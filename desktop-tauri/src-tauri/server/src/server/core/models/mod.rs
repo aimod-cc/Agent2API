@@ -73,13 +73,19 @@ use crate::server::core::proxies::ResolvedProxy;
 use crate::server::logging;
 
 // 本模块内部用（is_chat_model / apply_filters / get / apply_remote / list_response）
-use shape::{js_truthy, value_text};
+// `js_truthy` 不在这里：它由下面的 `pub use` 带进来，本模块与外部拿到的是同一个名字。
+use shape::value_text;
 
 // 对外再导出：聚合目录（core::providers::catalog）与排障方从 `core::models`
 // 取这些名字，保持与拆分前同一条导入路径。
 // `shape_value_text` 是 `shape::value_text` 的别名导出：聚合目录要按 `name`
 // 匹配模型（对齐 `ModelCatalog::get` 的第二段），需要与这里同一套 JS 文本化。
-pub use shape::{list_item, list_response_from, model_id, suggest_from, value_text as shape_value_text};
+// `js_truthy` 一并导出：识图能力闸门（`providers::catalog::entry_refuses_images`）
+// 判 `supportsImages` 必须与 `list_item` 透出这个字段时用**同一个**真值口径，
+// 否则会出现「目录说支持、闸门说支持、上游说不支持」这类三方向各判一次的分叉。
+pub use shape::{
+    js_truthy, list_item, list_response_from, model_id, suggest_from, value_text as shape_value_text,
+};
 
 /// 下游可见模型白名单：/v1/models 与路由解析只暴露这些模型。
 ///

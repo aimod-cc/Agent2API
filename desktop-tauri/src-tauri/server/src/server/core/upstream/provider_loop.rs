@@ -424,6 +424,61 @@ pub(super) async fn forward_with_providers(
     // 过滤与「全被排除时的错误」都在 `filter_by_key_scope` 里（它要能提前返回
     // 错误，所以返回 Result）。
     let candidates = filter_by_key_scope(candidates, ctx.key_scope, &model)?;
+    // ── 识图能力闸门 ────────────────────────────────────────────
+    // 请求带图片、而某家在这个模型上**明确**声明 `supportsImages=false` 时，
+    // 那几家根本不用试：上游只会回一句 "The request model is not multimodal"。
+    // 实测（2026-09-29 生产）`deepseek-v4.1-flash` 的每一个带图请求都先白撞
+    // 三跳 codearts 502 才轮到能识图的家 —— 三跳的时间与额度都是纯浪费，
+    // 而且日志里那一片 502 会把「这家坏了」的假象钉在健康的账号上。
+    //
+    // 位置与 Key 白名单同一层（「谁能提供这个模型」之后、选路之前）：候选链
+    // 本身仍是目录事实，这里只按**这次请求的内容**收窄。
+    //
+    // 判定只认清单上明确为假的键，缺键 = 不知道 = 放行（见
+    // `catalog::entry_refuses_images`）；**全部被剔光时退回不过滤** ——
+    // 目录可能说谎（上游把能力位标错），凭一份可能错的目录把请求判死，
+    // 比照旧撞几次 502 更糟。
+    let candidates = if request_carries_images(ctx.body) {
+        let split = crate::server::core::providers::catalog::without_image_refusing(
+            &candidates, &model,
+        );
+        if split.skipped.is_empty() {
+            candidates
+        } else if split.kept.is_empty() {
+            logging::console_line(
+                "[Upstream]",
+                &format!(
+                    "⚠️ 请求含图片，但候选家 {} 都在目录上标着不支持识图 —— 目录可能不准，\
+                     照原链转发（要纠正请在模型管理页改能力位）",
+                    split
+                        .skipped
+                        .iter()
+                        .map(|(id, _)| id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" / ")
+                ),
+            );
+            candidates
+        } else {
+            logging::verbose(
+                "[Upstream]",
+                &format!(
+                    "请求含图片，跳过明确不支持识图的候选 {}（模型 {}）",
+                    split
+                        .skipped
+                        .iter()
+                        .map(|(id, wire)| format!("{id}:{wire}"))
+                        .collect::<Vec<_>>()
+                        .join(" / "),
+                    if model.is_empty() { "(默认)" } else { &model },
+                ),
+            );
+            split.kept
+        }
+    } else {
+        candidates
+    };
+
     // 候选链已是 id 空间（`route_for_forward` 的返回值，见 router 的模块头）：
     // 内置家与自定义家的 id 同列，自定义 id 直接透传给选路与分派。
     let provider_ids: Vec<&str> = candidates.iter().map(String::as_str).collect();
@@ -2197,6 +2252,34 @@ fn model_of(body: &Value) -> String {
         .to_string()
 }
 
+/// 这次请求是否带**图片输入**。
+///
+/// 只认 chat 形态的 `messages[].content[]` 里 `type = "image_url"` 的块：
+/// 三个入口（`/v1/chat/completions`、`/v1/messages`、`/v1/responses`）都在
+/// **进入本层之前**折成 chat 形态（Anthropic 的 `image` 块、Responses 的
+/// `input_image` 都由 `core::protocol` 那两个转换器写成 `image_url`），
+/// 所以这里不需要认第二套形状 —— 多认一套就多一处会漂移的口径。
+///
+/// 只做「有没有」，不做「有多少、多大」：闸门要的是「这次需不需要识图能力」
+/// 这一个布尔，把条数当判据会让「一条都不带图的长会话」与「带十张图」走不同
+/// 分支，而目录能力位只区分能不能。
+fn request_carries_images(body: &Value) -> bool {
+    body.get("messages")
+        .and_then(Value::as_array)
+        .is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|parts| {
+                        parts.iter().any(|part| {
+                            part.get("type").and_then(Value::as_str) == Some("image_url")
+                        })
+                    })
+            })
+        })
+}
+
 /// 限额事件的模型文案：以**上游真名**为主读数。
 ///
 /// 冷却键是上游真名，账号页的「限流」列读的也是它 —— 日志若打印请求名，
@@ -2488,5 +2571,38 @@ mod local_failure {
         // 用户把名单清空也挡不住本地失败换号，反过来用户点名 556 也不该有额外效果。
         // 这条用例的存在是为了让「改成走名单」这个念头先撞上说明。
         assert!(!direct_switch_status(i64::from(readiness::LOCAL_PRECONDITION_STATUS)));
+    }
+}
+
+#[cfg(test)]
+mod vision_gate {
+    //! 识图闸门读请求体的那一条判据。
+    //!
+    //! 放在这里而不是 `core::protocol`：闸门要的是「这次转发需不需要识图能力」，
+    //! 而**转发层拿到的永远是 chat 形态**（三个入口都在进本层之前折完，见
+    //! `request_carries_images` 的说明）。最后一条用例钉的就是这个前提 ——
+    //! 如果哪天有人把转换器挪到本层之后，那条会立刻变红，提醒重新决定形状。
+    use serde_json::json;
+
+    use super::request_carries_images;
+
+    #[test]
+    fn only_chat_image_parts_count() {
+        assert!(request_carries_images(&json!({
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "看这张图"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+            ]}]
+        })));
+        // 字符串 content、纯文本块、没有 messages：都不算带图
+        assert!(!request_carries_images(&json!({"messages": [{"role": "user", "content": "看图"}]})));
+        assert!(!request_carries_images(&json!({
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "看图"}]}]
+        })));
+        assert!(!request_carries_images(&json!({"model": "glm-5.2"})));
+        // 入口已把 Responses 的 input_image 折成 image_url：本层不再认第二套形状
+        assert!(!request_carries_images(&json!({
+            "messages": [{"role": "user", "content": [{"type": "input_image", "image_url": "https://x/y.png"}]}]
+        })));
     }
 }
