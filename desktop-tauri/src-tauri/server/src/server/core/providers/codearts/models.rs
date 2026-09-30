@@ -82,7 +82,15 @@ pub struct ModelConfig {
     pub description: String,
     pub context_length: i64,
     pub max_output_tokens: i64,
-    pub supports_images: bool,
+    /// 是否支持图片输入。**`None` = 上游这个源根本没给这个字段**（不知道），
+    /// `Some(false)` = 上游明确说不支持 —— 两者不能混：识图闸门只在 `Some(false)`
+    /// 上把人挡掉，「不知道」一律放行（见 `catalog::routing::entry_refuses_images`）。
+    /// 之所以专门写这一句：福利网关那份清单（`/api/v1/gateway/config`）里没有
+    /// `supports_images` 这个键（参考实现的同一接口回包也没有），早先本家把它
+    /// 当 `false` 填进目录，于是闸门拿"我们自己填的默认值"当上游的证据，
+    /// 把 Qoder 的带图请求从 codearts 的福利模型上摘了下来 —— 而库里 3.7 天
+    /// 2964 条请求里**一条上游拒绝图片的回复都没有**。
+    pub supports_images: Option<bool>,
     pub source: ModelSource,
     /// 积分倍率的**官方文案**（上游 `credit[].ratio_display`，形如 `0.7x`）。
     ///
@@ -157,7 +165,7 @@ pub fn parse_builtin(body: &str) -> Result<Vec<ModelConfig>, String> {
             description: text(entry, "model_desc"),
             context_length: number(entry, "context_window"),
             max_output_tokens: capped_output(entry, "max_tokens"),
-            supports_images: entry.get("supports_images").and_then(Value::as_bool).unwrap_or(false),
+            supports_images: entry.get("supports_images").and_then(Value::as_bool),
             credit_display: credit_display_of(entry),
             id,
             source: ModelSource::Builtin,
@@ -208,7 +216,7 @@ pub fn parse_agent_detail(body: &str, language: &str) -> Result<Vec<ModelConfig>
             description,
             context_length: number(&parameters, "context_window"),
             max_output_tokens: capped_output(&parameters, "max_tokens"),
-            supports_images: parameters.get("supports_images").and_then(Value::as_bool).unwrap_or(false),
+            supports_images: parameters.get("supports_images").and_then(Value::as_bool),
             credit_display: credit_display_of(&entry),
             id,
             source: ModelSource::Agent,
@@ -285,7 +293,9 @@ pub fn parse_benefit(body: &str) -> Result<Vec<ModelConfig>, String> {
             description: String::new(),
             context_length: number(&entry, "context_window"),
             max_output_tokens: capped_output(&entry, "max_tokens"),
-            supports_images: false,
+            // 同一个道理：清单里也没有 `supports_images`，这里给 `None`（不知道），
+            // 不是给 `false`（上游说了不支持）。闸门据此起放行还是挡人。
+            supports_images: None,
             // 福利网关的条目没有 `credit`（实测三个源里只有 agent 与 builtin 带），
             // 留空 = 界面那一列显示 `—`，不是"倍率为 0"。
             credit_display: String::new(),
@@ -668,7 +678,7 @@ fn catalog_from_persisted() -> Option<Catalog> {
             description: text("description"),
             context_length: entry.get("contextWindow").and_then(Value::as_i64).unwrap_or(0),
             max_output_tokens: entry.get("maxOutputTokens").and_then(Value::as_i64).unwrap_or(0),
-            supports_images: entry.get("supportsImages").and_then(Value::as_bool).unwrap_or(false),
+            supports_images: entry.get("supportsImages").and_then(Value::as_bool),
             credit_display: text("credits"),
             name: id.clone(),
             source,
@@ -744,7 +754,12 @@ fn entries_of(catalog: &Catalog) -> Vec<Value> {
             entry.insert("id".to_string(), Value::String(model.id.clone()));
             entry.insert("name".to_string(), Value::String(model.display_name.clone()));
             entry.insert("providerModel".to_string(), Value::String(model.id.clone()));
-            entry.insert("supportsImages".to_string(), Value::Bool(model.supports_images));
+            // **只有上游给了这个字段才写这个键**：缺席就是"不知道"，让闸门按
+            // 放行处理。反过来在这里填 `false`，就等于把我们自己的默认值
+            // 冒充成上游的判断（2026-09-29 那条判据就是这么错的）。
+            if let Some(supports_images) = model.supports_images {
+                entry.insert("supportsImages".to_string(), Value::Bool(supports_images));
+            }
             entry.insert("supportsToolCall".to_string(), Value::Bool(true));
             entry.insert("source".to_string(), Value::String(model.source.as_str().to_string()));
             entry.insert("benefit".to_string(), Value::Bool(model.source.needs_benefit_header()));
@@ -807,7 +822,7 @@ mod tests {
         assert!(ids.contains(&"GLM-5.2"));
         // 多模态只在这个源里出现 —— 这条是"别丢 builtin 源"的实证
         let vision = models.iter().find(|model| model.id == "Qwen3-VL-235B").expect("多模态模型应当在内置源");
-        assert!(vision.supports_images, "Qwen3-VL-235B 必须标成支持图片");
+        assert_eq!(Some(true), vision.supports_images, "Qwen3-VL-235B 必须标成支持图片");
         assert_eq!(ModelSource::Builtin, vision.source);
         let glm = models.iter().find(|model| model.id == "GLM-5.2").unwrap();
         assert!(!glm.description.is_empty(), "描述要解析出来");
@@ -817,7 +832,7 @@ mod tests {
         // 所以别在 builtin 上断言这两个数 —— 合并时 agent 先到先得，最终保留的是
         // agent 那份（见 `three_source_merge_matches_what_cpa_advertises`）。
         assert_eq!(0, glm.context_length);
-        assert!(!glm.supports_images);
+        assert_eq!(Some(false), glm.supports_images, "agent 源明确给了 false，要原样收下");
     }
 
     #[test]
@@ -953,7 +968,7 @@ mod tests {
         // 多模态来自 builtin
         let vision = merged.iter().find(|model| model.id == "Qwen3-VL-235B").unwrap();
         assert_eq!(ModelSource::Builtin, vision.source);
-        assert!(vision.supports_images);
+        assert_eq!(Some(true), vision.supports_images);
 
         // 上下文窗口来自 agent 源（builtin 不带这两个字段）
         assert!(glm.context_length > 0 && glm.max_output_tokens > 0, "合并后 GLM-5.2 应当带上 agent 源的上下文窗口");
@@ -1045,7 +1060,7 @@ mod tests {
                     description: "旗舰".to_string(),
                     context_length: 202752,
                     max_output_tokens: 131072,
-                    supports_images: false,
+                    supports_images: Some(false),
                     credit_display: "0.7x".to_string(),
                     source: ModelSource::Agent,
                 },
@@ -1056,7 +1071,7 @@ mod tests {
                     description: String::new(),
                     context_length: 0,
                     max_output_tokens: 0,
-                    supports_images: true,
+                    supports_images: Some(true),
                     credit_display: String::new(),
                     source: ModelSource::Builtin,
                 },
@@ -1114,7 +1129,7 @@ mod tests {
             description: String::new(),
             context_length: 0,
             max_output_tokens: 0,
-            supports_images: false,
+            supports_images: Some(false),
             credit_display: String::new(),
             source,
         };
@@ -1130,6 +1145,8 @@ mod tests {
 
 #[cfg(test)]
 mod restart_tests {
+
+
     //! 重启后转发还能不能走 —— 审计抓出来的那条不对称：广告走 `list()`（有持久化回落），
     //! 转发的模型校验走 `cached_catalog()`（当时只读内存）。后果是每次重启后
     //! 「模型列得出来、每一条都 503 目录没拉取过」。
@@ -1155,7 +1172,7 @@ mod restart_tests {
                     description: "推理模型".into(),
                     context_length: 200_000,
                     max_output_tokens: 131_072,
-                    supports_images: false,
+                    supports_images: Some(false),
                     credit_display: String::new(),
                     source: ModelSource::Agent,
                 },
@@ -1166,7 +1183,7 @@ mod restart_tests {
                     description: String::new(),
                     context_length: 0,
                     max_output_tokens: 0,
-                    supports_images: true,
+                    supports_images: Some(true),
                     credit_display: String::new(),
                     source: ModelSource::Builtin,
                 },
@@ -1185,7 +1202,7 @@ mod restart_tests {
         assert_eq!(ModelSource::Agent, glm.source);
         assert_eq!(200_000, glm.context_length, "上下文长度不能在建回来时丢掉");
         let vl = restored.resolve("Qwen3-VL-235B").expect("内置源要在");
-        assert!(vl.supports_images, "多模态位只有 builtin 源有，重建时丢了就等于关掉视觉");
+        assert_eq!(Some(true), vl.supports_images, "多模态位只有 builtin 源有，重建时丢了就等于关掉视觉");
         assert!(!vl.source.needs_benefit_header());
         // `list()` 与转发读的是同一份真相 —— 这条断言就是当初那个 bug 的反面
         assert_eq!(restored.models.len(), list().len(), "广告与转发可解析的集合必须一致");
@@ -1201,7 +1218,7 @@ mod restart_tests {
                 description: String::new(),
                 context_length: 0,
                 max_output_tokens: 0,
-                supports_images: false,
+                supports_images: Some(false),
                 credit_display: String::new(),
                 source: ModelSource::Benefit,
             }],
@@ -1225,11 +1242,43 @@ mod restart_tests {
                 description: String::new(),
                 context_length: 0,
                 max_output_tokens: 0,
-                supports_images: false,
+                supports_images: Some(false),
                 credit_display: String::new(),
                 source,
             });
         }
         out
+    }
+
+    /// 福利源（`/api/v1/gateway/config`）的清单里**没有** `supports_images` 这个键。
+    ///
+    /// 这条钉的是识图闸门的判据来源：闸门只在「上游明确说 false」上挡人，
+    /// 所以目录条目必须**不带这个键**来表达"不知道"。早先这里填的是 `false`，
+    /// 闸门于是把我们的默认值当成上游的判断，把带图请求从 codearts 的福利模型
+    /// （`glm-5.3-flash` / `deepseek-v4.1-flash`）上整条摘掉 —— 而生产库里
+    /// 3.7 天 2964 条请求没有一条是上游拒绝图片的回复。
+    #[test]
+    fn a_benefit_entry_carries_no_image_capability_rather_than_a_made_up_false() {
+        let benefit = parse_benefit(r#"{"error_code":"0000","result":{"models":[
+            {"model_id":"glm-5.3-flash","model_name":"GLM-5.3-Flash","context_window":1048576,"max_tokens":393216}
+        ]}}"#).expect("福利清单可解析");
+        assert_eq!(1, benefit.len());
+        assert_eq!(None, benefit[0].supports_images, "上游没给这个键 = 不知道，不是不支持");
+
+        let catalog = Catalog { models: benefit.clone(), warnings: Vec::new() };
+        let entries = entries_of(&catalog);
+        assert!(
+            entries[0].get("supportsImages").is_none(),
+            "条目里不许出现一个我们自己编的 false：{:?}",
+            entries[0]
+        );
+
+        // 对照组：上游**明确给了** false 的条目要原样落成 Some(false)，闸门才会挡人
+        let agent = parse_agent_detail(
+            r#"{"gpts":{"models":[{"model_alias":"GLM-5.2","model_name":"GLM-5.2","model_parameters":{"enabled":true,"display_enabled":true,"supports_images":false,"context_window":202752,"max_tokens":131072}}]}}"#,
+            "zh_cn",
+        )
+        .expect("agent 清单可解析");
+        assert_eq!(Some(false), agent[0].supports_images, "明确 false 与缺席必须分得开");
     }
 }
