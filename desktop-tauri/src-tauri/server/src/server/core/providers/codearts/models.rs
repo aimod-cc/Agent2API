@@ -293,9 +293,14 @@ pub fn parse_benefit(body: &str) -> Result<Vec<ModelConfig>, String> {
             description: String::new(),
             context_length: number(&entry, "context_window"),
             max_output_tokens: capped_output(&entry, "max_tokens"),
-            // 同一个道理：清单里也没有 `supports_images`，这里给 `None`（不知道），
-            // 不是给 `false`（上游说了不支持）。闸门据此起放行还是挡人。
-            supports_images: None,
+            // 上游这份清单里**没有** `supports_images` 这个键 —— 但"没给"不等于
+            // "不知道"，本家有一条实测：2026-09-30 03:52 生产上把带图请求放行到
+            // 福利模型，三个账号（优先级 2/3/4）逐字回同一句
+            // `InferHub.001001020.406：The request model is not multimodal`。
+            // 所以这里是 `Some(false)`：**测出来的**不支持，不是填出来的默认值。
+            // （此前它也是 false，但那时的依据是"字段缺席就当 false"这条错推理；
+            // 类型改成 `Option<bool>` 之后，这一格才第一次有了证据。）
+            supports_images: Some(false),
             // 福利网关的条目没有 `credit`（实测三个源里只有 agent 与 builtin 带），
             // 留空 = 界面那一列显示 `—`，不是"倍率为 0"。
             credit_display: String::new(),
@@ -803,6 +808,22 @@ pub fn unknown_model_error(requested: &str, catalog: &Catalog) -> GatewayError {
     .with_code("model_not_found")
 }
 
+/// 测试用的样例条目（只为了让"能力位三态"的用例不必抄二十个字段）。
+#[cfg(test)]
+pub(crate) fn tests_sample_model() -> ModelConfig {
+    ModelConfig {
+        id: "sample-model".to_string(),
+        name: "Sample".to_string(),
+        display_name: "Sample".to_string(),
+        description: String::new(),
+        context_length: 0,
+        max_output_tokens: 0,
+        supports_images: None,
+        source: ModelSource::Benefit,
+        credit_display: String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1250,35 +1271,64 @@ mod restart_tests {
         out
     }
 
-    /// 福利源（`/api/v1/gateway/config`）的清单里**没有** `supports_images` 这个键。
+    /// 识图能力是**三态**的：上游给了 true / 上游给了 false / 上游根本没给。
     ///
-    /// 这条钉的是识图闸门的判据来源：闸门只在「上游明确说 false」上挡人，
-    /// 所以目录条目必须**不带这个键**来表达"不知道"。早先这里填的是 `false`，
-    /// 闸门于是把我们的默认值当成上游的判断，把带图请求从 codearts 的福利模型
-    /// （`glm-5.3-flash` / `deepseek-v4.1-flash`）上整条摘掉 —— 而生产库里
-    /// 3.7 天 2964 条请求没有一条是上游拒绝图片的回复。
+    /// 前两条各有来源（builtin 的 `Qwen3-VL-235B` 是 true、agent 的 `GLM-5.2` 是
+    /// false），第三条必须**不带 `supportsImages` 键**地落到目录条目里 —— 闸门
+    /// （`catalog::routing::entry_refuses_images`）的判据写的就是"缺键=不知道=放行"，
+    /// 而它在早前的实现里永远看不到缺键：解析层把缺席一律填成 `false`，于是
+    /// 闸门拿我们自己编的默认值当上游的判断使。
     #[test]
-    fn a_benefit_entry_carries_no_image_capability_rather_than_a_made_up_false() {
-        let benefit = parse_benefit(r#"{"error_code":"0000","result":{"models":[
-            {"model_id":"glm-5.3-flash","model_name":"GLM-5.3-Flash","context_window":1048576,"max_tokens":393216}
-        ]}}"#).expect("福利清单可解析");
-        assert_eq!(1, benefit.len());
-        assert_eq!(None, benefit[0].supports_images, "上游没给这个键 = 不知道，不是不支持");
-
-        let catalog = Catalog { models: benefit.clone(), warnings: Vec::new() };
+    fn an_unknown_image_capability_omits_the_key_rather_than_asserting_false() {
+        let catalog = Catalog {
+            models: vec![ModelConfig {
+                supports_images: None,
+                ..crate::server::core::providers::codearts::models::tests_sample_model()
+            }],
+            warnings: Vec::new(),
+        };
         let entries = entries_of(&catalog);
         assert!(
             entries[0].get("supportsImages").is_none(),
-            "条目里不许出现一个我们自己编的 false：{:?}",
+            "不知道就不许写这个键，否则闸门分不清「上游说不行」与「上游没说」：{:?}",
             entries[0]
         );
+        // 对照：明确 true / 明确 false 都必须原样落进条目
+        let known_false = Catalog {
+            models: vec![ModelConfig {
+                supports_images: Some(false),
+                ..crate::server::core::providers::codearts::models::tests_sample_model()
+            }],
+            warnings: Vec::new(),
+        };
+        assert_eq!(
+            Some(&Value::Bool(false)),
+            entries_of(&known_false)[0].get("supportsImages")
+        );
+    }
 
-        // 对照组：上游**明确给了** false 的条目要原样落成 Some(false)，闸门才会挡人
+    /// 福利源的 false 是**实测**来的，不是"字段缺席"推出来的。
+    ///
+    /// 依据（2026-09-30 03:52 生产，带图请求放行到福利模型后）：三个账号逐字回
+    /// `InferHub.001001020.406：The request model is not multimodal`。
+    /// 这条用例钉住的是"这个 false 有出处"，改的时候必须连那段实测一起改。
+    #[test]
+    fn benefit_models_are_known_not_to_take_images_by_measurement() {
+        let benefit = parse_benefit(r#"{"error_code":"0000","result":{"models":[
+            {"model_id":"glm-5.3-flash","model_name":"GLM-5.3-Flash","context_window":1048576,"max_tokens":393216}
+        ]}}"#).expect("福利清单可解析");
+        assert_eq!(
+            Some(false),
+            benefit[0].supports_images,
+            "上游清单里没有这个键，但实测过 not multimodal —— 这里是测量结果，不是默认值"
+        );
+        // 对照组：agent 源明确给的 false 与上面同值，但来源不同（一个是回包字段，
+        // 一个是我们的探针），所以两处各自的注释都得留着的理由也不同
         let agent = parse_agent_detail(
             r#"{"gpts":{"models":[{"model_alias":"GLM-5.2","model_name":"GLM-5.2","model_parameters":{"enabled":true,"display_enabled":true,"supports_images":false,"context_window":202752,"max_tokens":131072}}]}}"#,
             "zh_cn",
         )
         .expect("agent 清单可解析");
-        assert_eq!(Some(false), agent[0].supports_images, "明确 false 与缺席必须分得开");
+        assert_eq!(Some(false), agent[0].supports_images, "上游明确给了 false 就原样收下");
     }
 }
