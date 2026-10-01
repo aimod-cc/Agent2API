@@ -224,7 +224,9 @@ fn normalize_entry(item: &Value) -> Option<Value> {
     let mut entry = json!({
         "id": id,
         "name": name,
-        "supportsImages": item.get("supportImage").map(js_truthy).unwrap_or(false),
+        // 远程条目没给 `supportImage` 时是 null（未声明），不是 false；
+        // 静态表那条（`support_image` 字段）才是明确声明，两处不是一回事
+        "supportsImages": item.get("supportImage").map(js_truthy),
         "supportsReasoning": supports_thinking,
         "supportsToolCall": true,
         "kind": "chat",

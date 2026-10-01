@@ -223,7 +223,9 @@ fn normalize_entry(entry: &Value) -> Value {
         .get("contextWindow")
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let multimodal = entry.get("multimodal").and_then(Value::as_bool).unwrap_or(false);
+    // `None` = 上游这条目里没有 `multimodal` 这个键（不知道），
+    // 不是"说了不支持" —— 闸门据此放行，见 `catalog::routing::entry_refuses_images`
+    let multimodal = entry.get("multimodal").and_then(Value::as_bool);
     let efforts: Vec<Value> = entry
         .get("reasoningEfforts")
         .and_then(Value::as_array)

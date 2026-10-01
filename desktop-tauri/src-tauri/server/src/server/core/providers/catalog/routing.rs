@@ -158,10 +158,19 @@ pub struct ImageCapabilitySplit {
 
 /// 这条清单条目是否**明确**声明不接受图片输入。
 ///
-/// 只有 `supportsImages` **存在且为假值**才算「不支持」。**键缺失一律放行**：
-/// 上游目录给不给这个字段各家不一（静态表、远程清单形态都不同），把「不知道」
-/// 当成「不支持」等于凭缺数据关掉一家 —— 症状是模型明明在列表里、请求却说
-/// 「没有可用的账号」，比多撞一次 502 难查得多。
+/// 只有 `supportsImages` **存在、不是 null、且为假值**才算「不支持」。
+/// **键缺失与显式 null 一律放行**（两者都是"上游没说"）：上游目录给不给这个字段
+/// 各家不一（静态表、远程清单形态都不同），把「不知道」当成「不支持」等于凭缺数据
+/// 关掉一家 —— 症状是模型明明在列表里、请求却说「没有可用的账号」，比多撞一次
+/// 502 难查得多。这条不是抽象考虑：qoder / autoclaw / accio / catpaw 的解析层
+/// 此前都把"字段缺席"写成 `false`（`unwrap_or(false)`），闸门于是永远看不到
+/// 「不知道」这一态；同一个错在 codearts 的福利源上已经量到后果（上游回
+/// `InferHub.001001020.406 not multimodal` 才是真依据，而 zcode 的
+/// `glm-5.3-flash` 那个假 false 上游已在 beta 里改回 true）。
+///
+/// 解析层因此统一成：读到 `Some(bool)` 才写这个键，读不到就写 `null`
+/// （`json!` 会把 `Option<bool>` 的 `None` 序列化成 null）—— 出口那侧
+/// `models/shape.rs` 仍按 `unwrap_or(false)` 给客户端一个布尔，对外形态不变。
 ///
 /// 真值口径用 `js_truthy`（与 `/v1/models` 出口同一函数，两处判定不会分叉），
 /// 因此字符串 `"false"` 是**真**（非空串）—— 这不是疏漏，是生态里的一贯口径；
@@ -172,6 +181,7 @@ pub struct ImageCapabilitySplit {
 pub fn entry_refuses_images(entry: &Value) -> bool {
     entry
         .get("supportsImages")
+        .filter(|value| !value.is_null())
         .is_some_and(|value| !crate::server::core::models::js_truthy(value))
 }
 
@@ -273,15 +283,19 @@ mod vision_gate {
         ids.iter().map(|id| id.to_string()).collect()
     }
 
-    /// 只有**明确为假**才算不支持识图；缺键与真值都放行。
+    /// 只有**明确为假**才算不支持识图；**缺键与 `null` 都是"上游没说"= 放行**。
     ///
-    /// 真值口径是 `js_truthy`（与 `/v1/models` 出口同源），所以 `"false"` 这个
-    /// 非空字符串是**真**、`null` / `0` / `""` 是假 —— 用例把这四种都点一遍，
+    /// `null` 这一格是 2026-09-30 改的：各家解析层此前把"字段缺席"写成 `false`，
+    /// 闸门于是永远看不到未声明态；解析层改成 `Option<bool>` 之后，未声明在条目里
+    /// 就是 `null`，必须与 `false` 分开（否则三态白做）。
+    /// 真值口径仍是 `js_truthy`（与 `/v1/models` 出口同源），所以 `"false"` 这个
+    /// 非空字符串是**真**，而 `0` / `""` 是明确假值 —— 用例把这几样都点一遍，
     /// 免得日后有人「顺手加个字符串解析」把两处口径拆开。
     #[test]
     fn only_an_explicit_false_counts_as_refusing_images() {
         assert!(entry_refuses_images(&json!({"id": "m", "supportsImages": false})));
-        assert!(entry_refuses_images(&json!({"id": "m", "supportsImages": null})), "null 是假值");
+        assert!(!entry_refuses_images(&json!({"id": "m", "supportsImages": null})),
+                "null = 上游没给这个字段（未声明），不许当成「不支持」用来关一家");
         assert!(entry_refuses_images(&json!({"id": "m", "supportsImages": 0})));
         assert!(entry_refuses_images(&json!({"id": "m", "supportsImages": ""})));
 
