@@ -55,6 +55,17 @@ pub struct Stripped {
     pub removed: usize,
 }
 
+/// 这次剥图留给**尝试明细**的那句话（唯一措辞出处）。
+///
+/// 为什么由调用方而不是本模块写进 telemetry：留痕挂在「本轮尝试」这条记录上，
+/// 而那条记录的起头时刻各条路径不一样 —— 有状态路径（CatPaw / CodeArts / Trae）
+/// 是 `send_body` 先跑、`note_attempt_started` 后调，此刻还没有可写的槽位，
+/// 在变换里直接记会**静默丢掉**（-17 上线后实测到这一点：明细里的 notice 是 null，
+/// 而日志确实剥了 1 张）。所以本模块只交出「剥了几张」，由三个调用点在起头之后写。
+pub fn notice_for(stripped: usize) -> String {
+    format!("该上游不支持图像输入，已剥离历史图片 {stripped} 张（当前这一问不依赖图片）")
+}
+
 /// 关闭整层的开关（读一次定死）。
 fn strip_disabled() -> bool {
     static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

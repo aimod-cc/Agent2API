@@ -136,6 +136,12 @@ pub(super) struct SendBody<'a> {
     pub body: Cow<'a, Value>,
     /// 该家实际收到的上游模型名 —— 也是它 `rateLimits` 冷却的键。
     pub wire_model: String,
+    /// 这次发送**为这家剥掉了几张历史图片**（`None` = 一个都没动）。
+    ///
+    /// 交出去而不是在 [`send_body`] 里直接记进尝试明细：明细那条记录要等
+    /// `note_attempt_started` 才存在，而有状态路径是先算发送体、后起头 ——
+    /// 在变换里写会静默丢掉（-17 实测）。详见 [`crate::server::core::image_strip::notice_for`]。
+    pub images_stripped: Option<usize>,
 }
 
 /// 某一家 provider 实际要发送的请求体（**每次转发前**决定，不做跨家复用）。
@@ -257,7 +263,7 @@ pub(super) fn send_body<'a>(
         .to_string();
     if requested.is_empty() {
         // 没有 model 字段：不改写，也没有可用的冷却键（空串，与改造前一致）
-        return SendBody { body, wire_model: requested };
+        return SendBody { body, wire_model: requested, images_stripped: None };
     }
     // ── ④ 历史图片剥离层（核心判据见 `core::image_strip`）──────────────
     // 位置在模型名解析这一步**之后**才成立：判据是"这家收这个名字的那条条目
@@ -271,6 +277,7 @@ pub(super) fn send_body<'a>(
     //
     // 能吃图的家、以及"当前这一问依赖图"的请求，判据不成立 ⇒ body 原样借用
     // （零拷贝，字节不变）。
+    let mut stripped_count: Option<usize> = None;
     let refuses_images =
         crate::server::core::providers::catalog::provider_refuses_images(provider_id, &requested);
     let strip_now =
@@ -278,12 +285,7 @@ pub(super) fn send_body<'a>(
     let mut body = if strip_now {
         match crate::server::core::image_strip::strip_history_images(body.as_ref()) {
             Some(stripped) => {
-                // 留痕进**本轮尝试明细**（与代理回退提示同一去处）：这是逐请求的
-                // 事实，写运行日志会被长会话刷成噪声，而请求日志那一侧看得见
-                ctx.telemetry.note_attempt_notice(&format!(
-                    "该上游不支持图像输入，已剥离历史图片 {} 张（当前这一问不依赖图片）",
-                    stripped.removed
-                ));
+                stripped_count = Some(stripped.removed);
                 logging::verbose(
                     "[Upstream]",
                     &format!(
@@ -322,7 +324,11 @@ pub(super) fn send_body<'a>(
     // 注入路径已经问过一次适配器，这里再查一次注册表是两次哈希查找，可忽略。
     let upstream_reasoning = injected.or_else(|| outbound_reasoning_of(provider_id, &body));
     ctx.telemetry.note_upstream_reasoning(upstream_reasoning);
-    SendBody { body, wire_model: wire.model }
+    SendBody {
+        body,
+        wire_model: wire.model,
+        images_stripped: stripped_count,
+    }
 }
 
 /// 承载家的 [`ProviderAdapter::outbound_reasoning`]（读发送体里随行的等级）。

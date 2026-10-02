@@ -142,6 +142,19 @@ impl RetryBudget {
     }
 }
 
+/// 把「这次为这家剥了几张历史图片」写进**本轮尝试明细**。
+///
+/// 必须在 `note_attempt_started` **之后**调用：明细是先起头、后定稿的一条记录，
+/// 槽位不存在时 `note_attempt_notice` 静默什么都不做。`send_body` 因此只交出
+/// 计数（`SendBody::images_stripped`）而不自己写 —— 有状态路径的顺序正是
+/// 「先算发送体、后起头」，在那里直接记就是 -17 上线实测到的那个 null。
+fn note_strip_notice(ctx: &ProviderContext<'_>, send: &SendBody) {
+    if let Some(stripped) = send.images_stripped {
+        ctx.telemetry
+            .note_attempt_notice(&crate::server::core::image_strip::notice_for(stripped));
+    }
+}
+
 /// 换账号前扣一次预算：还能换返回 true，已经换满返回 false。
 ///
 /// 换满时顺手写一行终端日志 —— 这是「为什么这次只试了 N 个账号就收尾」的
@@ -1033,6 +1046,8 @@ async fn attempt_queue(
             // 随发送体一起取（发送体换了，真名也随之重算），成功时随返回值交给
             // 循环外（`cap_cleared` 要读它）—— 所以它是 break 的第二个元素。
             let wire_model = send.wire_model.clone();
+            // 剥图留痕：明细已在上面起头，这里写得到本轮
+            note_strip_notice(ctx, send);
             // 构造请求计划**可能失败**（适配器自己的校验，例如小浣熊账号缺
             // accessToken → 401）。这里显式处理而不是用 `?` 直接抛出：
             // 上面的 `note_attempt_started` 已经为这一轮起了头，直接返回会让
@@ -1933,6 +1948,8 @@ async fn attempt_custom(
     // modelRules），处理结果就是「提示词/脱敏后的客户端请求体」—— 自定义
     // 语义的改写（映射 alias → 真名、思考等级）在 forward 里做。
     let send = send_body(ctx, &provider_id, target.account.as_ref(), degraded);
+    // 剥图留痕：明细已在上面起头，此刻写得到本轮
+    note_strip_notice(ctx, &send);
     // 「上游模型」列以**真名**为准：send_body 对自定义 id 是零改写（它记的
     // 是请求名），真名的解析与改写发生在 forward 内部 —— 这里按同源解析
     // 覆盖一次（note_upstream_model 是覆盖式，最后一次为准；空串被内部过滤）。
@@ -2104,6 +2121,9 @@ async fn attempt_stateful(
     if let Some(notice) = target.proxy_notice.as_deref() {
         ctx.telemetry.note_attempt_notice(notice);
     }
+    // 剥图留痕：`send` 在本函数上面就算好了，但那时明细还没起头 ——
+    // 记在这里才落得进本轮（顺序问题见 `note_strip_notice` 的说明）
+    note_strip_notice(ctx, &send);
     let started_at = logging::now_ms();
     logging::verbose(
         "[Upstream]",
