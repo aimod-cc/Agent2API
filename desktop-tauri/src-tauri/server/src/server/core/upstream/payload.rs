@@ -232,7 +232,7 @@ pub(super) fn send_body<'a>(
     // 工具（智谱那套）也一并删掉，与透传契约矛盾。
     // 日后若某家确认支持某个原生工具，在这里（唯一闸门）按家/按类型开白即可。
     // 完整取舍见 `core::protocol::native_tool` 的模块头。
-    let mut body = if crate::server::core::custom_providers::is_custom_provider_id(provider_id) {
+    let body = if crate::server::core::custom_providers::is_custom_provider_id(provider_id) {
         body
     } else {
         match crate::server::core::protocol::native_tool::downgrade(body.as_ref()) {
@@ -259,6 +259,45 @@ pub(super) fn send_body<'a>(
         // 没有 model 字段：不改写，也没有可用的冷却键（空串，与改造前一致）
         return SendBody { body, wire_model: requested };
     }
+    // ── ④ 历史图片剥离层（核心判据见 `core::image_strip`）──────────────
+    // 位置在模型名解析这一步**之后**才成立：判据是"这家收这个名字的那条条目
+    // 明确说不吃图"，而条目要按请求名去目录里取（`provider_refuses_images` 走的
+    // 就是识图闸门那一条 `manifest_entry_for`，别名解析与自定义家能力位展平因此
+    // 不会有第二份实现）。
+    //
+    // 条件写成"一次调用"而不是在这里自己与一遍：选路侧（`decide_image_gate`）
+    // 刚刚按同一个判据把这家留在候选里，这里再各读一遍迟早分叉 —— 分叉的症状是
+    // 请求带着图送进不吃图的家，正好是这次改动要消掉的那次 400。
+    //
+    // 能吃图的家、以及"当前这一问依赖图"的请求，判据不成立 ⇒ body 原样借用
+    // （零拷贝，字节不变）。
+    let refuses_images =
+        crate::server::core::providers::catalog::provider_refuses_images(provider_id, &requested);
+    let strip_now =
+        crate::server::core::image_strip::strip_applies_for(body.as_ref(), refuses_images);
+    let mut body = if strip_now {
+        match crate::server::core::image_strip::strip_history_images(body.as_ref()) {
+            Some(stripped) => {
+                // 留痕进**本轮尝试明细**（与代理回退提示同一去处）：这是逐请求的
+                // 事实，写运行日志会被长会话刷成噪声，而请求日志那一侧看得见
+                ctx.telemetry.note_attempt_notice(&format!(
+                    "该上游不支持图像输入，已剥离历史图片 {} 张（当前这一问不依赖图片）",
+                    stripped.removed
+                ));
+                logging::verbose(
+                    "[Upstream]",
+                    &format!(
+                        "剥历史图片 {} 张：provider={} model={}（当前轮不依赖图片）",
+                        stripped.removed, provider_id, requested
+                    ),
+                );
+                Cow::Owned(stripped.body)
+            }
+            None => body,
+        }
+    } else {
+        body
+    };
     // 一次解析出两个属性：该家要收的名字 + 跟着那条映射走的思考等级
     // （同源，见模块头「思考等级绑定为什么也在这一步」）
     let wire = crate::server::core::providers::catalog::wire_target_for_provider(

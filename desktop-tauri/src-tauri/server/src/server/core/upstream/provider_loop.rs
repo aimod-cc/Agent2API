@@ -438,42 +438,58 @@ pub(super) async fn forward_with_providers(
     // `catalog::entry_refuses_images`）；**全部被剔光时退回不过滤** ——
     // 目录可能说谎（上游把能力位标错），凭一份可能错的目录把请求判死，
     // 比照旧撞几次 502 更糟。
+    //
+    // 2026-10-02 加了第三个出口：**图全在历史轮**（当前这一问不依赖图片）时
+    // 不剔家，候选原样保留，由发送体的第 ④ 层（`payload::send_body`）在送给那几家
+    // 之前把图剥掉。理由就是用户报的这个现象：pri=2 的 codearts 因为二十几轮前的
+    // 截图，被 pri=26 的 trae 顶掉 —— 那是可以消除的技术障碍，不是请求真的需要
+    // 视觉。四个分支的次序收成 `catalog::decide_image_gate` 一张表（可脱离全局
+    // 目录测），本处只按它落日志与换候选链。
     let candidates = if request_carries_images(ctx.body) {
-        let split = crate::server::core::providers::catalog::without_image_refusing(
-            &candidates, &model,
-        );
-        if split.skipped.is_empty() {
-            candidates
-        } else if split.kept.is_empty() {
-            logging::console_line(
-                "[Upstream]",
-                &format!(
-                    "⚠️ 请求含图片，但候选家 {} 都在目录上标着不支持识图 —— 目录可能不准，\
-                     照原链转发（要纠正请在模型管理页改能力位）",
-                    split
-                        .skipped
-                        .iter()
-                        .map(|(id, _)| id.as_str())
-                        .collect::<Vec<_>>()
-                        .join(" / ")
-                ),
-            );
-            candidates
-        } else {
-            logging::verbose(
-                "[Upstream]",
-                &format!(
-                    "请求含图片，跳过明确不支持识图的候选 {}（模型 {}）",
-                    split
-                        .skipped
-                        .iter()
-                        .map(|(id, wire)| format!("{id}:{wire}"))
-                        .collect::<Vec<_>>()
-                        .join(" / "),
-                    if model.is_empty() { "(默认)" } else { &model },
-                ),
-            );
-            split.kept
+        let split =
+            crate::server::core::providers::catalog::without_image_refusing(&candidates, &model);
+        let refused_text = split
+            .skipped
+            .iter()
+            .map(|(id, wire)| format!("{id}:{wire}"))
+            .collect::<Vec<_>>()
+            .join(" / ");
+        match crate::server::core::providers::catalog::decide_image_gate(
+            &split,
+            crate::server::core::image_strip::strip_applies(ctx.body),
+        ) {
+            crate::server::core::providers::catalog::ImageGate::Unchanged => candidates,
+            crate::server::core::providers::catalog::ImageGate::StripAndKeep(_) => {
+                logging::verbose(
+                    "[Upstream]",
+                    &format!(
+                        "请求含历史图片、当前这一问不依赖图片：向 {refused_text} 转发前会剥掉图片\
+                         （不再绕开这些家）"
+                    ),
+                );
+                candidates
+            }
+            crate::server::core::providers::catalog::ImageGate::FallBackToAll(_) => {
+                logging::console_line(
+                    "[Upstream]",
+                    &format!(
+                        "⚠️ 请求含图片且当前这一问依赖图片，但候选家 {refused_text} 都在目录上标着\
+                         不支持识图 —— 目录可能不准，照原链转发（要纠正请在模型管理页改能力位）"
+                    ),
+                );
+                candidates
+            }
+            crate::server::core::providers::catalog::ImageGate::Narrow(kept) => {
+                logging::verbose(
+                    "[Upstream]",
+                    &format!(
+                        "请求含图片且当前这一问依赖图片，跳过明确不支持识图的候选 {refused_text}\
+                         （模型 {}）",
+                        if model.is_empty() { "(默认)" } else { &model },
+                    ),
+                );
+                kept
+            }
         }
     } else {
         candidates
@@ -2262,23 +2278,11 @@ fn model_of(body: &Value) -> String {
 ///
 /// 只做「有没有」，不做「有多少、多大」：闸门要的是「这次需不需要识图能力」
 /// 这一个布尔，把条数当判据会让「一条都不带图的长会话」与「带十张图」走不同
-/// 分支，而目录能力位只区分能不能。
-fn request_carries_images(body: &Value) -> bool {
-    body.get("messages")
-        .and_then(Value::as_array)
-        .is_some_and(|messages| {
-            messages.iter().any(|message| {
-                message
-                    .get("content")
-                    .and_then(Value::as_array)
-                    .is_some_and(|parts| {
-                        parts.iter().any(|part| {
-                            part.get("type").and_then(Value::as_str) == Some("image_url")
-                        })
-                    })
-            })
-        })
-}
+/// 「这次请求里有没有图片」的判据本体在 [`crate::server::core::image_strip`] ——
+/// 识图闸门与剥图层必须读同一个函数，两处各写一份迟早分叉（分叉的症状是"候选池里
+/// 留着这家、发送时却没剥"，那正是我们要避免的那次 400）。这里只做转出，
+/// 让本层的读法保持原名，`vision_gate` 那组用例也照旧钉住"到本层只剩 chat 形态"。
+pub(super) use crate::server::core::image_strip::request_carries_images;
 
 /// 限额事件的模型文案：以**上游真名**为主读数。
 ///

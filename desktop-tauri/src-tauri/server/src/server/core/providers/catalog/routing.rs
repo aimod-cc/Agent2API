@@ -262,6 +262,52 @@ pub fn without_image_refusing(providers: &[String], requested: &str) -> ImageCap
     split_by_image_capability(providers, |id| manifest_entry_for(id, requested))
 }
 
+/// 这家承接 `requested` 时是否**明确**声明不接受图片输入。
+///
+/// 剥图层（`payload::send_body` 的第 ④ 层）读的就是这个读数，与闸门共用
+/// [`manifest_entry_for`] 与 [`entry_refuses_images`] 两处既有实现 —— 别名解析、
+/// 自定义家的能力位展平那些细节因此不会有两份。
+pub fn provider_refuses_images(provider_id: &str, requested: &str) -> bool {
+    manifest_entry_for(provider_id, requested)
+        .is_some_and(|entry| entry_refuses_images(&entry))
+}
+
+/// 识图闸门读完划分之后的**唯一决定**。
+///
+/// 收成枚举而不是让调用点写一串 if/else，是因为这四个分支各有不同的用户后果，
+/// 而它们的优先次序是这次改动真正的内容：
+///   - 图全在历史轮 → 候选不动，交给剥图层（`core::image_strip`）；
+///   · 当前这一问就依赖图、且还有能吃图的家 → 剔掉不吃图的；
+///   · 当前这一问依赖图、而**所有**候选都不吃图 → 退回不过滤（目录可能说谎，
+///     照原链转发比凭一份目录把请求判死好）。
+/// `history_images_strippable` 由调用方给（判据在 `core::image_strip`，那一侧还要
+/// 管环境变量开关），本函数只做三分支的编排 —— 于是这张表能脱离全局目录被测。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImageGate {
+    /// 请求没有图，或没有家被目录标成不吃图：候选原样
+    Unchanged,
+    /// 保留全部候选，发送前剥掉历史图片（`skipped` 是将被剥图的那几家）
+    StripAndKeep(Vec<String>),
+    /// 保留全部候选并告警目录可能不准（一支都不剩了）
+    FallBackToAll(Vec<String>),
+    /// 收窄到 `kept`（当前这一问依赖图片）
+    Narrow(Vec<String>),
+}
+
+pub fn decide_image_gate(split: &ImageCapabilitySplit, strippable: bool) -> ImageGate {
+    if split.skipped.is_empty() {
+        return ImageGate::Unchanged;
+    }
+    let refused: Vec<String> = split.skipped.iter().map(|(id, _)| id.clone()).collect();
+    if strippable {
+        return ImageGate::StripAndKeep(refused);
+    }
+    if split.kept.is_empty() {
+        return ImageGate::FallBackToAll(refused);
+    }
+    ImageGate::Narrow(split.kept.clone())
+}
+
 #[cfg(test)]
 mod vision_gate {
     //! 识图能力闸门的三条判据。
@@ -275,8 +321,8 @@ mod vision_gate {
     use serde_json::json;
 
     use super::{
-        entry_refuses_images, entry_with_capabilities_flattened, manifest_entry_for,
-        split_by_image_capability,
+        decide_image_gate, entry_refuses_images, entry_with_capabilities_flattened,
+        manifest_entry_for, split_by_image_capability, ImageCapabilitySplit, ImageGate,
     };
 
     fn providers(ids: &[&str]) -> Vec<String> {
@@ -305,6 +351,48 @@ mod vision_gate {
         // 关键的一条：目录没给这个键 = 不知道，不是不支持
         assert!(!entry_refuses_images(&json!({"id": "m"})), "缺键必须放行");
         assert!(!entry_refuses_images(&json!({})));
+    }
+
+    /// 闸门读完划分之后的**四个分支次序**：图可剥就一个家都不剔。
+    ///
+    /// 划分（谁不吃图）与决定（要不要因此绕开它）是两件事，这张表只测后者；
+    /// `strippable` 由调用方从 `core::image_strip` 取，因此这里能脱离全局目录跑。
+    #[test]
+    fn the_gate_prefers_stripping_over_dropping_a_home() {
+        // 划分本身不管"图在哪个轮次"，四个分支的次序才是这次改动的内容
+        let refused = |homes: &[&str]| ImageCapabilitySplit {
+            kept: vec!["trae".to_string()],
+            skipped: homes
+                .iter()
+                .map(|id| (id.to_string(), "deepseek-v4.1-flash".to_string()))
+                .collect(),
+        };
+        // ① 图可剥 → 候选一个不剔，被剥的那几家点名出来
+        assert_eq!(
+            ImageGate::StripAndKeep(vec!["codearts".to_string()]),
+            decide_image_gate(&refused(&["codearts"]), true)
+        );
+        // ② 图不可剥（当前这一问依赖图）→ 照旧收窄
+        assert_eq!(
+            ImageGate::Narrow(vec!["trae".to_string()]),
+            decide_image_gate(&refused(&["codearts"]), false)
+        );
+        // ③ 不可剥、且候选全被剔光 → 退回不过滤（目录可能说谎）
+        let all_refused = ImageCapabilitySplit {
+            kept: Vec::new(),
+            skipped: vec![("codearts".to_string(), "m".to_string())],
+        };
+        assert_eq!(
+            ImageGate::FallBackToAll(vec!["codearts".to_string()]),
+            decide_image_gate(&all_refused, false)
+        );
+        // ④ 没有家被标成不吃图 → 一律不动（连日志都不该写）
+        let none = ImageCapabilitySplit {
+            kept: vec!["codearts".to_string()],
+            skipped: Vec::new(),
+        };
+        assert_eq!(ImageGate::Unchanged, decide_image_gate(&none, true));
+        assert_eq!(ImageGate::Unchanged, decide_image_gate(&none, false));
     }
 
     /// 划分保留传入顺序，并把被剔的家**连同模型 id** 一起交出去（日志要点名）。
