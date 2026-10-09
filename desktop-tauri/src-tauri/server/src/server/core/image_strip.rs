@@ -12,7 +12,7 @@
 //! ── 唯一的硬边界：当前这一轮的图绝不剥 ────────────────────
 //! 剥图不能恢复信息。当前问题依赖那张图时（"这张报错截图第三行写了什么"），
 //! 剥掉必然答错，而且错得很像成功（200 + 一段编出来的话）。这一层因此只服务
-//! 一种请求：**最后一条 user 消息自己不含图片**。含图就整层不动，退回今天的
+//! 一种请求：**当前这一轮里没有任何 user 消息带图片**。含图就整层不动，退回今天的
 //! 行为（剔家）。这条判据是 `current_turn_needs_vision`，它是本模块存在的
 //! 全部前提，不是防御性检查。
 //!
@@ -112,24 +112,57 @@ pub fn request_carries_images(body: &Value) -> bool {
     in_messages || in_system
 }
 
-/// **当前这一轮**是否依赖图片：最后一条 `role:"user"` 消息自己含图即为真。
+/// **当前这一轮**是否依赖图片：本轮里的任何消息含图即为真。
 ///
-/// 为什么取"最后一条 user"而不是"最后一条消息"：agent 会话的尾巴经常是
-/// `assistant`（工具调用）或 `tool`（工具结果），拿"最后一条"判会把用户真正的
-/// 那一问漏掉 —— 那一问带图时我们照样该剥干净再送，而这是错的。
+/// 「本轮」的边界见 [`current_turn_start`]。
 ///
-/// 一条 user 消息都没有时（纯 system 探测）按**不依赖**处理：那时没有任何"当前
-/// 问题"会被图劫持。
+/// 为什么不能只看"最后一条 user"（2026-10-09 改，此前就是这条判据漏的）：客户端可以
+/// 把一次提问拆成**两条连续的 user**（图在第一条、正文在第二条），也可以后面再补一句
+/// 上下文提醒。那时"最后一条 user"是纯文本的，刚贴的图却被当成历史剥掉 —— dev 一手：
+/// codearts 回「没收到图片，看不到内容」，而这次本该剔家转给能识图那一台。
+///
+/// 为什么也不取"最后一条消息"：agent 会话的尾巴经常是 `assistant`（工具调用）或
+/// `tool`（工具结果），拿"最后一条"判会把用户真正的那一问漏掉。
 pub fn current_turn_needs_vision(body: &Value) -> bool {
-    body.get("messages")
-        .and_then(Value::as_array)
-        .and_then(|messages| {
-            messages
-                .iter()
-                .rev()
-                .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
-        })
-        .is_some_and(|message| has_image(message.get("content")))
+    let Some(messages) = body.get("messages").and_then(Value::as_array) else {
+        return false;
+    };
+    // `current_turn_start` 只会是「某条消息的下标」或「某条之后一位」，永远 ≤ len，
+    // 切片不会越界
+    messages[current_turn_start(messages)..]
+        .iter()
+        .any(|message| has_image(message.get("content")))
+}
+
+/// 本轮的起点。三种真实形状要同时满足（少一种就会重演今天这种「刚贴的图被剥」或
+/// 反向的「二十几轮前的截图永远剥不掉」）：
+///
+/// 1. **上一条 assistant 之后又出现了新的 user** ⇒ 模型已经接过新的一问，本轮从那一条
+///    起。这一条保住了本层的用处：早期轮次里被答过的截图仍是历史。
+///    `user(图) assistant(工具调用) tool user(正文)` → 起点 = 最后那条 user
+/// 2. **上一条 assistant 之后没有新的 user**（尾巴只有 tool）⇒ 那一问还没答完，本轮退到
+///    它自己那一条 user 上。`user(图) assistant(工具调用) tool` → 起点 = 那条 user
+/// 3. **一条 assistant 都没有**（`user(图) user(正文)`，或只有一问）⇒ 整段都是本轮，
+///    还没有任何东西消费过那张图。
+fn current_turn_start(messages: &[Value]) -> usize {
+    let is_role = |message: &Value, role: &str| {
+        message.get("role").and_then(Value::as_str) == Some(role)
+    };
+    let Some(assistant) = messages.iter().rposition(|message| is_role(message, "assistant")) else {
+        return 0;
+    };
+    // 情形 1：尾巴里已经有 user 消息
+    if let Some(offset) = messages[assistant + 1..]
+        .iter()
+        .position(|message| is_role(message, "user"))
+    {
+        return assistant + 1 + offset;
+    }
+    // 情形 2：尾巴只有 tool / 其它，退回到那一条还没被答的 user
+    messages[..=assistant]
+        .iter()
+        .rposition(|message| is_role(message, "user"))
+        .unwrap_or(assistant + 1)
 }
 
 /// 这一层此刻要不要工作（= 请求里有图、且当前这一问不依赖图、且没被环境变量关掉）。
@@ -160,7 +193,7 @@ pub fn strip_applies_for(body: &Value, home_refuses_images: bool) -> bool {
 /// "统一返回类型"而把无操作的请求复制一遍。
 ///
 /// 逐条规则：
-///   · 最后一条 user 消息：判据已保证它无图，因此不触碰；
+///   · 本轮之内的消息（[`current_turn_start`] 往后）：判据已保证它们无图，因此不触碰；
 ///   · 其余消息：`content` 数组里的 image part 全部移除；该消息若移除过≥1 张，
 ///     在**最后一个文本块之后**补一句占位文本（没有文本块就补在开头），
 ///     让模型先读完它真正会读的文字、再看"这里少了一张图"；
@@ -175,10 +208,10 @@ pub fn strip_history_images(body: &Value) -> Option<Stripped> {
 
     // ① messages
     if let Some(messages) = next.get_mut("messages").and_then(Value::as_array_mut) {
-        let last_user = last_user_index(messages);
+        let turn_start = current_turn_start(messages);
         for (index, message) in messages.iter_mut().enumerate() {
-            if Some(index) == last_user {
-                // 当前这一轮：判据保证它没图，这里再显式跳过一次，
+            if index >= turn_start {
+                // 当前这一轮：判据保证本轮没图，这里再显式跳过一次，
                 // 免得将来有人改了判据而这里跟着遭殃
                 continue;
             }
@@ -222,13 +255,6 @@ pub fn strip_history_images(body: &Value) -> Option<Stripped> {
         body: next,
         removed,
     })
-}
-
-/// 最后一条 `role:"user"` 消息的下标（没有则 `None`）。
-fn last_user_index(messages: &[Value]) -> Option<usize> {
-    messages
-        .iter()
-        .rposition(|message| message.get("role").and_then(Value::as_str) == Some("user"))
 }
 
 /// 就地把 image part 换成占位文本，并把重复的占位并成一条；返回**摘掉的张数**。
@@ -296,7 +322,7 @@ mod strip_rules {
         assert!(request_carries_images(&historical));
         assert!(
             !current_turn_needs_vision(&historical),
-            "最后一条 user 没有图"
+            "上一条 assistant 之后又来了新的 user ⇒ 本轮只剩那一条，它没有图"
         );
         let stripped = strip_history_images(&historical).expect("这一类应当剥得动");
         assert_eq!(1, stripped.removed, "摘除数按**张**计");
@@ -330,7 +356,7 @@ mod strip_rules {
         ]});
         assert!(
             current_turn_needs_vision(&current),
-            "最后一条 user 自己含图"
+            "整个请求就一条 user，本轮就是它，它自己含图"
         );
         assert!(
             strip_history_images(&current).is_none(),
@@ -340,9 +366,72 @@ mod strip_rules {
     }
 
     #[test]
+    fn a_second_user_message_in_the_same_turn_does_not_hide_the_image() {
+        // dev 2026-10-09 一手：客户端把「贴一张图」和「补一句正文」拆成两条连续的
+        // user 消息。判据只看最后一条 user 时，那张刚贴的图被当成历史剥掉，
+        // codearts 回「没收到图片，看不到内容」—— 而这次本该剔家转给能识图那一台。
+        let body = json!({"messages": [
+            {"role": "system", "content": "只答颜色"},
+            {"role": "user", "content": parts_with_image("这图什么颜色")},
+            {"role": "user", "content": "（补充：不用管别的）"},
+        ]});
+        assert!(
+            current_turn_needs_vision(&body),
+            "本轮里有两条 user，图在那一条里 —— 就还是本轮的图"
+        );
+        assert!(!strip_applies(&body), "因此整层不动，选路侧照旧剔掉不吃图的那几家");
+        assert!(strip_history_images(&body).is_none(), "一个字节都不该改");
+
+        // 正对照：同一形状里若那张图在上一条**真答过话**的 assistant 之前，仍按历史剥
+        let answered = json!({"messages": [
+            {"role": "user", "content": parts_with_image("看这张截图")},
+            {"role": "assistant", "content": "看到了"},
+            {"role": "user", "content": "图里第二行写了啥"},
+            {"role": "user", "content": "（补充：不用管别的）"},
+        ]});
+        assert!(!current_turn_needs_vision(&answered));
+        let stripped = strip_history_images(&answered).expect("这一类仍该剥得动");
+        assert_eq!(1, stripped.removed);
+        assert_eq!(
+            "图里第二行写了啥", stripped.body["messages"][2]["content"],
+            "本轮那两条连续 user 都不该被触碰"
+        );
+        assert_eq!(
+            "（补充：不用管别的）", stripped.body["messages"][3]["content"],
+            "本轮那两条连续 user 都不该被触碰"
+        );
+    }
+
+    #[test]
+    fn a_newer_user_message_closes_the_turn_even_when_the_answer_was_only_a_tool_call() {
+        // 情形 1（保住本层的用处）：图之后模型回过话 —— 哪怕只发了 tool_calls ——
+        // 并且**又出现了新的 user**，那一问就已被消费，图退回历史轮，照剥。
+        let superseded = json!({"messages": [
+            {"role": "user", "content": parts_with_image("这图什么颜色")},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "结果文本"},
+            {"role": "user", "content": "换个问题：今天几号"},
+        ]});
+        assert!(!current_turn_needs_vision(&superseded), "新的 user 已经把那一问答完了");
+        let stripped = strip_history_images(&superseded).expect("这一类仍该剥得动");
+        assert_eq!(1, stripped.removed);
+
+        // assistant 带正文的同一形状（块数组形态的正文也要认）
+        let answered = json!({"messages": [
+            {"role": "user", "content": parts_with_image("这图什么颜色")},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "想一想"},
+                {"type": "text", "text": "红色"},
+            ]},
+            {"role": "user", "content": "换个问题"},
+        ]});
+        assert!(!current_turn_needs_vision(&answered));
+    }
+
+    #[test]
     fn a_trailing_tool_turn_does_not_hide_the_current_question() {
-        // agent 会话的尾巴是 assistant(工具调用) + tool(结果)：判据取"最后一条
-        // user"而不是"最后一条消息"，否则带图的那一问会被当成历史剥掉
+        // agent 会话的尾巴是 assistant(工具调用) + tool(结果)：判据取"本轮"而不是
+        // "最后一条消息"，否则带图的那一问会被当成历史剥掉
         let body = json!({"messages": [
             {"role": "user", "content": parts_with_image("这张图里是什么？")},
             {"role": "assistant", "content": null, "tool_calls": [{"id": "c1"}]},
@@ -350,7 +439,7 @@ mod strip_rules {
         ]});
         assert!(
             current_turn_needs_vision(&body),
-            "尾巴不是用户那一问：判据要往回找到最后一条 user"
+            "尾巴不是用户那一问：判据要按本轮判，那轮还没答完"
         );
         assert!(strip_history_images(&body).is_none());
     }
@@ -363,6 +452,7 @@ mod strip_rules {
                 json!({"type": "image_url", "image_url": {"url": "data:image/png;base64,BBB"}}),
                 json!({"type": "image_url", "image_url": {"url": "data:image/png;base64,CCC"}}),
             ]},
+            {"role": "assistant", "content": "看到了"},
             {"role": "user", "content": "只回一个字：好"},
         ]});
         let stripped = strip_history_images(&body).expect("历史三张图，当前轮纯文本");
@@ -415,6 +505,7 @@ mod strip_rules {
         // 真值表钉在这里，是为了让"候选池留着这家、发送时没剥"那种分叉一写出来就红。
         let historical = json!({"messages": [
             {"role": "user", "content": parts_with_image("看这张截图")},
+            {"role": "assistant", "content": "看到了"},
             {"role": "user", "content": "只回一个字：好"},
         ]});
         let current = json!({"messages": [
@@ -481,7 +572,15 @@ mod strip_rules {
                 "一条消息里三张图",
                 json!({"messages": [
                     {"role": "user", "content": [img("D"), img("E"), img("F")]},
+                    {"role": "assistant", "content": "看了"},
                     {"role": "user", "content": "只回一个字"},
+                ]}),
+            ),
+            (
+                "连续两条 user，图在前一条（本轮不许动手）",
+                json!({"messages": [
+                    {"role": "user", "content": [img("D2"), json!({"type":"text","text":"这张图"})]},
+                    {"role": "user", "content": "补充：不用管别的"},
                 ]}),
             ),
             (
