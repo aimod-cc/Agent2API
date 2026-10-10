@@ -41,6 +41,9 @@ import {
   RETRY_CODE_MIN,
   RETRY_FIELDS,
   RETRY_MAX_CODES,
+  SCHEDULE_MODES,
+  SCHEDULE_MODE_KEY,
+  SESSION_STICKY_KEY,
   SETTINGS_CAT_KEY,
   TIMEOUT_FIELDS,
   errorMessage,
@@ -74,6 +77,7 @@ export type BusyScope =
   | 'codes'
   | 'timeouts'
   | 'queue'
+  | 'schedule'
   | 'debug'
   | 'sanitize'
   | 'clineHeaders'
@@ -208,6 +212,17 @@ export type StorageState = {
 /** 导入失败明细（只列前 3 条，more 表示还有更多） */
 export type IoFailure = { failed: number; detail: string; more: boolean } | null
 
+/**
+ * 调度设置的快照（三态 + 两个值）。
+ *
+ * 与 `CorsState` 同一形状（`status` + 生效值），但有两个值 —— 它们同属
+ * 「调度」这一块：读写走同一个端点（`/api/schedule`），拆成两个状态会让
+ * 「读一次拿到两份值」变成两次 publish。
+ * `status !== 'ready'` 时两个控件都禁用（读到后端值之前不许切，理由同
+ * `CorsState` 的注释）。
+ */
+export type ScheduleState = { status: LoadStatus; mode: string; sticky: boolean }
+
 export type SettingsSnapshot = {
   /** 当前分类（左侧导航与右侧面板的显隐都由它派生） */
   category: string
@@ -222,6 +237,8 @@ export type SettingsSnapshot = {
   retryCodes: number[] | null
   timeouts: NumericState
   queue: NumericState
+  /** 账号调度与会话粘性（「调度」分类）：模式 + 粘性开关同一块读写 */
+  schedule: ScheduleState
   debug: DebugState
   sanitize: SanitizeState
   clineHeaders: ClineHeadersState
@@ -277,6 +294,7 @@ const INITIAL: SettingsSnapshot = {
   retryCodes: null,
   timeouts: { status: 'loading', values: null },
   queue: { status: 'loading', values: null },
+  schedule: { status: 'loading', mode: 'priority', sticky: false },
   debug: { status: 'loading', on: false, count: null, limit: null },
   sanitize: { status: 'loading', on: false },
   clineHeaders: { status: 'loading', defaults: {}, overrides: {}, effective: {} },
@@ -939,6 +957,82 @@ export async function loadQueue(): Promise<void> {
 
 export async function saveQueueField(field: NumberField, raw: string): Promise<void> {
   await saveNumericField(queuePanel, field, raw)
+}
+
+/* ─── 账号调度与会话粘性（「调度」分类）─────── */
+
+/**
+ * 读到的调度设置 → 快照。`data === null` = 读不到（整块不可用），
+ * 与 `renderCors` 同一口径：状态置 unavailable、值给默认，控件据此禁用。
+ *
+ * 模式白名单校验在**前端也做一遍**（不在 `SCHEDULE_MODES` 里的值一律按
+ * 默认 priority 显示）：后端理论上只会回三个合法值，但旧版本后端 / 手改库
+ * 都可能给出别的字符串，界面拿到一个不认识的值时既不该显示成空白、
+ * 也不该把它当成选中项回传（那会把脏值写回去）。
+ */
+export function renderSchedule(data?: unknown): void {
+  // 与 renderCors / renderDebug / renderSanitize 同一约定：`undefined` =
+  // 「这次不渲染」（调用方拿不到桥方法时的空转），`null` = 明确的「读不到」。
+  // 若把 undefined 也判成 unavailable，旧版桥（没有 getSchedule）会让面板
+  // 显示「不可用」而不是保持加载态 —— 那是版本错配，不该由本函数断言。
+  if (data === undefined) return
+  if (data === null || typeof data !== 'object') {
+    publish({ schedule: { status: 'unavailable', mode: 'priority', sticky: false } })
+    return
+  }
+  const record = data as Record<string, unknown>
+  const rawMode = record[SCHEDULE_MODE_KEY]
+  const mode =
+    typeof rawMode === 'string' && SCHEDULE_MODES.some(item => item.value === rawMode)
+      ? rawMode
+      : 'priority'
+  publish({ schedule: { status: 'ready', mode, sticky: record[SESSION_STICKY_KEY] === true } })
+}
+
+async function loadSchedule(): Promise<void> {
+  try {
+    renderSchedule(await shared().workbuddyDesktop?.getSchedule())
+  } catch (error) {
+    console.warn('读取调度设置失败:', errorMessage(error))
+    renderSchedule(null)
+  }
+}
+
+/** 切换调度模式（下拉的 onValueChange 直接接它） */
+export async function saveScheduleMode(mode: string): Promise<void> {
+  if (busyScope) { repaint(); return }
+  if (mode === snapshot.schedule.mode) return
+  beginBusy('schedule')
+  // 乐观更新：下拉立刻显示新值，失败时由 loadSchedule 回滚到后端真实值
+  publish({ schedule: { ...snapshot.schedule, status: 'ready', mode } })
+  try {
+    const saved = await shared().workbuddyDesktop?.saveSchedule({ scheduleMode: mode })
+    renderSchedule(saved)
+    const option = SCHEDULE_MODES.find(item => item.value === mode)
+    toast(t('调度模式已改为「{label}」', { label: option?.toastLabel ?? mode }))
+  } catch (error) {
+    toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
+    await loadSchedule()
+  } finally {
+    endBusy()
+  }
+}
+
+/** 切换会话粘性开关（Switch 的 onCheckedChange 直接接它） */
+export async function saveSessionSticky(next: boolean): Promise<void> {
+  if (busyScope) { repaint(); return }
+  beginBusy('schedule')
+  publish({ schedule: { ...snapshot.schedule, status: 'ready', sticky: next } })
+  try {
+    const saved = await shared().workbuddyDesktop?.saveSchedule({ sessionSticky: next })
+    renderSchedule(saved)
+    toast(next ? t('会话粘性已开启') : t('会话粘性已关闭'))
+  } catch (error) {
+    toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
+    await loadSchedule()
+  } finally {
+    endBusy()
+  }
 }
 
 /* ─── 请求重试 ─────────────────────────────── */
@@ -1764,6 +1858,7 @@ export async function load(): Promise<void> {
     loadRetry(),
     loadTimeouts(),
     loadQueue(),
+    loadSchedule(),
     loadDebug(),
     loadSanitize(),
     loadClineHeaders(),
@@ -1796,6 +1891,11 @@ export async function refreshTimeouts(): Promise<void> {
 export async function refreshQueue(): Promise<void> {
   await loadQueue()
   toast(t('排队等待设置已刷新'))
+}
+
+export async function refreshSchedule(): Promise<void> {
+  await loadSchedule()
+  toast(t('调度设置已刷新'))
 }
 
 export async function refreshDebug(): Promise<void> {

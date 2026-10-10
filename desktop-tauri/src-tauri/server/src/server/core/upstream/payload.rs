@@ -112,6 +112,12 @@ pub(super) struct ProviderContext<'a> {
     /// [`super::ForwardRequest::ignore_model_gate`]）。候选链改从 `key_scope`
     /// 白名单取 —— 它是唯一的候选来源，两处读的是同一份事实。
     pub ignore_model_gate: bool,
+    /// 本次请求的会话标识（trace / thread；见 `core::session_sticky`）。
+    ///
+    /// 与 `key_scope` / `pinned_account` 同一分工：选路层每一轮（含失败换号）
+    /// 读同一份快照，粘性判定不会中途漂移；它由 `upstream::forward` 的栈帧
+    /// 持有（从 `ForwardRequest` 移出来），生命周期覆盖整条转发链。
+    pub session_keys: &'a crate::server::core::session_sticky::SessionKeys,
 }
 
 /// 某一家 provider 实际要发送的请求体（**每次转发前**决定，不做跨家复用），

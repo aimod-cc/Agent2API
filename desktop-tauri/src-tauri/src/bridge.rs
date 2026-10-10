@@ -630,6 +630,11 @@ const BRIDGE_JS: &str = r#"
     // 次数 / 单次秒数，存配置（/api/queue）。契约同 saveTimeouts。
     getQueue: () => call('GET', '/api/queue'),
     saveQueue: patch => call('PUT', '/api/queue', patch),
+    // ── 账号调度与会话粘性（设置页「调度」分类）──
+    // 调度模式（priority / provider / global）与会话粘性开关，存配置
+    // （/api/schedule）。契约同 saveQueue：PUT 允许部分字段，返回生效后的全量值。
+    getSchedule: () => call('GET', '/api/schedule'),
+    saveSchedule: patch => call('PUT', '/api/schedule', patch),
 
     // ── 调试模式（设置页「通用 → 调试模式」）──
     // 开关存配置（debugMode）：开启后转发层把上游原始报文（凭据类头已脱敏）

@@ -188,6 +188,16 @@ pub async fn chat_completions(
     // 下游原始请求体在此刻抄一份（request_raw 表的请求侧，见 `raw_body_text`）：
     // body 还是客户端发来的原值；送进转发层后 payload 会被就地改写（默认模型注入）
     let raw_request = pipeline::raw_body_text(&body);
+    // 会话标识（trace / thread）在入口提取一次：粘性选路要用它，而转发层
+    // 不认识 HTTP（见 `core::session_sticky` 与 `ForwardRequest::session_keys`）。
+    // 传的是**改写前**的 payload 副本（Claude Code 的 metadata.user_id 在
+    // 翻译前的原始体里，虽然 chat 入口本身不读它 —— 传原体是统一口径，
+    // 免得两个入口传的东西不一样）
+    let session_keys = crate::server::core::session_sticky::session_keys_from(
+        &headers,
+        path,
+        Some(&payload),
+    );
     let outcome = state
         .upstream()
         .forward(ForwardRequest {
@@ -204,6 +214,7 @@ pub async fn chat_completions(
             // 关闭的模型对生产请求保持「模型已在网关中关闭」（`ignore_model_gate`
             // 是模型测试的直达跳，见 `ForwardRequest` 的说明）
             ignore_model_gate: false,
+            session_keys,
         })
         .await;
     let stats = state.request_stats();

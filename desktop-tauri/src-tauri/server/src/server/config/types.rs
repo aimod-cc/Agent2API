@@ -809,3 +809,109 @@ pub struct QueuePatch {
     pub max_waits: Option<i64>,
     pub wait_seconds: Option<i64>,
 }
+
+// ─── 账号调度模式与会话粘性（设置页「调度」分类）──────────────────────
+//
+// 两项都作用于**转发选路**（谁去发这次请求），默认值取「与改造前逐字相同」
+// 的那一侧：模式 = 严格优先级、粘性 = 关。于是不配置任何东西的老用户升级后
+// 行为零变化 —— 这是这两项默认值的唯一判据。
+
+/// 账号调度模式的键（config.json / kv 表的键名，值见 [`ScheduleMode`]）
+pub const KEY_SCHEDULE_MODE: &str = "scheduleMode";
+/// 会话粘性开关的键（布尔；缺失 = 关）
+pub const KEY_SESSION_STICKY: &str = "sessionSticky";
+
+/// 调度模式：一次请求在候选账号里**按什么顺序挑**。
+///
+/// ── 三个取值各自回答的问题 ──────────────────────────────────
+///   - [`ScheduleMode::Priority`]：**谁优先级小用谁**（改造前唯一的行为）。
+///     队首可用就一直用它，负载集中是它的特性而不是缺陷 —— 免费池账号
+///     就是「用一个、坏了换下一个」的用法。
+///   - [`ScheduleMode::Provider`]：**先用优先级最高的那一家，但家内账号轮着来**。
+///     家与家之间仍是严格优先级（一家可用就不会用到别家），只是把同一家囤的
+///     多个账号摊开 —— 适合「一家多号、不想死磕队首」的场景。
+///   - [`ScheduleMode::Global`]：**全部候选账号（跨家）一条环，按优先级排序轮询**。
+///     账号多的家天然分到更多请求（环上有几个号就占几份），这是它的语义而不是
+///     偏差；要「家与家均分」不是这个模式的目标。
+///
+/// ── 轮询指针的推进时机（三个模式共用的口径）───────────────────
+/// **挑选与推进是两个动作**：挑选（`scheduling::peek`）只算「下一个是谁」，
+/// 不动指针；确认要用这个账号发请求时才推进（`scheduling::note_pick`，
+/// 由 `upstream::rotate` 在选中收尾处调用）。分开的理由：挑选之后还隔着
+/// 几道可能失败的关卡（无凭证账号会被 `get_session_by_id` 挡下、换号路径
+/// 的预览只用于写日志），挑一次就推会让一次请求消耗多格环位。
+///
+/// 推进的时机是「**确认选中**」而不是「请求成功」：失败换号（429 降级、
+/// 401 重试）走同一条路，指针因此自然跟着走，不需要在重试路径上再写一遍
+/// 推进逻辑。代价是「选中后立刻失败」也会消耗一次轮转位 —— 那正是轮询要
+/// 的效果（这次不行就下次轮到别人）。
+///
+/// 例外：模型测试（`pinned_account`）与第二级兜底（全冷却 / 全忙时的
+/// 「恢复最早」「余量挤占」）都不推进 —— 前者是只读探查，后者挑的账号
+/// 未必真能用，都不该改写环位。详见 `upstream::rotate` 的对应段落。
+///
+/// ── 字符串取值是持久化契约 ──────────────────────────────────
+/// `"priority"` / `"provider"` / `"global"` 落进配置库，改名会让老配置读不到、
+/// 静默回落默认值。序列化与解析各只有一处（[`Self::as_str`] / [`Self::parse`]）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScheduleMode {
+    /// 严格优先级（默认；改造前的唯一行为）
+    #[default]
+    Priority,
+    /// 同一提供商内轮询（家之间仍严格按优先级）
+    Provider,
+    /// 全部账号一条环轮询（按优先级排序）
+    Global,
+}
+
+impl ScheduleMode {
+    /// 持久化字符串（键值契约）
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ScheduleMode::Priority => "priority",
+            ScheduleMode::Provider => "provider",
+            ScheduleMode::Global => "global",
+        }
+    }
+
+    /// 从持久化字符串解析；不认识的值返回 `None`（调用方决定回落还是 400）。
+    ///
+    /// 大小写不敏感：手改库写成 `"Priority"` 不该被当成写坏。
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "priority" => Some(ScheduleMode::Priority),
+            "provider" => Some(ScheduleMode::Provider),
+            "global" => Some(ScheduleMode::Global),
+            _ => None,
+        }
+    }
+}
+
+/// 账号调度与会话粘性设置（设置页「调度」分类）。
+///
+/// 与 `RetrySettings` 同一取舍：两个值总是一起用（选路前取一次快照），
+/// 打包成一个 `Copy` 值让调用方一次拿到、不必多次读锁。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScheduleSettings {
+    /// 调度模式（见 [`ScheduleMode`]）
+    pub mode: ScheduleMode,
+    /// 会话粘性开关（默认关）。
+    ///
+    /// 开启后：优先使用 trace 最近选中的账号，其次 thread 最近选中的账号，
+    /// 粘性账号失败后按当前调度模式的正常顺序回退。提取链与记录口径见
+    /// `core::session_sticky` 的模块头（对齐 AxonHub 的实现）。
+    pub sticky: bool,
+}
+
+impl Default for ScheduleSettings {
+    fn default() -> Self {
+        Self { mode: ScheduleMode::default(), sticky: false }
+    }
+}
+
+/// 调度设置的**部分**更新入参（`None` = 该项不动）。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SchedulePatch {
+    pub mode: Option<ScheduleMode>,
+    pub sticky: Option<bool>,
+}

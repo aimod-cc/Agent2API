@@ -339,4 +339,30 @@ pub(super) fn queue_from(map: &Map<String, Value>) -> QueueSettings {
     }
 }
 
+// ─── 账号调度与会话粘性（scheduleMode / sessionSticky）──────────
+
+/// 由原始 JSON 解析调度设置（缺字段各自用默认值）。
+///
+/// 模式解析沿用本模块的统一口径「写坏回落默认值、不报错」：手改库写出
+/// 不认识的值（`"roundrobin"`、数字、对象）一律当「没配过」→ 严格优先级。
+/// 走接口写入的值在 `schedule_api::put_schedule` 里已按白名单校验（那里 400）。
+///
+/// 粘性开关只有字面 `true` 算开启（与 `debug_mode` / `cors_enabled` 同口径）：
+/// 手改库写出的 `"1"` / `"yes"` 一律当关 —— 这个开关改变的是选路行为，
+/// 宁可少开也不要因为一个写坏的字符串悄悄打开。
+pub(super) fn schedule_from(map: &Map<String, Value>) -> ScheduleSettings {
+    let defaults = ScheduleSettings::default();
+    ScheduleSettings {
+        mode: map
+            .get(KEY_SCHEDULE_MODE)
+            .and_then(Value::as_str)
+            .and_then(ScheduleMode::parse)
+            .unwrap_or(defaults.mode),
+        sticky: map
+            .get(KEY_SESSION_STICKY)
+            .and_then(Value::as_bool)
+            .unwrap_or(defaults.sticky),
+    }
+}
+
 // ─── 历史路由优先级（providerRoute，只读，供账号迁移）───────────

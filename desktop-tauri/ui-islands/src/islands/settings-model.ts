@@ -125,6 +125,9 @@ export type SettingsBridge = {
   saveTimeouts(patch: Record<string, number>): Promise<unknown>
   getQueue(): Promise<unknown>
   saveQueue(patch: Record<string, number>): Promise<unknown>
+  /** 账号调度与会话粘性（「调度」分类）：PUT 允许部分字段，返回生效后的全量值 */
+  getSchedule(): Promise<unknown>
+  saveSchedule(patch: SchedulePatch): Promise<unknown>
   getDebug(): Promise<unknown>
   saveDebug(enabled: boolean): Promise<unknown>
   getSanitize(): Promise<unknown>
@@ -238,6 +241,7 @@ export const CATEGORIES = [
   { id: 'general', label: t('通用'), icon: 'sliders' },
   { id: 'display', label: t('显示'), icon: 'display' },
   { id: 'gateway', label: t('网关'), icon: 'traffic' },
+  { id: 'schedule', label: t('调度'), icon: 'shuffle' },
   { id: 'retry', label: t('重试'), icon: 'refresh' },
   { id: 'timeout', label: t('超时'), icon: 'timer' },
   { id: 'security', label: t('安全'), icon: 'shield' },
@@ -477,6 +481,60 @@ export const QUEUE_FIELDS: NumberField[] = [
   },
 ]
 
+/* ─── 账号调度与会话粘性（「调度」分类） ─────── */
+
+/** 调度模式的持久化键名（与后端 config.rs 的 KEY_SCHEDULE_MODE 逐字一致） */
+export const SCHEDULE_MODE_KEY = 'scheduleMode'
+/** 会话粘性开关的持久化键名（与后端 KEY_SESSION_STICKY 逐字一致） */
+export const SESSION_STICKY_KEY = 'sessionSticky'
+
+/**
+ * 调度模式三档：value 与后端 `ScheduleMode` 的持久化字符串逐字一致
+ * （`priority` / `provider` / `global`），改一个字母后端就会 400。
+ *
+ * 展示文案（optionLabel）与 toast 短名分开，与 `PROMPT_MODES` 同一手法。
+ */
+export type ScheduleModeOption = {
+  value: string
+  optionLabel: string
+  toastLabel: string
+  /** 对比表左列：这个模式「一句话怎么选」（页面上直接可见，不用悬停问号） */
+  whenLabel: string
+  /** 对比表右列：完整说明（保留 `**加粗**` 记号，渲染时转 <strong>） */
+  detail: string
+}
+
+export const SCHEDULE_MODES: ScheduleModeOption[] = [
+  {
+    value: 'priority',
+    optionLabel: t('严格优先级（默认）'),
+    toastLabel: t('严格优先级'),
+    // 对比表用（页面上直接可见，见 SchedulePane 的 SCHEDULE_COMPARE）
+    whenLabel: t('队首可用就一直用它'),
+    detail: t('优先级最小的账号承担全部请求，只有它不可用（禁用 / 限流 / 满并发 / 余额不足）才换下一个。负载集中在队首，适合「用一个、坏了换下一个」的免费池用法。'),
+  },
+  {
+    value: 'provider',
+    optionLabel: t('同一提供商内轮询'),
+    toastLabel: t('同一提供商内轮询'),
+    whenLabel: t('先定一家，家内轮流用'),
+    detail: t('家与家之间仍严格按优先级（一家可用就不会用到别家），只把**同一家**的多个账号依次轮转。适合一家囤了多个号、不想死磕队首的场景。'),
+  },
+  {
+    value: 'global',
+    optionLabel: t('全部账号轮询'),
+    toastLabel: t('全部账号轮询'),
+    whenLabel: t('所有账号排一条环'),
+    detail: t('提供当前模型的**全部**账号按优先级排成一条环，逐次轮转（账号多的家天然分到更多请求 —— 环上每有一个号就占一份，不是「家与家均分」）。'),
+  },
+]
+
+/** PUT /api/schedule 的载荷（两项都可缺省 = 那一项不动） */
+export type SchedulePatch = {
+  scheduleMode?: string
+  sessionSticky?: boolean
+}
+
 /** 「指定错误码直接换号」：键名、状态码范围与名单上限与后端 retry_api.rs 逐字同源 */
 export const NO_RETRY_CODES_KEY = 'noRetryStatusCodes'
 export const RETRY_CODE_MIN = 100
@@ -599,6 +657,8 @@ export const TIPS = {
   io: t('导出会把全部账号与自定义提供商定义写入一个 JSON 文件，可以拷到另一台机器上导入后继续使用。导入采用合并策略：同提供商下按业务身份（UID / userId / apiKey 等）去重 —— 已存在的账号只更新凭证，保留本机原有的优先级顺序；新账号追加到转发顺序末尾，不会抢占当前正在使用的账号；自定义提供商定义按 id 合并，本机缺失时自动补建。'),
   retention: t('三类数据各自独立计时，超出保留天数的部分会被删除：事件日志是登录、账号切换、429 切换这类系统事件；请求日志是网关每次转发到上游的逐条记录；按天聚合供报表页的热力图与按天趋势使用。把某一档改小（例如 30 天改成 7 天）保存后会立即删除超出的历史数据，此操作不可恢复；改大或保持不变不会删除任何数据。三项的可填范围均为 1–3650 天。'),
   storage: t('全部数据（账号、事件日志、请求记录、调试报文、设置）统一保存在配置目录下的 agent2api.db 这一个 SQLite 数据库里。备份时只需拷贝这个文件；更换保存位置请设置环境变量 AGENT2API_PROXY_HOME 后重启程序。'),
+  schedule: t('决定一次请求在可用账号里「按什么顺序挑」，三选一：①严格优先级（默认）= 优先级最小的账号可用就一直用它，坏了才换下一个 —— 与之前的转发行为完全一致；②同一提供商内轮询 = 家与家之间仍按优先级（一家可用就不会用到别家），只是把同一家囤的多个账号轮着用；③全部账号轮询 = 把提供当前模型的全部账号按优先级排成一条环，逐次轮转（账号多的家天然分到更多请求，环上每有一个号就占一份）。轮询同样会跳过禁用、该模型限流冷却中、已达并发上限、余额不足的账号；账号被删或禁用后环会自然缩短。三种模式都只影响「先试谁」，失败换号、冷却标记、重试次数这些既有行为不变。保存后对下一个请求立即生效，不用重启。'),
+  sessionSticky: t('同一个对话的多轮请求若落到不同账号上，上游侧的会话状态（提示词缓存、按账号记的上下文）就会断。开启本项后，网关记住每条会话（trace）上次用的是哪个账号：下次这条会话再来请求，优先还用那个账号；trace 认不出来时退而使用所属会话线程（thread）的记录；那个账号不可用或这次请求失败时，按上面选定的调度顺序正常回退，并把这轮实际用上的账号记成新的粘性目标。会话标识从请求头与请求体里识别，覆盖常见客户端：AH-Trace-Id / AH-Thread-Id（AxonHub 约定）、OpenCode 的 X-Opencode-Session / X-Session-Id / X-Session-Affinity、Codex 的 Session-Id 头与 X-Codex-Turn-Metadata、Claude Code 的 metadata.user_id（/v1/messages）。带不上任何标识的客户端（普通 curl、简单脚本）不会命中粘性，行为与关闭时相同。记录只存在内存里，30 分钟不活跃自动失效，重启进程即清空。默认关闭。'),
 } as const
 
 /** 面板底注（`.hint.retention-note`）与各面板内的说明行 */
@@ -624,6 +684,8 @@ export const NOTES = {
   captcha: t('开启后，登录页在浏览器后台自动完成验证（对真人无感），而脚本每次尝试都要先算一道题 —— 暴力破解与抢注的成本显著上升。仅影响面板的登录 / 注册，与 API 客户端的 API Key 无关。'),
   panelLogin: t('当前浏览器以管理员身份登录着本面板。「退出登录」会撤销这台设备的登录会话（30 天内的自动续期一并失效），需要重新输入账号密码；其他已登录的设备不受影响。'),
   exportDanger: t('导出文件内含 accessToken / refreshToken / apiKey 等凭证与自定义提供商定义，可直接用于登录。请妥善保管，不要外传或上传到公共位置。'),
+  schedule: t('保存后立即生效，不用重启；轮询位置存在内存里（重启后从优先级最高的账号重新开始）。账号页的 ★ 标记会跟随所选模式显示「下一个会先用谁」，查看界面不会改变轮询位置。'),
+  sessionSticky: t('会话标识取不到时本项不生效（普通脚本调用通常不带这些标识）。粘性只改变「优先用谁」，不影响限流冷却与并发上限的判定；粘性目标不可用时按所选调度顺序回退。'),
 } as const
 
 /** 状态行（`.settings-state`）的派生文案：与旧实现的赋值逐字一致 */
@@ -654,4 +716,11 @@ export const STATES = {
   zoomWeb: t('网页端的界面缩放由浏览器自己控制（Ctrl + / Ctrl -，或浏览器菜单里的缩放），此项不可调。'),
   zoomDefault: t('当前按 100% 显示（默认比例）。'),
   languageHint: t('界面语言只保存在本机（localStorage）。切换后整页立即刷新，不影响账号、密钥与转发。'),
+  // ── 调度分类（本次新增：不来自静态骨架，是新写的文案）──
+  scheduleUnavailable: t('未能读取调度设置，请稍后重试'),
+  schedulePriority: t('当前按严格优先级转发：优先级最小的可用账号会一直承担请求，只有它不可用时才换下一个。'),
+  scheduleProvider: t('当前在同一提供商内轮询：家与家之间仍按优先级，同一家的多个账号依次轮转。'),
+  scheduleGlobal: t('当前全部账号轮询：提供当前模型的账号按优先级排成一条环，逐次轮转。'),
+  stickyOn: t('会话粘性已开启：同一会话优先复用上次的账号（trace → thread → 正常顺序回退），30 分钟不活跃自动失效。'),
+  stickyOff: t('会话粘性未开启：每次请求都按上面选定的调度顺序挑选账号。'),
 } as const

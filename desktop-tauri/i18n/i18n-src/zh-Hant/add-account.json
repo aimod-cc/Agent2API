@@ -260,6 +260,7 @@
   "等待网页登录…": "",
   "粘贴 API Key": "",
   "粘贴 Accio 的 accessToken": "",
+  "粘贴 Antigravity 的 Google refresh token（以 <code>1//</code> 开头；直接粘贴含 <code>refresh_token=</code> 的整行也行）。<br>这是本家唯一的登录入口。refresh token 不会过期，access token 到期由网关自动续期；令牌丢了只能重新走 Google 授权，请妥善保存。": "",
   "粘贴 Antigravity 的 Google refresh token（以 <code>1//</code> 开头；直接粘贴含 <code>refresh_token=</code> 的整行也行）。<br>这是网页登录之外的手工入口（例如从已登录的官方 IDE 里导出）。refresh token 不会过期，access token 到期由网关自动续期；令牌丢了只能重新走 Google 授权，请妥善保存。": "",
   "粘贴 Command Code 的 API Key（user_ 开头；从官方 CLI 的 ~/.commandcode/auth.json 或网页 studio 获取）。整行 / 带引号 / 带 Bearer 前缀地粘都行，网关会自己剥成裸 key。key 不过期、也没有续期接口，失效后重新获取即可；添加时网关会做一次轻量探活，失败不影响添加。": "",
   "粘贴 Cookie": "",

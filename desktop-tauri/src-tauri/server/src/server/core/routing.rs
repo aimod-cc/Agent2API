@@ -218,7 +218,7 @@ pub fn max_concurrent_of(account: &Value) -> u64 {
 /// `counts` 是各账号**当前在途请求数**（账号 id → 数，`upstream::connections`
 /// 的快照）：`maxConcurrent > 0` 且在途数已达上限的账号被跳过，请求转给
 /// 其他账号。没有运行时计数可拿的调用方传**空表** = 不做并发过滤（见
-/// `pick_for_model` / `describe_route_decision` 的说明）。
+/// `candidates_for_providers` / `describe_route_decision` 的说明）。
 ///
 /// ── 并发上限是**软上限**（选路与 rebind 之间的微小窗口）────────
 /// 两个并发请求可能在同一瞬间选中同一个账号、然后各自 +1 —— 期间谁都还
@@ -237,18 +237,7 @@ pub fn pick_account_by_priority(
 ) -> Option<Value> {
     let mut candidates: Vec<Value> = accounts
         .iter()
-        .filter(|account| {
-            let Some(id) = account_id(account) else {
-                return false;
-            };
-            if exclude_ids.iter().any(|excluded| excluded == id) {
-                return false;
-            }
-            account_usability(account, keys, now).usable
-                // 并发过滤放在 usability 之后：先答「这个账号让不让你用」，
-                // 再答「它忙不忙」—— 禁用 / 限流的原因不变，这里只追加一条。
-                && !at_concurrency_limit(account, id, counts)
-        })
+        .filter(|account| is_usable(account, keys, counts, exclude_ids, now))
         .cloned()
         .collect();
     if candidates.is_empty() {
@@ -256,6 +245,34 @@ pub fn pick_account_by_priority(
     }
     candidates.sort_by(compare_by_priority);
     candidates.into_iter().next()
+}
+
+/// 账号此刻能否被选中（选路判定的**唯一**实现，各模式共用）：
+/// 有 id + 不在已尝试名单 + 启用 + 该模型未限流 + 未达并发上限。
+///
+/// ── 为什么单独暴露这条判定 ──────────────────────────────────
+/// 三种调度模式（严格优先级 / 全局轮询 / 同家轮询）与粘性命中校验都问的是
+/// 同一个问题：「这个账号现在让不让你用」。散成多份实现必然漂移（漏掉并发
+/// 过滤、或忘了排除已尝试的），而这类漂移的症状是「某个账号被反复选中又
+/// 反复失败」，很难归因。所以只留这一处，`pick_account_by_priority` 与
+/// `scheduling::peek` 都从它出发。
+///
+/// 并发过滤放在 usability 之后（原实现的口径不变）：先答「这个账号让不让你
+/// 用」，再答「它忙不忙」—— 禁用 / 限流的原因不变，这里只追加一条。
+pub fn is_usable(
+    account: &Value,
+    keys: &CooldownKeys<'_>,
+    counts: &HashMap<String, usize>,
+    exclude_ids: &[String],
+    now: i64,
+) -> bool {
+    let Some(id) = account_id(account) else {
+        return false;
+    };
+    if exclude_ids.iter().any(|excluded| excluded == id) {
+        return false;
+    }
+    account_usability(account, keys, now).usable && !at_concurrency_limit(account, id, counts)
 }
 
 /// 该账号的在途请求数是否已达并发上限（`maxConcurrent == 0` = 不限，恒 false）。
@@ -267,51 +284,39 @@ fn at_concurrency_limit(account: &Value, id: &str, counts: &HashMap<String, usiz
     limit > 0 && counts.get(id).copied().unwrap_or(0) >= limit as usize
 }
 
-/// 按**指定模型**派生队首：候选先收窄到「清单里有这个模型的家」，再走
-/// [`pick_account_by_priority`] 的常规判据（启用 + 该模型未限流 + 优先级序）。
-///
-/// ── 为什么要单独有这个函数（`pick_current` 不够用）──────────────
-/// 账号库里的「当前账号」是**不限模型**的队首（只判启用 + 凭证），转发层却还要
-/// 剔除「对该模型限流中」的账号。两者在「队首正被限流」时给出不同答案：界面标着
-/// ★ 的那个账号，请求根本不会走它。账号页要回答的是「下一个请求会先用谁」，
-/// 所以必须按模型派生，见 `/api/session` 的 `routedAccountId`。
+/// 按**指定模型**收窄候选：只留「清单里有这个模型的家」的、且带凭证的账号。
 ///
 /// ── 为什么要传 `providers` 而不是只给 model ──────────────────
-/// 全局队列里四家混排，但一家只能承接**它自己清单里有的**模型（见
+/// 全局队列里各家混排，但一家只能承接**它自己清单里有的**模型（见
 /// `providers::router::route_for_forward`）。少了这道收窄，一个「优先级更小、
 /// 也对该模型未限流、但根本不提供该模型」的账号会被误判成队首。
-/// `providers` 为空（未知模型）时不过滤 —— 宁可退回全局队首，也不给空答案。
+/// `providers` 为空（未知模型）时不过滤 —— 宁可退回全局队列，也不给空答案。
 ///
 /// `hasCredentials` 也算进判据：转发挑出候选后还要取到会话才用，无凭证的账号
-/// 必然被跳过，前端按同一口径推算时才不会把这种账号标成 ★。
+/// 必然被跳过，界面按同一口径推算时才不会把这种账号标成 ★。
 ///
-/// 冷却键按各家真名解析（[`CooldownKeys`]）—— 界面标的 ★ 因此与转发实际会先试
-/// 的那个账号同判据：别名请求撞限额后，★ 不会再指向那个额度已耗尽的账号。
+/// ── 谁在用 ──────────────────────────────────────────────────
+/// `/api/session` 的 ★ 推算（`routed_account_id`）：它先调本函数收窄，
+/// 再叠加限制器过滤（余额 / Token），最后交给 `scheduling::peek` 按当前
+/// 调度模式算「下一个会先用谁」。转发层那条路不用本函数是因为它的候选来自
+/// `rotate::accounts_in_providers`（同样按 provider 收窄，但判据是
+/// `route_for_forward` 给出的家链，与这里的 `providers` 参数同源）。
 ///
-/// `counts` 的口径同样要对齐真实选路（并发过滤，见
-/// [`pick_account_by_priority`]）：★ 推算拿得到运行时计数就传（`/api/session`
-/// 从 `UpstreamService::connections()` 取），拿不到就传空表 = 并发不过滤 ——
-/// 宁可 ★ 少剔一个忙账号，也不要让整条推算在缺数据时静默失效。
-pub fn pick_for_model(
-    accounts: &[Value],
-    model: &str,
-    providers: &[&str],
-    counts: &HashMap<String, usize>,
-    now: i64,
-) -> Option<Value> {
-    let candidates: Vec<Value> = accounts
+/// `providers` 就是 `router::route_for_forward(model)` 的结果 —— 模型名
+/// 经它体现，本函数不再单独收一个 `model`（收了也只是重复解析一遍）。
+pub fn candidates_for_providers(accounts: &[Value], providers: &[&str]) -> Vec<Value> {
+    accounts
         .iter()
         .filter(|account| {
-            if !providers.is_empty() && !providers.iter().any(|known| *known == provider_of(account))
+            if !providers.is_empty()
+                && !providers.iter().any(|known| *known == provider_of(account))
             {
                 return false;
             }
             !matches!(account.get("hasCredentials"), Some(Value::Bool(false)))
         })
         .cloned()
-        .collect();
-    let keys = CooldownKeys::new(model);
-    pick_account_by_priority(&candidates, &keys, counts, &[], now)
+        .collect()
 }
 
 /// 账号记录上的 provider id（缺失按默认 provider 兜底，与 store 的
@@ -410,7 +415,7 @@ pub fn accounts_of(snapshot: &Value) -> Vec<Value> {
 
 /// 选路排序：优先级升序，同优先级按加入时间（复用 account-store 的规则实现，
 /// 保证「界面排序」与「转发顺序」永远同一套判据）。
-fn compare_by_priority(a: &Value, b: &Value) -> std::cmp::Ordering {
+pub fn compare_by_priority(a: &Value, b: &Value) -> std::cmp::Ordering {
     let key = |account: &Value| {
         (
             normalize_priority(account.get("priority"), crate::server::core::account_store::priority::DEFAULT_PRIORITY),

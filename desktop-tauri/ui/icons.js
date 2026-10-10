@@ -83,6 +83,11 @@
     // 更新：向下箭头 + 托盘（下载更新包）
     download: '<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
       + '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5M12 15V3"/></g>',
+    // 调度：分岔路径（一条线分成两支，代表「谁去发」的选择）—— 取 Lucide 的
+    // shuffle 意象，与上面九个同一套描边约定
+    shuffle: '<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
+      + '<path d="M16 3h5v5"/><path d="M4 20 21 3"/>'
+      + '<path d="M21 16v5h-5"/><path d="m15 15 6 6"/><path d="M4 4l5 5"/></g>',
 
     /**
      * 优先级控件的两枚箭头（账号表「↓ 数字 ↑」合并控件用）。
@@ -114,6 +119,18 @@
       + '<path d="M12 5v14"/><path d="m6 13 6 6 6-6"/></g>',
     arrowUp: '<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
       + '<path d="M12 19V5"/><path d="m6 11 6-6 6 6"/></g>',
+
+    /**
+     * 可折叠面板的展开箭头（设置页「Cline 伪装头」这类默认折叠的区块）。
+     *
+     * 只画「指向右」这一种形状：展开态由 CSS `rotate(90deg)` 得到向下的箭头，
+     * 两态共用同一枚图形，切换时是纯旋转、不换图标（与 eye / eyeOff 那种
+     * 「换图形」的切换相反 —— 那是两种语义，这是同一个控件的两个状态）。
+     * 粗细 1.8 与设置页那组描边图标同一套约定，显示 14px 时约 1.05px，
+     * 与 13.5px 的标题字重相称。
+     */
+    caretRight: '<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
+      + '<path d="m9 5 7 7-7 7"/></g>',
 
     /**
      * 账号名隐私开关的两枚眼睛（账号表「账号」表头的显隐按钮）。

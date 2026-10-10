@@ -232,6 +232,13 @@ pub struct ForwardRequest {
     /// 生产链路一律传 `false`；白名单为空（未限制）时本标记给不出候选链，
     /// 会走「没有可用的提供商」—— 唯一调用方恒带 `provider_only`，不会触发。
     pub ignore_model_gate: bool,
+    /// 本次请求的会话标识（trace / thread；提取链见 `core::session_sticky`）。
+    ///
+    /// 在**入口 handler** 提取一次（那里才有 headers 与下游原始 body），
+    /// 随请求带进转发层 —— 转发层不认识 HTTP，也不该为了取一个头把 body
+    /// 再解析一遍。两个字段都为空（绝大多数请求：客户端没带任何会话标识）
+    /// 时粘性完全不参与，选路与改造前逐字相同。
+    pub session_keys: crate::server::core::session_sticky::SessionKeys,
 }
 
 /// 转发结果：要么是可直接下发的流，要么是聚合好的 JSON
@@ -359,6 +366,8 @@ impl UpstreamService {
         // 钉住的账号与它同样处理：ownership 移出来、借给 context，
         // 于是 `request` 在下面不再被借用（理由同上一条）
         let pinned_account = request.pinned_account;
+        // 会话标识同样移出来借给 context（粘性选路每一轮都读它）
+        let session_keys = request.session_keys;
         let context = payload::ProviderContext {
             body: &upstream_body,
             stream: request.stream,
@@ -370,6 +379,7 @@ impl UpstreamService {
             pinned_account: pinned_account.as_deref(),
             // bool 是 Copy，直接读：不存在上面那两条的借用问题
             ignore_model_gate: request.ignore_model_gate,
+            session_keys: &session_keys,
         };
         provider_loop::forward_with_providers(self, context, &mut slot, &mut connections).await
     }

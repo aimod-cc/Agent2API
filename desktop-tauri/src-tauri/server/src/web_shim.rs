@@ -978,6 +978,9 @@ pub fn shim_js() -> &'static str {
     // ── 排队等待（次数 / 单次秒数）──
     getQueue: function () { return call('GET', '/api/queue'); },
     saveQueue: function (patch) { return call('PUT', '/api/queue', patch); },
+    // ── 账号调度与会话粘性（设置页「调度」分类）──
+    getSchedule: function () { return call('GET', '/api/schedule'); },
+    saveSchedule: function (patch) { return call('PUT', '/api/schedule', patch); },
 
     // ── 调试模式 ──
     getDebug: function () { return call('GET', '/api/debug'); },

@@ -482,6 +482,7 @@ async fn attempt_queue(
             &cooldown_keys,
             &tried_ids,
             ctx.pinned_account,
+            ctx.session_keys,
         )
         .await?;
         // 连接计数改绑到这一轮选中的账号：失败重试换账号时计数跟着走，
@@ -547,6 +548,7 @@ async fn attempt_queue(
                         &cooldown_keys,
                         &tried_ids,
                         ctx.pinned_account,
+                        ctx.session_keys,
                     ) {
                         Some(next) => {
                             // 换号额度用尽 → 队列里即使还有人也不再顺延
@@ -661,6 +663,7 @@ async fn attempt_queue(
                         &cooldown_keys,
                         &tried_ids,
                         ctx.pinned_account,
+                        ctx.session_keys,
                     ) {
                         Some(next) => {
                             // 换号额度用尽 → 队列里即使还有人也不再顺延
@@ -1103,6 +1106,7 @@ async fn attempt_queue(
                                 &cooldown_keys,
                                 &tried_ids,
                                 ctx.pinned_account,
+                                ctx.session_keys,
                             ) {
                                 Some(next) => {
                                     let next_label = account_display(&next);
@@ -1205,6 +1209,7 @@ async fn attempt_queue(
                         &cooldown_keys,
                         &tried_ids,
                         ctx.pinned_account,
+                        ctx.session_keys,
                     ) {
                         Some(next) => {
                             if !take_switch(&mut switches_left, switch_total) {

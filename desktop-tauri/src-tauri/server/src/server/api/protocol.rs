@@ -84,6 +84,10 @@ async fn forward_chat(
     dedupe_key: String,
     scope: Option<KeyScope>,
     telemetry: Arc<RequestTelemetry>,
+    // 会话标识（trace / thread）由调用方提取：`/v1/messages` 那条要从
+    // **翻译前**的原始体读 `metadata.user_id`（Claude Code），而本函数拿到的
+    // 已经是 Chat 形态的体（见 `session_keys_from` 的端点判定）
+    session_keys: crate::server::core::session_sticky::SessionKeys,
 ) -> Result<ForwardOutcome, GatewayError> {
     let outcome = state
         .upstream()
@@ -99,6 +103,7 @@ async fn forward_chat(
             // 关闭的模型对生产请求保持「模型已在网关中关闭」（`ignore_model_gate`
             // 是模型测试的直达跳，见 `ForwardRequest` 的说明）
             ignore_model_gate: false,
+            session_keys,
         })
         .await;
     outcome
@@ -204,6 +209,11 @@ pub async fn responses_endpoint(
         telemetry.set_cancel_token(token);
     }
     let mut guard = DisconnectGuard::new(state.request_stats(), telemetry_id.clone());
+    // 会话标识（trace / thread）：Responses 入口不读 body 里的会话字段
+    // （previous_response_id / conversation 是服务端状态语义，本网关直接 400，
+    // 见 `core::protocol::responses` 的模块头），只认头。
+    let session_keys =
+        crate::server::core::session_sticky::session_keys_from(&headers, path, None);
     let outcome = forward_chat(
         &state,
         chat_body,
@@ -212,6 +222,7 @@ pub async fn responses_endpoint(
         pipeline::sha256_hex(&body),
         scope,
         telemetry.clone(),
+        session_keys,
     )
     .await;
     let context = RecordContext {
@@ -378,6 +389,14 @@ pub async fn messages_endpoint(
         telemetry.set_cancel_token(token);
     }
     let mut guard = DisconnectGuard::new(state.request_stats(), telemetry_id.clone());
+    // 会话标识（trace / thread）：`/v1/messages` 是 Claude Code 的入口，
+    // 它的会话 id 在**翻译前**的原始体里（`metadata.user_id`），所以传 `raw`
+    // 而不是翻译后的 `chat_body`（后者已丢掉该字段）。
+    let session_keys = crate::server::core::session_sticky::session_keys_from(
+        &headers,
+        path,
+        Some(&raw),
+    );
     let outcome = forward_chat(
         &state,
         chat_body,
@@ -386,6 +405,7 @@ pub async fn messages_endpoint(
         pipeline::sha256_hex(&body),
         scope,
         telemetry.clone(),
+        session_keys,
     )
     .await;
     let context = RecordContext {

@@ -27,6 +27,7 @@ import {
   QUEUE_FIELDS,
   RETENTION_FIELDS,
   RETRY_FIELDS,
+  SCHEDULE_MODES,
   STATES,
   THEME_EVENT,
   THEME_MODES,
@@ -63,6 +64,7 @@ import {
   refreshRetention,
   refreshRetry,
   refreshSanitize,
+  refreshSchedule,
   refreshStorage,
   refreshTimeouts,
   removeProviderPrompt,
@@ -91,6 +93,8 @@ import {
   saveRetentionField,
   saveRetryField,
   saveSanitize,
+  saveScheduleMode,
+  saveSessionSticky,
   saveTimeoutField,
   saveToggle,
   selectCategory,
@@ -178,6 +182,21 @@ function iconHtml(name: string, size: number): string {
   return shared().wbIcons?.icon?.(name, size) || ''
 }
 
+/**
+ * 把文案里的 `**强调**` 渲染成 `<strong>`（其余部分原样文本）。
+ *
+ * 只服务调度对比表那三段说明：它们要在**页面上直接可见**地突出关键差异
+ * （「同一家」「全部」「不是家与家均分」），而其余提示文案都走纯文本。
+ * 用 `split` 而不是 `dangerouslySetInnerHTML`：文案来自 i18n 词典，
+ * 不该有 HTML 注入面；这样也顺带保证译文里的 `<` `&` 原样显示。
+ */
+function renderEmphasis(text: string): React.ReactNode[] {
+  return text.split(/\*\*(.+?)\*\*/g).map((part, index) =>
+    // split 带捕获组：偶数下标是普通文本、奇数下标是强调内容
+    index % 2 === 1 ? <strong key={index}>{part}</strong> : part,
+  )
+}
+
 /** 三态徽章：`.badge`（检测中…）/ `.badge.ok` / `.badge.bad` → Badge 的 variant */
 function StatusBadge({ tone, children }: { tone: 'idle' | 'ok' | 'bad'; children: React.ReactNode }) {
   const variant = tone === 'ok' ? 'success' : tone === 'bad' ? 'destructive' : 'outline'
@@ -201,6 +220,47 @@ function PanelHead({ title, tip, badge, actions }: PanelHeadProps) {
       {badge}
       {actions ? <div className='head-actions'>{actions}</div> : null}
     </div>
+  )
+}
+
+/**
+ * 可折叠面板：整块（标题栏 + 正文）收进 `<details>`，默认折叠。
+ *
+ * ── 为什么用原生 details/summary ─────────────────────────────
+ * 折叠是纯展示行为，原生元素自带键盘可达性（Enter/Space 切换）、
+ * 无脚本时也能用，且与请求日志页既有的 `.cv-details` 同一手法。
+ * 不引状态：`<details>` 自己记开合，React 只负责画一次。
+ *
+ * ── 折叠状态跨分类切换会保留 ─────────────────────────────────
+ * 九个分类的 pane 是常驻挂载、靠 CSS 显隐（见 `paneClass`），
+ * 所以 `<details>` 的开合态天然跟着组件存活 —— 切走再切回来还是
+ * 用户上次的选择，不需要额外持久化。
+ */
+function CollapsiblePanel({ title, tip, badge, actions, children }: PanelHeadProps & { children: React.ReactNode }) {
+  // `summary` 里的一切点击都会切换开合（原生行为），而标题栏里有两类**独立
+  // 动作**的控件：问号提示（点开 tooltip）与右侧操作按钮（如「刷新」）。
+  // 点它们不该顺手把面板折起来 —— 尤其是「展开 → 点问号看说明」这个动作，
+  // 正文会在眼前消失。
+  //
+  // 用 `preventDefault` 而不是 `stopPropagation`：开合是 click 的**默认动作**
+  // （由 `<details>` 在事件传播结束后执行），`stopPropagation` 拦不住它。
+  // 挂在 `summary` 上按目标判定，比给每个控件各包一层更不容易漏 —— 新增
+  // 标题栏控件时不必记得再加一次（上一版就漏了问号）。
+  function keepOpen(event: React.MouseEvent<HTMLElement>): void {
+    const target = event.target as HTMLElement
+    if (target.closest('.tip-q, .head-actions')) event.preventDefault()
+  }
+  return (
+    <details className='panel panel-fold'>
+      <summary className='panel-head' onClick={keepOpen}>
+        <span className='fold-caret' aria-hidden dangerouslySetInnerHTML={{ __html: iconHtml('caretRight', 14) }} />
+        <h2>{title}</h2>
+        {tip ? <span className='tip-q' data-tip={tip}></span> : null}
+        {badge}
+        {actions ? <div className='head-actions'>{actions}</div> : null}
+      </summary>
+      {children}
+    </details>
   )
 }
 
@@ -1157,6 +1217,137 @@ function RetryPane({ snap }: { snap: SettingsSnapshot }) {
   )
 }
 
+/* ─── 调度分类 ─────────────────────────────── */
+
+/**
+ * 调度面板：调度模式（下拉三选一）+ 会话粘性（开关）。
+ *
+ * ── 为什么两项合成一个面板而不是两块 ────────────────────────
+ * 它们共同回答「这次请求走谁」这一个问题，且**读写走同一个端点**
+ * （`/api/schedule`）：拆成两块会出现「读一次拿到两份值」被拆成两次 publish，
+ * 状态没有更清楚，只是多一层。两者都保存后立即生效（转发层每轮选路读快照）。
+ *
+ * 模式用 Select（与「语言设置」同款）而不是 SegmentedControl：选项文案较长
+ * （「同一提供商内轮询」等），分段按钮在窄面板里会挤成一团。
+ */
+function SchedulePane({ snap }: { snap: SettingsSnapshot }) {
+  const { status, mode } = snap.schedule
+  const busy = snap.busy === 'schedule'
+  // 读到后端值之前不许切（同「指纹脱敏」的理由：切了但不知道后端原本是什么，
+  // 回滚也没依据）
+  const locked = status !== 'ready' || busy
+  const current = SCHEDULE_MODES.find(item => item.value === mode) ?? SCHEDULE_MODES[0]
+  const stateText =
+    status === 'loading'
+      ? STATES.appLoading
+      : status === 'unavailable'
+        ? STATES.scheduleUnavailable
+        : mode === 'global'
+          ? STATES.scheduleGlobal
+          : mode === 'provider'
+            ? STATES.scheduleProvider
+            : STATES.schedulePriority
+  return (
+    <section className='panel'>
+      <PanelHead
+        title={t('账号调度')}
+        tip={TIPS.schedule}
+        badge={status === 'ready'
+          ? <StatusBadge tone='ok'>{t('已生效')}</StatusBadge>
+          : status === 'unavailable'
+            ? <StatusBadge tone='bad'>{t('不可用')}</StatusBadge>
+            : <StatusBadge tone='idle'>{t('检测中…')}</StatusBadge>}
+        actions={<RefreshButton id='btn-schedule-refresh' onClick={() => void refreshSchedule()} />}
+      />
+      <div className='panel-body'>
+        <div className='retention-list'>
+          <div className='retention-row'>
+            <label htmlFor='settings-schedule-mode'>{t('调度模式')}</label>
+            <span className='prompt-input'>
+              {/* 展示文案显式给 SelectValue，不依赖 value 自动显示（与「界面语言」同款）。
+                  onValueChange 可能给 null（被清空），只在拿到非空值时提交 */}
+              <Select
+                value={mode}
+                disabled={locked}
+                onValueChange={value => { if (value) void saveScheduleMode(String(value)) }}
+              >
+                <SelectTrigger id='settings-schedule-mode' className='w-[220px]' aria-label={t('调度模式')}>
+                  <SelectValue>{current.optionLabel}</SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {SCHEDULE_MODES.map(item => (
+                    <SelectItem key={item.value} value={item.value}>{item.optionLabel}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </span>
+          </div>
+        </div>
+        <div className='settings-state'>{stateText}</div>
+        {/* 三种模式的对比表：放在选择器下方、页面上直接可见 —— 用户不必逐个
+            切换去体会差别，也不必悬停问号读长文案。当前模式高亮（.active）。 */}
+        <div className='schedule-compare'>
+          {SCHEDULE_MODES.map(item => (
+            <div key={item.value} className={item.value === mode ? 'schedule-compare-row active' : 'schedule-compare-row'}>
+              <div className='schedule-compare-head'>
+                <span className='schedule-compare-name'>{item.optionLabel}</span>
+                <span className='schedule-compare-when'>{item.whenLabel}</span>
+              </div>
+              <div className='schedule-compare-detail'>{renderEmphasis(item.detail)}</div>
+            </div>
+          ))}
+        </div>
+        <div className='hint retention-note'>{NOTES.schedule}</div>
+      </div>
+    </section>
+  )
+}
+
+/**
+ * 会话粘性单独一块（虽然与调度同属一个端点 `snap.schedule`）：它的说明文案
+ * 很长，与调度模式挤在同一个面板里会让那一块读起来吃力。
+ *
+ * 两块**共用同一份状态与同一个刷新入口**（`SchedulePane` 标题栏那个「刷新」
+ * 读的就是 `snap.schedule`，两个字段一起回来），所以本块只给徽章、不再放
+ * 第二个刷新按钮 —— 两个按钮刷同一份数据只会让人以为它们各管一半。
+ */
+function StickyPane({ snap }: { snap: SettingsSnapshot }) {
+  const { status, sticky } = snap.schedule
+  const busy = snap.busy === 'schedule'
+  return (
+    <section className='panel'>
+      <PanelHead
+        title={t('会话粘性')}
+        tip={TIPS.sessionSticky}
+        badge={status === 'ready'
+          ? <StatusBadge tone='ok'>{t('已生效')}</StatusBadge>
+          : status === 'unavailable'
+            ? <StatusBadge tone='bad'>{t('不可用')}</StatusBadge>
+            : <StatusBadge tone='idle'>{t('检测中…')}</StatusBadge>}
+      />
+      <div className='panel-body'>
+        <div className='settings-switches'>
+          <SwitchRow
+            id='settings-session-sticky'
+            label={t('优先复用同一会话上次使用的账号（trace → thread → 正常顺序回退）')}
+            checked={sticky}
+            disabled={status !== 'ready' || busy}
+            onCheckedChange={next => void saveSessionSticky(next)}
+          />
+        </div>
+        <div className='settings-state'>
+          {status === 'loading'
+            ? STATES.appLoading
+            : status === 'unavailable'
+              ? STATES.scheduleUnavailable
+              : sticky ? STATES.stickyOn : STATES.stickyOff}
+        </div>
+        <div className='hint retention-note'>{NOTES.sessionSticky}</div>
+      </div>
+    </section>
+  )
+}
+
 /* ─── 网关分类 ─────────────────────────────── */
 
 function GatewayPane({ snap }: { snap: SettingsSnapshot }) {
@@ -1321,17 +1512,16 @@ function ClineHeadersPanel({ snap }: { snap: SettingsSnapshot }) {
   const dirty = ready && !sameOverrides(buildOverrides(), state.overrides)
 
   return (
-    <section className='panel'>
-      <PanelHead
-        title={t('Cline 伪装头')}
-        tip={TIPS.clineHeaders}
-        badge={state.status === 'ready'
-          ? <StatusBadge tone='ok'>{t('已生效')}</StatusBadge>
-          : state.status === 'unavailable'
-            ? <StatusBadge tone='bad'>{t('不可用')}</StatusBadge>
-            : <StatusBadge tone='idle'>{t('检测中…')}</StatusBadge>}
-        actions={<RefreshButton id='btn-cline-headers-refresh' onClick={() => void refreshClineHeaders()} />}
-      />
+    <CollapsiblePanel
+      title={t('Cline 伪装头')}
+      tip={TIPS.clineHeaders}
+      badge={state.status === 'ready'
+        ? <StatusBadge tone='ok'>{t('已生效')}</StatusBadge>
+        : state.status === 'unavailable'
+          ? <StatusBadge tone='bad'>{t('不可用')}</StatusBadge>
+          : <StatusBadge tone='idle'>{t('检测中…')}</StatusBadge>}
+      actions={<RefreshButton id='btn-cline-headers-refresh' onClick={() => void refreshClineHeaders()} />}
+    >
       <div className='panel-body'>
         <div className='retention-list'>
           {ready
@@ -1403,7 +1593,7 @@ function ClineHeadersPanel({ snap }: { snap: SettingsSnapshot }) {
         </div>
         <div className='hint retention-note'>{NOTES.clineHeaders}</div>
       </div>
-    </section>
+    </CollapsiblePanel>
   )
 }
 
@@ -1916,6 +2106,10 @@ function SettingsPage() {
         </div>
         <div className={paneClass('gateway')} data-cat='gateway'>
           <GatewayPane snap={snap} />
+        </div>
+        <div className={paneClass('schedule')} data-cat='schedule'>
+          <SchedulePane snap={snap} />
+          <StickyPane snap={snap} />
         </div>
         <div className={paneClass('retry')} data-cat='retry'>
           <RetryPane snap={snap} />

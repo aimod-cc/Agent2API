@@ -271,6 +271,13 @@ pub fn panel_router(state: ServerState) -> Router {
             "/api/queue",
             get(api::queue_api::get_queue).put(api::queue_api::put_queue),
         )
+        // 账号调度模式与会话粘性：GET 读、PUT（允许部分字段）更新。
+        // 与 /api/queue 同一模式、同一理由独立成端点：保存后对下一个请求
+        // 立即生效（转发层每轮选路读内存快照，不重启进程）。
+        .route(
+            "/api/schedule",
+            get(api::schedule_api::get_schedule).put(api::schedule_api::put_schedule),
+        )
         // ── 调试模式（设置页「通用 → 调试模式」）──
         // GET/PUT 开关；traffic 是按 id 取原始报文的详情端点（列表接口不返回
         // 报文，见 debug_api 的模块头）。挂 protected：报文含上游 URL 与请求体。

@@ -13,6 +13,7 @@
 //!                 GET/PUT /api/retention
 //!   retry_api.rs  GET/PUT /api/retry（请求重试设置，转发层退避的次数 / 间隔）
 //!   queue_api.rs  GET/PUT /api/queue（排队等待：次数与单次时长）
+//!   schedule_api.rs GET/PUT /api/schedule（账号调度模式 + 会话粘性）
 //!   accounts.rs   /api/accounts*（对照 workbuddy-account-routes.mjs）
 //!   proxies.rs    /api/proxies*（Clash 读取 + 出口测试）
 //!   billing.rs    积分 / 签到 / 运营活动（对照 workbuddy-billing.mjs + server.mjs 871-911 行）
@@ -81,6 +82,7 @@ pub mod qoder_umid;
 pub mod queue_api;
 pub mod retry_api;
 pub mod sanitize;
+pub mod schedule_api;
 pub mod scheduled_tasks;
 pub mod session;
 pub mod stats_api;

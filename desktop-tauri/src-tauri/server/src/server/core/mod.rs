@@ -18,6 +18,8 @@
 //!   prompt.rs            网关自有系统提示词（透传 / 替换 / 追加，照搬 workbuddy2api）
 //!   degrade.rs           内容拦截降级状态机（撞审核误报 → 中性提示词到次日 00:00）
 //!   routing.rs           账号选路（优先级 + 限额冷却）  （workbuddy-routing.mjs）
+//!   scheduling.rs        调度模式（严格优先级 / 全局轮询 / 同家轮询）的挑选顺序
+//!   session_sticky.rs    会话粘性（trace / thread → 账号的亲和记录）
 //!   upstream/            对话转发（选路/轮换/SSE/聚合） （workbuddy-upstream-client.mjs）
 //!   auto_checkin.rs      定时签到调度（轮询 + 补签）    （workbuddy-auto-checkin.mjs）
 //!   credential_maintenance.rs 凭证自动维护（遍历账号 → 刷新临期凭证；判定逻辑
@@ -80,9 +82,32 @@ pub mod proxy_pool;
 pub mod proxies;
 pub mod routing;
 pub mod sanitize;
+pub mod scheduling;
+pub mod session_sticky;
 pub mod scheduled_tasks;
 pub mod task_state;
 pub mod update;
 pub mod upstream;
 pub mod usage_query;
 pub mod usage_records;
+
+/// 进程级状态测试的**唯一**串行锁（仅测试构建可见）。
+///
+/// ── 为什么必须跨模块共用一把 ────────────────────────────────
+/// 本模块下有多张进程级表（`session_sticky` 的亲和记录、`scheduling` 的轮询
+/// 指针），而 cargo 默认并行跑测试。若各模块各持一把锁，A 模块用例里的
+/// `clear()` 会清掉 B 模块用例刚写进去的状态 —— 表现为随机失败，且失败集合
+/// 每次不同（最坏的情况：本地全绿、换台机器就红）。
+/// 共享一把之后，凡是动这些表的用例都串起来，结果与线程调度无关。
+///
+/// 用法（在每个 `#[test]` 首行）：
+/// ```ignore
+/// let _guard = crate::server::core::test_state_lock();
+/// ```
+#[cfg(test)]
+pub fn test_state_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}

@@ -119,9 +119,20 @@ pub async fn get_session(State(state): State<ServerState>) -> Response {
 ///    认领的那一家，见 `catalog::merged_items`），界面据此还原会漏掉并发提供
 ///    该模型的其它家。
 ///
-/// 直接复用转发层的 `routing::pick_for_model`，界面标 ★ 的账号便与转发会先试的
-/// 那个同判据；不做「取不到会话就继续往后找」那层运行时探测（要读客户端登录态
+/// 判据与转发层的选路**共用同一份实现**（`routing::is_usable` 的过滤 +
+/// `scheduling::peek` 的挑选顺序），界面标 ★ 的账号便与转发会先试的那个
+/// 同判据；不做「取不到会话就继续往后找」那层运行时探测（要读客户端登录态
 /// 文件，属转发编排的职责），改用 `hasCredentials` 这个静态事实近似。
+///
+/// ── 轮询模式（本次新增）─────────────────────────────────────
+/// `provider` / `global` 两种模式下，「下一个会先用谁」由轮询环决定 ——
+/// 这里用 `scheduling::peek`（**只读预览，不推进指针**）：若调 `pick`，
+/// 打开一次账号页就会把环拨一格，★ 与实际选路永远差一位，刷新页面甚至
+/// 会改变转发行为（界面每秒轮询一次）。
+///
+/// 粘性不参与 ★ 的推算：粘性命中的前提是「这个会话之前用过某账号」，
+/// 而 `/api/session` 是面板自己的请求，没有会话标识 —— 粘性对面板视角
+/// 无从谈起，★ 回答的是「不带会话标识的新请求会先用谁」。
 ///
 /// 模型未知 / 该模型下确实没有可用账号时给 null —— 界面回落到
 /// `currentAccountId`，宁可让它标一个「队列第一位」，也不要整列 ★ 凭空消失。
@@ -130,8 +141,8 @@ fn routed_account_id(accounts: &Value, model: Option<&str>, counts: &HashMap<Str
         return Value::Null;
     };
     // 候选链是 id 空间（内置家 + 自定义家同列，见 `router` 的模块头）；
-    // 自定义家的账号同样在全局队列里，`pick_for_model` 按 provider 字符串
-    // 过滤候选，两种 id 天然可比。
+    // 自定义家的账号同样在全局队列里，下面的 provider 过滤按字符串比对，
+    // 两种 id 天然可比。
     let provider_chain = router::route_for_forward(model);
     let providers: Vec<&str> = provider_chain.iter().map(String::as_str).collect();
     // 被限制器软跳过的账号先剔除（余额不足 / Token 限额，与转发选路同一判据，
@@ -140,19 +151,22 @@ fn routed_account_id(accounts: &Value, model: Option<&str>, counts: &HashMap<Str
     let facts = crate::server::core::usage_records::balance_facts();
     let token_facts = crate::server::core::limiter::token_facts();
     let now = crate::server::logging::now_ms();
-    let candidate_accounts: Vec<Value> = routing::accounts_of(accounts)
-        .into_iter()
-        .filter(|account| {
-            !crate::server::core::usage_records::balance_blocked(account, &facts)
-                && !crate::server::core::limiter::token_skip_blocked(account, &token_facts, now)
-        })
-        .collect();
-    routing::pick_for_model(
+    let candidate_accounts: Vec<Value> =
+        routing::candidates_for_providers(&routing::accounts_of(accounts), &providers)
+            .into_iter()
+            .filter(|account| {
+                !crate::server::core::usage_records::balance_blocked(account, &facts)
+                    && !crate::server::core::limiter::token_skip_blocked(account, &token_facts, now)
+            })
+            .collect();
+    let keys = routing::CooldownKeys::new(model);
+    crate::server::core::scheduling::peek(
+        config::schedule_settings().mode,
         &candidate_accounts,
-        model,
-        &providers,
+        &keys,
         counts,
-        logging::now_ms(),
+        &[],
+        now,
     )
     .and_then(|account| routing::account_id(&account).map(str::to_string))
     .map(Value::String)

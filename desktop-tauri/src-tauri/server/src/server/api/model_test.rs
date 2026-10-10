@@ -329,6 +329,9 @@ async fn run_forward(
         // 候选直接取上面钉住的那一家，生产的「模型已在网关中关闭」门禁不适用于
         // 测试（取舍见 `ForwardRequest::ignore_model_gate`）。
         ignore_model_gate: true,
+        // 模型测试与会话无关：空标识 = 粘性完全不参与（且测试本来就钉死了
+        // 账号，选路对它没有自由度 —— 见 `pinned_account`）
+        session_keys: Default::default(),
     });
     // 总预算套在整段转发之外（含流式聚合）：测试是一次弹窗等待，必须有上界，
     // 否则一个卡住的上游会让弹窗一直转圈（见 TEST_TIMEOUT）

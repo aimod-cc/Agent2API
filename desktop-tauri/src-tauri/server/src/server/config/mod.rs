@@ -110,6 +110,12 @@ pub struct RuntimeConfig {
     /// 与 timeouts 同一理由：走排队制的适配器**每次遇到排队**都要取它
     /// （改完设置下一个请求就用新值，不重启进程），解析一次存下来最省事。
     queue: QueueSettings,
+    /// 账号调度模式与会话粘性（设置页「调度」分类）。
+    ///
+    /// 与 retry 同一理由：转发层**每一轮选路**都要取它（改完设置下一个请求
+    /// 就用新值，不重启进程），解析一次存下来最省事 —— 这条判定在转发
+    /// 热路径上（每轮账号尝试读一次）。
+    schedule: ScheduleSettings,
     /// 事件日志的保存目录（原始配置值；None = 未设置，用配置目录）。
     /// 低频字段（启动 + 设置页读写），不值得为它发明解析层，存原始值即可。
     log_dir: Option<String>,
@@ -400,6 +406,7 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
     let retry = retry_from(&raw);
     let timeouts = timeouts_from(&raw);
     let queue = queue_from(&raw);
+    let schedule = schedule_from(&raw);
     RuntimeConfig {
         // 文件里有就用文件的，否则环境变量兜底（对应 `if (config.apiKey && !opts.apiKey)`）
         api_key: string_field(&raw, "apiKey").or_else(env_api_key),
@@ -413,6 +420,7 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
         retry,
         timeouts,
         queue,
+        schedule,
         log_dir: string_field(&raw, KEY_LOG_DIR),
         request_stats_dir: string_field(&raw, KEY_REQUEST_STATS_DIR),
         debug_dir: string_field(&raw, KEY_DEBUG_DIR),
@@ -1252,6 +1260,47 @@ pub fn set_queue(patch: QueuePatch) -> bool {
             next.wait_seconds = seconds;
         }
         config.queue = next;
+    })
+}
+
+// ─── 账号调度与会话粘性（scheduleMode / sessionSticky）──────────
+
+/// 当前调度设置（转发层每轮选路读一次）。
+///
+/// 与 [`retry_settings`] 同一模式：轻量读取，不克隆整份 `raw`。
+/// 未初始化（理论上只有启动极早期）时给默认值（严格优先级 + 粘性关）——
+/// 那正是「与改造前逐字相同」的那一侧，任何初始化顺序都不会让选路行为漂移。
+pub fn schedule_settings() -> ScheduleSettings {
+    if let Ok(guard) = CONFIG.read() {
+        if let Some(config) = guard.as_ref() {
+            return config.schedule;
+        }
+    }
+    ScheduleSettings::default()
+}
+
+/// 更新调度设置（`None` = 该项不动），返回是否写盘成功。
+///
+/// 调用方（`schedule_api::put_schedule`）**必须先校验取值**：本函数按
+/// 「已合法」处理。与 `set_queue` 同一模式：内存快照与 raw 底稿一起改 ——
+/// 前者让下一个请求立刻用新值（转发层每轮选路读快照），后者保证写盘时
+/// 不吃掉配置库里的其它字段。
+pub fn set_schedule(patch: SchedulePatch) -> bool {
+    update(|config| {
+        let mut next = config.schedule;
+        if let Some(mode) = patch.mode {
+            config
+                .raw
+                .insert(KEY_SCHEDULE_MODE.to_string(), Value::from(mode.as_str()));
+            next.mode = mode;
+        }
+        if let Some(sticky) = patch.sticky {
+            config
+                .raw
+                .insert(KEY_SESSION_STICKY.to_string(), Value::Bool(sticky));
+            next.sticky = sticky;
+        }
+        config.schedule = next;
     })
 }
 
