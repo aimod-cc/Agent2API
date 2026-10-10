@@ -182,21 +182,6 @@ function iconHtml(name: string, size: number): string {
   return shared().wbIcons?.icon?.(name, size) || ''
 }
 
-/**
- * 把文案里的 `**强调**` 渲染成 `<strong>`（其余部分原样文本）。
- *
- * 只服务调度对比表那三段说明：它们要在**页面上直接可见**地突出关键差异
- * （「同一家」「全部」「不是家与家均分」），而其余提示文案都走纯文本。
- * 用 `split` 而不是 `dangerouslySetInnerHTML`：文案来自 i18n 词典，
- * 不该有 HTML 注入面；这样也顺带保证译文里的 `<` `&` 原样显示。
- */
-function renderEmphasis(text: string): React.ReactNode[] {
-  return text.split(/\*\*(.+?)\*\*/g).map((part, index) =>
-    // split 带捕获组：偶数下标是普通文本、奇数下标是强调内容
-    index % 2 === 1 ? <strong key={index}>{part}</strong> : part,
-  )
-}
-
 /** 三态徽章：`.badge`（检测中…）/ `.badge.ok` / `.badge.bad` → Badge 的 variant */
 function StatusBadge({ tone, children }: { tone: 'idle' | 'ok' | 'bad'; children: React.ReactNode }) {
   const variant = tone === 'ok' ? 'success' : tone === 'bad' ? 'destructive' : 'outline'
@@ -1284,16 +1269,13 @@ function SchedulePane({ snap }: { snap: SettingsSnapshot }) {
           </div>
         </div>
         <div className='settings-state'>{stateText}</div>
-        {/* 三种模式的对比表：放在选择器下方、页面上直接可见 —— 用户不必逐个
-            切换去体会差别，也不必悬停问号读长文案。当前模式高亮（.active）。 */}
-        <div className='schedule-compare'>
+        {/* 三种模式各一行小字：页面上直接可见，不必逐个切换去体会差别，
+            也不必悬停问号读长文案。当前模式那行高亮（.active）。 */}
+        <div className='schedule-modes'>
           {SCHEDULE_MODES.map(item => (
-            <div key={item.value} className={item.value === mode ? 'schedule-compare-row active' : 'schedule-compare-row'}>
-              <div className='schedule-compare-head'>
-                <span className='schedule-compare-name'>{item.optionLabel}</span>
-                <span className='schedule-compare-when'>{item.whenLabel}</span>
-              </div>
-              <div className='schedule-compare-detail'>{renderEmphasis(item.detail)}</div>
+            <div key={item.value} className={item.value === mode ? 'schedule-mode-row active' : 'schedule-mode-row'}>
+              <span className='schedule-mode-name'>{item.optionLabel}</span>
+              <span className='schedule-mode-when'>{item.whenLabel}</span>
             </div>
           ))}
         </div>

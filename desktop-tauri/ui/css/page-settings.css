@@ -493,70 +493,50 @@
   .retention-row { grid-template-columns: max-content 1fr; }
 }
 
-/* ─── 调度模式对比表（「账号调度」面板）───
-   三行并排，当前生效的那一行高亮。放在选择器下方、页面上直接可见 ——
-   用户不必逐个切换去体会差别，也不必悬停问号读长文案。
 
-   ── 为什么不用表格（table）──────────────────────────────
-   每行是「名称 + 一句话」的标题行 + 一整段说明，本质是**卡片列表**而不是
-   行列对齐的数据（说明文字长度差异大，表格列宽会被最长的那段撑开、
-   窄面板下反而难读）。用 div 列表 + 左侧色条表达「当前选中」。 */
-.schedule-compare {
+/* ─── 调度模式清单（「账号调度」面板）───
+   三行小字：模式名 + 一句话说明，当前生效的那行高亮。放在选择器下方、
+   页面上直接可见 —— 用户不必逐个切换去体会差别，也不必悬停问号读长文案。
+
+   ── 为什么是「一行一条」而不是卡片（本版改）──────────────
+   初版给每条配了一整段 70 字左右的说明，三行加起来两百多字，把面板撑得很长
+   而信息密度很低（用户选完模式后那三段就再也不会读了）。改成一行一条：
+   模式名（常规字重）+ 说明（次要色小字），只保留「怎么选」这一层，
+   想看细节的去悬停标题旁的问号（那里有完整口径）。 */
+.schedule-modes {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 2px;
 }
 
-.schedule-compare-row {
-  padding: 8px 11px;
-  border: 1px solid var(--border);
-  /* 左侧留出 3px 色条位：未选中透明，选中变主题色 —— 只换颜色不换尺寸，
+.schedule-mode-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 9px;
+  /* 左侧 2px 色条位：未选中透明，选中变主题色 —— 只换颜色不换尺寸，
      行与行之间不会因为选中而错位。 */
-  border-left: 3px solid transparent;
-  border-radius: var(--r-sm);
-  background: var(--surface-2);
+  border-left: 2px solid transparent;
+  border-radius: var(--r-xs);
+  font-size: 11.5px;
+  line-height: 1.6;
 }
 
-/* 当前生效：品牌浅底 + 左侧色条，与左栏分类选中项同一口径
-   （那里的字色用 `--primary-fg` 而不是 `--primary`：浅色主题下后者
-   对白底对比度偏低，字发飘）。 */
-.schedule-compare-row.active {
-  border-color: var(--primary-bd);
+.schedule-mode-name {
+  flex: 0 0 auto;
+  color: var(--text-2);
+}
+
+.schedule-mode-when {
+  color: var(--text-3);
+}
+
+/* 当前生效：左侧色条 + 品牌浅底 + 主题色字，与左栏分类选中项同一口径
+   （字色用 `--primary-fg` 而不是 `--primary`：浅色主题下后者对比度偏低）。 */
+.schedule-mode-row.active {
   border-left-color: var(--primary);
   background: var(--primary-soft);
 }
 
-.schedule-compare-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 3px;
-}
-
-.schedule-compare-name {
-  color: var(--text);
-  font-size: 12.5px;
-  font-weight: 600;
-}
-
-.schedule-compare-when {
-  color: var(--text-3);
-  font-size: 11.5px;
-}
-
-/* 当前生效那行：名称与「一句话」都转主题色，与未选中的拉开层次 */
-.schedule-compare-row.active .schedule-compare-name,
-.schedule-compare-row.active .schedule-compare-when { color: var(--primary-fg); }
-
-.schedule-compare-detail {
-  color: var(--text-2);
-  font-size: 11.5px;
-  line-height: 1.65;
-  word-break: break-word;
-}
-
-.schedule-compare-detail strong {
-  color: var(--text);
-  font-weight: 600;
-}
+.schedule-mode-row.active .schedule-mode-name,
+.schedule-mode-row.active .schedule-mode-when { color: var(--primary-fg); }

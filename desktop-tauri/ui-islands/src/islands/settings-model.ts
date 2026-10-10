@@ -498,10 +498,8 @@ export type ScheduleModeOption = {
   value: string
   optionLabel: string
   toastLabel: string
-  /** 对比表左列：这个模式「一句话怎么选」（页面上直接可见，不用悬停问号） */
+  /** 模式清单里的小字说明（页面上直接可见，不用悬停问号） */
   whenLabel: string
-  /** 对比表右列：完整说明（保留 `**加粗**` 记号，渲染时转 <strong>） */
-  detail: string
 }
 
 export const SCHEDULE_MODES: ScheduleModeOption[] = [
@@ -509,23 +507,20 @@ export const SCHEDULE_MODES: ScheduleModeOption[] = [
     value: 'priority',
     optionLabel: t('严格优先级（默认）'),
     toastLabel: t('严格优先级'),
-    // 对比表用（页面上直接可见，见 SchedulePane 的 SCHEDULE_COMPARE）
-    whenLabel: t('队首可用就一直用它'),
-    detail: t('优先级最小的账号承担全部请求，只有它不可用（禁用 / 限流 / 满并发 / 余额不足）才换下一个。负载集中在队首，适合「用一个、坏了换下一个」的免费池用法。'),
+    // 页面上直接可见的一句话（见 SchedulePane 的模式清单）
+    whenLabel: t('一直用优先级最高的账号，直到它不可用'),
   },
   {
     value: 'provider',
     optionLabel: t('同一提供商内轮询'),
     toastLabel: t('同一提供商内轮询'),
-    whenLabel: t('先定一家，家内轮流用'),
-    detail: t('家与家之间仍严格按优先级（一家可用就不会用到别家），只把**同一家**的多个账号依次轮转。适合一家囤了多个号、不想死磕队首的场景。'),
+    whenLabel: t('家之间按优先级，只在家内轮流用各账号'),
   },
   {
     value: 'global',
     optionLabel: t('全部账号轮询'),
     toastLabel: t('全部账号轮询'),
-    whenLabel: t('所有账号排一条环'),
-    detail: t('提供当前模型的**全部**账号按优先级排成一条环，逐次轮转（账号多的家天然分到更多请求 —— 环上每有一个号就占一份，不是「家与家均分」）。'),
+    whenLabel: t('全部账号排成一条环依次轮转'),
   },
 ]
 
