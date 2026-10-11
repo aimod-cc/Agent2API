@@ -9,9 +9,12 @@
 //! ── 标识从哪来（提取链照抄 AxonHub，顺序即优先级）───────────────
 //!   1. 头 `AH-Trace-Id`（AxonHub 的约定，从它迁来的客户端直接可用）
 //!   2. OpenCode 系头：`X-Opencode-Session` → `X-Session-Id` → `X-Session-Affinity`
-//!   3. Claude Code：`POST /v1/messages` 时解析 body 的 `metadata.user_id`
+//!   3. OpenAI Chat 请求体的 `prompt_cache_key`（`POST /v1/chat/completions`）
+//!      —— **经翻译网关接入时唯一能拿到的那条**（AxonHub 把会话 id 写进
+//!      body 而不带头，见 [`trace_from`] 第 ③ 步）
+//!   4. Claude Code：`POST /v1/messages` 时解析 body 的 `metadata.user_id`
 //!      （v2 JSON 与 legacy 两种格式，见 [`parse_claude_code_user_id`]）
-//!   4. Codex：头 `Session_id` / `Session-Id`，或头 `X-Codex-Turn-Metadata`
+//!   5. Codex：头 `Session_id` / `Session-Id`，或头 `X-Codex-Turn-Metadata`
 //!      里的 `session_id` 字段
 //!   thread 单独一条：头 `AH-Thread-Id`（无 body 回退，与 AxonHub 相同）。
 //!
@@ -79,12 +82,14 @@ impl SessionKeys {
     }
 }
 
-/// 从入站请求头提取会话标识。
+/// 从入站请求头与请求体提取会话标识。
 ///
-/// `path` 用于 Claude Code 那条的端点判定：`metadata.user_id` 只在
+/// `path` 用于两条 body 回退的端点判定：`prompt_cache_key` 只在
+/// `POST /v1/chat/completions` 上解析，`metadata.user_id` 只在
 /// `POST /v1/messages` 上解析（AxonHub 同款收窄）—— 其它协议的 body 里
 /// 出现同名键是巧合，拿它当会话 id 会把不相干的请求粘到一起。
-/// `body` 是**下游原始请求体**（翻译前），Claude Code 读的是它自己的字段。
+/// `body` 是**下游原始请求体**（翻译前）：Claude Code 的 `metadata.user_id`
+/// 在翻译前的原始体里，`prompt_cache_key` 则在 Chat 形态的体里。
 pub fn session_keys_from(headers: &HeaderMap, path: &str, body: Option<&Value>) -> SessionKeys {
     SessionKeys {
         trace: trace_from(headers, path, body),
@@ -106,7 +111,35 @@ fn trace_from(headers: &HeaderMap, path: &str, body: Option<&Value>) -> String {
             return value;
         }
     }
-    // ③ Claude Code：只认 messages 端点的 metadata.user_id。
+    // ③ OpenAI Chat 的 prompt_cache_key：**翻译网关这条路唯一的会话标识**。
+    //
+    // 典型场景：客户端 → AxonHub（Anthropic 入口，:3016/anthropic）→ 翻译成
+    // Chat 格式 → 本网关 `/v1/chat/completions`。AxonHub 出站时只发
+    // Content-Type / Accept 两个头（`llm/transformer/openai/outbound.go`），
+    // 会话 id 它写进 **body 的 `prompt_cache_key`**
+    // （`llm/transformer/openai/outbound_convert.go`：把 `shared.GetSessionID`
+    // 的值填进 `req.PromptCacheKey`）。上面两条全落空时读它，粘性才接得上。
+    //
+    // 值取**纯字符串**、非空即用：`prompt_cache_key` 本就是「缓存命名空间」
+    // 语义（同一会话稳定复用），拿它当会话标识与该字段的用途一致；AxonHub
+    // 填的也正是会话 id。这里不做格式校验（不像 `metadata.user_id` 有
+    // v2/legacy 两套可辨认的形状）—— 它没有历史包袱，任何非空值都是调用方
+    // 自己给的稳定键。
+    //
+    // 端点判定用精确相等，与下面 Claude Code 那条同一理由：Chat 入口是
+    // `/v1/chat/completions` 一个点，`/v1/responses` 等其它协议即便 body 里
+    // 出现同名键也不是同一套语义。
+    if path == "/v1/chat/completions" {
+        if let Some(session) = body
+            .and_then(|body| body.get("prompt_cache_key"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return session.to_string();
+        }
+    }
+    // ④ Claude Code：只认 messages 端点的 metadata.user_id。
     // 用**精确相等**而不是 `ends_with`：当前路由表里只有 `/v1/messages`
     // 这一个（`/v1/messages/count_tokens` 是另一个端点，本就不该读 body），
     // 后缀匹配在将来出现 `/proxy/v1/messages` 之类的挂载路径时会误命中。
@@ -120,7 +153,7 @@ fn trace_from(headers: &HeaderMap, path: &str, body: Option<&Value>) -> String {
             return session;
         }
     }
-    // ④ Codex：会话头，或 turn metadata 里的 session_id
+    // ⑤ Codex：会话头，或 turn metadata 里的 session_id
     for name in ["session_id", "session-id"] {
         let value = header_text(headers, name);
         if !value.is_empty() {
@@ -370,6 +403,46 @@ mod tests {
             Some("550e8400-e29b-41d4-a716-446655440000")
         );
         assert_eq!(parse_claude_code_user_id("nonsense"), None);
+    }
+
+    #[test]
+    fn prompt_cache_key_only_on_chat_endpoint() {
+        let _guard = test_lock();
+        let body: Value = serde_json::json!({ "prompt_cache_key": "PC1" });
+        let on_chat =
+            session_keys_from(&HeaderMap::new(), "/v1/chat/completions", Some(&body));
+        assert_eq!(on_chat.trace, "PC1");
+        // 与 metadata.user_id 同款收窄：别的端点不读这个键
+        let on_messages = session_keys_from(&HeaderMap::new(), "/v1/messages", Some(&body));
+        assert!(on_messages.trace.is_empty(), "messages 端点不解析 prompt_cache_key");
+        let on_responses = session_keys_from(&HeaderMap::new(), "/v1/responses", Some(&body));
+        assert!(on_responses.trace.is_empty(), "responses 端点不解析 prompt_cache_key");
+    }
+
+    #[test]
+    fn prompt_cache_key_ignores_empty_and_non_string() {
+        let _guard = test_lock();
+        for body in [
+            serde_json::json!({ "prompt_cache_key": "" }),
+            serde_json::json!({ "prompt_cache_key": "   " }),
+            serde_json::json!({ "prompt_cache_key": 42 }),
+            serde_json::json!({}),
+        ] {
+            let keys = session_keys_from(&HeaderMap::new(), "/v1/chat/completions", Some(&body));
+            assert!(keys.trace.is_empty(), "只认非空字符串：{body}");
+        }
+    }
+
+    #[test]
+    fn header_beats_prompt_cache_key() {
+        let _guard = test_lock();
+        let body: Value = serde_json::json!({ "prompt_cache_key": "PC" });
+        let keys = session_keys_from(
+            &headers(&[("ah-trace-id", "H")]),
+            "/v1/chat/completions",
+            Some(&body),
+        );
+        assert_eq!(keys.trace, "H", "头优先于 body 回退");
     }
 
     #[test]
