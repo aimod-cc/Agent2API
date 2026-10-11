@@ -45,15 +45,25 @@
     || typeof bridge.windowToggleMaximize !== 'function'
     || typeof bridge.windowClose !== 'function') return;
 
-  // 三键图标：24×24 画布 + stroke 1.8 的内联 SVG，与 icons.js 的
+  // 三键图标：Windows / Linux 用 24×24 画布 + stroke 1.8 的内联 SVG，与 icons.js 的
   // arrowUp/arrowDown 同一风格（不用字体字形：不同机器基线与粗细不可控）。
   // 还原图标是两块错开的方框，「前块」填标题栏底色遮住后块的相交线
   // （.ico-restore .fg 的 fill 由 CSS 变量下发，深浅主题各自正确）。
+  // macOS 用 12×12 画布的红绿灯内部符号（× / − / 对角缩放三角），平时透明、
+  // 鼠标悬停在三键组上时整组浮现（见 layout.css 的 .titlebar.is-macos）。
+  const isMac = bridge.platform === 'macos';
   const stroke = 'fill="none" stroke="currentColor" stroke-width="1.8"'
     + ' stroke-linecap="round" stroke-linejoin="round"';
   const svg = inner =>
     `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false">${inner}</svg>`;
-  const ICONS = {
+  const macSvg = inner =>
+    `<svg viewBox="0 0 12 12" width="8" height="8" aria-hidden="true" focusable="false">${inner}</svg>`;
+  const ICONS = isMac ? {
+    minimize: macSvg('<path d="M2.5 6h7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>'),
+    maximize: macSvg('<path d="M3 9V4.6L7.4 9H3zM9 3v4.4L4.6 3H9z" fill="currentColor"/>'),
+    restore: macSvg('<path d="M3 9V4.6L7.4 9H3zM9 3v4.4L4.6 3H9z" fill="currentColor"/>'),
+    close: macSvg('<path d="M3.2 3.2l5.6 5.6M8.8 3.2L3.2 8.8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>'),
+  } : {
     minimize: svg(`<g ${stroke}><path d="M5 12h14"/></g>`),
     maximize: svg(`<g ${stroke}><rect x="5.5" y="5.5" width="13" height="13" rx="1.5"/></g>`),
     restore: svg(`<g ${stroke}><rect x="8.5" y="4.5" width="11" height="11" rx="1.5"/>`
@@ -63,11 +73,11 @@
 
   // ── 组装 DOM：header 挂在 body 最顶部，sidebar / main 之外整宽一条 ──
   const bar = document.createElement('header');
-  bar.className = 'titlebar';
+  bar.className = isMac ? 'titlebar is-macos' : 'titlebar';
   // 拖动与双击最大化：Tauri 2 内建支持，声明属性即可（见文件头说明）
   bar.setAttribute('data-tauri-drag-region', '');
 
-  // 左侧品牌区（图标复用 icons.js 的 brand，与侧栏品牌区 / 应用图标同一造型）。
+  // 品牌区（图标复用 icons.js 的 brand，与侧栏品牌区 / 应用图标同一造型）。
   // 文案取自桥接层注入的 title —— 与窗口标题、托盘提示同一份（开发版带
   // "Dev" 标记，两个实例同时跑时一眼能分清）；旧壳没注入时回落到发布版文案。
   const appTitle = bridge.title || wbI18n.t('Agent2API · 多提供商本地网关');
@@ -76,12 +86,12 @@
   brand.innerHTML =
     (window.wbIcons ? wbIcons.icon('brand', 16) : '')
     + `<span class="txt">${appTitle}</span>`;
-  bar.appendChild(brand);
   // document.title 也跟上（窗口标题由壳设置，这条只影响网页语义：
   // 任务栏悬停预览、无障碍，以及将来可能有的网页版）
   document.title = appTitle;
 
-  // 右侧三键（普通 button，不带拖动属性：Tauri 只认带属性的元素）
+  // 窗口三键（普通 button，不带拖动属性：Tauri 只认带属性的元素）。
+  // macOS 红绿灯居左且顺序为「关闭 / 最小化 / 最大化」；Windows / Linux 居右且为「最小化 / 最大化 / 关闭」。
   const actions = document.createElement('div');
   actions.className = 'titlebar-actions';
   const makeBtn = (cls, label) => {
@@ -97,8 +107,13 @@
   const maxBtn = makeBtn('max', wbI18n.t('最大化'));
   const closeBtn = makeBtn('close', wbI18n.t('关闭'));
   closeBtn.innerHTML = ICONS.close;
-  actions.append(minBtn, maxBtn, closeBtn);
-  bar.appendChild(actions);
+  if (isMac) {
+    actions.append(closeBtn, minBtn, maxBtn);
+    bar.append(actions, brand);
+  } else {
+    actions.append(minBtn, maxBtn, closeBtn);
+    bar.append(brand, actions);
+  }
 
   document.body.insertBefore(bar, document.body.firstChild);
   // 布局随标题栏让位（.shell 高度少一行，见 layout.css）

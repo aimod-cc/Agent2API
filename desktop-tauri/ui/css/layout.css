@@ -116,6 +116,69 @@ body.has-titlebar .shell {
 .titlebar-btn.is-maximized:hover .fg { fill: var(--nav-hover); }
 .titlebar-btn svg { display: block; width: 14px; height: 14px; pointer-events: none; }
 
+/* macOS 红绿灯样式（platform === 'macos' 时由 titlebar.js 挂 .is-macos）：
+   左侧红（关闭）/ 黄（最小化）/ 绿（最大化与还原）三颗 12px 圆点，
+   平时纯色圆点，鼠标悬停在三键组上时整组浮现内部符号。 */
+.titlebar.is-macos {
+  padding-left: 14px;
+  padding-right: 14px;
+  gap: 12px;
+}
+
+.titlebar.is-macos .titlebar-actions {
+  margin-left: 0;
+  align-self: center;
+  align-items: center;
+  gap: 8px;
+}
+
+.titlebar.is-macos .titlebar-btn {
+  width: 12px;
+  min-width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  border-radius: 50%;
+  border: 0.5px solid rgba(0, 0, 0, 0.15);
+  box-sizing: border-box;
+  transition: filter .1s ease;
+}
+
+.titlebar.is-macos .titlebar-btn.close,
+.titlebar.is-macos .titlebar-btn.close:hover:not(:disabled) {
+  background: #ff5f57;
+  border-color: #e0443e;
+  color: #4d0000;
+}
+
+.titlebar.is-macos .titlebar-btn.min,
+.titlebar.is-macos .titlebar-btn.min:hover:not(:disabled) {
+  background: #febc2e;
+  border-color: #dea123;
+  color: #995700;
+}
+
+.titlebar.is-macos .titlebar-btn.max,
+.titlebar.is-macos .titlebar-btn.max:hover:not(:disabled) {
+  background: #28c840;
+  border-color: #1aab29;
+  color: #006500;
+}
+
+.titlebar.is-macos .titlebar-btn:active:not(:disabled) {
+  filter: brightness(0.82);
+}
+
+.titlebar.is-macos .titlebar-btn svg {
+  width: 8px;
+  height: 8px;
+  opacity: 0;
+  transition: opacity .1s ease;
+}
+
+.titlebar.is-macos .titlebar-actions:hover .titlebar-btn svg {
+  opacity: 1;
+}
+
 /* 窄窗口：文案可能挤到三键，只留品牌图标（与侧栏 900px 收起文字同档） */
 @media (max-width: 900px) {
   .titlebar { padding-left: 10px; }
