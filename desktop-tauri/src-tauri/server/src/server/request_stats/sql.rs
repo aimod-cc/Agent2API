@@ -648,7 +648,6 @@ pub(super) fn update_running_request(
             // 无进行中行时的兜底之外的主路径，写一次保证两条插入路径口径一致
             entry.is_test as i64,
             encode_optional_json(&entry.route),
-            encode_optional_json(&entry.route),
         ],
     )
 }
@@ -692,6 +691,7 @@ pub(super) fn insert_request(conn: &Connection, entry: &RequestEntry) -> rusqlit
             entry.client_reasoning,
             entry.upstream_reasoning,
             entry.is_test as i64,
+            encode_optional_json(&entry.route),
         ],
     )?;
     Ok(())
