@@ -95,11 +95,28 @@ pub const DEFAULT_TIME: &str = "00:01";
 ///     `freepoint/taskComplete`，见 `providers::kuku::checkin`）。接口幂等，
 ///     重复领取只返回 reward_point=0；业务会话由换发的 genflowpro STOKEN
 ///     保障（`kuku::engine`）。
+///   - **CodeArts**（2026-10-12 接入）：**没有签到接口**，这一家的"每日额度"是
+///     ops 活动领取（`GET /v1/ops/delivery` → claim → confirm → 回读活动列表二次
+///     确认，见 `providers::codearts::welfare`）。执行体早就参数化好了
+///     （`Rewards::{DailyLogin, NewbieGift}`），本链只喂 `DailyLogin`。三条必须
+///     记住的约束：① 那条筛子（`kind == "USER_LOGIN"` 且 `benefit_unit == "CREDIT"`）
+///     是**唯一防线**，防止定时顺手领走一次性活动（新人礼 / 学生认证 / 邀请礼 ——
+///     邀请礼的收益还归邀请人，不该由网关代答）；② 本链走 `manual = false`，
+///     即受本家自己的两道写闸约束（≤6 次写/日 + 间隔 ≥10 分钟）；③ 一天只有一条，
+///     领过之后上游不再回 `claimable`，所以稳态是每天一发写请求。
+///     面板上那颗「领福利」按钮连同它的只读探测口已一并移除（2026-10-12）：留着一颗
+///     能绕过限流闸的手动按钮，等于让「每天自动一次」与「手动再点」两套口径并存。
 ///
 /// 这是「有签到或每日活跃任务」的清单，不是「有积分概念」的清单：CatPaw 有积分
 /// 查询但没有签到，因此不在此列 —— 它的账号在批量签到里被算作 `skipped`。
 /// 加一家之前先确认它的签到链路真的存在（一个点了必然报错的复选框比没有更糟）。
-pub const CHECKIN_PROVIDERS: [&str; 11] = [
+///
+/// ⚠️ 这份清单同时是**缺省全选**的来源（`default_providers`），且老配置里没有
+/// `providers` 字段时读出来就是全选 —— 新增一家等于给所有已开启自动签到的实例
+/// 默认打开它。本家还有一层与凭据有关的风险：同一批上游凭据起两个实例（例如开发
+/// 实例与生产实例挂着同一个账号）时，两台都开定时就会互抢同一天的份额
+/// （判据见 `codearts::welfare::claim_daily_checkin`）。
+pub const CHECKIN_PROVIDERS: [&str; 12] = [
     "workbuddy",
     "workbuddy-intl",
     "raccoon",
@@ -111,6 +128,7 @@ pub const CHECKIN_PROVIDERS: [&str; 11] = [
     "loomy",
     "kuku",
     "officeace",
+    "codearts",
 ];
 
 /// 缺省的签到提供商集合（全选）

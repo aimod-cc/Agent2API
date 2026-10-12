@@ -17,7 +17,7 @@ Panorama dos recursos de proxy reverso por plataforma (✓ suportado · ✗ não
 | Cline (Free / Pass) | ✓ | ✓ | ✓ remota + fallback estático | ✓ | — | — |
 | Accio (global / China) | ✓ | ✓ | ✓ remota + fallback estático | ✓ apenas percentual de uso | — | — |
 | ZCode (China / global) | ✓ | ✗ | ✗ tabela estática | ✓ saldo do plano | — | ✓ plano por tempo limitado (manual) |
-| CodeArts | ✓ | ✓ rotação única | ✓ remota (três fontes mescladas) | ✓ dois balanços | — | ✓ bônus diário (manual) |
+| CodeArts | ✓ | ✓ rotação única | ✓ remota (três fontes mescladas) | ✓ dois balanços | ✓ bônus diário (check-in agendado) | — |
 | Trae | ✓ | ✓ troca a cada uso | ✓ somente remota | ✓ dois balanços | — | — |
 | Loomy (iFlytek) | ✓ | ✗ sem API de renovação | ✓ somente remota | ✓ dois balanços de pontos | ✓ atualização dos pontos diários | — |
 | KukuAI (Baidu Wenku) | ✓ | ✗ sem API de renovação | ✓ remota + fallback estático | ✓ saldo de pontos | ✓ check-in diário (pontos grátis) | — |

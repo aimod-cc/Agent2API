@@ -17,7 +17,7 @@ Reverse-proxy capabilities at a glance (✓ supported · ✗ not supported · �
 | Cline (Free / Pass) | ✓ | ✓ | ✓ remote + static fallback | ✓ | — | — |
 | Accio (international / domestic) | ✓ | ✓ | ✓ remote + static fallback | ✓ used-percent only | — | — |
 | ZCode (domestic / international) | ✓ | ✗ | ✗ static table | ✓ plan balance | — | ✓ timed plan (manual) |
-| CodeArts | ✓ | ✓ one-shot rotation | ✓ remote (three sources merged) | ✓ two ledgers | — | ✓ daily welfare (manual) |
+| CodeArts | ✓ | ✓ one-shot rotation | ✓ remote (three sources merged) | ✓ two ledgers | ✓ daily welfare (scheduled check-in) | — |
 | Trae | ✓ | ✓ single-use rotation | ✓ remote only | ✓ two ledgers | — | — |
 | Loomy (iFlytek) | ✓ | ✗ no refresh flow | ✓ remote only | ✓ two point ledgers | ✓ daily gifted-points refresh | — |
 | KukuAI (Baidu Wenku) | ✓ | ✗ no refresh flow | ✓ remote + static fallback | ✓ points balance | ✓ daily check-in (free points) | — |

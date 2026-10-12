@@ -49,7 +49,6 @@ pub mod chat;
 // 资格类状态由前端按需惰性查询，见该文件模块头
 pub mod checkin_center;
 pub mod cline_headers;
-pub mod codearts_welfare;
 pub mod config_api;
 // 网关面（`/v1/*`）跨域访问开关：`GET/PUT /api/cors`（与 `/api/sanitize`
 // 同形的单开关端点，见该文件模块头）

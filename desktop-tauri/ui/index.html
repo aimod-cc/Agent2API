@@ -494,12 +494,6 @@
        见 ui-islands/src/islands/zcode-plans-modal.tsx 的 window.wbZcodePlans）。
        对外只有 window.wbZcodeClaim 的 preview / claim 两个方法。 -->
   <script src="zcode-claim.js"></script>
-  <!-- CodeArts 的「领福利」流程（与上面 zcode-claim.js 同一约定：岛只把账号对象递过去，
-       探测 → 确认 → 领取 → 回读二次确认这四步都在这个引擎里，它要问的是管理接口
-       而不是本页的普通 fetch —— 桌面壳里管理接口要走 Tauri 的 api_request 命令）。
-       界面上那颗按钮的判据（能力位 welfare）与台账读数都在岛上，见
-       ui-islands/src/islands/accounts-domain.ts 的 supportsWelfare / welfareStateOf。 -->
-  <script src="codearts-welfare.js"></script>
   <!-- ZCode 活动套餐通道的**验证码令牌池守卫**：后台循环向网关问库存，需要时用
        无痕验证静默铸令牌（`wbAliyunCaptcha.mintTraceless`）并推回网关 —— 活动套餐
        的推理端点每条请求都要一个这种令牌，而转发是后台发生的（没有让用户拖滑块的

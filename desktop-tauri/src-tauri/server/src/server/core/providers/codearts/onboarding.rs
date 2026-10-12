@@ -39,7 +39,7 @@ use crate::server::errors::GatewayError;
 
 use super::welfare::{self, Campaign};
 
-/// 业务基址与每日福利同一条（`api::codearts_welfare` 用的是同一个常量）。
+/// 业务基址与每日福利同一条（`welfare::claim_daily_checkin` 用的是同一个常量）。
 fn base() -> &'static str {
     super::models::DEFAULT_BASE_URL
 }

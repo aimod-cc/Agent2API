@@ -140,9 +140,11 @@ const PROVIDER_FEATURES: Record<string, ProviderFeatures> = {
   //   benefitError 而不是整次失败（半次失败的呈现见 accounts-panels 的 usageSummary）。
   // `usageDetail: true` —— 余额列的明细弹层形态（套餐徽标 + 点击逐项读数）：本家
   //   的计量表一行放不下，「可用 N 积分」是加总，两个权益不同的账号看不出差别。
-  // 「领福利」不在能力表里：入口已整体迁到「签到中心」（api::checkin_center 按
-  //   provider 组装福利行，ui/codearts-welfare.js 的流程两边共用），账号页不再有
-  //   这颗按钮 —— 判据只留后端一处，界面不再查表。
+  // 「领福利」不在能力表里，而且**整页都没有这颗按钮**：每日福利已并入后端的定时
+  //   签到链（`checkin_for` 的 codearts 分支），界面上既没有手动入口、也没有只读
+  //   探测口（2026-10-12：legacy 脚本 ui/codearts-welfare.js、
+  //   POST /api/accounts/{id}/codearts-welfare 与它的 /preview 一起删除）——
+  //   领没领这一判据只留后端一处，界面不再查表。
   // `edition: false` —— 没有版本/地区概念：region 固定在 cn-north-4 且必须与 token
   //   签发地一致，不是用户可选项；`login_type`（WEB/IDE）也不是版本，别塞进这一列。
   // `expiry: 'expiresAt'` —— 临时凭据约一小时到期，这一列对本家**是主要信息**。
@@ -772,71 +774,23 @@ export function planBadgeLabel(planName: unknown): string {
 /**
  * 今天的**北京时间**自然日（`YYYY-MM-DD`）。
  *
- * ⚠️ 不能按浏览器本地日算：后端那条自然日界是 `welfare::today`（UTC+8，中国无夏令时），
- * 台账里的 `day` 就是它写进去的字符串。界面若在别的时区按本地日判会出现两种错：
- * 北京 0 点前本地已是新一天 → 把昨天的「已领」显示成今天的（按钮被误置灰）；
- * 反过来则今天的读数被当成昨天（该灰不灰）。所以这里比的是**同一个字符串**，
- * 判据只有一份定义。
+ * ⚠️ 不能按浏览器本地日算：这类「按自然日发放」的台账，日界在上游那边是 UTC+8
+ * （中国无夏令时）。CodeArts 的领取台账里 `day` 就是后端 `welfare::today` 写进去的
+ * 同一份字符串，ZCode 的逐份套餐台账存的是毫秒时刻、由 `claimedPlanIdsToday` 按
+ * 北京日切。界面若在别的时区按本地日判会出现两种错：北京 0 点前本地已是新一天 →
+ * 把昨天的「已领」显示成今天的（按钮被误置灰）；反过来则今天的读数被当成昨天
+ * （该灰不灰）。所以这里比的是**同一个字符串**，判据只有一份定义。
  */
 export function beijingDay(at: number = Date.now()): string {
   return new Date(at + 8 * 3600 * 1000).toISOString().slice(0, 10)
 }
 
-/**
- * 领取台账 → 「已领取了吗」的读数（后端写在 `account.welfare` 上；签到中心的
- * 福利行从快照里拿到同一份台账后，用 `{ welfare: row.welfare }` 复用本函数）。
- */
-export type WelfareState = { known: boolean; today: boolean; day: string; accepted: boolean; attempts: number; confirmed: number }
-
-/**
- * 台账读数（`{known, today, day, accepted, attempts, confirmed}`）。
- *
- * ── 读不懂的台账一律按「今天没有读数」──────────────────────
- * 缺字段 / 日期不是今天 / 压根没领过，三种情况在这里都是 `today: false` 且
- * `attempts`/`accepted`/`confirmed` 归零：按钮照常可点，由后端如实报错（它那份
- * 校验比这里严，见 `ledger_of`）。这里**不复制**那份校验逻辑，否则同一件事有两处
- * 判据、改一处漏一处。**昨天的台账与今天无关**（后端也是整份重来），所以它只留下
- * `known: true`（「这台机器上有过台账」）而不带昨天的数字。
- *
- * `confirmed` 是**条数**而不是台账上的某个字段：后端把每条活动的进度存在
- * `campaigns` 字典里（`{idempotentKey, claimed, confirmed}`），台账顶层没有
- * `confirmed` 这个键 —— 悬停里那句「已确认到账 N 项」数的就是这里的项。
- */
-export function welfareStateOf(account: AccountRecord | null | undefined): WelfareState {
-  const day = beijingDay()
-  const empty: WelfareState = { known: false, today: false, day, accepted: false, attempts: 0, confirmed: 0 }
-  const ledger = account?.welfare
-  if (!ledger || typeof ledger !== 'object' || Array.isArray(ledger)) return empty
-  const row = ledger as Record<string, unknown>
-  const campaigns = (row.campaigns && typeof row.campaigns === 'object' ? row.campaigns : {}) as Record<string, { confirmed?: unknown }>
-  const state: WelfareState = {
-    known: true,
-    today: row.day === day,
-    day,
-    accepted: row.accepted === true,
-    attempts: Number(row.attempts) || 0,
-    confirmed: Object.values(campaigns).filter(item => item?.confirmed === true).length,
-  }
-  return state.today ? state : { ...empty, known: true }
-}
-
-/** 「已领取」的悬停说明：说清哪一天、领到哪一份额度、什么时候能再领。（签到中心的福利行用它） */
-export function welfareDoneTitle(state: WelfareState): string {
-  // 「不增加福利模型的 token 池」是**故意留在这里**的：这一家有两份账，领到的积分进的
-  // 是套餐赠送积分，而用户点完最可能问的下一句就是「那我的福利模型怎么还是没额度」——
-  // 答案放在这行说明里，不必再去余额明细里猜（后端 usage 文档的 note 同口径）。
-  return t('今天（北京时间 {day}）已由官方确认到账 {n} 项；领到的是套餐赠送积分，不增加福利模型的 token 池；按自然日重置，明天可再领', {
-    day: state.day, n: state.confirmed,
-  })
-}
-
-/** 「去领取」的悬停说明：把台账里已有的读数带上，回答「今天第几次了」。 */
-export function welfareTodoTitle(state: WelfareState): string {
-  const tried = state.today && state.attempts > 0
-    ? t('今天（北京时间 {day}）已试过 {n} 次但官方尚未确认到账，', { day: state.day, n: state.attempts })
-    : ''
-  return t('{tried}探测并领取官方每日登录赠送的套餐积分（到账进套餐积分，不增加福利模型 token 池）', { tried })
-}
+// 「CodeArts 今天领了几项」的界面读数（原 `WelfareState` / `welfareStateOf` /
+// `welfareDoneTitle`）已随签到中心那条 CodeArts 福利行一起删除（2026-10-12）：
+// 每日福利并入自动签到后，「今天签没签」由每日签到卡上那一家的 `checkinAt` /
+// `checkedInToday` 表达，再留一份台账渲染就是同一件事两个真相源。台账本身仍写在
+// 账号记录上（`accounts.data → welfare`，由 `welfare::claim_rewards` 落盘），
+// 只是界面不再读它 —— 上面那个 `beijingDay` 保留，ZCode 的逐份台账仍在用它。
 
 /* ─── 筛选维度（enabled / limit / q 三维各自独立）─────────────
    分组模式（账号页按家分组）去掉了「提供商」这一维：家的维度已经由页面结构本身

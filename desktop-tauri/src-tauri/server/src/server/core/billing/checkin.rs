@@ -98,17 +98,12 @@ pub fn supports_checkin(account: &Value) -> bool {
     if account.get("edition").and_then(Value::as_str) == Some("intl") {
         return false;
     }
-    // CodeArts 没有「签到」链路，必须先排除：`checkin_for` 的分派 match 把
-    // 「不在范围里的家」报成「未接入」，签到中心那边则按 `CHECKIN_PROVIDERS`
-    // 分桶（本家不在清单里，落到「没有签到链路」那组）—— 这一层是批量路径
-    // （`resolve_checkin_targets` 的 filter）与 API 直调的兜底，双保险。
-    // 注意 CodeArts 的每日福利**不是**签到（那是 ops 福利领取，独立的「领福利」
-    // 按钮，见 `providers::codearts::welfare`），与这条链无交集。
-    // Trae 曾与 CodeArts 同列排除表；SOLO 转积分制后模型调用花的就是签到钱包
-    // 那份钱，它已在 `providers::trae::checkin` 接入本链，不要再加回来。
-    if provider == crate::server::core::account_store::codearts_accounts::CODEARTS_PROVIDER_ID {
-        return false;
-    }
+    // CodeArts 的「每日福利」不是签到接口，而是 ops 活动领取（delivery → claim →
+    // confirm → 回读活动列表二次确认），执行体在 `providers::codearts::welfare`。
+    // 它**曾**在这张排除表里（理由：本家没有签到链路，`checkin_for` 会把没列出的家
+    // 报成「未接入」）；2026-10-12 起接入本链，走 `checkin_for` 的 "codearts" 分支。
+    // 同一段落里 Trae 也走过这条路（SOLO 转积分制后接入 `providers::trae::checkin`），
+    // 别再往回加。
     !crate::server::core::account_store::is_accio_family(provider)
 }
 
@@ -338,6 +333,22 @@ pub async fn checkin_for(
             // 一次、重复领不报错，幂等由上游保证（见 `officeace::checkin` 模块头）。
             let claim =
                 crate::server::core::providers::officeace::checkin::claim_daily_checkin(store, &id)
+                    .await
+                    .map_err(|error| error.message);
+            claim_result(id, name, &display, true, claim)
+        }
+        "codearts" => {
+            // CodeArts：每日福利是 ops 活动领取，不是签到接口 —— 但它的形态就是
+            // 「每天替这个账号领一次今日额度」，所以接进本链而不是另开一条定时。
+            // 三道既有约束都在这里生效，改动前先读 `welfare::claim_daily_checkin`：
+            //   1. 只挑 `kind == "USER_LOGIN"` 且 `benefit_unit == "CREDIT"` 那一条 ——
+            //      这条筛子是**唯一防线**，一次性活动（新人礼 / 学生认证 / 邀请礼）
+            //      全靠它不被定时顺手领走；
+            //   2. 走 `manual = false`，即本模块的两道写闸（≤6 次写/日 + 间隔 ≥10 分钟）；
+            //   3. 到账判定要回读活动列表（claim/confirm 的 `code:0` 只是受理），
+            //      所以「上游说成功」不等于「我们的 claim 说成功」。
+            let claim =
+                crate::server::core::providers::codearts::welfare::claim_daily_checkin(store, &id)
                     .await
                     .map_err(|error| error.message);
             claim_result(id, name, &display, true, claim)
@@ -587,6 +598,42 @@ mod tests {
         assert!(checkin_completed_today(&json!({"success": true, "code": 0})));
         // 第 2 条：上游明确告知（AutoClaw 的 daily_signin 带这个字段）
         assert!(checkin_completed_today(&json!({"success": false, "alreadyCompleted": true})));
+    }
+
+    #[test]
+    fn codearts_claim_shapes_split_done_from_not_applicable() {
+        use crate::server::core::providers::codearts::welfare::{Outcome, claim_json};
+
+        // 用**本家真实产出的 claim 形状**过判定，而不是手写一份理想 JSON ——
+        // 形状（`welfare::claim_json`）与判定（本函数）各写一遍就会分叉。
+        assert!(
+            checkin_completed_today(&claim_json(Outcome::Confirmed)),
+            "到账当然算本日完成"
+        );
+        assert!(
+            checkin_completed_today(&claim_json(Outcome::Already)),
+            "上游说这条今天已经领过 ⇒ 完成（只是不由我们领的）"
+        );
+        // 这两格必须是 false：落 `checkinAt` 会让签到中心显示「已领取」而实际
+        // 什么都没到手；报 error 又会让一家正常的空档每天在日志页红一次。
+        for outcome in [Outcome::NotEligible, Outcome::Skipped] {
+            let claim = claim_json(outcome);
+            assert!(
+                !checkin_completed_today(&claim),
+                "{outcome:?} 的 claim 不该被算成本日已完成：{claim}"
+            );
+        }
+        // 文案耦合的显式钉住：判定有一条走 `msg` 子串（「已领取」/「已签到」），
+        // 而本家的 msg 取自 `Outcome::label()`。哪天改 label 改出「已领取」字样，
+        // 「今天没得领」就会被记成已完成 —— 这条断言就是让那次改动必须经过这里。
+        assert_eq!(
+            "暂无可领取活动",
+            claim_json(Outcome::NotEligible)["msg"].as_str().unwrap()
+        );
+        assert_eq!(
+            "等待重试",
+            claim_json(Outcome::Skipped)["msg"].as_str().unwrap()
+        );
     }
 
     #[test]

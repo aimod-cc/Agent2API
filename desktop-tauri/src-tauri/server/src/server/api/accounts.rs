@@ -280,21 +280,13 @@ pub async fn dispatch(
                 return super::zcode_claim::preview(&state, &id).await;
             }
         }
-        // CodeArts 每日福利：先探测（只读）再领取（写）。
-        // 顺序上 preview 必须排在前面 —— 两个后缀互不包含，但读的时候按用户
-        // 的操作顺序排列，与上面 ZCode 那三条同一写法。
-        if let Some(id) = rest.strip_suffix("/codearts-welfare/preview") {
-            let id = decode_segment(id);
-            if !id.is_empty() {
-                return super::codearts_welfare::preview(&state, &id).await;
-            }
-        }
-        if let Some(id) = rest.strip_suffix("/codearts-welfare") {
-            let id = decode_segment(id);
-            if !id.is_empty() {
-                return super::codearts_welfare::claim(&state, &id, body).await;
-            }
-        }
+        // CodeArts 每日福利：**账号子动作里没有任何 welfare 端点了**。
+        // 历史上这里是两条（/codearts-welfare/preview 只读探测 + /codearts-welfare 真领），
+        // 2026-10-12 两条一起下架：领取改由定时签到链发起（`core::billing::checkin::checkin_for`
+        // 的 "codearts" 分支），面板上不再有可点的领取动作，而那条只读探测唯一的消费者
+        // 就是被删掉的那颗按钮 —— 留着一颗能绕过限流闸的按钮，等于让「手动再点一次」与
+        // 「每天自动一次」两套口径并存。领取台账仍写在 `account.welfare` 上，只是界面
+        // 不再读它（这一家的签到状态由每日签到卡那行的 `checkinAt` 表达）。
         if let Some(id) = rest.strip_suffix("/zcode-claim") {
             let id = decode_segment(id);
             if !id.is_empty() {

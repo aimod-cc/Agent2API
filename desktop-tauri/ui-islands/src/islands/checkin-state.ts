@@ -84,9 +84,9 @@ export type CheckinCenterSnapshot = {
   extras: {
     /** 新手任务行；`settled` 是后端的一次性福利结算记忆（已结清才非空） */
     onboarding: Array<{ id: string; name: string; provider?: string; settled?: OnboardingSettledRaw }>
-    /** CodeArts 福利行：`welfare` 是后端落盘的本地领取台账（day/accepted/…，原样透传），
-     *  「已领取」标记按它判（见 accounts-domain 的 welfareStateOf） */
-    welfare: Array<{ id: string; name: string; provider?: string; welfare?: unknown }>
+    // CodeArts 的福利行已删除（2026-10-12）：每日福利并入自动签到后，它就出现在
+    // 上面 `daily.providers` 的 CodeArts 一家里，领取结果由那行的 `checkinAt` /
+    // `checkedInToday` 表达 —— 再单列一份台账渲染就是两个真相源。
     plans: Array<{ id: string; name: string; provider?: string; claimAt?: number | null; claimPlans?: Record<string, number> | null }>
   }
   auto: AutoCheckinState

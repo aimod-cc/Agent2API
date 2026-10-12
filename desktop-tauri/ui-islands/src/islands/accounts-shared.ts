@@ -443,8 +443,10 @@ export type SharedWindow = {
   }
   /** ZCode 套餐明细弹窗（zcode-plans-modal.tsx）：可领取 + 名下已有的套餐，逐份领取 */
   wbZcodePlans?: { open?: (options: { id: string; name?: string }) => void }
-  /** CodeArts「领福利」流程（ui/codearts-welfare.js：只读探测 → 确认 → 领取 → 回读） */
-  wbCodeArtsWelfare?: { start?: (account: AccountRecord | undefined) => Promise<unknown> }
+  // （已删除）wbCodeArtsWelfare：CodeArts 每日福利改由后端定时签到链领取，
+  // legacy 脚本 `ui/codearts-welfare.js`、`POST /api/accounts/{id}/codearts-welfare`
+  // 与它的只读 `/preview` 已在 2026-10-12 一并移除 —— 界面上没有领取动作，那条
+  // 只读探测也就没有消费者了（要恢复是一个提交的事，见 welfare.rs 里那段去向）。
   /** 「添加账号」弹窗（归另一个代理，本页只调它的 open） */
   wbAddAccountModal?: { open?: () => void; close?: () => void }
   /** 添加表单的步骤复位（打开弹窗后按 providers 摘要重画卡片） */

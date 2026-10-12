@@ -824,9 +824,14 @@ export function openZcodePlans(id: string, name?: string): void {
 }
 
 /**
- * CodeArts 的「领福利」入口已整体迁到「签到中心」的活动福利卡（checkin-page.tsx
- * 直接调 legacy 脚本 `ui/codearts-welfare.js` 的 `wbCodeArtsWelfare.start`），
- * 账号页不再有这颗按钮 —— 这里不再中转。
+ * CodeArts 的福利**在界面上没有任何"领取"入口，也没有独立的一行**：每日福利已并入
+ * 自动签到（`checkin_for` 的 `codearts` 分支），它在签到中心里就是「每日签到」那张卡
+ * 里的 CodeArts 一家，签没签看那一家账号行的 `checkinAt` / `checkedInToday`。
+ * 历史上的两处入口都没有了：账号页那颗从来就没进过能力表，签到中心「活动福利」里
+ * 那行只读台账也在 2026-10-12 随并入自动签到一起删除（同一件事不留第二个真相源）。
+ * 台账本身仍在 `accounts.data → welfare`（后端 `codearts_welfare_ledger` 那份），
+ * 只是界面不再渲染它 —— 排查「自动领到底跑没跑」时读它，或看领取那四条提前返回
+ * 分支的日志。
  */
 
 /* ─── 对外契约（window）────────────────────── */

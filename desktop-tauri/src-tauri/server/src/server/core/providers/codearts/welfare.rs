@@ -36,7 +36,7 @@ use crate::server::core::egress;
 use crate::server::errors::GatewayError;
 use crate::server::logging;
 
-use super::{balance, chat, credentials::Credential, redact, signer};
+use super::{chat, credentials::Credential, redact, signer};
 
 pub const DELIVERY_PATH: &str = "/v1/ops/delivery?channel=IDE";
 pub const CLAIM_PATH: &str = "/v1/ops/claim";
@@ -416,35 +416,13 @@ impl Ledger {
     }
 }
 
-/// 只读预览（面板上「先看一眼」那一步）：**一个写请求都不发**。
-/// 返回今天的状态、可领的活动、以及限流闸门的剩余量。
-pub async fn preview(store: &AccountStore, account_id: &str, base: &str, now_ms: i64) -> Result<Value, GatewayError> {
-    let credential = current_credential(store, account_id).await?;
-    let items = delivery(base, &credential).await?;
-    let daily: Vec<&Campaign> = items.iter().filter(|item| item.is_daily_login_credit()).collect();
-    let ledger = ledger_of(store, account_id, now_ms)?;
-    Ok(json!({
-        "day": ledger.day,
-        "attempts": ledger.attempts,
-        "attemptsLeft": (MAX_ATTEMPTS_PER_DAY - ledger.attempts).max(0),
-        "nextAttemptInMs": gap_remaining(&ledger, now_ms).map(|millis| millis as i64).unwrap_or(0),
-        "acceptedToday": ledger.accepted,
-        "campaigns": daily
-            .iter()
-            .map(|item| json!({
-                "id": item.key(),
-                "status": item.status,
-                "claimable": item.claimable,
-                "benefitAmount": item.benefit_amount,
-                "benefitUnit": item.benefit_unit,
-                "confirmed": item.is_confirmed(),
-                "localClaimed": ledger.campaigns.get(&item.key()).map(|p| p.claimed).unwrap_or(false),
-            }))
-            .collect::<Vec<_>>(),
-        "eligible": daily.iter().any(|item| item.has_work()),
-        "note": "领取到账的是套餐赠送积分，不增加福利模型 token 池",
-    }))
-}
+// 只读预览 `preview()` 已随它唯一的消费者（面板上的手动领取流程）一起删除：
+// 「先看一眼再领」那一步存在的理由是「领取是不可逆的写操作，要点之前得看清」，
+// 而现在本家没有界面侧的领取动作了 —— 它在签到中心就是每日签到卡里的 CodeArts
+// 一家。领没领的真相仍在两处：领取台账（`account.welfare`：day / attempts /
+// accepted / 每个活动键的进度，由 `claim_rewards` 落盘）与领取那四个提前返回分支
+// 各一行日志（「上游活动列表里没有这一条」/「已经领过了」/「本地限流」/「当前不可领」）。
+// 需要在面板上直接看 delivery 原文时，恢复一条只读探测端点是一个提交的事。
 
 /// 读一份可用的凭据（临期就续，与转发同一入口）。
 pub(crate) async fn current_credential(store: &AccountStore, account_id: &str) -> Result<Credential, GatewayError> {
@@ -530,15 +508,55 @@ pub struct Run {
     pub after: Vec<Campaign>,
 }
 
-/// 面板上「领取今日福利」那颗按钮的入口 —— 只走每日登录那一组。
-pub async fn claim_account(
+/// 定时签到链的入口：把「每日福利」当这一家的签到来领。
+///
+/// ── 与已经被删掉的那颗手动按钮只差一件事 ────────────────────
+/// `manual = false` —— 必须走本模块的两道写闸（`MAX_ATTEMPTS_PER_DAY` + 间隔）。
+/// 无人值守的重试正是那两道闸要挡的东西；面板按钮当年传 `true` 绕开它，是因为
+/// 「人点了一下」本身就是限流要豁免的场景，而现在没有这个场景了。
+///
+/// 只挑 [`Rewards::DailyLogin`]（= `kind == "USER_LOGIN"` 且 `benefit_unit == "CREDIT"`）。
+/// **这条筛子是唯一防线**：一次性活动（`NEW_USER_REGISTER` 新人礼、`STUDENT_CERTIFIED`
+/// 学生认证、`INVITE_USER` 邀请礼）都带自己的 `claimable`，改成「挑所有 claimable」
+/// 就会在每天的定时里顺手领走它们 —— 而邀请礼的收益归邀请人，网关点它等于替
+/// 不是我们的用户做决定。判据与理由见 `onboarding.rs` 与 `Campaign::is_newbie_gift`。
+pub async fn claim_daily_checkin(
     store: &AccountStore,
     account_id: &str,
-    base: &str,
-    now_ms: i64,
-    manual: bool,
-) -> Result<Outcome, GatewayError> {
-    Ok(claim_rewards(store, account_id, base, now_ms, manual, Rewards::DailyLogin).await?.outcome)
+) -> Result<Value, GatewayError> {
+    let run = claim_rewards(
+        store,
+        account_id,
+        super::models::DEFAULT_BASE_URL,
+        logging::now_ms(),
+        false,
+        Rewards::DailyLogin,
+    )
+    .await?;
+    Ok(claim_json(run.outcome))
+}
+
+/// [`Outcome`] → 签到链认识的 claim 形状（`{success, alreadyCompleted, msg}`）。
+///
+/// 纯函数、单独摆出来，是为了让 `billing::checkin` 那条判定（`checkin_completed_today`）
+/// 能拿**本模块真实产出的形状**去断言，而不是在用例里手写一份理想 JSON —— 形状与
+/// 判定各写一遍就会分叉。四个变体两种归宿，分档不能并：
+///   - `Confirmed` / `Already` ⇒ 本日已完成（`checkinAt` 落盘、签到中心亮「已领取」）；
+///   - `NotEligible`（上游今天没下发这一条）与 `Skipped`（本地限流）⇒ **不算失败也不算完成**：
+///     落 `checkinAt` 会说谎，报 `error` 会让一家本来正常的空档每天在日志页红一次
+///     （与 Trae 那条「不把一次没得签当成没签成」同一个道理）。
+pub fn claim_json(outcome: Outcome) -> Value {
+    let (success, already_completed, message) = match outcome {
+        Outcome::Confirmed => (true, false, outcome.label()),
+        Outcome::Already => (false, true, outcome.label()),
+        Outcome::NotEligible | Outcome::Skipped => (false, false, outcome.label()),
+    };
+    json!({
+        "success": success,
+        "alreadyCompleted": already_completed,
+        "msg": message,
+        "outcome": outcome.label(),
+    })
 }
 
 /// 走一遍完整的领取流程。**这是本模块唯一会发写请求的函数。**
@@ -660,38 +678,13 @@ pub async fn newbie_gift(store: &AccountStore, account_id: &str, base: &str) -> 
     Ok(delivery(base, &credential).await?.into_iter().filter(Campaign::is_newbie_gift).collect())
 }
 
-/// 领取成功后顺手刷新一次余额（面板上「领完就能看到积分变了」）。
-/// 失败不影响领取结果 —— 余额是可选信息。
-pub async fn refresh_usage(store: &AccountStore, account_id: &str, now_ms: i64) -> Value {
-    let Ok(credential) = current_credential(store, account_id).await else {
-        return Value::Null;
-    };
-    let (statistics, benefit) = balance::fetch_both(
-        super::models::DEFAULT_BASE_URL,
-        super::models::DEFAULT_BENEFIT_GATEWAY_URL,
-        &credential,
-        chat::DEFAULT_LANGUAGE,
-        chat::DEFAULT_PLUGIN_VERSION,
-    )
-    .await;
-    // 形状与 `query_usage` 保持一致：福利那一侧的三种状态分开落
-    // （读到 → wallets；上游明说没有 → benefitAbsent；读失败 → benefitError）。
-    // 「领到了积分」与「有福利模型额度」是两本账 —— 后者没有不代表领取失败。
-    let benefit_absent = matches!(&benefit, Ok(None));
-    let benefit_value = benefit.as_ref().ok().and_then(|value| value.as_ref());
-    let _ = now_ms;
-    let mut document = balance::usage_document(statistics.as_ref().ok(), benefit_value);
-    if benefit_absent {
-        document["benefitAbsent"] = Value::Bool(true);
-    }
-    if let Err(error) = &statistics {
-        document["statisticsError"] = Value::String(error.message.clone());
-    }
-    if let Err(error) = &benefit {
-        document["benefitError"] = Value::String(error.message.clone());
-    }
-    document
-}
+// 「领取成功后顺手刷新一次余额」（原 `refresh_usage`）已随手动按钮一起删除。
+//
+// 它唯一的调用点是 `POST /api/accounts/{id}/codearts-welfare` 的响应（「领完就能
+// 看到积分变了」）。2026-10-12 手动入口移除后它一个调用者都不剩：余额读数另有两条
+// 现役路径（账号页的余额查询、限流器心跳里的 `balance_facts` 全量刷新），定时签到链
+// 不需要在领完那一刻同步再读一次。留一条没人调用的公共函数，下次排查「领完余额
+// 为什么没变」时它会被当成事实来源 —— 所以删掉，只在这里留一句去向。
 
 #[cfg(test)]
 mod tests {
@@ -706,6 +699,48 @@ mod tests {
 
     use super::*;
 
+    /// 下面这批状态机用例共用的入口：与生产曾经的「面板领取」同参数形状。
+    ///
+    /// 生产侧已经没有手动那条路了（每日福利改由定时签到链以 `manual = false` 领，
+    /// 见 [`claim_daily_checkin`]），所以这个包装只活在测试里 —— 它存在的意义是
+    /// 让限流、幂等、回读这三组断言仍然能分别按 `manual = true / false` 两种口径打。
+    async fn claim_account(
+        store: &AccountStore,
+        account_id: &str,
+        base: &str,
+        now_ms: i64,
+        manual: bool,
+    ) -> Result<Outcome, GatewayError> {
+        Ok(claim_rewards(store, account_id, base, now_ms, manual, Rewards::DailyLogin)
+            .await?
+            .outcome)
+    }
+
+    /// `claim_json` 的四个变体各产出什么形状（**这条是签到链判定的输入面**）。
+    ///
+    /// 与 `billing::checkin::tests` 里那条配对：那边用这份真实产物去过
+    /// `checkin_completed_today`，两边合起来才钉住「哪些结果算本日已完成」。
+    #[test]
+    fn claim_json_splits_done_from_not_applicable() {
+        let confirmed = claim_json(Outcome::Confirmed);
+        assert_eq!(true, confirmed["success"].as_bool().unwrap(), "到账要算成功");
+        assert_eq!(false, confirmed["alreadyCompleted"].as_bool().unwrap());
+
+        let already = claim_json(Outcome::Already);
+        assert_eq!(false, already["success"].as_bool().unwrap(), "本来就领过不是「领取成功」");
+        assert_eq!(true, already["alreadyCompleted"].as_bool().unwrap(), "但本日确实已完成");
+
+        for outcome in [Outcome::NotEligible, Outcome::Skipped] {
+            let row = claim_json(outcome);
+            assert_eq!(false, row["success"].as_bool().unwrap(), "{outcome:?} 不该报成功");
+            assert_eq!(
+                false,
+                row["alreadyCompleted"].as_bool().unwrap(),
+                "{outcome:?} 更不该把「今天没得领」记成本日已完成"
+            );
+            assert_eq!(outcome.label(), row["msg"].as_str().unwrap(), "msg 用同一条 label");
+        }
+    }
     fn campaign(id: &str, kind: &str, unit: &str, claimable: bool, status: &str) -> Campaign {
         Campaign {
             id: Value::String(id.to_string()),

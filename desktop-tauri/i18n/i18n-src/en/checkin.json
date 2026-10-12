@@ -87,6 +87,7 @@
   "每天时刻": "Daily time",
   "每日活跃任务 · 领取才加积分，保活只维持活跃 · 两者可分开执行": "Daily activity tasks · only claims add points; keep-alive just maintains activity · the two can run separately",
   "每日签到": "Daily check-in",
+  "没有可手动领取的活动套餐账号（ZCode 未添加）。": "No accounts with a manually claimable campaign (ZCode not added).",
   "没有可领福利的账号（CodeArts / ZCode 未添加）。": "No accounts with claimable rewards (CodeArts / ZCode not added).",
   "没有支持新手任务的账号": "No accounts support starter tasks",
   "没有支持新手任务的账号 —— 目前有 Loomy、小浣熊、CodeArts 三家。": "No accounts support starter tasks — currently Loomy, Raccoon, and CodeArts do.",

@@ -8,11 +8,12 @@
 //! 会抄一份判定逻辑 —— 那正是「两套行为」的开头。所以这里在服务端聚合成一份，
 //! 一次请求拉全，页面打开只打这一条。
 //!
-//! 惰性查询的**上游资格类状态**（Loomy / 小浣熊的新手任务、CodeArts 福利资格、
-//! ZCode 可领套餐）**不在**这份快照里：它们每查一个账号就要打一次上游，
-//! 聚合快照必须保持「打开页面零上游请求」。快照只给账号入口清单，前端拿到
-//! 清单后按需调既有的查询接口（/onboarding、/codearts-welfare/preview、
-//! /zcode-claim/preview）—— 那三条接口原样复用，一条不改。
+//! 惰性查询的**上游资格类状态**（各家新手任务、ZCode 可领套餐）**不在**这份快照里：
+//! 它们每查一个账号就要打一次上游，聚合快照必须保持「打开页面零上游请求」。快照
+//! 只给账号入口清单，前端拿到清单后按需调既有的查询接口（/onboarding、
+//! /zcode-claim/preview）—— 那两条原样复用，一条不改。（CodeArts 的每日福利原先
+//! 占着第三条只读探测口 `/codearts-welfare/preview`，2026-10-12 随手动领取一起
+//! 删除 —— 它已进自动签到链，见 `core::billing::checkin::checkin_for`。）
 //!
 //! ── 分组口径与批量签到完全一致 ─────────────────────────────
 //! 进「每日签到」分组的账号 = 提供商 ∈ `CHECKIN_PROVIDERS` **且**
@@ -33,7 +34,6 @@
 //!   },
 //!   "extras": {
 //!     "onboarding": [ { "id", "name", "provider" } ],
-//!     "welfare":    [ { "id", "name", "provider", "welfare" } ],
 //!     "plans":      [ { "id", "name", "provider", "claimAt", "claimPlans" } ]
 //!   },
 //!   "auto": { …与 GET /api/auto-checkin 同形… },
@@ -175,9 +175,9 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
     // （新手任务分组里 Loomy、小浣熊与 CodeArts 共用一张卡）。
     //
     // `settled` 是**一次性福利的结算记忆**（已结清才非空，形状三家一致，
-    // 见 `core::providers::onboarding_memory`）：与下面 CodeArts 行的 `welfare`
-    // 台账同一先例 —— 本地事实、零上游请求，界面据此直接渲染「已领取」并在
-    // 进页面 / 签到后跳过自动查询，不必为一条早就领完的福利反复问上游。
+    // 见 `core::providers::onboarding_memory`）：本地事实、零上游请求，界面据此
+    // 直接渲染「已领取」并在进页面 / 签到后跳过自动查询，不必为一条早就领完的
+    // 福利反复问上游。
     let onboarding_rows_of = |provider: &str| -> Vec<Value> {
         accounts
             .iter()
@@ -196,9 +196,9 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
     };
     // 新手任务分组：Loomy（任务表）+ 小浣熊（首次桌面登录奖励）+ CodeArts
     // （运营活动里的新人注册礼那一条），执行体按 provider 分派（api::onboarding）。
-    // CodeArts 的账号在这里出现**不等于**它进每日签到链：本家仍不在
-    // `auto_checkin` 的提供商清单里（那是后端的定时任务），签到中心「签到后自动
-    // 补领」会替用户领这一条一次性新人礼 —— 领过之后上游不再回 claimable，
+    // CodeArts 这家**同时**在每日签到链里（2026-10-12 起，定时签到领的是运营活动里
+    // `USER_LOGIN` 那一条），但这一格是**另一条**活动：一次性的新人注册礼不在定时
+    // 链上，由签到中心「签到后自动补领」发起 —— 领过之后上游不再回 claimable，
     // 而结算记忆一落，这条自动路径连查询都不再发（见 codearts::onboarding）。
     let mut onboarding_rows = onboarding_rows_of("loomy");
     onboarding_rows.extend(onboarding_rows_of("raccoon"));
@@ -206,22 +206,13 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
     // OfficeAce 的「新手任务」与每日签到是同一个上游动作（见 officeace::onboarding），
     // 所以它也在这张分组表里 —— 前端按 server 给的 extras.onboarding 驱动，不硬编码家。
     onboarding_rows.extend(onboarding_rows_of("officeace"));
-    // CodeArts 的福利行带**本地领取台账**（`account.welfare`）—— 与下面 ZCode 行
-    // 带 `claimPlans` 同一个先例：台账是后端落盘的本地事实（day / accepted /
-    // confirmed），带出来零上游请求，不违反「快照零上游」；界面的「已领取」
-    // 标记按它判（北京时间的日界判定在前端 `welfareStateOf`，不在后端再抄一份）。
-    let welfare_rows: Vec<Value> = accounts
-        .iter()
-        .filter(|account| account_text(account, "provider") == "codearts")
-        .map(|account| {
-            json!({
-                "id": account_text(account, "id"),
-                "name": Value::from(account_text(account, "name")),
-                "provider": "codearts",
-                "welfare": account.get("welfare").cloned().unwrap_or(Value::Null),
-            })
-        })
-        .collect();
+    // CodeArts 的**福利行不再进这个快照**（2026-10-12）：每日福利已并入自动签到
+    // （`core::billing::checkin::checkin_for` 的 "codearts" 分支），它就在上面的
+    // `daily.providers` 里作为一家出现，领取结果也由那一行的 `checkinAt` /
+    // `checkedInToday` 表达。原先这里额外带一份 `account.welfare` 台账只为渲染
+    // 「今天已领几项」，而现在面板上没有任何地方读它 —— 留着一个没人渲染的字段，
+    // 下一次排查「自动领到底跑没跑」时就会有人去猜它的含义。台账本身仍写在账号
+    // 记录上（`accounts.data → welfare`），要核对领没领用运维脚本读它。
     let plan_rows: Vec<Value> = accounts
         .iter()
         .filter(|account| {
@@ -250,7 +241,6 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
         },
         "extras": {
             "onboarding": onboarding_rows,
-            "welfare": welfare_rows,
             "plans": plan_rows,
         },
         "auto": state.auto_checkin().state(),
