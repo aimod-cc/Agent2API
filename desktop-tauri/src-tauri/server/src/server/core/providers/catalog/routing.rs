@@ -176,9 +176,25 @@ pub struct ImageCapabilitySplit {
 /// 因此字符串 `"false"` 是**真**（非空串）—— 这不是疏漏，是生态里的一贯口径；
 /// 用户在模型管理页改的能力位覆盖写的就是布尔（见 `core::capability`）。
 ///
+/// **社区库补的值不算声明**（`capSources.supportsImages == "modelsdev"` 直接放行）：
+/// beta 的 `core::model_meta` 会把上游没声明的六个能力键由 models.dev 补齐，于是
+/// 「键存在」不再等于「这条通道实测过」。拿一份外部数据去剔候选家，方向与上面
+/// 那条「不知道就放行」相反 —— 社区库记的是模型在**厂商自己那套 API** 上的能力，
+/// 不是本网关这条通道的（`fill` 的模块头为此把优先级定成「上游 > models.dev」，
+/// 同一个理由用在路由上就是：它能填展示值，不能决定发给谁）。关掉该开关、或这个
+/// 模型没被收录时 `capSources` 里没有这一项，本函数行为与没有补齐层时逐字相同。
+///
 /// 传进来的条目要先经 [`entry_with_capabilities_flattened`] 展平：自定义家的
 /// 覆盖是嵌在 `capabilities` 里的，不展平就等于看不见用户改的东西。
 pub fn entry_refuses_images(entry: &Value) -> bool {
+    if entry
+        .get("capSources")
+        .and_then(|sources| sources.get("supportsImages"))
+        .and_then(Value::as_str)
+        == Some("modelsdev")
+    {
+        return false;
+    }
     entry
         .get("supportsImages")
         .filter(|value| !value.is_null())
@@ -209,6 +225,14 @@ pub fn entry_with_capabilities_flattened(entry: &Value) -> Value {
     }
     let mut flat = entry.clone();
     crate::server::core::capability::apply_overrides(&mut flat, &normalized);
+    // 来源标记要跟着改：覆盖层写进去的是「用户明确指定」，而 `capSources` 里
+    // 可能还留着补齐层那条 `modelsdev` —— 不改成 `user`，闸门会按那份旧标记把
+    // 用户亲手勾掉的「不支持图片」当成社区库的猜测放行。内置家不走这里：它们的
+    // 覆盖在 `model_rules::apply_capability_overrides` 里应用，那边自己调 `mark_user`。
+    crate::server::core::model_meta::mark_user(
+        &mut flat,
+        &normalized.keys().cloned().collect::<Vec<_>>(),
+    );
     flat
 }
 
@@ -351,6 +375,71 @@ mod vision_gate {
         // 关键的一条：目录没给这个键 = 不知道，不是不支持
         assert!(!entry_refuses_images(&json!({"id": "m"})), "缺键必须放行");
         assert!(!entry_refuses_images(&json!({})));
+    }
+
+    /// 来源为 `modelsdev` 的假值**不算声明**（beta 的 `core::model_meta` 补齐层）。
+    ///
+    /// 补齐之后「键存在」不再等于「这条通道实测过」：社区库记的是模型在厂商自己
+    /// API 上的能力。让它去剔候选家，等于凭一份外部数据把健康的账号移出链路，
+    /// 方向与本文件「不知道就放行」那条主轴相反。反过来，`upstream` / `user` 两个
+    /// 来源仍按原样判 —— 缺 `capSources`（开关关掉 / 未收录）时行为逐字不变。
+    #[test]
+    fn a_modelsdev_value_is_not_a_declaration_but_upstream_and_user_are() {
+        assert!(
+            !entry_refuses_images(&json!({
+                "id": "m", "supportsImages": false,
+                "capSources": {"supportsImages": "modelsdev"}
+            })),
+            "社区库补的 false 不该把这家从候选链里剔掉"
+        );
+        for source in ["upstream", "user"] {
+            assert!(
+                entry_refuses_images(&json!({
+                    "id": "m", "supportsImages": false,
+                    "capSources": {"supportsImages": source}
+                })),
+                "{source} 声明的 false 仍要生效"
+            );
+        }
+        // 别的键有来源记录、这个键没有 → 视作清单原值，照判
+        assert!(entry_refuses_images(&json!({
+            "id": "m", "supportsImages": false,
+            "capSources": {"supportsToolCall": "modelsdev"}
+        })));
+    }
+
+    /// 自定义家的覆盖展平时必须把来源改成 `user`，否则用户的勾会被旧标记吃掉。
+    ///
+    /// `capability::apply_overrides` 只写值不记来源（记来源的是 `model_rules` 那条
+    /// 路径，自定义家不经过它），所以这里不补一次 `mark_user`，一条「补齐层填过
+    /// false、用户在管理页勾成 true」的条目会两个方向都错：闸门放行了本该剔的家，
+    /// 而反向（用户勾成 false）时又因 modelsdev 标记放行 —— 后者是静默失效。
+    #[test]
+    fn flattening_a_custom_override_rewrites_the_capability_source() {
+        let entry = json!({
+            "id": "m",
+            "supportsImages": true,
+            "capSources": {"supportsImages": "modelsdev"},
+            "capabilities": {"supportsImages": false}
+        });
+        let flat = entry_with_capabilities_flattened(&entry);
+        assert_eq!(flat.get("supportsImages"), Some(&json!(false)), "覆盖要落到顶层");
+        assert!(
+            flat.pointer("/capSources/supportsImages")
+                .and_then(|value| value.as_str())
+                == Some("user"),
+            "用户勾过的键不能再挂着补齐层的来源标记"
+        );
+        assert!(entry_refuses_images(&flat), "展平后的条目按用户声明生效");
+        // 反向：用户勾成 true、补齐层说 false —— 也不能被旧标记放行掉……本来放行就是
+        // 不剔家，这里钉的是「值以用户为准」这一条
+        let reverse = entry_with_capabilities_flattened(&json!({
+            "id": "m",
+            "supportsImages": false,
+            "capSources": {"supportsImages": "modelsdev"},
+            "capabilities": {"supportsImages": true}
+        }));
+        assert!(!entry_refuses_images(&reverse));
     }
 
     /// 闸门读完划分之后的**四个分支次序**：图可剥就一个家都不剔。
