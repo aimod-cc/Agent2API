@@ -96,6 +96,9 @@ async fn forward_chat(
             allowed_providers: scope,
             // 两个协议入口都不是模型测试：不钉账号，走全局优先级队列
             pinned_account: None,
+            // 关闭的模型对生产请求保持「模型已在网关中关闭」（`ignore_model_gate`
+            // 是模型测试的直达跳，见 `ForwardRequest` 的说明）
+            ignore_model_gate: false,
         })
         .await;
     outcome

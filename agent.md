@@ -1,4 +1,4 @@
-# Agent.MD — 发版流程
+# Agent.MD
 
 > 本文档面向维护者与 AI 代理：Agent2API（workbuddy）桌面端 + Docker 镜像的**标准发版流程**。
 > 所有发布动作都由 `.github/workflows/` 下的两个工作流自动完成，人工只负责「提交、打 tag、挂 GitHub Release、验收」。
@@ -35,6 +35,7 @@ GitHub 的归属规则只有一条：**提交头里的 author 邮箱，出现在
 - **用 GitHub 网页上的合并按钮**（`Merge pull request` / `Squash and merge` / `Rebase and merge`）：三种都会保留原作者为 commit 的 author；squash 时 PR 里的多位作者会一并进 co-author 名单。这是默认做法。
 - **禁止「本地摘取重提」**：把对方的改动拷过来自己提交（本地 `git merge --squash` 后自己 commit、重抄一遍改动、或改了 author 再提交）都不行 —— 这样 author 是合并者，贡献者的署名在 GitHub 侧完全不可见。本仓库历史上出现过这种情况，别再来一次。
 - **确实要在本地处理时**（有冲突要解、要顺带调整），必须把署名带上：单个原作者用 `git commit --author="原作者 <原作者邮箱>"`；一个提交里有多个人的工作，在提交信息末尾加 trailer `Co-authored-by: 名字 <邮箱>`（GitHub 会把 co-author 一并计入贡献者）。
+- **AI 不计入贡献者署名（特例）**：贡献者提交信息末尾的 `Co-Authored-By: Claude Code <…>` 这类 AI trailer，合并时一律摘除 —— GitHub 会把它渲染成共同作者，进了 `main` 就出现在 Contributors 名单里，而 AI 不是贡献者。摘除只删 trailer 行本身，author 与其余提交信息逐字保留；正文里对 AI 产品的**技术性提及**（「支持 Claude Code 客户端」「Claude 兼容端点」之类）与此无关，不动。摘除动的是已合入分支的历史，趁合并后、发版前尽早做（`git filter-branch --msg-filter` 摘行后 force-push），拖到发版后就得重写 `main`。
 - **邮箱必须能对上账号**：用对方 GitHub 账号里**已验证**的地址；对方想保密就用 GitHub 给的 `ID+用户名@users.noreply.github.com`（在对方账号的 Emails 设置里查）。内网地址、`user@机器名` 这类邮箱永远关联不上账号，提交会被记成匿名。
 
 合并后顺手核对一次：`git log --format='%an <%ae>' -1 <合并提交>`，或在 PR 页面看 commit 旁的头像是否指向原作者。

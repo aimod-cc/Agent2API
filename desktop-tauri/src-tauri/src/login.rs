@@ -113,6 +113,390 @@ fn social_restore_script() -> String {
     )
 }
 
+/// KukuAI 短信自动流程脚本：自动填手机号、点发码、等验证码、自动填码登录。
+///
+/// ── 登录态交回不由脚本做 ─────────────────────────────────────
+/// passport 登录成功后跳转 `success.html`，`BDUSS` 是 **HttpOnly** Cookie，
+/// `document.cookie` 读不到 —— 交回由壳侧在 `run_embedded` 的等待循环里
+/// 检测 `success.html` 跳转后读 WebView2 的 Cookie 存储完成
+/// （`cookies()` 含 HttpOnly，见 [`submit_kuku_login`]）。脚本只负责
+/// 「替用户点」：手机号由 `start_kuku_sms` 带进来，验证码由
+/// `submit_kuku_sms_code` 经 `window.eval("window.__kukuSmsCode='…'")`
+/// 写入页面变量（脚本轮询到就填）。
+///
+/// ── 图形验证码天然兼容 ─────────────────────────────────────
+/// passport 对异常 IP / 高频可能要求图形验证码（页面上多一个输入框）。脚本
+/// 检测到验证码输入框可见就经 `document.title` 上报（壳的监视任务据此把
+/// 隐藏窗口亮出来），用户填完图形验证码后短信正常发出，脚本继续自动走。
+///
+/// ── React 受控输入 ─────────────────────────────────────────
+/// passport 表单是 React 受控组件，直接 `el.value = x` 不会进 React 状态，
+/// 必须走原生 value setter + `input` 事件（页面结构用的是 `TANGRAM__PSP_4`
+/// 前缀，实测 `loginMerge.html` 与通用 passport 弹窗同一套 DOM，
+/// 见 asar 对读与 2026-10-07 浏览器实测）。
+fn kuku_sms_script(phone: &str) -> String {
+    format!(
+        r#"
+(function () {{
+  // ── 防重复注入 ──────────────────────────────────────────────
+  // 壳侧会**周期性重新注入**本脚本（initialization_script 的注入时机在
+  // WebView2 首次导航时可能早于 location 就绪，只靠它脚本有没跑起来的
+  // 风险；周期性 eval 兜底）。同一 document 内重复执行由这个 flag 拦住；
+  // 页面导航后 window 重置，flag 自然清零、脚本重新初始化。
+  if (window.__kukuInjected) return;
+  window.__kukuInjected = true;
+  var PHONE = '{phone}';
+  // ── 宽容选择器（不写死 TANGRAM__PSP_4 前缀）──────────────────
+  // 组件实例编号随页面版本浮动（PSP_4 只是 loginMerge.html 当前值），只有
+  // `__smsPhone` 这类**后缀**是模板层稳定的。实测（2026-10-07）手机号框
+  // name 是 username、动态密码框 name 是 password，与账密表单重名 ——
+  // 所以**不按 name 匹配**，一律走 id 后缀。
+  function q(sel) {{ return document.querySelector(sel); }}
+  function findAll(sel) {{ return Array.prototype.slice.call(document.querySelectorAll(sel)); }}
+  function phoneInput() {{ return q('[id$="__smsPhone"]'); }}
+  function codeInput() {{ return q('[id$="__smsVerifyCode"]'); }}
+  function sendBtn() {{
+    return findAll('button, a').find(function (n) {{
+      return /发送动态密码|获取验证码/.test(n.textContent || '');
+    }});
+  }}
+  function submitBtn() {{ return q('[id$="__smsSubmit"]'); }}
+  // ── 状态上报（壳侧监视任务读 document.title 判定，见 start_kuku_sms）──
+  // eval 拿不到页面变量（fire-and-forget），title 是壳能同步读的通道。
+  // 中间态（READY/FILLED/CLICKED）让监视任务与前端能看出脚本走没走。
+  var T_READY = 'WB_KUKU_READY';          // 脚本已启动（页面加载完成）
+  var T_FILLED = 'WB_KUKU_PHONE_FILLED';  // 手机号已填入
+  var T_CLICKED = 'WB_KUKU_SEND_CLICKED'; // 已点「发送动态密码」
+  var T_SENT = 'WB_KUKU_SMS_SENT';        // 短信已发出：保持隐藏等用户填码
+  var T_CAPTCHA = 'WB_KUKU_NEED_CAPTCHA'; // 需要图形验证码：亮窗让用户填
+  var T_LOGIN_OK = 'WB_KUKU_LOGIN_OK';    // 登录成功（同页「提交成功」形态）
+  function report(title) {{
+    try {{ document.title = title; }} catch (e) {{}}
+  }}
+  function loginDone() {{
+    // loginMerge.html 登录成功**不跳转**，停在本页显示「好开心，提交成功啦！」
+    // （实测 2026-10-07）。壳侧据此触发交回（BDUSS 由壳读 Cookie 存储）。
+    var body = (document.body && document.body.innerText) || '';
+    return /提交成功|登录成功/.test(body);
+  }}
+  function sendDone() {{
+    // 发码成功的标志：发送按钮进入冷却倒计时（文本变成「重新发送(48)」
+    // 或含数字+s 的倒计时，且 disabled）。注意**不能**再用「发送动态密码」
+    // 匹配 —— 发码后按钮文本就变了，用旧正则永远认不出（真实 bug）。
+    var b = findAll('button').find(function (n) {{
+      return n.disabled && /重新发送|\d+\s*s/.test(n.textContent || '');
+    }});
+    return Boolean(b);
+  }}
+  function captchaBoxVisible() {{
+    // 图形验证码输入框（passport 风控弹窗里的 verifyCode）。
+    // 用户名登录表单也常驻一个 verifyCode 框 —— 但短信流程点发码后
+    // 若按钮已进入倒计时（短信已发），那个框与短信无关，见下方顺序。
+    var boxes = findAll('input[id*="verifyCode"], input[id*="vcode"]');
+    var v = boxes.find(function (n) {{
+      var style = window.getComputedStyle(n);
+      return style.display !== 'none' && style.visibility !== 'hidden';
+    }});
+    return Boolean(v);
+  }}
+  var timer = setInterval(function () {{
+    try {{
+      // 还没导航到百度域（脚本可能先注入在 about:blank）：等下一轮。
+      // 检查放在轮询里而不是脚本顶层 —— 顶层检查会把「注入早于 location
+      // 就绪」的这一次执行整个吃掉（真实踩过：脚本静默不工作）。
+      if (location.hostname.indexOf('baidu.com') === -1) return;
+      // 0. 状态上报（每轮都写，页面不会自己改 title）。顺序重要：
+      //    登录成功（页面出现「提交成功」）最优先 —— 此时发送按钮倒计时
+      //    可能还在，不能让它盖掉登录成功信号；短信已发（倒计时）次之
+      //    （此时即使页面有可见验证码框也**不是**拦截，实测 2026-10-07）。
+      if (loginDone()) {{
+        report(T_LOGIN_OK);
+      }} else if (sendDone() || window.__kukuSentOk) {{
+        window.__kukuSentOk = true;
+        report(T_SENT);
+      }} else if (captchaBoxVisible()) {{
+        report(T_CAPTCHA);
+      }} else if (!window.__kukuReady) {{
+        window.__kukuReady = true;
+        report(T_READY);
+      }}
+      // 1. 切到「短信快捷登录」tab（点一次即可；tab 不存在说明页面已是短信形态）
+      if (!window.__kukuTab) {{
+        var tab = q('a.pass-sms-btn') || findAll('a, span, div').find(function (n) {{
+          return /短信快捷登录|短信登录/.test(n.textContent || '');
+        }});
+        if (tab) {{ window.__kukuTab = true; tab.click(); }}
+      }}
+      // 2. 填手机号 + 点「发送动态密码」
+      var phone = phoneInput();
+      if (phone && !window.__kukuSent) {{
+        window.__kukuSent = true;
+        report(T_FILLED);
+        var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        setter.call(phone, PHONE);
+        phone.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        setTimeout(function () {{
+          var b = sendBtn();
+          if (b) {{
+            report(T_CLICKED);
+            b.click();
+          }}
+        }}, 400);
+      }}
+      // 3. 填验证码 + 点「登录并添加」所在的提交按钮
+      var code = codeInput();
+      if (code && window.__kukuSmsCode) {{
+        // 填码只做一次（页面不清空就不用重填）；点提交按节流重试 ——
+        // passport 的提交按钮填码瞬间可能还 disabled（风控校验没走完），
+        // 一次性 flag 会永远错过那次点击。
+        if (!window.__kukuCodeFilled) {{
+          window.__kukuCodeFilled = true;
+          var setter2 = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+          setter2.call(code, window.__kukuSmsCode);
+          code.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        }}
+        var sub = submitBtn();
+        if (sub && !sub.disabled && !window.__kukuSubmitting) {{
+          window.__kukuSubmitting = true;
+          sub.click();
+          // 若点击无效（按钮校验后恢复），8 秒后允许再试一次
+          setTimeout(function () {{ window.__kukuSubmitting = false; }}, 8000);
+        }}
+      }}
+      // 不做次数上限：脚本随窗口存活，登录完成（壳读到 Cookie 后任务 Done）
+      // 或窗口销毁才停 —— 用户拖很久才填码 / 手动补图形验证码时仍然要活着。
+    }} catch (e) {{}}
+  }}, 500);
+}})();
+"#,
+        phone = phone,
+    )
+}
+
+/// KukuAI 短信自动流程的发起：打开登录窗口（注入自动脚本）后**立即返回**，
+/// 窗口在后台轮询 —— 验证码由 [`submit_kuku_sms_code`] 在用户收码后写入。
+///
+/// ── 为什么不在这里等完成 ────────────────────────────────────
+/// 短信登录是「发码 → 收码 → 输码」两步交互，发码后窗口必须继续等用户输码；
+/// 发起命令一等到完成，前端就永远等不到 verify 那一步了。因此这里
+/// **spawn 后台等待循环**（复用 `run_embedded`：等 `/wait` Done / 失败 / 超时
+/// 后自行关窗），命令本身立刻返回。
+pub async fn start_kuku_sms(app: &AppHandle, phone: &str) -> Result<serde_json::Value, String> {
+    if current_login(app).is_some() {
+        return Err("已有登录流程在进行，请先完成当前登录或等待超时".to_string());
+    }
+    let started = gateway::call(
+        "POST",
+        "/api/session/login/start",
+        Some(&json!({ "provider": "kuku" })),
+    )
+    .await?;
+    let login_state = started
+        .get("state")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("后端未返回登录状态")?
+        .to_string();
+    let auth_url = started
+        .get("authUrl")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("后端未返回登录链接，请检查网络")?
+        .to_string();
+
+    {
+        let state = app.state::<crate::state::AppState>();
+        let mut guard = state.login.lock().map_err(|_| "登录状态锁不可用")?;
+        *guard = Some(ActiveLogin {
+            state: login_state.clone(),
+            edition: String::new(),
+            mode: "sms".into(),
+            provider: "kuku".to_string(),
+        });
+    }
+    emit_login_state(
+        app,
+        LoginState {
+            active: true,
+            mode: Some("sms".into()),
+            edition: None,
+            provider: Some("kuku".to_string()),
+        },
+    );
+
+    // 后台并行两条：
+    //   1. run_embedded —— 窗口全程隐藏，脚本自动发码 / 等码 / 登录，
+    //      完成后（Done / 失败 / 超时）自己关窗并清状态；
+    //   2. 窗口监视 —— 只负责「需要人工介入时亮窗」：
+    //      - 脚本上报「需要图形验证码」（页面出现验证码输入框）→ 立即亮窗，
+    //        用户填完图形验证码后短信发出，脚本继续自动走；
+    //      - 90 秒没等到发码确认（页面加载慢 / 结构变化等）→ 兜底亮窗，
+    //        让用户直接在那个窗口里手动完成登录（脚本仍会交回 BDUSS）。
+    //   失败只记日志：真正的文案在后端任务里，`submit_kuku_sms_code` 轮询
+    //   `/wait` 时会读到并透给前端。
+    let app_for_task = app.clone();
+    let login_state_for_task = login_state.clone();
+    let phone_for_task = phone.to_string();
+    let monitor_label = login_window_label(&login_state_for_task);
+    tauri::async_runtime::spawn(async move {
+        let monitor = async {
+            // 每 1 秒读一次窗口标题（脚本经 document.title 上报状态）。
+            // 三级兜底，不让用户干等：
+            //   - 10 秒内窗口没有任何脚本状态 → 页面没加载 / 脚本没启动，
+            //     立即亮窗（用户能看到真实页面）；
+            //   - 20 秒内没确认发码成功 → 发码可能被风控拦，亮窗；
+            //   - 30 秒最终兜底亮窗。
+            // 每次状态变化：壳日志 + `login:kuku-status` 事件推给前端
+            // （面板提示行实时显示进度，用户不再「点了没反应」）。
+            let mut last_seen = String::new();
+            let emit_status = |status: &str| {
+                let _ = app_for_task.emit("login:kuku-status", json!({ "status": status }));
+            };
+            let mut saw_script = false;
+            for tick in 0..30 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let Some(window) = app_for_task.get_webview_window(&monitor_label) else {
+                    return; // 窗口已销毁（登录完成/取消），无事可监
+                };
+                let title = window.title().unwrap_or_default();
+                if title != last_seen {
+                    eprintln!("[login] KukuAI 短信窗口状态: {title}");
+                    last_seen = title.clone();
+                    match title.as_str() {
+                        "WB_KUKU_SMS_SENT" => {
+                            emit_status("sent");
+                            return; // 短信已发出：保持隐藏，等用户填码
+                        }
+                        "WB_KUKU_NEED_CAPTCHA" => {
+                            emit_status("captcha");
+                            let _ = window.show();
+                            return;
+                        }
+                        "WB_KUKU_READY" => {
+                            saw_script = true;
+                            emit_status("opening");
+                        }
+                        "WB_KUKU_PHONE_FILLED" => {
+                            saw_script = true;
+                            emit_status("filling");
+                        }
+                        "WB_KUKU_SEND_CLICKED" => {
+                            saw_script = true;
+                            emit_status("sending");
+                        }
+                        _ => {}
+                    }
+                }
+                // 10 秒内脚本没有任何动静：页面没加载 / 脚本没注入 → 亮窗
+                if tick == 10 && !saw_script {
+                    eprintln!("[login] KukuAI 短信窗口 10 秒无脚本状态，亮窗让用户手动完成");
+                    emit_status("timeout");
+                    let _ = window.show();
+                    return;
+                }
+            }
+            // 30 秒未确认发码：亮窗兜底（用户可手动完成，登录态仍由壳读回）
+            if let Some(window) = app_for_task.get_webview_window(&monitor_label) {
+                eprintln!("[login] KukuAI 短信发码 30 秒未确认，亮窗让用户手动完成");
+                emit_status("timeout");
+                let _ = window.show();
+            }
+        };
+        let run = run_embedded(
+            &app_for_task,
+            "kuku",
+            &auth_url,
+            "登录 KukuAI 账号",
+            &login_state_for_task,
+            false,
+            Some(&phone_for_task),
+            true, // start_hidden：窗口隐藏，全程脚本后台操作
+        );
+        let (result, ()) = tokio::join!(run, monitor);
+        if result.as_ref().map(|value| value.get("ok").and_then(serde_json::Value::as_bool)) != Ok(Some(true)) {
+            let _ = gateway::call(
+                "POST",
+                "/api/session/login/cancel",
+                Some(&json!({ "state": login_state_for_task.clone() })),
+            )
+            .await;
+        }
+        clear_active_login(&app_for_task, &login_state_for_task);
+        if let Err(error) = result {
+            eprintln!("[login] KukuAI 短信登录后台流程结束: {error}");
+        }
+    });
+
+    Ok(json!({ "state": login_state }))
+}
+
+/// KukuAI 短信自动流程的收码：把用户收到的验证码写入登录窗口，等登录完成。
+///
+/// 写入方式：`window.eval("window.__kukuSmsCode='…'")` —— 窗口脚本每 500ms
+/// 轮询这个变量，读到就自动填码点登录（见 [`kuku_sms_script`] 第 3 步）。
+///
+/// 然后轮询 `/wait` 直到后端任务 Done（登录完成、账号已落）或失败 / 超时；
+/// 完成后调 `/api/accounts` 取该账号返回 `{account, list}`（与
+/// `POST /api/accounts` 的响应同形状，前端直接交给「已添加账号」收尾逻辑）。
+pub async fn submit_kuku_sms_code(
+    app: &AppHandle,
+    code: &str,
+) -> Result<serde_json::Value, String> {
+    let active = current_login(app).ok_or("没有进行中的 KukuAI 短信登录，请先点「获取验证码」")?;
+    if active.provider != "kuku" || active.mode != "sms" {
+        return Err("没有进行中的 KukuAI 短信登录，请先点「获取验证码」".to_string());
+    }
+    let window_label = login_window_label(&active.state);
+    let Some(window) = app.get_webview_window(&window_label) else {
+        return Err("KukuAI 登录窗口已关闭，请重新发起短信登录".to_string());
+    };
+    let code = code.trim().to_string();
+    if code.len() != 6 || !code.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err("请填写 6 位数字验证码".to_string());
+    }
+    // 等登录完成（与 run_embedded 的等待循环同一出口：/wait 三态）
+    let deadline = tokio::time::Instant::now() + LOGIN_TIMEOUT;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err("等待登录完成超时，请重试".to_string());
+        }
+        // 每轮重写验证码变量（fire-and-forget）：passport 页面可能在发码后
+        // 刷新（图形验证码 / 风控重渲染），一次性写入会随旧页面一起丢 ——
+        // 窗口脚本每 500ms 轮询这个变量，新页面里读到就自动填码提交。
+        let _ = window.eval(&format!("window.__kukuSmsCode = '{}';", code));
+        tokio::time::sleep(POLL_INTERVAL).await;
+        match poll_once(&active.state).await {
+            PollOutcome::Pending => continue,
+            PollOutcome::Done(_) => break,
+            PollOutcome::Failed(error) => return Err(error),
+            PollOutcome::Unreachable(error) => {
+                if task_gone(&error) {
+                    return Err("登录已被取消或过期，请重新发起".to_string());
+                }
+                eprintln!("[login] 读取登录进度失败（继续等待）: {error}");
+                continue;
+            }
+        }
+    }
+    // 完成：取账号列表，挑本次落的 KukuAI 账号返回（与添加账号响应同形状）
+    let accounts = gateway::call("GET", "/api/accounts", None)
+        .await
+        .map_err(|error| format!("登录完成，但读取账号列表失败：{error}"))?;
+    let list = accounts
+        .get("list")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let account = list
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .filter(|item| item.get("provider").and_then(serde_json::Value::as_str) == Some("kuku"))
+                .max_by_key(|item| item.get("addedAt").and_then(serde_json::Value::as_i64).unwrap_or(0))
+                .cloned()
+        })
+        .unwrap_or_else(|| serde_json::json!({ "provider": "kuku", "name": "KukuAI 账号" }));
+    Ok(json!({ "account": account, "list": list }))
+}
+
 /// workbuddy 登录窗口允许导航的域名，取自两版 cli/product.json 的
 /// internalDomain / externalDomain / iOADomain，外加扫码登录所需的微信/QQ 域名。
 ///
@@ -262,8 +646,24 @@ fn allowed_hosts(provider: &str) -> Option<&'static [&'static str]> {
         // Trae 必须显式列在这里：落进默认分支会拿到 WorkBuddy 的白名单，
         // 那张表**既没有** `trae.cn`（授权页）**也没有** `127.0.0.1`（回调），
         // 症状正是本文件上面警告的那种 —— 窗口一片空白，日志什么也看不出。
-        "catpaw" | "qoder" | "cline-free" | "cline-pass" | "autoclaw" | "autoclaw-intl"
-        | "accio" | "accio-cn" | "zcode" | "zcode-intl" | "codearts" | "trae" => None,
+        //
+        // Antigravity 同样不设限：授权页在 `accounts.google.com`，而 Google 账号
+        // 可能继续跳不可穷举的身份链路（二次验证 / 组织 SSO 等）；更要紧的是
+        // 回调落在**网关自己的** loopback 端口
+        // （`http://localhost:{网关端口}/oauth-callback`，见
+        // `providers::antigravity::oauth`）。那条 loopback 导航一旦被白名单拦下，
+        // 症状就是上面警告过的那种静默故障：用户明明授权成功，网关却永远等不到码
+        // —— 回调本身就是一次普通 HTTP 导航，没有可供回调识别兜底的协议特征。
+        //
+        // OfficeAce 同样不设限：授权页在 `auth.huaweicloud.com`，它会按用户选的
+        // 登录方式继续跳华为云账号 / 扫码等不可穷举的主机（与 CodeArts 同一情形）。
+        // **不用回本机** —— 授权码由网关**轮询云端**取回（`/v1/claw/auth/code`，
+        // 见 `providers::officeace::oauth` 的模块头），所以这里没有 CodeArts 那种
+        // loopback 回调要放行；但「不设限」仍是必须显式写出的选择（落进默认分支
+        // 会拿到 WorkBuddy 的白名单 → 窗口白屏）。
+        "catpaw" | "qoder" | "qoder-intl" | "cline-free" | "cline-pass" | "autoclaw"
+        | "autoclaw-intl" | "accio" | "accio-cn" | "zcode" | "zcode-intl" | "codearts" | "trae"
+        | "kuku" | "antigravity" | "officeace" => None,
         // WorkBuddy 的两个地区共用这一张表（表里 `workbuddy.ai` 那一行就是国际站
         // 的登录域）。**显式列出**而不是靠下面的默认分支：上面那条警告要求
         // 「新 provider 落到默认分支」必须是有意的选择，写出来才看得出是选过的
@@ -416,7 +816,10 @@ fn normalize_provider(provider: &str) -> Result<&'static str, String> {
         // 少了它前端会收到「未知的 provider」而登录按钮直接失败。
         "workbuddy-intl" => Ok("workbuddy-intl"),
         "raccoon" => Ok("raccoon"),
+        // Qoder 两个地区（2026-10 拆家后是独立 provider）：设备授权两站同构，
+        // 壳侧只透传 provider id，地区由后端按 id 反查（与 ZCode 同款）。
         "qoder" => Ok("qoder"),
+        "qoder-intl" => Ok("qoder-intl"),
         "catpaw" => Ok("catpaw"),
         "cline-free" => Ok("cline-free"),
         "cline-pass" => Ok("cline-pass"),
@@ -449,6 +852,25 @@ fn normalize_provider(provider: &str) -> Result<&'static str, String> {
         // 上游把这个地址按正则逐字校验），所以窗口**必须允许**导航到本机端口，
         // 否则用户点完授权、回调请求根本发不出去（见下面 allowed_hosts 的同一条）。
         "trae" => Ok("trae"),
+        // Antigravity：授权地址由**后端适配器**本地拼（Google OAuth 授权码，
+        // 见 `providers::antigravity::oauth::build_authorize_url`），壳侧只负责
+        // 开窗口与轮询 —— 与 CodeArts 同一条路。回调落在
+        // `http://localhost:{网关端口}/oauth-callback`（网关自己登记给 Google 的
+        // redirect_uri），所以窗口**必须允许**导航到本机端口（见下面
+        // allowed_hosts 的同一条），否则用户授权成功后网关永远等不到码。
+        "antigravity" => Ok("antigravity"),
+        // KukuAI（百度通行证）：授权地址由**后端适配器**拼（客户端同款登录页
+        // `passApi/html/loginMerge.html`，见 `providers::kuku::login::build_login_url`），
+        // 壳侧负责开窗口（短信自动流程注入脚本；网页登录入口已移除）、并在
+        // 登录成功跳转 `success.html` 后读 Cookie 存储交回网关
+        // （`POST /api/session/login/kuku/complete`，见 `run_embedded` 的
+        // 等待循环与 `submit_kuku_login`）。
+        "kuku" => Ok("kuku"),
+        // OfficeAce（华为云果办 / OfficeClaw）：授权地址由**后端适配器**现拼
+        // （先向云端要 state，见 `providers::officeace::oauth`），壳侧只负责开窗口
+        // 与轮询 —— 与 ZCode / CodeArts 同一条路。它的授权码由网关**轮询云端**
+        // 取回（云端回调页不往本机跳），所以窗口最后停在云端页上也不影响登录判定。
+        "officeace" => Ok("officeace"),
         other => Err(format!("不支持网页登录的提供商：{other}")),
     }
 }
@@ -517,6 +939,8 @@ pub async fn start_autoclaw_oauth(
             "登录 AutoClaw 国际版账号",
             &state,
             false,
+            None,
+            false,
         )
         .await
     };
@@ -571,8 +995,9 @@ fn emit_login_state(app: &AppHandle, state: LoginState) {
 enum PollOutcome {
     /// `{pending:true}`
     Pending,
-    /// `{done:true, session:…}`
-    Done,
+    /// `{done:true, …}` —— 携带任务载荷（`{account, warning…}`，登录收尾
+    /// 时透传给前端，例如 KukuAI 的「凭证已落库但未通过上游复核」警告）。
+    Done(serde_json::Value),
     /// `{done:true, error:…}` —— 终态，文案原样给用户
     Failed(String),
     /// 读不到结果：本地网关的传输层错误（连接失败 / 非 2xx 信封）。
@@ -597,7 +1022,7 @@ async fn poll_once(state: &str) -> PollOutcome {
     if let Some(error) = value.get("error").and_then(serde_json::Value::as_str) {
         return PollOutcome::Failed(error.to_string());
     }
-    PollOutcome::Done
+    PollOutcome::Done(value)
 }
 
 /// 判断一条等待期错误是不是「任务已被后端清理」（取消 / 过期）。
@@ -648,6 +1073,11 @@ pub async fn start(
     if provider == "raccoon" {
         return start_raccoon(app).await;
     }
+    // KukuAI：百度通行证官方登录页（适配器生成授权地址），登录成功后由壳侧
+    // 读 Cookie 存储交回网关（见 `submit_kuku_login`）。
+    if provider == "kuku" {
+        return start_kuku(app, &mode).await;
+    }
     // CatPaw：授权地址要问一次上游 `login-config`，且 token 由上游**推**到本网关
     // 的 loopback 回调上（见 core::login::catpaw）。同样没有 edition 维度。
     if provider == "catpaw" {
@@ -663,9 +1093,10 @@ pub async fn start(
     // （`cline-free` / `cline-pass`），池已经在 provider id 里，没有第二个旋钮 ——
     // 这里再算一遍 edition 就是多余的一处状态（还会与 provider 冲突时说不清谁算数）。
     let edition_id = match provider {
-        "qoder" => {
-            if edition == "intl" || edition == "global" { "intl" } else { "cn" }
-        }
+        // Qoder 两家 provider 各自固定地区（界面上是两张卡片，没有地区下拉），
+        // 归属已经在 provider id 里 —— 与 ZCode 同款，不再读 edition 形参。
+        "qoder" => "cn",
+        "qoder-intl" => "intl",
         // ZCode 的两个地区由 **provider 本身**决定（界面上是两张卡片，
         // 没有地区下拉，因此面板不会传 `edition`）。不看 `edition` 形参的
         // 后果只是标题里的「国内版/国际版」四个字，但既然信息已经在
@@ -729,7 +1160,9 @@ pub async fn start(
     // 其余家各自点名 —— 少写一家只会让标题显示成「登录 WorkBuddy 国内版账号」
     // 而实际打开的是别家的页面，用户第一眼就会以为是点错了按钮。
     let provider_label = match provider {
-        "qoder" => "Qoder",
+        // Qoder 两家品牌名自带地区（两张卡片、无地区下拉），标题不拼后缀
+        "qoder" => "Qoder 中国版",
+        "qoder-intl" => "Qoder 国际版",
         "cline-free" => "Cline Free",
         "cline-pass" => "Cline Pass",
         "catpaw" => "CatPaw",
@@ -745,14 +1178,21 @@ pub async fn start(
         // Trae 只有一家（国内 SOLO 通道；国际版是另一套协议、另立 provider id），
         // 品牌名里不需要地区
         "trae" => "Trae",
+        // Antigravity（Google 的 AI IDE）只有一家，没有地区之分
+        // （本仓 `providers::antigravity` 的模块头：端点全球统一）
+        "antigravity" => "Antigravity",
+        // OfficeAce 只有一家（自助 OAuth 一条链，没有地区/版本概念），品牌名里
+        // 不需要地区
+        "officeace" => "OfficeAce 果办",
         _ => "WorkBuddy",
     };
-    // 窗口标题：Cline 两家的池、ZCode 两家的地区、CodeArts / Trae 的单一家
-    // 都已经在品牌名里，不再拼 edition 后缀（否则会出现「登录 Cline Free 国内版
-    // 账号」「登录 ZCode 国内版 国内版账号」这种说不通的标题）
+    // 窗口标题：Cline 两家的池、ZCode 两家的地区、CodeArts / Trae / OfficeAce
+    // 的单一家都已经在品牌名里，不再拼 edition 后缀（否则会出现「登录 Cline Free
+    // 国内版账号」这种说不通的标题）
     let title = if matches!(
         provider,
-        "cline-free" | "cline-pass" | "zcode" | "zcode-intl" | "codearts" | "trae"
+        "cline-free" | "cline-pass" | "zcode" | "zcode-intl" | "codearts" | "trae" | "qoder"
+        | "qoder-intl" | "antigravity" | "officeace"
     ) {
         format!("登录 {provider_label} 账号")
     } else {
@@ -775,7 +1215,7 @@ pub async fn start(
     let result = if use_external {
         open_external(app, &auth_url, edition_label, &login_state).await
     } else {
-        run_embedded(app, provider, &auth_url, &title, &login_state, social_restore).await
+        run_embedded(app, provider, &auth_url, &title, &login_state, social_restore, None, false).await
     };
 
     if result.as_ref().map(|value| value.get("ok").and_then(serde_json::Value::as_bool)) != Ok(Some(true)) {
@@ -830,7 +1270,75 @@ async fn start_raccoon(app: &AppHandle) -> Result<serde_json::Value, String> {
     // social_restore 传 false：第三方入口恢复只针对 WorkBuddy 的登录页
     // （`run_embedded` 里也只对 provider == "workbuddy" 注入脚本），小浣熊
     // 没有这个开关概念，直传 false 表明「不参与这项能力」。
-    let result = run_embedded(app, "raccoon", &auth_url, "登录小浣熊账号", &login_state, false).await;
+    let result = run_embedded(app, "raccoon", &auth_url, "登录小浣熊账号", &login_state, false, None, false).await;
+    if result.as_ref().map(|value| value.get("ok").and_then(serde_json::Value::as_bool)) != Ok(Some(true)) {
+        let _ = gateway::call("POST", "/api/session/login/cancel", Some(&json!({ "state": login_state }))).await;
+    }
+    clear_active_login(app, &login_state);
+    result
+}
+
+/// KukuAI 网页登录：**百度通行证官方登录页 + 壳侧读 Cookie 存储交回**。
+///
+/// 与其它家网页登录的差别（见 `providers/kuku/login.rs` 的模块头）：
+/// passport 登录成功后的跳转不携带授权码（凭证在 `.baidu.com` 域 Cookie 里），
+/// 因此不走「导航拦截 → 提交回调 URL」那条链，而是由壳侧在窗口跳转
+/// `success.html` 后读 WebView2 的 Cookie 存储（`BDUSS` 是 HttpOnly，
+/// 页面脚本读不到）POST 网关的 `POST /api/session/login/kuku/complete`
+/// （见 `run_embedded` 的等待循环与 `submit_kuku_login`）。
+///
+/// 前端已不提供网页登录入口（短信流程的隐藏窗口覆盖了同一页面），此函数
+/// 作为防御性保留（`start` 命令仍可能被老版本调用）。
+async fn start_kuku(app: &AppHandle, mode: &str) -> Result<serde_json::Value, String> {
+    // 登录态由壳侧读登录窗口的 Cookie 存储交回（见 `submit_kuku_login`）——
+    // 系统浏览器里壳读不到，登录完成网关等不到 Cookie。因此 external 模式
+    // 直接拒绝，不静默退回内嵌（用户点了 external 却弹出内嵌窗口，是
+    // 「按钮与行为对不上」）。
+    if mode == "external" {
+        return Err(
+            "KukuAI 的登录依赖壳侧读取登录窗口的 Cookie，只支持内嵌窗口；\
+             请用「内嵌窗口」发起，或改用「粘贴 Cookie」添加账号"
+                .to_string(),
+        );
+    }
+    let started = gateway::call(
+        "POST",
+        "/api/session/login/start",
+        Some(&json!({ "provider": "kuku" })),
+    )
+    .await?;
+    let login_state = started
+        .get("state")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("后端未返回登录状态")?
+        .to_string();
+    let auth_url = started
+        .get("authUrl")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("后端未返回登录链接，请检查网络")?
+        .to_string();
+
+    {
+        let state = app.state::<crate::state::AppState>();
+        let mut guard = state.login.lock().map_err(|_| "登录状态锁不可用")?;
+        *guard = Some(ActiveLogin {
+            state: login_state.clone(),
+            edition: String::new(),
+            mode: mode.into(),
+            provider: "kuku".to_string(),
+        });
+    }
+    emit_login_state(
+        app,
+        LoginState {
+            active: true,
+            mode: Some(mode.into()),
+            edition: None,
+            provider: Some("kuku".to_string()),
+        },
+    );
+
+    let result = run_embedded(app, "kuku", &auth_url, "登录 KukuAI 账号", &login_state, false, None, false).await;
     if result.as_ref().map(|value| value.get("ok").and_then(serde_json::Value::as_bool)) != Ok(Some(true)) {
         let _ = gateway::call("POST", "/api/session/login/cancel", Some(&json!({ "state": login_state }))).await;
     }
@@ -897,7 +1405,7 @@ async fn start_catpaw(
         open_external(app, &auth_url, "CatPaw 官方登录页", &login_state).await
     } else {
         // social_restore 传 false：与小浣熊同理，这项能力只属于 WorkBuddy 的登录页。
-        run_embedded(app, "catpaw", &auth_url, "登录 CatPaw 账号", &login_state, false).await
+        run_embedded(app, "catpaw", &auth_url, "登录 CatPaw 账号", &login_state, false, None, false).await
     };
     if result.as_ref().map(|value| value.get("ok").and_then(serde_json::Value::as_bool)) != Ok(Some(true)) {
         let _ = gateway::call("POST", "/api/session/login/cancel", Some(&json!({ "state": login_state }))).await;
@@ -946,7 +1454,9 @@ async fn open_external(
         }
         match poll_once(login_state).await {
             PollOutcome::Pending => continue,
-            PollOutcome::Done => return Ok(json!({ "ok": true, "external": true })),
+            PollOutcome::Done(payload) => {
+                return Ok(json!({ "ok": true, "external": true, "payload": payload }))
+            }
             PollOutcome::Failed(error) => {
                 // 任务已落定失败（后端写进任务的终态错误）：立刻透出真实原因，
                 // 不再把它盖成「等待超时」——小浣熊那条链上的「授权码已失效 /
@@ -975,6 +1485,16 @@ async fn open_external(
 /// `social_restore` 是**已经算好的结论**（调用方已按 provider 与版本收窄，见 `start`）：
 /// 为 true 时注入 [`social_restore_script`] 并放行第三方域名 —— 两项必须成对生效：
 /// 只注入不放行，点了 Google 登录会因导航被拦而白屏。
+///
+/// `kuku_phone`：**KukuAI 短信自动流程**的手机号（`Some` 时注入
+/// [`kuku_sms_script`]：脚本自动填号发码、等验证码、自动登录 —— 验证码由
+/// `submit_kuku_sms_code` 经 `window.eval` 写入页面变量；登录态由壳侧在
+/// 等待循环里读 Cookie 存储交回，见 [`submit_kuku_login`]）。
+/// `None` = 网页登录（用户手动操作，交回同样走壳侧读 Cookie）。
+///
+/// `start_hidden`：窗口**以隐藏状态创建**（KukuAI 短信流程用：整个登录
+/// 由脚本后台完成，用户不该看到网页 —— 只有遇到图形验证码等需要人工介入
+/// 的情况才由调用方把窗口亮出来，见 `start_kuku_sms` 的监视任务）。
 async fn run_embedded(
     app: &AppHandle,
     provider: &'static str,
@@ -982,6 +1502,8 @@ async fn run_embedded(
     title: &str,
     login_state: &str,
     social_restore: bool,
+    kuku_phone: Option<&str>,
+    start_hidden: bool,
 ) -> Result<serde_json::Value, String> {
     let window_label = login_window_label(login_state);
     // ── 每次登录一个独立环境（修复：第二次添加账号会看到上一个账号的登录态）──
@@ -1005,6 +1527,26 @@ async fn run_embedded(
     // Electron 版的 `callbackSeen` 同一用途。
     let callback_seen = Arc::new(AtomicBool::new(false));
     let login_state_owned = login_state.to_string();
+    // KukuAI 登录态只交回一次（主站登录的 Cookie 检测每拍触发，
+    // 成功后立刻交回；重复 POST complete 虽然幂等，但没有必要多发）。
+    let kuku_submitted = Arc::new(AtomicBool::new(false));
+    // KukuAI 主站方案的 Cookie 检测节拍：
+    //   - **导航事件**（on_navigation）计数变化 → 下一拍立即读 cookie
+    //     （用户登录时必然经过导航：跳 passport、回跳主站）；
+    //   - 每 4 拍（8 秒）兜底读一次（用户登录后长时间不导航也不漏）；
+    //   - 首次发现 BDUSS 后再等 4 秒才交回：登录瞬间影子 cookie
+    //     （BDUSS_BFESS 等）可能尚未刷新完，立刻交回会带着旧影子值被判
+    //     「未登录」（userreport errno=-6，2026-10-07 真实踩过）。
+    let mut kuku_check_tick: u32 = 0;
+    let kuku_nav_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let mut kuku_last_nav: u64 = 0;
+    let nav_counter_for_check = kuku_nav_counter.clone();
+    let nav_counter_for_nav = kuku_nav_counter.clone();
+    let mut kuku_bduss_seen_at: Option<tokio::time::Instant> = None;
+    // 交回失败后的退避（30 秒内不重复提交）：后端那次复核失败多为上游
+    // 临时风控限流（同一凭证几分钟后即恢复，2026-10-07 实测对照），
+    // 密集重试只会延长风控窗口。
+    let mut kuku_retry_block_until: Option<tokio::time::Instant> = None;
 
     // 导航拦截与弹窗拦截**共用同一个标志**：两种入口收到的可能是同一个回调
     // （页面先改 location、再被 WebView2 派生出一条弹窗请求），分开各一个标志
@@ -1028,6 +1570,7 @@ async fn run_embedded(
         .title(title.to_string())
         .inner_size(1100.0, 820.0)
         .min_inner_size(760.0, 560.0)
+        .visible(!start_hidden)
         .center();
 
     // 恢复第三方登录入口：登录页按上游开关把 Google / GitHub / X 隐藏了，
@@ -1036,7 +1579,19 @@ async fn run_embedded(
     // 用 for_all_frames：目标样式在**内层 iframe** 的 head 里，只注入主 frame
     // 够不着它。脚本自身再按 hostname 限一次，避免跳去 accounts.google.com
     // 之后还在那边空转。
-    let window = if social_restore {
+    //
+    // KukuAI 走自己的注入脚本（仅短信自动流程需要）：
+    // `kuku_phone` 非空时注入「短信自动流程」脚本（自动填号发码、等验证码、
+    // 自动登录，见 `kuku_sms_script`）；`None`（网页登录）不需要脚本 ——
+    // 用户手动操作，登录态由壳侧读 Cookie 存储交回（见等待循环的 kuku
+    // 分支与 `submit_kuku_login`）；登录后的「会话激活」在后端做
+    // （`providers/kuku/engine.rs`）。与 social_restore 互斥，按 provider 二选一。
+    let window = if provider == "kuku" {
+        match kuku_phone {
+            Some(phone) => window.initialization_script(kuku_sms_script(phone)),
+            None => window,
+        }
+    } else if social_restore {
         window.initialization_script_for_all_frames(social_restore_script())
     } else {
         window
@@ -1077,6 +1632,11 @@ async fn run_embedded(
                 }
                 return false;
             }
+            // KukuAI 主站登录：每次导航（含跳 passport、登录后回跳主站）
+            // 计数 +1，等待循环据此立即读一次 Cookie 存储做登录检测。
+            if provider == "kuku" {
+                nav_counter_for_nav.fetch_add(1, Ordering::SeqCst);
+            }
             host_allowed(url, provider, social_restore)
         })
         // 弹出窗口（window.open）也是回调的可能入口：有的登录页在拿到授权码后会用
@@ -1090,7 +1650,15 @@ async fn run_embedded(
         //
         // AutoClaw 的改道同样先判（它走的是顶层 302，正常不该落到这里；但授权页
         // 若改用 window.open 打开回调，没有这一支就会「登录成功却毫无反应」）。
+        //
+        // KukuAI 主站例外：它的「登录」按钮可能以弹窗打开 passport 登录页。
+        // 一律 Deny 会让用户点登录毫无反应 —— 这里**放行**（弹窗与主窗口
+        // 同属一个 WebView2 数据目录、共享 Cookie 存储，弹窗里登录成功后
+        // 等待循环照样能从 Cookie 读到 BDUSS）。
         .on_new_window(move |url, _features| {
+            if provider == "kuku" {
+                return tauri::webview::NewWindowResponse::Allow;
+            }
             if let Some(target) = autoclaw_callback_forward(&url) {
                 let app = app_for_window.clone();
                 let label = label_for_window.clone();
@@ -1137,9 +1705,92 @@ async fn run_embedded(
         if app.get_webview_window(&window_label).is_none() || !login_is_current(app, login_state) {
             break Ok(json!({ "ok": false, "canceled": true }));
         }
+        // KukuAI（主站登录方案，见 `providers/kuku/login.rs` 的模块头）：
+        // 用户在内嵌窗口的 `kuku.baidu.com` 里正常登录，壳侧以 **Cookie 存储
+        // 里出现 BDUSS** 作为成功判据（读 cookie 走独立线程 + 超时，见
+        // `read_window_cookies`；Windows 上同步调 cookies() 会死锁）。
+        // 触发时机：导航事件（登录必然经过导航：跳 passport、回跳主站）
+        // 之后立即读一次；另有每 4 拍（8 秒）兜底，防止「登录后长时间
+        // 不导航」漏掉。首次发现 BDUSS 后再等 4 秒交回（等影子 cookie
+        // BDUSS_BFESS 刷新完，见上面 `kuku_bduss_seen_at` 的说明）。
+        //
+        // 交回后的「会话激活」（换发 genflowpro 作用域 STOKEN）在后端做
+        // （`providers/kuku/engine.rs`）—— 那一步要调官方客户端引擎算签名，
+        // 浏览器页面里做不了，壳侧不再做任何等待门。
+        if provider == "kuku" {
+            kuku_check_tick += 1;
+            let nav_count = nav_counter_for_check.load(Ordering::SeqCst);
+            let navigated = nav_count != kuku_last_nav;
+            if navigated {
+                kuku_last_nav = nav_count;
+            }
+            let quick_url_hit = window
+                .url()
+                .map(|current| current.to_string().contains("/passApi/html/success.html"))
+                .unwrap_or(false);
+            let mut should_submit = quick_url_hit;
+            if !kuku_submitted.load(Ordering::SeqCst)
+                && (navigated || kuku_bduss_seen_at.is_some() || kuku_check_tick % 4 == 0)
+            {
+                match read_window_cookies(&window).await {
+                    Ok(cookies) => {
+                        let (header, has_bduss) = kuku_cookie_header(&cookies);
+                        eprintln!(
+                            "[login] KukuAI Cookie 检测：共 {} 条，BDUSS {}（头长 {}）",
+                            cookies.len(),
+                            if has_bduss { "已出现" } else { "未出现" },
+                            header.len()
+                        );
+                        if has_bduss {
+                            let is_first = kuku_bduss_seen_at.is_none();
+                            let first_seen = *kuku_bduss_seen_at
+                                .get_or_insert_with(tokio::time::Instant::now);
+                            if is_first {
+                                kuku_log_bduss_candidates(&cookies);
+                            }
+                            let stable = first_seen.elapsed() >= Duration::from_secs(4);
+                            if stable {
+                                // 用**刚读到的最新** cookie 交回（等稳定期间
+                                // 影子 cookie 可能已刷新）
+                                should_submit = true;
+                            } else {
+                                eprintln!(
+                                    "[login] KukuAI 已发现 BDUSS，等 4 秒让会话稳定后再交回…"
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("[login] KukuAI 读取窗口 Cookie 失败（下轮重试）: {error}");
+                    }
+                }
+            }
+            if should_submit && !kuku_submitted.load(Ordering::SeqCst) {
+                let blocked = kuku_retry_block_until
+                    .map(|until| tokio::time::Instant::now() < until)
+                    .unwrap_or(false);
+                if blocked {
+                    eprintln!("[login] KukuAI 交回退避中（30 秒），等下一轮再试");
+                } else {
+                    kuku_submitted.store(true, Ordering::SeqCst);
+                    if let Err(error) = submit_kuku_login(&window, login_state).await {
+                        eprintln!("[login] 交回 KukuAI 登录态失败（下轮重试）: {error}");
+                        kuku_submitted.store(false, Ordering::SeqCst);
+                        kuku_retry_block_until = Some(
+                            tokio::time::Instant::now() + Duration::from_secs(30),
+                        );
+                    } else {
+                        kuku_bduss_seen_at = None;
+                    }
+                }
+            }
+        }
         match poll_once(login_state).await {
             PollOutcome::Pending => continue,
-            PollOutcome::Done => break Ok(json!({ "ok": true })),
+            // 任务载荷（`{account, warning…}`）随成功结果透传：前端据此
+            // 在「账号已添加」之后补一条警告（例如 KukuAI 的凭证未通过
+            // 上游复核 —— 账号未开通 KukuAI 时就是这条路）。
+            PollOutcome::Done(payload) => break Ok(json!({ "ok": true, "payload": payload })),
             // 任务已落定失败（state 校验失败 / 授权码已失效 / 换取凭证失败）：
             // 立刻透出真实文案。继续轮询只会把它盖成 5 分钟后的「等待超时」，
             // 用户看不到任何可行动的原因。
@@ -1173,6 +1824,112 @@ async fn submit_callback(login_state: &str, callback_url: &str) {
         Ok(_) => eprintln!("[login] 已捕获登录回调并提交给网关"),
         Err(error) => eprintln!("[login] 提交登录回调失败: {error}"),
     }
+}
+
+/// 读登录窗口的 WebView2 Cookie 存储（含 HttpOnly）。
+///
+/// ── 为什么必须独立线程 + 超时 ────────────────────────────────
+/// Windows 上 `cookies()` 内部要等 WebView2 异步完成回调：在主线程/同步
+/// 命令里直接调会与消息循环互相等待而**死锁**（tauri 文档的 Known issues，
+/// 现象正是「窗口停住、永不收尾」）。这里挪到 `spawn_blocking` 独立线程，
+/// 再包一层 3 秒超时兜底 —— 读不到就当失败，绝不卡死调用方。
+async fn read_window_cookies(
+    window: &tauri::WebviewWindow,
+) -> Result<Vec<tauri::webview::Cookie<'static>>, String> {
+    let window_owned = window.clone();
+    // 闭包返回类型显式标注：`cookies()` 的返回形态一旦与预期不符，
+    // 这里的标注会让编译器直接指出真实类型（而不是在后面 match 处
+    // 绕出一串难以定位的推断错误）。
+    let handle = tokio::task::spawn_blocking(
+        move || -> Result<Vec<tauri::webview::Cookie<'static>>, tauri::Error> {
+            window_owned.cookies()
+        },
+    );
+    let nested = tokio::time::timeout(Duration::from_secs(10), handle).await;
+    // 三层 Result 逐层展开：Elapsed（超时）→ JoinError（任务失败）→
+    // tauri::Error（cookies() 本身），最后拿到 Vec<Cookie>。
+    let inner = match nested {
+        Ok(result) => result,
+        Err(_) => return Err("读取登录窗口 Cookie 超时（WebView2 未响应）".to_string()),
+    };
+    let joined = match inner {
+        Ok(result) => result,
+        Err(error) => return Err(format!("读取登录窗口 Cookie 的后台任务失败: {error}")),
+    };
+    match joined {
+        Ok(list) => Ok(list),
+        Err(error) => Err(format!("读取登录窗口 Cookie 失败: {error}")),
+    }
+}
+
+/// 把窗口里的百度域 Cookie 拼成 Cookie 头，返回 `(头串, 是否含 BDUSS)`。
+///
+/// 交回**全部百度域 Cookie**（不只 BDUSS/STOKEN）：上游 userreport 校验的是
+/// 完整浏览器会话，缺 BAIDUID / BAIDUID_BFESS 会被判「未登录」
+/// （2026-10-07 浏览器对照实测）。统计类（Hm_* / HMACCOUNT）跳过 —— 对认证
+/// 无用，只会把 Cookie 头撑长。
+fn kuku_cookie_header(cookies: &[tauri::webview::Cookie<'static>]) -> (String, bool) {
+    let mut parts: Vec<String> = Vec::new();
+    let mut has_bduss = false;
+    let mut seen: Vec<String> = Vec::new();
+    for cookie in cookies {
+        let name = cookie.name().to_string();
+        let domain = cookie.domain().unwrap_or("").to_string();
+        if !domain.ends_with("baidu.com") {
+            continue;
+        }
+        if name == "gfprotpl"
+            || name.starts_with("Hm_")
+            || name == "HMACCOUNT"
+            || seen.iter().any(|existing| existing == &name)
+        {
+            continue;
+        }
+        if name == "BDUSS" {
+            has_bduss = true;
+        }
+        seen.push(name.clone());
+        parts.push(format!("{name}={}", cookie.value()));
+    }
+    (parts.join("; "), has_bduss)
+}
+
+/// 诊断日志：列出 cookie 里所有 BDUSS 候选（domain / path / 长度 / 值前缀）。
+///
+/// 用于确认「是否有多条 BDUSS（不同域或路径）」「交回时带的是哪一条」——
+/// userreport 判「未登录」时，第一步就要排除「带错了候选」。
+fn kuku_log_bduss_candidates(cookies: &[tauri::webview::Cookie<'static>]) {
+    for cookie in cookies {
+        if cookie.name() == "BDUSS" {
+            let value = cookie.value();
+            let prefix: String = value.chars().take(20).collect();
+            eprintln!(
+                "[login] KukuAI BDUSS 候选：domain={:?} path={:?} 长度={} 前缀={prefix}…",
+                cookie.domain().unwrap_or(""),
+                cookie.path().unwrap_or(""),
+                value.len()
+            );
+        }
+    }
+}
+
+/// KukuAI 登录态交回：用户在主站窗口里登录成功后，读 WebView2 的 Cookie
+/// 存储（含 HttpOnly —— 页面脚本 `document.cookie` 读不到 BDUSS），把完整
+/// 百度域会话拼成 Cookie 头 POST 网关收尾（见 `read_window_cookies` 的说明）。
+async fn submit_kuku_login(
+    window: &tauri::WebviewWindow,
+    login_state: &str,
+) -> Result<(), String> {
+    let cookies = read_window_cookies(window).await?;
+    let (cookie_header, has_bduss) = kuku_cookie_header(&cookies);
+    if !has_bduss {
+        return Err("登录窗口没有 BDUSS（登录态尚未写入），请稍后重试".to_string());
+    }
+    let payload = json!({ "state": login_state, "cookie": cookie_header });
+    gateway::call("POST", "/api/session/login/kuku/complete", Some(&payload))
+        .await
+        .map_err(|error| format!("网关收尾失败: {error}"))?;
+    Ok(())
 }
 
 /// 用系统默认浏览器打开链接。

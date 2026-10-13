@@ -53,12 +53,14 @@ pub struct ActiveLogin {
 /// 两者都会走到 `RunEvent::ExitRequested`，只看 `close_to_tray`
 /// 会让托盘的「退出」永远退不掉。
 ///
-/// `close_to_tray` 缓存一份当前设置：窗口事件回调（含 `ExitRequested`）
-/// 是同步的、每关一次窗都可能触发，不该每次都去读磁盘。
+/// `close_to_tray` / `lightweight` 各缓存一份当前设置：窗口事件回调
+/// （含 `ExitRequested`）是同步的、每关一次窗都可能触发，不该每次都去读磁盘。
 #[derive(Default)]
 pub struct WindowState {
     pub exiting: AtomicBool,
     pub close_to_tray: AtomicBool,
+    /// 轻量模式：关窗时销毁窗口（释放 WebView2 内存）而不是隐藏
+    pub lightweight: AtomicBool,
 }
 
 impl WindowState {
@@ -77,6 +79,14 @@ impl WindowState {
 
     pub fn close_to_tray(&self) -> bool {
         self.close_to_tray.load(Ordering::SeqCst)
+    }
+
+    pub fn set_lightweight(&self, value: bool) {
+        self.lightweight.store(value, Ordering::SeqCst);
+    }
+
+    pub fn lightweight(&self) -> bool {
+        self.lightweight.load(Ordering::SeqCst)
     }
 }
 

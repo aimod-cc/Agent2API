@@ -9,9 +9,12 @@
 //!
 //! ── 为什么按地区分开缓存（与其它四家不同）─────────────────────
 //! Qoder 分国际版（`api3.qoder.sh`）与中国版（`gateway.qoder.com.cn`），
-//! 两边的目录**不是同一份**（套餐档位不同）。缓存按 region 分开，
-//! `list()` 返回两者的并集（按 id 去重，global 优先）供聚合目录使用；
-//! 请求时 `resolve` 先在**账号所属地区**的目录里找，再退到并集 ——
+//! 两边的目录**不是同一份**（套餐档位不同）。缓存按 region 分开。
+//! **拆家（2026-10）后两个地区是两家 provider**（`qoder` 中国版 /
+//! `qoder-intl` 国际版）：`list_for(region)` 只返回**本地区**的清单
+//! （适配器 `list_models` 按自己的地区取）；`list()` 保留两地区的并集
+//! （按 id 去重，global 优先）——只供种子与排障使用。
+//! 请求时 `resolve` 先在**账号所属地区**的目录里找，再退到另一地区 ——
 //! 于是「这个账号能不能用这个模型」由上游说了算，而不是我们猜。
 //!
 //! ── 条目的键名口径（与另外四家对齐）──────────────────────────
@@ -290,8 +293,8 @@ fn catalog_for(state: &CatalogState, region: Region) -> Vec<Value> {
 
 /// 当前清单（两个地区的**并集**，按 id 去重、global 优先）。
 ///
-/// 聚合目录与路由判定读这里 —— 它们只有「这个模型名认不认识」这一个问题，
-/// 不关心账号在哪一边（那由请求时的 `resolve` 收窄）。
+/// 拆家后聚合目录与路由判定读的是**各家自己的** `list_for`（地区是 provider
+/// 身份）；并集只留给种子与排障 —— 种子按地区分别种，见 `seed_default_rules`。
 pub fn list() -> Vec<Value> {
     let state = read_state();
     let mut out: Vec<Value> = Vec::new();
@@ -315,6 +318,25 @@ pub fn list() -> Vec<Value> {
         }
     }
     out
+}
+
+/// **本地区**的当前清单（远程优先，否则静态兜底）。
+///
+/// 拆家后每家 provider 只列本地区（适配器 `list_models` 按 `self.region` 取）：
+/// 模型管理、`/v1/models` 广告与「某模型由哪些家提供」的判定都由 provider
+/// 身份自动分开了 —— 中国版的账号/清单/启停归 `qoder`，国际版归 `qoder-intl`。
+pub fn list_for(region: Region) -> Vec<Value> {
+    let state = read_state();
+    catalog_for(&state, region)
+        .into_iter()
+        .filter(|model| !text_of(model, "id").is_empty())
+        .map(|mut model| {
+            if let Some(object) = model.as_object_mut() {
+                object.insert("region".to_string(), Value::String(region.id().to_string()));
+            }
+            model
+        })
+        .collect()
 }
 
 /// 把客户端的模型名解析成「上游标识 + 模型配置 + 地区」。
@@ -378,10 +400,23 @@ pub fn remote_refreshed(region: Region) -> bool {
     }
 }
 
-/// 最后一次成功刷新远程目录的时间（毫秒；从未成功过为 0）
-pub fn last_refreshed_at() -> i64 {
+/// 某地区最后一次成功刷新远程目录的时间（毫秒；从未成功过为 0）。
+///
+/// 拆家后「来源 / 更新日期」列按**各家**取值（`catalog::refresh_meta` 的
+/// Qoder / QoderIntl 两个分支各查一格），不再取两地区的最大值 —— 那会让
+/// 两家显示同一次拉取时刻。
+pub fn last_refreshed_at(region: Region) -> i64 {
     let state = read_state();
-    state.global_fetched_at.max(state.cn_fetched_at)
+    match region {
+        Region::Global => state.global_fetched_at,
+        Region::Cn => state.cn_fetched_at,
+    }
+}
+
+/// 最后一次成功刷新远程目录的时间（毫秒；从未成功过为 0）——两地区的最大值。
+#[allow(dead_code)]
+pub fn last_refreshed_at_any() -> i64 {
+    read_state().global_fetched_at.max(read_state().cn_fetched_at)
 }
 
 /// 拉取并落地某地区的远程目录。
@@ -484,19 +519,26 @@ pub async fn refresh(
     ModelRefreshOutcome::refreshed(count)
 }
 
-/// 对当前清单（两个地区的并集）补一次 Qoder 的默认规则种子。
+/// 对当前清单补一次 Qoder 的默认规则种子（**两个地区各按各的 provider 种**）。
 ///
 /// 刷新成功后由 [`refresh`] 调用；编排入口（`providers::adapter` 的
 /// `seed_current_qoder_defaults`）也调它 —— 覆盖「远程刷新失败、手里只有静态
-/// 兜底清单」与**升级用户**首次打开管理页的情形（那时并集来自兜底清单，
-/// 同样要按白名单落一次默认值）。幂等：种过的 id 不再动。
+/// 兜底清单」与**升级用户**首次打开管理页的情形。幂等：种过的 `(provider, id)`
+/// 不再动（用户的手动调整不会被覆盖）。拆家后种子按 provider id 分开记
+/// （`qoder` 中国版 / `qoder-intl` 国际版各一套 `(provider, id)` 命名空间）。
 pub fn seed_default_rules() {
-    let ids: Vec<String> = list()
-        .iter()
-        .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string))
-        .collect();
-    if let Some(summary) = crate::server::core::model_rules::seed_qoder_defaults(&ids) {
-        logging::log("[Models]", &summary);
+    for region in [Region::Cn, Region::Global] {
+        let ids: Vec<String> = list_for(region)
+            .iter()
+            .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        if let Some(summary) = crate::server::core::model_rules::seed_qoder_defaults(
+            region.provider_id(),
+            &format!("Qoder {}", region.label()),
+            &ids,
+        ) {
+            logging::log("[Models]", &summary);
+        }
     }
 }
 

@@ -108,6 +108,10 @@ pub(super) struct ProviderContext<'a> {
     /// 读同一份，语义不会中途漂移。收窄的语义见
     /// [`super::ForwardRequest::pinned_account`] 与 `rotate::accounts_in_providers`。
     pub pinned_account: Option<&'a str>,
+    /// 跳过按模型路由的启停门禁（模型测试的「未启用也能测」；语义与取舍见
+    /// [`super::ForwardRequest::ignore_model_gate`]）。候选链改从 `key_scope`
+    /// 白名单取 —— 它是唯一的候选来源，两处读的是同一份事实。
+    pub ignore_model_gate: bool,
 }
 
 /// 某一家 provider 实际要发送的请求体（**每次转发前**决定，不做跨家复用），
@@ -299,10 +303,13 @@ fn message_count(body: &Value) -> usize {
 /// 把发送体里的 model 字段换成该 provider 认识的真名（仅当需要换时才复制）。
 ///
 /// `requested` 是请求名、`wire` 是 `catalog::wire_target_for_provider` 已经算好
-/// 的该家真名（调用方算一次，这里不再查目录）；只有两者不同时才把 `Cow`
-/// 升级成 Owned —— 常规路径（本名该家认识）保持借用零拷贝。
+/// 的该家真名（调用方算一次，这里不再查目录）；只有两者**逐字节相同**时才保持
+/// 借用零拷贝 —— 大小写不同**也必须改写**：目录里返回的精确大小写是上游认的
+/// id（Loomy 目录就是 `GLM-5.3-Flash`，客户端常发小写），只差大小写时不改，
+/// 上游会当成未知模型静默回落（实测：`glm-5.3-flash` 被回落成
+/// `deepseek-v4-flash-0731`，图片能力随之丢失）。
 fn rewrite_model(body: &mut Cow<'_, Value>, requested: &str, wire: &str, provider_id: &str) {
-    if wire.eq_ignore_ascii_case(requested) {
+    if wire == requested {
         return;
     }
     logging::verbose(

@@ -26,7 +26,7 @@ use super::priority::next_free_priority;
 use super::sql;
 use super::state::{mark_name_custom, StoredAccount};
 use super::store::{AccountStore, AccountStoreError};
-use super::store_util::{max_concurrent_public, token_tail_of, truncate_chars};
+use super::store_util::{token_tail_of, truncate_chars};
 
 impl AccountStore {
     /// 显示用的一条 ZCode 账号（`account_id` 为空时取本地区组内优先级最高的那条）
@@ -267,12 +267,9 @@ impl AccountStore {
                     .to_string(),
             ),
         );
-        public.insert(
-            "maxConcurrent".to_string(),
-            Value::from(max_concurrent_public(record.get("maxConcurrent"))),
-        );
-        // `chatSupported` 不在这里写：它是跨家统一事实，由 `store.rs::public_account`
-        // 按适配器的 `supports_chat()` 注入（与 Qoder 那份同样的处置）
+        // `chatSupported` / `maxConcurrent` 不在这里写：它们是跨家统一事实，
+        // 由 `store_view::public_account` 注入（前者按适配器的 `supports_chat()`，
+        // 后者按 `store_util::max_concurrent_public_for`；与 Qoder 那份同样的处置）
         Value::Object(public)
     }
 

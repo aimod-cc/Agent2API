@@ -16,14 +16,13 @@
  * 例外是弹性列（FLEX_COLUMNS）：它**不写宽度**，吃表格的剩余宽度。
  */
 
+import { t } from '../i18n'
 import type { Align } from './accounts-shared'
 
 /** 列定义项（表头文案 / 小注 / 悬停说明 / 默认对齐 / 旧版默认对齐） */
 export type AccountColumn = {
   key: string
   label: string
-  /** 表头里的小字副标题（如「全局队列」「按模型」） */
-  hint?: string
   /** 表头的悬停说明 */
   title?: string
   align: Align
@@ -33,12 +32,14 @@ export type AccountColumn = {
 }
 
 /**
- * 列：勾选 / 优先级 / 提供商 / 账号 / 代理 / 连接数 / 状态 / 限流 / 有效期 / 余额 / 操作。
+ * 列：勾选 / 顺序 / 账号 / 代理 / 连接数 / 状态 / 限流 / 有效期 / 余额 / 操作。
  *
- * 优先级是整张表的主线（全局队列），所以放在提供商之前、紧跟勾选列。
- * 连接数紧跟账号列：它回答的是「这个账号此刻有几个请求在跑」，属于**账号的身份**
- * 而非健康状态 —— 放在状态列之前，与状态列（可用性）分工清楚。
- * 代理列紧挨账号列：它读起来是账号的属性，与后面的运行时读数不是一类。
+ * ── 分组模式（2026-10）删掉了「优先级」与「提供商」两列 ──────────
+ * 顺序改由**拖拽**表达，数字不再出现在表里：每一行是它所在组的组内序号（`#N`），
+ * 组的先后由分组带的顺位表达 —— 于是「优先级」那一列（数字 + ↑↓）整体下线，
+ * 「顺序」列顶上它的位置，并把拖动把手收进同一格（`⠿ #2`，见 OrderCell）。
+ * 「提供商」列同时删掉：家名与图标已经在分组带上，行里再重复一遍是噪音。
+ * 列设置里旧配置残留的这两个 key 由 table-col-settings 的归一化丢弃（认不出的列不认）。
  *
  * `key` 同时是 CSS 类名后缀（`cell-<key>`），默认列宽在 page-accounts-table.css 里按
  * 这些类名声明 —— 键名只有这一处定义。
@@ -51,52 +52,35 @@ export type AccountColumn = {
  * 到一条中轴，比左对齐更好扫读）。legacyAlign 只写在「上一版默认与新版不同」的列上。
  */
 export const ACCOUNT_COLUMNS: AccountColumn[] = [
-  { key: 'pick', label: '选择', align: 'center', legacyAlign: 'left' },
+  { key: 'pick', label: t('选择'), align: 'center', legacyAlign: 'left' },
   {
-    key: 'priority', label: '优先级', hint: '全局队列',
-    title: '全局一条队列：数值越小越先用，不分提供商',
+    key: 'order', label: t('顺序'),
+    title: t('组内先后：按住左边的把手上下拖动即可调整；整组的先后拖分组带的把手'),
     align: 'center', legacyAlign: 'left',
   },
-  { key: 'provider', label: '提供商', align: 'center', legacyAlign: 'left' },
-  { key: 'account', label: '账号', align: 'center', legacyAlign: 'left' },
+  { key: 'account', label: t('账号'), align: 'center', legacyAlign: 'left' },
   {
-    key: 'proxy', label: '代理',
-    title: '该账号出网走的代理（Clash 出口 / 自定义 / 直连）；点击可修改',
+    key: 'proxy', label: t('代理'),
+    title: t('该账号出网走的代理（Clash 出口 / 自定义 / 直连）；点击可修改'),
     align: 'center',
   },
   {
-    key: 'connections', label: '连接数',
-    title: '此刻正在使用这个账号的请求数（含还在下发内容的流式请求）；为 0 时不显示',
+    key: 'connections', label: t('连接数'),
+    title: t('此刻正在使用这个账号的请求数（含还在下发内容的流式请求）；为 0 时不显示'),
     align: 'center',
   },
-  { key: 'status', label: '状态', align: 'center', legacyAlign: 'left' },
+  { key: 'status', label: t('状态'), align: 'center', legacyAlign: 'left' },
   {
-    key: 'limits', label: '限流', hint: '按模型',
-    title: '该账号当前限流中的模型；点徽章看明细',
+    key: 'limits', label: t('限流'),
+    title: t('该账号当前限流中的模型；点徽章看明细'),
     align: 'center', legacyAlign: 'left',
   },
-  { key: 'expiry', label: '有效期', align: 'center', legacyAlign: 'left' },
+  { key: 'expiry', label: t('有效期'), align: 'center', legacyAlign: 'left' },
   // 「余额」列只放读数（查询按钮在操作列）：一个只显示余额数字的列叫「余额 / 积分」
   // 会让人以为这里还能点。而「余额」这个词也容得下各家的不同叫法（积分 / 余额）
-  { key: 'usage', label: '余额', align: 'center', legacyAlign: 'left' },
-  { key: 'actions', label: '操作', align: 'right' },
+  { key: 'usage', label: t('余额'), align: 'center', legacyAlign: 'left' },
+  { key: 'actions', label: t('操作'), align: 'right' },
 ]
-
-/** 优先级号段（与后端 priority.rs 的 MIN/MAX/DEFAULT 逐字一致） */
-export const PRIORITY_MIN = 0
-export const PRIORITY_MAX = 9999
-export const PRIORITY_DEFAULT = 100
-
-/** 优先级归一：夹到号段内并取整 */
-export function clampPriority(value: number): number {
-  return Math.min(PRIORITY_MAX, Math.max(PRIORITY_MIN, Math.round(value)))
-}
-
-/** 账号的优先级值（缺失 / 非法按默认值） */
-export function priorityOf(account: { priority?: number } | null | undefined): number {
-  const value = Number(account?.priority)
-  return Number.isFinite(value) ? value : PRIORITY_DEFAULT
-}
 
 /* ─── 列宽 ─────────────────────────────────── */
 
@@ -106,8 +90,10 @@ const STORE_KEY = 'agent2api-accounts-col-widths'
  * 默认列宽（px）：与 page-accounts-table.css 的 `.cell-*` 一一对应。
  *
  * 改这里**必须**同时改 CSS 与那份文件头的列宽预算说明 —— 三处是同一组数字。
- * 预算：十个固定列合计 1193px（勾选 47 / 优先级 132 / 提供商 132 / 代理 186 /
- * 连接数 56 / 状态 80 / 限流 148 / 有效期 80 / 余额 132 / 操作 200）。
+ * 预算：九个固定列合计 1013px（勾选 47 / 顺序 84 / 代理 186 / 连接数 56 / 状态 80 /
+ * 限流 148 / 有效期 80 / 余额 132 / 操作 200）。
+ * 顺序列 84 是「拖动把手（20）+ 组内序号（如 #12，约 30）+ 间隔」的宽度：它替代了
+ * 原先 132px 的优先级列（数字输入 + 两枚箭头），窄了 48px；
  * 代理列 186 是「节点名 :端口」的常见形态 + 选择器自带的约 41px 固定开销；
  * 余额列 132 是「主额度桶两行形态」的最小值（套餐名一行要放得下
  * 「ZCode Trust Build」，被省略号砍成「ZCode Tr…」这一列就白给了）；
@@ -118,8 +104,7 @@ const STORE_KEY = 'agent2api-accounts-col-widths'
  */
 const DEFAULTS: Record<string, number> = {
   pick: 47,
-  priority: 132,
-  provider: 132,
+  order: 84,
   proxy: 186,
   connections: 56,
   status: 80,
@@ -151,10 +136,9 @@ const FLEX_COLUMNS = new Set(['account'])
  * 弹性列的下限：容器窄到要把这一列压得比它还窄时，**撑宽表格交给横向滚动**，
  * 而不是继续挤它（page-accounts-table.css 的原则：不压缩列宽，宁可横滚）。
  *
- * 取 300 是「账号列原本的默认宽度」—— 于是窄窗口（容器 < 定宽列合计 + 300 = 1493px，
- * 约等于窗口 < 1867px）下的行为与改动前**逐字一致**：表格 1493px、账号列 300px、
- * 照样横滚。改动的收益只出现在装得下 1493px 的宽窗口上：多余宽度归账号列，
- * 表格不再恒定溢出、最右的「操作 / ⋯」列不再被切。
+ * 取 300 是「账号列原本的默认宽度」（分组化之前那一版的定宽值）。它同时是
+ * **横向滚动的分界线**：容器窄于「定宽列合计（1013）+ 300 = 1313px」时表格原样横滚，
+ * 宽于它则多余宽度全部归账号列 —— 表格不再恒定溢出、最右的「操作 / ⋯」列不再被切。
  */
 const FLEX_MIN_WIDTH = 300
 

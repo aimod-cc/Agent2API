@@ -17,6 +17,8 @@
  * 表格用它给值加一枚小点、弹窗用它区分「继承 / 覆盖」两态。
  */
 
+import { t } from '../i18n'
+
 /** 六个能力键（顺序 = 弹窗字段与能力徽章的展示顺序，与后端一致） */
 export const CAPABILITY_KEYS = [
   'maxInputTokens',
@@ -41,20 +43,20 @@ export const BOOLEAN_KEYS: readonly CapabilityKey[] = [
 
 /** 弹窗字段与表格 tooltip 用的完整文案 */
 export const CAPABILITY_LABELS: Record<CapabilityKey, string> = {
-  maxInputTokens: '上下文窗口',
-  maxOutputTokens: '最大输出 Token',
-  supportsToolCall: '工具调用',
-  supportsImages: '图片识别',
-  supportsVideo: '视频识别',
-  supportsReasoning: '支持思考',
+  maxInputTokens: t('上下文窗口'),
+  maxOutputTokens: t('最大输出 Token'),
+  supportsToolCall: t('工具调用'),
+  supportsImages: t('图片识别'),
+  supportsVideo: t('视频识别'),
+  supportsReasoning: t('支持思考'),
 }
 
 /** 能力徽章上的短标签（布尔键才有） */
 export const CAPABILITY_SHORT: Partial<Record<CapabilityKey, string>> = {
-  supportsToolCall: '工具',
-  supportsImages: '图片',
-  supportsVideo: '视频',
-  supportsReasoning: '思考',
+  supportsToolCall: t('工具'),
+  supportsImages: t('图片'),
+  supportsVideo: t('视频'),
+  supportsReasoning: t('思考'),
 }
 
 /** token 键的数值上限（与后端 `core::capability::MAX_TOKEN_VALUE` 同值） */
@@ -125,7 +127,7 @@ export function formatTokens(value: unknown): string {
 /** 精确值的展示形态（tooltip 里给千分位，`196608` → `196,608`） */
 export function exactTokens(value: unknown): string {
   const number = Number(value)
-  if (!Number.isFinite(number) || number <= 0) return '未声明'
+  if (!Number.isFinite(number) || number <= 0) return t('未声明')
   return Math.round(number).toLocaleString('en-US')
 }
 
@@ -167,15 +169,15 @@ export function reasoningLevelsOf(
 /** 单键的 tooltip 文案（表格里四枚徽章与数值列共用） */
 export function capabilityTip(key: CapabilityKey, value: unknown, overridden: boolean): string {
   const label = CAPABILITY_LABELS[key]
-  const suffix = overridden ? '（已被手动覆盖，弹窗里可恢复继承）' : ''
+  const suffix = overridden ? t('（已被手动覆盖，弹窗里可恢复继承）') : ''
   if (isTokenKey(key)) {
-    if (value === null || value === undefined) return `${label}：上游未声明${suffix}`
-    return `${label}：${exactTokens(value)}（对下游声明的精确值）${suffix}`
+    if (value === null || value === undefined) return t('{label}：上游未声明{suffix}', { label, suffix })
+    return t('{label}：{value}（对下游声明的精确值）{suffix}', { label, value: exactTokens(value), suffix })
   }
   const state = capabilityState(value)
-  if (state === 'on') return `${label}：支持${suffix}`
-  if (state === 'off') return `${label}：不支持${suffix}`
-  return `${label}：上游未声明（下游会按不支持处理）${suffix}`
+  if (state === 'on') return t('{label}：支持{suffix}', { label, suffix })
+  if (state === 'off') return t('{label}：不支持{suffix}', { label, suffix })
+  return t('{label}：上游未声明（下游会按不支持处理）{suffix}', { label, suffix })
 }
 
 /**

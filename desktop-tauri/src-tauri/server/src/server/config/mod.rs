@@ -110,6 +110,16 @@ pub struct RuntimeConfig {
     /// 与 timeouts 同一理由：走排队制的适配器**每次遇到排队**都要取它
     /// （改完设置下一个请求就用新值，不重启进程），解析一次存下来最省事。
     queue: QueueSettings,
+    /// ZCode 验证码令牌池的补货节奏（设置页「网关 → 验证码令牌池」区域）。
+    ///
+    /// 与 queue 同一理由：stats 端点**每次被铸造器轮询**都要取它（改完设置
+    /// 下一轮就生效，不重启进程），解析一次存下来最省事。
+    captcha_pool: CaptchaPoolSettings,
+    /// 账号路由的策略 / 粘性 / 退避 / 垫底 / 熔断（账号页「路由」区域）。
+    ///
+    /// 与 timeouts 同一理由：转发层**每次选路**都要取它（改完设置下一个
+    /// 请求就生效，不重启进程），解析一次存下来最省事。
+    routing: RoutingSettings,
     /// 事件日志的保存目录（原始配置值；None = 未设置，用配置目录）。
     /// 低频字段（启动 + 设置页读写），不值得为它发明解析层，存原始值即可。
     log_dir: Option<String>,
@@ -400,6 +410,8 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
     let retry = retry_from(&raw);
     let timeouts = timeouts_from(&raw);
     let queue = queue_from(&raw);
+    let captcha_pool = captcha_pool_from(&raw);
+    let routing = routing_from(&raw);
     RuntimeConfig {
         // 文件里有就用文件的，否则环境变量兜底（对应 `if (config.apiKey && !opts.apiKey)`）
         api_key: string_field(&raw, "apiKey").or_else(env_api_key),
@@ -413,6 +425,8 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
         retry,
         timeouts,
         queue,
+        captcha_pool,
+        routing,
         log_dir: string_field(&raw, KEY_LOG_DIR),
         request_stats_dir: string_field(&raw, KEY_REQUEST_STATS_DIR),
         debug_dir: string_field(&raw, KEY_DEBUG_DIR),
@@ -1252,6 +1266,122 @@ pub fn set_queue(patch: QueuePatch) -> bool {
             next.wait_seconds = seconds;
         }
         config.queue = next;
+    })
+}
+
+// ─── ZCode 验证码令牌池（zcodeCaptchaPoolTarget / PollMs / MaxPerRound）──
+
+/// 只取令牌池的三项（**不克隆整份 raw**）。
+///
+/// 与 `queue_settings()` 同一取舍：stats 端点每次被铸造器轮询都要取一次，
+/// 读锁取一份 `Copy` 快照即可。未初始化时给默认值。
+pub fn captcha_pool_settings() -> CaptchaPoolSettings {
+    if let Ok(guard) = CONFIG.read() {
+        if let Some(config) = guard.as_ref() {
+            return config.captcha_pool;
+        }
+    }
+    CaptchaPoolSettings::default()
+}
+
+/// 更新令牌池节奏（`None` = 该项不动），返回是否写盘成功。
+///
+/// 调用方（`zcode_captcha_pool_api::put_captcha_pool`）**必须先校验范围**：
+/// 本函数按「已合法」处理，越界值会被 `bounded_int_field` 的回读逻辑丢弃。
+/// 与 `set_queue` 同一模式：内存快照与 raw 底稿一起改。
+pub fn set_captcha_pool(patch: CaptchaPoolPatch) -> bool {
+    update(|config| {
+        let mut next = config.captcha_pool;
+        if let Some(target) = patch.target {
+            config
+                .raw
+                .insert(KEY_CAPTCHA_POOL_TARGET.to_string(), Value::from(target));
+            next.target = target;
+        }
+        if let Some(poll_ms) = patch.poll_ms {
+            config
+                .raw
+                .insert(KEY_CAPTCHA_POOL_POLL_MS.to_string(), Value::from(poll_ms));
+            next.poll_ms = poll_ms;
+        }
+        if let Some(max_per_round) = patch.max_per_round {
+            config.raw.insert(
+                KEY_CAPTCHA_POOL_MAX_PER_ROUND.to_string(),
+                Value::from(max_per_round),
+            );
+            next.max_per_round = max_per_round;
+        }
+        config.captcha_pool = next;
+    })
+}
+
+// ─── 账号路由（routingStrategy / routingSticky / 退避 / 垫底 / 熔断）──
+
+/// 只取路由设置的轻量读取（**不克隆整份 raw**）。
+///
+/// 与 `timeout_settings()` 同一取舍：转发层每次选路都要取一次，读锁取一份
+/// `Copy` 快照即可。未初始化时给默认值。
+pub fn routing_settings() -> RoutingSettings {
+    if let Ok(guard) = CONFIG.read() {
+        if let Some(config) = guard.as_ref() {
+            return config.routing;
+        }
+    }
+    RoutingSettings::default()
+}
+
+/// 更新路由设置（`None` = 该项不动），返回是否写盘成功。
+///
+/// 调用方（`routing_api::put_routing`）**必须先校验范围**：本函数按「已合法」
+/// 处理，越界值会被 `bounded_int_field` 的回读逻辑丢弃。与 `set_timeouts`
+/// 同一模式：内存快照与 raw 底稿一起改。
+pub fn set_routing(patch: RoutingPatch) -> bool {
+    update(|config| {
+        let mut next = config.routing;
+        if let Some(strategy) = patch.strategy {
+            config
+                .raw
+                .insert(KEY_ROUTING_STRATEGY.to_string(), Value::from(strategy.as_str()));
+            next.strategy = strategy;
+        }
+        if let Some(sticky) = patch.sticky {
+            config
+                .raw
+                .insert(KEY_ROUTING_STICKY.to_string(), Value::from(sticky.as_str()));
+            next.sticky = sticky;
+        }
+        let mut write_bool = |key: &str, value: bool, slot: &mut bool| {
+            config.raw.insert(key.to_string(), Value::Bool(value));
+            *slot = value;
+        };
+        if let Some(enabled) = patch.failover_backoff {
+            write_bool(KEY_ROUTING_FAILOVER_BACKOFF, enabled, &mut next.failover_backoff);
+        }
+        if let Some(enabled) = patch.sink {
+            write_bool(KEY_ROUTING_SINK, enabled, &mut next.sink);
+        }
+        if let Some(enabled) = patch.breaker_enabled {
+            write_bool(KEY_ROUTING_BREAKER_ENABLED, enabled, &mut next.breaker_enabled);
+        }
+        if let Some(count) = patch.breaker_threshold {
+            config
+                .raw
+                .insert(KEY_ROUTING_BREAKER_THRESHOLD.to_string(), Value::from(count));
+            next.breaker_threshold = count;
+        }
+        if let Some(seconds) = patch.breaker_timeout_seconds {
+            config
+                .raw
+                .insert(KEY_ROUTING_BREAKER_TIMEOUT.to_string(), Value::from(seconds));
+            next.breaker_timeout_seconds = seconds;
+        }
+        if let Some(count) = patch.breaker_success_threshold {
+            config
+                .raw
+                .insert(KEY_ROUTING_BREAKER_SUCCESS.to_string(), Value::from(count));
+            next.breaker_success_threshold = count;
+        }
+        config.routing = next;
     })
 }
 

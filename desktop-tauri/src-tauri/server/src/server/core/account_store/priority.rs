@@ -100,6 +100,61 @@ pub struct PriorityAssignment {
     pub to: i64,
 }
 
+/// 队列里一条记录的**排序输入**：只有分组排序用得上的四个字段。
+///
+/// 本模块是纯数值模块（不认识磁盘与 HTTP），所以不吃 `StoredAccount` —— 调用方
+/// 从投影列 / JSON 里把这四样取出来喂进来，排序规则就留在这里一处。
+pub struct QueueEntry<'a> {
+    pub id: &'a str,
+    pub provider: &'a str,
+    pub priority: i64,
+    pub added_at: i64,
+}
+
+/// 「分组连续」的全局队列序（分组模式的**硬不变量**）。
+///
+/// 账号页按家分组展示，组的顺位由拖拽决定 —— 界面上「第 2 顺位的家排在第 1 顺位的家
+/// 之后」这句话要成立，队列里同一家的账号就必须**连续**：中间夹进别家的账号，界面
+/// 显示的先后与真实的尝试顺序就分叉了。本函数把这条件编译出来：
+///   1. 先按家归堆；
+///   2. 组序 = 各家**当前最靠前**的那个账号（组内最小优先级，并列比加入时间）；
+///   3. 组内按优先级升序，并列按加入时间（与 [`by_priority_order`] 同口径）。
+///
+/// 组序不额外存一份的原因：它完全由「组里最靠前的账号」决定 —— 删空一家不会留下
+/// 空档，新加一条也只影响它自己那一组，不必维护第二份顺序状态。
+///
+/// 只排序、不改号：编号由调用方按返回的顺序写回（0、1、2…）。返回的是**全部**传入
+/// 记录的 id（一条不丢，顺序即队列序）。
+pub fn grouped_queue_order(entries: &[QueueEntry<'_>]) -> Vec<String> {
+    let mut groups: Vec<(&str, Vec<&QueueEntry<'_>>)> = Vec::new();
+    for entry in entries {
+        match groups
+            .iter_mut()
+            .find(|(provider, _)| *provider == entry.provider)
+        {
+            Some((_, list)) => list.push(entry),
+            None => groups.push((entry.provider, vec![entry])),
+        }
+    }
+    for (_, list) in groups.iter_mut() {
+        list.sort_by(|a, b| {
+            by_priority_order((a.priority, a.added_at), (b.priority, b.added_at))
+        });
+    }
+    // 组序用组内第一位定：`sort_by` 是稳定排序，两个组的队首完全并列时保持
+    // 传入顺序（调用方按物理行序读出来，与旧实现的数组顺序一致）
+    groups.sort_by(|(_, a), (_, b)| {
+        by_priority_order(
+            (a[0].priority, a[0].added_at),
+            (b[0].priority, b[0].added_at),
+        )
+    });
+    groups
+        .into_iter()
+        .flat_map(|(_, list)| list.into_iter().map(|entry| entry.id.to_string()))
+        .collect()
+}
+
 /// 把已排好序的账号重新连续编号，保持这个顺序不变。
 ///
 /// 起点优先沿用原有最小优先级（这样只是整体平移，相对顺序与「第 N 位」都不变）；

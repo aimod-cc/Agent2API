@@ -698,6 +698,10 @@ impl RequestStats {
             daily::trim_daily_capacity(&tx, MAX_DAILY_DAYS)?;
             tx.commit()
         });
+        // 签到记录的明细台账共用「请求日志」的保留天数（不新增设置项），
+        // 在同一条「立即清理」路径里顺手裁 —— 它有自己的库句柄（与请求统计
+        // 同一个库、不同的表），在那边自己执行删除即可。
+        crate::server::core::checkin_records::prune();
     }
 
     /// 存储概况（排障与报表页脚用）

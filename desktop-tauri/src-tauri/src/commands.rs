@@ -405,6 +405,34 @@ pub async fn start_autoclaw_oauth_login(
     .await
 }
 
+/// KukuAI 手机验证码登录 · 发码：开登录窗口（注入短信自动流程脚本）后立即返回。
+///
+/// 与其它短信链路（AutoClaw / Loomy）不同：百度通行证的「发码」必须在页面里
+/// 点（请求要带页面上生成的风控签名，见 `login::kuku_sms_script` 的说明），
+/// 所以这里**不是**调后端 API，而是让壳打开一个隐藏登录窗口替用户自动填号发码。
+/// 前端收到返回的 `state` 后进入「等验证码」状态，用户填码后走
+/// [`login_kuku_sms_verify`]。
+#[tauri::command]
+pub async fn login_kuku_sms_send(
+    app: AppHandle,
+    phone: String,
+) -> Result<Value, String> {
+    login::start_kuku_sms(&app, &phone).await
+}
+
+/// KukuAI 手机验证码登录 · 收码：把用户收到的验证码写入登录窗口，等登录完成。
+///
+/// 成功后返回 `{account, list}`（与 `POST /api/accounts` 添加账号的响应同形状，
+/// 前端直接走「已添加账号」收尾逻辑）。手机号在发码时已随窗口带进去，
+/// 这里只需要验证码。
+#[tauri::command]
+pub async fn login_kuku_sms_verify(
+    app: AppHandle,
+    code: String,
+) -> Result<Value, String> {
+    login::submit_kuku_sms_code(&app, &code).await
+}
+
 #[tauri::command]
 pub fn login_state(app: AppHandle) -> LoginState {
     match login::current_login(&app) {
@@ -466,6 +494,7 @@ pub fn get_app_settings(app: AppHandle) -> AppSettings {
     }
     // 顺手把缓存与磁盘对齐：拦截关窗时要用到最新值
     app.state::<AppState>().window.set_close_to_tray(current.close_to_tray);
+    app.state::<AppState>().window.set_lightweight(current.lightweight_mode);
     current
 }
 
@@ -504,6 +533,7 @@ pub fn save_app_settings(app: AppHandle, patch: AppSettings) -> Result<AppSettin
     settings::save(&saved)?;
     // 立即生效：配置改完不用重启，下一次关窗就走新行为
     app.state::<AppState>().window.set_close_to_tray(saved.close_to_tray);
+    app.state::<AppState>().window.set_lightweight(saved.lightweight_mode);
     Ok(saved)
 }
 
@@ -620,6 +650,67 @@ fn unwrap_envelope_file(parsed: Value) -> Value {
         Some(data) if data.get("accounts").is_some() => data.clone(),
         _ => parsed,
     }
+}
+
+/// 整库备份：弹系统保存框，后端把整库导出为 SQL 文本直接写到该路径。
+///
+/// 与账号导出（`export_accounts`）不同：**没有「空库不导」分支** —— 整库
+/// 语义下 kv 表至少有配置项，空库同样值得备份。文件内容不经壳中转，
+/// 后端按路径直写（几十 MB 的导出不占两份内存，见 `api/backup_api`）。
+#[tauri::command]
+pub async fn export_database(
+    app: AppHandle,
+    #[allow(non_snake_case)] includeLogs: Option<bool>,
+) -> Result<Value, String> {
+    let stamp = timestamp_for_filename();
+    let default_name = format!("agent2api-backup-{stamp}.sql");
+    let file = app
+        .dialog()
+        .file()
+        .set_title("整库备份")
+        .set_file_name(&default_name)
+        .add_filter("SQL", &["sql"])
+        .add_filter("全部文件", &["*"])
+        .blocking_save_file();
+    let Some(target) = file else {
+        return Ok(json!({ "canceled": true }));
+    };
+    let path = target
+        .into_path()
+        .map_err(|error| format!("保存路径无效: {error}"))?;
+    let payload = json!({
+        "filePath": path.to_string_lossy(),
+        // 前端不传（旧壳直调）时按完整导出
+        "includeLogs": includeLogs.unwrap_or(true),
+    });
+    let mut data = gateway::call("POST", "/api/backup/export", Some(&payload)).await?;
+    if let Value::Object(map) = &mut data {
+        map.insert("file".to_string(), Value::String(path.to_string_lossy().to_string()));
+    }
+    Ok(data)
+}
+
+/// 整库恢复：弹系统打开框，后端校验该 SQL 文件后整体替换数据库。
+///
+/// 覆盖前的确认弹窗由前端负责（文案里说明「本机数据会先自动备份到
+/// backups/ 目录」「恢复后需重新登录面板」）；这里只做选文件与转发。
+#[tauri::command]
+pub async fn import_database(app: AppHandle) -> Result<Value, String> {
+    let file = app
+        .dialog()
+        .file()
+        .set_title("整库恢复")
+        .add_filter("SQL", &["sql"])
+        .add_filter("全部文件", &["*"])
+        .blocking_pick_file();
+    let Some(target) = file else {
+        return Ok(json!({ "canceled": true }));
+    };
+    let path = target
+        .into_path()
+        .map_err(|error| format!("文件路径无效: {error}"))?;
+    let payload = json!({ "filePath": path.to_string_lossy() });
+    gateway::call("POST", "/api/backup/import", Some(&payload)).await
 }
 
 /// 检查新版本：把本应用版本作为 query 参数交给后端比较。

@@ -24,6 +24,7 @@ import * as React from 'react'
 import { Button, Checkbox } from '@ui'
 
 import { shared, toast } from './add-account-bridge'
+import { t } from '../i18n'
 
 type ImportProvider = {
   id: string | number
@@ -96,7 +97,7 @@ async function runScan(options: { force?: boolean } = {}): Promise<void> {
   let scan: ImportScan
   try {
     const data = (await request('GET', '/api/import/cc-switch')) as ImportScan | null
-    scan = data || { available: false, reason: '响应为空' }
+    scan = data || { available: false, reason: t('响应为空') }
   } catch (error) {
     scan = {
       available: false,
@@ -126,8 +127,9 @@ function modelNote(item: ImportProvider): string {
     .map(entry => String(entry || '').trim())
     .filter(Boolean)
   if (!models.length) return ''
-  const head = models.slice(0, 2).join('、')
-  return ` · 模型 ${head}${models.length > 2 ? ` 等 ${models.length} 个` : ''}`
+  const head = models.slice(0, 2).join(t('、'))
+  const rest = models.length > 2 ? t(' 等 {n} 个', { n: models.length }) : ''
+  return t(' · 模型 {head}{rest}', { head, rest })
 }
 
 /**
@@ -211,12 +213,12 @@ async function runImport(): Promise<void> {
   const failedCount = selected.length - ok
   if (ok > 0 && !failedCount) {
     shared().wbAddAccountModal?.close?.()
-    toast(`✅ 已从 cc-switch 导入 ${ok} 个供应商`)
+    toast(t('✅ 已从 cc-switch 导入 {n} 个供应商', { n: ok }))
   } else if (ok > 0) {
-    toast(`已导入 ${ok} 个，失败 ${failedCount} 个（失败项已标注在列表里）`, 'err')
+    toast(t('已导入 {ok} 个，失败 {fail} 个（失败项已标注在列表里）', { ok, fail: failedCount }), 'err')
   } else {
     const first = [...failures.values()][0]
-    patch({ footHint: first || '导入失败' })
+    patch({ footHint: first || t('导入失败') })
   }
 }
 
@@ -234,7 +236,7 @@ export function ImportPanel({ segmentOn }: { segmentOn: boolean }): React.ReactE
   if (current.scanState === 'loading') {
     return (
       <div id='add-import-panel' style={style}>
-        <div id='add-import-status'>正在扫描本机 cc-switch…</div>
+        <div id='add-import-status'>{t('正在扫描本机 cc-switch…')}</div>
         <div id='add-import-list' />
       </div>
     )
@@ -249,19 +251,19 @@ export function ImportPanel({ segmentOn }: { segmentOn: boolean }): React.ReactE
       <div id='add-import-status'>
         {!scan || !scan.available ? (
           <div className='add-import-empty'>
-            <p>{scan?.reason || '未能读取 cc-switch 数据'}</p>
+            <p>{scan?.reason || t('未能读取 cc-switch 数据')}</p>
             <Button variant='outline' size='sm' onClick={() => { void runScan({ force: true }) }}>
-              重新扫描
+              {t('重新扫描')}
             </Button>
           </div>
         ) : (
           <div className='add-import-head'>
             <span>
-              在 cc-switch 里找到 <b>{providers.length}</b> 条配置，其中{' '}
-              <b>{importable.length}</b> 条可导入
+              {t('在 cc-switch 里找到')} <b>{providers.length}</b> {t('条配置，其中')}{' '}
+              <b>{importable.length}</b> {t('条可导入')}
             </span>
             <Button variant='ghost' size='xs' className='linkish' onClick={() => { void runScan({ force: true }) }}>
-              重新扫描
+              {t('重新扫描')}
             </Button>
           </div>
         )}
@@ -274,10 +276,10 @@ export function ImportPanel({ segmentOn }: { segmentOn: boolean }): React.ReactE
           const failed = current.failures.get(id)
           // 模型名一并展示：它会被登记成新家的初始清单，用户看得见「带过来了什么」
           const meta = failed
-            ? `导入失败：${failed}`
+            ? t('导入失败：{reason}', { reason: failed })
             : canImport
               ? String(item.baseUrl || '') + modelNote(item)
-              : String(item.reason || '不支持导入')
+              : String(item.reason || t('不支持导入'))
           const toggle = (): void => {
             const checked = new Set(state.checked)
             if (checked.has(id)) checked.delete(id)
@@ -340,7 +342,7 @@ export function ImportFootActions(): React.ReactElement {
           disabled={current.busy || !count}
           onClick={() => { void runImport() }}
         >
-          {current.busy ? '导入中…' : count ? `导入所选（${count}）` : '导入所选'}
+          {current.busy ? t('导入中…') : count ? t('导入所选（{n}）', { n: count }) : t('导入所选')}
         </Button>
       </span>
     </>

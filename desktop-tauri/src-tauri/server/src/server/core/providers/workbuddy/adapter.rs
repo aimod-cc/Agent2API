@@ -600,7 +600,10 @@ async fn default_session_token(store: &AccountStore, region: Region) -> Result<S
 /// `api::session` 里 ZCode 那段注释同一条理由（拿账号字段定地区，会让
 /// 「落错家的账号」把请求稳定打到错域名上，而那种错没有任何日志会提示）。
 /// 账号记录里的 `endpoint` 覆盖仍然优先（见 `chat_completions_url`）。
-fn chat_headers(
+///
+/// `pub(super)`：本目录的 `keepalive`（国际版每日活跃保活）与转发共用同一套
+/// 头集合 —— 保活必须长得和真对话一模一样，抄一份必然漂移。
+pub(super) fn chat_headers(
     session: &Value,
     region: Region,
     request_id: &str,
@@ -640,7 +643,7 @@ fn chat_headers(
 /// 而现在两个地区同时存在，环境变量不该再决定某个 provider 打哪个站）。
 /// 账号记录里带 `endpoint` 时仍然以它为准 —— 那是 staging / 自建反向代理
 /// 用户的落点，也是同一个账号级别的覆盖能力。
-fn chat_completions_url(session: &Value, region: Region) -> String {
+pub(super) fn chat_completions_url(session: &Value, region: Region) -> String {
     let fallback = region
         .env_endpoint_override()
         .unwrap_or_else(|| region.default_endpoint().to_string());

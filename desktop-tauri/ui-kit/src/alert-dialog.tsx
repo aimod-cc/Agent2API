@@ -2,6 +2,7 @@ import * as React from 'react'
 import { AlertDialog as AlertDialogPrimitive } from '@base-ui/react/alert-dialog'
 import { cn } from './lib/cn'
 import { Button } from './button'
+import { t } from './i18n'
 
 /**
  * 确认对话框（标准形态，与 shadcn/ui 的 AlertDialog 一致）。
@@ -96,7 +97,7 @@ function AlertDialogContent({
                 fill='none'
               />
             </svg>
-            <span className='sr-only'>关闭</span>
+            <span className='sr-only'>{t('关闭')}</span>
           </AlertDialogPrimitive.Close>
         )}
       </AlertDialogPrimitive.Popup>

@@ -53,6 +53,14 @@
 //! system 一句即 200 / 406 两分），并据此追加了 `DeepSeek Harness` 身份句与新版
 //! Codex 的两条句式（首句 / 第二句，见 `super::prompt`）。
 //!
+//! 上面编号之后又实测出**两道闸**（各见实现处的完整依据，别并进上面的编号）：
+//!   3. **`max_tokens` 预校验**（2026-09-29 起，#58 / #69）：30 ~ 8192 的小正
+//!      整数一律 406 空响应体，不传或 ≥ 10000 则 200 —— 出站前由
+//!      `normalize_max_tokens` 归一；
+//!   4. **平台绑定**（2026-10-08，#115 / PR #116）：被绑为 Windows 的新国际版
+//!      账号收到 `X-Tm: linux` 一律 403（非空体 `{"message":"forbidden"}`，
+//!      与 406 的空体不同形）—— `platform_tm()` 已不再发 linux。
+//!
 //! ── 三处「不做什么」（与源实现对齐，别顺手补）────────────────
 //!   1. **不做消息序列的增删**（但**要**给 system 加前缀，见下）：源实现从不改
 //!      消息序列，本适配器也只动首条 system 消息的**正文**。`super::prompt` 负责
@@ -154,11 +162,13 @@ impl ProviderAdapter for AutoClawAdapter {
     /// 「上游 2026-09-22 起的两道闸」——`modelProxyUpstreamHeaders` 的头里
     /// **不发** `X-Harness-Type`）。
     ///
-    /// body **透传 + 改写两处**：
+    /// body **透传 + 改写三处**：
     ///   1. `model` 换成 `body_model_id`（剥掉路由前缀的模型 ID）。源实现是
     ///      `JSON.stringify({ ...body, model: route.bodyModelId })` —— 其余字段
     ///      （含 `stream` / `tools` / 未知字段）原样；
-    ///   2. **system 提示词规范化**（[`super::prompt::normalize`]）：给首条 system
+    ///   2. **`max_tokens` 下限归一**（[`normalize_max_tokens`]）：小正整数会被
+    ///      上游预校验拒成 406 空响应体（#58 / #69），抬到 10000 即放行；
+    ///   3. **system 提示词规范化**（[`super::prompt::normalize`]）：给首条 system
     ///      消息前置 OpenClaw 身份前缀、改写外来身份句。这是上游 2026-09-22 起的
     ///      硬要求（不满足稳定 406 / 403），客户端自己的提示词逐字保留在前缀之后。
     ///
@@ -212,9 +222,11 @@ impl ProviderAdapter for AutoClawAdapter {
         if let Some(object) = out_body.as_object_mut() {
             object.insert("model".to_string(), Value::String(route.body_model_id.clone()));
         }
+        // max_tokens 下限归一（上游预校验，实测依据见 `normalize_max_tokens`）。
+        normalize_max_tokens(&mut out_body);
         // system 提示词规范化（上游白名单：身份前缀 + 外来身份句改写）。
-        // 放在 model 改写之后、返回之前 —— 这里是「即将发出去的字节」的最后一道
-        // 加工，此后没有任何一步会再动 body。
+        // 放在最后 —— 这里是「即将发出去的字节」的最后一道加工，此后没有任何
+        // 一步会再动 body。
         super::prompt::normalize(&mut out_body);
         // body 不是对象时原样透传（chat.rs 已保证是对象；这里的兜底只为不 panic，
         // 上游会自己报格式错误 —— 比在网关里编一个空对象更能说明问题）
@@ -249,10 +261,13 @@ impl ProviderAdapter for AutoClawAdapter {
     /// 文案前缀与另外三家逐字同形。
     ///
     /// ── 406 空响应体为什么补一句提示 ────────────────────────────
-    /// 406（空响应体）是 system 提示词闸门拒收的形态（实测表见 `super::prompt`）：
-    /// 上游不给错误体，客户端只会看到「上游返回 406: 上游错误」，无从判断该改
-    /// 什么。文案里补上 [`super::prompt::REJECT_HINT`]（切「替换」模式绕过 /
-    /// 把漏网的身份句反馈回来），与 `content_block::CONTENT_BLOCK_HINT` 同一手法。
+    /// 406（空响应体）是上游预校验拒收的统一形态，实测过三个独立方向
+    /// （`max_tokens` 取值 / system 首句指纹 / 请求形态风控，实测依据见
+    /// `super::prompt::UPSTREAM_406_HINT` 的模块注释）：上游不给错误体，客户端
+    /// 只会看到「上游返回 406: 上游错误」，无从判断该改什么 —— #58 / #69 的
+    /// 报告人就因为文案只提提示词、在提示词上绕了远路。文案里补上
+    /// [`super::prompt::UPSTREAM_406_HINT`] 把方向列全，与
+    /// `content_block::CONTENT_BLOCK_HINT` 同一手法。
     /// 只在**上游没给 message** 时补 —— 上游自己给了说明的 406 以它为准。
     ///
     /// `retry_advice` 不覆写：源实现唯一的重试是「401 刷新后重试一次」，
@@ -266,7 +281,7 @@ impl ProviderAdapter for AutoClawAdapter {
         let raw = upstream_message.unwrap_or("上游错误");
         let mut message = format!("上游返回 {status}: {raw}");
         if status == 406 && upstream_message.is_none() {
-            message.push_str(super::prompt::REJECT_HINT);
+            message.push_str(super::prompt::UPSTREAM_406_HINT);
         }
         if status == 401 {
             return UpstreamErrorClass::TokenExpired { message };
@@ -533,12 +548,25 @@ fn brand_headers() -> Vec<(String, String)> {
     ]
 }
 
-/// 平台标识（源实现 `platformTm()`）
+/// 平台标识（源实现 `platformTm()`）。
+///
+/// 上游只认官方桌面端存在的平台：`X-Tm: linux` 会被回 403
+/// （`{"message":"forbidden"}`，约 0.9s，非空响应体）。
+///
+/// 实测（固定请求体、只变「账号 × `X-Tm`」，每格 2 轮，结果 100% 一致）：
+/// 被上游绑为 Windows 的国际版账号收到 `X-Tm: linux` 一律 403，
+/// 而 `win` / `mac` / 不带该头均 200；更早添加的账号不受该头约束（四格全 200）。
+/// 进一步二分：上游只拒绝**恰好等于 `linux`** 的值，`windows` / `other` /
+/// 带尾空格的 `win  ` 也都放行。
+///
+/// 服务端 / Docker 镜像跑在 Linux 上，`cfg!(target_os = "linux")` 恒真，
+/// 于是每个出站请求都带 `X-Tm: linux`，被绑为 Windows 的账号经网关调用必然 403
+/// （每次还在同一账号原地重发 3×5s 才降级）。容器里不存在"真实平台"可选，
+/// 且官方桌面端只有 Windows / macOS，Linux 不是上游认得的客户端平台，
+/// 故 linux 分支回落为 `win`；macOS 桌面端（Tauri 构建）行为不变。
 fn platform_tm() -> &'static str {
     if cfg!(target_os = "macos") {
         "mac"
-    } else if cfg!(target_os = "linux") {
-        "linux"
     } else {
         "win"
     }
@@ -560,6 +588,53 @@ fn passthrough_session_headers(client_headers: &HeaderMap) -> Vec<(String, Strin
         }
     }
     headers
+}
+
+/// 出站请求体 `max_tokens` 的**下限归一**（**就地修改**；#58 / #69 的修复）。
+///
+/// ── 上游行为（#69 评论区两份独立实测，结论逐格一致）──────────
+/// 上游对出站请求体里的 `max_tokens` **取值**有预校验：30 / 100 / 256 / 512 /
+/// 1024 / 8192 这类**小正整数一律拒成 406 空响应体**；**不传该字段**或取值
+/// ≥ 10000（10000 / 12288 / 16384 / 49152 / 65536 / 131072）都 200。下界落在
+/// 8192（拒）与 10000（过）之间，取实测过的安全值 10000。超上界（超过该模型
+/// 输出上限）上游回 500 —— 那是它自己的语义，本函数**不碰**（不替上游做上限
+/// 钳制）。`max_completion_tokens` 不参与该校验（实测 30 也放行），**一字不动**。
+///
+/// ── 为什么必须修：406 的文案此前把人引向提示词 ─────────────
+/// 绝大多数客户端 / OpenAI SDK 默认都带 `max_tokens`（4096 / 2048 / 1024…），
+/// 于是表现为「某些客户端 100% 406 且响应体为空」；网关旧文案只提「system
+/// 提示词不合规」，#58 / #69 两位报告人都先在提示词上绕了远路（改 max_tokens
+/// 才是关键变量 —— 空响应体 + 约 115ms 返回，本来就是预校验拒收的形态）。
+///
+/// ── 判据纪律：写在本适配器里 = 按 provider 生效，别改按模型名 ──
+/// **小浣熊（raccoon）也提供 `glm-5-3` / `glm-5-3-flash`**（横线命名，另一套
+/// 上游，不受此拦截，实测带 `max_tokens=5` 照常按 5 截断）。因此判据**不能**是
+/// 模型名前缀（`glm-`）—— 会把小浣熊的截断行为一起改掉；也**不能**是模型名单
+/// —— 本家模型集合（`glm-5.3` / `glm-5.3-flash` / `auto` / `auto-fast`）随上游
+/// 变动，`auto*` 两个还不含 `glm-`。函数住在本文件、只被本适配器的
+/// `build_chat_request` 调用，天然只对 `autoclaw` / `autoclaw-intl` 出站生效。
+///
+/// ── 归一规则（只在「小正整数」窗口里动手）──────────────────
+///   - 字段存在、是正整数、且 < `MAX_TOKENS_FLOOR` → 改写为 `MAX_TOKENS_FLOOR`；
+///   - **缺省时不注入**：上游对缺省是 200，凭空注入反而改变行为（且注入多少
+///     是在猜上游上限）；
+///   - ≥ 下限 / 0 / 负数 / null / 字符串 / 浮点 → **原样**：只归一实测过被拒的
+///     「小正整数」形态，其余形态（尤其非正整数）交上游自己报错，不在网关里
+///     猜语义。
+fn normalize_max_tokens(body: &mut Value) {
+    /// 实测过的安全下限：8192（拒）与 10000（过）之间取后者
+    const MAX_TOKENS_FLOOR: i64 = 10_000;
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    let below_floor = matches!(object.get("max_tokens"), Some(Value::Number(n))
+        if n.as_i64().is_some_and(|value| value > 0 && value < MAX_TOKENS_FLOOR));
+    if below_floor {
+        object.insert(
+            "max_tokens".to_string(),
+            Value::Number(serde_json::Number::from(MAX_TOKENS_FLOOR)),
+        );
+    }
 }
 
 /// 本次请求的凭证（源实现 `resolveCredentials` 的优先级）。

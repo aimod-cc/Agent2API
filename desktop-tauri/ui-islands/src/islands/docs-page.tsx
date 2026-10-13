@@ -1,5 +1,6 @@
 import { createRoot } from 'react-dom/client'
 import { Button } from '@ui'
+import { t } from '../i18n'
 
 /**
  * 文档页（接口地址）—— React 岛。
@@ -45,10 +46,9 @@ import { Button } from '@ui'
 
 /* ─── 常量 ─────────────────────────────────── */
 
-/** 面板头问号的说明全文（逐字照抄静态 DOM 的 data-tip，别删条目 —— 每一条都是踩过的边界） */
-const PANEL_TIP = 'Base URL 填进客户端的「API 地址 / Base URL」栏；对话协议按客户端支持的类型三选一'
-  + '（Chat Completions / Responses / Anthropic Messages），三者共用同一套模型与账号池，可随时切换；'
-  + '鉴权用「网关 Key」页里任一启用 Key。'
+/** 面板头问号的说明全文（逐字照抄静态 DOM 的 data-tip，别删条目 —— 每一条都是踩过的边界）。
+ *  整段作为 t() 的键（中文即键）：写成单个字符串字面量而不是多段拼接，扫描器才认得出这个键。 */
+const PANEL_TIP = t('Base URL 填进客户端的「API 地址 / Base URL」栏；对话协议按客户端支持的类型三选一（Chat Completions / Responses / Anthropic Messages），三者共用同一套模型与账号池，可随时切换；鉴权用「网关 Key」页里任一启用 Key。')
 
 /* ─── 小组件 ───────────────────────────────── */
 
@@ -80,7 +80,7 @@ function EndpointRow({ id, name, note }: EndpointRowProps) {
           size='icon-xs'
           className='copy-btn size-[21px] rounded-[var(--r-xs)]'
           data-copy-from={id}
-          title='复制地址'
+          title={t('复制地址')}
         >
           ⧉
         </Button>
@@ -95,37 +95,40 @@ function DocsPage() {
   return (
     <section className='panel ep-panel'>
       <div className='panel-head'>
-        <h2>接口地址</h2>
+        <h2>{t('接口地址')}</h2>
         <span className='tip-q' data-tip={PANEL_TIP}></span>
       </div>
       {/* 对话协议三种并列写出：客户端按自己支持的那种选一行填，三家共用同一套模型与账号池
-          —— 换协议不用换配置 */}
+          —— 换协议不用换配置。端点名（Base URL / OpenAI …）是协议固定叫法，不进词典；
+          用途说明与分组标题是中文，走 t() */}
       <div className='ep-list'>
-        <EndpointRow id='api-base' name='Base URL' note='填进客户端的「API 地址 / Base URL」' />
+        <EndpointRow id='api-base' name='Base URL' note={t('填进客户端的「API 地址 / Base URL」')} />
 
-        <div className='ep-group'>对话协议（按客户端支持的类型选一行）</div>
+        <div className='ep-group'>{t('对话协议（按客户端支持的类型选一行）')}</div>
 
-        <EndpointRow id='api-chat' name='OpenAI Chat Completions' note='多数 OpenAI 兼容客户端的默认协议' />
-        <EndpointRow id='api-responses' name='OpenAI Responses' note='OpenAI 新协议（Codex、新版 SDK）' />
+        <EndpointRow id='api-chat' name='OpenAI Chat Completions' note={t('多数 OpenAI 兼容客户端的默认协议')} />
+        <EndpointRow id='api-responses' name='OpenAI Responses' note={t('OpenAI 新协议（Codex、新版 SDK）')} />
         <EndpointRow id='api-messages' name='Anthropic Messages'
-          note='Claude Code / Anthropic SDK（token 计数：/v1/messages/count_tokens）' />
+          note={t('Claude Code / Anthropic SDK（token 计数：/v1/messages/count_tokens）')} />
 
-        <div className='ep-group'>模型清单</div>
+        <div className='ep-group'>{t('模型清单')}</div>
 
-        <EndpointRow id='api-models' name='模型列表'
-          note='客户端自动拉取可用模型；不受鉴权限制，配 Key 之前就能拉' />
+        <EndpointRow id='api-models' name={t('模型列表')}
+          note={t('客户端自动拉取可用模型；不受鉴权限制，配 Key 之前就能拉')} />
       </div>
       {/* 脚注逐字照抄静态 DOM：空格与标点都是原文的一部分，所以每段文本各写一个表达式 ——
-          JSX 会把「跨行的文本」折成一个空格，中英混排里那一格空隙很显眼 */}
+          JSX 会把「跨行的文本」折成一个空格，中英混排里那一格空隙很显眼。
+          内联的 <code> 是协议关键字、不进词典；两边的中文碎片各自走 t()（片段式翻译在这里
+          是刻意的：把整句塞进一个键就没法保留 <b> / <code> 的行内强调） */}
       <div className='panel-foot'>
         <span>
-          {'鉴权用「网关 Key」页里任一'}
-          <b>启用</b>
-          {'的 Key：请求带 '}
+          {t('鉴权用「网关 Key」页里任一')}
+          <b>{t('启用')}</b>
+          {t('的 Key：请求带 ')}
           <code>{'Authorization: Bearer <key>'}</code>
-          {' 或 '}
+          {t(' 或 ')}
           <code>{'x-api-key: <key>'}</code>
-          {'。一把启用的 Key 都没有时不鉴权（默认网关只监听 127.0.0.1；在设置页开启「局域网访问」后监听所有网卡，鉴权与安全闸门随之启用）。'}
+          {t('。一把启用的 Key 都没有时不鉴权（默认网关只监听 127.0.0.1；在设置页开启「局域网访问」后监听所有网卡，鉴权与安全闸门随之启用）。')}
         </span>
       </div>
     </section>

@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { createRoot } from 'react-dom/client'
 import { Button, Popover, PopoverContent, SegmentedControl, Switch, cn } from '@ui'
+import { t } from '../i18n'
 
 /**
  * Agent2API · 表格列设置（列的显示 / 隐藏 · 顺序 · 对齐）—— React 岛。
@@ -72,9 +73,9 @@ type Align = 'left' | 'center' | 'right'
  *（`{ value, label }` 就是它要的形状），所以档位只有这一处定义。
  */
 const ALIGNS: readonly { value: Align; label: string }[] = [
-  { value: 'left', label: '左' },
-  { value: 'center', label: '中' },
-  { value: 'right', label: '右' },
+  { value: 'left', label: t('左') },
+  { value: 'center', label: t('中') },
+  { value: 'right', label: t('右') },
 ]
 
 /** 存盘里的对齐只认这三档（脏值退回该列默认，见 normalize） */
@@ -560,7 +561,7 @@ function ColSettingsPanel({ spec, anchor, repaintRef, onClose }: PanelProps) {
         sideOffset={6}
         collisionPadding={8}
         className='w-[336px]'
-        aria-label={`${spec.label || spec.id}的列设置`}
+        aria-label={t('{name}的列设置', { name: spec.label || spec.id })}
       >
         {/* 表头：与数据行同一套网格，四列依次是 手柄 / 列名 / 显示 / 对齐 */}
         <div
@@ -571,9 +572,9 @@ function ColSettingsPanel({ spec, anchor, repaintRef, onClose }: PanelProps) {
           )}
         >
           <span />
-          <span className='text-center'>列</span>
-          <span className='text-center'>显示</span>
-          <span className='text-center'>对齐</span>
+          <span className='text-center'>{t('列')}</span>
+          <span className='text-center'>{t('显示')}</span>
+          <span className='text-center'>{t('对齐')}</span>
         </div>
 
         {/* 行区滚动：列多时面板不跟着长，最大高度由外层（组件库）的 max-h 兜底 */}
@@ -595,7 +596,7 @@ function ColSettingsPanel({ spec, anchor, repaintRef, onClose }: PanelProps) {
               >
                 <span
                   className='flex cursor-grab items-center justify-center text-muted-foreground opacity-50 hover:opacity-100'
-                  title='按住拖动调整列顺序'
+                  title={t('按住拖动调整列顺序')}
                   onPointerDown={event => startDrag(item.key, event)}
                 >
                   {GRIP_ICON}
@@ -607,15 +608,15 @@ function ColSettingsPanel({ spec, anchor, repaintRef, onClose }: PanelProps) {
                   className='justify-self-center'
                   checked={item.visible}
                   onCheckedChange={next => setVisible(item.key, next)}
-                  aria-label={`显示「${label}」列`}
-                  title={item.visible ? '这一列正在显示' : '这一列已隐藏'}
+                  aria-label={t('显示「{label}」列', { label })}
+                  title={item.visible ? t('这一列正在显示') : t('这一列已隐藏')}
                 />
                 <SegmentedControl
                   className='w-full justify-center'
                   options={ALIGNS}
                   value={item.align}
                   onValueChange={next => setAlign(item.key, next)}
-                  aria-label={`「${label}」列的对齐`}
+                  aria-label={t('「{label}」列的对齐', { label })}
                 />
               </div>
             )
@@ -623,9 +624,9 @@ function ColSettingsPanel({ spec, anchor, repaintRef, onClose }: PanelProps) {
         </div>
 
         <div className='flex items-center gap-2 border-t border-hairline px-3 pt-2 pb-[9px]'>
-          <span className='flex-1 text-[11px] text-muted-foreground'>拖动 ⋮⋮ 调整顺序</span>
+          <span className='flex-1 text-[11px] text-muted-foreground'>{t('拖动 ⋮⋮ 调整顺序')}</span>
           <Button variant='outline' size='sm' onClick={resetAll}>
-            恢复默认
+            {t('恢复默认')}
           </Button>
         </div>
       </PopoverContent>
@@ -737,8 +738,8 @@ function makeButton(spec: TableEntry): Anchor {
   button.type = 'button'
   button.className = `sm colset-btn${spec.buttonClass ? ` ${spec.buttonClass}` : ''}`
   button.id = `btn-colset-${spec.id}`
-  button.title = `调整「${spec.label || spec.id}」的列：显示 / 隐藏、顺序、对齐`
-  button.innerHTML = `${shared().wbIcons?.icon?.('settings', 14) || ''}<span>列设置</span>`
+  button.title = t('调整「{name}」的列：显示 / 隐藏、顺序、对齐', { name: spec.label || spec.id })
+  button.innerHTML = `${shared().wbIcons?.icon?.('settings', 14) || ''}<span>${t('列设置')}</span>`
   button.setAttribute('aria-haspopup', 'dialog')
   button.setAttribute('aria-expanded', 'false')
   button.addEventListener('click', event => {

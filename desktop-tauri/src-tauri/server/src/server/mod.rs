@@ -300,6 +300,10 @@ impl ServerState {
         // CodeArts 同理：授权地址由适配器拼（同步无参），而 portal 只认 `port`，
         // 所以端口要在发起登录之前就写在进程级常量里（见该模块 `set_loopback_port`）。
         crate::server::core::providers::codearts::oauth::set_loopback_port(port);
+        // Antigravity 的网页登录同理：Google 授权页完成后要回到
+        // `http://localhost:{port}/oauth-callback`（redirect_uri 由适配器在发起
+        // 登录时本地拼），端口必须在第一次发起之前就位（见该模块 `set_loopback_port`）。
+        crate::server::core::providers::antigravity::oauth::set_loopback_port(port);
         let config_dir = config::config_dir();
         // 与 Node 版一致：verbose 由环境变量 AGENT2API_VERBOSE=1 打开
         // （旧名 WORKBUDDY_VERBOSE 仍可读，新名优先），
@@ -336,6 +340,28 @@ impl ServerState {
         // 下面日志裁剪天数与旧文件候选目录才不会用错值。
         let snapshot = config::init(db.clone());
         core::task_state::install(db.clone());
+        // 每账号的余额查询记录（余额不足跳过 / 自动禁用的底座）：装库句柄时
+        // 顺带做旧 kv 快照的一次性迁移与内存事实表的装载（见 usage_records 模块头）。
+        core::usage_records::install(db.clone());
+        // 签到记录的明细台账（签到中心「签到记录」页）：装句柄即可，记账点在
+        // `core::billing::checkin::run_checkin`（唯一），保留期裁剪随每次记账
+        // 与「立即清理」进行（见 checkin_records 模块头）。
+        core::checkin_records::install(db.clone());
+        // 定时签到的「签到范围」一次性补齐：把加入版本晚于配置里那一版的家补进
+        // 每条条目的范围（用户的期望是 OfficeAce 果办 / CodeArts 默认开启）。
+        // 放在这里是因为它要读写配置快照（`config::init` 已在上方就位），且必须早于
+        // 第一次 `/api/checkin-schedules` —— 界面读到的就该是补过的清单。
+        // 只补一次：版本写上去之后，用户取消勾选就真的生效了。
+        if core::checkin_schedules::extend_providers_once() {
+            logging::console_line(
+                "[Checkin]",
+                "已把新加入的签到提供商补进定时条目的签到范围（OfficeAce 果办 / CodeArts）",
+            );
+        }
+        // 每账号的「限制器」（余额 / Token 规则列表）：Token 周期消耗的窗口
+        // 聚合读同一个库（schema v9 的聚合索引），装句柄即可 —— 事实表的刷新
+        // 由 usage_query 的心跳循环驱动（见 limiter 模块头）。
+        core::limiter::install(db.clone());
         // 出网代理池（「网络代理」页维护的命名代理；账号按 id 引用它们）：
         // 与任务状态同为「kv 固定键 + 整份读写」的形态，把同一个 `Db` 传进去。
         // 它不参与启动预热，位置只要求早于任何一次 `/api/proxies/pool*` 请求。
@@ -346,6 +372,11 @@ impl ServerState {
         // 位置必须在这里：它得早于下面那次 `restore_cached_catalogs` 预热 ——
         // 各家的目录句柄首次初始化时才读缓存，句柄先被碰到就再也读不回来了。
         core::providers::catalog_cache::install(db.clone());
+        // OfficeAce 模型可用性探测的结论也落同一个库（kv 的 `officeaceModelProbe`
+        // 键）：目录刷新后探一轮、把「这个号打不通」的模型从对外清单里收窄掉。
+        // 与 catalog_cache 同一形态（kv 固定键 + 整份读写），位置只需早于
+        // 第一次 `advertise_models`（那是纯读，未 install 时给空结论 = 不藏）。
+        core::providers::officeace::probe::install(db.clone());
         // ── 旧文件一次性迁移：**本切片起不再自动跑** ────────────────
         // 它现在由用户在升级弹窗里点「升级」触发（`POST /api/upgrade/run`）。
         // 为什么改成手动：需求是「弹窗告诉用户换了 SQLite，点升级才开始导」——
@@ -674,6 +705,11 @@ impl ServerState {
         // 服务器停机时进程会结束，任务随之消失。用 crate::spawn_task
         // （与 auto_checkin 同一理由）保证从非 tokio 上下文调用也能进入全局运行时。
         core::scheduled_tasks::spawn(state.store.clone(), state.update.clone());
+
+        // 每账号自动余额查询的心跳循环：与上面的间隔型任务同一形态（一个进程
+        // 一个循环，到点判定全在「记录 + 配置」上），只是排期按账号各自算，
+        // 不再是全局任务（见 `core::usage_query` 的模块头）。
+        core::usage_query::spawn_sweeper(state.store.clone());
 
         Ok(state)
     }

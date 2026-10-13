@@ -74,6 +74,61 @@
    能完整显示的宽度，这一页放得下 —— 曾为挤进同一行收到 180，不必了 */
 #models-search { flex: 0 0 auto; width: 240px; }
 
+/* ── 面板头两行制（2026-10 重设计）────────────────────────
+   原来一行塞下「筛选 + 搜索 + 动作按钮」，没有「这是谁家的表」的上下文。
+   现在拆两行：第一行家名 + 统计 + 动作（.mm-titlebar），第二行筛选 + 搜索 +
+   批量条（.mm-filters）。两行都通栏（width:100%），窄窗口由 .panel-head 的
+   flex-wrap 整体下折。.panel-head 自身的 padding / 分隔线在这里清零 ——
+   行距交给两行自己给，与表格的分界交给 .models-table-wrap 的 border-top。 */
+.page[data-page="gateway"] .panel-head {
+  flex-wrap: wrap;
+  gap: 0;
+  padding: 0;
+  border-bottom: 0;
+}
+.mm-titlebar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 13px 16px 5px;
+}
+/* 窄窗口下标题与动作按钮允许各占一行 */
+@media (max-width: 900px) { .mm-titlebar { flex-wrap: wrap; row-gap: 6px; } }
+.mm-title { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.mm-title h2 { margin: 0; font-size: 15px; font-weight: 650; line-height: 1.25; white-space: nowrap; }
+/* 统计：三个数加重量、文字用灰档 —— 读的是数字，不是句子 */
+.mm-meta { color: var(--text-3); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mm-meta b { font-weight: 600; color: var(--text-2); font-variant-numeric: tabular-nums; }
+
+.mm-filters {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 16px 12px;
+}
+
+/* 批量条：勾选后出现在筛选行的带计数小药丸（原「批量操作」孤按钮升级）——
+   计数本身是这条存在的原因，写进药丸里比按钮 title 更可读 */
+.batch-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  flex: 0 0 auto;
+  padding: 0 4px 0 11px;
+  border: 1px solid var(--primary-bd);
+  border-radius: var(--r-pill);
+  background: var(--primary-soft);
+  color: var(--primary-fg);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.batch-chip b { font-weight: 700; font-variant-numeric: tabular-nums; }
+
 /* 刷新说明与逐家结果：常驻在表格下方，不随 toast 消失；有失败才标红 */
 /* ─── 「获取模型」弹窗的样式已随迁移移除 ───────────────
    弹窗迁到组件库后（ui-islands/src/islands/models-fetch-modal.tsx），这里原先那套
@@ -130,17 +185,50 @@
 .models-table th.r, .models-table td.r { text-align: right; }
 .models-table td.empty { padding: 26px 8px; text-align: center; color: var(--text-3); }
 
+/* ── 模型管理页的密度与表头（2026-10 重设计）──────────────
+   行高收紧一档（上下 7px）、左右给到 10px 便于扫读；表头字号提到 11px、
+   去掉字距（中文不受益）。只住本页 —— 网关 Key 页共用 .models-table
+   骨架与列宽拖动，不跟着这组覆盖走。 */
+.page[data-page="gateway"] .models-table thead th { padding: 8px 10px; font-size: 11px; letter-spacing: 0; }
+.page[data-page="gateway"] .models-table td { padding: 7px 10px; }
+
+/* 「模型映射」表头的问号提示（完整口径从括号长标题挪进 title，见 models-page） */
+.page[data-page="gateway"] .models-table .th-help {
+  display: inline-flex;
+  vertical-align: -2px;
+  margin-left: 3px;
+  opacity: .7;
+  cursor: help;
+}
+.page[data-page="gateway"] .models-table .th-help svg { width: 11px; height: 11px; display: block; }
+
+/* 勾选的行：品牌淡底（比 hover 高一档）——批量勾选后滚动了视图，
+   「选中的是哪几行」仍可辨。与 hover 叠加时取更深的一档。 */
+.page[data-page="gateway"] .models-table tbody tr.sel td {
+  background: color-mix(in srgb, var(--primary) 7%, transparent);
+}
+.page[data-page="gateway"] .models-table tbody tr.sel:hover td {
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+}
+
 /* 列宽（合计 100%，table-layout: fixed 下按 colgroup 分配） */
-.models-table .c-model { width: 22%; }
-.models-table .c-rate { width: 6%; }
-.models-table .c-source { width: 7%; }
-/* 能力位两列：数值一格（上下文 / 最大输出）、三枚布尔徽章一格。
+/* 选择列：一整列只有一枚复选框，给 3.5% 的窄档（46px 上下，照账号页勾选列的量级）；
+   多出的宽度从映射列（chips 有弹性）与操作列（按钮定宽、无长文案）各挪一点 ——
+   合计仍 100%，没有换行风险。 */
+.models-table .c-check { width: 3.5%; }
+/* 勾选列的表头 / 单元格都居中：一整列只有复选框，居中才与账号页勾选列同一观感
+   （数据行走列设置的 ta-center；th 上的 text-align 是全局 left，这里单独补） */
+.models-table th[data-col="check"] { text-align: center; }
+.models-table .c-model { width: 19%; }
+.models-table .c-rate { width: 5.5%; }
+.models-table .c-source { width: 6.5%; }
+/* 能力位两列：数值一格（上下文 / 最大输出）、四枚图标圆点一格。
    并入映射列的宽度从这里来 —— 五列会把它挤到装不下 chips（见 models-page
    文件头的列数取舍） */
-.models-table .c-budget { width: 11%; }
-.models-table .c-caps { width: 13%; }
-.models-table .c-alias { width: 29%; }
-.models-table .c-act { width: 12%; }
+.models-table .c-budget { width: 10%; }
+.models-table .c-caps { width: 11.5%; }
+.models-table .c-alias { width: 33%; }
+.models-table .c-act { width: 11%; }
 .keys-table .k-name { width: 22%; }
 .keys-table .k-key { width: 44%; }
 .keys-table .k-time { width: 16%; }
@@ -235,28 +323,46 @@
 .cap-num.unset { color: var(--text-3); opacity: .6; }
 .cap-sep { color: var(--text-3); font-size: 11px; }
 
-/* 三枚布尔徽章：支持 = 品牌淡底实心；不支持 = 描边压淡；未声明 = 虚线。
-   窄窗口下列宽会被压小，允许换行 —— 不换行只会让第三枚压到映射列上 */
+/* ── 「来源」列：色点 + 小字（2026-10 重设计）──────────────
+   原描边徽标在这一列是满屏的小框框（每行都在重复同一个词），换成色点后
+   扫表时只剩「点的颜色」一个信号：远程 = 品牌蓝（正常态）、内置 = 灰
+   （还没拉到目录）、手动 = 琥珀（人工登记，可移除）。 */
+.src { display: inline-flex; align-items: center; gap: 5px; color: var(--text-3); font-size: 11.5px; white-space: nowrap; }
+.src i { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); opacity: .55; }
+.src.remote { color: var(--text-2); }
+.src.remote i { background: var(--primary); opacity: 1; }
+.src.manual i { background: var(--warn); opacity: 1; }
+
+/* ── 「能力」列：四枚图标圆点（2026-10 重设计）──────────────
+   文字徽章 → 图标圆点：四个键在每一行都出现，扫表时读的是「几个亮圆」，
+   具体语义由悬停提示兜底（capabilityTip）。三态：
+   支持 = 品牌淡底圆、明确不支持 = 灰实底圆、未声明 = 虚线圈。 */
 .caps-open.caps-badges { gap: 4px; flex-wrap: wrap; }
-.cap-badge {
+.cap-dot {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  padding: 1px 6px;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
   border: 1px solid transparent;
-  border-radius: var(--r-pill);
-  font-size: 10.5px;
-  line-height: 16px;
-  white-space: nowrap;
 }
-.cap-badge.on { border-color: var(--primary-bd); background: var(--primary-soft); color: var(--primary-fg); font-weight: 600; }
-.cap-badge.off { border-color: var(--border); color: var(--text-3); }
-.cap-badge.unset { border-style: dashed; border-color: var(--border-strong); color: var(--text-3); opacity: .8; }
+.cap-dot svg { width: 11px; height: 11px; display: block; }
+.cap-dot.on { background: var(--primary-soft); color: var(--primary-fg); }
+.cap-dot.off { background: var(--surface-3); color: var(--text-3); }
+.cap-dot.unset { border: 1px dashed var(--border-strong); color: var(--text-3); opacity: .75; }
 
-/* 覆盖标记：被用户改过的那一项挂一枚小点（title 说明「已覆盖上游值」） */
+/* 覆盖标记：被用户改过的那一项挂一枚小点（title 说明「已覆盖上游值」）。
+   基础 .cap-mark 是行内小点（「上下文 / 输出」格用）；圆点里的那枚绝对定位
+   到右上角，外圈描一层表面色把它从底色上托出来。 */
 .cap-mark { flex: 0 0 auto; display: block; width: 4px; height: 4px; border-radius: 50%; background: var(--primary); }
+.cap-dot .cap-mark { position: absolute; top: -1px; right: -1px; box-shadow: 0 0 0 2px var(--surface); }
 
-/* 映射名药丸：品牌色浅底；行禁用时随行压淡并加删除线。
+/* 映射名药丸（2026-10 重设计）：**中性表面底** —— 原品牌色淡底把整列刷成蓝色按钮墙，
+   品牌色在该列只属于两个真正的交互件：chip 上的开关与「＋ 映射」入口。
+   chip 本体降级为「一条绑定的容器」：surface-3 底 + 细描边（比行 hover 底
+   深一档，行悬浮时也分得开）；行禁用时随行压淡并加删除线。
    纵向排列（每条绑定独占一行，参照账号页模型管理弹窗）——映射一多条，
    横向 wrap 会挤成变宽的迷宫，竖着读每行一条才对得上「绑定列表」的心智。
    第一行是例外：默认那条与「＋ 映射」并排（.alias-row）—— 入口按钮不是绑定，
@@ -269,25 +375,26 @@
 .alias {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  height: 22px;
-  padding: 0 3px 0 8px;
-  border: 1px solid var(--primary-bd);
+  gap: 5px;
+  height: auto;
+  min-height: 26px;
+  max-width: 100%;
+  padding: 3px 5px;
+  border: 1px solid var(--border);
   border-radius: var(--r-pill);
-  background: var(--primary-soft);
-  color: var(--primary-fg);
+  background: var(--surface-3);
+  color: var(--text);
   font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 600;
 }
 .alias.off { border-color: var(--border); background: var(--surface-inset); color: var(--text-3); text-decoration: line-through; }
-/* 关闭的映射（chip 上自己的开关关着）：整体灰化弱化并加删除线，但仍可点
+/* 关闭的映射（chip 上自己的开关关着）：虚线弱化 + 删除线，但仍可点
    （开关就在 chip 里）。与行级压淡的 .off 互相独立 —— 「行开着、某条映射
    关着」的状态要一眼可辨，所以另起一个类名。 */
-.alias.map-off { border-color: var(--border); background: var(--surface-inset); color: var(--text-3); }
-.alias.map-off .t { text-decoration: line-through; }
+.alias.map-off { border-style: dashed; background: transparent; color: var(--text-3); }
+.alias.map-off .t { text-decoration: line-through; font-weight: 500; }
 .alias .t { min-width: 0; overflow-wrap: anywhere; }
-.alias { height: auto; min-height: 26px; max-width: 100%; padding-top: 3px; padding-bottom: 3px; gap: 5px; }
 .binding-default { flex: 0 0 auto; padding: 0 4px; border: 1px solid var(--border); border-radius: var(--r-xs); background: var(--surface); color: var(--text-3); font-family: var(--font-sans); font-size: 10px; font-weight: 500; }
 .alias .switch { flex: 0 0 auto; }
 .alias .alias-level, .alias .x { flex: 0 0 auto; }
@@ -403,84 +510,120 @@
 .prov-rail {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 8px 8px 12px;
+  min-height: 0;
+  padding: 8px 8px 10px;
   border-right: 1px solid var(--sidebar-border);
   /* 比全局侧栏浅一档（--rail-bg，见 tokens.css）：它是面板内的一段内嵌导航，
      用侧栏同款底色会被读成侧栏的延伸，和右边的模型表也不成一块 */
   background: var(--rail-bg);
-  /* 高度由 grid 行高给（= 面板高度），家数多了自己滚 —— 它是列表，不是内容。
-     这里**不能**加 scrollbar-gutter: stable：预留的槽仍在 padding box 内，
-     分组标题条的负外边距一旦铺进去（见 .rail-label）就是 11px 的横向溢出，
-     栏底立刻挂一条横向滚动条。原生滚动条的出现/消失只让内容宽跳 11px，
-     而这一栏的家数远不到一屏，实际几乎见不到滚动条。 */
-  overflow-y: auto;
+  /* 高度由 grid 行高给（= 面板高度）。滚动不再发生在 aside 上（2026-10 重设计）：
+     条目区 .rail-scroll 自己滚，「＋ 新建」在 .rail-foot 沉底 —— 它是动作不是选项，
+     家多了也不该被推出视野。这里**不能**加 scrollbar-gutter: stable：预留的槽仍在
+     padding box 内，分组标题的负外边距一旦铺进去就是 11px 的横向溢出。 */
+  overflow: hidden;
 }
 
-/* 分组标题：做成一条**通栏的分组条**，而不是一行小字。
-   原先它逐条照搬侧边栏的 .nav-group-label（同样字号、字距、muted 色），结果是
-   它和条目同色系、只淡一档，混在列表里根本看不出「这里是两组」—— 而内置与
-   自定义的分界恰恰是这一页最要紧的一次分类，看错组就会在错的家上改模型。
-   现在：底色用 --surface-inset 抬起一层（与文档页 .ep-group 同一个手法），
-   文字提到 --sidebar-fg 并加粗，负外边距让底色通到栏边（.prov-rail 内边距 8px）。
-   字号仍压在 11px：它是标题，不能比 .pv 条目更抢眼；左右内边距取 18px
-   （= 栏内边距 8 + 条目内边距 10），标题文字与条目文字左对齐。 */
+/* 条目区： aside 里唯一滚动的块（家数多了自己滚） */
+.rail-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+/* 栏底的动作区：与条目区隔一条发丝线，说明下面是「动作」不是「选项」
+   （里面的「＋ 新建」是 NavItem 的 add 变体，宽度组件自带 w-full） */
+.rail-foot { flex: none; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--hairline); }
+
+/* 分组标题：一行小字 + 右侧细线（2026-10 重设计）。原通栏色带把左栏切成几块、
+   又与条目的选中底色抢重量；「小字 + 细线」同样分得开两组，但整栏是一块的。 */
 .rail-label {
   flex: none;
-  /* 左右各 -8px 抵消 .prov-rail 的内边距，底色通到栏边（右缘正好落在
-     padding box 右边缘；有纵向滚动条时落在滚动条左缘，都不会溢出） */
-  margin: 8px -8px 4px -8px;
-  padding: 6px 18px 5px;
-  background: var(--surface-inset);
-  color: var(--sidebar-fg);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: .09em;
-}
-.rail-label:first-child { margin-top: 0; }
-.rail-empty { padding: 2px 10px 6px; color: var(--sidebar-muted); font-size: 11.5px; }
-
-/* 一家一行：与 .nav-item 同一形态（行高、圆角、字号、字重、选中态配色、
-   过渡曲线都取自那一份），差异只有右侧那个计数 */
-.pv {
-  position: relative;
   display: flex;
   align-items: center;
-  gap: 9px;
-  width: 100%;
-  padding: 8px 10px;
-  border: 1px solid transparent;
-  border-radius: var(--r-sm);
-  background: transparent;
-  /* 通用 button 规则会带上 --shadow-1，与「平铺的导航列表」冲突（.nav-item 同样清掉） */
-  box-shadow: none;
-  color: var(--sidebar-fg);
-  font-size: 12.5px;
-  font-weight: 500;
-  text-align: left;
-  transition: background .15s ease, color .15s ease;
+  gap: 8px;
+  margin: 10px 4px 5px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  white-space: nowrap;
 }
-.pv:hover:not(:disabled) { background: var(--nav-hover); color: var(--text); border-color: transparent; }
-.pv.on,
-.pv.on:hover:not(:disabled) {
-  color: var(--nav-selected-fg);
-  background: var(--nav-selected-bg);
-  border-color: var(--nav-selected-border);
-  font-weight: 600;
+.rail-label:first-child { margin-top: 0; }
+.rail-label::after { content: ""; flex: 1; height: 1px; background: var(--hairline); }
+.rail-empty { padding: 2px 10px 6px; color: var(--sidebar-muted); font-size: 11.5px; }
+
+/* ── 提供商头像（2026-10 重设计）──────────────────────────
+   收录过图标的家用**真实图标**（内置家按 id 查 PROVIDER_ICONS，自定义家按名字
+   match预置目录，见 models-page.tsx 的 providerAvatar）：品牌图自带颜色，底换
+   中性控件色、图 contain 缩进一圈（.img 形态），不与色相 tint 混用。
+   没图标可用的家回落色相 monogram：底 = 色相淡混、字 = 色相亮档，色相由内联
+   --av-h 给（providerHue）。深浅主题各配一档文字亮度：深色下提亮、浅色下压暗，
+   同一份 --av-h 两边都成立。「全部」不是一家（.mute）：中性灰，不参与色环。 */
+.pv-ico {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 21px;
+  height: 21px;
+  border-radius: 6px;
+  background: oklch(0.68 0.13 var(--av-h, 260) / 18%);
+  color: oklch(0.70 0.14 var(--av-h, 260));
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+  overflow: hidden;
+}
+:root[data-theme='light'] .pv-ico {
+  background: oklch(0.68 0.13 var(--av-h, 260) / 14%);
+  color: oklch(0.52 0.15 var(--av-h, 260));
+}
+.pv-ico svg { width: 12px; height: 12px; display: block; }
+.pv-ico.mute {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  color: var(--text-3);
+}
+/* 真图标形态：中性底（品牌图自带颜色，色相 tint 会打架），四周留 2px 呼吸 */
+.pv-ico.img,
+:root[data-theme='light'] .pv-ico.img { background: var(--control-bg); color: initial; padding: 2px; }
+.pv-ico.img img { width: 100%; height: 100%; object-fit: contain; display: block; }
+/* 面板头标题上的那枚：大一档（它是这页的「页签」） */
+.mm-title .pv-ico { width: 26px; height: 26px; border-radius: 8px; font-size: 12px; }
+.mm-title .pv-ico svg { width: 14px; height: 14px; }
+
+/* 计数改小药丸（2026-10 重设计）：NavItem 渲染的计数 span 加底色与圆角。
+   只作用于本栏 —— 计数药丸是「导航列表」的语义，别处（侧栏等）不跟。 */
+.prov-rail [data-slot='nav-item-count'] {
+  min-width: 20px;
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  line-height: 16px;
+  text-align: center;
+}
+/* 选中态下药丸跟随选中文字色（NavItem 已把计数 color 设为 inherit，
+   这里只换底色，让它在选中底上仍是可读的一小块） */
+.prov-rail [data-slot='nav-item'][data-active] [data-slot='nav-item-count'] {
+  background: color-mix(in srgb, currentColor 18%, transparent);
 }
 
-.pv .n { flex: 0 0 auto; color: var(--sidebar-muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
-.pv.on .n { color: inherit; }
+/* 条目本体（一家一行）已换成组件库 NavItem（models-page.tsx 的 rail()）：
+   行高、圆角、字号、字重、选中态配色、过渡曲线都在组件里取同一套令牌，
+   旧的 .pv / .pv.on / .pv .n 一组规则随之删除 —— 左栏剩下的自定义样式只有
+   头像（.pv-ico）、计数药丸（上面两条）与下面的删除 ×。 */
 
-/* 自定义家条目外层的定位容器（.pv 是 button，删除按钮不能嵌在它里面 ——
-   button 套 button 会被解析器拆开，绝对定位也跟着失去参照，见 models-panel 的
-   renderRail）。宽高都交给里面的 .pv，这一层只负责给 × 当坐标原点。 */
+/* 自定义家条目外层的定位容器（条目本体是组件库 NavItem 的 button，删除按钮不能嵌在
+   它里面 —— button 套 button 会被解析器拆开，绝对定位也跟着失去参照）。
+   宽高都交给里面的条目，这一层只负责给 × 当坐标原点。 */
 .pv-row { position: relative; flex: none; }
 
 /* 条目上的删除按钮：与右侧那个计数**占同一个位置**，hover / 键盘聚焦时互换
    —— 计数在「要删它」这一刻没有用，让位给按钮既不用加宽左栏，也不会让
    12.5px 的名字被挤掉一截。默认隐藏（opacity 而非 display：显隐不动布局，
-   鼠标扫过一排条目时不会有跳动）。 */
+   鼠标扫过一排条目时不会有跳动）。（条目换成 NavItem 后计数由 JS 侧的
+   RAIL_HIDE_COUNT_ON_HOVER 工具类藏，这里那条保留是为了与该行为同处一地。） */
 .pv-del {
   position: absolute;
   top: 50%;
@@ -506,7 +649,7 @@
 .pv-row:hover .pv-del,
 .pv-del:focus-visible { opacity: 1; }
 /* hover 时把计数让出来（两者都在右缘，不藏计数就会叠字） */
-.pv-row:hover .pv .n { visibility: hidden; }
+.pv-row:hover [data-slot='nav-item-count'] { visibility: hidden; }
 /* :not(:disabled) 是为了压过 components.css 的 `button:hover:not(:disabled)`
    —— 那条的特异性是 (0,2,1)，比单类 + :hover 高一级，不写就抢不回来 */
 .pv-del:hover:not(:disabled) {

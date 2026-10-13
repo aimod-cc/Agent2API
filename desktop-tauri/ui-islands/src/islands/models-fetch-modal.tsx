@@ -26,6 +26,7 @@ import {
   TableRow,
   type BadgeProps,
 } from '@ui'
+import { t } from '../i18n'
 
 /**
  * Agent2API · 「获取模型」弹窗（模型管理页那颗按钮的本体）。
@@ -176,8 +177,8 @@ const WIDTH_CUSTOM: Record<string, string> = { pick: 'w-[8%]', model: 'w-[74%]',
 
 /** 表头文案（按列 key 取；空串 = 勾选列没有标题，与旧实现一致） */
 const HEAD_LABEL: Record<string, string> = {
-  pick: '', provider: '提供商', source: '模型来源', state: '状态', count: '模型数',
-  note: '说明', updated: '更新日期', model: '上游模型',
+  pick: '', provider: t('提供商'), source: t('模型来源'), state: t('状态'), count: t('模型数'),
+  note: t('说明'), updated: t('更新日期'), model: t('上游模型'),
 }
 
 /**
@@ -187,9 +188,9 @@ const HEAD_LABEL: Record<string, string> = {
  * 「未知」而无从排查）。
  */
 const KIND: Record<string, { variant: NonNullable<BadgeProps['variant']>; label: string }> = {
-  refreshed: { variant: 'brand', label: '已刷新' },
-  failed: { variant: 'destructive', label: '失败' },
-  skipped: { variant: 'outline', label: '跳过' },
+  refreshed: { variant: 'brand', label: t('已刷新') },
+  failed: { variant: 'destructive', label: t('失败') },
+  skipped: { variant: 'outline', label: t('跳过') },
 }
 
 /**
@@ -246,7 +247,7 @@ function accountLabel(account: Account): string {
   const email = String(account?.email || '').trim()
   if (shared().wbAccountsModel?.providerFeatures?.(account?.provider)?.emailAsName && email) return email
   const name = String(account?.nickname || account?.name || email || account?.id || '').trim()
-  return name || '未命名账号'
+  return name || t('未命名账号')
 }
 
 /** 该家可用于拉取目录的账号（「模型来源」下拉的选项）。过滤 = `available`（后端口径：启用 + 有
@@ -296,7 +297,7 @@ function refreshedText(item: RefreshItem): string {
 
 /** 逐家结果的徽章与文案（见 KIND 的说明） */
 function kindOf(item: RefreshItem): { variant: NonNullable<BadgeProps['variant']>; label: string } {
-  return KIND[String(item.status)] ?? { variant: 'outline', label: String(item.status || '未知') }
+  return KIND[String(item.status)] ?? { variant: 'outline', label: String(item.status || t('未知')) }
 }
 
 /**
@@ -394,21 +395,23 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
   const summary = custom
     // 还没拉过时三个计数都是 0，列出来只会让人以为「上游没有模型」——那与「还没拉」是两件事
     ? fetched
-      ? `已选 ${picked.size} 个 · 上游共 ${upstream.length} 个 · 清单已有 ${managed.size} 个`
-      : '尚未获取'
+      ? t('已选 {picked} 个 · 上游共 {upstream} 个 · 清单已有 {managed} 个',
+        { picked: picked.size, upstream: upstream.length, managed: managed.size })
+      : t('尚未获取')
     : intlSummary()
 
   /** 内置家的汇总文案（待获取 / 刷新中 / 失败 / 逐家结果四档） */
   function intlSummary(): string {
-    if (status === 'loading') return '正在刷新…'
+    if (status === 'loading') return t('正在刷新…')
     // 失败时不留上一轮的读数：那是旧结果，与整屏的「获取失败」自相矛盾
     if (status === 'error') return ''
     if (status === 'ready') {
-      return results.length
-        ? `${results.length} 家 · 成功 ${done}${failed ? ` · 失败 ${failed}` : ''}`
-        : '0 家'
+      if (!results.length) return t('0 家')
+      return failed
+        ? t('{total} 家 · 成功 {done} · 失败 {failed}', { total: results.length, done, failed })
+        : t('{total} 家 · 成功 {done}', { total: results.length, done })
     }
-    return pending.length ? `共 ${pending.length} 家 · 点「获取模型」开始` : '0 家'
+    return pending.length ? t('共 {n} 家 · 点「获取模型」开始', { n: pending.length }) : t('0 家')
   }
 
   /**
@@ -528,13 +531,14 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
     setHint('')
     try {
       const added = Number(await shared().wbModelsCustom?.addModels?.(providerId, values)) || 0
-      toast(`✅ 已导入 ${added} 个模型（${values.length - added} 个已存在，跳过）`)
+      toast(t('✅ 已导入 {added} 个模型（{skipped} 个已存在，跳过）',
+        { added, skipped: values.length - added }))
       setBusyKind(null)
       onClose()
       onDone?.()
     } catch (error) {
       const message = errorMessage(error)
-      toast(`导入失败：${message}`, 'err')
+      toast(t('导入失败：{message}', { message }), 'err')
       setHint(message)
       setBusyKind(null)
     }
@@ -579,14 +583,15 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
     const { list, selected } = selectSource(pid, reported)
     if (!list.length) {
       const why = ACCOUNTLESS_REFRESH.has(pid)
-        ? '这家的模型清单是全局的，不跟账号走'
-        : '这家还没有可用账号，刷新会使用默认登录态'
+        ? t('这家的模型清单是全局的，不跟账号走')
+        : t('这家还没有可用账号，刷新会使用默认登录态')
       return <span className='text-[11.5px] text-muted-foreground' title={why}>—</span>
     }
     const current = list.find(account => String(account.id) === selected)
     return (
       <Select value={selected} onValueChange={next => rememberSource(pid, String(next))}>
-        <SelectTrigger className='w-full' title='用哪个账号去拉这家的模型清单' aria-label='模型来源'>
+        <SelectTrigger className='w-full' title={t('用哪个账号去拉这家的模型清单')}
+          aria-label={t('模型来源')}>
           {/* 展示文案显式给出：不依赖 value 自动显示（值是 id，而这一格要的是账号名） */}
           <SelectValue>{current ? accountLabel(current) : '—'}</SelectValue>
         </SelectTrigger>
@@ -602,11 +607,13 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
   /** 自定义家的表体：一行一个上游模型 + 勾选框 + 是否已在清单里。已在清单里的行整体压淡、复选框
    *  禁用（不重复导入），徽章文案说明后果。 */
   function customBody() {
-    if (status === 'idle') return stateRow('点右侧「获取模型」从上游拉取这家的模型清单')
-    if (status === 'loading') return stateRow('正在获取…')
-    if (status === 'error') return stateRow(`获取失败：${errorText}`)
+    if (status === 'idle') return stateRow(t('点右侧「获取模型」从上游拉取这家的模型清单'))
+    if (status === 'loading') return stateRow(t('正在获取…'))
+    if (status === 'error') return stateRow(t('获取失败：{message}', { message: errorText }))
     // 「没匹配上」与「上游压根没返回」是两件事，文案分开
-    if (!shown.length) return stateRow(upstream.length ? `没有匹配「${needle}」的模型` : '上游没有返回任何模型')
+    if (!shown.length) return stateRow(upstream.length
+      ? t('没有匹配「{keyword}」的模型', { keyword: needle })
+      : t('上游没有返回任何模型'))
     return shown.map(id => {
       const has = managed.has(norm(id))
       return (
@@ -620,9 +627,9 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
           <TableCell>{nameCell(id)}</TableCell>
           <TableCell>
             {has ? (
-              <Badge variant='brand' title='这个模型已经在这家的清单里，不重复导入'>已添加</Badge>
+              <Badge variant='brand' title={t('这个模型已经在这家的清单里，不重复导入')}>{t('已添加')}</Badge>
             ) : (
-              <Badge variant='outline' title='勾上它，导入后即进入这家的清单'>未添加</Badge>
+              <Badge variant='outline' title={t('勾上它，导入后即进入这家的清单')}>{t('未添加')}</Badge>
             )}
           </TableCell>
         </TableRow>
@@ -640,17 +647,17 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
    * 用户决定「要不要刷」的依据，等刷完才有值就太晚了。
    */
   function intlBody() {
-    if (status === 'loading') return stateRow('正在获取…')
-    if (status === 'error') return stateRow(`获取失败：${errorText}`)
+    if (status === 'loading') return stateRow(t('正在获取…'))
+    if (status === 'error') return stateRow(t('获取失败：{message}', { message: errorText }))
     if (status === 'idle') {
-      if (!pending.length) return stateRow('还没有可刷新的提供商：先在账号页添加一个账号')
+      if (!pending.length) return stateRow(t('还没有可刷新的提供商：先在账号页添加一个账号'))
       return pending.map(item => {
         const at = formatTime(Number(shared().wbModelsPanel?.providerRefreshedAt?.(String(item.id || ''))) || 0)
         return (
           <TableRow key={String(item.id || '')}>
             <TableCell>{nameCell(String(item.label || item.id || ''))}</TableCell>
             <TableCell>{sourceCell(String(item.id || ''))}</TableCell>
-            <TableCell><Badge variant='outline'>待获取</Badge></TableCell>
+            <TableCell><Badge variant='outline'>{t('待获取')}</Badge></TableCell>
             <TableCell>{rateCell('—')}</TableCell>
             <TableCell>{rateCell('—')}</TableCell>
             <TableCell>{rateCell(at || '—')}</TableCell>
@@ -658,7 +665,7 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
         )
       })
     }
-    if (!results.length) return stateRow('刷新完成，但没有得到任何结果')
+    if (!results.length) return stateRow(t('刷新完成，但没有得到任何结果'))
     return results.map((item, index) => {
       const kind = kindOf(item)
       const count = Number(item.count)
@@ -666,14 +673,14 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
       // message），没给才按 fixed 标记分辨「能力边界」与「本次没取到新内容」—— 按 message 文案
       // 匹配会在措辞调整后静默失效
       const note = item.status === 'refreshed'
-        ? '远程目录已更新，「来源」列会显示为「远程」'
-        : item.message || (item.fixed ? '这家用固定模型清单，无可刷新' : '本次没有取到新内容')
+        ? t('远程目录已更新，「来源」列会显示为「远程」')
+        : item.message || (item.fixed ? t('这家用固定模型清单，无可刷新') : t('本次没有取到新内容'))
       return (
         <TableRow key={String(item.provider ?? index)}>
           <TableCell>{nameCell(String(item.providerLabel || item.provider || ''))}</TableCell>
           <TableCell>{sourceCell(String(item.provider || ''), item.accountId)}</TableCell>
           <TableCell><Badge variant={kind.variant}>{kind.label}</Badge></TableCell>
-          <TableCell>{rateCell(count ? `${count} 个` : '—')}</TableCell>
+          <TableCell>{rateCell(count ? t('{n} 个', { n: count }) : '—')}</TableCell>
           <TableCell><span className='text-[11.5px] leading-[1.5] text-muted-foreground'>{note}</span></TableCell>
           <TableCell>{rateCell(refreshedText(item))}</TableCell>
         </TableRow>
@@ -702,7 +709,7 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
           .modal-narrow ≈ 552px，与宽表区分开）；两侧各留 24px 与遮罩内边距对齐 */}
       <DialogContent className={custom ? 'w-[min(552px,calc(100vw-48px))]' : 'w-[min(920px,calc(100vw-48px))]'}>
         <DialogHeader>
-          <DialogTitle>获取模型 — {name}</DialogTitle>
+          <DialogTitle>{t('获取模型 — {name}', { name })}</DialogTitle>
         </DialogHeader>
         <DialogBody>
           {/* 工具行：**汇总在左、动作在右**（获取模型是最右那颗）—— 用户扫一眼左边就知道
@@ -712,7 +719,7 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
             {custom && (
               // 搜索框：图标走 InputGroupAddon，宽度沿用旧 .fm-search 的 240px
               <InputGroup className='w-[240px] flex-none'>
-                <InputGroupInput type='search' placeholder='搜索模型 ID…' autoComplete='off'
+                <InputGroupInput type='search' placeholder={t('搜索模型 ID…')} autoComplete='off'
                   value={keyword} onChange={event => setKeyword(event.currentTarget.value)} />
                 <InputGroupAddon aria-hidden='true'>⌕</InputGroupAddon>
               </InputGroup>
@@ -720,15 +727,15 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
             <div className='mr-auto' />
             {custom && (
               <>
-                <Button variant='ghost' size='sm' onClick={selectAllUnadded}>全选未添加</Button>
-                <Button variant='ghost' size='sm' onClick={() => setPicked(new Set())}>清空</Button>
+                <Button variant='ghost' size='sm' onClick={selectAllUnadded}>{t('全选未添加')}</Button>
+                <Button variant='ghost' size='sm' onClick={() => setPicked(new Set())}>{t('清空')}</Button>
               </>
             )}
             {/* 文案按「这次有没有真的拿到一份结果」定：拉失败时仍是「获取模型」（用户要的是再试
                 一次），成功之后才是「重新获取」 */}
-            <Button variant='outline' size='sm' title='从上游拉一次' disabled={busy}
+            <Button variant='outline' size='sm' title={t('从上游拉一次')} disabled={busy}
               onClick={() => { void load() }}>
-              {busyKind === 'load' ? '获取中…' : fetched ? '重新获取' : '获取模型'}
+              {busyKind === 'load' ? t('获取中…') : fetched ? t('重新获取') : t('获取模型')}
             </Button>
           </div>
           <Table id={custom ? TABLE_ID.custom : TABLE_ID.intl}
@@ -756,10 +763,11 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
         <DialogFooter>
           <span className='min-w-0 text-[11.5px] text-muted-foreground'>{hint}</span>
           <div className='mr-auto' />
-          <Button variant='outline' onClick={handleCloseClick}>{custom ? '取消' : '完成'}</Button>
+          <Button variant='outline' onClick={handleCloseClick}>{custom ? t('取消') : t('完成')}</Button>
           {custom && (
             <Button variant='default' disabled={!picked.size || busy} onClick={() => { void importPicked() }}>
-              {busyKind === 'import' ? '导入中…' : picked.size ? `导入选中的 ${picked.size} 个模型` : '导入'}
+              {busyKind === 'import' ? t('导入中…')
+                : picked.size ? t('导入选中的 {n} 个模型', { n: picked.size }) : t('导入')}
             </Button>
           )}
         </DialogFooter>

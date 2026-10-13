@@ -43,6 +43,10 @@
       .filter(item => item && typeof item.id === 'string' && item.id)
       .map(item => ({
         id: item.id,
+        // label 保持后端注册名原文、**不包 t()**：它同时被 accounts-domain.ts 的
+        // editionSuffix 当作「注册名里是否已含地区词」的判重串（label.includes('国际版')），
+        // 在那处被包成译文会让判重在非简体界面下失效（例如繁体下拼出「…國際版 国际版」）。
+        // 展示名需要翻译时由各展示处自行处理，别在这里动。
         label: typeof item.label === 'string' && item.label ? item.label : item.id,
         count: Number(item.count) || 0,
       }));
@@ -108,7 +112,7 @@
   function customRequest(method, path, body) {
     const internals = window.__TAURI_INTERNALS__;
     if (!internals || typeof internals.invoke !== 'function') {
-      return Promise.reject(new Error('桌面运行时不可用（Tauri 未初始化）'));
+      return Promise.reject(new Error(wbI18n.t('桌面运行时不可用（Tauri 未初始化）')));
     }
     return internals.invoke('api_request', {
       request: { method, path, body: body === undefined ? null : body },

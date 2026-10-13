@@ -224,11 +224,11 @@
       const onLoad = () => {
         cleanup();
         if (getInitAliyunCaptcha()) resolve();
-        else fail(new CaptchaError('验证码组件加载异常，请重试'));
+        else fail(new CaptchaError(wbI18n.t('验证码组件加载异常，请重试')));
       };
-      const onError = () => fail(new CaptchaError('验证码组件加载失败，请检查网络后重试'));
+      const onError = () => fail(new CaptchaError(wbI18n.t('验证码组件加载失败，请检查网络后重试')));
       timer = window.setTimeout(
-        () => fail(new CaptchaError('验证码组件加载超时，请检查网络后重试')),
+        () => fail(new CaptchaError(wbI18n.t('验证码组件加载超时，请检查网络后重试'))),
         SCRIPT_LOAD_TIMEOUT_MS,
       );
       script.addEventListener('load', onLoad);
@@ -269,7 +269,7 @@
     }
     if (typeof captchaVerifyParam !== 'string' || captchaVerifyParam.length === 0) {
       settlePending(pending, {
-        error: new CaptchaError('验证码校验失败，请重试'),
+        error: new CaptchaError(wbI18n.t('验证码校验失败，请重试')),
       });
       return { captchaResult: false, bizResult: false };
     }
@@ -316,14 +316,14 @@
       await loadAliyunCaptchaScript(config);
       ensureCaptchaElements();
       const initAliyunCaptcha = getInitAliyunCaptcha();
-      if (!initAliyunCaptcha) throw new CaptchaError('验证码组件不可用，请重试');
+      if (!initAliyunCaptcha) throw new CaptchaError(wbI18n.t('验证码组件不可用，请重试'));
       await new Promise((resolve, reject) => {
         let settled = false;
         let boundInstance = null;
         const timer = window.setTimeout(() => {
           if (settled) return;
           settled = true;
-          reject(new CaptchaError('验证码组件初始化超时，请重试'));
+          reject(new CaptchaError(wbI18n.t('验证码组件初始化超时，请重试')));
         }, INIT_TIMEOUT_MS);
         const settle = callback => {
           if (settled) return false;
@@ -363,7 +363,7 @@
               if (pending && pending.generation === generation && pending.instance === boundInstance) {
                 settlePending(pending, {
                   error: new CaptchaError(
-                    (error && error.message) || '验证码校验失败，请重试',
+                    (error && error.message) || wbI18n.t('验证码校验失败，请重试'),
                   ),
                 });
                 return;
@@ -376,17 +376,17 @@
                 return;
               }
               settle(() => reject(new CaptchaError(
-                (error && error.message) || '验证码组件不可用，请重试',
+                (error && error.message) || wbI18n.t('验证码组件不可用，请重试'),
               )));
             },
           });
         } catch (error) {
           settle(() => reject(new CaptchaError(
-            (error && error.message) || '验证码组件不可用，请重试',
+            (error && error.message) || wbI18n.t('验证码组件不可用，请重试'),
           )));
         }
       });
-      if (!captchaInstance) throw new CaptchaError('验证码组件不可用，请重试');
+      if (!captchaInstance) throw new CaptchaError(wbI18n.t('验证码组件不可用，请重试'));
     })();
     return initializationPromise;
   }
@@ -420,7 +420,7 @@
     await waitForWarmup();
     const button = ensureCaptchaElements();
     const instance = captchaInstance;
-    if (!instance) throw new CaptchaError('验证码组件不可用，请重试');
+    if (!instance) throw new CaptchaError(wbI18n.t('验证码组件不可用，请重试'));
     const generation = initializationGeneration;
     return new Promise((resolve, reject) => {
       const pending = {
@@ -434,7 +434,7 @@
       };
       pending.timer = window.setTimeout(() => {
         settlePending(pending, {
-          error: new CaptchaError('验证码校验超时，请重试'),
+          error: new CaptchaError(wbI18n.t('验证码校验超时，请重试')),
         });
       }, VERIFY_TIMEOUT_MS);
       pendingVerification = pending;

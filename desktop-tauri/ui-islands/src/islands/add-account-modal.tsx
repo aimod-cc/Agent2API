@@ -54,6 +54,7 @@ import {
   type AccountType,
 } from './add-provider-pick'
 import { ProviderBlock, WorkBuddyBlock } from './add-provider-blocks'
+import { t } from '../i18n'
 
 type Step = 'pick' | 'form'
 
@@ -71,7 +72,7 @@ type IslandState = {
   showToken: number
 }
 
-/** 打开弹窗（以及点「添加账号」）时的复位落点：第 1 步 + 反代段 + WorkBuddy */
+/** 打开弹窗（以及点「添加账号」）时的复位落点：第 1 步 + Agent 段 + WorkBuddy */
 const INITIAL: IslandState = {
   step: 'pick',
   accountType: TYPE_PROXY,
@@ -159,9 +160,9 @@ function AddAccountModal({
   // 标题写在表单弹窗的头部：列表弹窗的标题始终是「添加账号」，不跟着步骤变
   const heading = isCustom
     ? (state.providerHint || state.presetKey
-      ? `登录 / 添加 ${customLabel || '自定义提供商'} 账号`
-      : '新建自定义提供商')
-    : `登录 / 添加 ${providerLabel} 账号`
+      ? t('登录 / 添加 {name} 账号', { name: customLabel || t('自定义提供商') })
+      : t('新建自定义提供商'))
+    : t('登录 / 添加 {name} 账号', { name: providerLabel })
 
   /** 第 1 步点一张卡：三种特殊取值分别落到自定义块的哪种模式（见 pickProvider 的旧注释） */
   function pick(id: string): void {
@@ -195,7 +196,7 @@ function AddAccountModal({
     <Dialog open onOpenChange={next => { if (!next) onClose() }}>
       <DialogContent className='w-[min(880px,calc(100vw-48px))]'>
         <DialogHeader>
-          <DialogTitle>添加账号</DialogTitle>
+          <DialogTitle>{t('添加账号')}</DialogTitle>
         </DialogHeader>
         <DialogBody>
           <PickStep
@@ -271,8 +272,8 @@ function AddAccountModal({
               {hasBlock ? null : (
                 <div className='add-provider-block'>
                   <DialogSection>
-                    <h3>该提供商账号添加功能即将上线</h3>
-                    <p>{`「${providerLabel}」的账号添加功能还在开发中，敬请期待。`}</p>
+                    <h3>{t('该提供商账号添加功能即将上线')}</h3>
+                    <p>{t('「{name}」的账号添加功能还在开发中，敬请期待。', { name: providerLabel })}</p>
                   </DialogSection>
                 </div>
               )}

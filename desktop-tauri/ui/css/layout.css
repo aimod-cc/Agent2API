@@ -19,8 +19,10 @@ body.has-titlebar .shell {
 
 /* ─────────────────────────────
    自定义标题栏（桌面端，titlebar.js 动态创建）
-   主窗口去掉了系统装饰（src-tauri 建窗处 decorations(false)），这里补一条
-   32px 的标题条：左侧标题、右侧最小化 / 最大化(还原) / 关闭三键。
+   32px 高的一条，两平台各有形态：Windows / Linux 建窗处去掉了系统装饰
+   （decorations(false)），所以本条自带左侧标题 + 右侧最小化 / 最大化(还原)
+   / 关闭三键；macOS 保留系统装饰、标题栏设为透明叠加（TitleBarStyle:
+   Overlay），三键是系统画的红绿灯，本条只让位（见下面的 .is-macos）。
    形态参考 OmniProxy 的 TitleBar（Electron 版）。拖动与双击最大化用
    Tauri 的 data-tauri-drag-region 内建支持，不用 Electron 的
    -webkit-app-region；配色全部走 token，深浅两套主题自动适配。
@@ -115,6 +117,25 @@ body.has-titlebar .shell {
 .titlebar-btn.is-maximized .fg { fill: var(--sidebar-bg); }
 .titlebar-btn.is-maximized:hover .fg { fill: var(--nav-hover); }
 .titlebar-btn svg { display: block; width: 14px; height: 14px; pointer-events: none; }
+
+/* ─────────────────────────────
+   macOS（platform === 'macos' 时由 titlebar.js 挂 .is-macos）
+   这条标题条上**没有我们画的三键**：那边用的是系统原生红绿灯 —— 建窗处
+   保留系统装饰、标题栏设为透明叠加（TitleBarStyle: Overlay，见 lib.rs），
+   AppKit 把红/黄/绿三颗圆点画在窗口左上角、盖在网页内容之上，本条就是
+   它们的背景板。所以这里只剩一件事：把红绿灯占的那一段从左边让出来，
+   让标题正好排在它们右侧（Mac 的默认形态：整组靠左，右半边留白）。
+   宽度按系统标准算：20（首颗圆点到窗口左边缘）+ 52（三颗 12px 圆点，
+   间距 8px）+ 12（与标题之间的呼吸）= 84px。建窗处把圆点位置钉在 (20, 20)
+   （见 lib.rs 的 traffic_light_position），所以这个数是硬对齐的。
+   （窄窗口那条 @media 把 .titlebar 的 padding-left 压到 10px，是给右侧
+   自绘三键省空间用的；mac 这边左边让的是红绿灯，不能跟着压 —— 靠
+   .titlebar.is-macos 的选择器权重压过它，是有意为之。）
+   ───────────────────────────── */
+.titlebar.is-macos {
+  padding-left: 84px;
+  padding-right: 14px;
+}
 
 /* 窄窗口：文案可能挤到三键，只留品牌图标（与侧栏 900px 收起文字同档） */
 @media (max-width: 900px) {

@@ -24,6 +24,7 @@ import * as React from 'react'
 import { flushSync } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import { Button, Input, Label } from '@ui'
+import { t } from '../i18n'
 
 /** 挂载点 id：login.html 里唯一的岛容器 */
 const HOST_ID = 'login-app'
@@ -66,7 +67,7 @@ function LoginPage() {
         </svg>
         <div>
           <h1 className='m-0 text-[21px] font-bold tracking-[0.2px]'>Agent2API</h1>
-          <div className='text-[12.5px] text-muted-foreground'>OpenAI 兼容网关 · 管理面板</div>
+          <div className='text-[12.5px] text-muted-foreground'>{t('OpenAI 兼容网关 · 管理面板')}</div>
         </div>
       </div>
 
@@ -74,25 +75,25 @@ function LoginPage() {
 
       <form id='form' autoComplete='on'>
         <Label htmlFor='username' className='mt-3.5 mb-[5px] text-[12.5px]'>
-          账号
+          {t('账号')}
         </Label>
-        <Input id='username' autoComplete='username' placeholder='管理员账号' />
+        <Input id='username' autoComplete='username' placeholder={t('管理员账号')} />
         <Label htmlFor='password' className='mt-3.5 mb-[5px] text-[12.5px]'>
-          密码
+          {t('密码')}
         </Label>
-        <Input id='password' type='password' autoComplete='new-password' placeholder='至少 8 位' />
+        <Input id='password' type='password' autoComplete='new-password' placeholder={t('至少 8 位')} />
         {/* 领题求解放后台跑 → 绿勾已验证（组件见 ui/panel-captcha.js） */}
         {captchaWidget}
         {/* type='submit' 必须显式给：Base UI 的 useButton 会给原生 button 补一个
             type="button"，只有显式传入（合并时外部 props 优先）才盖得掉 */}
         <Button id='submit' type='submit' size='lg' className='w-full'>
-          继续
+          {t('继续')}
         </Button>
         <div id='error' className='mt-3 min-h-5 text-center text-[13px] whitespace-pre-wrap text-destructive' />
       </form>
 
       <div className='mt-[22px] text-center text-[12px] text-muted-foreground'>
-        登录后可在「网关 Key」页为 API 客户端创建密钥
+        {t('登录后可在「网关 Key」页为 API 客户端创建密钥')}
       </div>
     </div>
   )

@@ -4,7 +4,17 @@
 //! 别家的每日签到是「定点、无人值守、一次请求」。本家是**运营活动交付**：
 //! 先读活动列表（delivery），挑出**该自动领的那几类**，逐个 claim，再 confirm，
 //! 最后**回读列表二次确认**。三个接口、两套状态、一个幂等键。
-//! 所以本家不进 `auto_checkin` 的提供商清单，面板上也是一个独立按钮。
+//!
+//! 尽管如此，它在「今天还能不能再领」「要不要稍后重试」这两件事上与签到同构，
+//! 所以 2026-10（按用户要求）本家**已并入** `auto_checkin` 的提供商清单：
+//! 每日签到里的 CodeArts 分组执行的就是本模块，收尾（落 `checkinAt`、
+//! 计 succeeded、记签到记录台账）由 `billing::checkin` 统一做。
+//! 并入带来两条与别家不同的性质，改这块前先看清：
+//!   · **写请求有限流闸**（每天 ≤6 次写、间隔 ≥10 分钟，见下）：`claim_account`
+//!     的 `manual` 参数决定它生不生效 —— 用户在面板上点（single / manual 来源）
+//!     不受闸，定时与启动补签（schedule / startup 来源）受闸；
+//!   · **「暂无可领取活动 / 等待重试」是中性未领取**，不是失败：不落当日台账，
+//!     由定时链稍后重试（`billing::checkin::claim_pending` 认这两个文案）。
 //!
 //! ── 为什么必须回读 delivery 才算成功 ────────────────────────
 //! `claim` 与 `confirm` 都只回 `code:0`，那是「请求受理了」，不是「到账了」。
@@ -58,6 +68,7 @@ const DAY_ZONE_OFFSET_SECONDS: i32 = 8 * 60 * 60;
 pub struct Campaign {
     pub id: Value,
     pub kind: String,
+    pub title: String,
     pub claimable: bool,
     pub status: String,
     pub benefit_amount: f64,
@@ -84,6 +95,64 @@ impl Campaign {
     /// 都故意不自动领 —— 它们是一次性奖励，自动领等于替用户做决定。
     pub fn is_daily_login_credit(&self) -> bool {
         self.kind == "USER_LOGIN" && self.benefit_unit == "CREDIT" && !self.key().is_empty()
+    }
+
+    /// 面板展示用的中文标题。
+    ///
+    /// ── 为什么要映射（不直接用上游 title）────────────────────────
+    /// 上游 `delivery` 的 title 是英文的（"Daily Check-in: Claim 1000 Credits"、
+    /// "Student Certification: Claim 4000 Credits"…），只有注册礼那条给了中文。
+    /// 面板是中文界面，任务清单里混着两行英文读起来是断裂的 —— 这里按 **kind**
+    /// 翻成中文：kind 是活动**类**的稳定标识（换期只改 id 与文案，类不变），
+    /// 而 title 会随活动文案改（"新人注册送 4000 积分" 这种把金额写进去的形态
+    /// 还会跟着金额变）。金额不拼进标题：任务行右侧已有「+N」那一列，拼进来
+    /// 就是同一句话说两遍。
+    ///
+    /// ── 中文名的来源：官方客户端的 i18n，不是自己编 ──────────────
+    /// 官方 IDE（`D:\Program Files\CodeArts` 的 app.asar）里
+    /// `normalizeActivityType` 把四类映射成 daily_claim / invite / student_certify
+    /// / login，标题就是按这套映射取的本地化文案（它**不看**服务端给的 title）：
+    ///   「每日签到领 {n} 积分」「邀请好友得 {n} 积分」「学生认证领 {n} 积分」
+    ///   「用户登录送积分」
+    /// 这里取同名去金额，与官方客户端同一套口径（`DAILY_CLAIM` 与 `USER_LOGIN`
+    /// 都收：官方常量表里两个都在，实测清单里出现的是哪一个尚未定论）。
+    ///
+    /// 认不出的 kind 回退上游原文（再空才回退 kind 本身）—— 上游新增活动类型时
+    /// 面板不会开天窗，只是那一行暂时保持原文。
+    pub fn display_title(&self) -> String {
+        let mapped = match self.kind.as_str() {
+            "DAILY_CLAIM" => "每日签到",
+            "USER_LOGIN" => "用户登录送积分",
+            "NEW_USER_REGISTER" => "新用户注册礼",
+            "STUDENT_CERTIFIED" => "学生认证",
+            "INVITE_USER" => "邀请好友",
+            _ => "",
+        };
+        if !mapped.is_empty() {
+            return mapped.to_string();
+        }
+        if !self.title.trim().is_empty() {
+            return self.title.clone();
+        }
+        self.kind.clone()
+    }
+
+    /// 属于**新人注册礼**这一条 —— 签到中心「新手任务」只给这一条入口。
+    ///
+    /// 官方 IDE 的 `ActivityWelfarePane.TYPE_ORDER` 把活动分成四类，`USER_LOGIN`
+    /// 之外还有三种。端点形状与每日那条完全一样（同一份 `POST /v1/ops/claim` +
+    /// `confirm`），所以"挑哪几条"就是两条链唯一的分界。本家只把
+    /// `NEW_USER_REGISTER` 做成可点的，另外两类**刻意不给入口**，理由各不相同，
+    /// 都不是"还没做"：
+    ///   · `STUDENT_CERTIFIED` —— 真实清单里这一项 `claimable:false`（`status` 是 null），
+    ///     前置是学生认证本身，而认证不是 API；给了按钮就是给一个必然失败的按钮。
+    ///   · `INVITE_USER` —— `status:"ENTRY"`，收益归**邀请人**，由网关点这一下等于
+    ///     替一个不是我们的用户做决定。
+    /// 与每日那条**不混领**：一个是每天的事，一个只有一次。领过一次之后上游不再回
+    /// `claimable`，所以面板上签到后的自动补领在这条上只会发一次写请求（见
+    /// `onboarding` 模块头对两条自动路径的划分）。
+    pub fn is_newbie_gift(&self) -> bool {
+        self.kind == "NEW_USER_REGISTER" && !self.key().is_empty()
     }
 
     /// 这一条还有活要干吗（要么能领，要么领了没确认）。
@@ -239,6 +308,7 @@ fn parse_delivery(data: &Value) -> Result<Vec<Campaign>, GatewayError> {
         .map(|item| Campaign {
             id: item.get("campaignId").cloned().unwrap_or(Value::Null),
             kind: item.get("type").and_then(Value::as_str).unwrap_or("").to_string(),
+            title: item.get("title").and_then(Value::as_str).unwrap_or("").to_string(),
             claimable: item.get("claimable").and_then(Value::as_bool).unwrap_or(false),
             status: item.get("status").and_then(Value::as_str).unwrap_or("").to_string(),
             benefit_amount: item.get("benefitAmount").and_then(Value::as_f64).unwrap_or(0.0),
@@ -437,11 +507,40 @@ pub fn gap_remaining(ledger: &Ledger, now_ms: i64) -> Option<u64> {
     if elapsed >= gap { None } else { Some(gap.saturating_sub(elapsed) as u64) }
 }
 
-/// 走一遍完整的领取流程。**这是本模块唯一会发写请求的函数。**
-///
-/// `manual = true`（用户在面板上点）时**不受本地限流约束**：限流保护的是
-/// 「无人值守的自动重试」，用户主动要看一眼不该被一句「等待重试」挡回去 ——
-/// 但资格仍每次重读，见模块头那条「不要把 CONFIRMED 变成全天跳过」。
+/// 领哪一组活动。两组用的端点形状完全一样，区别只在**能不能无人值守地领**。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rewards {
+    /// 每日登录送积分（明天还有）
+    DailyLogin,
+    /// 新人注册礼（每号只有一次，领早了撤不回）
+    NewbieGift,
+}
+
+impl Rewards {
+    fn selects(&self, item: &Campaign) -> bool {
+        match self {
+            Rewards::DailyLogin => item.is_daily_login_credit(),
+            Rewards::NewbieGift => item.is_newbie_gift(),
+        }
+    }
+
+    /// 日志与面板文案里的名字（两条链的文案不能混，否则"领到了"指的是别的东西）
+    fn label(&self) -> &'static str {
+        match self {
+            Rewards::DailyLogin => "每日福利",
+            Rewards::NewbieGift => "新人注册礼",
+        }
+    }
+}
+
+/// 一次领取流程的结果：结论 + 领取**前后**两份活动清单（后一份是回读确认过的那份）。
+pub struct Run {
+    pub outcome: Outcome,
+    pub before: Vec<Campaign>,
+    pub after: Vec<Campaign>,
+}
+
+/// 面板上「领取今日福利」那颗按钮的入口 —— 只走每日登录那一组。
 pub async fn claim_account(
     store: &AccountStore,
     account_id: &str,
@@ -449,6 +548,22 @@ pub async fn claim_account(
     now_ms: i64,
     manual: bool,
 ) -> Result<Outcome, GatewayError> {
+    Ok(claim_rewards(store, account_id, base, now_ms, manual, Rewards::DailyLogin).await?.outcome)
+}
+
+/// 走一遍完整的领取流程。**这是本模块唯一会发写请求的函数。**
+///
+/// `manual = true`（用户在面板上点）时**不受本地限流约束**：限流保护的是
+/// 「无人值守的自动重试」，用户主动要看一眼不该被一句「等待重试」挡回去 ——
+/// 但资格仍每次重读，见模块头那条「不要把 CONFIRMED 变成全天跳过」。
+pub async fn claim_rewards(
+    store: &AccountStore,
+    account_id: &str,
+    base: &str,
+    now_ms: i64,
+    manual: bool,
+    which: Rewards,
+) -> Result<Run, GatewayError> {
     // 先取凭据（临期会真换发并写回账号记录），再往下走。台账的写回按 id 现读记录，
     // 所以这里**不需要**也不该提前抓一份记录快照 —— 上一版就是这么写的，
     // 结果每次在临期凭据上领取，全部台账写回都被判 Stale 并被静默吞掉。
@@ -463,19 +578,32 @@ pub async fn claim_account(
     };
 
     let items = delivery(base, &credential).await?;
-    let daily: Vec<Campaign> = items.into_iter().filter(Campaign::is_daily_login_credit).collect();
-    if daily.is_empty() {
-        return Ok(Outcome::NotEligible);
+    let picked: Vec<Campaign> = items.into_iter().filter(|item| which.selects(item)).collect();
+    // 四个提前返回**都要留一行日志**：否则面板上"点了一下但上游说
+    // 早就领过了"和"根本没点到/清单里没这一条"在日志里长得一模一样，只能靠猜。
+    // 走这些分支时台账不动、也没有写请求，所以日志是它们唯一的痕迹。
+    if picked.is_empty() {
+        logging::log("[CodeArts]", &format!("{}：上游活动列表里没有这一条活动，未发送领取请求", which.label()));
+        return Ok(Run { outcome: Outcome::NotEligible, before: Vec::new(), after: Vec::new() });
     }
-    if daily.iter().all(Campaign::is_confirmed) {
-        return Ok(Outcome::Already);
+    if picked.iter().all(Campaign::is_confirmed) {
+        logging::log("[CodeArts]", &format!("{}：上游说这一条已经领过了（CONFIRMED / CONSUMED），未发送写请求", which.label()));
+        return Ok(Run { outcome: Outcome::Already, before: picked.clone(), after: Vec::new() });
     }
     // 限流只管**写**：读资格、判确认永远放行
     if !manual && (ledger.attempts >= MAX_ATTEMPTS_PER_DAY || gap_remaining(&ledger, now_ms).is_some()) {
-        return Ok(Outcome::Skipped);
+        logging::log(
+            "[CodeArts]",
+            &format!("{}：本地限流（今日已 {} 次写尝试），本轮跳过", which.label(), ledger.attempts),
+        );
+        return Ok(Run { outcome: Outcome::Skipped, before: picked.clone(), after: Vec::new() });
     }
-    if !daily.iter().any(Campaign::has_work) {
-        return Ok(Outcome::NotEligible);
+    if !picked.iter().any(Campaign::has_work) {
+        logging::log(
+            "[CodeArts]",
+            &format!("{}：这一条在列表里但当前不可领（前置未满足），未发送写请求", which.label()),
+        );
+        return Ok(Run { outcome: Outcome::NotEligible, before: picked.clone(), after: Vec::new() });
     }
 
     ledger.attempts += 1;
@@ -483,7 +611,7 @@ pub async fn claim_account(
     ledger.accepted = false;
     save(&ledger)?;
 
-    for item in &daily {
+    for item in &picked {
         let id = item.key();
         if item.is_confirmed() {
             continue;
@@ -512,10 +640,10 @@ pub async fn claim_account(
 
     // 回读二次确认：`code:0` 只是受理
     let verified = delivery(base, &credential).await?;
-    for item in &daily {
+    for item in picked.iter().filter(|item| item.has_work()) {
         let id = item.key();
         let confirmed = verified.iter().any(|seen| {
-            seen.key() == id && seen.kind == "USER_LOGIN" && seen.is_confirmed()
+            seen.key() == id && seen.kind == item.kind && seen.is_confirmed()
         });
         if !confirmed {
             return Err(GatewayError::with_status(
@@ -529,8 +657,17 @@ pub async fn claim_account(
     }
     ledger.accepted = true;
     save(&ledger)?;
-    logging::log("[CodeArts]", "每日福利：官方活动列表已回读确认到账（计入套餐赠送积分，不增加福利模型 token 池）");
-    Ok(Outcome::Confirmed)
+    logging::log(
+        "[CodeArts]",
+        &format!("{}：官方活动列表已回读确认到账（计入套餐赠送积分，不增加福利模型 token 池）", which.label()),
+    );
+    Ok(Run { outcome: Outcome::Confirmed, before: picked, after: verified })
+}
+
+/// 只读地把**新人注册礼**取回来（签到中心的「新手任务」用，一个写请求都不发）。
+pub async fn newbie_gift(store: &AccountStore, account_id: &str, base: &str) -> Result<Vec<Campaign>, GatewayError> {
+    let credential = current_credential(store, account_id).await?;
+    Ok(delivery(base, &credential).await?.into_iter().filter(Campaign::is_newbie_gift).collect())
 }
 
 /// 领取成功后顺手刷新一次余额（面板上「领完就能看到积分变了」）。
@@ -583,6 +720,7 @@ mod tests {
         Campaign {
             id: Value::String(id.to_string()),
             kind: kind.to_string(),
+            title: String::new(),
             claimable,
             status: status.to_string(),
             benefit_amount: 100.0,
@@ -952,6 +1090,98 @@ mod tests {
         let error = claim_account(&store, &account_id, &upstream.base, logging::now_ms(), true).await.expect_err("时钟倒退必须拒绝");
         assert!(error.message.contains("早于领取记录"), "{}", error.message);
         assert_eq!(0, upstream.seen.lock().unwrap().len());
+    }
+
+    #[tokio::test]
+    async fn the_two_chains_never_cross_each_other() {
+        // 混合清单：每日一条能领、新人礼一条能领、学生认证领不动（实测 claimable:false
+        // 且 status 是 null）、邀请礼**也能领**（claimable:true）。
+        // 最后那条才是这次收窄的关键判据：能领 ≠ 该领，邀请礼的收益归邀请人。
+        let mixed = || delivery_of(vec![
+            json!({"campaignId": "d1", "type": "USER_LOGIN", "claimable": true, "status": "", "benefitUnit": "CREDIT", "benefitAmount": 1000}),
+            json!({"campaignId": "n1", "type": "NEW_USER_REGISTER", "title": "新人注册礼", "claimable": true, "status": "", "benefitUnit": "CREDIT", "benefitAmount": 4000}),
+            json!({"campaignId": "s1", "type": "STUDENT_CERTIFIED", "title": "学生认证", "claimable": false, "status": null, "benefitUnit": "CREDIT", "benefitAmount": 4000}),
+            json!({"campaignId": "i1", "type": "INVITE_USER", "title": "邀请好友", "claimable": true, "status": "ENTRY", "benefitUnit": "CREDIT", "benefitAmount": 1000}),
+        ]);
+
+        // 臂一：每日链
+        let store = store_with("u8");
+        let account_id = only_account_id(&store);
+        let daily_run = mock_upstream(vec![
+            mixed(),
+            json!({"code": 0, "data": {"campaignId": "d1"}}),
+            json!({"code": 0, "data": {}}),
+            delivery_of(vec![
+                json!({"campaignId": "d1", "type": "USER_LOGIN", "claimable": false, "status": "CONFIRMED", "benefitUnit": "CREDIT"}),
+                json!({"campaignId": "n1", "type": "NEW_USER_REGISTER", "claimable": true, "status": "", "benefitUnit": "CREDIT", "benefitAmount": 4000}),
+            ]),
+        ])
+        .await;
+        let outcome = claim_account(&store, &account_id, &daily_run.base, logging::now_ms(), true)
+            .await
+            .expect("每日那条该领成");
+        assert_eq!(Outcome::Confirmed, outcome);
+        let seen = daily_run.seen.lock().unwrap().clone();
+        assert_eq!(4, seen.len(), "探测 / claim / confirm / 回读各一次：{seen:?}");
+        assert!(seen[1].contains("\"d1\""), "每日链只准领每日那条：{}", seen[1]);
+        assert!(!seen[1].contains("n1"), "新人礼被每日链顺手领掉就是替用户烧掉一次性奖励");
+
+        // 臂二：新人礼链（签到中心的「新手任务」）
+        let store = store_with("u9");
+        let account_id = only_account_id(&store);
+        let newbie = mock_upstream(vec![
+            mixed(),
+            json!({"code": 0, "data": {"campaignId": "n1"}}),
+            json!({"code": 0, "data": {}}),
+            delivery_of(vec![
+                json!({"campaignId": "d1", "type": "USER_LOGIN", "claimable": true, "status": "", "benefitUnit": "CREDIT"}),
+                json!({"campaignId": "n1", "type": "NEW_USER_REGISTER", "claimable": false, "status": "CONFIRMED", "benefitUnit": "CREDIT"}),
+                json!({"campaignId": "s1", "type": "STUDENT_CERTIFIED", "claimable": false, "status": null, "benefitUnit": "CREDIT"}),
+                json!({"campaignId": "i1", "type": "INVITE_USER", "claimable": true, "status": "ENTRY", "benefitUnit": "CREDIT"}),
+            ]),
+        ])
+        .await;
+        let run = claim_rewards(&store, &account_id, &newbie.base, logging::now_ms(), true, Rewards::NewbieGift)
+            .await
+            .expect("新人礼该领成");
+        assert_eq!(Outcome::Confirmed, run.outcome);
+        let seen = newbie.seen.lock().unwrap().clone();
+        assert_eq!(4, seen.len(), "探测 / claim / confirm / 回读各一次，别的一条都不许碰：{seen:?}");
+        assert!(seen[1].contains("\"n1\""), "新人礼链只领新人礼：{}", seen[1]);
+        assert!(!seen[1].contains("d1"), "每日那条不是一笔一次性的账，不能混领");
+        // 这两条是这次收窄的全部意义：一条领不动（前置不是 API），一条能领但不该我们领（收益归邀请人）
+        for skipped in ["s1", "i1"] {
+            assert!(
+                !seen.iter().any(|line| line.starts_with("POST") && line.contains(skipped)),
+                "{skipped} 不该出现在任何写请求里"
+            );
+        }
+        // 回读确认按**这一条自己**的 kind 判，不再硬编码 USER_LOGIN
+        assert!(run.after.iter().any(|item| item.key() == "n1" && item.is_confirmed()));
+        assert_eq!(1, run.before.len(), "本组只挑新人礼那一条： {:?}", run.before.iter().map(Campaign::key).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn an_already_credited_campaign_writes_nothing() {
+        // 用户在面板上点「一键领取」时最可能撞到的分支：上游说这条早就 CONFIRMED 了。
+        // 它不发写请求、不动台账 —— 日志因此是它唯一的痕迹：没有那行日志，
+        // "上游说领过了"与"根本没点到"在日志里完全同形。
+        let store = store_with("u10");
+        let account_id = only_account_id(&store);
+        let upstream = mock_upstream(vec![delivery_of(vec![json!({
+            "campaignId": "n9", "type": "NEW_USER_REGISTER", "claimable": false,
+            "status": "CONFIRMED", "benefitUnit": "CREDIT", "benefitAmount": 4000
+        })])])
+        .await;
+        let run = claim_rewards(&store, &account_id, &upstream.base, logging::now_ms(), true, Rewards::NewbieGift)
+            .await
+            .expect("已领过不是错误");
+        assert_eq!(Outcome::Already, run.outcome);
+        assert_eq!(1, upstream.seen.lock().unwrap().len(), "只读探测一次，不许有写");
+        assert!(
+            store.codearts_welfare_ledger(&account_id).is_none(),
+            "没发写请求就不该留台账痕迹（留了会把'我们领过'记成事实）"
+        );
     }
 
     #[tokio::test]

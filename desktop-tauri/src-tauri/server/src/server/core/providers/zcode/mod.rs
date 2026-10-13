@@ -47,8 +47,10 @@
 //!   region.rs       地区（域名 / 身份 / 环境变量 / 账号 id 前缀）—— 已完成
 //!   models.rs       模型清单（静态表，两地共用）—— 已完成
 //!   claim.rs        限时套餐领取（探测 / 领取 / 失败分类 / 调度语义）—— 已完成
+//!   activation.rs   激活事件上报（app_launch / app_daily_active；领取资格的前置动作）—— 已完成
 //!   captcha.rs      活动套餐通道的人机验证令牌池（界面铸造 → 网关消费）—— 已完成
-//!   balance.rs      套餐余额（`billing/balance`：余额桶 + 套餐 + 到期）—— 已完成
+//!   balance.rs      套餐余额（**候选令牌链**：billing 余额桶 → 监控窗口限额）—— 已完成
+//!   monitor.rs      开放平台监控通道（窗口限额 + 套餐等级，候选链的第二候选）—— 已完成
 //!   plan.rs         活动套餐通道（系统提示词块 + Anthropic 协议 + JWT 鉴权）—— 已完成
 //!   reasoning.rs    GLM-5.3 家族的思考等级契约（等级 ↔ 预算、预算与 max_tokens 配对）—— 已完成
 //!   adapter.rs      `ProviderAdapter` 实现（按账号的两条通道 + 余额接线）—— 已完成
@@ -83,12 +85,14 @@ use serde_json::Value;
 
 use crate::server::core::prompt::GatewayBlocks;
 pub mod adapter;
+pub mod activation;
 pub mod balance;
 pub mod captcha;
 pub mod claim;
 pub mod coding_key;
 pub mod credentials;
 pub mod models;
+pub mod monitor;
 pub mod oauth;
 pub mod plan;
 pub mod reasoning;

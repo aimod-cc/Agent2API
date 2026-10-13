@@ -39,9 +39,7 @@ use crate::server::core::account_store::sql;
 use crate::server::core::account_store::state::{mark_name_custom, StoredAccount};
 use crate::server::core::account_store::store::live_desktop_credentials;
 use crate::server::core::account_store::store::{AccountStore, AccountStoreError};
-use crate::server::core::account_store::store_util::{
-    max_concurrent_public, pick_token, token_tail_of, truncate_chars,
-};
+use crate::server::core::account_store::store_util::{pick_token, token_tail_of, truncate_chars};
 use crate::server::core::account_store::{CredentialWrite, MAX_TOKEN_LENGTH};
 use crate::server::core::providers::raccoon::{credentials, jwt, models};
 use crate::server::core::providers::kind_id;
@@ -55,6 +53,9 @@ fn raccoon_id() -> &'static str {
 
 /// 身份字段（office_*）的长度上限（源项目 `MAX_IDENTITY_LENGTH`）
 const MAX_IDENTITY_LENGTH: usize = 1024;
+
+/// 新手任务结算台账键的长度上限（任务 key 就两个固定串，这是脏值兜底）
+const MAX_ONBOARDING_KEY_LENGTH: usize = 64;
 
 impl AccountStore {
     // ─── 读：账号记录 ────────────────────────────────────────
@@ -291,7 +292,7 @@ impl AccountStore {
                 "✅ 小浣熊账号已保存: {record_name}（{user_id}，优先级 {priority}）"
             ),
         );
-        Ok(self.to_raccoon_public_account(&saved))
+        Ok(self.public_account(&saved))
     }
 
     /// 导入/刷新「桌面端实时登录态」账号（`importDesktop: true` 与启动导入共用）。
@@ -391,7 +392,7 @@ impl AccountStore {
                 if is_new { "已导入" } else { "已刷新" },
             ),
         );
-        Ok(self.to_raccoon_public_account(&saved))
+        Ok(self.public_account(&saved))
     }
 
     /// 小浣熊账号刷新成功后回写新 token（`raccoon::credentials` 的刷新路径调用）。
@@ -499,6 +500,46 @@ impl AccountStore {
         None
     }
 
+    /// 记一批小浣熊新手任务的结算时刻（台账见 [`StoredAccount::onboarding_grants`]）。
+    ///
+    /// 「本轮刚领到」与「探测确认早已发放过」**都该写**：后者意味着这条一次性
+    /// 奖励已经被领掉了（多半是官方客户端或旧版签到链领的），不落台账的话界面
+    /// 每次都显示「待领取」，用户每次都点一遍「领取」，每次拿回同一句
+    /// 「早已发放过」—— 那正是这台账要消灭的多余动作。
+    ///
+    /// 与 `mark_checkin` / `mark_zcode_claim` 同一口径：写盘失败不致命（返回
+    /// bool，上游那边奖励已经结清，调用方最多记一条日志），**不**动 `updatedAt`
+    /// （理由见 `mark_checkin` 的说明）；一次领取写一条记录（两条任务一次探测
+    /// 流程里可能同时结算，分开写会造成两次读-改-写）。键集由
+    /// `raccoon::onboarding` 的任务表定义，这里不做自由 KV，也不校验键名合法性
+    /// （唯一调用方就在那个模块里）；非法键（空白 / 超长）整批拒绝。
+    pub fn mark_onboarding_grant_batch(
+        &self,
+        account_id: &str,
+        entries: &Map<String, Value>,
+    ) -> bool {
+        if entries.is_empty() {
+            return true;
+        }
+        for key in entries.keys() {
+            let key = key.trim();
+            if key.is_empty() || key.len() > MAX_ONBOARDING_KEY_LENGTH {
+                return false;
+            }
+        }
+        let guard = self.guard();
+        let Some(mut record) = self.record_by_id(&guard, account_id) else {
+            return false;
+        };
+        let mut ledger = record.onboarding_grants();
+        for (key, at) in entries {
+            ledger.insert(key.trim().to_string(), at.clone());
+        }
+        record.set_onboarding_grants(ledger);
+        self.with_conn(&guard, |conn| sql::update_in_place(conn, &record))
+            .is_ok()
+    }
+
     // ─── 公开形态（小浣熊）───────────────────────────────────
 
     /// 小浣熊账号的公开形态。
@@ -580,12 +621,6 @@ impl AccountStore {
         );
         // 与 workbuddy 的公开形态同口径：本切片所有账号都视为可用
         public.insert("available".to_string(), Value::Bool(true));
-        // 单账号并发上限（所有家通用，兜底共用 `max_concurrent_public`）：
-        // 0 = 不限，缺键同样输出 0
-        public.insert(
-            "maxConcurrent".to_string(),
-            Value::from(max_concurrent_public(record.get("maxConcurrent"))),
-        );
         Value::Object(public)
     }
 

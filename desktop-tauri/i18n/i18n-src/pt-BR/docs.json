@@ -1,0 +1,18 @@
+{
+  " 或 ": " ou ",
+  "Base URL 填进客户端的「API 地址 / Base URL」栏；对话协议按客户端支持的类型三选一（Chat Completions / Responses / Anthropic Messages），三者共用同一套模型与账号池，可随时切换；鉴权用「网关 Key」页里任一启用 Key。": "Preencha o Base URL no campo “Endereço da API / Base URL” do cliente; escolha um dos três protocolos de conversa conforme o tipo compatível com o cliente (Chat Completions / Responses / Anthropic Messages) — os três compartilham o mesmo conjunto de modelos e o mesmo pool de contas e podem ser alternados a qualquer momento; para autenticação, use qualquer Key habilitada na página “Chave do gateway”.",
+  "Claude Code / Anthropic SDK（token 计数：/v1/messages/count_tokens）": "Claude Code / Anthropic SDK (contagem de tokens: /v1/messages/count_tokens)",
+  "OpenAI 新协议（Codex、新版 SDK）": "Novo protocolo da OpenAI (Codex, SDKs mais recentes)",
+  "。一把启用的 Key 都没有时不鉴权（默认网关只监听 127.0.0.1；在设置页开启「局域网访问」后监听所有网卡，鉴权与安全闸门随之启用）。": ". Se nenhuma Key estiver habilitada, não há autenticação (por padrão, o gateway escuta apenas 127.0.0.1; após habilitar “Acesso LAN” na página de configurações, ele passa a escutar todas as interfaces de rede, e a autenticação e as barreiras de segurança entram em vigor).",
+  "启用": "habilitada",
+  "填进客户端的「API 地址 / Base URL」": "Preencha no campo “Endereço da API / Base URL” do cliente",
+  "复制地址": "Copiar endereço",
+  "多数 OpenAI 兼容客户端的默认协议": "Protocolo padrão da maioria dos clientes compatíveis com OpenAI",
+  "客户端自动拉取可用模型；不受鉴权限制，配 Key 之前就能拉": "O cliente busca automaticamente os modelos disponíveis; não exige autenticação e pode ser consultado antes de configurar uma Key",
+  "对话协议（按客户端支持的类型选一行）": "Protocolo de conversa (escolha uma linha conforme o tipo compatível com o cliente)",
+  "接口地址": "Endereço da API",
+  "模型列表": "Lista de modelos",
+  "模型清单": "Catálogo de modelos",
+  "的 Key：请求带 ": " da página “Chave do gateway”; as requisições enviam ",
+  "鉴权用「网关 Key」页里任一": "Para autenticação, use qualquer Key "
+}

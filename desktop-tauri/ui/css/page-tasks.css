@@ -44,30 +44,23 @@
   background: var(--surface-inset);
 }
 
-/* ── 后六条的两栏网格 ─────────────────────────────────────
-   前两条（自动签到 / 凭证自动维护）整行铺开，其余六条收进这里分两栏、每栏三条。
+/* ── 其余任务的两栏网格 ─────────────────────────────────────
+   第一条（凭证自动维护）整行铺开，其余任务收进这里分两栏。
 
-   **列优先**（`grid-auto-flow: column` + 三行）：顺序仍是从上到下的阅读顺序，
-   而三行两列的排法恰好把两类任务分开 —— 左栏是后端任务（定时查询积分 /
-   模型目录刷新 / 软件版本检查，都带「立即执行」），右栏是页面任务（三个页面
-   自动刷新，执行者是页面自己的定时器）。行优先会让两类在每行里交错，
-   那就看不出这条分栏想表达什么了。见 tasks-panel.js 的 `cardsHtml`。
+   **行优先**（默认 `grid-auto-flow: row`）：按阅读顺序从左到右逐行配对排满，
+   条数是奇数时最后一行只占一栏，也不会出现「右栏整列空着」的空洞
+   （曾经是列优先 + 三行，为的是把后端任务排左栏、页面任务排右栏；
+   「定时查询积分」与「软件版本检查」先后离开这页之后，那个对称已经不存在，
+   行优先是任何条数下都最满的排法）。
 
    行高 `auto` + 卡片被拉伸（grid 默认 stretch）让同一行的两栏等高，
    卡片高度参差时也还是齐的（列内动作区随 `.task-main` 的 `flex: 1` 落到卡片
-   底部，同一行的「每 N 分钟」因此横向对齐）。
-
-   条数将来若超过六条（后端加了新任务），会照三行一栏的规则多排出一栏，
-   顺序与对齐都仍然成立 —— 不是「六条硬编码」，三行只是这里的取整方式。
-   `grid-auto-columns` 是给那种情况兜底：没它的话第三栏按 `auto` 定宽，
-   内容一长就撑破卡片。 */
+   底部，同一行的「每 N 分钟」因此横向对齐）。 */
 .task-grid {
   flex: none;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-rows: repeat(3, auto);
-  grid-auto-flow: column;
-  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: row;
   gap: 10px;
 }
 
@@ -138,17 +131,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* 签到提供商勾选行：与 .role-picks / .provider-pick 同一套「lead + check」观感，
-   但不套边框底色 —— 它是任务卡内部的一行控件，再做内嵌块会跟状态行挤成一团 */
-.task-providers {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 4px 15px;
-}
-
-.task-providers .lead { color: var(--text-3); font-size: 11.5px; }
-
 /* 右侧动作区：间隔输入 + 立即执行，纵向居中于卡片
    （align-items 用 center 而不是 flex-start：卡片高时按钮贴着顶端会显得散） */
 .task-actions {
@@ -184,14 +166,6 @@
   max-width: 74px;
   font-variant-numeric: tabular-nums;
   text-align: center;
-}
-
-/* 时刻输入（自动签到那条）：time 控件窄一点更好看，与数字框同宽 */
-.task-interval input[type="time"] {
-  flex: 0 0 auto;
-  width: 96px;
-  max-width: 96px;
-  font-variant-numeric: tabular-nums;
 }
 
 .task-interval-unit { color: var(--text-3); }

@@ -40,12 +40,14 @@ use serde_json::{json, Map, Value};
 
 use crate::server::core::account_store::AccountStore;
 use crate::server::core::auth_http::send_raw;
+use crate::server::core::beijing;
 use crate::server::errors::GatewayError;
 
 use super::credentials;
 
-/// 余额 / 订阅接口的请求超时（源实现 `REQUEST_TIMEOUT_MS`）
-const REQUEST_TIMEOUT_MS: u64 = 20_000;
+/// 余额 / 订阅接口的请求超时（源实现 `REQUEST_TIMEOUT_MS`）。
+/// 新手任务的首次登录奖励探测（`onboarding.rs`）沿用同一超时。
+pub(super) const REQUEST_TIMEOUT_MS: u64 = 20_000;
 
 /// 默认主站 origin（源实现 `apiOrigin()` 的兜底值）
 const DEFAULT_MAIN_SITE_URL: &str = "https://xiaohuanxiong.com";
@@ -146,13 +148,13 @@ async fn request_json(origin: &str, path: &str, token: &str) -> Result<Value, Ga
     request_json_ex(origin, "GET", path, token, &[], REQUEST_TIMEOUT_MS).await
 }
 
-/// `request_json` 的通用形态：方法与附加头可指定（桌面登录积分链路需要
-/// `X-Client-Platform` / `X-Client-Version` / `X-Raccoon-Language` 三个头，
+/// `request_json` 的通用形态：方法与附加头可指定（每日签到与新手任务的
+/// 桌面端链路需要 `X-Client-Platform` / `X-Client-Version` 头，
 /// 账单核对需要更长的超时 —— 见 `claim_daily_grant` 的说明）。
 ///
 /// 其余判定链与 `request_json` 完全一致；`method` 目前只有 GET / POST 两种用法
 /// （上游的积分域没有其它方法）。
-async fn request_json_ex(
+pub(super) async fn request_json_ex(
     origin: &str,
     method: &str,
     path: &str,
@@ -286,23 +288,41 @@ fn to_int(value: Option<&Value>) -> Option<i64> {
 // 登录积分**链路：官方桌面客户端每次启动会打两个接口，服务端据此按天发放
 // 每日积分（1.x 源实现 account-balance.mjs / account-routes.mjs 的
 // desktop-grant 已验证）。这里复刻同一条链路作为「签到」：
-//   ① POST /api/web/desktop/v1/login/points/grant —— 首次桌面登录奖励
-//      （一次性，幂等；已发放过时上游返回 granted=false）；
-//   ② GET  /api/web/office/v3/setting_info —— **每日积分的发放触发器**
+//   ① GET  /api/web/office/v3/setting_info —— **每日积分的发放触发器**
 //      （按天幂等），发放通知在响应的 point_grant_popups / point_grant_toast；
-//   ③ GET  /api/web/points/v1/bills —— 核对今日实际入账，作为权威结果
+//   ② GET  /api/web/points/v1/bills —— 核对今日实际入账，作为权威结果
 //      （账单接口慢，limit=20 实测约 9 秒，用独立超时兜底；失败降级，
-//      不影响 ①② 的领取本身）。
+//      不影响 ① 的领取本身）。
+//
+// 同一条 grant 接口里的**首次**桌面登录奖励（一次性 3000，新手福利）原先是
+// 本函数的第①步，已拆到新手任务分组（`onboarding.rs`，与 Loomy 同一入口），
+// 不再随每日签到执行 —— 一次性动作混进每日调度，之后每一轮都会白打一次。
 
 /// 账单核对的拉取条数与超时（源实现 GRANT_CHECK_LIMIT / GRANT_CHECK_TIMEOUT_MS）
 const GRANT_CHECK_LIMIT: usize = 20;
 const GRANT_CHECK_TIMEOUT_MS: u64 = 25_000;
 
-/// 客户端身份头：官方桌面端启动时带的两个头（源实现 grantDesktopLoginPoints）
-fn desktop_client_headers() -> Vec<(String, String)> {
+/// 客户端身份头：官方桌面端启动时带的两个头（源实现 grantDesktopLoginPoints）。
+/// 每日签到（setting_info）与新手任务的首次登录奖励（`onboarding.rs`）共用。
+pub(super) fn desktop_client_headers() -> Vec<(String, String)> {
     vec![
         ("X-Client-Platform".to_string(), "desktop-windows".to_string()),
         ("X-Client-Version".to_string(), "v1.0.0".to_string()),
+    ]
+}
+
+/// 客户端身份头：官方手机端（Capacitor App）请求登录积分接口带的两个头。
+///
+/// 平台值是 App 壳的 `getPlatform()` 加 `app-` 前缀（`app-android` / `app-ios`，
+/// APK 逆向确认），版本头带 `v` 前缀（App 把自身版本号剥掉 `v` 再补回去）。
+/// 这里固定报安卓 `v1.0.3`（实测样本）；上游只按账号结算一次性奖励，报哪端
+/// 只影响走哪条端点，不影响凭证 —— 手机端接口认的也是桌面端登录签发的
+/// 同一把 Bearer token（实测 + JWT claims 无平台字段双重确认）。
+/// 只服务新手任务的手机端首登奖励（`onboarding.rs`）。
+pub(super) fn mobile_client_headers() -> Vec<(String, String)> {
+    vec![
+        ("X-Client-Platform".to_string(), "app-android".to_string()),
+        ("X-Client-Version".to_string(), "v1.0.3".to_string()),
     ]
 }
 
@@ -312,6 +332,9 @@ fn desktop_client_headers() -> Vec<(String, String)> {
 /// `success` 的口径是「**今日积分确有入账**」（账单核对），而不是某一步的
 /// HTTP 成败：发放是服务端在 setting_info 上按天幂等完成的，重复执行
 /// 不会重复入账，账单里看得到就是领到了。
+///
+/// 首次桌面登录奖励（一次性新手福利）**不在**本函数里 —— 它已拆到
+/// `onboarding.rs` 挂新手任务分组，见那里的模块头说明。
 pub async fn claim_daily_grant(
     store: &AccountStore,
     account_id: &str,
@@ -325,25 +348,7 @@ pub async fn claim_daily_grant(
     }
     let origin = main_site_url();
 
-    // ① 桌面登录奖励（一次性）。失败不阻断：它对老账号注定是 granted=false，
-    //    真正的每日发放在 ② 里 —— 与 1.x 源实现「单步失败继续走完」一致
-    let desktop_grant = match request_json_ex(
-        &origin,
-        "POST",
-        "/api/web/desktop/v1/login/points/grant",
-        &credentials.token,
-        &desktop_client_headers(),
-        REQUEST_TIMEOUT_MS,
-    )
-    .await
-    {
-        Ok(data) => {
-            json!({ "granted": data.get("granted").and_then(Value::as_bool) == Some(true) })
-        }
-        Err(error) => json!({ "granted": false, "error": error.message }),
-    };
-
-    // ② 每日积分发放触发器（按天幂等）。失败必须体现在结果里 ——
+    // ① 每日积分发放触发器（按天幂等）。失败必须体现在结果里 ——
     //    这步不成功当日就没有发放，账单核对会给出「今日未见入账」
     let mut settings_headers = desktop_client_headers();
     settings_headers.push(("X-Raccoon-Language".to_string(), "zh".to_string()));
@@ -367,8 +372,11 @@ pub async fn claim_daily_grant(
         Err(error) => json!({ "popups": Value::Null, "toast": Value::Null, "error": error.message }),
     };
 
-    // ③ 账单核对今日入账（慢接口独立超时；失败降级为 grantsError）
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    // ② 账单核对今日入账（慢接口独立超时；失败降级为 grantsError）。
+    // 「今天」按**北京时间**（上游自然日即 UTC+8 零点，见 `core::beijing`），
+    // 不跟机器时区：海外 / 容器部署下跟本地时区走会把 16 小时的账单认成昨天，
+    // 让「今日积分 +N」与「今天已领过」的判定整体错位（issue #138）。
+    let today = beijing::today_key();
     let bills_path = format!(
         "/api/web/points/v1/bills?paging.limit={GRANT_CHECK_LIMIT}&paging.offset=0"
     );
@@ -416,9 +424,6 @@ pub async fn claim_daily_grant(
 
     let granted_today = grants.iter().map(|item| to_int(item.get("points")).unwrap_or(0)).sum::<i64>();
     let mut msg_parts: Vec<String> = Vec::new();
-    if desktop_grant.get("granted").and_then(Value::as_bool) == Some(true) {
-        msg_parts.push("桌面登录奖励已发放".to_string());
-    }
     if granted_today > 0 {
         msg_parts.push(format!("今日积分 +{granted_today}"));
     } else if grants_error.is_some() {
@@ -429,16 +434,12 @@ pub async fn claim_daily_grant(
     }
     if let Some(error) = grants_error.as_deref() {
         msg_parts.push(format!("账单核对失败：{error}"));
-    } else if desktop_grant.get("error").and_then(Value::as_str).is_some() {
-        // 首次奖励领取失败对老账号是常态（granted=false），但真错误还是提一句
-        msg_parts.push("桌面登录奖励未领取".to_string());
     }
 
     Ok(json!({
         "success": granted_today > 0,
         "msg": msg_parts.join("；"),
         "grantsToday": grants,
-        "desktopGrant": desktop_grant,
         "settings": settings,
         "grantsError": grants_error.map(Value::String).unwrap_or(Value::Null),
     }))

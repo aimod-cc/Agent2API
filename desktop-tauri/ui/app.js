@@ -1,5 +1,5 @@
 /* Agent2API · 桌面端渲染层 */
-/* global workbuddyDesktop */
+/* global workbuddyDesktop, wbI18n */
 
 const api = window.workbuddyDesktop;
 const $ = id => document.getElementById(id);
@@ -123,20 +123,21 @@ function applyZoom(percent) {
 // ─── 页面导航 ────────────────────────────────
 
 const PAGE_KEY = 'workbuddy-desktop-page';
-const PAGES = ['overview', 'accounts', 'gateway', 'proxies', 'keys', 'docs', 'logs', 'tasks', 'requests', 'settings'];
+const PAGES = ['overview', 'accounts', 'checkin', 'gateway', 'proxies', 'keys', 'docs', 'logs', 'tasks', 'requests', 'settings'];
 /** 页签中文名：顶栏面包屑用。overview 的用户可见名是「报表」、gateway 的是「模型管理」
  *  （内部标识保持不变：localStorage 记忆、showPage 与 CSS 的 [data-page] 选择器都依赖它） */
 const PAGE_LABELS = {
-  overview: '报表',
-  accounts: '账号',
-  gateway: '模型管理',
-  proxies: '网络代理',
-  keys: '网关 Key',
-  docs: '文档',
-  logs: '日志',
-  tasks: '定时任务',
-  requests: '请求日志',
-  settings: '设置',
+  overview: wbI18n.t('报表'),
+  accounts: wbI18n.t('账号'),
+  checkin: wbI18n.t('签到中心'),
+  gateway: wbI18n.t('模型管理'),
+  proxies: wbI18n.t('网络代理'),
+  keys: wbI18n.t('网关 Key'),
+  docs: wbI18n.t('文档'),
+  logs: wbI18n.t('日志'),
+  tasks: wbI18n.t('定时任务'),
+  requests: wbI18n.t('请求日志'),
+  settings: wbI18n.t('设置'),
 };
 
 /** 当前页（子模块据此判断是否需要重新加载） */
@@ -176,6 +177,10 @@ function showPage(name, { persist = true } = {}) {
   // 定时任务页自持清单与编辑态，切进去时拉一次最新
   if (page === 'tasks') {
     window.wbTasksPanel?.load?.();
+  }
+  // 签到中心自持数据（聚合快照 + 惰性查询缓存），切进去时拉一次最新
+  if (page === 'checkin') {
+    void window.wbCheckinPanel?.load?.();
   }
   // 切到设置页时拉一次启动设置与网关地址（面板内部自持状态，这里只做转发）
   if (page === 'settings') {
@@ -226,9 +231,12 @@ function renderTopbarStatus() {
   const session = state?.session || {};
   const accounts = state?.accounts?.accounts || [];
   const enabled = accounts.filter(a => a.enabled !== false).length;
-  // accounts-model.js 在 app.js 之后加载，首屏这次调用可能早于它就绪，故用可选链
-  const isRateLimited = window.wbAccountsModel?.isRateLimited;
-  const limited = isRateLimited ? accounts.filter(a => a.enabled !== false && isRateLimited(a)).length : 0;
+  // accounts-model.js 在 app.js 之后加载，首屏这次调用可能早于它就绪，故用可选链。
+  // 计数用 isLimited（含「余额不足已跳过」档，与账号页「已限流」分段同一口径）；
+  // 契约上没有该成员时退回 isRateLimited（只数模型限流），宁少报不报错
+  const modelApi = window.wbAccountsModel;
+  const isLimited = modelApi?.isLimited || modelApi?.isRateLimited;
+  const limited = isLimited ? accounts.filter(a => a.enabled !== false && isLimited(a)).length : 0;
   // 「网关运行中」用的是**网关进程**的判据（壳侧 is_ready 探测，见 port-panel.js），
   // 不是 upstreamConfigured（那个说的是有没有账号）。两者会独立变化：没账号不影响
   // 网关监听，端口被占也不影响账号存在 —— 混用会让用户对着「未就绪」去查账号。
@@ -249,27 +257,29 @@ function renderTopbarStatus() {
   };
 
   const views = {
-    accounts: () => chip(`${enabled} 个启用`, enabled ? 'ok' : '')
-      + (limited ? chip(`${limited} 个已限流`, 'warn') : ''),
-    gateway: () => (gatewayUp ? chip('监听 127.0.0.1', 'ok') : chip('未就绪', 'bad')) + chip(port, '', true),
+    accounts: () => chip(wbI18n.t('{n} 个启用', { n: enabled }), enabled ? 'ok' : '')
+      + (limited ? chip(wbI18n.t('{n} 个已限流', { n: limited }), 'warn') : ''),
+    gateway: () => (gatewayUp ? chip(wbI18n.t('监听 127.0.0.1'), 'ok') : chip(wbI18n.t('未就绪'), 'bad')) + chip(port, '', true),
     keys: () => mirror('keys-status'),
     // 文档页没有自己的徽标（它只有一组复制的地址），跟着网关的运行状态走 ——
     // 地址在页面上的意义就是「现在能不能连」，网关没起来时那个状态最要紧
-    docs: () => (gatewayUp ? chip('网关运行中', 'ok') : chip('未就绪', 'bad')) + chip(port, '', true),
+    docs: () => (gatewayUp ? chip(wbI18n.t('网关运行中'), 'ok') : chip(wbI18n.t('未就绪'), 'bad')) + chip(port, '', true),
     logs: () => mirror('logs-badge'),
     requests: () => mirror('req-badge'),
     // 定时任务页的徽标由 tasks-panel 自己渲染（「N / M 个已开启」），直接镜像
     tasks: () => mirror('tasks-badge'),
-    settings: () => (gatewayUp ? chip('网关运行中', 'ok', true) : chip('未就绪', 'bad', true))
-      + (enabled ? chip(`${enabled} 个账号启用`) : ''),
-    overview: () => (gatewayUp ? chip('网关运行中', 'ok') : chip('未就绪', 'bad'))
-      + (session.loggedIn ? chip('已登录', 'ok') : chip('未登录', 'warn')),
+    // 签到中心的徽标由 checkin-page 自己渲染（自动签到开启状态），直接镜像
+    checkin: () => mirror('checkin-badge'),
+    settings: () => (gatewayUp ? chip(wbI18n.t('网关运行中'), 'ok', true) : chip(wbI18n.t('未就绪'), 'bad', true))
+      + (enabled ? chip(wbI18n.t('{n} 个账号启用', { n: enabled })) : ''),
+    overview: () => (gatewayUp ? chip(wbI18n.t('网关运行中'), 'ok') : chip(wbI18n.t('未就绪'), 'bad'))
+      + (session.loggedIn ? chip(wbI18n.t('已登录'), 'ok') : chip(wbI18n.t('未登录'), 'warn')),
   };
 
   box.innerHTML = views[currentPage]?.() ?? views.overview();
   // 加载失败的原因挂在这里（会话状态卡片删除后它没有别的落点）：此时下面各页面
   // 显示的都是上一次的值，顶栏是唯一常驻可见的位置。成功一次即清空。
-  box.title = stateError ? `加载失败：${stateError}` : '';
+  box.title = stateError ? wbI18n.t('加载失败：{error}', { error: stateError }) : '';
 }
 
 // ─── 日志未读徽标（只提示 error） ─────────────
@@ -367,7 +377,7 @@ async function refreshUnreadErrors(badge) {
       return;
     }
     badge.textContent = unread > 99 ? '99+' : String(unread);
-    badge.title = `${unread} 条错误日志未读，点开「日志」查看`;
+    badge.title = wbI18n.t('{n} 条错误日志未读，点开「日志」查看', { n: unread });
     badge.style.display = '';
   } catch {
     // 保持上一次的显示
@@ -452,7 +462,7 @@ function paintRequestsBadge() {
   }
   if (runningRequests > 0) {
     badge.textContent = runningRequests > 99 ? '99+' : String(runningRequests);
-    badge.title = `${runningRequests} 个请求正在转发中，点开「请求日志」查看`;
+    badge.title = wbI18n.t('{n} 个请求正在转发中，点开「请求日志」查看', { n: runningRequests });
     badge.style.display = '';
     // 类名用 is-running 而不是 live：layout.css 里 .live 是**侧栏状态灯**
     // （7px 圆点 + 绿底 + 光晕），加上它会把这颗数字角标压成小圆点 ——
@@ -463,7 +473,7 @@ function paintRequestsBadge() {
   badge.classList.remove('is-running');
   if (unreadFailures > 0) {
     badge.textContent = unreadFailures > 99 ? '99+' : String(unreadFailures);
-    badge.title = `${unreadFailures} 条失败请求未读，点开「请求日志」查看`;
+    badge.title = wbI18n.t('{n} 条失败请求未读，点开「请求日志」查看', { n: unreadFailures });
     badge.style.display = '';
     return;
   }
@@ -559,9 +569,11 @@ function syncUpdateBadge() {
   }
   // 只放一个「新」字而不是数字：这里没有「未读条数」的含义，
   // 写成数字容易被误会成还有多少个版本可以更新
-  badge.textContent = '新';
-  badge.title = `发现新版本 ${latest}（当前 ${info.currentVersion || '未知'}），`
-    + '点开「设置 - 软件更新」可查看更新日志并下载';
+  badge.textContent = wbI18n.t('新');
+  badge.title = wbI18n.t('发现新版本 {latest}（当前 {current}），点开「设置 - 软件更新」可查看更新日志并下载', {
+    latest,
+    current: info.currentVersion || wbI18n.t('未知'),
+  });
   badge.style.display = '';
 }
 
@@ -569,10 +581,13 @@ function syncUpdateBadge() {
 function updateUpdateBadge(info) {
   lastUpdateInfo = info || null;
   syncUpdateBadge();
-  // 「检测到更新」弹窗已迁到组件库（见 ui-islands/src/islands/update-panel.tsx）：
-  // 弹与不弹的判定（跳过此次更新的版本号 / 本会话已弹过 / 人已在设置页）与弹窗本体
-  // 都在那边，这里只把结果递过去。app.js 不再持有弹窗 DOM、跳过键与会话守卫 ——
-  // 那套状态若两边各留一份，判定必然漂移（这正是本次迁移要避免的）。
+  // 结果递给软件更新面板（另一个岛，见 ui-islands/src/islands/update-panel.tsx）：
+  //   · applyStatus：把这份读数铺进面板。后端定时任务查到的新版本、新的检查时刻，
+  //     不该等到用户手点一次「检查更新」才出现；
+  //   · showUpdateModal：「检测到更新」弹窗。弹与不弹的判定（跳过此次更新的版本号 /
+  //     本会话已弹过 / 人已在设置页）与弹窗本体都在那边 —— app.js 不再持有弹窗 DOM、
+  //     跳过键与会话守卫，那套状态若两边各留一份，判定必然漂移。
+  window.wbUpdatePanel?.applyStatus?.(info);
   window.wbUpdatePanel?.showUpdateModal?.(info);
 }
 
@@ -598,10 +613,12 @@ function renderProxyStatus() {
   // 这里说的是「上游凭证」（有没有可用账号），与网关进程是否在监听是两件事，
   // 所以措辞明确指向账号 —— 别再说成「代理不可用」（那会让人去查端口）
   if (!health?.upstreamConfigured) {
-    box.innerHTML = `<span style="color:var(--danger)">无可用账号：${esc(health?.unavailableReason || '尚未登录')}</span>`;
+    box.innerHTML = wbI18n.t('<span style="color:var(--danger)">无可用账号：{reason}</span>', {
+      reason: esc(health?.unavailableReason || wbI18n.t('尚未登录')),
+    });
     return;
   }
-  box.textContent = `运行正常 · ${health.upstreamBaseUrl || ''}`;
+  box.textContent = wbI18n.t('运行正常 · {url}', { url: health.upstreamBaseUrl || '' });
 }
 
 function render() {
@@ -688,7 +705,7 @@ async function refresh() {
   }
 }
 
-// ─── 账号操作（列表按钮统一入口；积分/签到由 accounts-view 自行消化） ───
+// ─── 账号操作（列表按钮统一入口；余额查询由账号视图自行消化） ───
 
 async function runAccountAction(action, id) {
   if (busy) return;
@@ -702,30 +719,32 @@ async function runAccountAction(action, id) {
     if (action === 'switch') {
       const result = await api.switchAccount(id);
       await refresh();
-      toast(result?.changed === false ? '账号已在全局队列第一位' : '✅ 已将账号优先级调整到全局第一位');
+      toast(result?.changed === false
+        ? wbI18n.t('账号已在全局队列第一位')
+        : wbI18n.t('✅ 已将账号优先级调整到全局第一位'));
     } else if (action === 'refresh') {
       await api.refreshAccountToken(id);
       await refresh();
-      toast('✅ Token 已刷新');
+      toast(wbI18n.t('✅ Token 已刷新'));
     } else if (action === 'remove') {
       const account = state?.accounts?.accounts?.find(a => a.id === id);
       // 与岛内 displayNameOf 同一口径：nameCustom 恒赢，未打标维持旧口径（昵称优先）
       const name = esc(account?.nameCustom && account?.name ? account.name : (account?.nickname || account?.name || id));
       // 原生 confirm 在 Tauri 的 WebView 里不弹窗、直接放行（等于没有确认），
       // 危险确认一律走自绘弹窗（wbConfirm，见 confirm-dialog.js）—— 下同
-      const note = window.wbAccountsModel?.isDesktopAccount?.(account) ? '（不会影响客户端登录态）' : '';
+      const note = window.wbAccountsModel?.isDesktopAccount?.(account) ? wbI18n.t('（不会影响客户端登录态）') : '';
       if (!(await window.wbConfirm?.ask?.({
-        title: '删除账号',
-        html: `确定删除账号「<strong>${name}</strong>」？${esc(note)}`,
-        okText: '删除',
+        title: wbI18n.t('删除账号'),
+        html: wbI18n.t('确定删除账号「<strong>{name}</strong>」？{note}', { name, note: esc(note) }),
+        okText: wbI18n.t('删除'),
         okClass: 'danger',
       }))) return;
       await api.removeAccount(id);
       await refresh();
-      toast('账号已删除');
+      toast(wbI18n.t('账号已删除'));
     }
   } catch (error) {
-    toast(`操作失败：${error.message}`, 'err');
+    toast(wbI18n.t('操作失败：{message}', { message: error.message }), 'err');
   } finally {
     releaseBusy(); // 释放锁并补跑排队中的刷新（见 releaseBusy 注释）
   }
@@ -872,7 +891,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // 它**不是**更新检查那种「有新版本就提示」的可选动作 —— 没升级时账号是空的，
   // 所以过程与结果都要 toast 报出来，不能让用户面对一个「账号怎么空了」的疑问。
   void window.wbUpgradePanel?.check?.();
-  // 启动即读一次「定时查询积分」的结果快照：快照在后端是**持久化**的（重启也在），
+  // 启动即读一次后端的余额结果快照（每账号自动查询的最新结论，重启也在），
   // 只靠下面那条 20 秒轮询的话，用户启动后第一眼看到的是账号页一片「未查询」，
   // 要等最久一整轮才变出余额 —— 那正是「定时查询好像没生效、必须手动点」的来源。
   // 放在 DOMContentLoaded：islands（wbAccountsView 的注册处，见 index.html 的
@@ -901,7 +920,7 @@ setInterval(() => {
   void syncLogsBadge();
   // 请求日志的未读失败同理：人不在请求日志页时也要有人推进角标
   void syncRequestsBadge();
-  // 「定时查询积分」的结果快照也跟着这一轮读一次：后端的定时任务在跑，
+  // 余额快照也跟着这一轮读一次：后端的每账号自动查询在跑，
   // 界面得跟上它（否则用户不点按钮就永远停在启动那次的旧余额上）。
   // 快照时间戳没变时它自己会早退，不会造成无谓的重绘。
   void window.wbAccountsView?.syncBalancesSnapshot?.();

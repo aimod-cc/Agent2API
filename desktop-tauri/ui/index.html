@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Agent2API · 多提供商本地网关</title>
+  <title data-i18n="Agent2API · 多提供商本地网关">Agent2API · 多提供商本地网关</title>
   <script>
     // 与主题持久化配合：在 CSS 解析前先贴上 data-theme，避免深色模式首屏闪烁
     (() => {
@@ -23,6 +23,40 @@
       }
     })();
   </script>
+  <script>
+    // 语言引导：在 head 解析期定下界面语言，再注入词典域清单（各域词典文件改由 i18n.js
+    // 执行时补写，原因见下方）—— 必须早于所有业务脚本，否则首屏会先按简体渲染再跳一下。
+    // 解析规则与 ui/i18n.js 的 resolveLocale 逐字一致（那份供运行时查表用，这份供词典
+    // 注入用，因为 i18n.js 本身也要等这段先定语言；改一处必须同步改另一处与 login.html）。
+    (function () {
+      var CODES = ['zh-Hans', 'zh-Hant', 'en', 'ja', 'ko', 'pt-BR'];
+      var raw = null;
+      try { raw = localStorage.getItem('workbuddy-desktop-locale'); } catch (e) { /* 存储被禁：按 auto 处理 */ }
+      var locale = 'en';
+      if (raw && raw !== 'auto' && CODES.indexOf(raw) >= 0) {
+        locale = raw;
+      } else {
+        var tags = (navigator.languages && navigator.languages.length) ? navigator.languages : [navigator.language];
+        for (var i = 0; i < tags.length; i++) {
+          var tag = String(tags[i] || '').toLowerCase();
+          if (!tag) continue;
+          if (tag === 'zh-tw' || tag === 'zh-hk' || tag === 'zh-mo' || tag.indexOf('hant') >= 0) { locale = 'zh-Hant'; break; }
+          if (tag.indexOf('zh') === 0) { locale = 'zh-Hans'; break; }
+          if (tag.indexOf('ja') === 0) { locale = 'ja'; break; }
+          if (tag.indexOf('ko') === 0) { locale = 'ko'; break; }
+          if (tag.indexOf('pt') === 0) { locale = 'pt-BR'; break; }
+        }
+      }
+      document.documentElement.lang = locale;
+      // 简体没有词典目录（查不到即显示简体原文），不必注入；其余语言只注入域清单 manifest。
+      // locale 已过白名单校验，拼进 src 安全；某域文件缺失时该 <script> 404，静默无害。
+      if (locale === 'zh-Hans') return;
+      // 只写域清单 manifest；各域词典文件由 i18n.js 在自己执行时补写 ——
+      // document.write 之后同步读 __WB_I18N_DOMAINS 拿到的是 undefined（manifest
+      // 要等本脚本块结束才执行），在这里循环只会写出 0 个。
+      document.write('<script src="i18n/manifest.js"><\/script>');
+    })();
+  </script>
   <link rel="stylesheet" href="css/tokens.css">
   <link rel="stylesheet" href="css/layout.css">
   <link rel="stylesheet" href="css/components.css">
@@ -34,6 +68,7 @@
   <link rel="stylesheet" href="css/page-gateway.css">
   <link rel="stylesheet" href="css/page-logs.css">
   <link rel="stylesheet" href="css/page-tasks.css">
+  <link rel="stylesheet" href="css/page-checkin.css">
   <link rel="stylesheet" href="css/page-requests.css">
   <link rel="stylesheet" href="css/page-settings.css">
   <!-- 更新日志（Markdown 正文 / 版本卡片 / 导航更新提示）：排在页面样式之后，
@@ -56,6 +91,12 @@
        排在最后：工具类带 !important（原因见 ui-kit/styles/globals.css 顶部），
        顺序其实已不影响结果，但保持「后加载的是更新的体系」这条阅读线索。 -->
   <link rel="stylesheet" href="islands/ui.css">
+  <!-- 多语言运行时：查表 t() + 静态文案扫描器（data-i18n 系列）。
+       域清单（manifest.js）已由上面 head 里的引导脚本注入（document.write），各域词典
+       由 i18n.js 执行时补写。这里只放运行时逻辑。
+       必须排在 units.js / app.js 等业务脚本之前 —— 它们在加载期就可能读 window.wbI18n；
+       排在 head 末尾天然满足。 -->
+  <script src="i18n.js"></script>
 </head>
 <body>
   <div class="shell">
@@ -71,31 +112,39 @@
 
       <!-- 图标由 icons.js + app.js 注入（内联 SVG，见 icons.js 顶部说明） -->
       <nav class="nav" id="nav">
-        <div class="nav-group-label">运行状态</div>
-        <button class="nav-item active" data-page="overview" data-icon="overview"><span class="ico"></span><span class="label">报表</span></button>
-        <button class="nav-item" data-page="accounts" data-icon="accounts"><span class="ico"></span><span class="label">账号</span></button>
+        <div class="nav-group-label" data-i18n="运行状态">运行状态</div>
+        <button class="nav-item active" data-page="overview" data-icon="overview"><span class="ico"></span><span class="label" data-i18n="报表">报表</span></button>
+        <button class="nav-item" data-page="accounts" data-icon="accounts"><span class="ico"></span><span class="label" data-i18n="账号">账号</span></button>
 
-        <div class="nav-group-label">转发能力</div>
-        <button class="nav-item" data-page="gateway" data-icon="gateway"><span class="ico"></span><span class="label">模型管理</span></button>
+        <!-- 签到中心：页内三个标签页 —— 签到中心（每日签到 / 新手福利 / 活动福利）、
+             定时签到（多条目 + 总开关 + 保活模型链）、签到记录（每账号明细台账）。
+             整页由 React 岛渲染（desktop-tauri/ui-islands/src/islands/checkin-page.tsx，
+             随 islands/ui.js 一起加载），岛直接挂在这个 section 上；
+             定时签到与签到记录两个标签页分别在 checkin-schedule-tab.tsx /
+             checkin-records-tab.tsx。 -->
+        <button class="nav-item" data-page="checkin" data-icon="checkin"><span class="ico"></span><span class="label" data-i18n="签到中心">签到中心</span></button>
+
+        <div class="nav-group-label" data-i18n="转发能力">转发能力</div>
+        <button class="nav-item" data-page="gateway" data-icon="gateway"><span class="ico"></span><span class="label" data-i18n="模型管理">模型管理</span></button>
         <!-- 网络代理：出网出口的管理页（代理池 CRUD + 连通性测试 + Clash 出口引用）。
              挨着「模型管理」是因为它管的是同一个问题的另一半：模型管理决定
              「请求发往哪家上游」，这里决定「从哪条线路出去」。账号弹窗里的
              「出网代理」仍可用，但推荐在这里配好、账号按名字引用 ——
              改一次地址，所有引用的账号一起生效。 -->
-        <button class="nav-item" data-page="proxies" data-icon="proxies"><span class="ico"></span><span class="label">网络代理</span></button>
-        <button class="nav-item" data-page="keys" data-icon="key"><span class="ico"></span><span class="label">网关 Key</span></button>
+        <button class="nav-item" data-page="proxies" data-icon="proxies"><span class="ico"></span><span class="label" data-i18n="网络代理">网络代理</span></button>
+        <button class="nav-item" data-page="keys" data-icon="key"><span class="ico"></span><span class="label" data-i18n="网关 Key">网关 Key</span></button>
         <!-- 文档：接口地址（Base URL / 三种对话协议 / 模型列表）与将来的使用说明。
              它原先在「网关 Key」页里，R8 按需求搬成独立一级菜单 —— 接口地址是
              「接客户端」这件事本身要查的东西，与「管理 Key」不是同一类操作，
              混在一页里用户要在两件事之间来回滚。图标用 logs（文档 + 文本行），
              语义上就是「文档」，不新画 SVG（见 icons.js）。 -->
-        <button class="nav-item" data-page="docs" data-icon="logs"><span class="ico"></span><span class="label">文档</span></button>
+        <button class="nav-item" data-page="docs" data-icon="logs"><span class="ico"></span><span class="label" data-i18n="文档">文档</span></button>
 
-        <div class="nav-group-label">诊断</div>
-        <button class="nav-item" data-page="requests" data-icon="requests"><span class="ico"></span><span class="label">请求日志</span><span class="count" id="nav-count-requests" style="display:none">0</span></button>
-        <button class="nav-item" data-page="logs" data-icon="logs"><span class="ico"></span><span class="label">日志</span><span class="count" id="nav-count-logs" style="display:none">0</span></button>
-        <button class="nav-item" data-page="tasks" data-icon="tasks"><span class="ico"></span><span class="label">定时任务</span></button>
-        <button class="nav-item" data-page="settings" data-icon="settings"><span class="ico"></span><span class="label">设置</span><span class="count" id="nav-count-update" style="display:none">新</span></button>
+        <div class="nav-group-label" data-i18n="诊断">诊断</div>
+        <button class="nav-item" data-page="requests" data-icon="requests"><span class="ico"></span><span class="label" data-i18n="请求日志">请求日志</span><span class="count" id="nav-count-requests" style="display:none">0</span></button>
+        <button class="nav-item" data-page="logs" data-icon="logs"><span class="ico"></span><span class="label" data-i18n="日志">日志</span><span class="count" id="nav-count-logs" style="display:none">0</span></button>
+        <button class="nav-item" data-page="tasks" data-icon="tasks"><span class="ico"></span><span class="label" data-i18n="定时任务">定时任务</span></button>
+        <button class="nav-item" data-page="settings" data-icon="settings"><span class="ico"></span><span class="label" data-i18n="设置">设置</span><span class="count" id="nav-count-update" style="display:none" data-i18n="新">新</span></button>
       </nav>
 
       <div class="sidebar-foot">
@@ -104,16 +153,16 @@
              不依赖 HTTP 能否应答）。曾经还有第二条「可用账号」，与它拆成
              两个独立事实；账号那行已按需求移除 —— 有没有账号、几个可用，
              账号页的筛选器与状态列本来就是权威出处。 -->
-        <div class="sidebar-status" id="sidebar-status" title="本地网关监听状态">
+        <div class="sidebar-status" id="sidebar-status" title="本地网关监听状态" data-i18n-title="本地网关监听状态">
           <!-- 状态行与两个出口由 React 岛渲染（ui-islands/src/islands/port-panel.tsx）：
                岛直接挂在这个 div 上（.sidebar-status 的子元素是 flex 布局，中间插一层
                宿主会破坏排版），所以这里不再有静态子节点，class / id / title 保留。
                对外仍是 window.wbPortPanel = { render, sync, portLabel, isReady }。 -->
         </div>
         <div class="theme-switch" id="theme-switch">
-          <button data-mode="system">跟随系统</button>
-          <button data-mode="light">浅色</button>
-          <button data-mode="dark">深色</button>
+          <button data-mode="system" data-i18n="跟随系统">跟随系统</button>
+          <button data-mode="light" data-i18n="浅色">浅色</button>
+          <button data-mode="dark" data-i18n="深色">深色</button>
         </div>
       </div>
     </aside>
@@ -124,7 +173,7 @@
         <div class="crumb">
           <span>Agent2API</span>
           <span class="sep">/</span>
-          <span class="cur" id="crumb-page">报表</span>
+          <span class="cur" id="crumb-page" data-i18n="报表">报表</span>
         </div>
         <div class="spacer"></div>
         <div class="topbar-actions" id="topbar-status"></div>
@@ -150,6 +199,18 @@
              表骨架（colgroup + thead 的 th[data-col]）由岛渲染，顺序与原先写死的完全一致，
              列显隐 / 顺序仍由 wbColSettings.syncStaticHead 就地重排。 -->
         <section class="page" data-page="accounts"></section>
+
+        <!-- ─── 签到中心 ───
+             整页由 React 岛渲染（desktop-tauri/ui-islands/src/islands/checkin-page.tsx，
+             随 islands/ui.js 一起加载）。岛直接挂在这个 section 上、不套宿主 div。
+             页内三个标签页：签到中心（每日签到 / 新手福利 / 活动福利）、定时签到
+             （多条目 + 总开关 + 保活模型链，见 checkin-schedule-tab.tsx）、签到记录
+             （每账号明细台账，见 checkin-records-tab.tsx）。
+             数据入口是聚合快照 GET /api/checkin-center（分组与「今日已签」的判定
+             在后端，与批量签到同一对判据）；新手福利的资格状态是上游查询，
+             页面拿到账号清单后按需惰性查询，快照本身零上游请求。
+             对外契约 window.wbCheckinPanel = { load }（app.js 切页时调）。 -->
+        <section class="page" data-page="checkin"></section>
 
         <!-- ─── 模型管理（内部标识仍是 gateway：localStorage 记忆与 CSS 选择器都依赖它）───
              整页由 React 岛渲染（desktop-tauri/ui-islands/src/islands/models-page.tsx，
@@ -215,14 +276,13 @@
         </section>
 
         <!-- ─── 定时任务 ───
-             到点自动干活的任务集中在这里：自动签到（每天定点）+ 七条等间隔任务
-             （凭证自动维护 / 定时查询积分 / 模型目录刷新 / 软件版本检查 /
-             日志页自动刷新 / 请求日志自动刷新 / 报表自动刷新）。
-             两类走不同的接口（签到是「每天某时刻」，间隔型是「每 N 分钟 / 秒」），
-             但同属「定时」这一类，收在一页才好对照着调。
-             整个列表由 tasks-panel.js 渲染，这里只留容器。
-             排布（见 tasks-panel.js 的 cardsHtml 与 page-tasks.css 的 .task-grid）：
-             自动签到与凭证自动维护整行铺开，其余六条分两栏各三条 —— 左栏是后端
+             到点自动干活的任务集中在这里：七条等间隔任务（凭证自动维护 /
+             定时查询积分 / 模型目录刷新 / 软件版本检查 / 日志页自动刷新 /
+             请求日志自动刷新 / 报表自动刷新）。自动签到（每天定点）原也在这页，
+             已迁到「签到中心」—— 签到的执行、范围、历史与设置只有那一个出处。
+             整个列表由 tasks-panel（React 岛）渲染，这里只留容器。
+             排布（见 tasks-panel.tsx 与 page-tasks.css 的 .task-grid）：
+             凭证自动维护整行铺开，其余六条分两栏各三条 —— 左栏是后端
              任务（带「立即执行」），右栏是页面自动刷新（执行者是页面自己）。 -->
         <section class="page" data-page="tasks">
           <!-- 整页由 React 岛渲染（ui-islands/src/islands/tasks-panel.tsx，随
@@ -434,8 +494,9 @@
        SDK，从 o.alicdn.com 加载），拿到验证串才去换授权地址、再交壳开窗口。
        必须在 add-provider-forms.js 之前 —— 加载期由它建国际版那一份。 -->
   <script src="autoclaw-oauth.js"></script>
-  <!-- ZCode「周末套餐」的探测与领取（账号页那一列按钮）。
-       依赖 window.wbAccountsView 的列注册与 window.wbAliyunCaptcha。 -->
+  <!-- ZCode「限时套餐」的探测与领取（网络与验证码；界面在套餐明细弹窗里，
+       见 ui-islands/src/islands/zcode-plans-modal.tsx 的 window.wbZcodePlans）。
+       对外只有 window.wbZcodeClaim 的 preview / claim 两个方法。 -->
   <script src="zcode-claim.js"></script>
   <!-- CodeArts 的「领福利」流程（与上面 zcode-claim.js 同一约定：岛只把账号对象递过去，
        探测 → 确认 → 领取 → 回读二次确认这四步都在这个引擎里，它要问的是管理接口

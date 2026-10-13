@@ -11,9 +11,14 @@
 //! }
 //! ```
 //! - **禁用**：模型在管理页里仍可见（开关关着），但不出现在 `/v1/models`，
-//!   请求它返回 404 model_not_found，**且不再参与转发路由** ——
-//!   `providers::router::route_for_forward` 会把这一家从候选链里剔除，
-//!   请求点名它、或被某条映射指向它（按该条目的 target 判）时都不会落到这里；
+//!   请求它的**原始 id** 返回 404 model_not_found，这一家的**原生路由**也不再
+//!   进候选链（`catalog::builtin_target` 的第一个分支按 `default_enabled` 判定）。
+//!   **别名不受牵连**：映射条目只吃自己的 `enabled` 开关，目标模型被关不会挡住
+//!   别名 —— `manifest_for` 刻意保留被关掉的上游记录（理由见该函数的注释），
+//!   别名照旧解析得到它。所以「关掉主模型、用别名照样请求得到」是**预期行为**，
+//!   不是漏判；要让别名也失效，得关那条映射自己的开关（或删掉它）。
+//!   唯一例外是 `alias == target` 的自映射：它与模型的默认绑定共用一个开关
+//!   （`set_state` 同步两者），关模型即关它。
 //! - **映射**（照抄 OmniProxy 的模型映射语义）：把「上游模型（提供商 × 真名）」
 //!   以对外名 `alias` 暴露给下游。`alias` **自由命名**——允许与任何上游模型 id
 //!   同名（同名时该上游的原生路由仍在、且优先，映射是追加的兜底路，不存在遮蔽）；
@@ -1294,8 +1299,8 @@ pub const QODER_DEFAULT_ENABLED: &[&str] = &["Qwen3.8-Flash"];
 /// 目录从上游拉回来时），以及编排入口对**当前缓存清单**的补种（见
 /// `providers::adapter` 的 `seed_current_qoder_defaults` —— 覆盖「有账号但远程
 /// 刷新失败，手里只有静态兜底清单」与升级用户首次打开管理页的情形）。
-pub fn seed_qoder_defaults(ids: &[String]) -> Option<String> {
-    seed_default_enabled("qoder", "Qoder", QODER_DEFAULT_ENABLED, ids)
+pub fn seed_qoder_defaults(provider: &str, label: &str, ids: &[String]) -> Option<String> {
+    seed_default_enabled(provider, label, QODER_DEFAULT_ENABLED, ids)
 }
 
 /// 「默认启用白名单」种子的公共实现（WorkBuddy 与 Qoder 共用）。

@@ -104,6 +104,16 @@ impl KeyScope {
         self.allowed_providers.is_empty() || self.allowed_providers.contains(&normalize_one(provider))
     }
 
+    /// 白名单里的 provider id（小写、排序；未限制 = 空表）。
+    ///
+    /// 目前唯一的消费方是模型测试的**直达选路**（`provider_loop` 的
+    /// `ignore_model_gate`）：测试把家钉在白名单里，候选链直接取它 ——
+    /// 被测的模型可能还没启用（先测通、再决定启不启用），按模型路由的
+    /// 启停门禁不适用于这一跳。
+    pub fn allowed_provider_ids(&self) -> Vec<String> {
+        sorted(&self.allowed_providers)
+    }
+
     /// 白名单的可读摘要（日志与错误文案用；空 = `不限制`）
     pub fn describe(&self) -> String {
         let providers = if self.restricts_providers() {

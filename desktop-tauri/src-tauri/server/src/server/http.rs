@@ -117,6 +117,15 @@ pub fn panel_router(state: ServerState) -> Router {
             "/api/session/login/raccoon-callback",
             get(api::session::login_raccoon_callback),
         )
+        // KukuAI 短信登录收尾（百度通行证）：壳侧在登录窗口跳转 success.html
+        // 后读取 WebView2 Cookie 存储（BDUSS 是 HttpOnly，页面脚本读不到），
+        // 把 state + 登录态 Cookie 一并 POST 交到这里。**免鉴权**：调用方是
+        // 壳侧进程（登录窗口），不带 API Key；安全性由登录任务的一次性 state
+        // 承担（与 raccoon-callback 同款）。
+        .route(
+            "/api/session/login/kuku/complete",
+            post(api::session::login_kuku_complete),
+        )
         // AutoClaw OAuth（国际版）的 loopback 回调：**浏览器 302 到这里**
         // （授权页完成后顶层导航到我们交给上游的 navigate_uri，见
         // `providers::autoclaw::oauth`），所以同样必须免鉴权 —— 调用方是用户的
@@ -147,6 +156,18 @@ pub fn panel_router(state: ServerState) -> Router {
         .route(
             "/oauth/callback",
             get(api::session::login_codearts_callback).post(api::session::login_codearts_callback_post),
+        )
+        // Antigravity 网页登录的回调：**浏览器 302 到这里**（Google 授权页完成
+        // 后顶层导航回我们发起时登记的 redirect_uri）。路径 `/oauth-callback`
+        // 是 Google 侧登记/参考实现逐字使用的那个（`Antigravity-Manager`
+        // `oauth_server.rs`），不是我们自己挑的 —— 与 CodeArts 的
+        // `/oauth/callback`（多一个斜杠）是两个路径，同端口共存不冲突。
+        // 免鉴权的理由与 CatPaw / Accio / CodeArts 几条 loopback 回调同一句：
+        // 调用方是用户的浏览器，它没有我们的 API Key；安全性由本次登录任务
+        // 生成的一次性 state 承担（逐字比对见处理函数与 core::login）。
+        .route(
+            "/oauth-callback",
+            get(api::session::login_antigravity_callback),
         );
 
     // 需鉴权：Node 版对这些路径都调用了 checkApiKey
@@ -250,6 +271,14 @@ pub fn panel_router(state: ServerState) -> Router {
             "/api/queue",
             get(api::queue_api::get_queue).put(api::queue_api::put_queue),
         )
+        // 账号路由（策略 / 粘性 / 退避 / 垫底 / 熔断）：GET 读、PUT（部分字段）
+        // 更新，保存后对下一个请求立即生效；queue 是候选队列的可见化端点
+        // （账号页「路由」面板的数据源，排序实现与转发选路同一个函数）。
+        .route(
+            "/api/routing",
+            get(api::routing_api::get_routing).put(api::routing_api::put_routing),
+        )
+        .route("/api/routing/queue", get(api::routing_api::get_routing_queue))
         // ── 调试模式（设置页「通用 → 调试模式」）──
         // GET/PUT 开关；traffic 是按 id 取原始报文的详情端点（列表接口不返回
         // 报文，见 debug_api 的模块头）。挂 protected：报文含上游 URL 与请求体。
@@ -270,6 +299,12 @@ pub fn panel_router(state: ServerState) -> Router {
         // 全部业务表（账号、日志、统计、配置），与 /api/config 同级敏感。
         .route("/api/upgrade", get(api::upgrade_api::get_upgrade))
         .route("/api/upgrade/run", post(api::upgrade_api::run_upgrade))
+        // ── 整库备份 / 恢复（设置页，SQL 文本形态）──
+        // 挂 protected：导出把全部凭证写进指定路径，导入整体替换数据库，
+        // 都是 /api/config 级别敏感；文件由后端按壳选的路径直读直写
+        // （大文件不过 HTTP，见 api::backup_api 的模块头）。
+        .route("/api/backup/export", post(api::backup_api::export_backup))
+        .route("/api/backup/import", post(api::backup_api::import_backup))
         // ── 账号管理（对照 workbuddy-account-routes.mjs）──
         // 用 any(...) 注册两条入口（无尾段 + 通配尾段），方法/路径的判定交给
         // api::accounts::dispatch —— 这是为了复刻 Node 版 tryHandle 的判定顺序
@@ -308,6 +343,13 @@ pub fn panel_router(state: ServerState) -> Router {
             "/api/activity/ambassador",
             get(api::billing::activity_ambassador),
         )
+        // WorkBuddy 国际版日活保活的模型链（签到中心「自动签到」卡里编辑）
+        .route(
+            "/api/checkin-keepalive",
+            get(api::billing::get_keepalive).post(api::billing::save_keepalive),
+        )
+        // WorkBuddy 国际版日活任务的手动粒度入口（保活 / 领取 / 保活+领取）
+        .route("/api/checkin-activity", post(api::billing::run_activity))
         // ── 会话与登录 ──
         .route("/api/session/login/start", post(api::session::login_start))
         .route("/api/session/login/wait", get(api::session::login_wait))
@@ -463,6 +505,14 @@ pub fn panel_router(state: ServerState) -> Router {
             "/api/zcode/captcha",
             get(api::zcode_captcha::get_captcha).post(api::zcode_captcha::push_captcha),
         )
+        // 令牌池的补货节奏设置（目标 / 轮询间隔 / 单轮上限）：与上面那条的
+        // 分工见 `api::zcode_captcha_pool` 的模块头。stats 响应会把这三项
+        // 带给铸造器，保存后下一轮轮询就生效。同样挂 protected。
+        .route(
+            "/api/zcode/captcha-pool",
+            get(api::zcode_captcha_pool::get_captcha_pool)
+                .put(api::zcode_captcha_pool::put_captcha_pool),
+        )
         // ── 系统提示词与内容拦截降级 ──
         // 与 /api/sanitize 同为「出站内容处理」的开关，但形状不同（枚举 + 文件
         // 路径 + 一个运行期状态要一起返回），所以单独一条端点，见 api::prompt
@@ -482,6 +532,41 @@ pub fn panel_router(state: ServerState) -> Router {
             get(api::auto_checkin::get_state).post(api::auto_checkin::configure),
         )
         .route("/api/auto-checkin/run", post(api::auto_checkin::run_now))
+        // ── 定时签到的条目 ──
+        // 总开关走上面的老接口；条目 CRUD / 立即执行在这里（分组理由见
+        // api::checkin_schedules 的模块头）。挂 protected：写配置 + 触发真签到，
+        // 敏感度与 /api/auto-checkin 同级。三条入口 any(...) 手工分发，
+        // 与 /api/scheduled-tasks 同一取舍（统一 404，不落到 405 兜底）。
+        .route("/api/checkin-schedules", any(api::checkin_schedules::entry))
+        .route("/api/checkin-schedules/", any(api::checkin_schedules::entry))
+        .route(
+            "/api/checkin-schedules/{*rest}",
+            any(api::checkin_schedules::entry),
+        )
+        // ── 签到记录明细台账 ──
+        // GET 查询 / DELETE 清空（全清护栏 all=1，照 logs 的规则；筛选删除与
+        // 查询共用同一份过滤链）。挂 protected：明细里有账号名与收益文案，
+        // 敏感度与 /api/logs 一致。
+        .route(
+            "/api/checkin-records",
+            get(api::checkin_records::query_records).delete(api::checkin_records::clear_records),
+        )
+        .route("/api/checkin-records/", any(api::logs_api::not_found))
+        .route("/api/checkin-records/{*rest}", any(api::logs_api::not_found))
+        // ── 签到中心的聚合快照 ──
+        // 只读一条：分组与「今日已签」的判定复用批量签到同一对判据
+        // （CHECKIN_PROVIDERS ∩ supports_checkin），见 api::checkin_center 的模块头。
+        // 挂 protected：它能列出全部账号及其签到时间，敏感度与 /api/accounts 一致。
+        .route("/api/checkin-center", get(api::checkin_center::get_center))
+        // ── Qoder UMID 组件（设备风控身份）──
+        // GET 状态 / POST 安装（安装仅 Linux，见 api::qoder_umid 的模块头）。
+        // 挂 protected：安装会向 npm 下载并落地一个可执行组件，敏感度与
+        // /api/scheduled-tasks 同级。
+        .route(
+            "/api/qoder-umid",
+            get(api::qoder_umid::get_status).post(api::qoder_umid::get_status),
+        )
+        .route("/api/qoder-umid/install", post(api::qoder_umid::install))
         // ── 间隔型定时任务（凭证自动维护 / 模型目录刷新 / 两个前端自动刷新）──
         // 挂 protected：它能改后端后台任务的执行节奏（间隔 1 分钟会让网关持续
         // 打上游），并触发真打上游的刷新，敏感度与 /api/retention 同级。

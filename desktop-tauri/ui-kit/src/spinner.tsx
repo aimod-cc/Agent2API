@@ -1,5 +1,6 @@
 import * as React from 'react'
 import { cn } from './lib/cn'
+import { t } from './i18n'
 
 /**
  * 转圈指示器（标准形态，与 shadcn/ui 的 Spinner 一致：一个旋转的 loader 图标）。
@@ -18,7 +19,7 @@ function Spinner({ className, ...props }: React.ComponentProps<'svg'>) {
     <svg
       data-slot='spinner'
       role='status'
-      aria-label='加载中'
+      aria-label={t('加载中')}
       viewBox='0 0 24 24'
       fill='none'
       stroke='currentColor'

@@ -1,7 +1,14 @@
 //! Qoder 的地区与鉴权端点；地区不接受任意 URL。
+//!
+//! ── 地区即 provider 身份（2026-10 拆家）────────────────────────
+//! 与 AutoClaw / Accio / ZCode 同款：两个地区是**两家 provider**（`qoder` 中国版
+//! / `qoder-intl` 国际版），地区 → 身份的互查就在本 impl（`kind` /
+//! `provider_id` / `from_provider_id`），别处不要再写 `"qoder-intl"` 字面量。
+//! 中国版保持裸 `qoder`（存量账号 `accounts` 里的落盘契约，只改展示名）。
 
 use serde_json::Value;
 
+use crate::server::core::providers::{kind_id, ProviderKind};
 use crate::server::errors::GatewayError;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -11,6 +18,34 @@ pub enum Region {
 }
 
 impl Region {
+    /// 两个地区（注册表顺序：中国版在前 —— 历史已有的一家，存量账号都归它）。
+    pub const ALL: [Region; 2] = [Region::Cn, Region::Global];
+
+    /// 本地区对应哪个 provider kind（地区 → 身份的**唯一**映射）
+    pub fn kind(self) -> ProviderKind {
+        match self {
+            Self::Cn => ProviderKind::Qoder,
+            Self::Global => ProviderKind::QoderIntl,
+        }
+    }
+
+    /// 本地区的 provider id（`"qoder"` / `"qoder-intl"`）
+    pub fn provider_id(self) -> &'static str {
+        kind_id(self.kind())
+    }
+
+    /// provider id → 地区（`qoder` 系之外的 id 返回 None）
+    pub fn from_provider_id(provider_id: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|region| region.provider_id() == provider_id)
+    }
+
+    /// 这个 kind 是不是 Qoder 系（两家都算）—— 判据只在这里写一份
+    pub fn from_kind(kind: ProviderKind) -> Option<Self> {
+        Self::ALL.into_iter().find(|region| region.kind() == kind)
+    }
+
     pub fn parse(value: &str) -> Result<Self, GatewayError> {
         match value.trim() {
             "" | "global" | "intl" => Ok(Self::Global),

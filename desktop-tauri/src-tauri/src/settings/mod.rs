@@ -116,13 +116,27 @@ pub struct AppSettings {
     /// 默认 false：桌面端是电脑端应用，只把 `/v1/*` 网关出给局域网，
     /// 面板仍由 Tauri 壳自己出。仅在本字段为 true 时有意义。
     pub lan_panel: bool,
+    /// 轻量模式：关闭到托盘时**销毁**主窗口（连带退出 WebView2 那 6 个常驻
+    /// 进程、释放约 200MB 内存），点托盘图标时再按同一份参数重建界面。
+    ///
+    /// 网关在进程内（`server/` crate），销毁窗口不影响转发与定时任务；
+    /// 但跑在 WebView 里的「ZCode 活动套餐验证码令牌池」随之停止 ——
+    /// 该通道的请求会以 503 落进请求日志（文案会指明需要打开主窗口补令牌）。
+    /// 仅在 `close_to_tray` 开启时有意义（关闭即退出时窗口不存在「轻量」一说）。
+    ///
+    /// 开机自启 + 本开关同时开启时，**启动期就不建窗口**（只起托盘与后端，
+    /// 点托盘再按同一份参数重建）：自启路径不经过关窗，若照常建窗（哪怕
+    /// 隐藏），WebView2 也会常驻，轻量模式就要等一次完整的「开窗→关窗」才
+    /// 兑现。代价同上（令牌池在打开窗口前不补货）。
+    /// 默认 false。
+    pub lightweight_mode: bool,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         // 关闭到托盘默认开启：网关的价值在于后台持续转发，
         // 用户点关闭通常只是想收起界面，而不是让转发中断
-        Self { close_to_tray: true, autostart: false, proxy_port: 0, lan_access: false, lan_panel: false }
+        Self { close_to_tray: true, autostart: false, proxy_port: 0, lan_access: false, lan_panel: false, lightweight_mode: false }
     }
 }
 

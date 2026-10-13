@@ -145,13 +145,41 @@ pub(super) fn pick_token(payload: &Map<String, Value>, keys: &[&str]) -> String 
 /// 公开形态的 `maxConcurrent`（单账号并发上限）读数：记录里没有该键 = 未设置
 /// = **不限**，统一输出数字 0。
 ///
-/// 「缺键 → 0」的兜底**只写这一份**：七处公开形态（workbuddy 兜底形状 /
-/// custom / 小浣熊 / CatPaw / AutoClaw / Qoder / Cline）都经它取值 ——
 /// 消费方（选路 `routing::max_concurrent_of` 与前端账号菜单）按「0 = 不限」
-/// 解释，所以缺键与显式 0 在语义上等价；公开形态统一成恒有的数字键,
+/// 解释，所以缺键与显式 0 在语义上等价；公开形态统一成恒有的数字键，
 /// 前端不必再判「字段存不存在」。
+///
+/// 取值口径**只写这一份**，且各家的公开形态**不再自己写这个键**：一律由
+/// `store_view::public_account` 在按 provider 分派之后统一注入（与
+/// `hasCredentials` / `checkinAt` 同处）。从前它是各家公开形态里的逐条
+/// `insert`，于是「逐字段白名单」那几家（monkeycode / antigravity / officeace）
+/// 漏掉了它 —— 缺键在选路里被当成 0 = 不限，**并发上限静默失效**。
 pub(crate) fn max_concurrent_public(value: Option<&Value>) -> u64 {
     value.and_then(Value::as_u64).unwrap_or(0)
+}
+
+/// 公开形态出口的 `maxConcurrent`：在 [`max_concurrent_public`] 之上套上
+/// 「本家默认并发」的口径。
+///
+/// 只有 CodeArts 一家有默认值：它**没有「不限」这个选项**，记录上的 0（含从未
+/// 设置过）由上游解释成「按默认并发」（`providers::codearts::session::
+/// DEFAULT_SESSION_LIMIT`，准入闸 `SessionGate::limit_for` 读的是同一个数），
+/// 所以公开形态要报出 3 而不是 0 —— 否则选路读到的 0 等于不限，
+/// `routing::at_concurrency_limit` 不会在本家满员时跳过这个账号，请求照发、
+/// 第 4 个被上游回 **409**，而 409 是账号级冲突、不触发降级换号，客户端拿到一个
+/// 「明明有别家空着却报错」的结果。
+///
+/// 别家 0 就是 0（不限）—— 两家的差别只在这一个函数里，各家的公开形态
+/// 不必各写一遍。
+pub(crate) fn max_concurrent_public_for(provider: &str, value: Option<&Value>) -> u64 {
+    let configured = max_concurrent_public(value);
+    if provider == super::codearts_accounts::CODEARTS_PROVIDER_ID {
+        configured.max(
+            crate::server::core::providers::codearts::session::DEFAULT_SESSION_LIMIT as u64,
+        )
+    } else {
+        configured
+    }
 }
 
 /// 取对象成员；非对象（含数组）一律当空表 —— 对 `payload.auth` / `payload.account`

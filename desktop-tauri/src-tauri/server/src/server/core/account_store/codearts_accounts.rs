@@ -25,7 +25,7 @@ use super::priority::next_free_priority;
 use super::sql;
 use super::state::{mark_name_custom, StoredAccount};
 use super::store::{AccountStore, AccountStoreError};
-use super::store_util::{max_concurrent_public, token_tail_of, truncate_chars};
+use super::store_util::{token_tail_of, truncate_chars};
 use super::CredentialWrite;
 
 /// 本家的 provider id（`store_view` 的形状分派与别处比对都要用，
@@ -227,23 +227,11 @@ impl AccountStore {
         public.insert("rateLimits".to_string(), record.get("rateLimits").cloned().unwrap_or_else(|| json!({})));
         public.insert("desktop".to_string(), Value::Bool(false));
         public.insert("available".to_string(), Value::Bool(available));
-        // 并发上限：本家**没有「不限」这个选项**，所以缺省给上游硬顶而不是 0。
-        //
-        // 别家走 `max_concurrent_public`（缺键 → 0 = 选路侧不做并发过滤）。
-        // 这里如果照抄，后果是：一个没配过上限的 codearts 账号可以在途 10 个，
-        // 选路侧不拦（它读到的就是 0），第 4 个才被本家的准入闸回 **409** ——
-        // 而 409 是账号级冲突，不触发降级换号，客户端拿到一个"明明有别家空着
-        // 却报错"的结果。让公开形态直接报 3，选路就会在满员时**跳过这个账号**
-        // （`routing::at_concurrency_limit`），这才是参考实现里
-        // `candidateSessionAvailable` 承担的那一步。
-        // 与准入闸读的是同一个数（`session::SessionGate::limit_for`：0/缺省 → 默认 3），
-        // 两处不会一个显示 3、一个按别的数判。
-        public.insert(
-            "maxConcurrent".to_string(),
-            Value::from(max_concurrent_public(record.get("maxConcurrent")).max(
-                crate::server::core::providers::codearts::session::DEFAULT_SESSION_LIMIT as u64,
-            )),
-        );
+        // `maxConcurrent` 不在这里写：本家**没有「不限」这个选项**，记录上的 0
+        // （含从未设置过）要报成上游的默认并发 3 而不是 0，否则选路读到的 0 等于
+        // 不限、不会在本家满员时跳过这个账号（详见 `store_util::
+        // max_concurrent_public_for`，那个函数按 provider 套上这层口径）。
+        // 进入本家的这个键由 `store_view::public_account` 统一注入。
         // 每日福利领取的台账原样透出：界面要显示「今天已试过几次 / 是否已到账」，
         // 而这三项之外没有别的可推。里面**只有活动 id、幂等键与布尔状态**，
         // 没有任何凭据材料（幂等键是我们自己拼的 `claim_<活动id>_<毫秒>`），

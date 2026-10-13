@@ -50,6 +50,8 @@
 //!   jwt.rs           JWT payload 解码（不验签，只读 exp/name/iss 等声明）
 //!   credentials.rs   凭证来源（账号记录 / 桌面端实时登录态）、单飞刷新与回写
 //!   models.rs        模型清单（静态兜底 5 个 + `/model_catalog` 远程刷新）
+//!   balance.rs       余额 / 积分与订阅查询 + 每日积分发放（每日签到链路）
+//!   onboarding.rs    新手任务：首次桌面登录奖励（一次性，幂等领取）
 //!
 //! ── panic=abort ────────────────────────────────────────────
 //! 本文件在对话链路上，绝不 unwrap/expect/panic：取值走 Option 链与
@@ -69,6 +71,7 @@ pub mod balance;
 pub mod credentials;
 pub mod jwt;
 pub mod models;
+pub mod onboarding;
 pub mod oauth;
 
 /// 默认 LLM 网关地址（源实现 `DEFAULT_LLM_BASE_URL`）

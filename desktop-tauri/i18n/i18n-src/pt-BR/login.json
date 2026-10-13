@@ -1,0 +1,23 @@
+{
+  "Agent2API · 登录": "Agent2API · Entrar",
+  "OpenAI 兼容网关 · 管理面板": "Gateway compatível com OpenAI · Painel de administração",
+  "创建账号并进入面板": "Criar conta e entrar no painel",
+  "密码": "Senha",
+  "我不是机器人": "Não sou um robô",
+  "无法连接网关": "Não foi possível conectar ao gateway",
+  "无法连接网关，请确认服务已启动": "Não foi possível conectar ao gateway, verifique se o serviço está em execução",
+  "登录": "Entrar",
+  "登录后可在「网关 Key」页为 API 客户端创建密钥": "Após entrar, você pode criar chaves na página “Chave do gateway” para clientes de API",
+  "管理员账号": "Conta de administrador",
+  "继续": "Continuar",
+  "至少 8 位": "Mínimo de 8 caracteres",
+  "设置密码（至少 8 位）": "Defina uma senha (mínimo de 8 caracteres)",
+  "请先勾选「我不是机器人」完成验证": "Marque “Não sou um robô” primeiro para concluir a verificação",
+  "请填写账号与密码": "Preencha a conta e a senha",
+  "请求失败，请重试": "Falha na requisição, tente novamente",
+  "请输入管理员账号与密码": "Preencha a conta de administrador e a senha",
+  "首次使用：创建一个管理员账号，用于登录此面板": "Primeiro uso: crie uma conta de administrador para entrar neste painel",
+  "验证中…": "Verificando…",
+  "验证失败，请重试": "Falha na verificação, tente novamente",
+  "验证成功": "Verificado"
+}

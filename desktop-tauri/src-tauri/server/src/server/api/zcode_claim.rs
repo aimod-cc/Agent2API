@@ -31,6 +31,16 @@
 //! 领取通常要过阿里云无痕验证（`3007` 那档），而解它的唯一可行方式是 webview
 //! 里跑官方 SDK（见 `providers::zcode::claim` 的模块头）。定时任务没有那个环境，
 //! 硬发只会稳定拿回「验证码校验未通过」—— 不如如实不做，由用户在界面上点。
+//! （`zcode-switch` 的自动领取是靠**弹一个隐藏的验证码窗口**绕过去的：那需要一个
+//! 常驻的桌面界面，本家的 headless 形态没有；这一点在那边是有意为之的取舍，
+//! 本家不跟。）
+//!
+//! ── 激活事件：领取链上的**前置动作**（见 `report_activation`）────
+//! 资格由上游的激活事件（`app_launch` / `app_daily_active`）发放，而本家不跑
+//! 官方客户端、那一步不会自动发生。因此两个入口都会补报：
+//!   · `claim`：领取前必报（失败不阻断）；
+//!   · `preview`：**探测为空时**报一次再重探（列表非空时不报，读写分开的口径
+//!     因此只在这一处被打破，理由写在那个分支上）。
 //!
 //! ── 出口要不要挂账号代理：**要**（与「余额查询直连」相反）────────
 //! 小浣熊的余额查询刻意直连（照抄源实现的裸 fetch），本家**不照抄那个决定**：
@@ -44,15 +54,18 @@
 use axum::body::Bytes;
 use serde_json::{json, Value};
 
+use crate::server::core::proxies::ResolvedProxy;
+use crate::server::core::providers::zcode::activation;
 use crate::server::core::providers::zcode::claim::{
     self, ClaimFailure, ClaimOutcome, PreviewOutcome,
 };
 use crate::server::core::providers::zcode::region::Region;
 use crate::server::errors::management_error;
 use crate::server::http::{ok_json, parse_body};
+use crate::server::logging;
 use crate::server::ServerState;
 
-/// 从账号记录里取出领取链路要的三样东西。
+/// 从账号记录里取出领取链路要的几样东西。
 ///
 /// `jwt` 与 `deviceMid` **不走投影列**（它们是本家独有的字段，账号存储的
 /// 列只认各家共用的那几个），因此这里读的是记录的 JSON 形态而不是会话形态。
@@ -64,6 +77,8 @@ struct ClaimTarget {
     jwt: String,
     /// 设备标识（上游硬要求，UUID 形态；缺失时已由存储层生成并落盘）
     device_mid: Option<String>,
+    /// 上游用户 id（激活事件上报用；手工粘贴凭证建的账号没有这一项）
+    user_id: String,
     /// 账号展示名（日志与错误文案用）
     name: String,
 }
@@ -119,8 +134,65 @@ fn load_target(state: &ServerState, account_id: &str) -> Result<ClaimTarget, (i3
         region,
         jwt,
         device_mid,
+        user_id: text("userId"),
         name,
     })
+}
+
+/// 上报一次客户端激活事件（`app_launch` / `app_daily_active`），返回响应里那两个
+/// 字段的取值。
+///
+/// ── 为什么这件事挂在领取链上（而不是一个独立按钮）────────────────
+/// 资格由激活事件发放（见 `providers::zcode::activation` 的模块头），因此它是
+/// **领取的前置动作**：领取前补一次，等于把「官方客户端开着的那些账号本来就
+/// 会发生的事」补上。界面上不再多一颗按钮，用户也不必知道有这一步。
+///
+/// 返回值 `(activated, activationError)`：
+///   · `Some(true)` —— 两条事件都上报成功；
+///   · `Some(false)` + 原因 —— 上报失败（网络 / 上游拒绝）；
+///   · `None` —— **没上报**（账号没有 `userId`：手工粘贴 API Key 建的账号）。
+/// 失败不阻断调用方：领取仍有它自己的路径（验证码 → claim），
+/// 这里如实把原因带出去（日志 + 响应字段）即可。
+async fn report_activation(
+    target: &ClaimTarget,
+    proxy: Option<&ResolvedProxy>,
+) -> (Option<bool>, Option<String>) {
+    if target.user_id.trim().is_empty() {
+        logging::verbose(
+            "[Claim]",
+            &format!(
+                "ZCode {}账号「{}」没有 userId，跳过激活事件上报",
+                target.region.label(),
+                target.name
+            ),
+        );
+        return (None, None);
+    }
+    let device_mid = target.device_mid.as_deref().unwrap_or("");
+    match activation::report(target.region, &target.user_id, device_mid, proxy).await {
+        Ok(()) => {
+            logging::verbose(
+                "[Claim]",
+                &format!(
+                    "ZCode {}账号「{}」已上报激活事件（app_launch / app_daily_active）",
+                    target.region.label(),
+                    target.name
+                ),
+            );
+            (Some(true), None)
+        }
+        Err(error) => {
+            logging::log(
+                "[Claim]",
+                &format!(
+                    "ZCode {}账号「{}」激活事件上报失败：{error}",
+                    target.region.label(),
+                    target.name
+                ),
+            );
+            (Some(false), Some(error))
+        }
+    }
 }
 
 /// 取该账号配置的出口代理（理由见模块头：领取**要**挂代理）
@@ -135,11 +207,24 @@ fn account_proxy(state: &ServerState, account_id: &str) -> Option<crate::server:
 /// ```json
 /// { "plans": [ { "planId", "name", "description", "priority",
 ///                "startsAt", "endsAt", "entitlements": [...] } ],
-///   "deployed": true }
+///   "deployed": true, "activated": true, "activationError": null }
 /// ```
 /// `deployed: false` 表示上游活动接口尚未部署（404）—— **这不是错误**，
 /// 是活动开抢前的正常状态（见 `providers::zcode::claim` 的模块头）。
 /// 前端应当据此显示「当前没有可领套餐」而不是报错。
+///
+/// ── `activated` / `activationError` 的取值 ────────────────────
+/// 它们回答「这次有没有补报激活事件」（资格的前置动作，见
+/// `providers::zcode::activation` 的模块头）：
+///   · `null` —— 没报（探测到了套餐：不必报；接口未部署：报也无从解锁；
+///     账号没有 `userId`：报不出去）。**也没出错**；
+///   · `true` / `false` —— 报了 / 报失败（原因在第二个字段里）。
+/// 前端不读它就什么也不影响（老界面照样工作）；只为把「为什么这次是空的」
+/// 留一条可查的线索。
+///
+/// ── 一处**有副作用**的分支（别当成纯只读）────────────────────
+/// **探测结果为空时**：先补报激活事件、再重探一次 —— 空列表可能只是资格没
+/// 登记，而那是本家不跑官方客户端的必然结果（理由见上）。列表非空时不报。
 pub async fn preview(state: &ServerState, account_id: &str) -> axum::response::Response {
     let target = match load_target(state, account_id) {
         Ok(target) => target,
@@ -153,14 +238,65 @@ pub async fn preview(state: &ServerState, account_id: &str) -> axum::response::R
         proxy.as_ref(),
     )
     .await;
-    match outcome {
-        Ok(PreviewOutcome::NotDeployed) => ok_json(json!({ "plans": [], "deployed": false })),
-        Ok(PreviewOutcome::Plans(plans)) => ok_json(json!({
-            "plans": plans.iter().map(plan_to_json).collect::<Vec<Value>>(),
-            "deployed": true,
-        })),
-        Err(error) => management_error(error.status_code, error.message),
-    }
+    // 三个字段：探测到的套餐、接口是否已部署，以及**这次有没有补报激活事件**
+    // （`activated` / `activationError`，取值语义见 `report_activation`）
+    let (plans, deployed, activated, activation_error) = match outcome {
+        Ok(PreviewOutcome::NotDeployed) => (Vec::new(), false, None, None),
+        Ok(PreviewOutcome::Plans(plans)) if !plans.is_empty() => (plans, true, None, None),
+        // ── 空列表：补报激活再探测一遍（本函数唯一一处会写上游的地方）──
+        // 空列表**可能**只是资格没登记（见 `providers::zcode::activation` 的模块头：
+        // 资格由激活事件发放，而本家不跑官方客户端，那一步不会自动发生）。
+        // 代价是两次事件 + 一次重探，收益是把「明明有资格却看不到套餐」变成看得到 ——
+        // 而预览是用户点出来的低频动作（界面上的那颗「领套餐」），这个代价付得起。
+        // 反过来，列表非空时**不报**：读写分开的既有口径不变（探测仍是只读的）。
+        Ok(PreviewOutcome::Plans(_)) => {
+            let (activated, activation_error) = report_activation(&target, proxy.as_ref()).await;
+            match claim::preview(
+                target.region,
+                &target.jwt,
+                target.device_mid.as_deref(),
+                proxy.as_ref(),
+            )
+            .await
+            {
+                Ok(PreviewOutcome::NotDeployed) => (Vec::new(), false, activated, activation_error),
+                Ok(PreviewOutcome::Plans(plans)) => {
+                    logging::verbose(
+                        "[Claim]",
+                        &format!(
+                            "ZCode {}账号「{}」补报激活事件后重探：{} 份可领套餐",
+                            target.region.label(),
+                            target.name,
+                            plans.len()
+                        ),
+                    );
+                    (plans, true, activated, activation_error)
+                }
+                // 重探失败：不把「刚才那次成功的空探测」降级成错误 ——
+                // 首次探测已经拿到了一个可信的答案（当前没有可领套餐），
+                // 补报那一趟只是加试。错误原因进日志，响应用首次探测的结果。
+                Err(error) => {
+                    logging::log(
+                        "[Claim]",
+                        &format!(
+                            "ZCode {}账号「{}」补报激活后的重探失败：{}",
+                            target.region.label(),
+                            target.name,
+                            error.message
+                        ),
+                    );
+                    (Vec::new(), true, activated, activation_error)
+                }
+            }
+        }
+        Err(error) => return management_error(error.status_code, error.message),
+    };
+    ok_json(json!({
+        "plans": plans.iter().map(plan_to_json).collect::<Vec<Value>>(),
+        "deployed": deployed,
+        "activated": activated,
+        "activationError": activation_error,
+    }))
 }
 
 /// `POST /api/accounts/{id}/zcode-claim/captcha-config`：取阿里云风控配置。
@@ -247,6 +383,10 @@ pub async fn claim_plan(
     };
 
     let proxy = account_proxy(state, account_id);
+    // ── 领取前补报激活事件（资格的前置动作，见 `report_activation`）──
+    // 位置在这一步而不是 claim 调用之前：下面这段「没点名就先探测一次」也要
+    // 受益（资格登记之后探测才看得见套餐）。失败不阻断 —— 如实进日志与响应。
+    let (activated, activation_error) = report_activation(&target, proxy.as_ref()).await;
     let requested_plan_id = field("planId");
     let plan_id = if requested_plan_id.is_empty() {
         // 没点名就探测一次，取优先级最高的那个
@@ -265,6 +405,8 @@ pub async fn claim_plan(
                         "ok": false,
                         "failure": "unavailable",
                         "message": "当前没有可领取的套餐",
+                        "activated": activated,
+                        "activationError": activation_error,
                     }))
                 }
             },
@@ -273,6 +415,8 @@ pub async fn claim_plan(
                     "ok": false,
                     "failure": "unavailable",
                     "message": "活动尚未开始（上游接口未部署）",
+                    "activated": activated,
+                    "activationError": activation_error,
                 }))
             }
             Err(error) => return management_error(error.status_code, error.message),
@@ -310,6 +454,8 @@ pub async fn claim_plan(
                 "startsAt": starts_at,
                 "endsAt": ends_at,
                 "claimedAt": claimed_at,
+                "activated": activated,
+                "activationError": activation_error,
             }))
         }
         Ok(ClaimOutcome::Failed { plan_id, failure, code, message, failure_ends_at }) => {
@@ -341,6 +487,8 @@ pub async fn claim_plan(
                 "message": message,
                 "failureEndsAt": failure_ends_at,
                 "claimedAt": claimed_at,
+                "activated": activated,
+                "activationError": activation_error,
             }))
         }
     }

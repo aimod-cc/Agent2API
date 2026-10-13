@@ -8,13 +8,15 @@
    静默无痕验证 → 推给网关 → 转发层按请求取一个。
 
    ── 节奏（不铸多、不空窗）─────────────────────────────────────
-   每 4 秒问一次网关 `GET /api/zcode/captcha`：
+   每轮问网关 `GET /api/zcode/captcha`（间隔与单轮产量都是网关下发的设置，
+   见「节奏参数」段）：
      · `needsTokens: true`（有账号走活动套餐，且库存低于目标）→ 补到目标；
      · `needsTokens: false` → 什么都不做（**没有账号用这条路时一个都不铸** ——
        阿里云对铸造频率有风控，白铸纯属烧配额，见参考实现的熔断那一段）；
      · 上游刚回过 3007（`rejected` 计数变大）→ 立刻补一轮，不等下一个周期。
    令牌寿命两分钟（网关那侧定的），每次只铸到目标（默认 3 个）：
-   「够下一条请求立刻有得用」即可。
+   「够下一条请求立刻有得用」即可。三项节奏可在设置页「网关 → 验证码
+   令牌池」调（config 键 zcodeCaptchaPool*），随每轮 stats 下发热生效。
 
    ── 为什么不做成用户可见的按钮 ───────────────────────────────
    转发是后台发生的（用户在别的工具里发请求），没有人会在每条请求前点一次验证。
@@ -29,13 +31,39 @@
 
    依赖：`ui/aliyun-captcha.js` 的 `window.wbAliyunCaptcha.mintTraceless`
    （脚本顺序：本文件必须排在它之后）与桥接层 `zcodeCaptchaStats` /
-   `pushZcodeCaptchaTokens`（见 desktop-tauri/src-tauri/src/bridge.rs）。 */
+   `pushZcodeCaptchaTokens`（deploy 的两种形态各有一份实现：桌面端
+   desktop-tauri/src-tauri/src/bridge.rs，headless 面板
+   server/src/web_shim.rs —— 两份都给才谈得上「同一份界面代码两种部署通用」，
+   早先在 headless 缺这两条，于是铸造器每轮都退让、池子永远是空的，
+   见 Issue #163）。 */
 
 (() => {
-  /** 轮询间隔（毫秒）。2.5 秒是「库存见底到补上」的平滑窗口 */
+  /** 轮询间隔的**回退默认**（毫秒）：网关没给 `pollMs` 时才用。正式值是
+     设置页「网关 → 验证码令牌池」的设置项，随每轮 stats 下发（见 pollMsOf） */
   const POLL_MS = 2500;
-  /** 一轮铸 1 个：单实例单次铸造，避免并发冲突与 DOM 重建竞态 */
+  /** 单轮铸造上限的**回退默认**：网关没给 `maxPerRound` 时才用。1 = 单实例
+     单次铸造，避免并发冲突与 DOM 重建竞态（见 maxPerRoundOf） */
   const MAX_PER_ROUND = 1;
+  /** 节奏参数的合法范围（与后端 config 的范围常量同源：zcodeCaptchaPool*）。
+     网关写侧已按这个范围校验过，这里的夹取只是防御响应被改坏 */
+  const POLL_MIN_MS = 1000;
+  const POLL_MAX_MS = 30000;
+  const PER_ROUND_MIN = 1;
+  const PER_ROUND_MAX = 5;
+
+  /** 本轮的轮询间隔：网关设置说了算，缺失 / 非法回落默认并夹进合法范围 */
+  function pollMsOf(stats) {
+    const value = Number(stats.pollMs);
+    if (!Number.isFinite(value) || value <= 0) return POLL_MS;
+    return Math.min(POLL_MAX_MS, Math.max(POLL_MIN_MS, Math.round(value)));
+  }
+
+  /** 本轮的单轮铸造上限：同上 */
+  function maxPerRoundOf(stats) {
+    const value = Number(stats.maxPerRound);
+    if (!Number.isFinite(value) || value <= 0) return MAX_PER_ROUND;
+    return Math.min(PER_ROUND_MAX, Math.max(PER_ROUND_MIN, Math.round(value)));
+  }
   /** 失败后的退让（毫秒）：失败时轻度退让，并在连续失败时重置铸造实例 */
   const BACKOFF_MIN_MS = 3000;
   const BACKOFF_MAX_MS = 15000;
@@ -60,7 +88,7 @@
     if (window.wbApp?.debug) window.wbApp.debug(`[ZCodeCaptcha] [WARN] ${message}`);
   }
 
-  /** 拿一次池子概况；桥接不可用（浏览器直开界面）时返回 null，循环安静地退让 */
+  /** 拿一次池子概况；桥接方法缺失（界面被别的宿主打开、脚本没就位）时返回 null，循环安静地退让 */
   async function fetchStats() {
     const bridge = api();
     if (!bridge?.zcodeCaptchaStats) return null;
@@ -115,7 +143,7 @@
       const want = stats.needsTokens === true || challenged;
       // 「需要铸造」的三样前提缺一不可：有账号走活动套餐、库存不足、风控配置拿得到
       if (!want) {
-        schedule(POLL_MS);
+        schedule(pollMsOf(stats));
         return;
       }
       // 风控配置只在真要铸的时候才去取（带 5 分钟缓存；上游那份配置很少变）
@@ -126,7 +154,7 @@
       }
       const target = Math.max(1, Number(stats.target) || 1);
       const ready = Number(stats.ready) || 0;
-      const need = Math.min(MAX_PER_ROUND, Math.max(0, target - ready));
+      const need = Math.min(maxPerRoundOf(stats), Math.max(0, target - ready));
       const tokens = [];
       for (let index = 0; index < need; index += 1) {
         const param = await mintOne(config);
@@ -148,7 +176,7 @@
       }
       await pushTokens(tokens);
       failures = 0;
-      schedule(POLL_MS);
+      schedule(pollMsOf(stats));
     } catch (error) {
       failures += 1;
       if (failures >= 2) {
@@ -214,7 +242,8 @@
 
   window.wbZcodeCaptchaPool = { start, stop };
 
-  // 自启：界面加载完就开始守着。桥接不可用（浏览器直开）时循环会安静退让，
+  // 自启：界面加载完就开始守着（桌面端与 headless 面板都走这里 —— 两种部署的
+  // 桥接方法都由各自的实现提供，见文件头）。桥接方法真缺失时循环安静退让，
   // 不会有报错刷屏（见 fetchStats 的返回 null 分支）
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', start, { once: true });

@@ -12,10 +12,12 @@
 //! 与各家同款：内存缓存 + `providers::catalog_cache` 落盘（进程重启后读回）。
 //! 自动路径 10 分钟 TTL；用户手动「刷新模型清单」时 `force = true` 绕过。
 //!
-//! ── 思考能力位 ──────────────────────────────────────────────
-//! 只有 `spark-x` 是思考模型（客户端给它挂 `reasoning: true` +
-//! `interleaved: { field: 'reasoning_content' }`，并在请求侧用
-//! `reasoning_effort` 控制档位），其余模型标 false。
+//! ── 能力位 ──────────────────────────────────────────────────
+//! 思考 / 工具 / 图片 / 视频位都读上游条目的 `capabilities`（`reasoning` /
+//! `function_calling` / `vision` / `input_modalities`，实测 2026-10 每个条目都
+//! 带这四个键，见 `map_entry`）。旧实现只按模型 id 判思考位（spark-x）、硬编码
+//! 工具位 —— 那会丢掉 GLM-5.3-Flash 等模型的 vision 声明，目录里全部显示成
+//! 不支持图片。
 //!
 //! ── 硬约束 ──────────────────────────────────────────────────
 //! release 是 `panic=abort`：本文件零 unwrap/expect/panic。
@@ -126,13 +128,36 @@ fn split_rate_suffix(name: &str) -> (String, Option<String>) {
     (cleaned.to_string(), Some(format!("x{number}")))
 }
 
+/// 从上游 `capabilities` 对象里取布尔位（缺失 / 非布尔一律 false）
+fn caps_bool(caps: Option<&serde_json::Map<String, Value>>, key: &str) -> bool {
+    caps.and_then(|caps| caps.get(key))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// `capabilities.input_modalities` 数组里有没有指定模态（大小写不敏感）
+fn caps_modal(caps: Option<&serde_json::Map<String, Value>>, modal: &str) -> bool {
+    caps.and_then(|caps| caps.get("input_modalities"))
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|value| {
+                value.as_str().is_some_and(|text| text.eq_ignore_ascii_case(modal))
+            })
+        })
+}
+
 /// 把一个 OpenAI 目录条目映射成聚合层认的形态
 /// （键名对照 `core/models/shape.rs::list_item`：`id` / `name` /
-/// `maxInputTokens` / `maxOutputTokens` / `supportsReasoning` / `supportsToolCall`）。
+/// `maxInputTokens` / `maxOutputTokens` / `supportsImages` / `supportsVideo` /
+/// `supportsReasoning` / `supportsToolCall`）。
 ///
-/// 上游没给的键不编造：能力位只在有依据时给 true（工具调用是 OpenAI 兼容网关的
-/// 既有能力，照 `autoclaw::models` 的处置显式给 true；思考位只给 spark-x）。
-/// 倍率从展示名后缀拆出（见 [`split_rate_suffix`] 的说明）。
+/// 能力位以上游 `capabilities` 为准（实测 2026-10：条目都带
+/// `{reasoning, vision, function_calling, input_modalities, ...}`，见模块头的
+/// 上游形态说明）。`vision` / `input_modalities` 双读判定图片位，防一端缺失时
+/// 静默丢能力 —— 生图模型（Hy image / qwen image）的 `vision:true` 也由此落入
+/// `supportsImages`，与目录展示口径一致。缺失时保守回落：工具调用按 OpenAI
+/// 兼容网关的既有能力给 true（照 `autoclaw::models` 的处置），思考位保留
+/// 按 id 的旧判断兜底。倍率从展示名后缀拆出（见 [`split_rate_suffix`]）。
 fn map_entry(row: &Value) -> Option<Value> {
     let id = row
         .get("id")
@@ -146,12 +171,25 @@ fn map_entry(row: &Value) -> Option<Value> {
         .filter(|value| !value.is_empty())
         .unwrap_or(id);
     let (name, rate) = split_rate_suffix(raw_name);
+    let caps = row.get("capabilities").and_then(Value::as_object);
+    let tool_call = caps_bool(caps, "function_calling") || caps.is_none();
+    let reasoning = caps_bool(caps, "reasoning") || is_reasoning_model(id);
     let mut item = json!({
         "id": id,
         "name": name,
-        "supportsToolCall": true,
-        "supportsReasoning": is_reasoning_model(id),
+        "supportsToolCall": tool_call,
+        "supportsReasoning": reasoning,
     });
+    if caps_bool(caps, "vision") || caps_modal(caps, "image") {
+        if let Some(object) = item.as_object_mut() {
+            object.insert("supportsImages".to_string(), Value::Bool(true));
+        }
+    }
+    if caps_modal(caps, "video") {
+        if let Some(object) = item.as_object_mut() {
+            object.insert("supportsVideo".to_string(), Value::Bool(true));
+        }
+    }
     if let Some(rate) = rate {
         if let Some(object) = item.as_object_mut() {
             object.insert("credits".to_string(), Value::String(rate));

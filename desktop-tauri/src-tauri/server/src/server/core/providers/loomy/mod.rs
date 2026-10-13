@@ -35,8 +35,10 @@ pub mod checkin;
 pub mod client;
 pub mod credentials;
 pub mod endpoints;
+pub mod images;
 pub mod login;
 pub mod models;
+pub mod onboarding;
 pub mod sign;
 
 use axum::http::HeaderMap;
@@ -104,10 +106,35 @@ impl ProviderAdapter for LoomyAdapter {
         ];
         // model 原样透传：Loomy 的模型 id 就是上游 id（没有路由前缀那套），
         // 入口校验已按目录收窄过，这里不需要二次映射。
+        //
+        // 图片格式适配（见 `images` 模块头）：deepseek 系模型只认
+        // `<image_base64>` 标记，标准 image_url 会被上游当文本读（用户报的
+        // 「图片被截断/不支持图片识别」）；其余模型保持 image_url。
+        // 判断用**客户端请求名**（body.model 此刻还没被 wire 改写）：
+        // 目录名与映射别名都含 `deepseek`，宽松匹配两段链路都成立。
+        let requested_model = body
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let payload = if images::prefers_tag_format(&requested_model) {
+            let (rewritten, converted) = images::rewrite_to_tag(body);
+            if converted > 0 {
+                logging::verbose(
+                    "[Loomy]",
+                    &format!(
+                        "模型 {requested_model} 只认 <image_base64> 标记：已转换 {converted} 个图片块"
+                    ),
+                );
+            }
+            rewritten
+        } else {
+            body.clone()
+        };
         Ok(ChatRequestPlan::chat(
             format!("{}/chat/completions", endpoints::model_base_url()),
             headers,
-            body.clone(),
+            payload,
         ))
     }
 

@@ -374,6 +374,42 @@ impl AccountStore {
             .is_ok()
     }
 
+    /// 记下「这个账号的新手任务（一次性福利）已全部结算」的快照
+    /// （账号记录上的 `onboardingSettled`；形状与读法见
+    /// [`StoredAccount::set_onboarding_settled`] 与
+    /// `crate::server::core::providers::onboarding_memory`）。
+    ///
+    /// 与 `mark_checkin` / `mark_onboarding_grant_batch` 同一口径：账号级事实、
+    /// 低频写、写盘失败不致命（返回 bool；上游那边奖励已经结清，调用方最多记
+    /// 一条日志）。**不**动 updatedAt（理由同上）。
+    ///
+    /// 形状校验只到「对象或 Null」为止：对象 = 写入（内容是各家自己的任务行
+    /// `{at, tasks, earned, total}`，这里不做跨家白名单 —— 唯一调用方就是那几家
+    /// 的 onboarding 模块，键名在那边随任务表定义）；**Null = 清除**（上游出了
+    /// 新一期活动之类的新事实时，记忆失效要能抹掉，读侧把 Null 当「没有」）。
+    /// 其余形态（数组 / 字符串 / 数字）整批拒绝，免得往账号记录里塞进读不出来的
+    /// 脏值。
+    ///
+    /// 与现存值相同时（含「本来就没什么可清」的 Null）**直接返回 true，不写库**：
+    /// 没领完的账号每次状态查询都会带着 `unclaimed > 0` 走到「清除」那一步，
+    /// 值没变也写一次盘是纯浪费 —— 这条链真正要写的只有结算那一次。
+    pub fn mark_onboarding_settled(&self, id: &str, snapshot: Value) -> bool {
+        if !(snapshot.is_object() || snapshot.is_null()) {
+            return false;
+        }
+        let _guard = self.guard();
+        let Some(mut record) = self.record_by_id(&_guard, id) else {
+            return false;
+        };
+        let existing = record.fields().get("onboardingSettled");
+        if existing == Some(&snapshot) || (snapshot.is_null() && existing.is_none()) {
+            return true;
+        }
+        record.set_onboarding_settled(snapshot);
+        self.with_conn(&_guard, |conn| sql::update_in_place(conn, &record))
+            .is_ok()
+    }
+
     // ─── 迁移 ────────────────────────────────────────────────
 
     /// 启动时的一次性数据迁移（**唯一入口**，bootstrap 只调它）。
@@ -441,11 +477,29 @@ impl AccountStore {
         // 排在 Cline 之后只是让「拆家类迁移」聚在一起。
         let workbuddy_moved = Self::migrate_workbuddy_intl_accounts(&mut state);
 
+        // ⑥ Qoder 国际版拆家（见 `migrate_qoder_intl_accounts`）：与 ⑤ 同款，
+        // 只改 `provider`、不改 id（Qoder 的 id 本来就带地区段）。
+        let qoder_moved = Self::migrate_qoder_intl_accounts(&mut state);
+
+        // ⑦ OfficeAce 账号名自愈（见 `officeace_accounts::heal_names_from_stored_tokens`）：
+        // 存量记录的 name 曾是十六进制的 account_id/principal_id，而显示名一直躺在**同一行**
+        // 的 refreshToken 里 —— 这里零网络地把它解出来补上，不等续期、不碰那枚一次性令牌。
+        let officeace_named =
+            super::officeace_accounts::heal_names_from_stored_tokens(&mut state.accounts);
+        if officeace_named > 0 {
+            logging::log(
+                "[Accounts]",
+                &format!("🏷️  已按登录态为 {officeace_named} 个 OfficeAce 账号补回上游显示名"),
+            );
+        }
+
         if provider_added == 0
             && assignments.is_empty()
             && !scope_migrated
             && cline_renamed == 0
             && workbuddy_moved == 0
+            && qoder_moved == 0
+            && officeace_named == 0
         {
             return json!({
                 "providerAdded": 0,
@@ -479,6 +533,15 @@ impl AccountStore {
                 "[Accounts]",
                 &format!(
                     "🔀 WorkBuddy 已拆为国内版 / 国际版两家，{workbuddy_moved} 个国际版账号已归位\
+                     （凭证、优先级、限流记录与账号 id 均未改动）"
+                ),
+            );
+        }
+        if qoder_moved > 0 {
+            logging::log(
+                "[Accounts]",
+                &format!(
+                    "🔀 Qoder 已拆为中国版 / 国际版两家，{qoder_moved} 个国际版账号已归位\
                      （凭证、优先级、限流记录与账号 id 均未改动）"
                 ),
             );
@@ -605,6 +668,46 @@ impl AccountStore {
                 continue;
             }
             record.set_provider(provider);
+            moved += 1;
+        }
+        moved
+    }
+
+    /// Qoder 国际版拆家：把 `provider == "qoder"` 且地区为国际版的记录归到
+    /// `qoder-intl`（2026-10，见 `providers::qoder::endpoints` 的模块头）。
+    ///
+    /// ── 判据：记录里的地区，而不是 id 前缀 ─────────────────────
+    /// 拆家前「这个账号属于哪个地区」由记录的 `mode`（兜底 `edition`）字段
+    /// 表达（`Region::from_payload` 的读取口径）。id 虽然也带地区段
+    /// （`qoder-global-…` / `qoder-cn-…`），但那是生成时的快照，记录的权威
+    /// 表达一直是凭证字段 —— 与 WorkBuddy 拆家「判据是 edition」同一取舍。
+    ///
+    /// ── 为什么不改 id（与 `migrate_cline_accounts` 的差别）────────
+    /// Qoder 的 id 生成时已含地区段，两地区的 id 空间天然不相交（同 WorkBuddy
+    /// 拆家的论证）；而 id 是 `requests.account_id` 与请求报表的引用键，改名
+    /// 会让历史记录对不上账号。
+    ///
+    /// ── 幂等 ────────────────────────────────────────────────────
+    /// 判据是数据本身（`provider == qoder && 地区 == 国际`）：迁完就没有
+    /// 这样的记录，再跑一遍返回 0、不写库。
+    fn migrate_qoder_intl_accounts(state: &mut AccountState) -> usize {
+        /// 拆家前的唯一 Qoder provider id（只出现在这里）
+        const LEGACY_QODER_ID: &str = "qoder";
+        let mut moved = 0usize;
+        for record in state.accounts.iter_mut() {
+            if record.provider() != LEGACY_QODER_ID {
+                continue;
+            }
+            let Some(region) =
+                crate::server::core::providers::qoder::endpoints::Region::from_payload(
+                    &record.to_value(),
+                )
+                .ok()
+                .filter(|region| *region == crate::server::core::providers::qoder::endpoints::Region::Global)
+            else {
+                continue;
+            };
+            record.set_provider(region.provider_id());
             moved += 1;
         }
         moved

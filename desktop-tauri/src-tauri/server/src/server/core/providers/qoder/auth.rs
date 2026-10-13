@@ -127,16 +127,19 @@ pub async fn exchange_pat(
     Ok(credentials)
 }
 
-pub async fn prepare_account(payload: &Value) -> Result<Credentials, GatewayError> {
+/// 手动添加的凭证准备。`region` 来自 **provider 身份**（调用方从 kind 反查）——
+/// 拆家后界面上是两张卡片，点哪张就落哪一站；payload 里的 `mode` 只是兼容
+/// 字段，不再当权威（两边不一致时以 provider 为准，见 `add_qoder_account`）。
+pub async fn prepare_account(payload: &Value, region: Region) -> Result<Credentials, GatewayError> {
     if payload.get("importDesktop").and_then(Value::as_bool) == Some(true) {
         return Err(GatewayError::with_status(400, "Qoder 请使用网页登录或个人访问令牌（PAT）添加"));
     }
-    let region = Region::from_payload(payload)?;
     let pat = credentials::secret(payload, &["pat", "personalAccessToken", "personal_token"])?;
     if !pat.is_empty() {
         return exchange_pat(&pat, region, None).await;
     }
     let mut credentials = Credentials::from_payload(payload)?;
+    credentials.region = region;
     if credentials.user_id.is_empty() {
         let profile = fetch_profile(&credentials.access_token, region, None).await?;
         apply_profile(&mut credentials, &profile)?;

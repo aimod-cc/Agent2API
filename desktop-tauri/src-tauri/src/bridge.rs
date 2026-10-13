@@ -237,6 +237,10 @@ const BRIDGE_JS: &str = r#"
     pushZcodeCaptchaTokens: tokens =>
       call('POST', '/api/zcode/captcha', { tokens: Array.isArray(tokens) ? tokens : [] }),
     onLoginState: callback => on('login:state', callback),
+    // KukuAI 短信登录的窗口进度（壳侧监视任务推送，见 `start_kuku_sms`）：
+    // {status: 'opening'|'filling'|'sending'|'sent'|'captcha'|'timeout'}。
+    // 面板提示行据此实时显示，用户不会「点了没反应」。
+    onKukuSmsStatus: callback => on('login:kuku-status', callback),
     refreshSession: async () => {
       await call('POST', '/api/session/refresh', {});
       return call('GET', '/api/session');
@@ -317,6 +321,13 @@ const BRIDGE_JS: &str = r#"
     refreshAccountToken: id => call('POST', '/api/accounts/refresh', id ? { id } : {}),
     removeAccount: id => call('DELETE', '/api/accounts/' + encodeURIComponent(id)),
     updateAccount: (id, patch) => call('PATCH', '/api/accounts/' + encodeURIComponent(id), patch),
+    // 整队重排（账号页分组模式）：账号拖完组 / 拖完行之后，把**新队列整条**交上来
+    // （从队首到队尾的 id 数组）。后端按顺序把全局 priority 编成 0、1、2…，所以
+    // 「组顺位 + 组内顺位」一次落库，不存在逐条 PATCH 的中间态。
+    reorderAccounts: queue =>
+      call('POST', '/api/accounts/reorder', {
+        queue: Array.isArray(queue) ? queue.map(item => String(item)) : [],
+      }),
     moveAccount: (id, direction) =>
       call('POST', '/api/accounts/' + encodeURIComponent(id) + '/move', {
         direction: direction === 'down' ? 'down' : 'up',
@@ -325,6 +336,12 @@ const BRIDGE_JS: &str = r#"
     clearRateLimits: (id, model) =>
       call('POST', '/api/accounts/' + encodeURIComponent(id) + '/rate-limits/clear',
         model ? { model } : {}),
+    // ── 账号路由（策略 / 粘性 / 退避 / 垫底 / 熔断 + 队列可见化）──
+    getRoutingConfig: () => call('GET', '/api/routing'),
+    setRoutingConfig: patch => call('PUT', '/api/routing', patch || {}),
+    // 候选队列可见化（账号页「路由」面板的数据源）：model 缺省 = 不限模型的全局队列
+    getRoutingQueue: model =>
+      call('GET', '/api/routing/queue' + (model ? '?model=' + encodeURIComponent(model) : '')),
     batchAccounts: payload =>
       call('POST', '/api/accounts/batch', {
         action: String((payload && payload.action) || ''),
@@ -384,6 +401,19 @@ const BRIDGE_JS: &str = r#"
     // 账号页「连接数」列 2 秒轮询它 —— 后端是进程内计数，这条请求很轻。
     getAccountConnections: () => call('GET', '/api/accounts/connections'),
     checkinAllAccounts: id => call('POST', '/api/accounts/checkin', id ? { id } : {}),
+    // ── Loomy 新手任务（查询 / 一键领取）──
+    // 签到完成后的配套动作：界面查询该账号的任务状态，有未领取的弹窗展示并领取
+    // （见 ui-islands 的 accounts-dialog-onboarding）。与 `server/src/web_shim.rs`
+    // 的同名方法成对维护（headless 面板同一份界面，缺一边会在那一形态下静默失效）。
+    //
+    // `refresh`：界面手点「查询任务」时传 true → 后端 `?refresh=1` 强制实查上游。
+    // 不带（进页面 / 签到后的自动补领）吃后端的**结算记忆** —— 一次性福利领完就
+    // 不再问上游（见 server 的 api::onboarding 模块说明）。
+    getOnboardingTasks: (id, refresh) =>
+      call('GET', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/onboarding'
+        + (refresh ? '?refresh=1' : '')),
+    claimOnboardingTasks: id =>
+      call('POST', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/onboarding/claim', {}),
 
     // ── 手机验证码登录（AutoClaw 两地区 / Loomy）──
     // 与网页登录那条链（开窗口、等回调）不同：上游没有授权页，就是「发码 →
@@ -415,6 +445,14 @@ const BRIDGE_JS: &str = r#"
       // Loomy 是**另一条链路**（自己的签名算法与站点，中间态叫 msgid 而不是
       // deviceId），端点在服务端就是分开挂的；其余（AutoClaw 两地区）沿用既有
       // 端点，`provider` 原样带上去由后端判地区。
+      //
+      // KukuAI 又是**第三条链**：百度通行证没有可直连的发码 API（发码要页面上
+      // 的风控签名，见 `login::kuku_sms_script`），所以发码由**壳开登录窗口替用户
+      // 点**——走壳命令 `login_kuku_sms_send`（返回 {state}），verify 时才真正
+      // 登录。走 invoke 而不是 call：这条命令操作的是壳侧 WebView 窗口。
+      if (provider === 'kuku') {
+        return invoke('login_kuku_sms_send', { phone });
+      }
       const path = provider === 'loomy'
         ? '/api/session/login/loomy/sms/send'
         : '/api/session/login/sms/send';
@@ -425,6 +463,12 @@ const BRIDGE_JS: &str = r#"
     },
     verifySmsLogin: payload => {
       const provider = (payload && payload.provider) ? String(payload.provider) : '';
+      // KukuAI：验证码由壳写入登录窗口（`login_kuku_sms_verify`），
+      // 完成后返回 {account, list}（与添加账号的响应同形状，见
+      // `login::submit_kuku_sms_code`）。
+      if (provider === 'kuku') {
+        return invoke('login_kuku_sms_verify', { code: String((payload && payload.code) || '') });
+      }
       const path = provider === 'loomy'
         ? '/api/session/login/loomy/sms/verify'
         : '/api/session/login/sms/verify';
@@ -444,6 +488,39 @@ const BRIDGE_JS: &str = r#"
     getAutoCheckin: () => call('GET', '/api/auto-checkin'),
     saveAutoCheckin: patch => call('POST', '/api/auto-checkin', patch),
     runAutoCheckinNow: () => call('POST', '/api/auto-checkin/run', {}),
+    // 定时签到的**条目**（签到中心「定时签到」页）：列表 / 保存一条 / 删除 / 立即执行
+    getCheckinSchedules: () => call('GET', '/api/checkin-schedules'),
+    saveCheckinSchedule: patch => call('POST', '/api/checkin-schedules', patch),
+    deleteCheckinSchedule: id =>
+      call('POST', '/api/checkin-schedules/' + encodeURIComponent(String(id || '')) + '/delete', {}),
+    runCheckinSchedule: id =>
+      call('POST', '/api/checkin-schedules/' + encodeURIComponent(String(id || '')) + '/run', {}),
+    // WorkBuddy 国际版日活保活的模型链（读 / 存；与 web_shim.rs 的同名方法成对）
+    getCheckinKeepalive: () => call('GET', '/api/checkin-keepalive'),
+    saveCheckinKeepalive: models => call('POST', '/api/checkin-keepalive', { models }),
+    // WorkBuddy 国际版日活任务的手动粒度入口（mode: full | claim | keepalive）
+    runCheckinActivity: (id, mode) => call('POST', '/api/checkin-activity', { id, mode }),
+    // 签到中心的聚合快照（每日签到分组 / 自动签到设置 / 签到历史 / 一次性项入口），
+    // 见 api::checkin_center 的模块头 —— 页面打开只打这一条
+    getCheckinCenter: () => call('GET', '/api/checkin-center'),
+    // 签到记录明细台账（签到记录页）：查询（limit/offset/outcome/provider/keyword/start/end）
+    // 与清空（全清必须显式 all=1，护栏见 api::checkin_records 的模块头）
+    getCheckinRecords: params => {
+      const query = new URLSearchParams();
+      for (const [key, value] of Object.entries(params || {})) {
+        if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
+      }
+      const text = query.toString();
+      return call('GET', '/api/checkin-records' + (text ? '?' + text : ''));
+    },
+    clearCheckinRecords: params => {
+      const query = new URLSearchParams();
+      for (const [key, value] of Object.entries(params || {})) {
+        if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
+      }
+      const text = query.toString();
+      return call('DELETE', '/api/checkin-records' + (text ? '?' + text : ''));
+    },
 
     // ── 间隔型定时任务（凭证自动维护 / 定时查询积分 / 模型刷新 / 两个前端自动刷新）──
     // 改一条任务用 PATCH（后端同时受理 POST 作别名：CORS 允许方法里没有 PATCH，
@@ -489,6 +566,14 @@ const BRIDGE_JS: &str = r#"
     // PUT 整体替换覆盖表（空值 = 不发该头，删行 = 回落默认值）。
     getClineHeaders: () => call('GET', '/api/cline/headers'),
     saveClineHeaders: overrides => call('PUT', '/api/cline/headers', { overrides }),
+
+    // ── 网关面跨域访问（/v1/*，默认关）──
+    // 与 web_shim.rs 的 getCors / saveCors 逐字同形：桌面壳走 Tauri IPC 到
+    // /api/cors，网页端走同源 fetch，两边接口名与签名必须一致（界面代码零改动
+    // 地跑在两边）。上一轮加这个开关时只补了 web_shim 那一侧，桌面壳这侧漏了，
+    // 于是设置页读不到值，卡在「未能读取网关跨域访问设置」。
+    getCors: () => call('GET', '/api/cors'),
+    saveCors: enabled => call('PUT', '/api/cors', { corsEnabled: enabled === true }),
 
     // ── 系统提示词与内容拦截降级 ──
     // 与 getRetry / saveRetry 同形：GET 读、PUT 写（允许部分字段），响应体是
@@ -583,6 +668,12 @@ const BRIDGE_JS: &str = r#"
     // 次数 / 单次秒数，存配置（/api/queue）。契约同 saveTimeouts。
     getQueue: () => call('GET', '/api/queue'),
     saveQueue: patch => call('PUT', '/api/queue', patch),
+
+    // ── 验证码令牌池（设置页「网关 → 验证码令牌池」）──
+    // ZCode 活动套餐通道令牌池的补货节奏（目标 / 轮询间隔 / 单轮上限），
+    // 存配置（/api/zcode/captcha-pool）。契约同 saveTimeouts。
+    getCaptchaPool: () => call('GET', '/api/zcode/captcha-pool'),
+    saveCaptchaPool: patch => call('PUT', '/api/zcode/captcha-pool', patch),
 
     // ── 调试模式（设置页「通用 → 调试模式」）──
     // 开关存配置（debugMode）：开启后转发层把上游原始报文（凭据类头已脱敏）
@@ -683,6 +774,11 @@ const BRIDGE_JS: &str = r#"
     saveAppSettings: patch => invoke('save_app_settings', { patch }),
     exportAccounts: () => invoke('export_accounts'),
     importAccounts: () => invoke('import_accounts'),
+    // ── 整库备份 / 恢复（设置页「整库备份 / 恢复」）──
+    // 文件由后端按壳选的路径直读直写（见 api/backup_api.rs），壳只负责
+    // 系统对话框；参数名 includeLogs 必须与 Rust 侧 export_database 的形参一致
+    exportDatabase: includeLogs => invoke('export_database', { includeLogs }),
+    importDatabase: () => invoke('import_database'),
   };
 })();
 "#;

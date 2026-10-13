@@ -39,6 +39,8 @@ async fn mock_upstream(
             headers: vec![("Content-Type".into(), "application/json".into())],
             payload: r#"{"stream":true}"#.into(),
             proxy: None,
+            // 测试替身按默认能力位（false = 直连），与生产里不带这一步的家同款
+            system_proxy_when_unset: false,
         },
         hits,
         task,

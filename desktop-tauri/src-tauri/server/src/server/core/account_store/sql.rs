@@ -51,6 +51,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 
+use crate::server::core::account_store::priority::{grouped_queue_order, QueueEntry};
 use crate::server::core::account_store::state::{AccountState, StoredAccount};
 
 /// 一行 `data` 列 → `StoredAccount`；JSON 坏了或不是对象/缺 id 时返回 None。
@@ -205,6 +206,114 @@ pub(crate) fn priority_holder(
         .map(|record| record.name()))
 }
 
+/* ─── 队列顺序（分组模式的整队读改写）────────── */
+
+/// 一行「队列排序投影」：分组排序需要的最小输入（见 `priority::QueueEntry`）。
+pub(crate) struct QueueRow {
+    pub id: String,
+    pub provider: String,
+    pub priority: i64,
+    pub added_at: i64,
+}
+
+/// 全部账号的排序投影（id / provider / priority / added_at 四列）。
+///
+/// 只取四列，不解析 `data`：整队排序是纯数值 + 字符串运算，没必要把每条记录的
+/// 完整 JSON（含 rateLimits 这类嵌套结构）都解析一遍 —— 与 `priorities_all` 同一取向。
+/// `added_at` 用投影列 + `COALESCE(…, 0)`：它与 JSON 里的 `addedAt` 是同一份值
+/// （写入时由 `record.added_at()` 派生），列缺值时只影响并列时的先后，不影响正确性。
+pub(crate) fn queue_rows(conn: &Connection) -> rusqlite::Result<Vec<QueueRow>> {
+    let mut stmt = conn
+        .prepare("SELECT id, provider, priority, COALESCE(added_at, 0) FROM accounts")?;
+    let mut rows = stmt.query([])?;
+    let mut values = Vec::new();
+    while let Some(row) = rows.next()? {
+        values.push(QueueRow {
+            id: row.get(0)?,
+            provider: row.get(1)?,
+            priority: row.get(2)?,
+            added_at: row.get(3)?,
+        });
+    }
+    Ok(values)
+}
+
+/// 按 `(id, 新优先级)` 改号：**投影列与 JSON 里的 priority 一起刷**。
+///
+/// 两条口径：
+///   · 只写真正变化的行（与 `save_state` 的差异写入同一取向）—— 一次整队里
+///     常常只有一半的号码真的变了；
+///   · **不动 `updatedAt`**：改号不是「账号数据变了」，界面上「更新于」回答的是
+///     凭证/备注最后一次被碰的时间（`move_account` 那种一次只换两行的操作为了
+///     日志留痕会动它，整队重排若也动，拖一次就会把十几条都标成「刚更新过」）。
+pub(crate) fn apply_priorities(
+    conn: &Connection,
+    updates: &[(String, i64)],
+) -> rusqlite::Result<usize> {
+    let mut changed = 0usize;
+    for (id, priority) in updates {
+        let data: Option<String> = conn
+            .query_row("SELECT data FROM accounts WHERE id = ?1", params![id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let Some(record) = data.as_deref().and_then(decode_data) else {
+            continue;
+        };
+        if record.priority() == *priority {
+            continue;
+        }
+        let mut record = record;
+        record.set_priority(*priority);
+        update_in_place(conn, &record)?;
+        changed += 1;
+    }
+    Ok(changed)
+}
+
+/// 新账号的号是否插进了别家的区段里（需要整理队列）。
+///
+/// 调用方给的号是「全局最大值 + 1」，所以判据只有一条：**除它以外队尾那一条是不是
+/// 同一家**。是同一家 → 它本来就在本组末尾，无需整理；不是 → 得整理。
+pub(crate) fn queue_needs_normalize(
+    conn: &Connection,
+    provider: &str,
+    id: &str,
+) -> rusqlite::Result<bool> {
+    let last_provider: Option<String> = conn
+        .query_row(
+            "SELECT provider FROM accounts WHERE id <> ?1 ORDER BY priority DESC, rowid DESC LIMIT 1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(matches!(last_provider.as_deref(), Some(last) if last != provider))
+}
+
+/// 把队列整理成「分组连续 + 连续编号 0、1、2…」（规则见 `priority::grouped_queue_order`）。
+///
+/// 用于两处：新增账号之后（[`put`] 里的那一跳），以及 `AccountStore::reorder_accounts`
+/// 之外的整队场景。读全量是语义要求（组序由各组队首决定），但**写**只碰真的变了号的行。
+pub(crate) fn normalize_grouped_queue(conn: &Connection) -> rusqlite::Result<usize> {
+    let rows = queue_rows(conn)?;
+    let entries: Vec<QueueEntry<'_>> = rows
+        .iter()
+        .map(|row| QueueEntry {
+            id: &row.id,
+            provider: &row.provider,
+            priority: row.priority,
+            added_at: row.added_at,
+        })
+        .collect();
+    let ordered = grouped_queue_order(&entries);
+    let updates: Vec<(String, i64)> = ordered
+        .into_iter()
+        .enumerate()
+        .map(|(index, id)| (id, index as i64))
+        .collect();
+    apply_priorities(conn, &updates)
+}
+
 /// 写入（upsert）一条记录，**并把它移到物理顺序的末尾**。
 ///
 /// 语义与旧实现的 `state.accounts.retain(≠id); push(record)` 逐字对应：
@@ -217,9 +326,29 @@ pub(crate) fn priority_holder(
 /// 但那条保证埋在 SQLite 文档的 REPLACE 算法里，读代码时看不出来；显式的
 /// `DELETE` + `INSERT` 把这条语义写在脸上，也省得日后有人改成 `INSERT OR IGNORE`
 /// 之类的变体却以为行为不变。
+///
+/// ── 新增的那一条要落在**本组的末尾**（分组模式）────────────────
+/// 调用方给新账号的号是「全局最大值 + 1」，那是「排在整条队列最后」。分组模式
+/// 下同一家的账号在队列里必须连续（见 `priority::grouped_queue_order`），于是：
+/// 新账号若不属于**当前排在最后的那一家**，它就被插进了别家的区段里 —— 界面上
+/// 它显示在本组末尾，真实转发却排在末尾那一组之后，两处对不上。这里补一次整理
+/// （[`normalize_grouped_queue`]）：重编号之后它正好落在本组末尾（它是本组最大
+/// 号），组序不变。
+///
+/// 只在**真的需要**时整理（判据见 [`queue_needs_normalize`]）：给末尾那一组加
+/// 账号、以及一次只写一家的导入，都命中不到这条，省掉整表重写。
+///
+/// 一个已知的口径变化：调用方若显式传了 `priority`（`POST /api/accounts` 的
+/// `payload.priority`，历史客户端才有），整理会把那个号**改写成本组末尾**的号 ——
+/// 分组模式下「插在别家区段中间」不是一个有意义的请求（界面上也没有这个入口），
+/// 落在本组末尾是唯一自洽的结果。
 pub(crate) fn put(conn: &Connection, record: &StoredAccount) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM accounts WHERE id = ?1", params![record.id()])?;
-    insert_row(conn, record)
+    let existed = delete(conn, record.id())?;
+    insert_row(conn, record)?;
+    if !existed && queue_needs_normalize(conn, &record.provider(), record.id())? {
+        normalize_grouped_queue(conn)?;
+    }
+    Ok(())
 }
 
 /// 原地更新一条记录（**物理位置不变**）。

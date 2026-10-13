@@ -71,6 +71,7 @@ import {
   type OauthController,
   type WebLoginController,
 } from './add-account-bridge'
+import { t } from '../i18n'
 
 /**
  * 弹窗里的分段比页面上大一号（旧 #add-modal .add-seg 的 28px 项高 / 12.5px 字号，
@@ -81,8 +82,8 @@ export const ADD_SEG_CLASS =
   'max-w-full flex-wrap [&_[data-slot=segmented-item]]:h-7 [&_[data-slot=segmented-item]]:px-3 [&_[data-slot=segmented-item]]:text-[12.5px]'
 
 /** 小浣熊手填段里那个「登录态文件在哪」的链接点了要显示的路径 */
-const RACCOON_AUTH_PATH =
-  '登录态文件路径：~/.box-agent/config/auth.json（Windows：C:\\Users\\<你的用户名>\\.box-agent\\config\\auth.json）'
+const RACCOON_AUTH_PATH = t(
+  '登录态文件路径：~/.box-agent/config/auth.json（Windows：C:\\Users\\<你的用户名>\\.box-agent\\config\\auth.json）')
 
 /** 手填按钮的忙态：全局一把锁（旧实现的 addBusy 就是模块级，弹窗内互斥） */
 let addBusy = false
@@ -119,11 +120,15 @@ function expandJsonField(field: FieldSpec, value: string, payload: Record<string
   try {
     parsed = JSON.parse(value)
   } catch (error) {
-    toast(`${field.label} 不是合法 JSON：${describeError(error)}`, 'err')
+    toast(t('{name} 不是合法 JSON：{reason}', { name: field.label, reason: describeError(error) }), 'err')
     return false
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    toast(`${field.label}要粘一个 JSON 对象（形如 {"codearts_provider_credential":{…}}）`, 'err')
+    // JSON 示例里含花括号，不能直接进键（会被 t() 的 {形参} 替换吃掉），作为形参值传入
+    toast(t('{name}要粘一个 JSON 对象（形如 {sample}）', {
+      name: field.label,
+      sample: '{"codearts_provider_credential":{…}}',
+    }), 'err')
     return false
   }
   Object.assign(payload, parsed as Record<string, unknown>)
@@ -152,7 +157,7 @@ function ManualSection({
     for (const field of config.fields) {
       const value = readField(fieldIdOf(config, field))
       if (!field.optional && !value) {
-        toast(`请填写 ${field.label}`, 'err')
+        toast(t('请填写 {label}', { label: field.label }), 'err')
         return
       }
       if (!value) continue
@@ -169,7 +174,7 @@ function ManualSection({
         setHint('')
         await afterAdd(addedLabelOf(data?.account), config.label)
       } catch (error) {
-        toast(`添加失败：${describeError(error)}`, 'err')
+        toast(t('添加失败：{reason}', { reason: describeError(error) }), 'err')
       }
     })
   }
@@ -190,7 +195,7 @@ function ManualSection({
       {config.fields.map(field => {
         const id = fieldIdOf(config, field)
         // 必填只在标签上标出（弹窗不是 <form>，原生 required 不生效），真正的拦截在 submit
-        const marker = field.optional ? '' : '（必填）'
+        const marker = field.optional ? '' : t('（必填）')
         return (
           <div key={id} className={`field-row${field.rows ? ' stack' : ''}`}>
             <label htmlFor={id}>
@@ -213,7 +218,7 @@ function ManualSection({
       })}
       <div className='field-row'>
         <Button id={`${prefix}-add-button`} onClick={() => { void submit() }} disabled={busy}>
-          {busy ? '添加中…' : addButtonTextOf(config)}
+          {busy ? t('添加中…') : addButtonTextOf(config)}
         </Button>
         {/* 引擎不碰这一格：忙态文案在按钮上，这一格只放链接给出的路径与提交失败以外的说明 */}
         <span className='detail' id={`${prefix}-add-hint`}>{hint}</span>
@@ -244,14 +249,14 @@ function DesktopSection({
         await afterAdd(data?.account?.name || '', config.label)
       } catch (error) {
         // 读不到客户端登录态时后端给 400 + 明确原因，原样透出即可
-        toast(`导入失败：${describeError(error)}`, 'err')
+        toast(t('导入失败：{reason}', { reason: describeError(error) }), 'err')
       }
     })
   }
 
   return (
     <DialogSection hidden={!visible}>
-      <h3>从本机导入桌面端登录态</h3>
+      <h3>{t('从本机导入桌面端登录态')}</h3>
       <p>{config.desktopNote}</p>
       <div className='field-row'>
         <Button
@@ -260,7 +265,7 @@ function DesktopSection({
           onClick={() => { void submit() }}
           disabled={busy}
         >
-          {busy ? '导入中…' : '从本机导入桌面端登录态'}
+          {busy ? t('导入中…') : t('从本机导入桌面端登录态')}
         </Button>
       </div>
     </DialogSection>
@@ -313,10 +318,14 @@ function WebLoginSection({
         modeRef.current || 'embedded',
         prefix,
       ),
-      onSuccess: async () => {
+      onSuccess: async result => {
         closeAddModals()
         await shared().wbApp?.refresh?.()
-        toast(`✅ ${config.label}账号已添加`)
+        // 任务载荷里的警告（如 KukuAI「账号未通过上游复核」）：账号已入库，
+        // 但要让用户立刻知道可能需要换一个百度账号，而不是等刷新模型才发现。
+        const warning = (result as { payload?: { warning?: string } } | null)?.payload?.warning
+        if (warning) toast(t('账号已添加，但请留意：{warning}', { warning }), 'err')
+        else toast(t('✅ {label}账号已添加', { label: config.label }))
       },
     }) ?? null
   }, [])
@@ -329,13 +338,13 @@ function WebLoginSection({
   if (!web) return null
   return (
     <DialogSection hidden={!visible}>
-      <h3>网页登录</h3>
+      <h3>{t('网页登录')}</h3>
       <Note html={web.noteHtml} />
       {web.modes?.length ? (
         <div className='flex flex-col gap-2.5 border-l-2 border-border pl-[11px]'>
-          <span className='text-[12.5px] text-subtle'>打开方式</span>
+          <span className='text-[12.5px] text-subtle'>{t('打开方式')}</span>
           <SegmentedControl
-            aria-label={`${config.label} 网页登录的打开方式`}
+            aria-label={t('{label} 网页登录的打开方式', { label: config.label })}
             options={web.modes}
             value={mode}
             onValueChange={onModeChange}
@@ -356,7 +365,7 @@ function WebLoginSection({
           hidden
           onClick={() => controllerRef.current?.cancel()}
         >
-          取消等待
+          {t('取消等待')}
         </Button>
         <span className='detail' id={`${prefix}-web-hint`}>
           {web.hint || web.modes?.[0]?.hint || ''}
@@ -400,31 +409,31 @@ function SmsSection({
   if (!sms) return null
   return (
     <DialogSection hidden={!visible}>
-      <h3>手机验证码登录</h3>
+      <h3>{t('手机验证码登录')}</h3>
       <Note
         html={sms.noteHtml}
-        text={'用 AutoClaw 账号绑定的手机号登录：点击「获取验证码」，收到短信后填入下方并登录。验证码由本机直接提交给官方接口，界面不显示 token。'}
+        text={t('用 AutoClaw 账号绑定的手机号登录：点击「获取验证码」，收到短信后填入下方并登录。验证码由本机直接提交给官方接口，界面不显示 token。')}
       />
       <div className='sms-form'>
         {/* 第 1 行：手机号与发码合成一格。按钮内嵌在输入框尾部（组件库的
             InputGroup，就是为「输入框带一个动作」准备的），不再自己占一行 */}
         <div className='sms-field'>
           <label className='lb' htmlFor={`${prefix}-sms-phone`}>
-            手机号<i className='req'>*</i>
+            {t('手机号')}<i className='req'>*</i>
           </label>
           <InputGroup>
             <InputGroupInput
               id={`${prefix}-sms-phone`}
               type='text'
               maxLength={11}
-              placeholder='11 位大陆手机号'
+              placeholder={t('11 位大陆手机号')}
               {...draftProps(`${prefix}-sms-phone`)}
             />
             <InputGroupAddon align='inline-end'>
               {/* 引擎在 create() 时就绑上这一颗的 click（文案与禁用态也归它管）。
                   ghost + 主色字：不描边框，也不在 30px 高的输入框里再嵌一个盒子 */}
               <InputGroupButton id={`${prefix}-sms-send`} className='text-primary-fg'>
-                获取验证码
+                {t('获取验证码')}
               </InputGroupButton>
             </InputGroupAddon>
           </InputGroup>
@@ -433,7 +442,7 @@ function SmsSection({
         {/* 第 2 行：验证码只占 118px（6 个数字），右边并上同样是短字段的备注名 */}
         <div className='sms-field'>
           <label className='lb' htmlFor={`${prefix}-sms-code`}>
-            验证码<i className='req'>*</i>
+            {t('验证码')}<i className='req'>*</i>
           </label>
           <div className='sms-pair'>
             {/* 验证码**不进草稿**：引擎在登录成功后会把它清掉（codeNode.value = ''），
@@ -443,21 +452,21 @@ function SmsSection({
               className='sms-code'
               type='text'
               maxLength={6}
-              placeholder='6 位数字'
+              placeholder={t('6 位数字')}
             />
-            <label className='lb-inline' htmlFor={`${prefix}-sms-name`}>备注名</label>
+            <label className='lb-inline' htmlFor={`${prefix}-sms-name`}>{t('备注名')}</label>
             <Input
               id={`${prefix}-sms-name`}
               className='sms-name'
               type='text'
-              placeholder='可选，留空则用脱敏手机号'
+              placeholder={t('可选，留空则用脱敏手机号')}
               {...draftProps(`${prefix}-sms-name`)}
             />
           </div>
         </div>
 
         <div className='sms-foot'>
-          <Button id={`${prefix}-sms-submit`}>登录并添加</Button>
+          <Button id={`${prefix}-sms-submit`}>{t('登录并添加')}</Button>
           {/* 失败时引擎会给它挂 .err（见 setHint） */}
           <span className='detail sms-hint' id={`${prefix}-sms-hint`} />
         </div>
@@ -511,13 +520,13 @@ function OauthSection({
   if (!oauth) return null
   return (
     <DialogSection hidden={!visible}>
-      <h3>{oauth.title || '网页登录'}</h3>
+      <h3>{oauth.title || t('网页登录')}</h3>
       <Note html={oauth.noteHtml} />
       {oauth.modes?.length ? (
         <div className='flex flex-col gap-2.5 border-l-2 border-border pl-[11px]'>
-          <span className='text-[12.5px] text-subtle'>打开方式</span>
+          <span className='text-[12.5px] text-subtle'>{t('打开方式')}</span>
           <SegmentedControl
-            aria-label={`${config.label} 网页登录的打开方式`}
+            aria-label={t('{label} 网页登录的打开方式', { label: config.label })}
             options={oauth.modes}
             value={mode}
             onValueChange={onModeChange}
@@ -528,11 +537,11 @@ function OauthSection({
         {/* 两个变体各一颗：上游是两个独立端点、两套账号体系，用下拉会让用户猜。
             点击处理**不在这里**：autoclaw-oauth.js 的 create() 会自己给这三颗绑
             click（旧实现同一分工），这里再绑一次会让 start() 被调两遍 */}
-        <Button id={`${prefix}-oauth-zai`}>使用 Zai 账号登录</Button>
-        <Button id={`${prefix}-oauth-google`} variant='outline'>使用 Google 账号登录</Button>
+        <Button id={`${prefix}-oauth-zai`}>{t('使用 Zai 账号登录')}</Button>
+        <Button id={`${prefix}-oauth-google`} variant='outline'>{t('使用 Google 账号登录')}</Button>
         {/* 取消按钮的显隐由 autoclaw-oauth.js 的 paintCancel 管（同样是 hidden 属性） */}
         <Button id={`${prefix}-oauth-cancel`} variant='outline' hidden>
-          取消
+          {t('取消')}
         </Button>
       </div>
       <div className='field-row'>
@@ -575,9 +584,9 @@ export function ProviderBlock({
     <div className='add-provider-block' hidden={!active}>
       {config.regionOptions?.length ? (
         <DialogSection>
-          <h3>地区</h3>
+          <h3>{t('地区')}</h3>
           <SegmentedControl
-            aria-label={`${config.label} 账号地区`}
+            aria-label={t('{label} 账号地区', { label: config.label })}
             className={ADD_SEG_CLASS}
             options={config.regionOptions}
             value={region}
@@ -587,9 +596,9 @@ export function ProviderBlock({
       ) : null}
 
       <DialogSection>
-        <h3>添加方式</h3>
+        <h3>{t('添加方式')}</h3>
         <SegmentedControl
-          aria-label={`${config.label} 账号的添加方式`}
+          aria-label={t('{label} 账号的添加方式', { label: config.label })}
           className={ADD_SEG_CLASS}
           options={methodOptions}
           value={effective}
@@ -664,14 +673,14 @@ export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElem
       buttonId: 'web-login-button',
       cancelId: 'web-login-cancel',
       hintId: 'web-login-hint',
-      busyText: '等待网页登录…',
+      busyText: t('等待网页登录…'),
       texts: () => {
         const external = modeRef.current === 'external'
         return {
-          button: external ? '在浏览器中打开登录页' : '打开网页登录',
+          button: external ? t('在浏览器中打开登录页') : t('打开网页登录'),
           hint: external
-            ? '系统浏览器打开（复用已登录账号）；完成后自动加入列表'
-            : '内嵌窗口打开；完成后自动加入列表，关窗即取消等待',
+            ? t('系统浏览器打开（复用已登录账号）；完成后自动加入列表')
+            : t('内嵌窗口打开；完成后自动加入列表，关窗即取消等待'),
         }
       },
       start: () => shared().workbuddyDesktop?.startLogin(
@@ -683,10 +692,10 @@ export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElem
         socialRef.current,
       ),
       onSuccess: async () => {
-        const editionLabel = editionRef.current === 'intl' ? '国际版' : '国内版'
+        const editionLabel = editionRef.current === 'intl' ? t('国际版') : t('国内版')
         closeAddModals()
         await shared().wbApp?.refresh?.()
-        toast(`✅ 登录成功，${editionLabel}账号已加入列表`)
+        toast(t('✅ 登录成功，{edition}账号已加入列表', { edition: editionLabel }))
       },
     }) ?? null
   }, [])
@@ -721,25 +730,24 @@ export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElem
   const embedded = loginMode === 'embedded'
   const socialUsable = intl && embedded
   const socialTitle = socialUsable
-    ? '国际版登录页默认只显示邮箱登录，勾选后恢复 Google / GitHub / X 入口'
+    ? t('国际版登录页默认只显示邮箱登录，勾选后恢复 Google / GitHub / X 入口')
     : !intl
-      ? '国内版登录页没有 Google / GitHub 入口（它用微信 / 手机号 / 邮箱登录）'
-      : '只有「内嵌窗口」能恢复第三方入口：系统浏览器里我们无法改动登录页'
+      ? t('国内版登录页没有 Google / GitHub 入口（它用微信 / 手机号 / 邮箱登录）')
+      : t('只有「内嵌窗口」能恢复第三方入口：系统浏览器里我们无法改动登录页')
 
   return (
     <div className='add-provider-block' hidden={!active}>
       <DialogSection>
-        <h3>账号版本</h3>
+        <h3>{t('账号版本')}</h3>
         <p>
-          两版账号可同时保存，各自一份模型清单（国内版与国际版是两家提供商，
-          可分别启用与映射）。
+          {t('两版账号可同时保存，各自一份模型清单（国内版与国际版是两家提供商，可分别启用与映射）。')}
         </p>
         <SegmentedControl
-          aria-label='账号版本'
+          aria-label={t('账号版本')}
           className={ADD_SEG_CLASS}
           options={[
-            { value: 'cn', label: '国内版（WorkBuddy）' },
-            { value: 'intl', label: '国际版（WorkBuddy AI）' },
+            { value: 'cn', label: t('国内版（WorkBuddy）') },
+            { value: 'intl', label: t('国际版（WorkBuddy AI）') },
           ]}
           value={edition}
           onValueChange={value => pickEdition(value as Edition)}
@@ -747,16 +755,16 @@ export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElem
       </DialogSection>
 
       <DialogSection>
-        <h3>网页登录</h3>
-        <p>完成登录后自动加入账号列表，昵称取自上游。</p>
+        <h3>{t('网页登录')}</h3>
+        <p>{t('完成登录后自动加入账号列表，昵称取自上游。')}</p>
         <div className='field-row'>
-          <span className='text-[12.5px] whitespace-nowrap text-subtle'>打开方式</span>
+          <span className='text-[12.5px] whitespace-nowrap text-subtle'>{t('打开方式')}</span>
           <SegmentedControl
-            aria-label='网页登录的打开方式'
+            aria-label={t('网页登录的打开方式')}
             className={ADD_SEG_CLASS}
             options={[
-              { value: 'embedded', label: '内嵌窗口' },
-              { value: 'external', label: '系统默认浏览器' },
+              { value: 'embedded', label: t('内嵌窗口') },
+              { value: 'external', label: t('系统默认浏览器') },
             ]}
             value={loginMode}
             onValueChange={pickLoginMode}
@@ -771,14 +779,14 @@ export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElem
                 loginPrefs.socialRestore = next
               }}
             />
-            <span className='text-[12.5px] text-subtle'>恢复 Google / GitHub 入口</span>
+            <span className='text-[12.5px] text-subtle'>{t('恢复 Google / GitHub 入口')}</span>
           </label>
         </div>
-        <p>系统浏览器可复用已有登录态（国际版推荐）；内嵌窗口更干净。</p>
+        <p>{t('系统浏览器可复用已有登录态（国际版推荐）；内嵌窗口更干净。')}</p>
         <div className='field-row'>
           {/* 按钮与提示的文本子节点必须是常量：引擎会直接改它们的 textContent */}
           <Button id='web-login-button' onClick={() => controllerRef.current?.start()}>
-            打开网页登录
+            {t('打开网页登录')}
           </Button>
           <Button
             id='web-login-cancel'
@@ -786,10 +794,10 @@ export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElem
             hidden
             onClick={() => controllerRef.current?.cancel()}
           >
-            取消等待
+            {t('取消等待')}
           </Button>
           <span className='detail' id='web-login-hint'>
-            内嵌窗口打开；完成后自动加入列表，关窗即取消等待
+            {t('内嵌窗口打开；完成后自动加入列表，关窗即取消等待')}
           </span>
         </div>
       </DialogSection>

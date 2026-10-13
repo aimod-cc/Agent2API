@@ -19,6 +19,8 @@
  * 收尾也依赖这一点 —— 删掉的 id 在 accept 之后自然从 selected 里消失。
  */
 
+import { t } from '../i18n'
+
 /* ─── 后端形态 ───────────────────────────────── */
 
 /** 一条池条目（`api::proxies::pool_payload` 的 item；写操作返回同形全量列表） */
@@ -163,9 +165,10 @@ export function isClashItem(item: ProxyPoolItem): boolean {
   return item.source === 'clash'
 }
 
-/** 只读条目的统一说明（与后端 `CLASH_READONLY_HINT` 同一口径） */
-export const CLASH_READONLY_HINT =
-  '来自 Clash Verge 同步（名称 / 端口 / 启用都跟随 Clash），请到 Clash Verge 中修改'
+/** 只读条目的统一说明（与后端 `CLASH_READONLY_HINT` 同一口径；岛在词典注入之后才求值） */
+export const CLASH_READONLY_HINT = t(
+  '来自 Clash Verge 同步（名称 / 端口 / 启用都跟随 Clash），请到 Clash Verge 中修改',
+)
 
 /* ─── store ─────────────────────────────────── */
 
@@ -267,7 +270,7 @@ export function accept(payload: ProxyPoolPayload | null | undefined): void {
 export async function loadPanel(silent = false): Promise<void> {
   const bridge = wb().workbuddyDesktop
   if (typeof bridge?.getProxyPool !== 'function') {
-    patch({ error: '当前环境不支持代理池（桥接方法缺失）' })
+    patch({ error: t('当前环境不支持代理池（桥接方法缺失）') })
     return
   }
   if (!silent) patch({ loading: true })
@@ -275,7 +278,7 @@ export async function loadPanel(silent = false): Promise<void> {
     accept(await bridge.getProxyPool())
   } catch (error) {
     patch({ error: errorMessage(error) })
-    if (!silent) toast(`代理列表加载失败：${errorMessage(error)}`, 'err')
+    if (!silent) toast(t('代理列表加载失败：{reason}', { reason: errorMessage(error) }), 'err')
   } finally {
     patch({ loading: false })
   }
@@ -285,7 +288,7 @@ export async function loadPanel(silent = false): Promise<void> {
 export async function syncClash(): Promise<void> {
   const bridge = wb().workbuddyDesktop
   if (typeof bridge?.syncClashToProxyPool !== 'function') {
-    toast('当前环境不支持同步（桥接方法缺失）', 'err')
+    toast(t('当前环境不支持同步（桥接方法缺失）'), 'err')
     return
   }
   if (state.syncing) return
@@ -295,14 +298,14 @@ export async function syncClash(): Promise<void> {
     accept(data)
     if (data?.syncError) {
       // 「没装 Clash」是最常见的正常状态，但用户刚点了同步按钮，必须给出原因
-      toast(`没能同步：${data.syncError}`, 'err')
+      toast(t('没能同步：{reason}', { reason: data.syncError }), 'err')
     } else if (data?.changes) {
-      toast(`✅ 已同步 Clash Verge 出口（${data.changes} 项变更）`)
+      toast(t('✅ 已同步 Clash Verge 出口（{n} 项变更）', { n: data.changes }))
     } else {
-      toast('已是最新，没有需要同步的变更')
+      toast(t('已是最新，没有需要同步的变更'))
     }
   } catch (error) {
-    toast(`同步失败：${errorMessage(error)}`, 'err')
+    toast(t('同步失败：{reason}', { reason: errorMessage(error) }), 'err')
   } finally {
     patch({ syncing: false })
   }
@@ -311,7 +314,7 @@ export async function syncClash(): Promise<void> {
 export async function testItem(item: ProxyPoolItem): Promise<void> {
   const bridge = wb().workbuddyDesktop
   if (typeof bridge?.testProxyPoolItem !== 'function') {
-    toast('当前环境不支持代理测试（桥接方法缺失）', 'err')
+    toast(t('当前环境不支持代理测试（桥接方法缺失）'), 'err')
     return
   }
   if (state.testing) return
@@ -321,13 +324,18 @@ export async function testItem(item: ProxyPoolItem): Promise<void> {
     if (data?.items) accept({ items: data.items })
     if (data?.success) {
       const suffix = durationText(data.durationMs)
-      toast(`✅ 「${itemName(item)}」出口可用${data.ip ? `　出口 IP ${data.ip}` : ''}${suffix ? `　${suffix}` : ''}`)
+      // 出口 IP / 耗时是附带读数：IP 是后端数据、耗时只有数字，各自做形参不做键
+      toast(t('✅ 「{name}」出口可用{ip}{took}', {
+        name: itemName(item),
+        ip: data.ip ? t('　出口 IP {ip}', { ip: data.ip }) : '',
+        took: suffix ? `　${suffix}` : '',
+      }))
     } else {
-      toast(`❌ 「${itemName(item)}」${data?.error || '连接失败'}`, 'err')
+      toast(t('❌ 「{name}」{error}', { name: itemName(item), error: data?.error || t('连接失败') }), 'err')
     }
-    if (data?.saveError) toast(`测试结果没能记下：${data.saveError}`, 'err')
+    if (data?.saveError) toast(t('测试结果没能记下：{reason}', { reason: data.saveError }), 'err')
   } catch (error) {
-    toast(`测试失败：${errorMessage(error)}`, 'err')
+    toast(t('测试失败：{reason}', { reason: errorMessage(error) }), 'err')
   } finally {
     patch({ testing: null })
   }
@@ -351,9 +359,10 @@ export async function toggleItem(item: ProxyPoolItem, enabled: boolean): Promise
   patch({ pending })
   try {
     accept(await bridge.updateProxyPoolItem({ ...payloadOfItem(item), enabled }))
-    toast(enabled ? `已启用「${itemName(item)}」` : `已禁用「${itemName(item)}」`)
+    const name = itemName(item)
+    toast(enabled ? t('已启用「{name}」', { name }) : t('已禁用「{name}」', { name }))
   } catch (error) {
-    toast(`保存失败：${errorMessage(error)}`, 'err')
+    toast(t('保存失败：{reason}', { reason: errorMessage(error) }), 'err')
   } finally {
     const next = new Set(state.pending)
     next.delete(item.id)
@@ -370,14 +379,18 @@ export async function removeItem(item: ProxyPoolItem): Promise<void> {
   }
   const used = item.usedBy || []
   const usedHtml = used.length
-    ? `<p style="margin-top:6px">有 <strong>${used.length}</strong> 个账号正在使用它（${used
-        .map(entry => escapeHtml(String(entry.name || entry.id || '')))
-        .join('、')}）—— 删除后这些账号会回退直连。</p>`
+    ? `<p style="margin-top:6px">${t('有 <strong>{n}</strong> 个账号正在使用它（{names}）—— 删除后这些账号会回退直连。', {
+        n: used.length,
+        names: used.map(entry => escapeHtml(String(entry.name || entry.id || ''))).join(t('、')),
+      })}</p>`
     : ''
   const ok = await wb().wbConfirm?.ask?.({
-    title: '删除代理',
-    html: `确定删除「<strong>${escapeHtml(itemName(item))}</strong>」？${usedHtml}`,
-    okText: '删除',
+    title: t('删除代理'),
+    html: t('确定删除「<strong>{name}</strong>」？{used}', {
+      name: escapeHtml(itemName(item)),
+      used: usedHtml,
+    }),
+    okText: t('删除'),
     okClass: 'danger',
   })
   if (!ok) return
@@ -387,9 +400,9 @@ export async function removeItem(item: ProxyPoolItem): Promise<void> {
   try {
     const data = await bridge.removeProxyPoolItem(item.id)
     accept(data)
-    toast(`已删除「${itemName(item)}」`)
+    toast(t('已删除「{name}」', { name: itemName(item) }))
   } catch (error) {
-    toast(`删除失败：${errorMessage(error)}`, 'err')
+    toast(t('删除失败：{reason}', { reason: errorMessage(error) }), 'err')
   } finally {
     const next = new Set(state.pending)
     next.delete(item.id)
@@ -412,7 +425,7 @@ export async function removeItem(item: ProxyPoolItem): Promise<void> {
 export async function batchTest(): Promise<void> {
   const bridge = wb().workbuddyDesktop
   if (typeof bridge?.testProxyPoolItem !== 'function') {
-    toast('当前环境不支持代理测试（桥接方法缺失）', 'err')
+    toast(t('当前环境不支持代理测试（桥接方法缺失）'), 'err')
     return
   }
   if (state.batchBusy || state.testing) return
@@ -435,9 +448,11 @@ export async function batchTest(): Promise<void> {
     }
   }
   patch({ testing: null, batchBusy: false, batchProgress: null })
-  const summary = `批量测试完成：${ok} 个可用${failed ? `、${failed} 个失败` : ''}（共 ${targets.length} 个）`
+  const summary = failed
+    ? t('批量测试完成：{ok} 个可用、{failed} 个失败（共 {total} 个）', { ok, failed, total: targets.length })
+    : t('批量测试完成：{ok} 个可用（共 {total} 个）', { ok, total: targets.length })
   toast(failed ? summary : `✅ ${summary}`, failed ? 'err' : 'ok')
-  if (saveError) toast(`部分测试结果没能记下：${saveError}`, 'err')
+  if (saveError) toast(t('部分测试结果没能记下：{reason}', { reason: saveError }), 'err')
 }
 
 /**
@@ -458,22 +473,26 @@ export async function batchRemove(): Promise<void> {
   const deletable = picked.filter(item => !isClashItem(item))
   const skipped = picked.length - deletable.length
   if (!deletable.length) {
-    toast(skipped ? `选中的 ${skipped} 条都来自 Clash Verge 同步，不能删除（请到 Clash Verge 里删）` : '没有可删除的条目', 'err')
+    toast(skipped
+      ? t('选中的 {n} 条都来自 Clash Verge 同步，不能删除（请到 Clash Verge 里删）', { n: skipped })
+      : t('没有可删除的条目'), 'err')
     return
   }
-  const names = deletable.slice(0, 8).map(item => escapeHtml(itemName(item))).join('、')
-  const more = deletable.length > 8 ? ` 等 ${deletable.length} 条` : ''
+  const names = deletable.slice(0, 8).map(item => escapeHtml(itemName(item))).join(t('、'))
+  const namesText = deletable.length > 8
+    ? t('{names} 等 {n} 条', { names, n: deletable.length })
+    : names
   const usedCount = deletable.filter(item => (item.usedBy || []).length).length
   const usedHtml = usedCount
-    ? `<p style="margin-top:6px">其中 <strong>${usedCount}</strong> 条正被账号使用 —— 删除后那些账号会回退直连。</p>`
+    ? `<p style="margin-top:6px">${t('其中 <strong>{n}</strong> 条正被账号使用 —— 删除后那些账号会回退直连。', { n: usedCount })}</p>`
     : ''
   const skipHtml = skipped
-    ? `<p style="margin-top:6px">另有 ${skipped} 条来自 Clash Verge 同步，将跳过（请到 Clash Verge 里删）。</p>`
+    ? `<p style="margin-top:6px">${t('另有 {n} 条来自 Clash Verge 同步，将跳过（请到 Clash Verge 里删）。', { n: skipped })}</p>`
     : ''
   const ok = await wb().wbConfirm?.ask?.({
-    title: '批量删除代理',
-    html: `确定删除选中的 <strong>${deletable.length}</strong> 个代理？<p style="margin-top:6px">${names}${more}</p>${usedHtml}${skipHtml}`,
-    okText: '删除',
+    title: t('批量删除代理'),
+    html: `${t('确定删除选中的 <strong>{n}</strong> 个代理？', { n: deletable.length })}<p style="margin-top:6px">${namesText}</p>${usedHtml}${skipHtml}`,
+    okText: t('删除'),
     okClass: 'danger',
   })
   if (!ok) return
@@ -493,10 +512,10 @@ export async function batchRemove(): Promise<void> {
     }
   }
   patch({ batchBusy: false, batchProgress: null })
-  const parts = [`已删除 ${done} 个代理`]
-  if (skipped) parts.push(`跳过 ${skipped} 个（Clash 同步）`)
-  if (failed) parts.push(`失败 ${failed} 个（${firstError}）`)
-  toast(failed ? parts.join('，') : `✅ ${parts.join('，')}`, failed ? 'err' : 'ok')
+  const parts = [t('已删除 {n} 个代理', { n: done })]
+  if (skipped) parts.push(t('跳过 {n} 个（Clash 同步）', { n: skipped }))
+  if (failed) parts.push(t('失败 {n} 个（{reason}）', { n: failed, reason: firstError }))
+  toast(failed ? parts.join(t('，')) : `✅ ${parts.join(t('，'))}`, failed ? 'err' : 'ok')
 }
 
 /** 新建 / 编辑提交（表单已在弹窗里校验过形状） */

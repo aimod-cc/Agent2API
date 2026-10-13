@@ -17,6 +17,11 @@
     overview: '<path d="M12 3a9 9 0 0 0-9 9 8.94 8.94 0 0 0 2.2 5.9c.3.34.73.53 1.18.53h11.24c.45 0 .88-.2 1.18-.53A8.94 8.94 0 0 0 21 12a9 9 0 0 0-9-9Zm0 2a7 7 0 0 1 7 7 6.95 6.95 0 0 1-1.6 4.5H6.6A6.95 6.95 0 0 1 5 12a7 7 0 0 1 7-7Zm0 1.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3ZM11 12v4h2v-4h-2Z"/>',
     // 账号：人群
     accounts: '<path d="M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm0 2c-3.6 0-6.5 2-6.5 4.5V20h13v-2.5C15.5 15 12.6 13 9 13Zm7.5-2a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm0 2c-.9 0-1.7.12-2.4.35A6.9 6.9 0 0 1 18 17.5V20h3.5v-2.5c0-2.5-2.6-4.5-5-4.5Z"/>',
+    // 签到中心：日历 + 对勾。与 proxies 同款用描边（填充块在 17px 下会糊成一团，
+    // 见上面 proxies 那条的说明），粗细同一套约定（1.8 + 圆头圆角）。
+    checkin: '<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
+      + '<rect x="3.5" y="4.5" width="17" height="16" rx="2.5"/><path d="M3.5 9.5h17M8 2.5v4m8-4v4"/>'
+      + '<path d="m9.2 14.7 2 2 3.6-4.1"/></g>',
     // 网关：双向箭头
     gateway: '<path d="M7.4 6.6 4 10l3.4 3.4 1.4-1.4-.6-.6H16V15h2V9.6H8.2l.6-.6-1.4-1.4Zm9.2 6.8L15.2 12l-1.4 1.4.6.6H8v2h6.4l-.6.6 1.4 1.4L19.6 14l-3-3.2Z"/>',
     // 网关 Key：钥匙
@@ -59,6 +64,11 @@
     // 网关：双向箭头（进出的流量）
     traffic: '<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
       + '<path d="M8 3 4 7l4 4M4 7h16"/><path d="m16 21 4-4-4-4M20 17H4"/></g>',
+    // 路由：一条线分出两条支路（请求分流到不同账号）
+    route: '<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
+      + '<path d="M4 12h5"/><circle cx="3.5" cy="12" r="1.5"/>'
+      + '<path d="M9 12c3 0 3-6 6-6h4"/><path d="m17 3 3 3-3 3"/>'
+      + '<path d="M9 12c3 0 3 6 6 6h4"/><path d="m17 15 3 3-3 3"/></g>',
     // 重试：环形箭头
     refresh: '<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
       + '<path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></g>',
@@ -109,6 +119,19 @@
       + '<path d="M12 5v14"/><path d="m6 13 6 6 6-6"/></g>',
     arrowUp: '<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
       + '<path d="M12 19V5"/><path d="m6 11 6-6 6 6"/></g>',
+
+    /**
+     * 拖动把手（账号页分组模式：分组的组顺位、组内的行顺序都靠它）。
+     * 六个圆点两列排布，是「这一处可以拖」的通用意象。光标态交给 CSS
+     * （默认 grab、拖动中 grabbing），图标本身不带状态。
+     */
+    gripVertical: '<g fill="currentColor">'
+      + '<circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/>'
+      + '<circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/>'
+      + '<circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></g>',
+    /** 折叠箭头（分组带的展开 / 收起）：向下 = 已展开；收起态由 CSS 旋转 -90° */
+    chevronDown: '<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
+      + '<path d="m6 9 6 6 6-6"/></g>',
 
     /**
      * 账号名隐私开关的两枚眼睛（账号表「账号」表头的显隐按钮）。

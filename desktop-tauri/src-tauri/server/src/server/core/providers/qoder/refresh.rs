@@ -22,11 +22,16 @@ use crate::server::logging;
 use super::auth;
 use super::credentials::{self, Credentials};
 use super::endpoints;
+use super::endpoints::Region;
 
 static FLIGHTS: OnceLock<Table<Credentials>> = OnceLock::new();
 
-pub fn snapshot(store: &AccountStore, account_id: &str) -> Result<(Value, Credentials), GatewayError> {
-    let record = store.qoder_account_record(account_id)
+pub fn snapshot(
+    store: &AccountStore,
+    region: Region,
+    account_id: &str,
+) -> Result<(Value, Credentials), GatewayError> {
+    let record = store.qoder_account_record(region, account_id)
         .ok_or_else(|| GatewayError::with_status(404, "Qoder 账号不存在，请先添加账号"))?;
     let mut credentials = Credentials::from_payload(&record)?;
     credentials.complete_identity()?;
@@ -35,10 +40,11 @@ pub fn snapshot(store: &AccountStore, account_id: &str) -> Result<(Value, Creden
 
 pub async fn ensure_fresh(
     store: &AccountStore,
+    region: Region,
     account_id: &str,
     force: bool,
 ) -> Result<Credentials, GatewayError> {
-    let (record, credentials) = snapshot(store, account_id)?;
+    let (record, credentials) = snapshot(store, region, account_id)?;
     if !force && !credentials.expiring() {
         return Ok(credentials);
     }
@@ -81,7 +87,7 @@ async fn refresh_and_save(
         CredentialWrite::Written => Ok(fresh),
         CredentialWrite::Stale => {
             let id = record.get("id").and_then(Value::as_str).unwrap_or("");
-            snapshot(store, id).map(|(_, credentials)| credentials)
+            snapshot(store, credentials.region, id).map(|(_, credentials)| credentials)
         }
     }
 }

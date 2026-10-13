@@ -62,7 +62,8 @@ pub mod models;
 pub mod oauth;
 mod piping;
 pub mod protocol;
-mod refresh;
+pub mod refresh;
+pub mod risk;
 pub mod stream;
 
 use axum::http::HeaderMap;
@@ -78,10 +79,21 @@ use crate::server::errors::GatewayError;
 use crate::server::logging;
 
 use self::chat::Translator;
+use self::endpoints::Region;
 use self::stream::SseEvent;
 
-pub struct QoderAdapter;
-pub static QODER_ADAPTER: QoderAdapter = QoderAdapter;
+/// Qoder 适配器：**按地区参数化**（与 ZCode / Accio / AutoClaw 同款）。
+///
+/// 拆家后两个地区是两家 provider（`qoder` 中国版 / `qoder-intl` 国际版），
+/// 两个静态实例由 `adapter_for` 按 kind 给出；地区 → 身份的互查在
+/// `endpoints::Region`。适配器内部的链路（凭证、转发、签到）仍以凭证里的
+/// 地区为准 —— 拆家迁移保证了记录的 provider 与地区一致，这里的 `region`
+/// 用于「队首可用账号」的选取范围与模型清单的归属。
+pub struct QoderAdapter {
+    region: Region,
+}
+pub static QODER_ADAPTER: QoderAdapter = QoderAdapter { region: Region::Cn };
+pub static QODER_INTL_ADAPTER: QoderAdapter = QoderAdapter { region: Region::Global };
 
 /// 映射上绑的思考等级注入到请求体的哪个键。
 ///
@@ -134,7 +146,7 @@ fn record_limited(
 
 impl ProviderAdapter for QoderAdapter {
     fn kind(&self) -> ProviderKind {
-        ProviderKind::Qoder
+        self.region.kind()
     }
 
     /// Qoder **有**推理转发能力（本波次接入）。
@@ -152,7 +164,9 @@ impl ProviderAdapter for QoderAdapter {
     }
 
     fn list_models(&self) -> Vec<Value> {
-        models::list()
+        // 拆家后每家只列**本地区**的清单（不再并集）：另一地区是另一家
+        // provider 的事（见 `models::list_for` 与模块头）
+        models::list_for(self.region)
     }
 
     /// 防御性报错：Qoder 的请求体要先编码再签名，通用层的序列化路径产不出
@@ -209,7 +223,7 @@ impl ProviderAdapter for QoderAdapter {
         account_id: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, GatewayError>> + Send + 'a>> {
         Box::pin(async move {
-            refresh::ensure_fresh(store, account_id, false)
+            refresh::ensure_fresh(store, self.region, account_id, false)
                 .await
                 .map(|credentials| credentials.access_token)
         })
@@ -226,7 +240,7 @@ impl ProviderAdapter for QoderAdapter {
         account_id: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, GatewayError>> + Send + 'a>> {
         Box::pin(async move {
-            refresh::ensure_fresh(store, account_id, true)
+            refresh::ensure_fresh(store, self.region, account_id, true)
                 .await
                 .map(|credentials| credentials.access_token)
         })
@@ -238,7 +252,7 @@ impl ProviderAdapter for QoderAdapter {
 
     fn credentials_expiring(&self, store: &AccountStore, account_id: &str) -> bool {
         store
-            .qoder_account_record(account_id)
+            .qoder_account_record(self.region, account_id)
             .and_then(|record| credentials::Credentials::from_payload(&record).ok())
             .is_some_and(|credentials| credentials.expiring())
     }
@@ -252,7 +266,7 @@ impl ProviderAdapter for QoderAdapter {
         store: &'a AccountStore,
         account_id: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, GatewayError>> + Send + 'a>> {
-        Box::pin(balance::query(store, account_id))
+        Box::pin(balance::query(store, self.region, account_id))
     }
 
     /// Qoder 有远程目录（`GET {gateway}algo/api/v2/model/list`），支持刷新。
@@ -260,7 +274,7 @@ impl ProviderAdapter for QoderAdapter {
         true
     }
 
-    /// 刷新模型目录：用**库里第一个可用 Qoder 账号**的凭证（目录接口要签名，
+    /// 刷新模型目录：用**本地区队首可用账号**的凭证（目录接口要签名，
     /// 没有账号就拿不到 —— 与源实现「必须登录」的前置条件一致）。
     ///
     /// `force` 一路透传给 `models::refresh`：`false` 走 1 小时 TTL 早退（自动
@@ -279,13 +293,16 @@ impl ProviderAdapter for QoderAdapter {
         force: bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ModelRefreshOutcome> + Send + 'a>> {
         Box::pin(async move {
-            // 空 id = 队首可用账号（自动路径的默认）；非空 = 用户在弹窗里点名的
+            // 空 id = 本地区队首可用账号（自动路径的默认）；非空 = 用户在弹窗里点名的
             // 那条 —— 点名取不到时按「没账号」处理（本家没有可回落的环境变量
             // 登录态），文案由上面那行「未添加账号」的回答覆盖不到，改用明确的失败。
-            let Some(record) = store.qoder_account_record(account_id) else {
+            let Some(record) = store.qoder_account_record(self.region, account_id) else {
                 // 自动路径每次拉目录/启动都会走到这里，所以只打 verbose：
                 // 对不用 Qoder 的用户，这不是需要他关注的事
-                logging::verbose("[Models]", "Qoder 模型目录刷新跳过：尚未添加 Qoder 账号");
+                logging::verbose(
+                    "[Models]",
+                    &format!("Qoder {}模型目录刷新跳过：尚未添加账号", self.region.label()),
+                );
                 if account_id.is_empty() {
                     return ModelRefreshOutcome::unchanged();
                 }
@@ -428,7 +445,7 @@ impl ProviderAdapter for QoderAdapter {
                     "没有可用的 Qoder 账号：请在账号页添加并启用账号",
                 ));
             }
-            let mut context = chat::account_context(store, &account_id, false).await?;
+            let mut context = chat::account_context(store, self.region, &account_id, false).await?;
             // 代理：编排层给的优先（它与账号记录同源，但已经解析好），
             // 没有就用快照里的（例如目录刷新那条路径）
             let effective_proxy = proxy.or(context.proxy);
@@ -488,7 +505,7 @@ impl ProviderAdapter for QoderAdapter {
                         // 就把原错误交回 —— 那说明问题不在凭证的新旧上
                         chat::AttemptError::Auth(error) => {
                             context =
-                                refresh_after_auth(store, &account_id, &mut auth_retries, error, telemetry)
+                                refresh_after_auth(store, self.region, &account_id, &mut auth_retries, error, telemetry)
                                     .await?;
                             continue;
                         }
@@ -570,7 +587,7 @@ impl ProviderAdapter for QoderAdapter {
                         }
                         Err(chat::AttemptError::Auth(error)) => {
                             context =
-                                refresh_after_auth(store, &account_id, &mut auth_retries, error, telemetry)
+                                refresh_after_auth(store, self.region, &account_id, &mut auth_retries, error, telemetry)
                                     .await?;
                             continue;
                         }
@@ -598,7 +615,7 @@ impl ProviderAdapter for QoderAdapter {
                         continue;
                     }
                     Err(chat::AttemptError::Auth(error)) => {
-                        context = refresh_after_auth(store, &account_id, &mut auth_retries, error, telemetry)
+                        context = refresh_after_auth(store, self.region, &account_id, &mut auth_retries, error, telemetry)
                             .await?;
                         continue;
                     }
@@ -625,6 +642,7 @@ impl ProviderAdapter for QoderAdapter {
 /// 它比「上游返回 401」更能告诉用户下一步该做什么。
 async fn refresh_after_auth(
     store: &AccountStore,
+    region: Region,
     account_id: &str,
     attempts: &mut usize,
     error: GatewayError,
@@ -638,7 +656,7 @@ async fn refresh_after_auth(
     // 续期本身可能在途（刷新接口一次往返），先记一条内部重试 —— 用户看到
     // 「凭证过期 → 续期 → 重发」这条链，才解释得通这次请求为什么慢了一拍
     telemetry.note_attempt_retry("上游鉴权失败，强制续期凭证后重试", Some(401), 0);
-    chat::account_context(store, account_id, true).await
+    chat::account_context(store, region, account_id, true).await
 }
 
 // ── 排队等待的次数与单次时长来自设置页「通用 → 排队等待」──────────

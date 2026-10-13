@@ -115,9 +115,13 @@ async fn plan_name(credentials: &Credentials, proxy: Option<&ResolvedProxy>) -> 
     }
 }
 
-pub async fn query(store: &AccountStore, account_id: &str) -> Result<Value, GatewayError> {
-    let mut credentials = refresh::ensure_fresh(store, account_id, false).await?;
-    let (record, _) = refresh::snapshot(store, account_id)?;
+pub async fn query(
+    store: &AccountStore,
+    region: super::endpoints::Region,
+    account_id: &str,
+) -> Result<Value, GatewayError> {
+    let mut credentials = refresh::ensure_fresh(store, region, account_id, false).await?;
+    let (record, _) = refresh::snapshot(store, region, account_id)?;
     let proxy = auth::account_proxy(&record)?;
     let mut response = auth::request(
         "GET",
@@ -127,7 +131,7 @@ pub async fn query(store: &AccountStore, account_id: &str) -> Result<Value, Gate
         proxy.as_ref(),
     ).await?;
     if response.status == 401 && credentials.can_refresh() {
-        credentials = refresh::ensure_fresh(store, account_id, true).await?;
+        credentials = refresh::ensure_fresh(store, region, account_id, true).await?;
         response = auth::request(
             "GET",
             &format!("{}{}", credentials.region.open_api(), endpoints::USAGE_PATH),

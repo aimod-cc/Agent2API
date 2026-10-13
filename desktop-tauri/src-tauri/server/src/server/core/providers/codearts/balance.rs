@@ -18,6 +18,16 @@
 //! 区域 API 看 HTTP 状态；**福利网关把失败塞在 200 的响应体里**，只有
 //! envelope 的 `error_code == "0000"` 才算成功。按 HTTP 状态判会让一个
 //! `error_code:"9001"` 的错误看起来像成功然后显示空数据。
+//!
+//! ── benefit 档案从哪来（`claim_benefit` 存在的理由）──────────
+//! InferHub 的聊天计费、福利池余额都挂在 opengw 的 **benefit 记录**上，
+//! 而这条记录**不是开账号就有的** —— 官方客户端每次初始化都会
+//! `POST {benefit_gateway}/api/v1/benefit/claim`（幂等，`initBenefit`），
+//! 服务端随之给账号建档；没走过这一步的账号聊天直接被 InferHub 以
+//! `InferHub.4004.200: benefit not found` 拒答（2026-10-09 实测：同一批凭据，
+//! 官方客户端登录用一下就恢复，我们这边一直 4004）。本模块把同一条
+//! claim 纳入余额链路：查到「无档案」（`4004`）时自动补一次再重查，
+//! 新账号因此在一次余额查询内自愈，不用再靠官方客户端「渡」一次。
 
 use std::collections::HashMap;
 
@@ -35,6 +45,8 @@ use super::{oauth, redact, signer};
 pub const STATISTICS_PATH: &str = "/snap-manager/v1/statistics/plugin";
 /// 福利池余额（另一个网关）。
 pub const BENEFIT_BALANCE_PATH: &str = "/api/v1/user/tokens/balance";
+/// benefit 档案的领取/注册（同一网关；官方客户端 `initBenefit` 每次启动都调）。
+pub const BENEFIT_CLAIM_PATH: &str = "/api/v1/benefit/claim";
 
 /// 福利网关的「该账号没有福利数据」业务码。
 ///
@@ -88,7 +100,12 @@ impl Meter {
         if let (Some(remaining), Some(total)) = (self.credit_remaining, self.credit_total) {
             return Some(format!("剩 {} / {} 积分", compact(remaining), compact(total)));
         }
-        if self.allowance_tokens > 0 {
+        // 总量 >1 才当真配额：上游给过 `package_token_amount=1`（2026-10-09 实测，
+        // 试用版账号周期内没下发过对话 token 包时的占位形状）—— 1 个 token 的
+        // 「包」没有任何信息量，还会把「没额度」显示成「剩 0 / 1」的荒谬读数；
+        // 退回「已用 N token」（官方同款取向：它的 `calculateTokenPercent` 对
+        // `amount <= 0` 返回空，不拿小占位值当真）。
+        if self.allowance_tokens > 1 {
             let percent = self.used_percent.map(|value| format!("（{}%）", compact(value))).unwrap_or_default();
             return Some(format!("已用 {} / {} token{}", self.used_tokens, self.allowance_tokens, percent));
         }
@@ -166,16 +183,18 @@ fn trim(base: &str) -> String {
     base.trim_end_matches('/').to_string()
 }
 
-/// 一次签名 GET。
+/// 一次签名请求（GET / POST；本模块三处读数的头集合**各不相同**，别顺手统一）。
 ///
-/// **头集合与目录那套不同**，别顺手复用：参考实现在统计接口上只带
-/// `Accept` / `X-Language` / `plugin-name` / `plugin-version` 四个，
-/// 没有 `Content-Type`、没有 `Agent-Type`、没有 `client_version`。
-/// 多带一项会不会被拒没有实测过，但签名覆盖的是头集合，多一项少一项
-/// 签出来的串就不同 —— 与参考实现逐字一致才有「上游会接受」的证据。
-async fn signed_get(
+/// ── 头集合是契约的一部分 ───────────────────────────────────
+/// 订阅统计只带 `Accept` / `X-Language` / `plugin-name` / `plugin-version` 四个
+/// （没有 `Content-Type`、没有 `Agent-Type`）；福利余额与 claim 走
+/// [`benefit_headers`]（官方 BenefitService 的集合）。签名覆盖的是头集合，
+/// 多一项少一项签出来的串就不同 —— 与参考实现逐字一致才有「上游会接受」的证据。
+async fn signed_request(
+    method: &str,
     url: &str,
     headers: &[(String, String)],
+    payload: &[u8],
     credential: &Credential,
     host_signed: bool,
     domainless: bool,
@@ -184,9 +203,16 @@ async fn signed_get(
     if domainless {
         signing.domain_id = String::new();
     }
-    let signed = signer::sign("GET", url, headers, b"", &signing, host_signed)
+    let signed = signer::sign(method, url, headers, payload, &signing, host_signed)
         .map_err(|reason| GatewayError::with_status(500, format!("CodeArts 余额请求签名失败：{reason}")))?;
-    let mut request = egress::client_for(None).get(url).timeout(std::time::Duration::from_secs(20));
+    let is_post = method.eq_ignore_ascii_case("post");
+    let verb = reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET);
+    let mut request = egress::client_for(None)
+        .request(verb, url)
+        .timeout(std::time::Duration::from_secs(20));
+    if is_post {
+        request = request.body(payload.to_vec());
+    }
     for (name, value) in signed {
         request = request.header(name.as_str(), value.as_str());
     }
@@ -200,6 +226,7 @@ async fn signed_get(
     Ok((status, response.text().await.unwrap_or_default()))
 }
 
+/// 订阅统计的四件套（参考实现逐字一致：多一项签名串就不同）。
 fn statistics_headers(language: &str, plugin_version: &str) -> Vec<(String, String)> {
     vec![
         ("Accept".to_string(), "application/json".to_string()),
@@ -207,6 +234,22 @@ fn statistics_headers(language: &str, plugin_version: &str) -> Vec<(String, Stri
         ("plugin-name".to_string(), chat::DEFAULT_PLUGIN_NAME.to_string()),
         ("plugin-version".to_string(), plugin_version.to_string()),
     ]
+}
+
+/// 福利 claim 的头集合 —— **照官方 BenefitService 的 `claimBenefit` 逐字抄**：
+/// `X-Security-Token`（临时凭证的 STS）、`Agent-Type: PromptCenter`、
+/// `Content-Type`、`X-Language`。只有 claim 用它（官方只在这条上给过实证）；
+/// 余额那条维持实测通过的统计四件套，两套头各按各的证据，别顺手统一。
+fn benefit_headers(credential: &Credential) -> Vec<(String, String)> {
+    let mut headers = vec![
+        ("Agent-Type".to_string(), "PromptCenter".to_string()),
+        ("Content-Type".to_string(), "application/json".to_string()),
+        ("X-Language".to_string(), chat::DEFAULT_LANGUAGE.to_string()),
+    ];
+    if !credential.security_token.is_empty() {
+        headers.insert(0, ("X-Security-Token".to_string(), credential.security_token.clone()));
+    }
+    headers
 }
 
 /// 读订阅统计（付费套餐计量表）。
@@ -217,7 +260,16 @@ pub async fn fetch_statistics(
     plugin_version: &str,
 ) -> Result<Statistics, GatewayError> {
     let url = format!("{}{STATISTICS_PATH}", trim(base));
-    let (status, body) = signed_get(&url, &statistics_headers(language, plugin_version), credential, false, false).await?;
+    let (status, body) = signed_request(
+        "GET",
+        &url,
+        &statistics_headers(language, plugin_version),
+        b"",
+        credential,
+        false,
+        false,
+    )
+    .await?;
     if status != 200 {
         return Err(GatewayError::with_status(
             i32::from(status),
@@ -317,12 +369,56 @@ fn quota_meter_label(name: &str) -> Option<String> {
 /// 与「读取失败」（`Err`）分开 —— 界面才能把「没有福利」和「没读到」分得开。
 pub async fn fetch_benefit_balance(gateway: &str, credential: &Credential) -> Result<Option<BenefitBalance>, GatewayError> {
     let url = format!("{}{BENEFIT_BALANCE_PATH}", trim(gateway));
+    // 头集合维持**实测通过**的那一套（统计四件套；2026-09-27 现网 trial/Free 账号
+    // 都拿回过 envelope）—— claim 才用官方 BenefitService 的头集合，两个端点各按
+    // 各自的证据走，别顺手统一（统一 = 让其中一条失去实证）。
     let headers = statistics_headers(chat::DEFAULT_LANGUAGE, chat::DEFAULT_PLUGIN_VERSION);
-    let (status, body) = signed_get(&url, &headers, credential, true, true).await?;
+    let (status, body) = signed_request("GET", &url, &headers, b"", credential, true, true).await?;
     if status != 200 {
         return Err(GatewayError::with_status(i32::from(status), format!("CodeArts 福利余额返回 HTTP {status}")));
     }
     parse_benefit_balance(&body, credential)
+}
+
+/// benefit 档案的领取/注册（`POST {gateway}/api/v1/benefit/claim`，空 body）。
+///
+/// 与官方 BenefitService 的 `claimBenefit` 逐字同源（头集合见 [`benefit_headers`]，
+/// 签名口径与 [`fetch_benefit_balance`] 相同：带 Host、不带 `X-Domain-Id` —— 官方
+/// 签这条时本就不放 DomainId）。**幂等**：官方每次启动、每次选中免费模型都调它，
+/// 重复调用的返回只有「已存在」与「新建档」两种措辞，语义上不会多拿一次权益。
+///
+/// 成功判据与余额同一家：看 envelope 的 `error_code == "0000"`（HTTP 一律 200）。
+pub async fn claim_benefit(gateway: &str, credential: &Credential) -> Result<String, GatewayError> {
+    let url = format!("{}{BENEFIT_CLAIM_PATH}", trim(gateway));
+    let headers = benefit_headers(credential);
+    let (status, body) = signed_request("POST", &url, &headers, b"{}", credential, true, true).await?;
+    if status != 200 {
+        return Err(GatewayError::with_status(i32::from(status), format!("CodeArts benefit 领取返回 HTTP {status}")));
+    }
+    parse_benefit_claim(&body, credential)
+}
+
+/// claim 的解析：`0000` 成功（`result` 可能是空对象或一句说明，转成人话返回），
+/// 其余码如实报错。独立于 `parse_benefit_claim` 的**网络**半边以便单测。
+pub fn parse_benefit_claim(body: &str, credential: &Credential) -> Result<String, GatewayError> {
+    let parsed: Value = serde_json::from_str(body)
+        .map_err(|error| GatewayError::with_status(502, format!("CodeArts benefit 领取响应不是合法 JSON：{error}")))?;
+    let code = parsed.get("error_code").and_then(Value::as_str).unwrap_or("");
+    if code != "0000" {
+        let message = parsed.get("error_msg").and_then(Value::as_str).unwrap_or("");
+        return Err(GatewayError::with_status(
+            502,
+            format!("CodeArts benefit 领取返回 {code}：{}", excerpt(message, credential)),
+        ));
+    }
+    let result = parsed.get("result").cloned().unwrap_or(Value::Null);
+    let text = result.as_str().map(str::to_string).unwrap_or_else(|| {
+        // result 常见是 `{"claimed":true,...}` 一类；取不到字段就照实给一句中性的
+        result.get("msg").or_else(|| result.get("message"))
+            .and_then(Value::as_str).map(str::to_string)
+            .unwrap_or_else(|| "官方已确认 benefit 档案".to_string())
+    });
+    Ok(text)
 }
 
 /// 福利网关的解析：**成功看 envelope，不看 HTTP 状态**。
@@ -526,6 +622,22 @@ mod tests {
         assert_eq!("brand_new_thing", row.label, "认不出就照上游原名，别编一个中文标签");
     }
 
+    /// `package_token_amount=1` 是**占位**不是配额（2026-10-09 实测于试用版账号
+    /// 周期内没下发对话 token 包的形状）：1 个 token 的「包」画成「已用 0 / 1」
+    /// 是荒谬读数，还会被误读成「马上用完」。≤1 的总量退回「已用 N / 百分比」。
+    #[test]
+    fn a_placeholder_token_amount_of_one_is_not_a_real_quota() {
+        let body = r#"{"metrics":[{"name":"usageTokenChatMessages","value":0,"usage_token_num":0,"package_token_amount":1,"show":true}]}"#;
+        let row = &parse_statistics(body).unwrap().meters[0];
+        assert_eq!(Some("已用 0%".to_string()), row.view(), "占位包不该拼出「0 / 1 token」");
+        let real = r#"{"metrics":[{"name":"usageTokenChatMessages","value":42.5,"usage_token_num":85000,"package_token_amount":200000,"show":true}]}"#;
+        assert_eq!(
+            Some("已用 85000 / 200000 token（42.5%）".to_string()),
+            parse_statistics(real).unwrap().meters[0].view(),
+            "真总量（>1）照旧拼「已用 x / y token」"
+        );
+    }
+
     /// 上游**真实**给回的指标名（2026-09-27 从现网统计接口抓的，一个 trial 账号）。
     /// 这张表只能钉住，不能"以后再说"：名字对不上时界面每行都显示英文原名，
     /// 而没有人会报错 —— 典型的静默降级。
@@ -577,6 +689,23 @@ mod tests {
         let error = parse_benefit_balance(failed, &credential()).expect_err("200 + 非 0000 是失败");
         assert!(error.message.contains("9001"), "错误里要带上游的码：{}", error.message);
         assert!(parse_benefit_balance(r#"{"error_code":"0000"}"#, &credential()).is_err(), "缺 result 不能当成功");
+    }
+
+    /// claim 的 envelope 判据与余额同一家（`0000` 才是成功，HTTP 一律 200）。
+    /// `result` 的形状上游给过空对象与字符串两种，取不到字段时给中性确认句 ——
+    /// 「已建档」这个事实本身就是返回值，别让解析对形状挑剔。
+    #[test]
+    fn benefit_claim_successes_all_read_as_confirmed() {
+        let credential = credential();
+        let confirmed = parse_benefit_claim(r#"{"error_code":"0000","error_msg":"success","result":{}}"#, &credential)
+            .expect("0000 + 空 result 也是成功");
+        assert!(confirmed.contains("benefit"), "取不到字段要有中性确认句：{confirmed}");
+        let with_msg = parse_benefit_claim(r#"{"error_code":"0000","result":"already claimed"}"#, &credential)
+            .expect("字符串 result 原样转述");
+        assert_eq!("already claimed", with_msg);
+        let failed = parse_benefit_claim(r#"{"error_code":"9001","error_msg":"auth failed"}"#, &credential)
+            .expect_err("非 0000 如实报错");
+        assert!(failed.message.contains("9001") && failed.message.contains("auth failed"), "{}", failed.message);
     }
 
     /// 「该账号没有福利数据」是**正常状态**，不是错误：上游回

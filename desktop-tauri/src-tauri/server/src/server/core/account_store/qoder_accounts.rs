@@ -1,31 +1,38 @@
-//! Qoder 账号以地区 + userId 识别；凭证与其它提供商共享存储键名。
+//! Qoder 账号以 provider（地区身份）+ userId 识别；凭证与其它提供商共享存储键名。
+//!
+//! ── 拆家（2026-10）──────────────────────────────────────────
+//! 两个地区是**两家 provider**（`qoder` 中国版 / `qoder-intl` 国际版），地区由
+//! provider id 推导（`Region::from_provider_id`），不再从账号的 `mode` 字段猜。
+//! 记录里仍写 `mode`（凭证落盘的既有字段，公开形态的 `edition` 也由它派生），
+//! 但**归属判定只认 provider id** —— 与 AutoClaw / Accio / ZCode 同一口径。
 
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::server::core::providers::qoder::credentials::Credentials;
 use crate::server::core::providers::qoder::endpoints::Region;
-use crate::server::core::providers::{kind_id, ProviderKind};
 use crate::server::logging;
 
 use super::priority::next_free_priority;
 use super::sql;
 use super::state::{mark_name_custom, StoredAccount};
 use super::store::{AccountStore, AccountStoreError};
-use super::store_util::{max_concurrent_public, token_tail_of, truncate_chars};
+use super::store_util::{token_tail_of, truncate_chars};
 use super::CredentialWrite;
 
-const PROVIDER: &str = kind_id(ProviderKind::Qoder);
-
 impl AccountStore {
-    pub fn qoder_account_record(&self, account_id: &str) -> Option<Value> {
+    /// 某一地区的账号记录：非空 id 按 id 直查（核对归属），空 id 取该地区
+    /// **队首可用**账号（启用 + 有令牌，按全局优先级序）—— 与
+    /// `autoclaw_account_record` 同一款形状（拆家后「队首」必须限定在本地区）。
+    pub fn qoder_account_record(&self, region: Region, account_id: &str) -> Option<Value> {
         let guard = self.guard();
+        let provider = region.provider_id();
         if !account_id.is_empty() {
             // 按 id 直查一行后确认归属（同 id 只会有一条，provider 判定是保险）
             let record = self.record_by_id(&guard, account_id)?;
-            return (record.provider() == PROVIDER).then(|| record.to_value());
+            return (record.provider() == provider).then(|| record.to_value());
         }
-        self.records_for_provider(&guard, PROVIDER)
+        self.records_for_provider(&guard, provider)
             .into_iter()
             .filter(|record| record.enabled() && record.has_token())
             .min_by_key(|record| record.order_key())
@@ -34,19 +41,24 @@ impl AccountStore {
 
     pub fn add_qoder_account(
         &self,
+        region: Region,
         credentials: &Credentials,
         name: Option<&str>,
         source: &str,
     ) -> Result<Value, AccountStoreError> {
         let mut credentials = credentials.clone();
+        // 地区由 **provider 身份**决定（调用方从 kind 反查），凭证里带的
+        // `mode` 是 payload 的残留提示 —— 两边不一致时以 provider 为准，
+        // 否则「把中国版 PAT 粘到国际版卡片」会落一个两头都不认的记录。
+        credentials.region = region;
         credentials.complete_identity()
             .map_err(|error| AccountStoreError::new(error.message, error.status_code))?;
         let guard = self.guard();
-        // 身份匹配要「地区 + userId」两段信息，而地区存在记录 JSON 里（不是投影列），
-        // 所以这里读**本家那一组**（而不是全量）逐条比 —— Qoder 账号通常只有
-        // 一两条，按 provider 收窄已经把别家的记录挡在外面了。
+        // 身份匹配要「provider（=地区）+ userId」两段信息。provider 收窄已经
+        // 把另一地区挡在外面，这里再核对一次记录里的 `mode` 只是保险 ——
+        // 拆家迁移保证了两边一致，不一致的旧数据在启动时就已归位。
         let existing = self
-            .records_for_provider(&guard, PROVIDER)
+            .records_for_provider(&guard, region.provider_id())
             .into_iter()
             .find(|record| {
                 record.user_id() == credentials.user_id
@@ -94,7 +106,7 @@ impl AccountStore {
             }
         };
         fields.insert("id".to_string(), Value::String(id.clone()));
-        fields.insert("provider".to_string(), Value::String(PROVIDER.to_string()));
+        fields.insert("provider".to_string(), Value::String(region.provider_id().to_string()));
         fields.insert("name".to_string(), Value::String(truncate_chars(&record_name, 100)));
         mark_name_custom(&mut fields, name.is_some_and(|value| !value.trim().is_empty()), existing.as_ref());
         fields.insert("tokenTail".to_string(), Value::String(token_tail_of(&credentials.access_token)));
@@ -127,7 +139,7 @@ impl AccountStore {
         let guard = self.guard();
         let Some(mut record) = self
             .record_by_id(&guard, id)
-            .filter(|record| record.provider() == PROVIDER)
+            .filter(|record| Region::from_provider_id(&record.provider()).is_some())
         else {
             return Ok(CredentialWrite::Stale);
         };
@@ -158,7 +170,11 @@ impl AccountStore {
     }
 
     pub fn to_qoder_public_account(&self, record: &StoredAccount) -> Value {
-        let region = Region::from_payload(&record.to_value()).ok();
+        // 地区先看 provider 身份（拆家后的权威来源），payload 里的 `mode` 只是
+        // 旧数据的兼容读取 —— 记录缺 `mode` 时 `from_payload` 会默认 Global，
+        // 那个默认对中国版记录是错的，不能当首选。
+        let region = Region::from_provider_id(&record.provider())
+            .or_else(|| Region::from_payload(&record.to_value()).ok());
         let available = record.has_token() && region.is_some();
         let can_refresh = Credentials::from_payload(&record.to_value())
             .map(|credentials| credentials.can_refresh()).unwrap_or(false);
@@ -177,17 +193,12 @@ impl AccountStore {
         public.insert("rateLimits".to_string(), record.get("rateLimits").cloned().unwrap_or_else(|| json!({})));
         public.insert("desktop".to_string(), Value::Bool(false));
         public.insert("available".to_string(), Value::Bool(available));
-        // 单账号并发上限（所有家通用，兜底共用 `max_concurrent_public`）：
-        // 0 = 不限，缺键同样输出 0
-        public.insert(
-            "maxConcurrent".to_string(),
-            Value::from(max_concurrent_public(record.get("maxConcurrent"))),
-        );
-        // `chatSupported` **刻意不在这里写**：它是跨家的统一事实，由
-        // `store.rs::public_account` 在分派点按适配器的 `supports_chat()` 注入。
-        // 本函数早先硬编码过 `false`（Qoder 只有账号管理能力那会儿），
-        // 而那个值会被分派点的注入覆盖 —— 留着它只会在下一次读这段代码时
-        // 误导「这家不能转发」，且一旦注入被挪走就会静默失真。
+        // `chatSupported` / `maxConcurrent` **刻意不在这里写**：它们是跨家的统一
+        // 事实，由 `store_view::public_account` 在分派点注入（前者按适配器的
+        // `supports_chat()`，后者按 `store_util::max_concurrent_public_for`）。
+        // 本函数早先硬编码过 `chatSupported: false`（Qoder 只有账号管理能力
+        // 那会儿），而那个值会被分派点的注入覆盖 —— 留着它只会在下一次读这段
+        // 代码时误导「这家不能转发」，且一旦注入被挪走就会静默失真。
         Value::Object(public)
     }
 }

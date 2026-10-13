@@ -33,6 +33,7 @@
 import * as React from 'react'
 import {
   CATEGORIES,
+  CAPTCHA_POOL_FIELDS,
   NO_RETRY_CODES_KEY,
   PROMPT_MODES,
   QUEUE_FIELDS,
@@ -41,9 +42,12 @@ import {
   RETRY_CODE_MIN,
   RETRY_FIELDS,
   RETRY_MAX_CODES,
+  ROUTE_STICKY_OPTIONS,
+  ROUTE_STRATEGIES,
   SETTINGS_CAT_KEY,
   TIMEOUT_FIELDS,
   errorMessage,
+  formatBytes,
   normalizeApp,
   normalizeNumbers,
   parseInteger,
@@ -55,6 +59,7 @@ import {
   type NumberField,
   type PromptPatch,
 } from './settings-model'
+import { t } from '../i18n'
 
 /* ─── 快照类型 ─────────────────────────────── */
 
@@ -73,6 +78,8 @@ export type BusyScope =
   | 'codes'
   | 'timeouts'
   | 'queue'
+  | 'captchaPool'
+  | 'routing'
   | 'debug'
   | 'sanitize'
   | 'clineHeaders'
@@ -81,6 +88,8 @@ export type BusyScope =
   | 'captcha'
   | 'export'
   | 'import'
+  | 'dbExport'
+  | 'dbImport'
   | null
 
 /**
@@ -99,6 +108,8 @@ export type AppState = {
   lanAccess: boolean
   /** 局域网访问开启时是否同时托管网页管理面板 */
   lanPanel: boolean
+  /** 轻量模式：关窗销毁界面进程（释放 WebView2 内存），托盘按需重建 */
+  lightweightMode: boolean
   /** 本机在局域网里的 IP（查不到为 null，地址展示退化为占位符） */
   lanIp: string | null
   /** 网关端口（0 = 还没查到），拼局域网地址用 */
@@ -109,6 +120,12 @@ export type AppState = {
 
 /** 数值面板：values 为 null 时（loading / unavailable）各输入框保持禁用 */
 export type NumericState = { status: LoadStatus; values: Record<string, number> | null }
+
+/**
+ * 账号路由（策略 + 会话粘性）：两档都是受控枚举，读不到时档位回落后端默认
+ * （order / auto，由视图侧按合法值表兜底）。
+ */
+export type RoutingState = { status: LoadStatus; strategy: string; sticky: string }
 
 export type DebugState = {
   status: LoadStatus
@@ -219,6 +236,9 @@ export type SettingsSnapshot = {
   retryCodes: number[] | null
   timeouts: NumericState
   queue: NumericState
+  captchaPool: NumericState
+  /** 账号路由：策略 + 会话粘性（「路由」分类） */
+  routing: RoutingState
   debug: DebugState
   sanitize: SanitizeState
   clineHeaders: ClineHeadersState
@@ -229,6 +249,12 @@ export type SettingsSnapshot = {
   ioFailure: IoFailure
   /** 保留期改小的确认框正文（非空即开着）；确认 / 取消都收口到 resolveRetentionConfirm */
   retentionConfirm: { head: string } | null
+  /**
+   * 整库备份 / 恢复（「数据」分类）：`dbIncludeLogs` 是导出复选框的当前值；
+   * `dbBackupConfirm` 非空 = 恢复确认弹窗开着（记录的是确认时要执行的参数集）。
+   */
+  dbIncludeLogs: boolean
+  dbBackupConfirm: { includeLogs: boolean } | null
   /** 局域网访问的确认框（非空即开着）；确认 / 取消都收口到 resolveLanConfirm */
   lanConfirm: LanConfirm
   /** 局域网开启流程的注册步（非空 = 弹窗切到注册表单） */
@@ -263,6 +289,7 @@ const INITIAL: SettingsSnapshot = {
     autostart: false,
     lanAccess: false,
     lanPanel: false,
+    lightweightMode: false,
     lanIp: null,
     port: 0,
     adminRegistered: null,
@@ -273,6 +300,8 @@ const INITIAL: SettingsSnapshot = {
   retryCodes: null,
   timeouts: { status: 'loading', values: null },
   queue: { status: 'loading', values: null },
+  captchaPool: { status: 'loading', values: null },
+  routing: { status: 'loading', strategy: 'order', sticky: 'auto' },
   debug: { status: 'loading', on: false, count: null, limit: null },
   sanitize: { status: 'loading', on: false },
   clineHeaders: { status: 'loading', defaults: {}, overrides: {}, effective: {} },
@@ -306,6 +335,9 @@ const INITIAL: SettingsSnapshot = {
   captcha: { available: true, enabled: false },
   ioFailure: null,
   retentionConfirm: null,
+  // 整库备份：默认包含日志与调试报文（完整备份）；恢复确认弹窗默认关闭
+  dbIncludeLogs: true,
+  dbBackupConfirm: null,
   lanConfirm: null,
   lanRegister: null,
   panelLogin: false,
@@ -424,7 +456,7 @@ export function renderUnits(): void {
 export function applyUnits(on: boolean): void {
   shared().wbUnits?.setChinese?.(on)
   renderUnits()
-  toast(on ? '✅ 已改用中文单位（亿 / 万）' : '✅ 已改用英文单位（M / k）')
+  toast(on ? t('✅ 已改用本地量级词（万 / 亿式）') : t('✅ 已改用 k / M 缩写'))
 }
 
 /* ─── 启动与托盘 ───────────────────────────── */
@@ -449,6 +481,7 @@ export function renderSettings(data?: unknown): void {
     autostart: record.autostart === true,
     lanAccess: record.lanAccess === true,
     lanPanel: record.lanPanel === true,
+    lightweightMode: record.lightweightMode === true,
   })
 }
 
@@ -485,11 +518,11 @@ async function loadLanExtras(): Promise<void> {
 }
 
 /**
- * 拨动启动 / 托盘开关。patch 是**全量覆盖**（契约要求），另一项取快照里的当前值
- * —— 旧实现读的是 DOM 里那个 checkbox 的 checked，等价。
+ * 拨动启动 / 托盘开关。patch 是**全量覆盖**（契约要求），其余项取快照里的
+ * 当前值 —— 旧实现读的是 DOM 里那个 checkbox 的 checked，等价。
  * 忙碌中早退时什么都不写：受控开关的 checked 来自快照，界面自动「还原这一下拨动」。
  */
-export async function saveToggle(kind: 'tray' | 'autostart', next: boolean): Promise<void> {
+export async function saveToggle(kind: 'tray' | 'autostart' | 'lightweight', next: boolean): Promise<void> {
   if (busyScope) { repaint(); return }
   const previous = snapshot.app
   const patch: AppSettings = {
@@ -499,21 +532,26 @@ export async function saveToggle(kind: 'tray' | 'autostart', next: boolean): Pro
     // 全量覆盖的 patch 里原样带上磁盘现值，避免把它悄悄抹掉
     lanAccess: previous.lanAccess,
     lanPanel: previous.lanPanel,
+    lightweightMode: kind === 'lightweight' ? next : previous.lightweightMode,
   }
   beginBusy('app')
   publishApp(patch)
-  const label = kind === 'autostart' ? '开机自动启动' : '关闭窗口时最小化到托盘'
+  const label = kind === 'autostart'
+    ? t('开机自动启动')
+    : kind === 'lightweight'
+      ? t('轻量模式')
+      : t('关闭窗口时最小化到托盘')
   try {
     const api = shared().workbuddyDesktop
-    if (!api) throw new Error('主进程桥不可用')
+    if (!api) throw new Error(t('主进程桥不可用'))
     const saved = await api.saveAppSettings(patch)
     // 以主进程返回的设置为准渲染，避免界面与真实状态不一致（旁路读数保留当前值）
     publishApp({ status: 'ready', ...normalizeApp(saved, patch) })
-    toast(`✅ 已更新「${label}」`)
+    toast(t('✅ 已更新「{label}」', { label }))
   } catch (error) {
     // 回滚到拨动前的状态（旧实现：已知状态按状态回滚，未知状态只把刚切的这项切回去）
     publishApp(previous)
-    toast(`保存失败：${errorMessage(error)}`, 'err')
+    toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
   } finally {
     endBusy()
   }
@@ -555,14 +593,14 @@ export function resolveLanConfirm(accepted: boolean): void {
  */
 async function proceedEnable(): Promise<void> {
   const api = shared().workbuddyDesktop
-  if (!api?.panelAdminStatus) { toast('当前环境不支持局域网访问设置', 'err'); return }
+  if (!api?.panelAdminStatus) { toast(t('当前环境不支持局域网访问设置'), 'err'); return }
   beginBusy('lan')
   let registered: boolean
   try {
     registered = (await api.panelAdminStatus())?.registered === true
   } catch (error) {
     endBusy()
-    toast(`查询管理员状态失败：${errorMessage(error)}`, 'err')
+    toast(t('查询管理员状态失败：{message}', { message: errorMessage(error) }), 'err')
     return
   }
   endBusy()
@@ -585,11 +623,11 @@ export async function submitLanRegister(username: string, password: string): Pro
   if (!api?.panelRegister) return
   const name = username.trim()
   if (!name || name.length > 64) {
-    publish({ lanRegister: { busy: false, error: '请填写管理员账号（64 字符以内）' } })
+    publish({ lanRegister: { busy: false, error: t('请填写管理员账号（64 字符以内）') } })
     return
   }
   if (password.length < 8) {
-    publish({ lanRegister: { busy: false, error: '密码至少 8 位' } })
+    publish({ lanRegister: { busy: false, error: t('密码至少 8 位') } })
     return
   }
   publish({ lanRegister: { busy: true, error: '' } })
@@ -619,15 +657,15 @@ export function cancelLanRegister(): void {
 async function applyLan(enabled: boolean, panel: boolean): Promise<void> {
   if (busyScope) return
   const api = shared().workbuddyDesktop
-  if (!api?.changeLanAccess) { toast('当前环境不支持局域网访问设置', 'err'); return }
+  if (!api?.changeLanAccess) { toast(t('当前环境不支持局域网访问设置'), 'err'); return }
   beginBusy('lan')
   publishApp({ lanAccess: enabled, lanPanel: panel })
   try {
     const result = await api.changeLanAccess(enabled, panel) as { createdKey?: unknown } | null | undefined
-    if (result?.createdKey) toast('✅ 已自动创建网关 Key「默认」（可在「网关 Key」页查看）')
-    toast('✅ 设置已保存，应用正在重启…')
+    if (result?.createdKey) toast(t('✅ 已自动创建网关 Key「默认」（可在「网关 Key」页查看）'))
+    toast(t('✅ 设置已保存，应用正在重启…'))
   } catch (error) {
-    toast(`保存失败：${errorMessage(error)}`, 'err')
+    toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
     await loadSettings() // 回滚到磁盘上的真实值
   } finally {
     endBusy()
@@ -646,15 +684,16 @@ export async function exportAccounts(): Promise<void> {
   beginBusy('export')
   try {
     const result = await shared().workbuddyDesktop?.exportAccounts()
-    if (result?.canceled) { toast('已取消导出'); return }
+    if (result?.canceled) { toast(t('已取消导出')); return }
     const count = Number(result?.count) || 0
     const providers = Number(result?.customProviders) || 0
-    if (!count && !providers) { toast('没有可导出的账号', 'err'); return }
+    if (!count && !providers) { toast(t('没有可导出的账号'), 'err'); return }
     // v2 导出文件附带自定义提供商定义：账号为 0 但有定义时同样值得导
-    const providerNote = providers ? `、${providers} 个自定义提供商` : ''
-    toast(`✅ 已导出 ${count} 个账号${providerNote}${result?.file ? ` 到 ${result.file}` : ''}`)
+    const providerNote = providers ? t('、{n} 个自定义提供商', { n: providers }) : ''
+    const fileNote = result?.file ? t(' 到 {file}', { file: result.file }) : ''
+    toast(t('✅ 已导出 {count} 个账号{note}{file}', { count, note: providerNote, file: fileNote }))
   } catch (error) {
-    toast(`操作失败：${errorMessage(error)}`, 'err')
+    toast(t('操作失败：{message}', { message: errorMessage(error) }), 'err')
   } finally {
     endBusy()
   }
@@ -667,7 +706,7 @@ export async function importAccounts(): Promise<void> {
   beginBusy('import')
   try {
     const result = await shared().workbuddyDesktop?.importAccounts()
-    if (result?.canceled) { toast('已取消导入'); return }
+    if (result?.canceled) { toast(t('已取消导入')); return }
 
     const added = Number(result?.added) || 0
     const updated = Number(result?.updated) || 0
@@ -679,36 +718,118 @@ export async function importAccounts(): Promise<void> {
     const customUpdated = Number(custom.updated) || 0
 
     const extras: string[] = []
-    if (skipped) extras.push(`跳过 ${skipped} 个`)
-    if (failed) extras.push(`失败 ${failed} 个`)
-    const suffix = extras.length ? `，${extras.join('、')}` : ''
+    if (skipped) extras.push(t('跳过 {n} 个', { n: skipped }))
+    if (failed) extras.push(t('失败 {n} 个', { n: failed }))
+    const suffix = extras.length ? t('，{items}', { items: extras.join(t('、')) }) : ''
     const providerNote = (customAdded || customUpdated)
-      ? `，自定义提供商新增 ${customAdded} 个、更新 ${customUpdated} 个`
+      ? t('，自定义提供商新增 {added} 个、更新 {updated} 个', { added: customAdded, updated: customUpdated })
       : ''
-    const summary = `新增 ${added} 个、更新 ${updated} 个${suffix}${providerNote}`
+    const summary = t('新增 {added} 个、更新 {updated} 个{suffix}{note}', {
+      added, updated, suffix, note: providerNote,
+    })
 
     if (failed) {
-      toast(`导入完成：${summary}`, 'err')
+      toast(t('导入完成：{summary}', { summary }), 'err')
       // 失败明细只列前 3 条，与账号页批量操作的展示密度保持一致；
       // 定义警告（customProvider 标记）没有账号语义，展示时注明归属
       const detail = errors.slice(0, 3)
         .map(item => {
           const label = item?.customProvider
-            ? `自定义提供商 ${item?.id || '(无 id)'}`
-            : (item?.id ?? '未知账号')
-          return `${label}（${item?.message ?? '未知原因'}）`
+            ? t('自定义提供商 {id}', { id: item?.id || t('(无 id)') })
+            : (item?.id ?? t('未知账号'))
+          const message = item?.message ?? t('未知原因')
+          return t('{label}（{message}）', { label, message })
         })
-        .join('；')
+        .join(t('；'))
       publish({ ioFailure: { failed, detail, more: errors.length > 3 } })
     } else {
-      toast(`✅ 导入完成：${summary}`)
+      toast(t('✅ 导入完成：{summary}', { summary }))
     }
 
     // 账号被改动（新增/更新）后让主界面立刻反映：账号列表、导航计数等；
     // 自定义提供商定义有变化时同样要刷（分组名、模型清单都会变）
     if (added || updated || customAdded || customUpdated) await shared().wbApp?.refresh?.()
   } catch (error) {
-    toast(`操作失败：${errorMessage(error)}`, 'err')
+    toast(t('操作失败：{message}', { message: errorMessage(error) }), 'err')
+  } finally {
+    endBusy()
+  }
+}
+
+/* ─── 整库备份 / 恢复（替换语义，见 db::backup 的模块头） ──────────────── */
+
+/** 拨动「包含日志与调试报文」复选框（默认勾上；取消后只备业务数据） */
+export function toggleDbIncludeLogs(on: boolean): void {
+  publish({ dbIncludeLogs: on })
+}
+
+/**
+ * 整库备份：后端把整库导出为 SQL 文件直写到壳选的路径（文件不过壳中转）。
+ * 桌面端专属（web shim 没有这个方法），导出没有「空库不导」分支。
+ */
+export async function exportDatabase(): Promise<void> {
+  if (busyScope) return
+  beginBusy('dbExport')
+  try {
+    const api = shared().workbuddyDesktop
+    if (!api?.exportDatabase) {
+      toast(t('当前环境不支持整库备份（仅桌面端可用）'), 'err')
+      return
+    }
+    const result = await api.exportDatabase(snapshot.dbIncludeLogs)
+    if (result?.canceled) { toast(t('已取消导出')); return }
+    const size = Number(result?.bytes) || 0
+    const tables = Array.isArray(result?.tables) ? result.tables.length : 0
+    toast(t('✅ 已备份 {n} 张表（{size}）到 {file}', {
+      n: tables,
+      size: formatBytes(size),
+      file: result?.file || '',
+    }))
+  } catch (error) {
+    toast(t('操作失败：{message}', { message: errorMessage(error) }), 'err')
+  } finally {
+    endBusy()
+  }
+}
+
+/** 点「恢复」：先弹确认框（整库恢复是替换语义，二次确认后才开始） */
+export function confirmDbRestore(): void {
+  if (busyScope) return
+  publish({ dbBackupConfirm: { includeLogs: snapshot.dbIncludeLogs } })
+}
+
+/** 确认框出口（与 resolveRetentionConfirm 同形）：确认后才执行恢复 */
+export function resolveDbBackupConfirm(accepted: boolean): void {
+  publish({ dbBackupConfirm: null })
+  if (accepted) void proceedDbRestore()
+}
+
+/**
+ * 整库恢复本体。成功后**重拉整页设置与存储概况** —— 配置、桌面设置、账号、
+ * 日志全被替换成备份的状态，任何一块旧快照都不能再用；主界面同样刷新
+ * （账号列表、分组与模型清单都会变）。面板短效令牌由后端在恢复后清空，
+ * 浏览器下一次请求会自然落到重新登录。
+ */
+async function proceedDbRestore(): Promise<void> {
+  if (busyScope) return
+  const api = shared().workbuddyDesktop
+  if (!api?.importDatabase) {
+    toast(t('当前环境不支持整库恢复（仅桌面端可用）'), 'err')
+    return
+  }
+  beginBusy('dbImport')
+  try {
+    const result = await api.importDatabase()
+    const tables = Array.isArray(result?.tables) ? result.tables.length : 0
+    const note = result?.safetyBackup
+      ? t('，替换前的数据已备份为 {name}', { name: result.safetyBackup })
+      : ''
+    toast(t('✅ 已恢复 {n} 张表{note}', { n: tables, note }))
+    // 重拉整页（含启动/托盘设置、保留期、提示词、存储概况等全部面板）
+    await load()
+    await shared().wbApp?.refresh?.()
+  } catch (error) {
+    toast(t('恢复失败：{message}', { message: errorMessage(error) }), 'err')
   } finally {
     endBusy()
   }
@@ -756,8 +877,10 @@ function askRetentionShrink(head: string): Promise<boolean> {
 /** 改小保留期会立即删数据，文案必须点名「删的是哪一档」 */
 function shrinkPromptHead(field: NumberField, previous: number | null, days: number): string {
   return previous === null
-    ? `没能读到「${field.label}」的当前值，改为 ${days} 天可能会删除超出的历史数据。`
-    : `「${field.label}」将从 ${previous} 天改为 ${days} 天。`
+    ? t('没能读到「{label}」的当前值，改为 {days} 天可能会删除超出的历史数据。', {
+      label: field.label, days,
+    })
+    : t('「{label}」将从 {previous} 天改为 {days} 天。', { label: field.label, previous, days })
 }
 
 /**
@@ -771,7 +894,7 @@ export async function saveRetentionField(field: NumberField, raw: string): Promi
   // 遮罩已经挡住了页面，走到这里只剩键盘 Tab 之类的少数路径，挡一下成本极低。
   if (snapshot.retentionConfirm) return
 
-  const parsed = parseInteger(raw, field.min, field.max, '天数')
+  const parsed = parseInteger(raw, field.min, field.max, t('天数'))
   if (!parsed.ok) { toast(parsed.message, 'err'); return }
 
   const known = snapshot.retention.values?.[field.key]
@@ -808,17 +931,21 @@ async function commitRetention(field: NumberField, days: number, shrinking: bool
     const values = snapshot.retention.values
     if (RETENTION_FIELDS.every(item => Number.isInteger(values?.[item.key]))) {
       const applied = values?.[field.key] ?? days
-      toast(shrinking ? `✅ 已保留 ${applied} 天，超出部分已清理` : `✅ 已保留 ${applied} 天`)
+      toast(shrinking
+        ? t('✅ 已保留 {days} 天，超出部分已清理', { days: applied })
+        : t('✅ 已保留 {days} 天', { days: applied }))
       return
     }
     // 响应里三项没齐（换壳后接口形状变了之类）：退回一次 GET 补齐，
     // 宁可多跑一趟，也不能停在「界面说改了、其实没读到真值」的状态
     await loadRetention()
     // 这里提示用户填的值：GET 也没读到真值时，报后端返回的值反而更让人困惑
-    toast(shrinking ? `✅ 已保留 ${days} 天，超出部分已清理` : `✅ 已保留 ${days} 天`)
+    toast(shrinking
+      ? t('✅ 已保留 {days} 天，超出部分已清理', { days })
+      : t('✅ 已保留 {days} 天', { days }))
   } catch (error) {
     // 400 的 message（点名哪个字段、超出多少）比自造一句更指向具体问题
-    toast(`保存失败：${errorMessage(error)}`, 'err')
+    toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
     await loadRetention() // 回滚到后端的真实值
   } finally {
     endBusy()
@@ -837,7 +964,7 @@ async function commitRetention(field: NumberField, days: number, shrinking: bool
  * 直接换号」名单）由各自的代码实现，在数据到达 / 不可用时被回调一次。
  */
 type NumericPanel = {
-  scope: 'retry' | 'timeouts' | 'queue'
+  scope: 'retry' | 'timeouts' | 'queue' | 'captchaPool'
   fields: NumberField[]
   consoleLabel: string
   /** 取数 / 写回：桥不在时给 undefined（各调用点按「读不到」处理） */
@@ -886,10 +1013,11 @@ async function saveNumericField(panel: NumericPanel, field: NumberField, raw: st
     // PUT 契约返回生效后的全量值，正常情况下用响应刷新即可，不必再跑一趟 GET
     renderNumericPanel(panel, saved)
     const applied = panel.read().values?.[field.key]
-    toast(`✅ 已保存：${field.label} ${Number.isInteger(applied) ? applied : parsed.value}`)
+    const shown = Number.isInteger(applied) ? applied : parsed.value
+    toast(t('✅ 已保存：{label} {value}', { label: field.label, value: String(shown) }))
   } catch (error) {
     // 400 的 message（点名哪个字段、超出多少）比自造一句更指向具体问题
-    toast(`保存失败：${errorMessage(error)}`, 'err')
+    toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
     await loadNumericPanel(panel) // 回滚到后端的真实值
   } finally {
     endBusy()
@@ -918,6 +1046,92 @@ export async function loadQueue(): Promise<void> {
 
 export async function saveQueueField(field: NumberField, raw: string): Promise<void> {
   await saveNumericField(queuePanel, field, raw)
+}
+
+/* ─── 验证码令牌池 ─────────────────────────── */
+
+const captchaPoolPanel: NumericPanel = {
+  scope: 'captchaPool',
+  fields: CAPTCHA_POOL_FIELDS,
+  consoleLabel: '读取验证码令牌池设置',
+  get: () => shared().workbuddyDesktop?.getCaptchaPool(),
+  save: patch => shared().workbuddyDesktop?.saveCaptchaPool(patch),
+  read: () => snapshot.captchaPool,
+  write: state => publish({ captchaPool: state }),
+}
+
+export function renderCaptchaPool(data?: unknown): void {
+  renderNumericPanel(captchaPoolPanel, data)
+}
+
+export async function loadCaptchaPool(): Promise<void> {
+  await loadNumericPanel(captchaPoolPanel)
+}
+
+export async function saveCaptchaPoolField(field: NumberField, raw: string): Promise<void> {
+  await saveNumericField(captchaPoolPanel, field, raw)
+}
+
+/* ─── 账号路由（策略 + 会话粘性）───────────── */
+
+/** 后端给的路由配置里我们关心的两个键（与 /api/routing 的长键名逐字对应） */
+const ROUTING_STRATEGY_KEY = 'routingStrategy'
+const ROUTING_STICKY_KEY = 'routingSticky'
+
+/** 路由配置的合法取值表（逐字来自 settings-model 的档位表，校验与兜底共用） */
+const ROUTING_VALID: Record<string, ReadonlySet<string>> = {
+  [ROUTING_STRATEGY_KEY]: new Set(ROUTE_STRATEGIES.map(item => item.value)),
+  [ROUTING_STICKY_KEY]: new Set(ROUTE_STICKY_OPTIONS.map(item => item.value)),
+}
+
+/** 路由响应 → 快照值：只认合法档位，读不到 / 非法时按该键的默认档兜底 */
+function routingValuesFrom(data: unknown): { strategy: string; sticky: string } {
+  const record = (data && typeof data === 'object' ? data : {}) as Record<string, unknown>
+  const pick = (key: string, fallback: string): string => {
+    const raw = record[key]
+    return typeof raw === 'string' && ROUTING_VALID[key].has(raw) ? raw : fallback
+  }
+  return { strategy: pick(ROUTING_STRATEGY_KEY, 'order'), sticky: pick(ROUTING_STICKY_KEY, 'auto') }
+}
+
+export async function loadRouting(): Promise<void> {
+  try {
+    const data = await shared().workbuddyDesktop?.getRoutingConfig()
+    if (data === undefined) { publish({ routing: { ...snapshot.routing, status: 'unavailable' } }); return }
+    publish({ routing: { status: 'ready', ...routingValuesFrom(data) } })
+  } catch (error) {
+    console.warn('读取路由设置失败:', errorMessage(error))
+    publish({ routing: { ...snapshot.routing, status: 'unavailable' } })
+  }
+}
+
+/**
+ * 保存两档之一：PUT 契约返回生效后的全量值（与超时 / 重试同一模式），直接按响应刷新。
+ * 后端只认长键名；未知档位在界面上就发不出来（SegmentedControl 的取值来自档位表）。
+ */
+export async function saveRoutingField(patch: { routingStrategy?: string; routingSticky?: string }): Promise<void> {
+  if (busyScope) return
+  const bridge = shared().workbuddyDesktop
+  if (!bridge?.setRoutingConfig) {
+    toast(t('桌面运行时不可用，暂时无法保存'), 'err')
+    return
+  }
+  beginBusy('routing')
+  try {
+    const saved = await bridge.setRoutingConfig(patch)
+    if (saved !== undefined) {
+      publish({ routing: { status: 'ready', ...routingValuesFrom(saved) } })
+    } else {
+      // 老壳不回响应体：回读一次拿真实生效值（loadRouting 会给出 ready / unavailable）
+      await loadRouting()
+    }
+    toast(t('✅ 路由设置已保存'))
+  } catch (error) {
+    toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
+    await loadRouting() // 回滚到后端的真实值
+  } finally {
+    endBusy()
+  }
 }
 
 /* ─── 请求重试 ─────────────────────────────── */
@@ -968,9 +1182,9 @@ async function saveRetryCodes(codes: number[]): Promise<void> {
     // PUT 契约返回生效后的全量值（含三个数字项），交给面板统一回填，
     // 顺带把徽章重画成后端确认的形态（排序去重后的结果）
     renderNumericPanel(retryPanel, saved)
-    toast('✅ 已保存：指定错误码直接换号')
+    toast(t('✅ 已保存：指定错误码直接换号'))
   } catch (error) {
-    toast(`保存失败：${errorMessage(error)}`, 'err')
+    toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
     await loadNumericPanel(retryPanel) // 回滚到后端的真实值
   } finally {
     endBusy()
@@ -984,13 +1198,15 @@ export async function addRetryCode(raw: string): Promise<void> {
   const text = String(raw ?? '').trim()
   if (!text) return
   if (!/^\d+$/.test(text) || Number(text) < RETRY_CODE_MIN || Number(text) > RETRY_CODE_MAX) {
-    toast(`状态码必须是 ${RETRY_CODE_MIN}–${RETRY_CODE_MAX} 的整数（收到: ${text}）`, 'err')
+    toast(t('状态码必须是 {min}–{max} 的整数（收到: {text}）', {
+      min: RETRY_CODE_MIN, max: RETRY_CODE_MAX, text,
+    }), 'err')
     return
   }
   const code = Number(text)
-  if (codes.includes(code)) { toast(`状态码 ${code} 已在名单里`); return }
+  if (codes.includes(code)) { toast(t('状态码 {code} 已在名单里', { code })); return }
   if (codes.length >= RETRY_MAX_CODES) {
-    toast(`名单最多 ${RETRY_MAX_CODES} 个状态码`, 'err')
+    toast(t('名单最多 {max} 个状态码', { max: RETRY_MAX_CODES }), 'err')
     return
   }
   await saveRetryCodes([...codes, code])
@@ -1068,9 +1284,9 @@ export async function saveDebug(next: boolean): Promise<void> {
   try {
     const saved = await shared().workbuddyDesktop?.saveDebug(next)
     renderDebug(saved)
-    toast(next ? '✅ 调试模式已开启' : '✅ 调试模式已关闭')
+    toast(next ? t('✅ 调试模式已开启') : t('✅ 调试模式已关闭'))
   } catch (error) {
-    toast(`保存失败: ${errorMessage(error)}`, 'err')
+    toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
     await loadDebug() // 回滚到后端的真实值
   } finally {
     endBusy()
@@ -1103,9 +1319,9 @@ export async function saveSanitize(next: boolean): Promise<void> {
   try {
     const saved = await shared().workbuddyDesktop?.saveSanitize(next)
     renderSanitize(saved)
-    toast(next ? '✅ 出站指纹脱敏已开启' : '已关闭出站指纹脱敏')
+    toast(next ? t('✅ 出站指纹脱敏已开启') : t('已关闭出站指纹脱敏'))
   } catch (error) {
-    toast(`保存失败: ${errorMessage(error)}`, 'err')
+    toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
     await loadSanitize() // 回滚到后端的真实值
   } finally {
     endBusy()
@@ -1152,7 +1368,7 @@ async function loadClineHeaders(): Promise<void> {
 
 export async function refreshClineHeaders(): Promise<void> {
   await loadClineHeaders()
-  toast('Cline 伪装头已刷新')
+  toast(t('Cline 伪装头已刷新'))
 }
 
 /**
@@ -1166,9 +1382,9 @@ export async function saveClineHeaders(overrides: Record<string, string>): Promi
   try {
     const saved = await shared().workbuddyDesktop?.saveClineHeaders(overrides)
     renderClineHeaders(saved)
-    toast('✅ Cline 伪装头已保存')
+    toast(t('✅ Cline 伪装头已保存'))
   } catch (error) {
-    toast(`保存失败: ${errorMessage(error)}`, 'err')
+    toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
     await loadClineHeaders() // 回滚到后端的真实值
   } finally {
     endBusy()
@@ -1203,9 +1419,9 @@ export async function saveCors(next: boolean): Promise<void> {
   try {
     const saved = await shared().workbuddyDesktop?.saveCors(next)
     renderCors(saved)
-    toast(next ? '网关跨域访问已开启' : '已关闭网关跨域访问')
+    toast(next ? t('网关跨域访问已开启') : t('已关闭网关跨域访问'))
   } catch (error) {
-    toast(`保存失败: ${errorMessage(error)}`, 'err')
+    toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
     await loadCors() // 回滚到后端的真实值
   } finally {
     endBusy()
@@ -1232,9 +1448,9 @@ export async function saveCaptcha(next: boolean): Promise<void> {
   try {
     const state = await shared().workbuddyDesktop?.saveCaptchaSetting(next)
     publish({ captcha: { available: true, enabled: state?.captchaEnabled === true } })
-    toast(next ? '✅ 机器人校验已开启' : '⚠️ 机器人校验已关闭')
+    toast(next ? t('✅ 机器人校验已开启') : t('⚠️ 机器人校验已关闭'))
   } catch (error) {
-    toast(`保存失败：${errorMessage(error)}`, 'err')
+    toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
     await loadCaptcha()
   } finally {
     endBusy()
@@ -1402,10 +1618,10 @@ async function savePromptField(label: string, patch: PromptPatch): Promise<boole
   try {
     const saved = await shared().workbuddyDesktop?.savePrompt(patch)
     renderPrompt(saved)
-    toast(`✅ 已保存：${label}`)
+    toast(t('✅ 已保存：{label}', { label }))
     return true
   } catch (error) {
-    toast(`保存失败: ${errorMessage(error)}`, 'err')
+    toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
     await loadPrompt() // 回滚到后端的真实值
     return false
   } finally {
@@ -1415,12 +1631,12 @@ async function savePromptField(label: string, patch: PromptPatch): Promise<boole
 
 export async function savePromptMode(mode: string): Promise<void> {
   const option = PROMPT_MODES.find(item => item.value === mode)
-  await savePromptField(`模式改为「${option?.toastLabel ?? mode}」`, { promptMode: mode })
+  await savePromptField(t('模式改为「{mode}」', { mode: option?.toastLabel ?? mode }), { promptMode: mode })
 }
 
 export async function savePromptFile(raw: string): Promise<void> {
   await savePromptField(
-    raw.trim() ? '提示词文件已更新' : '已改回内置默认提示词',
+    raw.trim() ? t('提示词文件已更新') : t('已改回内置默认提示词'),
     { promptFile: raw },
   )
 }
@@ -1434,7 +1650,7 @@ export async function savePromptFile(raw: string): Promise<void> {
 export async function savePromptText(text: string): Promise<boolean> {
   const empty = !text.trim()
   return savePromptField(
-    empty ? '已清掉界面编辑的提示词（回落文件 / 内置默认）' : '提示词正文已更新',
+    empty ? t('已清掉界面编辑的提示词（回落文件 / 内置默认）') : t('提示词正文已更新'),
     { promptText: empty ? '' : text },
   )
 }
@@ -1502,7 +1718,7 @@ export async function addProviderPrompt(rawId: string): Promise<void> {
   if (!id) return
   const prompt = snapshot.prompt
   await saveProviderPrompt(
-    `已为「${promptProviderLabel(prompt, id)}」单独配置提示词`,
+    t('已为「{label}」单独配置提示词', { label: promptProviderLabel(prompt, id) }),
     id,
     providerPatch(prompt, {
       id,
@@ -1523,7 +1739,10 @@ export async function saveProviderPromptMode(item: ProviderPromptState, mode: st
   if (!id || !PROMPT_MODES.some(option => option.value === mode)) return
   const option = PROMPT_MODES.find(candidate => candidate.value === mode)
   await saveProviderPrompt(
-    `「${promptProviderLabel(snapshot.prompt, id)}」的模式改为「${option?.toastLabel ?? mode}」`,
+    t('「{label}」的模式改为「{mode}」', {
+      label: promptProviderLabel(snapshot.prompt, id),
+      mode: option?.toastLabel ?? mode,
+    }),
     id,
     { ...providerPatch(snapshot.prompt, item), promptMode: mode },
   )
@@ -1534,8 +1753,8 @@ export async function saveProviderPromptFile(item: ProviderPromptState, raw: str
   if (!id) return
   await saveProviderPrompt(
     raw.trim()
-      ? `「${promptProviderLabel(snapshot.prompt, id)}」的提示词文件已更新`
-      : `「${promptProviderLabel(snapshot.prompt, id)}」改用内置默认提示词`,
+      ? t('「{label}」的提示词文件已更新', { label: promptProviderLabel(snapshot.prompt, id) })
+      : t('「{label}」改用内置默认提示词', { label: promptProviderLabel(snapshot.prompt, id) }),
     id,
     // 同上：与文件一起把当前显示的模式落定，避免「改文件把模式改回去」
     { ...providerPatch(snapshot.prompt, item), promptFile: raw },
@@ -1558,7 +1777,7 @@ export async function saveProviderPromptText(
   const empty = !text.trim()
   const label = promptProviderLabel(snapshot.prompt, id)
   return saveProviderPrompt(
-    empty ? `已清掉「${label}」界面编辑的正文` : `「${label}」的提示词正文已更新`,
+    empty ? t('已清掉「{label}」界面编辑的正文', { label }) : t('「{label}」的提示词正文已更新', { label }),
     id,
     { ...providerPatch(snapshot.prompt, item), promptText: empty ? '' : text },
   )
@@ -1569,7 +1788,7 @@ export async function removeProviderPrompt(rawId: string): Promise<void> {
   const id = knownProviderId(rawId)
   if (!id) return
   await saveProviderPrompt(
-    `已取消「${promptProviderLabel(snapshot.prompt, id)}」的单独配置`,
+    t('已取消「{label}」的单独配置', { label: promptProviderLabel(snapshot.prompt, id) }),
     id,
     null,
   )
@@ -1598,12 +1817,12 @@ export async function saveProviderGatewayPrompt(rawId: string, enabled: boolean)
     renderPrompt(saved)
     toast(
       enabled
-        ? `✅ 已为「${label}」装上网关自带提示词`
-        : `已关闭「${label}」的网关自带提示词：能否通过上游校验取决于上游当前口径`,
+        ? t('✅ 已为「{label}」装上网关自带提示词', { label })
+        : t('已关闭「{label}」的网关自带提示词：能否通过上游校验取决于上游当前口径', { label }),
       enabled ? 'ok' : 'err',
     )
   } catch (error) {
-    toast(`保存失败：${errorMessage(error)}`, 'err')
+    toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
     await loadPrompt() // 回滚到后端的真实值
   } finally {
     endBusy()
@@ -1633,7 +1852,9 @@ export async function saveProviderGatewayText(
   const emptied = !blocks
     || !(blocks.identity.trim() || blocks.stable.trim() || blocks.dynamic.trim())
   return savePromptField(
-    emptied ? `「${label}」的网关自带提示词已改回官方原文` : `「${label}」的网关自带提示词正文已更新`,
+    emptied
+      ? t('「{label}」的网关自带提示词已改回官方原文', { label })
+      : t('「{label}」的网关自带提示词正文已更新', { label }),
     { promptGatewayText: { [id]: emptied ? null : blocks } },
   )
 }
@@ -1645,9 +1866,9 @@ export async function clearDegrade(): Promise<void> {
   try {
     const saved = await shared().workbuddyDesktop?.savePrompt({ clearDegrade: true })
     renderPrompt(saved)
-    toast('✅ 已解除内容拦截降级')
+    toast(t('✅ 已解除内容拦截降级'))
   } catch (error) {
-    toast(`解除失败: ${errorMessage(error)}`, 'err')
+    toast(t('解除失败：{message}', { message: errorMessage(error) }), 'err')
     await loadPrompt()
   } finally {
     endBusy()
@@ -1714,7 +1935,7 @@ export async function panelLogout(): Promise<boolean> {
     window.location.href = '/login'
     return true
   } catch (error) {
-    toast(`退出失败：${errorMessage(error)}`, 'err')
+    toast(t('退出失败：{message}', { message: errorMessage(error) }), 'err')
     return false
   }
 }
@@ -1736,6 +1957,8 @@ export async function load(): Promise<void> {
     loadRetry(),
     loadTimeouts(),
     loadQueue(),
+    loadCaptchaPool(),
+    loadRouting(),
     loadDebug(),
     loadSanitize(),
     loadClineHeaders(),
@@ -1752,45 +1975,55 @@ export async function load(): Promise<void> {
 
 export async function refreshRetention(): Promise<void> {
   await loadRetention()
-  toast('保留天数已刷新')
+  toast(t('保留天数已刷新'))
 }
 
 export async function refreshRetry(): Promise<void> {
   await loadRetry()
-  toast('重试设置已刷新')
+  toast(t('重试设置已刷新'))
 }
 
 export async function refreshTimeouts(): Promise<void> {
   await loadTimeouts()
-  toast('超时设置已刷新')
+  toast(t('超时设置已刷新'))
 }
 
 export async function refreshQueue(): Promise<void> {
   await loadQueue()
-  toast('排队等待设置已刷新')
+  toast(t('排队等待设置已刷新'))
+}
+
+export async function refreshCaptchaPool(): Promise<void> {
+  await loadCaptchaPool()
+  toast(t('验证码令牌池设置已刷新'))
+}
+
+export async function refreshRouting(): Promise<void> {
+  await loadRouting()
+  toast(t('路由设置已刷新'))
 }
 
 export async function refreshDebug(): Promise<void> {
   await loadDebug()
-  toast('调试模式设置已刷新')
+  toast(t('调试模式设置已刷新'))
 }
 
 export async function refreshSanitize(): Promise<void> {
   await loadSanitize()
-  toast('指纹脱敏设置已刷新')
+  toast(t('指纹脱敏设置已刷新'))
 }
 
 export async function refreshCors(): Promise<void> {
   await loadCors()
-  toast('网关跨域访问设置已刷新')
+  toast(t('网关跨域访问设置已刷新'))
 }
 
 export async function refreshPrompt(): Promise<void> {
   await loadPrompt()
-  toast('系统提示词设置已刷新')
+  toast(t('系统提示词设置已刷新'))
 }
 
 export async function refreshStorage(): Promise<void> {
   await loadStorage()
-  toast('存储概况已刷新')
+  toast(t('存储概况已刷新'))
 }

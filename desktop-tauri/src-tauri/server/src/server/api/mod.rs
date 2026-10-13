@@ -38,10 +38,22 @@ pub mod accounts;
 // `/api/accounts/usage` 的查询与结果组装（从 accounts.rs 拆出：余额能力从
 // 「只服务 workbuddy」扩到四家混查时新增，见该文件模块头）
 pub mod accounts_usage;
+// 整库备份 / 恢复（设置页「整库备份 / 恢复」，SQL 文本形态；核心在
+// `db::backup`，替换语义与账号 JSON 导入的 merge 是两条独立通道）
+pub mod backup_api;
 pub mod auto_checkin;
 pub mod billing;
 pub mod captcha;
 pub mod chat;
+// 签到中心的聚合快照（GET /api/checkin-center）：分组口径在后端唯一化，
+// 资格类状态由前端按需惰性查询，见该文件模块头
+pub mod checkin_center;
+// 签到记录明细台账（GET/DELETE /api/checkin-records）：每账号一行的成败与
+// 收益明细，记账点在 `core::billing::checkin::run_checkin`，见该文件模块头
+pub mod checkin_records;
+// 定时签到的**条目**（GET/POST /api/checkin-schedules + {id}/delete|run）：
+// 总开关仍在 /api/auto-checkin，条目 CRUD 在这里，见该文件模块头
+pub mod checkin_schedules;
 pub mod cline_headers;
 pub mod codearts_welfare;
 pub mod config_api;
@@ -67,13 +79,17 @@ pub mod model_manage;
 // 只把候选收窄到「这一家 × 这一个账号」并把流量标成测试，见该文件模块头
 pub mod model_test;
 pub mod models;
+// Loomy 新手任务的查询 / 一键领取（签到后在界面弹窗），见该文件模块头
+pub mod onboarding;
 pub mod panel;
 pub mod pipeline;
 pub mod prompt;
 pub mod protocol;
 pub mod proxies;
+pub mod qoder_umid;
 pub mod queue_api;
 pub mod retry_api;
+pub mod routing_api;
 pub mod sanitize;
 pub mod scheduled_tasks;
 pub mod session;
@@ -84,4 +100,6 @@ pub mod update;
 pub mod upgrade_api;
 // 活动套餐通道的人机验证令牌池（界面铸造 → 网关消费），见该文件模块头
 pub mod zcode_captcha;
+// 令牌池的**补货节奏**设置（目标 / 轮询间隔 / 单轮上限），见该文件模块头
+pub mod zcode_captcha_pool;
 pub mod zcode_claim;

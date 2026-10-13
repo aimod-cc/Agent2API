@@ -43,20 +43,21 @@ import {
   accept, errorMessage, modelRowOf, providerLabelOf, toast, writeCapabilities,
   type CapabilityContext,
 } from './models-panel-state'
+import { t } from '../i18n'
 
 /** 布尔键的三档（label 随数据源换，`inheritLabel` 由调用方拼） */
 const BOOLEAN_OPTIONS = (inheritLabel: string): SegmentedControlOption<string>[] => [
   { value: 'inherit', label: inheritLabel },
-  { value: 'on', label: '支持' },
-  { value: 'off', label: '不支持' },
+  { value: 'on', label: t('支持') },
+  { value: 'off', label: t('不支持') },
 ]
 
 /** 布尔值的展示文案（状态行与 tooltip 共用） */
 function booleanText(value: number | boolean | null): string {
   const state = capabilityState(value)
-  if (state === 'on') return '支持'
-  if (state === 'off') return '不支持'
-  return '未声明'
+  if (state === 'on') return t('支持')
+  if (state === 'off') return t('不支持')
+  return t('未声明')
 }
 
 /**
@@ -72,9 +73,13 @@ function statusText(
 ): string {
   const has = value !== null && value !== undefined
   const shown = TOKEN_KEYS.includes(key) ? exactTokens(value) : booleanText(value)
-  if (set) return `已${custom ? '填写' : '覆盖'}：对下游声明 ${shown}`
-  if (custom) return '未填写（下游按未声明处理）'
-  return has ? `继承上游：${shown}` : '上游未声明（下游会按不支持处理）'
+  if (set) {
+    return custom
+      ? t('已填写：对下游声明 {value}', { value: shown })
+      : t('已覆盖：对下游声明 {value}', { value: shown })
+  }
+  if (custom) return t('未填写（下游按未声明处理）')
+  return has ? t('继承上游：{value}', { value: shown }) : t('上游未声明（下游会按不支持处理）')
 }
 
 /**
@@ -129,17 +134,16 @@ export function CapabilityDialog({ context, onClose }: { context: CapabilityCont
       <Dialog open onOpenChange={next => { if (!next) onClose() }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>模型能力</DialogTitle>
+            <DialogTitle>{t('模型能力')}</DialogTitle>
           </DialogHeader>
           <DialogBody>
             <p className='text-sm leading-[1.7] text-subtle'>
-              这一行已不在当前清单里（模型被移除、或目录刷新后上游不再提供它）。
-              关闭后刷新列表再试。
+              {t('这一行已不在当前清单里（模型被移除、或目录刷新后上游不再提供它）。关闭后刷新列表再试。')}
             </p>
           </DialogBody>
           <DialogFooter>
             <div className='mr-auto' />
-            <Button variant='outline' onClick={onClose}>关闭</Button>
+            <Button variant='outline' onClick={onClose}>{t('关闭')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -150,15 +154,15 @@ export function CapabilityDialog({ context, onClose }: { context: CapabilityCont
   // 保留 `if (!row)` 的收窄 —— 用 row.id 会按 `possibly null` 报错
   const rowId = row.id
   const providerLabel = row.providerLabel || providerLabelOf(context.provider)
-  const inheritLabel = custom ? '未声明' : '继承上游'
-  const clearLabel = custom ? '清除' : '恢复继承'
+  const inheritLabel = custom ? t('未声明') : t('继承上游')
+  const clearLabel = custom ? t('清除') : t('恢复继承')
 
   /** 数值字段的 placeholder：这一项没有值/未覆盖时提示上游值或「未声明」 */
   function tokenPlaceholder(key: CapabilityKey): string {
     const current = capabilities[key]
     if (isSet(key)) return ''
-    if (custom) return '未填写'
-    return typeof current === 'number' ? `继承上游 ${exactTokens(current)}` : '上游未声明'
+    if (custom) return t('未填写')
+    return typeof current === 'number' ? t('继承上游 {value}', { value: exactTokens(current) }) : t('上游未声明')
   }
 
   /** 这一项当前有没有值（判据见 setKeysOf） */
@@ -177,18 +181,19 @@ export function CapabilityDialog({ context, onClose }: { context: CapabilityCont
       const raw = draft[key].trim()
       if (!raw) continue
       if (normalizeCapability(key, raw) === null) {
-        setStatus(`${CAPABILITY_LABELS[key]}要填 1 ~ 1 亿之间的整数（留空 = ${inheritLabel}）`)
+        setStatus(t('{label}要填 1 ~ 1 亿之间的整数（留空 = {inherit}）',
+          { label: CAPABILITY_LABELS[key], inherit: inheritLabel }))
         return
       }
     }
     setSaving(true)
-    setStatus('保存中…')
+    setStatus(t('保存中…'))
     try {
       accept(await writeCapabilities(context.provider, context.id, patchFromDraft(draft)))
       onClose()
-      toast(`✅ 已保存 ${rowId} 的能力位（${providerLabel}）`)
+      toast(t('✅ 已保存 {id} 的能力位（{provider}）', { id: rowId, provider: providerLabel }))
     } catch (error) {
-      setStatus(`保存失败：${errorMessage(error)}`)
+      setStatus(t('保存失败：{message}', { message: errorMessage(error) }))
       setSaving(false)
     }
   }
@@ -202,12 +207,12 @@ export function CapabilityDialog({ context, onClose }: { context: CapabilityCont
     }}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>模型能力</DialogTitle>
+          <DialogTitle>{t('模型能力')}</DialogTitle>
         </DialogHeader>
         <DialogBody>
           {/* 预览行：改的是哪一条模型（与映射弹窗的预览区同一用意） */}
           <div className='rounded-md border border-border bg-surface-inset px-3 py-2.5 font-mono text-[12px] text-subtle'>
-            <b className='text-primary-fg'>{row.id}</b>（{providerLabel}）
+            <b className='text-primary-fg'>{row.id}</b>{t('（{provider}）', { provider: providerLabel })}
           </div>
 
           {TOKEN_KEYS.map(key => (
@@ -216,7 +221,7 @@ export function CapabilityDialog({ context, onClose }: { context: CapabilityCont
                 <Label htmlFor={`cap-${key}`}>{CAPABILITY_LABELS[key]}</Label>
                 {isSet(key) ? (
                   <Button variant='ghost' size='2xs' disabled={saving}
-                    title={custom ? '清除这一项（回到未声明）' : '清除覆盖，回到上游声明值'}
+                    title={custom ? t('清除这一项（回到未声明）') : t('清除覆盖，回到上游声明值')}
                     onClick={() => setValue(key, '')}>{clearLabel}</Button>
                 ) : null}
               </div>
@@ -245,34 +250,34 @@ export function CapabilityDialog({ context, onClose }: { context: CapabilityCont
           {levelsInfo ? (
             <div className='rounded-md border border-border bg-surface-inset px-3 py-2.5 text-xs leading-[1.7] text-subtle'>
               <div className='flex flex-wrap items-center gap-x-2 gap-y-1'>
-                <span>可配思考档位</span>
+                <span>{t('可配思考档位')}</span>
                 <span className='font-mono text-[12px] text-primary-fg'>
                   {levelsInfo.levels.join(' / ')}
                 </span>
                 {levelsInfo.defaultLevel ? (
-                  <span>（默认 <span className='font-mono text-[12px] text-primary-fg'>{levelsInfo.defaultLevel}</span>）</span>
+                  <span>{t('（默认 ')}<span className='font-mono text-[12px] text-primary-fg'>{levelsInfo.defaultLevel}</span>{t('）')}</span>
                 ) : null}
               </div>
               <div className='mt-1'>
-                这是模型自己能配的档位（来自上游目录），只读；要改某一档请到映射弹窗里选。
+                {t('这是模型自己能配的档位（来自上游目录），只读；要改某一档请到映射弹窗里选。')}
               </div>
             </div>
           ) : null}
 
           <p className='text-xs leading-[1.65] text-subtle'>
-            这几项是给<b>下游客户端</b>看的能力声明（<code>/v1/models</code> 里的
-            <code>max_input_tokens</code> / <code>supports_*</code> 与
-            <code>input_modalities</code>），下游按它们决定发不发图片、按多大的窗口堆历史。
-            <b>不影响网关的转发与路由</b>。上游清单给的值不准时，在这里改；
-            {custom ? '这家的清单是你自己登记的，不填的项下游按未声明处理。' : '「恢复继承」会把这一项交还给上游清单的值。'}
+            {t('这几项是给')}<b>{t('下游客户端')}</b>{t('看的能力声明（')}
+            <code>/v1/models</code>{t(' 里的 ')}<code>max_input_tokens</code> / <code>supports_*</code>{t(' 与 ')}<code>input_modalities</code>
+            {t('），下游按它们决定发不发图片、按多大的窗口堆历史。')}
+            <b>{t('不影响网关的转发与路由')}</b>{t('。上游清单给的值不准时，在这里改；')}
+            {custom ? t('这家的清单是你自己登记的，不填的项下游按未声明处理。') : t('「恢复继承」会把这一项交还给上游清单的值。')}
           </p>
           {/* 状态行：高度固定，出现错误时弹窗不跳高 */}
           <div className='min-h-[18px] text-xs text-subtle'>{status}</div>
         </DialogBody>
         <DialogFooter>
           <div className='mr-auto' />
-          <Button variant='outline' disabled={saving} onClick={onClose}>取消</Button>
-          <Button variant='default' disabled={saving} onClick={() => void save()}>保存</Button>
+          <Button variant='outline' disabled={saving} onClick={onClose}>{t('取消')}</Button>
+          <Button variant='default' disabled={saving} onClick={() => void save()}>{t('保存')}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

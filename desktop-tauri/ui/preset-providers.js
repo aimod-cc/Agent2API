@@ -27,11 +27,14 @@
   /**
    * 预置清单。字段：
    *   key      卡片的稳定标记（data-provider="preset:<key>"），也是图标文件名
-   *   name     展示名（预填进「名称」输入框，可改）
+   *   name     展示名（预填进「名称」输入框，可改）。**不包 t()**：品牌名，且
+   *            同时被 add-provider-pick 的「同名家是否已建」判重与 models-page
+   *            的图标回match当字面量用，包了会跨语言失配（见任务报告）
    *   icon     assets/providers/ 下的图标文件；没有收录的用首字母徽章
    *   protocol 预填协议（下拉仍可改）
    *   baseUrl  预填基址（按本网关的拼接语义，见文件头）
    *   hint     表单 Base URL 栏下的备注：该家另一端协议的地址 / 站点差异说明
+   *            （纯展示文案，走 wbI18n.t）
    *   quirks   该家的上游特判（随创建写进提供商记录，转发时生效，见下）
    *   account  该家账号的默认取值（表单里的初始勾选态，用户可改）：
    *            · noAuth —— 「该上游无需鉴权」预勾选（无需 API Key 的家里预勾上；
@@ -78,7 +81,7 @@
     {
       key: 'openrouter', name: 'OpenRouter', icon: 'openrouter.png',
       protocol: P.openai, baseUrl: 'https://openrouter.ai/api/v1',
-      hint: '一个 Key 用遍多家模型，模型名用「厂商/模型」全称（如 deepseek/deepseek-chat）',
+      hint: wbI18n.t('一个 Key 用遍多家模型，模型名用「厂商/模型」全称（如 deepseek/deepseek-chat）'),
       quirks: {
         headers: { 'HTTP-Referer': 'https://endpoint-proxy.local', 'X-Title': 'Endpoint Proxy' },
       },
@@ -86,33 +89,33 @@
     {
       key: 'huggingface', name: 'HuggingFace', icon: 'huggingface.png',
       protocol: P.openai, baseUrl: 'https://router.huggingface.co/v1',
-      hint: '走 Inference Providers 路由，Key 在 hf.co/settings/tokens 创建',
+      hint: wbI18n.t('走 Inference Providers 路由，Key 在 hf.co/settings/tokens 创建'),
     },
     {
       key: 'nvidia', name: 'NVIDIA', icon: 'nvidia.png',
       protocol: P.openai, baseUrl: 'https://integrate.api.nvidia.com/v1',
-      hint: 'NVIDIA NIM 托管端点，Key 在 integrate.api.nvidia.com 申请',
+      hint: wbI18n.t('NVIDIA NIM 托管端点，Key 在 integrate.api.nvidia.com 申请'),
     },
     {
       key: 'deepseek', name: 'DeepSeek', icon: 'deepseek.png',
       protocol: P.openai, baseUrl: 'https://api.deepseek.com',
-      hint: 'Anthropic 兼容端点在 https://api.deepseek.com/anthropic（协议换 anthropic 时填它）',
+      hint: wbI18n.t('Anthropic 兼容端点在 https://api.deepseek.com/anthropic（协议换 anthropic 时填它）'),
     },
     {
       key: 'glm', name: 'GLM Coding', icon: 'glm.png',
       protocol: P.anthropic, baseUrl: 'https://api.z.ai/api/anthropic',
-      hint: '国际版 z.ai 的 Coding 套餐；OpenAI 兼容地址为 https://api.z.ai/api/coding/paas/v4',
+      hint: wbI18n.t('国际版 z.ai 的 Coding 套餐；OpenAI 兼容地址为 https://api.z.ai/api/coding/paas/v4'),
       quirks: { urlSuffix: '?beta=true', headers: { ...ANTHROPIC_BETA_HEADERS } },
     },
     {
       key: 'glm-cn', name: 'GLM 中国', icon: 'glm-cn.png',
       protocol: P.openai, baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
-      hint: '智谱 bigmodel.cn 的 Coding 套餐，Key 在 open.bigmodel.cn/usercenter/apikeys',
+      hint: wbI18n.t('智谱 bigmodel.cn 的 Coding 套餐，Key 在 open.bigmodel.cn/usercenter/apikeys'),
     },
     {
       key: 'minimax', name: 'Minimax Coding', icon: 'minimax.png',
       protocol: P.anthropic, baseUrl: 'https://api.minimax.io/anthropic',
-      hint: '国际站 Coding 套餐；OpenAI 兼容地址为 https://api.minimax.io/v1',
+      hint: wbI18n.t('国际站 Coding 套餐；OpenAI 兼容地址为 https://api.minimax.io/v1'),
       quirks: {
         urlSuffix: '?beta=true',
         headers: { ...ANTHROPIC_BETA_HEADERS },
@@ -122,7 +125,7 @@
     {
       key: 'minimax-cn', name: 'Minimax 中国', icon: 'minimax-cn.png',
       protocol: P.anthropic, baseUrl: 'https://api.minimaxi.com/anthropic',
-      hint: '国内站（minimaxi.com）；OpenAI 兼容地址为 https://api.minimaxi.com/v1',
+      hint: wbI18n.t('国内站（minimaxi.com）；OpenAI 兼容地址为 https://api.minimaxi.com/v1'),
       quirks: {
         urlSuffix: '?beta=true',
         headers: { ...ANTHROPIC_BETA_HEADERS },
@@ -132,47 +135,47 @@
     {
       key: 'siliconflow', name: 'SiliconFlow', icon: 'siliconflow.png',
       protocol: P.openai, baseUrl: 'https://api.siliconflow.com/v1',
-      hint: '国内站为 https://api.siliconflow.cn/v1',
+      hint: wbI18n.t('国内站为 https://api.siliconflow.cn/v1'),
     },
     {
       key: 'volcengine-ark', name: '火山方舟', icon: 'volcengine-ark.png',
       protocol: P.openai, baseUrl: 'https://ark.cn-beijing.volces.com/api/coding/v3',
-      hint: '火山引擎 Coding 套餐；通用推理接入点为 https://ark.cn-beijing.volces.com/api/v3',
+      hint: wbI18n.t('火山引擎 Coding 套餐；通用推理接入点为 https://ark.cn-beijing.volces.com/api/v3'),
     },
     {
       key: 'alicode', name: 'Alibaba', icon: 'alicode.png',
       protocol: P.openai, baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
-      hint: '阿里云百炼 Coding 套餐（国内站）',
+      hint: wbI18n.t('阿里云百炼 Coding 套餐（国内站）'),
     },
     {
       key: 'alicode-intl', name: 'Alibaba Coding', icon: 'alicode-intl.png',
       protocol: P.openai, baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
-      hint: '阿里云百炼 Coding 套餐（国际站）',
+      hint: wbI18n.t('阿里云百炼 Coding 套餐（国际站）'),
     },
     {
       key: 'alims-intl', name: 'Alibaba Studio', icon: 'alims-intl.png',
       protocol: P.openai, baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
-      hint: '阿里云百炼模型服务（国际站，OpenAI 兼容模式）',
+      hint: wbI18n.t('阿里云百炼模型服务（国际站，OpenAI 兼容模式）'),
     },
     {
       key: 'alitp-intl', name: 'Alibaba Token Plan', icon: 'alitp-intl.png',
       protocol: P.openai, baseUrl: 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
-      hint: '阿里云 Token Plan 套餐（国际站）',
+      hint: wbI18n.t('阿里云 Token Plan 套餐（国际站）'),
     },
     {
       key: 'xiaomi-tokenplan', name: '小米 MiMo (Token Plan)', icon: 'xiaomi-tokenplan.png',
       protocol: P.openai, baseUrl: 'https://token-plan-sgp.xiaomimimo.com/v1',
-      hint: '小米 MiMo Token Plan 套餐（新加坡站）',
+      hint: wbI18n.t('小米 MiMo Token Plan 套餐（新加坡站）'),
     },
     {
       key: 'opencode-go', name: 'OpenCode Go', icon: 'opencode-go.png',
       protocol: P.openai, baseUrl: 'https://opencode.ai/zen/go/v1',
-      hint: '同地址换 anthropic 协议即走它的 Claude 兼容端点。转发必须填 OpenCode Go 的 API Key（订阅制；获取模型清单不需要 Key，但发请求上游会回 401「Missing API key」）',
+      hint: wbI18n.t('同地址换 anthropic 协议即走它的 Claude 兼容端点。转发必须填 OpenCode Go 的 API Key（订阅制；获取模型清单不需要 Key，但发请求上游会回 401「Missing API key」）'),
     },
     {
       key: 'opencode-zen', name: 'OpenCode Zen', icon: 'opencode-zen.png',
       protocol: P.openai, baseUrl: 'https://opencode.ai/zen/v1',
-      hint: '免费模型不用填 Key（默认勾上「该上游无需鉴权」，网关自动用匿名凭证）；付费模型则填 Zen 的 API Key。免费档上游只认官方客户端形态，已默认开启「伪装 OpenCode 官方客户端」',
+      hint: wbI18n.t('免费模型不用填 Key（默认勾上「该上游无需鉴权」，网关自动用匿名凭证）；付费模型则填 Zen 的 API Key。免费档上游只认官方客户端形态，已默认开启「伪装 OpenCode 官方客户端」'),
       // 免费档的三道校验（匿名凭证 / 会话头 / 请求体形态）由该开关统一补齐，
       // 见后端 providers::custom::emulation 的模块头（含实测记录）
       clientEmulation: 'opencode',
@@ -181,7 +184,7 @@
     {
       key: 'ollama-local', name: 'Ollama（本地）', icon: 'ollama-local.png',
       protocol: P.openai, baseUrl: 'http://localhost:11434/v1',
-      hint: '本机 Ollama 的 OpenAI 兼容端点，无需 API Key（默认已勾上「该上游无需鉴权」，鉴权头一个都不发）',
+      hint: wbI18n.t('本机 Ollama 的 OpenAI 兼容端点，无需 API Key（默认已勾上「该上游无需鉴权」，鉴权头一个都不发）'),
       account: { noAuth: true },
     },
   ];

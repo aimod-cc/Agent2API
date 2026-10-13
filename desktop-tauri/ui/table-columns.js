@@ -69,7 +69,7 @@
   const GRIP_CLASS = 'col-grip';
   /** 末列的把手（往内让 4px，见模块头的「把手的定位与末列」） */
   const GRIP_END_CLASS = 'col-grip-end';
-  const gripHtml = end => `<span class="${GRIP_CLASS}${end ? ` ${GRIP_END_CLASS}` : ''}" title="拖动调整列宽（双击还原）"></span>`;
+  const gripHtml = end => `<span class="${GRIP_CLASS}${end ? ` ${GRIP_END_CLASS}` : ''}" title="${wbI18n.t('拖动调整列宽（双击还原）')}"></span>`;
 
   /**
    * 六张表的登记：columns 的顺序就是列顺序。
@@ -101,7 +101,7 @@
       id: 'models',
       mode: 'table',
       root: '.page[data-page="gateway"] table.models-table',
-      columns: ['model', 'rate', 'source', 'budget', 'caps', 'alias', 'act'].map(key => ({ key })),
+      columns: ['check', 'model', 'rate', 'source', 'budget', 'caps', 'alias', 'act'].map(key => ({ key })),
       columnsOf: visibleColumnsOf(() => window.wbModelsPanel?.visibleColumns?.()),
     },
     {

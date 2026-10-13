@@ -26,10 +26,14 @@
 //!                        管理 API 在 `api::custom_providers`，账号接入在
 //!                        `account_store::custom_accounts`
 //!   scheduled_tasks.rs   间隔型定时任务注册表与调度循环（凭证维护 / 模型刷新 /
-//!                        定时查询积分 / 两个前端自动刷新；开关与间隔来自 config，
+//!                        两个前端自动刷新；开关与间隔来自 config，
 //!                        路由见 `api::scheduled_tasks`）
-//!   usage_query.rs       余额 / 积分查询（目标集合解析 + 跨账号并发 + 定时那一轮的
-//!                        结果快照；查询逻辑在 core 是为了让手动与定时共用一份）
+//!   usage_query.rs       余额 / 积分查询（目标集合解析 + 跨账号并发 + 每账号
+//!                        到期的心跳调度；查询逻辑在 core 是为了让手动与自动
+//!                        共用一份）
+//!   usage_records.rs     每账号的余额查询记录（account_usage_records 表）与
+//!                        选路用的内存事实表 —— 余额不足跳过 / 自动禁用的
+//!                        数据底座
 //!   key_scope.rs         本次请求命中的网关 Key 及其可用提供商 / 可用模型限制
 //!                        （R9；中间件放入请求扩展，handler 与转发层读出）
 //!   update/              软件更新（版本/出网/下载状态机）（workbuddy-update.mjs）
@@ -52,8 +56,12 @@ pub mod api_keys;
 pub mod auth;
 pub mod auth_http;
 pub mod auto_checkin;
+pub mod beijing;
 pub mod billing;
 pub mod capability;
+pub mod checkin_history;
+pub mod checkin_records;
+pub mod checkin_schedules;
 pub mod clash;
 pub mod credential_maintenance;
 pub mod custom_providers;
@@ -63,6 +71,7 @@ pub mod egress;
 pub mod endpoints;
 pub mod import_ccswitch;
 pub mod key_scope;
+pub mod limiter;
 pub mod login;
 pub mod model_rules;
 pub mod models;
@@ -78,3 +87,4 @@ pub mod task_state;
 pub mod update;
 pub mod upstream;
 pub mod usage_query;
+pub mod usage_records;

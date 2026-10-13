@@ -14,6 +14,7 @@ import {
   writePageSize,
   type PageSizeChoice,
 } from './table-shell'
+import { t } from '../i18n'
 
 /**
  * Agent2API · 请求日志页（网关转发明细：筛选 / 分页 / 自动刷新）—— React 岛。
@@ -138,6 +139,8 @@ type SharedWindow = {
   wbRequestClearModal?: { open?: () => unknown }
   wbColSettings?: ColSettingsApi
   wbTableColumns?: { repaint?: (id: string) => void }
+  /** Token 读数的量级口径（万 / 亿 与 k / M，随界面语言）：唯一实现在 ui/units.js */
+  wbUnits?: { formatTokens?: (value: unknown) => string }
 }
 
 function shared(): SharedWindow {
@@ -164,24 +167,25 @@ function escapeHtml(value: string): string {
  *
  * 数据来自后端在途期间写入的 `phase` / `phaseStartedAt`（见 core::upstream::usage::LogPhase）：
  * phase 空串 = 不在途（终态行、旧行），回落成通用的「进行中」。
+ * 文案（含悬停说明）在模块求值时走 t()：岛加载晚于 head 里的 i18n 词典注入，拿得到译文。
  */
 const PHASES: Record<string, { label: string; cls: string }> = {
-  connecting: { label: '连接中', cls: 'phase-connecting' },
-  waiting: { label: '等待响应', cls: 'phase-waiting' },
-  streaming: { label: '响应中', cls: 'phase-streaming' },
-  retrying: { label: '重试中', cls: 'phase-retrying' },
-  queued: { label: '排队中', cls: 'phase-queued' },
+  connecting: { label: t('连接中'), cls: 'phase-connecting' },
+  waiting: { label: t('等待响应'), cls: 'phase-waiting' },
+  streaming: { label: t('响应中'), cls: 'phase-streaming' },
+  retrying: { label: t('重试中'), cls: 'phase-retrying' },
+  queued: { label: t('排队中'), cls: 'phase-queued' },
 }
-const PHASE_FALLBACK_LABEL = '进行中'
+const PHASE_FALLBACK_LABEL = t('进行中')
 const PHASE_FALLBACK_CLS = 'running'
 /** 每个阶段的悬停说明：徽章只有四个字，落点要说清「这一步在干什么」 */
 const PHASE_TITLES: Record<string, string> = {
-  connecting: '请求已受理，正在选路、取凭证、建立上游连接',
-  waiting: '上游请求已发出，正在等第一个字节到达（模型的思考时间也在这段）',
-  streaming: '首帧已到，上游内容正在下发',
-  retrying: '本轮尝试失败，正在退避等待或切换到下一个账号',
-  queued: '上游模型繁忙，请求已排进上游队列；网关正按上游建议的时长等待后重发（不是登录态或额度问题）',
-  '': '请求正在转发中，用时列显示的是已用时',
+  connecting: t('请求已受理，正在选路、取凭证、建立上游连接'),
+  waiting: t('上游请求已发出，正在等第一个字节到达（模型的思考时间也在这段）'),
+  streaming: t('首帧已到，上游内容正在下发'),
+  retrying: t('本轮尝试失败，正在退避等待或切换到下一个账号'),
+  queued: t('上游模型繁忙，请求已排进上游队列；网关正按上游建议的时长等待后重发（不是登录态或额度问题）'),
+  '': t('请求正在转发中，用时列显示的是已用时'),
 }
 
 /** 行对象里那个阶段字面量，非法值一律按「没有阶段」处理（不猜） */
@@ -208,8 +212,8 @@ function phaseElapsedText(ms: unknown): string {
   const value = Number(ms)
   if (!Number.isFinite(value) || value < 0) return ''
   const seconds = Math.max(1, Math.floor(value / 1000))
-  if (seconds < 60) return `${seconds}秒`
-  return `${Math.floor(seconds / 60)}分${seconds % 60}秒`
+  if (seconds < 60) return t('{n}秒', { n: seconds })
+  return t('{m}分{s}秒', { m: Math.floor(seconds / 60), s: seconds % 60 })
 }
 
 /**
@@ -243,7 +247,8 @@ function phaseElapsedLineHtml(entry: unknown): string {
   const text = phaseElapsedText(phaseElapsedMsOf(entry))
   if (!text) return ''
   const label = phaseLabelOf(entry)
-  return `<span class="req-phase-elapsed" title="${escapeHtml(`进入「${label}」阶段已持续 ${text}`)}">`
+  const tip = t('进入「{phase}」阶段已持续 {time}', { phase: label, time: text })
+  return `<span class="req-phase-elapsed" title="${escapeHtml(tip)}">`
     + `${escapeHtml(text)}</span>`
 }
 
@@ -251,15 +256,15 @@ function phaseElapsedLineHtml(entry: unknown): string {
  * key 取 table-columns.js 里登记的同一套：与 CSS 里的 .req-xxx 类同名；`sel` 是表头格的
  * 选择器、`track` 是默认轨道。列的集合只有一套，这里管显隐与顺序，那边管列宽。 */
 const COLUMNS: Column[] = [
-  { key: 'time', label: '时间', sel: '.req-time', track: '92px' },
-  { key: 'target', label: '提供商 / 账号', sel: '.req-target', track: 'minmax(0, 1.1fr)' },
-  { key: 'retry', label: '重试', sel: '.req-retry', track: '52px' },
-  { key: 'status', label: '状态', sel: '.req-status', track: '96px' },
-  { key: 'model', label: '模型', sel: '.req-model', track: 'minmax(0, 1.3fr)' },
-  { key: 'dur', label: '用时', sel: '.req-dur', track: '96px', align: 'right' },
-  { key: 'usage', label: '用量', sel: '.req-usage', track: 'minmax(0, 1.6fr)' },
-  { key: 'error', label: '错误', sel: '.req-error-cell', track: 'minmax(0, 1.2fr)' },
-  { key: 'detail', label: '详情', sel: '.req-detail', track: '60px', align: 'right' },
+  { key: 'time', label: t('时间'), sel: '.req-time', track: '92px' },
+  { key: 'target', label: t('提供商 / 账号'), sel: '.req-target', track: 'minmax(0, 1.1fr)' },
+  { key: 'retry', label: t('重试'), sel: '.req-retry', track: '52px' },
+  { key: 'status', label: t('状态'), sel: '.req-status', track: '96px' },
+  { key: 'model', label: t('模型'), sel: '.req-model', track: 'minmax(0, 1.3fr)' },
+  { key: 'dur', label: t('用时'), sel: '.req-dur', track: '96px', align: 'right' },
+  { key: 'usage', label: t('用量'), sel: '.req-usage', track: 'minmax(0, 1.6fr)' },
+  { key: 'error', label: t('错误'), sel: '.req-error-cell', track: 'minmax(0, 1.2fr)' },
+  { key: 'detail', label: t('详情'), sel: '.req-detail', track: '60px', align: 'right' },
 ]
 
 /* ─── 常量 ─────────────────────────────────── */
@@ -290,10 +295,10 @@ const RANGES: readonly string[] = ['today', '7', '30', 'month', 'all']
 const DEFAULT_RANGE = 'all'
 /** 摘要文字（「近 7 天」）与分段控件上的短标签（「7 天」）是两套，别合并：控件里位置窄 */
 const RANGE_LABEL: Record<string, string> = {
-  today: '今天', 7: '近 7 天', 30: '近 30 天', month: '本月', all: '全部',
+  today: t('今天'), 7: t('近 7 天'), 30: t('近 30 天'), month: t('本月'), all: t('全部'),
 }
 const RANGE_OPTION_LABEL: Record<string, string> = {
-  today: '今天', 7: '7 天', 30: '30 天', month: '本月', all: '全部',
+  today: t('今天'), 7: t('7 天'), 30: t('30 天'), month: t('本月'), all: t('全部'),
 }
 /** 选项提到模块级：SegmentedControl 每拿到新数组都要重新量滑块位置，常量能省掉这轮测量 */
 const RANGE_OPTIONS: readonly SegmentedControlOption<string>[] = RANGES.map(value => ({
@@ -302,13 +307,13 @@ const RANGE_OPTIONS: readonly SegmentedControlOption<string>[] = RANGES.map(valu
 
 /** 状态下拉的选项（与旧 index.html 里那三个 option 逐字一致） */
 const STATUS_OPTIONS: readonly { value: string; label: string }[] = [
-  { value: '', label: '全部状态' },
-  { value: 'ok', label: '成功' },
-  { value: 'error', label: '失败' },
+  { value: '', label: t('全部状态') },
+  { value: 'ok', label: t('成功') },
+  { value: 'error', label: t('失败') },
 ]
-const ALL_STATUS_LABEL = '全部状态'
-const ALL_PROVIDER_LABEL = '全部提供商'
-const ALL_MODEL_LABEL = '全部模型'
+const ALL_STATUS_LABEL = t('全部状态')
+const ALL_PROVIDER_LABEL = t('全部提供商')
+const ALL_MODEL_LABEL = t('全部模型')
 
 type Filters = { status: string; provider: string; model: string }
 const DEFAULT_FILTERS: Filters = { status: '', provider: '', model: '' }
@@ -473,9 +478,9 @@ function formatDuration(ms: unknown): string {
   const rounded = Math.round(Number(ms) || 0)
   if (rounded < 1000) return `${rounded}ms`
   const seconds = Math.floor(rounded / 1000)
-  if (seconds >= 60) return `${Math.floor(seconds / 60)}分${seconds % 60}秒`
+  if (seconds >= 60) return t('{m}分{s}秒', { m: Math.floor(seconds / 60), s: seconds % 60 })
   const millis = rounded % 1000
-  return millis > 0 ? `${seconds}秒${millis}ms` : `${seconds}秒`
+  return millis > 0 ? t('{s}秒{ms}ms', { s: seconds, ms: millis }) : t('{n}秒', { n: seconds })
 }
 
 /**
@@ -488,9 +493,10 @@ function formatFirstResponse(ms: unknown): string {
   return formatDuration(value)
 }
 
-/** 用量读数：明细里存的是精确值，展示也用精确值（千分位），缩写会丢比对基准 */
+/** 用量读数：量级词与分档交给 units.js 的 formatTokens（与报表页 / 账号页同一口径，
+ *  中文「万 / 亿」与英文「k / M」的切换在那边一处）；桥不在位时退回精确千分位 */
 function formatTokens(value: unknown): string {
-  return (Number(value) || 0).toLocaleString('zh-CN')
+  return shared().wbUnits?.formatTokens?.(value) ?? (Number(value) || 0).toLocaleString('zh-CN')
 }
 
 /**
@@ -499,7 +505,7 @@ function formatTokens(value: unknown): string {
  */
 function formatElapsed(ts: unknown): string {
   const elapsed = Math.max(0, Date.now() - (Number(ts) || 0))
-  return `${Math.max(1, Math.floor(elapsed / 1000))}秒`
+  return t('{n}秒', { n: Math.max(1, Math.floor(elapsed / 1000)) })
 }
 
 /** 缓存命中率：命中读取 / 输入，分母为 0 时无意义，给「-」 */
@@ -643,7 +649,7 @@ function ensureColumns(): void {
   colTried = true
   colHandle = api.register({
     id: 'requests',
-    label: '请求日志表',
+    label: t('请求日志表'),
     columns: COLUMNS.map(({ key, label, align }) => ({ key, label, align })),
     mount: () => document.querySelector('.page[data-page="requests"] .panel-head .head-actions'),
     onChange: () => {
@@ -678,9 +684,9 @@ const EMPTY_DATA: PanelData = {
 }
 
 function emptyText(data: PanelData): string {
-  if (!data.loaded) return '正在加载请求日志…'
-  if (!data.total) return '暂无请求日志，网关还没有转发过请求'
-  return '没有符合筛选条件的请求'
+  if (!data.loaded) return t('正在加载请求日志…')
+  if (!data.total) return t('暂无请求日志，网关还没有转发过请求')
+  return t('没有符合筛选条件的请求')
 }
 
 /* ─── 单元格渲染 ───────────────────────────── */
@@ -693,8 +699,8 @@ function runningFirstLine(entry: RequestEntry): React.ReactNode {
   const value = Number(entry.firstResponseMs)
   if (!Number.isFinite(value) || value <= 0) return null
   return (
-    <span className='req-dur-line sub' title='首响：上游首帧到达的耗时（请求仍在转发中）'>
-      {`首响 ${formatDuration(value)}`}
+    <span className='req-dur-line sub' title={t('首响：上游首帧到达的耗时（请求仍在转发中）')}>
+      {t('首响 {time}', { time: formatDuration(value) })}
     </span>
   )
 }
@@ -733,16 +739,19 @@ function requestCell(entry: RequestEntry, column: VisibleColumn): React.ReactNod
       return (
         <span key={key} className={className}>
           {provider ? (
-            <span className='req-provider' title={id && id !== provider ? `${provider}（${id}）` : provider}>
+            <span className='req-provider'
+              title={id && id !== provider ? t('{name}（{id}）', { name: provider, id }) : provider}>
               {provider}
             </span>
           ) : (
-            <span className='req-provider is-empty' title='这条明细没有记录提供商（旧数据或请求未走到转发）'>—</span>
+            <span className='req-provider is-empty'
+              title={t('这条明细没有记录提供商（旧数据或请求未走到转发）')}>—</span>
           )}
           {entry.accountName ? (
             <span className='req-acct' title={entry.accountId || entry.accountName}>{entry.accountName}</span>
           ) : (
-            <span className='req-acct is-empty' title='请求在任何账号接手之前就失败了'>—</span>
+            <span className='req-acct is-empty'
+              title={t('请求在任何账号接手之前就失败了')}>—</span>
           )}
         </span>
       )
@@ -759,7 +768,7 @@ function requestCell(entry: RequestEntry, column: VisibleColumn): React.ReactNod
       if (entry.isTest) {
         tags.push(
           <Badge key='test' variant='brand' shape='tag'
-            title='这条明细是一次模型测试（人工发起）：走的是真实转发链路，但不计入报表统计'>测试</Badge>,
+            title={t('这条明细是一次模型测试（人工发起）：走的是真实转发链路，但不计入报表统计')}>{t('测试')}</Badge>,
         )
       }
       // 判据交给悬停面板模块（它要读明细内部字段）；兜底成 attempts > 1：模块没就绪时至少换过
@@ -773,7 +782,7 @@ function requestCell(entry: RequestEntry, column: VisibleColumn): React.ReactNod
           // button 上（不是覆盖），观感则回到组件库的语义档（原来手写的 `warn` 即 warning）
           <Badge key='chain' variant='warning' shape='tag' render={<button type='button' />}
             className='req-hover-tag' data-req-hover='chain' data-req-id={identity}>
-            {count > 1 ? `重试 ${count}` : '重试'}
+            {count > 1 ? t('重试 {n}', { n: count }) : t('重试')}
           </Badge>,
         )
       }
@@ -785,7 +794,7 @@ function requestCell(entry: RequestEntry, column: VisibleColumn): React.ReactNod
         tags.push(
           <Badge key='sensitive' variant='sensitive' shape='tag' render={<button type='button' />}
             className='req-hover-tag' data-req-hover='sensitive' data-req-id={identity}
-            aria-label='命中了敏感词'>敏</Badge>,
+            aria-label={t('命中了敏感词')}>{t('敏')}</Badge>,
         )
       }
       if (!tags.length) return <span key={key} className={`req-none ta-${align}`}>-</span>
@@ -800,8 +809,8 @@ function requestCell(entry: RequestEntry, column: VisibleColumn): React.ReactNod
           return (
             <span key={key} className={className}>
               <span className='req-status-badge'>
-                <Badge shape='tag' variant='info' title='请求正在转发中，用时列显示的是已用时'>
-                  <BadgeDot className='req-live-dot' aria-hidden='true' />进行中
+                <Badge shape='tag' variant='info' title={t('请求正在转发中，用时列显示的是已用时')}>
+                  <BadgeDot className='req-live-dot' aria-hidden='true' />{t('进行中')}
                 </Badge>
               </span>
             </span>
@@ -820,12 +829,12 @@ function requestCell(entry: RequestEntry, column: VisibleColumn): React.ReactNod
       const ok = isOk(entry)
       // 走到这里 status=0 的只剩「还没发出请求就失败」的历史行：写 0 会被读成 HTTP 状态码，退成「失败」
       const title = !ok && status >= 200 && status < 300
-        ? `HTTP ${status}，但响应体阶段出错：见错误列`
+        ? t('HTTP {status}，但响应体阶段出错：见错误列', { status })
         : undefined
       return (
         <span key={key} className={className}>
           <Badge shape='tag' variant={ok ? 'success' : 'destructive'} title={title}>
-            {status || '失败'}
+            {status || t('失败')}
           </Badge>
         </span>
       )
@@ -847,8 +856,10 @@ function requestCell(entry: RequestEntry, column: VisibleColumn): React.ReactNod
       const downText = tag(client, clientLevel)
       return (
         <span key={key} className={`${className} req-model-split`}>
-          <span className='req-model-line' title={`转发到上游的模型：${upText}`}>⬆️ {upText}</span>
-          <span className='req-model-line sub' title={`下游请求的模型：${downText}`}>⬇️ {downText}</span>
+          <span className='req-model-line'
+            title={t('转发到上游的模型：{model}', { model: upText })}>⬆️ {upText}</span>
+          <span className='req-model-line sub'
+            title={t('下游请求的模型：{model}', { model: downText })}>⬇️ {downText}</span>
         </span>
       )
     }
@@ -858,7 +869,7 @@ function requestCell(entry: RequestEntry, column: VisibleColumn): React.ReactNod
         // 进行中行没有 durationMs（收尾才记账）：主行显示已用时（每拍轮询在走）
         return (
           <span key={key} className={className}>
-            <span className='req-dur-line' title='已用时（请求仍在转发中）'>{formatElapsed(entry.ts)}</span>
+            <span className='req-dur-line' title={t('已用时（请求仍在转发中）')}>{formatElapsed(entry.ts)}</span>
             {runningFirstLine(entry)}
           </span>
         )
@@ -866,8 +877,8 @@ function requestCell(entry: RequestEntry, column: VisibleColumn): React.ReactNod
       return (
         <span key={key} className={className}>
           <span className='req-dur-line'>{formatDuration(entry.durationMs)}</span>
-          <span className='req-dur-line sub' title='首响：上游首帧到达的耗时'>
-            {`首响 ${formatFirstResponse(entry.firstResponseMs)}`}
+          <span className='req-dur-line sub' title={t('首响：上游首帧到达的耗时')}>
+            {t('首响 {time}', { time: formatFirstResponse(entry.firstResponseMs) })}
           </span>
         </span>
       )
@@ -879,14 +890,16 @@ function requestCell(entry: RequestEntry, column: VisibleColumn): React.ReactNod
       // 失败请求的 token 由后端一律清零，写「0」会让人以为真的消耗了这些量
       if (!isOk(entry)) {
         return (
-          <span key={key} className={className} title='失败请求不记录用量'>
+          <span key={key} className={className} title={t('失败请求不记录用量')}>
             <span className='req-usage-line'>in: - / out: - / all: -</span>
-            <span className='req-usage-line sub'>缓存读取: - / 命中率: -</span>
+            <span className='req-usage-line sub'>{t('缓存读取: - / 命中率: -')}</span>
           </span>
         )
       }
       const line1 = `in: ${formatTokens(entry.promptTokens)} / out: ${formatTokens(entry.completionTokens)} / all: ${formatTokens(entry.totalTokens)}`
-      const line2 = `缓存读取: ${formatTokens(entry.cacheReadTokens)} / 命中率: ${cacheRate(entry)}`
+      const line2 = t('缓存读取: {cache} / 命中率: {rate}', {
+        cache: formatTokens(entry.cacheReadTokens), rate: cacheRate(entry),
+      })
       return (
         <span key={key} className={className} title={`${line1}\n${line2}`}>
           <span className='req-usage-line'>{line1}</span>
@@ -910,8 +923,8 @@ function requestCell(entry: RequestEntry, column: VisibleColumn): React.ReactNod
       if (!id) return <span key={key} className={`req-none ${base} ta-${align}`}>-</span>
       return (
         <span key={key} className={className}>
-          <Button size='sm' variant='outline' className='req-detail-btn' title='查看该请求的上游原始报文'
-            onClick={() => { void shared().wbRequestDetail?.open?.(id, entry) }}>详情</Button>
+          <Button size='sm' variant='outline' className='req-detail-btn' title={t('查看该请求的上游原始报文')}
+            onClick={() => { void shared().wbRequestDetail?.open?.(id, entry) }}>{t('详情')}</Button>
         </span>
       )
     }
@@ -1022,7 +1035,7 @@ function RequestsPage() {
     const token = ++seq
     try {
       const api = shared().workbuddyDesktop
-      if (!api) throw new Error('后端桥不可用')
+      if (!api) throw new Error(t('后端桥不可用'))
       const result = await api.getStatsRequests(queryParams())
       if (token !== seq) return
       const next: PanelData = {
@@ -1047,7 +1060,7 @@ function RequestsPage() {
       // 静默（轮询）时保留上一屏数据，只当没刷过：把读数清成 0 会让人以为明细被删了
       if (!silent) {
         console.warn('读取请求日志失败:', errorMessage(error))
-        paintError('读取请求日志失败，详见控制台')
+        paintError(t('读取请求日志失败，详见控制台'))
       }
     }
   }, [applyOffset, paint, paintError, restoreSavedFilters])
@@ -1212,15 +1225,17 @@ function RequestsPage() {
   const pageRangeEnd = data.matched ? offset + data.entries.length : 0
   const badgeText = data.error
     ? '—'
-    : data.matched === data.total ? `${data.total} 条` : `${data.matched} / ${data.total} 条`
+    : data.matched === data.total
+      ? t('{n} 条', { n: data.total })
+      : t('{matched} / {total} 条', { matched: data.matched, total: data.total })
   // 「仅看进行中」开着时整页都是进行中，再缀一遍就成了复读
-  const liveText = !runningOnly && data.running > 0 ? ` · ${data.running} 进行中` : ''
+  const liveText = !runningOnly && data.running > 0 ? t(' · {n} 进行中', { n: data.running }) : ''
 
   /** 页脚读数：范围、状态、提供商与模型都写出来，「为什么只有这几条」一眼可查 */
-  const summaryParts = [RANGE_LABEL[range] || '全部']
-  if (runningOnly) summaryParts.push('只看进行中')
-  else if (filters.status === 'ok') summaryParts.push('只看成功')
-  else if (filters.status === 'error') summaryParts.push('只看失败')
+  const summaryParts = [RANGE_LABEL[range] || t('全部')]
+  if (runningOnly) summaryParts.push(t('只看进行中'))
+  else if (filters.status === 'ok') summaryParts.push(t('只看成功'))
+  else if (filters.status === 'error') summaryParts.push(t('只看失败'))
   if (filters.provider) summaryParts.push(providerLabelOf(filters.provider))
   if (filters.model) summaryParts.push(filters.model)
 
@@ -1245,16 +1260,16 @@ function RequestsPage() {
   return (
     <section className='panel'>
       <div className='panel-head'>
-        <h2>请求日志列表</h2>
+        <h2>{t('请求日志列表')}</h2>
         {/* id 保留：app.js 的 renderTopbarStatus 按 id 镜像这枚徽标的文案与配色（data-tone 空串
             = 无修饰，与旧实现 renderBadge 只写 'badge' 等价） */}
         <Badge id='req-badge' variant='outline' data-tone=''>{badgeText + liveText}</Badge>
-        <span className='panel-sub'>按时间倒序，保留期在设置页可调</span>
+        <span className='panel-sub'>{t('按时间倒序，保留期在设置页可调')}</span>
         <div className='head-actions'>
           {/* 打开清理弹窗（request-clear-modal.tsx）：两种删除方式 + 预览统计 + 压缩数据库都在
               那边；本页只负责把当前筛选参数给它（见 clearParams） */}
           <Button id='btn-req-clear' variant='destructive'
-            onClick={() => { void shared().wbRequestClearModal?.open?.() }}>清理</Button>
+            onClick={() => { void shared().wbRequestClearModal?.open?.() }}>{t('清理')}</Button>
         </div>
       </div>
 
@@ -1263,15 +1278,15 @@ function RequestsPage() {
           {/* 时间档位用组件库的 SegmentedControl（不再经 wbSegmented 挂载点）。shrink-0 补的是旧
               CSS `.log-filters .seg { flex: 0 0 auto }`：新控件没有 .seg 类，不补会被压扁 */}
           <SegmentedControl options={RANGE_OPTIONS} value={range} onValueChange={onRangeChange}
-            aria-label='请求日志时间范围' className='shrink-0' />
+            aria-label={t('请求日志时间范围')} className='shrink-0' />
           {/* min-w-[120px] 补的是旧 CSS `.log-filters select { width: auto; min-width: 120px }`：
               原生 select 换成按钮触发器后那条规则不再命中；#req-provider / #req-model 的 max-width
               仍在 page-requests.css 里按 id 命中。展示文案显式给 SelectValue（不依赖 value 自动显示） */}
           <Select value={filters.status} disabled={runningOnly}
             onValueChange={next => onSelectChange({ status: String(next ?? '') })}>
             <SelectTrigger id='req-status' className='min-w-[120px]'
-              title={runningOnly ? '「仅看进行中」开启时，状态固定为进行中' : '按请求结果筛选'}
-              aria-label='按请求结果筛选'>
+              title={runningOnly ? t('「仅看进行中」开启时，状态固定为进行中') : t('按请求结果筛选')}
+              aria-label={t('按请求结果筛选')}>
               <SelectValue>
                 {STATUS_OPTIONS.find(item => item.value === filters.status)?.label ?? ALL_STATUS_LABEL}
               </SelectValue>
@@ -1285,7 +1300,7 @@ function RequestsPage() {
           <Select value={filters.provider}
             onValueChange={next => onSelectChange({ provider: String(next ?? '') })}>
             <SelectTrigger id='req-provider' className='min-w-[120px]'
-              title='按提供商筛选（只列日志里出现过的）' aria-label='按提供商筛选'>
+              title={t('按提供商筛选（只列日志里出现过的）')} aria-label={t('按提供商筛选')}>
               <SelectValue>
                 {filters.provider
                   ? (providerSelectOptions.find(item => item.value === filters.provider)?.label || filters.provider)
@@ -1302,7 +1317,7 @@ function RequestsPage() {
           <Select value={filters.model}
             onValueChange={next => onSelectChange({ model: String(next ?? '') })}>
             <SelectTrigger id='req-model' className='min-w-[120px]'
-              title='按模型筛选（只列日志里出现过的；精确匹配模型名）' aria-label='按模型筛选'>
+              title={t('按模型筛选（只列日志里出现过的；精确匹配模型名）')} aria-label={t('按模型筛选')}>
               <SelectValue>{filters.model || ALL_MODEL_LABEL}</SelectValue>
             </SelectTrigger>
             <SelectContent>
@@ -1318,7 +1333,7 @@ function RequestsPage() {
               都由组件库给，不再手写类名。互斥规则不变：开启时状态下拉停用（见上面那颗 Select） */}
           <Toggle id='btn-req-running' variant='outline' size='default' pressed={runningOnly}
             onPressedChange={onRunningOnlyChange}
-            title='只显示正在转发中的请求（状态列按阶段显示：连接中 / 等待响应 / 响应中 / 重试中，用时列显示已用时）'>仅看进行中</Toggle>
+            title={t('只显示正在转发中的请求（状态列按阶段显示：连接中 / 等待响应 / 响应中 / 重试中，用时列显示已用时）')}>{t('仅看进行中')}</Toggle>
           <div className='spacer' />
           <span className='panel-sub' id='req-summary'>{summaryParts.join(' · ')}</span>
         </div>

@@ -1,12 +1,11 @@
 import * as React from 'react'
 import { createRoot } from 'react-dom/client'
-import { Badge, Button, Checkbox, Input, Switch } from '@ui'
+import { Badge, Button, Input, Switch } from '@ui'
+import { t } from '../i18n'
 // 「把检查结果交给更新弹窗」与 app.js 的轮询同一条出口，实现在更新家族的共享模块里
-// （它自带那一族的桥类型与弹窗判定，见 update-shared.ts 的 forwardUpdateResult）
-import { forwardUpdateResult } from './update-shared'
 
 /**
- * 定时任务面板（间隔型任务 + 自动签到）—— 本项目的第一个**面板岛**。
+ * 定时任务面板（间隔型任务）—— 本项目的第一个**面板岛**。
  *
  * 替换的是 ui/tasks-panel.js（那份用 innerHTML 拼 .task-item / .badge 那套老类名、
  * 事件走容器委托）。对外接口与原实现**完全一致**：`window.wbTasksPanel.load()`，
@@ -30,25 +29,27 @@ import { forwardUpdateResult } from './update-shared'
  * 长得不一样。里面的**控件**一律换成 @ui：button → Button、.badge → Badge、
  * 开关 → Switch、复选框 → Checkbox、数字 / 时刻输入 → Input。
  *
- * ── 这一页管两类任务（接口也是两组）──────────────────────────
- *   · **间隔型**（凭证自动维护 / 定时查询积分 / 模型目录刷新 / 软件版本检查 /
+ * ── 这一页管什么（接口只有一组）──────────────────────────────
+ *   · **间隔型**（凭证自动维护 / 模型目录刷新 /
  *     日志页自动刷新 / 请求日志自动刷新 / 报表自动刷新）
  *     —— 形状统一：`{enabled, interval}`，走 /api/scheduled-tasks。
- *   · **自动签到** —— 每天定点型：`{enabled, time, providers}` 外加当天去重与
- *     启动补签，走 /api/auto-checkin。两者形状不同，所以后端也是两组接口（理由见
- *     core::scheduled_tasks 与 api::scheduled_tasks 的模块头）；界面上收在同一页，
- *     用同一套卡片观感，只是签到多一个时刻输入框。
+ *     「软件版本检查」也是间隔型、也走同一组接口，但它的配置入口收进了
+ *     「更新设置」弹窗（update-settings.tsx）—— 那一行在本页过滤掉（见
+ *     HIDDEN_TASK_IDS），后端的定时执行不受影响。
  *   · `runner: "frontend"` 的三条（日志页 / 请求日志页 / 报表页自动刷新）执行者是
  *     **页面自己**，所以它们没有「上次执行 / 下次执行」，也不给「立即执行」按钮 ——
  *     按钮点了也没有任何东西可跑；改完配置由本文件推给那三个面板（见 pushAutoRefresh）。
+ *   · **自动签到曾是本页的一条卡片**，已迁到「签到中心」（checkin-page.tsx）——
+ *     签到的执行、范围、历史与设置从此只有那一个出处；两边的接口形状本来就不同
+ *     （定点 vs 间隔），拆开之后本页只剩 /api/scheduled-tasks 一组。
  *
  * ── 旧实现刻意保留的交互：结构没变时只就地更新每张卡的值 ──────────
  * 整块重建会让正在编辑的间隔输入框丢焦点、正在输入的数字被冲掉。React 里同一 id
  * 的卡片由 key 协调、DOM 不重建，焦点天然保住；但**受控输入**还有第二重风险：
  * 轮询回来的外部值会把用户敲到一半的内容覆盖掉。旧实现靠「只更新未聚焦的输入」
- * 解决，这里用等价手法：输入框在编辑期间由本地草稿（intervalDrafts / timeDraft）
- * 接管 value，外部值只在草稿为空（= 用户没在编辑）时才写进去 —— 于是间隔 / 时刻
- * 都走「失焦或回车才提交」，开关这类瞬时动作则立即存（见 submitInterval）。
+ * 解决，这里用等价手法：输入框在编辑期间由本地草稿（intervalDrafts）接管 value，
+ * 外部值只在草稿为空（= 用户没在编辑）时才写进去 —— 于是间隔走「失焦或回车才
+ * 提交」，开关这类瞬时动作则立即存（见 submitInterval）。
  */
 
 /* ─── 类型 ─────────────────────────────────── */
@@ -81,43 +82,10 @@ type IntervalTask = {
   canRun: boolean
 }
 
-/** 签到提供商的一个选项（providerOptions[]）：选项与默认勾选都由后端下发 */
-type CheckinProviderOption = { id: string; label: string }
-
-/** 签到上次执行结果（lastResult）；字段可能缺，展示时逐个归一 */
-type CheckinResult = {
-  at?: number | null
-  reason?: string | null
-  succeeded?: number | null
-  total?: number | null
-  skipped?: number | null
-  failedCount?: number | null
-  failed?: string[] | null
-}
-
 /**
- * 自动签到的状态（GET/POST /api/auto-checkin）。
- * `/run` 的响应是 summary + state 的合并（同名字段以 state 为准），形状仍落在这里。
+ * 本岛用到的后端桥（间隔型任务一组；自动签到的 /api/auto-checkin 已随那张卡片
+ * 迁到签到中心，见 checkin-page.tsx）
  */
-type CheckinState = {
-  enabled?: boolean
-  time?: string
-  providers?: string[]
-  providerOptions?: CheckinProviderOption[]
-  lastFiredToday?: boolean
-  nextRunAt?: number | null
-  lastResult?: CheckinResult | null
-  running?: boolean
-}
-
-/**
- * `POST /api/auto-checkin/run` 的响应：执行 summary 与 state 合并（同名字段以 state
- * 为准，见 api::auto_checkin::run_now）—— 所以它同时带两边的字段，签到结果直接
- * 从这一份响应里读，不必再跑一趟 GET。
- */
-type CheckinRunResult = CheckinState & CheckinResult
-
-/** 本岛用到的后端桥（两组接口，见文件头） */
 type TasksBridge = {
   /** GET /api/scheduled-tasks */
   getScheduledTasks(): Promise<{ tasks?: IntervalTask[] } | null | undefined>
@@ -127,12 +95,6 @@ type TasksBridge = {
   runScheduledTask(
     id: string,
   ): Promise<{ task?: IntervalTask; summary?: string } | null | undefined>
-  /** GET /api/auto-checkin */
-  getAutoCheckin(): Promise<CheckinState>
-  /** POST /api/auto-checkin（{enabled?, time?, providers?}），响应是新状态 */
-  saveAutoCheckin(patch: Record<string, unknown>): Promise<CheckinState>
-  /** POST /api/auto-checkin/run，响应是 summary + state 合并 */
-  runAutoCheckinNow(): Promise<CheckinRunResult | null | undefined>
 }
 
 /**
@@ -163,8 +125,6 @@ type SharedWindow = {
   wbReport?: { applyAutoRefresh?: (task: IntervalTask | null) => unknown }
   wbAccountsView?: {
     syncBalancesSnapshot?: () => unknown
-    /** 签到后把余额读数重新查一遍（账号页的动作层，静默：不弹 toast、结果落在余额列上） */
-    refreshUsageAfterCheckin?: (id?: string | null) => unknown
   }
 }
 
@@ -174,40 +134,31 @@ function shared(): SharedWindow {
 
 /* ─── 常量 ─────────────────────────────────── */
 
-/** 自动签到在界面上的 id：它不是间隔型任务，但要在同一个列表里排序与定位 */
-const CHECKIN_ID = 'autoCheckin'
-
 /**
- * 「软件版本检查」的任务 id（后端 `config::KEY_UPDATE_CHECK`）。
+ * 本页**不渲染**的任务 id：软件版本检查（后端 `config::KEY_UPDATE_CHECK`）。
  *
- * 单独起一个常量是因为这一条在 runTask 里有个**额外动作**：查到新版本要把结果转给
- * 更新面板弹窗（见 forwardUpdateResult），不是跑完报一句就完事。
+ * 任务本身还在后端注册表里照常跑（到期自动查 GitHub、状态与冷却照旧落库），
+ * 只是开关与间隔的配置入口收进了「软件更新」面板的「更新设置」弹窗 ——
+ * 和版本相关的设置收在一个地方。本页在 load 与 sync 两个数据入口统一过滤，
+ * 卡片、计数、徽标因此都不看它。
  */
-const UPDATE_CHECK_ID = 'updateCheck'
+const HIDDEN_TASK_IDS: ReadonlySet<string> = new Set(['updateCheck'])
 
-/**
- * 自动签到的说明文案（问号 tooltip 的内容）。
- *
- * 它不来自后端：签到不走 `/api/scheduled-tasks`（形状不同，见文件头），后端那份
- * 注册表里没有这一条，所以文案只能写在这里；其余各条的说明由后端随任务下发。
- */
-const CHECKIN_DESC =
-  '到点后自动签到勾选提供商的已启用账号（WorkBuddy 走每日签到接口，仅限国内版；' +
-  '小浣熊走桌面端每日积分链路；AutoClaw 走官方客户端的每日签到任务；' +
-  'Qoder 走官方活动领取链路，仅限中国版 —— 它的每日权益是当天 10:00 到次日 10:00 的' +
-  '一个活动窗口，没被下发活动的账号会得到「当前没有可领取的签到活动」的中性提示；' +
-  '国际版账号没有签到活动，会被跳过）。' +
-  '多个账号串行执行，避免同时请求触发上游风控。若启动时当天还没签过，会立即补签一次，' +
-  '不会因为当时没开机而漏掉。各家签到接口都是幂等的，重复执行不会重复领取。'
+/** 数据入口统一过滤：本页不渲染的任务不进状态（卡片 / 计数 / 徽标因此都不看它） */
+function filterVisibleTasks(list: { tasks?: IntervalTask[] } | null | undefined): IntervalTask[] {
+  const tasks = Array.isArray(list?.tasks) ? list.tasks : []
+  return tasks.filter(task => !HIDDEN_TASK_IDS.has(task.id))
+}
 
 /** 页面可见时的自动同步间隔：与 app.js 的主状态轮询同频，页面不可见时不跑 */
 const SYNC_MS = 20_000
 
 /**
- * 整行铺开的卡片条数：自动签到 + 凭证自动维护。
- * 其余卡片裹进 `.task-grid` 两栏三行（列优先，见 page-tasks.css 的说明）。
+ * 整行铺开的卡片条数：凭证自动维护（清单的第一条）。
+ * 其余卡片裹进 `.task-grid` 两栏（行优先逐行配对，见 page-tasks.css 的说明）。
+ * 自动签到曾占第一条的位置，迁到签到中心后这里只剩它。
  */
-const LEAD_CARDS = 2
+const LEAD_CARDS = 1
 
 /** 列表里两段文字之间的分隔符（全角空格 + 间隔号），与旧实现逐字一致 */
 const SEP = '　·　'
@@ -223,9 +174,9 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** 间隔单位的中文名：单位由后端给定（'seconds' | 'minutes'），前端不自己猜 */
+/** 间隔单位的展示名：单位由后端给定（'seconds' | 'minutes'），前端不自己猜 */
 function unitLabel(unit: string): string {
-  return unit === 'seconds' ? '秒' : '分钟'
+  return unit === 'seconds' ? t('秒') : t('分钟')
 }
 
 /** 把毫秒时间戳化成「时:分:秒」，供上次 / 下次执行展示 */
@@ -240,14 +191,14 @@ function describeNext(value: unknown): string {
   const ms = Number(value) || 0
   if (!ms) return ''
   const diff = ms - Date.now()
-  if (diff <= 0) return '即将执行'
+  if (diff <= 0) return t('即将执行')
   const seconds = Math.round(diff / 1000)
-  if (seconds < 60) return `${seconds} 秒后`
+  if (seconds < 60) return t('{n} 秒后', { n: seconds })
   const minutes = Math.round(seconds / 60)
-  if (minutes < 60) return `${minutes} 分钟后`
+  if (minutes < 60) return t('{n} 分钟后', { n: minutes })
   const hours = Math.round(minutes / 60)
-  if (hours < 24) return `${hours} 小时后`
-  return `${Math.round(hours / 24)} 天后`
+  if (hours < 24) return t('{n} 小时后', { n: hours })
+  return t('{n} 天后', { n: Math.round(hours / 24) })
 }
 
 /**
@@ -263,44 +214,22 @@ function taskStateText(task: IntervalTask): string {
   const backend = task.runner === 'backend'
   const lines: string[] = []
   if (task.lastRunAt) {
-    lines.push(`上次执行 ${clockOf(task.lastRunAt)}${task.lastResult ? `（${task.lastResult}）` : ''}`)
+    const at = clockOf(task.lastRunAt)
+    // 上次执行的结果原文是后端数据，包进 {result} 形参、不翻译
+    lines.push(task.lastResult
+      ? t('上次执行 {time}（{result}）', { time: at, result: task.lastResult })
+      : t('上次执行 {time}', { time: at }))
   } else {
-    lines.push(backend ? '还没有执行记录' : '由页面按间隔自动刷新')
+    lines.push(backend ? t('还没有执行记录') : t('由页面按间隔自动刷新'))
   }
   if (backend && task.enabled && task.nextRunAt) {
-    lines.push(`下次执行 ${clockOf(task.nextRunAt)}（${describeNext(task.nextRunAt)}）`)
+    lines.push(t('下次执行 {time}（{relative}）', {
+      time: clockOf(task.nextRunAt),
+      relative: describeNext(task.nextRunAt),
+    }))
   }
   if (backend && task.retryAt && task.retryAt > Date.now()) {
-    lines.push(`冷却中，${describeNext(task.retryAt)}重试`)
-  }
-  return lines.join(SEP)
-}
-
-/** 自动签到的运行状态一行（后端未返回设置时给出原因，而不是留空） */
-function checkinStateText(data: CheckinState | null): string {
-  if (!data) return '后端未返回自动签到设置'
-  const lines: string[] = []
-  if (data.enabled !== true) {
-    lines.push('未开启，账号需要手动签到')
-  } else {
-    lines.push(`每天 ${data.time} 自动签到`)
-    if (data.nextRunAt) {
-      lines.push(`下次执行 ${clockOf(data.nextRunAt)}（${describeNext(data.nextRunAt)}）`)
-    }
-  }
-  const result = data.lastResult
-  if (result) {
-    const when = result.at ? new Date(Number(result.at)).toLocaleString('zh-CN', { hour12: false }) : ''
-    const head = `${when ? `${when} ` : ''}上次执行（${result.reason || '定时'}）：` +
-      `${Number(result.succeeded) || 0}/${Number(result.total) || 0} 个成功`
-    const extras: string[] = []
-    if (Number(result.skipped)) extras.push(`跳过 ${Number(result.skipped)} 个`)
-    if (Number(result.failedCount)) extras.push(`失败 ${Number(result.failedCount)} 个`)
-    // 失败明细只列前两条，与账号页的展示密度一致
-    const failed = Array.isArray(result.failed) && result.failed.length
-      ? `（${result.failed.slice(0, 2).join('；')}${result.failed.length > 2 ? ' 等' : ''}）`
-      : ''
-    lines.push(`${head}${extras.length ? `，${extras.join('、')}` : ''}${failed}`)
+    lines.push(t('冷却中，{relative}重试', { relative: describeNext(task.retryAt) }))
   }
   return lines.join(SEP)
 }
@@ -315,11 +244,21 @@ function parseInterval(
 ): { ok: true; value: number } | { ok: false; message: string } {
   const text = String(raw ?? '').trim()
   const unit = unitLabel(task.unit)
-  if (!text) return { ok: false, message: `间隔不能为空（可填 ${task.min}–${task.max} ${unit}）` }
-  if (!/^\d+$/.test(text)) return { ok: false, message: '间隔必须是整数' }
+  if (!text) {
+    return { ok: false, message: t('间隔不能为空（可填 {min}–{max} {unit}）', { min: task.min, max: task.max, unit }) }
+  }
+  if (!/^\d+$/.test(text)) return { ok: false, message: t('间隔必须是整数') }
   const value = Number(text)
   if (value < task.min || value > task.max) {
-    return { ok: false, message: `间隔必须在 ${task.min}–${task.max} ${unit} 之间（当前填的是 ${text}）` }
+    return {
+      ok: false,
+      message: t('间隔必须在 {min}–{max} {unit} 之间（当前填的是 {value}）', {
+        min: task.min,
+        max: task.max,
+        unit,
+        value: text,
+      }),
+    }
   }
   return { ok: true, value }
 }
@@ -339,25 +278,6 @@ function pushAutoRefresh(task: IntervalTask) {
   if (task.id === 'logsAutoRefresh') bridge.wbLogsPanel?.applyAutoRefresh?.(task)
   else if (task.id === 'requestsAutoRefresh') bridge.wbRequestsPanel?.applyAutoRefresh?.(task)
   else if (task.id === 'reportAutoRefresh') bridge.wbReport?.applyAutoRefresh?.(task)
-}
-
-/**
- * 勾选一家提供商之后的完整勾选清单（提交用）。
- *
- * 旧实现是收集 DOM 里所有复选框的 checked 再按 DOM 顺序成数组，这里按同样的
- * 顺序（= providerOptions 的顺序）算出来：后端只认注册过的 id，且会自己按注册
- * 顺序归一，两边不会因为顺序差异对不上。
- */
-function nextProviders(
-  id: string,
-  next: boolean,
-  options: CheckinProviderOption[],
-  picked: string[],
-): string[] {
-  const set = new Set(picked)
-  if (next) set.add(id)
-  else set.delete(id)
-  return options.map(option => option.id).filter(optionId => set.has(optionId))
 }
 
 /* ─── 模块级状态（跨渲染的守卫与入口登记）────────── */
@@ -390,18 +310,12 @@ async function load() {
 function TasksPanel() {
   /** 最近一次拉到的间隔型任务清单 */
   const [tasks, setTasks] = React.useState<IntervalTask[]>([])
-  /** 最近一次拉到的自动签到状态（null = 后端没返回 / 读失败，卡片降级成「不可用」） */
-  const [checkin, setCheckin] = React.useState<CheckinState | null>(null)
   /**
    * 是否已经成功拉到过数据。
-   * 用来区分「还在加载」与「加载失败」—— 两者都是 tasks 空 + checkin 空，
+   * 用来区分「还在加载」与「加载失败」—— 两者都是 tasks 空，
    * 只看数据会把「后端不可用」显示成永远转不完的「正在加载…」。
    */
   const [loaded, setLoaded] = React.useState(false)
-  /** 签到设置保存中：四个签到控件临时禁用（旧实现是直接置 DOM 的 disabled） */
-  const [checkinSaving, setCheckinSaving] = React.useState(false)
-  /** 正在「立即签到」（按钮文案切「签到中…」） */
-  const [checkinRunning, setCheckinRunning] = React.useState(false)
   /** 正在「立即执行」的那条任务 id（按钮文案切「执行中…」；同时只可能有一条） */
   const [runningId, setRunningId] = React.useState<string | null>(null)
   /**
@@ -410,11 +324,6 @@ function TasksPanel() {
    * 「document.activeElement !== interval 时才回填」等价。
    */
   const [intervalDrafts, setIntervalDrafts] = React.useState<Record<string, string | undefined>>({})
-  /** 签到时刻的编辑草稿：null = 跟随后端值（同上） */
-  const [timeDraft, setTimeDraft] = React.useState<string | null>(null)
-
-  /** 签到时刻的「当前值」：编辑中用草稿，否则用后端值（旧实现读的是 DOM 的 value） */
-  const checkinTime = timeDraft ?? (checkin?.time || '00:01')
 
   function clearIntervalDraft(id: string) {
     setIntervalDrafts(prev => {
@@ -430,28 +339,19 @@ function TasksPanel() {
   /**
    * 拉一次清单（结构与数据都更新）。
    *
-   * 两个接口并发拉；签到失败不该让整页不可用，所以它单独 catch、降级成「不可用」
-   * 的那张卡片。外层 catch 兜的是间隔型那一路失败：置 loaded = true 后显示
-   * 「后端未返回任务清单」的失败说明，而不是永远停在加载中。
+   * 外层 catch 兜的是这一路失败：置 loaded = true 后显示「后端未返回任务清单」
+   * 的失败说明，而不是永远停在加载中。
    */
   const loadPanel = React.useCallback(async () => {
     const api = shared().workbuddyDesktop
     try {
-      if (!api) throw new Error('后端桥不可用')
-      const [list, checkinState] = await Promise.all([
-        api.getScheduledTasks(),
-        api.getAutoCheckin().catch(error => {
-          console.warn('读取自动签到设置失败:', errorMessage(error))
-          return null
-        }),
-      ])
-      setTasks(Array.isArray(list?.tasks) ? list.tasks : [])
-      setCheckin(checkinState)
+      if (!api) throw new Error(t('后端桥不可用'))
+      const list = await api.getScheduledTasks()
+      setTasks(filterVisibleTasks(list))
       setLoaded(true)
     } catch (error) {
       console.warn('读取定时任务失败:', errorMessage(error))
       setTasks([])
-      setCheckin(null)
       setLoaded(true) // 标记「尝试过了」，于是空态显示成失败说明而不是加载中
     }
   }, [])
@@ -468,12 +368,8 @@ function TasksPanel() {
     const api = shared().workbuddyDesktop
     if (!api) return
     try {
-      const [list, checkinState] = await Promise.all([
-        api.getScheduledTasks(),
-        api.getAutoCheckin().catch(() => null),
-      ])
-      setTasks(Array.isArray(list?.tasks) ? list.tasks : [])
-      setCheckin(checkinState)
+      const list = await api.getScheduledTasks()
+      setTasks(filterVisibleTasks(list))
     } catch (error) {
       console.warn('同步定时任务状态失败:', errorMessage(error))
     }
@@ -493,7 +389,7 @@ function TasksPanel() {
    *  数据一更新就让它跟上，否则要等下一次主状态轮询（20 秒）才同步。 */
   React.useEffect(() => {
     shared().wbApp?.renderTopbarStatus?.()
-  }, [tasks, checkin, loaded])
+  }, [tasks, loaded])
 
   /** 把加载函数登记给模块级的 load()；顺带补发「挂载前就来的那次加载」 */
   React.useEffect(() => {
@@ -515,6 +411,8 @@ function TasksPanel() {
    * 以接口返回值为准（后端会把非法值夹到范围内并在必要时回落默认值），所以不能
    * 「按前端算的值渲染」—— 那会在后端实际拒绝时显示成已生效。
    * 失败时回滚到后端的真实状态：界面显示的可能是用户刚拨过去的假值。
+   *
+   * `label` 是 toast 里用的展示名，调用方拼好且已走 t()（任务名是后端下发的展示文案）。
    */
   async function saveTask(id: string, patch: Record<string, unknown>, label: string) {
     if (panelBusy) return
@@ -525,9 +423,9 @@ function TasksPanel() {
       const saved = await api.saveScheduledTask(id, patch)
       setTasks(prev => prev.map(task => (task.id === id ? saved : task)))
       pushAutoRefresh(saved)
-      toast(`✅ 已更新「${label}」`)
+      toast(t('✅ 已更新「{label}」', { label }))
     } catch (error) {
-      toast(`保存失败：${errorMessage(error)}`, 'err')
+      toast(t('保存失败：{reason}', { reason: errorMessage(error) }), 'err')
       await loadPanel()
     } finally {
       panelBusy = false
@@ -551,7 +449,7 @@ function TasksPanel() {
       clearIntervalDraft(task.id)
       return
     }
-    await saveTask(task.id, { interval: parsed.value }, `${task.label}间隔`)
+    await saveTask(task.id, { interval: parsed.value }, t('{name}间隔', { name: t(task.label) }))
     // 成功时以后端返回值为准；失败时 saveTask 内部已 loadPanel() 回滚 —— 两种情况都让草稿归位
     clearIntervalDraft(task.id)
   }
@@ -569,105 +467,19 @@ function TasksPanel() {
         const refreshed = result.task
         setTasks(prev => prev.map(item => (item.id === task.id ? refreshed : item)))
       }
-      toast(`✅ ${task.label}：${result?.summary || '已执行'}`)
+      toast(t('✅ {task}：{summary}', {
+        task: t(task.label),
+        summary: result?.summary || t('已执行'),
+      }))
       // 凭证刷新会改账号页的有效期 / 凭证状态，顺手刷新主界面
       if (task.id === 'credentialMaintenance') await shared().wbApp?.refresh?.()
-      // 立即查询积分刚写下一份新快照，让账号页马上应用它 —— 否则用户点完
-      // 「立即执行」切到账号页，看到的还是上一次的旧余额
-      if (task.id === 'usageQuery') await shared().wbAccountsView?.syncBalancesSnapshot?.()
-      // 软件版本检查：查到新版本就弹出「检测到更新」弹窗（与设置页「检查更新」、定时
-      // 任务到期后轮询到结果时同一个弹窗）。放在最后：它只影响别处的展示，跑完本页的
-      // 状态更新与刷新都完成了再播报，用户先看到本页的结果
-      if (task.id === UPDATE_CHECK_ID) await forwardUpdateResult()
     } catch (error) {
-      toast(`执行失败：${errorMessage(error)}`, 'err')
+      toast(t('执行失败：{reason}', { reason: errorMessage(error) }), 'err')
       await loadPanel()
     } finally {
       panelBusy = false
       setRunningId(null)
     }
-  }
-
-  /* ─── 操作：自动签到 ─────────────────────── */
-
-  /**
-   * 保存签到设置（开关 / 时刻 / 提供商三处共用）。
-   *
-   * 保存期间四个签到控件全部禁用（旧实现直接置 DOM 的 disabled）：一是请求在飞时
-   * 界面上的勾选还是旧值，二是这些控件都要按「完整清单」提交，中途再点会以旧状态
-   * 为准算出错误的 patch。失败回滚到后端的真实状态。
-   */
-  async function saveCheckin(patch: Record<string, unknown>, label: string) {
-    if (panelBusy) return
-    const api = shared().workbuddyDesktop
-    if (!api) return
-    panelBusy = true
-    setCheckinSaving(true)
-    try {
-      setCheckin(await api.saveAutoCheckin(patch))
-      toast(`✅ 已更新「${label}」`)
-    } catch (error) {
-      toast(`保存失败：${errorMessage(error)}`, 'err')
-      setCheckin(await api.getAutoCheckin().catch(() => null))
-    } finally {
-      panelBusy = false
-      setCheckinSaving(false)
-    }
-  }
-
-  /**
-   * 签到时刻提交（失焦 / 回车）。
-   *
-   * 旧实现走原生 change（提交时机由浏览器定：失焦、或用选择器选完一个完整时刻），
-   * 注释里写明了「拖动时间选择器时不该每动一下就发请求」；React 的 onChange 是
-   * input 事件，会在拖动时连续触发，所以这里把提交挪到 blur —— 与旧实现同义。
-   */
-  async function submitCheckinTime(value: string) {
-    const current = checkin?.time || '00:01'
-    if (!checkin || value === current) {
-      setTimeDraft(null)
-      return
-    }
-    await saveCheckin({ enabled: checkin.enabled === true, time: value }, '签到触发时刻')
-    setTimeDraft(null)
-  }
-
-  /** 立即签到一次 */
-  async function runCheckin() {
-    if (panelBusy) return
-    const api = shared().workbuddyDesktop
-    if (!api) return
-    panelBusy = true
-    setCheckinRunning(true)
-    try {
-      const result = await api.runAutoCheckinNow()
-      const succeeded = Number(result?.succeeded) || 0
-      const total = Number(result?.total) || 0
-      const failed = Number(result?.failedCount) || 0
-      if (failed) {
-        toast(`签到完成：${succeeded}/${total} 成功，${failed} 个失败`, 'err')
-      } else {
-        toast(`✅ 签到完成：${succeeded}/${total} 个账号成功领取`)
-      }
-      // run 的响应把 state 合并进来了（见 api::auto_checkin::run_now），不必再跑一趟 GET
-      if (result) setCheckin(result)
-      await shared().wbApp?.refresh?.()
-      // 积分可能已变化，让账号页把余额读数重新查一遍 —— refresh 只重拉账号列表，
-      // 余额读数是账号页自己缓存里的，不查它还是签到前的旧值（不 await：那是
-      // 后台的一次静默刷新，不该让这颗按钮一直转着）
-      void shared().wbAccountsView?.refreshUsageAfterCheckin?.()
-    } catch (error) {
-      toast(`签到失败：${errorMessage(error)}`, 'err')
-      setCheckin(await api.getAutoCheckin().catch(() => null))
-    } finally {
-      panelBusy = false
-      setCheckinRunning(false)
-    }
-  }
-
-  /** 「查看签到日志」：跳到日志页并把分类筛选预设成「自动签到」 */
-  function showCheckinLogs() {
-    void shared().wbLogsPanel?.showCategory?.('checkin')
   }
 
   /* ─── 渲染 ───────────────────────────────── */
@@ -697,17 +509,18 @@ function TasksPanel() {
             <label className='switch'>
               <Switch
                 checked={task.enabled === true}
-                onCheckedChange={next => void saveTask(task.id, { enabled: next }, `${task.label}开关`)}
+                onCheckedChange={next => void saveTask(task.id, { enabled: next }, t('{name}开关', { name: t(task.label) }))}
               />
-              <span className='task-name'>{task.label}</span>
+              {/* 任务名 / 描述由后端随任务下发（固定中文常量），走 t() 让词典能翻 */}
+              <span className='task-name'>{t(task.label)}</span>
             </label>
-            <span className='tip-q' data-tip={task.description}></span>
+            <span className='tip-q' data-tip={t(task.description)}></span>
             <Badge className='task-badge' variant={task.enabled ? 'success' : 'outline'}>
-              {task.enabled ? '已开启' : '已关闭'}
+              {task.enabled ? t('已开启') : t('已关闭')}
             </Badge>
             {task.running ? (
               <Badge className='task-badge' variant='warning'>
-                执行中…
+                {t('执行中…')}
               </Badge>
             ) : null}
           </div>
@@ -715,7 +528,7 @@ function TasksPanel() {
         </div>
         <div className='task-actions'>
           <span className='task-interval'>
-            <span className='task-interval-label'>每</span>
+            <span className='task-interval-label'>{t('每')}</span>
             {/* 单位是后端的固定属性（'seconds' | 'minutes'），不是一个可选字段：
                 PATCH 只受理 {enabled?, interval?}，做成下拉会「看着能改、其实不生效」。
 
@@ -732,7 +545,12 @@ function TasksPanel() {
               step={1}
               className='w-[74px] max-w-[74px] text-center tabular-nums'
               value={intervalDrafts[task.id] ?? String(task.interval)}
-              title={`可填 ${task.min}–${task.max} ${unit}（默认 ${task.defaultInterval} ${unit}）`}
+              title={t('可填 {min}–{max} {unit}（默认 {def} {unit}）', {
+                min: task.min,
+                max: task.max,
+                unit,
+                def: task.defaultInterval,
+              })}
               // onChange 只记草稿、不发请求：提交交给 blur / 回车（见 submitInterval）
               onChange={event => {
                 const value = event.currentTarget.value
@@ -753,7 +571,7 @@ function TasksPanel() {
               disabled={running || task.running === true}
               onClick={() => void runTask(task)}
             >
-              {running ? '执行中…' : '立即执行'}
+              {running ? t('执行中…') : t('立即执行')}
             </Button>
           ) : null}
         </div>
@@ -761,104 +579,14 @@ function TasksPanel() {
     )
   }
 
-  /** 自动签到卡片：形状与间隔型不同（时刻而非间隔），所以单独渲染 */
-  function checkinCard() {
-    const data = checkin
-    const enabled = data?.enabled === true
-    const options = Array.isArray(data?.providerOptions) ? data.providerOptions : []
-    const picked = Array.isArray(data?.providers) ? data.providers : []
-    /** 后端没返回签到设置时整卡只读（不是「关着」，而是「读不到」） */
-    const locked = !data || checkinSaving
-    return (
-      <div className='task-item' data-task={CHECKIN_ID} key={CHECKIN_ID}>
-        <div className='task-main'>
-          <div className='task-title'>
-            <label className='switch'>
-              <Switch
-                checked={enabled}
-                disabled={locked}
-                // 开关一起提交当前时刻（旧实现读的是 DOM 里的 value，同样带上未提交的编辑）
-                onCheckedChange={next => void saveCheckin({ enabled: next, time: checkinTime }, '自动签到开关')}
-              />
-              <span className='task-name'>自动签到</span>
-            </label>
-            <span className='tip-q' data-tip={CHECKIN_DESC}></span>
-            {/* 徽标三态：读不到 → bad（红）；开启 → ok（绿）；关闭 → 无修饰 */}
-            <Badge
-              className='task-badge'
-              variant={!data ? 'destructive' : enabled ? 'success' : 'outline'}
-            >
-              {!data ? '不可用' : enabled ? (data.lastFiredToday ? '今日已执行' : '已开启') : '已关闭'}
-            </Badge>
-            {data?.running ? (
-              <Badge className='task-badge' variant='warning'>
-                执行中…
-              </Badge>
-            ) : null}
-          </div>
-          {/* 签到提供商：选项与默认勾选都由后端下发，前端不抄一份清单 —— 以后加
-              第三家时只改后端。提交的是「完整勾选清单」（后端校验至少一家） */}
-          <div className='task-providers'>
-            <span className='lead'>签到提供商：</span>
-            {options.map(option => (
-              <label className='check' key={option.id}>
-                <Checkbox
-                  checked={picked.includes(option.id)}
-                  disabled={locked}
-                  // 按「完整勾选清单」提交（后端校验至少一家），顺序取 providerOptions
-                  onCheckedChange={next =>
-                    void saveCheckin(
-                      { providers: nextProviders(option.id, next, options, picked) },
-                      '签到提供商',
-                    )
-                  }
-                />
-                <span>{option.label}</span>
-              </label>
-            ))}
-          </div>
-          <div className='task-state'>{checkinStateText(data)}</div>
-        </div>
-        <div className='task-actions'>
-          <span className='task-interval'>
-            <span className='task-interval-label'>每天</span>
-            <Input
-              type='time'
-              className='w-[96px] max-w-[96px] font-mono tabular-nums'
-              value={checkinTime}
-              disabled={locked}
-              onChange={event => setTimeDraft(event.currentTarget.value)}
-              // 提交挪到 blur：原生 change 的时机就是「选完才存」，见 submitCheckinTime
-              onBlur={event => void submitCheckinTime(event.currentTarget.value)}
-              onKeyDown={event => {
-                if (event.key === 'Enter') event.currentTarget.blur()
-              }}
-            />
-          </span>
-          <Button size='sm' variant='outline' onClick={() => showCheckinLogs()}>
-            查看签到日志
-          </Button>
-          <Button
-            size='sm'
-            variant='outline'
-            disabled={!data || checkinRunning}
-            onClick={() => void runCheckin()}
-          >
-            {checkinRunning ? '签到中…' : '立即签到'}
-          </Button>
-        </div>
-      </div>
-    )
-  }
-
   /** 一条任务都没有：区分「还在加载」与「加载失败 / 后端没返回任务」 */
-  const empty = tasks.length === 0 && !checkin
-  const enabledCount = tasks.filter(task => task.enabled).length + (checkin?.enabled === true ? 1 : 0)
+  const empty = tasks.length === 0
+  const enabledCount = tasks.filter(task => task.enabled).length
   const badgeText = empty
     ? loaded
-      ? '不可用'
+      ? t('不可用')
       : '—'
-    : `${enabledCount} / ${tasks.length + 1} 个已开启`
+    : t('{enabled} / {total} 个已开启', { enabled: enabledCount, total: tasks.length })
   /** 徽标配色：无数据未定 → 无修饰；尝试过但读不到 → bad；正常 → 有开启就 ok */
   const badgeVariant: 'destructive' | 'outline' | 'success' = empty
     ? loaded
@@ -870,25 +598,25 @@ function TasksPanel() {
   /** 顶栏镜像用的语义记号（app.js 的 mirror 读它，不再按 className 拆 Tailwind 类） */
   const badgeTone = badgeVariant === 'destructive' ? 'bad' : badgeVariant === 'success' ? 'ok' : ''
 
-  // 卡片顺序：自动签到在最前（用户最关心的那条），其余按后端给的顺序。
-  // 后六条裹进 .task-grid 分两栏（列优先），条数变了只是分栏比例变，不会错位。
-  const cards = [checkinCard(), ...tasks.map(task => taskCard(task))]
+  // 卡片顺序：按后端给的顺序（第一条「凭证自动维护」整行铺开，见 LEAD_CARDS）。
+  // 其余条裹进 .task-grid 分两栏（行优先逐行配对），条数变了只是行数变，不会错位。
+  const cards = tasks.map(task => taskCard(task))
   const rest = cards.slice(LEAD_CARDS)
 
   return (
     <section className='panel'>
       <div className='panel-head'>
-        <h2>任务清单</h2>
+        <h2>{t('任务清单')}</h2>
         {/* id 保留：app.js 的 renderTopbarStatus 会按 id 镜像这枚徽标的文案与配色
             （配色经 data-tone 传，见 badgeTone） */}
         <Badge id='tasks-badge' variant={badgeVariant} data-tone={badgeTone}>
           {badgeText}
         </Badge>
-        <span className='panel-sub'>状态每 20 秒自动同步</span>
+        <span className='panel-sub'>{t('状态每 20 秒自动同步')}</span>
         <div className='head-actions'>
           {/* 旧实现是 load().then(() => toast('定时任务已刷新'))：不看结果，一律报已刷新 */}
-          <Button variant='outline' onClick={() => void loadPanel().then(() => toast('定时任务已刷新'))}>
-            刷新
+          <Button variant='outline' onClick={() => void loadPanel().then(() => toast(t('定时任务已刷新')))}>
+            {t('刷新')}
           </Button>
         </div>
       </div>
@@ -897,8 +625,8 @@ function TasksPanel() {
           {empty ? (
             <div className='log-empty'>
               {loaded
-                ? '没有可显示的定时任务。后端未返回任务清单，请确认网关正在运行。'
-                : '正在加载定时任务…'}
+                ? t('没有可显示的定时任务。后端未返回任务清单，请确认网关正在运行。')
+                : t('正在加载定时任务…')}
             </div>
           ) : (
             <>
@@ -909,10 +637,11 @@ function TasksPanel() {
         </div>
       </div>
       <div className='panel-foot'>
+        {/* 路径 / 字段名是配置契约、不进词典；两边的中文碎片各走 t()（片段式与 docs-page 脚注同一手法） */}
         <span>
-          任务配置保存在 <code>~/.agent2api/config.json</code> 的 <code>scheduledTasks</code> 字段
+          {t('任务配置保存在 ')}<code>~/.agent2api/config.json</code>{t(' 的 ')}<code>scheduledTasks</code>{t(' 字段')}
         </span>
-        <span>改动立即生效，不需要重启程序</span>
+        <span>{t('改动立即生效，不需要重启程序')}</span>
       </div>
     </section>
   )

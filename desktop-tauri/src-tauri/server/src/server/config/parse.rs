@@ -146,8 +146,7 @@ pub(super) fn interval_field(task: &Map<String, Value>, default: i64, min: i64, 
 /// 从一条任务的子对象里取开关。
 ///
 /// **缺字段按开启**：这些任务在本次改造前都是无条件运行的（凭证维护每 10 分钟、
-/// 两个前端面板每 10 秒、模型刷新随 /v1/models 触发；定时查询积分是后来新增的，
-/// 它没有「改造前」—— 缺字段同样按开启，与新装用户第一次打开的行为一致），
+/// 两个前端面板每 10 秒、模型刷新随 /v1/models 触发），
 /// 升级上来的 config.json 里没有 `scheduledTasks` —— 若把「没配过」读成「关闭」，
 /// 用户什么也没动，凭证却不再自动续期了。写侧（`PUT /api/scheduled-tasks`）
 /// 则要求显式布尔值。
@@ -155,7 +154,9 @@ pub(super) fn task_enabled(task: &Map<String, Value>, default: bool) -> bool {
     task.get("enabled").and_then(Value::as_bool).unwrap_or(default)
 }
 
-/// 由原始 JSON 解析六条间隔型任务（缺字段各自用默认值）
+/// 由原始 JSON 解析六条间隔型任务（缺字段各自用默认值）。
+/// 旧配置里可能残留 `usageQuery` 子键（已退役的全局余额查询任务）：
+/// 解析按**未知键忽略**处理，读不到就是不存在，首次保存设置时会被自然清掉。
 pub(super) fn scheduled_from(map: &Map<String, Value>) -> ScheduledSettings {
     let defaults = ScheduledSettings::default();
     let task = |key: &str, interval: i64, min: i64, max: i64| {
@@ -199,12 +200,6 @@ pub(super) fn scheduled_from(map: &Map<String, Value>) -> ScheduledSettings {
         update_check: task(
             KEY_UPDATE_CHECK,
             defaults.update_check.interval,
-            INTERVAL_MIN_MINUTES,
-            INTERVAL_MAX_MINUTES,
-        ),
-        usage_query: task(
-            KEY_USAGE_QUERY,
-            defaults.usage_query.interval,
             INTERVAL_MIN_MINUTES,
             INTERVAL_MAX_MINUTES,
         ),
@@ -344,4 +339,90 @@ pub(super) fn queue_from(map: &Map<String, Value>) -> QueueSettings {
     }
 }
 
+// ─── ZCode 验证码令牌池的解析（三项：目标 / 轮询间隔 / 单轮上限）──────
+
+/// 由原始 JSON 解析令牌池的三项（缺字段各自用默认值；越界回落默认）。
+///
+/// 与 `queue_from` 同一口径：范围校验在写侧（`zcode_captcha_pool_api`）是
+/// 400 报错，在这里是回落默认 —— 手改库写进一个越界值时，宁可回到出厂节奏，
+/// 也不要让铸造器拿到一个必然坏事的值（例如 0 毫秒的轮询会让它原地空转）。
+pub(super) fn captcha_pool_from(map: &Map<String, Value>) -> CaptchaPoolSettings {
+    let defaults = CaptchaPoolSettings::default();
+    CaptchaPoolSettings {
+        target: bounded_int_field(
+            map,
+            KEY_CAPTCHA_POOL_TARGET,
+            defaults.target,
+            CAPTCHA_POOL_MIN_TARGET,
+            CAPTCHA_POOL_MAX_TARGET,
+        ),
+        poll_ms: bounded_int_field(
+            map,
+            KEY_CAPTCHA_POOL_POLL_MS,
+            defaults.poll_ms,
+            CAPTCHA_POOL_MIN_POLL_MS,
+            CAPTCHA_POOL_MAX_POLL_MS,
+        ),
+        max_per_round: bounded_int_field(
+            map,
+            KEY_CAPTCHA_POOL_MAX_PER_ROUND,
+            defaults.max_per_round,
+            CAPTCHA_POOL_MIN_MAX_PER_ROUND,
+            CAPTCHA_POOL_MAX_MAX_PER_ROUND,
+        ),
+    }
+}
+
 // ─── 历史路由优先级（providerRoute，只读，供账号迁移）───────────
+
+// ─── 账号路由的解析（策略 / 粘性 / 退避 / 垫底 / 熔断）──────────────
+
+/// 由原始 JSON 解析路由设置（缺字段各自用默认值；非法取值回落默认）。
+///
+/// 与 `timeouts_from` 同一口径：范围校验在写侧（`routing_api`）是 400 报错，
+/// 在这里是回落默认 —— 手改库写进一个离谱值时，宁可回到默认行为也不要让
+/// 选路拿到一个必然坏事的值（例如阈值 0 会让熔断第一个失败就打开）。
+pub(super) fn routing_from(map: &Map<String, Value>) -> RoutingSettings {
+    let defaults = RoutingSettings::default();
+    let strategy = map
+        .get(KEY_ROUTING_STRATEGY)
+        .and_then(Value::as_str)
+        .map(RouteStrategy::from_id)
+        .unwrap_or(defaults.strategy);
+    let sticky = map
+        .get(KEY_ROUTING_STICKY)
+        .and_then(Value::as_str)
+        .map(StickyMode::from_id)
+        .unwrap_or(defaults.sticky);
+    let bool_field = |key: &str, default: bool| -> bool {
+        map.get(key).and_then(Value::as_bool).unwrap_or(default)
+    };
+    RoutingSettings {
+        strategy,
+        sticky,
+        failover_backoff: bool_field(KEY_ROUTING_FAILOVER_BACKOFF, defaults.failover_backoff),
+        sink: bool_field(KEY_ROUTING_SINK, defaults.sink),
+        breaker_enabled: bool_field(KEY_ROUTING_BREAKER_ENABLED, defaults.breaker_enabled),
+        breaker_threshold: bounded_int_field(
+            map,
+            KEY_ROUTING_BREAKER_THRESHOLD,
+            defaults.breaker_threshold,
+            ROUTING_BREAKER_MIN_THRESHOLD,
+            ROUTING_BREAKER_MAX_THRESHOLD,
+        ),
+        breaker_timeout_seconds: bounded_int_field(
+            map,
+            KEY_ROUTING_BREAKER_TIMEOUT,
+            defaults.breaker_timeout_seconds,
+            ROUTING_BREAKER_MIN_TIMEOUT,
+            ROUTING_BREAKER_MAX_TIMEOUT,
+        ),
+        breaker_success_threshold: bounded_int_field(
+            map,
+            KEY_ROUTING_BREAKER_SUCCESS,
+            defaults.breaker_success_threshold,
+            ROUTING_BREAKER_MIN_SUCCESS,
+            ROUTING_BREAKER_MAX_SUCCESS,
+        ),
+    }
+}

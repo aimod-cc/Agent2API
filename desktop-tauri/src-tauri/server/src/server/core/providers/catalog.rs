@@ -86,11 +86,16 @@ pub(crate) fn refresh_meta(kind: ProviderKind) -> (bool, i64) {
             super::raccoon::models::remote_refreshed(),
             super::raccoon::models::last_refreshed_at(),
         ),
-        ProviderKind::Qoder => (
-            super::qoder::models::remote_refreshed(super::qoder::endpoints::Region::Global)
-                || super::qoder::models::remote_refreshed(super::qoder::endpoints::Region::Cn),
-            super::qoder::models::last_refreshed_at(),
-        ),
+        // 拆家后两个地区各查**自己那一格**缓存（「来源 / 更新日期」列如实分开，
+        // 不再取两地区的最大值 —— 那会让两家显示同一次拉取时刻）
+        ProviderKind::Qoder | ProviderKind::QoderIntl => {
+            let region = super::qoder::endpoints::Region::from_kind(kind)
+                .unwrap_or(super::qoder::endpoints::Region::Cn);
+            (
+                super::qoder::models::remote_refreshed(region),
+                super::qoder::models::last_refreshed_at(region),
+            )
+        }
         ProviderKind::CodeArts => (
             super::codearts::models::remote_refreshed(),
             super::codearts::models::last_refreshed_at(),
@@ -132,6 +137,43 @@ pub(crate) fn refresh_meta(kind: ProviderKind) -> (bool, i64) {
         ProviderKind::Loomy => (
             super::loomy::models::remote_refreshed(),
             super::loomy::models::last_refreshed_at(),
+        ),
+        // KukuAI 的清单来自远程目录（`/wenchain/genflowpro/model_list`）；
+        // 静态兜底只是离线保底，「有内容」才算远程来源（与 raccoon 同判据）。
+        ProviderKind::Kuku => (
+            super::kuku::models::remote_refreshed(),
+            super::kuku::models::last_refreshed_at(),
+        ),
+        // MonkeyCode 的两个站点各有一份独立清单（缓存按地区分格，见
+        // `monkeycode::models` 的模块头）：这里如实各查**自己那一格**。
+        ProviderKind::MonkeyCode | ProviderKind::MonkeyCodeIntl => {
+            let region = super::monkeycode::Region::from_kind(kind)
+                .unwrap_or(super::monkeycode::Region::Cn);
+            (
+                super::monkeycode::models::remote_refreshed(region),
+                super::monkeycode::models::last_refreshed_at(region),
+            )
+        }
+        // Command Code：清单来自 `GET /provider/v1/models`（单一域名、无地区），
+        // 拉不到时回落内置 26 项 —— 「有远程内容」才算远程来源（`remote_refreshed`
+        // 只看落地的那些，不看兜底表）。
+        ProviderKind::CommandCode => (
+            super::commandcode::models::remote_refreshed(),
+            super::commandcode::models::last_refreshed_at(),
+        ),
+        // Antigravity：清单来自 `POST {base}:fetchAvailableModels`（三个环境
+        // 轮流打，但只有**一格**缓存 —— 环境不是地区）。拉不到时回落内置的
+        // Gemini 兜底清单，所以同样「有远程内容」才算远程来源。
+        ProviderKind::Antigravity => (
+            super::antigravity::models::remote_refreshed(),
+            super::antigravity::models::last_refreshed_at(),
+        ),
+        // OfficeAce 的清单来自 `GET {网关}/v1/models`（OpenAI 格式，网关 Basic
+        // 凭据）。上游目录照收（可用性由转发时的 81004/81009 分类回答），
+        // 「有内容」就是「远程拉到过」。
+        ProviderKind::OfficeAce => (
+            super::officeace::models::remote_refreshed(),
+            super::officeace::models::last_refreshed_at(),
         ),
     }
 }

@@ -58,6 +58,7 @@
 //! ── 硬约束 ──────────────────────────────────────────────────
 //! release 是 `panic=abort`：本文件零 unwrap / expect / panic；持锁期间不做网络。
 
+use std::collections::HashSet;
 use std::sync::{OnceLock, RwLock};
 
 use serde_json::{Value, json};
@@ -258,15 +259,26 @@ pub fn remote_only_names(ours: &[String], groups: &[(String, Vec<String>)]) -> V
 ///
 /// 条目顺序保留上游给的顺序：`/v1/models` 的阅读顺序与官方客户端一致，
 /// 而且"顺序变了"本身就是一条可观察的漂移信号。
+///
+/// ── 按 `config_name` 去重（修复 #177）────────────────────────
+/// 上游 `config_info_list` 里同一条 `config_name` 可能给两遍（实测
+/// `deepseek-v4.1-flash-solo`）：逐条 push 会让管理页画出两行同 id 的模型
+/// （第二行是条"没信息"的残条），连带 `manage_view` 为每条模型合成的那条
+/// 默认映射也重复一条。留第一条（忽略大小写 —— 与下游按名匹配的
+/// `eq_ignore_ascii_case` 同一口径），重复条目直接丢。
 pub fn parse_catalog(payload: &Value) -> Vec<Value> {
     let Some(entries) = payload.get("config_info_list").and_then(Value::as_array) else {
         return Vec::new();
     };
     let mut out = Vec::with_capacity(entries.len());
+    let mut seen: HashSet<String> = HashSet::with_capacity(entries.len());
     for entry in entries {
         let config_name = text(entry, "config_name");
         if config_name.is_empty() {
             continue; // 空 id 的条目不能路由，也不能广告
+        }
+        if !seen.insert(config_name.to_lowercase()) {
+            continue; // 同一条 config_name 的重复条目（见函数头「按 config_name 去重」）
         }
         // `false` 才过滤；缺省（None）按启用处理（见模块头）
         if entry.get("config_switch").and_then(Value::as_bool) == Some(false) {
@@ -304,6 +316,11 @@ pub fn parse_catalog(payload: &Value) -> Vec<Value> {
             }
             if let Some(vision) = supports_images(entry) {
                 object.insert("supportsImages".to_string(), Value::from(vision));
+            }
+            // 倍率：取不到就**不写这个键**（界面那一列显示 `—`），编一个 `x1` 充数
+            // 会让「上游没给」被读成「这个模型不收倍率」。
+            if let Some(rate) = consumption_rate(entry) {
+                object.insert("credits".to_string(), Value::String(credits_text(rate)));
             }
         }
         out.push(item);
@@ -473,6 +490,68 @@ async fn merge_extra_scenes(
             ),
         }
     }
+}
+
+/// 每个模型的积分倍率：藏在条目的 `display_contact_config` 里 —— 那是**一段 JSON 字符串**，
+/// 要二次解析（与同一条目上的 `extra_config` 同一形态）。
+///
+/// 形状与三道坑抄自参考实现 Go 那份 `readConsumptionRate`（`plugins/trae/models.go:200-232`，
+/// 它引 Trae 客户端 `trae.ts:851-864`）：
+///   ① 键名两种形态都在用（`consumption_rate` / `ConsumptionRate`、`data` / `Data`），
+///     只认一种就会静默变成「没给」；
+///   ② **`enable:false` 的意思是「这一条没有倍率」**，不是 0 —— 把 `enable` 当装饰读，
+///     就会给没有倍率概念的模型编出一个「0 倍（免费）」来；
+///   ③ **`rate:0` 是合法值**（免费/限免档），所以不许写成「非零才算有」那种过滤。
+///
+/// 数值两种形态都收（JSON 数字与 `"0.08"` 字符串）：这类字段上游改过形态是有前科的
+/// （别家目录里 `context_window` 就混着字符串），而倍率一旦解析失败就**静默**变成空列，
+/// 现场看不出区别。任何一步解不出来都只当「没给」，全程不报错。
+fn consumption_rate(entry: &Value) -> Option<f64> {
+    let raw = entry.get("display_contact_config").and_then(Value::as_str)?;
+    let config: Value = serde_json::from_str(raw.trim()).ok()?;
+    let rate = object_of(&config, &["consumption_rate", "ConsumptionRate"])?;
+    if rate.get("enable").and_then(Value::as_bool) == Some(false) {
+        return None;
+    }
+    let data = object_of(rate, &["data", "Data"])?;
+    let value = number_of(data, &["rate", "Rate"])?;
+    if value.is_finite() && value >= 0.0 {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+/// 按候选键名取第一个**对象**字段（两种大小写形态共用一份判据）。
+fn object_of<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
+    keys.iter()
+        .filter_map(|key| value.get(*key))
+        .find(|found| found.is_object())
+}
+
+/// 按候选键名取第一个数（数字与数字字符串都算，负数与非有限值算没有）。
+fn number_of(value: &Value, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| match value.get(*key) {
+        Some(Value::Number(number)) => number.as_f64(),
+        Some(Value::String(text)) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    })
+}
+
+/// 倍率数字 → 界面那一列的文本（`x0.5 credits`）—— 与小浣熊/CodeArts 同一措辞，
+/// 数字格式化也同一取向：整数不带小数点，其余最多两位并裁尾零
+/// （目录里 `0.25` / `0.75` 真实存在，一位小数会把 `0.25` 说成 `0.3`）。
+fn credits_text(rate: f64) -> String {
+    let rounded = (rate * 100.0).round() / 100.0;
+    let plain = if (rounded - rounded.trunc()).abs() < 1e-9 {
+        format!("{}", rounded.trunc() as i64)
+    } else {
+        format!("{rounded:.2}")
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    };
+    format!("x{plain} credits")
 }
 
 /// 一条目录条目（聚合形态）。
@@ -1047,5 +1126,85 @@ mod tests {
         assert!(describe_failure(500, "boom").contains("boom"));
         let with_version = format!("IdeVersionCode={IDE_VERSION_CODE}");
         assert!(with_version.contains("2026"), "版本号要真的能印出来：{with_version}");
+    }
+    /// 倍率取自 `display_contact_config` 那段**二次编码 JSON**，参考实现的三条坑逐个钉：
+    /// `rate:0` 是合法值、`enable:false` 不算 0、键名两种形态都要认。
+    #[test]
+    fn the_multiplier_is_read_out_of_the_double_encoded_contact_config() {
+        let parsed = |raw: &str| {
+            consumption_rate(&json!({"display_contact_config": raw}))
+        };
+
+        assert_eq!(
+            Some(0.08),
+            parsed(r#"{"consumption_rate":{"enable":true,"data":{"rate":0.08}}}"#)
+        );
+        // ① `0` 是合法值（免费 / 限免），不是「没给」—— 用「非零才算有」会把它滤掉
+        assert_eq!(
+            Some(0.0),
+            parsed(r#"{"consumption_rate":{"enable":true,"data":{"rate":0}}}"#)
+        );
+        // ② `enable:false` 是「这一条没有倍率概念」，绝不能折成 0
+        assert_eq!(
+            None,
+            parsed(r#"{"consumption_rate":{"enable":false,"data":{"rate":0.08}}}"#)
+        );
+        // ③ 两种键名形态都在用，只认一种就会静默变成「没给」
+        assert_eq!(Some(0.5), parsed(r#"{"ConsumptionRate":{"enable":true,"Data":{"Rate":0.5}}}"#));
+        // 数字字符串也收（这类字段上游改过形态有前科，而失败是静默的）
+        assert_eq!(Some(0.2), parsed(r#"{"consumption_rate":{"data":{"rate":"0.2"}}}"#));
+        // 解不开 / 形状不对 / 负数 ⇒ 一律当「没给」，不报错
+        for raw in [
+            "",
+            "nope",
+            "[]",
+            "{}",
+            r#"{"consumption_rate":{}}"#,
+            r#"{"consumption_rate":{"data":{}}}"#,
+            r#"{"consumption_rate":{"data":{"rate":-1}}}"#,
+        ] {
+            assert_eq!(None, parsed(raw), "这条不该产出倍率：{raw}");
+        }
+        // 条目里根本没有那一段 ⇒ None（调用点因此不写 `credits` 键）
+        assert_eq!(None, consumption_rate(&json!({"config_name": "glm-5.2"})));
+
+        assert_eq!("x0.08 credits", credits_text(0.08));
+        assert_eq!("x1 credits", credits_text(1.0));
+        assert_eq!("x0 credits", credits_text(0.0));
+        assert_eq!("x0.25 credits", credits_text(0.25), "两位小数要留住，一位会报成 0.3");
+    }
+
+    /// 端到端：目录条目里的倍率要真的落到广告条目的 `credits` 键上 —— 只测上面那个单元
+    /// 的话，接线处把键名写错也照样全绿，而现场表现只是「倍率列空着、没人报错」。
+    #[test]
+    fn the_catalog_entry_carries_the_multiplier() {
+        let payload = json!({"config_info_list": [{
+            "config_name": "glm-5.2",
+            "config_switch": true,
+            "display_config": {"display_name": "GLM-5.2"},
+            "display_contact_config": "{\"consumption_rate\":{\"enable\":true,\"data\":{\"rate\":0.7}}}",
+        }]});
+        let models = parse_catalog(&payload);
+        assert_eq!(1, models.len(), "夹具条目该被收下：{models:?}");
+        assert_eq!(
+            Some("x0.7 credits"),
+            models[0].get("credits").and_then(Value::as_str),
+            "倍率要出现在广告条目上：{}",
+            models[0]
+        );
+
+        // 同一张条目去掉那一段 ⇒ `credits` 整个键不存在（界面显示 `—`），而不是 `x0`
+        let payload = json!({"config_info_list": [{
+            "config_name": "glm-5.2",
+            "config_switch": true,
+            "display_config": {"display_name": "GLM-5.2"},
+        }]});
+        let models = parse_catalog(&payload);
+        assert_eq!(1, models.len());
+        assert!(
+            models[0].get("credits").is_none(),
+            "上游没给就不许写：{}",
+            models[0]
+        );
     }
 }

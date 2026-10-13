@@ -556,6 +556,64 @@ impl AccountStore {
                 }
             }
         }
+        // ── Antigravity 的两个附加键（`antigravity::adapter` 用）──────
+        // 与上面 ZCode 同一手法、同一理由：适配器只能看到会话，而这两个字段
+        // 在记录里（`antigravity_accounts.rs` 的落盘形态）：
+        //   - `projectId`：cloudaicompanionProject —— 信封的 `project` 字段
+        //     （规格 §3.3），OAuth 刷新 / 添加账号 / 目录刷新三处发现后回写；
+        //   - `email`：决定信封的 `userAgent` 标记（非 gmail/googlemail →
+        //     `jetski`，Manager 的判定逐字）。会话里的 `account.uid` 对
+        //     Antigravity 也是 email，但那是「展示身份」的通用字段，别让
+        //     协议层去依赖通用字段的取值约定。
+        // 条件判据是 provider id（与 ZCode 的 Region 同一性质），对别家的会话
+        // 是逐字空操作（连键都不会多）。
+        if record.provider() == super::ANTIGRAVITY_PROVIDER_ID {
+            if let Some(object) = session.as_object_mut() {
+                for key in ["projectId", "email"] {
+                    let value = record
+                        .fields()
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .unwrap_or("");
+                    if !value.is_empty() {
+                        object.insert(key.to_string(), Value::String(value.to_string()));
+                    }
+                }
+            }
+        }
+        // ── OfficeAce 的凭据字段（`officeace::adapter` 用）──────────────
+        // 它的转发凭证不是 `auth.accessToken`，而是**记录顶层的**网关 Basic 那一对
+        // （`baseUrl` / `modelAppKey` / `modelAppSecret`）；控制面临时凭据
+        // （`accessKeyId` 等）留给额度/签到。会话是转发链交给适配器的唯一形态
+        // （`build_chat_request` 的 `account` 参数），所以这些字段必须随会话出来 ——
+        // 否则 `officeace::credentials::from_record` 读到全空、转发必报缺凭据。
+        // 与 ZCode 那支同一形态（本家才注入，别家逐字不变）；空值不写。
+        if record.provider() == crate::server::core::account_store::OFFICEACE_PROVIDER_ID {
+            if let Some(object) = session.as_object_mut() {
+                for key in [
+                    "baseUrl",
+                    "modelAppKey",
+                    "modelAppSecret",
+                    "accessKeyId",
+                    "secretAccessKey",
+                    "securityToken",
+                    "projectId",
+                ] {
+                    let value = record.get(key).and_then(Value::as_str).unwrap_or("");
+                    if !value.trim().is_empty() {
+                        object.insert(key.to_string(), Value::String(value.to_string()));
+                    }
+                }
+                if let Some(expires_at) = record
+                    .get("expiresAt")
+                    .and_then(Value::as_i64)
+                    .filter(|value| *value > 0)
+                {
+                    object.insert("expiresAt".to_string(), Value::from(expires_at));
+                }
+            }
+        }
         session
     }
 

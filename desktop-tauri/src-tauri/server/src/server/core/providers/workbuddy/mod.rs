@@ -8,6 +8,7 @@
 //!             token 刷新、模型清单与 /v3/config 远程刷新），按 region 参数化
 //! normalize.rs 出站请求体归一（角色 / tool_choice / image_url / max_tokens /
 //!             tool 配对 / 前缀缓存键），从参考项目 workbuddy2api 移植
+//! keepalive.rs 国际版每日活跃保活的请求构造（免费模型链缺省值 + 最小流式 body）
 //! ```
 //!
 //! ── 为什么是一个目录而不是单文件 ─────────────────────────────
@@ -23,10 +24,12 @@
 //! 照抄的范本。
 
 pub mod adapter;
+pub mod keepalive;
 pub mod normalize;
 pub mod region;
 
 pub use adapter::{
     ensure_leading_system_message, WorkBuddyAdapter, WORKBUDDY_ADAPTER, WORKBUDDY_INTL_ADAPTER,
 };
+pub use keepalive::{DEFAULT_FREE_MODELS, build_daily_activity_request};
 pub use region::{is_workbuddy_family, Region};

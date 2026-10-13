@@ -38,6 +38,11 @@
    **本轮余额列 84 → 132**（格子从一行纯读数改成两行：套餐名 + 进度条与读数，
    见下方「余额列」一节）：固定列合计 1145 → 1193，min-width 1107 → 1155。
 
+   **分组模式（2026-10）：优先级列 132 与提供商列 132 下线，新增顺序列 84** ——
+   账号按家分组显示，家名与图标搬到分组带上（提供商列重复了这件事），顺序改由
+   拖拽表达（组内序号 `#N` + 拖动把手，见下方「顺序列」）。固定列合计
+   1193 → 1013，表格的横滚线随之从 1493 降到 1313（= 1013 + 弹性列下限 300）。
+
    **勾选列 26 → 47**（本轮）：26px 的列里居中的复选框只离表格左缘 5.5px，
    看起来是「贴边」而不是居中，还与批量栏那颗「全选」错开 10.5px。
    47 = 16 + 15 + 16 让它与批量栏全选落在同一条竖轴上，算式与理由见下方 .cell-pick。
@@ -117,7 +122,6 @@
 /* 表头文字：主标签 + 小注（优先级「全局队列」/ 限流「按模型」）。
    小注用同色弱化：它只解释口径，不该抢列名的注意力。 */
 .acct-table thead th .th-label { display: inline-flex; align-items: center; gap: 4px; }
-.acct-table thead th .th-hint { font-weight: 400; letter-spacing: 0; opacity: .7; }
 
 /* 表头的「隐藏账号名」眼睛（只在账号列出现）：一颗纯图标小按钮，贴在列名后面。
    默认继承表头小字的灰色、不抢注意力；隐藏生效时常亮主色（.on）——
@@ -166,8 +170,11 @@
 .cell-pick { width: 47px; }
 .acct-table th.cell-pick,
 .acct-table td.cell-pick { padding-inline: 0; text-align: center; }
-.cell-priority { width: 132px; }
-.cell-provider { width: 132px; }
+/* 顺序列（分组模式，替代原优先级列 132px）：拖动把手 20 + 组内序号（#12 这种
+   两位数约 30）+ 间隔 6，84px 留有余量。它是这一家**组内**的位次，组的先后由
+   分组带的顺位表达 —— 两者合起来才是真实的尝试顺序（见 accounts-domain 的
+   accountGroups）。这一列同时是「行顺序」唯一的拖动起点（把手在格子里）。 */
+.cell-order { width: 84px; }
 /* 代理列：一格一个下拉（选中即保存，见 accounts-table.js 的 proxyCell）。
    宽度按「节点名 :端口」的常见形态给足（下拉开销：触发器左右内边距 + 箭头 +
    间隔 ≈ 41px，186px 的格子留给文本约 129px）；更长的名字由触发器省略号
@@ -208,7 +215,7 @@
 /* ─── 行状态 ─── */
 
 .acct-row .cell-account,
-.acct-row .cell-priority,
+.acct-row .cell-order,
 .acct-row .cell-proxy,
 .acct-row .cell-usage,
 .acct-row .cell-actions { min-width: 0; }
@@ -241,6 +248,7 @@
 .pbadge {
   display: inline-flex;
   align-items: center;
+  gap: 5px;
   max-width: 100%;
   padding: 1px 8px;
   border: 1px solid var(--border);
@@ -254,15 +262,28 @@
   text-overflow: ellipsis;
 }
 
+/* 收录过图标的家在名字前挂一枚 13px 小图（PROVIDER_ICONS，与卡片 / 模型管理页
+   同一份）。图与名字同一行居中；圆角略收，自带透明底的图不至于显得比文字重 */
+.pbadge .pbadge-ico {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  border-radius: 3px;
+  object-fit: contain;
+}
+/* 名字段单独成盒才能吃到 ellipsis —— 裸文本节点在 flex 容器里只是匿名项，
+   父级的 text-overflow 对它不生效（图标固定 13px 不参与截断） */
+.pbadge .pbadge-txt {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .pbadge.p-workbuddy { background: var(--primary-soft); border-color: var(--primary-bd); color: var(--primary-fg); }
 .pbadge.p-raccoon { background: var(--cn-soft); border-color: var(--cn-bd); color: var(--cn); }
 .pbadge.p-catpaw { background: var(--warn-soft); border-color: var(--warn-bd); color: var(--warn); }
 .pbadge.p-autoclaw { background: var(--intl-soft); border-color: var(--intl-bd); color: var(--intl); }
-
-/* 提供商列：一枚徽章（「WorkBuddy 国际版」这类名字 + 版本拼在一枚里）。
-   .pv 仍保留 flex-wrap：自定义提供商的名字长度不可控，列宽放不下时整块折行，
-   徽章内文字不会被截断（徽章自身另有 ellipsis 兜底，单枚比整列还宽才触发）。 */
-.cell-provider .pv { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px; }
 
 /* ─── 账号列 ─── */
 
@@ -332,163 +353,152 @@
 .acct-note.warn { color: var(--warn); }
 .acct-note.bad { color: var(--danger); }
 
-/* ─── 优先级列（全局队列：序号 + 「↓ 数字 ↑」合并控件）─── */
-
-.prio { display: flex; align-items: center; gap: 3px; }
-
-/* 全局序号：#N 是队列位置（与后端选路同构），控件里的数字是队列值。
-   两个都要 —— 序号便于扫读「我的账号在第几位」，数值便于精确定位与跨行对齐。 */
-.prio .seat {
-  flex: 0 0 auto;
-  min-width: 22px;
-  color: var(--text-3);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  text-align: right;
+/* ─── 顺序列（`⠿ #N`：组内位次 + 拖动把手）───
+   分组模式把「顺序」的两种表达合成了拖拽一种：组内的先后拖这一格的把手，
+   整组的先后拖分组带的把手。数字（原优先级）不再出现在表里 —— 它由
+   「组顺位 → 组内顺位」编译出来（后端整队重编号），界面上没有第二处口径。 */
+.order-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
 }
 
-/* ── 合并控件：下箭头 / 数字 / 上箭头共享一个外框 ──
-   改造前是三块独立控件（数字框 + 一组 order-btns，中间留 3px 缝），
-   看上去像「一个输入框 + 两个无关按钮」；而它们其实是同一个动作的
-   两种输入方式（增量 / 绝对值），所以合成一个整体。
-
-   宽度预算：两枚箭头各 20 + 输入框 42 = 82，加上外框描边 2 = 84，
-   再加上序号 22 与间距 3 ≈ 109，落在 132px 的列里（内容盒 116）还有余量。
-   输入框从 44 收到 42：合并后两侧的箭头各让出 1px 给描边，
-   而 0–9999 四位数字在 11.5px 等宽字体下约 31px，42 仍有充足余量。
-
-   ── 圆角与描边怎么分 ──
-   外框统一给圆角与描边（.prio-stepper 自己带 border + overflow: hidden），
-   内部三块各自**不带**边框与圆角，只用一条内部分隔线断开（相邻处 border-left）。
-   这样做的理由与 .seg / .seg-item 那一对完全相同（见 components.css）：
-   若让每一块各自带圆角与描边，三个圆角会在接缝处叠成一道毛边，而且
-   边框会变成 2 条相邻的线（1+1px），比一条分隔线显粗。
-   overflow: hidden 是必需的：输入框在聚焦态不换边框（见下），
-   但内部元素的方角要靠它被外框裁掉。 */
-.prio-stepper {
-  display: inline-flex;
-  align-items: stretch;
-  flex: 0 0 auto;
-  height: 24px;
-  overflow: hidden;
-  border: 1px solid var(--control-border);
-  border-radius: var(--r-sm);
-  background: var(--control-bg);
-  transition: border-color .15s ease;
-}
-
-/* 整组悬停 / 聚焦：边框高亮提到外框上（而不是各块自己变），
-   于是「这是一个控件」的观感在交互态也成立 */
-.prio-stepper:hover { border-color: var(--control-border-hover); }
-.prio-stepper:focus-within { border-color: var(--primary); }
-
-/* 两枚箭头：无边框、贴满可用高度，颜色比正文淡一档（次要动作）。
-   它们是 `button` 的默认样式被清掉后的形态，尺寸靠 flex 撑满。
-
-   ── 为什么必须显式写 height（本次修复）──────────────────────
-   改造前这里只声明了 `width: 20px`、**没写 height**，于是全局
-   `button { height: 30px }
-
-`（components.css）直接生效 —— 它与特异性无关，
-   纯粹是这里没人声明过高度。
-   后果：按钮实际高 30px，而外框 `.prio-stepper` 只有 24px，
-   `overflow: hidden` 把它裁到 24px。按钮自己的垂直中心落在 15px（30/2），
-   而外框中心是 12px（24/2）—— 箭头整体**向下偏 3px**、底部还被裁掉一截。
-   补上 `height: 100%` 之后，两枚箭头与中间的输入框（也写着 height:100%）
-   共用同一套高度基准，三者对齐。
-
-   `flex: 0 0 auto` 同理：箭头是固定 20px 的两枚按钮，不该参与伸缩
-   （与输入框那条一致）。
-
-   选择器带 `.prio-stepper` 前缀是让这几条覆盖不依赖「本文件排在
-   components.css 之后」这个隐含前提 —— 与下面 `.prio-input` 同一手法。 */
-.prio-stepper .prio-arrow {
+/* 拖动把手：行里唯一的拖动起点。整行可拖会让「点开关」变成「拖走一行」，
+   所以只给这一小块；触摸 / 触控板上靠 touch-action: none 接管手势。 */
+.order-grip,
+.queue-grip {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 100%;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 20px;
+  border-radius: var(--r-xs);
+  color: var(--text-3);
+  cursor: grab;
+  touch-action: none;
+}
+
+.order-grip:hover,
+.queue-grip:hover { background: color-mix(in srgb, var(--text) 10%, transparent); color: var(--text-2); }
+
+.acct-row.dragging,
+.grp-band.dragging { opacity: .45; }
+
+/* 拖动中：整页光标切成抓取态，提示「现在松手就会落位」 */
+body.queue-dragging,
+body.queue-dragging * { cursor: grabbing !important; }
+
+/* 落点提示：插在这一行的**上面 / 下面**。用 inset box-shadow 而不是 border ——
+   加 border 会把这一行撑高 2px，拖动中整张表跟着跳，落点反而看不清。 */
+.acct-row.drop-before > td,
+.acct-row.drop-after > td,
+.grp-band.drop-before > td,
+.grp-band.drop-after > td { box-shadow: inset 0 2px 0 0 var(--primary); }
+
+.acct-row.drop-after > td,
+.grp-band.drop-after > td { box-shadow: inset 0 -2px 0 0 var(--primary); }
+
+/* 组内序号：#N。与分组带的「第 N 顺位」是同一种读数的两个层级，
+   都取中性灰 —— 顺序不是状态，不该有颜色。 */
+.order-rank {
+  min-width: 22px;
+  text-align: center;
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─── 分组带（一家一段的横幅，占满一行的通栏格）───
+   刻意保持**中性**：一家一色会让整页看着像调色板，而「这一段是哪一家」由家名
+   与图标已经说清楚了。分组带只负责两件事：说清这是谁、以及可拖（顺位）。 */
+.acct-group .grp-band > td {
   padding: 0;
-  border: 0;
-  border-radius: 0;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.grp-band-inner {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 8px;
+}
+
+/* 组顺位：与 .order-rank 同色同一档字号 —— 组的先后与组内先后是同一类读数。
+   title 里说清「拖动可改」，格子本身不放控件。 */
+.grp-rank {
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.grp-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+}
+
+.grp-logo img { width: 16px; height: 16px; border-radius: 3px; object-fit: contain; }
+
+/* 没有图标的家（自定义提供商）：首字母方块，中性底 —— 不引人注目但能与文字区分 */
+.grp-logo-txt {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.grp-name { font-size: 12.5px; font-weight: 650; color: var(--text); white-space: nowrap; }
+
+.grp-stat {
+  color: var(--text-3);
+  font-size: 11px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.grp-spacer { flex: 1 1 auto; }
+
+.grp-iconbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-xs);
   background: transparent;
   box-shadow: none;
   color: var(--text-2);
-  font-size: 10.5px;
+  font-size: 13px;
   line-height: 1;
-  flex: 0 0 auto;
+  cursor: pointer;
 }
 
-.prio-arrow:hover:not(:disabled) { background: var(--nav-hover); color: var(--text); }
-.prio-arrow:disabled { opacity: .3; cursor: not-allowed; }
+.grp-iconbtn:hover { background: var(--nav-hover); color: var(--text); }
+.grp-iconbtn svg { display: block; transition: transform .16s ease; }
 
-/* 箭头图标本体（icons.js 的 arrowDown / arrowUp，内联 SVG）。
-   `display: block` 是必需的：SVG 默认是行内元素，会落在**基线上**、
-   下方留出 descender 的空隙（约 2–3px），于是图标看着偏上、按钮的
-   点击热区也跟着歪。改成块级之后它就是一个纯几何盒子，
-   由 .prio-arrow 的 flex 居中精确对位。
-   这一步与「不用字符箭头」是同一个目的的两半：先把会飘的字形换掉，
-   再把新元素放平 —— 少任何一半都还会偏。 */
-.prio-arrow svg { display: block; }
+/* 折叠态：箭头转成「指向右」，与展开态共用一个图标（少一枚图标，状态靠旋转表达） */
+.acct-group.collapsed .grp-fold svg { transform: rotate(-90deg); }
 
-/* 输入框：占中间一格，自己不带描边与圆角（那些归外框）。
-   高度用 100% 而不是 24px —— 外框有 1px 描边，写死 24 会顶出去。
-   两条分隔线：输入框自带左边一条（断在「下箭头 | 数字」之间），
-   右边那条由 `+` 相邻选择器给上箭头（见下）—— 输入框自身不加右边框，
-   它聚焦时不换任何边框，两条线不会跟着交互态变，视觉上更稳。
-
-   ── 选择器为什么要写成 `.prio-stepper .prio-input`（不是 `.prio-input`）──
-   components.css 的全局表单规则是 `input[type="number"]`（特异性 0,1,1），
-   比单个类（0,1,0）**高**，所以下面这些声明必须靠**再加一个类**压过去，
-   否则全局那条会赢、数字周围会多出一个圆角描边框，与外框叠成两层：
-     · `border-radius: var(--r-md)` —— 数字被裹成一个胶囊（本次修的就是它）；
-     · `border: 1px solid` —— 多出一圈框；
-     · `height: 30px` —— 比外框的 24px 还高，撑破合并控件；
-     · `padding: 0 10px` —— 数字被挤偏；
-     · `flex: 1 1 auto` —— 输入框会吃掉箭头的位置。
-   与 page-settings.css 的 `.retention-input input[type="number"]` 同一手法
-   （那里也是嵌在自定义外壳里的数字框，注释写着同样的理由）。 */
-.prio-stepper .prio-input {
-  width: 42px;
-  height: 100%;
-  padding: 0 4px;
-  border: 0;
-  border-left: 1px solid var(--control-border);
-  border-radius: 0;
-  background: transparent;
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  font-variant-numeric: tabular-nums;
-  text-align: center;
-  /* 数字框的上下箭头在 24px 高里会把数字挤成半截，去掉；
-     改值用键盘或两侧的箭头按钮（后者是本控件的主要改值方式） */
-  appearance: textfield;
-  -moz-appearance: textfield;
-  /* flex 归零：箭头是固定 20px 的两枚按钮，输入框不许参与伸缩
-     （全局 `input[type=number]{flex:1 1 auto}
-
-` 会把它们挤没） */
-  flex: 0 0 auto;
-}
-
-.prio-stepper .prio-input::-webkit-outer-spin-button,
-.prio-stepper .prio-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-
-/* 聚焦时整组高亮（见 .prio-stepper:focus-within），输入框自身不加描边与光晕。
-   box-shadow 也要清：全局 `input:focus` 会画一圈 --ring，
-   在 24px 高的合并控件里会糊成一团。 */
-.prio-stepper .prio-input:focus { outline: none; box-shadow: none; }
-
-/* 悬停同理：全局 `input:hover` 会把边框改成高亮色，而这里的边框是 0，
-   改的是「看不见的边框」—— 它会让输入框那一格与外框的描边色不一致，
-   所以显式压掉，让整组的悬停高亮只由 .prio-stepper:hover 一处负责。 */
-.prio-stepper .prio-input:hover:not(:disabled) { border-color: transparent; }
-
-.prio-stepper .prio-input:disabled { opacity: .5; }
-
-/* 上箭头的左侧分隔线（把「数字 | 上箭头」断开，与输入框那条呼应） */
-.prio-input + .prio-arrow { border-left: 1px solid var(--control-border); }
+/* 折叠时分组带的下边框仍然留着：它同时是与下一段的分隔线 */
 
 /* ─── 连接数列 ───
    只在有连接时显示一个绿色数字（与 OmniProxy 上游管理页的「连接」列同款观感），
@@ -626,6 +636,264 @@
 .usage-pool-view.ok { color: var(--ok); font-weight: 600; }
 .usage-pool-view.warn { color: var(--warn); font-weight: 600; }
 
+/* ─── 余额列：套餐徽标 + 明细弹层的两行形态（usageDetail 能力位，CodeArts）───
+   第一行是套餐徽标（试用版 / 免费版 —— 两个权益不同的账号第一眼就能分开），
+   第二行「可用 N 积分」可点击，点开逐项读数（样式在下面的 .usage-pop 一组）。
+   交互对齐 ⋯ 菜单：点开、点外关闭、Esc 收起（组件库 Popover 负责）。
+   悬停提示仍是 summary.title 那份单行摘要，弹层是「要看构成」时的入口。 */
+.usage-cell { display: block; min-width: 0; font-variant-numeric: tabular-nums; }
+
+.usage-plan {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  min-width: 0;
+}
+
+.plan-chip {
+  flex: none;
+  font-size: 10.5px;
+  line-height: 1;
+  font-weight: 600;
+  padding: 3px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--primary-bd);
+  background: var(--primary-soft);
+  color: var(--primary-fg);
+  white-space: nowrap;
+}
+
+/* 免费版没有付费套餐，徽标走中性灰 —— 不让它看起来像一份「更好的套餐」 */
+.plan-chip.free {
+  border-color: var(--border-strong);
+  background: var(--control-bg);
+  color: var(--text-2);
+  font-weight: 500;
+}
+
+.plan-sub {
+  font-size: 10.5px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 读数按钮：整行可点（那格本来就是「一眼看出还剩多少」，加一个点击态不换语义），
+   视觉上与 .usage-sum 同字号同色，只加一个 caret 提示「点开还有明细」。
+   读数**居中**：本形态只有 CodeArts 一家用，两个权益档的读数（「可用 —积分」/
+   「可用 11000 积分」）在同一列里居中后不再贴着左边的套餐徽标；caret 改绝对
+   定位、不占布局宽度 —— 留在流里的话读数会被它的宽度挤得偏左，「居中」名不
+   副实。两侧对称留白因此由 .val 的 padding 承担，且长读数不会与 caret 叠字。 */
+.usage-toggle {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: calc(100% + 16px);
+  margin: 0 -8px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--r-xs);
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.usage-toggle:hover { background: var(--row-hover); border-color: var(--hairline); }
+.usage-toggle .val {
+  flex: 1;
+  text-align: center;
+  /* 与 caret 的占位对称（caret 在右 8px 处、宽约 6px）：读数再长也不叠字 */
+  padding: 0 14px;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.usage-toggle .caret {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-3);
+  font-size: 9px;
+  line-height: 1;
+  transition: transform 0.15s;
+}
+.usage-toggle.ok .val { color: var(--ok); font-weight: 600; }
+.usage-toggle.warn .val { color: var(--warn); font-weight: 600; }
+.usage-toggle.bad .val { color: var(--danger); }
+.usage-toggle.muted .val { color: var(--text-3); }
+.usage-cell.open .usage-toggle { background: var(--primary-soft); border-color: var(--primary-bd); }
+.usage-cell.open .usage-toggle .caret { transform: translateY(-50%) rotate(180deg); }
+
+/* ── token 组的平铺行（对话 token / 福利模型日额度）───
+   这两行是「这账号现在能不能跑」的直接标志，直接住在余额格里不折叠；
+   积分类的构成才进弹层。标签短名（福利模型日额度 → 福利日额度），
+   读数万/亿缩写（3541691 → 354 万），原值都在悬停 title。
+   条与积分明细同款：6px 胶囊、画**剩余**比例、超额整条走红 ——
+   但只在**真总量**（allowance > 1）时画，无上限 / 占位包不画。 */
+.usage-flat-line {
+  display: block;
+  margin-top: 4px;
+  min-width: 0;
+}
+
+.usage-flat-head {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+}
+
+.usage-flat-name {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.usage-flat-view {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.usage-flat-view.ok { color: var(--ok); font-weight: 600; }
+.usage-flat-view.warn { color: var(--warn); font-weight: 600; }
+.usage-flat-view.bad { color: var(--danger); font-weight: 600; }
+.usage-flat-view.muted { color: var(--text-3); }
+
+.usage-flat-track {
+  display: block;
+  height: 5px;
+  margin-top: 3px;
+  border-radius: 999px;
+  background: var(--surface-inset);
+  overflow: hidden;
+}
+.usage-flat-track i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--primary);
+}
+.usage-flat-track.over i { background: var(--danger); }
+
+/* ─── 余额明细弹层的内容（portal 渲染，样式挂在 PopoverContent 上）───
+   结构照原型 prototype/codearts-balance.html：两组（积分 / token 额度）、
+   每行「名称 + 读数 (+ 剩余进度条)」、可选合计行。长解释只在悬停 title，
+   界面上不放句子 —— 弹层本来就是扫一眼的。 */
+.usage-pop { padding: 10px 14px 12px; gap: 0; }
+
+.usage-pop-missing {
+  margin: 0 0 8px;
+  padding: 6px 9px;
+  border-radius: var(--r-xs);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-bd);
+  color: var(--warn);
+  font-size: 11px;
+  line-height: 1.6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 弹层的兜底行：没有积分类读数的账号（免费版额度全在福利 token 池）——
+   一句中性说明，别渲染成一个空框让人怀疑是故障 */
+.usage-pop-empty {
+  padding: 8px 0 2px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+
+.usage-pop-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 2px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+.usage-pop-group::after { content: ""; flex: 1; height: 1px; background: var(--hairline); }
+.usage-pop-group:first-child { margin-top: 0; }
+
+.usage-pop-row { padding: 7px 0; }
+.usage-pop-row + .usage-pop-row { border-top: 1px dashed var(--hairline); }
+
+.usage-pop-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.usage-pop-name {
+  font-size: 12px;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-pop-view {
+  margin-left: auto;
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.usage-pop-view.ok { color: var(--ok); }
+.usage-pop-view.warn { color: var(--warn); }
+.usage-pop-view.bad { color: var(--danger); }
+.usage-pop-view.muted { color: var(--text-3); font-weight: 500; }
+
+/* 剩余进度条：6px 胶囊、轨道 surface-inset；画的是**剩余**比例（与 usage-pool 同向）。
+   超额整条走红 —— 画不满的「剩余 0%」读起来像「没用过」，与事实相反。 */
+.usage-pop-track {
+  display: block;
+  height: 6px;
+  margin-top: 6px;
+  border-radius: 999px;
+  background: var(--surface-inset);
+  overflow: hidden;
+}
+.usage-pop-track i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--primary);
+}
+.usage-pop-track.over i { background: var(--danger); }
+
+.usage-pop-total {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 11px;
+  border-radius: var(--r-xs);
+  background: var(--surface-inset);
+}
+.usage-pop-total .k { font-size: 11.5px; color: var(--text-3); }
+.usage-pop-total .v {
+  margin-left: auto;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--ok);
+  font-variant-numeric: tabular-nums;
+}
+.usage-pop-total .v small { font-size: 11px; font-weight: 500; color: var(--text-3); }
+
 /* ─── 操作列 ─── */
 
 /* 定位祖先：⋯ 菜单挂在它下面（菜单仍是「点击才插入 DOM」，见 accounts-view.js） */
@@ -760,22 +1028,3 @@
    批量栏沿用 page-accounts.css 的骨架，这里只补一条：表格化之后
    「全选」有两个入口（批量栏 + 表头），表头的那个需要一点可点区域 */
 #acct-select-all { cursor: pointer; }
-
-/* ─── ZCode「领套餐」确认弹窗里的套餐清单 ───
-   清单由 ui/zcode-claim.js 生成。`.muted` 在别处只以 `.cell-expiry .muted`
-   的形式生效，弹窗里拿不到那条规则 —— 这里补一条作用域内的，否则
-   「权益 / 有效期 / 描述」那几行与套餐名同样粗细，读起来分不出主次。 */
-.zcode-claim-plans { margin: 8px 0 0; padding-left: 18px; }
-.zcode-claim-plans li + li { margin-top: 8px; }
-.zcode-claim-plans .muted { color: var(--text-3); }
-
-/* 多套餐时的单选形态（「领取时指定领哪个」）：去掉列表符号、把圆钮与说明并排。
-   与上面的只读列表同一档间距，只是每行多了一个可点的圆钮。
-   今天已领过的那几份：圆钮 disabled + 整行压暗 + 名字后标「（今日已领）」——
-   逐份标注是必需的，上游按套餐判「已领取过」，领了 A 不影响 B（见 zcode-claim.js）。 */
-.zcode-claim-plans.pickable { padding-left: 0; list-style: none; }
-.zcode-claim-option { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
-.zcode-claim-option input[type="radio"] { flex: none; margin: 2px 0 0; }
-.zcode-claim-option > span { min-width: 0; }
-.zcode-claim-option.taken { cursor: default; opacity: .55; }
-.zcode-claim-taken { color: var(--text-3); }

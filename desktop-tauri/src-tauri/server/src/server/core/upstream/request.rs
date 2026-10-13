@@ -69,6 +69,9 @@ pub struct TransportRequest {
     pub payload: String,
     /// 出网代理（账号级；与 provider 无关，由编排层解析后带上）
     pub proxy: Option<ResolvedProxy>,
+    /// 账号未配代理时本家是否**跟随系统代理**出网（编排层按适配器的能力位填，
+    /// 默认 false = 直连）。为 true 的家见 `ProviderAdapter::system_proxy_when_unset`。
+    pub system_proxy_when_unset: bool,
 }
 
 /// 归一化后的上游错误：`{code, message}`
@@ -145,7 +148,13 @@ pub async fn read_upstream_error(
 pub async fn send_chat_request(
     plan: &TransportRequest,
 ) -> Result<reqwest::Response, UpstreamRequestError> {
-    let client = egress::client_for(plan.proxy.as_ref());
+    // 客户端三选一：账号级代理 → 跟随系统代理（本家能力位，见
+    // `TransportRequest::system_proxy_when_unset`）→ 直连
+    let client = match plan.proxy.as_ref() {
+        Some(proxy) => egress::client_for(Some(proxy)),
+        None if plan.system_proxy_when_unset => egress::client_for_system_proxy(),
+        None => egress::client_for(None),
+    };
     let mut builder = client.post(&plan.url).body(plan.payload.clone());
     for (key, value) in &plan.headers {
         builder = builder.header(key, value);
@@ -157,6 +166,10 @@ pub async fn send_chat_request(
     let via = match &plan.proxy {
         Some(proxy) if !proxy.label.is_empty() => format!("经代理 {}", proxy.label),
         Some(proxy) => format!("经代理 {}", proxy.host),
+        // 跟随系统代理的家（Antigravity）在账号未配代理时走的是系统代理，
+        // 文案不能再说「直连」—— 诊断时要能一眼看出流量从哪出去（见
+        // `ProviderAdapter::system_proxy_when_unset`）
+        None if plan.system_proxy_when_unset => "跟随系统代理".to_string(),
         None => "直连".to_string(),
     };
     // 等待响应头有上限（见 headers_timeout 的说明）：超时后 future 被丢弃，

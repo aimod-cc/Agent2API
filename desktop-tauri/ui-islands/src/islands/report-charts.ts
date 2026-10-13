@@ -14,6 +14,8 @@
  * 这里只回答「给定数据与容器宽度 → 画在哪」，不知道容器是谁、什么时候重算。
  */
 
+import { t } from '../i18n'
+
 /* ─── 数据形状（后端 /api/stats/summary，字段都可缺省） ─── */
 
 export type StatsDay = { date?: string; tokens?: number; requests?: number }
@@ -49,15 +51,16 @@ export const RANGES: readonly string[] = ['today', '7', '30', 'month', 'all']
 export const DEFAULT_RANGE = '7'
 /** 持久化键：沿用项目既有的 workbuddy-desktop-* 前缀（主题 / 页码 / 日志开关是同一套） */
 export const RANGE_KEY = 'workbuddy-desktop-report-range'
+/** 档位对应的展示名（键是后端白名单里的枚举值，不能翻；只有展示串走 t()） */
 export const RANGE_LABEL: Record<string, string> = {
-  today: '今天', 7: '近 7 天', 30: '近 30 天', month: '本月', all: '全部',
+  today: t('今天'), 7: t('近 7 天'), 30: t('近 30 天'), month: t('本月'), all: t('全部'),
 }
 /**
  * 分段控件上的短标签。与 RANGE_LABEL 是两套，别合并：那边是概览小格的说明文字
  * （「近 7 天」），控件里位置窄，用更短的（「7 天」）。
  */
 export const RANGE_OPTION_LABEL: Record<string, string> = {
-  today: '今天', 7: '7 天', 30: '30 天', month: '本月', all: '全部',
+  today: t('今天'), 7: t('7 天'), 30: t('30 天'), month: t('本月'), all: t('全部'),
 }
 
 /** 只有明确存过合法值才采纳；无值 / 读取抛错 / 值被改坏都回落默认的 7 天 */
@@ -70,8 +73,9 @@ export function readRange(): string {
   }
 }
 
-/** 热力图与折线图共用的星期行标签：只标周一 / 三 / 五，七行全写会糊成一片 */
-export const WEEKDAY_ROWS: readonly (readonly [number, string])[] = [[0, '一'], [2, '三'], [4, '五']]
+/** 热力图与折线图共用的星期行标签：只标周一 / 三 / 五，七行全写会糊成一片。
+ *  左边的数字是布局行号（周一 = 0），文案走 t()，与 dayLabel 的星期字共用同一批键 */
+export const WEEKDAY_ROWS: readonly (readonly [number, string])[] = [[0, t('一')], [2, t('三')], [4, t('五')]]
 
 /**
  * 超过这个条数就不再给热区挂 data-tip，改用 SVG 自带的 <title>。
@@ -85,13 +89,17 @@ export const TIP_LIMIT = 400
 
 /* ─── 读数口径 ─────────────────────────────── */
 
-/** 计数：千分位。请求数天然是整数，缩写反而看不出量级差 */
+/** 计数：千分位。请求数天然是整数，缩写反而看不出量级差。
+ *  数字分组的地区格式（zh-CN / ja-JP / en-US …）与量级词一样收在 units.js 一处，
+ *  拿不到桥（极端加载顺序）时留原逻辑兜底，维持改造前的中文观感。 */
 export function formatInt(value: unknown): string {
-  return (Number(value) || 0).toLocaleString('zh-CN')
+  const api = units()
+  return api.formatInt ? api.formatInt(value) : (Number(value) || 0).toLocaleString('zh-CN')
 }
 
-/** units.js 的公开面（本文件只读它的两个格式化函数，不碰开关本身） */
+/** units.js 的公开面（本文件只读它的三个格式化函数，不碰开关本身） */
 type UnitsBridge = {
+  formatInt?: (value: unknown) => string
   formatTokens?: (value: unknown) => string
   formatAxis?: (value: number, max: number) => string
 }
@@ -146,10 +154,16 @@ export function parseDay(key: unknown): Date {
   return new Date(y || 1970, (m || 1) - 1, d || 1)
 }
 
-/** 日期写成人话：9月17日 周三（tooltip 用） */
+/** 星期字（下标 = Date.getDay()，0 = 周日）：与 WEEKDAY_ROWS 的行标签共用同一批键 */
+const WEEKDAY_TEXT: readonly string[] = [t('日'), t('一'), t('二'), t('三'), t('四'), t('五'), t('六')]
+
+/** 日期写成人话：9月17日 周三（tooltip 用）。整句是模板键，「周」字与日期段的
+ *  写法归词典管，各语言可以按自己的习惯改写（如 {m}/{d} {wd}） */
 export function dayLabel(key: unknown): string {
   const date = parseDay(key)
-  return `${date.getMonth() + 1}月${date.getDate()}日 周${'日一二三四五六'[date.getDay()]}`
+  return t('{m}月{d}日 周{wd}', {
+    m: date.getMonth() + 1, d: date.getDate(), wd: WEEKDAY_TEXT[date.getDay()],
+  })
 }
 
 /** 本地整点键 `YYYY-MM-DDTHH` → `15:00`（只取时钟位，时区口径由后端定死） */
@@ -200,18 +214,19 @@ export function overviewCells(overview: StatsOverview | undefined, range: string
   const successRate = requests ? `${((successful / requests) * 100).toFixed(1)}%` : '—'
 
   const cells: OverviewCell[] = [
-    { key: 'requests', label: '总请求数', value: formatInt(requests), sub: RANGE_LABEL[range] || '', mono: false },
-    { key: 'successful', label: '成功请求数', value: formatInt(successful), sub: `成功率 ${successRate}`, mono: false },
-    { key: 'tokens', label: '总 Token', value: formatTokens(data.tokens), sub: '输入 + 输出', mono: false },
-    { key: 'activeDays', label: '活跃天数', value: formatInt(data.activeDays), sub: `区间共 ${days} 天`, mono: false },
-    { key: 'streak', label: '当前连续天数', value: formatInt(data.streak), sub: '含今天在内往前数', mono: false },
+    { key: 'requests', label: t('总请求数'), value: formatInt(requests), sub: RANGE_LABEL[range] || '', mono: false },
+    { key: 'successful', label: t('成功请求数'), value: formatInt(successful), sub: t('成功率 {rate}', { rate: successRate }), mono: false },
+    { key: 'tokens', label: t('总 Token'), value: formatTokens(data.tokens), sub: t('输入 + 输出'), mono: false },
+    { key: 'activeDays', label: t('活跃天数'), value: formatInt(data.activeDays), sub: t('区间共 {n} 天', { n: days }), mono: false },
+    { key: 'streak', label: t('当前连续天数'), value: formatInt(data.streak), sub: t('含今天在内往前数'), mono: false },
   ]
   cells.push(top
     ? {
-      key: 'topModel', label: 'Top 模型', value: String(top.model ?? ''),
-      sub: `${formatTokens(top.tokens)} tokens · 占 ${formatPercent(top.percentage)}`, mono: true,
+      key: 'topModel', label: t('Top 模型'), value: String(top.model ?? ''),
+      sub: t('{tokens} tokens · 占 {pct}', { tokens: formatTokens(top.tokens), pct: formatPercent(top.percentage) }),
+      mono: true,
     }
-    : { key: 'topModel', label: 'Top 模型', value: '—', sub: '所选范围内还没有模型用量', mono: false })
+    : { key: 'topModel', label: t('Top 模型'), value: '—', sub: t('所选范围内还没有模型用量'), mono: false })
   return cells
 }
 
@@ -266,10 +281,10 @@ export function rankRows(list: StatsGroup[] | undefined): RankRowView[] | null {
   return [...rows].sort((left, right) => right.tokens - left.tokens).map((item, index) => {
     const percent = share(item.tokens)
     const text = formatTokens(item.tokens)
-    const name = item.label || item.id || '未知'
+    const name = item.label || item.id || t('未知')
     // 账号名可能重复（两家都能叫「默认」），provider 的 id 是注册表里的短标识
     // （workbuddy / qoder）—— 两者都靠 id 认身份，气泡里带上它
-    const full = item.id ? `${name}（${item.id}）` : name
+    const full = item.id ? t('{name}（{id}）', { name, id: item.id }) : name
     return {
       // key 带上下标：id 与名字理论上都可能重名（手改过的聚合行），React 的 key 必须唯一
       key: `${index}-${item.id || name}`,
@@ -277,7 +292,7 @@ export function rankRows(list: StatsGroup[] | undefined): RankRowView[] | null {
       name,
       full,
       // 气泡只讲用量：读数 + 占比，与格里看到的两列同源（不给成功率，见上）
-      tip: `${full}：${text} tokens · 占 ${percent.toFixed(1)}%`,
+      tip: t('{name}：{tokens} tokens · 占 {pct}%', { name: full, tokens: text, pct: percent.toFixed(1) }),
       tokensText: text,
       percentText: `${percent.toFixed(1)}%`,
       // 条宽用百分比：容器宽度变化时条跟着伸缩，不必像 SVG 那样量宽度重绘
@@ -455,7 +470,10 @@ export function donutView(list: StatsGroup[] | undefined, unknownLabel: string):
       name: item.label,
       tokensText: formatTokens(item.tokens),
       percentText: formatPercent(percent),
-      tip: `${item.label} · ${formatTokens(item.tokens)} tokens · ${formatInt(item.requests)} 次请求 · ${formatPercent(percent)}`,
+      tip: t('{name} · {tokens} tokens · {n} 次请求 · {pct}', {
+        name: item.label, tokens: formatTokens(item.tokens),
+        n: formatInt(item.requests), pct: formatPercent(percent),
+      }),
     })
   })
 
@@ -582,8 +600,10 @@ export function heatmapView(days: StatsDay[] | undefined, boxWidth: number): Hea
       // 「有没有用过」看**请求数**，不看 Token：全部请求都失败的日子请求数大于 0 而 Token
       // 为 0，按 Token 判会把它说成「无请求」（明明试过了）。Token 只是着色依据与读数之一。
       const tip = requests
-        ? `${dayLabel(day.date)} · ${formatTokens(tokens)} tokens · ${formatInt(requests)} 次请求`
-        : `${dayLabel(day.date)} · 无请求`
+        ? t('{date} · {tokens} tokens · {n} 次请求', {
+          date: dayLabel(day.date), tokens: formatTokens(tokens), n: formatInt(requests),
+        })
+        : t('{date} · 无请求', { date: dayLabel(day.date) })
       cellsOut.push({
         key: String(day.date),
         level: levelOf(tokens),
@@ -615,7 +635,10 @@ export function heatmapView(days: StatsDay[] | undefined, boxWidth: number): Hea
     lastMonth = month
     if (col - lastLabelCol < 3) continue
     lastLabelCol = col
-    months.push({ key: `${month}-${col}`, x: round1(offsetX + labelW + col * step), text: `${month + 1}月` })
+    months.push({
+      key: `${month}-${col}`, x: round1(offsetX + labelW + col * step),
+      text: t('{m}月', { m: month + 1 }),
+    })
   }
 
   return { width, height, months, weekdays, cells: cellsOut }
@@ -632,11 +655,12 @@ export type CacheRateCell = { key: string; label: string; value: string; sub: st
 
 export function cacheRateCells(rates: Record<string, CacheRateWindow> | undefined): CacheRateCell[] {
   const data = rates || {}
+  // 四格的口径键（last10m …）是后端字段名，不能翻；标签才是展示串
   const windows: [string, string][] = [
-    ['last10m', '近 10 分钟'],
-    ['last1h', '近 1 小时'],
-    ['last24h', '近 24 小时'],
-    ['last7d', '近 7 天'],
+    ['last10m', t('近 10 分钟')],
+    ['last1h', t('近 1 小时')],
+    ['last24h', t('近 24 小时')],
+    ['last7d', t('近 7 天')],
   ]
   return windows.map(([key, label]) => {
     const item = data[key] || {}
@@ -646,7 +670,9 @@ export function cacheRateCells(rates: Record<string, CacheRateWindow> | undefine
       label,
       // 没有输入 Token 时命中率没有意义（0/0），给破折号
       value: input ? formatPercent(item.rate) : '—',
-      sub: `命中 ${formatTokens(item.hitTokens)} / 输入 ${formatTokens(input)}`,
+      sub: t('命中 {hit} / 输入 {input}', {
+        hit: formatTokens(item.hitTokens), input: formatTokens(input),
+      }),
     }
   })
 }
@@ -810,10 +836,14 @@ export function cacheTrendView(series: StatsHour[] | undefined, width: number): 
   const plotRight = pad.left + plotW
   const hits: ChartHit[] | null = list.length <= TIP_LIMIT
     ? list.map((item, index) => {
-      const tip = `${dayLabel(String(item.hour).slice(0, 10))} ${hourText(item.hour)}`
-        + ` · 命中率 ${formatPercent(item.rate)}`
-        + ` · 总 ${formatTokens(item.totalTokens)} tokens`
-        + `（命中 ${formatTokens(item.hitTokens)} / 输入 ${formatTokens(item.inputTokens)}）`
+      const tip = t('{date} {time} · 命中率 {rate} · 总 {tokens} tokens（命中 {hit} / 输入 {input}）', {
+        date: dayLabel(String(item.hour).slice(0, 10)),
+        time: hourText(item.hour),
+        rate: formatPercent(item.rate),
+        tokens: formatTokens(item.totalTokens),
+        hit: formatTokens(item.hitTokens),
+        input: formatTokens(item.inputTokens),
+      })
       const left = Math.max(plotLeft, xAt(index) - band / 2)
       const right = Math.min(plotRight, xAt(index) + band / 2)
       return { key: `h${index}`, x: round1(left), width: round1(right - left), tip }
@@ -911,7 +941,9 @@ export function dailyTrendView(series: StatsDay[] | undefined, width: number): D
       width: round1(barW),
       height: round1(Math.max(1, baseY - y)),
       rx: barW > 4 ? 2 : 1,
-      tip: `${dayLabel(item.date)} · ${formatTokens(value)} tokens · ${formatInt(item.requests)} 次请求`,
+      tip: t('{date} · {tokens} tokens · {n} 次请求', {
+        date: dayLabel(item.date), tokens: formatTokens(value), n: formatInt(item.requests),
+      }),
       // 超长区间不挂 data-tip 时改用 SVG 原生 <title>：提示成本降到零，hover 仍有读数
       nativeTip: !tips,
     })
@@ -956,7 +988,9 @@ export function dailyTrendView(series: StatsDay[] | undefined, width: number): D
       key: `h${index}`,
       x: round1(pad.left + step * index),
       width: round1(step),
-      tip: `${dayLabel(item.date)} · ${formatTokens(item.tokens)} tokens · ${formatInt(item.requests)} 次请求`,
+      tip: t('{date} · {tokens} tokens · {n} 次请求', {
+        date: dayLabel(item.date), tokens: formatTokens(item.tokens), n: formatInt(item.requests),
+      }),
     }))
     : null
 

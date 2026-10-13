@@ -17,6 +17,7 @@ import {
   type MultiSelectOption,
 } from '@ui'
 import { TableFooter, useClientPaging } from './table-shell'
+import { t } from '../i18n'
 
 /**
  * Agent2API · 网关 Key 页（列表 / 新建 / 启停 / 删除 / 可用范围）—— React 岛。
@@ -175,11 +176,12 @@ type Align = 'left' | 'center' | 'right'
 type ColumnDecl = { key: string; label: string; align?: Align }
 
 const COLUMNS: readonly ColumnDecl[] = [
-  { key: 'name', label: '名称' },
+  { key: 'name', label: t('名称') },
+  // 「Key」是产品固定叫法（无中文），不进词典
   { key: 'key', label: 'Key' },
-  { key: 'time', label: '创建时间' },
-  { key: 'state', label: '启用' },
-  { key: 'act', label: '操作', align: 'right' },
+  { key: 'time', label: t('创建时间') },
+  { key: 'state', label: t('启用') },
+  { key: 'act', label: t('操作'), align: 'right' },
 ]
 
 /** 每个单元格自己的类名（`state` / `r` 是既有 CSS 的钩子，见 page-gateway.css） */
@@ -227,7 +229,7 @@ function setupColumns(): void {
   if (colSettings) return
   const handle = shared().wbColSettings?.register({
     id: 'keys',
-    label: '网关 Key 表',
+    label: t('网关 Key 表'),
     columns: COLUMNS,
     mount: () => document.querySelector('.page[data-page="keys"] .panel-head .head-actions'),
     onChange: () => {
@@ -285,7 +287,8 @@ function modelOptions(
   })
   // 已勾选的模型无论是否还在并集里都要铺出来（见函数说明）
   selected.forEach(put)
-  const out = [...names.values()].map(value => ({ value, label: value }))
+  // 选项**值**是模型名（提交给后端的身份）不进词典；展示 label 走 t()
+  const out = [...names.values()].map(value => ({ value, label: t(value) }))
   out.sort((a, b) => (a.value.toLowerCase() < b.value.toLowerCase() ? -1 : 1))
   return out
 }
@@ -298,12 +301,13 @@ function modelOptions(
 function restrictionText(k: KeyEntry): string {
   const providers = Array.isArray(k.allowedProviders) ? k.allowedProviders : []
   const models = Array.isArray(k.allowedModels) ? k.allowedModels : []
-  if (!providers.length && !models.length) return '不限制'
+  if (!providers.length && !models.length) return t('不限制')
   const parts: string[] = []
-  if (providers.length) parts.push(providers.map(providerLabel).join('、'))
+  // providerLabel 的输出是展示名（providers.js 侧已处理多语言），原样透出
+  if (providers.length) parts.push(providers.map(providerLabel).join(t('、')))
   // 模型那半边只报个数：一屏 Row 里塞不下十几个模型名，悬停由 title 给全量
-  if (models.length) parts.push(`${models.length} 个模型`)
-  return `限制：${parts.join(' / ')}`
+  if (models.length) parts.push(t('{n} 个模型', { n: models.length }))
+  return t('限制：{text}', { text: parts.join(' / ') })
 }
 
 /** 限制摘要的完整说明（悬停 title 用；列不宽，详情只能挂这里） */
@@ -311,11 +315,11 @@ function restrictionTitle(k: KeyEntry): string {
   const providers = Array.isArray(k.allowedProviders) ? k.allowedProviders : []
   const models = Array.isArray(k.allowedModels) ? k.allowedModels : []
   if (!providers.length && !models.length) {
-    return '这把 Key 不限制提供商与模型（可用全部上游与全部对外模型）'
+    return t('这把 Key 不限制提供商与模型（可用全部上游与全部对外模型）')
   }
   const lines: string[] = []
-  if (providers.length) lines.push(`可用提供商：${providers.map(providerLabel).join('、')}`)
-  if (models.length) lines.push(`可用模型：${models.join('、')}`)
+  if (providers.length) lines.push(t('可用提供商：{names}', { names: providers.map(providerLabel).join(t('、')) }))
+  if (models.length) lines.push(t('可用模型：{names}', { names: models.join(t('、')) }))
   return lines.join('\n')
 }
 
@@ -326,16 +330,16 @@ function restrictionTitle(k: KeyEntry): string {
  */
 function restrictionSummary(providers: readonly string[], models: readonly string[]): string {
   if (!providers.length && !models.length) {
-    return '当前不限制：这把 Key 可以用全部提供商与全部对外模型'
+    return t('当前不限制：这把 Key 可以用全部提供商与全部对外模型')
   }
   const parts: string[] = []
-  if (providers.length) parts.push(`提供商：${providers.map(providerLabel).join('、')}`)
-  if (models.length) parts.push(`模型：${models.join('、')}`)
+  if (providers.length) parts.push(t('提供商：{names}', { names: providers.map(providerLabel).join(t('、')) }))
+  if (models.length) parts.push(t('模型：{names}', { names: models.join(t('、')) }))
   // 只限制了模型、没限制提供商（旧数据里可能存在这种组合）：模型候选此刻只剩已勾的
   // 那几个（没有提供商就没有并集可铺），要说清怎么把候选拿回来 —— 否则用户会以为
   // 「模型清单坏了，加不了新的」
   if (!providers.length) {
-    parts.push('（模型候选需先选提供商；不选则沿用当前这几项，保存后仍按模型白名单生效）')
+    parts.push(t('（模型候选需先选提供商；不选则沿用当前这几项，保存后仍按模型白名单生效）'))
   }
   return parts.join('　')
 }
@@ -401,7 +405,8 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
    * 会在保存时被静默丢掉（见后端 `keys_api` 里 `providers` 候选表的说明）。
    */
   const providerOptions = React.useMemo<MultiSelectOption[]>(
-    () => providers.map(item => ({ value: String(item.id), label: String(item.label ?? item.id) })),
+    // 值是提供商 id（提交给后端的身份）不包；展示 label 走 t()（后端下发的展示名）
+    () => providers.map(item => ({ value: String(item.id), label: t(String(item.label ?? item.id)) })),
     [providers],
   )
 
@@ -436,10 +441,10 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
    * 那时浮层里空只可能是搜索没匹配上。
    */
   const modelEmptyHint = modelCandidates.length
-    ? '没有匹配的选项'
+    ? t('没有匹配的选项')
     : allowedProviders.length
-      ? '这几家当前没有可用模型（账号未登录或清单为空）'
-      : '请先在上面选择可用提供商'
+      ? t('这几家当前没有可用模型（账号未登录或清单为空）')
+      : t('请先在上面选择可用提供商')
 
   /** 收尾：解除在途守卫（写两处，避免两边漂移） */
   function stopSaving(): void {
@@ -452,10 +457,10 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
     // 两个白名单直接用归一后的勾选（见 pickedFromOptions），字段名与取值口径都与旧实现一致
     savingRef.current = true
     setSaving(true)
-    setStatus('保存中…')
+    setStatus(t('保存中…'))
     try {
       const api = shared().workbuddyDesktop
-      if (!api) throw new Error('后端桥不可用')
+      if (!api) throw new Error(t('后端桥不可用'))
       if (editingId) {
         // 只提交两个白名单：别名与启停都不动（部分更新语义，见后端 api_keys::update）
         const next = await api.updateKey(editingId, { allowedProviders, allowedModels })
@@ -463,12 +468,12 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
         stopSaving()
         onSaved(next)
         onClose()
-        toast('✅ 可用范围已保存')
+        toast(t('✅ 可用范围已保存'))
         return
       }
       const trimmedKey = keyValue.trim()
       if (trimmedKey && trimmedKey.length < 8) {
-        setStatus('Key 至少需要 8 个字符')
+        setStatus(t('Key 至少需要 8 个字符'))
         return
       }
       const next = await api.createKey({
@@ -477,9 +482,9 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
       stopSaving()
       onSaved(next, next?.created?.id)
       onClose()
-      toast('✅ Key 已创建，记得复制给客户端')
+      toast(t('✅ Key 已创建，记得复制给客户端'))
     } catch (error) {
-      setStatus(`保存失败：${errorMessage(error)}`)
+      setStatus(t('保存失败：{reason}', { reason: errorMessage(error) }))
     } finally {
       stopSaving()
     }
@@ -502,14 +507,16 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {editing ? `可用范围 · ${target?.name || '未命名'}` : '新建 API Key'}
+            {editing
+              ? t('可用范围 · {name}', { name: target?.name || t('未命名') })
+              : t('新建 API Key')}
           </DialogTitle>
         </DialogHeader>
         <DialogBody>
           <DialogSection>
             <div className='flex flex-wrap items-center gap-2.5'>
-              <Label htmlFor='key-name' className='text-[12.5px] whitespace-nowrap text-subtle'>名称</Label>
-              <Input id='key-name' type='text' maxLength={60} placeholder='例如 Cursor / 公司电脑'
+              <Label htmlFor='key-name' className='text-[12.5px] whitespace-nowrap text-subtle'>{t('名称')}</Label>
+              <Input id='key-name' type='text' maxLength={60} placeholder={t('例如 Cursor / 公司电脑')}
                 autoComplete='off' value={name} disabled={editing}
                 onChange={event => setName(event.currentTarget.value)} />
             </div>
@@ -519,7 +526,7 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
             {!editing && (
               <div className='flex flex-wrap items-center gap-2.5'>
                 <Label htmlFor='key-value' className='text-[12.5px] whitespace-nowrap text-subtle'>Key</Label>
-                <Input id='key-value' type='text' placeholder='留空自动生成；手填至少 8 个字符'
+                <Input id='key-value' type='text' placeholder={t('留空自动生成；手填至少 8 个字符')}
                   autoComplete='off' spellCheck={false} value={keyValue}
                   onChange={event => setKeyValue(event.currentTarget.value)}
                   // 回车 = 提交（旧实现只绑在这一个输入框上）
@@ -533,34 +540,32 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
                 触发器上没有可见 label 与之关联（同样没有 id 可给 htmlFor），所以 aria-label
                 必须给，否则读屏只念到一串连接起来的选项名。 */}
             <div className='flex flex-wrap items-center gap-2.5'>
-              <Label className='text-[12.5px] whitespace-nowrap text-subtle'>可用提供商</Label>
+              <Label className='text-[12.5px] whitespace-nowrap text-subtle'>{t('可用提供商')}</Label>
               <MultiSelect
                 value={allowedProviders}
                 onValueChange={setPickedProviders}
                 options={providerOptions}
-                placeholder='留空 = 不限制'
-                searchPlaceholder='搜索提供商…'
-                aria-label='可用提供商'
+                placeholder={t('留空 = 不限制')}
+                searchPlaceholder={t('搜索提供商…')}
+                aria-label={t('可用提供商')}
                 className='flex-auto min-w-[180px] max-w-[260px]'
               />
             </div>
             <div className='flex flex-wrap items-center gap-2.5'>
-              <Label className='text-[12.5px] whitespace-nowrap text-subtle'>可用模型</Label>
+              <Label className='text-[12.5px] whitespace-nowrap text-subtle'>{t('可用模型')}</Label>
               <MultiSelect
                 value={allowedModels}
                 onValueChange={setPickedModels}
                 options={modelCandidates}
-                placeholder='留空 = 不限制'
+                placeholder={t('留空 = 不限制')}
                 emptyHint={modelEmptyHint}
-                searchPlaceholder='搜索模型…'
-                aria-label='可用模型'
+                searchPlaceholder={t('搜索模型…')}
+                aria-label={t('可用模型')}
                 className='flex-auto min-w-[180px] max-w-[260px]'
               />
             </div>
             <p>
-              留空表示不限制；同时设置时请求需同时满足两个条件（模型在白名单内且路由到允许的提供商）。
-              「可用模型」的候选跟着上面勾选的提供商走：没勾提供商时它是空的（还没有约束范围），
-              勾了几家就列出这几家能收的全部对外名。
+              {t('留空表示不限制；同时设置时请求需同时满足两个条件（模型在白名单内且路由到允许的提供商）。 「可用模型」的候选跟着上面勾选的提供商走：没勾提供商时它是空的（还没有约束范围）， 勾了几家就列出这几家能收的全部对外名。')}
             </p>
             {/* 当前选的摘要：多选的触发器上只显示「连接后的一行文案」，清单长了会被省略号
                 收掉 —— 勾了哪几家 / 哪些模型要在这儿摊开。id 沿用旧实现的：page-gateway.css
@@ -572,10 +577,10 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
         <DialogFooter>
           <div className='mr-auto' />
           <Button variant='outline' onClick={onClose} disabled={saving}>
-            取消
+            {t('取消')}
           </Button>
           <Button variant='default' disabled={saving} onClick={() => void save()}>
-            {editing ? '保存范围' : '创建'}
+            {editing ? t('保存范围') : t('创建')}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -632,10 +637,10 @@ function KeysPage() {
     loadingRef.current = true
     try {
       const api = shared().workbuddyDesktop
-      if (!api) throw new Error('后端桥不可用')
+      if (!api) throw new Error(t('后端桥不可用'))
       applyData((await api.getKeys()) ?? null)
     } catch (error) {
-      toast(`读取 Key 列表失败：${errorMessage(error)}`, 'err')
+      toast(t('读取 Key 列表失败：{reason}', { reason: errorMessage(error) }), 'err')
     } finally {
       loadingRef.current = false
     }
@@ -654,7 +659,7 @@ function KeysPage() {
       accept(await run())
       if (doneText) toast(doneText)
     } catch (error) {
-      toast(`操作失败：${errorMessage(error)}`, 'err')
+      toast(t('操作失败：{reason}', { reason: errorMessage(error) }), 'err')
     } finally {
       pendingRef.current.delete(id)
       setPending(new Set(pendingRef.current))
@@ -677,13 +682,13 @@ function KeysPage() {
     if (!api || !ask) return
     const label = escapeHtml(k.name || k.masked || k.id)
     const confirmed = await ask({
-      title: '删除网关 Key',
-      html: `确定删除 Key「<strong>${label}</strong>」？使用它的客户端会立刻无法访问。`,
-      okText: '删除',
+      title: t('删除网关 Key'),
+      html: t('确定删除 Key「<strong>{name}</strong>」？使用它的客户端会立刻无法访问。', { name: label }),
+      okText: t('删除'),
       okClass: 'danger',
     })
     if (!confirmed) return
-    void runRowAction(k.id, () => api.deleteKey(k.id), 'Key 已删除')
+    void runRowAction(k.id, () => api.deleteKey(k.id), t('Key 已删除'))
   }
 
   /** 开关：写接口回的是最新列表，就地替换（与旧实现的 runRowAction 同路） */
@@ -693,7 +698,7 @@ function KeysPage() {
     void runRowAction(
       k.id,
       () => api.updateKey(k.id, { enabled: next }),
-      next ? 'Key 已启用' : 'Key 已停用',
+      next ? t('Key 已启用') : t('Key 已停用'),
     )
   }
 
@@ -740,7 +745,9 @@ function KeysPage() {
   const columns = visibleColumns()
   const authRequired = data?.authRequired === true
   const enabledCount = list.filter(item => item.enabled).length
-  const badgeText = authRequired ? `已启用鉴权 · ${enabledCount} 把 Key 生效` : '未启用鉴权'
+  const badgeText = authRequired
+    ? t('已启用鉴权 · {n} 把 Key 生效', { n: enabledCount })
+    : t('未启用鉴权')
 
   /** 一个单元格的内容（不含 <td> 外壳）；「某一列长什么样」只有这一处实现 */
   function cell(columnKey: string, k: KeyEntry, busyRow: boolean): React.ReactNode {
@@ -748,7 +755,7 @@ function KeysPage() {
       case 'name':
         return (
           <>
-            <div className='mid'><span className='t'>{k.name || '未命名'}</span></div>
+            <div className='mid'><span className='t'>{k.name || t('未命名')}</span></div>
             <div className='mname' title={restrictionTitle(k)}>{restrictionText(k)}</div>
           </>
         )
@@ -758,10 +765,10 @@ function KeysPage() {
           <div className='keycell'>
             <code className='kv'>{shown ? k.key : k.masked}</code>
             <Button size='sm' variant='ghost' onClick={() => toggleReveal(k.id)}>
-              {shown ? '隐藏' : '显示'}
+              {shown ? t('隐藏') : t('显示')}
             </Button>
             {/* data-copy 是 clipboard.js 的委托钩子 */}
-            <Button size='sm' variant='ghost' data-copy={k.key} title='复制 Key'>复制</Button>
+            <Button size='sm' variant='ghost' data-copy={k.key} title={t('复制 Key')}>{t('复制')}</Button>
           </div>
         )
       }
@@ -772,18 +779,18 @@ function KeysPage() {
       case 'state':
         return (
           <Switch checked={k.enabled === true} disabled={busyRow}
-            aria-label={`启用「${k.name || '未命名'}」`}
+            aria-label={t('启用「{name}」', { name: k.name || t('未命名') })}
             onCheckedChange={next => toggleEnabled(k, next)} />
         )
       case 'act':
         return (
           <div className='row-actions'>
             <Button size='sm' variant='ghost' disabled={busyRow} onClick={() => setModal({ key: k })}>
-              可用范围
+              {t('可用范围')}
             </Button>
             <Button size='sm' variant='destructive' disabled={busyRow}
               onClick={() => void removeKey(k)}>
-              删除
+              {t('删除')}
             </Button>
           </div>
         )
@@ -795,7 +802,7 @@ function KeysPage() {
   return (
     <section className='panel'>
       <div className='panel-head'>
-        <h2>API Key 列表</h2>
+        <h2>{t('API Key 列表')}</h2>
         {/* id 与 data-tone 保留：app.js 的 renderTopbarStatus 按 id 镜像这枚徽标的文案
             与配色（data-tone 有值走它，不去拆组件库 Badge 那串 Tailwind 类名） */}
         <Badge id='keys-status' variant={authRequired ? 'success' : 'warning'}
@@ -806,7 +813,7 @@ function KeysPage() {
           {/* 列设置的触发按钮由 wbColSettings.register 插进这个容器的最前面（命令式，
               与模型管理页同一手法：插入位置由那边决定，本岛只留容器） */}
           <Button variant='default' onClick={() => setModal({ key: null })}>
-            ＋ 新建 Key
+            {t('＋ 新建 Key')}
           </Button>
         </div>
       </div>
@@ -824,11 +831,12 @@ function KeysPage() {
           </colgroup>
           <thead>
             <tr>
-              <th data-col='name'>名称</th>
+              <th data-col='name'>{t('名称')}</th>
+              {/* 「Key」是产品固定叫法（无中文），不进词典 */}
               <th data-col='key'>Key</th>
-              <th data-col='time'>创建时间</th>
-              <th data-col='state'>启用</th>
-              <th className='r' data-col='act'>操作</th>
+              <th data-col='time'>{t('创建时间')}</th>
+              <th data-col='state'>{t('启用')}</th>
+              <th className='r' data-col='act'>{t('操作')}</th>
             </tr>
           </thead>
           <tbody>
@@ -848,7 +856,7 @@ function KeysPage() {
               // 两格，把整张表顶出横向滚动
               <tr>
                 <td colSpan={columns.length} className='empty'>
-                  {data ? '还没有 Key，当前不鉴权' : '加载中…'}
+                  {data ? t('还没有 Key，当前不鉴权') : t('加载中…')}
                 </td>
               </tr>
             )}
@@ -858,12 +866,18 @@ function KeysPage() {
 
       <TableFooter
         leading={(
+          // 行内 <code> / <b> 拆片段保住（与 docs-page 脚注同一手法）；
+          // 片段里的空格是 JSX 折行产生的原文空隙，照抄
           <span>
-            客户端请求需带 <code>{'Authorization: Bearer <key>'}</code> 或 <code>{'x-api-key: <key>'}</code>；
-            修改后立即生效，本程序自身会自动使用第一把启用的 Key。每把 Key 可单独限制
-            <b>可用提供商</b>与<b>可用模型</b>（行内「可用范围」）：留空 = 不限制，两个都设时
-            按交集生效 —— 被限制的模型对这把 Key 表现为「不存在」（拉 /v1/models 也看不到它），
-            提供它的家不在可用列表里时请求同样被拒。
+            {t('客户端请求需带 ')}
+            <code>{'Authorization: Bearer <key>'}</code>
+            {t(' 或 ')}
+            <code>{'x-api-key: <key>'}</code>
+            {t('； 修改后立即生效，本程序自身会自动使用第一把启用的 Key。每把 Key 可单独限制')}
+            <b>{t('可用提供商')}</b>
+            {t('与')}
+            <b>{t('可用模型')}</b>
+            {t('（行内「可用范围」）：留空 = 不限制，两个都设时 按交集生效 —— 被限制的模型对这把 Key 表现为「不存在」（拉 /v1/models 也看不到它）， 提供它的家不在可用列表里时请求同样被拒。')}
           </span>
         )}
         total={keys.length}

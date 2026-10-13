@@ -149,6 +149,13 @@ pub fn manage_view(store: &AccountStore) -> Value {
     let mut models = Vec::new();
     let mut mappings = Vec::new();
     let mut attached = HashSet::new();
+    // `(provider, id 小写)` 的出口去重（修复 #177 的兜底一层）。
+    //
+    // 各家的目录解析**应**在源头去重（如 Trae 的 `parse_catalog` 按
+    // `config_name`），但上游形态随时可能变化、别家未必有同样的去重 —— 管理页
+    // 是「清单的可视检查」，同 id 画出两行会连带下面那条默认映射也重复一条。
+    // 这一层独立于源头：不管哪家目录出了脏数据，这里只认第一次出现的那条。
+    let mut claimed: HashSet<(String, String)> = HashSet::new();
     for (kind, mut manifest) in active_manifests(store) {
         let provider = kind_id(kind);
         manifest.sort_by_key(|item| !rules.default_enabled(provider, &model_id(item)));
@@ -158,6 +165,9 @@ pub fn manage_view(store: &AccountStore) -> Value {
         for item in manifest {
             let id = model_id(&item);
             if id.is_empty() { continue; }
+            if !claimed.insert((provider.to_string(), id.to_lowercase())) {
+                continue; // 同家同 id 的重复条目（见 claimed 的说明）
+            }
             let default = rules.binding(provider, &id, &id);
             let enabled = rules.default_enabled(provider, &id);
             mappings.push(json!({

@@ -122,6 +122,25 @@ impl Region {
         }
     }
 
+    /// 开放平台**监控平面**基址（额度窗口读数用，见 `monitor.rs`）。
+    ///
+    /// ── 为什么两地不同、为什么是这两个域 ────────────────────────
+    /// `/api/monitor/usage/quota/limit` 是**未公开**端点，第三方实现给出的是
+    /// 一对域，且多个独立项目完全一致：国际 `api.z.ai`、国内 `open.bigmodel.cn`
+    /// （CodexBar 的 z.ai 文档、opencode-glm-quota 的 `PI_ZAI_CODING_CN_USAGE_ENDPOINT`、
+    /// zai-limits 的说明）。国内那个正是本家 `openai_base_url` 的域 ——
+    /// 也就是说监控平面与**推理平面同域**，只是路径不同（`/api/monitor/...`
+    /// vs `/api/coding/paas/v4/...`）。
+    ///
+    /// `ZCODE_MONITOR_BASE_URL` / `ZCODE_INTL_MONITOR_BASE_URL` 可覆盖
+    /// （与 `openai_base_url` 同一个口子：上游改域时用户能自己救急，不必等发版）。
+    pub fn monitor_base_url(self) -> &'static str {
+        match self {
+            Self::Cn => "https://open.bigmodel.cn",
+            Self::Intl => "https://api.z.ai",
+        }
+    }
+
     /// 编码套餐业务域（凭证换取用，见 `coding_key.rs`）。
     ///
     /// ── 国内版为什么是 `bigmodel.cn` 而不是 `open.bigmodel.cn` ──

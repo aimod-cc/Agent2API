@@ -126,6 +126,14 @@ pub const RESERVED_KV_KEYS: &[&str] = &[
     // —— 下次点「升级」会重复导入一遍历史明细。
     "requestsMigrated",
     "dailyMigrated",
+    // 模型用量口径订正的完成标记（request_stats::aggregate 的
+    // `MODEL_UPSTREAM_MARKER`）—— #139 的根因就是这个键漏登记：
+    // 它在 `remap_model_days` 里**直接写库**（与重算同一事务，有意的：
+    // 中断后标记必然没写、下次整批重跑），而 `config::init` 把全库读进内存
+    // 快照发生在那之前 —— 不登记的话，用户改任意一项配置时 `save_raw` 会把
+    // 它当「配置里已删掉的键」清掉，下次启动同一批历史被重算第二遍
+    // （日期键未变时是幂等覆盖、静默；变过日期键就留下重复的聚合行）。
+    "modelUsageUpstreamRemapped",
     // 远程模型清单的持久化缓存（core::providers::catalog_cache）：整份
     // 「各家上次成功拉到的清单」一个键（十份清单挤一个键的理由见那个模块头）。
     // 属于「其它零散状态」——它不是配置项，配置写入绝不能动它。
@@ -136,16 +144,22 @@ pub const RESERVED_KV_KEYS: &[&str] = &[
     // GitHub 检查、余额查询、模型刷新、凭证维护各多打一轮上游请求。
     // 属于「其它零散状态」：配置写入绝不能动它（否则排期归零、重启又立刻重跑）。
     "backgroundTaskState",
-    // 最近一次「定时查询积分」的结果快照（core::usage_query）：整份
-    // `{at, results, skipped}` 一个键，让界面在重启后仍能看到上次结果与查询时刻。
-    // 与上面的排期分开存：一个是「下次什么时候跑」，一个是「上次跑出了什么」，
-    // 生命周期不同（快照会被手动查询覆盖，排期不会）。同样不归配置管。
+    // 旧「定时查询积分」的结果快照（全局任务已退役）：键保留在保留清单里是
+    // 刻意的 —— `core::usage_records` 启动时把它的行导入 account_usage_records
+    // 表后删除本键；若那次迁移失败，这里不让配置写入把唯一的迁移来源误清掉。
+    // 迁移成功后这个键不再出现，条目留在清单里只是防御。
     "usageQuerySnapshot",
     // 出网代理池（core::proxy_pool）：整份 `{items: [...]}` 一个键 ——
     // 「网络代理」页维护的命名代理，账号可按 id 引用。属于「其它零散状态」：
     // 它不是配置项（配置写入绝不能动它，否则用户配好的代理会被改一次 API Key
     // 清空）。条目不落独立表、只整份读写，理由见那个模块头。
     "proxyPool",
+    // OfficeAce 模型可用性探测的结论（core::providers::officeace::probe）：
+    // 整份 `{unavailable:[…], probedAt, account}` 一个键。探测「目录里列着、这个
+    // 号实际打不通」的模型（上游回 81004/81009），结论由 `advertise_models` 用来
+    // 默认隐藏它们。属于「其它零散状态」——不是配置项，配置写入绝不能动它
+    // （否则每次改配置都让隐藏集合清零、客户端又照着一个一个试）。
+    "officeaceModelProbe",
 ];
 
 /// 这个键是否属于「其它零散状态」（即不归网关配置管）。
@@ -199,7 +213,21 @@ pub fn is_reserved(key: &str) -> bool {
 /// 链路，它产生的请求会照常进请求日志 —— 这一列把它与真实流量分开，
 /// 于是报表聚合能把它排除（测试是人工反复发起的样本，混进去会把真实流量读歪），
 /// 而请求日志那边照旧能看到它、并标成「测试」。
-pub const SCHEMA_VERSION: i64 = 7;
+/// ── 版本 8：account_usage_records 表（每账号的余额查询记录）─────
+/// 见 [`V8_SCHEMA`]。与 v3 同一形态（新表，`CREATE TABLE IF NOT EXISTS`，
+/// 老库与全新库都会跑这一版建出它）。它取代旧 kv 快照 `usageQuerySnapshot`
+/// 成为「每账号最近一次余额查询结果」的权威存放处：全局「定时查询积分」
+/// 退役后查询按账号各自到期触发，一行一账号才能逐条更新、逐条被选路读取
+/// （kv 整份读改写撑不住这个粒度）。旧快照的数据由 `core::usage_records`
+/// 启动时导入，升级后余额列不会变空白。
+///
+/// ── 版本 11：checkin_records 表（签到记录的每账号明细台账）───────
+/// 见 [`V11_SCHEMA`]。与 v3 / v8 同一形态（新表，`CREATE TABLE IF NOT EXISTS`）。
+/// 它是签到中心「签到记录」页的数据源：每执行一次签到，每个账号一行
+/// （领成功 / 已领过 / 失败及其错误原文 / 收益文案），补上改造前「只有
+/// config.json 里一条聚合同 lastResult」看不见的明细。写入方是
+/// `core::checkin_records`（记账点唯一：`core::billing::checkin::run_checkin`）。
+pub const SCHEMA_VERSION: i64 = 11;
 
 /// 版本 1 的全部表与索引：改造前所有 JSON / JSONL 文件的对应形态。
 ///
@@ -552,6 +580,118 @@ const V7_SCHEMA: &str = "
 ALTER TABLE requests ADD COLUMN is_test INTEGER NOT NULL DEFAULT 0;
 ";
 
+/// 版本 8：account_usage_records 表 —— 每账号一条余额查询记录（一账号一行，
+/// 主键即账号 id，重复写入天然是 UPSERT）。
+///
+/// 存什么：`usage` 是适配器返回的**归一化余额 JSON 原文**（与 `/api/accounts/usage`
+/// 行里的 `usage` 同一份形状，前端按它渲染余额列），`error` / `code` 是失败行的
+/// 原因与机器标记（与快照行同语义）。`remaining` 是从 usage 里提出的**数字**投影
+/// （归一化家 = `available`，workbuddy 既有形状 = `totalLeft`）：转发选路的
+/// 「余额不足跳过」每条请求都要比一次，从 JSON 里现场解析太奢侈，主键查一列即可；
+/// `unlimited` 单独一列，workbuddy 的 ∞ 账号不参与阈值判定。
+///
+/// ── 为什么 `remaining` 只在成功时覆写 ────────────────────────
+/// 失败行保留上次成功的数值：欠费判定不因「这次查询失败」而放行（避免
+/// 「查询失败 → 放行 → 402」的窗口期），恢复需要查询成功且数值回到阈值之上。
+/// 失败本身的展示信息在 `error` / `code` 里，二者互不覆盖。
+///
+/// 为什么时间是 INTEGER 毫秒而不是 DATETIME：调度判定（到期 = 上次尝试 +
+/// 间隔）要的是可直接比较的毫秒数，与 `logging::now_ms` 同一口径，读出来即用。
+const V8_SCHEMA: &str = "
+-- ── account_usage_records：每账号的余额查询记录（schema v8）──
+CREATE TABLE IF NOT EXISTS account_usage_records (
+  account_id      TEXT PRIMARY KEY,
+  usage           TEXT,
+  error           TEXT,
+  code            TEXT,
+  remaining       REAL,
+  unlimited       INTEGER NOT NULL DEFAULT 0 CHECK (unlimited IN (0, 1)),
+  last_success_at INTEGER NOT NULL DEFAULT 0,
+  last_attempt_at INTEGER NOT NULL DEFAULT 0,
+  updated_at      INTEGER NOT NULL DEFAULT 0
+);
+";
+
+/// 版本 9：给 `requests` 补「按账号 + 时间」的聚合索引。
+///
+/// ── 它服务什么 ──────────────────────────────────────────────
+/// 账号限制器的 **Token 消耗规则**：每条规则问的是「这个账号在当前重置窗口
+/// （对齐自然时间的固定窗口，30 分钟 ~ 24 小时）内一共消耗了多少 Token」——
+/// 一次 `SELECT account_id, SUM(total_tokens) FROM requests
+/// WHERE account_id = ? AND ts >= ?` 的聚合。没有这个索引它只能走
+/// `idx_requests_ts` 全表扫到过滤条件上，限制器的心跳刷新（每 10 秒一轮）
+/// 会把请求明细表整个翻一遍。
+///
+/// 为什么是复合索引 `(account_id, ts)` 而不是只补 `account_id`：窗口过滤
+/// （`ts >= 窗口起点`）要在**同一账号内**做范围扫描，复合索引让聚合变成
+/// 一次有序的范围读；单独的 account_id 索引拿到行号后还得回表逐行比 ts。
+///
+/// 聚合查询的全部调用方：`core::limiter` 的窗口刷新（按 distinct 周期分组
+/// 查）与单账号即时复查（自动禁用判定）。
+const V9_SCHEMA: &str = "
+-- ── requests 补按账号聚合的索引（schema v9）──────────────────
+CREATE INDEX IF NOT EXISTS idx_requests_account_ts ON requests(account_id, ts);
+";
+
+/// 版本 10：requests 补「选路决策快照」一列。
+///
+/// 存整个决策 JSON 的原文（`{strategy, sticky, stickyHit, picked, ordered[],
+/// blocked[]}`，采集侧已截断到各有界条数）。DEFAULT NULL：旧行与「没走到
+/// 选路」的请求都是「没有决策」—— 展示层对两者不渲染同一段，与
+/// `attempt_details` 的 `'[]'` 不同（那表达「空表」是有意的信息，这里 NULL
+/// 就是「没这回事」，不必造一种空形态）。
+const V10_SCHEMA: &str = "
+-- ── requests 补选路决策快照列（schema v10）───────────────────
+ALTER TABLE requests ADD COLUMN route TEXT;
+";
+
+/// 版本 11：checkin_records 表 —— 签到记录的**每账号明细台账**。
+///
+/// 存什么：每执行一次签到（定时条目轮次 / 启动补签 / 手动批量 / 单账号 /
+/// 国际版活动领取），每个账号落一行。列的口径：
+///   - `ts`：记账时刻（毫秒，`logging::now_ms` 同口径；排序与翻页游标）；
+///   - `date`：北京时间 `YYYY-MM-DD`（上游自然日，`core::beijing` 的日期键 ——
+///     「哪天的签到」按它算，跟机器时区无关，与调度判定同一份口径）；
+///   - `source`：触发来源 `schedule / startup / manual / single / activity`
+///     （见 `core::checkin_records` 的模块头），界面显示为「来源」列；
+///   - `reason`：给日志看的那句（「到点触发（08:00）」「手动签到」…），原样存；
+///   - `account_id` / `account_name` / `provider`：账号三件套（结果行里就有，
+///     原样复制；账号删除后历史行仍然可读）；
+///   - `outcome`：`success / already / pending / failed`（判定复用签到执行体的
+///     同一对判据，判据只此一份，见 `core::checkin_records::classify`）；
+///   - `ok`：`success|already → 1` 的布尔投影（「今日已完成」口径的 SQL 过滤列，
+///     免得每个读点都写 `(outcome='success' OR outcome='already')`）；
+///   - `message`：claim.msg 原文（「今日积分 +100」等**收益就在这里**）；
+///   - `error`：执行错误原文（失败行的原因）；
+///   - `kept_active`：国际版保活成功（`activity.pokeSucceeded`）标记。
+///
+/// 为什么 row_id 用 AUTOINCREMENT：与 `requests` 同一理由 —— 它当翻页游标，
+/// 复用 rowid 会让「翻页漏行 / 重行」。
+///
+/// 索引三个（ts / outcome / provider），对应记录页固定的三种过滤维度，
+/// 刻意不做复合索引（与 logs 表同一取舍：组合多、量级小，让 SQLite 自己挑）。
+const V11_SCHEMA: &str = "
+-- ── checkin_records：签到记录的每账号明细台账（schema v11）────
+CREATE TABLE IF NOT EXISTS checkin_records (
+  row_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts           INTEGER NOT NULL,
+  date         TEXT NOT NULL DEFAULT '',
+  source       TEXT NOT NULL DEFAULT '',
+  reason       TEXT NOT NULL DEFAULT '',
+  account_id   TEXT NOT NULL DEFAULT '',
+  account_name TEXT NOT NULL DEFAULT '',
+  provider     TEXT NOT NULL DEFAULT '',
+  outcome      TEXT NOT NULL DEFAULT '',
+  ok           INTEGER NOT NULL DEFAULT 0,
+  message      TEXT,
+  error        TEXT,
+  kept_active  INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_checkin_records_ts ON checkin_records(ts);
+CREATE INDEX IF NOT EXISTS idx_checkin_records_outcome ON checkin_records(outcome);
+CREATE INDEX IF NOT EXISTS idx_checkin_records_provider ON checkin_records(provider);
+";
+
 /// 把库升到 [`SCHEMA_VERSION`]（幂等：已是最新版时什么都不做）。
 ///
 /// 返回 `rusqlite::Result` 而不是本模块自造的字符串错误：调用方 `Db::open`
@@ -613,6 +753,14 @@ fn apply_version(conn: &Connection, version: i64) -> rusqlite::Result<()> {
         6 => conn.execute_batch(V6_SCHEMA),
         // v7：requests 补「测试来源」一列（模型测试的流量标记，见 V7_SCHEMA）
         7 => conn.execute_batch(V7_SCHEMA),
+        // v8：account_usage_records 每账号余额记录表（取代旧 kv 快照，见 V8_SCHEMA）
+        8 => conn.execute_batch(V8_SCHEMA),
+        // v9：requests 补按账号聚合的索引（限制器的 Token 周期消耗聚合，见 V9_SCHEMA）
+        9 => conn.execute_batch(V9_SCHEMA),
+        // v10：requests 补「选路决策快照」一列（请求详情的路由回放，见 V10_SCHEMA）
+        10 => conn.execute_batch(V10_SCHEMA),
+        // v11：checkin_records 签到记录明细台账（签到记录页的数据源，见 V11_SCHEMA）
+        11 => conn.execute_batch(V11_SCHEMA),
         _ => Ok(()),
     }
 }

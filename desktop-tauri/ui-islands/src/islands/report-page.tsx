@@ -11,6 +11,7 @@ import {
   type RankRowView, type DonutView,
   type StatsDay, type StatsGroup, type StatsHour, type StatsSummary,
 } from './report-charts'
+import { t } from '../i18n'
 
 /**
  * Agent2API · 报表页（时间范围 / 统计概览 / 两张排行 / 两张环形图 / 热力图 / 缓存命中率 /
@@ -114,12 +115,12 @@ const RANGE_OPTIONS: readonly SegmentedControlOption<string>[] = RANGES.map(valu
  * 不能改：每一条都是踩过的边界）。仍是 `.tip-q` + data-tip 的既有形态 —— 与定时任务页
  * 同一处理，由 tooltip.js 的 MutationObserver 增强 React 插入的节点。
  */
-const TIP_ACCOUNTS = '所选范围内每个账号各消耗了多少 Token，按 Token 用量从多到少排。账号是比提供商更细的一维：同一家可以挂多个账号，转发时按优先级在候选链上依次尝试，所以这里反映的是「具体哪个登录态在出力」。百分比按本区间的总 Token 数算（这一块只看用量，请求次数与成功率在概览卡片里）。「未知账号」是指那批请求没有账号身份：走默认登录态转发（未配置账号列表）时会这样；这一维上线前写出的旧聚合行也没有账号明细，但它们会在启动时按明细自动补算回来 —— 只有明细已被保留期清掉（默认 30 天）的那几天补不回来，仍留在「未知账号」里，那是确实无从恢复的部分。'
-const TIP_PROVIDERS = '所选范围内每个提供商各消耗了多少 Token，按 Token 用量从多到少排。同一个模型名可能有多家都能提供，网关按设置页「转发路由」的优先级依次尝试，所以占比也反映了实际落到谁身上。百分比按本区间的总 Token 数算（这一块只看用量，请求次数与成功率在概览卡片里）。「未知」是指那批请求没记下承载它的提供商 —— 主要是记录提供商这个功能上线之前的旧明细，其次是请求在选定上游之前就失败了（请求体非法、模型不存在、没有可用账号）。这一维与账号那一维不同：旧明细里根本没有「哪家承载」的信息（早期版本只有单一上游，但那是配置事实而非逐条记录），所以无法回算，旧数据会一直留在「未知」里；此后新产生的请求都会记上具体的提供商。'
-const TIP_MODELS = '所选范围内每个模型各消耗了多少 Token，按用量从多到少排，扇区角度即占比。中心是这一维的合计（等于概览里的总 Token），右侧每行给出该模型的 Token 用量与百分比。扇区内的百分比只在 ≥3% 时标出，更小的会挤成一团 —— 完整读数在右侧列表与悬停气泡里。颜色按用量排名分配：最大的那段是红色，依次往后；同一份报表里换个维度看，配色口径不变。'
-const TIP_PROVIDERS_PIE = '所选范围内每个提供商各消耗了多少 Token，按用量从多到少排，扇区角度即占比。同一个模型名可能有多家都能提供，网关按设置页「转发路由」的优先级依次尝试，所以占比也反映了实际落到谁身上。中心是这一维的合计（等于概览里的总 Token），右侧每行给出该提供商的 Token 用量与百分比。「未知」是指那批请求没记下承载它的提供商 —— 主要是记录提供商这个功能上线之前的旧明细，其次是请求在选定上游之前就失败了。'
-const TIP_CACHE_RATES = '命中率 = 缓存读取 Token / 输入 Token（promptTokens）。窗口越短越贴近「此刻」：上游把缓存读取与输入分开上报时，该比值合法地可能超过 100%，此处不夹取值、如实展示。'
-const TIP_DAILY_TREND = '每天的总 Token 用量（输入 + 输出）。柱顶标出当天的读数；区间很长、柱子挤到放不下时只标最高的那几天，其余悬停柱子即可读到。'
+const TIP_ACCOUNTS = t('所选范围内每个账号各消耗了多少 Token，按 Token 用量从多到少排。账号是比提供商更细的一维：同一家可以挂多个账号，转发时按优先级在候选链上依次尝试，所以这里反映的是「具体哪个登录态在出力」。百分比按本区间的总 Token 数算（这一块只看用量，请求次数与成功率在概览卡片里）。「未知账号」是指那批请求没有账号身份：走默认登录态转发（未配置账号列表）时会这样；这一维上线前写出的旧聚合行也没有账号明细，但它们会在启动时按明细自动补算回来 —— 只有明细已被保留期清掉（默认 30 天）的那几天补不回来，仍留在「未知账号」里，那是确实无从恢复的部分。')
+const TIP_PROVIDERS = t('所选范围内每个提供商各消耗了多少 Token，按 Token 用量从多到少排。同一个模型名可能有多家都能提供，网关按设置页「转发路由」的优先级依次尝试，所以占比也反映了实际落到谁身上。百分比按本区间的总 Token 数算（这一块只看用量，请求次数与成功率在概览卡片里）。「未知」是指那批请求没记下承载它的提供商 —— 主要是记录提供商这个功能上线之前的旧明细，其次是请求在选定上游之前就失败了（请求体非法、模型不存在、没有可用账号）。这一维与账号那一维不同：旧明细里根本没有「哪家承载」的信息（早期版本只有单一上游，但那是配置事实而非逐条记录），所以无法回算，旧数据会一直留在「未知」里；此后新产生的请求都会记上具体的提供商。')
+const TIP_MODELS = t('所选范围内每个模型各消耗了多少 Token，按用量从多到少排，扇区角度即占比。中心是这一维的合计（等于概览里的总 Token），右侧每行给出该模型的 Token 用量与百分比。扇区内的百分比只在 ≥3% 时标出，更小的会挤成一团 —— 完整读数在右侧列表与悬停气泡里。颜色按用量排名分配：最大的那段是红色，依次往后；同一份报表里换个维度看，配色口径不变。')
+const TIP_PROVIDERS_PIE = t('所选范围内每个提供商各消耗了多少 Token，按用量从多到少排，扇区角度即占比。同一个模型名可能有多家都能提供，网关按设置页「转发路由」的优先级依次尝试，所以占比也反映了实际落到谁身上。中心是这一维的合计（等于概览里的总 Token），右侧每行给出该提供商的 Token 用量与百分比。「未知」是指那批请求没记下承载它的提供商 —— 主要是记录提供商这个功能上线之前的旧明细，其次是请求在选定上游之前就失败了。')
+const TIP_CACHE_RATES = t('命中率 = 缓存读取 Token / 输入 Token（promptTokens）。窗口越短越贴近「此刻」：上游把缓存读取与输入分开上报时，该比值合法地可能超过 100%，此处不夹取值、如实展示。')
+const TIP_DAILY_TREND = t('每天的总 Token 用量（输入 + 输出）。柱顶标出当天的读数；区间很长、柱子挤到放不下时只标最高的那几天，其余悬停柱子即可读到。')
 
 /* ─── 模块级状态（跨渲染的守卫、缓存与入口登记）────── */
 
@@ -189,7 +190,7 @@ function ProviderBadge({ accountId }: { accountId: string }) {
   const label = shared().wbProviders?.labelOf?.(provider) || provider
   const suffix = (account && shared().wbAccountsModel?.editionSuffix?.(account)) || ''
   const text = suffix ? `${label} ${suffix}` : label
-  return <span className={`pbadge p-${provider}`} title={`提供商：${text}`}>{text}</span>
+  return <span className={`pbadge p-${provider}`} title={t('提供商：{text}', { text })}>{text}</span>
 }
 
 /* ─── 板块一：统计概览 ────────────────────── */
@@ -291,7 +292,7 @@ function DonutPanel({ panelId, listId, title, tip, ariaLabel, view, emptyText }:
                 </svg>
                 <div className='donut-center'>
                   <div className='donut-center-value'>{view.totalText}</div>
-                  <div className='donut-center-label'>总 Token</div>
+                  <div className='donut-center-label'>{t('总 Token')}</div>
                 </div>
               </div>
               <div className='donut-legend'>
@@ -317,7 +318,7 @@ function DonutPanel({ panelId, listId, title, tip, ariaLabel, view, emptyText }:
 function HeatmapChart({ view }: { view: HeatmapView }) {
   return (
     <svg className='report-svg' width={view.width} height={view.height}
-      viewBox={`0 0 ${view.width} ${view.height}`} role='img' aria-label='近 365 天活跃热力图'>
+      viewBox={`0 0 ${view.width} ${view.height}`} role='img' aria-label={t('近 365 天活跃热力图')}>
       {view.months.map(item => (
         <text className='hm-axis' x={item.x} y={10} key={item.key}>{item.text}</text>
       ))}
@@ -372,7 +373,7 @@ function CacheTrendChart({ view }: { view: CacheTrendView }) {
     <>
       <svg className='report-svg' width={width} height={height}
         viewBox={`0 0 ${width} ${height}`} role='img'
-        aria-label='近 24 小时缓存命中率与总 Token 趋势'>
+        aria-label={t('近 24 小时缓存命中率与总 Token 趋势')}>
         {view.grid.map(item => (
           <line className='chart-grid' x1={plotLeft} y1={item.y}
             x2={round1(plotLeft + plotW)} y2={item.y} key={item.key} />
@@ -418,7 +419,7 @@ function DailyTrendChart({ view }: { view: DailyTrendView }) {
   return (
     <>
       <svg className='report-svg' width={width} height={height}
-        viewBox={`0 0 ${width} ${height}`} role='img' aria-label='按天 Token 趋势'>
+        viewBox={`0 0 ${width} ${height}`} role='img' aria-label={t('按天 Token 趋势')}>
         {view.grid.map(item => (
           <line className='chart-grid' x1={item.x1} y1={item.y} x2={item.x2} y2={item.y} key={item.key} />
         ))}
@@ -441,7 +442,7 @@ function DailyTrendChart({ view }: { view: DailyTrendView }) {
         ))}
         {view.blank ? (
           <text className='chart-empty' x={round1(plotLeft + plotW / 2)}
-            y={round1(plotTop + plotH / 2)} textAnchor='middle'>所选范围内暂无请求</text>
+            y={round1(plotTop + plotH / 2)} textAnchor='middle'>{t('所选范围内暂无请求')}</text>
         ) : null}
       </svg>
       {view.hits ? (
@@ -594,7 +595,7 @@ function ReportPage() {
       summaryValue = null
       // silent：只压掉控制台噪音（首屏自持加载 / 轮询用），错误态照常显示在页面上
       if (!options.silent) console.warn('读取报表数据失败:', message)
-      applyData({ summary: null, error: message || '未知错误' })
+      applyData({ summary: null, error: message || t('未知错误') })
       return null
     }
   }, [applyData])
@@ -684,8 +685,8 @@ function ReportPage() {
   const modelList: StatsGroup[] | null = summary && Array.isArray(summary.models) ? summary.models : null
 
   /** 各板块的公共三态：错误态 / 正在加载 / 内容 */
-  const errorBlock = error ? placeholder(`读取报表失败：${error}`, 'empty report-error') : null
-  const loadingBlock = placeholder('正在加载…')
+  const errorBlock = error ? placeholder(t('读取报表失败：{error}', { error }), 'empty report-error') : null
+  const loadingBlock = placeholder(t('正在加载…'))
   const loading = errorBlock ?? loadingBlock
 
   // 图表的坐标全靠容器宽度，所以视图只在这里算一次（同一个 view 传给判断与渲染两处）
@@ -700,11 +701,11 @@ function ReportPage() {
            同处一行最直观 */}
       <section className='panel'>
         <div className='panel-head'>
-          <h2>统计概览</h2>
+          <h2>{t('统计概览')}</h2>
           <span className='panel-sub' id='report-range-label'>{RANGE_LABEL[rangeKey] || ''}</span>
           <div className='head-actions'>
             <SegmentedControl options={RANGE_OPTIONS} value={range}
-              onValueChange={changeRange} aria-label='报表时间范围' />
+              onValueChange={changeRange} aria-label={t('报表时间范围')} />
           </div>
         </div>
         <div className='panel-body'>
@@ -718,45 +719,45 @@ function ReportPage() {
       <div className='report-rank-grid'>
         {accountList ? (
           <RankPanel panelId='report-accounts-panel' listId='report-accounts' labelId='report-accounts-label'
-            title='Top 账号' tip={TIP_ACCOUNTS} rows={rankRows(accountList) || []}
-            totalText={rankTotalText(accountList)} withBadge emptyText='所选范围内还没有账号用量' />
+            title={t('Top 账号')} tip={TIP_ACCOUNTS} rows={rankRows(accountList) || []}
+            totalText={rankTotalText(accountList)} withBadge emptyText={t('所选范围内还没有账号用量')} />
         ) : null}
         {providerList ? (
           <RankPanel panelId='report-providers-panel' listId='report-providers' labelId='report-providers-label'
-            title='Top 提供商' tip={TIP_PROVIDERS} rows={rankRows(providerList) || []}
-            totalText={rankTotalText(providerList)} withBadge={false} emptyText='所选范围内还没有请求记录' />
+            title={t('Top 提供商')} tip={TIP_PROVIDERS} rows={rankRows(providerList) || []}
+            totalText={rankTotalText(providerList)} withBadge={false} emptyText={t('所选范围内还没有请求记录')} />
         ) : null}
       </div>
 
       {/* ── 用量环形图：模型 / 提供商两张并排（各自独立判断显隐）── */}
       <div className='report-donut-grid'>
         {modelList ? (
-          <DonutPanel panelId='report-models-panel' listId='report-models-donut' title='模型用量'
-            tip={TIP_MODELS} ariaLabel='模型用量占比'
-            view={donutView(modelList, '未知模型')} emptyText='所选范围内还没有模型用量' />
+          <DonutPanel panelId='report-models-panel' listId='report-models-donut' title={t('模型用量')}
+            tip={TIP_MODELS} ariaLabel={t('模型用量占比')}
+            view={donutView(modelList, t('未知模型'))} emptyText={t('所选范围内还没有模型用量')} />
         ) : null}
         {providerList ? (
-          <DonutPanel panelId='report-providers-pie-panel' listId='report-providers-donut' title='提供商用'
-            tip={TIP_PROVIDERS_PIE} ariaLabel='提供商用占比'
-            view={donutView(providerList, '未知')} emptyText='所选范围内还没有提供商用量' />
+          <DonutPanel panelId='report-providers-pie-panel' listId='report-providers-donut' title={t('提供商用')}
+            tip={TIP_PROVIDERS_PIE} ariaLabel={t('提供商用占比')}
+            view={donutView(providerList, t('未知'))} emptyText={t('所选范围内还没有提供商用量')} />
         ) : null}
       </div>
 
       {/* ── 热力图（固定 365 天，与时间范围筛选解耦）── */}
       <section className='panel'>
         <div className='panel-head'>
-          <h2>活跃热力图</h2>
-          <span className='panel-sub'>近 365 天，按天 Token 用量着色（档位按本窗口峰值自动定）</span>
+          <h2>{t('活跃热力图')}</h2>
+          <span className='panel-sub'>{t('近 365 天，按天 Token 用量着色（档位按本窗口峰值自动定）')}</span>
         </div>
         <div className='panel-body'>
           <div className='heat-wrap' id='report-heatmap' ref={heatWidth[0]}>
             {summary
-              ? (heatView ? <HeatmapChart view={heatView} /> : placeholder('暂无热力图数据'))
+              ? (heatView ? <HeatmapChart view={heatView} /> : placeholder(t('暂无热力图数据')))
               : loading}
           </div>
         </div>
         <div className='panel-foot'>
-          <span className='heat-scale-label'>Token</span>
+          <span className='heat-scale-label'>{t('Token')}</span>
           {/* 图例与热力图共用同一份阈值：它随窗口峰值变，所以每次重绘都要跟着刷新，
               否则图例上的数字会停在上一批数据上 */}
           <span className='heat-legend' id='report-heat-legend'>
@@ -767,14 +768,14 @@ function ReportPage() {
             )) : null}
           </span>
           <div className='spacer' />
-          <span>方格为本地自然日，无请求显示为空槽</span>
+          <span>{t('方格为本地自然日，无请求显示为空槽')}</span>
         </div>
       </section>
 
       {/* ── 缓存命中率四窗口 ── */}
       <section className='panel'>
         <div className='panel-head'>
-          <h2>缓存命中率</h2>
+          <h2>{t('缓存命中率')}</h2>
           <TipQ text={TIP_CACHE_RATES} />
         </div>
         <div className='panel-body'>
@@ -795,13 +796,13 @@ function ReportPage() {
       {/* ── 近 24 小时缓存命中率趋势（固定 24 个整点）── */}
       <section className='panel'>
         <div className='panel-head'>
-          <h2>近 24 小时缓存命中率趋势</h2>
-          <span className='panel-sub'>按本地整点，无请求的整点不标注</span>
+          <h2>{t('近 24 小时缓存命中率趋势')}</h2>
+          <span className='panel-sub'>{t('按本地整点，无请求的整点不标注')}</span>
         </div>
         <div className='panel-body'>
           <div className='chart-wrap' id='report-cache-trend' ref={trendWidth[0]}>
             {summary
-              ? (trendView ? <CacheTrendChart view={trendView} /> : placeholder('暂无缓存趋势数据'))
+              ? (trendView ? <CacheTrendChart view={trendView} /> : placeholder(t('暂无缓存趋势数据')))
               : loading}
           </div>
         </div>
@@ -809,20 +810,20 @@ function ReportPage() {
             的唯一线索，所以必须标出来 */}
         <div className='panel-foot'>
           <span className='chart-legend'>
-            <span className='swatch rate' />缓存命中率<span className='axis-hint'>左轴</span>
+            <span className='swatch rate' />{t('缓存命中率')}<span className='axis-hint'>{t('左轴')}</span>
           </span>
           <span className='chart-legend'>
-            <span className='swatch tokens' />总 Token<span className='axis-hint'>右轴</span>
+            <span className='swatch tokens' />{t('总 Token')}<span className='axis-hint'>{t('右轴')}</span>
           </span>
           <div className='spacer' />
-          <span>无请求的整点按 0% 计，但不写读数</span>
+          <span>{t('无请求的整点按 0% 计，但不写读数')}</span>
         </div>
       </section>
 
       {/* ── 按天 Token 趋势（随时间范围变化）── */}
       <section className='panel'>
         <div className='panel-head'>
-          <h2>按天 Token 趋势</h2>
+          <h2>{t('按天 Token 趋势')}</h2>
           <TipQ text={TIP_DAILY_TREND} />
           <span className='panel-sub' id='report-trend-label'>
             {summary ? `${summary.startDate || '—'} ～ ${summary.endDate || '—'}` : '—'}
@@ -831,7 +832,7 @@ function ReportPage() {
         <div className='panel-body'>
           <div className='chart-wrap tall' id='report-daily-trend' ref={dailyWidth[0]}>
             {summary
-              ? (dailyView ? <DailyTrendChart view={dailyView} /> : placeholder('暂无趋势数据'))
+              ? (dailyView ? <DailyTrendChart view={dailyView} /> : placeholder(t('暂无趋势数据')))
               : loading}
           </div>
         </div>

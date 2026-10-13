@@ -78,6 +78,7 @@
 //! 权限不足 / 库文件损坏都不该让整个桌面应用闪退。网关降级启动至少还能给出
 //! 可读的错误页面与日志。各 store 的接线点要按「数据库可能不存在」写。
 
+pub mod backup;
 pub mod migrate;
 pub mod schema;
 

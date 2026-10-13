@@ -45,8 +45,8 @@ document.addEventListener('click', async event => {
   const trigger = event.target.closest('[data-copy], [data-copy-from]');
   if (!trigger) return;
   const text = copyTextOf(trigger);
-  if (!(await copyToClipboard(text))) { toast('复制失败，请手动选择复制', 'err'); return; }
-  toast(`已复制：${text.length > 46 ? `${text.slice(0, 46)}…` : text}`);
+  if (!(await copyToClipboard(text))) { toast(wbI18n.t('复制失败，请手动选择复制'), 'err'); return; }
+  toast(wbI18n.t('已复制：{text}', { text: text.length > 46 ? `${text.slice(0, 46)}…` : text }));
   // 复制按钮给个即时反馈（模型芯片本身是内容，不改它的外观）
   if (trigger.classList.contains('copy-btn')) {
     trigger.classList.add('done');

@@ -1,11 +1,11 @@
-//! Qoder 每日签到（**只有中国版有**；国际版没有这个活动）。
+//! Qoder 每日签到（campaign 领取链路；中国版 / 国际版两条分支）。
 //!
 //! ── 上游长什么样（2026-09-27 在真实账号上实测）────────────────
 //! 每日权益以**活动（campaign）**形式下发，走 `sash` 一族接口：
 //!
 //! ```text
 //! GET  {openapi}/sash/api/v1/me/campaigns?forceRefresh=true
-//!   → {showCampaign, claimable, campaigns:[{campaignId, campaignKey,
+//!   → {uid, showCampaign, claimable, campaigns:[{campaignId, campaignKey,
 //!        actionType, claimStatus, startAt, endAt,
 //!        benefit:{kind:"CREDITS", amount:100,
 //!                 validity:{mode:"RELATIVE_DAYS", days:30}}}]}
@@ -26,20 +26,26 @@
 //!   - 顶层的 `claimable` 标志**不能当判据**：领完之后它仍是 `true`（同账号还有一条
 //!     可领的促销活动），必须按 `actionType` 逐行筛。
 //!
+//! ── 国际版为什么要两段拉取（issue #140，CreditDaddy 实测结论）──
+//! 国际版服务端**只对带设备风控头**（`Cosy-MachineToken` / `Cosy-MachineCode` /
+//! `Cosy-MachineType`，由本机 Qoder 客户端 / qodercli 的 UMID 组件生成，见
+//! `risk.rs`）的请求下发「每天领 100 Credits」活动：不带风控头时活动列表里
+//! 永远只有 `VIEW_DETAILS` 促销 —— 本家旧注释「国际版没有签到计划」的真正
+//! 原因就是缺头，不是没活动。风控身份按 **uid** 生成，而 uid 在活动列表的
+//! **顶层字段**里，所以顺序必须是：先拉一次拿 uid → 叠风控头重拉 → 再领。
+//! legacy 的 `daily-check-in` 路径两个地区都已停用（国际版 404、中国版恒
+//! `DISABLED`），一次都不碰。
+//!
 //! ── 为什么不走 legacy 的 daily-check-in ─────────────────────
 //! `GET /sash/api/v1/me/daily-check-in/status` 的 `status` 恒为 `DISABLED`
 //! （国际版该路径直接 404），streak 与累计全 0；它的 claim 兄弟端点已被上游
 //! 全局停用（对未领取的日子也回 409 且不发积分）。因此这里**只读活动列表**，
 //! 一次都不碰 legacy。
 //!
-//! ── 两个地区为什么不一样 ───────────────────────────────────
-//! 国际版没有签到计划（`openapi.qoder.sh` 上活动列表里永远只有 `VIEW_DETAILS`
-//! 促销、legacy 路径 404），签到链路只对中国版成立；`billing::checkin::supports_checkin`
-//! 已经在入口按 `edition == "intl"` 把国际版排除（Qoder 的公开账号形态带该字段），
-//! 这里的国际版分支只是兜底文案，正常不会走到。
-//!
-//! 没有签到活动的账号（Free 套餐实测如此）返回一条中性结果（`success:false`
-//! + 说明），不是错误：上游给不给活动是账号侧的状态，把「今天没得领」报成
+//! ── 没有签到活动的账号 ─────────────────────────────────────
+//! 中国版 Free 套餐实测没有活动下发（Pro/试用才有）：返回一条中性结果
+//! （`success:false` + 说明），不是错误 —— 上游给不给活动是账号侧的状态。
+//! 国际版缺 UMID 组件时同样给中性说明（缺什么、怎么补），把「没得领」报成
 //! 失败会让用户以为接口坏了。
 //!
 //! ── panic=abort ────────────────────────────────────────────
@@ -53,7 +59,7 @@ use crate::server::core::proxies::ResolvedProxy;
 use crate::server::errors::GatewayError;
 
 use super::credentials::Credentials;
-use super::{auth, endpoints, refresh};
+use super::{auth, endpoints, refresh, risk};
 use super::endpoints::Region;
 
 /// 活动类型：可领取权益（促销类活动是 `VIEW_DETAILS`，不是签到，不能领）
@@ -67,7 +73,7 @@ const RESULT_ALREADY_CLAIMED: &str = "ALREADY_CLAIMED";
 /// 上游没给 `benefit.amount` 时的缺省奖励额（实测就是 100）
 const DEFAULT_REWARD: f64 = 100.0;
 
-/// 中国版 Qoder 的每日签到。
+/// Qoder 的每日签到（中国版直领；国际版带设备风控身份两段拉取）。
 ///
 /// 返回 `{success, msg, ...}` —— 与 WorkBuddy / 小浣熊 / AutoClaw 三家同形状
 /// （见 `billing::checkin::claim_result`），于是汇总、日志与界面三处不需要
@@ -81,19 +87,68 @@ const DEFAULT_REWARD: f64 = 100.0;
 ///     变成「已签到」）；「没有活动」不带它 —— 不能把「今天没得领」记成已签到。
 pub async fn claim_daily_checkin(
     store: &AccountStore,
+    region: Region,
     account_id: &str,
 ) -> Result<Value, GatewayError> {
-    let mut credentials = refresh::ensure_fresh(store, account_id, false).await?;
-    let (record, _) = refresh::snapshot(store, account_id)?;
-    let region = credentials.region;
+    let mut credentials = refresh::ensure_fresh(store, region, account_id, false).await?;
+    let (record, _) = refresh::snapshot(store, region, account_id)?;
     let proxy = auth::account_proxy(&record)?;
 
     let mut response = fetch_campaigns(&credentials, proxy.as_ref()).await?;
     if response.status == 401 && credentials.can_refresh() {
-        credentials = refresh::ensure_fresh(store, account_id, true).await?;
+        credentials = refresh::ensure_fresh(store, region, account_id, true).await?;
         response = fetch_campaigns(&credentials, proxy.as_ref()).await?;
     }
     let list = auth::payload(response, "签到活动查询")?;
+
+    // ── 国际版：先拿顶层 uid，叠风控头重拉一次（中国版不需要）────
+    // 401 重拉后的重试同样要叠头 —— 那时令牌换了，但流程不变。
+    let mut headers = endpoints::sash_headers(&credentials.access_token);
+    let mut risk_note: Option<String> = None;
+    if region == Region::Global {
+        let uid = list.get("uid").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        let (augmented, note) = risk::augment_headers(headers, region, &uid).await;
+        headers = augmented;
+        risk_note = note;
+        let second = fetch_campaigns_with(&credentials, proxy.as_ref(), &headers).await?;
+        if second.status == 401 && credentials.can_refresh() {
+            credentials = refresh::ensure_fresh(store, region, account_id, true).await?;
+            let third = fetch_campaigns(&credentials, proxy.as_ref()).await?;
+            let third = intl_refetch(&credentials, proxy.as_ref(), third).await?;
+            return claim_from(store, region, account_id, credentials, proxy, third, risk_note).await;
+        }
+        let second = auth::payload(second, "签到活动查询（风控重拉）")?;
+        return claim_from(store, region, account_id, credentials, proxy, second, risk_note).await;
+    }
+
+    claim_from(store, region, account_id, credentials, proxy, list, risk_note).await
+}
+
+/// 国际版的活动列表重取（叠风控头）。首段的 `uid` 缺失（上游没给）时按空
+/// uid 走 —— 风控身份生成不出来，头束退化为「只有客户端身份」，与缺组件
+/// 同一表现（上游不下发积分活动，落到 `no_claim` 的说明文案）。
+async fn intl_refetch(
+    credentials: &Credentials,
+    proxy: Option<&ResolvedProxy>,
+    first: ApiResponse,
+) -> Result<Value, GatewayError> {
+    let first = auth::payload(first, "签到活动查询")?;
+    let uid = first.get("uid").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let (headers, _) = risk::augment_headers(endpoints::sash_headers(&credentials.access_token), credentials.region, &uid).await;
+    let second = fetch_campaigns_with(credentials, proxy, &headers).await?;
+    auth::payload(second, "签到活动查询（风控重拉）")
+}
+
+/// 活动列表解析 + 领取（两个地区共用的收尾）。
+async fn claim_from(
+    store: &AccountStore,
+    region: Region,
+    account_id: &str,
+    mut credentials: Credentials,
+    proxy: Option<ResolvedProxy>,
+    list: Value,
+    risk_note: Option<String>,
+) -> Result<Value, GatewayError> {
     let rows: Vec<Value> = list
         .get("campaigns")
         .and_then(Value::as_array)
@@ -114,7 +169,7 @@ pub async fn claim_daily_checkin(
     }
 
     let Some(target) = claimable else {
-        return Ok(no_claim(region, claimed));
+        return Ok(no_claim(region, claimed, risk_note));
     };
     let campaign_id = target.get("campaignId").and_then(Value::as_str).unwrap_or("");
     if campaign_id.is_empty() {
@@ -127,7 +182,13 @@ pub async fn claim_daily_checkin(
         endpoints::CAMPAIGNS_PATH,
         campaign_id
     );
-    let mut claim = claim_campaign(&url, &credentials, proxy.as_ref()).await?;
+    let mut headers = endpoints::sash_headers(&credentials.access_token);
+    if region == Region::Global {
+        let uid = list.get("uid").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        let (augmented, _) = risk::augment_headers(headers, region, &uid).await;
+        headers = augmented;
+    }
+    let mut claim = claim_campaign(&url, &credentials, proxy.as_ref(), &headers).await?;
     // 上游并发/重放时给 409 + `{"result":"ALREADY_CLAIMED"}`（参考实现实测），
     // 那不是失败，是「今天已经领过了」。
     if !claim.ok && (claim.status == 409 || result_of(&claim).as_deref() == Some(RESULT_ALREADY_CLAIMED))
@@ -139,8 +200,15 @@ pub async fn claim_daily_checkin(
         }));
     }
     if claim.status == 401 && credentials.can_refresh() {
-        credentials = refresh::ensure_fresh(store, account_id, true).await?;
-        claim = claim_campaign(&url, &credentials, proxy.as_ref()).await?;
+        credentials = refresh::ensure_fresh(store, region, account_id, true).await?;
+        // 重签一个新头束（令牌换了，旧头的 Bearer 已失效）
+        let mut fresh_headers = endpoints::sash_headers(&credentials.access_token);
+        if region == Region::Global {
+            let uid = list.get("uid").and_then(Value::as_str).unwrap_or("").trim().to_string();
+            let (augmented, _) = risk::augment_headers(fresh_headers, region, &uid).await;
+            fresh_headers = augmented;
+        }
+        claim = claim_campaign(&url, &credentials, proxy.as_ref(), &fresh_headers).await?;
     }
     let body = auth::payload(claim, "签到领取")?;
 
@@ -180,10 +248,20 @@ pub async fn claim_daily_checkin(
     }))
 }
 
-/// 活动列表（`forceRefresh` 拿实时 `claimStatus`）。
+/// 活动列表（默认头束：`forceRefresh` 拿实时 `claimStatus`）。
 async fn fetch_campaigns(
     credentials: &Credentials,
     proxy: Option<&ResolvedProxy>,
+) -> Result<ApiResponse, GatewayError> {
+    let headers = endpoints::sash_headers(&credentials.access_token);
+    fetch_campaigns_with(credentials, proxy, &headers).await
+}
+
+/// 活动列表（指定头束 —— 国际版第二段要叠风控头）。
+async fn fetch_campaigns_with(
+    credentials: &Credentials,
+    proxy: Option<&ResolvedProxy>,
+    headers: &[(String, String)],
 ) -> Result<ApiResponse, GatewayError> {
     let url = format!(
         "{}{}{}",
@@ -191,13 +269,7 @@ async fn fetch_campaigns(
         endpoints::CAMPAIGNS_PATH,
         endpoints::CAMPAIGNS_QUERY
     );
-    auth::request(
-        "GET",
-        &url,
-        None,
-        &endpoints::sash_headers(&credentials.access_token),
-        proxy,
-    ).await
+    auth::request("GET", &url, None, headers, proxy).await
 }
 
 /// 领取一个活动。请求体是空对象（抓包确认：无参数），`Origin` 指向该地区门户
@@ -206,8 +278,9 @@ async fn claim_campaign(
     url: &str,
     credentials: &Credentials,
     proxy: Option<&ResolvedProxy>,
+    headers: &[(String, String)],
 ) -> Result<ApiResponse, GatewayError> {
-    let mut headers = endpoints::sash_headers(&credentials.access_token);
+    let mut headers = headers.to_vec();
     headers.push(("content-type".to_string(), "application/json".to_string()));
     headers.push(("origin".to_string(), credentials.region.open_api().to_string()));
     auth::request("POST", url, Some(&json!({})), &headers, proxy).await
@@ -223,8 +296,8 @@ fn result_of(response: &ApiResponse) -> Option<String> {
     }
 }
 
-/// 「这次没领到」的结果：区分「今天已领」与「没有可领的活动」。
-fn no_claim(region: Region, claimed: bool) -> Value {
+/// 「这次没领到」的结果：区分「今天已领」「没有可领的活动」与「缺风控身份」。
+fn no_claim(region: Region, claimed: bool, risk_note: Option<String>) -> Value {
     if claimed {
         return json!({
             "success": false,
@@ -233,11 +306,20 @@ fn no_claim(region: Region, claimed: bool) -> Value {
         });
     }
     if region == Region::Global {
-        // 国际版没有签到计划（legacy 路径 404、活动列表里只有促销）——
-        // 说清楚是地区没有，用户才不会反复重试。
+        // 国际版：要么缺 UMID 组件（风控头没带上，上游不下发积分活动），
+        // 要么组件在但活动列表里此刻没有积分活动。10router 作者也在国际版
+        // 上观察到「长期只回 VIEW_DETAILS 促销」（见它的 qoderCheckin.js），
+        // 官方文档确认每日 100 Credits 的窗口每天 10:00（UTC+8）开启 ——
+        // 文案如实说明现状与时机，不要暗示「已经领过」。
+        if let Some(note) = risk_note {
+            return json!({
+                "success": false,
+                "msg": format!("未领取：{note}。国际版签到需要本机安装 Qoder 客户端或 qodercli（Linux 可在签到中心一键安装组件）"),
+            });
+        }
         return json!({
             "success": false,
-            "msg": "该区域无每日签到活动（国际版没有签到计划）",
+            "msg": "上游暂未给该账号下发每日积分活动（官方活动窗口每天 10:00 开启，若今天已在 Qoder 客户端领过则活动行会消失）。明天 10 点后再试",
         });
     }
     // 中国版没有活动是账号侧状态（实测 Free 套餐账号如此，Pro/试用账号才有），

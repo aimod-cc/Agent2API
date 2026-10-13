@@ -3,6 +3,9 @@
 //! 托盘是本应用唯一的「后台入口」：关窗后进程仍在跑（见 lib.rs 的关闭到托盘逻辑），
 //! 用户只能靠托盘图标把界面叫回来或彻底退出，所以菜单项与左键点击都复用了
 //! 同一套 `show_main_window` / 退出实现，避免出现「图标恢复不了窗口」这类死角。
+//! 轻量模式下窗口会被整个销毁（见 lib.rs 的 `ensure_main_window`），唤起时按
+//! 同一份建窗参数重建 —— 本文件只负责「叫回来」，不关心窗口此刻是隐藏、
+//! 最小化还是不存在。
 //!
 //! 图标直接复用 `app.default_window_icon()`（即 tauri.conf.json 里配置的 bundle 图标），
 //! 不额外引入托盘专用图片资源。
@@ -59,10 +62,12 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// 显示并聚焦主窗口。窗口可能处于「隐藏」或「最小化」两种状态，
-/// 两种都要能恢复，所以固定按 unminimize → show → set_focus 走一遍。
+/// 显示并聚焦主窗口。窗口可能处于「隐藏」「最小化」两种状态，
+/// 也可能在轻量模式下已被销毁 —— 三种都要能恢复：
+/// 前两种按 unminimize → show → set_focus 走一遍；
+/// 销毁的由 `ensure_main_window` 按建窗参数重建后再展示。
 pub fn show_main_window(app: &AppHandle) {
-    let Some(window) = app.get_webview_window(crate::MAIN_WINDOW_LABEL) else {
+    let Some(window) = crate::ensure_main_window(app) else {
         return;
     };
     let _ = window.unminimize();

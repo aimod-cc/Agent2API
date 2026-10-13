@@ -17,7 +17,8 @@
 //!   request.rs      传输层：请求发送、上游错误解析、追踪 id（**不认识 provider**）
 //!   sse.rs          SSE reasoning 帧合并（跨 chunk 半行缓冲）+ usage 旁路提取
 //!   aggregate.rs    非流式聚合（SSE → 完整 chat.completion）+ usage 旁路提取
-//!   translate.rs    上游响应协议翻译（Anthropic SSE → chat SSE；ZCode 活动套餐）
+//!   translate.rs    上游响应协议翻译（Anthropic / NDJSON / Gemini 三条翻译流）
+//!                    ——ZCode 活动套餐、Command Code、Antigravity 三家各一台
 //!   usage.rs        usage 旁路槽：token 用量 / 承载 provider+账号 / 尝试次数
 //!
 //! ── provider 差异去哪了（Agent2API 改造 W2b-T3）───────────────
@@ -26,7 +27,7 @@
 //! 本目录只通过 `ProviderAdapter` 契约（`providers::adapter`）使用它们。
 //! 这里出现的 `ProviderKind` 只作**身份标识**使用（候选链的元素、
 //! 日志里的 provider id、记账槽里的 provider 字段），没有任何
-//! 「如果 provider 是 X 就怎么做」的分支 —— 四家 provider 在 `adapter_for`
+//! 「如果 provider 是 X 就怎么做」的分支 —— 各家 provider 在 `adapter_for`
 //! 里都已接上真身适配器（那个 match 是穷举的，加新 kind 会在编译期被拦住），
 //! 编排层不需要为任何一家写特判。
 //!
@@ -47,10 +48,12 @@
 pub mod aggregate;
 pub mod cancellation;
 pub mod connections;
+pub mod refusal;
 pub mod request;
 mod payload;
 mod provider_loop;
 mod rotate;
+mod route_state;
 pub mod sse;
 pub mod stall;
 pub mod translate;
@@ -167,6 +170,13 @@ pub struct UpstreamService {
     in_flight: Arc<Mutex<HashMap<String, Arc<InFlight>>>>,
     /// 账号级活跃连接计数（账号页「连接数」列的数据源，见 `connections.rs`）
     connections: Connections,
+    /// 账号路由的运行期状态（轮转游标 / 粘性 / 退避 / 垫底 / 熔断，
+    /// 见 `route_state.rs`）。转发选路读它的快照、请求收尾写它。
+    /// 字段刻意保持**私有**：子孙模块（rotate / provider_loop）本就看得到，
+    /// 模块外一律走 `route_queue_facts` 的只读快照 —— 状态只该被两条钩子
+    /// 路径改写。Arc 是给 `#[derive(Clone)]` 的：克隆服务句柄（入请求上下文）
+    /// 时状态必须仍是同一份 —— 游标与粘性表分叉就失去意义了。
+    route: std::sync::Arc<route_state::RouteState>,
 }
 
 /// 一次转发的入参
@@ -212,6 +222,25 @@ pub struct ForwardRequest {
     /// 它没有「账号被禁用 / 已被删除时换一个」的兜底语义（见
     /// `rotate::accounts_in_providers` 的说明）。
     pub pinned_account: Option<String>,
+    /// **跳过按模型路由的启停门禁**，候选提供商直接取 [`Self::allowed_providers`]
+    /// 白名单（目前也是模型测试的专用开关，与 `pinned_account` 同一调用方）。
+    ///
+    /// ── 为什么要有它 ─────────────────────────────────────────
+    /// 模型管理页那颗「测试」的用法是「先测通、再决定要不要启用」：被测的行
+    /// 往往就是关着的。生产链路上「承载家全被关闭」的模型以 404
+    /// 「模型已在网关中关闭」拒之门外（`route_for_forward` 不回落默认家），
+    /// 那道门对测试是把被测对象挡在门外 —— 测试已经把家与账号都钉死了，
+    /// 它问的正是「这一家、这个账号、这个名字现在通不通」，路由门禁在语义上
+    /// 不参与这个问题。
+    ///
+    /// 发送侧的按家改写**照常生效**：关闭的默认绑定解析不出目标（
+    /// `builtin_target` 要求启用），回落成「名字原样直发」—— 这正是测试要的
+    /// 形态（目录里的原始 ID 发给被钉住的那家），思考等级也因此不注入，
+    /// 与「映射关闭 = 这条别名不存在」的生产语义一致。
+    ///
+    /// 生产链路一律传 `false`；白名单为空（未限制）时本标记给不出候选链，
+    /// 会走「没有可用的提供商」—— 唯一调用方恒带 `provider_only`，不会触发。
+    pub ignore_model_gate: bool,
 }
 
 /// 转发结果：要么是可直接下发的流，要么是聚合好的 JSON
@@ -243,6 +272,12 @@ pub(super) struct RouteTarget {
     /// 又看不到「这条请求其实是直连出去的」。带到这里之后，转发层把它记进
     /// **本轮尝试明细**的 `notice`，请求日志一次悬停就能看到，运行日志不再写。
     pub proxy_notice: Option<String>,
+    /// 本次选路的**决策快照**（候选怎么排的、谁被跳过、为什么选中它 ——
+    /// `routing::plan_route` 的输出；请求详情页的「路由回放」读它）。
+    ///
+    /// `None` = 没走到账号选路（候选集合为空、用默认登录态直发）。
+    /// 由转发层挂进 telemetry 落进请求日志；这里只是**捎带**，不参与转发。
+    pub decision: Option<Value>,
 }
 
 impl UpstreamService {
@@ -252,7 +287,24 @@ impl UpstreamService {
             auth,
             in_flight: Arc::new(Mutex::new(HashMap::new())),
             connections: Connections::new(),
+            route: std::sync::Arc::new(route_state::RouteState::new()),
         }
+    }
+
+    /// 路由运行期状态的**只读快照**（`api::routing` 的队列端点用）。
+    ///
+    /// 返回纯 std 容器（沉底表 / 休息表 / 熔断集合），不把本模块的私有类型
+    /// 漏出去；面板只看不写，粘性查找不在此做（预演不该刷新会话计时）。
+    pub fn route_queue_facts(
+        &self,
+        now: i64,
+    ) -> (
+        HashMap<String, i64>,
+        HashMap<String, i64>,
+        std::collections::HashSet<String>,
+    ) {
+        let snapshot = self.route.snapshot("", now, 0);
+        (snapshot.sunk, snapshot.resting, snapshot.open)
     }
 
     /// 账号级活跃连接计数句柄（`api::accounts` 的 `/api/accounts/connections` 读它）。
@@ -348,6 +400,8 @@ impl UpstreamService {
             prompt,
             key_scope: key_scope.as_ref(),
             pinned_account: pinned_account.as_deref(),
+            // bool 是 Copy，直接读：不存在上面那两条的借用问题
+            ignore_model_gate: request.ignore_model_gate,
         };
         provider_loop::forward_with_providers(self, context, &mut slot, &mut connections).await
     }

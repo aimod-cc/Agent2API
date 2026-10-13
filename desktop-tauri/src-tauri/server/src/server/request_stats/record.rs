@@ -24,6 +24,7 @@
 //!     `default` 让「多一个键」不至于让整列解析失败。
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// 明细保留的最大条数（超出丢最旧的）。
 ///
@@ -222,6 +223,17 @@ pub struct RequestEntry {
     /// 时才有内容）。与 `provider` 的空串同一约定：**不给旧数据猜值**。
     #[serde(rename = "attemptDetails", default)]
     pub attempt_details: Vec<AttemptDetail>,
+    /// **选路决策快照**（`{strategy, sticky, stickyHit, picked, ordered[], blocked[]}`）。
+    ///
+    /// 「路由回放」的数据源：请求详情页按它画「当时为什么这么排」—— 与
+    /// `attemptDetails` 互补，那边回答「试了谁、成没成」，这边回答「候选怎么
+    /// 排、为什么是它先上」。采集点在选路层（`rotate::select_target_account`
+    /// 产出、telemetry 槽位承载、记账点搬运），与敏感词同一「有采集才有值」。
+    ///
+    /// 旧行没有这个键，`default` 读成 Null；展示层对 Null 与缺失一视同仁
+    /// （不渲染那一段）。存 JSON 与 attemptDetails 同一取舍（整体读写，不拆表）。
+    #[serde(rename = "route", default)]
+    pub route: Value,
     /// **本次请求命中的敏感词**（`[{word, count}]`，按次数降序；空表 = 没命中）。
     ///
     /// 结构与 `core::upstream::usage::SensitiveHit` **逐字段相同**（`word` /
@@ -337,6 +349,10 @@ pub struct AttemptDetail {
     /// 这一轮的提示（目前只有代理回退直连）
     #[serde(default)]
     pub notice: Option<String>,
+    /// 这一轮实际发给上游的体字节数（None = 没发出去过）。采集侧的来由与
+    /// 「只记体积不记内容」的口径见 `core::upstream::usage::AttemptDetail::body_bytes`。
+    #[serde(rename = "bodyBytes", default)]
+    pub body_bytes: Option<i64>,
 }
 
 /// 一次尝试内部的退避重试（存储契约，与采集侧同形各自定义）。
@@ -444,6 +460,8 @@ pub struct NewRequestEntry {
     /// 每一次上游尝试的明细（见 `RequestEntry::attempt_details`）。
     /// 空表 = 一次都没发出去（转发前就失败）或采集侧没记上。
     pub attempt_details: Vec<AttemptDetail>,
+    /// 选路决策快照（见 `RequestEntry::route`）。Null = 没走到选路。
+    pub route: Value,
     /// 本次请求命中的敏感词（见 `RequestEntry::sensitive_hits`）。空表 = 没命中。
     pub sensitive_hits: Vec<SensitiveHit>,
     /// 这条请求是不是模型测试发起的（见 `RequestEntry::is_test`；默认 false）。
@@ -478,6 +496,8 @@ impl NewRequestEntry {
             // 那里构造的 telemetry 是空的，于是两个空表如实表达「没发生过尝试 /
             // 没命中过词」—— 而不是留一个需要读侧再判一次的 None
             attempt_details: Vec::new(),
+            // 没走到选路时保持 Null（与旧行同一形态，展示层不渲染）
+            route: Value::Null,
             sensitive_hits: Vec::new(),
             // 默认是真实流量；模型测试那一条由 `api::model_test` 显式改成 true
             // （`RecordContext::is_test` 一路带过来）
@@ -537,6 +557,8 @@ impl NewRequestEntry {
             // 两个等级列同一口径：trim 后透传，空串 = 没有等级
             client_reasoning: self.client_reasoning.trim().to_string(),
             upstream_reasoning: self.upstream_reasoning.trim().to_string(),
+            // 决策快照透传（Null 或对象，原样入库 —— 形状由采集侧保证）
+            route: self.route,
             // ── 两个明细字段的归一（本次改造）───────────────────────
             // 都做「清掉空项 + 夹到合理形状」，让读侧（SQL false 编码、前端渲染）
             // 拿到的永远是可直接消费的表：
@@ -571,6 +593,8 @@ impl NewRequestEntry {
                         .collect(),
                     // notice 空串收敛成 None，理由同 error
                     notice: item.notice.filter(|text| !text.is_empty()),
+                    // 体字节数原样透传（None = 这一轮没发出去；采集侧的理由见 usage 的字段说明）
+                    body_bytes: item.body_bytes,
                 })
                 .collect(),
             sensitive_hits: self

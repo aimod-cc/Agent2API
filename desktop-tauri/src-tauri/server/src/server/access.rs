@@ -320,7 +320,20 @@ fn refresh_tokens() -> &'static Mutex<Vec<RefreshRecord>> {
     REFRESH_TOKENS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// 启动时把库里的刷新令牌载入内存（`bootstrap` 完成后调用一次）。
+/// 整库恢复后清空短效令牌（`db::backup::import_from_file` 调用）。
+///
+/// 恢复把 `panelTokens` 换成了备份机器的记录，本机浏览器的 cookie 对不上
+/// 新表；内存里的旧 access 会话若保留，用户会顶着「看似已登录」的状态用到
+/// 过期才撞 401。清空让所有人立刻走重新登录 —— 行为与新库一致。
+pub fn clear_access_tokens() {
+    match access_tokens().lock() {
+        Ok(mut table) => table.clear(),
+        Err(poisoned) => poisoned.into_inner().clear(),
+    }
+}
+
+/// 启动时把库里的刷新令牌载入内存（`bootstrap` 完成后调用一次；
+/// 整库恢复后由 `db::backup::import_from_file` 再调一次完成重装）。
 pub fn load_refresh_tokens() {
     let Some(loaded) = db().and_then(|db| {
         db.with(|conn| {

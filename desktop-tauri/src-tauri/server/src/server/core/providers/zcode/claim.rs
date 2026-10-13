@@ -221,6 +221,23 @@ pub fn platform() -> &'static str {
     }
 }
 
+/// 操作系统的**类别名**（`windows` / `macos` / `linux`）。
+///
+/// 客户端身份头 `X-Os-Category` 与激活事件体的 `device_os_category` 共用
+/// 这一处（两处各写一份 cfg 链，迟早有一处漏改）。与 [`platform`] 的区别：
+/// 那个是「平台-架构」（`win32-x64`），这个是纯类别名 —— 上游按它分流、
+/// 不看架构。认不出的平台落 `linux`（参考实现 `normalizeOsCategory` 的
+/// 默认分支同义）。
+pub fn os_category() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    }
+}
+
 /// 一条可领取的套餐（上游 `plans[]` 的归一形态）。
 ///
 /// 字段保留上游语义：`starts_at` / `ends_at` 是 **unix 秒**（不是毫秒）——
@@ -637,7 +654,10 @@ fn parse_plan(raw: &Value) -> Option<ClaimablePlan> {
                             .unwrap_or("")
                             .trim()
                             .to_string(),
-                        effective_at: item.get("effective_at").and_then(Value::as_i64),
+                        // 生效时间（unix 秒）：品类同 [`unix_seconds_of`]。
+                        // `0` 是官方文档里的「立即生效」哨兵值，原样带出 —— 判定在
+                        // 余额侧（`balance::plan_effective_times` 只收 > 0 的）
+                        effective_at: item.get("effective_at").and_then(unix_seconds_of),
                     })
                 })
                 .collect()
@@ -653,10 +673,25 @@ fn parse_plan(raw: &Value) -> Option<ClaimablePlan> {
             .trim()
             .to_string(),
         priority: raw.get("priority").and_then(Value::as_i64).unwrap_or(0),
-        starts_at: raw.get("starts_at").and_then(Value::as_i64),
-        ends_at: raw.get("ends_at").and_then(Value::as_i64),
+        starts_at: raw.get("starts_at").and_then(unix_seconds_of),
+        ends_at: raw.get("ends_at").and_then(unix_seconds_of),
         entitlements,
     })
+}
+
+/// 一个 unix 秒字段 → `i64`。
+///
+/// 上游这几个时间字段的官方类型是 `number | string | null`
+/// （`ZaiStartPlanPlan` / `entitlements[].effective_at` 在官方源码里就是这么写的），
+/// 只看 `as_i64` 会让**字符串形态**整条消失 —— 生效时间一丢，界面就退回
+/// 「按领取时间 / 立即生效」猜，那正是「生效时间显示成领取时间」那类 bug 的来源。
+/// 与余额侧的 `number_of` 同一条取值口径。
+fn unix_seconds_of(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(number) => number.as_i64(),
+        Value::String(text) => text.trim().parse::<i64>().ok(),
+        _ => None,
+    }
 }
 
 /// 从一批可领套餐里挑出目标：指定了 `plan_id` 就取它，否则取优先级最高的。

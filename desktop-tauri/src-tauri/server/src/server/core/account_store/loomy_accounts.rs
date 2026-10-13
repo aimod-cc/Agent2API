@@ -251,7 +251,7 @@ impl AccountStore {
             "[Accounts]",
             &format!("✅ Loomy 账号已保存: {record_name}（优先级 {priority}）"),
         );
-        Ok(self.to_loomy_public_account(&saved))
+        Ok(self.public_account(&saved))
     }
 
     /// Loomy 账号的**公开形态**（进 HTTP 响应）：去掉 session 本体，只留尾 4 位。

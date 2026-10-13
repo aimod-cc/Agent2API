@@ -11,6 +11,7 @@ import {
   RadioGroup,
   RadioGroupItem,
 } from '@ui'
+import { t } from '../i18n'
 
 /**
  * 请求日志的「清理」弹窗（列表头那颗「清理」按钮的本体）。
@@ -57,19 +58,16 @@ type Mode = 'all' | 'raw'
  * 日报是全量聚合，无法按筛选部分重算；全量清空则连报表一起归零。
  * 文案与旧实现 MODES 逐字一致（旧实现靠 esc() 转义后塞 innerHTML，
  * 这里交给 React 的文本节点，天然不解析标签）。
+ * 文案整段作为 t() 的键（中文即键）：写成单个字符串字面量而不是多段拼接，扫描器才认得出。
  */
 const MODES: Record<Mode, { title: string; desc: string }> = {
   all: {
-    title: '全部删除',
-    desc:
-      '删除日志记录本身。当前有筛选时只删命中的条目，按天聚合报表不受影响；' +
-      '无筛选时清空全部并重置报表。此方式无法恢复。',
+    title: t('全部删除'),
+    desc: t('删除日志记录本身。当前有筛选时只删命中的条目，按天聚合报表不受影响；无筛选时清空全部并重置报表。此方式无法恢复。'),
   },
   raw: {
-    title: '仅清空报文原文',
-    desc:
-      '保留统计行与报表，只抹掉请求 / 响应正文。清理后详情弹窗的' +
-      '「预览对话」将无原文可看，统计数字分毫不动。',
+    title: t('仅清空报文原文'),
+    desc: t('保留统计行与报表，只抹掉请求 / 响应正文。清理后详情弹窗的「预览对话」将无原文可看，统计数字分毫不动。'),
   },
 }
 
@@ -272,7 +270,7 @@ function RequestClearModal({ onClose }: RequestClearModalProps) {
     if (next.vacuumRunning) return
     stopPolling()
     setHint('')
-    toast('✅ 压缩完成')
+    toast(t('✅ 压缩完成'))
     // 压缩不改数据，但库占用变小了：预览刚随上面那次响应更新过，
     // 列表顺带刷一次（vacuum 期间可能又进了新请求）
     void shared().wbRequestsPanel?.load?.({ silent: true })
@@ -295,7 +293,7 @@ function RequestClearModal({ onClose }: RequestClearModalProps) {
     setPreview({ status: 'loading' })
     try {
       const api = shared().workbuddyDesktop
-      if (!api) throw new Error('后端桥不可用')
+      if (!api) throw new Error(t('后端桥不可用'))
       const raw = await api.getStatsClearPreview(currentQuery())
       if (!aliveRef.current) return // 等待期间已关窗：丢弃这次结果
       const next = toCounts(raw)
@@ -305,7 +303,7 @@ function RequestClearModal({ onClose }: RequestClearModalProps) {
     } catch (error) {
       if (!aliveRef.current) return
       setPreview({ status: 'failed' })
-      setHint(`预览读取失败：${errorMessage(error)}`)
+      setHint(t('预览读取失败：{error}', { error: errorMessage(error) }))
     }
   }
 
@@ -337,21 +335,21 @@ function RequestClearModal({ onClose }: RequestClearModalProps) {
     setVacuumRunning(true) // 先切「压缩中…」并禁用（旧实现同序）
     try {
       await api.compactStatsDb()
-      setHint('压缩已在后台开始，完成后会自动提示')
+      setHint(t('压缩已在后台开始，完成后会自动提示'))
       startPolling()
     } catch (error) {
       const message = errorMessage(error)
       // 409 = 另一个压缩正在跑：后端文案「数据库压缩正在进行中…」，
       // 桥接层只透出这句话（不带状态码），两种特征都认一下
       if (/409|正在进行/.test(message)) {
-        toast('压缩已在进行中')
-        setHint('压缩已在进行中，接上它的进度等待完成')
+        toast(t('压缩已在进行中'))
+        setHint(t('压缩已在进行中，接上它的进度等待完成'))
         startPolling()
         return
       }
       setVacuumRunning(false)
-      setHint(`压缩失败：${message}`)
-      toast(`压缩失败：${message}`, 'err')
+      setHint(t('压缩失败：{message}', { message }))
+      toast(t('压缩失败：{message}', { message }), 'err')
     }
   }
 
@@ -376,11 +374,11 @@ function RequestClearModal({ onClose }: RequestClearModalProps) {
     const deleting = preview.status === 'ready' ? (mode === 'raw' ? preview.raw : preview.all) : 0
 
     const confirmed = await ask({
-      title: '清理请求日志',
+      title: t('清理请求日志'),
       html: hasFilters
-        ? `确定按当前筛选执行「<strong>${escapeHtml(label)}</strong>」？将处理 <strong>${deleting}</strong> 条，此操作无法恢复。`
-        : `确定对<strong>全部</strong>请求日志执行「<strong>${escapeHtml(label)}</strong>」？将处理 <strong>${deleting}</strong> 条，此操作无法恢复。`,
-      okText: mode === 'raw' ? '抹掉原文' : '删除',
+        ? t('确定按当前筛选执行「<strong>{label}</strong>」？将处理 <strong>{count}</strong> 条，此操作无法恢复。', { label: escapeHtml(label), count: deleting })
+        : t('确定对<strong>全部</strong>请求日志执行「<strong>{label}</strong>」？将处理 <strong>{count}</strong> 条，此操作无法恢复。', { label: escapeHtml(label), count: deleting }),
+      okText: mode === 'raw' ? t('抹掉原文') : t('删除'),
       okClass: 'danger',
     })
     if (!confirmed) return
@@ -392,7 +390,7 @@ function RequestClearModal({ onClose }: RequestClearModalProps) {
       const deleted = Number(result?.deleted) || 0
       // raw 模式删的是正文而不是行：「已删除 N 条」会让人以为行没了，
       // 文案按实际删掉的东西写
-      toast(mode === 'raw' ? `已抹掉 ${deleted} 条报文原文` : `已删除 ${deleted} 条`)
+      toast(mode === 'raw' ? t('已抹掉 {count} 条报文原文', { count: deleted }) : t('已删除 {count} 条', { count: deleted }))
       setInFlight(false) // 先解除守卫，closeModal() 才放行（与旧实现同序）
       onClose()
       // 列表收口刷新：筛选清单可能整批消失（清了明细后下拉不该再列着旧值），
@@ -400,8 +398,8 @@ function RequestClearModal({ onClose }: RequestClearModalProps) {
       void shared().wbRequestsPanel?.notifyCleared?.()
     } catch (error) {
       const message = errorMessage(error)
-      setHint(`清理失败：${message}`)
-      toast(`清理失败：${message}`, 'err')
+      setHint(t('清理失败：{message}', { message }))
+      toast(t('清理失败：{message}', { message }), 'err')
       // 失败必须解除守卫，否则弹窗再也关不掉（按钮与取消键一并恢复可用）
       setInFlight(false)
     }
@@ -409,10 +407,14 @@ function RequestClearModal({ onClose }: RequestClearModalProps) {
 
   const previewText =
     preview.status === 'ready'
-      ? `将删除 ${preview.all} 条日志 · 其中 ${preview.raw} 条仍带报文原文 · 数据库占用 ${formatBytes(preview.dbBytes)}`
+      ? t('将删除 {count} 条日志 · 其中 {raw} 条仍带报文原文 · 数据库占用 {db}', {
+          count: preview.all,
+          raw: preview.raw,
+          db: formatBytes(preview.dbBytes),
+        })
       : preview.status === 'failed'
-        ? '预览读取失败'
-        : '正在统计…'
+        ? t('预览读取失败')
+        : t('正在统计…')
 
   return (
     <Dialog
@@ -432,11 +434,11 @@ function RequestClearModal({ onClose }: RequestClearModalProps) {
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>清理请求日志</DialogTitle>
+          <DialogTitle>{t('清理请求日志')}</DialogTitle>
         </DialogHeader>
         <DialogBody>
           <RadioGroup
-            aria-label='清理方式'
+            aria-label={t('清理方式')}
             value={mode}
             onValueChange={next => setMode(next === 'raw' ? 'raw' : 'all')}
           >
@@ -478,14 +480,14 @@ function RequestClearModal({ onClose }: RequestClearModalProps) {
             disabled={vacuumRunning}
             title={
               vacuumRunning
-                ? '压缩正在后台执行，完成后自动恢复'
-                : '回收已删除数据占用的磁盘空间（checkpoint + VACUUM，后台执行）'
+                ? t('压缩正在后台执行，完成后自动恢复')
+                : t('回收已删除数据占用的磁盘空间（checkpoint + VACUUM，后台执行）')
             }
           >
-            {vacuumRunning ? '压缩中…' : '压缩数据库'}
+            {vacuumRunning ? t('压缩中…') : t('压缩数据库')}
           </Button>
           <Button variant='outline' onClick={onClose} disabled={clearingView}>
-            取消
+            {t('取消')}
           </Button>
           <Button
             variant='destructive'
@@ -494,7 +496,7 @@ function RequestClearModal({ onClose }: RequestClearModalProps) {
             }}
             disabled={clearingView}
           >
-            {clearingView ? '清理中…' : '执行清理'}
+            {clearingView ? t('清理中…') : t('执行清理')}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -156,7 +156,7 @@ pub fn parse_builtin(body: &str) -> Result<Vec<ModelConfig>, String> {
             display_name: if model_name.is_empty() { id.clone() } else { model_name },
             description: text(entry, "model_desc"),
             context_length: number(entry, "context_window"),
-            max_output_tokens: number(entry, "max_tokens"),
+            max_output_tokens: capped_output(entry, "max_tokens"),
             supports_images: entry.get("supports_images").and_then(Value::as_bool).unwrap_or(false),
             credit_display: credit_display_of(entry),
             id,
@@ -207,7 +207,7 @@ pub fn parse_agent_detail(body: &str, language: &str) -> Result<Vec<ModelConfig>
             display_name: if model_name.is_empty() { id.clone() } else { model_name },
             description,
             context_length: number(&parameters, "context_window"),
-            max_output_tokens: number(&parameters, "max_tokens"),
+            max_output_tokens: capped_output(&parameters, "max_tokens"),
             supports_images: parameters.get("supports_images").and_then(Value::as_bool).unwrap_or(false),
             credit_display: credit_display_of(&entry),
             id,
@@ -284,7 +284,7 @@ pub fn parse_benefit(body: &str) -> Result<Vec<ModelConfig>, String> {
             display_name: if name.is_empty() { id.clone() } else { name },
             description: String::new(),
             context_length: number(&entry, "context_window"),
-            max_output_tokens: number(&entry, "max_tokens"),
+            max_output_tokens: capped_output(&entry, "max_tokens"),
             supports_images: false,
             // 福利网关的条目没有 `credit`（实测三个源里只有 agent 与 builtin 带），
             // 留空 = 界面那一列显示 `—`，不是"倍率为 0"。
@@ -514,6 +514,22 @@ fn text(value: &Value, key: &str) -> String {
 
 fn number(value: &Value, key: &str) -> i64 {
     value.get(key).and_then(Value::as_i64).unwrap_or(0)
+}
+
+/// 目录自述的 `max_tokens` 不能当请求上限用。实测这一家对单次输出额度的硬上限是 65536
+/// （65537 起回 `InferHub.001001005.400`，见 `chat::MAX_OUTPUT_TOKENS`），而目录里
+/// GLM-5.2 写着 131072、deepseek-v4.1-flash 写着 384000。这些数经 `/v1/models` 广告出去，
+/// 客户端照它写值就会被上游整条拒收，所以出口先夹一遍。请求侧另有
+/// `chat::clamp_output_tokens` 兜底，这里管的是对外报出的那个数。
+///
+/// `0` 表示目录没给，原样留着：不知道就不编一个数。
+fn capped_output(value: &Value, key: &str) -> i64 {
+    let declared = number(value, key);
+    if declared <= 0 {
+        declared
+    } else {
+        declared.min(super::chat::MAX_OUTPUT_TOKENS)
+    }
 }
 
 /// `credit[]` → 倍率文案（`ratio_display`）。
@@ -950,6 +966,47 @@ mod tests {
         // 倍率随条目一起活过合并；福利源没有 credit，保持空串
         assert_eq!("0.7x", full.iter().find(|model| model.id == "GLM-5.2").unwrap().credit_display);
         assert!(benefit.credit_display.is_empty(), "福利网关不给倍率，界面那列就该是 —");
+    }
+
+    /// 三个解析口的 `max_output_tokens` 都夹到上游硬上限。
+    ///
+    /// 这三个数会经 `/v1/models` 报给客户端，客户端照它写值就会被上游拒（实测 65537 起
+    /// `InferHub.001001005.400`）。目录写的 131072 / 393216 是模型能力，不是请求上限。
+    #[test]
+    fn advertised_output_budget_never_exceeds_the_channel_cap() {
+        let cap = crate::server::core::providers::codearts::chat::MAX_OUTPUT_TOKENS;
+
+        let builtin = parse_builtin(
+            r#"{"builtinModels":[{"model_id":"deepseek-v4.1-flash","model_name":"D","context_window":1000000,"max_tokens":384000}]}"#,
+        )
+        .expect("builtin 可解析");
+        assert_eq!(1, builtin.len(), "夹具得先真的被解析出来");
+        assert_eq!(cap, builtin[0].max_output_tokens, "384000 这种自述值要夹到硬上限");
+
+        let agent = parse_agent_detail(
+            // 字段集与上一条用例逐字同形：`display_enabled` 缺失会让整条被过滤掉，
+            // 那时 agent[0] 是越界而不是断言失败
+            r#"{"gpts":{"models":[{"model_alias":"GLM-5.2","model_name":"G","model_parameters":{"enabled":true,"display_enabled":true,"context_window":202752,"max_tokens":131072}}]}}"#,
+            "zh_cn",
+        )
+        .expect("agent 可解析");
+        assert_eq!(1, agent.len(), "夹具得先真的被解析出来，否则下面的断言是空跑");
+        assert_eq!(cap, agent[0].max_output_tokens, "agent 源同一条边");
+
+        let benefit = parse_benefit(
+            r#"{"error_code":"0000","result":{"models":[{"model_id":"glm-5.3-flash","model_name":"F","context_window":1048576,"max_tokens":393216}]}}"#,
+        )
+        .expect("福利可解析");
+        assert_eq!(1, benefit.len(), "夹具得先真的被解析出来");
+        assert_eq!(cap, benefit[0].max_output_tokens, "福利源同一条边");
+
+        // 对照：到线值与"目录没给(0)"都不许被改动
+        let within = parse_benefit(
+            r#"{"error_code":"0000","result":{"models":[{"model_id":"a","max_tokens":65536},{"model_id":"b"}]}}"#,
+        )
+        .expect("对照可解析");
+        assert_eq!(65536, within[0].max_output_tokens, "到线值原样");
+        assert_eq!(0, within[1].max_output_tokens, "目录没给就留 0，不编一个数");
     }
 
     /// 大小写归一：客户端习惯小写，上游真名是 `GLM-5.2`。

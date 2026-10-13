@@ -50,7 +50,7 @@ use crate::server::core::account_store::priority::next_free_priority;
 use crate::server::core::account_store::sql;
 use crate::server::core::account_store::state::{mark_name_custom, StoredAccount};
 use crate::server::core::account_store::store::{AccountStore, AccountStoreError};
-use crate::server::core::account_store::store_util::{max_concurrent_public, token_tail_of, truncate_chars};
+use crate::server::core::account_store::store_util::{token_tail_of, truncate_chars};
 use crate::server::core::account_store::{
     is_cline_family, CredentialWrite, CLINE_FREE_PROVIDER_ID, CLINE_PASS_PROVIDER_ID,
     MAX_TOKEN_LENGTH,
@@ -385,7 +385,7 @@ impl AccountStore {
                 crate::server::core::providers::label_of(provider),
             ),
         );
-        Ok(self.to_cline_public_account(&saved))
+        Ok(self.public_account(&saved))
     }
 
     /// 导入桌面端实时登录态（建一条 `desktop: true` 的账号记录，凭证不落盘）。
@@ -535,7 +535,7 @@ impl AccountStore {
                 if is_new { "已导入" } else { "已刷新" },
             ),
         );
-        Ok(self.to_cline_public_account(&saved))
+        Ok(self.public_account(&saved))
     }
 
     /// Cline 账号续期成功后回写新 token（适配器的 `persist_refresh` 调用）。
@@ -742,12 +742,6 @@ impl AccountStore {
         if let Some(expires) = expires {
             out.insert("expiresAt".to_string(), expires);
         }
-        // 单账号并发上限（所有家通用，兜底共用 `max_concurrent_public`）：
-        // 0 = 不限，缺键同样输出 0
-        out.insert(
-            "maxConcurrent".to_string(),
-            Value::from(max_concurrent_public(value.get("maxConcurrent"))),
-        );
         // 出网代理（账号级配置）：与其余八家的公开形态同形，前端代理列据此
         // 回显「直连 / 代理池某条」。漏了它，即使记录里配了代理，界面也一律
         // 显示「直连」——而转发其实照走代理（`session_from_record` 是全家

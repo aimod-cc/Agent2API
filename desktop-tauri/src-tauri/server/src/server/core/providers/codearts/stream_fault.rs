@@ -136,13 +136,29 @@ pub fn stream_frame_fault(payload: &str) -> Option<StreamFault> {
     // details 里只认「一条短且不含冒号」的补充说明（规则 3）
     if let Some(items) = frame.get("details").and_then(Value::as_array) {
         for item in items {
-            let detail = item.get("error_msg").and_then(Value::as_str).unwrap_or("").trim();
+            // error_msg 优先，**取不到就退到 error_code**：尺寸那两道墙的标记恰好只写在
+            // `error_code` 上（`PARSE_REQUEST_DATA_EXCEPTION`），只看 error_msg 会把它
+            // 整条丢掉 —— 于是这句面向人的话里再也没有任何尺寸线索，门也就无从登记
+            // （丢掉时实测过：8 MB 连打两发，两发都完整发了出去）。
+            let detail = ["error_msg", "error_code"]
+                .iter()
+                .find_map(|key| item.get(*key).and_then(Value::as_str))
+                .unwrap_or("")
+                .trim();
             if detail.is_empty() || message.contains(detail) || detail.contains(':') {
                 continue;
             }
             message.push_str(&format!("（{detail}）"));
             break;
         }
+    }
+    // benefit 档案不存在（账号没在官方体系里注册过权益，2026-10-09 取证：官方
+    // 客户端登录用一下即恢复 —— 那边的 initBenefit 每次启动都 POST claim）。
+    // 余额查询链路会自动补这条注册（见 `balance::claim_benefit`），给用户一句
+    // 「会自愈」的指引，别让人以为账号坏了。指引里不含「insufficient quota」
+    // 等状态词，放在 status 判定之前不会影响下面的分类。
+    if message.to_lowercase().contains("benefit not found") {
+        message.push_str("（该账号还没有福利档案，余额查询会自动向官方注册，稍等片刻重试即可）");
     }
 
     let lowered = message.to_lowercase();
@@ -301,6 +317,25 @@ mod tests {
         let unknown = fault_to_error(&stream_frame_fault(r#"{"error_code":"E9","error_msg":"boom"}"#).unwrap());
         assert_eq!(502, unknown.status_code);
         assert!(unknown.payload()["error"].get("code").is_none(), "不确定的分类不要伪造 code：{}", unknown.payload());
+    }
+
+    /// `details` 只给 `error_code`（不给 error_msg）时，那句面向人的话要把它带上。
+    ///
+    /// 尺寸墙的真实形状就是这样：标记**只**在 `details[].error_code` 里。丢掉它不只是
+    /// 少一条线索 —— `codearts` 的尺寸门就是靠这句话登记的，丢掉等于每发大请求都白跑一趟。
+    #[test]
+    fn a_detail_with_only_an_error_code_still_reaches_the_message() {
+        let frame = r#"{"error_code":"InferHub.001001005.400","error_msg":"The request param is invalid, Please check it","details":[{"error_code":"PARSE_REQUEST_DATA_EXCEPTION"}]}"#;
+        let fault = stream_frame_fault(frame).expect("这应当被认成故障帧");
+        assert!(
+            fault.message.contains("PARSE_REQUEST_DATA_EXCEPTION"),
+            "消息里要留得下那句标记：{}",
+            fault.message
+        );
+        // 有 error_msg 时仍以它为先（不给 error_code 抢占位置，保持既有形状）
+        let both = r#"{"error_code":"E1","error_msg":"outer","details":[{"error_code":"C2","error_msg":"inner"}]}"#;
+        let fault = stream_frame_fault(both).expect("这应当被认成故障帧");
+        assert!(fault.message.ends_with("（inner）"), "error_msg 优先：{}", fault.message);
     }
 
     /// 大小写不敏感：上游的 `error_code` 大小写并不稳定。

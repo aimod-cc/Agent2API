@@ -1,0 +1,366 @@
+{
+  "glossary": {
+    "en": {
+      "网关": "Gateway",
+      "提供商": "Provider",
+      "上游": "Upstream",
+      "账号": "Account",
+      "凭证": "Credential",
+      "令牌": "Token",
+      "签到": "Daily Check-in",
+      "额度/配额": "Quota",
+      "模型": "Model",
+      "端口": "Port",
+      "代理": "Proxy",
+      "令牌池": "Token Pool",
+      "指纹脱敏": "Fingerprint Masking",
+      "降级": "Fallback"
+    },
+    "zh-Hant": {
+      "网关": "閘道",
+      "提供商": "供應商",
+      "上游": "上游",
+      "账号": "帳號",
+      "凭证": "憑證",
+      "令牌": "權杖",
+      "签到": "每日簽到",
+      "额度/配额": "額度",
+      "模型": "模型",
+      "端口": "連接埠",
+      "代理": "代理",
+      "令牌池": "權杖池",
+      "指纹脱敏": "指紋遮罩",
+      "降级": "降級"
+    },
+    "ja": {
+      "网关": "ゲートウェイ",
+      "提供商": "プロバイダー",
+      "上游": "アップストリーム",
+      "账号": "アカウント",
+      "凭证": "認証情報",
+      "令牌": "トークン",
+      "签到": "デイリーチェックイン",
+      "额度/配额": "クォータ",
+      "模型": "モデル",
+      "端口": "ポート",
+      "代理": "プロキシ",
+      "令牌池": "トークンプール",
+      "指纹脱敏": "フィンガープリントのマスキング",
+      "降级": "フォールバック"
+    },
+    "ko": {
+      "网关": "게이트웨이",
+      "提供商": "제공자",
+      "上游": "업스트림",
+      "账号": "계정",
+      "凭证": "자격 증명",
+      "令牌": "토큰",
+      "签到": "출석 체크",
+      "额度/配额": "할당량",
+      "模型": "모델",
+      "端口": "포트",
+      "代理": "프록시",
+      "令牌池": "토큰 풀",
+      "指纹脱敏": "지문 마스킹",
+      "降级": "폴백"
+    },
+    "pt-BR": {
+      "网关": "Gateway",
+      "提供商": "Provedor",
+      "上游": "Upstream",
+      "账号": "Conta",
+      "凭证": "Credencial",
+      "令牌": "Token",
+      "签到": "Check-in diário",
+      "额度/配额": "Cota",
+      "模型": "Modelo",
+      "端口": "Porta",
+      "代理": "Proxy",
+      "令牌池": "Pool de tokens",
+      "指纹脱敏": "Mascaramento de fingerprint",
+      "降级": "Fallback"
+    }
+  },
+  "strings": {
+    "报表": {
+      "en": "Reports",
+      "zh-Hant": "報表",
+      "ja": "レポート",
+      "ko": "리포트",
+      "pt-BR": "Relatórios"
+    },
+    "账号": {
+      "en": "Accounts",
+      "zh-Hant": "帳號",
+      "ja": "アカウント",
+      "ko": "계정",
+      "pt-BR": "Contas"
+    },
+    "签到中心": {
+      "en": "Check-in Center",
+      "zh-Hant": "簽到中心",
+      "ja": "チェックインセンター",
+      "ko": "출석 체크 센터",
+      "pt-BR": "Central de check-in"
+    },
+    "模型管理": {
+      "en": "Model Management",
+      "zh-Hant": "模型管理",
+      "ja": "モデル管理",
+      "ko": "모델 관리",
+      "pt-BR": "Gerenciamento de modelos"
+    },
+    "网络代理": {
+      "en": "Network Proxy",
+      "zh-Hant": "網路代理",
+      "ja": "ネットワークプロキシ",
+      "ko": "네트워크 프록시",
+      "pt-BR": "Proxy de rede"
+    },
+    "网关 Key": {
+      "en": "Gateway Key",
+      "zh-Hant": "閘道金鑰",
+      "ja": "ゲートウェイキー",
+      "ko": "게이트웨이 키",
+      "pt-BR": "Chave do gateway"
+    },
+    "请求日志": {
+      "en": "Request Logs",
+      "zh-Hant": "請求日誌",
+      "ja": "リクエストログ",
+      "ko": "요청 로그",
+      "pt-BR": "Logs de requisições"
+    },
+    "定时任务": {
+      "en": "Scheduled Tasks",
+      "zh-Hant": "排程工作",
+      "ja": "定期タスク",
+      "ko": "예약 작업",
+      "pt-BR": "Tarefas agendadas"
+    },
+    "设置": {
+      "en": "Settings",
+      "zh-Hant": "設定",
+      "ja": "設定",
+      "ko": "설정",
+      "pt-BR": "Configurações"
+    },
+    "跟随系统": {
+      "en": "System",
+      "zh-Hant": "跟隨系統",
+      "ja": "システム",
+      "ko": "시스템",
+      "pt-BR": "Seguir o sistema"
+    },
+    "浅色": {
+      "en": "Light",
+      "zh-Hant": "淺色",
+      "ja": "ライト",
+      "ko": "라이트",
+      "pt-BR": "Claro"
+    },
+    "深色": {
+      "en": "Dark",
+      "zh-Hant": "深色",
+      "ja": "ダーク",
+      "ko": "다크",
+      "pt-BR": "Escuro"
+    },
+    "保存": {
+      "en": "Save",
+      "zh-Hant": "儲存",
+      "ja": "保存",
+      "ko": "저장",
+      "pt-BR": "Salvar"
+    },
+    "取消": {
+      "en": "Cancel",
+      "zh-Hant": "取消",
+      "ja": "キャンセル",
+      "ko": "취소",
+      "pt-BR": "Cancelar"
+    },
+    "删除": {
+      "en": "Delete",
+      "zh-Hant": "刪除",
+      "ja": "削除",
+      "ko": "삭제",
+      "pt-BR": "Excluir"
+    },
+    "确认": {
+      "en": "Confirm",
+      "zh-Hant": "確認",
+      "ja": "確認",
+      "ko": "확인",
+      "pt-BR": "Confirmar"
+    },
+    "立即执行": {
+      "en": "Run Now",
+      "zh-Hant": "立即執行",
+      "ja": "今すぐ実行",
+      "ko": "지금 실행",
+      "pt-BR": "Executar agora"
+    },
+    "添加账号": {
+      "en": "Add Account",
+      "zh-Hant": "新增帳號",
+      "ja": "アカウント追加",
+      "ko": "계정 추가",
+      "pt-BR": "Adicionar conta"
+    },
+    "刷新": {
+      "en": "Refresh",
+      "zh-Hant": "重新整理",
+      "ja": "更新",
+      "ko": "새로 고침",
+      "pt-BR": "Atualizar"
+    },
+    "已复制": {
+      "en": "Copied",
+      "zh-Hant": "已複製",
+      "ja": "コピーしました",
+      "ko": "복사됨",
+      "pt-BR": "Copiado"
+    },
+    "操作失败：{msg}": {
+      "en": "Operation failed: {msg}",
+      "zh-Hant": "操作失敗：{msg}",
+      "ja": "操作に失敗しました：{msg}",
+      "ko": "작업 실패: {msg}",
+      "pt-BR": "Falha na operação: {msg}"
+    },
+    "账号已删除": {
+      "en": "Account deleted",
+      "zh-Hant": "帳號已刪除",
+      "ja": "アカウントを削除しました",
+      "ko": "계정이 삭제되었습니다",
+      "pt-BR": "Conta excluída"
+    },
+    "令牌已刷新": {
+      "en": "Token refreshed",
+      "zh-Hant": "權杖已更新",
+      "ja": "トークンを更新しました",
+      "ko": "토큰이 갱신되었습니다",
+      "pt-BR": "Token atualizado"
+    },
+    "优先级": {
+      "en": "Priority",
+      "zh-Hant": "優先度",
+      "ja": "優先度",
+      "ko": "우선순위",
+      "pt-BR": "Prioridade"
+    },
+    "状态": {
+      "en": "Status",
+      "zh-Hant": "狀態",
+      "ja": "ステータス",
+      "ko": "상태",
+      "pt-BR": "Status"
+    },
+    "余额": {
+      "en": "Balance",
+      "zh-Hant": "餘額",
+      "ja": "残高",
+      "ko": "잔액",
+      "pt-BR": "Saldo"
+    },
+    "有效期": {
+      "en": "Expiry",
+      "zh-Hant": "有效期",
+      "ja": "有効期限",
+      "ko": "유효 기간",
+      "pt-BR": "Validade"
+    },
+    "提供商": {
+      "en": "Provider",
+      "zh-Hant": "供應商",
+      "ja": "プロバイダー",
+      "ko": "제공자",
+      "pt-BR": "Provedor"
+    },
+    "模型": {
+      "en": "Model",
+      "zh-Hant": "模型",
+      "ja": "モデル",
+      "ko": "모델",
+      "pt-BR": "Modelo"
+    },
+    "用时": {
+      "en": "Duration",
+      "zh-Hant": "耗時",
+      "ja": "所要時間",
+      "ko": "소요 시간",
+      "pt-BR": "Duração"
+    },
+    "用量": {
+      "en": "Usage",
+      "zh-Hant": "用量",
+      "ja": "使用量",
+      "ko": "사용량",
+      "pt-BR": "Uso"
+    },
+    "确定要删除该账号吗？此操作不可撤销。": {
+      "en": "Are you sure you want to delete this account? This action cannot be undone.",
+      "zh-Hant": "確定要刪除此帳號嗎？此操作無法復原。",
+      "ja": "このアカウントを削除してもよろしいですか？この操作は取り消せません。",
+      "ko": "이 계정을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.",
+      "pt-BR": "Tem certeza de que deseja excluir esta conta? Esta ação não pode ser desfeita."
+    },
+    "共 {n} 个账号": {
+      "en": "{n} accounts total",
+      "zh-Hant": "共 {n} 個帳號",
+      "ja": "アカウント {n} 件",
+      "ko": "총 {n}개 계정",
+      "pt-BR": "{n} contas no total"
+    },
+    "第 {index} 位": {
+      "en": "#{index}",
+      "zh-Hant": "第 {index} 位",
+      "ja": "{index} 番目",
+      "ko": "{index}번째",
+      "pt-BR": "{index}º"
+    },
+    "界面语言": {
+      "en": "Interface Language",
+      "zh-Hant": "介面語言",
+      "ja": "表示言語",
+      "ko": "인터페이스 언어",
+      "pt-BR": "Idioma da interface"
+    },
+    "保留天数": {
+      "en": "Retention Days",
+      "zh-Hant": "保留天數",
+      "ja": "保存日数",
+      "ko": "보관 일수",
+      "pt-BR": "Dias de retenção"
+    },
+    "网关跨域访问": {
+      "en": "Gateway CORS",
+      "zh-Hant": "閘道跨網域存取",
+      "ja": "ゲートウェイの CORS アクセス",
+      "ko": "게이트웨이 CORS 액세스",
+      "pt-BR": "Acesso CORS do gateway"
+    },
+    "出网代理": {
+      "en": "Outbound Proxy",
+      "zh-Hant": "對外代理",
+      "ja": "送信プロキシ",
+      "ko": "아웃바운드 프록시",
+      "pt-BR": "Proxy de saída"
+    },
+    "余额不足，已跳过": {
+      "en": "Insufficient balance, skipped",
+      "zh-Hant": "餘額不足，已略過",
+      "ja": "残高不足のためスキップしました",
+      "ko": "잔액 부족으로 건너뛰었습니다",
+      "pt-BR": "Saldo insuficiente, ignorado"
+    },
+    "凭证已过期，请重新登录": {
+      "en": "Credential expired. Please sign in again.",
+      "zh-Hant": "憑證已過期，請重新登入",
+      "ja": "認証情報の有効期限が切れました。再度ログインしてください。",
+      "ko": "자격 증명이 만료되었습니다. 다시 로그인하세요.",
+      "pt-BR": "Credencial expirada. Faça login novamente."
+    }
+  }
+}

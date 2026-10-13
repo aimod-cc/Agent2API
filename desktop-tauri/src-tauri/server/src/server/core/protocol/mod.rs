@@ -2,14 +2,16 @@
 //! （`/v1/messages`）翻译成网关内部统一的 **Chat Completions**，再把回程翻译回去。
 //!
 //! ── 为什么以 Chat 为枢纽，而不是在每个适配器里各写一套 ────────
-//! 本项目六家上游（WorkBuddy / 小浣熊 / CatPaw / AutoClaw / Qoder / Cline）
-//! **全部经适配器层归一为 OpenAI Chat 协议**：CatPaw 的 conversation 会话协议与
-//! Qoder 的 COSY 信封都在各自的 `forward_conversation` 里被翻译成 OpenAI chunk
-//! 下发（见 `providers/catpaw`、`providers/qoder` 的模块头）。也就是说，
-//! 「上游说 Chat」这件事在适配器边界上**已经成立**。
+//! 本项目各内置上游**在适配器 / 翻译层边界上最终都归一为 OpenAI Chat 协议**：
+//! 有状态家（CatPaw 的 conversation 会话协议、Qoder 的 COSY 信封等）在各自的
+//! `forward_conversation` 里被翻译成 OpenAI chunk 下发（见 `providers/catpaw`、
+//! `providers/qoder` 的模块头）；无状态但响应异形的三家（ZCode 活动套餐的
+//! Anthropic、Command Code 的 NDJSON、Antigravity 的 Gemini v1internal 信封）
+//! 由 `upstream::translate` 的翻译层折回 chat SSE。也就是说，
+//! 「上游说 Chat」这件事在边界上**已经成立**。
 //!
 //! 于是协议转换只有两个可能的位置：
-//!   ① 在每家适配器里各写一遍（6 家 × 2 协议 = 12 套转换）；
+//!   ① 在每家适配器里各写一遍（每家 × 2 协议）；
 //!   ② 在网关出入口写一次（2 套转换），让适配器完全不知情。
 //! ② 明显更优：适配器不必知道下游说的是什么协议（它本来就只认 Chat），
 //! 新增一家上游时也不用再补一套转换。本模块就是②的落点。
@@ -17,7 +19,8 @@
 //! ── 与参考实现（OmniProxy）的结构差异 ────────────────────────
 //! OmniProxy 以 **Responses 为枢纽**（Chat ↔ Responses ↔ Anthropic），
 //! 因为它上游同时存在三种协议、且要支持「下游 Responses → 上游 Anthropic」
-//! 这类直连。本项目上游**只有 Chat 一种**，所以枢纽选 Chat：
+//! 这类直连。本项目在枢纽边界上**只见 Chat 这一种**（异构上游都在进入枢纽前
+//! 折回 chat），所以枢纽选 Chat：
 //! 每组转换都只走一跳，少一次中转，也少一处「中转丢字段」的风险。
 //! 转换规则本身（消息/工具/思考档位/usage 字段映射）大量参考了 OmniProxy
 //! 的 `gatewayProtocol*.ts`，并按本项目的口径收敛。
@@ -28,11 +31,21 @@
 //!   anthropic.rs         Anthropic Messages ↔ Chat（同上）
 //!   responses_outbound.rs chat → Responses 上游的出站翻译（自定义提供商转发）
 //!   anthropic_outbound.rs chat → Anthropic 上游的出站翻译（同上）
+//!   commandcode_outbound.rs 上游 Command Code NDJSON → chat SSE（内置家：
+//!                         `api.commandcode.ai` 的 `/alpha/generate` 返回
+//!                         `application/x-ndjson`，HTTP 恒 200、错误在流内；
+//!                         见该文件模块头）
+//!   antigravity_outbound.rs chat → Antigravity 的 Gemini v1internal 信封请求
+//!                         （内置家：Google Cloud Code Assist；见该文件模块头）
+//!   antigravity_schema.rs 工具参数 JSON Schema 清洗（规格坑 #13 的纯函数库，
+//!                         从 antigravity_outbound 拆出）
+//!   antigravity_stream.rs 上游 Gemini v1internal SSE → chat SSE（同上拆出）
 //!   history.rs           内部 Chat 体的历史 sanitize（客户端带来的畸形工具历史）
 //!
-//! 出站两个文件与回程两个文件方向相反：回程服务「下游说 X」的入口
-//! （`api::protocol`），出站服务「上游说 X」的自定义家转发
-//! （`providers::custom::forward`）。单开文件而不是塞回原文件：两个
+//! 出站几个文件与回程两个文件方向相反：回程服务「下游说 X」的入口
+//! （`api::protocol`），出站服务「上游说 X」的转发（自定义家
+//! `providers::custom::forward` 与内置的 ZCode / Command Code / Antigravity
+//! 通道）。单开文件而不是塞回原文件：两个
 //! 回程文件早已超过项目约定的单文件行数（各自 1000+ 行），出站方向
 //! 又是完整独立的一套（请求转换 + SSE 状态机），分开后各自内聚。
 //!
@@ -42,6 +55,10 @@
 
 pub mod anthropic;
 pub mod anthropic_outbound;
+pub mod antigravity_outbound;
+pub mod antigravity_schema;
+pub mod antigravity_stream;
+pub mod commandcode_outbound;
 pub mod freeform;
 pub mod history;
 pub mod native_tool;

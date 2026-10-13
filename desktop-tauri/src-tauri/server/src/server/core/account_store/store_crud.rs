@@ -37,17 +37,19 @@
 use serde_json::{json, Map, Value};
 
 use crate::server::core::account_store::priority::{
-    next_free_priority, normalize_priority, renumber_consecutively, DEFAULT_PRIORITY,
+    grouped_queue_order, next_free_priority, normalize_priority, renumber_consecutively,
+    QueueEntry, DEFAULT_PRIORITY,
 };
 use crate::server::core::account_store::sql;
 use crate::server::core::account_store::state::{mark_name_custom, StoredAccount};
 use crate::server::core::account_store::store::{AccountStore, AccountStoreError};
 use crate::server::core::account_store::store_util::{
-    js_string, number_or, object_or_empty, optional_text, pick_token, token_tail_of, truncate_chars,
-    value_or, value_or_nullish,
+    js_string, js_truthy, number_or, object_or_empty, optional_text, pick_token, token_tail_of,
+    truncate_chars, value_or, value_or_nullish,
 };
 use crate::server::core::account_store::MAX_TOKEN_LENGTH;
 use crate::server::core::endpoints::resolve_edition;
+use crate::server::core::limiter;
 use crate::server::core::providers::DEFAULT_PROVIDER_ID;
 use crate::server::core::proxies::describe_account_proxy;
 use crate::server::logging;
@@ -454,16 +456,63 @@ impl AccountStore {
             return Err(AccountStoreError::not_found("账号不存在"));
         }
 
-        let mut ordered = state.accounts.clone();
-        ordered.sort_by_key(StoredAccount::order_key);
+        // ── 「首选」在分组模式下的含义（2026-10 账号页分组化）──────────
+        // 组顺位是主键：别的家的组排在前头时，本家账号再怎么调号也当不上第一名。
+        // 所以置顶落成两步：**目标提到本组最前 + 本组整体提到最前** —— 这样它确实
+        // 是全局队列第一个被尝试的账号，界面上的「第 1 顺位」也与事实一致。
+        // 顺序从 `grouped_queue_order` 出发（而不是直接按优先级排），于是同家的
+        // 账号在队列里继续连续，这条不变量不会被一次「设为首选」打破。
+        let target_provider = state
+            .accounts
+            .iter()
+            .find(|item| item.id() == id)
+            .map(StoredAccount::provider)
+            .unwrap_or_default();
+        let providers: Vec<String> = state.accounts.iter().map(StoredAccount::provider).collect();
+        let entries: Vec<QueueEntry<'_>> = state
+            .accounts
+            .iter()
+            .enumerate()
+            .map(|(index, record)| QueueEntry {
+                id: record.id(),
+                provider: &providers[index],
+                priority: record.priority(),
+                added_at: record.added_at(),
+            })
+            .collect();
+        let current_order = grouped_queue_order(&entries);
+        let mut mine: Vec<String> = Vec::new();
+        let mut others: Vec<String> = Vec::new();
+        for item_id in current_order.iter() {
+            let same_provider = state
+                .accounts
+                .iter()
+                .find(|item| item.id() == item_id.as_str())
+                .map(|item| item.provider() == target_provider)
+                .unwrap_or(false);
+            if same_provider {
+                mine.push(item_id.clone());
+            } else {
+                others.push(item_id.clone());
+            }
+        }
+        mine.retain(|item_id| item_id != id);
+        mine.insert(0, id.to_string());
+        let next_order: Vec<String> = mine.into_iter().chain(others).collect();
         let mut changes: Vec<String> = Vec::new();
 
-        let position = ordered.iter().position(|item| item.id() == id).unwrap_or(0);
-        if position > 0 {
-            let record = ordered.remove(position);
-            ordered.insert(0, record);
-            // 整队重新连续编号（而非只改目标账号）：优先级唯一的前提下，
-            // 把目标插到队首后必须把其余账号整体让位，否则会撞号
+        if next_order != current_order {
+            // 按新顺序排记录再整队连续编号（组内第一 + 本组第一，见上）
+            let mut ordered: Vec<StoredAccount> = next_order
+                .iter()
+                .filter_map(|item_id| {
+                    state
+                        .accounts
+                        .iter()
+                        .find(|item| item.id() == item_id.as_str())
+                        .cloned()
+                })
+                .collect();
             let mut numbering: Vec<(String, String, i64)> = ordered
                 .iter()
                 .map(|item| (item.id().to_string(), item.name(), item.priority()))
@@ -476,15 +525,19 @@ impl AccountStore {
                 }
             }
             changes.push(format!(
-                "优先级 → {}（置顶）",
+                "优先级 → {}（本组置顶 + 本组排到最前）",
                 ordered.first().map(StoredAccount::priority).unwrap_or(DEFAULT_PRIORITY)
             ));
+            if let Some(record) = ordered.iter_mut().find(|item| item.id() == id) {
+                record.set_updated_at(logging::now_ms());
+            }
+            state.accounts = ordered;
         }
         if changes.is_empty() {
             return Ok(json!({
                 "id": id,
                 "changed": false,
-                "reason": "已在全局队列第一位",
+                "reason": "已在队列第一位",
                 "currentAccountId": Self::pick_current(&state.accounts)
                     .map(|record| Value::String(record.id().to_string()))
                     .unwrap_or(Value::Null),
@@ -492,19 +545,16 @@ impl AccountStore {
             }));
         }
 
-        let display_name = ordered
+        let display_name = state
+            .accounts
             .iter()
             .find(|item| item.id() == id)
             .map(StoredAccount::name)
             .unwrap_or_default();
-        // 按优先级序交给保存层：`save_state` 只对 data 真的变了的行发 UPDATE，
-        // 于是「不重写没变的账号」这条收益在这里同样成立。
-        // 物理行序（列表顺序）**不动** —— 界面与选路都自己按优先级排，
-        // 没有消费方观察数组顺序（推演见 `sql.rs` 模块头「顺序」一节）。
-        state.accounts = ordered;
-        if let Some(record) = state.accounts.iter_mut().find(|item| item.id() == id) {
-            record.set_updated_at(logging::now_ms());
-        }
+        // 数组已按新顺序排好、号码也已写进记录（见上面那一支），交给保存层：
+        // `save_state` 只对 data 真的变了的行发 UPDATE，于是「不重写没变的账号」
+        // 这条收益在这里同样成立。物理行序（列表顺序）**不动** —— 界面与选路都
+        // 自己按优先级排，没有消费方观察数组顺序（推演见 `sql.rs` 模块头「顺序」一节）。
         self.save(&state, &_guard)?;
         let current_id = Self::pick_current(&state.accounts).map(|record| record.id().to_string());
         logging::log(
@@ -707,7 +757,192 @@ impl AccountStore {
             }
         }
 
+        if let Some(value) = patch.get("usageQuery") {
+            // 每账号自动余额查询（enabled + interval 秒）：界面的设置段每次保存
+            // 都整块发回，与 name / proxy 同一形态。归一化后恒存显式对象
+            // （关闭 = {enabled:false, interval:0}），读侧（公开形态 / 调度）
+            // 不必判「键缺失」。边界常量与读取侧同源（usage_records），
+            // 否则「接口拒绝 29 秒而手改记录接受它」。
+            let next = Self::normalize_usage_query(value)?;
+            let current = Self::normalize_usage_query_lenient(record.get("usageQuery"));
+            if next != current {
+                record.set("usageQuery", next.clone());
+                changes.push(Self::describe_usage_query(&next));
+            }
+        }
+
+        if let Some(value) = patch.get("lowBalance") {
+            // 每账号的「余额不足处理」（mode + threshold）：同一形态。
+            // off 档把阈值归零存放，不留「关了开关还挂着旧阈值」的脏数据。
+            // 缺省档按 provider 区分（Cline 免费池不处理，其余跳过阈值 1，
+            // 见 usage_records::default_low_balance_mode），比较基准同源 ——
+            // 对着缺省值保存不会凭空多一条变更日志、不会物化进记录。
+            //
+            // 限制器上线后这只是**兼容入口**（旧版前端 / 手工 API 调用还在用）：
+            // 新界面只发 `limiters`；同一请求里两个键都出现时，下面 limiters
+            // 块会按规则列表重写 lowBalance（限制器是源真值，见那里的说明）。
+            let provider = record.provider();
+            let next = Self::normalize_low_balance(value, &provider)?;
+            let current = Self::normalize_low_balance_lenient(record.get("lowBalance"), &provider);
+            if next != current {
+                record.set("lowBalance", next.clone());
+                changes.push(Self::describe_low_balance(&next));
+            }
+        }
+
+        if let Some(value) = patch.get("limiters") {
+            // 每账号的「限制器」（余额 / Token 规则列表，源真值）：界面每次保存
+            // 都整块发回，与 usageQuery 同一形态。写入侧归一化校验（校验即权威），
+            // 比较基准 = 有效规则（记录上没有 limiters 键时由旧 lowBalance /
+            // provider 缺省推导）—— 对着现状保存不会凭空多一条变更日志。
+            //
+            // ── 顺手同步 lowBalance（降级兼容）───────────────────
+            // 首条余额规则回写成旧的 {mode, threshold}，没有余额规则就写 off：
+            // 用户降级回旧版本时余额限制不丢（Token 规则旧版不认识，忽略即可，
+            // 多条余额规则只保首条 —— 旧形状本来就表达不了第二条）。
+            let next_rules = limiter::normalize_rules(value, record.fields())
+                .map_err(AccountStoreError::bad_request)?;
+            let next = limiter::rules_to_json(&next_rules);
+            let current = limiter::effective_rules_json_in(record.fields());
+            if next != current {
+                record.set("limiters", next);
+                changes.push(limiter::describe_rules(&next_rules));
+                record.set("lowBalance", Self::legacy_low_balance_of(&next_rules));
+            }
+        }
+
         Ok(changes)
+    }
+
+    /// 规则列表 → 旧 `lowBalance` 形状（降级兼容的同步目标）：首条余额规则的
+    /// (action, threshold)，没有余额规则 = off（阈值归零，与旧 off 形态一致）。
+    fn legacy_low_balance_of(rules: &[limiter::LimiterRule]) -> Value {
+        let Some(rule) = rules
+            .iter()
+            .find(|rule| rule.kind == limiter::LimiterKind::Balance)
+        else {
+            return json!({ "mode": "off", "threshold": 0.0 });
+        };
+        let mode = match rule.action {
+            limiter::LimiterAction::Skip => "skip",
+            limiter::LimiterAction::Disable => "disable",
+        };
+        json!({ "mode": mode, "threshold": rule.threshold })
+    }
+
+    /// `usageQuery` 的写入侧归一化（校验即权威：读侧只做容错展开，见 store_view）。
+    ///
+    /// 整块对象更新：`enabled` 按真值判定；`interval` 必须是整数秒，开启时必须在
+    /// `MIN~MAX_QUERY_INTERVAL_SECONDS` 内（关闭时放行任意整数 / 缺失，存 0）——
+    /// 用户先关开关保存，不会因为残留的旧间隔被 400 挡住。非对象（null / 脏值）
+    /// 一律视为「恢复缺省」= 开启、1 分钟（与读侧 `query_interval_of` 的缺省
+    /// 同一口径）；显式关闭必须是 `{enabled:false}` 对象。
+    fn normalize_usage_query(value: &Value) -> Result<Value, AccountStoreError> {
+        const MIN: i64 = crate::server::core::usage_records::MIN_QUERY_INTERVAL_SECONDS;
+        const MAX: i64 = crate::server::core::usage_records::MAX_QUERY_INTERVAL_SECONDS;
+        const DEFAULT: i64 = crate::server::core::usage_records::DEFAULT_QUERY_INTERVAL_SECONDS;
+        let Some(fields) = value.as_object() else {
+            return Ok(json!({ "enabled": true, "interval": DEFAULT }));
+        };
+        let enabled = fields.get("enabled").map(js_truthy).unwrap_or(false);
+        let interval = match fields.get("interval") {
+            None | Some(Value::Null) => 0,
+            Some(raw) => raw.as_i64().ok_or_else(|| {
+                AccountStoreError::bad_request("查询间隔必须是整数（单位：秒）")
+            })?,
+        };
+        if interval != 0 && !(MIN..=MAX).contains(&interval) {
+            return Err(AccountStoreError::bad_request(format!(
+                "查询间隔必须是 {MIN}~{MAX} 秒"
+            )));
+        }
+        if enabled && interval == 0 {
+            return Err(AccountStoreError::bad_request(format!(
+                "开启自动查询需要填写 {MIN}~{MAX} 秒的间隔"
+            )));
+        }
+        Ok(json!({ "enabled": enabled, "interval": interval }))
+    }
+
+    /// `usageQuery` 的比较基准：已存的值过一遍同一套归一化（容错版 —— 存量数据
+    /// 由写入侧保证合法，这里不报错）。**记录上没有这个键 = 缺省开启、1 分钟**：
+    /// 比较基准与读侧缺省一致，用户对着缺省值保存一次设置不会凭空多出一条
+    /// 「已开启」的变更日志，也不会把缺省配置物化进每条账号记录。
+    fn normalize_usage_query_lenient(value: Option<&Value>) -> Value {
+        const DEFAULT: i64 = crate::server::core::usage_records::DEFAULT_QUERY_INTERVAL_SECONDS;
+        Self::normalize_usage_query(value.unwrap_or(&Value::Null)).unwrap_or_else(|_| {
+            json!({ "enabled": true, "interval": DEFAULT })
+        })
+    }
+
+    /// `lowBalance` 的写入侧归一化：mode 三选一；非 off 档要求阈值有限且 > 0；
+    /// off 档阈值归零。非对象（null / 脏值）一律视为「恢复缺省」= 按 provider
+    /// 区分的缺省档（与读侧 `balance_blocked` 的缺省同一口径，见
+    /// `usage_records::default_low_balance_mode`）；对象里缺 mode 是不完整的
+    /// 表达，按校验失败处理而不是猜。
+    fn normalize_low_balance(value: &Value, provider: &str) -> Result<Value, AccountStoreError> {
+        let Some(fields) = value.as_object() else {
+            return Ok(Self::low_balance_default(provider));
+        };
+        let mode = fields.get("mode").and_then(Value::as_str).unwrap_or("");
+        if !matches!(mode, "off" | "skip" | "disable") {
+            return Err(AccountStoreError::bad_request(
+                "余额不足的处理方式必须是「不处理 / 跳过 / 禁用」之一",
+            ));
+        }
+        if mode == "off" {
+            return Ok(json!({ "mode": "off", "threshold": 0.0 }));
+        }
+        let threshold = fields
+            .get("threshold")
+            .and_then(Value::as_f64)
+            .ok_or_else(|| AccountStoreError::bad_request("余额阈值必须是大于 0 的数字"))?;
+        if !threshold.is_finite() || threshold <= 0.0 {
+            return Err(AccountStoreError::bad_request("余额阈值必须是大于 0 的数字"));
+        }
+        Ok(json!({ "mode": mode, "threshold": threshold }))
+    }
+
+    /// `lowBalance` 的缺省形状（无配置 / 无法解析时的口径）：委托
+    /// `usage_records::default_low_balance`（按 provider 区分，缺省值与读侧
+    /// `balance_blocked` 同源）。
+    fn low_balance_default(provider: &str) -> Value {
+        crate::server::core::usage_records::default_low_balance(provider)
+    }
+
+    /// `lowBalance` 的比较基准（容错，同上）。
+    fn normalize_low_balance_lenient(value: Option<&Value>, provider: &str) -> Value {
+        Self::normalize_low_balance(value.unwrap_or(&Value::Null), provider)
+            .unwrap_or_else(|_| Self::low_balance_default(provider))
+    }
+
+    /// 变更提示文案：`每 90 分钟` 这类人能读的间隔。
+    fn describe_usage_query(next: &Value) -> String {
+        let enabled = next.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+        if !enabled {
+            return "自动查询余额 → 关闭".to_string();
+        }
+        let seconds = next.get("interval").and_then(Value::as_i64).unwrap_or(0);
+        let span = if seconds > 0 && seconds % 3600 == 0 {
+            format!("{} 小时", seconds / 3600)
+        } else if seconds > 0 && seconds % 60 == 0 {
+            format!("{} 分钟", seconds / 60)
+        } else {
+            format!("{seconds} 秒")
+        };
+        format!("自动查询余额 → 开启（每 {span}）")
+    }
+
+    /// 变更提示文案：低于阈值跳过 / 禁用。f64 的 Display 打整数不带小数点
+    /// （`100.0` → `100`），与余额列的数字口径一致。
+    fn describe_low_balance(next: &Value) -> String {
+        let mode = next.get("mode").and_then(Value::as_str).unwrap_or("off");
+        let threshold = next.get("threshold").and_then(Value::as_f64).unwrap_or(0.0);
+        match mode {
+            "skip" => format!("余额不足处理 → 低于 {threshold} 时跳过"),
+            "disable" => format!("余额不足处理 → 低于 {threshold} 时禁用"),
+            _ => "余额不足处理 → 不处理".to_string(),
+        }
     }
 
     /// 沿优先级顺序把账号上移/下移一位（与相邻账号交换优先级数值）。

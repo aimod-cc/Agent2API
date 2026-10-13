@@ -1,12 +1,12 @@
 # Agent2API · 多提供商本地网关
 
-**简体中文** | [English](./README.en.md)
+**简体中文** | [English](./README.en.md) | [繁體中文](./README.zh-Hant.md) | [日本語](./README.ja.md) | [한국어](./README.ko.md) | [Português (BR)](./README.pt-BR.md)
 
-把多家 AI 桌面客户端的登录态包装成本地 **OpenAI 兼容 API 网关**，统一暴露一个 `base_url`，附带多提供商账号管理、模型管理（启停 / 删除 / 映射）、出站指纹脱敏、出网代理与请求报表，并提供一个开箱即用的 Tauri 桌面端。任何支持自定义 `base_url` 的 OpenAI 客户端都能以 `http://127.0.0.1:3065/v1` 为端点调用这几家的模型额度——不需要 API Key，不需要改客户端源码。
+把多家 AI 桌面客户端的登录态变成一个本地 **OpenAI 兼容 API 网关**：统一暴露一个 `base_url`，带多账号管理、模型管理、出网代理与请求报表，并附一个开箱即用的 Tauri 桌面端。任何支持自定义 `base_url` 的 OpenAI 客户端都能以 `http://127.0.0.1:3065/v1` 调用这几家的模型额度 —— 不需要上游 API Key，不需要改客户端。
 
-各平台的反代能力一览（✓ 支持 · ✗ 不支持 · — 无此概念或不适用）：
+支持情况一览（✓ 支持 · ✗ 不支持 · — 无此概念）：
 
-| 平台 | LLM 请求 | Token 自动续期 | 模型列表（远程刷新） | 余额查询 | 签到 | 领取类 |
+| 平台 | LLM 请求 | Token 自动续期 | 模型列表 | 余额查询 | 签到 | 领取类 |
 | --- | :--: | :--: | :--: | :--: | :--: | :--: |
 | WorkBuddy 国内版 | ✓ | ✓ | ✓ 远程 + 静态兜底 | ✓ | ✓ 每日签到 | — |
 | WorkBuddy 国际版 | ✓ | ✓ | ✓ 远程 + 静态兜底 | ✓ | ✗ 无签到活动 | — |
@@ -20,13 +20,18 @@
 | CodeArts | ✓ | ✓ 一次性轮换 | ✓ 远程（三源合并） | ✓ 两份账 | — | ✓ 每日福利（手动） |
 | Trae | ✓ | ✓ 一次一换 | ✓ 仅远程 | ✓ 两份账 | — | — |
 | Loomy（讯飞） | ✓ | ✗ 无续期接口 | ✓ 仅远程 | ✓ 两份积分账 | ✓ 每日赠送积分刷新 | — |
+| KukuAI（百度文库） | ✓ | ✗ 无续期接口 | ✓ 远程 + 静态兜底 | ✓ 积分余额 | ✓ 每日签到（免费积分） | — |
+| MonkeyCode（长亭科技，国内版 / 国际版） | ✓ | ✗ 无续期接口 | ✓ 仅远程 | — | — | — |
+| Command Code | ✓ | ✗ 静态 API Key | ✓ 远程 + 静态兜底 | — | — | — |
+| Antigravity（Google，Gemini） | ✓ | ✓ | ✓ 远程 + 静态兜底 | — | — | — |
+| OfficeAce（华为云果办 / OfficeClaw） | ✓ | ✓ 控制面自动续期 | ✓ 仅远程 | ✓ 积分余额 | ✓ 每日奖励（签到 + 新人礼） | — |
 | 自定义提供商 | ✓ Chat 透传 / Responses / Anthropic | — | ✓ 手动登记 + 服务端拉取 | — | — | — |
 
-三条对话协议入口（`/v1/chat/completions`、`/v1/responses`、`/v1/messages`，另含 `/v1/messages/count_tokens`）与 `/v1/models` 对所有平台一视同仁，差异只在各家上游能不能做到表里那些事；模型映射、全局优先级队列、429 降级、出网代理、出站指纹脱敏与请求报表同样对全平台通用。
+`/v1/chat/completions`、`/v1/responses`、`/v1/messages`（含 `count_tokens`）与 `/v1/models` 对所有平台一视同仁；模型映射、全局优先级队列、429 降级、出网代理、出站指纹脱敏与请求报表同样全平台通用。
 
-> **本项目仅供学习与交流使用。** 它通过本地反向代理复用你自己账号的登录态，这种「以非官方客户端形态转发」的方式可能不符合上游服务的用户协议，使用风险（含账号被风控、封禁）由使用者自行承担；禁止用于商业用途或绕过计费。详见[使用声明](#使用声明)与 [LICENSE](./LICENSE)。
+> **本项目仅供学习与交流使用。** 它以非官方客户端形态复用你自己账号的登录态，可能不符合上游服务的使用条款，风险（含账号被风控、封禁）自负；禁止商用或绕过计费。详见[使用声明](#使用声明)与 [LICENSE](./LICENSE)。
 >
-> 本项目是个人用途的本地代理工具，与腾讯（WorkBuddy）、美团（CatPaw）、商汤（小浣熊）、智谱（AutoClaw/autoglm）、阿里巴巴（Qoder / Accio）、华为云（CodeArts）、字节跳动（Trae）、科大讯飞（Loomy）、Cline 及其官方产品均无关；所有接口形态来自对各家桌面端通信的观察，上游随时可能调整。
+> 本项目与各上游厂商及其官方产品均无关（名单见[使用声明](#使用声明)）；接口形态来自对各家客户端通信的观察，上游随时可能调整。
 
 ---
 
@@ -47,12 +52,10 @@
 从 Releases 下载安装包（NSIS，简体中文，默认装到 `C:\Program Files\Agent2API`，安装时需要管理员授权），安装后启动即可，**无需安装 Node 或任何其它运行时**。
 
 1. 首次启动即在应用进程内启动本机网关（端口 3065）并打开主窗口；若检测到旧版本的数据目录或数据文件，会弹窗提示迁移，按指引操作即可。
-2. 点「账号」页的「添加账号」，选提供商（WorkBuddy / 小浣熊 / CatPaw / AutoClaw 国内版 / AutoClaw 国际版 / Qoder / Cline / Accio 国际版 / Accio 国内版 / ZCode 国内版 / ZCode 国际版 / CodeArts / Trae / Loomy），再按该家支持的方式完成登录或填写凭证：网页登录、手机验证码、粘贴凭证，或导入本机桌面端登录态（导入不落 token，客户端重新登录后网关自动跟上；CodeArts 与 Trae 只有网页登录与粘贴凭证两种，Loomy 只有手机验证码与粘贴 session 两种）。
+2. 点「账号」页的「添加账号」，选提供商后按弹窗提示完成登录或填写凭证即可（方式以弹窗为准：网页登录 / 手机验证码 / 粘贴凭证 / 导入本机登录态）。
 3. 把 OpenAI 客户端的 `base_url` 填成 `http://127.0.0.1:3065/v1`，`api_key` 随便填（例如 `sk-local`，未启用鉴权时服务端不校验）。
 
-关闭窗口默认只是最小化到托盘，网关继续在后台转发；要彻底退出请在托盘图标上右键选「退出」。
-
-账号排在同一条**全局队列**里，按优先级从小到大逐个尝试，跳过已禁用、不提供该模型或对该模型处于限额冷却期的账号；某家对某模型触发 429 时降级到下一个候选，全部不可用才把最后一个真实错误透传出来。
+关闭窗口默认最小化到托盘，网关继续在后台转发；彻底退出请在托盘图标右键选「退出」。
 
 ### 验证
 
@@ -80,11 +83,11 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)
 ```
 
-**浏览器里的页面**（自建 Web UI、单文件前端应用等）用 `fetch` 直连这个端点时，会因为跨源预检被拒而报「无法连接 API」：网关面默认**不应答 CORS**，预检请求（OPTIONS）会落到 API Key 校验上得到 401（跨源预检按规范不携带 `Authorization` 头），请求根本发不出去。两种解法：① 在设置页「安全 → 网关跨域访问」里打开它，网关随即按面板的同一口径应答（预检放行、响应带 `Access-Control-Allow-*`，来源 `*`，立即生效）—— 注意网关是真正转发上游、消耗额度的那一面，开着 `*` 又没配 API Key 时任何网页都能借本机网关打上游，建议同时配置「网关 Key」；② 让页面与网关同源 —— 用一个本地静态服务同时托管页面并把 `/v1` 反代到 `127.0.0.1:3065`，这样连跨域都不存在，不需要放开任何东西。
+**浏览器页面**（自建 Web UI 等）用 `fetch` 直连会被跨源预检拒绝——网关默认不应答 CORS，预检落到 API Key 校验上得 401。两种解法：① 设置页「安全 → 网关跨域访问」打开（来源 `*`；此时任何网页都能借本机网关打上游，建议同时配「网关 Key」）；② 页面与网关同源——本地静态服务托管页面并把 `/v1` 反代到 `127.0.0.1:3065`。
 
 ### 局域网访问
 
-默认网关只监听 `127.0.0.1`，只有本机能用。在「设置 → 通用 → 局域网访问」开启后，网关改听所有网卡，同一局域网内的设备把 API 地址指向本机 IP（界面上会给出完整地址，如 `http://192.168.1.5:3065/v1`）即可共用这套账号。出于安全考虑，开启前必须注册一个面板管理员：管理接口从此要求管理员会话或网关 Key，一把启用的 Key 都没有时转发接口也会拒绝服务（开启流程会自动补一把「默认」Key）。还可以选择把网页管理面板一并开放给局域网（其他设备的浏览器打开本机 IP 即可管理，需管理员登录）；默认不开放，桌面端的面板只由本程序自己出。改动随应用重启生效。
+默认只监听 `127.0.0.1`。开启「设置 → 通用 → 局域网访问」后改听所有网卡，局域网设备把 API 地址指向本机 IP 即可共用（界面会给出完整地址）。出于安全，开启前必须注册面板管理员：管理接口要求管理员会话或网关 Key，无可用 Key 时转发接口同样拒绝服务（开启流程会自动补一把「默认」Key）；也可选择同时开放网页面板（默认关闭）。改动重启生效。
 
 ---
 
@@ -96,9 +99,9 @@ docker run -d --name agent2api --restart unless-stopped \
   aimodcc/agent2api:latest
 ```
 
-浏览器打开 `http://<主机>:3065`，首次进入会引导**注册管理员账号**（后续登录用它）；登录后在「网关 Key」页创建一把 API Key 给客户端用 —— `http://<主机>:3065/v1` 即 OpenAI 兼容端点，未建 Key 前拒绝转发，建第一把后自动恢复。所有状态（SQLite 库 / 配置 / 日志）都落在 `./data` 一个卷里。
+浏览器打开 `http://<主机>:3065`，首次进入会引导**注册管理员账号**；登录后在「网关 Key」页建一把 API Key 给客户端用 —— `http://<主机>:3065/v1` 即 OpenAI 兼容端点（未建 Key 前拒绝转发）。状态（SQLite 库 / 配置 / 日志）都在 `./data` 一个卷里。
 
-compose 用户（`docker-compose.yml` 全文就这么多；amd64 / arm64 都有镜像）：
+compose 用户（amd64 / arm64 都有镜像）：
 
 ```yaml
 services:
@@ -112,7 +115,7 @@ services:
       - ./data:/data
 ```
 
-环境变量（都可选，不需要预置任何东西）：
+环境变量（都可选）：
 
 | 变量 | 说明 |
 | --- | --- |
@@ -120,13 +123,11 @@ services:
 | `AGENT2API_PANEL_PORT` | 面板分端口：设后面板（界面 + `/api/*`）单独监听该端口，公网只映射主端口即可把管理面留在内网（面板端口绑回环，写 `127.0.0.1:3066:3066`） |
 | `AGENT2API_HOST` / `AGENT2API_PROXY_PORT` | 监听地址（默认 `0.0.0.0`）/ 端口（默认 `3065`） |
 | `AGENT2API_ALLOW_NO_KEY` | 置 `1` 关闭 fail-closed（未配 Key 也放行 `/v1`，仅限纯内网） |
-| `AGENT2API_CAPTCHA_ENABLED` | 登录页人机验证组件环境变量：默认为 `1` 开启，`0` 为关闭 |
+| `AGENT2API_CAPTCHA_ENABLED` | 登录页人机验证：默认 `1` 开启，`0` 关闭 |
 
 从源码构建：克隆本仓库后 `docker compose up -d --build`（镜像里只有网关与面板，不含 Rust 工具链）。
 
-**网页端功能差异**（都源于「没有本机桌面客户端」）：网页登录（WorkBuddy / Qoder / Cline）、手机验证码、粘贴凭证完全可用；AutoClaw / CatPaw / Accio / CodeArts / Trae 网页登录的回调打本机端口，远程面板请改用粘贴凭证；小浣熊网页登录与「导入本机桌面端登录态」不可用（用填写凭证；Loomy / CodeArts / Trae 本来也没有桌面端登录态可导入）。
-
----
+**网页端功能差异**（源于「没有本机桌面客户端」）：网页登录（WorkBuddy / Qoder / Cline）、手机验证码、粘贴凭证完全可用；需要本机回调的网页登录（AutoClaw / CatPaw / Accio / CodeArts / Trae）与「导入本机登录态」不可用，请改用粘贴凭证。
 
 ---
 
@@ -134,27 +135,27 @@ services:
 
 ### 账号
 
-所有提供商的账号排在同一条**全局队列**里（左起第二列就是优先级），可逐条启停；限额行显示按模型维度的冷却状态与恢复时间，有效期与余额由「凭据维护」「定时查询积分」这类后台任务持续刷新。
+全部账号排在同一条队列里（左起第二列是优先级），可逐条启停；限额冷却、有效期与余额都在行内显示，余额不足默认按阈值跳过。
 
 ![账号管理页：全局队列、按模型限额冷却、有效期与余额](./assets/screenshots/accounts.png)
 
-添加账号时先选提供商，再按该家支持的方式登录。同一家可同时保存多个版本的账号（例如 WorkBuddy 的国内版 / 国际版），转发时按模型自动选路：
+添加账号先选提供商再登录；同一家可保存多版账号（如 WorkBuddy 国内 / 国际版）：
 
 ![添加账号：选择提供商与版本，然后走网页登录](./assets/screenshots/add-account.png)
 
 ### 报表
 
-统计概览给出总请求数、成功率、Token 总量与 Top 模型，右侧按账号和提供商分别排序；再往下是模型用量与提供商用量两张环形图，以及固定 365 天的活跃热力图：
+概览：请求数 / 成功率 / Token 总量 / Top 模型与账号、提供商排名，附用量环图与 365 天活跃热力图：
 
 ![报表概览：统计卡片、Top 账号 / 提供商、模型与提供商用量环形图](./assets/screenshots/report-overview.png)
 
-再往下是趋势区：近 24 小时的**缓存命中率**（左轴，折线）与 **Token 消耗**（右轴，面积）叠在同一张图上，便于判断命中率下滑是流量结构变化还是缓存失效；底部是按天 Token 柱状图，范围随顶部时间窗切换：
+趋势：24 小时**缓存命中率**（折线）与 **Token 消耗**（面积）双轴同图，底部按天 Token 柱状图：
 
 ![报表趋势：缓存命中率与 Token 消耗双轴趋势、按天 Token 柱状图](./assets/screenshots/report-trends.png)
 
 ### 定时任务
 
-后台任务在「定时任务」页统一管理：开关、执行间隔、上次执行结果与下次触发时间都在这里，也可以绕过间隔手动「立即执行」一次。任务清单本身保存在 `~/.agent2api/config.json` 的 `scheduledTasks` 字段，改动立即生效，不需要重启程序。
+后台任务统一在这一页（开关 / 间隔 / 上次结果 / 立即执行）；清单存在 `~/.agent2api/config.json` 的 `scheduledTasks`，改动即时生效。
 
 ![定时任务页：自动签到、凭证维护、模型目录刷新等后台任务的开关与间隔](./assets/screenshots/scheduled-tasks.png)
 
@@ -162,7 +163,10 @@ services:
 
 ## 项目结构
 
-网关与桌面端都在 `desktop-tauri/`：后端是 `src-tauri/` 下的 Rust 进程内 HTTP 服务器，前端是 `ui/` 下的原生 HTML/CSS/JS。
+后端是 `src-tauri/` 下的 Rust 进程内 HTTP 服务器，前端是 `ui/` 下的原生 HTML/CSS/JS。
+
+<details>
+<summary>完整目录树（点开）</summary>
 
 ```
 agent2api/
@@ -185,7 +189,7 @@ agent2api/
 │  │  │  │  │  ├─ catalog.rs    聚合模型目录（清单合并 / 同名去重 / 可用性判定）
 │  │  │  │  │  ├─ catalog_cache.rs  各家远程清单的持久化缓存（重启后读回，不再回落到内置清单）
 │  │  │  │  │  ├─ refresh_flight.rs  凭证刷新的单飞去重
-│  │  │  │  │  ├─ workbuddy.rs  WorkBuddy 适配器（头集合 / system 注入 / 6004 / 11128）
+│  │  │  │  │  ├─ workbuddy.rs  WorkBuddy 适配器（头集合 / system 注入 / 6004 / 11-128）
 │  │  │  │  │  ├─ raccoon/      小浣熊：mod / models / credentials / jwt / oauth / balance
 │  │  │  │  │  ├─ catpaw/       CatPaw：adapter（is_stateful）/ conversation（轮次状态机）/
 │  │  │  │  │  │                turn_executor / prepare / decision（轮次判定）/ fingerprint /
@@ -199,7 +203,7 @@ agent2api/
 │  │  │  │  │  ├─ qoder/        Qoder：adapter / endpoints（两站地址）/ oauth（设备授权）/
 │  │  │  │  │  │                auth / cosy（COSY 签名与体编码）/ protocol（信封解码）/
 │  │  │  │  │  │                chat（会话式转发）/ stream / machine（PKCE 与机器标识）/
-│  │  │  │  │  │                credentials / refresh / models / balance
+│  │  │  │  │  │                credentials / refresh / models / balance / risk（UMID 风控组件）
 │  │  │  │  │  ├─ cline/        Cline：adapter（Bearer + 产品面头）/ credentials（workos: 前缀
 │  │  │  │  │  │                + 桌面端登录态 + 姓名解析）/ login（WorkOS 设备授权）/
 │  │  │  │  │  │                refresh（单飞续期）/ models（两额度池 + 默认映射种子）/
@@ -210,6 +214,12 @@ agent2api/
 │  │  │  │  │  │                models（静态兜底 + /api/llm/config/v2）/
 │  │  │  │  │  │                protocol（OpenAI ↔ ADK 的 Gemini 风格信封）/
 │  │  │  │  │  │                chat（会话式转发）/ stream（ADK SSE 解包）/ balance
+│  │  │  │  │  ├─ zcode/        ZCode（智谱 Z.AI，国内版 + 国际版两家）：region（两地域名与身份）/
+│  │  │  │  │  │                adapter（无状态、按地区参数化）/ credentials（令牌 + 套餐 JWT）/
+│  │  │  │  │  │                oauth（CLI 轮询登录）/ coding_key（换推理用 API Key）/ models（静态表）/
+│  │  │  │  │  │                balance（套餐余额）/ plan + claim（活动套餐通道与限时领取）/
+│  │  │  │  │  │                captcha（人机验证令牌池）/ reasoning（GLM-5.3 思考预算）/
+│  │  │  │  │  │                zcode_system.json（系统提示词）
 │  │  │  │  │  ├─ codearts/     CodeArts（华为云码道）：signer（华为云 SDK-HMAC-SHA256，
 │  │  │  │  │  │                与参考实现逐字节对账）/ credentials / dpop（ES256 DPoP proof）/
 │  │  │  │  │  │                oauth（PKCE 网页登录 + loopback 回调）/ refresh（单飞续期）/
@@ -219,18 +229,45 @@ agent2api/
 │  │  │  │  │  │                balance（订阅统计 + 福利网关两份账）/
 │  │  │  │  │  │                welfare（每日福利领取：幂等键先落盘、回读二次确认）
 │  │  │  │  │  ├─ trae/         Trae（字节 AI IDE SOLO 通道）：credentials / device（设备密钥对）/
-│  │  │  │  │                   login + oauth（PKCE 网页登录 + 换证候选）/ callback_server
-│  │  │  │  │                   （本机随机端口回调与噪音过滤）/ refresh（单飞续期）/
-│  │  │  │  │                   payload（SOLO 信封白名单重建）/ headers（SOLO 头集合）/
-│  │  │  │  │                   stream（SSE→chunk 翻译）/ forward（有状态转发）/
-│  │  │  │  │                   errors（错误分类与死配置名单）/ models（get_detail_param 目录）/
-│  │  │  │  │                   usage（权益包 + 套餐 quota 两份账）/ profile（身份解析）
-│  │  │  │  │  └─ loomy/        Loomy（讯飞）：login（手机验证码）/ credentials（session 14 天、无续期接口）/
-│  │  │  │  │                   sign（复刻客户端 HMAC-SHA1 签名头）/ endpoints / client（集成网关）/
-│  │  │  │  │                   models（/api/v1/models 远程目录，上游无内置兜底清单）/
-│  │  │  │  │                   balance（永久积分 + 每日赠送两份账）/ checkin（每日首次登录刷新赠送积分）
+│  │  │  │  │  │                login + oauth（PKCE 网页登录 + 换证候选）/ callback_server
+│  │  │  │  │  │                （本机随机端口回调与噪音过滤）/ refresh（单飞续期）/
+│  │  │  │  │  │                payload（SOLO 信封白名单重建）/ headers（SOLO 头集合）/
+│  │  │  │  │  │                stream（SSE→chunk 翻译）/ forward（有状态转发）/
+│  │  │  │  │  │                errors（错误分类与死配置名单）/ models（get_detail_param 目录）/
+│  │  │  │  │  │                usage（权益包 + 套餐 quota 两份账）/ profile（身份解析）
+│  │  │  │  │  ├─ loomy/        Loomy（讯飞）：login（手机验证码）/ credentials（session 14 天、无续期接口）/
+│  │  │  │  │  │                sign（复刻客户端 HMAC-SHA1 签名头）/ endpoints / client（集成网关）/
+│  │  │  │  │  │                models（/api/v1/models 远程目录，上游无内置兜底清单）/
+│  │  │  │  │  │                balance（永久积分 + 每日赠送两份账）/ checkin（每日首次登录刷新赠送积分）
+│  │  │  │  │  ├─ kuku/         KukuAI（百度文库「库库 AI / GenFlowPro」，kuku.baidu.com）：
+│  │  │  │  │  │                adapter（is_stateful）/ session（bdstoken/uinfo/uk 三件套缓存）/
+│  │  │  │  │  │                engine（STOKEN 换发）/ http / login（主站网页登录 + 壳侧收 Cookie）/
+│  │  │  │  │  │                credentials（BDUSS Cookie）/ models（静态兜底 + 远程刷新）/
+│  │  │  │  │  │                chat（建会话 → 分配算力 → SSE）/ balance（积分余量）/
+│  │  │  │  │  │                checkin（每日免费积分）
+│  │  │  │  │  ├─ monkeycode/   MonkeyCode（长亭科技，国内版 + 国际版两家）：region（两站域名与身份）/
+│  │  │  │  │  │                adapter / endpoints（路径 / cookie 名 / interface_type→CLI 映射）/
+│  │  │  │  │  │                client / credentials（session + imageId）/ login（粘贴 session 与自动发现）/
+│  │  │  │  │  │                models（两站各一格清单，仅远程）/ task（建任务）/ stream（WS 任务流）/
+│  │  │  │  │  │                translate（ACP 事件 → chat 帧，含工具自动批准与提问自动应答）
+│  │  │  │  │  ├─ commandcode/  Command Code：adapter / endpoints / credentials / login /
+│  │  │  │  │  │                fingerprint（确定性设备指纹与 8h 上报）/ models /
+│  │  │  │  │  │                plan（8 键信封与 params 重写、session id 派生）
+│  │  │  │  │  ├─ antigravity/  Antigravity（Google，Gemini）：oauth（refresh token 续期 + 单飞）/
+│  │  │  │  │                   project（loadCodeAssist → onboardUser 发现）/ credentials /
+│  │  │  │  │                   endpoints（三环境基址与头集合）/ login /
+│  │  │  │  │                   models（fetchAvailableModels + 内置兜底 + 上游真名映射）/ adapter
+│  │  │  │  │  └─ officeace/    OfficeAce（华为云果办 / OfficeClaw）：oauth（PKCE + P-256 DPoP 自助登录）/
+│  │  │  │  │                   signer（SDK-HMAC 与 V11-HMAC 两套签名 + 向量夹具）/ credentials（网关 Basic 与控制面临时 AK/SK 两层）/
+│  │  │  │  │                   chat（无状态 OpenAI 兼容转发）/ models（远程目录 + 每模型倍率）/
+│  │  │  │  │                   probe（模型可用性探测，打不通的默认隐藏）/ subscription（订阅 / 额度 / 奖励）/
+│  │  │  │  │                   onboarding / checkin / balance
+│  │  │  │  ├─ protocol/        协议转换层（各家 wire ↔ 标准 chat SSE 的请求/响应翻译：
+│  │  │  │  │                    Anthropic Messages / Responses / NDJSON（Command Code）/
+│  │  │  │  │                    Gemini 信封（Antigravity），以及工具 plan 与历史修复）
 │  │  │  │  ├─ upstream/        转发编排：全局账号队列循环（provider_loop）+ 发送体处理
-│  │  │  │  │                    （payload）+ SSE 透传/聚合 + usage 旁路提取
+│  │  │  │  │                    （payload）+ SSE 透传/聚合 + usage 旁路提取 + 非 chat 协议的
+│  │  │  │  │                    翻译流接入（translate：Anthropic / NDJSON / Gemini 三条并列）
 │  │  │  │  ├─ account_store/   账号存储（全局优先级、限额冷却、各家添加与导入）
 │  │  │  │  ├─ models/          模型目录底层（workbuddy 内置清单 + /v3/config 刷新）
 │  │  │  │  ├─ model_rules.rs   模型管理规则（禁用 / 隐藏 / 映射 alias）
@@ -261,6 +298,7 @@ agent2api/
 │  │  ├─ bridge.rs               注入 window.workbuddyDesktop 的桥接脚本
 │  │  └─ update.rs / settings.rs / state.rs / tray.rs
 │  ├─ ui/                        前端（原生 HTML/CSS/JS，无框架）
+│  ├─ i18n/                      界面词典源与构建脚本（六语）
 │  └─ src-tauri/tauri.conf.json  打包配置（NSIS）
 ├─ build/make-icon.mjs           生成应用图标源图
 ├─ assets/screenshots/           README 配图（界面截图）
@@ -269,6 +307,8 @@ agent2api/
 └─ package.json                  构建脚本入口（tauri:dev / tauri:build / build:icon）
 ```
 
+</details>
+
 ---
 
 ## 开发与构建
@@ -276,7 +316,7 @@ agent2api/
 ### 环境要求
 
 - Rust >= 1.77 与 Tauri 2 工具链（编译桌面端本体；Windows 上还需 WebView2 运行时）
-- Node.js >= 18.17（仅用来执行 `npm run tauri:*` 与 `build/make-icon.mjs` 这些前端构建脚本，桌面端运行时不依赖 Node，也不会打包任何 Node 产物）
+- Node.js >= 18.17（只用于 `npm run tauri:*` 与前端构建脚本，桌面端运行时不依赖 Node）
 
 ### 常用脚本
 
@@ -288,7 +328,7 @@ npm run tauri:build        # 构建桌面端安装包
 npm run build:icon         # 生成图标源图（改图标设计后执行，再跑 tauri icon）
 ```
 
-根项目本身没有运行期依赖，`package.json` 只提供上面这些快捷脚本入口。打包产物为 `target/release/bundle/nsis/Agent2API_<版本>_x64-setup.exe`（当前约 3.0 MB；`src-tauri/.cargo/config.toml` 把 cargo 的 `target-dir` 指到了项目根的 `target/`）。
+打包产物为 `target/release/bundle/nsis/Agent2API_<版本>_x64-setup.exe`（当前约 3.0 MB；`src-tauri/.cargo/config.toml` 把 cargo 的 `target-dir` 指到了项目根的 `target/`）。
 
 ---
 
@@ -296,7 +336,7 @@ npm run build:icon         # 生成图标源图（改图标设计后执行，再
 
 ### 仅供学习与交流
 
-本项目是一个用于学习 HTTP 反向代理、SSE 流式透传、多上游协议适配与桌面端打包（Tauri）等技术主题的实践项目，**仅供个人学习与研究使用**。它不是官方产品，与腾讯公司及 WorkBuddy / CodeBuddy、美团及 CatPaw、商汤及小浣熊、智谱及 AutoClaw / autoglm、阿里巴巴及 Qoder / Accio、华为云及 CodeArts、字节跳动及 Trae、科大讯飞及 Loomy 均无任何关联，未获得其授权、认可或赞助。
+本项目是一个用于学习 HTTP 反向代理、SSE 流式透传、多上游协议适配与桌面端打包（Tauri）等技术主题的实践项目，**仅供个人学习与研究使用**。它不是官方产品，与腾讯公司及 WorkBuddy / CodeBuddy、美团及 CatPaw、商汤及小浣熊、智谱及 AutoClaw / autoglm、阿里巴巴及 Qoder / Accio、华为云及 CodeArts / OfficeAce、字节跳动及 Trae、科大讯飞及 Loomy、百度文库及 KukuAI、长亭科技及 MonkeyCode、Command Code、Google 及 Antigravity 均无任何关联，未获得其授权、认可或赞助。
 
 ### 关于反向代理行为
 
@@ -333,4 +373,3 @@ npm run build:icon         # 生成图标源图（改图标设计后执行，再
     <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=aimod-cc/agent2api&type=Date" />
   </picture>
 </a>
-

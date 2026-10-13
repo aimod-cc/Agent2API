@@ -121,8 +121,8 @@ function ConfirmDialog({ options, onSettle }: ConfirmDialogProps) {
         </AlertDialogHeader>
         <AlertDialogBody>
           {/* html 与 text 二选一：html 非空就用它（调用方负责转义，内部原样注入，
-              既有调用点会传 <strong>/<code>/<b>/<ul class="zcode-claim-plans"> 这类
-              标记），否则用转义后的 text 并把换行转成 <br>。 */}
+              既有调用点会传 <strong>/<code>/<b> 这类标记），否则用转义后的 text
+              并把换行转成 <br>。 */}
           <AlertDialogBanner
             tone={bodyClass === 'danger-zone' ? 'danger' : 'neutral'}
             dangerouslySetInnerHTML={{ __html: html || escapeHtml(text).replace(/\n/g, '<br>') }}

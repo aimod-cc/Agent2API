@@ -32,10 +32,10 @@
   var REFRESH_MS = 9.5 * 60 * 1000
 
   var TEXT = {
-    idle: '我不是机器人',
-    verifying: '验证中…',
-    verified: '验证成功',
-    error: '验证失败，请重试',
+    idle: wbI18n.t('我不是机器人'),
+    verifying: wbI18n.t('验证中…'),
+    verified: wbI18n.t('验证成功'),
+    error: wbI18n.t('验证失败，请重试'),
   }
 
   /* ── SHA-256：`crypto.subtle` 不可用时的兜底实现 ──────────────

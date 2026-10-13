@@ -84,6 +84,7 @@ import {
   saveItem, setAllPicked, subscribe, syncClash, testItem, toggleItem, togglePick, toast, wb,
   type ProxyPoolItem,
 } from './proxies-state'
+import { t } from '../i18n'
 
 /* ─── 表格列 ─────────────────────────────────── */
 
@@ -108,13 +109,14 @@ function ProxiesPage() {
 
   function testCell(item: ProxyPoolItem): React.ReactNode {
     const last = item.lastTest
-    if (!last || !last.at) return <span className='text-subtle'>未测试</span>
+    if (!last || !last.at) return <span className='text-subtle'>{t('未测试')}</span>
     const suffix = durationText(last.durationMs)
     return (
       <div className='flex flex-col gap-0.5 leading-[1.5]'>
+        {/* 失败原因是上游错误原文（后端数据）原样透出；耗时只有数字单位，不包 */}
         <span className={last.success ? 'text-success' : 'text-destructive'}
-          title={last.success ? '' : String(last.error || '连接失败')}>
-          {last.success ? `✅ ${last.ip || '连接成功'}` : '❌ 连接失败'}
+          title={last.success ? '' : String(last.error || t('连接失败'))}>
+          {last.success ? t('✅ {ip}', { ip: last.ip || t('连接成功') }) : t('❌ 连接失败')}
           {suffix ? `　${suffix}` : ''}
         </span>
         <span className='text-[11px] text-subtle'>{formatTime(last.at)}</span>
@@ -130,18 +132,18 @@ function ProxiesPage() {
     switch (column) {
       case 'pick':
         return (
-          <Checkbox checked={picked} title='勾选后可批量操作'
-            aria-label={`勾选「${item.name || '未命名'}」`}
+          <Checkbox checked={picked} title={t('勾选后可批量操作')}
+            aria-label={t('勾选「{name}」', { name: item.name || t('未命名') })}
             onCheckedChange={next => togglePick(item.id, next)} />
         )
       case 'name':
         return (
           <div className='flex flex-col gap-0.5 leading-[1.5]'>
-            <b>{item.name || '未命名'}</b>
+            <b>{item.name || t('未命名')}</b>
             {used.length ? (
               <span className='text-[11px] text-subtle'
-                title={used.map(entry => String(entry.name || entry.id || '')).join('、')}>
-                {used.length} 个账号在用
+                title={used.map(entry => String(entry.name || entry.id || '')).join(t('、'))}>
+                {t('{n} 个账号在用', { n: used.length })}
               </span>
             ) : null}
           </div>
@@ -150,7 +152,7 @@ function ProxiesPage() {
         return item.source === 'clash' ? (
           <Badge variant='secondary' title={CLASH_READONLY_HINT}>Clash Verge</Badge>
         ) : (
-          <Badge title='手动填写的地址与端口'>手动</Badge>
+          <Badge title={t('手动填写的地址与端口')}>{t('手动')}</Badge>
         )
       case 'addr':
         // 地址统一成「协议 主机:端口」（与账号侧下拉同一口径，见
@@ -158,7 +160,7 @@ function ProxiesPage() {
         // 「监听器名（:端口）」、对混合端口是「Clash 混合端口 7892」—— 都不含主机，
         // 形态还随来源变。主机与端口在这里是核对「这条连的是哪儿」的唯一读数
         return item.resolveError ? (
-          <span className='text-destructive' title={item.resolveError}>解析失败</span>
+          <span className='text-destructive' title={item.resolveError}>{t('解析失败')}</span>
         ) : (
           <span className='font-mono text-[12px] text-text-2'>{poolItemAddress(item) || '—'}</span>
         )
@@ -167,7 +169,7 @@ function ProxiesPage() {
         const readonly = isClashItem(item)
         return (
           <Switch checked={item.enabled} disabled={locked || readonly}
-            aria-label={`启用「${item.name || '未命名'}」`}
+            aria-label={t('启用「{name}」', { name: item.name || t('未命名') })}
             title={readonly ? CLASH_READONLY_HINT : undefined}
             onCheckedChange={next => void toggleItem(item, next)} />
         )
@@ -180,17 +182,17 @@ function ProxiesPage() {
           <div className='row-actions'>
             <Button size='sm' variant='ghost' disabled={locked || snapshot.testing !== null}
               onClick={() => void testItem(item)}>
-              {snapshot.testing === item.id ? '测试中…' : '测试'}
+              {snapshot.testing === item.id ? t('测试中…') : t('测试')}
             </Button>
             <Button size='sm' variant='ghost' disabled={locked || readonly}
               title={readonly ? CLASH_READONLY_HINT : undefined}
               onClick={() => setModal({ item })}>
-              编辑
+              {t('编辑')}
             </Button>
             <Button size='sm' variant='destructive' disabled={locked || readonly}
               title={readonly ? CLASH_READONLY_HINT : undefined}
               onClick={() => void removeItem(item)}>
-              删除
+              {t('删除')}
             </Button>
           </div>
         )
@@ -203,9 +205,9 @@ function ProxiesPage() {
   return (
     <section className='panel'>
       <div className='panel-head'>
-        <h2>网络代理</h2>
+        <h2>{t('网络代理')}</h2>
         <span className='panel-sub'>
-          {ready ? `${rows.length} 个出口` : '加载中…'}
+          {ready ? t('{n} 个出口', { n: rows.length }) : t('加载中…')}
         </span>
         <div className='head-actions'>
           {/* 同步放在刷新左边：它做的事比「刷新」多一层（把 Clash 的出口集合
@@ -214,14 +216,14 @@ function ProxiesPage() {
               批量在跑时两个都停：它们会把正在被批量流程改写的列表整份换掉 */}
           <Button variant='outline' disabled={snapshot.syncing || snapshot.batchBusy}
             onClick={() => void syncClash()}>
-            {snapshot.syncing ? '同步中…' : '同步 Clash Verge'}
+            {snapshot.syncing ? t('同步中…') : t('同步 Clash Verge')}
           </Button>
           <Button variant='outline' disabled={snapshot.loading || snapshot.batchBusy}
             onClick={() => void loadPanel()}>
-            {snapshot.loading ? '刷新中…' : '刷新'}
+            {snapshot.loading ? t('刷新中…') : t('刷新')}
           </Button>
           <Button variant='default' disabled={snapshot.batchBusy}
-            onClick={() => setModal({ item: null })}>＋ 新增代理</Button>
+            onClick={() => setModal({ item: null })}>{t('＋ 新增代理')}</Button>
         </div>
       </div>
 
@@ -229,30 +231,30 @@ function ProxiesPage() {
       <div className={cn('batch-bar', selectedCount > 0 && 'active')}>
         <label className='batch-select-all'>
           <Checkbox checked={allPicked} indeterminate={somePicked}
-            disabled={!rows.length} aria-label='全选所有代理'
+            disabled={!rows.length} aria-label={t('全选所有代理')}
             onCheckedChange={next => setAllPicked(selectedIds, next)} />
-          <span>{rows.length ? `全选（${rows.length} 个）` : '没有可全选的代理'}</span>
+          <span>{rows.length ? t('全选（{n} 个）', { n: rows.length }) : t('没有可全选的代理')}</span>
         </label>
         <span className='batch-count'>
-          已选 <b>{selectedCount}</b> 个 · 共 <b>{rows.length}</b> 个
+          {t('已选')} <b>{selectedCount}</b> {t('个 · 共')} <b>{rows.length}</b> {t('个')}
         </span>
         {clashPicked ? (
           <span className='batch-hidden'>
-            其中 {clashPicked} 条来自 Clash 同步：可参与批量测试，删除会跳过
+            {t('其中 {n} 条来自 Clash 同步：可参与批量测试，删除会跳过', { n: clashPicked })}
           </span>
         ) : null}
         <div className='batch-actions'>
           <Button variant='outline' disabled={!selectedCount || snapshot.batchBusy}
             onClick={() => void batchTest()}>
-            {progress ? `测试中 ${progress.done}/${progress.total}` : '批量测试'}
+            {progress ? t('测试中 {done}/{total}', { done: progress.done, total: progress.total }) : t('批量测试')}
           </Button>
           <Button variant='destructive' disabled={!selectedCount || snapshot.batchBusy}
             onClick={() => void batchRemove()}>
-            批量删除
+            {t('批量删除')}
           </Button>
           <Button variant='outline' disabled={!selectedCount || snapshot.batchBusy}
             onClick={() => clearSelection()}>
-            取消选择
+            {t('取消选择')}
           </Button>
         </div>
       </div>
@@ -273,12 +275,12 @@ function ProxiesPage() {
           <thead>
             <tr>
               <th className='ta-center' />
-              <th>名称</th>
-              <th>类型</th>
-              <th>地址</th>
-              <th className='ta-center'>启用</th>
-              <th>上次测试</th>
-              <th className='ta-right'>操作</th>
+              <th>{t('名称')}</th>
+              <th>{t('类型')}</th>
+              <th>{t('地址')}</th>
+              <th className='ta-center'>{t('启用')}</th>
+              <th>{t('上次测试')}</th>
+              <th className='ta-right'>{t('操作')}</th>
             </tr>
           </thead>
           <tbody>
@@ -299,8 +301,8 @@ function ProxiesPage() {
               <tr>
                 <td colSpan={COLUMNS.length} className='empty'>
                   {ready
-                    ? '还没有代理。点右上角「＋ 新增代理」手填一个，或点「同步 Clash Verge」把 Clash 的出口导进来。'
-                    : '加载中…'}
+                    ? t('还没有代理。点右上角「＋ 新增代理」手填一个，或点「同步 Clash Verge」把 Clash 的出口导进来。')
+                    : t('加载中…')}
                 </td>
               </tr>
             )}
@@ -309,22 +311,25 @@ function ProxiesPage() {
       </div>
 
       <div className='panel-foot'>
+        {/* 行内 <b> 是强调，拆片段保住它（与 docs-page 脚注同一手法）；片段的空格是原文 */}
         <span>
-          这里配的出口可被账号引用（账号弹窗 →「出网代理」→「已保存的代理」）——
-          改一次地址、所有引用的账号一起生效。测试的判据是<b>能否连上上游</b>，
-          出口 IP 与耗时是附带读数。<b>Clash Verge</b> 那一类由「同步 Clash Verge」
-          镜像进来（进入本页时会自动同步一次）：名称、端口、启用都跟随 Clash，
-          在 Clash 里改或删，这里跟着变 —— 所以它们只读，改请到 Clash Verge 里改。
+          {t('这里配的出口可被账号引用（账号弹窗 →「出网代理」→「已保存的代理」）—— 改一次地址、所有引用的账号一起生效。测试的判据是')}
+          <b>{t('能否连上上游')}</b>
+          {t('， 出口 IP 与耗时是附带读数。')}
+          <b>Clash Verge</b>
+          {t(' 那一类由「同步 Clash Verge」 镜像进来（进入本页时会自动同步一次）：名称、端口、启用都跟随 Clash， 在 Clash 里改或删，这里跟着变 —— 所以它们只读，改请到 Clash Verge 里改。')}
         </span>
         {/* Clash 状态常驻在页脚：同步是静默的（进页面自动跑一次），没有这句话时
             「为什么一条 Clash 条目都没有」只能靠点按钮 + 看 toast 才知道 */}
         {snapshot.data?.clash && snapshot.data.clash.available === false ? (
           <span className='text-subtle'>
-            未检测到 Clash Verge{snapshot.data.clash.error ? `：${snapshot.data.clash.error}` : ''}
+            {snapshot.data.clash.error
+              ? t('未检测到 Clash Verge：{reason}', { reason: snapshot.data.clash.error })
+              : t('未检测到 Clash Verge')}
           </span>
         ) : null}
         {snapshot.error ? (
-          <span className='text-destructive'>读取失败：{snapshot.error}</span>
+          <span className='text-destructive'>{t('读取失败：{reason}', { reason: snapshot.error })}</span>
         ) : null}
       </div>
 
@@ -370,12 +375,12 @@ function ProxyModal({
   /** 表单 → 归一化后的提交对象；形状非法时返回一句面向用户的错误 */
   function draftPayload(): { payload: Record<string, unknown> } | { error: string } {
     const trimmed = name.trim()
-    if (!trimmed) return { error: '请填写代理名称' }
+    if (!trimmed) return { error: t('请填写代理名称') }
     const hostText = host.trim()
-    if (!hostText) return { error: '请填写代理主机地址' }
+    if (!hostText) return { error: t('请填写代理主机地址') }
     const portNumber = Number(port)
     if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
-      return { error: '代理端口必须是 1-65535 的整数' }
+      return { error: t('代理端口必须是 1-65535 的整数') }
     }
     return {
       payload: {
@@ -409,18 +414,20 @@ function ProxyModal({
       password: payload.password,
     }
     setTesting(true)
-    setStatus('正在连接上游…')
+    setStatus(t('正在连接上游…'))
     try {
       const data = await wb().workbuddyDesktop?.testProxy?.({ proxy })
       if (data?.success) {
         const suffix = durationText(data.durationMs)
         setStatus(
           <span className='text-success'>
-            ✅ 出口可用{data.ip ? `　出口 IP ${data.ip}` : ''}{suffix ? `　${suffix}` : ''}
+            {t('✅ 出口可用')}
+            {data.ip ? t('　出口 IP {ip}', { ip: data.ip }) : ''}
+            {suffix ? `　${suffix}` : ''}
           </span>,
         )
       } else {
-        setStatus(<span className='text-destructive'>❌ {data?.error || '连接失败'}</span>)
+        setStatus(<span className='text-destructive'>❌ {data?.error || t('连接失败')}</span>)
       }
     } catch (error) {
       setStatus(<span className='text-destructive'>❌ {errorMessage(error)}</span>)
@@ -440,7 +447,7 @@ function ProxyModal({
     setStatus(null)
     try {
       await saveItem(item, draft.payload)
-      toast(editing ? `已保存「${name.trim()}」` : `已新增「${name.trim()}」`)
+      toast(editing ? t('已保存「{name}」', { name: name.trim() }) : t('已新增「{name}」', { name: name.trim() }))
       onClose()
     } catch (error) {
       setStatus(<span className='text-destructive'>❌ {errorMessage(error)}</span>)
@@ -452,19 +459,20 @@ function ProxyModal({
     <Dialog open onOpenChange={open => { if (!open && !saving) onClose() }}>
       <DialogContent className='max-w-[560px]'>
         <DialogHeader>
-          <DialogTitle>{editing ? '编辑代理' : '新增代理'}</DialogTitle>
+          <DialogTitle>{editing ? t('编辑代理') : t('新增代理')}</DialogTitle>
         </DialogHeader>
         <DialogBody className='flex flex-col gap-3.5'>
           <div className='flex flex-col gap-1.5'>
-            <Label htmlFor='proxy-name'>名称</Label>
+            <Label htmlFor='proxy-name'>{t('名称')}</Label>
             <Input id='proxy-name' maxLength={60} autoComplete='off' spellCheck={false}
-              placeholder='例如：香港 HTTP 出口'
+              placeholder={t('例如：香港 HTTP 出口')}
               value={name} onChange={event => setName(event.currentTarget.value)} />
           </div>
 
           <div className='flex flex-row items-end gap-2.5'>
             <div className='flex flex-col gap-1.5'>
-              <Label htmlFor='proxy-protocol'>协议</Label>
+              <Label htmlFor='proxy-protocol'>{t('协议')}</Label>
+              {/* 协议名 HTTP / SOCKS5 是固定叫法，不进词典 */}
               <Select value={protocol} onValueChange={value => setProtocol(value as 'http' | 'socks5')}>
                 <SelectTrigger id='proxy-protocol' className='min-w-[110px]'>
                   <SelectValue>{protocol === 'socks5' ? 'SOCKS5' : 'HTTP'}</SelectValue>
@@ -476,52 +484,50 @@ function ProxyModal({
               </Select>
             </div>
             <div className='flex min-w-0 flex-1 flex-col gap-1.5'>
-              <Label htmlFor='proxy-host'>主机</Label>
+              <Label htmlFor='proxy-host'>{t('主机')}</Label>
               <Input id='proxy-host' placeholder='127.0.0.1' autoComplete='off' spellCheck={false}
                 value={host} onChange={event => setHost(event.currentTarget.value)} />
             </div>
             <div className='flex flex-col gap-1.5'>
-              <Label htmlFor='proxy-port'>端口</Label>
+              <Label htmlFor='proxy-port'>{t('端口')}</Label>
               <Input id='proxy-port' type='number' min={1} max={65535} className='max-w-[110px]'
                 placeholder='7890' value={port} onChange={event => setPort(event.currentTarget.value)} />
             </div>
           </div>
           <div className='flex flex-row items-end gap-2.5'>
             <div className='flex min-w-0 flex-1 flex-col gap-1.5'>
-              <Label htmlFor='proxy-user'>用户名</Label>
-              <Input id='proxy-user' placeholder='可选' autoComplete='off'
+              <Label htmlFor='proxy-user'>{t('用户名')}</Label>
+              <Input id='proxy-user' placeholder={t('可选')} autoComplete='off'
                 value={username} onChange={event => setUsername(event.currentTarget.value)} />
             </div>
             <div className='flex min-w-0 flex-1 flex-col gap-1.5'>
-              <Label htmlFor='proxy-pass'>密码</Label>
-              <Input id='proxy-pass' placeholder='可选' autoComplete='off'
+              <Label htmlFor='proxy-pass'>{t('密码')}</Label>
+              <Input id='proxy-pass' placeholder={t('可选')} autoComplete='off'
                 value={password} onChange={event => setPassword(event.currentTarget.value)} />
             </div>
           </div>
 
           <div className='flex flex-row items-center gap-2.5'>
-            <Switch checked={enabled} onCheckedChange={setEnabled} aria-label='启用这条代理' />
+            <Switch checked={enabled} onCheckedChange={setEnabled} aria-label={t('启用这条代理')} />
             <span className='text-[12.5px]'>
-              启用（禁用的条目不会被账号使用，被引用时账号回退直连；仍可测试）
+              {t('启用（禁用的条目不会被账号使用，被引用时账号回退直连；仍可测试）')}
             </span>
           </div>
 
           <p className='text-xs leading-[1.65] text-subtle'>
-            想要 Clash Verge 的出口？那类条目由工具条的<b>「同步 Clash Verge」</b>整体
-            镜像进来（进本页时也会自动同步一次），名称与端口跟随 Clash、因此是只读的 ——
-            不必（也不能）在这里手工填。
+            {t('想要 Clash Verge 的出口？那类条目由工具条的')}<b>{t('「同步 Clash Verge」')}</b>{t('整体 镜像进来（进本页时也会自动同步一次），名称与端口跟随 Clash、因此是只读的 —— 不必（也不能）在这里手工填。')}
           </p>
 
           <div className='min-h-[18px] text-xs text-subtle'>{status}</div>
         </DialogBody>
         <DialogFooter>
           <Button variant='outline' disabled={testing || saving} onClick={() => void testDraft()}>
-            {testing ? '测试中…' : '测试出口'}
+            {testing ? t('测试中…') : t('测试出口')}
           </Button>
           <div className='mr-auto' />
-          <Button variant='outline' disabled={saving} onClick={onClose}>取消</Button>
+          <Button variant='outline' disabled={saving} onClick={onClose}>{t('取消')}</Button>
           <Button variant='default' disabled={saving} onClick={() => void save()}>
-            {saving ? '保存中…' : '保存'}
+            {saving ? t('保存中…') : t('保存')}
           </Button>
         </DialogFooter>
       </DialogContent>

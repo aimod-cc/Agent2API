@@ -67,7 +67,7 @@
       const cancel_ = cancelButton();
       if (loginActive && loginProvider === config.provider) {
         button_.disabled = true;
-        button_.innerHTML = `<span class="spinner"></span>${config.busyText || '等待登录完成…'}`;
+        button_.innerHTML = `<span class="spinner"></span>${config.busyText || wbI18n.t('等待登录完成…')}`;
         // 取消按钮切 hidden 属性而不是行内 display：它是组件库的 Button（自带带
         // !important 的 inline-flex 工具类），行内样式压不过它
         if (cancel_) cancel_.hidden = false;
@@ -79,8 +79,9 @@
         button_.disabled = true;
         const hint_ = hint();
         if (hint_) {
-          hint_.textContent = `正在等待${providerLabel(loginProvider)}登录完成；完成或取消后`
-            + `才能发起新的登录`;
+          hint_.textContent = wbI18n.t('正在等待{name}登录完成；完成或取消后才能发起新的登录', {
+            name: providerLabel(loginProvider),
+          });
         }
         return;
       }
@@ -102,18 +103,18 @@
         const button_ = button();
         if (button_) {
           button_.disabled = true;
-          button_.innerHTML = `<span class="spinner"></span>${config.busyText || '等待网页登录…'}`;
+          button_.innerHTML = `<span class="spinner"></span>${config.busyText || wbI18n.t('等待网页登录…')}`;
         }
         try {
           const result = await config.start();
           if (result?.canceled) {
-            toast('已取消登录等待');
+            toast(wbI18n.t('已取消登录等待'));
             return;
           }
           flowSettling = true;
           await config.onSuccess(result);
         } catch (error) {
-          toast(`登录失败：${error.message}`, 'err');
+          toast(wbI18n.t('登录失败：{message}', { message: error.message }), 'err');
         } finally {
           flowSettling = false;
           releaseBusy(); // 释放锁并补跑排队中的刷新（见 releaseBusy 注释）
@@ -128,7 +129,7 @@
           return;
         }
         const canceled = await cancelLogin();
-        toast(canceled ? '已取消登录等待' : '登录已结束');
+        toast(canceled ? wbI18n.t('已取消登录等待') : wbI18n.t('登录已结束'));
         await syncShellState();
       },
     };
@@ -143,7 +144,7 @@
       await window.workbuddyDesktop.cancelLogin();
       return true;
     } catch (error) {
-      toast(`取消失败：${error.message}`, 'err');
+      toast(wbI18n.t('取消失败：{message}', { message: error.message }), 'err');
       return false;
     }
   }

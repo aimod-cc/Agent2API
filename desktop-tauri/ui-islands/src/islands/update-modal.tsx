@@ -10,6 +10,7 @@ import {
   DialogTitle,
 } from '@ui'
 import { handleExternalClick, markdownHtml, shared, type UpdateInfo } from './update-shared'
+import { t } from '../i18n'
 
 /**
  * 「检测到更新」弹窗（按需建、关闭即卸）—— 从 update-panel.tsx 拆出。
@@ -120,29 +121,29 @@ function UpdateModal({ info, onGoUpdate, onClose }: UpdateModalProps) {
     <Dialog open onOpenChange={next => { if (!next) onClose() }}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>检测到更新</DialogTitle>
+          <DialogTitle>{t('检测到更新')}</DialogTitle>
         </DialogHeader>
         <DialogBody>
           <p className='text-[12.5px] leading-[1.6] text-subtle'>
-            新版本 <strong className='text-foreground'>{version}</strong> 已发布（当前{' '}
-            {info.currentVersion || '未知'}），更新日志如下：
+            {t('新版本 ')}<strong className='text-foreground'>{version}</strong>
+            {t(' 已发布（当前 {current}），更新日志如下：', { current: info.currentVersion || t('未知') })}
           </p>
           {/* 正文限高 + 滚动（旧 .update-modal-notes 的 46vh），长日志不会把弹窗撑出一屏；
               overscroll-contain 拦住滚动链，滚到底不带动外层页面 */}
           <div className='max-h-[46vh] overflow-y-auto overscroll-contain pr-1.5' onClick={handleExternalClick}>
             {html ? <div className='md-body' dangerouslySetInnerHTML={{ __html: html }} /> : (
               <div className='md-body'>
-                <p className='md-body-empty'>这个版本没有填写发布说明。</p>
+                <p className='md-body-empty'>{t('这个版本没有填写发布说明。')}</p>
               </div>
             )}
           </div>
         </DialogBody>
         <DialogFooter>
           {/* 旧 .modal-foot 的布局：跳过 | spacer | 取消 + 去更新 */}
-          <Button variant='outline' size='sm' onClick={handleSkip}>跳过此次更新</Button>
+          <Button variant='outline' size='sm' onClick={handleSkip}>{t('跳过此次更新')}</Button>
           <div className='mr-auto' />
-          <Button variant='outline' onClick={onClose}>取消</Button>
-          <Button variant='default' onClick={handleGo}>去更新</Button>
+          <Button variant='outline' onClick={onClose}>{t('取消')}</Button>
+          <Button variant='default' onClick={handleGo}>{t('去更新')}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

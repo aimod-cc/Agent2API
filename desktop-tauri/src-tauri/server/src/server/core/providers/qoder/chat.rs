@@ -813,14 +813,16 @@ pub struct AccountContext {
     pub proxy: Option<ResolvedProxy>,
 }
 
-/// 取某账号的凭证快照（含临期主动刷新）。
+/// 取某账号的凭证快照（含临期主动刷新）。`region` 是本适配器的地区身份
+/// （拆家后 provider 即地区，见 `qoder::mod` 的模块头）。
 pub async fn account_context(
     store: &AccountStore,
+    region: super::endpoints::Region,
     account_id: &str,
     force_refresh: bool,
 ) -> Result<AccountContext, GatewayError> {
-    let credentials = super::refresh::ensure_fresh(store, account_id, force_refresh).await?;
-    let (record, _) = super::refresh::snapshot(store, account_id)?;
+    let credentials = super::refresh::ensure_fresh(store, region, account_id, force_refresh).await?;
+    let (record, _) = super::refresh::snapshot(store, region, account_id)?;
     let proxy = super::auth::account_proxy(&record)?;
     Ok(AccountContext { credentials, proxy })
 }

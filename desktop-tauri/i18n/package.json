@@ -1,0 +1,15 @@
+{
+  "name": "agent2api-i18n",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Agent2API 前端多语言词典工具链 —— 扫描源码里的中文键（scan.mjs）并编译成运行时词典（build.mjs）",
+  "scripts": {
+    "scan": "node scan.mjs",
+    "check": "node scan.mjs --check",
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "opencc-js": "^1.0.5"
+  }
+}

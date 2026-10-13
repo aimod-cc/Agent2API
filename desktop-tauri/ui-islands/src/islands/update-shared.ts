@@ -22,6 +22,7 @@ import type * as React from 'react'
 // （`pool:<id>`），各写一份迟早会漂移。accounts-shared 是纯类型 + 常量的
 // 自包含模块（不 import 任何业务模块），这里引用它不产生循环。
 import { POOL_VALUE_PREFIX, poolItemLabel, type PoolItem } from './accounts-shared'
+import { t } from '../i18n'
 
 /* ─── 类型 ─────────────────────────────────── */
 
@@ -107,6 +108,16 @@ export type UpdateBridge = {
   getUpdateToken(): Promise<UpdateTokenStatus | null | undefined>
   /** 保存 / 清除 GitHub 令牌（token 传 null = 清除） */
   setUpdateToken(payload: { token: string | null }): Promise<UpdateTokenStatus | null | undefined>
+  /** 间隔型任务清单：「自动检查更新」（任务 id 'updateCheck'）的开关与间隔读它 ——
+   *  那条任务的配置入口收进了「更新设置」弹窗（update-settings.tsx） */
+  getScheduledTasks?: () => Promise<{
+    tasks?: Array<{ id?: string; enabled?: boolean; interval?: number }>
+  } | null | undefined>
+  /** 保存间隔型任务配置（PATCH /api/scheduled-tasks/{id}，响应是改完的那条） */
+  saveScheduledTask?: (
+    id: string,
+    patch: Record<string, unknown>,
+  ) => Promise<{ id?: string; enabled?: boolean; interval?: number } | null | undefined>
   /** 「网络代理」页的池条目（出网代理下拉的选项只来自它，与账号页同一条链） */
   getProxyPool(): Promise<{ items?: PoolItem[] } | null | undefined>
   downloadUpdate(payload: { url: string; name?: string }): Promise<DownloadTask | null | undefined>
@@ -173,15 +184,42 @@ export function safeExternal(value: unknown): string {
 export async function openExternal(url: string): Promise<void> {
   const target = safeExternal(url)
   if (!target) {
-    toast('链接地址不受支持', 'err')
+    toast(t('链接地址不受支持'), 'err')
     return
   }
   try {
     await shared().workbuddyDesktop?.openReleasePage(target)
   } catch (error) {
-    toast(`打开链接失败：${errorMessage(error)}`, 'err')
+    toast(t('打开链接失败：{error}', { error: errorMessage(error) }), 'err')
   }
 }
+
+/**
+ * 官方 QQ 群号。两处用：面板页脚那颗「加入 QQ 群」的悬停提示，以及加群弹窗里
+ * 显示的「群号」（可复制，给人搜不到码时手打）。
+ */
+export const QQ_GROUP = '1127656296'
+
+/**
+ * 加群二维码：**随界面一起打包**的一张小图（`ui/assets/qq-group/<群号>.jpg`，
+ * 与 provider 图标同在 `ui/assets/` 下，同样按相对路径引用）。
+ *
+ * ── 为什么落在这里，而不是外链 ──────────────────────────────
+ * 先后试过两条远程路子，都不成立：
+ *   · `mqqapi://card/show_pslcard?…&card_type=group`（社区里流传最广的「一键加群」）：
+ *     协议确实注册了、能拉起 QQ 主程序，但桌面版 QQ NT 9.9.36 打开那张群名片后自己
+ *     弹「当前QQ暂不支持该内容」；这个拒绝**发生在 QQ 里面**，壳只看得到 ShellExecuteW
+ *     成功，判断不了、也就接不了「失败再换一条路」的兜底。
+ *   · 群里「分享 → 复制加群链接」给出的 `https://qm.qq.com/q/xxxx`：它是给 QQ 内置
+ *     浏览器 / 手机 QQ 用的加群页（靠 `qqapi.wk.js` 那套 App 内 SDK 完成加群），
+ *     系统浏览器里走不通。
+ * 外链托管（GitHub raw、自建 Worker）也都不如内置：图是死的、就那么一张，放进安装包
+ * 不用联网、不受网络环境影响，扫码这条路也不依赖对方 QQ 的版本。
+ *
+ * 代价说清楚：图在包里，**换群 / 换码必须跟着发一次版**（改文件名 + 这一个常量），
+ * 不像外链那样能只换服务端。文件名就用群号，两处对得上即可。
+ */
+export const QQ_GROUP_QR = `assets/qq-group/${QQ_GROUP}.jpg`
 
 /** 更新日志正文：渲染交给 wbMarkdown（不重写它），只做缺失兜底 */
 export function markdownHtml(notes: string): string {
@@ -314,11 +352,13 @@ export async function saveProxy(value: string): Promise<{ choice: UpdateProxyCho
     // 以后端回报的描述形态为准（含解析失败时的 error），不从本地猜
     const choice = result?.proxy ?? null
     const saved = result?.saved !== false
-    if (!saved) toast('出网线路已切换，但写入磁盘失败（重启后会恢复原线路）', 'err')
-    else toast(choice ? `✅ 更新出网已切换为 ${choice.label || '指定代理'}` : '✅ 更新出网已切换为直连')
+    if (!saved) toast(t('出网线路已切换，但写入磁盘失败（重启后会恢复原线路）'), 'err')
+    else toast(choice
+      ? t('✅ 更新出网已切换为 {label}', { label: choice.label || t('指定代理') })
+      : t('✅ 更新出网已切换为直连'))
     return { choice, saved }
   } catch (error) {
-    toast(`保存失败：${errorMessage(error)}`, 'err')
+    toast(t('保存失败：{error}', { error: errorMessage(error) }), 'err')
     return null
   }
 }
@@ -341,7 +381,7 @@ export function buildProxyPick(selection: ProxySelection): {
 } {
   const proxy = selection.proxyChoice
   const source = proxy?.config?.source || proxy?.source
-  const label = proxy?.label || (source === 'custom' ? '自定义代理' : '已设置')
+  const label = proxy?.label || (source === 'custom' ? t('自定义代理') : t('已设置'))
   const broken = Boolean(proxy?.error)
   const poolItems = Array.isArray(selection.pool) ? selection.pool : []
 
@@ -351,7 +391,7 @@ export function buildProxyPick(selection: ProxySelection): {
   if (source === 'pool' && proxy?.config?.proxyId) current = `${POOL_VALUE_PREFIX}${proxy.config.proxyId}`
   else if (proxy) current = PROXY_OTHER_CURRENT
 
-  const items: Array<{ value: string; label: string; disabled?: boolean }> = [{ value: '', label: '直连' }]
+  const items: Array<{ value: string; label: string; disabled?: boolean }> = [{ value: '', label: t('直连') }]
   for (const item of poolItems) {
     // 「名字（协议 主机:端口）」—— 与账号页代理列、账号弹窗的代理表单同一格式
     items.push({ value: `${POOL_VALUE_PREFIX}${item.id}`, label: poolItemLabel(item) })
@@ -359,11 +399,11 @@ export function buildProxyPick(selection: ProxySelection): {
   if (selection.pool === null) {
     // 还没读到（弹窗刚打开、请求在途）：给一句「读取中」而不是
     // 「还没有代理」—— 后者会让用户以为池是空的
-    items.push({ value: '__hint_pool__', label: '正在读取代理列表…', disabled: true })
+    items.push({ value: '__hint_pool__', label: t('正在读取代理列表…'), disabled: true })
   } else if (!poolItems.length) {
     items.push({
       value: '__hint_pool__',
-      label: selection.poolError ? '代理列表读取失败' : '还没有代理（去「网络代理」页添加）',
+      label: selection.poolError ? t('代理列表读取失败') : t('还没有代理（去「网络代理」页添加）'),
       disabled: true,
     })
   }
@@ -371,12 +411,12 @@ export function buildProxyPick(selection: ProxySelection): {
     // 存量记录：直接引用 Clash 出口（`listenerUid`）或自定义形状。这几种值
     // 现在没有对应的可选项（出口统一走池），但仍要显示出来 —— 它们照原样
     // 转发，用户想改就在这里选一条池条目或切回直连
-    const prefix = source === 'clash' ? 'Clash 出口：' : source === 'custom' ? '自定义：' : ''
-    items.push({ value: PROXY_OTHER_CURRENT, label: `${prefix}${label}${broken ? '（不可用）' : ''}` })
+    const prefix = source === 'clash' ? t('Clash 出口：') : source === 'custom' ? t('自定义：') : ''
+    items.push({ value: PROXY_OTHER_CURRENT, label: `${prefix}${label}${broken ? t('（不可用）') : ''}` })
   } else if (source === 'pool' && !poolItems.some(item => `${POOL_VALUE_PREFIX}${item.id}` === current)) {
     // 池引用但条目已不在池里（被删 / Clash 侧删了出口）：补位显示当前值，
     // 后端解析失败的原因在 title 里
-    items.push({ value: current, label: `${label}${broken ? '（不可用）' : ''}` })
+    items.push({ value: current, label: `${label}${broken ? t('（不可用）') : ''}` })
   }
   return {
     current,
@@ -384,7 +424,7 @@ export function buildProxyPick(selection: ProxySelection): {
     selected: items.find(item => item.value === current),
     broken,
     title: broken
-      ? `当前线路不可用：${proxy?.error}；请重新选择代理或切回直连`
-      : `检查更新与下载安装包走哪条线路（当前：${proxy ? label : '直连'}）；选择即保存。选项来自「网络代理」页；直连失败时会自动借 Clash 混合端口重试一次，选定指定代理后只走它`,
+      ? t('当前线路不可用：{error}；请重新选择代理或切回直连', { error: String(proxy?.error || '') })
+      : t('检查更新与下载安装包走哪条线路（当前：{current}）；选择即保存。选项来自「网络代理」页；直连失败时会自动借 Clash 混合端口重试一次，选定指定代理后只走它', { current: proxy ? label : t('直连') }),
   }
 }

@@ -21,6 +21,11 @@
 //!   2. **优先级全局唯一**（所有提供商共用一条队列）：数值小的先用（主备式）。
 //!      写入侧冲突一律拒绝（409），启动时对既有数据做一次性迁移
 //!      （`migrate_startup`：旧版按家分队的号码按旧顺序合并成全局队列 + 去重）。
+//!      **分组模式（账号页按家分组）再加一条：同一家的账号在队列里连续** ——
+//!      组的顺位由「该家最靠前的账号」决定，界面上「第 N 顺位的家排在前面」这句
+//!      话才与真实尝试顺序一致。维护它只需两处：新增/导入一律落在本组末尾
+//!      （`sql::put` 里的那一跳），整队拖拽由 `store_order::reorder_accounts`
+//!      按用户拖出来的顺序重编号。规则本身在 `priority::grouped_queue_order`。
 //!      「当前账号」不是独立存储的手动选择，而是**由优先级派生** ——
 //!      全局队列里第一个「已启用且有可用凭证」的账号（`pick_current`），所以不存在
 //!      「手动选了 A、实际用 B」这种分叉。想换当前账号就把目标置顶。
@@ -60,6 +65,7 @@
 //!                按 id / provider 的按需读取
 //!   store_view.rs 公开形态（各家形状分派 + 跨家事实注入）、列表快照、provider 摘要
 //!   store_crud.rs 增删改查（add/remove/promote/update/move 与 apply_patch 内核）
+//!   store_order.rs 队列顺序（分组模式）：按给定顺序整队重编号（`reorder_accounts`）
 //!   store_batch.rs 批量操作（batch_update / batch_remove）
 //!   store_admin.rs token 回写、限额标记、启动迁移（provider 补齐 + 优先级去重）
 //!   raccoon_accounts.rs 小浣熊账号（W3-T4）：手动添加、桌面端实时账号、
@@ -84,16 +90,27 @@
 //!                存储与校验的架构说明见 `core::custom_providers`
 //!   accio_accounts.rs    Accio 账号（两个地区各一家 provider）：添加（粘贴凭证 /
 //!                网页登录共用入口）、续期回写、公开形态（含 edition）
+//!   monkeycode_accounts.rs MonkeyCode 账号（两个站点各一家 provider）：粘贴
+//!                session 添加（session + imageId + userId）、公开形态（含 edition）
+//!   commandcode_accounts.rs Command Code 账号（单一 provider）：粘贴 `user_`
+//!                开头的 API Key 添加、公开形态（只给尾号）
+//!   antigravity_accounts.rs Antigravity 账号（单一 provider）：粘贴 Google
+//!                refresh token 添加、刷新回写（比较-再写）、公开形态（只给尾号）
 
 pub mod accio_accounts;
+pub mod antigravity_accounts;
 pub mod autoclaw_accounts;
 pub mod autoclaw_import;
 pub mod catpaw_accounts;
 pub mod catpaw_import;
 pub mod cline_accounts;
 pub mod codearts_accounts;
+pub mod commandcode_accounts;
 pub mod custom_accounts;
+pub mod kuku_accounts;
 pub mod loomy_accounts;
+pub mod monkeycode_accounts;
+pub mod officeace_accounts;
 pub mod priority;
 pub mod qoder_accounts;
 pub mod raccoon_accounts;
@@ -104,6 +121,7 @@ pub mod store;
 pub mod store_admin;
 pub mod store_batch;
 pub mod store_crud;
+pub mod store_order;
 pub mod store_util;
 pub mod store_view;
 pub mod trae_accounts;
@@ -158,18 +176,56 @@ pub(crate) const AUTOCLAW_INTL_PROVIDER_ID: &str = crate::server::core::provider
 /// [`RACCOON_PROVIDER_ID`] 的口径）。Qoder 的账号形态与推理转发见
 /// `qoder_accounts.rs` 与 `providers::qoder` 的模块头。
 /// Trae provider id（账号存储内部多处要用；**从注册表推导**，同
-/// [`QODER_PROVIDER_ID`] 的口径）。账号形态见 `trae_accounts.rs`。
+/// [`RACCOON_PROVIDER_ID`] 的口径）。账号形态见 `trae_accounts.rs`。
 pub(crate) const TRAE_PROVIDER_ID: &str =
     crate::server::core::providers::kind_id(crate::server::core::providers::ProviderKind::Trae);
-
-pub(crate) const QODER_PROVIDER_ID: &str = crate::server::core::providers::kind_id(
-    crate::server::core::providers::ProviderKind::Qoder,
-);
 
 /// Loomy（讯飞）provider id（账号存储内部多处要用；**从注册表推导**，同
 /// [`TRAE_PROVIDER_ID`] 的口径）。账号形态见 `loomy_accounts.rs`。
 pub(crate) const LOOMY_PROVIDER_ID: &str =
     crate::server::core::providers::kind_id(crate::server::core::providers::ProviderKind::Loomy);
+
+/// MonkeyCode **国内版** provider id（账号存储内部多处要用；**从注册表推导**）。
+/// 账号形态见 `monkeycode_accounts.rs`；判「是不是 MonkeyCode 系」用
+/// [`is_monkeycode_family`]。
+pub(crate) const MONKEYCODE_PROVIDER_ID: &str = crate::server::core::providers::kind_id(
+    crate::server::core::providers::ProviderKind::MonkeyCode,
+);
+
+/// MonkeyCode **国际版** provider id（同 [`MONKEYCODE_PROVIDER_ID`] 的口径）。
+///
+/// 两个站点是两家 provider（理由见 `providers::monkeycode::region` 的模块头）：
+/// 各有独立的账号集合，账号层的「按家过滤」必须区分它们。
+pub(crate) const MONKEYCODE_INTL_PROVIDER_ID: &str = crate::server::core::providers::kind_id(
+    crate::server::core::providers::ProviderKind::MonkeyCodeIntl,
+);
+
+/// 这个 provider 是不是 **MonkeyCode 系**（两个站点之一）。
+///
+/// 与 [`is_accio_family`] / [`is_zcode_family`] 同一形态、同一理由：账号层有
+/// 几处判断只关心「是不是 MonkeyCode」，不关心哪个站点。
+pub(crate) fn is_monkeycode_family(provider_id: &str) -> bool {
+    provider_id == MONKEYCODE_PROVIDER_ID || provider_id == MONKEYCODE_INTL_PROVIDER_ID
+}
+
+/// Command Code provider id（账号存储内部多处要用；**从注册表推导**）。
+/// 账号形态见 `commandcode_accounts.rs`（单一 provider、没有地区之分）。
+pub(crate) const COMMANDCODE_PROVIDER_ID: &str = crate::server::core::providers::kind_id(
+    crate::server::core::providers::ProviderKind::CommandCode,
+);
+
+/// Antigravity provider id（账号存储内部多处要用；**从注册表推导**）。
+/// 账号形态见 `antigravity_accounts.rs`（单一 provider、没有地区之分 ——
+/// `sandbox`/`daily`/`prod` 是环境不是地区，规格 §6）。
+pub(crate) const ANTIGRAVITY_PROVIDER_ID: &str = crate::server::core::providers::kind_id(
+    crate::server::core::providers::ProviderKind::Antigravity,
+);
+
+/// OfficeAce（华为云果办 / OfficeClaw）provider id（**从注册表推导**，同
+/// [`LOOMY_PROVIDER_ID`] 的口径）。账号形态见 `officeace_accounts.rs`。
+pub(crate) const OFFICEACE_PROVIDER_ID: &str = crate::server::core::providers::kind_id(
+    crate::server::core::providers::ProviderKind::OfficeAce,
+);
 
 /// Cline **免费池** provider id（账号存储内部多处要用；**从注册表推导**，同
 /// [`RACCOON_PROVIDER_ID`] 的口径）。账号形态见 `cline_accounts.rs`。
@@ -224,6 +280,17 @@ pub(crate) fn is_accio_family(provider_id: &str) -> bool {
 /// （那种写法对国际版恒为假，是个不会报错的静默失配）。
 pub(crate) fn is_zcode_family(provider_id: &str) -> bool {
     crate::server::core::providers::zcode::region::Region::from_provider_id(provider_id).is_some()
+}
+
+/// 这个 provider 是不是 **Qoder 系**（`qoder` 中国版 / `qoder-intl` 国际版）。
+///
+/// 与 [`is_accio_family`] / [`is_zcode_family`] 同一形态、同一理由：账号层有
+/// 几处判断只关心「是不是 Qoder」（公开形态、身份字段），不关心哪个地区 ——
+/// 那些分支走本函数，于是加地区或改名时只改这里一处，而不是散在各文件里的
+/// `id == "qoder"`（那种写法对国际版恒为假，是个不会报错的静默失配）。
+pub(crate) fn is_qoder_family(provider_id: &str) -> bool {
+    crate::server::core::providers::qoder::endpoints::Region::from_provider_id(provider_id)
+        .is_some()
 }
 
 /// 小浣熊 provider id（账号存储内部多处要用）。

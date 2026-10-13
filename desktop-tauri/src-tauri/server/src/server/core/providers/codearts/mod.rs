@@ -14,6 +14,7 @@
 
 pub mod balance;
 pub mod chat;
+pub mod onboarding;
 pub mod welfare;
 pub mod credentials;
 pub mod dpop;
@@ -23,6 +24,7 @@ pub mod redact;
 pub mod refresh;
 pub mod session;
 pub mod signer;
+pub mod size_gate;
 pub mod stream_fault;
 
 use std::pin::Pin;
@@ -52,6 +54,23 @@ impl CodeArtsAdapter {
     /// 从账号记录读回凭据（账号存储写的就是 `Credential` 的字段名）。
     pub fn credential(record: &Value) -> Result<credentials::Credential, GatewayError> {
         credentials::Credential::from_payload(record).map_err(|reason| GatewayError::with_status(503, reason))
+    }
+}
+
+/// 登记尺寸门（体积墙可能走在 HTTP 状态上，也可能走在 SSE 第一帧里，三处出口共用这份）。
+///
+/// 只在**从放行变成挡住**那一次打一行终端日志：门存续期内每发大请求都会命中判据，
+/// 逐请求打就是刷屏。
+fn note_size_gate(reason: Option<&'static str>, wire_bytes: i64) {
+    let Some(reason) = reason else { return };
+    if size_gate::hold(wire_bytes, logging::now_ms()) {
+        logging::console_line(
+            "[Routing]",
+            &format!(
+                "⚠️ CodeArts 的尺寸门已登记：{}（本次发出 {} 字节），同尺寸或更大的请求暂时绕开这一家",
+                reason, wire_bytes
+            ),
+        );
     }
 }
 
@@ -143,6 +162,38 @@ impl ProviderAdapter for CodeArtsAdapter {
             let benefit = model.source.needs_benefit_header();
             let upstream_model = model.id.clone();
 
+            // ②.5 尺寸门：这一家刚在「体 ≥ N 字节」上被上游拒过（TTL 内），同尺寸的
+            // 就别再发出去 —— 上游那道墙按字节判，重发同一份体结论不变（实测见
+            // [`chat::size_rejection`]：6 MB 级回 400 PARSE_REQUEST_DATA_EXCEPTION、
+            // 12 MB 级回 413，两者都在出门之后才发生，白烧一次往返）。
+            //
+            // 估的是客户端 body 的字节数（**只在有门时**才付这一次序列化：无门是常态，
+            // 常态路径零额外开销），比真实发出量小（本家还要塞会话 id、可能抬 max_tokens），
+            // 所以直接 `estimate >= floor` 会在墙边上漏放一发 ——
+            // dev 实测就是这个 32 字节：估 8,146,988 vs 真值 8,147,020，门形同虚设。
+            // 留 64 KiB 的余量（远大于本家自己加的那些字段），代价是「比上界小不到
+            // 64 KiB」的请求会被保守挡一次；比起每 120 秒白撞一发 8 MB 往返，这笔账划算。
+            const ESTIMATE_SLACK_BYTES: i64 = 64 * 1024;
+            let now_ms = logging::now_ms();
+            if let Some(floor) = size_gate::floor(now_ms) {
+                let estimate = serde_json::to_string(body)
+                    .map(|text| text.len() as i64)
+                    .unwrap_or_default();
+                if estimate + ESTIMATE_SLACK_BYTES >= floor {
+                    return Err(GatewayError::with_status(
+                        i32::from(size_gate::BLOCKED_STATUS),
+                        format!(
+                            "CodeArts 发不出这么大的请求体（本次约 {} 字节，这一家已知 ≥ {} 字节会被上游拒）：\
+                             本轮绕开这一家，最长 {} 秒后会重新探一次；\
+                             要立刻可用就减小上下文（少带历史 / 别整份贴文件）",
+                            estimate,
+                            floor,
+                            size_gate::ms_left(now_ms) / 1000
+                        ),
+                    ));
+                }
+            }
+
             // ③ 本地准入（满员回 409，不冷却账号）。
             // 身份优先用凭据里的 domain+user；两个都取不到时退到**账号行 id**
             // （不是 AK —— 它每次续期都换，用它当键等于每刷一次期就把并发上限清零）。
@@ -223,6 +274,8 @@ impl ProviderAdapter for CodeArtsAdapter {
             for (name, value) in headers {
                 request = request.header(name.as_str(), value.as_str());
             }
+            // 真实发出量：只有这里知道（上游那道墙按它判），也是观测要的那个数
+            let wire_bytes = payload.len() as i64;
             let response = match request.body(payload).send().await {
                 Ok(response) => response,
                 Err(error) => {
@@ -241,20 +294,54 @@ impl ProviderAdapter for CodeArtsAdapter {
                 // 有预算地读：见 `chat::read_error_body`（它同时把 truncated 如实带出来，
                 // 让脱敏那条"末尾正好是秘密前缀"的分支真的会被走到）
                 let (error_body, truncated) = chat::read_error_body(response).await;
+                let error_text = String::from_utf8_lossy(&error_body).to_string();
+                let size_reason = chat::size_rejection_any(status, &error_text, wire_bytes);
+                // 判据没命中但状态是 400/413/502 时，把原始诊断体露一小截：这道墙的
+                // 症状散在不同层（HTTP 状态 vs SSE 帧），靠猜改不动它。
+                // 只在 verbose 下打（生产默认关），截 200 字，绝不整份进日志。
+                if matches!(status, 400 | 413 | 502) && size_reason.is_none() {
+                    let preview: String = error_text.chars().take(200).collect();
+                    logging::verbose(
+                        "[CodeArts]",
+                        &format!("非 2xx 诊断体（尺寸判据未命中，前 200 字）：{preview}"),
+                    );
+                }
+                // 体积被拒 ⇒ 按**真值**登记尺寸门，下一轮同尺寸的在 ②.5 就被挡在本地。
+                note_size_gate(size_reason, wire_bytes);
                 session.stop().await;
                 drop(permit);
+                telemetry.note_attempt_body_bytes(wire_bytes);
                 return Err(chat::upstream_http_error(status, &error_body, &credential, truncated));
             }
+
+            // 发出量落账（成功与失败都记：这条要回答的是「这类会话到底多大」，
+            // 只记失败的那次就永远看不到分布）
+            telemetry.note_attempt_body_bytes(wire_bytes);
 
             // ⑦ 首包门：一个字节都没下发之前就决定"交出去"还是"换账号"
             let (prefetched, rest) = match chat::prefetch_head(response).await {
                 Ok(head) => head,
                 Err(error) => {
+                    // 首包门就把故障帧判掉了 —— 尺寸墙正是从这里出去的（dev 实测：
+                    // 8 MB 那发在 `prefetch_head` 里就成了故障），所以登记必须在这里；
+                    // 放在 ⑦.5 的那些分支上永远摸不到，门一次也不会立起来。
+                    note_size_gate(
+                        chat::size_rejection_any(0, &error.message, wire_bytes),
+                        wire_bytes,
+                    );
                     session.stop().await;
                     drop(permit);
                     return Err(error);
                 }
             };
+
+            // ⑦.5 体积墙也走在**流里**：HTTP 200 + 一帧 `InferHub.001001005.400`
+            // 才是真结论（dev 实测 8 MB 那发就是这样回来的，标记只在
+            // `details[].error_code`）。尺寸类失败必然出现在第一帧，所以扫头部字节就够。
+            note_size_gate(
+                chat::size_rejection_any(0, &String::from_utf8_lossy(&prefetched), wire_bytes),
+                wire_bytes,
+            );
 
             if !stream {
                 // 非流式：把剩下的读完再折叠（上游只有流式，与参考实现同一做法）
@@ -273,6 +360,11 @@ impl ProviderAdapter for CodeArtsAdapter {
                 if let Some(error) = read_error {
                     return Err(GatewayError::with_status(502, format!("CodeArts 上游流中断：{error}")));
                 }
+                // 折叠前用完整体再判一次（第一帧没中时兜住；同扇门内重复登记不会再打日志）
+                note_size_gate(
+                    chat::size_rejection_any(0, &String::from_utf8_lossy(&all), wire_bytes),
+                    wire_bytes,
+                );
                 let completion = chat::aggregate_sse(&all, &upstream_model)?;
                 // 用量旁路记账：聚合体里那份 usage 是上游给的，报一次进请求日志
                 // （流式那份由 `UsageSniffer` 负责，两条路都缺了就又是恒 0）
@@ -496,6 +588,33 @@ impl ProviderAdapter for CodeArtsAdapter {
                 chat::DEFAULT_PLUGIN_VERSION,
             )
             .await;
+            // ── 「无 benefit 档案」先自动注册一次再重查 ─────────────────
+            // benefit 记录不是开账号就有的：官方客户端每次启动都 POST claim
+            // （幂等建档，见 `balance::claim_benefit` 的模块注释），没走过这一步
+            // 的账号 InferHub 一律 `4004.200 benefit not found` 拒答。官方客户端
+            // 「登录用一下就好了」正是这条在起作用 —— 余额查询是每分钟自动跑的，
+            // 把注册挂在这里，新账号在一次查询内自愈，不必再借官方客户端渡一次。
+            // 去抖：注册是写语义的幂等调用，没必要每分钟补一发（10 分钟一次足够）。
+            let mut benefit = benefit;
+            if matches!(&benefit, Ok(None)) && benefit_claim_due(account_id) {
+                match balance::claim_benefit(models::DEFAULT_BENEFIT_GATEWAY_URL, &credential).await {
+                    Ok(_) => {
+                        benefit = balance::fetch_benefit_balance(
+                            models::DEFAULT_BENEFIT_GATEWAY_URL,
+                            &credential,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        // 注册失败（网络/签名/上游）不该把「无档案」升级成整次失败：
+                        // 下一轮余额查询会再试（去抖窗过后）。原样保留 absent 结果。
+                        crate::server::logging::verbose(
+                            "[CodeArts]",
+                            &format!("benefit 自动注册失败（账号 {account_id}）：{}", error.message),
+                        );
+                    }
+                }
+            }
             // 两边都失败才算整次失败（一边失败不抹掉另一边）。
             // 注意「无福利」（`Ok(None)`）不是失败 —— 它是账号的正常状态
             // （福利按活动下发，Free 账号常常没有），见 balance.rs 的
@@ -640,6 +759,30 @@ fn record_proxy(
 async fn proxy_and_fresh(store: &AccountStore, account_id: &str) -> Result<credentials::Credential, GatewayError> {
     let proxy = record_proxy(store, account_id)?;
     refresh::ensure_fresh(store, account_id, false, proxy.as_ref()).await
+}
+
+/// benefit 自动注册（claim）的**进程级去抖**：距上次尝试不足窗口期返回 false。
+///
+/// 自动余额查询默认每分钟跑一次，「无档案」的账号若不加去抖就会每分钟被补发一次
+/// claim —— 调用幂等但没必要（官方客户端也就是每次启动一发）。10 分钟取的是
+/// 「自愈要快，但也不在网关故障时把节奏打满」的中间值；表只增不减，量级就是
+/// 本机的 CodeArts 账号数，不值得做清理。返回 true 表示这次该发（并记下时刻）。
+fn benefit_claim_due(account_id: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    const WINDOW: Duration = Duration::from_secs(600);
+    static LAST: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    let map = LAST.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = match map.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if guard.get(account_id).is_some_and(|at| at.elapsed() < WINDOW) {
+        return false;
+    }
+    guard.insert(account_id.to_string(), Instant::now());
+    true
 }
 
 /// 把上游原文拼成统一文案的一截（空则不拼）。

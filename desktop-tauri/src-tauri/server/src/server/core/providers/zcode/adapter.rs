@@ -475,20 +475,11 @@ pub(super) fn identity_headers(user_agent_suffix: Option<&str>) -> Vec<(String, 
             "X-Platform".to_string(),
             super::claim::platform().to_string(),
         ),
-        ("X-Os-Category".to_string(), os_category().to_string()),
+        (
+            "X-Os-Category".to_string(),
+            super::claim::os_category().to_string(),
+        ),
     ]
-}
-
-/// `X-Os-Category` 的取值（参考实现 `normalizeOsCategory`：macos / windows /
-/// linux，认不出的落 linux —— 与那边 `default` 分支同义）。
-fn os_category() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "windows"
-    } else if cfg!(target_os = "macos") {
-        "macos"
-    } else {
-        "linux"
-    }
 }
 
 /// 流式请求补 `stream_options.include_usage = true`。

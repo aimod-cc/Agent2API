@@ -22,7 +22,7 @@ use serde_json::{json, Map, Value};
 
 use crate::server::core::account_store::state::{AccountState, StoredAccount};
 use crate::server::core::account_store::store::{forwards_requests, AccountStore};
-use crate::server::core::account_store::store_util::{js_truthy, max_concurrent_public, value_or, value_or_nullish};
+use crate::server::core::account_store::store_util::{js_truthy, max_concurrent_public_for, value_or, value_or_nullish};
 use crate::server::core::endpoints::{resolve_edition, EditionInfo};
 use crate::server::core::proxies::describe_account_proxy;
 
@@ -122,13 +122,6 @@ impl AccountStore {
         );
         // 本切片所有账号都视为可用（限额/可用性判定属切片 3 的转发层）
         public.insert("available".to_string(), Value::Bool(true));
-        // 单账号并发上限（所有家通用的账号属性）：0 = 不限，记录里没有该键
-        // （旧数据 / 从未设置过）同样输出 0 —— 兜底在 `max_concurrent_public`
-        // 一处实现，其余各家的公开形态同用它（选路消费方按 0 解释为不限）
-        public.insert(
-            "maxConcurrent".to_string(),
-            Value::from(max_concurrent_public(fields.get("maxConcurrent"))),
-        );
         Value::Object(public)
     }
 
@@ -236,6 +229,15 @@ impl AccountStore {
     /// 事实，否则会出现「界面标 ★ 的账号其实转发时会因无凭证被跳过」的分歧。
     /// 放在分派点让各家形状**同字段名、同语义**，前端不必按 provider 查表。
     ///
+    /// `nameCustom` / `checkinAt` / `usageQuery` / `lowBalance` / `limiters` /
+    /// `maxConcurrent` 走同一条路子。`maxConcurrent` 尤其不能下放到各家：
+    /// 它是**恒有的数字键**，而各家公开形态只要漏写一次，选路读到的缺键就等于
+    /// 0 = 不限（上限静默失效），现场看不出任何异常。
+    ///
+    /// 两条出口（本函数与各家的「添加 / 更新响应」）必须形状一致，所以那些响应
+    /// 也一律回 [`Self::public_account`] 的结果，而不是各自调 `to_*_public_account`
+    /// —— 后者会绕过这里注入的全部字段。
+    ///
     /// 纯新增字段：各家的既有字段一个不动，旧客户端忽略它即可。
     pub(crate) fn public_account(&self, record: &StoredAccount) -> Value {
         let shaped = if record.provider() == super::RACCOON_PROVIDER_ID {
@@ -247,7 +249,9 @@ impl AccountStore {
             // 账号字段、桌面端判定、deviceId 语义两地完全一致，
             // 差别只在域名（那是转发与凭证层的事，公开形态不体现）
             self.to_autoclaw_public_account(record)
-        } else if record.provider() == super::QODER_PROVIDER_ID {
+        } else if super::is_qoder_family(&record.provider()) {
+            // 两个地区（`qoder` / `qoder-intl`）共用这一份公开形态：地区由
+            // provider id（兜底 `mode` 字段）派生进 `edition` / `editionLabel`
             self.to_qoder_public_account(record)
         } else if record.provider() == super::codearts_accounts::CODEARTS_PROVIDER_ID {
             self.to_codearts_public_account(record)
@@ -273,6 +277,32 @@ impl AccountStore {
             // Loomy（讯飞）：单一入口（手机验证码登录），公开形态带 userId /
             // phone / session 尾四位的展示字段（见 `loomy_accounts.rs`）
             self.to_loomy_public_account(record)
+        } else if super::is_monkeycode_family(&record.provider()) {
+            // MonkeyCode 的两个站点（`monkeycode` / `monkeycode-intl`）共用这一份
+            // 公开形态：字段两地完全一致，差别只在站点域名（那是转发与凭证层的
+            // 事，公开形态只用 `edition` 把地区标出来供界面显示）
+            self.to_monkeycode_public_account(record)
+        } else if record.provider() == super::kuku_accounts::KUKU_PROVIDER_ID {
+            // KukuAI（百度文库库库 AI）：单一入口（粘贴 Cookie / 导入本机登录态），
+            // 公开形态带 uid(=uk) / loginName(=昵称) / tokenTail（见
+            // `kuku_accounts.rs`）
+            self.to_kuku_public_account(record)
+        } else if record.provider() == super::COMMANDCODE_PROVIDER_ID {
+            // Command Code：单一入口（粘贴 `user_` API Key），公开形态去掉 key
+            // 本体、只留尾号与「有没有 key」（见 `commandcode_accounts.rs`）
+            self.to_commandcode_public_account(record)
+        } else if record.provider() == super::ANTIGRAVITY_PROVIDER_ID {
+            // Antigravity（Google）：单一入口（粘贴 Google refresh token），
+            // 公开形态去掉 token 本体、只留 refresh token 尾号与
+            // 「有没有 refreshToken / accessToken」（见 `antigravity_accounts.rs`）
+            self.to_antigravity_public_account(record)
+        } else if record.provider() == super::OFFICEACE_PROVIDER_ID {
+            // OfficeAce（华为云果办）：只透出标识与到期时刻，网关 Basic 那一对
+            // 与控制面临时凭据都不出这个函数（见 `to_officeace_public_account`）。
+            // 漏这一支时它会掉进下面的 workbuddy 兜底形状：界面多出一批 uid/edition
+            // 之类与它无关的空字段，而「刷新 Token」按钮靠的 hasRefreshToken
+            // 只是**恰好**在兜底形状里也算得出来 —— 那不是设计，是巧合。
+            self.to_officeace_public_account(record)
         } else if record
             .provider()
             .starts_with(crate::server::core::custom_providers::ID_PREFIX)
@@ -294,7 +324,7 @@ impl AccountStore {
                 );
                 // 没有转发能力的家：界面据此说明「启用了也不会被转发」，
                 // 而不是把一个失效的启用开关当成正常账号展示。
-                // 五家现在都能转发，所以正常配置下这里恒为 true ——
+                // 各家现在都能转发，所以正常配置下这里恒为 true ——
                 // 保留这个字段是因为「能用账号管理、但转发还没接上」这种过渡期
                 // 状态将来还会出现，而界面需要有办法如实说出来。
                 fields.insert(
@@ -302,7 +332,7 @@ impl AccountStore {
                     Value::Bool(forwards_requests(record)),
                 );
                 // 最近一次签到成功的时刻（0 = 从未签过）。跨家统一注入的理由与上面
-                // 两条相同：它是「这条账号的签到状态」这一个事实，五家的存放位置
+                // 两条相同：它是「这条账号的签到状态」这一个事实，各家的存放位置
                 // 一致（`checkinAt`），界面不必按 provider 查表。
                 //
                 // 给出的是**时间戳**而不是「今天签过没」的布尔：自然日的边界要按
@@ -313,6 +343,20 @@ impl AccountStore {
                 // 恒为数字（无记录时 0）而不是缺键：界面按 `Number(...) || 0` 读，
                 // 两种形态都能吃，但恒定的形状让「字段缺失」与「值为 0」不再需要分开判。
                 fields.insert("checkinAt".to_string(), Value::from(record.checkin_at()));
+                // 单账号并发上限（所有家通用的账号属性）：跨家统一注入的理由与上面
+                // 三条相同 —— 选路（`routing::max_concurrent_of`）与前端账号菜单读的
+                // 是**同一份事实**。恒为数字键（0 = 不限），且**只在这里写一次**：
+                // 从前它是各家公开形态里各自的 `insert`，于是逐字段白名单那几家
+                // （monkeycode / antigravity / officeace）漏了它 —— 缺键被选路当成
+                // 0 = 不限，上限**静默失效**。CodeArts 的「0 = 按本家默认并发」口径
+                // 由 `max_concurrent_public_for` 一处承载，别家 0 就是不限。
+                fields.insert(
+                    "maxConcurrent".to_string(),
+                    Value::from(max_concurrent_public_for(
+                        &record.provider(),
+                        record.get("maxConcurrent"),
+                    )),
+                );
                 // 用户显式设置过备注名（update_account 真正改到 name 时打的标，
                 // 见 apply_patch）。恒为布尔而不是缺键：界面据此决定「备注名赢过
                 // 邮箱 / 昵称等默认口径」还是「维持原展示行为」，两种形态都不必
@@ -326,6 +370,27 @@ impl AccountStore {
                             .map(js_truthy)
                             .unwrap_or(false),
                     ),
+                );
+                // 每账号的余额查询设置（自动查询 + 余额不足处理）：跨家统一注入
+                // 的理由与 hasCredentials 相同 —— 心跳调度、选路跳过 / 禁用与前端
+                // 弹窗、徽章读的是**同一份事实**，不能各家形状一个口径。
+                // 恒为对象（未配置 = 各家缺省档的规范化形状，与写入侧
+                // `apply_patch` 的归一化一致），读侧不必判「键缺失」。
+                fields.insert(
+                    "usageQuery".to_string(),
+                    usage_query_public(record.fields().get("usageQuery")),
+                );
+                fields.insert(
+                    "lowBalance".to_string(),
+                    low_balance_public(&record.provider(), record.fields().get("lowBalance")),
+                );
+                // 每账号的「限制器」有效规则（余额 / Token 规则列表）：恒为数组 ——
+                // 记录上没有 `limiters` 键（旧版写的记录）时由 lowBalance / provider
+                // 缺省**推导**（见 `limiter::effective_rules`），前端因此不必自带
+                // 推导逻辑，弹窗、徽章与后端选路读到的永远是同一份规则。
+                fields.insert(
+                    "limiters".to_string(),
+                    crate::server::core::limiter::effective_rules_json_in(record.fields()),
                 );
                 Value::Object(fields)
             }
@@ -444,12 +509,58 @@ impl AccountStore {
             "available".to_string(),
             Value::Bool(record.enabled() && record.has_credentials()),
         );
-        // 单账号并发上限（与 to_public_account 同口径，兜底共用
-        // `max_concurrent_public`）：0 = 不限，缺键同样输出 0
-        public.insert(
-            "maxConcurrent".to_string(),
-            Value::from(max_concurrent_public(fields.get("maxConcurrent"))),
-        );
         Value::Object(public)
+    }
+}
+
+/// 记录上的 `usageQuery` → 公开形态的规范化形状（恒为对象）。
+///
+/// 读侧只做**容错展开**、不校验：合法性由写入侧（`apply_patch` 的
+/// `normalize_usage_query`）保证，这里负责把缺失 / 脏值收敛成缺省形状，让
+/// 调度与前端都按「恒定形状」读。缺省与 `usage_records::query_interval_of`
+/// 同一口径 —— **未配置 = 开启、1 分钟**（对齐全局任务时代「默认就在查」的
+/// 行为，升级后余额列不停更），只有显式 `{enabled:false}` 才是关。
+fn usage_query_public(value: Option<&Value>) -> Value {
+    use crate::server::core::usage_records::{
+        DEFAULT_QUERY_INTERVAL_SECONDS, MAX_QUERY_INTERVAL_SECONDS, MIN_QUERY_INTERVAL_SECONDS,
+    };
+    let Some(fields) = value.and_then(Value::as_object) else {
+        return json!({ "enabled": true, "interval": DEFAULT_QUERY_INTERVAL_SECONDS });
+    };
+    let enabled = fields.get("enabled").map(js_truthy).unwrap_or(true);
+    let interval = fields.get("interval").and_then(Value::as_i64).unwrap_or(0);
+    // 开着但间隔缺失 / 越界（脏值）→ 缺省间隔；关着则原样透出（0 = 未设过）
+    let interval = if enabled
+        && !(MIN_QUERY_INTERVAL_SECONDS..=MAX_QUERY_INTERVAL_SECONDS).contains(&interval)
+    {
+        DEFAULT_QUERY_INTERVAL_SECONDS
+    } else {
+        interval
+    };
+    json!({ "enabled": enabled, "interval": interval })
+}
+
+/// 记录上的 `lowBalance` → 公开形态的规范化形状。
+///
+/// 缺省（无配置）按 provider 区分（与 `usage_records::balance_blocked` 同一口径，
+/// 见 `default_low_balance_mode`）：Cline 免费池 = `off`（不处理），其余 = `skip`、
+/// 阈值 1；显式配置一律原样尊重 —— 那是用户选过的，缺省不能覆盖它。skip / disable
+/// 档下阈值缺失或非法时回落缺省 1。
+fn low_balance_public(provider: &str, value: Option<&Value>) -> Value {
+    use crate::server::core::usage_records::{default_low_balance, default_low_balance_mode, DEFAULT_LOW_BALANCE_THRESHOLD};
+    let default_mode = default_low_balance_mode(provider);
+    let Some(fields) = value.and_then(Value::as_object) else {
+        return default_low_balance(provider);
+    };
+    let mode = fields.get("mode").and_then(Value::as_str).unwrap_or(default_mode);
+    let threshold = fields
+        .get("threshold")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(DEFAULT_LOW_BALANCE_THRESHOLD);
+    match mode {
+        "skip" => json!({ "mode": "skip", "threshold": threshold }),
+        "disable" => json!({ "mode": "disable", "threshold": threshold }),
+        _ => json!({ "mode": "off", "threshold": 0.0 }),
     }
 }

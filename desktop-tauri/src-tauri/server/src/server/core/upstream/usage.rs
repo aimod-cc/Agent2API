@@ -333,6 +333,17 @@ pub struct AttemptDetail {
     /// 账号的请求都会发生的事，正因如此更不该按请求往运行日志里灌。
     #[serde(default)]
     pub notice: Option<String>,
+    /// 这一轮**实际发给上游**的体字节数（None = 没发出去过：本地就拒 / 被尺寸门挡）。
+    ///
+    /// 为什么要记：上游有两道按**请求体字节**判的墙（见
+    /// `providers::codearts::chat::size_rejection` 的实测数），而库里那份
+    /// `request_raw.request_body` 在 131072 字节处截断 —— 于是下一次生产 413 我们
+    /// 仍然回答不出「它到底多大、撞的是哪道墙」。这里的数是发送点 `payload.len()`
+    /// 的**真值**，不是从 `Value` 估的。
+    ///
+    /// 只记体积、不记内容：体积是运维事实，正文是用户数据。
+    #[serde(rename = "bodyBytes", default)]
+    pub body_bytes: Option<i64>,
 }
 
 /// 一次**尝试内部**的退避重试（`AttemptDetail::retries` 的元素）。
@@ -524,6 +535,10 @@ pub struct RequestTelemetry {
     /// 轮询）手上只有 telemetry，令牌放这里它们才够得着；接线在入口 handler
     /// （`api::chat` / `api::protocol` 在 `record_started` 之后装入）。
     cancel: Mutex<Option<Arc<super::cancellation::CancelToken>>>,
+    /// 本次请求的**选路决策快照**（`rotate::select_target_account` 产出，
+    /// 转发层每次选路后覆盖 —— 最后一次为准）。请求日志「路由回放」的数据源；
+    /// None = 没走到账号选路（转发前就失败、候选集合为空）。
+    route: Mutex<Option<Value>>,
 }
 
 impl Default for RequestTelemetry {
@@ -539,7 +554,25 @@ impl RequestTelemetry {
             capture: Mutex::new(None),
             live: Mutex::new(LiveWrite::default()),
             cancel: Mutex::new(None),
+            route: Mutex::new(None),
         }
+    }
+
+    /// 挂本次请求的选路决策快照（选路层每次覆盖，最后一次 = 最终承载那次）。
+    pub fn set_route_decision(&self, decision: Value) {
+        let mut guard = self
+            .route
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(decision);
+    }
+
+    /// 取选路决策快照（记账点在请求收尾时取走落库；没走到选路时为 None）。
+    pub fn route_decision(&self) -> Option<Value> {
+        self.route
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// 建一个已带关联 id 的槽位（三个对话入口都走这条：转发开始前生成一次）。
@@ -759,6 +792,7 @@ impl RequestTelemetry {
             error: None,
             retries: Vec::new(),
             notice: None,
+            body_bytes: None,
         });
         // 阶段：新一轮的请求**即将发出** → 等待响应（含模型思考）。
         // 位置与 OmniProxy 的「连接已建立、请求即将发出」同一时点：本函数就在
@@ -767,6 +801,22 @@ impl RequestTelemetry {
         self.enter_phase(&mut guard, LogPhase::Waiting);
         // 在途回写：新的一轮进了尝试链（换号时这一步就让「重试」列出现）
         self.flush_live(&guard);
+    }
+
+    /// 给**最后一条**尝试明细补上实际发出的体字节数。
+    ///
+    /// 与 [`Self::note_attempt_started`] 配对：起头那条只知「谁」，真值只有 provider
+    /// 在发送点握着自己序列化出来的 `Vec<u8>` 时才知道（各家还会改写 body：抬
+    /// `max_tokens`、塞会话 id），所以由 provider 侧回报，而不是编排层从 `Value` 估。
+    ///
+    /// 没有明细可挂（超上限被丢弃 / 压根没起头）时静默跳过 —— 这是观测，
+    /// 不该反过来影响转发结论。
+    pub fn note_attempt_body_bytes(&self, bytes: i64) {
+        let mut guard = self.lock();
+        if let Some(last) = guard.attempts_detail.last_mut() {
+            last.body_bytes = Some(bytes.max(0));
+            self.flush_live(&guard);
+        }
     }
 
     /// 给**最后一条**尝试明细追加一次内部退避重试（`send_with_retry` 每退避
@@ -1038,5 +1088,41 @@ impl RequestTelemetry {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }
+    }
+}
+
+#[cfg(test)]
+mod body_bytes_observation {
+    //! 发出量这条观测的采集侧（存储侧的透传见 `request_stats::record` 与 `api::pipeline`）。
+
+    use super::*;
+
+    /// 回报只落**最后一条**明细；没起头时不许凭空造一条。
+    ///
+    /// 后半个断言是反空跑：若这个方法在明细为空时自己补一条，或写成「只有第一条能拿到」，
+    /// 前半个断言照样绿。真实路径里本地就拒的请求根本没有明细项，必须把那一趟也钉住。
+    #[test]
+    fn the_body_bytes_observation_lands_on_the_latest_attempt() {
+        let telemetry = RequestTelemetry::new();
+        telemetry.note_attempt_body_bytes(123);
+        assert!(
+            telemetry.snapshot().attempts_detail.is_empty(),
+            "没有起头时不该凭空多一条明细（本地就拒的请求根本没有发出量）"
+        );
+        telemetry.note_attempt_started("codearts", "GT-a");
+        telemetry.note_attempt_body_bytes(6_372_244);
+        telemetry.note_attempt_started("workbuddy", "wb-1");
+        telemetry.note_attempt_body_bytes(1_024);
+        let details = telemetry.snapshot().attempts_detail;
+        assert_eq!(2, details.len());
+        assert_eq!(
+            Some(6_372_244),
+            details[0].body_bytes,
+            "第一轮记下的是第一轮真实发出去的字节（串行就等于假归因）"
+        );
+        assert_eq!(Some(1_024), details[1].body_bytes);
+        // 负数只可能来自手改的库：夹成 0，展示层不为一位数写分支
+        telemetry.note_attempt_body_bytes(-5);
+        assert_eq!(Some(0), telemetry.snapshot().attempts_detail[1].body_bytes);
     }
 }

@@ -22,6 +22,7 @@ import { buildIndex as buildReasoningIndex } from './models-reasoning'
 import * as customSource from './models-custom-source'
 import type { CustomProviderRecord, ManageMapping, ManageModel, ManageView } from './models-custom-source'
 import type { SegmentedControlOption } from '@ui'
+import { t } from '../i18n'
 
 /* ─── 类型 ───────────────────────────────────── */
 
@@ -111,6 +112,12 @@ export type SharedWindow = {
     labelOf?: (id: string) => string
     refreshCustom?: () => Promise<unknown>
   }
+  /** 预置提供商目录（preset-providers.js）：自定义家记录不带图标，按名字回match预置图标用 */
+  wbPresetProviders?: {
+    list?: Array<{ key?: string; name?: string; icon?: string }>
+    presetOf?: (key: string) => { key?: string; name?: string; icon?: string } | null
+    iconOf?: (key: string) => string
+  }
   wbCustomProvidersUi?: { remove?: (providerId: string) => Promise<boolean> }
   wbAccountAddForms?: { openNewCustomForm?: () => void }
   wbModelsFetchModal?: {
@@ -165,9 +172,9 @@ export const GROUP_LIMIT = 8
 const FILTERS_KEY = 'workbuddy-desktop-models-filters'
 
 const MODEL_STATES: readonly string[] = ['all', 'enabled', 'disabled', 'mapped']
-/** 状态分段控件上的标签（键与 MODEL_STATES 一一对应，顺序也照它） */
+/** 状态分段控件上的标签（键与 MODEL_STATES 一一对应，顺序也照它；只有展示串走 t()，value 是匹配/落盘用的枚举值） */
 const MODEL_STATE_LABEL: Record<string, string> = {
-  all: '全部', enabled: '已启用', disabled: '已禁用', mapped: '有映射',
+  all: t('全部'), enabled: t('已启用'), disabled: t('已禁用'), mapped: t('有映射'),
 }
 /** 选项提到模块级：SegmentedControl 每拿到新数组都要重新量滑块位置，常量能省掉这轮测量 */
 export const MODEL_STATE_OPTIONS: readonly SegmentedControlOption<string>[] = MODEL_STATES.map(value => ({
@@ -179,16 +186,19 @@ export const MODEL_STATE_OPTIONS: readonly SegmentedControlOption<string>[] = MO
  * 表头 th、table-columns.js 的列宽登记三处同名，键名只有一套）。顺序即默认渲染顺序。
  */
 const COLUMNS: ColumnDecl[] = [
-  { key: 'model', label: '上游模型' },
-  { key: 'rate', label: '倍率' },
-  { key: 'source', label: '来源' },
+  // 「选择」列：整行的批量操作入口（照账号页勾选列的口径 —— 列设置里要有名字，
+  // 表格里那格是「全选」复选框，没有表头文案）
+  { key: 'check', label: t('选择'), align: 'center' },
+  { key: 'model', label: t('上游模型') },
+  { key: 'rate', label: t('倍率') },
+  { key: 'source', label: t('来源') },
   // 能力位两列（顺序、文案与 model-capability 的键序对应）：数值合并在
   // 「上下文 / 输出」一格里，三个布尔合并成一列徽章 —— 分成五列会把
   // 复合控件最宽的「模型映射」列挤到不可用（列数取舍见交付说明）
-  { key: 'budget', label: '上下文 / 输出' },
-  { key: 'caps', label: '能力' },
-  { key: 'alias', label: '模型映射' },
-  { key: 'act', label: '操作', align: 'right' },
+  { key: 'budget', label: t('上下文 / 输出') },
+  { key: 'caps', label: t('能力') },
+  { key: 'alias', label: t('模型映射') },
+  { key: 'act', label: t('操作'), align: 'right' },
 ]
 
 /**
@@ -447,7 +457,7 @@ export function upstreamOptions(providerId: string): UpstreamOption[] {
     .map(model => ({
       id: model.id,
       // 展示名与 id 不同才补在括号里，避免出现「GLM-5.3（GLM-5.3）」这种重复
-      label: model.name && model.name !== model.id ? `${model.id}（${model.name}）` : model.id,
+      label: model.name && model.name !== model.id ? t('{id}（{name}）', { id: model.id, name: model.name }) : model.id,
       off: model.enabled === false,
     }))
 }
@@ -506,7 +516,7 @@ export function registerColumnSettings(): void {
   if (colSettings) return
   const handle = shared().wbColSettings?.register({
     id: 'models',
-    label: '模型管理表',
+    label: t('模型管理表'),
     columns: COLUMNS,
     mount: () => document.querySelector('.page[data-page="gateway"] .panel-head .head-actions'),
     buttonPlacement: 'last',
@@ -548,7 +558,7 @@ export async function load({ force = false }: { force?: boolean } = {}): Promise
   } catch (error) {
     if (seq !== loadSeq) return
     render()
-    toast(`读取模型清单失败：${errorMessage(error)}`, 'err')
+    toast(t('读取模型清单失败：{message}', { message: errorMessage(error) }), 'err')
   } finally {
     if (seq === loadSeq) loading = false
   }
@@ -594,28 +604,28 @@ export async function writeBinding(
 ): Promise<unknown> {
   if (customSource.isCustom(provider)) return customSource.setBinding(provider, alias, target, change)
   const api = shared().workbuddyDesktop
-  if (!api) throw new Error('后端桥不可用')
+  if (!api) throw new Error(t('后端桥不可用'))
   return api.addModelMapping(alias, target, provider, change.reasoning, change.enabled)
 }
 
 export async function writeRemoveMapping(provider: string, alias: string, target: string): Promise<unknown> {
   if (customSource.isCustom(provider)) return customSource.removeMapping(provider, alias, target)
   const api = shared().workbuddyDesktop
-  if (!api) throw new Error('后端桥不可用')
+  if (!api) throw new Error(t('后端桥不可用'))
   return api.removeModelMapping(alias, target, provider)
 }
 
 export async function writeAddModel(provider: string, id: string): Promise<unknown> {
   if (customSource.isCustom(provider)) return customSource.addModel(provider, id)
   const api = shared().workbuddyDesktop
-  if (!api) throw new Error('后端桥不可用')
+  if (!api) throw new Error(t('后端桥不可用'))
   return api.addCustomModel(provider, id)
 }
 
 export async function writeRemoveModel(provider: string, id: string): Promise<unknown> {
   if (customSource.isCustom(provider)) return customSource.removeModel(provider, id)
   const api = shared().workbuddyDesktop
-  if (!api) throw new Error('后端桥不可用')
+  if (!api) throw new Error(t('后端桥不可用'))
   return api.removeCustomModel(provider, id)
 }
 
@@ -635,7 +645,7 @@ export async function writeCapabilities(
 ): Promise<unknown> {
   if (customSource.isCustom(provider)) return customSource.setCapabilities(provider, id, capabilities)
   const api = shared().workbuddyDesktop
-  if (!api) throw new Error('后端桥不可用')
+  if (!api) throw new Error(t('后端桥不可用'))
   return api.setModelCapabilities(provider, id, capabilities)
 }
 
@@ -652,7 +662,7 @@ export async function runRowAction(key: string, run: () => Promise<unknown>, don
     accept(await run())
     if (doneText) toast(doneText)
   } catch (error) {
-    toast(`操作失败：${errorMessage(error)}`, 'err')
+    toast(t('操作失败：{message}', { message: errorMessage(error) }), 'err')
   } finally {
     const pending = new Set(snapshot.pending)
     pending.delete(key)
@@ -749,7 +759,7 @@ export async function removeCustomProvider(providerId: string): Promise<void> {
   const api = shared().wbCustomProvidersUi
   // 正常加载顺序下它一定在（custom-provider-ui.js 在本岛之后加载）。真缺了就说一声 ——
   // 点了 × 什么都不发生比报错更难查
-  if (!api?.remove) { toast('删除入口未就绪，请重试或重启应用', 'err'); return }
+  if (!api?.remove) { toast(t('删除入口未就绪，请重试或重启应用'), 'err'); return }
   if (!(await api.remove(providerId))) return
   // 重拉而非只重绘：该家从后端目录里消失了（它的模型不再参与路由），内置家那份 manage
   // 视图里的承载关系可能跟着变
@@ -838,7 +848,7 @@ export function refreshModels(): void {
   const custom = customSource.isCustom(provider)
   const name = custom
     ? (customSource.record(provider)?.name || provider)
-    : '内置提供商'
+    : t('内置提供商')
   shared().wbModelsFetchModal?.open({
     providerId: provider,
     custom,
@@ -894,4 +904,38 @@ export function levelOf(alias: unknown, target: unknown, provider: unknown): str
  */
 export function setTableEl(el: HTMLTableElement | null): void {
   tableEl = el
+}
+
+/**
+ * 摘掉表格里**不属于 React 树**的节点（修复 #195，由视图层每次提交后调用）。
+ *
+ * `<table>` 的直接子级只该有 colgroup / thead / tbody#models 三样，行全部由
+ * React 渲染。但 React **不会**清理外部插进表格的节点：注入实验确认，手工塞进
+ * tbody 的行、或塞进 table 的独立 tbody，之后 render() / load() 都不会把它们
+ * 摘掉，会一直留在表里。issue #195 的现场正是这样一行：不属于当前数据、不计入
+ * 标题统计，且它所在的那个 tbody 让它下面少了一条分隔线（tbody 最后一行没有
+ * 下边框）。
+ *
+ * 判据是 React 给每个渲染元素挂的 fiber 标记（`__reactFiber$…` / 旧版
+ * `__reactInternalInstance$…`）：外部插入的节点没有这两个键。摘的全是「不属于
+ * React」的节点，所以清理本身不会与 React 的 diff 打架，正常渲染一个都不会碰。
+ */
+export function pruneForeignTableNodes(): void {
+  const table = tableEl
+  if (!table) return
+  const owned = (el: Element): boolean => Object.keys(el).some(
+    key => key.startsWith('__reactFiber$') || key.startsWith('__reactInternalInstance$'))
+  for (const child of [...table.children]) {
+    if (child.tagName === 'TBODY') {
+      if (child.id !== 'models') child.remove()
+    } else if (child.tagName === 'TR' && !owned(child)) {
+      // 直接落在 table 下的 tr 会被浏览器按「匿名 tbody」渲染成一行，同样要清
+      child.remove()
+    }
+  }
+  const tbody = table.querySelector('tbody#models')
+  if (!tbody) return
+  for (const row of [...tbody.children]) {
+    if (!owned(row)) row.remove()
+  }
 }

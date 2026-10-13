@@ -22,7 +22,7 @@ use super::priority::next_free_priority;
 use super::sql;
 use super::state::{mark_name_custom, StoredAccount};
 use super::store::{AccountStore, AccountStoreError};
-use super::store_util::{max_concurrent_public, token_tail_of, truncate_chars};
+use super::store_util::{token_tail_of, truncate_chars};
 use super::CredentialWrite;
 
 impl AccountStore {
@@ -248,10 +248,6 @@ impl AccountStore {
         );
         public.insert("desktop".to_string(), Value::Bool(false));
         public.insert("available".to_string(), Value::Bool(available));
-        public.insert(
-            "maxConcurrent".to_string(),
-            Value::from(max_concurrent_public(record.get("maxConcurrent"))),
-        );
         Value::Object(public)
     }
 }

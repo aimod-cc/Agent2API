@@ -1,9 +1,10 @@
 //! Anthropic Messages 协议的**出站**转换：chat 请求 → Anthropic 上游请求、
-//! 上游 Anthropic SSE → chat SSE（自定义提供商转发的 `anthropic` 分支）。
+//! 上游 Anthropic SSE → chat SSE（自定义提供商转发的 `anthropic` 分支，
+//! 以及内置 ZCode 活动套餐通道 —— 见 `upstream::translate` 的 `AnthropicToChatStream`）。
 //!
 //! ── 与 `anthropic.rs` 的方向关系 ─────────────────────────────
 //! `anthropic.rs` 服务**下游入口**（`api::protocol` 的 `/v1/messages`）；
-//! 本文件是它的反方向，服务自定义提供商的**上游**：
+//! 本文件是它的反方向，服务自定义提供商与内置 ZCode 的**上游**：
 //!   - 请求：`anthropic_request_from_chat`（chat 体 → Messages 体，逐字段
 //!     对着 `chat_from_anthropic` 反推）；
 //!   - 响应：`ChatFromAnthropicStream`（上游 Anthropic SSE → 标准 chat SSE，

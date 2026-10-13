@@ -97,6 +97,43 @@
 
 .batch-hidden { color: var(--warn); font-size: 11px; }
 
+/* 批量栏里的分组摘要（「N 家 · 显示 M 行」）：分组带逐段给了各家的账号数，
+   这里只说「当前看到几家几行」，不再重复各家的明细 */
+.batch-summary { color: var(--text-3); font-size: 11.5px; white-space: nowrap; }
+
+/* 「清除筛选」是一条轻动作（就在批量栏里，与批量操作同一行）：
+   它改的是「怎么看」，不该与右侧那两颗操作按钮同权重 */
+.batch-bar .link-btn {
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-2);
+  font-size: 11px;
+}
+
+.batch-bar .link-btn:hover { background: var(--nav-hover); color: var(--text); }
+
+/* 搜索框（工具条第一段）：宽度跟着工具条走，最窄 150px、最宽 220px ——
+   账号名 / 邮箱长度不可控，再宽就把两个分段挤到下一行了 */
+.acct-search { width: clamp(150px, 22vw, 220px); }
+
+/* 空态里那颗「清除筛选」：与 .empty 的正文同一行，做成下划线链接的样子
+   （空态本身已经在说「没有账号」，这里只补一个出口，不该再给一颗按钮的分量） */
+.empty .link-btn {
+  margin-left: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--primary-fg);
+  font-size: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .batch-actions { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
 
 .batch-actions button {
@@ -111,3 +148,88 @@
    .panel-foot + .table-foot-ctl 一族，见 layout.css）：原先那一套 .table-foot
    专属样式（同底色 + 一条 --hairline 分隔线）随「五张表页脚一致」一并去掉。 */
 
+
+/* ─── 账号设置弹窗：限制器段 ───
+   每账号的限制规则列表（余额 / Token 两类，见 islands/accounts-dialog-limiter.tsx）：
+   规则行是「开关 + 条件一句话 + 实时状态徽章 + 编辑/删除」的横排；编辑器是
+   列表下方的内联卡片（不做嵌套弹层 —— 弹窗里再弹弹窗的焦点管理得不偿失）。
+   徽章的样子交给组件库的 Badge，这里只管行布局与停用态的降权。 */
+.limiter-rules {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+
+.limiter-rule {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--surface);
+}
+.limiter-rule:last-child { border-bottom: none; }
+
+.limiter-rule-main { flex: 1; min-width: 0; }
+.limiter-rule[data-off] .limiter-rule-main { opacity: .5; }
+
+.limiter-rule-cond {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.limiter-rule-ops { display: flex; flex: none; }
+.limiter-rule-ops button { height: 25px; padding: 0 8px; font-size: 11.5px; }
+
+/* 编辑器实况提示（限制器二级弹层里）：与弹层字段的标签列对齐（76px + 间距 10px） */
+.limiter-hint {
+  margin-left: 86px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-xs);
+  padding: 6px 10px;
+}
+
+/* ─── 账号设置弹窗：左侧分组导航 + 右侧内容区 ───
+   单列长滚动换成分区结构（见 islands/accounts-dialogs.tsx 的五分组）：
+   导航只承载「切」，内容区一屏一组；字段标签定宽右对齐，控件左边缘落同一条线。 */
+.acct-dlg { display: flex; min-height: 460px; align-items: stretch; }
+
+/* 弹窗内只补栏宽：容器（底色 / 分隔线 / 内边距）与条目的选中态、悬浮态、字重
+   都是 .prov-rail + NavItem 组件自带的（与模型管理左栏同一形态，见 page-gateway.css） */
+.acct-dlg-rail { flex: 0 0 148px; min-height: 0; }
+
+.acct-dlg-main { flex: 1; min-width: 0; padding: 14px 20px 16px; }
+.acct-dlg-pane-head h3 { font-size: 13.5px; font-weight: 600; }
+.acct-dlg-pane-head p { font-size: 12px; color: var(--text-3); line-height: 1.7; margin-top: 2px; }
+/* 内容区字段：标签定宽右对齐（原型网格的落点），跨弹窗分段共用。
+   行距在内容区统一给（全局 .field-row 没有 margin —— 旧弹窗的行距是逐行手挂
+   mt-2.5 撑出来的，分组结构下再逐行挂迟早漏一行，就长成「没有间距」的样子）。 */
+.acct-dlg-main .field-row { margin: 10px 0; min-height: 30px; }
+.acct-dlg-main .field-row > label { width: 76px; flex: none; text-align: right; }
+.acct-dlg-main .field-row > label:empty { width: 76px; }
+.acct-dlg-hint { margin-left: 86px; }
+
+/* ─── 余额列：Token 限制器的第二行读数 ───
+   「周期 Token 31 万 / 50 万 · 剩 23 分」：配了 Token 规则的账号才有这一行
+   （见 islands/accounts-panels.tsx 的 prominentTokenLimit）。观感与 .lim-sub
+   同一档小字，已触发的读数用 warn 色点出来。 */
+.usage-token-sub {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usage-token-sub .hit { color: var(--warn); font-weight: 600; }

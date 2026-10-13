@@ -1,5 +1,5 @@
 /* Agent2API · 自定义提供商的提供商级操作（读记录 / 改配置 / 删除） */
-/* global wbApp */
+/* global wbApp, wbI18n */
 
 /**
  * 自定义提供商的**提供商级**操作只有三件事：读一条记录、改它（名称 / 协议 /
@@ -78,7 +78,7 @@
    * 提供商未更新」这句话写在弹窗里，笼统报一句「保存失败」会把两件事混成一件。
    */
   async function update({ id, name, protocol, baseUrl, clientEmulation }) {
-    if (!isCustomProviderId(id)) throw new Error('不是自定义提供商');
+    if (!isCustomProviderId(id)) throw new Error(wbI18n.t('不是自定义提供商'));
     const body = { id, name, protocol, baseUrl };
     if (typeof clientEmulation === 'string') body.clientEmulation = clientEmulation;
     await providers.customRequest('POST', '/api/custom-providers/update', body);
@@ -104,17 +104,16 @@
   async function remove(providerId) {
     const provider = await findProvider(providerId);
     if (!provider) {
-      toast('该自定义提供商已不存在（可能已被删除），请刷新后重试', 'err');
+      toast(wbI18n.t('该自定义提供商已不存在（可能已被删除），请刷新后重试'), 'err');
       return false;
     }
     const name = provider.name || providerId;
     const count = accountCountOf(providerId);
     // 原生 confirm 在 Tauri 的 WebView 里不弹窗、直接放行，危险确认一律走 wbConfirm
     const ok = await window.wbConfirm?.ask?.({
-      title: '删除自定义提供商',
-      html: `确定删除自定义提供商「<strong>${esc(name)}</strong>」？`
-        + `将同时删除该提供商下 <strong>${count}</strong> 个账号，删除后无法恢复。`,
-      okText: '删除',
+      title: wbI18n.t('删除自定义提供商'),
+      html: wbI18n.t('确定删除自定义提供商「<strong>{name}</strong>」？将同时删除该提供商下 <strong>{count}</strong> 个账号，删除后无法恢复。', { name: esc(name), count }),
+      okText: wbI18n.t('删除'),
       okClass: 'danger',
     });
     if (!ok) return false;
@@ -125,16 +124,20 @@
       const keysUnrestricted = Number(data?.keysUnrestricted);
       let keysNote = '';
       if (Number.isFinite(keysUpdated) && keysUpdated > 0) {
-        keysNote = `，并从 ${keysUpdated} 把 Key 的可用提供商里移除`;
+        keysNote = wbI18n.t('，并从 {n} 把 Key 的可用提供商里移除', { n: keysUpdated });
         if (Number.isFinite(keysUnrestricted) && keysUnrestricted > 0) {
-          keysNote += `（其中 ${keysUnrestricted} 把恢复为不限制）`;
+          keysNote += wbI18n.t('（其中 {n} 把恢复为不限制）', { n: keysUnrestricted });
         }
       }
-      toast(`✅ 已删除自定义提供商「${name}」${Number.isFinite(removed) ? `及 ${removed} 个账号` : ''}${keysNote}`);
+      toast(wbI18n.t('✅ 已删除自定义提供商「{name}」{accounts}{keys}', {
+        name,
+        accounts: Number.isFinite(removed) ? wbI18n.t('及 {n} 个账号', { n: removed }) : '',
+        keys: keysNote,
+      }));
       await refreshAfterChange();
       return true;
     } catch (error) {
-      toast(`删除失败：${error instanceof Error ? error.message : String(error)}`, 'err');
+      toast(wbI18n.t('删除失败：{reason}', { reason: error instanceof Error ? error.message : String(error) }), 'err');
       return false;
     }
   }

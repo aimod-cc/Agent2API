@@ -48,20 +48,22 @@ import {
   type ProviderPromptOption,
   type ProviderPromptState,
 } from './settings-state'
+import { t } from '../i18n'
 
-/** 三段的名字与顺序（就是后端 `GatewayBlocks::FIELDS` 的那三个；只在这里各写一遍） */
-const BLOCK_FIELDS: { key: keyof GatewayBlocks; label: string; hint: string }[] = [
-  { key: 'identity', label: '第一段（身份句）', hint: '官方原文只有一句：声明自己是 ZCode。' },
-  { key: 'stable', label: '第二段（稳定段）', hint: '工具用法与环境说明那一大段。' },
-  { key: 'dynamic', label: '第三段（动态段）', hint: '沟通方式 / 上下文管理 + Environment 段。' },
+/** 三段的名字与顺序（就是后端 `GatewayBlocks::FIELDS` 的那三个；只在这里各写一遍）。
+ *  `short` 是行内状态说明里的短名：gatewayEditedText 用它拼「已改哪几段」。 */
+const BLOCK_FIELDS: { key: keyof GatewayBlocks; label: string; short: string; hint: string }[] = [
+  { key: 'identity', label: t('第一段（身份句）'), short: t('第一段'), hint: t('官方原文只有一句：声明自己是 ZCode。') },
+  { key: 'stable', label: t('第二段（稳定段）'), short: t('第二段'), hint: t('工具用法与环境说明那一大段。') },
+  { key: 'dynamic', label: t('第三段（动态段）'), short: t('第三段'), hint: t('沟通方式 / 上下文管理 + Environment 段。') },
 ]
 
 /** 正文来源的中文说法（'inline' = 这份就是界面里编辑的；'none' = 透传，没有生效正文） */
 function sourceText(source: string): string {
-  if (source === 'inline') return '界面里编辑的正文'
-  if (source === 'file') return '提示词文件'
-  if (source === 'builtin') return '内置默认提示词'
-  return '（未生效）'
+  if (source === 'inline') return t('界面里编辑的正文')
+  if (source === 'file') return t('提示词文件')
+  if (source === 'builtin') return t('内置默认提示词')
+  return t('（未生效）')
 }
 
 /* ─── ①② 提示词正文（全局 / 某一家的）──────────── */
@@ -107,22 +109,25 @@ function BodyEditor({ title, text, source, file, disabled, save, onClose }: {
         <DialogHeader><DialogTitle>{title}</DialogTitle></DialogHeader>
         <DialogBody>
           <DialogSection>
-            <h3>保存后以这里的文本为准</h3>
+            <h3>{t('保存后以这里的文本为准')}</h3>
             <p>
-              这一份就是「替换 / 追加」模式下网关要发的 system 正文。
+              {t('这一份就是「替换 / 追加」模式下网关要发的 system 正文。')}
               {/* `source === 'none'` 与「当前是透传模式」等价：解析层只在透传时给
                   none（没有生效的正文）—— 见 `config::resolve_choice` */}
               {source === 'none'
-                ? '当前是透传模式：存下来也不会发出，切成「替换 / 追加」之后才生效。'
-                : `当前生效的正文来自${sourceText(source)}`
-                  + `${file.trim() && source !== 'inline' ? `（文件：${file.trim()}）` : ''}。`
-                  + '保存后这一份会盖过提示词文件与内置默认'
-                  + `${source !== 'inline' && file.trim() ? '，文件里后续的改动在清空这里之前不再生效' : ''}。`}
-              想回到原来那份，把这里清空再保存即可（不会删掉你配的文件路径）。
+                ? t('当前是透传模式：存下来也不会发出，切成「替换 / 追加」之后才生效。')
+                : t('当前生效的正文来自{source}{file}。保存后这一份会盖过提示词文件与内置默认{note}。', {
+                    source: sourceText(source),
+                    file: file.trim() && source !== 'inline' ? t('（文件：{path}）', { path: file.trim() }) : '',
+                    note: source !== 'inline' && file.trim()
+                      ? t('，文件里后续的改动在清空这里之前不再生效')
+                      : '',
+                  })}
+              {t('想回到原来那份，把这里清空再保存即可（不会删掉你配的文件路径）。')}
             </p>
           </DialogSection>
           <div className='flex flex-col gap-1.5'>
-            <Label htmlFor='settings-prompt-body'>提示词正文</Label>
+            <Label htmlFor='settings-prompt-body'>{t('提示词正文')}</Label>
             <Textarea
               id='settings-prompt-body'
               rows={18}
@@ -134,8 +139,8 @@ function BodyEditor({ title, text, source, file, disabled, save, onClose }: {
             />
             <div className='hint'>
               {draft.trim()
-                ? `${draft.split('\n').length} 行、${draft.length} 字符（按当前草稿计）`
-                : '空 = 不要这一份，回落提示词文件 / 内置默认提示词。'}
+                ? t('{lines} 行、{chars} 字符（按当前草稿计）', { lines: draft.split('\n').length, chars: draft.length })
+                : t('空 = 不要这一份，回落提示词文件 / 内置默认提示词。')}
             </div>
           </div>
         </DialogBody>
@@ -148,15 +153,15 @@ function BodyEditor({ title, text, source, file, disabled, save, onClose }: {
             disabled={busy || source !== 'inline'}
             onClick={() => void commit('')}
           >
-            清除这里的正文
+            {t('清除这里的正文')}
           </Button>
-          <Button variant='outline' disabled={busy} onClick={onClose}>取消</Button>
+          <Button variant='outline' disabled={busy} onClick={onClose}>{t('取消')}</Button>
           <Button
             variant='default'
             disabled={busy || !edited}
             onClick={() => void commit(draft)}
           >
-            {saving ? '保存中…' : '保存'}
+            {saving ? t('保存中…') : t('保存')}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -179,11 +184,11 @@ export function PromptTextButton({ prompt, locked, busy }: {
         disabled={locked || busy}
         onClick={() => setOpen(true)}
       >
-        编辑正文
+        {t('编辑正文')}
       </Button>
       {open ? (
         <BodyEditor
-          title='编辑提示词正文 · 全局'
+          title={t('编辑提示词正文 · 全局')}
           text={prompt.text}
           source={prompt.source}
           file={prompt.file}
@@ -212,11 +217,11 @@ export function ProviderPromptTextButton({ item, label, locked, busy }: {
         disabled={locked || busy}
         onClick={() => setOpen(true)}
       >
-        编辑正文
+        {t('编辑正文')}
       </Button>
       {open ? (
         <BodyEditor
-          title={`编辑提示词正文 · ${label}`}
+          title={t('编辑提示词正文 · {label}', { label })}
           text={item.text}
           source={item.source}
           file={item.file}
@@ -271,15 +276,14 @@ function GatewayEditor({ id, title, official, over, enabled, disabled, onClose }
         <DialogHeader><DialogTitle>{title}</DialogTitle></DialogHeader>
         <DialogBody>
           <DialogSection>
-            <h3>三段各自成块，所以分开编辑</h3>
+            <h3>{t('三段各自成块，所以分开编辑')}</h3>
             <p>
-              上游按<strong>结构</strong>校验身份：这三段必须各自成块排在最前
-              （实测：三段并成一段会被回 405 / 3012）。因此这里按段编辑，不能合成一段。
-              改过的段以你的文本为准，没改的段继续用官方原文；清空某一段 = 那一段恢复官方原文。
-              {editedNow.length ? `当前已改过：${editedNow.join('、')}。` : '当前三段都是官方原文。'}
+              {t('上游按')}<strong>{t('结构')}</strong>
+              {t('校验身份：这三段必须各自成块排在最前（实测：三段并成一段会被回 405 / 3012）。因此这里按段编辑，不能合成一段。改过的段以你的文本为准，没改的段继续用官方原文；清空某一段 = 那一段恢复官方原文。')}
+              {editedNow.length ? t('当前已改过：{edited}。', { edited: editedNow.join(t('、')) }) : t('当前三段都是官方原文。')}
               {/* 开关关着时改这里的文本不会发出（`apply_start_plan` 直接跳过官方段，
                   连覆盖一起跳过）—— 不说这句，用户会以为自己改的生效了 */}
-              {enabled ? '' : '注意：这一家的「网关自带」开关现在是关的，改过的正文要等开关打开才生效。'}
+              {enabled ? '' : t('注意：这一家的「网关自带」开关现在是关的，改过的正文要等开关打开才生效。')}
             </p>
             <p>{NOTES.promptGatewayText}</p>
           </DialogSection>
@@ -288,7 +292,7 @@ function GatewayEditor({ id, title, official, over, enabled, disabled, onClose }
               <Label htmlFor={`settings-prompt-block-${id}-${field.key}`}>
                 {field.label}
                 <span className='ml-2 font-normal text-subtle'>
-                  {draft[field.key] === official[field.key] ? '（官方原文）' : '（已改）'}
+                  {draft[field.key] === official[field.key] ? t('（官方原文）') : t('（已改）')}
                 </span>
               </Label>
               <Textarea
@@ -314,11 +318,11 @@ function GatewayEditor({ id, title, official, over, enabled, disabled, onClose }
             disabled={busy || !editedNow.length}
             onClick={() => void commit(null)}
           >
-            恢复官方原文
+            {t('恢复官方原文')}
           </Button>
-          <Button variant='outline' disabled={busy} onClick={onClose}>取消</Button>
+          <Button variant='outline' disabled={busy} onClick={onClose}>{t('取消')}</Button>
           <Button variant='default' disabled={busy || !edited} onClick={() => void commit(draft)}>
-            {saving ? '保存中…' : '保存'}
+            {saving ? t('保存中…') : t('保存')}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -352,12 +356,12 @@ export function GatewayTextButton({ item, option, over, locked, busy }: {
         disabled={locked || busy}
         onClick={() => setOpen(true)}
       >
-        编辑正文
+        {t('编辑正文')}
       </Button>
       {open ? (
         <GatewayEditor
           id={item.id}
-          title={`编辑网关自带提示词 · ${option.label}`}
+          title={t('编辑网关自带提示词 · {label}', { label: option.label })}
           official={official}
           over={over}
           enabled={item.gateway}
@@ -374,6 +378,6 @@ export function gatewayEditedText(over: GatewayBlocks | undefined): string {
   if (!over) return ''
   return BLOCK_FIELDS
     .filter(field => (over[field.key] || '').trim())
-    .map(field => field.label.replace(/（.*?）/, ''))
-    .join('、')
+    .map(field => field.short)
+    .join(t('、'))
 }

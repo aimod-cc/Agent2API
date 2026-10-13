@@ -32,6 +32,7 @@ mod autoclaw;
 mod catpaw;
 pub mod codearts;
 mod qoder;
+mod officeace;
 mod trae;
 mod zcode;
 
@@ -410,6 +411,70 @@ impl LoginService {
         Ok(handle)
     }
 
+    /// KukuAI 网页登录收尾：校验任务 → 从登录态 Cookie 提取凭证 → 落账号。
+    ///
+    /// ── 与其它网页登录回调的差别（为什么单独一个入口）────────────
+    /// 百度通行证登录成功后的跳转**不携带授权码**（凭证在 `.baidu.com` 域的
+    /// Cookie 里，跨域跳转不会带过去），因此无法走「回调 URL 里解析 code」的
+    /// 通用链路。本家由壳侧登录窗口的注入脚本把 Cookie 直接 POST 到
+    /// `POST /api/session/login/kuku/complete`，这里完成「任务校验 → 提取 →
+    /// 落账号 → 写任务状态」四步。任务状态的写回与 raccoon 分支同款
+    /// （`finish_task`），前端 `/wait` 轮询拿到的结果与其它家一致。
+    pub async fn finish_kuku_login(
+        &self,
+        state: &str,
+        cookie: &str,
+    ) -> Result<String, GatewayError> {
+        let state = state.trim();
+        if state.is_empty() {
+            return Err(GatewayError::with_status(400, "缺少 state，无法确认这次回调归属"));
+        }
+        let Some(handle) = self.tasks.get(state) else {
+            return Err(GatewayError::with_status(
+                404,
+                "登录任务不存在或已过期，请重新发起网页登录",
+            ));
+        };
+        let task = handle.snapshot();
+        if task.canceled {
+            return Err(GatewayError::with_status(400, "登录已取消，请重新发起"));
+        }
+        if task.done {
+            // 幂等：同一个回调被送来两次（脚本重入 + 页面重载各触发一次）不是错误
+            return Ok(String::new());
+        }
+        if task.provider != crate::server::core::providers::kind_id(crate::server::core::providers::ProviderKind::Kuku) {
+            return Err(GatewayError::with_status(
+                400,
+                "该登录任务不属于 KukuAI，请重新发起",
+            ));
+        }
+        let (credentials, warning) =
+            crate::server::core::providers::kuku::login::complete_login(cookie).await?;
+        let store = self.store.clone();
+        let account = store
+            .add_kuku_account(&credentials, None, "web")
+            .map_err(|error| GatewayError::with_status(error.status_code, error.message))?;
+        let account_id = account
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let label = account
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("KukuAI 账号")
+            .to_string();
+        let mut payload = json!({ "account": account, "edition": task.edition });
+        // 复核未通过的警告随任务载荷透传前端（账号已落库；提示换正确账号）
+        if let Some(warning) = warning {
+            payload["warning"] = Value::String(warning);
+        }
+        finish_task(&handle, &payload);
+        logging::log("[Login]", &format!("✅ KukuAI 网页登录成功: {label}"));
+        Ok(account_id)
+    }
+
     /// 发起一次 **Cline 设备授权登录**（WorkOS RFC 8628）。
     ///
     /// ── 与前两条链路的区别（为什么是第三种形态）─────────────────
@@ -714,6 +779,59 @@ impl LoginService {
                 self.drop_accio_pending(state);
             }
             return result.map(LoginCallbackSubmission::Completed);
+        }
+        // Antigravity 的回调同样是标准 `code` / `state` 查询串（Google OAuth
+        // 授权码 + loopback）。与 Accio 同款，这里同时服务两个入口：
+        //   ① 浏览器直接落到网关的 `/oauth-callback` 路由（public 回调 handler
+        //      把 URL 转交进来）；
+        //   ② 网页端 / Docker 用户在登录弹窗里手工粘贴整条回调 URL（浏览器
+        //      到不了容器内的 loopback 端口时）。
+        // 两条入口的收尾完全一致：state 与任务逐字比对 → 适配器换码落账号。
+        if kind == ProviderKind::Antigravity {
+            let parsed = url::Url::parse(callback_url).map_err(|_| {
+                GatewayError::with_status(400, "Antigravity 登录回调地址无效")
+            })?;
+            let params: std::collections::HashMap<String, String> = parsed
+                .query_pairs()
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect();
+            if let Some(error) = params.get("error").filter(|value| !value.trim().is_empty()) {
+                return Err(GatewayError::with_status(400, format!("授权被拒绝（{error}）")));
+            }
+            let callback_state = params.get("state").map(String::as_str).unwrap_or("");
+            let code = params.get("code").map(String::as_str).unwrap_or("");
+            if callback_state.trim() != state {
+                return Err(GatewayError::with_status(400, "回调地址与当前 Antigravity 登录任务不匹配"));
+            }
+            return match adapter_for(kind)
+                .exchange_login_code(&self.store, code, state)
+                .await
+            {
+                Ok(account_id) => {
+                    let session = json!({
+                        "accountUid": account_id,
+                        "nickname": Value::Null,
+                        "edition": task.edition,
+                        "provider": task.provider,
+                    });
+                    handle.update(|task| {
+                        task.done = true;
+                        task.session = Some(session);
+                        task.finished_at = Some(logging::now_ms());
+                    });
+                    Ok(LoginCallbackSubmission::Completed(account_id))
+                }
+                Err(error) => {
+                    // 与 Accio / Raccoon 同一处置：失败要落定任务错误，
+                    // 否则前端会一直等到 5 分钟超时
+                    finish_task_error(&handle, &error.message);
+                    logging::log(
+                        "[Login]",
+                        &format!("❌ Antigravity 网页登录换取凭证失败: {}", error.message),
+                    );
+                    Err(error)
+                }
+            };
         }
         // AutoClaw OAuth 回调 URL 里没有网关自己的 task state，手工提交时由
         // 请求体的 state 先锁定这次任务，再按回调路径识别 Zai / Google。

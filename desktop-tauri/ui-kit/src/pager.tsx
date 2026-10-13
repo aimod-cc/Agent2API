@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { Button } from './button'
 import { cn } from './lib/cn'
+import { t } from './i18n'
 
 /**
  * 分页器（项目扩展，shadcn 标准里没有对应件）。
@@ -54,7 +55,7 @@ function Pager({
       // 说明文字是同一档，用更淡的那档在浅色主题下会糊
       className='text-[11.5px] text-subtle [font-variant-numeric:tabular-nums]'
     >
-      第 {current} / {total} 页
+      {t('第 {current} / {total} 页', { current, total })}
     </span>
   )
 
@@ -68,7 +69,7 @@ function Pager({
         disabled={disabled || current <= 1}
         onClick={() => onPageChange(current - 1)}
       >
-        上一页
+        {t('上一页')}
       </Button>
       <Button
         type='button'
@@ -77,7 +78,7 @@ function Pager({
         disabled={disabled || current >= total}
         onClick={() => onPageChange(current + 1)}
       >
-        下一页
+        {t('下一页')}
       </Button>
       {!infoFirst && info}
     </div>

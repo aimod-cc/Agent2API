@@ -16,7 +16,8 @@
  *                       :811 与 tasks-panel.tsx 的 syncBalancesSnapshot / providers.js:138 render；
  *                       tasks-panel.tsx 的「立即签到一次」还调 refreshUsageAfterCheckin
  *                       —— 那条路径的签到不在账号页里，但积分同样会变，余额得跟着刷
- *   · `wbAccountsModel` app.js:178 isRateLimited / :663 isDesktopAccount / report.js:307
+ *   · `wbAccountsModel` app.js:236 isLimited（顶栏「已限流」计数，含余额不足档）/
+ *                       :663 isDesktopAccount / report.js:307
  *                       editionSuffix / models-fetch-modal.tsx:245 providerFeatures、:255 byPriorityOrder
  *   · `wbAccountPanel`  app.js:623 invalidate / :645 open
  * 注册必须在**模块求值时**完成：app.js 的 refresh() 是异步的（首个 await 之后才轮到渲染），
@@ -29,14 +30,15 @@
 
 import {
   errorMessage, POOL_VALUE_PREFIX, shared, toast,
-  type AccountRecord, type ClashSnapshot, type PanelKind, type PoolItem, type UsageEntry,
+  type AccountRecord, type ClashSnapshot, type PanelKind, type PoolItem,
+  type TokenReading, type UsageEntry,
 } from './accounts-shared'
 import {
-  checkinableAccounts, claimedPlanIdsToday, displayNameOf, isDesktopAccount, isEnabled, isRateLimited,
-  supportsCheckin, supportsUsage,
+  isDesktopAccount, isEnabled, isLimitedNow, isRateLimited,
+  supportsUsage,
 } from './accounts-domain'
 import * as domain from './accounts-domain'
-import { clampPriority, priorityOf } from './accounts-columns'
+import { t } from '../i18n'
 import {
   allAccounts, bump, findAccount, getStore, isPicked, openPanelsFor, panelOpen, patch,
 } from './accounts-store'
@@ -112,21 +114,71 @@ export function usageEntryOf(account: AccountRecord): UsageEntry {
   return (usageFailureAt.get(account.id) || 0) >= changedAt ? entry : undefined
 }
 
-/**
- * 上一次签到的**失败原因**（按账号 id）。
+/* ─── Token 限制器的周期消耗读数（快照轮询带来的窗口读数）───
  *
- * 签到没有明细面板，结果只落在两处：成功/已领取由行上那颗按钮自己的状态表达
- * （`checkedInToday` → 「已签到」）＋ 一条 toast；失败则要留下可复看的原因 ——
- * toast 几秒后就没了，而「为什么没签上」正是需要复看的信息，所以记在这里，
- * 由按钮的 title 读出来（见 `checkinErrorOf`）。
- *
- * 成功与「今天已领取」都不进这张表：前者按钮会变「已签到」，后者是上游的正常状态，
- * 不该在按钮上挂一个「失败」提示。
+ * 「限制器」的 Token 规则要显示「本周期已用多少 / 什么时候重置」，读数来自
+ * 用量快照的 `tokenUsage` 段（后端 `usage_query::snapshot` 从内存事实表投影，
+ * 心跳 10 秒刷新 + 请求收尾增量记账，前端 20 秒轮询拿到）。与余额缓存分开存：
+ * 余额只在查询到期时变化（`at` 不动 = 没新东西），Token 随每条请求变化，两边
+ * 的「应用过了没」各判各的（见 syncBalancesSnapshot）。
  */
-const checkinErrors = new Map<string, string>()
 
-/** 该账号上一次签到的失败原因（没有则空串）—— 行上「签到」按钮的 title 读它 */
-export const checkinErrorOf = (id: string): string => checkinErrors.get(id) || ''
+/** Token 周期消耗读数缓存（账号 id → 启用中的每个周期一条；没配规则 = 空数组） */
+const tokenUsageMap = new Map<string, TokenReading[]>()
+
+/** 最近一次应用的 `tokenAt`（快照里 Token 读数的计算时刻；0 = 还没应用过） */
+let lastTokenAt = 0
+
+/**
+ * Token 周期消耗读数的读入口（状态列 / 余额格 / 弹窗限制器段共用）。
+ * 没有读数（还没轮询到 / 后端没有这个段）返回空数组 —— 判定按 0 算（放行）。
+ */
+export function tokenUsageOf(account: AccountRecord | null | undefined): TokenReading[] {
+  if (!account) return []
+  return tokenUsageMap.get(account.id) || []
+}
+
+/**
+ * 把快照里的 `tokenUsage` 段写进缓存。返回是否有变化（变了才 bump 重绘）。
+ * 行的形状由后端保证（`{period, windowStart, used}`），这里只做容错整形 ——
+ * 脏行丢弃，不让一条坏数据污染整个账号的读数。
+ */
+function applyTokenUsage(
+  snapshot: { tokenAt?: unknown; tokenUsage?: Record<string, unknown> } | null | undefined,
+): boolean {
+  const tokenAt = Number(snapshot?.tokenAt) || 0
+  if (!tokenAt || tokenAt === lastTokenAt) return false
+  const usage = snapshot?.tokenUsage
+  if (!usage || typeof usage !== 'object') return false
+  lastTokenAt = tokenAt
+  const fresh = new Map<string, TokenReading[]>()
+  for (const [id, rows] of Object.entries(usage)) {
+    if (!Array.isArray(rows)) continue
+    const readings: TokenReading[] = []
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue
+      const kind = Number((row as Record<string, unknown>).kind)
+      const windowStart = Number((row as Record<string, unknown>).windowStart)
+      const used = Number((row as Record<string, unknown>).used)
+      if (!Number.isFinite(kind) || kind < 0) continue
+      if (!Number.isFinite(windowStart) || windowStart <= 0) continue
+      if (!Number.isFinite(used) || used < 0) continue
+      readings.push({ kind, windowStart, used })
+    }
+    fresh.set(id, readings)
+  }
+  // 引用比较足够：Map 整体替换，账号数量与每行内容有任一变化就会体现在新对象上
+  const changed = fresh.size !== tokenUsageMap.size
+    || [...fresh].some(([id, readings]) => {
+      const current = tokenUsageMap.get(id)
+      return !current || current.length !== readings.length
+        || readings.some((row, index) => row.used !== current[index]?.used
+          || row.windowStart !== current[index]?.windowStart)
+    })
+  tokenUsageMap.clear()
+  for (const [id, readings] of fresh) tokenUsageMap.set(id, readings)
+  return changed
+}
 
 /* ─── Clash 出口缓存（只剩代理表单的「Clash Verge」档在用）─────
  *
@@ -151,7 +203,7 @@ export async function clashOptions(options: { force?: boolean } = {}): Promise<C
       try {
         const data = await shared().workbuddyDesktop?.getProxies?.()
         if (!data || typeof data !== 'object' || !data.clash) {
-          throw new Error(`代理列表响应异常（${typeof data}）`)
+          throw new Error(t('代理列表响应异常（{type}）', { type: typeof data }))
         }
         return data.clash
       } finally {
@@ -207,7 +259,7 @@ export async function proxyPoolOptions(options: { force?: boolean } = {}): Promi
       try {
         const data = await shared().workbuddyDesktop?.getProxyPool?.()
         if (!data || typeof data !== 'object' || !Array.isArray(data.items)) {
-          throw new Error(`代理池响应异常（${typeof data}）`)
+          throw new Error(t('代理池响应异常（{type}）', { type: typeof data }))
         }
         return data.items
       } finally {
@@ -263,7 +315,7 @@ export function ensureProxyPoolOptions(): void {
 /* ─── 弹窗 ─────────────────────────────────── */
 
 export function openSettingsDialog(id: string): void {
-  if (!findAccount(id)) { toast('账号不存在，请刷新后重试', 'err'); return }
+  if (!findAccount(id)) { toast(t('账号不存在，请刷新后重试'), 'err'); return }
   patch({ dialog: { kind: 'settings', id } })
 }
 
@@ -273,7 +325,7 @@ export function closeDialog(): void {
 
 export function openBatchDialog(ids: string[], action = 'enable'): void {
   const selected = (Array.isArray(ids) ? ids : []).filter(id => findAccount(id))
-  if (!selected.length) { toast('请先勾选要操作的账号', 'err'); return }
+  if (!selected.length) { toast(t('请先勾选要操作的账号'), 'err'); return }
   patch({ dialog: { kind: 'batch', ids: selected, action } })
 }
 
@@ -286,7 +338,6 @@ export function refreshCaches(validIds: Set<string>): void {
   // 失败结论的时刻表跟着条目一起清：账号删掉后同 id 可能被「重新添加」复用，
   // 留着的旧时刻会让那条新记录继承一个本该作废的失败结论
   for (const id of [...usageFailureAt.keys()]) if (!validIds.has(id)) usageFailureAt.delete(id)
-  for (const id of [...checkinErrors.keys()]) if (!validIds.has(id)) { checkinErrors.delete(id); touched = true }
   const panels = new Map(getStore().panels)
   for (const id of [...panels.keys()]) if (!validIds.has(id)) { panels.delete(id); touched = true }
   const connections = new Map(getStore().connections)
@@ -382,14 +433,16 @@ export function usageFailureOf(entry: UsageEntry): { message: string; notConfigu
  *  与真正的失败（红色）—— 只存 error 字符串会丢掉这个判据。 */
 function cacheEntryOf(row: Record<string, unknown>): UsageEntry {
   if (row.usage) return row.usage as Record<string, unknown>
-  return { error: row.error ? String(row.error) : '余额响应为空', code: row.code }
+  return { error: row.error ? String(row.error) : t('余额响应为空'), code: row.code }
 }
 
 /**
- * 把一批余额结果写进列表缓存（定时快照、批量查询与外部调用共用）。返回写入条数。
+ * 把一批余额结果写进列表缓存（自动查询快照、批量查询与外部调用共用）。返回写入条数。
  *
- * 行的时间戳取 `balances.at`（后端快照自带的查询时刻），没有就按「刚刚」——
- * 手动查询的那一批结果没有 `at` 字段，而它本来就是当刻的结论。
+ * 行的时间戳取**行上的 `at`**（快照端按账号到期查询，每行各带自己的结论时刻），
+ * 没有就按外层的 `at`（手动查询的响应不带 `at`，当刻就是它的结论时刻）。
+ * 失败行的时效判定按「这条结论的取得时刻」算，不能拿别人的时刻盖 ——
+ * 那正是行级 `at` 存在的原因（见后端 `usage_query::snapshot`）。
  */
 export function applyBalances(
   balances: { results?: Array<Record<string, unknown>>; at?: unknown } | null | undefined,
@@ -399,22 +452,29 @@ export function applyBalances(
   let applied = 0
   for (const row of rows) {
     if (!row?.id) continue
-    putUsage(String(row.id), cacheEntryOf(row), at)
+    putUsage(String(row.id), cacheEntryOf(row), Number(row.at) || at)
     applied++
   }
-  if (applied) bump()
+  if (applied) {
+    bump()
+    // 余额结论会翻转「已限流」归类（余额不足跳过档，isLimitedNow 的口径），顶栏那枚
+    // 计数徽标住在岛外（app.js 渲染）—— 这里顺手重画一次，别让它停在旧数字上
+    // （keys-page 改完自己的徽标也是这么同步顶栏的）
+    shared().wbApp?.renderTopbarStatus?.()
+  }
   return applied
 }
 
 /**
- * 拉一次「定时查询积分」的结果快照并写进缓存，返回是否应用了新的一轮。
+ * 拉一次后端的余额快照并写进缓存，返回是否应用了新的一轮。
  *
- * 余额查询在后端有条定时任务（默认每 10 分钟查全部账号），结果存在后端快照里。
- * 界面不点按钮时也要跟着它更新 —— 否则定时任务在后台跑得好好的，用户看到的还是启动
- * 那一次的旧余额，那正是「定时查询」最容易让人觉得「没生效」的地方。
- * `at` 是那一刻的毫秒时间戳，用它判断「这一轮我应用过了没」：时间戳没变就直接返回，
- * 不做无谓的重绘。**失败的行同样会被应用**（后端快照里就带着它们），于是账号页会
- * 明确显示「查询失败」而不是悄悄留着上一个成功的旧值 —— 但后端出口会先丢掉
+ * 余额查询按账号各自的间隔在后端自动跑（账号设置里逐账号配置），结论存进
+ * 记录表；这份快照接口把它端出来。界面不点按钮时也要跟着它更新 —— 否则自动
+ * 查询在后台跑得好好的，用户看到的还是启动那一次的旧余额，那正是「自动查询」
+ * 最容易让人觉得「没生效」的地方。`at` 是最近一条结论的时刻，用它判断
+ * 「这份快照我应用过了没」：时间戳没变就直接返回，不做无谓的重绘。
+ * **失败的行同样会被应用**（后端快照里就带着它们），于是账号页会明确显示
+ * 「查询失败」而不是悄悄留着上一个成功的旧值 —— 但后端出口会先丢掉
  * 「账号记录比快照还新」的失败行（见 `usageEntryOf` 的说明），那些行这里也就收不到。
  * 失败静默（不 toast）：它是 20 秒一次的轮询，网关长时间不可用会变成刷屏。
  */
@@ -422,11 +482,21 @@ let lastSnapshotAt = 0
 export async function syncBalancesSnapshot(): Promise<boolean> {
   try {
     const data = await shared().workbuddyDesktop?.getBalancesSnapshot?.()
+    // Token 限制器的读数**先于**余额的早退判定应用：余额只在查询到期时变化
+    // （`at` 不动说明没有新结论），而 Token 周期消耗随每条请求变化 —— 先判
+    // 余额的 `at` 就返回会让 Token 读数停在最后一次余额查询那会儿。
+    const tokenApplied = applyTokenUsage(data)
+    if (tokenApplied) {
+      bump()
+      // Token 结论会翻转「已限流」归类（isLimitedNow 的口径），顶栏那枚计数
+      // 徽标住在岛外（app.js 渲染）—— 与余额结论应用后的同步同一形态
+      shared().wbApp?.renderTopbarStatus?.()
+    }
     const at = Number(data?.at) || 0
     // at = 0 表示本进程还没定时查过（刚启动、或任务被关掉）—— 不覆盖已有缓存
-    if (!at || at === lastSnapshotAt) return false
+    if (!at || at === lastSnapshotAt) return tokenApplied
     lastSnapshotAt = at
-    if (!applyBalances(data)) return false
+    if (!applyBalances(data)) return tokenApplied
     return true
   } catch {
     // 静默：下一次轮询自然重试；账号页保持上一轮的结果不变
@@ -458,7 +528,7 @@ export async function queryUsageFor(id?: string | null): Promise<{ results?: Arr
   }
   if (id) {
     // 后端返回了 0 行才是真的「没数据」（账号刚被删、或 provider 不认这个 id）
-    if (!returned.has(id)) putUsage(id, '未返回余额数据', at)
+    if (!returned.has(id)) putUsage(id, t('未返回余额数据'), at)
     bump()
     return data
   }
@@ -467,7 +537,7 @@ export async function queryUsageFor(id?: string | null): Promise<{ results?: Arr
   // 本轮查询」说成「上游没给数据」—— 与单查那个 bug 同源。判据走 `batchUsageTargets`，
   // 与后端 `resolve_batch_targets` 逐字一致。
   for (const account of batchUsageTargets()) {
-    if (!returned.has(account.id)) putUsage(account.id, '未返回余额数据', at)
+    if (!returned.has(account.id)) putUsage(account.id, t('未返回余额数据'), at)
   }
   bump()
   return data
@@ -483,7 +553,7 @@ export async function queryUsageFor(id?: string | null): Promise<{ results?: Arr
 export async function queryAllUsage(): Promise<void> {
   if (getStore().usageBusy) return
   const targets = batchUsageTargets()
-  if (!targets.length) { toast('暂无可查询余额的账号', 'err'); return }
+  if (!targets.length) { toast(t('暂无可查询余额的账号'), 'err'); return }
   patch({ usageBusy: true })
   // 先写「查询中」再重绘：余额列立刻显示查询中，结果回来了直接换成读数
   targets.forEach(account => putUsage(account.id, null, Date.now()))
@@ -493,156 +563,18 @@ export async function queryAllUsage(): Promise<void> {
     const ok = rows.filter(row => row.usage).length
     // 「未配置查询」不算失败：那些账号成功返回了、只是缺一个可选的凭证
     const skipped = rows.filter(row => row.code === NOT_CONFIGURED_CODE).length
-    const suffix = skipped ? `（${skipped} 个未配置查询凭证）` : ''
+    const suffix = skipped ? t('（{n} 个未配置查询凭证）', { n: skipped }) : ''
     const failed = rows.length - ok - skipped
     toast(ok + skipped === rows.length
-      ? `✅ 已更新 ${ok} 个账号的余额${suffix}`
-      : `已更新 ${ok}/${rows.length} 个账号，${failed} 个失败`, failed ? 'err' : 'ok')
+      ? t('✅ 已更新 {n} 个账号的余额{suffix}', { n: ok, suffix })
+      : t('已更新 {ok}/{total} 个账号，{failed} 个失败', { ok, total: rows.length, failed }), failed ? 'err' : 'ok')
   } catch (error) {
     const message = errorMessage(error)
-    targets.forEach(account => putUsage(account.id, `查询失败：${message}`, Date.now()))
+    targets.forEach(account => putUsage(account.id, t('查询失败：{message}', { message }), Date.now()))
     bump()
-    toast(`余额查询失败：${message}`, 'err')
+    toast(t('余额查询失败：{message}', { message }), 'err')
   } finally {
     patch({ usageBusy: false })
-  }
-}
-
-/**
- * 签到。`id` 缺省 = 全部可签到账号串行签到；指定 id = 单账号签到。
- * 目标集合只用「有签到概念 + 国内版」的账号（后端同样只把国际版排除在外，
- * **不看启用状态**）。
- *
- * 只发请求、不动任何界面缓存：结果的呈现由调用方决定（行上按钮的状态 + toast，
- * 以及顺带一次余额刷新，见 `runCheckin` / `checkinAll`）—— 签到**没有明细面板**，
- * 别在这里挂面板状态。
- */
-export async function checkinFor(id?: string | null): Promise<{
-  results?: Array<Record<string, unknown>>
-  succeeded?: number
-  total?: number
-  skipped?: number
-} | null | undefined> {
-  return shared().workbuddyDesktop?.checkinAllAccounts?.(id || null)
-}
-
-/**
- * 一行签到结果的分类。三种结局互斥，判据只看 claim 的两个布尔：
- *   - `ok`：本次真的领到了（`claim.success === true`）；
- *   - `already`：上游说今天已经领过了（`claim.alreadyCompleted === true`）——
- *     **不是失败**：一天里大部分时候点签到都是这个结果，报红会把正常状态说成故障；
- *   - `failed`：其余（`row.error` 后端分派层报的错、`claim.success === false` 且
- *     不是已领取、完全没返回结果），原因取 msg。
- */
-type CheckinOutcome = { kind: 'ok' | 'already' | 'failed'; reason: string }
-
-function checkinOutcomeOf(row: Record<string, unknown> | undefined): CheckinOutcome {
-  if (!row) return { kind: 'failed', reason: '未返回签到结果' }
-  if (row.error) return { kind: 'failed', reason: String(row.error) }
-  const claim = row.claim as Record<string, unknown> | null | undefined
-  if (!claim) return { kind: 'failed', reason: '签到响应为空' }
-  if (claim.success === true) return { kind: 'ok', reason: '' }
-  if (claim.alreadyCompleted === true) return { kind: 'already', reason: '' }
-  return { kind: 'failed', reason: String(claim.msg || '未领取') }
-}
-
-/**
- * 批量签到（工具条「全部签到」）。结果只走 toast —— 没有明细面板可展开。
- * 签到完还会静默刷新一次余额：签到发的积分 / 权益本来就要落到余额列上。
- */
-export async function checkinAll(): Promise<void> {
-  if (getStore().checkinBusy) return
-  const targets = checkinableAccounts(allAccounts())
-  if (!targets.length) {
-    toast('暂无可签到的账号（签到仅限 WorkBuddy 国内版 / 小浣熊 / AutoClaw / Qoder 中国版）', 'err')
-    return
-  }
-  if (!(await shared().wbConfirm?.ask?.({
-    title: '批量签到',
-    html: `将对 <strong>${targets.length}</strong> 个账号串行签到，可能需要一点时间。继续？`,
-    okText: '继续',
-    bodyClass: '',
-  }))) return
-  patch({ checkinBusy: true })
-  try {
-    const data = await checkinFor(null)
-    const rows = Array.isArray(data?.results) ? data.results : []
-    const byId = new Map(rows.map(row => [String(row?.id || ''), row]))
-    let ok = 0
-    let already = 0
-    const failed: string[] = []
-    for (const account of targets) {
-      const outcome = checkinOutcomeOf(byId.get(account.id))
-      if (outcome.kind === 'ok') {
-        ok += 1
-        checkinErrors.delete(account.id)
-      } else if (outcome.kind === 'already') {
-        already += 1
-        checkinErrors.delete(account.id)
-      } else {
-        failed.push(`${displayNameOf(account) || account.id}：${outcome.reason}`)
-        checkinErrors.set(account.id, outcome.reason)
-      }
-    }
-    bump()
-    // 失败详情：个数 + 第一条原因（各账号自己的原因记进按钮 title，可逐个悬停复看）
-    const parts = [`成功领取 ${ok} 个`]
-    if (already) parts.push(`今日已领取 ${already} 个`)
-    if (failed.length) parts.push(`未领取 ${failed.length} 个（首个：${failed[0]}）`)
-    const skipped = Number(data?.skipped) || 0
-    toast(`签到完成：${parts.join('，')}`
-      + (skipped ? `；跳过 ${skipped} 个国际版 / 所属家无签到的账号` : ''), failed.length ? 'err' : 'ok')
-    // 签到会改变余额读数（签到发的就是积分 / 权益）：静默再查一遍，余额列直接落到
-    // 新读数（不 await、不播报，理由见 refreshUsageAfterCheckin）
-    void refreshUsageAfterCheckin()
-  } catch (error) {
-    const message = errorMessage(error)
-    targets.forEach(account => checkinErrors.set(account.id, message))
-    bump()
-    toast(`签到失败：${message}`, 'err')
-  } finally {
-    patch({ checkinBusy: false })
-    // 重拉账号状态：签到时间由后端落盘，行上的签到按钮据此变成「已签到」。
-    // 不重拉的话按钮要等下一轮 20 秒轮询才跟上，那期间还显示成可点。
-    void shared().wbApp?.refresh?.()
-  }
-}
-
-/**
- * 单个账号签到：请求 → toast 结果 → 重拉账号状态（`checkinAt` 由后端落盘）。
- *
- * 三种结局各自的落点（见 `checkinOutcomeOf`）：
- *   - 成功 → toast ✅，按钮随即变成「已签到」；
- *   - 今日已领取 → 中性 toast（正常状态，不是故障），按钮同样变「已签到」；
- *   - 未领取 → toast 原因 + 把它记进按钮 title（toast 会消失，原因要能复看）。
- *
- * 请求正常返回（三种结局都算）后顺带**静默查一次该账号的余额** —— 签到会改变余额
- * 读数，见 `refreshUsageAfterCheckin`。请求本身抛错时不查：那时后端多半不可达。
- */
-export async function runCheckin(id: string): Promise<void> {
-  const label = displayNameOf(findAccount(id)) || id
-  try {
-    const data = await checkinFor(id)
-    const rows = Array.isArray(data?.results) ? data.results : []
-    const row = rows.find(item => item?.id === id) || rows[0]
-    const outcome = checkinOutcomeOf(row)
-    if (outcome.kind === 'failed') {
-      checkinErrors.set(id, outcome.reason)
-      toast(`签到失败：${label}：${outcome.reason}`, 'err')
-    } else {
-      checkinErrors.delete(id)
-      toast(outcome.kind === 'already' ? `${label}：今日已领取` : `✅ ${label} 签到成功`, 'ok')
-    }
-    bump()
-    // 签到会改变余额读数：此刻刷新余额（静默，见 refreshUsageAfterCheckin）。
-    // 只查这一行 —— 用户点的是这个账号，别的行没动过
-    void refreshUsageAfterCheckin(id)
-    void shared().wbApp?.refresh?.()
-  } catch (error) {
-    const message = errorMessage(error)
-    checkinErrors.set(id, message)
-    bump()
-    toast(`签到失败：${label}：${message}`, 'err')
   }
 }
 
@@ -676,12 +608,12 @@ export async function queryUsageOnce(id: string): Promise<void> {
     // 「未配置」与「失败」—— 提示语要跟着这个分叉走
     const failure = usageFailureOf(usageMap.get(id))
     if (failure?.notConfigured) toast(failure.message, 'ok')
-    else if (failure) toast(`余额查询失败：${failure.message}`, 'err')
-    else toast('✅ 已更新余额')
+    else if (failure) toast(t('余额查询失败：{message}', { message: failure.message }), 'err')
+    else toast(t('✅ 已更新余额'))
   } catch (error) {
-    putUsage(id, `查询失败：${errorMessage(error)}`, Date.now())
+    putUsage(id, t('查询失败：{message}', { message: errorMessage(error) }), Date.now())
     bump()
-    toast(`余额查询失败：${errorMessage(error)}`, 'err')
+    toast(t('余额查询失败：{message}', { message: errorMessage(error) }), 'err')
   }
 }
 
@@ -716,7 +648,7 @@ export async function refreshUsageAfterCheckin(id?: string): Promise<void> {
     try {
       await runUsageQuery(id)
     } catch (error) {
-      putUsage(id, `查询失败：${errorMessage(error)}`, Date.now())
+      putUsage(id, t('查询失败：{message}', { message: errorMessage(error) }), Date.now())
       bump()
     }
     return
@@ -731,44 +663,17 @@ export async function refreshUsageAfterCheckin(id?: string): Promise<void> {
     await queryUsageFor(null)
   } catch (error) {
     const message = errorMessage(error)
-    targets.forEach(account => putUsage(account.id, `查询失败：${message}`, Date.now()))
+    targets.forEach(account => putUsage(account.id, t('查询失败：{message}', { message }), Date.now()))
     bump()
   } finally {
     patch({ usageBusy: false })
   }
 }
 
-/* ─── 行内动作（优先级 / 启用 / 顺序 / 限流 / 代理）───── */
-
-/**
- * 提交一个优先级。失败（409 冲突）时**必须还原显示值**：留着用户输的数字会让人以为
- * 存进去了，而实际的转发顺序没变 —— 下一次刷新时它会悄悄跳回去，那比当场报错更让人
- * 困惑。后端的 409 文案已经带上了占位者的姓名，直接透出即可（前端不知道谁是占位者，
- * 除非再算一遍，而两套算法迟早会分叉）。
- */
-export async function commitPriority(id: string, raw: string): Promise<number | null> {
-  const account = findAccount(id)
-  if (!account) return null
-  const current = priorityOf(account)
-  const text = String(raw ?? '').trim()
-  const parsed = text ? Number(text) : NaN
-  // 非法值 / 未改动：只把显示复原，不发请求（改成同一个值后端也会返回空 changes）
-  if (!Number.isFinite(parsed)) return current
-  const next = clampPriority(parsed)
-  if (next === current) return current
-  try {
-    await shared().workbuddyDesktop?.updateAccount?.(id, { priority: next })
-    toast(`✅ 优先级已改为 ${next}`)
-    // 改完顺序会变，必须重拉：只改本地状态的话行不会重排，看起来「没生效」
-    await shared().wbApp?.refresh?.()
-    return next
-  } catch (error) {
-    toast(`优先级未保存：${errorMessage(error)}`, 'err')
-    // 冲突可能来自别处已经改过的数据（比如另一端刚占了号），补一次刷新让列表回到事实
-    void shared().wbApp?.refresh?.()
-    return current
-  }
-}
+/* ─── 行内动作（启用 / 顺序 / 限流 / 代理）─────
+ * 「优先级」那一组动作随分组化下线：顺序不再由数字表达，改由拖拽整队
+ * （`reorderQueue`）。后端 `PATCH priority` / `move` 端点仍在（别的客户端在用），
+ * 只是账号页不再调它们。 */
 
 /**
  * 启用 / 禁用单个账号（状态列的开关与 ⋯ 菜单的第一项走同一条链）。
@@ -781,28 +686,53 @@ export async function setAccountEnabled(id: string, enabled: boolean): Promise<v
   try {
     await shared().workbuddyDesktop?.updateAccount?.(id, { enabled })
     await shared().wbApp?.refresh?.()
-    toast(enabled ? '✅ 已启用' : '✅ 已禁用')
+    toast(enabled ? t('✅ 已启用') : t('✅ 已禁用'))
   } catch (error) {
-    toast(`操作失败：${errorMessage(error)}`, 'err')
+    toast(t('操作失败：{message}', { message: errorMessage(error) }), 'err')
     // 失败时把开关拨回去：界面上不能留一个「已改」的假象
     void shared().wbApp?.refresh?.()
   }
 }
 
 /**
- * 与全局相邻账号交换优先级。
+ * **整队重排**（分组模式唯一的顺序写入通道）：把新队列整条交给后端。
  *
- * 方向与语义的对应（**极易搞反**）：优先级数值越小越先用，所以
- *   · up   = 与队列里的**上一个**账号交换 = 排得更靠前 = 数值变小
- *   · down = 与队列里的**下一个**账号交换 = 排得更靠后 = 数值变大
- * 来自后端 `move_account(id, "up" | "down")` 的语义（down 找 index + 1，up 找 index - 1）。
+ * 调用方给的是「组顺位 → 组内顺位」展开后的账号 id 列表（从队首到队尾），后端按
+ * 顺序把全局 priority 编成 0、1、2… —— 一次请求落地一条队列，不存在逐条 PATCH
+ * 的中间态（中途失败会留下重号，那会破坏「优先级唯一」这条不变量）。
+ *
+ * 失败必须刷新：界面此时显示的是**用户拖出来的顺序**，而库里还是旧顺序，
+ * 不拉回事实的话，下一次刷新会看到顺序「自己跳回去」。
  */
-export async function moveAccount(id: string, direction: 'up' | 'down'): Promise<void> {
+export async function reorderQueue(ids: string[], note?: string): Promise<boolean> {
+  if (!ids.length) return false
   try {
-    await shared().workbuddyDesktop?.moveAccount?.(id, direction)
+    await shared().workbuddyDesktop?.reorderAccounts?.(ids)
+    toast(note ? t('✅ 已保存：{note}', { note }) : t('✅ 顺序已保存'))
+    await shared().wbApp?.refresh?.()
+    return true
+  } catch (error) {
+    toast(t('顺序未保存：{message}', { message: errorMessage(error) }), 'err')
+    void shared().wbApp?.refresh?.()
+    return false
+  }
+}
+
+/**
+ * 整组启用 / 禁用（分组带的 ⋯ 菜单）：走既有的批量端点，一次改一组。
+ * 与单行开关同一口径（`PATCH enabled`），只是把 ids 换成一组的成员。
+ */
+export async function setGroupEnabled(ids: string[], enabled: boolean): Promise<void> {
+  if (!ids.length) return
+  try {
+    await shared().workbuddyDesktop?.batchAccounts?.({ action: enabled ? 'enable' : 'disable', ids })
+    toast(enabled
+      ? t('✅ 已启用 {n} 个账号', { n: ids.length })
+      : t('✅ 已禁用 {n} 个账号', { n: ids.length }))
     await shared().wbApp?.refresh?.()
   } catch (error) {
-    toast(`调整顺序失败：${errorMessage(error)}`, 'err')
+    toast(t('操作失败：{message}', { message: errorMessage(error) }), 'err')
+    void shared().wbApp?.refresh?.()
   }
 }
 
@@ -810,10 +740,10 @@ export async function moveAccount(id: string, direction: 'up' | 'down'): Promise
 export async function clearLimits(id: string, model?: string): Promise<void> {
   try {
     await shared().workbuddyDesktop?.clearRateLimits?.(id, model || null)
-    toast(model ? `✅ 已清除 ${model} 的限流标记` : '✅ 已清除该账号全部限流标记')
+    toast(model ? t('✅ 已清除 {model} 的限流标记', { model }) : t('✅ 已清除该账号全部限流标记'))
     await shared().wbApp?.refresh?.()
   } catch (error) {
-    toast(`清除失败：${errorMessage(error)}`, 'err')
+    toast(t('清除失败：{message}', { message: errorMessage(error) }), 'err')
   }
 }
 
@@ -848,10 +778,11 @@ export async function applyProxyPick(id: string, value: string, fallback: string
       : { source: 'pool', proxyId: value.slice(POOL_VALUE_PREFIX.length) }
     const result = await shared().workbuddyDesktop?.updateAccount?.(id, { proxy })
     const changes = result?.changes
-    const change = Array.isArray(changes) && changes.length ? changes[0] : '代理已更新'
+    // changes[0] 是后端回报的变更说明（后端文案保持一份事实），没有时给前端兜底一句
+    const change = Array.isArray(changes) && changes.length ? changes[0] : t('代理已更新')
     toast(`✅ ${change}`)
   } catch (error) {
-    toast(`保存失败：${errorMessage(error)}`, 'err')
+    toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
   } finally {
     // 成败都重拉：成功让这格显示落库后的值，失败把下拉拨回原值
     await shared().wbApp?.refresh?.()
@@ -863,65 +794,64 @@ export const PROXY_CUSTOM_CURRENT = '__proxy_custom__'
 export const PROXY_CUSTOM_EDIT = '__proxy_custom_edit__'
 
 /**
- * 行上「领套餐」：整条流程（探测 → 确认 → 验证码 → 领取）在 ui/zcode-claim.js，
- * 这里负责发起与**收尾**。
+ * 行上「领套餐」/ 签到中心 ZCode 行：打开**套餐明细**弹窗（zcode-plans-modal.tsx）。
  *
- * ── 为什么要把「今天领过的套餐」传给脚本 ──────────────────────
- * 一个账号可能同时挂着几份可领套餐，上游的「已领取过」是**按套餐**判的
- * （见 `claimedPlanIdsToday`）。台账在本页（账号记录的 `claimPlans`），
- * 判定规则在域层，脚本只负责把它们画进弹窗、并只让选还没领的那几份 ——
- * 日界的算法因此仍然只有域层一处。
+ * ── 为什么是一颗「打开弹窗」的按钮而不是直接开领 ──────────────
+ * 一个账号可能同时挂着几份可领套餐，而上游的「已领取过」是**按套餐**判的
+ * （同一份再领回 1003，换一份照样能领）—— 所以「这次领哪一份」必须由用户看着
+ * 逐份状态来决定。旧版是先探测再弹一个原生确认框，里面既列不出逐份状态、也显示
+ * 不了刚领到还没生效的套餐；现在统一进弹窗：上面是可领取（逐份标「今日已领」、
+ * 逐份点「领取」），下面是账号名下已有的套餐（含**待生效**与已过期）。
  *
- * ── 收尾为什么在本文件而不是那支 legacy 脚本里 ────────────────
- * 领到的是 token 额度：余额列的读数立刻就变了，而那颗按钮的悬停提示也跟着变
- * （后端落的领取台账由重拉账号拿到）。两件事都是本页的 store / 动作
- * （legacy 脚本拿不到），所以脚本只把结果交回来，由这里刷新 ——
- * 与 CodeArts 那条（脚本自己调 `wbApp.refresh()`）不同，是因为这条还得顺带刷余额。
+ * 「今天领过哪几份」与余额读数都由弹窗自己从账号页状态里读（判据只有域层的
+ * `claimedPlanIdsToday` 一处），这里只传 id 与显示名。
  *
- * `already_claimed` 同样算「已领」：上游说这份套餐已经被领掉了（可能是另一台
- * 设备领的），台账该补上它，否则用户会一直点它、每次拿回同一句话。
+ * ── 收尾（刷新余额 / 重拉账号）为什么在弹窗里 ────────────────
+ * 领到的是 token 额度：余额列的读数立刻就变了，领取台账也变了。这两件事都是本页
+ * 的 store（弹窗能订阅到，见那边的 `subscribe`），所以由弹窗领完自己刷 ——
+ * 这里不替它盯流程。
  */
-export async function startZcodeClaim(id: string): Promise<void> {
-  const account = findAccount(id) || undefined
-  const result = (await shared().wbZcodeClaim?.start?.(
-    account,
-    claimedPlanIdsToday(account),
-  )) as { ok?: boolean; failure?: string } | undefined
-  const settled = result?.ok === true || result?.failure === 'already_claimed'
-  if (!settled) return
-  // 余额静默刷新（不 await、不播报：领取结果那条 toast 不能被顶掉，
-  // 理由见 refreshUsageAfterCheckin）
-  void refreshUsageAfterCheckin(id)
-  // 重拉账号状态：领取台账是后端落盘的，弹窗与悬停提示据此更新「哪几份已领」
-  void shared().wbApp?.refresh?.()
+export function openZcodePlans(id: string, name?: string): void {
+  const account = findAccount(id)
+  if (!account) { toast(t('账号不存在，请刷新后重试'), 'err'); return }
+  const modal = shared().wbZcodePlans
+  if (!modal?.open) {
+    // 岛还没挂上（构建产物没更新 / 加载失败）：如实说一句，别静默什么都不做
+    toast(t('套餐明细弹窗未加载，请重启应用后重试'), 'err')
+    return
+  }
+  modal.open({ id, name: name || account.name })
 }
 
 /**
- * CodeArts 的「领福利」：整条流程（只读探测 → 用户确认 → 领取 → 等官方回读）
- * 住在 legacy 脚本 `ui/codearts-welfare.js` 里，这里只把账号对象递过去。
- *
- * 与上面那颗「领套餐」是**两件事**（判据位 `welfare` vs `claim`、本家不要验证码、
- * 端点也不同），所以是另一个全局对象而不是 `wbZcodeClaim` 的一个参数。
- * 台账刷新由那侧负责（它领完自己调 `wbApp.refresh()`）。
+ * CodeArts 的「领福利」入口已整体迁到「签到中心」的活动福利卡（checkin-page.tsx
+ * 直接调 legacy 脚本 `ui/codearts-welfare.js` 的 `wbCodeArtsWelfare.start`），
+ * 账号页不再有这颗按钮 —— 这里不再中转。
  */
-export async function startCodeArtsWelfare(id: string): Promise<void> {
-  await shared().wbCodeArtsWelfare?.start?.(findAccount(id) || undefined)
-}
 
 /* ─── 对外契约（window）────────────────────── */
 
 /** 一行账号的渲染上下文（视图层按它取位置、勾选、余额与连接数） */
 export type RowContext = {
+  /** 全局队列位置（1 起）：⋯ 菜单的「已在第一位」判定、模型测试候选清单用它。
+   *  分组模式下**不再直接显示**（行上是组内序号），见 accounts-domain 模块头 */
   seat: { position: number; total: number }
+  /** 组内序号（1 起）：顺序列的 `#N` 就是它 */
+  rank: number
   picked: boolean
   usageEntry: UsageEntry
   limitsOpen: boolean
   connections: number
 }
 
-export function rowContext(account: AccountRecord, seatMap: Map<string, { position: number; total: number }>): RowContext {
+export function rowContext(
+  account: AccountRecord,
+  seatMap: Map<string, { position: number; total: number }>,
+  rank = 1,
+): RowContext {
   return {
     seat: seatMap.get(account.id) || { position: 1, total: 1 },
+    rank,
     picked: isPicked(account.id),
     usageEntry: usageMap.get(account.id),
     limitsOpen: panelOpen(account.id, 'limits'),
@@ -940,11 +870,7 @@ export type AccountsViewApi = {
   syncBalancesSnapshot(): Promise<boolean>
   queryUsageFor(id?: string | null): Promise<unknown>
   queryAllUsage(): Promise<void>
-  checkinFor(id?: string | null): Promise<unknown>
-  checkinAll(): Promise<void>
   refreshUsageAfterCheckin(id?: string | null): Promise<void>
-  checkinableAccounts: typeof checkinableAccounts
-  supportsCheckin: typeof supportsCheckin
   supportsUsage: typeof supportsUsage
   isDesktopAccount: typeof isDesktopAccount
   isEnabled: typeof isEnabled
@@ -965,6 +891,8 @@ export type AccountsPanelApi = {
  * 只少了五个**生成 HTML 字符串**的成员（statusTag / accountTags / moreMenuHtml /
  * limitPanelHtml / checkinPanelHtml）—— 它们随表格一起变成了 React 组件，页外无任何
  * 引用（见最终报告）。accountTags 的等价物在域层（返回结构化标签，由视图渲染成 Badge）。
+ * 后补的 `isLimited`（顶栏「已限流」计数从 isRateLimited 换过来）是唯一的加项：
+ * 余额读数缓存在本文件里，域层拿不到 —— 逐字清单只对「迁移时点」负责，口径演进在此处接线。
  */
 type AccountsModelApi = {
   DEFAULT_PROVIDER_ID: string
@@ -981,12 +909,10 @@ type AccountsModelApi = {
   typeLabel: typeof domain.typeLabel
   isEnabled: typeof domain.isEnabled
   isRateLimited: typeof domain.isRateLimited
+  /** 「已限流」的完整口径（isLimitedNow：模型限流或限制器跳过档），余额与 Token 读数由本文件的缓存出 */
+  isLimited: (account: AccountRecord | null | undefined) => boolean
   accountEdition: typeof domain.accountEdition
-  supportsCheckin: typeof domain.supportsCheckin
   supportsClaim: typeof domain.supportsClaim
-  checkedInToday: typeof domain.checkedInToday
-  checkinableAccounts: typeof domain.checkinableAccounts
-  matchProvider: typeof domain.matchProvider
   matchEnabled: typeof domain.matchEnabled
   matchLimit: typeof domain.matchLimit
   visibleAccounts: typeof domain.visibleAccounts
@@ -1024,12 +950,13 @@ const ACCOUNTS_MODEL_API: AccountsModelApi = {
   typeLabel: domain.typeLabel,
   isEnabled: domain.isEnabled,
   isRateLimited: domain.isRateLimited,
+  isLimited: account => isLimitedNow(
+    account,
+    account ? usageEntryOf(account) : undefined,
+    tokenUsageOf(account),
+  ),
   accountEdition: domain.accountEdition,
-  supportsCheckin: domain.supportsCheckin,
   supportsClaim: domain.supportsClaim,
-  checkedInToday: domain.checkedInToday,
-  checkinableAccounts: domain.checkinableAccounts,
-  matchProvider: domain.matchProvider,
   matchEnabled: domain.matchEnabled,
   matchLimit: domain.matchLimit,
   visibleAccounts: domain.visibleAccounts,
@@ -1055,11 +982,7 @@ export function installAccountsApi(): void {
     syncBalancesSnapshot,
     queryUsageFor,
     queryAllUsage,
-    checkinFor,
-    checkinAll,
     refreshUsageAfterCheckin,
-    checkinableAccounts,
-    supportsCheckin,
     supportsUsage,
     isDesktopAccount,
     isEnabled,

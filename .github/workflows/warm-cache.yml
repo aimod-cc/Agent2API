@@ -1,0 +1,126 @@
+name: warm-cache
+
+# 预热 CI 缓存：让发版构建命中 Rust / BuildKit 缓存，把等待时间砍半。
+#
+# ── 为什么需要单独的预热工作流 ────────────────────────────────
+# GitHub Actions 的缓存按 ref 作用域隔离：tag 触发的构建，缓存存进
+# 「这个 tag 自己」的作用域，它能读的只有本 tag 与默认分支 main ——
+# 「别的 tag」存过的缓存永远读不到（官方文档：Workflow runs also
+# cannot restore caches created for different tag names）。
+# build.yml / docker.yml 只在 tag push 与手动触发时运行，缓存从未
+# 落进过 main 作用域，于是每次发版都是全量冷编译：v2.9.5 → v2.9.7
+# 三次构建的 rust 缓存日志全是 No cache found，每次发版存下的
+# 500-600 MiB 缓存全都是白存（v2.9.6 与 v2.9.7 的缓存 key 完全
+# 相同，却因作用域隔离互相看不见）。
+#
+# 本工作流以 main 的名义跑一遍「只编译、不发布」的构建，把编译
+# 产物写进 main 作用域；之后 tag 构建就能直接命中。npm 缓存正是
+# 因为早期一条进了 main 作用域而每次都命中的现成例子。
+#
+# ── 触发方式 ──────────────────────────────────────────────────
+#   · push 到 main：代码变了，缓存随之更新
+#   · 每周一 UTC 19:00（北京周二 03:00）：兜底 —— GitHub 会清理
+#     7 天未访问的缓存，main 不常推时靠它保活
+#   · 手动 workflow_dispatch：⚠️ 必须在 Actions 页面选 main 分支
+#     触发 —— 缓存的作用域跟触发分支走，选了别的分支等于白跑
+#
+# ── job 名为什么必须与 build.yml 一致（macos / windows）───────
+# rust-cache 生成的缓存 key 里包含 job id（观察到的形如
+# v0-rust-macos-Darwin-arm64-<rustc 哈希>-<依赖哈希>），预热 job
+# 一旦改名，正式构建算出的 key 就对不上，缓存存了也取不到。
+# rust-cache 的 workspaces 参数同理，两边必须逐字一致。
+#
+# ── 预热到什么程度 ────────────────────────────────────────────
+# 桌面端 = cargo build --release，不跑 tauri build、不打 dmg/exe
+# 安装包（预热只关心 Rust 编译产物，打包工具不进 rust 缓存）。
+# 主 crate 的 custom-protocol 在 default features 里，feature 指纹
+# 与 tauri build 一致，预热后连主 crate 都能命中。macOS 按 universal
+# 的两个 target 各编一遍，与 build.yml 的产物位置一致：编译产物由
+# src-tauri/.cargo/config.toml 统一指向仓库根 target/，正是
+# rust-cache 缓存的目录。workspace 全成员（主 crate + server）都会
+# 编到，覆盖面比 tauri build 只编主 crate 更全。
+#
+# Docker = buildx 构建 --push=false，不推任何镜像，只攒 BuildKit
+# 的 gha 缓存（桩依赖层）。cache-from/cache-to 与 docker.yml 逐字
+# 一致（type=gha 默认 scope 相同），发版构建才能对上号。
+#
+# 免费额度说明：本仓库是公开仓库，GitHub-hosted runner 不计分钟，
+# 预热的冷启动开销（macOS 约 15 分钟）没有成本，只有等待它跑完的
+# 推送体验 —— 因此并发取消旧预热，避免排队。
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 19 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: warm-cache
+  cancel-in-progress: true
+
+env:
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── macOS（job 名与 build.yml 一致：macos）──────────────────
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # universal 需要两个目标都装上（与 build.yml 一致）
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      # workspaces 与 build.yml 逐字一致，key 才能对上
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-tauri/src-tauri -> ../../target
+
+      # 无前端构建链（frontendDist 是仓库里的静态目录 ui/），直接
+      # cargo 即可，不必装 node/npm —— 也因此预热比正式构建还快
+      - name: 预热 Rust 编译（aarch64）
+        run: cargo build --release --target aarch64-apple-darwin
+        working-directory: desktop-tauri/src-tauri
+
+      - name: 预热 Rust 编译（x86_64）
+        run: cargo build --release --target x86_64-apple-darwin
+        working-directory: desktop-tauri/src-tauri
+
+  # ── Windows（job 名与 build.yml 一致：windows）──────────────
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-tauri/src-tauri -> ../../target
+
+      - name: 预热 Rust 编译
+        run: cargo build --release
+        working-directory: desktop-tauri/src-tauri
+
+  # ── Docker 镜像缓存预热 ─────────────────────────────────────
+  # BuildKit 的 gha 缓存 key 不含 job 名，这个 job 名不影响命中。
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      # 与 docker.yml 同一套 cache-from/cache-to；不推镜像、不出 tag，
+      # 只让桩依赖层落进 main 作用域，发版构建时命中后只剩源码层重编
+      - name: 预热镜像构建缓存（不推送）
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

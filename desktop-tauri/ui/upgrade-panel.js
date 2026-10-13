@@ -1,5 +1,5 @@
 /* Agent2API · 数据结构升级（旧 JSON/JSONL → 单个 SQLite 库，启动即自动执行） */
-/* global workbuddyDesktop, wbApp */
+/* global workbuddyDesktop, wbApp, wbI18n */
 
 /**
  * 这个模块解决什么
@@ -102,7 +102,7 @@
     running = true;
     // 「旧数据不会被删除」这句是这条 toast 最要紧的信息：用户没有点过任何东西，
     // 却看到程序在搬他的数据，第一反应会是「我的文件呢」。
-    toast('正在把旧数据导入 SQLite 数据库（旧文件会保留，不会删除）…');
+    toast(wbI18n.t('正在把旧数据导入 SQLite 数据库（旧文件会保留，不会删除）…'));
     let result = null;
     try {
       result = await api.runUpgrade();
@@ -110,7 +110,7 @@
       running = false;
       // 自动流程的失败必须说清「数据还在」与「会自动重试」——否则用户无从判断
       // 要不要做什么。后端也已把失败项写进日志页（见模块头）。
-      toast(`数据升级失败：${error.message}（旧数据仍在原处，下次启动会自动重试）`, 'err');
+      toast(wbI18n.t('数据升级失败：{error}（旧数据仍在原处，下次启动会自动重试）', { error: error.message }), 'err');
       return;
     }
     running = false;
@@ -130,11 +130,11 @@
     const outcomes = Array.isArray(result?.outcomes) ? result.outcomes : [];
     const imported = outcomes.length;
     if (result?.pending) {
-      toast(`数据升级未全部完成（已导入 ${imported} 项，仍有数据待导入，下次启动会自动重试）`, 'err');
+      toast(wbI18n.t('数据升级未全部完成（已导入 {n} 项，仍有数据待导入，下次启动会自动重试）', { n: imported }), 'err');
     } else if (imported) {
-      toast(`✅ 数据升级完成（${imported} 项）`);
+      toast(wbI18n.t('✅ 数据升级完成（{n} 项）', { n: imported }));
     } else {
-      toast('数据升级：没有需要导入的旧数据');
+      toast(wbI18n.t('数据升级：没有需要导入的旧数据'));
     }
     void refreshPanels();
   }

@@ -1,6 +1,6 @@
 # Agent2API · Multi-Provider Local Gateway
 
-[简体中文](./README.md) | **English**
+[简体中文](./README.md) | **English** | [繁體中文](./README.zh-Hant.md) | [日本語](./README.ja.md) | [한국어](./README.ko.md) | [Português (BR)](./README.pt-BR.md)
 
 Wraps the login state of several AI desktop clients into a local **OpenAI-compatible API gateway**, exposing a single `base_url` and bundling multi-provider account management, model management (enable / disable / delete / alias), content redaction, egress proxying and request reporting — plus a ready-to-run Tauri desktop app. Any OpenAI client that accepts a custom `base_url` can call these providers' model quota through `http://127.0.0.1:3065/v1` — no API key, no client source changes needed.
 
@@ -20,13 +20,18 @@ Reverse-proxy capabilities at a glance (✓ supported · ✗ not supported · �
 | CodeArts | ✓ | ✓ one-shot rotation | ✓ remote (three sources merged) | ✓ two ledgers | — | ✓ daily welfare (manual) |
 | Trae | ✓ | ✓ single-use rotation | ✓ remote only | ✓ two ledgers | — | — |
 | Loomy (iFlytek) | ✓ | ✗ no refresh flow | ✓ remote only | ✓ two point ledgers | ✓ daily gifted-points refresh | — |
+| KukuAI (Baidu Wenku) | ✓ | ✗ no refresh flow | ✓ remote + static fallback | ✓ points balance | ✓ daily check-in (free points) | — |
+| MonkeyCode (Chaitin, domestic / international) | ✓ | ✗ no refresh flow | ✓ remote only | — | — | — |
+| Command Code | ✓ | ✗ static API key | ✓ remote + static fallback | — | — | — |
+| Antigravity (Google, Gemini) | ✓ | ✓ | ✓ remote + static fallback | — | — | — |
+| OfficeAce (Huawei Cloud, OfficeClaw) | ✓ | ✓ control-plane auto-refresh | ✓ remote only | ✓ points balance | ✓ daily bonus (check-in + newcomer gift) | — |
 | Custom providers | ✓ chat passthrough / Responses / Anthropic | — | ✓ manual + server-side fetch | — | — | — |
 
 The three chat entry points (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`, plus `/v1/messages/count_tokens`) and `/v1/models` behave identically for every platform — the differences above are only about what each upstream can do. Model mapping, the global priority queue, 429 fallback, egress proxying, content redaction and request reporting apply to all platforms alike.
 
-> **This project is for learning and discussion only.** It reuses the login state of your own accounts through a local reverse proxy; forwarding requests in the shape of a non-official client may violate the upstream services' terms of service, and any risk (including rate limiting or account bans) is borne by the user. Commercial use and circumventing billing are prohibited. See [Usage Notice](#usage-notice) and [LICENSE](./LICENSE).
+> **This project is for learning and discussion only.** It reuses your own accounts' login state in the shape of a non-official client, which may violate the upstream services' terms; risks (including rate limiting or account bans) are your own. Commercial use and circumventing billing are prohibited. See [Usage Notice](#usage-notice) and [LICENSE](./LICENSE).
 >
-> This is a personal, local-purpose proxy tool. It is unaffiliated with Tencent (WorkBuddy), Meituan (CatPaw), SenseTime (Raccoon), Zhipu (AutoClaw/autoglm), Alibaba Cloud (Qoder / Accio), Huawei Cloud (CodeArts), ByteDance (Trae), iFlytek (Loomy), Cline and their official products; every interface shape comes from observing each vendor's desktop client traffic, and upstream may change at any time.
+> This is a personal, local-purpose proxy tool, unaffiliated with any upstream vendor or their official products (the list is in the [Usage Notice](#usage-notice)); interface shapes come from observing the clients' traffic, and upstream may change at any time.
 
 ---
 
@@ -47,12 +52,10 @@ The three chat entry points (`/v1/chat/completions`, `/v1/responses`, `/v1/messa
 Download the installer from Releases (NSIS, Simplified Chinese, installs to `C:\Program Files\Agent2API` by default, and needs administrator approval during setup), then launch it — **no Node or any other runtime required**.
 
 1. First launch starts the local gateway (port 3065) inside the app process and opens the main window. If an older version's data directory or data files are found, a dialog walks you through the migration.
-2. Click "Add account" on the Accounts page, pick a provider (WorkBuddy / Raccoon / CatPaw / AutoClaw domestic / AutoClaw international / Qoder / Cline / Accio international / Accio domestic / ZCode domestic / ZCode international / CodeArts / Trae / Loomy), then sign in or fill in credentials using whatever that vendor supports: web login, SMS code, pasting credentials, or importing this machine's desktop login state (importing stores no token — the gateway follows once the desktop client signs in again; CodeArts and Trae only offer web login and pasted credentials; Loomy only offers SMS sign-in and pasted session).
+2. Click "Add account" on the Accounts page, pick a provider and follow the dialog: sign in or fill in credentials (web login / SMS code / pasted credentials / importing this machine's desktop login state).
 3. Set your OpenAI client's `base_url` to `http://127.0.0.1:3065/v1` and put anything in `api_key` (for example `sk-local`; the server does not check it while authentication is disabled).
 
-Closing the window only minimizes to the tray by default, and the gateway keeps forwarding in the background; to quit for real, right-click the tray icon and choose "Exit".
-
-Accounts sit in one **global queue** and are tried in ascending priority order, skipping accounts that are disabled, do not offer that model, or are in a rate-limit cooldown for that model; when an account hits a 429 on a model the request falls back to the next candidate, and only when every candidate is unavailable is the last real error passed through.
+Closing the window minimizes to the tray by default and the gateway keeps forwarding in the background; to quit for real, right-click the tray icon and choose "Exit".
 
 ### Verification
 
@@ -80,7 +83,11 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)
 ```
 
-**Pages running in a browser** (a self-built web UI, a single-file frontend app, …) that call this endpoint with `fetch` will fail with "cannot connect to the API": the gateway surface does **not** answer CORS by default, so the preflight (OPTIONS) lands on the API-key check and gets a 401 (a cross-origin preflight never carries the `Authorization` header) and the real request is never sent. Two ways out: ① turn on "Security → Gateway CORS" in Settings — the gateway then answers exactly like the panel does (preflight allowed, responses carry `Access-Control-Allow-*` with origin `*`, effective immediately). Note the gateway is the surface that really forwards upstream and spends quota: with `*` and no API key configured, any web page could drive your local gateway, so configure a "Gateway Key" as well; ② make the page same-origin — run a small local static server that also reverse-proxies `/v1` to `127.0.0.1:3065`, which removes cross-origin entirely and needs no relaxation at all.
+**Pages running in a browser** (a self-built web UI, …) that call this endpoint with `fetch` hit a cross-origin preflight rejection — the gateway does **not** answer CORS by default, so the preflight lands on the API-key check and gets a 401. Two ways out: ① turn on "Security → Gateway CORS" in Settings (origin `*`; with `*` any web page could drive your local gateway, so set a "Gateway Key" too); ② make the page same-origin — serve it from a small local static server that reverse-proxies `/v1` to `127.0.0.1:3065`.
+
+### LAN access
+
+By default the gateway only listens on `127.0.0.1`. After turning on "Settings → General → LAN access" it listens on all adapters, and devices on the LAN just point their API base URL at this machine's IP (the UI shows the full address) to share the accounts. For safety, enabling it requires registering a panel administrator first: the management API then demands an admin session or a gateway key, and with no key enabled the forwarding API refuses service too (the enable flow adds a "default" key automatically). The web panel can optionally be exposed to the LAN as well (off by default). Changes take effect after a restart.
 
 ---
 
@@ -94,7 +101,7 @@ docker run -d --name agent2api --restart unless-stopped \
 
 Open `http://<host>:3065` in a browser — the first visit walks you through **registering the admin account**; log in and create an API key in the "Gateway Keys" page for your clients — `http://<host>:3065/v1` is the OpenAI-compatible endpoint (it refuses to forward until the first key exists, then recovers automatically). All state (SQLite database / config / logs) lives in the `./data` volume.
 
-Compose users (this is the whole `docker-compose.yml`; images are published for amd64 and arm64):
+Compose users (images are published for amd64 and arm64):
 
 ```yaml
 services:
@@ -120,7 +127,7 @@ Environment variables (all optional — nothing needs to be preset):
 
 Build from source: clone the repo and run `docker compose up -d --build` (the image contains only the gateway and the panel, no Rust toolchain).
 
-**Web panel capability notes** (all differences stem from having no local desktop client): web login (WorkBuddy / Qoder / Cline), SMS codes and pasted credentials work fully; AutoClaw / CatPaw / Accio / CodeArts / Trae web-login callbacks hit the machine's own port, so from a remote panel use pasted credentials instead; Raccoon web login and "import desktop login state" are unavailable (use pasted credentials; Loomy, CodeArts and Trae have no desktop login state to import either).
+**Web panel capability notes** (all stem from having no local desktop client): web login (WorkBuddy / Qoder / Cline), SMS codes and pasted credentials work fully; web logins that need a callback on this machine (AutoClaw / CatPaw / Accio / CodeArts / Trae) and "import desktop login state" are unavailable — use pasted credentials instead.
 
 ---
 
@@ -128,27 +135,27 @@ Build from source: clone the repo and run `docker compose up -d --build` (the im
 
 ### Accounts
 
-Every provider's accounts share one **global queue** (the second column from the left is the priority) and can be toggled individually. The rate-limit row shows the per-model cooldown state and when it recovers, while expiry and balance are kept fresh by background tasks such as "Credential maintenance" and the scheduled balance query.
+All accounts share one queue (the second column is the priority) and can be toggled individually; per-model cooldowns, expiry and balance are shown inline, and low-balance accounts are skipped below the threshold by default.
 
 ![Accounts page: global queue, per-model rate-limit cooldown, expiry and balance](./assets/screenshots/accounts.png)
 
-When adding an account you pick the provider first, then sign in however that vendor supports. One vendor can hold several account versions at once (WorkBuddy's China and Global editions, for example), and forwarding picks the right one by model name:
+Pick a provider, then sign in; one vendor can hold several account versions (e.g. WorkBuddy China / Global), and forwarding picks the right one by model name:
 
 ![Add account: choose provider and edition, then sign in on the web](./assets/screenshots/add-account.png)
 
 ### Report
 
-The overview gives total requests, success rate, total tokens and the top model, with rankings by account and by provider beside it; below that come two usage donuts (by model and by provider), then a fixed 365-day activity heatmap:
+Overview: requests / success rate / tokens / top model, with account and provider rankings, usage donuts and a 365-day activity heatmap:
 
 ![Report overview: stat cards, top accounts / providers, model and provider usage donuts](./assets/screenshots/report-overview.png)
 
-Further down are the trends: the last 24 hours of **cache hit rate** (left axis, line) and **token consumption** (right axis, area) are overlaid in one chart so a dip in hit rate can be read as a change in traffic mix versus a cache miss; at the bottom is a per-day token bar chart whose range follows the time window at the top:
+Trends: 24-hour **cache hit rate** (line) and **token consumption** (area) on twin axes, with a per-day token bar chart below:
 
 ![Report trends: dual-axis cache hit rate and token consumption, per-day token bars](./assets/screenshots/report-trends.png)
 
 ### Scheduled Tasks
 
-Background tasks are managed on one page: toggle, interval, last result and next fire time all live here, and you can also run one immediately without waiting out the interval. The task list itself is stored in the `scheduledTasks` field of `~/.agent2api/config.json`, and edits take effect immediately — no restart needed.
+All background tasks live on one page (toggle / interval / last result / run now); the list is stored in `scheduledTasks` in `~/.agent2api/config.json` and edits apply immediately.
 
 ![Scheduled tasks page: toggles and intervals for check-in, credential maintenance, model catalog refresh and more](./assets/screenshots/scheduled-tasks.png)
 
@@ -194,12 +201,22 @@ agent2api/
 │  │  │  │  │  │                auth / cosy (COSY signing and body encoding) / protocol (envelope decoding) /
 │  │  │  │  │  │                chat (session-style forwarding) / stream / machine (PKCE and machine id) /
 │  │  │  │  │  │                credentials / refresh / models / balance
+│  │  │  │  │  ├─ cline/        Cline: adapter (Bearer + product headers) / credentials (workos: prefix
+│  │  │  │  │  │                + desktop login state + name parsing) / login (WorkOS device authorization) /
+│  │  │  │  │  │                refresh (single-flight renewal) / models (two quota pools + default mapping seeds) /
+│  │  │  │  │  │                balance (credit balance, micro-credit ÷1e6)
 │  │  │  │  │  ├─ accio/        Accio (international + domestic): endpoints (both regions and paths) /
 │  │  │  │  │  │                credentials / auth / refresh (single-flight) /
 │  │  │  │  │  │                oauth (PKCE web login + loopback callback) /
 │  │  │  │  │  │                models (static fallback + /api/llm/config/v2) /
 │  │  │  │  │  │                protocol (OpenAI <-> ADK Gemini-style envelope) /
 │  │  │  │  │  │                chat (session-style forwarding) / stream (ADK SSE unwrapping) / balance
+│  │  │  │  │  ├─ zcode/        ZCode (Zhipu Z.AI, domestic + international): region (two regions and identities) /
+│  │  │  │  │  │                adapter (stateless, parameterized by region) / credentials (token + plan JWT) /
+│  │  │  │  │  │                oauth (CLI polling login) / coding_key (exchange for an inference API key) / models (static table) /
+│  │  │  │  │  │                balance (plan balance) / plan + claim (plan channel and timed claim) /
+│  │  │  │  │  │                captcha (human-verification token pool) / reasoning (GLM-5.3 thinking budget) /
+│  │  │  │  │  │                zcode_system.json (system prompt)
 │  │  │  │  │  ├─ codearts/     CodeArts (Huawei Cloud): signer (Huawei Cloud SDK-HMAC-SHA256,
 │  │  │  │  │  │                byte-for-byte vectors from the reference implementation) /
 │  │  │  │  │  │                credentials / dpop (ES256 DPoP proof) /
@@ -219,13 +236,42 @@ agent2api/
 │  │  │  │  │                   errors (error classification and dead-config list) /
 │  │  │  │  │                   models (get_detail_param catalog) /
 │  │  │  │  │                   usage (entitlement packs + plan quota, two accounts) / profile (identity parsing)
-│  │  │  │  │  └─ loomy/        Loomy (iFlytek): login (SMS code) / credentials (14-day session, no
-│  │  │  │  │                   refresh flow) / sign (client HMAC-SHA1 headers) / endpoints /
-│  │  │  │  │                   client (integration gateway) / models (/api/v1/models remote only,
-│  │  │  │  │                   no built-in fallback) / balance (permanent + daily gifted points) /
-│  │  │  │  │                   checkin (first login of the day refreshes the gifted points)
+│  │  │  │  │  ├─ loomy/        Loomy (iFlytek): login (SMS code) / credentials (14-day session, no
+│  │  │  │  │  │                refresh flow) / sign (client HMAC-SHA1 headers) / endpoints /
+│  │  │  │  │  │                client (integration gateway) / models (/api/v1/models remote only,
+│  │  │  │  │  │                no built-in fallback) / balance (permanent + daily gifted points) /
+│  │  │  │  │  │                checkin (first login of the day refreshes the gifted points)
+│  │  │  │  │  ├─ kuku/         KukuAI (Baidu Wenku "Kuku AI / GenFlowPro", kuku.baidu.com):
+│  │  │  │  │  │                adapter (is_stateful) / session (bdstoken/uinfo/uk trio cache) /
+│  │  │  │  │  │                engine (STOKEN exchange) / http / login (main-site web login + shell-side cookie capture) /
+│  │  │  │  │  │                credentials (BDUSS cookies) / models (static fallback + remote refresh) /
+│  │  │  │  │  │                chat (create session → allocate compute → SSE) / balance (points) /
+│  │  │  │  │  │                checkin (daily free points)
+│  │  │  │  │  ├─ monkeycode/   MonkeyCode (Chaitin, domestic + international): region (two sites) /
+│  │  │  │  │  │                adapter / endpoints (paths, cookie name, interface_type -> CLI map) /
+│  │  │  │  │  │                client / credentials (session + imageId) / login (paste session and discovery) /
+│  │  │  │  │  │                models (one slot per site, remote only) / task (create task) /
+│  │  │  │  │  │                stream (WS task stream) / translate (ACP events -> chat frames, with
+│  │  │  │  │  │                auto-approval of tools and auto-reply to agent questions)
+│  │  │  │  │  ├─ commandcode/  Command Code: adapter / endpoints / credentials / login /
+│  │  │  │  │  │                fingerprint (deterministic device fingerprint + 8h reporting) / models /
+│  │  │  │  │  │                plan (8-key envelope, params rewrite, session id derivation)
+│  │  │  │  │  ├─ antigravity/  Antigravity (Google, Gemini): oauth (refresh token + single-flight) /
+│  │  │  │  │                   project (loadCodeAssist -> onboardUser discovery) / credentials /
+│  │  │  │  │                   endpoints (three environment bases and header set) / login /
+│  │  │  │  │                   models (fetchAvailableModels + built-in fallback + real-name mapping) / adapter
+│  │  │  │  │  └─ officeace/    OfficeAce (Huawei Cloud, OfficeClaw): oauth (PKCE + P-256 DPoP self-service login) /
+│  │  │  │  │                   signer (both SDK-HMAC and V11-HMAC signatures + vector fixtures) /
+│  │  │  │  │                   credentials (gateway Basic + control-plane temporary AK/SK) /
+│  │  │  │  │                   chat (stateless OpenAI-compatible) / models (remote catalog + per-model multipliers) /
+│  │  │  │  │                   probe (availability probe; unreachable models hidden by default) /
+│  │  │  │  │                   subscription (subscription / quota / rewards) / onboarding / checkin / balance
+│  │  │  │  ├─ protocol/        Protocol translation layer (per-vendor wire <-> standard chat SSE request/response
+│  │  │  │  │                   translation: Anthropic Messages / Responses / NDJSON (Command Code) /
+│  │  │  │  │                   Gemini envelope (Antigravity), plus tool plans and history repair)
 │  │  │  │  ├─ upstream/        Forwarding orchestration: global account queue loop (provider_loop) + request body
-│  │  │  │  │                   handling (payload) + SSE passthrough/aggregation + usage side-channel extraction
+│  │  │  │  │                   handling (payload) + SSE passthrough/aggregation + usage side-channel extraction +
+│  │  │  │  │                   translation stream wiring for non-chat protocols (translate: three in parallel)
 │  │  │  │  ├─ account_store/   Account storage (global priority, rate-limit cooldown, per-vendor add and import)
 │  │  │  │  ├─ models/          Model catalog internals (built-in WorkBuddy list + /v3/config refresh)
 │  │  │  │  ├─ model_rules.rs   Model management rules (disable / hide / mapping alias)
@@ -291,7 +337,7 @@ The root project has no runtime dependencies; `package.json` only provides the s
 
 ### For learning and discussion only
 
-This project is a hands-on exercise in HTTP reverse proxying, SSE streaming passthrough, multi-upstream protocol adaptation and desktop packaging (Tauri), and is **for personal learning and research only**. It is not an official product and has no affiliation with, endorsement from or sponsorship by Tencent and WorkBuddy / CodeBuddy, Meituan and CatPaw, SenseTime and Raccoon, Zhipu and AutoClaw / autoglm, Alibaba and Qoder / Accio, Huawei Cloud and CodeArts, ByteDance and Trae, or iFlytek and Loomy.
+This project is a hands-on exercise in HTTP reverse proxying, SSE streaming passthrough, multi-upstream protocol adaptation and desktop packaging (Tauri), and is **for personal learning and research only**. It is not an official product and has no affiliation with, endorsement from or sponsorship by Tencent and WorkBuddy / CodeBuddy, Meituan and CatPaw, SenseTime and Raccoon, Zhipu and AutoClaw / autoglm, Alibaba and Qoder / Accio, Huawei Cloud and CodeArts / OfficeAce, ByteDance and Trae, iFlytek and Loomy, Baidu Wenku and KukuAI, Chaitin and MonkeyCode, Command Code, or Google and Antigravity.
 
 ### About the reverse-proxy behaviour
 

@@ -274,6 +274,17 @@
   gap: 7px;
 }
 
+/* 「路由」分类的两行（路由策略 / 会话粘性）：行内问号紧跟分段控件 —— 问号
+   放在 118px 标签列的右侧、控件左边，视觉上就是「标签后的说明」 */
+.routing-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.routing-row .tip-q {
+  flex: none;
+}
+
 /* 覆盖 components.css 的 input[type=number]{max-width:130px}
 
 ：这里要收窄到 92px，

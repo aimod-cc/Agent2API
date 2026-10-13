@@ -1,0 +1,404 @@
+/* ─────────────────────────────────────────────
+   签到中心页（page-checkin.css）
+
+   页内三个标签页（SegmentedControl 切换）：签到中心（总览卡 + 三块任务面板）、
+   定时签到（总开关 + 条目列表 + 保活模型链）、签到记录（每账号明细表）。
+   页面骨架类名全部以 .ck- 前缀自持；控件（Badge / Button / Checkbox / Input /
+   Progress / SegmentedControl / Select / Spinner / Switch / Pager）来自组件库，
+   不在这里画。
+   ───────────────────────────────────────────── */
+
+/* ── Tab 条：左档位 + 右总开关徽标 ── */
+.ck-tabs {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+/* ── 总览卡条 ── */
+.ck-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.ck-stat {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-1);
+  padding: 13px 16px;
+  min-width: 0;
+}
+/* 可点击的总览卡（切到对应标签页的入口）：悬停给一点「这是入口」的反馈 */
+.ck-stat-link { cursor: pointer; }
+.ck-stat-link:hover { border-color: var(--border-strong); }
+.ck-stat-label { font-size: 12px; color: var(--text-3); }
+.ck-stat-value {
+  font-size: 22px;
+  font-weight: 700;
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+.ck-stat-value small { font-size: 13px; font-weight: 500; color: var(--text-3); }
+.ck-stat-foot { margin-top: 4px; font-size: 12px; color: var(--text-3); }
+.ck-stat .ck-stat-bar { margin-top: 8px; }
+/* 无数据（还没读到快照）时的占位灰 */
+.ck-stat-value.ck-pending { color: var(--text-3); }
+
+/* ── 任务面板列（签到中心 tab；单列，三块面板纵向排）── */
+.ck-main { min-width: 0; display: grid; gap: 0; }
+/* .panel 自带 margin-bottom: 14px，用 grid gap 统一间距，抵掉面板自身的
+   margin（grid gap + margin 会叠成 28px 的行距，比其它页大出一倍） */
+.ck-main > .panel { margin-bottom: 0; }
+.ck-main > .panel + .panel { margin-top: 14px; }
+
+@media (max-width: 1080px) {
+  .ck-stats { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ── 每日签到：提供商行 ── */
+.ck-prov-row { border-bottom: 1px solid var(--hairline); }
+.ck-prov-row:last-child { border-bottom: 0; }
+.ck-prov-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 16px;
+  cursor: pointer;
+  user-select: none;
+}
+.ck-prov-main:hover { background: var(--row-hover); }
+.ck-prov-logo {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  background: var(--control-bg);
+  color: var(--text-2);
+  overflow: hidden;
+}
+.ck-prov-logo img { width: 100%; height: 100%; object-fit: contain; }
+.ck-prov-info { flex: 1; min-width: 0; }
+.ck-prov-name {
+  font-weight: 600;
+  font-size: 13.5px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.ck-prov-desc { font-size: 12px; color: var(--text-3); margin-top: 2px; }
+.ck-prov-right { display: flex; align-items: center; gap: 10px; flex: none; }
+.ck-prov-count { font-size: 12.5px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.ck-chev { color: var(--text-3); transition: transform 0.15s; flex: none; }
+.ck-prov-row.open .ck-chev { transform: rotate(90deg); }
+.ck-prov-detail { display: none; padding: 2px 16px 12px 58px; }
+.ck-prov-row.open .ck-prov-detail { display: block; }
+/* 范围外账号的折叠说明（每日签到卡底部） */
+.ck-fold-note {
+  padding: 9px 16px;
+  font-size: 12px;
+  color: var(--text-3);
+  background: var(--surface-2);
+  border-top: 1px solid var(--hairline);
+  line-height: 1.7;
+}
+
+/* ── 账号明细表（展开区里的小表，非整页大表）── */
+.ck-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  background: var(--surface-inset);
+  border-radius: var(--r-xs);
+  overflow: hidden;
+}
+.ck-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-3);
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.ck-table td {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--hairline);
+  font-variant-numeric: tabular-nums;
+}
+.ck-table tr:last-child td { border-bottom: 0; }
+
+/* ── 任务行（新手任务清单 / KukuAI 每日子任务共用）── */
+.ck-task-line { display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: 13px; }
+.ck-task-tick {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  flex: none;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+}
+.ck-task-tick.done { background: var(--ok-soft); color: var(--ok); border: 1px solid var(--ok-bd); }
+.ck-task-tick.todo { border: 1.5px dashed var(--border-strong); color: transparent; }
+.ck-task-pts { font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.ck-task-st { margin-left: auto; }
+.ck-task-st .ck-task-btn { margin-left: 8px; }
+.ck-group-label { margin: 10px 0 4px; font-size: 12px; color: var(--text-3); }
+
+/* ── 活动福利行（CodeArts / ZCode）── */
+.ck-welfare-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--hairline);
+}
+.ck-welfare-row:last-child { border-bottom: 0; }
+
+/* ── 自动签到设置卡 ── */
+.ck-set-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--hairline);
+  font-size: 13px;
+}
+.ck-set-line:last-child { border-bottom: 0; }
+.ck-set-k { color: var(--text-2); flex: none; width: 58px; }
+.ck-set-v { flex: 1; min-width: 0; }
+.ck-range { display: flex; flex-wrap: wrap; gap: 6px; }
+.ck-note {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: var(--r-xs);
+  background: var(--surface-inset);
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.7;
+}
+
+/* ── 保活模型链：一行一个模型的清单编辑器 ──
+   顺序就是语义（按顺序逐个尝试、第一个成功即止），所以每一行左侧留一枚拖动把手、
+   行尾是移除按钮。把手是**唯一**的拖动起点 —— 行里还有 ×，整行可拖会把「点移除」
+   变成「拖走一行」（与账号页顺序拖拽同一取舍）。 */
+
+/* 面板本身收成半幅：里面只有一列短清单，拉满整行时那排灰条会长得没有内容。
+   再给个上限 —— 2K / 4K 上「半幅」又够宽到把清单拉回一条长带，白收。 */
+.ck-chain-panel { width: 50%; max-width: 640px; }
+
+.ck-chain { display: flex; flex-direction: column; gap: 4px; }
+.ck-chain-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px 4px 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  background: var(--surface-2);
+  font-size: 12.5px;
+}
+/* 拖动中的那一行压淡（与账号页 .dragging 同一观感） */
+.ck-chain-row.dragging { opacity: .45; }
+.ck-chain-grip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--r-xs);
+  color: var(--text-3);
+  cursor: grab;
+  /* 触屏 / 触控板上按住拖动时不要连带触发页面滚动 */
+  touch-action: none;
+}
+.ck-chain-grip:hover { background: var(--nav-hover); color: var(--text); }
+.ck-chain-grip svg { display: block; }
+.ck-chain-name {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 链内位次：与账号页的 #N 同一档读数（顺序是这条链的全部意义，给个数好核对） */
+.ck-chain-index {
+  flex: none;
+  color: var(--text-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.ck-chain-del {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-3);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.ck-chain-del:hover { background: var(--danger-soft); color: var(--danger); }
+.ck-chain-del:disabled { opacity: .5; cursor: not-allowed; }
+.ck-chain-empty { font-size: 12px; color: var(--text-3); }
+.ck-chain-add { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.ck-chain-dirty { font-size: 11.5px; color: var(--warn); }
+/* 拖动期间整页禁选：不锁的话鼠标划过文本会把模型名一片片选中 */
+body.ck-chain-dragging { cursor: grabbing; user-select: none; }
+
+/* ── 定时签到：条目行 ──
+   形状与每日签到的提供商行同族（hover 底色、hairline 分隔），但不可展开查看、
+   编辑表单由「编辑」按钮显式开合（open 类只控制表单显隐） */
+.ck-sched-row { border-bottom: 1px solid var(--hairline); }
+.ck-sched-row:last-child { border-bottom: 0; }
+/* 悬停 / 展开时给底色：一行里三段文字三个按钮，没有底色很难看出整行是一体的 */
+.ck-sched-row:hover { background: var(--row-hover); }
+.ck-sched-row.open { background: var(--row-hover); }
+.ck-sched-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 16px;
+}
+/* 范围那行截断：部分勾选时名字可能很长，整行会被挤成两三行；
+   全貌在 title 里（见 providersFullList） */
+.ck-sched-scope { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ck-sched-next {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  background: var(--surface);
+  font-size: 12px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* 新建条目那一行：卡头按钮点开就落在列表首位（左侧一枚 ＋ 与已存条目区分） */
+.ck-sched-row-new .ck-new-dot {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--border-strong);
+  border-radius: 999px;
+  color: var(--text-3);
+  font-size: 13px;
+  line-height: 1;
+}
+/* 行内编辑表单与「添加条目」的落点 */
+.ck-sched-editor {
+  padding: 2px 16px 14px 44px;
+  border-top: 1px dashed var(--hairline);
+}
+.ck-sched-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 6px;
+}
+/* 签到范围的取值行：标签与内容顶对齐（内容是多行的复选框网格） */
+.ck-set-line-top { align-items: flex-start; }
+.ck-set-line-top .ck-set-k { padding-top: 5px; }
+.ck-mini-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 7px;
+}
+.ck-mini-note { font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+/* 「全选 / 清空」：文字按钮，不抢「保存」的注意力 */
+.ck-mini-btn {
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--primary);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.ck-mini-btn:hover { text-decoration: underline; }
+.ck-mini-btn:disabled { color: var(--text-3); cursor: not-allowed; text-decoration: none; }
+.ck-range { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 4px 10px; }
+.ck-range-item { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: 12.5px; }
+.ck-range-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ck-mini-warn { margin-top: 6px; font-size: 11.5px; color: var(--warn); }
+
+/* ── 签到记录：明细表 ── */
+.ck-records-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--hairline);
+}
+/* 关键词框吃掉剩余宽度（与日志页 .log-filters 的 search 框同一取舍） */
+.ck-records-search { flex: 1 1 140px; min-width: 140px; }
+.ck-records-scroll { overflow-x: auto; }
+/* 时间列定宽：时间与北京日期两行都不换行 */
+.ck-records-table .ck-col-time { white-space: nowrap; }
+.ck-record-date {
+  display: block;
+  font-size: 11px;
+  color: var(--text-3);
+}
+.ck-record-source { font-variant-numeric: tabular-nums; }
+.ck-record-reason { margin-left: 6px; color: var(--text-3); font-size: 11.5px; }
+.ck-record-detail-fail { color: var(--danger); }
+.ck-records-foot {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 16px;
+  border-top: 1px solid var(--hairline);
+}
+
+/* ── 空态 / 加载态（整页级与卡内共用）── */
+.ck-empty {
+  padding: 18px 16px;
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+.ck-loading {
+  padding: 40px 0;
+  display: grid;
+  place-items: center;
+  gap: 10px;
+  color: var(--text-3);
+  font-size: 13px;
+}
+.ck-page-error {
+  margin-bottom: 14px;
+  padding: 10px 16px;
+  border: 1px solid var(--danger-bd);
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}

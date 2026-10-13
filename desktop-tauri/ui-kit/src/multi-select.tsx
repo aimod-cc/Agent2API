@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { Combobox as ComboboxPrimitive } from '@base-ui/react/combobox'
 import { cn } from './lib/cn'
+import { t } from './i18n'
 
 /**
  * 多选下拉。
@@ -61,8 +62,8 @@ function MultiSelect<Value extends string = string>({
   onValueChange,
   options,
   placeholder = '',
-  emptyHint = '没有匹配的选项',
-  searchPlaceholder = '搜索…',
+  emptyHint = t('没有匹配的选项'),
+  searchPlaceholder = t('搜索…'),
   disabled = false,
   className,
   id,

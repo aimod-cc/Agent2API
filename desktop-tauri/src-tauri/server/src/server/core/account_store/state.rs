@@ -323,6 +323,48 @@ impl StoredAccount {
             .insert("claimPlans".to_string(), Value::Object(ledger));
     }
 
+    /// 小浣熊新手任务的**结算台账**：`{ "<task_key>": <毫秒时刻> }`。
+    ///
+    /// 键是 `providers::raccoon::onboarding` 的任务 key（`desktop_login_grant` /
+    /// `mobile_login_grant`），值是这条**一次性**登录奖励结算的时刻 —— 「本轮刚
+    /// 领到」（granted=true）与「探测确认早已发放过」（granted=false）都算结算：
+    /// 一次性福利落定后不会再变，之后状态查询直接按「已领取」展示。不记的话，
+    /// 奖励早被官方客户端领掉的老账号每次打开面板都是「待领取」，点一次领取拿回
+    /// 一句「早已发放过」—— 与 `mark_zcode_claim` 头上那段是同一个教训。
+    ///
+    /// 读不懂的形状（数组 / 字符串这类脏值）一律当空表：台账只服务「这条结算过没」
+    /// 的展示，按「没结算过」处理最多让用户多点一次领取（上游幂等，不会重复加分），
+    /// 领取一步会顺手把台账补上。
+    pub fn onboarding_grants(&self) -> Map<String, Value> {
+        match self.fields.get("onboardingGrants") {
+            Some(Value::Object(map)) => map.clone(),
+            _ => Map::new(),
+        }
+    }
+
+    pub fn set_onboarding_grants(&mut self, ledger: Map<String, Value>) {
+        self.fields
+            .insert("onboardingGrants".to_string(), Value::Object(ledger));
+    }
+
+    /// 新手任务的**一次性结算快照**（Loomy 8 条任务 / CodeArts 新人礼）：
+    /// `{ "at": <ms>, "tasks": [...], "earned": n, "total": n }`，`tasks` 与
+    /// 状态查询返回的行同形（此刻全部 `done`）。
+    ///
+    /// 与 [`Self::onboarding_grants`] 的分工：那份是**逐条**时刻（小浣熊的两条
+    /// 首登奖励各有独立的探测口径），这份是**整份清单** —— 给那两家「任务表领完
+    /// 就没有了」的家用：结算之后状态查询与一键领取都不必再打上游（零请求），
+    /// 面板进页面也直接按记忆渲染。一次性福利不会再变，快照因此没有过期问题；
+    /// 手动「查询任务」仍走强制刷新（`?refresh=1`），拿到新事实时覆盖它。
+    ///
+    /// 读在 [`crate::server::core::providers::onboarding_memory::snapshot`]：
+    /// 那里的入参是**账号记录的原始 JSON**（几家 `*_account_record()` 的返回形态），
+    /// 读侧因此只有一份实现，本访问器只负责写。
+    pub fn set_onboarding_settled(&mut self, snapshot: Value) {
+        self.fields
+            .insert("onboardingSettled".to_string(), snapshot);
+    }
+
     /// 账号级出网代理配置（缺失返回 Value::Null）
     pub fn proxy(&self) -> Value {
         self.fields.get("proxy").cloned().unwrap_or(Value::Null)
@@ -412,9 +454,14 @@ impl StoredAccount {
     /// 不是缺陷而是**这条账号的正常形态**。判据必须**显式**落在记录上 ——
     /// 只看「apiKey 为空」会把用户忘了填 key 的记录一起放行，表现成一条
     /// 看不懂的上游 401（见 [`Self::no_auth`]）。
+    ///
+    /// 第六条判据 `has_officeace_key()` 只对 OfficeAce 有效（`modelAppKey` /
+    /// `modelAppSecret` 是它独有的凭证键）：那家不用 Bearer token，转发凭证是
+    /// 一对网关 Basic key，漏了这一条它整家都会被静默过滤掉（见
+    /// [`Self::has_officeace_key`]）。
     pub fn has_credentials(&self) -> bool {
         self.has_token() || self.is_desktop() || self.has_api_key() || self.has_jwt()
-            || self.no_auth()
+            || self.no_auth() || self.has_officeace_key()
     }
 
     /// 记录是否**显式声明「该上游无需鉴权」**（自定义账号的 `noAuth: true`）。
@@ -441,6 +488,28 @@ impl StoredAccount {
             .get("apiKey")
             .and_then(Value::as_str)
             .is_some_and(|key| !key.trim().is_empty())
+    }
+
+    /// 记录里是否有 OfficeAce 的**网关凭据**（`modelAppKey` + `modelAppSecret`）。
+    ///
+    /// ── 为什么要有这一支 ────────────────────────────────────────
+    /// OfficeAce 的转发凭证是**一对**（`Bearer`/`accessToken` 那套它不用）：
+    /// 网关 Basic 的 `modelAppKey` : `modelAppSecret`。没有这一支时
+    /// `has_credentials()` 对它恒假 ⇒ 账号在 `accounts_for_provider` /
+    /// `current_entry_for_provider` / `get_session_by_id` 三处全被过滤掉，
+    /// 表现为「账号导入成功、目录也拉到了，但 `/v1/models` 里这条家一个模型都
+    /// 没有、点名转发报没有可用账号」——把一整家静默吞掉。
+    ///
+    /// 两个 key 都要非空才算：只填一个的凭据转发必然 401，把它算作「有凭证」
+    /// 只会让失败推迟到上游（与 `has_api_key` 的取舍同一条）。
+    pub fn has_officeace_key(&self) -> bool {
+        let non_empty = |key: &str| {
+            self.fields
+                .get(key)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+        };
+        non_empty("modelAppKey") && non_empty("modelAppSecret")
     }
 
     /// 小浣熊账号的用户 ID（`userId`；workbuddy 侧对应 `uid`）
@@ -632,5 +701,34 @@ mod tests {
         let mut record = Map::new();
         mark_name_custom(&mut record, false, Some(&existing));
         assert_eq!(record.get("nameCustom"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn officeace_gateway_pair_counts_as_credentials() {
+        // 一对齐备的网关 Basic 凭据 ⇒ 有凭证（否则整家会被静默过滤掉）
+        let mut fields = Map::new();
+        fields.insert("modelAppKey".to_string(), Value::String("K".to_string()));
+        fields.insert("modelAppSecret".to_string(), Value::String("S".to_string()));
+        let record = StoredAccount::from_map(fields);
+        assert!(record.has_officeace_key());
+        assert!(record.has_credentials());
+
+        // 只填一个：不算有凭证（转发必然 401，别把失败推到上游）
+        let mut only_key = Map::new();
+        only_key.insert("modelAppKey".to_string(), Value::String("K".to_string()));
+        assert!(!StoredAccount::from_map(only_key).has_officeace_key());
+
+        // 空串 / 全空白同样不算
+        let mut blank = Map::new();
+        blank.insert("modelAppKey".to_string(), Value::String("K".to_string()));
+        blank.insert("modelAppSecret".to_string(), Value::String("  ".to_string()));
+        assert!(!StoredAccount::from_map(blank).has_officeace_key());
+
+        // 别家的记录不受影响：只有 accessToken 的记录仍是「有凭证」
+        let mut plain = Map::new();
+        plain.insert("accessToken".to_string(), Value::String("T".to_string()));
+        let plain = StoredAccount::from_map(plain);
+        assert!(plain.has_credentials());
+        assert!(!plain.has_officeace_key(), "别家不该被判成有 OfficeAce 凭据");
     }
 }

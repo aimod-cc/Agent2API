@@ -3,9 +3,8 @@
 //! ── 为什么要有这个模块 ──────────────────────────────────────
 //! 改造前整个网关只有 WorkBuddy 一个上游，provider 概念是隐含的：账号就是
 //! workbuddy 账号、端点常量写在 `endpoints.rs`、鉴权逻辑写在 `auth.rs`。
-//! 多提供商（注册表现有七家：WorkBuddy / 小浣熊 raccoon / CatPaw / AutoClaw /
-//! Qoder / Cline Free / Cline Pass，七家都参与推理转发，见各自的 `mod.rs`），
-//! 后两家分别由 W5-T-d4 与 W4b-T-c2 接上各自的适配器）之后，
+//! 多提供商（注册表见 [`PROVIDERS`]，各家都参与推理转发，见各自的
+//! `mod.rs` 模块头）之后，
 //! 「这个账号属于哪家」「这一家叫什么名字」需要一个
 //! 全局唯一的定义点 —— 就是本模块。
 //!
@@ -32,7 +31,7 @@
 //! 经 `kind_from_id` 判定」自动派生，不需要再改那些文件里的任何 id 清单。
 //!
 //! ── 静态注册表为什么用切片而不是 HashMap ─────────────────────
-//! provider 是**编译期内置**的（内置五家，不是插件），数量个位数；
+//! provider 是**编译期内置**的（不是插件），数量有限（见 [`PROVIDERS`]）；
 //! 用 `&'static [ProviderMeta]` 可以让 `meta()` 直接返回 `&'static` 引用
 //! （没有生命周期纠缠、也没有锁），且列表顺序稳定 —— 前端拿到的 `providers`
 //! 数组顺序稳定，便于比对与展示。
@@ -97,6 +96,13 @@
 
 pub mod adapter;
 pub mod accio;
+/// Antigravity（Google 的 AI IDE，推理走 **Google Cloud Code Assist**
+/// `v1internal`）。适配实现在 `antigravity/`：账号管理（粘贴 Google
+/// refresh token）+ token 刷新（Google OAuth 的 form 端点）+ 模型目录
+/// （`:fetchAvailableModels`，只列 Gemini）+ **会话转发**（`build_chat_request`
+/// 构造 v1internal 信封，响应走 `UpstreamResponse::AntigravityGemini` 那条
+/// Gemini SSE 翻译层）全部已接通；`is_stateful` 恒 false，见 `antigravity/mod.rs`）。
+pub mod antigravity;
 pub mod autoclaw;
 pub mod catalog;
 /// 远程模型清单的**持久化缓存**（各家的清单在进程重启后由它读回，见模块头）。
@@ -107,8 +113,14 @@ pub mod catpaw;
 pub mod cline;
 /// CodeArts（华为云 snap-access）。适配器实现在 `codearts/`，
 /// 语义来源与施工计划见 `cpa-deploy/notes/agent2api-codearts-port-plan.md`。
-/// 目前只落了签名层，尚未进 `ProviderKind`（不参与目录与转发）。
+/// 全链已接齐（账号 / 目录 / 会话式转发 / 余额 / 每日福利），见
+/// `codearts/mod.rs` 的模块头。
 pub mod codearts;
+/// Command Code（`api.commandcode.ai`）：无状态转发（一次 HTTP 请求 = 一次
+/// 生成）+ 粘贴式 `user_` API Key。上游响应是 **NDJSON** 而不是 SSE、且
+/// **HTTP 恒 200**（错误在流内），因此走
+/// `UpstreamResponse::CommandCodeNdjson` 那条翻译层，见 `commandcode/mod.rs`。
+pub mod commandcode;
 pub mod content_block;
 /// 自定义提供商的**运行期接线**（目录聚合的追加段 + Chat Completions 协议
 /// 转发）。它不进本文件的身份体系（`ProviderKind` / `PROVIDERS`，见
@@ -116,13 +128,23 @@ pub mod content_block;
 /// 形态调用它 —— 挂在这里与其它子模块并列，便于对照「内置家走适配器、
 /// 自定义家走独立通道」的两条路径。
 pub mod custom;
+pub mod kuku;
 pub mod loomy;
+/// MonkeyCode（长亭科技的开源 AI 开发平台）。适配实现在 `monkeycode/`：
+/// 账号管理（粘贴 session）+ 模型目录（`GET /api/v1/users/models`）+
+/// **会话转发**（上游是「建任务 → WebSocket 任务流」，ACP 事件翻译为 chat 帧，
+/// 含工具自动批准与提问自动应答）全部已接通；`is_stateful` 为 true，
+/// 见 `monkeycode/mod.rs` 的模块头。
+pub mod monkeycode;
+pub mod officeace;
+pub mod onboarding_memory;
 pub mod qoder;
 pub mod raccoon;
 pub mod refresh_flight;
 pub mod router;
-/// Trae（字节 AI IDE）。目前只有"形状层"（签名无关的 body/头/SSE 判定），
-/// 适配器与账号存储在后续里程碑接入 —— 先挂模块是为了让向量测试能跑。
+/// Trae（字节 AI IDE）。适配实现在 `trae/`：登录 / 凭据 / 目录 / 会话式转发
+/// 已接通（只支持国内 SOLO 通道；国际版是另一套协议，将来另立 kind），见
+/// `trae/mod.rs` 的模块头。
 pub mod trae;
 pub mod workbuddy;
 pub mod zcode;
@@ -197,12 +219,25 @@ pub enum ProviderKind {
     /// 的互查在 `autoclaw::region::Region`（`kind` / `provider_id` /
     /// `from_provider_id`），别处不要再写 `"autoclaw-intl"` 这类字面量。
     AutoClawIntl,
-    /// Qoder。适配实现在 `qoder/`：账号管理（国际版设备授权登录 / PAT /
-    /// 凭证续期 / 额度查询）**加推理转发**。上游鉴权不是 Bearer 而是一套自签名
-    /// 的 COSY 头、请求体要先编码再签名、响应还多包一层信封，因此
-    /// `is_stateful()` 为 true（一次发送由适配器自己完成，见 `qoder/mod.rs`）；
-    /// 它参与全局队列与模型广告，`supports_chat()` 为 true。
+    /// Qoder **中国版**（`qoder`，历史 id 不改名：存量账号的落盘契约）。适配实现
+    /// 在 `qoder/`：账号管理（设备授权登录 / PAT / 凭证续期 / 额度查询）**加推理
+    /// 转发**。上游鉴权不是 Bearer 而是一套自签名的 COSY 头、请求体要先编码再
+    /// 签名、响应还多包一层信封，因此 `is_stateful()` 为 true（一次发送由适配器
+    /// 自己完成，见 `qoder/mod.rs`）；它参与全局队列与模型广告，`supports_chat()`
+    /// 为 true。
+    ///
+    /// ── 与 [`ProviderKind::QoderIntl`] 是同一套协议的两个地区（2026-10 拆家）──
+    /// 与 AutoClaw / Accio / ZCode 同一思路：地区是**provider 身份**而不是账号
+    /// 属性。拆家前「地区是账号上的 `mode` 字段」的后果：模型管理里两地区账号
+    /// 混在一个「模型来源」下拉里、一次刷新只能刷到队首账号所属地区的目录、
+    /// 「获取模型」弹窗也只有一个 Qoder 行。地区互查在
+    /// `qoder::endpoints::Region`（`kind` / `provider_id` / `from_provider_id`）。
     Qoder,
+    /// Qoder **国际版**（`qoder-intl`）。与 [`ProviderKind::Qoder`] 同一套协议、
+    /// 不同站点（`openapi.qoder.sh` / `api3.qoder.sh`，见 `qoder::endpoints`）。
+    /// 国际版有独立的「每日 100 Credits」签到链路（需要设备风控身份，见
+    /// `qoder::checkin` 与 `qoder::risk`）。
+    QoderIntl,
     /// Cline **免费额度池**（`cline-free/...`）。官方 `api.cline.bot`。
     ///
     /// ── 为什么两池是两家而不是「一家的一个选项」（本次改动的核心）────
@@ -329,6 +364,96 @@ pub enum ProviderKind {
     /// （`POST /api/v1/points/first-login`）。它已接进 `core::auto_checkin`
     /// （清单里列 `loomy`），claim 见 `loomy::checkin`。
     Loomy,
+    /// KukuAI（百度文库「库库 AI / GenFlowPro」，`kuku.baidu.com`）。适配实现
+    /// 在 `kuku/`：账号管理（粘贴 Cookie / 导入本机客户端登录态）**加推理转发**
+    /// （建会话 → 分配算力 → SSE 的自有三步时序，`is_stateful()` 为 true，
+    /// 会话是**请求内**的、不跨请求保持状态）。
+    ///
+    /// ── 上游长什么样（从客户端 app.asar 逆向 + 参考实现实测，见模块头）──
+    /// 认证是三个 Cookie（`BDUSS` / `STOKEN` / `gfprotpl=genflowpro`），
+    /// **没有刷新接口**（`supports_refresh = false`，过期只能重新登录/重新导入，
+    /// 与 CatPaw 同一处境）；模型是 `/wenchain/genflowpro/model_list` 的
+    /// `model_name`（静态兜底 + 远程刷新）；余额是
+    /// `/bizapi/gfpro/getgfvipremain`（`data.list[0].totalPoint`）。
+    ///
+    /// ── 签到形态 ────────────────────────────────────────────
+    /// 「免费领积分」活动的每日任务（每日登录 / 完成一次对话），已接进
+    /// `core::auto_checkin`（清单里列 `kuku`），claim 见 `kuku::checkin`。
+    /// 业务会话靠换发的 genflowpro STOKEN（`kuku::engine`）。
+    Kuku,
+    /// MonkeyCode（长亭科技）**国内版**（`monkeycode-ai.com`）。适配实现在
+    /// `monkeycode/`：账号管理（**粘贴 session cookie**）、模型目录
+    /// （`GET /api/v1/users/models`）与**会话转发**（建任务 → WebSocket 任务流
+    /// → ACP 事件翻译为 chat 帧）全部已接通；`is_stateful()` 为 true。
+    ///
+    /// ── 与 [`ProviderKind::MonkeyCodeIntl`] 是同一套协议的两个站点 ────
+    /// 与 AutoClaw / Qoder / ZCode 的两地同一思路：地区是**provider 身份**
+    /// 而不是账号属性。地区 → 域名 / 身份的互查在 `monkeycode::Region`
+    /// （`kind` / `provider_id` / `from_provider_id`），别处不要再写
+    /// `"monkeycode-intl"` 这类字面量。
+    MonkeyCode,
+    /// MonkeyCode **国际版**（`monkeycode-ai.net`，官方托管入口）。与
+    /// [`ProviderKind::MonkeyCode`] 同一套协议、不同站点。
+    ///
+    /// ── 参考资料的覆盖面（一处必须知道的事实）────────────────────
+    /// 逆向参考只覆盖国内站 `.com`；`.net` 的站点存在由官方发布渠道确认，
+    /// 但参考没有 `.net` 的实测端点 / cookie 名差异记录。本家按「同协议换站点」
+    /// 建模，差异待实测（见 `monkeycode/region.rs` 的模块头）。
+    MonkeyCodeIntl,
+    /// Command Code（`api.commandcode.ai`）。适配实现在 `commandcode/`：
+    /// 账号管理（**粘贴 `user_` 开头的 API Key**）**加推理转发**。
+    ///
+    /// ── 上游长什么样（规格 `_recon/commandcode-spec.md`，参考
+    /// `Acankao/commandcode-proxy/`）──────────────────────────────
+    /// 单一域名、单一 API Key（无 OAuth / 设备码 / 续期）。生成走
+    /// `POST /alpha/generate`、请求体是自有 8 键信封；响应是
+    /// **NDJSON**（`application/x-ndjson`，一行一个 JSON 事件）且 **HTTP 恒
+    /// 200**，错误在流内以 `{"type":"error"}` 表达；发正式请求前还要先上报
+    /// 「设备指纹 + 生命周期」两条预请求（指纹由 apiKey 确定性派生）。
+    ///
+    /// ── 为什么是**一家**（没有地区伴生）─────────────────────────
+    /// 规格 §9 明确：参考里出现的 Command Code 主机只有
+    /// `https://api.commandcode.ai`，没有 cn / intl 双域名、没有 region 头、
+    /// 模型 id 也不分地区 —— 拆地区没有依据（出口 IP 风控是代理层选项，
+    /// 不是协议里的地区）。
+    ///
+    /// ── 转发路线（为什么无状态却能说两套协议）──────────────────
+    /// 本家是**无状态**（一次 HTTP 请求 = 一次生成），只是响应协议是 NDJSON：
+    /// 走 [`adapter::UpstreamResponse::CommandCodeNdjson`] 那条翻译层
+    /// （`upstream::translate::CommandCodeToChatStream`），`is_stateful` 恒
+    /// false —— 账号轮换 / 冷却 / 重试 / usage / 取消全部由编排层承担。
+    CommandCode,
+    /// Antigravity（Google 的 AI IDE）。适配实现在 `antigravity/`：
+    /// 账号管理（**粘贴 Google refresh token**）、token 刷新、模型目录
+    /// （**只接 Gemini**）、**会话转发**（`build_chat_request` 构造 v1internal
+    /// 信封）全部已接通，见 `antigravity/mod.rs` 的模块头）。
+    ///
+    /// ── 上游长什么样（规格 `_recon/antigravity-spec.md`，参考
+    /// `Acankao/Antigravity-Manager` + `Acankao/9router`）────────────
+    /// 推理走 **Google Cloud Code Assist**（`v1internal`，不是
+    /// `generativelanguage.googleapis.com`）：`POST {base}:streamGenerateContent?alt=sse`，
+    /// 鉴权是 Google OAuth 的 Bearer 令牌，每帧 SSE 都裹一层
+    /// `{"response":{…gemini 响应…}}` 信封；鉴权链是 Google 的
+    /// `oauth2.googleapis.com/token`（refresh_token 换 access_token）。
+    ///
+    /// ── 为什么是**一家**（没有地区伴生）─────────────────────────
+    /// 规格 §6：本家没有 region 参数、端点全球统一（`sandbox`/`daily`/`prod`
+    /// 是**环境**不是地区），因此不需要地区拆分，也不需要 `region.rs`。
+    ///
+    /// ── 转发路线（已落地）─────────────────────────────────────
+    /// 上游是**无状态**（一次 HTTP 请求 = 一次生成），只是响应帧是 Gemini 方言：
+    /// 照 Command Code / ZCode 的先例给了
+    /// [`adapter::UpstreamResponse`] 一个新变体（`AntigravityGemini`）+ 一层
+    /// 翻译器（`protocol::antigravity_outbound` / `antigravity_stream`），
+    /// **`is_stateful` 保持 false**（不走 `forward_conversation`）。
+    Antigravity,
+    /// OfficeAce（华为云果办 / OfficeClaw / jiuwenclaw）。
+    ///
+    /// 上游是 OpenAI 兼容的华为 AgentArts 模型网关（`Basic` 鉴权，见
+    /// `officeace/mod.rs` 的模块头）—— **无状态**：`build_chat_request` 一条路，
+    /// 不需要 CodeArts 那种会话闸门。凭据两层：网关 Basic（不过期，转发用）
+    /// 与控制面临时 AK/SK（2 小时，额度/签到用）。
+    OfficeAce,
 }
 
 /// 一个提供商的静态元数据。
@@ -376,7 +501,12 @@ pub const PROVIDERS: &[ProviderMeta] = &[
     // 合并时同名模型先归谁家 —— 国内版在前，与存量账号的归属一致。
     ProviderMeta { id: "autoclaw", label: "AutoClaw 国内版" },
     ProviderMeta { id: "autoclaw-intl", label: "AutoClaw 国际版" },
-    ProviderMeta { id: "qoder", label: "Qoder" },
+    // Qoder 两个地区**相邻**排列（与 AutoClaw / Accio / ZCode 同一理由）：拆家后
+    // 是**两家独立的提供商**，国内版保持裸 `qoder`（存量账号的落盘契约，只改
+    // 展示名），国际版取 `qoder-intl`。顺序也决定模型目录合并时同名模型先归
+    // 谁家 —— 国内版在前，与存量账号的归属一致。
+    ProviderMeta { id: "qoder", label: "Qoder 中国版" },
+    ProviderMeta { id: "qoder-intl", label: "Qoder 国际版" },
     ProviderMeta { id: "cline-free", label: "Cline Free" },
     ProviderMeta { id: "cline-pass", label: "Cline Pass" },
     // Accio 两个地区**相邻**排列（与 AutoClaw 同一理由：同一条产品线的两个
@@ -393,6 +523,28 @@ pub const PROVIDERS: &[ProviderMeta] = &[
     ProviderMeta { id: "trae", label: "Trae" },
     // Loomy（讯飞）：单一地区、单一入口（手机号验证码登录），没有国际版伴生。
     ProviderMeta { id: "loomy", label: "Loomy" },
+    // KukuAI（百度文库库库 AI）：单一地区、单一入口（粘贴 Cookie / 导入本机
+    // 客户端登录态），没有国际版伴生。排在末尾（2026-10 接入，后到居后）。
+    ProviderMeta { id: "kuku", label: "KukuAI" },
+    // MonkeyCode（长亭科技）的两个站点**相邻**排列（与 AutoClaw / Qoder /
+    // ZCode 同一理由：同一条产品线的两个版本，中间隔着别家会让「找国际版」
+    // 变成一次扫描）。顺序也决定模型目录合并时同名模型先归谁家 ——
+    // 国内版在前（用户直觉里「MonkeyCode 就是国内那个站」）。
+    ProviderMeta { id: "monkeycode", label: "MonkeyCode" },
+    ProviderMeta { id: "monkeycode-intl", label: "MonkeyCode 国际版" },
+    // Command Code：单一域名、单一入口（粘贴 user_ API Key），没有国际版伴生
+    // （规格 §9：参考里只有 api.commandcode.ai 一个主机）。排在末尾
+    // （2026-10 接入，后到居后，与 Kuku 同一处置）。
+    ProviderMeta { id: "commandcode", label: "Command Code" },
+    // Antigravity（Google）：单一入口（粘贴 Google refresh token）、没有地区
+    // 伴生（规格 §6：没有 region 参数，sandbox/daily/prod 是环境不是地区）。
+    // 排在末尾（2026-10 接入，后到居后，与 Kuku / Command Code 同一处置）。
+    ProviderMeta { id: "antigravity", label: "Antigravity" },
+    // OfficeAce（华为云果办 / OfficeClaw）：排末尾（新家按约定追加在末尾）。
+    // 它的可用名单与 codearts / catpaw / trae / zcode 大面积同名（glm-5.2 /
+    // glm-5.3 / deepseek-v4-flash-0731 / kimi-k2.6 …），注册表顺序决定目录
+    // 合并时同名模型先归谁家 —— 放在末尾即「同名时优先已有各家」。
+    ProviderMeta { id: "officeace", label: "OfficeAce 果办" },
 ];
 
 /// provider id 在注册表里的下标（未知 id → None）。
@@ -460,6 +612,7 @@ pub fn kind_from_id(id: &str) -> Option<ProviderKind> {
         "autoclaw" => Some(ProviderKind::AutoClaw),
         "autoclaw-intl" => Some(ProviderKind::AutoClawIntl),
         "qoder" => Some(ProviderKind::Qoder),
+        "qoder-intl" => Some(ProviderKind::QoderIntl),
         "cline-free" => Some(ProviderKind::ClineFree),
         "cline-pass" => Some(ProviderKind::ClinePass),
         "accio" => Some(ProviderKind::Accio),
@@ -469,6 +622,12 @@ pub fn kind_from_id(id: &str) -> Option<ProviderKind> {
         "codearts" => Some(ProviderKind::CodeArts),
         "trae" => Some(ProviderKind::Trae),
         "loomy" => Some(ProviderKind::Loomy),
+        "kuku" => Some(ProviderKind::Kuku),
+        "monkeycode" => Some(ProviderKind::MonkeyCode),
+        "monkeycode-intl" => Some(ProviderKind::MonkeyCodeIntl),
+        "commandcode" => Some(ProviderKind::CommandCode),
+        "antigravity" => Some(ProviderKind::Antigravity),
+        "officeace" => Some(ProviderKind::OfficeAce),
         // 走到这里 = 上面的注册表判定已放行、这个 match 却没有对应分支：
         // 只可能是有人给 `PROVIDERS` 加了条目忘了加这里。开发期喊出来；
         // release 返回 None（见上：宁可为「未知」，不可误认成别家）。
@@ -494,6 +653,7 @@ pub const fn kind_id(kind: ProviderKind) -> &'static str {
         ProviderKind::AutoClaw => "autoclaw",
         ProviderKind::AutoClawIntl => "autoclaw-intl",
         ProviderKind::Qoder => "qoder",
+        ProviderKind::QoderIntl => "qoder-intl",
         ProviderKind::ClineFree => "cline-free",
         ProviderKind::ClinePass => "cline-pass",
         ProviderKind::Accio => "accio",
@@ -503,6 +663,12 @@ pub const fn kind_id(kind: ProviderKind) -> &'static str {
         ProviderKind::CodeArts => "codearts",
         ProviderKind::Trae => "trae",
         ProviderKind::Loomy => "loomy",
+        ProviderKind::Kuku => "kuku",
+        ProviderKind::MonkeyCode => "monkeycode",
+        ProviderKind::MonkeyCodeIntl => "monkeycode-intl",
+        ProviderKind::CommandCode => "commandcode",
+        ProviderKind::Antigravity => "antigravity",
+        ProviderKind::OfficeAce => "officeace",
     }
 }
 

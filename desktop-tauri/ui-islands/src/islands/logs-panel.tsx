@@ -12,6 +12,7 @@ import {
   writePageSize,
   type PageSizeChoice,
 } from './table-shell'
+import { t } from '../i18n'
 
 /**
  * Agent2API · 系统事件日志面板（筛选 / 分页 / 导出 / 清空）—— React 岛。
@@ -166,29 +167,33 @@ const DEFAULT_FILE = '~/.agent2api/logs.jsonl'
  */
 const RANGES: readonly string[] = ['today', '7', '30', 'month', 'all']
 const DEFAULT_RANGE = 'all'
-/** 分段控件上的**短**标签（与报表页的摘要文字「近 7 天」是两套，别合并：控件里位置窄） */
+/**
+ * 分段控件上的**短**标签（与报表页的摘要文字「近 7 天」是两套，别合并：控件里位置窄）。
+ * 数组的 value 是持久化的档位字面量、绝不翻译；label 走 t()。
+ */
 const RANGE_OPTION_LABEL: Record<string, string> = {
-  today: '今天', 7: '7 天', 30: '30 天', month: '本月', all: '全部',
+  today: t('今天'), 7: t('7 天'), 30: t('30 天'), month: t('本月'), all: t('全部'),
 }
-/** 选项提到模块级：SegmentedControl 每拿到新数组都要重新量滑块位置，常量能省掉这轮测量 */
+/** 选项提到模块级：SegmentedControl 每拿到新数组都要重新量滑块位置，常量能省掉这轮测量。
+ *  （模块求值晚于 head 里的 i18n 词典注入，所以这里的 t() 拿得到译文。） */
 const RANGE_OPTIONS: readonly SegmentedControlOption<string>[] = RANGES.map(value => ({
   value, label: RANGE_OPTION_LABEL[value],
 }))
 
-/** 最低级别下拉的选项（与旧实现 index.html 里那四个 option 逐字一致） */
+/** 最低级别下拉的选项（与旧实现 index.html 里那四个 option 逐字一致；value 是后端参数，不译） */
 const LEVEL_OPTIONS: readonly { value: string; label: string }[] = [
-  { value: '', label: '全部级别' },
-  { value: 'debug', label: 'debug 及以上' },
-  { value: 'info', label: 'info 及以上' },
-  { value: 'warn', label: 'warn 及以上' },
-  { value: 'error', label: '仅 error' },
+  { value: '', label: t('全部级别') },
+  { value: 'debug', label: t('debug 及以上') },
+  { value: 'info', label: t('info 及以上') },
+  { value: 'warn', label: t('warn 及以上') },
+  { value: 'error', label: t('仅 error') },
 ]
-const ALL_LEVEL_LABEL = '全部级别'
-const ALL_CATEGORY_LABEL = '全部分类'
+const ALL_LEVEL_LABEL = t('全部级别')
+const ALL_CATEGORY_LABEL = t('全部分类')
 
-/** 级别中文名（日志行里那枚徽章的文案） */
+/** 级别中文名（日志行里那枚徽章的文案；键是后端 level 字面量，不译） */
 const LEVEL_LABEL: Record<string, string> = {
-  debug: '调试', info: '信息', warn: '警告', error: '错误',
+  debug: t('调试'), info: t('信息'), warn: t('警告'), error: t('错误'),
 }
 
 /* ─── 模块级状态（跨渲染的守卫、缓存与入口登记）────── */
@@ -326,14 +331,16 @@ function formatLogTime(ts?: number): string {
   return `${d.getFullYear()}-${date} ${clock}`
 }
 
-/** 附加数据渲染成简短后缀：429 切换显示「账号 A → 账号 B · 恢复时间」 */
+/** 附加数据渲染成简短后缀：429 切换显示「账号 A → 账号 B · 恢复时间」。
+ *  「模型」「恢复」是界面文案走 t()；模型名 / 恢复时间 / 状态码是后端数据，原样带入。
+ *  `HTTP 404` 整段没有中文（协议名 + 数字），不包 t()。 */
 function extraText(entry: LogEntry): string {
   const data = entry.data
   if (!data) return ''
   const parts: string[] = []
   if (data.from || data.to) parts.push([data.from, data.to].filter(Boolean).join(' → '))
-  if (data.model) parts.push(`模型 ${data.model}`)
-  if (data.resetAtText) parts.push(`${data.resetAtText} 恢复`)
+  if (data.model) parts.push(t('模型 {model}', { model: data.model }))
+  if (data.resetAtText) parts.push(t('{time} 恢复', { time: data.resetAtText }))
   else if (data.status && !data.from && !data.to) parts.push(`HTTP ${data.status}`)
   return parts.length ? parts.join(' · ') : ''
 }
@@ -514,8 +521,8 @@ function fromResult(result: LogQueryResult | null | undefined, prev: PanelData):
 
 /** 空态文案：还没加载完 / 库里确实没有日志 / 有日志但筛不出来 */
 function emptyText(data: PanelData): string {
-  if (!data.loaded) return '正在加载日志…'
-  return data.total ? '没有符合筛选条件的日志' : '暂无日志'
+  if (!data.loaded) return t('正在加载日志…')
+  return data.total ? t('没有符合筛选条件的日志') : t('暂无日志')
 }
 
 function LogsPanel() {
@@ -595,7 +602,7 @@ function LogsPanel() {
     const pageBefore = pageRef.current
     try {
       const api = shared().workbuddyDesktop
-      if (!api) throw new Error('后端桥不可用')
+      if (!api) throw new Error(t('后端桥不可用'))
       const [result, nextStats] = await Promise.all([api.getLogs(query), api.getLogStats()])
       // 重写列表会把滚动弹回顶部：轮询刷新时把读到的位置还回去，否则每隔一个刷新周期就
       // 把正在看日志的人踢回页首。换筛选 / 页码被夹回则一律回顶。
@@ -727,7 +734,7 @@ function LogsPanel() {
     try {
       await action()
     } catch (error) {
-      toast(`操作失败：${errorMessage(error)}`, 'err')
+      toast(t('操作失败：{error}', { error: errorMessage(error) }), 'err')
     } finally {
       panelBusy = false
       setBusy(null)
@@ -742,37 +749,39 @@ function LogsPanel() {
     const query = clearQuery(filtersRef.current, rangeRef.current)
     const hasFilters = query.length > 0
     const message = hasFilters
-      ? `确定清空当前筛选出的 <strong>${Number(dataRef.current.matched) || 0}</strong> 条日志？清空后无法恢复。`
-      : '确定清空<strong>全部</strong>运行日志？清空后无法恢复。'
+      ? t('确定清空当前筛选出的 <strong>{count}</strong> 条日志？清空后无法恢复。', { count: Number(dataRef.current.matched) || 0 })
+      : t('确定清空<strong>全部</strong>运行日志？清空后无法恢复。')
     const ask = shared().wbConfirm?.ask
     if (!ask) return
     // 原生 confirm 在 Tauri 的 WebView 里不弹窗、直接放行（等于没有确认），危险确认一律
     // 走自绘弹窗（wbConfirm）
-    if (!(await ask({ title: '清空运行日志', html: message, okText: '清空', okClass: 'danger' }))) return
-    await guard('clear', '清空中…', async () => {
+    if (!(await ask({ title: t('清空运行日志'), html: message, okText: t('清空'), okClass: 'danger' }))) return
+    await guard('clear', t('清空中…'), async () => {
       const api = shared().workbuddyDesktop
-      if (!api) throw new Error('后端桥不可用')
+      if (!api) throw new Error(t('后端桥不可用'))
       // 无筛选时显式带 all=1：后端要求「清空全部」必须显式声明，免得哪天参数漏传又被当成
       // 全清（前端写错一次就是全部数据没了）
       await api.clearLogs(hasFilters ? query : 'all=1')
       // 清空后没有「当前页」可言：回到第 1 页并把滚动位置一起归零
       await loadPanel({ resetPage: true })
-      toast('运行日志已清空')
+      toast(t('运行日志已清空'))
     })
   }
 
   /** 导出全部日志（不带筛选：导出走壳侧的 /api/logs/download） */
   async function exportLogs(): Promise<void> {
-    await guard('export', '导出中…', async () => {
+    await guard('export', t('导出中…'), async () => {
       const api = shared().workbuddyDesktop
-      if (!api) throw new Error('后端桥不可用')
+      if (!api) throw new Error(t('后端桥不可用'))
       const result = await api.exportLogs()
       if (!result || result.canceled) return
       if (result.count === 0) {
-        toast('暂无日志可导出', 'err')
+        toast(t('暂无日志可导出'), 'err')
         return
       }
-      toast(`✅ 已导出 ${result.count} 条日志到 ${result.file}`)
+      toast(t('✅ 已导出 {count} 条日志到 {file}', {
+        count: String(result.count), file: String(result.file),
+      }))
     })
   }
 
@@ -851,8 +860,8 @@ function LogsPanel() {
    * 加载完之前保持骨架里那枚「—」。
    */
   const badgeText = data.matched === data.total
-    ? `${data.total} 条`
-    : `${data.matched} / ${data.total} 条`
+    ? t('{n} 条', { n: data.total })
+    : t('{matched} / {total} 条', { matched: data.matched, total: data.total })
 
   /** 顶栏那枚是本页徽标的镜像（app.js 的 renderTopbarStatus 按 id 读文案与配色）：文案一变
    *  就让它跟上，否则要等下一次主状态轮询（20 秒）才同步。 */
@@ -889,16 +898,16 @@ function LogsPanel() {
   return (
     <section className='panel' id='logs-panel-events'>
       <div className='panel-head'>
-        <h2>系统事件</h2>
+        <h2>{t('系统事件')}</h2>
         {/* id 保留：app.js 的 renderTopbarStatus 会按 id 镜像这枚徽标的文案与配色。
             data-tone 空串 = 无修饰（旧实现的 renderBadge 同样只写 'badge'、不带修饰）；
             有它 app.js 的 mirror 才会走 data-tone 分支，不去拆组件库 Badge 那串 Tailwind 类名。 */}
         <Badge id='logs-badge' variant='outline' data-tone=''>{data.loaded ? badgeText : '—'}</Badge>
         <div className='head-actions'>
           <Button id='btn-logs-export' variant='outline' disabled={busy !== null}
-            onClick={() => void exportLogs()}>{busyExport ? busy?.label : '导出'}</Button>
+            onClick={() => void exportLogs()}>{busyExport ? busy?.label : t('导出')}</Button>
           <Button id='btn-logs-clear' variant='destructive' disabled={busy !== null}
-            onClick={() => void clearLogs()}>{busyClear ? busy?.label : '清空'}</Button>
+            onClick={() => void clearLogs()}>{busyClear ? busy?.label : t('清空')}</Button>
         </div>
       </div>
 
@@ -908,13 +917,13 @@ function LogsPanel() {
               旧 CSS `.log-filters .seg { flex: 0 0 auto }` —— 新控件没有 .seg 类，那条规则成了死
               规则；不补的话窄窗口下它会被压扁，「本月」和「30 天」看着像同一个按钮。 */}
           <SegmentedControl options={RANGE_OPTIONS} value={range} onValueChange={onRangeChange}
-            aria-label='事件日志时间范围' className='shrink-0' />
+            aria-label={t('事件日志时间范围')} className='shrink-0' />
           {/* min-w-[120px] 补的是旧 CSS `.log-filters select { width:auto; min-width:120px }`：原生
               select 换成按钮触发器后那条规则不再命中，宽度锚要自己带。展示文案显式给 SelectValue
               （不依赖 value 自动显示）。 */}
           <Select value={filters.level} onValueChange={next => onSelectChange({ level: String(next ?? '') })}>
-            <SelectTrigger id='logs-level' className='min-w-[120px]' title='按最低级别筛选'
-              aria-label='按最低级别筛选'>
+            <SelectTrigger id='logs-level' className='min-w-[120px]' title={t('按最低级别筛选')}
+              aria-label={t('按最低级别筛选')}>
               <SelectValue>
                 {LEVEL_OPTIONS.find(item => item.value === filters.level)?.label ?? ALL_LEVEL_LABEL}
               </SelectValue>
@@ -926,8 +935,8 @@ function LogsPanel() {
             </SelectContent>
           </Select>
           <Select value={filters.category} onValueChange={next => onSelectChange({ category: String(next ?? '') })}>
-            <SelectTrigger id='logs-category' className='min-w-[120px]' title='按分类筛选'
-              aria-label='按分类筛选'>
+            <SelectTrigger id='logs-category' className='min-w-[120px]' title={t('按分类筛选')}
+              aria-label={t('按分类筛选')}>
               <SelectValue>
                 {filters.category ? (categories[filters.category] || filters.category) : ALL_CATEGORY_LABEL}
               </SelectValue>
@@ -946,8 +955,8 @@ function LogsPanel() {
               !important 的工具类盖掉，弹性由这里显式带。刻意**不带** data-island-input：那是
               输入框岛（就地升级）的钩子，两个岛同时挂一个输入框会打架。 */}
           <InputGroup className='w-auto flex-auto'>
-            <InputGroupInput id='logs-keyword' type='search' placeholder='搜索消息关键词…'
-              autoComplete='off' aria-label='搜索消息关键词' value={filters.keyword}
+            <InputGroupInput id='logs-keyword' type='search' placeholder={t('搜索消息关键词…')}
+              autoComplete='off' aria-label={t('搜索消息关键词')} value={filters.keyword}
               onChange={event => onKeywordChange(event.currentTarget.value)} />
             <InputGroupAddon aria-hidden='true'>⌕</InputGroupAddon>
           </InputGroup>

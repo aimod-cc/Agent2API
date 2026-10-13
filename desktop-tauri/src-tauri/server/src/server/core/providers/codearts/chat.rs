@@ -100,6 +100,9 @@ impl HeaderProfile {
 ///   （不是客户端看到的名字，映射在目录层做）
 /// * `benefit` 为真时注入 `maas_type: benefit`（福利模型才需要，普通模型带了
 ///   反而会被判成"没领福利"）
+/// * 出站前把 `max_tokens` / `max_completion_tokens` 超过上游硬顶的取值钳到
+///   65536（[`clamp_output_tokens`]）—— 上游对超顶取值**整条**拒收
+///   （`InferHub.001001005.400`），不钳就等于每次对话全账号 502
 /// * 返回 `(完整地址, 已签名的头, 请求体)`；`credential` 允许为空 —— 空的时候
 ///   不签名（调试逃生口，与参考实现一致）
 pub fn build_upstream_request(
@@ -128,6 +131,30 @@ pub fn build_upstream_request(
         // 让上游在最后一帧带上 usage（不要求它就永远不会给）
         object.insert("stream_options".to_string(), json!({ "include_usage": true }));
     }
+    // 「关思考」在本家没有可发送的表达：始终思考的名字收到 `reasoning_effort:"none"`
+    // 会被上游整条拒掉（dev 一手：Qoder 的侧路调用每发都撞，错误是
+    // `InferHub.malformed_json.400：该模型始终思考，不支持关闭思考；请使用 low、high 或 max`）。
+    // 与 `model_rules::reasoning_is_off` 那一侧的既有口径同一条：off/none 不注入上游 ——
+    // 客户端自己写的这个键也算注入，所以在签名前摘掉（对照：同一份 body 不带该键，本家直接 200）。
+    for key in drop_thinking_off(&mut payload) {
+        crate::server::logging::verbose(
+            "[CodeArts]",
+            &format!("出站前摘掉 {key}：本家没有「关闭思考」这一档，带着它上游会整条拒收"),
+        );
+    }
+    // 丢历史思考也要在序列化之前：签名覆盖的就是这串字节，少发的字节才算数
+    if !keep_historical_reasoning() {
+        let dropped = strip_historical_reasoning(&mut payload);
+        if dropped > 0 {
+            crate::server::logging::verbose(
+                "[CodeArts]",
+                &format!("出站前丢掉 {dropped} 段历史思考（重放给下一个模型没有信息量，实测占体积 38–45%）"),
+            );
+        }
+    }
+    // 输出上限钳制（实测依据见 `clamp_output_tokens`）：放在序列化前的最后一步，
+    // 此后没有任何一步会再动 body。
+    clamp_output_tokens(&mut payload);
     let body = serde_json::to_vec(&payload)
         .map_err(|error| GatewayError::with_status(400, format!("请求体序列化失败：{error}")))?;
     let mut headers = profile.headers(model);
@@ -141,6 +168,240 @@ pub fn build_upstream_request(
     let signed = signer::sign("POST", &endpoint, &headers, &body, &signer_credential(credential), false)
         .map_err(|reason| GatewayError::with_status(500, reason))?;
     Ok((endpoint, signed, body))
+}
+
+/// 上游对**输出上限**（`max_tokens` / `max_completion_tokens` 的取值）的硬顶，
+/// 单位是 Token 个数。实测值，不是推测值 —— 依据见 [`clamp_output_tokens`]。
+pub const MAX_OUTPUT_TOKENS: i64 = 65_536;
+
+/// 出站请求体 `max_tokens` / `max_completion_tokens` 的**上限归一**（就地修改）。
+///
+/// ── 上游行为（2026-10-09 本机实测，逐格结论）──────────────────
+/// 这两个键的**取值**参与上游预校验：**65536 放行、65537 起一律拒收**，整条
+/// 请求回 `InferHub.001001005.400：The request param is invalid`（不是截断、
+/// 也不是部分失败；两个键各自都受这道校验）。边界两侧都逐点打过：65536 过，
+/// 65537 / 73728 / 81920 / 98304 / 100000 / 122880 / 128000 / 131071 / 131072 全拒。
+/// 三条"不是它"（都已排除，别再把排查引回去）：**与提示词长度无关**（2 万字符
+/// 的真实请求体 + 65536 → 200）、**与模型无关**（福利 `glm-5.3-flash` 与非福利
+/// `glm-5.2-sft-harmony` 边界一致，是平台级校验）、**与其它参数无关**（35 个
+/// `tools` + `tool_choice` / `thinking` / `enable_thinking` / `reasoning` /
+/// `reasoning_effort` / `prompt_cache_key` 单独加都是 200）。
+///
+/// ── 目录里的 maxOutputTokens 不是依据 ───────────────────────
+/// 上游目录给 `glm-5.3-flash` 声明 `maxOutputTokens: 131072`（`deepseek-v4-*`
+/// 甚至声明 393216），**与实际执行的 65536 不符** —— 照声明钳等于没钳，
+/// 128000 照样被拒。
+///
+/// ── 为什么必须修：不钳 = 每次对话整条 502 ────────────────────
+/// ZCode 这类客户端按自己的上下文长度发 `max_completion_tokens: 128000`，原样
+/// 透传时表现为「CodeArts 账号逐个 502、换号也没用」，而模型测试路径不带这个
+/// 字段、一路 200 —— 两边现象对不上，极易把排查带向账号 / 网络 / 思考等级
+/// （实测：真实请求体**只去掉**这一个字段 → 200，加回 128000 → 502）。
+///
+/// ── 归一规则（只在「超过硬顶」窗口里动手）────────────────────
+///   - 字段存在、是整数（`as_i64`）且 > [`MAX_OUTPUT_TOKENS`] → 改写为
+///     `MAX_OUTPUT_TOKENS`。**钳而不是删**：删等于让上游按默认档回答（通常
+///     几千），客户端"要长回答"的意图直接丢失；钳到硬顶是上游能给的最大值；
+///   - **缺省时不注入**、非整数形态（字符串 / null / 浮点）不碰：其余形态交
+///     上游自己报错，不在网关里猜语义；
+///   - 两个键各判各的，只改客户端**用了的那个键**，不替它新造键；
+///   - 本函数**不打日志**：客户端每个请求都带这个值，钳一次写一行会把日志刷满
+///     （与 autoclaw 的 `normalize_max_tokens` 同一取舍）。
+///
+/// ── 判据纪律：写在本适配器里 = 按 provider 生效，别改按模型名 ──
+/// 与 [`reserve_for_thinking`] 同一条：别家上游没有这道预校验（小浣熊那边
+/// `max_completion_tokens` 原样可用），因此判据只住本文件、只被
+/// [`build_upstream_request`] 调用，天然只对 CodeArts 出站生效。
+fn clamp_output_tokens(body: &mut Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    for key in ["max_tokens", "max_completion_tokens"] {
+        let over = matches!(object.get(key), Some(Value::Number(n))
+            if n.as_i64().is_some_and(|value| value > MAX_OUTPUT_TOKENS));
+        if over {
+            object.insert(
+                key.to_string(),
+                Value::Number(serde_json::Number::from(MAX_OUTPUT_TOKENS)),
+            );
+        }
+    }
+}
+
+/// 摘掉客户端请求体里表达「关闭思考」的键，返回被摘掉的键名（用于日志）。
+///
+/// 三种写法都算「关思考」：`reasoning_effort` / `reasoningEffort` / `effort` 的
+/// 值为 `off` 或 `none`（判据复用 `model_rules::reasoning_is_off`，与绑定注入那一侧
+/// 同一个口径，不再各写一份），以及布尔形式的 `enable_thinking:false`。
+///
+/// **只摘这几种，别的值一律原样走**：`low` / `medium` / `high` / `max` 是上游收的档位，
+/// `enable_thinking:true` 是「开思考」，都不该由网关替客户端做主。表外值（比如自定义
+/// 字符串）也不摘 —— 摘掉就等于把客户端的意图吞了，而本家对它的回答我们没测过。
+pub fn drop_thinking_off(payload: &mut Value) -> Vec<String> {
+    use crate::server::core::model_rules::reasoning_is_off;
+
+    let mut dropped = Vec::new();
+    let Some(object) = payload.as_object_mut() else {
+        return dropped;
+    };
+    for key in ["reasoning_effort", "reasoningEffort", "effort"] {
+        let off = object
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(reasoning_is_off);
+        if off {
+            object.remove(key);
+            dropped.push(key.to_string());
+        }
+    }
+    if object.get("enable_thinking") == Some(&Value::Bool(false)) {
+        object.remove("enable_thinking");
+        dropped.push("enable_thinking".to_string());
+    }
+    dropped
+}
+
+#[cfg(test)]
+mod thinking_off_switches {
+    use super::{build_upstream_request, drop_thinking_off, HeaderProfile};
+    use serde_json::json;
+
+    #[test]
+    fn only_the_thinking_off_expressions_are_dropped() {
+        let mut payload = json!({
+            "reasoning_effort": "none",
+            "enable_thinking": false,
+        });
+        assert_eq!(
+            vec!["reasoning_effort".to_string(), "enable_thinking".to_string()],
+            drop_thinking_off(&mut payload)
+        );
+        assert_eq!(payload, json!({}), "摘完不该留下空壳之外的东西");
+
+        // 驼峰与简写两种拼法都算同一件事
+        let mut aliases = json!({"reasoningEffort": "off", "effort": "NONE"});
+        assert_eq!(
+            vec!["reasoningEffort".to_string(), "effort".to_string()],
+            drop_thinking_off(&mut aliases)
+        );
+        assert_eq!(aliases, json!({}));
+    }
+
+    #[test]
+    fn real_levels_and_an_explicit_yes_survive_untouched() {
+        // 反空跑：这一条保证实现没有退化成「把思考相关的键全删」。上游认的四个档位
+        // 与 `enable_thinking:true` 都是客户端的有效意图，删掉就是替客户端做主。
+        for level in ["low", "medium", "high", "max"] {
+            let mut payload = json!({"reasoning_effort": level, "enable_thinking": true});
+            assert_eq!(Vec::<String>::new(), drop_thinking_off(&mut payload), "{level}");
+            assert_eq!(
+                json!({"reasoning_effort": level, "enable_thinking": true}),
+                payload
+            );
+        }
+        // 表外值（自定义档位）不摘：本家会怎么回它我们没测过，摘掉等于吞掉客户端意图
+        let mut unknown = json!({"reasoning_effort": "turbo"});
+        assert_eq!(Vec::<String>::new(), drop_thinking_off(&mut unknown));
+        assert_eq!(json!({"reasoning_effort": "turbo"}), unknown);
+    }
+
+    #[test]
+    fn the_signed_path_never_carries_a_thinking_off_key() {
+        // 端到端钉在 build_upstream_request 的出口上（`credential=None` 是排障逃生口，
+        // 返回的就是没签名前那串字节）：判据落在真正出门的字节上，不落在中间函数上。
+        let payload = json!({
+            "messages": [{"role": "user", "content": "短答"}],
+            "reasoning_effort": "none",
+            "enable_thinking": false,
+        });
+        let profile = HeaderProfile::default();
+        let (_, _, body) = build_upstream_request(
+            "https://example.invalid",
+            "glm-5.3-flash",
+            payload,
+            true,
+            true,
+            &profile,
+            None,
+        )
+        .expect("构造出站请求");
+        let text = String::from_utf8_lossy(&body).to_string();
+        assert!(!text.contains("reasoning_effort"), "出门字节里不该有它：{text}");
+        assert!(!text.contains("enable_thinking"), "出门字节里不该有它：{text}");
+    }
+}
+
+/// 出站前把**历史里的思考内容**丢掉，返回丢掉的块数。
+///
+/// ── 为什么是这一刀 ────────────────────────────────────────
+/// 实测上界在 6 MiB 附近（5,310,247 过 / 6,372,244 拒，见 `SIZE_CEILING_KNOWN_BYTES`），
+/// 而真实 agent 会话里 `thinking` 占 messages 内字节 **38–45%**（两个大会话量出来：
+/// 26.8 MB 与 12.9 MB 的转录），是结构化削减里唯一还站得住的大头 ——
+/// 重复文件读取只值 9–12%、相邻 tool_result 打包实测省 0%、这类会话里图片是 0%。
+///
+/// 客户端每轮都把**全部历史思考**原样重放回来，而它对下游模型没有信息量：
+/// 那是上一个模型自己怎么想的，不是这个模型需要读的事实。
+///
+/// ── 只动 assistant、只动思考 ──────────────────────────────
+/// `user` 那一侧不碰（思考只可能出现在 assistant 轮里，动了就是改用户输入）。
+/// **消息条数一条不少** —— 这一刀只减内容、不减轮次：别家按条数做会话预算的口径
+/// 不该被本家的一次削减顺手改掉。只剩思考的那条不删整条，改成空串内容：
+/// 上游对"缺 assistant 轮"的容忍度没人保证，形状稳定比省一条更值。
+///
+/// 两种形状都清：OpenAI 系的 `reasoning_content` / `reasoning` 字段，
+/// 与 Anthropic 系 content 数组里的 `thinking` / `redacted_thinking` 块。
+/// （不在别的 provider 上做的理由：Anthropic 的 `tool_use` 轮要求把带签名的
+/// thinking 一起回传，全局一刀切会直接变成上游报错 —— 那一家要单独判。）
+pub fn strip_historical_reasoning(payload: &mut Value) -> usize {
+    let Some(messages) = payload.get_mut("messages").and_then(Value::as_array_mut) else {
+        return 0;
+    };
+    let mut dropped = 0;
+    for message in messages.iter_mut() {
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(object) = message.as_object_mut() else {
+            continue;
+        };
+        // OpenAI 形状：思考是消息上的一个字符串字段
+        for key in ["reasoning_content", "reasoning"] {
+            match object.remove(key) {
+                Some(Value::String(text)) if !text.trim().is_empty() => dropped += 1,
+                Some(Value::Null) | None => {}
+                Some(_) => dropped += 1,
+            }
+        }
+        // Anthropic 形状：思考是 content 数组里的块
+        let mut emptied = false;
+        if let Some(blocks) = object.get_mut("content").and_then(Value::as_array_mut) {
+            let before = blocks.len();
+            blocks.retain(|block| {
+                !matches!(
+                    block.get("type").and_then(Value::as_str),
+                    Some("thinking") | Some("redacted_thinking")
+                )
+            });
+            dropped += before - blocks.len();
+            emptied = before != blocks.len() && blocks.is_empty();
+        }
+        if emptied {
+            // 只剩思考的那条：留一个空串内容，别把整条消息删掉（见函数头的理由）
+            object.insert("content".to_string(), Value::String(String::new()));
+        }
+    }
+    dropped
+}
+
+/// 要不要保留历史思考（默认丢）。留给现网出问题时**不改代码**就能退回旧行为的一格。
+fn keep_historical_reasoning() -> bool {
+    keep_historical_reasoning_from(std::env::var("CODEARTS_KEEP_REASONING").ok().as_deref())
+}
+
+/// 上一行的判据本体（认 `1` / `true` / `yes`，大小写敏感，其余一律按默认走）。
+/// 拆开只为能测：进程环境变量是全局的，测试里改它会污染并发跑别的用例。
+fn keep_historical_reasoning_from(value: Option<&str>) -> bool {
+    matches!(value, Some("1") | Some("true") | Some("yes"))
 }
 
 /// 折叠出来的非流式回答。
@@ -315,6 +576,85 @@ fn merge_tool_call(calls: &mut Vec<Value>, incoming: &Value) {
             target["function"]["arguments"] = Value::String(joined);
         }
     }
+}
+
+/// 实测的**可用上界**：5,310,247 字节走得过去，6,372,244 起被拒。取 6 MiB
+/// （6,291,456）—— 外部实现报过同一个数（"max bytes … 6291456"）。
+///
+/// 这个数只给「文案里没有尺寸字样」那条判据用（见 [`size_rejection_by_shape`]）：
+/// 它是**相关性的门槛**，不是我们要把体削到的目标 —— 真正拦体的是尺寸门
+/// （`codearts::size_gate`），那里记的是这一次实际撞到的字节数。
+pub const SIZE_CEILING_KNOWN_BYTES: i64 = 6 * 1024 * 1024;
+
+/// 第二条判据：泛化的「请求参数无效」+ **这发的字节数已越过实测上界** ⇒ 按尺寸失败处理。
+///
+/// 为什么需要它：上游对超限体的回法不止一种形状。探针直发时带
+/// `details[].error_code = PARSE_REQUEST_DATA_EXCEPTION`（文案能唯一指向体积），
+/// 而经网关这一路（真模型名）拿到的 SSE 帧只有
+/// `InferHub.001001005.400 / The request param is invalid, Please check it`
+/// —— 没有任何尺寸字样。只等标记就永远不登记（dev 上连打四版都没动静，就是这个原因）。
+///
+/// 所以这条用**相关性**而不是文案：错误码 + 我们确知的发出字节数越界 ⇒ 记门。
+/// 小体撞上同一个码就是真的参数错，不能记 —— 那是把一家冤枉关在门外 120 秒。
+pub fn size_rejection_by_shape(text: &str, wire_bytes: i64) -> Option<&'static str> {
+    if wire_bytes <= SIZE_CEILING_KNOWN_BYTES {
+        return None;
+    }
+    if text.to_lowercase().contains("inferhub.001001005.400") {
+        return Some("上游回「请求参数无效」，而这发已越过实测的 6 MiB 上界（按尺寸失败处理）");
+    }
+    None
+}
+
+/// 三处出口统一走这里：标记版优先，命不中再按体积相关性判。
+///
+/// `status` 不参与判定（理由见 `size_rejection_text` 的说明：错误码与状态码都不可信），
+/// 留着只是让 HTTP 那条调用点与流内那条调用点共用一个函数。
+pub fn size_rejection_any(status: u16, text: &str, wire_bytes: i64) -> Option<&'static str> {
+    let _ = status;
+    size_rejection_text(text).or_else(|| size_rejection_by_shape(text, wire_bytes))
+}
+
+/// 这一发是不是**体积**被拒？是的话给出那句给人读的原因。
+///
+/// ── 两道墙、两种症状（2026-10-09 实测；探针用不存在的模型名 ⇒ 到路由就拒、一发没计费）──
+///   · **APIG 网关层**：`413` + `{"error_msg":"Request entity too large","error_code":"APIG.0201"}`
+///     —— 实测 12,744,384 与 13,806,381 字节落这里（与华为文档的默认上限 12 MB 一致）。
+///   · **后端解析层**：`400` + `details[].error_code = PARSE_REQUEST_DATA_EXCEPTION`
+///     （外层是 `InferHub.001001005.400 The request param is invalid`）
+///     —— 实测 6,372,244 / 7,434,241 / 8,496,317 落这里，而 5,310,247 走得过去。
+///
+/// 为什么必须两种都认：`APIG.0201` 是**过载码**（官方错误码表把它同时给了 400/413/414/494/
+/// 502/504/500）⇒ 判据只能取文案；而只盯 413 会把 6–12 MB 这一整段当成「上游参数错」放过，
+/// 于是每一发大请求都要先白打一次才换家。
+///
+/// 两条**反面对照**（用例钉着）：`404 InferHub.002002009.404 The model is not registered`
+/// 是模型名问题不是体积；`400 TM.00001001 request body is invalid JSON` 是「我们发了压过的体
+/// 而上游不解压」，那份体可能只有几 KB ⇒ 登记成尺寸门等于瞎挡（也说明请求侧 gzip 这条路是死的）。
+pub fn size_rejection(status: u16, body: &[u8]) -> Option<&'static str> {
+    let _ = status; // 见下面的说明：这一对标记**不按状态码收窄**
+    size_rejection_text(&String::from_utf8_lossy(body))
+}
+
+/// 同一判据的纯文本版。**判据只取文案，不取状态码、也不取错误码**：
+///
+///   · `APIG.0201` 是过载码（官方错误码表把它同时给了 400/413/414/494/502/504/500），
+///     所以错误码不可信；
+///   · 状态码同样不可信 —— 同一句 `Request entity too large` / `PARSE_REQUEST_DATA_EXCEPTION`
+///     实测出现过 **400**（探针直发）与 **502**（经网关这一路）两种状态 —— 判据若锁在
+///     400/413 上，502 那发就带着标记不认，门一次也立不起来。
+///
+/// 这两句文案本身足够特定：反面对照里的 `model is not registered` 与
+/// `request body is invalid JSON`（我们发了压缩体、上游没解压）都不含它们。
+pub fn size_rejection_text(text: &str) -> Option<&'static str> {
+    let lowered = text.to_lowercase();
+    if lowered.contains("parse_request_data_exception") {
+        return Some("上游解析不了该体积的请求体（400 PARSE_REQUEST_DATA_EXCEPTION）");
+    }
+    if lowered.contains("request entity too large") {
+        return Some("上游网关拒收该体积（413 Request entity too large）");
+    }
+    None
 }
 
 /// 上游非 2xx 时的错误：**保留原始 HTTP 状态**，附脱敏后的诊断体。
@@ -687,6 +1027,135 @@ mod tests {
         );
     }
 
+    /// **尺寸墙 × 请求侧 gzip 对照探针**（零推理消耗，2026-10-08）。
+    ///
+    /// 要分开的是两件事：APIG 的 413（`APIG.0201` Request entity too large）量的到底是
+    /// **线上字节**还是**解压后的字节**。前一发裸 body，后一发同一份 body 压成 gzip 再签一次名
+    /// （`X-Sdk-Content-Sha256` 按压缩后的字节算），其余头与签名流程逐字相同 —— 两发只差编码，
+    /// 所以任何差异都归给编码这一层。
+    ///
+    /// 模型名是**不存在**的，上游在路由阶段就拒 ⇒ 不产生任何推理消耗，所以敢发 3 MB 的体
+    /// （这是本条探针成立的前提，别换成真模型名，那会按整份上下文计费）。
+    ///
+    /// 读法：
+    ///   · 裸的 413、gzip 的回「模型没注册」⇒ 量线字节 ⇒ 请求侧压缩是有效的扩容手段；
+    ///   · 两发都 413 ⇒ 量解压后的字节 ⇒ 压缩白做，只能削体或换家；
+    ///   · gzip 那发回签名/鉴权错（`SignatureDoesNotMatch`、`APIG.0301`）⇒ 它按**解压后的体**
+    ///     重算摘要，与我们签的压缩字节对不上 ⇒ 要走这条路得先摸清它的摘要口径；
+    ///   · 裸的那发就回了「模型没注册」⇒ 还没到墙，把 `CODEARTS_PROBE_MB` 加大重跑。
+    ///
+    /// 用法（四个凭据与邻居探针同源；STS 短寿命，过期会先看到 401 而不是尺寸结论）：
+    /// ```bash
+    /// CODEARTS_AK=… CODEARTS_SK=… CODEARTS_STS=… CODEARTS_DOMAIN=… \
+    ///   CODEARTS_PROBE_MB=3 cargo test -p agent2api-server size_wall -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore]
+    async fn live_size_wall_compares_plain_and_gzip_request_bodies() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let mut given = 0;
+        let mut pick = |key: &str| {
+            let value = std::env::var(key).unwrap_or_default();
+            if value.is_empty() { value } else { given += 1; value }
+        };
+        let credential = Credential {
+            access_key_id: pick("CODEARTS_AK"),
+            secret_access_key: pick("CODEARTS_SK"),
+            security_token: pick("CODEARTS_STS"),
+            domain_id: pick("CODEARTS_DOMAIN"),
+            ..Credential::default()
+        };
+        if given < 4 {
+            println!("跳过：四个 CODEARTS_* 环境变量没给齐（只给了 {given} 个）");
+            return;
+        }
+        let megabytes: usize = std::env::var("CODEARTS_PROBE_MB")
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .filter(|value: &usize| (1..=16).contains(value))
+            .unwrap_or(3);
+
+        // 填充用「像代码的文本」而不是随机字节：随机数据压不动，会得出「压缩没用」的假结论
+        let line = "    let router = build_router(state.clone()).await?; // 装配选路与限额\n";
+        let mut content = String::with_capacity(megabytes * 1024 * 1024);
+        while content.len() < megabytes * 1024 * 1024 {
+            content.push_str(line);
+        }
+        let payload = json!({ "messages": [{ "role": "user", "content": content }] });
+        let (endpoint, headers, raw) = build_upstream_request(
+            "https://snap-access.cn-north-4.myhuaweicloud.com",
+            "codearts-size-wall-not-a-real-model",
+            payload,
+            false,
+            false,
+            &HeaderProfile::default(),
+            Some(&credential),
+        )
+        .expect("应当能构造请求");
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&raw).expect("压缩写入不该失败");
+        let gzipped = encoder.finish().expect("gzip 收尾不该失败");
+        println!(
+            "体积：裸 {} 字节 → gzip {} 字节（压缩比 {:.2}）",
+            raw.len(),
+            gzipped.len(),
+            raw.len() as f64 / gzipped.len().max(1) as f64
+        );
+
+        // 重签：摘掉上一轮的签名头与摘要头，把压缩后的字节交给同一个签名器
+        let mut gzip_headers: Vec<(String, String)> = headers
+            .iter()
+            .filter(|(name, _)| {
+                !matches!(
+                    name.as_str(),
+                    "Authorization" | "X-Sdk-Content-Sha256" | "x-sdk-content-sha256"
+                )
+            })
+            .cloned()
+            .collect();
+        gzip_headers.push(("Content-Encoding".to_string(), "gzip".to_string()));
+        let gzip_signed = signer::sign(
+            "POST",
+            &endpoint,
+            &gzip_headers,
+            &gzipped,
+            &signer_credential(&credential),
+            false,
+        )
+        .expect("gzip 这一发应当能签名");
+
+        let client = reqwest::Client::new();
+        let mut shots = Vec::new();
+        for (label, headers, body) in [
+            ("A 裸 body", headers.clone(), raw.clone()),
+            ("B gzip body", gzip_signed, gzipped.clone()),
+        ] {
+            let mut request = client.post(&endpoint).timeout(std::time::Duration::from_secs(40));
+            for (name, value) in headers {
+                request = request.header(name.as_str(), value.as_str());
+            }
+            let outcome = match request.body(body).send().await {
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    let text = response.text().await.unwrap_or_default();
+                    format!("HTTP {status} :: {}", text.chars().take(220).collect::<String>())
+                }
+                Err(error) => format!("发送失败 :: {error}"),
+            };
+            println!("{label} → {outcome}");
+            shots.push(outcome);
+        }
+        assert_eq!(shots.len(), 2, "两发都应当拿到上游的答复（否则本探针没有对照）");
+        println!(
+            "结论读法：A 是 413 而 B 是 not-registered ⇒ 墙量线字节；两发都 413 ⇒ 墙量解压后的字节；\
+             B 报签名/鉴权 ⇒ 上游按解压后的体重算摘要。"
+        );
+    }
+
     /// **端到端交接探针**：真凭据走完「刷新 → 用新材料 → 真对话」整条链。
     ///
     /// 这就是 §10.3 / §12 里一直卡着的两个验收（M1 的"到期前自动换新"与
@@ -839,6 +1308,176 @@ mod tests {
             Err(error) => panic!("目录请求发不出去：{}", crate::server::core::egress::describe_error_detail(&error)),
         }
     }
+    /// 尺寸判据：两道墙的**原文**都要认，两种"看着像但不是"的都不能认。
+    /// 每段响应体都是 2026-10-09 那发零计费探针从上游原样拿回的。
+    #[test]
+    fn both_size_walls_are_recognized_from_their_own_copy() {
+        let parse = br#"{"error_code":"InferHub.001001005.400","error_msg":"The request param is invalid, Please check it","details":[{"error_code":"PARSE_REQUEST_DATA_EXCEPTION","error_msg":"PARSE_REQUEST_DATA_EXCEPTION"}]}"#;
+        assert!(
+            size_rejection(400, parse).is_some(),
+            "6 MB 级那发必须被认成尺寸拒绝，否则每轮都要白打一次"
+        );
+        let entity = br#"{"error_msg":"Request entity too large","error_code":"APIG.0201","request_id":"2464cdca99b2e672aff3df71978de6d8"}"#;
+        assert!(size_rejection(413, entity).is_some());
+        // 两句原因分别指向两道墙（面板与日志靠它分清「该削体」还是「该换家」）
+        assert!(size_rejection(400, parse).unwrap().contains("解析"));
+        assert!(size_rejection(413, entity).unwrap().contains("网关"));
+    }
+
+    /// 反对照：状态码像、但**不是体积问题**的形状不许登记成尺寸门。
+    #[test]
+    fn lookalikes_are_not_size_rejections() {
+        assert!(size_rejection(413, br#"{"error_msg":"something else"}"#).is_none());
+        // 同码不同面孔（APIG.0201 也用于 414/494 之类）⇒ 只凭码会连坐
+        assert!(
+            size_rejection(413, br#"{"error_code":"APIG.0201","error_msg":"too many headers"}"#)
+                .is_none(),
+            "判据取文案，不取错误码"
+        );
+        let unregistered = br#"{"error_code":"InferHub.002002009.404","error_msg":"The model is not registered, please request other model","details":[{"error_code":"InferHub.002002009.404"}]}"#;
+        assert!(size_rejection(404, unregistered).is_none());
+        assert!(
+            size_rejection(
+                400,
+                br#"{"text":"[DONE]","error_code":"TM.00001001","error_msg":"request body is invalid JSON"}"#
+            )
+            .is_none()
+        );
+    }
+
+    /// 真实帧的形状：标记**只**出现在 `details[].error_code`，顶层没有尺寸字样。
+    ///
+    /// 这条是第二次改动的原因 —— 同一句体积错，**经网关这一路回的是 HTTP 502**
+    /// （探针直发时是 400），把判据锁在状态码上就等于漏登记：dev 上连打两发
+    /// 8 MB，两发都完整发了出去，日志里一行「尺寸门已登记」都没有。
+    #[test]
+    fn the_size_marker_survives_whatever_status_upstream_picks() {
+        let frame = r#"{"error_code":"InferHub.001001005.400","error_msg":"The request param is invalid, Please check it","details":[{"error_code":"PARSE_REQUEST_DATA_EXCEPTION"}]}"#;
+        assert!(size_rejection_text(frame).is_some());
+        // 状态无关：400（探针直发）与 502（经网关实测）都要认
+        assert!(size_rejection(400, frame.as_bytes()).is_some());
+        assert!(
+            size_rejection(502, frame.as_bytes()).is_some(),
+            "上游把同一句体积错放在 502 上也必须认"
+        );
+        // 同一段文字里没有那个标记就不认（`InferHub.…400` 本身不构成尺寸结论）
+        assert!(size_rejection_text(r#"{"error_code":"InferHub.001001005.400"}"#).is_none());
+    }
+
+    /// 丢历史思考：两种形状都清、**条数一条不少**、user 轮不碰、没思考时一字节都不改。
+    #[test]
+    fn historical_reasoning_is_stripped_without_changing_the_shape() {
+        // Anthropic 形状：content 数组里的 thinking 块
+        let mut body = json!({"messages": [
+            {"role": "user", "content": [
+                {"type": "text", "text": "看这个"},
+                {"type": "thinking", "thinking": "这行不属于我们该改的用户输入"},
+            ]},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "先读文件", "signature": "sig-1"},
+                {"type": "text", "text": "答案是 42"},
+                {"type": "tool_use", "id": "t1", "name": "read", "input": {"p": "a.rs"}},
+            ]},
+            {"role": "assistant", "content": [
+                {"type": "redacted_thinking", "data": "AAAA"},
+            ]},
+        ]});
+        // 2 而不是 3：user 轮那条 thinking **故意不碰**（那是用户给的内容，
+        // 我们无权改写；思考只可能出现在 assistant 轮，那种输入本来就是异常的）
+        assert_eq!(2, strip_historical_reasoning(&mut body));
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(3, messages.len(), "条数必须一条不少：条数是别家（catpaw）的主变量");
+        assert_eq!(2, messages[0]["content"].as_array().unwrap().len(), "user 轮不碰");
+        let assistant = messages[1]["content"].as_array().unwrap();
+        assert_eq!(2, assistant.len());
+        assert_eq!(assistant[0]["text"], "答案是 42");
+        assert_eq!(assistant[1]["name"], "read", "tool_use 必须原样留着");
+        assert_eq!(messages[2]["content"], "", "只剩思考的那条改成空内容，不删整条");
+
+        // OpenAI 形状：思考挂在消息字段上
+        let mut openai = json!({"messages": [
+            {"role": "assistant", "content": "答", "reasoning_content": "想过", "reasoning": "也想过"},
+        ]});
+        assert_eq!(2, strip_historical_reasoning(&mut openai));
+        assert!(openai["messages"][0].get("reasoning_content").is_none());
+        assert!(openai["messages"][0].get("reasoning").is_none());
+        assert_eq!(openai["messages"][0]["content"], "答");
+
+        // 对照组：没有思考 ⇒ 序列化结果逐字节不变（不然"省体积"其实是偷偷改内容）
+        let clean = json!({"messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "yo"},
+        ]});
+        let mut same = clean.clone();
+        assert_eq!(0, strip_historical_reasoning(&mut same));
+        assert_eq!(
+            serde_json::to_string(&clean).unwrap(),
+            serde_json::to_string(&same).unwrap()
+        );
+
+        // 残缺形状不炸（release 是 panic=abort）
+        assert_eq!(0, strip_historical_reasoning(&mut json!({})));
+        assert_eq!(0, strip_historical_reasoning(&mut json!({"messages": "x"})));
+        assert_eq!(
+            0,
+            strip_historical_reasoning(&mut json!({"messages": [
+                "not-an-object",
+                {"role": "assistant", "content": null}
+            ]}))
+        );
+    }
+
+    /// 保留开关的判据（拆成纯函数只为能测：进程 env 是全局的，会污染并发用例）。
+    #[test]
+    fn the_retain_switch_only_accepts_the_three_documented_values() {
+        for value in ["1", "true", "yes"] {
+            assert!(keep_historical_reasoning_from(Some(value)), "{value} 应当认");
+        }
+        for value in ["0", "", "no", "TRUE", "Yes"] {
+            assert!(!keep_historical_reasoning_from(Some(value)), "{value} 不该开");
+        }
+        assert!(!keep_historical_reasoning_from(None), "没设 env = 默认丢");
+    }
+
+    /// 第二条判据（体积相关性）：**大体才贴这个码，小体撞上它是真参数错**。
+    ///
+    /// 反对照就是这条的全部价值 —— 没有它，任何一次普通的参数错都会把这一家按体积
+    /// 关在门外 120 秒；有了它，只有「我们确知这发已越过实测上界」时才记门。
+    #[test]
+    fn the_generic_param_error_is_a_size_failure_only_above_the_ceiling() {
+        let generic = r#"{"error_code":"InferHub.001001005.400","error_msg":"The request param is invalid, Please check it"}"#;
+        let above = SIZE_CEILING_KNOWN_BYTES + 1;
+        assert!(
+            size_rejection_by_shape(generic, above).is_some(),
+            "越界 + 这个码 ⇒ 按尺寸失败"
+        );
+        assert!(
+            size_rejection_by_shape(generic, SIZE_CEILING_KNOWN_BYTES).is_none(),
+            "刚好在上界以内不记门"
+        );
+        assert!(
+            size_rejection_by_shape(generic, 155).is_none(),
+            "小体撞上同一个码是参数错，不是体积"
+        );
+        // 越界但错误码无关 ⇒ 也不记（额度那种码别想关这一家的门）
+        assert!(
+            size_rejection_by_shape(
+                r#"{"error_code":"InferHub.4291.200","error_msg":"insufficient quota"}"#,
+                above
+            )
+            .is_none()
+        );
+        // 合成入口：标记版命中时不需要体积；两条都不命中才返回 None
+        let marked = r#"{"error_code":"InferHub.001001005.400","details":[{"error_code":"PARSE_REQUEST_DATA_EXCEPTION"}]}"#;
+        assert!(size_rejection_any(0, marked, 1_000).is_some());
+        assert!(
+            size_rejection_any(413, r#"{"error_msg":"Request entity too large"}"#, 1_000).is_some()
+        );
+        assert!(size_rejection_any(0, r#"{"error_code":"InferHub.002002009.404"}"#, 1_000).is_none());
+        assert!(size_rejection_any(0, generic, 1_000).is_none());
+        assert!(size_rejection_any(0, generic, above).is_some());
+    }
+
 }
 
 /// 首包门在「拿到内容」之前最多缓冲多少字节。
