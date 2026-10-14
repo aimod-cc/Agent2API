@@ -1,10 +1,18 @@
 /**
- * 账号页 · 「模型调度」作用域视图（**只读**）—— React 岛。
+ * 账号页 · 「模型调度」作用域的**左栏树 + 队列取数**（React 岛）。
  *
  * ── 这一版回答什么 ──────────────────────────────────────────
  * 「这个模型的下一个请求会先用谁、后面依次是谁、谁被跳过、为什么被跳过」。
  * 它**什么都不改** —— 可写覆盖（按模型排除账号 / 按模型设策略）刻意留到下一版，
  * 理由见文件末尾「下一版」那一段。
+ *
+ * ── 视图形态：模型作用域 = **同一张账号表** ────────────────────
+ * 本文件**不再自己画一块表格**。第一版曾在列表区整块换成一块自制的调度视图，代价是
+ * 切作用域时工具条（筛选档位全没了）与列标题（`<thead>` 整行不见了）都跟着变 ——
+ * 那是两个「整页级」的东西，不该被一次作用域切换改掉。现在模型作用域只是**换一批行、
+ * 换一个行序**：表是同一张表、工具条是同一个工具条、表头是同一行表头
+ * （见 accounts-page 的 `viewRows` / accounts-sort 的比较器）。
+ * 本文件于是只剩两件事：左栏那棵树（`ScopeRail`）与队列的取数（`useScheduleQueue`）。
  *
  * ── 排序一行都不自己写（本岛最要紧的一条）────────────────────
  * 行序直接取 `GET /api/routing/queue?model=` 的 `ordered`。那个端点的排序实现
@@ -14,15 +22,12 @@
  * 后端 `priority::grouped_queue_order` 的**第二份同构实现**（那份自带「改一处
  * 必须同步另一处」的欠条），这里不加第三份。
  *
- * ── 本文件两个组件 ─────────────────────────────────────
- * `ScopeRail`  = 账号表**左侧常驻**的作用域树（全局 + 厂商 → 模型），切「在看什么」；
- * `SchedulePane` = 列表区里那一块只读调度视图，画「该模型的队列长什么样」。
- * 两者都只读，状态（当前作用域）在下面的模块级 store 里，用 useSyncExternalStore 共享。
- *
  * ── 厂商 = 分组（文件夹）、账号 = 行（文件）──────────────────
  * 队列里同一家的账号**必然连续** —— 这是账号页整队重排写优先级时保证的不变量
- * （见后端 `priority::grouped_queue_order` 的模块说明），所以「按首次出现归组」
- * 得到的组序就等于真实队列里的组序，不需要任何额外排序。
+ * （见后端 `priority::grouped_queue_order` 的模块说明）。所以「切成连续段」得到的
+ * 组序就等于真实队列里的组序，不需要任何额外排序；`queueRuns` 刻意按**连续段**切
+ * 而不是按 provider 归堆 —— 万一哪天不连续了，归堆会把两段并成一段、行序随之与
+ * 队列分叉，而切段最坏只是多出一条同名的分组带。
  *
  * ── 倍率为什么在分组带上、而不是一列 ─────────────────────────
  * 倍率（`credits`）是 (提供商, 模型) 级属性：在「同一个模型」这个作用域下，全表
@@ -49,7 +54,7 @@ import type { AccountRecord } from './accounts-shared'
 /* ─── 桥（只声明用到的成员）────────────────────── */
 
 /** 队列里的一条候选（`api/routing_api.rs` 的 entry_json 形状） */
-type QueueEntry = {
+export type QueueEntry = {
   id?: string
   name?: string
   provider?: string
@@ -61,7 +66,7 @@ type QueueEntry = {
 }
 
 /** `GET /api/routing/queue?model=` 的响应 */
-type QueueSnapshot = {
+export type QueueSnapshot = {
   strategy?: string
   sticky?: string
   model?: string | null
@@ -96,10 +101,9 @@ function errorMessage(error: unknown): string {
 }
 
 /* ─── 作用域（全局 / 单模型）的共享状态 ─────────────────
-   切换器在工具条里、视图在列表区，是同一棵 React 树上的两个位置；而
-   accounts-page 自己也要读它（决定「渲染账号表还是调度视图」），所以状态放在
-   模块级、两边都用 useSyncExternalStore 订阅 —— 不把 state 提在 accounts-page
-   里再往下传（那会让它多背一份与它无关的状态）。 */
+   切换在左栏、消费在 accounts-page（它按作用域决定行集合与行序），是同一棵 React
+   树上的两个位置；所以状态放在模块级、两边都用 useSyncExternalStore 订阅 ——
+   不把 state 提在 accounts-page 里再往下传（那会让它多背一份与它无关的状态）。 */
 
 /** 全局作用域：'' —— 「模型名」不会是空串，所以用它做哨兵值 */
 export const SCOPE_ALL = ''
@@ -117,7 +121,7 @@ function scopeSnapshot(): string {
   return scope
 }
 
-/** 当前作用域（'' = 全局账号表）。accounts-page 用它决定渲染哪一份内容 */
+/** 当前作用域（'' = 全局账号表）。accounts-page 用它决定行集合与行序 */
 export function useScheduleScope(): string {
   return React.useSyncExternalStore(subscribeScope, scopeSnapshot)
 }
@@ -340,7 +344,8 @@ export function ScopeRail({ narrow }: { narrow: boolean }) {
 
 /* ─── 倍率（分组带上的读数）─────────────────────── */
 
-type RateMap = Map<string, string>
+/** `(提供商, 模型名) → 倍率短文案` */
+export type RateMap = Map<string, string>
 
 /**
  * `(提供商, 模型名) → 倍率短文案`。
@@ -377,11 +382,23 @@ const STATE_META: Record<string, { label: string; cls: string }> = {
   'no-credentials': { label: '无凭证', cls: 'bg-destructive-soft text-destructive' },
 }
 
-function StateBadge({ state }: { state: string | undefined }) {
+/**
+ * 状态的**可比序**（按「越不可用越靠后」）。排序与徽章共用同一份 `STATE_META` 的次序，
+ * 认不出的状态（后端新增取值）排在全部已知状态之后 —— 不猜它是好是坏。
+ */
+const STATE_ORDER = Object.keys(STATE_META)
+
+export function stateRank(state: string | undefined): number {
+  const index = STATE_ORDER.indexOf(String(state || ''))
+  return index < 0 ? STATE_ORDER.length : index
+}
+
+export function StateBadge({ state, reason }: { state?: string; reason?: string }) {
   const key = String(state || '')
   const meta = STATE_META[key] || { label: key || '—', cls: 'bg-muted text-muted-foreground' }
   return (
-    <span className={cn('inline-flex rounded px-1.5 py-0.5 text-[11px] leading-4 whitespace-nowrap', meta.cls)}>
+    <span className={cn('inline-flex rounded px-1.5 py-0.5 text-[11px] leading-4 whitespace-nowrap', meta.cls)}
+      {...(reason ? { title: reason } : {})}>
       {t(meta.label)}
     </span>
   )
@@ -389,7 +406,7 @@ function StateBadge({ state }: { state: string | undefined }) {
 
 /* ─── 策略 / 粘性的只读文案 ─────────────────────── */
 
-function strategyLabel(value: unknown): string {
+export function strategyLabel(value: unknown): string {
   switch (String(value || '')) {
     case 'order': return t('顺序优先')
     case 'rotate': return t('负载均衡')
@@ -397,7 +414,7 @@ function strategyLabel(value: unknown): string {
   }
 }
 
-function stickyLabel(value: unknown): string {
+export function stickyLabel(value: unknown): string {
   switch (String(value || '')) {
     case 'auto': return t('自动')
     case 'session': return t('会话内')
@@ -407,43 +424,27 @@ function stickyLabel(value: unknown): string {
   }
 }
 
-/* ─── 按家归堆（厂商 = 分组）───────────────────── */
+/* ─── 队列取数 ─────────────────────────────────── */
 
-type EntryGroup = {
-  provider: string
-  label: string
-  entries: QueueEntry[]
+export type ScheduleQueueState = {
+  queue: QueueSnapshot | null
+  rates: RateMap
+  busy: boolean
+  error: string
+  /** 手动重取一次（批量栏那颗「刷新」） */
+  reload: () => void
 }
 
 /**
- * 按**首次出现**归堆 —— 不排序（见文件头：组序就是队列里的组序）。
- * `providers` 的顺序因此原样保留，组内也保持传入顺序。
- */
-function groupByProvider(entries: QueueEntry[]): EntryGroup[] {
-  const groups: EntryGroup[] = []
-  const index = new Map<string, EntryGroup>()
-  for (const entry of entries) {
-    const provider = String(entry.provider || '')
-    let group = index.get(provider)
-    if (!group) {
-      group = { provider, label: String(entry.providerLabel || provider || '—'), entries: [] }
-      index.set(provider, group)
-      groups.push(group)
-    }
-    group.entries.push(entry)
-  }
-  return groups
-}
-
-/* ─── 调度视图（列表区）────────────────────────── */
-
-/**
- * 模型调度视图：整块替换列表区的账号表（由 accounts-page 在作用域非全局时渲染）。
+ * 拉某个模型的调度队列 + 倍率表（作用域为空串时**什么都不做**，直接给空态：
+ * 全局作用域下这份数据一点用都没有，不该为一枚没在看的东西打一次请求）。
  *
- * 数据一次拉两样：队列（顺序 + 原因）与模型清单（只取倍率）。两样都不依赖账号表
- * 的 store —— 这一块是**只读旁路**，账号表那份状态一律不碰。
+ * 为什么不做轮询：队列随限流冷却 / 并发 / 游标一直在变，但它是**为看而拉**的一份快照
+ * （界面上写着「只读：这里的顺序就是转发会走的顺序」）。给它挂 2 秒一轮的轮询，代价是
+ * 每 2 秒一次全量选路计算，而收益只是「冷却结束那一行自己变色」。留一颗手动刷新，
+ * 需要时按一下即可。
  */
-export function SchedulePane({ model }: { model: string }) {
+export function useScheduleQueue(model: string): ScheduleQueueState {
   const [queue, setQueue] = React.useState<QueueSnapshot | null>(null)
   const [rates, setRates] = React.useState<RateMap>(() => new Map())
   const [error, setError] = React.useState('')
@@ -461,6 +462,12 @@ export function SchedulePane({ model }: { model: string }) {
   }, [])
 
   React.useEffect(() => {
+    if (!model) {
+      setQueue(null)
+      setError('')
+      setBusy(false)
+      return
+    }
     let alive = true
     setBusy(true)
     setError('')
@@ -476,162 +483,58 @@ export function SchedulePane({ model }: { model: string }) {
     return () => { alive = false }
   }, [model, reload])
 
-  /** id → 账号记录：队列条目只有 id，展示名与备注名要从账号表同一份数据里取 */
-  const records = React.useMemo(() => {
-    const map = new Map<string, AccountRecord>()
-    for (const record of bridge().wbApp?.getState?.()?.accounts?.accounts || []) {
-      if (record?.id) map.set(String(record.id), record)
-    }
-    return map
-  }, [queue])
-
-  const ordered = queue?.ordered || []
-  const blocked = queue?.blocked || []
-  const orderedGroups = React.useMemo(() => groupByProvider(ordered), [queue])
-  const blockedGroups = React.useMemo(() => groupByProvider(blocked), [queue])
-
-  function displayOf(entry: QueueEntry): string {
-    const id = String(entry.id || '')
-    const record = id ? records.get(id) : undefined
-    if (record) return displayNameOf(record)
-    return String(entry.name || id || '—')
+  return {
+    queue, rates, busy, error,
+    reload: React.useCallback(() => setReload(count => count + 1), []),
   }
-
-  function rateOf(provider: string): string {
-    return rates.get(`${provider}::${model.toLowerCase()}`) || '—'
-  }
-
-  /** 位次：`ordered` 里的下标（+1）。被跳过者没有位次，拿 '' 让那一列空着 */
-  const seatOf = new Map<string, number>()
-  ordered.forEach((entry, position) => {
-    if (entry.id) seatOf.set(String(entry.id), position + 1)
-  })
-
-  const pickedId = String(queue?.pickedId || '')
-
-  return (
-    <div className='flex min-h-0 flex-col' data-sched-pane='1'>
-      {/* 只读头：当前策略 / 粘性 / 这一份队列是算给哪个模型的 */}
-      <div className='flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-hairline bg-surface px-3 py-2 text-xs text-muted-foreground'>
-        <span>{t('策略')}<b className='ml-1 text-foreground'>{strategyLabel(queue?.strategy)}</b></span>
-        <span>{t('会话粘性')}<b className='ml-1 text-foreground'>{stickyLabel(queue?.sticky)}</b></span>
-        <span>{t('模型')}<b className='ml-1 text-foreground'>{model}</b></span>
-        <span>{t('队列 {n} 个可用 · 跳过 {m} 个', { n: ordered.length, m: blocked.length })}</span>
-        <span className='flex-1' />
-        <span className='text-muted-foreground'>{t('只读：这里的顺序就是转发会走的顺序')}</span>
-        <button type='button' className='rounded border border-hairline px-2 py-0.5 hover:bg-control-hover'
-          onClick={() => setReload(count => count + 1)}>{t('刷新')}</button>
-      </div>
-
-      <div className='min-h-0 flex-1 overflow-auto'>
-        {busy && !queue ? (
-          <div className='p-4 text-sm text-muted-foreground'>{t('正在读取调度队列…')}</div>
-        ) : error ? (
-          <div className='p-4 text-sm text-destructive'>{error}</div>
-        ) : (
-          <>
-            {/* ── 调度顺序：会被用到的那些 ── */}
-            <div className='px-3 pt-3 pb-1 text-xs font-medium text-muted-foreground'>
-              {t('调度顺序（从上往下依次尝试）')}
-            </div>
-            {ordered.length ? orderedGroups.map(group => (
-              <ScheduleGroup key={group.provider} group={group} rate={rateOf(group.provider)}
-                seatOf={seatOf} displayOf={displayOf} pickedId={pickedId} />
-            )) : (
-              <div className='px-3 py-2 text-sm text-muted-foreground'>
-                {t('这个模型当前没有可用账号（全部被跳过，原因见下）')}
-              </div>
-            )}
-
-            {/* ── 被跳过者：原因逐条摆出来，用户不用猜 ── */}
-            {blocked.length ? (
-              <>
-                <div className='px-3 pt-4 pb-1 text-xs font-medium text-muted-foreground'>
-                  {t('被跳过（{n} 个）', { n: blocked.length })}
-                </div>
-                {blockedGroups.map(group => (
-                  <ScheduleGroup key={group.provider} group={group} rate={rateOf(group.provider)}
-                    seatOf={seatOf} displayOf={displayOf} pickedId='' blocked />
-                ))}
-              </>
-            ) : null}
-
-            {queue?.lastRequestModel ? (
-              <div className='px-3 py-3 text-xs text-muted-foreground'>
-                {t('最近一次请求用的是：{model}', { model: String(queue.lastRequestModel) })}
-              </div>
-            ) : null}
-          </>
-        )}
-      </div>
-    </div>
-  )
 }
 
-/* ─── 一组（一家）──────────────────────────────── */
+/* ─── 按队列顺序切段（厂商 = 一段）───────────────── */
+
+export type QueueRun = {
+  provider: string
+  label: string
+  /** 这一段里的条目（`ordered` 与 `blocked` 各自切各自的） */
+  entries: QueueEntry[]
+  /** 这一段是「被跳过」那一段 */
+  blocked: boolean
+}
 
 /**
- * 分组带 + 这一家的行。分组带上的倍率是「这一家在这个模型上的单价」——
- * 模型级属性，所以只在带上出现一次（理由见文件头）。
+ * 把队列切成**连续段**：相邻同家的条目是一段，家变了就另起一段。
+ *
+ * 刻意不按 provider 归堆（`Map<provider, entries>`）：归堆会把「同一家的两段」并成一段，
+ * 一旦哪天队列不再保证同家连续，合并就会把行序改成与队列不一致，而界面上看不出来。
+ * 切段最坏的后果只是多出一条同名的分组带 —— 那是看得见的。
+ *
+ * `ordered` 与 `blocked` 分别调用（两者的「第 N 段」各自独立），`blocked` 标记会带上。
  */
-function ScheduleGroup({ group, rate, seatOf, displayOf, pickedId, blocked }: {
-  group: EntryGroup
-  rate: string
-  seatOf: Map<string, number>
-  displayOf: (entry: QueueEntry) => string
-  pickedId: string
-  blocked?: boolean
-}) {
-  return (
-    <div className='mb-2 overflow-hidden rounded border border-hairline bg-card' data-sched-group={group.provider}>
-      <div className='flex items-center gap-3 border-b border-hairline bg-surface px-3 py-1.5'>
-        <span className='text-sm font-medium text-foreground'>{group.label}</span>
-        <span className='text-xs text-muted-foreground'>
-          {t('{n} 个账号', { n: group.entries.length })}
-        </span>
-        <span className='flex-1' />
-        <span className='text-xs text-muted-foreground' data-sched-rate='1' title={t('这一家在这个模型上的倍率（与模型管理页同一份数据）')}>
-          {t('倍率')}<b className='ml-1 text-foreground'>{rate}</b>
-        </span>
-      </div>
-      <table className='w-full table-fixed border-collapse text-sm'>
-        <tbody>
-          {group.entries.map((entry, index) => {
-            const id = String(entry.id || '')
-            const seat = seatOf.get(id)
-            const picked = !blocked && pickedId !== '' && id === pickedId
-            return (
-              <tr key={id || `${group.provider}-${index}`} data-sched-row={id}
-                className={cn('border-t border-hairline first:border-t-0', picked && 'bg-primary-soft')}>
-                <td className='w-12 px-2 py-1.5 text-center text-xs text-muted-foreground'>
-                  {seat ? `#${seat}` : '—'}
-                </td>
-                {/* 宽度写死前两列、把余量留给「原因」：原因句是这一格唯一的长文本，
-                    让它吃剩余宽度；账号名列不写宽度会与它平分 —— 名字很短，
-                    多出来的宽度只会把原因挤出视野 */}
-                <td className='w-56 px-2 py-1.5'>
-                  <span className='text-foreground'>{displayOf(entry)}</span>
-                  {picked ? (
-                    <span className='ml-2 rounded bg-primary-tint px-1.5 py-0.5 text-[11px] text-primary-fg'
-                      data-sched-picked='1'>
-                      {t('下一次优先用它')}
-                    </span>
-                  ) : null}
-                </td>
-                <td className='w-24 px-2 py-1.5'><StateBadge state={entry.state} /></td>
-                <td className='px-2 py-1.5 text-xs text-muted-foreground'>{String(entry.reason || '')}</td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
-    </div>
-  )
+export function queueRuns(entries: QueueEntry[], blocked: boolean): QueueRun[] {
+  const runs: QueueRun[] = []
+  for (const entry of entries) {
+    const provider = String(entry.provider || '')
+    const last = runs[runs.length - 1]
+    if (last && last.provider === provider) last.entries.push(entry)
+    else runs.push({
+      provider,
+      label: String(entry.providerLabel || provider || '—'),
+      entries: [entry],
+      blocked,
+    })
+  }
+  return runs
+}
+
+/** 队列条目 → 展示名：**不用**后端给的 `name` 作为首选 —— 账号页显示的名字有自己的
+ *  兜底链（昵称 / 邮箱 / uid），两处口径不同会让同一行在两个作用域下显示成两个名字。
+ *  这张表渲染时用的就是账号表那份记录，本函数只在没有记录可查时兜底。 */
+export function entryDisplayName(entry: QueueEntry, nameOf: (id: string) => string | undefined): string {
+  const id = String(entry.id || '')
+  return nameOf(id) || String(entry.name || id || '—')
 }
 
 /*
  * ── 下一版（可写覆盖）为什么先不做 ──────────────────────────
- * 这一版刻意只读，是因为「局部设置」到底该可写什么，答案要先看过真实队列才拍得准：
  *   · 若语义是「这个模型单独一套调度参数（顺序优先 / 轮换）」——落点是全仓库 3 处
  *     构造 `PlanMeta` 的地方（`rotate.rs` 的 `select_target_account` 与
  *     `pick_next_account`、`routing_api.rs` 的队列端点），把

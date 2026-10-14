@@ -30,6 +30,23 @@ import {
   visibleAccounts, type AccountFilter, type AccountGroup, type TokenUsageLookup, type UsageLookup,
 } from './accounts-domain'
 
+/**
+ * 表头排序（点表头那一列）。
+ *
+ * `scope` 决定那张表是**按厂商分组**的这件事要不要让步：
+ *   · `group`（默认）只在各家组内重排，组与组的先后（= 各家队首的先后）不动；
+ *   · `flat` 打散分组按整表排 —— 找「余额最高的那个账号」时它才真的排得出全局第一名。
+ * 两种作用域都保留「顺序」列的真实位次（`#N`），所以排序期间也没有信息被抹掉。
+ */
+export type AccountSortScope = 'group' | 'flat'
+
+export type AccountSort = {
+  /** 列 key（`ACCOUNT_COLUMNS` 的 key，也是 `th[data-col]`） */
+  key: string
+  dir: 'asc' | 'desc'
+  scope: AccountSortScope
+}
+
 /** 弹窗状态：账号设置（单个）/ 批量操作（多选 + 动作），关闭即 null */
 export type AccountsDialog =
   | { kind: 'settings'; id: string }
@@ -50,6 +67,8 @@ export type AccountsStore = {
   clash: ClashSnapshot | null
   dialog: AccountsDialog
   namesHidden: boolean
+  /** 表头排序（`null` = 默认次序：全局按优先级队列，模型作用域按调度队列） */
+  sort: AccountSort | null
   /** 批量查询余额在途（工具条按钮的文案与禁用态） */
   usageBusy: boolean
   /** 余额查询在途的账号（行上那颗「余额」按钮的去重闸） */
@@ -64,6 +83,9 @@ const COLLAPSED_KEY = 'workbuddy-desktop-accounts-collapsed'
 /** 账号名隐藏开关（表头「账号」旁边那颗眼睛）：打开后账号列的名字整体显示成星号。
  *  这是「怎么看这张表」的偏好，与列宽同一档，存 localStorage 跨次启动保留 */
 const NAMES_HIDDEN_KEY = 'workbuddy-desktop-accounts-names-hidden'
+/** 表头排序：与筛选 / 折叠同一档的「怎么看这张表」偏好。它不隐藏任何行，所以跨次启动
+ *  保留是安全的（存了排序而排序不明显，靠批量栏那枚「已按 X 排序」的提示交代） */
+const SORT_KEY = 'workbuddy-desktop-accounts-sort'
 
 /**
  * 读回筛选档位。
@@ -104,6 +126,27 @@ function loadNamesHidden(): boolean {
   }
 }
 
+/**
+ * 读回表头排序。
+ *
+ * `scope` 只认 group / flat 两个值（存盘里出现过第三个值时退回 group 而不是丢掉整条
+ * 排序）：`flat` 会打散厂商分组，是个更重的手法 —— 认不出就按轻的那一档走。
+ */
+function loadSort(): AccountSort | null {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SORT_KEY) || 'null') as Partial<AccountSort> | null
+    const key = String(raw?.key || '')
+    if (!key) return null
+    return {
+      key,
+      dir: raw?.dir === 'desc' ? 'desc' : 'asc',
+      scope: raw?.scope === 'flat' ? 'flat' : 'group',
+    }
+  } catch {
+    return null
+  }
+}
+
 /* ─── store ─────────────────────────────────── */
 
 let store: AccountsStore = {
@@ -116,6 +159,7 @@ let store: AccountsStore = {
   clash: null,
   dialog: null,
   namesHidden: loadNamesHidden(),
+  sort: loadSort(),
   usageBusy: false,
   usageInflight: new Set<string>(),
 }
@@ -323,6 +367,68 @@ export function setAllGroupsCollapsed(providers: string[], collapsed: boolean): 
   }
   persistCollapsed(next)
   patch({ collapsed: next })
+}
+
+/* ─── 表头排序 ─────────────────────────────────
+ * 语义与筛选同一档（「怎么看这张表」），但**不隐藏任何行** —— 所以它不参与
+ * `filterActive()` 那条「顺序已锁」的判定（排序期间拖拽的语义见 accounts-page：
+ * 有排序时拖拽落点与真实队列对不上，那一处单独锁）。 */
+
+/** 没有排序时用户选过的作用域档位（下一次点表头时由 `cycleSort` 带上） */
+let sortScope: AccountSortScope = 'group'
+
+function persistSort(sort: AccountSort | null): void {
+  try {
+    if (sort) localStorage.setItem(SORT_KEY, JSON.stringify(sort))
+    else localStorage.removeItem(SORT_KEY)
+  } catch { /* 隐私模式等存不了就算了：本次会话内仍然生效 */ }
+}
+
+/** 当前排序（`null` = 默认次序） */
+export function accountSort(): AccountSort | null {
+  return store.sort
+}
+
+/**
+ * 点表头：同一列上是 升序 → 降序 → 取消；换一列则从那列的升序起。
+ *
+ * 三态而不是两态：这张表的**默认次序本身有意义**（全局 = 优先级队列，模型作用域 =
+ * 调度队列），两态会给不出一条「回到默认」的路 —— 用户点了表头就再也回不到队列序。
+ */
+export function cycleSort(key: string): void {
+  const current = store.sort
+  let next: AccountSort | null
+  if (!current || current.key !== key) next = { key, dir: 'asc', scope: current?.scope || sortScope }
+  else if (current.dir === 'asc') next = { ...current, dir: 'desc' }
+  else next = null
+  persistSort(next)
+  patch({ sort: next })
+}
+
+/**
+ * 切排序的作用域（组内 / 整表）。
+ *
+ * 没有排序时**只记住这一档**、不重绘：那时页面上根本没有排序在生效，为一次「预选」
+ * 重画整张表不值当；下一次点表头时由 `cycleSort` 带上它。
+ */
+export function setSortScope(scope: AccountSortScope): void {
+  const current = store.sort
+  sortScope = scope
+  if (!current) return
+  persistSort({ ...current, scope })
+  patch({ sort: { ...current, scope } })
+}
+
+/** 取消排序（批量栏那枚提示里的 ×） */
+export function clearSort(): void {
+  if (!store.sort) return
+  persistSort(null)
+  patch({ sort: null })
+}
+
+/** 当前生效的作用域档位（没排序时就是那次预选） */
+export function currentSortScope(): AccountSortScope {
+  return store.sort?.scope || sortScope
 }
 
 /* ─── 勾选（只作用于当前勾选，不随筛选变化自动增减）─── */

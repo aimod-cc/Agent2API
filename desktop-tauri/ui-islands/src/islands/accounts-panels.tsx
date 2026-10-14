@@ -52,6 +52,7 @@ import {
   tokenRulesOf, tokenWindowInfo, zcodePlanStateLabel,
 } from './accounts-domain'
 import { CreditDetailButton, creditRowsOf } from './accounts-credit-detail'
+import type { AccountSort } from './accounts-store'
 import {
   PROXY_CUSTOM_CURRENT, PROXY_CUSTOM_EDIT, applyProxyPick,
   connectionsOf, maskName, openBatchDialog, openSettingsDialog, openZcodePlans,
@@ -82,8 +83,11 @@ function iconHtml(name: string, size: number): string {
  * 让「点一下开关」变成「拖走了一行」。序号显示的是它在**本组内**的位次，组与组之间的
  * 先后由分组带的顺位表达 —— 两者合起来才是真实的尝试顺序。
  */
-export function OrderCell({ account, rank }: { account: AccountRecord; rank: number }) {
-  const label = t('组内第 {rank} 位', { rank })
+export function OrderCell({ account, rank, hint }: { account: AccountRecord; rank: number; hint?: string }) {
+  // 位次的说法随作用域变：全局表里它是**组内**序号（组与组的先后由分组带的顺位表达），
+  // 模型调度作用域里它是**该模型队列**里的位次（组顺位那一层在那边没有意义）。
+  // 两种口径下的 `#N` 都是事实，只是「N 是第几位」要由 hint 说清
+  const label = hint || t('组内第 {rank} 位', { rank })
   return (
     <div className='order-cell'>
       <span className='order-grip' role='button' tabIndex={-1} aria-label={t('拖动调整组内顺序')}
@@ -153,10 +157,16 @@ function GroupMenu({ group, ids, collapsed }: { group: AccountGroup; ids: string
  * 样式刻意保持中性（surface 底 + 一条 hairline）：一家一色会让整页像调色板，
  * 而「哪一段是哪一家」由家名与图标已经说清楚了。
  */
-export function GroupBandRow({ group, collapsed, colSpan }: {
+export function GroupBandRow({ group, collapsed, colSpan, extra, hideRank }: {
   group: AccountGroup
   collapsed: boolean
   colSpan: number
+  /** 分组带右侧、折叠箭头之前的只读挂件（模型作用域用来放这一家在这个模型上的**倍率**：
+   *  它是 (提供商, 模型) 级属性，在全表每行都一样，做成一列就是 N 行重复） */
+  extra?: React.ReactNode
+  /** 不显示「第 N 顺位」。模型作用域下那一段是**队列里的连续段**，段序就是队列序，
+   *  但「顺位」这个词在那边指的是另一种东西（账号页的组顺位），摆出来只会误导 */
+  hideRank?: boolean
 }) {
   const icon = PROVIDER_ICONS[group.provider]
   return (
@@ -166,9 +176,11 @@ export function GroupBandRow({ group, collapsed, colSpan }: {
           <span className='queue-grip' role='button' tabIndex={-1} aria-label={t('拖动调整整组顺序')}
             title={t('按住拖动，调整这一家的组顺位（整组一起动）')}
             dangerouslySetInnerHTML={{ __html: iconHtml('gripVertical', 14) }} />
-          <span className='grp-rank' title={t('组顺位：越小越先用（拖动分组带调整）')}>
-            {t('第 {rank} 顺位', { rank: group.rank })}
-          </span>
+          {hideRank ? null : (
+            <span className='grp-rank' title={t('组顺位：越小越先用（拖动分组带调整）')}>
+              {t('第 {rank} 顺位', { rank: group.rank })}
+            </span>
+          )}
           <span className='grp-logo'>
             {icon
               ? <img src={icon} alt='' loading='lazy' />
@@ -182,6 +194,7 @@ export function GroupBandRow({ group, collapsed, colSpan }: {
             limited: group.limited > 0 ? t(' · 限流 {n}', { n: group.limited }) : '',
           })}</span>
           <span className='grp-spacer' />
+          {extra}
           <button type='button' className='grp-iconbtn grp-fold' aria-expanded={!collapsed}
             title={collapsed ? t('展开这一组') : t('折叠这一组')}
             onClick={() => toggleGroupCollapsed(group.provider)}
@@ -1138,7 +1151,13 @@ function UsageDetailRowView({ row }: { row: UsageDetailRow }) {
  * 隐藏账号名开关打开时邮箱 / 昵称在气泡里同样打码 ——
  * 不给「悬停一下就绕过打码」的口子。
  */
-export function AccountCell({ account, namesHidden }: { account: AccountRecord; namesHidden: boolean }) {
+export function AccountCell({ account, namesHidden, providerLabel }: {
+  account: AccountRecord
+  namesHidden: boolean
+  /** 非空时在名字后面挂一枚厂商标记。只在**整表排序（分组被打散）**时传 ——
+   *  那时行不再属于某一条分组带，「这一行是哪一家」没有别的地方可看 */
+  providerLabel?: string
+}) {
   const ident = identifierOf(account)
   const features = providerFeatures(providerOf(account))
   const name = displayNameOf(account) || t('未命名账号')
@@ -1162,6 +1181,16 @@ export function AccountCell({ account, namesHidden }: { account: AccountRecord; 
 
   const showEmail = email && email !== name
   const proxyError = account.proxy?.error
+  // 厂商标记（只在整表排序、分组被打散时挂）：图标取分组带同一份映射，
+  // 于是「同一个家」在带子上与行里长得一样
+  const providerId = providerOf(account)
+  const providerIcon = PROVIDER_ICONS[providerId]
+  const chip = providerLabel ? (
+    <span className='acct-prov-chip' title={t('所属厂商：{label}', { label: providerLabel })}>
+      {providerIcon ? <img src={providerIcon} alt='' loading='lazy' /> : null}
+      {providerLabel}
+    </span>
+  ) : null
   // 原生 title 的出现时机由浏览器/系统定（悬停约一秒才出，改不了），换成组件库
   // Tooltip：Provider delay=0 悬停即现；Portal 渲染不被表格滚动容器裁剪；
   // 内容一行一个 div（用户要的「一行一个信息」）。
@@ -1170,6 +1199,7 @@ export function AccountCell({ account, namesHidden }: { account: AccountRecord; 
       <Tooltip>
         <TooltipTrigger render={<div className='acct-name' />}>
           <span className='name'>{mask(name)}</span>
+          {chip}
         </TooltipTrigger>
         <TooltipContent>
           <TooltipArrow />
@@ -1180,6 +1210,7 @@ export function AccountCell({ account, namesHidden }: { account: AccountRecord; 
   ) : (
     <div className='acct-name'>
       <span className='name'>{mask(name)}</span>
+      {chip}
     </div>
   )
   return (
@@ -1476,14 +1507,57 @@ export function PanelsRow({ account, colSpan, limitsOpen, onClear }: {
  * 各列的对齐类（ta-*）由 syncStaticHead 统一贴（它按用户配置给），所以这里不写 ——
  * 写了反而会与它的结果打架。数据行相反：完全按 visibleColumns() 逐列渲染。
  */
-export function TableHead({ namesHidden, allPicked, somePicked, disabled, onToggleAll }: {
+/**
+ * 表头（**静态**：列的字面量顺序，不随任何状态重建 —— 列宽把手与列设置的就地重排
+ * 都挂在这些节点上，见 accounts-page 的文件头）。
+ *
+ * ── 可排序的列 ─────────────────────────────────────────────
+ * 列名是一枚按钮：点一次升序、再点降序、**第三次恢复默认次序**。三态而不是两态，
+ * 是因为这张表的默认次序本身有含义（全局 = 优先级队列，模型作用域 = 调度队列），
+ * 两态会给不出一条「回到队列序」的路。
+ *
+ * 未排序时那枚小箭头只在**悬停**时显形：常亮的话每一列都挂一枚，反而看不出当前
+ * 排的是哪一列。已排序的那一列文字转主色、箭头常亮。
+ * 哪些列可排、每列怎么取值全在 accounts-sort（本文件只管画与转发点击）。
+ */
+export function TableHead({ namesHidden, allPicked, somePicked, disabled, onToggleAll, sort, onSort }: {
   namesHidden: boolean
   allPicked: boolean
   somePicked: boolean
   disabled: boolean
   onToggleAll: (picked: boolean) => void
+  /** 当前排序（`null` = 默认次序） */
+  sort: AccountSort | null
+  /** 点某一列的表头：升 → 降 → 取消（落 accounts-store 的 `cycleSort`） */
+  onSort: (key: string) => void
 }) {
   const grip = <span className='col-grip' title={t('拖动调整列宽（双击还原）')} />
+  const sorted = (key: string) => sort?.key === key
+  /** `th` 上的排序语义（读屏用；视觉一侧由箭头的显隐表达） */
+  const ariaSort = (key: string): 'ascending' | 'descending' | undefined =>
+    sorted(key) ? (sort?.dir === 'desc' ? 'descending' : 'ascending') : undefined
+  /**
+   * 一个可排序的列名。`title` 是这一列**原本**的说明（有就拼在前面）——
+   * 排序的说明不该把「这一列是什么」顶掉，两个都留着。
+   */
+  const sortable = (key: string, label: React.ReactNode, title?: string) => {
+    const active = sorted(key)
+    const desc = active && sort?.dir === 'desc'
+    const hint = t('点一下按这一列排序（升序 → 降序 → 恢复默认次序）')
+    return (
+      <button type='button' className={cn('th-sort', active && 'is-sorted')}
+        title={title ? `${title}；${hint}` : hint} onClick={() => onSort(key)}>
+        {label}
+        <span className='th-caret' aria-hidden='true'>
+          <svg viewBox='0 0 8 8' width='8' height='8'>
+            <path d={desc ? 'M1.5 2.7 4 5.2 6.5 2.7' : 'M1.5 5.3 4 2.8 6.5 5.3'}
+              stroke='currentColor' strokeWidth='1.3' fill='none'
+              strokeLinecap='round' strokeLinejoin='round' />
+          </svg>
+        </span>
+      </button>
+    )
+  }
   return (
     <thead>
       <tr>
@@ -1494,41 +1568,39 @@ export function TableHead({ namesHidden, allPicked, somePicked, disabled, onTogg
             title={t('全选 / 取消全选当前筛选结果（与批量栏同一个选择）')}
             onCheckedChange={next => onToggleAll(next)} />
         </th>
-        <th className='cell-order' data-col='order'>
-          <span className='th-label' title={t('组内先后：按住左边的把手上下拖动即可调整；整组的先后拖分组带的把手')}>
-            {t('顺序')}
-          </span>
+        <th className='cell-order' data-col='order' aria-sort={ariaSort('order')}>
+          {sortable('order', t('顺序'), t('组内先后：按住左边的把手上下拖动即可调整；整组的先后拖分组带的把手'))}
           {grip}
         </th>
-        <th className='cell-account' data-col='account'>
+        <th className='cell-account' data-col='account' aria-sort={ariaSort('account')}>
+          {/* 账号列的列名与「隐藏账号名」那颗眼睛同一格：眼睛**不能**放进列名按钮里
+              （button 不能嵌套 button），所以两者是 `.th-label` 下的兄弟 */}
           <span className='th-label'>
-            {t('账号')}
+            {sortable('account', t('账号'))}
             <NameEyeButton hidden={namesHidden} />
           </span>
           {grip}
         </th>
-        <th className='cell-proxy' data-col='proxy'>
-          <span className='th-label' title={t('该账号出网走的代理（Clash 出口 / 自定义 / 直连）；点击可修改')}>{t('代理')}</span>
+        <th className='cell-proxy' data-col='proxy' aria-sort={ariaSort('proxy')}>
+          {sortable('proxy', t('代理'), t('该账号出网走的代理（Clash 出口 / 自定义 / 直连）；点击可修改'))}
           {grip}
         </th>
-        <th className='cell-connections' data-col='connections'>
-          <span className='th-label' title={t('此刻正在使用这个账号的请求数（含还在下发内容的流式请求）；为 0 时不显示')}>{t('连接数')}</span>
+        <th className='cell-connections' data-col='connections' aria-sort={ariaSort('connections')}>
+          {sortable('connections', t('连接数'), t('此刻正在使用这个账号的请求数（含还在下发内容的流式请求）；为 0 时不显示'))}
           {grip}
         </th>
-        <th className='cell-status' data-col='status'>
-          <span className='th-label'>{t('状态')}</span>{grip}
+        <th className='cell-status' data-col='status' aria-sort={ariaSort('status')}>
+          {sortable('status', t('状态'))}{grip}
         </th>
-        <th className='cell-limits' data-col='limits'>
-          <span className='th-label' title={t('该账号当前限流中的模型；点徽章看明细')}>
-            {t('限流')}
-          </span>
+        <th className='cell-limits' data-col='limits' aria-sort={ariaSort('limits')}>
+          {sortable('limits', t('限流'), t('该账号当前限流中的模型；点徽章看明细'))}
           {grip}
         </th>
-        <th className='cell-expiry' data-col='expiry'>
-          <span className='th-label'>{t('有效期')}</span>{grip}
+        <th className='cell-expiry' data-col='expiry' aria-sort={ariaSort('expiry')}>
+          {sortable('expiry', t('有效期'))}{grip}
         </th>
-        <th className='cell-usage' data-col='usage'>
-          <span className='th-label'>{t('余额')}</span>{grip}
+        <th className='cell-usage' data-col='usage' aria-sort={ariaSort('usage')}>
+          {sortable('usage', t('余额'))}{grip}
         </th>
         {/* 最后一列不给把手：它绝对定位在右缘，钉在表格右缘会顶出一条横向滚动条 */}
         <th className='cell-actions' data-col='actions'><span className='th-label'>{t('操作')}</span></th>

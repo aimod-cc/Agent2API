@@ -1,0 +1,97 @@
+/* 账号页 · 表头排序 + 模型作用域的呈现件（**下游新增文件**，上游没有这一份）
+   ────────────────────────────────────────────────────────────
+   为什么单独一个文件而不是塞进 page-accounts-rail.css：
+     rail 那份只管左栏（作用域树）的宽 / 窄两态；这里管的是**表本身**的那几件
+     （可排序表头的手感、被跳过行的弱化、整表排序时行内的厂商标记）。
+     两件事各自的读者不同，混在一个文件里会让「改排序」的人去翻一份叫 rail 的文件。
+
+   为什么这些样式不用工具类：
+     表头那枚按钮必须**逐字继承列名的小字**（10.5px / 600 / letter-spacing），
+     而全局 `button` 规则（components.css）给的是 12.5px / 500 + 控件底色 ——
+     要压回去得写五六个工具类，不如照 `.name-eye` 的既有写法来一条规则。
+     项目里表头的其它小按钮（眼睛）走的就是同一条路。
+
+   依赖的上游选择器（上游改了要回来跟）：
+     · `.acct-table thead th`          —— 表头格（page-accounts-table.css）
+     · `.acct-table thead th .th-label` —— 列名容器（inline-flex）
+     · `.acct-table tr.acct-row`        —— 数据行
+     · `.acct-name`                     —— 账号格里的名字（AccountCell 产出） */
+
+/* ─── 表头排序 ───────────────────────────────
+   可排序的列表头文字是一枚按钮（`role` 上仍是表格语义，见 accounts-panels 的 TableHead）。
+   未排序时隐形地摆一枚小箭头：悬停才显形 —— 它回答的是「这一列能点吗」，
+   常亮的话每一列都挂一枚箭头，反而看不出当前排的是哪一列。
+   已排序的那一列：文字转主色 + 箭头常亮。 */
+.acct-table thead th .th-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: none;
+  box-shadow: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+
+.acct-table thead th .th-sort:hover { color: var(--text); }
+.acct-table thead th .th-sort:focus-visible { box-shadow: var(--ring); }
+
+.acct-table thead th .th-sort .th-caret {
+  display: inline-flex;
+  width: 8px;
+  height: 8px;
+  opacity: 0;
+  transition: opacity .12s ease;
+}
+
+.acct-table thead th .th-sort:hover .th-caret { opacity: .45; }
+
+.acct-table thead th .th-sort.is-sorted { color: var(--primary); }
+.acct-table thead th .th-sort.is-sorted .th-caret { opacity: 1; }
+
+/* ─── 排序粒度档位（排序条里的「组内 / 整表」）──
+   两档都摆在明面上、当前的置亮：单开关按钮只能让用户猜「点下去会去哪边」。
+   它复用批量栏那条 `.link-btn`（page-accounts.css），这里只补「当前档」的样子。 */
+.batch-bar #sort-state { display: inline-flex; align-items: center; gap: 6px; }
+
+.batch-bar .sort-scope { display: inline-flex; gap: 2px; }
+
+.batch-bar .sort-scope .link-btn.is-on {
+  border-color: var(--primary-bd);
+  background: var(--primary-soft);
+  color: var(--primary-fg);
+  font-weight: 600;
+}
+
+/* ─── 模型作用域：被跳过的行 ─────────────────
+   队列里「这次不会用到」的那些账号仍然留在表里（它们的余额、有效期照样是要看的），
+   但整体压暗 —— 一眼能分出「会走的那几行」与「被跳过的几行」。
+   悬停恢复完全不透明：压暗是为了分组，不是为了让人看不清读数。 */
+.acct-table tr.acct-row.skipped { opacity: .55; }
+.acct-table tr.acct-row.skipped:hover { opacity: 1; }
+
+/* ─── 整表排序（打散分组）时行内的厂商标记 ────
+   分组被散开后，「这一行是哪一家」就没有分组带可看了，只能回到行里。
+   它是**排序的副产品**，所以刻意做得比分组带轻：小圆角底 + 弱色小字。 */
+.acct-prov-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  padding: 0 5px;
+  height: 15px;
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  color: var(--text-3);
+  font-size: 10.5px;
+  line-height: 1;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.acct-prov-chip img { width: 11px; height: 11px; border-radius: 3px; object-fit: contain; }
