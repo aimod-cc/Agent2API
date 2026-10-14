@@ -84,7 +84,7 @@ import { bindQueueDrag, type QueueDrop } from './accounts-queue-drag'
 import { AccountsDialogs } from './accounts-dialogs'
 // 「模型调度」作用域视图（只读，见那个文件的模块头）：作用域非全局时，
 // 列表区整块换成它 —— 账号表那条渲染路径不受影响，切回全局即原样回来
-import { SchedulePane, ScopeSwitcher, useScheduleScope } from './accounts-schedule'
+import { SchedulePane, ScopeRail, useScheduleScope } from './accounts-schedule'
 
 /** 列设置的句柄（注册在挂载后的布局 effect 里，见下方说明） */
 let colHandle: ColSettingsHandle | null = null
@@ -141,9 +141,11 @@ function syncHead(): void {
 
 function AccountsPage() {
   const store = React.useSyncExternalStore(subscribe, getStore)
-  /** 调度视图的作用域（'' = 全局）。挂在模块级 store 上（切在工具条、读在列表区） */
+  /** 调度视图的作用域（'' = 全局）。挂在模块级 store 上（切在左栏、读在列表区） */
   const scheduleModel = useScheduleScope()
   const listRef = React.useRef<HTMLDivElement | null>(null)
+  /** 面板本身（左栏 / 表格两栏的度量对象，见下面的 ResizeObserver） */
+  const panelRef = React.useRef<HTMLElement | null>(null)
   /** 登记列设置之后强制重画一次用的本地计数器（不依赖 store 订阅的时序，见下） */
   const [, forceTick] = React.useReducer((tick: number) => tick + 1, 0)
 
@@ -183,6 +185,33 @@ function AccountsPage() {
   const locked = filterActive() || paging.paged
   /** 筛选 / 搜索 / 分页任一在效时，顺序不可调整 —— 提示语要说清是卡在哪一条上 */
   const lockReason = filterActive() ? t('清除筛选') : t('把每页调回「全部」')
+
+  /**
+   * 左栏窄态判定：按**面板实宽**而不是窗口宽。
+   *
+   * 窗口宽看不出「应用侧栏收起后版面变宽」这件事，而那次变化正好让面板多出 148px ——
+   * 用媒体查询会出现「窗口没变、版面明明够宽，左栏却还收着」。
+   *
+   * 阈值 = 表格不能再窄的那条线（由可见列算出，见 accounts-columns 的 tableMinWidth）
+   * + 左栏 218 + 滚动条槽的余量。表窄于它就横滚，而横滚正是左栏最不该「白占」宽度的
+   * 场景 —— 于是宁可收成图标条（展开态是浮层，不会把表格挤得更窄）。
+   *
+   * 不担心反馈环：面板宽度由版心决定（.page 是 width:100%），与左栏多宽无关，
+   * 所以「窄 → 收 → 面板没变宽 → 还是窄」会稳定在一个状态上。
+   */
+  const railThreshold = tableMinWidth(columns.map(column => column.key)) + 230
+  const railThresholdRef = React.useRef(railThreshold)
+  railThresholdRef.current = railThreshold
+  const [railNarrow, setRailNarrow] = React.useState(false)
+  React.useEffect(() => {
+    const el = panelRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const measure = () => setRailNarrow(el.clientWidth < railThresholdRef.current)
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
 
   // 代理列的选项（「网络代理」页的池条目）没就绪就补拉（节流 30 秒，失败不缓存）。
   // Clash 出口那一组已经不在这一页了 —— 出口统一由代理页的「同步 Clash Verge」
@@ -348,13 +377,17 @@ function AccountsPage() {
 
   return (
     <>
-      <section className='panel account-table'>
+      <section className={cn('panel account-table', railNarrow && 'rail-narrow')} ref={panelRef}>
+        {/* 作用域树常驻在表格**左侧**（原来是工具条里的一个下拉）—— 它切的是「这张表
+            在看什么」，比工具条里那些筛选档位高一层；模型上百条（实测 77 个 / 9 家）时，
+            常驻的「厂商 → 模型」树比下拉少两次操作，且这层结构一直留在页面上。
+            窄窗口收成图标条，见上面的 ResizeObserver 与 css/page-accounts-rail.css */}
+        <ScopeRail narrow={railNarrow} />
+
+        {/* 工具条 / 批量栏 / 列表 / 页脚整组挪进主列（多这一层 div 是为了让左栏与它们
+            并列成两栏）。这一组内部的排布与顺序一个字未改 */}
+        <div className='acct-main'>
         <div className='toolbar'>
-          {/* 作用域：全局（账号表）或某一个模型（模型调度视图）。放在工具条最前 ——
-              它切的是「这张表在看什么」，比右边那些筛选档位高一层。作用域非全局时
-              右边那四个筛选组整体收走：它们筛的是账号表，对调度视图没有意义 */}
-          <ScopeSwitcher />
-          <div className='divider' />
           {scheduleModel ? null : (<>
           {/* 提供商：分组模式把「哪一家」画在了页面上（一家一段），但「只看某一家」仍是
               常用动作 —— 分组带收得掉一家、收不掉其余那几家。用下拉而不是分段按钮：家数
@@ -563,6 +596,7 @@ function AccountsPage() {
           onPageChange={paging.goto}
         />
         )}
+        </div>
       </section>
       <AccountsDialogs />
     </>

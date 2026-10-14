@@ -14,6 +14,11 @@
  * 后端 `priority::grouped_queue_order` 的**第二份同构实现**（那份自带「改一处
  * 必须同步另一处」的欠条），这里不加第三份。
  *
+ * ── 本文件两个组件 ─────────────────────────────────────
+ * `ScopeRail`  = 账号表**左侧常驻**的作用域树（全局 + 厂商 → 模型），切「在看什么」；
+ * `SchedulePane` = 列表区里那一块只读调度视图，画「该模型的队列长什么样」。
+ * 两者都只读，状态（当前作用域）在下面的模块级 store 里，用 useSyncExternalStore 共享。
+ *
  * ── 厂商 = 分组（文件夹）、账号 = 行（文件）──────────────────
  * 队列里同一家的账号**必然连续** —— 这是账号页整队重排写优先级时保证的不变量
  * （见后端 `priority::grouped_queue_order` 的模块说明），所以「按首次出现归组」
@@ -35,8 +40,9 @@
 
 import * as React from 'react'
 import { t } from '../i18n'
-import { cn } from '@ui'
-import { Combobox as ComboboxPrimitive } from '@base-ui/react/combobox'
+import { cn, Input, NavItem } from '@ui'
+// 内置家的图标（与模型管理页左栏、账号页分组带同一份映射，别处不要照抄）
+import { PROVIDER_ICONS } from './add-provider-pick'
 import { displayNameOf } from './accounts-domain'
 import type { AccountRecord } from './accounts-shared'
 
@@ -123,198 +129,212 @@ export function setScheduleScope(model: string): void {
   scopeListeners.forEach(listener => listener())
 }
 
-/* ─── 模型清单（作用域选择器的选项）─────────────── */
+/* ─── 作用域树的数据（全局 + 厂商 → 模型）────────── */
 
-/** 一个作用域选项。`group` 是它归属的分组名（承载家）；「全局」那一项钉在最上面 */
-type ScopeOption = { value: string; label: string; group: string }
+/** 一个作用域叶子。`value` 是哨兵 `''`（全局账号表）或**模型名** —— 后端
+    `plan_route` 收窄候选走的就是模型名（`route_for_forward(model)`），作用域的单位是它 */
+type ScopeOption = {
+  value: string
+  /** 显示文案：「全局（账号表）」，或就是模型名 */
+  label: string
+  /** 悬停提示：多承载家时列全（作用域是模型名，与「哪一家供给」无关） */
+  tip: string
+}
 
-/** 浮层里的一组（一家厂商的模型）。`items` 交给 Combobox 做过滤与键盘导航 */
+/** 一家厂商 = 作用域树里的「文件夹」。`key` 是**提供商 id**（不是显示名）——
+    图标要按它查 `PROVIDER_ICONS`，用显示名查不到 */
 type ScopeGroup = { key: string; label: string; items: ScopeOption[] }
 
 /**
- * 作用域选项 = 钉住的「全局」+ 广告中的模型，**按模型名去重**，并按承载家分组。
+ * 作用域树 = 钉住的「全局」+ 按承载家分组（文件夹）的模型（叶子）。
  *
- * 必须去重：`/api/session` 的 `models` 是「模型 × 承载家」的清单，同一个模型被
- * 多家同时提供就会出现多条（如 `kimi-k3` 同时挂在 CatPaw 与小浣熊下）。作用域是
- * **模型名**（后端 `plan_route` 的候选收窄走 `route_for_forward(model)`），所以
- * 同名只该有一个选项 —— 承载它的家写进副标题，正好回答「这个模型是谁家在供」。
+ * 必须按模型名去重：`/api/session` 的 `models` 是「模型 × 承载家」的清单，同一个模型
+ * 被多家同时提供就会出现多条（文件头提到的那句 `kimi-k3` 同时挂在 CatPaw 与小浣熊下
+ * 说的就是它；本机实测当前 0 例，属**潜在**情形）。作用域的单位是模型名，所以同名
+ * 只该有一个节点 —— 只归到**第一家**名下，其余承载家写进 `tip`。
  *
- * 也因此**不按承载家复制条目**：同一个 value 在浮层里出现两次，`isItemEqualToValue`
- * 会认不出「是不是那一项」，选中态直接失准。只归到第一家名下，label 里仍列全。
- *
- * 分组顺序：模型多的家在前 —— `Trae` 一家就有二十多个，若排在最后，分组等于没分。
+ * 分组顺序：模型多的家在前 —— `Trae` 一家二十多个，若排在最后，分组等于没分。
  * 组内按模型名升序，便于扫读。
  */
 function scopeModel(): { pinned: ScopeOption; groups: ScopeGroup[] } {
-  const carriers = new Map<string, string[]>()
+  const carriers = new Map<string, Array<{ id: string; label: string }>>()
   for (const model of bridge().wbApp?.getState?.()?.models || []) {
     const id = String(model?.id || '').trim()
     if (!id) continue
-    const label = String(model?.providerLabel || model?.provider || '').trim()
+    const providerId = String(model?.provider || '').trim() || 'other'
+    const providerLabel = String(model?.providerLabel || model?.provider || '').trim() || providerId
     const list = carriers.get(id) || []
-    if (label && !list.includes(label)) list.push(label)
+    if (!list.some(entry => entry.id === providerId)) list.push({ id: providerId, label: providerLabel })
     carriers.set(id, list)
   }
 
-  const buckets = new Map<string, ScopeOption[]>()
-  for (const [id, providers] of carriers) {
-    const group = providers[0] || t('其他')
+  const buckets = new Map<string, ScopeGroup>()
+  for (const [id, owners] of carriers) {
+    const first = owners[0]
     const option: ScopeOption = {
       value: id,
-      label: providers.length ? `${id} · ${providers.join(' / ')}` : id,
-      group,
+      label: id,
+      tip: owners.length > 1 ? `${id} · ${owners.map(entry => entry.label).join(' / ')}` : id,
     }
-    const list = buckets.get(group)
-    if (list) list.push(option)
-    else buckets.set(group, [option])
+    const group = buckets.get(first.id)
+    if (group) group.items.push(option)
+    else buckets.set(first.id, { key: first.id, label: first.label, items: [option] })
   }
 
-  const groups: ScopeGroup[] = []
-  for (const [label, items] of [...buckets].sort(
-    (a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0])
-  )) {
-    items.sort((a, b) => a.value.localeCompare(b.value))
-    groups.push({ key: label, label, items })
-  }
+  const groups = [...buckets.values()].sort(
+    (a, b) => b.items.length - a.items.length || a.label.localeCompare(b.label)
+  )
+  for (const group of groups) group.items.sort((a, b) => a.value.localeCompare(b.value))
 
   return {
-    pinned: { value: SCOPE_ALL, label: t('全局（账号表）'), group: SCOPE_ALL },
+    pinned: { value: SCOPE_ALL, label: t('全局（账号表）'), tip: t('全局（账号表）') },
     groups,
   }
 }
 
+/** 厂商小头像：收录过图标的用真实图标，否则回落首字母色块（与账号页分组带同一取舍）。
+    `workbuddy-intl` 回落同品牌那张图 —— 这个映射模型管理页与签到中心各有一份，同一口径 */
+function avatarOf(providerId: string, label: string): React.ReactNode {
+  const icon = PROVIDER_ICONS[providerId === 'workbuddy-intl' ? 'workbuddy' : providerId] || ''
+  return (
+    <span className='acct-rail-av' aria-hidden='true'>
+      {icon ? <img src={icon} alt='' loading='lazy' /> : String(label || '?').trim().slice(0, 1).toUpperCase()}
+    </span>
+  )
+}
+
 /**
- * 工具条里的作用域选择器（由 accounts-page 渲染）。
+ * 账号页左栏 · 作用域树（由 accounts-page 渲染在账号表左侧）。
  *
- * 为什么是 Combobox 而不是 Select：模型上百条（本机实测 77 个），必须能在浮层里
- * **打字过滤** —— Select 的 typeahead 只是「打字跳转高亮」，替不了「把不相关的全滤掉」；
- * 分组标题则把「这个模型是谁家在供」这层结构画在浮层里。过滤走选项 label
- * （=「模型名 · 承载家」），所以**模型名与厂商名都能当关键词**。
+ * ── 为什么从工具条下拉改成常驻左栏 ─────────────────────────
+ * 作用域清单本机实测 77 个模型 / 9 家。下拉能装下（带分组与搜索），但它有三个代价：
+ * 每次切换要「打开 → 找 → 点 → 关」；浮层里的结构（谁属于谁）只在打开时才存在；
+ * 与模型管理页的左栏导航不同形态。常驻左栏把「厂商 → 模型」这层结构画在页面上，
+ * 默认只露 9 行（各家默认收起，只展开当前作用域所在的那一家）。
  *
- * 选项在**每次渲染时现算**：`getState()` 是同步取内存快照，而 accounts-page 因
- * 连接数轮询（2 秒一轮）会持续重渲染，清单变化自然跟上 —— 不值得为它再挂一份订阅。
+ * ── 搜索不是「打字跳转」，是真的过滤 ─────────────────────
+ * 关键词同时匹配分组名与模型名（`hit(...)`），命中整组时整组留下、否则只留命中的叶子；
+ * 搜索期间所有留下的组自动展开（否则「搜到了但看不见」）。空组连同组标题一起消失。
+ *
+ * ── 窄窗口：收成图标条，悬停 / 聚焦展开 ───────────────────
+ * `narrow` 由 accounts-page 的 ResizeObserver 给（面板放不下「左栏 + 表格最小宽」时为真）。
+ * 展开态是**浮层**（宽 218px 盖在表格上），不是把表格挤走 —— 于是「鼠标划过去看一眼」
+ * 不会让表格宽度来回跳。条上每个图标点一下 = 展开那一家（于是它不是个死图标）。
  */
-export function ScopeSwitcher() {
+export function ScopeRail({ narrow }: { narrow: boolean }) {
   const model = useScheduleScope()
   const { pinned, groups } = scopeModel()
-  const all = [pinned, ...groups.flatMap(group => group.items)]
-  const selected = all.find(item => item.value === model) || pinned
-  /**
-   * Root 的 `items` 必须是**分组数组**，不能是摊平数组。
-   *
-   * Base UI 靠「元素带 `items` 数组属性」判定它是不是分组（`combobox/items/createItems.d.ts`：
-   * *"Items cannot have an `items` array property because they would be interpreted as groups"*）。
-   * 若这里传摊平数组、渲染却走 `Group` + `Collection`，过滤会算在一份数据上、渲染读另一份，
-   * 症状是「搜索框里有值、空态也出来了，但列表一项都没被滤掉」。
-   */
-  const grouped: ScopeGroup[] = [
-    { key: SCOPE_ALL, label: t('全局'), items: [pinned] },
-    ...groups,
-  ]
+  const [query, setQuery] = React.useState('')
+  const [expanded, setExpanded] = React.useState<Record<string, boolean>>({})
 
-  /** 一个选项的渲染。钉住的「全局」与分组里的模型共用这一份，两边不会走样 */
-  const optionNode = (item: ScopeOption) => (
-    <ComboboxPrimitive.Item
-      key={item.value}
-      value={item}
-      className={cn(
-        'grid cursor-pointer grid-cols-[14px_minmax(0,1fr)] items-center gap-2 rounded-sm px-[9px] py-[5px]',
-        'text-[12.5px] leading-[1.4] text-foreground select-none outline-none',
-        'transition-colors duration-[120ms] ease-out',
-        'data-[highlighted]:bg-nav-hover',
-        // 用 data-[selected] 而不是 shadcn 的 data-selected 变体：Base UI 输出的
-        // 是 data-selected=""（属性存在即选中），空串匹配不上 true。
-        'data-[selected]:bg-primary-soft data-[selected]:font-semibold data-[selected]:text-primary-fg',
-        'data-[highlighted]:data-[selected]:bg-primary-tint'
-      )}
-    >
-      <ComboboxPrimitive.ItemIndicator className='col-start-1 flex text-primary'>
-        <svg viewBox='0 0 12 12' className='size-3' aria-hidden='true'>
-          <path d='M2.5 6.2 4.8 8.5 9.5 3.8' stroke='currentColor' strokeWidth='1.8' fill='none' strokeLinecap='round' strokeLinejoin='round' />
-        </svg>
-      </ComboboxPrimitive.ItemIndicator>
-      <span className='col-start-2 min-w-0 truncate'>{item.label}</span>
-    </ComboboxPrimitive.Item>
-  )
+  const keyword = query.trim().toLowerCase()
+  const hit = (text: string) => !keyword || text.toLowerCase().includes(keyword)
+
+  /** 当前作用域所在的那一家：默认展开（用户手动收过的以手动的为准，见 expandedOf） */
+  const current = groups.find(group => group.items.some(item => item.value === model))?.key || ''
+
+  const shown = keyword
+    ? groups
+      .map(group => {
+        const wholeGroup = hit(group.label)
+        const items = wholeGroup ? group.items : group.items.filter(item => hit(item.value) || hit(item.tip))
+        return items.length ? { ...group, items } : null
+      })
+      .filter((group): group is ScopeGroup => group !== null)
+    : groups
+
+  const expandedOf = (key: string) => (keyword ? true : expanded[key] ?? key === current)
+  const toggleGroup = (key: string) => setExpanded(prev => ({ ...prev, [key]: !expandedOf(key) }))
+
+  const pinShown = hit(pinned.label)
 
   return (
-    <div className='group'>
-      <span className='label'>{t('作用域')}</span>
-      <ComboboxPrimitive.Root
-        items={grouped}
-        value={selected}
-        onValueChange={next => setScheduleScope(String((next as ScopeOption | null)?.value || ''))}
-        isItemEqualToValue={(a, b) => a?.value === b?.value}
-      >
-        <ComboboxPrimitive.Trigger
-          className={cn(
-            'inline-flex h-[30px] min-w-[180px] max-w-[320px] cursor-pointer items-center justify-between gap-1.5 rounded-md border border-control-border bg-control px-2.5',
-            'text-[12.5px] font-normal text-foreground',
-            'transition-colors duration-150 ease-out',
-            'hover:border-control-border-hover hover:bg-control-hover',
-            'focus-visible:border-primary focus-visible:shadow-focus focus-visible:outline-none'
-          )}
-          aria-label={t('选择调度视图的作用域')}
-        >
-          <span className='min-w-0 flex-1 truncate text-left' title={selected.label}>
-            {selected.label}
-          </span>
-          <ComboboxPrimitive.Icon className='flex flex-none text-muted-foreground transition-transform duration-[180ms] data-popup-open:rotate-180'>
-            <svg viewBox='0 0 10 6' className='size-2.5' aria-hidden='true'>
-              <path d='M1 1l4 4 4-4' stroke='currentColor' strokeWidth='1.4' fill='none' strokeLinecap='round' strokeLinejoin='round' />
-            </svg>
-          </ComboboxPrimitive.Icon>
-        </ComboboxPrimitive.Trigger>
+    // 类名 `.acct-rail*` 全在下游的 css/page-accounts-rail.css（宽 / 窄两种形态都在那边）；
+    // 只有 `.rail-scroll` / `.rail-label` / `.rail-empty` 是复用模型管理页左栏的通用件
+    // ——账号页的「账号设置弹窗」左栏早就在复用同一套（见 page-accounts.css）。
+    <aside className='acct-rail' id='acct-scope-rail'
+      aria-label={t('按作用域选择：全局账号表，或某一个模型的调度视图')}>
 
-        <ComboboxPrimitive.Portal>
-          <ComboboxPrimitive.Positioner sideOffset={4} className='z-[35]'>
-            <ComboboxPrimitive.Popup
-              className={cn(
-                // 比 Select 的浮层宽一档（下限 260px）：选项是「模型名 · 厂商名」，
-                // 而触发器只有 180-320px，跟随它会把名字全截掉
-                'flex max-h-[320px] w-[max(var(--anchor-width),260px)] flex-col overflow-hidden',
-                'rounded-lg border border-border-strong bg-raised shadow-3 outline-none',
-                'data-open:animate-in data-open:fade-in-0',
-                'data-closed:animate-out data-closed:fade-out-0'
-              )}
-            >
-              {/* 搜索框在浮层里（input-inside-popup）：触发器保持「选择器」的样子，
-                  而不是变成一个能打字的输入框 —— 那会让人以为可以随便填。 */}
-              <div className='flex flex-none items-center gap-1.5 border-b border-hairline px-2.5 py-1.5'>
-                <svg viewBox='0 0 12 12' className='size-3 flex-none text-muted-foreground' aria-hidden='true'>
-                  <circle cx='5' cy='5' r='3.4' stroke='currentColor' strokeWidth='1.3' fill='none' />
-                  <path d='M7.6 7.6 10.5 10.5' stroke='currentColor' strokeWidth='1.3' strokeLinecap='round' />
-                </svg>
-                <ComboboxPrimitive.Input
-                  placeholder={t('搜索模型或厂商…')}
-                  className='min-w-0 flex-1 border-0 bg-transparent p-0 text-[12.5px] text-foreground outline-none placeholder:text-muted-foreground'
-                />
-              </div>
-              <ComboboxPrimitive.Empty>
-                <div className='px-2.5 py-3 text-[11.5px] leading-[1.5] text-muted-foreground'>
-                  {t('没有匹配的模型')}
-                </div>
-              </ComboboxPrimitive.Empty>
-              <ComboboxPrimitive.List className='min-h-0 flex-1 overflow-y-auto overscroll-contain p-[5px]'>
-                {(group: ScopeGroup) => (
-                  <ComboboxPrimitive.Group key={group.key} items={group.items}>
-                    {/* 「全局」那一组不画标题：它只有一项，标题把这一项衬得像个小标题 */}
-                    {group.key === SCOPE_ALL ? null : (
-                      <ComboboxPrimitive.GroupLabel className='px-[9px] pt-1.5 pb-1 text-[11px] font-medium text-muted-foreground'>
-                        {group.label}
-                      </ComboboxPrimitive.GroupLabel>
-                    )}
-                    <ComboboxPrimitive.Collection>
-                      {(item: ScopeOption) => optionNode(item)}
-                    </ComboboxPrimitive.Collection>
-                  </ComboboxPrimitive.Group>
-                )}
-              </ComboboxPrimitive.List>
-            </ComboboxPrimitive.Popup>
-          </ComboboxPrimitive.Positioner>
-        </ComboboxPrimitive.Portal>
-      </ComboboxPrimitive.Root>
-    </div>
+      {/* 窄窗口下的图标条。只在窄态挂载：宽态下这十来个按钮纯属噪音（含读屏） */}
+      {narrow ? (
+        <div className='acct-rail-strip'>
+          <button type='button' className={cn('acct-rail-chip', model === SCOPE_ALL && 'is-on')}
+            title={pinned.label} aria-label={pinned.label} onClick={() => setScheduleScope(SCOPE_ALL)}>
+            <svg viewBox='0 0 12 12' aria-hidden='true'>
+              <g fill='none' stroke='currentColor' strokeWidth='1.3'>
+                <rect x='1.6' y='1.6' width='3.8' height='3.8' rx='1' />
+                <rect x='6.6' y='1.6' width='3.8' height='3.8' rx='1' />
+                <rect x='1.6' y='6.6' width='3.8' height='3.8' rx='1' />
+                <rect x='6.6' y='6.6' width='3.8' height='3.8' rx='1' />
+              </g>
+            </svg>
+          </button>
+          {groups.map(group => (
+            <button key={group.key} type='button'
+              className={cn('acct-rail-chip', group.items.some(item => item.value === model) && 'is-on')}
+              title={group.label} aria-label={group.label}
+              onClick={() => setExpanded(prev => ({ ...prev, [group.key]: true }))}>
+              {avatarOf(group.key, group.label)}
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      <div className='acct-rail-body'>
+        <div className='acct-rail-search'>
+          <Input type='search' className='h-[26px] px-2 text-[12px]'
+            value={query} onChange={event => setQuery(event.currentTarget.value)}
+            placeholder={t('搜索模型或厂商…')} aria-label={t('搜索模型或厂商')} />
+        </div>
+
+        <div className='rail-scroll'>
+          {pinShown ? (
+            <NavItem active={model === SCOPE_ALL} className='py-1.5'
+              onClick={() => setScheduleScope(SCOPE_ALL)}>{pinned.label}</NavItem>
+          ) : null}
+
+          {shown.length ? <div className='rail-label'>{t('按厂商')}</div> : null}
+
+          {shown.map(group => {
+            const open = expandedOf(group.key)
+            return (
+              <React.Fragment key={group.key}>
+                {/* 分组行是**文件夹**：点它只折叠 / 展开，不筛账号 ——
+                    「只看某一家」由工具条那个提供商下拉负责，两者语义不同不能合并 */}
+                <NavItem className='py-1.5' count={group.items.length} aria-expanded={open}
+                  title={open
+                    ? t('收起来自{label}的 {n} 个模型', { label: group.label, n: group.items.length })
+                    : t('展开来自{label}的 {n} 个模型', { label: group.label, n: group.items.length })}
+                  onClick={() => toggleGroup(group.key)}
+                  icon={<>
+                    <span className='acct-rail-caret' aria-hidden='true'>
+                      <svg viewBox='0 0 10 10'>
+                        <path d={open ? 'M2 3.6 5 6.6 8 3.6' : 'M3.6 2 6.6 5 3.6 8'}
+                          stroke='currentColor' strokeWidth='1.4' fill='none'
+                          strokeLinecap='round' strokeLinejoin='round' />
+                      </svg>
+                    </span>
+                    {avatarOf(group.key, group.label)}
+                  </>}>
+                  {group.label}
+                </NavItem>
+
+                {open ? group.items.map(item => (
+                  <NavItem key={item.value} active={model === item.value}
+                    className='py-1 pl-9' title={t('看这个模型的调度队列：{tip}', { tip: item.tip })}
+                    onClick={() => setScheduleScope(item.value)}>{item.label}</NavItem>
+                )) : null}
+              </React.Fragment>
+            )
+          })}
+
+          {!shown.length && !pinShown ? <div className='rail-empty'>{t('没有匹配的模型')}</div> : null}
+          {!groups.length ? (
+            <div className='rail-empty'>{t('还没有可用模型（添加账号后可见）')}</div>
+          ) : null}
+        </div>
+      </div>
+    </aside>
   )
 }
 
