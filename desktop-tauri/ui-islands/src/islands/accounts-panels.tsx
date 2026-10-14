@@ -51,7 +51,7 @@ import {
   tokenBlockedOf, tokenCountdownText, tokenDisableTriggeredOf, tokenReadingForRule,
   tokenRulesOf, tokenWindowInfo, zcodePlanStateLabel,
 } from './accounts-domain'
-import { CreditDetailButton, creditRowsOf } from './accounts-credit-detail'
+import { CreditDetailButton, creditRowsOf, nearestCreditOf } from './accounts-credit-detail'
 import type { AccountSort } from './accounts-store'
 import {
   PROXY_CUSTOM_CURRENT, PROXY_CUSTOM_EDIT, applyProxyPick,
@@ -323,6 +323,80 @@ export function ExpiryCell({ account }: { account: AccountRecord }) {
   // 直接拼会留下一个空的「（）」
   const full = formatTime(expiresAt)
   return <span title={full ? t('{text}过期（{full}）', { text, full }) : t('{text}过期', { text })}>{text}</span>
+}
+
+/**
+ * 「最近到期」列：所有积分包里**最先作废**的那一份什么时候到期。
+ *
+ * ── 与「有效期」列不是一回事 ─────────────────────────────────
+ * 有效期说的是**账号凭据**什么时候失效（`ExpiryCell`，读 `expiresAt` /
+ * `tokenExpiresAt`）；这一列说的是**钱**什么时候作废（读 `credits[].expireAt`）。
+ * 一个账号明天要重新登录，但它名下的积分可能三个月后才过期 —— 两件事、两套时刻。
+ *
+ * ── 只读不猜 ────────────────────────────────────────────────
+ * 取值全部来自 `nearestCreditOf`（把 `credits[]` 的解析入口复用成一处，见那个
+ * 函数的说明）。没有「还没到期且不是日额度」的份时显示 `—`：那不是缺数据，
+ * 是**这账号确实没有将作废的积分**（全是日额度包 / 全花完了 / 这家不给逐份读数）。
+ */
+export function CreditExpiryCell({ account }: { account: AccountRecord }) {
+  if (!supportsUsage(account)) {
+    return <span className='muted' title={t('该提供商没有余额查询，因此读不到积分包的到期时刻')}>—</span>
+  }
+  const entry = usageEntryOf(account)
+  const nearest = nearestCreditOf(entry)
+  if (!nearest) {
+    return (
+      <span className='muted' title={t('没有将到期的积分（全是每日重置的额度，或这一家不给逐份读数）')}>—</span>
+    )
+  }
+  const now = Date.now()
+  const left = nearest.expireAt - now
+  // 与有效期列同一套倒计时口径（分钟 / 小时 / 天三档）：两列的读数形态一致，
+  // 扫读时不必在两套写法之间切换
+  const text = left < 3600e3 ? t('{n} 分钟后', { n: Math.max(1, Math.round(left / 60e3)) })
+    : left < 48 * 3600e3 ? t('{n} 小时后', { n: (left / 3600e3).toFixed(1) })
+      : t('{n} 天后', { n: Math.floor(left / 24 / 3600e3) })
+  const full = formatTime(nearest.expireAt)
+  const title = [
+    t('最近到期：{name}', { name: nearest.name }),
+    full ? t('到期时刻 {time}', { time: full }) : '',
+    t('逐份明细见「余额」格的积分明细'),
+  ].filter(Boolean).join(' · ')
+  return <span title={title}>{text}</span>
+}
+
+/**
+ * 「最近到期积分」列：**最先作废的那一份还剩多少**（不是面额）。
+ *
+ * 这一列回答的是「马上要作废掉多少」—— 面额回答的是「当初发过多少」，两件事。
+ * 一份包快到期时它还剩下多少，才是"再不用就亏了"的那个数。
+ *
+ * 单位跟着那一份自己的 `unit` 走（Trae 的套餐包与积分包单位不同）；没有单位
+ * 就不硬贴一个（与明细行的读数同一处置）。`remain` 读不到 → `—`，**但 0 要画**
+ * （「0 积分」比「—」准确：那一份确实要作废，只是已经花完了）。
+ */
+export function CreditLeftCell({ account }: { account: AccountRecord }) {
+  if (!supportsUsage(account)) {
+    return <span className='muted' title={t('该提供商没有余额查询，因此读不到积分包')}>—</span>
+  }
+  const entry = usageEntryOf(account)
+  const nearest = nearestCreditOf(entry)
+  if (!nearest) {
+    return (
+      <span className='muted' title={t('没有将到期的积分（全是每日重置的额度，或这一家不给逐份读数）')}>—</span>
+    )
+  }
+  if (nearest.remain === null) {
+    return (
+      <span className='muted' title={t('这一份还剩多少：{name} · 上游没给剩余量', { name: nearest.name })}>—</span>
+    )
+  }
+  const value = `${nearest.remain}${nearest.unit ? ' ' + nearest.unit : ''}`
+  return (
+    <span title={t('最近到期：{name} · 这一份还剩 {value}（不是面额）', { name: nearest.name, value })}>
+      {value}
+    </span>
+  )
 }
 
 /**
@@ -1598,6 +1672,19 @@ export function TableHead({ namesHidden, allPicked, somePicked, disabled, onTogg
         </th>
         <th className='cell-expiry' data-col='expiry' aria-sort={ariaSort('expiry')}>
           {sortable('expiry', t('有效期'))}{grip}
+        </th>
+        {/* 「最近到期」两列：有效期列说的是账号凭据何时失效，这两列说的是钱何时作废。
+            时间那列可排（「谁先作废」是这个表最常问的问题）；积分列不给排序 ——
+            它只在**同一天到期**的几份之间才有比较意义，跨天比大小没有语义 */}
+        <th className='cell-creditExpiry' data-col='creditExpiry' aria-sort={ariaSort('creditExpiry')}>
+          {sortable('creditExpiry', t('最近到期'), t('所有积分包里最先作废的那一份什么时候到期；逐份明细见「余额」格里的积分明细'))}
+          {grip}
+        </th>
+        <th className='cell-creditLeft' data-col='creditLeft'>
+          <span className='th-label' title={t('最先作废的那一份还剩多少（不是面额）')}>
+            {t('最近到期积分')}
+          </span>
+          {grip}
         </th>
         <th className='cell-usage' data-col='usage' aria-sort={ariaSort('usage')}>
           {sortable('usage', t('余额'))}{grip}

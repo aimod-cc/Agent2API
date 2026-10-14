@@ -79,8 +79,8 @@ import {
 import { accountSort, clearSort, cycleSort, setSortScope } from './accounts-store'
 import { SORTABLE_COLUMNS, accountComparator, sortDirLabel, sortLabel, type SortContext } from './accounts-sort'
 import {
-  AccountCell, ActionsCell, ConnectionsCell, ExpiryCell, GroupBandRow, LimitsCell, OrderCell,
-  PanelsRow, ProxyCell, StatusCell, TableHead, UsageCell,
+  AccountCell, ActionsCell, ConnectionsCell, CreditExpiryCell, CreditLeftCell, ExpiryCell,
+  GroupBandRow, LimitsCell, OrderCell, PanelsRow, ProxyCell, StatusCell, TableHead, UsageCell,
 } from './accounts-panels'
 import { bindQueueDrag, type QueueDrop } from './accounts-queue-drag'
 import { AccountsDialogs } from './accounts-dialogs'
@@ -537,6 +537,12 @@ function AccountsPage() {
         return <LimitsCell account={account} open={ctx.limitsOpen} />
       case 'expiry':
         return <ExpiryCell account={account} />
+      // 「最近到期」两列读的是**积分包**（credits[]），不是账号凭据 —— 与上面
+      // 有效期列的两套时刻各管一件事，取值口径都在 accounts-credit-detail
+      case 'creditExpiry':
+        return <CreditExpiryCell account={account} />
+      case 'creditLeft':
+        return <CreditLeftCell account={account} />
       case 'usage':
         return <UsageCell account={account} />
       case 'actions':
@@ -870,6 +876,8 @@ function ColGroup() {
       {col('status')}
       {col('limits')}
       {col('expiry')}
+      {col('creditExpiry')}
+      {col('creditLeft')}
       {col('usage')}
       {col('actions')}
     </colgroup>

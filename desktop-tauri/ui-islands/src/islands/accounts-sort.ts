@@ -1,5 +1,6 @@
 import { t } from '../i18n'
 import { ACCOUNT_COLUMNS } from './accounts-columns'
+import { nearestCreditOf } from './accounts-credit-detail'
 import {
   activeLimits, balanceBlockedOf, displayNameOf, expiryMillis, isEnabled, providerFeatures, providerOf,
   tokenBlockedOf,
@@ -31,9 +32,14 @@ import type { AccountSort } from './accounts-store'
  *
  * 不给的两列：勾选列没有值（它那一格是个复选框）、操作列装的是按钮。除此之外每一列
  * 都有一个可比的读数 —— 包括「代理」（没有代理 = 直连，排最前）。
+ *
+ * 「最近到期时间」在表——**谁先作废**是这一列存在的理由，能排才有用。
+ * 「最近到期积分」**不在**：它的比较只在同一天到期的几份之间才有意义（「还有 3 天才
+ * 到期的 200 分」与「明天就作废的 50 分」按大小排会把急的那份排到后面），跨天比大小
+ * 没有语义。那一列的读法只有「跟时间列对着看」，所以它的表头不给排序按钮。
  */
 export const SORTABLE_COLUMNS: ReadonlySet<string> = new Set([
-  'order', 'account', 'proxy', 'connections', 'status', 'limits', 'expiry', 'usage',
+  'order', 'account', 'proxy', 'connections', 'status', 'limits', 'expiry', 'creditExpiry', 'usage',
 ])
 
 /** 比较器要读的外部数据口（页面把当前作用域下最合适的那一份注进来） */
@@ -122,6 +128,18 @@ function limitedCountOf(account: AccountRecord, ctx: SortContext): number {
   return models + (blocked ? 1 : 0)
 }
 
+/**
+ * 「最近到期」那一份的到期时刻（毫秒；`nearestCreditOf` 的产物）。
+ *
+ * 与那一列**显示的文字**同一份数据 —— 显示的倒计时由同一个 `expireAt` 算出，
+ * 于是「按这一列排序」出来的先后就是屏幕上那几个倒计时的先后（排完看不出来
+ * 排过没有的那类问题，根子都在显示与排序各读一份数据）。
+ */
+function creditExpiryOf(account: AccountRecord, ctx: SortContext): number | null {
+  const nearest = nearestCreditOf(ctx.usageOf(account))
+  return nearest ? nearest.expireAt : null
+}
+
 /** 一列的原始可比值（`null` = 这一行没有这个读数） */
 function valueOf(key: string, account: AccountRecord, ctx: SortContext): number | string | null {
   switch (key) {
@@ -135,6 +153,7 @@ function valueOf(key: string, account: AccountRecord, ctx: SortContext): number 
       return ctx.stateOf ? stateRank(ctx.stateOf(account.id)) : (isEnabled(account) ? 1 : 0)
     case 'limits': return limitedCountOf(account, ctx)
     case 'expiry': return expiryOf(account)
+    case 'creditExpiry': return creditExpiryOf(account, ctx)
     case 'usage': return usageAmount(ctx.usageOf(account))
     default: return null
   }

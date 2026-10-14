@@ -32,7 +32,8 @@ export type AccountColumn = {
 }
 
 /**
- * 列：勾选 / 顺序 / 账号 / 代理 / 连接数 / 状态 / 限流 / 有效期 / 余额 / 操作。
+ * 列：勾选 / 顺序 / 账号 / 代理 / 连接数 / 状态 / 限流 / 有效期 / 最近到期 /
+ * 最近到期积分 / 余额 / 操作。
  *
  * ── 分组模式（2026-10）删掉了「优先级」与「提供商」两列 ──────────
  * 顺序改由**拖拽**表达，数字不再出现在表里：每一行是它所在组的组内序号（`#N`），
@@ -76,6 +77,22 @@ export const ACCOUNT_COLUMNS: AccountColumn[] = [
     align: 'center', legacyAlign: 'left',
   },
   { key: 'expiry', label: t('有效期'), align: 'center', legacyAlign: 'left' },
+  // 「最近到期」两列（2026-10-15 增）：有效期列说的是**账号本身**什么时候失效，
+  // 这两列说的是**钱**什么时候作废 —— 两件事、两套时刻，不能合成一列。
+  // 取值口径（见 accounts-panels 的 nearestCreditOf）：所有积分包里**最先作废**的
+  // 那一份，时间 = 它的到期时刻，积分 = 它还剩多少（不是面额 —— 这一列回答的是
+  // 「马上要作废掉多少」，不是「当初发过多少」）。
+  // 两份包同刻到期时两列各自在组内重复，是同一份包的两面，不是冗余。
+  {
+    key: 'creditExpiry', label: t('最近到期'),
+    title: t('所有积分包里**最先作废**的那一份什么时候到期；逐份明细见「余额」格里的积分明细'),
+    align: 'center', legacyAlign: 'left',
+  },
+  {
+    key: 'creditLeft', label: t('最近到期积分'),
+    title: t('最先作废的那一份还剩多少（不是面额：这一列回答「马上要作废掉多少」）'),
+    align: 'center', legacyAlign: 'left',
+  },
   // 「余额」列只放读数（查询按钮在操作列）：一个只显示余额数字的列叫「余额 / 积分」
   // 会让人以为这里还能点。而「余额」这个词也容得下各家的不同叫法（积分 / 余额）
   { key: 'usage', label: t('余额'), align: 'center', legacyAlign: 'left' },
@@ -110,6 +127,11 @@ const DEFAULTS: Record<string, number> = {
   status: 80,
   limits: 148,
   expiry: 80,
+  // 两列按同一档给：读数是「09-30 23:59」与「200 credits」这类定长串（等宽数字 +
+  // 不换行），96 放得下最长的一档（`2026-09-30` 那种带年份的写法会走到省略号，
+  // 完整值在 title 里）。与 page-accounts-table.css 的 .cell-credit* 同步
+  creditExpiry: 96,
+  creditLeft: 96,
   usage: 132,
   actions: 200,
 }

@@ -193,6 +193,11 @@
 .cell-status { width: 80px; }
 .cell-limits { width: 148px; }
 .cell-expiry { width: 80px; }
+/* 「最近到期」两列（时间 / 积分）：读数都是定长短串（09-30 23:59 / 200 credits），
+   按同一档给 96。与 accounts-columns.ts 的 DEFAULTS 同步 —— 漂移的症状是用户
+   双击把手「还原」后列宽跳到另一个值。 */
+.cell-creditExpiry { width: 96px; }
+.cell-creditLeft { width: 96px; }
 /* 余额列：主额度桶的两行形态（套餐名 + 进度条与读数）需要比纯读数宽一档 ——
    84px 放不下「ZCode Trust Build」+「8800万 / 1亿 token」，套餐名会被省略成
    「ZCode Tr…」而失去意义。132 与优先级列同档，是「一行塞得下套餐名」的最小值。
@@ -555,6 +560,19 @@ body.queue-dragging * { cursor: grabbing !important; }
 /* ─── 有效期列 ─── */
 .cell-expiry { color: var(--text-2); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 .cell-expiry .muted { color: var(--text-3); }
+
+/* ─── 「最近到期」两列 ───
+   读数都是**定长短串**（`09-30 23:59` / `200 credits`），因此单行不换行即可，
+   不做余额列那种竖排两行。等宽数字让两列的位数在同一条中轴上，扫读时不必
+   逐行重新对位 —— 与有效期列同一处置。
+   时间列给一点弱化色（它是个时刻不是读数），积分列用正文色（这一列才是要看的数）。
+   完整时刻（含年）与单位口径都在 title 里，列宽不够时收省略号。 */
+.cell-creditExpiry,
+.cell-creditLeft { white-space: nowrap; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.cell-creditExpiry { color: var(--text-2); }
+.cell-creditLeft { color: var(--text); }
+.cell-creditExpiry .muted,
+.cell-creditLeft .muted { color: var(--text-3); }
 
 /* ─── 余额列 ───
    只放**摘要读数**（不可点）—— 查询按钮已移到操作列（本次改造），
