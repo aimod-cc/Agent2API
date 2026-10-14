@@ -1674,16 +1674,14 @@ export function TableHead({ namesHidden, allPicked, somePicked, disabled, onTogg
           {sortable('expiry', t('有效期'))}{grip}
         </th>
         {/* 「最近到期」两列：有效期列说的是账号凭据何时失效，这两列说的是钱何时作废。
-            时间那列可排（「谁先作废」是这个表最常问的问题）；积分列不给排序 ——
-            它只在**同一天到期**的几份之间才有比较意义，跨天比大小没有语义 */}
+            两列都可排、但各管一个维度：时间列管「什么时候作废」（谁先作废），
+            积分列管「作废前还剩多少」（按那一份的剩余量比大小） */}
         <th className='cell-creditExpiry' data-col='creditExpiry' aria-sort={ariaSort('creditExpiry')}>
           {sortable('creditExpiry', t('最近到期'), t('所有积分包里最先作废的那一份什么时候到期；逐份明细见「余额」格里的积分明细'))}
           {grip}
         </th>
-        <th className='cell-creditLeft' data-col='creditLeft'>
-          <span className='th-label' title={t('最先作废的那一份还剩多少（不是面额）')}>
-            {t('最近到期积分')}
-          </span>
+        <th className='cell-creditLeft' data-col='creditLeft' aria-sort={ariaSort('creditLeft')}>
+          {sortable('creditLeft', t('最近到期积分'), t('最先作废的那一份还剩多少（不是面额）；按这一份的剩余量排序，缺失值恒排最后'))}
           {grip}
         </th>
         <th className='cell-usage' data-col='usage' aria-sort={ariaSort('usage')}>

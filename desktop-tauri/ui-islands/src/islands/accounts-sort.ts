@@ -34,12 +34,15 @@ import type { AccountSort } from './accounts-store'
  * 都有一个可比的读数 —— 包括「代理」（没有代理 = 直连，排最前）。
  *
  * 「最近到期时间」在表——**谁先作废**是这一列存在的理由，能排才有用。
- * 「最近到期积分」**不在**：它的比较只在同一天到期的几份之间才有意义（「还有 3 天才
- * 到期的 200 分」与「明天就作废的 50 分」按大小排会把急的那份排到后面），跨天比大小
- * 没有语义。那一列的读法只有「跟时间列对着看」，所以它的表头不给排序按钮。
+ * 「最近到期积分」也在表——**还剩多少**同样是个可比的量（剩得多 → 少），与时间列各管一个
+ * 维度：一个管「什么时候作废」、一个管「作废前还剩多少」，两列点出来的次序互不打架。
+ * 早先不给它按钮，理由是「跨天比大小无语义」（拿「3 天后到期的 200 分」比「明天作废的
+ * 50 分」）；但用户实际要的就是按数值排，且缺值时那一格本来就是 `—`、恒排段末。
+ * 只提示一点：这两列的读数取自**同一份**「最先作废的份」，所以「最近到期积分」排出来的
+ * 次序只在该份之间可比 —— 它不是「账号总余额」的排序（那是「余额」列）。
  */
 export const SORTABLE_COLUMNS: ReadonlySet<string> = new Set([
-  'order', 'account', 'proxy', 'connections', 'status', 'limits', 'expiry', 'creditExpiry', 'usage',
+  'order', 'account', 'proxy', 'connections', 'status', 'limits', 'expiry', 'creditExpiry', 'creditLeft', 'usage',
 ])
 
 /** 比较器要读的外部数据口（页面把当前作用域下最合适的那一份注进来） */
@@ -140,6 +143,18 @@ function creditExpiryOf(account: AccountRecord, ctx: SortContext): number | null
   return nearest ? nearest.expireAt : null
 }
 
+/**
+ * 「最近到期积分」那一份的**剩余量**（`nearestCreditOf` 的 `remain`）。
+ *
+ * 与那一列**显示的数字**同一份数据（显示的就是 `remain`），所以「按这一列排序」出来的
+ * 先后就是屏幕上那几个数字的先后。注意它是**那一份的剩余量**、不是账号总余额：
+ * `remain` 缺失（无限量那类）时给 `null` → 恒排段末，与那一列的 `—` 一致。
+ */
+function creditLeftOf(account: AccountRecord, ctx: SortContext): number | null {
+  const nearest = nearestCreditOf(ctx.usageOf(account))
+  return nearest ? nearest.remain : null
+}
+
 /** 一列的原始可比值（`null` = 这一行没有这个读数） */
 function valueOf(key: string, account: AccountRecord, ctx: SortContext): number | string | null {
   switch (key) {
@@ -154,6 +169,7 @@ function valueOf(key: string, account: AccountRecord, ctx: SortContext): number 
     case 'limits': return limitedCountOf(account, ctx)
     case 'expiry': return expiryOf(account)
     case 'creditExpiry': return creditExpiryOf(account, ctx)
+    case 'creditLeft': return creditLeftOf(account, ctx)
     case 'usage': return usageAmount(ctx.usageOf(account))
     default: return null
   }
