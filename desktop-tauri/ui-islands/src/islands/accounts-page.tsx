@@ -82,6 +82,9 @@ import {
 } from './accounts-panels'
 import { bindQueueDrag, type QueueDrop } from './accounts-queue-drag'
 import { AccountsDialogs } from './accounts-dialogs'
+// 「模型调度」作用域视图（只读，见那个文件的模块头）：作用域非全局时，
+// 列表区整块换成它 —— 账号表那条渲染路径不受影响，切回全局即原样回来
+import { SchedulePane, ScopeSwitcher, useScheduleScope } from './accounts-schedule'
 
 /** 列设置的句柄（注册在挂载后的布局 effect 里，见下方说明） */
 let colHandle: ColSettingsHandle | null = null
@@ -138,6 +141,8 @@ function syncHead(): void {
 
 function AccountsPage() {
   const store = React.useSyncExternalStore(subscribe, getStore)
+  /** 调度视图的作用域（'' = 全局）。挂在模块级 store 上（切在工具条、读在列表区） */
+  const scheduleModel = useScheduleScope()
   const listRef = React.useRef<HTMLDivElement | null>(null)
   /** 登记列设置之后强制重画一次用的本地计数器（不依赖 store 订阅的时序，见下） */
   const [, forceTick] = React.useReducer((tick: number) => tick + 1, 0)
@@ -345,6 +350,12 @@ function AccountsPage() {
     <>
       <section className='panel account-table'>
         <div className='toolbar'>
+          {/* 作用域：全局（账号表）或某一个模型（模型调度视图）。放在工具条最前 ——
+              它切的是「这张表在看什么」，比右边那些筛选档位高一层。作用域非全局时
+              右边那四个筛选组整体收走：它们筛的是账号表，对调度视图没有意义 */}
+          <ScopeSwitcher />
+          <div className='divider' />
+          {scheduleModel ? null : (<>
           {/* 提供商：分组模式把「哪一家」画在了页面上（一家一段），但「只看某一家」仍是
               常用动作 —— 分组带收得掉一家、收不掉其余那几家。用下拉而不是分段按钮：家数
               是**动态**的（后端注册表加一家就多一项），分段按钮会随家数增长把工具条挤成
@@ -399,17 +410,21 @@ function AccountsPage() {
             ]} value={store.filter.limit} onValueChange={value => setSegmentFilter('limit', value)}
               aria-label={t('限额状态')} />
           </div>
+          </>)}
 
           <div className='actions'>
             {/* 折叠是「只看某几家」的入口：一家几十条时，收起不关心的那些比筛选更顺手。
                 「全部」就是全部 —— 作用对象是全部组，不按当前筛选收窄（见 store 里
                 setAllGroupsCollapsed 的说明） */}
+            {/* 折叠只对账号表有意义（调度视图里没有分组可收），作用域非全局时收走 */}
+            {scheduleModel ? null : (
             <Button id='btn-fold-groups' variant='outline'
               disabled={!allGroups.length}
               title={allCollapsed ? t('展开全部分组') : t('折叠全部分组（只留组头）')}
               onClick={() => setAllGroupsCollapsed(allGroups.map(group => group.provider), !allCollapsed)}>
               {allCollapsed ? t('展开全部') : t('折叠全部')}
             </Button>
+            )}
             {/* 「添加账号」的打开逻辑归 add-account.js（它按同一个 id 绑了监听），这里再挂
                 一次 onClick 是**冗余保险**：万一那个脚本的绑定因加载顺序没接上，按钮仍可用
                 （openModal / resetAddStep 都是幂等的，重复调用无副作用） */}
@@ -425,6 +440,10 @@ function AccountsPage() {
           </div>
         </div>
 
+        {/* 批量栏是「对账号表做什么」的控制条：调度视图是只读的，它整条收走
+            （作用域切回全局即原样回来）。**只包批量栏** —— 列表区夹在批量栏与
+            页脚之间，把它一起包进来会把调度视图本身也吞掉 */}
+        {scheduleModel ? null : (
         <div className={cn('batch-bar', active && 'active')} id='batch-bar'>
           <label className='batch-select-all'>
             <Checkbox id='batch-select-all' checked={allPicked} indeterminate={!allPicked && somePicked}
@@ -467,9 +486,15 @@ function AccountsPage() {
               onClick={() => clearSelection()}>{t('取消选择')}</Button>
           </div>
         </div>
+        )}
 
         <div className='acct-scroll' id='account-list' ref={listRef}>
-          {!loaded ? (
+          {/* 作用域非全局 → 模型调度视图整块替换账号表（见 accounts-schedule）。
+              注意这条分支排在 `!loaded` 之前：调度视图的数据来自队列端点，与账号表
+              的加载态无关 —— 账号还没加载出来时它照样能画 */}
+          {scheduleModel ? (
+            <SchedulePane model={scheduleModel} />
+          ) : !loaded ? (
             <div className='empty'><span className='spinner' />{t('正在加载…')}</div>
           ) : !all.length ? (
             <div className='empty'>{t('暂无账号，请点击右上角「添加账号」')}</div>
@@ -525,7 +550,9 @@ function AccountsPage() {
 
         {/* 页脚是纯控制条（读数 / 每页条数 / 跳页 / 翻页器，通用件 table-shell.tsx）。
             左侧原先那两句说明（优先级是全局队列 / 拖表头调列宽 / 设为首选的含义）
-            按用户要求移除 —— 五张表的页脚现在都不带说明文字了。 */}
+            按用户要求移除 —— 五张表的页脚现在都不带说明文字了。
+            （与批量栏同理：调度视图没有分页，这一条也收走）*/}
+        {scheduleModel ? null : (
         <TableFooter
           total={shown.length}
           range={paging.paged ? { start: paging.rangeStart, end: paging.rangeEnd } : null}
@@ -535,6 +562,7 @@ function AccountsPage() {
           onSizeChange={paging.setSize}
           onPageChange={paging.goto}
         />
+        )}
       </section>
       <AccountsDialogs />
     </>
