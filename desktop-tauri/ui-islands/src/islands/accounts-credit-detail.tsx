@@ -26,7 +26,8 @@
  *   startAt       生效（抵扣开始）时刻，毫秒 —— 发放时刻缺失时顶上左边那一半
  *   expireAt      到期时刻，毫秒
  *   unit          与主读数不同单位时才在（Trae 的套餐包 vs 积分包）
- *   daily         每日重置的包（到期字段对它是「今天 24 点」的意思）
+ *   daily         每日重置的包（**它的 `expireAt` 是「今天 24 点」** —— 后端按
+ *                 `isDaily` 特意从 `CycleEndTime` 取，不是作废时刻）
  *   grantReason   WorkBuddy 的发放原因（官方活动 / 拉新奖励…），可无
  * ```
  * 这里只读不猜：谁缺键谁就不显示那一段。`null` 与 `0` 的区别在这一层就得守住 ——
@@ -75,7 +76,9 @@ export type CreditRow = {
   remain: number | null
   /** 这一份的剩余量单位（`credits` / `积分`）；没给给空串 */
   unit: string
-  /** 日额度包：它的「到期」是周期边界（今天 24 点回满），不是这笔钱作废 */
+  /** 日额度包：它的「到期」是周期边界（今天 24 点回满），不是这笔钱作废。
+   *  账号表那两列在「没有一次性包」时会退到它，读数因此是「今日剩余」——
+   *  同一份 `expireAt`，两种说法（见 `nearestCreditOf`）。 */
   daily: boolean
   /**
    * 这一份还能不能花。两条判据：**剩余读到 0**（或已用 ≥ 总量）算耗尽，
@@ -277,7 +280,7 @@ function CreditRowView({ row }: { row: CreditRow }) {
  * 「第一个未过期且有到期时刻的份」就是答案 —— 前端再排一次会让两处口径分叉。
  */
 export type NearestCredit = {
-  /** 到期时刻（毫秒） */
+  /** 到期时刻（毫秒）。**日额度包的这一位是「今天 24 点」**（见下面「取哪一份」） */
   expireAt: number
   /** 这一份叫什么（悬停里要回答「是哪一笔」） */
   name: string
@@ -286,14 +289,53 @@ export type NearestCredit = {
   remain: number | null
   /** 剩余量的单位（`积分` / `credits`）；没给给空串 */
   unit: string
+  /**
+   * 这一份是**日额度包**（`daily: true`）。
+   *
+   * 界面据此换说法：一次性包的到期是「这笔钱作废」，日额度包的到期是
+   * 「今天 24 点回满」—— 同一个 `expireAt`，两句话。读数（倒计时）本身
+   * 一样，只有悬停与列标题要分开写。
+   */
+  daily: boolean
 }
 
-/** 取「最先作废且还没作废」的那一份（没有 → null） */
+/**
+ * 取「最先作废」的那一份（没有 → null）。
+ *
+ * ── 两轮筛选，一次性包永远压过日额度包 ──────────────────────
+ *   ① 还没过期、且**不是**日额度包的 → 到期最早的那一份（主答案：钱要作废了）；
+ *   ② ① 没有时，退到日额度包 → 它的 `expireAt` 是**今天 24 点**，读数因此是
+ *      「离今天结束还有多久」（这一列在纯日额度账号上不再是 `—`）。
+ *
+ * ── 为什么把日额度包排在后面，而不是一视同仁 ────────────────
+ * 两者问的不是同一件事：「哪笔钱要作废了」远比「今天还剩多少额度到点回满」更值得
+ * 占这一列。只有在一份一次性包都没有时才轮得到后者 —— 这时候答案也确实有用
+ * （它答的是「今天这家的免费额度还能用到几点」）。
+ *
+ * ── 日额度包的 expireAt 为什么天然就是「今天 24 点」────────────
+ * 不是我在这里算的，是后端**故意挑过字段**：`billing::credit_pack_of` 对
+ * `isDaily` 的包取 `CycleEndTime`、对其余取 `DeductionEndTime`
+ * （`core/billing/usage.rs`，那处注释写着「日额度包该读哪个到期字段」）。
+ * 所以这里直接用 `expireAt`，**前端不重算一天结束的时刻** —— 重算就是第二份实现，
+ * 且跨时区/跨夏令时迟早与后端对不上。
+ *
+ * 不自己再排一次序：后端两家的 `credits[]` 都已按到期升序发出（Trae：
+ * `trae::usage::credit_rows` 以 `expireAt` 升序、缺失垫底；WorkBuddy：
+ * `billing::usage` 先按套餐优先级、同优先级再按 `expireAt` 升序），所以
+ * 「第一个命中的份」就是答案 —— 前端再排一次会让两处口径分叉。
+ */
 export function nearestCreditOf(entry: UsageEntry): NearestCredit | null {
   const now = Date.now()
-  for (const row of creditRowsOf(entry)) {
+  const rows = creditRowsOf(entry)
+  // ① 一次性包优先：`daily` 的跳过，留到第二轮
+  for (const row of rows) {
     if (row.daily || row.expireAt === null || row.expireAt <= now) continue
-    return { expireAt: row.expireAt, name: row.name, remain: row.remain, unit: row.unit }
+    return { expireAt: row.expireAt, name: row.name, remain: row.remain, unit: row.unit, daily: false }
+  }
+  // ② 兜底：日额度包（`expireAt` = 今天 24 点）
+  for (const row of rows) {
+    if (!row.daily || row.expireAt === null || row.expireAt <= now) continue
+    return { expireAt: row.expireAt, name: row.name, remain: row.remain, unit: row.unit, daily: true }
   }
   return null
 }

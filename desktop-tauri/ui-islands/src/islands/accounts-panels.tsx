@@ -346,7 +346,7 @@ export function CreditExpiryCell({ account }: { account: AccountRecord }) {
   const nearest = nearestCreditOf(entry)
   if (!nearest) {
     return (
-      <span className='muted' title={t('没有将到期的积分（全是每日重置的额度，或这一家不给逐份读数）')}>—</span>
+      <span className='muted' title={t('没有将到期的积分（没有一次性额度包，或这一家不给逐份读数）')}>—</span>
     )
   }
   const now = Date.now()
@@ -357,11 +357,19 @@ export function CreditExpiryCell({ account }: { account: AccountRecord }) {
     : left < 48 * 3600e3 ? t('{n} 小时后', { n: (left / 3600e3).toFixed(1) })
       : t('{n} 天后', { n: Math.floor(left / 24 / 3600e3) })
   const full = formatTime(nearest.expireAt)
-  const title = [
-    t('最近到期：{name}', { name: nearest.name }),
-    full ? t('到期时刻 {time}', { time: full }) : '',
-    t('逐份明细见「余额」格的积分明细'),
-  ].filter(Boolean).join(' · ')
+  // 日额度包兜底时换说法：同一个时刻，一个是「这笔钱作废」，一个是「今天回满」。
+  // 不说清会被读成「免费额度明天就没了」（其实是用完回满），见 nearestCreditOf。
+  const title = (nearest.daily
+    ? [
+      t('今天剩余：{name}', { name: nearest.name }),
+      t('每日重置（{time} 回满，不是作废）', { time: full || t('今天 24 点') }),
+    ]
+    : [
+      t('最近到期：{name}', { name: nearest.name }),
+      full ? t('到期时刻 {time}', { time: full }) : '',
+    ])
+    .concat(t('逐份明细见「余额」格的积分明细'))
+    .filter(Boolean).join(' · ')
   return <span title={title}>{text}</span>
 }
 
@@ -383,7 +391,7 @@ export function CreditLeftCell({ account }: { account: AccountRecord }) {
   const nearest = nearestCreditOf(entry)
   if (!nearest) {
     return (
-      <span className='muted' title={t('没有将到期的积分（全是每日重置的额度，或这一家不给逐份读数）')}>—</span>
+      <span className='muted' title={t('没有将到期的积分（没有一次性额度包，或这一家不给逐份读数）')}>—</span>
     )
   }
   if (nearest.remain === null) {
@@ -393,7 +401,9 @@ export function CreditLeftCell({ account }: { account: AccountRecord }) {
   }
   const value = `${nearest.remain}${nearest.unit ? ' ' + nearest.unit : ''}`
   return (
-    <span title={t('最近到期：{name} · 这一份还剩 {value}（不是面额）', { name: nearest.name, value })}>
+    <span title={nearest.daily
+      ? t('今天剩余：{name} · 这一份还剩 {value}（每天 24 点回满）', { name: nearest.name, value })
+      : t('最近到期：{name} · 这一份还剩 {value}（不是面额）', { name: nearest.name, value })}>
       {value}
     </span>
   )
@@ -1675,9 +1685,10 @@ export function TableHead({ namesHidden, allPicked, somePicked, disabled, onTogg
         </th>
         {/* 「最近到期」两列：有效期列说的是账号凭据何时失效，这两列说的是钱何时作废。
             两列都可排、但各管一个维度：时间列管「什么时候作废」（谁先作废），
-            积分列管「作废前还剩多少」（按那一份的剩余量比大小） */}
+            积分列管「作废前还剩多少」（按那一份的剩余量比大小）。
+            没有一次性包时退到日额度包，此时读数变成「今天 24 点还剩多久」——*/}
         <th className='cell-creditExpiry' data-col='creditExpiry' aria-sort={ariaSort('creditExpiry')}>
-          {sortable('creditExpiry', t('最近到期'), t('所有积分包里最先作废的那一份什么时候到期；逐份明细见「余额」格里的积分明细'))}
+          {sortable('creditExpiry', t('最近到期'), t('所有积分包里最先作废的那一份什么时候到期；没有一次性包时退到每日重置额度、显示今天还剩多久；逐份明细见「余额」格里的积分明细'))}
           {grip}
         </th>
         <th className='cell-creditLeft' data-col='creditLeft' aria-sort={ariaSort('creditLeft')}>

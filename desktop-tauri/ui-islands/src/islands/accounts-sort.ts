@@ -137,6 +137,9 @@ function limitedCountOf(account: AccountRecord, ctx: SortContext): number {
  * 与那一列**显示的文字**同一份数据 —— 显示的倒计时由同一个 `expireAt` 算出，
  * 于是「按这一列排序」出来的先后就是屏幕上那几个倒计时的先后（排完看不出来
  * 排过没有的那类问题，根子都在显示与排序各读一份数据）。
+ *
+ * 注意 `nearestCreditOf` 会在**没有一次性包时退到日额度包**（`expireAt` = 今天
+ * 24 点）。那个值在这里照样可排：它就是「今天还剩多久」，与别的行的倒计时同一量纲。
  */
 function creditExpiryOf(account: AccountRecord, ctx: SortContext): number | null {
   const nearest = nearestCreditOf(ctx.usageOf(account))
@@ -149,6 +152,9 @@ function creditExpiryOf(account: AccountRecord, ctx: SortContext): number | null
  * 与那一列**显示的数字**同一份数据（显示的就是 `remain`），所以「按这一列排序」出来的
  * 先后就是屏幕上那几个数字的先后。注意它是**那一份的剩余量**、不是账号总余额：
  * `remain` 缺失（无限量那类）时给 `null` → 恒排段末，与那一列的 `—` 一致。
+ *
+ * 日额度包兜底时也一样（那一份今天还剩多少）—— 与一次性包的 `remain` 是同一个字段、
+ * 同一量纲，混排不会产生讲不通的次序。
  */
 function creditLeftOf(account: AccountRecord, ctx: SortContext): number | null {
   const nearest = nearestCreditOf(ctx.usageOf(account))
