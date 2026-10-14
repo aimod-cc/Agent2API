@@ -122,7 +122,7 @@ import type { ManageModel, ManageView } from './models-custom-source'
 // 内置家的图标映射（与添加账号弹窗、签到中心同一份，别处不要照抄这份映射）
 import { PROVIDER_ICONS } from './add-provider-pick'
 import {
-  GROUP_LIMIT, MODEL_SORT_OPTIONS, MODEL_STATE_OPTIONS, accept, bindingKeyOf, bindingsOf, builtinRailItems,
+  CUSTOM_ALL, GROUP_LIMIT, MODEL_SORT_OPTIONS, MODEL_STATE_OPTIONS, accept, bindingKeyOf, bindingsOf, builtinRailItems,
   closeCapability, closeCustomModel, closeMapping, collapseGroup, currentProvider, customProviderOptions,
   directoryReady, esc, errorMessage, expandGroup, formatTime, getSnapshot, levelOf, load, models,
   openAddCustomProvider, openCapability, openCustomModel, openMapping, providerLabelOf, providerOptions,
@@ -310,7 +310,9 @@ function matches(model: ManageModel, keyword: string, provider: string, stateFil
   if (stateFilter === 'enabled' && !rowEnabled(model)) return false
   if (stateFilter === 'disabled' && rowEnabled(model)) return false
   if (stateFilter === 'mapped' && !(model.aliases || []).length) return false
-  if (provider !== 'all' && (model.provider || '') !== provider) return false
+  // 「自定义 · 全部」视图：数据已经只含自定义家（viewData 合并而来），这里不再按家过滤；
+  // 选中具体某家（含内置与自定义）时按行上的 provider 精确匹配，与旧实现同口径。
+  if (provider !== 'all' && provider !== CUSTOM_ALL && (model.provider || '') !== provider) return false
   if (!keyword) return true
   const hay = [model.id, model.name, ...(model.aliases || [])].join(' ').toLowerCase()
   return hay.includes(keyword)
@@ -319,7 +321,9 @@ function matches(model: ManageModel, keyword: string, provider: string, stateFil
 function ModelsPage() {
   const state = React.useSyncExternalStore(subscribe, getSnapshot)
   const provider = resolveProvider(state)
-  const custom = customSource.isCustom(provider)
+  /** 「自定义 · 全部」聚合视图（只读浏览，写入仍按行上的 provider 落到具体某一家） */
+  const customAll = provider === CUSTOM_ALL
+  const custom = customAll || customSource.isCustom(provider)
   /**
    * 「测试」弹窗的目标行。这一份状态刻意**不放进模块级快照**（与三个弹窗的 context 不同）：
    * 它只被本页用、也没有从 React 之外打开的调用点（入口就是表格里那颗按钮），
@@ -337,7 +341,7 @@ function ModelsPage() {
    */
   const [selection, setSelection] = React.useState<ReadonlySet<string>>(new Set())
   /** 选中了一个已被删除的自定义家（目录缓存里确实没有这条记录，而不是「还没加载完」） */
-  const customMissing = custom && directoryReady() && !customSource.record(provider)
+  const customMissing = !customAll && customSource.isCustom(provider) && directoryReady() && !customSource.record(provider)
 
   /**
    * 首屏一次性副作用：登记列设置（并注入按钮）→ 同步静态表头 → 补读筛选记忆 → 按需自拉。
@@ -382,9 +386,11 @@ function ModelsPage() {
    */
   const titleLabel = provider === 'all'
     ? t('全部')
-    : (custom
-      ? String(customSource.record(provider)?.name || provider)
-      : (builtinRailItems(state.data).get(provider)?.label || providerLabelOf(provider)))
+    : (customAll
+      ? t('全部')
+      : (custom
+        ? String(customSource.record(provider)?.name || provider)
+        : (builtinRailItems(state.data).get(provider)?.label || providerLabelOf(provider))))
   const enabledCount = all.filter(rowEnabled).length
   const mappedCount = all.filter(model => (model.aliases || []).length > 0).length
   /**
@@ -424,7 +430,7 @@ function ModelsPage() {
       }} />
   )
 
-  /** 左栏：内置提供商（全部 + 各家）+ 自定义提供商（每家 + 新建）。
+  /** 左栏：内置提供商（全部 + 各家）+ 自定义提供商（全部 + 每家 + 新建）。
       条目区（.rail-scroll）自己滚，「＋ 新建」沉在栏底（.rail-foot）不跟着滚 ——
       它是动作不是选项，家多了也不该被推出视野。 */
   function rail() {
@@ -432,6 +438,11 @@ function ModelsPage() {
     const customs = customSource.list()
     const total = [...counts.values()].reduce((sum, item) => sum + item.n, 0)
     const allLabel = t('全部（{n} 家）', { n: counts.size })
+    // 「自定义 · 全部」的计数与家数：模型总数是各家 models 长度之和（目录缓存的权威口径，
+    // 与单家条目上那颗计数同源）；只有一家时这项没意义，不渲染（与内置区恒显「全部」不同 ——
+    // 内置区那份还承担「回到全局视图」的入口，自定义区的「全部」只是多家的聚合浏览）
+    const customTotal = customs.reduce((sum, item) => sum + (Array.isArray(item.models) ? item.models.length : 0), 0)
+    const customAllLabel = t('全部（{n} 家）', { n: customs.length })
     return (
       <aside className='prov-rail' id='prov-rail' aria-label={t('按提供商选择')}>
         <div className='rail-scroll'>
@@ -450,6 +461,11 @@ function ModelsPage() {
               onClick={() => selectProvider(key)}>{entry.label}</NavItem>
           ))}
           <div className='rail-label'>{t('自定义提供商')}</div>
+          {customs.length > 1 ? (
+            <NavItem active={provider === CUSTOM_ALL} data-provider={CUSTOM_ALL} title={customAllLabel}
+              count={customTotal} icon={providerAvatar('all', '', GRID_GLYPH)}
+              className='shadow-none' onClick={() => selectProvider(CUSTOM_ALL)}>{customAllLabel}</NavItem>
+          ) : null}
           {customs.length ? customs.map(item => {
             const id = String(item.id || '')
             const label = String(item.name || id)
@@ -784,15 +800,18 @@ function ModelsPage() {
           ? t('加载中…')
           : customMissing
             ? t('该提供商已不存在（可能已被删除），请刷新列表')
-            : t('这家还没有模型：点「添加模型」登记，或「获取上游模型」从上游拉取'))
+            : customAll
+              ? t('自定义提供商还没有模型：选中具体某一家后点「添加模型」登记，或「获取上游模型」从上游拉取')
+              : t('这家还没有模型：点「添加模型」登记，或「获取上游模型」从上游拉取'))
         : (state.data ? t('暂无模型（请先添加账号）') : t('加载中…'))
       return <tr><td colSpan={columnCount} className='empty'>{empty}</td></tr>
     }
     if (!shown.length) {
       return <tr><td colSpan={columnCount} className='empty'>{keyword ? t('没有匹配「{keyword}」的模型', { keyword }) : t('没有匹配当前筛选的模型')}</td></tr>
     }
-    // 分组带只在「全部」视图里出现：选中单家时标题已经写了是哪一家，再叠一条是重复的
-    const showGroups = provider === 'all'
+    // 分组带只在「全部」视图里出现（内置全部 / 自定义全部）：选中单家时标题已经写了是哪一家，
+    // 再叠一条是重复的
+    const showGroups = provider === 'all' || customAll
     // 分页档位下**不做组内折叠**（见 paging 的说明）：页数本身就把长度限住了，
     // 两套折叠叠在一起会让人算不清「到底还有多少个」。选「全部」时保持原行为。
     const collapsible = showGroups && !keyword && state.stateFilter === 'all' && !paging.paged
@@ -878,7 +897,7 @@ function ModelsPage() {
             <div className='panel-head'>
               <div className='mm-titlebar'>
                 <div className='mm-title'>
-                  {provider === 'all'
+                  {provider === 'all' || customAll
                     ? providerAvatar('all', '', GRID_GLYPH)
                     : providerAvatar(provider, titleLabel)}
                   <h2>{titleLabel}</h2>
@@ -891,7 +910,7 @@ function ModelsPage() {
                       「添加模型」是补充，维持描边档。文案与 title 只有一处事实来源（这里），
                       index.html 里不写死 */}
                   <Button id='btn-refresh-models'
-                    title={custom
+                    title={custom && !customAll
                       ? t('从这一家的上游拉一份模型清单，勾选要哪些再导入（已添加的不会重复导入）')
                       : t('刷新模型管理页里各提供商的远程模型目录，逐家结果列在弹窗里')}
                     onClick={() => refreshModels()}>{t('获取模型')}</Button>

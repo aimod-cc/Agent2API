@@ -325,6 +325,7 @@
   "这家的清单是你自己登记的，不填的项下游按未声明处理。": "This provider's catalog is what you registered yourself; fields left empty are treated as not declared downstream.",
   "这家还没有可用账号，刷新会使用默认登录态": "This provider has no usable accounts yet; the refresh will use the default login session",
   "这家还没有模型：点「添加模型」登记，或「获取上游模型」从上游拉取": "No models for this provider yet: click “Add model” to register one, or “Fetch models” to pull from upstream",
+  "自定义提供商还没有模型：选中具体某一家后点「添加模型」登记，或「获取上游模型」从上游拉取": "No models on custom providers yet: pick a specific provider, then click “Add model” to register one or “Fetch models” to pull from upstream",
   "这是模型自己能配的档位（来自上游目录），只读；要改某一档请到映射弹窗里选。": "These are the levels the model itself supports (from the upstream catalog); they're read-only. To change a level, select it in the mapping dialog.",
   "这条登记（不像内置模型那样只是隐藏），因为它的存在完全由这次登记决定。": "this registration (unlike built-in models, which are merely hidden), because its existence is decided entirely by this registration.",
   "远程": "Remote",

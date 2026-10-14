@@ -325,6 +325,7 @@
   "这家的清单是你自己登记的，不填的项下游按未声明处理。": "O catálogo deste provedor é registrado por você; itens não preenchidos são tratados como não declarados pelo downstream.",
   "这家还没有可用账号，刷新会使用默认登录态": "Este provedor ainda não tem contas disponíveis; a atualização usará a sessão padrão",
   "这家还没有模型：点「添加模型」登记，或「获取上游模型」从上游拉取": "Este provedor ainda não tem modelos: clique em “Adicionar modelo” para registrar ou em “Buscar modelos do upstream” para buscá-los",
+  "自定义提供商还没有模型：选中具体某一家后点「添加模型」登记，或「获取上游模型」从上游拉取": "Os provedores personalizados ainda não têm modelos: selecione um provedor específico e clique em “Adicionar modelo” para registrar ou em “Buscar modelos do upstream” para buscá-los",
   "这是模型自己能配的档位（来自上游目录），只读；要改某一档请到映射弹窗里选。": "São os níveis que o próprio modelo pode configurar (vêm do catálogo upstream); somente leitura. Para alterar algum nível, escolha no diálogo de mapeamento.",
   "这条登记（不像内置模型那样只是隐藏），因为它的存在完全由这次登记决定。": " este registro (não apenas ocultá-lo como no caso dos modelos integrados), pois sua existência é determinada inteiramente por este registro.",
   "远程": "Remoto",

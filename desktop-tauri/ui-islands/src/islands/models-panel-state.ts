@@ -168,6 +168,21 @@ export const same = (left: unknown, right: unknown): boolean => norm(left) === n
 /** 「全部」视图里每组默认只展开这么多行，其余折叠成一行「展开其余 N 个」 */
 export const GROUP_LIMIT = 8
 
+/**
+ * 「自定义提供商 · 全部」的聚合视图选中值（仿内置家的 'all'）。
+ *
+ * 刻意**不用** `custom-` 前缀：`isCustom`（与后端 `is_custom_provider_id` 同一判据）会把
+ * 它当成一家真实存在的自定义家，于是写路径（`writeBinding` / `writeAddModel` / …）会拿这个
+ * 聚合 id 去整表提交，落到一个不存在的记录上。`$` 前缀在任何一家的 id 字符集里都不出现，
+ * 天然不撞；同时它不是 'all'，`matches` / 左栏 / 标题都可以把它与内置「全部」区分开。
+ */
+export const CUSTOM_ALL = '$custom'
+
+/** 当前选中项是不是「自定义提供商 · 全部」这个聚合视图 */
+export function isCustomAllView(provider: string): boolean {
+  return provider === CUSTOM_ALL
+}
+
 /** 筛选的落盘键（走 wbFilterMemory：provider / state / search 三个维度各存各的） */
 const FILTERS_KEY = 'workbuddy-desktop-models-filters'
 
@@ -232,7 +247,7 @@ const DEFAULT_FILTERS: Filters = { provider: 'all', state: 'all', search: '', so
 /* ─── 共享快照（外部 store）──────────────────── */
 
 export type PanelState = {
-  /** 左栏选中的提供商：'all' / 某个内置家 id / 某个 custom- id */
+  /** 左栏选中的提供商：'all' / 某个内置家 id / 某个 custom- id / CUSTOM_ALL（自定义·全部） */
   provider: string
   stateFilter: string
   search: string
@@ -354,6 +369,15 @@ export function restoreSavedFilters(): void {
 export function resolveProvider(state: PanelState): string {
   const id = state.provider
   if (id === 'all') return id
+  // 「自定义 · 全部」只在目录里**还有**自定义家时成立；一家都不剩（全被删了）回落内置「全部」。
+  // 失效判定与下单个自定义家同一条口径（见函数头「两份数据都到位才判定」）：目录桥在但
+  // customList 还没拉回来（启动窗口期，桥先落地、清单请求在途）时列表为空是「还没加载完」
+  // 不是「没有家」，不能用 directoryReady 单独判它失效 —— 那会把存过的选中项在首屏就冲掉。
+  if (id === CUSTOM_ALL) {
+    if (customSource.list().length > 0) return id
+    if (!state.data || !directoryReady()) return id
+    return 'all'
+  }
   if (customSource.list().some(provider => provider.id === id)) return id
   if (builtinRailItems(state.data).has(id)) return id
   if (!state.data || !directoryReady()) return id
@@ -373,9 +397,10 @@ export function directoryReady(): boolean {
   return Boolean(shared().wbProviders)
 }
 
-/** 当前选中项是不是自定义家 */
+/** 当前选中项是不是自定义家（含「自定义 · 全部」这个聚合视图） */
 function isCustomView(): boolean {
-  return customSource.isCustom(currentProvider())
+  const provider = currentProvider()
+  return provider === CUSTOM_ALL || customSource.isCustom(provider)
 }
 
 /**
@@ -393,9 +418,39 @@ function customViewOf(id: string): ManageView {
   return customViewCache.view
 }
 
+/**
+ * 「自定义 · 全部」的聚合视图：把目录里**每家**自定义家的 buildView 结果拼成一份。
+ *
+ * 行上的 `provider` 保留各家真实 id（buildView 本来就写死了那一家的 id）——于是表格里
+ * 所有行内写入（开关 / 映射 / 能力 / 移除 / 测试）走的还是「那一家」的整表提交路径，
+ * 聚合视图只影响**读**，不进任何一条写路径。
+ *
+ * 缓存键是目录列表的引用：providers.js 每次 refreshCustom 都会换一份新数组（哪怕内容相同），
+ * 正好满足「目录一变就重建」；目录没变就复用，一次渲染里表格 / 弹窗 / 索引读到的都是同一份。
+ */
+let customAllViewCache: { list: CustomProviderRecord[]; view: ManageView } | null = null
+
+function customAllViewOf(): ManageView {
+  const list = customSource.list()
+  if (customAllViewCache && customAllViewCache.list === list) return customAllViewCache.view
+  const models: ManageModel[] = []
+  const mappings: ManageMapping[] = []
+  for (const provider of list) {
+    const id = String(provider?.id || '')
+    if (!id) continue
+    const view = customSource.buildView(id)
+    if (!view) continue
+    models.push(...view.models)
+    mappings.push(...view.mappings)
+  }
+  customAllViewCache = { list, view: { models, mappings } }
+  return customAllViewCache.view
+}
+
 /** 当前视图的数据（两个数据源在这里合流，下游渲染 / 搜索 / 候选自动跟着选中的家走） */
 export function viewData(): ManageView {
   const provider = currentProvider()
+  if (provider === CUSTOM_ALL) return customAllViewOf()
   if (customSource.isCustom(provider)) return customViewOf(provider)
   return snapshot.data || EMPTY_VIEW
 }
@@ -821,7 +876,9 @@ export function closeMapping(): void {
 export function openCustomModel(): void {
   const provider = currentProvider()
   const custom = customSource.isCustom(provider)
-  patch({ customModel: { provider: custom || provider !== 'all' ? provider : '', locked: custom } })
+  // 「自定义 · 全部」与内置「全部」一样不是具体的登记目标：不预选，让用户在弹窗里挑一家
+  const picked = custom || (provider !== 'all' && provider !== CUSTOM_ALL) ? provider : ''
+  patch({ customModel: { provider: picked, locked: custom } })
 }
 
 export function closeCustomModel(): void {
@@ -877,7 +934,10 @@ export function providerLabelOf(provider: string): string {
  */
 export function refreshModels(): void {
   const provider = currentProvider()
-  const custom = customSource.isCustom(provider)
+  // 「自定义 · 全部」是**只读**聚合视图：它本身没有上游可拉（每家有各自的 baseURL/密钥），
+  // 拉取动作落在具体某一家上 —— 所以这里回落到内置家的刷新弹窗（与内置「全部」同一路径），
+  // 想拉某一家的上游清单时，先切到那家再点「获取模型」。
+  const custom = provider !== CUSTOM_ALL && customSource.isCustom(provider)
   const name = custom
     ? (customSource.record(provider)?.name || provider)
     : t('内置提供商')
