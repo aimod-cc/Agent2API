@@ -71,6 +71,10 @@
   <link rel="stylesheet" href="css/page-checkin.css">
   <link rel="stylesheet" href="css/page-requests.css">
   <link rel="stylesheet" href="css/page-settings.css">
+  <!-- 主侧栏「设置」的可折叠子项（设置分类的快捷入口，见 sidebar-settings-nav.js）。
+       只画主侧栏那一条，与设置页内部的 .settings-nav 是两份互不相干的样式，
+       排在这里仅为跟设置页样式挨着便于对照阅读。 -->
+  <link rel="stylesheet" href="css/sidebar-subnav.css">
   <!-- 更新日志（Markdown 正文 / 版本卡片 / 导航更新提示）：排在页面样式之后，
        需要时可覆盖 page-settings.css 里为旧的纯文本说明写的规则 -->
   <link rel="stylesheet" href="css/update-notes.css">
@@ -438,6 +442,13 @@
        但排在前面才没有这一拍的抖动）。 -->
   <script src="filter-memory.js"></script>
   <script src="islands/ui.js"></script>
+  <!-- 主侧栏「设置」的可折叠子项：把设置页的十个分类做成「设置」底下的快捷入口，
+       在任意页面都能一步跳过去。必须排在 islands/ui.js **之后** —— 它要观察设置页
+       岛渲染出来的 .settings-nav 才能同步选中态；排在 app.js 之后则因为切页与分类
+       切换分别要走 wbApp.showPage / wbSettingsPanel.showCategory。
+       为什么不做成岛（那样能复用 CATEGORIES 单一来源）、以及选中态怎么反向同步，
+       见 desktop-tauri/ui/sidebar-settings-nav.js 顶部注释。 -->
+  <script src="sidebar-settings-nav.js"></script>
   <!-- 自定义标题栏（桌面端）：主窗口去掉了系统装饰（src-tauri/lib.rs 建窗处
        decorations(false)），这里动态补一条 32px 的标题栏（左标题右三键，
        拖动与双击最大化靠 data-tauri-drag-region）。网页端没有应用窗口，
