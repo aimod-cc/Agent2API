@@ -220,12 +220,22 @@ function avatarOf(providerId: string, label: string): React.ReactNode {
  * 关键词同时匹配分组名与模型名（`hit(...)`），命中整组时整组留下、否则只留命中的叶子；
  * 搜索期间所有留下的组自动展开（否则「搜到了但看不见」）。空组连同组标题一起消失。
  *
- * ── 窄窗口：收成图标条，悬停 / 聚焦展开 ───────────────────
- * `narrow` 由 accounts-page 的 ResizeObserver 给（面板放不下「左栏 + 表格最小宽」时为真）。
- * 展开态是**浮层**（宽 218px 盖在表格上），不是把表格挤走 —— 于是「鼠标划过去看一眼」
- * 不会让表格宽度来回跳。条上每个图标点一下 = 展开那一家（于是它不是个死图标）。
+ * ── 常驻左栏：**不自动折叠**，收起要用户自己点 ───────────────
+ * 左栏默认常驻展开（218px），**不随窗口宽度自动收成图标条** —— 早先那套「窄了自动收、
+ * 悬停才浮出来看一眼」把「结构在哪」这件事变成了要摸的：鼠标一移开就没了，看一眼得先
+ * 悬停、还得防着它盖住表格。用户裁定：**常驻**。
+ *
+ * 收起只能**手动**：左上角那枚按钮（见 `.acct-rail-top`）显式切换。收起后只剩 44px 图标条，
+ * 条上每个图标点一下 = 切到那一家（**不是**展开浮层 —— 浮层那套已删）。选择记在
+ * localStorage（key 见 accounts-page 的 RAIL_COLLAPSED_KEY），跨次启动保持。
+ *
+ * 代价（已知并接受）：左栏常驻会占掉表格 218px，窗口不够宽时表格**横向滚动**
+ * （表格 min-width 见 accounts-columns 的 tableMinWidth，横滚是它本来的兜底，不压列）。
  */
-export function ScopeRail({ narrow }: { narrow: boolean }) {
+export function ScopeRail({ collapsed, onToggleCollapse }: {
+  collapsed: boolean
+  onToggleCollapse: () => void
+}) {
   const model = useScheduleScope()
   const { pinned, groups } = scopeModel()
   const [query, setQuery] = React.useState('')
@@ -252,16 +262,22 @@ export function ScopeRail({ narrow }: { narrow: boolean }) {
 
   const pinShown = hit(pinned.label)
 
-  return (
-    // 类名 `.acct-rail*` 全在下游的 css/page-accounts-rail.css（宽 / 窄两种形态都在那边）；
-    // 只有 `.rail-scroll` / `.rail-label` / `.rail-empty` 是复用模型管理页左栏的通用件
-    // ——账号页的「账号设置弹窗」左栏早就在复用同一套（见 page-accounts.css）。
-    <aside className='acct-rail' id='acct-scope-rail'
-      aria-label={t('按作用域选择：全局账号表，或某一个模型的调度视图')}>
-
-      {/* 窄窗口下的图标条。只在窄态挂载：宽态下这十来个按钮纯属噪音（含读屏） */}
-      {narrow ? (
+  // 收起态：只剩图标条。**每个图标都是「切到那一家」的入口**（不再有「展开浮层」这回事）
+  if (collapsed) {
+    return (
+      <aside className='acct-rail is-collapsed' id='acct-scope-rail'
+        aria-label={t('按作用域选择：全局账号表，或某一个模型的调度视图')}>
         <div className='acct-rail-strip'>
+          <button type='button' className='acct-rail-chip is-toggle'
+            title={t('展开作用域栏')} aria-label={t('展开作用域栏')} aria-expanded={false}
+            onClick={onToggleCollapse}>
+            <span className='acct-rail-caret' aria-hidden='true'>
+              <svg viewBox='0 0 10 10'>
+                <path d='M3.6 2 6.6 5 3.6 8' stroke='currentColor' strokeWidth='1.4'
+                  fill='none' strokeLinecap='round' strokeLinejoin='round' />
+              </svg>
+            </span>
+          </button>
           <button type='button' className={cn('acct-rail-chip', model === SCOPE_ALL && 'is-on')}
             title={pinned.label} aria-label={pinned.label} onClick={() => setScheduleScope(SCOPE_ALL)}>
             <svg viewBox='0 0 12 12' aria-hidden='true'>
@@ -277,18 +293,40 @@ export function ScopeRail({ narrow }: { narrow: boolean }) {
             <button key={group.key} type='button'
               className={cn('acct-rail-chip', group.items.some(item => item.value === model) && 'is-on')}
               title={group.label} aria-label={group.label}
-              onClick={() => setExpanded(prev => ({ ...prev, [group.key]: true }))}>
+              onClick={() => setScheduleScope(group.items[0]?.value || SCOPE_ALL)}>
               {avatarOf(group.key, group.label)}
             </button>
           ))}
         </div>
-      ) : null}
+      </aside>
+    )
+  }
+
+  return (
+    // 类名 `.acct-rail*` 全在下游的 css/page-accounts-rail.css（展开 / 收起两种形态都在那边）；
+    // 只有 `.rail-scroll` / `.rail-label` / `.rail-empty` 是复用模型管理页左栏的通用件
+    // ——账号页的「账号设置弹窗」左栏早就在复用同一套（见 page-accounts.css）。
+    <aside className='acct-rail' id='acct-scope-rail'
+      aria-label={t('按作用域选择：全局账号表，或某一个模型的调度视图')}>
 
       <div className='acct-rail-body'>
-        <div className='acct-rail-search'>
-          <Input type='search' className='h-[26px] px-2 text-[12px]'
-            value={query} onChange={event => setQuery(event.currentTarget.value)}
-            placeholder={t('搜索模型或厂商…')} aria-label={t('搜索模型或厂商')} />
+        {/* 收起按钮（显式，唯一的收起入口）。与搜索框同一行，省掉一整行高度 */}
+        <div className='acct-rail-top'>
+          <button type='button' className='acct-rail-collapse'
+            title={t('收起作用域栏')} aria-label={t('收起作用域栏')} aria-expanded
+            onClick={onToggleCollapse}>
+            <span className='acct-rail-caret' aria-hidden='true'>
+              <svg viewBox='0 0 10 10'>
+                <path d='M6.4 2 3.4 5 6.4 8' stroke='currentColor' strokeWidth='1.4'
+                  fill='none' strokeLinecap='round' strokeLinejoin='round' />
+              </svg>
+            </span>
+          </button>
+          <div className='acct-rail-search'>
+            <Input type='search' className='h-[26px] px-2 text-[12px]'
+              value={query} onChange={event => setQuery(event.currentTarget.value)}
+              placeholder={t('搜索模型或厂商…')} aria-label={t('搜索模型或厂商')} />
+          </div>
         </div>
 
         <div className='rail-scroll'>

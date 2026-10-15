@@ -136,6 +136,9 @@ let tableEl: HTMLTableElement | null = null
 /** 表头已经同步过的「表格在不在 + 可见列与对齐」签名：只有它变了才重排表头（见 syncHead） */
 let headSignature = ''
 
+/** 左栏收起状态的键（'1' = 收起只剩图标条，缺省 = 常驻展开）。与列宽 / 折叠分组同一套惯例 */
+const RAIL_COLLAPSED_KEY = 'workbuddy-desktop-accounts-rail-collapsed'
+
 /** 当前可见列（顺序即配置顺序；列设置未就绪时退回全部列） */
 function visibleColumns(): Array<(typeof ACCOUNT_COLUMNS)[number] & { align: 'left' | 'center' | 'right' }> {
   return colHandle ? colHandle.apply(ACCOUNT_COLUMNS) : ACCOUNT_COLUMNS
@@ -189,7 +192,8 @@ function syncHead(): void {
 function AccountsPage() {
   const store = React.useSyncExternalStore(subscribe, getStore)
   const listRef = React.useRef<HTMLDivElement | null>(null)
-  /** 面板本身（左栏 / 表格两栏的度量对象，见下面的 ResizeObserver） */
+  /** 面板本身（左栏 / 表格两栏的容器）。左栏收起改由用户手动切之后这里不再度量宽度，
+   *  留着 ref 是因为面板节点本身仍要被指认（排障时 `#acct-scope-rail` 的同级就是它） */
   const panelRef = React.useRef<HTMLElement | null>(null)
   /** 登记列设置之后强制重画一次用的本地计数器（不依赖 store 订阅的时序，见下） */
   const [, forceTick] = React.useReducer((tick: number) => tick + 1, 0)
@@ -450,30 +454,23 @@ function AccountsPage() {
       : t('把每页调回「全部」')
 
   /**
-   * 左栏窄态判定：按**面板实宽**而不是窗口宽。
+   * 左栏收起状态：**只由用户手动切**，不随窗口宽度自动收。
    *
-   * 窗口宽看不出「应用侧栏收起后版面变宽」这件事，而那次变化正好让面板多出 148px ——
-   * 用媒体查询会出现「窗口没变、版面明明够宽，左栏却还收着」。
+   * 早先是「面板放不下『左栏 + 表格最小宽』就自动收成图标条、悬停浮层展开」——
+   * 用户裁定改成常驻（见 accounts-schedule 的 ScopeRail 模块头）：结构一直在页面上，
+   * 不靠悬停去摸；收起要显式点那枚按钮。代价是窄窗口下表格横向滚动（接受）。
    *
-   * 阈值 = 表格不能再窄的那条线（由可见列算出，见 accounts-columns 的 tableMinWidth）
-   * + 左栏 218 + 滚动条槽的余量。表窄于它就横滚，而横滚正是左栏最不该「白占」宽度的
-   * 场景 —— 于是宁可收成图标条（展开态是浮层，不会把表格挤得更窄）。
-   *
-   * 不担心反馈环：面板宽度由版心决定（.page 是 width:100%），与左栏多宽无关，
-   * 所以「窄 → 收 → 面板没变宽 → 还是窄」会稳定在一个状态上。
+   * 选择落 localStorage（与折叠分组 / 列宽同一套持久化惯例），跨次启动保持。
    */
-  const railThreshold = tableMinWidth(columns.map(column => column.key)) + 230
-  const railThresholdRef = React.useRef(railThreshold)
-  railThresholdRef.current = railThreshold
-  const [railNarrow, setRailNarrow] = React.useState(false)
-  React.useEffect(() => {
-    const el = panelRef.current
-    if (!el || typeof ResizeObserver === 'undefined') return
-    const measure = () => setRailNarrow(el.clientWidth < railThresholdRef.current)
-    measure()
-    const observer = new ResizeObserver(measure)
-    observer.observe(el)
-    return () => observer.disconnect()
+  const [railCollapsed, setRailCollapsed] = React.useState<boolean>(() => {
+    try { return localStorage.getItem(RAIL_COLLAPSED_KEY) === '1' } catch { return false }
+  })
+  const toggleRailCollapsed = React.useCallback(() => {
+    setRailCollapsed(prev => {
+      const next = !prev
+      try { localStorage.setItem(RAIL_COLLAPSED_KEY, next ? '1' : '0') } catch { /* 存不了只影响下次启动 */ }
+      return next
+    })
   }, [])
 
   // 代理列的选项（「网络代理」页的池条目）没就绪就补拉（节流 30 秒，失败不缓存）。
@@ -696,12 +693,13 @@ function AccountsPage() {
 
   return (
     <>
-      <section className={cn('panel account-table', railNarrow && 'rail-narrow')} ref={panelRef}>
+      <section className={cn('panel account-table', railCollapsed && 'rail-collapsed')} ref={panelRef}>
         {/* 作用域树常驻在表格**左侧**（原来是工具条里的一个下拉）—— 它切的是「这张表
             在看什么」，比工具条里那些筛选档位高一层；模型上百条（实测 77 个 / 9 家）时，
             常驻的「厂商 → 模型」树比下拉少两次操作，且这层结构一直留在页面上。
-            窄窗口收成图标条，见上面的 ResizeObserver 与 css/page-accounts-rail.css */}
-        <ScopeRail narrow={railNarrow} />
+            **默认常驻展开**；收起只能点左栏左上角那枚按钮（不随窗口自动收，理由见
+            accounts-schedule 的 ScopeRail 模块头与 css/page-accounts-rail.css）*/}
+        <ScopeRail collapsed={railCollapsed} onToggleCollapse={toggleRailCollapsed} />
 
         {/* 工具条 / 批量栏 / 列表 / 页脚整组挪进主列（多这一层 div 是为了让左栏与它们
             并列成两栏）。这一组内部的排布与顺序一个字未改 —— **作用域切换不改工具条**：

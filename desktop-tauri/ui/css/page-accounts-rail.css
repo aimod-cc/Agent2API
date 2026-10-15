@@ -8,17 +8,19 @@
    于是「工具条以上」的结构变化为零。grid-template-rows 显式写 minmax(0,1fr)：
    grid 行高默认按内容算，不写这条左栏与主列都只有内容高，列表区就没有可分配的剩余高度。
 
-   ── 窄窗口：收成 44px 图标条，展开态是浮层 ─────────────────
-   阈值不写在 CSS 里（媒体查询只看窗口宽度，看不见「应用侧栏收起后版面变宽」这件事），
-   由 accounts-page 的 ResizeObserver 按**面板实宽**判定并挂 .rail-narrow。
-   展开态用绝对定位的浮层（218px 盖在表格上）而不是把表格挤走：鼠标划过去看一眼
-   不该让表格宽度来回跳；.account-table 的 overflow:clip 正好把它收在面板内。
+   ── 常驻左栏：默认展开，收起要**手动**─────────────────────
+   左栏默认常驻 218px，**不随窗口宽度自动收起**。窄了也不收 —— 表格放不下就横向滚动
+   （表格 min-width 由 accounts-columns 的 tableMinWidth 算出，横滚是它本来的兜底）。
+   收起只有一条路：左栏左上角那枚显式按钮（.acct-rail-collapse），收起后剩 44px 图标条
+   （.acct-rail-strip），条上每个图标点一下 = 切到那一家。
+   早先那套「窄了自动收成图标条 + 悬停 / :focus-visible 浮层展开」**已删** ——
+   「结构在哪」不该靠悬停去摸，且浮层会盖住表格。
 
    ── 复用了模型管理页左栏的三个通用件 ─────────────────────
    .rail-scroll / .rail-label / .rail-empty 定义在 page-gateway.css。这不是巧合式复用：
    账号页的「账号设置弹窗」左栏（.acct-dlg-rail）早就在复用同一套（见 page-accounts.css
    的自述「与模型管理左栏同一形态」）。容器（.acct-rail）**没有**复用 .prov-rail ——
-   那边带 overflow:hidden，会把窄态那个溢出到右邻列的浮层裁掉。
+   那边带 overflow:hidden；这里虽然不再有溢出浮层，但保持独立更简单。
    ───────────────────────────────────────────── */
 
 /* ── 选择器为什么要写这么长（踩过的坑）─────────────────────
@@ -37,8 +39,8 @@
   grid-template-rows: minmax(0, 1fr);
 }
 
-/* 窄态：左栏只剩图标条。类由 accounts-page 按面板实宽挂，与组件收到的 narrow 同源 */
-.page[data-page="accounts"] .panel.account-table.rail-narrow {
+/* 收起态：左栏只剩图标条。类由 ScopeRail 的 collapsed 挂（用户手动切、记 localStorage） */
+.page[data-page="accounts"] .panel.account-table.rail-collapsed {
   grid-template-columns: 44px minmax(0, 1fr);
 }
 
@@ -55,13 +57,22 @@
 .acct-rail {
   grid-column: 1;
   grid-row: 1;
-  /* 浮层（窄态展开）要溢出到右邻列上，所以这里不能裁剪 */
+  /* 不再有溢出浮层，但仍保留 relative：收起按钮与滚动区的定位基准都在这一层内 */
   position: relative;
   min-width: 0;
   min-height: 0;
   border-right: 1px solid var(--sidebar-border);
   /* 比主区浅一档：它是面板内嵌的一段导航，用 --surface 会和表格糊成一块 */
   background: var(--rail-bg);
+}
+
+/* 收起态：容器不再是 flex 列（里面只有一个图标条），且不画右分隔线 —— 44px 图标条
+   自己就是一条视觉边界，再叠一条竖线会显得左栏没对齐 */
+.acct-rail.is-collapsed {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  border-right: 1px solid var(--sidebar-border);
 }
 
 .acct-rail-body {
@@ -72,9 +83,36 @@
   padding: 8px 8px 10px;
 }
 
-.acct-rail-search { flex: none; margin-bottom: 6px; }
+/* 收起按钮 + 搜索框同一行：按钮 20px 见方，搜索框吃剩余宽度 */
+.acct-rail-top {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  margin-bottom: 6px;
+}
 
-/* ─── 窄态：图标条 + 悬停 / 聚焦展开的浮层 ─── */
+.acct-rail-collapse {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: background-color 150ms ease-out, color 150ms ease-out;
+}
+
+.acct-rail-collapse:hover { background: var(--nav-hover); color: var(--text); }
+
+.acct-rail-search { flex: 1; min-width: 0; }
+
+/* ─── 收起态：图标条（每个图标 = 切到那一家）─────────── */
 
 .acct-rail-strip {
   display: flex;
@@ -103,40 +141,17 @@
 
 .acct-rail-chip:hover { background: var(--nav-hover); color: var(--text); }
 
-/* 选中项所在的厂商（或「全局」）自己亮起来 —— 窄态看不到文字，就靠这一枚自证 */
+/* 选中项所在的厂商（或「全局」）自己亮起来 —— 收起态看不到文字，就靠这一枚自证 */
 .acct-rail-chip.is-on {
   border-color: var(--nav-selected-border);
   background: var(--nav-selected-bg);
   color: var(--nav-selected-fg);
 }
 
-.rail-narrow .acct-rail-body {
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  z-index: 6;
-  width: 218px;
-  border-right: 1px solid var(--sidebar-border);
-  background: var(--rail-bg);
-  box-shadow: var(--shadow-3);
-  /* 收起时左移出自己的宽度（超出面板的部分被 .account-table 的 overflow:clip 收掉），
-     并且不吃指针事件 —— 否则它在屏外也拦得住点击 */
-  transform: translateX(-100%);
-  opacity: 0;
-  pointer-events: none;
-  transition: transform 160ms ease-out, opacity 160ms ease-out;
-}
+/* 最上面那枚是「展开」而不是切作用域：与下面的厂商图标拉开一点距离 */
+.acct-rail-chip.is-toggle { margin-bottom: 4px; color: var(--text-3); }
 
-/* 展开条件用 :focus-visible 而**不是 :focus-within**：鼠标点过的按钮同样会拿到焦点，
-   用 :focus-within 的话「点完一行 → 焦点留在栏内 → 浮层再也不收」，窄态下浮层就一直
-   盖着表格。:focus-visible 只在键盘导航（Tab）下命中，正合「键盘用户也要够得着」这件事。 */
-.rail-narrow .acct-rail:hover .acct-rail-body,
-.rail-narrow .acct-rail:has(:focus-visible) .acct-rail-body {
-  transform: none;
-  opacity: 1;
-  pointer-events: auto;
-}
+.acct-rail-chip.is-toggle:hover { color: var(--text); }
 
 /* ─── 分组行 / 叶子行的小件 ─── */
 
