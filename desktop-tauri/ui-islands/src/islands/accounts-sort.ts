@@ -26,6 +26,10 @@ import type { AccountSort } from './accounts-store'
  * ── 缺失值恒排最后 ────────────────────────────────────────
  * 不随升降序翻转：把「没有这个读数」排到最前，会是一整批「未查询」的账号占满首屏 ——
  * 而它们恰恰是最不需要被先看到的那一批。所以方向在**两个都有值**时才参与比较。
+ *
+ * ── 并列有确定的次序 ──────────────────────────────────────
+ * 主键相等时按 `(addedAt, id)` 定序（见 `tieBreak`），**不返回 0** —— 否则并列段
+ * 的先后就由「传入数组的顺序」决定，而那个顺序每次渲染都可能变。详见比较器上方注释。
  */
 
 /**
@@ -198,21 +202,48 @@ function valueOf(key: string, account: AccountRecord, ctx: SortContext): number 
  * 生成一个比较器。
  *
  * `dir` 只作用在**两个值都存在**的那一半：缺失值（null）恒排最后，翻方向也不翻它。
+ *
+ * ── 并列时的稳定尾键（`(addedAt, id)`，**不随方向翻转**）────────
+ * 主键相等时不再返回 0，而是按「加入时间 → 账号 id」定序。为什么必须有这一步：
+ *
+ *   · **可复现**：`Array.prototype.sort` 虽稳定，但稳定指的是「保**输入**序」——
+ *     输入序从哪来？屏幕上这份数组每次渲染都可能是新对象。于是「主键相等的两行」
+ *     在两次渲染里可能换个位置（实测：usage 未就绪时 16 行里 12 行键为 `null`，
+ *     点一次排序、屏幕与写回各自的输入序不同 → 屏幕 ≠ 已落盘的队列序）。
+ *   · **与后端默认序同源**：后端 `compare_by_priority`（`core/routing.rs`）的键是
+ *     `(priority, addedAt)` 字典序，前端默认序 `byPriorityOrder`（`accounts-domain.ts`）
+ *     与它同构。尾键取 `addedAt` 让「主键并列的那一段」与「取消排序后回到的默认序」
+ *     次序一致 —— 取消排序不该把并列段悄悄换个队。
+ *   · **`id` 兜底**：`addedAt` 可缺失（按 `0` 参与），两个都缺时再按 `id` 定序，
+ *     保证**任何**输入都得到同一个结果（不是「大概率稳定」而是「确定」）。
+ *
+ * 尾键**不乘 `sign`**：它表达的是「同一批里的固有先后」，不是一个可翻的排序维度 ——
+ * 与「缺失值恒排最后」同一个道理。
  */
 export function accountComparator(sort: AccountSort, ctx: SortContext): (a: AccountRecord, b: AccountRecord) => number {
   const sign = sort.dir === 'desc' ? -1 : 1
   return (a, b) => {
     const left = valueOf(sort.key, a, ctx)
     const right = valueOf(sort.key, b, ctx)
-    if (left === null && right === null) return 0
+    if (left === null && right === null) return tieBreak(a, b)
     if (left === null) return 1
     if (right === null) return -1
     const compared = typeof left === 'string' || typeof right === 'string'
       // 名字类按本地语言序列（带数字的自然序：「账号 2」排在「账号 10」前面）
       ? String(left).localeCompare(String(right), 'zh-Hans-CN', { numeric: true })
       : left - right
-    return compared * sign
+    return compared === 0 ? tieBreak(a, b) : compared * sign
   }
+}
+
+/**
+ * 主键并列时的定序：加入时间升序，再按账号 id 升序（都是**固有次序**、不翻方向）。
+ * 取值口径与 `byPriorityOrder` / 后端 `compare_by_priority` 一致：`addedAt` 缺失按 0。
+ */
+function tieBreak(a: AccountRecord, b: AccountRecord): number {
+  const added = (Number(a?.addedAt) || 0) - (Number(b?.addedAt) || 0)
+  if (added !== 0) return added
+  return String(a?.id || '').localeCompare(String(b?.id || ''))
 }
 
 /** 列 key → 列名（批量栏那枚「已按 X 排序」的提示用它，认不出的列退回 key 本身） */
