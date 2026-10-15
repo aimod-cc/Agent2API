@@ -142,16 +142,15 @@ impl RetryBudget {
     }
 }
 
-/// 把「这次为这家剥了几张历史图片」写进**本轮尝试明细**。
+/// 把「这次为这家剥了多少张历史图片、为什么」写进**本轮尝试明细**。
 ///
 /// 必须在 `note_attempt_started` **之后**调用：明细是先起头、后定稿的一条记录，
 /// 槽位不存在时 `note_attempt_notice` 静默什么都不做。`send_body` 因此只交出
-/// 计数（`SendBody::images_stripped`）而不自己写 —— 有状态路径的顺序正是
+/// 读数与理由（`SendBody::images_stripped`）而不自己写 —— 有状态路径的顺序正是
 /// 「先算发送体、后起头」，在那里直接记就是 -17 上线实测到的那个 null。
 fn note_strip_notice(ctx: &ProviderContext<'_>, send: &SendBody) {
-    if let Some(stripped) = send.images_stripped {
-        ctx.telemetry
-            .note_attempt_notice(&crate::server::core::image_strip::notice_for(stripped));
+    if let Some(notice) = send.images_stripped {
+        ctx.telemetry.note_attempt_notice(&notice.describe());
     }
 }
 

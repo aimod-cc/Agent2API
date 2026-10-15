@@ -65,6 +65,7 @@ use serde_json::Value;
 use crate::server::logging;
 
 use super::usage::RequestTelemetry;
+use crate::server::core::image_strip::StripNotice;
 
 /// 一次转发的只读输入（打包传入，避免多参数函数在两层循环里各自展开）。
 pub(super) struct ProviderContext<'a> {
@@ -136,12 +137,15 @@ pub(super) struct SendBody<'a> {
     pub body: Cow<'a, Value>,
     /// 该家实际收到的上游模型名 —— 也是它 `rateLimits` 冷却的键。
     pub wire_model: String,
-    /// 这次发送**为这家剥掉了几张历史图片**（`None` = 一个都没动）。
+    /// 这次发送**为这家剥掉了多少张历史图片、为什么**（`None` = 一个都没动）。
     ///
     /// 交出去而不是在 [`send_body`] 里直接记进尝试明细：明细那条记录要等
     /// `note_attempt_started` 才存在，而有状态路径是先算发送体、后起头 ——
-    /// 在变换里写会静默丢掉（-17 实测）。详见 [`crate::server::core::image_strip::notice_for`]。
-    pub images_stripped: Option<usize>,
+    /// 在变换里写会静默丢掉（-17 实测）。详见 `image_strip::StripNotice`。
+    ///
+    /// 理由要一起交出去：明细里那句话的措辞按理由分（"这家不吃图"与"图太占地方"
+    /// 是两件事），而那时原始的 `Stripped` 已经被拆掉了（body 被借进 `Cow`）。
+    pub images_stripped: Option<StripNotice>,
 }
 
 /// 某一家 provider 实际要发送的请求体（**每次转发前**决定，不做跨家复用）。
@@ -275,30 +279,37 @@ pub(super) fn send_body<'a>(
     // 刚刚按同一个判据把这家留在候选里，这里再各读一遍迟早分叉 —— 分叉的症状是
     // 请求带着图送进不吃图的家，正好是这次改动要消掉的那次 400。
     //
-    // 能吃图的家、以及"当前这一问依赖图"的请求，判据不成立 ⇒ body 原样借用
-    // （零拷贝，字节不变）。
-    let mut stripped_count: Option<usize> = None;
+    // 能吃图的家也不是一律不剥：历史图片的体积越过预算时照样剥（判据见
+    // `image_strip` 模块头的第 ② 条）—— 那是"这叠图已经不值得原样重发"，
+    // 与这家能不能吃图无关。两轴合一仍是**一次调用**，理由随之交出来。
+    //
+    // 不动手的请求（当前这一问依赖图、没有图可言、或两轴都不成立）⇒ body 原样
+    // 借用（零拷贝，字节不变）。
+    let mut strip_notice: Option<StripNotice> = None;
     let refuses_images =
         crate::server::core::providers::catalog::provider_refuses_images(provider_id, &requested);
-    let strip_now =
-        crate::server::core::image_strip::strip_applies_for(body.as_ref(), refuses_images);
-    let mut body = if strip_now {
-        match crate::server::core::image_strip::strip_history_images(body.as_ref()) {
+    let mut body = match crate::server::core::image_strip::strip_reason_for(
+        body.as_ref(),
+        refuses_images,
+    ) {
+        Some(reason) => match crate::server::core::image_strip::strip_history_images(
+            body.as_ref(),
+            reason,
+        ) {
             Some(stripped) => {
-                stripped_count = Some(stripped.removed);
+                strip_notice = Some(stripped.notice());
                 logging::verbose(
                     "[Upstream]",
                     &format!(
-                        "剥历史图片 {} 张：provider={} model={}（当前轮不依赖图片）",
-                        stripped.removed, provider_id, requested
+                        "剥历史图片 {} 张：provider={} model={} 理由={:?}（当前轮不依赖图片）",
+                        stripped.removed, provider_id, requested, reason
                     ),
                 );
                 Cow::Owned(stripped.body)
             }
             None => body,
-        }
-    } else {
-        body
+        },
+        None => body,
     };
     // 一次解析出两个属性：该家要收的名字 + 跟着那条映射走的思考等级
     // （同源，见模块头「思考等级绑定为什么也在这一步」）
@@ -327,7 +338,7 @@ pub(super) fn send_body<'a>(
     SendBody {
         body,
         wire_model: wire.model,
-        images_stripped: stripped_count,
+        images_stripped: strip_notice,
     }
 }
 
