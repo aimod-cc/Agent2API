@@ -41,11 +41,19 @@
  * `routing::plan_route` 排序的第一排序键，而转发选路与队列端点调的是**同一个**
  * `plan_route`（见 accounts-schedule 的模块头）。此前只是「排序没写回」这一步缺了。
  *
- * 两个必须守住的口径：
+ * **凡是会改行序的动作都要写回**，一共三个入口，别漏：
+ *   · `onSortColumn`（点表头，三态循环）；
+ *   · `onSortScope`（切「组内 / 整表」粒度 —— 两档排出来的次序不同，必须跟着写回）；
+ *   · `onDrop`（拖拽，本来就走 `reorderQueue`，是这条落盘通道的源头）。
+ * `clearSort`（取消排序）**不**写回：默认次序就是当前队列序，写回是空操作。
+ *
+ * 三个必须守住的口径：
  *   · 只在**全局账号表**下写回 —— 模型作用域那一屏只是全局队列的**投影**（只含提供
  *     该模型的家），在那儿重排会挪动别的家的号，语义接不上；
  *   · 写回的源是 `allGroups`（全部行、组序 → 组内序），**不是**当前可见的 `shown`
- *     —— 筛选 / 折叠下 `shown` 缺行，拿它写回后端会 400（「队列不完整」）。
+ *     —— 筛选 / 折叠下 `shown` 缺行，拿它写回后端会 400（「队列不完整」）；
+ *   · 判据是「屏幕行序 == `/api/accounts` 按 `priority` 的全量序」——**不是**
+ *     `ordered ++ blocked`（`ordered` 只是可跑子集，被跳过者仍占着号、屏幕画在原位）。
  *
  * ── 静态表头（本页最容易出错的地方）────────────────────
  * `<colgroup>` 的 `col[data-col]` 与 `<thead>` 的 `th[data-col]`（见 accounts-panels.tsx
@@ -91,7 +99,10 @@ import {
   setAllGroupsCollapsed, setAllPicked, setProviderFilter, setSearchFilter, setSegmentFilter,
   snapshot, startConnectionsPolling, subscribe, tokenUsageOf, togglePick, usageEntryOf,
 } from './accounts-data'
-import { accountSort, clearSort, currentSortScope, cycleSort, setSortScope, type AccountSort } from './accounts-store'
+import {
+  accountSort, clearSort, currentSortScope, cycleSort, setSortScope,
+  type AccountSort, type AccountSortScope,
+} from './accounts-store'
 import { SORTABLE_COLUMNS, accountComparator, sortDirLabel, sortLabel, type SortContext } from './accounts-sort'
 import {
   AccountCell, ActionsCell, ConnectionsCell, CreditExpiryCell, CreditLeftCell, ExpiryCell,
@@ -364,6 +375,22 @@ function AccountsPage() {
       : current.dir === 'asc' ? { ...current, dir: 'desc' } : null
     cycleSort(key)
     if (!scheduleScope) void reorderBySort(next)
+  }
+  /**
+   * 切排序粒度（组内 ⇄ 整表）。
+   *
+   * **必须也写回**：这一档改的正是「行怎么排」—— 组内只动组内先后、整表把分组散开。
+   * 两档排出来的次序**不是同一个次序**，屏幕上换了一批行序，队列就必须跟着换；否则
+   * 屏幕与调度又分叉了（那正是这一版要消灭的毛病，别从档位按钮这里漏回去）。
+   *
+   * 没排序时不写回：那时切档只记「预选」（`setSortScope` 只存不重绘），屏幕上没有
+   * 顺序变化，没有什么可写回的。
+   */
+  const onSortScope = (scope: AccountSortScope): void => {
+    const current = sort
+    setSortScope(scope)
+    if (!current || scheduleScope) return
+    void reorderBySort({ ...current, scope })
   }
   /** 默认次序下的全部可见行（组序 → 组内序）。全选 / 计数 / 分页都以它为基准：
    *  被隐藏的组（一个启用的都没有）不该算进「当前看到的这些」—— 否则「全选（8 个）」
@@ -805,11 +832,11 @@ function AccountsPage() {
                 <button type='button' className={cn('link-btn', sort.scope === 'group' && 'is-on')}
                   id='sort-scope-group' data-on={sort.scope === 'group' ? '1' : undefined}
                   title={t('组内排序：只在每一家内部重排，分组与组序不变（组内先后写回队列）')}
-                  onClick={() => setSortScope('group')}>{t('组内')}</button>
+                  onClick={() => onSortScope('group')}>{t('组内')}</button>
                 <button type='button' className={cn('link-btn', sort.scope === 'flat' && 'is-on')}
                   id='sort-scope-flat' data-on={sort.scope === 'flat' ? '1' : undefined}
                   title={t('整表排序：打散厂商分组，全表一起来（行里带厂商标记；顺序写回队列）')}
-                  onClick={() => setSortScope('flat')}>{t('整表')}</button>
+                  onClick={() => onSortScope('flat')}>{t('整表')}</button>
               </span>
               <button type='button' className='link-btn' id='sort-clear'
                 title={t('取消排序，回到默认次序（不影响已写回的队列顺序）')}

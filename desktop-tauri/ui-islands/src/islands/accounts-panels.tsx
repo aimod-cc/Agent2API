@@ -1652,8 +1652,16 @@ export function TableHead({ namesHidden, allPicked, somePicked, disabled, onTogg
             title={t('全选 / 取消全选当前筛选结果（与批量栏同一个选择）')}
             onCheckedChange={next => onToggleAll(next)} />
         </th>
-        <th className='cell-order' data-col='order' aria-sort={ariaSort('order')}>
-          {sortable('order', t('顺序'), t('组内先后：按住左边的把手上下拖动即可调整；整组的先后拖分组带的把手'))}
+        {/* 「顺序」列**刻意不给排序按钮**：它这一列显示的是**组内位次**（每一家从 `#1` 起，
+            见 accounts-page 的 rankMap），而「组内第几位」不是一个能用来排**全表**的键 ——
+            组与组的先后由**分组带的顺位**表达、组内先后由**拖拽把手**改，位置本就不该由
+            排序按钮来动。（早先它确实挂了按钮，但读的是另一份口径的全队列位次，于是
+            「点升序屏幕不动、点降序只部分反转」；排序写回队列之后这个矛盾更会真的挪动队列，
+            故撤掉入口。历史见 docs/下游开发与同步方案.md §8.1.5。） */}
+        <th className='cell-order' data-col='order'>
+          <span className='th-label' title={t('组内先后：按住左边的把手上下拖动即可调整；整组的先后拖分组带的把手')}>
+            {t('顺序')}
+          </span>
           {grip}
         </th>
         <th className='cell-account' data-col='account' aria-sort={ariaSort('account')}>

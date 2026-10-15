@@ -17,10 +17,11 @@ import type { AccountSort } from './accounts-store'
  * 还要多读一份调度状态），而「怎么读」在 accounts-page / accounts-panels / accounts-domain
  * 三处各有各的入口。把它收在这里，页面只负责「哪一列、升还是降、排哪些行」。
  *
- * ── 只排序，不改任何数据 ───────────────────────────────────
- * 排序是**视图行为**：行序变了，但「顺序」列里那个 `#N` 仍是它在队列里的真实位次
- * （全局 = 优先级队列，模型作用域 = 调度队列）。两者分得清，才不会出现「排了一下序，
- * 界面显示的先后就与转发实际走的先后对不上、而用户看不出来」。
+ * ── 排序会写回队列（本文件自己仍只算值） ───────────────────
+ * 全局账号表下点表头排序，页面会把排出来的先后**整队重编号**写回调度队列
+ * （`accounts-page` 的 `reorderBySort` → `POST /api/accounts/reorder`），于是屏幕上
+ * 那一列的先后就是转发会走的先后。本文件只负责「列 → 可比值」这一步，写回不在这里。
+ * 另：「顺序」列不参与排序（见 `SORTABLE_COLUMNS` 上方的说明）。
  *
  * ── 缺失值恒排最后 ────────────────────────────────────────
  * 不随升降序翻转：把「没有这个读数」排到最前，会是一整批「未查询」的账号占满首屏 ——
@@ -30,8 +31,14 @@ import type { AccountSort } from './accounts-store'
 /**
  * 可排序的列。
  *
- * 不给的两列：勾选列没有值（它那一格是个复选框）、操作列装的是按钮。除此之外每一列
- * 都有一个可比的读数 —— 包括「代理」（没有代理 = 直连，排最前）。
+ * 不给的三列：勾选列没有值（它那一格是个复选框）、操作列装的是按钮、「顺序」列见下。
+ *
+ * **「顺序」列不排序**：它显示的是**组内位次**（每一家从 `#1` 起，见 accounts-page 的
+ * `rankMap`），而「组内第几位」不是一个能用来排**全表**的键 —— 组与组的先后由分组带的
+ * 顺位表达、组内先后由拖拽把手改。早先它挂着按钮，但取值读的是另一份口径（全队列位次
+ * `seatOf`），于是「点升序屏幕不动、点降序只部分反转」，且排序写回队列后这个矛盾会真的
+ * 挪动队列 —— 故撤掉入口（`SORTABLE_COLUMNS` 这里同步移除，与表头保持一致）。历史见
+ * docs/下游开发与同步方案.md §8.1.5。
  *
  * 「最近到期时间」在表——**谁先作废**是这一列存在的理由，能排才有用。
  * 「最近到期积分」也在表——**还剩多少**同样是个可比的量（剩得多 → 少），与时间列各管一个
@@ -42,7 +49,7 @@ import type { AccountSort } from './accounts-store'
  * 次序只在该份之间可比 —— 它不是「账号总余额」的排序（那是「余额」列）。
  */
 export const SORTABLE_COLUMNS: ReadonlySet<string> = new Set([
-  'order', 'account', 'proxy', 'connections', 'status', 'limits', 'expiry', 'creditExpiry', 'creditLeft', 'usage',
+  'account', 'proxy', 'connections', 'status', 'limits', 'expiry', 'creditExpiry', 'creditLeft', 'usage',
 ])
 
 /** 比较器要读的外部数据口（页面把当前作用域下最合适的那一份注进来） */
@@ -50,8 +57,12 @@ export type SortContext = {
   usageOf: (account: AccountRecord) => UsageEntry
   tokenUsageOf: (account: AccountRecord) => TokenReading[]
   connectionsOf: (id: string) => number
-  /** 默认次序（顺序列的读数）：全局 = 全队列位次，模型作用域 = 该模型的队列位次。
-   *  `null` = 不在这个作用域的队列里（模型作用域下的被跳过者） */
+  /** 默认次序的位次：全局 = 全队列位次，模型作用域 = 该模型的队列位次。
+   *  `null` = 不在这个作用域的队列里（模型作用域下的被跳过者）。
+   *
+   *  **注意**：全局域下「顺序」列**不再**用它（那一列显示组内位次、且已不可排序，
+   *  见 `SORTABLE_COLUMNS`）；此口现在只服务模型作用域（那边位次即该模型队列里的
+   *  真实排位，与 `状态` 列同源）。 */
   seatOf: (account: AccountRecord) => number | null
   /** 模型作用域：该账号在这个模型上的调度状态（`状态`列显示的就是它，排序必须同源） */
   stateOf?: (id: string) => string | undefined
@@ -164,6 +175,8 @@ function creditLeftOf(account: AccountRecord, ctx: SortContext): number | null {
 /** 一列的原始可比值（`null` = 这一行没有这个读数） */
 function valueOf(key: string, account: AccountRecord, ctx: SortContext): number | string | null {
   switch (key) {
+    // 「顺序」列不在 SORTABLE_COLUMNS 里，页面不会把 'order' 送进来（保留这条是为了
+    // 取值表完整、且模型作用域将来若要按位次排，这里就是落点）。见上方 SORTABLE_COLUMNS。
     case 'order': return ctx.seatOf(account)
     case 'account': return displayNameOf(account).toLowerCase()
     case 'proxy': return proxyTextOf(account)
