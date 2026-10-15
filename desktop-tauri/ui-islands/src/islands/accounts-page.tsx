@@ -32,6 +32,21 @@
  * accounts-data.ts 的 reorderQueue）。筛选 / 搜索 / 分页生效时顺序不可见（行被裁过，
  * 序号也断了），此时**锁定拖拽**并给一次提示 —— 拖动必然错位。
  *
+ * ── 排序与调度是同一件事（2026-10，「所见即所得」）─────────────
+ * 点表头排序**不再是纯视图行为**：它按排出来的先后把整条队列重编号（`reorderBySort`
+ * → 同一个 `POST /api/accounts/reorder`）。于是屏幕上那一列行的先后，就是转发实际
+ * 会走的先后 —— 用户点「按最近到期时间排序」，排在最上面的那家**真的**会先接走请求。
+ *
+ * 后端这一条本来就通：`priority` 既是 `POST /api/accounts/reorder` 写的字段，也是
+ * `routing::plan_route` 排序的第一排序键，而转发选路与队列端点调的是**同一个**
+ * `plan_route`（见 accounts-schedule 的模块头）。此前只是「排序没写回」这一步缺了。
+ *
+ * 两个必须守住的口径：
+ *   · 只在**全局账号表**下写回 —— 模型作用域那一屏只是全局队列的**投影**（只含提供
+ *     该模型的家），在那儿重排会挪动别的家的号，语义接不上；
+ *   · 写回的源是 `allGroups`（全部行、组序 → 组内序），**不是**当前可见的 `shown`
+ *     —— 筛选 / 折叠下 `shown` 缺行，拿它写回后端会 400（「队列不完整」）。
+ *
  * ── 静态表头（本页最容易出错的地方）────────────────────
  * `<colgroup>` 的 `col[data-col]` 与 `<thead>` 的 `th[data-col]`（见 accounts-panels.tsx
  * 的 TableHead）是**字面量**渲染，永远按列定义的原始顺序渲染全部列、且不随任何状态
@@ -76,7 +91,7 @@ import {
   setAllGroupsCollapsed, setAllPicked, setProviderFilter, setSearchFilter, setSegmentFilter,
   snapshot, startConnectionsPolling, subscribe, tokenUsageOf, togglePick, usageEntryOf,
 } from './accounts-data'
-import { accountSort, clearSort, cycleSort, setSortScope } from './accounts-store'
+import { accountSort, clearSort, currentSortScope, cycleSort, setSortScope, type AccountSort } from './accounts-store'
 import { SORTABLE_COLUMNS, accountComparator, sortDirLabel, sortLabel, type SortContext } from './accounts-sort'
 import {
   AccountCell, ActionsCell, ConnectionsCell, CreditExpiryCell, CreditLeftCell, ExpiryCell,
@@ -275,10 +290,80 @@ function AccountsPage() {
     stateOf: scheduleScope ? (id => entryOf.get(id)?.entry.state) : undefined,
   }
   const compare = sort ? accountComparator(sort, sortContext) : null
-  /** 点表头。过一道 `SORTABLE_COLUMNS`：认不出的列在 accounts-sort 里取不到值，
-   *  排了也不动 —— 挡在这里，免得将来给表头加了新列却忘了补比较器时「点了没反应」 */
+  /**
+   * 把「按某列排序」的结果**写回调度队列**（所见即所得）。
+   *
+   * ── 为什么能写回 ──────────────────────────────────────────
+   * 排出来的次序是「同一家的行连续」的：比较器排完全部行后按 `provider` **折叠成组**
+   * （`flatMap` 的组序取比较器给的第一行所属组的先后，但组内只有比较器排过的那一段），
+   * 组这一层继续由 `allGroups` 的组序承载。于是结果**仍是一条合法的全局队列** ——
+   * 满足 `reorder_accounts` 的两个不变量（是全部账号的一个排列、同一家连续）。
+   *
+   * ── 具体算哪一份 ─────────────────────────────────────────
+   * 源行取 `allGroups.flatMap(group => group.members)`（= 当前队列序，组序 → 组内序），
+   * **不是** `shown` —— `shown` 只是「当前筛选 / 折叠下看得见的那些」，拿它去写回会
+   * 把没显示的行漏掉，后端直接 400（「队列不完整」）。
+   *
+   * ── 「组内」档怎么写回 ────────────────────────────────────
+   * 组内档只改每组内部的先后，**组序照 `allGroups`**：折叠时 `group.members` 会被
+   * 比较器排成该组的新序，各组之间仍按 `allGroups` 的组序拼 —— 与屏幕画出来的次序
+   * 逐字一致（屏幕也是组序 → 组内序）。「整表」档则把所有行放一起排、再按结果折叠。
+   *
+   * `next` 为 `null`（点了「取消排序」，回到默认次序）时不写回：默认次序就是**当前**
+   * 队列序，写回是空操作 —— 而「取消排序」的意图正是「别再动了」，不该顺手重排一遍。
+   */
+  const reorderBySort = async (next: AccountSort | null): Promise<void> => {
+    if (!next) return
+    const comparator = accountComparator(next, sortContext)
+    // 全部行（不受筛选 / 折叠影响）—— 写回要的是完整队列
+    const allRows: AccountRecord[] = []
+    for (const group of allGroups) allRows.push(...group.members)
+    if (allRows.length < 2) return
+    // 比较器排一遍；组内档按 allGroups 的组序拼（组序不动），整表档按结果折叠
+    const sorted = allRows.slice().sort(comparator)
+    let queue: string[]
+    if (next.scope === 'flat') {
+      queue = sorted.map(account => account.id)
+    } else {
+      const rank = new Map(sorted.map((account, index) => [account.id, index]))
+      const members = new Map<string, AccountRecord[]>()
+      for (const account of allRows) {
+        const list = members.get(providerOf(account)) || []
+        list.push(account)
+        members.set(providerOf(account), list)
+      }
+      queue = []
+      for (const group of allGroups) {
+        const list = (members.get(group.provider) || [])
+          .slice()
+          .sort((a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0))
+        for (const account of list) queue.push(account.id)
+      }
+    }
+    // 与拖拽走同一条落盘通道（同一份 toast / 同一次刷新），不另造一条
+    void reorderQueue(queue, t('已按「{label}」{dir}排序并保存', {
+      label: sortLabel(next.key), dir: sortDirLabel(next.dir),
+    }))
+  }
+  /**
+   * 点表头排序 —— **所见即所得**：排序的结果同时写回调度队列，屏幕上那个顺序就是
+   * 转发会走的顺序（见本文件模块头「排序与调度是同一件事」）。
+   *
+   * 过一道 `SORTABLE_COLUMNS`：认不出的列在 accounts-sort 里取不到值，排了也不动
+   * —— 挡在这里，免得将来给表头加了新列却忘了补比较器时「点了没反应」。
+   *
+   * 只在**全局账号表**下写回。模型作用域那一屏的行序是后端算的调度队列（`plan_route`
+   * 的产物，只含「提供该模型的家」），它只是**全局队列的一个投影** —— 在那儿重排会把
+   * 别的家的号一起挪走，语义接不上，所以那一档维持只读（左栏切回全局才能排）。
+   */
   const onSortColumn = (key: string): void => {
-    if (SORTABLE_COLUMNS.has(key)) cycleSort(key)
+    if (!SORTABLE_COLUMNS.has(key)) return
+    const current = sort
+    const next: AccountSort | null = !current || current.key !== key
+      ? { key, dir: 'asc', scope: current?.scope || currentSortScope() }
+      : current.dir === 'asc' ? { ...current, dir: 'desc' } : null
+    cycleSort(key)
+    if (!scheduleScope) void reorderBySort(next)
   }
   /** 默认次序下的全部可见行（组序 → 组内序）。全选 / 计数 / 分页都以它为基准：
    *  被隐藏的组（一个启用的都没有）不该算进「当前看到的这些」—— 否则「全选（8 个）」
@@ -323,17 +408,19 @@ function AccountsPage() {
     }))
     .filter(item => item.rows.length > 0)
   /**
-   * 顺序能不能拖。四条各自独立的理由，提示语要说清卡在哪一条上：
+   * 顺序能不能拖。三条各自独立的理由，提示语要说清卡在哪一条上：
    *   · 筛选 / 搜索 —— 行被裁过，落点与真实队列对不上；
    *   · 分页        —— 同上（渲染出来的行只是队列的一段）；
-   *   · **排序**    —— 行序不是队列序了，拖出来的先后写回去就是错的；
    *   · **模型作用域** —— 行序是后端算的调度队列，这里没有「另一份顺序」可写。
+   *
+   * **排序不再进这条判据**：排序现在会写回队列（见 `reorderBySort`），行序与队列序
+   * 是同一件事 —— 此时再拖，落点算出来的先后本来就是对的。早先那条「行序已不是队列序」
+   * 的理由随写回一起消失了。
    */
-  const locked = filterActive() || paging.paged || Boolean(sort) || Boolean(scheduleScope)
+  const locked = filterActive() || paging.paged || Boolean(scheduleScope)
   const lockReason = scheduleScope ? t('切回全局账号表')
-    : sort ? t('取消排序')
-      : filterActive() ? t('清除筛选')
-        : t('把每页调回「全部」')
+    : filterActive() ? t('清除筛选')
+      : t('把每页调回「全部」')
 
   /**
    * 左栏窄态判定：按**面板实宽**而不是窗口宽。
@@ -702,29 +789,30 @@ function AccountsPage() {
               ? t('{groups} 家 · 显示 {rows} 行', { groups: sections.length, rows: visibleIds.length })
               : ''}
           </span>
-          {/* 排序的当前状态。它必须比「顺序已锁定」更显眼：排序生效时表里画的**不是**
-              转发要走的先后，看的人得知道这件事。右边那两档「组内 / 整表」是**粒度**：
+          {/* 排序的当前状态。排序现在**写回调度队列** —— 表里画的先后就是转发要走的
+              先后（所见即所得，见 `reorderBySort`），所以这里只报「排了哪一列、什么方向」，
+              不再声明「显示顺序不是转发顺序」。右边那两档「组内 / 整表」是**粒度**：
               一组只在这一家内部重排（分组与组序不动），一组把分组打散、全表一起来。
               两档都摆出来、当前的置亮 —— 单个开关按钮只能靠猜「现在点下去会去哪边」 */}
           {sort ? (
             <span className='batch-count' id='sort-state' data-sort-key={sort.key}
               data-sort-dir={sort.dir} data-sort-scope={sort.scope}
               title={sort.scope === 'flat'
-                ? t('整表排序：厂商分组已散开，行里带厂商标记')
-                : t('各厂商组内排序：分组与组序不变')}>
+                ? t('整表排序：厂商分组已散开，行里带厂商标记；此顺序已写回调度队列')
+                : t('各厂商组内排序：分组与组序不变；组内先后已写回调度队列')}>
               {t('已按「{label}」{dir}排序', { label: sortLabel(sort.key), dir: sortDirLabel(sort.dir) })}
               <span className='sort-scope' id='sort-scope' role='group' aria-label={t('排序粒度')}>
                 <button type='button' className={cn('link-btn', sort.scope === 'group' && 'is-on')}
                   id='sort-scope-group' data-on={sort.scope === 'group' ? '1' : undefined}
-                  title={t('组内排序：只在每一家内部重排，分组与组序不变')}
+                  title={t('组内排序：只在每一家内部重排，分组与组序不变（组内先后写回队列）')}
                   onClick={() => setSortScope('group')}>{t('组内')}</button>
                 <button type='button' className={cn('link-btn', sort.scope === 'flat' && 'is-on')}
                   id='sort-scope-flat' data-on={sort.scope === 'flat' ? '1' : undefined}
-                  title={t('整表排序：打散厂商分组，全表一起来（行里带厂商标记）')}
+                  title={t('整表排序：打散厂商分组，全表一起来（行里带厂商标记；顺序写回队列）')}
                   onClick={() => setSortScope('flat')}>{t('整表')}</button>
               </span>
               <button type='button' className='link-btn' id='sort-clear'
-                title={t('取消排序，回到默认次序')}
+                title={t('取消排序，回到默认次序（不影响已写回的队列顺序）')}
                 onClick={() => clearSort()}>{t('取消排序')}</button>
             </span>
           ) : null}
