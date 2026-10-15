@@ -21,6 +21,10 @@
 //!      于是客户端自带 `thinking` 时这一发会以 400 透传（同 body 重发结论不变），
 //!      去掉该字段即可。本家**自己从不注入** `thinking`：适配器没有实现
 //!      `reasoning_patch`，所以映射绑定的思考等级不会踩到这条（它对本家是空操作）。
+//!   3. **`max_tokens` 的按模型族硬上限**（2026-10-15 参考实现 `d8ee830` 同款）：
+//!      追加预算是**加法**，客户端要是给的正好是上游上限，加完就顶出去了
+//!      （`393216 + 1024 = 394240` → 400 `ModelArts.81001`，**确定性失败**）。
+//!      所以上限夹紧放在追加**之后**（见 [`clamp_max_tokens`]）。
 //!
 //! ── 硬约束 ──────────────────────────────────────────────────
 //! release 是 `panic=abort`：本文件零 unwrap/expect/panic。
@@ -80,6 +84,44 @@ pub fn apply_reasoning_allowance(body: &mut Value) -> Option<(i64, i64)> {
     let raised = requested + REASONING_ALLOWANCE;
     body["max_tokens"] = json!(raised);
     Some((requested, raised))
+}
+
+/// 上游 `max_tokens` **参数范围**的按模型族上限（实测自上游 400 原文；
+/// 2026-10-15 参考实现 officeace2api 的 `d8ee830` 独立测得同一组数）。
+///
+/// 只收「错误原文写明是 `max_tokens` **参数范围**」的两族：
+///   - deepseek：`max_tokens range is [1, 393216]`
+///   - glm：`max_tokens参数非法：限制数值范围[1,131072]`
+///
+/// ⚠️ qwen 一族**故意不收**：它的实测错误是 **prompt + completion 合计**的上下文限制
+/// （`maximum context length is 131072 … 9 in the messages, 131072 in the completion`），
+/// 不是参数范围 —— 静态上限挡不住它（prompt 大时照样 400），夹了反而制造
+/// 「我们以为防住了」的假象。宁可不夹、让上游的 400 原样透传（fail-open）。
+/// 其余族没测过，同样不夹。
+pub fn max_tokens_ceiling(wire_model: &str) -> Option<i64> {
+    let name = wire_model.to_ascii_lowercase();
+    if name.contains("deepseek") {
+        Some(393_216)
+    } else if name.contains("glm") {
+        Some(131_072)
+    } else {
+        None
+    }
+}
+
+/// 夹住 `max_tokens`（**只夹上限、不设下限**；没给 model / 没给 max_tokens /
+/// 模型族未知 / 本就没超时都不动）。
+///
+/// 必须排在 [`apply_reasoning_allowance`] **之后**：追加是加法，先加后夹才能把
+/// 「顶格 + 1024」这种组合压回上限内（顺序反了夹的是客户端原值，加完照样越界）。
+pub fn clamp_max_tokens(body: &mut Value) -> Option<i64> {
+    let ceiling = max_tokens_ceiling(body.get("model").and_then(Value::as_str)?)?;
+    let current = body.get("max_tokens").and_then(Value::as_i64)?;
+    if current <= ceiling {
+        return None;
+    }
+    body["max_tokens"] = json!(ceiling);
+    Some(ceiling)
 }
 
 /// 流式补 `stream_options.include_usage`（**不覆盖**客户端已有的取值）。
@@ -158,6 +200,7 @@ pub fn build_chat_plan(
         object.insert("stream".to_string(), Value::Bool(true));
     }
     apply_reasoning_allowance(&mut body);
+    clamp_max_tokens(&mut body);
     ensure_include_usage(&mut body);
 
     let mut headers = vec![
@@ -222,6 +265,48 @@ mod tests {
         let mut absent = json!({});
         assert_eq!(None, apply_reasoning_allowance(&mut absent));
         assert!(absent.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn the_ceiling_clamps_after_the_allowance_not_before() {
+        // 一手故障形状（参考实现 d8ee830 实测同款）：客户端顶格 393216，
+        // 追加 1024 = 394240 → 上游 400 ModelArts.81001，确定性失败。
+        // **先加后夹**才是修法：夹在追加之前的话，加完照样越界。
+        let mut deepseek = json!({"model": "deepseek-v4.1-flash", "max_tokens": 393_216});
+        apply_reasoning_allowance(&mut deepseek);
+        assert_eq!(394_240, deepseek["max_tokens"], "追加之后确实越界了（这正是要防的形状）");
+        assert_eq!(Some(393_216), clamp_max_tokens(&mut deepseek));
+        assert_eq!(393_216, deepseek["max_tokens"]);
+
+        // glm 族的上限是另一组数
+        let mut glm = json!({"model": "glm-5.3", "max_tokens": 131_072});
+        apply_reasoning_allowance(&mut glm);
+        assert_eq!(Some(131_072), clamp_max_tokens(&mut glm));
+
+        // 没顶格就一个字节都不动（追加量原样保留）
+        let mut roomy = json!({"model": "deepseek-v4.1-flash", "max_tokens": 100_000});
+        apply_reasoning_allowance(&mut roomy);
+        assert_eq!(101_024, roomy["max_tokens"]);
+        assert_eq!(None, clamp_max_tokens(&mut roomy));
+
+        // 客户端自己就要超限（没有追加也超）：同样夹到上游能给的那个数
+        let mut greedy = json!({"model": "glm-5.3", "max_tokens": 500_000});
+        assert_eq!(Some(131_072), clamp_max_tokens(&mut greedy));
+    }
+
+    #[test]
+    fn unknown_families_fail_open_instead_of_faking_safety() {
+        // qwen 的实测错误是 prompt+completion **合计**的上下文限制，不是参数范围
+        // ⇒ 静态上限挡不住它；夹了会制造「我们以为防住了」的假象，故意不夹
+        let mut qwen = json!({"model": "qwen3-32b", "max_tokens": 999_999});
+        assert_eq!(None, clamp_max_tokens(&mut qwen));
+        assert_eq!(999_999, qwen["max_tokens"]);
+        // 没测过的族同样不夹（上游会自己拒，我们把 400 原样透传）
+        let mut spark = json!({"model": "spark-x2.5", "max_tokens": 999_999});
+        assert_eq!(None, clamp_max_tokens(&mut spark));
+        // 没有 model / 没有 max_tokens 也一样
+        assert_eq!(None, clamp_max_tokens(&mut json!({"max_tokens": 999_999})));
+        assert_eq!(None, clamp_max_tokens(&mut json!({"model": "glm-5.3"})));
     }
 
     #[test]
