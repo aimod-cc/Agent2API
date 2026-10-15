@@ -102,10 +102,10 @@ function shared(): SharedWindow {
 /* ─── 常量 ─────────────────────────────────── */
 
 /**
- * 自动刷新间隔（毫秒）的兜底值，1 秒 = 后端的默认间隔
+ * 自动刷新间隔（毫秒）的兜底值，30 秒 = 后端的默认间隔
  * （`DEFAULT_REPORT_AUTO_REFRESH_SECONDS`）。
  */
-const DEFAULT_AUTO_REFRESH_MS = 1_000
+const DEFAULT_AUTO_REFRESH_MS = 30_000
 
 /** 选项提到模块级：SegmentedControl 每拿到新数组都要重新量滑块位置，常量能省掉这轮测量 */
 const RANGE_OPTIONS: readonly SegmentedControlOption<string>[] = RANGES.map(value => ({
@@ -519,7 +519,7 @@ async function syncAutoRefresh(): Promise<void> {
     autoSynced = Array.isArray(list?.tasks)
   } catch (error) {
     // 读不到就用兜底值继续跑（见 applyAutoRefresh），下次切进本页再试
-    console.warn('读取报表自动刷新间隔失败，按默认 1 秒:', error instanceof Error ? error.message : error)
+    console.warn('读取报表自动刷新间隔失败，按默认 30 秒:', error instanceof Error ? error.message : error)
     applyAutoRefresh(null)
   }
 }

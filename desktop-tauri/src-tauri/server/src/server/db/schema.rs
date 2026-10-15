@@ -288,7 +288,7 @@ pub fn is_reserved(key: &str) -> bool {
 /// （`SCHEMA_VERSION <= 13`）读到 v14 库会明确失败，而不是把密文当坏数据跳过、
 /// 再在写回时把「读不出来的行」当成「内存里没有」DELETE 掉（即「回退一次 =
 /// 账号被删」）。对本程序，v14 只是一次空操作。
-pub const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 15;
 
 /// 版本 1 的全部表与索引：改造前所有 JSON / JSONL 文件的对应形态。
 ///
@@ -406,6 +406,8 @@ CREATE TABLE IF NOT EXISTS requests (
 -- id：由请求 id 反查明细（与调试报文对照、按 id 看一次请求的完整记录）。
 CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts);
 CREATE INDEX IF NOT EXISTS idx_requests_id ON requests(id);
+-- 报表缓存命中与 24 小时趋势的精准范围扫描（排除测试，避免全表扫描与文件排序）
+CREATE INDEX IF NOT EXISTS idx_requests_summary ON requests(is_test, ts, row_id);
 
 -- ── request_daily：按天聚合（原 request-daily.jsonl）──────────
 -- 存什么：一天一行（date 是**本地时区**的 `YYYY-MM-DD`，与文件名版逐字相同；
@@ -770,6 +772,21 @@ ALTER TABLE requests ADD COLUMN client TEXT NOT NULL DEFAULT '';
 // v13 没有对应的 `*_SCHEMA` 常量：它只有一条 DELETE，且在 `apply_version`
 // 的分支里用 `execute` 单独执行（要拿被删行数），语句就在那里 —— 见
 // `SCHEMA_VERSION` 的 v13 段。
+// v14 没有对应的 `*_SCHEMA` 常量：它是逐行加密变换，见 `SCHEMA_VERSION` 的 v14 段。
+
+/// 版本 15：requests 补「排除测试 + 时间」的聚合复合索引（schema v15）。
+///
+/// ── 它服务什么 ──────────────────────────────────────────────
+/// 报表计算「近 7 天缓存命中率」与「近 24 小时整点趋势」时，频繁执行：
+/// `WHERE is_test = 0 AND ts >= ?1 AND ts <= ?2 ORDER BY ts ASC, row_id ASC`
+///
+/// 既有索引只有 `idx_requests_ts (ts)`，在存量请求包含大量测试行的库中，
+/// 必须全量扫描并比对每一行的 `is_test`；补充 `(is_test, ts, row_id)` 复合索引后，
+/// 查询可直接在索引树上按 `is_test = 0` 进行精准时间范围扫描，彻底消除表扫描与文件排序。
+const V15_SCHEMA: &str = "
+-- ── requests 补报表缓存聚合复合索引（schema v15）─────────────
+CREATE INDEX IF NOT EXISTS idx_requests_summary ON requests(is_test, ts, row_id);
+";
 
 /// 把库升到 [`SCHEMA_VERSION`]（幂等：已是最新版时什么都不做）。
 ///
@@ -925,6 +942,8 @@ fn apply_version(
         // 读到 v14 库时明确失败（见 `migrate` 的拒绝分支），而不是把密文当坏
         // 数据跳过后又删掉。完整说明见 [`SCHEMA_VERSION`] 的 v14 段。
         14 => Ok(()),
+        // v15：requests 补报表缓存聚合复合索引（(is_test, ts, row_id)，见 V15_SCHEMA）
+        15 => conn.execute_batch(V15_SCHEMA),
         _ => Ok(()),
     }
 }

@@ -58,7 +58,9 @@ use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, Connection};
 use serde_json::Value;
 
-use super::record::{AttemptDetail, RequestEntry, RequestQuery, RunningProgress, SensitiveHit};
+use super::record::{
+    AttemptDetail, CacheMetricEntry, RequestEntry, RequestQuery, RunningProgress, SensitiveHit,
+};
 use super::report::normalize_status_filter;
 
 /// `requests` 的列顺序（所有 SELECT 都按这个顺序取，`decode_request` 依赖它；
@@ -443,6 +445,34 @@ pub(super) fn select_between(
     let mut out = Vec::new();
     while let Some(row) = rows.next()? {
         out.push(decode_request(row)?);
+    }
+    Ok(out)
+}
+
+/// 报表专属：仅拉取算缓存命中与 24 小时趋势所需的精简指标字段。
+///
+/// 排除模型测试（`is_test = 0`），仅投影 6 列指标与模型名，避免反序列化 `attempt_details`
+/// 与 `sensitive_hits` 等大文本 JSON，显著降低长周期（7 天）全量扫描下的 CPU 与内存开销。
+pub(super) fn select_cache_metrics_between(
+    conn: &Connection,
+    from_ms: i64,
+    to_ms: i64,
+) -> rusqlite::Result<Vec<CacheMetricEntry>> {
+    let sql = "SELECT ts, prompt_tokens, total_tokens, cache_read_tokens, model, upstream_model \
+               FROM requests WHERE ts >= ?1 AND ts <= ?2 AND is_test = 0 \
+               ORDER BY ts ASC, row_id ASC";
+    let mut stmt = conn.prepare(sql)?;
+    let mut rows = stmt.query(params![from_ms, to_ms])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(CacheMetricEntry {
+            ts: row.get(0)?,
+            prompt_tokens: row.get(1)?,
+            total_tokens: row.get(2)?,
+            cache_read_tokens: row.get(3)?,
+            model: row.get(4)?,
+            upstream_model: row.get(5)?,
+        });
     }
     Ok(out)
 }

@@ -45,6 +45,21 @@ pub const MAX_RAW_BODY_BYTES: usize = 128 * 1024;
 pub const DEFAULT_LIMIT: usize = 50;
 pub const MAX_LIMIT: usize = 500;
 
+/// 报表计算缓存命中率与 24 小时整点趋势所需的精简指标。
+///
+/// 相比完整的 `RequestEntry`，仅投影统计计算所需的指标与模型字段，
+/// 避免拉取 `attempt_details`、`sensitive_hits` 等重试与敏感词大文本 JSON，
+/// 显著减少内存分配与反序列化开销。
+#[derive(Clone, Debug, Default)]
+pub struct CacheMetricEntry {
+    pub ts: i64,
+    pub prompt_tokens: i64,
+    pub total_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub model: String,
+    pub upstream_model: String,
+}
+
 /// 一条请求日志。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequestEntry {

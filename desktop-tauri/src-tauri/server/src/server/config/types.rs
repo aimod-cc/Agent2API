@@ -439,15 +439,13 @@ pub const DEFAULT_CREDENTIAL_MAINTENANCE_MINUTES: i64 = 10;
 /// 上游（见 `providers::workbuddy` 的 `refresh_models`），间隔太密等于给上游
 /// 添无谓的负载。一小时的粒度对「模型清单变了没」这个问题足够。
 pub const DEFAULT_MODEL_REFRESH_MINUTES: i64 = 60;
-/// 两个前端自动刷新的默认间隔（秒）：每秒一次。
+/// 两个前端自动刷新的默认间隔（秒）：
+/// 日志与请求日志每秒一次，报表页默认 30 秒一次。
 ///
-/// 比改造前的硬编码 10 秒密得多，这是有意的：两条任务都只在**对应页面可见时**
-/// 才请求（`document.hidden` 与当前页都判过），离开页面就完全静默，所以
-/// 「密」的代价只落在用户正盯着那一页的时候 —— 而那正是他想要实时的时刻。
-/// 两条接口都是本地读写（一条读日志库、一条查统计库），不出网。
+/// 报表涉及多维度与较长区间的聚合计算，避免使用秒级高频轮询引发数据库读锁竞争与 CPU 堆叠。
 pub const DEFAULT_LOGS_AUTO_REFRESH_SECONDS: i64 = 1;
 pub const DEFAULT_REQUESTS_AUTO_REFRESH_SECONDS: i64 = 1;
-pub const DEFAULT_REPORT_AUTO_REFRESH_SECONDS: i64 = 1;
+pub const DEFAULT_REPORT_AUTO_REFRESH_SECONDS: i64 = 30;
 /// 软件版本检查默认间隔（分钟）：每 20 分钟查一次 GitHub 最新发布。
 ///
 /// 20 分钟 = 3 次/小时，相对匿名限额（60 次/小时，且**按出口 IP 计** —— 同一

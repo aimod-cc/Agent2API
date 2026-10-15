@@ -17,7 +17,9 @@ use chrono::{Datelike, Duration as ChronoDuration, NaiveDate};
 use serde_json::{json, Value};
 
 use super::clock::{date_key, hour_floor, hour_key, ms_to_local, now_ms};
-use super::record::{AccountAccum, DailyEntry, ModelAccum, ProviderAccum, RequestEntry};
+use super::record::{
+    AccountAccum, CacheMetricEntry, DailyEntry, ModelAccum, ProviderAccum, RequestEntry,
+};
 
 /// 未知 provider 的展示名（`id` 为空串的那一组：旧版本写出的明细、
 /// 以及「一次都没发出去就失败」的请求）。前端也会用同样的文案做降级显示。
@@ -249,6 +251,14 @@ pub(super) fn push_model_accum(list: &mut Vec<ModelAccum>, model: &str, tokens: 
 /// （`aggregate::fold_into_daily`）、近 24 小时趋势（本文件的 `cache_trend_24h`）
 /// 与整行重算（`aggregate::rebuild_day` 经前者），三处**必须调同一个函数**。
 pub(super) fn model_stat_key(item: &RequestEntry) -> &str {
+    if item.upstream_model.is_empty() {
+        &item.model
+    } else {
+        &item.upstream_model
+    }
+}
+
+pub(super) fn metric_stat_key(item: &CacheMetricEntry) -> &str {
     if item.upstream_model.is_empty() {
         &item.model
     } else {
@@ -675,7 +685,7 @@ pub(super) fn streak(daily: &BTreeMap<String, DailyEntry>, today: NaiveDate) -> 
 // ─── 缓存命中率（窗口都很短，必须从明细算）────────────────────
 
 /// 四档缓存命中率
-pub(super) fn cache_rates(entries: &[RequestEntry], now: i64) -> Value {
+pub(super) fn cache_rates(entries: &[CacheMetricEntry], now: i64) -> Value {
     const MINUTE: i64 = 60_000;
     json!({
         "last10m": cache_rate(entries, now - 10 * MINUTE, now),
@@ -686,7 +696,7 @@ pub(super) fn cache_rates(entries: &[RequestEntry], now: i64) -> Value {
 }
 
 /// 单窗口的命中率（`[since_ms, now]` 闭区间）
-fn cache_rate(entries: &[RequestEntry], since_ms: i64, now: i64) -> Value {
+fn cache_rate(entries: &[CacheMetricEntry], since_ms: i64, now: i64) -> Value {
     let mut hit: i64 = 0;
     let mut input: i64 = 0;
     for item in entries {
@@ -709,9 +719,9 @@ fn cache_rate(entries: &[RequestEntry], since_ms: i64, now: i64) -> Value {
 ///
 /// 每个整点还带 `models`（`[{model, label, tokens, requests}]`，按 tokens 降序）：
 /// 折线图的悬停读数要给出「这一小时总用量是多少、分别花在哪些模型上」。
-/// 模型统计键走 [`model_stat_key`]（与日报折算同一口径），于是同一小时里
+/// 模型统计键走 [`metric_stat_key`]（与日报折算同一口径），于是同一小时里
 /// 「各模型之和」必然等于该小时的 `totalTokens`（当份数据之内）。
-pub(super) fn cache_trend_24h(entries: &[RequestEntry], now: i64) -> Vec<Value> {
+pub(super) fn cache_trend_24h(entries: &[CacheMetricEntry], now: i64) -> Vec<Value> {
     /// 单个整点的桶：三项总量 + 按模型的累计（模型数是个位到十位级，
     /// 线性查找即可 —— 与 `push_model_accum` 同一取舍）
     #[derive(Default)]
@@ -736,7 +746,7 @@ pub(super) fn cache_trend_24h(entries: &[RequestEntry], now: i64) -> Vec<Value> 
         slot.hit += item.cache_read_tokens;
         slot.input += item.prompt_tokens;
         slot.total += item.total_tokens;
-        push_model_accum(&mut slot.models, model_stat_key(item), item.total_tokens, 1);
+        push_model_accum(&mut slot.models, metric_stat_key(item), item.total_tokens, 1);
     }
 
     let mut out = Vec::with_capacity(24);

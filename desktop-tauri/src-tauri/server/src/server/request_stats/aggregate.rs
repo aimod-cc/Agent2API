@@ -20,7 +20,7 @@ use chrono::{Duration as ChronoDuration, NaiveDate};
 use serde_json::{json, Value};
 
 use super::clock::{date_key, day_of, local_midnight_ms};
-use super::record::{DailyEntry, RequestEntry};
+use super::record::{CacheMetricEntry, DailyEntry, RequestEntry};
 use super::report::{
     build_accounts, build_models, build_providers, build_top_model, cache_rates, cache_trend_24h,
     daily_trend, heatmap, model_stat_key, normalize_range, push_account_accum, push_model_accum,
@@ -134,7 +134,7 @@ fn rebuild_day(conn: &rusqlite::Connection, day: NaiveDate) -> rusqlite::Result<
 /// 非 custom 档传 None（也允许传了不用 —— 只有 custom 分支会读它）。
 pub(super) fn summarize(
     daily: &BTreeMap<String, DailyEntry>,
-    entries: &[RequestEntry],
+    entries: &[CacheMetricEntry],
     range: &str,
     now: i64,
     custom: Option<(NaiveDate, NaiveDate)>,

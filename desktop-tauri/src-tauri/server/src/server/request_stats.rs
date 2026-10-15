@@ -582,9 +582,9 @@ impl RequestStats {
             let guard = self.guard();
             self.with_conn(&guard, |conn| {
                 let daily = daily::select_daily_map(conn)?;
-                // 报表侧排除模型测试（见 `select_between` 的说明）：
-                // 趋势图与排行回答的是「真实流量长什么样」
-                let entries = sql::select_between(conn, now - SUMMARY_WINDOW_MS, now, true)?;
+                // 报表侧排除模型测试，仅拉取算缓存命中与趋势所需的精简指标：
+                let entries =
+                    sql::select_cache_metrics_between(conn, now - SUMMARY_WINDOW_MS, now)?;
                 Ok((daily, entries))
             })
         };
