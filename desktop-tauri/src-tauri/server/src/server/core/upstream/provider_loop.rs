@@ -326,11 +326,13 @@ fn transport_retry_advice(error: &super::request::UpstreamRequestError, remainin
 ///   - `ContentBlocked`（内容策略拦截）：也有专属动作（换中性提示词重发一次，
 ///     见 `attempt_queue` 的动作 0），走到这里说明那次补救已经用掉 ——
 ///     再原地重发同一份 body 结论不变（拦的是字节，不是账号）；
-///   - `Fatal` + **413**（见 [`PAYLOAD_SIZE_REJECTION_STATUSES`]）：上游入口按请求体
-///     字节数拒收（实测 Loomy 的网关回 `{"error_code":"APIG.0201","error_msg":
-///     "Request entity too large"}`），判据里没有任何会变的量。而代价不对称：
-///     每次往返约 13 秒 + 一个 5 秒间隔，三次下来客户端的 60 秒等待墙先到，
-///     面板里只剩下「408 客户端在响应完成前断开」，真实成因埋在 attempt_details。
+///   - `Fatal` + **413**（见 [`PAYLOAD_SIZE_REJECTION_STATUSES`]）：这份请求的**体量**
+///     被拒（实测 Loomy 的网关回 `{"error_code":"APIG.0201","error_msg":
+///     "Request entity too large"}`；同一家的业务层还会回 400 + 中文文案，
+///     由适配器折成 413 —— 折状态码那条路见下面的判据说明），判据里没有任何
+///     会变的量。而代价不对称：每次往返约 13 秒 + 一个 5 秒间隔，三次下来
+///     客户端的 60 秒等待墙先到，面板里只剩下「408 客户端在响应完成前断开」，
+///     真实成因埋在 attempt_details。
 fn fallback_retry_advice(
     class: &UpstreamErrorClass,
     remaining: usize,
@@ -344,8 +346,19 @@ fn fallback_retry_advice(
         | UpstreamErrorClass::TokenExpired { .. }
         | UpstreamErrorClass::ContentBlocked { .. } => None,
         // 体积被入口拒收：重发同一份字节只会得到同一个 413（换号也一样，但那是
-        // 编排层的事，这里只撤「原地再发一次」这一件事）
-        UpstreamErrorClass::Fatal { .. } if PAYLOAD_SIZE_REJECTION_STATUSES.contains(&status) => {
+        // 编排层的事，这里只撤「原地再发一次」这一件事）。
+        //
+        // ── 判据取**分类后**的状态码，不是线路上的那一个 ──────────────
+        // 有家拿到体积超限后会把状态码折成 413（果办 `81113`：上游给的是 HTTP
+        // **429**，不先折掉就会被限额档吞成「账号限额 + 冷却 + 换号」）。那种家的
+        // 线路上是 429、客户端看到的是 413 —— 按线路上的判就永远命不中这一格，
+        // 于是「折成 413 让客户端看懂」与「别再重发这份体」只兑现了前一半：
+        // 同一份 5.5 MB 的体会被原样再上传三遍。折过的 413 与真收到的 413 是
+        // 同一件事，判据跟着**分类结果**走才与文档那句「重发同一份字节只会得到
+        // 同一个 413」对得上。
+        UpstreamErrorClass::Fatal { status, .. }
+            if PAYLOAD_SIZE_REJECTION_STATUSES.contains(status) =>
+        {
             None
         }
         UpstreamErrorClass::Fatal { .. } => Some(RetryAdvice {

@@ -61,6 +61,40 @@ pub struct LoomyAdapter;
 /// 静态单例
 pub static LOOMY_ADAPTER: LoomyAdapter = LoomyAdapter;
 
+/// 这一发是不是**这份请求太长/太大**被拒？判据取自上游文案，参数**要已小写**。
+///
+/// ── 为什么只取文案，不取状态码、也不取错误码 ───────────────────
+/// 本家的长度墙实测有**两种形状**（dev 3066 真实流量）：
+///   · 业务层 `400` + 中文原文「内容太长了，请精简输入或开启新对话」
+///     —— 2026-10-15 那份 16,341,828 字节的会话（同一份体被重发 11 次）；
+///   · 华为云 APIG 的 `413` + `{"error_msg":"Request entity too large","error_code":"APIG.0201"}`。
+/// 判据若锁在 413 上，第一种（也就是实测在打的那条）一次都认不出来。
+///
+/// ⚠️ `APIG.0201` **不能**单独当判据：官方错误码表把这个**过载码**同时给了
+/// 400/413/414/494/500/502/504，其中 5xx 是真该退避重发的上游抖动 —— 拿它当
+/// 体积判据会把该重试的那一类一起治没。这条与 codearts 的
+/// [`super::codearts::chat::size_rejection_text`] 同一条理由（同一句文案实测会换码）。
+fn request_is_too_long(lower: &str) -> bool {
+    [
+        // 本家业务层原文（实测）
+        "内容太长",
+        "内容过长",
+        "精简输入",
+        // 华为云 APIG / 后端解析两层对超限体的措辞
+        "request entity too large",
+        "requestentitytoolarge",
+        "payload too large",
+        "exceeds the maximum size",
+        "parse_request_data_exception",
+        // OpenAI 兼容网关的通用上下文超限措辞
+        "context_length_exceeded",
+        "maximum context length",
+        "too many tokens",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
 impl ProviderAdapter for LoomyAdapter {
     fn kind(&self) -> ProviderKind {
         ProviderKind::Loomy
@@ -141,6 +175,7 @@ impl ProviderAdapter for LoomyAdapter {
     /// 上游错误分类：
     ///   - HTTP 401 / 403 → `TokenExpired`（刷新链对无续期的家会走到重登提示）；
     ///   - 业务码 `020002` / `100002`（HTTP 200 或非 2xx 里的 body）→ `TokenExpired`；
+    ///   - **长度/体积超限**（文案判据见 [`request_is_too_long`]）→ `Fatal` + **413**；
     ///   - HTTP 429 → `QuotaLimited`（上游不给结构化恢复时间）；
     ///   - 其余 → 内容拦截分类（审核文案）或原样透传。
     fn classify_error(&self, status: u16, error_body: &Value) -> UpstreamErrorClass {
@@ -158,6 +193,27 @@ impl ProviderAdapter for LoomyAdapter {
             .unwrap_or("");
         if status == 401 || status == 403 || client::is_auth_error_code(body_code) {
             return UpstreamErrorClass::TokenExpired { message };
+        }
+        // ── 体积超限折成 413，且**必须先于 429 判掉** ─────────────────
+        // 这条排在这里有两个理由，都要一起成立：
+        //   ① 落进限额档的代价不是「多试一次」能兜住的：账号被记一次限额冷却并
+        //      换号 —— 可它拒的是这份请求的体量，跟哪个号无关，换号后同一份体
+        //      照样被拒，等于把下一个号也拖进同一笔白账；
+        //   ② 折成 413 才有人接得住它：`upstream::fallback_retry_advice` 对
+        //      「分类结果的状态码是 413」的失败**不原地重发**（判据取分类后的
+        //      状态码），客户端那边 `413` 也早有 `request_too_large` 的映射
+        //      （见 `protocol::anthropic`）—— 它是唯一一条能让客户端自己压缩
+        //      上下文的路。原文不动地放进文案里，用户看得见的仍是上游那句。
+        let lowered = error_body.to_string().to_ascii_lowercase();
+        if request_is_too_long(&lowered) {
+            return UpstreamErrorClass::Fatal {
+                status: 413,
+                message: format!(
+                    "请求超过上游上限：{raw}（这条拒的是这份请求的体量，与账号无关：\
+                     把历史清短一些、或开启新对话）"
+                ),
+                upstream_code: error_body.get("code").and_then(Value::as_i64),
+            };
         }
         if status == 429 {
             return UpstreamErrorClass::QuotaLimited {
@@ -311,5 +367,108 @@ impl ProviderAdapter for LoomyAdapter {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, GatewayError>> + Send + 'a>>
     {
         Box::pin(async move { balance::query_usage(store, account_id).await })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::core::providers::adapter::adapter_for;
+    use serde_json::json;
+
+    /// 上游给「内容太长」时的**真实形态**（dev 3066 实测，2026-10-15）：
+    /// HTTP 400 + 中文原文。`{code, message}` 与非 2xx 路径上
+    /// `UpstreamErrorDetail::to_value` 给的形状逐字一致。
+    fn length_rejection() -> Value {
+        json!({
+            "code": Value::Null,
+            "message": "内容太长了，请精简输入或开启新对话",
+        })
+    }
+
+    /// 同一件事在华为云层的另一种措辞、另一个状态码。
+    fn apig_too_large() -> Value {
+        json!({
+            "code": Value::Null,
+            "message": "{\"error_msg\":\"Request entity too large\",\"error_code\":\"APIG.0201\"}",
+        })
+    }
+
+    /// 两种形状都要认，而且都要折成 413：只认 413 会把实测在打的那条（400
+    /// 中文原文）整个漏掉，落进兜底那一档接着原地重发这份十几 MB 的体。
+    #[test]
+    fn both_length_rejection_shapes_become_a_413() {
+        let adapter = adapter_for(ProviderKind::Loomy);
+        for (wire, body) in [(400u16, length_rejection()), (413, apig_too_large())] {
+            match adapter.classify_error(wire, &body) {
+                UpstreamErrorClass::Fatal { status, message, .. } => {
+                    assert_eq!(status, 413, "线路上是 {wire}，客户端要看到的是 413：{message}");
+                    assert!(
+                        message.contains("与账号无关"),
+                        "文案要说明这不是账号的问题：{message}"
+                    );
+                }
+                other => panic!("线路上 {wire} 的长度拒绝不该被归成 {other:?}"),
+            }
+        }
+    }
+
+    /// 折出来的 413 要让**上游原文**留住，同时给一句可执行的处置。
+    ///
+    /// ⚠️ 只断言「文案里有上游那句」是**空跑**：不折的时候那句本来就在
+    /// （`上游返回 400: 内容太长了…`）。判据必须落在折本身与**我们补的那半句**上。
+    #[test]
+    fn the_upstream_wording_survives_the_fold() {
+        let adapter = adapter_for(ProviderKind::Loomy);
+        match adapter.classify_error(400, &length_rejection()) {
+            UpstreamErrorClass::Fatal { status, message, .. } => {
+                assert_eq!(status, 413, "折成 413 才有客户端那一侧的压缩动作");
+                assert!(message.contains("内容太长了"), "保住上游原话：{message}");
+                assert!(
+                    message.contains("把历史清短一些"),
+                    "处置要落在「这份请求的体量」上，不是转述上游那句话：{message}"
+                );
+            }
+            other => panic!("应当折成 Fatal + 413，实际 {other:?}"),
+        }
+    }
+
+    /// 反对照：本家别的失败一格都不许被这条折掉。
+    ///
+    /// 少了这一条，判据写成「400 一律折 413」也会全绿 —— 那会把「上游偶尔 400
+    /// 抖一下」这类真正需要退避的抖动一起治没（症状是偶发失败不再自愈）。
+    #[test]
+    fn other_failures_keep_their_own_classification() {
+        let adapter = adapter_for(ProviderKind::Loomy);
+        // 报文非法（我们发坏了）：仍是原样的 400，还该退避重发
+        match adapter.classify_error(
+            400,
+            &json!({"code": Value::Null, "message": "messages: expected array"}),
+        ) {
+            UpstreamErrorClass::Fatal { status, .. } => assert_eq!(status, 400),
+            other => panic!("报文非法不该被折成别的：{other:?}"),
+        }
+        // 限额：该冷却、该换号
+        assert!(matches!(
+            adapter.classify_error(
+                429,
+                &json!({"code": Value::Null, "message": "request rate limit exceeded"})
+            ),
+            UpstreamErrorClass::QuotaLimited { status: 429, .. }
+        ));
+        // 凭据失效：该走刷新/重登
+        assert!(matches!(
+            adapter.classify_error(401, &json!({"code": "020002", "message": "登录已过期"})),
+            UpstreamErrorClass::TokenExpired { .. }
+        ));
+        // ⚠️ `APIG.0201` 单独出现**不算**体积：官方错误码表把这个过载码同时给了
+        // 400/413/414/494/500/502/504，5xx 上的过载是真该退避重发的抖动。
+        assert!(matches!(
+            adapter.classify_error(
+                500,
+                &json!({"code": Value::Null, "message": "{\"error_code\":\"APIG.0201\"}"})
+            ),
+            UpstreamErrorClass::Fatal { status: 500, .. }
+        ));
     }
 }
