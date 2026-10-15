@@ -453,6 +453,64 @@ fn other_fatal_statuses_still_get_the_fallback_resend() {
     );
 }
 
+/// 判据取的是**分类后**的状态码：有家把体积超限折成 413，线路上却是 429。
+///
+/// 果办（OfficeAce）的 `81113` 就是这样 —— 上游给 HTTP 429，适配器先折成 413，
+/// 否则会落进限额档（冷却 + 换号，而它拒的与账号无关）。折了之后线路上仍是 429：
+/// 判据若按线路上的状态码走，这一格永远命不中，同一份 5.5 MB 的体会被原样再上传
+/// 三遍（正是 #241 想撤掉的那件事）。
+#[test]
+fn a_folded_payload_size_rejection_gets_no_in_place_retry_either() {
+    // 分类结果说 413、线路上说 429：仍要认出这是「按体积拒收」
+    assert!(
+        fallback_retry_advice(&fatal(413), 3, 429).is_none(),
+        "折成 413 的那条失败与真收到的 413 是同一件事，不该给它原地重发"
+    );
+    // 反对照：分类结果不是 413 时，线路上是不是 413 都不进这一格
+    assert!(
+        fallback_retry_advice(&fatal(500), 3, 500).is_some(),
+        "上游自己的 5xx 抖动照旧要退避重发"
+    );
+}
+
+/// 端到端：果办那条 81113（线路 429、折 413）打到替身上，**只发一次**。
+#[tokio::test]
+async fn an_officeace_size_rejection_is_sent_once_and_handed_back() {
+    const OFFICEACE_TOO_LARGE_BODY: &str = r#"{"error_code":"ModelArts.81113","error_msg":"Invalid request body, exceeds the maximum size , messages max size is: 5000."}"#;
+    let (transport, hits, task) = mock_upstream(
+        429,
+        "application/json; charset=utf-8",
+        OFFICEACE_TOO_LARGE_BODY,
+    )
+    .await;
+    let mut budget = RetryBudget::new(3);
+    let capture = crate::server::core::debug_traffic::TrafficCapture::begin("folded-413");
+    let result = send_with_retry(
+        crate::server::core::providers::adapter::adapter_for(ProviderKind::OfficeAce),
+        &transport,
+        &mut budget,
+        Some(&capture),
+        &RequestTelemetry::new(),
+        false,
+    )
+    .await;
+    task.abort();
+    let failure = match result {
+        Ok(_) => panic!("HTTP 429 不该被当成成功流"),
+        Err(failure) => failure,
+    };
+    assert_eq!(
+        1,
+        hits.load(Ordering::SeqCst),
+        "体积拒收的失败应当一次就交回，不该原地重发"
+    );
+    assert!(
+        matches!(failure.class, UpstreamErrorClass::Fatal { status: 413, .. }),
+        "折出来的 413 要带回客户端（不是线路上的 429），实际 {:?}",
+        failure.class
+    );
+}
+
 /// 端到端：打到真实返回 413 的替身上身，**只发一次**（改造前是 1 + 3 次）。
 #[tokio::test]
 async fn a_real_413_response_is_sent_once_and_handed_back() {
