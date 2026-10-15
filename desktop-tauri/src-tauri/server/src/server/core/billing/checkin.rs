@@ -228,7 +228,16 @@ pub async fn checkin_for(
     manual: bool,
 ) -> Value {
     let id = account.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-    let name = account.get("name").cloned().unwrap_or(Value::Null);
+    // 结果行的 name 是**签到记录台账与前端结果卡的展示名快照**：优先读统一
+    // 展示名 `displayName`（与账号页 / 请求日志同一口径，见
+    // `store_view::display_name_of`；「以邮箱报名字」的三家在这里同样显示邮箱），
+    // 缺键（旧快照 / 手工构造）按旧口径回落 `name`，再退 id。
+    let name = account
+        .get("displayName")
+        .filter(|value| value.as_str().is_some_and(|text| !text.is_empty()))
+        .cloned()
+        .or_else(|| account.get("name").cloned())
+        .unwrap_or(Value::Null);
     let display = name.as_str().unwrap_or(&id).to_string();
     // 分派的键就是账号的 provider id（`provider_of` 已归一）；AutoClaw 两个
     // 地区各是一个 provider，因此下面按 `region.provider_id()` 反查地区，
@@ -590,6 +599,14 @@ pub async fn run_checkin(
                 .and_then(|activity| activity.get("pokeSucceeded"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
+                // 活跃上报（/v2/report，点亮国际版连登的那条通道）成功同样算
+                // 「完成活跃」—— 这才是国际版日活的主动作；保活对话只是补充。
+                || item
+                    .get("activity")
+                    .and_then(|activity| activity.get("report"))
+                    .and_then(|report| report.get("succeeded"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
         })
         .count();
     if skipped > 0 {

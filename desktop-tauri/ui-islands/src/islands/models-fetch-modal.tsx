@@ -48,6 +48,15 @@ import { t } from '../i18n'
  * 或改一下「模型来源」用哪个账号；打开即拉等于把「看一眼」也变成一次全量刷新，还让「本次结果」与
  * 「上次结果」在界面上分不清。所以第一屏只渲染待获取的名单，拉取由用户点最右那颗「获取模型」触发。
  *
+ * ── 逐行拉取：只刷一家，不动别家 ─────────────────────────────
+ * 底部那颗是**全刷**；每一行最右还有一颗「获取 / 重新获取」——它把请求里的 `providers` 白名单收窄
+ * 成这一家（后端逐家打上游，名单外的家不打网络、也不进结果，见 api/models.rs 的 `parse_providers`），
+ * 回来后把这一条**并进**结果表，其余行原样留着。理由：目录刷新的成本是逐家一律打一次上游，而用户
+ * 点进来常常只是刚给某一家换了账号、或想补一家的清单 —— 为这一家把十家全打一遍既慢又吵。
+ *
+ * 因此表体是**一条行模型**（见 buildRows）：待获取的家与已有结果的家合成同一种行，行序 = 注册表序
+ * （= 左栏序；后端逐家结果与它同序，见 providers::PROVIDERS 与 implemented_kinds）。
+ *
  * ── 两个回调的语义都是「后端数据变了，你那边该重取一次」──────────
  * 本弹窗只把变化告诉调用方，不替它取数：`onDone` 在自定义家导入成功后、`onRefreshed` 在内置家远程
  * 目录**真落地**后（`result.refreshed > 0`；失败 / 跳过时清单一个字没变，不通知）。
@@ -82,6 +91,13 @@ type RefreshItem = {
   refreshedAt?: unknown; fixed?: boolean; message?: string; accountId?: string
 }
 type RefreshResponse = { results?: RefreshItem[]; refreshed?: unknown }
+
+/**
+ * 内置家表体的**一行**：待获取的家与已有结果的家合成同一条行模型（见 buildRows）。`item` 缺席
+ * 就是「这家还没拉过」——状态列显示「待获取」、计数与说明留空，而「更新日期」照样显示这家清单当前
+ * 的时刻。逐行「获取」回来时只替掉对应那一行的 `item`，其余行不受影响。
+ */
+type Row = { provider: string; label: string; item?: RefreshItem }
 
 /** open() 的入参（与旧实现逐字一致） */
 type OpenOptions = {
@@ -155,7 +171,7 @@ function shared(): SharedWindow {
  */
 const TABLE_ID = { intl: 'fm-table-intl', custom: 'fm-table-custom' }
 const TABLE_COL_ID = { intl: 'fetch-models', custom: 'fetch-models-custom' }
-const COLS_INTL: readonly string[] = ['provider', 'source', 'state', 'count', 'note', 'updated']
+const COLS_INTL: readonly string[] = ['provider', 'source', 'state', 'count', 'note', 'updated', 'op']
 const COLS_CUSTOM: readonly string[] = ['pick', 'model', 'state']
 
 /**
@@ -163,14 +179,16 @@ const COLS_CUSTOM: readonly string[] = ['pick', 'model', 'state']
  * 这里的百分数，拖过的列由 table-columns.js 写 `<col>` 的 inline width 覆盖（th 上不能写宽度，
  * 它会盖过 col，拖动就失效）。
  *
- * 六列怎么分（每格还要减去 td 的左右内边距）：更新日期 19% 要装下 formatTime 的完整输出（只给
- * 「日期」会在同一天的两次刷新之间分不出先后，而这弹窗的用处之一正是看清单有多旧）；模型来源
- * 25% 由邮箱长度定（emailAsName 的家以邮箱为主名）；说明 24% 比最长那句「远程目录已更新…」窄
- * 一点、会折成两行 —— 折行比截断好，且只有「已刷新」的行吃这句长文案。
+ * 七列怎么分（每格还要减去 td 的左右内边距）：更新日期 16% 要装下 formatTime 的完整输出（只给
+ * 「日期」会在同一天的两次刷新之间分不出先后，而这弹窗的用处之一正是看清单有多旧）；模型来源 21%
+ * 由邮箱长度定（emailAsName 的家以邮箱为主名）；提供商 13% 装注册名（「AutoClaw 国际版」这类最长
+ * 的名字会折行，可接受）；说明 20% 比最长那句「远程目录已更新…」窄一点、会折成两行 —— 折行比截断
+ * 好，且只有「已刷新」的行吃这句长文案；操作 15% 装那一颗逐行按钮 —— 它是本表最宽的一档约束：
+ * 译文里最长的 `重新获取`（pt-BR「Buscar novamente」≈ 120px）+ 内边距刚好放得下，再窄会被截断。
  */
 const WIDTH_INTL: Record<string, string> = {
-  provider: 'w-[15%]', source: 'w-[25%]', state: 'w-[10%]',
-  count: 'w-[7%]', note: 'w-[24%]', updated: 'w-[19%]',
+  provider: 'w-[13%]', source: 'w-[21%]', state: 'w-[9%]',
+  count: 'w-[6%]', note: 'w-[20%]', updated: 'w-[16%]', op: 'w-[15%]',
 }
 /** 自定义家的窄形态（三列）：勾选 40px ≈ 8%、状态 92px ≈ 18%、上游模型吃剩余 */
 const WIDTH_CUSTOM: Record<string, string> = { pick: 'w-[8%]', model: 'w-[74%]', state: 'w-[18%]' }
@@ -178,7 +196,7 @@ const WIDTH_CUSTOM: Record<string, string> = { pick: 'w-[8%]', model: 'w-[74%]',
 /** 表头文案（按列 key 取；空串 = 勾选列没有标题，与旧实现一致） */
 const HEAD_LABEL: Record<string, string> = {
   pick: '', provider: t('提供商'), source: t('模型来源'), state: t('状态'), count: t('模型数'),
-  note: t('说明'), updated: t('更新日期'), model: t('上游模型'),
+  note: t('说明'), updated: t('更新日期'), model: t('上游模型'), op: t('操作'),
 }
 
 /**
@@ -348,10 +366,12 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
   /** 脚注（toast 会消失，脚注留一份） */
   const [hint, setHint] = React.useState('')
   /**
-   * 在途状态（拉取 / 导入互斥）：置真期间不许关窗，关掉会让「到底成没成」变成未知；两种在途
-   * 的按钮文案不同（获取中… / 导入中…），所以记的是种类而不是一个布尔。
+   * 在途状态（全刷 / 逐行 / 导入，三者互斥）：置真期间不许关窗，关掉会让「到底成没成」变成未知；
+   * 三种的按钮文案不同（前两种都是「获取中…」，导入是「导入中…」），所以记的是种类而不是一个布尔。
    */
-  const [busyKind, setBusyKind] = React.useState<'load' | 'import' | null>(null)
+  const [busyKind, setBusyKind] = React.useState<'load' | 'import' | 'row' | null>(null)
+  /** 逐行取数时**哪一家**在途（`busyKind === 'row'` 时有值）：那一行的按钮转「获取中…」 */
+  const [busyRow, setBusyRow] = React.useState('')
   const busy = busyKind !== null
   /**
    * 本次会话是否**已经拉过**一次（打开时是 false）。弹窗打开**不自动拉取**，所以「拉过没有」
@@ -380,13 +400,13 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
     shared().wbTableColumns?.repaint?.(custom ? TABLE_COL_ID.custom : TABLE_COL_ID.intl)
   }, [custom])
 
-  /** 内置家：待获取那一屏的家（与 scopeProviders 同源，也就是真正会进请求的名单） */
+  /** 内置家：本次范围里的家（与 scopeProviders 同源，也就是真正会进请求的名单） */
   const pending = custom ? [] : pendingProviders()
+  /** 内置家的表体行（待获取的家 + 已有结果的家，见 buildRows）；自定义家没有这条模型 */
+  const rows = custom ? [] : buildRows()
   /** 自定义家：按搜索词过滤后的上游模型 id（大小写不敏感，与旧实现同口径） */
   const needle = keyword.trim().toLowerCase()
   const shown = upstream.filter(id => !needle || id.toLowerCase().includes(needle))
-  const done = results.filter(item => item.status === 'refreshed').length
-  const failed = results.filter(item => item.status === 'failed').length
 
   /**
    * 汇总行（表格左端，旧实现 paintSummary 的文案与状态语义）：自定义家是「已选 N / 上游共
@@ -398,20 +418,46 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
       ? t('已选 {picked} 个 · 上游共 {upstream} 个 · 清单已有 {managed} 个',
         { picked: picked.size, upstream: upstream.length, managed: managed.size })
       : t('尚未获取')
-    : intlSummary()
+    : intlSummary(rows)
 
-  /** 内置家的汇总文案（待获取 / 刷新中 / 失败 / 逐家结果四档） */
-  function intlSummary(): string {
+  /**
+   * 内置家的表体行：按注册表顺序（= 左栏顺序）列出本次范围里的家，已有结果的那几行挂上自己那一条
+   * 结果。行序不随后端结果的到达顺序变 —— 逐行「获取」回来后只有那一行的内容变化，位置不动。
+   */
+  function buildRows(): Row[] {
+    const byProvider = new Map(results.map(item => [String(item.provider || ''), item]))
+    const built: Row[] = pending.map(meta => {
+      const id = String(meta.id || '')
+      return { provider: id, label: String(meta.label || id), item: byProvider.get(id) }
+    })
+    const known = new Set(built.map(row => row.provider))
+    // 后端给了结果、却不在本次待获取名单里的家（理论上不该有）：附在末尾，别把它藏起来
+    for (const item of results) {
+      const id = String(item.provider || '')
+      if (!known.has(id)) built.push({ provider: id, label: String(item.providerLabel || id), item })
+    }
+    return built
+  }
+
+  /**
+   * 内置家的汇总文案（待获取 / 刷新中 / 失败 / 逐行结果四档）。计数按**行模型**算而不是按
+   * `results.length`：逐行刷过一家之后表里仍是全部家，成功数只该算真拿到结果的那几家。
+   */
+  function intlSummary(list: Row[]): string {
     if (status === 'loading') return t('正在刷新…')
     // 失败时不留上一轮的读数：那是旧结果，与整屏的「获取失败」自相矛盾
     if (status === 'error') return ''
-    if (status === 'ready') {
-      if (!results.length) return t('0 家')
-      return failed
-        ? t('{total} 家 · 成功 {done} · 失败 {failed}', { total: results.length, done, failed })
-        : t('{total} 家 · 成功 {done}', { total: results.length, done })
+    const items = list.map(row => row.item).filter((item): item is RefreshItem => Boolean(item))
+    if (!items.length) {
+      // 点了刷、但（这些家）一条结果都没回来：如实说「没得到结果」，别提「点获取开始」
+      if (fetched) return t('刷新完成，但没有得到任何结果')
+      return list.length ? t('共 {n} 家 · 点「获取模型」开始', { n: list.length }) : t('0 家')
     }
-    return pending.length ? t('共 {n} 家 · 点「获取模型」开始', { n: pending.length }) : t('0 家')
+    const done = items.filter(item => item.status === 'refreshed').length
+    const failed = items.filter(item => item.status === 'failed').length
+    return failed
+      ? t('{total} 家 · 成功 {done} · 失败 {failed}', { total: list.length, done, failed })
+      : t('{total} 家 · 成功 {done}', { total: list.length, done })
   }
 
   /**
@@ -449,13 +495,14 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
     return map
   }
 
-  /** 当前屏幕上那张表里的行（buildSourceMap 要按它取「下拉的当前值」）；拉取中 / 失败时表体只有
-   *  一行提示，没有下拉。 */
-  const sourceRows: Array<{ provider: string; reported?: unknown }> = !custom && status === 'ready'
-    ? results.map(item => ({ provider: String(item.provider || ''), reported: item.accountId }))
-    : !custom && status === 'idle'
-      ? pending.map(item => ({ provider: String(item.id || '') }))
-      : []
+  /**
+   * 表里每一行的「模型来源」当前值（buildSourceMap 按它取「下拉的当前值」）：行模型把**待获取的家
+   * 也包含在内**，所以逐行刷过一家之后，其余行下拉里的选择照样进请求体（旧实现只按一屏结果取，
+   * 逐行刷过之后就只剩那一行了）。拉取中 / 失败时表体是一行提示、没有下拉，此时这份映射只由
+   * selectSource 的回落链给出，与会话里的落盘值同源。
+   */
+  const sourceRows: Array<{ provider: string; reported?: unknown }> =
+    rows.map(row => ({ provider: row.provider, reported: row.item?.accountId }))
 
   /** 选中即落盘 —— 下次打开弹窗、「重新获取」都以它为准（见 loadSavedSource） */
   function rememberSource(pid: string, accountId: string) {
@@ -466,7 +513,7 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
   /* ─── 取数与导入 ─────────────────────────── */
 
   /**
-   * 按当前形态取数：自定义家拉该家上游，内置家刷新各家目录。
+   * **全刷**（底部那颗）：自定义家拉该家上游，内置家按本次范围刷新各家目录，结果**整表替换**。
    * 失败一律把整屏换成「获取失败：…」并留一份脚注（toast 会消失，脚注不会）。
    */
   async function load() {
@@ -517,6 +564,55 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
     } finally {
       setBusyKind(null)
     }
+  }
+
+  /**
+   * **逐行取数**（每行最右那颗）：只刷这一家。请求里的 `providers` 收窄成 `[row.provider]` —— 后端
+   * 逐家打上游，名单外的家不打网络、也不进结果（见 api/models.rs 的 `parse_providers`），所以这是一
+   * 次「只针对一家」的真刷新，不是拿缓存糊弄。
+   *
+   * 回来后**并进**结果表（mergeResults）而不是整表替换：其余行（含还没拉过的「待获取」行）原样
+   * 留着，界面上只有这一行发生变化。
+   *
+   * 失败**不**整屏换成「获取失败」：表里其他行的结果是有效的，一行失败不该把它们一起抹掉 ——
+   * 只留脚注 + toast 说清原因，这一行维持原样（待获取的行仍是「待获取」，已有结果的行保住上次读数）。
+   * 与全刷同一口径：`refreshed > 0` 才通知调用方（失败 / 跳过的清单一个字都没变）。
+   */
+  async function loadRow(row: Row) {
+    if (busy || !row.provider) return
+    setBusyKind('row')
+    setBusyRow(row.provider)
+    setHint('')
+    try {
+      const result = await shared().workbuddyDesktop?.refreshModels({
+        // 这一行的下拉当前值（+ 落盘记忆）；后端只认它白名单里的那一家
+        accounts: buildSourceMap([{ provider: row.provider, reported: row.item?.accountId }]),
+        providers: [row.provider],
+      })
+      setResults(prev => mergeResults(prev, Array.isArray(result?.results) ? result.results : []))
+      setFetched(true)
+      setStatus('ready')
+      if (Number(result?.refreshed) > 0) onRefreshed?.()
+    } catch (error) {
+      const message = errorMessage(error)
+      setHint(message)
+      toast(t('获取失败：{message}', { message }), 'err')
+    } finally {
+      setBusyKind(null)
+      setBusyRow('')
+    }
+  }
+
+  /** 把逐家结果并进现有结果表：同名行整行替换、新家追加 —— 逐行取数只动自己那一行（同名判定按
+   *  provider id，与后端逐行结果的键一致）。 */
+  function mergeResults(previous: RefreshItem[], items: RefreshItem[]): RefreshItem[] {
+    const byProvider = new Map(items.map(item => [String(item.provider || ''), item]))
+    const merged = previous.map(item => byProvider.get(String(item.provider || '')) ?? item)
+    const known = new Set(merged.map(item => String(item.provider || '')))
+    for (const item of items) {
+      if (!known.has(String(item.provider || ''))) merged.push(item)
+    }
+    return merged
   }
 
   /**
@@ -638,35 +734,54 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
   }
 
   /**
-   * 内置家的表体：待获取那一屏（idle）/ 逐家结果（ready）。
+   * 行内的「只看这一家」按钮：在途的那一行转「获取中…」，已经有结果的行说「重新获取」、还没有的
+   * 说「获取」（两处措辞沿用底部那颗全刷的同一口径）。在途期间所有行按钮一起禁用 —— 连点没有意义，
+   * 后端也有最短请求间隔，不如把「现在有一次刷新在跑」直接摆在界面上。
+   */
+  function rowFetchButton(row: Row) {
+    const fetching = busyKind === 'row' && busyRow === row.provider
+    return (
+      <Button variant='outline' size='sm' className='w-full' disabled={busy}
+        title={t('只刷新这一家的模型清单')}
+        onClick={() => { void loadRow(row) }}>
+        {fetching ? t('获取中…') : row.item ? t('重新获取') : t('获取')}
+      </Button>
+    )
+  }
+
+  /**
+   * 内置家的表体：**一屏一条行模型**（见 buildRows）—— 待获取的家与已有结果的家都在这里，一行的
+   * 内容按 `row.item` 是否有值分流（没有 = 待获取，有 = 那一条结果）。
    *
-   * 为什么第一屏不是一张空表：①「模型来源」下拉是随结果行渲染的，结果还没有时它就不存在 —— 用户
-   * 没法先选「用哪个账号去拉」，只能先拉一次、看清用了谁、改完再拉一次；②用户一眼能看到这次会刷
-   * 哪些家（与 scopeProviders 同源，也就是真正会进请求的那份名单）。「更新日期」列在这一屏照样有
-   * 值：它显示的是各家清单**当前**的时刻（从 manage 视图读，见 providerRefreshedAt）—— 那正是
-   * 用户决定「要不要刷」的依据，等刷完才有值就太晚了。
+   * 为什么第一屏不是一张空表：①「模型来源」下拉与逐行「获取」按钮是随行渲染的，行还没有时它们就
+   * 不存在 —— 用户没法先选「用哪个账号去拉」，也没法只拉一家；②用户一眼能看到这次会刷哪些家（与
+   * scopeProviders 同源，也就是真正会进请求的那份名单）。「更新日期」列在待获取的行上也照样有值：
+   * 它显示的是这家清单**当前**的时刻（从 manage 视图读，见 providerRefreshedAt）—— 那正是用户
+   * 决定「要不要刷」的依据，等刷完才有值就太晚了。
+   *
+   * 「正在获取…」「获取失败…」两屏仍留给**全刷**（那是一次整表请求，逐行读数在那一刻全都不可信）；
+   * 逐行的失败只在脚注 + toast 里说，表照旧（见 loadRow）。
    */
   function intlBody() {
     if (status === 'loading') return stateRow(t('正在获取…'))
     if (status === 'error') return stateRow(t('获取失败：{message}', { message: errorText }))
-    if (status === 'idle') {
-      if (!pending.length) return stateRow(t('还没有可刷新的提供商：先在账号页添加一个账号'))
-      return pending.map(item => {
-        const at = formatTime(Number(shared().wbModelsPanel?.providerRefreshedAt?.(String(item.id || ''))) || 0)
+    if (!rows.length) return stateRow(t('还没有可刷新的提供商：先在账号页添加一个账号'))
+    return rows.map(row => {
+      const item = row.item
+      if (!item) {
+        const at = formatTime(Number(shared().wbModelsPanel?.providerRefreshedAt?.(row.provider)) || 0)
         return (
-          <TableRow key={String(item.id || '')}>
-            <TableCell>{nameCell(String(item.label || item.id || ''))}</TableCell>
-            <TableCell>{sourceCell(String(item.id || ''))}</TableCell>
+          <TableRow key={row.provider}>
+            <TableCell>{nameCell(row.label)}</TableCell>
+            <TableCell>{sourceCell(row.provider)}</TableCell>
             <TableCell><Badge variant='outline'>{t('待获取')}</Badge></TableCell>
             <TableCell>{rateCell('—')}</TableCell>
             <TableCell>{rateCell('—')}</TableCell>
             <TableCell>{rateCell(at || '—')}</TableCell>
+            <TableCell>{rowFetchButton(row)}</TableCell>
           </TableRow>
         )
-      })
-    }
-    if (!results.length) return stateRow(t('刷新完成，但没有得到任何结果'))
-    return results.map((item, index) => {
+      }
       const kind = kindOf(item)
       const count = Number(item.count)
       // 已刷新的行固定说清「来源」列会怎么变；其余行优先用后端给的原因（skipped / failed 的
@@ -676,13 +791,14 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
         ? t('远程目录已更新，「来源」列会显示为「远程」')
         : item.message || (item.fixed ? t('这家用固定模型清单，无可刷新') : t('本次没有取到新内容'))
       return (
-        <TableRow key={String(item.provider ?? index)}>
-          <TableCell>{nameCell(String(item.providerLabel || item.provider || ''))}</TableCell>
-          <TableCell>{sourceCell(String(item.provider || ''), item.accountId)}</TableCell>
+        <TableRow key={row.provider}>
+          <TableCell>{nameCell(row.label)}</TableCell>
+          <TableCell>{sourceCell(row.provider, item.accountId)}</TableCell>
           <TableCell><Badge variant={kind.variant}>{kind.label}</Badge></TableCell>
           <TableCell>{rateCell(count ? t('{n} 个', { n: count }) : '—')}</TableCell>
           <TableCell><span className='text-[11.5px] leading-[1.5] text-muted-foreground'>{note}</span></TableCell>
           <TableCell>{rateCell(refreshedText(item))}</TableCell>
+          <TableCell>{rowFetchButton(row)}</TableCell>
         </TableRow>
       )
     })
@@ -732,8 +848,9 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
               </>
             )}
             {/* 文案按「这次有没有真的拿到一份结果」定：拉失败时仍是「获取模型」（用户要的是再试
-                一次），成功之后才是「重新获取」 */}
-            <Button variant='outline' size='sm' title={t('从上游拉一次')} disabled={busy}
+                一次），成功之后才是「重新获取」。这是**全刷**那一颗（逐家都打一次上游）—— title 里
+                写明范围，免得与每行那颗只看一家的按钮混起来 */}
+            <Button variant='outline' size='sm' title={t('刷新全部家（逐家打上游）')} disabled={busy}
               onClick={() => { void load() }}>
               {busyKind === 'load' ? t('获取中…') : fetched ? t('重新获取') : t('获取模型')}
             </Button>

@@ -105,33 +105,45 @@ impl HeldHead {
     }
 }
 
+/// 一段（可能不完整的）SSE 文本里的 `data:` 载荷，逐帧交出来（**不解析**，
+/// 交出去的还是文本）。
+///
+/// 只认**成对换行结束**的块里的 `data:` 行，且载荷要 trim 后以 `{` 开头 ——
+/// 尾部没结束的那半截不算一帧（当成一帧解析失败，会把「还没读到终帧」读成
+/// 「没有终帧」）。`[DONE]` 哨兵与注释行（`: keepalive`）跳过。
+///
+/// 抽出来共用是有意的：本层的两条识别路径读的是**同一批字节** —— 「找
+/// `finish_reason`」（这里）与「攒出这一轮的正文/终帧」（`continuation` 的
+/// `TurnAccumulator`）。切帧口径写两份，就会出现一份算一帧、另一份算两帧的分歧，
+/// 而这种分歧只会表现为「偶尔少判一次 / 多判一次」，查不出根因。
+///
+/// 它对 `core::upstream` 内部可见（`pub(super)`）而不是全开：切帧口径是这一层的
+/// 私有约定，外层不该按它解析字节。
+pub(super) fn frame_payloads(text: &str) -> impl Iterator<Item = &str> {
+    text.split("\n\n")
+        .flat_map(|block| block.lines())
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(str::trim)
+        .filter(|data| !data.is_empty() && *data != "[DONE]" && data.starts_with('{'))
+}
+
 /// 从一段（可能不完整的）SSE 文本里找**第一个**非空 `choices[].finish_reason`。
 ///
-/// 只认**成对换行结束**的帧（`\n\n` 分块）：尾部没结束的那行留给下一次读 ——
-/// 否则会把半截 JSON 当成一帧解析失败，误判成「没看到 finish_reason」。
+/// 切帧口径见 [`frame_payloads`]（与本模块的预读窗口、`continuation` 的判定同源）。
 ///
-/// 大小写保留原值（判定由适配器按大小写不敏感比较）；`DONE` 哨兵与非 JSON 行跳过。
+/// 大小写保留原值（判定由适配器按大小写不敏感比较）；非 JSON 帧跳过。
 pub fn scan_finish_reason(text: &str) -> Option<String> {
-    for block in text.split("\n\n") {
-        for line in block.lines() {
-            let Some(data) = line.strip_prefix("data:") else {
-                continue;
-            };
-            let data = data.trim();
-            if data.is_empty() || data == "[DONE]" || !data.starts_with('{') {
-                continue;
-            }
-            let Ok(frame) = serde_json::from_str::<Value>(data) else {
-                continue;
-            };
-            let Some(choices) = frame.get("choices").and_then(Value::as_array) else {
-                continue;
-            };
-            for choice in choices {
-                if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
-                    if !reason.is_empty() {
-                        return Some(reason.to_string());
-                    }
+    for data in frame_payloads(text) {
+        let Ok(frame) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        let Some(choices) = frame.get("choices").and_then(Value::as_array) else {
+            continue;
+        };
+        for choice in choices {
+            if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+                if !reason.is_empty() {
+                    return Some(reason.to_string());
                 }
             }
         }

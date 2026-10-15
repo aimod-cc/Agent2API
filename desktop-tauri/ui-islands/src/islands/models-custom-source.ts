@@ -145,6 +145,18 @@ export function list(): CustomProviderRecord[] {
   return (shared().wbProviders?.customList?.() || []).filter(provider => isCustom(provider?.id))
 }
 
+/**
+ * 目录缓存的**原始引用**（不拷贝、不过滤）：聚合视图按它判「缓存换没换」。
+ *
+ * providers.js 每次 fetchCustomProviders 都把 customItems 整份换新对象，所以
+ * 引用相等 = 目录没变 = 聚合缓存仍有效；引用一变缓存即失效重建。这是聚合视图
+ * 唯一可靠的失效信号 —— 记录内容是运行期数据，逐条比对既贵又漏（新增 / 删除
+ * 家、改模型清单都会换引用，全都该重建）。
+ */
+export function listSource(): readonly CustomProviderRecord[] {
+  return shared().wbProviders?.customList?.() || []
+}
+
 /** 取一家（不存在返回 null —— 可能刚被别处删掉） */
 export function record(id: string): CustomProviderRecord | null {
   return list().find(provider => provider.id === id) || null
@@ -443,6 +455,7 @@ export async function fetchModels(id: string): Promise<{ total: number; added: n
 export type CustomSourceApi = {
   isCustom: typeof isCustom
   list: typeof list
+  listSource: typeof listSource
   record: typeof record
   buildView: typeof buildView
   setBinding: typeof setBinding
@@ -466,6 +479,7 @@ export type CustomSourceApi = {
 shared().wbModelsCustom = {
   isCustom,
   list,
+  listSource,
   record,
   buildView,
   setBinding,

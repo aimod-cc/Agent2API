@@ -130,21 +130,17 @@ impl FramePolicy {
 ///   - 同一个 delta 里没有别的有效载荷：`reasoning_content` 为空/缺失、
 ///     `tool_calls` 空数组、`function_call` 假值 —— 一帧里只要还有别的真东西，
 ///     它就不只是节拍，不能丢；
-///   - `choices[0].finish_reason` 是 null 或空串：终端帧丢了客户端就等不到收尾；
-///   - 顶层 `usage` 缺失或为 null：usage 帧同理（本函数只在旁路提取**之后**
-///     才被调用，所以统计不会因为丢弃而少记）；
-///   - 顶层没有 `error`：流内错误帧一律保留。
+///   - 顶层没有收尾/统计/错误载体：`finish_reason` 非真值、`usage` 缺失或 null、
+///     没有 `error` —— 这三样客户端只能从这一帧拿到，所以判据统一在
+///     [`carries_terminal_signal`]（本函数第一句就调它，不再自己抄一份）。
 ///
 /// `delta.role` 存在**不影响**判定：AutoClaw 的每一帧都带 `role:"assistant"`，
 /// 把它算进「有别的东西」就等于一条都丢不掉。
 pub fn is_newline_keepalive(chunk: &Value) -> bool {
-    let Some(object) = chunk.as_object() else {
-        return false;
-    };
-    if object.contains_key("error") {
-        return false;
-    }
-    if chunk.get("usage").is_some_and(|usage| !usage.is_null()) {
+    // 收尾 / 统计 / 错误的豁免**只有一处实现**（见 `carries_terminal_signal`），
+    // 别在这里再抄一份：两份同源判据一改一漏，就是 2026-10 那次「收尾帧被整帧吞掉」
+    // 的翻版（当时正是累积分支缺了这里的两条守卫）。
+    if carries_terminal_signal(chunk) {
         return false;
     }
     let Some(choice) = chunk
@@ -154,9 +150,6 @@ pub fn is_newline_keepalive(chunk: &Value) -> bool {
     else {
         return false;
     };
-    if choice.get("finish_reason").is_some_and(is_truthy) {
-        return false;
-    }
     let Some(delta) = choice.get("delta").and_then(Value::as_object) else {
         return false;
     };
@@ -181,6 +174,33 @@ pub fn is_newline_keepalive(chunk: &Value) -> bool {
         .unwrap_or(false);
     let carries_function_call = delta.get("function_call").map(is_truthy).unwrap_or(false);
     !(carries_reasoning || carries_tool_calls || carries_function_call)
+}
+
+/// 这一帧是否**带着客户端只能从它拿到的信息**：顶层 `error`、顶层 `usage` 有内容、
+/// 或 `choices[0].finish_reason` 为真值。
+///
+/// 用途是「按帧整体吞掉」的两条路径（保活丢弃、reasoning 累积）都必须先问它：
+/// 一帧可以既有噪声载荷、又是唯一的收尾/统计/错误载体，按载荷形状丢帧就会把
+/// 它们一起丢掉，而这三样客户端**只能**从这一帧拿到（`finish_reason` 缺了，
+/// 以它作为「这一轮结束了」契约的客户端会判流不完整；`error` 缺了，故障被静默）。
+///
+/// **这是那三样豁免的唯一实现** —— 增删条款只改这里，不要在任何调用点旁边再抄一份：
+/// 2026-10 那次事故（OfficeAce 的收尾帧带一个空 `reasoning_content`，被 reasoning
+/// 累积分支整帧吞掉，客户端永远等不到 stop reason）的成因就是同一份判据散成了两处、
+/// 只有一处补齐了守卫。
+pub fn carries_terminal_signal(chunk: &Value) -> bool {
+    if chunk.get("error").is_some() {
+        return true;
+    }
+    if chunk.get("usage").is_some_and(|usage| !usage.is_null()) {
+        return true;
+    }
+    chunk
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first().cloned())
+        .filter(|choice| choice.get("finish_reason").is_some_and(is_truthy))
+        .is_some()
 }
 
 /// 帧元数据（对应 Node 的 `meta = { id, model, created }`）
@@ -364,7 +384,14 @@ impl ReasoningCoalescer {
             })
             .unwrap_or(false);
 
-        if reasoning.is_some() && !other_delta {
+        // ── reasoning 累积：只吞「纯思考增量」────────────────────────
+        // 判据用 `reasoning.is_some()`（键在就算），所以 OfficeAce 那种
+        // `delta:{content:"", reasoning_content:""} + finish_reason + usage`
+        // 的**收尾帧**也会落进这里 —— 空串攒不出任何东西、`acc` 仍为空，
+        // 于是这一帧被整帧吞掉、连 `[DONE]` 处的冲刷都补不回来。
+        // 客户端因此永远等不到 stop reason（Qoder 直接判 incomplete_stream
+        // 且因「已吐过 tool_call 参数」拒绝重试）：见 `carries_terminal_signal`。
+        if reasoning.is_some() && !other_delta && !carries_terminal_signal(&chunk) {
             if let Some(text) = reasoning {
                 self.acc.push_str(&text);
             }
@@ -725,5 +752,132 @@ mod tests {
             .map(|frame| String::from_utf8_lossy(frame).to_string())
             .collect();
         assert_eq!(out, stream, "开关关着时七帧要一字不动地出去");
+    }
+
+    /// OfficeAce 工具调用流的**收尾帧原样字节**（NAS dev `debug_traffic`，
+    /// 请求 `74eeb698…`，上游第 17 帧）：`delta` 里同时有 `content:""` 与
+    /// `reasoning_content:""`，终止信息与统计只挂在**这一帧**上。
+    fn officeace_terminal_frame() -> String {
+        raw(json!({
+            "id": "as-92kpqm9s7j",
+            "object": "chat.completion.chunk",
+            "created": 1_791_906_909_u64,
+            "model": "deepseek-v4.1-flash",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "", "role": "assistant", "reasoning_content": ""},
+                "finish_reason": "tool_calls",
+                "flag": 0,
+            }],
+            "usage": {
+                "prompt_tokens": 293, "completion_tokens": 48, "total_tokens": 341,
+                "completion_tokens_details": {"reasoning_tokens": 11},
+            },
+            "service_tier": "default",
+        }))
+    }
+
+    /// 客户端拿不到 stop reason 就会判流不完整（Qoder 直接
+    /// `incomplete_stream` 且因已吐过 tool_call 参数而**拒绝重试** ⇒ 整条会话终止）。
+    /// 旧实现里这一帧被 reasoning 累积分支当成"纯思考增量"整帧吞掉：
+    /// `reasoning_content` 只要**键在**就算思考帧，而空串又攒不出任何东西，
+    /// 连 `[DONE]` 处的冲刷都补不回来 —— 这条按上游原字节回放，旧实现必红。
+    #[test]
+    fn a_terminal_frame_with_an_empty_reasoning_delta_still_reaches_the_client() {
+        let terminal = officeace_terminal_frame();
+        let mut coalescer = ReasoningCoalescer::new();
+        let mut out = feed(&mut coalescer, &terminal);
+        out.push_str(&feed(&mut coalescer, "data: [DONE]\n\n"));
+        assert!(
+            out.contains("\"finish_reason\":\"tool_calls\""),
+            "收尾帧不许被累积分支吃掉: {out}"
+        );
+        assert!(out.contains("\"usage\":{"), "usage 与终止信息同帧，一起丢了就没处补: {out}");
+        assert!(out.contains("data: [DONE]"), "[DONE] 照常透传");
+
+        // 对照：这一帧是**逐字节原样**出去的，没有被改写成"合成的一帧"
+        assert!(out.contains(terminal.trim_end()), "保留时原样透传: {out}");
+    }
+
+    /// 反对照：真正纯粹的思考增量照旧被累积（改动只放开"带终止/统计信息"那一格，
+    /// 没有把透传面扩大成"每帧都原样发"）。
+    #[test]
+    fn a_pure_reasoning_delta_is_still_absorbed() {
+        let mut coalescer = ReasoningCoalescer::new();
+        assert!(
+            feed(&mut coalescer, &frame(json!({"reasoning_content": "边想"}))).is_empty(),
+            "没有终止信息的思考帧仍应攒着"
+        );
+    }
+
+    /// `carries_terminal_signal` 的三支判据各自单独成立。
+    ///
+    /// 它是那三样豁免的**唯一**实现（保活与累积两条路径都只调它），所以三支都得能
+    /// 被单独钉住：上面那条端到端用例喂的帧**同时**带 `usage` 与 `finish_reason`，
+    /// 只覆盖了 usage 那一支 —— `finish_reason` 单独一支与 `error` 一支此前无人钉。
+    #[test]
+    fn the_terminal_signal_predicate_answers_each_clause_on_its_own() {
+        // finish_reason 单独一支（没有 usage）：真值算命中
+        assert!(carries_terminal_signal(&json!({
+            "choices": [{"delta": {"content": ""}, "finish_reason": "stop"}],
+        })));
+        // 假值形态一律不算：null / 空串（判据是 is_truthy，不是「键在不在」）
+        assert!(!carries_terminal_signal(&json!({
+            "choices": [{"delta": {"content": ""}, "finish_reason": Value::Null}],
+        })));
+        assert!(!carries_terminal_signal(&json!({
+            "choices": [{"delta": {"content": ""}, "finish_reason": ""}],
+        })));
+        // usage 单独一支：非 null 算命中，null 与整键缺失都不算
+        assert!(carries_terminal_signal(&json!({"usage": {"prompt_tokens": 1}})));
+        assert!(!carries_terminal_signal(&json!({"usage": Value::Null})));
+        assert!(!carries_terminal_signal(&json!({})));
+        // error 那一支：流内错误帧一律不许被按形状丢弃
+        assert!(carries_terminal_signal(&json!({"error": {"message": "boom"}})));
+        // 非对象载荷不该被误判成命中
+        assert!(!carries_terminal_signal(&json!([1, 2])));
+        assert!(!carries_terminal_signal(&json!("data")));
+    }
+
+    /// 流内错误帧**带着一个空思考增量**时，不许被 reasoning 累积分支整帧吞掉。
+    ///
+    /// 这是把两份同源判据合并成一处之后收紧的那一格：保活路径一直护着 `error`，
+    /// 而累积分支此前没有 —— 一个既带 `error`、`choices[0].delta` 里又有个空
+    /// `reasoning_content` 的帧会被当成"纯思考增量"吞掉，故障从此静默。
+    #[test]
+    fn an_error_frame_with_an_empty_reasoning_delta_is_not_absorbed() {
+        let mut coalescer = ReasoningCoalescer::new();
+        let error_frame = raw(json!({
+            "error": {"message": "upstream exploded", "type": "server_error"},
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "", "reasoning_content": ""},
+                "finish_reason": Value::Null,
+            }],
+        }));
+        let out = feed(&mut coalescer, &error_frame);
+        assert!(out.contains("upstream exploded"), "错误帧必须下发: {out}");
+    }
+
+    /// 攒了一半的思考在前、终止帧在后：顺序不能颠倒（客户端会先把思考当正文），
+    /// 且终止帧之后 `acc` 必须已清空、不再补一帧空的 reasoning。
+    #[test]
+    fn the_accumulated_reasoning_is_flushed_before_the_terminal_frame() {
+        let terminal = officeace_terminal_frame();
+        let mut coalescer = ReasoningCoalescer::new();
+        let mut out = feed(&mut coalescer, &frame(json!({"reasoning_content": "先想一句"})));
+        assert!(out.is_empty(), "还没到阈值时不该下发");
+        out.push_str(&feed(&mut coalescer, &terminal));
+        let reasoning_at = out
+            .find("先想一句")
+            .expect("攒着的思考应在终止帧之前被冲刷出去");
+        let terminal_at = out
+            .find("\"finish_reason\":\"tool_calls\"")
+            .expect("终止帧要下发");
+        assert!(reasoning_at < terminal_at, "顺序：思考在前、终止帧在后: {out}");
+        assert!(
+            feed(&mut coalescer, "data: [DONE]\n\n").trim() == "data: [DONE]",
+            "acc 已清空，[DONE] 处不该再补一帧空的思考"
+        );
     }
 }

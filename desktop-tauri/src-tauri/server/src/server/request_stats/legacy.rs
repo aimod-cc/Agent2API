@@ -5,10 +5,10 @@
 //!   1. **解析口径是数据契约的一部分**：`parse_requests_jsonl` /
 //!      `parse_daily_jsonl` 必须与 `record.rs` 的 serde 注解**共用同一份**
 //!      实现 —— 迁移项只负责「文件在哪、什么时候导、导完备份谁」；
-//!   2. **写库口径是存储规则的一部分**：导入后的裁剪边界（保留期）与裁剪语句
-//!      必须与运行期**同一套** —— 迁移期没有 `RequestStats` 实例（它由数据库
-//!      就绪之后才构造），所以把「从配置取保留期 + 算边界」这一步在这里暴露出来
-//!      （`legacy_bounds`），边界计算仍复用 `RetentionBounds::of`；
+//!   2. **写库口径是存储规则的一部分**：导入用的 `insert_request` /
+//!      `upsert_daily` 与运行期同一套；**导入后不再做任何裁剪** ——
+//!      请求统计全量保留（没有保留天数、没有条数上限），旧文件里带过来的
+//!      历史行有多少留多少，与「升级不丢数据」的取向一致；
 //!   3. **回填需要 `backfill` 与 `fold_into_daily`**（都是私有子模块/私有函数），
 //!      迁移项够不到它们。
 //! 所以这里只暴露**入口**（`parse_*` / `legacy_*` / `import_legacy_*`），
@@ -22,10 +22,10 @@
 
 use std::collections::BTreeMap;
 
-use super::record::{DailyEntry, RequestEntry, Retention, MAX_DAILY_DAYS, MAX_ENTRIES};
+use super::record::{DailyEntry, RequestEntry};
 use super::report::{push_account_accum, push_model_accum, push_provider_accum};
 use super::daily;
-use super::{backfill, sql, RetentionBounds};
+use super::{backfill, sql};
 
 /// 逐行解析明细旧文件（`requests.jsonl`），坏行跳过。
 ///
@@ -109,20 +109,9 @@ pub(crate) fn parse_daily_jsonl(text: &str) -> BTreeMap<String, DailyEntry> {
     out
 }
 
-/// 迁移项用的保留边界：读配置的内存快照，按与运行期**同一套**归一化算边界。
-///
-/// 为什么不让迁移项自己调 `config::retention_settings()` 再算：那会把「保留 N 天
-/// 是含今天在内的 N 个自然日」这条口径复制到第二处。运行期走
-/// `RequestStats::retention_bounds`（保留期来自回调），迁移期没有实例，所以
-/// 这里把「从配置取保留期」这一步单独暴露出来，边界计算仍共用
-/// [`RetentionBounds::of`]。
-pub(crate) fn legacy_bounds() -> RetentionBounds {
-    let settings = crate::server::config::retention_settings();
-    RetentionBounds::of(Retention {
-        request_days: settings.request_days,
-        daily_days: settings.daily_days,
-    })
-}
+// 这里原本有一个 `legacy_bounds`（给迁移导入的裁剪算保留期边界）。**已删除**：
+// 请求统计不再有保留期与容量闸，导入后不需要裁任何东西 —— 边界计算、配置读取
+// 与那条「保留 N 天 = 含今天在内的 N 个自然日」的口径一并失去存在理由。
 
 // 这里原本有一个 `legacy_counts`（返回明细与聚合两张表的行数，给「表非空
 // 即跳过」当幂等闸门）。**已删除**：T11 把迁移改成用户点「升级」触发之后，
@@ -181,13 +170,14 @@ pub(crate) fn backfill_report_line(changed: &[String]) -> String {
     backfill::report_line(changed)
 }
 
-/// 迁移项用：把旧明细整批写进 `requests` 表（**一个事务**，含导入后的裁剪）。
+/// 迁移项用：把旧明细整批写进 `requests` 表（**一个事务**）。
 ///
-/// 为什么导入后要裁一遍：旧实现只在**启动载入**时把内存裁到合规，盘上的文件
-/// 下一次写入才收敛 —— 所以旧文件里留着超期行、超容量行是常态（见
-/// `db/migrate.rs` 模块头对同类问题的说明）。不裁的话迁移完的库立刻就超限。
-/// 裁法与运行期同源：时间用 `delete_expired_requests`、容量用
-/// `trim_requests_capacity`（同一组函数，口径不可能漂）。
+/// ── 导入后为什么不再裁一遍 ──────────────────────────────────
+/// 旧实现只在**启动载入**时把内存裁到合规，盘上的文件下一次写入才收敛 ——
+/// 所以旧文件里留着超期行、超限行是常态。那是「保留期 + 容量闸」时代的产物；
+/// 现在请求统计**全量保留**（明细 / 正文 / 聚合都不再按天数或条数自动删），
+/// 旧文件里有多少历史行就导进来多少 —— 与「升级不丢数据」的取向一致，
+/// 用户想清历史可以自己在请求日志页清空。
 ///
 /// 用 `unchecked_transaction` 而不是 `transaction`：迁移框架给的签名是
 /// `&Connection`（`transaction()` 要 `&mut`），调用点 `Db::with` 全程只有一把锁、
@@ -205,14 +195,11 @@ pub(crate) fn backfill_report_line(changed: &[String]) -> String {
 pub(crate) fn import_legacy_requests(
     conn: &rusqlite::Connection,
     entries: &[RequestEntry],
-    bounds: &RetentionBounds,
 ) -> rusqlite::Result<usize> {
     let tx = conn.unchecked_transaction()?;
     for entry in entries {
         sql::insert_request(&tx, entry)?;
     }
-    sql::delete_expired_requests(&tx, bounds.requests_ms)?;
-    sql::trim_requests_capacity(&tx, MAX_ENTRIES)?;
     // 标记与数据同事务提交（本项幂等的全部依据）
     write_marker(&tx, MARKER_REQUESTS)?;
     tx.commit()?;
@@ -220,20 +207,20 @@ pub(crate) fn import_legacy_requests(
 }
 
 /// 迁移项用：把旧聚合整批写进 `request_daily` 表，再做一次**口径回填**
-/// （**一个事务**，含导入后的裁剪与回填写回）。
+/// （**一个事务**，含回填写回）。
 ///
 /// 返回（导入的天数, 被回填改写的日期）。调用方把后者记一行控制台日志 ——
 /// 那几天的数字与用户昨天看到的可能不同，出问题时日志里要有线索。
 ///
 /// ── 回填为什么在这里而不是运行期 ────────────────────────────
 /// 见 `backfill` 模块头：`accountStats` 是后加的维度，旧聚合行没有它，
-/// 报表只走聚合（跨年区间超出明细保留期），那段历史会整段落进「未知账号」。
+/// 报表只走聚合（跨年区间超出报表侧从明细取的 7 天窗口），那段历史会整段落进「未知账号」。
 /// 回填需要「缺维度的聚合行 + 足够的明细」同时在场，而这个组合**只可能出现在
 /// 刚导入完旧数据的这一刻**：新代码写出的行三个维度恒齐（`fold_into_daily`
 /// 恒建组），库里的行不会再出现「缺维度」状态。所以它是**一次性的升级动作**，
 /// 归迁移所有；运行期不再有调用点（旧实现的 `load()` 里那次已随本切片消失）。
 /// 安全边界「明细条数 >= 聚合行 requests 才重算」原样保留在 `backfill` 里 ——
-/// 明细已被保留期裁掉的日子没有重算依据，继续留在未知组比缩水好。
+/// 明细已被手动清理掉的日子没有重算依据，继续留在未知组比缩水好。
 ///
 /// ── 幂等：标记键与数据**同事务**（理由同 [`MARKER_DAILY`]）──────
 /// 聚合表同样会被运行期写入（用户点「升级」之前发过请求 → 当天那行已被
@@ -249,24 +236,16 @@ pub(crate) fn import_legacy_requests(
 pub(crate) fn import_legacy_daily(
     conn: &rusqlite::Connection,
     daily: &BTreeMap<String, DailyEntry>,
-    bounds: &RetentionBounds,
 ) -> rusqlite::Result<(usize, Vec<String>)> {
     let tx = conn.unchecked_transaction()?;
     for day in daily.values() {
         daily::upsert_daily(&tx, day)?;
     }
-    daily::delete_daily_before(&tx, &bounds.daily_key)?;
-    // 聚合的天数上限（与运行期同一个函数 —— 它自己先判行数再决定删不删）。
-    // 明细的保留期与容量不在这里管：那是 `import_legacy_requests` 的事，
-    // 而它按注册表顺序排在前面 —— 这边只是读它导进来的明细做回填。
-    daily::trim_daily_capacity(&tx, MAX_DAILY_DAYS)?;
-    // 裁剪之后再回填：已经超期被删掉的日子不必再花一次重算
-    //（顺序与旧 `load()` 一致：先裁聚合、再回填）
     let mut stored = daily::select_daily_map(&tx)?;
     let entries = match (sql::min_ts(&tx)?, sql::max_ts(&tx)?) {
         // 明细在这两个时间之间全取 —— 回填的判据要看「某天有多少条明细」，
         // 只取候选日会需要先知道候选日（那正是 backfill 内部算的），
-        // 全取一次更简单；上限 2 万条，一次性迁移可以接受。
+        // 全取一次更简单；一次性迁移可以接受。
         // 这一份是「旧库回填」（构建某天的聚合行），与实时累加同口径：
         // 排除测试行（见 `select_between` 与 `RequestEntry::is_test`）
         (Some(min), Some(max)) => sql::select_between(&tx, min, max, true)?,

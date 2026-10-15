@@ -452,14 +452,25 @@ pub fn shim_js() -> &'static str {
       return httpCall(request.method || 'GET', request.path || '/', request.body);
     },
     check_update: function () {
-      // 网页端走镜像更新（拉新镜像重启容器），不提供安装包下载
-      return Promise.resolve({
-        currentVersion: 'web', latestVersion: 'web', hasUpdate: false,
-        notes: '网页端通过 Docker 镜像更新：拉取新镜像后重启容器即可。',
-        publishedAt: '', pageUrl: '', installerKind: 'none',
-      });
+      // 网页端没有「壳打包的版本号」这个概念：不带 current，服务端按自己的
+      // 编译期版本比较（见 api/update 的 check 分支）。返回里带 selfUpdate /
+      // serverAsset / backupAvailable —— 面板据此决定显示「一键更新」、
+      // 「回滚」还是退回手动升级命令，不再由这里硬编码。
+      return call('GET', '/api/update/check');
     },
     get_update_status: function () { return call('GET', '/api/update/status'); },
+    // 下载三件套：下载落在服务端的数据目录（/data/updates），进度由面板轮询。
+    // 桌面端这三个走壳命令（壳要往后端转发），网页端直接打接口 —— 桥的两侧
+    // 名字一致，面板代码不感知差异。
+    download_update: function (args) {
+      var payload = args || {};
+      return call('POST', '/api/update/download', {
+        url: String(payload.url || ''),
+        name: payload.name != null ? String(payload.name) : '',
+      });
+    },
+    update_progress: function () { return call('GET', '/api/update/progress'); },
+    cancel_update: function () { return call('POST', '/api/update/cancel', {}); },
     backend_status: function () {
       return Promise.resolve({ ready: true, port: null, portFromEnv: false, failure: null });
     },
@@ -526,34 +537,121 @@ pub fn shim_js() -> &'static str {
     // 文件对话框类：导入要走文件选择，单独给一条带输入框的链路
     if (command === 'import_accounts') return importAccountsViaFile();
     return Promise.reject(new Error(
-      command === 'download_update' || command === 'update_progress' || command === 'cancel_update'
-      || command === 'run_installer'
-        ? '软件更新在网页端不可用：请通过 Docker 镜像更新'
+      command === 'run_installer'
+        ? '网页端不启动安装程序：容器内的更新请用「一键更新」（设置 → 软件更新）'
         : SHELL_UNAVAILABLE
     ));
   }
 
-  async function importAccountsViaFile() {
+  /**
+   * 网页端的「导入账号」：浏览器没有原生文件对话框，用 <input type=file> 顶替。
+   *
+   * 移动端的三处坑（都踩过，改动时别退回去）：
+   *   · 输入框**不能** `display:none` —— iOS Safari 会忽略对隐藏 file input 的
+   *     程序化 `click()`，表现成「点了没反应」。改成视觉隐藏（离屏 + 透明）。
+   *   · 在系统选择器里点「取消」时 `change` 不触发，Promise 永远挂着、按钮卡在
+   *     「导入中…」。用 window focus / visibilitychange 兜底：回到页面后仍没拿到
+   *     文件就按取消落定（与桌面壳返回 `{canceled:true}` 同一契约）。
+   *   · `accept` 只写扩展名：Android 各家文件管理器对 MIME 形（application/json）
+   *     支持不一，带上它反而可能把 .json 过滤掉。
+   *
+   * 解析口径与桌面壳 `commands.rs::import_accounts` 对齐，见 buildImportPayload。
+   */
+  function importAccountsViaFile() {
     return new Promise(function (resolve, reject) {
       var input = document.createElement('input');
       input.type = 'file';
-      input.accept = '.json,application/json';
-      input.style.display = 'none';
-      input.addEventListener('change', async function () {
-        var file = input.files && input.files[0];
+      input.accept = '.json';
+      input.setAttribute('aria-hidden', 'true');
+      input.tabIndex = -1;
+      // 视觉隐藏而非 display:none（理由见上）
+      input.style.position = 'fixed';
+      input.style.left = '-9999px';
+      input.style.top = '0';
+      input.style.width = '1px';
+      input.style.height = '1px';
+      input.style.opacity = '0';
+
+      var settled = false;      // 结果只落定一次
+      var picked = false;       // change 是否已同步拿到文件（压过取消兜底）
+      var settleTimer = null;
+
+      function cleanup() {
+        window.removeEventListener('focus', onReturn);
+        document.removeEventListener('visibilitychange', onVisibility);
+        if (settleTimer !== null) { window.clearTimeout(settleTimer); settleTimer = null; }
         input.remove();
-        if (!file) { reject(new Error('未选择文件')); return; }
-        try {
-          var text = await file.text();
-          var payload = JSON.parse(text);
-          resolve(await call('POST', '/api/accounts/import', payload));
-        } catch (error) {
+      }
+      function settleCancel() {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve({ canceled: true });
+      }
+      function onReturn() {
+        if (settleTimer !== null) return;
+        // 给系统选择器一点时间派发 change，再判定「没选」= 取消
+        settleTimer = window.setTimeout(function () {
+          settleTimer = null;
+          if (!picked) settleCancel();
+        }, 400);
+      }
+      function onVisibility() {
+        if (document.visibilityState === 'visible') onReturn();
+      }
+
+      input.addEventListener('change', function () {
+        var file = input.files && input.files[0];
+        if (!file) { settleCancel(); return; }
+        picked = true;          // 同步置位：兜底那条链不再当取消
+        cleanup();
+        file.text().then(function (text) {
+          var payload;
+          try {
+            payload = buildImportPayload(JSON.parse(text));
+          } catch (error) {
+            settled = true;
+            reject(asError(error));
+            return;
+          }
+          call('POST', '/api/accounts/import', payload).then(
+            function (result) { settled = true; resolve(result); },
+            function (error) { settled = true; reject(asError(error)); }
+          );
+        }, function (error) {
+          settled = true;
           reject(asError(error));
-        }
+        });
       });
+
       document.body.appendChild(input);
+      window.addEventListener('focus', onReturn);
+      document.addEventListener('visibilitychange', onVisibility);
       input.click();
     });
+  }
+
+  /**
+   * 把用户选的文件整成 `POST /api/accounts/import` 的请求体。
+   * 与桌面壳 `commands.rs::import_accounts` + `unwrap_envelope_file` 同口径：
+   * 「导出文件」（顶层 accounts）、「裸账号数组」、以及网页端旧版把 `{success,data}`
+   * 信封整个存进文件的情况 —— 三种形状都认，自定义提供商定义一并带上。
+   */
+  function buildImportPayload(parsed) {
+    var document_ = parsed;
+    if (document_ && !Array.isArray(document_)
+      && !document_.accounts && document_.data && document_.data.accounts) {
+      document_ = document_.data;
+    }
+    var accounts = Array.isArray(document_) ? document_ : (document_ && document_.accounts);
+    if (!Array.isArray(accounts)) {
+      throw new Error('文件里没有 accounts 数组（不是本程序导出的账号文件？）');
+    }
+    var body = { accounts: accounts };
+    if (document_ && !Array.isArray(document_) && document_.customProviders) {
+      body.customProviders = document_.customProviders;
+    }
+    return body;
   }
 
   // ── 装配对外接口 ─────────────────────────────────────────
@@ -789,6 +887,13 @@ pub fn shim_js() -> &'static str {
     removeProxyPoolItem: function (id) { return call('POST', '/api/proxies/pool/remove', { id: String(id || '') }); },
     testProxyPoolItem: function (id) { return call('POST', '/api/proxies/pool/test', { id: String(id || '') }); },
     syncClashToProxyPool: function () { return call('POST', '/api/proxies/pool/sync-clash', {}); },
+    // 补建订阅节点监听器（与桌面壳 bridge.rs 的同名方法成对存在，契约见 api::proxies）
+    // payload 可选 `{ids}`（批量测试把那一批条目一次性补建并等就绪；不带 = 只补已有缺口）
+    provisionProxyPool: function (payload) { return call('POST', '/api/proxies/pool/provision', payload || {}); },
+    // 代理设置（「网络代理」页的设置弹窗；与桌面壳 bridge.rs 的同名方法
+    // 成对存在，契约见 api::proxies 的模块头 settings 两条）
+    getProxySettings: function () { return call('GET', '/api/proxies/settings'); },
+    saveProxySettings: function (payload) { return call('POST', '/api/proxies/settings', payload || {}); },
     // 订阅（「网络代理」页的订阅区块；与桌面壳 bridge.rs 的同名方法成对存在，
     // 契约见 api::subscriptions 的模块头 —— 写操作后端投一条内核命令（异步），
     // 节点数与运行状态由轮询 kernel 看结果）
@@ -799,8 +904,13 @@ pub fn shim_js() -> &'static str {
     removeSubscription: function (id) { return call('POST', '/api/subscriptions/remove', { id: String(id || '') }); },
     decodeQrImage: function (payload) { return call('POST', '/api/subscriptions/decode-qr', payload || {}); },
     getKernelStatus: function () { return call('GET', '/api/subscriptions/kernel'); },
-    downloadKernel: function () { return call('POST', '/api/subscriptions/kernel/download', {}); },
+    downloadKernel: function (payload) { return call('POST', '/api/subscriptions/kernel/download', payload || {}); },
+    cancelKernelDownload: function () { return call('POST', '/api/subscriptions/kernel/download/cancel', {}); },
     restartKernel: function () { return call('POST', '/api/subscriptions/kernel/restart', {}); },
+    removeKernel: function () { return call('POST', '/api/subscriptions/kernel/remove', {}); },
+    // 文件夹选择框是**壳的能力**（web 版没有壳）：回 `unsupported`，界面据此提示
+    // 手输路径 —— 只回 `canceled` 的话，点一下按钮什么都不会发生，用户会以为卡了
+    pickFolder: function () { return Promise.resolve({ canceled: true, unsupported: true }); },
 
     // ── 积分 / 签到 ──
     getUsage: function () { return call('GET', '/api/usage'); },
@@ -905,6 +1015,10 @@ pub fn shim_js() -> &'static str {
     runCheckinActivity: function (id, mode) { return call('POST', '/api/checkin-activity', { id: id, mode: mode }); },
     // 签到中心的聚合快照（与 bridge.rs 的同名方法同一路径）
     getCheckinCenter: function () { return call('GET', '/api/checkin-center'); },
+    // Qoder UMID 组件（设备风控身份）的状态与安装（与 bridge.rs 的同名方法成对）。
+    // 路径挂 protected：headless 形态必须带面板凭据，所以页面只能走桥、不能裸 fetch。
+    getQoderUmid: function () { return call('GET', '/api/qoder-umid'); },
+    installQoderUmid: function () { return call('POST', '/api/qoder-umid/install', {}); },
     // 签到记录明细台账（查询 / 清空；参数对象里空值不带，与 bridge.rs 成对）
     getCheckinRecords: function (params) {
       const query = new URLSearchParams();
@@ -934,7 +1048,7 @@ pub fn shim_js() -> &'static str {
       return call('POST', '/api/scheduled-tasks/' + encodeURIComponent(String(id || '')) + '/run', {});
     },
 
-    // ── 软件更新（检查可用，下载 / 安装明确拒绝）──
+    // ── 软件更新（检查 / 下载 / 容器内更新；只有「跑安装程序」是桌面专有）──
     checkUpdate: function () { return invokeShell('check_update'); },
     getUpdateStatus: function () { return call('GET', '/api/update/status'); },
     // 「软件更新」的出网线路（null = 直连）：与桌面 bridge 对齐，面板下拉读写
@@ -950,6 +1064,15 @@ pub fn shim_js() -> &'static str {
       return invokeShell('run_installer', { path: String(path || ''), restart: restart !== false });
     },
     openReleasePage: function (url) { return invokeShell('open_release_page', { url: String(url || '') }); },
+    // ── 容器内更新（Linux headless / Docker）：安装 → 重启 ──
+    // 三步走：下载（上面三条已接）→ installUpdate（校验 sha256 后原地替换
+    // 二进制与 ui 目录）→ restartService（进程优雅退出，容器由 restart 策略
+    // 拉起，同一个容器、可写层保留）。未开 AGENT2API_SELF_UPDATE 的部署由
+    // 后端 400 拒绝；面板按 check 返回的 selfUpdate 字段决定是否显示这些入口。
+    // 回滚用的是 install 留下的 .backup 备份（同一套替换逻辑的反向操作）。
+    installUpdate: function () { return call('POST', '/api/update/install', {}); },
+    rollbackUpdate: function () { return call('POST', '/api/update/rollback', {}); },
+    restartService: function () { return call('POST', '/api/update/restart', {}); },
 
     // ── 出站指纹脱敏 ──
     getSanitize: function () { return call('GET', '/api/sanitize'); },
@@ -1003,8 +1126,14 @@ pub fn shim_js() -> &'static str {
     exportLogs: function () { return invokeShell('export_logs'); },
 
     // ── 请求统计报表 / 数据保留 ──
-    getStatsSummary: function (range) {
-      return call('GET', '/api/stats/summary?range=' + encodeURIComponent(range));
+    // dates（`{start, end}`，`YYYY-MM-DD`）只在 range=custom 时给，
+    // 与桌面壳 bridge.rs 的同名方法同一口径（toQuery 负责跳过空值）
+    getStatsSummary: function (range, dates) {
+      return call('GET', '/api/stats/summary' + toQuery({
+        range: range,
+        startDate: dates && dates.start,
+        endDate: dates && dates.end,
+      }));
     },
     getStatsRequests: function (query) { return call('GET', '/api/stats/requests' + toQuery(query)); },
     getStatsRequestFilters: function () { return call('GET', '/api/stats/requests/filters'); },

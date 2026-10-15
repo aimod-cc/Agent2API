@@ -1,13 +1,15 @@
 import * as React from 'react'
 import { createRoot } from 'react-dom/client'
-import { SegmentedControl, type SegmentedControlOption } from '@ui'
+import { Input, SegmentedControl, type SegmentedControlOption } from '@ui'
 import {
   RANGES, DEFAULT_RANGE, RANGE_KEY, RANGE_LABEL, RANGE_OPTION_LABEL,
-  readRange, round1,
+  CUSTOM_RANGE, DAY_KEY_RE,
+  readRange, readCustomRange, saveCustomRange, dayKey, round1,
+  modelColorMap, TIP_DOT_FALLBACK,
   overviewCells, rankRows, rankTotalText, donutView,
   heatmapView, heatLegendItems, heatThresholdsOf, cacheRateCells,
   cacheTrendView, dailyTrendView,
-  type CacheTrendView, type ChartText, type DailyTrendView, type HeatmapView,
+  type CacheTrendView, type ChartText, type CustomRange, type DailyTrendView, type HeatmapView,
   type RankRowView, type DonutView,
   type StatsDay, type StatsGroup, type StatsHour, type StatsSummary,
 } from './report-charts'
@@ -63,8 +65,8 @@ type IntervalTask = { id?: string; enabled?: boolean; interval?: number; unit?: 
 
 /** 本页用到的壳侧接口（见 bridge.rs 的统计那一段） */
 type StatsBridge = {
-  /** GET /api/stats/summary?range=<档位> */
-  getStatsSummary(range: string): Promise<StatsSummary | null | undefined>
+  /** GET /api/stats/summary?range=<档位>[&startDate=&endDate=]（dates 只在自定义区间时给） */
+  getStatsSummary(range: string, dates?: CustomRange): Promise<StatsSummary | null | undefined>
   /** 读自动刷新间隔配置（scheduledTasks.reportAutoRefresh） */
   getScheduledTasks(): Promise<{ tasks?: IntervalTask[] } | null | undefined>
 }
@@ -115,7 +117,7 @@ const RANGE_OPTIONS: readonly SegmentedControlOption<string>[] = RANGES.map(valu
  * 不能改：每一条都是踩过的边界）。仍是 `.tip-q` + data-tip 的既有形态 —— 与定时任务页
  * 同一处理，由 tooltip.js 的 MutationObserver 增强 React 插入的节点。
  */
-const TIP_ACCOUNTS = t('所选范围内每个账号各消耗了多少 Token，按 Token 用量从多到少排。账号是比提供商更细的一维：同一家可以挂多个账号，转发时按优先级在候选链上依次尝试，所以这里反映的是「具体哪个登录态在出力」。百分比按本区间的总 Token 数算（这一块只看用量，请求次数与成功率在概览卡片里）。「未知账号」是指那批请求没有账号身份：走默认登录态转发（未配置账号列表）时会这样；这一维上线前写出的旧聚合行也没有账号明细，但它们会在启动时按明细自动补算回来 —— 只有明细已被保留期清掉（默认 30 天）的那几天补不回来，仍留在「未知账号」里，那是确实无从恢复的部分。')
+const TIP_ACCOUNTS = t('所选范围内每个账号各消耗了多少 Token，按 Token 用量从多到少排。账号是比提供商更细的一维：同一家可以挂多个账号，转发时按优先级在候选链上依次尝试，所以这里反映的是「具体哪个登录态在出力」。百分比按本区间的总 Token 数算（这一块只看用量，请求次数与成功率在概览卡片里）。「未知账号」是指那批请求没有账号身份：走默认登录态转发（未配置账号列表）时会这样；这一维上线前写出的旧聚合行也没有账号明细，但它们会在升级导入旧数据时按明细自动补算回来 —— 只有明细已被手动清理掉的那几天补不回来，仍留在「未知账号」里，那是确实无从恢复的部分。')
 const TIP_PROVIDERS = t('所选范围内每个提供商各消耗了多少 Token，按 Token 用量从多到少排。同一个模型名可能有多家都能提供，网关按设置页「转发路由」的优先级依次尝试，所以占比也反映了实际落到谁身上。百分比按本区间的总 Token 数算（这一块只看用量，请求次数与成功率在概览卡片里）。「未知」是指那批请求没记下承载它的提供商 —— 主要是记录提供商这个功能上线之前的旧明细，其次是请求在选定上游之前就失败了（请求体非法、模型不存在、没有可用账号）。这一维与账号那一维不同：旧明细里根本没有「哪家承载」的信息（早期版本只有单一上游，但那是配置事实而非逐条记录），所以无法回算，旧数据会一直留在「未知」里；此后新产生的请求都会记上具体的提供商。')
 const TIP_MODELS = t('所选范围内每个模型各消耗了多少 Token，按用量从多到少排，扇区角度即占比。中心是这一维的合计（等于概览里的总 Token），右侧每行给出该模型的 Token 用量与百分比。扇区内的百分比只在 ≥3% 时标出，更小的会挤成一团 —— 完整读数在右侧列表与悬停气泡里。颜色按用量排名分配：最大的那段是红色，依次往后；同一份报表里换个维度看，配色口径不变。')
 const TIP_PROVIDERS_PIE = t('所选范围内每个提供商各消耗了多少 Token，按用量从多到少排，扇区角度即占比。同一个模型名可能有多家都能提供，网关按设置页「转发路由」的优先级依次尝试，所以占比也反映了实际落到谁身上。中心是这一维的合计（等于概览里的总 Token），右侧每行给出该提供商的 Token 用量与百分比。「未知」是指那批请求没记下承载它的提供商 —— 主要是记录提供商这个功能上线之前的旧明细，其次是请求在选定上游之前就失败了。')
@@ -400,13 +402,16 @@ function CacheTrendChart({ view }: { view: CacheTrendView }) {
         ))}
       </svg>
       {/* 热区单独一层 SVG 覆盖在图形之上（.chart-hit-layer），指针事件只落在这里 ——
-          柱子 / 折线自身不必承担 hover 语义，零值日也能有读数 */}
+          柱子 / 折线自身不必承担 hover 语义，零值日也能有读数。
+          `data-tip-variant='plain'`：这两张图的读数是「日期 / 总量 / 每模型一行」的
+          表格形态，气泡用浅底卡片样式而不是默认的品牌蓝底（见 tooltip.css 的变体段） */}
       {view.hits ? (
         <svg className='report-svg chart-hit-layer' width={width} height={height}
           viewBox={`0 0 ${width} ${height}`} aria-hidden='true'>
           {view.hits.map(hit => (
             <rect className='chart-hit' x={hit.x} y={plotTop} width={hit.width}
-              height={round1(plotH)} tabIndex={-1} data-tip={hit.tip} key={hit.key} />
+              height={round1(plotH)} tabIndex={-1} data-tip={hit.tip}
+              data-tip-variant='plain' key={hit.key} />
           ))}
         </svg>
       ) : null}
@@ -450,7 +455,8 @@ function DailyTrendChart({ view }: { view: DailyTrendView }) {
           viewBox={`0 0 ${width} ${height}`} aria-hidden='true'>
           {view.hits.map(hit => (
             <rect className='chart-hit' x={hit.x} y={plotTop} width={hit.width}
-              height={round1(plotH)} tabIndex={-1} data-tip={hit.tip} key={hit.key} />
+              height={round1(plotH)} tabIndex={-1} data-tip={hit.tip}
+              data-tip-variant='plain' key={hit.key} />
           ))}
         </svg>
       ) : null}
@@ -554,6 +560,8 @@ const EMPTY_DATA: PageData = { summary: null, error: null }
 function ReportPage() {
   const [data, setData] = React.useState<PageData>(EMPTY_DATA)
   const [range, setRange] = React.useState<string>(readRange)
+  /** 自定义区间（起止本地自然日）：只有档位选中「自定义」时随请求发出 */
+  const [custom, setCustom] = React.useState<CustomRange>(readCustomRange)
   /** 自动刷新配置：挂载前的推送已经写在模块级变量里，这里取的就是最新的那份 */
   const [auto, setAuto] = React.useState(() => ({ ms: autoRefreshMs, enabled: autoEnabled }))
   /** 单位口径（中文亿/万 ⇄ 英文 M/k）变了就整页重算：数值一个都没变，变的只是「怎么写成字」，
@@ -563,6 +571,8 @@ function ReportPage() {
   /** 当前档位：异步回调（loadPanel）必须立刻读到最新值，state 的更新要等下一次渲染，
    *  所以写入时同时落 ref 与 state，读一律走 ref.current */
   const rangeRef = React.useRef(range)
+  /** 自定义区间同理（见 rangeRef 的说明）：日期一次改一个端，异步回调必须读到配好对的那份 */
+  const customRef = React.useRef(custom)
 
   const applyData = React.useCallback((next: PageData) => {
     setData(next)
@@ -580,10 +590,13 @@ function ReportPage() {
     void syncAutoRefresh()
     const token = ++seq
     const requested = rangeRef.current
+    // 自定义区间的两个日期跟在这条请求上（后端只在 range=custom 时读它们；
+    // 其余档位不带，避免出现「档位与日期各说各话」的请求）
+    const dates = requested === CUSTOM_RANGE ? customRef.current : undefined
     try {
       const api = shared().workbuddyDesktop
       if (!api) throw new Error('后端桥不可用')
-      const payload = await api.getStatsSummary(requested)
+      const payload = await api.getStatsSummary(requested, dates)
       if (token !== seq) return summaryValue
       if (!payload || typeof payload !== 'object') throw new Error('后端未返回报表数据')
       summaryValue = payload
@@ -619,6 +632,31 @@ function ReportPage() {
       localStorage.setItem(RANGE_KEY, value)
     } catch { /* 存储不可用时只影响下次启动，本次会话照常 */ }
     void loadPanel()
+  }, [loadPanel])
+
+  /**
+   * 改自定义区间的某一端（日期输入框的 onChange）。
+   *
+   * 三条约定：
+   *   - 只采纳合法的 `YYYY-MM-DD`：浏览器清空日期输入时给空串，放它过去会让请求带上
+   *     非法参数（后端 400）——界面停在旧日期上更好解释；
+   *   - 两端交叉（start 被改到晚于 end）时把另一端**拉齐到同一天**，而不是报错或
+   *     静默 400：用户手输日期时这是最常见的一次失误；
+   *   - 只有当前档位就是「自定义」时才重拉（在别的档位上改日期不影响正在看的数据）。
+   */
+  const changeCustomDate = React.useCallback((patch: Partial<CustomRange>): void => {
+    const next: CustomRange = { ...customRef.current, ...patch }
+    if (!DAY_KEY_RE.test(next.start) || !DAY_KEY_RE.test(next.end)) return
+    // 两端交叉时「谁被改就把另一端拉到同一天」，不报错也不静默失败
+    const normalized: CustomRange = next.start <= next.end
+      ? next
+      : patch.start
+        ? { start: next.start, end: next.start }
+        : { start: next.end, end: next.end }
+    customRef.current = normalized
+    setCustom(normalized)
+    saveCustomRange(normalized)
+    if (rangeRef.current === CUSTOM_RANGE) void loadPanel()
   }, [loadPanel])
 
   /* ─── 挂载 / 卸载 ───────────────────────── */
@@ -689,16 +727,29 @@ function ReportPage() {
   const loadingBlock = placeholder(t('正在加载…'))
   const loading = errorBlock ?? loadingBlock
 
+  /** 模型 → 色（环形图与图表气泡共用一份，见 modelColorMap）：气泡里模型行前那枚
+   *  色点与环形图扇区、图例上的颜色因此说的是同一个模型。
+   *  `modelList` 在 summary 不变时是同一个数组引用，这个映射只在换了一批数据后重算 */
+  const modelColors = React.useMemo(() => modelColorMap(modelList || []), [modelList])
+  /** 查色：区间级汇总里没有的模型（极端数据）给中性灰兜底，不借色板色（会撞色） */
+  const colorOf = React.useCallback(
+    (label: string) => modelColors.get(label) || TIP_DOT_FALLBACK,
+    [modelColors],
+  )
+
   // 图表的坐标全靠容器宽度，所以视图只在这里算一次（同一个 view 传给判断与渲染两处）
   const heatView = summary ? heatmapView(heatmapDays, heatWidth[1]) : null
-  const trendView = summary ? cacheTrendView(cacheTrendHours, trendWidth[1]) : null
-  const dailyView = summary ? dailyTrendView(dailyDays, dailyWidth[1]) : null
+  const trendView = summary ? cacheTrendView(cacheTrendHours, trendWidth[1], colorOf) : null
+  const dailyView = summary ? dailyTrendView(dailyDays, dailyWidth[1], colorOf) : null
+
+  /** 日期输入框的上限（不许选未来：后端聚合里本来也没有未来的行） */
+  const today = dayKey(new Date())
 
   return (
     <>
       {/* ── 统计概览 ──
            时间范围控件住在这一块的面板头里：它控制的就是这一页的统计口径，与旁边的读数
-           同处一行最直观 */}
+           同处一行最直观。选中「自定义」时右端展开两个日期输入（起止本地自然日） */}
       <section className='panel'>
         <div className='panel-head'>
           <h2>{t('统计概览')}</h2>
@@ -706,6 +757,21 @@ function ReportPage() {
           <div className='head-actions'>
             <SegmentedControl options={RANGE_OPTIONS} value={range}
               onValueChange={changeRange} aria-label={t('报表时间范围')} />
+            {range === CUSTOM_RANGE ? (
+              <span className='report-date-range'>
+                {/* 宽度走 Tailwind 类（覆盖 Input 的 w-full）：在 flex 行里 w-full
+                    会各撑一半，两个日期框会被拉得很宽 */}
+                <Input type='date' className='report-date-input w-[132px]' value={custom.start}
+                  max={custom.end || today} aria-label={t('开始日期')}
+                  title={t('起始日期（含当天）')}
+                  onChange={event => changeCustomDate({ start: event.target.value })} />
+                <span className='report-date-sep' aria-hidden='true'>～</span>
+                <Input type='date' className='report-date-input w-[132px]' value={custom.end}
+                  min={custom.start || undefined} max={today} aria-label={t('结束日期')}
+                  title={t('结束日期（含当天）')}
+                  onChange={event => changeCustomDate({ end: event.target.value })} />
+              </span>
+            ) : null}
           </div>
         </div>
         <div className='panel-body'>

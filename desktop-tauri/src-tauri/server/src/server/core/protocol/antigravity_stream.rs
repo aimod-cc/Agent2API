@@ -42,8 +42,9 @@
 //! 签名随 tool_call 增量带出，位置取 Google 自家 OpenAI 兼容端点的官方字段
 //! `extra_content.google.thought_signature`；客户端下一轮原样带回时由请求侧
 //! （`antigravity_outbound` 的 `call_signature`）回填到 `functionCall`。
-//! 客户端不回带 → 省略（不发明默认签名）。非流式客户端走聚合器时该字段会被
-//! `merge_tool_call` 丢弃（聚合形态只保留 id/type/name/arguments）。
+//! 客户端不回带 → 省略（不发明默认签名）。非流式客户端走聚合器时该字段由
+//! `merge_tool_call` 保留（2026-10-14 前曾被丢弃，导致下一轮工具续接被上游
+//! 400「missing a thought_signature」，issue #237）。
 //!
 //! ── 硬约束 ──────────────────────────────────────────────────
 //! release 是 `panic=abort`：本文件零 unwrap/expect/panic。

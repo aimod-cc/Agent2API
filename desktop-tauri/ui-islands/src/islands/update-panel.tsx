@@ -64,6 +64,16 @@ import { t } from '../i18n'
 /** 进度轮询间隔：下载 25MB 左右，1 秒足够顺滑又不会太密（照旧实现） */
 const POLL_MS = 1000
 
+/**
+ * 容器内更新（Linux headless / Docker）的下载速度与安装包不同量级：
+ * 服务端包约 10MB 出头，仍然 1 秒一轮。
+ */
+const RESTART_SECONDS = 8
+
+/** 探活重试次数与间隔：容器冷启动通常 1-3 秒，给到 10 秒足够 */
+const HEALTH_RETRIES = 10
+const HEALTH_INTERVAL_MS = 1000
+
 /** 徽章语义色记号（app.js 的 renderTopbarStatus 优先读 data-tone，见其 mirror 注释） */
 type BadgeTone = '' | 'ok' | 'warn' | 'bad'
 
@@ -75,8 +85,9 @@ const BADGE_VARIANT: Record<BadgeTone, 'outline' | 'success' | 'warning' | 'dest
   bad: 'destructive',
 }
 
-/** 下载 / 安装的界面阶段：决定那颗按钮的文案与显隐 */
-type DownloadPhase = 'idle' | 'downloading' | 'failed' | 'ready'
+/** 下载 / 安装的界面阶段：决定那颗按钮的文案与显隐。
+ *  `restarting` 只有容器内更新会走到（安装完成 → 服务重启 → 页面自动刷新）。 */
+type DownloadPhase = 'idle' | 'downloading' | 'failed' | 'ready' | 'restarting'
 
 /** 面板快照：React 侧只读它，命令式流程只写它 */
 type Snapshot = {
@@ -103,6 +114,8 @@ type Snapshot = {
   checking: boolean
   /** 下载 / 安装请求在途：按钮临时禁用（与旧实现置 DOM disabled 等价） */
   actionBusy: boolean
+  /** 重启倒计时读数（仅 phase === 'restarting' 时有意义） */
+  restartSeconds: number
 }
 
 const INITIAL_SNAPSHOT: Snapshot = {
@@ -119,6 +132,7 @@ const INITIAL_SNAPSHOT: Snapshot = {
   readyPath: '',
   checking: false,
   actionBusy: false,
+  restartSeconds: 0,
 }
 
 /* ─── 工具 ─────────────────────────────────── */
@@ -166,8 +180,29 @@ function isMacInstaller(info: UpdateInfo | null): boolean {
   return /Mac|iPhone|iPad/.test(navigator.userAgent || '')
 }
 
+/**
+ * 容器内更新（Linux headless / Docker）与桌面安装包是**两条不同的路**，全文件
+ * 按这一个判定分流：桌面端 selfUpdate 恒为 false，下面每个分支都原样走回旧行为。
+ *
+ *   · 桌面：后端给 `asset`（NSIS / dmg 安装器）→ 下载 → 由壳启动安装程序；
+ *   · 容器：后端给 `serverAsset`（服务端更新包）→ 下载 → 服务端自己原地替换
+ *     二进制与 ui 目录 → 重启进程（容器 restart 策略拉起）。
+ */
+function isSelfUpdate(info: UpdateInfo | null | undefined): boolean {
+  return info?.selfUpdate === true
+}
+
+/** 本次要下载的资产：容器内更新取服务端包，桌面取安装器 */
+function downloadAsset(info: UpdateInfo | null | undefined): { url?: string; name?: string } | null {
+  if (!info) return null
+  return isSelfUpdate(info) ? (info.serverAsset ?? null) : (info.asset ?? null)
+}
+
 /** 「开始下载」时的提示：说明下载完会发生什么 */
 function downloadHint(info: UpdateInfo | null): string {
+  if (isSelfUpdate(info)) {
+    return t('正在下载服务端更新包…（下载完成后由面板完成替换，重启容器内的服务后生效）')
+  }
   return isMacInstaller(info)
     ? t('正在下载安装包…（下载完成后会挂载磁盘映像，把应用拖进「应用程序」即可完成安装）')
     : t('正在下载安装包…（下载完成后启动安装程序需要管理员权限，会弹出 UAC 确认框）')
@@ -175,6 +210,9 @@ function downloadHint(info: UpdateInfo | null): string {
 
 /** 「安装包已就绪」的提示：说明下一步该做什么 */
 function readyHint(info: UpdateInfo | null, name: string): string {
+  if (isSelfUpdate(info)) {
+    return t('更新包已就绪：{name}。点「安装并重启」后，面板会校验并替换容器内的程序与界面文件，然后重启服务（页面会自动刷新）。', { name })
+  }
   return isMacInstaller(info)
     ? t('安装包已就绪：{name}。点击「打开安装包」后会挂载磁盘映像，把应用拖进「应用程序」即可完成安装。', { name })
     : t('安装包已就绪：{name}。点击「安装并重启」后需要管理员权限，会弹出 UAC 确认框。', { name })
@@ -182,6 +220,7 @@ function readyHint(info: UpdateInfo | null, name: string): string {
 
 /** 安装按钮的文案：macOS 不重启（dmg 与运行中的进程没有文件冲突） */
 function installButtonText(info: UpdateInfo | null): string {
+  if (isSelfUpdate(info)) return t('安装并重启')
   return isMacInstaller(info) ? t('打开安装包') : t('安装并重启')
 }
 
@@ -260,8 +299,25 @@ function renderCheckResult(): void {
   const { info, checkedAt } = snapshot
   if (!info) return
   const at = checkedAt ? t('（检查于 {time}）', { time: formatClock(checkedAt) }) : ''
+  // 已应用、只差重启：这一条优先于「有新版本」——此刻磁盘上已经是新版，
+  // 再提示「可下载」只会把人往死路上带（后端会以 400 拒绝第二次安装）
+  if (info.pendingRestart === true) {
+    setBadge(t('待重启'), 'warn')
+    setState(t('更新已应用到容器内，重启服务后生效。{at}', { at }))
+    return
+  }
   if (info.hasUpdate === true) {
     setBadge(t('有新版本'), 'warn')
+    // 容器内更新：该版本没挂服务端更新包时（老 Release / 只发了桌面安装包），
+    // 按钮不会出现 —— 把原因与手动命令说清楚，别让人对着没有按钮的面板猜
+    if (isSelfUpdate(info) && !info.serverAsset) {
+      setState(t('发现新版本 {latest}（当前 {current}），但该版本没有提供容器内更新包；请在宿主机执行 docker compose pull && docker compose up -d 升级。{at}', {
+        latest: String(info.latestVersion || ''),
+        current: String(info.currentVersion || ''),
+        at,
+      }))
+      return
+    }
     setState(t('发现新版本 {latest}（当前 {current}）。{at}', {
       latest: String(info.latestVersion || ''),
       current: String(info.currentVersion || ''),
@@ -347,8 +403,10 @@ function renderTask(task: DownloadTask | null | undefined): boolean {
   }
   if (task.canceled) {
     setBadge(t('已取消'), 'warn')
-    setState(t('下载已取消，可重新点击「下载并安装」。'))
-    // 回到 idle：按钮文案变回「下载并安装」（旧实现同样只改文案，不动显隐）
+    setState(isSelfUpdate(snapshot.info)
+      ? t('下载已取消，可重新点击「下载并更新」。')
+      : t('下载已取消，可重新点击「下载并安装」。'))
+    // 回到 idle：按钮文案变回「下载并安装 / 下载并更新」（旧实现同样只改文案，不动显隐）
     publish({ phase: 'idle' })
     return true
   }
@@ -357,6 +415,13 @@ function renderTask(task: DownloadTask | null | undefined): boolean {
     const name = task.filename || path
     setBadge(t('可安装'), 'ok')
     publish({ phase: 'ready', readyPath: path })
+    // 容器内更新：**不自动安装**。桌面端下完即装是因为「点下载的意图就是要更新」，
+    // 代价是弹一次 UAC；容器这边安装会替换文件并重启服务（面板当场断连、页面要
+    // 刷新），得让用户自己按下那一下，也好挑个没人用网关的时机。
+    if (isSelfUpdate(snapshot.info)) {
+      setState(readyHint(snapshot.info, name))
+      return true
+    }
     // 下载完成即自动安装（含「下载中切走、回来时已经下完」这条重入路径）。只有同一
     // 路径已经自动装过一次才不再重复触发 —— 那时任务仍停在「已完成」（UAC 被拒 /
     // 安装程序没起来），反复自动触发等于反复弹 UAC。
@@ -422,6 +487,111 @@ async function install(path: string): Promise<void> {
     // 包装 —— 用户照着做就能重试成功（按钮仍在，见 phase === 'ready'）
     setState(t('启动安装程序失败：{error}', { error: errorMessage(error) }), true)
   }
+}
+
+/* ─── 容器内更新（Linux headless / Docker）────── */
+
+/**
+ * 安装并重启：服务端校验并替换文件 → 请求重启 → 倒计时 + 探活 → 整页刷新。
+ *
+ * 与桌面 install() 的分工不同：那边是把安装包交给操作系统（UAC / 挂载 dmg），
+ * 这边服务端自己换文件、进程退出后由容器 restart 策略拉起 —— 前端只剩「等它
+ * 回来」这一件事。倒计时与探活照 sub2api 的做法：重启期间页面必然断连，
+ * 与其让用户对着报错，不如自动刷新回「新版本已经在跑」的那一刻。
+ */
+async function installSelfUpdate(): Promise<void> {
+  const api = shared().workbuddyDesktop
+  if (!api?.installUpdate) return
+  try {
+    setBadge(t('安装中'), 'warn')
+    setState(t('正在校验并替换容器内的程序与界面文件…'))
+    const result = await api.installUpdate()
+    const version = String(result?.version || '').trim()
+    setState(version
+      ? t('已替换为 {version}，正在重启服务…', { version })
+      : t('替换完成，正在重启服务…'))
+    // 重启请求的响应可能因为进程退出而读不到（连接被切断）——那不是失败，
+    // 照常进入倒计时探活即可，所以这里吞掉异常
+    await api.restartService?.().catch(() => undefined)
+    beginRestartCountdown(version)
+  } catch (error) {
+    setBadge(t('安装失败'), 'bad')
+    setState(t('安装失败：{error}', { error: errorMessage(error) }), true)
+  }
+}
+
+/**
+ * 回滚到上一版本（用上次更新留下的备份），同样走「重启 + 倒计时 + 探活」。
+ * 备份不存在时后端 400，这里原样透出原因。
+ */
+async function rollbackSelfUpdate(): Promise<void> {
+  const api = shared().workbuddyDesktop
+  if (!api?.rollbackUpdate || busy) return
+  busy = true
+  publish({ actionBusy: true })
+  try {
+    setBadge(t('回滚中'), 'warn')
+    setState(t('正在回滚到上一版本…'))
+    await api.rollbackUpdate()
+    setState(t('已还原上一版本，正在重启服务…'))
+    await api.restartService?.().catch(() => undefined)
+    beginRestartCountdown('')
+  } catch (error) {
+    setBadge(t('回滚失败'), 'bad')
+    setState(t('回滚失败：{error}', { error: errorMessage(error) }), true)
+  } finally {
+    busy = false
+    publish({ actionBusy: false })
+  }
+}
+
+/** 重启倒计时：走完就开始探活 */
+function beginRestartCountdown(version: string): void {
+  stopPolling()
+  publish({ phase: 'restarting', restartSeconds: RESTART_SECONDS, readyPath: '' })
+  setBadge(t('重启中'), 'warn')
+  let seconds = RESTART_SECONDS
+  const tick = (): void => {
+    setState(version
+      ? t('{version} 已就位，服务正在重启，页面会在恢复后自动刷新…（{seconds}s）', {
+        version,
+        seconds: Math.max(0, seconds),
+      })
+      : t('服务正在重启，页面会在恢复后自动刷新…（{seconds}s）', { seconds: Math.max(0, seconds) }))
+    if (seconds <= 0) {
+      window.clearInterval(timer)
+      void waitForServiceThenReload()
+      return
+    }
+    seconds -= 1
+    publish({ restartSeconds: seconds })
+  }
+  const timer = window.setInterval(tick, 1000)
+  tick()
+}
+
+/**
+ * 探活后整页刷新。
+ *
+ * 用桥（`getUpdateStatus`）而不是裸 fetch /health：分端口部署（AGENT2API_PANEL_PORT）
+ * 下面板与网关不在同一个端口，/health 只在网关那个端口上；桥走的是面板自己的
+ * /api/*，两种部署都通。探不通也照样刷新 —— 服务已经重启，刷新本身就是用户想要的
+ * 那一步，卡在加载上比停在旧页面更糟。
+ */
+async function waitForServiceThenReload(): Promise<void> {
+  for (let attempt = 0; attempt < HEALTH_RETRIES; attempt += 1) {
+    try {
+      const probe = await shared().workbuddyDesktop?.getUpdateStatus()
+      if (probe) {
+        window.location.reload()
+        return
+      }
+    } catch {
+      /* 还没起来：等下一轮 */
+    }
+    await new Promise<void>(resolve => { window.setTimeout(resolve, HEALTH_INTERVAL_MS) })
+  }
+  window.location.reload()
 }
 
 /* ─── 面板流程（对外契约的实现）────────────────── */
@@ -501,12 +671,29 @@ async function downloadOrCancel(): Promise<void> {
   if (busy) return
   const current = getSnapshot()
 
-  // 已有就绪的安装包：按钮在这一步是「安装并重启 / 打开安装包」
+  // 更新已经应用到容器里、只差重启（可能发生在页面上一次打开之后：
+  // 安装点了、重启请求没成，或用户在倒计时里刷新了页面）——这一步只重启
+  if (current.info?.pendingRestart === true && current.phase !== 'downloading') {
+    busy = true
+    publish({ actionBusy: true })
+    try {
+      await shared().workbuddyDesktop?.restartService?.().catch(() => undefined)
+      beginRestartCountdown('')
+    } finally {
+      busy = false
+      publish({ actionBusy: false })
+    }
+    return
+  }
+
+  // 已有就绪的更新包：按钮在这一步是「安装并重启 / 打开安装包」。
+  // 容器内更新走 installSelfUpdate（替换 + 重启 + 探活），桌面走 install（交给壳）
   if (current.phase !== 'downloading' && current.readyPath) {
     busy = true
     publish({ actionBusy: true })
     try {
-      await install(current.readyPath)
+      if (isSelfUpdate(current.info)) await installSelfUpdate()
+      else await install(current.readyPath)
     } finally {
       busy = false
       publish({ actionBusy: false })
@@ -525,9 +712,9 @@ async function downloadOrCancel(): Promise<void> {
     return
   }
 
-  const asset = current.info?.asset
+  const asset = downloadAsset(current.info)
   if (!asset?.url) {
-    toast(t('没有可下载的安装包'), 'err')
+    toast(isSelfUpdate(current.info) ? t('这一版没有提供容器内更新包') : t('没有可下载的安装包'), 'err')
     return
   }
   // 按钮不可见就不该从这里发起下载（openAndDownload 的自动触发也走这条路）
@@ -595,6 +782,12 @@ async function load(): Promise<void> {
  * 把正在下的任务顶掉。
  */
 async function openAndDownload(checkedInfo?: UpdateInfo | null): Promise<void> {
+  // 已应用、只差重启：没有可下的东西了 —— 交给面板那条「立即重启」分支，
+  // 而不是再下一次包（后端会以 400 拒绝第二次安装）
+  if (checkedInfo?.pendingRestart === true) {
+    await downloadOrCancel()
+    return
+  }
   if (checkedInfo?.hasUpdate === true) {
     // 时刻用后端给的那一个：弹窗这份结果就是后端缓存里的最近一次检查结果（轮询读来的），
     // 用本地时钟会把几小时前的检查标成「刚刚查的」—— 面板要显示的是真实的上次检查时间
@@ -629,8 +822,15 @@ async function openAndDownload(checkedInfo?: UpdateInfo | null): Promise<void> {
 
 /** 面板上那颗按钮的形态；null = 不渲染（显隐一律条件渲染，理由见文件头） */
 function downloadButton(snap: Snapshot): { label: string; disabled: boolean } | null {
-  // 有更新且真的有可下载资产时才给出「下载并安装」
-  const actionable = snap.info?.hasUpdate === true && !!snap.info?.asset?.url
+  // 重启倒计时期间不给按钮：此刻点了也没有意义（页面马上就要刷新）
+  if (snap.phase === 'restarting') return null
+  // 已应用、只差重启：按钮换语义（点击 = 重启，见 downloadOrCancel 的首个分支）
+  if (snap.info?.pendingRestart === true && snap.phase === 'idle') {
+    return { label: t('立即重启'), disabled: snap.actionBusy }
+  }
+  // 有更新且真的有可下载资产时才给出按钮：桌面看 asset（安装器），
+  // 容器看 serverAsset（服务端包）—— 该版本没挂对应资产时退回纯提示
+  const actionable = snap.info?.hasUpdate === true && !!downloadAsset(snap.info)?.url
   if (!actionable && snap.phase !== 'downloading' && snap.phase !== 'ready') return null
   const label = snap.phase === 'downloading'
     ? t('取消下载')
@@ -638,7 +838,7 @@ function downloadButton(snap: Snapshot): { label: string; disabled: boolean } | 
       ? t('重试下载')
       : snap.phase === 'ready'
         ? installButtonText(snap.info)
-        : t('下载并安装')
+        : isSelfUpdate(snap.info) ? t('下载并更新') : t('下载并安装')
   return { label, disabled: snap.actionBusy }
 }
 
@@ -722,6 +922,11 @@ function UpdatePanel() {
 
   const repo = snap.repository ? `https://github.com/${snap.repository}` : ''
   const owner = snap.repository ? `https://github.com/${snap.repository.split('/')[0]}` : ''
+  const selfUpdate = isSelfUpdate(snap.info)
+  // 回滚入口：只有容器内更新、且上一次更新留下了备份时才出现。
+  // 下载 / 安装途中不给（那两条流程各自持有按钮语义，混在一起只会误点）
+  const canRollback = selfUpdate && snap.info?.backupAvailable === true
+    && snap.phase !== 'downloading' && snap.phase !== 'ready' && snap.phase !== 'restarting'
   const latestLabel = snap.info?.latestVersion
     ? (snap.info.prerelease
       ? t('{version}（预发布）', { version: snap.info.latestVersion })
@@ -738,7 +943,9 @@ function UpdatePanel() {
         <h2>{t('软件更新')}</h2>
         <span
           className='tip-q'
-          data-tip={t('更新包从 GitHub 发布页下载，下载完成后可直接启动安装程序并自动重启本程序。安装包会先校验来源域名与文件完整性。检查更新与下载安装包的出网线路、GitHub 令牌都在「更新设置」里：线路默认直连（直连失败时自动借 Clash Verge 的混合端口重试一次），选定指定出口后只走该出口；填写 GitHub 令牌可把检查限额从 60 次/小时提高到 5000 次/小时。')}
+          data-tip={selfUpdate
+            ? t('容器内更新：更新包从 GitHub 发布页下载，校验 sha256 后由面板替换容器内的程序与界面文件，再重启服务（容器由 restart 策略拉起，页面会自动刷新）。更新的是容器里的文件，compose 里的镜像标签不变 —— 之后执行 docker compose pull && up -d 会回到镜像里的版本；更新失败可一键回滚到上一版本。检查更新与下载的出网线路、GitHub 令牌都在「更新设置」里。')
+            : t('更新包从 GitHub 发布页下载，下载完成后可直接启动安装程序并自动重启本程序。安装包会先校验来源域名与文件完整性。检查更新与下载安装包的出网线路、GitHub 令牌都在「更新设置」里：线路默认直连（直连失败时自动借 Clash Verge 的混合端口重试一次），选定指定出口后只走该出口；填写 GitHub 令牌可把检查限额从 60 次/小时提高到 5000 次/小时。')}
         ></span>
         {/* id 保留：app.js 的 renderTopbarStatus 按 id 镜像徽章文案与语义色（配色经
             data-tone 传；设置页顶栏那枚镜像目前还不读它，保持一致没坏处） */}
@@ -757,9 +964,21 @@ function UpdatePanel() {
             {t('更新设置')}
           </Button>
           {/* 旧 class="primary" → variant="default"；无 class → variant="outline" */}
-          <Button id='btn-update-check' variant='outline' disabled={snap.checking} onClick={() => void check()}>
+          <Button id='btn-update-check' variant='outline' disabled={snap.checking || snap.phase === 'restarting'} onClick={() => void check()}>
             {snap.checking ? t('检查中…') : t('检查更新')}
           </Button>
+          {/* 回滚：只在容器内更新、且有上一版备份时出现（点击后同样会重启服务） */}
+          {canRollback ? (
+            <Button
+              id='btn-update-rollback'
+              variant='outline'
+              disabled={snap.actionBusy}
+              title={t('把容器内的程序与界面文件还原到更新前的版本，并重启服务')}
+              onClick={() => void rollbackSelfUpdate()}
+            >
+              {t('回滚到上一版本')}
+            </Button>
+          ) : null}
           {button ? (
             <Button
               id='btn-update-download'

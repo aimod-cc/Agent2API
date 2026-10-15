@@ -564,9 +564,21 @@ export function usageSummary(entry: UsageEntry): { text: string; kind: string; t
     // 展示串优先：ZCode 的额度单位是 token（1 亿 = 9 位数字），而余额列只有几十
     // 像素宽 —— 后端因此给了 `availableView`（`1亿 token` 这类紧凑串）。没有这个
     // 字段的家（其余全部）走的仍是「数值 + 单位」那条老路，行为一字未变。
+    // `available` 为 null 是「上游只有比例、没有绝对剩余量」的形状（Accio 的
+    // `usagePercent`：issue #242 的「可用 — %」）—— 此时读**钱包里的实际读数**
+    // （`balance` + 自己的 `unit`），有可读的钱包就不再拼「—」。钱包也没有
+    // （真读空了）才落回「—」，如实说没读到。
+    const fallbackWallet = data.available == null
+      ? wallets.find(wallet => wallet?.balance != null)
+      : undefined
     const available = data.availableView
       ? String(data.availableView)
-      : t('可用 {value} {unit}', { value: numberText(data.available), unit })
+      : fallbackWallet
+        ? t('可用 {value} {unit}', {
+            value: numberText(fallbackWallet.balance),
+            unit: String(fallbackWallet.unit || unit),
+          })
+        : t('可用 {value} {unit}', { value: numberText(data.available), unit })
     // ── 部分失败：一份账读到了、另一份没读到 ────────────────────
     // CodeArts 的余额是**两台网关**（订阅统计 + 福利网关，见后端
     // `providers::codearts::balance` 的模块头），后端把失败的一侧写进

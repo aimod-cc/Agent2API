@@ -1,0 +1,895 @@
+/* ─────────────────────────────────────────────
+   移动端适配层（真机 < 768px）
+   ─────────────────────────────────────────────
+   既有 layout.css 的 900px 断点只为「窄桌面 / 平板」设计：侧边栏收为
+   68px 图标栏。真正的手机（360-430px）上还会撞上几处破版：
+
+      0. tokens.css 给 body 写死 min-width:720px（桌面 Tauri 窗口的
+         最小宽度下限），手机上把整个文档撑到 720px 宽 —— 375px 的视口里
+         只露出中间那 375px，左右各裁掉 172px。「页面看不全」的根因。
+         这一条已搬到 tokens.css（它必须在媒体查询之外的级联里被压掉）。
+      1. 侧边栏恒显 68px，占满 1/5 屏宽，且点图标后没有「收起」入口
+         -> 抽屉化：默认隐藏，顶栏汉堡按钮切换
+      2. 五张表（账号 / 模型 / 网关 Key / 网络代理）都是 table-layout:fixed，
+         JS 把 min-width 写成 ~400-1200px 的 inline style，375px 里只能横滚
+         -> 卡片化：逐行拆成 grid 卡片，列头成 label，强制关 JS 写的 min-width
+      3. 请求日志 9 列 grid（--req-cols 变量）在窄屏挤成竖条
+         -> 同样卡片化：表头藏掉，每行变「label + 值」的纵列卡片
+      4. 面板头 / 工具条 / 筛选行 / 表格页脚在窄屏挤成一团
+         -> 各控件整行排布
+      5. 报表排行卡 4 列（名字 / 条 / 读数 / 百分比）在 246px 里把名字
+         压到只剩提供商徽章 -> 改两行：名字 + 百分比一行，条 + 读数一行
+      6. 设置页分类导航变顶部横条、开关区竖排
+      7. 报表两列卡片网格 -> 单列
+
+   桌面端（>=768px）整份不生效：全部规则锁在 @media (max-width:767px) 内。
+   选择器都锚在既有 class 上，不动原 CSS 文件的其它声明。
+
+   注意「不生效」只等于「本文件不覆盖桌面」，它管不到新加的元素本身：
+   **移动端专有的元素必须自己保证在桌面端不占位**（见下面的 .mobile-menu-btn
+   / .nav-scrim）—— .shell 是「2 列 + 100vh」的 grid，只要多一个在流内的
+   子元素，就会多出一个隐式行，align-content 把 100vh 的富余高度在两行之间
+   平分，侧栏与主区会提前结束、窗口底部空出一条。 */
+
+/* ═══ 顶栏：加一条汉堡按钮（768px 以下才出现） ═══ */
+.topbar { position: relative; }
+.mobile-menu-btn {
+  display: none;
+  position: absolute;
+  left: max(var(--pad, 12px), 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  width: 38px; height: 38px;
+  padding: 0; margin: 0;
+  border: 1px solid var(--border, #ccc);
+  border-radius: var(--radius, 8px);
+  background: var(--surface, #fff);
+  color: var(--text, #333);
+  cursor: pointer;
+  z-index: 5;
+  align-items: center;
+  justify-content: center;
+}
+/* 图标由内联 SVG 提供（index.html 里的 mobile-menu-btn），这里只兜底居中 */
+.mobile-menu-btn svg { display: block; }
+
+@media (max-width: 767px) {
+  .mobile-menu-btn { display: inline-flex; }
+  /* 汉堡按钮占位后，面包屑让出左侧空间 */
+  .topbar {
+    padding-left: calc(max(var(--pad, 12px), 8px) + 46px);
+    padding-right: max(var(--pad, 12px), 8px);
+  }
+  /* 面包屑的「上级」在手机上没有价值（点侧栏就是切换页面），
+     只留当前页名，给右侧状态徽标与汉堡按钮让出空间 */
+  .crumb { overflow: hidden; white-space: nowrap; min-width: 0; }
+  .crumb > span:not(.cur),
+  .crumb .sep { display: none; }
+  .crumb .cur { font-size: 14px; }
+}
+
+/* ═══ 侧边栏抽屉化（纯 CSS，#nav-toggle 驱动） ═══ */
+.nav-toggle-input { position: absolute; opacity: 0; pointer-events: none; }
+/* 遮罩在桌面端必须**彻底不存在**，不能只是"看不见"：它是 .shell 的直接子
+   元素，而 .shell 是「2 列 + 100vh」的 grid —— 没有样式时它会成为第三个
+   网格项，多出的隐式行把 100vh 的富余高度分走一半，表现就是侧栏与主区提前
+   结束、窗口底部空出一条白带（内容越矮越明显）。.nav-toggle-input 靠
+   position:absolute 脱离了流才没踩到这条；遮罩要盖满整屏只能用 fixed，
+   所以这里直接 display:none，767px 内再打开。 */
+.nav-scrim { display: none; }
+
+@media (max-width: 767px) {
+  .shell { grid-template-columns: 1fr; }
+
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: 256px;
+    transform: translateX(-100%);
+    transition: transform .22s ease;
+    z-index: 40;
+    box-shadow: 4px 0 16px rgba(0,0,0,.18);
+  }
+  /* 纯 CSS 开合：汉堡 label 与遮罩 label 都指向 #nav-toggle，
+     :checked 时侧边栏滑入、遮罩淡入 */
+  #nav-toggle:checked ~ .sidebar { transform: translateX(0); }
+
+  /* 900px 断点把 label / 分组名全藏了，手机上恢复 */
+  .sidebar .nav-item .label,
+  .sidebar .nav-item .count,
+  .sidebar .nav-group-label,
+  .sidebar .brand-text,
+  .sidebar .sidebar-status .txt { display: inline; }
+  .sidebar .nav-item { justify-content: flex-start; padding: 9px 14px; }
+  .sidebar .sidebar-status { padding: 10px 14px; align-items: flex-start; }
+  .sidebar .status-line { justify-content: flex-start; }
+
+  /* 遮罩（.nav-scrim 与 #nav-toggle 同为 .shell 子元素，在它之后）
+     display:block 是压掉顶层那条 display:none —— 少了它手机上遮罩照样不显示 */
+  .nav-scrim {
+    display: block;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,.35);
+    z-index: 30;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .18s ease;
+  }
+  #nav-toggle:checked ~ .nav-scrim { opacity: 1; pointer-events: auto; }
+
+  /* 内容区不再给侧栏留位 */
+  .main { margin-left: 0; }
+}
+
+/* ═══ 内容区：留白收窄，面板贴住视口边 ═══ */
+@media (max-width: 767px) {
+  .content { padding: 12px 12px 20px; }
+}
+
+/* ═══ 面板：标题 / 副题 / 动作区在窄屏重排 ═══
+   桌面上一行放得下的「标题 + 副题 + 右侧动作」，在 360px 的屏里三块互顶。
+   这里是**两行结构**而不是纯纵排：
+     第一行：标题（+ 问号提示）+ 动作按钮（靠右顶对齐）
+     第二行：副题说明（整行，可换行）
+   纯 column 纵排会让「添加条目」「立即全部签到」这类按钮孤零零落到第三行、
+   离标题很远，看不出它属于哪个面板。 */
+@media (max-width: 767px) {
+  .panel-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 8px;
+    row-gap: 6px;
+    padding: 12px;
+  }
+  /* 标题与问号同在第一行第一列（问号紧贴标题之后） */
+  .panel-head > h2 { grid-column: 1; grid-row: 1; min-width: 0; }
+  .panel-head > .tip-q { grid-column: 1; grid-row: 1; justify-self: end; }
+  /* 动作区（.head-actions）或裸按钮：第一行第二列，靠右。
+     但动作区很宽时（如概览页的五档时间选择器 202px）在 320px 屏上会
+     把标题挤成 20px 宽（竖排）—— 见下方 ≤430px 的整行下移规则。 */
+  .panel-head > .head-actions {
+    grid-column: 2; grid-row: 1;
+    margin-left: 0;
+    width: auto;
+    min-width: 0;
+    justify-content: flex-end;
+    flex-wrap: nowrap;
+  }
+  .panel-head > .head-actions > * { flex: 0 0 auto; }
+  /* 裸按钮（没有 .head-actions 包裹的，如「添加条目」「立即全部签到」） */
+  .panel-head > button { grid-column: 2; grid-row: 1; justify-self: end; align-self: center; }
+  /* 副题说明：整行第二行，允许换行 */
+  .panel-head > .panel-sub {
+    grid-column: 1 / -1; grid-row: 2;
+    min-width: 0;
+    white-space: normal;
+  }
+  /* 其它零星元素（标签、开关等）自然落到后续行 */
+  /* 通栏块：.mm-titlebar / .mm-filters 这类自带 width:100% 的行必须跨两列，
+     否则被塞进第一列（1fr）里，与右侧的 auto 列并存 → 宽度被压到 10px、
+     内容全竖排（模型管理页实测）。 */
+  .panel-head > .mm-titlebar,
+  .panel-head > .mm-filters { grid-column: 1 / -1; grid-row: auto; }
+  .panel-body { padding: 12px; }
+  .panel-foot { padding: 10px 12px; }
+}
+
+/* ═══ 面板页脚 / 通用表格页脚：控件组独占一行 ═══
+   .table-foot-ctl 有五个控件（读数 / 每页 / 条 / 跳页 / 翻页器），桌面上一行
+   摆得下。窄屏下 flex:0 0 auto 不让它收缩，399px 的组宽把 298px 的面板顶出
+   横向溢出。改成整行铺开 + 内部自己折行，输入框同步收窄。 */
+@media (max-width: 767px) {
+  .panel-foot .spacer { display: none; }
+  .table-foot-ctl {
+    flex: 1 1 100%;
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-start;
+    row-gap: 6px;
+  }
+  .table-foot-size input,
+  .table-foot-jump input { width: 54px; }
+}
+
+/* ═══ 账号页工具条：筛选项各自整行、按钮等宽成网格 ═══ */
+@media (max-width: 767px) {
+  /* 原布局（桌面口径）在手机上是一堆参差的小块：提供商下拉 157px 独占一行、
+     搜索框/状态/限额各占半行、三个操作按钮挤在末尾 —— 6 个元素错落 5 行、
+     宽度参差不齐，视觉上很乱。
+     改成规整结构：① 每个筛选组占整行（标签固定宽度，控件吃满右侧，左边缘
+     全部对齐）② 操作按钮排成等宽 2 列网格（同一行 2 个、最后独占行时也
+     撑满），视觉是整齐的栅格而不是长短不一的碎片。 */
+  .toolbar { flex-flow: column nowrap; align-items: stretch; gap: 8px; }
+  .toolbar .group { flex: 0 0 auto; width: 100%; display: flex; align-items: center; gap: 8px; }
+  /* 标签固定宽度：三行控件左边缘对齐成一条线 */
+  .toolbar .group > .label { flex: 0 0 44px; }
+  /* 控件/下拉吃满整行，不再各自参差。组件库给 select-trigger 硬编码了
+     `max-w-[200px] min-w-[130px]`（Tailwind 任意值类，且自带 !important），
+     它比同排的搜索框窄 14px，右边缘参差。注意 ui.css 在 index.html 里
+     后于本文件加载 —— 同为 !important 时后加载者胜，所以这里用 `html`
+     前缀把特异性抬到 (0,2,3) 压过 Tailwind 的单类选择器。 */
+  html .toolbar .group > *:not(.label) { flex: 1 1 auto !important; max-width: none !important; min-width: 0 !important; width: 100%; }
+  html .toolbar .group [data-slot="select-trigger"] { max-width: none !important; min-width: 0 !important; width: 100% !important; }
+  html .toolbar .group [data-slot="segmented-control"] { width: 100%; }
+  html .toolbar .group [data-slot="segmented-control"] > * { flex: 1 1 0; min-width: 0; justify-content: center; }
+  .toolbar .divider { display: none; }
+  /* 操作按钮：等宽网格。auto-fit + 78px 下限 —— 375px 容器 266px 排 3 列
+     （每个 83px，容得下「折叠全部」的 72px），320px 容器 222px 自动降 2 列，
+     不会把文字挤断。比原来固定 2 列省下一整行（68px → 30px）。 */
+  .toolbar .actions {
+    flex: 0 0 auto;
+    width: 100%;
+    margin-left: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(78px, 1fr));
+    gap: 8px;
+  }
+  .toolbar .actions > * { width: 100%; min-width: 0; }
+
+  /* 批量操作栏：同样收成栅格 —— 全选/已选/摘要各占整行，按钮 auto-fit 网格 */
+  .batch-bar { flex-flow: row wrap; align-items: center; gap: 6px 10px; }
+  .batch-bar .provider-summary { flex: 1 1 0; min-width: 0; }
+  .batch-actions {
+    flex-basis: 100%;
+    margin-left: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(78px, 1fr));
+    gap: 8px;
+  }
+  .batch-actions > * { width: 100%; min-width: 0; }
+}
+
+/* ═══ 表格卡片化（账号 / 模型 / 网关 Key / 网络代理四张表共用）═══
+   .acct-table 是账号页专用，.models-table 是模型管理 / 网关 Key / 网络代理
+   三页共用（后两页各挂一个修饰类）。四张表都是 table-layout:fixed，列宽
+   公式为桌面设计；375px 里 7 列表只能横滚、第一列滚出去就分不清哪一行。
+
+   改成卡片：table -> block，每行 -> grid 卡片（两列），表头藏掉，列名由
+   mobile-columns.js 从 th[data-col] 写进 td 的 data-col，td::before 渲染。
+   身份信息 / 长文本 / 按钮组整行占宽，其余两两并排。 */
+@media (max-width: 767px) {
+  .acct-scroll, .models-table-wrap { overflow-x: hidden; }
+  .acct-table, .models-table {
+    display: block;
+    table-layout: auto;
+    width: 100%;
+    min-width: 0 !important;   /* 压住 JS 写进 inline style 的 ~400-1200px */
+  }
+  .acct-table thead, .models-table thead { display: none; }
+  .acct-table tbody, .models-table tbody { display: block; }
+  .acct-table tr, .models-table tr {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 10px;
+    border: 1px solid var(--border, #ddd);
+    border-radius: var(--r-md, 8px);
+    padding: 10px;
+    margin: 0 0 10px;
+    background: var(--surface, #fff);
+  }
+  /* 每格自带列名：表头文字由 mobile-columns.js 注入到 td 的 data-col 属性 */
+  .acct-table td, .models-table td {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+    width: auto;
+    white-space: normal;
+  }
+  .acct-table td::before, .models-table td::before {
+    content: attr(data-col);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--text-3, #999);
+  }
+
+  /* 整行占宽：身份信息、长文本（Key / 地址 / 别名）、按钮组 */
+  .acct-table td.cell-account,
+  .acct-table td.cell-proxy,
+  .acct-table td.cell-actions,
+  .models-table td.cell-model,
+  .models-table td.cell-alias,
+  .models-table td.cell-act,
+  .models-table td.cell-key,
+  .models-table td.cell-name,
+  .models-table td.cell-time { grid-column: 1 / -1; }
+  /* 含按钮的格一律整行（覆盖四张表所有「操作」列，不管类名叫什么） */
+  .acct-table td:has(button),
+  .models-table td:has(button) { grid-column: 1 / -1; }
+
+  /* 单一 td 的行：分组标题（模型表按提供商分组）与空态行。
+     不显示列名标签，按行类型给视觉区分 */
+  .acct-table tr > td:only-child,
+  .models-table tr > td:only-child { grid-column: 1 / -1; }
+  .acct-table tr > td:only-child::before,
+  .models-table tr > td:only-child::before { content: none; }
+
+  /* 2.9.6 模型表新增「选择」列（复选框）：桌面在最左；卡片里让它和
+     模型名同排，不独占一行 —— 否则复选框孤零零占第一行、卡片被撑高 */
+  .models-table tr > td.cell-check { grid-column: 1; grid-row: 1; justify-self: start; }
+  .models-table tr > td.cell-check::before { content: none; }
+  .models-table tr > td.cell-check + td.cell-model { grid-column: 2 / -1; grid-row: 1; }
+
+  /* 分组标题行：去边框、小一号、大写字距，读起来像 section heading */
+  .models-table tr.tr-group {
+    border: 0;
+    border-radius: 0;
+    margin: 14px 0 6px;
+    padding: 4px 2px;
+    background: transparent;
+  }
+  .models-table tr.tr-group td {
+    display: block;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--text-2);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+
+  /* 操作按钮纵向堆 */
+  .cell-actions { flex-direction: column; align-items: stretch; }
+  .cell-actions .btn, .cell-act .btn { text-align: center; }
+  .cell-act .row-actions, .cell-actions .row-actions { flex-wrap: wrap; }
+
+  /* 代理列的地址 / Key 列的长串：允许折行，不被省略号吃掉 */
+  .cell-proxy code, .cell-key code, .cell-key .mono {
+    word-break: break-all;
+    white-space: normal;
+  }
+}
+
+/* ═══ 账号卡片：按内容分区重排（通用两列网格不够，这里单独设计） ═══
+   账号表是四张表里唯一「每行都是一个富控件组」的：优先级步进器、提供商徽章、
+   账号名、代理选择器、启停开关、限流徽章、有效期、余额、四颗操作按钮。
+   桌面 11 列里只有「账号」是弹性列，其余全是定宽 —— 通用两列网格会把绝大多数
+   格子推成整行（实测每张卡 9 个网格行、581px 高，8 个账号撑出 4749px 滚动区，
+   一屏只看得到半张卡，这就是「乱」）。
+
+   按内容分区重排成 6 行：头部（勾选 / 账号名 / 启停）、身份（提供商 / 优先级）、
+   代理整行、读数两两并排（限流 + 有效期、余额 + 连接数）、操作整行。 */
+@media (max-width: 767px) {
+  .acct-table tr.acct-row {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 5px 10px;
+    padding: 10px;
+  }
+  /* 头部：勾选 | 账号名 | 启停开关 */
+  .acct-table tr.acct-row .cell-pick     { grid-area: 1 / 1; justify-self: start; align-self: center; }
+  .acct-table tr.acct-row .cell-account  { grid-area: 1 / 2; }
+  .acct-table tr.acct-row .cell-status   { grid-area: 1 / 3; justify-self: end; align-self: center; }
+  /* 身份：提供商徽章 | 优先级 */
+  .acct-table tr.acct-row .cell-provider { grid-area: 2 / 1 / 3 / 3; }
+  .acct-table tr.acct-row .cell-priority { grid-area: 2 / 3; justify-self: end; }
+  /* 代理整行 */
+  .acct-table tr.acct-row .cell-proxy    { grid-area: 3 / 1 / 4 / 4; }
+  /* 读数两两并排 */
+  .acct-table tr.acct-row .cell-limits      { grid-area: 4 / 1 / 5 / 3; }
+  .acct-table tr.acct-row .cell-expiry      { grid-area: 4 / 3; }
+  .acct-table tr.acct-row .cell-usage       { grid-area: 5 / 1 / 6 / 3; }
+  .acct-table tr.acct-row .cell-connections { grid-area: 5 / 3; }
+  /* 操作整行 */
+  .acct-table tr.acct-row .cell-actions  { grid-area: 6 / 1 / 7 / 4; }
+
+  /* 单元格内边距收窄：桌面 7px 上下是给表格行高用的，卡片里每格都带一份，
+     6 行就是 84px 白边 */
+  .acct-table tr.acct-row td { padding: 2px 0; }
+
+  /* 「标签 + 值」改横排：竖排时每格至少占「标签 + 值」两行（约 40px），
+     横排一行就够（约 24px）。只给短值的格子用，代理那格的值是可伸缩控件，
+     横排能让标签与选择器同一基线 */
+  .acct-table tr.acct-row .cell-priority,
+  .acct-table tr.acct-row .cell-limits,
+  .acct-table tr.acct-row .cell-expiry,
+  .acct-table tr.acct-row .cell-usage,
+  .acct-table tr.acct-row .cell-connections,
+  .acct-table tr.acct-row .cell-proxy {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+  }
+  .acct-table tr.acct-row td::before { flex: 0 0 auto; }
+  /* 横排后值一侧要能收缩，否则 Select 触发器把卡片顶出去 */
+  .acct-table tr.acct-row .cell-proxy > * { min-width: 0; }
+
+  /* 操作按钮：桌面是四颗 24px 高的小按钮挤在 200px 的列里。卡片里让它们撑满
+     整行均分 —— 触控目标从 32×24 提到约 60×34，也不再是一小撮堆在左边 */
+  .acct-table tr.acct-row .cell-actions .row-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    width: 100%;
+  }
+  .acct-table tr.acct-row .cell-actions button {
+    /* basis 给 0 而不是 auto：这些按钮带 Tailwind 的 shrink-0（那条工具类是
+       !important），按内容宽排会 4×64 + 间距 > 卡片内容宽，第四颗被切掉。
+       basis 0 时行内没有溢出，grow 均分剩余宽度 */
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 34px;
+    justify-content: center;
+  }
+
+  /* 自明的格子不挂列名：勾选框、账号名（本身就是标题）、提供商徽章、
+     启停开关、操作按钮 */
+  .acct-table tr.acct-row .cell-pick::before,
+  .acct-table tr.acct-row .cell-account::before,
+  .acct-table tr.acct-row .cell-provider::before,
+  .acct-table tr.acct-row .cell-status::before,
+  .acct-table tr.acct-row .cell-actions::before { content: none; }
+
+  /* 空值格子整格收起：连接数为 0 时后端渲染空 td，留着只剩一个
+     「连接数」标签配一片空白 */
+  .acct-table tbody td:empty { display: none; }
+  /* 连接数收起后，余额那一格补到整行，不留半截空位 */
+  .acct-table tr.acct-row:has(.cell-connections:empty) .cell-usage { grid-column: 1 / 4; }
+
+  /* 展开的限流明细行（.acct-panels，单 td 跨全部列）整行铺开，不套两列网格 */
+  .acct-table tr.acct-panels { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ═══ 请求日志：多列 grid -> 卡片 ═══
+   桌面 9 列（时间 / 提供商·账号 / 重试 / 状态 / 模型 / 用时 / 用量 / 错误 /
+   详情）走 --req-cols 变量，行宽下限由 JS 算成 ~520px 写在 #req-list 上。
+   375px 里横滚要滑两次、第一列滚出去就分不清在讲哪条请求。
+
+   改成卡片：表头藏掉，每行变成纵列的「label + 值」列表，label 由
+   mobile-columns.js 从 .req-head > span[data-col] 写进 .req-row > span。
+   值为空（重试 / 错误 / 详情没内容）的格整格隐藏，不留空标签。 */
+@media (max-width: 767px) {
+  .log-list { overflow-x: hidden; }
+  #req-list { overflow-x: hidden; }
+  .req-head { display: none; }
+  .req-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+    padding: 10px 12px;
+    min-width: 0 !important;   /* 压住 JS 写在 #req-list 上的 --req-row-min */
+  }
+  .req-row > span {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+  .req-row > span::before {
+    content: attr(data-col);
+    flex: 0 0 40px;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: .03em;
+    color: var(--text-3);
+  }
+  /* 空值整格隐藏：req-none 是「无」占位，:empty 是错误 / 详情无内容 */
+  .req-row > .req-none,
+  .req-row > span:empty { display: none; }
+
+  /* 重置 page-requests.css 的 @media(max-width:1200px) 逐格定位：它把这几列
+     重排成 4 列 × 4 行的「时间+模型 / 提供商+用时 / 用量 / 客户端+详情」表格。
+     改成单列卡片后这些 grid-row/grid-column 会让浏览器隐式生成多余列轨道，
+     单列变成多列。逐格重置为 auto 后回归自然流。
+     ⚠️ 这份清单必须与 page-requests.css 那个媒体查询里的逐格定位**逐格对应**：
+     那边新增一列（例如后来的「客户端」）而这边漏了它，漏掉的那一格就会带着
+     grid-column 落进单列卡片里，整块破版。 */
+  .req-row > .req-time,
+  .req-row > .req-model,
+  .req-row > .req-status,
+  .req-row > .req-retry,
+  .req-row > .req-target,
+  .req-row > .req-dur,
+  .req-row > .req-usage,
+  .req-row > .req-client,
+  .req-row > .req-error-cell,
+  .req-row > .req-detail {
+    grid-row: auto;
+    grid-column: auto;
+    justify-self: stretch;
+  }
+  .req-row > .req-detail { justify-self: stretch; justify-content: flex-end; }
+  /* 用量两行读数（in/out/all + 缓存命中率）竖排，标签在左上 */
+  .req-row > .req-usage { flex-direction: column; align-items: flex-start; gap: 2px; }
+  .req-row > .req-usage::before { flex: 0 0 auto; }
+  .req-row > .req-usage > * { flex: 0 0 auto; width: 100%; }
+  /* 错误信息要能读全：不换行会被压成半行截断 */
+  .req-row > .req-error-cell { word-break: break-word; }
+  /* 详情按钮右对齐到行尾 */
+  .req-row > .req-detail { justify-content: flex-end; }
+}
+
+/* ═══ 运行日志行：消息列吃满剩余宽度 ═══
+   桌面三列 grid（10px 轨道 / 117px 消息 / 93px 时间）在 272px 的容器里，
+   消息只有 117px —— 日志正文里混着账号 ID、路径、端点，117px 一行放不
+   下一个中文字符组。中间列改弹性、时间列 max-content，消息多拿一倍宽度。
+   .log-line 本来就是 flex-wrap:wrap，cat/lvl 与 msg 自然分两行，不用额外处理。 */
+@media (max-width: 767px) {
+  .log-row {
+    grid-template-columns: 10px minmax(0, 1fr) max-content;
+    column-gap: 8px;
+    padding: 8px 10px;
+  }
+}
+
+/* ═══ 模型管理页：提供商栏 ═══
+   218px 的固定栏在 375px 屏里吃掉一半多。900px 断点已经把 .mm 收成单列
+   （提供商栏在上、表格在下），这里不要再改 grid-template-columns ——
+   改回两列会让表格只剩 ~140px，7 列表完全没法看。这里只收窄栏内留白。 */
+@media (max-width: 767px) {
+  .prov-rail { padding: 6px 6px 10px; }
+}
+
+/* ═══ 模型管理页：标题栏与筛选区排整齐 ═══
+   .mm-titlebar（标题 + 统计 + 动作）与 .mm-filters（状态筛选 + 倍率排序 +
+   搜索框 + 批量药丸）桌面是两行通栏，各自 flex-wrap。375px 下：
+   · .mm-titlebar 里「标题/统计」被动作按钮挤成 32px 宽多行堆叠
+   · .mm-filters 三个控件各自一行、宽度 171/142/240px 参差，右边缘全不齐
+   改成与账号页工具条同款：横向每一组占整行（控件吃满、左边缘对齐），
+   动作按钮排 auto-fit 等宽网格。 */
+@media (max-width: 767px) {
+  /* 标题栏：标题+统计一行（整行），动作按钮整行成网格。
+     注意 flex-basis:100% 必须配 min-width:0，否则在 flex 容器里被压成
+     10px 宽（文字全竖排）—— 实测过这个坑。 */
+  .mm-titlebar {
+    flex-wrap: wrap;
+    row-gap: 8px;
+    padding: 12px 12px 6px;
+  }
+  .mm-titlebar .mm-title { flex: 1 1 100%; width: 100%; min-width: 0; flex-wrap: wrap; }
+  .mm-titlebar .mm-title > * { min-width: 0; }
+  .mm-titlebar .mm-title h2 { white-space: normal; }
+  .mm-titlebar .mm-meta { white-space: normal; overflow: visible; text-overflow: clip; flex: 1 1 100%; min-width: 0; }
+  /* 动作区：整行 + 等宽网格（获取模型 / 添加模型 / 列设置） */
+  .mm-titlebar > .head-actions {
+    flex: 1 1 100%;
+    width: 100%;
+    min-width: 0;
+    margin-left: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+    gap: 8px;
+  }
+  .mm-titlebar .head-actions > * { width: 100%; min-width: 0; min-height: 30px; }
+  /* 按钮统一等高：组件库给了 h-[26px] 一档，网格里与 30px 档混排会参差 */
+  .mm-titlebar .head-actions button { min-height: 30px; }
+
+  /* 筛选区：每个控件占整行、吃满宽度，右边缘对齐成一条直线 */
+  .mm-filters {
+    flex-flow: column nowrap;
+    align-items: stretch;
+    gap: 8px;
+    padding: 6px 12px 12px;
+  }
+  .mm-filters > * { flex: 0 0 auto; width: 100%; min-width: 0; max-width: none; }
+  /* 分段筛选（状态 / 倍率排序）：自身铺满、内部三档等分 */
+  .mm-filters [data-slot="segmented-control"] { width: 100%; }
+  .mm-filters [data-slot="segmented-control"] > * { flex: 1 1 0; min-width: 0; justify-content: center; }
+  /* 搜索框（input-group）：吃满整行。组件库给的是 w-[240px] 固定值，
+     与上面两条 274px 的线段右边缘不齐 —— 覆盖成整行宽。 */
+  .mm-filters [data-slot="input-group"],
+  .mm-filters [data-slot="input"] { width: 100% !important; max-width: none !important; min-width: 0 !important; }
+  /* 批量药丸排成一行可横向滚（数量多时不挤成多行） */
+  .mm-filters .batch-chip { width: auto; }
+}
+
+/* ═══ 设置页：左侧分类导航变顶部横条（复用 900px 断点已有的横排形态），
+        开关区竖排 ═══ */
+@media (max-width: 767px) {
+  .settings-layout { flex-direction: column; gap: 12px; }
+  .settings-nav {
+    width: auto;
+    flex-direction: row;
+    gap: 4px;
+    padding: 0 0 8px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+  }
+  .settings-nav-item {
+    width: auto;
+    flex: 0 0 auto;
+    padding: 0 12px;
+  }
+  .settings-switches { flex-direction: column; }
+  /* 保留天数 / 提示词阈值一类「标签 + 输入」的两列表，窄屏改成标签在上 */
+  .retention-row { grid-template-columns: max-content 1fr; row-gap: 4px; }
+}
+
+/* ═══ 报表卡片单列 ═══ */
+@media (max-width: 767px) {
+  .report-rank-grid,
+  .report-donut-grid { grid-template-columns: minmax(0, 1fr) !important; }
+}
+
+/* ═══ 报表排行卡：名字 / 条 / 读数 / 百分比四列 -> 两行 ═══
+   桌面 grid-template-columns: minmax(0,max-content) minmax(56px,1fr) 68px 48px，
+   靠 subgrid 让 .rank-row 继承四列。卡片单列铺满后容器约 246px，减去
+   padding 14×2 剩 218px：68 + 48 + 3×10(gap) = 146px 固定占位，只剩 72px
+   给 minmax(0,max-content) 的名字列 —— 提供商徽章一枚就 140px，名字被压
+   到只剩徽章（截断成半个字符）。
+
+   改成两行：第一行名字 + 百分比，第二行进度条 + 读数。名字拿到整行宽度，
+   长邮箱也能展示完整。 */
+@media (max-width: 767px) {
+  .rank-shares {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 12px;
+    gap: 10px;
+  }
+  .rank-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
+    gap: 4px 8px;
+  }
+  .rank-row .name {
+    grid-column: 1;
+    grid-row: 1;
+    max-width: none;
+    white-space: normal;
+    word-break: break-word;
+    text-overflow: clip;
+  }
+  .rank-row .pct { grid-column: 2; grid-row: 1; }
+  .rank-row .track { grid-column: 1 / -1; grid-row: 2; }
+  .rank-row .num { grid-column: 2; grid-row: 2; }
+}
+
+/* ═══ 文档页：接口地址值允许折行 ═══
+   .ep-value 是 code 元素，桌面一行放得下。窄屏下 code + 复制按钮挤在一行，
+   长地址（含路径参数）被省略号吃掉后半段 —— 而这半段正是用户要复制的部分。 */
+@media (max-width: 767px) {
+  .ep-line { flex-wrap: wrap; gap: 6px 8px; }
+  .ep-value {
+    flex: 1 1 100%;
+    min-width: 0;
+    word-break: break-all;
+    white-space: normal;
+  }
+}
+
+/* ═══ 签到中心：面板被内容撑破（461px vs 375px 视口） ═══
+   .ck-main 是 grid 但没写 grid-template-columns，默认单列 auto = max-content，
+   被 .ck-prov-row 的内容（提供商名 + 右侧按钮组）撑到 461px —— panel 直接
+   破出视口，整页横向裁掉 86px，签到按钮全部点不到。
+   修法：单列改 minmax(0,1fr) 让轨道收进容器宽，行内再允许折行。 */
+@media (max-width: 767px) {
+  .ck-main { grid-template-columns: minmax(0, 1fr); }
+  /* 提供商行：名字/描述占满剩余宽度，右侧操作组折行到下一行，不再顶宽 */
+  .ck-prov-main { flex-wrap: wrap; }
+  .ck-prov-info { min-width: 0; }
+  .ck-prov-name, .ck-prov-desc { overflow-wrap: anywhere; }
+  .ck-prov-right { flex: 1 1 100%; justify-content: flex-start; gap: 8px; flex-wrap: wrap; }
+
+  /* 展开的账号明细（.ck-prov-detail）：桌面左侧留 58px 缩进对齐上方
+     提供商的 logo/文字。298px 容器减掉 58+16=74px padding 只剩 224px，
+     而 4 列表（账号 / 今日签到 / 上次签到时间 / 操作）需要 ~307px，
+     行尾「重签」按钮被推出容器右缘裁掉（实测 detail scrollWidth 307 >
+     clientWidth 298）。
+     修法：手机收掉左侧缩进（只留 12px），表格改卡片式四行。 */
+  .ck-prov-detail { padding: 4px 12px 12px; }
+  .ck-table { display: block; }
+  .ck-table thead { display: none; }
+  .ck-table tbody { display: block; }
+  .ck-table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 4px 8px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--hairline, #eee);
+  }
+  .ck-table tr:last-child { border-bottom: 0; }
+  .ck-table td {
+    display: block;
+    padding: 0;
+    border-bottom: 0;
+    min-width: 0;
+  }
+  /* 账号名第一行、签到状态跟在右侧；时间第二行整行；操作按钮第二行右端 */
+  .ck-table td:nth-child(1) { grid-column: 1; grid-row: 1; font-weight: 600; overflow-wrap: anywhere; }
+  .ck-table td:nth-child(2) { grid-column: 2; grid-row: 1; justify-self: end; }
+  .ck-table td:nth-child(3) { grid-column: 1 / -1; grid-row: 2; font-size: 11.5px; }
+  .ck-table td:nth-child(4) {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: end;
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+  /* 操作列可能有多颗按钮（国际版有「保活 / 领取 / 保活+领取」）—— 让它们换行不溢出 */
+  .ck-table td:nth-child(4) { flex-wrap: wrap; }
+  .ck-table td:nth-child(4) button { min-height: 28px; }
+
+  /* 签到记录表（.ck-records-table）：桌面 6 列 table-layout:fixed +
+     colgroup 固定列宽（时间 160px + 18%/10%/11%/13%/48%），总宽远超手机屏。
+     320px 下整表 336px 宽、右侧「来源 / 详情」列被推出视口裁掉。
+     改卡片：外层滚动容器不再横滚、表格/列组不再定宽，每行变多行网格。 */
+  .ck-records-scroll { overflow-x: hidden; }
+  .ck-records-table {
+    display: block;
+    table-layout: auto;
+    width: 100%;
+    min-width: 0 !important;   /* 压住 JS 写入的固定列宽合计（实测 336px） */
+  }
+  .ck-records-table colgroup { display: none; }
+  .ck-records-table thead { display: none; }
+  .ck-records-table tbody { display: block; }
+  .ck-records-table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 4px 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--hairline, #eee);
+  }
+  .ck-records-table tr:last-child { border-bottom: 0; }
+  .ck-records-table td {
+    display: block;
+    width: auto !important;
+    min-width: 0;
+    overflow: visible;   /* 桌面靠 overflow:hidden 裁超长内容，卡片里要折行 */
+    padding: 0;
+    border-bottom: 0;
+  }
+  /* 时间（含日期）第一行左、结果第一行右 */
+  .ck-records-table .ck-col-time { grid-column: 1; grid-row: 1; white-space: normal; }
+  .ck-records-table .ck-col-outcome { grid-column: 2; grid-row: 1; justify-self: end; }
+  /* 账号 + 提供商第二行 */
+  .ck-records-table .ck-col-account { grid-column: 1; grid-row: 2; }
+  .ck-records-table .ck-col-provider { grid-column: 2; grid-row: 2; justify-self: end; }
+  /* 来源 + 详情第三行（详情常是长句，整行折行） */
+  .ck-records-table .ck-col-source { grid-column: 1; grid-row: 3; }
+  .ck-records-table .ck-col-detail { grid-column: 1 / -1; grid-row: 4; overflow-wrap: anywhere; }
+  .ck-records-table .ck-record-reason { margin-left: 6px; }
+}
+
+/* ═══ 定时签到：条目行不折行 → 信息区被压成 0 宽（文字竖排）+ 按钮溢出 ═══
+   .ck-sched-main 是 flex 且 nowrap（桌面布局），行内是 开关 + .ck-prov-info
+   （弹性）+ .ck-prov-right（flex:none，含「下次 …」+ 立即执行/编辑/删除）。
+   375px 下 .ck-prov-right 实测占 311px，把 .ck-prov-info 挤成 width:0 ——
+   该格里「00:01 · 每天 · 全部…」全部逐字堆叠（看起来是竖排），而右侧
+   三个按钮一路顶到 x=425，出了 300px 面板看不见。
+   修法：与每日签到同款 —— 行内折行，操作组整行下移。 */
+@media (max-width: 767px) {
+  .ck-sched-main { flex-wrap: wrap; }
+  .ck-sched-main .ck-prov-info { flex: 1 1 100%; min-width: 0; order: 2; }
+  /* 操作区：三段排布 ——
+     第一行「下次 …」时间徽标（整行，可读全）；
+     第二行「立即执行 / 编辑 / 删除」三颗按钮排成等宽网格。
+     原来让它们自然折行 + 左对齐，结果是「下一行时间 + 立即执行」一行、
+     左边孤零零「编辑 / 删除」另起一行，看不出这三个按钮是一组。 */
+  .ck-sched-main .ck-prov-right {
+    flex: 1 1 100%;
+    order: 3;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    justify-content: stretch;
+    align-items: center;
+  }
+  .ck-sched-main .ck-prov-right > .ck-sched-next { grid-column: 1 / -1; justify-self: start; }
+  .ck-sched-main .ck-prov-right > button { width: 100%; min-width: 0; }
+  .ck-sched-main > [role="switch"], .ck-sched-main > [data-slot="switch"] { order: 1; }
+}
+
+/* ═══ 设置区「标签 + 开关 + 说明」行（定时签到总开关、保活链等）═══
+   .ck-set-line 是 flex nowrap：.ck-set-k 固定 58px 标签、.ck-set-v 弹性。
+   桌面一行够宽时比例正常；375px 下开关与它右侧的说明文字之间被推到
+   远端（实测开关 x123、说明 x167，中间空 44px），看着像两个不相干的
+   控件，用户认不出「说明是在讲这个开关」。
+   修法：窄屏把标签提到上一行（整行），开关与说明在第二行紧挨成一组。 */
+@media (max-width: 767px) {
+  .ck-set-line { flex-wrap: wrap; row-gap: 6px; }
+  /* 标签独占一行；短标签（如「总开关」）不占满宽度也行，这里统一放行首 */
+  .ck-set-line .ck-set-k { flex: 1 1 100%; width: auto; }
+  /* 值区（开关 + 说明）整行，内容左对齐挨在一起 */
+  .ck-set-line .ck-set-v { flex: 1 1 100%; min-width: 0; }
+  /* 保活模型链面板里那条已经是上下排（见下），这里只兜底不让它重复换行 */
+  .ck-chain-panel .ck-set-line .ck-set-k { flex: 1 1 100%; }
+}
+
+/* ═══ 活动福利 / 新手福利：行不折行 → 账号名字被压成 0 宽（文字竖排） ═══
+   .ck-welfare-row 是 flex 且 nowrap（桌面布局），行内是 徽标 + .ck-prov-info
+   （账号名 + 说明）+ .ck-prov-right（去领取）。手机上 .ck-prov-right 拿
+   flex:1 1 100% 后把 .ck-prov-info 挤成 width:0 —— 账号名
+   「ZCode 国际版 · fbda9ca4-…」与说明在该宽度里逐字堆叠（全竖排）。
+   修法：行内折行，领取按钮整行下移（与每日签到/定时签到同款）。 */
+@media (max-width: 767px) {
+  .ck-welfare-row { flex-wrap: wrap; }
+  .ck-welfare-row .ck-prov-info { flex: 1 1 0; min-width: 0; }
+  .ck-welfare-row .ck-prov-name { overflow-wrap: anywhere; }
+  .ck-welfare-row .ck-prov-right { flex: 1 1 100%; justify-content: flex-start; flex-wrap: wrap; gap: 8px; }
+}
+
+/* ═══ 保活模型链：桌面「半幅」在手机上把清单压成 48px ═══
+   .ck-chain-panel { width: 50%; max-width: 640px } 是桌面口径（清单短，
+   拉满整行太空）。375px 下 50% = 150px，内部 .ck-set-line 的 .ck-set-k
+   固定 58px 后，模型清单容器 .ck-set-v 只剩 48px —— 模型名与「按序逐个
+   尝试，共 4 个」在该宽度里逐字断行（竖排），行尾的 × 也顶出面板外。
+   修法：手机上取消半幅，铺满整行。 */
+@media (max-width: 767px) {
+  .ck-chain-panel { width: auto; max-width: none; }
+  /* 标签与内容：窄屏下改成上下排，内容区拿满整行 */
+  .ck-chain-panel .ck-set-line { flex-wrap: wrap; }
+  .ck-chain-panel .ck-set-k { width: auto; flex: 1 1 100%; }
+  .ck-chain-panel .ck-set-v { flex: 1 1 100%; }
+  /* 清单一行的触控目标放大（原 22px） */
+  .ck-chain-grip, .ck-chain-del { min-width: 28px; min-height: 28px; }
+}
+
+/* ═══ 账号分组带：尾部「⋯ / 折叠」按钮被挤出带外裁掉 ═══
+   .grp-band-inner 是 flex 且 nowrap，中部 .grp-name/.grp-stat 都 nowrap，
+   长组名把 ⋯ 按钮推出 td 右缘（实测 ⋯ 按钮出界 14-63px）。
+   修法：让名字可截断，按钮钉死在行尾。 */
+@media (max-width: 767px) {
+  .grp-band-inner { min-width: 0; flex-wrap: nowrap; }
+  .grp-band-inner .grp-name {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .grp-band-inner .grp-stat { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .grp-band-inner .grp-iconbtn { flex: 0 0 auto; }
+  /* 拖动把手与折叠/⋯ 按钮的触控目标放大（原 18-22px，手指难点） */
+  .grp-band-inner .queue-grip,
+  .grp-band-inner .grp-iconbtn { width: 30px; height: 30px; min-width: 30px; }
+}
+
+/* ═══ 超窄屏（≤380px）：面板头的宽动作区整行下移 ═══
+   概览页的 .head-actions 是五档时间选择器（今天/7天/30天/本月/全部，
+   实测 202px）。在 320px 屏上「标题 + 202px」超出容器，grid 的 1fr 列
+   被压到 20px —— 标题「统计概览」逐字竖排。让动作区整行下移，
+   标题拿回整行。 */
+@media (max-width: 380px) {
+  .panel-head > .head-actions {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-content: flex-start;
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  .panel-head > .head-actions > * { flex: 1 1 auto; min-width: 0; }
+  .panel-head > .panel-sub { grid-row: 3; }
+}
+
+/* ═══ 全局触控与滚动 ═══
+   移动端最小触控目标：图标/小按钮不小于 30px（Apple HIG 44px 是上限，
+   面板密度优先取 30，够手指点中又不毁布局）。覆盖各页 icon 按钮：
+   模型页提供商栏删除 ×、文档页复制 ⧉、账号分组带把手等。 */
+@media (max-width: 767px) {
+  /* 文档级横向溢出彻底锁死。body 的 min-width:720px 已在 tokens.css 里
+     用媒体查询去掉，这里再加一道 overflow-x 保险。 */
+  html { -webkit-text-size-adjust: 100%; }
+  body { overflow-x: hidden; }
+  /* 按钮 / 可点行 44px 最小触控高 */
+  .nav-item, .btn { min-height: 44px; }
+  .nav-item { padding-top: 6px; padding-bottom: 6px; }
+
+  /* ── CJK 断行口径 ──
+     中文按字换行是正常行为，真正的"竖排"来自容器被挤到 ~1 个字宽
+     （如 .ck-prov-info 被 flex 压成 width:0），已在各页就地修容器宽度。
+     这里只保证长串不撑破布局：默认按字断，超长英文/URL 允许断词。 */
+  .page.active, .modal, [role="dialog"] { word-break: normal; overflow-wrap: break-word; }
+
+  /* ── 图标 / 小按钮触控目标放大（原 16-22px，手指点不中）── */
+  /* 状态开关（账号表 / 签到条目）：原 36×21，抬到 30px 高 */
+  [role="switch"], [data-slot="switch"] { min-height: 30px; }
+  /* 模型管理页：提供商栏删除 × */
+  .prov-rail button, .prov-rail [role="button"] { min-width: 30px; min-height: 30px; }
+  /* 文档页：复制按钮 ⧉ */
+  .ep-line button { min-width: 30px; min-height: 30px; }
+  /* 请求日志：详情列按钮、重试标签可点区 */
+  .req-row button { min-height: 30px; }
+  /* 模型表：＋等级 小按钮 */
+  .models-table td button.sm, .models-table td [class*="button"] { min-height: 28px; }
+  /* 账号表：组内拖动手柄（order-grip / queue-grip） */
+  .acct-table .order-grip, .acct-table .queue-grip { min-width: 28px; min-height: 28px; }
+  /* 签到页：全选 / 清空 小按钮 */
+  .ck-mini-btn { min-height: 30px; }
+}

@@ -1,6 +1,6 @@
 [package]
 name = "workbuddy-proxy-desktop"
-version = "3.0.3"
+version = "3.0.5"
 description = "Agent2API 桌面端 — 多提供商本地网关与会话管理"
 authors = ["aimod-cc"]
 edition = "2021"
@@ -36,6 +36,14 @@ tauri-build = { version = "2", features = [] }
 # headless 二进制（agent2api-server）也链接同一个 lib
 agent2api-server = { path = "server" }
 # tray-icon 提供系统托盘，image-png 用于解析 bundle 图标（托盘图标直接复用它，不新增图片资源）
+# devtools：把 WebView 开发者工具（F12 / 右键「检查」）编译进 release 安装包。
+# 没有它 wry 在 release 下默认 SetAreDevToolsEnabled(false)，按 F12 没有反应。
+# 开关在下方 [target.'cfg(windows)'.dependencies]（分目标追加特性）：
+# Windows 的 WebView2 DevTools 走微软公开 API，release 开启无副作用；macOS 的
+# WKWebView 开 devtools 依赖 Apple 私有 API，wry 官方不建议 release 开，故只在
+# Windows 上追加（debug / dev 构建两个平台都照常有 devtools，不受影响）。
+# 注意：Windows 构建时这段与下方 windows 段的 tauri 特性**合并**生效，
+# 下方必须写全 tray-icon / image-png，否则托盘等特性会在 Windows 上丢失。
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-autostart = "2"
@@ -161,7 +169,12 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # 启发式，进程一启动就被拦杀（报 Trojan/Intercept.a，退出码 0xFFFFFFFF）。
 # 换 API 后导入表里只剩 kernel32 / iphlpapi，不再有任何命令行工具的名字。
 # 只对 Windows 目标生效：非 Windows 平台是桩实现，不需要这份依赖。
+# ── tauri 为什么要在这里重写一遍 ─────────────────────────────
+# 只为追加 devtools 特性。cargo 对「基础段 + 目标段」的同名依赖是特性并集，
+# 但目标段不继承基础段的 features 列表，所以 tray-icon / image-png 必须在这里
+# 重复声明，Windows 构建里才不丢托盘与图标解码；最终只在 Windows 上多带 devtools。
 [target.'cfg(windows)'.dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png", "devtools"] }
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_NetworkManagement_IpHelper",

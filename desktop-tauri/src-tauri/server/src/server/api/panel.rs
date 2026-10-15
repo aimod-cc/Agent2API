@@ -68,7 +68,7 @@ pub async fn captcha_challenge() -> Response {
 /// 来源/环境猜测：标记由前端在传输探测（`cookie_probe`）失败后显式给出。
 const TOKEN_BODY_MODE: &str = "x-panel-auth-mode";
 
-/// 最近一次发出的探针（**两枚**值 + 时刻）——服务器端自持的判据。
+/// 最近一次发出的探针（值 + 时刻）——服务器端自持的判据。
 ///
 /// ── 为什么前端配合还不够 ────────────────────────────────────
 /// 实测（2026-09-29 两轮）：这个中转对 Set-Cookie / 自定义请求头 / URL
@@ -80,30 +80,31 @@ const TOKEN_BODY_MODE: &str = "x-panel-auth-mode";
 /// 错判。直连环境的时序（登录页加载 → 几秒内登录）天然命中；探针超过
 /// 窗口后令牌也会进响应体，功能无损（客户端两边都认）。
 ///
-/// ── 为什么是两枚 ───────────────────────────────────────────
-/// 登录响应下发的是两条 `Set-Cookie`（access + refresh），探针必须**同形**：
-/// 只种一枚的中转会把探针判成「通道完好」，却在真正登录时把两条拼成一条
-/// （属性 `Path=/` 因此降级成名为 `path` 的 cookie，新会话不按 `/` 落罐）——
-/// 探针通过、会话死循环。两枚都往返才判通，缺一条就判中转。
+/// ── 为什么是一枚 ───────────────────────────────────────────
+/// 探针要预测的是「登录那趟响应的 cookie 能不能存下」，而登录响应现在只发
+/// **一条** `Set-Cookie`（会话 cookie 一枚装两段，见 `access::ACCESS_COOKIE`）。
+/// 从前种两枚是因为登录发两条 —— 只种一枚的单条探针会被中转原样透传、判成
+/// 「通道完好」，而两条却被拼成一条，于是探针通过、会话死循环。判据的形状
+/// 必须和被预测的对象一致：现在两边都是一条。
 static LAST_ISSUED_PROBE: std::sync::OnceLock<
-    std::sync::Mutex<Option<(String, String, std::time::Instant)>>,
+    std::sync::Mutex<Option<(String, std::time::Instant)>>,
 > = std::sync::OnceLock::new();
 const PROBE_FRESH_WINDOW: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
-fn remember_issued_probe(first: &str, second: &str) {
+fn remember_issued_probe(value: &str) {
     let Ok(mut slot) = LAST_ISSUED_PROBE
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
     else {
         return;
     };
-    *slot = Some((first.to_string(), second.to_string(), std::time::Instant::now()));
+    *slot = Some((value.to_string(), std::time::Instant::now()));
 }
 
-/// 收到的**两枚**探针 cookie 是否「当前有效」：每一枚都在场、各自等于最近发出的
-/// 那个值、且在窗口内。同名多条（罐里有陈值）时按「期望值在不在其中」判，
-/// 不看第一条 —— 与 `access::cookie_values` 的全量口径一致。
-fn probe_is_currently_valid(first: &[String], second: &[String]) -> bool {
+/// 收到的探针 cookie 是否「当前有效」：在场、等于最近发出的那个值、且在窗口内。
+/// 同名多条（罐里有陈值）时按「期望值在不在其中」判，不看第一条 ——
+/// 与 `access::cookie_values` 的全量口径一致。
+fn probe_is_currently_valid(received: &[String]) -> bool {
     let Ok(slot) = LAST_ISSUED_PROBE
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
@@ -111,9 +112,7 @@ fn probe_is_currently_valid(first: &[String], second: &[String]) -> bool {
         return false;
     };
     match &*slot {
-        Some((expected_first, expected_second, at)) if at.elapsed() < PROBE_FRESH_WINDOW => {
-            first.contains(expected_first) && second.contains(expected_second)
-        }
+        Some((expected, at)) if at.elapsed() < PROBE_FRESH_WINDOW => received.contains(expected),
         _ => false,
     }
 }
@@ -136,14 +135,11 @@ fn tokens_in_body(
     if header_marked || query_marked {
         return true;
     }
-    // 探针 cookie 必须是「本服务刚发的那两个值」（见 `probe_is_currently_valid`
+    // 探针 cookie 必须是「本服务刚发的那把值」（见 `probe_is_currently_valid`
     // 的说明）才算 cookie 通道可用 —— 缺席、旧值（早前轮次 / 同宿主其它端口
-    // 写下的）、对不上、只回来一条，一律令牌进响应体。这是服务器端自持的判据，
+    // 写下的）、对不上，一律令牌进响应体。这是服务器端自持的判据，
     // 不依赖任何前端标记穿过中转，也不被同宿主旧探针骗过。
-    !probe_is_currently_valid(
-        &access::cookie_values(headers, access::PROBE_COOKIE),
-        &access::cookie_values(headers, access::PROBE_COOKIE_SECOND),
-    )
+    !probe_is_currently_valid(&access::cookie_values(headers, access::PROBE_COOKIE))
 }
 
 /// 判定依据的可读形态（登录日志用）：标记走了哪条通道。
@@ -165,89 +161,63 @@ fn marker_source(headers: &HeaderMap, query: &std::collections::HashMap<String, 
     }
 }
 
-/// 探针两枚 cookie 的上行情况（登录日志用）：`两条都在` / `只有一条` / `都没有`。
+/// 探针 cookie 的上行情况（登录日志用）：`一枚在` / `都没有`。
 ///
-/// 「只有一条」就是合并型中转的指纹 —— 单条 Set-Cookie 透传得动、两条就拼成一条。
 /// 这一列出现的意义是把「为什么这次令牌进了响应体」写在同一行里，不必再去翻
-/// 探针端点的响应。
+/// 探针端点的响应。从前这里是三态（`两条都在` / `只有一条` / `都没有`），
+/// 「只有一条」是合并型中转的指纹；登录响应改成只发一条会话 cookie 之后，
+/// 探针也只发一枚，"缺一条"这个形状不再存在 —— 要测的变成「这一条能不能往返」。
 fn probe_shape(headers: &HeaderMap) -> &'static str {
-    let first = !access::cookie_values(headers, access::PROBE_COOKIE).is_empty();
-    let second = !access::cookie_values(headers, access::PROBE_COOKIE_SECOND).is_empty();
-    match (first, second) {
-        (true, true) => "两条都在",
-        (true, false) | (false, true) => "只有一条",
-        (false, false) => "都没有",
+    if access::cookie_values(headers, access::PROBE_COOKIE).is_empty() {
+        "都没有"
+    } else {
+        "一枚在"
     }
 }
 
 /// `ANY /api/panel/cookie-probe` —— 会话传输探测（登录页加载时连打两发）。
 ///
-/// 挂 public：探测发生在登录之前。第一发**没有**探针 cookie：种**两枚** 90 天
-/// 寿命的探针 cookie（`PROBE_COOKIE` + `PROBE_COOKIE_SECOND`，与登录响应的两条
-/// `Set-Cookie` 同形）并回 `roundtrip:false`；第二发浏览器若两条都存得下、发
-/// 得回且各自值对得上，服务端回 `roundtrip:true` —— 本环境的 cookie 传输（含
-/// 多条 Set-Cookie 下发）完好，登录响应不需要令牌进 body。第二发仍 `false`
-/// （中转剥 Set-Cookie / 拼成一条 / 浏览器拒存第三方 cookie / 隐私模式）＝ cookie
-/// 走不通，前端才带 `x-panel-auth-mode: body` 登录。测的是环境的真实传输，
+/// 挂 public：探测发生在登录之前。第一发**没有**探针 cookie：种**一枚** 90 天
+/// 寿命的探针 cookie（`PROBE_COOKIE`，与登录响应的那条 `Set-Cookie` 同形）并回
+/// `roundtrip:false`；第二发浏览器若存得下、发得回且值对得上，服务端回
+/// `roundtrip:true` —— 本环境的 cookie 传输完好，登录响应不需要令牌进 body。
+/// 第二发仍 `false`（中转剥 Set-Cookie / 浏览器拒存第三方 cookie / 隐私模式）＝
+/// cookie 走不通，前端才带 `x-panel-auth-mode: body` 登录。测的是环境的真实传输，
 /// 不猜代理行为：哪天中转把 cookie 修好了，直连形态自动回归。
 pub async fn cookie_probe(
     headers: HeaderMap,
     Query(query): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    // ── 值比对：带回的必须是**刚发的那两个值** ───────────────────
+    // ── 值比对：带回的必须是**刚发的那把值** ───────────────────
     // cookie 按主机算、不分端口（RFC 6265）——fnOS 网页（:5666）与面板
     // 直连（:3065）共用同一份 cookie 罐：用户先直连过一次，浏览器里就
-    // 存下了一份长效探针；从 :5666 的中转进来时这份**旧探针**照样会上行。
+    // 存下了一份长效探针；从 :5666 的中转进来时这份**旧探针**照样会上行
+    // （2026-10-13 实测：dev 上带回来的正是生产那把出现 63 次的僵尸）。
     // 只判「有没有」会被它骗过（实测 2026-09-29：探针 cookie 在场、通道
-    // 实际不通、弹回登录页）。所以第二发必须带 `expect=` / `expect-b=`，
-    // 服务器比对两个 cookie 值 —— 旧探针的值对不上，判 false。
-    let received_first = access::cookie_values(&headers, access::PROBE_COOKIE);
-    let received_second = access::cookie_values(&headers, access::PROBE_COOKIE_SECOND);
-    let expected_first = non_empty(query.get("expect"));
-    let expected_second = non_empty(query.get("expect-b"));
-    if expected_first.is_some() || expected_second.is_some() {
-        // 第二发（带 expect）：两枚都必须对得上才算通。**只回一个 expect 的
-        // 是旧版页面缓存**（单枚探针那版），它证明不了两条 Set-Cookie 的命运
-        // —— 按不通处理，宁可用响应体令牌这条更宽的路。
-        let roundtrip = match (&expected_first, &expected_second) {
-            (Some(first), Some(second)) => {
-                received_first.iter().any(|value| value == first)
-                    && received_second.iter().any(|value| value == second)
-            }
-            _ => false,
-        };
+    // 实际不通、弹回登录页）。所以第二发必须带 `expect=`，服务器比对值。
+    let received = access::cookie_values(&headers, access::PROBE_COOKIE);
+    if let Some(expected) = non_empty(query.get("expect")) {
+        let roundtrip = received.iter().any(|value| value == &expected);
         // 不再补发：补发会洗掉浏览器里那份旧 cookie，干扰下一轮判断
         return ok_json(serde_json::json!({ "roundtrip": roundtrip }));
     }
-    // 第一发（无 expect）：发两枚新探针，值随响应体带回（匿名随机串，
+    // 第一发（无 expect）：发一枚新探针，值随响应体带回（匿名随机串，
     // 无会话语义；HttpOnly 本体 JS 读不到，走 body 才比对得了）
     let first = access::random_hex(16);
-    let second = access::random_hex(16);
-    // 长效（90 天）：它们发下去之后是「这台浏览器的 cookie 通道完好（连两条
-    // 都透传）」的持续标志 —— 直连环境的登录 / 刷新请求恒带着它们，响应体与
-    // 旧版逐字一致（见 `tokens_in_body`）。
-    let cookies = [
-        format!(
-            "{}={first}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax",
-            access::PROBE_COOKIE,
-            90 * 24 * 3600
-        ),
-        format!(
-            "{}={second}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax",
-            access::PROBE_COOKIE_SECOND,
-            90 * 24 * 3600
-        ),
-    ];
-    remember_issued_probe(&first, &second);
+    // 长效（90 天）：它发下去之后是「这台浏览器的 cookie 通道完好」的持续标志
+    // —— 直连环境的登录 / 刷新请求恒带着它，响应体与旧版逐字一致（见 `tokens_in_body`）。
+    let cookie = format!(
+        "{}={first}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax",
+        access::PROBE_COOKIE,
+        90 * 24 * 3600
+    );
+    remember_issued_probe(&first);
     let mut response = ok_json(serde_json::json!({
         "roundtrip": false,
         "token": first,
-        "tokenB": second,
     }));
-    for cookie in cookies {
-        if let Ok(value) = axum::http::HeaderValue::from_str(&cookie) {
-            response.headers_mut().append(SET_COOKIE, value);
-        }
+    if let Ok(value) = axum::http::HeaderValue::from_str(&cookie) {
+        response.headers_mut().append(SET_COOKIE, value);
     }
     response
 }
@@ -273,10 +243,11 @@ fn issue_response(session: access::IssuedSession, tokens_in_body: bool) -> Respo
         payload["refreshToken"] = session.refresh_token.into();
     }
     let mut response = ok_json(payload);
-    for cookie in [session.access_cookie, session.refresh_cookie] {
-        if let Ok(value) = axum::http::HeaderValue::from_str(&cookie) {
-            response.headers_mut().append(SET_COOKIE, value);
-        }
+    // **只发一条** `Set-Cookie`（一枚装 access+refresh）：合并型中转会把多条
+    // 拼成一条，属性降级成名为 `path|domain|max-age|…` 的 cookie，新会话存不进
+    // 罐子 —— 那正是「经中转开面板每次都要重登」的成因。一条没有可拼的对象。
+    if let Ok(value) = axum::http::HeaderValue::from_str(&session.session_cookie) {
+        response.headers_mut().append(SET_COOKIE, value);
     }
     response
 }
@@ -407,15 +378,13 @@ pub async fn panel_refresh(
     issue_response(session, tokens_in_body(&headers, &query))
 }
 
-/// `POST /api/panel/logout` —— 撤销当前会话链（双 cookie 一并清除）。
+/// `POST /api/panel/logout` —— 撤销当前会话链（会话 cookie 清除）。
 pub async fn panel_logout(headers: HeaderMap) -> Response {
     access::revoke_session(&headers);
     let mut response = ok_json(serde_json::json!({ "loggedIn": false }));
-    for name in [access::ACCESS_COOKIE, access::REFRESH_COOKIE] {
-        let clear = format!("{name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
-        if let Ok(value) = axum::http::HeaderValue::from_str(&clear) {
-            response.headers_mut().append(SET_COOKIE, value);
-        }
+    let clear = access::clear_cookie();
+    if let Ok(value) = axum::http::HeaderValue::from_str(&clear) {
+        response.headers_mut().append(SET_COOKIE, value);
     }
     response
 }
@@ -461,59 +430,55 @@ mod tokens_in_body_tests {
             .collect()
     }
 
-    /// 两枚探针 cookie 的上行文本。
-    fn probe_cookies(first: &str, second: &str) -> String {
-        format!("{PROBE}={first}; {SECOND}={second}")
+    /// 探针 cookie 的上行文本（一枚）。
+    fn probe_cookies(value: &str) -> String {
+        format!("{PROBE}={value}")
     }
 
-    // 别名而非重新字面量化：探针名字必须与 `access` 里那两位常量同源，
+    /// 会话 cookie 的上行文本：一枚装两段（与 `access::issue_cookie` 同形）。
+    fn session_cookie_of(session: &access::IssuedSession) -> String {
+        format!("{}={}.{}", access::ACCESS_COOKIE, session.access_token, session.refresh_token)
+    }
+
+    /// 从一条 `Set-Cookie` 里取出会话 cookie 的值（去掉属性段）。
+    fn cookie_value_of(set_cookie: &str) -> Option<&str> {
+        set_cookie
+            .split(';')
+            .next()?
+            .strip_prefix(&format!("{}=", access::ACCESS_COOKIE))
+    }
+
+    // 别名而非重新字面量化：探针名字必须与 `access` 里那位常量同源，
     // 否则改了名字测试还全绿（生产的探针 cookie 就再也没人对得上）。
     const PROBE: &str = access::PROBE_COOKIE;
-    const SECOND: &str = access::PROBE_COOKIE_SECOND;
 
-    /// 判据是**两枚都要对得上**（2026-09-29 那台中转的现场）：
-    ///   · 两条都在且各自等于刚发的值 → cookie 通道真的通了（含多条 Set-Cookie
-    ///     透传），响应体与旧版逐字一致（令牌只在 HttpOnly cookie，JS 读不到）；
-    ///   · 只回来一条 → 中转把两条拼成了一条（`Path=/` 降级成名为 `path` 的
-    ///     cookie，会话落不进罐）→ 令牌进响应体。**这一格就是旧实现的漏洞**：
-    ///     单枚探针那版在这里判的是「通」。
-    ///   · 值是同宿主其它来源写下的旧值（cookie 不分端口，fnOS :5666 中转与
-    ///     :3065 直连共用一份罐）→ 同样判不通。
+    /// 判据是**探针值对得上刚发的那把**（服务器端自持，2026-09-29 的现场教训）：
+    ///   · 在场且等于刚发的值 → cookie 通道真的通了，响应体与旧版逐字一致
+    ///     （令牌只在 HttpOnly cookie 里，JS 读不到）；
+    ///   · 缺席 / 是同宿主其它来源写下的旧值（cookie 不分端口，fnOS :5666 中转
+    ///     与 :3065 直连共用一份罐）→ 判不通，令牌进响应体。
+    /// 从前这里要**两枚都对得上**，因为登录响应发两条 Set-Cookie；登录改成只发
+    /// 一条之后，探针也跟着收成一枚 —— 判据的形状要和被预测的对象一致。
     #[test]
-    fn both_probe_cookies_must_match_the_recently_issued_values() {
+    fn the_probe_cookie_must_match_the_recently_issued_value() {
         let _serial = hold_probe_slot();
-        remember_issued_probe("fresh-a", "fresh-b");
+        remember_issued_probe("fresh-a");
 
-        let both = headers_with(&[("cookie", probe_cookies("fresh-a", "fresh-b").as_str())]);
+        let headers = headers_with(&[("cookie", probe_cookies("fresh-a").as_str())]);
         assert!(
-            !tokens_in_body(&both, &HashMap::new()),
-            "两条探针都对得上时不许把令牌塞进响应体（直连环境的原样行为）"
+            !tokens_in_body(&headers, &HashMap::new()),
+            "探针对得上时不许把令牌塞进响应体（直连环境的原样行为）"
         );
 
-        // 只回来一枚：合并型中转的指纹
-        for only in [
-            format!("{PROBE}=fresh-a"),
-            format!("{SECOND}=fresh-b"),
-        ] {
-            let headers = headers_with(&[("cookie", only.as_str())]);
-            assert!(
-                tokens_in_body(&headers, &HashMap::new()),
-                "缺另一枚探针（{only}）必须判不通 —— 单枚探针被骗过的那次弹回就是这么来的"
-            );
-        }
-
-        // 两条都在，但第二枚是陈值
-        let half_stale = headers_with(&[(
-            "cookie",
-            probe_cookies("fresh-a", "stale-b").as_str(),
-        )]);
-        assert!(tokens_in_body(&half_stale, &HashMap::new()));
+        // 陈值（升级前那版留下的、或同宿主另一端口写下的）→ 判不通
+        let stale = headers_with(&[("cookie", probe_cookies("stale-a").as_str())]);
+        assert!(tokens_in_body(&stale, &HashMap::new()));
 
         // 同名多条（罐里留着上一轮的残本）：期望值在其中就算对得上，
         // 与 `access::cookie_values` 的全量口径一致
         let repeated = headers_with(&[(
             "cookie",
-            format!("{}=old-a; {PROBE}=fresh-a; {SECOND}=fresh-b", PROBE).as_str(),
+            format!("{PROBE}=old-a; {PROBE}=fresh-a").as_str(),
         )]);
         assert!(!tokens_in_body(&repeated, &HashMap::new()));
     }
@@ -523,7 +488,7 @@ mod tokens_in_body_tests {
     #[test]
     fn a_cookie_stripping_environment_gets_tokens_in_the_body() {
         let _serial = hold_probe_slot();
-        remember_issued_probe("a", "b");
+        remember_issued_probe("a");
         let headers = headers_with(&[]);
         assert!(tokens_in_body(&headers, &HashMap::new()));
     }
@@ -533,11 +498,11 @@ mod tokens_in_body_tests {
     #[test]
     fn the_marker_travels_by_header_or_by_query() {
         let _serial = hold_probe_slot();
-        remember_issued_probe("fresh-a", "fresh-b");
-        let pair = probe_cookies("fresh-a", "fresh-b");
+        remember_issued_probe("fresh-a");
+        let pair = probe_cookies("fresh-a");
 
         // 显式标记**优先于**「探针说通道完好」：前端明确要求走响应体时，
-        // 即便两枚探针都对得上也把令牌放进去（两侧客户端都认，功能无损）。
+        // 即便探针对得上也把令牌放进去（两侧客户端都认，功能无损）。
         let headers = headers_with(&[
             ("x-panel-auth-mode", "body"),
             ("cookie", pair.as_str()),
@@ -549,7 +514,7 @@ mod tokens_in_body_tests {
             &headers,
             &query_with(&[("auth-mode", "body")])
         ));
-        // 认不出的标记值不算数：落到探针有效性判据上 —— 探针都对得上，
+        // 认不出的标记值不算数：落到探针有效性判据上 —— 探针对得上，
         // 于是这里判的是「走 cookie」（与上一条互为对照，证明那个标记
         // 没被当成"任何值都算 body"）
         assert!(
@@ -557,10 +522,9 @@ mod tokens_in_body_tests {
             "未知取值的标记不该改变判据，应回落到探针结论"
         );
         // 探针值对不上时，认不出的标记也不影响「令牌进响应体」这个安全默认
-        let stale_pair = probe_cookies("nope-a", "nope-b");
-        let headers = headers_with(&[("cookie", stale_pair.as_str())]);
+        let stale = headers_with(&[("cookie", probe_cookies("nope-a").as_str())]);
         assert!(tokens_in_body(
-            &headers,
+            &stale,
             &query_with(&[("auth-mode", "cookie")])
         ));
     }
@@ -572,10 +536,10 @@ mod tokens_in_body_tests {
     // 运行时，守卫只会让另一个线程上的测试阻塞等待槽位，不存在同线程重入死锁；
     // 换成 async Mutex 反而要让整条测试变成 await 密集型，为一把测试用的锁不值。
     #[allow(clippy::await_holding_lock)]
-    async fn the_probe_endpoint_plants_two_cookies_and_needs_both_back() {
+    async fn the_probe_endpoint_plants_one_cookie_and_needs_it_back() {
         let _serial = hold_probe_slot();
 
-        // 第一发（没有任何探针 cookie）：两条 Set-Cookie + 两个值进响应体
+        // 第一发（没有任何探针 cookie）：**一条** Set-Cookie + 值进响应体
         let response = cookie_probe(HeaderMap::new(), Query(HashMap::new())).await;
         let planted: Vec<String> = response
             .headers()
@@ -583,57 +547,47 @@ mod tokens_in_body_tests {
             .iter()
             .filter_map(|value| value.to_str().ok().map(str::to_string))
             .collect();
-        assert_eq!(2, planted.len(), "探针必须下发**两条** Set-Cookie，与登录响应同形");
+        assert_eq!(
+            1,
+            planted.len(),
+            "探针只该下发一条 Set-Cookie —— 与登录响应同形；多条正是被中转拼接的那一格"
+        );
         let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
             .await
             .expect("探针响应体可读");
         let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(false, payload["data"]["roundtrip"]);
         let first = payload["data"]["token"].as_str().unwrap().to_string();
-        let second = payload["data"]["tokenB"].as_str().unwrap().to_string();
         assert!(
-            planted
-                .iter()
-                .any(|cookie| cookie.starts_with(&format!("{PROBE}={first};"))),
-            "第一枚探针的名字与值要下发的是它自己"
-        );
-        assert!(
-            planted
-                .iter()
-                .any(|cookie| cookie.starts_with(&format!("{SECOND}={second};"))),
-            "第二枚探针（那条 -b）缺席就等于回到单枚探针的老毛病"
+            planted[0].starts_with(&format!("{PROBE}={first};")),
+            "探针的名字与值要下发的是它自己，实得 {:?}",
+            planted[0]
         );
 
-        // 第二发（直连环境：两条都回来了）→ roundtrip true
-        let headers = headers_with(&[("cookie", probe_cookies(&first, &second).as_str())]);
-        let response = cookie_probe(
-            headers,
-            Query(query_with(&[("expect", &first), ("expect-b", &second)])),
-        )
-        .await;
+        // 第二发（直连环境：探针回来了）→ roundtrip true
+        let headers = headers_with(&[("cookie", probe_cookies(&first).as_str())]);
+        let response = cookie_probe(headers, Query(query_with(&[("expect", &first)]))).await;
         let payload: serde_json::Value = payload_of(response).await;
         assert_eq!(true, payload["data"]["roundtrip"]);
 
-        // 第二发（合并型中转：只有第一条回来）→ false —— 这正是旧版探针
-        // 判成 true、随后登录弹回的那一格
-        let headers = headers_with(&[("cookie", format!("{PROBE}={first}").as_str())]);
-        let response = cookie_probe(
-            headers,
-            Query(query_with(&[("expect", &first), ("expect-b", &second)])),
-        )
-        .await;
+        // 第二发（中转剥了 cookie / 带的是同宿主的旧探针）→ false
+        let headers = headers_with(&[("cookie", probe_cookies("an-old-value").as_str())]);
+        let response = cookie_probe(headers, Query(query_with(&[("expect", &first)]))).await;
         let payload: serde_json::Value = payload_of(response).await;
         assert_eq!(
             false, payload["data"]["roundtrip"],
-            "缺第二枚探针时必须判不通（令牌随后要走响应体那条更宽的路）"
+            "探针值对不上时必须判不通（令牌随后走响应体那条更宽的路）"
         );
 
-        // 第二发（旧版页面只发 expect）→ 也判不通：它证明不了两条的命运，
-        // 而服务端无法区分"旧页面"与"页面新但另一枚被剥"，两者都该退到 body 模式
-        let headers = headers_with(&[("cookie", probe_cookies(&first, &second).as_str())]);
-        let response = cookie_probe(headers, Query(query_with(&[("expect", &first)]))).await;
-        let payload: serde_json::Value = payload_of(response).await;
-        assert_eq!(false, payload["data"]["roundtrip"]);
+        // 没带 expect（第一发的形态）不再被当第二发：它自己的作用是把探针种下去
+        let response = cookie_probe(HeaderMap::new(), Query(HashMap::new())).await;
+        let planted: Vec<String> = response
+            .headers()
+            .get_all(SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok().map(str::to_string))
+            .collect();
+        assert_eq!(1, planted.len(), "每发最多种一枚，不多发");
     }
 
     async fn payload_of(response: Response) -> serde_json::Value {
@@ -648,19 +602,15 @@ mod tokens_in_body_tests {
     /// 每两小时一次续期都会让令牌变成 JS 可读、并被落进 localStorage ——
     /// 「直连环境令牌只在 HttpOnly cookie 里」这条性质在一次续期之后就失效了。
     /// 客户端改成只在本地存过令牌时才发标记；这一条钉住服务端那一半：
-    /// **没有标记 + 两枚探针都对得上 = cookie 模式 = 响应体里没有令牌**，
-    /// 而新令牌仍随两条 `Set-Cookie` 下发（会话照续）。
+    /// **没有标记 + 探针对得上 = cookie 模式 = 响应体里没有令牌**，
+    /// 而新令牌仍随**一条** `Set-Cookie` 下发（会话照续）。
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn a_direct_session_refreshes_without_putting_tokens_in_the_body() {
         let _serial = hold_probe_slot();
-        remember_issued_probe("direct-a", "direct-b");
+        remember_issued_probe("direct-a");
         let session = access::IssuedSession::new_session();
-        let cookie = format!(
-            "{PROBE}=direct-a; {SECOND}=direct-b; {}={}",
-            access::REFRESH_COOKIE,
-            session.refresh_token
-        );
+        let cookie = format!("{PROBE}=direct-a; {}", session_cookie_of(&session));
 
         let response = panel_refresh(
             headers_with(&[("cookie", cookie.as_str())]),
@@ -681,20 +631,16 @@ mod tokens_in_body_tests {
             payload["data"]
         );
         assert!(payload["data"]["refreshToken"].is_null());
-        assert_eq!(2, set_cookies.len(), "新令牌应改为随两条 Set-Cookie 下发");
+        assert_eq!(
+            1,
+            set_cookies.len(),
+            "续期也只该下发一条 Set-Cookie（多条就会被合并型中转拼坏）"
+        );
 
         // 对照：同一个（已轮换过的）链，客户端**带标记**时令牌必须进响应体 ——
         // 少了这一格，上面的"没有令牌"就可能是「续期根本没发新令牌」
-        let rotated_refresh = set_cookies
-            .iter()
-            .filter_map(|value| value.split(';').next())
-            .find_map(|pair| pair.strip_prefix(&format!("{}=", access::REFRESH_COOKIE)))
-            .map(str::to_string)
-            .expect("Set-Cookie 里应有新的 refresh");
-        let marked = format!(
-            "{PROBE}=direct-a; {SECOND}=direct-b; {}={rotated_refresh}",
-            access::REFRESH_COOKIE
-        );
+        let rotated = cookie_value_of(&set_cookies[0]).expect("Set-Cookie 里应有新的会话对");
+        let marked = format!("{PROBE}=direct-a; {}={rotated}", access::ACCESS_COOKIE);
         let response = panel_refresh(
             headers_with(&[
                 ("cookie", marked.as_str()),

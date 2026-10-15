@@ -132,6 +132,14 @@
     /** 折叠箭头（分组带的展开 / 收起）：向下 = 已展开；收起态由 CSS 旋转 -90° */
     chevronDown: '<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
       + '<path d="m6 9 6 6 6-6"/></g>',
+    /**
+     * 折叠面板的展开箭头（`details.panel-fold` 的 summary 里，置于标题之前）。
+     * 向右 = 收起；展开后由 CSS 旋转 90° 指向下方 —— 两个状态只差一个变换，
+     * 所以只画这一个形状。几何与设置页那组描边图标同一套约定（1.8 粗细、
+     * 圆头），显示 14px 时约 1.05px，与 13.5px 的标题字重相称。
+     */
+    caretRight: '<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
+      + '<path d="m9 5 7 7-7 7"/></g>',
 
     /**
      * 账号名隐私开关的两枚眼睛（账号表「账号」表头的显隐按钮）。

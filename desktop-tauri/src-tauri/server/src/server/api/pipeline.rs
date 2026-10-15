@@ -376,13 +376,15 @@ pub struct RecordContext {
     pub status: i64,
     /// **下游原始请求体文本**（`request_raw` 表的请求侧；已按
     /// [`MAX_RAW_BODY_BYTES`] 截断，None = 无正文可存 —— 转发前就失败的
-    /// 路径连 body 都没解析成）。采集点在各入口 handler（它们手里才有
-    /// 客户端发来的原始字节）；与调试模式（`core::debug_traffic` 的**上游侧**
-    /// 报文）平行，这条是**下游侧**、始终采集。
+    /// 路径连 body 都没解析成，或**调试模式没开**）。采集点在各入口 handler
+    /// （它们手里才有客户端发来的原始字节），经由 [`capture_raw_body`] ——
+    /// 与 `core::debug_traffic` 的**上游侧**报文共用「调试模式」这一个开关：
+    /// 开启时两侧分别采（那边存头部脱敏后的上游信封，这边存下游正文）。
     pub raw_request: Option<String>,
     /// **响应正文文本**（`request_raw` 表的响应侧；同样截断到上限）。
-    /// 非流式路径在记账前由入口直接填（完整 JSON）；流式路径构造时是 None，
-    /// 由 `RecordingStream` 在流结束时用累积缓冲定稿 —— 那时才见得到最后一个字节。
+    /// 非流式路径在记账前由入口用 [`capture_raw_json`] 填（完整 JSON）；
+    /// 流式路径构造时是 None，由 `RecordingStream` 在流结束时用累积缓冲定稿
+    /// —— 那时才见得到最后一个字节。两侧与请求侧同一道开关（见上）。
     pub raw_response: Option<String>,
     /// 这条请求是不是**模型测试**发起的（默认 false，见
     /// `request_stats::RequestEntry::is_test`）。
@@ -391,6 +393,10 @@ pub struct RecordContext {
     /// 同形，唯一的分野就是「谁发起的」—— 存档时要能把它标出来（报表排除、
     /// 请求日志标记）。
     pub is_test: bool,
+    /// **请求来源客户端**（入口由 `core::client::classify` 从下游 UA 判出，
+    /// 见 `request_stats::RequestEntry::client`）。空串 = 没采集到 UA
+    /// （模型测试、请求体解析都失败的早失败路径）。
+    pub client: String,
 }
 
 /// 把原始字节变成可入库的正文文本（请求侧 / 响应侧共用）。
@@ -412,6 +418,44 @@ pub fn raw_body_text(bytes: &[u8]) -> Option<String> {
     Some(text[..cut].to_string())
 }
 
+/// 采集下游原始请求体（`request_raw` 表的请求侧）—— **仅调试模式开启时**。
+///
+/// ── 为什么与调试模式同开关（对齐 OmniProxy）──────────────────
+/// 预览对话用的下游正文（客户端请求体 + 网关响应体）从本次改造起由
+/// `config.json` 的 `debugMode` 统一控制：开关关闭时**什么都不保存**，
+/// 请求日志详情的「预览对话」没有数据可看 —— 与 OmniProxy 的口径一致
+/// （那边入口路由写的是 `rawEnabled ? … : null`）。改造前的行为是
+/// 「始终采集」，那批历史正文已由 schema v13 一次清空。
+///
+/// ── 为什么在采集点判定而不是落库前 ──────────────────────────
+/// 关着时连 [`raw_body_text`] 的截断转换都不做（零开销）—— 与
+/// `core::debug_traffic` 各采集点的 `if enabled` 同一取向。判定用
+/// [`debug_traffic::enabled`]（调试模式的唯一判定入口），改开关对
+/// 「下一个请求」立即生效。
+///
+/// ── 同一请求内开关中途切换的取舍 ────────────────────────────
+/// 每个采集点各自读开关，所以理论上会出现「请求侧采了、响应侧没采」
+/// 这类半条（用户恰好在转发中途手动切了开关）。发生率极低、后果无害
+/// （预览能显示多少算多少），不值得为它引入「请求开始定格一次」的贯穿
+/// 参数 —— `core::debug_traffic` 的采集同样是各点独立判定。
+pub fn capture_raw_body(bytes: &[u8]) -> Option<String> {
+    if !crate::server::core::debug_traffic::enabled() {
+        return None;
+    }
+    raw_body_text(bytes)
+}
+
+/// 采集非流式响应正文（`request_raw` 表的响应侧）—— 仅调试模式开启时。
+///
+/// 与 [`capture_raw_body`] 同一道闸，差别只在入参是已解析的 JSON 值
+/// （非流式路径手里是 `Value`，序列化一份才落库）。序列化在关着时整个跳过。
+pub fn capture_raw_json<T: serde::Serialize>(value: &T) -> Option<String> {
+    if !crate::server::core::debug_traffic::enabled() {
+        return None;
+    }
+    serde_json::to_string(value).ok()
+}
+
 /// 转发前就失败（body 非法 / 缺字段 / 模型不在目录）时的记账。
 ///
 /// 这些请求**一次都没往上游发**，所以 attempts 记 0 会被存储层夹成 1
@@ -420,11 +464,16 @@ pub fn raw_body_text(bytes: &[u8]) -> Option<String> {
 ///
 /// 为什么这几条也要记：`model_not_found` 是客户端配置错误最常见的形态，
 /// 不记的话用户在报表里看不到「请求全在失败」，只会以为统计漏了。
+///
+/// `client` 由调用方从请求头判好带入（`core::client::classify`）：早失败
+/// 恰恰最需要知道「是谁发来的」（客户端配错模型就是典型场景）；拿不到
+/// headers 的路径传空串（见 `RequestEntry::client`）。
 pub fn record_early_failure(
     state: &ServerState,
     started_at: i64,
     model: &str,
     client_reasoning: &str,
+    client: &str,
     error: &GatewayError,
 ) {
     let context = RecordContext {
@@ -442,6 +491,7 @@ pub fn record_early_failure(
         raw_response: None,
         // 早失败路径只有真实流量会走（模型测试自己那条失败在 handler 里收尾）
         is_test: false,
+        client: client.to_string(),
     };
     record_entry(&context, Some(error.message.clone()));
 }
@@ -601,6 +651,9 @@ pub fn record_entry(context: &RecordContext, fallback_error: Option<String>) {
     entry.route = context.telemetry.route_decision().unwrap_or(Value::Null);
     // 来源标记：入口带进来的事实，存储层据此排除报表聚合（见该字段的说明）
     entry.is_test = context.is_test;
+    // 来源客户端：入口解析请求头判好的类型（`core::client::classify`），
+    // 存储层只搬运不重判 —— UA 规则只有一份
+    entry.client = context.client.clone();
     entry.error = error;
     entry.prompt_tokens = snapshot.prompt_tokens;
     entry.completion_tokens = snapshot.completion_tokens;
@@ -618,8 +671,10 @@ pub fn record_entry(context: &RecordContext, fallback_error: Option<String>) {
     }
     // 原始正文落库（request_raw 表）：与明细同 id、同开始时刻。独立于 record
     // 的一次写入（大字段不进记账热路径，理由见 `RequestStats::store_raw`）；
-    // id 为空 / 两侧全空在 store_raw 内部拦下，失败只打控制台 —— 正文是
-    // 排障辅助，丢一侧不能影响已经收尾的请求
+    // 两侧的采集在入口已按调试模式 gate（见 `capture_raw_body` / `capture_raw_json`
+    // —— 这里的两侧通常都是 None，store_raw 提前返回不写行）；id 为空 / 两侧
+    // 全空也在 store_raw 内部拦下，失败只打控制台 —— 正文是排障辅助，
+    // 丢一侧不能影响已经收尾的请求
     context.stats.store_raw(
         &snapshot.id,
         context.started_at,
@@ -751,7 +806,7 @@ pub struct RecordingStream {
 /// 流式请求的响应正文是逐帧下发的，`RecordingStream` 是唯一能看到**全部**
 /// 下发字节的地方（协议转换层在它里面，见 `transformed_stream` 的顺序说明）。
 /// 预览对话要的就是「客户端实际看到的响应」，在这里抄一份最准确，也
-/// 不用各条转发路径再各接一个钩子。
+/// 不用各条转发路径再各接一个钩子。**只在调试模式开启时攒**（见 `enabled`）。
 ///
 /// ── 内存有上界 ──────────────────────────────────────────────
 /// 攒到 [`MAX_RAW_BODY_BYTES`] 就停（后续字节只透传不缓存）：一次 SSE 响应
@@ -759,16 +814,25 @@ pub struct RecordingStream {
 /// 但网关不该为一个排障功能长期多占一份响应大小的内存。截断即终态：
 /// `raw_body` 读取时按「长度达到上限」给出 truncated 提示。
 struct RawCapture {
+    /// 调试模式是否开启（与请求侧 [`capture_raw_body`] 同一道闸），
+    /// **构造时定格**：转发中途切开关不会让同一条记录出现「请求侧采了、
+    /// 响应侧又攒了半截」的更细碎的半条 —— 定格后本请求的响应侧行为一致。
+    /// false = 连缓冲都不攒（push 直接丢弃，零内存开销）。
+    enabled: bool,
     buf: Vec<u8>,
 }
 
 impl RawCapture {
-    fn new() -> Self {
-        Self { buf: Vec::new() }
+    fn new(enabled: bool) -> Self {
+        Self { enabled, buf: Vec::new() }
     }
 
-    /// 抄一段刚下发的字节（达到上限后丢弃，不报错 —— 采集永远不影响透传）
+    /// 抄一段刚下发的字节（达到上限或调试模式关着时丢弃，不报错 ——
+    /// 采集永远不影响透传）
     fn push(&mut self, chunk: &[u8]) {
+        if !self.enabled {
+            return;
+        }
         let remaining = MAX_RAW_BODY_BYTES.saturating_sub(self.buf.len());
         if remaining == 0 {
             return;
@@ -777,10 +841,14 @@ impl RawCapture {
         self.buf.extend_from_slice(&chunk[..take]);
     }
 
-    /// 定稿：一个字节都没抄到给 None（不写行）；UTF-8 边界与截断由
-    /// [`raw_body_text`] 统一处理。取 `&mut self`：settle 之后本缓冲不再使用，
-    /// 清空与否无所谓，但 RecordingStream 只拿得到 `&mut self`
+    /// 定稿：调试模式关着、或一个字节都没抄到，都给 None（不写行）；
+    /// UTF-8 边界与截断由 [`raw_body_text`] 统一处理。取 `&mut self`：
+    /// settle 之后本缓冲不再使用，清空与否无所谓，但 RecordingStream 只拿得到
+    /// `&mut self`
     fn into_text(&mut self) -> Option<String> {
+        if !self.enabled {
+            return None;
+        }
         raw_body_text(&self.buf)
     }
 }
@@ -797,7 +865,10 @@ impl RecordingStream {
         frames: TerminalFrames,
     ) -> Self {
         let terminal = if frames.is_empty() { None } else { Some(TerminalScan::new(frames)) };
-        Self { inner, context: Some(context), terminal, raw: RawCapture::new() }
+        // 响应侧采集与请求侧同一道闸：调试模式关着就不攒缓冲（零开销）——
+        // 这里定格一次，本请求的响应侧行为此后不再看开关（见 `RawCapture` 的说明）
+        let raw = RawCapture::new(crate::server::core::debug_traffic::enabled());
+        Self { inner, context: Some(context), terminal, raw }
     }
 
     /// 记账并清空上下文（幂等：第二次调用什么都不做）。
@@ -1153,7 +1224,7 @@ mod tests {
 
     use crate::server::core::upstream::usage::RequestTelemetry;
     use crate::server::db::Db;
-    use crate::server::request_stats::{RequestQuery, RequestStats, Retention};
+    use crate::server::request_stats::{RequestQuery, RequestStats};
 
     /// 临时库的 RAII 守卫：**返回给调用点持有**（只在创建时删一次的写法会让
     /// 用例失败或提前 return 时把目录留下，累积成几百个）。
@@ -1173,7 +1244,7 @@ mod tests {
             .join(format!("api-pipeline-{}-{}-{id}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&dir);
         let db = Db::open(&dir.join("agent2api.db")).expect("临时库应当能建起来");
-        (Arc::new(RequestStats::with_db(Some(db), || Retention::default())), TempDir(dir))
+        (Arc::new(RequestStats::with_db(Some(db))), TempDir(dir))
     }
 
     /// 建一条上下文：用量按生产实测的那份填（71476 / 56）
@@ -1191,6 +1262,8 @@ mod tests {
             client_reasoning: String::new(),
             // 模拟真实流量：不是模型测试发起的（见 `RecordContext::is_test`）
             is_test: false,
+            // 客户端不参与本用例的断言，给空串（无 UA 的形态）
+            client: String::new(),
             status: 200,
             raw_request: None,
             raw_response: None,

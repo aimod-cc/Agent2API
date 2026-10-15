@@ -1,7 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Agent2API",
-  "version": "3.0.3",
+  "mainBinaryName": "agent2api",
+  "version": "3.0.5",
   "identifier": "com.workbuddy.local-proxy",
   "build": {
     "frontendDist": "../ui"
@@ -34,6 +35,7 @@
       "nsis": {
         "installMode": "perMachine",
         "installerIcon": "icons/icon.ico",
+        "installerHooks": "nsis-hooks.nsh",
         "languages": [
           "SimpChinese"
         ]

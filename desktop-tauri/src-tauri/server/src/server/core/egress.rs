@@ -74,7 +74,10 @@ const MAX_CLIENTS: usize = 24;
 
 /// 出口 IP 查询服务：拿不到只当作附加信息缺失，不影响连通性结论
 const IP_ECHO_URL: &str = "https://api.ipify.org?format=json";
-/// 连通性测试的默认目标：**上游站点**而不是第三方站点（判据见 test_connectivity）
+/// 连通性测试的默认目标：**上游站点**而不是第三方站点（判据见 test_connectivity）。
+/// 用户可在「网络代理」页的设置里换成自家上游（`core::proxy_settings::test_url`），
+/// 未配置（空）时回落到这里 —— 字面量与 `core::proxy_settings::DEFAULT_TEST_URL`
+/// 保持一致，改一处要同步另一处。
 const DEFAULT_TEST_URL: &str = "https://copilot.tencent.com/v2/config";
 /// 连通性测试默认超时
 const DEFAULT_TEST_TIMEOUT_MS: u64 = 15_000;
@@ -481,9 +484,19 @@ pub async fn test_connectivity(
     }
 }
 
-/// 用默认超时与默认目标测试出口（路由层的入口）
+/// 用默认超时与测试目标测试出口（路由层的入口）。
+///
+/// 测试目标：代理设置里自定义的网址优先（`core::proxy_settings::test_url`），
+/// 未配置回落 `DEFAULT_TEST_URL` —— 「网络代理」页设置弹窗的写入方，
+/// 语义见 `core::proxy_settings` 的模块头。
 pub async fn test_proxy(proxy: Option<&ResolvedProxy>) -> ConnectivityResult {
-    test_connectivity(proxy, DEFAULT_TEST_TIMEOUT_MS, None).await
+    let url = crate::server::core::proxy_settings::test_url();
+    test_connectivity(
+        proxy,
+        DEFAULT_TEST_TIMEOUT_MS,
+        url.as_deref().or(Some(DEFAULT_TEST_URL)),
+    )
+    .await
 }
 
 /// 错误链的可读描述（对照 Node 版 `proxyErrorDetail`）。

@@ -158,12 +158,26 @@ pub(super) async fn select_target_account(
     // 轮转游标只在「本请求的第一次选路」前进：429 顺延的后续选路沿用同一
     // 起点往后走，否则一条请求会连跳好几位。粘性命中的轮次不前进 —— 会话
     // 一直粘着同一个账号时，轮转的「下一棒」留给新会话。
-    let cursor = if settings.strategy == config::RouteStrategy::Rotate
-        && tried_ids.is_empty()
-        && pinned.is_none()
-        && snap.sticky_hit.is_none()
-    {
-        Some(service.route.rotate_take(keys.request_model(), candidates.len()))
+    //
+    // 家内轮询（`Provider`）的取用条件与 `Rotate` 逐字相同（第一次选路 +
+    // 没钉账号 + 没粘住）——「一次请求只消耗一格环位」对两种轮转是同一个口径；
+    // 差别只在它取的是**每家各一个**起始位（见 `rotate_take_per_provider`）。
+    let may_rotate = tried_ids.is_empty() && pinned.is_none() && snap.sticky_hit.is_none();
+    let cursor = if may_rotate && settings.strategy == config::RouteStrategy::Rotate {
+        Some(service.route.rotate_take(keys.request_model()))
+    } else {
+        None
+    };
+    // 游标只传「哪几家」用来定键名（`provider_sizes`），各家的**人数不参与
+    // 取模** —— 取模发生在 `plan_route` 内部、用的是过滤（禁用 / 冷却 / 并发满 /
+    // 无凭证）之后的实际成员数。推进与环绕必须用同一把尺子：2026-10-14 之前
+    // 这里按未过滤人数取模，两个模数一旦不等，家内就会出现「同一个账号连续
+    // 被选中两次」的不均匀。
+    let provider_cursors = if may_rotate && settings.strategy == config::RouteStrategy::Provider {
+        Some(service.route.rotate_take_per_provider(
+            keys.request_model(),
+            &routing::provider_sizes(&candidates),
+        ))
     } else {
         None
     };
@@ -174,6 +188,7 @@ pub(super) async fn select_target_account(
         open: &snap.open,
         limiter_blocked: &balance_blocked_ids,
         cursor,
+        provider_cursors: provider_cursors.as_ref(),
         sticky_account: snap.sticky_hit.as_deref(),
     };
     let plan = routing::plan_route(&candidates, keys, &counts, tried_ids, now, &meta);
@@ -563,6 +578,7 @@ pub(super) fn pick_next_account(
         open: &snap.open,
         limiter_blocked: &balance_blocked_ids,
         cursor: None,
+        provider_cursors: None,
         sticky_account: None,
     };
     let plan = routing::plan_route(&candidates, keys, &counts, tried_ids, now, &meta);

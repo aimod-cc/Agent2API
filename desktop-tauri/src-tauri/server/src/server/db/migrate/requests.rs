@@ -28,12 +28,11 @@
 //! 各自判自己的表非空即跳过（模块头的原则），检查在**备份之前** ——
 //! 表非空时连旧文件都不动，用户仍能在目录里看到它。
 //!
-//! ── 导入后为什么要裁一遍 ────────────────────────────────────
+//! ── 导入后不再裁一遍 ────────────────────────────────────────
 //! 旧实现只在**启动载入**时把内存裁到合规（明细按保留期与容量、聚合按保留期
-//! 与天数上限），盘上的文件下一次写入才收敛 —— 所以旧文件里留着超期行、
-//! 超限行是常态。裁法与运行期同源：复用 `RequestStats::legacy_bounds()` 算边界
-//! （它内部走 `RetentionBounds::of`，与运行期是同一段代码）、
-//! 复用同一个 `import_legacy_*` 写库函数（内部调 `sql::` 的同一组删除语句）。
+//! 与天数上限），盘上的文件下一次写入才收敛 —— 所以旧文件里留着超期行是常态，
+//! 那时导入后要按同一套边界裁一次。现在请求统计**全量保留**：没有保留天数、
+//! 没有条数上限，旧文件里有多少行就导进来多少，升级不会丢掉任何历史数据。
 
 use std::path::{Path, PathBuf};
 
@@ -140,8 +139,7 @@ pub(super) fn import_requests(conn: &Connection, dir: &Path) -> Option<LegacyOut
         }
     }
     let entries = read_requests(&path)?;
-    let bounds = request_stats::legacy::legacy_bounds();
-    if let Err(error) = request_stats::legacy::import_legacy_requests(conn, &entries, &bounds) {
+    if let Err(error) = request_stats::legacy::import_legacy_requests(conn, &entries) {
         logging::console_line(
             "[Storage]",
             &format!("❌ 请求明细迁移失败：写入数据库失败（{error}）"),
@@ -152,9 +150,9 @@ pub(super) fn import_requests(conn: &Connection, dir: &Path) -> Option<LegacyOut
     Some(LegacyOutcome {
         label: LABEL,
         source: path,
-        // 报的是**解析出的条数**（文件里有多少条就报多少条），不是落库后的行数 ——
-        // 导入时的时间/容量两道裁剪会再删掉超期与超限的行（旧文件里带这些是常态），
-        // 而裁剪是**存储规则**在生效、不是迁移的动作，混进这个数字会让用户以为迁移丢数据。
+        // 报的是**解析出的条数**（文件里有多少条就报多少条）：导入现在不做任何
+        // 裁剪，这个数字与落库行数一致；即便将来口径变化，它描述的也始终是
+        // 「迁移读了文件里的多少条」，不会混进存储规则的动作。
         imported: entries.len(),
         backup,
     })
@@ -202,8 +200,7 @@ pub(super) fn import_daily(conn: &Connection, dir: &Path) -> Option<LegacyOutcom
         }
     };
     let daily = request_stats::legacy::parse_daily_jsonl(&text);
-    let bounds = request_stats::legacy::legacy_bounds();
-    let (imported, backfilled) = match request_stats::legacy::import_legacy_daily(conn, &daily, &bounds) {
+    let (imported, backfilled) = match request_stats::legacy::import_legacy_daily(conn, &daily) {
         Ok(result) => result,
         Err(error) => {
             logging::console_line(
@@ -223,7 +220,7 @@ pub(super) fn import_daily(conn: &Connection, dir: &Path) -> Option<LegacyOutcom
     Some(LegacyOutcome {
         label: DAILY_LABEL,
         source: path,
-        // 报解析出的天数（同明细项的理由：导入后的裁剪不算迁移丢数据）
+        // 报解析出的天数（同明细项的理由：这个数字只描述文件里有多少行）
         imported,
         backup,
     })

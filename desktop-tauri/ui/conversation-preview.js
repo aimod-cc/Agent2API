@@ -247,6 +247,20 @@
       const filled = blocks.filter(Boolean);
       if (filled.length) return filled.join('');
     }
+    if (isPlainObject(body) && body.input !== undefined) {
+      // OpenAI Responses 请求体：instructions 对应 system，input 可为字符串或消息数组
+      const blocks = [];
+      if (typeof body.instructions === 'string' && body.instructions.trim()) {
+        blocks.push(`<div class="cv-row sys"><div class="cv-msg sys md-body">${richText(body.instructions)}</div></div>`);
+      }
+      if (typeof body.input === 'string' && body.input.trim()) {
+        blocks.push(messageHtml({ role: 'user', content: body.input }));
+      } else if (Array.isArray(body.input)) {
+        for (const item of body.input) blocks.push(messageHtml(item));
+      }
+      const filled = blocks.filter(Boolean);
+      if (filled.length) return filled.join('');
+    }
     // 降级：不是 JSON / 没有 messages / 消息全空 —— 说清为什么，并保留原文
     return wbI18n.t('<div class="cv-parse-empty">无法解析请求体（不是含 messages 数组的 JSON）</div>')
       + `<details class="cv-details">${wbI18n.t('<summary>请求原文</summary>')}<pre class="req-detail-pre">${esc(source)}</pre></details>`;
@@ -333,6 +347,42 @@
     if (body.error) {
       const message = isPlainObject(body.error) ? body.error.message : body.error;
       return { errorText: String(message ?? wbI18n.t('上游返回错误')) };
+    }
+    if (Array.isArray(body.output)) {
+      // OpenAI Responses 响应体：output 数组含 reasoning / message / function_call 项
+      const parts = newParts();
+      let reasoning = '';
+      for (const item of body.output) {
+        if (!isPlainObject(item)) continue;
+        if (item.type === 'reasoning' && Array.isArray(item.summary)) {
+          for (const piece of item.summary) {
+            if (isPlainObject(piece) && typeof piece.text === 'string' && piece.text) {
+              reasoning += (reasoning ? '\n' : '') + piece.text;
+            }
+          }
+        } else if (item.type === 'message' && Array.isArray(item.content)) {
+          for (const piece of item.content) {
+            if (isPlainObject(piece) && typeof piece.text === 'string' && piece.text) {
+              parts.text += (parts.text ? '\n' : '') + piece.text;
+            }
+          }
+        } else if (item.type === 'function_call' || item.type === 'custom_tool_call') {
+          parts.calls.push({
+            name: String(item.name || 'tool'),
+            args: prettyJson(item.arguments ?? item.input ?? ''),
+          });
+        }
+      }
+      if (!parts.text && typeof body.output_text === 'string') parts.text = body.output_text;
+      if (!parts.text && !parts.calls.length && !reasoning) return null;
+      return { text: parts.text, images: [], reasoning, calls: parts.calls, errorText: '' };
+    }
+    if (body.type === 'message' && Array.isArray(body.content)) {
+      // Anthropic Messages 响应体：content 块数组含 thinking / text / tool_use
+      const parts = collectContent(body.content, newParts());
+      const reasoning = Array.isArray(parts.thinking) ? parts.thinking.join('\n') : String(parts.thinking || '');
+      if (!parts.text && !parts.images.length && !parts.calls.length && !reasoning) return null;
+      return { text: parts.text, images: parts.images, reasoning, calls: parts.calls, errorText: '' };
     }
     const choice = Array.isArray(body.choices) ? body.choices[0] : null;
     const message = isPlainObject(choice) ? choice.message : null;

@@ -77,6 +77,18 @@ fn account_text(account: &Value, key: &str) -> String {
         .to_string()
 }
 
+/// 账号行的展示名：统一展示名优先（与账号页 / 请求日志同口径，见
+/// `store_view::display_name_of`），缺键（旧快照）按旧口径回落 `name`。
+/// 本文件四处行组装共用这一份，签到中心的账号名不再另立口径。
+fn account_display_name(account: &Value) -> String {
+    let display = account_text(account, "displayName");
+    if display.is_empty() {
+        account_text(account, "name")
+    } else {
+        display
+    }
+}
+
 /// outOfScope 的原因文案（按 `supports_checkin` 的排除分支逐一对应）：
 /// 判据改了这里要跟着改 —— 两处写的都是「这个账号为什么不能签到」。
 fn out_of_scope_reason(account: &Value) -> &'static str {
@@ -121,7 +133,7 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
         if let Some(index) = slot {
             buckets[index].push(json!({
                 "id": account_text(account, "id"),
-                "name": Value::from(account_text(account, "name")),
+                "name": Value::from(account_display_name(account)),
                 "available": account.get("available").and_then(Value::as_bool).unwrap_or(true),
                 "checkinAt": account.get("checkinAt").cloned().unwrap_or(Value::Null),
                 "checkedInToday": checked_in_today(
@@ -187,7 +199,7 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
                 let id = account_text(account, "id");
                 json!({
                     "id": id,
-                    "name": Value::from(account_text(account, "name")),
+                    "name": Value::from(account_display_name(account)),
                     "provider": provider,
                     "settled": super::onboarding::settled_view(state.store(), &id, provider)
                         .unwrap_or(Value::Null),
@@ -224,7 +236,7 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
         .map(|account| {
             json!({
                 "id": account_text(account, "id"),
-                "name": Value::from(account_text(account, "name")),
+                "name": Value::from(account_display_name(account)),
                 "claimAt": account.get("claimAt").cloned().unwrap_or(Value::Null),
                 // 领取台账（{planId: 毫秒}）原样带出：界面「今天领过哪几份」按
                 // 逐份比对（claimPlans 的日界判定在前端已有同款实现，复用它，
@@ -247,7 +259,7 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
         .map(|account| {
             json!({
                 "id": account_text(account, "id"),
-                "name": Value::from(account_text(account, "name")),
+                "name": Value::from(account_display_name(account)),
                 "provider": "workbuddy",
             })
         })

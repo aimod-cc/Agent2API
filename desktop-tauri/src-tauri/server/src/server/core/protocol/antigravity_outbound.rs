@@ -88,9 +88,9 @@
 //!     `thought_signature` / `thoughtSignature` 裸字段）读回并回填到
 //!     `functionCall` part；
 //!   - 限制：客户端不回带签名时**省略**（不回填默认值 —— 那是参考实现的自有
-//!     状态，本仓不发明）；非流式客户端走聚合器时 `extra_content` 会被
-//!     `merge_tool_call` 丢掉（聚合形态只保留 id/type/name/arguments），
-//!     签名只在流式路径可见。这些都是报告里点名的已知限制。
+//!     状态，本仓不发明）。非流式客户端走聚合器时 `extra_content` 由
+//!     `merge_tool_call` 保留（2026-10-14 前曾被丢弃、只留 id/type/name/arguments，
+//!     签名只在流式路径可见 —— 那正是 issue #237 的 400 成因）。
 //!
 //! ── 硬约束 ──────────────────────────────────────────────────
 //! release 是 `panic=abort`：本文件零 unwrap/expect/panic。

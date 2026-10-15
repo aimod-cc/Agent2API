@@ -23,12 +23,13 @@ import { t } from '../i18n'
  *      row 缺失（列表在弹窗打开前恰好刷新过）时显示「数据已刷新，请重试」。
  *   ② 预览对话 —— 调 `getStatsRequestRaw(id)` 拿下游原文（请求体 + 最终响应），
  *      解析与气泡渲染全在 conversation-preview.js（纯函数，这里只取数与给空态）。
- *      404 / 双空给空态：报文有自己的容量闸（按条数与时间丢最旧），
- *      「明细还在、原文已被挤掉」是正常状态，不是错误。
+ *      正文只在**调试模式开启期间**的请求上采集（与上游报文同一个开关，
+ *      对齐 OmniProxy 的口径），所以 404 / 双空给空态：最常见的原因是
+ *      「请求发生时开关没开」，其次是已被清理 —— 都不是错误。
  *   ③ 原始报文 —— 调试模式保存的**上游**原始报文（`getDebugTraffic` 的四段：
  *      请求头 / 请求体 / 响应头 / 响应体，凭据已脱敏），原样保留为四块竖排。
- *      调试模式没开（或超出保留）时**整个标签隐藏** —— 它本来就是可选的排障
- *      数据，缺了不该让用户在两个空标签里找内容。
+ *      调试模式没开（或该条已被淘汰出最近 500 条）时**整个标签隐藏** ——
+ *      它本来就是可选的排障数据，缺了不该让用户在两个空标签里找内容。
  *
  * ── 迁移里最需要保持的三条取舍 ──────────────────────────────
  *   · 两个接口在 open 时**并行**发起，谁到了渲染谁（各自动自己那块与标签条，
@@ -506,10 +507,12 @@ function RouteReplay({ row }: { row: RequestRow }) {
   if (!route) return null
   const strategy = String(route.strategy || '')
   const sticky = String(route.sticky || '')
-  // 只有两档（顺序优先 / 负载均衡）；历史记录里可能留着已下线的 'usage'，
-  // 按它的替代者「负载均衡」显示（后端 RouteStrategy::from_id 也是这么归的）
+  // 三档（顺序优先 / 负载均衡 / 家内轮询）；历史记录里可能留着已下线的 'usage'，
+  // 按它的替代者「负载均衡」显示（后端 RouteStrategy::from_id 也是这么归的）。
+  // 认不出的取值原样显示 —— 那是「后端有、前端还没跟上」的信号，藏起来更难查。
   const strategyLabel = strategy === 'rotate' || strategy === 'usage' ? t('负载均衡')
-    : strategy === 'order' ? t('顺序优先') : strategy
+    : strategy === 'order' ? t('顺序优先')
+      : strategy === 'provider' ? t('家内轮询') : strategy
   const stickyLabel = sticky === 'auto' ? t('自动') : sticky === 'session' ? t('会话内')
     : sticky === 'turn' ? t('每轮') : sticky === 'off' ? t('关闭') : sticky
   const ordered = Array.isArray(route.ordered) ? route.ordered as Array<Record<string, unknown>> : []
@@ -638,7 +641,7 @@ function PreviewPane({ state }: { state: RawState }) {
   const html = body
     ? shared().wbConversationPreview?.render?.(body.requestBody, body.responseBody) || ''
     : ''
-  if (!html) return <Empty text={t('无报文原文（可能已被清理或超出保留范围）')} />
+  if (!html) return <Empty text={t('无报文原文（未开启「调试模式」，或已被清理）')} />
   return (
     <div>
       {state !== 'gone' && state.truncated ? (

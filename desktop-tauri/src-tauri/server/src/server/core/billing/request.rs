@@ -118,6 +118,35 @@ pub(super) const BILLING_ACTIVITY_CHECKIN_STATUS: BillingSpec = BillingSpec {
     whitelist_headers: false,
 };
 
+/// 国际版「对话活跃上报」端点（growth 连登的唯一点亮通道）。
+///
+/// 实测（2026-10，真实国际版账号）：`POST {endpoint}/v2/report` 在
+/// www.workbuddy.ai 上返回 200 code=0，**上报后 growth streak 从 0 点亮到 1**；
+/// 而签到活动探测里的 `active` 字段与保活对话都不点亮连登。参考实现
+/// （workbuddy2api 系）同样把这条上报作为国际版每日活跃的主动作，并留有
+/// 「曾按 global 无活跃体系跳过 → 国际版账号永远点不亮连登」的修复记录。
+pub(super) const BILLING_REPORT_ACTIVITY: BillingSpec = BillingSpec {
+    method: "POST",
+    path: "/v2/report",
+    body: report_body,
+    whitelist_headers: false,
+};
+
+/// 国际版成长中心连登状态（回读用）。上报是否真的计分要靠它闭环验证 ——
+/// 实测存在「上报 200 但 streak 没涨」的静默丢弃形态（事件缺 userId 时）。
+pub(super) const GROWTH_STREAK_STATUS: BillingSpec = BillingSpec {
+    method: "GET",
+    path: "/activity/growth/streak",
+    body: empty_body,
+    whitelist_headers: false,
+};
+
+/// 活跃上报事件的缺省请求体（占位，真实体由调用方覆盖 ——
+/// `BillingSpec.body` 是 fn 指针，无法携带每账号的字段）。
+fn report_body() -> Value {
+    json!([])
+}
+
 pub(super) const BILLING_USER_RESOURCE: BillingSpec = BillingSpec {
     method: "POST",
     path: "/v2/billing/meter/get-user-resource",

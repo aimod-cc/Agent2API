@@ -27,6 +27,8 @@
 //!                               htpasswd -nBC 10 user 的输出整行可粘）
 //!   AGENT2API_ALLOW_NO_KEY      置 `1` 关闭全部闸门（未配 Key 也放行，纯内网用）
 //!   AGENT2API_CAPTCHA_ENABLED   登录页人机验证组件环境变量，默认为1开启，0为关闭
+//!   AGENT2API_SELF_UPDATE       置 `1` 允许面板在容器内原地更新（Dockerfile 默认设好；
+//!                               换文件后进程退出、由容器 restart 策略拉起）
 //!   AGENT2API_VERBOSE           置 `1` 打开 debug 级日志（与桌面一致）
 
 use std::net::{IpAddr, Ipv4Addr};
@@ -74,7 +76,8 @@ fn main() -> ExitCode {
     };
 
     // bootstrap：开库、读配置、探测旧数据、装日志库（与桌面同一套时序）。
-    // 失败只可能来自目录迁移防御性校验 —— 原样透出，不能带错继续。
+    // 失败只可能来自目录迁移防御性校验、以及「库 schema 版本高于本程序」
+    // —— 两者都原样透出，不能带错继续。
     let mut state = match ServerState::bootstrap(port, host) {
         Ok(state) => state,
         Err(reason) => {
@@ -101,6 +104,7 @@ fn main() -> ExitCode {
     // 面板访问控制的库句柄与刷新令牌载入（注册 / 双令牌落盘都走它）
     agent2api_server::server::access::attach_db(state.db().cloned());
     agent2api_server::server::access::load_refresh_tokens();
+    agent2api_server::server::access::load_access_tokens();
     // env 预置的管理员同步进库（明文在此前已转哈希，库里只存哈希）
     agent2api_server::server::access::sync_env_admin_to_store();
 
@@ -148,6 +152,21 @@ fn main() -> ExitCode {
     }
 
     state.set_ui_dir(ui_dir);
+
+    // 容器内更新的「重启」通道：面板点了「安装并重启」之后，自更新模块的钩子
+    // 往这里发一个信号，主线程照 SIGTERM 那条路优雅停机并返回 —— 容器由
+    // `restart: unless-stopped` 拉起（同一个容器、可写层保留），刚换上去的
+    // 程序与界面随之生效。桌面形态不注册钩子（那边重启归壳管），
+    // /api/update/restart 会以 400 拒绝。
+    //
+    // 放 start() 之前注册：请求只会由正在跑的服务器发来，而钩子只需要这个
+    // 发送端（停机动作仍在主线程做，见下面 block_on 的等待项）。
+    let (restart_tx, restart_rx) = tokio::sync::mpsc::channel::<()>(1);
+    agent2api_server::server::core::update::selfupdate::set_restart_hook(Box::new(move || {
+        // 钩子跑在自更新的后台线程里：try_send 不阻塞、也不要求运行时上下文
+        let _ = restart_tx.try_send(());
+    }));
+
     let shutdown_tx = match start(&state) {
         Ok(tx) => tx,
         Err(conflict) => {
@@ -167,8 +186,8 @@ fn main() -> ExitCode {
         ),
     );
 
-    // 停机信号：Ctrl+C（全平台）+ SIGTERM（unix，容器 stop 走这条）。
-    // 收到任一个就触发 graceful shutdown —— 在途请求跑完再退。
+    // 停机信号：Ctrl+C（全平台）+ SIGTERM（unix，容器 stop 走这条）；
+    // 「面板发起的重启」与两者同一条收尾路径（见上面 restart_rx 的说明）。
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -179,7 +198,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    runtime.block_on(wait_for_shutdown_signal());
+    runtime.block_on(wait_for_shutdown_signal(restart_rx));
     let _ = shutdown_tx.send(());
     // 给在途请求留出跑完的时间（start 内部会等 graceful shutdown 收尾）
     std::thread::sleep(std::time::Duration::from_millis(300));
@@ -223,8 +242,9 @@ fn display_host(host: IpAddr) -> String {
     }
 }
 
-/// 等待停机信号：Ctrl+C（全平台）或 SIGTERM（unix）
-async fn wait_for_shutdown_signal() {
+/// 等待停机信号：Ctrl+C（全平台）、SIGTERM（unix，容器 stop 走这条），
+/// 或面板发起的重启（容器内更新完成后走这条，见 main 里注册的钩子）。
+async fn wait_for_shutdown_signal(mut restart: tokio::sync::mpsc::Receiver<()>) {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
@@ -232,10 +252,14 @@ async fn wait_for_shutdown_signal() {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}
             _ = term.recv() => {}
+            _ = restart.recv() => {}
         }
     }
     #[cfg(not(unix))]
     {
-        let _ = tokio::signal::ctrl_c().await;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = restart.recv() => {}
+        }
     }
 }

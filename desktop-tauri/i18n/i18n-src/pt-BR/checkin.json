@@ -228,5 +228,11 @@
   "领取失败：{error}": "Falha no resgate: {error}",
   "（共 {n} 个账号）": "({n} contas no total)",
   "（能量 / 连登读数本次未取到）": "(Leituras de energia / sequência indisponíveis desta vez)",
-  "，日活保活 {n} 个": ", {n} mantidas ativas"
+  "，日活保活 {n} 个": ", {n} mantidas ativas",
+  "已完成活跃上报（连登已点亮），但活动未开启（本次没有可领的奖励）": "Atividade reportada (ofensiva acesa), mas a campanha não está ativa (nada para resgatar desta vez)",
+  "活跃上报完成，但保活未成功且活动未开启": "Atividade reportada, mas o keep-alive falhou e a campanha não está ativa",
+  "活跃保活完成，但活跃上报失败且活动未开启": "Keep-alive concluído, mas o relatório de atividade falhou e a campanha não está ativa",
+  "活跃上报与保活均未成功，且活动未开启": "Tanto o relatório de atividade quanto o keep-alive falharam, e a campanha não está ativa",
+  "活跃上报完成，但活动未开启": "Atividade reportada, mas a campanha não está ativa",
+  "活跃上报成功": "Atividade reportada com sucesso"
 }

@@ -1,0 +1,94 @@
+name: frontend-artifacts
+
+# 校验「入库的前端构建产物」与源码同源。
+#
+# ── 为什么需要单独一道闸 ──────────────────────────────────────
+# 本仓库把构建产物**入库**（`ui/islands/ui.js`、`ui/islands/ui.css`、`ui/i18n/**`），
+# 而 Tauri 打包的正是 `ui/` 这个静态目录（见 tauri.conf.json 的 frontendDist）——
+# 也就是说上线的字节就是仓库里那几份。于是「只改源码不重新构建」与「手改产物」
+# 都能一路合进 beta 并被打进安装包，而常规 review 看不出 1.1 MB 压缩文件里少了什么。
+#
+# 2026-10 合并 #228 / #235 时踩到过这个面：两个 PR 各自重建过产物，在 `ui.js` 上
+# 必然撞车，而**取任何一边都会静默回退另一边的 UI 改动**（那一次是靠人工核对
+# token 集合才判出「产物确实出自源码」）。这道闸把那件事交给机器。
+#
+# ── 判据：重建后必须逐字节相同 ────────────────────────────────
+# 不是「对比源码与产物的语义」——那是做不到的。判据只有一条：**产物能被源码
+# 复现出逐字节相同的结果**。它成立的前提是构建可复现，这一点已在 Windows 与
+# 本工作流的 Linux 上分别验证：两边都产出 LF，且与入库内容一致（入库的 blob
+# 也是 LF；仓库没有 .gitattributes，Linux 侧 autocrlf 为 false，不会来回转换）。
+#
+# ── 差异提示 ──────────────────────────────────────────────────
+# 失败时输出差异文件清单与内容摘要。最常见的原因按频率排：
+#   1. 改了 `ui-islands/src/**` 却没跑 `npm run build`；
+#   2. 改了 `i18n/i18n-src/**` 却没跑 `build.mjs`；
+#   3. 用了与 lock 文件不同的依赖版本（先 `npm ci` 再构建）。
+
+on:
+  push:
+    branches: [main, beta]
+  pull_request:
+    branches: [main, beta]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 安装 Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          # 依赖不集中在仓库根（根 package.json 没有依赖），三个包各有 lock 文件，
+          # 必须显式列全 —— 与 build.yml 的同款说明。
+          cache-dependency-path: |
+            desktop-tauri/ui-kit/package-lock.json
+            desktop-tauri/ui-islands/package-lock.json
+            desktop-tauri/i18n/package-lock.json
+
+      # ui-kit 也必须装，不是可选项：岛构建以**源码**方式接入它（vite alias 指到
+      # ../ui-kit/src），而 ui-kit/styles/globals.css 里 tailwindcss / tw-animate-css /
+      # shadcn 三个 @import 要从**它自己**的位置解析（见 vite.config.ts 的注释）。
+      # 漏装会样式解析不到、产出的 ui.css 与入库那份不同 —— 报出来是「产物不同源」，
+      # 真正的原因却是依赖没装全，排查要多绕一圈。
+      - name: 安装依赖
+        run: |
+          npm --prefix desktop-tauri/ui-kit ci
+          npm --prefix desktop-tauri/ui-islands ci
+          npm --prefix desktop-tauri/i18n ci
+
+      - name: 重建产物
+        run: |
+          # 岛产物：build 脚本是 `tsc --noEmit && vite build`，顺带做类型检查
+          npm --prefix desktop-tauri/ui-islands run build
+          # 多语言词典产物
+          npm --prefix desktop-tauri/i18n run build
+
+      - name: 校验产物与源码同源
+        run: |
+          # status 而不是 diff：它同时覆盖「已入库但被改」「构建新产出但没入库」
+          # 「已入库但构建不再产出」三种形态，diff 只能看见第一种。
+          changed="$(git status --porcelain -- desktop-tauri/ui)"
+          if [ -z "$changed" ]; then
+            echo "✅ 入库的构建产物可由源码复现（逐字节相同）"
+            exit 0
+          fi
+          echo "::error::入库的前端产物与源码不同源（改了源码没重建，或手改了产物）"
+          echo
+          echo "--- 差异文件（M=被改动 / ??=构建新产出未入库 / D=已入库但不再产出）---"
+          echo "$changed"
+          echo
+          echo "--- 内容差异摘要 ---"
+          git --no-pager diff --stat -- desktop-tauri/ui
+          echo
+          echo "本地修复方式："
+          echo "  npm --prefix desktop-tauri/ui-islands run build"
+          echo "  node desktop-tauri/i18n/build.mjs"
+          echo "（不要手动编辑 ui/islands/ui.js 或 ui/i18n/** —— 它们是产物，重建即可）"
+          exit 1

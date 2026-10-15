@@ -68,6 +68,9 @@ export function showUpdateModal(
   onGoUpdate: (info: UpdateInfo) => Promise<void>,
 ): void {
   if (!info || info.hasUpdate !== true) return
+  // 更新已应用到容器里、只差重启（容器内更新）：此刻弹「去更新」是条死路 ——
+  // 面板上的那颗按钮已经换成「立即重启」，重启入口在那里
+  if (info.pendingRestart === true) return
   const latest = String(info.latestVersion || '').trim()
   if (!latest) return
   if (shared().wbApp?.currentPage === 'settings') return

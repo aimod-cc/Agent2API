@@ -241,6 +241,20 @@
 .keys-table .k-state { width: 8%; }
 .keys-table .k-act { width: 10%; }
 
+/* 代理池表（islands/proxies-page.tsx）的默认列宽。
+   与上面两组同一条口径：默认宽度写在**普通类**上、由 colgroup 的 <col> 带上，
+   没拖过的列走它，拖过的列由 table-columns.js 往 <col> 写 inline width 盖掉它。
+   所以这里不能用 Tailwind 的 w-[196px] 那类工具类 —— 组件库的 Tailwind 是
+   `!important` 导出的（见 ui-kit/styles/globals.css），`width: 196px !important`
+   会反过来压住拖动写下的 inline 宽度，表现为「拖完松手、列宽弹回原值」。
+   节点列不给宽度：它是全表唯一内容长度不可控的列（名字 + 协议 + 引用数），
+   由 table-layout: fixed 把剩余宽度分给它。 */
+.proxies-table .p-pick { width: 36px; }
+.proxies-table .p-addr { width: 196px; }
+.proxies-table .p-state { width: 58px; }
+.proxies-table .p-test { width: 28%; }
+.proxies-table .p-act { width: 168px; }
+
 /* 禁用 / 已删除的行整体压淡，开关与操作列保持可点 */
 .models-table tr.off td { opacity: .5; }
 .models-table tr.off td.state, .models-table tr.off td.r { opacity: 1; }

@@ -39,9 +39,14 @@
 //! 键与自家账号列表），所以两处都调不会做两遍活。
 //!
 //! ── 顺序（有一处真实依赖，别随手调）───────────────────────────
-//! 与改造前的启动顺序逐字一致，其中最后两条有依赖：
-//!   `auth.json` → `migrate_startup`（整队/拆池/拆家）→ `migrate_cline_split`
+//! 与改造前的启动顺序逐字一致，其中最后几条有依赖：
+//!   `auth.json` → `migrate_startup`（整队/拆池/拆家）→ 历史账号凭证加密
+//!   → 历史网关 Key 加密 → 顶层 `apiKey` 原地加密 → `migrate_cline_split`
 //!   → 网关 Key 白名单补齐 → raccoon → catpaw → autoclaw
+//!   - 三条「形态加密」（账号凭证 / 网关 Key 数组 / 网关 Key 旧字段）紧随
+//!     `migrate_startup` 之后、且排在彼此相邻：第一条收尾它没碰到的历史明文行，
+//!     后两条只碰 kv 里的 `apiKeys` 与顶层 `apiKey`，互不依赖、也都不依赖后面的
+//!     语义迁移（写入侧从本轮改造起本来就是密文）。
 //!   - `migrate_cline_split` 必须排在 `migrate_startup` **之后**：后者会把
 //!     Cline 的账号 id 拆成 `cline-free` / `cline-pass`，前者改的是规则键
 //!     （`modelRules` 里按 provider id 记账的 disabled / hidden / mappings /
@@ -71,6 +76,38 @@ pub(crate) fn run(store: &AccountStore) {
     //   ③ Cline 拆池改名（`provider: "cline"` + `pool` → cline-free / cline-pass）
     //   ④ WorkBuddy 拆家（`provider: "workbuddy"` + `edition: "intl"` → workbuddy-intl）
     store.migrate_startup();
+    // 历史明文账号行的整列加密（见 store_admin::encrypt_legacy_accounts）：
+    // `accounts.data` 从本轮改造起写的是 `enc1:` 密文，而升级前已在库里的行仍是
+    // 明文 JSON（读侧 `decode_data` 兼容明文，所以那期间账号照常可用）。这一步把
+    // 过渡态收敛掉 —— 之后「拷走库文件」就看不到任何凭证。
+    //
+    // 位置在 `migrate_startup` **之后**：那一轮会按差异重写改了字段的行（写出的
+    // 已经加密），剩下没被它碰到的历史行由这一步收尾。本身幂等（判据是数据自证，
+    // 没有 kv 标记）、失败不阻断启动（密钥不可用时记日志返回，下次启动重试）。
+    store.encrypt_legacy_accounts();
+    // 网关 Key 的历史明文加密（见 `core::api_keys::encrypt_legacy_keys`）：
+    // `apiKeys` 里每把 Key 的 `key` 从本轮改造起写的是 `enc1:` 密文，而升级前
+    // 已在配置里的仍是明文（读侧 `from_value` 兼容明文，所以那期间 Key 照常可用）。
+    // 这一步把过渡态收敛掉 —— 之后「拷走库文件」就看不到网关口令。
+    //
+    // 位置与上一条**并列**（账号那一轮加密的后面）：两者互不依赖，只是同为
+    // 「同一批本机凭证的形态迁移」，排在一起让这一组一眼看得全。它读
+    // `config::current().raw()`，因此**必须等配置快照就位**：启动路径里
+    // `config::init` 在 bootstrap 开头就已经装好（早于本函数被调用），升级路径里
+    // 调用方先做过 `config::reload()`（见 `api::upgrade_api`），两条路都成立 ——
+    // 与同在这段里的 `add_intl_to_workbuddy_allowlists` 是同一条依赖。
+    // 本身幂等（判据是数据自证：还有没有明文 key）、失败不阻断启动（密钥不可用时
+    // 记日志返回，本次 Key 照常可用，下次启动重试），与上一条同一形态。
+    crate::server::core::api_keys::encrypt_legacy_keys();
+    // 顶层旧字段 `apiKey` 的**原地**加密（见 `core::legacy_api_key`）：与上一条同族的
+    // 第三条「形态加密」—— `apiKeys` 数组与顶层 `apiKey` 是同一把「网关口令」的两种
+    // 形态，排在一起让这一组一眼看得全。依赖与失败语义跟上一条逐字相同：
+    // 读 `config::current().raw()`（所以同样必须等配置快照就位，两条路都成立，
+    // 见上一条的说明）、幂等（判据是数据自证：值还不是 `enc1:` 信封）、
+    // 失败只记日志不阻断启动（本次 Key 照常可用，下次启动重试）。
+    // 它**只换值**：字段名留在 `apiKey`、不搬进数组 —— 搬了会破坏「写侧一旦动过
+    // 列表才落成 `apiKeys` 并删掉 `apiKey`」这条既有语义（完整论证在新模块的模块头）。
+    crate::server::core::legacy_api_key::encrypt_legacy_api_key();
     // 模型规则的同一轮迁移（见模块头的顺序说明）：它改的是 `kv` 里的
     // `modelRules`，所以必须读**已经导入过配置**的那份快照。
     if let Some(summary) = model_rules::migrate_cline_split() {

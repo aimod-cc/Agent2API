@@ -67,7 +67,7 @@ const DOMAIN_RULES = [
   { domain: 'settings', files: ['units.js'], prefixes: ['settings-'] },
   { domain: 'update', files: ['upgrade-panel.js'], prefixes: ['update-'] },
   { domain: 'keys', files: ['keys-page.tsx'] },
-  { domain: 'proxies', files: ['proxies-page.tsx', 'proxies-state.ts'] },
+  { domain: 'proxies', files: ['proxies-page.tsx', 'proxies-columns.ts', 'proxies-state.ts', 'proxies-dialogs.tsx', 'proxies-sub-state.ts', 'proxies-sub-view.tsx', 'proxies-kernel-dialog.tsx'] },
   { domain: 'docs', files: ['docs-page.tsx'] },
   { domain: 'report', files: ['report-page.tsx', 'report-charts.ts'] },
   { domain: 'checkin', files: ['checkin-page.tsx', 'checkin-state.ts', 'checkin-schedule-tab.tsx', 'checkin-records-tab.tsx', 'checkin-schedules-state.ts'] },

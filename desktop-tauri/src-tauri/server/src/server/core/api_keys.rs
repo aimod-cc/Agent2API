@@ -9,6 +9,9 @@
 //! 把它当成一条 id 为 `legacy` 的记录展示 / 校验；写侧一旦动过列表就落成 `apiKeys`
 //! 并删掉 `apiKey`，从此只有一份真相。环境变量 `WORKBUDDY_PROXY_API_KEY` 仍然
 //! 算一把额外的启用 Key（启动注入语义不变）。
+//! 该字段的值从本轮改造起也是 `enc1:` 信封（启动期原地加密迁移见
+//! `core::legacy_api_key`，它只换值、字段名与形态都不动），所以读它必须走
+//! `decode_key` —— 与数组里的 `key` 同一条口径。
 //!
 //! ── 每把 Key 的**可用提供商 / 可用模型**白名单（R9，参考 OmniProxy）──
 //! 两个字段，语义与 OmniProxy 的 `allowed_models` / `allowed_provider_ids`
@@ -35,12 +38,51 @@
 //! （可能来自新版本写入、被旧版本读到；真正的校验点在管理 API 的写入侧）。
 //! 写回时**总是**写出这两个键（空也得是 `[]`）：配置形状稳定，
 //! 用户手改配置时也看得出这两个位置存在。
+//!
+//! ── `key` 是密文（本切片的整字段加密）───────────────────────────
+//! 落盘的 `key`（kv 表的 `apiKeys` 键里那份 JSON 数组的 `key` 字段）不再是
+//! `sk-a2a-…` 明文，而是 `core::crypto` 的 `enc1:` 信封（AES-256-GCM）。
+//! 密钥域是 [`SecretScope::Accounts`] —— 与账号表**共用** `account.key` /
+//! `AGENT2API_ACCOUNT_KEY`，**刻意不新增域**：网关 Key 与账号同属「本机凭证」，
+//! 没有互相保密的必要，而多一个域就多一份要跟着备份/迁移的密钥文件、多一种
+//! 「拷了库没拷密钥」的故障形态。数组结构与其余字段（id / name / enabled /
+//! createdAt / 两个白名单）**保持明文 JSON**：加密只覆盖「值本身就是凭证」的
+//! 那一个字段 —— 其余字段本来就要给人看（配置形状、界面展示）。
+//!
+//! 三条边界，改这个文件时不要破：
+//!   1. **内存与对外形态是明文**。`ApiKeyEntry::key` 在内存里永远是明文，
+//!      `public_json()` 也照常返回明文（桌面端本地管理界面要能复制给客户端）。
+//!      加密只发生在 `to_value()` 这**一个**落盘点 —— 与账号表的 `encode_data`
+//!      同一取向（见 `core::account_store::sql` 的模块头第 1 条不变量）。
+//!   2. **落盘失败绝不静默降级成明文**（fail closed）。`to_value` 返回 `Result`，
+//!      加密失败 → 整次保存失败并上抛（见 `save`）：加密的全部意义是「库被单独
+//!      拿走时看不到凭证」，而失败恰恰发生在保护最该生效的异常环境（密钥文件建
+//!      不出来等）——静默落明文等于「越该保护越失效」，且用户从界面上完全看不出。
+//!   3. **解不开的 `key` 不丢记录、不改写、不放行**（下面那条硬不变量的补充，
+//!      这是它新增的一层）。密钥文件被删/被换时 `crypto::open` 必然失败，此时
+//!      处理方式见 `from_value` 的详细论证：记录保留、原始密文**原样**留在 `key`
+//!      里（不置空、不再加密）、进程内只记一条日志。
 
 use serde_json::{json, Map, Value};
 
 use crate::server::config;
+use crate::server::core::crypto::{self, SecretScope};
+use crate::server::logging;
 
+/// 现役形态：`apiKeys` 数组（本模块的读写主体）
 pub const KEY_API_KEYS: &str = "apiKeys";
+/// 旧形态：顶层单 Key 字段。只读兼容在本模块（`entries_from` 的兼容分支），
+/// **写入侧两处** —— 面板保存 `config::set_api_key`（收明文、落 `enc1:` 信封）
+/// 与启动期原地加密迁移（`core::legacy_api_key`）；清除它的两条路径也都在
+/// config 层（`set_api_key(None)`、`replace_api_keys` 切到 `apiKeys` 形态时）。
+/// 掩码取值的口径见 `RuntimeConfig::masked_api_key`（快照存磁盘原值，解密只在
+/// 那个唯一读者里做）。
+///
+/// 常量与 `KEY_API_KEYS` 并排放着，是为了让这个字段名只有一个来源：上面这些
+/// 读写点（含 `config::update_raw_field` 的快照同步判定）用的都是本常量，
+/// 各写一遍字面量迟早漏改一处；仅剩 `config::build` 取快照原值那一处还是
+/// 旧字面量。
+pub const KEY_API_KEY: &str = "apiKey";
 const LEGACY_ID: &str = "legacy";
 const LEGACY_NAME: &str = "默认 Key";
 /// 与旧版一致的最小长度
@@ -58,6 +100,17 @@ pub struct ApiKeyEntry {
     pub allowed_providers: Vec<String>,
     /// 可用模型白名单（**对外模型名**，含映射 alias）；**空 = 不限制**
     pub allowed_models: Vec<String>,
+    /// 这条记录的 `key` **解不开**（密钥文件被删/被换），处于降级态。
+    ///
+    /// 为 true 时 `key` 里放的是**原样的密文信封**（不是明文）：
+    ///   - 不能拿去和客户端带来的明文比对（密文永远不相等 → 这把 Key 降级期
+    ///     只是暂时不可用，**不会误放行**）；
+    ///   - 不能再加密一次（会把信封当成明文套第二层 → 即便用户找回密钥文件，
+    ///     真 Key 也永远解不回来，见 `to_value`）。
+    ///
+    /// 私有字段：外部只该通过 `key` 读明文，这个标记是模块内部的「这条记录
+    /// 处于降级态」事实（唯一的消费者是 `to_value`）。
+    key_unreadable: bool,
 }
 
 /// 从 JSON 里读一个「字符串数组」白名单（缺失 / 类型不对 / 空 → 空数组）。
@@ -94,10 +147,83 @@ fn list_value(list: &[String]) -> Value {
     Value::Array(list.iter().map(|item| Value::String(item.clone())).collect())
 }
 
+/// 「有一把网关 Key 解不开」的**进程级一次性**告警。
+///
+/// ── 为什么必须限流成一条 ────────────────────────────────────
+/// `from_value` 在**鉴权热路径**上（每个请求经 `active_keys_from` 走一遍，
+/// 再由 `entry_for_key_from` 走第二遍），而 `logging::log` 是要写库的 ——
+/// 逐次打日志会在降级期把日志表刷爆，把真正有用的请求日志全挤掉。
+/// 这个事件本身只有一件（密钥文件丢了/换了），看到一条就够定位，所以用
+/// `AtomicBool::swap` 做闸门：并发下是谁抢到那条日志不重要，重要的是**只有一条**。
+fn warn_unreadable_once(id: &str, reason: &str) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    logging::log(
+        "[Keys]",
+        &format!(
+            "⚠️  网关 Key「{id}」解密失败（{reason}）：记录与原始密文都已保留，这把 Key 暂时不可用（不会误放行）。恢复密钥文件后重启即可，或直接在管理页重存这把 Key"
+        ),
+    );
+}
+
+/// 落盘的 `key` 字段 → 内存里的明文，外加「这条记录处于降级态吗」。
+///
+/// 三种输入、两种输出：
+///   - **历史明文**（没有 `enc1:` 前缀）：原样返回，`false` —— 升级兼容的读侧
+///     安全网，迁移（见 `encrypt_legacy_keys`）会去收敛它，但读侧永远认它；
+///   - **信封且解得开**：返回明文，`false`；
+///   - **信封但解不开**（密钥文件被删/被换/格式坏）：**原样返回信封** + `true`，
+///     并（进程内第一次）记一条日志 —— 为什么不能丢记录、不能置空、不能改写，
+///     完整论证见 `from_value`。
+///
+/// 判「是不是信封」只用 `crypto::is_envelope`（口径的唯一来源在 `core::crypto`），
+/// 不在这里自己 `starts_with("enc1:")` —— 将来换格式（`enc2:`）才不会漏改一处。
+fn decode_key(raw: &str, id: &str) -> (String, bool) {
+    if !crypto::is_envelope(raw) {
+        return (raw.to_string(), false);
+    }
+    match crypto::open(raw, SecretScope::Accounts) {
+        // `open` 已经校验过 UTF-8（见 `core::crypto` 的模块头「明文闸门」），
+        // 这里只是把字节收成 String；真出现非法字节也按「解不开」处理
+        // （保留原样），绝不把一段乱码当成明文 Key 用
+        Ok(bytes) => match std::str::from_utf8(&bytes) {
+            Ok(text) => (text.to_string(), false),
+            Err(_) => {
+                warn_unreadable_once(id, "解密结果不是合法 UTF-8 文本");
+                (raw.to_string(), true)
+            }
+        },
+        Err(error) => {
+            warn_unreadable_once(id, &error);
+            (raw.to_string(), true)
+        }
+    }
+}
+
 impl ApiKeyEntry {
+    /// 从一条 JSON 记录解析出条目（**密文与历史明文都能读**）。
+    ///
+    /// ── 解密失败为什么必须保留记录（本文件最关键的一条补充）────────
+    /// 密钥文件（`account.key`）被删/被换时 `crypto::open` 必然失败。若像
+    /// 「字段缺失 / 类型不对」那样返回 None，这条记录会被 `entries_from` 的
+    /// `filter_map` 丢掉 —— 用户的 Key 从配置里凭空消失：界面上看不到、管理接口
+    /// 也删不掉，而这**不是用户的任何操作造成的**（正是模块头那条硬不变量要挡的
+    /// 灾难，只是触发原因从「字段缺失」换成了「钥匙丢了」）。所以：
+    ///   - 记录照常构造，只把 `key` 留在**原样的密文**上并置 `key_unreadable`；
+    ///   - **不置空**：空串会在鉴权比对里命中「带空 token 的请求」
+    ///     （`Bearer ` / 空的 `x-api-key`），等于把网关放开 —— 比丢掉记录更糟；
+    ///   - 密文也**不会误放行**（客户端不可能带得出密文），实际效果是
+    ///     「这把 Key 在降级期暂时不可用」，这是能接受、也最容易被用户理解的结果
+    ///     （恢复密钥文件即自愈）；
+    ///   - 落盘时原样回写（`to_value`），磁盘上的密文一个字节都不动：
+    ///     用户找回密钥文件后，这条记录**照旧能解出真 Key**。
+    ///
+    /// 兼容历史明文：没有 `enc1:` 前缀的 `key` 就是明文，原样使用（见 `decode_key`）。
     fn from_value(value: &Value) -> Option<Self> {
-        let key = value.get("key")?.as_str()?.trim().to_string();
-        if key.is_empty() {
+        let raw = value.get("key")?.as_str()?.trim();
+        if raw.is_empty() {
             return None;
         }
         let id = value
@@ -105,6 +231,7 @@ impl ApiKeyEntry {
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
             .map(str::to_string)?;
+        let (key, key_unreadable) = decode_key(raw, &id);
         Some(Self {
             id,
             name: value
@@ -117,22 +244,46 @@ impl ApiKeyEntry {
             created_at: value.get("createdAt").and_then(Value::as_i64).unwrap_or(0),
             allowed_providers: string_list(value.get("allowedProviders")),
             allowed_models: string_list(value.get("allowedModels")),
+            key_unreadable,
         })
     }
 
-    fn to_value(&self) -> Value {
-        json!({
+    /// 落盘形态：`key` 加密成 `enc1:` 信封，其余字段保持明文 JSON（见模块头）。
+    ///
+    /// ── 为什么返回 `Result` 而不是降级写明文（fail closed）────────
+    /// 与账号表 `encode_data` 同一论证（见 `core::account_store::sql` 的模块头）：
+    /// 加密的全部意义是「库文件被单独拿走时看不到凭证」，而失败恰恰发生在保护最该
+    /// 生效的异常环境（`config_dir` 不可写、密钥文件建不出来等）。此时静默落明文
+    /// 就等于「越该保护越失效」，用户还从界面上看不出任何区别。所以失败即让
+    /// **整次保存**失败并上抛，调用方（`save` → 管理 API）把错误报出来。
+    ///
+    /// ── 降级态（`key_unreadable`）为什么原样回写 ────────────────
+    /// 那条记录的 `key` 里是解不开的**原始信封**。若照常再加密一次，落盘的就成了
+    /// 「信封的信封」：即便用户之后找回密钥文件，解出来的也只是中间那层密文，
+    /// 真 Key 永远回不来 —— 一次静默的、不可逆的数据损坏。原样回写让磁盘上的密文
+    /// 保持不变，恢复密钥后下一次读取就能解出明文。
+    fn to_value(&self) -> Result<Value, String> {
+        let key = if self.key_unreadable {
+            self.key.clone()
+        } else {
+            crypto::seal(self.key.as_bytes(), SecretScope::Accounts)?
+        };
+        Ok(json!({
             "id": self.id,
             "name": self.name,
-            "key": self.key,
+            "key": key,
             "enabled": self.enabled,
             "createdAt": self.created_at,
             "allowedProviders": list_value(&self.allowed_providers),
             "allowedModels": list_value(&self.allowed_models),
-        })
+        }))
     }
 
-    /// 管理接口的输出形态（含明文 key：桌面端本地管理界面要能复制给客户端）
+    /// 管理接口的输出形态（含明文 key：桌面端本地管理界面要能复制给客户端）。
+    ///
+    /// 唯一的例外是降级态：那时 `key` 里是解不开的密文（见 `from_value`），
+    /// 这里照样原样输出 —— 磁盘上是什么、界面上看到什么，用户在密钥丢失时
+    /// 看到的就不是一把「看起来正常却复制出去也没用」的假 Key。
     pub fn public_json(&self) -> Value {
         json!({
             "id": self.id,
@@ -168,20 +319,59 @@ pub fn entries_from(raw: &Map<String, Value>) -> Vec<ApiKeyEntry> {
     if let Some(Value::Array(items)) = raw.get(KEY_API_KEYS) {
         return items.iter().filter_map(ApiKeyEntry::from_value).collect();
     }
-    match raw.get("apiKey").and_then(Value::as_str).map(str::trim) {
-        Some(key) if !key.is_empty() => vec![ApiKeyEntry {
-            id: LEGACY_ID.to_string(),
-            name: LEGACY_NAME.to_string(),
-            key: key.to_string(),
-            enabled: true,
-            created_at: 0,
-            // 旧字段形态的 Key 从来没有白名单概念 —— 空 = 不限制，
-            // 与它升级前的行为（放行一切）逐字一致
-            allowed_providers: Vec::new(),
-            allowed_models: Vec::new(),
-        }],
-        _ => Vec::new(),
+    legacy_entry(raw).into_iter().collect()
+}
+
+/// 顶层旧字段 `apiKey` → 一条 `legacy` 记录（`None` = 没配 / 空值）。
+///
+/// ── 为什么要走 `decode_key` ──────────────────────────────────
+/// `apiKey` 从本轮改造起也与数组里的 `key` 一样是 `enc1:` 信封（启动期的原地
+/// 加密迁移见 `core::legacy_api_key`），所以取值口径必须和 `from_value` 合并成
+/// 一条：历史明文原样用、信封解密、解不开按降级态处置。判「是不是信封」的
+/// 唯一来源仍是 `crypto::is_envelope`（在 `decode_key` 里），不在这里另写一份。
+///
+/// 解密失败时**保留记录、不置空、不丢**的三条理由与 `from_value` 逐字相同
+/// （见那里的论证），这里只把「旧字段只有一条记录」这个差别点出：丢掉它意味着
+/// 一把启用的 Key 都没有 → 中间件判免鉴权（全放行），比留着一条暂时用不了的
+/// 记录糟得多。
+///
+/// 空值校验发生在解密**之前**（与 `from_value` 同一口径）：存的是非空信封、
+/// 解密结果却为空这种极端情形（只可能来自手改数据）也照常产出记录 ——
+/// 判断依据与上面同一条（宁可留一条不可用的记录，也不让列表空掉）。
+fn legacy_entry(raw: &Map<String, Value>) -> Option<ApiKeyEntry> {
+    let stored = raw.get(KEY_API_KEY)?.as_str()?.trim();
+    if stored.is_empty() {
+        return None;
     }
+    let (key, key_unreadable) = decode_key(stored, LEGACY_ID);
+    Some(ApiKeyEntry {
+        id: LEGACY_ID.to_string(),
+        name: LEGACY_NAME.to_string(),
+        key,
+        enabled: true,
+        created_at: 0,
+        // 旧字段形态的 Key 从来没有白名单概念 —— 空 = 不限制，
+        // 与它升级前的行为（放行一切）逐字一致
+        allowed_providers: Vec::new(),
+        allowed_models: Vec::new(),
+        key_unreadable,
+    })
+}
+
+/// 某个位置上**存着**的旧字段值 → 明文（界面掩码用）。
+///
+/// 调用点只有 `config::masked_api_key`：它手里是内存快照里的原始值（磁盘上是什么
+/// 就是什么，可能是 `enc1:` 信封），掩码前必须先解出来 —— 否则界面上会显示一封
+/// `enc1:b...xxxx`，用户以为 Key 被换掉了。
+/// 与 `legacy_entry` 共用 `decode_key`，于是三种输入的口径只有一份：历史明文原样、
+/// 信封解开、**解不开则返回密文本身**（降级期的显示口径：磁盘上是什么、界面就显示
+/// 什么，与 `public_json` 的既有取向一致）。
+///
+/// 为什么不在快照构建期（`config::build`）做这件事：那里跑在 `config::init` 里，
+/// 日志库还没装，「密钥文件丢了」那条一次性降级告警会落在控制台上（桌面形态下
+/// 用户看不到）—— 细节见 `RuntimeConfig::masked_api_key` 的说明。
+pub fn stored_plaintext(stored: &str) -> String {
+    decode_key(stored.trim(), LEGACY_ID).0
 }
 
 /// 当前全部记录
@@ -190,6 +380,13 @@ pub fn list() -> Vec<ApiKeyEntry> {
 }
 
 /// 当前**启用**的明文 Key（鉴权中间件用）；空 = 免鉴权
+///
+/// ── 降级态（`key_unreadable`）的记录**不要**在这里筛掉 ───────────
+/// 那些记录带着**密文**留在列表里（见 `from_value`）。筛掉它们的后果是：
+/// 密钥文件一丢、全表都解不开 → 列表变空 → 中间件判「免鉴权模式」直接放行
+/// （见模块头），等于一次密钥文件丢失就把网关对全网放开。留在列表里则相反：
+/// 密文永远不可能与客户端带来的明文相等，实际效果是「这些 Key 暂时不可用」，
+/// 正是降级期该有的行为。
 pub fn active_keys_from(raw: &Map<String, Value>) -> Vec<String> {
     let mut keys: Vec<String> = entries_from(raw)
         .into_iter()
@@ -271,10 +468,107 @@ fn now_millis() -> i64 {
         .unwrap_or(0)
 }
 
-/// 把整份列表写回配置（同时删掉旧字段 `apiKey`）
-fn save(entries: &[ApiKeyEntry]) -> bool {
-    let list: Vec<Value> = entries.iter().map(ApiKeyEntry::to_value).collect();
-    config::replace_api_keys(Value::Array(list))
+/// 把整份列表写回配置（同时删掉旧字段 `apiKey`）。
+///
+/// ── 为什么逐条 `?` 上抛（fail closed）─────────────────────────
+/// 任一条的 `to_value` 加密失败 → **整个列表一条都不写**：`replace_api_keys`
+/// 根本不会被调到，磁盘与内存快照都保持原样，调用方把「保存失败」报给用户。
+/// 绝不会出现「保存成功但某把 Key 是明文落盘」这种界面看不出来的降级。
+///
+/// ── 落库失败（库不可用）为什么不上报 ──────────────────────────
+/// `config::replace_api_keys` 返回 false 时内部已经记过日志
+/// （见 `config::save_raw`），且配置层刻意的语义是「写失败只影响重启后还在不在，
+/// 不该让正在跑的请求或被改的配置报错」（见 `config::update` 的说明）——
+/// 这里沿用，不把它升级成一次 API 报错。加密失败与落库失败的区别在于：
+/// 前者会留下**形态错误**的数据（明文凭证），后者只是没落到盘上。
+fn save(entries: &[ApiKeyEntry]) -> Result<(), String> {
+    let mut list: Vec<Value> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        list.push(entry.to_value()?);
+    }
+    let _ = config::replace_api_keys(Value::Array(list));
+    Ok(())
+}
+
+/// `apiKeys` 数组里**仍是明文**的 `key` 条数（0 = 这份配置不需要迁移）。
+///
+/// ── 为什么要在原始 JSON 上数，而不是在解析结果上数 ─────────────
+/// `from_value` 出来的 `key` **两种情况都是明文**（本来就是明文 / 密文被解开），
+/// 从解析结果里分不出谁需要迁移 —— 只有还没被 `decode_key` 碰过的原始值上才看得出
+/// 「是不是信封」。顺便给日志一个准确条数（而不是「整张表都被回写了一遍」）。
+///
+/// 判据与 `from_value` 接受的记录口径一致（`key` 与 `id` 都是非空字符串）：
+/// 会被 `filter_map` 丢掉的坏条目本来就不会被回写，不该算进迁移条数。
+/// 旧字段 `apiKey`（单 Key 兼容形态）**不算** —— 它不在 `apiKeys` 数组里，
+/// 本函数只数数组里的明文档数（旧字段的原地加密单独做，见 `core::legacy_api_key`）。
+fn plaintext_key_count(raw: &Map<String, Value>) -> usize {
+    let Some(Value::Array(items)) = raw.get(KEY_API_KEYS) else {
+        return 0;
+    };
+    items
+        .iter()
+        .filter(|item| {
+            let key = item.get("key").and_then(Value::as_str).map(str::trim);
+            let id = item.get("id").and_then(Value::as_str).map(str::trim);
+            matches!(
+                (key, id),
+                (Some(key), Some(id))
+                    if !key.is_empty() && !id.is_empty() && !crypto::is_envelope(key)
+            )
+        })
+        .count()
+}
+
+/// 把**仍是明文**的 Key 就地加密回写（启动期一次性迁移，幂等，可重复调用）。
+///
+/// ── 它补的是什么 ────────────────────────────────────────────
+/// 本轮改造起落盘的 `key` 是 `enc1:` 密文，但**升级前已经写进配置的记录**仍是
+/// 明文（`from_value` 兼容明文，所以那些 Key 照常可用 —— 那是过渡期的安全网、
+/// 不是最终形态：只要还有明文，拷走库文件就带走网关口令）。本函数在启动时把过渡态
+/// 收敛掉，与账号表的 `encrypt_legacy_rows` 同构（判据、幂等、失败语义都对齐）。
+///
+/// ── 幂等判据：数据自证 ──────────────────────────────────────
+/// 判据是「`apiKeys` 里还有没有不以 `enc1:` 开头的 `key`」，**不用任何 kv 标记**：
+/// 加密是可重复的纯变换，迁完自然就没有明文了，再跑一遍在第一段就早退、
+/// 连配置的快照都不必回写。加标记键反而多一份「这条跑过没有」的事实来源。
+///
+/// ── 为什么走 `save`（整体回写）而不是只改那几条 ────────────────
+/// `apiKeys` 是**一个** kv 键里的一整份 JSON 数组，本来就没有「按条更新」的余地 ——
+/// 回写必然重写整个值，其余条目只是被重新 seal 一遍（nonce 随机、密文不同但明文
+/// 相同），语义上没有任何变化（与 `config::replace_api_keys` 的既有做法一致）。
+///
+/// ── 失败不阻断启动 ──────────────────────────────────────────
+/// 密钥不可用 / 库不可用时 `save` 会失败：这里只记一条日志并返回 0 ——
+/// 读侧兼容明文，本次运行 Key 照常可用，下次启动重试。
+///
+/// ── 旧字段 `apiKey` 为什么不在这里 ──────────────────────────
+/// 它不在 `apiKeys` 数组里，也就不会出现在本函数「整份数组回写」的范围里。
+/// 顺手把它搬进 `apiKeys` 是**不能做**的：那会提前触发「写侧一旦动过列表才落成
+/// `apiKeys` 并删掉 `apiKey`」这条既有语义（用户没动过配置，形态却变了）。
+/// 它的收敛方式是同族的另一条：**原地加密**（字段名与形态不变，只把值换成信封），
+/// 见 `core::legacy_api_key::encrypt_legacy_api_key` —— 与本函数并列，由
+/// `account_bootstrap::run` 紧邻调用。
+pub fn encrypt_legacy_keys() -> usize {
+    // 一次取快照、两处共用（数明文条数 + 解析记录）：配置快照本来就是克隆，
+    // 不必为同一份 raw 克隆两遍（与鉴权热路径同一条纪律，这里只是顺带对齐）
+    let raw = config::current().raw().clone();
+    let pending = plaintext_key_count(&raw);
+    if pending == 0 {
+        // 全新库 / 已迁过的库走这条早退路径：一个字节都不写
+        return 0;
+    }
+    let entries = entries_from(&raw);
+    if let Err(error) = save(&entries) {
+        logging::log(
+            "[Keys]",
+            &format!(
+                "⚠️  网关 Key 加密未完成（下次启动会自动重试，本次 Key 照常可用）: {error}"
+            ),
+        );
+        return 0;
+    }
+    logging::log("[Keys]", &format!("🔒 已加密 {pending} 把网关 Key"));
+    pending
 }
 
 /// 新增：`key` 为空则自动生成。返回新记录；名称重复不限制，key 重复拒绝。
@@ -311,9 +605,13 @@ pub fn add(
         created_at,
         allowed_providers,
         allowed_models,
+        // 刚生成的 Key 当然是明文可读的，与降级态无关
+        key_unreadable: false,
     };
     entries.push(entry.clone());
-    save(&entries);
+    // 加密失败（fail closed）→ 这条 Key 一点都没落下（列表没写、磁盘没动），
+    // 把错误如实交给调用方，让用户看到「保存失败」而不是一把明文躺在库里
+    save(&entries)?;
     Ok(entry)
 }
 
@@ -348,7 +646,7 @@ pub fn update(
         entry.allowed_models = list;
     }
     let updated = entry.clone();
-    save(&entries);
+    save(&entries)?;
     Ok(updated)
 }
 
@@ -360,7 +658,7 @@ pub fn remove(id: &str) -> Result<(), String> {
     if entries.len() == before {
         return Err("Key 不存在".to_string());
     }
-    save(&entries);
+    save(&entries)?;
     Ok(())
 }
 
@@ -407,7 +705,16 @@ pub fn strip_provider_from_allowlists(provider_id: &str) -> Vec<ApiKeyEntry> {
         touched.push(entry.clone());
     }
     if !touched.is_empty() {
-        save(&entries);
+        if let Err(error) = save(&entries) {
+            // 这条路径返回 `Vec`（不给调用方 Result），失败只能在这里记日志。
+            // 只记日志、**不改变返回值**：调用方（删除自定义家）不该因为一次
+            // 白名单清理没落盘而回滚整个删家动作 —— 那个动作本身是另一回事，
+            // 而白名单的清理下次删除/编辑时会再来一遍（幂等）。
+            logging::log(
+                "[Keys]",
+                &format!("⚠️  网关 Key 白名单清理未落盘（改动仅本次运行生效）: {error}"),
+            );
+        }
     }
     touched
 }
@@ -455,7 +762,15 @@ pub fn add_intl_to_workbuddy_allowlists() -> Vec<ApiKeyEntry> {
         touched.push(entry.clone());
     }
     if !touched.is_empty() {
-        save(&entries);
+        if let Err(error) = save(&entries) {
+            // 与 `strip_provider_from_allowlists` 同一处置：返回 `Vec`、不阻断
+            // 调用方（`account_bootstrap` 的启动序列）；失败只影响「重启后还在
+            // 不在」，而这条补齐本身幂等，下次启动会再来一遍。
+            logging::log(
+                "[Keys]",
+                &format!("⚠️  网关 Key 白名单补齐未落盘（改动仅本次运行生效）: {error}"),
+            );
+        }
     }
     touched
 }

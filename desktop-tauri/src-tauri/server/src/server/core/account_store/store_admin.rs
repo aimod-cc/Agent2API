@@ -573,6 +573,53 @@ impl AccountStore {
         })
     }
 
+    /// 把历史明文账号行**整列加密**落库（幂等，可重复调用）。
+    ///
+    /// ── 它补的是什么 ────────────────────────────────────────────
+    /// 本轮改造起 `accounts.data` 写的是 `enc1:` 密文（见 `sql.rs` 模块头），但
+    /// **升级前已经写进库的行**仍是明文 JSON。`sql::decode_data` 兼容明文，那些行
+    /// 照常能读 —— 那是过渡期的安全网，不是最终形态：只要还有明文行，拷走库文件
+    /// 就带走全部凭证。所以启动时补一次「就地加密」，把过渡态收敛掉。
+    ///
+    /// ── 为什么排位在 `migrate_startup` 之后（见 `account_bootstrap::run`）────
+    /// 那一轮会按差异重写改了字段的行（补 provider、整队、拆池改名…），写出的
+    /// 已经是密文；剩下没被它碰到、仍是明文的历史行由本函数收尾。反过来的顺序
+    /// 也能得到同一结果（`decode_data` 两种都读得出来），排后面只是让「先做语义
+    /// 迁移、再做形态迁移」这条读起来更顺。
+    ///
+    /// ── 幂等与失败语义都由 SQL 层承担 ───────────────────────────
+    /// 判据是数据自证（`sql::encrypt_legacy_rows` 逐行看 `data` 是不是 `enc1:`），
+    /// 没有 kv 标记；整批在一个事务里，要么全成、要么一行都不动。**失败不阻断
+    /// 启动**：密钥文件建不出来之类的失败在这里只记一条日志、返回，下次启动重试
+    /// —— 而因为 `decode_data` 兼容明文，本次账号照常可用，绝不把用户挡在门外。
+    pub fn encrypt_legacy_accounts(&self) {
+        let _guard = self.guard();
+        // 用 `with_conn_mut` 而不是 `with_conn`：整批加密要在一个事务里
+        // （见 `sql::encrypt_legacy_rows` 的说明），而事务需要可变的连接借用。
+        match self.with_conn_mut(&_guard, |conn| sql::encrypt_legacy_rows(conn)) {
+            // 0 条 = 库里没有明文行（全新库 / 已迁过的库），不记日志
+            Ok(0) => {}
+            Ok(count) => {
+                logging::log(
+                    "[Accounts]",
+                    &format!("🔒 已加密 {count} 个历史账号的凭证"),
+                );
+            }
+            Err(error) => {
+                // 这条日志必须在 `with_conn_mut` **之外**打：记日志本身要写库
+                // （logs 表），而 `with_conn_mut` 持着那条唯一的数据库连接 ——
+                // 在它内部再记日志就是「自己等自己」的硬死锁（`std` 的 Mutex
+                // 不可重入，release 构建还是 panic=abort）。
+                logging::log(
+                    "[Accounts]",
+                    &format!(
+                        "⚠️  历史账号凭证加密未完成（下次启动会自动重试，本次账号照常可用）: {error}"
+                    ),
+                );
+            }
+        }
+    }
+
     /// Cline 拆池改名：`provider: "cline"` + `pool` 字段 → 两家里的某一家，
     /// 原地改 state（不落盘）。返回改名的记录条数。
     ///

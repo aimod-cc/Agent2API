@@ -5,7 +5,7 @@ import { PROVIDER_ICONS } from './add-provider-pick'
 import { formatTime, shared, type OnboardingTask } from './accounts-shared'
 import { claimedPlanIdsToday } from './accounts-domain'
 import {
-  claimOnboarding, getCheckinStore, groupTone, loadCheckinCenter, nextScheduleRun,
+  bridge, claimOnboarding, getCheckinStore, groupTone, loadCheckinCenter, nextScheduleRun,
   onboardingExpanded, queryOnboarding, runAllCheckin, setCheckinTab, showCheckinTab,
   signSingleAccount, subscribeCheckinStore, toggleOnboardingExpand, toggleProviderExpand,
   growthExpanded, queryGrowth, runGrowth, runGrowthSchool, runGrowthTravel, toggleGrowthExpand,
@@ -215,9 +215,9 @@ function ProviderRow({ group, expanded }: { group: CheckinProviderGroup; expande
           {hasAccounts ? <span className='ck-chev' aria-hidden>›</span> : null}
         </div>
       </div>
+      {group.id === 'qoder-intl' ? <UmidHint /> : null}
       {expanded ? (
         <div className='ck-prov-detail'>
-          {group.id === 'qoder-intl' ? <UmidHint /> : null}
           <AccountRows group={group} />
         </div>
       ) : null}
@@ -226,34 +226,45 @@ function ProviderRow({ group, expanded }: { group: CheckinProviderGroup; expande
 }
 
 /**
- * Qoder 国际版的 UMID 组件提示（展开后的分组详情顶部）。
+ * Qoder 国际版的 UMID 组件提示（常驻在分组行下方）。
  *
  * 国际版签到依赖本机的设备风控身份（`Cosy-MachineToken` 三件套），组件来源
  * 三种：本机 Qoder 客户端、qodercli 解压、网关数据目录安装（Linux 一键装）。
- * 这里只读一次状态：装了就说明来源，没装且平台支持安装就给按钮（Linux/Docker
- * 用户唯一能自助的路径）；不支持安装的平台只说明怎么补 —— Windows/macOS 装
- * 客户端或 qodercli 后无需重启网关（组件发现按次执行）。
+ * 组件是**机器级**的，与有没有账号、有没有展开无关 —— 未装就常驻这一条，
+ * 装好（available）整条消失，不做「已安装」的展示。
+ *
+ * 读状态分两条路：挂载时拉一次；`installing` 为真时每几秒回读一次 —— 安装
+ * 耗时以分钟计，中途刷新页面后不能把「安装中…」永久留在界面上（装完或失败
+ * 都要能自己恢复到按钮 / 消失）。平台不支持安装（Windows / macOS）时只说明
+ * 怎么补 —— 装客户端或 qodercli 后无需重启网关（组件发现按次执行）。
+ *
+ * ── 为什么必须走桥而不是 fetch ──────────────────────────────
+ * 桌面端的页面来自 `tauri://` 协议（frontendDist 指向 ui/），裸 fetch('/api/…')
+ * 打的是 tauri asset，根本到不了后端；headless / Docker 形态下 `/api/qoder-umid`
+ * 挂在 protected 路由上（安装会下载并落地可执行组件），要求面板凭据 —— 裸 fetch
+ * 不带 `x-api-key` / `x-panel-token`，只会拿到 401。桥的两端各自补齐凭据
+ *（bridge.rs 带 X-API-Key，web_shim.rs 带 Key 与面板令牌），所以这里统一走桥。
  */
 function UmidHint(): React.ReactElement | null {
   const [state, setState] = React.useState<{ available?: boolean; source?: string | null; installSupported?: boolean; installing?: boolean } | null>(null)
   const load = React.useCallback(async (): Promise<void> => {
     try {
-      const response = await fetch('/api/qoder-umid')
-      if (response.ok) setState(await response.json())
+      setState(await bridge().getQoderUmid?.() ?? null)
     } catch { /* 状态是锦上添花，拉不到不挡签到 */ }
   }, [])
   React.useEffect(() => { void load() }, [load])
+  const installing = state?.installing === true && state.available !== true
+  React.useEffect(() => {
+    if (!installing) return
+    const timer = window.setInterval(() => { void load() }, 3000)
+    return () => { window.clearInterval(timer) }
+  }, [installing, load])
   if (!state || state.available) return null
   const install = async (): Promise<void> => {
     try {
       setState(prev => prev ? { ...prev, installing: true } : prev)
-      const response = await fetch('/api/qoder-umid/install', { method: 'POST' })
-      if (!response.ok) {
-        const payload = await response.json().catch(() => null)
-        shared().wbApp?.toast?.(t('UMID 组件安装失败：{error}', { error: String(payload?.error ?? response.status) }), 'err')
-      } else {
-        shared().wbApp?.toast?.(t('✅ UMID 组件已安装，下轮签到即可领取国际版积分'))
-      }
+      await bridge().installQoderUmid?.()
+      shared().wbApp?.toast?.(t('✅ UMID 组件已安装，下轮签到即可领取国际版积分'))
     } catch (error) {
       shared().wbApp?.toast?.(t('UMID 组件安装失败：{error}', { error: error instanceof Error ? error.message : String(error) }), 'err')
     } finally {
@@ -261,7 +272,7 @@ function UmidHint(): React.ReactElement | null {
     }
   }
   return (
-    <div className='flex flex-wrap items-center gap-2 px-[2px] pb-1 text-[12px] text-muted-foreground'>
+    <div className='flex flex-wrap items-center gap-2 pb-2.5 pl-[58px] pr-4 text-[12px] text-muted-foreground'>
       <span>{t('国际版签到需要 UMID 组件生成设备风控身份（本机未检测到）。')}</span>
       {state.installSupported
         ? <Button variant='outline' size='sm' disabled={state.installing === true} onClick={() => { void install() }}>
@@ -612,7 +623,7 @@ function GrowthRow({ row }: { row: { id: string; name: string } }) {
   )
 }
 
-/** 空账号家的占位行（没有账号时该行不可展开） */
+/** 空账号家的占位行（没有账号时该行不可展开；Qoder 国际版的 UMID 提示照常常驻） */
 function EmptyProviderRow({ group }: { group: CheckinProviderGroup }) {
   return (
     <div className='ck-prov-row'>
@@ -626,6 +637,7 @@ function EmptyProviderRow({ group }: { group: CheckinProviderGroup }) {
           <Badge variant='outline' shape='tag'>{t('无账号')}</Badge>
         </div>
       </div>
+      {group.id === 'qoder-intl' ? <UmidHint /> : null}
     </div>
   )
 }

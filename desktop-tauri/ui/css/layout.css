@@ -118,6 +118,19 @@ body.has-titlebar .shell {
 .titlebar-btn.is-maximized:hover .fg { fill: var(--nav-hover); }
 .titlebar-btn svg { display: block; width: 14px; height: 14px; pointer-events: none; }
 
+/* ─── 移动端：从「app-shell 固定视口」切成「正常文档流」───
+   tokens.css 只改了 body 的 min-width 与 overflow，这里把整条 app-shell 链
+   （.shell → .main → .content → .content-inner → .page.active）的高度与
+   overflow 一并放开。放开后 body 自己滚，页面内容按内容高度自然生长，
+   用户不再被困在「页面层内部滚」里。 */
+@media (max-width: 767px) {
+  .shell { height: auto; overflow: visible; }
+  .main { overflow: visible; }
+  .content { overflow: visible; }
+  .content-inner { flex: none; min-height: 0; }
+  .page.active { overflow-y: visible; }
+}
+
 /* ─────────────────────────────
    macOS（platform === 'macos' 时由 titlebar.js 挂 .is-macos）
    这条标题条上**没有我们画的三键**：那边用的是系统原生红绿灯 —— 建窗处
@@ -551,6 +564,46 @@ body.has-titlebar .shell {
 .panel-head .panel-sub { color: var(--text-3); font-size: 11.5px; }
 .head-actions { margin-left: auto; display: flex; gap: 7px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 .panel-body { padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
+
+/* ─── 可折叠面板（details.panel-fold）───
+   标题栏就是 <summary>，正文是它后面的兄弟节点（.panel-body）。
+   折叠后只剩标题栏，所以那条 `border-bottom` 的分隔线在收起时是多余的
+   —— 用 `[open]` 限定，收起时标题栏直接贴住卡片下边缘。
+
+   ── 三角标记的两套写法 ──────────────────────
+   `list-style: none` 是新内核的写法（Chrome 89+ / Safari 17+），
+   `::-webkit-details-marker` 覆盖老 WebKit；两条都留是为了「不显示原生
+   三角」这件事在两端都成立 —— 三角与 flex 布局的 gap 会叠成一块说不清的
+   空白，且它默认取 currentColor，在深色主题下比标题还显眼。
+   自绘的箭头由下面的 `.fold-caret` 承担，开合时旋转。 */
+details.panel-fold > summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+details.panel-fold > summary::-webkit-details-marker { display: none; }
+details.panel-fold:not([open]) > summary { border-bottom: none; }
+/* 折叠时正文整块不渲染（display:none 由 details 原生提供，这里只补间距） */
+details.panel-fold > .panel-body { margin-top: 0; }
+/* 悬停提示「这里可以点」：整条标题栏是一层极淡的叠加底，与左栏分类项同款表达式 */
+details.panel-fold > summary:hover { background: var(--surface-2); }
+
+/* 标题栏里的展开箭头：置于标题之前，收起时指向右、展开后向下（旋转 90°，
+   两者只差这一个变换，所以只画一个「向右」的形状）。几何与设置页那组
+   描边图标同源（1.8 粗细、圆头），尺寸跟着 13.5px 的标题走。 */
+.fold-caret {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: var(--text-3);
+  transition: transform 0.15s ease;
+}
+.fold-caret svg { display: block; width: 14px; height: 14px; }
+details.panel-fold[open] > summary .fold-caret { transform: rotate(90deg); }
+
 /* 面板底注：说明文字收在底部灰条里，不抢主内容 */
 .panel-foot {
   display: flex;

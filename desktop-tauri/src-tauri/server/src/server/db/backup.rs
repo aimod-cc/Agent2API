@@ -45,6 +45,17 @@
 //!   - 账号 / 日志 / 统计 / 调试报文 / 桌面设置（壳侧）：都无内存快照，
 //!     下一个查询自然看到新库。
 //!
+//! ── 账号密钥指纹（为什么头部要记一行哈希）─────────────────────
+//! 整库备份只 dump 表数据，**不含** `{config_dir}/account.key` 密钥文件。把备份
+//! 拿到另一台机器恢复、或本机密钥文件丢失后恢复，`accounts.data` 里的密文全部
+//! 解不开 —— 用户只看到「账号列表为空」，查不出原因。因此导出时在文件头写一行
+//! `-- account-key-fingerprint: <sha256(密钥)[:16]>`（**哈希，不是密钥**，见
+//! `core::crypto::key_fingerprint`；密钥尚不存在时写「(未生成)」），导入时与本机
+//! 指纹比对：不一致或「(未生成)」就在返回值里附一条 `warning` 说明原因与补救办法
+//! （把 `account.key` 一起带过来）。**不阻断导入** —— 用户可能就是要先把数据导
+//! 回来再处理密钥。该行是文件头前缀之后的注释，不影响「以 BACKUP_SQL_HEADER
+//! 开头」的判定；旧备份没有这一行则无从比对，静默放行。
+//!
 //! ── schema 版本 ────────────────────────────────────────────
 //! 导出文件头与 `PRAGMA user_version` 都带库版本。导入侧先看暂存库执行后
 //! 的真实版本：**高于**当前 `SCHEMA_VERSION` 直接拒绝（旧程序打开新库，
@@ -62,11 +73,30 @@ use serde_json::{json, Value};
 
 use super::schema;
 use super::Db;
+use crate::server::core::crypto;
 use crate::server::logging;
 
 /// 导出文件的第一行。导入端只认带这个前缀的文件 —— 用户的其它 SQL
 /// （手写、别处导出）即便语法正确也拒绝，避免「恢复成了半份陌生数据」。
 pub const BACKUP_SQL_HEADER: &str = "-- Agent2API SQLite 导出";
+
+/// 文件头里记录「导出时账号加密密钥指纹」的注释行前缀（值在冒号之后）。
+/// 放在 `BACKUP_SQL_HEADER` 之后，是**注释行**，不影响「以头部前缀开头」的判定。
+const KEY_FINGERPRINT_LINE: &str = "-- account-key-fingerprint:";
+
+/// 导出时账号密钥尚不存在时写入的明确标记（对应 `crypto::key_fingerprint` 返回
+/// `None` 的情形）。写一个可读的词而不是留空：留空会让「没这一行」与「有但为空」
+/// 两种含义混在一起，导入侧无法区分「旧备份没记」和「记了但没有密钥」。
+const KEY_FINGERPRINT_ABSENT: &str = "(未生成)";
+
+/// 解析指纹时只扫文件开头这几行 —— 头部是固定几行注释，为一行标记去遍历整份
+/// 上百 MB 的正文毫无必要。留足余量以容忍将来在前面再加一两行头部注释。
+const HEADER_SCAN_LINES: usize = 16;
+
+/// 账号域密钥文件名，只用于给用户的警告文案（「把这个文件一起带过来」）。
+/// 事实来源是 `crypto::SecretScope::key_file`，但那是私有实现细节；这里重复的
+/// 只是一个**用户可见的文件名**，改动概率极低（改了它等于换密钥文件，见 crypto 模块头）。
+const ACCOUNT_KEY_FILE: &str = "account.key";
 
 /// 精简导出（不带日志）跳过的表：事件日志、请求明细/聚合、调试报文与请求
 /// 原始报文。业务数据（kv、accounts、account_usage_records）无论哪种口径
@@ -161,6 +191,11 @@ fn dump_sql(conn: &Connection, skip_tables: &[&str]) -> Result<String, String> {
         "{BACKUP_SQL_HEADER}\n-- 生成时间: {}\n-- user_version: {user_version}\n",
         Local::now().format("%Y-%m-%d %H:%M:%S"),
     ));
+    // 追加账号密钥指纹（注释行，紧跟头部其它注释）：本备份**不含** `account.key`
+    // 密钥文件，换了机器或密钥文件丢失后恢复，`accounts.data` 的密文就再也解不开，
+    // 界面只表现为「账号列表为空」。把导出时那把密钥的**指纹**（哈希，不是密钥
+    // 本身，见 `crypto::key_fingerprint`）记下来，导入侧才能比对并明确告知原因。
+    output.push_str(&account_key_fingerprint_line());
     output.push_str("PRAGMA foreign_keys=OFF;\n");
     output.push_str(&format!("PRAGMA user_version={user_version};\n"));
     output.push_str("BEGIN TRANSACTION;\n");
@@ -218,6 +253,18 @@ fn dump_sql(conn: &Connection, skip_tables: &[&str]) -> Result<String, String> {
 
     output.push_str("COMMIT;\nPRAGMA foreign_keys=ON;\n");
     Ok(output)
+}
+
+/// 文件头那行账号密钥指纹注释（含结尾换行）。
+///
+/// 密钥存在 → 写指纹；不存在 → 写「未生成」标记。**绝不写密钥本身**：备份是明文
+/// SQL，会被拷到别的机器，写进去就等于把钥匙交给拿到备份的人（见 `crypto` 模块头）。
+/// 读指纹用 `crypto::key_fingerprint`（只读），**不会**因为有这个调用就生成密钥 ——
+/// 导出是纯读动作，不能在用户机器上凭空造出一把 `account.key`。
+fn account_key_fingerprint_line() -> String {
+    let fingerprint = crypto::key_fingerprint(crypto::SecretScope::Accounts)
+        .unwrap_or_else(|| KEY_FINGERPRINT_ABSENT.to_string());
+    format!("{KEY_FINGERPRINT_LINE} {fingerprint}\n")
 }
 
 /// 一张表的数据 → 多行 VALUES 的 INSERT 批。
@@ -426,10 +473,53 @@ fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), String> {
 
 // ── 导入 ────────────────────────────────────────────────────────
 
+/// 从备份文件头部解析 `-- account-key-fingerprint:` 行的值。
+///
+/// 只扫开头 `HEADER_SCAN_LINES` 行（头部是固定几行注释），不为一行标记遍历正文。
+/// 旧版本导出的文件没有这一行 → `None`（无法比对，调用方按「无信息」处理）。
+fn parse_account_key_fingerprint(sql: &str) -> Option<String> {
+    sql.lines()
+        .take(HEADER_SCAN_LINES)
+        .find_map(|line| line.trim().strip_prefix(KEY_FINGERPRINT_LINE))
+        .map(|value| value.trim().to_string())
+}
+
+/// 比对备份头部记录的密钥指纹与本机现状，返回**给用户看的警告**（未比对出问题 →
+/// `None`）。
+///
+/// 场景与结论：
+///   · 两边指纹一致（最常见：同机恢复）→ 不警告；
+///   · 备份写的是「未生成」→ 警告（导出时那把钥匙还是「不存在」状态，本机若已有
+///     密钥，备份里的账号密文多半解不开）；
+///   · 指纹不同 / 本机没有密钥 → 警告（这份备份是**另一把密钥**加密的）。
+///
+/// **绝不因此阻断导入**：用户常常就是要「先把数据导回来，再单独处理密钥」
+/// （例如先导数据、再把 `account.key` 拷过来重导，或先看看数据再决定）。
+/// 所以这里只产出文案，由调用方放进返回值冒泡给界面 / 日志。
+fn account_key_warning(backup_marker: Option<String>) -> Option<String> {
+    // 旧备份没有这一行：没有任何可比较的信息，静默（不拿「没记」当「不匹配」报）
+    let backup_marker = backup_marker?;
+    if backup_marker == KEY_FINGERPRINT_ABSENT {
+        return Some(format!(
+            "这份备份导出时账号加密密钥尚未生成，无法校验密钥是否一致：若账号数据无法解密（账号列表为空），\
+             请把备份那台机器的 {ACCOUNT_KEY_FILE} 一并带过来后重新导入。"
+        ));
+    }
+    let local = crypto::key_fingerprint(crypto::SecretScope::Accounts);
+    if local.as_deref() == Some(backup_marker.as_str()) {
+        return None;
+    }
+    Some(format!(
+        "这份备份是用另一把加密密钥加密的，导入后账号数据将无法解密（账号列表可能为空）。\
+         若要在别的机器恢复，请把备份那台机器的 {ACCOUNT_KEY_FILE} 一并带过来。"
+    ))
+}
+
 /// 从 SQL 文件恢复整库：校验 → 暂存库执行 → 安全备份 → 整体覆盖主库。
 ///
-/// 返回 `{ tables, safetyBackup }`；替换后的内存态重装在本函数内完成
-/// （见模块头「替换后要重装哪些内存状态」）。
+/// 返回 `{ tables, safetyBackup, warning? }`；替换后的内存态重装在本函数内完成
+/// （见模块头「替换后要重装哪些内存状态」）。`warning` 只在密钥指纹对不上时出现
+/// ——**不阻断导入**，只是把「账号为什么解不开」明确说出来（见 `account_key_warning`）。
 pub fn import_from_file(db: &Db, source: &Path, config_dir: &Path) -> Result<Value, String> {
     let sql_raw = std::fs::read_to_string(source)
         .map_err(|e| format!("读取备份文件失败: {e}"))?;
@@ -439,6 +529,9 @@ pub fn import_from_file(db: &Db, source: &Path, config_dir: &Path) -> Result<Val
             "仅支持导入由 Agent2API 导出的整库备份文件（缺少文件头标记）".to_string(),
         );
     }
+    // 密钥指纹比对：在重活之前先算好文案，最后随结果一起返回。这里只看头部注释，
+    // 不碰暂存库；比对结果**不影响**导入流程（见 account_key_warning 的注释）。
+    let key_warning = account_key_warning(parse_account_key_fingerprint(sql_content));
 
     // 暂存库：外部 SQL 在一次性文件上执行，失败不污染主库。
     // journal_mode 先对齐主库的 WAL —— Backup 会把源文件头拷进目标，
@@ -510,7 +603,17 @@ pub fn import_from_file(db: &Db, source: &Path, config_dir: &Path) -> Result<Val
             safety.display()
         ),
     );
-    Ok(json!({ "tables": tables, "safetyBackup": safety_name }))
+    let mut result = json!({ "tables": tables, "safetyBackup": safety_name });
+    // 指纹警告放进返回值，让它冒泡到界面（HTTP handler 原样回传）与日志；
+    // 键只在真有警告时出现，前端 `if (data.warning)` 即可。
+    if let Some(warning) = key_warning {
+        logging::log(
+            "[Storage]",
+            &format!("⚠️ 整库恢复密钥指纹不匹配（不阻断导入）: {warning}"),
+        );
+        result["warning"] = json!(warning);
+    }
+    Ok(result)
 }
 
 /// 导入期间挂到暂存库上的守卫：拒绝一切能**离开暂存库文件**的动作。

@@ -23,7 +23,7 @@
 //!   - `request_raw`：下游原始正文（预览对话的地基），与 requests 同 id 关联。
 //!     它的写入（`upsert_raw`）由上层在明细记账后单独调；**删除必须挂在
 //!     requests 明细的每一个删除点之后/之前同步做**（见各删除函数的注释），
-//!     否则明细没了正文还在，既占容量闸的名额又永远读不出来。
+//!     否则明细没了正文还在，成为永远读不出来的孤儿行。
 //!   - status=0 的行：转发开始前由 `insert_started_request` 先插的「进行中」
 //!     行，收尾时由 `update_running_request` 补全终态字段（先 UPDATE 后
 //!     INSERT 的理由见 `update_running_request`）。这类行**不进日报**
@@ -71,7 +71,7 @@ use super::report::normalize_status_filter;
 const REQUEST_COLUMNS: &str = "id, ts, model, account_id, account_name, status, duration_ms, \
      first_response_ms, attempts, error, prompt_tokens, completion_tokens, total_tokens, \
      cache_read_tokens, provider, client_model, upstream_model, attempt_details, sensitive_hits, \
-     client_reasoning, upstream_reasoning, phase, phase_started_at, is_test, route";
+     client_reasoning, upstream_reasoning, phase, phase_started_at, is_test, route, client";
 
 // `request_daily`（按天聚合）那一支的列常量、编解码与读-改-写语句在
 // `daily.rs` —— 两张表的语句分文件后各自独立演化。
@@ -131,6 +131,9 @@ fn decode_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<RequestEntry> {
             .get::<_, Option<String>>(24)?
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or(Value::Null),
+        // 末列是 schema v12 加的（请求来源客户端）；旧行的 DEFAULT '' 原样
+        // 读出 —— 空串 = 没有记录（前端显示占位符），与无 UA 的请求同一形态
+        client: row.get(25)?,
     })
 }
 
@@ -263,7 +266,7 @@ impl FilterPlan {
 
 // ─── 明细：计数与读取 ───────────────────────────────────────
 
-/// 明细总条数（`QueryResult.total` 与容量判定都用它）
+/// 明细总条数（列表页的 `total` 读数用它）
 pub(super) fn count_all(conn: &Connection) -> rusqlite::Result<usize> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM requests", [], |row| row.get(0))?;
     Ok(count.max(0) as usize)
@@ -303,7 +306,7 @@ pub(super) fn count_running(
 /// 清单回答的是「这份日志里出现过什么」，与界面上的时间档位是两个独立维度：
 /// 跟着档位过滤的话，切一次档位就要重拉一次清单，而下拉的内容还会在用户正要选
 /// 的时候整体换掉（选中项可能凭空消失）。全量清单稳定得多，代价是切到「今天」
-/// 档位后可能列出一个只在 30 天前出现过的模型 —— 选中它得到空结果，
+/// 档位后可能列出一个很久以前出现过的模型 —— 选中它得到空结果，
 /// 而原因一眼可见（时间档位那一栏还写着「今天」）。
 ///
 /// ── 上限只截断展示 ──────────────────────────────────────────
@@ -471,6 +474,7 @@ pub(super) fn insert_started_request(
     model: &str,
     client_model: &str,
     client_reasoning: &str,
+    client: &str,
     is_test: bool,
 ) -> rusqlite::Result<bool> {
     let existing: i64 = conn.query_row(
@@ -485,11 +489,13 @@ pub(super) fn insert_started_request(
     // 同一时刻、同一来源），进行中行就能显示「请求的什么(等级)」
     // is_test 同样随首发写入：来源是入口就知道的事实，等收尾再补会让「进行中」
     // 那一段的测试行看起来与真实流量一样
+    // client（来源客户端）同一理由：它在入口解析请求头那一刻就定稿了，
+    // 进行中行也应带上 —— 等收尾再补会让列表里「客户端」列在转发期间空一格
     conn.execute(
         "INSERT INTO requests (id, ts, model, client_model, client_reasoning, status, \
-         phase, phase_started_at, is_test) \
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, 'connecting', ?2, ?6)",
-        params![id, ts, model, client_model, client_reasoning, is_test as i64],
+         phase, phase_started_at, is_test, client) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, 'connecting', ?2, ?6, ?7)",
+        params![id, ts, model, client_model, client_reasoning, is_test as i64, client],
     )?;
     Ok(true)
 }
@@ -620,7 +626,7 @@ pub(super) fn update_running_request(
          completion_tokens = ?12, total_tokens = ?13, cache_read_tokens = ?14, provider = ?15, \
          client_model = ?16, upstream_model = ?17, attempt_details = ?18, sensitive_hits = ?19, \
          client_reasoning = ?20, upstream_reasoning = ?21, phase = '', phase_started_at = NULL, \
-         is_test = ?22, route = ?23 \
+         is_test = ?22, route = ?23, client = ?24 \
          WHERE id = ?1 AND status = 0",
         params![
             entry.id,
@@ -648,6 +654,9 @@ pub(super) fn update_running_request(
             // 无进行中行时的兜底之外的主路径，写一次保证两条插入路径口径一致
             entry.is_test as i64,
             encode_optional_json(&entry.route),
+            // 客户端同 is_test：首发已写过一次，收尾再写一次保证
+            // 「有进行中行」与「直接插入」两条路径落库的值同源
+            entry.client,
         ],
     )
 }
@@ -665,9 +674,9 @@ pub(super) fn insert_request(conn: &Connection, entry: &RequestEntry) -> rusqlit
         "INSERT INTO requests (id, ts, model, account_id, account_name, status, duration_ms, \
          first_response_ms, attempts, error, prompt_tokens, completion_tokens, total_tokens, \
          cache_read_tokens, provider, client_model, upstream_model, attempt_details, \
-         sensitive_hits, client_reasoning, upstream_reasoning, is_test, route) \
+         sensitive_hits, client_reasoning, upstream_reasoning, is_test, route, client) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-         ?18, ?19, ?20, ?21, ?22, ?23)",
+         ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
         params![
             entry.id,
             entry.ts,
@@ -692,6 +701,7 @@ pub(super) fn insert_request(conn: &Connection, entry: &RequestEntry) -> rusqlit
             entry.upstream_reasoning,
             entry.is_test as i64,
             encode_optional_json(&entry.route),
+            entry.client,
         ],
     )?;
     Ok(())
@@ -736,59 +746,6 @@ pub(super) fn delete_all_requests(conn: &Connection) -> rusqlite::Result<usize> 
     conn.execute("DELETE FROM requests", [])
 }
 
-/// 删掉 `ts < cutoff` 的明细（时间维度保留）。
-///
-/// **先删**这批明细对应的 request_raw 行再删明细本身（顺序理由同上）：
-/// 过期行通常为 0～少量，`ts` 索引让子查询的代价可以忽略 —— 记账热路径上
-/// 多一条带子查询的 DELETE，与原有的逐次裁剪同量级。
-pub(super) fn delete_expired_requests(conn: &Connection, cutoff: i64) -> rusqlite::Result<usize> {
-    conn.execute(
-        "DELETE FROM request_raw WHERE id IN \
-         (SELECT id FROM requests WHERE ts < ?1 AND id <> '')",
-        params![cutoff],
-    )?;
-    conn.execute("DELETE FROM requests WHERE ts < ?1", params![cutoff])
-}
-
-/// 容量裁剪：只保留 **ts 最新的** `max` 条，返回删除条数。
-///
-/// 按 ts 而不是 row_id 取「最新」：旧实现是「升序数组从头部 drain 掉溢出部分」，
-/// 头部就是 ts 最小的那些；`ts` 允许补写历史（记账点传入的 ts 可能偏早），
-/// 按 row_id 裁会把刚补写的旧请求当成最新而保住它、反而裁掉真正的新请求。
-///
-/// ── 为什么先判条数再发 DELETE（这是热路径）────────────────────
-/// `record` 每次记账都调它，而上面那条 DELETE 在**不需要裁剪时也不是空转**：
-/// `NOT IN (子查询)` 要让 SQLite 把子查询结果物化出来再逐行比对（子查询的
-/// `ORDER BY ts DESC` 能走 `idx_requests_ts`，但仍要取回最多 `max` 个 row_id 建表）。
-/// 条数未达上限时这次比对必然一行都不删，纯属白烧 —— 而记账是每个请求一次的路径。
-/// 所以先 `COUNT(*)`（走最小的索引，比物化子查询便宜得多），未超限直接返回 0。
-/// **与改造前的判定同形**：旧 `insert_sorted` 也是 `if entries.len() > MAX_ENTRIES`
-/// 才 drain。
-///
-/// ── request_raw 的同步删除（淘汰点接上）──────────────────────
-/// 超限时**先**删将被淘汰明细的正文、再删明细：正文与明细同 id 关联，
-/// 明细一删，`id IN (SELECT ...)` 就再也找不到要删的正文行了。子查询与
-/// 下面的明细 DELETE 用同一个「保留集合」，两步必然删中同一批 id。
-/// 同 id 多行的边缘情形（淘汰其一、留下其一）：正文只有一行（UPSERT 覆盖），
-/// 删掉它会让留下的那条明细失去详情正文 —— 两个明细行共享一个 id 本来就是
-/// 模糊地带，这里取「正文跟着被淘汰的行走」，不再为它单独记状态。
-pub(super) fn trim_requests_capacity(conn: &Connection, max: usize) -> rusqlite::Result<usize> {
-    if count_all(conn)? <= max {
-        return Ok(0);
-    }
-    conn.execute(
-        "DELETE FROM request_raw WHERE id IN (\
-           SELECT id FROM requests WHERE row_id NOT IN \
-           (SELECT row_id FROM requests ORDER BY ts DESC, row_id DESC LIMIT ?1) AND id <> '')",
-        params![max as i64],
-    )?;
-    conn.execute(
-        "DELETE FROM requests WHERE row_id NOT IN \
-         (SELECT row_id FROM requests ORDER BY ts DESC, row_id DESC LIMIT ?1)",
-        params![max as i64],
-    )
-}
-
 // ─── 原始报文：request_raw ──────────────────────────────────
 
 /// 写一条原始正文（存在即覆盖；`id` 为空由调用方拦下）。
@@ -826,29 +783,6 @@ pub(super) fn select_raw(
         Some(row) => Ok(Some((row.get(0)?, row.get(1)?, row.get(2)?))),
         None => Ok(None),
     }
-}
-
-/// request_raw 行数（容量判定）
-pub(super) fn count_raw(conn: &Connection) -> rusqlite::Result<usize> {
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM request_raw", [], |row| row.get(0))?;
-    Ok(count.max(0) as usize)
-}
-
-/// 容量裁剪：只保留 **ts 最新的** `max` 行（先判条数再删，理由同
-/// [`trim_requests_capacity`]）。
-///
-/// 按 ts 丢最旧：正文的价值随时间衰减（「预览最近的对话」），明细行的
-/// 淘汰另有自己的口径 —— 两边各自守闸，孤儿行（明细已删、正文还在）由
-/// 各删除点的同步清理兜住。
-pub(super) fn trim_raw_capacity(conn: &Connection, max: usize) -> rusqlite::Result<usize> {
-    if count_raw(conn)? <= max {
-        return Ok(0);
-    }
-    conn.execute(
-        "DELETE FROM request_raw WHERE id NOT IN \
-         (SELECT id FROM request_raw ORDER BY ts DESC LIMIT ?1)",
-        params![max as i64],
-    )
 }
 
 /// 命中筛选的明细里**仍带正文**的条数（清理预览的 `raw`）。

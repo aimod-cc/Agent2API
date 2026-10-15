@@ -16,6 +16,7 @@
 //!   mod.rs          句柄、下载状态机、进度/取消、check 的响应组装（本文件）
 //!   version.rs      版本比较、域名白名单、资产挑选、文件名安全化（纯函数）
 //!   client.rs       出网候选解析、GitHub 请求头、带出口重试的 fetch
+//!   selfupdate.rs   容器内自更新（原地替换二进制与 ui 目录、回滚、重启钩子）
 //!
 //! ── 与 Node 版的一处结构性差异：下载任务的所有权 ─────────────
 //! Node 用一个模块级 `task` 变量（同一时刻只允许一个下载）；Rust 侧同一份状态
@@ -30,10 +31,14 @@ mod check;
 // 公网站点无关，为它复制一份候选解析只会多一处会漂移的知识。因此对本 crate
 // 可见，对外仍不暴露。
 pub(crate) mod client;
+// 容器内自更新：headless 入口注册重启钩子（`set_restart_hook`）要用它，
+// 所以对本 crate 之外也要可见（桌面形态不注册，该模块的函数在非 Linux 上
+// 一律返回「不支持」）。
+pub mod selfupdate;
 mod token;
 mod version;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -43,8 +48,9 @@ use serde_json::{json, Map, Value};
 use crate::server::logging;
 
 pub use version::{
-    assert_downloadable, compare_versions, installer_kind, pick_installer, safe_file_name,
-    UpdateError, DEFAULT_REPO, GITHUB_API, MAX_INSTALLER_BYTES,
+    api_base, assert_downloadable, compare_versions, custom_api_base, installer_kind,
+    pick_asset_by_name, pick_installer, safe_file_name, server_bundle_name, UpdateError,
+    DEFAULT_REPO, GITHUB_API, MAX_INSTALLER_BYTES,
 };
 /// 「更新设置」弹窗的 GitHub 令牌接口（api::update 走这两条；加解密本体
 /// 只在 token 模块内部，见它的模块头）
@@ -113,6 +119,11 @@ struct Inner {
     latest: Option<Value>,
     repository: String,
     download_dir: PathBuf,
+    /// 容器内更新已应用、但进程还没重启（只活在内存里，重启即自然清零）。
+    ///
+    /// 挡「同一版重复安装」：第二次替换会把上一版的 `.backup` 覆盖掉，
+    /// 回滚这条路就断了 —— 而界面在新版本已就位、只差重启时最容易连点。
+    pending_restart: bool,
 }
 
 /// 更新管理器句柄：内部一把锁 + Clone（与 auto_checkin / models 同构）。
@@ -139,6 +150,7 @@ impl UpdateManager {
                 latest: None,
                 repository,
                 download_dir: directory.join("updates"),
+                pending_restart: false,
             })),
         }
     }
@@ -163,13 +175,14 @@ impl UpdateManager {
     /// 组装 check 的响应（对应 buildCheckResult，字段逐个对齐）
     fn build_check_result(&self, current_version: &str) -> Value {
         let version = current_version.trim().to_string();
-        let (latest, repository, download_dir, task) = {
+        let (latest, repository, download_dir, task, pending_restart) = {
             let guard = self.lock();
             (
                 guard.latest.clone(),
                 guard.repository.clone(),
                 guard.download_dir.clone(),
                 guard.task.clone(),
+                guard.pending_restart,
             )
         };
         let latest_tag = latest
@@ -190,6 +203,18 @@ impl UpdateManager {
                 value.get("url").and_then(Value::as_str).map(|url| !url.is_empty()).unwrap_or(false)
             })
             .cloned();
+        // 容器内更新包与它的 .sha256 伴随文件（非 Linux、或该发布没挂这两个
+        // 资产时都是 None —— 面板据此退回「手动升级命令」的提示）
+        let downloadable = |value: Option<&Value>| -> Option<Value> {
+            value
+                .filter(|item| {
+                    item.get("url").and_then(Value::as_str).map(|url| !url.is_empty()).unwrap_or(false)
+                })
+                .cloned()
+        };
+        let server_asset = downloadable(latest.as_ref().and_then(|value| value.get("serverBundle")));
+        let server_checksum =
+            downloadable(latest.as_ref().and_then(|value| value.get("serverChecksums")));
         let latest_text = |key: &str| -> Value {
             match latest.as_ref().and_then(|value| value.get(key)) {
                 Some(Value::String(text)) if !text.is_empty() => Value::String(text.clone()),
@@ -221,6 +246,17 @@ impl UpdateManager {
                 .and_then(Value::as_bool)
                 == Some(true),
             "asset": asset.clone().unwrap_or(Value::Null),
+            // ── 容器内更新（Linux / Docker）──────────────────────
+            // selfUpdate 说的是「这个部署能不能原地更新」（平台 + 环境开关），
+            // serverAsset 说的是「这一版有没有可下的包」—— 两者分开，面板才能
+            // 区分「本部署不支持」与「该版本没提供更新包」这两种不同的提示。
+            "selfUpdate": selfupdate::supported(),
+            "serverAsset": server_asset.unwrap_or(Value::Null),
+            "serverChecksumUrl": server_checksum.unwrap_or(Value::Null),
+            "backupAvailable": selfupdate::backup_available(),
+            // 已应用、只差重启：界面据此把按钮换成「立即重启」，
+            // 而不是再给一次注定 400 的「下载并更新」
+            "pendingRestart": pending_restart,
             "repository": repository,
             "downloadSupported": asset.is_some(),
             // 安装包形态（"nsis" / "dmg"）：界面据此决定文案 ——
@@ -512,6 +548,150 @@ impl UpdateManager {
             )));
         }
         Ok(size)
+    }
+
+    // ─── 容器内更新（Docker / Linux headless）────────────────────
+    //
+    // 与上面的「下载安装包」是两条路：那条给桌面端下安装器（下完由壳启动
+    // 安装程序），这条给容器里的自己换文件（下完由本进程原地替换 + 重启）。
+    // 三条入口都是 POST /api/update/{install,rollback,restart} 的唯一实现，
+    // 细节与安全边界见 selfupdate 模块头。
+
+    /// 应用已下载的更新包：校验 → 解包 → 原子替换二进制与 ui 目录。
+    ///
+    /// 下载目录里的文件按**固定文件名**取（`safe_file_name(包名)`），不接受
+    /// 调用方传路径 —— 少一个「把任意文件当成更新包解包替换」的入口。
+    pub async fn install_downloaded(&self, ui_dir: Option<&Path>) -> Result<Value, UpdateError> {
+        if !selfupdate::supported() {
+            return Err(UpdateError::with_status(
+                400,
+                "当前部署不支持容器内更新：需要在容器中运行并设置 AGENT2API_SELF_UPDATE=1",
+            ));
+        }
+        // 下载还在跑的时候文件是半截的：宁可让人等，也不要拿半个包去替换
+        if self.lock().task.as_ref().map(|task| task.active).unwrap_or(false) {
+            return Err(UpdateError::with_status(400, "更新包还在下载中，请等下载完成后再安装"));
+        }
+        // 已经应用过一次、还没重启：再替换一次会把上一版的备份顶掉（见 Inner 的说明）
+        if self.lock().pending_restart {
+            return Err(UpdateError::with_status(
+                400,
+                "本次更新已经应用，请先重启服务（面板上的重启，或宿主机 docker compose restart）",
+            ));
+        }
+        let bundle = selfupdate::bundle_name().expect("supported 已判定平台与架构");
+        // 从**内存里那份 release JSON** 取三个值：包地址、校验文件地址、版本号。
+        // 键名是 check.rs 存进去的那套（`serverBundle` / `serverChecksums` / `tag`），
+        // **不是** check 响应里给界面用的扁平字段（`serverAsset` / `serverChecksumUrl` /
+        // `latestVersion`）—— 两套名字混用的后果是永远读空、永远报「没有提供校验文件」。
+        let (bundle_url, checksum_url, version) = {
+            let guard = self.lock();
+            let latest = guard.latest.clone();
+            let asset_url = |key: &str| -> String {
+                latest
+                    .as_ref()
+                    .and_then(|value| value.get(key))
+                    .and_then(|value| value.get("url"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            };
+            let tag = latest
+                .as_ref()
+                .and_then(|value| value.get("tag"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            (asset_url("serverBundle"), asset_url("serverChecksums"), tag)
+        };
+        // 该发布没挂包（老版本 Release）：给界面一句能照做的提示，而不是含糊的失败
+        if bundle_url.is_empty() {
+            return Err(UpdateError::with_status(
+                400,
+                "本次发布没有提供容器内更新包，请在宿主机执行 docker compose pull && docker compose up -d 升级",
+            ));
+        }
+        if checksum_url.is_empty() {
+            return Err(UpdateError::with_status(
+                400,
+                "本次发布没有提供校验文件（.sha256），已放弃安装",
+            ));
+        }
+        let archive = self.download_dir().join(safe_file_name(&bundle));
+        if !archive.is_file() {
+            return Err(UpdateError::with_status(400, "更新包尚未下载，请先点击「下载并更新」"));
+        }
+        let expected = selfupdate::fetch_checksum(&checksum_url).await?;
+        let actual = selfupdate::file_sha256(&archive)?;
+        if expected != actual {
+            logging::log(
+                "[Update]",
+                &format!("❌ 更新包 sha256 校验失败（期望 {expected}，实际 {actual}）"),
+            );
+            return Err(UpdateError::new(
+                "更新包校验失败（sha256 不匹配），已放弃安装；可删掉该文件后重新下载",
+            ));
+        }
+        let exe = selfupdate::current_exe_path()?;
+        let outcome = selfupdate::apply(&archive, &exe, ui_dir)?;
+        self.lock().pending_restart = true;
+        logging::log(
+            "[Update]",
+            &format!(
+                "✅ 已在容器内替换程序{}（v{version}），重启后生效",
+                if outcome.ui_updated { "与界面文件" } else { "" }
+            ),
+        );
+        Ok(json!({
+            "applied": true,
+            "version": version,
+            "needRestart": true,
+            "uiUpdated": outcome.ui_updated,
+            "archive": archive.to_string_lossy(),
+        }))
+    }
+
+    /// 回滚到上一版本（上一版备份由 install 时留下）。
+    pub fn rollback(&self, ui_dir: Option<&Path>) -> Result<Value, UpdateError> {
+        if !selfupdate::supported() {
+            return Err(UpdateError::with_status(
+                400,
+                "当前部署不支持容器内更新：需要在容器中运行并设置 AGENT2API_SELF_UPDATE=1",
+            ));
+        }
+        let exe = selfupdate::current_exe_path()?;
+        let outcome = selfupdate::rollback(&exe, ui_dir)?;
+        // 回滚同样是「已应用待重启」：重启之前不许再来一次（同上）
+        self.lock().pending_restart = true;
+        logging::log(
+            "[Update]",
+            &format!(
+                "⚠️ 已回滚到上一版本{}，重启后生效",
+                if outcome.ui_updated { "（含界面文件）" } else { "" }
+            ),
+        );
+        Ok(json!({
+            "restored": true,
+            "needRestart": true,
+            "uiRestored": outcome.ui_updated,
+        }))
+    }
+
+    /// 请求重启进程（容器由 restart 策略拉起；见 selfupdate 的重启钩子）。
+    pub fn request_restart(&self) -> Result<Value, UpdateError> {
+        if !selfupdate::supported() {
+            return Err(UpdateError::with_status(
+                400,
+                "当前部署不支持在网页端重启：请在宿主机执行 docker compose restart",
+            ));
+        }
+        if !selfupdate::request_restart() {
+            return Err(UpdateError::with_status(
+                400,
+                "重启通道未就绪：本进程不是由 headless 容器入口启动的",
+            ));
+        }
+        Ok(json!({ "restarting": true }))
     }
 }
 

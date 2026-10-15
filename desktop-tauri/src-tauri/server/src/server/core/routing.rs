@@ -391,15 +391,21 @@ pub fn account_id(account: &Value) -> Option<&str> {
         .filter(|id| !id.is_empty())
 }
 
-/// 账号展示名：`account.name || account.id`（Node 的 blocked 列表用这个兜底）
+/// 账号展示名：`displayName`（统一展示名，见 `store_view::display_name_of`）
+/// → `name` → id（快照缺 `displayName` 时按旧口径回落）
 pub fn account_name(account: &Value, id: &str) -> String {
-    match account.get("name") {
-        Some(value) if js_truthy(value) => match value.as_str() {
-            Some(text) => text.to_string(),
-            None => value.to_string(),
-        },
-        _ => id.to_string(),
-    }
+    account
+        .get("displayName")
+        .filter(|value| js_truthy(value))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            account.get("name").filter(|value| js_truthy(value)).and_then(|value| match value {
+                Value::String(text) => Some(text.to_string()),
+                other => Some(other.to_string()),
+            })
+        })
+        .unwrap_or_else(|| id.to_string())
 }
 
 /// 从 store 快照 `{ currentAccountId, accounts: [...] }` 取账号数组。
@@ -502,8 +508,13 @@ pub struct PlanMeta<'a> {
     pub open: &'a std::collections::HashSet<String>,
     /// 被限制器软跳过的账号（余额不足 / Token 限额，调用方判好传入）
     pub limiter_blocked: &'a std::collections::HashSet<String>,
-    /// 轮转起始位（`None` = 不轮转 —— 顺序优先策略）
+    /// 轮转**计数**（`None` = 不轮转 —— 顺序优先策略）。取模由 `base_order` 做，
+    /// 用的是过滤后的长度（理由见 `RouteState::rotate_take`）。
     pub cursor: Option<usize>,
+    /// 家内轮询（`Provider`）下**每家各自的**轮转计数（provider id → 计数），
+    /// 同样由 `provider_order` 按各家过滤后的成员数取模。
+    /// 其余策略不看这个字段；`None` = 不轮转（预演 / 本轮已推进过）
+    pub provider_cursors: Option<&'a HashMap<String, usize>>,
     /// 粘性命中的账号 id（`None` = 无命中）
     pub sticky_account: Option<&'a str>,
 }
@@ -538,12 +549,84 @@ fn base_order(candidates: &[Value], strategy: RouteStrategy, meta: &PlanMeta<'_>
             if len <= 1 {
                 return sorted;
             }
+            // `cursor` 是单调计数，取模只在这里做一次 —— 用的是**过滤后**的长度
+            // （`sorted` 已排除禁用 / 冷却 / 并发满 / 无凭证），与游标推进时那把
+            // 尺子无关（见 `RouteState::rotate_take`）。
             let start = meta.cursor.unwrap_or(0) % len;
             (0..len)
                 .map(|offset| sorted[(start + offset) % len].clone())
                 .collect()
         }
+        RouteStrategy::Provider => provider_order(sorted, meta),
     }
+}
+
+/// 家内轮询的排序：候选先按**家**分段，段之间按「段内最优账号的优先级」升序
+/// （优先级最高的家排最前），段内按各自的游标环绕。
+///
+/// ── 为什么不直接在排好的线上轮转 ─────────────────────────────
+/// `sorted` 已按优先级升序，是一条**跨家的线**；在这条线上环绕就是 `Rotate`
+/// （轮一转会跳到别的家）。家内轮询的要点恰恰是「家的先后固定、只有家内换人」，
+/// 所以必须先把这条线按家切成段、各段自己转，再按段拼回去。
+///
+/// ── 段序为什么取「首次出现的位置」────────────────────────────
+/// 正常路径下 `sorted` 有序，某家第一次出现的那个账号就是这家**优先级最高**
+/// 的账号 —— 按首次出现的位置编排各段，段序正是「各家最优账号之间的优先级
+/// 顺序」，不必另算一遍。
+///
+/// ⚠️ 有一条例外，是有意为之：`plan_route` 会把**粘性命中的账号**提到传进来的
+/// 列表最前（见那里「粘性命中的可用账号提到最前」一段）。那时它的家整段排到
+/// 第一位，段序随之让位于粘性、不再按优先级 —— 粘性的语义就是「这个会话继续
+/// 用同一个账号」，压过家的优先级才是对的。粘性只在本会话内生效，别的会话
+/// 照常按优先级排。
+fn provider_order(sorted: Vec<Value>, meta: &PlanMeta<'_>) -> Vec<Value> {
+    let mut groups: Vec<(String, Vec<Value>)> = Vec::new();
+    for account in sorted {
+        let provider = provider_of(&account).to_string();
+        match groups.iter_mut().find(|(name, _)| *name == provider) {
+            Some((_, members)) => members.push(account),
+            None => groups.push((provider, vec![account])),
+        }
+    }
+    let mut arranged = Vec::new();
+    for (provider, members) in groups {
+        let len = members.len();
+        if len <= 1 {
+            arranged.extend(members);
+            continue;
+        }
+        // 没有游标时从第 0 位起 —— 与 `Rotate` 分支对 `cursor: None` 的处理同一口径。
+        // 游标是单调计数（`RouteState::rotate_take_per_provider`），取模只在这里做
+        // 一次、只对**这一家过滤后的成员数**取 —— 家内有人被冷却时环会变短，位次
+        // 序列仍然均匀。
+        let start = meta
+            .provider_cursors
+            .and_then(|cursors| cursors.get(&provider))
+            .copied()
+            .unwrap_or(0)
+            % len;
+        for offset in 0..len {
+            arranged.push(members[(start + offset) % len].clone());
+        }
+    }
+    arranged
+}
+
+/// 统计一组账号里各家的账号数（`provider id → 个数`，按首次出现排）。
+///
+/// 家内轮询用它列出「有哪几家」，为每家建一条游标键（`rotate_take_per_provider`）。
+/// 个数本身不参与取模 —— 取模在 `provider_order` 里按各家**过滤后**的成员数做
+/// （见 `RouteState::rotate_take` 那段）。
+pub fn provider_sizes(accounts: &[Value]) -> Vec<(String, usize)> {
+    let mut sizes: Vec<(String, usize)> = Vec::new();
+    for account in accounts {
+        let provider = provider_of(account).to_string();
+        match sizes.iter_mut().find(|(name, _)| *name == provider) {
+            Some((_, count)) => *count += 1,
+            None => sizes.push((provider, 1)),
+        }
+    }
+    sizes
 }
 
 /// 生成一份完整的选路计划（转发选路与队列端点共用的**唯一**排序实现）。
@@ -617,25 +700,38 @@ pub fn plan_route(
         ordered.push(account.clone());
     }
 
-    // 粘性命中的可用账号提到最前（它可用，请求就会走它 —— 排序必须如实反映）
-    let mut sticky_hit = false;
-    if let Some(hit) = meta.sticky_account {
-        if let Some(index) = ordered
-            .iter()
-            .position(|account| account_id(account) == Some(hit))
-        {
-            let hit_account = ordered.remove(index);
-            ordered.insert(0, hit_account);
-            sticky_hit = true;
-        }
-    }
-
     // 基础序（策略）→ 稳定修饰：没沉底的在前 → 没休息的在前 → 没熔断的在前
     // 三个修饰**跨策略**生效：垫底（Sink）解决的是「每次回到第 1 位再撞一次
     // 429」，退避解决的是「反复失败反复撞」—— 它们在顺序优先下同样成立；
     // 若只对负载均衡生效，默认策略下这两个开关就是摆设。稳定排序保证
     // 同档内的先后仍由策略的基础序决定（顺序优先下 = 位次）。
     let mut arranged = base_order(&ordered, meta.strategy, meta);
+
+    // ── 粘性命中的可用账号提到最前（它可用，请求就会走它 —— 排序必须如实反映）
+    //
+    // ⚠️ 这一步**必须在 `base_order` 之后**（2026-10-13 修正）：`base_order` 的
+    // 三个分支都以 `sort_by(compare_by_priority)` 开头，置顶若放在它之前，会被
+    // 那句排序按优先级原样冲回原位 —— 粘性只在「命中的账号本来就是队首」时
+    // 才生效，命中非队首账号时请求照样回到队首（2026-10-13 在 `.3` 上实测到：
+    // 同一个 trace 的相邻两条请求落在 priority=107 与 priority=100 两个账号上）。
+    // 上游原实现就是放在前面的，属既有缺陷；本仓把它移到这里修掉。
+    //
+    // 放在这里还有一层：下面三个修饰用的是 `sort_by_key`（**稳定**排序），
+    // 同键元素的相对次序原样保留，所以置顶项不会被它们打乱；而排在最前的
+    // 命中账号若正处冷却 / 熔断，本就该让位 —— 命中项能走到这一步就说明它
+    // 可用（不可用的在收集阶段已进 `blocked`），两者不冲突。
+    let mut sticky_hit = false;
+    if let Some(hit) = meta.sticky_account {
+        if let Some(index) = arranged
+            .iter()
+            .position(|account| account_id(account) == Some(hit))
+        {
+            let hit_account = arranged.remove(index);
+            arranged.insert(0, hit_account);
+            sticky_hit = true;
+        }
+    }
+
     let rank_of = |account: &Value, table: &HashMap<String, i64>| -> bool {
         account_id(account)
             .and_then(|id| table.get(id))
@@ -651,6 +747,24 @@ pub fn plan_route(
             .unwrap_or(false)
     });
 
+    // 每个位次「前面出现过的家是不是全是它自己家」—— `Provider` 策略的原因句
+    // 要用：排在第 2 位的若是**同一家的下一个账号**（家 A = a1/a2、家 B = b1），
+    // 前面并没有「优先级更高的家」，它是家内轮流的正常位次。此前那句一律写
+    // 「等优先级更高的家轮完或失败才到它」，是一句与排序事实冲突的假话
+    // （2026-10-14 review 发现）。
+    let prefix_is_same_family: Vec<bool> = {
+        let mut seen: Vec<String> = Vec::new();
+        let mut flags = Vec::with_capacity(arranged.len());
+        for account in &arranged {
+            let provider = provider_of(account).to_string();
+            flags.push(seen.iter().all(|name| *name == provider));
+            if !seen.iter().any(|name| *name == provider) {
+                seen.push(provider);
+            }
+        }
+        flags
+    };
+
     let ordered_entries: Vec<PlanEntry> = arranged
         .into_iter()
         .enumerate()
@@ -658,7 +772,15 @@ pub fn plan_route(
             let id = account_id(&account).unwrap_or("").to_string();
             let position = index + 1;
             let mut reason = if sticky_hit && Some(id.as_str()) == meta.sticky_account {
-                "会话粘住：这个会话上一轮是它答的，本轮继续用它".to_string()
+                // 「继续用它」只在它**真的**排在队首时才说（置顶之后还有三层
+                // 稳定修饰，粘住的账号若正在垫底 / 休息 / 熔断，会被推回队尾）。
+                // 不说这一句会让原因句与事实冲突 —— 界面写着「本轮继续用它」，
+                // 实际却排在第 10 位（2026-10-13 review 发现）。
+                if position == 1 {
+                    "会话粘住：这个会话上一轮是它答的，本轮继续用它".to_string()
+                } else {
+                    format!("会话粘住，但它当前排在第 {position} 位（正在让位于下面的状态）")
+                }
             } else {
                 match meta.strategy {
                     RouteStrategy::Order => {
@@ -675,10 +797,22 @@ pub fn plan_route(
                             format!("排在第 {position} 位：等前面的轮完或失败才到它")
                         }
                     }
+                    RouteStrategy::Provider => {
+                        if position == 1 {
+                            "本轮轮到它：家之间按优先级、家内轮流，它是当前该上的那一位".to_string()
+                        } else if prefix_is_same_family[index] {
+                            // 同家的后一位：前面没有别的家，「等优先级更高的家」是假话
+                            format!("排在第 {position} 位：同一家内轮流，轮到它才上")
+                        } else {
+                            format!("排在第 {position} 位：等优先级更高的家轮完或失败才到它")
+                        }
+                    }
                 }
             };
             if meta.sunk.contains_key(&id) {
-                reason.push_str("；曾还有额度时被 429（垫底中，轮一圈才回来）");
+                // 文案跟着 `route_state::SINK_TTL_MS` 走：垫底现在有 30 分钟寿命，
+                // 不再是「轮一圈才回来」（那句是上游原实现的说法，那时垫底永不失效）。
+                reason.push_str("；曾还有额度时被 429（垫底中，30 分钟后自动回到队列）");
             }
             if let Some(until) = meta.resting.get(&id) {
                 reason.push_str(&format!("；转发失败休息至 {}", clock_text(*until, now)));
@@ -708,6 +842,324 @@ pub fn plan_route(
 /// 粘性 TTL（毫秒）：转发选路与队列端点共用的换算（StickyMode → 时长）。
 pub fn sticky_ttl_ms(mode: StickyMode) -> i64 {
     mode.ttl_ms().unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 家内轮询的一份最小 meta：只带各家游标，其余状态为空。
+    fn provider_meta<'a>(
+        cursors: &'a HashMap<String, usize>,
+        empty_numbers: &'a HashMap<String, i64>,
+        empty_ids: &'a std::collections::HashSet<String>,
+    ) -> PlanMeta<'a> {
+        PlanMeta {
+            strategy: RouteStrategy::Provider,
+            sunk: empty_numbers,
+            resting: empty_numbers,
+            open: empty_ids,
+            limiter_blocked: empty_ids,
+            cursor: None,
+            provider_cursors: Some(cursors),
+            sticky_account: None,
+        }
+    }
+
+    fn account(id: &str, provider: &str, priority: i64) -> Value {
+        json!({ "id": id, "provider": provider, "priority": priority })
+    }
+
+    fn ordered_ids(accounts: &[Value], meta: &PlanMeta<'_>) -> Vec<String> {
+        provider_order(accounts.to_vec(), meta)
+            .iter()
+            .map(|account| account_id(account).unwrap_or("").to_string())
+            .collect()
+    }
+
+    /// 家内轮询的核心语义：家之间保持优先级顺序，只有家内换人。
+    #[test]
+    fn provider_order_rotates_inside_a_family_but_keeps_families_in_priority_order() {
+        let empty_numbers: HashMap<String, i64> = HashMap::new();
+        let empty_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // A 家轮到第 1 位（a2）；B 家没有游标，从第 0 位起
+        let cursors: HashMap<String, usize> = HashMap::from([("A".to_string(), 1usize)]);
+        let meta = provider_meta(&cursors, &empty_numbers, &empty_ids);
+        // 传进来的已是「按优先级升序」的线（plan_route 的输入形态）
+        let sorted = vec![
+            account("a1", "A", 100),
+            account("a2", "A", 110),
+            account("b1", "B", 120),
+        ];
+        // A 家在前（它最优账号的 100 最小）且家内轮到 a2；B 家整段排在 A 家之后
+        assert_eq!(ordered_ids(&sorted, &meta), vec!["a2", "a1", "b1"]);
+    }
+
+    #[test]
+    fn provider_order_without_a_cursor_starts_at_each_familys_top() {
+        let empty_numbers: HashMap<String, i64> = HashMap::new();
+        let empty_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let cursors: HashMap<String, usize> = HashMap::new();
+        let meta = provider_meta(&cursors, &empty_numbers, &empty_ids);
+        let sorted = vec![
+            account("a1", "A", 100),
+            account("a2", "A", 110),
+            account("b1", "B", 120),
+        ];
+        assert_eq!(ordered_ids(&sorted, &meta), vec!["a1", "a2", "b1"]);
+    }
+
+    /// 游标按**当前**候选数取模：某家账号被限流掉几个、环变短时不许越界
+    #[test]
+    fn provider_cursor_wraps_instead_of_going_out_of_range() {
+        let empty_numbers: HashMap<String, i64> = HashMap::new();
+        let empty_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let cursors: HashMap<String, usize> = HashMap::from([("A".to_string(), 7usize)]);
+        let meta = provider_meta(&cursors, &empty_numbers, &empty_ids);
+        let sorted = vec![account("a1", "A", 100), account("a2", "A", 110)];
+        // 7 % 2 = 1 → 从 a2 起
+        assert_eq!(ordered_ids(&sorted, &meta), vec!["a2", "a1"]);
+    }
+
+    #[test]
+    fn provider_sizes_counts_each_family() {
+        let accounts = vec![
+            account("a1", "A", 100),
+            account("b1", "B", 120),
+            account("a2", "A", 110),
+        ];
+        assert_eq!(
+            provider_sizes(&accounts),
+            vec![("A".to_string(), 2), ("B".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn provider_strategy_round_trips_through_its_config_id() {
+        assert_eq!(RouteStrategy::from_id("provider"), RouteStrategy::Provider);
+        assert_eq!(RouteStrategy::Provider.as_str(), "provider");
+    }
+
+    /// `Provider` 策略的原因句：**同家的下一位**不许说成「等优先级更高的家」。
+    ///
+    /// 家 A = a1/a2、家 B = b1 —— 第 2 位是 a2，它前面只有同家的 a1，前面
+    /// **没有**任何别的家。此前这句一律写成「等优先级更高的家轮完或失败才到
+    /// 它」，是一句与排序事实相冲突的假话（2026-10-14 review 发现）。原因句是
+    /// 排查排序时唯一要读的东西，不能是假的。
+    ///
+    /// 走完整的 `plan_route`：原因句由它生成，`provider_order` 只排不写文案。
+    #[test]
+    fn a_sibling_in_the_same_family_is_not_explained_by_a_higher_priority_family() {
+        let empty_numbers: HashMap<String, i64> = HashMap::new();
+        let empty_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let counts: HashMap<String, usize> = HashMap::new();
+        let cursors: HashMap<String, usize> = HashMap::new();
+        let meta = provider_meta(&cursors, &empty_numbers, &empty_ids);
+        let accounts = vec![
+            account("a1", "A", 100),
+            account("a2", "A", 110),
+            account("b1", "B", 120),
+        ];
+        let plan = plan_route(
+            &accounts,
+            &CooldownKeys::new("test-model"),
+            &counts,
+            &[],
+            1_700_000_000_000,
+            &meta,
+        );
+        let order: Vec<&str> = plan.ordered.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(order, vec!["a1", "a2", "b1"]);
+        // 第 2 位是同家的 a2
+        assert!(plan.ordered[1].reason.contains("同一家内轮流"), "{}", plan.ordered[1].reason);
+        assert!(!plan.ordered[1].reason.contains("优先级更高的家"), "{}", plan.ordered[1].reason);
+        // 第 3 位的 b1 前面确实有 A 家，仍按「优先级更高的家」解释
+        assert!(plan.ordered[2].reason.contains("优先级更高的家"), "{}", plan.ordered[2].reason);
+    }
+
+    /// 粘性命中的账号必须真的排到第 1 位 —— 即使它的优先级最低。
+    ///
+    /// 这条钉的是 2026-10-13 修掉的一处**上游既有缺陷**：置顶那一步原先在
+    /// `base_order` 之前，而 `base_order` 三个分支都以 `sort_by(compare_by_priority)`
+    /// 开头，置顶随即被冲回原位 ⇒ 粘性只在「命中账号本来就是队首」时生效。
+    /// 实测证据：`.3` 上同一个 trace 的相邻两条请求落在 priority=107 与 100 上。
+    ///
+    /// 走完整的 `plan_route`（而不是直接调 `provider_order`）：置顶与排序的
+    /// **先后关系**正是这条用例要钉的东西，只有从入口调才验得到。
+    #[test]
+    fn sticky_pinning_survives_the_base_order_sort() {
+        let empty_numbers: HashMap<String, i64> = HashMap::new();
+        let empty_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let counts: HashMap<String, usize> = HashMap::new();
+        let keys = CooldownKeys::new("test-model");
+        let accounts = vec![
+            account("a1", "A", 100),
+            account("a2", "A", 110),
+            account("a3", "A", 120),
+        ];
+        // 粘性命中优先级最低的 a3 —— 置顶生效时它必须排第一
+        let meta = PlanMeta {
+            strategy: RouteStrategy::Order,
+            sunk: &empty_numbers,
+            resting: &empty_numbers,
+            open: &empty_ids,
+            limiter_blocked: &empty_ids,
+            cursor: None,
+            provider_cursors: None,
+            sticky_account: Some("a3"),
+        };
+        let plan = plan_route(&accounts, &keys, &counts, &[], 1_700_000_000_000, &meta);
+        let order: Vec<&str> = plan.ordered.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["a3", "a1", "a2"],
+            "粘性命中的 a3 必须排在队首（粘性的全部意义就是「继续用它」）"
+        );
+        assert!(plan.sticky_hit);
+        // 剩下两位仍按优先级（置顶只动命中那一项，不整体重排）
+        assert_eq!(plan.ordered[1].id, "a1");
+        assert_eq!(plan.ordered[2].id, "a2");
+    }
+
+    /// 家内轮询下也一样：命中项置顶后，家内顺序的**其余部分**照常环绕。
+    #[test]
+    fn sticky_pinning_survives_under_the_provider_strategy() {
+        let empty_numbers: HashMap<String, i64> = HashMap::new();
+        let empty_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let counts: HashMap<String, usize> = HashMap::new();
+        let keys = CooldownKeys::new("test-model");
+        let cursors: HashMap<String, usize> = HashMap::from([("A".to_string(), 1usize)]);
+        let accounts = vec![
+            account("a1", "A", 100),
+            account("a2", "A", 110),
+            account("b1", "B", 120),
+        ];
+        let meta = PlanMeta {
+            strategy: RouteStrategy::Provider,
+            sunk: &empty_numbers,
+            resting: &empty_numbers,
+            open: &empty_ids,
+            limiter_blocked: &empty_ids,
+            cursor: None,
+            provider_cursors: Some(&cursors),
+            sticky_account: Some("b1"),
+        };
+        let plan = plan_route(&accounts, &keys, &counts, &[], 1_700_000_000_000, &meta);
+        let order: Vec<&str> = plan.ordered.iter().map(|entry| entry.id.as_str()).collect();
+        // b1 置顶（家 B 优先级最低，本来排最后）⇒ 粘性压过家的优先级，这是设计
+        assert_eq!(order, vec!["b1", "a2", "a1"]);
+    }
+
+    /// 粘住的账号若正在垫底，会被三层稳定修饰推回队尾 —— 那时原因句
+    /// **不能**再说「本轮继续用它」（2026-10-13 review 发现：置顶在排序修饰
+    /// 之前，界面会写着「继续用它」而它实际排第 2 位）。
+    #[test]
+    fn a_sticky_account_that_is_sunk_says_so_instead_of_claiming_it_will_be_used() {
+        let empty_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let counts: HashMap<String, usize> = HashMap::new();
+        let keys = CooldownKeys::new("test-model");
+        let accounts = vec![account("a1", "A", 100), account("a2", "A", 110)];
+        // a2 粘住，但它同时在 sink 表里
+        let sunk: HashMap<String, i64> = HashMap::from([("a2".to_string(), 1_700_000_000_000i64)]);
+        let empty_numbers: HashMap<String, i64> = HashMap::new();
+        let meta = PlanMeta {
+            strategy: RouteStrategy::Order,
+            sunk: &sunk,
+            resting: &empty_numbers,
+            open: &empty_ids,
+            limiter_blocked: &empty_ids,
+            cursor: None,
+            provider_cursors: None,
+            sticky_account: Some("a2"),
+        };
+        let plan = plan_route(&accounts, &keys, &counts, &[], 1_700_000_000_000, &meta);
+        let order: Vec<&str> = plan.ordered.iter().map(|entry| entry.id.as_str()).collect();
+        // 垫底的 a2 被推回第 2 位（粘性置顶让位于垫底 —— 这正是要如实展示的事实）
+        assert_eq!(order, vec!["a1", "a2"]);
+        assert!(plan.sticky_hit, "命中过就该记着（sticky_hit 表示「查到过」）");
+        // 原因句必须如实：说它在第几位，而不是「本轮继续用它」
+        let a2 = &plan.ordered[1];
+        assert!(
+            a2.reason.contains("排在第 2 位"),
+            "垫底中的粘住账号不该声称「本轮继续用它」，实际原因句：{}",
+            a2.reason
+        );
+        assert!(!a2.reason.contains("本轮继续用它"));
+        // 队首的 a1 走正常原因句（不是粘住那句）
+        assert!(plan.ordered[0].reason.contains("队列第 1 位"));
+    }
+
+    /// 家内轮询**经完整 `plan_route`** 的效果：家之间按优先级、家内按游标环绕。
+    ///
+    /// 上面几条 `provider_order_*` 都只调那个纯函数；这一条从 `plan_route` 进，
+    /// 验的是「接线正确」—— 档位传到 `base_order`、`provider_cursors` 真的被
+    /// 消费到。只测纯函数的话，接线处把 `provider_cursors` 传成 `None` 也全绿。
+    #[test]
+    fn the_provider_strategy_keeps_families_in_priority_order_and_rotates_inside() {
+        let empty_numbers: HashMap<String, i64> = HashMap::new();
+        let empty_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let counts: HashMap<String, usize> = HashMap::new();
+        let keys = CooldownKeys::new("test-model");
+        // B 家最优账号的优先级（120）低于 A 家（100）⇒ 整段 B 排在整段 A 之后
+        let accounts = vec![
+            account("a1", "A", 100),
+            account("b1", "B", 120),
+            account("a2", "A", 110),
+            account("b2", "B", 130),
+        ];
+        // 两家各自的游标都是 1 ⇒ 各自从第二个成员起
+        let cursors: HashMap<String, usize> =
+            HashMap::from([("A".to_string(), 1usize), ("B".to_string(), 1usize)]);
+        let meta = PlanMeta {
+            strategy: RouteStrategy::Provider,
+            sunk: &empty_numbers,
+            resting: &empty_numbers,
+            open: &empty_ids,
+            limiter_blocked: &empty_ids,
+            cursor: None,
+            provider_cursors: Some(&cursors),
+            sticky_account: None,
+        };
+        let plan = plan_route(&accounts, &keys, &counts, &[], 1_700_000_000_000, &meta);
+        let order: Vec<&str> = plan.ordered.iter().map(|entry| entry.id.as_str()).collect();
+        // A 家整段在前（家内从 a2 起环绕），B 家整段在后（家内从 b2 起环绕）
+        assert_eq!(order, vec!["a2", "a1", "b2", "b1"]);
+        // 队首的原因句是家内轮询那一档（不是顺序优先 / 负载均衡的）
+        assert!(
+            plan.ordered[0].reason.contains("家之间按优先级"),
+            "队首原因句应当是家内轮询的口径，实际：{}",
+            plan.ordered[0].reason
+        );
+    }
+
+    /// 家内轮询下**没有游标**（预演 / 队列端点）时，各家都从自己的队首起。
+    #[test]
+    fn the_provider_strategy_without_cursors_shows_each_family_from_its_top() {
+        let empty_numbers: HashMap<String, i64> = HashMap::new();
+        let empty_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let counts: HashMap<String, usize> = HashMap::new();
+        let keys = CooldownKeys::new("test-model");
+        let accounts = vec![
+            account("a1", "A", 100),
+            account("b1", "B", 120),
+            account("a2", "A", 110),
+            account("b2", "B", 130),
+        ];
+        let meta = PlanMeta {
+            strategy: RouteStrategy::Provider,
+            sunk: &empty_numbers,
+            resting: &empty_numbers,
+            open: &empty_ids,
+            limiter_blocked: &empty_ids,
+            cursor: None,
+            provider_cursors: None,
+            sticky_account: None,
+        };
+        let plan = plan_route(&accounts, &keys, &counts, &[], 1_700_000_000_000, &meta);
+        let order: Vec<&str> = plan.ordered.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(order, vec!["a1", "a2", "b1", "b2"]);
+    }
 }
 
 

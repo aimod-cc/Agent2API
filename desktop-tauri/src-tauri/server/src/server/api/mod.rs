@@ -42,6 +42,10 @@ pub mod accounts_usage;
 // `db::backup`，替换语义与账号 JSON 导入的 merge 是两条独立通道）
 pub mod backup_api;
 pub mod auto_checkin;
+// 长度截断的自动续写（开关 + 轮数上限）：`GET/PUT /api/auto-continue`。
+// 判据与执行链在 `core::upstream::continuation`，这里只是那两个数的读写入口；
+// 独立成文件而不是塞进 config_api —— 理由见该模块头。
+pub mod auto_continue;
 pub mod billing;
 pub mod captcha;
 pub mod chat;

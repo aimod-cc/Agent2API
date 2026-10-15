@@ -214,12 +214,15 @@ fn item_of(object: &Map<String, Value>) -> Value {
         .filter(|text| valid_protocol(text))
         .unwrap_or(PROTOCOL_CHAT_COMPLETIONS)
         .to_string();
-    let base_url = object
-        .get("baseUrl")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or("")
-        .to_string();
+    let client_emulation = client_emulation_of(object.get("clientEmulation"));
+    let base_url = migrate_base_url(
+        object
+            .get("baseUrl")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or(""),
+        client_emulation == CLIENT_EMULATION_OPENCODE,
+    );
     json!({
         "id": id,
         "name": name,
@@ -234,7 +237,7 @@ fn item_of(object: &Map<String, Value>) -> Value {
         "urlSuffix": url_suffix_of(object.get("urlSuffix")),
         "headers": headers_of(object.get("headers")),
         "anthropicToolType": tool_type_of(object.get("anthropicToolType")),
-        "clientEmulation": client_emulation_of(object.get("clientEmulation")),
+        "clientEmulation": client_emulation,
     })
 }
 
@@ -1102,6 +1105,52 @@ pub fn normalize_base_url(raw: &str) -> Result<String, String> {
         return Err("baseUrl 必须以 http:// 或 https:// 开头".to_string());
     }
     Ok(parsed.as_str().trim_end_matches('/').to_string())
+}
+
+/// OpenCode Zen 免费档的**旧端点**：2026-10 起打它一律 403 `FreeTierError`
+/// （实测，见 `providers::custom::emulation` 的模块头）。
+pub const LEGACY_OPENCODE_BASE_URL: &str = "https://opencode.ai/zen/v1";
+
+/// OpenCode Zen 免费档的**当前端点**（旧端点已废弃，见上）。
+pub const OPENCODE_BASE_URL: &str = "https://opencode.ai/inference/v1";
+
+/// OpenCode **Go**（订阅制）的端点。它与免费档的要求**不同**：免费档要「伪装成
+/// 官方客户端」（四会话头 + 工具对 + 匿名凭证），Go 只要客户端**带一个稳定的
+/// 会话头**——上游文档 `docs/go/#where-can-i-use-it` 的公开路由要求（「Send a
+/// stable session ID in `x-opencode-session` for each conversation」），缺了直接
+/// `400 MissingSessionID`（实测：这道检查在鉴权之前，且只看在场、不校验形状）。
+/// 两面的要求不同，转发侧按端点分派，见 `providers::custom::emulation`。
+pub const OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
+
+/// 这条记录的 baseUrl 是否逐字命中 OpenCode Go 端点（忽略末尾斜杠与 ASCII 大小写）。
+///
+/// 与 [`migrate_base_url`] 同一口径的**精确匹配**：只有官方那个端点走 Go 面的
+/// 特殊处理，用户自建的中转/代理地址一概不碰（那类地址背后是什么取决于中转
+/// 自己，网关不该替它猜）。
+pub fn is_opencode_go_endpoint(base_url: &str) -> bool {
+    base_url
+        .trim()
+        .trim_end_matches('/')
+        .eq_ignore_ascii_case(OPENCODE_GO_BASE_URL)
+}
+
+/// 读侧迁移：把**逐字等于旧端点**的 baseUrl 改写成当前端点。
+///
+/// 为什么在读侧做而不是写一条一次性迁移：旧端点是免费档的入口，2026-10 起打它
+/// 一律 403；存量记录里有两处可能还指着它 —— 预置卡早先写进提供商记录的，
+/// 以及用户在**账号**上覆盖的（那条由 `forward` 在解析完最终 baseUrl 后再过一次
+/// 本函数）。读侧改写让老记录不改盘、不迁移也能立刻恢复可用，新写的记录本来就
+/// 用新端点。
+///
+/// `is_opencode` 是**显式开关**（调用方传记录的 `clientEmulation`）：只对
+/// 「按 OpenCode 客户端形状伪装」的记录动手，别家填了同名字符串也不改 ——
+/// 与 `client_emulation` 整体的 opt-in 取向一致。
+pub fn migrate_base_url(raw: &str, is_opencode: bool) -> String {
+    let text = raw.trim();
+    if is_opencode && text.trim_end_matches('/').eq_ignore_ascii_case(LEGACY_OPENCODE_BASE_URL) {
+        return OPENCODE_BASE_URL.to_string();
+    }
+    text.to_string()
 }
 
 // ── per-provider 特判字段的写侧校验（create / update 共用）────────

@@ -334,6 +334,8 @@ export type PoolItem = {
   /** manual | clash（表单里按它标「手动 / Clash Verge」） */
   source?: string
   enabled?: boolean
+  /** 订阅节点的监听端口；null = 未分配（lazy listeners，见网络代理页） */
+  port?: number | null
   /** 解析后的出口（Clash 条目的端口在这里是实时值）；不受控字段按 unknown 收 */
   resolved?: { protocol?: string; host?: string; port?: number | null; label?: string } | null
   /** 解析失败的原因（引用了已删除的 Clash 监听器等） */
@@ -354,6 +356,11 @@ export type PoolItem = {
  * 取不到（解析失败 / 字段缺失）时回落 `resolved.label`，再没有就是空串。
  */
 export function poolItemAddress(item: PoolItem): string {
+  // lazy listeners：订阅节点可能还没有分配监听端口（未引用 / 引用刚保存
+  // 内核还没重建完）—— 在这里标注出来，下拉与地址列都能看到原因
+  if (item.source === 'subscription' && (item.port === null || item.port === undefined)) {
+    return t('未分配端口')
+  }
   const resolved = item.resolved
   if (resolved?.protocol && resolved.host && resolved.port) {
     return `${String(resolved.protocol).toUpperCase()} ${resolved.host}:${resolved.port}`

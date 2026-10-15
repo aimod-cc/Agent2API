@@ -10,8 +10,27 @@ use serde_json::Value;
 /// 默认仓库（本项目的上游）；fork 后可自行覆盖（Node 版 DEFAULT_REPO）
 pub const DEFAULT_REPO: &str = "aimod-cc/agent2api";
 
-/// GitHub API 根（Node 版 GITHUB_API）
+/// GitHub API 根（Node 版 GITHUB_API）—— [`api_base`] 的默认值
 pub const GITHUB_API: &str = "https://api.github.com";
+
+/// 自建更新源的地址（`WORKBUDDY_UPDATE_API_BASE`，空串/非法值当没配）。
+///
+/// 用途是「不连 GitHub 也能更新」：内网镜像站、离线演练都走这条。配置后
+/// **只管更新检查与下载两件事**（账号转发、模型清单一概不受影响）：
+///   · 检查更新打 `{base}/repos/{repo}/releases/latest`，返回体与 GitHub 同形；
+///   · 下载白名单额外放行 `base` 的 host（见 [`assert_downloadable`]）——
+///     这是**显式配置才生效**的口子，没配就还是只有 GitHub 那几个域名。
+pub fn custom_api_base() -> Option<String> {
+    std::env::var("WORKBUDDY_UPDATE_API_BASE")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// 更新源 API 根：配了 `WORKBUDDY_UPDATE_API_BASE` 就用它，否则是 GitHub。
+pub fn api_base() -> String {
+    custom_api_base().unwrap_or_else(|| GITHUB_API.to_string())
+}
 
 /// 允许下载的域名：Release 资产实际会落在 github.com 或 *.githubusercontent.com
 /// （Node 版 ALLOWED_HOSTS）
@@ -115,10 +134,33 @@ pub fn compare_versions(a: &str, b: &str) -> Option<i32> {
 pub fn assert_downloadable(url: &str) -> Result<url::Url, UpdateError> {
     let parsed = url::Url::parse(url)
         .map_err(|_| UpdateError::with_status(400, "下载地址不是合法 URL"))?;
+    let host = parsed.host_str().unwrap_or("").to_lowercase();
+
+    // ── 自建更新源（WORKBUDDY_UPDATE_API_BASE）───────────────
+    // 放行「显式配置的那个源」本身：host 相同或它的子域。scheme 跟着配置走 ——
+    // 配 http:// 就允许 http 下载（本地演练 / 内网镜像常见形态），配 https://
+    // 仍然强制 https。公共 GitHub 那条路不受影响，照旧强制 https + 白名单。
+    //
+    // 代价说清楚：把源配成 http 等于放弃传输层保护，完整性只剩 sha256 这一道
+    // （而校验文件也来自同一个源）。**演练与内网可信网络**用它没问题，公网部署
+    // 请配 https。
+    if let Some(base) = custom_api_base() {
+        if let Ok(parsed_base) = url::Url::parse(&base) {
+            let base_host = parsed_base.host_str().unwrap_or("").to_lowercase();
+            let same_host = !base_host.is_empty()
+                && (host == base_host || host.ends_with(&format!(".{base_host}")));
+            if same_host {
+                if parsed_base.scheme() == "https" && parsed.scheme() != "https" {
+                    return Err(UpdateError::with_status(400, "下载地址必须是 https"));
+                }
+                return Ok(parsed);
+            }
+        }
+    }
+
     if parsed.scheme() != "https" {
         return Err(UpdateError::with_status(400, "下载地址必须是 https"));
     }
-    let host = parsed.host_str().unwrap_or("").to_lowercase();
     let allowed = ALLOWED_HOSTS.contains(&host.as_str()) || host.ends_with(ALLOWED_HOST_SUFFIX);
     if !allowed {
         return Err(UpdateError::with_status(
@@ -198,7 +240,16 @@ fn pick_preferred<'a>(candidates: &[&'a Value]) -> Option<&'a Value> {
 /// 后缀按 [`installer_suffix`] 分流（Windows → exe，macOS → dmg），
 /// 多个候选时按 [`pick_preferred`] 的优先级取一个。没有匹配的资产返回 None
 /// （界面据此把「下载并安装」按钮藏起来，而不是给一个点了报错的按钮）。
+///
+/// ── Linux 恒为 None（容器 / headless）────────────────────────
+/// 桌面安装包在 Linux 上没有任何意义，而 [`installer_suffix`] 只有
+/// macos / 其它两支 —— 不拦的话 Linux 会去挑 Windows 的 exe，面板上就出现
+/// 一个「下载并安装」按钮，点了只会得到「软件更新在网页端不可用」。
+/// 容器里的更新走另一条路：[`server_bundle_name`] 那份 tar.gz（见 selfupdate 模块）。
 pub fn pick_installer(assets: Option<&Value>) -> Option<Value> {
+    if cfg!(target_os = "linux") {
+        return None;
+    }
     let list = assets.and_then(Value::as_array)?;
     // 带点的后缀拼一次放循环外（循环里每次 format 会白分配）
     let suffix = format!(".{}", installer_suffix());
@@ -210,6 +261,43 @@ pub fn pick_installer(assets: Option<&Value>) -> Option<Value> {
     Some(serde_json::json!({
         "name": asset_name(chosen),
         // `Number(installer.size) || 0`：非数字/NaN/0 都得 0
+        "size": chosen.get("size").and_then(Value::as_u64).unwrap_or(0),
+        "url": chosen.get("browser_download_url").and_then(Value::as_str).unwrap_or(""),
+    }))
+}
+
+/// 容器内更新包在 Release 资产里的名字：`agent2api-server-linux-<arch>.tar.gz`。
+///
+/// 包内含两个条目：可执行文件 `agent2api-server` 与界面目录 `ui/`（见
+/// selfupdate 模块的解包约定）。**这个名字是三方约定的连接点** ——
+/// CI 打包（.github/workflows/build.yml 的 linux-server job）、这里挑选资产、
+/// 面板下载后按 `safe_file_name` 落到下载目录，三处逐字一致；改名要一起改。
+///
+/// 非 Linux 目标返回 None：桌面端（Windows / macOS）的更新走安装包，
+/// 不存在「容器内替换」这条路径。
+pub fn server_bundle_name() -> Option<String> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    // Release 资产用 amd64 / arm64 的写法（与 docker 镜像的 TARGETARCH 同一套词汇）
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        _ => return None,
+    };
+    Some(format!("agent2api-server-linux-{arch}.tar.gz"))
+}
+
+/// 按**精确资产名**在 Release 资产里取 `{name, size, url}`。
+///
+/// 与 [`pick_installer`] 的区别：那条按后缀挑「本平台的安装包」，这条要的是
+/// 一个点名要的文件（服务端更新包 / 它的 `.sha256` 伴随文件）。找不到返回 None
+/// —— 老版本 Release 没有挂这些资产时，面板据此退回「手动升级命令」的提示。
+pub fn pick_asset_by_name(assets: Option<&Value>, wanted: &str) -> Option<Value> {
+    let list = assets.and_then(Value::as_array)?;
+    let chosen = list.iter().find(|item| asset_name(item) == wanted)?;
+    Some(serde_json::json!({
+        "name": asset_name(chosen),
         "size": chosen.get("size").and_then(Value::as_u64).unwrap_or(0),
         "url": chosen.get("browser_download_url").and_then(Value::as_str).unwrap_or(""),
     }))

@@ -226,11 +226,12 @@ async fn timezone_now() -> String {
     }
     #[cfg(windows)]
     {
-        let output = tokio::process::Command::new("tzutil")
-            .arg("/g")
-            .output()
-            .await
-            .ok();
+        // tzutil / reg 都是控制台程序：桌面端（GUI 进程）直接起会闪一个黑框，
+        // 与内核进程同一成因，见 `sub_kernel::runtime::start_kernel` 的说明
+        let mut command = tokio::process::Command::new("tzutil");
+        command.arg("/g");
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        let output = command.output().await.ok();
         let name = output
             .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
             .unwrap_or_default();
@@ -253,16 +254,15 @@ async fn os_version_now() -> String {
     }
     #[cfg(windows)]
     {
-        let output = tokio::process::Command::new("reg")
-            .args([
-                "query",
-                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion",
-                "/v",
-                "CurrentBuildNumber",
-            ])
-            .output()
-            .await
-            .ok();
+        let mut command = tokio::process::Command::new("reg");
+        command.args([
+            "query",
+            r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+            "/v",
+            "CurrentBuildNumber",
+        ]);
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW（同上）
+        let output = command.output().await.ok();
         let text = output
             .map(|out| String::from_utf8_lossy(&out.stdout).to_string())
             .unwrap_or_default();

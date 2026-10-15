@@ -160,6 +160,9 @@ function showPage(name, { persist = true } = {}) {
   });
   const crumb = $('crumb-page');
   if (crumb) crumb.textContent = PAGE_LABELS[page] || page;
+  // 移动端：切页后收起侧边栏抽屉。#nav-toggle 是纯 CSS 开关（见 css/mobile.css），
+  // 点导航项只切页不 uncheck，抽屉会一直开着；桌面端该元素恒为 unchecked，这行无副作用。
+  { const t = document.getElementById('nav-toggle'); if (t) t.checked = false; }
   if (persist) localStorage.setItem(PAGE_KEY, page);
   // 列的设置面板常驻 body（.panel 是 overflow:hidden，留在原处会被裁掉，
   // 见 table-col-settings.js），不随宿主页面的 display:none 一起消失 ——

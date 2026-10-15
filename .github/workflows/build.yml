@@ -10,11 +10,11 @@ name: build
 #
 # ── 触发方式 ──────────────────────────────────────────────────
 #   · 手动 workflow_dispatch（在 Actions 页面选分支触发）：
-#     两个平台一起构建，产物作为 workflow artifact 下载，不发布 Release
+#     三个平台一起构建，产物作为 workflow artifact 下载，不发布 Release
 #   · 推送 v* tag：与 docker.yml 同时触发，一次打 tag 安装包与镜像全出；
-#     Windows/macOS 包只挂 workflow artifact —— GitHub Release 由发版
-#     收尾脚本在本地挂载（scripts/release.sh）：Release 本就不自动建，
-#     安装包只挂 artifact 让构建与发布解耦，发布那步重跑脚本即可
+#     Windows/macOS 包与 Linux 服务端包只挂 workflow artifact —— GitHub
+#     Release 由发版收尾脚本在本地挂载（scripts/release.sh）：Release 本就
+#     不自动建，安装包只挂 artifact 让构建与发布解耦，发布那步重跑脚本即可
 #
 # ── action 版本为什么都钉在大版本 v7（本次升级）─────────────────
 # 原先用 checkout@v4 / setup-node@v4 / upload-artifact@v4，三者都跑在
@@ -139,4 +139,56 @@ jobs:
         with:
           name: windows-nsis
           path: target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+  # ── Linux 服务端包（容器内一键更新的 Release 资产）──────────
+  # 面板在容器里「一键更新」时下载的就是这里的产物：包内是可执行文件 +
+  # ui/ 目录，由服务端自己替换后再重启（见 core/update/selfupdate.rs）。
+  # 两个架构各出一个包，包名与后端挑资产的名字**必须逐字一致**
+  # （server_bundle_name()：agent2api-server-linux-amd64 / -arm64.tar.gz）。
+  #
+  # 为什么走 Dockerfile 而不是直接 cargo build：
+  #   · 复用镜像那条已经验证过的编译路径（amd64 原生 / arm64 交叉），
+  #     不引入第二套工具链；
+  #   · 产物与镜像里的可执行文件**同源同工具链**，glibc 版本天然对齐
+  #     （不变量见 Dockerfile 的 bundle 阶段）；
+  #   · bundle 阶段是 FROM scratch + 纯 COPY，导出时不进 QEMU。
+  # 缓存与 docker.yml 共用同一个 gha scope：依赖桩层已在那边暖过。
+  linux-server:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 设置 buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 构建服务端包
+        run: |
+          docker buildx build \
+            --platform linux/${{ matrix.arch }} \
+            --target bundle \
+            --output type=local,dest=out \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            .
+
+      - name: 打包并生成校验和
+        run: |
+          name="agent2api-server-linux-${{ matrix.arch }}.tar.gz"
+          mkdir -p dist
+          # 包内布局是硬约定：根下 agent2api-server 与 ui/（解包方按名取）
+          tar -C out/bundle -czf "dist/$name" agent2api-server ui
+          # 校验文件与包同名 + .sha256：面板按这个名字找它，找不到就拒绝安装
+          ( cd dist && sha256sum "$name" > "$name.sha256" )
+          cat "dist/$name.sha256"
+          ls -lh dist
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-server-${{ matrix.arch }}
+          path: dist/*
           if-no-files-found: error

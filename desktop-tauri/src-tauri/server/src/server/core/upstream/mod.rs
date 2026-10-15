@@ -48,6 +48,7 @@
 pub mod aggregate;
 pub mod cancellation;
 pub mod connections;
+pub mod continuation;
 pub mod refusal;
 pub mod request;
 mod payload;
@@ -241,6 +242,12 @@ pub struct ForwardRequest {
     /// 生产链路一律传 `false`；白名单为空（未限制）时本标记给不出候选链，
     /// 会走「没有可用的提供商」—— 唯一调用方恒带 `provider_only`，不会触发。
     pub ignore_model_gate: bool,
+    /// 单次请求的出网代理临时覆盖（目前仅模型测试 `api::model_test` 使用）。
+    ///
+    /// - `None`（生产链路恒为此值）：跟随选中账号自身绑定的代理配置；
+    /// - `Some(None)`：本次强制直连（忽略账号绑定的代理，且不回退系统代理）；
+    /// - `Some(Some(proxy))`：本次强制走指定代理节点。
+    pub proxy_override: Option<Option<ResolvedProxy>>,
 }
 
 /// 转发结果：要么是可直接下发的流，要么是聚合好的 JSON
@@ -391,6 +398,7 @@ impl UpstreamService {
         // 钉住的账号与它同样处理：ownership 移出来、借给 context，
         // 于是 `request` 在下面不再被借用（理由同上一条）
         let pinned_account = request.pinned_account;
+        let proxy_override = request.proxy_override;
         let context = payload::ProviderContext {
             body: &upstream_body,
             stream: request.stream,
@@ -402,6 +410,7 @@ impl UpstreamService {
             pinned_account: pinned_account.as_deref(),
             // bool 是 Copy，直接读：不存在上面那两条的借用问题
             ignore_model_gate: request.ignore_model_gate,
+            proxy_override: proxy_override.as_ref(),
         };
         provider_loop::forward_with_providers(self, context, &mut slot, &mut connections).await
     }
@@ -698,25 +707,38 @@ pub(super) fn has_access_token(session: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// 账号展示名（Node 的 `account.name || account.id`）
+/// 账号展示名（Node 的 `account.name || account.id`）。
+///
+/// **优先读 `displayName`**（`store_view::public_account` 注入的统一展示名，
+/// 与前端 `displayNameOf` 同口径 —— 「以邮箱报名字」的三家在日志里也显示邮箱）；
+/// 快照缺该键（旧快照缓存 / 手工构造的账号对象）时按旧口径回落 `name || id`。
 pub(super) fn account_display(account: &Value) -> String {
     account
-        .get("name")
+        .get("displayName")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+        .or_else(|| {
+            account
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
         .or_else(|| account.get("id").and_then(Value::as_str).map(str::to_string))
         .unwrap_or_default()
 }
 
-/// 限额日志里的账号文案：账号名 → 会话昵称 → 账号 id
-/// （对应 Node 的 `target.account?.name || session.account?.nickname || accountId`）
+/// 限额日志里的账号文案：展示名 → 会话昵称 → 账号 id
+/// （对应 Node 的 `target.account?.name || session.account?.nickname || accountId`）。
+///
+/// `displayName` 优先的理由见 [`account_display`]：账号页显示什么，日志里
+/// 就是什么。会话昵称只在账号对象缺席（手工构造的会话）时兜底 —— 老代码
+/// 的 `session.account.nickname` 形态保留不动。
 pub(super) fn account_label(account: Option<&Value>, account_id: &str, session: &Value) -> String {
     account
-        .and_then(|account| account.get("name"))
-        .and_then(Value::as_str)
+        .map(account_display)
         .filter(|value| !value.is_empty())
-        .map(str::to_string)
         .or_else(|| {
             session
                 .get("account")

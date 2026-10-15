@@ -15,11 +15,13 @@
 use serde_json::{json, Map, Value};
 
 use crate::server::core::endpoints::RESPONSE_CODE_OK;
+use crate::server::core::upstream::request::new_request_id;
 use crate::server::logging;
 
 use super::request::{
     BillingCall, CallOptions, ACTIVITY_AMBASSADOR, ACTIVITY_BANNER,
-    BILLING_ACTIVITY_CHECKIN_STATUS, BILLING_DAILY_CHECKIN, js_truthy,
+    BILLING_ACTIVITY_CHECKIN_STATUS, BILLING_DAILY_CHECKIN, BILLING_REPORT_ACTIVITY,
+    GROWTH_STREAK_STATUS, js_truthy,
 };
 use super::{assert_checkin_supported, BillingError, BillingService};
 
@@ -293,7 +295,10 @@ impl BillingService {
     pub async fn workbuddy_daily_activity(&self, session: &Value, mode: WorkbuddyActivity) -> Value {
         // 只保活：跳过探测与领取。活动状态没查过，读数给 **null** 而不是 false
         // —— 「没查」与「查了说没开」是两回事；前端只认 `pokeSucceeded`。
+        // 保活的核心是活跃上报（点亮连登的那条 /v2/report 通道），保活对话
+        // 只是补充 —— 两者都做，读数分别透出。
         if mode == WorkbuddyActivity::Keepalive {
+            let report = self.report_chat_activity(session).await;
             let (poke_succeeded, poke_model) = self.poke_daily_activity(session).await;
             if !poke_succeeded {
                 logging::verbose("[Checkin]", "WorkBuddy 国际版免费模型活跃保活未成功");
@@ -310,6 +315,7 @@ impl BillingService {
                     "active": Value::Null,
                     "todayCheckedIn": Value::Null,
                     "statusAvailable": Value::Null,
+                    "report": report,
                     "pokeSucceeded": poke_succeeded,
                     "pokeModel": poke_model,
                 },
@@ -377,6 +383,16 @@ impl BillingService {
             }
         };
 
+        // 活跃上报（Claim / Full 都做，Keepalive 不做）。
+        //
+        // 这是国际版每日活跃的**主动作**：`POST /v2/report` 的一条
+        // chat_request_send 事件点亮成长中心连登（growth streak）。实测
+        // （2026-10，真实账号）上报后 streak 从 0 → 1；而签到活动探测的
+        // `active` 字段与免费模型保活对话都**不**点亮连登 —— 后者只是维持
+        // 「账号有调用」，上游的活跃计数只认 /v2/report 事件。
+        // 上报按天幂等（同一自然日重复上报不重复计分），失败不阻断领取分支。
+        let report = self.report_chat_activity(session).await;
+
         let mut claim = if today_checked_in {
             // 上游幂等，但「今日已领」就不用再打一发领取 —— 少一发是一发。
             json!({
@@ -427,19 +443,22 @@ impl BillingService {
         };
 
         // 领取没有明确的成功/已领读数时，msg 给出这一轮**实际发生**的事。
-        // ⚠️ 完整模式里保活成功那条必须把「活动未开启」说在同一句里：能走到
-        // 这里的分支必然 !active（活动没开放），只写「活跃保活完成」会让人以为
-        // 保活就是领取、积分该加没加 —— 两个事实都交代，提示才不会自相矛盾。
+        // ⚠️ 完整模式里「上报 + 保活成功」必须把「活动未开启」说在同一句里：
+        // 能走到这里的分支必然 !active（活动没开放），只写「已完成活跃上报」
+        // 会让人以为积分该加没加 —— 两个事实都交代，提示才不会自相矛盾。
         // 「只领取」模式没有保活可讲，msg 保留探测/领取的原话（活动未开启 /
         // 具体错误），那正是这颗按钮唯一要回答的问题。
         if mode == WorkbuddyActivity::Full && !claim_succeeded && !today_checked_in && !active {
+            let report_ok = report.get("succeeded").and_then(Value::as_bool) == Some(true);
             let poke = poke_succeeded.as_bool().unwrap_or(false);
-            claim["msg"] = Value::String(if poke {
-                "活跃保活完成，但活动未开启（本次没有可领的奖励）".to_string()
-            } else if status_available {
-                "活动未开启，且活跃保活未成功".to_string()
+            claim["msg"] = Value::String(if report_ok && poke {
+                "已完成活跃上报（连登已点亮），但活动未开启（本次没有可领的奖励）".to_string()
+            } else if report_ok {
+                "活跃上报完成，但保活未成功且活动未开启".to_string()
+            } else if poke {
+                "活跃保活完成，但活跃上报失败且活动未开启".to_string()
             } else {
-                "活跃保活失败".to_string()
+                "活跃上报与保活均未成功，且活动未开启".to_string()
             });
         }
 
@@ -451,10 +470,154 @@ impl BillingService {
                 "active": active,
                 "todayCheckedIn": today_checked_in,
                 "statusAvailable": status_available,
+                "report": report,
                 "pokeSucceeded": poke_succeeded,
                 "pokeModel": poke_model,
             },
         })
+    }
+
+    /// 国际版对话活跃上报：`POST {endpoint}/v2/report` 的一条
+    /// `chat_request_send` 事件。
+    ///
+    /// 这是点亮成长中心连登（growth streak）的唯一实测通道（见
+    /// `BILLING_REPORT_ACTIVITY` 的注释与 `workbuddy_daily_activity` 的编排）。
+    ///
+    /// 事件形状照抄官方客户端的完整 24 字段（conversationId / mode /
+    /// inputLength / requestModelId …），**`userId` 必填**（= 账号 uid）——
+    /// 缺失时上游返回 200 但**静默丢弃**事件（参考实现 REPORT-active-map
+    /// 的实测记录，本仓 streak 回读闭环同款验证）。conversationId 无需真实
+    /// 会话，随机生成即可；每号每天一条（按天幂等），多号之间靠调度串行自然
+    /// 限速，这里不再额外加 sleep。
+    ///
+    /// 返回 `{succeeded: bool, streakDays: number|null, msg: string}`：
+    /// `streakDays` 是上报后的回读（`GET /activity/growth/streak`），null 表示
+    /// 回读失败 —— 回读是**只读 oracle**（参考实现同款口径），失败不撤销
+    /// 上报本身的结果，也不做重试（上报按天幂等，明天还会再发）。
+    async fn report_chat_activity(&self, session: &Value) -> Value {
+        let uid = session
+            .get("account")
+            .and_then(|account| account.get("uid"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if uid.is_empty() {
+            return json!({
+                "succeeded": false,
+                "streakDays": Value::Null,
+                "msg": "会话缺少账号 uid，无法上报活跃",
+            });
+        }
+        let conversation_id = format!("agent2api-{}", new_request_id());
+        let now = logging::now_ms();
+        let event = json!({
+            "eventCode": "chat_request_send",
+            "timestamp": now,
+            "reportDelay": 0,
+            "mode": "craft",
+            "conversationId": conversation_id,
+            "requestId": conversation_id,
+            "inputLength": 12,
+            "requestModelId": "deepseek-v4.1-flash",
+            "requestModelName": "DeepSeek V4.1 Flash",
+            "isPlan": false,
+            "isAutoExecuteTerminal": false,
+            "isAutoModify": false,
+            "codebaseEnable": false,
+            "maxToken": 0,
+            "maxSteps": 0,
+            "temperature": 0,
+            "maxRetries": 0,
+            "mentionContexts": [],
+            "knowledgeId": [],
+            "knowledgeName": [],
+            "codebaseId": "",
+            "mentionContextCount": 0,
+            "command": "",
+            "expertId": "",
+            "recommendId": "",
+            "skillId": "",
+            "skillCount": 0,
+            "totalCount": 0,
+            "fileUri": "",
+            "presentAt": now,
+            "traceId": "",
+            "rootRequestId": conversation_id,
+            "parentConversationId": conversation_id,
+            "agentName": "default",
+            "agentType": "conversation",
+            "userId": uid,
+        });
+        let body = json!([event]);
+        let result = self
+            .call_billing(
+                BILLING_REPORT_ACTIVITY,
+                CallOptions {
+                    session: Some(session),
+                    body: Some(&body),
+                    expect_code_ok: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+        let succeeded = match &result {
+            Ok(_) => true,
+            Err(error) => {
+                logging::verbose(
+                    "[Checkin]",
+                    &format!("WorkBuddy 国际版活跃上报失败: {}", error.message),
+                );
+                false
+            }
+        };
+        // 回读连登天数（只读 oracle）：上报 200 ≠ 计分，闭环验证用。
+        let streak_days = if succeeded {
+            match self.read_growth_streak(session).await {
+                Ok(days) => Some(days),
+                Err(error) => {
+                    logging::verbose(
+                        "[Checkin]",
+                        &format!("WorkBuddy 国际版连登回读失败（上报本身已成功）: {}", error.message),
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let streak_text = streak_days
+            .map(|days| format!("，连登 {days} 天"))
+            .unwrap_or_default();
+        json!({
+            "succeeded": succeeded,
+            "streakDays": streak_days.map(Value::from).unwrap_or(Value::Null),
+            "msg": if succeeded {
+                format!("活跃上报成功{streak_text}")
+            } else {
+                "活跃上报失败".to_string()
+            },
+        })
+    }
+
+    /// 回读成长中心连登状态（`GET /activity/growth/streak`），返回
+    /// `streak.days`。只读、失败即 Err，调用方决定是否容忍。
+    async fn read_growth_streak(&self, session: &Value) -> Result<i64, BillingError> {
+        let result = self
+            .call_billing(
+                GROWTH_STREAK_STATUS,
+                CallOptions {
+                    session: Some(session),
+                    expect_code_ok: true,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok(result
+            .data
+            .get("streak")
+            .and_then(|streak| streak.get("days"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0))
     }
 
     /// 用免费模型发一次最小流式对话，维持账号「活跃」。

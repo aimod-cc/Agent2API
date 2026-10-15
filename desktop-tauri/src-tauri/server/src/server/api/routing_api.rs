@@ -55,6 +55,7 @@ pub async fn put_routing(State(_state): State<ServerState>, body: Bytes) -> Resp
         let known = [
             config::ROUTING_STRATEGY_ORDER,
             config::ROUTING_STRATEGY_ROTATE,
+            config::ROUTING_STRATEGY_PROVIDER,
         ];
         if !known.contains(&text) {
             return errors::management_error(
@@ -209,7 +210,8 @@ pub async fn get_routing_queue(
         .collect();
     let settings = config::routing_settings();
     // 面板只**看**当前状态，不做粘性查找、不前进轮转游标 —— 预演不该刷新
-    // 任何会话的计时，也不该消耗下一次轮转
+    // 任何会话的计时，也不该消耗下一次轮转。家内轮询的各家游标同理，所以
+    // 两种轮转策略都传 `None`：面板看到的是「各家都从第 0 位起」的静态序。
     let (sunk, resting, open) = state.upstream().route_queue_facts(now);
     let meta = routing::PlanMeta {
         strategy: settings.strategy,
@@ -218,6 +220,7 @@ pub async fn get_routing_queue(
         open: &open,
         limiter_blocked: &limiter_blocked,
         cursor: None,
+        provider_cursors: None,
         sticky_account: None,
     };
     let plan = routing::plan_route(&scoped, &keys, &counts, &[], now, &meta);

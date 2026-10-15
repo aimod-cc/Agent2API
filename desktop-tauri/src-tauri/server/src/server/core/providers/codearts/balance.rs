@@ -485,10 +485,26 @@ pub async fn fetch_both(
 ///
 /// `available` 只在**有积分数值**时给数：福利池是 token 不是积分，把两家的数
 /// 加在一起是一个谁也对不上的值 —— 宁可 null，让界面按 wallets 逐项显示。
+///
+/// 「套餐积分」是**汇总口径**不是独立分账：`usageTotalPackageCredit` 的剩余/总量
+/// 恰好等于「基础包 + 赠送」两行之和（2026-10-14 实测 trial 账号：套餐 8500 =
+/// 基础包 500 + 赠送 8000，`available` 若三行全加得 17000 = 真值的 2 倍，与
+/// issue #225 的 14956 = 7478×2 同一形状）。合计时识别这种包含关系，命中就只取
+/// 分项行 —— 用容差比较，上游数值走浮点。分项缺失（比如哪天上游不再单独给
+/// 赠送行）时不剔除：宁可照旧全加，也不凭猜丢掉一笔真实的钱。
 pub fn usage_document(statistics: Option<&Statistics>, benefit: Option<&BenefitBalance>) -> Value {
     let mut wallets = Vec::new();
     let mut credit_left: Option<f64> = None;
     if let Some(statistics) = statistics {
+        // 「基础包 + 赠送」两行的剩余之和（任一行缺席则组合判据不成立）。
+        let component_sum = || -> Option<f64> {
+            let mut sum = 0.0;
+            for wanted in ["usageBasicPackageCredit", "usageBonusPackageCredit"] {
+                let meter = statistics.meters.iter().find(|meter| meter.name == wanted)?;
+                sum += meter.credit_remaining?;
+            }
+            Some(sum)
+        }();
         for meter in &statistics.meters {
             wallets.push(json!({
                 "type": format!("meter:{}", meter.name),
@@ -501,7 +517,10 @@ pub fn usage_document(statistics: Option<&Statistics>, benefit: Option<&BenefitB
                 "creditUsed": meter.credit_used,
                 "creditRemaining": meter.credit_remaining,
             }));
-            if let Some(left) = meter.credit_remaining {
+            let Some(left) = meter.credit_remaining else { continue };
+            let duplicated = meter.name == "usageTotalPackageCredit"
+                && component_sum.is_some_and(|sum| (sum - left).abs() <= f64::EPSILON.max(left.abs() * 1e-6));
+            if !duplicated {
                 credit_left = Some(credit_left.unwrap_or(0.0) + left);
             }
         }
@@ -669,9 +688,55 @@ mod tests {
         assert_eq!("套餐积分", total.label);
         assert_eq!(Some(5172.57), total.credit_remaining);
         assert_eq!(Some(5.0), total.used_percent);
-        // available = 各行剩余积分之和（按需那行是 0，不是「没读到」）
+        // available = 172.57（基础包）+ 5000（赠送）= 5172.57。「套餐积分」行
+        // （5172.57）恰好是这两行的汇总口径，命中包含关系后不再重复累加 ——
+        // 旧行为三行全加得 10345.14 = 真值的 2 倍（issue #225 的形状）。
         let document = usage_document(Some(&parsed), None);
-        assert_eq!(Some(10_345.14), document["available"].as_f64().map(|v| (v * 100.0).round() / 100.0));
+        assert_eq!(Some(5_172.57), document["available"].as_f64().map(|v| (v * 100.0).round() / 100.0));
+    }
+
+    /// 「套餐积分」是汇总口径不是独立分账：它的剩余 = 基础包 + 赠送时，合计
+    /// 只取分项，不再把汇总行加进去。数字抄 2026-10-14 真实 trial 账号的读数
+    /// （8500 = 500 + 8000，旧代码 available = 17000，issue #225 实测的
+    /// 14956 = 7478×2 是同一形状）。分项缺席时照旧全加 —— 不凭猜丢钱。
+    #[test]
+    fn the_summary_package_credit_is_not_counted_twice() {
+        let body = r#"{
+          "metrics": [
+            {"name":"usageTotalPackageCredit","value":0,"package_credit_amount":8500,"package_credit_remain":8500,"show":true},
+            {"name":"usageBasicPackageCredit","value":0,"package_credit_amount":500,"package_credit_remain":500,"show":true},
+            {"name":"usageOnDemandPackageCredit","value":0,"package_credit_remain":0,"show":true},
+            {"name":"usageBonusPackageCredit","value":0,"package_credit_amount":8000,"package_credit_remain":8000,"show":true}
+          ]
+        }"#;
+        let parsed = parse_statistics(body).unwrap();
+        assert_eq!(Some(8500.0), usage_document(Some(&parsed), None)["available"].as_f64());
+    }
+
+    /// 包含关系不成立（数值对不上 / 分项行缺席）时不得剔除：「套餐积分」万一
+    /// 哪天真是独立分账，剔除会把真实的钱丢掉一半。宁加错不可少算的方向与
+    /// 旧行为一致，只是不再加重复的那份。
+    #[test]
+    fn the_summary_row_stays_counted_when_the_containment_does_not_hold() {
+        let mismatch = r#"{
+          "metrics": [
+            {"name":"usageTotalPackageCredit","value":0,"package_credit_amount":9000,"package_credit_remain":9000,"show":true},
+            {"name":"usageBasicPackageCredit","value":0,"package_credit_amount":500,"package_credit_remain":500,"show":true},
+            {"name":"usageBonusPackageCredit","value":0,"package_credit_amount":8000,"package_credit_remain":8000,"show":true}
+          ]
+        }"#;
+        let parsed = parse_statistics(mismatch).unwrap();
+        assert_eq!(Some(17500.0), usage_document(Some(&parsed), None)["available"].as_f64());
+
+        // 缺「赠送」行：组合判据不成立，汇总行照旧计入
+        let missing = r#"{
+          "metrics": [
+            {"name":"usageTotalPackageCredit","value":0,"package_credit_amount":8500,"package_credit_remain":8500,"show":true},
+            {"name":"usageBasicPackageCredit","value":0,"package_credit_amount":500,"package_credit_remain":500,"show":true}
+          ]
+        }"#;
+        let parsed = parse_statistics(missing).unwrap();
+        assert_eq!(Some(9000.0), usage_document(Some(&parsed), None)["available"].as_f64());
     }
 
     #[test]

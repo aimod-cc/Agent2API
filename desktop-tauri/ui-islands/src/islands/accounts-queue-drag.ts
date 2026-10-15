@@ -17,9 +17,14 @@
  * 目标顺序由调用方（页面）从分组数据算：折叠起来的组在 DOM 里没有行，光看 DOM
  * 拼不出完整队列，而重排接口要求「全部账号的一个排列」（见 store_order.rs）。
  *
- * ── 什么时候不给拖 ─────────────────────────────────────────
- * 筛选 / 搜索生效时顺序不可见（行被裁过、组内序号也断了连续性），拖动必然错位。
- * 这时 `isLocked()` 为真：不开始拖，回调 onLockedAttempt 让页面提示一次。
+ * ── 什么时候不给拖（分粒度）──────────────────────────────────
+ * **组顺位**（拖分组带）：筛选 / 搜索 / 分页把别家的组整组裁掉了 —— 渲染出来的
+ * 组只是完整队列的一小段，「插到第几个可见组之前」仍可换算，但**被裁掉的组**用户
+ * 根本看不见，落点完全凭想象，所以整组拖动保持锁定，回调 onLockedAttempt 让页面
+ * 提示一次。
+ * **组内顺位**（拖行把手）：筛选裁的是**组内的行**，落点仍按「渲染出来的行」中点
+ * 比出（= 插到哪个可见行之前），再由调用方按锚点换算回完整 members —— 可见与全量
+ * 的映射是确定的，拖动不会错位，因此**不锁**。
  */
 
 /** 拖完的落点：`index` 是目标位置（0 起，已在被拖项之外的那一串里数） */
@@ -28,9 +33,9 @@ export type QueueDrop =
   | { kind: 'row'; provider: string; accountId: string; index: number }
 
 export type QueueDragHandlers = {
-  /** 顺序是否被锁住（筛选 / 搜索进行中） */
+  /** 组顺位是否被锁住（筛选 / 搜索 / 分页进行中；组内行不受它限制） */
   isLocked(): boolean
-  /** 锁着的时候用户还是按下了把手：给一次提示（由页面决定怎么说） */
+  /** 组顺位锁着的时候用户还是按下了把手：给一次提示（由页面决定怎么说） */
   onLockedAttempt(): void
   /** 拖完了：把新位置交回去，顺序怎么写由调用方决定 */
   onDrop(drop: QueueDrop): void
@@ -152,7 +157,8 @@ export function bindQueueDrag(host: HTMLElement | null, handlers: QueueDragHandl
     const rowGrip = target?.closest?.('.order-grip')
     if (!groupGrip && !rowGrip) return
     event.preventDefault()
-    if (handlers.isLocked()) {
+    // 锁只管**组顺位**（groupGrip）：组内行落点可按可见行换算，筛选下也拖得动
+    if (groupGrip && handlers.isLocked()) {
       handlers.onLockedAttempt()
       return
     }

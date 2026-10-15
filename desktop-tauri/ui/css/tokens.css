@@ -287,6 +287,27 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* 720px 是桌面 Tauri 窗口的最小宽度下限（窗口不允许再拖窄）。手机上照抄会
+   把整个文档撑到 720px 宽：375px 的视口里只露出中间 375px 的一段，左右两边
+   各被裁掉 172px —— 用户看到的「页面看不全」就是这一条造成的，而且它发生在
+   任何媒体查询之外，光靠 @media (max-width:767px) 覆盖不掉级联。
+   真机视口按浏览器给的实际宽度走，窗口最小宽度由 Tauri 自己管（Web 端没有
+   窗口这个概念，body 不该替它设下限）。 */
+@media (max-width: 767px) {
+  body { min-width: 0; }
+}
+
+/* ─── 移动端：从「app-shell 固定视口」切成「正常文档流」───
+   桌面端 body 不滚（height:100% + overflow:hidden），滚动发生在 .page.active 里；
+   但这个结构在手机上会把用户困在容器里 —— 滚到底后惯性滚动被 .content 的
+   overflow:hidden 截断，外面的页脚 / 顶栏永远滑不到。改成正常文档流后 body
+   自己滚，所有页面内容按内容高度自然生长，用户想滑多远就滑多远。
+   侧栏 / 顶栏 / 面板头保持原样（侧栏本来就是 position:fixed，不受影响）。 */
+@media (max-width: 767px) {
+  html, body { height: auto; overflow: visible; }
+  body { overflow-y: auto; -webkit-overflow-scrolling: touch; }
+}
+
 h1, h2, h3, h4, p { margin: 0; }
 
 button, input, select, textarea { font: inherit; color: inherit; }

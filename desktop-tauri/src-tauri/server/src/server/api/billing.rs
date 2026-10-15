@@ -155,7 +155,14 @@ pub async fn run_activity(State(state): State<ServerState>, body: Bytes) -> Resp
     if account.get("provider").and_then(Value::as_str) != Some(Region::Intl.provider_id()) {
         return GatewayError::with_status(400, "该账号不是 WorkBuddy 国际版账号").into_response();
     }
-    let name = account.get("name").cloned().unwrap_or(Value::Null);
+    // 展示名快照：统一展示名优先（与账号页 / 请求日志同口径，见
+    // `store_view::display_name_of`），缺键（旧快照）按旧口径回落 name
+    let name = account
+        .get("displayName")
+        .filter(|value| value.as_str().is_some_and(|text| !text.is_empty()))
+        .cloned()
+        .or_else(|| account.get("name").cloned())
+        .unwrap_or(Value::Null);
     let Some(entry) = state.store().get_session_by_id(&id) else {
         return GatewayError::with_status(400, "没有可用凭证").into_response();
     };

@@ -128,7 +128,17 @@ export type NumericState = { status: LoadStatus; values: Record<string, number> 
  * 账号路由（策略 + 会话粘性）：两档都是受控枚举，读不到时档位回落后端默认
  * （order / auto，由视图侧按合法值表兜底）。
  */
-export type RoutingState = { status: LoadStatus; strategy: string; sticky: string }
+export type RoutingState = {
+  status: LoadStatus
+  strategy: string
+  sticky: string
+  /** 失败退避：转发失败的账号休息一会儿再回来（后端默认开） */
+  failoverBackoff: boolean
+  /** 限流垫底：还有额度时被 429 的账号排到队尾（后端默认开） */
+  sink: boolean
+  /** 熔断开关：连续失败到阈值后打开（后端默认关） */
+  breakerEnabled: boolean
+}
 
 export type DebugState = {
   status: LoadStatus
@@ -280,6 +290,15 @@ export type SettingsSnapshot = {
    */
   dbIncludeLogs: boolean
   dbBackupConfirm: { includeLogs: boolean } | null
+  /**
+   * 整库恢复返回的密钥警告原文（`DatabaseImportResult.warning`；null = 没有警告）。
+   *
+   * 存进快照而不是只弹 toast：这条警告决定导入后的账号能不能解开（密钥不匹配时
+   * 账号列表是空的），必须**常驻**在面板里等用户看到 —— toast 只亮 3.5 秒（app.js），
+   * 错过就再没有第二次提示。生命周期与 ioFailure 同约定：只反映最近一次恢复，
+   * 下一次恢复开始时清掉。
+   */
+  dbWarning: string | null
   /** 局域网访问的确认框（非空即开着）；确认 / 取消都收口到 resolveLanConfirm */
   lanConfirm: LanConfirm
   /** 局域网开启流程的注册步（非空 = 弹窗切到注册表单） */
@@ -326,7 +345,7 @@ const INITIAL: SettingsSnapshot = {
   timeouts: { status: 'loading', values: null },
   queue: { status: 'loading', values: null },
   captchaPool: { status: 'loading', values: null },
-  routing: { status: 'loading', strategy: 'order', sticky: 'auto' },
+  routing: { status: 'loading', strategy: 'order', sticky: 'auto', failoverBackoff: true, sink: true, breakerEnabled: false },
   debug: { status: 'loading', on: false, count: null, limit: null },
   sanitize: { status: 'loading', on: false },
   clineHeaders: { status: 'loading', defaults: {}, overrides: {}, effective: {} },
@@ -364,6 +383,7 @@ const INITIAL: SettingsSnapshot = {
   // 整库备份：默认包含日志与调试报文（完整备份）；恢复确认弹窗默认关闭
   dbIncludeLogs: true,
   dbBackupConfirm: null,
+  dbWarning: null,
   lanConfirm: null,
   lanRegister: null,
   panelLogin: false,
@@ -844,6 +864,8 @@ async function proceedDbRestore(): Promise<void> {
     return
   }
   beginBusy('dbImport')
+  // 结果区只反映最近一次操作：上一次恢复留下的密钥警告先清掉（与 ioFailure 同一约定）
+  publish({ dbWarning: null })
   try {
     const result = await api.importDatabase()
     const tables = Array.isArray(result?.tables) ? result.tables.length : 0
@@ -851,6 +873,11 @@ async function proceedDbRestore(): Promise<void> {
       ? t('，替换前的数据已备份为 {name}', { name: result.safetyBackup })
       : ''
     toast(t('✅ 已恢复 {n} 张表{note}', { n: tables, note }))
+    // 密钥指纹不匹配的警告（账号将无法解密）：后端把文案给全了，这里只负责让它
+    // 在面板里**常驻**显示 —— 光靠上面那条 3.5 秒的 toast，用户错过后只会对着
+    // 空账号列表发懵，不知道「为什么账号都没了」
+    const warning = typeof result?.warning === 'string' ? result.warning.trim() : ''
+    if (warning) publish({ dbWarning: warning })
     // 重拉整页（含启动/托盘设置、保留期、提示词、存储概况等全部面板）
     await load()
     await shared().wbApp?.refresh?.()
@@ -861,7 +888,7 @@ async function proceedDbRestore(): Promise<void> {
   }
 }
 
-/* ─── 数据保留（三项保留天数） ─────────────── */
+/* ─── 数据保留（事件日志保留天数） ─────────────── */
 
 export function renderRetention(data?: unknown): void {
   if (data === undefined) return
@@ -900,7 +927,7 @@ function askRetentionShrink(head: string): Promise<boolean> {
   })
 }
 
-/** 改小保留期会立即删数据，文案必须点名「删的是哪一档」 */
+/** 改小保留期会立即删数据，文案必须点名「删的是哪一档」（泛化：选项来自 RETENTION_FIELDS） */
 function shrinkPromptHead(field: NumberField, previous: number | null, days: number): string {
   return previous === null
     ? t('没能读到「{label}」的当前值，改为 {days} 天可能会删除超出的历史数据。', {
@@ -1103,6 +1130,9 @@ export async function saveCaptchaPoolField(field: NumberField, raw: string): Pro
 /** 后端给的路由配置里我们关心的两个键（与 /api/routing 的长键名逐字对应） */
 const ROUTING_STRATEGY_KEY = 'routingStrategy'
 const ROUTING_STICKY_KEY = 'routingSticky'
+const ROUTING_FAILOVER_BACKOFF_KEY = 'routingFailoverBackoff'
+const ROUTING_SINK_KEY = 'routingSink'
+const ROUTING_BREAKER_ENABLED_KEY = 'routingBreakerEnabled'
 
 /** 路由配置的合法取值表（逐字来自 settings-model 的档位表，校验与兜底共用） */
 const ROUTING_VALID: Record<string, ReadonlySet<string>> = {
@@ -1111,13 +1141,30 @@ const ROUTING_VALID: Record<string, ReadonlySet<string>> = {
 }
 
 /** 路由响应 → 快照值：只认合法档位，读不到 / 非法时按该键的默认档兜底 */
-function routingValuesFrom(data: unknown): { strategy: string; sticky: string } {
+function routingValuesFrom(data: unknown): {
+  strategy: string
+  sticky: string
+  failoverBackoff: boolean
+  sink: boolean
+  breakerEnabled: boolean
+} {
   const record = (data && typeof data === 'object' ? data : {}) as Record<string, unknown>
   const pick = (key: string, fallback: string): string => {
     const raw = record[key]
     return typeof raw === 'string' && ROUTING_VALID[key].has(raw) ? raw : fallback
   }
-  return { strategy: pick(ROUTING_STRATEGY_KEY, 'order'), sticky: pick(ROUTING_STICKY_KEY, 'auto') }
+  // 三个布尔开关：只认字面 true / false（后端返回的一定是布尔），缺字段时回落后端默认值
+  const pickBool = (key: string, fallback: boolean): boolean => {
+    const raw = record[key]
+    return typeof raw === 'boolean' ? raw : fallback
+  }
+  return {
+    strategy: pick(ROUTING_STRATEGY_KEY, 'order'),
+    sticky: pick(ROUTING_STICKY_KEY, 'auto'),
+    failoverBackoff: pickBool(ROUTING_FAILOVER_BACKOFF_KEY, true),
+    sink: pickBool(ROUTING_SINK_KEY, true),
+    breakerEnabled: pickBool(ROUTING_BREAKER_ENABLED_KEY, false),
+  }
 }
 
 export async function loadRouting(): Promise<void> {
@@ -1135,7 +1182,13 @@ export async function loadRouting(): Promise<void> {
  * 保存两档之一：PUT 契约返回生效后的全量值（与超时 / 重试同一模式），直接按响应刷新。
  * 后端只认长键名；未知档位在界面上就发不出来（SegmentedControl 的取值来自档位表）。
  */
-export async function saveRoutingField(patch: { routingStrategy?: string; routingSticky?: string }): Promise<void> {
+export async function saveRoutingField(patch: {
+  routingStrategy?: string
+  routingSticky?: string
+  routingFailoverBackoff?: boolean
+  routingSink?: boolean
+  routingBreakerEnabled?: boolean
+}): Promise<void> {
   if (busyScope) return
   const bridge = shared().workbuddyDesktop
   if (!bridge?.setRoutingConfig) {

@@ -124,8 +124,34 @@ Environment variables (all optional — nothing needs to be preset):
 | `AGENT2API_HOST` / `AGENT2API_PROXY_PORT` | Listen address (default `0.0.0.0`) / port (default `3065`) |
 | `AGENT2API_ALLOW_NO_KEY` | Set to `1` to serve `/v1` without any key — private networks only |
 | `AGENT2API_CAPTCHA_ENABLED` | Login-page human verification widget: `1` enabled (default), `0` disabled |
+| `AGENT2API_SELF_UPDATE` | In-container update endpoint: `1` enabled by default (the panel offers "Download and update"); set `0` to disable and upgrade manually only |
+| `WORKBUDDY_UPDATE_REPO` + `WORKBUDDY_UPDATE_API_BASE` | Advanced: point update checks/downloads at your own source. The first changes the repository (defaults to the upstream `aimod-cc/agent2api`; forks should override it), the second changes the API root (default `https://api.github.com`, must return a GitHub-shaped release JSON). With a custom source configured, the download allowlist additionally accepts only **that source's own host** (scheme follows the source: an `http://` source also allows plaintext downloads — intended for local drills / internal mirrors) |
 
 Build from source: clone the repo and run `docker compose up -d --build` (the image contains only the gateway and the panel, no Rust toolchain).
+
+### Upgrading
+
+**From the panel**: Settings → Software update → Check for updates, then click "Download and update" and once the package is ready "Install and restart". The server verifies sha256, replaces the executable and UI files inside the container, and restarts the process — the container is brought back by `restart: unless-stopped` (same container, your data volume untouched) and the page refreshes by itself a few seconds later. To go back, use "Roll back to previous version" in the same panel (it restores the backup left by the update).
+
+Three things worth knowing:
+
+- **It updates the files inside the container, not your local image**: the `image:` tag in your compose file stays the same and `docker inspect` still shows the old tag; a later `docker compose pull && docker compose up -d` (which recreates the container) returns to the image's version. To keep both in sync, bump the tag in your compose file and run `docker compose pull && up -d` once after upgrading.
+- The endpoint only appears in containers (`AGENT2API_SELF_UPDATE=1`, already set in the image); set it to `0` to fall back to the manual path below.
+- Packages come from GitHub Releases (`agent2api-server-linux-<arch>.tar.gz` plus a sibling `.sha256`). Downloads use the egress route configured in "Update settings" (shared with update checks) — pick a proxy there or add a GitHub token if direct access is flaky.
+
+**Manual upgrade** (works for any deployment shape):
+
+```bash
+# compose (using the compose file from this repo)
+docker compose pull && docker compose up -d
+
+# docker run: pull the new image and recreate the container (your data lives in ./data)
+docker pull aimodcc/agent2api:latest
+docker rm -f agent2api
+# then re-run the original "docker run" command from above
+```
+
+Built from source: `git pull && docker compose up -d --build`.
 
 **Web panel capability notes** (all stem from having no local desktop client): web login (WorkBuddy / Qoder / Cline), SMS codes and pasted credentials work fully; web logins that need a callback on this machine (AutoClaw / CatPaw / Accio / CodeArts / Trae) and "import desktop login state" are unavailable — use pasted credentials instead.
 

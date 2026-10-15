@@ -23,7 +23,7 @@ use super::clock::{date_key, day_of, local_midnight_ms};
 use super::record::{DailyEntry, RequestEntry};
 use super::report::{
     build_accounts, build_models, build_providers, build_top_model, cache_rates, cache_trend_24h,
-    daily_trend, heatmap, normalize_range, push_account_accum, push_model_accum,
+    daily_trend, heatmap, model_stat_key, normalize_range, push_account_accum, push_model_accum,
     push_provider_accum, range_bounds, range_totals, streak,
 };
 use super::{daily, sql};
@@ -78,7 +78,7 @@ pub(super) fn remap_model_days(conn: &mut rusqlite::Connection) -> rusqlite::Res
             )
             .unwrap_or(0);
         // backfill 同一条判据：明细条数 ≥ 聚合行请求数才说明明细足以代表
-        // 当天（没被保留期/容量裁过），才重算 —— 拿残缺明细重算会让当天
+        // 当天（没被手动清理过），才重算 —— 拿残缺明细重算会让当天
         // 数字凭空缩水（见 `backfill` 模块头的「拿不准就不动」）
         if detail_count >= aggregate_requests {
             rebuild_day(&tx, day)?;
@@ -129,15 +129,19 @@ fn rebuild_day(conn: &rusqlite::Connection, day: NaiveDate) -> rusqlite::Result<
 /// 结果」（见该方法的说明），抽成纯函数后两条路径**必然同形** ——
 /// 手写一份全零的 JSON 迟早会与正常路径的形状漂开，而形状漂开是静默的
 /// （前端只会显示空白或 0，不会报错）。
+///
+/// `custom` 是 `range == "custom"` 时的起止日（本地自然日，由路由层解析校验）：
+/// 非 custom 档传 None（也允许传了不用 —— 只有 custom 分支会读它）。
 pub(super) fn summarize(
     daily: &BTreeMap<String, DailyEntry>,
     entries: &[RequestEntry],
     range: &str,
     now: i64,
+    custom: Option<(NaiveDate, NaiveDate)>,
 ) -> Value {
     let now_day = super::clock::today();
     let range = normalize_range(range);
-    let (start_date, end_date) = range_bounds(range, daily, now_day);
+    let (start_date, end_date) = range_bounds(range, daily, now_day, custom);
 
     // overview / dailyTrend / heatmap 走聚合（跨年；明细只有请求天数）
     let totals = range_totals(daily, &start_date, &end_date);
@@ -234,28 +238,4 @@ pub(super) fn fold_into_daily(day: &mut DailyEntry, item: &RequestEntry) {
         i64::from(success),
         item.total_tokens,
     );
-}
-
-/// 报表按模型聚合用的**统计键**：上游真名优先，请求名回落。
-///
-/// ── 为什么不能直接用 `model` ────────────────────────────────
-/// 映射语义重做后（见 `pipeline::resolve_model` 的说明），请求名全程保持
-/// 客户端原值，改写下沉到发送侧按家进行（`payload::send_body` →
-/// `catalog::wire_target_for_provider`）。于是 `model`（请求侧解析名）在
-/// 客户端点名映射别名时就是**别名本身** —— 报表若按它聚合，同一个上游模型
-/// 会被拆成「真名 + 各家别名」好几行。而映射只是代名，实际请求的仍是上游
-/// 那一个模型：`upstream_model`（telemetry 在发送侧采集的最终下发名）才是
-/// 「用量花在哪个模型上」的正确答案。
-///
-/// ── 回落 ──────────────────────────────────────────────────
-/// 转发前就失败的请求一次都没发出去，`upstream_model` 为空串 —— 请求名是
-/// 此时我们所知的最好信息（token 已清零，只影响请求数维度）。还没有
-/// `upstreamModel` 键的旧明细同样走回落：这不是「给旧数据猜值」，空串回落
-/// 保留的是明细里本来就有的信息。
-fn model_stat_key(item: &RequestEntry) -> &str {
-    if item.upstream_model.is_empty() {
-        &item.model
-    } else {
-        &item.upstream_model
-    }
 }

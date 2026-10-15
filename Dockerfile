@@ -75,6 +75,31 @@ RUN cd src-tauri \
     && find server/src -type f -exec touch {} + \
     && /build/cargo-build.sh
 
+# ── 服务端更新包（CI 的 linux-server job 用它出 Release 资产）──────
+# 容器内「一键更新」下载的就是这个阶段导出的东西（见
+# desktop-tauri/src-tauri/server/src/server/core/update/selfupdate.rs）：
+# 根下两个条目 —— 可执行文件 + ui/ 目录，面板解包后原地替换。
+#
+#   docker buildx build --platform linux/amd64 --target bundle \
+#     --output type=local,dest=out .
+#
+# 这一阶段是 FROM scratch 且只有 COPY、没有 RUN，所以交叉构建 arm64 时
+# 不会进 QEMU：编译仍由上面那个 $BUILDPLATFORM 的 builder 完成（原生 amd64
+# + aarch64 工具链交叉），这里只是把产物取出来。
+#
+# ★ 位置：必须排在运行时阶段**之前**。`docker build` / `docker compose build`
+#   不带 --target 时取**最后一个**阶段作为镜像 —— 把它放最后会让镜像变成
+#   这个空的 scratch 阶段。
+#
+# ★ 不变量：本阶段必须保持 bookworm 世代（builder 现为 rust:1-bookworm）。
+#   运行时镜像是 debian:bookworm-slim（glibc 2.36），而更新是「旧容器装新
+#   包」—— 只要包始终按不高于运行时的 glibc 构建就成立（glibc 向前兼容）。
+#   将来运行时基础镜像换代时，这里要么继续钉在旧世代构建，要么整体改
+#   musl 静态（那样就与发行版彻底解耦），不要跟着运行时一起换代。
+FROM scratch AS bundle
+COPY --from=builder /build/agent2api-server /bundle/agent2api-server
+COPY desktop-tauri/ui /bundle/ui
+
 # ── 运行时 ──────────────────────────────────────────────────
 # bookworm-slim + ca-certificates（出站 HTTPS）+ curl（HEALTHCHECK）。
 # 网关链的是 rustls（纯 Rust），运行时没有任何额外的共享库要求。
@@ -90,10 +115,17 @@ COPY desktop-tauri/ui /app/ui
 # 鉴权：面板需要管理员（登录页注册或 env 预置）；未配置任何 API Key 时
 # /v1/* 处于 fail-closed（登录面板创建第一把后自动恢复）。
 # AGENT2API_CAPTCHA_ENABLED：登录页人机验证组件环境变量，默认为1开启，0为关闭。
+# AGENT2API_SELF_UPDATE：允许面板在容器内原地更新 —— 校验 sha256 后替换
+# /usr/local/bin 下的可执行文件与 /app/ui 下的界面文件，再让进程优雅退出、
+# 由 restart 策略拉起**同一个容器**（可写层保留，刚换上去的版本随之生效）。
+# 容器以 root 运行、可写层可写，这条路才成立；裸机 / systemd 部署不要设这个
+# 变量（那里退出进程等于把服务停掉，见 core/update/selfupdate.rs 的模块头）。
+# 想关掉容器内的更新入口（例如自行管理镜像版本），把它设成 0 即可。
 ENV AGENT2API_HOST=0.0.0.0 \
     AGENT2API_PROXY_HOME=/data \
     AGENT2API_UI_DIR=/app/ui \
-    AGENT2API_CAPTCHA_ENABLED=1
+    AGENT2API_CAPTCHA_ENABLED=1 \
+    AGENT2API_SELF_UPDATE=1
 VOLUME ["/data"]
 EXPOSE 3065
 WORKDIR /app

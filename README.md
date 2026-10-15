@@ -124,8 +124,34 @@ services:
 | `AGENT2API_HOST` / `AGENT2API_PROXY_PORT` | 监听地址（默认 `0.0.0.0`）/ 端口（默认 `3065`） |
 | `AGENT2API_ALLOW_NO_KEY` | 置 `1` 关闭 fail-closed（未配 Key 也放行 `/v1`，仅限纯内网） |
 | `AGENT2API_CAPTCHA_ENABLED` | 登录页人机验证：默认 `1` 开启，`0` 关闭 |
+| `AGENT2API_SELF_UPDATE` | 容器内的更新入口：默认 `1` 开启（面板可「下载并更新」）；置 `0` 关闭，只走手动升级 |
+| `WORKBUDDY_UPDATE_REPO` + `WORKBUDDY_UPDATE_API_BASE` | 进阶：把「检查更新 / 下载更新」换成自建源。前者换仓库（默认跟上游 `aimod-cc/agent2api`，fork 后可改），后者换 API 根（默认 `https://api.github.com`，需返回与 GitHub 同形的 release JSON）。配了自建源后，下载白名单只额外放行**该源自己的域名**（按源的 scheme：配 `http://` 就允许明文下载，仅建议本地演练/内网镜像用）|
 
 从源码构建：克隆本仓库后 `docker compose up -d --build`（镜像里只有网关与面板，不含 Rust 工具链）。
+
+### 升级
+
+**面板里直接升**：设置 → 软件更新 → 检查更新，发现新版本后点「下载并更新」，包下完再点「安装并重启」。服务端会校验 sha256，替换容器内的可执行文件与界面文件，然后重启进程 —— 容器由 `restart: unless-stopped` 拉起（同一个容器，数据卷不动），页面几秒后自动刷新。想退回上一版，面板上有「回滚到上一版本」（用的是更新时留下的备份）。
+
+三点需要知道：
+
+- **更新的是容器里的文件，不是你本地的镜像**：compose 里的 `image:` 标签不会变，`docker inspect` 仍显示旧 tag；之后再 `docker compose pull && docker compose up -d`（重建容器）会回到镜像里的版本。想让两边一致，升级后顺手把 compose 里的标签改成新版本号，再 `docker compose pull && up -d` 一次即可。
+- 更新入口只在容器里出现（`AGENT2API_SELF_UPDATE=1`，镜像默认已设）；置 `0` 就退回下面的手动方式。
+- 包来自 GitHub Release（`agent2api-server-linux-<arch>.tar.gz` + 同名 `.sha256`）。下载走「更新设置」里配的出网线路（与检查更新共用），国内直连不畅时可在那里指定代理或填 GitHub 令牌。
+
+**手动升级**（任何部署形态都适用）：
+
+```bash
+# compose（用仓库里那份 compose 时）
+docker compose pull && docker compose up -d
+
+# docker run：拉新镜像后重建容器（数据都在 ./data 卷里，不会丢）
+docker pull aimodcc/agent2api:latest
+docker rm -f agent2api
+# 再执行一遍上面「docker run」那段原始命令
+```
+
+从源码构建的：`git pull && docker compose up -d --build`。
 
 **网页端功能差异**（源于「没有本机桌面客户端」）：网页登录（WorkBuddy / Qoder / Cline）、手机验证码、粘贴凭证完全可用；需要本机回调的网页登录（AutoClaw / CatPaw / Accio / CodeArts / Trae）与「导入本机登录态」不可用，请改用粘贴凭证。
 

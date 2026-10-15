@@ -11,7 +11,7 @@
 //! ── 只删「确认是本产品」的目标 ────────────────────────────────────
 //! 判定链每一环都必须成立，任何一环不成立就跳过（宁可留下垃圾，也绝不误删
 //! 用户自己安装的其它软件）：
-//!   目录     必须存在本产品主程序（`workbuddy-proxy-desktop.exe` / `agent2api.exe`）；
+//!   目录     必须存在本产品主程序（`agent2api.exe` / `workbuddy-proxy-desktop.exe`）；
 //!   卸载键   键名与 DisplayName 都要等于本产品的历史/现用名，且键里记录的安装
 //!            位置要落在对应旧目录内、该目录已经不存在；
 //!   快捷方式 文件名等于产品名，且 .lnk 内容里出现旧目录的绝对路径；
@@ -59,11 +59,14 @@ mod imp {
 
     /// 旧安装目录里可能出现的主程序文件名。
     ///
-    /// `workbuddy-proxy-desktop.exe` 是实际产物名：Cargo.toml 的 package name 是
-    /// `workbuddy-proxy-desktop`，而 tauri.conf.json 没有设 mainBinaryName，所以
-    /// NSIS 的 MAINBINARYNAME 与磁盘上的 exe 都是它（已按构建出的 installer.nsi
-    /// 与真实安装目录核对）。另一个候选是防御性的：产品已改名为 Agent2API，
-    /// 将来若把二进制一起改名，旧目录里就会是这个文件名，判定链不该因此失效。
+    /// `workbuddy-proxy-desktop.exe` 是用过很久的产物名：Cargo.toml 的 package
+    /// name 一直是 `workbuddy-proxy-desktop`，早期 tauri.conf.json 又没设
+    /// mainBinaryName，NSIS 的 MAINBINARYNAME 与磁盘上的 exe 都是它（已按构建出的
+    /// installer.nsi 与真实安装目录核对）。现在 tauri.conf.json 把 mainBinaryName
+    /// 设成 `agent2api`，新装的目录里是 `agent2api.exe`。
+    ///
+    /// 两个名字都留着：判定对象是**历史**安装目录，里面是哪一个取决于当初装的是
+    /// 哪个版本，判定链不该因为改名而失效。
     const BINARY_NAMES: [&str; 2] = ["workbuddy-proxy-desktop.exe", "agent2api.exe"];
 
     /// 当前用户级安装的卸载信息（NSIS 的 currentUser 模式写这里）

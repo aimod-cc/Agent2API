@@ -1,10 +1,18 @@
 //! 「更新设置」里的 GitHub 令牌：加密落库、读取与状态。
 //!
+//! ── 加解密已委托给 `core::crypto` ───────────────────────────
+//! 本模块**不再自带加解密实现**：算法、`enc1:` 信封、密钥文件的加载/生成/缓存
+//! 统统抽到了 `crate::server::core::crypto`（账号表要复用同一套，抽出理由见它的
+//! 模块头）。这里只剩两件令牌专属的事：
+//!   1. 把密钥域钉死成 `SecretScope::UpdateToken`（密钥文件 `update-token.key`）；
+//!   2. 令牌自己的规矩：校验规则、与环境变量 `GITHUB_TOKEN` 的优先级、解不开时
+//!      的回落，以及 `status_json` 给用户看的那句提示。
+//!
 //! ── 为什么落库前要加密 ─────────────────────────────────────
 //! 令牌能提高 GitHub API 的限额（匿名 60 次/小时 → 5000 次/小时），是**有代价的
 //! 凭证**：泄露后别人能以你的身份读仓库、触发 CI。配置库（`agent2api.db`）会被
 //! 整库导出 / 备份 / 拷机迁移，明文躺在里面等于「拷走一个文件就带走令牌」。
-//! 因此这里存的是 AES-256-GCM 密文：
+//! 因此这里存的是 AES-256-GCM 密文（形态与密钥存放规则见 `core::crypto`）：
 //!   · 密钥：32 字节随机，存**库外**的 `{config_dir}/update-token.key`（首次保存
 //!     令牌时生成；Unix 上 0600）。库被单独拿走时没有密钥文件，解不出令牌。
 //!   · 密文形态：`enc1:<base64(nonce(12) || 密文+tag)>`，作为配置键 `githubToken`
@@ -28,139 +36,32 @@
 //! 密钥文件被删 / 手改过 / 拷库没拷密钥时：**不当作「没配」**——配置里明明有
 //! 一段密文，静默按匿名跑会让用户以为令牌还在生效。`effective_token` 回落
 //! 环境变量并留一条 verbose；`status_json` 把原因带出去，界面上提示重新保存
-//! 一次（新密钥 + 新密文，自愈）。
-
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine as _;
+//! 一次（新密钥 + 新密文，自愈）。「重存一次令牌即可自愈」这句提示本身由
+//! `core::crypto` 按密钥域生成（不同域提示不同），本模块不再自己拼。
 
 use crate::server::config;
+use crate::server::core::crypto::{self, SecretScope};
 use crate::server::logging;
 
-/// 密钥文件名（落在 `~/.agent2api`，与库同目录、库之外）
-const KEY_FILE: &str = "update-token.key";
-
-/// 密文信封的版本前缀（见模块头「密文形态」）
-const ENVELOPE_PREFIX: &str = "enc1:";
-
-/// GCM nonce 长度（96 bit，标准值）
-const NONCE_LEN: usize = 12;
+/// 本模块使用的密钥域（GitHub 令牌专用；密钥文件是 `update-token.key`）
+const SCOPE: SecretScope = SecretScope::UpdateToken;
 
 /// 令牌长度上限：GitHub 令牌最长 255 左右，再宽就当脏数据处理
 const MAX_TOKEN_LEN: usize = 255;
 
-// ─── 密钥（加载 / 首次生成，进程内缓存）─────────────────────
+// ─── 信封的解与读 ──────────────────────────────────────────
 
-/// 进程级密钥缓存。
+/// 解开一段 `enc1:` 信封 → UTF-8 明文。
 ///
-/// 为什么用 `Mutex<Option<…>>` 而不是 `OnceLock`：密钥要**不存在就现场生成**，
-/// 生成失败（目录不可写等）不能把失败缓存成永久状态 —— 下次保存还能重试；
-/// 同时首次并发的两个保存要串行（各自生成不同的密钥、互相覆盖文件，
-/// 先存的令牌就解不开了）。
-static KEY: std::sync::OnceLock<std::sync::Mutex<Option<[u8; 32]>>> = std::sync::OnceLock::new();
-
-/// 取加密密钥（没有就生成一份新的）。所有失败都以中文错误上抛。
-fn secret_key() -> Result<[u8; 32], String> {
-    let cell = KEY.get_or_init(|| std::sync::Mutex::new(None));
-    let Ok(mut guard) = cell.lock() else {
-        return Err("密钥锁中毒".to_string());
-    };
-    if let Some(key) = *guard {
-        return Ok(key);
-    }
-    let key = load_or_create_key()?;
-    *guard = Some(key);
-    Ok(key)
+/// 只是「绑定额外的密钥域 + 收口成 String」的薄包装：真正的格式解析、长度校验、
+/// AES-GCM 解密与 UTF-8 闸门都在 `core::crypto::open`。`open` 已保证字节是合法
+/// UTF-8（见其模块头），所以这里的转换不会替换任何字符 —— 用 `from_utf8_lossy`
+/// 只是为了拿 `String`，不引入第二条错误路径（与旧实现逐字等价的错误文案仍由
+/// `open` 给出）。
+fn decode_envelope(envelope: &str) -> Result<String, String> {
+    let bytes = crypto::open(envelope, SCOPE)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
-
-/// 读密钥文件；不存在则生成并写出（Unix 上收紧到 0600）。
-fn load_or_create_key() -> Result<[u8; 32], String> {
-    let path = config::config_dir().join(KEY_FILE);
-    match std::fs::read(&path) {
-        Ok(bytes) => match <[u8; 32]>::try_from(&bytes[..]) {
-            Ok(key) => Ok(key),
-            Err(_) => Err(format!(
-                "密钥文件 {} 长度异常（期望 32 字节，实际 {} 字节）",
-                path.display(),
-                bytes.len()
-            )),
-        },
-        // 不存在才生成新密钥；其余错误（权限等）如实上抛 —— 覆盖式重建会把
-        // 已保存的密文变成永远解不开的死数据
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => create_key_file(&path),
-        Err(error) => Err(format!("读取密钥文件 {} 失败: {error}", path.display())),
-    }
-}
-
-/// 生成 32 字节随机密钥并写盘
-fn create_key_file(path: &std::path::Path) -> Result<[u8; 32], String> {
-    let mut key = [0u8; 32];
-    getrandom::getrandom(&mut key).map_err(|error| format!("系统随机源不可用: {error}"))?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|error| format!("创建配置目录失败: {error}"))?;
-    }
-    std::fs::write(path, key).map_err(|error| format!("写入密钥文件 {} 失败: {error}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(key)
-}
-
-// ─── 加密 / 解密 ───────────────────────────────────────────
-
-/// 加密明文 → `enc1:<base64(nonce||密文+tag)>`。
-///
-/// nonce 每次现生成（GCM 的 nonce 重用是灾难性的：同一密钥下两条明文用同一
-/// nonce 会互相泄底），随机性来自系统熵源，不用计数器——进程重启后计数没有
-/// 持久化，随机 nonce 才是这里站得住的选择。
-fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<String, String> {
-    use aes_gcm::aead::{consts::U12, Aead as _};
-    use aes_gcm::{Aes256Gcm, KeyInit as _, Nonce};
-
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|_| "密钥长度不受 AES-256 支持".to_string())?;
-    let mut nonce_bytes = [0u8; NONCE_LEN];
-    getrandom::getrandom(&mut nonce_bytes).map_err(|error| format!("系统随机源不可用: {error}"))?;
-    let nonce = Nonce::<U12>::try_from(nonce_bytes.as_slice())
-        .map_err(|_| "生成 nonce 失败".to_string())?;
-    let ciphertext = cipher
-        .encrypt(&nonce, plaintext)
-        .map_err(|_| "AES-GCM 加密失败".to_string())?;
-    let mut blob = Vec::with_capacity(NONCE_LEN + ciphertext.len());
-    blob.extend_from_slice(&nonce_bytes);
-    blob.extend_from_slice(&ciphertext);
-    Ok(format!("{ENVELOPE_PREFIX}{}", BASE64.encode(&blob)))
-}
-
-/// 解开一段 `enc1:` 信封 → UTF-8 明文。失败原因都是「能照着做」的提示。
-fn decrypt(envelope: &str) -> Result<String, String> {
-    use aes_gcm::aead::{consts::U12, Aead as _};
-    use aes_gcm::{Aes256Gcm, KeyInit as _, Nonce};
-
-    let Some(encoded) = envelope.trim().strip_prefix(ENVELOPE_PREFIX) else {
-        return Err("密文格式不受支持（不是 enc1 信封）".to_string());
-    };
-    let blob = BASE64
-        .decode(encoded)
-        .map_err(|_| "密文不是合法 base64".to_string())?;
-    // 长度下限：nonce + GCM tag（16）。aes-gcm 的 tag 附在密文尾部，
-    // 这里整段交给 decrypt（Postfix 语义，与 autoclaw/crypto.rs 同一套）
-    if blob.len() <= NONCE_LEN + 16 {
-        return Err("密文长度异常".to_string());
-    }
-    let key = secret_key()?;
-    let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|_| "密钥长度不受 AES-256 支持".to_string())?;
-    let nonce = Nonce::<U12>::try_from(&blob[..NONCE_LEN])
-        .map_err(|_| "密文 nonce 长度异常".to_string())?;
-    let plaintext = cipher
-        .decrypt(&nonce, &blob[NONCE_LEN..])
-        .map_err(|_| format!("AES-GCM 解密失败（密钥文件 {KEY_FILE} 是否被删除或更换？重存一次令牌即可自愈）"))?;
-    String::from_utf8(plaintext).map_err(|_| "解密结果不是合法 UTF-8 文本".to_string())
-}
-
-// ─── 读取与写入（对外）────────────────────────────────────
 
 /// 环境变量里的令牌（Docker / 命令行部署的配置口，两个名字都认、空串当没配）
 fn env_token() -> Option<String> {
@@ -181,7 +82,7 @@ fn env_token() -> Option<String> {
 /// 检查冷却 —— 重复粘贴同一个令牌不该算一次更换）。
 pub fn stored_token() -> Option<String> {
     let envelope = config::github_token_envelope()?;
-    decrypt(&envelope).ok()
+    decode_envelope(&envelope).ok()
 }
 
 /// 实际生效的令牌：界面保存的（解密）> 环境变量。
@@ -190,7 +91,7 @@ pub fn stored_token() -> Option<String> {
 /// 统一处理，调用方拿到 `Option<String>` 就够了。
 pub fn effective_token() -> Option<String> {
     if let Some(envelope) = config::github_token_envelope() {
-        match decrypt(&envelope) {
+        match decode_envelope(&envelope) {
             Ok(token) => return Some(token),
             Err(reason) => logging::verbose(
                 "[Update]",
@@ -240,8 +141,7 @@ pub fn set_token(token: Option<&str>) -> Result<TokenUpdate, String> {
     }
     // 与已存令牌逐字比较（解不开时存储侧那一份算「非现值」，会正确判为变化）
     let changed = previous.as_deref() != Some(token);
-    let key = secret_key()?;
-    let envelope = encrypt(&key, token.as_bytes())?;
+    let envelope = crypto::seal(token.as_bytes(), SCOPE)?;
     Ok(TokenUpdate {
         saved: config::set_github_token_envelope(Some(envelope)),
         changed,
@@ -255,7 +155,7 @@ pub fn set_token(token: Option<&str>) -> Result<TokenUpdate, String> {
 /// 而不是把「配置坏了」显示成「没配置」。
 pub fn status_json() -> serde_json::Value {
     if let Some(envelope) = config::github_token_envelope() {
-        return match decrypt(&envelope) {
+        return match decode_envelope(&envelope) {
             Ok(_) => serde_json::json!({ "filled": true, "origin": "stored", "error": null }),
             Err(reason) => {
                 let env = env_token().is_some();

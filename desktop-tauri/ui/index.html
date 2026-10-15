@@ -24,10 +24,10 @@
     })();
   </script>
   <script>
-    // 语言引导：在 head 解析期定下界面语言，再注入词典域清单（各域词典文件改由 i18n.js
-    // 执行时补写，原因见下方）—— 必须早于所有业务脚本，否则首屏会先按简体渲染再跳一下。
-    // 解析规则与 ui/i18n.js 的 resolveLocale 逐字一致（那份供运行时查表用，这份供词典
-    // 注入用，因为 i18n.js 本身也要等这段先定语言；改一处必须同步改另一处与 login.html）。
+    // 语言引导：在 head 解析期定下界面语言，再同步注入词典 —— 必须早于所有业务脚本，
+    // 否则首屏会先按简体渲染再跳一下。解析规则与 ui/i18n.js 的 resolveLocale 逐字一致
+    // （那份供运行时查表用，这份供词典注入用，因为 i18n.js 本身也要等这段先定语言；
+    // 改一处必须同步改另一处与 login.html）。
     (function () {
       var CODES = ['zh-Hans', 'zh-Hant', 'en', 'ja', 'ko', 'pt-BR'];
       var raw = null;
@@ -48,13 +48,14 @@
         }
       }
       document.documentElement.lang = locale;
-      // 简体没有词典目录（查不到即显示简体原文），不必注入；其余语言只注入域清单 manifest。
+      // 简体没有词典目录（查不到即显示简体原文），不必注入；其余语言注入 manifest + 各域文件。
       // locale 已过白名单校验，拼进 src 安全；某域文件缺失时该 <script> 404，静默无害。
       if (locale === 'zh-Hans') return;
-      // 只写域清单 manifest；各域词典文件由 i18n.js 在自己执行时补写 ——
-      // document.write 之后同步读 __WB_I18N_DOMAINS 拿到的是 undefined（manifest
-      // 要等本脚本块结束才执行），在这里循环只会写出 0 个。
       document.write('<script src="i18n/manifest.js"><\/script>');
+      var domains = window.__WB_I18N_DOMAINS || [];
+      for (var d = 0; d < domains.length; d++) {
+        document.write('<script src="i18n/' + locale + '/' + domains[d] + '.js"><\/script>');
+      }
     })();
   </script>
   <link rel="stylesheet" href="css/tokens.css">
@@ -100,8 +101,7 @@
        顺序其实已不影响结果，但保持「后加载的是更新的体系」这条阅读线索。 -->
   <link rel="stylesheet" href="islands/ui.css">
   <!-- 多语言运行时：查表 t() + 静态文案扫描器（data-i18n 系列）。
-       域清单（manifest.js）已由上面 head 里的引导脚本注入（document.write），各域词典
-       由 i18n.js 执行时补写。这里只放运行时逻辑。
+       词典已由上面 head 里的引导脚本同步注入（document.write），这里只放运行时逻辑。
        必须排在 units.js / app.js 等业务脚本之前 —— 它们在加载期就可能读 window.wbI18n；
        排在 head 末尾天然满足。 -->
   <script src="i18n.js"></script>
@@ -124,12 +124,11 @@
         <button class="nav-item active" data-page="overview" data-icon="overview"><span class="ico"></span><span class="label" data-i18n="报表">报表</span></button>
         <button class="nav-item" data-page="accounts" data-icon="accounts"><span class="ico"></span><span class="label" data-i18n="账号">账号</span></button>
 
-        <!-- 签到中心：页内三个标签页 —— 签到中心（每日签到 / 新手福利 / 活动福利）、
-             定时签到（多条目 + 总开关 + 保活模型链）、签到记录（每账号明细台账）。
-             整页由 React 岛渲染（desktop-tauri/ui-islands/src/islands/checkin-page.tsx，
-             随 islands/ui.js 一起加载），岛直接挂在这个 section 上；
-             定时签到与签到记录两个标签页分别在 checkin-schedule-tab.tsx /
-             checkin-records-tab.tsx。 -->
+        <!-- 签到中心：每日签到（7 家提供商）、新手任务（Loomy 一次性）、活动福利
+             （CodeArts / ZCode）与自动签到设置的统一入口。整页由 React 岛渲染
+             （desktop-tauri/ui-islands/src/islands/checkin-page.tsx，随 islands/ui.js
+             一起加载），岛直接挂在这个 section 上。自动签到的设置卡从「定时任务」页
+             移到这里 —— 签到的执行、范围与历史从此只有这一个出处。 -->
         <button class="nav-item" data-page="checkin" data-icon="checkin"><span class="ico"></span><span class="label" data-i18n="签到中心">签到中心</span></button>
 
         <div class="nav-group-label" data-i18n="转发能力">转发能力</div>
@@ -211,12 +210,9 @@
         <!-- ─── 签到中心 ───
              整页由 React 岛渲染（desktop-tauri/ui-islands/src/islands/checkin-page.tsx，
              随 islands/ui.js 一起加载）。岛直接挂在这个 section 上、不套宿主 div。
-             页内三个标签页：签到中心（每日签到 / 新手福利 / 活动福利）、定时签到
-             （多条目 + 总开关 + 保活模型链，见 checkin-schedule-tab.tsx）、签到记录
-             （每账号明细台账，见 checkin-records-tab.tsx）。
              数据入口是聚合快照 GET /api/checkin-center（分组与「今日已签」的判定
-             在后端，与批量签到同一对判据）；新手福利的资格状态是上游查询，
-             页面拿到账号清单后按需惰性查询，快照本身零上游请求。
+             在后端，与批量签到同一对判据）；新手任务 / 活动福利的资格状态是
+             上游查询，页面拿到账号清单后按需惰性查询，快照本身零上游请求。
              对外契约 window.wbCheckinPanel = { load }（app.js 切页时调）。 -->
         <section class="page" data-page="checkin"></section>
 
@@ -509,9 +505,8 @@
        SDK，从 o.alicdn.com 加载），拿到验证串才去换授权地址、再交壳开窗口。
        必须在 add-provider-forms.js 之前 —— 加载期由它建国际版那一份。 -->
   <script src="autoclaw-oauth.js"></script>
-  <!-- ZCode「限时套餐」的探测与领取（网络与验证码；界面在套餐明细弹窗里，
-       见 ui-islands/src/islands/zcode-plans-modal.tsx 的 window.wbZcodePlans）。
-       对外只有 window.wbZcodeClaim 的 preview / claim 两个方法。 -->
+  <!-- ZCode「周末套餐」的探测与领取（账号页那一列按钮）。
+       依赖 window.wbAccountsView 的列注册与 window.wbAliyunCaptcha。 -->
   <script src="zcode-claim.js"></script>
   <!-- CodeArts 的「领福利」流程（与上面 zcode-claim.js 同一约定：岛只把账号对象递过去，
        探测 → 确认 → 领取 → 回读二次确认这四步都在这个引擎里，它要问的是管理接口

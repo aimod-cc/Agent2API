@@ -36,6 +36,11 @@
 //!                        数据底座
 //!   key_scope.rs         本次请求命中的网关 Key 及其可用提供商 / 可用模型限制
 //!                        （R9；中间件放入请求扩展，handler 与转发层读出）
+//!   crypto.rs            通用对称加解密（AES-256-GCM + `enc1:` 信封），按
+//!                        `SecretScope` 分密钥域；GitHub 令牌与账号表共用
+//!                        （实现原在 `update/token.rs`，抽出供账号表复用）
+//!   legacy_api_key.rs    顶层旧字段 `apiKey`（单 Key 兼容形态）的原地加密迁移；
+//!                        读侧的兼容与降级处理仍在 `api_keys.rs`
 //!   update/              软件更新（版本/出网/下载状态机）（workbuddy-update.mjs）
 //!
 //! ── 模型清单的三个层次（Agent2API 改造 W2a-T2）─────────────
@@ -67,7 +72,9 @@ pub mod checkin_history;
 pub mod checkin_records;
 pub mod checkin_schedules;
 pub mod clash;
+pub mod client;
 pub mod credential_maintenance;
+pub mod crypto;
 pub mod custom_providers;
 pub mod debug_traffic;
 pub mod degrade;
@@ -75,6 +82,7 @@ pub mod egress;
 pub mod endpoints;
 pub mod import_ccswitch;
 pub mod key_scope;
+pub mod legacy_api_key;
 pub mod limiter;
 pub mod login;
 pub mod model_meta;
@@ -84,6 +92,7 @@ pub mod prompt;
 pub mod protocol;
 pub mod providers;
 pub mod proxy_pool;
+pub mod proxy_settings;
 pub mod proxies;
 pub mod routing;
 pub mod sanitize;

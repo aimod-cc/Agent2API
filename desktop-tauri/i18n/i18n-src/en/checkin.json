@@ -228,5 +228,11 @@
   "领取失败：{error}": "Claim failed: {error}",
   "（共 {n} 个账号）": " ({n} accounts total)",
   "（能量 / 连登读数本次未取到）": "(Energy / streak readings unavailable this time)",
-  "，日活保活 {n} 个": ", {n} kept alive"
+  "，日活保活 {n} 个": ", {n} kept alive",
+  "已完成活跃上报（连登已点亮），但活动未开启（本次没有可领的奖励）": "Activity reported (streak lit up), but the campaign is not active (nothing to claim this time)",
+  "活跃上报完成，但保活未成功且活动未开启": "Activity reported, but keep-alive failed and the campaign is not active",
+  "活跃保活完成，但活跃上报失败且活动未开启": "Keep-alive complete, but the activity report failed and the campaign is not active",
+  "活跃上报与保活均未成功，且活动未开启": "Both the activity report and keep-alive failed, and the campaign is not active",
+  "活跃上报完成，但活动未开启": "Activity reported, but the campaign is not active",
+  "活跃上报成功": "Activity reported"
 }

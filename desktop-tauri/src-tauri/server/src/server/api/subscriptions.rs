@@ -1,4 +1,4 @@
-//! 订阅路由（「网络代理」页的「订阅」区块）。
+//! 订阅路由（「网络代理」页的「订阅管理」）。
 //!
 //!   GET  /api/subscriptions              订阅列表 + 内核状态
 //!   POST /api/subscriptions/add          新增订阅 {name, url}
@@ -7,8 +7,11 @@
 //!   POST /api/subscriptions/remove       删除订阅 {id}
 //!   POST /api/subscriptions/decode-qr    从图片解二维码 {imageBase64} → {url}
 //!   GET  /api/subscriptions/kernel       内核状态（下载进度 / 运行状态）
-//!   POST /api/subscriptions/kernel/download  开始下载内核（后台任务，轮询看进度）
+//!   POST /api/subscriptions/kernel/download  开始下载内核（{proxy, dir} 可选，
+//!                                        后台任务，轮询看进度）
+//!   POST /api/subscriptions/kernel/download/cancel  停止下载（删掉半截文件）
 //!   POST /api/subscriptions/kernel/restart   启动 / 重启内核（重建配置）
+//!   POST /api/subscriptions/kernel/remove    删除已下载的内核（先停进程再删文件）
 //!
 //! ── 分发方式 ────────────────────────────────────────────────
 //! 与 proxies 同构：一条 `/api/subscriptions` 固定路径入口 + 按 (方法, 剩余
@@ -108,8 +111,10 @@ pub async fn entry(request: axum::extract::Request) -> Response {
         ("POST", "remove") => remove(&body).await,
         ("POST", "decode-qr") => decode_qr(&body),
         ("GET", "kernel") => ok_json(sub_kernel::status_json()),
-        ("POST", "kernel/download") => kernel_download().await,
+        ("POST", "kernel/download") => kernel_download(&body).await,
+        ("POST", "kernel/download/cancel") => kernel_download_cancel(),
         ("POST", "kernel/restart") => kernel_restart(),
+        ("POST", "kernel/remove") => kernel_remove(),
         _ => management_error(
             404,
             format!("Not found: {} {full_path}", method.as_str()),
@@ -267,13 +272,101 @@ fn decode_qr(body: &Bytes) -> Response {
 // ─── 内核操作 ───────────────────────────────────────────────
 
 /// POST /api/subscriptions/kernel/download（后台下载，进度轮询看）
-async fn kernel_download() -> Response {
+///
+/// 请求体（两个字段都可省）：`{proxy: null | {source,…}, dir: "D:\\kernel" | ""}`
+/// —— 对应下载弹窗里的两个选择。**先落配置再投命令**：worker 执行时读配置决定
+/// 走哪条线路、装到哪儿（见 `sub_kernel::request_download` 的说明），所以这两个
+/// 值同时是「本次下载的参数」与「下次的默认值」—— 弹窗下次打开显示的就是它们，
+/// 不必另设一个「保存」按钮（也就不会出现「改了没点保存」的中间态）。
+///
+/// `dir` 空串 = 恢复默认目录；非绝对路径当场 400 —— 宁可在这里说清楚，也不要
+/// 等下载时报一句「创建内核目录失败」。
+async fn kernel_download(body: &Bytes) -> Response {
     if sub_kernel::installed() {
         return ok_json(sub_kernel::status_json());
     }
+    // 下载中重复投命令只会让 worker 排队（它此刻正忙着下载），用户看到的是
+    // 「点了没反应」；当场说清楚
+    if downloading() {
+        return management_error(400, "内核正在下载中，先停止或等它下完");
+    }
+    let payload = match parse_body(body) {
+        Ok(value) => value,
+        Err(_) => return management_error(400, "请求内容不是有效 JSON"),
+    };
+    // 出口：与账号代理 / 更新出口同一套归一（null / 空 = 默认链）
+    let proxy = match crate::server::core::proxies::normalize_account_proxy(
+        payload.get("proxy").unwrap_or(&Value::Null),
+    ) {
+        Ok(proxy) => proxy,
+        Err(error) => return management_error(400, &error.message),
+    };
+    // 目录：**缺字段 = 不动已存的设置**（老客户端与别的入口不带它）；
+    // 有值就必须是绝对路径（空串 = 恢复默认）
+    let dir = match payload.get("dir") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                Some(None)
+            } else if std::path::Path::new(trimmed).is_absolute() {
+                Some(Some(trimmed.to_string()))
+            } else {
+                return management_error(400, "存放目录必须是绝对路径（例如 D:\\proxy-kernel）");
+            }
+        }
+        Some(_) => return management_error(400, "存放目录必须是字符串"),
+    };
+    // 两个键各自落盘，任一失败都算「没完全落盘」（进程内已生效，重启会回到旧值）
+    let proxy_saved = if payload.get("proxy").is_some() {
+        crate::server::config::set_kernel_proxy(proxy)
+    } else {
+        true
+    };
+    let dir_saved = match dir {
+        Some(value) => crate::server::config::set_kernel_dir(value),
+        None => true,
+    };
     sub_kernel::request_download(subscriptions::enabled_provider_inputs());
-    logging::log("[Subscription]", "⬇️ 开始下载代理内核");
-    ok_json(sub_kernel::status_json())
+    logging::log(
+        "[Subscription]",
+        &format!(
+            "⬇️ 开始下载代理内核（存放目录 {}）",
+            sub_kernel::kernel_dir().to_string_lossy()
+        ),
+    );
+    let mut status = sub_kernel::status_json();
+    if let Some(object) = status.as_object_mut() {
+        object.insert("saved".to_string(), Value::Bool(proxy_saved && dir_saved));
+    }
+    ok_json(status)
+}
+
+/// POST /api/subscriptions/kernel/download/cancel（停止下载）。
+///
+/// 只有**正在下载**时才受理：`{canceled: true}` 表示停止请求已置位（真正的
+/// 落地由前端轮询 `download.state` 收敛 —— 下载循环在下个分片就响应，毫秒级）；
+/// 不在下载中时 `{canceled: false}`，不假装停成功了（与 remove 的「幂等但如实
+/// 报」同一取向）。
+fn kernel_download_cancel() -> Response {
+    let canceled = sub_kernel::request_cancel_download();
+    if canceled {
+        logging::log("[Subscription]", "⏹️ 请求停止下载代理内核");
+    }
+    let mut status = sub_kernel::status_json();
+    if let Some(object) = status.as_object_mut() {
+        object.insert("canceled".to_string(), Value::Bool(canceled));
+    }
+    ok_json(status)
+}
+
+/// 快照里的下载状态是不是 downloading（下载与删除两个入口共用同一个判据）
+fn downloading() -> bool {
+    sub_kernel::status_json()
+        .get("download")
+        .and_then(|download| download.get("state"))
+        .and_then(Value::as_str)
+        == Some("downloading")
 }
 
 /// POST /api/subscriptions/kernel/restart（手动启动 / 重启；先落日志便于排障）
@@ -284,4 +377,30 @@ fn kernel_restart() -> Response {
     }
     sub_kernel::request_restart(enabled);
     ok_json(sub_kernel::status_json())
+}
+
+/// POST /api/subscriptions/kernel/remove（删除已下载的内核）。
+///
+/// 幂等：没装（或已经删掉）直接返回现状，不报错 —— 这个动作的目标状态是
+/// 「内核不在磁盘上」，它已经成立。下载中直接拒绝：命令队列是串行的，此时投
+/// 删除会排在下载后面，用户看到的是「点了没反应」，不如当场说清楚。
+///
+/// 响应是**投命令前**的快照（命令异步执行）：真正的落地状态由前端轮询
+/// `installed` 收敛（与下载 / 重启同一套）。
+fn kernel_remove() -> Response {
+    let status = sub_kernel::status_json();
+    let downloading = status
+        .get("download")
+        .and_then(|download| download.get("state"))
+        .and_then(Value::as_str)
+        == Some("downloading");
+    if downloading {
+        return management_error(400, "内核正在下载中，等下载结束后再删除");
+    }
+    if !sub_kernel::installed() {
+        return ok_json(status);
+    }
+    sub_kernel::request_remove();
+    logging::log("[Subscription]", "🗑️ 删除代理内核（停进程 + 清内核目录）");
+    ok_json(status)
 }

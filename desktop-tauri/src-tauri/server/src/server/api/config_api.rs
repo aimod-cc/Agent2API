@@ -11,6 +11,8 @@
 //! 见 `http::router` 的登记处）；
 //!   - apiKey 非字符串、或长度 < 8 → 400 `{"success":false,"error":"API Key 至少需要 8 个字符"}`
 //!   - apiKey 为 null → 删除 key
+//!   - apiKey 合法但本机加密不可用（密钥文件 / 配置目录建不出来等）→ 500，且
+//!     **一个字节都不写**（盘上仍是旧 Key，照常可用；见 `config::set_api_key`）
 //!   - locale 非空字符串 → 更新语言
 //!   - 写盘后返回 `{success:true,data:{apiKeySet,locale,defaultModel}}`
 //!
@@ -71,15 +73,25 @@ pub async fn post_config(State(_state): State<ServerState>, body: Bytes) -> Resp
     if let Some(value) = object.get("apiKey") {
         match value {
             // null → 删除 key（对应 Node 版 delete config.apiKey + opts.apiKey = null）
+            // 删除不经过加密，不会出现 `Err`（见 `config::set_api_key` 的说明）；落库
+            // 失败沿用既有语义（内部已记日志、本次运行已生效，请求照常成功）
             Value::Null => {
-                config::set_api_key(None);
+                let _ = config::set_api_key(None);
                 logging::log("[Config]", "API Key 已清除，接口恢复免鉴权（仅监听 127.0.0.1）");
             }
             Value::String(text) => {
                 if text.chars().count() < MIN_API_KEY_LENGTH {
                     return errors::management_error(400, API_KEY_TOO_SHORT);
                 }
-                config::set_api_key(Some(text.clone()));
+                // 收明文、落 `enc1:` 信封（见 `config::set_api_key`）。加密失败时一个
+                // 字节都没写、盘上仍是旧值 —— 必须报出去，绝不能报成功（面板会以为
+                // Key 已更新）。与校验不过的 400 不同：请求本身没问题，是本机加密环境
+                // 不可用，所以是 500（与 panel 注册的「密码加密失败」同一处置）；
+                // 原因一并带上，让用户能照着排查
+                if let Err(reason) = config::set_api_key(Some(text.clone())) {
+                    logging::log("[Config]", &format!("❌ API Key 保存失败: {reason}"));
+                    return errors::management_error(500, format!("API Key 保存失败: {reason}"));
+                }
                 // 不打印 key 本身（日志会被导出与截图），只说明已更新
                 logging::log("[Config]", "✅ API Key 已更新，客户端需带 Authorization: Bearer <key>");
             }

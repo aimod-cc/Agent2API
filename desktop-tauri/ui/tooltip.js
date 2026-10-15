@@ -8,6 +8,13 @@
  * 触发方式、定位、动画与无障碍全部由本模块负责，业务 JS 零感知 ——
  * 后续新增设置项照抄这个写法即可，不需要任何 init 调用。
  *
+ * ── 内容的两处可选增强（都可缺省，缺省时行为与最初一致）────────
+ *   · `data-tip` 里可以用 `\n` 换行、行首 `[#rrggbb]` 加一枚色点 —— 报表
+ *     图表的气泡用它逐行列出「总量 + 每个模型用了多少」（读数是表格形态，
+ *     挤成一行读不出来）。语法与安全的完整说明见下面的 paint()。
+ *   · `data-tip-variant="plain"` 切换成浅底深字的卡片样式（CSS 按
+ *     data-variant 选样式）—— 图表读数用它，说明性文案仍走品牌蓝底的默认样式。
+ *
  * 交互取舍：
  *   · 悬停 150ms 后显示、移开 80ms 后收起：问号多排在标题右侧，
  *     鼠标横穿标题行时不该闪出一排气泡；收起留一点宽限，手抖不至于把气泡弄没。
@@ -125,6 +132,54 @@
     bubble.classList.toggle('is-top', flip);
   }
 
+  /**
+   * 气泡内容的渲染。
+   *
+   * 支持两种**轻量标记**，都是我们自己产出的受控内容（报表图表的气泡用它们
+   * 交出「日期 / 总量 / 每模型一行」的读数）：
+   *   · `\n` 换行 —— 每一行渲染成一个块级 .tip-line（换行由元素表达，CSS 的
+   *     空白处理不必为多行改动）；
+   *   · 行首 `[#rrggbb]`（3 位或 6 位十六进制）—— 该行前面加一枚色点
+   *     （模型用量行的颜色标识，配色由图表一侧给出）。
+   *
+   * 绝不解析 HTML、绝不碰 innerHTML：文本一律走 createTextNode，色点只接受
+   * 正则捕获到的十六进制色值 —— `data-tip` 的内容可能来自用户数据，
+   * 当 HTML 塞进去就是注入。不含标记的单行文案仍是「一个文本节点」，
+   * 与改造前的 `textContent = text` 行为逐字一致。
+   *
+   * `variant` 透传到气泡的 data-variant 上，CSS 按它选样式（tooltip.js 不认识
+   * 具体变体的语义，只负责搬运 —— 见 tooltip.css 的 [data-variant="plain"]）。
+   */
+  const DOT_PREFIX = /^\[(#[0-9a-fA-F]{3}|#[0-9a-fA-F]{6})\]/;
+
+  function paint(el, text, variant) {
+    el.textContent = '';
+    if (variant) el.dataset.variant = variant;
+    else delete el.dataset.variant;
+    const lines = text.split('\n');
+    // 单行且无色点：直接一个文本节点（绝大多数气泡走这条，行为与改造前一致）
+    if (lines.length === 1 && !DOT_PREFIX.test(lines[0])) {
+      el.appendChild(document.createTextNode(lines[0]));
+      return;
+    }
+    for (const line of lines) {
+      const row = document.createElement('span');
+      row.className = 'tip-line';
+      const match = DOT_PREFIX.exec(line);
+      if (match) {
+        const dot = document.createElement('span');
+        dot.className = 'tip-bubble-dot';
+        dot.style.background = match[1];
+        row.classList.add('tip-line-dot');
+        row.appendChild(dot);
+        row.appendChild(document.createTextNode(line.slice(match[0].length)));
+      } else {
+        row.appendChild(document.createTextNode(line));
+      }
+      el.appendChild(row);
+    }
+  }
+
   /** 展开锚点的气泡；同一个锚点重复调用只重新定位 */
   function open(el) {
     const text = (el.dataset.tip || '').trim();
@@ -132,7 +187,7 @@
     cancelTimers();
     if (anchor && anchor !== el) close();
     anchor = el;
-    bubble.textContent = text;
+    paint(bubble, text, el.dataset.tipVariant);
     el.classList.add('active');
     // aria-describedby 只在展开期间挂：气泡是全局复用的一个节点，
     // 常驻引用会把六条说明同时读给读屏软件

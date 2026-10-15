@@ -5,10 +5,14 @@
 #   bash scripts/release.sh vX.Y.Z <run-id>   # 或显式指定 run
 #
 # 做三件事：
-#   1. 下载 build 工作流的两个安装包 artifact（windows-nsis / macos-universal）到 dist/；
+#   1. 下载 build 工作流的产物 artifact（windows-nsis / macos-universal，以及
+#      新版的 linux-server-amd64 / -arm64 两个容器内更新包）到 dist/；
 #   2. 用 tag 所指提交的提交信息（= 更新日志，见 agent.md 第 5 节）创建 / 更新
-#      GitHub Release 并挂两个附件；
+#      GitHub Release 并挂全部附件；
 #   3. 打印验收提示。
+#
+# linux-server-* 两个 artifact 是后加的（容器内一键更新用）：老 tag 的 run 里
+# 没有它们，脚本只提醒、不中断（历史 tag 仍可重跑收尾）。
 #
 # 幂等可重跑：附件 `--clobber` 覆盖上传。
 
@@ -70,6 +74,20 @@ EXE=$(ls dist/windows-nsis/*.exe)
 DMG=$(ls dist/macos-universal/*.dmg)
 echo "→ 已下载 $(basename "$EXE") / $(basename "$DMG")"
 
+# 容器内更新包：两个架构的 tar.gz + 同名 .sha256（面板按名找校验文件，
+# 缺了会拒绝安装）。老 tag 的 run 没有这两个 artifact —— 提醒一句继续走。
+ASSETS=("$EXE" "$DMG")
+if [ -d dist/linux-server-amd64 ] && [ -d dist/linux-server-arm64 ]; then
+  # 两个目录下各是 <包名>.tar.gz 与 <包名>.tar.gz.sha256，原样全带上
+  for file in dist/linux-server-amd64/* dist/linux-server-arm64/*; do
+    ASSETS+=("$file")
+  done
+  echo "→ 已下载 $(basename "$(ls dist/linux-server-amd64/*.tar.gz)") / $(basename "$(ls dist/linux-server-arm64/*.tar.gz)")（含 .sha256）"
+else
+  echo "⚠️  这个 run 里没有 linux-server-* 产物（本功能上线前的 tag？）——"
+  echo "    Release 将不含容器内更新包，面板更新入口会退回「手动升级命令」提示"
+fi
+
 # ── 2. 更新日志 = tag 所指提交的提交信息 ──────────────────────
 NOTES_FILE=$(mktemp)
 trap 'rm -f "$NOTES_FILE"' EXIT
@@ -77,10 +95,10 @@ git log -1 --format=%B "$TAG" > "$NOTES_FILE"
 
 echo "→ GitHub Release"
 if gh release view "$TAG" >/dev/null 2>&1; then
-  gh release upload "$TAG" --clobber "$EXE" "$DMG"
+  gh release upload "$TAG" --clobber "${ASSETS[@]}"
   echo "  ↳ 已存在，附件覆盖上传"
 else
-  gh release create "$TAG" --title "$TAG" --notes-file "$NOTES_FILE" "$EXE" "$DMG"
+  gh release create "$TAG" --title "$TAG" --notes-file "$NOTES_FILE" "${ASSETS[@]}"
 fi
 
 # ── 3. 验收提示 ───────────────────────────────────────────────
@@ -89,3 +107,5 @@ echo "发版收尾完成。核对："
 echo "  [1] GitHub Release:  gh release view $TAG"
 echo "  [2] Docker Hub:      https://hub.docker.com/r/aimodcc/agent2api/tags （$TAG 版本号 + latest）"
 echo "  [3] 安装包「关于」页版本号与 $TAG 一致"
+echo "  [4] 容器内更新：面板「设置 → 软件更新」出现「下载并更新」，且 Release 里"
+echo "      agent2api-server-linux-{amd64,arm64}.tar.gz 与各自的 .sha256 都在"

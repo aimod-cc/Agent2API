@@ -151,6 +151,33 @@ impl AccountStore {
         self.snapshot(&state)
     }
 
+    /// 全部账号 proxy 指向的池条目 id 集合（去重）。
+    ///
+    /// 判据是 `proxy.config.source == "pool"`（引用在 describe 之后的形态，
+    /// 见 `proxies::describe_account_proxy` —— 解析失败的引用 config 也在，
+    /// 所以「引用了一个已删掉的条目」同样统计得到）。消费方是内核的
+    /// lazy listeners（`sub_kernel::runtime` 只给被引用的订阅节点开监听器，
+    /// 见 `proxy_pool::subscription_node_keys`），这里不做启用状态过滤：
+    /// 禁用账号的引用也算「在用」—— 重新启用不该再付一次内核重启的等待。
+    pub fn referenced_pool_ids(&self) -> std::collections::HashSet<String> {
+        let _guard = self.guard();
+        let state = self.load(&_guard);
+        state
+            .accounts
+            .iter()
+            .filter_map(|record| {
+                let proxy = record.proxy();
+                let config = proxy.get("config")?;
+                config.get("source").and_then(Value::as_str).filter(|source| *source == "pool")?;
+                config
+                    .get("proxyId")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
     /// 账号 id → 该记录最近一次改动的时刻（`max(addedAt, updatedAt)`，毫秒）。
     ///
     /// 给「这条结论现在还算不算数」的时效判定用（见 `core::usage_query` 的快照
@@ -392,6 +419,16 @@ impl AccountStore {
                     "limiters".to_string(),
                     crate::server::core::limiter::effective_rules_json_in(record.fields()),
                 );
+                // 跨家统一注入的**账号展示名**：与前端 `displayNameOf` 同口径的
+                // 唯一后端实现（规则见本文件底部的 `display_name_of`）。
+                // 恒为非空字符串（`displayName` 全兜底失效时退 id），请求日志 /
+                // 运行日志 / 选路面板 / 签到台账等后端文案一律读它 —— 账号页
+                // 显示什么，日志里就是什么，不再出现「账号页邮箱、日志昵称」
+                // 这种两套口径的错位（issue #249）。
+                fields.insert(
+                    "displayName".to_string(),
+                    Value::String(display_name_of(&fields, &record.id().to_string())),
+                );
                 Value::Object(fields)
             }
             // 各家形状恒为对象；真出现异常形态时原样透出，不在这里改语义
@@ -562,5 +599,115 @@ fn low_balance_public(provider: &str, value: Option<&Value>) -> Value {
         "skip" => json!({ "mode": "skip", "threshold": threshold }),
         "disable" => json!({ "mode": "disable", "threshold": threshold }),
         _ => json!({ "mode": "off", "threshold": 0.0 }),
+    }
+}
+
+/// 公开形态字段 → 账号展示名（`displayName`，恒为非空字符串）。
+///
+/// 这是前端 `displayNameOf`（ui-islands accounts-domain.ts）的**唯一后端口径**，
+/// 两条线与它逐条对齐：
+///   1. 用户显式设置过备注名（`nameCustom`）→ 备注名恒为主名；
+///   2. 未打标 → 「以邮箱报名字」的三家（Qoder 两地 / AutoClaw 国际版 / Accio
+///      两地）**邮箱优先** —— 这是历史约定：这四家登录拿到的是邮箱、昵称往往
+///      缺失或不可读（issue #249 的 Qoder 国版正是「账号页邮箱、日志昵称」的
+///      错位来自两套口径）；其余家昵称优先，再退 name / 标识 / id。
+/// 前端 displayNameOf 的兜底链是 `nickname || name || identifierOf || id`，
+/// 这里 `identifier` 按各家的能力表逐家写死（与前端 `identifier` 列同一份口径，
+/// 后端没有那张表，家数有限不值得再抄一份）。
+///
+/// **消费方只读公开形态**（选路快照 / 签到台账 / telemetry），所以入参就是
+/// 公开形态字段本身（`name` / `nickname` / `email` / `nameCustom` / `provider`），
+/// 不再回读记录。
+fn display_name_of(public: &Map<String, Value>, id: &str) -> String {
+    let text = |key: &str| -> String {
+        public
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    let name = text("name");
+    // 用户显式设置过备注名（update_account 真正改到 name 时打的标）→ 备注名恒为主名
+    if public.get("nameCustom").map(js_truthy).unwrap_or(false) && !name.is_empty() {
+        return name;
+    }
+    let email = text("email");
+    let provider = text("provider");
+    // 「以邮箱报名字」的三家：与前端 emailAsName 列一致 ——
+    // Qoder 两个地区 / AutoClaw 国际版 / Accio 两个地区
+    let email_as_name = super::is_qoder_family(&provider)
+        || provider == super::AUTOCLAW_INTL_PROVIDER_ID
+        || super::is_accio_family(&provider);
+    if email_as_name && !email.is_empty() {
+        return email;
+    }
+    let nickname = text("nickname");
+    let identifier = identifier_key_of(&provider).map(text).unwrap_or_default();
+    let fallback = [nickname, name, identifier]
+        .into_iter()
+        .find(|value| !value.is_empty())
+        .unwrap_or_else(|| id.to_string());
+    fallback
+}
+
+/// 各家公开形态上的「账号标识」字段键（与前端能力表 `identifier` 列同一份口径；
+/// 未登记的家按 userId 兜底 —— 与前端 GENERIC_FEATURES 一致）。
+fn identifier_key_of(provider: &str) -> Option<&'static str> {
+    match provider {
+        "workbuddy" | "workbuddy-intl" | "catpaw" | "trae" | "kuku" => Some("uid"),
+        "cline-free" | "cline-pass" => Some("account"),
+        "officeace" => Some("id"),
+        _ => Some("userId"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::display_name_of;
+
+    fn fields(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        value.as_object().cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn qoder_shows_email_like_the_accounts_page() {
+        // issue #249：Qoder 国版账号页显示邮箱、请求日志显示昵称 —— 统一后
+        // 「以邮箱报名字」的家在后端同样邮箱优先
+        let value = fields(json!({
+            "provider": "qoder", "name": "昵称", "email": "a@b.com", "userId": "u1",
+        }));
+        assert_eq!(display_name_of(&value, "id-1"), "a@b.com");
+        let intl = fields(json!({
+            "provider": "qoder-intl", "email": "c@d.com", "userId": "u2",
+        }));
+        assert_eq!(display_name_of(&intl, "id-2"), "c@d.com");
+    }
+
+    #[test]
+    fn custom_note_wins_over_email() {
+        let value = fields(json!({
+            "provider": "qoder", "name": "备注名", "nameCustom": true,
+            "email": "a@b.com", "userId": "u1",
+        }));
+        assert_eq!(display_name_of(&value, "id-1"), "备注名");
+    }
+
+    #[test]
+    fn other_providers_prefer_nickname() {
+        let value = fields(json!({
+            "provider": "workbuddy", "nickname": "昵称", "name": "种子名", "uid": "uid-9",
+        }));
+        assert_eq!(display_name_of(&value, "id-1"), "昵称");
+    }
+
+    #[test]
+    fn falls_back_to_identifier_then_id() {
+        let value = fields(json!({ "provider": "raccoon", "userId": "u-77" }));
+        assert_eq!(display_name_of(&value, "id-1"), "u-77");
+        let empty = fields(json!({ "provider": "raccoon" }));
+        assert_eq!(display_name_of(&empty, "id-9"), "id-9");
     }
 }

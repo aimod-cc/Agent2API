@@ -6,8 +6,9 @@
  * 是六项；账号维度由本弹窗的「测试账号」多选覆盖 —— 那是同一个动作的另一个参数，不是另一件事。
  *
  * ── 两层：参数在下、结果在上 ──────────────────────────────────
- *   1. **参数层**（外层 Dialog）：目标行 + 系统提示词 / 用户提示词 / 思考等级 / 流式 / 测试账号。
- *      默认值刻意取「最小请求」——用户提示词「你好」、流式开、思考等级跟随映射；
+ *   1. **参数层**（外层 Dialog）：目标行 + 系统提示词 / 用户提示词 / 对话协议 / 测试节点 /
+ *      思考等级 / 流式 / 测试账号。默认值刻意取「最小请求」——用户提示词「你好」、流式开、
+ *      协议 OpenAI Chat Completions、节点跟随账号配置、思考等级跟随映射；
  *   2. **结果层**（内层 Dialog，按账号分块）：测试中 / 一成一败 / 全部失败三态都住在这一层。
  *
  * 内层是**嵌在外层 DialogContent 的 children 里**的（照 add-account-modal.tsx 的双层形态）：
@@ -21,9 +22,9 @@
  * 账号**钉住**再走 `UpstreamService::forward` —— token 刷新、出站脱敏、提示词模式、思考等级注入、
  * 请求日志与调试报文全都覆盖到，所以结论与生产一致。也因此**会消耗少量额度**，且每次测试都带
  * 「测试」来源标记记入请求日志（报表统计里排除，见后端 `is_test`）——这句压成一行常驻在参数弹窗
- * 底部（额度必须看得见），其余解释各归其位：目标行 / 流式 / 账号的口径进 ⓘ（tip-q + Tooltip），
- * 「留空则…」进 placeholder，页脚旁白与标题里重复的模型 ID 一律不摆。文案精简的对照与去向见
- * prototype/model-test-lite.html。
+ * 底部（额度必须看得见），其余解释各归其位：目标行 / 协议 / 节点 / 流式 / 账号的口径进 ⓘ
+ * （tip-q + Tooltip），「留空则…」进 placeholder，页脚旁白与标题里重复的模型 ID 一律不摆。
+ * 文案精简的对照与去向见 prototype/model-test-lite.html。
  *
  * ── 中止：没有 abort 桥，靠同一个关联 id ──────────────────────
  * 桌面壳的桥（`invoke('api_request')`）**没有 abort**：一次已经在跑的调用取消不掉。所以 id 由
@@ -47,7 +48,9 @@ import {
 import {
   DEFAULT_PROVIDER_ID, byPriorityOrder, displayNameOf, isRateLimited, positionMap, providerFeatures,
 } from './accounts-domain'
-import type { AccountRecord } from './accounts-shared'
+import {
+  POOL_VALUE_PREFIX, poolItemLabel, type AccountRecord, type PoolItem,
+} from './accounts-shared'
 import * as customSource from './models-custom-source'
 import type { ManageModel } from './models-custom-source'
 import { levels as reasoningLevels } from './models-reasoning'
@@ -71,6 +74,10 @@ type TestModelRequest = {
   /** 本次指定的思考等级；空 = 不写进请求体（映射上绑的等级因此照常生效） */
   reasoning?: string
   stream?: boolean
+  /** 本次测试使用的网关对话协议（chat_completions / responses / anthropic） */
+  protocol?: string
+  /** 本次测试临时指定的出网节点（空 = 跟随账号配置，direct = 直连，pool:<id> = 代理池节点） */
+  proxy?: string
   /** 前端生成的关联 id（请求日志那一行的 id，也是中止用的把手） */
   test_id?: string
 }
@@ -84,6 +91,8 @@ type TestModelResponse = {
   reasoning?: string
   provider?: string
   model?: string
+  protocol?: string
+  proxy?: string | null
   account_id?: string | null
   account_name?: string | null
   upstream_model?: string | null
@@ -127,9 +136,14 @@ type WindowBridge = {
     testModel(payload: TestModelRequest): Promise<TestModelResponse | null | undefined>
     /** 「终止请求」：按关联 id 置位取消令牌（测试的中止走它，见模块头） */
     terminateStatsRequest?(id: string): Promise<unknown>
+    /** 代理池列表（「网络代理」页维护的命名出口节点） */
+    getProxyPool?(): Promise<{ items?: PoolItem[] } | null | undefined>
   }
   wbApp?: {
     getState?: () => { accounts?: { accounts?: AccountRecord[] } } | null | undefined
+  }
+  wbProviders?: {
+    PROTOCOL_OPTIONS?: Array<{ value: string; label: string }>
   }
 }
 
@@ -148,6 +162,23 @@ const DEFAULT_PROMPT = '你好'
 
 /** 提示词长度上限（与后端 `MAX_PROMPT_CHARS` 同值；超了后端会截断，这里先挡一道） */
 const MAX_PROMPT_CHARS = 4000
+
+/** 网关对话协议兜底选项（与 providers.js 的 PROTOCOL_OPTIONS 及后端 TestProtocol 一致） */
+const FALLBACK_PROTOCOLS: Array<{ value: string; label: string }> = [
+  { value: 'chat_completions', label: 'OpenAI - Chat Completions' },
+  { value: 'responses', label: 'OpenAI - Responses' },
+  { value: 'anthropic', label: 'Anthropic - Messages' },
+]
+
+/** 结果块里的协议简写（非默认协议时展示） */
+const PROTOCOL_SHORT: Record<string, string> = {
+  chat_completions: 'Chat Completions',
+  responses: 'Responses',
+  anthropic: 'Anthropic Messages',
+}
+
+/** 临时直连在节点下拉里的取值（与后端 parse_proxy_override 的 direct 分支对齐） */
+const PROXY_DIRECT = 'direct'
 
 /** 模型行的「来源」徽章（与模型表同一套口径；自定义家的 source 是空串，见 ManageModel） */
 const SOURCE_LABEL: Record<string, string> = {
@@ -319,6 +350,10 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
 
   const [systemPrompt, setSystemPrompt] = React.useState('')
   const [prompt, setPrompt] = React.useState(DEFAULT_PROMPT)
+  const [protocol, setProtocol] = React.useState('chat_completions')
+  const [proxy, setProxy] = React.useState('')
+  const [pool, setPool] = React.useState<PoolItem[] | null>(null)
+  const [poolError, setPoolError] = React.useState('')
   const [reasoning, setReasoning] = React.useState('')
   const [stream, setStream] = React.useState(true)
   /**
@@ -339,6 +374,29 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
 
   const running = slots.some(slot => slot.state === 'running')
   const now = useClock(running)
+
+  /** 打开弹窗时读取一次代理池列表（供「测试节点」下拉使用） */
+  React.useEffect(() => {
+    let alive = true
+    void (async () => {
+      try {
+        const getPool = bridge().workbuddyDesktop?.getProxyPool
+        if (typeof getPool !== 'function') throw new Error(t('当前环境不支持代理池'))
+        const data = await getPool()
+        if (!alive) return
+        if (!data || typeof data !== 'object' || !Array.isArray(data.items)) {
+          throw new Error(t('代理池响应异常'))
+        }
+        setPool(data.items)
+        setPoolError('')
+      } catch (error) {
+        if (!alive) return
+        setPool([])
+        setPoolError(errorMessage(error))
+      }
+    })()
+    return () => { alive = false }
+  }, [])
 
   /** 中止在途请求：seq 自增（作废回调）+ 逐个置位取消令牌，然后清空槽位回到参数层 */
   const abort = React.useCallback((quiet = false) => {
@@ -365,6 +423,8 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
       system_prompt: systemPrompt.trim(),
       reasoning,
       stream,
+      protocol,
+      ...(proxy ? { proxy } : {}),
       test_id: slot.testId,
     }
     const settle = (patch: Partial<Slot>): void => {
@@ -467,6 +527,28 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
         ? t('映射上绑定的思考等级是 {level}，「跟随映射」按它注入', { level: boundLevel })
         : t('映射上未绑定思考等级，「跟随映射」等于这次不注入'),
   ].filter(Boolean).join(t('；')) + t('。')
+
+  const protocols = bridge().wbProviders?.PROTOCOL_OPTIONS || FALLBACK_PROTOCOLS
+  const protocolLabel = protocols.find(item => item.value === protocol)?.label || protocol
+  const proxyItems: Array<{ value: string; label: string; disabled?: boolean }> = [
+    { value: '', label: t('跟随账号配置') },
+    { value: PROXY_DIRECT, label: t('直连（不使用代理）') },
+    ...(pool ?? []).map(item => ({
+      value: `${POOL_VALUE_PREFIX}${item.id}`,
+      label: poolItemLabel(item),
+    })),
+  ]
+  if (pool === null) {
+    proxyItems.push({ value: '__hint_pool__', label: t('正在读取代理列表…'), disabled: true })
+  } else if (!pool.length) {
+    proxyItems.push({
+      value: '__hint_pool__',
+      label: poolError ? t('代理列表读取失败') : t('还没有代理（去「网络代理」页添加）'),
+      disabled: true,
+    })
+  }
+  const proxyLabel = proxyItems.find(item => item.value === proxy)?.label || t('跟随账号配置')
+
   const accountOptions = usable.map(account => ({
     value: account.id,
     // 「限额中」按**这个模型**判（限额是按模型记的：一个账号可能对 A 模型限额、对 B 模型正常）
@@ -528,11 +610,15 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
     const reply = String(result?.reply ?? '')
     const reasoningText = String(result?.reasoning ?? '')
     const foldKey = `think-${slot.testId}`
-    // 「上游 xxx」只在实际模型与被测名不同（映射改名）时才有信息量，同名不重复念一遍
+    // 「上游 xxx」只在实际模型与被测名不同（映射改名）时才有信息量，同名不重复念一遍；
+    // 协议与节点在显式切换时一并标出，便于对照本次测试条件
     const metaLine = [
       result?.upstream_model && result.upstream_model !== target.id
         ? t('上游 {model}', { model: result.upstream_model }) : '',
       result?.upstream_reasoning ? t('思考等级 {level}', { level: result.upstream_reasoning }) : '',
+      result?.protocol && result.protocol !== 'chat_completions'
+        ? (PROTOCOL_SHORT[result.protocol] || result.protocol) : '',
+      result?.proxy ? t('节点 {proxy}', { proxy: result.proxy }) : '',
       Number(result?.attempts) > 1 ? t('尝试 {n} 次', { n: Number(result?.attempts) }) : '',
     ].filter(Boolean).join(' · ')
     return (
@@ -642,6 +728,47 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
               placeholder={t('留空用默认问候「你好」')}
               value={prompt}
               onChange={event => setPrompt(event.currentTarget.value)} />
+          </div>
+
+          <div className='grid grid-cols-2 gap-4'>
+            <div className='flex flex-col gap-1.5'>
+              <div className='flex items-center gap-1.5'>
+                <Label htmlFor='model-test-protocol'>{t('对话协议')}</Label>
+                <Tooltip>
+                  <TooltipTrigger render={<span className='tip-q' tabIndex={0} aria-label={t('对话协议的说明')} />}>?</TooltipTrigger>
+                  <TooltipContent>{t('按所选网关对话协议组装请求并校验响应转换（Chat Completions / Responses / Anthropic Messages）。')}</TooltipContent>
+                </Tooltip>
+              </div>
+              <Select value={protocol} onValueChange={next => setProtocol(String(next))}>
+                <SelectTrigger id='model-test-protocol' className='w-full'>
+                  <SelectValue className='min-w-0 truncate'>{protocolLabel}</SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {protocols.map(item => (
+                    <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className='flex flex-col gap-1.5'>
+              <div className='flex items-center gap-1.5'>
+                <Label htmlFor='model-test-proxy'>{t('测试节点')}</Label>
+                <Tooltip>
+                  <TooltipTrigger render={<span className='tip-q' tabIndex={0} aria-label={t('测试节点的说明')} />}>?</TooltipTrigger>
+                  <TooltipContent>{t('仅本次测试临时生效，不修改账号保存的代理配置。可选「网络代理」页里的节点或强制直连。')}</TooltipContent>
+                </Tooltip>
+              </div>
+              <Select value={proxy} onValueChange={next => setProxy(String(next))}>
+                <SelectTrigger id='model-test-proxy' className='w-full'>
+                  <SelectValue className='min-w-0 truncate'>{proxyLabel}</SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {proxyItems.map(item => (
+                    <SelectItem key={item.value} value={item.value} disabled={item.disabled}>{item.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
           </div>
 
           <div className='grid grid-cols-2 gap-4'>

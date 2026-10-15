@@ -328,6 +328,8 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/proxies/pool/remove", any(api::accounts::proxies_entry))
         .route("/api/proxies/pool/test", any(api::accounts::proxies_entry))
         .route("/api/proxies/pool/sync-clash", any(api::accounts::proxies_entry))
+        .route("/api/proxies/settings", any(api::accounts::proxies_entry))
+        .route("/api/proxies/pool/provision", any(api::accounts::proxies_entry))
         // ── 订阅（「网络代理」页的订阅区块：机场订阅 → 内核本地监听器）──
         // 固定路径 + api::subscriptions::entry 按 (方法, 剩余段) 分发（理由同上：
         // 通配段与 404 兜底互相干扰）。内核命令是异步的（重启 / 拉订阅要几秒
@@ -341,7 +343,12 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/subscriptions/decode-qr", any(api::subscriptions::entry))
         .route("/api/subscriptions/kernel", any(api::subscriptions::entry))
         .route("/api/subscriptions/kernel/download", any(api::subscriptions::entry))
+        // 停止下载是**独立一条路径**（不是 download 上的查询参数）：它是另一个
+        // 动作，且必须在下载进行中也能到达 —— 与 download 共用一条路径会让
+        // 「按方法区分」的相邻语义（POST=开始）在同一个路径上出现两种含义
+        .route("/api/subscriptions/kernel/download/cancel", any(api::subscriptions::entry))
         .route("/api/subscriptions/kernel/restart", any(api::subscriptions::entry))
+        .route("/api/subscriptions/kernel/remove", any(api::subscriptions::entry))
         // ── 积分 / 签到 / 运营活动（对照 server.mjs 871-911 行）──
         // 六条都挂在 protected（Node 版每条都调了 checkApiKey），
         // 失败时的 body 是 OpenAI 风格（那几条在 server.mjs 的大 try 里）
@@ -520,6 +527,17 @@ pub fn panel_router(state: ServerState) -> Router {
         .route(
             "/api/keepalive-strip",
             get(api::keepalive::get_keepalive_strip).put(api::keepalive::put_keepalive_strip),
+        )
+        // ── 长度截断的自动续写 ──
+        // 与 /api/keepalive-strip 同一族（GET 读 / PUT 写、默认关、改的是客户端
+        // 看得见的行为），比它多一项：一个布尔开关 + 一个有界整数（轮数上限）——
+        // 上限是续写链两道停机里那道硬保险（相似度闸是软判据），两项合起来才
+        // 决定一次请求最多打上游几回，所以挂在同一条端点上。
+        // 挂 protected 的理由与那两者相同：开着它会为一次客户端请求多打若干次
+        // 上游往返、多花账号额度（判据与代价见 core::upstream::continuation）。
+        .route(
+            "/api/auto-continue",
+            get(api::auto_continue::get_auto_continue).put(api::auto_continue::put_auto_continue),
         )
         // ── 机器人校验开关 ──
         // 与 /api/sanitize 同形的单开关端点（GET 读 / PUT 写），挂 protected：
@@ -860,7 +878,7 @@ async fn require_api_key(mut request: Request, next: Next) -> Response {
                 if seen_headers.is_empty() { "无".to_string() } else { seen_headers.join("+") },
             ),
         );
-        return errors::panel_login_required_response();
+        return errors::panel_login_required_response(request.headers());
     }
     // ── 未注册闸门（headless 专属，桌面壳不开启）────────────────
     // 管理员还没注册（也没用环境变量预置）：/api/* 只放行 /api/panel/
@@ -878,7 +896,7 @@ async fn require_api_key(mut request: Request, next: Next) -> Response {
         if !path.starts_with("/api/panel/")
             && !(keys.iter().any(|expected| request_matches_key(&request, expected)))
         {
-            return errors::panel_login_required_response();
+            return errors::panel_login_required_response(request.headers());
         }
         return next.run(request).await;
     }

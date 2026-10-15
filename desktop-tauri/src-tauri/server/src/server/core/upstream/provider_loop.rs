@@ -250,6 +250,13 @@ fn defer_to_next_account(
 /// 它的出路只有换号一条（见 [`defer_to_next_account`]）。
 const TRANSIENT_RETRY_STATUSES: &[u16] = &[408, 500, 502, 503, 504];
 
+/// 按**请求体字节数**拒收的状态码：这一档的结论只由「这份 body 有多大」决定，
+/// 重发同一份字节必然得到同一个失败 ⇒ 不进原地重发（见 [`fallback_retry_advice`]）。
+///
+/// 与 [`TRANSIENT_RETRY_STATUSES`] 相反：那三个码说的是「上游或链路自己抖了一下」，
+/// 再看一眼有意义；413 没有任何会变的量。
+const PAYLOAD_SIZE_REJECTION_STATUSES: &[u16] = &[413];
+
 /// 这次的失败状态码是否命中「指定错误码直接换号」名单（设置页「通用 → 请求重试」）。
 ///
 /// 命中的失败**跳过本账号**：不进 [`send_with_retry`] 的原地重发，也不做同
@@ -318,7 +325,12 @@ fn transport_retry_advice(error: &super::request::UpstreamRequestError, remainin
 ///     走到这里说明已经刷过一轮仍失败，重发没有新变量；
 ///   - `ContentBlocked`（内容策略拦截）：也有专属动作（换中性提示词重发一次，
 ///     见 `attempt_queue` 的动作 0），走到这里说明那次补救已经用掉 ——
-///     再原地重发同一份 body 结论不变（拦的是字节，不是账号）。
+///     再原地重发同一份 body 结论不变（拦的是字节，不是账号）；
+///   - `Fatal` + **413**（见 [`PAYLOAD_SIZE_REJECTION_STATUSES`]）：上游入口按请求体
+///     字节数拒收（实测 Loomy 的网关回 `{"error_code":"APIG.0201","error_msg":
+///     "Request entity too large"}`），判据里没有任何会变的量。而代价不对称：
+///     每次往返约 13 秒 + 一个 5 秒间隔，三次下来客户端的 60 秒等待墙先到，
+///     面板里只剩下「408 客户端在响应完成前断开」，真实成因埋在 attempt_details。
 fn fallback_retry_advice(
     class: &UpstreamErrorClass,
     remaining: usize,
@@ -331,6 +343,11 @@ fn fallback_retry_advice(
         UpstreamErrorClass::QuotaLimited { .. }
         | UpstreamErrorClass::TokenExpired { .. }
         | UpstreamErrorClass::ContentBlocked { .. } => None,
+        // 体积被入口拒收：重发同一份字节只会得到同一个 413（换号也一样，但那是
+        // 编排层的事，这里只撤「原地再发一次」这一件事）
+        UpstreamErrorClass::Fatal { .. } if PAYLOAD_SIZE_REJECTION_STATUSES.contains(&status) => {
+            None
+        }
         UpstreamErrorClass::Fatal { .. } => Some(RetryAdvice {
             delay_ms: config::retry_settings().delay_ms(),
             reason: format!("上游错误（HTTP {status}），换账号前先原地重发"),
@@ -501,11 +518,13 @@ async fn attempt_queue(
     // 建一次、整条请求共用 —— 选路、429 记账、成功清理三处读的必须是同一个键，
     // 否则冷却会写在一个名字上、查在另一个名字上。
     let cooldown_keys = rotate::CooldownKeys::new(&model);
-    // 会话粘性键（`route_state::conversation_key`）：模型 + 首条用户消息的
-    // 进程内哈希。空串 = 这条请求没有可用的会话特征（无 messages），粘性
-    // 自动不生效。整个请求周期只用这一个键 —— 429 顺延的后续选路查的是
-    // 同一个会话，粘住的账号失败后同样顺延（粘性不等于无条件）。
-    let conv_key = super::route_state::RouteState::conversation_key(&ctx.body);
+    // 会话粘性键（`route_state::conversation_key`）：优先取请求里的**显式会话
+    // 标识**（trace 头 / `prompt_cache_key` / Claude Code 的 `metadata.user_id`
+    // 等），都没有才回落到「模型 + 首条用户消息」的进程内哈希。空串 = 既没有
+    // 标识、也没有可用的会话特征（无 messages），粘性自动不生效。整个请求周期
+    // 只用这一个键 —— 429 顺延的后续选路查的是同一个会话，粘住的账号失败后
+    // 同样顺延（粘性不等于无条件）。
+    let conv_key = super::route_state::RouteState::conversation_key(ctx.client_headers, &ctx.body);
     let mut tried_ids: Vec<String> = Vec::new();
     // ── 两份独立的预算（见 config::RetrySettings）─────────────────────
     //   - `budget`：同一个账号上还能**原地重发**几次。整份请求共用一份，
@@ -563,7 +582,7 @@ async fn attempt_queue(
         if ctx.telemetry.is_cancelled() {
             return Err(cancellation::cancelled_error());
         }
-        let target = rotate::select_target_account(
+        let mut target = rotate::select_target_account(
             service,
             provider_ids,
             &cooldown_keys,
@@ -572,6 +591,10 @@ async fn attempt_queue(
             &conv_key,
         )
         .await?;
+        if let Some(override_proxy) = ctx.proxy_override {
+            target.proxy = override_proxy.clone();
+            target.proxy_notice = None;
+        }
         // 决策快照挂进 telemetry（最后一次为准：请求日志的「路由回放」显示
         // 的是最终承载那次选路的完整排序 —— 与 attempts 明细的换号链互补，
         // 那边回答「试了谁」，这边回答「当时为什么这么排」）。
@@ -1032,8 +1055,9 @@ async fn attempt_queue(
                 headers: plan.headers,
                 payload,
                 proxy: target.proxy.clone(),
-                // 能力位由适配器给；账号已配代理时它不参与（proxy 优先）
-                system_proxy_when_unset: adapter.system_proxy_when_unset(),
+                // 能力位由适配器给；账号已配代理或本次显式指定了直连/节点时它不参与
+                system_proxy_when_unset: ctx.proxy_override.is_none()
+                    && adapter.system_proxy_when_unset(),
             };
             // ── 调试模式：抓一份即将发出去的原始报文 ──────────────────
             // 位置在 `build_chat_request` 之后（URL / 头 / body 都已定稿）。

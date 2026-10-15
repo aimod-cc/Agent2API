@@ -341,8 +341,30 @@ fn codearts_daily_pool_envelope_cools_to_the_boundary_instead_of_ten_minutes() {
 
     let stored = rotate::account_limit_reset_at(&service, &id, "glm-5.3-flash");
     assert_eq!(stored, *reset_at, "落库的恢复时刻必须是适配器算出的日池重置点");
+    // ── 断言「是下一个北京零点」，而不是「距现在 > 10 分钟」（2026-10-13 修）──
+    //
+    // 原断言写的是 `minutes > 10`，本意是「不是 10 分钟兜底常量」；但它有个
+    // 时变缺陷：日池重置点就是**下一个北京零点**，于是每天 23:50–00:00 这十分钟
+    // 里「距零点」天然小于 10 分钟，用例必然变红（实测 2026-10-13 23:49 撞上）。
+    // 那是测试写法的问题，不是实现的 —— 与兜底常量无关的失败被报成了兜底。
+    //
+    // 改成直接钉住真正的判据：恢复时刻必须落在**当天或次日的北京零点**上，
+    // 且距现在不超过 24 小时（日池的语义就是「到零点重置」）。这样任何时刻
+    // 跑都成立，也不再依赖「现在离零点有多远」。
     let minutes = (stored - logging::now_ms()) / 60_000;
-    assert!(minutes > 10, "日池文案被压成 {minutes} 分钟 = 兜底常量，透传没生效");
+    assert!(
+        (0..=24 * 60).contains(&minutes),
+        "日池的恢复时刻应当落在 24 小时以内，实际 {minutes} 分钟"
+    );
+    // 判据：恢复时刻在北京时区里必须是 00:00:00 —— 日池按天重置。
+    // 10 分钟兜底常量（now + 10min）落在零点上的概率可忽略，这一条足以把它排除。
+    let at = crate::server::core::beijing::date_time_of_ms(stored).expect("合法时间戳");
+    use chrono::Timelike;
+    assert!(
+        at.hour() == 0 && at.minute() == 0 && at.second() == 0,
+        "恢复时刻必须是北京零点（日池按天重置），实际 {}",
+        at.format("%Y-%m-%d %H:%M:%S")
+    );
 }
 
 #[test]
@@ -387,5 +409,78 @@ fn that_one_argument_is_the_divider_between_a_day_and_ten_minutes() {
         after - before > 2 * 60 * 60 * 1000,
         "透传与写死 None 的差距应当是「一整天 vs 10 分钟」量级，实际差 {} 分钟",
         (after - before) / 60_000
+    );
+}
+
+const APIG_TOO_LARGE_BODY: &str = r#"{"error_msg":"Request entity too large","error_code":"APIG.0201","request_id":"apig-test"}"#;
+
+fn fatal(status: u16) -> UpstreamErrorClass {
+    UpstreamErrorClass::Fatal {
+        status,
+        message: format!("上游返回 {status}"),
+        upstream_code: None,
+    }
+}
+
+/// 413 说的是「这份字节太大」，重发一遍没有任何会变的量 ⇒ 不消耗原地重发预算。
+/// 改造前它落到兜底那一档，三次 ×5 秒间隔 + 每次约 13 秒往返 = 客户端的 60 秒
+/// 等待墙先到，面板只剩「408 客户端在响应完成前断开」，真因（413）埋在明细里。
+#[test]
+fn a_payload_size_rejection_gets_no_in_place_retry() {
+    assert!(
+        PAYLOAD_SIZE_REJECTION_STATUSES.contains(&413),
+        "413 应当在「按体积拒收」名单里"
+    );
+    assert!(
+        fallback_retry_advice(&fatal(413), 3, 413).is_none(),
+        "预算还剩 3 次也不该给 413 提原地重发"
+    );
+}
+
+/// 反对照：其它 4xx/未知失败照旧走兜底原地重发（这条改动只放开"体积拒收"那一格，
+/// 没有把 400 这类"含义由上游决定"的码一并排除）。
+#[test]
+fn other_fatal_statuses_still_get_the_fallback_resend() {
+    for status in [400u16, 404, 409] {
+        assert!(
+            fallback_retry_advice(&fatal(status), 3, status).is_some(),
+            "HTTP {status} 的语义由上游决定，兜底原地重发的既有行为不该变"
+        );
+    }
+    assert!(
+        !TRANSIENT_RETRY_STATUSES.contains(&413),
+        "413 不该被当成瞬时抖动（否则瞬时那一档会把它重发回去）"
+    );
+}
+
+/// 端到端：打到真实返回 413 的替身上身，**只发一次**（改造前是 1 + 3 次）。
+#[tokio::test]
+async fn a_real_413_response_is_sent_once_and_handed_back() {
+    let (transport, hits, task) =
+        mock_upstream(413, "application/json; charset=utf-8", APIG_TOO_LARGE_BODY).await;
+    let mut budget = RetryBudget::new(3);
+    let capture = crate::server::core::debug_traffic::TrafficCapture::begin("payload-too-large");
+    let result = send_with_retry(
+        &ZCODE_ADAPTER,
+        &transport,
+        &mut budget,
+        Some(&capture),
+        &RequestTelemetry::new(),
+        false,
+    )
+    .await;
+    task.abort();
+    let failure = match result {
+        Ok(_) => panic!("HTTP 413 不该被当成成功流"),
+        Err(failure) => failure,
+    };
+    assert_eq!(
+        1,
+        hits.load(Ordering::SeqCst),
+        "体积拒收的失败应当一次就交回，不该原地重发"
+    );
+    assert!(
+        matches!(failure.class, UpstreamErrorClass::Fatal { status: 413, .. }),
+        "状态码 413 要原样带回，不该被折成别的失败"
     );
 }

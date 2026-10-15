@@ -63,6 +63,21 @@
    .head-actions 自带 margin-left:auto，于是筛选与刷新按钮自动靠右，
    这里不需要任何额外定位声明。 */
 
+/* 自定义区间：选中「自定义」档时出现在分段控件右侧的两个日期输入。
+   排列在这里管（间距 / 对齐），输入框自身宽度由岛里的 Tailwind 类给
+   （w-[132px]，覆盖组件库 Input 的 w-full）—— 组件库控件的尺寸归类名、
+   版式归本文件，与其它页同一分工。 */
+.report-date-range {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.report-date-sep {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
 /* 概览小格：数字上等宽，切换范围时 1 → 10 不会让整块左右跳 */
 .page[data-page="overview"] .field .value {
   font-variant-numeric: tabular-nums;

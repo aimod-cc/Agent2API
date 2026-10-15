@@ -5,8 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title data-i18n="Agent2API · 登录">Agent2API · 登录</title>
   <script>
-    // 语言引导：在 head 解析期定下界面语言，再注入词典域清单（各域词典文件改由 i18n.js
-    // 执行时补写，原因见下方）—— 与 index.html 同一套，
+    // 语言引导：在 head 解析期定下界面语言，再同步注入词典（与 index.html 同一套，
     // 解析规则与 ui/i18n.js 的 resolveLocale 逐字一致，改一处要一起改）。
     // 登录页的静态文案只有 <title>；卡片内容由 React 岛渲染，本页内联登录脚本里的
     // 中文属后续批次，这里不碰。
@@ -31,10 +30,11 @@
       }
       document.documentElement.lang = locale;
       if (locale === 'zh-Hans') return; // 简体无词典：查不到即显示简体原文
-      // 只写域清单 manifest；各域词典文件由 i18n.js 在自己执行时补写 ——
-      // document.write 之后同步读 __WB_I18N_DOMAINS 拿到的是 undefined（manifest
-      // 要等本脚本块结束才执行），在这里循环只会写出 0 个。
       document.write('<script src="i18n/manifest.js"><\/script>');
+      var domains = window.__WB_I18N_DOMAINS || [];
+      for (var d = 0; d < domains.length; d++) {
+        document.write('<script src="i18n/' + locale + '/' + domains[d] + '.js"><\/script>');
+      }
     })();
   </script>
   <!-- 组件库产物（ui-kit + Tailwind，由 ui-islands 构建）：与主面板同一份。
@@ -121,8 +121,8 @@
     panel-captcha[state='error'] .pc-label { color: var(--ui-destructive); }
     @keyframes pc-spin { to { transform: rotate(360deg); } }
   </style>
-  <!-- 多语言运行时（域清单由上面 head 的引导脚本注入，各域词典由 i18n.js 执行时补写）：
-       排在所有 css 之后，且早于 body 末尾的 islands/ui.js 与 panel-captcha.js。 -->
+  <!-- 多语言运行时（词典已在上面 head 的引导脚本里同步注入）：排在所有 css 之后，
+       且早于 body 末尾的 islands/ui.js 与 panel-captcha.js。 -->
   <script src="i18n.js"></script>
 </head>
 <body>
@@ -245,12 +245,12 @@
         var registered = data && data.data && data.data.registered;
         isSetup = !registered;
         tip.textContent = isSetup
-          ? wbI18n.t('首次使用：创建一个管理员账号，用于登录此面板')
-          : wbI18n.t('请输入管理员账号与密码');
-        $('submit').textContent = isSetup ? wbI18n.t('创建账号并进入面板') : wbI18n.t('登录');
-        if (isSetup) $('password').placeholder = wbI18n.t('设置密码（至少 8 位）');
+          ? '首次使用：创建一个管理员账号，用于登录此面板'
+          : '请输入管理员账号与密码';
+        $('submit').textContent = isSetup ? '创建账号并进入面板' : '登录';
+        if (isSetup) $('password').placeholder = '设置密码（至少 8 位）';
       }).catch(function () {
-        tip.textContent = wbI18n.t('无法连接网关，请确认服务已启动');
+        tip.textContent = '无法连接网关，请确认服务已启动';
       });
 
       async function doSubmit(username, password) {
@@ -288,12 +288,12 @@
           // 后端的错误信封是 {success:false, error:"账号或密码不正确"}，error
           // 是字符串；也兼容 {message:"…"} 形态的对象
           if (detail && typeof detail === 'object') detail = detail.message;
-          errorEl.textContent = detail || wbI18n.t('请求失败，请重试');
+          errorEl.textContent = detail || '请求失败，请重试';
           button.disabled = false;
           captchaPayload = null; // payload 是一次性的：失败后重新验证
           if (captchaRequired) widget.reset();
         }).catch(function () {
-          errorEl.textContent = wbI18n.t('无法连接网关');
+          errorEl.textContent = '无法连接网关';
           button.disabled = false;
           captchaPayload = null;
           if (captchaRequired) widget.reset();
@@ -306,11 +306,11 @@
         var username = $('username').value.trim();
         var password = $('password').value;
         if (!username || !password) {
-          errorEl.textContent = wbI18n.t('请填写账号与密码');
+          errorEl.textContent = '请填写账号与密码';
           return;
         }
         if (captchaRequired && !captchaPayload) {
-          errorEl.textContent = wbI18n.t('请先勾选「我不是机器人」完成验证');
+          errorEl.textContent = '请先勾选「我不是机器人」完成验证';
           return;
         }
         doSubmit(username, password);

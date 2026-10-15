@@ -970,10 +970,14 @@ export function visibleAccounts(
 }
 
 /**
- * 分段计数：某分段显示的数字 = 「其余维度保持当前选择、本维度取该值」的账号数。
- * 「可见列表」与「分段计数」共用这一份口径 —— 否则徽标数字与点进去看到的结果会各算各的。
- * 提供商那一维不给自己算分段（它是下拉，数字直接写在选项里，见 accounts-page），
- * 但**要进其余分段的取景框**：切了家之后，状态 / 限额徽标就该跟着只数这一家。
+ * 分段计数：状态与限额按「两级筛选」各管一段 ——
+ *   · 状态段的数字 = 全量（提供商 + 搜索取景后），不受限额档位影响：状态是
+ *     一级筛选，它要回答「现在一共有多少账号」，数字必须恒定；
+ *   · 限额段的数字 = 状态收窄后的范围（提供商 + 搜索 + 状态档），再按
+ *     正常 / 已限流分档：限额是二级筛选，它数的是「这一级里还有多少」。
+ * 徽标与点进去看到的行数仍然一致（状态段在限额=全部时所见即徽标；限额段
+ * 在当前状态档下所见即徽标），而「全部」恒等于家底总数，切限额不再让状态
+ * 的数字跟着变。
  */
 export function filterCounts(
   all: AccountRecord[] | null | undefined,
@@ -985,7 +989,6 @@ export function filterCounts(
   const scope = (except: 'enabled' | 'limit') => list.filter(account =>
     matchProvider(account, filter)
     && (except === 'enabled' || matchEnabled(account, filter))
-    && (except === 'limit' || matchLimit(account, filter, usageOf, tokenUsageOf))
     && matchQuery(account, filter))
 
   const forEnabled = scope('enabled')

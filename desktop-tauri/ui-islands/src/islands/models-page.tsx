@@ -122,11 +122,11 @@ import type { ManageModel, ManageView } from './models-custom-source'
 // 内置家的图标映射（与添加账号弹窗、签到中心同一份，别处不要照抄这份映射）
 import { PROVIDER_ICONS } from './add-provider-pick'
 import {
-  GROUP_LIMIT, MODEL_SORT_OPTIONS, MODEL_STATE_OPTIONS, accept, bindingKeyOf, bindingsOf, builtinRailItems,
+  GROUP_LIMIT, MODEL_SORT_OPTIONS, MODEL_STATE_OPTIONS, accept, bindingKeyOf, bindingsOf, builtinRailCounts,
   closeCapability, closeCustomModel, closeMapping, collapseGroup, currentProvider, customProviderOptions,
-  directoryReady, esc, errorMessage, expandGroup, formatTime, getSnapshot, levelOf, load, models,
-  openAddCustomProvider, openCapability, openCustomModel, openMapping, providerLabelOf, providerOptions,
-  refreshAll,
+  customRailItems, directoryReady, esc, errorMessage, expandGroup, formatTime, getSnapshot, isAllCustomView,
+  levelOf, load, models, openAddCustomProvider, openCapability, openCustomModel, openMapping, providerLabelOf,
+  providerOptions, refreshAll,
   refreshModels, registerColumnSettings, removeCustomProvider, render, resolveProvider, restoreSavedFilters,
   pruneForeignTableNodes,
   rowEnabled, rowKeyOf, runRowAction, same, selectProvider, setSearch, setSort, setStateFilter, setTableEl,
@@ -252,11 +252,13 @@ function providerIconOf(id: string, label: string): string {
 
 /** 左栏 / 标题共用的头像节点（glyph 传 ReactNode 时直接渲染，如「全部」的网格）。
     有真实图标（内置家 / 名字match到预置目录的自定义家）用 <img>（.img 形态，中性底），
-    否则回落色相 monogram；「全部」不是一家，挂 .mute 走中性灰，不参与色环。 */
+    否则回落色相 monogram；两颗「全部」（内置 / 自定义组各自的聚合哨兵）都不是一家，
+    挂 .mute 走中性灰，不参与色环。 */
 function providerAvatar(id: string, label: string, glyph?: React.ReactNode): React.ReactNode {
   const icon = glyph ? '' : providerIconOf(id, label)
+  const sentinel = id === 'all' || id === 'custom-all'
   return (
-    <span className={cn('pv-ico', id === 'all' && 'mute', icon && 'img')}
+    <span className={cn('pv-ico', sentinel && 'mute', icon && 'img')}
       style={icon ? undefined : avatarStyle(id)} aria-hidden='true'>
       {icon ? <img src={icon} alt='' /> : (glyph ?? providerGlyph(label))}
     </span>
@@ -319,7 +321,8 @@ function matches(model: ManageModel, keyword: string, provider: string, stateFil
 function ModelsPage() {
   const state = React.useSyncExternalStore(subscribe, getSnapshot)
   const provider = resolveProvider(state)
-  const custom = customSource.isCustom(provider)
+  /** 当前视图是不是自定义侧（单家或「自定义 · 全部」聚合都算 —— 列隐藏 / 页脚说明同一口径） */
+  const custom = customSource.isCustom(provider) || provider === 'custom-all'
   /**
    * 「测试」弹窗的目标行。这一份状态刻意**不放进模块级快照**（与三个弹窗的 context 不同）：
    * 它只被本页用、也没有从 React 之外打开的调用点（入口就是表格里那颗按钮），
@@ -336,8 +339,9 @@ function ModelsPage() {
    * 一律按「当前数据里还解析得出来」算（`selectedModels`），残键自然失效。
    */
   const [selection, setSelection] = React.useState<ReadonlySet<string>>(new Set())
-  /** 选中了一个已被删除的自定义家（目录缓存里确实没有这条记录，而不是「还没加载完」） */
-  const customMissing = custom && directoryReady() && !customSource.record(provider)
+  /** 选中了一个已被删除的自定义家（目录缓存里确实没有这条记录，而不是「还没加载完」）；
+      「自定义 · 全部」是聚合哨兵、目录里没有它的记录，不算「已删除」 */
+  const customMissing = custom && !isAllCustomView() && directoryReady() && !customSource.record(provider)
 
   /**
    * 首屏一次性副作用：登记列设置（并注入按钮）→ 同步静态表头 → 补读筛选记忆 → 按需自拉。
@@ -382,9 +386,11 @@ function ModelsPage() {
    */
   const titleLabel = provider === 'all'
     ? t('全部')
-    : (custom
-      ? String(customSource.record(provider)?.name || provider)
-      : (builtinRailItems(state.data).get(provider)?.label || providerLabelOf(provider)))
+    : (provider === 'custom-all'
+      ? t('自定义 · 全部')
+      : (custom
+        ? String(customSource.record(provider)?.name || provider)
+        : (builtinRailCounts().get(provider)?.label || providerLabelOf(provider))))
   const enabledCount = all.filter(rowEnabled).length
   const mappedCount = all.filter(model => (model.aliases || []).length > 0).length
   /**
@@ -428,10 +434,15 @@ function ModelsPage() {
       条目区（.rail-scroll）自己滚，「＋ 新建」沉在栏底（.rail-foot）不跟着滚 ——
       它是动作不是选项，家多了也不该被推出视野。 */
   function rail() {
-    const counts = builtinRailItems(state.data)
+    const counts = builtinRailCounts()
     const customs = customSource.list()
+    const customCounts = customRailItems()
     const total = [...counts.values()].reduce((sum, item) => sum + item.n, 0)
     const allLabel = t('全部（{n} 家）', { n: counts.size })
+    // 自定义组「全部」的计数 = 各家模型数之和；「N 家」按实有模型的家算，
+    // 空家（登记了但还没拉到清单）不虚增数字
+    const customTotal = [...customCounts.values()].reduce((sum, item) => sum + item.n, 0)
+    const customAllLabel = t('全部（{n} 家）', { n: [...customCounts.values()].filter(item => item.n > 0).length })
     return (
       <aside className='prov-rail' id='prov-rail' aria-label={t('按提供商选择')}>
         <div className='rail-scroll'>
@@ -450,24 +461,35 @@ function ModelsPage() {
               onClick={() => selectProvider(key)}>{entry.label}</NavItem>
           ))}
           <div className='rail-label'>{t('自定义提供商')}</div>
-          {customs.length ? customs.map(item => {
-            const id = String(item.id || '')
-            const label = String(item.name || id)
-            return (
-              // 删除按钮不能嵌进 NavItem（button 套 button 是无效 HTML，解析器会把内层提到外面、
-              // 绝对定位跟着失去参照），所以外面套一层定位容器，× 与条目做兄弟节点
-              <div className='pv-row' key={id}>
-                <NavItem active={provider === id} data-provider={id} title={label}
-                  count={Array.isArray(item.models) ? item.models.length : 0}
-                  icon={providerAvatar(id, label)}
-                  className={cn('shadow-none', RAIL_HIDE_COUNT_ON_HOVER)}
-                  onClick={() => selectProvider(id)}>{label}</NavItem>
-                <button type='button' className='pv-del' aria-label={t('删除自定义提供商')}
-                  title={t('删除这个自定义提供商（连同名下账号）')}
-                  onClick={() => void removeCustomProvider(id)}>×</button>
-              </div>
-            )
-          }) : <div className='rail-empty'>{t('还没有自定义提供商')}</div>}
+          {customs.length ? [
+            // 自定义组自己的「全部」：选中时右栏聚合所有自定义家的模型（不含内置家 ——
+            // 与上面内置组那颗「全部」是并列的两份聚合）。计数非零才显示条目：
+            // 一家都没模型时点进去只有一句空态，挂着反而添噪
+            ...(customTotal > 0 ? [(
+              <NavItem key='custom-all' active={isAllCustomView()} data-provider='custom-all'
+                title={customAllLabel} count={customTotal}
+                icon={providerAvatar('custom-all', '', GRID_GLYPH)}
+                className='shadow-none' onClick={() => selectProvider('custom-all')}>{customAllLabel}</NavItem>
+            )] : []),
+            ...customs.map(item => {
+              const id = String(item.id || '')
+              const label = String(item.name || id)
+              return (
+                // 删除按钮不能嵌进 NavItem（button 套 button 是无效 HTML，解析器会把内层提到外面、
+                // 绝对定位跟着失去参照），所以外面套一层定位容器，× 与条目做兄弟节点
+                <div className='pv-row' key={id}>
+                  <NavItem active={provider === id} data-provider={id} title={label}
+                    count={customCounts.get(id)?.n ?? 0}
+                    icon={providerAvatar(id, label)}
+                    className={cn('shadow-none', RAIL_HIDE_COUNT_ON_HOVER)}
+                    onClick={() => selectProvider(id)}>{label}</NavItem>
+                  <button type='button' className='pv-del' aria-label={t('删除自定义提供商')}
+                    title={t('删除这个自定义提供商（连同名下账号）')}
+                    onClick={() => void removeCustomProvider(id)}>×</button>
+                </div>
+              )
+            }),
+          ] : <div className='rail-empty'>{t('还没有自定义提供商')}</div>}
         </div>
         <div className='rail-foot'>
           <NavItem variant='add' id='rail-add-custom'
@@ -580,6 +602,12 @@ function ModelsPage() {
     if (model.source === 'manual') {
       return <span className='src manual' title={t('手动登记的上游模型；移除它会直接删掉这条登记')}><i aria-hidden='true' />{t('手动')}</span>
     }
+    // 自定义家的行（source 留空串）：只在聚合视图里出现 —— 选中该家时这一列整个
+    // 按视图隐藏。给个明确的「自定义」档而不是落「—」：聚合视图里「—」读起来像
+    // 「来源未知」，而它恰恰是唯一确定的一档（清单就是用户登记的）
+    if (!model.source && customSource.isCustom(model.provider)) {
+      return <span className='src manual' title={t('用户登记的自定义模型；整份清单只属于这一家')}><i aria-hidden='true' />{t('自定义')}</span>
+    }
     if (model.source !== 'remote' && model.source !== 'builtin') return <span className='rate'>—</span>
     const remote = model.source === 'remote'
     const at = formatTime(Number(model.refreshedAt) || 0)
@@ -691,7 +719,8 @@ function ModelsPage() {
       void runRowAction(
         rowKeyOf(model),
         () => writeRemoveModel(model.provider || '', model.id),
-        custom ? t('模型已移除') : t('自定义模型已移除'),
+        // 文案按**行**的归属判（聚合视图里两家的行混在一张表上，视图级 custom 不再适用）
+        customSource.isCustom(model.provider || '') ? t('模型已移除') : t('自定义模型已移除'),
       )
     }
 
@@ -737,6 +766,10 @@ function ModelsPage() {
         // 「先测通、再决定要不要启用」正是这颗按钮的用法（后端给测试开了直达跳，
         // 见 model-test-dialog 的 testBlockReason）
         const blocked = testBlockReason(model.provider || '', model)
+        // 移除按钮判据按**行**判（聚合视图里内置与自定义的行混在一张表上，视图级的
+        // custom 布尔不再适用）：内置家只露手动登记的（source=manual，上游目录带来的
+        // 行由清单决定存在性），自定义家的每一行都是用户登记的、都可以移除
+        const removable = model.source === 'manual' || customSource.isCustom(model.provider || '')
         return (
           <td className={cellClass('cell-act r', column.align)}>
             <div className='row-actions'>
@@ -745,7 +778,7 @@ function ModelsPage() {
                 onClick={() => setTestTarget({ provider: model.provider || '', id: model.id })}>
                 {t('测试')}
               </Button>
-              {model.source === 'manual' || custom ? (
+              {removable ? (
                 <Button variant='ghost' size='sm' className='text-destructive' disabled={busyRow}
                   onClick={() => void confirmRemoveModel()}>{t('移除')}</Button>
               ) : null}
@@ -777,14 +810,17 @@ function ModelsPage() {
    */
   function body() {
     if (!all.length) {
-      // 一条模型都没有：内置家是「还没加账号」，自定义家是「还没登记 / 还没拉取」。
+      // 一条模型都没有：内置家是「还没加账号」，自定义家是「还没登记 / 还没拉取」，
+      // 自定义「全部」是「一家都还没有（或都没拉到模型）」。
       // 说清下一步该做什么才有用；目录还没就位时既不能说「已删除」也不能说「还没有模型」
       const empty = custom
         ? (!directoryReady()
           ? t('加载中…')
-          : customMissing
-            ? t('该提供商已不存在（可能已被删除），请刷新列表')
-            : t('这家还没有模型：点「添加模型」登记，或「获取上游模型」从上游拉取'))
+          : isAllCustomView()
+            ? t('自定义提供商还没有模型：先在左栏选一家，点「添加模型」登记，或「获取上游模型」从上游拉取')
+            : customMissing
+              ? t('该提供商已不存在（可能已被删除），请刷新列表')
+              : t('这家还没有模型：点「添加模型」登记，或「获取上游模型」从上游拉取'))
         : (state.data ? t('暂无模型（请先添加账号）') : t('加载中…'))
       return <tr><td colSpan={columnCount} className='empty'>{empty}</td></tr>
     }
@@ -792,7 +828,9 @@ function ModelsPage() {
       return <tr><td colSpan={columnCount} className='empty'>{keyword ? t('没有匹配「{keyword}」的模型', { keyword }) : t('没有匹配当前筛选的模型')}</td></tr>
     }
     // 分组带只在「全部」视图里出现：选中单家时标题已经写了是哪一家，再叠一条是重复的
-    const showGroups = provider === 'all'
+    // 分组带在两个聚合视图（内置「全部」/ 自定义「全部」）里出现：选中单家时标题已经
+    // 写了是哪一家，再叠一条是重复的
+    const showGroups = provider === 'all' || isAllCustomView()
     // 分页档位下**不做组内折叠**（见 paging 的说明）：页数本身就把长度限住了，
     // 两套折叠叠在一起会让人算不清「到底还有多少个」。选「全部」时保持原行为。
     const collapsible = showGroups && !keyword && state.stateFilter === 'all' && !paging.paged
@@ -878,8 +916,8 @@ function ModelsPage() {
             <div className='panel-head'>
               <div className='mm-titlebar'>
                 <div className='mm-title'>
-                  {provider === 'all'
-                    ? providerAvatar('all', '', GRID_GLYPH)
+                  {provider === 'all' || provider === 'custom-all'
+                    ? providerAvatar(provider, '', GRID_GLYPH)
                     : providerAvatar(provider, titleLabel)}
                   <h2>{titleLabel}</h2>
                   <span className='mm-meta'>
@@ -891,7 +929,7 @@ function ModelsPage() {
                       「添加模型」是补充，维持描边档。文案与 title 只有一处事实来源（这里），
                       index.html 里不写死 */}
                   <Button id='btn-refresh-models'
-                    title={custom
+                    title={customSource.isCustom(provider)
                       ? t('从这一家的上游拉一份模型清单，勾选要哪些再导入（已添加的不会重复导入）')
                       : t('刷新模型管理页里各提供商的远程模型目录，逐家结果列在弹窗里')}
                     onClick={() => refreshModels()}>{t('获取模型')}</Button>
@@ -909,8 +947,9 @@ function ModelsPage() {
                   onValueChange={setSort} aria-label={t('按倍率排序')} className='shrink-0' />
                 {/* 搜索框：InputGroup + addon 图标（与 input-control.tsx 的用法一致）。
                     刻意**不带** data-island-input：那是输入框岛（就地升级）的钩子，
-                    两个岛同时挂一个输入框会打架。宽度沿用旧 CSS 的 #models-search 240px */}
-                <InputGroup className='w-[240px] flex-none' id='models-search'>
+                    两个岛同时挂一个输入框会打架。宽度：桌面 240px；手机上整行
+                    （工具条已改纵向排列，固定 240px 会与上下两条线段右边缘不齐）。 */}
+                <InputGroup className='w-full min-[768px]:w-[240px] flex-none min-[768px]:flex-none' id='models-search'>
                   <InputGroupInput type='search' placeholder={t('搜索模型 ID / 名称 / 映射名…')}
                     aria-label={t('搜索模型')} autoComplete='off' value={state.search}
                     onChange={event => setSearch(event.currentTarget.value)} />
@@ -1002,9 +1041,11 @@ function ModelsPage() {
                 的页脚说明也都去掉了，页脚现在是清一色的控制条 */}
             <TableFooter
               className='models-panel-foot'
-              leading={custom
-                ? <>{t('自定义提供商的清单')}<b>{t('只属于这一家')}</b>{t('：这里的模型不会出现在其他家，别名也只在这一家内生效。改名称 / 协议 / Base URL 在账号页该家账号的「设置」→ 提供商一栏；整家不要了，鼠标移到左栏这家上点 × 删除（连同名下账号）。')}</>
-                : undefined}
+              leading={isAllCustomView()
+                ? <>{t('这里是')}<b>{t('全部自定义提供商')}</b>{t('的模型合集：每家的清单互相独立，别名也只在自己那家内生效；要改名称 / 协议 / Base URL，到账号页该家账号的「设置」→ 提供商一栏。')}</>
+                : (custom
+                  ? <>{t('自定义提供商的清单')}<b>{t('只属于这一家')}</b>{t('：这里的模型不会出现在其他家，别名也只在这一家内生效。改名称 / 协议 / Base URL 在账号页该家账号的「设置」→ 提供商一栏；整家不要了，鼠标移到左栏这家上点 × 删除（连同名下账号）。')}</>
+                  : undefined)}
               total={shown.length}
               range={paging.paged ? { start: paging.rangeStart, end: paging.rangeEnd } : null}
               page={paging.page}

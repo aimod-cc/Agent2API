@@ -33,7 +33,6 @@ use std::sync::OnceLock;
 use rusqlite::params;
 use serde_json::{json, Value};
 
-use crate::server::config;
 use crate::server::core::beijing;
 use crate::server::core::billing::checkin::{checkin_completed_today, claim_pending};
 use crate::server::db::Db;
@@ -57,6 +56,21 @@ fn database() -> Option<&'static Db> {
 
 // ─── 记账 ────────────────────────────────────────────────────
 
+/// 行的 `activity` 段是否携带「活跃上报成功」读数（`report.succeeded`）。
+///
+/// 国际版每日活跃的三件事里，**只有活跃上报点亮连登**（`/v2/report` 实测，
+/// 见 `billing::activity::report_chat_activity`）；领取依赖上游活动开放、
+/// 保活对话不参与活跃计数。「活动未开启」轮次的成败就认这一格 —— 与
+/// `claim_pending` 只认中性文案是同一条克制原则：上报失败、网络错误都照旧
+/// 落 failed，不会把真故障美化成成功。
+fn activity_report_ok(row: &Value) -> bool {
+    row.get("activity")
+        .and_then(|activity| activity.get("report"))
+        .and_then(|report| report.get("succeeded"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// 签到结果行的记账（`run_checkin` 的每账号行，`{id, name, claim, activity?,
 /// error}` 形状）。`provider` 由调用方从账号记录带上（结果行里没有这个字段，
 /// 账号页的过滤列要用它）。
@@ -65,6 +79,9 @@ fn database() -> Option<&'static Db> {
 ///   - 行的 `error` 非空 → **failed**（执行出错：网络 / 凭证 / 未接入）；
 ///   - claim 判「今日已完成」→ success（真领到）或 already（上游说已领过）；
 ///   - claim 判「中性未领取」→ **pending**（此刻没有可领的活动，等窗口）；
+///   - 国际版每日活跃「活动未开启但活跃上报成功」→ **already** —— 活动没开
+///     是上游运营态（谁也领不到），而活跃上报已把连登点亮，这一天的「日活」
+///     实际完成了；记 failed 会把每天的正常轮次刷成一片红（改造前的实况）。
 ///   - 其余 → **failed**，错误原文取行的 `error`，缺了取 claim 的 `msg`
 ///     （claim.success=false 且带文案的失败，如「登录态已过期」）。
 pub fn record_row(row: &Value, provider: &str, source: &str, reason: &str) {
@@ -85,6 +102,8 @@ pub fn record_row(row: &Value, provider: &str, source: &str, reason: &str) {
         (outcome, None)
     } else if claim_pending(&claim) {
         (OUTCOME_PENDING, None)
+    } else if activity_report_ok(row) {
+        (OUTCOME_ALREADY, None)
     } else {
         // 失败且行上没有 error：失败文案在 claim.msg 里（claim_result 的
         // Err 分支已经把 message 放进行 error，这里兜的是直接给出
@@ -122,10 +141,12 @@ pub fn record_row(row: &Value, provider: &str, source: &str, reason: &str) {
 /// 国际版活动的手动领取 / 保活（`api::billing::run_activity` 的返回行，
 /// `{id, name, mode, claim, activity}`）。
 ///
-/// 判定按 mode 分两条：`keepalive` 只看保活读数（`pokeSucceeded`）—— 它的
+/// 判定按 mode 分两条：`keepalive` 看「上报成功或保活成功」任一 —— 它的
 /// claim 是 `{success:false, msg:"活跃保活完成"}` 的形态，走 claim 判据会被
-/// 误判成 failed；`full` / `claim` 与签到同判据（claim），保活读数单独留在
-/// `kept_active` 列。reason 用人话（界面的「来源/说明」列直接展示）。
+/// 误判成 failed，而这一颗按钮的本意就是「维持账号活跃」，活跃上报（点亮
+/// 连登的那条通道）成功同样算数；`full` / `claim` 与签到同判据（claim），
+/// 「活动未开启但活跃上报成功」按 `record_row` 同款落到 already。
+/// reason 用人话（界面的「来源/说明」列直接展示）。
 pub fn record_activity(row: &Value, provider: &str, mode: &str) {
     let reason = match mode {
         "keepalive" => "手动保活",
@@ -138,8 +159,9 @@ pub fn record_activity(row: &Value, provider: &str, mode: &str) {
         .and_then(|activity| activity.get("pokeSucceeded"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let report_ok = activity_report_ok(row);
     let (outcome, error, ok) = if mode == "keepalive" {
-        match kept_active {
+        match kept_active || report_ok {
             true => (OUTCOME_SUCCESS, None, true),
             false => (
                 OUTCOME_FAILED,
@@ -162,6 +184,10 @@ pub fn record_activity(row: &Value, provider: &str, mode: &str) {
         (outcome, None, true)
     } else if claim_pending(&claim) {
         (OUTCOME_PENDING, None, false)
+    } else if report_ok {
+        // full / claim 模式「活动未开启但活跃上报成功」：与 record_row 同款，
+        // 这一天的国际版日活实际完成了，不落 failed。
+        (OUTCOME_ALREADY, None, true)
     } else {
         (
             OUTCOME_FAILED,
@@ -205,13 +231,17 @@ struct Entry<'a> {
     kept_active: bool,
 }
 
-/// 落一行 + 顺手按保留期裁超期行（一次事务）。失败打 verbose，不向上报
+/// 落一行台账（一次事务）。失败打 verbose，不向上报
 /// （见模块头「写失败不报错」）。
+///
+/// 台账**全量保留**：不按天数裁、也没有条数上限（与请求日志同一取向）——
+/// 要清历史用签到记录页自己的「清空 / 按筛选删除」（`clear_all` /
+/// `clear_where`）。这里原本会顺带按「请求日志保留天数」裁超期行，
+/// 那套保留期已随请求日志一起移除。
 fn insert(entry: Entry<'_>) {
     let Some(db) = database() else { return };
     let ts = logging::now_ms();
     let date = beijing::today_key();
-    let cutoff = retention_cutoff();
     let failed = db
         .with_mut(|conn| -> Result<(), rusqlite::Error> {
             conn.execute(
@@ -234,10 +264,6 @@ fn insert(entry: Entry<'_>) {
                     entry.kept_active as i64,
                 ],
             )?;
-            // 保留期沿用「请求日志」的天数（不新增设置项）。签到记账一天几条，
-            // 顺手裁一条 DELETE 的代价可以忽略（同 request_stats::record 的理由：
-            // 只靠启动与「立即清理」裁，桌面端常驻数周会一直涨）。
-            conn.execute("DELETE FROM checkin_records WHERE date < ?1", [cutoff])?;
             Ok(())
         })
         .map(|result| result.is_err())
@@ -254,35 +280,6 @@ fn text_or(value: Option<&Value>, fallback: &str) -> String {
         .filter(|text| !text.is_empty())
         .unwrap_or(fallback)
         .to_string()
-}
-
-// ─── 保留期 ──────────────────────────────────────────────────
-
-/// 保留期的日期下界（北京时间键）：沿用「请求日志」的天数，口径与
-/// `RetentionBounds` 一致 —— 保留 N 天 = 含今天在内的 N 个自然日，往前推
-/// N-1 天；下限 1 天、上限 10 年（同 `Retention::normalized`）。
-/// 按 `date` 列（整日粒度）裁，与「签到按自然日」的语义对齐。
-fn retention_cutoff() -> String {
-    let days = config::retention_settings().request_days.clamp(1, 3650);
-    let today = beijing::today_key();
-    // date 键直接做日历减法有跨月坑，用 chrono 日期算再转回来
-    match chrono::NaiveDate::parse_from_str(&today, "%Y-%m-%d") {
-        Ok(today) => (today - chrono::Duration::days(days - 1))
-            .format("%Y-%m-%d")
-            .to_string(),
-        Err(_) => today, // 系统时钟异常到连日期键都不是合法格式：不裁比乱裁好
-    }
-}
-
-/// 「立即清理」（设置页 / 保留期改小后）与外部裁剪入口。
-/// 只按时间维度裁 —— 筛选维度的删除走 `clear_where`。
-pub fn prune() {
-    let Some(db) = database() else { return };
-    let cutoff = retention_cutoff();
-    let _ = db.with_mut(|conn| {
-        conn.execute("DELETE FROM checkin_records WHERE date < ?1", [cutoff])
-            .ok()
-    });
 }
 
 // ─── 查询与删除 ──────────────────────────────────────────────

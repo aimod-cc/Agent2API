@@ -112,6 +112,9 @@ pub(super) struct ProviderContext<'a> {
     /// [`super::ForwardRequest::ignore_model_gate`]）。候选链改从 `key_scope`
     /// 白名单取 —— 它是唯一的候选来源，两处读的是同一份事实。
     pub ignore_model_gate: bool,
+    /// 单次请求的出网代理临时覆盖（模型测试专用；`None` = 跟随账号配置，
+    /// `Some(None)` = 强制直连，`Some(Some(proxy))` = 强制走指定节点）。
+    pub proxy_override: Option<&'a Option<crate::server::core::proxies::ResolvedProxy>>,
 }
 
 /// 某一家 provider 实际要发送的请求体（**每次转发前**决定，不做跨家复用），

@@ -292,7 +292,7 @@ function RecordsTab(): React.ReactElement {
   // 挂载拉一次；筛选 / 档位 / 每页条数 / 翻页变化时重拉（这四件事都在 load 的入参里）
   React.useEffect(() => { void load({ page, size, range, filters }) }, [load, page, size, range, filters])
 
-  // 总数变小（清空 / 保留期裁掉一批）导致当前页越界时夹回最后一页 —— 否则会停在一片空白上
+  // 总数变小（清空 / 按筛选删除一批）导致当前页越界时夹回最后一页 —— 否则会停在一片空白上
   React.useEffect(() => { if (page > pageCount) setPage(pageCount) }, [page, pageCount])
 
   /**

@@ -8,15 +8,15 @@
 //! GET    /api/stats/requests/clear-preview  清理弹窗的预览统计（将删明细数 / 带正文数 / 库占用 / 压缩状态）
 //! DELETE /api/stats/requests           清理（mode=raw 只删原始正文 / mode=all 删明细，默认 all）
 //! POST   /api/stats/requests/compact   压缩数据库（checkpoint + VACUUM，后台执行）
-//! GET    /api/retention                三档保留天数（事件日志 / 请求日志 / 按天聚合）
+//! GET    /api/retention                事件日志保留天数
 //! PUT    /api/retention                更新保留天数并**立即**触发清理
 //! ```
 //!
 //! ── 为什么两条前缀放在一个文件里 ─────────────────────────────
-//! `/api/retention` 是这三条数据保留期的**统一入口**（事件日志在 `logs_store`、
-//! 请求日志与聚合在 `request_stats`），其中两条属于请求统计；而改完设置必须
-//! 立刻裁剪，裁剪又要拿 `request_stats` 句柄 —— 两者共享同一份校验与清理逻辑，
-//! 拆成两个文件只会让「校验 → 写配置 → 立即清理」这条链断成两段。
+//! `/api/retention` 是数据保留期的入口（只剩事件日志一项，实现在 `logs_store`；
+//! 请求日志 / 按天聚合 / 签到记录已全量保留，不再有保留期可设），而清理逻辑与
+//! 请求统计的管理路由共享同一份校验与「校验 → 写配置 → 立即清理」链条，
+//! 拆成两个文件只会让这条链断成两段 —— 沿用同一入口即可。
 //! 文件名沿用 `logs_api.rs` / `config_api.rs` 的 `*_api.rs` 约定。
 //!
 //! ── 参数解析的取舍（与 logs_api 同一口径）────────────────────
@@ -68,8 +68,8 @@ use axum::response::Response;
 use serde_json::{json, Value};
 
 use crate::server::config::{
-    self, RetentionPatch, RetentionSettings, KEY_DAILY_RETENTION_DAYS, KEY_LOG_RETENTION_DAYS,
-    KEY_REQUEST_RETENTION_DAYS, RETENTION_MAX_DAYS, RETENTION_MIN_DAYS,
+    self, RetentionPatch, RetentionSettings, KEY_LOG_RETENTION_DAYS, RETENTION_MAX_DAYS,
+    RETENTION_MIN_DAYS,
 };
 use crate::server::errors;
 use crate::server::http::{ok_json, parse_body, parse_query_ms};
@@ -78,8 +78,9 @@ use crate::server::request_stats::RequestQuery;
 use crate::server::ServerState;
 
 /// `/api/stats/summary` 的合法 range 取值（与 `request_stats::report` 的
-/// `normalize_range` 白名单逐字一致；那边是存储层的归一，这里是路由层的校验）
-const RANGES: [&str; 5] = ["today", "7", "30", "month", "all"];
+/// `normalize_range` 白名单逐字一致；那边是存储层的归一，这里是路由层的校验）。
+/// `custom` 另需 `startDate` / `endDate`（见 `stats_summary`）。
+const RANGES: [&str; 6] = ["today", "7", "30", "month", "all", "custom"];
 /// range 缺省值：与存储层「非法/缺省按 7 处理」的默认口径相同
 const DEFAULT_RANGE: &str = "7";
 
@@ -130,7 +131,12 @@ fn parse_limit(value: Option<&String>) -> Option<usize> {
     text.parse::<usize>().ok().filter(|size| *size > 0)
 }
 
-/// GET /api/stats/summary?range=7
+/// GET /api/stats/summary?range=7&startDate=&endDate=
+///
+/// `range=custom` 时必须带 `startDate` / `endDate`（`YYYY-MM-DD`，本地自然日，
+/// 闭区间）：两个日期都由用户在选择器上显式选定，缺失 / 格式错 / 起止倒置一律
+/// 400 —— 与 `range` 同一取舍（隐式换一个区间会让页面显示的与选的对不上，
+/// 报错比默默改口径好排查）。
 pub async fn stats_summary(State(state): State<ServerState>, Query(params): Query<Params>) -> Response {
     // 先 trim 再比对：存储层的 `normalize_range` 也是先 trim 后匹配，
     // 若这里比对未 trim 的值，`?range=%207%20` 会被判 400 而存储层本可接受它 ——
@@ -143,10 +149,48 @@ pub async fn stats_summary(State(state): State<ServerState>, Query(params): Quer
             format!("range 取值非法: {requested}（合法值: {}）", RANGES.join("、")),
         );
     }
+    let custom = if requested == "custom" {
+        let start = match parse_day_param(&params, "startDate") {
+            Ok(value) => value,
+            Err(message) => return errors::management_error(400, message),
+        };
+        let end = match parse_day_param(&params, "endDate") {
+            Ok(value) => value,
+            Err(message) => return errors::management_error(400, message),
+        };
+        if start > end {
+            return errors::management_error(
+                400,
+                format!(
+                    "开始日期不能晚于结束日期（startDate={}, endDate={}）",
+                    start, end
+                ),
+            );
+        }
+        Some((start, end))
+    } else {
+        None
+    };
     // 原样透传存储层的报表结果（`{range, startDate, endDate, overview, providers,
     // heatmap, cacheRates, cacheTrend24h, dailyTrend}`），路由层不加工，避免两处口径。
     // `providers` 是 W4 新增的 provider 维度汇总（见文件头的说明）
-    ok_json(state.request_stats().usage_summary(&requested))
+    ok_json(state.request_stats().usage_summary(&requested, custom))
+}
+
+/// 解析 `YYYY-MM-DD` 的日期参数：缺失 / 空白 / 格式错都给可读的 400 文案。
+///
+/// 只认严格格式（`2026-1-5` 这种补零缺失的写法也拒绝）：这个值由前端的
+/// `<input type="date">` 产出，格式天然规范；宽容解析反而会掩盖「前端传了
+/// 别的东西」这类问题。错误文案把收到的原值带出来，便于对照。
+fn parse_day_param(
+    params: &Params,
+    key: &str,
+) -> Result<chrono::NaiveDate, String> {
+    let Some(text) = text_of(params, key) else {
+        return Err(format!("range=custom 时必须带 {key}（格式 YYYY-MM-DD）"));
+    };
+    chrono::NaiveDate::parse_from_str(&text, "%Y-%m-%d")
+        .map_err(|_| format!("{key} 格式非法: {text}（需要 YYYY-MM-DD）"))
 }
 
 /// GET /api/stats/requests?offset=&limit=&model=&provider=&status=&start=&end=
@@ -287,8 +331,9 @@ pub async fn clear_stats_requests(
 ///
 /// 详情弹窗（预览对话）的数据源：`{id, requestBody, responseBody, truncated}`，
 /// 两个文本字段原样返回（两侧各截断到存储层的采集上限，`truncated` 提示
-/// 前端正文可能不完整）。不存在给 404 —— 正文有自己的容量闸（按 ts 丢最旧），
-/// 「明细还在、正文已被挤掉」是正常状态，不是错误。
+/// 前端正文可能不完整）。不存在给 404 —— 正文只在**调试模式开启期间**的
+/// 请求上采集（关着时不写行，见 `api::pipeline::capture_raw_body`），
+/// 此外也可能已被清理过；两种情况都是正常状态，不是错误。
 pub async fn stats_request_raw(
     State(state): State<ServerState>,
     Query(params): Query<Params>,
@@ -370,15 +415,18 @@ pub async fn get_retention(State(_state): State<ServerState>) -> Response {
     ok_json(retention_json(config::retention_settings()))
 }
 
-/// PUT /api/retention —— body `{logRetentionDays?, requestRetentionDays?, dailyRetentionDays?}`
+/// PUT /api/retention —— body `{logRetentionDays?}`
 ///
 /// 允许部分字段（未出现的项保持原值）。校验通过后：写 config.json → 立即裁剪
 /// → 返回**生效后**的值（前端直接用响应刷新界面，不必再 GET 一次）。
+/// 请求日志 / 按天聚合两项已随「请求统计全量保留」退役：老前端多传的
+/// `requestRetentionDays` / `dailyRetentionDays` 不在校验目标里，会被忽略
+/// （不报错，也不生效）。
 ///
-/// 立即裁剪的必要性：保留期只在「记账 / 写日志 / 启动载入」时顺带生效，
-/// 用户把 30 天改成 7 天之后如果不动，旧数据要等到下一条请求或下次重启才消失 ——
+/// 立即裁剪的必要性：保留期只在「写日志」时顺带生效，
+/// 用户把 30 天改成 7 天之后如果不动，旧数据要等到下一条日志或下次重启才消失 ——
 /// 那时的界面会显示「设置是 7 天，日志里还有 30 天前的条目」，看起来像没生效。
-pub async fn put_retention(State(state): State<ServerState>, body: Bytes) -> Response {
+pub async fn put_retention(State(_state): State<ServerState>, body: Bytes) -> Response {
     let payload = match parse_body(&body) {
         Ok(value) => value,
         Err(error) => return errors::management_error(400, error.message),
@@ -388,22 +436,14 @@ pub async fn put_retention(State(state): State<ServerState>, body: Bytes) -> Res
     };
 
     // ── 校验：全部先过一遍再写盘 ──────────────────────────────
-    // 为什么先收集再写：三项里有一项非法时整体不落盘，避免出现
-    // 「日志天数改了、明细天数没改」的半套设置（用户以为保存失败，实际生效了一半）
+    // 为什么先收集再写：多字段并存时有一项非法就整体不落盘，避免出现
+    // 「一半设置生效了」的错觉（用户以为保存失败，实际生效了一半）
     let mut patch = RetentionPatch::default();
-    let mut targets: [(&str, Option<&Value>, &mut Option<i64>); 3] = [
-        (KEY_LOG_RETENTION_DAYS, object.get(KEY_LOG_RETENTION_DAYS), &mut patch.log_days),
-        (
-            KEY_REQUEST_RETENTION_DAYS,
-            object.get(KEY_REQUEST_RETENTION_DAYS),
-            &mut patch.request_days,
-        ),
-        (
-            KEY_DAILY_RETENTION_DAYS,
-            object.get(KEY_DAILY_RETENTION_DAYS),
-            &mut patch.daily_days,
-        ),
-    ];
+    let mut targets: [(&str, Option<&Value>, &mut Option<i64>); 1] = [(
+        KEY_LOG_RETENTION_DAYS,
+        object.get(KEY_LOG_RETENTION_DAYS),
+        &mut patch.log_days,
+    )];
     for (key, value, slot) in targets.iter_mut() {
         let Some(value) = value else {
             continue;
@@ -419,22 +459,21 @@ pub async fn put_retention(State(state): State<ServerState>, body: Bytes) -> Res
         }
     }
 
-    // 三项都没给：不写盘（空 PUT 不该在 config.json 里留下痕迹），
+    // 没给任何项：不写盘（空 PUT 不该在 config.json 里留下痕迹），
     // 也不记「已更新」日志（什么都没改，日志里不该出现一次伪更新），但仍返回当前值 ——
     // 空 PUT 的语义就是「读一次当前设置」，调用方不用为此换成 GET
-    let updated =
-        patch.log_days.is_some() || patch.request_days.is_some() || patch.daily_days.is_some();
+    let updated = patch.log_days.is_some();
     if updated {
         if !config::set_retention(patch) {
             // 写盘失败：内存快照已更新（本次运行仍生效），但重启后会回到旧值 ——
             // 必须让用户知道，否则「改了设置重启又变回去」会被当成玄学问题
             logging::log("[Config]", "⚠️  保留期写入 config.json 失败，本次运行内仍生效");
         }
-        // ── 立即清理（两种数据各自的时机不同，这里一次触发）──
-        // 请求统计：prune() 内部**动态取**保留期回调，所以取到的就是刚写入的值
-        state.request_stats().prune();
-        // 事件日志：LogStore 的保留天数同样走回调（见 `LogStore::with_db` 的注释），
-        // prune 返回裁掉的条数，打一行控制台便于确认「改小天数确实删了东西」
+        // ── 立即清理 ────────────────────────────────────────────
+        // 保留期只剩事件日志一项：LogStore 的保留天数走回调（见 `LogStore::with_db`
+        // 的注释），prune 返回裁掉的条数，打一行控制台便于确认「改小天数确实删了东西」。
+        // （请求统计已全量保留，没有可裁剪的东西；清历史是请求日志页自己的
+        // 「清空 / 按筛选删除」。）
         if let Some(store) = logging::store_ref() {
             let removed = store.prune();
             if removed > 0 {
@@ -447,27 +486,22 @@ pub async fn put_retention(State(state): State<ServerState>, body: Bytes) -> Res
     if updated {
         logging::log(
             "[Config]",
-            &format!(
-                "数据保留期已更新: 事件日志 {} 天 / 请求日志 {} 天 / 按天聚合 {} 天",
-                settings.log_days, settings.request_days, settings.daily_days
-            ),
+            &format!("数据保留期已更新: 事件日志 {} 天", settings.log_days),
         );
     }
     ok_json(retention_json(settings))
 }
 
-/// 三档保留天数的响应体（GET 与 PUT 共用，保证两边键名完全一致）。
+/// 保留天数的响应体（GET 与 PUT 共用，保证两边键名完全一致）。
 ///
 /// 键用**常量标识符**而不是手写字符串：`json!` 会把标识符当表达式求值再
-/// `.into()` 成键名，所以这里落到 JSON 里的就是常量的值（`"logRetentionDays"` 等）。
+/// `.into()` 成键名，所以这里落到 JSON 里的就是常量的值（`"logRetentionDays"`）。
 /// 好处是键名只在 `config.rs` 定义一次，读侧（`days_field`）、写侧
 /// （`set_retention`）与响应体三处必然一致 —— 手写三遍字符串，拼错一处
 /// 不会报错，只会静默地少一个字段。
 fn retention_json(settings: RetentionSettings) -> Value {
     json!({
         KEY_LOG_RETENTION_DAYS: settings.log_days,
-        KEY_REQUEST_RETENTION_DAYS: settings.request_days,
-        KEY_DAILY_RETENTION_DAYS: settings.daily_days,
     })
 }
 

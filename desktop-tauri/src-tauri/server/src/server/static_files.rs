@@ -147,6 +147,12 @@ fn mime_of(file_path: &PathBuf) -> String {
         "js" | "mjs" => "text/javascript; charset=utf-8",
         "css" => "text/css; charset=utf-8",
         "json" => "application/json; charset=utf-8",
+        // PWA 清单（`ui/manifest.webmanifest`）。规范类型是 `application/manifest+json`，
+        // 浏览器对 `application/json` 也宽松接受；但**落到下面 `_` 那支的
+        // `application/octet-stream` 不是 JSON 类型** —— 清单被判解析失败，
+        // 「添加到主屏幕」驱动的显示名 / 主题色 / 图标清单整套读不出来
+        // （iOS 那条路走 `apple-touch-icon` + `apple-mobile-web-app-*`，不受影响）。
+        "webmanifest" => "application/manifest+json; charset=utf-8",
         "svg" => "image/svg+xml",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",

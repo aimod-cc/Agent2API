@@ -18,6 +18,43 @@
 
 import { t } from '../i18n'
 
+
+// ── 从 HEAD 恢复的类型（桥成员的返回形状）──────────────
+
+export type DatabaseTableStat = { table?: string; rows?: number }
+
+/** 整库导出结果（壳命令 export_database） */
+export type DatabaseExportResult = {
+  canceled?: boolean
+  bytes?: number
+  file?: string
+  tables?: DatabaseTableStat[]
+}
+
+export type DatabaseImportResult = {
+  /** 恢复后的各表行数 */
+  tables?: DatabaseTableStat[]
+  /** 替换前自动建的安全备份文件名（{config_dir}/backups/ 下） */
+  safetyBackup?: string
+  /**
+   * 密钥指纹不匹配的警告（**只在有问题的恢复里出现**，文案由后端 `db::backup` 的
+   * `account_key_warning` 生成并给全）。
+   *
+   * 它**不是失败**：导入照常完成，但这份备份是用另一把加密密钥做的（或备份时本机
+   * 还没生成过密钥），导入后的账号数据解不开、账号列表会是空的。所以界面**必须**
+   * 把它常驻显示出来（面板内的警告框）—— 只塞进几秒即逝的 toast 等于没提示，
+   * 用户错过后只会对着空账号列表发懵。
+   */
+  warning?: string
+}
+
+export type ModelsDevRefreshResult = {
+  status?: string
+  message?: string
+  count?: number
+  refreshedAt?: number
+}
+
 /* ─── 桥与共享全局 ─────────────────────────── */
 
 /** 启动与托盘设置（壳命令 get_app_settings / save_app_settings） */
@@ -55,25 +92,6 @@ export type ExportResult = {
   /** v2 导出文件附带的自定义提供商定义条数 */
   customProviders?: number
   file?: string
-}
-
-/** 整库导出里每张表的行数统计（导出与恢复的响应同形） */
-export type DatabaseTableStat = { table?: string; rows?: number }
-
-/** 整库导出结果（壳命令 export_database） */
-export type DatabaseExportResult = {
-  canceled?: boolean
-  bytes?: number
-  file?: string
-  tables?: DatabaseTableStat[]
-}
-
-/** 整库恢复结果（壳命令 import_database） */
-export type DatabaseImportResult = {
-  /** 恢复后的各表行数 */
-  tables?: DatabaseTableStat[]
-  /** 替换前自动建的安全备份文件名（{config_dir}/backups/ 下） */
-  safetyBackup?: string
 }
 
 /**
@@ -128,68 +146,6 @@ export type ClineHeadersData = {
   effective: Record<string, string>
 }
 
-/** models.dev 模型元数据的当前状态（GET / PUT `/api/models/metadata` 同形）。 */
-export type ModelsDevState = {
-  /** 联网刷新开关（关闭后已装载的数据继续用，见后端 `KEY_MODELS_DEV_ENABLED`） */
-  modelsDevEnabled?: boolean
-  /** 这份索引的来历：`builtin`（内嵌快照）/ `cache`（上次刷新结果）/ `network`（刚拉的） */
-  source?: string
-  /** 这份数据的生成时刻（毫秒；0 = 未知） */
-  updatedAt?: number
-  /** 收录的模型条数 */
-  count?: number
-}
-
-/** 立即刷新的一行结果（字段与各家目录刷新的结果行同形，见后端 `api::model_meta`）。 */
-export type ModelsDevRefreshResult = {
-  status?: string
-  message?: string
-  count?: number
-  refreshedAt?: number
-}
-
-/** 面板状态行要的那几个字段（避免这里 import 状态层的类型造成循环依赖） */
-type ModelsDevView = {
-  status: 'loading' | 'ready' | 'unavailable'
-  enabled: boolean
-  source: string
-  updatedAt: number
-  count: number
-}
-
-/**
- * models.dev 面板的状态行：把「开关 + 数据来历 + 生成时刻 + 条数」写成一句话。
- *
- * 为什么不只写「已开启」：这个开关的价值全在**那份元数据是什么时候的、有多少
- * 条** —— 只报开关状态，用户没法判断「我的档位为什么还是老样子」是没开、
- * 是没拉到、还是这份快照本来就旧。
- */
-export function modelsDevStateText(state: ModelsDevView): string {
-  if (state.status === 'loading') return STATES.appLoading
-  if (state.status === 'unavailable') return STATES.modelsDevUnavailable
-  const origin = state.source === 'builtin'
-    ? STATES.modelsDevSourceBuiltin
-    : state.source === 'cache'
-      ? STATES.modelsDevSourceCache
-      : state.source === 'network'
-        ? STATES.modelsDevSourceNetwork
-        // 后端将来加了档位时原样回显，不显示成空白
-        : state.source
-  const stamp = state.updatedAt > 0
-    // 与别处的时间展示同源（app.js 提供的 `formatTime`；岛里从共享桥取）
-    ? String(shared().wbApp?.formatTime?.(state.updatedAt) ?? '')
-    : ''
-  if (!origin && !stamp && !state.count) return STATES.modelsDevEmpty
-  const at = stamp ? t('，{time}', { time: stamp }) : ''
-  const mode = state.enabled ? t('正在联网更新') : t('仅用现有数据、不联网刷新')
-  return t('{count} 条 · 来自{origin}{at} · {mode}', {
-    count: Number(state.count).toLocaleString('zh-CN'),
-    origin: origin || t('未知来源'),
-    at,
-    mode,
-  })
-}
-
 /** 本页用到的壳 / HTTP 桥（方法名与 bridge.rs 一一对应，一个都不能改） */
 export type SettingsBridge = {
   /** 'desktop' | 'web'：面板登录那一块只在网页端有意义 */
@@ -198,11 +154,6 @@ export type SettingsBridge = {
   saveAppSettings(patch: AppSettings): Promise<AppSettings | null | undefined>
   exportAccounts(): Promise<ExportResult | null | undefined>
   importAccounts(): Promise<ImportResult | null | undefined>
-  // ── 整库备份 / 恢复（仅桌面端；web 端 shim 不提供，按钮也只在桌面端渲染）──
-  /** 整库备份：弹保存框，后端把整库导出为 SQL 文件直写到该路径 */
-  exportDatabase?(includeLogs: boolean): Promise<DatabaseExportResult | null | undefined>
-  /** 整库恢复：弹打开框，后端校验后整体替换数据库（替换前自动安全备份） */
-  importDatabase?(): Promise<DatabaseImportResult | null | undefined>
   getRetention(): Promise<unknown>
   saveRetention(patch: Record<string, number>): Promise<unknown>
   getRetry(): Promise<unknown>
@@ -211,11 +162,6 @@ export type SettingsBridge = {
   saveTimeouts(patch: Record<string, number>): Promise<unknown>
   getQueue(): Promise<unknown>
   saveQueue(patch: Record<string, number>): Promise<unknown>
-  getCaptchaPool(): Promise<unknown>
-  saveCaptchaPool(patch: Record<string, number>): Promise<unknown>
-  // ── 账号路由（「路由」分类）：GET/PUT /api/routing，PUT 返回生效后的全量值 ──
-  getRoutingConfig(): Promise<unknown>
-  setRoutingConfig(patch: Record<string, unknown>): Promise<unknown>
   getDebug(): Promise<unknown>
   saveDebug(enabled: boolean): Promise<unknown>
   getSanitize(): Promise<unknown>
@@ -229,11 +175,6 @@ export type SettingsBridge = {
   getStorage(): Promise<unknown>
   getCaptchaSetting(): Promise<{ captchaEnabled?: boolean } | null | undefined>
   saveCaptchaSetting(on: boolean): Promise<{ captchaEnabled?: boolean } | null | undefined>
-  /** models.dev 模型元数据：开关 + 当前索引状态（见后端 `api::model_meta`） */
-  getModelsDev(): Promise<ModelsDevState | null | undefined>
-  saveModelsDev(on: boolean): Promise<ModelsDevState | null | undefined>
-  /** 立即刷新：真打公网；返回一行结果（与各家目录刷新同形）+ 刷新后的状态 */
-  refreshModelsDev(): Promise<{ result?: ModelsDevRefreshResult; status?: ModelsDevState } | null | undefined>
   panelLogout(): Promise<unknown>
   /** 后端就绪状态（局域网地址展示要拼网关端口；其余字段本页不消费） */
   getBackendStatus?(): Promise<{ port?: number } | null | undefined>
@@ -248,6 +189,16 @@ export type SettingsBridge = {
   localIp?(): Promise<string | null | undefined>
   /** 打开外链的唯一出口（只放行 http(s)）：桌面走系统浏览器，网页端 shim 是 window.open */
   openReleasePage?(url: string): Promise<unknown>
+  // ── 以下成员从 HEAD 恢复（并行改动移走了定义但 settings-state.ts 仍引用）──
+    exportDatabase?(includeLogs: boolean): Promise<DatabaseExportResult | null | undefined>
+    importDatabase?(): Promise<DatabaseImportResult | null | undefined>
+    getCaptchaPool(): Promise<unknown>
+    saveCaptchaPool(patch: Record<string, number>): Promise<unknown>
+    getRoutingConfig(): Promise<unknown>
+    setRoutingConfig(patch: Record<string, unknown>): Promise<unknown>
+    getModelsDev(): Promise<ModelsDevState | null | undefined>
+    saveModelsDev(on: boolean): Promise<ModelsDevState | null | undefined>
+    refreshModelsDev(): Promise<{ result?: ModelsDevRefreshResult; status?: ModelsDevState } | null | undefined>
 }
 
 /**
@@ -270,8 +221,6 @@ export type SharedWindow = {
     applyTheme?: (mode: string) => void
     /** 应用界面缩放（传百分数，如 105）：由 app.js 落到 WebView 层并记档 */
     applyZoom?: (percent: number) => void
-    /** 时间戳 → 本地时间串（app.js 的全局实现；models.dev 面板的「数据是什么时候的」用它） */
-    formatTime?: (value: unknown) => string
   }
   /** Token 计量单位的展示口径（units.js）：本页只负责拨开关，格式化在那边 */
   wbUnits?: { isChinese?: () => boolean; setChinese?: (on: boolean) => void }
@@ -304,7 +253,7 @@ export async function openExternal(url: string): Promise<void> {
   try {
     await shared().workbuddyDesktop?.openReleasePage?.(url)
   } catch (error) {
-    toast(t('打开链接失败：{error}', { error: errorMessage(error) }), 'err')
+    toast(`打开链接失败：${errorMessage(error)}`, 'err')
   }
 }
 
@@ -333,71 +282,16 @@ export async function openExternal(url: string): Promise<void> {
  * 改名会让两者当场失配 —— 用户看到的只是标签，id 是内部契约。
  */
 export const CATEGORIES = [
-  { id: 'general', label: t('通用'), icon: 'sliders' },
-  { id: 'display', label: t('显示'), icon: 'display' },
-  { id: 'gateway', label: t('网关'), icon: 'traffic' },
-  { id: 'routing', label: t('路由'), icon: 'route' },
-  { id: 'retry', label: t('重试'), icon: 'refresh' },
-  { id: 'timeout', label: t('超时'), icon: 'timer' },
-  { id: 'security', label: t('安全'), icon: 'shield' },
-  { id: 'data', label: t('数据'), icon: 'database' },
-  { id: 'feedback', label: t('反馈与需求'), icon: 'feedback' },
-  { id: 'about', label: t('更新'), icon: 'download' },
+  { id: 'general', label: '通用', icon: 'sliders' },
+  { id: 'display', label: '显示', icon: 'display' },
+  { id: 'gateway', label: '网关', icon: 'traffic' },
+  { id: 'retry', label: '重试', icon: 'refresh' },
+  { id: 'timeout', label: '超时', icon: 'timer' },
+  { id: 'security', label: '安全', icon: 'shield' },
+  { id: 'data', label: '数据', icon: 'database' },
+  { id: 'feedback', label: '反馈与需求', icon: 'feedback' },
+  { id: 'about', label: '更新', icon: 'download' },
 ] as const
-
-/**
- * 「路由」分类的档位表：转发选路的策略与会话粘性（取值与后端 /api/routing 逐字对应）。
- *
- * `tip` 是行内问号（[data-tip]）的说明全文 —— 这组设置原来在账号页的路由抽屉里
- * （说明平铺成段），抽屉撤除后搬到设置页，说明收进问号气泡，档位值不变。
- *
- * ── 两档（2026-10）───────────────────────────────────────────
- * 曾经有第三档「余额优先」：它的 `value` 写的是 `balance`，而后端只认 `order` /
- * `rotate` / `usage` —— 选中它保存必然报「未知的路由策略「balance」」，等于一直
- * 是坏的。这次连同后端的 `usage` 策略一起移除（按用户要求），只留这两档：
- * 「顺序优先」（队列第 1 位接走所有请求）与「负载均衡」（逐请求轮换）。
- * 后端 `RouteStrategy::from_id` 把历史配置里的 `usage` 归到负载均衡。
- */
-export const ROUTE_STRATEGIES = [
-  {
-    value: 'order',
-    label: t('顺序优先'),
-    tip: t('排第 1 的接走所有请求，直到它不能答（限流 / 故障 / 额度尽）才轮到下一位 —— 就是「从上往下」的现状行为。'),
-  },
-  {
-    value: 'rotate',
-    label: t('负载均衡'),
-    tip: t('每条请求轮换到下一个可用账号；新会话交给当前最闲的那位。适合想把手里的号摊开用、不让某一个一直扛。'),
-  },
-] as const
-
-/** 会话粘性档位：同一会话的后续请求是否尽量跟住同一个账号（会话 = 模型 + 首条用户消息） */
-export const ROUTE_STICKY_OPTIONS = [
-  {
-    value: 'auto',
-    label: t('自动'),
-    tip: t('同一会话在 5 分钟内尽量跟住同一个账号；停了 5 分钟再发就算新会话。多数场景用它 —— 多轮对话少换号，也不至于把账号焊死。'),
-  },
-  {
-    value: 'session',
-    label: t('会话内'),
-    tip: t('同一会话在 6 小时内跟住同一个账号；适合一坐几个小时的长会话，上游的上下文缓存能吃到更多。'),
-  },
-  {
-    value: 'turn',
-    label: t('每轮'),
-    tip: t('每条请求都重新按策略选路 —— 行为与「关闭」一致，仅保留会话识别的记录。'),
-  },
-  {
-    value: 'off',
-    label: t('关闭'),
-    tip: t('不做会话识别，每条请求都重新按策略选路。'),
-  },
-] as const
-
-/** 路由档位的取值（SegmentedControl 的泛型参数用它，视图里不必再写字面量联合） */
-export type RouteStrategyValue = (typeof ROUTE_STRATEGIES)[number]['value']
-export type RouteStickyValue = (typeof ROUTE_STICKY_OPTIONS)[number]['value']
 
 /**
  * 「设置页当前分类」的 localStorage 键：纯前端偏好（与主题、计量单位同类），
@@ -443,9 +337,9 @@ export const ZOOM_PERCENTS: number[] = Array.from(
  * 这里用了更书面的一种）。
  */
 export const THEME_MODES = [
-  { value: 'system', label: t('跟随系统') },
-  { value: 'light', label: t('浅色') },
-  { value: 'dark', label: t('深色') },
+  { value: 'system', label: '跟随系统' },
+  { value: 'light', label: '浅色' },
+  { value: 'dark', label: '深色' },
 ] as const
 
 /** 显示模式取值（SegmentedControl 的泛型参数要用它，免得在视图里转字面量联合） */
@@ -507,29 +401,29 @@ export const RETENTION_FIELDS: NumberField[] = [
   {
     key: 'logRetentionDays',
     id: 'settings-retention-log',
-    label: t('事件日志保留天数'),
-    unit: t('天'),
+    label: '事件日志保留天数',
+    unit: '天',
     min: RETENTION_MIN,
     max: RETENTION_MAX,
-    hint: t('登录 / 账号切换 / 429 切换等系统事件，可填 1–3650 天。'),
+    hint: '登录 / 账号切换 / 429 切换等系统事件，可填 1–3650 天。',
   },
   {
     key: 'requestRetentionDays',
     id: 'settings-retention-request',
-    label: t('请求日志保留天数'),
-    unit: t('天'),
+    label: '请求日志保留天数',
+    unit: '天',
     min: RETENTION_MIN,
     max: RETENTION_MAX,
-    hint: t('「请求日志」页的逐条请求记录，可填 1–3650 天。'),
+    hint: '「请求日志」页的逐条请求记录，可填 1–3650 天。',
   },
   {
     key: 'dailyRetentionDays',
     id: 'settings-retention-daily',
-    label: t('按天聚合保留天数'),
-    unit: t('天'),
+    label: '按天聚合保留天数',
+    unit: '天',
     min: RETENTION_MIN,
     max: RETENTION_MAX,
-    hint: t('报表页的热力图与按天趋势，可填 1–3650 天。'),
+    hint: '报表页的热力图与按天趋势，可填 1–3650 天。',
   },
 ]
 
@@ -542,29 +436,29 @@ export const RETRY_FIELDS: NumberField[] = [
   {
     key: 'retryCount',
     id: 'settings-retry-count',
-    label: t('同一账号重试次数'),
-    unit: t('次'),
+    label: '同一账号重试次数',
+    unit: '次',
     min: 0,
     max: 10,
-    hint: t('在同一个账号上原地重发几次（不含首发；整条请求共用一份，用完后换来的账号只发一次就继续换）。可填 0–10，0 表示失败立即换号。'),
+    hint: '在同一个账号上原地重发几次（不含首发；整条请求共用一份，用完后换来的账号只发一次就继续换）。可填 0–10，0 表示失败立即换号。',
   },
   {
     key: 'retryCrossProviderCount',
     id: 'settings-retry-cross-provider-count',
-    label: t('切换账号重试次数'),
-    unit: t('次'),
+    label: '切换账号重试次数',
+    unit: '次',
     min: 0,
     max: 10,
-    hint: t('失败后最多再换几个账号试（填 N = 最多换 N 个，首发那个不算）。换到同一家名下另一个账号、或换到另一家，都各算一次；换满仍失败就返回错误。可填 0–10，0 表示失败立即报错。'),
+    hint: '失败后最多再换几个账号试（填 N = 最多换 N 个，首发那个不算）。换到同一家名下另一个账号、或换到另一家，都各算一次；换满仍失败就返回错误。可填 0–10，0 表示失败立即报错。',
   },
   {
     key: 'retryIntervalSeconds',
     id: 'settings-retry-interval',
-    label: t('重试间隔'),
-    unit: t('秒'),
+    label: '重试间隔',
+    unit: '秒',
     min: 0,
     max: 300,
-    hint: t('两次重试之间的等待时间，两项共用，可填 0–300 秒。'),
+    hint: '两次重试之间的等待时间，两项共用，可填 0–300 秒。',
   },
 ]
 
@@ -573,38 +467,38 @@ export const TIMEOUT_FIELDS: NumberField[] = [
   {
     key: 'connectTimeoutSeconds',
     id: 'settings-timeout-connect',
-    label: t('连接中超时'),
-    unit: t('秒'),
+    label: '连接中超时',
+    unit: '秒',
     min: 1,
     max: 3600,
-    hint: t('建立上游 TCP/TLS 连接或代理隧道的最大等待时间（秒），默认 30 秒，范围 1~3600。'),
+    hint: '建立上游 TCP/TLS 连接或代理隧道的最大等待时间（秒），默认 30 秒，范围 1~3600。',
   },
   {
     key: 'headersTimeoutSeconds',
     id: 'settings-timeout-headers',
-    label: t('等待响应超时'),
-    unit: t('秒'),
+    label: '等待响应超时',
+    unit: '秒',
     min: 1,
     max: 3600,
-    hint: t('请求发出后等待上游响应头的最大时间（秒），默认 300 秒，范围 1~3600。'),
+    hint: '请求发出后等待上游响应头的最大时间（秒），默认 300 秒，范围 1~3600。',
   },
   {
     key: 'streamIdleTimeoutSeconds',
     id: 'settings-timeout-stream-idle',
-    label: t('流式响应空闲超时'),
-    unit: t('秒'),
+    label: '流式响应空闲超时',
+    unit: '秒',
     min: 1,
     max: 3600,
-    hint: t('流式响应相邻数据之间允许的最大空闲时间（秒），收到新数据后重新计时，默认 300 秒，范围 1~3600。'),
+    hint: '流式响应相邻数据之间允许的最大空闲时间（秒），收到新数据后重新计时，默认 300 秒，范围 1~3600。',
   },
   {
     key: 'bodyTimeoutSeconds',
     id: 'settings-timeout-body',
-    label: t('非流式响应超时'),
-    unit: t('秒'),
+    label: '非流式响应超时',
+    unit: '秒',
     min: 1,
     max: 3600,
-    hint: t('读取完整非流式响应体允许的最大时间（秒），默认 300 秒，范围 1~3600。'),
+    hint: '读取完整非流式响应体允许的最大时间（秒），默认 300 秒，范围 1~3600。',
   },
 ]
 
@@ -613,51 +507,20 @@ export const QUEUE_FIELDS: NumberField[] = [
   {
     key: 'queueMaxWaits',
     id: 'settings-queue-max-waits',
-    label: t('排队等待次数'),
-    unit: t('次'),
+    label: '排队等待次数',
+    unit: '次',
     min: 0,
     max: 10,
-    hint: t('上游模型繁忙时会先排队（回一句「建议 N 秒后再来」，Qoder 免费模型就是这样）：网关等一会儿再发同一请求，最多等几次。默认 2 次，可填 0–10；填 0 表示不等待，排队直接返回 503 并说明「不是登录态或额度问题」。'),
+    hint: '上游模型繁忙时会先排队（回一句「建议 N 秒后再来」，Qoder 免费模型就是这样）：网关等一会儿再发同一请求，最多等几次。默认 2 次，可填 0–10；填 0 表示不等待，排队直接返回 503 并说明「不是登录态或额度问题」。',
   },
   {
     key: 'queueWaitSeconds',
     id: 'settings-queue-wait-seconds',
-    label: t('排队等待秒数'),
-    unit: t('秒'),
+    label: '排队等待秒数',
+    unit: '秒',
     min: 0,
     max: 120,
-    hint: t('每次等待的时长，默认 0 = 跟随上游建议（实测 9~30 秒，上游没给建议时用 15 秒）。可填 0–120 秒强制一个固定时长。'),
-  },
-]
-
-/** 验证码令牌池字段：键名与 config.rs 的 KEY_CAPTCHA_POOL_* 指向的 JSON 键逐字一致 */
-export const CAPTCHA_POOL_FIELDS: NumberField[] = [
-  {
-    key: 'zcodeCaptchaPoolTarget',
-    id: 'settings-captcha-pool-target',
-    label: t('库存目标'),
-    unit: t('个'),
-    min: 1,
-    max: 10,
-    hint: t('ZCode 活动套餐通道每条请求都要消耗一个当次铸造的人机验证令牌（一次性，2 分钟过期），库存低于该值时界面自动补铸到它。默认 3 个。调大能吸收突发并发，但用不掉的令牌 2 分钟就过期作废，烧的是上游风控配额。可填 1–10。'),
-  },
-  {
-    key: 'zcodeCaptchaPoolPollMs',
-    id: 'settings-captcha-pool-poll-ms',
-    label: t('轮询间隔'),
-    unit: t('毫秒'),
-    min: 1000,
-    max: 30000,
-    hint: t('铸造守卫每隔多久看一次库存（毫秒）。只影响发现缺货的反应速度 —— 库存够用时轮询不会铸造任何令牌。默认 2500 毫秒，可填 1000–30000。'),
-  },
-  {
-    key: 'zcodeCaptchaPoolMaxPerRound',
-    id: 'settings-captcha-pool-max-per-round',
-    label: t('单轮铸造上限'),
-    unit: t('个'),
-    min: 1,
-    max: 5,
-    hint: t('发现缺货时一轮最多铸几个（连铸之间固定隔 500 毫秒）。默认 1 个：SDK 同一实例连铸容易互相干扰。调大补货更快，但单轮连铸越多越容易触发上游风控。可填 1–5。'),
+    hint: '每次等待的时长，默认 0 = 跟随上游建议（实测 9~30 秒，上游没给建议时用 15 秒）。可填 0–120 秒强制一个固定时长。',
   },
 ]
 
@@ -671,9 +534,9 @@ export const RETRY_MAX_CODES = 50
 export type PromptModeOption = { value: string; optionLabel: string; toastLabel: string }
 
 export const PROMPT_MODES: PromptModeOption[] = [
-  { value: 'passthrough', optionLabel: t('透传客户端 system（默认）'), toastLabel: t('透传客户端 system') },
-  { value: 'custom', optionLabel: t('替换为网关提示词'), toastLabel: t('替换为网关提示词') },
-  { value: 'append', optionLabel: t('追加网关提示词'), toastLabel: t('追加网关提示词') },
+  { value: 'passthrough', optionLabel: '透传客户端 system（默认）', toastLabel: '透传客户端 system' },
+  { value: 'custom', optionLabel: '替换为网关提示词', toastLabel: '替换为网关提示词' },
+  { value: 'append', optionLabel: '追加网关提示词', toastLabel: '追加网关提示词' },
 ]
 
 /* ─── 校验与归一化 ─────────────────────────── */
@@ -689,11 +552,11 @@ export type ParseResult = { ok: true; value: number } | { ok: false; message: st
 export function parseInteger(raw: unknown, min: number, max: number, noun: string): ParseResult {
   const text = String(raw ?? '').trim()
   // 空串要单独挡：空值过不了下面的正则，但提示语不同（「不能为空」比「必须是整数」更准）
-  if (!text) return { ok: false, message: t('{noun}不能为空（可填 {min}–{max}）', { noun, min, max }) }
-  if (!/^\d+$/.test(text)) return { ok: false, message: t('{noun}必须是整数', { noun }) }
+  if (!text) return { ok: false, message: `${noun}不能为空（可填 ${min}–${max}）` }
+  if (!/^\d+$/.test(text)) return { ok: false, message: `${noun}必须是整数` }
   const value = Number(text)
   if (value < min || value > max) {
-    return { ok: false, message: t('{noun}必须在 {min}–{max} 之间（当前填的是 {text}）', { noun, min, max, text }) }
+    return { ok: false, message: `${noun}必须在 ${min}–${max} 之间（当前填的是 ${text}）` }
   }
   return { ok: true, value }
 }
@@ -745,13 +608,13 @@ export function normalizeNumbers(
 
 /** 字节数 → 可读大小（库主文件通常几百 KB 到几十 MB，四档够用） */
 export function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return t('0 B')
-  if (bytes < 1024) return t('{n} B', { n: bytes })
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  if (bytes < 1024) return `${bytes} B`
   const kb = bytes / 1024
-  if (kb < 1024) return t('{n} KB', { n: kb.toFixed(1) })
+  if (kb < 1024) return `${kb.toFixed(1)} KB`
   const mb = kb / 1024
-  if (mb < 1024) return t('{n} MB', { n: mb.toFixed(1) })
-  return t('{n} GB', { n: (mb / 1024).toFixed(2) })
+  if (mb < 1024) return `${mb.toFixed(1)} MB`
+  return `${(mb / 1024).toFixed(2)} GB`
 }
 
 /** 条数 → 带千分位的文本（用户对着看更省事）；非法值给「—」 */
@@ -765,91 +628,172 @@ export function formatCount(value: unknown): string {
 
 /** 标题右侧问号（`[data-tip]`）的说明全文：tooltip.js 仍在页面上跑，照旧服务这些元素 */
 export const TIPS = {
-  displayTheme: t('控制界面的深浅色，与左侧边栏底部的三个主题按钮是同一个设置（改哪一处，另一处立刻跟上）。「跟随系统」会随操作系统当前的浅色 / 深色自动切换，并在系统主题变化时即时跟上；选「浅色」或「深色」则把界面固定在该模式，不再随系统变化。窗口标题栏的深浅色会一并同步，不会出现深色界面配一条浅色标题栏的情况。'),
-  displayZoom: t('等比放大或缩小整个界面（文字、控件、间距一起变），效果与浏览器按 Ctrl +/- 相同：80%–130%、5% 一档。窗口本身不缩放，变的是页面内容的显示比例，设置立即生效并记住，下次启动直接按这个比例打开。放得越大可视范围越小，窗口较窄或表格较宽时不建议调得太大。'),
-  displayLanguage: t('界面语言。可选简体中文、繁體中文、English、日本語、한국어、Português (Brasil)，或「跟随系统」（按浏览器 / 系统的语言列表自动选）。切换后整页立即刷新；该偏好只存在本机（localStorage），不影响账号、密钥与转发。'),
-  tray: t('默认关闭窗口不会退出程序，而是把窗口缩到系统托盘，转发继续在后台运行（OpenAI 客户端不受影响）；要彻底退出程序，请在托盘图标上右键选「退出」。关掉这个开关后，点关闭按钮即退出程序、转发随之中断。「开机自动启动」开启后，登录系统时会自动启动本程序（通常直接驻留托盘），不需要手动打开。'),
-  lightweight: t('开启后，关闭窗口不只是隐藏，而是把界面窗口整个销毁：底层的 WebView2 六个常驻进程（约 200MB 内存）随之退出，网关转发、定时签到、余额查询都在后台进程里继续，不受影响；需要界面时点托盘图标重新打开（WebView 冷启动约 1 秒）。注意：界面销毁期间「ZCode 活动套餐」通道的验证码令牌由界面铸造，无法补充 —— 走该通道的请求会以 503 落进请求日志（写明原因），重新打开界面即自动恢复。与「开机自动启动」同时开启时，开机后也不建界面（只留托盘与后台进程），点托盘才打开 —— 效果与关窗后一致。此开关只在「关闭窗口时最小化到托盘」开启时有意义，最小化窗口不受影响。'),
-  lan: t('默认网关只监听 127.0.0.1，只有本机能访问。开启后网关改听所有网卡，同一局域网内的设备可以把 API 地址指向本机 IP 一起使用。出于安全考虑，开启前必须先注册一个面板管理员：管理接口从此要求管理员会话或网关 Key，模型额度不会对局域网裸奔；一把启用的网关 Key 都没有时，转发接口也会拒绝服务，直到创建第一把。改动需要重启应用生效。「同时开放网页管理面板」把管理界面也出给局域网（其他设备的浏览器打开本机 IP 即可管理），默认关闭 —— 桌面端的面板仍只由本程序自己出。'),
-  units: t('控制报表与请求日志里 Token 读数的写法：开启后按「万 / 亿」式的本地量级词显示（简体为万 / 亿，繁体为萬 / 億，日文为万 / 億，韩文为만 / 억），关闭则用 k / M 缩写（与上游文档、接口字段的写法一致）。英文 / 葡语的本地量级词就是 k / M，这项对它们没有区别。只影响显示口径，不改变任何统计与存储的数值。'),
-  queue: t('只对「排队制」的上游生效（目前是 Qoder 的免费模型）：模型繁忙时上游不报错，只回一句「建议 N 秒后再来」（业务码 10605），网关按建议时长等一会儿再发同一请求，等满次数仍排不上才把「排队中」作为错误返回（HTTP 503，文案会说明这不是登录态或额度问题）。等待发生在首个字节之前，吃的是「等待响应超时」那份预算 —— 两项设置一起决定一次请求最多卡多久；排队不会标记账号限额、也不会换账号（换谁都一样在排队）。保存后对下一个请求立即生效，不用重启。'),
-  captchaPool: t('ZCode「活动套餐」通道的每条推理请求都要附一个当次铸造的阿里云无痕验证令牌（一次性、约 2 分钟过期）：令牌由界面里的铸造守卫静默铸好、推给网关入池，转发时逐条取用。这里的三个值管的是补货节奏：①「库存目标」= 库存低于它守卫才补铸、补到它为止，默认 3 个；②「轮询间隔」= 守卫多久看一次库存，默认 2500 毫秒，只影响反应速度（库存够用时不会多铸）；③「单轮铸造上限」= 发现缺货时一轮最多铸几个，默认 1 个（连铸之间固定隔 500 毫秒）。请求密集、请求日志里连续出现「需要人机验证令牌」的 503 时，把目标与单轮上限适当调大、轮询调快，能让池子跟得上消耗 —— 代价是上游（阿里云）对铸造频率有风控，铸得越多越快越容易触发限流，且用不掉的令牌 2 分钟即过期作废、等于白烧配额，所以建议小步调。保存后对下一轮补货立即生效，不用重启。'),
-  timeouts: t('上游请求四个阶段各自的等待上限（秒，1~3600）：①「连接中超时」= 建立 TCP/TLS 连接或代理隧道的最大等待，默认 30 秒；②「等待响应超时」= 请求发出后等上游响应头的最大时间，默认 300 秒 —— 网关请求上游恒带 stream，响应头在 SSE 建立时就到达，与模型思考多久无关；③「流式响应空闲超时」= 流式响应相邻两块数据之间允许的最大空闲，收到新数据即重新计时，默认 300 秒 —— 上游长时间不吐数据即判定连接僵死并断开；④「非流式响应超时」= 读完整份非流式响应体的总预算（一次性计时、不重置），默认 300 秒。四项都是「等待上限」，只要数据还在来，正常的流式回答就一直往下传。保存后对下一个请求立即生效，不用重启。'),
-  retry: t('请求转发到上游失败时（服务器瞬时错误、连接失败，以及 WorkBuddy 的 11-128 敏感词拦截），网关会等一段间隔后再发一次。次数分两档，管的是两件事：①「同一账号重试次数」在同一账号上原地重发几次 —— 一般是提示词被上游拦截、或链路瞬时抖动，等一会儿重发往往就好了；②「切换账号重试次数」这份请求最多再换几个账号试 —— 首发的那个账号不算，每换一个扣一次，不分是不是同一家（换到同一家的下一个账号也算一次），换满还失败就把错误返回给客户端。两项都设为 0 表示失败不重试、直接报错。注意账号级限额（429）不占这里的换号次数 —— 那类失败走「冷却该账号并换下一个账号」的降级，与这里的重试是两条路。另有「指定错误码直接换号」名单（默认 402）：命中名单的上游状态码不在同一账号重发，直接按队列换下一个账号继续试（换号也占「切换账号重试次数」），换满仍失败才把错误返回给客户端。'),
-  routing: t('转发一个请求时按什么顺序挑账号：①「路由策略」决定排队规则 —— 顺序优先是排第 1 的接走所有请求、直到它不能答（限流 / 故障 / 额度尽）才轮到下一位；负载均衡是每条请求换下一位，把负载摊到各个账号上。②「会话粘性」让同一会话（相同的模型 + 相同的开头消息）尽量跟住同一个账号 —— 多轮对话的上下文缓存能复用、少换号少浪费；自动档粘 5 分钟、会话内档粘 6 小时、每轮与关闭都不粘。账号的排队位次（账号表的第一列）在所有策略下都是地基，策略在它之上再排。此外路由还有三层自愈保护默认生效，不需要配置：转发失败的账号退避休息一会儿（15 分钟起步翻倍、封顶 1 小时），被 429 的账号垫底排到队尾一圈，余额不足 / Token 周期用量到顶的账号由限制器拦下 —— 恢复后自动回到队列。'),
-  sanitize: t('上游用「逐字精确匹配」的方式审核请求体（不是语义审核）：客户端注入的固定模板句、计费头字段名、以及某些裸错误码出现在报文里就会整单拦截，返回 400。开启本项后，网关在每次转发前改写这些指纹 —— 表头键值整段删除，承载语义的模板句只换一个词（如 official CLI for Claude → official CLI tool for Claude），对话内容与语义都不受影响。规则集是内置的，不需要也无法维护词表。关掉本项后客户端模板会原样发往上游，可能重新出现模板句被误拦的报错。'),
-  clineHeaders: t('Cline 上游按请求头判定「调用方是不是 Cline 自家产品」：X-CLIENT-TYPE: cline-sdk 是硬门槛（缺了它免费池模型一律 403），版本号与平台标识让请求更贴近官方客户端的形态。这里列出的是网关默认会发的头：改某一行的值 = 覆盖默认值（也可以新增默认清单之外的自定义头）；把值清空保存 = 这个头不发送；在界面删掉被改过的行 = 回落默认值。改完点「保存」，下一个 Cline 请求立即生效。不懂某一行的含义就不要动它 —— 伪装头的价值在「与官方客户端逐字一致」。'),
-  cors: t('网关面（/v1/*）默认不应答浏览器跨源请求：页面直连会被预检拦下，只报「无法连接 API」。注意来源是 * —— 未配「网关 Key」时任何网页都能借本机网关打上游，故默认关闭；只给自己用的话，让页面与网关同源（本地反代 /v1）更稳妥。面板接口（/api/*）不受影响。'),
-  prompt: t('客户端（Claude Code / Codex 等 CLI）会在 system 提示词里注入几十句固定模板，上游按逐字匹配审核，命中就整单拦截（HTTP 400）。指纹脱敏能改写实测命中过的那几句，但换一个客户端版本就可能冒出新的。这里可以把 system 整段换成网关自己那份：①「透传」= 不动客户端 system（默认，行为与之前完全一致）；②「替换」= 删掉客户端所有 system / developer 消息，换成网关的提示词（客户端项目规范随之消失）；③「追加」= 在开头连续 system 块之后插入一条网关提示词，既有消息逐字不动（客户端规范与网关提示词并用）。那份提示词有两个来源：提示词文件（留空用内置默认），或直接在界面上编辑正文 —— 编辑过就以那份正文为准（优先于文件），清空则回到文件 / 内置默认。另外，透传 / 追加模式下撞了内容拦截（多半是指纹误报）时，网关会自动换一段最小中性提示词重试一次，并把「降级期」开到次日 00:00 —— 期间所有请求直接带中性提示词出门，不再先撞一次 400；这里能看见并提前解除它。上面几项是**默认值**：想给某个提供商单独配，用下面的「按提供商」加一行（带「网关自带」的家默认就列在那里）—— 不同的上游对这些内容的接受程度不一样。'),
-  debug: t('开启后，网关会把每次转发**发给上游的请求**（请求头 + 请求体）与**上游返回的响应**（状态码 + 响应头 + 响应体）完整保存到本地，供请求日志页的「详情」查看。请求头里的 Authorization、Cookie、API Key 等凭据字段一律替换成 [redacted]，不会明文落盘；请求体与响应体按原样保存（可能包含你的对话内容）。报文只保留最近 500 条，超出后丢弃最旧的。这是排障用的临时开关，不需要时建议关闭。'),
-  io: t('导出会把全部账号与自定义提供商定义写入一个 JSON 文件，可以拷到另一台机器上导入后继续使用。导入采用合并策略：同提供商下按业务身份（UID / userId / apiKey 等）去重 —— 已存在的账号只更新凭证，保留本机原有的优先级顺序；新账号追加到转发顺序末尾，不会抢占当前正在使用的账号；自定义提供商定义按 id 合并，本机缺失时自动补建。'),
-  backup: t('把整份数据库（账号、网关配置、事件日志、请求统计、调试报文与桌面设置）导出成一个 SQL 文件，恢复时整体替换本机全部数据 —— 与上面「账号导入 / 导出」的逐条合并是两种语义：恢复会连配置、日志与当前启用状态一起换成备份那台机器的状态。导出默认包含日志与调试报文（文件可能很大），不需要时可以取消勾选只备业务数据。恢复前会自动把当前数据备份到配置目录的 backups/ 下，恢复后需要重新登录管理面板。'),
-  retention: t('三类数据各自独立计时，超出保留天数的部分会被删除：事件日志是登录、账号切换、429 切换这类系统事件；请求日志是网关每次转发到上游的逐条记录；按天聚合供报表页的热力图与按天趋势使用。把某一档改小（例如 30 天改成 7 天）保存后会立即删除超出的历史数据，此操作不可恢复；改大或保持不变不会删除任何数据。三项的可填范围均为 1–3650 天。'),
-  storage: t('全部数据（账号、事件日志、请求记录、调试报文、设置）统一保存在配置目录下的 agent2api.db 这一个 SQLite 数据库里。备份时只需拷贝这个文件；更换保存位置请设置环境变量 AGENT2API_PROXY_HOME 后重启程序。'),
-  modelsDev: t('models.dev 是一个开源的模型资料库（社区维护），这里用它补齐「上游没告诉我们」的模型能力：上下文窗口、最大输出、工具调用、图片、视频、是否支持思考，以及这个模型认识哪些思考档位。优先级是：你在「模型能力」里手工改的值 > 上游清单自己声明的值 > models.dev 的值 —— 它只填上游没声明的空位，从不推翻上游已声明的。网关随包内嵌了一份快照，所以离线、首次启动、访问不通时也有数据；开启时会按「模型目录刷新」任务的间隔联网更新（同一轮里一并刷新，也可在这里立即刷新）。关闭只停联网刷新，已经拿到的数据继续用。'),
+  displayTheme: '控制界面的深浅色，与左侧边栏底部的三个主题按钮是同一个设置（改哪一处，另一处立刻跟上）。「跟随系统」会随操作系统当前的浅色 / 深色自动切换，并在系统主题变化时即时跟上；选「浅色」或「深色」则把界面固定在该模式，不再随系统变化。窗口标题栏的深浅色会一并同步，不会出现深色界面配一条浅色标题栏的情况。',
+  displayZoom: '等比放大或缩小整个界面（文字、控件、间距一起变），效果与浏览器按 Ctrl +/- 相同：80%–130%、5% 一档。窗口本身不缩放，变的是页面内容的显示比例，设置立即生效并记住，下次启动直接按这个比例打开。放得越大可视范围越小，窗口较窄或表格较宽时不建议调得太大。',
+  displayLanguage: '界面语言。可选简体中文、繁體中文、English、日本語、한국어、Português (Brasil)，或「跟随系统」（按浏览器 / 系统的语言列表自动选）。切换后整页立即刷新；该偏好只存在本机（localStorage），不影响账号、密钥与转发。',
+  tray: '默认关闭窗口不会退出程序，而是把窗口缩到系统托盘，转发继续在后台运行（OpenAI 客户端不受影响）；要彻底退出程序，请在托盘图标上右键选「退出」。关掉这个开关后，点关闭按钮即退出程序、转发随之中断。「开机自动启动」开启后，登录系统时会自动启动本程序（通常直接驻留托盘），不需要手动打开。',
+  lightweight: '开启后，关闭窗口不只是隐藏，而是把界面窗口整个销毁：底层的 WebView2 六个常驻进程（约 200MB 内存）随之退出，网关转发、定时签到、余额查询都在后台进程里继续，不受影响；需要界面时点托盘图标重新打开（WebView 冷启动约 1 秒）。注意：界面销毁期间「ZCode 活动套餐」通道的验证码令牌由界面铸造，无法补充 —— 走该通道的请求会以 503 落进请求日志（写明原因），重新打开界面即自动恢复。此开关只在「关闭窗口时最小化到托盘」开启时有意义，最小化窗口不受影响。',
+  lan: '默认网关只监听 127.0.0.1，只有本机能访问。开启后网关改听所有网卡，同一局域网内的设备可以把 API 地址指向本机 IP 一起使用。出于安全考虑，开启前必须先注册一个面板管理员：管理接口从此要求管理员会话或网关 Key，模型额度不会对局域网裸奔；一把启用的网关 Key 都没有时，转发接口也会拒绝服务，直到创建第一把。改动需要重启应用生效。「同时开放网页管理面板」把管理界面也出给局域网（其他设备的浏览器打开本机 IP 即可管理），默认关闭 —— 桌面端的面板仍只由本程序自己出。',
+  units: '控制报表与请求日志里 Token 读数的写法：开启后按中文量级显示（1.2亿 / 8400万），关闭则用 k / M 缩写（与上游文档、接口字段的写法一致）。这只影响显示口径，不改变任何统计与存储的数值。',
+  queue: '只对「排队制」的上游生效（目前是 Qoder 的免费模型）：模型繁忙时上游不报错，只回一句「建议 N 秒后再来」（业务码 10605），网关按建议时长等一会儿再发同一请求，等满次数仍排不上才把「排队中」作为错误返回（HTTP 503，文案会说明这不是登录态或额度问题）。等待发生在首个字节之前，吃的是「等待响应超时」那份预算 —— 两项设置一起决定一次请求最多卡多久；排队不会标记账号限额、也不会换账号（换谁都一样在排队）。保存后对下一个请求立即生效，不用重启。',
+  timeouts: '上游请求四个阶段各自的等待上限（秒，1~3600）：①「连接中超时」= 建立 TCP/TLS 连接或代理隧道的最大等待，默认 30 秒；②「等待响应超时」= 请求发出后等上游响应头的最大时间，默认 300 秒 —— 网关请求上游恒带 stream，响应头在 SSE 建立时就到达，与模型思考多久无关；③「流式响应空闲超时」= 流式响应相邻两块数据之间允许的最大空闲，收到新数据即重新计时，默认 300 秒 —— 上游长时间不吐数据即判定连接僵死并断开；④「非流式响应超时」= 读完整份非流式响应体的总预算（一次性计时、不重置），默认 300 秒。四项都是「等待上限」，只要数据还在来，正常的流式回答就一直往下传。保存后对下一个请求立即生效，不用重启。',
+  retry: '请求转发到上游失败时（服务器瞬时错误、连接失败，以及 WorkBuddy 的 11-128 敏感词拦截），网关会等一段间隔后再发一次。次数分两档，管的是两件事：①「同一账号重试次数」在同一账号上原地重发几次 —— 一般是提示词被上游拦截、或链路瞬时抖动，等一会儿重发往往就好了；②「切换账号重试次数」这份请求最多再换几个账号试 —— 首发的那个账号不算，每换一个扣一次，不分是不是同一家（换到同一家的下一个账号也算一次），换满还失败就把错误返回给客户端。两项都设为 0 表示失败不重试、直接报错。注意账号级限额（429）不占这里的换号次数 —— 那类失败走「冷却该账号并换下一个账号」的降级，与这里的重试是两条路。另有「指定错误码直接换号」名单（默认 402）：命中名单的上游状态码不在同一账号重发，直接按队列换下一个账号继续试（换号也占「切换账号重试次数」），换满仍失败才把错误返回给客户端。',
+  sanitize: '上游用「逐字精确匹配」的方式审核请求体（不是语义审核）：客户端注入的固定模板句、计费头字段名、以及某些裸错误码出现在报文里就会整单拦截，返回 400。开启本项后，网关在每次转发前改写这些指纹 —— 表头键值整段删除，承载语义的模板句只换一个词（如 official CLI for Claude → official CLI tool for Claude），对话内容与语义都不受影响。规则集是内置的，不需要也无法维护词表。关掉本项后客户端模板会原样发往上游，可能重新出现模板句被误拦的报错。',
+  clineHeaders: 'Cline 上游按请求头判定「调用方是不是 Cline 自家产品」：X-CLIENT-TYPE: cline-sdk 是硬门槛（缺了它免费池模型一律 403），版本号与平台标识让请求更贴近官方客户端的形态。这里列出的是网关默认会发的头：改某一行的值 = 覆盖默认值（也可以新增默认清单之外的自定义头）；把值清空保存 = 这个头不发送；在界面删掉被改过的行 = 回落默认值。改完点「保存」，下一个 Cline 请求立即生效。不懂某一行的含义就不要动它 —— 伪装头的价值在「与官方客户端逐字一致」。',
+  cors: '网关面（/v1/*）默认不应答浏览器跨源请求：页面直连会被预检拦下，只报「无法连接 API」。注意来源是 * —— 未配「网关 Key」时任何网页都能借本机网关打上游，故默认关闭；只给自己用的话，让页面与网关同源（本地反代 /v1）更稳妥。面板接口（/api/*）不受影响。',
+  prompt: '客户端（Claude Code / Codex 等 CLI）会在 system 提示词里注入几十句固定模板，上游按逐字匹配审核，命中就整单拦截（HTTP 400）。指纹脱敏能改写实测命中过的那几句，但换一个客户端版本就可能冒出新的。这里可以把 system 整段换成网关自己那份：①「透传」= 不动客户端 system（默认，行为与之前完全一致）；②「替换」= 删掉客户端所有 system / developer 消息，换成网关的提示词（客户端项目规范随之消失）；③「追加」= 在开头连续 system 块之后插入一条网关提示词，既有消息逐字不动（客户端规范与网关提示词并用）。那份提示词有两个来源：提示词文件（留空用内置默认），或直接在界面上编辑正文 —— 编辑过就以那份正文为准（优先于文件），清空则回到文件 / 内置默认。另外，透传 / 追加模式下撞了内容拦截（多半是指纹误报）时，网关会自动换一段最小中性提示词重试一次，并把「降级期」开到次日 00:00 —— 期间所有请求直接带中性提示词出门，不再先撞一次 400；这里能看见并提前解除它。上面几项是**默认值**：想给某个提供商单独配，用下面的「按提供商」加一行（带「网关自带」的家默认就列在那里）—— 不同的上游对这些内容的接受程度不一样。',
+  debug: '开启后，网关会把每次转发**发给上游的请求**（请求头 + 请求体）与**上游返回的响应**（状态码 + 响应头 + 响应体）完整保存到本地，供请求日志页的「详情」查看。请求头里的 Authorization、Cookie、API Key 等凭据字段一律替换成 [redacted]，不会明文落盘；请求体与响应体按原样保存（可能包含你的对话内容）。报文只保留最近 500 条，超出后丢弃最旧的。这是排障用的临时开关，不需要时建议关闭。',
+  io: '导出会把全部账号与自定义提供商定义写入一个 JSON 文件，可以拷到另一台机器上导入后继续使用。导入采用合并策略：同提供商下按业务身份（UID / userId / apiKey 等）去重 —— 已存在的账号只更新凭证，保留本机原有的优先级顺序；新账号追加到转发顺序末尾，不会抢占当前正在使用的账号；自定义提供商定义按 id 合并，本机缺失时自动补建。',
+  retention: '三类数据各自独立计时，超出保留天数的部分会被删除：事件日志是登录、账号切换、429 切换这类系统事件；请求日志是网关每次转发到上游的逐条记录；按天聚合供报表页的热力图与按天趋势使用。把某一档改小（例如 30 天改成 7 天）保存后会立即删除超出的历史数据，此操作不可恢复；改大或保持不变不会删除任何数据。三项的可填范围均为 1–3650 天。',
+  storage: '全部数据（账号、事件日志、请求记录、调试报文、设置）统一保存在配置目录下的 agent2api.db 这一个 SQLite 数据库里。备份时只需拷贝这个文件；更换保存位置请设置环境变量 AGENT2API_PROXY_HOME 后重启程序。',
 } as const
 
 /** 面板底注（`.hint.retention-note`）与各面板内的说明行 */
 export const NOTES = {
-  timeouts: t('保存后立即生效，不用重启；超时按上游失败处理（计入请求日志的「错误」列，并按「请求重试」的设置决定是否重试）。'),
-  queue: t('等待期间请求日志的状态列会显示「排队中」阶段，详情弹窗的「内部重试」里能逐次看到等待时长；等待用尽后返回 HTTP 503（不是 401/429：既不会刷新凭证，也不会把账号标成限额）。'),
-  captchaPool: t('保存后对下一轮补货立即生效，不用重启。守卫跑在应用界面里：轻量模式关窗销毁界面期间无法铸造，走活动套餐通道的请求会以 503 落进请求日志（写明原因），重新打开界面即自动恢复。'),
-  retry: t('保存后立即生效，不用重启；次数用尽仍失败时，错误原样返回给客户端。'),
-  routing: t('保存后立即生效，不用重启：策略与粘性作用于**下一次**转发的选路，进行中的请求不受影响。'),
-  retryCodes: t('命中这些上游状态码的失败不在同一账号重发，直接换下一个账号继续试（换号占用「切换账号重试次数」，换满仍失败才把错误原样返回给客户端）。输入 100–599 的状态码后回车添加，点 × 或退格删除；默认 402（积分不足）。清空全部表示任何错误都照常重试。'),
-  sanitize: t('默认开启。命中明细会记进请求日志的「敏」标签（悬停可看命中了哪几条规则）。本项只改发给上游的副本，客户端看到的响应内容不变。'),
-  clineHeaders: t('值与默认值相同的行不占覆盖（存的是「改过的键」，不是全量配置）；值留空保存表示这个头不发送，删除改过的行表示回落默认值。改完立即生效，不用重启。'),
-  cors: t('默认关闭。改动立即生效，不用重启；关闭期间的跨源请求会被预检拦下。'),
-  debug: t('开启后新发生的请求才会被记录（已经过去的请求补不回来）。报文统一存放在本地数据库里，只保留最近 500 条（超出后丢弃最旧的），条数见左侧「数据 → 数据存储」的「调试报文」。'),
-  promptMode: t('替换 = 客户端 system / developer 消息全部删掉，换成网关的提示词；追加 = 保留客户端内容，只在开头 system 块之后多插一条。两者都只改发给上游的副本，客户端看到的响应不变。'),
-  promptFile: t('UTF-8 文本文件路径，留空用内置默认提示词（通用编码助手提示词，不含任何会被上游拦截的模板句）。只在「替换 / 追加」模式下生效，透传模式不读它。'),
-  promptText: t('在这里直接编辑提示词正文：保存后以这份文本为准（优先于上面的提示词文件），清空则回到文件 / 内置默认。改一个字不必再去编辑器里开文件。'),
-  promptGatewayText: t('上游按「结构」校验身份：三段必须各自成块，所以这里分开编辑三段（不能合成一段）。动态段里的运行值写成占位符，发请求时才替换：{cwd} 工作目录、{platform} 平台、{shell} shell、{os_version} 系统版本、{git} 是否 git 仓库、{provider} 提供方标识、{model} 模型名。清空某一段 = 那一段恢复官方原文。第三段发出时前面会自带一个空行（官方形状）。'),
-  prompt: t('改完立即生效，不用重启（下一个请求就用新模式）。降级是自动的临时状态，解除后本模式自己的提示词立刻恢复。'),
-  promptProviders: t('「用哪份提示词」本来是按上游分别决定的事，所以每家可以有自己的模式、提示词文件与正文：不在这里列出的提供商一律沿用上面那份默认设置，「跟随默认」把这一家取消、回到默认。带「网关自带」那一行的家（目前是 ZCode 两家）默认就列在这里 —— 那一段是网关自己装上去的文本，不来自客户端也不来自提示词文件，默认开启、可以关掉，也可以改它的正文（改过的那一段以你的文本为准）；关掉后还能不能通过上游校验，取决于上游当下的口径，行内说明了实测依据。「模式 / 提示词文件 / 正文」管的是客户端自己的 system 怎么处理，与那个开关是两件事。'),
-  retention: t('保存后立即生效：改小保留天数会立刻删除超出的历史数据，且不可恢复。'),
-  storageFile: t('配置目录下的 agent2api.db（账号、日志、请求记录、调试报文与设置都在里面）。'),
-  storageSize: t('库主文件的大小（不含运行期间的 WAL 临时文件，退出时已自动并回）。'),
-  storage: t('数据统一保存在配置目录下的 agent2api.db；如需更换位置，请设置环境变量 AGENT2API_PROXY_HOME 后重启程序。'),
-  captcha: t('开启后，登录页在浏览器后台自动完成验证（对真人无感），而脚本每次尝试都要先算一道题 —— 暴力破解与抢注的成本显著上升。仅影响面板的登录 / 注册，与 API 客户端的 API Key 无关。'),
-  panelLogin: t('当前浏览器以管理员身份登录着本面板。「退出登录」会撤销这台设备的登录会话（30 天内的自动续期一并失效），需要重新输入账号密码；其他已登录的设备不受影响。'),
-  exportDanger: t('导出文件内含 accessToken / refreshToken / apiKey 等凭证与自定义提供商定义，可直接用于登录。请妥善保管，不要外传或上传到公共位置。'),
-  backupDanger: t('备份文件内含全部账号凭证、网关 API Key 与面板管理员凭据，可直接用于登录。请妥善保管，不要外传或上传到公共位置。'),
-  modelsDev: t('「模型管理」里每个能力的来源标记（上游 / models.dev / 已覆盖）读的就是这份数据；映射弹窗的思考档位下拉也按这里的数据只列该模型真实认识的档位。'),
+  timeouts: '保存后立即生效，不用重启；超时按上游失败处理（计入请求日志的「错误」列，并按「请求重试」的设置决定是否重试）。',
+  queue: '等待期间请求日志的状态列会显示「排队中」阶段，详情弹窗的「内部重试」里能逐次看到等待时长；等待用尽后返回 HTTP 503（不是 401/429：既不会刷新凭证，也不会把账号标成限额）。',
+  retry: '保存后立即生效，不用重启；次数用尽仍失败时，错误原样返回给客户端。',
+  retryCodes: '命中这些上游状态码的失败不在同一账号重发，直接换下一个账号继续试（换号占用「切换账号重试次数」，换满仍失败才把错误原样返回给客户端）。输入 100–599 的状态码后回车添加，点 × 或退格删除；默认 402（积分不足）。清空全部表示任何错误都照常重试。',
+  sanitize: '默认开启。命中明细会记进请求日志的「敏」标签（悬停可看命中了哪几条规则）。本项只改发给上游的副本，客户端看到的响应内容不变。',
+  clineHeaders: '值与默认值相同的行不占覆盖（存的是「改过的键」，不是全量配置）；值留空保存表示这个头不发送，删除改过的行表示回落默认值。改完立即生效，不用重启。',
+  cors: '默认关闭。改动立即生效，不用重启；关闭期间的跨源请求会被预检拦下。',
+  debug: '开启后新发生的请求才会被记录（已经过去的请求补不回来）。报文统一存放在本地数据库里，只保留最近 500 条（超出后丢弃最旧的），条数见左侧「数据 → 数据存储」的「调试报文」。',
+  promptMode: '替换 = 客户端 system / developer 消息全部删掉，换成网关的提示词；追加 = 保留客户端内容，只在开头 system 块之后多插一条。两者都只改发给上游的副本，客户端看到的响应不变。',
+  promptFile: 'UTF-8 文本文件路径，留空用内置默认提示词（通用编码助手提示词，不含任何会被上游拦截的模板句）。只在「替换 / 追加」模式下生效，透传模式不读它。',
+  promptText: '在这里直接编辑提示词正文：保存后以这份文本为准（优先于上面的提示词文件），清空则回到文件 / 内置默认。改一个字不必再去编辑器里开文件。',
+  promptGatewayText: '上游按「结构」校验身份：三段必须各自成块，所以这里分开编辑三段（不能合成一段）。动态段里的运行值写成占位符，发请求时才替换：{cwd} 工作目录、{platform} 平台、{shell} shell、{os_version} 系统版本、{git} 是否 git 仓库、{provider} 提供方标识、{model} 模型名。清空某一段 = 那一段恢复官方原文。第三段发出时前面会自带一个空行（官方形状）。',
+  prompt: '改完立即生效，不用重启（下一个请求就用新模式）。降级是自动的临时状态，解除后本模式自己的提示词立刻恢复。',
+  promptProviders: '「用哪份提示词」本来是按上游分别决定的事，所以每家可以有自己的模式、提示词文件与正文：不在这里列出的提供商一律沿用上面那份默认设置，「跟随默认」把这一家取消、回到默认。带「网关自带」那一行的家（目前是 ZCode 两家）默认就列在这里 —— 那一段是网关自己装上去的文本，不来自客户端也不来自提示词文件，默认开启、可以关掉，也可以改它的正文（改过的那一段以你的文本为准）；关掉后还能不能通过上游校验，取决于上游当下的口径，行内说明了实测依据。「模式 / 提示词文件 / 正文」管的是客户端自己的 system 怎么处理，与那个开关是两件事。',
+  retention: '保存后立即生效：改小保留天数会立刻删除超出的历史数据，且不可恢复。',
+  storageFile: '配置目录下的 agent2api.db（账号、日志、请求记录、调试报文与设置都在里面）。',
+  storageSize: '库主文件的大小（不含运行期间的 WAL 临时文件，退出时已自动并回）。',
+  storage: '数据统一保存在配置目录下的 agent2api.db；如需更换位置，请设置环境变量 AGENT2API_PROXY_HOME 后重启程序。',
+  captcha: '开启后，登录页在浏览器后台自动完成验证（对真人无感），而脚本每次尝试都要先算一道题 —— 暴力破解与抢注的成本显著上升。仅影响面板的登录 / 注册，与 API 客户端的 API Key 无关。',
+  panelLogin: '当前浏览器以管理员身份登录着本面板。「退出登录」会撤销这台设备的登录会话（30 天内的自动续期一并失效），需要重新输入账号密码；其他已登录的设备不受影响。',
+  exportDanger: '导出文件内含 accessToken / refreshToken / apiKey 等凭证与自定义提供商定义，可直接用于登录。请妥善保管，不要外传或上传到公共位置。',
 } as const
 
 /** 状态行（`.settings-state`）的派生文案：与旧实现的赋值逐字一致 */
 export const STATES = {
   appLoading: '—',
-  appUnavailable: t('主进程未返回启动设置，请更新桌面端后重试'),
-  appTrayOn: t('关闭窗口时程序不退出，转发继续在后台运行；退出请用托盘菜单'),
-  appTrayOff: t('关闭窗口即退出程序，后台转发随之中断'),
-  appLightOn: t('轻量模式已开启：关窗即销毁界面进程（释放约 200MB 内存），网关在后台继续；界面销毁期间 ZCode 活动套餐通道不可用，相关请求会在请求日志里注明原因'),
-  appLightOff: t('未开启轻量模式：关窗仅隐藏窗口，界面进程常驻内存，随时打开不等待'),
-  unitsOn: t('当前按「万 / 亿」式本地量级词显示（如 1.2亿 / 8400万）。'),
-  unitsOff: t('当前按 k / M 缩写显示（如 1.20M / 8.4k）。'),
-  debugUnavailable: t('未能读取调试模式设置，请稍后重试'),
-  debugOn: t('正在保存上游原始报文：'),
-  debugOff: t('未开启，转发时不保存任何原始报文。'),
-  sanitizeUnavailable: t('未能读取指纹脱敏设置，请稍后重试'),
-  sanitizeOn: t('正在剥离出站请求里的审核指纹：表头键值整段删除，模板句最小改写。'),
-  sanitizeOff: t('未开启，客户端 system 模板会原样发往上游，可能被内容审核误拦（400）。'),
-  corsUnavailable: t('未能读取网关跨域访问设置，请稍后重试'),
-  corsOn: t('正在应答跨源请求：浏览器跨域请求可直连 /v1/*。'),
-  corsOff: t('未开启，浏览器跨域无法直连网关。'),
-  modelsDevUnavailable: t('未能读取 models.dev 元数据状态，请稍后重试'),
-  /** 数据来历：内嵌快照（发版时那份）/ 上次刷新结果 / 刚拉的 */
-  modelsDevSourceBuiltin: t('随包内嵌的快照（发版时的那份）'),
-  modelsDevSourceCache: t('上次成功刷新的结果（存在本机数据库里）'),
-  modelsDevSourceNetwork: t('刚刚从 models.dev 拉到的最新数据'),
-  modelsDevEmpty: t('还没有装载任何数据。'),
-  promptUnavailable: t('未能读取系统提示词设置，请稍后重试'),
-  degradeUntilFallback: t('次日 00:00'),
+  appUnavailable: '主进程未返回启动设置，请更新桌面端后重试',
+  appTrayOn: '关闭窗口时程序不退出，转发继续在后台运行；退出请用托盘菜单',
+  appTrayOff: '关闭窗口即退出程序，后台转发随之中断',
+  appLightOn: '轻量模式已开启：关窗即销毁界面进程（释放约 200MB 内存），网关在后台继续；界面销毁期间 ZCode 活动套餐通道不可用，相关请求会在请求日志里注明原因',
+  appLightOff: '未开启轻量模式：关窗仅隐藏窗口，界面进程常驻内存，随时打开不等待',
+  unitsOn: '当前显示为「1.2亿 / 8400万」这类中文量级。',
+  unitsOff: '当前显示为「1.20M / 8.4k」这类英文缩写。',
+  debugUnavailable: '未能读取调试模式设置，请稍后重试',
+  debugOn: '正在保存上游原始报文：',
+  debugOff: '未开启，转发时不保存任何原始报文。',
+  sanitizeUnavailable: '未能读取指纹脱敏设置，请稍后重试',
+  sanitizeOn: '正在剥离出站请求里的审核指纹：表头键值整段删除，模板句最小改写。',
+  sanitizeOff: '未开启，客户端 system 模板会原样发往上游，可能被内容审核误拦（400）。',
+  corsUnavailable: '未能读取网关跨域访问设置，请稍后重试',
+  corsOn: '正在应答跨源请求：浏览器跨域请求可直连 /v1/*。',
+  corsOff: '未开启，浏览器跨域无法直连网关。',
+  promptUnavailable: '未能读取系统提示词设置，请稍后重试',
+  degradeUntilFallback: '次日 00:00',
   // ── 显示分类（本次新增：不来自静态骨架，是新写的文案）──
-  themeSystem: t('当前跟随操作系统的深浅色设置，系统切换时界面会自动跟上。'),
-  themeLight: t('当前固定为浅色模式，不随系统变化。'),
-  themeDark: t('当前固定为深色模式，不随系统变化。'),
-  zoomWeb: t('网页端的界面缩放由浏览器自己控制（Ctrl + / Ctrl -，或浏览器菜单里的缩放），此项不可调。'),
-  zoomDefault: t('当前按 100% 显示（默认比例）。'),
-  languageHint: t('界面语言只保存在本机（localStorage）。切换后整页立即刷新，不影响账号、密钥与转发。'),
+  themeSystem: '当前跟随操作系统的深浅色设置，系统切换时界面会自动跟上。',
+  themeLight: '当前固定为浅色模式，不随系统变化。',
+  themeDark: '当前固定为深色模式，不随系统变化。',
+  zoomWeb: '网页端的界面缩放由浏览器自己控制（Ctrl + / Ctrl -，或浏览器菜单里的缩放），此项不可调。',
+  zoomDefault: '当前按 100% 显示（默认比例）。',
+  languageHint: '界面语言只保存在本机（localStorage）。切换后整页立即刷新，不影响账号、密钥与转发。',
 } as const
+
+// ── 以下成员从 HEAD 恢复 ──────────────────────────────
+// settings-state.ts（上一版拆分前的整体状态层）仍 import 它们；并行改动
+// 移走了定义但没改 import，构建因此断在这里。恢复定义而不是动那份 import，
+// 等那边的迁移完成后可整体搬走。
+
+export const ROUTE_STRATEGIES = [
+  {
+    value: 'order',
+    label: t('顺序优先'),
+    tip: t('排第 1 的接走所有请求，直到它不能答（限流 / 故障 / 额度尽）才轮到下一位 —— 就是「从上往下」的现状行为。'),
+  },
+  {
+    value: 'rotate',
+    label: t('负载均衡'),
+    tip: t('每条请求轮换到下一个可用账号；新会话交给当前最闲的那位。适合想把手里的号摊开用、不让某一个一直扛。'),
+  },
+  {
+    value: 'provider',
+    label: t('家内轮询'),
+    tip: t('家之间仍按优先级，只有同一家内部轮流用各账号 —— 想优先用某几家、又不愿把某一家的某个账号焊死时用它。'),
+  },
+] as const
+
+/** 会话粘性档位：同一会话的后续请求是否尽量跟住同一个账号（会话 = 模型 + 首条用户消息） */
+
+export const ROUTE_STICKY_OPTIONS = [
+  {
+    value: 'auto',
+    label: t('自动'),
+    tip: t('同一会话在 5 分钟内尽量跟住同一个账号；停了 5 分钟再发就算新会话。多数场景用它 —— 多轮对话少换号，也不至于把账号焊死。'),
+  },
+  {
+    value: 'session',
+    label: t('会话内'),
+    tip: t('同一会话在 6 小时内跟住同一个账号；适合一坐几个小时的长会话，上游的上下文缓存能吃到更多。'),
+  },
+  {
+    value: 'turn',
+    label: t('每轮'),
+    tip: t('每条请求都重新按策略选路 —— 行为与「关闭」一致，仅保留会话识别的记录。'),
+  },
+  {
+    value: 'off',
+    label: t('关闭'),
+    tip: t('不做会话识别，每条请求都重新按策略选路。'),
+  },
+] as const
+
+/** 路由档位的取值（SegmentedControl 的泛型参数用它，视图里不必再写字面量联合） */
+
+export const CAPTCHA_POOL_FIELDS: NumberField[] = [
+  {
+    key: 'zcodeCaptchaPoolTarget',
+    id: 'settings-captcha-pool-target',
+    label: t('库存目标'),
+    unit: t('个'),
+    min: 1,
+    max: 10,
+    hint: t('ZCode 活动套餐通道每条请求都要消耗一个当次铸造的人机验证令牌（一次性，2 分钟过期），库存低于该值时界面自动补铸到它。默认 3 个。调大能吸收突发并发，但用不掉的令牌 2 分钟就过期作废，烧的是上游风控配额。可填 1–10。'),
+  },
+  {
+    key: 'zcodeCaptchaPoolPollMs',
+    id: 'settings-captcha-pool-poll-ms',
+    label: t('轮询间隔'),
+    unit: t('毫秒'),
+    min: 1000,
+    max: 30000,
+    hint: t('铸造守卫每隔多久看一次库存（毫秒）。只影响发现缺货的反应速度 —— 库存够用时轮询不会铸造任何令牌。默认 2500 毫秒，可填 1000–30000。'),
+  },
+  {
+    key: 'zcodeCaptchaPoolMaxPerRound',
+    id: 'settings-captcha-pool-max-per-round',
+    label: t('单轮铸造上限'),
+    unit: t('个'),
+    min: 1,
+    max: 5,
+    hint: t('发现缺货时一轮最多铸几个（连铸之间固定隔 500 毫秒）。默认 1 个：SDK 同一实例连铸容易互相干扰。调大补货更快，但单轮连铸越多越容易触发上游风控。可填 1–5。'),
+  },
+]
+
+/** 「指定错误码直接换号」：键名、状态码范围与名单上限与后端 retry_api.rs 逐字同源 */
+
+export type ModelsDevState = {
+  /** 联网刷新开关（关闭后已装载的数据继续用，见后端 `KEY_MODELS_DEV_ENABLED`） */
+  modelsDevEnabled?: boolean
+  /** 这份索引的来历：`builtin`（内嵌快照）/ `cache`（上次刷新结果）/ `network`（刚拉的） */
+  source?: string
+  /** 这份数据的生成时刻（毫秒；0 = 未知） */
+  updatedAt?: number
+  /** 收录的模型条数 */
+  count?: number
+}
+
+/** 立即刷新的一行结果（字段与各家目录刷新的结果行同形，见后端 `api::model_meta`）。 */

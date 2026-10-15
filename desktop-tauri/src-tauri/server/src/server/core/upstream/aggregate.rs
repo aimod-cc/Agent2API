@@ -409,7 +409,14 @@ impl CompletionAccumulator {
     }
 }
 
-/// 合并一个 tool_call 增量到已累积的条目上（id/type 覆盖、name/arguments 追加）
+/// 合并一个 tool_call 增量到已累积的条目上（id/type 覆盖、name/arguments 追加）。
+///
+/// `extra_content` 也要保留：antigravity 把 Gemini 的思考签名挂在
+/// `extra_content.google.thought_signature`（见 `antigravity_stream.rs` 的
+/// tool_call_frames），客户端下一轮原样回传、出站侧 `call_signature` 靠它回填
+/// `functionCall.thoughtSignature` —— 丢掉它，非流式（聚合器）路径的下一轮
+/// 工具续接就会被上游 400「Function call is missing a thought_signature」
+/// （issue #237）。签名只在流式增量里出现一次，直接覆盖不拼接。
 fn merge_tool_call(entry: &mut Value, incoming: &Value) {
     let Some(target) = entry.as_object_mut() else {
         return;
@@ -422,6 +429,11 @@ fn merge_tool_call(entry: &mut Value, incoming: &Value) {
     if let Some(kind) = incoming.get("type").and_then(Value::as_str) {
         if !kind.is_empty() {
             target.insert("type".to_string(), Value::String(kind.to_string()));
+        }
+    }
+    if let Some(extra) = incoming.get("extra_content") {
+        if !extra.is_null() {
+            target.insert("extra_content".to_string(), extra.clone());
         }
     }
     let Some(function) = incoming.get("function") else {
@@ -535,6 +547,34 @@ mod tests {
         let message = &body["choices"][0]["message"];
         assert_eq!(message["content"], "你好");
         assert!(message.get("reasoning_content").is_none());
+    }
+
+    /// `extra_content` 必须随 tool_call 保留（issue #237）：antigravity 的思考
+    /// 签名挂在 `extra_content.google.thought_signature`，客户端下一轮原样回传、
+    /// 出站侧靠它回填 `functionCall.thoughtSignature` —— 聚合形态丢掉它，
+    /// 非流式客户端的下一轮工具续接会被上游 400「missing a thought_signature」。
+    #[test]
+    fn tool_call_extra_content_survives_aggregation() {
+        let mut acc = CompletionAccumulator::default();
+        feed(
+            &mut acc,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"pwsh","arguments":""},"extra_content":{"google":{"thought_signature":"sig_abc"}}}]}}]}"#,
+        );
+        feed(
+            &mut acc,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"command\":\"ls\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+        );
+        feed(&mut acc, "data: [DONE]");
+
+        let body = acc.into_completion().body;
+        let call = &body["choices"][0]["message"]["tool_calls"][0];
+        assert_eq!(call["id"], "call_1");
+        assert_eq!(call["function"]["name"], "pwsh");
+        assert_eq!(call["function"]["arguments"], r#"{"command":"ls"}"#);
+        assert_eq!(
+            call["extra_content"]["google"]["thought_signature"], "sig_abc",
+            "签名丢了，下一轮 functionCall 就缺 thoughtSignature"
+        );
     }
 
     /// 把「A / \n / ' B'」三帧折成一份非流式正文（`strip` = 丢不丢保活换行）

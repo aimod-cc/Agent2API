@@ -220,6 +220,24 @@ impl Db {
     }
 }
 
+/// 只读地取某个库文件的 `PRAGMA user_version`（读不到返回 `None`）。
+///
+/// ── 为什么需要一条「独立于 `Db`」的读法 ──────────────────────
+/// 唯一调用点是 `ServerState::bootstrap` 里 `Db::open` **失败之后**那一步：那时
+/// 没有可用的 `Db` 句柄（正因为 schema 版本不符才失败），但仍需要知道「库里写的
+/// 版本号是多少」才能判断该不该让启动明确失败（库版本**高于**本程序 = 用户回退到
+/// 旧版本，见 `schema::migrate` 的拒绝分支与 `SCHEMA_VERSION` 的 v14 段）。
+/// 这里开一条**短命连接**只做「打开 → 读一个 PRAGMA → 关掉」。
+///
+/// 任何失败（文件不在、权限、库损坏、PRAGMA 读不出）一律返回 `None`：
+/// **读不到版本号 ≠ 版本不符**，据此拒绝启动会把「库彻底坏了」这种本该降级继续
+/// 的情形也变成启动失败。调用方只在拿到确切的 `Some(版本)` 且大于本程序时才拒绝。
+pub fn stored_schema_version(path: &Path) -> Option<i64> {
+    let conn = Connection::open(path).ok()?;
+    conn.pragma_query_value(None, "user_version", |row| row.get(0))
+        .ok()
+}
+
 /// 打开连接后必须设置的 PRAGMA。
 ///
 /// 用 `execute_batch` 一次跑完而不是逐条 `pragma_update`：`journal_mode` 这个

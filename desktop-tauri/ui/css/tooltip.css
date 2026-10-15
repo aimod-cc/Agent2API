@@ -64,6 +64,8 @@
   /* 说明里可能带长 URL / 长单词，按词断行，必要时由 JS 升级为 anywhere */
   overflow-wrap: break-word;
   word-break: normal;
+  /* 换行由内容结构表达（多行文案在 tooltip.js 里逐行渲染成 .tip-line），
+     这里保持默认的空白处理即可 */
   white-space: normal;
   box-shadow: var(--shadow-3);
   pointer-events: none;
@@ -101,6 +103,51 @@
   top: auto;
   bottom: -4px;
 }
+
+/* ─── 读数值的卡片变体（[data-tip-variant="plain"]）───
+   默认气泡是品牌蓝底白字 —— 那是**说明性文案**的形态（一两句解释）。
+   报表图表的悬停读数是另一类内容：日期 / 总量 / 每个模型一行的表格形态，
+   蓝底承载多行数字会糊成一片。这一档换成浅底深字的卡片（容器底色 + 描边 +
+   阴影），深浅主题各自取令牌 —— 与参考项目（OmniProxy）统计悬浮提示的
+   形态一致（那边同样是「容器底色 + 1px 强描边 + 阴影」，从不给读数用彩色底）。
+   变体只由锚点的 data-tip-variant 触发，别处的气泡不受影响。 */
+.tip-bubble[data-variant="plain"] {
+  background: var(--surface-raised);
+  /* 描边用一个比 --border 更实的档：浅色下 --border（10% 黑）在白底上几乎看不见，
+     而这张卡片没有彩色底做边界，全靠描边与页面区分 */
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+}
+
+/* 箭头跟着换成容器底色。刻意不加描边：8px 的小方块旋转 45° 后，
+   要让它只显出朝外的两条边得叠两层伪元素，收益不值这点复杂度 ——
+   1px 的描边在箭头根部有极小一处的断续，肉眼基本看不出。 */
+.tip-bubble[data-variant="plain"]::after {
+  background: var(--surface-raised);
+}
+
+/* ─── 多行读数的行结构（tooltip.js 的 paint 生成）───
+   每行一个块级 .tip-line；行间不加额外间距（line-height 已经把行距给足）。 */
+.tip-bubble .tip-line { display: block; }
+
+/* 带色点的行（模型用量行）：悬挂缩进 —— 行首色点占 8px + 间距 5px，
+   名字太长折到第二行时与文字左缘对齐，不会缩到色点下面去 */
+.tip-bubble .tip-line-dot {
+  padding-left: 13px;
+  text-indent: -13px;
+}
+
+/* 行首色点：与环形图图例（.donut-dot）同尺寸同圆角，
+   同一份报表里「气泡与环形图说的是同一个模型」靠颜色对上 */
+.tip-bubble-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 5px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+
 
 @keyframes tip-in {
   from {

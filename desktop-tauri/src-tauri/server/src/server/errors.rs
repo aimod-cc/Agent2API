@@ -214,8 +214,10 @@ pub fn unauthorized_response() -> Response {
 ///
 /// `type` 用 `panel_login_required` 与普通 Key 鉴权失败（`invalid_api_key`）
 /// 区分 —— 两者都是 401，但浏览器面板对它们的反应不同。
-pub fn panel_login_required_response() -> Response {
-    (
+///
+/// 需要 `headers` 是为了判断「refresh 还活不活」——见下面的清除条件。
+pub fn panel_login_required_response(headers: &axum::http::HeaderMap) -> Response {
+    let mut response = (
         StatusCode::UNAUTHORIZED,
         Json(json!({
             "error": {
@@ -224,7 +226,30 @@ pub fn panel_login_required_response() -> Response {
             }
         })),
     )
-        .into_response()
+        .into_response();
+    // 只在**整条会话链确实没了**时才清那枚会话 cookie —— 判据见 `access::has_live_refresh`。
+    //
+    // refresh 还活着时**必须留着它**：access 的生命周期只有 2 小时（`ACCESS_TTL`），
+    // 而会话 cookie 里同时装着 30 天的 refresh（一枚装两段，见 `access::ACCESS_COOKIE`）。
+    // 401 无差别清除等于把 30 天的静默续期砍成每 2 小时强制重登一次 —— 浏览器删 cookie
+    // 要名字与 Path 同时命中，清掉之后客户端紧接着那次 `/api/panel/refresh` 就没有
+    // refresh 候选了（直连 cookie 模式下 localStorage 里没有令牌，头回退也走不通）。
+    //
+    // 而链已经没了的时候，不清才是"反复"的成因：罐里那枚死凭据每次开页都被带回来、
+    // 服务端每次重新判一次无效（一手读数：同一把对不上任何登录的指纹两天里出现 51 次，
+    // 横跨四个时段；后来 dev 上的一条清除头把它从共享罐子里删掉，两个实例此后都是 0 次）。
+    //
+    // 清的时候只发一条 `Set-Cookie`：合并型中转会把多条拼成一条（见
+    // `access::session_valid` 的事故记录），两条清除头等于一条都到不了。
+    if !crate::server::access::has_live_refresh(headers) {
+        if let Ok(value) = axum::http::HeaderValue::from_str(&crate::server::access::clear_cookie())
+        {
+            response
+                .headers_mut()
+                .append(axum::http::header::SET_COOKIE, value);
+        }
+    }
+    response
 }
 
 /// 503：headless 公网形态未配置任何 API Key 时，`/v1/*` 的 fail-closed 响应。
@@ -388,5 +413,86 @@ fn format_reset_at_text(reset_at: i64) -> String {
             .format("%Y/%m/%d %H:%M:%S")
             .to_string(),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod panel_401_cookie_tests {
+    //! 面板 401 的 cookie 清除**只在会话链确实没了时才发**：
+    //!
+    //! - 链没了还留着那枚 cookie 就是「反复」的成因 —— 罐里那枚同名 cookie 每次开页
+    //!   都原样带回来，服务端每次重新判一次无效（生产读数：同一把对不上任何登录的
+    //!   指纹两天里出现 51 次）。
+    //! - 链还活着却清掉，是另一个方向的错，而且更贵：access 只有 2 小时寿命、会话
+    //!   cookie 里同时装着 30 天的 refresh，一过期就清等于把静默续期砍成每 2 小时
+    //!   强制重登一次（客户端拿到 401 的下一步就是拿这枚 cookie 去换新令牌）。
+    //!
+    //! 两个方向各有一条用例钉住。清除头只发一条：合并型中转会把多条拼成一条
+    //! （见 `access::session_valid` 的事故记录），两条清除头等于一条都到不了。
+
+    use super::*;
+    use crate::server::access;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    /// 只带 `Cookie` 头的请求。
+    fn with_cookie(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            HeaderValue::from_str(value).unwrap(),
+        );
+        headers
+    }
+
+    fn set_cookies(response: &Response) -> Vec<String> {
+        response
+            .headers()
+            .get_all(axum::http::header::SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_panel_401_clears_the_stale_access_cookie() {
+        // 没有任何 refresh 候选（匿名访问 / 罐里只剩死值）：该清
+        let response = panel_login_required_response(&HeaderMap::new());
+        let cookies = set_cookies(&response);
+        assert_eq!(cookies.len(), 1, "401 只该发一条清除头（多条会被中转拼坏）");
+        assert!(cookies[0].starts_with(&format!("{}=;", access::ACCESS_COOKIE)));
+        assert!(cookies[0].contains("Path=/"), "清除要落在 access 的签发 Path 上");
+        assert!(cookies[0].contains("Max-Age=0"));
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "错误语义不能因为加了一条头就变"
+        );
+    }
+
+    /// **反对照（这条是回归的钉子）**：access 过期但 refresh 还活着时，401 不许清
+    /// cookie —— 一枚都不许发。
+    ///
+    /// 清掉的后果是可观测的：浏览器删 cookie 要名字与 Path 同时命中，这枚 cookie
+    /// 里同时装着 refresh，删掉之后客户端紧接着的 `/api/panel/refresh` 就没有任何
+    /// refresh 候选了（直连 cookie 模式下 localStorage 是空的，头回退也走不通），
+    /// 于是每 2 小时（`ACCESS_TTL`）被强制重登一次。
+    #[test]
+    fn the_panel_401_leaves_a_live_refresh_alone() {
+        let session = access::IssuedSession::new_session();
+        let headers = with_cookie(&format!(
+            "{}=not-a-live-access.{}",
+            access::ACCESS_COOKIE, session.refresh_token
+        ));
+        // 前提：这把 refresh 确实活着（否则下面那条断言就在真空里跑）
+        assert!(
+            access::has_live_refresh(&headers),
+            "签发的 refresh 应当被判为活的"
+        );
+        let response = panel_login_required_response(&headers);
+        assert!(
+            set_cookies(&response).is_empty(),
+            "refresh 还活着时 401 不许清 cookie —— 清了就把静默续期砍掉"
+        );
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

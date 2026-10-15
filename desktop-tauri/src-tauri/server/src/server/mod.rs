@@ -166,7 +166,7 @@ use crate::server::core::models::ModelCatalog;
 use crate::server::core::update::UpdateManager;
 use crate::server::core::upstream::UpstreamService;
 use crate::server::db::Db;
-use crate::server::request_stats::{RequestStats, Retention};
+use crate::server::request_stats::RequestStats;
 
 /// 服务器共享状态。handler 通过 `axum::extract::State` 拿到它的克隆。
 ///
@@ -330,6 +330,27 @@ impl ServerState {
             Ok(db) => Some(db),
             Err(error) => {
                 logging::console_line("[Storage]", &format!("❌ 数据库打开失败: {error}"));
+                // ── 唯一的例外：库版本**高于**本程序 → 明确拒绝启动 ────────────
+                // 这几乎必然是「用户回退到了旧版本」。旧程序读不懂加密后的
+                // `accounts.data`（会把每一行当坏数据跳过），而它的 `save_state`
+                // 会把「读不出来 = 内存里没有」的行 DELETE —— 即「回退一次 =
+                // 账号被删」（完整论证见 `db::schema::migrate` 的拒绝分支）。
+                // 降级继续会让用户看到「服务正常起来了、账号却全报错」，那不是
+                // 「明确拒绝降级」；所以这里直接返回 Err 让启动失败。
+                //
+                // **只加这一个分支**：其余任何 DB 打开失败（磁盘满、权限、库损坏）
+                // 一律保持下面原有的降级行为（`db = None` 继续启动，理由见
+                // `ServerState.db` 字段注释与 `db` 模块头）。判据必须来自
+                // `Db::open` 之外的一次独立读取：`Db::open` 已经失败、没有句柄可用。
+                if let Some(stored) = db::stored_schema_version(&db_path) {
+                    if stored > db::schema::SCHEMA_VERSION {
+                        return Err(format!(
+                            "库 schema 版本（{stored}）高于当前程序（{}）：这通常是回退到了旧版本。\
+                             请使用更新版本的程序，或从备份恢复——用旧程序打开会把加密后的账号静默删除。",
+                            db::schema::SCHEMA_VERSION,
+                        ));
+                    }
+                }
                 None
             }
         };
@@ -344,8 +365,8 @@ impl ServerState {
         // 顺带做旧 kv 快照的一次性迁移与内存事实表的装载（见 usage_records 模块头）。
         core::usage_records::install(db.clone());
         // 签到记录的明细台账（签到中心「签到记录」页）：装句柄即可，记账点在
-        // `core::billing::checkin::run_checkin`（唯一），保留期裁剪随每次记账
-        // 与「立即清理」进行（见 checkin_records 模块头）。
+        // `core::billing::checkin::run_checkin`（唯一），台账全量保留 ——
+        // 清历史走签到记录页自己的「清空 / 按筛选删除」（见 checkin_records 模块头）。
         core::checkin_records::install(db.clone());
         // 定时签到的「签到范围」一次性补齐：把加入版本晚于配置里那一版的家补进
         // 每条条目的范围（用户的期望是 OfficeAce 果办 / CodeArts 默认开启）。
@@ -366,7 +387,11 @@ impl ServerState {
         // 与任务状态同为「kv 固定键 + 整份读写」的形态，把同一个 `Db` 传进去。
         // 它不参与启动预热，位置只要求早于任何一次 `/api/proxies/pool*` 请求。
         core::proxy_pool::install(db.clone());
-        // 订阅存储（「订阅」区块维护的订阅链接）：同一个 `Db`（与 proxyPool
+        // 代理设置（节点监听端口范围 + 出口测试网址，「网络代理」页的设置
+        // 弹窗）：与 proxyPool 同一形态的 kv 固定键。内核端口分配与出口
+        // 测试在运行期直接读它，位置只要求早于第一次内核启动 / 测试请求。
+        core::proxy_settings::install(db.clone());
+        // 订阅存储（「订阅管理」维护的订阅链接）：同一个 `Db`（与 proxyPool
         // 同一形态）。位置只要求早于任何一次 `/api/subscriptions*` 请求。
         core::subscriptions::install(db.clone());
         // 订阅内核（mihomo sidecar）的命令 worker：单条队列串行消费内核操作
@@ -466,6 +491,11 @@ impl ServerState {
         // 的其余部分（日志、模型目录、健康检查、配置页）不依赖账号，让它们继续
         // 可用比整体拒绝启动更有用 —— 用户能在界面上看到那条 ❌ 日志并处理磁盘问题。
         let store = AccountStore::with_db(db.clone());
+        // 账号存储句柄给订阅内核（lazy listeners：内核 runtime 读「哪些订阅节点
+        // 需要监听器」决定给谁开 —— 账号引用 ∪ 被「测试」钉住的节点，见
+        // `sub_kernel::runtime::listener_node_keys`）。AccountStore 是轻量 Arc
+        // 句柄，clone 与 ServerState 里那份同实例。
+        core::sub_kernel::install_store(Some(store.clone()));
         let context = core::endpoints::default_context();
         let auth = AuthService::new(store.clone(), context);
         let login = LoginService::new(auth.clone(), store.clone());
@@ -503,18 +533,10 @@ impl ServerState {
         // `requestStatsDir` 这个键仍被迁移项读（去自定义目录里找那两个旧文件，
         // 见 `db::migrate::requests`），本文件不再碰它。
         //
-        // 保留期走**回调**，每次裁剪时动态读配置：明细天数来自
-        // `requestRetentionDays`、聚合天数来自 `dailyRetentionDays`
-        // （`config::retention_settings()` 读的是 config::init() 装好的内存快照，
-        // 而 `PUT /api/retention` 会同步刷新它）——
-        // 于是设置页改完天数，下一次记账 / prune 立即生效，**不需要重启进程**。
-        let request_stats = Arc::new(RequestStats::with_db(db.clone(), || {
-            let settings = config::retention_settings();
-            Retention {
-                request_days: settings.request_days,
-                daily_days: settings.daily_days,
-            }
-        }));
+        // 请求统计**全量保留**：没有保留天数、没有条数上限，记账不再带任何裁剪
+        // （明细 / 原始正文 / 按天聚合都不自动淘汰；清历史是请求日志页自己的
+        // 「清空 / 按筛选删除」）。所以构造不再接收保留期回调。
+        let request_stats = Arc::new(RequestStats::with_db(db.clone()));
         // 启动即收尾上次运行遗留的进行中行（详情见方法注释）：不等到第一条
         // 请求进来才清理，界面打开时看到的就已经是「已中断」的终态
         request_stats.sweep_stale_running();

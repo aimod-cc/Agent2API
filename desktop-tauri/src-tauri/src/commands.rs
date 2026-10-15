@@ -481,6 +481,34 @@ pub async fn export_logs(app: AppHandle) -> Result<Value, String> {
     Ok(json!({ "count": count, "file": path.to_string_lossy() }))
 }
 
+/// 弹系统文件夹选择框，返回选中的绝对路径（取消 → `{canceled: true}`）。
+///
+/// 目前只有「下载内核」弹窗的「选择目录…」用它。**只负责选，不负责建**：
+/// 目标目录可以还不存在（用户也能在输入框里直接敲一个新路径），真正建目录是
+/// 下载开始时后端 `create_dir_all` 的事 —— 在这里建的话，「选了但最后没下载」
+/// 会平白留下一个空目录。
+///
+/// `defaultDir` 给对话框一个起点（通常是当前内核目录），不存在时忽略。
+#[tauri::command]
+pub async fn pick_folder(app: AppHandle, default_dir: Option<String>) -> Result<Value, String> {
+    let mut builder = tauri_plugin_dialog::DialogExt::dialog(&app)
+        .file()
+        .set_title("选择文件夹");
+    if let Some(dir) = default_dir.filter(|text| !text.trim().is_empty()) {
+        let path = std::path::PathBuf::from(dir);
+        if path.is_dir() {
+            builder = builder.set_directory(path);
+        }
+    }
+    let Some(folder) = builder.blocking_pick_folder() else {
+        return Ok(json!({ "canceled": true }));
+    };
+    let path = folder
+        .into_path()
+        .map_err(|error| format!("文件夹路径无效: {error}"))?;
+    Ok(json!({ "canceled": false, "path": path.to_string_lossy() }))
+}
+
 /// 读取应用设置。
 ///
 /// `autostart` 以系统注册表的实际状态为准，而不是设置文件里的值：
