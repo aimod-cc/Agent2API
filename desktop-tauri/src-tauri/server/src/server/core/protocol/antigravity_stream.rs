@@ -324,6 +324,15 @@ impl ChatFromAntigravityStream {
             Some(Value::Null) | None => "{}".to_string(),
             Some(other) => json_text(other),
         };
+        // 服务端自持签名（见 `thought_signature_cache` 模块头）：上游按 call id
+        // 把签名回传，这里按同一个 id 记下，下一轮出站时取回。
+        // 这条路径**不依赖客户端回带** —— Anthropic 入口（`/v1/messages`）的
+        // `tool_use` 块没有 `extra_content` 字段，客户端没有承载签名的通道，
+        // 只靠 `extra_content` 那一路的签名永远回不来，工具续接必 400。
+        // 放在 id 被下面 `tool.insert` 移走之前。
+        if let Some(signature) = signature.as_deref() {
+            super::thought_signature_cache::remember(&id, signature);
+        }
         let index = self.tool_index;
         self.tool_index += 1;
         self.tools_emitted = true;
