@@ -422,6 +422,13 @@ fn call_args(value: &Value) -> Value {
 /// 历史里回带的思考签名（出站时挂到 tool_call 的
 /// `extra_content.google.thought_signature` —— Google 自家 OpenAI 兼容端点的
 /// 字段位置；也容忍裸 `thought_signature` / `thoughtSignature` 形态）。
+///
+/// ── 客户端没回带时的兜底：服务端缓存 ────────────────────────
+/// 上面三条路径都要求**客户端把签名带回来**。Anthropic Messages
+/// （`/v1/messages`，Claude Code 走这条）的 `tool_use` 块没有 `extra_content`
+/// 字段，带不回来 —— 于是每一轮工具续接都缺签名、上游必 400。所以这里再兜一层：
+/// 按 call id 去 [`super::thought_signature_cache`] 取上游上一轮给的签名。
+/// 优先级：客户端显式回带 > 服务端缓存（前者是客户端自己的会话态，更准）。
 fn call_signature(call: &Value) -> Option<String> {
     for pointer in [
         "/extra_content/google/thought_signature",
@@ -435,7 +442,14 @@ fn call_signature(call: &Value) -> Option<String> {
             }
         }
     }
-    None
+    // 客户端没带 → 查服务端缓存（本轮响应的签名按 call id 存过，
+    // 见 `antigravity_stream::tool_call_frames`）
+    let id = string_field(call, "id");
+    let id = id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    super::thought_signature_cache::recall(id)
 }
 
 /// `tool` 消息的正文 → `functionResponse.response.result`。

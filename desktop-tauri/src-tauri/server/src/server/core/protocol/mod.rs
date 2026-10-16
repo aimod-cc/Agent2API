@@ -64,6 +64,7 @@ pub mod history;
 pub mod native_tool;
 pub mod responses;
 pub mod responses_outbound;
+pub mod thought_signature_cache;
 pub mod tool_plan;
 
 use std::borrow::Cow;
