@@ -312,7 +312,9 @@ function matches(model: ManageModel, keyword: string, provider: string, stateFil
   if (stateFilter === 'enabled' && !rowEnabled(model)) return false
   if (stateFilter === 'disabled' && rowEnabled(model)) return false
   if (stateFilter === 'mapped' && !(model.aliases || []).length) return false
-  if (provider !== 'all' && (model.provider || '') !== provider) return false
+  // 「自定义 · 全部」视图：数据已只含自定义家（viewData 的聚合分支给），不再按家过滤 ——
+  // 行上的 provider 是各家真实 id，拿哨兵 'custom-all' 精确匹配会把整张表筛光
+  if (provider !== 'all' && provider !== 'custom-all' && (model.provider || '') !== provider) return false
   if (!keyword) return true
   const hay = [model.id, model.name, ...(model.aliases || [])].join(' ').toLowerCase()
   return hay.includes(keyword)

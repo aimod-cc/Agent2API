@@ -435,8 +435,11 @@ function aggregateView(): ManageView {
 /** 当前视图的数据（两个数据源在这里合流，下游渲染 / 搜索 / 候选自动跟着选中的家走） */
 export function viewData(): ManageView {
   const provider = currentProvider()
-  if (customSource.isCustom(provider)) return customViewOf(provider)
+  // 哨兵必须先于 isCustom 判定：'custom-all' 也以 custom- 开头，isCustom 会把它当成
+  // 一家真实记录查（record 为 null → 空视图），聚合分支永远走不到 —— v3.0.4~v3.0.6
+  // 「全部视图恒为空」的根因就是这两行的先后顺序
   if (provider === ALL_CUSTOM) return aggregateView()
+  if (customSource.isCustom(provider)) return customViewOf(provider)
   return snapshot.data || EMPTY_VIEW
 }
 
@@ -886,8 +889,10 @@ export function closeMapping(): void {
 export function openCustomModel(): void {
   const provider = currentProvider()
   // 「自定义 · 全部」不预选：模型要登记到某一家名下，聚合视图说明用户没定到哪一家，
-  // 交给弹窗自己选（与内置「全部」视图同一行为）；单家视图锁定那一家
-  const custom = customSource.isCustom(provider)
+  // 交给弹窗自己选（与内置「全部」视图同一行为）；单家视图锁定那一家。
+  // 哨兵要先从 isCustom 里豁免：'custom-all' 过不了前缀判定的话，这里会 locked=true
+  // 且把不存在的 'custom-all' 预选进弹窗（保存必然报「该提供商已不存在」）
+  const custom = provider !== ALL_CUSTOM && customSource.isCustom(provider)
   const preselect = custom || (provider !== 'all' && provider !== ALL_CUSTOM) ? provider : ''
   patch({ customModel: { provider: preselect, locked: custom } })
 }
@@ -945,14 +950,18 @@ export function providerLabelOf(provider: string): string {
  */
 export function refreshModels(): void {
   const provider = currentProvider()
-  const custom = customSource.isCustom(provider)
+  // 哨兵不算单家（同 openCustomModel：'custom-all' 会被 isCustom 的前缀判定误中，
+  // 把 name 顶成哨兵原文、custom 布尔置真）
+  const custom = provider !== ALL_CUSTOM && customSource.isCustom(provider)
   const name = custom
     ? (customSource.record(provider)?.name || provider)
     : t('内置提供商')
   shared().wbModelsFetchModal?.open({
-    // 「自定义 · 全部」聚合视图没有单一的上游可拉（各家 Base URL 都不同），
-    // 把 providerId 置空，弹窗按内置家的「多家范围」模式组装刷新名单
-    providerId: provider === ALL_CUSTOM ? '' : provider,
+    // 「自定义 · 全部」聚合视图没有单一的上游可拉（各家 Base URL 都不同），按内置家的
+    // 「多家范围」模式打开弹窗。providerId 传 'all' 而不是空串：弹窗入口对空 providerId
+    // 直接 return（点了没反应），而内置分支的刷新请求体只带 {accounts, providers}，
+    // 不会把这个值发给后端 —— 它只在弹窗没拿到 name 时做标题回落，这里已显式给了
+    providerId: provider === ALL_CUSTOM ? 'all' : provider,
     custom,
     name,
     // 自定义家：导入成功 → 目录缓存已刷新，重绘即可（数据源是本地缓存）
