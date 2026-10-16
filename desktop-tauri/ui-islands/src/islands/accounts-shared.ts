@@ -1,4 +1,5 @@
 import { t } from '../i18n'
+import type { BalanceQueryPublic } from './balance-query'
 
 /**
  * 账号页各文件共用的**类型与全局桥读取**（非岛：`.ts` 不被 import.meta.glob 当岛加载）。
@@ -22,11 +23,20 @@ export type ProxyConfig = {
   label?: string
   /** 解析失败的原因：转发时回退直连，界面上整格标红 */
   error?: string
+  /**
+   * 轮询档（`source === 'rotate'`，只对 OpenCode Zen 开放）的展示读数：
+   * 候选条数与其中可用的条数（后端 `proxy_rotate::summary`）。
+   */
+  rotate?: { all?: boolean; total?: number; usable?: number } | null
   config?: {
     source?: string
     listenerUid?: string
     /** `source === 'pool'` 时的池条目 id（见 PoolItem） */
     proxyId?: string
+    /** `source === 'rotate'`：true = 轮询池里全部启用的出口 */
+    all?: boolean
+    /** `source === 'rotate' && all !== true`：要轮询的池条目 id */
+    proxyIds?: string[]
     protocol?: string
     host?: string
     port?: number
@@ -132,6 +142,22 @@ export type AccountRecord = {
   hasApiKey?: boolean
   /** 自定义账号：是否声明了「该上游无需鉴权」（与 `hasApiKey` 互斥，见后端 `state::no_auth`） */
   noAuth?: boolean
+  /**
+   * 自定义账号：账号级 **baseUrl 覆盖项**（记录里写了这个键才透出；缺省表示
+   * 回落到提供商的 baseUrl）。出网「轮询」档与后端 `is_opencode_zen_account`
+   * 都要看它 —— 两层都可能指着 OpenCode Go 端点，只看提供商那一层会漏判。
+   */
+  baseUrl?: string
+  /**
+   * 自定义账号：**余额查询配置**（后端只在这家登记了余额方案时注入；见
+   * `providers::custom::balance` 与 `balance-query.tsx`）。
+   *
+   * 形状恒定的三件事：方案 id（只读事实）、两个非密字段的值（`userId` /
+   * `username`）、三个密字段的**存在标记**（`hasAccessToken` / `hasPassword` /
+   * `hasToken` —— 值绝不透出）。没有这个键 = 这一家不查余额，「查询设置」段
+   * 里也就没有方案字段。
+   */
+  balanceQuery?: BalanceQueryPublic
   maxConcurrent?: number
   checkinAt?: number
   /**
@@ -417,7 +443,13 @@ export type SharedWindow = {
   wbProviders?: {
     labelOf?: (id: string) => string
     all?: () => Array<{ id?: string; label?: string }>
-    customList?: () => Array<{ id?: string; name?: string; protocol?: string; baseUrl?: string }>
+    customList?: () => Array<{
+      id?: string; name?: string; protocol?: string; baseUrl?: string
+      /** 客户端形态伪装（`'opencode'` = 按 OpenCode 官方 CLI 形状补齐请求）。
+       *  账号设置里判断「这家是不是 OpenCode Zen」的第二半判据，见 accounts-domain
+       *  的 `isOpencodeZenProvider`。 */
+      clientEmulation?: string
+    }>
     customRequest?: (method: string, path: string, body?: unknown) => Promise<unknown>
     PROTOCOL_OPTIONS?: Array<{ value: string; label: string }>
   }

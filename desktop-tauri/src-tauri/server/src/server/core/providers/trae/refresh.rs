@@ -137,6 +137,12 @@ pub fn response_client_id(body: &str) -> String {
 ///
 /// 上游把令牌放在 `Result` 里，且字段名有两套写法（`Token` / `token` 等），
 /// 所以取值要像参考实现那样逐个试；`TokenExpireAt` 是**毫秒**。
+///
+/// ── 到期字段数字与**字符串**都要认（issue #263）──────────────
+/// 中国版的 `TokenExpireAt` 是**字符串**形态（参考实现 Trae2api-cn 的两处
+/// 测试夹具原样：`"TokenExpireAt": "1900000000000"`，他们的解析全程 `str()`
+/// 兜底）。旧解析只走 `as_i64` / `as_f64`，字符串静默落成 0 —— 面板上的
+/// 有效期与自动续期节奏（`needs_refresh` 看到期）一起坏，而且不报错。
 pub fn parse_refresh_response(body: &str) -> Result<(String, String, i64), String> {
     let parsed: Value = serde_json::from_str(body).map_err(|error| format!("换证响应不是合法 JSON：{error}"))?;
     let candidates = ["Result", "result"];
@@ -146,13 +152,22 @@ pub fn parse_refresh_response(body: &str) -> Result<(String, String, i64), Strin
                 let refresh = first_string(object, &["RefreshToken", "refreshToken", "refresh_token"]).unwrap_or_default();
                 let expires = ["TokenExpireAt", "tokenExpireAt", "ExpiresAt", "expiresAt"]
                     .iter()
-                    .find_map(|field| object.get(*field).and_then(Value::as_i64).or_else(|| object.get(*field).and_then(Value::as_f64).map(|value| value as i64)))
+                    .find_map(|field| timestamp_field(object.get(*field)))
                     .unwrap_or(0);
                 return Ok((token, refresh, normalize_expires_at(expires)));
             }
         }
     }
     Err("换证响应里没有 access token".to_string())
+}
+
+/// 时间戳字段的三种形态都认：整数、浮点、**字符串**数字。
+fn timestamp_field(value: Option<&Value>) -> Option<i64> {
+    match value? {
+        Value::Number(number) => number.as_i64().or_else(|| number.as_f64().map(|raw| raw as i64)),
+        Value::String(text) => text.trim().parse::<f64>().ok().map(|raw| raw as i64),
+        _ => None,
+    }
 }
 
 /// 秒与毫秒的归一（同 `Credential::expires_at_ms` 的判据）。
@@ -364,6 +379,32 @@ mod tests {
         for body in ["{}", r#"{"Result":{}}"#, "not json", r#"{"Result":{"Token":""}}"#] {
             assert!(parse_refresh_response(body).is_err(), "{body:?} 不能算换证成功");
         }
+    }
+
+    /// 中国版实测形状（Trae2api-cn 的夹具原样）：`TokenExpireAt` 是**字符串**。
+    /// 旧解析只认数字，中国版账号的到期时刻会静默落成 0 —— 面板有效期与
+    /// 自动续期节奏一起坏，且不报任何错（issue #263）。
+    #[test]
+    fn a_string_form_token_expire_at_is_read() {
+        let (token, refresh, expires) = parse_refresh_response(
+            r#"{"Result":{"Token":"CN","RefreshToken":"CN-R","TokenExpireAt":"1900000000000"}}"#,
+        )
+        .expect("字符串形态要能解析");
+        assert_eq!("CN", token);
+        assert_eq!("CN-R", refresh);
+        assert_eq!(1_900_000_000_000, expires, "字符串毫秒要落成毫秒");
+        // 带空白的字符串同样认（上游哪天换个序列化器就可能出现）
+        let (_, _, expires) = parse_refresh_response(
+            r#"{"Result":{"Token":"CN","TokenExpireAt":" 1900000000 "}}"#,
+        )
+        .expect("带空白的字符串也要能解析");
+        assert_eq!(1_900_000_000_000, expires, "字符串秒同样按量级归一");
+        // 解析不出数字的串落 0（与「字段缺席」同一去向），不许 panic 或给负数
+        let (_, _, expires) = parse_refresh_response(
+            r#"{"Result":{"Token":"CN","TokenExpireAt":"not-a-number"}}"#,
+        )
+        .expect("坏串不该让换证整体失败");
+        assert_eq!(0, expires);
     }
 
     #[test]

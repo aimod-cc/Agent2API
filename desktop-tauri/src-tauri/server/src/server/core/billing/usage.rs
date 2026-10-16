@@ -112,14 +112,17 @@ impl BillingService {
                 let create_at = time_or_null(item.get("CreateTime")).map(epoch_to_millis);
                 // expireAt 的排序键：缺失视为 Infinity（排在最后）
                 let expire_sort = expire_at.map(|value| value as f64).unwrap_or(f64::INFINITY);
-                let name = label_of(&package_code)
+                // 名字以**上游原文**为准（`PackageName`），包名码表只在它缺席时
+                // 兜底 —— 码表是照抄 Node 版的手抄品，上游改名/换档位后不会跟着
+                // 变：issue #239 里 `code_008` 上游叫「CodeBuddy个人体验版」、
+                // 周期是月，码表却写着「专业版日额度」，名字与周期都不对。
+                let name = item
+                    .get("PackageName")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
                     .map(str::to_string)
-                    .or_else(|| {
-                        item.get("PackageName")
-                            .and_then(Value::as_str)
-                            .filter(|text| !text.is_empty())
-                            .map(str::to_string)
-                    })
+                    .or_else(|| label_of(&package_code).map(str::to_string))
                     .unwrap_or_else(|| package_code.clone());
                 // 逐键组装而不是 json! 字面量：Node 里 `id: r.ResourceId` 在字段
                 // 缺失时是 undefined，`JSON.stringify` 会**整个丢掉这个键**；

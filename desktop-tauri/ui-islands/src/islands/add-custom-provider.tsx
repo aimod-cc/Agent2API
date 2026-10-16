@@ -43,6 +43,7 @@ import {
   toast,
   type CustomProviderRecord,
 } from './add-account-bridge'
+import { balanceSpecOf, type BalanceFieldKey } from './balance-query'
 import { t } from '../i18n'
 
 /** 展示名长度上限（与后端 custom_providers::MAX_NAME_CHARS 一致，前端先挡一次） */
@@ -84,6 +85,89 @@ const protocolOptions = (): Array<{ value: string; label: string }> =>
   shared().wbProviders?.PROTOCOL_OPTIONS || FALLBACK_PROTOCOLS
 
 const customList = (): CustomProviderRecord[] => shared().wbProviders?.customList?.() || []
+
+/* ─── 余额查询方案那一段（预置卡带来方案时才出现）─────────
+ *
+ * 方案与字段说明见 `balance-query.tsx`；这里只负责「按方案渲染输入框」与
+ * 「提交时读出来」。两家（新建 / 加入已有）各有一份字段，DOM id 前缀因此分开。
+ */
+
+const BALANCE_CREATE_PREFIX = 'custom-balance'
+const BALANCE_EXISTING_PREFIX = 'custom-existing-balance'
+
+/** 方案字段的 DOM id（与草稿读写、提交读取三处共用同一个拼法） */
+const balanceFieldId = (prefix: string, key: BalanceFieldKey): string => `${prefix}-${key}-input`
+
+/** 预置卡声明的方案（空串 = 这个预置没有余额方案） */
+function presetSchemeOf(presetKey: string): string {
+  if (!presetKey) return ''
+  const preset = shared().wbPresetProviders?.presetOf?.(presetKey)
+  return String(preset?.balance?.scheme || '')
+}
+
+/**
+ * 读余额查询字段 → 请求体里的 `balanceQuery`（只带**非空**字段）。
+ *
+ * 语义与后端 `custom_accounts::normalize_balance_query_patch` 一致：缺省 = 不写、
+ * 空串 = 不修改。新增账号这一刻没有「已配置」可言，留空就是「不配」，整个键
+ * 不提交即可；方案没有字段的四家（Sub2API / DeepSeek / OpenCode Go / 智谱
+ * 国际站）返回 null。
+ */
+function readBalanceQuery(scheme: string, prefix: string): Record<string, string> | null {
+  const spec = balanceSpecOf(scheme)
+  if (!spec || !spec.fields.length) return null
+  const query: Record<string, string> = {}
+  for (const field of spec.fields) {
+    const value = readField(balanceFieldId(prefix, field.key))
+    if (value) query[field.key] = value
+  }
+  return Object.keys(query).length ? query : null
+}
+
+/** 清空余额查询字段（提交成功后复位，下次进来是干净的） */
+function clearBalanceFields(scheme: string, prefix: string): void {
+  const spec = balanceSpecOf(scheme)
+  if (!spec) return
+  for (const field of spec.fields) setDraftValue(balanceFieldId(prefix, field.key), '')
+}
+
+/**
+ * 余额查询那一段（**只有带方案的家渲染**）。
+ *
+ * 非受控 + 草稿：与这份表单的其它字段同一手法（提交动作在底部操作条那个组件
+ * 里，按 DOM id 现读，见文件头）。方案没有字段时**不渲染输入框**，只留一句
+ * 方案说明 —— 用户仍要看得见「这一家拿什么查余额」（DeepSeek 那类「不用额外
+ * 填东西」的家，这一行就是全部）。
+ */
+function BalanceFields({ scheme, prefix }: { scheme: string; prefix: string }): React.ReactElement | null {
+  const spec = balanceSpecOf(scheme)
+  if (!spec) return null
+  return (
+    <>
+      <div className='add-field'>
+        <Label>{t('余额查询')}</Label>
+        <div className='col-start-2 row-start-1 flex h-[30px] items-center'>
+          <span className='text-xs text-subtle'>{t('方案：{label}', { label: spec.label })}</span>
+          <span className='ml-1.5 text-xs text-subtle'>{spec.endpoint}</span>
+        </div>
+        <span className='hint'>{spec.note}</span>
+      </div>
+      {spec.fields.map(field => (
+        <div className='add-field' key={field.key}>
+          <Label htmlFor={balanceFieldId(prefix, field.key)}>{field.label}</Label>
+          <Input
+            id={balanceFieldId(prefix, field.key)}
+            type={field.secret ? 'password' : 'text'}
+            autoComplete={field.secret ? 'new-password' : 'off'}
+            placeholder={field.placeholder}
+            {...draftProps(balanceFieldId(prefix, field.key))}
+          />
+          <span className='hint'>{field.hint}</span>
+        </div>
+      ))}
+    </>
+  )
+}
 
 /** 提交按钮的忙态包装（与内置家的 runAdd 同一形制；锁是模块级的，弹窗内互斥） */
 async function runSubmit(setBusy: (value: boolean) => void, task: () => Promise<void>): Promise<void> {
@@ -175,6 +259,8 @@ export function CustomProviderBlock({
   const [protocol, setProtocol] = React.useState(() => readField(PROTOCOL_ID) || options[0].value)
   /** 预置家给的 Base URL 备注（用户一改协议就失效，回到按协议算的那句） */
   const [baseHintOverride, setBaseHintOverride] = React.useState('')
+  /** 预置家给的 Base URL 占位提示（自建面板没有固定地址：`https://你的站点/…`） */
+  const [basePlaceholderOverride, setBasePlaceholderOverride] = React.useState('')
   const [picked, setPicked] = React.useState(() => readField(EXISTING_SELECT_ID))
   /** 两张表单各有一枚「该上游无需鉴权」，初值都从草稿读（关掉再打开还在） */
   const [noAuth, setNoAuth] = React.useState(() => readNoAuthDraft(NOAUTH_ID))
@@ -202,26 +288,44 @@ export function CustomProviderBlock({
    * （OpenCode Zen 的免费档、本地 Ollama）本来就不要 Key —— 它正是 issue #39
    * 里「加了提供商却处处提示要 API Key」的根因，勾上这一项才是一条可用账号。
    * 同一张卡再点一次会重新预填，与其它字段同一时序。
+   *
+   * 「加入已有」模式（模板卡指向已建的那家，见 add-account-modal 的 pick）不预填
+   * 字段，但 noAuth 默认态照带：Ollama 这类家在加第二个账号时同样是「根本不要
+   * Key」，与第一个账号（新建时预勾）保持同一口径，用户仍可手动取消。
    */
   React.useEffect(() => {
-    if (mode !== 'create' || !presetKey) return
+    if (!presetKey) return
     const preset = shared().wbPresetProviders?.presetOf?.(presetKey)
     if (!preset) return
+    const presetNoAuth = preset.account?.noAuth === true
+    if (mode !== 'create') {
+      setExistingNoAuth(presetNoAuth)
+      writeNoAuthDraft(EXISTING_NOAUTH_ID, presetNoAuth)
+      return
+    }
     setDraftValue(NAME_ID, preset.name || '')
     setDraftValue(BASEURL_ID, preset.baseUrl || '')
     if (preset.protocol) {
       setProtocol(preset.protocol)
       setDraftValue(PROTOCOL_ID, preset.protocol)
     }
-    const presetNoAuth = preset.account?.noAuth === true
     setNoAuth(presetNoAuth)
     writeNoAuthDraft(NOAUTH_ID, presetNoAuth)
     setBaseHintOverride(preset.hint || '')
+    setBasePlaceholderOverride(preset.placeholder || '')
     // showToken 参与依赖：同一张预置卡再点一次也要重新预填（旧 onShow 每次进这一屏都跑）
   }, [mode, presetKey, providerHint, showToken])
 
   const anthropic = protocol === 'anthropic'
   const baseHint = baseHintOverride || (anthropic ? BASE_HINT_ANTHROPIC : BASE_HINT_OPENAI)
+  const basePlaceholder = basePlaceholderOverride || (anthropic ? BASE_PLACEHOLDER_ANTHROPIC : BASE_PLACEHOLDER_OPENAI)
+  // 余额查询方案：新建模式看**预置卡**、加入已有模式看**选中的那家**（方案在
+  // 提供商记录里，见 select 上方对 `list` 的用法）。空串 = 这一家不查余额，
+  // 那一段整个不渲染。
+  const createScheme = mode === 'create' ? presetSchemeOf(presetKey) : ''
+  const existingScheme = mode === 'existing'
+    ? String(list.find(item => item.id === current)?.balanceScheme || '')
+    : ''
   /** 勾选框的统一处理：React 状态 + 草稿一起写（提交动作读草稿） */
   const toggleNoAuth = (id: string, setter: (next: boolean) => void) => (next: boolean) => {
     setter(next)
@@ -283,7 +387,7 @@ export function CustomProviderBlock({
               id={BASEURL_ID}
               type='text'
               aria-required='true'
-              placeholder={anthropic ? BASE_PLACEHOLDER_ANTHROPIC : BASE_PLACEHOLDER_OPENAI}
+              placeholder={basePlaceholder}
               {...draftProps(BASEURL_ID)}
             />
             <span className='hint' id='custom-baseurl-hint'>{baseHint}</span>
@@ -313,6 +417,8 @@ export function CustomProviderBlock({
               : t('本地 Ollama、OpenCode Zen 免费档这类上游要勾上，否则账号不可用')}
             onChange={toggleNoAuth(NOAUTH_ID, setNoAuth)}
           />
+          {/* 余额查询：只有预置卡带方案的家才出现（新建时方案随记录写入） */}
+          <BalanceFields scheme={createScheme} prefix={BALANCE_CREATE_PREFIX} />
         </div>
       </DialogSection>
 
@@ -362,9 +468,11 @@ export function CustomProviderBlock({
             checked={existingNoAuth}
             note={existingNoAuth
               ? t('已声明无需鉴权：账号会被正常选路，出网时不带任何鉴权头')
-              : t('同一家可以混着放：有 Key 的账号与无鉴权账号各按各的规则走')}
+              : t('同一家可以混着放：有 Key 的账号与无鉴权账号各按各的规则走；无需鉴权的账号也能并存多条（各自可配不同的出网代理）')}
             onChange={toggleNoAuth(EXISTING_NOAUTH_ID, setExistingNoAuth)}
           />
+          {/* 余额查询：这一家登记了方案才出现（方案来自提供商记录，不能改） */}
+          <BalanceFields scheme={existingScheme} prefix={BALANCE_EXISTING_PREFIX} />
           <div className='add-field'>
             <Label htmlFor={EXISTING_NAME_ID}>{t('备注名')}</Label>
             <Input
@@ -421,6 +529,14 @@ async function submitCreate(context: FootContext): Promise<void> {
     // 客户端形态伪装（OpenCode 免费档）：只有预置清单声明了的家才有，
     // 建完可在账号设置的「提供商」一段里改
     if (preset?.clientEmulation) payload.clientEmulation = preset.clientEmulation
+    // 余额查询方案：预置卡声明了才有（deepseek / opencode / glm-cn / sub2api /
+    // newapi / sensenova 六个键）。后端校验后写进提供商记录的 `balanceScheme`
+    // —— 之后的余额查询、账号设置里的「查询设置」段都认这一个事实
+    const scheme = presetSchemeOf(context.presetKey)
+    if (scheme) payload.balanceScheme = scheme
+    // 查询凭证（该方案要的那份；没有字段的家在这里恒为 null）
+    const balanceQuery = readBalanceQuery(scheme, BALANCE_CREATE_PREFIX)
+    if (balanceQuery) payload.balanceQuery = balanceQuery
     // 两个凭证字段互斥（后端也这么归一）：勾了无需鉴权就不带 apiKey 上去
     if (noAuth) payload.noAuth = true
     else if (apiKey) payload.apiKey = apiKey
@@ -430,6 +546,7 @@ async function submitCreate(context: FootContext): Promise<void> {
         'POST', '/api/custom-providers', payload,
       )) as { provider?: { name?: string } } | null
       clearFields([NAME_ID, BASEURL_ID, APIKEY_ID])
+      clearBalanceFields(scheme, BALANCE_CREATE_PREFIX)
       // 勾选框与草稿一起复位（下次进来是干净的默认态，不被上一家预勾影响）
       writeNoAuthDraft(NOAUTH_ID, false)
       const created = data?.provider?.name || name
@@ -447,24 +564,37 @@ async function submitExisting(context: FootContext): Promise<void> {
   const apiKey = readField(EXISTING_APIKEY_ID)
   const noAuth = readNoAuthDraft(EXISTING_NOAUTH_ID)
   const name = readField(EXISTING_NAME_ID)
+  // 余额查询方案在这一家身上（提供商记录）：要不要渲染查询凭证那段由它决定，
+  // 提交时也就按它读（同一个来源，不会出现「界面上有框、提交时读错方案」）
+  const scheme = String(customList().find(item => item.id === providerId)?.balanceScheme || '')
   await runSubmit(context.setBusy, async () => {
     const payload: Record<string, unknown> = { provider: providerId }
     // 与新建模式同一口径：勾了无需鉴权就不带 apiKey
     if (noAuth) payload.noAuth = true
     else if (apiKey) payload.apiKey = apiKey
     if (name) payload.name = name
+    const balanceQuery = readBalanceQuery(scheme, BALANCE_EXISTING_PREFIX)
+    if (balanceQuery) payload.balanceQuery = balanceQuery
     context.setHint('')
     try {
       const data = (await shared().wbProviders?.customRequest?.(
         'POST', '/api/accounts', payload,
-      )) as { account?: { name?: string } } | null
+      )) as { account?: { name?: string }; created?: boolean } | null
       clearFields([EXISTING_APIKEY_ID, EXISTING_NAME_ID])
+      clearBalanceFields(scheme, BALANCE_EXISTING_PREFIX)
       writeNoAuthDraft(EXISTING_NOAUTH_ID, false)
       const label = data?.account?.name
         || customList().find(item => item.id === providerId)?.name
         || ''
-      // 与 add-account-bridge 的 afterAdd 同键同形（label 留空，账号名的冒号前缀作为形参值拼入）
-      await afterCustomAdd(t('✅ {label}账号已添加{name}', { label: '', name: label ? `：${label}` : '' }))
+      // 后端的幂等合并只剩「同一把 Key 重复添加」一种（id 由 key 派生，见后端
+      // account_id_for；无需鉴权账号每次添加都是新的一条，同家可并存多条）。
+      // 合并时 created=false，这次提交更新的是已有账号 —— 提示必须照实说
+      // 「已更新」，照搬「已添加」会让人以为列表会多出一条（实测反馈过的误导）。
+      const suffix = label ? `：${label}` : ''
+      const message = data?.created !== false
+        ? t('✅ {label}账号已添加{name}', { label: '', name: suffix })
+        : t('✅ 已更新已有账号{name}（同一把 API Key 只保留一条，重复添加会合并）', { name: suffix })
+      await afterCustomAdd(message)
     } catch (error) {
       showSubmitError(context, error)
     }

@@ -74,7 +74,15 @@ type SelectContentProps = Omit<React.ComponentProps<typeof BaseSelect.Popup>, 'c
 function SelectContent({ className, sideOffset = 4, children, ...props }: SelectContentProps) {
   return (
     <BaseSelect.Portal>
-      <BaseSelect.Positioner sideOffset={sideOffset} className='z-[35]'>
+      {/* alignItemWithTrigger={false}：关闭 Base UI 默认的「选中项对齐触发器」定位。
+          那个模式由组件自己接管弹层的高度与 top/bottom（fixed + 从视口顶边起算），
+          与我们在 Popup 上写的 max-h 固定上限互相打架：当选中项落在长列表深处、
+          触发器又靠近视口底部时（账号页代理列实测 —— 轮询账号的补位项排在
+          40+ 项的末尾），弹层会被钉到视口顶部，离触发器十万八千里。
+          关掉后回到标准锚定定位：贴着触发器下方弹出、空间不够向上翻转，
+          弹层内部自行滚动到选中项。官方对默认模式的说明与关闭方式见
+          base-ui.com/react/components/select 的 Positioning 一节。 */}
+      <BaseSelect.Positioner sideOffset={sideOffset} alignItemWithTrigger={false} className='z-[35]'>
         <BaseSelect.Popup
           data-slot='select-content'
           className={cn(

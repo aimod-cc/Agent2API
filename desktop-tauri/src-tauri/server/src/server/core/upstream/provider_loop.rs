@@ -257,6 +257,27 @@ const TRANSIENT_RETRY_STATUSES: &[u16] = &[408, 500, 502, 503, 504];
 /// 再看一眼有意义；413 没有任何会变的量。
 const PAYLOAD_SIZE_REJECTION_STATUSES: &[u16] = &[413];
 
+/// 按**请求的路由 / 模型名**拒收的状态码：上游在解析请求时就没找到目标
+/// （模型不在这一家的套餐里、路由不存在），结论只由「这份 body 长什么样」决定，
+/// 同一账号重发同一份 body 必然得到同一个 404 ⇒ 不进原地重发，
+/// 换账号才是有意义的动作（别的账号可能有这个模型）。
+///
+/// 实测形状（issue #255）：OfficeAce 对目录里有、套餐里没有的名字回
+/// `404 {"code":null,"message":"Invalid model."}`，旧判据把它当普通 Fatal，
+/// 原地重发 3 次 × 5 秒才换号——客户端白等 15 秒，换来的还是同一个 404。
+///
+/// 与 [`PAYLOAD_SIZE_REJECTION_STATUSES`] 分成两个常量而不是合一：
+/// 一个是「字节」，一个是「名字」，出处与措辞不同，将来各自的排除面也可能变。
+const DETERMINISTIC_NOT_FOUND_STATUSES: &[u16] = &[404];
+
+/// 轮询出网档（`core::proxy_rotate`）在 429 时**原地换出口**的次数上限。
+///
+/// 为什么是 3：OpenCode Zen 免费档的 429 按 IP 判（这个出口的额度用完），换出口
+/// 就有机会过；但一次请求也不该无限换下去 —— 池里几十个出口全试一遍意味着
+/// 几十次往返，客户端白等。换满 3 个仍 429，按「这台账号此刻确实被上游拒了」
+/// 收尾（走既有的按模型冷却 + 顺延下一个账号），与没有轮询时的行为一致。
+const MAX_ROTATE_EXIT_RETRIES: usize = 3;
+
 /// 这次的失败状态码是否命中「指定错误码直接换号」名单（设置页「通用 → 请求重试」）。
 ///
 /// 命中的失败**跳过本账号**：不进 [`send_with_retry`] 的原地重发，也不做同
@@ -345,7 +366,10 @@ fn fallback_retry_advice(
         | UpstreamErrorClass::ContentBlocked { .. } => None,
         // 体积被入口拒收：重发同一份字节只会得到同一个 413（换号也一样，但那是
         // 编排层的事，这里只撤「原地再发一次」这一件事）
-        UpstreamErrorClass::Fatal { .. } if PAYLOAD_SIZE_REJECTION_STATUSES.contains(&status) => {
+        UpstreamErrorClass::Fatal { .. }
+            if PAYLOAD_SIZE_REJECTION_STATUSES.contains(&status)
+                || DETERMINISTIC_NOT_FOUND_STATUSES.contains(&status) =>
+        {
             None
         }
         UpstreamErrorClass::Fatal { .. } => Some(RetryAdvice {
@@ -944,8 +968,10 @@ async fn attempt_queue(
         let started_at = logging::now_ms();
         let mut refreshed = false;
         // 第三个元素是上游响应的协议（适配器在构造请求时给出）：chat 之外
-        // 还要在下面套一层响应翻译，见 `UpstreamResponse` 的说明
-        let (response, wire_model, response_protocol) = loop {
+        // 还要在下面套一层响应翻译，见 `UpstreamResponse` 的说明。第四个元素是
+        // Antigravity 请求信封里的会话键（签名缓存兜底档的写入键，issue #291；
+        // 其余家是空串 —— 提取见循环内唯一那条成功 break）
+        let (response, wire_model, response_protocol, antigravity_session) = loop {
             // 发送体在这一轮发送前取一次（同一家同池同降级状态下复用缓存项）：
             // 借用在本次迭代内有效，`continue`（401 刷新 / 内容拦截补救）时
             // 重新取 —— 于是「换了 body 的那次重试」拿到的一定是新的一份。
@@ -1111,7 +1137,21 @@ async fn attempt_queue(
                     ) {
                         service.route.sticky_bind(&conv_key, account_id, logging::now_ms());
                     }
-                    break (response, wire_model, plan.response);
+                    // Antigravity 的会话键随信封带出（签名缓存兜底档的写入键，
+                    // issue #291）：只有本家的信封有 `request.sessionId`，其余
+                    // 家给空串。`plan.body` 在这里仍归 plan 所有，取指针即可。
+                    let antigravity_session = if plan.response
+                        == crate::server::core::providers::adapter::UpstreamResponse::AntigravityGemini
+                    {
+                        plan.body
+                            .pointer("/request/sessionId")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string()
+                    } else {
+                        String::new()
+                    };
+                    break (response, wire_model, plan.response, antigravity_session);
                 }
                 Err(failure) => {
                     // ── 手动终止优先于一切重试动作 ────────────────────────
@@ -1636,6 +1676,7 @@ async fn attempt_queue(
                     super::translate::AntigravityToChatStream::new(
                         response,
                         &wire_model,
+                        &antigravity_session,
                         ctx.telemetry,
                     ),
                 ),
@@ -1830,6 +1871,15 @@ fn mark_conversation_limited(
 /// 分支用 `custom_forward::cooldown_model` 解析 —— 与发送名同一纯函数、同一
 /// 结果，两次调用不会分叉（见那个函数的说明）。
 ///
+/// ── 轮询出网档（`core::proxy_rotate`）的 429 补救 ─────────────
+/// 这条路径是**唯一**会把「429」再拆一层的地方：轮询档（目前只有 OpenCode Zen
+/// 免费档）下的 429 说的是「这个出口 IP 的免费额度用完了」，不是「这台账号不行」
+/// —— 换一个出口重发往往就过。所以本函数在轮询档上最多原地换
+/// [`MAX_ROTATE_EXIT_RETRIES`] 个出口，换出口的次数与原因记进本轮的尝试明细
+/// （`note_attempt_retry`，与「动作 0 换提示词」同一记账形态：同一个账号、同一条
+/// 明细，不另起一轮）；换满仍 429 才把错误交给调用方，走既有的「按模型冷却 +
+/// 顺延下一个账号」。别的档、别的错误码一律不换出口（理由见函数内注释）。
+///
 /// 明细记账的定稿粒度与无状态路径对齐：成功时记**上游真实状态码**（流式在
 /// `ForwardOutcome::Stream.status`、聚合完成恒为 200 —— 非 2xx 在 forward
 /// 内部已经分类成错误了），失败时记网关错误的状态码与文案。
@@ -1881,56 +1931,106 @@ async fn attempt_custom(
             describe_proxy(target.proxy.as_ref()),
         ),
     );
-    match custom_forward::forward(
-        &service.store,
-        &provider_id,
-        target.account_id.as_deref().unwrap_or(""),
-        &send.body,
-        target.proxy.clone(),
-        ctx.stream,
-        ctx.telemetry,
-        slot,
-        connections,
-    )
-    .await
-    {
-        Ok(outcome) => {
-            // 成功：明细记**上游真实状态码**（流式在 outcome 里、聚合恒 200）。
-            // 限额标记的清理对自定义家是空操作 —— 它们的冷却由调用方的 429
-            // 分支写入，成功清理走 `cap_cleared` 的同一条路径（这里与有状态
-            // 路径一样在 outcome 到手后调用，见 attempt_stateful 的说明）。
-            let status = match &outcome {
-                ForwardOutcome::Stream { status, .. } => i64::from(*status),
-                ForwardOutcome::Completion { .. } => 200,
-            };
-            cap_cleared(
-                service,
-                &target,
-                &custom_forward::cooldown_model(&provider_id, &model_of(ctx.body)),
-                &limit_model_label(
-                    &model_of(ctx.body),
+    // ── 轮询档的 429 补救：换下一个出口原地重发 ────────────────────
+    // OpenCode Zen 免费档的 429 是**按 IP** 判的（这个出口的免费额度用完，
+    // 见 `core::proxy_rotate` 的模块头）——换一个出口往往就过了，而按「账号
+    // 被限额」处理会白白把这台账号冷却掉。所以这里在轮询档上最多原地换
+    // [`MAX_ROTATE_EXIT_RETRIES`] 个出口；都 429 才把错误交给调用方，走既有的
+    // 「按模型冷却 + 顺延下一个账号」。
+    //
+    // 只对 429（`is_quota_limit`）动手：连接错误 / 5xx / 4xx 与出口无关，
+    // 换出口只是白花一次往返（那类失败由调用方顺延下一个账号兜底）。
+    let mut proxy = target.proxy.clone();
+    let mut rotate_left = if custom_forward::is_rotate_account(target.account.as_ref()) {
+        MAX_ROTATE_EXIT_RETRIES
+    } else {
+        0
+    };
+    loop {
+        match custom_forward::forward(
+            &service.store,
+            &provider_id,
+            target.account_id.as_deref().unwrap_or(""),
+            &send.body,
+            proxy.clone(),
+            ctx.stream,
+            ctx.telemetry,
+            slot,
+            connections,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                // 成功：明细记**上游真实状态码**（流式在 outcome 里、聚合恒 200）。
+                // 限额标记的清理对自定义家是空操作 —— 它们的冷却由调用方的 429
+                // 分支写入，成功清理走 `cap_cleared` 的同一条路径（这里与有状态
+                // 路径一样在 outcome 到手后调用，见 attempt_stateful 的说明）。
+                let status = match &outcome {
+                    ForwardOutcome::Stream { status, .. } => i64::from(*status),
+                    ForwardOutcome::Completion { .. } => 200,
+                };
+                cap_cleared(
+                    service,
+                    &target,
                     &custom_forward::cooldown_model(&provider_id, &model_of(ctx.body)),
-                ),
-                &Value::Null,
-                &provider_id,
-            );
-            logging::verbose(
-                "[Upstream]",
-                &format!("自定义转发完成: HTTP {status}（{}ms）", logging::now_ms() - started_at),
-            );
-            ctx.telemetry.finish_last_attempt(Some(status), None);
-            Ok(outcome)
-        }
-        Err(error) => {
-            // 只在终端：这条错误会作为 GatewayError 抛回入口（或由调用方的
-            // Err 分支顺延），由 `api::chat` / `api::protocol` 记进请求日志。
-            logging::console_line(
-                "[CustomProvider]",
-                &format!("❌ {}", error.message),
-            );
-            ctx.telemetry
-                .finish_last_attempt(Some(i64::from(error.status_code)), Some(&error.message));
-            Err(error)
+                    &limit_model_label(
+                        &model_of(ctx.body),
+                        &custom_forward::cooldown_model(&provider_id, &model_of(ctx.body)),
+                    ),
+                    &Value::Null,
+                    &provider_id,
+                );
+                logging::verbose(
+                    "[Upstream]",
+                    &format!("自定义转发完成: HTTP {status}（{}ms）", logging::now_ms() - started_at),
+                );
+                ctx.telemetry.finish_last_attempt(Some(status), None);
+                return Ok(outcome);
+            }
+            Err(error) => {
+                // 换出口重发（同一账号、同一条尝试明细：明细里追加一条内部重试，
+                // 与「动作 0 换提示词重试」同一记账形态，见 `note_attempt_retry`）。
+                if rotate_left > 0 && error.is_quota_limit() {
+                    if let Some(account_id) = target.account_id.as_deref() {
+                        match service.store.next_rotate_proxy(account_id) {
+                            Ok(Some(next)) => {
+                                rotate_left -= 1;
+                                let reason = format!(
+                                    "轮询换出口重试（下一个 {label}）：上游 {status} 表示该出口已用完额度",
+                                    label = describe_proxy(Some(&next)),
+                                    status = error.status_code,
+                                );
+                                logging::verbose("[Upstream]", &format!("🔁 {reason}"));
+                                ctx.telemetry.note_attempt_retry(
+                                    &reason,
+                                    Some(i64::from(error.status_code)),
+                                    0,
+                                );
+                                proxy = Some(next);
+                                continue;
+                            }
+                            // 不是轮询档（理论上不会走到：上面已按它开门）——
+                            // 按原错误收尾，不制造第二条消息
+                            Ok(None) => {}
+                            // 是轮询档但一条候选都取不出来（池空了 / 全被禁用）：
+                            // 原错误更有信息量（上游为什么拒），换出口那件事
+                            // 如实记一句到明细里，便于排障时区分两种成因
+                            Err(reason) => {
+                                ctx.telemetry.note_attempt_retry(&reason, None, 0);
+                            }
+                        }
+                    }
+                }
+                // 只在终端：这条错误会作为 GatewayError 抛回入口（或由调用方的
+                // Err 分支顺延），由 `api::chat` / `api::protocol` 记进请求日志。
+                logging::console_line(
+                    "[CustomProvider]",
+                    &format!("❌ {}", error.message),
+                );
+                ctx.telemetry
+                    .finish_last_attempt(Some(i64::from(error.status_code)), Some(&error.message));
+                return Err(error);
+            }
         }
     }
 }

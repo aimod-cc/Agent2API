@@ -76,21 +76,25 @@
 //!      9router 那条 recon 拷贝损坏的「Claude Code 前导句」规则**不做**，
 //!      见报告（不猜不可读的字面量）。
 //!
-//! ── thoughtSignature 的往返方案与限制（响应侧见 `antigravity_stream.rs`）──
-//! 两套参考都在服务端**按 call id / 会话缓存签名**，客户端历史不带时回填缓存值
-//! 或默认签名（Manager 还会打 `skip_thought_signature_validator` 哨兵）。
-//! OpenAI chat 的 wire 形态里**没有签名字段**，本仓又刻意不做跨请求状态缓存，
-//! 因此采用「**响应侧随 tool_call 增量带出、请求侧原样回填、不带就省略**」：
-//!   - 响应侧：`parts[*].thoughtSignature` 挂到对应 tool_call 的
-//!     `extra_content.google.thought_signature`（Google 自家 OpenAI 兼容端点的
-//!     官方字段位置，见 `antigravity_stream.rs`）；
-//!   - 请求侧：本文件的 [`call_signature`] 从同一位置（也容忍
-//!     `thought_signature` / `thoughtSignature` 裸字段）读回并回填到
-//!     `functionCall` part；
-//!   - 限制：客户端不回带签名时**省略**（不回填默认值 —— 那是参考实现的自有
-//!     状态，本仓不发明）。非流式客户端走聚合器时 `extra_content` 由
-//!     `merge_tool_call` 保留（2026-10-14 前曾被丢弃、只留 id/type/name/arguments，
-//!     签名只在流式路径可见 —— 那正是 issue #237 的 400 成因）。
+//! ── thoughtSignature 的往返方案（issue #291，响应侧见 `antigravity_stream.rs`）──
+//! 上游把历史回放里 functionCall 的签名当**硬性要求**：缺 → 400「missing a
+//! thought_signature」，伪造 → 400「Corrupted thought signature」—— 签名本体
+//! 被校验，「发明默认签名」的路走不通（Manager 的
+//! `skip_thought_signature_validator` 字面量本仓拿不到，不猜）。
+//! 签名随响应的 tool_call 走 `extra_content.google.thought_signature`
+//! （Google 自家 OpenAI 兼容端点的官方字段位置）带出给客户端；请求侧按
+//! **三级取值**回填到 `functionCall` part：
+//!   1. 客户端带回的签名（[`call_signature`]，也容忍 `thought_signature` /
+//!      `thoughtSignature` 裸字段）—— 最忠实的一份，最优先；
+//!   2. 服务端缓存的 call id 档（[`super::antigravity_signature_cache`]，
+//!      issue #291 新增）—— 多数 OpenAI 兼容客户端下一轮会把非标的
+//!      `extra_content` 丢掉，靠这份缓存续命（[`backfill_signatures`]）；
+//!   3. 服务端缓存的会话 + 函数名兜底档 —— 个别框架重排 id 时用。
+//! 两套参考的解法同源（服务端按 call id / 会话缓存、历史不带时回填）；本仓
+//! 此前「刻意不做跨请求状态缓存」的决定建立在「上游不强制」的前提上，上游
+//! 改为硬校验后补上了缓存。非流式客户端走聚合器时 `extra_content` 由
+//! `merge_tool_call` 保留（2026-10-14 前曾被丢弃、只留 id/type/name/arguments，
+//! 那是 issue #237 的 400 成因）。
 //!
 //! ── 硬约束 ──────────────────────────────────────────────────
 //! release 是 `panic=abort`：本文件零 unwrap/expect/panic。
@@ -149,7 +153,7 @@ pub fn antigravity_request_from_chat(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let contents = contents_of(messages)?;
+    let mut contents = contents_of(messages)?;
 
     let mut request = Map::new();
     if !image_gen {
@@ -173,10 +177,10 @@ pub fn antigravity_request_from_chat(
         generation_config(chat, model, image_gen),
     );
     let first_user = first_user_text(&contents);
-    request.insert(
-        "sessionId".to_string(),
-        Value::String(session_id(project, model, &system_text, &first_user)),
-    );
+    let session = session_id(project, model, &system_text, &first_user);
+    // 客户端没带回签名时按服务端缓存回填（issue #291，见下方的方案节）
+    backfill_signatures(&mut contents, &session);
+    request.insert("sessionId".to_string(), Value::String(session));
     request.insert("contents".to_string(), Value::Array(contents));
 
     let mut envelope = Map::new();
@@ -436,6 +440,74 @@ fn call_signature(call: &Value) -> Option<String> {
         }
     }
     None
+}
+
+/// 历史回放里缺签名的 `functionCall` part → 按服务端缓存回填（issue #291）。
+///
+/// 优先级：客户端带回的签名（[`call_signature`]，在 `contents_of` 构建时已
+/// 挂上）→ call id 缓存 → 会话 + 函数名缓存（两档键的语义见
+/// [`super::antigravity_signature_cache`] 的模块头）。会话键取本次派生出的
+/// `sessionId` —— 与响应侧写入用的是同一把派生尺，两边同源。
+///
+/// 只扫 model 轮：functionCall 只会长在 model 轮上（`contents_of` 的产物）。
+fn backfill_signatures(contents: &mut [Value], session: &str) {
+    let mut backfilled = 0usize;
+    for turn in contents.iter_mut() {
+        if string_field(turn, "role") != "model" {
+            continue;
+        }
+        let Some(parts) = turn.get_mut("parts").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for part in parts.iter_mut() {
+            // thoughtSignature 是 **part 层级**的字段（与 functionCall 平级，
+            // Gemini Part 的形态；`function_call_part` 的写入位置同此），
+            // 不是 functionCall 对象里的键 —— 插错层级上游会报
+            // `Unknown name "thoughtSignature" at …function_call`
+            let Some(part_object) = part.as_object_mut() else {
+                continue;
+            };
+            let Some(call) = part_object.get("functionCall").and_then(Value::as_object) else {
+                continue;
+            };
+            let has_signature = part_object
+                .get("thoughtSignature")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_some();
+            if has_signature {
+                continue;
+            }
+            let id = call
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+            let name = call
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+            let signature = super::antigravity_signature_cache::lookup_call(&id)
+                .or_else(|| super::antigravity_signature_cache::lookup_for_session(session, &name));
+            if let Some(signature) = signature {
+                part_object.insert("thoughtSignature".to_string(), Value::String(signature));
+                backfilled += 1;
+            }
+        }
+    }
+    if backfilled > 0 {
+        crate::server::logging::verbose(
+            "[Antigravity]",
+            &format!(
+                "客户端未回带思考签名，已按服务端缓存回填 {backfilled} 处 functionCall \
+                 （issue #291：上游对历史回放的 functionCall 硬性要求签名）"
+            ),
+        );
+    }
 }
 
 /// `tool` 消息的正文 → `functionResponse.response.result`。

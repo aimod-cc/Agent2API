@@ -53,7 +53,7 @@
 //! 当前配置项（`apiKeys` / `modelRules` / `logRetentionDays` / `debugMode` /
 //! `sanitizeBlacklistFingerprints` / `promptMode` / `promptFile` /
 //! `scheduledTasks` / `autoCheckin` / `locale` / `lastRequestModel` /
-//! `providerRoute` / `updateProxy` / 三个 `*Dir` / 三个 `*RetentionDays` /
+//! `providerRoute` / `updateProxy` / `updateBeta` / 三个 `*Dir` / 三个 `*RetentionDays` /
 //! 三个 `retry*` / 六条 `scheduledTasks.*` 子键 / 三个 `*Imported` 标记 /
 //! 旧字段 `apiKey`）与固定键**无冲突**，逐项核对过（全仓 `update_raw_field` /
 //! `raw.insert` / `KEY_*` 常量的取值集合 vs 下面的 `RESERVED_KV_KEYS`）。
@@ -288,7 +288,29 @@ pub fn is_reserved(key: &str) -> bool {
 /// （`SCHEMA_VERSION <= 13`）读到 v14 库会明确失败，而不是把密文当坏数据跳过、
 /// 再在写回时把「读不出来的行」当成「内存里没有」DELETE 掉（即「回退一次 =
 /// 账号被删」）。对本程序，v14 只是一次空操作。
-pub const SCHEMA_VERSION: i64 = 14;
+///
+/// ── 版本 15：requests 补两条索引（`status` 与报表窄列覆盖）─────
+/// 见 [`V15_SCHEMA`]。两条索引都来自同一次实测：明细三万余行、库已经四百多
+/// MB 的库上，两个最热的读路径分别在整表扫描与逐行回表。
+///
+///   · `idx_requests_status`：`SELECT COUNT(*) FROM requests WHERE status = 0`
+///     在**没有任何索引可用**时对整表做 `SCAN`（实测 3 万行 50 ms 量级，
+///     而命中的通常只有个位数行）。这条语句不属于报表 —— 它是前端「进行中」
+///     徽标的全局轮询（每 5 秒一次，与当前停在哪个页面无关，见 `ui/app.js`
+///     的 `syncRunningRequests`）与请求日志列表每次查询的一部分。加索引后
+///     按 status 直接定位，不再扫全表。
+///   · `idx_requests_summary`：`/api/stats/summary` 的近 24 小时明细窗口
+///     （`request_stats::sql::select_summary_rows`）只需要 6 列，而非覆盖索引
+///     必须逐行回表 —— 明细行里躺着 KB 级的 `route` / `attempt_details`，
+///     回表读回来的几乎全是被随后丢掉的字节。这条索引让该查询变成**纯索引
+///     扫描**（列序与那条 SELECT 的列序一致，改动任一侧都要回来对一眼）。
+///
+/// 两条都是 `CREATE INDEX IF NOT EXISTS`（与其余版本的幂等纪律一致）：在存量库
+/// 上建索引要扫一遍表，代价与表大小成正比、只付一次；`requests` 只有几万行时
+/// 在百毫秒量级，不会让启动明显变慢。**不要把这两条往 [`V1_SCHEMA`] 里补**：
+/// 新库按 1→15 依次跑，v15 那一步同样会建出来，而 v1 里多写一份等于同一条索引
+/// 有了两处定义 —— 将来改一处忘一处，正是 `V4_SCHEMA` 那类错位的来源。
+pub const SCHEMA_VERSION: i64 = 15;
 
 /// 版本 1 的全部表与索引：改造前所有 JSON / JSONL 文件的对应形态。
 ///
@@ -728,7 +750,8 @@ ALTER TABLE requests ADD COLUMN route TEXT;
 ///     免得每个读点都写 `(outcome='success' OR outcome='already')`）；
 ///   - `message`：claim.msg 原文（「今日积分 +100」等**收益就在这里**）；
 ///   - `error`：执行错误原文（失败行的原因）；
-///   - `kept_active`：国际版保活成功（`activity.pokeSucceeded`）标记。
+///   - `kept_active`：国际版保活成功标记（保活对话 `pokeSucceeded` 或网页
+///     会话 `webConversation.succeeded` 任一，见 `checkin_records::kept_active_of`）。
 ///
 /// 为什么 row_id 用 AUTOINCREMENT：与 `requests` 同一理由 —— 它当翻页游标，
 /// 复用 rowid 会让「翻页漏行 / 重行」。
@@ -770,6 +793,26 @@ ALTER TABLE requests ADD COLUMN client TEXT NOT NULL DEFAULT '';
 // v13 没有对应的 `*_SCHEMA` 常量：它只有一条 DELETE，且在 `apply_version`
 // 的分支里用 `execute` 单独执行（要拿被删行数），语句就在那里 —— 见
 // `SCHEMA_VERSION` 的 v13 段。
+
+/// 版本 15：requests 补两条索引（schema v15）。
+///
+/// 与 v9 同一形态（既有表加索引，`CREATE INDEX IF NOT EXISTS`，幂等靠版本号）。
+/// 两条索引各自的来历与代价见 [`SCHEMA_VERSION`] 的 v15 段。
+///
+/// `idx_requests_summary` 的列序 = `sql::SUMMARY_COLUMNS` 的列序**加前缀
+/// `ts, is_test`**：`ts` 在最前才能支撑 `WHERE ts >= ? AND ts <= ?` 的范围扫描，
+/// `is_test` 紧随其后是为了在索引内就过滤掉模型测试行（不必回表才知道要丢）。
+/// 其余 5 列（`model` / `upstream_model` / `total_tokens` / `cache_read_tokens`
+/// / `prompt_tokens`）就是报表要读的全部内容 —— 少一列就要回表，多一列白占
+/// 空间与写入开销。
+const V15_SCHEMA: &str = "
+-- ── requests 补 status 索引（schema v15）─────────────────────
+CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);
+-- ── requests 补报表窄列覆盖索引（schema v15）─────────────────
+CREATE INDEX IF NOT EXISTS idx_requests_summary ON requests(
+  ts, is_test, model, upstream_model, total_tokens, cache_read_tokens, prompt_tokens
+);
+";
 
 /// 把库升到 [`SCHEMA_VERSION`]（幂等：已是最新版时什么都不做）。
 ///
@@ -925,6 +968,9 @@ fn apply_version(
         // 读到 v14 库时明确失败（见 `migrate` 的拒绝分支），而不是把密文当坏
         // 数据跳过后又删掉。完整说明见 [`SCHEMA_VERSION`] 的 v14 段。
         14 => Ok(()),
+        // v15：requests 补两条索引（status 的定位 + 报表窄列的覆盖，见
+        // V15_SCHEMA 与 SCHEMA_VERSION 的 v15 段）。
+        15 => conn.execute_batch(V15_SCHEMA),
         _ => Ok(()),
     }
 }

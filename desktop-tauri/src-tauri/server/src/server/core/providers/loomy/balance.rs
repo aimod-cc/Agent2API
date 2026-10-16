@@ -108,10 +108,32 @@ pub async fn query_usage(store: &AccountStore, account_id: &str) -> Result<Value
         }
     }
 
-    Ok(json!({
+    // ── 逐份明细（`credits[]`，账号页「积分明细」弹层的输入）────────
+    // 两行与 `wallets` 同序同口径：永久积分在前、每日赠送在后。`daily: true` 是界面
+    // 「每日重置」的判据（余额读到 0 时也不折进「已用完」—— 明天回满，这是对的）。
+    //
+    // `dailyRemainingPoints` / `dailyLimitPoints` **不折进这两行**：它们是赠送额度
+    // 的另一个展示口径（客户端在团队卡片上用），与 `dailyBalance` 是否同源未经证实
+    // ——混进来的「剩 x / 共 y」可能对不上真正的余额（宁可少给，不编）。这两个数仍在
+    // `wallets[1]` 的 `remaining` / `limit` 里透出，位置没变。
+    //
+    // 这里没有"缺失不写键"的分支：上游没给时余额列本来就显示 0（`pick_number` 的
+    // `unwrap_or(0.0)`），明细跟着同一份数走，不与上方读数打架。
+    let credits = vec![
+        json!({ "name": "永久积分", "remain": permanent }),
+        json!({ "name": "每日赠送积分", "remain": daily, "daily": true }),
+    ];
+
+    let mut document = json!({
         "available": permanent + daily,
         "unit": "积分",
         "wallets": wallets,
         "raw": payload,
-    }))
+    });
+    // credits 固定两行（见上），没有"空数组"这一档；键名与其余几家一致，
+    // 前端按「键在不在」挂「积分明细」入口
+    if let Some(object) = document.as_object_mut() {
+        object.insert("credits".to_string(), Value::Array(credits));
+    }
+    Ok(document)
 }

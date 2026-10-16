@@ -29,7 +29,17 @@ export type ProxyPoolItem = {
   name: string
   /** manual（手填）| clash（Clash Verge 同步来的只读镜像） */
   source: string
+  /** **有效**启用（来源侧启用 ∧ 非本地禁用）；开关读它 */
   enabled: boolean
+  /**
+   * 本地禁用位（只对镜像条目有意义）。
+   *
+   * 镜像条目的名称 / 端口跟随来源侧，但「本端用不用这条」由用户在本页决定：
+   * `enabled` 是来源侧的镜像值（Clash 里这条监听器开没开），本地那位单独记在
+   * `localDisabled` 上 —— 两种 off 在开关上的含义不同（来源侧关着自己改不了、
+   * 本地关着点一下就恢复），所以界面上要分开说。
+   */
+  localDisabled?: boolean
   protocol: string
   host: string
   port: number | null
@@ -49,8 +59,6 @@ export type ProxyPoolItem = {
   /** 解析后的出口（Clash 条目是**实时**读取的结果） */
   resolved: { protocol?: string; host?: string; port?: number | null; label?: string } | null
   resolveError: string | null
-  /** 订阅节点被「测试」钉住（内核据此给它开监听器，见后端 proxy_pool 的 pinned） */
-  pinned?: boolean
   /** 订阅节点的归属订阅（`subscriptions` 里的 id）；手动 / Clash 条目为空串 */
   providerId?: string
   /** 订阅节点在机场清单里的原始节点名（池条目的展示名可能被改过） */
@@ -94,6 +102,12 @@ export type ProxyPoolPayload = {
   changes?: number
   /** 同步没能进行的原因（Clash 未安装 / verge.yaml 读不出来）；那不算失败 */
   syncError?: string | null
+  /**
+   * 启用 / 禁用响应里的监听器联动（`none` / `closing` / `opening`）：
+   * 订阅节点的端口要等内核重建完才落地，页面按它决定要不要盯一会儿列表
+   * （见 `settleListener`）。manual / clash 条目恒 `none`。
+   */
+  listener?: 'none' | 'closing' | 'opening'
 }
 
 export type ProxyTestResult = {
@@ -126,6 +140,8 @@ export type ProxyPoolBridge = {
   getProxyPool?: () => Promise<ProxyPoolPayload | null | undefined>
   createProxyPoolItem?: (payload: Record<string, unknown>) => Promise<ProxyPoolPayload | null | undefined>
   updateProxyPoolItem?: (payload: Record<string, unknown>) => Promise<ProxyPoolPayload | null | undefined>
+  /** 启用 / 禁用一条（三种来源都放行；响应带 `listener`，见 ProxyPoolPayload） */
+  setProxyPoolItemEnabled?: (payload: { id: string; enabled: boolean }) => Promise<ProxyPoolPayload | null | undefined>
   removeProxyPoolItem?: (id: string) => Promise<ProxyPoolPayload | null | undefined>
   testProxyPoolItem?: (id: string) => Promise<ProxyTestResult | null | undefined>
   /** 手动同步 Clash Verge 出口（响应带 `changes` / `syncError`） */
@@ -135,14 +151,6 @@ export type ProxyPoolBridge = {
   /** 代理设置（节点端口范围 + 测试网址，「网络代理」页的设置弹窗） */
   getProxySettings?: () => Promise<ProxySettings | null | undefined>
   saveProxySettings?: (payload: Record<string, unknown>) => Promise<ProxySettings | null | undefined>
-  /**
-   * 补建订阅节点监听器（lazy listeners）。`{pending, missing, ready}`：
-   * pending = 已投重启命令，ready = 本批条目端口是否都已就绪（后端等到了才回）。
-   * payload 带 `{ids}` 时把那批条目一并纳入补建（批量测试用，见 `batchTest`）。
-   */
-  provisionProxyPool?: (payload?: { ids?: string[] }) => Promise<
-    { pending?: boolean; missing?: number; ready?: boolean } | null | undefined
-  >
 }
 
 export type ProxySharedWindow = {
@@ -195,8 +203,9 @@ export function itemName(item: ProxyPoolItem | null | undefined): string {
 /**
  * 是否 Clash 同步来的只读镜像。
  *
- * 判定只认 `source`：视图侧据此禁用编辑 / 删除 / 启停，
- * 但**测试与批量测试照常可用**（读操作不受只读语义限制）。
+ * 判定只认 `source`：视图侧据此禁用**编辑 / 删除**（名称与端口必须跟随 Clash），
+ * 但**测试与批量测试照常可用**，**启用列也能开关** —— 那条开关写的是本地
+ * 禁用位（本端用不用它），不是 Clash 侧的东西（见 ProxyPoolItem.localDisabled）。
  */
 export function isClashItem(item: ProxyPoolItem): boolean {
   return item.source === 'clash'
@@ -204,15 +213,49 @@ export function isClashItem(item: ProxyPoolItem): boolean {
 
 /**
  * 是否订阅节点镜像（内核同步进来的只读条目，见 `core::proxy_pool`）。
- * 与 Clash 条目同一只读语义：禁用编辑 / 删除 / 启停，测试照常。
+ * 与 Clash 条目同一只读语义：禁用编辑 / 删除，测试与启停照常。
  */
 export function isSubscriptionItem(item: ProxyPoolItem): boolean {
   return item.source === 'subscription'
 }
 
-/** 只读条目的统一判定（Clash 同步 / 订阅镜像都不给写入口） */
+/** 只读条目的统一判定（Clash 同步 / 订阅镜像都不给编辑与删除入口） */
 export function isReadonlyPoolItem(item: ProxyPoolItem): boolean {
   return isClashItem(item) || isSubscriptionItem(item)
+}
+
+/**
+ * 本地禁用中的条目（本页开关关掉的那一类）。
+ *
+ * 三种来源都有 `enabled`，但只有镜像条目会带 `localDisabled`：manual 条目的
+ * 开关就是它自己的 `enabled`，所以判定要看**两处**而不是只看 `enabled === false`
+ * —— 镜像条目的 `enabled` 是来源侧的值（Clash 里这条监听器开没开），
+ * 它与本地那位是两条独立的轴。
+ */
+function isDisabledItem(item: ProxyPoolItem): boolean {
+  return item.localDisabled === true || item.enabled === false
+}
+
+/**
+ * 来源侧本身就关着的镜像条目（Clash 里这条监听器是停用的）。
+ *
+ * 这种 off **本页改不动**（本地开关改不了来源侧），所以开关要禁用并说明
+ * 去哪儿改 —— 否则用户点一下、开关又弹回原位，只会以为是界面坏了。
+ */
+export function isMirrorOffItem(item: ProxyPoolItem): boolean {
+  return isReadonlyPoolItem(item) && item.enabled === false && item.localDisabled !== true
+}
+
+/**
+ * 禁用中的订阅节点（它的监听端口已被关闭流程收掉）。
+ *
+ * **测试照常可用**：测试走统一测试口（切组即换节点，不开端口，见后端
+ * `pool_test`），禁用挡的是「专用监听器与账号取用」，不挡测试 ——「先关着、
+ * 偶尔测一下看机场修好没有」是合理用法。这里只用于地址列：禁用中又没有端口
+ * 的条目，地址格要说明「为什么没有地址」。
+ */
+export function isDisabledSubscriptionItem(item: ProxyPoolItem): boolean {
+  return isSubscriptionItem(item) && isDisabledItem(item)
 }
 
 /**
@@ -233,12 +276,12 @@ export function isWritablePoolItem(item: ProxyPoolItem): boolean {
 
 /** 只读条目的统一说明（与后端同口径；岛在词典注入之后才求值） */
 export const CLASH_READONLY_HINT = t(
-  '来自 Clash Verge 同步（名称 / 端口 / 启用都跟随 Clash），请到 Clash Verge 中修改',
+  '来自 Clash Verge 同步（名称、端口跟随 Clash），请到 Clash Verge 中修改；启用可在本页关闭',
 )
 
 /** 订阅节点的只读说明（与后端 SUBSCRIPTION_READONLY_HINT 同口径；入口是「订阅管理」弹窗） */
 export const SUBSCRIPTION_READONLY_HINT = t(
-  '该节点来自订阅（名称 / 端口 / 启用跟随订阅与内核），请在「订阅管理」里修改',
+  '该节点来自订阅（名称、端口跟随订阅与内核），请在「订阅管理」里修改；启用可在本页关闭',
 )
 
 /** 孤儿订阅节点的提示（可删除；与其它只读条目的说明区分开） */
@@ -249,6 +292,35 @@ export const ORPHAN_SUBSCRIPTION_HINT = t(
 export function readonlyHint(item: ProxyPoolItem): string {
   if (isOrphanSubscriptionItem(item)) return ORPHAN_SUBSCRIPTION_HINT
   return isSubscriptionItem(item) ? SUBSCRIPTION_READONLY_HINT : CLASH_READONLY_HINT
+}
+
+/** Clash 条目开着的提示：讲清禁用改的是**哪一侧**（Clash 侧的端口不受影响） */
+const CLASH_ENABLE_HINT = t('禁用后本端不再用它（引用它的账号回退直连）；端口在 Clash Verge 侧，不受影响')
+
+/** 订阅节点开着的提示（端口是本机内核起的，禁用会把它关掉） */
+const SUB_ENABLE_HINT = t('禁用后本端不再用它（引用它的账号回退直连），并会关掉它的本地监听端口')
+
+/** 本页禁用中的镜像条目：开着开关就恢复 */
+const LOCAL_DISABLED_HINT = t('已在本页禁用（打开开关即恢复）')
+
+/** 来源侧关着的条目（实践中只有 Clash 条目会这样）：本地开关改不动它 */
+const MIRROR_OFF_HINT = t('这条在 Clash Verge 里是停用的，本页启用不生效 —— 到 Clash Verge 里打开它')
+
+/**
+ * 启用列开关的悬浮提示：按「这条现在是什么状态、点在改哪一侧」选一句话。
+ *
+ * 四种状态各说各的，是因为它们对用户的意义完全不同：开着（可关，说清关了会
+ * 发生什么）、本页关着（点一下就回来）、来源侧关着（本页改不了，得去哪儿改）、
+ * 孤儿订阅节点（删了拉倒）。提示不写「已启用」这种同义反复 —— 开关的样子
+ * 已经说明状态了。
+ */
+export function enableHint(item: ProxyPoolItem): string | undefined {
+  if (isOrphanSubscriptionItem(item)) return ORPHAN_SUBSCRIPTION_HINT
+  if (item.localDisabled === true) return LOCAL_DISABLED_HINT
+  if (isMirrorOffItem(item)) return MIRROR_OFF_HINT
+  if (isSubscriptionItem(item)) return SUB_ENABLE_HINT
+  if (isClashItem(item)) return CLASH_ENABLE_HINT
+  return undefined
 }
 
 /* ─── store ─────────────────────────────────── */
@@ -395,10 +467,9 @@ export async function syncClash(): Promise<void> {
 /**
  * 行内「测试」。
  *
- * 订阅节点还没有监听器时**不需要前端先补建**：后端在解析之前会把它钉住、
- * 请内核补建、等端口落地，然后才测（见 `api::proxies::pool_test`）—— 所以
- * 这里不再前置一次 provision。这一轮可能要几秒（内核在重建），按钮此时
- * 显示「测试中…」；成功时顺手刷新一次列表把端口值拉回来。
+ * 订阅节点走内核的**统一测试口**：后端把 select 策略组切到目标节点、从测试口
+ * 发测试，**不为被测节点开专用端口**（manual / clash 条目照旧测它自己的地址）。
+ * 所以测试是秒级的 —— 没有过去「钉住 → 等内核补建 → 再测」那一整套等待。
  */
 export async function testItem(item: ProxyPoolItem): Promise<void> {
   const bridge = wb().workbuddyDesktop
@@ -412,8 +483,6 @@ export async function testItem(item: ProxyPoolItem): Promise<void> {
     const data = await bridge.testProxyPoolItem(item.id)
     if (data?.items) accept({ items: data.items })
     if (data?.success) {
-      // 补建完成后端口的值落回了条目 —— 刷新一次列表把它拉回来
-      if (isUnprovisionedItem(item)) void loadPanel(true)
       const suffix = durationText(data.durationMs)
       // 出口 IP / 耗时是附带读数：IP 是后端数据、耗时只有数字，各自做形参不做键
       toast(t('✅ 「{name}」出口可用{ip}{took}', {
@@ -433,31 +502,71 @@ export async function testItem(item: ProxyPoolItem): Promise<void> {
 }
 
 /**
- * 行内启停：把整条记录原样回传 + 改 enabled（后端 update 是整份覆盖语义）。
+ * 行内启停（三种来源都放行）。
  *
- * 只服务**手动**条目：Clash 同步来的是只读镜像（视图侧已禁用，这里再挡一次 ——
- * 将来多一个入口时也不会绕过这条规则）。
+ * 写的东西按来源分：manual 条目写它自己的 `enabled`；Clash / 订阅条目写的是
+ * **本地禁用位**（`localDisabled`）—— 名称与端口继续跟随来源侧，本地那位只让
+ * 本端不用它（来源侧关着的那种 off 由视图挡住，见 `isMirrorOffItem`）。
+ *
+ * ── 订阅节点的端口要看一会儿 ────────────────────────────────
+ * 禁用一条订阅节点会连带收掉它的本地监听端口（后端走关闭流程：重建内核配置
+ * + 重启，被禁用的节点不再有监听器），启用时反过来要补建 —— 这两步都要等内核
+ * 重建，而重建是秒级到几十秒的事。后端**不在请求里等**（等在这儿开关会十几秒
+ * 不动，用户以为没点上），它回一句 `listener`：`closing` / `opening` 时由
+ * `settleListener` 悄悄盯几轮列表，等端口落到期望形态。
  */
 export async function toggleItem(item: ProxyPoolItem, enabled: boolean): Promise<void> {
   const bridge = wb().workbuddyDesktop
-  if (typeof bridge?.updateProxyPoolItem !== 'function') return
-  if (isReadonlyPoolItem(item)) {
-    toast(readonlyHint(item), 'err')
+  if (typeof bridge?.setProxyPoolItemEnabled !== 'function') {
+    toast(t('当前环境不支持启停（桥接方法缺失）'), 'err')
     return
   }
   const pending = new Set(state.pending)
   pending.add(item.id)
   patch({ pending })
   try {
-    accept(await bridge.updateProxyPoolItem({ ...payloadOfItem(item), enabled }))
+    const data = await bridge.setProxyPoolItemEnabled({ id: item.id, enabled })
+    accept(data)
     const name = itemName(item)
-    toast(enabled ? t('已启用「{name}」', { name }) : t('已禁用「{name}」', { name }))
+    const listener = data?.listener ?? 'none'
+    if (enabled) {
+      toast(listener === 'opening'
+        ? t('已启用「{name}」，正在补建监听端口（内核重建中）', { name })
+        : t('已启用「{name}」', { name }))
+    } else {
+      toast(listener === 'closing'
+        ? t('已禁用「{name}」，监听端口正在关闭（内核重建中）', { name })
+        : t('已禁用「{name}」', { name }))
+    }
+    if (listener === 'closing' || listener === 'opening') void settleListener(item.id, listener)
   } catch (error) {
     toast(t('保存失败：{reason}', { reason: errorMessage(error) }), 'err')
   } finally {
     const next = new Set(state.pending)
     next.delete(item.id)
     patch({ pending: next })
+  }
+}
+
+/**
+ * 内核重建期间盯几轮列表，等这条的监听端口落到期望形态（禁用 → 清空、
+ * 启用 → 有值）就收手。
+ *
+ * 与订阅增删后的 `pollSectionAfterChange` 同一手法（都是「后端命令是异步的、
+ * 界面的最终状态要轮几轮才齐」），只是判据窄得多：只关心**这一条**的端口，
+ * 所以收手条件是确定的，不必靠「刷够几轮就停」糊过去。上限 12 轮 × 1.5s：
+ * 内核重建 + 节点同步的常见路径在一两秒内，慢路径（首次拉订阅）会走到上限，
+ * 那时界面停在「端口待定」上也不假 —— 下一轮刷新（用户点刷新 / 切页）自然
+ * 会把它拉到最终值。
+ */
+async function settleListener(id: string, listener: 'closing' | 'opening'): Promise<void> {
+  for (let round = 0; round < 12; round += 1) {
+    await new Promise(resolve => setTimeout(resolve, 1500))
+    await loadPanel(true)
+    const item = items().find(entry => entry.id === id)
+    if (!item) return // 条目被删了（切订阅 / 手工删）—— 没什么可等的
+    const open = item.port !== null && item.port !== undefined
+    if (listener === 'closing' ? !open : open) return
   }
 }
 
@@ -512,7 +621,10 @@ export async function removeItem(item: ProxyPoolItem): Promise<void> {
  * 为什么串行而不是并发：测试是「本机 → 上游」的一次真实请求，池里条目可能
  * 有十几条，一起打出去会把上游的建连额度瞬间占满（同一出口还可能撞限流），
  * 而这一页的批量测试本来就只需要一个结论：哪些通、哪些不通。
- * 汇总口径与 OmniProxy 的 batchTestProxies 一致：成功 / 失败 / 跳过都报。
+ * 汇总口径与 OmniProxy 的 batchTestProxies 一致：成功 / 失败都报。
+ *
+ * 订阅节点走统一测试口（切组即换节点），批量测试**不再需要任何前置补建**
+ * —— 曾经「先把整批钉住、一次重启全建出来」的那段就是为这件事存在的。
  */
 export async function batchTest(): Promise<void> {
   const bridge = wb().workbuddyDesktop
@@ -524,19 +636,6 @@ export async function batchTest(): Promise<void> {
   const targets = items().filter(item => state.selected.has(item.id))
   if (!targets.length) return
   patch({ batchBusy: true, batchProgress: { done: 0, total: targets.length } })
-  // 批次里有「未分配端口」的订阅节点 → 把这批**一次性**钉住并补建、等端口就绪
-  // （后端一次重启就把它们都建出来）。不这样做，每条都要各自等一轮内核重建：
-  // 批量测 30 条就变成 30 次重启（几十秒到几分钟），而那些等待完全是重复的。
-  const unprovisioned = targets.filter(isUnprovisionedItem).map(item => item.id)
-  if (unprovisioned.length) {
-    const { ready } = await provisionPool(unprovisioned)
-    if (!ready) {
-      // 端口没建出来（内核卡在重建 / 拉订阅）：逐条测只会各自白等一轮，直接中止
-      patch({ testing: null, batchBusy: false, batchProgress: null })
-      toast(t('这些节点的监听器还没建好（内核可能卡在拉取订阅），批量测试已中止；稍后重试，或看「订阅」区块的内核状态与日志'), 'err')
-      return
-    }
-  }
   let ok = 0
   let failed = 0
   let saveError = ''
@@ -639,25 +738,6 @@ export async function saveItem(
   return data
 }
 
-/**
- * 条目 → 提交用 payload（行内启停要用它原样回传）。
- *
- * 只服务**手动**条目（Clash 条目不会走到这里）。可编辑字段一个不少地列全 ——
- * 后端 update 是整份覆盖语义，少带一个键就是一次静默的字段丢失。
- */
-function payloadOfItem(item: ProxyPoolItem): Record<string, unknown> {
-  return {
-    name: item.name,
-    source: 'manual',
-    protocol: item.protocol,
-    host: item.host,
-    port: item.port,
-    username: item.username,
-    password: item.password,
-    enabled: item.enabled,
-  }
-}
-
 /* ─── 代理设置（设置弹窗）────────────────────── */
 
 /** 读代理设置（设置弹窗打开时调一次；拿不到返回 null，弹窗显示读取失败） */
@@ -671,28 +751,6 @@ export async function loadSettings(): Promise<ProxySettings | null> {
     throw new Error(t('代理设置响应异常'))
   }
   return data
-}
-
-/**
- * 补建订阅节点监听器（手动兜底；账号保存时后端也会自动触发一次）。
- *
- * `ids` 为要**一并纳入补建**的池条目（批量测试用），空数组 = 只补「已经需要
- * 监听器却还没有端口」的节点。
- *
- * 返回 `{pending, ready}`：pending = 投了内核重启命令；ready = 本批条目端口
- * 是否都已就绪（后端等到端口写回条目才返回 true，`ready:false` 只可能是
- * 「内核卡住了」—— 45 秒都没建出来）。
- */
-export async function provisionPool(ids: string[] = []): Promise<{ pending: boolean; ready: boolean }> {
-  const bridge = wb().workbuddyDesktop
-  if (typeof bridge?.provisionProxyPool !== 'function') return { pending: false, ready: true }
-  try {
-    const data = await bridge.provisionProxyPool(ids.length ? { ids } : {})
-    return { pending: data?.pending === true, ready: data?.ready !== false }
-  } catch {
-    // 请求失败不当作「内核卡住」：调用方按未补建处理（真正的失败会在测试结果里出现）
-    return { pending: false, ready: true }
-  }
 }
 
 /**

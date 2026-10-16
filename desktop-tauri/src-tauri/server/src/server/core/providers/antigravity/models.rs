@@ -460,14 +460,20 @@ async fn fetch_once(
     }
 }
 
-/// 一次 HTTP 结果（目录请求只需要状态 + 解析后的 body）
-struct HttpOutcome {
-    status: u16,
-    payload: Value,
+/// 一次 HTTP 结果（目录请求只需要状态 + 解析后的 body）。
+///
+/// `pub(super)`：`balance.rs` 的额度摘要复用同一条请求口径 —— 同一台主机
+/// （v1internal 的同一组基址）、同一组头、同一超时；两处各写一份必然分叉。
+pub(super) struct HttpOutcome {
+    pub(super) status: u16,
+    pub(super) payload: Value,
 }
 
-/// 发一次 JSON POST（头集合与超时统一在这里）
-async fn send_json(
+/// 发一次 JSON POST（头集合与超时统一在这里）。
+///
+/// `pub(super)`：`balance.rs` 的额度摘要直接复用它 —— 同一台主机、同一组头、
+/// 同一超时，两处各写一份必然分叉（该文件不再自建请求口径）。
+pub(super) async fn send_json(
     url: &str,
     access_token: &str,
     project_id: &str,

@@ -365,6 +365,16 @@ export function connectionsOf(id: string): number {
 /**
  * 拉一次连接数。失败静默：2 秒一次的轮询，后端不可达时 toast 会变成刷屏；
  * 且缓存保留上一轮的值比清空更贴近事实（用户看到的是「刚才还在跑」）。
+ *
+ * ── 数值没变就不写 store（本次改造）──────────────────────────
+ * 这条链路每 2 秒跑一次，而「有请求在跑」是少数时刻：绝大多数轮次里
+ * `connections` 都是同一份空表。原实现照写不误，而 store 的每次 `patch` 都会换一份
+ * 新快照（`useSyncExternalStore` 按引用判「变了没」）—— 于是账号页每 2 秒整体重渲染
+ * 一次，43 个账号 × 十几列的单元格全部重建，屏幕上却一个数字都没变。这里先比一遍，
+ * 相同就直接返回：那 2 秒一次的「重渲染整页」在空闲时彻底消失。
+ *
+ * 比较口径与写入口径必须一致（都是「只放 count > 0 的项」）—— 两个 Map 的构造
+ * 走的是同一段代码，所以「key 集合 + 每个值」全等都等价于「这份读数与上一份相同」。
  */
 export async function syncConnections(): Promise<boolean> {
   try {
@@ -375,12 +385,25 @@ export async function syncConnections(): Promise<boolean> {
       const count = Number(value) || 0
       if (count > 0) connections.set(id, count)
     }
+    if (sameConnections(connections, getStore().connections)) return true
     patch({ connections })
     return true
   } catch {
     // 静默：下一次轮询自然重试（与 app.js 的 refresh / syncLogsBadge 同一取舍）
     return false
   }
+}
+
+/** 两份连接数读数是否完全相同（key 集合与每个值；见 syncConnections 的说明） */
+function sameConnections(
+  next: ReadonlyMap<string, number>,
+  prev: ReadonlyMap<string, number>,
+): boolean {
+  if (next.size !== prev.size) return false
+  for (const [id, count] of next) {
+    if (prev.get(id) !== count) return false
+  }
+  return true
 }
 
 /**

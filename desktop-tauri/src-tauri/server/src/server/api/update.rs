@@ -8,6 +8,8 @@
 //!   POST /api/update/proxy                 换更新出网线路 { proxy: null | {…} }
 //!   GET  /api/update/token                 GitHub 令牌状态 { filled, origin }（不回显本体）
 //!   POST /api/update/token                 保存 / 清除 GitHub 令牌 { token: string | null }
+//!   GET  /api/update/beta                  「加入 beta 版」开关 { enabled }
+//!   POST /api/update/beta                  写「加入 beta 版」{ enabled: bool }
 //!
 //! ── 容器内更新的三条（Linux headless / Docker 专有）──────────
 //!   POST /api/update/install               校验并应用已下载的更新包（替换二进制与 ui）
@@ -123,6 +125,16 @@ async fn dispatch(
         };
         let raw = payload.get("proxy").cloned().unwrap_or(Value::Null);
         return match normalize_account_proxy(&raw) {
+            // 轮询档只属于**账号级**出网（逐请求换出口，见 `core::proxy_rotate`）：
+            // 软件更新是一条检查 / 下载动作，没有这个语义。归一放行它（那份归一
+            // 与账号共用）之后必须在这里挡下 —— 否则会存进一条解析不出地址的
+            // 配置，检查更新静默回退直连（界面上却显示「已换线路」）。
+            Ok(Some(value)) if crate::server::core::proxies::is_rotate_config(&value) => {
+                GatewayError::bad_request(
+                    "更新出网线路不支持「轮询」档（轮询用于 OpenCode Zen 账号的出网）",
+                )
+                .into_response()
+            }
             Ok(normalized) => {
                 // 「换」才算数：重复选中当前线路不该被当成换线路（否则就成了
                 // 绕开失败冷却的口子，见下面 clear_check_cooldown 的说明）
@@ -185,6 +197,34 @@ async fn dispatch(
                 GatewayError::bad_request(message).into_response()
             }
         };
+    }
+
+    if method == Method::GET && full_path == "/api/update/beta" {
+        // 「加入 beta 版」开关（设置页「更新设置」弹窗里那一枚的读数）。
+        // 只报当前值：开关的效果体现在**下一次检查**上（后端每次检查现读这个键），
+        // 这里不做任何事，也不动缓存里那份上次检查结果。
+        return ok_json(json!({ "enabled": config::update_beta() }));
+    }
+
+    if method == Method::POST && full_path == "/api/update/beta" {
+        // 写：`{enabled: true|false}`。缺字段 / 非布尔一律 400 —— 与 token 那条
+        // 同一纪律（开关就该显式给值，免得某个调用方手滑发个 `{}` 把它关掉）。
+        let payload = match parse_body(body) {
+            Ok(value) => value,
+            Err(error) => return GatewayError::new(error.message).into_response(),
+        };
+        let Some(enabled) = payload.get("enabled").and_then(Value::as_bool) else {
+            return GatewayError::bad_request("请求体缺少 enabled 字段（须为 true / false）")
+                .into_response();
+        };
+        let saved = config::set_update_beta(enabled);
+        // 不做 clear_check_cooldown：那条冷却记的是 GitHub **配额桶**的恢复时刻，
+        // 换通道既没换出口也没换身份，桶还是同一个（与换线路 / 换令牌不同）。
+        // 落库失败仍返回新值（内存已生效，本次运行照走新通道），saved 如实带上。
+        return ok_json(json!({
+            "enabled": config::update_beta(),
+            "saved": saved,
+        }));
     }
 
     if method == Method::POST && full_path == "/api/update/download" {

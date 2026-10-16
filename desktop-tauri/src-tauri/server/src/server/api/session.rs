@@ -978,6 +978,47 @@ pub async fn login_kuku_complete(
     }
 }
 
+// ─── OrcaTerm 网页登录收尾（官方 Web 控制台）────────────────────
+
+/// `POST /api/session/login/orcaterm/complete` —— 壳侧交回登录态 Cookie。
+///
+/// OrcaTerm 的 Web 令牌住在一个普通（非 HttpOnly）Cookie `ot_session` 里，
+/// 页面脚本与 Cookie 存储都读得到；交回仍走**壳侧进程**这一步（与 KukuAI
+/// 同款），因为登录窗口是壳自己开的、Cookie 存储也归它：窗口里出现
+/// `ot_session` 即「用户已扫码登录成功」，壳把 `{state, token}` POST 到这里
+/// （state + 令牌在请求体里，不走 URL）。
+///
+/// 该路由**免鉴权**：调用方是壳侧进程（登录窗口），不带 API Key；安全性由
+/// 登录任务的一次性 state 承担（与 kuku/complete 同口径）。
+pub async fn login_orcaterm_complete(
+    State(state): State<ServerState>,
+    Json(payload): Json<Value>,
+) -> Response {
+    let task_state = payload
+        .get("state")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    // 字段叫 `token`：交回的是裸令牌（`ot_session=` 前缀由后端再剥一次，
+    // 兼容壳侧原样传整段 Cookie 的形态）；`cookie` 作为别名一并接受。
+    let token = payload
+        .get("token")
+        .or_else(|| payload.get("cookie"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if task_state.is_empty() || token.is_empty() {
+        return management_error(
+            400,
+            "登录失败：回调缺少 state 或登录态令牌，请重新发起网页登录。",
+        );
+    }
+    match state.login().finish_orcaterm_login(task_state, token).await {
+        Ok(_) => ok_json(json!({ "ok": true })),
+        Err(error) => management_error(error.status_code, &format!("登录失败：{}", error.message)),
+    }
+}
+
 // ─── AutoClaw OAuth 网页登录（国际版，三段）──────────────────
 
 /// 从请求体里读 OAuth 变体（`vendor` 字段：`zai` / `google`）。

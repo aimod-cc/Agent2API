@@ -275,9 +275,13 @@ pub struct AntigravityToChatStream {
 
 impl AntigravityToChatStream {
     /// `model` 是**上游真名**（下发帧里的 `model` 字段，见模块头）。
+    /// `session` 是请求信封里的 `sessionId`（会话稳定键，随分派从信封带出；
+    /// 签名缓存兜底档的写入键，拿不到给空串 —— 见
+    /// `protocol::antigravity_signature_cache` 的模块头）。
     pub fn new(
         response: reqwest::Response,
         model: &str,
+        session: &str,
         telemetry: &Arc<super::usage::RequestTelemetry>,
     ) -> Self {
         use futures::StreamExt;
@@ -295,7 +299,7 @@ impl AntigravityToChatStream {
         );
         Self {
             inner: guarded,
-            machine: ChatFromAntigravityStream::new(model),
+            machine: ChatFromAntigravityStream::new(model, session),
             pending: VecDeque::new(),
             upstream_done: false,
             capture: telemetry.capture(),

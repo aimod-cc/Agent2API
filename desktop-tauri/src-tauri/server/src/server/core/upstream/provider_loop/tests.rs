@@ -438,10 +438,11 @@ fn a_payload_size_rejection_gets_no_in_place_retry() {
 }
 
 /// 反对照：其它 4xx/未知失败照旧走兜底原地重发（这条改动只放开"体积拒收"那一格，
-/// 没有把 400 这类"含义由上游决定"的码一并排除）。
+/// 没有把 400 这类"含义由上游决定"的码一并排除）。404 已于 issue #255 单独豁免
+/// （路由 / 模型名类确定性失败，见 `DETERMINISTIC_NOT_FOUND_STATUSES`），不在此列。
 #[test]
 fn other_fatal_statuses_still_get_the_fallback_resend() {
-    for status in [400u16, 404, 409] {
+    for status in [400u16, 409] {
         assert!(
             fallback_retry_advice(&fatal(status), 3, status).is_some(),
             "HTTP {status} 的语义由上游决定，兜底原地重发的既有行为不该变"
@@ -482,5 +483,31 @@ async fn a_real_413_response_is_sent_once_and_handed_back() {
     assert!(
         matches!(failure.class, UpstreamErrorClass::Fatal { status: 413, .. }),
         "状态码 413 要原样带回，不该被折成别的失败"
+    );
+}
+
+#[test]
+fn a_deterministic_404_skips_the_in_place_resend() {
+    // issue #255 的形状：OfficeAce 对目录里有、套餐里没有的名字回
+    // `404 {"code":null,"message":"Invalid model."}`，旧判据把它当普通 Fatal，
+    // 原地重发 3 次 × 5 秒才换号——客户端白等 15 秒，换来的还是同一个 404。
+    let not_found = UpstreamErrorClass::Fatal {
+        status: 404,
+        upstream_code: None,
+        message: "上游返回 404: {\"code\":null,\"message\":\"Invalid model.\"}".to_string(),
+    };
+    assert!(
+        fallback_retry_advice(&not_found, 3, 404).is_none(),
+        "名字类确定性失败不该再原地重发"
+    );
+    // 对照：普通 400 仍走原地重发（400 的语义由上游定，重发是安全默认）
+    let bad_request = UpstreamErrorClass::Fatal {
+        status: 400,
+        upstream_code: None,
+        message: "上游返回 400: whatever".to_string(),
+    };
+    assert!(
+        fallback_retry_advice(&bad_request, 3, 400).is_some(),
+        "404 的豁免不许顺手把 400 也豁免了"
     );
 }

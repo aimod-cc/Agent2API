@@ -57,6 +57,7 @@ pub mod anthropic;
 pub mod anthropic_outbound;
 pub mod antigravity_outbound;
 pub mod antigravity_schema;
+pub mod antigravity_signature_cache;
 pub mod antigravity_stream;
 pub mod commandcode_outbound;
 pub mod freeform;

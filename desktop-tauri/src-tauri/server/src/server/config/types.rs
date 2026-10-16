@@ -33,12 +33,19 @@ pub const DEFAULT_LOCALE: &str = "zh-CN";
 // 命名风格与既有字段（apiKey / locale / lastRequestModel / autoCheckin）一致：
 // camelCase。这里把键名提成常量，是因为**读侧与写侧必须用同一个字符串** ——
 // 任一处手写拼错都不会报错，只会静默地读到默认值。
-//
-// 只剩事件日志一项：`requestRetentionDays` / `dailyRetentionDays` 两个键随
-// 「请求统计全量保留」一起退役（老配置里残留的值不再被读取，也无害）。
 
 /// 事件日志（统一库的 `logs` 表）保留天数
 pub const KEY_LOG_RETENTION_DAYS: &str = "logRetentionDays";
+/// 请求日志（统一库的 `requests` 表）保留天数。
+///
+/// 为什么不是旧版的 `requestRetentionDays`：那个键在「全量保留」时期
+/// （`4a0e104`）退役过，老库 / 旧 config.json 里残留的值是**旧默认**（30 天）。
+/// 恢复这项设置时默认改成了 99999 天 —— 沿用旧键会让那些残留值悄悄生效，
+/// 升级后的第一次记账就把老日志裁掉。换新键让它从新默认起步；旧键残留
+/// 不被读取、也无害（与全量保留时期的口径一致）。
+pub const KEY_REQUEST_RETENTION_DAYS: &str = "requestLogRetentionDays";
+/// 按天聚合（统一库的 `request_daily` 表）保留天数（改名理由同上）
+pub const KEY_DAILY_RETENTION_DAYS: &str = "dailyAggregateRetentionDays";
 
 /// 事件日志的保存目录（config.json 键）。
 ///
@@ -59,6 +66,22 @@ pub const KEY_DEBUG_DIR: &str = "debugDir";
 /// 归一与解析都复用账号代理那两份实现（`normalize_account_proxy` /
 /// `resolve_account_proxy`），这里只存取。
 pub const KEY_UPDATE_PROXY: &str = "updateProxy";
+
+/// 「加入 beta 版」开关（config.json 键，**缺省 = 关**）。
+///
+/// 开启后「检查更新」改问 GitHub 的 Release **列表**，把预发布版（beta）一并
+/// 纳入候选、取版本号最高的一个；关闭时仍问 `/releases/latest`（GitHub 自己
+/// 排除预发布与草稿）。检查结果同时喂给面板、侧栏徽标与下载安装包三条路，
+/// 所以拨一下开关不用重启，下一次检查就换通道（含定时任务）。
+///
+/// **默认关**：beta 版由 beta 分支构建、可能不稳定，只有明确想尝鲜的人才会打开
+/// （与 `debugMode` 同一取向 —— 默认关的代价只是「功能对没打开的人不存在」）。
+///
+/// 与之配套的一条约定：**beta 版的版本号必须与 tag 一致**（tag `v3.1.0-beta.1`
+/// 就要把应用版本写成 `3.1.0-beta.1`），否则版本比较会把「当前 beta」判成比
+/// 「待装的 beta」新，通道打开也收不到更新 —— 比较规则见
+/// `core::update::version` 的预发布段处理。
+pub const KEY_UPDATE_BETA: &str = "updateBeta";
 
 /// 代理内核（mihomo）的**存放目录**（config.json 键）。
 ///
@@ -108,6 +131,18 @@ pub const KEY_DEBUG_MODE: &str = "debugMode";
 /// 上游，那正是模板句被误拦（400 code=11128）的原因。
 /// 转发层逐请求读快照，改完下一个请求立即生效，不重启进程。
 pub const KEY_SANITIZE_FINGERPRINTS: &str = "sanitizeBlacklistFingerprints";
+
+/// 开发者角色兼容开关（config.json 键，设置页「网关 → 开发者角色兼容」）。
+///
+/// 开启后转发层在每次出站前把请求 `messages` 里 `role: "developer"` 的消息
+/// 改写为 `role: "system"`（OpenAI 新版 API 用 developer 取代 system 承载
+/// 指令），兼容不认识 developer 角色的 OpenAI 兼容上游 —— 自定义提供商是
+/// 请求体原样透传的，不归一的话这类消息会原样发出去被上游 400。
+/// **默认开启**（与 OmniProxy 同默认）：改写语义无损（两类角色在 OpenAI 语义
+/// 上等价），而默认关会让发 developer 角色的客户端一上来就撞不认识它的上游。
+/// 转发层逐请求读快照，改完下一个请求立即生效，不重启进程。
+/// 转换实施点见 `core::upstream::payload`（send_body 的角色归一层）。
+pub const KEY_DEVELOPER_ROLE_COMPAT: &str = "developerRoleCompat";
 
 /// **Cline 转发头的逐键覆盖**（config.json 键）。
 ///
@@ -359,8 +394,15 @@ pub struct ProviderPrompt {
     pub file_error: Option<String>,
 }
 
-/// 事件日志保留天数的默认值（缺失时用它）
+/// 三档保留天数的默认值（缺失时用它们）。
+///
+/// 请求日志与按天聚合的默认是 99999 天（约 274 年）：效果上等于「全量保留」，
+/// 同时界面仍是一个普通的天数输入框 —— 想清理历史数据的用户可以把它改小，
+/// 不必再专程去各页面找「清空」入口（旧「全量保留」版本的行为仍是兜底：
+/// 清空 / 按筛选删除的入口保留）。
 pub const DEFAULT_LOG_RETENTION_DAYS: i64 = 30;
+pub const DEFAULT_REQUEST_RETENTION_DAYS: i64 = 99999;
+pub const DEFAULT_DAILY_RETENTION_DAYS: i64 = 99999;
 
 /// **历史**路由优先级键：`{"workbuddy": 10, "raccoon": 20}`。
 ///
@@ -371,31 +413,39 @@ pub const DEFAULT_LOG_RETENTION_DAYS: i64 = 30;
 pub const KEY_PROVIDER_ROUTE: &str = "providerRoute";
 
 /// 保留天数的合法范围：下限 1 天（保留 0 天等于什么都不存，不是有效配置），
-/// 上限 10 年（防手改 config.json 写个天文数字让裁剪逻辑空转）。
+/// 上限即「近似无限」的默认值 99999 天 —— 再往上没有语义（99999 天已约 274 年），
+/// 又能防手改 config.json 写个天文数字让裁剪逻辑空转。
 ///
 /// **写侧（`stats_api::parse_days`）与读侧（`days_field`）共用这两个常量**：
 /// 若两边各写一套数字，手改文件与走接口设值就会出现两套口径
 /// （比如接口拒绝 5000 而读侧接受它）。两侧的处理方式不同是有意的：
 /// 走接口的非法值给 400（用户当场能改），手改文件的非法值回落到默认（不打扰）。
 pub const RETENTION_MIN_DAYS: i64 = 1;
-pub const RETENTION_MAX_DAYS: i64 = 3650;
+pub const RETENTION_MAX_DAYS: i64 = 99999;
 
-/// 保留期设置（设置页「数据保留」区域）。
+/// 三档保留天数（设置页「数据保留」区域）。
 ///
-/// 现在只剩**事件日志**一项：请求日志 / 按天聚合 / 签到记录都已全量保留
-/// （没有保留天数、没有条数上限），对应的两个设置项与接口字段一并移除。
-/// 保留结构而不直接摊成一个函数：GET / PUT 与日志存储的回调都按「一份
-/// `Copy` 值」的形状传，将来若再加保留项，调用方不必跟着改签名。
+/// 请求日志与按天聚合的默认 99999 天是**故意的近似无限**：默认行为与
+/// 「全量保留」一致，但用户随时可以把某一项改小 —— 保存后立即裁剪
+/// （`stats_api::put_retention`），不用去各页面手动清。事件日志维持 30 天默认
+/// 不变。保留结构而不直接摊成三个函数：GET / PUT 与日志存储的回调都按
+/// 「一份 `Copy` 值」的形状传，将来若再加保留项，调用方不必跟着改签名。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RetentionSettings {
     /// 事件日志保留天数
     pub log_days: i64,
+    /// 请求日志保留天数
+    pub request_days: i64,
+    /// 按天聚合保留天数
+    pub daily_days: i64,
 }
 
 impl Default for RetentionSettings {
     fn default() -> Self {
         Self {
             log_days: DEFAULT_LOG_RETENTION_DAYS,
+            request_days: DEFAULT_REQUEST_RETENTION_DAYS,
+            daily_days: DEFAULT_DAILY_RETENTION_DAYS,
         }
     }
 }
@@ -405,6 +455,8 @@ impl Default for RetentionSettings {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RetentionPatch {
     pub log_days: Option<i64>,
+    pub request_days: Option<i64>,
+    pub daily_days: Option<i64>,
 }
 
 // ─── 定时任务设置的键名与边界（config.json 里的字段名**就是契约**）─────

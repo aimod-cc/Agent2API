@@ -186,7 +186,7 @@ export function GroupBandRow({ group, collapsed, colSpan, extra, hideRank }: {
               ? <img src={icon} alt='' loading='lazy' />
               : <span className='grp-logo-txt'>{String(group.label || '?').trim().slice(0, 1).toUpperCase()}</span>}
           </span>
-          <span className='grp-name'>{group.label}</span>
+          <span className='grp-name'>{t(group.label)}</span>
           <span className='grp-stat'>{t('{total} 个账号 · 启用 {enabled} · 禁用 {disabled}{limited}', {
             total: group.members.length,
             enabled: group.enabled,
@@ -806,6 +806,73 @@ type UsageFlatRow = {
   title?: string
 }
 
+/**
+ * 平铺在余额格里的一行：**名称 + 读数 + 占满格宽的剩余条**（两行式）。
+ *
+ * 两处共用同一个渲染：CodeArts 的两行 token 池（对话 token / 福利日额度）与
+ * OpenCode Go 的三个用量窗口 —— 形态本来就是同一种（一行一个读数、下面一条
+ * 比例条），所以类名也同一套（`.usage-flat-*`，尺寸全写在 CSS 里），
+ * 不各写一份。条画的是**剩余**比例，超额整条走红（与积分明细同款）。
+ */
+function UsageFlatRowView({ row }: { row: UsageFlatRow }) {
+  return (
+    <span className='usage-flat-line' title={row.title}>
+      <span className='usage-flat-head'>
+        <span className='usage-flat-name'>{row.name}</span>
+        <span className={`usage-flat-view ${row.tone}`}>{row.view}</span>
+      </span>
+      {row.percent !== null ? (
+        <span className={`usage-flat-track${row.over ? ' over' : ''}`}>
+          <i style={{ width: `${row.percent}%` }} aria-label={t('剩余 {percent}%', { percent: Math.round(row.percent) })} />
+        </span>
+      ) : null}
+    </span>
+  )
+}
+
+/**
+ * 余额文档 → **逐窗口**读数（`windows[]` 形状：OpenCode Go 的 5 小时 / 每周 / 每月），
+ * 一个窗口一行平铺（形状就是 [`UsageFlatRow`]，与 CodeArts 那两行同一套渲染）。
+ *
+ * 这一家的额度不是「一个池子剩多少」而是**几个窗口各自的剩余比例** —— 只报一个
+ * 数字说不清「5 小时还剩着、每周已经用光」，而后者正是「这账号还能不能跑」的答案。
+ * 于是后端除主读数外给出 `windows[]`，这里一窗一条。
+ *
+ * 判据仍是**形状**（后端给了 windows 数组）而不是 provider：谁去查是后端的事，
+ * 查回来长什么样由字段决定（与 `usageSummary` / `usagePool` 同一口径）。没有这个
+ * 键的家（其余全部）走的还是原来那两条呈现，行为一字未变。
+ *
+ * 缺失一律当「不知道」：`remainingPercent` 读不到时那一行**不画条**、读数是
+ * 「—」（后端没给 `view` 时按比例补一句，比例也没有就留破折号）—— 一条空条与
+ * 「这一窗口用光了」读起来一样，而它们是两件事。
+ *
+ * 语义色与 token 那两行同一口径：没读到灰；剩余 < 20%（含耗尽 0%）黄 ——
+ * 这一列的红只留给查询失败，某个窗口用光还不是「这次没查到」。
+ */
+export function usageWindows(entry: UsageEntry): UsageFlatRow[] {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return []
+  const data = entry as Record<string, unknown>
+  const rows = Array.isArray(data.windows) ? data.windows as Array<Record<string, unknown>> : []
+  const out: UsageFlatRow[] = []
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue
+    const name = String(row.label || '').trim()
+    if (!name) continue
+    const read = numberOrNull(row.remainingPercent)
+    // 条画的是**剩余**比例（与积分明细同向），越界一律夹回 0~100
+    const percent = read === null ? null : Math.max(0, Math.min(100, read))
+    out.push({
+      name,
+      view: String(row.view || '').trim()
+        || (percent === null ? '—' : t('剩余 {percent}%', { percent: Math.round(percent) })),
+      tone: percent === null ? 'muted' : percent < 20 ? 'warn' : 'ok',
+      percent,
+      over: false,
+    })
+  }
+  return out
+}
+
 /** 明细弹层的数据形状（`usageDetailOf` 的产物） */
 type UsageDetail = {
   credit: UsageDetailRow[]
@@ -1046,8 +1113,9 @@ export function UsageCell({ account }: { account: AccountRecord }) {
       {t('待生效 {n} 份', { n: pending.length })}
     </Badge>
   ) : null
-  // 积分明细入口（`creditDetail` 能力位：WorkBuddy 两家与 Trae）。同一档「读数可用」
-  // 的判据：查询失败 / 未配置时连读数本身都没有，挂一个点开是空框的入口更糟。
+  // 积分明细入口（`creditDetail` 能力位：WorkBuddy 两家、Trae 等多家后端出
+  // `credits[]` 的家）。同一档「读数可用」的判据：查询失败 / 未配置时连读数本身
+  // 都没有，挂一个点开是空框的入口更糟。
   // 空数组同样不挂 —— 后端不写 `credits` 键就是「这家这次没有逐份读数」
   // （企业账号、上游没给包），界面不去证明一个空清单。
   const creditRows = summary.kind === 'ok' || summary.kind === 'warn' ? creditRowsOf(entry) : []
@@ -1059,6 +1127,22 @@ export function UsageCell({ account }: { account: AccountRecord }) {
       title: summary.title,
     }
     : null
+  // ── 逐窗口读数：一格三条（`windows[]` 形状，OpenCode Go 的三个用量窗口）──
+  // 形态与 CodeArts 平铺的那两行 token 条**同一种**（名称 + 读数 + 占满格宽的
+  // 剩余条），因此共用 `UsageFlatRowView` 与 `.usage-flat-*` 那套样式，
+  // 不另写一份。判据与上面两处同一档（读数可用才画）：三条本身就在讲
+  // 「还剩多少」，挂在一句错误下面会把错误装饰成一条可信的读数。
+  const windows = summary.kind === 'ok' || summary.kind === 'warn' ? usageWindows(entry) : []
+  if (windows.length) {
+    return (
+      <span className='usage-cell' title={summary.title}>
+        {windows.map(row => <UsageFlatRowView key={row.name} row={row} />)}
+        {blockedBadge}
+        {pendingBadge}
+        {tokenSub}
+      </span>
+    )
+  }
   if (supportsUsageDetail(account)) {
     const usable = summary.kind === 'ok' || summary.kind === 'warn'
     const detail = usable ? usageDetailOf(entry) : null
@@ -1186,19 +1270,7 @@ function UsageDetailCell({ summary, detail, blockedBadge, tokenSub }: {
       </Popover>
       {/* token 组平铺（对话 token / 福利模型日额度）：转发能不能跑，看这两行。
           条与积分明细同款（画剩余比例）；无真总量不画 —— 上游没给就不装作有 */}
-      {detail.token.map(row => (
-        <span className='usage-flat-line' key={row.name} title={row.title}>
-          <span className='usage-flat-head'>
-            <span className='usage-flat-name'>{row.name}</span>
-            <span className={`usage-flat-view ${row.tone}`}>{row.view}</span>
-          </span>
-          {row.percent !== null ? (
-            <span className={`usage-flat-track${row.over ? ' over' : ''}`}>
-              <i style={{ width: `${row.percent}%` }} aria-label={t('剩余 {percent}%', { percent: Math.round(row.percent) })} />
-            </span>
-          ) : null}
-        </span>
-      ))}
+      {detail.token.map(row => <UsageFlatRowView key={row.name} row={row} />)}
       {detail.benefitAbsent ? (
         <span className='usage-flat-line'
           title={t('福利按限时活动下发，不是每个账号都有 —— 正常状态，不是查询失败')}>
@@ -1338,6 +1410,11 @@ export function AccountCell({ account, namesHidden, providerLabel }: {
  * 存量记录（直接引用 Clash 出口的 `{source:'clash', listenerUid}`、或自定义
  * 形状）在这里显示为**补位项**（带来源前缀），照原样转发；用户在这个下拉里
  * 选一条池条目或切回直连就会改写它。
+ *
+ * 轮询档（`{source:'rotate'}`，目前只有 OpenCode Zen 账号会有）同样走补位项：
+ * 它的「当前出口」逐请求在变，格子里显示的是后端给的摘要标签
+ * （`轮询全部代理（N 个出口）`，见 `describe_account_proxy` 的 rotate 分支），
+ * 在这个下拉里改成某一条池条目就等于退出轮询（一次明确的改写）。
  */
 export function ProxyCell({ account }: { account: AccountRecord }) {
   const proxy = account.proxy
@@ -1348,7 +1425,7 @@ export function ProxyCell({ account }: { account: AccountRecord }) {
   const poolItems = Array.isArray(pool) ? pool : []
 
   // 当前值映射回下拉的值域：池条目用 `pool:<id>`、其余（Clash 直引 / custom /
-  // 坏形状）落到补位项 —— 绝不能回落成「直连」：那会把「配置坏了」显示成「没配」
+  // 轮询 / 坏形状）落到补位项 —— 绝不能回落成「直连」：那会把「配置坏了」显示成「没配」
   let current = ''
   if (source === 'pool' && proxy?.config?.proxyId) current = `${POOL_VALUE_PREFIX}${proxy.config.proxyId}`
   else if (proxy) current = PROXY_CUSTOM_CURRENT
@@ -1375,7 +1452,8 @@ export function ProxyCell({ account }: { account: AccountRecord }) {
   }
   if (current === PROXY_CUSTOM_CURRENT) {
     // 补位项：不带动任何写操作（PROXY_CUSTOM_CURRENT 在 applyProxyPick 里被忽略），
-    // 只是把当前值原样显示出来
+    // 只是把当前值原样显示出来。轮询档不加前缀 —— 后端给的 label 本身就是
+    // 「轮询全部代理（N 个出口）」这种完整一句话（见 describe_account_proxy）
     const prefix = source === 'clash' ? t('Clash 出口：') : source === 'custom' ? t('自定义：') : ''
     items.push({ value: PROXY_CUSTOM_CURRENT, label: `${prefix}${label}${broken ? t('（不可用）') : ''}` })
   } else if (source === 'pool' && !poolItems.some(item => `${POOL_VALUE_PREFIX}${item.id}` === current)) {
@@ -1386,11 +1464,13 @@ export function ProxyCell({ account }: { account: AccountRecord }) {
 
   const title = broken
     ? t('代理不可用：{error}（转发时会回退直连）；选「自定义代理…」去修改', { error: broken })
-    : source === 'clash' || source === 'custom'
-      ? t('当前：{label}（未经过代理池 —— 可在「网络代理」页把出口同步进池后来这里改选）', { label })
-      : t('当前：{label}；选项来自「网络代理」页；「自定义代理…」打开完整设置', {
-        label: proxy ? label : t('直连'),
-      })
+    : source === 'rotate'
+      ? t('当前：{label}（每条请求换一个出口）；「自定义代理…」打开完整设置', { label })
+      : source === 'clash' || source === 'custom'
+        ? t('当前：{label}（未经过代理池 —— 可在「网络代理」页把出口同步进池后来这里改选）', { label })
+        : t('当前：{label}；选项来自「网络代理」页；「自定义代理…」打开完整设置', {
+          label: proxy ? label : t('直连'),
+        })
   const selected = items.find(item => item.value === current)
 
   return (

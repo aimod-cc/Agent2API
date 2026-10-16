@@ -1,4 +1,4 @@
-//! 自定义提供商的目录与转发接线。
+//! 自定义提供商的目录、转发接线与余额查询。
 
 use serde_json::Value;
 
@@ -7,8 +7,17 @@ use crate::server::core::custom_providers;
 use crate::server::core::key_scope::{self, KeyScope};
 use crate::server::core::models::{list_item, model_id};
 
+/// 余额查询：七种方案（sub2api / NewAPI / DeepSeek / OpenCode Go / 商汤日日新 /
+/// 智谱 / 智谱 z.ai 国际）的编排。方案由提供商记录的 `balanceScheme` 决定
+/// （预置卡写入），查询凭证按账号存（`balanceQuery`）—— 详见各文件模块头。
+pub mod balance;
+/// 七种方案的上游响应解析（纯函数；与 `balance` 的请求链路分开，
+/// 便于对照移植来源逐字段读）
+pub mod balance_parse;
 pub mod emulation;
 pub mod forward;
+/// 商汤日日新的账号密码登录（OAuth2 + PKCE 换控制台 JWT），只服务余额查询
+pub mod sensenova_auth;
 
 pub(crate) fn catalog_providers(store: &AccountStore) -> Vec<(String, Vec<Value>)> {
     custom_providers::list().into_iter().filter_map(|provider| {

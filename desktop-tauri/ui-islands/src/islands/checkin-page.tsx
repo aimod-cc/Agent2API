@@ -43,7 +43,7 @@ import { t } from '../i18n'
  */
 const PROVIDER_DESC: Record<string, string> = {
   workbuddy: t('腾讯每日签到接口 · 仅国内版'),
-  'workbuddy-intl': t('每日活跃任务 · 领取才加积分，保活只维持活跃 · 两者可分开执行'),
+  'workbuddy-intl': t('每日活跃任务 · 网页会话保活点亮日活，领取才加积分 · 两者可分开执行'),
   raccoon: t('桌面端每日积分链路'),
   autoclaw: t('官方客户端的每日签到任务'),
   'autoclaw-intl': t('与国内版同一套任务接口 · 站点不同'),
@@ -68,11 +68,11 @@ const CHECKIN_TAB_OPTIONS = [
 
 /* ─── 小组件 ───────────────────────────────── */
 
-/** 新手福利分组的提供商展示名（缺省回落 provider id 本身） */
+/** 新手福利分组的提供商展示名（缺省回落 provider id 本身）；名字进词典，非中文界面才翻得动 */
 function onboardingProviderLabel(provider: string): string {
-  return provider === 'raccoon' ? '小浣熊' : provider === 'loomy' ? 'Loomy'
+  return t(provider === 'raccoon' ? '小浣熊' : provider === 'loomy' ? 'Loomy'
     : provider === 'codearts' ? 'CodeArts'
-    : provider === 'officeace' ? 'OfficeAce 果办' : provider
+    : provider === 'officeace' ? 'OfficeAce 果办' : provider)
 }
 
 function useCheckinStore(): CheckinStore {
@@ -141,7 +141,7 @@ function AccountRows({ group }: { group: CheckinProviderGroup }) {
                     <Button
                       size='sm' variant='ghost'
                       disabled={busy(account.id, 'keepalive')}
-                      title={t('用免费模型维持账号活跃 · 不领取奖励')}
+                      title={t('用免费模型与网页会话维持账号活跃 · 不领取奖励')}
                       onClick={() => void signSingleAccount(account.id, 'keepalive')}
                     >
                       {busy(account.id, 'keepalive') ? t('保活中…') : t('保活')}

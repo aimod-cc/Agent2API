@@ -113,6 +113,25 @@ pub(super) async fn query_usage(
         })
         .collect();
 
+    // 逐份明细（账号页「积分明细」弹层的输入）：与上面 `wallets` 走**同一张
+    // `WALLET_LABELS`、同一口径**（`to_int` 读不到数值就跳过这一行）—— 字段表只有
+    // 一份，两处各抄一份迟早会漂。上游只给余额一个数（没有面额 / 已用 / 到期时刻），
+    // 所以每行只有 `name` 与 `remain`：缺的键**不写**（写 0 会让界面把「没读到」
+    // 画成「只剩 0」）。
+    // 「每日积分」**不标 `daily`**：本文件与同目录其它文件里都没有「这份余额按天
+    // 重置」的依据（每日积分走的是签到链路按天发放的那笔，不是余额清零）；缺一个
+    // 标记只是少一句提示，编一个会让人以为余额明天回满。
+    let credits: Vec<Value> = WALLET_LABELS
+        .iter()
+        .filter_map(|(key, display_name)| {
+            let balance = to_int(points.get(*key))?;
+            Some(json!({
+                "name": display_name,
+                "remain": balance,
+            }))
+        })
+        .collect();
+
     // 订阅失败只记原因，不阻断余额展示（见上）
     let (subscription, subscription_error) =
         match request_json(&origin, "/api/web/auth/v1/entitlement_info", &credentials.token).await {
@@ -125,14 +144,22 @@ pub(super) async fn query_usage(
     if !subscription_error.is_null() {
         raw.insert("subscriptionError".to_string(), subscription_error);
     }
-    Ok(json!({
+    let mut document = json!({
         "available": available,
         // 小浣熊的积分口径就是「积分」（源实现的中文标签与文案都用它）
         "unit": "积分",
         "wallets": wallets,
         "subscription": subscription,
         "raw": Value::Object(raw),
-    }))
+    });
+    // `credits[]` 只在非空时挂：空数组**整个不写这个键** —— 界面按「键在不在 +
+    // 长度」决定要不要给这一格挂「可点开」的交互，给一个空数组会点出一个空框
+    if !credits.is_empty() {
+        if let Some(object) = document.as_object_mut() {
+            object.insert("credits".to_string(), Value::Array(credits));
+        }
+    }
+    Ok(document)
 }
 
 /// 发一次 GET 并解包 `{code, message, data}`（源实现 `requestJson` 的判定链）。

@@ -1,6 +1,7 @@
 /**
  * Agent2API · 网络代理页（代理池：列表 / 新增 / 编辑 / 删除 / 启停 / 连通性测试
- * / 同步 Clash Verge / 勾选批量测试与批量删除）。
+ * / 勾选批量测试与批量删除）。Clash 出口同步与订阅导入同在「订阅管理」弹窗里
+ * （见 proxies-sub-view.tsx），页面上不再单列那颗按钮。
  *
  * 对照 OmniProxy 的 ProxiesPage（那张带 CRUD + 测试 + Clash 同步 + 批量的代理表），
  * 存储与解析在 Rust 侧：`core::proxy_pool` 是唯一事实来源（`kv` 的 `proxyPool`
@@ -20,15 +21,30 @@
  *
  * ── 三种条目（只读语义照 OmniProxy）──────────────────────────
  *   · 手动：这里新建 / 编辑 / 删除，字段全在本地；
- *   · Clash Verge 同步来的：**只读镜像** —— 名称 / 端口 / 启用状态全部跟随
- *     Clash，本页不给编辑与删除入口，要改去 Clash Verge 改、要删去 Clash Verge
- *     删（下次同步自然摘掉）；
+ *   · Clash Verge 同步来的：**只读镜像** —— 名称与端口跟随 Clash，本页不给
+ *     编辑与删除入口，要改去 Clash Verge 改、要删去 Clash Verge 删（下次同步
+ *     自然摘掉）；
  *   · 订阅节点：**只读镜像** —— 由内核起成本地监听器后镜像进来，入口在
  *     「订阅管理」弹窗里（见下）。
  *   两种只读来源在「操作」列**只有测试**（外加订阅孤儿的删除）：去哪儿改由只读
  *   开关的悬浮提示说明，不再摆两颗永远点不动的「去 X 改」按钮占地方。
- *   同步有两处触发：进页面时的列表接口（后端自动同步）与面板头的
- *   「同步 Clash Verge」按钮（手动，会报本次变更数）。
+ *   同步有两处触发：进页面时的列表接口（后端自动同步）与「订阅管理」弹窗里的
+ *   「同步 Clash Verge」按钮（手动，会报本次变更数 —— 2026-10 从工具条搬进那个
+ *   弹窗，与订阅摆在一处：两者都是「把外面的出口集合整份镜像进池」）。
+ *
+ * ── 「启用」列不再只读：本页开关管的是**本端用不用它** ─────────
+ * 名称与端口必须跟随来源侧，但「这条本端用不用」是用户自己的事：某条节点常年
+ * 不通、或只是先放一边，用户要能在这里把它关掉（不必去 Clash Verge 关监听器、
+ * 也不必改订阅里的节点）。所以三种来源的开关都放行：
+ *   · 手动条目 → 写它自己的 `enabled`（引用它的账号回退直连）；
+ *   · Clash / 订阅条目 → 写**本地禁用位** `localDisabled`（只在本端生效，
+ *     来源侧什么都不动，下一次同步也不会把开关弹回去）；
+ *   · 订阅节点禁用时**端口会一起关掉**（后端走关闭流程：内核不再为它开监听器，
+ *     重建配置 + 重启），启用时再补建 —— 这两步要等内核重建，所以开关是「立刻
+ *     翻转 + 稍后端口落地」，见 `toggleItem` / `settleListener`。
+ *   唯一不给点的情况是**来源侧本身就关着的**（Clash 里那条监听器是停用的）：
+ *   本地开关改不了它，点了也只会弹回原位 —— 那时开关禁用 + 悬浮提示指向
+ *   Clash Verge（见 `isMirrorOffItem` / `enableHint`）。
  *
  * ── 一页只有一张表：订阅与内核去哪了 ──────────────────────────
  * 改造前订阅区块是代理池**上方**的第二个面板：两张表叠在一页，页面被拉得很长，
@@ -66,6 +82,9 @@
  * ── 测试的判据与账号弹窗同一套 ────────────────────────────────
  * 判据是「能否连上**上游**」（不是能否访问第三方站点）、出口 IP 是附加信息、
  * 失败也返回 200 + `success:false`，见 `core::egress::test_connectivity`。
+ * 订阅节点走内核的**统一测试口**（参照 Clash Verge：一个固定端口 + select
+ * 策略组，测试 = 切组到目标节点再发请求）—— 测试不为节点开专用端口、也不用
+ * 等内核重建，秒回；节点端口只在被账号引用时才开（lazy listeners）。
  * 结果会落进条目（`lastTest`）：重启 / 换设备打开都还能看到上次测出来是什么。
  * 失败原因（上游错误原文）直接铺在第二行并截断，完整文本在 title 里 ——
  * 只放在 title 里等于要用户逐行悬停去猜「为什么不通」。
@@ -112,10 +131,11 @@ import {
 } from '@ui'
 import { poolItemAddress } from './accounts-shared'
 import {
-  batchRemove, batchTest, clearSelection, durationText, formatTime, getSnapshot,
-  isOrphanSubscriptionItem, isPicked, isReadonlyPoolItem, isUnprovisionedItem, items,
-  loadPanel, readonlyHint, removeItem, setAllPicked, subscribe, syncClash, testItem,
-  toggleItem, togglePick, wb, type ProxyPoolItem,
+  batchRemove, batchTest, clearSelection, durationText, enableHint,
+  formatTime, getSnapshot, isDisabledSubscriptionItem, isMirrorOffItem, isOrphanSubscriptionItem,
+  isPicked, isReadonlyPoolItem, isUnprovisionedItem, items, loadPanel, readonlyHint, removeItem,
+  setAllPicked, subscribe, testItem, toggleItem, togglePick, wb,
+  type ProxyPoolItem,
 } from './proxies-state'
 import {
   getSnapshot as getSubSnapshot, kernel as subKernel, loadSection, subscribe as subscribeSubs,
@@ -177,13 +197,6 @@ function ProxiesPage() {
   // 本页卸载（切换页面不会卸载，留着兜底）：列设置浮层与它的锚点按钮一起走
   React.useEffect(() => () => { closeColumnPanel() }, [])
 
-  /** 状态档：未就绪（还没分配端口）单独一档 —— 它既不是「可用」也不是「失败」 */
-  function stateKey(item: ProxyPoolItem): 'ok' | 'fail' | 'wait' | 'none' {
-    if (item.port === null || item.port === undefined) return 'wait'
-    if (!item.lastTest?.at) return 'none'
-    return item.lastTest.success ? 'ok' : 'fail'
-  }
-
   const keyword = kw.trim().toLowerCase()
   /** 提供方下拉的档位（顺序固定：粗档在前，各家订阅按池里条数多的排前面） */
   const vendors = vendorOptions(rows, subs)
@@ -204,7 +217,7 @@ function ProxiesPage() {
   function matches(item: ProxyPoolItem): boolean {
     if (srcFilter !== 'all' && groupOf(item) !== srcFilter) return false
     if (!vendorHit(item)) return false
-    if (stFilter !== 'all' && stateKey(item) !== stFilter) return false
+    if (stFilter !== 'all' && stateKeyOf(item) !== stFilter) return false
     if (keyword) {
       const hay = [item.name, poolItemAddress(item), item.host, item.protocol, String(item.port ?? '')]
         .join(' ').toLowerCase()
@@ -313,20 +326,37 @@ function ProxiesPage() {
    * `data-copy` 给文本，`.copy-btn` 负责「⧉ → ✓」那一下反馈。
    */
   function addrCell(item: ProxyPoolItem): React.ReactNode {
-    // 解析失败：错误原文挂在 title 上（这一格铺不下详情，但用户需要知道为什么）
+    // 禁用中的订阅节点：监听端口已随禁用一起收掉，这一格说明的是**为什么**
+    // 没有地址 —— 落到下面的「未分配端口」分支会把话说成「还没有账号引用它」，
+    // 而这条其实可能是用户自己关的
+    if (isDisabledSubscriptionItem(item) && (item.port === null || item.port === undefined)) {
+      return <span className='text-subtle'>{t('已禁用（未开监听端口）')}</span>
+    }
+    // 解析失败：错误原文挂在 title 上（这一格铺不下详情，但用户需要知道为什么）。
+    // 例外是**还没分配端口的订阅节点** —— 那是 lazy listeners 的正常状态
+    // （没有账号引用它），不是「坏了」：画成红色「解析失败」会让整列看着像
+    // 出了事故（实测整页全红，其实一个能用的都没少）。按中性「未分配端口」
+    // 显示，原因照旧挂 title。
     if (item.resolveError) {
-      return <span className='text-destructive' title={item.resolveError}>{t('解析失败')}</span>
+      const portless = item.source === 'subscription' && (item.port === null || item.port === undefined)
+      return (
+        <span className={portless ? 'text-subtle' : 'text-destructive'}
+          title={item.resolveError}>
+          {portless ? t('未分配端口') : t('解析失败')}
+        </span>
+      )
     }
     // lazy listeners：订阅节点还没有监听端口（未被账号引用，或刚引用上、内核还没补建完）
     if (isUnprovisionedItem(item)) {
-      // 「点测试会自动补建」只在**有内核**时成立：内核没装（没下过 / 刚被删）
-      // 时补建无从谈起，该说的是「先去下载内核」—— 与后端 pool_test 的判据同口径
+      // 测试**不需要**端口（走统一测试口，见后端 pool_test），所以这里说的是
+      // 「地址什么时候会有」：内核没装（没下过 / 刚被删）时说「先去下载内核」，
+      // 否则说清「引用它并保存后内核自动开端口」—— 与后端 resolve_item 同口径
       const noKernel = subKernel()?.installed === false
       return (
         <span className='text-subtle'
           title={noKernel
             ? t('代理内核未安装（在「订阅管理」里下载内核后，节点会自动分配监听端口）')
-            : t('还没有监听端口（点「测试」会自动补建并等它就绪；或在账号里引用它，保存后自动补建）')}>
+            : t('还没有监听端口（还没有账号引用它 —— 在账号里选它并保存后，内核会自动开端口）')}>
           {poolItemAddress(item) || t('未分配端口')}
         </span>
       )
@@ -368,13 +398,14 @@ function ProxiesPage() {
       case 'addr':
         return addrCell(item)
       case 'state': {
-        // 只读镜像：开关照常显示真实状态（Clash 里禁用了这里也看得见），但不给改
-        const readonly = isReadonlyPoolItem(item)
-        const hint = readonlyHint(item)
+        // 三种来源都能开关（管的是「本端用不用它」，见文件头「启用列」一节）：
+        // 唯一不能点的是**来源侧本身就关着的**（Clash 里那条监听器是停用的）——
+        // 本地开关改不了它，点了只会弹回原位，那种情况禁用开关 + 提示去哪儿改
+        const mirrorOff = isMirrorOffItem(item)
         return (
-          <Switch checked={item.enabled} disabled={locked || readonly}
+          <Switch checked={item.enabled !== false} disabled={locked || mirrorOff}
             aria-label={t('启用「{name}」', { name: item.name || t('未命名') })}
-            title={readonly ? hint : undefined}
+            title={enableHint(item)}
             onCheckedChange={next => void toggleItem(item, next)} />
         )
       }
@@ -444,7 +475,7 @@ function ProxiesPage() {
         <tr>
           <td colSpan={columns.length} className='empty'>
             {ready
-              ? t('还没有代理。点右上角「＋ 新增代理」手填一个，点「同步 Clash Verge」把 Clash 的出口导进来，或在「订阅管理」里导入订阅节点。')
+              ? t('还没有代理。点右上角「＋ 新增代理」手填一个，或在「订阅管理」里导入订阅节点、同步 Clash Verge 的出口。')
               : t('加载中…')}
           </td>
         </tr>
@@ -503,18 +534,12 @@ function ProxiesPage() {
             {t('设置')}
           </Button>
           {/* 订阅管理：订阅表的唯一入口（页面上不再有第二个面板）。
-              带订阅条数 —— 0 条时只写按钮名，免得出现「订阅管理（0）」这种读数 */}
+              带订阅条数 —— 0 条时只写按钮名，免得出现「订阅管理（0）」这种读数。
+              「同步 Clash Verge」也在这个弹窗里（与订阅同属「把外面的出口集合
+              整份镜像进池」，摆在一处），页面上因此不再单列那颗按钮 */}
           <Button variant='outline' disabled={snapshot.batchBusy}
             onClick={() => setSubsOpen(true)}>
             {subs.length ? t('订阅管理（{n}）', { n: subs.length }) : t('订阅管理')}
-          </Button>
-          {/* 同步放在刷新左边：它做的事比「刷新」多一层（把 Clash 的出口集合
-              镜像进池），而进页面时的那次自动同步是静默的 —— 用户想在
-              「我刚在 Clash 里加了出口」之后立刻见效时点它。
-              批量在跑时两个都停：它们会把正在被批量流程改写的列表整份换掉 */}
-          <Button variant='outline' disabled={snapshot.syncing || snapshot.batchBusy}
-            onClick={() => void syncClash()}>
-            {snapshot.syncing ? t('同步中…') : t('同步 Clash Verge')}
           </Button>
           <Button variant='outline' disabled={snapshot.loading || snapshot.batchBusy}
             onClick={() => { void loadPanel(); void loadSection() }}>
@@ -636,8 +661,8 @@ function ProxiesPage() {
         leading={(
           /* 脚注只留**状态**（Clash 没同步上 / 列表读失败）：那两句用法说明
              （出口怎么被账号引用、只读镜像去哪儿改）已经收进各自的入口 ——
-             账号弹窗的「出网代理」、面板头的「订阅管理」与「同步 Clash Verge」，
-             页脚常驻一大段解释只会把读数挤掉 */
+             账号弹窗的「出网代理」、面板头的「订阅管理」（含里面的
+             「同步 Clash Verge」），页脚常驻一大段解释只会把读数挤掉 */
           <>
             {/* Clash 状态常驻在页脚：同步是静默的（进页面自动跑一次），没有这句话时
                 「为什么一条 Clash 条目都没有」只能靠点按钮 + 看 toast 才知道 */}
@@ -690,13 +715,15 @@ function groupOf(item: ProxyPoolItem): string {
 
 /**
  * 三个来源组（顺序固定：可写的在最上，镜像来的按「配置成本」排在后面）。
- * note 就是这一组的只读口径 —— 分组带是用户唯一会逐组读一行文字的地方。
+ * note 就是这一组的读写口径 —— 分组带是用户唯一会逐组读一行文字的地方，
+ * 所以两组镜像都要说明「名字与端口去来源侧改、启用在本页关」（启用列已解禁，
+ * 见文件头）。
  */
 function groups(): Array<{ key: string; label: string; note: string }> {
   return [
     { key: 'manual', label: t('手动'), note: t('本页可编辑、可删除') },
-    { key: 'clash', label: 'Clash Verge', note: t('只读：在 Clash Verge 里改') },
-    { key: 'subscription', label: t('订阅'), note: t('只读：在「订阅管理」里改') },
+    { key: 'clash', label: 'Clash Verge', note: t('名字与端口在 Clash Verge 里改；启用可在本页关闭') },
+    { key: 'subscription', label: t('订阅'), note: t('名字与端口跟随订阅与内核；启用可在本页关闭') },
   ]
 }
 
@@ -711,19 +738,47 @@ function sourceOptions(rows: ProxyPoolItem[]): Array<{ value: string; label: str
   ]
 }
 
-/** 状态档位：未就绪（订阅节点还没有监听端口）单独一档 */
+/** 状态档的键（筛选用；`stateOptions` 的数数与这里读的是同一判据） */
+type ProxyStateKey = 'off' | 'ok' | 'fail' | 'wait' | 'none'
+
+/**
+ * 一条条目落在哪一档。**判定的顺序就是优先级**：
+ *
+ *   ① 禁用：开关关掉的条目（本页关的、或来源侧关的）不参与「通不通」的讨论。
+ *      这一档必须排在前面 —— 订阅节点被禁用后监听端口已经收掉，落到下面的
+ *      判据里会被算成「未就绪」（一个说得像「马上就好」的词），而它其实是
+ *      用户自己关的，处置动作完全不同（前者等内核补建，后者去开开关）。
+ *   ② 未就绪：还没有监听端口（订阅节点未被引用 / 内核还没补建完）。
+ *   ③ 未测试 / 可用 / 失败：按上次测试结果（`lastTest`）分。
+ */
+function stateKeyOf(item: ProxyPoolItem): ProxyStateKey {
+  if (item.enabled === false) return 'off'
+  if (item.port === null || item.port === undefined) return 'wait'
+  if (!item.lastTest?.at) return 'none'
+  return item.lastTest.success ? 'ok' : 'fail'
+}
+
+/**
+ * 状态档位：可用 / 失败 / 未就绪 / 已禁用。
+ *
+ * 「已禁用」排在最后（前四档是排查连通性时逐档往下看的路子，已禁用是「我自己
+ * 关掉的那些」——查漏时单独看它）。它也不并进「未就绪」：未就绪是「还没到、
+ * 等内核补建」，已禁用是「已经关掉、要开开关」，两个词说的动作不一样（见
+ * `stateKeyOf`）。
+ *
+ * 标签用「已禁用」而不是「禁用」：词表里「禁用」已被账号域占作**动作**标签
+ * （en 是 Disable、ja 是 無効化，都是动词），与这一排状态词（可用 / 失败 /
+ * 未就绪）并列时语法不对；「已禁用」在各语言里都是状态词（Disabled / 無効 /
+ * 비활성 / Desativada），且与行内「已禁用（未开监听端口）」同一口径。
+ */
 function stateOptions(rows: ProxyPoolItem[]): Array<{ value: string; label: string; count: number }> {
-  const key = (item: ProxyPoolItem) => {
-    if (item.port === null || item.port === undefined) return 'wait'
-    if (!item.lastTest?.at) return 'none'
-    return item.lastTest.success ? 'ok' : 'fail'
-  }
-  const count = (target: string) => rows.filter(item => key(item) === target).length
+  const count = (target: ProxyStateKey) => rows.filter(item => stateKeyOf(item) === target).length
   return [
     { value: 'all', label: t('全部状态'), count: rows.length },
     { value: 'ok', label: t('可用'), count: count('ok') },
     { value: 'fail', label: t('失败'), count: count('fail') },
     { value: 'wait', label: t('未就绪'), count: count('wait') },
+    { value: 'off', label: t('已禁用'), count: count('off') },
   ]
 }
 

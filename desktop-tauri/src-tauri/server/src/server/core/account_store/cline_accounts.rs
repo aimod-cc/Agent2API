@@ -72,6 +72,53 @@ fn record_id(provider: &str, key: &str) -> String {
     format!("{provider}-{}", truncate_chars(key, MAX_IDENTITY_LENGTH))
 }
 
+/// `providers.json` 的**文本内容** → 一份 Cline 凭证（提取口径的唯一一份）。
+///
+/// ── 桌面导入与文件导入共用（别在调用方另写键名候选）──────────
+/// 两条链拿到的都是同一份文件的文本：
+///   - 桌面导入（`import_cline_desktop_account`）读**本机固定路径**
+///     `~/.cline/data/settings/providers.json`；
+///   - 文件导入（`add_cline_account_from_file`，`POST /api/accounts` 的
+///     `authFileContent`）读**用户手选内容**（可能来自另一台机器或备份）。
+/// 形状解析（`providers.cline.settings.auth` / `workos:` 前缀 / 毫秒
+/// `expiresAt` / `metadata.userInfo` 的展示名）全部委托给
+/// `credentials::credentials_from_desktop_settings`；本函数只做「文本 → Value」
+/// 与错误口径转换。口径分叉的症状会很难排查：「同一个文件，手选能导入、
+/// 本机路径却报格式不对」。
+///
+/// `invalid_json_message` 由调用方给：两条路对「文件不是 JSON」要说不同的指引
+/// （桌面导入指向本机客户端文件，文件导入指向用户刚选的那份），除此之外一字不差。
+fn cline_credentials_from_settings_text(
+    text: &str,
+    invalid_json_message: &str,
+) -> Result<credentials::ClineCredentials, AccountStoreError> {
+    let root: Value = serde_json::from_str(text)
+        .map_err(|_| AccountStoreError::new(invalid_json_message, 400))?;
+    credentials::credentials_from_desktop_settings(&root)
+        .map_err(|error| AccountStoreError::new(error.message, error.status_code))
+}
+
+/// 读本机固定路径的 Cline 登录态**文本**（桌面导入用）。
+///
+/// 文案与 `credentials::read_desktop_credentials` 对齐（文件不存在 → 提示先在
+/// 客户端登录；读不出来 → 500），让「点导入」与「转发时读文件」对同一个问题
+/// 说一样的话。这里直接读文本而不再经 `read_desktop_credentials`，是为了与
+/// 文件导入走同一个提取函数（见上）；那条函数的进程缓存（网关内存里的刷新
+/// 轮换结果）仍然只服务转发链路，不受本路径影响。
+fn read_desktop_settings_text() -> Result<String, AccountStoreError> {
+    let path = credentials::desktop_settings_path()
+        .map_err(|error| AccountStoreError::new(error.message, error.status_code))?;
+    if !path.exists() {
+        return Err(AccountStoreError::new(
+            "本机没有找到 Cline 登录态（请先在 Cline 客户端登录）",
+            400,
+        ));
+    }
+    std::fs::read_to_string(&path).map_err(|error| {
+        AccountStoreError::new(format!("读取本机 Cline 登录态失败: {error}"), 500)
+    })
+}
+
 impl AccountStore {
     // ─── 读：账号记录 ────────────────────────────────────────
 
@@ -388,6 +435,62 @@ impl AccountStore {
         Ok(self.public_account(&saved))
     }
 
+    /// 文件导入：把用户**手选**的 `providers.json` 内容解析成凭证后落账号
+    /// （`POST /api/accounts` 的 `authFileContent` 分支，见 `api::accounts::add_account`）。
+    ///
+    /// ── 与 `import_cline_desktop_account` 是两条语义不同的路（别混用）──
+    ///   - 本函数（文件导入）＝把文件里的凭证**解析后落库**（token 落到实处），
+    ///     得到一个**可独立转发**的账号 —— 与「手动粘贴」同一语义，文件可来自
+    ///     任意机器或备份；
+    ///   - `import_cline_desktop_account`（`importDesktop: true`）＝只建一条
+    ///     `desktop: true` 的记录，**不落 token**，转发时实时读本机固定路径。
+    /// 两者同时给时以文件为准（用户的显式文件更强），顺序由
+    /// `api::accounts::add_account` 的分支保证。
+    ///
+    /// 提取口径与桌面导入共用（`cline_credentials_from_settings_text`），落账号
+    /// 复用 `add_cline_account`（校验 / `workos:` 前缀 / 撞 id 保护 / 备注名
+    /// 保留全在一处），因此这里只做「凭证 → 入参 payload」的搬运。
+    pub fn add_cline_account_from_file(
+        &self,
+        provider: &str,
+        content: &str,
+        name: Option<&str>,
+    ) -> Result<Value, AccountStoreError> {
+        let credentials = cline_credentials_from_settings_text(
+            content,
+            "不是合法 JSON（请选择 Cline 客户端登录后生成的 providers.json）",
+        )?;
+        // 键名取 `add_cline_account` 的入参口径（与手动粘贴 / 设备授权登录
+        // 落账号那条链一致）：`accessToken` 已带 `workos:` 前缀（helper 经凭证层
+        // 的 `ensure_token_prefix`），`expiresAt` 是**毫秒**时间戳（providers.json
+        // 的原单位，落盘口径与另外几家一致）。空值不入 payload —— 让
+        // `add_cline_account` 走它自己的兜底链（从 JWT 推过期时间 / 账号标识）。
+        let mut payload = Map::new();
+        payload.insert(
+            "accessToken".to_string(),
+            Value::String(credentials.access_token),
+        );
+        if !credentials.refresh_token.is_empty() {
+            payload.insert(
+                "refreshToken".to_string(),
+                Value::String(credentials.refresh_token),
+            );
+        }
+        if let Some(expires_at) = credentials.expires_at.filter(|value| *value > 0.0) {
+            payload.insert(
+                "expiresAt".to_string(),
+                crate::server::core::account_store::state::json_number(expires_at),
+            );
+        }
+        if !credentials.account.is_empty() {
+            payload.insert(
+                "account".to_string(),
+                Value::String(credentials.account),
+            );
+        }
+        self.add_cline_account(provider, &Value::Object(payload), name)
+    }
+
     /// 导入桌面端实时登录态（建一条 `desktop: true` 的账号记录，凭证不落盘）。
     ///
     /// `provider` 决定进哪个池那一家。**同一个 Cline 桌面登录态两个池各能导入
@@ -404,14 +507,14 @@ impl AccountStore {
                 400,
             ));
         }
-        let credentials = credentials::read_desktop_credentials()
-            .map_err(|error| AccountStoreError::new(error.message, error.status_code))?
-            .ok_or_else(|| {
-                AccountStoreError::new(
-                    "本机没有找到 Cline 登录态（请先在 Cline 客户端登录）",
-                    400,
-                )
-            })?;
+        // 读本机固定路径的文本 → 走与文件导入共用的提取口径（见
+        // `cline_credentials_from_settings_text`）。注意「提取口径共用」不等于
+        // 「落账号函数共用」：桌面导入建的是 `desktop: true`、**不落 token** 的
+        // 记录（字段在下面自己组装），与文件导入落 token 是两条刻意的不同语义。
+        let credentials = cline_credentials_from_settings_text(
+            &read_desktop_settings_text()?,
+            "本机 Cline 登录态文件格式无效（应为 Cline 客户端登录后生成的 providers.json）",
+        )?;
         let id = credentials::desktop_account_id(provider);
         let _guard = self.guard();
         let existing = self.record_by_id(&_guard, &id);

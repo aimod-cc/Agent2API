@@ -5,7 +5,7 @@
  * renderProviderCards / newCardHtml 与 mountAddProviderUi 里注入的那段骨架。
  *
  * 卡片网格与卡片的类名（.add-provider-grid / .add-provider-card / .add-provider-logo…）
- * 原样保留：那是布局性的成套样式（两列网格 + 固定高度滚动 + 卡片三行排版），
+ * 原样保留：那是布局性的成套样式（四列网格 + 固定高度滚动 + 卡片三行排版），
  * 组件库没有对应件，重写成 Tailwind 只会把一份已经调好的像素预算再抄一遍。
  * 控件（分段、搜索框）走组件库。
  */
@@ -13,7 +13,7 @@
 import * as React from 'react'
 import { DialogSection, InputGroup, InputGroupAddon, InputGroupInput, SegmentedControl } from '@ui'
 
-import { accountCountOf, shared } from './add-account-bridge'
+import { accountCountOf, existingCustomOfPreset, matchesPresetName, shared } from './add-account-bridge'
 import type { CustomProviderRecord } from './add-account-bridge'
 import { WORKBUDDY_ENTRY_LABEL, WORKBUDDY_PROVIDER } from './add-account-configs'
 import { ADD_SEG_CLASS } from './add-provider-blocks'
@@ -95,6 +95,10 @@ export const PROVIDER_ICONS: Record<string, string> = {
   // （`res-static.hc-cdn.cn/.../OfficeAce/新图标.png`，176×176 RGBA，
   // 归一成 256×256 入库 —— 与系统里显示的应用图标为同一形象）
   officeace: 'assets/providers/officeace.png',
+  // OrcaTerm（腾讯云遨驰终端桌面客户端）：取自官方 PWA 图标
+  // （`cloudcache.tencent-cloud.com/qcloud/orcaterm/pwa/icon/orcaterm_192x192.png`，
+  // 与客户端 / 官网显示的应用图标为同一形象）
+  orcaterm: 'assets/providers/orcaterm.png',
 }
 
 /**
@@ -105,6 +109,20 @@ export const PROVIDER_ICONS: Record<string, string> = {
  */
 const BETA_PROVIDERS = new Set(['monkeycode', 'monkeycode-intl', 'commandcode', 'antigravity'])
 
+/**
+ * Agent 段**不露出添加入口**的内置家（精确匹配 provider id）。目前只有
+ * `cline-pass`：
+ *   ① 它支持 API Key 形态（与 OAuth token 走同一个 Bearer 头），添加入口已迁到
+ *      「预置 API」段的 Cline Pass 卡（`preset-providers.js` 的 `clinepass`）；
+ *   ② 后端 Provider 与存量账号完全不动 —— 存量账号照常转发 / 刷新 / 删除，
+ *      账号页的分组带仍会列出 cline-pass（那段走 accounts-domain 的
+ *      providerSummaries 直读 providers 摘要，不经过本文件）；
+ *   ③ 这是刻意的（与 `workbuddy-intl` 那条同类：入口只留一处），**不要当成
+ *      漏掉的 bug 把它恢复**。
+ * 注意只按 id 精确匹配：`cline-free`（免费池）不受影响，仍在 Agent 段。
+ */
+const HIDDEN_AGENT_PROVIDERS = new Set(['cline-pass'])
+
 type CardItem = {
   id: string
   label: string
@@ -112,46 +130,68 @@ type CardItem = {
   preset?: boolean
   custom?: boolean
   beta?: boolean
+  /** 预置卡专用：该模板已建过的同名自定义家 id（空串 / 缺省 = 还没建过） */
+  builtId?: string
 }
 
 /**
  * 第 1 步的卡片列表数据，按账号类型分三段：
  *   · Agent —— 内置家来自 providers 摘要；
- *   · 预置 API —— 预置目录的官方与托管端点，点一张卡 = 创建这一家并预填；
- *     **已建过同名家的预置卡不再出现**（那张已建卡就在「自定义」段里）；
- *   · 自定义 —— 已建的自定义家（customList），每张卡是「给这家加账号」的对象。
+ *   · 预置 API —— 预置目录的官方与托管端点，**全部常驻**（建过的也还在）：
+ *     点一张卡 = 已建过同名家的接着加账号（多把 key 轮换），没建过的按模板
+ *     新建并预填；
+ *   · 自定义 —— 手动新建的自定义家（customList），每张卡是「给这家加账号」的
+ *     对象。预置模板建的家**不进这一段**：它的加账号入口就是预置段那张常驻
+ *     模板卡（与 Agent 内置家同一形态），再重复出现一份只会让人以为建了两个家。
  * 「手动新建」那张卡不在这个列表里：它不是一家提供商，由渲染处单独插在队首。
  */
 function providerCards(accountType: AccountType): CardItem[] {
   const providers = shared().wbProviders
   if (accountType === TYPE_PRESET) {
-    const customNames = new Set((providers?.customList?.() || []).map(item => item.name || ''))
-    return (shared().wbPresetProviders?.list || [])
-      .filter(preset => !customNames.has(preset.name))
-      .map(preset => ({
+    // 模板卡不因「已建过」从列表里消失（那会让用户以为模板只能用一次）：
+    // 建过的卡继续常驻，点它落到「加入已有」模式（见 add-account-modal 的
+    // pick），账号数显示在卡片第二行 —— 形态与 Agent 段的卡片一致。
+    return (shared().wbPresetProviders?.list || []).map(preset => {
+      const built = existingCustomOfPreset(preset)
+      return {
         id: PRESET_CARD_PREFIX + preset.key,
         label: preset.name,
-        count: 0,
+        count: built ? accountCountOf(built.id) : 0,
         preset: true,
-      }))
+        builtId: built?.id || '',
+      }
+    })
   }
   if (accountType === TYPE_CUSTOM) {
-    return (providers?.customList?.() || []).map((provider: CustomProviderRecord) => ({
-      id: provider.id,
-      label: provider.name || provider.id,
-      count: accountCountOf(provider.id),
-      custom: true,
-    }))
+    // 预置模板同名的家不重复出现（口径见 matchesPresetName）：预置家改了名
+    // （不再对应任何模板）后会重新回到这一段，从这里继续加账号不受影响。
+    return (providers?.customList?.() || [])
+      .filter((provider: CustomProviderRecord) => !matchesPresetName(provider))
+      .map((provider: CustomProviderRecord) => ({
+        id: provider.id,
+        label: provider.name || provider.id,
+        count: accountCountOf(provider.id),
+        custom: true,
+      }))
   }
-  const list = providers?.all?.() || []
+  // Cline Pass 的添加入口不在这一段（判据与缘由见 HIDDEN_AGENT_PROVIDERS）：
+  // 在映射成卡片之前就把摘要里那条剔掉，后面的名字 / beta 处理都不必再想它。
+  // 过滤只落在**本函数**（PickStep 的列表构造）上：账号页分组带 / 模型管理页
+  // 读的是同一份 providers 摘要，但各自有自己的列表构造（accounts-domain 的
+  // providerSummaries、models-page 的左栏），不经过这里，所以存量 cline-pass
+  // 账号仍照常成组显示。
+  const list = (providers?.all?.() || [])
+    .filter(item => !HIDDEN_AGENT_PROVIDERS.has(String(item?.id || '')))
   // WorkBuddy 这张卡与它的弹窗标题用**中性品牌名**（不带地区）而不是注册名：
   // 这个入口内部有「账号版本」分段，两版都从这一张卡进（名字见
   // `WORKBUDDY_ENTRY_LABEL` 的说明）。与下面那条「国际版不进卡片列表」是同一件事
   // 的两半：入口一处、版本在块里选。
+  // 注册名（「AutoClaw 国内版」这类）过一遍词典：卡片名与弹窗标题都由它出，
+  // 不查表的话非中文界面会在这里印中文
   const labelOf = (id: string, fallback: string): string =>
     id === WORKBUDDY_PROVIDER
       ? WORKBUDDY_ENTRY_LABEL
-      : shared().wbProviders?.labelOf?.(id) || fallback
+      : t(shared().wbProviders?.labelOf?.(id) || fallback)
   // 摘要还没到时先放 WorkBuddy 一张：弹窗不能因为一次状态未就绪就空着。
   // 名字与注册表无关（走上面那条中性口径）—— 兜底文案与真实文案不一致的话，
   // 网络慢的那一次会让用户以为界面变了样。
@@ -202,9 +242,16 @@ function Logo({ item }: { item: CardItem }): React.ReactElement {
 /**
  * 卡片正文第二行（meta）。三段各说各的动作，徽章不再出现 —— 分段已经把类型
  * 分开了，整段都是同一类，再给每张卡挂一枚「预置 / 自定义」徽章只是噪音。
+ * 预置卡分两种：没建过的是「按模板新建」，已建过的是「给那家接着加账号」——
+ * 后者与「自定义」段的卡片做的是同一件事，因此文案同一口径（账号数 + 点击添加）。
  */
 function cardMeta(item: CardItem): string {
-  if (item.preset) return t('点开即预填，填 Key 接入')
+  if (item.preset) {
+    if (!item.builtId) return t('点开即预填，填 Key 接入')
+    return item.count
+      ? t('已建过 · {n} 个账号，点击继续添加', { n: item.count })
+      : t('已建过，点击继续添加账号')
+  }
   if (item.custom) return item.count ? t('{n} 个账号，点击添加', { n: item.count }) : t('点击添加账号')
   return item.count ? t('{n} 个账号', { n: item.count }) : t('还没有账号')
 }

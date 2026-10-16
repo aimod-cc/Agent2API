@@ -156,6 +156,18 @@ const BRIDGE_JS: &str = r#"
     // 同时跑时界面上一眼能分清。
     title: '__AGENT2API_TITLE__',
 
+    // ── 直连网关的凭证（AI 助手页专用）────────────────────────
+    // 助手页为了流式对话直接 fetch 网关基址、不经桥（见 ui-islands 的
+    // assistant-state.ts）。桌面形态下页面来自 Tauri 自定义协议、网关在
+    // 127.0.0.1:{port}：跨源 + 不带 cookie，那条请求里一个凭证都没有；
+    // 面板认证开启后（设置页开过局域网访问就会注册管理员）会被 401
+    // `panel_login_required` 挡下，界面只能显示「请先登录管理面板」——
+    // 而桌面上并没有登录页。桥的其它方法不受影响，是因为壳统一给它们补了
+    // 第一把 Key（见 gateway::request_builder）；这里把**同一把**交给页面。
+    // 返回 `{ 头名: 值 }`：网页端 shim 的同名方法回面板令牌 / 用户输入的
+    // Key（见 web_shim.rs），助手页对两端一视同仁，只负责合并进请求头。
+    directCredentials: () => invoke('direct_credentials'),
+
     // ── 会话 ──
     getState: () => call('GET', '/api/session'),
     startLogin: (edition, mode, provider, socialRestore) =>
@@ -376,6 +388,12 @@ const BRIDGE_JS: &str = r#"
     //   · create/update/remove   写操作都返回同一份最新列表（就地替换）；
     //                            Clash 同步来的条目是只读镜像，update/remove
     //                            会被后端拒绝（400 + 一句可读的中文）
+    //   · setProxyPoolItemEnabled 启用 / 禁用一条（三种来源都放行：manual 写它
+    //                            自己的 enabled，镜像条目写本地禁用位）。订阅
+    //                            节点禁用时后端走「关闭监听端口」流程、启用时
+    //                            走补建，响应里多一个 `listener`
+    //                            （none / closing / opening）—— 页面按它轮询列表
+    //                            看端口落地，不在请求里等内核重建
     //   · testProxyPoolItem      测一条并把结果记进条目；测试失败也是**成功响应**
     //                            （`success:false` + error 文案）
     //   · syncClashToProxyPool   手动同步 Clash Verge 出口，返回里多一个
@@ -384,14 +402,10 @@ const BRIDGE_JS: &str = r#"
     getProxyPool: () => call('GET', '/api/proxies/pool'),
     createProxyPoolItem: payload => call('POST', '/api/proxies/pool', payload || {}),
     updateProxyPoolItem: payload => call('POST', '/api/proxies/pool/update', payload || {}),
+    setProxyPoolItemEnabled: payload => call('POST', '/api/proxies/pool/enable', payload || {}),
     removeProxyPoolItem: id => call('POST', '/api/proxies/pool/remove', { id: String(id || '') }),
     testProxyPoolItem: id => call('POST', '/api/proxies/pool/test', { id: String(id || '') }),
     syncClashToProxyPool: () => call('POST', '/api/proxies/pool/sync-clash', {}),
-    // 补建订阅节点监听器（lazy listeners：账号保存引用后由壳侧自动触发；
-    // 这里给前端一个手动兜底入口。响应 `{pending, missing, ready}`，pending=true
-    // 表示投了内核重启命令、端口要等重建完成；payload 可选 `{ids}`
-    // （批量测试把那一批条目一次性钉住 + 补建，ready=false 表示端口始终没建出来）
-    provisionProxyPool: payload => call('POST', '/api/proxies/pool/provision', payload || {}),
     // ── 代理设置（「网络代理」页的设置弹窗：节点端口范围 + 测试网址）──
     // 与 web_shim.rs 的同名方法成对存在（教训同上）。契约见 `api::proxies`
     // 的模块头 settings 两条：GET 带 `defaults`（弹窗的默认值读它），
@@ -417,6 +431,9 @@ const BRIDGE_JS: &str = r#"
     //   · cancelKernelDownload    停止正在进行的下载（删掉半截文件；不在下载中时
     //                             回 `{canceled: false}`，不假装停成功了）
     //   · restartKernel           手动启动 / 重启内核（重建配置）
+    //   · stopKernel              手动关闭内核（只停进程；订阅与端口注册表保留，
+    //                             「启动内核」后原位恢复 —— 与「最后一条订阅没了」
+    //                             那条自动停不同，那条会清空订阅节点镜像）
     //   · removeKernel            删除已下载的内核（停进程 + 清内核目录；订阅
     //                             与账号引用保留，订阅节点端口被回收成「未分配」）
     //   · pickFolder              弹系统文件夹选择框（下载弹窗的「选择目录…」）
@@ -431,6 +448,7 @@ const BRIDGE_JS: &str = r#"
     downloadKernel: payload => call('POST', '/api/subscriptions/kernel/download', payload || {}),
     cancelKernelDownload: () => call('POST', '/api/subscriptions/kernel/download/cancel', {}),
     restartKernel: () => call('POST', '/api/subscriptions/kernel/restart', {}),
+    stopKernel: () => call('POST', '/api/subscriptions/kernel/stop', {}),
     removeKernel: () => call('POST', '/api/subscriptions/kernel/remove', {}),
     // 桌面壳的文件夹选择框：参数名与命令签名一致（camelCase ← Rust 的 snake_case）
     pickFolder: defaultDir => invoke('pick_folder', { defaultDir: defaultDir == null ? null : String(defaultDir) }),
@@ -618,6 +636,11 @@ const BRIDGE_JS: &str = r#"
     // 写传 {token: '…' | null}（null = 清除）。加密落库在后端做
     getUpdateToken: () => call('GET', '/api/update/token'),
     setUpdateToken: payload => call('POST', '/api/update/token', payload),
+    // 「加入 beta 版」：读只报 {enabled}，写传 {enabled: true|false}。
+    // 打开后更新检查把 GitHub 的预发布版一并纳入候选（后端下一次检查就换通道）；
+    // 写响应带 saved（false = 本次运行已生效、重启会回到原通道）
+    getUpdateBeta: () => call('GET', '/api/update/beta'),
+    setUpdateBeta: payload => call('POST', '/api/update/beta', payload),
     downloadUpdate: payload => invoke('download_update', {
       url: String((payload && payload.url) || ''),
       name: (payload && payload.name) ? String(payload.name) : null,
@@ -633,6 +656,13 @@ const BRIDGE_JS: &str = r#"
     getSanitize: () => call('GET', '/api/sanitize'),
     saveSanitize: enabled =>
       call('PUT', '/api/sanitize', { sanitizeBlacklistFingerprints: enabled === true }),
+
+    // ── 开发者角色兼容开关 ──
+    // 与 getSanitize / saveSanitize 同形：GET 读、PUT 写，响应体就是新状态。
+    // 与 web_shim.rs 的同名方法逐字同形（漏一侧的症状见下面 getCors 那段）。
+    getDeveloperRoleCompat: () => call('GET', '/api/developer-role-compat'),
+    saveDeveloperRoleCompat: enabled =>
+      call('PUT', '/api/developer-role-compat', { developerRoleCompat: enabled === true }),
 
     // ── Cline 伪装头 ──
     // 与 getSanitize / saveSanitize 同形：GET 读（overrides + effective），

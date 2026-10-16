@@ -222,7 +222,7 @@ function AccountsPage() {
    * 于是「哪家有账号、各有多少」不切页就能看到（家数动态，这也是它用下拉不用分段的原因）。
    */
   const providerOptions = [{ value: 'all', label: t('全部（{n}）', { n: all.length }) }]
-    .concat(providerSummaryList().map(item => ({ value: item.id, label: t('{label}（{count}）', { label: item.label, count: item.count }) })))
+    .concat(providerSummaryList().map(item => ({ value: item.id, label: t('{label}（{count}）', { label: t(item.label), count: item.count }) })))
   /** 家名表：整表排序时分组带没了，行里要挂一枚厂商标记顶上（见 accounts-panels 的 AccountCell） */
   const providerLabels = new Map(providerSummaryList().map(item => [item.id, item.label]))
 
@@ -621,7 +621,7 @@ function AccountsPage() {
     const next = current.map(item => item.provider === drop.provider ? { ...item, members: nextMembers } : item)
     const queue = next.flatMap(item => item.members.map(account => account.id))
     void reorderQueue(queue, t('{name} 移到 {group} 组内第 {rank} 位', {
-      name: String(moved.name || moved.id), group: group.label, rank: to + 1,
+      name: String(moved.name || moved.id), group: t(group.label), rank: to + 1,
     }))
   }, [])
 

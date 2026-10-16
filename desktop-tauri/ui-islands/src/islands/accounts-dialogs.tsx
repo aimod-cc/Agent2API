@@ -30,6 +30,7 @@ import {
   DialogTitle,
   Input,
   Label,
+  MultiSelect,
   NavItem,
   RadioGroup,
   RadioGroupItem,
@@ -47,11 +48,16 @@ import {
 } from './accounts-shared'
 import {
   displayNameOf, providerFeatures, providerOf, supportsPlanChannel, supportsUsage,
+  isOpencodeZenProvider, supportsProxyRotate,
   zcodePlanLabel, zcodePlanOf, ZCODE_PLAN_CODING, ZCODE_PLAN_START,
 } from './accounts-domain'
 import {
   readUsageChanges, UsageSettingsSection, usageDraftOf, type UsageDraft,
 } from './accounts-dialog-usage'
+import {
+  BalanceQuerySection, balanceFieldConfigured, balanceQueryConfigured, balanceQueryDraftOf,
+  balanceSpecOf, readBalanceQueryChanges, type BalanceFieldKey,
+} from './balance-query'
 import { limiterDraftOf, LimiterSection, readLimiterChanges } from './accounts-dialog-limiter'
 import {
   allAccounts, clashOptions, closeDialog, findAccount, getStore, proxyPoolOptions,
@@ -74,6 +80,15 @@ type PaneId = 'basic' | 'credential' | 'query' | 'limiter' | 'network'
 /** 并发上限的封顶值（与后端 apply_patch 的 MAX_CONCURRENT_LIMIT 一致） */
 const CONC_MAX = 999
 
+/**
+ * 轮询档「测试出口」一次最多测几条。
+ *
+ * 每条候选都是一次真实出网（测试结果会记进那条代理的「上次测试」），几十条的
+ * 池全测一遍要几十秒。8 条足够回答「这条轮询配置大致通不通」；要看单条结果，
+ * 「网络代理」页每行都有独立的「测试」。
+ */
+const ROTATE_TEST_LIMIT = 8
+
 function labelOf(account: AccountLike | null | undefined): string {
   // 与账号列同一取名口径（displayNameOf 内含 nameCustom / emailAsName 分流）
   return displayNameOf(account) || account?.id || ''
@@ -84,13 +99,18 @@ function labelOf(account: AccountLike | null | undefined): string {
 export type ProxyPayload =
   | null
   | { source: 'pool'; proxyId: string }
+  | { source: 'rotate'; all: boolean; proxyIds?: string[] }
   | { source: 'clash'; listenerUid: string }
   | { source: 'custom'; protocol: 'http' | 'socks5'; host: string; port: number; username: string; password: string }
 
 export type ProxyDraft = {
-  mode: 'none' | 'pool' | 'clash' | 'custom'
+  mode: 'none' | 'pool' | 'rotate' | 'clash' | 'custom'
   /** 池条目 id（mode === 'pool'） */
   proxyId: string
+  /** 轮询档：true = 池里全部启用的出口（"全部"，默认档；false = 只在 rotateIds 里轮） */
+  rotateAll: boolean
+  /** 轮询档：指定要轮询的池条目 id（rotateAll 为 true 时不用） */
+  rotateIds: string[]
   listenerUid: string
   protocol: 'http' | 'socks5'
   host: string
@@ -103,9 +123,15 @@ export type ProxyDraft = {
 export function draftOfProxy(proxy: AccountRecord['proxy']): ProxyDraft {
   const source = proxy?.config?.source || proxy?.source
   const config = proxy?.config || null
+  const rotate = source === 'rotate'
   return {
-    mode: source === 'pool' ? 'pool' : source === 'clash' ? 'clash' : source === 'custom' ? 'custom' : 'none',
+    mode: source === 'pool' ? 'pool'
+      : rotate ? 'rotate'
+        : source === 'clash' ? 'clash' : source === 'custom' ? 'custom' : 'none',
     proxyId: source === 'pool' ? String(config?.proxyId || '') : '',
+    // `all` 缺键按「全部」读（后端同一个口径：那是这一档的默认语义）
+    rotateAll: rotate ? config?.all !== false : true,
+    rotateIds: rotate && Array.isArray(config?.proxyIds) ? config.proxyIds.map(String) : [],
     listenerUid: config?.source === 'clash' || source === 'clash' ? String(config?.listenerUid || '') : '',
     protocol: config?.protocol === 'socks5' ? 'socks5' : 'http',
     host: config?.host || '',
@@ -121,6 +147,12 @@ export function readProxyDraft(draft: ProxyDraft): ProxyPayload {
   if (draft.mode === 'pool') {
     if (!draft.proxyId) throw new Error(t('请先选择已保存的代理'))
     return { source: 'pool', proxyId: draft.proxyId }
+  }
+  if (draft.mode === 'rotate') {
+    // 「全部」不写 proxyIds：池里以后新增的出口自动进轮询（后端归一也是这个形状）
+    if (draft.rotateAll) return { source: 'rotate', all: true }
+    if (!draft.rotateIds.length) throw new Error(t('轮询至少要选择一条代理（或改选「全部」）'))
+    return { source: 'rotate', all: false, proxyIds: [...draft.rotateIds] }
   }
   if (draft.mode === 'clash') {
     if (!draft.listenerUid) throw new Error(t('请先选择 Clash Verge 出口'))
@@ -155,6 +187,10 @@ function clashOptionLabel(option: NonNullable<ClashSnapshot['options']>[number])
  *   · **已保存的代理** —— 引用「网络代理」页的池条目（推荐路径：出口在那里
  *     配一次、测一次，所有引用它的账号一起生效）。选项文案是
  *     「名字（协议 主机:端口）」，与账号页代理列同一格式（见 poolItemLabel）；
+ *   · **轮询** —— 逐请求轮换池里的出口（换 IP）。**只在 `allowRotate` 为真时
+ *     出现**（OpenCode Zen 免费档，判据见 accounts-domain 的 supportsProxyRotate
+ *     —— 那个上游按 IP 限流）。默认「全部代理节点」（池里每个启用的出口轮流
+ *     使用），取消勾选后从池里多选出要轮询的几条；
  *   · **Clash Verge** —— **只在账号当前就是直接引用 Clash 出口时出现**：
  *     那种存量记录要能改（切到别的档就消失，因为出口统一走池之后不再提供
  *     「新建一条 Clash 直引」的入口；想引用 Clash 出口请先到「网络代理」页
@@ -164,10 +200,13 @@ export function ProxyForm({
   draft,
   onChange,
   idPrefix,
+  allowRotate = false,
 }: {
   draft: ProxyDraft
   onChange: (next: ProxyDraft) => void
   idPrefix: string
+  /** 是否给出「轮询」档（只有 OpenCode Zen 账号为真，见函数说明） */
+  allowRotate?: boolean
 }) {
   const store = getStore()
   const clash = store.clash
@@ -176,7 +215,7 @@ export function ProxyForm({
   const showClashMode = draft.mode === 'clash'
   const [testing, setTesting] = React.useState(false)
   const [testResult, setTestResult] = React.useState<React.ReactNode>(null)
-  /** 池列表：「已保存的代理」那一档的选项（模块级缓存，见 accounts-data） */
+  /** 池列表：「已保存的代理」与「轮询」两档共用的选项（模块级缓存，见 accounts-data） */
   const [pool, setPool] = React.useState<PoolItem[] | null>(null)
   const [poolError, setPoolError] = React.useState('')
   const set = (patch: Partial<ProxyDraft>): void => onChange({ ...draft, ...patch })
@@ -197,13 +236,62 @@ export function ProxyForm({
         setPoolError(errorMessage(error))
       })
   }, [])
-  // 只有选中（或初始就是）池引用时才真正去读 —— 其余三档的用户不必为一次多余的
-  // 请求买单；读完缓存住，切到这一档不会再打网络
-  React.useEffect(() => { if (draft.mode === 'pool' && pool === null) loadPool() }, [draft.mode, pool, loadPool])
+  // 只有选中（或初始就是）引用池的那两档时才真正去读 —— 其余档的用户不必为一次
+  // 多余的请求买单；读完缓存住，切到这一档不会再打网络
+  React.useEffect(() => {
+    if ((draft.mode === 'pool' || draft.mode === 'rotate') && pool === null) loadPool()
+  }, [draft.mode, pool, loadPool])
+
+  /**
+   * 轮询档当前会用到哪些条目（与后端 `proxy_rotate::candidate_ids` 同口径：
+   * 「全部」= 池里启用的条目，顺序即池序；指定档 = 表单里选的那些）。
+   */
+  function rotateCandidateIds(): string[] {
+    if (draft.rotateAll) {
+      return (pool ?? []).filter(item => item.enabled !== false).map(item => item.id)
+    }
+    return [...draft.rotateIds]
+  }
 
   /** 用当前表单内容测试出口连通性 */
   async function test(): Promise<void> {
     if (testing) return
+    // 轮询档：逐条测候选（每条都走 testProxyPoolItem —— 结果会记进那条代理的
+    // 「上次测试」，与代理页那颗按钮同一个动作）。候选可能几十条，全测一遍是
+    // 几十次往返，所以只测前 ROTATE_TEST_LIMIT 条并把「还有几条没测」说出来；
+    // 只为看某一条通不通时，用「网络代理」页的行内「测试」更直接。
+    if (draft.mode === 'rotate') {
+      const ids = rotateCandidateIds()
+      if (!ids.length) {
+        toast(t('轮询至少要选择一条代理（或改选「全部」）'), 'err')
+        return
+      }
+      const targets = ids.slice(0, ROTATE_TEST_LIMIT)
+      setTesting(true)
+      setTestResult(t('正在连接上游…'))
+      let ok = 0
+      const failures: string[] = []
+      for (const id of targets) {
+        const name = pool?.find(item => item.id === id)?.name || id
+        try {
+          const data = await shared().workbuddyDesktop?.testProxyPoolItem?.(id)
+          if (data?.success) ok += 1
+          else failures.push(`${name}（${data?.error || t('连接失败')}）`)
+        } catch (error) {
+          failures.push(`${name}（${errorMessage(error)}）`)
+        }
+      }
+      const rest = ids.length - targets.length
+      const summary = t('✅ {ok}/{total} 个出口可用', { ok, total: targets.length })
+        + (rest > 0 ? t('（只测了前 {limit} 个，还有 {rest} 个未测）', { limit: ROTATE_TEST_LIMIT, rest }) : '')
+      setTestResult(
+        <span className={failures.length ? 'text-destructive' : 'text-success'}>
+          {summary}{failures.length ? `　${esc(failures.join(t('；')))}` : ''}
+        </span>,
+      )
+      setTesting(false)
+      return
+    }
     // 池引用：测的是**那条已保存的条目**（testProxyPoolItem 会把结果记进它的
     // 「上次测试」，与代理页那一颗按钮同一个动作）—— 未选条目时给出提示
     if (draft.mode === 'pool') {
@@ -271,6 +359,13 @@ export function ProxyForm({
         <Label className='inline-flex cursor-pointer items-center gap-2 font-normal'>
           <RadioGroupItem value='pool' />{t('已保存的代理')}
         </Label>
+        {/* 轮询档只对 OpenCode Zen 出现（见 allowRotate 的说明） */}
+        {allowRotate ? (
+          <Label className='inline-flex cursor-pointer items-center gap-2 font-normal'
+            title={t('逐请求轮换出口（换 IP）：OpenCode Zen 免费档按 IP 限流，单个 IP 的额度用完会对它一律 429')}>
+            <RadioGroupItem value='rotate' />{t('轮询（换 IP）')}
+          </Label>
+        ) : null}
         {/* Clash 直引档只对**已经是这种配置**的账号出现（见函数说明）：
             出口统一走代理池之后不再提供新建入口 */}
         {showClashMode ? (
@@ -315,7 +410,50 @@ export function ProxyForm({
                 ? t('正在读取代理列表…')
                 : pool.length
                   ? t('地址与端口由「网络代理」页管理：那边改一次、测一次，所有引用它的账号一起生效')
-                  : t('「网络代理」页还没有出口 —— 去那里新增，或点「同步 Clash Verge」把 Clash 的出口导进来')}
+                  : t('「网络代理」页还没有出口 —— 去那里新增，或在「订阅管理」里点「同步 Clash Verge」把 Clash 的出口导进来')}
+          </div>
+        </div>
+      ) : null}
+
+      {draft.mode === 'rotate' ? (
+        <div className='mt-3'>
+          {/* 「全部」是默认档：勾上 = 池里每个启用的出口轮流使用（新加的出口
+              自动进轮询，不必回来改这条账号）。取消勾选才出现多选。
+              这一行刻意**不走 .field-row**：账号设置弹窗里它的直接 label 子元素
+              会被 `.acct-dlg-main .field-row > label` 强制成 76px 定宽字段标签，
+              「全部代理节点（推荐）」比 76px 长，nowrap 溢出会压住后面的说明
+              （实测叠字）—— 所以用普通 flex 行，文案跟在复选框后面自然排 */}
+          <div className='flex flex-wrap items-center gap-x-2.5 gap-y-1'>
+            <Checkbox id={`${idPrefix}-rotate-all`} checked={draft.rotateAll}
+              aria-label={t('轮询全部代理节点')}
+              onCheckedChange={value => set({ rotateAll: value === true })} />
+            <label htmlFor={`${idPrefix}-rotate-all`} className='cursor-pointer text-xs text-subtle'>
+              {t('全部代理节点（推荐）')}
+            </label>
+            <span className='detail'>
+              {t('「网络代理」页里每个启用的出口轮流使用；之后新加的出口自动加入')}
+            </span>
+          </div>
+          {!draft.rotateAll ? (
+            <div className='field-row mt-2.5'>
+              <label htmlFor={`${idPrefix}-rotate-exits`}>{t('轮询的代理')}</label>
+              <MultiSelect id={`${idPrefix}-rotate-exits`}
+                value={draft.rotateIds}
+                onValueChange={values => set({ rotateIds: values.map(String) })}
+                options={(pool ?? []).map(item => ({ value: item.id, label: poolItemLabel(item) }))}
+                placeholder={t('选择要轮询的代理（可多选）')}
+                aria-label={t('轮询的代理')} />
+              <Button variant='outline' size='sm' onClick={() => loadPool(true)}>{t('重新读取')}</Button>
+            </div>
+          ) : null}
+          <div className='detail mt-1.5'>
+            {poolError
+              ? t('读取失败：{error}', { error: poolError })
+              : pool === null
+                ? t('正在读取代理列表…')
+                : pool.length
+                  ? t('每条请求换一个出口（按顺序轮流），上游看到的 IP 因此是变化的；出口的地址与端口由「网络代理」页管理')
+                  : t('「网络代理」页还没有出口 —— 去那里新增，或在「订阅管理」里点「同步 Clash Verge」把 Clash 的出口导进来')}
           </div>
         </div>
       ) : null}
@@ -361,7 +499,7 @@ export function ProxyForm({
           <p className='detail mt-1.5'>
             {t('这是既有配置（直接引用 Clash 出口，不经过代理池）。推荐改用上面的')}
             <b>{t('「已保存的代理」')}</b>
-            {t('：到「网络代理」页点「同步 Clash Verge」把出口导进池后即可选 —— 那样能集中测试、也能被多个账号共用。')}
+            {t('：到「网络代理」页的「订阅管理」里点「同步 Clash Verge」把出口导进池后即可选 —— 那样能集中测试、也能被多个账号共用。')}
           </p>
         </div>
       ) : null}
@@ -451,20 +589,20 @@ function PlanChannelField({
         </SelectTrigger>
         <SelectContent>
           <SelectItem value={ZCODE_PLAN_CODING}>
-            {t('编码套餐（Coding Plan）— 走开放平台端点，用自己订阅的额度')}
+            {t('编码套餐（Coding Plan）— 走开放平台端点，消耗开放平台的额度（订阅套餐 / 资源包 / 充值余额）')}
           </SelectItem>
           <SelectItem value={ZCODE_PLAN_START}>
-            {t('活动套餐（Start Plan）— 走官方活动端点，用活动里领到的额度')}
+            {t('套餐池（Start Plan）— 走 zcode.z.ai 端点，消耗 ZCode 套餐池的额度（新用户体验额度 / 活动领取）')}
           </SelectItem>
         </SelectContent>
       </Select>
       {plan === ZCODE_PLAN_START && !hasJwt ? (
         <span className='detail text-destructive'>
-          {t('该账号没有套餐登录态（jwt），活动套餐会失败：请重新登录该账号')}
+          {t('该账号没有套餐登录态（jwt），套餐池通道会失败：请重新登录该账号')}
         </span>
       ) : null}
       {plan === ZCODE_PLAN_START ? (
-        <span className='detail' title={t('活动套餐的推理端点要求每条请求带一个阿里云验证码令牌；令牌由本应用在后台静默铸造，界面关闭时无法铸造')}>
+        <span className='detail' title={t('套餐池的推理端点要求每条请求带一个阿里云验证码令牌；令牌由本应用在后台静默铸造，界面关闭时无法铸造')}>
           {t('验证码令牌：{counts}', { counts: pool ? `${pool.ready} / ${pool.target || 3}` : t('读取中…') })}
           {pool && pool.ready === 0 ? t('（库存为空，正在补；补不上时转发会失败）') : ''}
         </span>
@@ -656,6 +794,11 @@ export function AccountSettingsDialog({ id, onClose }: { id: string; onClose: ()
   // 「查询设置」段的草稿（自动查询间隔）：只在真的有余额概念的家渲染，草稿仍
   // 无条件初始化 —— 与 planChannel 同一形态，省一个条件分支
   const [usageDraft, setUsageDraft] = React.useState<UsageDraft>(() => usageDraftOf(account))
+  // 「查询设置」段里**余额方案要的凭证**（只有登记了方案的自定义家才有字段）：
+  // 草稿同样无条件初始化（没有方案时是一份空草稿，那一段也不渲染）
+  const [balanceQueryDraft, setBalanceQueryDraft] = React.useState<Record<string, string>>(
+    () => balanceQueryDraftOf(account?.balanceQuery),
+  )
   // 「限制器」段的草稿（余额 / Token 规则列表）：与查询设置同一 gating
   const [limiterDraft, setLimiterDraft] = React.useState<LimiterRule[]>(() => limiterDraftOf(account))
   // 分组导航的当前页（弹窗按账号 id 挂载，切账号自然回到「基本」）
@@ -702,6 +845,26 @@ export function AccountSettingsDialog({ id, onClose }: { id: string; onClose: ()
   // 自定义账号：凭证段（API Key / 无需鉴权）只对它渲染。判据用 provider 前缀 ——
   // 与后端 `custom_account_provider` 一致（提供商被删后残留的账号同样该能改凭证）
   const isCustomAccount = providerOf(target).startsWith('custom-')
+  // 「轮询」档的可见性：只有 OpenCode Zen 免费档（按 IP 限流）。判据用**已读到的
+  // 提供商记录**（上面那个 effect 拉的）而不是目录缓存 —— 这一段的上下文里就有它，
+  // 且与「提供商」段编辑的是同一份现值（改了 emulation / baseUrl 未保存时，
+  // 档位仍按盘上的值给，保存后才变 —— 与后端闸门读盘上记录同一口径）。
+  // 记录本来就是这个档时**恒显示**（哪怕判据此刻为假：目录还没读到 / 提供商被
+  // 改过）：否则用户看不到自己这条账号现在是什么状态；后端只挡「真的改成轮询」
+  // 的保存，原样发回来不会 400。
+  const allowRotate = isOpencodeZenProvider(provider, target.baseUrl) || proxyDraft.mode === 'rotate'
+  // 余额方案那一段（「查询设置」里的查询凭证）：方案与「已配置」标记都由账号的
+  // 公开形态回答 —— `scheme` 是这一家的方案 id，`has*` 是密字段的存在标记
+  // （值永不回显，见后端 `store_view::balance_query_public`）
+  const balanceSpec = balanceSpecOf(target.balanceQuery?.scheme)
+  const balanceConfigured: Record<string, boolean> = {}
+  for (const field of balanceSpec?.fields ?? []) {
+    balanceConfigured[field.key] = balanceFieldConfigured(target.balanceQuery, field)
+  }
+  // 「要填但还没填全」时给一句中性提示（不是错误：余额列会显示「未配置」，
+  // 用户在那一列看到的就是这句话的后果）
+  const balanceNeedsCredentials = Boolean(balanceSpec && balanceSpec.fields.length)
+    && !balanceQueryConfigured(target.balanceQuery)
 
   /** 清除余额凭证（立即落库，不走保存按钮 —— 它是一个独立的撤销动作） */
   async function clearBalanceToken(): Promise<void> {
@@ -731,6 +894,30 @@ export function AccountSettingsDialog({ id, onClose }: { id: string; onClose: ()
       await shared().workbuddyDesktop?.updateAccount?.(id, { apiKey: null })
       setApiKeyDraft('')
       toast(t('✅ 已清除 API Key（该账号现在没有凭证，转发会被跳过）'))
+      await shared().wbApp?.refresh?.()
+    } catch (error) {
+      toast(t('清除失败：{error}', { error: errorMessage(error) }), 'err')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
+   * 清除一个已配置的余额查询凭证字段（自定义家：NewAPI 的访问令牌 / 商汤的
+   * 密码 / 智谱的控制台令牌）。
+   *
+   * 与清除 API Key 同一形制：**立即落库的独立撤销动作**（不进保存按钮那一批）
+   * —— 密字段的值不回显，输入框留空是「不修改」，清除只能靠这个显式动作
+   * （传 null 给后端，语义见 `normalize_balance_query_patch`）。
+   * 清掉之后余额列会显示「未配置」，用户看得到后果。
+   */
+  async function clearBalanceQueryField(key: BalanceFieldKey): Promise<void> {
+    if (busy) return
+    setBusy(true)
+    try {
+      await shared().workbuddyDesktop?.updateAccount?.(id, { balanceQuery: { [key]: null } })
+      setBalanceQueryDraft(prev => ({ ...prev, [key]: '' }))
+      toast(t('✅ 已清除查询凭证'))
       await shared().wbApp?.refresh?.()
     } catch (error) {
       toast(t('清除失败：{error}', { error: errorMessage(error) }), 'err')
@@ -800,6 +987,9 @@ export function AccountSettingsDialog({ id, onClose }: { id: string; onClose: ()
     // 限制器段（余额 / Token 规则列表）：与查询设置同一层；编辑器保存时已校验过，
     // 这里只负责「真改了才带上」（对着现状保存不会凭空多一条变更日志，与后端一致）
     const limiterChanges = readLimiterChanges(target, limiterDraft)
+    // 查询凭证段（自定义家的余额方案）：按方案读草稿 —— 密字段留空 = 不修改，
+    // 非密字段原样提交（后端判无变化时不写日志）；这一家没有方案时恒 null
+    const balanceQueryPatch = readBalanceQueryChanges(target.balanceQuery?.scheme, balanceQueryDraft)
     // 凭证段（自定义账号）：与代理 / 套餐同一层，跟着这次保存一起落库
     // （它走的是 PATCH /api/accounts 的自定义分支，见后端 `update_custom_credentials`）
     const credentialPatch = readCredentialPatch() || {}
@@ -839,6 +1029,7 @@ export function AccountSettingsDialog({ id, onClose }: { id: string; onClose: ()
         ...planPatch,
         ...credentialPatch,
         ...concPatch,
+        ...(balanceQueryPatch ? { balanceQuery: balanceQueryPatch } : {}),
         ...(usageChanges && 'patch' in usageChanges ? usageChanges.patch : {}),
         ...(limiterChanges && 'patch' in limiterChanges ? limiterChanges.patch : {}),
       })
@@ -988,6 +1179,24 @@ export function AccountSettingsDialog({ id, onClose }: { id: string; onClose: ()
                     <h3>{t('查询设置')}</h3>
                     <p>{t('余额列读数的自动刷新；也是「限制器」余额规则的数据来源。')}</p>
                   </div>
+                  {/* 余额方案要的凭证（只有登记了方案的自定义家才有这一段；
+                      DeepSeek 这类不需要额外信息的家只有一行方案说明） */}
+                  {balanceSpec ? (
+                    <BalanceQuerySection
+                      spec={balanceSpec}
+                      values={balanceQueryDraft}
+                      configured={balanceConfigured}
+                      onValue={(key, next) => setBalanceQueryDraft(prev => ({ ...prev, [key]: next }))}
+                      onClear={key => void clearBalanceQueryField(key)}
+                      clearBusy={busy}
+                      idPrefix='account-balance-query'
+                    />
+                  ) : null}
+                  {balanceNeedsCredentials ? (
+                    <p className='detail mt-2.5 text-subtle'>
+                      {t('查询凭证还没配齐：填好后余额列才有读数，在此之前会显示「未配置」。')}
+                    </p>
+                  ) : null}
                   <UsageSettingsSection account={target} draft={usageDraft} onChange={setUsageDraft} />
                 </div>
               ) : null}
@@ -1010,7 +1219,8 @@ export function AccountSettingsDialog({ id, onClose }: { id: string; onClose: ()
                     <h3>{t('网络')}</h3>
                     <p>{t('这条账号访问上游走哪条线路。')}</p>
                   </div>
-                  <ProxyForm draft={proxyDraft} onChange={setProxyDraft} idPrefix='account-proxy' />
+                  <ProxyForm draft={proxyDraft} onChange={setProxyDraft} idPrefix='account-proxy'
+                    allowRotate={allowRotate} />
                   {account.proxy?.error ? (
                     <p className='detail text-destructive'>
                       {t('当前代理不可用：{error}（转发时会回退直连）', { error: account.proxy.error })}
@@ -1058,6 +1268,14 @@ function BatchDialog({ ids, action, onClose }: { ids: string[]; action: string; 
     (cap, account) => Math.max(cap, Number(providerFeatures(providerOf(account)).concurrencyDefault) || 0),
     0,
   )
+  /**
+   * 「轮询」档在批量里只在**选中的账号全是 OpenCode Zen** 时给出。
+   *
+   * 后端的闸门是逐账号判的（非 Zen 账号存轮询会 400，见 apply_patch），所以
+   * 混选时给出这一档等于让用户提交一次必然部分失败的批量操作。空选区不给
+   * （那时连账号是谁都还不知道，见 supportsProxyRotate 的说明）。
+   */
+  const allowRotate = accounts.length > 0 && accounts.every(account => supportsProxyRotate(account))
 
   /** 批量删除是不可逆操作，按数量做二次确认（原生 confirm 在 Tauri WebView 里直接放行） */
   function confirmBatchRemove(count: number): Promise<boolean> {
@@ -1171,7 +1389,8 @@ const verb = { enable: t('启用'), disable: t('禁用'), proxy: t('修改代理
             </RadioGroup>
             {current === 'proxy' ? (
               <div className='mt-2.5'>
-                <ProxyForm draft={proxyDraft} onChange={setProxyDraft} idPrefix='batch-proxy' />
+                <ProxyForm draft={proxyDraft} onChange={setProxyDraft} idPrefix='batch-proxy'
+                  allowRotate={allowRotate} />
               </div>
             ) : null}
             {current === 'concurrency' ? (

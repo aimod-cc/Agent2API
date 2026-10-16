@@ -194,6 +194,25 @@ fn read_api_key() -> Option<String> {
         .next()
 }
 
+/// 壳自己发管理请求时用的那把 Key —— 供**界面直连网关**时取用
+/// （`commands::direct_credentials` → 桥的 `directCredentials` → AI 助手页）。
+///
+/// ── 为什么界面需要它 ────────────────────────────────────────
+/// 助手页为了流式对话直接 fetch 网关、不走桥（见 ui-islands 的
+/// `assistant-state.ts`）。桌面形态下页面来自 Tauri 自定义协议、网关在
+/// `127.0.0.1:{port}`：跨源且不带 cookie，于是那条请求里一个凭证都没有 ——
+/// 面板认证开启后（设置页开过局域网访问就会注册管理员，见
+/// `commands::panel_register`）会被 401 `panel_login_required` 挡下。
+/// 桥的其它方法不受影响，正是因为壳统一给它们补了这把 Key（见
+/// [`request_builder`]）；这里把**同一把**交给页面，两种通道的凭证口径才
+/// 一致，不会出现「壳能操作、助手页连配置都读不到」。
+///
+/// 不动面板认证本身：桌面与 headless 共用一套准入判定（见
+/// `server::access` 的模块头），这里只是让直连那条通道也带上凭证。
+pub fn management_key() -> Option<String> {
+    read_api_key()
+}
+
 fn client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(Duration::from_millis(REQUEST_TIMEOUT_MS))

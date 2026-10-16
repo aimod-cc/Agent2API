@@ -4,7 +4,7 @@
 //!   GET  /v2/activity/workbuddy/banner    运营 banner（需客户端白名单头）
 //!   GET  /v2/activity/ambassador/status    大使状态
 //!   签到 + 查余额的组合动作（"签到并回报最新积分"）
-//!   WorkBuddy 国际版的每日活跃任务（探测 → 条件领取 → 免费模型保活）
+//!   WorkBuddy 国际版的每日活跃任务（探测 → 条件领取 → 免费模型保活 + 网页会话）
 //!
 //! 从 billing/mod.rs 拆出（单文件行数约定）。banner / ambassador **吞掉所有错误
 //! 返回 null**（装饰性内容，拉不到不该让首屏报错）；组合动作里的签到失败则收敛成
@@ -274,7 +274,7 @@ impl BillingService {
 
     // ─── WorkBuddy 国际版：每日活跃任务 ─────────────────────
 
-    /// 国际版每日活跃任务：活动探测 → 条件领取 → 免费模型保活。
+    /// 国际版每日活跃任务：活动探测 → 条件领取 → 免费模型保活 → 网页会话。
     ///
     /// [`WorkbuddyActivity`] 决定这次跑到哪一步 —— 界面上「保活 / 领取 /
     /// 保活+领取」三颗按钮各对应一种粒度；**定时与批量签到恒走 [`WorkbuddyActivity::Full`]**
@@ -291,24 +291,40 @@ impl BillingService {
     ///     `alreadyCompleted`（上游幂等，但少一发是一发），活动没开就不打领取。
     ///
     /// 保活的模型链来自 `keepalive::models()`（签到中心可自定义，空回落缺省链），
-    /// 逐个尝试、第一个成功的收口（见 `poke_daily_activity`）。
+    /// 逐个尝试、第一个成功的收口（见 `poke_daily_activity` 与
+    /// `create_web_conversation`）。
     pub async fn workbuddy_daily_activity(&self, session: &Value, mode: WorkbuddyActivity) -> Value {
         // 只保活：跳过探测与领取。活动状态没查过，读数给 **null** 而不是 false
         // —— 「没查」与「查了说没开」是两回事；前端只认 `pokeSucceeded`。
-        // 保活的核心是活跃上报（点亮连登的那条 /v2/report 通道），保活对话
-        // 只是补充 —— 两者都做，读数分别透出。
+        // 保活三件事：活跃上报（点亮连登的那条 /v2/report 通道）、桌面端
+        // 免费模型对话（维持「账号有调用」）、网页通道会话（issue #277：
+        // **每日活跃计数只认它**）—— 全都做，读数分别透出。
         if mode == WorkbuddyActivity::Keepalive {
             let report = self.report_chat_activity(session).await;
             let (poke_succeeded, poke_model) = self.poke_daily_activity(session).await;
-            if !poke_succeeded {
-                logging::verbose("[Checkin]", "WorkBuddy 国际版免费模型活跃保活未成功");
+            let web = self.create_web_conversation(session).await;
+            let web_ok = web.get("succeeded").and_then(Value::as_bool) == Some(true);
+            if !poke_succeeded && !web_ok {
+                logging::verbose("[Checkin]", "WorkBuddy 国际版免费模型与网页会话保活均未成功");
             }
+            // msg 交代两发保活各自的走向：网页会话才是「当日活跃」的判定
+            // 通道，桌面端那发失败不致命，网页会话失败要给出原因。
+            let msg = if web_ok {
+                "活跃保活完成（网页会话已建）".to_string()
+            } else if poke_succeeded {
+                format!(
+                    "免费模型保活完成，但网页会话失败：{}",
+                    web.get("msg").and_then(Value::as_str).unwrap_or("未知原因")
+                )
+            } else {
+                "活跃保活失败".to_string()
+            };
             return json!({
                 "status": Value::Null,
                 "claim": {
                     "success": false,
                     "code": 0,
-                    "msg": if poke_succeeded { "活跃保活完成" } else { "活跃保活失败" },
+                    "msg": msg,
                 },
                 "activity": {
                     "mode": mode.as_str(),
@@ -318,6 +334,7 @@ impl BillingService {
                     "report": report,
                     "pokeSucceeded": poke_succeeded,
                     "pokeModel": poke_model,
+                    "webConversation": web,
                 },
             });
         }
@@ -432,30 +449,43 @@ impl BillingService {
 
         // 保活只在完整模式做：「只领取」的用户明确不多打这次对话。
         // pokeSucceeded 是 bool | null —— null = 这次没跑保活（不是失败）。
-        let (poke_succeeded, poke_model) = if mode == WorkbuddyActivity::Full {
+        // 网页会话与保活对话同一档粒度（都是「保活」的一部分，issue #277），
+        // 只在 Full 跑；它的成败不影响 claim（那是探测/领取的事），只透出读数。
+        let (poke_succeeded, poke_model, web) = if mode == WorkbuddyActivity::Full {
             let (succeeded, model) = self.poke_daily_activity(session).await;
             if !succeeded {
                 logging::verbose("[Checkin]", "WorkBuddy 国际版免费模型活跃保活未成功");
             }
-            (Value::Bool(succeeded), model.map(Value::String).unwrap_or(Value::Null))
+            let web = self.create_web_conversation(session).await;
+            if web.get("succeeded").and_then(Value::as_bool) != Some(true) {
+                logging::verbose("[Checkin]", "WorkBuddy 国际版网页会话保活未成功");
+            }
+            (
+                Value::Bool(succeeded),
+                model.map(Value::String).unwrap_or(Value::Null),
+                web,
+            )
         } else {
-            (Value::Null, Value::Null)
+            (Value::Null, Value::Null, Value::Null)
         };
+        let web_ok = web.get("succeeded").and_then(Value::as_bool) == Some(true);
 
         // 领取没有明确的成功/已领读数时，msg 给出这一轮**实际发生**的事。
         // ⚠️ 完整模式里「上报 + 保活成功」必须把「活动未开启」说在同一句里：
         // 能走到这里的分支必然 !active（活动没开放），只写「已完成活跃上报」
         // 会让人以为积分该加没加 —— 两个事实都交代，提示才不会自相矛盾。
+        // 保活完成 = 两发任一建成（网页会话是「当日活跃」的判定通道，桌面端
+        // 对话维持「账号有调用」，互补而非冗余）。
         // 「只领取」模式没有保活可讲，msg 保留探测/领取的原话（活动未开启 /
         // 具体错误），那正是这颗按钮唯一要回答的问题。
         if mode == WorkbuddyActivity::Full && !claim_succeeded && !today_checked_in && !active {
             let report_ok = report.get("succeeded").and_then(Value::as_bool) == Some(true);
             let poke = poke_succeeded.as_bool().unwrap_or(false);
-            claim["msg"] = Value::String(if report_ok && poke {
-                "已完成活跃上报（连登已点亮），但活动未开启（本次没有可领的奖励）".to_string()
+            claim["msg"] = Value::String(if report_ok && (poke || web_ok) {
+                "已完成活跃上报（连登已点亮）与保活，但活动未开启（本次没有可领的奖励）".to_string()
             } else if report_ok {
                 "活跃上报完成，但保活未成功且活动未开启".to_string()
-            } else if poke {
+            } else if poke || web_ok {
                 "活跃保活完成，但活跃上报失败且活动未开启".to_string()
             } else {
                 "活跃上报与保活均未成功，且活动未开启".to_string()
@@ -473,6 +503,7 @@ impl BillingService {
                 "report": report,
                 "pokeSucceeded": poke_succeeded,
                 "pokeModel": poke_model,
+                "webConversation": web,
             },
         })
     }
@@ -691,6 +722,140 @@ impl BillingService {
         }
         (false, None)
     }
+
+    /// 网页通道建一个带 prompt 的 agent 会话（issue #277 的修复主体）。
+    ///
+    /// 国际版上游把「当日活跃」（每日 30 积分的判定）记在网页通道的会话上：
+    /// 参考实现 workbuddy2api-hub 的抓包结论 —— `POST /console/as/conversations/`
+    /// 建会话即计活跃，桌面端 `chat/completions` 与 `/v2/report` 上报都**不进
+    /// 这个计数**（后者只点亮成长中心连登）。网页链路只认 Bearer + X-User-Id
+    /// 两个头（见 `keepalive::build_web_conversation_request`），同一份账号
+    /// 凭据直接可用，无需网页登录。
+    ///
+    /// 模型沿用 `keepalive::models()`（与桌面端保活同一份免费链）逐个尝试，
+    /// 第一个建成的收口；成功判定沿用参考实现口径 —— 响应 `code ∈ {0, 缺失}`
+    /// 且 `data.id` 存在。HTTP 非 2xx / 业务码非 0 / 建不出会话换下一个模型，
+    /// 全部失败收敛为 `succeeded:false`，不阻断领取分支。请求与读体各自限时
+    /// （保活挂在批量签到的串行链上，一个挂住的模型不能把整轮拖住）；响应是
+    /// 一次性 JSON，读满 `MAX_WEB_BYTES` 即截断（上游正常响应远小于上限）。
+    ///
+    /// 返回 `{succeeded: bool, conversationId: string|null, msg: string}`，
+    /// 原样进 `activity.webConversation` 给前端与台账读。
+    async fn create_web_conversation(&self, session: &Value) -> Value {
+        const TIMEOUT_MS: u64 = 20_000;
+        const MAX_WEB_BYTES: usize = 1 << 16;
+        for model in super::keepalive::models() {
+            let plan = match crate::server::core::providers::workbuddy::keepalive::build_web_conversation_request(
+                session, &model,
+            ) {
+                Ok(plan) => plan,
+                // 构造失败是凭据层面的缺失（缺 token / uid），换模型也救不了，直接收口
+                Err(error) => {
+                    logging::verbose(
+                        "[Checkin]",
+                        &format!("WorkBuddy 国际版网页会话请求构造失败: {error}"),
+                    );
+                    return json!({ "succeeded": false, "conversationId": Value::Null, "msg": error });
+                }
+            };
+            let response = match tokio::time::timeout(
+                std::time::Duration::from_millis(TIMEOUT_MS),
+                crate::server::core::upstream::request::send_chat_request(&plan),
+            )
+            .await
+            {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) => {
+                    logging::verbose(
+                        "[Checkin]",
+                        &format!(
+                            "WorkBuddy 国际版网页会话（{model}）请求失败: {}",
+                            error.message
+                        ),
+                    );
+                    continue;
+                }
+                Err(_) => {
+                    logging::verbose(
+                        "[Checkin]",
+                        &format!("WorkBuddy 国际版网页会话（{model}）请求超时"),
+                    );
+                    continue;
+                }
+            };
+            let status = response.status();
+            if !(200..300).contains(&status.as_u16()) {
+                logging::verbose(
+                    "[Checkin]",
+                    &format!(
+                        "WorkBuddy 国际版网页会话（{model}）返回 HTTP {}",
+                        status.as_u16()
+                    ),
+                );
+                continue;
+            }
+            let body = match tokio::time::timeout(
+                std::time::Duration::from_millis(TIMEOUT_MS),
+                consume_response_bytes(response, MAX_WEB_BYTES),
+            )
+            .await
+            {
+                Ok(Ok(body)) => body,
+                _ => {
+                    logging::verbose(
+                        "[Checkin]",
+                        &format!("WorkBuddy 国际版网页会话（{model}）响应读取失败"),
+                    );
+                    continue;
+                }
+            };
+            let payload: Value = match serde_json::from_slice(&body) {
+                Ok(value) => value,
+                Err(error) => {
+                    logging::verbose(
+                        "[Checkin]",
+                        &format!("WorkBuddy 国际版网页会话（{model}）响应不是 JSON: {error}"),
+                    );
+                    continue;
+                }
+            };
+            // 参考实现的判定口径：code 缺失 / null / 0 都算业务成功（其余是失败）
+            let code_ok = match payload.get("code") {
+                None | Some(Value::Null) => true,
+                Some(code) => code.as_i64() == Some(0),
+            };
+            let conversation_id = payload
+                .get("data")
+                .and_then(|data| data.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if !code_ok || conversation_id.is_empty() {
+                let msg = payload.get("msg").and_then(Value::as_str).unwrap_or("未知原因");
+                logging::verbose(
+                    "[Checkin]",
+                    &format!(
+                        "WorkBuddy 国际版网页会话（{model}）未建成: msg={msg}"
+                    ),
+                );
+                continue;
+            }
+            logging::verbose(
+                "[Checkin]",
+                &format!("WorkBuddy 国际版网页会话建成（model={model}）"),
+            );
+            return json!({
+                "succeeded": true,
+                "conversationId": conversation_id,
+                "model": model,
+                "msg": "网页会话已创建",
+            });
+        }
+        json!({
+            "succeeded": false,
+            "conversationId": Value::Null,
+            "msg": "网页会话创建失败（模型链全部未建成）",
+        })
+    }
 }
 
 /// 国际版活跃探测响应归一化为管理 API 能直接消费的形态。
@@ -730,16 +895,29 @@ async fn consume_activity_response(
     response: reqwest::Response,
     max_bytes: usize,
 ) -> Result<bool, ()> {
+    consume_response_bytes(response, max_bytes).await.map(|_| true)
+}
+
+/// 有界读体：最多读 `max_bytes`（超出即截断返回），网络层断流返回 Err。
+///
+/// SSE 那路只求「读过了」，JSON 那路（网页会话）要拿到完整字节去解析 ——
+/// 同一条纪律：响应体必须**读**（不读的请求上游可能没记活跃），但绝不无界缓冲。
+async fn consume_response_bytes(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ()> {
     use futures::StreamExt;
 
     let mut stream = response.bytes_stream();
-    let mut consumed = 0usize;
+    let mut body: Vec<u8> = Vec::new();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| ())?;
-        consumed = consumed.saturating_add(chunk.len());
-        if consumed >= max_bytes {
-            return Ok(true);
+        let remaining = max_bytes - body.len();
+        let take = chunk.len().min(remaining);
+        body.extend_from_slice(&chunk[..take]);
+        if body.len() >= max_bytes {
+            return Ok(body);
         }
     }
-    Ok(true)
+    Ok(body)
 }

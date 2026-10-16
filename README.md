@@ -1,55 +1,93 @@
-# Agent2API · 多提供商本地网关
+<div align="center">
 
-**简体中文** | [English](./README.en.md) | [繁體中文](./README.zh-Hant.md) | [日本語](./README.ja.md) | [한국어](./README.ko.md) | [Português (BR)](./README.pt-BR.md)
+# Agent2API
 
-把多家 AI 桌面客户端的登录态变成一个本地 **OpenAI 兼容 API 网关**：统一暴露一个 `base_url`，带多账号管理、模型管理、出网代理与请求报表，并附一个开箱即用的 Tauri 桌面端。任何支持自定义 `base_url` 的 OpenAI 客户端都能以 `http://127.0.0.1:3065/v1` 调用这几家的模型额度 —— 不需要上游 API Key，不需要改客户端。
+**把多家 AI 桌面客户端的登录态，变成一个本地 OpenAI 兼容 API 网关**
+
+[简体中文](./README.md) | [English](./docs/README.en.md) | [繁體中文](./docs/README.zh-Hant.md) | [日本語](./docs/README.ja.md) | [한국어](./docs/README.ko.md) | [Português (BR)](./docs/README.pt-BR.md)
+
+[![license](https://img.shields.io/badge/license-MIT%20%2B%20附加声明-green)](./LICENSE)
+[![release](https://img.shields.io/github/v/release/aimod-cc/agent2api?include_prereleases)](https://github.com/aimod-cc/agent2api/releases/latest)
+[![docker pulls](https://img.shields.io/docker/pulls/aimodcc/agent2api)](https://hub.docker.com/r/aimodcc/agent2api)
+[![stars](https://img.shields.io/github/stars/aimod-cc/agent2api?style=flat&color=yellow)](https://github.com/aimod-cc/agent2api/stargazers)
+[![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Docker-blue)](https://github.com/aimod-cc/agent2api/releases/latest)
+
+[✨ 核心特性](#-核心特性) • [💬 社区与支持](#-社区与支持) • [🤝 支持的提供商](#-支持的提供商) • [🚀 快速开始](#-快速开始) • [🐳 Docker 部署](#-docker-部署) • [📸 界面预览](#-界面预览) • [🔧 开发与构建](#-开发与构建) • [📜 使用声明](#-使用声明)
+
+</div>
+
+---
+
+Agent2API 把多家 AI 桌面客户端里已登录的账号接到一起，共用一套 OpenAI 兼容接口。任何支持自定义 `base_url` 的客户端，填上 `http://127.0.0.1:3065/v1` 就能直接调用这些账号的模型额度 —— **不需要上游 API Key，也不需要改客户端**。
+
+## ✨ 核心特性
+
+- 🔌 **OpenAI 兼容** —— 客户端填个 `base_url` 就能用，Chat / Responses / Messages 三种协议都支持
+- 🏪 **内置 17 家提供商** —— WorkBuddy、小浣熊、CatPaw、Qoder、Trae 等开箱即用，也支持自定义提供商
+- 🔁 **凭证自动续期** —— Token 到期自动换新，临期凭证可批量刷新，模型目录也不会过期
+- 🪂 **多账号轮转** —— 按优先级排队，429 自动换账号，限额冷却期内不空等
+- 🛡️ **出网代理** —— 每个账号可配独立出口，出站指纹按官方客户端伪装
+- 🔑 **网关安全** —— 多把网关 Key 可分权、登录有人机验证，没配 Key 时默认拒绝请求
+- 📊 **请求报表** —— 请求量、成功率、Token 消耗一览，还有缓存命中率与 365 天热力图
+- ⏰ **定时任务** —— 自动签到、凭证维护、模型目录刷新，开关与间隔在一页里管理
+- 💰 **余额与用量** —— 账号行内直接看余额与用量，支持跨账号并发查询
+- 🖥️ **两种部署** —— 桌面端托盘常驻、免装 Node；Docker 版面板与网关同端口，界面六语
+
+## ❤️ 赞助商
+
+<a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><img src="assets/sponsor-proxylane.png" alt="ProxyLane（赞助位）" width="100%" /></a>
+
+<table>
+
+<tr>
+<td width="240"><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/proxylane-logo-for-dark-bg.png" /><img src="assets/proxylane-logo-for-light-bg.png" alt="ProxyLane" width="220" /></picture></a></td>
+<td>感谢 <a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme">ProxyLane</a> 赞助了本项目！ProxyLane 提供 AI 账号专用的原生静态住宅 IP（Static Residential ISP）：IP 来自真实家庭宽带运营商，Scamalytics 低欺诈评分，每个 IP 独享，不限流量，$3.90 起。在「网络代理」页给每个账号配一个出口即可。首次购买使用优惠码 <code>AGENT2API25</code> 享 75 折。</td>
+</tr>
+
+</table>
+
+## 💬 社区与支持
+
+- **QQ 群**：Agent2API 交流群，群号 `1127656296` —— 在 QQ 里搜索群号即可加入，使用答疑与问题反馈都在这里。
+- **💖 赞赏**：如果 Agent2API 帮到了你，欢迎[请作者喝杯咖啡](docs/SPONSOR.md)；赞赏完全自愿，不解锁任何功能。
+- **🤝 赞助 / 商务合作**：想赞助本项目，或想让你的产品出现在这里？发邮件到 [541675139@qq.com](mailto:541675139@qq.com)。
+
+## 🤝 支持的提供商
 
 支持情况一览（✓ 支持 · ✗ 不支持 · — 无此概念）：
 
 | 平台 | LLM 请求 | Token 自动续期 | 模型列表 | 余额查询 | 签到 | 领取类 |
 | --- | :--: | :--: | :--: | :--: | :--: | :--: |
-| WorkBuddy 国内版 | ✓ | ✓ | ✓ 远程 + 静态兜底 | ✓ | ✓ 每日签到 | — |
-| WorkBuddy 国际版 | ✓ | ✓ | ✓ 远程 + 静态兜底 | ✓ | ✗ 无签到活动 | — |
-| 小浣熊 | ✓ | ✓ | ✓ 远程 + 静态兜底 | ✓ | ✓ 桌面登录积分 | — |
-| CatPaw | ✓ | ✗ 无刷新机制 | ✓ 远程 + 静态兜底 | ✓ | ✗ | — |
-| AutoClaw（国内版 / 国际版） | ✓ | ✓ | ✓ 远程 + 静态兜底 | ✓ | ✓ 每日签到 | — |
-| Qoder | ✓ | ✓ | ✓ 远程（按地区）+ 静态兜底 | ✓ | ✓ 仅中国版 | — |
-| Cline（Free / Pass） | ✓ | ✓ | ✓ 远程 + 静态兜底 | ✓ | — | — |
-| Accio（国际版 / 国内版） | ✓ | ✓ | ✓ 远程 + 静态兜底 | ✓ 用量百分比 | — | — |
-| ZCode（国内版 / 国际版） | ✓ | ✗ | ✗ 静态表 | ✓ 套餐余额 | — | ✓ 限时套餐（手动） |
-| CodeArts | ✓ | ✓ 一次性轮换 | ✓ 远程（三源合并） | ✓ 两份账 | — | ✓ 每日福利（手动） |
-| Trae | ✓ | ✓ 一次一换 | ✓ 仅远程 | ✓ 两份账 | — | — |
-| Loomy（讯飞） | ✓ | ✗ 无续期接口 | ✓ 仅远程 | ✓ 两份积分账 | ✓ 每日赠送积分刷新 | — |
-| KukuAI（百度文库） | ✓ | ✗ 无续期接口 | ✓ 远程 + 静态兜底 | ✓ 积分余额 | ✓ 每日签到（免费积分） | — |
-| MonkeyCode（长亭科技，国内版 / 国际版） | ✓ | ✗ 无续期接口 | ✓ 仅远程 | — | — | — |
-| Command Code | ✓ | ✗ 静态 API Key | ✓ 远程 + 静态兜底 | — | — | — |
-| Antigravity（Google，Gemini） | ✓ | ✓ | ✓ 远程 + 静态兜底 | — | — | — |
-| OfficeAce（华为云果办 / OfficeClaw） | ✓ | ✓ 控制面自动续期 | ✓ 仅远程 | ✓ 积分余额 | ✓ 每日奖励（签到 + 新人礼） | — |
-| 自定义提供商 | ✓ Chat 透传 / Responses / Anthropic | — | ✓ 手动登记 + 服务端拉取 | — | — | — |
+| WorkBuddy 国内版 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| WorkBuddy 国际版 | ✓ | ✓ | ✓ | ✓ | ✗ | — |
+| 小浣熊 | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| CatPaw | ✓ | ✗ | ✓ | ✓ | ✗ | — |
+| AutoClaw（国内版 / 国际版） | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| Qoder | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| Cline（Free / Pass） | ✓ | ✓ | ✓ | ✓ | — | — |
+| Accio（国际版 / 国内版） | ✓ | ✓ | ✓ | ✓ | — | — |
+| ZCode（国内版 / 国际版） | ✓ | ✗ | ✗ | ✓ | — | ✓ |
+| CodeArts | ✓ | ✓ | ✓ | ✓ | — | ✓ |
+| Trae | ✓ | ✓ | ✓ | ✓ | — | — |
+| Loomy（讯飞） | ✓ | ✗ | ✓ | ✓ | ✓ | — |
+| KukuAI（百度文库） | ✓ | ✗ | ✓ | ✓ | ✓ | — |
+| MonkeyCode（长亭科技，国内版 / 国际版） | ✓ | ✗ | ✓ | — | — | — |
+| Command Code | ✓ | ✗ | ✓ | — | — | — |
+| Antigravity（Google，Gemini） | ✓ | ✓ | ✓ | — | — | — |
+| OfficeAce（华为云果办 / OfficeClaw） | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| 自定义提供商 | ✓ | — | ✓ | — | — | — |
+
+> 注：模型列表的 ✓ 表示支持在线自动拉取，部分平台另有内置静态表兜底；ZCode 仅有内置静态表。Token 续期列 ✗ 表示该平台没有可用的续期接口（账号在有效期内不受影响）。Qoder 签到仅中国版可用。
 
 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`（含 `count_tokens`）与 `/v1/models` 对所有平台一视同仁；模型映射、全局优先级队列、429 降级、出网代理、出站指纹脱敏与请求报表同样全平台通用。
 
-> **本项目仅供学习与交流使用。** 它以非官方客户端形态复用你自己账号的登录态，可能不符合上游服务的使用条款，风险（含账号被风控、封禁）自负；禁止商用或绕过计费。详见[使用声明](#使用声明)与 [LICENSE](./LICENSE)。
+> **本项目仅供学习与交流使用。** 它以非官方客户端形态复用你自己账号的登录态，可能不符合上游服务的使用条款，风险（含账号被风控、封禁）自负；禁止商用或绕过计费。详见[使用声明](#-使用声明)与 [LICENSE](./LICENSE)。
 >
-> 本项目与各上游厂商及其官方产品均无关（名单见[使用声明](#使用声明)）；接口形态来自对各家客户端通信的观察，上游随时可能调整。
+> 本项目与各上游厂商及其官方产品均无关（名单见[使用声明](#-使用声明)）；接口形态来自对各家客户端通信的观察，上游随时可能调整。
 
----
+## 🚀 快速开始
 
-## 目录
-
-- [快速开始](#快速开始)
-- [Docker 部署](#docker-部署)
-- [界面预览](#界面预览)
-- [项目结构](#项目结构)
-- [开发与构建](#开发与构建)
-- [使用声明](#使用声明)
-- [许可](#许可)
-
----
-
-## 快速开始
-
-从 Releases 下载安装包（NSIS，简体中文，默认装到 `C:\Program Files\Agent2API`，安装时需要管理员授权），安装后启动即可，**无需安装 Node 或任何其它运行时**。
+从 [Releases](https://github.com/aimod-cc/agent2api/releases/latest) 下载安装包（NSIS，简体中文，默认装到 `C:\Program Files\Agent2API`，安装时需要管理员授权），安装后启动即可，**无需安装 Node 或任何其它运行时**。
 
 1. 首次启动即在应用进程内启动本机网关（端口 3065）并打开主窗口；若检测到旧版本的数据目录或数据文件，会弹窗提示迁移，按指引操作即可。
 2. 点「账号」页的「添加账号」，选提供商后按弹窗提示完成登录或填写凭证即可（方式以弹窗为准：网页登录 / 手机验证码 / 粘贴凭证 / 导入本机登录态）。
@@ -89,9 +127,7 @@ print(resp.choices[0].message.content)
 
 默认只监听 `127.0.0.1`。开启「设置 → 通用 → 局域网访问」后改听所有网卡，局域网设备把 API 地址指向本机 IP 即可共用（界面会给出完整地址）。出于安全，开启前必须注册面板管理员：管理接口要求管理员会话或网关 Key，无可用 Key 时转发接口同样拒绝服务（开启流程会自动补一把「默认」Key）；也可选择同时开放网页面板（默认关闭）。改动重启生效。
 
----
-
-## Docker 部署
+## 🐳 Docker 部署
 
 ```bash
 docker run -d --name agent2api --restart unless-stopped \
@@ -129,45 +165,21 @@ services:
 
 从源码构建：克隆本仓库后 `docker compose up -d --build`（镜像里只有网关与面板，不含 Rust 工具链）。
 
-### 升级
-
-**面板里直接升**：设置 → 软件更新 → 检查更新，发现新版本后点「下载并更新」，包下完再点「安装并重启」。服务端会校验 sha256，替换容器内的可执行文件与界面文件，然后重启进程 —— 容器由 `restart: unless-stopped` 拉起（同一个容器，数据卷不动），页面几秒后自动刷新。想退回上一版，面板上有「回滚到上一版本」（用的是更新时留下的备份）。
-
-三点需要知道：
-
-- **更新的是容器里的文件，不是你本地的镜像**：compose 里的 `image:` 标签不会变，`docker inspect` 仍显示旧 tag；之后再 `docker compose pull && docker compose up -d`（重建容器）会回到镜像里的版本。想让两边一致，升级后顺手把 compose 里的标签改成新版本号，再 `docker compose pull && up -d` 一次即可。
-- 更新入口只在容器里出现（`AGENT2API_SELF_UPDATE=1`，镜像默认已设）；置 `0` 就退回下面的手动方式。
-- 包来自 GitHub Release（`agent2api-server-linux-<arch>.tar.gz` + 同名 `.sha256`）。下载走「更新设置」里配的出网线路（与检查更新共用），国内直连不畅时可在那里指定代理或填 GitHub 令牌。
-
-**手动升级**（任何部署形态都适用）：
-
-```bash
-# compose（用仓库里那份 compose 时）
-docker compose pull && docker compose up -d
-
-# docker run：拉新镜像后重建容器（数据都在 ./data 卷里，不会丢）
-docker pull aimodcc/agent2api:latest
-docker rm -f agent2api
-# 再执行一遍上面「docker run」那段原始命令
-```
-
-从源码构建的：`git pull && docker compose up -d --build`。
-
 **网页端功能差异**（源于「没有本机桌面客户端」）：网页登录（WorkBuddy / Qoder / Cline）、手机验证码、粘贴凭证完全可用；需要本机回调的网页登录（AutoClaw / CatPaw / Accio / CodeArts / Trae）与「导入本机登录态」不可用，请改用粘贴凭证。
 
----
-
-## 界面预览
+## 📸 界面预览
 
 ### 账号
 
-全部账号排在同一条队列里（左起第二列是优先级），可逐条启停；限额冷却、有效期与余额都在行内显示，余额不足默认按阈值跳过。
-
 ![账号管理页：全局队列、按模型限额冷却、有效期与余额](./assets/screenshots/accounts.png)
 
-添加账号先选提供商再登录；同一家可保存多版账号（如 WorkBuddy 国内 / 国际版）：
+添加账号：
 
 ![添加账号：选择提供商与版本，然后走网页登录](./assets/screenshots/add-account.png)
+
+### 模型管理
+
+![模型管理页：按提供商查看模型清单、倍率、上下文与映射](./assets/screenshots/models.png)
 
 ### 报表
 
@@ -179,165 +191,11 @@ docker rm -f agent2api
 
 ![报表趋势：缓存命中率与 Token 消耗双轴趋势、按天 Token 柱状图](./assets/screenshots/report-trends.png)
 
-### 定时任务
+### 签到中心
 
-后台任务统一在这一页（开关 / 间隔 / 上次结果 / 立即执行）；清单存在 `~/.agent2api/config.json` 的 `scheduledTasks`，改动即时生效。
+![签到中心页：签到总览与每日签到分组](./assets/screenshots/checkin-center.png)
 
-![定时任务页：自动签到、凭证维护、模型目录刷新等后台任务的开关与间隔](./assets/screenshots/scheduled-tasks.png)
-
----
-
-## 项目结构
-
-后端是 `src-tauri/` 下的 Rust 进程内 HTTP 服务器，前端是 `ui/` 下的原生 HTML/CSS/JS。
-
-<details>
-<summary>完整目录树（点开）</summary>
-
-```
-agent2api/
-├─ desktop-tauri/
-│  ├─ src-tauri/
-│  │  ├─ server/                 网关本体 crate（agent2api-server，独立编译：
-│  │  │                          桌面端与 headless 二进制共用；src/server/ 下
-│  │  │                          的实现与 bin/agent2api-server.rs 无 GUI 依赖）
-│  │  │  ├─ mod.rs               服务组装：ServerState、启动、停机、启动迁移
-│  │  │  ├─ http.rs              路由表、CORS、API Key 中间件、body 限制、headless 静态托管
-│  │  │  ├─ config.rs / logging.rs / logs_store.rs / errors.rs
-│  │  │  ├─ config_migration.rs  1.x 配置目录迁移（~/.workbuddy-proxy → ~/.agent2api，启动第一步）
-│  │  │  ├─ request_stats.rs + request_stats/   统计的时钟窗口、写入、聚合与裁剪
-│  │  │  ├─ core/
-│  │  │  │  ├─ providers/        ★ 多提供商层（本改造的核心）
-│  │  │  │  │  ├─ mod.rs        ProviderKind（内置各家；Cline 按额度池拆两池、Accio 与
-│  │  │  │  │  │                ZCode 按地区拆两地）+ PROVIDERS 注册表 + id 互查
-│  │  │  │  │  ├─ adapter.rs    ProviderAdapter trait + adapter_for + implemented_kinds
-│  │  │  │  │  ├─ router.rs     模型名 → 候选 provider 集合（聚合目录）
-│  │  │  │  │  ├─ catalog.rs    聚合模型目录（清单合并 / 同名去重 / 可用性判定）
-│  │  │  │  │  ├─ catalog_cache.rs  各家远程清单的持久化缓存（重启后读回，不再回落到内置清单）
-│  │  │  │  │  ├─ refresh_flight.rs  凭证刷新的单飞去重
-│  │  │  │  │  ├─ workbuddy.rs  WorkBuddy 适配器（头集合 / system 注入 / 6004 / 11-128）
-│  │  │  │  │  ├─ raccoon/      小浣熊：mod / models / credentials / jwt / oauth / balance
-│  │  │  │  │  ├─ catpaw/       CatPaw：adapter（is_stateful）/ conversation（轮次状态机）/
-│  │  │  │  │  │                turn_executor / prepare / decision（轮次判定）/ fingerprint /
-│  │  │  │  │  │                registry/（会话注册表：表与句柄 / 账号身份 / 作废）/
-│  │  │  │  │  │                messages / blocks / tools / openai（翻译层）/
-│  │  │  │  │  │                upstream_http / image_compress / models / credentials / balance
-│  │  │  │  │  ├─ autoclaw/     智谱 autoglm（国内版 + 国际版两家）：region（两地域名与身份）/
-│  │  │  │  │  │                adapter / credentials / refresh / crypto / models /
-│  │  │  │  │  │                balance / login（手机验证码，仅国内版）/
-│  │  │  │  │  │                oauth（Zai / Google 网页登录，仅国际版）/ checkin（每日签到任务）
-│  │  │  │  │  ├─ qoder/        Qoder：adapter / endpoints（两站地址）/ oauth（设备授权）/
-│  │  │  │  │  │                auth / cosy（COSY 签名与体编码）/ protocol（信封解码）/
-│  │  │  │  │  │                chat（会话式转发）/ stream / machine（PKCE 与机器标识）/
-│  │  │  │  │  │                credentials / refresh / models / balance / risk（UMID 风控组件）
-│  │  │  │  │  ├─ cline/        Cline：adapter（Bearer + 产品面头）/ credentials（workos: 前缀
-│  │  │  │  │  │                + 桌面端登录态 + 姓名解析）/ login（WorkOS 设备授权）/
-│  │  │  │  │  │                refresh（单飞续期）/ models（两额度池 + 默认映射种子）/
-│  │  │  │  │  │                balance（credit 余额，微 credit ÷1e6）
-│  │  │  │  │  ├─ accio/        Accio（国际版 + 国内版两家）：endpoints（两地区与端点）/
-│  │  │  │  │  │                credentials / auth / refresh（单飞续期）/
-│  │  │  │  │  │                oauth（PKCE 网页登录 + loopback 回调）/
-│  │  │  │  │  │                models（静态兜底 + /api/llm/config/v2）/
-│  │  │  │  │  │                protocol（OpenAI ↔ ADK 的 Gemini 风格信封）/
-│  │  │  │  │  │                chat（会话式转发）/ stream（ADK SSE 解包）/ balance
-│  │  │  │  │  ├─ zcode/        ZCode（智谱 Z.AI，国内版 + 国际版两家）：region（两地域名与身份）/
-│  │  │  │  │  │                adapter（无状态、按地区参数化）/ credentials（令牌 + 套餐 JWT）/
-│  │  │  │  │  │                oauth（CLI 轮询登录）/ coding_key（换推理用 API Key）/ models（静态表）/
-│  │  │  │  │  │                balance（套餐余额）/ plan + claim（活动套餐通道与限时领取）/
-│  │  │  │  │  │                captcha（人机验证令牌池）/ reasoning（GLM-5.3 思考预算）/
-│  │  │  │  │  │                zcode_system.json（系统提示词）
-│  │  │  │  │  ├─ codearts/     CodeArts（华为云码道）：signer（华为云 SDK-HMAC-SHA256，
-│  │  │  │  │  │                与参考实现逐字节对账）/ credentials / dpop（ES256 DPoP proof）/
-│  │  │  │  │  │                oauth（PKCE 网页登录 + loopback 回调）/ refresh（单飞续期）/
-│  │  │  │  │  │                session（chat-session 心跳与每账号并发准入）/ chat（会话式转发）/
-│  │  │  │  │  │                stream_fault（HTTP 200 的流内错误信封）/ redact（错误体脱敏）/
-│  │  │  │  │  │                models（agent / builtin / 福利网关三源合并）/
-│  │  │  │  │  │                balance（订阅统计 + 福利网关两份账）/
-│  │  │  │  │  │                welfare（每日福利领取：幂等键先落盘、回读二次确认）
-│  │  │  │  │  ├─ trae/         Trae（字节 AI IDE SOLO 通道）：credentials / device（设备密钥对）/
-│  │  │  │  │  │                login + oauth（PKCE 网页登录 + 换证候选）/ callback_server
-│  │  │  │  │  │                （本机随机端口回调与噪音过滤）/ refresh（单飞续期）/
-│  │  │  │  │  │                payload（SOLO 信封白名单重建）/ headers（SOLO 头集合）/
-│  │  │  │  │  │                stream（SSE→chunk 翻译）/ forward（有状态转发）/
-│  │  │  │  │  │                errors（错误分类与死配置名单）/ models（get_detail_param 目录）/
-│  │  │  │  │  │                usage（权益包 + 套餐 quota 两份账）/ profile（身份解析）
-│  │  │  │  │  ├─ loomy/        Loomy（讯飞）：login（手机验证码）/ credentials（session 14 天、无续期接口）/
-│  │  │  │  │  │                sign（复刻客户端 HMAC-SHA1 签名头）/ endpoints / client（集成网关）/
-│  │  │  │  │  │                models（/api/v1/models 远程目录，上游无内置兜底清单）/
-│  │  │  │  │  │                balance（永久积分 + 每日赠送两份账）/ checkin（每日首次登录刷新赠送积分）
-│  │  │  │  │  ├─ kuku/         KukuAI（百度文库「库库 AI / GenFlowPro」，kuku.baidu.com）：
-│  │  │  │  │  │                adapter（is_stateful）/ session（bdstoken/uinfo/uk 三件套缓存）/
-│  │  │  │  │  │                engine（STOKEN 换发）/ http / login（主站网页登录 + 壳侧收 Cookie）/
-│  │  │  │  │  │                credentials（BDUSS Cookie）/ models（静态兜底 + 远程刷新）/
-│  │  │  │  │  │                chat（建会话 → 分配算力 → SSE）/ balance（积分余量）/
-│  │  │  │  │  │                checkin（每日免费积分）
-│  │  │  │  │  ├─ monkeycode/   MonkeyCode（长亭科技，国内版 + 国际版两家）：region（两站域名与身份）/
-│  │  │  │  │  │                adapter / endpoints（路径 / cookie 名 / interface_type→CLI 映射）/
-│  │  │  │  │  │                client / credentials（session + imageId）/ login（粘贴 session 与自动发现）/
-│  │  │  │  │  │                models（两站各一格清单，仅远程）/ task（建任务）/ stream（WS 任务流）/
-│  │  │  │  │  │                translate（ACP 事件 → chat 帧，含工具自动批准与提问自动应答）
-│  │  │  │  │  ├─ commandcode/  Command Code：adapter / endpoints / credentials / login /
-│  │  │  │  │  │                fingerprint（确定性设备指纹与 8h 上报）/ models /
-│  │  │  │  │  │                plan（8 键信封与 params 重写、session id 派生）
-│  │  │  │  │  ├─ antigravity/  Antigravity（Google，Gemini）：oauth（refresh token 续期 + 单飞）/
-│  │  │  │  │                   project（loadCodeAssist → onboardUser 发现）/ credentials /
-│  │  │  │  │                   endpoints（三环境基址与头集合）/ login /
-│  │  │  │  │                   models（fetchAvailableModels + 内置兜底 + 上游真名映射）/ adapter
-│  │  │  │  │  └─ officeace/    OfficeAce（华为云果办 / OfficeClaw）：oauth（PKCE + P-256 DPoP 自助登录）/
-│  │  │  │  │                   signer（SDK-HMAC 与 V11-HMAC 两套签名 + 向量夹具）/ credentials（网关 Basic 与控制面临时 AK/SK 两层）/
-│  │  │  │  │                   chat（无状态 OpenAI 兼容转发）/ models（远程目录 + 每模型倍率）/
-│  │  │  │  │                   probe（模型可用性探测，打不通的默认隐藏）/ subscription（订阅 / 额度 / 奖励）/
-│  │  │  │  │                   onboarding / checkin / balance
-│  │  │  │  ├─ protocol/        协议转换层（各家 wire ↔ 标准 chat SSE 的请求/响应翻译：
-│  │  │  │  │                    Anthropic Messages / Responses / NDJSON（Command Code）/
-│  │  │  │  │                    Gemini 信封（Antigravity），以及工具 plan 与历史修复）
-│  │  │  │  ├─ upstream/        转发编排：全局账号队列循环（provider_loop）+ 发送体处理
-│  │  │  │  │                    （payload）+ SSE 透传/聚合 + usage 旁路提取 + 非 chat 协议的
-│  │  │  │  │                    翻译流接入（translate：Anthropic / NDJSON / Gemini 三条并列）
-│  │  │  │  ├─ account_store/   账号存储（全局优先级、限额冷却、各家添加与导入）
-│  │  │  │  ├─ models/          模型目录底层（workbuddy 内置清单 + /v3/config 刷新）
-│  │  │  │  ├─ model_rules.rs   模型管理规则（禁用 / 隐藏 / 映射 alias）
-│  │  │  │  ├─ api_keys.rs      网关 Key 列表（多把 Key，任一启用即通过）
-│  │  │  │  ├─ auth.rs / auth_http.rs / login.rs   会话、出网传输、无头登录
-│  │  │  │  │                    （login/ 下是各家特有的登录流程：catpaw 的
-│  │  │  │  │                    loopback 回调、qoder 的设备授权）
-│  │  │  │  ├─ routing.rs / billing/   账号选路（全局优先级 + 限额冷却）/ 积分签到运营
-│  │  │  │  ├─ proxies.rs / clash.rs / egress.rs   出网代理与按出口缓存 Client
-│  │  │  │  ├─ sanitize.rs      出站指纹脱敏（硬编码规则集：表头剥离 + 模板句最小改写）
-│  │  │  │  ├─ prompt.rs        网关自有系统提示词（透传 / 替换 / 追加三模式）
-│  │  │  │  ├─ degrade.rs       内容拦截降级状态机（撞审核误报后到次日 00:00 用中性提示词）
-│  │  │  │  ├─ credential_maintenance.rs  已过期 / 临期凭证的批量刷新
-│  │  │  │  ├─ usage_query.rs     余额 / 积分查询（跨账号并发 + 定时那一轮的快照）
-│  │  │  │  ├─ scheduled_tasks.rs  间隔型定时任务注册表与调度循环（开关 / 间隔 /
-│  │  │  │  │                      上次结果；配置在 config.json 的 scheduledTasks）
-│  │  │  │  └─ account_transfer.rs + account_transfer/ / auto_checkin.rs / update/
-│  │  │  │                       导入导出（含身份归一）/ 定时签到 / 软件更新
-│  │  │  └─ api/                 各路由 handler（health/session/accounts/accounts_usage/
-│  │  │                          chat/models/keys/model_manage/stats/logs/billing/
-│  │  │                          sanitize/prompt/auto-checkin/scheduled-tasks/update/…）
-│  │  ├─ lib.rs                 应用入口（配置目录迁移 → 设置 → 托盘 → 主窗口 → 启动后端）
-│  │  ├─ backend.rs              进程内服务器生命周期
-│  │  ├─ legacy_install.rs       旧「当前用户」安装的清理（目录 / 快捷方式 / 卸载项 / 自启；仅 release）
-│  │  ├─ gateway.rs              壳侧访问管理 API 的 HTTP 客户端
-│  │  ├─ login.rs / commands.rs  登录窗口与轮询、暴露给前端的 invoke 命令
-│  │  ├─ login_profile.rs        每次网页登录独享一个临时 WebView2 数据目录（登完即删）
-│  │  ├─ bridge.rs               注入 window.workbuddyDesktop 的桥接脚本
-│  │  └─ update.rs / settings.rs / state.rs / tray.rs
-│  ├─ ui/                        前端（原生 HTML/CSS/JS，无框架）
-│  ├─ i18n/                      界面词典源与构建脚本（六语）
-│  └─ src-tauri/tauri.conf.json  打包配置（NSIS）
-├─ build/make-icon.mjs           生成应用图标源图
-├─ assets/screenshots/           README 配图（界面截图）
-├─ Dockerfile / .dockerignore    headless 镜像（多阶段构建，只含网关与面板）
-├─ docker-compose.yml / .env.example   部署（单容器：面板 + 网关同端口）
-└─ package.json                  构建脚本入口（tauri:dev / tauri:build / build:icon）
-```
-
-</details>
-
----
-
-## 开发与构建
+## 🔧 开发与构建
 
 ### 环境要求
 
@@ -356,9 +214,7 @@ npm run build:icon         # 生成图标源图（改图标设计后执行，再
 
 打包产物为 `target/release/bundle/nsis/Agent2API_<版本>_x64-setup.exe`（当前约 3.0 MB；`src-tauri/.cargo/config.toml` 把 cargo 的 `target-dir` 指到了项目根的 `target/`）。
 
----
-
-## 使用声明
+## 📜 使用声明
 
 ### 仅供学习与交流
 
@@ -380,17 +236,13 @@ npm run build:icon         # 生成图标源图（改图标设计后执行，再
 
 本项目按「现状」提供，作者不对其可用性、稳定性、安全性或对特定用途的适用性作任何承诺。上游接口随时可能变更，本项目可能随时失效而不再维护。完整条款见 [LICENSE](./LICENSE)。本项目中的接口形态、协议字段等信息来自对各官方客户端公开网络通信的观察与整理，相关商标与服务的权利归其各自所有者；若权利方认为本项目存在不当之处，请联系作者，将及时调整或删除。
 
----
-
-## 许可
+## 📄 许可
 
 本项目基于 [MIT License](./LICENSE)，可自由使用、修改与分发，须保留版权声明。
 
 需要留意的是：LICENSE 正文之后附有一份**使用声明**，其中第 3 条在 MIT 之上**追加了限制**（禁止商业用途、禁止二次分发牟利、禁止批量账号运营）。因此本项目**不是**纯粹的 MIT 项目——**MIT 条款与使用声明共同构成完整的授权与使用约定**，两者对同一行为给出不同结论时以更严格的一方为准。这也是 `Cargo.toml` 用 `license-file` 指向 LICENSE、而不声明 SPDX `"MIT"` 的原因。
 
----
-
-## Star History
+## ⭐ Star History
 
 <a href="https://star-history.com/#aimod-cc/agent2api&Date">
   <picture>
@@ -399,3 +251,11 @@ npm run build:icon         # 生成图标源图（改图标设计后执行，再
     <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=aimod-cc/agent2api&type=Date" />
   </picture>
 </a>
+
+<div align="center">
+
+**[下载最新版](https://github.com/aimod-cc/agent2api/releases/latest)** • **[问题反馈](https://github.com/aimod-cc/agent2api/issues)**
+
+如果这个项目对你有帮助，欢迎点一个 ⭐️ Star！
+
+</div>

@@ -69,6 +69,7 @@
 //!   models.rs       :fetchAvailableModels（只列 Gemini）+ 内置兜底 + 对外 id → 上游真名映射表
 //!   login.rs        粘贴式归一化（1// 前缀 / 引号 / Bearer）+ 一次校验刷新
 //!   adapter.rs      ProviderAdapter 实现（账号 / 刷新 / 目录 / 转发 / 思考档绑定）
+//!   balance.rs      余额读数（5 小时 / 每周额度窗口 + 订阅档）
 //! ```
 //! 请求信封与响应翻译在 `core::protocol` 的 `antigravity_outbound` /
 //! `antigravity_schema` / `antigravity_stream` 三个文件里（单文件行数约定下
@@ -79,6 +80,7 @@
 //! **不发 `x-goog-api-client`**（规格 §7.2：属于 IDE 的 JS 层，发了形成矛盾指纹）。
 
 pub mod adapter;
+pub mod balance;
 pub mod credentials;
 pub mod endpoints;
 pub mod login;

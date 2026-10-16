@@ -33,6 +33,12 @@ export type CustomProviderRecord = {
   accountCount?: number
   /** 客户端形态伪装（预置卡写入的记录字段）：'opencode' = 按官方 CLI 形状补齐请求 */
   clientEmulation?: string
+  /**
+   * 余额查询方案（预置卡写入的记录字段，见 `custom_providers::BALANCE_SCHEMES`）：
+   * 有它 = 这一家能查余额，且账号设置里会出现「查询设置」的凭证字段。
+   * **只读**：方案是「这一家是谁」的派生事实，界面上不给用户改。
+   */
+  balanceScheme?: string
   quirks?: {
     urlSuffix?: string
     headers?: Record<string, string>
@@ -46,11 +52,15 @@ export type PresetRecord = {
   protocol?: string
   baseUrl?: string
   hint?: string
+  /** Base URL 输入框的占位提示（自建面板没有固定地址时给一句「填你自己的站点」） */
+  placeholder?: string
   quirks?: CustomProviderRecord['quirks']
   /** 客户端形态伪装：随创建写进提供商记录（OpenCode Zen 用它过免费档的三道校验） */
   clientEmulation?: string
   /** 该家账号的默认取值（表单初始勾选态）：noAuth = 预勾「该上游无需鉴权」 */
   account?: { noAuth?: boolean }
+  /** 余额查询方案：创建时随记录写入 `balanceScheme`（见 `CustomProviderRecord`） */
+  balance?: { scheme?: string }
 }
 
 /** web-login.js 的控制器（只列本子系统用到的成员） */
@@ -169,6 +179,37 @@ export function describeError(error: unknown): string {
 export function accountCountOf(providerId: string): number {
   const accounts = shared().wbApp?.getState?.()?.accounts?.accounts || []
   return accounts.filter(account => (account?.provider || 'workbuddy') === providerId).length
+}
+
+/**
+ * 预置模板对应的「已建家」：按展示名在自定义目录里找同名的那一条，找不到
+ * （没建过 / 用户改过名 / 目录还没拉到）返回 undefined。
+ *
+ * 判重按 name 是刻意的：预置清单的 name 是品牌名（不包 t()，可作字面量参与
+ * 比对）；用户在新建表单里改了名，这家就不再对应那张模板卡，宁可让他重新
+ * 走新建，也不要把模板卡指到一家名字对不上的记录上。卡片文案
+ * （add-provider-pick）与点击分派（add-account-modal）共用这一处口径。
+ */
+export function existingCustomOfPreset(
+  preset: PresetRecord | null | undefined,
+): CustomProviderRecord | undefined {
+  const name = preset?.name || ''
+  if (!name) return undefined
+  return (shared().wbProviders?.customList?.() || []).find(item => (item.name || '') === name)
+}
+
+/**
+ * 该自定义家是否与某个预置模板同名 —— 是的话它**不进「自定义」段的卡片列表**：
+ * 预置家与 Agent 内置家同一形态，卡片常驻在「预置 API」段、点卡加账号，再在
+ * 「自定义」段重复出现一份只会让人以为建了两个家。与 existingCustomOfPreset
+ * 是同一件事的两个方向，共用「按 name 字面量比对」这一条口径：模板家改了名
+ * （不再对应任何模板）就自然回到「自定义」段；手动新建时起了与模板相同的名字
+ * 也会被归到预置段（看起来一样，入口合一没有坏处）。
+ */
+export function matchesPresetName(provider: CustomProviderRecord | null | undefined): boolean {
+  const name = provider?.name || ''
+  if (!name) return false
+  return (shared().wbPresetProviders?.list || []).some(preset => preset.name === name)
 }
 
 /* ─── 提交与收尾 ─────────────────────────────── */

@@ -112,6 +112,21 @@ pub struct EditionInfo {
     pub product_name: &'static str,
     pub client_version: &'static str,
     pub cli_version: &'static str,
+    /// 对话链路（`/v2/chat/completions`）的 `X-IDE-Version`。
+    ///
+    /// 与 `client_version` 分开的原因：2026-10-16 对国际版客户端 5.8.4 抓包后
+    /// （参考实现 workbuddy2api-hub #381），上游渠道校验按对话请求的身份头
+    /// 识别客户端，过旧的版本号本身是一处网关特征；而计费 / 登录 / 目录链路
+    /// 没有对应抓包、也不吃这套身份，`client_version` 维持原值不动 ——
+    /// 两套取值不能共用一个字段。
+    pub chat_ide_version: &'static str,
+    /// 对话链路的完整 UA（含 CLI 扩展段）。
+    ///
+    /// 国际版取 5.8.4 实测值：`WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0`
+    /// —— 产品段是**小写** `workbuddy-ai`，末段 `CLI/2.161.0` 是客户端内置
+    /// CLI 的版本。国内版无对应抓包，维持与 `user_agent_for_edition` 同形的
+    /// 既有取值。
+    pub chat_ua: &'static str,
     /// 客户端数据目录名（本进程不使用，仅 /api/endpoints 展示与排查）
     pub data_folder_name: &'static str,
 }
@@ -128,6 +143,8 @@ const EDITION_CN: EditionInfo = EditionInfo {
     product_name: "WorkBuddy",
     client_version: WORKBUDDY_CLIENT_VERSION,
     cli_version: WORKBUDDY_CLI_VERSION,
+    chat_ide_version: WORKBUDDY_CLIENT_VERSION,
+    chat_ua: "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1",
     data_folder_name: ".workbuddy",
 };
 
@@ -143,6 +160,8 @@ const EDITION_INTL: EditionInfo = EditionInfo {
     product_name: "WorkBuddy AI",
     client_version: "5.5.2",
     cli_version: WORKBUDDY_CLI_VERSION,
+    chat_ide_version: "5.8.4",
+    chat_ua: "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0",
     data_folder_name: ".workbuddy-ai",
 };
 

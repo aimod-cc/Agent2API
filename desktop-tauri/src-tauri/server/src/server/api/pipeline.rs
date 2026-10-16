@@ -1107,6 +1107,7 @@ mod tests {
     //! 中断洗成成功（报表再也看不出断流）。所以这一组用例两头都要钉住。
 
     use super::{terminal, RecordContext, RecordingStream, TerminalFrames, TerminalScan};
+    use crate::server::request_stats::Retention;
 
     /// 生产实测到的收尾帧写法（CodeArts 走字节透传，上游发什么就下发什么）：
     /// 冒号后面**没有**那个空格。取自 `request_raw.response_body` 的真实尾巴。
@@ -1244,7 +1245,7 @@ mod tests {
             .join(format!("api-pipeline-{}-{}-{id}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&dir);
         let db = Db::open(&dir.join("agent2api.db")).expect("临时库应当能建起来");
-        (Arc::new(RequestStats::with_db(Some(db))), TempDir(dir))
+        (Arc::new(RequestStats::with_db(Some(db), Retention::default)), TempDir(dir))
     }
 
     /// 建一条上下文：用量按生产实测的那份填（71476 / 56）

@@ -34,7 +34,9 @@ use rusqlite::params;
 use serde_json::{json, Value};
 
 use crate::server::core::beijing;
-use crate::server::core::billing::checkin::{checkin_completed_today, claim_pending};
+use crate::server::core::billing::checkin::{
+    activity_report_ok, checkin_completed_today, claim_pending, web_conversation_ok,
+};
 use crate::server::db::Db;
 use crate::server::logging;
 
@@ -56,19 +58,18 @@ fn database() -> Option<&'static Db> {
 
 // ─── 记账 ────────────────────────────────────────────────────
 
-/// 行的 `activity` 段是否携带「活跃上报成功」读数（`report.succeeded`）。
+/// 台账的「保活」标记：桌面端保活对话（`pokeSucceeded`）或网页会话任一建成
+/// 即算 —— 两者互补（网页会话点亮「当日活跃」计数，桌面端对话维持「账号有
+/// 调用」），落同一格 `kept_active`，不另开列。
 ///
-/// 国际版每日活跃的三件事里，**只有活跃上报点亮连登**（`/v2/report` 实测，
-/// 见 `billing::activity::report_chat_activity`）；领取依赖上游活动开放、
-/// 保活对话不参与活跃计数。「活动未开启」轮次的成败就认这一格 —— 与
-/// `claim_pending` 只认中性文案是同一条克制原则：上报失败、网络错误都照旧
-/// 落 failed，不会把真故障美化成成功。
-fn activity_report_ok(row: &Value) -> bool {
+/// `activity_report_ok` / `web_conversation_ok` 的实现在 `billing::checkin`
+/// （与落账判据 `day_completed` 同源，见那里的说明），本模块只消费。
+fn kept_active_of(row: &Value) -> bool {
     row.get("activity")
-        .and_then(|activity| activity.get("report"))
-        .and_then(|report| report.get("succeeded"))
+        .and_then(|activity| activity.get("pokeSucceeded"))
         .and_then(Value::as_bool)
         .unwrap_or(false)
+        || web_conversation_ok(row)
 }
 
 /// 签到结果行的记账（`run_checkin` 的每账号行，`{id, name, claim, activity?,
@@ -79,9 +80,11 @@ fn activity_report_ok(row: &Value) -> bool {
 ///   - 行的 `error` 非空 → **failed**（执行出错：网络 / 凭证 / 未接入）；
 ///   - claim 判「今日已完成」→ success（真领到）或 already（上游说已领过）；
 ///   - claim 判「中性未领取」→ **pending**（此刻没有可领的活动，等窗口）；
-///   - 国际版每日活跃「活动未开启但活跃上报成功」→ **already** —— 活动没开
-///     是上游运营态（谁也领不到），而活跃上报已把连登点亮，这一天的「日活」
-///     实际完成了；记 failed 会把每天的正常轮次刷成一片红（改造前的实况）。
+///   - 国际版每日活跃「活动未开启但活跃上报成功（或网页会话建成）」→
+///     **already** —— 活动没开是上游运营态（谁也领不到），而活跃链路已把
+///     这一天记成活跃（连登点亮 / 网页会话计活跃），积分由上游异步发放；
+///     记 failed 会把每天的正常轮次刷成一片红（改造前的实况）。判据与落账
+///     的 `billing::checkin::day_completed` 同源。
 ///   - 其余 → **failed**，错误原文取行的 `error`，缺了取 claim 的 `msg`
 ///     （claim.success=false 且带文案的失败，如「登录态已过期」）。
 pub fn record_row(row: &Value, provider: &str, source: &str, reason: &str) {
@@ -102,7 +105,7 @@ pub fn record_row(row: &Value, provider: &str, source: &str, reason: &str) {
         (outcome, None)
     } else if claim_pending(&claim) {
         (OUTCOME_PENDING, None)
-    } else if activity_report_ok(row) {
+    } else if activity_report_ok(row) || web_conversation_ok(row) {
         (OUTCOME_ALREADY, None)
     } else {
         // 失败且行上没有 error：失败文案在 claim.msg 里（claim_result 的
@@ -115,11 +118,7 @@ pub fn record_row(row: &Value, provider: &str, source: &str, reason: &str) {
             .map(str::to_string);
         (OUTCOME_FAILED, message)
     };
-    let kept_active = row
-        .get("activity")
-        .and_then(|activity| activity.get("pokeSucceeded"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let kept_active = kept_active_of(row);
     insert(Entry {
         account_id: text_or(row.get("id"), ""),
         account_name: text_or(row.get("name"), &text_or(row.get("id"), "")),
@@ -141,11 +140,11 @@ pub fn record_row(row: &Value, provider: &str, source: &str, reason: &str) {
 /// 国际版活动的手动领取 / 保活（`api::billing::run_activity` 的返回行，
 /// `{id, name, mode, claim, activity}`）。
 ///
-/// 判定按 mode 分两条：`keepalive` 看「上报成功或保活成功」任一 —— 它的
-/// claim 是 `{success:false, msg:"活跃保活完成"}` 的形态，走 claim 判据会被
-/// 误判成 failed，而这一颗按钮的本意就是「维持账号活跃」，活跃上报（点亮
-/// 连登的那条通道）成功同样算数；`full` / `claim` 与签到同判据（claim），
-/// 「活动未开启但活跃上报成功」按 `record_row` 同款落到 already。
+/// 判定按 mode 分两条：`keepalive` 看「上报 / 保活对话 / 网页会话」任一成功
+/// —— 它的 claim 是 `{success:false, msg:"活跃保活完成"}` 的形态，走 claim
+/// 判据会被误判成 failed，而这一颗按钮的本意就是「维持账号活跃」，三件事
+/// 任一做成即算数；`full` / `claim` 与签到同判据（claim），
+/// 「活动未开启但活跃上报成功（或网页会话建成）」按 `record_row` 同款落到 already。
 /// reason 用人话（界面的「来源/说明」列直接展示）。
 pub fn record_activity(row: &Value, provider: &str, mode: &str) {
     let reason = match mode {
@@ -154,12 +153,8 @@ pub fn record_activity(row: &Value, provider: &str, mode: &str) {
         _ => "手动活动",
     };
     let claim = row.get("claim").cloned().unwrap_or(Value::Null);
-    let kept_active = row
-        .get("activity")
-        .and_then(|activity| activity.get("pokeSucceeded"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let report_ok = activity_report_ok(row);
+    let kept_active = kept_active_of(row);
+    let report_ok = activity_report_ok(row) || web_conversation_ok(row);
     let (outcome, error, ok) = if mode == "keepalive" {
         match kept_active || report_ok {
             true => (OUTCOME_SUCCESS, None, true),

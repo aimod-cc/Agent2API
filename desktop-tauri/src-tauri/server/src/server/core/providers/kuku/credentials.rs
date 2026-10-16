@@ -18,7 +18,7 @@
 //! release 是 `panic=abort`：本文件零 unwrap/expect/panic。
 
 use serde_json::{Map, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::server::core::account_store::AccountStore;
 use crate::server::errors::GatewayError;
@@ -261,24 +261,27 @@ pub fn cookies_path() -> Option<PathBuf> {
     None
 }
 
-/// 读本机客户端登录态（`importDesktop: true` 用）。
+/// 从**指定路径**读 Cookies SQLite 并解析登录态（`cookies` 表的 `value` 列）。
 ///
-/// 直读 `Network\Cookies` 的 `value` 列（明文，无需解密）。客户端运行时该文件
-/// 被 Chromium 独占锁 —— 读失败时把「可能正在运行」写进文案（占用冲突的
-/// 两段式处置在账号层 / 前端，这里只负责如实报错）。
-pub fn read_desktop_credentials() -> Result<KukuCredentials, String> {
-    let path = cookies_path().ok_or_else(|| {
-        "没有找到本机 KukuAI（GenFlowPro）客户端的登录态（%APPDATA%\\baidugenflowpro\\Network\\Cookies）；请先安装并登录客户端，或用「粘贴 Cookie」添加账号".to_string()
-    })?;
+/// 判定与解析只有这一份，两个入口共用，口径不会分叉：
+///   - `importDesktop`：固定路径的本机实时文件（[`read_desktop_credentials`]），
+///     由本机客户端持续维护，失败最常见的原因是客户端正在运行、Chromium
+///     独占锁着它；
+///   - 文件导入（`authFileB64`）：接口层把用户手选文件的 base64 解回**临时
+///     文件**后调用同一函数（见 `api::accounts` 的 KukuAI 分支与
+///     `kuku_credentials_from_b64_file`）—— 用户可能选了任意文件（不是
+///     SQLite / 拷贝不完整），且临时副本不存在「被客户端占用」一说。
+/// 因此这里只归因「哪一步失败」（[`ReadFromPathError`]），发出去的人话由各自
+/// 的入口按语境出（`desktop_message` / `file_import_message`）。
+///
+/// 直读 `value` 列（明文，无需解密）：`encrypted_value` 长度为 0，见模块头。
+pub fn read_credentials_from_path(path: &Path) -> Result<KukuCredentials, ReadFromPathError> {
     let conn = rusqlite::Connection::open_with_flags(
-        &path,
+        path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-    .map_err(|error| {
-        format!(
-            "读取客户端登录态失败（{}，Cookie 文件可能正被 KukuAI 客户端占用，请先关闭客户端重试）：{error}",
-            path.display()
-        )
+    .map_err(|error| ReadFromPathError::Open {
+        detail: error.to_string(),
     })?;
     let mut bduss = String::new();
     let mut stoken = String::new();
@@ -293,12 +296,16 @@ pub fn read_desktop_credentials() -> Result<KukuCredentials, String> {
              WHERE host_key LIKE '%baidu%' AND value != '' \
                AND name NOT LIKE 'Hm\\_%' ESCAPE '\\' AND name != 'HMACCOUNT'",
         )
-        .map_err(|error| format!("读取客户端登录态失败（{error}）"))?;
+        .map_err(|error| ReadFromPathError::Query {
+            detail: error.to_string(),
+        })?;
     let rows = stmt
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
-        .map_err(|error| format!("读取客户端登录态失败（{error}）"))?;
+        .map_err(|error| ReadFromPathError::Query {
+            detail: error.to_string(),
+        })?;
     for row in rows.flatten() {
         let (name, value) = row;
         if name.eq_ignore_ascii_case("BDUSS") && bduss.is_empty() {
@@ -316,7 +323,7 @@ pub fn read_desktop_credentials() -> Result<KukuCredentials, String> {
         }
     }
     if bduss.len() < MIN_BDUSS_LENGTH {
-        return Err("本机客户端未登录（Cookies 里没有有效的 BDUSS）；请先在 KukuAI 客户端登录".to_string());
+        return Err(ReadFromPathError::MissingBduss);
     }
     Ok(KukuCredentials {
         bduss,
@@ -325,6 +332,68 @@ pub fn read_desktop_credentials() -> Result<KukuCredentials, String> {
         uid: String::new(),
         nickname: String::new(),
     })
+}
+
+/// 从 Cookies 路径读取失败的归类（见 [`read_credentials_from_path`]）。
+///
+/// 为什么先归类、文案在方法里：同一份失败在两个入口要说不同的话 —— 本机固定
+/// 路径最常见的原因是客户端正在运行、文件被 Chromium 独占（文案指向「先关闭
+/// 客户端重试」）；文件导入读的是用户刚上传的**临时副本**，最常见的原因是
+/// **选错了文件**（文案指向「选客户端生成的 Network\Cookies」）。
+/// 「什么算失败」的判定只有这一份，措辞按入口出。
+#[derive(Debug)]
+pub enum ReadFromPathError {
+    /// `Connection::open` 失败：路径打不开（不存在 / 权限 / 不是 SQLite 文件）。
+    Open { detail: String },
+    /// 打开成功但读取失败（不是 cookies 库 / 库损坏）。
+    Query { detail: String },
+    /// 能读但库里没有有效的 BDUSS。
+    MissingBduss,
+}
+
+impl ReadFromPathError {
+    /// 本机固定路径（`importDesktop`）的文案。**逐字沿用历史**（含「可能正被
+    /// 客户端占用，请先关闭客户端重试」的提示与原有的拼装形状）：重构只搬位置，
+    /// 不许顺手润色 —— 占用冲突的两段式处置在账号层 / 前端，认的就是这句话。
+    pub fn desktop_message(self, path: &Path) -> String {
+        match self {
+            ReadFromPathError::Open { detail } => format!(
+                "读取客户端登录态失败（{}，Cookie 文件可能正被 KukuAI 客户端占用，请先关闭客户端重试）：{detail}",
+                path.display()
+            ),
+            ReadFromPathError::Query { detail } => format!("读取客户端登录态失败（{detail}）"),
+            ReadFromPathError::MissingBduss => {
+                "本机客户端未登录（Cookies 里没有有效的 BDUSS）；请先在 KukuAI 客户端登录".to_string()
+            }
+        }
+    }
+
+    /// 文件导入（`authFileB64`）的文案：读的是临时副本，不存在「被客户端占用」；
+    /// 失败最常见的原因是**选错了文件**（用户手选任意文件）。历史文案只讲占用，
+    /// 对「不是 Cookies 库」说不清楚，所以这里补上能照着做的指引；底层判定不变。
+    pub fn file_import_message(self) -> String {
+        match self {
+            ReadFromPathError::Open { detail } | ReadFromPathError::Query { detail } => format!(
+                "不是有效的 KukuAI Cookies 数据库（请选择 KukuAI 客户端数据目录下 Network\\Cookies 文件，且拷贝要完整）：{detail}"
+            ),
+            ReadFromPathError::MissingBduss => {
+                "文件里没有有效的 BDUSS（请选择 KukuAI 客户端登录后生成的 Network\\Cookies 文件；客户端未登录时它不会是登录态）".to_string()
+            }
+        }
+    }
+}
+
+/// 读本机客户端登录态（`importDesktop: true` 用）。
+///
+/// [`read_credentials_from_path`] 的薄包装：只负责「定位本机固定路径 + 把失败
+/// 换成历史文案（[`ReadFromPathError::desktop_message`]）」，读取/解析行为与
+/// 历史逐字一致。文件不存在 → 固定提示；文件被客户端占用 → 把「可能正在运行」
+/// 写进文案（这里只负责如实报错）。
+pub fn read_desktop_credentials() -> Result<KukuCredentials, String> {
+    let path = cookies_path().ok_or_else(|| {
+        "没有找到本机 KukuAI（GenFlowPro）客户端的登录态（%APPDATA%\\baidugenflowpro\\Network\\Cookies）；请先安装并登录客户端，或用「粘贴 Cookie」添加账号".to_string()
+    })?;
+    read_credentials_from_path(&path).map_err(|error| error.desktop_message(&path))
 }
 
 /// 本机登录态的展示摘要（前端导入按钮悬停 / 预检用）。

@@ -35,8 +35,9 @@ import { t } from '../i18n'
  *                       的外边距与圆角裁切多出一层盒子，布局与接入前不等价。
  *   update-modal.tsx    「检测到更新」弹窗：按需建的命令式外壳（照 port-panel），
  *                       弹与不弹的判定也归它。
- *   update-settings.tsx 「更新设置」弹窗（自动检查更新 + 出网代理 + GitHub 令牌；
- *   定时任务页的「软件版本检查」配置入口也收在这个弹窗里）。
+ *   update-settings.tsx 「更新设置」弹窗（自动检查更新 + 加入 beta 版 + 出网代理 +
+ *                       GitHub 令牌；定时任务页的「软件版本检查」配置入口也收在
+ *                       这个弹窗里）。
  *   update-shared.ts    三个 tsx 共用的类型、桥读取与工具（.ts 不被当岛挂载）。
  *
  * ── 两条贯穿全文件的约定（细节见各自函数）────────────────────
@@ -116,6 +117,10 @@ type Snapshot = {
   actionBusy: boolean
   /** 重启倒计时读数（仅 phase === 'restarting' 时有意义） */
   restartSeconds: number
+  /** 「GitHub 令牌填了没有」：面板头部那句常驻提示的读数。
+   *  `null` = 还没读到（不显示提示）；`false` = 没有可用令牌（显示黄色提示）。
+   *  只取 `filled` 这一位，令牌本体与来源（界面保存 / 环境变量）都由弹窗那边的徽章负责 */
+  tokenFilled: boolean | null
 }
 
 const INITIAL_SNAPSHOT: Snapshot = {
@@ -133,6 +138,8 @@ const INITIAL_SNAPSHOT: Snapshot = {
   checking: false,
   actionBusy: false,
   restartSeconds: 0,
+  // 首屏不显示「未填写」（还没读到，不猜）：读到 false 才亮起那句提示
+  tokenFilled: null,
 }
 
 /* ─── 工具 ─────────────────────────────────── */
@@ -244,6 +251,33 @@ function subscribe(listener: () => void): () => void {
 function publish(patch: Partial<Snapshot>): void {
   snapshot = { ...snapshot, ...patch }
   for (const listener of subscribers) listener()
+}
+
+/**
+ * 读一次「GitHub 令牌填了没有」，喂给面板头部那句常驻提示。
+ *
+ * ── 判据为什么是 `filled` 这一位 ─────────────────────────────
+ * 后端 `/api/update/token` 只报「有没有、来自哪」（令牌本体永不回显，见
+ * core::update::token），头部提示与弹窗里那枚徽章读的是同一个字段，口径不会漂。
+ * 这里要回答的是「检查限额还是匿名那 60 次/小时吗」：界面保存的令牌与环境变量
+ * `GITHUB_TOKEN` 都算填了（两种都提额），只有两边都没有才亮这句话。
+ * 密文解不开（密钥文件被删 / 拷库没拷密钥）且没有环境变量兜底时，后端给的
+ * `filled` 同样是 false —— 这里也照样亮；**确切原因**（「重新粘贴保存一次即可
+ * 自愈」）在弹窗那枚红徽章的悬停提示里，头部这句话不承载原因。
+ *
+ * ── 什么时候读 ──────────────────────────────────────────────
+ * 挂载、每次进设置页（load）、以及「更新设置」弹窗关闭之后 —— 令牌只在那个弹窗里
+ * 改（保存 / 清除），关窗这一下是唯一会改变该状态的时刻。读失败**保持原值**：
+ * 这一位只为一句提示服务，不该因为一次读失败在头部闪出（或闪掉）一句话；
+ * 检查更新自己那条路有各自的错误播报。
+ */
+async function refreshTokenHint(): Promise<void> {
+  try {
+    const status = await shared().workbuddyDesktop?.getUpdateToken()
+    publish({ tokenFilled: status?.filled === true })
+  } catch {
+    /* 读不到保持原值（仍未读到就是不显示） */
+  }
 }
 
 /* ─── 模块级流程状态 ─────────────────────────── */
@@ -745,6 +779,10 @@ async function load(): Promise<void> {
   // 日志与版本号同源：先按当前快照铺一次，切回来时不会白着一块等接口
   renderCheckResult()
 
+  // 头部那句「GitHub Token 未填写」的读数：本地接口、不打网络，每次进设置页都读一次
+  // （与下面的缓存读并发，谁先回来都不影响谁）
+  void refreshTokenHint()
+
   // 再读一次后端缓存那一份（定时任务按间隔写、手动检查也写同一个字段）：**每次进来都读**，
   // 不因为「本次会话已经有结果」就跳过 —— 后端刚查到的新版本、新的检查时刻要立刻反映到
   // 面板上（本地读库，不打网络，理由见 syncFromCache）。放在下载任务之前：下面那几条路
@@ -919,6 +957,8 @@ function UpdatePanel() {
   // 面板常驻（root 随应用生命周期），正常不会卸载；万一将来被卸载（骨架变化 / 页面
   // 重载），把进度轮询收掉 —— 悬挂的定时器会一直按 1 秒打后端
   React.useEffect(() => () => { stopPolling() }, [])
+  // 头部那句「GitHub Token 未填写」的首次读数（之后由 load 与弹窗关闭刷新）
+  React.useEffect(() => { void refreshTokenHint() }, [])
 
   const repo = snap.repository ? `https://github.com/${snap.repository}` : ''
   const owner = snap.repository ? `https://github.com/${snap.repository.split('/')[0]}` : ''
@@ -953,6 +993,19 @@ function UpdatePanel() {
           {snap.badgeText}
         </Badge>
         <div className='head-actions'>
+          {/* 「未填写 GitHub 令牌」的常驻提示（只在真的没有可用令牌时出现，黄色字体）：
+              匿名限额 60 次/小时、填了 5000，而「检查更新」按钮就在旁边 —— 提示放在这里
+              才有人看见；点开「更新设置」就能填，悬停补一句代价说明。
+              读数来自后端 filled 这一位（口径见 refreshTokenHint），读到与否都不影响
+              其它控件：null（还没读到）不显示，避免首屏闪一下 */}
+          {snap.tokenFilled === false ? (
+            <span
+              className='text-[12px] font-semibold text-warning'
+              title={t('填写后检查限额 60 → 5000 次/小时（创建令牌无需勾选任何权限）')}
+            >
+              {t('GitHub Token 未填写')}
+            </span>
+          ) : null}
           {/* 「更新设置」：出网线路 + GitHub 令牌都在弹窗里（update-settings.tsx），
               放「检查更新」左边 —— 先配好线路与令牌再检查，动线才顺 */}
           <Button
@@ -1027,7 +1080,7 @@ function UpdatePanel() {
                 <a id='update-author-link' href={owner} data-external={owner} target='_blank' rel='noopener'>
                   {snap.repository.split('/')[0]}
                 </a>{' '}
-                {t('个人开发并开源维护，免费使用、不带广告，也不会收集你的账号数据。如果它帮到了你，欢迎到项目仓库点个 Star 支持一下。')}
+                {t('个人开发并开源维护，免费使用，也不会收集你的账号数据。如果它帮到了你，欢迎到项目仓库点个 Star 支持一下。')}
               </span>
             </div>
             <div className='update-author-actions'>
@@ -1059,8 +1112,17 @@ function UpdatePanel() {
       </div>
 
       {/* 「更新设置」弹窗：条件渲染（Dialog 自带 Portal 挂 body，放在 section 里
-          只是声明位置，不影响视觉层级）；关闭即卸载，状态在弹窗内部自生自灭 */}
-      {settingsOpen ? <UpdateSettingsDialog open onClose={() => setSettingsOpen(false)} /> : null}
+          只是声明位置，不影响视觉层级）；关闭即卸载，状态在弹窗内部自生自灭。
+          关窗时重读一次令牌状态：令牌只在这个弹窗里保存 / 清除，头部那句提示要跟着变 */}
+      {settingsOpen ? (
+        <UpdateSettingsDialog
+          open
+          onClose={() => {
+            setSettingsOpen(false)
+            void refreshTokenHint()
+          }}
+        />
+      ) : null}
       {/* 「加入 QQ 群」：二维码 + 群号（图在项目仓库里，见 update-shared.ts 的说明） */}
       {qqGroupOpen ? <QqGroupDialog open onClose={() => setQqGroupOpen(false)} /> : null}
     </section>

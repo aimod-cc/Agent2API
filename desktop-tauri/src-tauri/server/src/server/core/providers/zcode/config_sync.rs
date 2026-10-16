@@ -1,4 +1,6 @@
-//! 把上游那份「模型请求要不要验证码」的配置**同步进来**的后台循环。
+//! 把上游的两份「会变的配置」**同步进来**的后台循环：
+//!   1. 风控配置（`client/configs` 的 `captcha` 段）→ [`super::captcha`]；
+//!   2. 端点映射（`agent/configs` 的 `proxyEndpoint.mapping`）→ [`super::endpoint_mapping`]。
 //!
 //! ── 为什么需要一个循环 ─────────────────────────────────────
 //! 活动套餐通道原先按「每条请求都要一枚阿里云验证码令牌」实现（2026-09-28 实测
@@ -15,6 +17,11 @@
 //! 返回逐字相同，所以它与客户端版本无关，是服务端口径）。这一格是**会变的**：
 //! 上游今天放开、明天收回去，都不需要提前发版。所以它必须被周期性读回来，而不是
 //! 编译期写死。
+//!
+//! 端点映射（第 2 份）是同一类东西：上游通过它把推理端点在平面间迁移
+//! （`open.bigmodel.cn` → `zcode.z.ai`，见 `endpoint_mapping` 的模块头），表随
+//! 服务端变。两条配置的性质相同 —— 低频、与账号无关、会反转 —— 就共用这一条
+//! 5 分钟的循环（各自挑各自的代表账号、各自失败互不影响）。
 //!
 //! ── 为什么不懒在请求路径上取 ────────────────────────────────
 //! `ZcodeAdapter::build_chat_request` 是**同步**函数（转发层在构造请求计划时不
@@ -41,7 +48,7 @@ use crate::server::core::account_store::AccountStore;
 use crate::server::core::proxies;
 use crate::server::logging;
 
-use super::{captcha, claim, plan_of, region::Region, PLAN_START};
+use super::{captcha, claim, endpoint_mapping, plan_of, region::Region, PLAN_START};
 
 /// 同步间隔（毫秒）。
 ///
@@ -73,13 +80,21 @@ pub fn spawn(store: AccountStore) {
     });
 }
 
-/// 一轮同步：挑一个「走活动套餐的启用账号」当代表 → 读那份配置 → 落结论。
+/// 一轮同步：两份配置各自挑代表账号 → 读取 → 落结论，互不影响。
 ///
-/// 「代表账号」这个说法要说清楚：配置本身**与账号无关**（它是 `client/configs`，
-/// 不认登录态），账号只是两件事的来源 —— ① 有没有人走这条路（没人走就不问），
-/// ② 走哪条出口（有的账号配了代理，那份配置要从同一个出口读，免得代理侧的
-/// WAF 给我们一份不同的答案）。
+/// 「代表账号」这个说法要说清楚：配置本身**与账号无关**（captcha 是
+/// `client/configs`、不认登录态；mapping 的表也是服务端全局的），账号只是
+/// 三件事的来源 —— ① 有没有人走这条路（没人走就不问），② 走哪条出口（有的
+/// 账号配了代理，那份配置要从同一个出口读，免得代理侧的 WAF 给我们一份
+/// 不同的答案），③ 端点映射的 `x-api-key`（编码套餐 API Key，参考实现的
+/// `sourceHeaders` 口径）。
 async fn sync_once(store: &AccountStore) {
+    sync_captcha_config(store).await;
+    sync_endpoint_mapping(store).await;
+}
+
+/// 第一份：风控配置（captcha 段，见模块头）。
+async fn sync_captcha_config(store: &AccountStore) {
     let Some((region, account_id)) = start_plan_account(store) else {
         return;
     };
@@ -101,9 +116,93 @@ async fn sync_once(store: &AccountStore) {
         // 失败**不动结论**：网络/代理/temporarily 5xx 都不构成免码的证据
         Err(error) => logging::verbose(
             "[ZCode]",
-            &format!("同步活动套餐的风控配置失败（保持现值）: {}", error.message),
+            &format!("同步套餐池的风控配置失败（保持现值）: {}", error.message),
         ),
     }
+}
+
+/// 第二份：端点映射（`agent/configs` 的 `proxyEndpoint.mapping`，fail-open）。
+///
+/// 两地各拉一份（mapping 按地区各存一份，且上游对两地下发的表可能不同，
+/// 参考实现的 `ultra[-zai]` 命名就是两地各一条的痕迹）。代表账号取该地区
+/// **启用且带编码套餐 API Key** 的第一个：key 挂到 `x-api-key`（参考实现口径），
+/// 没有 key 的账号不当代表 —— 匿名请求拿不拿得到表没有证据，不为它多一次
+/// 试探；没有代表 = 这一刻没有读者，直接跳过。
+async fn sync_endpoint_mapping(store: &AccountStore) {
+    for region in Region::ALL {
+        if endpoint_mapping::disabled(region) {
+            endpoint_mapping::clear(region);
+            continue;
+        }
+        let Some((account_id, credential)) = mapping_account(store, region) else {
+            continue;
+        };
+        let proxy = store
+            .get_session_by_id(&account_id)
+            .and_then(|entry| proxies::session_proxy(&entry.session));
+        match endpoint_mapping::refresh(region, Some(&credential), proxy.as_ref()).await {
+            Ok((count, changed)) => {
+                if changed {
+                    logging::log(
+                        "[ZCode]",
+                        &format!(
+                            "{} 的推理端点映射已更新（{count} 条，来源 GET /api/v1/agent/configs）",
+                            region.label()
+                        ),
+                    );
+                }
+            }
+            Err(error) => logging::verbose(
+                "[ZCode]",
+                &format!(
+                    "同步 {} 的端点映射失败（保持现值）: {}",
+                    region.label(),
+                    error.message
+                ),
+            ),
+        }
+    }
+}
+
+/// 端点映射的代表账号：该地区**启用**的 ZCode 账号里第一个带编码套餐 API Key 的
+/// （返回 `(账号 id, API Key)`）。
+///
+/// 通道不限 —— 映射对两条通道的推理 URL 都可能生效；判「启用」的口径与
+/// [`pick_start_plan_account`] 相同（`enabled == Some(false)` 才算禁用）。
+fn mapping_account(store: &AccountStore, region: Region) -> Option<(String, String)> {
+    let accounts = store.list_accounts();
+    let items: &[Value] = accounts.get("accounts").and_then(Value::as_array)?;
+    for account in items {
+        let provider = account
+            .get("provider")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if Region::from_provider_id(provider) != Some(region) {
+            continue;
+        }
+        if account.get("enabled").and_then(Value::as_bool) == Some(false) {
+            continue;
+        }
+        let id = account
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("");
+        if id.is_empty() {
+            continue;
+        }
+        // 凭证在账号记录里（`list_accounts` 的条目是列表形状，凭证读记录本体；
+        // 与 `balance::query_usage` 的取法同一条链）
+        let key = store
+            .zcode_account_record(id)
+            .and_then(|record| record.get("accessToken").and_then(Value::as_str).map(str::to_string))
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty());
+        if let Some(key) = key {
+            return Some((id.to_string(), key));
+        }
+    }
+    None
 }
 
 /// 有没有「启用 + 走活动套餐」的账号，有的话取第一个（连同它的地区与 id）。

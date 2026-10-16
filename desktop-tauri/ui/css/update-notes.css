@@ -292,6 +292,32 @@
 
 .md-body .md-quote p { margin: 4px 0; }
 
+/* 表格（GFM）：细边框 + 表头浅底；列宽交给内容与浏览器自动分，不设固定宽 */
+.md-body .md-table {
+  margin: 8px 0;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.md-body .md-table th,
+.md-body .md-table td {
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+
+.md-body .md-table th {
+  background: var(--surface-3);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.md-body .md-table th.md-ta-c,
+.md-body .md-table td.md-ta-c { text-align: center; }
+
+.md-body .md-table th.md-ta-r,
+.md-body .md-table td.md-ta-r { text-align: right; }
+
 .md-body .md-hr {
   margin: 12px 0;
   border: 0;

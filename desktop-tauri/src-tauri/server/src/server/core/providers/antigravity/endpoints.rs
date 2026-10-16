@@ -109,7 +109,7 @@ pub const METHOD_STREAM_GENERATE: &str = "streamGenerateContent";
 pub const METHOD_GENERATE: &str = "generateContent";
 /// 模型目录 + 每模型配额
 pub const METHOD_FETCH_AVAILABLE_MODELS: &str = "fetchAvailableModels";
-/// 分组额度（周 / 5 小时窗）—— 本步不用，登记给后续余额/配额展示
+/// 分组额度（周 / 5 小时窗）—— 余额窗口读数（`balance.rs`）
 pub const METHOD_RETRIEVE_QUOTA_SUMMARY: &str = "retrieveUserQuotaSummary";
 /// 订阅档 + `cloudaicompanionProject`
 pub const METHOD_LOAD_CODE_ASSIST: &str = "loadCodeAssist";
@@ -251,6 +251,13 @@ pub fn generate_url(base: &str) -> String {
 /// 模型目录端点（`{base}:fetchAvailableModels`）
 pub fn fetch_available_models_url(base: &str) -> String {
     method_url(base, METHOD_FETCH_AVAILABLE_MODELS)
+}
+
+/// 分组额度摘要端点（`{base}:retrieveUserQuotaSummary`）—— 余额窗口读数走它
+/// （Manager `modules/quota.rs::fetch_quota_summary` 的同一条；基址顺序与
+/// [`V1_BASE_URLS`] 相同：sandbox → daily → prod）
+pub fn retrieve_user_quota_summary_url(base: &str) -> String {
+    method_url(base, METHOD_RETRIEVE_QUOTA_SUMMARY)
 }
 
 /// project 发现：`loadCodeAssist`（**prod**，见 [`PROJECT_BASE_URL`]）

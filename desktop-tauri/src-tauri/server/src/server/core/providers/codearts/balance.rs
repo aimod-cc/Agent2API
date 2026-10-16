@@ -486,24 +486,34 @@ pub async fn fetch_both(
 /// `available` 只在**有积分数值**时给数：福利池是 token 不是积分，把两家的数
 /// 加在一起是一个谁也对不上的值 —— 宁可 null，让界面按 wallets 逐项显示。
 ///
-/// 「套餐积分」是**汇总口径**不是独立分账：`usageTotalPackageCredit` 的剩余/总量
-/// 恰好等于「基础包 + 赠送」两行之和（2026-10-14 实测 trial 账号：套餐 8500 =
-/// 基础包 500 + 赠送 8000，`available` 若三行全加得 17000 = 真值的 2 倍，与
-/// issue #225 的 14956 = 7478×2 同一形状）。合计时识别这种包含关系，命中就只取
-/// 分项行 —— 用容差比较，上游数值走浮点。分项缺失（比如哪天上游不再单独给
-/// 赠送行）时不剔除：宁可照旧全加，也不凭猜丢掉一笔真实的钱。
+/// 「套餐积分」是**汇总口径**不是独立分账：`usageTotalPackageCredit` 的剩余等于
+/// 各分项行之和（2026-10-14 实测 trial 账号：5172.57 = 基础包 172.57 + 按需 0 +
+/// 赠送 5000；issue #225 的 14956 = 7478×2、#261 的 11000 = 5500×2 同一形状）。
+/// 合计时识别这种包含关系，命中就只取分项行 —— 用容差比较，上游数值走浮点。
+///
+/// 分项行**不点名**（#261 之后的推广）：按需付费行（`usageOnDemandPackageCredit`）
+/// 非零的账号，「基础包 + 赠送」两行之和 ≠ 汇总行，点名判据认不出包含关系、
+/// 翻倍照旧 —— 所以分项取「除汇总行外所有带剩余积分的行」。认不出包含关系
+/// （数值对不上 / 分项缺席）时不剔除：宁可照旧全加，也不凭猜丢掉一笔真实的钱。
 pub fn usage_document(statistics: Option<&Statistics>, benefit: Option<&BenefitBalance>) -> Value {
     let mut wallets = Vec::new();
     let mut credit_left: Option<f64> = None;
     if let Some(statistics) = statistics {
-        // 「基础包 + 赠送」两行的剩余之和（任一行缺席则组合判据不成立）。
-        let component_sum = || -> Option<f64> {
+        // 分项行的剩余之和：**除汇总行外**所有带 `credit_remaining` 的行
+        // （有没有分项、有哪几族由上游的 metrics 决定，这里不点名）。
+        let parts_sum = || -> Option<f64> {
             let mut sum = 0.0;
-            for wanted in ["usageBasicPackageCredit", "usageBonusPackageCredit"] {
-                let meter = statistics.meters.iter().find(|meter| meter.name == wanted)?;
-                sum += meter.credit_remaining?;
+            let mut any = false;
+            for meter in &statistics.meters {
+                if meter.name == "usageTotalPackageCredit" {
+                    continue;
+                }
+                if let Some(left) = meter.credit_remaining {
+                    sum += left;
+                    any = true;
+                }
             }
-            Some(sum)
+            any.then_some(sum)
         }();
         for meter in &statistics.meters {
             wallets.push(json!({
@@ -519,7 +529,7 @@ pub fn usage_document(statistics: Option<&Statistics>, benefit: Option<&BenefitB
             }));
             let Some(left) = meter.credit_remaining else { continue };
             let duplicated = meter.name == "usageTotalPackageCredit"
-                && component_sum.is_some_and(|sum| (sum - left).abs() <= f64::EPSILON.max(left.abs() * 1e-6));
+                && parts_sum.is_some_and(|sum| (sum - left).abs() <= f64::EPSILON.max(left.abs() * 1e-6));
             if !duplicated {
                 credit_left = Some(credit_left.unwrap_or(0.0) + left);
             }
@@ -711,6 +721,38 @@ mod tests {
         }"#;
         let parsed = parse_statistics(body).unwrap();
         assert_eq!(Some(8500.0), usage_document(Some(&parsed), None)["available"].as_f64());
+    }
+
+    /// 按需付费行**非零**的账号：点名「基础包 + 赠送」的旧判据下，两行之和 ≠ 汇总行，
+    /// 包含关系认不出来、翻倍照旧 —— #261 报的 11000 = 5500×2 就可能是这个形状。
+    /// 分项不点名后，按需行也进分项之和，包含关系照常命中。
+    #[test]
+    fn the_summary_is_deduped_even_when_the_on_demand_row_is_nonzero() {
+        let body = r#"{
+          "metrics": [
+            {"name":"usageTotalPackageCredit","value":0,"package_credit_amount":12000,"package_credit_remain":8800,"show":true},
+            {"name":"usageBasicPackageCredit","value":0,"package_credit_amount":500,"package_credit_remain":500,"show":true},
+            {"name":"usageOnDemandPackageCredit","value":0,"package_credit_amount":3500,"package_credit_remain":300,"show":true},
+            {"name":"usageBonusPackageCredit","value":0,"package_credit_amount":8000,"package_credit_remain":8000,"show":true}
+          ]
+        }"#;
+        let parsed = parse_statistics(body).unwrap();
+        // 分项之和 500 + 300 + 8000 = 8800 = 汇总行 ⇒ 命中包含关系，只取分项
+        assert_eq!(Some(8800.0), usage_document(Some(&parsed), None)["available"].as_f64());
+
+        // 反对照：若汇总行**不含**按需（8500 = 500 + 8000）而按需另有一笔，包含关系
+        // 认不出来 ⇒ 照旧全加（17300）。这条钉住「宁加错不少算」的取舍没被顺手改掉 ——
+        // 两种语义哪种为真要靠上游实测，猜一个方向去夹都可能丢掉真实的钱。
+        let excluding = r#"{
+          "metrics": [
+            {"name":"usageTotalPackageCredit","value":0,"package_credit_amount":8500,"package_credit_remain":8500,"show":true},
+            {"name":"usageBasicPackageCredit","value":0,"package_credit_amount":500,"package_credit_remain":500,"show":true},
+            {"name":"usageOnDemandPackageCredit","value":0,"package_credit_amount":300,"package_credit_remain":300,"show":true},
+            {"name":"usageBonusPackageCredit","value":0,"package_credit_amount":8000,"package_credit_remain":8000,"show":true}
+          ]
+        }"#;
+        let parsed = parse_statistics(excluding).unwrap();
+        assert_eq!(Some(17300.0), usage_document(Some(&parsed), None)["available"].as_f64());
     }
 
     /// 包含关系不成立（数值对不上 / 分项行缺席）时不得剔除：「套餐积分」万一

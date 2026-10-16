@@ -37,8 +37,28 @@ import {
   type ProxyPoolItem, type ProxySettings,
 } from './proxies-state'
 import { t } from '../i18n'
+// 赞助位外链：与文档页/更新日志同一条路（data-external 委托 + 系统浏览器打开）。
+// 链接本体在 sponsor.ts（唯一定义点），这里只取用。
+import { handleExternalClick } from './update-shared'
+import { PROXYLANE_URL } from './sponsor'
 
 /* ─── 新增 / 编辑弹窗 ───────────────────────── */
+
+/**
+ * 赞助位里的行内链接：一处样式、一条链接（同一行的品牌名与「去获取」都用它）。
+ * 「链接只裹需要点的字」是全站赞助位的口径 —— 句子按片段拼，翻译时片段可以
+ * 各自贴合目标语言的语序。
+ */
+function SponsorLink({ children }: { children: React.ReactNode }) {
+  return (
+    <a
+      className='font-semibold text-primary-fg no-underline hover:underline'
+      href={PROXYLANE_URL}
+      data-external={PROXYLANE_URL}
+      onClick={handleExternalClick}
+    >{children}</a>
+  )
+}
 
 /**
  * 新增 / 编辑**手动**条目。
@@ -209,8 +229,15 @@ export function ProxyModal({
             </span>
           </div>
 
+          {/* 赞助位：一行提示（另两处在 README 顶部与「文档」页的网络代理示例）。
+              品牌名与句尾的「去获取」都是行内链接（SponsorLink），翻译时片段
+              可以各自贴合目标语言的语序 */}
           <p className='text-xs leading-[1.65] text-subtle'>
-            {t('想要 Clash Verge 的出口？那类条目由工具条的')}<b>{t('「同步 Clash Verge」')}</b>{t('整体 镜像进来（进本页时也会自动同步一次），名称与端口跟随 Clash、因此是只读的 —— 不必（也不能）在这里手工填。')}
+            {t('需要干净的出口？')}
+            <SponsorLink>ProxyLane</SponsorLink>
+            {t(' AI 账号专用静态住宅 IP：Scamalytics 低欺诈评分，不限流量，首单 75 折（AGENT2API25）')}
+            {' '}
+            <SponsorLink>{t('去获取')}</SponsorLink>
           </p>
 
           <div className='min-h-[18px] text-xs text-subtle'>{status}</div>

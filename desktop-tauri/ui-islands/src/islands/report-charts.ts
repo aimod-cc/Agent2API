@@ -835,7 +835,13 @@ export function cacheRateCells(rates: Record<string, CacheRateWindow> | undefine
 /* ─── 板块六：近 24 小时命中率折线 ────────── */
 
 export type ChartHit = { key: string; x: number; width: number; tip: string }
-export type ChartText = { key: string; x: number; y: number; text: string; anchor: 'start' | 'middle' | 'end' }
+/** `rotate` = 这串读数竖排（绕 (x, y) 转 -90°、自下而上读，x 为这一列的中线）：
+ *  柱状图的密区间靠它把每天的读数都标下（见 dailyTrendView 的三级排法） */
+export type ChartText = {
+  key: string; x: number; y: number; text: string
+  anchor: 'start' | 'middle' | 'end'
+  rotate?: boolean
+}
 export type ChartLine = { points: string; dots: { key: string; cx: number; cy: number }[] }
 
 export type CacheTrendView = {
@@ -1040,11 +1046,22 @@ export type DailyTrendView = {
 }
 
 /**
+ * 竖排读数所需的最小列宽：rotate(-90) 后一串数字只占一行字高（11px 字号加一点缝）。
+ * 列宽（step）小于它时相邻两列的字会互相压住，只能回到「只标最大的那几根」。
+ */
+const VERTICAL_LABEL_MIN_STEP = 13
+
+/**
  * 按天 Token 柱状图。柱顶直接标出当天的用量。
  *
- * 标注的取舍与折线图一致（见 cacheTrendView）：给的是「扫一眼看量级」的读数，所以不必
- * 每根柱子都标 —— 柱子密到标注必然重叠时，只标当区间里最大的那几根，其余靠悬停气泡读。
- * 这样图始终是干净的，而峰值一眼可见。
+ * ── 标注的三级排法 ────────────────────────────────
+ * 1. **横排**：每根柱子的读数横着摆在柱顶，相邻不重叠 —— 区间短时就这样（`allFit`）。
+ * 2. **竖排**：横排挤不下（近 30 天起就开始挤）时整排改竖排 rotate(-90)，读数自下而上
+ *    贴着柱顶排。一串数字横过来只占一行字高，列宽十几像素就够 —— 每一天的量都标得出，
+ *    不必再悬停补读。这是「近 30 天」这类常规区间的主排法。
+ * 3. **只标峰值**：连竖排都塞不进（柱子密到列宽只剩几像素，如「全部」这种超长区间）时，
+ *    退回只标最大的那几根 —— 此时任何排法都必然糊成一片，索性让峰值一眼可见，其余靠气泡。
+ *    挑的时候按用量从高到低放、遇到会压住已放标注的就跳过，所以标出来的仍然互不遮挡。
  *
  * `colorOf` 给悬停气泡里模型行的色点用（见 [`modelTipLines`]），缺省时是纯文本行。
  */
@@ -1060,12 +1077,23 @@ export function dailyTrendView(
   const height = 240
   const pad = { left: 50, right: 14, top: 26, bottom: 26 }
   const plotW = Math.max(40, width - pad.left - pad.right)
+  const step = plotW / list.length
+
+  // 柱顶读数先在这里定排法：pad.top 得跟着排法走（竖排要从柱顶往上长出最长那一串），
+  // 而 plotH 又要用到 pad.top，所以先算这一步再定版面
+  const texts = list.map(item => (Number(item.tokens) > 0 ? formatTokens(item.tokens) : ''))
+  const widest = Math.max(0, ...texts.map(textWidth))
+  const allFit = texts.every(text => !text) || widest + 4 <= step   // +4：相邻标注之间留一点缝
+  const vertical = !allFit && step >= VERTICAL_LABEL_MIN_STEP
+  // 竖排读数自柱顶往上排，顶格柱子的标注也不能被裁掉：顶部留出最长那一串的高度。
+  // textWidth 是估算值（见它自己的说明），乘个系数放宽一点当余量。
+  if (vertical) pad.top = 10 + Math.ceil(widest * 1.25)
+
   const plotH = height - pad.top - pad.bottom
 
   const values = list.map(item => Number(item.tokens) || 0)
   const peak = Math.max(...values)
   const yMax = axisMax(peak)
-  const step = plotW / list.length
   // 极长区间（接近后端 4000 天上限）下柱子只剩一两像素：此时不再压窄，保证看得见
   const barW = Math.max(1, Math.min(28, step * 0.68))
   const baseY = pad.top + plotH
@@ -1109,38 +1137,54 @@ export function dailyTrendView(
     })
   })
 
-  // 柱顶读数：每根柱子都要放得下才逐一标注（区间一长、柱子一密就必然重叠）。放不下时退成
-  // 「只标最大的那几根」—— 峰值是最该一眼看到的那个数，而每一根的具体值仍能从气泡读到。
-  const texts = list.map(item => (Number(item.tokens) > 0 ? formatTokens(item.tokens) : ''))
-  const widest = Math.max(0, ...texts.map(textWidth))
-  const allFit = texts.every(text => !text) || widest + 4 <= step   // +4：相邻标注之间留一点缝
+  const barLabels: ChartText[] = []
+  // 已放下的标注占位（只给第三级退让做避让用；横排由 allFit 保证不叠、竖排各占一列）
+  const boxes: { left: number; right: number; top: number; bottom: number }[] = []
 
-  // 退让模式下取用量最高的前几名；并列多少就取多少（上限只是防极端区间标出一大串）
-  const marked = new Set<number>()
-  if (!allFit) {
-    list
+  /** 放一根柱子的读数。`avoid` 为真时与已放好的标注相撞就返回 null（见第三级退让） */
+  const place = (index: number, avoid: boolean): ChartText | null => {
+    const text = texts[index]
+    const top = yAt(Number(list[index].tokens) || 0)
+    const x = round1(pad.left + step * index + step / 2)
+    // 竖排：贴着柱顶往上排，rotate(-90) 后自锚点往上走，列内左右居中由 dominantBaseline 管
+    // （见 report-page 的 ChartLabels）。顶部预留见上面的 pad.top，满格柱子的读数也裁不到。
+    if (vertical) return { key: `b${index}`, x, y: round1(top - 6), anchor: 'start', text, rotate: true }
+    const y = top - 6
+    // 顶到画布边（柱子接近 100%）时翻到柱子内侧，免得文字被裁掉
+    const inside = y - 9 < pad.top - 10
+    const ly = round1(inside ? y + 13 : y)
+    if (avoid) {
+      const half = textWidth(text) / 2
+      const box = { left: x - half, right: x + half, top: ly - 8.5, bottom: ly + 2.5 }
+      // 留 2px 横向、1px 纵向的呼吸：贴着不重叠也算「挤在一起」，一样难认（与折线图同一口径）
+      if (boxes.some(item => box.left < item.right + 2 && box.right > item.left - 2
+        && box.top < item.bottom + 1 && box.bottom > item.top - 1)) return null
+      boxes.push(box)
+    }
+    return { key: `b${index}`, x, y: ly, anchor: 'middle', text }
+  }
+
+  if (allFit || vertical) {
+    texts.forEach((text, index) => {
+      if (!text) return
+      const placed = place(index, false)
+      if (placed) barLabels.push(placed)
+    })
+  } else {
+    // 第三级退让：只标用量最高的那几根，**按用量从高到低依次放、撞上已放好的就跳过** ——
+    // 峰值常落在相邻几天（连着两个 13 亿的日子），列宽只剩几像素时谁也不让谁，读数必然叠成
+    // 一团；避让之后标出来的一定互不遮挡，代价是相邻的那根改由悬停气泡读。上限 8 根只是
+    // 防极端区间标出一大串。
+    const ranked = list
       .map((item, index) => ({ index, value: Number(item.tokens) || 0 }))
       .filter(item => item.value > 0)
       .sort((left, right) => right.value - left.value)
-      .slice(0, 8)
-      .forEach(item => marked.add(item.index))
+    for (const item of ranked) {
+      if (barLabels.length >= 8) break
+      const placed = place(item.index, true)
+      if (placed) barLabels.push(placed)
+    }
   }
-
-  const barLabels: ChartText[] = []
-  list.forEach((item, index) => {
-    if (!texts[index]) return
-    if (!allFit && !marked.has(index)) return
-    const y = yAt(Number(item.tokens) || 0) - 6
-    // 顶到画布边（柱子接近 100%）时翻到柱子内侧，免得文字被裁掉
-    const inside = y - 9 < pad.top - 10
-    barLabels.push({
-      key: `b${index}`,
-      x: round1(pad.left + step * index + step / 2),
-      y: round1(inside ? y + 13 : y),
-      anchor: 'middle',
-      text: texts[index],
-    })
-  })
 
   // 热区整列铺满（含零值日），鼠标扫过任何一列都能读到当天读数。
   // **这一层才是柱状图悬停读数的实际来源**（柱子自身不挂 data-tip），所以色点

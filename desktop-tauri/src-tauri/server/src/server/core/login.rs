@@ -475,6 +475,70 @@ impl LoginService {
         Ok(account_id)
     }
 
+    /// OrcaTerm 网页登录收尾：校验任务 → 归一化令牌 → 上游探活 → 落账号。
+    ///
+    /// ── 与 KukuAI 收尾的同与异 ──────────────────────────────────
+    /// 同：交回的都是「登录窗口里的登录态」（那家是百度域 Cookie，这家是
+    /// 控制台写入的 `ot_session`），都由壳侧进程 POST 进来，任务校验、
+    /// 幂等、写回 `/wait` 的时序完全一致（见 `finish_kuku_login`）。
+    /// 异：这家的令牌必须**当场通过上游探活**才落库（`complete_login` 里打
+    /// `GetUserInfo`）—— 过期/被撤销的令牌落下来只会得到必然 401 的账号；
+    /// KukuAI 那条是「凭证本身有效、业务令牌换发另说」，所以它带警告照样落。
+    ///
+    /// 探活失败**不写任务终态**：令牌可能只是刚写入、上游尚未生效（实测无此
+    /// 现象，但代价为零），壳侧会退避重试；真正的错误文案由返回的 `Err`
+    /// 透给壳侧日志，最终由 `/wait` 的超时兜底。
+    pub async fn finish_orcaterm_login(
+        &self,
+        state: &str,
+        token: &str,
+    ) -> Result<String, GatewayError> {
+        let state = state.trim();
+        if state.is_empty() {
+            return Err(GatewayError::with_status(400, "缺少 state，无法确认这次回调归属"));
+        }
+        let Some(handle) = self.tasks.get(state) else {
+            return Err(GatewayError::with_status(
+                404,
+                "登录任务不存在或已过期，请重新发起网页登录",
+            ));
+        };
+        let task = handle.snapshot();
+        if task.canceled {
+            return Err(GatewayError::with_status(400, "登录已取消，请重新发起"));
+        }
+        if task.done {
+            // 幂等：同一个登录态被送来两次（Cookie 检测每拍触发）不是错误
+            return Ok(String::new());
+        }
+        if task.provider != crate::server::core::providers::kind_id(crate::server::core::providers::ProviderKind::OrcaTerm)
+        {
+            return Err(GatewayError::with_status(
+                400,
+                "该登录任务不属于 OrcaTerm，请重新发起",
+            ));
+        }
+        let credentials =
+            crate::server::core::providers::orcaterm::login::complete_login(token).await?;
+        let store = self.store.clone();
+        let account = store
+            .add_orcaterm_account(&credentials, None, "web")
+            .map_err(|error| GatewayError::with_status(error.status_code, error.message))?;
+        let account_id = account
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let label = account
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("OrcaTerm 账号")
+            .to_string();
+        finish_task(&handle, &json!({ "account": account, "edition": task.edition }));
+        logging::log("[Login]", &format!("✅ OrcaTerm 网页登录成功: {label}"));
+        Ok(account_id)
+    }
+
     /// 发起一次 **Cline 设备授权登录**（WorkOS RFC 8628）。
     ///
     /// ── 与前两条链路的区别（为什么是第三种形态）─────────────────

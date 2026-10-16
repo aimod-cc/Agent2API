@@ -28,7 +28,10 @@
 //!   · AutoClaw（OAuth）：优先接收 loopback 回调，远程面板由网页端粘贴
 //!     最终回调地址兜底；CatPaw 由服务端 poll-token 兜底；
 //!   · 小浣熊：网页端把授权页切换到官方 `redirect` 分支，直接回到网关的
-//!     HTTP 回调；Trae / Accio / CodeArts：网页端自动提供“粘贴回调地址”兜底。
+//!     HTTP 回调 —— 前提是浏览器以回环地址访问面板（上游白名单只收
+//!     http://127.0.0.1 / localhost / [::1] + 显式端口，见
+//!     `raccoonCallbackOriginProblem`），不满足时发起前就弹指引拦下；
+//!     Trae / Accio / CodeArts：网页端自动提供“粘贴回调地址”兜底。
 //!
 //! ── 壳特有命令的降级 ────────────────────────────────────────
 //! 窗口主题、托盘、改端口、软件更新安装、桌面设置、文件对话框导入导出
@@ -180,8 +183,56 @@ pub fn shim_js() -> &'static str {
   // 浏览器地址栏不会暴露授权码。该页面还支持 redirect 分支：去掉 desktop
   // 标记后，它会把 authorization_code 追加到 redirect URL 并导航过去。
   // 这里把回调地址放在当前面板 Origin，浏览器因此能直接访问 Docker 网关。
+  //
+  // ── 为什么发起前要先检查面板自身地址（raccoonCallbackOriginProblem）──
+  // 上游授权页对 redirect 参数有一份写死的白名单（实测 2026-10）：http 协议
+  // + 回环主机（127.0.0.1 / localhost / [::1]）+ 显式端口；域名、局域网 IP、
+  // https、省略端口一律拒收 —— 服务端直接把授权上下文置空，页面渲染
+  // 「授权链接无效，请从客户端重新发起登录。」这句话对我们的用户毫无信息量
+  // （链接是面板自己拼的，用户没改过任何参数），所以在发起登录前先按同一
+  // 口径检查面板地址，不满足就弹指引拦下，不送用户去授权页吃那句报错。
+  function raccoonCallbackOriginProblem() {
+    var hostname = window.location.hostname;
+    var port = String(window.location.port || '');
+    var loopback = hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '[::1]';
+    if (window.location.protocol === 'http:' && loopback && port !== '') return null;
+    var reason;
+    if (window.location.protocol !== 'http:') {
+      reason = '小浣熊授权页只接受 http:// 的回调地址，当前面板以 '
+        + window.location.protocol + ' 访问';
+    } else if (!loopback) {
+      reason = '小浣熊授权页只接受 127.0.0.1 / localhost 的回调地址，当前面板主机是 ' + hostname;
+    } else {
+      reason = '小浣熊授权页要求回调地址带显式端口，当前面板地址未带（默认端口访问）';
+    }
+    var displayPort = port || (window.location.protocol === 'https:' ? '443' : '80');
+    var html = '<div style="margin-bottom:10px;">小浣熊官方授权页只接受<strong>浏览器本机的回环地址</strong>'
+      + '（127.0.0.1 / localhost，http 且带端口）作为登录回调；当前面板地址是 <code>'
+      + escapeHtml(window.location.origin) + '</code>，继续发起只会看到「授权链接无效」。</div>'
+      + '<div style="margin-bottom:6px;">可行的做法：</div>'
+      + '<div style="margin-bottom:6px;">① 在打开面板的这台电脑上，改用 <code>http://localhost:'
+      + escapeHtml(displayPort) + '</code> 访问面板后再登录；面板部署在别的机器时，先做端口转发'
+      + '（例如 <code>ssh -L ' + escapeHtml(displayPort) + ':127.0.0.1:' + escapeHtml(displayPort)
+      + ' 用户@面板主机</code>，端口按实际改）。</div>'
+      + '<div>② 改用「粘贴 token / refreshToken」方式添加小浣熊账号，不走授权页。</div>';
+    return { title: '小浣熊网页登录无法在当前地址发起', html: html, reason: reason };
+  }
+
+  // 预检不过的完整处置：先弹指引层（模态，细节在这里讲清），用户关闭后再
+  // reject —— 引擎会 toast 一次 reason 收尾（弹层承载细节，toast 只做结论）。
+  async function reportRaccoonCallbackProblem(problem) {
+    await ensureOverlay(problem.title, problem.html, '知道了');
+    throw new Error(problem.reason);
+  }
+
   function buildRaccoonWebAuthUrl(provider, state, authUrl) {
     if (provider !== 'raccoon') return authUrl;
+    // 防御纵深：startLogin 已预检过（弹指引并拦下）。这里再查一次，是因为
+    // 本函数是 redirect 分支的唯一入口 —— 未来新增调用方不必记得「必须回环
+    // 访问」这条前提；走到这里才失败时，runLoginFlow 的 finally 会关掉窗口，
+    // 已建的后台任务无人认领会自行超时落定。
+    var problem = raccoonCallbackOriginProblem();
+    if (problem) throw new Error(problem.reason);
     var authorizeUrl;
     try {
       authorizeUrl = new URL(authUrl, window.location.href);
@@ -678,6 +729,14 @@ pub fn shim_js() -> &'static str {
     getState: function () { return call('GET', '/api/session'); },
     startLogin: function (edition, mode, provider) {
       var target = provider || 'workbuddy';
+      // 小浣熊的 redirect 分支只有在浏览器以回环地址访问面板时才成立
+      // （前提见 raccoonCallbackOriginProblem 的注释）。预检不过就不发
+      // /start（省一个注定失败的登录任务），弹指引并 reject，由引擎 toast
+      // 收尾 —— 用户看到的不再是授权页那句「授权链接无效」。
+      if (target === 'raccoon') {
+        var problem = raccoonCallbackOriginProblem();
+        if (problem) return reportRaccoonCallbackProblem(problem);
+      }
       return runLoginFlow(target, call('POST', '/api/session/login/start', {
         edition: edition || 'cn',
         provider: target,
@@ -884,12 +943,12 @@ pub fn shim_js() -> &'static str {
     getProxyPool: function () { return call('GET', '/api/proxies/pool'); },
     createProxyPoolItem: function (payload) { return call('POST', '/api/proxies/pool', payload || {}); },
     updateProxyPoolItem: function (payload) { return call('POST', '/api/proxies/pool/update', payload || {}); },
+    // 启用 / 禁用（三种来源都放行；订阅节点禁用时后端会走关闭监听端口流程，
+    // 响应带 `listener`：none / closing / opening —— 前端据此轮询列表看端口落地）
+    setProxyPoolItemEnabled: function (payload) { return call('POST', '/api/proxies/pool/enable', payload || {}); },
     removeProxyPoolItem: function (id) { return call('POST', '/api/proxies/pool/remove', { id: String(id || '') }); },
     testProxyPoolItem: function (id) { return call('POST', '/api/proxies/pool/test', { id: String(id || '') }); },
     syncClashToProxyPool: function () { return call('POST', '/api/proxies/pool/sync-clash', {}); },
-    // 补建订阅节点监听器（与桌面壳 bridge.rs 的同名方法成对存在，契约见 api::proxies）
-    // payload 可选 `{ids}`（批量测试把那一批条目一次性补建并等就绪；不带 = 只补已有缺口）
-    provisionProxyPool: function (payload) { return call('POST', '/api/proxies/pool/provision', payload || {}); },
     // 代理设置（「网络代理」页的设置弹窗；与桌面壳 bridge.rs 的同名方法
     // 成对存在，契约见 api::proxies 的模块头 settings 两条）
     getProxySettings: function () { return call('GET', '/api/proxies/settings'); },
@@ -907,6 +966,8 @@ pub fn shim_js() -> &'static str {
     downloadKernel: function (payload) { return call('POST', '/api/subscriptions/kernel/download', payload || {}); },
     cancelKernelDownload: function () { return call('POST', '/api/subscriptions/kernel/download/cancel', {}); },
     restartKernel: function () { return call('POST', '/api/subscriptions/kernel/restart', {}); },
+    // 手动关闭内核（与桌面壳 bridge.rs 的同名方法成对存在；只停进程，订阅与端口注册表保留）
+    stopKernel: function () { return call('POST', '/api/subscriptions/kernel/stop', {}); },
     removeKernel: function () { return call('POST', '/api/subscriptions/kernel/remove', {}); },
     // 文件夹选择框是**壳的能力**（web 版没有壳）：回 `unsupported`，界面据此提示
     // 手输路径 —— 只回 `canceled` 的话，点一下按钮什么都不会发生，用户会以为卡了
@@ -1057,6 +1118,10 @@ pub fn shim_js() -> &'static str {
     // GitHub 令牌：读只报 {filled, origin}，写传 {token: '…' | null}
     getUpdateToken: function () { return call('GET', '/api/update/token'); },
     setUpdateToken: function (payload) { return call('POST', '/api/update/token', payload); },
+    // 「加入 beta 版」：读只报 {enabled}，写传 {enabled: true|false}（与桌面 bridge
+    // 逐字同形 —— 两侧接口名与签名必须一致，界面代码零改动地跑在两边）
+    getUpdateBeta: function () { return call('GET', '/api/update/beta'); },
+    setUpdateBeta: function (payload) { return call('POST', '/api/update/beta', payload); },
     downloadUpdate: function (payload) { return invokeShell('download_update', payload); },
     updateProgress: function () { return invokeShell('update_progress'); },
     cancelUpdate: function () { return invokeShell('cancel_update'); },
@@ -1078,6 +1143,15 @@ pub fn shim_js() -> &'static str {
     getSanitize: function () { return call('GET', '/api/sanitize'); },
     saveSanitize: function (enabled) {
       return call('PUT', '/api/sanitize', { sanitizeBlacklistFingerprints: enabled === true });
+    },
+
+    // ── 开发者角色兼容 ──
+    // 与桌面桥（src/bridge.rs 的 getDeveloperRoleCompat / saveDeveloperRoleCompat）
+    // 同一映射：两边接口名与签名必须一致，界面代码零改动地跑在两边
+    //（漏一侧的症状见 getClineHeaders 那段）。
+    getDeveloperRoleCompat: function () { return call('GET', '/api/developer-role-compat'); },
+    saveDeveloperRoleCompat: function (enabled) {
+      return call('PUT', '/api/developer-role-compat', { developerRoleCompat: enabled === true });
     },
 
     // ── Cline 伪装头（转发头逐键覆盖）──
@@ -1163,6 +1237,26 @@ pub fn shim_js() -> &'static str {
       await call('POST', '/api/panel/logout', {});
       // 服务端已撤销会话链；本地保管的双令牌一并清掉。
       clearPanelAuth();
+    },
+
+    // ── 直连网关的凭证（AI 助手页专用；桌面 bridge 的同名方法见 bridge.rs）
+    // 助手页为流式对话直接 fetch 网关基址、不经 call（见 ui-islands 的
+    // assistant-state.ts），那条请求带什么凭证由这里说了算 —— 口径必须与
+    // httpCall 完全一致，否则会出现「设置页能读、助手页 401」这种分叉：
+    //   · 直连环境：会话在 HttpOnly cookie 里，同源请求浏览器自动带，
+    //     这张表通常为空（令牌不进 JS 正是我们想保住的性质）；
+    //   · 宿主中转（cookie 往返不通）：令牌在 localStorage，必须放进
+    //     `x-panel-token`（自定义头被剥时还有标准的 Authorization 兜底）；
+    //   · 未注册管理员的部署：用户输入的网关 Key 是唯一凭证。
+    directCredentials: function () {
+      var headers = {};
+      var access = storedPanelToken('access');
+      if (access) {
+        headers['x-panel-token'] = access;
+        headers['Authorization'] = 'Bearer ' + access;
+      }
+      if (apiKey) headers['x-api-key'] = apiKey;
+      return Promise.resolve(headers);
     },
 
     // ── 机器人校验开关（登录 / 注册的 ALTCHA proof-of-work）──

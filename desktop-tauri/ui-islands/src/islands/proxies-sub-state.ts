@@ -32,6 +32,10 @@ export type SubscriptionItem = {
   id: string
   name: string
   url: string
+  /** 来源：url = 订阅链接（缺省）；local = 本地 YAML 文件导入 */
+  kind?: 'url' | 'local'
+  /** 本地文件订阅的原文件名（只做展示） */
+  fileName?: string
   enabled: boolean
   createdAt: number
   updatedAt: number
@@ -47,6 +51,12 @@ export type KernelStatus = {
   running: boolean
   controllerPort?: number
   listenerCount: number
+  /**
+   * 手动关闭闩（`StatusSnapshot.halted`）：刚点过「关闭内核」时为 true，
+   * 「启动内核」执行后清零。停止态文案据此区分「手动关闭」与「已停止」；
+   * 后端同时用它拒掉测试 / 保存引用的静默重启。
+   */
+  halted?: boolean
   /** 当前内核目录（配置里选了别的位置就是它） */
   kernelDir: string
   /** 默认内核目录（下载弹窗「恢复默认」的目标值，由后端给） */
@@ -106,6 +116,8 @@ export type SubscriptionBridge = {
   downloadKernel?: (choice?: KernelDownloadChoice) => Promise<KernelStatus | null | undefined>
   cancelKernelDownload?: () => Promise<KernelStatus | null | undefined>
   restartKernel?: () => Promise<KernelStatus | null | undefined>
+  /** 手动关闭内核（只停进程；订阅与端口注册表保留，见 stopKernel） */
+  stopKernel?: () => Promise<KernelStatus | null | undefined>
   removeKernel?: () => Promise<KernelStatus | null | undefined>
   /** 桌面壳的文件夹选择框（下载弹窗的「选择目录…」）；web 版没有壳，
    *  回 `{canceled: true, unsupported: true}` —— 界面据此提示「手填路径」
@@ -278,19 +290,43 @@ async function pollSectionAfterChange(): Promise<void> {
 
 /* ─── 订阅动作 ───────────────────────────────── */
 
-export async function addSubscription(name: string, url: string): Promise<SubscriptionsPayload | null> {
+/**
+ * 新增订阅的输入（两种来源二选一）：
+ *   · 链接订阅 → `url`；
+ *   · 本地文件 → `kind: 'local'` + `contentB64`（`fileName` 只做展示）。
+ * `contentB64` 走 base64（与二维码图片同一传输形态），后端解出明文并校验。
+ */
+export type NewSubscriptionInput = {
+  name: string
+  kind?: 'url' | 'local'
+  url?: string
+  fileName?: string
+  contentB64?: string
+}
+
+export async function addSubscription(input: NewSubscriptionInput): Promise<SubscriptionsPayload | null> {
   const bridge = wb().workbuddyDesktop
-  const data = await bridge?.addSubscription?.({ name: name.trim(), url: url.trim(), enabled: true })
+  const data = await bridge?.addSubscription?.({ enabled: true, kind: 'url', url: '', ...input })
   accept(data)
-  toast(t('已新增订阅「{name}」，内核正在同步节点…', { name: name.trim() }))
+  toast(t('已新增订阅「{name}」，内核正在同步节点…', { name: input.name.trim() }))
   refreshPool()
   void pollSectionAfterChange()
   return data ?? null
 }
 
+/** 编辑订阅的载荷：本地订阅换文件时带 `contentB64`（不带 = 内容保持不变） */
+export type SaveSubscriptionPayload = {
+  name: string
+  url?: string
+  enabled: boolean
+  kind?: 'url' | 'local'
+  fileName?: string
+  contentB64?: string
+}
+
 export async function saveSubscription(
   item: SubscriptionItem,
-  payload: { name: string; url: string; enabled: boolean },
+  payload: SaveSubscriptionPayload,
 ): Promise<void> {
   const bridge = wb().workbuddyDesktop
   const data = await bridge?.saveSubscription?.({ id: item.id, ...payload })
@@ -306,7 +342,13 @@ export async function toggleSubscription(item: SubscriptionItem, enabled: boolea
   if (state.pending) return
   patch({ pending: true })
   try {
-    const data = await bridge?.saveSubscription?.({ id: item.id, name: item.name, url: item.url, enabled })
+    const data = await bridge?.saveSubscription?.({
+      id: item.id,
+      name: item.name,
+      url: item.url,
+      kind: item.kind,
+      enabled,
+    })
     accept(data)
     toast(enabled ? t('已启用「{name}」', { name: item.name }) : t('已禁用「{name}」', { name: item.name }))
     refreshPool()
@@ -473,6 +515,52 @@ export async function restartKernel(): Promise<void> {
 }
 
 /**
+ * 手动关闭内核（界面上的「关闭内核」；停止后按钮换回「启动内核」）。
+ *
+ * ── 只停进程，不动配置 ─────────────────────────────────────
+ * 与「最后一条订阅没了」那条自动停不同：订阅还在、账号引用还在，池条目与
+ * 端口注册表**原样保留** —— 「启动内核」后端口原位写回，账号引用不漂移。
+ * 所以这里**不刷代理池**（池没有变，刷了也是同一份）。
+ *
+ * 停进程本身是毫秒级的，但命令要走内核 worker 的串行队列（前面可能排着
+ * 一次重启 / 下载），所以照旧轮询到 `running` 真的落成 false 再收手 ——
+ * 只看「没抛错」就报成功，用户会看到「已关闭」而内核还在跑。
+ */
+export async function stopKernel(): Promise<void> {
+  const bridge = wb().workbuddyDesktop
+  if (typeof bridge?.stopKernel !== 'function') {
+    toast(t('当前环境不支持订阅（桥接方法缺失）'), 'err')
+    return
+  }
+  if (state.pending) return
+  patch({ pending: true })
+  try {
+    const first = await bridge.stopKernel()
+    if (first && state.data) patch({ data: { ...state.data, kernel: first } })
+    // 上限 5 秒（10 轮 × 500ms）：停进程是毫秒级，排队等一轮重启才需要更久
+    for (let round = 0; round < 10; round += 1) {
+      const next = await bridge.getKernelStatus?.()
+      if (next && state.data) patch({ data: { ...state.data, kernel: next } })
+      if (next && next.running === false) break
+      await new Promise(resolve => setTimeout(resolve, 500))
+    }
+    const finalKernel = state.data?.kernel
+    if (finalKernel?.running === false) {
+      toast(t('内核已关闭（订阅与端口注册表保留，「启动内核」后原位恢复）'))
+    } else {
+      const reason = finalKernel?.lastError || t('内核没有在超时内停下来')
+      toast(t('关闭内核失败：{reason}', { reason }), 'err')
+    }
+    void loadSection(true)
+  } catch (error) {
+    toast(t('关闭内核失败：{reason}', { reason: errorMessage(error) }), 'err')
+    void loadSection(true)
+  } finally {
+    patch({ pending: false })
+  }
+}
+
+/**
  * 删除已下载的内核（界面上的「删除内核」）。
  *
  * ── 这是破坏性动作，但**不删订阅** ─────────────────────────
@@ -565,4 +653,18 @@ export async function decodeQrImage(file: File): Promise<string> {
   const url = data?.url
   if (!url) throw new Error(t('二维码里没有订阅链接'))
   return url
+}
+
+/**
+ * 本地 YAML 文件 → base64（data URL 形态，后端剥前缀）：与 decodeQrImage
+ * 同一套传法 —— YAML 原文走 JSON 转义容易在壳层被改写坏，base64 原样达。
+ * 服务端负责解码 + 校验（YAML 形状 / 编码 / 节点名），这里只读不验。
+ */
+export function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(new Error(t('文件读取失败')))
+    reader.readAsDataURL(file)
+  })
 }

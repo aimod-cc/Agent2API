@@ -119,6 +119,14 @@ export type UpdateBridge = {
   getUpdateToken(): Promise<UpdateTokenStatus | null | undefined>
   /** 保存 / 清除 GitHub 令牌（token 传 null = 清除） */
   setUpdateToken(payload: { token: string | null }): Promise<UpdateTokenStatus | null | undefined>
+  /** 「加入 beta 版」开关的读数（`/api/update/beta`）：只有 enabled 一个字段 */
+  getUpdateBeta(): Promise<{ enabled?: boolean } | null | undefined>
+  /** 写「加入 beta 版」：true = 加入（此后检查把 GitHub 的预发布版一并纳入候选）。
+   *  写响应里的 saved = 是否落盘成功（false = 本次运行已生效，重启回到原通道） */
+  setUpdateBeta(payload: { enabled: boolean }): Promise<{
+    enabled?: boolean
+    saved?: boolean
+  } | null | undefined>
   /** 间隔型任务清单：「自动检查更新」（任务 id 'updateCheck'）的开关与间隔读它 ——
    *  那条任务的配置入口收进了「更新设置」弹窗（update-settings.tsx） */
   getScheduledTasks?: () => Promise<{

@@ -188,7 +188,10 @@ pub(super) async fn query_usage(
                 if !has_wallets(&value) && !coding_key.is_empty() {
                     match super::monitor::query(region, &coding_key, proxy.as_ref()).await {
                         Ok(windows) if has_wallets(&windows) => {
-                            return Ok(merge_monitor_windows(value, windows))
+                            // 明细挂在合并**之后**：`credits` 读的是这份文档最终的
+                            // `wallets`（此时是监控通道的窗口行），与余额列显示的完全
+                            // 同源 —— 见 [`with_credits`]。
+                            return Ok(with_credits(merge_monitor_windows(value, windows)))
                         }
                         Ok(_) => {}
                         Err(error) => {
@@ -204,7 +207,7 @@ pub(super) async fn query_usage(
                         }
                     }
                 }
-                return Ok(value);
+                return Ok(with_credits(value));
             }
             Err(error) => {
                 logging::verbose(
@@ -222,7 +225,7 @@ pub(super) async fn query_usage(
     }
     if !coding_key.is_empty() {
         match super::monitor::query(region, &coding_key, proxy.as_ref()).await {
-            Ok(value) => return Ok(value),
+            Ok(value) => return Ok(with_credits(value)),
             Err(error) => {
                 logging::verbose(
                     "[Usage]",
@@ -788,6 +791,94 @@ fn merge_monitor_windows(billing: Value, windows: Value) -> Value {
         Value::String("monitor".to_string()),
     );
     merged
+}
+
+/// 逐桶明细行（账号页「积分明细」弹层的输入；行形状与 workbuddy / trae 两家
+/// 同一套 —— 界面因此只写一个读取器）。
+///
+/// ── 原料是归一化好的 `wallets`，两个通道通用 ──────────────────
+/// billing 与 monitor 归一化出的钱包行是同一个形状（见各自 `normalize`），这里
+/// 不区分通道：有绝对数就出一行；只有比例（`remainingPercent`）的行整条跳过 ——
+/// 行契约里没有百分比的位置，硬出只能画一个「—」，而这类读数在悬停摘要里已有
+/// （纯比例账号的 `credits` 键因此整个不写，行为与改动前一致）。
+///
+/// ── 三个数怎么取 ────────────────────────────────────────────
+///   `total` ← `total`、`used` ← `used`、`remain` ← `balance`（余额列的读数就是
+///   「剩余」）。归一化时缺失写的是 **null**，这里**不写这个键** —— 界面用
+///   `Number(null) === 0` 判空，写 null 会被画成「只剩 0」。
+///
+/// ── 时刻与单位都不写 ────────────────────────────────────────
+///   * `expireAt`：桶上的 `period_end` 是**周期边界**（日桶是「今天 24 点」，见
+///     模块头），不能当「到期」用；per-bucket 的到期时刻未证实，不编；
+///   * `unit`：文档级 `unit` 取自第一个非空桶单位，多桶同单位是常态，行内再标
+///     一遍是噪声（行契约：只在与文档级不同时才写）。
+///
+/// ── 顺序保持 wallets 原序，不做排序 ─────────────────────────
+/// wallets 的顺序就是上游计划的顺序，与余额列主读数的取桶顺序同源；再排一次会让
+/// 明细与主读数顺序分叉。
+///
+/// `planName` 非空时写进 `grantReason`：行契约里承载「来源一句话」的键就是它
+/// （前端把说明行末尾那半句读 `grantReason`）—— 这一家的来源就是给这份额度的
+/// 套餐名（`normalize` 里 `owner_name` 的产物，认不出归属时是 null，同样不写）。
+fn credits_of(wallets: &[Value]) -> Vec<Value> {
+    let mut rows: Vec<Value> = Vec::new();
+    for wallet in wallets {
+        let total = wallet.get("total").and_then(number_of);
+        let used = wallet.get("used").and_then(number_of);
+        let remain = wallet.get("balance").and_then(number_of);
+        // 纯比例窗口（三个数全缺，只有 `remainingPercent`）：整行跳过（见函数头）
+        if total.is_none() && used.is_none() && remain.is_none() {
+            continue;
+        }
+        let mut row = Map::new();
+        row.insert(
+            "name".to_string(),
+            Value::String(
+                wallet
+                    .get("displayName")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .to_string(),
+            ),
+        );
+        for (key, value) in [("total", total), ("used", used), ("remain", remain)] {
+            if let Some(value) = value {
+                row.insert(key.to_string(), json!(value));
+            }
+        }
+        if let Some(plan) = wallet
+            .get("planName")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            row.insert("grantReason".to_string(), Value::String(plan.to_string()));
+        }
+        rows.push(Value::Object(row));
+    }
+    rows
+}
+
+/// 把逐桶明细挂上读数文档顶层（`credits` 键）；**一行都没有就整键不写**。
+///
+/// 空数组不写键：界面按「键在不在 + 长度」决定挂不挂「积分明细」入口，写一个空
+/// 数组会挂出一个点开是空的入口。调用点在 `query_usage` 的三个成功返回上
+/// （billing / 合并 / monitor 三种文档），读的因此总是**最终**的 `wallets`
+/// —— 明细与余额列同源，不另解析一遍上游响应。
+fn with_credits(mut value: Value) -> Value {
+    let rows = value
+        .get("wallets")
+        .and_then(Value::as_array)
+        .map(|wallets| credits_of(wallets))
+        .unwrap_or_default();
+    if rows.is_empty() {
+        return value;
+    }
+    if let Some(object) = value.as_object_mut() {
+        object.insert("credits".to_string(), Value::Array(rows));
+    }
+    value
 }
 
 /// 挑一个「代表这个账号」的套餐（`subscription` 那段文案读它）。

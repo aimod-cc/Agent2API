@@ -221,7 +221,25 @@ fn base_builder(timeouts: &TimeoutSettings) -> reqwest::ClientBuilder {
 /// 环境变量里的代理设置，不关掉的话用户机器上设了 `HTTPS_PROXY` 就会
 /// 「配置为直连却走了代理」。
 fn build_client(proxy: Option<&ResolvedProxy>, timeouts: &TimeoutSettings) -> Result<reqwest::Client, String> {
+    build_client_with(proxy, timeouts, false)
+}
+
+/// [`build_client`] 的本体：`no_redirect` 为真时**不自动跟随 3xx**。
+///
+/// 为什么需要这个开关：多步登录链路（商汤日日新的 OAuth2 + PKCE，见
+/// `providers::custom::sensenova_auth`）要自己读每一步的 `Location` 与
+/// `Set-Cookie`，自动跟转会把这些中间响应吞掉。reqwest 0.12 的跳转策略只能
+/// 在建 Client 时定（`RequestBuilder` 上没有逐请求的 `redirect()`），
+/// 所以它做成一个构造开关而不是请求参数。
+fn build_client_with(
+    proxy: Option<&ResolvedProxy>,
+    timeouts: &TimeoutSettings,
+    no_redirect: bool,
+) -> Result<reqwest::Client, String> {
     let mut builder = base_builder(timeouts);
+    if no_redirect {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
 
     match proxy {
         None => {
@@ -267,6 +285,31 @@ fn build_system_proxy_client(timeouts: &TimeoutSettings) -> Result<reqwest::Clie
     base_builder(timeouts)
         .build()
         .map_err(|error| format!("创建 HTTP 客户端失败: {error}"))
+}
+
+/// **不自动跟随跳转**、也不进缓存的 Client（每次调用新建一个）。
+///
+/// 只服务需要自己管 Cookie、逐步读 `Location` / `Set-Cookie` 的多步登录链路
+/// （商汤日日新，见 `providers::custom::sensenova_auth`）——那种链路一步一跳，
+/// 自动跟转会吞掉中间响应，而 reqwest 的跳转策略只能建 Client 时定。
+/// 不进 LRU 缓存是刻意的：跳转策略与其它出口的 key 不同维，混进同一张表会
+/// 让「同一个代理有时跟转、有时不跟」这种最难查的行为分叉成为可能；而登录
+/// 是低频动作（每个账号一天几次），新建 Client 的代价可以忽略。
+///
+/// 构造失败退回 `client_for(proxy)`（自动跟转的那条出口）：那条链路会失败，
+/// 但错误会如实回到用户面前 —— 硬约束是绝不 panic（release 是 panic=abort）。
+pub fn client_without_redirects(proxy: Option<&ResolvedProxy>) -> Arc<reqwest::Client> {
+    let timeouts = crate::server::config::timeout_settings();
+    match build_client_with(proxy, &timeouts, true) {
+        Ok(client) => Arc::new(client),
+        Err(error) => {
+            logging::log(
+                "[Upstream]",
+                &format!("⚠️ {error}（不跟跳转的出口回退自动跟转）"),
+            );
+            client_for(proxy)
+        }
+    }
 }
 
 /// 跟随系统代理的 Client（进程级缓存一份）。

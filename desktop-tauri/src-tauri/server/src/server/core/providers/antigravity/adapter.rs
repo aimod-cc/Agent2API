@@ -26,10 +26,11 @@
 //!     两条入口共用 `add_antigravity_account` 落账号；
 //!   - **没有签到**（`core::auto_checkin` 的清单不含本家：Antigravity 没有可自动
 //!     领取的奖励活动）；
-//!   - **没有余额查询**（`supports_usage` 保持默认 false）：额度是「每模型剩余
-//!     比例」（`fetchAvailableModels` 的 `quotaInfo.remainingFraction`，随模型
-//!     条目一起进目录缓存），不是账号级余额 —— 界面上要展示时走模型条目里的
-//!     `quota` 键，不需要一条独立的余额链路；
+//!   - **有余额查询**（`supports_usage = true`，见 `balance.rs`）：账号级的
+//!     5 小时 / 每周额度窗口（`retrieveUserQuotaSummary` 的剩余比例）+
+//!     `loadCodeAssist` 的订阅档。模型目录里每个条目的 `quota` 键
+//!     （`fetchAvailableModels` 的 `quotaInfo`）仍随目录走 —— 那是**目录侧**的
+//!     单模型读数，与账号级的窗口额度并存，互不替代；
 //!   - **不发 `x-goog-api-client`**、不采集设备指纹（见 `endpoints.rs` 的模块头）。
 //!
 //! ── 硬约束 ──────────────────────────────────────────────────
@@ -365,6 +366,27 @@ impl ProviderAdapter for AntigravityAdapter {
             let credentials = oauth::ensure_fresh(store, account_id, true).await?;
             Ok(credentials.access_token)
         })
+    }
+
+    /// 有余额：5 小时 / 每周额度窗口（见 `balance.rs`）。
+    ///
+    /// 与模型目录里的每模型 `quota` 键不是一回事：那是**目录侧**的单模型读数
+    /// （随 `fetchAvailableModels` 进缓存），这里是**账号级**的窗口额度 ——
+    /// 两者并存，互不替代。
+    fn supports_usage(&self) -> bool {
+        true
+    }
+
+    /// 查余额：`retrieveUserQuotaSummary` 的窗口剩余比例 + `loadCodeAssist`
+    /// 的订阅档（`balance::query_usage`）。
+    fn query_usage<'a>(
+        &'a self,
+        store: &'a AccountStore,
+        account_id: &'a str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Value, GatewayError>> + Send + 'a>,
+    > {
+        Box::pin(super::balance::query_usage(store, account_id))
     }
 
     /// 本家有续期手段（`refresh_token` + Google token 端点）——维护任务要问本家。

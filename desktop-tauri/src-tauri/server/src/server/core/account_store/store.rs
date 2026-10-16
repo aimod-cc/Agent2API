@@ -39,7 +39,9 @@ use crate::server::core::account_store::state::{
 };
 use crate::server::core::endpoints::resolve_edition;
 use crate::server::core::providers::DEFAULT_PROVIDER_ID;
-use crate::server::core::proxies::{resolve_account_proxy, ProxyResolution};
+use crate::server::core::proxies::{
+    resolve_account_proxy, resolve_account_proxy_rotating, ProxyResolution, ResolvedProxy,
+};
 use crate::server::db::Db;
 
 /// 账号存储错误（对应 Node 版 AccountStoreError，带状态码 → 路由层直接用）。
@@ -638,7 +640,9 @@ impl AccountStore {
             return None;
         }
         let edition = resolve_edition(record.edition().as_deref());
-        let resolution = resolve_account_proxy(Some(&record.proxy()));
+        // 轮询档取**下一个**出口（游标属于「这条账号的出网进度」）：凭证读数是
+        // 一次真实的出网准备，与展示口径分开，见 `resolve_account_proxy_rotating`。
+        let resolution = resolve_account_proxy_rotating(Some(&record.proxy()), record.id());
         let (proxy, proxy_error) = split_resolution(resolution);
         Some(CredentialsById {
             id: record.id().to_string(),
@@ -661,13 +665,16 @@ impl AccountStore {
     }
 
     /// 指定账号的完整会话形态（Node 版 getSessionById）；不存在/无凭证时 None
+    ///
+    /// 代理走 `resolve_account_proxy_rotating`：转发的每一次选路都从这里取出口，
+    /// 轮询档因此天然是「一请求一出口」（见 `core::proxy_rotate` 的模块头）。
     pub fn get_session_by_id(&self, id: &str) -> Option<SessionById> {
         let _guard = self.guard();
         let record = self.record_by_id(&_guard, id)?;
         if !record.has_credentials() {
             return None;
         }
-        let resolution = resolve_account_proxy(Some(&record.proxy()));
+        let resolution = resolve_account_proxy_rotating(Some(&record.proxy()), record.id());
         let (proxy, proxy_error) = split_resolution(resolution);
         Some(SessionById {
             id: record.id().to_string(),
@@ -675,6 +682,28 @@ impl AccountStore {
             proxy,
             proxy_error,
         })
+    }
+
+    /// 轮询档的**下一个**出口（不带会话、只按配置取一条）。
+    ///
+    /// 消费方是转发层「429 原地换出口」那条补救：OpenCode Zen 免费档的 429 是
+    /// **按 IP** 判的（这个 IP 的免费额度用完），换一个出口往往就能过 ——
+    /// 换到别的 IP 再试一次比直接罚账号（按模型冷却）更贴近上游的语义。
+    ///
+    /// 返回 `Ok(None)` = 这条账号不是轮询档（调用方不该换出口）；
+    /// `Err(原因)` = 是轮询档但一条候选都取不出来（原因原样报给明细）。
+    pub fn next_rotate_proxy(&self, id: &str) -> Result<Option<ResolvedProxy>, String> {
+        let _guard = self.guard();
+        let Some(record) = self.record_by_id(&_guard, id) else {
+            return Ok(None);
+        };
+        let config = record.proxy();
+        if !crate::server::core::proxies::is_rotate_config(&config) {
+            return Ok(None);
+        }
+        crate::server::core::proxy_rotate::next(&config, record.id())
+            .map(Some)
+            .map_err(|reason| reason)
     }
 }
 

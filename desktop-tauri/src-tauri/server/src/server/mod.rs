@@ -166,7 +166,7 @@ use crate::server::core::models::ModelCatalog;
 use crate::server::core::update::UpdateManager;
 use crate::server::core::upstream::UpstreamService;
 use crate::server::db::Db;
-use crate::server::request_stats::RequestStats;
+use crate::server::request_stats::{RequestStats, Retention};
 
 /// 服务器共享状态。handler 通过 `axum::extract::State` 拿到它的克隆。
 ///
@@ -533,10 +533,17 @@ impl ServerState {
         // `requestStatsDir` 这个键仍被迁移项读（去自定义目录里找那两个旧文件，
         // 见 `db::migrate::requests`），本文件不再碰它。
         //
-        // 请求统计**全量保留**：没有保留天数、没有条数上限，记账不再带任何裁剪
-        // （明细 / 原始正文 / 按天聚合都不自动淘汰；清历史是请求日志页自己的
-        // 「清空 / 按筛选删除」）。所以构造不再接收保留期回调。
-        let request_stats = Arc::new(RequestStats::with_db(db.clone()));
+        // 保留期回调读**内存快照**（`config::retention_settings()`）而不是每次读盘：
+        // 记账是每个请求一次的热路径，而 `PUT /api/retention` 会同步刷新快照 ——
+        // 于是设置页改完天数，下一次记账 / prune 立即生效，**不需要重启进程**。
+        // 两档默认都是 99999 天（约 274 年，近似全量保留），用户改小即生效。
+        let request_stats = Arc::new(RequestStats::with_db(db.clone(), || {
+            let settings = config::retention_settings();
+            Retention {
+                request_days: settings.request_days,
+                daily_days: settings.daily_days,
+            }
+        }));
         // 启动即收尾上次运行遗留的进行中行（详情见方法注释）：不等到第一条
         // 请求进来才清理，界面打开时看到的就已经是「已中断」的终态
         request_stats.sweep_stale_running();

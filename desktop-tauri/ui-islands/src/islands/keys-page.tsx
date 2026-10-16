@@ -258,9 +258,9 @@ function modelsByProviderOf(payload: KeysPayload | null): Record<string, string[
   return map && typeof map === 'object' ? map : {}
 }
 
-/** 提供商显示名：注册表里没有的 id 回落原样（旧数据里可能有已下线的家） */
+/** 提供商显示名：注册名过词典；注册表里没有的 id 回落原样（旧数据里可能有已下线的家） */
 function providerLabel(id: string): string {
-  return shared().wbProviders?.labelOf?.(id) || id
+  return t(shared().wbProviders?.labelOf?.(id) || id)
 }
 
 /**
@@ -303,7 +303,7 @@ function restrictionText(k: KeyEntry): string {
   const models = Array.isArray(k.allowedModels) ? k.allowedModels : []
   if (!providers.length && !models.length) return t('不限制')
   const parts: string[] = []
-  // providerLabel 的输出是展示名（providers.js 侧已处理多语言），原样透出
+  // providerLabel 的输出已是译文（注册名在这里过词典），原样透出
   if (providers.length) parts.push(providers.map(providerLabel).join(t('、')))
   // 模型那半边只报个数：一屏 Row 里塞不下十几个模型名，悬停由 title 给全量
   if (models.length) parts.push(t('{n} 个模型', { n: models.length }))

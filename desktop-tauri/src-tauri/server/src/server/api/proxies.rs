@@ -5,17 +5,19 @@
 //!   GET  /api/proxies/pool       代理池列表（进来时自动同步一次 Clash 出口）
 //!   POST /api/proxies/pool       新建池条目（只收手动条目）
 //!   POST /api/proxies/pool/update 编辑池条目（body 带 id；Clash 同步来的不可改）
+//!   POST /api/proxies/pool/enable 启用 / 禁用池条目（body 带 id + enabled；
+//!                                 三种来源都放行：manual 写自己的 enabled，
+//!                                 镜像条目写本地禁用位；订阅节点禁用时走
+//!                                 「关闭监听端口」流程、启用时走补建）
 //!   POST /api/proxies/pool/remove 删除池条目（body 带 id；Clash 同步来的不可删）
-//!   POST /api/proxies/pool/test  测试池条目并把结果记进条目（订阅节点还没有
-//!                                监听器时先钉住 + 补建 + 等端口就绪再测）
+//!   POST /api/proxies/pool/test  测试池条目并把结果记进条目（订阅节点走内核的
+//!                                统一测试口：切 select 组到目标节点再测，
+//!                                不为被测节点开专用端口）
 //!   POST /api/proxies/pool/sync-clash 手动同步 Clash Verge 出口
-//!   POST /api/proxies/pool/provision 补建订阅节点监听器（lazy listeners 的
-//!                                    主动入口：账号保存 / 测试前调用；body 可带
-//!                                    `{ids}` 把一批条目一并补建并等就绪）
 //!   GET  /api/proxies/settings   代理设置（节点端口范围 + 测试网址 + 默认值）
 //!   POST /api/proxies/settings   保存代理设置（整份表单；非法形状 400）
 //!
-//! 前两条是账号侧的出口能力（Node 版原有）；`pool` 那六条是「网络代理」页
+//! 前两条是账号侧的出口能力（Node 版原有）；`pool` 那几条是「网络代理」页
 //! 的代理池管理（对照 OmniProxy 的 proxies CRUD + sync-clash + 测试，存储、
 //! 只读语义与镜像规则见 `core::proxy_pool`）。路径用固定段 + `body` 传 id
 //! 而不是 `/pool/{id}`：http.rs 的路由按固定路径注册，通配段会与「已注册路径
@@ -173,6 +175,11 @@ pub async fn test_proxy(state: &ServerState, body: &Bytes) -> Response {
 /// describe 之后的形态是 `{source:'pool', ..., config:{source:'pool', proxyId}}`
 /// （见 `core::proxies::describe_account_proxy`）—— 解析失败的记录 config 也在，
 /// 所以「引用了一个已被删掉的代理」同样统计得到（那正是最需要提醒用户的情况）。
+///
+/// **轮询档（rotate）也算引用**：它的候选来自池里同一批条目（全部启用 / 指定
+/// 几条）。不在删除确认框里列出来，用户会以为「这条没人用」而删掉一条正在被
+/// 轮询的出口。两条分支回答的是同一个问题 ——「这条池条目会不会被某条账号的
+/// 转发用到」—— 所以放在同一个函数里。
 fn pool_references(state: &ServerState) -> std::collections::HashMap<String, Vec<Value>> {
     let mut references: std::collections::HashMap<String, Vec<Value>> =
         std::collections::HashMap::new();
@@ -184,13 +191,18 @@ fn pool_references(state: &ServerState) -> std::collections::HashMap<String, Vec
         let Some(config) = account.get("proxy").and_then(|proxy| proxy.get("config")) else {
             continue;
         };
-        if config.get("source").and_then(Value::as_str) != Some("pool") {
-            continue;
-        }
-        let Some(proxy_id) = config.get("proxyId").and_then(Value::as_str) else {
-            continue;
+        let ids: Vec<String> = if crate::server::core::proxies::is_rotate_config(config) {
+            crate::server::core::proxy_rotate::candidate_ids(config)
+        } else if config.get("source").and_then(Value::as_str) == Some("pool") {
+            config
+                .get("proxyId")
+                .and_then(Value::as_str)
+                .map(|id| vec![id.to_string()])
+                .unwrap_or_default()
+        } else {
+            Vec::new()
         };
-        references.entry(proxy_id.to_string()).or_default().push(json!({
+        let entry = json!({
             "id": account.get("id").cloned().unwrap_or(Value::Null),
             // 统一展示名优先（与列表接口同一取舍，见上面的说明）
             "name": account
@@ -200,7 +212,10 @@ fn pool_references(state: &ServerState) -> std::collections::HashMap<String, Vec
                 .or_else(|| account.get("name").cloned())
                 .unwrap_or(Value::Null),
             "enabled": account.get("enabled").cloned().unwrap_or(Value::Bool(true)),
-        }));
+        });
+        for proxy_id in ids {
+            references.entry(proxy_id).or_default().push(entry.clone());
+        }
     }
     references
 }
@@ -348,79 +363,168 @@ pub async fn pool_remove(state: &ServerState, body: &Bytes) -> Response {
     }
 }
 
+/// POST /api/proxies/pool/enable（启用 / 禁用一条池条目；body `{id, enabled}`）
+///
+/// 三种来源都能开关，但写的东西不一样：
+///   · manual：写它自己的 `enabled`（禁用后引用它的账号回退直连）；
+///   · clash / subscription（只读镜像）：写**本地禁用位** `localDisabled` ——
+///     名称 / 端口 / 来源侧的启用状态继续跟随来源，本地那位只让本端不用它
+///     （为什么不直接改写 `enabled`，见 `core::proxy_pool` 的模块头）。
+///     所以本接口不吃 `pool/update` 的整份覆盖语义：它只碰开关这一个字段，
+///     镜像条目的名称 / 端口一个字节都不动。
+///
+/// ── 订阅节点的监听器联动（关闭流程 / 补建流程）──────────────
+/// 订阅节点的地址是本机内核起的监听端口，`enabled` 若只写一个标记，端口会继续
+/// 开着 —— 而用户禁用一条节点往往正是为了**不要那个端口**。所以两个方向都要
+/// 让内核跟上，判据都是「真实的缺口」而不是「用户点了什么」：
+///   · 禁用 → 缺口是「端口还开着但已不该开」（禁用 / 失去引用），请求内核
+///     重建配置（新配置里没有这条监听器，进程重启即端口关闭），端口由重启后
+///     的节点同步写回 null；
+///   · 启用 → 缺口是「启用 ∧ 被账号引用 ∧ 没有端口」，走补建链路。
+/// 两个方向都走同一个对账入口（`reconcile_listeners`，与账号保存收尾同一条
+/// 路），没缺口就不投重启命令 —— 重复点击 / 反复开关都不会排出一串多余的重建。
+///
+/// 响应里的 `listener` 说明这次要不要盯一会儿端口（manual / clash 恒 `none`）：
+///   `none`    没有本机端口要动；
+///   `closing` 已请求关闭（前端轮询列表，等端口变成「未分配」）；
+///   `opening` 已请求补建（前端轮询列表，等端口落地）。
+/// **不在请求里等**：内核重建要几秒到几十秒，等在这里会让开关十几秒不动，
+/// 用户只会以为没点上（等与轮询的分工与订阅增删那条链一致，见页面的
+/// `settleListener`）。
+pub async fn pool_enable(state: &ServerState, body: &Bytes) -> Response {
+    let payload = match parse_body(body) {
+        Ok(value) => value,
+        Err(_) => return management_error(400, "请求内容不是有效 JSON"),
+    };
+    let id = payload.get("id").and_then(Value::as_str).unwrap_or("");
+    if id.trim().is_empty() {
+        return management_error(400, "缺少代理 id");
+    }
+    // 缺 enabled 就报错而不是猜：这条接口只有一个语义，猜错方向等于把用户
+    // 按下的开关反过来执行
+    let Some(enabled) = payload.get("enabled").and_then(Value::as_bool) else {
+        return management_error(400, "缺少 enabled（true / false）");
+    };
+    let (_, change) = match proxy_pool::set_enabled(id, enabled) {
+        Ok(value) => value,
+        Err(message) => return management_error(400, message),
+    };
+    let listener = listener_flow(state, id, &change);
+    let mut data = pool_payload(state);
+    if let Some(object) = data.as_object_mut() {
+        object.insert("name".to_string(), Value::String(change.name));
+        object.insert("enabled".to_string(), Value::Bool(change.enabled));
+        object.insert("listener".to_string(), Value::String(listener.to_string()));
+    }
+    ok_json(data)
+}
+
+/// 开关之后的内核联动，返回响应里的 `listener`（`none` / `closing` / `opening`）。
+///
+/// 只对订阅节点有事可做：manual 没有本机端口，clash 的端口在 Clash Verge 手里
+/// （那是别人家的进程，本服务能做的只是「本端别用它」）。
+fn listener_flow(state: &ServerState, id: &str, change: &proxy_pool::EnabledChange) -> &'static str {
+    if change.source != "subscription" {
+        return "none";
+    }
+    if change.enabled {
+        // 内核没装：补建无从谈起（地址列会提示「去订阅管理下载内核」），
+        // 这里报 opening 只会让前端白轮询十几秒
+        if !sub_kernel::installed() {
+            return "none";
+        }
+        let pool_ids = state.store().referenced_pool_ids();
+        let borrowed: std::collections::HashSet<&str> =
+            pool_ids.iter().map(String::as_str).collect();
+        if !proxy_pool::needs_listener(id, &borrowed) {
+            return "none";
+        }
+        // 对账（补建方向）。返回 false 只有两种情况：这条其实没缺口（上面
+        // 已挡）/ 手动关闭闩置位（对账记了日志，「启动内核」时按 wanted
+        // 一并补上）—— 都不该报 opening 让前端白轮询
+        if reconcile_listeners(state) {
+            "opening"
+        } else {
+            "none"
+        }
+    } else {
+        // 禁用：对账（回收方向）—— 缺口判据是 reconcile 的 stale 检测
+        // （不在 wanted 里却还挂着端口：刚禁用的这条、先前遗留的、
+        // 失去引用的都算），内核没装则无端口可收
+        if !sub_kernel::installed() {
+            return "none";
+        }
+        if reconcile_listeners(state) {
+            "closing"
+        } else {
+            "none"
+        }
+    }
+}
+
 /// POST /api/proxies/pool/test（测一条池条目，结果记进条目）
 ///
-/// **禁用的条目也测**（`resolve_for_test` 不看禁用位）：「先测通再启用」
-/// 是常见顺序。测试失败也返回 200（`success:false` + error 文案），
-/// 与 `/api/proxies/test` 同一约定 —— 前端据 success 分支显示红/绿。
+/// **禁用的条目也测**：解析不看禁用位（`resolve_for_test`），订阅节点走统一
+/// 测试口更与禁用无关 —— 「先关着、偶尔测一下看机场修好没有」是合理用法。
+/// 测试失败也返回 200（`success:false` + error 文案），与 `/api/proxies/test`
+/// 同一约定 —— 前端据 success 分支显示红/绿。
 ///
-/// ── 订阅节点还没有监听器时先补建 ────────────────────────────
-/// 内核只给「账号引用中的节点 ∪ 测试钉住的节点」开监听器（lazy listeners）。
-/// 池里的「测试」按钮打的正是「先测一个节点、测通了再决定给谁用」这个主意，
-/// 而这类节点在引用之前是没有监听器的：必须先把它钉住、请求内核重建、等端口
-/// 写回条目，才谈得上测。**顺序不能反** —— 老实现是先 `resolve_for_test`
-/// 再补建，未分配端口时解析失败就直接 400 返回了，补建永远执行不到，而那句
-/// 错误文案还建议用户「点一次测试」，成了死循环（实测踩过）。
+/// ── 订阅节点走统一测试口（不为它开端口）─────────────────────
+/// 内核里有一个固定的「测试口」监听器，背后是 select 策略组（成员 = 全部
+/// 节点）：先通过控制器把组切到目标节点，再从测试口发测试（见
+/// `sub_kernel::runtime::select_test_node`）。这是 Clash Verge 的形态 ——
+/// 「测试」不再需要为被测节点开专用端口 + 等内核重建（曾经的 pinned +
+/// provision + 45 秒等待那一整套就是为这件事存在的，统一测试口上线后退役）。
+/// 专用端口只服务真正在用的节点（账号引用，lazy listeners）。
+///
+/// 订阅分支全程持 [`SUB_TEST_LOCK`]：策略组的「当前指向」是内核的**全局状态**，
+/// 两条测试并发时后切的会把先切的覆盖掉，先测的那条就走了别人的出口 ——
+/// 前端本来同时只放行一条测试（其余按钮禁用），这把锁兜的是多入口（桌面 +
+/// headless 面板）与将来并发化的可能性。
+static SUB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub async fn pool_test(state: &ServerState, body: &Bytes) -> Response {
     let payload = match parse_body(body) {
         Ok(value) => value,
         Err(_) => return management_error(400, "请求内容不是有效 JSON"),
     };
     let id = payload.get("id").and_then(Value::as_str).unwrap_or("");
-    let prep = match proxy_pool::prepare_test(id) {
-        Ok(prep) => prep,
+    let target = match proxy_pool::test_target(id) {
+        Ok(target) => target,
         Err(message) => return management_error(400, message),
     };
-    // 补建期间的结果：不是测试结论，只说明「内核重建中」。名字带上（此时没有
-    // 已解析的出口可描述），前端照常显示 ❌ + 这句话，重测就是补建后的结果
-    let mut pending: Option<String> = None;
-    // 内核没装（没下过 / 刚被删）：补建无从谈起 —— 这条是**结论**，重测不会变
-    let mut uninstalled: Option<String> = None;
-    if prep.needs_provision {
-        if sub_kernel::installed() {
-            provision_missing_listeners(state);
-            if !wait_for_listeners(&[id.to_string()]).await {
-                pending = Some("监听器正在补建（内核重建中），稍等几秒后重测一次".to_string());
-            }
-        } else {
-            // 不装内核时走补建 + 等待只会白等 45 秒（restart 早退在「未安装」上），
-            // 末了还给一句「稍后重测」—— 而重测永远不会成功，是条死路。直接说清楚
-            // 该做什么（去「订阅管理」下载内核），结论照常落进条目。
-            uninstalled =
-                Some("代理内核未安装（在「订阅管理」里下载内核后，节点会自动分配监听端口）"
-                    .to_string());
-        }
-    }
-    let (result, public) = match (uninstalled, pending) {
-        (Some(error), _) | (None, Some(error)) => (
-            egress::ConnectivityResult {
-                success: false,
-                status: None,
-                ip: String::new(),
-                duration_ms: 0,
-                error: Some(error),
-            },
-            // 补建中：退回一个只表明「这条订阅节点、本地监听器、端口待定」的形态
-            // （egress 的公开描述要 ResolvedProxy，这里能拼全 —— 订阅节点的地址
-            // 本来就是内核起的本地监听器；label 取条目展示名）
-            egress::describe_public(Some(&ResolvedProxy {
+    // 出口解析 + 测试按来源分两条路：
+    //   · subscription → 统一测试口（切组到目标节点，从测试口发测试）；
+    //   · manual / clash → 原有解析（manual 用它自己的地址；clash 实时读
+    //     Clash 配置），与内核无关。
+    // Err 都是一句可读的中文 → 400（条目不存在 / 内核没装 / 节点已不在订阅里）。
+    // 订阅分支**全程持锁**：从切组到拿到测试结果，组不能被另一条测试切走
+    // （锁只在订阅分支内拿，manual / clash 不碰内核、不排队）。
+    let (result, public) = if target.source == "subscription" {
+        let _guard = SUB_TEST_LOCK.lock().await;
+        let proxy = match sub_kernel::runtime::select_test_node(&target.provider_id, &target.node)
+            .await
+        {
+            Ok(port) => ResolvedProxy {
                 source: "pool".to_string(),
                 protocol: "http".to_string(),
                 host: "127.0.0.1".to_string(),
-                port: None,
+                port: Some(port),
                 username: String::new(),
                 password: String::new(),
-                label: prep.name.clone(),
-            })),
-        ),
-        // 不需要补建（或已就绪）：照常解析 + 测
-        (None, None) => match proxy_pool::resolve_for_test(id) {
-            Ok(proxy) => (
-                egress::test_proxy(Some(&proxy)).await,
-                egress::describe_public(Some(&proxy)),
-            ),
+                label: target.name.clone(),
+            },
             Err(message) => return management_error(400, message),
-        },
+        };
+        let result = egress::test_proxy(Some(&proxy)).await;
+        (result, egress::describe_public(Some(&proxy)))
+    } else {
+        let proxy = match proxy_pool::resolve_for_test(id) {
+            Ok(proxy) => proxy,
+            Err(message) => return management_error(400, message),
+        };
+        let result = egress::test_proxy(Some(&proxy)).await;
+        (result, egress::describe_public(Some(&proxy)))
     };
     let write_error = proxy_pool::record_test(
         id,
@@ -436,7 +540,7 @@ pub async fn pool_test(state: &ServerState, body: &Bytes) -> Response {
         "[Proxies]",
         &format!(
             "代理测试（{}）: {}",
-            prep.name,
+            target.name,
             if result.success {
                 format!("✅ 出口 IP {}", result.ip)
             } else {
@@ -458,25 +562,6 @@ pub async fn pool_test(state: &ServerState, body: &Bytes) -> Response {
         );
     }
     ok_json(data)
-}
-
-/// 等这些条目的监听端口写回（补建完成）；**全部**就绪才返回 true。
-///
-/// 上限 45 秒：内核重启本身是秒级，但重启流程里会等 provider 拉取
-/// （`PROVIDER_WAIT_MS` = 25 秒），端口是在那之后的节点同步里写回条目的 ——
-/// 上限必须覆盖它，否则「首次补建 + 订阅拉取慢」这两个正常情况都会被判成超时。
-/// 500ms 一轮、就绪立即返回：常见路径（订阅缓存已在本地）大约一两秒。
-///
-/// 超时**不报错**：调用方给一句「正在补建，稍后重测」，比在这里猜原因好；
-/// 真正的失败原因（内核没装、订阅拉不到）会在内核状态与运行日志里。
-async fn wait_for_listeners(ids: &[String]) -> bool {
-    for _ in 0..90 {
-        if ids.iter().all(|id| proxy_pool::current_port(id).is_some()) {
-            return true;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
-    false
 }
 
 // ─── 代理设置（「网络代理」页的设置弹窗）─────────────────────
@@ -504,86 +589,69 @@ pub async fn settings_save(body: &Bytes) -> Response {
     }
 }
 
-// ─── 节点监听器补建（lazy listeners 的主动入口）──────────────
+// ─── 节点监听器补建（lazy listeners 的触发点）───────────────
 
-/// 给「需要监听器但还没有端口」的订阅节点补建监听器（lazy listeners 的主动入口）。
+/// 监听器对账：把「该开的监听器」与「池里条目的端口状态」收敛一致
+/// （lazy listeners 的**双向**触发点）。
 ///
-/// 「需要」= **账号引用 ∪ 测试钉住**（`proxy_pool::listener_node_keys`），与内核
-/// 侧 `allocate_listeners` 用同一个口径 —— 口径不一致会出现「这里说没缺口、
-/// 内核却不建」这类谁也解释不清的状态。lazy 的语义是「内核只为需要的节点开
-/// 监听器」；引用动作发生在账号保存时，测试动作发生在池的「测试」按钮上，
-/// 后者先 `prepare_test` 把条目钉住再来这里。本函数是一个**幂等的重启请求**，
-/// 只在确实有缺口（需要 ∧ 无端口）时才投命令，重复调用无害。
+/// 该开的集合 `wanted` = **账号引用 ∩ 启用中的订阅节点**
+/// （`proxy_pool::listener_node_keys`，与内核侧 `allocate_listeners` 同口径
+/// —— 口径不一致会出现「这里说没缺口、内核却不建」这类谁也解释不清的状态）。
+/// 两个方向的缺口各检测各的：
+///   · **待补建**：在 wanted 里、条目端口还是 null（新增引用 / 刚启用）；
+///   · **待回收**：不在 wanted 里、条目端口还挂着值（失去引用 / 被禁用 /
+///     订阅侧关掉）—— 内核重建时不再给它开监听器，端口随重建一起关。
+/// 任一方向非空就投一次重启（重建按 wanted 全量重算，一次同时干两件事）；
+/// 没缺口不投，重复调用无害 —— 这是调用方敢在每次账号写操作后都调它的前提。
+/// 测试**不在其中** —— 测试走统一测试口，不需要端口（见 `pool_test` 与
+/// `sub_kernel::runtime::select_test_node`）。
 ///
-/// 三类调用方：
-///   · 账号保存链路（`api::accounts` 的写操作收尾）—— 引用变化后自动补；
-///   · `pool_test`（测试一个没有端口的订阅节点前先补建，否则连不上）;
-///   · HTTP：POST /api/proxies/pool/provision（前端手动兜底）。
+/// 调用方：
+///   · 账号写操作收尾（`api::accounts` 的 add / update / 批量 / 删除）——
+///     引用变化后补缺与回收；
+///   · `pool_enable`（启用 / 禁用一条订阅节点后的联动）。
 ///
-/// 返回是否投了重启命令：true 时节点端口要等内核重建完成才有值，前端轮询
+/// 手动关闭闩置位时只记日志不投命令：用户刚按过「关闭内核」，保存引用不能
+/// 把它悄悄带起来 —— 「启动内核」重建时同样按 wanted 全量分配，缺口自然收敛。
+///
+/// 返回是否投了重启命令：true 时节点端口要等内核重建完成才有终值，前端轮询
 /// 列表即可。同步版（投命令是 mpsc send，无需 await）—— 账号写操作收尾在
 /// 持锁路径的边缘调用它，不想为它包一层 spawn。
-pub fn provision_missing_listeners(state: &ServerState) -> bool {
+pub fn reconcile_listeners(state: &ServerState) -> bool {
     let pool_ids = state.store().referenced_pool_ids();
     let borrowed: std::collections::HashSet<&str> =
         pool_ids.iter().map(String::as_str).collect();
     let wanted = proxy_pool::listener_node_keys(&borrowed);
-    let missing = if wanted.is_empty() {
-        Vec::new()
-    } else {
-        proxy_pool::subscription_entries_with_ports()
-            .into_iter()
-            .filter(|(provider_id, node, port)| {
-                port.is_none() && wanted.contains(&format!("{provider_id}::{node}"))
-            })
-            .collect::<Vec<_>>()
-    };
-    if missing.is_empty() {
+    let mut missing = 0usize;
+    let mut stale = 0usize;
+    for (provider_id, node, port) in proxy_pool::subscription_entries_with_ports() {
+        // key 形态与 `listener_node_keys` 的构造处一致（`{providerId}::{node}`）
+        match (wanted.contains(&format!("{provider_id}::{node}")), port) {
+            (true, None) => missing += 1,
+            (false, Some(_)) => stale += 1,
+            _ => {}
+        }
+    }
+    if missing == 0 && stale == 0 {
         return false;
     }
-    // 有缺口才重启内核（重建配置把缺的监听器建出来）。内核未安装时投命令
-    // 也无害（restart 早退在「未安装」上，见 `sub_kernel` worker 的说明）。
+    // 手动关闭闩：用户刚点过「关闭内核」，这里不悄悄把它带起来 —— 缺口
+    // 记在这条日志里，「启动内核」重建配置时按最新引用一并收敛
+    if sub_kernel::is_manually_halted() {
+        logging::log(
+            "[Proxies]",
+            &format!(
+                "内核已手动关闭 —— 监听器对账暂缓（{missing} 个待补建 / {stale} 个待回收），「启动内核」时按最新引用重算"
+            ),
+        );
+        return false;
+    }
+    // 有缺口才重启内核（重建配置把缺的建出来、多的收掉）。内核未安装时投
+    // 命令也无害（restart 早退在「未安装」上，见 `sub_kernel` worker 的说明）。
     sub_kernel::request_restart(crate::server::core::subscriptions::enabled_provider_inputs());
     logging::log(
         "[Proxies]",
-        &format!(
-            "🔄 检测到 {} 个被引用的订阅节点还没有监听器，已请求内核补建",
-            missing.len()
-        ),
+        &format!("🔄 监听器对账：{missing} 个待补建 / {stale} 个待回收，已请求内核重建"),
     );
     true
-}
-
-/// POST /api/proxies/pool/provision —— 补建的主动入口（响应带 `pending`：
-/// true = 投了重启命令；`ready` = 指定的那批条目端口是否都就绪）。
-///
-/// body 可选 `{ids: [...]}`：把这几条池条目**一并钉住**再补建，并等它们的
-/// 端口落地才返回。批量测试用这个形态 —— 「哪个节点要测」只有前端知道，
-/// 后端不猜；一次重启把所有要测的节点都建出来，比每条各等一轮内核重建快得多
-/// （后者会把「批量测 30 条」变成 30 次重启）。不传 ids 时保持原来的语义：
-/// 只补「已经需要监听器（账号引用 ∪ 已钉住）却还没有端口」的节点。
-pub async fn pool_provision(state: &ServerState, body: &Bytes) -> Response {
-    let ids: Vec<String> = parse_body(body)
-        .ok()
-        .and_then(|value| value.get("ids").and_then(Value::as_array).cloned())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .filter(|id| !id.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-    // 逐个钉住（不存在的 id / 已经不需要补建的条目直接忽略：批量里混进
-    // 已就绪、甚至已被删的条目都是正常时序，不该让整批失败）
-    let pinned: Vec<String> = ids
-        .iter()
-        .filter(|id| matches!(proxy_pool::prepare_test(id), Ok(prep) if prep.needs_provision))
-        .cloned()
-        .collect();
-    let pending = provision_missing_listeners(state);
-    // 钉住的那批等一下端口（没钉住任何条目 = 不用等，直接回报就绪）
-    let ready = pinned.is_empty() || wait_for_listeners(&pinned).await;
-    ok_json(json!({ "pending": pending, "missing": pending as u8, "ready": ready }))
 }

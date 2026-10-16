@@ -947,6 +947,24 @@ fn describe_proxy(proxy: Option<&ResolvedProxy>) -> String {
     }
 }
 
+/// 这条**账号公开形态**是不是「轮询出网」档（`proxy.config.source == "rotate"`）。
+///
+/// 编排层（`attempt_custom`）用它决定「429 时要不要原地换出口」：轮询档的 429
+/// 是**按 IP** 判的（这个出口的免费额度用完，见 `core::proxy_rotate` 的模块头），
+/// 换一个出口重发往往就过了；别的档没有这层语义，429 就是账号/模型的限额。
+///
+/// 判据读账号公开形态里的 `proxy.config`（路由层拿到的就是它，形状见
+/// `core::proxies` 的模块头）而不是转发用的 `ResolvedProxy`：解析结果里
+/// `source` 是候选条目自己的来源（pool / clash / custom），轮询取用后已经看不出
+/// 「这是轮询档」了。
+pub fn is_rotate_account(account: Option<&Value>) -> bool {
+    account
+        .and_then(|item| item.get("proxy"))
+        .and_then(|proxy| proxy.get("config"))
+        .map(crate::server::core::proxies::is_rotate_config)
+        .unwrap_or(false)
+}
+
 /// 这一轮的**限额冷却键**（该家实际收到的上游真名；编排层 `attempt_custom` 用）。
 ///
 /// 与 [`rewrite_body`] 内部同一解析（`wire_model_for` 是纯函数：读配置快照、

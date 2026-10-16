@@ -79,6 +79,21 @@ export type ProviderConfig = {
   desktopHint?: string
   /** 登录态是 Electron safeStorage 密文、解密要走 DPAPI（仅 Windows） */
   desktopWindowsOnly?: boolean
+  /**
+   * 「导入凭证文件」这一条来源的配置（有它才有那个分段）。
+   *
+   * 与 `desktop` 的语义差别（别混用，见后端 `api::accounts` 的文件导入契约）：
+   * `desktop` 只是建一条「转发时**实时**读本机固定路径」的记录；这里是把用户
+   * **手选**的文件解析后落库 —— 得到可独立转发的账号，文件可以来自别的机器 / 备份。
+   */
+  fileImport?: {
+    /** 文件选择器的 accept（空串 = 不过滤：KukuAI 的 Cookies 文件没有扩展名） */
+    accept: string
+    /** 段落说明：选哪个文件、在哪、导入后的凭证落在哪（正文里写清，界面不再折叠） */
+    note: string
+    /** true = 二进制文件，前端读 base64 传 `authFileB64`；否则读文本传 `authFileContent` */
+    binary?: boolean
+  }
 }
 
 /* ─── 长度上限（与后端逐条对齐，前端先挡一次）────────────── */
@@ -99,8 +114,10 @@ const RACCOON: ProviderConfig = {
   label: '小浣熊',
   addButton: t('添加小浣熊账号'),
   // 网页登录（后端 providers::raccoon::oauth）：官方登录页 + 一次性授权码回调。
-  // 桌面端仍优先用内嵌窗口；网页端 / Docker 远程面板会在授权完成后
-  // 提示用户粘贴 office-raccoon:// 回调地址，不依赖本机协议注册。
+  // 桌面端仍优先用内嵌窗口；网页端 / Docker 远程面板会把授权页切到官方
+  // redirect 分支自动回调，前提是浏览器以 127.0.0.1/localhost（http + 端口）
+  // 访问面板 —— 上游白名单如此，不满足时网页端发起前就会弹指引拦下
+  // （见 web_shim 的 raccoonCallbackOriginProblem）。
   webLogin: {
     noteHtml: t('在<strong>内嵌窗口</strong>里完成官方登录，成功后自动加入账号列表。'),
     button: t('打开网页登录'),
@@ -115,6 +132,13 @@ const RACCOON: ProviderConfig = {
     { key: 'refreshToken', inputKey: 'refresh', label: 'refreshToken', rows: 2, optional: true, placeholder: t('可选') },
   ],
   desktopNote: t('读本机客户端当前登录态，每次实时读取（删掉这条记录不影响客户端登录态）。客户端重新登录后点「刷新 Token」同步。'),
+  // 「导入凭证文件」：客户端登录态是明文 JSON，前端读文本传 authFileContent。
+  // 与上面 desktop 那条并排保留是刻意的 —— 一个是「实时读本机固定路径」，
+  // 一个是「把用户手选的文件解析后落库」（文件可来自别的机器 / 备份）。
+  fileImport: {
+    accept: '.json,application/json',
+    note: t('选择小浣熊客户端的登录态文件 auth.json（Windows：C:\\Users\\<你的用户名>\\.box-agent\\config\\auth.json；macOS / Linux：~/.box-agent/config/auth.json）。导入后凭证直接落在网关、可独立转发，不再依赖本机客户端。'),
+  },
 }
 
 const CATPAW: ProviderConfig = {
@@ -141,6 +165,10 @@ const CATPAW: ProviderConfig = {
   ],
   desktopNote: t('读本机客户端当前登录态，每次实时读取（删掉这条记录不影响客户端登录态）。客户端重新登录后重新导入即可。'),
   desktopHint: t('读取 ~/.meituan-catpaw/auth.json，需已在 CatPaw 客户端登录'),
+  fileImport: {
+    accept: '.json,application/json',
+    note: t('选择 CatPaw 客户端的登录态文件 auth.json（Windows：C:\\Users\\<你的用户名>\\.meituan-catpaw\\auth.json；macOS / Linux：~/.meituan-catpaw/auth.json）。导入后凭证直接落在网关、可独立转发，不再依赖本机客户端。'),
+  },
 }
 
 /**
@@ -277,6 +305,12 @@ function clineForm(spec: { provider: string; label: string; poolNote: string }):
     ],
     desktopNote: t('读本机客户端当前登录态，每次实时读取（删掉这条记录不影响客户端登录态）。这一条归入 {label}。', { label }),
     desktopHint: t('读取 ~/.cline/data/settings/providers.json，需已在 Cline 客户端登录'),
+    // 「导入凭证文件」：providers.json 是**设置**文件（明文 JSON），前端读文本传
+    // authFileContent。归池与 desktop 那条同一口径：在哪一项下导入就归入哪个池。
+    fileImport: {
+      accept: '.json,application/json',
+      note: t('选择 Cline 客户端的登录态文件 providers.json（Windows：C:\\Users\\<你的用户名>\\.cline\\data\\settings\\providers.json；macOS / Linux：~/.cline/data/settings/providers.json）。导入后凭证直接落在网关、可独立转发，不再依赖本机客户端；这一条归入 {label}。', { label }),
+    },
   }
 }
 
@@ -537,6 +571,17 @@ const KUKU: ProviderConfig = {
   desktop: true,
   desktopHint: t('读取本机 KukuAI 客户端登录态（%APPDATA%\\baidugenflowpro\\Network\\Cookies），需已在 KukuAI 客户端登录'),
   desktopNote: t('读本机客户端当前登录态（明文 Cookie，无需解密）。客户端运行时 Cookies 文件被独占占用，导入前请先关闭 KukuAI 客户端。'),
+  // 「导入凭证文件」：**二进制** SQLite（文件名就叫 Cookies、没有后缀），
+  // 前端读 base64 传 authFileB64（文本字段对这家明确 400）。
+  // 与 desktop 那条的关键差别：网关读的是用户选中文件的**副本**（先解成临时
+  // 文件再解析），不碰客户端正在用的那份 —— 因此这里无需先关闭客户端，
+  // 文案要把这一点说清，否则用户会以为与上面那条同一个坑。
+  fileImport: {
+    binary: true,
+    // 文件名无扩展名、文件类型也无从按扩展名筛：空串 = 选择器不过滤（全都能选）
+    accept: '',
+    note: t('选择 KukuAI 客户端的 Cookies 文件（%APPDATA%\\baidugenflowpro\\Network\\Cookies）：它是**二进制** SQLite 数据库（无扩展名，不是 JSON）。导入时读的是你选中文件的副本、不和运行中的客户端抢占用，因此**无需先关闭客户端**。导入后凭证直接落在网关、可独立转发。'),
+  },
 }
 
 /**
@@ -710,6 +755,20 @@ const OFFICEACE: ProviderConfig = {
     noteHtml: t('打开华为云授权页登录：登录完成后网关会自动<b>轮询云端</b>取回授权码并加入账号列表（不需要装 OfficeAce 桌面端，也无需手工回填回调地址）。'),
     button: t('打开授权页'),
     busyText: t('等待 OfficeAce 登录完成…'),
+    // 两种打开方式都可用：授权码是网关**轮询云端**取回的（云端回调页不往本机
+    // 跳），壳侧不开回调监听，因此浏览器在哪台机器上都不影响判定。
+    modes: [
+      {
+        value: 'embedded',
+        label: t('内嵌窗口（推荐）'),
+        hint: t('将打开内嵌窗口；登录完成后自动加入账号列表。关掉窗口即取消等待'),
+      },
+      {
+        value: 'external',
+        label: t('系统浏览器'),
+        hint: t('将用系统默认浏览器打开授权页（会复用浏览器里已登录的华为云账号）；授权码由网关轮询云端取回，与浏览器跑在哪台机器无关，完成后自动加入账号列表'),
+      },
+    ],
   },
   manualTitle: t('粘贴网关凭据'),
   manualNoteHtml: t('从别的机器（或 OfficeAce 桌面端 <code>models.json</code>）取三项贴进来：模型网关基址（<code>baseUrl</code>，形如 <code>https://modelgw-…/v2</code>）与 <code>modelAppKey</code> / <code>modelAppSecret</code>。这三项就能转发（网关凭据不过期）；控制面临时凭据（<code>accessKeyId</code> 等）可选，留空则额度/自动续期不可用，但不影响转发。'),
@@ -719,6 +778,53 @@ const OFFICEACE: ProviderConfig = {
     { key: 'modelAppKey', label: t('网关 Key'), placeholder: 'model_app_key' },
     { key: 'modelAppSecret', label: t('网关 Secret'), placeholder: 'model_app_secret' },
     { key: 'name', label: t('备注名'), optional: true, placeholder: t('可选，留空用「OfficeAce 果办」') },
+  ],
+}
+
+/**
+ * OrcaTerm（腾讯云遨驰终端桌面客户端）：一家一个 provider，没有地区之分。
+ *
+ * ── 凭证形态 ────────────────────────────────────────────────
+ * 微信 OAuth 登录后的一枚 JWT（`oauth_access_token`，约 2 小时时效），
+ * `Authorization: Bearer` 直达上游。粘贴支持（与后端 `orcaterm::credentials`
+ * 同口径）：裸 token、`Authorization: Bearer …` 整行、`ot_session=…`（Web 版
+ * Cookie 名），或整个 `data.bin` 的 JSON —— 网关会自己剥出 token。
+ *
+ * ── 三条添加路径 ────────────────────────────────────────────
+ * 网页登录（官方 Web 控制台扫码，壳侧读 `ot_session` Cookie 交回）/
+ * 导入桌面端登录态 / 粘贴 accessToken。三条最终都归一成同一枚 JWT
+ * （见后端 `providers::orcaterm::login` 与 `api::accounts` 的 OrcaTerm 分支）。
+ *
+ * ── 导入桌面端 ──────────────────────────────────────────────
+ * 客户端是 Tauri 应用，登录态在 `%APPDATA%\com.orcaterm-desktop.app\data.bin`
+ * （**明文 JSON**，无需解密）。导入即复制当前令牌进账号记录，之后由网关接管。
+ *
+ * ── 有真续期接口 ───────────────────────────────────────────
+ * 上游 `OAuthRefreshToken` 传旧 token 即可换新（2026-10-16 实测），因此账号
+ * 添加后由网关自动续期，用户不需要跟着 2 小时时效手动换令牌（与 KukuAI /
+ * CatPaw「过期只能重登」不同）。令牌丢了（被顶号 / 上游拒认）才需要重新导入。
+ */
+const ORCATERM: ProviderConfig = {
+  provider: 'orcaterm',
+  label: 'OrcaTerm',
+  // 网页登录（后端 providers::orcaterm::login）：打开官方 Web 控制台，
+  // 用户在里面微信扫码（云账号那一套），登录成功后壳侧读窗口里的
+  // `ot_session` Cookie 交回网关落账号。窗口里会自动帮用户点开登录面板
+  // （左下角头像 → 立即登录），点不动就自己点 —— 文案要写清这条退路。
+  webLogin: {
+    noteHtml: t('在打开的<strong>官方 Web 控制台</strong>里用微信扫码登录（窗口会自动弹出登录面板；若没有，点左下角头像 → 立即登录）。登录成功后自动加入账号列表。'),
+    button: t('打开网页登录'),
+    hint: t('内嵌窗口打开；扫码完成后自动加入列表，关窗即取消等待'),
+    busyText: t('等待 OrcaTerm 登录完成…'),
+  },
+  desktop: true,
+  desktopHint: t('读取本机 OrcaTerm 客户端登录态（%APPDATA%\\com.orcaterm-desktop.app\\data.bin），需已在 OrcaTerm 客户端登录'),
+  desktopNote: t('读本机客户端当前登录的 OAuth 令牌（明文 JSON，无需解密）。导入后由网关自动续期，无需跟随客户端的 2 小时时效手动换令牌。'),
+  manualTitle: t('粘贴 accessToken'),
+  manualNoteHtml: t('粘贴 OrcaTerm 的 OAuth accessToken（JWT，三段点分；从桌面客户端 <code>data.bin</code> 或 Web 版 Cookie <code>ot_session</code> 获取）。直接粘贴含 <code>Bearer</code> / <code>ot_session=</code> 的整行也行，网关会自己剥成裸 token。添加后由网关自动续期（上游有续期接口），无需跟随 2 小时时效手动更换。'),
+  fields: [
+    { key: 'accessToken', label: 'accessToken', rows: 3, placeholder: t('JWT（三段点分；也可直接粘贴 Bearer 整行或 data.bin 内容）') },
+    { key: 'name', label: t('备注名'), optional: true, placeholder: t('可选，留空则用账号昵称或 userId') },
   ],
 }
 
@@ -763,6 +869,9 @@ export const BUILTIN_CONFIGS: ProviderConfig[] = [
   // OfficeAce（华为云果办 / OfficeClaw）：浏览器登录（自助 OAuth）或粘贴网关
   //凭据，排在末尾（与后端注册表 PROVIDERS 的排列一致，2026-10 接入）
   OFFICEACE,
+  // OrcaTerm（腾讯云遨驰终端桌面客户端）：粘贴 accessToken / 导入桌面端登录态，
+  // 排在末尾（与后端注册表 PROVIDERS 的排列一致，2026-10 接入）
+  ORCATERM,
 ]
 
 /** WorkBuddy 的块 id（结构特殊，单独一个组件） */
@@ -802,12 +911,18 @@ export function configOf(providerId: string): ProviderConfig | undefined {
  * 但交互不同 —— 网页登录点一下就开窗口（等待态由 web-login.js 统一管），而
  * AutoClaw 国际版要先在本弹窗里弹一个阿里云滑块让用户拖完才能拿到授权地址。
  * 并进去会让那个引擎多出「有些家要先跑一段验证码」的分支，且两者的发起时序与
- * 按钮布局都不一样（这一项是两个变体各一个按钮）。 */
+ * 按钮布局都不一样（这一项是两个变体各一个按钮）。
+ *
+ * `file` 紧跟 `manual` 而不并进 `desktop`：两者都是「导入本机登录态」，但
+ * `desktop` 建的是「转发时实时读本机固定路径」的记录（只有本机能用），`file`
+ * 是把用户手选的凭证文件解析后落库（可独立转发，文件可来自任意机器 / 备份）。
+ * 失败处置与文案也各不相同（后者要选文件、要预检 JSON），因此各占一项。 */
 export const ADD_METHODS = [
   { id: 'oauth', label: t('网页登录（Zai / Google）') },
   { id: 'sms', label: t('手机验证码登录') },
   { id: 'web', label: t('网页登录') },
   { id: 'manual', label: t('填写凭证') },
+  { id: 'file', label: t('导入凭证文件') },
   { id: 'desktop', label: t('导入桌面端登录态') },
 ] as const
 
@@ -844,6 +959,7 @@ export function methodsOf(config: ProviderConfig, region: string): MethodId[] {
     if (method.id === 'oauth') return Boolean(config.oauthLogin)
     if (method.id === 'sms') return Boolean(config.smsLogin)
     if (method.id === 'web') return Boolean(config.webLogin) && (!config.webLogin?.region || region === config.webLogin.region)
+    if (method.id === 'file') return Boolean(config.fileImport)
     if (method.id === 'desktop') return desktopImportAvailable(config)
     return true
   }).map(method => method.id)

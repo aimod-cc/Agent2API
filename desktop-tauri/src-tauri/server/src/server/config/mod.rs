@@ -65,10 +65,12 @@ use serde_json::{Map, Value};
 
 use crate::server::db::Db;
 
+mod assistant_config;
 pub(crate) mod parse;
 pub(crate) mod sql;
 mod types;
 
+pub use assistant_config::*;
 pub use types::*;
 
 use parse::*;
@@ -142,6 +144,12 @@ pub struct RuntimeConfig {
     /// 请求就生效，不重启进程），从 `Value` 里翻一次要处理类型判定，解析一次存
     /// 下来最省事 —— 这条判定在转发热路径上。
     sanitize_fingerprints: bool,
+    /// 开发者角色兼容开关（设置页「网关 → 开发者角色兼容」）。
+    ///
+    /// 与 `sanitize_fingerprints` 同一理由：转发层**每次发送前**都要判一次
+    /// （改完开关下一个请求就生效，不重启进程），解析一次存下来最省事。
+    /// 语义与默认值见 `KEY_DEVELOPER_ROLE_COMPAT`。
+    developer_role_compat: bool,
     /// **Cline 转发头的逐键覆盖**（设置页「Cline 伪装头」）。
     ///
     /// 存的只是**用户改过的键**（覆盖表），默认值硬编码在
@@ -156,6 +164,11 @@ pub struct RuntimeConfig {
     /// 生效，不重启进程），解析一次存下来最省事。默认 `false`，见 `KEY_CORS_ENABLED`。
     /// 只作用于网关面，面板路由不受它影响。
     cors_enabled: bool,
+    /// AI 助手配置（设置页「AI 助手」分类：对话模型 / 系统提示词 / 工具勾选）。
+    ///
+    /// 与 `prompt` 同一模式：低频读取 + 整块进出（只有设置页与助手的对话入口取它），
+    /// 解析一次存下来即可。整块存在一个配置键下（见 `assistant_config` 模块头）。
+    assistant: AssistantConfig,
     /// 「丢弃保活换行分片」开关（`/api/keepalive-strip`，默认关）。
     ///
     /// 与 `sanitize_fingerprints` 同一理由：装配下发策略时每轮都要问一次，
@@ -207,6 +220,16 @@ pub struct RuntimeConfig {
     /// `core::proxies::resolve_account_proxy`（同一条路）。低频字段（每次
     /// 检查 / 下载发起时读一次），不值得为它发明解析层，存原始值即可。
     update_proxy: Option<Value>,
+    /// 「加入 beta 版」开关（`updateBeta`：缺省关）。
+    ///
+    /// 开启后更新检查改问 `/releases` 列表、自己挑一版：**当前跑 beta 版的人只看
+    /// 预发布**（同核心号的转正版不算更新，不会自动切回正式版），跑正式版的人
+    /// 预发布一并参与（仓库没有 beta 时照旧收正式版更新）。关闭时走
+    /// `/releases/latest`（GitHub 自己排除预发布）—— 且与当前版本做语义化比较，
+    /// 所以「从 beta 版关掉开关」不会被降级到更低的正式版。与 `update_proxy` 同为
+    /// 低频字段（每次检查发起时读一次），解析一次存下来 —— 判据与代价口径见
+    /// `core::update::check` 的通道分支与 `core::update::version::pick_listed_release`。
+    update_beta: bool,
     /// 代理内核的存放目录（`kernelDir`：None = 用默认 `{config_dir}/proxy-kernel`）。
     ///
     /// 与 `log_dir` 同形（存原始字符串，解析时要求绝对路径），区别是**它有一个
@@ -264,6 +287,11 @@ impl RuntimeConfig {
     /// 出站指纹脱敏是否开启（转发层每次发送前判一次，见字段说明）
     pub fn sanitize_fingerprints(&self) -> bool {
         self.sanitize_fingerprints
+    }
+
+    /// 开发者角色兼容是否开启（转发层每次发送前判一次，见字段说明）
+    pub fn developer_role_compat(&self) -> bool {
+        self.developer_role_compat
     }
 
     /// 网关面（`/v1/*`）跨域访问是否开启（CORS 中间件逐请求判一次，见字段说明）
@@ -522,6 +550,15 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
             .get(KEY_SANITIZE_FINGERPRINTS)
             .and_then(Value::as_bool)
             .unwrap_or(true),
+        // 只有字面 `false` 算关闭：**默认开**（缺失 → true）。改写语义无损
+        // （developer 与 system 在 OpenAI 语义上等价），而默认关会让发 developer
+        // 角色的客户端（新版 OpenAI SDK、Claude Code 等）一上来就撞不认识该角色
+        // 的上游 —— 与 sanitize_fingerprints 同一取向：默认关的代价落在用户的
+        // 第一次真实请求上。
+        developer_role_compat: raw
+            .get(KEY_DEVELOPER_ROLE_COMPAT)
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
         // Cline 伪装头覆盖表：只收 string → string 的项（手改库写出数字/布尔
         // 值的项直接忽略 —— 头值只会是文本），缺失 = 全默认
         cline_upstream_headers: cline_headers_from(&raw),
@@ -533,6 +570,9 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
             .get(KEY_CORS_ENABLED)
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        // AI 助手配置：容忍度与 cline_upstream_headers 一致（逐项容错、
+        // 写坏不整块废掉），默认值口径见 assistant_config 模块头
+        assistant: assistant_config::from_raw(&raw),
         // 只有字面 `true` 算开启：**默认关**。与 debug_mode 同一取向（两者的
         // 代价都是「多做了一件界面没说清的事」），而与 sanitize_fingerprints
         // 相反（那个默认关会让新用户一上来就撞 400）。这里默认关的理由见
@@ -576,6 +616,13 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
             .get(KEY_UPDATE_PROXY)
             .filter(|value| !value.is_null())
             .cloned(),
+        // 只有字面 `true` 算开启：**默认关**。beta 版由 beta 分支构建、可能不稳定，
+        // 默认开的代价落在「用户没要求却被换到 beta 通道」上（与 debug_mode 同一
+        // 取向：默认关只是让功能对没打开的人不存在）。理由见 KEY_UPDATE_BETA。
+        update_beta: raw
+            .get(KEY_UPDATE_BETA)
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         // 内核存放目录：空串 / 相对路径在**读**的时候才判（`kernel_dir()` 的
         // resolve_dir 同一口径），这里只去掉空串
         kernel_dir: string_field(&raw, KEY_KERNEL_DIR),
@@ -915,6 +962,28 @@ pub fn current() -> RuntimeConfig {
     build(Map::new())
 }
 
+/// 在配置读锁内跑一个**只读、短小**的闭包，只借出快照的 `raw` 表（**不克隆**）。
+///
+/// ── 为什么需要它（与上面各 `*_enabled` 轻量读取同一动机）──────
+/// `current()` 每次调用都会克隆整份 `raw`（含提示词全文那几百行）。有些读取
+/// 点只想要 `raw` 里的**一两个键**，却跑在热路径上：典型是账号列表构建时
+/// 按 provider 查一个自定义提供商记录里的方案字段（逐账号一次）。为它们付
+/// 整份克隆的代价没必要，而逐个键写一个 `*_of()` 访问器又会让本模块认识
+/// 别的模块的数据形状。
+///
+/// ── 闭包的约束（持有读锁，务必短小）────────────────────────
+/// 闭包执行期间配置的**读锁是持有的**：写侧 `update()` 会被它挡住。因此闭包里
+/// 只允许「取键、比较、拷出一两个值」这类纯内存动作 —— 不得做文件 / 网络 IO，
+/// 不得再获取任何其它锁（本进程有多个 RwLock，交叉持锁是死锁的经典配方）。
+///
+/// 未初始化时返回 `None`（与 `current()` 回落空配置不同：这里没有可借的表，
+/// 调用方按「查不到」处理）。
+pub fn with_raw<R>(reader: impl FnOnce(&Map<String, Value>) -> R) -> Option<R> {
+    let guard = CONFIG.read().ok()?;
+    let config = guard.as_ref()?;
+    Some(reader(config.raw()))
+}
+
 /// 只取网关面跨域访问开关的轻量读取（**不克隆整份 raw**）。
 ///
 /// 与 [`retention_settings`] 同一理由：这条判定在**每个 `/v1/*` 请求**上跑一次
@@ -931,6 +1000,20 @@ pub fn cors_enabled() -> bool {
         }
     }
     false
+}
+
+/// 只取 AI 助手配置（**不克隆整份 raw**）。
+///
+/// 与 [`cors_enabled`] 同一理由：助手对话入口与设置页各取一次，而 `current()`
+/// 每次都会克隆整个 `raw` Map（含提示词全文那几百行）。未初始化（理论上只有
+/// 启动极早期）时给 [`AssistantConfig::default`]。
+pub fn assistant_config() -> AssistantConfig {
+    if let Ok(guard) = CONFIG.read() {
+        if let Some(config) = guard.as_ref() {
+            return config.assistant.clone();
+        }
+    }
+    AssistantConfig::default()
 }
 
 /// 只取保留期设置的轻量读取（**不克隆整份 raw**）。
@@ -1267,7 +1350,7 @@ pub fn update_raw_field(key: &str, value: Value) -> bool {
     })
 }
 
-/// 更新保留天数（`None` = 该项不动），返回是否写盘成功。
+/// 更新三档保留天数（`None` = 该项不动），返回是否写盘成功。
 ///
 /// 调用方（`stats_api::put_retention`）**必须先校验范围**：本函数按「已合法」
 /// 处理，越界值会被 `days_field` 的回读逻辑丢弃（那会让用户以为设置生效了）。
@@ -1279,11 +1362,20 @@ pub fn set_retention(patch: RetentionPatch) -> bool {
     update(|config| {
         let mut next = config.retention;
         // 只写传进来的项：缺省项保持原值，也**不落盘**成默认值 ——
-        // 否则一次空改会把该项固化成默认值，抹掉用户设置
-        if let Some(days) = patch.log_days {
-            config.raw.insert(KEY_LOG_RETENTION_DAYS.to_string(), Value::from(days));
-            next.log_days = days;
-        }
+        // 否则「只改日志天数」会把另外两项一并固化成默认值，抹掉用户设置
+        let mut apply = |key: &str, value: Option<i64>, slot: &mut i64| {
+            if let Some(days) = value {
+                config.raw.insert(key.to_string(), Value::from(days));
+                *slot = days;
+            }
+        };
+        apply(KEY_LOG_RETENTION_DAYS, patch.log_days, &mut next.log_days);
+        apply(
+            KEY_REQUEST_RETENTION_DAYS,
+            patch.request_days,
+            &mut next.request_days,
+        );
+        apply(KEY_DAILY_RETENTION_DAYS, patch.daily_days, &mut next.daily_days);
         config.retention = next;
     })
 }
@@ -1627,6 +1719,22 @@ pub fn set_sanitize_fingerprints(enabled: bool) -> bool {
     })
 }
 
+// ─── 开发者角色兼容（developerRoleCompat）────────────────────
+
+/// 写入开发者角色兼容开关。
+///
+/// 与 `set_debug_mode` 同一模式：内存快照与 raw 底稿一起改 —— 前者让下一个请求
+/// 立刻用新值（转发层逐请求读快照），后者保证写盘时不吃掉 config.json 里的
+/// 其它字段。返回是否落盘成功（失败时内存仍已更新，见调用点）。
+pub fn set_developer_role_compat(enabled: bool) -> bool {
+    update(|config| {
+        config
+            .raw
+            .insert(KEY_DEVELOPER_ROLE_COMPAT.to_string(), Value::Bool(enabled));
+        config.developer_role_compat = enabled;
+    })
+}
+
 // ─── Cline 伪装头覆盖表（clineUpstreamHeaders）────────────────
 
 /// 写入 Cline 伪装头的**整份覆盖表**（PUT 语义 = 整体替换）。
@@ -1663,6 +1771,20 @@ pub fn set_cors_enabled(enabled: bool) -> bool {
             .raw
             .insert(KEY_CORS_ENABLED.to_string(), Value::Bool(enabled));
         config.cors_enabled = enabled;
+    })
+}
+
+/// 写入 AI 助手配置（整块替换）。
+///
+/// 与其它 setter 同一模式：内存快照立即生效（下一个对话请求就用新值），raw 底稿
+/// 一起改保证写盘不吃掉其它键。返回 `false` 只表示**落库失败**（本次运行内仍生效）。
+pub fn set_assistant_config(config: AssistantConfig) -> bool {
+    let value = config.to_value();
+    update(|current| {
+        current
+            .raw
+            .insert(KEY_ASSISTANT_CONFIG.to_string(), value);
+        current.assistant = config;
     })
 }
 
@@ -1804,6 +1926,39 @@ pub fn set_update_proxy(proxy: Option<Value>) -> bool {
                 config.update_proxy = None;
             }
         }
+    })
+}
+
+// ─── 「加入 beta 版」开关（updateBeta）──────────────────────────
+
+/// 只取「加入 beta 版」开关的轻量读取（**不克隆整份 raw**）。
+///
+/// 每次更新检查发起时读一次（低频），未初始化时给 false（正式通道）——
+/// 与缺省一致，理由见 `KEY_UPDATE_BETA`。
+pub fn update_beta() -> bool {
+    if let Ok(guard) = CONFIG.read() {
+        if let Some(config) = guard.as_ref() {
+            return config.update_beta;
+        }
+    }
+    false
+}
+
+/// 写入「加入 beta 版」开关（设置页「更新设置」弹窗里的那一枚）。
+///
+/// 与 `set_sanitize_fingerprints` 同一模式：内存立即生效（下一次检查就换通道，
+/// 含定时任务，不必重启进程），写盘时不吃掉其它字段。
+///
+/// **不动已经缓存的检查结果与排期**：换通道之后要不要立刻重查由调用方决定
+/// （界面拨完开关会主动查一次，见 update-settings.tsx），后端只负责回答
+/// 「下一次检查按哪个通道看」；排期与失败冷却都与通道无关（那条冷却记的是
+/// GitHub 配额桶的恢复时刻，见 core::update::check 的说明）。
+pub fn set_update_beta(enabled: bool) -> bool {
+    update(|config| {
+        config
+            .raw
+            .insert(KEY_UPDATE_BETA.to_string(), Value::Bool(enabled));
+        config.update_beta = enabled;
     })
 }
 

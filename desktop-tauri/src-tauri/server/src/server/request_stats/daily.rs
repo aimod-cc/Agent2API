@@ -125,6 +125,12 @@ pub(super) fn delete_daily(conn: &Connection, date: &str) -> rusqlite::Result<us
     conn.execute("DELETE FROM request_daily WHERE date = ?1", params![date])
 }
 
+/// 删掉 `date < cutoff_key` 的聚合行（时间维度保留；定长日期串字典序即时间序）。
+/// 保留期裁剪用：`record` 每次记账与 `prune` 都走它（边界由调用方算好传入）。
+pub(super) fn delete_daily_before(conn: &Connection, cutoff_key: &str) -> rusqlite::Result<usize> {
+    conn.execute("DELETE FROM request_daily WHERE date < ?1", params![cutoff_key])
+}
+
 /// 聚合行数（存储概况的 `dailyDays` 读数）
 pub(super) fn count_daily(conn: &Connection) -> rusqlite::Result<usize> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM request_daily", [], |row| row.get(0))?;

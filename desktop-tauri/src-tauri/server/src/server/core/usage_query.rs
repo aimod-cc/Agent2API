@@ -142,7 +142,17 @@ async fn query_usage_for(store: &AccountStore, account: &Value) -> Value {
     // 凭证与 provider 都从目标集合里的账号对象读，**不回读账号文件**：
     // 20 个账号并发时那次回读会变成 20 次整库读盘，而答案已在手上。
     // `hasCredentials` 是 store 逐条给出的统一判据（缺省视为有）。
-    let has_credentials = account.get("hasCredentials").and_then(Value::as_bool) != Some(false);
+    //
+    // 自定义家（含「预置 API」卡片建的那些）另有**一份查询凭证**（NewAPI 的
+    // 访问令牌 / 商汤的控制台账号密码 / 智谱的控制台令牌，见
+    // `providers::custom::balance`）：只靠它也能查余额，所以「有余额方案」
+    // 就放行 —— 不然一个没填转发 Key 的账号只会得到笼统的「没有可用凭证」，
+    // 而真正该说的是「哪一份凭证缺了」（各方案自己给 400「未配置」）。
+    let has_credentials = account.get("hasCredentials").and_then(Value::as_bool) != Some(false)
+        || account
+            .get("balanceQuery")
+            .and_then(|query| query.get("scheme"))
+            .is_some();
     let outcome = if has_credentials {
         let provider_id = account
             .get("provider")
@@ -159,7 +169,12 @@ async fn query_usage_for(store: &AccountStore, account: &Value) -> Value {
             json!({ "id": id, "usage": Value::Null, "error": "没有可用凭证" })
         }
         Err(UsageFailure::Request(message, code)) => {
-            logging::verbose("[Accounts]", &format!("账号 {id} 余额查询失败: {message}"));
+            let display = account
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(&id);
+            logging::verbose("[Accounts]", &format!("账号「{display}」余额查询失败: {message}"));
             json!({ "id": id, "name": name, "usage": Value::Null, "error": message, "code": code })
         }
     }
@@ -186,6 +201,17 @@ async fn query_usage_inner(
     provider_id: &str,
     id: &str,
 ) -> Result<Value, UsageFailure> {
+    // 自定义提供商（含「预置 API」卡片建的那些）走**余额方案**那条路：它们
+    // 没有 `ProviderKind`（不在注册表里），只有提供商记录上的 `balanceScheme`
+    // （七种方案见 `providers::custom::balance`）。这条分支必须在下面那句
+    // 「未知的提供商」之前 —— 否则自定义账号会稳定撞上它。
+    if crate::server::core::custom_providers::is_custom_provider_id(provider_id) {
+        // 这家没有续期协议（四条链路都是静态凭证或账号密码），因此没有
+        // 401 刷新重试那一步 —— 有的话反而会把「凭证不对」变成两条错误
+        return crate::server::core::providers::custom::balance::query_usage(store, id)
+            .await
+            .map_err(|error| UsageFailure::Request(error.message, error.code));
+    }
     // 注册表里没有的 id（前端比后端新、或手改过的账号文件）：明确报「未知的
     // 提供商」，不猜成任何一家（与全仓的 provider 口径一致）
     let Some(kind) = crate::server::core::providers::kind_from_id(provider_id) else {
@@ -230,11 +256,18 @@ async fn query_usage_inner(
 /// 501 —— 用户看到一片红，而那不是故障、只是能力缺失（当前四家都支持，
 /// 但注册表是可扩展的）。判据是各家的恒定能力声明，不是这次请求成不成功。
 /// 未知 provider id 一并跳过；显式指定 id 的调用路径仍会走到那条明确报错。
+///
+/// 自定义提供商（含「预置 API」卡片建的那些）**不在注册表里**，能力来自提供商
+/// 记录上的余额方案（`balanceScheme`，七种方案见 `providers::custom::balance`）：
+/// 有方案 = 这一家有余额查询（凭证没配上时那次查询给「未配置」，不是不支持）。
 fn supports_usage(account: &Value) -> bool {
     let provider_id = account
         .get("provider")
         .and_then(Value::as_str)
         .unwrap_or(crate::server::core::providers::DEFAULT_PROVIDER_ID);
+    if crate::server::core::custom_providers::is_custom_provider_id(provider_id) {
+        return crate::server::core::providers::custom::balance::supports_usage(provider_id);
+    }
     crate::server::core::providers::kind_from_id(provider_id)
         .map(|kind| adapter_for(kind).supports_usage())
         .unwrap_or(false)

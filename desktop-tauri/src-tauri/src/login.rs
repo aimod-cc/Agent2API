@@ -661,9 +661,16 @@ fn allowed_hosts(provider: &str) -> Option<&'static [&'static str]> {
         // 见 `providers::officeace::oauth` 的模块头），所以这里没有 CodeArts 那种
         // loopback 回调要放行；但「不设限」仍是必须显式写出的选择（落进默认分支
         // 会拿到 WorkBuddy 的白名单 → 窗口白屏）。
+        //
+        // OrcaTerm（腾讯云遨驰终端）同样不设限：登录窗口开在官方 Web 控制台
+        // （`orcaterm.cloud.tencent.com`），而扫码登录是**云账号**那一套 ——
+        // 控制台会拉 `cloud.tencent.com` 的 `wxQrcode`、再把
+        // `open.weixin.qq.com/connect/qrconnect` 以 iframe 嵌进来，之后还可能
+        // 跳账号中心 / 协议页等不可穷举的主机。**显式列出**（落进默认分支会拿到
+        // WorkBuddy 的白名单 → 控制台白屏，日志上什么也看不出）。
         "catpaw" | "qoder" | "qoder-intl" | "cline-free" | "cline-pass" | "autoclaw"
         | "autoclaw-intl" | "accio" | "accio-cn" | "zcode" | "zcode-intl" | "codearts" | "trae"
-        | "kuku" | "antigravity" | "officeace" => None,
+        | "kuku" | "antigravity" | "officeace" | "orcaterm" => None,
         // WorkBuddy 的两个地区共用这一张表（表里 `workbuddy.ai` 那一行就是国际站
         // 的登录域）。**显式列出**而不是靠下面的默认分支：上面那条警告要求
         // 「新 provider 落到默认分支」必须是有意的选择，写出来才看得出是选过的
@@ -871,6 +878,12 @@ fn normalize_provider(provider: &str) -> Result<&'static str, String> {
         // 与轮询 —— 与 ZCode / CodeArts 同一条路。它的授权码由网关**轮询云端**
         // 取回（云端回调页不往本机跳），所以窗口最后停在云端页上也不影响登录判定。
         "officeace" => Ok("officeace"),
+        // OrcaTerm（腾讯云遨驰终端）：地址由**后端适配器**返回（官方 Web 控制台
+        // 首页 `orcaterm.cloud.tencent.com/terminal`），壳侧负责开窗口、在窗口里
+        // 等控制台写入的 `ot_session` Cookie 出现后交回网关
+        // （`POST /api/session/login/orcaterm/complete`，见 `run_embedded` 的
+        // 等待循环与 `submit_orcaterm_login`）。
+        "orcaterm" => Ok("orcaterm"),
         other => Err(format!("不支持网页登录的提供商：{other}")),
     }
 }
@@ -1077,6 +1090,11 @@ pub async fn start(
     // 读 Cookie 存储交回网关（见 `submit_kuku_login`）。
     if provider == "kuku" {
         return start_kuku(app, &mode).await;
+    }
+    // OrcaTerm：官方 Web 控制台（适配器给的地址），登录成功后壳侧读窗口里的
+    // `ot_session` Cookie 交回网关（见 `submit_orcaterm_login`）。
+    if provider == "orcaterm" {
+        return start_orcaterm(app, &mode).await;
     }
     // CatPaw：授权地址要问一次上游 `login-config`，且 token 由上游**推**到本网关
     // 的 loopback 回调上（见 core::login::catpaw）。同样没有 edition 维度。
@@ -1346,6 +1364,79 @@ async fn start_kuku(app: &AppHandle, mode: &str) -> Result<serde_json::Value, St
     result
 }
 
+/// OrcaTerm 网页登录：**官方 Web 控制台 + 壳侧读 `ot_session` Cookie 交回**。
+///
+/// 与 KukuAI 同一形态（`start_kuku`）：官方页面上怎么登录由用户自己决定
+/// （控制台里的微信扫码由云账号那一套驱动），壳侧只在窗口里等一枚登录态
+/// Cookie 出现。因此 `mode = "external"` 同样要拒绝 —— 系统浏览器里的
+/// Cookie 壳读不到，等下去只会等到 5 分钟超时。
+///
+/// 窗口打开时会注入一段脚本**帮用户点开登录面板**（控制台首页左下角
+/// 头像 → 立即登录；不点的话用户得自己找那个入口），见
+/// [`orcaterm_login_panel_script`] 的说明与边界。
+async fn start_orcaterm(app: &AppHandle, mode: &str) -> Result<serde_json::Value, String> {
+    if mode == "external" {
+        return Err(
+            "OrcaTerm 的登录依赖壳侧读取登录窗口的 Cookie，只支持内嵌窗口；\
+             请用「内嵌窗口」发起，或改用「粘贴 accessToken」/「导入桌面端登录态」添加账号"
+                .to_string(),
+        );
+    }
+    let started = gateway::call(
+        "POST",
+        "/api/session/login/start",
+        Some(&json!({ "provider": "orcaterm" })),
+    )
+    .await?;
+    let login_state = started
+        .get("state")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("后端未返回登录状态")?
+        .to_string();
+    let auth_url = started
+        .get("authUrl")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("后端未返回登录链接，请检查网络")?
+        .to_string();
+
+    {
+        let state = app.state::<crate::state::AppState>();
+        let mut guard = state.login.lock().map_err(|_| "登录状态锁不可用")?;
+        *guard = Some(ActiveLogin {
+            state: login_state.clone(),
+            edition: String::new(),
+            mode: mode.into(),
+            provider: "orcaterm".to_string(),
+        });
+    }
+    emit_login_state(
+        app,
+        LoginState {
+            active: true,
+            mode: Some(mode.into()),
+            edition: None,
+            provider: Some("orcaterm".to_string()),
+        },
+    );
+
+    let result = run_embedded(
+        app,
+        "orcaterm",
+        &auth_url,
+        "登录 OrcaTerm 账号",
+        &login_state,
+        false,
+        None,
+        false,
+    )
+    .await;
+    if result.as_ref().map(|value| value.get("ok").and_then(serde_json::Value::as_bool)) != Ok(Some(true)) {
+        let _ = gateway::call("POST", "/api/session/login/cancel", Some(&json!({ "state": login_state }))).await;
+    }
+    clear_active_login(app, &login_state);
+    result
+}
+
 /// CatPaw 网页登录：**passport 登录页 + 上游回调打到网关自己的 loopback 端口**。
 ///
 /// 与另两家的差别（见 `core::login::catpaw` 的模块头）：token 是**上游推给
@@ -1548,6 +1639,10 @@ async fn run_embedded(
     // 密集重试只会延长风控窗口。
     let mut kuku_retry_block_until: Option<tokio::time::Instant> = None;
 
+    // OrcaTerm 的登录检测（官方 Web 控制台的 `ot_session` Cookie）：
+    // 状态与逻辑都在 [`OrcatermWatch`] 里，主循环只多一行调用。
+    let mut orcaterm_watch = OrcatermWatch::default();
+
     // 导航拦截与弹窗拦截**共用同一个标志**：两种入口收到的可能是同一个回调
     // （页面先改 location、再被 WebView2 派生出一条弹窗请求），分开各一个标志
     // 就会提交两次，第二次拿到的必然是「授权码已失效」。
@@ -1591,6 +1686,11 @@ async fn run_embedded(
             Some(phone) => window.initialization_script(kuku_sms_script(phone)),
             None => window,
         }
+    } else if provider == "orcaterm" {
+        // OrcaTerm：注入「帮用户点开登录面板」的脚本（控制台首页左下角
+        // 头像 → 立即登录）。纯尽力而为：点不动就什么都不做，用户自己点
+        // （见 `orcaterm_login_panel_script` 的边界说明）。
+        window.initialization_script(orcaterm_login_panel_script())
     } else if social_restore {
         window.initialization_script_for_all_frames(social_restore_script())
     } else {
@@ -1634,7 +1734,9 @@ async fn run_embedded(
             }
             // KukuAI 主站登录：每次导航（含跳 passport、登录后回跳主站）
             // 计数 +1，等待循环据此立即读一次 Cookie 存储做登录检测。
-            if provider == "kuku" {
+            // OrcaTerm 同理：扫码登录会经历若干次导航（云账号登录页 →
+            // 控制台回跳），每次导航都值得马上读一次 Cookie。
+            if provider == "kuku" || provider == "orcaterm" {
                 nav_counter_for_nav.fetch_add(1, Ordering::SeqCst);
             }
             host_allowed(url, provider, social_restore)
@@ -1657,6 +1759,13 @@ async fn run_embedded(
         // 等待循环照样能从 Cookie 读到 BDUSS）。
         .on_new_window(move |url, _features| {
             if provider == "kuku" {
+                return tauri::webview::NewWindowResponse::Allow;
+            }
+            // OrcaTerm 同款放行：云账号的登录链路（`cloud.tencent.com` 的
+            // wxQrcode / 账号中心）可能用 `window.open` 打开新页，一律 Deny 会
+            // 让「点了登录没反应」。弹窗与主窗口同属一个 WebView2 数据目录、
+            // 共享 Cookie 存储，弹窗里登录成功后等待循环照样能读到 `ot_session`。
+            if provider == "orcaterm" {
                 return tauri::webview::NewWindowResponse::Allow;
             }
             if let Some(target) = autoclaw_callback_forward(&url) {
@@ -1784,6 +1893,18 @@ async fn run_embedded(
                     }
                 }
             }
+        }
+        // OrcaTerm（官方 Web 控制台登录，见 `providers/orcaterm/login.rs` 的
+        // 模块头）：成功判据是窗口里出现 `ot_session` Cookie —— 那正是控制台
+        // 自己的登录态载体（未登录时该 Cookie 完全不存在，2026-10-16 实测对照）。
+        if provider == "orcaterm" {
+            orcaterm_watch
+                .tick(
+                    &window,
+                    login_state,
+                    nav_counter_for_check.load(Ordering::SeqCst),
+                )
+                .await;
         }
         match poll_once(login_state).await {
             PollOutcome::Pending => continue,
@@ -1930,6 +2051,208 @@ async fn submit_kuku_login(
         .await
         .map_err(|error| format!("网关收尾失败: {error}"))?;
     Ok(())
+}
+
+// ─── OrcaTerm（官方 Web 控制台登录）──────────────────────────
+
+/// OrcaTerm 登录检测的滚动状态。
+///
+/// 抽成一个类型而不是在 [`run_embedded`] 的等待循环里再摊一份内联变量：
+/// 那段循环里 KukuAI 的检测已经占了一大块（它有自己的影子 Cookie 时序），
+/// 再塞一份带退避的状态会让主循环难以通读。判据与 KukuAI 同款但更简单 ——
+/// `ot_session` 是一枚普通 Cookie，没有 HttpOnly 影子副本要等。
+#[derive(Default)]
+struct OrcatermWatch {
+    /// 当前节拍（每拍按时长递增；每 4 拍兜底读一次 Cookie）
+    tick: u32,
+    /// 上一次见到的导航计数（导航之后立刻读一次 Cookie）
+    last_nav: u64,
+    /// 首次发现 `ot_session` 的时刻（之后等 [`Self::STABLE_AFTER`] 再交回）
+    seen_at: Option<tokio::time::Instant>,
+    /// 本次登录是否已经交回过（成功或正在提交中）
+    submitted: bool,
+    /// 交回失败后的退避截止时刻（后端探活失败多为上游尚未生效 / 网络抖动，
+    /// 密集重试没有意义）
+    retry_block_until: Option<tokio::time::Instant>,
+}
+
+impl OrcatermWatch {
+    /// 发现 `ot_session` 之后等这么久再交回：控制台写入 Cookie 与页面把
+    /// 登录态落定（跳首页、拉身份）是两步，抢在中间交回拿到的仍是可用令牌，
+    /// 但没有必要冒这个险 —— 3 秒足够，且不影响用户感受（窗口本来还开着）。
+    const STABLE_AFTER: Duration = Duration::from_secs(3);
+    /// 交回失败后的退避时长（与 KukuAI 同一口径）
+    const RETRY_BACKOFF: Duration = Duration::from_secs(30);
+
+    /// 一拍：必要时读一次登录窗口的 Cookie，发现 `ot_session` 就交回网关。
+    ///
+    /// 读 Cookie 走独立线程 + 超时（Windows 上同步调 `cookies()` 会死锁，
+    /// 见 [`read_window_cookies`]）；读失败只记日志，下一拍再来。
+    async fn tick(
+        &mut self,
+        window: &tauri::WebviewWindow,
+        login_state: &str,
+        nav_count: u64,
+    ) {
+        if self.submitted {
+            return;
+        }
+        self.tick = self.tick.wrapping_add(1);
+        let navigated = nav_count != self.last_nav;
+        if navigated {
+            self.last_nav = nav_count;
+        }
+        // 触发时机：导航之后立即读；已经发现过 `ot_session` 时每拍都读
+        // （要拿最新的那次值交回）；否则每 4 拍兜底一次，防止「登录后长时间
+        // 不导航」漏掉。
+        let should_read = navigated || self.seen_at.is_some() || self.tick % 4 == 0;
+        if !should_read {
+            return;
+        }
+        let token = match read_window_cookies(window).await {
+            Ok(cookies) => {
+                let token = orcaterm_session_token(&cookies);
+                if token.is_none() && self.tick % 25 == 0 {
+                    // 慢节拍诊断（约 50 秒一次）：把「窗口停在哪一页、有多少条
+                    // Cookie」记下来 —— 扫码后迟迟不给 `ot_session` 时，这两条
+                    // 信息能立刻区分「还停在登录页（用户没扫完）」与
+                    // 「已登录但登录态换了存放方式（上游改版）」。
+                    let url = window
+                        .url()
+                        .map(|url| url.to_string())
+                        .unwrap_or_default();
+                    eprintln!(
+                        "[login] OrcaTerm 仍未捕获 ot_session（当前页面 {url}，共 {} 条 Cookie）",
+                        cookies.len()
+                    );
+                }
+                token
+            }
+            Err(error) => {
+                eprintln!("[login] OrcaTerm 读取窗口 Cookie 失败（下轮重试）: {error}");
+                return;
+            }
+        };
+        let Some(token) = token else {
+            return;
+        };
+        let is_first = self.seen_at.is_none();
+        let first_seen = *self.seen_at.get_or_insert_with(tokio::time::Instant::now);
+        if is_first {
+            eprintln!(
+                "[login] OrcaTerm 窗口已出现 ot_session（长度 {}），等 {} 秒后交回…",
+                token.len(),
+                Self::STABLE_AFTER.as_secs()
+            );
+        }
+        if first_seen.elapsed() < Self::STABLE_AFTER {
+            return;
+        }
+        let blocked = self
+            .retry_block_until
+            .map(|until| tokio::time::Instant::now() < until)
+            .unwrap_or(false);
+        if blocked {
+            return;
+        }
+        self.submitted = true;
+        match submit_orcaterm_login(login_state, &token).await {
+            Ok(()) => eprintln!("[login] 已把 OrcaTerm 登录态交回网关"),
+            Err(error) => {
+                eprintln!("[login] 交回 OrcaTerm 登录态失败（下轮重试）: {error}");
+                self.submitted = false;
+                self.seen_at = None;
+                self.retry_block_until = Some(tokio::time::Instant::now() + Self::RETRY_BACKOFF);
+            }
+        }
+    }
+}
+
+/// 从登录窗口的 Cookie 里挑出 OrcaTerm 的 `ot_session` 值。
+///
+/// 判据不只是名字：控制台首页在**未登录**时不会写这个 Cookie（实测对照），
+/// 但为空串或残值（用户手删、上游撤销后留的覆盖写）都要排除，所以要求
+/// 取值是 JWT 形态（三段点分且够长）。域名不做硬过滤，但多条候选时取**最长**
+/// 的一条 —— 登录态在同一窗口里只会有一条（每个数据目录一份 Cookie 存储），
+/// 取最长是为了容错而不是为了选路。
+fn orcaterm_session_token(cookies: &[tauri::webview::Cookie<'static>]) -> Option<String> {
+    let mut best: Option<String> = None;
+    for cookie in cookies {
+        if cookie.name() != "ot_session" {
+            continue;
+        }
+        let value = cookie.value().trim();
+        if value.split('.').count() != 3 || value.len() < 60 {
+            continue;
+        }
+        if best.as_deref().map(|current| value.len() > current.len()).unwrap_or(true) {
+            best = Some(value.to_string());
+        }
+    }
+    best
+}
+
+/// OrcaTerm 登录态交回：把窗口里的 `ot_session` POST 给网关收尾。
+///
+/// 与前几家的差别：交回的是**令牌本身**（不是 Cookie 头）—— OrcaTerm 的
+/// 登录态就是这一枚 JWT，Cookie 只是它的存放形态（见
+/// `providers/orcaterm/login.rs` 的模块头）。后端会再剥一次 `ot_session=`
+/// 前缀并打一次上游探活，验过才落账号。
+async fn submit_orcaterm_login(login_state: &str, token: &str) -> Result<(), String> {
+    let payload = json!({ "state": login_state, "token": token });
+    gateway::call("POST", "/api/session/login/orcaterm/complete", Some(&payload))
+        .await
+        .map_err(|error| format!("网关收尾失败: {error}"))?;
+    Ok(())
+}
+
+/// 打开 OrcaTerm 控制台后**帮用户点开登录面板**的注入脚本。
+///
+/// ── 为什么只做「点两下」这一件事 ─────────────────────────────
+/// 控制台的登录入口藏在左下角头像的浮层里（头像 → 立即登录 → 微信扫码），
+/// 而登录窗口是壳自己开的、用户没有浏览器的地址栏与既有登录态，
+/// 让它去找那个入口是没必要的门槛 —— 脚本只把入口替他点开，**扫码本身
+/// 仍由用户在官方页面上完成**（云账号的二维码、风控、协议勾选全在上游页面里，
+/// 与 KukuAI 放弃 passport 页面自动化同一条边界：不替用户完成登录动作本身，
+/// 也不复刻上游前端的实现）。
+///
+/// ── 边界（点不动就算了）─────────────────────────────────────
+/// 选择器取自控制台真实 DOM（2026-10-16 实测：`.orcaterm-header-avatar`
+/// 点击后浮层里出现 `.orcaterm-user-account-bubble__login-btn`，点它才插入
+/// `open.weixin.qq.com/connect/qrconnect` 的 iframe）。上游改版会让它失效，
+/// 因此：只点一次、失败不再重试、出现二维码即收手；用户仍可自己点头像 →
+/// 立即登录（前端那块文案也这么写）。
+fn orcaterm_login_panel_script() -> String {
+    r#"
+(function () {
+  var tries = 0;
+  var avatarClicked = false;
+  var loginClicked = false;
+  function hasQr() {
+    var frames = document.querySelectorAll('iframe');
+    for (var i = 0; i < frames.length; i++) {
+      if (/open\.weixin\.qq\.com\/connect\/qrconnect/.test(frames[i].src || '')) return true;
+    }
+    return false;
+  }
+  function loggedIn() {
+    return /(^|;\s*)ot_session=/.test(document.cookie || '');
+  }
+  function tick() {
+    if (hasQr() || loggedIn() || tries++ > 60) return;
+    if (!avatarClicked) {
+      var avatar = document.querySelector('.orcaterm-header-avatar');
+      if (avatar) { avatar.click(); avatarClicked = true; }
+    } else if (!loginClicked) {
+      var button = document.querySelector('.orcaterm-user-account-bubble__login-btn');
+      if (button) { button.click(); loginClicked = true; }
+    }
+    setTimeout(tick, 700);
+  }
+  setTimeout(tick, 1200);
+})();
+"#
+    .to_string()
 }
 
 /// 用系统默认浏览器打开链接。

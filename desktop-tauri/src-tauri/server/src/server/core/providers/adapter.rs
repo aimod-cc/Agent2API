@@ -1013,6 +1013,11 @@ pub trait ProviderAdapter: Send + Sync {
     ///   "raw": { }                    // 各家原始响应（排障用；前端默认不展示）
     /// }
     /// ```
+    /// 上面那套之外还有几个**可选展示键**，各家按自己的读数形态自带、前端按形状探测
+    /// （不按 provider 判）：`availableView`（读数的紧凑展示串）、`balanceView`
+    /// （明细行自己的展示串，含重置时刻那类补充）、`credits[]`（逐份积分读数）、
+    /// `windows[]`（逐窗口读数，如 OpenCode 的 5 小时 / 每周 / 每月三个窗口，
+    /// 界面一格画三条）。不带这些键的家走的仍是最上面那套基础形状。
     ///
     /// ── 契约（调用方按这几条写）────────────────────────────────
     ///   1. **不抛 HTTP 错误的语义**：实现返回 `Err` 表示「这次查询失败」，
@@ -1143,6 +1148,10 @@ pub fn adapter_for(kind: ProviderKind) -> &'static dyn ProviderAdapter {
         // （Basic 网关凭据；账号管理走手工导入 / 自助 OAuth，见
         // `officeace/mod.rs` 的模块头）
         ProviderKind::OfficeAce => &super::officeace::adapter::OFFICEACE_ADAPTER,
+        // OrcaTerm（腾讯云遨驰终端桌面客户端）：账号 / OAuth 续期 / 会话转发 /
+        // 余额全部已接通（建会话 → assistant SSE，`is_stateful` 为 true，
+        // 见 `orcaterm/mod.rs` 与 `orcaterm/adapter.rs` 的模块头）
+        ProviderKind::OrcaTerm => &super::orcaterm::ORCATERM_ADAPTER,
     }
 }
 
@@ -1238,6 +1247,10 @@ pub fn implemented_kinds() -> Vec<ProviderKind> {
         // OfficeAce：远程目录（`GET {网关}/v1/models`）+ 有转发能力，
         // 进本列表才会被后台目录刷新调度
         ProviderKind::OfficeAce,
+        // OrcaTerm：适配器已接线（账号 / 续期 / 转发 / 余额），但**没有**
+        // 远程模型目录（静态清单，`supports_model_refresh()` 为 false）——
+        // 进本列表只代表「已实现」（与 Zcode 同一口径：刷新循环对它是空操作）。
+        ProviderKind::OrcaTerm,
     ]
 }
 

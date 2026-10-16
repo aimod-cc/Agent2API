@@ -64,20 +64,32 @@ fn wallet(kind: &str, name: &str, value: f64, unit: &str) -> Value {
     })
 }
 
+/// `addOnQuota` 桶本身（键在、是对象、且**不是空桶**）。
+///
+/// 判据只有这一份（「键缺失或全零 = 没有资源包」，见模块头）：[`add_on`] 的钱包行
+/// 与 [`credit_rows`] 的个人资源包行都从这里取桶 —— 两处各判一次迟早漂成两种口径。
+fn add_on_bucket(raw: &Value) -> Option<&Value> {
+    let bucket = raw.get("addOnQuota").filter(|value| value.is_object())?;
+    let total = number(bucket.get("total"));
+    let used = number(bucket.get("used"));
+    let remaining = number(bucket.get("remaining"));
+    if [total, used, remaining].iter().all(|value| value.unwrap_or(0.0) <= 0.0) {
+        return None;
+    }
+    Some(bucket)
+}
+
 /// 个人资源包（`addOnQuota`）→ 钱包行 + 剩余额度。
 ///
 /// 没有这个键、或全零（上游会返回空对象）时给空结果 —— 与参考实现的判据一致：
-/// 「全零」意味着没有资源包，而不是「有 0 个」。
+/// 「全零」意味着没有资源包，而不是「有 0 个」（判据本体在 [`add_on_bucket`]）。
 fn add_on(raw: &Value, fallback_unit: &str) -> (Vec<Value>, Option<f64>) {
-    let Some(bucket) = raw.get("addOnQuota").filter(|value| value.is_object()) else {
+    let Some(bucket) = add_on_bucket(raw) else {
         return (Vec::new(), None);
     };
     let total = number(bucket.get("total"));
     let used = number(bucket.get("used"));
     let remaining = number(bucket.get("remaining"));
-    if [total, used, remaining].iter().all(|value| value.unwrap_or(0.0) <= 0.0) {
-        return (Vec::new(), None);
-    }
     let unit = bucket.get("unit").and_then(Value::as_str).unwrap_or(fallback_unit);
     let mut wallets = Vec::new();
     if let Some(value) = used {
@@ -87,6 +99,21 @@ fn add_on(raw: &Value, fallback_unit: &str) -> (Vec<Value>, Option<f64>) {
         wallets.push(wallet("addon_total", "资源包总额", value, unit));
     }
     (wallets, remaining)
+}
+
+/// `orgResourcePackage` 桶本身（键在、是对象、且上游说它**可用**）。
+///
+/// 判据细则见 [`org_package`] 的文档；这里与 [`add_on_bucket`] 同一取向 ——
+/// 判据只写一份，钱包行与 [`credit_rows`] 的组织资源包行都从这里取桶。
+fn org_bucket(raw: &Value) -> Option<&Value> {
+    let bucket = raw.get("orgResourcePackage").filter(|value| value.is_object())?;
+    let cap = number(bucket.get("cap")).or_else(|| number(bucket.get("total")));
+    let used = number(bucket.get("used"));
+    let remaining = number(bucket.get("remaining"));
+    let usable = bucket.get("available").and_then(Value::as_bool).unwrap_or_else(|| {
+        [cap, used, remaining].iter().any(|value| value.unwrap_or(0.0) > 0.0)
+    });
+    if usable { Some(bucket) } else { None }
 }
 
 /// 组织资源包（`orgResourcePackage`）→ 钱包行 + 剩余额度。
@@ -101,20 +128,14 @@ fn add_on(raw: &Value, fallback_unit: &str) -> (Vec<Value>, Option<f64>) {
 ///     也不能算进「还能花多少」。
 ///
 /// `available` 缺失（旧形状）时退回老判据：`cap` / `used` / `remaining`
-/// 有一个大于零就显示。
+/// 有一个大于零就显示。判据本体在 [`org_bucket`]。
 fn org_package(raw: &Value, fallback_unit: &str) -> (Vec<Value>, Option<f64>) {
-    let Some(bucket) = raw.get("orgResourcePackage").filter(|value| value.is_object()) else {
+    let Some(bucket) = org_bucket(raw) else {
         return (Vec::new(), None);
     };
     let cap = number(bucket.get("cap")).or_else(|| number(bucket.get("total")));
     let used = number(bucket.get("used"));
     let remaining = number(bucket.get("remaining"));
-    let usable = bucket.get("available").and_then(Value::as_bool).unwrap_or_else(|| {
-        [cap, used, remaining].iter().any(|value| value.unwrap_or(0.0) > 0.0)
-    });
-    if !usable {
-        return (Vec::new(), None);
-    }
     let unit = bucket.get("unit").and_then(Value::as_str).unwrap_or(fallback_unit);
     let mut wallets = Vec::new();
     if let Some(total) = cap.filter(|value| *value > 0.0) {
@@ -124,6 +145,95 @@ fn org_package(raw: &Value, fallback_unit: &str) -> (Vec<Value>, Option<f64>) {
         wallets.push(wallet("org_used", "组织已用", value, unit));
     }
     (wallets, remaining)
+}
+
+/// 逐桶明细行（账号页「积分明细」弹层的输入；行形状与 workbuddy / trae 两家
+/// 同一套 —— 界面只写一个读取器）。
+///
+/// 一行一个桶：套餐额度 → 个人资源包 → 组织资源包（与 `wallets` 的 push 顺序
+/// 一致）。三个数直接透传桶上的 `total` / `used` / `remaining`，**缺失不写键**
+/// （界面 `Number(null) === 0`，写 null 会把「没读到」画成「只剩 0」）。
+///
+/// ── 出行的判据全部与钱包行同源 ──────────────────────────────
+///   * 套餐行：三个数一个都读不到时整行不出 —— 行里没有数字可读，界面只能画
+///     「—」（与 ZCode 那边「纯比例窗口行跳过」同一条纪律）；一个桶都没读到
+///     时 `credits` 键整个不写，界面按「键在不在」自然退回原样。
+///   * 个人资源包 / 组织资源包两行：判据取 [`add_on_bucket`] / [`org_bucket`]
+///     —— 「有没有这份额度」只有一份判据，见那两个函数。
+///
+/// ── 时刻与单位 ──────────────────────────────────────────────
+///   * 不写 `expireAt` / `grantAt`：桶级没有这些字段；`subscription.expireAt`
+///     是**订阅**到期，与「这一份额度什么时候作废」是两回事，不拿它顶替；
+///   * `unit` 只在该桶自己的单位非空且**与文档级不同**时写（文档级取自
+///     `userQuota.unit`，缺省「额度」；三桶通常同单位，多数情况都不写）。
+fn credit_rows(raw: &Value, doc_unit: &str) -> Vec<Value> {
+    let mut rows: Vec<Value> = Vec::new();
+    if let Some(bucket) = raw.get("userQuota").filter(|value| value.is_object()) {
+        if let Some(row) = credit_row(
+            "套餐额度",
+            number(bucket.get("total")),
+            number(bucket.get("used")),
+            number(bucket.get("remaining")),
+            bucket.get("unit").and_then(Value::as_str),
+            doc_unit,
+        ) {
+            rows.push(row);
+        }
+    }
+    if let Some(bucket) = add_on_bucket(raw) {
+        if let Some(row) = credit_row(
+            "个人资源包",
+            number(bucket.get("total")),
+            number(bucket.get("used")),
+            number(bucket.get("remaining")),
+            bucket.get("unit").and_then(Value::as_str),
+            doc_unit,
+        ) {
+            rows.push(row);
+        }
+    }
+    if let Some(bucket) = org_bucket(raw) {
+        if let Some(row) = credit_row(
+            "组织资源包",
+            // 总量字段叫 `cap`（旧形状叫 `total`，与钱包行同一兜底，见 [`org_package`]）
+            number(bucket.get("cap")).or_else(|| number(bucket.get("total"))),
+            number(bucket.get("used")),
+            number(bucket.get("remaining")),
+            bucket.get("unit").and_then(Value::as_str),
+            doc_unit,
+        ) {
+            rows.push(row);
+        }
+    }
+    rows
+}
+
+/// 一行明细：`name` + 三个数 + （与文档级不同的）单位；三个数一个都没有时给
+/// `None`（整行不出，理由见 [`credit_rows`]）。
+fn credit_row(
+    name: &str,
+    total: Option<f64>,
+    used: Option<f64>,
+    remain: Option<f64>,
+    unit: Option<&str>,
+    doc_unit: &str,
+) -> Option<Value> {
+    if total.is_none() && used.is_none() && remain.is_none() {
+        return None;
+    }
+    let mut row = Map::new();
+    row.insert("name".to_string(), Value::String(name.to_string()));
+    // 上游给什么写什么（读到 0 也照写：那是真读数，不是「没读到」）；
+    // 缺失一律不写这个键
+    for (key, value) in [("total", total), ("used", used), ("remain", remain)] {
+        if let Some(value) = value {
+            row.insert(key.to_string(), json!(value));
+        }
+    }
+    if let Some(unit) = unit.map(str::trim).filter(|value| !value.is_empty() && *value != doc_unit) {
+        row.insert("unit".to_string(), Value::String(unit.to_string()));
+    }
+    Some(Value::Object(row))
 }
 
 /// 订阅到期时间；哨兵值、0 与 null 都按「没有到期时间」处理（不显示）。
@@ -158,7 +268,8 @@ async fn plan_name(credentials: &Credentials, proxy: Option<&ResolvedProxy>) -> 
     }
 }
 
-/// 额度文档的纯函数半边：三个桶合成钱包明细与 `available`。
+/// 额度文档的纯函数半边：三个桶合成钱包明细、`available` 与顶层逐桶明细
+/// （`credits`，见 [`credit_rows`]）。
 ///
 /// 抽出来是为了让「组织资源包计不计入 `available`」这类判据能单测钉住——
 /// 这一带的历史事故全是「明明读到了却显示成没有」，而症状在界面上，
@@ -185,11 +296,21 @@ fn usage_document(raw: &Value) -> Value {
         .into_iter()
         .flatten()
         .reduce(|acc, value| acc + value);
-    json!({
+    let credits = credit_rows(raw, unit);
+    let mut document = json!({
         "available": available,
         "unit": unit,
         "wallets": wallets,
-    })
+    });
+    // 逐桶明细挂文档顶层（见 [`credit_rows`]）；空数组**整键不写** —— 界面按
+    // 「键在不在 + 长度」决定挂不挂「积分明细」入口，写一个空数组会挂出一个
+    // 点开是空的入口。
+    if !credits.is_empty() {
+        if let Some(object) = document.as_object_mut() {
+            object.insert("credits".to_string(), Value::Array(credits));
+        }
+    }
+    document
 }
 
 pub async fn query(

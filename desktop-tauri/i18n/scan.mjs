@@ -49,7 +49,7 @@ const LOCALES = ['en', 'zh-Hant', 'ja', 'ko', 'pt-BR']
  * 调整顺序会改变某些跨界键的归属，非必要不要动。
  */
 const DOMAIN_ORDER = [
-  'common', 'login', 'accounts', 'add-account', 'models', 'settings', 'update',
+  'common', 'login', 'accounts', 'add-account', 'models', 'settings', 'assistant', 'update',
   'keys', 'proxies', 'docs', 'report', 'checkin', 'tasks', 'logs', 'requests',
   'tables', 'port',
 ]
@@ -61,13 +61,16 @@ const DOMAIN_ORDER = [
 const DOMAIN_RULES = [
   { domain: 'common', files: ['index.html', 'titlebar.js', 'tooltip.js', 'clipboard.js', 'filter-memory.js', 'app.js', 'confirm-dialog.tsx', 'input.tsx', 'input-control.tsx', 'segmented.tsx', 'index.tsx', 'markdown.js', 'icons.js'] },
   { domain: 'login', files: ['login.html', 'login-page.tsx', 'panel-captcha.js'] },
-  { domain: 'accounts', files: ['accounts-page.tsx', 'accounts-shared.ts', 'accounts-columns.ts', 'accounts-store.ts', 'accounts-panels.tsx', 'accounts-queue-drag.ts', 'accounts-dialogs.tsx', 'accounts-dialog-limiter.tsx', 'accounts-dialog-usage.tsx', 'accounts-credit-detail.tsx', 'accounts-data.ts', 'accounts-domain.ts', 'zcode-plans-modal.tsx'] },
+  { domain: 'accounts', files: ['accounts-page.tsx', 'accounts-shared.ts', 'accounts-columns.ts', 'accounts-store.ts', 'accounts-panels.tsx', 'accounts-queue-drag.ts', 'accounts-dialogs.tsx', 'accounts-dialog-limiter.tsx', 'accounts-dialog-usage.tsx', 'accounts-credit-detail.tsx', 'accounts-data.ts', 'accounts-domain.ts', 'zcode-plans-modal.tsx', 'balance-query.tsx'] },
   { domain: 'add-account', files: ['add-custom-provider.tsx', 'custom-provider-ui.js', 'providers.js', 'preset-providers.js', 'web-login.js', 'sms-login.js', 'autoclaw-oauth.js', 'aliyun-captcha.js', 'zcode-claim.js', 'zcode-captcha-pool.js', 'codearts-welfare.js'], prefixes: ['add-account-', 'add-provider-'] },
   { domain: 'models', files: ['model-capability.ts', 'model-capability-dialog.tsx', 'model-test-dialog.tsx'], prefixes: ['models-'] },
   { domain: 'settings', files: ['units.js'], prefixes: ['settings-'] },
+  // AI 助手（侧边栏「智能」组的一级页 + 设置页「AI 助手」分类）：
+  // 对话页、工具集、设置面板三块
+  { domain: 'assistant', prefixes: ['assistant-'] },
   { domain: 'update', files: ['upgrade-panel.js'], prefixes: ['update-'] },
   { domain: 'keys', files: ['keys-page.tsx'] },
-  { domain: 'proxies', files: ['proxies-page.tsx', 'proxies-columns.ts', 'proxies-state.ts', 'proxies-dialogs.tsx', 'proxies-sub-state.ts', 'proxies-sub-view.tsx', 'proxies-kernel-dialog.tsx'] },
+  { domain: 'proxies', files: ['proxies-page.tsx', 'proxies-columns.ts', 'proxies-state.ts', 'proxies-dialogs.tsx', 'proxies-sub-state.ts', 'proxies-sub-view.tsx', 'proxies-kernel-dialog.tsx', 'sponsor.ts'] },
   { domain: 'docs', files: ['docs-page.tsx'] },
   { domain: 'report', files: ['report-page.tsx', 'report-charts.ts'] },
   { domain: 'checkin', files: ['checkin-page.tsx', 'checkin-state.ts', 'checkin-schedule-tab.tsx', 'checkin-records-tab.tsx', 'checkin-schedules-state.ts'] },

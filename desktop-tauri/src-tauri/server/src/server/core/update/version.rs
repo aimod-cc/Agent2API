@@ -4,6 +4,13 @@
 //! 与 `mod.rs`（网络与状态机）拆开，是因为这里全是**纯函数**：
 //! 改动原因不同（这里随「版本号与资产命名约定」变，mod.rs 随「HTTP 与文件」变），
 //! 也方便单测式排查时直接调用。
+//!
+//! ── 一处有意的分歧：版本号带预发布段 ──────────────────────────
+//! Node 版只比三段数字、后缀一律忽略；这里按 semver 继续比 `-` 之后的预发布段
+//! （见 [`compare_versions`]），外加 [`pick_listed_release`]（从 Release 列表里
+//! 挑版本最高的一版）—— 两者都是「加入 beta 版」这条通道的必要条件：通道打开
+//! 后 `3.1.0-beta.1` 与 `3.1.0-beta.2` 必须能分出先后，正式通道的行为则一字不变
+//! （`/releases/latest` 本来就不会返回预发布标签）。
 
 use serde_json::Value;
 
@@ -18,6 +25,8 @@ pub const GITHUB_API: &str = "https://api.github.com";
 /// 用途是「不连 GitHub 也能更新」：内网镜像站、离线演练都走这条。配置后
 /// **只管更新检查与下载两件事**（账号转发、模型清单一概不受影响）：
 ///   · 检查更新打 `{base}/repos/{repo}/releases/latest`，返回体与 GitHub 同形；
+///     「加入 beta 版」打开时改打 `{base}/repos/{repo}/releases?per_page=…`
+///     （取的是**数组**，元素同形）—— 自建源要支持 beta 通道就得提供这个列表接口；
 ///   · 下载白名单额外放行 `base` 的 host（见 [`assert_downloadable`]）——
 ///     这是**显式配置才生效**的口子，没配就还是只有 GitHub 那几个域名。
 pub fn custom_api_base() -> Option<String> {
@@ -86,12 +95,37 @@ impl std::fmt::Display for UpdateError {
 /// 再要求以 `d+.d+.d+` **开头**（后面的预发布/构建元数据不管）。
 /// 非语义化版本返回 None（此时不做「有新版本」判断，只展示原文）。
 pub fn parse_version(text: &str) -> Option<[u64; 3]> {
+    split_version(text).map(|(core, _)| core)
+}
+
+/// 这个标签是不是**预发布版**（`-beta.1` 这类 semver 预发布段）？
+///
+/// ── 判据只用版本号，不读 Release 的 `prerelease` 标记 ──────────
+/// 本仓库「tag 带 `-` ↔ 标 pre-release」是同一条约定（见 agent.md 的发版流程），
+/// 而版本比较本来就看标签 —— 两处若各读一个来源，漏标 pre-release 时「取最高
+/// 版本」与「是不是 beta」就会自相矛盾（它参与比较的方式与它被分类的方式不一致）。
+/// 认不出来的标签一律按正式版处理，与 [`split_version`] 的口径一致。
+pub fn is_prerelease_version(text: &str) -> bool {
+    split_version(text)
+        .map(|(_, prerelease)| prerelease.is_some())
+        .unwrap_or(false)
+}
+
+/// 拆版本号：`(三段数字, 预发布段)`。数字三段与 [`parse_version`] 同一口径
+/// （剥 `v` 前缀、只要求前缀匹配），预发布段是 `-` 之后那串（不含 `-`）。
+///
+/// ── 只有 `-` 才算预发布段 ────────────────────────────────────
+/// `3.1.0.1` / `3.1.0_beta` 这类非 semver 写法一律当「没有预发布段」处理，
+/// 与改动前「后缀一律忽略」的行为一致：它们本来就不该出现在 Release 标签里，
+/// 真出现时按正式版对待（继续按语义化比较）比按预发布对待更安全。
+/// 构建元数据（`+` 之后）按 semver 不参与优先级，这里直接截掉。
+fn split_version(text: &str) -> Option<([u64; 3], Option<&str>)> {
     let trimmed = text.trim();
     let body = trimmed
         .strip_prefix('v')
         .or_else(|| trimmed.strip_prefix('V'))
         .unwrap_or(trimmed);
-    // `^(\d+)\.(\d+)\.(\d+)`：只要求前缀匹配，多余部分（-beta.1 等）忽略
+    // `^(\d+)\.(\d+)\.(\d+)`：只要求前缀匹配，多余部分（-beta.1 等）交给下面拆
     let mut parts = [0u64; 3];
     let mut rest = body;
     for (index, slot) in parts.iter_mut().enumerate() {
@@ -106,13 +140,54 @@ pub fn parse_version(text: &str) -> Option<[u64; 3]> {
             rest = rest.strip_prefix('.')?;
         }
     }
-    Some(parts)
+    let head = rest.split('+').next().unwrap_or(rest);
+    let prerelease = head.strip_prefix('-').filter(|tail| !tail.is_empty());
+    Some((parts, prerelease))
+}
+
+/// 预发布段的先后（semver 第 11 条）：返回值口径同 [`compare_versions`]。
+///
+/// 两侧都是 `-` 之后的原文（`beta.1` / `rc.2` 这类），按 `.` 拆成标识符逐个比：
+///   · 两边都是数字 → 按数值比（`beta.2` > `beta.10` 的坑正在这里）；
+///   · 数字 < 非数字（`alpha.1` < `alpha.beta`）；
+///   · 都是非数字 → 按 ASCII 字典序；
+///   · 前缀全相同 → 标识符少的更小（`1.0.0-alpha` < `1.0.0-alpha.1`）。
+fn compare_prerelease(left: &str, right: &str) -> i32 {
+    let mut left_parts = left.split('.');
+    let mut right_parts = right.split('.');
+    loop {
+        match (left_parts.next(), right_parts.next()) {
+            (None, None) => return 0,
+            (None, Some(_)) => return -1,
+            (Some(_), None) => return 1,
+            (Some(a), Some(b)) => {
+                // `u64` 解析成功即「数字标识符」：带前导零的写法（01）按 semver
+                // 本来就非法，这里当数字比也不吃亏
+                let order = match (a.parse::<u64>(), b.parse::<u64>()) {
+                    (Ok(x), Ok(y)) => x.cmp(&y),
+                    (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+                    (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+                    (Err(_), Err(_)) => a.cmp(b),
+                };
+                if order != std::cmp::Ordering::Equal {
+                    return if order == std::cmp::Ordering::Less { -1 } else { 1 };
+                }
+            }
+        }
+    }
 }
 
 /// 语义化比较：a > b 返回 1，相等 0，a < b 返回 -1；无法解析时 None。
+///
+/// ── 为什么必须比预发布段 ─────────────────────────────────────
+/// 「加入 beta 版」通道会把 `3.1.0-beta.1` 与 `3.1.0-beta.2` 一起摆到比较里：
+/// 只看核心三段的话这两个是「同一版」，beta 用户装完 beta.1 就再也收不到
+/// beta.2（定时任务每轮都判「无更新」）。按 semver：带预发布段的比同核心号的
+/// 正式版小（`1.0.0-beta.1` < `1.0.0`），于是「beta.1 → beta.2 → 正式版」
+/// 这条链每一跳都算「有新版本」，正式版发布时 beta 用户也能自动接上。
 pub fn compare_versions(a: &str, b: &str) -> Option<i32> {
-    let left = parse_version(a)?;
-    let right = parse_version(b)?;
+    let (left, left_pre) = split_version(a)?;
+    let (right, right_pre) = split_version(b)?;
     for index in 0..3 {
         if left[index] > right[index] {
             return Some(1);
@@ -121,7 +196,76 @@ pub fn compare_versions(a: &str, b: &str) -> Option<i32> {
             return Some(-1);
         }
     }
-    Some(0)
+    Some(match (left_pre, right_pre) {
+        (None, None) => 0,
+        // 核心号相同：没有预发布段的那侧更大（`3.1.0` > `3.1.0-beta.1`）
+        (None, Some(_)) => 1,
+        (Some(_), None) => -1,
+        (Some(left), Some(right)) => compare_prerelease(left, right),
+    })
+}
+
+/// 从 Release **列表**（`/releases`）里挑「当前该更新到的一版」。
+///
+/// 这是 beta 通道的取版方式：`/releases/latest` 由 GitHub 自己排除预发布，
+/// 想要 beta 就得自己从列表里挑。规则：
+///   · 跳过草稿（带令牌请求时草稿也会出现在列表里，它绝不该被当成可下载的一版）；
+///   · 版本号认不出来的标签不参与比较；
+///   · 其余按**版本号**取最高的一个（`3.2.0-beta.1` > `3.1.0`）。
+///
+/// ── 两种模式：`only_prerelease` ─────────────────────────────
+/// 调用方（`check::fetch_release`）按「当前跑的是不是 beta 版」决定：
+///   · `false`（当前跑正式版，比如刚打开开关的人）：**预发布一并参与**，取最高。
+///     beta 的核心号总排在正式版前面，所以正常会拿到某个 beta；仓库一个 beta
+///     都没有时照旧拿正式版更新 —— 打开开关不该让人收不到任何更新。
+///   · `true`（当前就在 beta 版上）：**只看预发布**。同核心号的转正版
+///     （`3.1.0` > `3.1.0-beta.1`）不算「有更新」，不会把人从 beta 频道拽回
+///     正式版 —— 加入 beta 的人要的是「留在 beta 上」，回到正式版由用户自己
+///     关开关决定。列表里没有可用 beta 时返回 `None`（无更新），
+///     **不回落到正式版**：回落等于用「转正」把人踢出 beta 频道。
+///
+/// 不降级由调用方那次 `compare_versions(挑中的标签, 当前版本) > 0` 兜住：beta 版
+/// 比同核心号的正式版小、但比更早的正式版大，于是「关掉开关后不会被降级、
+/// 等正式版版号超上来才收到」这条自然成立（`3.1.0-beta.1` 的用户在正式版发到
+/// `3.1.0` 之前不会收到任何东西）。
+///
+/// 为什么按版本号而不是列表顺序：列表按创建时间倒序，而热修（先发 3.1.0、
+/// 后补 3.0.9）会让创建时间与版本号不一致 —— 面板要的是「版本最高的一版」。
+/// 版本号相同时保留先遇到的（= 创建时间更晚的那条）。
+pub fn pick_listed_release<'a>(payload: &'a Value, only_prerelease: bool) -> Option<&'a Value> {
+    let list = payload.as_array()?;
+    let mut best: Option<&Value> = None;
+    let mut first: Option<&Value> = None;
+    for item in list {
+        if item.get("draft").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        if first.is_none() {
+            first = Some(item);
+        }
+        let tag = item.get("tag_name").and_then(Value::as_str).unwrap_or("");
+        if parse_version(tag).is_none() {
+            continue;
+        }
+        // 「不要用转正版把人踢出 beta 频道」：只在这里筛预发布（见函数说明）
+        if only_prerelease && !is_prerelease_version(tag) {
+            continue;
+        }
+        let take = match best {
+            None => true,
+            Some(current) => {
+                let current_tag = current.get("tag_name").and_then(Value::as_str).unwrap_or("");
+                compare_versions(tag, current_tag) == Some(1)
+            }
+        };
+        if take {
+            best = Some(item);
+        }
+    }
+    // 兜底取列表第一条（= 创建时间最新）只在「一个能认的版本号都没有」时用；
+    // 只看预发布的那条路上不用 —— 它要的是「没有 beta 就没有更新」，不是
+    // 「随便挑一条充数」。
+    if only_prerelease { best } else { best.or(first) }
 }
 
 // ─── URL 与资产 ─────────────────────────────────────────────

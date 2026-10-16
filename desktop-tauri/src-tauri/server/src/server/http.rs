@@ -49,12 +49,25 @@ use crate::server::ServerState;
 /// 网关先拒（上游会自己表达能收多大），见 `gateway_router` 里的 disable。
 pub const MAX_BODY_SIZE: usize = 32 * 1024 * 1024;
 
-/// CORS 允许的方法，逐字照抄 Node 版 sendCORS。
+/// CORS 允许的方法，照抄 Node 版 sendCORS，**只多一项 PUT**。
 ///
-/// 注意：这里**不含 PATCH** —— Node 版就是这样，虽然账号批量修改等接口
-/// 在服务端支持 PATCH，但预检响应里没声明。不做「顺手修复」，
-/// 浏览器端若有 PATCH 需求应由后续切片对照 Node 版行为一起评估。
-const CORS_METHODS: &str = "GET, POST, OPTIONS, DELETE";
+/// ── 为什么补 PUT ────────────────────────────────────────────
+/// AI 助手页为流式对话直接 fetch 网关（见 ui-islands 的 assistant-state.ts），
+/// 而桌面形态下页面来自 Tauri 自定义协议、网关在 `127.0.0.1:{port}`：跨源。
+/// 保存助手设置走 PUT + JSON 体，跨源必触发预检 —— 这份表里没有 PUT 时浏览器
+/// 直接判 CORS 失败，请求**根本到不了服务端**（表现是「连接网关失败…
+/// Failed to fetch」，与鉴权无关，日志里什么都看不到）。Node 版原表不带 PUT
+/// 是因为那时面板只被同源页面使用，跨源预检从来不在路径上。
+///
+/// 补上它不放开任何东西：预检只声明「允许发这个方法的跨源请求」，准入仍由
+/// `require_api_key` 判；且 `Allow-Origin: *` 下浏览器不会替跨源请求带 cookie，
+/// 凭证只能显式放进请求头（助手页正是这么做的，见 bridge 的 directCredentials）。
+///
+/// 注意：这里**仍不含 PATCH** —— Node 版就是这样，虽然账号批量修改等接口
+/// 在服务端支持 PATCH，但预检响应里没声明。不做「顺手修复」：
+/// PATCH 只被两条不跨源的通道用（壳的进程内 HTTP 客户端、网页端 shim 同源
+/// fetch），没有实际需要，浏览器端若有需求应由后续切片对照 Node 版行为一起评估。
+const CORS_METHODS: &str = "GET, POST, PUT, OPTIONS, DELETE";
 /// CORS 允许的请求头，逐字照抄 Node 版
 const CORS_HEADERS: &str = "Content-Type, Authorization, x-api-key";
 
@@ -125,6 +138,14 @@ pub fn panel_router(state: ServerState) -> Router {
         .route(
             "/api/session/login/kuku/complete",
             post(api::session::login_kuku_complete),
+        )
+        // OrcaTerm 网页登录收尾：壳侧在登录窗口（官方 Web 控制台）里等到
+        // `ot_session` Cookie 出现后，把 state + 该 Cookie 一并 POST 交到这里。
+        // **免鉴权**：调用方是壳侧进程（登录窗口），不带 API Key；安全性由登录
+        // 任务的一次性 state 承担（与 kuku/complete 同款）。
+        .route(
+            "/api/session/login/orcaterm/complete",
+            post(api::session::login_orcaterm_complete),
         )
         // AutoClaw OAuth（国际版）的 loopback 回调：**浏览器 302 到这里**
         // （授权页完成后顶层导航到我们交给上游的 navigate_uri，见
@@ -319,17 +340,17 @@ pub fn panel_router(state: ServerState) -> Router {
         // ── 出网代理（Clash Verge 实时读取 + 出口连通性测试 + 代理池）──
         // /api/proxies 与 /api/proxies/pool* 之外（如 /api/proxies/zzz）不注册
         // → 落到全局 404 兜底，与 Node 版「前缀判定不通过 → 全局兜底」一致。
-        // pool 的六条都是固定路径（id 走 body / query，不用 {id} 段 ——
+        // pool 各条都是固定路径（id 走 body / query，不用 {id} 段 ——
         // 理由见 api::proxies 的模块头），方法判定在 proxies_entry 里。
         .route("/api/proxies", any(api::accounts::proxies_entry))
         .route("/api/proxies/test", any(api::accounts::proxies_entry))
         .route("/api/proxies/pool", any(api::accounts::proxies_entry))
         .route("/api/proxies/pool/update", any(api::accounts::proxies_entry))
+        .route("/api/proxies/pool/enable", any(api::accounts::proxies_entry))
         .route("/api/proxies/pool/remove", any(api::accounts::proxies_entry))
         .route("/api/proxies/pool/test", any(api::accounts::proxies_entry))
         .route("/api/proxies/pool/sync-clash", any(api::accounts::proxies_entry))
         .route("/api/proxies/settings", any(api::accounts::proxies_entry))
-        .route("/api/proxies/pool/provision", any(api::accounts::proxies_entry))
         // ── 订阅（「网络代理」页的订阅区块：机场订阅 → 内核本地监听器）──
         // 固定路径 + api::subscriptions::entry 按 (方法, 剩余段) 分发（理由同上：
         // 通配段与 404 兜底互相干扰）。内核命令是异步的（重启 / 拉订阅要几秒
@@ -348,6 +369,7 @@ pub fn panel_router(state: ServerState) -> Router {
         // 「按方法区分」的相邻语义（POST=开始）在同一个路径上出现两种含义
         .route("/api/subscriptions/kernel/download/cancel", any(api::subscriptions::entry))
         .route("/api/subscriptions/kernel/restart", any(api::subscriptions::entry))
+        .route("/api/subscriptions/kernel/stop", any(api::subscriptions::entry))
         .route("/api/subscriptions/kernel/remove", any(api::subscriptions::entry))
         // ── 积分 / 签到 / 运营活动（对照 server.mjs 871-911 行）──
         // 六条都挂在 protected（Node 版每条都调了 checkApiKey），
@@ -454,6 +476,17 @@ pub fn panel_router(state: ServerState) -> Router {
         // 结论失败也返回 2xx（上游的错误放在响应体的 status / error 里，
         // 理由见 api::model_test 模块头）
         .route("/api/models/test", post(api::model_test::run_model_test))
+        // ── AI 助手（侧边栏「AI 助手」页 + 设置页「AI 助手」分类）──
+        // 对话那条会**真打上游、消耗额度**（与 /v1/chat/completions、
+        // /api/models/test 同一量级），设置那条写配置，三条一起挂 protected。
+        // 对话做成流式（SSE），前端必须绕开桌面壳的桥（桥无流式且 60 秒超时）
+        // 直接 fetch —— 挂在面板路由而不是 /v1/*，是为了不要求用户打开
+        // 网关面的 CORS 开关，理由见 api::assistant 模块头。
+        .route(
+            "/api/assistant/config",
+            get(api::assistant::get_config).put(api::assistant::put_config),
+        )
+        .route("/api/assistant/chat", post(api::assistant::chat))
         // ── 自定义提供商（用户自建上游端点：存储 + 管理）──
         // 与 /api/models/manage 同级敏感：写配置（customProviders 键）且「新建」
         // 会顺带写账号库，挂 protected。账号侧不经这里 —— 客户端走
@@ -500,6 +533,15 @@ pub fn panel_router(state: ServerState) -> Router {
         .route(
             "/api/sanitize",
             get(api::sanitize::get_sanitize).put(api::sanitize::put_sanitize),
+        )
+        // ── 开发者角色兼容开关 ──
+        // 与 /api/sanitize 同形的单开关端点（GET 读 / PUT 写），挂 protected：
+        // 它决定出站请求里 developer 角色消息要不要归一成 system（改的是发给
+        // 上游的请求体，敏感度与那两者同级）。转换实施点见
+        // `core::upstream::payload` 的 send_body 角色归一层。
+        .route(
+            "/api/developer-role-compat",
+            get(api::role_compat::get_role_compat).put(api::role_compat::put_role_compat),
         )
         // ── Cline 伪装头的逐键覆盖 ──
         // 与 /api/sanitize 同形（GET 读 / PUT 写，响应体就是新状态），挂
@@ -781,7 +823,8 @@ async fn cors_gateway(request: Request, next: Next) -> Response {
     cors(request, next).await
 }
 
-/// 写入三个 CORS 头（值固定，不会失败；失败时静默跳过而不是 panic）
+/// 写入三个 CORS 头 + 一个 Private Network Access 许可（值固定，不会失败；
+/// 失败时静默跳过而不是 panic）
 fn attach_cors(headers: &mut axum::http::HeaderMap) {
     if let Ok(value) = HeaderValue::from_str("*") {
         headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
@@ -791,6 +834,19 @@ fn attach_cors(headers: &mut axum::http::HeaderMap) {
     }
     if let Ok(value) = HeaderValue::from_str(CORS_HEADERS) {
         headers.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, value);
+    }
+    // Private Network Access（Chromium 的「页面打私有网络要先拿到许可」草案）：
+    // 桌面壳的页面 origin 是自定义协议（`http://tauri.localhost`），从它 fetch 到
+    // `http://127.0.0.1:{port}` 会被 WebView2 判为 private network request，
+    // 没有这个头时请求会被浏览器拦下 —— 页面侧看到的只是一句
+    // `TypeError: Failed to fetch`，什么原因都查不到。多回这一个头对非浏览器
+    // 客户端是空操作（它们不读 CORS 头），对已经在放行的面板路由也不收紧
+    // 任何东西 —— 这条路由的暴露面由上面的 `*` 决定，与这个头无关。
+    if let Ok(value) = HeaderValue::from_str("true") {
+        headers.insert(
+            axum::http::HeaderName::from_static("access-control-allow-private-network"),
+            value,
+        );
     }
 }
 
@@ -829,11 +885,17 @@ async fn require_api_key(mut request: Request, next: Next) -> Response {
     let keys = snapshot.active_api_keys();
     let path = request.uri().path();
 
-    // ── 面板认证（headless 配置了管理员时启用）──────────────────
+    // ── 面板认证（注册过管理员即启用：headless 的注册页/环境变量，或
+    //    桌面端「局域网访问」开启流程里的注册，见 commands::panel_register）
     // `/api/*` 认「会话 cookie（人，账号密码换来）」或「API Key（程序，
     // 桌面壳/脚本自动带）」。两者都没有 → 401 并注明是面板登录 ——
-    // web_shim 据此弹账号密码框而不是 Key 框。桌面形态不开这个开关
-    // （未配置管理员环境变量），下面的原有语义原样生效。
+    // web_shim 据此弹账号密码框而不是 Key 框。
+    //
+    // 桌面端**没有登录页**，它的凭证就是第一把启用的 Key：壳发管理请求时自动
+    // 带（gateway::request_builder），界面里少数不经桥的直连请求（AI 助手页）
+    // 由桥把同一把交给页面（bridge::directCredentials → commands::
+    // direct_credentials）。因此这里对「Key 通道」的判定同时服务两种形态，
+    // 别改成只认会话 —— 那会把桌面端整体挡在外面。
     let panel_auth = crate::server::access::panel_auth_enabled();
     if panel_auth && path.starts_with("/api/") {
         if crate::server::access::session_valid(request.headers()) {

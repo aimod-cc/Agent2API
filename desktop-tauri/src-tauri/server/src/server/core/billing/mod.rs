@@ -50,7 +50,8 @@ use crate::server::logging;
 // 请求构造素材对同层子模块可见（`super::X`），对外仍是模块私有
 use request::{
     build_headers, whitelist_headers, BillingCall, BillingSpec, CallOptions,
-    BILLING_ACTIVITY_CHECKIN_STATUS, BILLING_CHECKIN_STATUS, BILLING_DAILY_CHECKIN,
+    BILLING_ACTIVITY_CHECKIN_STATUS, BILLING_CHECKIN_STATUS, BILLING_CLAIM_COMPENSATION,
+    BILLING_CLAIM_GIFT, BILLING_DAILY_CHECKIN,
 };
 use activity::normalize_activity_status;
 pub use activity::WorkbuddyActivity;
@@ -216,7 +217,9 @@ impl BillingService {
             .filter(|value| !value.is_empty())
             .map(normalize_endpoint)
             .unwrap_or_else(|| normalize_endpoint(self.auth.default_context().base_url.as_str()));
-        let url = format!("{endpoint}{}{}", spec.path, options.query.unwrap_or(""));
+        // 跨站端点（新手礼包 / 活动补偿）：落点由 spec 固定，不跟账号端点走（见 `base` 字段）
+        let base = spec.base.map(str::to_string).unwrap_or(endpoint);
+        let url = format!("{base}{}{}", spec.path, options.query.unwrap_or(""));
 
         let mut extra: Vec<(String, String)> = Vec::new();
         if let Some(locale) = options.locale {
@@ -476,6 +479,48 @@ impl BillingService {
         Ok(normalize_daily_claim(result))
     }
 
+    /// 领取一次性运营奖励（`claim-gift` / `claim-compensation` 的共用实现）。
+    ///
+    /// 国内版专属：落点固定在 `www.codebuddy.cn` 的计费站（见
+    /// `BillingSpec::base`），国际版没有对应活动、调用方也不会进这条链。
+    ///
+    /// 每号一次 —— 「已领取」与「没有可领取的」都是正常终态，必须原样
+    /// 返回而不是丢成 `Err`：
+    ///   · HTTP 200 + 非 0 code：`expect_code_ok=false` 原样解包；
+    ///   · HTTP 400/409 + 「已领取」文案：`tolerate_duplicate_claim` 放行
+    ///     （与签到那条共用一份判据，见 `is_duplicate_claim`）。
+    /// 其余（网络错误 / 凭证失效 / 业务 400）仍是 `Err`，调用方静默跳过并
+    /// 记 verbose —— 奖励领不到不该让签到链整体失败。
+    async fn claim_reward(
+        &self,
+        spec: BillingSpec,
+        label: &str,
+        session: &Value,
+    ) -> Result<Value, BillingError> {
+        let result = self
+            .call_billing(
+                spec,
+                CallOptions {
+                    session: Some(session),
+                    expect_code_ok: false,
+                    tolerate_duplicate_claim: true,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok(normalize_reward(result, label))
+    }
+
+    /// 领取活动补偿（如 2026-10 的 DeepSeek 故障补偿 500 积分）
+    pub async fn claim_compensation(&self, session: &Value) -> Result<Value, BillingError> {
+        self.claim_reward(BILLING_CLAIM_COMPENSATION, "活动补偿", session).await
+    }
+
+    /// 领取新手礼包（一次性新用户积分包，没领过的账号才有）
+    pub async fn claim_gift(&self, session: &Value) -> Result<Value, BillingError> {
+        self.claim_reward(BILLING_CLAIM_GIFT, "新手礼包", session).await
+    }
+
     /// 默认语言下的积分简报（路由层入口，对照 server.mjs
     /// `billing.queryCreditsSummary({ locale: opts.locale })`）
     pub async fn query_credits_summary_default(&self) -> Result<Value, BillingError> {
@@ -531,6 +576,34 @@ fn normalize_daily_claim(result: BillingCall) -> Value {
         failure.insert("requestId".to_string(), request_id);
     }
     Value::Object(failure)
+}
+
+/// 一次性运营奖励领取结果的统一 claim 形状（`claim-gift` / `claim-compensation`）。
+///
+/// 成功：`{success:true, code:0, credit, msg}` —— `credit` 是本次到账积分
+/// （上游 `data.credit`；缺失按 0），`msg` 带奖励名（「活动补偿 +500 积分」），
+/// 调用方直接拿它拼日志。失败 / 已领 / 无可领取同形：
+/// `{success:false, code, msg}`，由调用方决定要不要出声 —— 对签到链来说
+/// 那是正常终态（静默跳过），不是故障。
+fn normalize_reward(result: BillingCall, label: &str) -> Value {
+    if result.code == Some(RESPONSE_CODE_OK) {
+        let credit = result
+            .data
+            .get("credit")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        return json!({
+            "success": true,
+            "code": 0,
+            "credit": credit,
+            "msg": format!("{label} +{credit} 积分"),
+        });
+    }
+    json!({
+        "success": false,
+        "code": result.code.unwrap_or(-1),
+        "msg": result.msg.unwrap_or_else(|| format!("当前没有可领取的{label}")),
+    })
 }
 
 /// 国内版通用计费签到的版本守卫。

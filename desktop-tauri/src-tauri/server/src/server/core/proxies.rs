@@ -11,6 +11,7 @@
 //!   { source: 'clash',  listenerUid: '__mixed__' | '<Clash 节点名>' }
 //!   { source: 'custom', protocol: 'http' | 'socks5', host, port, username?, password? }
 //!   { source: 'pool',   proxyId: '<代理池条目 id>' }
+//!   { source: 'rotate', all: true } | { source: 'rotate', all: false, proxyIds: ['<池条目 id>'] }
 //!
 //! `pool` 是「网络代理」页那批命名代理的**引用**（见 `core::proxy_pool`）：
 //! 解析时去池里取条目、再按条目自己的 clash/custom 形态解析（端口实时读取、
@@ -19,6 +20,13 @@
 //! 三条链走的都是本模块，加一个分支就全部生效。
 //! 注意 `proxy_pool::resolve_item` 反过来调本模块 —— 两条路径**不递归**：
 //! 池条目的 source 只可能是 clash / custom（归一里挡掉了嵌套引用）。
+//!
+//! `rotate` 是上面的**轮询档**（见 `core::proxy_rotate`）：逐请求轮换池里的一条
+//! 出口（`all: true` = 池里全部启用的条目），目前只对 OpenCode Zen 开放
+//! （那个免费档按 IP 限流）。它比 `pool` 多一层「这次该用哪条」的取用动作，
+//! 所以解析分成两个入口：`resolve_account_proxy_rotating`（转发等**逐次**链路，
+//! 前进轮询游标）与 `resolve_account_proxy`（展示等**静态**链路，恒取第一条
+//! 可用），两者的差别只在 rotate 分支上。
 
 use serde_json::{json, Map, Value};
 
@@ -31,6 +39,14 @@ pub use crate::server::core::clash::{clash_proxy_options, CLASH_MIXED_UID};
 const MAX_HOST_LENGTH: usize = 255;
 const MAX_USER_LENGTH: usize = 200;
 const MAX_LABEL_LENGTH: usize = 100;
+
+/// 轮询档的 source 值（`core::proxy_rotate` 的配置形状）
+pub const ROTATE_SOURCE: &str = "rotate";
+
+/// 这条 proxy 配置是不是轮询档（判据只看 source；形状是否完整由归一侧保证）
+pub fn is_rotate_config(config: &Value) -> bool {
+    config.get("source").and_then(Value::as_str) == Some(ROTATE_SOURCE)
+}
 
 /// 代理配置错误（对应 Node 版 ProxyConfigError，状态码固定 400）。
 ///
@@ -113,7 +129,51 @@ pub fn normalize_account_proxy(input: &Value) -> Result<Option<Value>, ProxyConf
         String::new()
     };
     if source.is_empty() {
-        return Err(ProxyConfigError::new("代理配置缺少 source（clash / custom）"));
+        return Err(ProxyConfigError::new(
+            "代理配置缺少 source（clash / custom / pool / rotate）",
+        ));
+    }
+
+    // 轮询档：只存「怎么挑」（全部 or 指定哪几条），出口本身仍然全在池里。
+    // 与 pool 引用同一条纪律：条目是否存在 / 是否禁用留给**解析**时报错，
+    // 保存账号不依赖代理池当下的读库结果（池还没建好时也存得下这条配置）。
+    if source == ROTATE_SOURCE {
+        let all = match object.get("all") {
+            None | Some(Value::Null) => true,
+            Some(Value::Bool(flag)) => *flag,
+            Some(_) => return Err(ProxyConfigError::new("轮询的 all 必须是布尔值")),
+        };
+        if all {
+            // 「全部」恒不带 proxyIds：留着它会让「以后池里新增的条目要不要进轮询」
+            // 变成一个没人回答的问题（两处状态取谁为准）。归一即收口成唯一形态
+            return Ok(Some(json!({ "source": ROTATE_SOURCE, "all": true })));
+        }
+        let mut ids: Vec<String> = Vec::new();
+        if let Some(items) = object.get("proxyIds") {
+            let Some(items) = items.as_array() else {
+                return Err(ProxyConfigError::new("轮询的 proxyIds 必须是数组"));
+            };
+            for item in items {
+                let id = clean_string(Some(item), MAX_LABEL_LENGTH);
+                if id.is_empty() || ids.iter().any(|existing| existing == &id) {
+                    continue;
+                }
+                ids.push(id);
+                if ids.len() >= crate::server::core::proxy_rotate::MAX_IDS {
+                    break;
+                }
+            }
+        }
+        if ids.is_empty() {
+            return Err(ProxyConfigError::new(
+                "轮询至少要选择一条代理（或改选「全部」）",
+            ));
+        }
+        return Ok(Some(json!({
+            "source": ROTATE_SOURCE,
+            "all": false,
+            "proxyIds": ids,
+        })));
     }
 
     if source == "clash" {
@@ -372,6 +432,18 @@ pub fn resolve_account_proxy(config: Option<&Value>) -> Option<ProxyResolution> 
         .map(|value| js_interpolation(Some(value)))
         .unwrap_or_else(|| "undefined".to_string());
 
+    // 轮询档：静态取第一条可用（**不动游标**）。逐请求的轮询走
+    // `resolve_account_proxy_rotating`；这条留给展示与「一次调用不代表一次转发」
+    // 的链路（见模块头）—— 它们问的是「这条配置现在能不能用」，不是「这次该走哪条」。
+    if source == ROTATE_SOURCE {
+        return Some(
+            match crate::server::core::proxy_rotate::first_usable(config) {
+                Ok(proxy) => ProxyResolution::Resolved(proxy),
+                Err(reason) => ProxyResolution::Failed(reason),
+            },
+        );
+    }
+
     // 代理池引用：去池里取条目、按条目自己的 clash / custom 形态解析。
     // 失败文案（不存在 / 已禁用 / Clash 监听器没了）由 proxy_pool 给出，
     // 这里只做转手 —— 账号列表的「代理异常」气泡、转发时的回退日志都读它。
@@ -479,15 +551,47 @@ pub fn resolve_account_proxy(config: Option<&Value>) -> Option<ProxyResolution> 
     }))
 }
 
+/// **逐次**解析：与 [`resolve_account_proxy`] 只差 rotate 档——它按 `rotate_key`
+/// 取下一个出口（前进轮询游标），其余 source 逐字委托给静态那条。
+///
+/// `rotate_key` 是轮询进度的归属键（**账号 id**）：同一账号的多条请求依次落到
+/// 不同出口，不同账号各转各的（见 `core::proxy_rotate` 的模块头）。
+/// 只有真正代表一次出网的链路（会话组装、转发重取）才该走这条：展示、
+/// 余额查询这类「一次调用不代表一次转发」的地方用静态解析，否则账号列表
+/// 一刷新就把游标推走好几格（轮询的意义就是「相邻两次出网落在不同 IP」，被
+/// 界面读一次就错位，等于白转）。
+pub fn resolve_account_proxy_rotating(
+    config: Option<&Value>,
+    rotate_key: &str,
+) -> Option<ProxyResolution> {
+    let config = config?;
+    if config.is_null() {
+        return None;
+    }
+    if is_rotate_config(config) {
+        return Some(match crate::server::core::proxy_rotate::next(config, rotate_key) {
+            Ok(proxy) => ProxyResolution::Resolved(proxy),
+            Err(reason) => ProxyResolution::Failed(reason),
+        });
+    }
+    resolve_account_proxy(Some(config))
+}
+
 /// 账号代理的展示描述（公开形态，不带单独字段的密码 —— 与 Node 版一致，
 /// 密码只在 config 里原样带回）。
 ///
 /// 无代理返回 Null；解析失败时 `label` 为「解析失败」并附 `error`
 /// （前端据此提示「转发时会回退直连」）。
+///
+/// 轮询档单独一支（见下）：它的「当前出口」是个随机进度的概念，展示要回答的是
+/// 「轮询了几条、都可用吗」，不能借用某一次解析的 label 冒充「当前出口」。
 pub fn describe_account_proxy(config: Option<&Value>) -> Value {
     let Some(config) = config.filter(|value| !value.is_null()) else {
         return Value::Null;
     };
+    if is_rotate_config(config) {
+        return describe_rotate_proxy(config);
+    }
     let Some(resolution) = resolve_account_proxy(Some(config)) else {
         return Value::Null;
     };
@@ -517,4 +621,34 @@ pub fn describe_account_proxy(config: Option<&Value>) -> Value {
             "config": config,
         }),
     }
+}
+
+/// 轮询档的展示形态（`describe_account_proxy` 的 rotate 分支）。
+///
+/// 字段与其它档同形（`source` / `label` / `error` / `config`），**不**给
+/// host / port：轮询没有「当前出口」这个读数（下一次请求可能就换了），给一个
+/// 只会让人以为「这条代理就是那个地址」。多的 `rotate` 子对象是给界面的读数：
+/// 总共几条、几条例看起来可用（判据见 `proxy_rotate::entry_ready`）。
+///
+/// `label` 是账号列表代理格与弹窗直接显示的文案；`error` 只在**一条候选都用
+/// 不了**时给出 —— 那时转发会回退直连，账号列表按既有口径标红提示
+/// （与单条引用档「代理不可用」同一形制）。
+fn describe_rotate_proxy(config: &Value) -> Value {
+    let summary = crate::server::core::proxy_rotate::summary(config);
+    let label = if summary.all {
+        format!("轮询全部代理（{} 个出口）", summary.total)
+    } else {
+        format!("轮询指定代理（{} 个出口）", summary.total)
+    };
+    json!({
+        "source": ROTATE_SOURCE,
+        "label": label,
+        "error": summary.error,
+        "config": config,
+        "rotate": {
+            "all": summary.all,
+            "total": summary.total,
+            "usable": summary.usable,
+        },
+    })
 }

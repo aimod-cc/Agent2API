@@ -129,10 +129,11 @@ function applyZoom(percent) {
 // ─── 页面导航 ────────────────────────────────
 
 const PAGE_KEY = 'workbuddy-desktop-page';
-const PAGES = ['overview', 'accounts', 'checkin', 'gateway', 'proxies', 'keys', 'docs', 'logs', 'tasks', 'requests', 'settings'];
+const PAGES = ['assistant', 'overview', 'accounts', 'checkin', 'gateway', 'proxies', 'keys', 'docs', 'logs', 'tasks', 'requests', 'settings'];
 /** 页签中文名：顶栏面包屑用。overview 的用户可见名是「报表」、gateway 的是「模型管理」
  *  （内部标识保持不变：localStorage 记忆、showPage 与 CSS 的 [data-page] 选择器都依赖它） */
 const PAGE_LABELS = {
+  assistant: wbI18n.t('AI 助手'),
   overview: wbI18n.t('报表'),
   accounts: wbI18n.t('账号'),
   checkin: wbI18n.t('签到中心'),
@@ -169,6 +170,11 @@ function showPage(name, { persist = true } = {}) {
   // 不收起的话，切页之后它会孤零零地浮在新页面上。它自己不认识「页面」，
   // 由切页这一处统一告诉它。
   window.wbColSettings?.close?.();
+  // 切到 AI 助手页时唤醒会话（岛的初始化可能晚于首屏的 showPage —— 它要等
+  // islands/ui.js 加载完；activate 自己判重，早调晚调都只初始化一次）
+  if (page === 'assistant') {
+    window.wbAssistant?.activate?.();
+  }
   // 切到报表页时拉一次统计（面板内部自持时间范围与数据，这里只做转发）
   if (page === 'overview') {
     window.wbReport?.load?.();

@@ -137,6 +137,12 @@ pub mod loomy;
 /// 见 `monkeycode/mod.rs` 的模块头。
 pub mod monkeycode;
 pub mod officeace;
+/// OrcaTerm（腾讯云遨驰终端桌面客户端）。适配实现在 `orcaterm/`：
+/// 账号管理（**粘贴 accessToken** / 导入桌面端 `data.bin` 登录态）+
+/// OAuth 续期（上游有真续期接口）+ **会话转发**（建会话 → assistant SSE，
+/// 多轮拍平为单条输入）+ 余额（月度 AI 配额）全部已接通；
+/// `is_stateful` 为 true（请求内会话，与 KukuAI 同形态），见 `orcaterm/mod.rs`。
+pub mod orcaterm;
 pub mod onboarding_memory;
 /// **本地就绪闸门**：一条通道在「还没出本机就注定发不出去」时，让选路绕开它
 /// （当前唯一的用户是 ZCode 活动套餐的令牌池，判据与取舍见模块头）。
@@ -458,6 +464,11 @@ pub enum ProviderKind {
     /// 不需要 CodeArts 那种会话闸门。凭据两层：网关 Basic（不过期，转发用）
     /// 与控制面临时 AK/SK（2 小时，额度/签到用）。
     OfficeAce,
+    /// OrcaTerm（腾讯云遨驰终端桌面客户端）。适配实现在 `orcaterm/`：
+    /// 账号管理（粘贴 accessToken / 导入桌面端登录态）+ OAuth 续期 +
+    /// 会话转发（建会话 → assistant SSE）+ 余额（月度 AI 配额）；
+    /// `is_stateful` 为 true（请求内会话），见 `orcaterm/mod.rs` 的模块头。
+    OrcaTerm,
 }
 
 /// 一个提供商的静态元数据。
@@ -549,6 +560,11 @@ pub const PROVIDERS: &[ProviderMeta] = &[
     // glm-5.3 / deepseek-v4-flash-0731 / kimi-k2.6 …），注册表顺序决定目录
     // 合并时同名模型先归谁家 —— 放在末尾即「同名时优先已有各家」。
     ProviderMeta { id: "officeace", label: "OfficeAce 果办" },
+    // OrcaTerm（腾讯云遨驰终端桌面客户端）：单一入口（粘贴 accessToken /
+    // 导入桌面端登录态），没有地区伴生。排在末尾（2026-10 接入，后到居后）。
+    // 它的模型名（glm-5.3 / kimi-k3 / deepseek-v4-* 等）与 codearts / catpaw /
+    // zcode 大面积同名，同样靠末位让同名模型优先归已有各家。
+    ProviderMeta { id: "orcaterm", label: "OrcaTerm" },
 ];
 
 /// provider id 在注册表里的下标（未知 id → None）。
@@ -632,6 +648,7 @@ pub fn kind_from_id(id: &str) -> Option<ProviderKind> {
         "commandcode" => Some(ProviderKind::CommandCode),
         "antigravity" => Some(ProviderKind::Antigravity),
         "officeace" => Some(ProviderKind::OfficeAce),
+        "orcaterm" => Some(ProviderKind::OrcaTerm),
         // 走到这里 = 上面的注册表判定已放行、这个 match 却没有对应分支：
         // 只可能是有人给 `PROVIDERS` 加了条目忘了加这里。开发期喊出来；
         // release 返回 None（见上：宁可为「未知」，不可误认成别家）。
@@ -673,6 +690,7 @@ pub const fn kind_id(kind: ProviderKind) -> &'static str {
         ProviderKind::CommandCode => "commandcode",
         ProviderKind::Antigravity => "antigravity",
         ProviderKind::OfficeAce => "officeace",
+        ProviderKind::OrcaTerm => "orcaterm",
     }
 }
 

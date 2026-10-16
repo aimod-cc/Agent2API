@@ -21,7 +21,7 @@
 //! ── 硬约束 ──────────────────────────────────────────────────
 //! release 是 `panic=abort`：本文件零 unwrap/expect/panic。
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::server::core::egress;
 use crate::server::errors::GatewayError;
@@ -249,6 +249,67 @@ fn whole_points(value: f64) -> f64 {
     }
 }
 
+/// 上游数值字段 → `Option`（缺失 / 空串 / 非数字 / 非有限值一律 `None`）。
+///
+/// 与 [`num`] 的分工：聚合读数要一个**可加的数**，缺失折 0（口径见 [`summarize`]）；
+/// 明细行要回答「上游到底给没给」，缺失必须**整个不写这个键** —— 写成 0 会被界面
+/// 画成「只剩 0 / 已用 0」（`Number(null) === 0`），这是明细这条线最要防的事故。
+///
+/// 非有限值也挡在这里：serde_json 只能把 NaN / ±inf 落成 `null`
+/// （`json!(f64::INFINITY)` 出来就是 `null`），而 `null` 与缺键在界面上同义 ——
+/// 那就不如缺键，至少不会多写一个假数出去。
+fn num_opt(value: Option<&Value>) -> Option<f64> {
+    let parsed = match value {
+        Some(Value::Number(number)) => number.as_f64(),
+        Some(Value::String(text)) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    };
+    parsed.filter(|value| value.is_finite())
+}
+
+/// 一行明细 → `(排序键, 名字, 行)`（键顺序与 workbuddy 的 `billing::credit_packs_from`、
+/// trae 的 `usage::credit_rows` 一致 —— 界面因此只写一个读取器）。
+///
+/// ── 谁缺谁不写，一个 `null` 都不许出去 ──────────────────────
+/// 三个数（`total` / `used` / `remain`）与 `expireAt` 都收 `Option`，`None` 直接
+/// 不出键：界面那道 `Number(null) === 0` 的闸就在这一层之后，写 0 或者写 `null`
+/// 都会被画成「剩 0 / 共 0」这种看起来像读到了的假读数。
+///
+/// `unit` 只在与文档级单位（本文件的「积分」）不同的行上才有值 —— 这里只有联网
+/// 搜索那一行（按**次**计），同单位的行不必每行再标一遍。
+///
+/// `expire_ms` 兼职排序键：**最近到期的排前面**（明细第一个要回答的问题是
+/// 「哪笔先作废」），没给到期时刻的排最后（`i64::MAX`），同一时刻按名字比
+/// （否则每次刷新行序都在跳，看起来像数据在变）。
+fn credit_row(
+    name: &str,
+    total: Option<f64>,
+    used: Option<f64>,
+    remain: Option<f64>,
+    unit: Option<&str>,
+    expire_ms: i64,
+) -> (i64, String, Value) {
+    let name = name.trim();
+    let mut row = Map::new();
+    row.insert("name".to_string(), Value::String(name.to_string()));
+    for (key, value) in [("total", total), ("used", used), ("remain", remain)] {
+        if let Some(value) = value.filter(|value| value.is_finite()) {
+            row.insert(key.to_string(), json!(value));
+        }
+    }
+    if let Some(unit) = unit {
+        row.insert("unit".to_string(), Value::String(unit.to_string()));
+    }
+    if expire_ms > 0 {
+        row.insert("expireAt".to_string(), json!(expire_ms));
+    }
+    (
+        if expire_ms > 0 { expire_ms } else { i64::MAX },
+        name.to_string(),
+        Value::Object(row),
+    )
+}
+
 /// 把 `/v1/subscription` 归一成 `query_usage` 的形状（见 `adapter::ProviderAdapter`
 /// 的 `query_usage` 契约）。
 ///
@@ -269,6 +330,11 @@ pub fn summarize(subscription: &Value) -> Value {
     let mut plan_expire = 0i64;
     let mut search_total = 0.0;
     let mut search_used = 0.0;
+    // 逐份明细（`credits[]`，账号页「积分明细」弹层的输入）的行在这里顺手收齐：
+    // 排序键 + 名字 + 行，读的是同一个循环里的同一份 quotas —— 第二遍遍历只会让
+    // 两处口径有机会分叉。循环里被 `continue` 排掉的过期配额不进明细：聚合读数
+    // （`available` 与套餐钱包）本来就不计它们，弹层要回答的是「现在还能花什么」。
+    let mut rows: Vec<(i64, String, Value)> = Vec::new();
     for sku in subscription
         .get("skus")
         .and_then(Value::as_array)
@@ -284,6 +350,18 @@ pub fn summarize(subscription: &Value) -> Value {
                 Some("officeace_points") => {
                     plan_total += num(quota.get("sku_value"));
                     plan_used += num(quota.get("current_value"));
+                    // 聚合之外逐条再出明细行（聚合是读数，明细是账本：一份配额一行）——
+                    // 明细这条线走 num_opt，「上游没给」与「真的 0」不混
+                    let total = num_opt(quota.get("sku_value"));
+                    let used = num_opt(quota.get("current_value"));
+                    // 剩余是减出来的：两个基数缺一个就**不写这个键**（拿 0 顶上等于
+                    // 替上游宣布「没用过 / 没发过」）
+                    let remain = total.zip(used).map(|(total, used)| whole_points(total - used));
+                    // 配额自己没有名字，挂所属 sku 的；上游连 sku 名字都没给时写
+                    // 「套餐积分」—— 界面的兜底名「积分包」分不出这是套餐还是活动发的
+                    let sku_name = sku.get("sku_name").and_then(Value::as_str).unwrap_or("").trim();
+                    let name = if sku_name.is_empty() { "套餐积分" } else { sku_name };
+                    rows.push(credit_row(name, total, used, remain, None, expired));
                 }
                 Some("online_search_count") => {
                     search_total += num(quota.get("sku_value"));
@@ -325,7 +403,36 @@ pub fn summarize(subscription: &Value) -> Value {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    json!({
+    // 联网搜索聚合成一行：上游按 sku 把它们拆成多条，逐条摆出来只是同一件事的
+    // 碎片（聚合口径与 `subscription.searches` 同源，`search_total` / `search_used`
+    // 就是上面循环顺手收的两个数）。单位是「次」、与文档的「积分」不同，这一行才
+    // 写 `unit`；上游没给搜索额度的到期时刻，`expireAt` 整个不写。
+    // 非有限值不出发：`json!` 会把它写成 `null`，那与「没读到」在界面上同义。
+    if search_total > 0.0 && search_total.is_finite() {
+        rows.push(credit_row(
+            "联网搜索",
+            Some(search_total),
+            Some(search_used),
+            Some(whole_points(search_total - search_used)),
+            Some("次"),
+            0,
+        ));
+    }
+    // 奖励活动**全部条目都出，含已过期的**：聚合读数只算未过期的（`available` /
+    // 奖励钱包），明细要能回答「哪笔作废了」—— 界面对已过期的另有折叠分组，
+    // 这个差异是刻意的。三个数走 `Bonus` 的既有口径（缺失折 0，与奖励钱包同源），
+    // `remain` 与 `Bonus::remaining` 同式再套全文件的向下取整。
+    for bonus in &bonuses {
+        rows.push(credit_row(
+            &bonus.name,
+            Some(bonus.total),
+            Some(bonus.used),
+            Some(whole_points(bonus.remaining())),
+            None,
+            bonus.expires_at,
+        ));
+    }
+    let mut document = json!({
         "available": available,
         "unit": "积分",
         "wallets": [
@@ -345,7 +452,19 @@ pub fn summarize(subscription: &Value) -> Value {
             },
         },
         "raw": subscription,
-    })
+    });
+    // 明细只在有行时挂（键在不在 + 长度就是界面的入口开关）：一条可写的行都没有的
+    // 账户挂个空数组，只会多出一个点开什么都没有的入口
+    if !rows.is_empty() {
+        rows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        if let Some(object) = document.as_object_mut() {
+            object.insert(
+                "credits".to_string(),
+                Value::Array(rows.into_iter().map(|(_, _, row)| row).collect()),
+            );
+        }
+    }
+    document
 }
 
 fn plan_name_or_default(name: &str) -> String {

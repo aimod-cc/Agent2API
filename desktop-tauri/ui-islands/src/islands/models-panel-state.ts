@@ -522,7 +522,9 @@ export function providerOptions(): ProviderOption[] {
   const seen = new Map<string, string>()
   for (const model of models()) {
     const key = model.provider || ''
-    if (key && !seen.has(key)) seen.set(key, model.providerLabel || key)
+    // 展示名走词典：后端给的 providerLabel 是注册名（「WorkBuddy 国内版」这类），
+    // 不查表的话非中文界面会整列回落中文
+    if (key && !seen.has(key)) seen.set(key, t(model.providerLabel || key))
   }
   return [...seen].map(([id, label]) => ({ id, label }))
 }
@@ -562,7 +564,7 @@ export function customProviderOptions(): ProviderOption[] {
   if (Array.isArray(builtin)) {
     for (const item of builtin) {
       const id = String(item?.id || '')
-      if (id) options.push({ id, label: String(item?.label || id) })
+      if (id) options.push({ id, label: t(String(item?.label || id)) })
     }
   }
   for (const provider of customSource.list()) {
@@ -926,10 +928,11 @@ export function modelRowOf(provider: string, id: string): ManageModel | null {
  */
 export function providerLabelOf(provider: string): string {
   if (customSource.isCustom(provider)) {
+    // 自定义家是用户自己起的名字（运行期数据），不进词典
     const name = customSource.record(provider)?.name
     return (typeof name === 'string' && name) || provider
   }
-  return shared().wbProviders?.labelOf?.(provider) || provider
+  return t(shared().wbProviders?.labelOf?.(provider) || provider)
 }
 
 /**

@@ -30,7 +30,10 @@ pub mod codes {
     pub const PRO_TRIAL_YEAR: &str = "TCACA_code_040_mi9rCYg46x";
 }
 
-/// 商品码 → 展示名（前端明细里的「套餐」一栏直接用这个）
+/// 商品码 → 展示名。**只在上游没给 `PackageName` 时兜底**（名单见
+/// `usage::get_personal_usage`：上游原文优先，见 issue #239 —— 这张表是照抄
+/// Node 版的手抄品，上游改名/换档位后不会跟着变，`FREE_MON` 就曾把
+/// 「CodeBuddy个人体验版」写成「专业版日额度」）。
 pub fn label_of(code: &str) -> Option<&'static str> {
     use codes::*;
     Some(match code {

@@ -262,3 +262,78 @@ pub fn new_request_id() -> String {
         bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
     )
 }
+
+// ─── UUIDv7 家族（WorkBuddy 对话链路的会话/消息/链路 id）──────
+//
+// 2026-10-16 对国际版桌面客户端 5.8.4 的抓包结论（参考实现
+// workbuddy2api-hub #381，本仓与之对齐）：官方客户端的请求 / 消息 id 是
+// 32 位无连字符 hex、会话 id 是带连字符的 UUID，都是 UUIDv7 家族
+// （48 位毫秒时间戳打头，时间有序）。上游不校验版本位 —— 抓包里主对话的
+// X-Conversation-ID 实际是 v4、辅助请求是 v7，两种都被正常接受 —— 所以
+// 形态只求贴近，不承担语义。上游也不拿这些 id 存对话历史（同一 id 连发两轮、
+// 第二轮只带 system+user，模型仍答不出上一轮），因此**每次请求现生成**，
+// 不按会话维护映射；缺了整个头族才会触发渠道校验（400 / code 11-128，
+// `conversation id missing`）。
+
+/// 生成 16 字节的 UUIDv7（RFC 9562）：毫秒时间戳 + 版本位 7 + 变体位 10。
+///
+/// 随机源与 [`new_request_id`] 同款（`RandomState` 种子 + 进程内计数器），
+/// 不为此引入新的随机依赖。
+fn uuid7_bytes() -> [u8; 16] {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let mix = |label: &[u8], salt: u64| -> u64 {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write(label);
+        hasher.write_u64(salt);
+        hasher.finish()
+    };
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+        & ((1 << 48) - 1);
+    let rand_a = mix(b"wb-uuid7-a", counter) & 0x0fff;
+    let rand_b = mix(b"wb-uuid7-b", counter.wrapping_mul(0x9E37_79B9_7F4A_7C15)) & ((1 << 62) - 1);
+    let int = ((millis as u128) << 80)
+        | (0x7u128 << 76)
+        | ((rand_a as u128) << 64)
+        | (0b10u128 << 62)
+        | (rand_b as u128);
+    int.to_be_bytes()
+}
+
+/// 请求 / 消息 id（`X-Request-ID` / `X-Conversation-Message-ID` /
+/// `X-Conversation-Request-ID` / `X-Root-Request-ID`）：32 位无连字符 hex。
+pub fn new_message_id() -> String {
+    let bytes = uuid7_bytes();
+    let mut id = String::with_capacity(32);
+    for byte in bytes {
+        id.push_str(&format!("{byte:02x}"));
+    }
+    id
+}
+
+/// 会话 id（`X-Conversation-ID`）：带连字符的 UUID 形态。
+pub fn new_conversation_id() -> String {
+    let bytes = uuid7_bytes();
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    )
+}
+
+/// 链路追踪的 span id（`traceparent` / b3 / `X-B3-SpanId`）：16 位 hex。
+pub fn new_span_id() -> String {
+    let bytes = uuid7_bytes();
+    let mut id = String::with_capacity(16);
+    for byte in &bytes[..8] {
+        id.push_str(&format!("{byte:02x}"));
+    }
+    id
+}

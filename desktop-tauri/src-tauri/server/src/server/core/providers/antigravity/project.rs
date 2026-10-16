@@ -9,6 +9,14 @@
 //! （规格 §3.4 的实测结论，Manager `quota.rs` 的注释逐字确认），所以本步
 //! 只把它当「发现 + 存下来」的动作，失败不阻断账号添加与目录刷新。
 //!
+//! ── `loadCodeAssist` 的第三个用途：订阅档 ──────────────────────
+//! 同一个响应除了 project，还带 `paidTier` / `currentTier`（订阅档）—— Manager
+//! 的 `modules/quota.rs::fetch_project_id` 用一次调用同时取 project 与等级
+//! （等级取值链见 [`fetch_tier`]；归一化在 `balance.rs` 的 `normalize_tier`）。
+//! 本仓的 [`discover_project`] 只用它的 project 字段，订阅档走 [`fetch_tier`]
+//! 单独取 —— 同一个调用、两个用途，职责分开：project 缺失会阻断聊天，订阅档
+//! 只影响展示（best-effort）。
+//!
 //! ── 两个调用的逐字形态（两套参考实现核对过）──────────────────
 //! ```text
 //! POST https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist
@@ -243,6 +251,60 @@ pub async fn onboard(
             "Antigravity 账号尚未完成开通（onboardUser 未返回 done，稍后刷新模型清单时会再试）"
         },
     ))
+}
+
+/// 从 `loadCodeAssist` 响应读**订阅档**（上游原始值，本方法不做归一化）。
+///
+/// 取值链（Manager 的等级提取优先级逐条）：`paidTier.id` → `currentTier.id` →
+/// `paidTier.name` → `currentTier.name`，都按字符串读、空串跳过。
+/// 两个 tier 都没有 → `Ok(String::new())`（地理受限 / 受限账号的形态）：
+/// 调用方按 Manager 的权威判法翻成 Free —— `models/quota.rs` 的
+/// `resolve_subscription_tier` 原话是「绝不误判为 PRO」。
+///
+/// 与 [`discover_project`] 是两个用途、同一个调用（见模块头）：
+/// project 缺失会阻断聊天，订阅档只影响展示，因此这里的调用点按 best-effort
+/// 处理（失败不写 `subscription` 键，而不是编一个档位）。
+pub async fn fetch_tier(
+    access_token: &str,
+    proxy: Option<&ResolvedProxy>,
+) -> Result<String, GatewayError> {
+    let (status, payload, text) = post_json(
+        &endpoints::load_code_assist_url(),
+        access_token,
+        "",
+        &json!({ "metadata": metadata() }),
+        proxy,
+    )
+    .await?;
+    if !(200..300).contains(&status) {
+        let detail = describe_body(&payload, &text);
+        return Err(GatewayError::with_status(
+            502,
+            format!("Antigravity 订阅档查询失败（HTTP {status}）：{detail}"),
+        ));
+    }
+    Ok(tier_of(&payload))
+}
+
+/// 订阅档的取值链（见 [`fetch_tier`] 的文档）
+fn tier_of(payload: &Value) -> String {
+    let paid = payload.get("paidTier");
+    let current = payload.get("currentTier");
+    for candidate in [
+        paid.and_then(|tier| tier.get("id")),
+        current.and_then(|tier| tier.get("id")),
+        paid.and_then(|tier| tier.get("name")),
+        current.and_then(|tier| tier.get("name")),
+    ] {
+        if let Some(text) = candidate
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            return text.to_string();
+        }
+    }
+    String::new()
 }
 
 /// 错误文摘要（上游文案 → 截断的原文兜底）

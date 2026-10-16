@@ -24,9 +24,8 @@ desktop-tauri/web
 logs/
 desktop-tauri/window-shot.png
 
-# 本地文档目录（发布说明草稿等，只在本机留存，不入库）
-# 新增文档直接放进 docs/ 下的分类目录即可，无需再加忽略规则
-/docs/
+# 发布说明草稿只在本机留存，不入库；docs/ 下的其它文档正常入库
+/docs/release-notes/
 
 # 发版脚本下载的 CI 构建产物（scripts/release.sh）
 dist/

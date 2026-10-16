@@ -36,18 +36,25 @@
 //! 统计）。本模块返回同一形状，于是工作流/日志/界面三处的口径与 WorkBuddy、
 //! 小浣熊完全一致，不需要为第三家再加分支。
 //!
-//! ── 活动福利（Weekly Perks 等「活跃即发」活动，2026-10 加）──────
+//! ── 活动福利（Weekly Perks / 登录奖励等「活跃即发」活动，2026-10 加）──
 //! 这类活动没有领取接口、由服务端在账号**登录活跃**时自动入账。签到链的做法：
-//! 签到完成后读一次积分流水，**今天还没到账**就顺带触发一次「登录」（token
-//! 刷新，`refresh::refresh` 的 force 通道），复核之后把状态放进
-//! `promotionReward` 字段（读侧实现见 `promotion` 模块头）。
+//! 签到完成后读一次积分流水，**今天还没到账**就顺带打一次「登录」接口
+//! （`POST /userapi/v1/user-info`，客户端每次启动都会打的那个），复核之后把
+//! 状态放进 `promotionReward` 字段（读侧实现见 `promotion` 模块头）。
 //!
-//! 触发动作的安全性有实测依据（2026-10-13）：服务端虽会**轮换** refresh_token，
-//! 但**旧令牌可重复使用**（同一旧 refresh_token 连续刷新两次均成功）—— 因此
-//! 这个刷新不会顶掉桌面端的登录态。刷新失败只记日志、不阻断签到（活动福利是
-//! 附加收益，见 `attach_today_reward` 的兜底说明）。
+//! ── 为什么触发动作是 user-info（2026-10-15 实测，别改回刷新 token）──
+//! M10W3 活动（10.15-10.21 一次性 20000；10.15-10.25 每日 500/800）当天逐条
+//! 测过：签到本身、`refresh` 的 force 刷新（含带调高的 X-Version）、home-fetch
+//! 都**不触发**发放；只有 user-info 打下去，20000 + 500 立刻入账（国际版是
+//! 800，没有 20000 档）。user-info 是客户端启动时的固定动作，服务端把「登录」
+//! 的判据挂在它上面（流水元数据 `event_type: autoclaw_user_active`）。
+//! 版本无关（X-Version 1.18.5 照发）、幂等（重复调用不重复入账）。
 //!
-//! 已到账时**不触发**（用户当天开过客户端就已经拿到，不重复刷新）。
+//! user-info 只需要 access token（不需要 refreshToken），也就没有 token 轮换
+//! 这类副作用 —— 比原来的「强制刷新」触发更干净、覆盖面更大。失败只记日志、
+//! 不阻断签到（活动福利是附加收益，见 `attach_today_reward` 的兜底说明）。
+//!
+//! 已到账时**不触发**（用户当天开过客户端就已经拿到，这里的调用次数零浪费）。
 //!
 //! ── 为什么带一个只读的任务列表调用 ─────────────────────────
 //! `GET autoclaw-task-list` 能拿到所有任务的完成状态。它在**签到失败时**提供
@@ -66,7 +73,6 @@ use crate::server::logging;
 use super::balance::{userapi_get, userapi_post};
 use super::credentials;
 use super::promotion;
-use super::refresh;
 use super::region::Region;
 
 /// 每日签到任务的 id（源实现 `DAILY_SIGNIN_TASK_ID`）
@@ -74,9 +80,10 @@ const DAILY_SIGNIN_TASK_ID: &str = "daily_signin";
 
 /// 触发「登录活跃」后、复核活动福利到账前等的一拍。
 ///
-/// 实测（2026-10-13）：刷新 16:18:46 → 服务端入账 16:18:48（约 2 秒）。
-/// 签到本身耗时通常已覆盖一部分等待，所以这里只补 1.5 秒再复核 —— 复核不到
-/// 也不影响结论（下一次签到/查询会看到，活动福利按天入账、当天都在流水里）。
+/// 实测（2026-10-15）：user-info 打下去 → 服务端入账（流水 occurred_at）在同一
+/// 秒内（20000 + 500 两笔同秒）。签到本身耗时通常已覆盖一部分等待，所以这里
+/// 只补 1.5 秒再复核 —— 复核不到也不影响结论（下一次签到/查询会看到，活动福利
+/// 按天入账、当天都在流水里）。
 const PROMOTION_SETTLE_MS: u64 = 1500;
 
 /// 签到接口路径（源实现 `completeClientTask`）
@@ -84,6 +91,11 @@ const TASK_COMPLETE_PATH: &str = "/autoclaw-proxy/proxy/autoclaw-task-complete";
 
 /// 任务列表路径（源实现 `getTaskList`；`?lang=` 可选，省略时上游给默认语言）
 const TASK_LIST_PATH: &str = "/autoclaw-proxy/proxy/autoclaw-task-list";
+
+/// 「登录」接口路径（客户端启动同款：`withWebInfo` 的 user-info）。
+///
+/// 活动福利的发放钩子挂在它上面（见模块头「为什么触发动作是 user-info」）。
+const USER_INFO_PATH: &str = "/userapi/v1/user-info";
 
 /// AutoClaw 账号的每日签到（**含活动福利触发与附加**）。
 ///
@@ -98,7 +110,7 @@ const TASK_LIST_PATH: &str = "/autoclaw-proxy/proxy/autoclaw-task-list";
 ///   1. **签到先行**：task-complete 的成败就是这条结果行的成败（账号不存在 /
 ///      凭证失效等在这里直接返回错误，不做多余的查询与触发）；
 ///   2. 读一次积分流水，判断今天的活动福利是否已到账（只读）；
-///   3. 未到账 → 触发一次「登录活跃」（token 刷新）—— **已到账不触发**，
+///   3. 未到账 → 打一次「登录」接口（user-info）—— **已到账不触发**，
 ///      用户当天开过客户端时这里零副作用；签到耗时已充当服务端发放延迟的
 ///      一部分，触发后再等一拍复核一次。
 pub async fn claim_daily_signin(
@@ -122,45 +134,48 @@ pub async fn claim_daily_signin(
     Ok(attach_today_reward(claim, reward))
 }
 
-/// 触发一次「登录活跃」—— 刷新 token，让服务端把今天的活动福利发出来。
+/// 触发一次「登录活跃」—— 打 user-info（客户端启动同款「登录」动作），
+/// 让服务端把今天的活动福利发出来。
 ///
-/// ── 为什么不自己做请求，而是复用 `refresh` ───────────────────
-/// 刷新链的验签头（appId/appKey）、400002 降级、单飞与缓存写回都只有一份实现
-///（`refresh.rs`）；在这里另起一套必然与它分叉。`force = true` 是无条件刷新
-///（`false` 只在临期才刷，而这里的目的是「触发登录」而不是「续期」）。
+/// ── 为什么是 user-info 而不是刷新 token ─────────────────────
+/// 见模块头「为什么触发动作是 user-info」：它是服务端「登录即发」的钩子
+/// （2026-10-15 实测：只有它能让 20000 + 500 立刻入账，refresh / home-fetch
+/// 都不行），且只带 access token、不涉及 token 轮换 —— 比强制刷新更干净。
 ///
 /// ── 返回值与容错 ────────────────────────────────────────────
-/// 返回是否**尝试并成功**触发了刷新（调用方据此决定要不要多等一拍复核）。
-/// 失败（没有 refreshToken / 网络问题 / 登录态失效）只记日志并返回 false ——
+/// 返回是否**成功**打出了这次登录（调用方据此决定要不要多等一拍复核）。
+/// 失败（没有可用凭证 / 网络问题 / 登录态失效）只记日志并返回 false ——
 /// 活动福利是附加收益，绝不因它把一次真签到判成失败。
 async fn trigger_login_active(region: Region, store: &AccountStore, account_id: &str) -> bool {
     let record = store.autoclaw_account_record(region, account_id);
-    // 与签到同一判据：非空 id 必须命中记录，否则不该拿桌面端登录态去刷
+    // 与签到同一判据：非空 id 必须命中记录，否则不该拿桌面端登录态去打
     if !account_id.is_empty() && record.is_none() {
         return false;
     }
     let Ok(credentials) = credentials::snapshot_for(record.as_ref(), region) else {
         return false;
     };
-    if !credentials.can_refresh() {
+    if credentials.token.trim().is_empty() {
         logging::verbose(
             "[AutoClaw]",
-            &format!("账号 {account_id} 没有 refreshToken，跳过活动福利触发"),
+            &format!("账号 {account_id} 没有可用凭证，跳过活动福利触发"),
         );
         return false;
     }
-    match refresh::refresh(&credentials, true).await {
+    // body 与客户端 `withWebInfo` 一致：source_id + device_id（device_id 可能为空串）
+    let body = json!({ "source_id": "autoclaw", "device_id": credentials.device_id });
+    match userapi_post(&credentials, USER_INFO_PATH, &body, "登录").await {
         Ok(_) => {
             logging::verbose(
                 "[AutoClaw]",
-                &format!("账号 {account_id} 已刷新登录态（触发活动福利发放）"),
+                &format!("账号 {account_id} 已触发登录（user-info），复核活动福利"),
             );
             true
         }
         Err(error) => {
             logging::verbose(
                 "[AutoClaw]",
-                &format!("账号 {account_id} 活动福利触发刷新失败: {}", error.message),
+                &format!("账号 {account_id} 活动福利触发失败: {}", error.message),
             );
             false
         }
@@ -290,10 +305,11 @@ async fn describe_task_state(
 /// 福利读积分流水）。把它做成「查不到就签到失败」会让一次网络抖动否决一次
 /// 真实签到 —— 与 `balance.rs` 给「订阅失败不影响积分结果」的兜底同一取向。
 ///
-/// 已到账时把收益拼进 `msg`（「…（活动福利 +800 已到账）」）：签到记录台账与
-/// 面板展示读的都是这一条 msg，用户在一个地方就能看清「今天到底拿到了什么」。
-/// 未到账**不改 msg** —— 活动有期限，结束后每天提示「未到账」只会变成噪音；
-/// 状态仍在 `promotionReward` 字段里，给需要的地方读。
+/// 已到账时把收益拼进 `msg`（「…（活动福利 +20500 已到账）」，`points` 是当日
+/// 全部活动入账的**合计**，逐笔明细在 `promotionReward.entries` 里）：签到记录
+/// 台账与面板展示读的都是这一条 msg，用户在一个地方就能看清「今天到底拿到了
+/// 什么」。未到账**不改 msg** —— 活动有期限，结束后每天提示「未到账」只会变成
+/// 噪音；状态仍在 `promotionReward` 字段里，给需要的地方读。
 fn attach_today_reward(mut claim: Value, reward: Value) -> Value {
     let granted = reward.get("granted").and_then(Value::as_bool).unwrap_or(false);
     let points = reward.get("points").and_then(Value::as_i64).unwrap_or(0);

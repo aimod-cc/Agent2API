@@ -143,6 +143,8 @@ pub(super) async fn query_usage(
         .get("wallets")
         .cloned()
         .unwrap_or_else(|| Value::Array(Vec::new()));
+    // 逐份明细只读上面这份 `points`（钱包清单 + 即将过期），不再打一次上游接口
+    let credits = credit_rows_from(&points);
     let mut raw = Map::new();
     raw.insert(
         "points".to_string(),
@@ -176,14 +178,22 @@ pub(super) async fn query_usage(
             }
         }
     }
-    Ok(json!({
+    let mut document = json!({
         "available": available,
         // AutoClaw 的资产口径就是它自己的「积分」
         "unit": "积分",
         "wallets": wallets,
         "subscription": subscription,
         "raw": Value::Object(raw),
-    }))
+    });
+    // `credits[]` 只在非空时挂：空数组**整个不写这个键** —— 界面按「键在不在 +
+    // 长度」决定要不要给这一格挂「可点开」的交互，给一个空数组会点出一个空框
+    if !credits.is_empty() {
+        if let Some(object) = document.as_object_mut() {
+            object.insert("credits".to_string(), Value::Array(credits));
+        }
+    }
+    Ok(document)
 }
 
 /// 查询积分钱包（源实现 `queryPoints`：v2 主链路 → v1 兜底 → expiring 附加）。
@@ -332,6 +342,89 @@ async fn query_points(credentials: &AutoClawCredentials) -> Result<Value, Gatewa
         "expiring": expiring,
         "raw": raw,
     }))
+}
+
+// ── 逐份明细（账号页「积分明细」弹层的输入）──────────────────
+
+/// `points`（[`query_points`] 的产物）→ 逐份明细行。
+///
+/// 一行一份钱包，最后补一行「即将过期」：
+/// ```text
+///   name / remain          这一份是什么 / 还剩多少（上游给什么写什么）
+///   grantReason            来源一句话（只有「即将过期」行有：上游的展示串）
+/// ```
+///
+/// ── 只有「剩余」一个数，缺了就不写这个键 ──────────────────────
+/// 上游不分开给面额与已用（`balance` 就是这一份还剩多少），所以 total / used
+/// 一律**不写这个键**；`remain` 也只在读到有限数时写 —— v2 的 `balance` 允许
+/// 是 null，那种行只出名字，界面显示「—」。写成 0 会让界面把「没读到」画成
+/// 「只剩 0」（前端 `Number(null) === 0`）。
+///
+/// ── 顺序不做二次排序 ────────────────────────────────────────
+/// 钱包按上游 `priority` 升序（[`query_points`] 里已排好），这里原样保留 ——
+/// 再排一次会让界面上每次刷新的行序都在跳。「即将过期」是附加信息、不是一份
+/// 钱包，所以放在最后一行。
+///
+/// ── 「即将过期」为什么不换算成时刻 ─────────────────────────────
+/// `expireTimeValue` / `expireTimeType` 是**相对时长**（“7 天”），不是时刻；
+/// 拿它推 `expireAt` 等于替上游编一个时间。上游自己给的展示串（`text`，
+/// 如「800 积分将于 7 天后过期」）原样进 `grantReason`，界面拼在说明行末尾。
+/// 点数非正数（0 / 负数 / null）时整行不写：既没有可写的读数，也就没有
+/// 「即将过期」这件事。
+fn credit_rows_from(points: &Value) -> Vec<Value> {
+    let mut rows: Vec<Value> = Vec::new();
+    if let Some(wallets) = points.get("wallets").and_then(Value::as_array) {
+        for wallet in wallets {
+            rows.push(credit_row_of(wallet));
+        }
+    }
+    let expiring = points.get("expiring").filter(|value| !value.is_null());
+    if let Some(points_left) = expiring
+        .and_then(|value| number_or_null(value.get("points")))
+        .filter(|value| *value > 0.0)
+    {
+        let mut row = Map::new();
+        row.insert("name".to_string(), json!("即将过期"));
+        row.insert("remain".to_string(), json!(points_left));
+        let text = expiring
+            .and_then(|value| value.get("text"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty());
+        if let Some(text) = text {
+            row.insert("grantReason".to_string(), json!(text));
+        }
+        rows.push(Value::Object(row));
+    }
+    rows
+}
+
+/// 一个钱包 → 明细行（键名与口径见 [`credit_rows_from`]）。
+///
+/// `name` 的三级兜底与 `query_points` 构造 `displayName` 时同口径
+/// （展示名 → 钱包类型 → 「积分」）：明细行**必须有名字** —— 名字空着界面会
+/// 退回占位的「积分包」，比上游给的钱包名更难认。
+fn credit_row_of(wallet: &Value) -> Value {
+    let name = wallet
+        .get("displayName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .or_else(|| {
+            wallet
+                .get("type")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+        })
+        .unwrap_or("积分");
+    let mut row = Map::new();
+    row.insert("name".to_string(), json!(name));
+    // 读不到有限数时**不写这个键**（理由见 `credit_rows_from` 的说明）
+    if let Some(balance) = number_or_null(wallet.get("balance")) {
+        row.insert("remain".to_string(), json!(balance));
+    }
+    Value::Object(row)
 }
 
 /// v1 钱包实例按 `wallet_scope` 归类（源实现 `normalizeLegacyWallets`）。

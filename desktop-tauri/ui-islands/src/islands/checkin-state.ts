@@ -633,17 +633,23 @@ export async function signSingleAccount(id: string, mode: 'checkin' | 'full' | '
       | { success?: boolean; msg?: string; alreadyCompleted?: boolean }
       | undefined
     const activity = row?.activity as
-      | { pokeSucceeded?: boolean | null; report?: { succeeded?: boolean } | null }
+      | {
+          pokeSucceeded?: boolean | null
+          report?: { succeeded?: boolean } | null
+          webConversation?: { succeeded?: boolean } | null
+        }
       | null
       | undefined
     const reportOk = activity?.report?.succeeded === true
+    const webOk = activity?.webConversation?.succeeded === true
     if (row?.error) {
       toast(t('签到失败：{error}', { error: String(row.error) }), 'err')
     } else if (mode === 'keepalive') {
       // 只保活：结果就一句话（保活成功 / 失败），不存在领取语义。
-      // 活跃上报（点亮连登的那条通道）成功同样算保活成功 —— 它才是「维持
-      // 账号活跃」的主动作；两者都失败才是失败。
-      if (activity?.pokeSucceeded === true || reportOk) toast(t('✅ {message}', { message: claim?.msg || t('活跃保活完成') }))
+      // 活跃上报（点亮连登的那条通道）与网页会话（issue #277：「当日活跃」
+      // 计数的判定通道）成功同样算保活成功；三者都失败才是失败。
+      if (activity?.pokeSucceeded === true || webOk || reportOk)
+        toast(t('✅ {message}', { message: claim?.msg || t('活跃保活完成') }))
       else toast(claim?.msg || t('活跃保活失败'), 'err')
     } else if (claim?.success === true) {
       toast(t('✅ {message}', { message: claim.msg || t('签到成功') }))
@@ -652,8 +658,9 @@ export async function signSingleAccount(id: string, mode: 'checkin' | 'full' | '
     } else if (reportOk) {
       // 活跃上报成功（连登点亮）但没领到 —— 后端 msg 把「活动未开启」一并交代
       toast(t('✅ {message}', { message: claim?.msg || t('活跃上报完成，但活动未开启') }))
-    } else if (activity?.pokeSucceeded === true) {
-      // 完整模式：保活成功但没领到 —— 后端 msg 把「活动未开启」一并交代
+    } else if (activity?.pokeSucceeded === true || webOk) {
+      // 完整模式：保活成功（保活对话或网页会话）但没领到 —— 后端 msg 把
+      // 「活动未开启」一并交代
       toast(t('✅ {message}', { message: claim?.msg || t('活跃保活完成，但活动未开启') }))
     } else {
       toast(claim?.msg || t('未领取'), 'err')

@@ -185,6 +185,35 @@ pub(super) fn code_hint(code: i64) -> Option<&'static str> {
     }
 }
 
+/// 429 文案 → 池子错位的提示（`None` = 不是那种文案，按上游原文透传）。
+///
+/// ── 这条提示回答的是 issue #232 的场景 ─────────────────────
+/// ZCode 的额度在**两个互不相通的池子**里：编码套餐通道（默认）消耗**开放平台**
+/// 的订阅套餐 / 资源包 / 充值余额；而新注册用户的免费体验额度与活动领取的额度
+/// 记在 **ZCode 套餐池**里（`zcode.z.ai` 的 zcode-plan 平面），只有把账号的
+/// 「使用套餐」切到 [`super::PLAN_START`] 才花得到。只有套餐池额度的账号走默认
+/// 通道时，上游回 429「余额不足或无可用资源包，请充值」—— 语义有误导性：
+/// 用户的套餐额度一分未动，只是这条通道够不着它。
+///
+/// 判的是**上游错误原文**（不猜业务码，上游没有为它给独立 code）：
+/// 中文实测句（#232）含「余额不足」「资源包」，英文形态按同义短语认
+/// （`insufficient balance`）。判错的多付代价只是错误信息里多一句提示，
+/// 判漏的代价是用户对着「请充值」摸不着头脑 —— 判据因此放宽。
+pub(super) fn quota_hint(raw: &str) -> Option<&'static str> {
+    let hit = raw.contains("余额不足")
+        || raw.contains("资源包")
+        || raw.to_lowercase().contains("insufficient balance");
+    if !hit {
+        return None;
+    }
+    Some(
+        "这条限额来自开放平台计费平面：编码套餐通道只消耗开放平台的额度\
+         （订阅套餐 / 资源包 / 充值余额），与 ZCode 套餐池互不相通。\
+         若这个账号的额度在套餐池里（新注册的体验额度、活动领取的额度），\
+         请在账号设置里把「使用套餐」切到「套餐池（Start Plan）」",
+    )
+}
+
 /// 构造一次「活动套餐」转发请求（OpenAI Chat 体 → 上游 Anthropic Messages 体）。
 ///
 /// 入参 `session` 是账号会话（带 `jwt` / `deviceMid` / `zcodePlan` 三个附加键，
@@ -211,7 +240,7 @@ pub(super) fn build_request(
         // 一句可执行的出路，与 `refresh_access_token` 的文案同一取向。
         return Err(GatewayError::with_status(
             401,
-            "该 ZCode 账号缺少套餐登录态（jwt），无法使用活动套餐通道：\
+            "该 ZCode 账号缺少套餐登录态（jwt），无法使用套餐池（Start Plan）通道：\
              请重新登录该账号，或在账号设置里把「使用套餐」切回编码套餐",
         ));
     }
@@ -226,7 +255,7 @@ pub(super) fn build_request(
         // （与 chat 路径「没点名就用上游默认」不同：那边上游有默认值）
         return Err(GatewayError::with_status(
             400,
-            "活动套餐通道需要明确的模型名：请在客户端指定模型后重试",
+            "套餐池（Start Plan）通道需要明确的模型名：请在客户端指定模型后重试",
         ));
     }
 
@@ -308,7 +337,12 @@ pub(super) fn build_request(
     }
 
     Ok(ChatRequestPlan {
-        url: format!("{}{MESSAGES_PATH}", plan_base_url(region)),
+        // 端点映射：这条端点也可能被上游的 mapping 表改写（表是服务端控制的），
+        // 与编码套餐通道同一份表、同一个 fail-open 语义（见 `endpoint_mapping`）
+        url: super::endpoint_mapping::apply(
+            region,
+            &format!("{}{MESSAGES_PATH}", plan_base_url(region)),
+        ),
         headers,
         body: payload,
         // 上游说 Anthropic：响应帧要先折成 chat SSE 再下发
@@ -336,14 +370,14 @@ fn captcha_pool_empty(provider_id: &str) -> GatewayError {
     // 只能在页面上跑），桌面端与 headless 面板**都能铸** —— 区别只是桌面端关了窗口
     // 要打开主窗口，headless 要把面板页开着。写「headless 无法铸造」会把人劝去切回
     // 编码套餐，而那是一条本来能用的路。
-    let message = "活动套餐通道需要人机验证令牌，当前令牌池为空：\
+    let message = "套餐池（Start Plan）通道需要人机验证令牌，当前令牌池为空：\
          令牌由**打开着的界面**自动铸造，请先打开主窗口（轻量模式下窗口被销毁时）\
          或浏览器面板页让它补铸；也可以先在账号设置里把「使用套餐」切回编码套餐";
     if readiness::hold(provider_id, message) {
         logging::console_line(
             "[Routing]",
             &format!(
-                "⚠️ {provider_id} 的活动套餐通道在本机发不出去（令牌池为空），\
+                "⚠️ {provider_id} 的套餐池通道在本机发不出去（令牌池为空），\
                  选路暂时绕开这一家；界面（主窗口或面板页）开始铸造令牌后会自动恢复，\
                  否则最长 {} 秒重新探一次",
                 readiness::GATE_TTL_MS / 1000

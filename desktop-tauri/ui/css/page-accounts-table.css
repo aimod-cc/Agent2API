@@ -770,17 +770,22 @@ body.queue-dragging * { cursor: grabbing !important; }
 .usage-toggle[aria-expanded="true"] { background: var(--primary-soft); border-color: var(--primary-bd); }
 .usage-toggle[aria-expanded="true"] .caret { transform: translateY(-50%) rotate(180deg); }
 
-/* ── token 组的平铺行（对话 token / 福利模型日额度）───
-   这两行是「这账号现在能不能跑」的直接标志，直接住在余额格里不折叠；
-   积分类的构成才进弹层。标签短名（福利模型日额度 → 福利日额度），
-   读数万/亿缩写（3541691 → 354 万），原值都在悬停 title。
-   条与积分明细同款：6px 胶囊、画**剩余**比例、超额整条走红 ——
-   但只在**真总量**（allowance > 1）时画，无上限 / 占位包不画。 */
+/* ── 余额格里的平铺行（一行一个读数 + 一条占满格宽的剩余条）───
+   CodeArts 的 token 池那两行（对话 token / 福利模型日额度）与 OpenCode Go 的
+   三个用量窗口（5 小时 / 每周 / 每月）共用这一套：形态本来就是同一种，
+   渲染也同一处（islands 的 `UsageFlatRowView`）。
+   标签用短名（福利模型日额度 → 福利日额度），读数万/亿缩写（3541691 → 354 万），
+   原值都在悬停 title。条与积分明细同款：5px 胶囊、画**剩余**比例、超额整条走红
+   —— 但只在读得到比例时画，无上限 / 占位包 / 读不出数都不画。 */
 .usage-flat-line {
   display: block;
   margin-top: 4px;
   min-width: 0;
 }
+
+/* 上面没有别的块时不留那段间距（OpenCode 的窗口格：一格就是三条平铺行，
+   第一条得贴着格顶，与相邻几列的读数对齐） */
+.usage-cell > .usage-flat-line:first-child { margin-top: 0; }
 
 .usage-flat-head {
   display: flex;

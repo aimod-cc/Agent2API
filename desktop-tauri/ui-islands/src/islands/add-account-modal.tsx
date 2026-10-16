@@ -12,7 +12,7 @@
  * 同一手法）。index.html 里那段 47 行的静态骨架（#add-modal）随之删除。
  *
  * ── 两层弹窗（与旧实现的对应关系）──────────────────────────
- *   第 1 步 #add-modal       → 这里的列表 Dialog（选提供商），宽 880px；
+ *   第 1 步 #add-modal       → 这里的列表 Dialog（选提供商），宽 1100px；
  *   第 2 步 #add-form-modal  → 这里的表单 Dialog（选方式 + 填凭证），宽 620px。
  * 两层都用组件库的 Dialog：Esc / 点遮罩 / 焦点陷阱 / 关闭后焦点归位由 Base UI
  * 内建，嵌套弹窗的 Esc 只收最上面那层（旧实现靠 document 上的 keydown +
@@ -34,7 +34,7 @@ import * as React from 'react'
 import { createRoot } from 'react-dom/client'
 import { Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogSection, DialogTitle } from '@ui'
 
-import { shared, type CustomProviderRecord, type SharedWindow } from './add-account-bridge'
+import { existingCustomOfPreset, shared, type CustomProviderRecord, type SharedWindow } from './add-account-bridge'
 import {
   BUILTIN_CONFIGS,
   CUSTOM_PROVIDER,
@@ -153,10 +153,11 @@ function AddAccountModal({
       : ''
   // WorkBuddy 用中性品牌名（不带地区）：这个块内部有「账号版本」分段，标题写着
   // 「国内版」而用户当场切到国际版就自相矛盾了（与第 1 步那张卡同一口径，名字
-  // 见 add-account-configs 的 WORKBUDDY_ENTRY_LABEL）。别家用注册表名。
+  // 见 add-account-configs 的 WORKBUDDY_ENTRY_LABEL）。别家用注册表名，
+  // 注册名要过一遍词典（「AutoClaw 国内版」这类在非中文界面得翻）。
   const providerLabel = state.provider === WORKBUDDY_PROVIDER
     ? WORKBUDDY_ENTRY_LABEL
-    : shared().wbProviders?.labelOf?.(state.provider) || state.provider
+    : t(shared().wbProviders?.labelOf?.(state.provider) || state.provider)
   // 标题写在表单弹窗的头部：列表弹窗的标题始终是「添加账号」，不跟着步骤变
   const heading = isCustom
     ? (state.providerHint || state.presetKey
@@ -171,12 +172,20 @@ function AddAccountModal({
     if (id === NEW_PROVIDER_CARD_ID) {
       setState(prev => ({ ...prev, ...entry, provider: CUSTOM_PROVIDER, providerHint: '', presetKey: '' }))
     } else if (id.startsWith(PRESET_CARD_PREFIX)) {
+      const presetKey = id.slice(PRESET_CARD_PREFIX.length)
+      // 模板卡分两种落法（判重口径与卡片文案共用 bridge 的 existingCustomOfPreset）：
+      //   · 这家还没建过 —— 空 providerHint，落到「新建」模式（模板预填名称 / 协议 /
+      //     Base URL），提交即建家 + 首个账号；
+      //   · 已建过同名家 —— 带上那家的 id，落到「加入已有」模式并预选它，点几次
+      //     模板卡就能加几个账号（同一家多把 key 轮换），不会建出重名的第二家。
+      // presetKey 照带：`CustomFootActions` 在新建提交时要用它取 quirks。
+      const built = existingCustomOfPreset(shared().wbPresetProviders?.presetOf?.(presetKey))
       setState(prev => ({
         ...prev,
         ...entry,
         provider: CUSTOM_PROVIDER,
-        providerHint: '',
-        presetKey: id.slice(PRESET_CARD_PREFIX.length),
+        providerHint: built?.id || '',
+        presetKey,
       }))
     } else if (customList().some(item => item.id === id)) {
       setState(prev => ({ ...prev, ...entry, provider: CUSTOM_PROVIDER, providerHint: id, presetKey: '' }))
@@ -194,7 +203,7 @@ function AddAccountModal({
     //
     // 第 2 步（表单层）写在 **DialogContent 的 children 里**（见下面那段 Dialog）。
     <Dialog open onOpenChange={next => { if (!next) onClose() }}>
-      <DialogContent className='w-[min(880px,calc(100vw-48px))]'>
+      <DialogContent className='w-[min(1100px,calc(100vw-48px))]'>
         <DialogHeader>
           <DialogTitle>{t('添加账号')}</DialogTitle>
         </DialogHeader>

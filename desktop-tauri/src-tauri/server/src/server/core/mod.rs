@@ -92,6 +92,7 @@ pub mod prompt;
 pub mod protocol;
 pub mod providers;
 pub mod proxy_pool;
+pub mod proxy_rotate;
 pub mod proxy_settings;
 pub mod proxies;
 pub mod routing;

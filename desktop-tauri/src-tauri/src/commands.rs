@@ -325,6 +325,30 @@ pub fn change_lan_access(app: AppHandle, enabled: bool, panel: bool) -> Result<V
     }))
 }
 
+/// 界面直连网关时该带的凭证头（AI 助手的配置读写与流式对话）。
+///
+/// ── 为什么需要单独一条命令 ──────────────────────────────────
+/// 助手页为了流式对话/不受桥 60 秒超时限制，直接 fetch 网关基址（见
+/// ui-islands/src/islands/assistant-state.ts）。桌面形态下页面来自 Tauri
+/// 自定义协议、网关在 `127.0.0.1:{port}`：跨源 + 不带 cookie，请求里没有
+/// 任何凭证；面板认证一旦开启（设置页开过局域网访问就会注册管理员），
+/// `/api/*` 要求「面板会话或一把启用的 Key」，那条裸请求就会被 401
+/// `panel_login_required` 拒绝 —— 用户看到的就是「加载助手设置失败：请先
+/// 登录管理面板」，而桌面上并没有登录页。把壳自己用的那把 Key 交给页面，
+/// 直连通道与桥通道的凭证口径就一致了。
+///
+/// 返回 `{ 头名: 值 }`（桌面端只有 `x-api-key`）：网页端 shim 的同名方法回
+/// 面板令牌 / 用户输入的 Key，助手页对两端一视同仁，只负责合并。面板认证
+/// 没开启时多带一个头也不会被拒 —— 中间件的鉴权分支只在开启后才看它。
+#[tauri::command]
+pub fn direct_credentials() -> Result<Value, String> {
+    let mut headers = serde_json::Map::new();
+    if let Some(key) = crate::gateway::management_key() {
+        headers.insert("x-api-key".to_string(), Value::String(key));
+    }
+    Ok(Value::Object(headers))
+}
+
 /// 本机在局域网里的地址（给「局域网访问」面板显示 `http://<IP>:<端口>/v1` 用）。
 ///
 /// UDP connect 不发任何包，只是让内核按路由表选出默认出口的源地址 —— 机器

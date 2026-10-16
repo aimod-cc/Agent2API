@@ -186,6 +186,10 @@ pub(crate) fn refresh_meta(kind: ProviderKind) -> (bool, i64) {
             super::officeace::models::remote_refreshed(),
             super::officeace::models::last_refreshed_at(),
         ),
+        // OrcaTerm 的清单来自客户端内置（上游没有列模型的接口，见
+        // `orcaterm::models` 的模块头）：永远不是远程来源，也没有刷新时刻。
+        // 与 ZCode 同一口径：如实回 `(false, 0)`，界面的「来源」列显示成内置清单。
+        ProviderKind::OrcaTerm => (false, 0),
     }
 }
 

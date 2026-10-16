@@ -118,16 +118,36 @@ impl Credential {
         }
     }
 
-    /// JWT 里的 `exp`（毫秒），解不出来返回 None。
+    /// JWT 里的到期时刻（毫秒），解不出来返回 None。
     ///
     /// 只看第二段、不验签：这不是安全判定，只是"还有多久要续"的读数来源。
     /// 验签要公钥，而我们对上游的令牌格式没有信任需求 —— 判错过一次
     /// 也只是早续或晚续一次。
+    ///
+    /// ── 为什么除 `exp` 之外还认 `TokenExpireAt` ────────────────
+    /// 中国版的令牌把到期写在**自定义声明** `TokenExpireAt` 里而不是标准 `exp`
+    /// （参考实现 Trae2api-cn 从 JWT payload 读的也是它，见 issue #263）；
+    /// 旧解析只认 `exp`，中国版的令牌解出来是 None ⇒ 有效期落到落盘字段，
+    /// 而落盘那份在换证时同样是坏的（见 `refresh::parse_refresh_response` ——
+    /// 中国版的 `TokenExpireAt` 是**字符串**，旧解析读成 0）。两层都没有的账号
+    /// 面板上的有效期就不准，续期节奏也跟着错。
+    ///
+    /// 声明值可能是数字也可能是字符串，秒与毫秒两种量级都在（`"1900000000000"`
+    /// 是毫秒、`1780000000` 是秒），按 [`crate::server::core::providers::trae::refresh::normalize_expires_at`]
+    /// 同一判据归一。
     pub fn jwt_expires_at_ms(&self) -> Option<i64> {
-        // saturating：release 是 panic=abort 且整数溢出在 release 下**静默回绕**，
-        // 一个畸形的大 `exp`（上游哪天塞 1e16）会翻成负数到期时刻，
-        // 于是"刚签发"被读成"早该续期"、每轮都白刷一次。宁可顶到 i64::MAX。
-        jwt_claim(&self.access_token, "exp").map(|seconds| seconds.saturating_mul(1000))
+        let from_claim = |claim: &str| {
+            jwt_claim(&self.access_token, claim).map(|raw| {
+                if raw < 100_000_000_000 {
+                    raw.saturating_mul(1000)
+                } else {
+                    raw
+                }
+            })
+        };
+        from_claim("exp")
+            .or_else(|| from_claim("TokenExpireAt"))
+            .or_else(|| from_claim("tokenExpireAt"))
     }
 
     /// JWT 里的 `iat`（秒）。参考实现额外用它在签发龄超 15 天时强制轮换
@@ -136,7 +156,8 @@ impl Credential {
         jwt_claim(&self.access_token, "iat")
     }
 
-    /// 有效到期时刻：JWT 的 `exp` 优先，落盘字段兜底。
+    /// 有效到期时刻：JWT 声明优先（`exp`，缺席时退中国版自定义的 `TokenExpireAt`），
+    /// 落盘字段兜底。
     pub fn effective_expiry_ms(&self) -> i64 {
         self.jwt_expires_at_ms().unwrap_or_else(|| self.expires_at_ms())
     }
@@ -280,7 +301,14 @@ fn jwt_claim(token: &str, claim: &str) -> Option<i64> {
     )
     .ok()?;
     let value: Value = serde_json::from_slice(&decoded).ok()?;
-    value.get(claim)?.as_f64().map(|number| number as i64)
+    // 声明值数字与**字符串数字**都认：中国版把 `TokenExpireAt` 放进 payload 时
+    // 是字符串形态（参考实现的夹具原样，见 `jwt_expires_at_ms` 的函数头）。
+    match value.get(claim)? {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+    .map(|number| number as i64)
 }
 
 #[cfg(test)]
@@ -346,6 +374,37 @@ mod tests {
         let aged = Credential { access_token: fake_jwt(now_seconds + 90 * 86400, now_seconds - 20 * 86400), ..Default::default() };
         assert!(aged.needs_refresh(24 * 3600 * 1000, 15 * 86400 * 1000, now_seconds * 1000), "签发龄超 15 天要续（服务端有吊销风险）");
         assert!(!aged.needs_refresh(24 * 3600 * 1000, 0, now_seconds * 1000), "max_age=0 是关掉这条规则，不是立刻续");
+    }
+
+    /// 造一个 payload 任意指定的假 JWT（中国版声明形态的夹具用）。
+    fn fake_jwt_with(payload: Value) -> String {
+        use base64::Engine;
+        let encode = |object: &Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(object.to_string().as_bytes())
+        };
+        format!("{}.{}.sig", encode(&json!({"alg": "HS256"})), encode(&payload))
+    }
+
+    /// 中国版形状（issue #263）：JWT 里没有标准 `exp`，到期写在自定义声明
+    /// `TokenExpireAt` 且是**字符串**毫秒（Trae2api-cn 的夹具原样）。
+    /// 旧解析两处都读不到 ⇒ 有效期落 0，面板显示与续期节奏一起坏。
+    #[test]
+    fn the_cn_custom_claim_drives_the_expiry_when_exp_is_absent() {
+        let token = fake_jwt_with(json!({"TokenExpireAt": "1900000000000", "iat": 1_780_000_000i64}));
+        let credential = Credential { access_token: token, expires_at: 0, ..Default::default() };
+        assert_eq!(1_900_000_000_000, credential.effective_expiry_ms(), "字符串毫秒声明要落数");
+        // 数字形态（秒量级）的同一声明按量级归一
+        let numeric = fake_jwt_with(json!({"TokenExpireAt": 1_900_000_000i64}));
+        let credential = Credential { access_token: numeric, expires_at: 0, ..Default::default() };
+        assert_eq!(1_900_000_000_000, credential.effective_expiry_ms());
+        // 标准 `exp` 仍是最优先：两者都在时听 exp 的
+        let both = fake_jwt_with(json!({"exp": 1_780_050_000i64, "TokenExpireAt": "1900000000000"}));
+        let credential = Credential { access_token: both, expires_at: 0, ..Default::default() };
+        assert_eq!(1_780_050_000_000, credential.effective_expiry_ms(), "标准 exp 在时必须压过自定义声明");
+        // exp 是坏值（字符串垃圾）时退到自定义声明，而不是整个放弃落 0
+        let broken_exp = fake_jwt_with(json!({"exp": "garbage", "TokenExpireAt": "1900000000000"}));
+        let credential = Credential { access_token: broken_exp, expires_at: 0, ..Default::default() };
+        assert_eq!(1_900_000_000_000, credential.effective_expiry_ms(), "exp 坏值要退到自定义声明");
     }
 
     #[test]

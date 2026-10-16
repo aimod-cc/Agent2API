@@ -186,6 +186,20 @@ pub async fn run_activity(State(state): State<ServerState>, body: Bytes) -> Resp
         account.get("provider").and_then(Value::as_str).unwrap_or(""),
         mode.as_str(),
     );
+    // 落 `checkinAt`：手动粒度入口与批量/定时（`run_checkin`）必须同口径 ——
+    // 判据是 `day_completed`（领取成功 / 活跃上报 / 网页会话任一），否则
+    // 手动跑完一轮后签到中心仍显示「待签」，与台账已记的 already/ok 矛盾。
+    // 写盘失败只打日志，不影响本响应（与 run_checkin 的取舍同构）。
+    if crate::server::core::billing::checkin::day_completed(&row)
+        && !state
+            .store()
+            .mark_checkin(&id, crate::server::logging::now_ms())
+    {
+        crate::server::logging::verbose(
+            "[Accounts]",
+            &format!("账号 {id} 的签到时间未能落盘（账号可能已被删除）"),
+        );
+    }
     ok_json(row)
 }
 
