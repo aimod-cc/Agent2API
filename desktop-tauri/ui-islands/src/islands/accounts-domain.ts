@@ -234,6 +234,20 @@ const PROVIDER_FEATURES: Record<string, ProviderFeatures> = {
   // `expiry: ''` —— refresh token 不过期、access token 自动续期，这一列对它没有可显示的事实
   //   （与 kuku 同一处置：界面不渲染「有效期」）。
   antigravity: { usage: true, edition: false, identifier: 'userId', expiry: '' },
+  // ModelScope（魔搭）的两个站点（`modelscope` / `modelscope-intl`）：两条同一份
+  //   —— 账号字段、余额形态、签到链路两地完全一致，差别只在域名（那是转发与
+  //   凭证层的事，这里不体现）。
+  // `usage: true` —— 额度是魔粒钱包（`available_balance`），外加「今日已用调用数」
+  //   一行，见后端 providers::modelscope::balance；`creditDetail: true` 让余额格
+  //   挂出「积分明细」（可用 / 冻结 / 今日已用三行）。
+  // `edition: false` —— 地区由 provider id 直接表达（两家 provider、两个分组），
+  //   不需要再渲染一个地区列。
+  // `identifier: 'userId'` —— 身份键存的是上游的 HavanaId
+  //   （见 account_store::modelscope_accounts 模块头）。
+  // `expiry: ''` —— 令牌不过期、也没有过期时刻可算，这一列对它没有可显示的事实
+  //   （与 kuku / antigravity 同一处置：界面不渲染「有效期」）。
+  modelscope: { usage: true, creditDetail: true, edition: false, identifier: 'userId', expiry: '' },
+  'modelscope-intl': { usage: true, creditDetail: true, edition: false, identifier: 'userId', expiry: '' },
 }
 
 /**

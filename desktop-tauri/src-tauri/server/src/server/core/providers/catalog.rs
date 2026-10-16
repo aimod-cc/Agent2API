@@ -190,6 +190,17 @@ pub(crate) fn refresh_meta(kind: ProviderKind) -> (bool, i64) {
         // `orcaterm::models` 的模块头）：永远不是远程来源，也没有刷新时刻。
         // 与 ZCode 同一口径：如实回 `(false, 0)`，界面的「来源」列显示成内置清单。
         ProviderKind::OrcaTerm => (false, 0),
+        // ModelScope 的两个站点各有一份独立清单（缓存按地区分格，见
+        // `modelscope::models` 的模块头）：这里如实各查**自己那一格**。
+        // 上游**没有**内置兜底清单，所以「有内容」就等于「远程拉到过」。
+        ProviderKind::Modelscope | ProviderKind::ModelscopeIntl => {
+            let region = super::modelscope::Region::from_kind(kind)
+                .unwrap_or(super::modelscope::Region::Cn);
+            (
+                super::modelscope::models::remote_refreshed(region),
+                super::modelscope::models::last_refreshed_at(region),
+            )
+        }
     }
 }
 

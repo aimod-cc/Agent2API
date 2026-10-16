@@ -756,6 +756,64 @@ const ORCATERM: ProviderConfig = {
   ],
 }
 
+/**
+ * ModelScope（魔搭）的两个站点：一家一个 provider，粘贴 `ms-` 令牌。
+ *
+ * ── 一枚令牌两用（这是本家最省事的地方）──────────────────────
+ * 同一个 `ms-` 令牌既作 `Authorization: Bearer` 调推理，又作
+ * `Cookie: m_session_id=<令牌>` 读账号身份 / 魔粒余额 / 每日签到（实测确认）。
+ * 所以凭据只有一个字段，用户从魔搭的「访问令牌」页复制一次就够。
+ *
+ * ── 两个站点是两套独立账号 ─────────────────────────────────
+ * 国内站（modelscope.cn）与国际站（modelscope.ai）账号体系分开：令牌打错站点
+ * 会得到 401，所以两家各一张卡、各填各的令牌。
+ *
+ * ── 没有续期、没有桌面端导入 ───────────────────────────────
+ * 令牌长期有效（上游没有 refresh 接口），失效只能重新获取；魔搭没有桌面客户端
+ * （与 Loomy / MonkeyCode 同一处境），因此不渲染「导入桌面端登录态」。
+ *
+ * ── 添加时的一次探活（会拦下添加）──────────────────────────
+ * 令牌不透明、解不出身份，所以网关添加前必须打一次上游换回账号身份 ——
+ * 令牌无效 / 站点点错会在添加的那一刻就说清楚，而不是等第一次转发才失败。
+ */
+function modelscopeForm(spec: {
+  provider: string
+  label: string
+  site: string
+  siteNote: string
+}): ProviderConfig {
+  const { provider, label, site, siteNote } = spec
+  return {
+    provider,
+    label,
+    // 没有桌面客户端，也就没有可导入的登录态文件（理由见上方注释）
+    desktop: false,
+    manualTitle: t('粘贴 API 令牌'),
+    // 整段是一个 t() 键：扫描器只认字符串字面量（拼接串提不到键），所以不拆行
+    manualNoteHtml: t('粘贴 ModelScope 的 API 令牌（<code>ms-</code> 开头，在 {site} 的「访问令牌」页获取）。<br>{siteNote}<br>这枚令牌<b>两用</b>：网关既用它调推理，也用它读账号身份、魔粒余额与每日签到。令牌长期有效、没有续期接口，失效后重新获取再粘一次即可。', { site, siteNote }),
+    fields: [
+      // 字段名不包 t()（各语言相同，与别家同一处置）
+      { key: 'accessToken', label: 'accessToken', rows: 3, placeholder: t('ms- 开头的 API 令牌') },
+      { key: 'name', label: t('备注名'), optional: true, placeholder: t('可选，留空则用上游账号昵称') },
+    ],
+  }
+}
+
+const MODELSCOPE = modelscopeForm({
+  provider: 'modelscope',
+  label: t('ModelScope 国内版'),
+  site: 'modelscope.cn',
+  siteNote: t('这里填国内站（modelscope.cn）的账号：请粘贴国内站的令牌。国际站（modelscope.ai）是另一家 provider、另一套账号，两边的令牌不通用。'),
+})
+
+const MODELSCOPE_INTL = modelscopeForm({
+  provider: 'modelscope-intl',
+  label: t('ModelScope 国际版'),
+  site: 'modelscope.ai',
+  siteNote: t('这里填国际站（modelscope.ai）的账号：请粘贴国际站的令牌。国内站（modelscope.cn）是另一家 provider、另一套账号，两边的令牌不通用。'),
+})
+
+
 /** 内置家的表单块，顺序与旧 ADD_FORMS 一致（只影响 DOM 里的块顺序，不影响界面） */
 export const BUILTIN_CONFIGS: ProviderConfig[] = [
   RACCOON,
@@ -800,6 +858,11 @@ export const BUILTIN_CONFIGS: ProviderConfig[] = [
   // OrcaTerm（腾讯云遨驰终端桌面客户端）：粘贴 accessToken / 导入桌面端登录态，
   // 排在末尾（与后端注册表 PROVIDERS 的排列一致，2026-10 接入）
   ORCATERM,
+  // ModelScope（魔搭）的两个站点相邻（与 AutoClaw / Qoder / MonkeyCode 同一拆法）：
+  // 国内版在前 —— 与后端注册表 PROVIDERS 的追加顺序一致（2026-10 接入）
+  MODELSCOPE,
+  MODELSCOPE_INTL,
+
 ]
 
 /** WorkBuddy 的块 id（结构特殊，单独一个组件） */

@@ -109,6 +109,7 @@ pub mod commandcode_accounts;
 pub mod custom_accounts;
 pub mod kuku_accounts;
 pub mod loomy_accounts;
+pub mod modelscope_accounts;
 pub mod monkeycode_accounts;
 pub mod officeace_accounts;
 pub mod orcaterm_accounts;
@@ -208,6 +209,20 @@ pub(crate) const MONKEYCODE_INTL_PROVIDER_ID: &str = crate::server::core::provid
 /// 几处判断只关心「是不是 MonkeyCode」，不关心哪个站点。
 pub(crate) fn is_monkeycode_family(provider_id: &str) -> bool {
     provider_id == MONKEYCODE_PROVIDER_ID || provider_id == MONKEYCODE_INTL_PROVIDER_ID
+}
+
+/// 这个 provider 是不是 **ModelScope 系**（两个站点之一）。
+///
+/// 与 [`is_autoclaw_family`] / [`is_monkeycode_family`] 同一形态、同一理由：
+/// 账号层有几处判断只关心「是不是 ModelScope」（公开形态、令牌长度校验），
+/// 不关心哪个站点 —— 那些分支走本函数，于是加站点或改名时只改这里一处，
+/// 而不是散在各文件里的 `id == "modelscope"`（那种写法对国际版恒为假，
+/// 是个不会报错的静默失配）。
+///
+/// 判据从 `Region` 互查推导（同 [`is_accio_family`] / [`is_zcode_family`]），
+/// **不要**用 `starts_with("modelscope-")` —— 国际版的 id 也以它开头。
+pub(crate) fn is_modelscope_family(provider_id: &str) -> bool {
+    crate::server::core::providers::modelscope::Region::from_provider_id(provider_id).is_some()
 }
 
 /// Command Code provider id（账号存储内部多处要用；**从注册表推导**）。

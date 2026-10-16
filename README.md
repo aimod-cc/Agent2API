@@ -55,6 +55,7 @@
 | Command Code | ✓ | ✗ 静态 API Key | ✓ 远程 + 静态兜底 | — | — | — |
 | Antigravity（Google，Gemini） | ✓ | ✓ | ✓ 远程 + 静态兜底 | — | — | — |
 | OfficeAce（华为云果办 / OfficeClaw） | ✓ | ✓ 控制面自动续期 | ✓ 仅远程 | ✓ 积分余额 | ✓ 每日奖励（签到 + 新人礼） | — |
+| ModelScope（魔搭，国内版 / 国际版） | ✓ | ✗ 令牌长期有效 | ✓ 仅远程 | ✓ 魔粒余额 | ✓ 每日魔粒（调登录接口即触发） | — |
 | 自定义提供商 | ✓ Chat 透传 / Responses / Anthropic | — | ✓ 手动登记 + 服务端拉取 | — | — | — |
 
 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`（含 `count_tokens`）与 `/v1/models` 对所有平台一视同仁；模型映射、全局优先级队列、429 降级、出网代理、出站指纹脱敏与请求报表同样全平台通用。
@@ -296,11 +297,16 @@ agent2api/
 │  │  │  │  │  │                project（loadCodeAssist → onboardUser 发现）/ credentials /
 │  │  │  │  │  │                endpoints（三环境基址与头集合）/ login /
 │  │  │  │  │  │                models（fetchAvailableModels + 内置兜底 + 上游真名映射）/ adapter
-│  │  │  │  │  └─ officeace/    OfficeAce（华为云果办 / OfficeClaw）：oauth（PKCE + P-256 DPoP 自助登录）/
-│  │  │  │  │                   signer（SDK-HMAC 与 V11-HMAC 两套签名 + 向量夹具）/ credentials（网关 Basic 与控制面临时 AK/SK 两层）/
-│  │  │  │  │                   chat（无状态 OpenAI 兼容转发）/ models（远程目录 + 每模型倍率）/
-│  │  │  │  │                   probe（模型可用性探测，打不通的默认隐藏）/ subscription（订阅 / 额度 / 奖励）/
-│  │  │  │  │                   onboarding / checkin / balance
+│  │  │  │  │  ├─ officeace/    OfficeAce（华为云果办 / OfficeClaw）：oauth（PKCE + P-256 DPoP 自助登录）/
+│  │  │  │  │  │                signer（SDK-HMAC 与 V11-HMAC 两套签名 + 向量夹具）/ credentials（网关 Basic 与控制面临时 AK/SK 两层）/
+│  │  │  │  │  │                chat（无状态 OpenAI 兼容转发）/ models（远程目录 + 每模型倍率）/
+│  │  │  │  │  │                probe（模型可用性探测，打不通的默认隐藏）/ subscription（订阅 / 额度 / 奖励）/
+│  │  │  │  │  │                onboarding / checkin / balance
+│  │  │  │  │  └─ modelscope/   ModelScope（魔搭，国内版 / 国际版）：region（两套域名与两条 provider 身份）/
+│  │  │  │  │                   credentials（一枚 ms- 令牌两用：Bearer 调推理、cookie 值读网页站）/
+│  │  │  │  │                   client（两条出站链路 + 两种响应信封）/ models（远程目录，两地各一格缓存）/
+│  │  │  │  │                   probe（添加时探活换身份）/ checkin（调登录信息接口即触发当日魔粒）/
+│  │  │  │  │                   balance（魔粒钱包 + 今日已用）/ errors（魔粒耗尽与未验证邮箱的判据）
 │  │  │  │  ├─ protocol/        协议转换层（各家 wire ↔ 标准 chat SSE 的请求/响应翻译：
 │  │  │  │  │                    Anthropic Messages / Responses / NDJSON（Command Code）/
 │  │  │  │  │                    Gemini 信封（Antigravity），以及工具 plan 与历史修复）
@@ -371,7 +377,7 @@ npm run build:icon         # 生成图标源图（改图标设计后执行，再
 
 ### 仅供学习与交流
 
-本项目是一个用于学习 HTTP 反向代理、SSE 流式透传、多上游协议适配与桌面端打包（Tauri）等技术主题的实践项目，**仅供个人学习与研究使用**。它不是官方产品，与腾讯公司及 WorkBuddy / CodeBuddy、美团及 CatPaw、商汤及小浣熊、智谱及 AutoClaw / autoglm、阿里巴巴及 Qoder / Accio、华为云及 CodeArts / OfficeAce、字节跳动及 Trae、科大讯飞及 Loomy、百度文库及 KukuAI、长亭科技及 MonkeyCode、Command Code、Google 及 Antigravity 均无任何关联，未获得其授权、认可或赞助。
+本项目是一个用于学习 HTTP 反向代理、SSE 流式透传、多上游协议适配与桌面端打包（Tauri）等技术主题的实践项目，**仅供个人学习与研究使用**。它不是官方产品，与腾讯公司及 WorkBuddy / CodeBuddy、美团及 CatPaw、商汤及小浣熊、智谱及 AutoClaw / autoglm、阿里巴巴及 Qoder / Accio、华为云及 CodeArts / OfficeAce、字节跳动及 Trae、科大讯飞及 Loomy、百度文库及 KukuAI、长亭科技及 MonkeyCode、Command Code、Google 及 Antigravity、阿里巴巴及 ModelScope（魔搭）均无任何关联，未获得其授权、认可或赞助。
 
 ### 关于反向代理行为
 

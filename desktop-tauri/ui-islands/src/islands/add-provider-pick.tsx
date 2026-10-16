@@ -99,6 +99,11 @@ export const PROVIDER_ICONS: Record<string, string> = {
   // （`cloudcache.tencent-cloud.com/qcloud/orcaterm/pwa/icon/orcaterm_192x192.png`，
   // 与客户端 / 官网显示的应用图标为同一形象）
   orcaterm: 'assets/providers/orcaterm.png',
+  // ModelScope（魔搭）：取自官网 favicon（`https://modelscope.cn/favicon.ico`，
+  // 内含 128×128 的一帧，归一成 256×256 入库 —— 与站点标签页上显示的是同一形象；
+  // 国内 / 国际版共用这一张，同 AutoClaw / MonkeyCode 的形态）
+  modelscope: 'assets/providers/modelscope.png',
+  'modelscope-intl': 'assets/providers/modelscope.png',
 }
 
 /**

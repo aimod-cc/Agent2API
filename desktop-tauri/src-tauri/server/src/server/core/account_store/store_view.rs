@@ -361,6 +361,12 @@ impl AccountStore {
             // tokenTail / tokenExpireAt（续期是否在工作可被肉眼校验，见
             // `orcaterm_accounts.rs`）
             self.to_orcaterm_public_account(record)
+        } else if super::is_modelscope_family(&record.provider()) {
+            // ModelScope（魔搭）的两个站点（`modelscope` / `modelscope-intl`）共用
+            // 这一份公开形态：账号字段两地完全一致，差别只在域名（那是转发与凭证
+            // 层的事，公开形态不体现）。去掉令牌本体，只留尾 4 位与「有没有令牌」
+            // （见 `modelscope_accounts.rs`）。
+            self.to_modelscope_public_account(record)
         } else if record
             .provider()
             .starts_with(crate::server::core::custom_providers::ID_PREFIX)

@@ -55,6 +55,7 @@
 | Command Code | ✓ | ✗ 靜態 API Key | ✓ 遠端 + 靜態備援 | — | — | — |
 | Antigravity（Google，Gemini） | ✓ | ✓ | ✓ 遠端 + 靜態備援 | — | — | — |
 | OfficeAce（華為雲果辦 / OfficeClaw） | ✓ | ✓ 控制面自動續期 | ✓ 僅遠端 | ✓ 積分餘額 | ✓ 每日獎勵（簽到 + 新人禮） | — |
+| ModelScope（魔搭，國內版 / 國際版） | ✓ | ✗ 權杖長期有效 | ✓ 僅遠端 | ✓ 魔粒餘額 | ✓ 每日魔粒（呼叫登入介面即觸發） | — |
 | 自訂供應商 | ✓ Chat 透傳 / Responses / Anthropic | — | ✓ 手動登記 + 伺服器端拉取 | — | — | — |
 
 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`（含 `count_tokens`）與 `/v1/models` 對所有平台一視同仁；模型對應、全域優先順序佇列、429 降級、出口代理、出站指紋脫敏與請求報表同樣對全平台通用。
@@ -296,11 +297,16 @@ agent2api/
 │  │  │  │  │  │                project（loadCodeAssist → onboardUser 探索）/ credentials /
 │  │  │  │  │  │                endpoints（三環境基址與標頭集合）/ login /
 │  │  │  │  │  │                models（fetchAvailableModels + 內建備援 + 上游真名對應）/ adapter
-│  │  │  │  │  └─ officeace/    OfficeAce（華為雲果辦 / OfficeClaw）：oauth（PKCE + P-256 DPoP 自助登入）/
-│  │  │  │  │                   signer（SDK-HMAC 與 V11-HMAC 兩套簽章 + 向量 fixtures）/ credentials（閘道器 Basic 與控制面臨時 AK/SK 兩層）/
-│  │  │  │  │                   chat（無狀態 OpenAI 相容轉發）/ models（遠端目錄 + 每模型倍率）/
-│  │  │  │  │                   probe（模型可用性探測，打不通的預設隱藏）/ subscription（訂閱 / 額度 / 獎勵）/
-│  │  │  │  │                   onboarding / checkin / balance
+│  │  │  │  │  ├─ officeace/    OfficeAce（華為雲果辦 / OfficeClaw）：oauth（PKCE + P-256 DPoP 自助登入）/
+│  │  │  │  │  │                signer（SDK-HMAC 與 V11-HMAC 兩套簽章 + 向量 fixtures）/ credentials（閘道器 Basic 與控制面臨時 AK/SK 兩層）/
+│  │  │  │  │  │                chat（無狀態 OpenAI 相容轉發）/ models（遠端目錄 + 每模型倍率）/
+│  │  │  │  │  │                probe（模型可用性探測，打不通的預設隱藏）/ subscription（訂閱 / 額度 / 獎勵）/
+│  │  │  │  │  │                onboarding / checkin / balance
+│  │  │  │  │  └─ modelscope/   ModelScope（魔搭，國內版 / 國際版）：region（兩套網域與兩條 provider 身分）/
+│  │  │  │  │                   credentials（一枚 ms- 權杖兩用：Bearer 呼叫推理、cookie 值讀網頁站）/
+│  │  │  │  │                   client（兩條出站鏈路 + 兩種回應信封）/ models（遠端目錄，兩地各一格快取）/
+│  │  │  │  │                   probe（新增時探活換身分）/ checkin（呼叫登入資訊介面即觸發當日魔粒）/
+│  │  │  │  │                   balance（魔粒錢包 + 今日已用）/ errors（魔粒耗盡與未驗證信箱的判據）
 │  │  │  │  ├─ protocol/        協定轉換層（各家 wire ↔ 標準 chat SSE 的請求/回應翻譯：
 │  │  │  │  │                    Anthropic Messages / Responses / NDJSON（Command Code）/
 │  │  │  │  │                    Gemini 信封（Antigravity），以及工具 plan 與歷史修復）
@@ -371,7 +377,7 @@ npm run build:icon         # 產生圖示來源圖（改圖示設計後執行，
 
 ### 僅供學習與交流
 
-本專案是一個用於學習 HTTP 反向代理、SSE 串流透傳、多上游協定適配與桌面端打包（Tauri）等技術主題的實踐專案，**僅供個人學習與研究使用**。它不是官方產品，與騰訊公司及 WorkBuddy / CodeBuddy、美團及 CatPaw、商湯及小浣熊、智譜及 AutoClaw / autoglm、阿里巴巴及 Qoder / Accio、華為雲及 CodeArts / OfficeAce、字節跳動及 Trae、科大訊飛及 Loomy、百度文庫及 KukuAI、長亭科技及 MonkeyCode、Command Code、Google 及 Antigravity 均無任何關聯，未獲得其授權、認可或贊助。
+本專案是一個用於學習 HTTP 反向代理、SSE 串流透傳、多上游協定適配與桌面端打包（Tauri）等技術主題的實踐專案，**僅供個人學習與研究使用**。它不是官方產品，與騰訊公司及 WorkBuddy / CodeBuddy、美團及 CatPaw、商湯及小浣熊、智譜及 AutoClaw / autoglm、阿里巴巴及 Qoder / Accio、華為雲及 CodeArts / OfficeAce、字節跳動及 Trae、科大訊飛及 Loomy、百度文庫及 KukuAI、長亭科技及 MonkeyCode、Command Code、Google 及 Antigravity、阿里巴巴及 ModelScope（魔搭）均無任何關聯，未獲得其授權、認可或贊助。
 
 ### 關於反向代理行為
 

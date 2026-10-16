@@ -372,6 +372,22 @@ pub async fn checkin_for(
             .map(welfare_claim_of);
             claim_result(id, name, &display, true, claim)
         }
+        // ModelScope（魔搭）的两个站点：签到 = 调一次登录信息接口
+        // （`GET {网页站}/api/v1/users/login/info`，**调用即触发当日魔粒**，
+        // 幂等；见 `providers::modelscope::checkin` 的模块头）。
+        // 两个站点各打各的网页站、令牌不通用 —— 地区由 provider id 反查
+        // （账号集合按 provider 隔离，同一 id 不可能同时属于两家）。
+        "modelscope" | "modelscope-intl" => {
+            let region =
+                crate::server::core::providers::modelscope::Region::from_provider_id(provider_id)
+                    .unwrap_or(crate::server::core::providers::modelscope::Region::Cn);
+            let claim = crate::server::core::providers::modelscope::checkin::claim_daily_checkin(
+                region, store, &id,
+            )
+            .await
+            .map_err(|error| error.message);
+            claim_result(id, name, &display, true, claim)
+        }
         // 兜底只服务默认那家（WorkBuddy 国内版）——**不是**「剩下所有家」。
         // 这里曾经是无所不包的 `_`：一个 provider 只要没在上面列出，就会拿自己的
         // 令牌去打腾讯的签到接口，稳定报错且看不出原因（Qoder 接入前正是这个处境）。

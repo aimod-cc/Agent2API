@@ -874,6 +874,36 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
                 if import_desktop { "desktop" } else { "manual" },
             )
         }
+        // ModelScope（魔搭）的两个站点：粘贴 `ms-` 令牌 + **先探活换身份**。
+        //
+        // 为什么本家要出网（不是「粘贴即落盘」）：那枚令牌是不透明的，
+        // 解不出身份 —— 不出网就只能拿令牌尾号当账号 id，同一个账号换一次令牌
+        // 就会变成两条记录。所以照 Qoder / OfficeAce 的既有分工：**网络在锁外**
+        // （这里 await 一次探活），把结果作为参数交给同步的落账号入口
+        // （`add_modelscope_account` 只在锁内做读-改-写）。
+        //
+        // 探活顺带触发当日签到（见 `modelscope::probe` 的模块头）——
+        // 添加账号的人当天就把魔粒拿到手，这是上游的接口语义决定的，
+        // 不是这里额外做了一件事。
+        //
+        // 地区由 kind 反查（provider 身份是权威，payload 里没有地区字段）。
+        Some(kind @ (crate::server::core::providers::ProviderKind::Modelscope
+            | crate::server::core::providers::ProviderKind::ModelscopeIntl)) => {
+            let region = crate::server::core::providers::modelscope::Region::from_kind(kind)
+                .unwrap_or(crate::server::core::providers::modelscope::Region::Cn);
+            let token = crate::server::core::providers::modelscope::credentials::token_from_payload(&payload);
+            if token.is_empty() {
+                Err(AccountStoreError::new(
+                    "缺少令牌（accessToken / apiKey / token / session）",
+                    400,
+                ))
+            } else {
+                match crate::server::core::providers::modelscope::probe::identify(region, &token).await {
+                    Ok(identity) => store.add_modelscope_account(region, &payload, &identity, import_name),
+                    Err(error) => Err(AccountStoreError::new(error.message, error.status_code)),
+                }
+            }
+        }
         // WorkBuddy 系的两家（国内版 / 国际版）：同一套凭证形态与落账号路径，
         // 差别只有归属 —— provider id 自己就是归属（拆家后不再从 payload 里的
         // `edition` 反推：那是账号的属性，而落哪一家是身份问题）。

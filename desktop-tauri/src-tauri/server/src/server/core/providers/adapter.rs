@@ -1152,6 +1152,13 @@ pub fn adapter_for(kind: ProviderKind) -> &'static dyn ProviderAdapter {
         // 余额全部已接通（建会话 → assistant SSE，`is_stateful` 为 true，
         // 见 `orcaterm/mod.rs` 与 `orcaterm/adapter.rs` 的模块头）
         ProviderKind::OrcaTerm => &super::orcaterm::ORCATERM_ADAPTER,
+        // ModelScope 的两个站点是两个 provider、两个实例（同一份实现的按地区
+        // 参数化，见 `modelscope::region` 与 `modelscope::mod` 的模块头）：
+        // 国内站打 `api-inference.modelscope.cn` / `modelscope.cn`，
+        // 国际站打 `.ai` 两个域 —— 打错了会拿到 401（实测），
+        // 所以这里 kind → region 必须逐字对应。
+        ProviderKind::Modelscope => &super::modelscope::MODELSCOPE_ADAPTER,
+        ProviderKind::ModelscopeIntl => &super::modelscope::MODELSCOPE_INTL_ADAPTER,
     }
 }
 
@@ -1251,6 +1258,12 @@ pub fn implemented_kinds() -> Vec<ProviderKind> {
         // 远程模型目录（静态清单，`supports_model_refresh()` 为 false）——
         // 进本列表只代表「已实现」（与 Zcode 同一口径：刷新循环对它是空操作）。
         ProviderKind::OrcaTerm,
+        // ModelScope 的两个站点各算一家：与国内版各自一份模型清单（各打各的
+        // 推理域）、各自的缓存槽与刷新排期 —— 两家都必须在列表里，否则国际版的
+        // 目录刷新永远不会被调度（症状是「国际版账号加了、模型列表一直是空的」，
+        // 与 WorkBuddy 国际版那条同一理由）。
+        ProviderKind::Modelscope,
+        ProviderKind::ModelscopeIntl,
     ]
 }
 
