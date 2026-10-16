@@ -37,6 +37,17 @@
 //! 第二条不能省：Trae 的 refreshToken 一次一换，被拒时手里那份 accessToken
 //! 多半是"服务端已吊销"而不是"过期"，不重发就直接把一次可救的调用报成失败。
 //!
+//! ── 「没等到 `event: done`」到底算不算失败（与参考实现有意不同）──
+//! 参考实现把「流结束了但没给 `done`」当**正常形状**（向量
+//! `上游没给 done（EOF 兜底 [DONE]）` / `usage 之后没有 done` 钉的就是它），
+//! 本家此前照抄。代价在 2026-10-15 的上游 issue #286 上露了出来：上游把连接撑断
+//! 时，那份前缀在客户端看起来是一次**正常完成**（200 / 错误列为空 / 一次都不重试），
+//! 连自动续写都接不住（判据要的 `finish_reason` 被兜成了 `stop`）。
+//! 现在的口径：**产出过内容却没等到 `done`** 时，流式在 `[DONE]` 之前补一帧错误、
+//! 非流式直接 502。转换层（`stream.rs` 的 `SoloStream` / `aggregate`）仍然只
+//! 如实报告事实，回包形状一个字不改 —— 那两条向量因此一条都没动。
+//! 判据与开关见 `missing_terminal` / `require_terminal`。
+//!
 //! ── 硬约束 ──────────────────────────────────────────────────
 //! release 是 `panic=abort`：本文件零 unwrap / expect / panic；网络不在锁内。
 
@@ -373,6 +384,50 @@ pub(crate) async fn forward_at(
     Ok(ForwardOutcome::Stream { status: 200, stream: Box::new(tokio_stream::wrappers::ReceiverStream::new(receiver)) })
 }
 
+/// 「上游给了内容、却始终没给完成事件」的对客户端文案。
+///
+/// 流式的错误帧与非流式的 502 用**同一句** —— 同一个成因不该在两条路上有两个说法。
+const MISSING_TERMINAL: &str = "Trae 上游未给出完成事件（event: done）即结束，本轮回答可能被截断";
+
+/// 这一轮是不是「没等到上游收场就结束了」。
+///
+/// 为什么需要这条判据：上游的结束帧是 `event: done`，而「流结束了」与
+/// 「上游说完成了」是**两件事**，此前被压成一件（`SoloStream::finish` 只补
+/// `[DONE]`、`aggregate` 的 `finish_reason` 直接兜 `stop`），于是截断在客户端
+/// 看起来是一次完全正常的完成 —— 2026-10-15 的上游 issue #286 就是它：trae 的
+/// `deepseek-v4.1-flash-solo` 推理失控把上游连接撑断，报告人 13/15 次只收到前缀，
+/// 而网关侧 status=200、错误列为空、一次重试都没有。
+///
+/// 判据只要两半：**产出过内容**（`saw_output`）且**上游没给过完成事件**
+/// （`!saw_done`）。两个例外刻意排除在外：
+///   · 一句不吐就结束 → 归既有的空回答兜底链，不是这条要管的；
+///   · `event: error` 之后结束 → `saw_done` 同样为真（错误已经如实下发过了）。
+fn missing_terminal(saw_done: bool, saw_output: bool, require: bool) -> bool {
+    require && !saw_done && saw_output
+}
+
+/// [`missing_terminal`] 的开关：`AGENT2API_TRAE_NO_REQUIRE_TERMINAL=1` 关掉这条
+/// 判据（读一次定死）。
+///
+/// 为什么要留一格：参考实现的向量把「没给 done 也结束」当正常形状，也就是这条
+/// 判据万一在某个我们没见过的上游形状上误伤，兜底不该依赖发版
+/// （与 `zcode::captcha` 的 `ZCODE_REQUIRE_CAPTCHA` 同一取向：读一次定死，
+/// 部署方能一行环境变量把行为切回去）。
+fn require_terminal() -> bool {
+    static REQUIRE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *REQUIRE.get_or_init(|| require_terminal_from(std::env::var("AGENT2API_TRAE_NO_REQUIRE_TERMINAL").ok().as_deref()))
+}
+
+/// 开关的判据本体。拆开只为能测：`std::env::set_var` 在同一进程里全局可见，
+/// 用例里改它会污染并发跑的其它用例（与 `forward_at` 把上游基址做成入参、
+/// 而不是读环境变量，是同一个理由）。
+fn require_terminal_from(value: Option<&str>) -> bool {
+    !matches!(
+        value.map(|raw| raw.trim().to_ascii_lowercase()).as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
+}
+
 /// 流式下发（在 spawn 的后台任务里跑）。
 async fn drive_stream(
     mut source: futures::stream::BoxStream<'static, Result<bytes::Bytes, io::Error>>,
@@ -416,6 +471,17 @@ async fn drive_stream(
     // EOF 收尾：上游没给过 `done` 时由 `finish()` 补那一个 `[DONE]`。
     // 这里**不再自己添一个** —— `[DONE]` 必须恰好一个，而 `SoloStream` 已经
     // 保证「done / error / EOF 三条路各发一次且只一次」。
+    //
+    // 但「补 `[DONE]` 让客户端能收尾」不等于「上游说完成了」（见 `missing_terminal`）：
+    // 产出过内容却没等到 `event: done` 时，先补一帧错误（形状与流内错误一致）
+    // 再补 `[DONE]` —— 顺序不能反，客户端是拿 `[DONE]` 收尾的。
+    if missing_terminal(solo.saw_done(), solo.saw_output(), require_terminal()) {
+        telemetry.note_error(MISSING_TERMINAL);
+        let frame = bytes::Bytes::from(format!("data: {}\n\n", json!({"error": {"message": MISSING_TERMINAL, "type": "upstream_error"}})));
+        if sender.send(Ok(frame)).await.is_err() {
+            return;
+        }
+    }
     for frame in solo.finish() {
         note(&frame, telemetry, &mut usage_seen);
         if let Some(text) = render(&frame, requested) {
@@ -469,7 +535,15 @@ async fn drive_aggregate(
         }
     }
     match super::stream::aggregate(&text, &request_id(), logging::now_ms() / 1000) {
-        Ok(mut completion) => {
+        Ok(aggregated) => {
+            // 非流式这条能**直接失败**：内容一个字节都还没发给客户端，而一份带前缀的
+            // 200 比一次明确的失败坏得多（客户端会把它当成完整答案，issue #286 里
+            // 报告人测到的正是它：非流式 12/15 截断、状态 200）。
+            if missing_terminal(aggregated.saw_done, aggregated.saw_output, require_terminal()) {
+                telemetry.note_error(MISSING_TERMINAL);
+                return Err(GatewayError::with_status(502, MISSING_TERMINAL));
+            }
+            let mut completion = aggregated.body;
             if !requested.is_empty() {
                 if let Some(object) = completion.as_object_mut() {
                     object.insert("model".to_string(), Value::String(requested));
@@ -720,6 +794,92 @@ mod tests {
         assert_eq!(5, snapshot.completion_tokens);
         assert_eq!(12, snapshot.total_tokens);
         assert!(text.contains("\"usage\""), "客户端也要拿到那一帧 usage：{text}");
+    }
+
+    /// 上游给了内容、却**不给完成事件**就结束 —— 上游把连接撑断时的形状
+    /// （issue #286：trae 的 `deepseek-v4.1-flash-solo` 推理失控）。
+    #[tokio::test]
+    async fn a_stream_that_ends_without_done_is_flagged_in_band() {
+        let (store, _db) = store_with_account("FW-NODONE");
+        let id = account_id(&store);
+        let upstream = FakeUpstream::spawn(sse(&[("output", "{\"response\":\"半句\"}")])).await;
+        let telemetry = Arc::new(RequestTelemetry::new());
+        let outcome = forward_at(&store, &id, &body("glm-5.2-solo"), None, true, &telemetry, &upstream.base)
+            .await
+            .expect("内容已经出去了，HTTP 只能是 200");
+        let text = drain(outcome).await;
+        assert!(text.contains("半句"), "内容照常下发：{text}");
+        assert!(text.contains("\"type\":\"upstream_error\""), "截断要能在流里看出来：{text}");
+        assert!(text.contains("完成事件"), "文案要点出是没等到完成事件：{text}");
+        assert!(text.ends_with("data: [DONE]\n\n"), "错误帧在 [DONE] 之前，且尾巴照常收住：{text}");
+        assert_eq!(1, text.matches("data: [DONE]").count(), "[DONE] 仍然只有一个：{text}");
+        assert!(telemetry.snapshot().error.is_some(), "错误要进遥测（请求日志的「错误」列读它）");
+    }
+
+    /// 正对照：上游给了 `done` 就一个字节都不多（这条守的是误伤）。
+    #[tokio::test]
+    async fn a_stream_that_ends_with_done_is_untouched() {
+        let (store, _db) = store_with_account("FW-HASDONE");
+        let id = account_id(&store);
+        let upstream = FakeUpstream::spawn(sse(&[
+            ("output", "{\"response\":\"完整回答\"}"),
+            ("done", "{\"finish_reason\":\"stop\"}"),
+        ]))
+        .await;
+        let telemetry = Arc::new(RequestTelemetry::new());
+        let outcome = forward_at(&store, &id, &body("glm-5.2-solo"), None, true, &telemetry, &upstream.base)
+            .await
+            .expect("转发应当成功");
+        let text = drain(outcome).await;
+        assert!(!text.contains("upstream_error"), "收过场的一轮不许补错误帧：{text}");
+        assert!(text.contains("\"finish_reason\":\"stop\""), "收尾帧照常：{text}");
+        assert!(text.ends_with("data: [DONE]\n\n"), "{text}");
+        assert!(telemetry.snapshot().error.is_none(), "这一轮不该有任何错误留痕");
+    }
+
+    /// 非流式：没等到完成事件时**直接失败**，不给「200 + 前缀」那份假成功
+    /// （issue #286 里报告人测到的就是它：非流式 12/15 截断、状态 200）。
+    #[tokio::test]
+    async fn an_aggregate_that_ends_without_done_fails_instead_of_a_prefix() {
+        let (store, _db) = store_with_account("FW-AGGNODONE");
+        let id = account_id(&store);
+        let upstream = FakeUpstream::spawn(sse(&[("output", "{\"response\":\"半句\"}")])).await;
+        let telemetry = Arc::new(RequestTelemetry::new());
+        let error = match forward_at(&store, &id, &body("glm-5.2-solo"), None, false, &telemetry, &upstream.base).await {
+            Err(error) => error,
+            Ok(_) => panic!("没等到完成事件就不能当成功返回"),
+        };
+        assert_eq!(502, error.status_code, "{}", error.message);
+        assert!(error.message.contains("完成事件"), "{}", error.message);
+    }
+
+    /// 「一句不吐就结束」不算截断：非流式照旧返回空回答（既有兜底链在管那一类）。
+    #[tokio::test]
+    async fn an_aggregate_that_produced_nothing_is_still_tolerated() {
+        let (store, _db) = store_with_account("FW-AGGSILENT");
+        let id = account_id(&store);
+        let upstream = FakeUpstream::spawn(sse(&[("token_usage", "{\"prompt_tokens\":1,\"completion_tokens\":0,\"total_tokens\":1}")])).await;
+        let telemetry = Arc::new(RequestTelemetry::new());
+        let outcome = forward_at(&store, &id, &body("glm-5.2-solo"), None, false, &telemetry, &upstream.base)
+            .await
+            .expect("空回答不是这条判据要管的");
+        let ForwardOutcome::Completion { body } = outcome else { panic!("非流式路径要给 Completion") };
+        assert_eq!("", body["choices"][0]["message"]["content"].as_str().unwrap_or("x"));
+    }
+
+    /// 判据本体与开关：**不碰进程环境变量**（那会污染并发跑的其它用例）。
+    #[test]
+    fn the_missing_terminal_judgment_can_be_switched_off() {
+        assert!(missing_terminal(false, true, true), "给了内容却没完成 → 要报");
+        assert!(!missing_terminal(true, true, true), "收过场 → 不报");
+        assert!(!missing_terminal(false, false, true), "一句不吐 → 不报（空回答链在管）");
+        assert!(!missing_terminal(false, true, false), "开关关掉 → 退回旧行为");
+        for off in ["1", "true", "YES", " on "] {
+            assert!(!require_terminal_from(Some(off)), "{off} 应当关掉判据");
+        }
+        for on in [None, Some("0"), Some(""), Some("false")] {
+            assert!(require_terminal_from(on), "{on:?} 应当保持判据");
+        }
     }
 
     #[tokio::test]
