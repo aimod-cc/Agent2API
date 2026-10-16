@@ -147,12 +147,29 @@ pub struct SoloStream {
     scanner: SseScanner,
     /// `token_usage` 读到后欠着，随下一帧一起发。
     pending_usage: Option<Value>,
+    /// 上游给过完成事件（`done` / `error` 都算收过场）。
     saw_done: bool,
+    /// 上游产出过内容（正文 / 思考 / 工具调用任一非空）。
+    ///
+    /// 与 `saw_done` 一起构成「未收尾」判据的两半（见 `forward.rs` 的
+    /// `missing_terminal`）：**产出过内容却始终没说完成**才算截断 ——
+    /// 「一句不吐就结束」归既有的空回答链管，不算到这里来。
+    saw_output: bool,
 }
 
 impl SoloStream {
     pub fn new(id: String, created: i64) -> Self {
-        Self { id, created, scanner: SseScanner::default(), pending_usage: None, saw_done: false }
+        Self { id, created, scanner: SseScanner::default(), pending_usage: None, saw_done: false, saw_output: false }
+    }
+
+    /// 上游给过完成事件（`done` / `error`）。
+    pub fn saw_done(&self) -> bool {
+        self.saw_done
+    }
+
+    /// 上游产出过内容。EOF 收尾时与 [`Self::saw_done`] 一起判「未收尾」。
+    pub fn saw_output(&self) -> bool {
+        self.saw_output
     }
 
     /// 喂一行，返回该行产生的帧。
@@ -179,6 +196,7 @@ impl SoloStream {
                 if delta.is_empty() {
                     return Vec::new();
                 }
+                self.saw_output = true;
                 vec![self.chunk(Value::Object(delta), None)]
             }
             SoloEvent::TokenUsage(usage) => {
@@ -279,11 +297,24 @@ impl StreamError {
     }
 }
 
+/// 聚合结果：给客户端的 `chat.completion`，外加「上游这一轮是怎么收的场」。
+///
+/// 两个标志位是**转发层**的判据（`forward.rs` 的 `missing_terminal`）：正文形状
+/// 按参考实现逐字不变（没给 `done` 时 `finish_reason` 仍是 `stop`），而
+/// 「这份内容可不可信」留在转发层判 —— 转换层只如实报告事实，对拍向量一条都不用改。
+pub struct Aggregated {
+    pub body: Value,
+    /// 上游给过完成事件（`done`；`error` 走的是 `Err` 那条路）
+    pub saw_done: bool,
+    /// 上游产出过内容（正文 / 思考 / 工具调用任一非空）
+    pub saw_output: bool,
+}
+
 /// 非流式：把整条 SSE 折成一个 `chat.completion`。
 ///
 /// 上游没有非流式端点（`stream` 被强制成 true），所以这一条是**唯一**的
 /// 非流式实现路径，不是"流式的替代品"。
-pub fn aggregate(text: &str, id: &str, created: i64) -> Result<Value, StreamError> {
+pub fn aggregate(text: &str, id: &str, created: i64) -> Result<Aggregated, StreamError> {
     let mut scanner = SseScanner::default();
     let mut content = String::new();
     let mut reasoning = String::new();
@@ -291,6 +322,7 @@ pub fn aggregate(text: &str, id: &str, created: i64) -> Result<Value, StreamErro
     let mut usage: Option<Value> = None;
     let mut calls: Vec<Value> = Vec::new();
     let mut upstream_error: Option<StreamError> = None;
+    let mut saw_done = false;
 
     // 与 Go 的 `ReadString('\n')` 对齐：按行喂，**EOF 那一次还会再喂一个空行**
     // （那一下把最后一个没被空行闭合的事件推出去）。少喂这一行，
@@ -309,6 +341,7 @@ pub fn aggregate(text: &str, id: &str, created: i64) -> Result<Value, StreamErro
             }
             SoloEvent::TokenUsage(payload) => usage = Some(payload),
             SoloEvent::Done { finish_reason: reason } => {
+                saw_done = true;
                 if !reason.is_empty() {
                     finish_reason = reason;
                 }
@@ -321,6 +354,9 @@ pub fn aggregate(text: &str, id: &str, created: i64) -> Result<Value, StreamErro
     if let Some(error) = upstream_error {
         return Err(error);
     }
+    // 只报事实：这一轮产出过内容吗（正文 / 思考 / 工具调用任一非空）。
+    // 放在 `calls` 被搬进 message 之前算。
+    let saw_output = !content.is_empty() || !reasoning.is_empty() || !calls.is_empty();
     let mut message = serde_json::Map::new();
     message.insert("role".to_string(), json!("assistant"));
     message.insert("content".to_string(), json!(content));
@@ -342,7 +378,7 @@ pub fn aggregate(text: &str, id: &str, created: i64) -> Result<Value, StreamErro
     if let Some(usage) = usage {
         response.insert("usage".to_string(), usage);
     }
-    Ok(Value::Object(response))
+    Ok(Aggregated { body: Value::Object(response), saw_done, saw_output })
 }
 
 /// 按 `index` 合并流式 tool_call 片段：`id` / `type` / `function.name` 直覆盖，
@@ -467,7 +503,7 @@ mod tests {
                     // 时间戳归一掉了），它不是合法 JSON —— 先换成数字再解析。
                     let raw = case["output"].as_str().unwrap().replace("<CREATED>", "0");
                     let want: Value = serde_json::from_str(&raw).expect("向量 output 是合法 JSON");
-                    assert_eq!(canonical(want), canonical(got), "用例：{name}");
+                    assert_eq!(canonical(want), canonical(got.body), "用例：{name}");
                 }
                 Err(error) => {
                     assert_eq!(
@@ -478,6 +514,29 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// 两个标志位是转发层的判据（`forward.rs::missing_terminal`）。
+    ///
+    /// 参考实现把「没给 done 也结束」当**正常形状**（body 一字不改，向量钉着），
+    /// 但**事实**必须能拿到：上游这一轮到底收没收场、产出过内容没有。
+    /// 缺了它，一次截断在下游看起来就是一次正常完成（上游 issue #286）。
+    #[test]
+    fn aggregate_reports_whether_upstream_ever_declared_completion() {
+        let done = "event: output\ndata: {\"response\":\"好\"}\n\nevent: done\ndata: {\"finish_reason\":\"stop\"}\n\n";
+        let with_done = aggregate(done, "id", 0).expect("聚合应当成功");
+        assert!(with_done.saw_done && with_done.saw_output);
+
+        // 给了内容却没说完成：body 与带 done 的一模一样（那是向量钉的形状），
+        // 差别只在这两个标志位上 —— 转发层据此报错而不是当成功。
+        let no_done = aggregate("event: output\ndata: {\"response\":\"半句\"}\n\n", "id", 0).expect("聚合应当成功");
+        assert!(!no_done.saw_done, "没见过 done 就不该说自己收过场");
+        assert!(no_done.saw_output);
+        assert_eq!("stop", no_done.body["choices"][0]["finish_reason"].as_str().unwrap_or(""), "body 形状不变");
+
+        // 「一句不吐就结束」不算截断候选：空回答由既有的兜底链管，不能在这里报错。
+        let silent = aggregate("event: token_usage\ndata: {\"prompt_tokens\":1}\n\n", "id", 0).expect("聚合应当成功");
+        assert!(!silent.saw_done && !silent.saw_output);
     }
 
     #[test]
