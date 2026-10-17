@@ -35,8 +35,9 @@ import { t } from '../i18n'
  *                       的外边距与圆角裁切多出一层盒子，布局与接入前不等价。
  *   update-modal.tsx    「检测到更新」弹窗：按需建的命令式外壳（照 port-panel），
  *                       弹与不弹的判定也归它。
- *   update-settings.tsx 「更新设置」弹窗（自动检查更新 + 出网代理 + GitHub 令牌；
- *   定时任务页的「软件版本检查」配置入口也收在这个弹窗里）。
+ *   update-settings.tsx 「更新设置」弹窗（自动检查更新 + 加入 beta 版 + 出网代理 +
+ *                       GitHub 令牌；定时任务页的「软件版本检查」配置入口也收在
+ *                       这个弹窗里）。
  *   update-shared.ts    三个 tsx 共用的类型、桥读取与工具（.ts 不被当岛挂载）。
  *
  * ── 两条贯穿全文件的约定（细节见各自函数）────────────────────
@@ -116,6 +117,10 @@ type Snapshot = {
   actionBusy: boolean
   /** 重启倒计时读数（仅 phase === 'restarting' 时有意义） */
   restartSeconds: number
+  /** 「GitHub 令牌填了没有」：面板头部那句常驻提示的读数。
+   *  `null` = 还没读到（不显示提示）；`false` = 没有可用令牌（显示黄色提示）。
+   *  只取 `filled` 这一位，令牌本体与来源（界面保存 / 环境变量）都由弹窗那边的徽章负责 */
+  tokenFilled: boolean | null
 }
 
 const INITIAL_SNAPSHOT: Snapshot = {
@@ -133,6 +138,8 @@ const INITIAL_SNAPSHOT: Snapshot = {
   checking: false,
   actionBusy: false,
   restartSeconds: 0,
+  // 首屏不显示「未填写」（还没读到，不猜）：读到 false 才亮起那句提示
+  tokenFilled: null,
 }
 
 /* ─── 工具 ─────────────────────────────────── */
@@ -170,21 +177,38 @@ function formatClock(value: number): string {
 }
 
 /**
- * 安装包形态由后端按**编译目标平台**给出（checkUpdate 的 installerKind）。兜底读 UA
- * 的理由：load() 里「发现上次遗留的下载任务」那条路可能早于任何一次 checkUpdate（那时
- * info 还是 null），只看 installerKind 会让 macOS 用户看到「会弹出 UAC 确认框」这种在
- * 那台机器上根本不存在的东西。有后端值时一律以后端为准。
+ * 桌面安装包的**包型**：`dmg`（macOS，挂载磁盘映像）/ `deb`（Linux，交给系统
+ * 图形安装器）/ `appimage`（Linux，免安装单文件）/ `nsis`（Windows，提权覆盖安装）。
+ *
+ * ── 包型由后端给（checkUpdate 的 installerKind），不再是二元判断 ──────
+ * 早先是 `isMacInstaller()` 这样一个「是不是 dmg」的布尔值 —— 双平台时代够用
+ * （非 macOS 即按 Windows 的 UAC 文案处理），但 Linux 桌面端进来后第三态就无处
+ * 安放：deb 既不提权也不挂载，套用任何一支都是错的话。
+ *
+ * ── 兜底为什么读 UA ─────────────────────────────────────────
+ * load() 里「发现上次遗留的下载任务」那条路可能早于任何一次 checkUpdate（那时
+ * info 还是 null），没有兜底会让 macOS 用户看到「会弹出 UAC 确认框」这种在那台
+ * 机器上根本不存在的东西。有后端值时一律以后端为准。
  */
-function isMacInstaller(info: UpdateInfo | null): boolean {
-  if (info?.installerKind) return info.installerKind === 'dmg'
-  return /Mac|iPhone|iPad/.test(navigator.userAgent || '')
+type InstallerKind = 'dmg' | 'deb' | 'appimage' | 'nsis'
+
+function installerKindOf(info: UpdateInfo | null): InstallerKind {
+  const raw = info?.installerKind
+  if (raw === 'dmg' || raw === 'deb' || raw === 'appimage' || raw === 'nsis') return raw
+  // 后端没给（老版本 / info 仍为 null）：按 UA 猜一个 —— Apple 相关一律当 dmg，
+  // Linux 当 deb（更常见），其余按 Windows 的 nsis。
+  const ua = navigator.userAgent || ''
+  if (/Mac|iPhone|iPad/.test(ua)) return 'dmg'
+  if (/Linux/.test(ua)) return 'deb'
+  return 'nsis'
 }
 
 /**
  * 容器内更新（Linux headless / Docker）与桌面安装包是**两条不同的路**，全文件
  * 按这一个判定分流：桌面端 selfUpdate 恒为 false，下面每个分支都原样走回旧行为。
  *
- *   · 桌面：后端给 `asset`（NSIS / dmg 安装器）→ 下载 → 由壳启动安装程序；
+ *   · 桌面：后端给 `asset`（NSIS / dmg / deb / AppImage 安装器）→ 下载 → 由壳
+ *     启动安装程序（见 run_installer）；
  *   · 容器：后端给 `serverAsset`（服务端更新包）→ 下载 → 服务端自己原地替换
  *     二进制与 ui 目录 → 重启进程（容器 restart 策略拉起）。
  */
@@ -203,9 +227,16 @@ function downloadHint(info: UpdateInfo | null): string {
   if (isSelfUpdate(info)) {
     return t('正在下载服务端更新包…（下载完成后由面板完成替换，重启容器内的服务后生效）')
   }
-  return isMacInstaller(info)
-    ? t('正在下载安装包…（下载完成后会挂载磁盘映像，把应用拖进「应用程序」即可完成安装）')
-    : t('正在下载安装包…（下载完成后启动安装程序需要管理员权限，会弹出 UAC 确认框）')
+  switch (installerKindOf(info)) {
+    case 'dmg':
+      return t('正在下载安装包…（下载完成后会挂载磁盘映像，把应用拖进「应用程序」即可完成安装）')
+    case 'deb':
+      return t('正在下载安装包…（下载完成后会交给系统安装器，按提示输入密码即可完成安装）')
+    case 'appimage':
+      return t('正在下载安装包…（下载完成后会启动新的 AppImage；把它替换掉旧文件即完成升级）')
+    default:
+      return t('正在下载安装包…（下载完成后启动安装程序需要管理员权限，会弹出 UAC 确认框）')
+  }
 }
 
 /** 「安装包已就绪」的提示：说明下一步该做什么 */
@@ -213,15 +244,27 @@ function readyHint(info: UpdateInfo | null, name: string): string {
   if (isSelfUpdate(info)) {
     return t('更新包已就绪：{name}。点「安装并重启」后，面板会校验并替换容器内的程序与界面文件，然后重启服务（页面会自动刷新）。', { name })
   }
-  return isMacInstaller(info)
-    ? t('安装包已就绪：{name}。点击「打开安装包」后会挂载磁盘映像，把应用拖进「应用程序」即可完成安装。', { name })
-    : t('安装包已就绪：{name}。点击「安装并重启」后需要管理员权限，会弹出 UAC 确认框。', { name })
+  switch (installerKindOf(info)) {
+    case 'dmg':
+      return t('安装包已就绪：{name}。点击「打开安装包」后会挂载磁盘映像，把应用拖进「应用程序」即可完成安装。', { name })
+    case 'deb':
+      return t('安装包已就绪：{name}。点击「打开安装包」后会交给系统安装器，按提示输入密码即可完成安装（本程序无需退出）。', { name })
+    case 'appimage':
+      return t('安装包已就绪：{name}。点击「安装并重启」后会启动新的 AppImage；把它移动到你的应用目录并替换旧文件即完成升级（本程序会先退出以释放文件占用）。', { name })
+    default:
+      return t('安装包已就绪：{name}。点击「安装并重启」后需要管理员权限，会弹出 UAC 确认框。', { name })
+  }
 }
 
-/** 安装按钮的文案：macOS 不重启（dmg 与运行中的进程没有文件冲突） */
+/**
+ * 安装按钮的文案。macOS 与 Linux deb 都**不重启**：它们与运行中的进程没有文件
+ * 冲突（dmg 是挂载 + 拖拽，deb 是系统包管理器往系统目录写，本程序跑在用户目录），
+ * 且安装时机由用户决定 —— 照着 Windows 那样退出反而会无故中断正在服务的网关。
+ */
 function installButtonText(info: UpdateInfo | null): string {
   if (isSelfUpdate(info)) return t('安装并重启')
-  return isMacInstaller(info) ? t('打开安装包') : t('安装并重启')
+  const kind = installerKindOf(info)
+  return kind === 'dmg' || kind === 'deb' ? t('打开安装包') : t('安装并重启')
 }
 
 /* ─── 共享快照（外部 store）──────────────────── */
@@ -244,6 +287,33 @@ function subscribe(listener: () => void): () => void {
 function publish(patch: Partial<Snapshot>): void {
   snapshot = { ...snapshot, ...patch }
   for (const listener of subscribers) listener()
+}
+
+/**
+ * 读一次「GitHub 令牌填了没有」，喂给面板头部那句常驻提示。
+ *
+ * ── 判据为什么是 `filled` 这一位 ─────────────────────────────
+ * 后端 `/api/update/token` 只报「有没有、来自哪」（令牌本体永不回显，见
+ * core::update::token），头部提示与弹窗里那枚徽章读的是同一个字段，口径不会漂。
+ * 这里要回答的是「检查限额还是匿名那 60 次/小时吗」：界面保存的令牌与环境变量
+ * `GITHUB_TOKEN` 都算填了（两种都提额），只有两边都没有才亮这句话。
+ * 密文解不开（密钥文件被删 / 拷库没拷密钥）且没有环境变量兜底时，后端给的
+ * `filled` 同样是 false —— 这里也照样亮；**确切原因**（「重新粘贴保存一次即可
+ * 自愈」）在弹窗那枚红徽章的悬停提示里，头部这句话不承载原因。
+ *
+ * ── 什么时候读 ──────────────────────────────────────────────
+ * 挂载、每次进设置页（load）、以及「更新设置」弹窗关闭之后 —— 令牌只在那个弹窗里
+ * 改（保存 / 清除），关窗这一下是唯一会改变该状态的时刻。读失败**保持原值**：
+ * 这一位只为一句提示服务，不该因为一次读失败在头部闪出（或闪掉）一句话；
+ * 检查更新自己那条路有各自的错误播报。
+ */
+async function refreshTokenHint(): Promise<void> {
+  try {
+    const status = await shared().workbuddyDesktop?.getUpdateToken()
+    publish({ tokenFilled: status?.filled === true })
+  } catch {
+    /* 读不到保持原值（仍未读到就是不显示） */
+  }
 }
 
 /* ─── 模块级流程状态 ─────────────────────────── */
@@ -427,9 +497,16 @@ function renderTask(task: DownloadTask | null | undefined): boolean {
     // 安装程序没起来），反复自动触发等于反复弹 UAC。
     if (path !== autoInstalledPath) {
       autoInstalledPath = path
-      setState(isMacInstaller(snapshot.info)
+      // 下载完成后的自动动作按包型给提示（deb 交给系统安装器、dmg 挂载、
+      // AppImage / NSIS 直接启动）
+      const kind = installerKindOf(snapshot.info)
+      setState(kind === 'dmg'
         ? t('安装包已下载完成，正在挂载磁盘映像…')
-        : t('安装包已下载完成，正在启动安装程序（需要管理员权限，会弹出 UAC 确认框）…'))
+        : kind === 'deb'
+          ? t('安装包已下载完成，正在打开系统安装器…')
+          : kind === 'appimage'
+            ? t('安装包已下载完成，正在启动新的 AppImage…')
+            : t('安装包已下载完成，正在启动安装程序（需要管理员权限，会弹出 UAC 确认框）…'))
       void install(path)
     } else {
       setState(readyHint(snapshot.info, name))
@@ -468,9 +545,9 @@ function startPolling(): void {
 /**
  * 安装：启动安装包；Windows 上由壳退出本程序，让出文件占用。
  *
- * 返回值里的 restart 是**壳按平台定的**：Windows 覆盖安装前必须先退出，macOS 挂载 dmg
- * 则不需要（也不该）退出 —— 所以这里不假设重启，按壳回传的取值决定提示语（否则 macOS
- * 用户会等一个不会发生的退出）。
+ * 返回值里的 restart 是**壳按平台定的**：Windows 覆盖安装前必须先退出；macOS 挂载 dmg
+ * 与 Linux 的 deb 都不需要（也不该）退出 —— 所以这里不假设重启，按壳回传的取值决定
+ * 提示语（否则 macOS / Linux 用户会等一个不会发生的退出）。
  */
 async function install(path: string): Promise<void> {
   const api = shared().workbuddyDesktop
@@ -478,9 +555,13 @@ async function install(path: string): Promise<void> {
   try {
     const result = await api.runInstaller(path, true)
     const willRestart = result?.restart !== false
+    // 不重启时的说法按包型分：dmg 是拖进「应用程序」，deb 是系统安装器里装完即可
+    const noRestartHint = installerKindOf(snapshot.info) === 'deb'
+      ? t('已打开系统安装器，请在它弹出的窗口里完成安装。安装完成后重新打开本程序即可。')
+      : t('安装包已挂载，请在弹出的窗口里把应用拖进「应用程序」完成安装。安装完成后重新打开本程序即可。')
     setState(willRestart
       ? t('安装程序已启动，本程序将退出以便完成覆盖安装。安装程序需要管理员权限，会弹出 UAC 确认框，请选择「是」。')
-      : t('安装包已挂载，请在弹出的窗口里把应用拖进「应用程序」完成安装。安装完成后重新打开本程序即可。'))
+      : noRestartHint)
   } catch (error) {
     setBadge(t('启动失败'), 'bad')
     // UAC 被拒时壳侧返回的提示已经说明「可重新点击安装并重启」，这里原样透出，不额外
@@ -745,6 +826,10 @@ async function load(): Promise<void> {
   // 日志与版本号同源：先按当前快照铺一次，切回来时不会白着一块等接口
   renderCheckResult()
 
+  // 头部那句「GitHub Token 未填写」的读数：本地接口、不打网络，每次进设置页都读一次
+  // （与下面的缓存读并发，谁先回来都不影响谁）
+  void refreshTokenHint()
+
   // 再读一次后端缓存那一份（定时任务按间隔写、手动检查也写同一个字段）：**每次进来都读**，
   // 不因为「本次会话已经有结果」就跳过 —— 后端刚查到的新版本、新的检查时刻要立刻反映到
   // 面板上（本地读库，不打网络，理由见 syncFromCache）。放在下载任务之前：下面那几条路
@@ -919,6 +1004,8 @@ function UpdatePanel() {
   // 面板常驻（root 随应用生命周期），正常不会卸载；万一将来被卸载（骨架变化 / 页面
   // 重载），把进度轮询收掉 —— 悬挂的定时器会一直按 1 秒打后端
   React.useEffect(() => () => { stopPolling() }, [])
+  // 头部那句「GitHub Token 未填写」的首次读数（之后由 load 与弹窗关闭刷新）
+  React.useEffect(() => { void refreshTokenHint() }, [])
 
   const repo = snap.repository ? `https://github.com/${snap.repository}` : ''
   const owner = snap.repository ? `https://github.com/${snap.repository.split('/')[0]}` : ''
@@ -953,6 +1040,19 @@ function UpdatePanel() {
           {snap.badgeText}
         </Badge>
         <div className='head-actions'>
+          {/* 「未填写 GitHub 令牌」的常驻提示（只在真的没有可用令牌时出现，黄色字体）：
+              匿名限额 60 次/小时、填了 5000，而「检查更新」按钮就在旁边 —— 提示放在这里
+              才有人看见；点开「更新设置」就能填，悬停补一句代价说明。
+              读数来自后端 filled 这一位（口径见 refreshTokenHint），读到与否都不影响
+              其它控件：null（还没读到）不显示，避免首屏闪一下 */}
+          {snap.tokenFilled === false ? (
+            <span
+              className='text-[12px] font-semibold text-warning'
+              title={t('填写后检查限额 60 → 5000 次/小时（创建令牌无需勾选任何权限）')}
+            >
+              {t('GitHub Token 未填写')}
+            </span>
+          ) : null}
           {/* 「更新设置」：出网线路 + GitHub 令牌都在弹窗里（update-settings.tsx），
               放「检查更新」左边 —— 先配好线路与令牌再检查，动线才顺 */}
           <Button
@@ -1027,7 +1127,7 @@ function UpdatePanel() {
                 <a id='update-author-link' href={owner} data-external={owner} target='_blank' rel='noopener'>
                   {snap.repository.split('/')[0]}
                 </a>{' '}
-                {t('个人开发并开源维护，免费使用、不带广告，也不会收集你的账号数据。如果它帮到了你，欢迎到项目仓库点个 Star 支持一下。')}
+                {t('个人开发并开源维护，免费使用，也不会收集你的账号数据。如果它帮到了你，欢迎到项目仓库点个 Star 支持一下。')}
               </span>
             </div>
             <div className='update-author-actions'>
@@ -1059,8 +1159,17 @@ function UpdatePanel() {
       </div>
 
       {/* 「更新设置」弹窗：条件渲染（Dialog 自带 Portal 挂 body，放在 section 里
-          只是声明位置，不影响视觉层级）；关闭即卸载，状态在弹窗内部自生自灭 */}
-      {settingsOpen ? <UpdateSettingsDialog open onClose={() => setSettingsOpen(false)} /> : null}
+          只是声明位置，不影响视觉层级）；关闭即卸载，状态在弹窗内部自生自灭。
+          关窗时重读一次令牌状态：令牌只在这个弹窗里保存 / 清除，头部那句提示要跟着变 */}
+      {settingsOpen ? (
+        <UpdateSettingsDialog
+          open
+          onClose={() => {
+            setSettingsOpen(false)
+            void refreshTokenHint()
+          }}
+        />
+      ) : null}
       {/* 「加入 QQ 群」：二维码 + 群号（图在项目仓库里，见 update-shared.ts 的说明） */}
       {qqGroupOpen ? <QqGroupDialog open onClose={() => setQqGroupOpen(false)} /> : null}
     </section>

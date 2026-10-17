@@ -106,6 +106,10 @@ pub mod proxies;
 pub mod qoder_umid;
 pub mod queue_api;
 pub mod retry_api;
+// 开发者角色兼容开关（GET/PUT /api/developer-role-compat）：与 /api/sanitize
+// 同形的单开关端点，转换实施点在 `core::upstream::payload` 的 send_body，
+// 见该文件模块头
+pub mod role_compat;
 pub mod routing_api;
 pub mod sanitize;
 pub mod scheduled_tasks;

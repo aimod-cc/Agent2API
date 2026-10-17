@@ -137,7 +137,7 @@ function modelLabel(row: ModelRow): string {
   return provider ? `${provider} / ${str(row.id)}` : str(row.id)
 }
 function accountLabel(row: AccountRow): string {
-  return str(row.name) || str(row.nickname) || str(row.id) || '（未命名账号）'
+  return str(row.name) || str(row.nickname) || str(row.id) || t('未命名账号')
 }
 
 /** 账号点名：id 精确 > 名字精确 > 名字子串（唯一命中才算），命中多条时说清是哪些 */
@@ -357,12 +357,12 @@ const setModelMapping: AssistantTool = {
 /** 5 · 修改模型能力（改动） */
 const CAPABILITY_KEYS = ['maxInputTokens', 'maxOutputTokens', 'supportsToolCall', 'supportsImages', 'supportsVideo', 'supportsReasoning'] as const
 const CAPABILITY_LABELS: Record<string, string> = {
-  maxInputTokens: '上下文窗口',
-  maxOutputTokens: '最大输出 Token',
-  supportsToolCall: '工具调用',
-  supportsImages: '图片识别',
-  supportsVideo: '视频识别',
-  supportsReasoning: '深度推理',
+  maxInputTokens: t('上下文窗口'),
+  maxOutputTokens: t('最大输出 Token'),
+  supportsToolCall: t('工具调用'),
+  supportsImages: t('图片识别'),
+  supportsVideo: t('视频识别'),
+  supportsReasoning: t('深度推理'),
 }
 
 const setModelCapability: AssistantTool = {

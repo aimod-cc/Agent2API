@@ -144,6 +144,12 @@ pub struct RuntimeConfig {
     /// 请求就生效，不重启进程），从 `Value` 里翻一次要处理类型判定，解析一次存
     /// 下来最省事 —— 这条判定在转发热路径上。
     sanitize_fingerprints: bool,
+    /// 开发者角色兼容开关（设置页「网关 → 开发者角色兼容」）。
+    ///
+    /// 与 `sanitize_fingerprints` 同一理由：转发层**每次发送前**都要判一次
+    /// （改完开关下一个请求就生效，不重启进程），解析一次存下来最省事。
+    /// 语义与默认值见 `KEY_DEVELOPER_ROLE_COMPAT`。
+    developer_role_compat: bool,
     /// **Cline 转发头的逐键覆盖**（设置页「Cline 伪装头」）。
     ///
     /// 存的只是**用户改过的键**（覆盖表），默认值硬编码在
@@ -214,6 +220,16 @@ pub struct RuntimeConfig {
     /// `core::proxies::resolve_account_proxy`（同一条路）。低频字段（每次
     /// 检查 / 下载发起时读一次），不值得为它发明解析层，存原始值即可。
     update_proxy: Option<Value>,
+    /// 「加入 beta 版」开关（`updateBeta`：缺省关）。
+    ///
+    /// 开启后更新检查改问 `/releases` 列表、自己挑一版：**当前跑 beta 版的人只看
+    /// 预发布**（同核心号的转正版不算更新，不会自动切回正式版），跑正式版的人
+    /// 预发布一并参与（仓库没有 beta 时照旧收正式版更新）。关闭时走
+    /// `/releases/latest`（GitHub 自己排除预发布）—— 且与当前版本做语义化比较，
+    /// 所以「从 beta 版关掉开关」不会被降级到更低的正式版。与 `update_proxy` 同为
+    /// 低频字段（每次检查发起时读一次），解析一次存下来 —— 判据与代价口径见
+    /// `core::update::check` 的通道分支与 `core::update::version::pick_listed_release`。
+    update_beta: bool,
     /// 代理内核的存放目录（`kernelDir`：None = 用默认 `{config_dir}/proxy-kernel`）。
     ///
     /// 与 `log_dir` 同形（存原始字符串，解析时要求绝对路径），区别是**它有一个
@@ -271,6 +287,11 @@ impl RuntimeConfig {
     /// 出站指纹脱敏是否开启（转发层每次发送前判一次，见字段说明）
     pub fn sanitize_fingerprints(&self) -> bool {
         self.sanitize_fingerprints
+    }
+
+    /// 开发者角色兼容是否开启（转发层每次发送前判一次，见字段说明）
+    pub fn developer_role_compat(&self) -> bool {
+        self.developer_role_compat
     }
 
     /// 网关面（`/v1/*`）跨域访问是否开启（CORS 中间件逐请求判一次，见字段说明）
@@ -529,6 +550,15 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
             .get(KEY_SANITIZE_FINGERPRINTS)
             .and_then(Value::as_bool)
             .unwrap_or(true),
+        // 只有字面 `false` 算关闭：**默认开**（缺失 → true）。改写语义无损
+        // （developer 与 system 在 OpenAI 语义上等价），而默认关会让发 developer
+        // 角色的客户端（新版 OpenAI SDK、Claude Code 等）一上来就撞不认识该角色
+        // 的上游 —— 与 sanitize_fingerprints 同一取向：默认关的代价落在用户的
+        // 第一次真实请求上。
+        developer_role_compat: raw
+            .get(KEY_DEVELOPER_ROLE_COMPAT)
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
         // Cline 伪装头覆盖表：只收 string → string 的项（手改库写出数字/布尔
         // 值的项直接忽略 —— 头值只会是文本），缺失 = 全默认
         cline_upstream_headers: cline_headers_from(&raw),
@@ -586,6 +616,13 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
             .get(KEY_UPDATE_PROXY)
             .filter(|value| !value.is_null())
             .cloned(),
+        // 只有字面 `true` 算开启：**默认关**。beta 版由 beta 分支构建、可能不稳定，
+        // 默认开的代价落在「用户没要求却被换到 beta 通道」上（与 debug_mode 同一
+        // 取向：默认关只是让功能对没打开的人不存在）。理由见 KEY_UPDATE_BETA。
+        update_beta: raw
+            .get(KEY_UPDATE_BETA)
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         // 内核存放目录：空串 / 相对路径在**读**的时候才判（`kernel_dir()` 的
         // resolve_dir 同一口径），这里只去掉空串
         kernel_dir: string_field(&raw, KEY_KERNEL_DIR),
@@ -1682,6 +1719,22 @@ pub fn set_sanitize_fingerprints(enabled: bool) -> bool {
     })
 }
 
+// ─── 开发者角色兼容（developerRoleCompat）────────────────────
+
+/// 写入开发者角色兼容开关。
+///
+/// 与 `set_debug_mode` 同一模式：内存快照与 raw 底稿一起改 —— 前者让下一个请求
+/// 立刻用新值（转发层逐请求读快照），后者保证写盘时不吃掉 config.json 里的
+/// 其它字段。返回是否落盘成功（失败时内存仍已更新，见调用点）。
+pub fn set_developer_role_compat(enabled: bool) -> bool {
+    update(|config| {
+        config
+            .raw
+            .insert(KEY_DEVELOPER_ROLE_COMPAT.to_string(), Value::Bool(enabled));
+        config.developer_role_compat = enabled;
+    })
+}
+
 // ─── Cline 伪装头覆盖表（clineUpstreamHeaders）────────────────
 
 /// 写入 Cline 伪装头的**整份覆盖表**（PUT 语义 = 整体替换）。
@@ -1873,6 +1926,39 @@ pub fn set_update_proxy(proxy: Option<Value>) -> bool {
                 config.update_proxy = None;
             }
         }
+    })
+}
+
+// ─── 「加入 beta 版」开关（updateBeta）──────────────────────────
+
+/// 只取「加入 beta 版」开关的轻量读取（**不克隆整份 raw**）。
+///
+/// 每次更新检查发起时读一次（低频），未初始化时给 false（正式通道）——
+/// 与缺省一致，理由见 `KEY_UPDATE_BETA`。
+pub fn update_beta() -> bool {
+    if let Ok(guard) = CONFIG.read() {
+        if let Some(config) = guard.as_ref() {
+            return config.update_beta;
+        }
+    }
+    false
+}
+
+/// 写入「加入 beta 版」开关（设置页「更新设置」弹窗里的那一枚）。
+///
+/// 与 `set_sanitize_fingerprints` 同一模式：内存立即生效（下一次检查就换通道，
+/// 含定时任务，不必重启进程），写盘时不吃掉其它字段。
+///
+/// **不动已经缓存的检查结果与排期**：换通道之后要不要立刻重查由调用方决定
+/// （界面拨完开关会主动查一次，见 update-settings.tsx），后端只负责回答
+/// 「下一次检查按哪个通道看」；排期与失败冷却都与通道无关（那条冷却记的是
+/// GitHub 配额桶的恢复时刻，见 core::update::check 的说明）。
+pub fn set_update_beta(enabled: bool) -> bool {
+    update(|config| {
+        config
+            .raw
+            .insert(KEY_UPDATE_BETA.to_string(), Value::Bool(enabled));
+        config.update_beta = enabled;
     })
 }
 

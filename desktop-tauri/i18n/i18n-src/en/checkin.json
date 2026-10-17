@@ -163,6 +163,7 @@
   "每天时刻": "Daily time",
   "每执行一次签到 · 每个账号一条明细 · 结果与收益以后端落账为准": "One row per account per check-in run · outcomes and gains as recorded by the backend",
   "每日活跃任务 · 网页会话保活点亮日活，领取才加积分 · 两者可分开执行": "Daily activity tasks · a web-app conversation lights up the daily activity, only claims add points · the two can run separately",
+  "每日登录积分 · 顺带领取会员活动 · 访客账号无积分体系（跳过）": "Daily sign-in points · claims member activities along the way · guest accounts have no points system (skipped)",
   "每日福利 · 领取 → 确认 → 回读核实 · 按北京时间自然日重置": "Daily welfare · claim → confirm → read back to verify · resets on the Beijing calendar day",
   "每日签到": "Daily check-in",
   "每条条目各有时刻与范围 · 各自当天去重 · 错过时点开机自动补签": "Each schedule has its own time and scope · same-day dedup per entry · missed runs are made up after startup",

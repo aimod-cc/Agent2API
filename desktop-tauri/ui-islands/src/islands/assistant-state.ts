@@ -19,6 +19,8 @@
  * 有 UI 状态），本模块给出的是「一轮请求」的纯粹形态。
  */
 
+import { t } from '../i18n'
+
 const FALLBACK_PORT = 3065
 
 /** 网关基址缓存（每次进对话页最多问一次壳） */
@@ -28,6 +30,8 @@ type BackendStatus = { port?: number }
 type DesktopBridge = {
   platform?: string
   getBackendStatus?: () => Promise<BackendStatus | null | undefined>
+  /** 直连网关要带的凭证头（桌面壳回第一把 Key、网页端 shim 回面板令牌/Key） */
+  directCredentials?: () => Promise<unknown>
 }
 
 function bridge(): DesktopBridge | undefined {
@@ -49,10 +53,51 @@ function bridge(): DesktopBridge | undefined {
  * `omit` 是「永远不带凭据」，连**同源**都不带 —— web 形态（面板由网关自己托管、
  * 需要管理员会话）会被这条打成未登录。而 `same-origin` 恰好是两全的那个：
  *   · web 形态同源 → 照常带 cookie，面板会话认证不受影响；
- *   · 桌面形态跨源 → 浏览器自动不带凭据，于是能通过 `*` 的 CORS 检查
- *     （桌面 `/api/*` 本就免鉴权，没有凭据要带）。
+ *   · 桌面形态跨源 → 浏览器自动不带 cookie，于是能通过 `*` 的 CORS 检查
+ *     —— 凭证改由请求头显式表达，见下。
+ *
+ * ── 凭证头从哪来（桌面端靠它才不是裸请求）────────────────────
+ * 桌面形态跨源 = cookie 一个都带不上，而助手这三条接口挂在**受保护**的
+ * `/api/*` 上，两种情形都要求凭证：
+ *   · 配置了网关 Key 时（正常部署都有）：`require_api_key` 逐把比对 ——
+ *     未配置 Key 才是「免鉴权放行」，一旦有 Key，裸请求拿到的是 401
+ *     `invalid_api_key`；
+ *   · 面板认证开启后（设置页开过局域网访问就会注册管理员，见
+ *     `commands::panel_register`）：要「面板会话或一把启用的 Key」——
+ *     两者都没有时是 401 `panel_login_required`，界面显示「请先登录管理
+ *     面板」，而桌面上并没有登录页（登录页只服务浏览器面板）。
+ * 所以这里的每条直连请求都先问桥要一份凭证头（`directCredentials`）：
+ *   · 桌面壳回第一把启用的 Key（与壳自己发管理请求用的同一把）；
+ *   · 网页端 shim 回面板令牌 / 用户输入的 Key（口径与它自己的 httpCall 一致）。
+ * Key 那一栏为空时（还没建过 Key）多带一个头也不会被拒，所以两条形态、
+ * 有没有 Key 都共用同一条码路。
  */
 const CREDENTIALS: RequestCredentials = 'same-origin'
+
+/** 直连网关的凭证头（桥给的，见上面一段）。取一次即缓存：
+ *  网关换 Key 后旧值会一直 401，靠 [`requestDirect`] 的「401 清缓存重试一次」
+ *  自愈，不必每次请求都问一遍桥。 */
+let cachedAuthHeaders: Record<string, string> | null = null
+
+/** 桥返回的凭证表 → 只保留值为非空字符串的项（形状校验，防老壳/异常值） */
+function asHeaderTable(value: unknown): Record<string, string> {
+  const table: Record<string, string> = {}
+  if (!value || typeof value !== 'object') return table
+  for (const [name, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof raw === 'string' && raw) table[name] = raw
+  }
+  return table
+}
+
+async function directAuthHeaders(force = false): Promise<Record<string, string>> {
+  if (cachedAuthHeaders && !force) return cachedAuthHeaders
+  let table: Record<string, string> = {}
+  try {
+    table = asHeaderTable(await bridge()?.directCredentials?.())
+  } catch { /* 桥没就绪 / 这一版壳还没有这条方法：按无凭证发，401 的提示自己会说话 */ }
+  cachedAuthHeaders = table
+  return table
+}
 
 /** 当前该用哪个基址发请求（见模块头两条路） */
 export async function gatewayBase(force = false): Promise<string> {
@@ -179,22 +224,56 @@ function describeError(value: unknown, status: number): string {
  *  —— 把「连的是哪个地址」拼进去，用户对着侧栏的网关端口一眼就能看出对不对。 */
 function wrapFetchError(error: unknown, base: string): Error {
   const message = error instanceof Error ? error.message : String(error)
-  return new Error(`连接网关失败（${base}）：${message}`)
+  return new Error(t('连接网关失败（{base}）：{message}', { base, message }))
 }
 
-async function callJson<T>(method: string, path: string, body?: unknown): Promise<T> {
+/**
+ * 带凭证的一次直连请求（凭证来源见上面 CREDENTIALS 一段）。
+ *
+ * `body` 给对象即按 JSON 发（直连的两个接口都是 JSON 进出），`undefined` 表示
+ * 不带体 —— 与原先每个调用点自己拼 headers/body 相比，凭证合并、Content-Type
+ * 与重试策略都只有这一处实现。
+ *
+ * 401 时清掉凭证缓存重试一次：面板认证开启后网关要的是「面板会话或一把启用
+ * 的 Key」，而那把 Key 可能在两次请求之间被换掉（管理页里重新生成第一把），
+ * 缓存住的旧值会一直 401 —— 重问一次桥就自愈。**401 表示服务端没有处理这次
+ * 请求**，重发不会有副作用（对话也一样）。
+ */
+async function requestDirect(
+  path: string,
+  options: { method: string; body?: unknown; signal?: AbortSignal },
+  retried = false,
+): Promise<Response> {
   const base = await gatewayBase()
+  const headers: Record<string, string> = { ...(await directAuthHeaders()) }
+  const payload = options.body === undefined ? undefined : JSON.stringify(options.body)
+  if (payload !== undefined) headers['Content-Type'] = 'application/json'
   let response: Response
   try {
     response = await fetch(base + path, {
-      method,
-      headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      method: options.method,
+      headers,
+      body: payload,
+      signal: options.signal,
       credentials: CREDENTIALS,
     })
   } catch (error) {
+    // 用户主动停止（abort）不是故障，原样交回 —— 调用方按 signal.aborted 区分
+    if (options.signal?.aborted) throw error
     throw wrapFetchError(error, base)
   }
+  if (response.status === 401 && !retried) {
+    // 先把响应体读掉再重试：不消费会让这条连接一直吊着（同一把凭证再来一次
+    // 也还是同一个 401，内容没有价值）
+    await response.text().catch(() => '')
+    cachedAuthHeaders = null
+    return requestDirect(path, options, true)
+  }
+  return response
+}
+
+async function callJson<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const response = await requestDirect(path, { method, body })
   const text = await response.text()
   let parsed: unknown = null
   try { parsed = text ? JSON.parse(text) : null } catch { parsed = null }
@@ -205,7 +284,7 @@ async function callJson<T>(method: string, path: string, body?: unknown): Promis
     // 404 只有一种来源：这一版网关**没有助手接口**（前端比后端新）。把话说全，
     // 否则用户只会看到一句「HTTP 404」去猜是不是自己哪里配错了
     if (response.status === 404) {
-      throw new Error(`这一版网关还没有 AI 助手接口（HTTP 404）：后端还是旧的，重新编译 / 重启客户端后再试。${message}`)
+      throw new Error(t('这一版网关还没有 AI 助手接口（HTTP 404）：后端还是旧的，重新编译 / 重启客户端后再试。{message}', { message }))
     }
     throw new Error(message)
   }
@@ -216,7 +295,7 @@ async function callJson<T>(method: string, path: string, body?: unknown): Promis
 export async function loadAssistantConfig(): Promise<AssistantConfig> {
   const data = await callJson<{ config?: AssistantConfig }>('GET', '/api/assistant/config')
   const config = data?.config
-  if (!config || typeof config !== 'object') throw new Error('配置响应不完整')
+  if (!config || typeof config !== 'object') throw new Error(t('配置响应不完整'))
   // model 兼容两种形态：字符串（现行）/ {provider, id}（改成对外名之前存过的）
   const model = typeof config.model === 'string'
     ? config.model
@@ -282,23 +361,14 @@ export async function streamChat(options: {
   signal?: AbortSignal
   onEvent: (event: ChatEvent) => void
 }): Promise<void> {
-  const base = await gatewayBase()
   const body: Record<string, unknown> = { messages: toWireMessages(options.messages) }
   if (options.tools.length) body.tools = options.tools
-  let response: Response
-  try {
-    response = await fetch(base + '/api/assistant/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: options.signal,
-      credentials: CREDENTIALS,
-    })
-  } catch (error) {
-    // 用户主动停止（abort）不是故障，原样交回 —— 调用方按 signal.aborted 区分
-    if (options.signal?.aborted) throw error
-    throw wrapFetchError(error, base)
-  }
+  // 与 config 两条走同一个通道（凭证、跨源模式、401 重试都在 requestDirect 里）
+  const response = await requestDirect('/api/assistant/chat', {
+    method: 'POST',
+    body,
+    signal: options.signal,
+  })
   if (!response.ok || !response.body) {
     const text = await response.text().catch(() => '')
     let parsed: unknown = null
@@ -306,7 +376,7 @@ export async function streamChat(options: {
     const raw = (parsed as { error?: unknown } | null)?.error
     const message = describeError(raw, response.status)
     if (response.status === 404) {
-      throw new Error(`这一版网关还没有 AI 助手接口（HTTP 404）：后端还是旧的，重新编译 / 重启客户端后再试。${message}`)
+      throw new Error(t('这一版网关还没有 AI 助手接口（HTTP 404）：后端还是旧的，重新编译 / 重启客户端后再试。{message}', { message }))
     }
     throw new Error(message)
   }

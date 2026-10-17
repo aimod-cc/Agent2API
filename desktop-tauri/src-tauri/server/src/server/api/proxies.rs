@@ -377,11 +377,12 @@ pub async fn pool_remove(state: &ServerState, body: &Bytes) -> Response {
 /// 订阅节点的地址是本机内核起的监听端口，`enabled` 若只写一个标记，端口会继续
 /// 开着 —— 而用户禁用一条节点往往正是为了**不要那个端口**。所以两个方向都要
 /// 让内核跟上，判据都是「真实的缺口」而不是「用户点了什么」：
-///   · 禁用 → 缺口是「已禁用 ∧ 端口还开着」，请求内核重建配置（新配置里没有
-///     这条监听器，进程重启即端口关闭），端口由重启后的节点同步写回 null；
-///   · 启用 → 缺口是「启用 ∧ 被账号引用 ∧ 没有端口」，走补建链路
-///     （`provision_missing_listeners`，与账号保存收尾同一条路）。
-/// 没缺口就不投重启命令，于是重复点击 / 反复开关都不会排出一串多余的重建。
+///   · 禁用 → 缺口是「端口还开着但已不该开」（禁用 / 失去引用），请求内核
+///     重建配置（新配置里没有这条监听器，进程重启即端口关闭），端口由重启后
+///     的节点同步写回 null；
+///   · 启用 → 缺口是「启用 ∧ 被账号引用 ∧ 没有端口」，走补建链路。
+/// 两个方向都走同一个对账入口（`reconcile_listeners`，与账号保存收尾同一条
+/// 路），没缺口就不投重启命令 —— 重复点击 / 反复开关都不会排出一串多余的重建。
 ///
 /// 响应里的 `listener` 说明这次要不要盯一会儿端口（manual / clash 恒 `none`）：
 ///   `none`    没有本机端口要动；
@@ -438,33 +439,27 @@ fn listener_flow(state: &ServerState, id: &str, change: &proxy_pool::EnabledChan
         if !proxy_pool::needs_listener(id, &borrowed) {
             return "none";
         }
-        provision_missing_listeners(state);
-        return "opening";
+        // 对账（补建方向）。返回 false 只有两种情况：这条其实没缺口（上面
+        // 已挡）/ 手动关闭闩置位（对账记了日志，「启动内核」时按 wanted
+        // 一并补上）—— 都不该报 opening 让前端白轮询
+        if reconcile_listeners(state) {
+            "opening"
+        } else {
+            "none"
+        }
+    } else {
+        // 禁用：对账（回收方向）—— 缺口判据是 reconcile 的 stale 检测
+        // （不在 wanted 里却还挂着端口：刚禁用的这条、先前遗留的、
+        // 失去引用的都算），内核没装则无端口可收
+        if !sub_kernel::installed() {
+            return "none";
+        }
+        if reconcile_listeners(state) {
+            "closing"
+        } else {
+            "none"
+        }
     }
-    // 禁用：还有端口开着才需要重建（判据是**全部**禁用中且有端口的条目，
-    // 不只是刚点的这条 —— 这样「内核没来得及重建就又被关掉」的遗留也能收掉）
-    let stale = proxy_pool::disabled_subscription_ids_with_ports();
-    if stale.is_empty() || !sub_kernel::installed() {
-        return "none";
-    }
-    // 手动关闭闩：内核已停着，端口本来就全下线了 —— 禁用标志已落库，下次
-    // 「启动内核」重建配置时自然不带这些端口，不必为关端口把内核拉起来
-    if sub_kernel::is_manually_halted() {
-        logging::log(
-            "[Proxies]",
-            "内核已手动关闭 —— 禁用已记录，「启动内核」后端口不再开",
-        );
-        return "none";
-    }
-    sub_kernel::request_restart(crate::server::core::subscriptions::enabled_provider_inputs());
-    logging::log(
-        "[Proxies]",
-        &format!(
-            "🔄 已请求内核重建（关闭 {} 个被禁用节点的监听端口）",
-            stale.len()
-        ),
-    );
-    "closing"
 }
 
 /// POST /api/proxies/pool/test（测一条池条目，结果记进条目）
@@ -596,63 +591,67 @@ pub async fn settings_save(body: &Bytes) -> Response {
 
 // ─── 节点监听器补建（lazy listeners 的触发点）───────────────
 
-/// 给「需要监听器但还没有端口」的订阅节点补建监听器（lazy listeners 的触发点）。
+/// 监听器对账：把「该开的监听器」与「池里条目的端口状态」收敛一致
+/// （lazy listeners 的**双向**触发点）。
 ///
-/// 「需要」= **账号引用**（`proxy_pool::listener_node_keys`，禁用中的不算），
-/// 与内核侧 `allocate_listeners` 用同一个口径 —— 口径不一致会出现「这里说没缺口、
-/// 内核却不建」这类谁也解释不清的状态。lazy 的语义是「内核只为需要的节点开
-/// 监听器」；引用动作发生在账号保存时，启用一条还没有端口的节点也走这里
-/// （`pool_enable` 的 opening 分支）。测试**不在其中** —— 测试走统一测试口，
-/// 不需要端口（见 `pool_test` 与 `sub_kernel::runtime::select_test_node`）。
-/// 本函数是一个**幂等的重启请求**，只在确实有缺口（需要 ∧ 无端口）时才投
-/// 命令，重复调用无害。
+/// 该开的集合 `wanted` = **账号引用 ∩ 启用中的订阅节点**
+/// （`proxy_pool::listener_node_keys`，与内核侧 `allocate_listeners` 同口径
+/// —— 口径不一致会出现「这里说没缺口、内核却不建」这类谁也解释不清的状态）。
+/// 两个方向的缺口各检测各的：
+///   · **待补建**：在 wanted 里、条目端口还是 null（新增引用 / 刚启用）；
+///   · **待回收**：不在 wanted 里、条目端口还挂着值（失去引用 / 被禁用 /
+///     订阅侧关掉）—— 内核重建时不再给它开监听器，端口随重建一起关。
+/// 任一方向非空就投一次重启（重建按 wanted 全量重算，一次同时干两件事）；
+/// 没缺口不投，重复调用无害 —— 这是调用方敢在每次账号写操作后都调它的前提。
+/// 测试**不在其中** —— 测试走统一测试口，不需要端口（见 `pool_test` 与
+/// `sub_kernel::runtime::select_test_node`）。
 ///
 /// 调用方：
-///   · 账号保存链路（`api::accounts` 的写操作收尾）—— 引用变化后自动补；
-///   · `pool_enable`（启用一条被引用却还没有端口的订阅节点）。
+///   · 账号写操作收尾（`api::accounts` 的 add / update / 批量 / 删除）——
+///     引用变化后补缺与回收；
+///   · `pool_enable`（启用 / 禁用一条订阅节点后的联动）。
 ///
-/// 返回是否投了重启命令：true 时节点端口要等内核重建完成才有值，前端轮询
+/// 手动关闭闩置位时只记日志不投命令：用户刚按过「关闭内核」，保存引用不能
+/// 把它悄悄带起来 —— 「启动内核」重建时同样按 wanted 全量分配，缺口自然收敛。
+///
+/// 返回是否投了重启命令：true 时节点端口要等内核重建完成才有终值，前端轮询
 /// 列表即可。同步版（投命令是 mpsc send，无需 await）—— 账号写操作收尾在
 /// 持锁路径的边缘调用它，不想为它包一层 spawn。
-pub fn provision_missing_listeners(state: &ServerState) -> bool {
+pub fn reconcile_listeners(state: &ServerState) -> bool {
     let pool_ids = state.store().referenced_pool_ids();
     let borrowed: std::collections::HashSet<&str> =
         pool_ids.iter().map(String::as_str).collect();
     let wanted = proxy_pool::listener_node_keys(&borrowed);
-    let missing = if wanted.is_empty() {
-        Vec::new()
-    } else {
-        proxy_pool::subscription_entries_with_ports()
-            .into_iter()
-            .filter(|(provider_id, node, port)| {
-                port.is_none() && wanted.contains(&format!("{provider_id}::{node}"))
-            })
-            .collect::<Vec<_>>()
-    };
-    if missing.is_empty() {
+    let mut missing = 0usize;
+    let mut stale = 0usize;
+    for (provider_id, node, port) in proxy_pool::subscription_entries_with_ports() {
+        // key 形态与 `listener_node_keys` 的构造处一致（`{providerId}::{node}`）
+        match (wanted.contains(&format!("{provider_id}::{node}")), port) {
+            (true, None) => missing += 1,
+            (false, Some(_)) => stale += 1,
+            _ => {}
+        }
+    }
+    if missing == 0 && stale == 0 {
         return false;
     }
-    // 手动关闭闩：用户刚点过「关闭内核」，保存引用不悄悄把内核带起来 ——
-    // 缺口记在这条日志里，「启动内核」重建配置时会把这些监听器一并建出来
+    // 手动关闭闩：用户刚点过「关闭内核」，这里不悄悄把它带起来 —— 缺口
+    // 记在这条日志里，「启动内核」重建配置时按最新引用一并收敛
     if sub_kernel::is_manually_halted() {
         logging::log(
             "[Proxies]",
             &format!(
-                "内核已手动关闭 —— {} 个被引用节点的监听器暂不补建，「启动内核」后自动补上",
-                missing.len()
+                "内核已手动关闭 —— 监听器对账暂缓（{missing} 个待补建 / {stale} 个待回收），「启动内核」时按最新引用重算"
             ),
         );
         return false;
     }
-    // 有缺口才重启内核（重建配置把缺的监听器建出来）。内核未安装时投命令
-    // 也无害（restart 早退在「未安装」上，见 `sub_kernel` worker 的说明）。
+    // 有缺口才重启内核（重建配置把缺的建出来、多的收掉）。内核未安装时投
+    // 命令也无害（restart 早退在「未安装」上，见 `sub_kernel` worker 的说明）。
     sub_kernel::request_restart(crate::server::core::subscriptions::enabled_provider_inputs());
     logging::log(
         "[Proxies]",
-        &format!(
-            "🔄 检测到 {} 个被引用的订阅节点还没有监听器，已请求内核补建",
-            missing.len()
-        ),
+        &format!("🔄 监听器对账：{missing} 个待补建 / {stale} 个待回收，已请求内核重建"),
     );
     true
 }

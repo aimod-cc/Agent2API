@@ -1118,6 +1118,10 @@ pub fn shim_js() -> &'static str {
     // GitHub 令牌：读只报 {filled, origin}，写传 {token: '…' | null}
     getUpdateToken: function () { return call('GET', '/api/update/token'); },
     setUpdateToken: function (payload) { return call('POST', '/api/update/token', payload); },
+    // 「加入 beta 版」：读只报 {enabled}，写传 {enabled: true|false}（与桌面 bridge
+    // 逐字同形 —— 两侧接口名与签名必须一致，界面代码零改动地跑在两边）
+    getUpdateBeta: function () { return call('GET', '/api/update/beta'); },
+    setUpdateBeta: function (payload) { return call('POST', '/api/update/beta', payload); },
     downloadUpdate: function (payload) { return invokeShell('download_update', payload); },
     updateProgress: function () { return invokeShell('update_progress'); },
     cancelUpdate: function () { return invokeShell('cancel_update'); },
@@ -1139,6 +1143,15 @@ pub fn shim_js() -> &'static str {
     getSanitize: function () { return call('GET', '/api/sanitize'); },
     saveSanitize: function (enabled) {
       return call('PUT', '/api/sanitize', { sanitizeBlacklistFingerprints: enabled === true });
+    },
+
+    // ── 开发者角色兼容 ──
+    // 与桌面桥（src/bridge.rs 的 getDeveloperRoleCompat / saveDeveloperRoleCompat）
+    // 同一映射：两边接口名与签名必须一致，界面代码零改动地跑在两边
+    //（漏一侧的症状见 getClineHeaders 那段）。
+    getDeveloperRoleCompat: function () { return call('GET', '/api/developer-role-compat'); },
+    saveDeveloperRoleCompat: function (enabled) {
+      return call('PUT', '/api/developer-role-compat', { developerRoleCompat: enabled === true });
     },
 
     // ── Cline 伪装头（转发头逐键覆盖）──
@@ -1224,6 +1237,26 @@ pub fn shim_js() -> &'static str {
       await call('POST', '/api/panel/logout', {});
       // 服务端已撤销会话链；本地保管的双令牌一并清掉。
       clearPanelAuth();
+    },
+
+    // ── 直连网关的凭证（AI 助手页专用；桌面 bridge 的同名方法见 bridge.rs）
+    // 助手页为流式对话直接 fetch 网关基址、不经 call（见 ui-islands 的
+    // assistant-state.ts），那条请求带什么凭证由这里说了算 —— 口径必须与
+    // httpCall 完全一致，否则会出现「设置页能读、助手页 401」这种分叉：
+    //   · 直连环境：会话在 HttpOnly cookie 里，同源请求浏览器自动带，
+    //     这张表通常为空（令牌不进 JS 正是我们想保住的性质）；
+    //   · 宿主中转（cookie 往返不通）：令牌在 localStorage，必须放进
+    //     `x-panel-token`（自定义头被剥时还有标准的 Authorization 兜底）；
+    //   · 未注册管理员的部署：用户输入的网关 Key 是唯一凭证。
+    directCredentials: function () {
+      var headers = {};
+      var access = storedPanelToken('access');
+      if (access) {
+        headers['x-panel-token'] = access;
+        headers['Authorization'] = 'Bearer ' + access;
+      }
+      if (apiKey) headers['x-api-key'] = apiKey;
+      return Promise.resolve(headers);
     },
 
     // ── 机器人校验开关（登录 / 注册的 ALTCHA proof-of-work）──

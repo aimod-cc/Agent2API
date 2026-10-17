@@ -52,6 +52,8 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::Method;
 use axum::response::Response;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use serde_json::{json, Map, Value};
 
 use crate::server::core::account_store::AccountStoreError;
@@ -59,6 +61,7 @@ use crate::server::core::auth::WorkBuddyAuthError;
 use crate::server::core::billing::checkin;
 use crate::server::core::proxies::ProxyConfigError;
 use crate::server::core::providers::adapter::adapter_for;
+use crate::server::core::providers::kuku::credentials::KukuCredentials;
 use crate::server::core::providers::zcode;
 use crate::server::core::providers::ProviderKind;
 use crate::server::errors::management_error;
@@ -95,6 +98,119 @@ fn parse_json_body(body: &Bytes, fallback_message: &str) -> Result<Value, Respon
         Ok(value) => Ok(value),
         Err(_) => Err(management_error(400, fallback_message)),
     }
+}
+
+/// 文件导入失败的统一包装：给文案补上「哪个文件」——前端传了 `authFileName`
+/// 才显示文件名，没传就说「凭证文件」。
+///
+/// 为什么在接口层拼、不传进账号存储：文件名是**这次请求的用户上下文**，而
+/// 落账号的入口（`add_*_account`）只认内容 —— 让它多收一个名字字符串，等于把
+/// HTTP 字段的语义泄进账号存储的解析口径里（同一个入口还要服务「手动粘贴」等
+/// 没有文件名的调用方）。
+fn describe_file_import_error(
+    error: AccountStoreError,
+    file_name: Option<&str>,
+) -> AccountStoreError {
+    AccountStoreError::new(
+        format!(
+            "凭证文件{}无法导入：{}",
+            file_name.map(|name| format!("「{name}」")).unwrap_or_default(),
+            error.message,
+        ),
+        error.status_code,
+    )
+}
+
+/// `authFileB64`（二进制凭证文件）的统一 400：**只识别、不实现**的几家才调它。
+///
+/// 接了文本文件导入的几家（小浣熊 / CatPaw / Cline）都会调它：这三家的
+/// 凭证文件都是**文本 JSON**，二进制是别家才有的形态（KukuAI 的 Cookies 是
+/// SQLite —— 它**实现** `authFileB64`，不调这里，见其分支与
+/// `kuku_credentials_from_b64_file`）；别家分支不读文件导入三字段（历史契约不变）。
+/// 为什么明确 400 而不是静默忽略：静默会让用户以为导入成功了，而账号根本没落。
+fn binary_auth_file_unsupported(provider: &str) -> AccountStoreError {
+    AccountStoreError::new(
+        format!(
+            "该提供商（{}）暂不支持二进制凭证文件（authFileB64），请改用文本内容（authFileContent）",
+            crate::server::core::providers::label_of(provider)
+        ),
+        400,
+    )
+}
+
+/// KukuAI 文件导入（`authFileB64`）：二进制 Cookies 文件的 base64 → 解析出凭证。
+///
+/// 为什么是 base64 + 临时文件：KukuAI 的凭证文件是 Cookies 的 SQLite **二进制**，
+/// 文本字段（`authFileContent`）装不下它；而读写判定只有
+/// `kuku::credentials::read_credentials_from_path` 这一份、按**路径**工作（与本机
+/// `importDesktop` 共用），所以先把字节解回临时文件、再走同一条读取链 ——
+/// 不另写「从内存字节解析 SQLite」，免得两边对「什么算有效的 Cookies 库」的口径
+/// 分叉。
+///
+/// 临时文件的生命周期只覆盖这一次读取：读取完成**无论成败**立即删除（成功时
+/// 凭证已读到内存，失败时内容也不该留在盘上）；base64 解码失败时文件压根没建，
+/// 写入失败时顺手清掉可能留下的半截文件。
+///
+/// 所有失败的文案都经 `describe_file_import_error` 带上原文件名（与另外三家同款），
+/// 状态码一律 400（这是「这次请求给的文件有问题」，不是服务端故障）。
+fn kuku_credentials_from_b64_file(
+    encoded: &str,
+    auth_file_name: Option<&str>,
+) -> Result<KukuCredentials, AccountStoreError> {
+    let bytes = BASE64.decode(encoded).map_err(|error| {
+        describe_file_import_error(
+            AccountStoreError::new(
+                format!("authFileB64 不是合法的 base64（{error}）；请重新选择文件后再试"),
+                400,
+            ),
+            auth_file_name,
+        )
+    })?;
+    let path = kuku_temp_cookies_path();
+    if let Err(error) = std::fs::write(&path, &bytes) {
+        // 写入失败也可能已经留下半截文件（建文件成功、写盘失败）：顺手清掉，
+        // 不留本次请求的残留（清不掉也不阻断，只是垃圾）。
+        let _ = std::fs::remove_file(&path);
+        return Err(describe_file_import_error(
+            AccountStoreError::new(
+                format!(
+                    "写入临时文件失败（{}）：{error}；请检查系统临时目录是否可写（磁盘空间 / 权限）后重试",
+                    path.display()
+                ),
+                400,
+            ),
+            auth_file_name,
+        ));
+    }
+    let read_result =
+        crate::server::core::providers::kuku::credentials::read_credentials_from_path(&path);
+    // 读后即删：失败也要删（见函数说明）—— 这里是最靠近「文件不再需要」的位置，
+    // 删一次覆盖后面所有分支（含解析失败）。
+    let _ = std::fs::remove_file(&path);
+    read_result.map_err(|error| {
+        describe_file_import_error(
+            AccountStoreError::new(error.file_import_message(), 400),
+            auth_file_name,
+        )
+    })
+}
+
+/// KukuAI 文件导入的临时 Cookies 文件路径（系统临时目录 + 随机文件名）。
+///
+/// 随机段与 `proxy_pool::new_id` / `upstream::request::new_request_id` 同一手法
+/// （`RandomState` 的随机种子 + 毫秒 + 进程号，不引第三方依赖）：只要求并发写
+/// 不撞名，不承担安全语义（文件读完即删）。
+fn kuku_temp_cookies_path() -> std::path::PathBuf {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(logging::now_ms() as u64);
+    hasher.write_u64(std::process::id() as u64);
+    let suffix = (hasher.finish() & 0xffff_ffff) as u32;
+    std::env::temp_dir().join(format!(
+        "kuku-cookies-{}-{}-{suffix:08x}",
+        std::process::id(),
+        logging::now_ms()
+    ))
 }
 
 /// 百分号解码（对应 Node 版 `decodeURIComponent(path.slice(...))`）。
@@ -148,6 +264,21 @@ pub async fn accounts_entry(State(state): State<ServerState>, request: axum::ext
     dispatch(state, method, rest.as_deref(), &full_path, &query, &body).await
 }
 
+/// 账号写、批量改代理 / 删除账号后的**监听器对账**（lazy listeners 的触发点，
+/// 见 `api::proxies::reconcile_listeners`）。
+///
+/// 用「改动前后引用 id 集合」的差集来判：改个备注名 / 改密钥不该付一次内核
+/// 重启的等待（重启要重建全部监听器，几秒）。引用增加要补监听器、引用减少
+/// 要回收端口（删账号 / 改走别的代理 / 改直连）—— 两个方向都交给对账的缺口
+/// 检测收敛，这里不猜方向，只拦「没变化」这一种白重启。
+fn reconcile_kernel_listeners(state: &ServerState, before: &std::collections::HashSet<String>) {
+    let after = state.store().referenced_pool_ids();
+    if &after == before {
+        return; // 引用集合没变（纯改配置），不重启
+    }
+    super::proxies::reconcile_listeners(state);
+}
+
 /// `/api/proxies*` 的入口（同样接受任意方法）。
 ///
 /// 已注册路径：`/api/proxies`、`/api/proxies/test`（Node 版原有的出口能力）与
@@ -155,23 +286,6 @@ pub async fn accounts_entry(State(state): State<ServerState>, request: axum::ext
 /// `/pool/test`、`/pool/sync-clash`（「网络代理」页的代理池 CRUD + 启停 + 测试
 /// + Clash 同步，见 `api::proxies` 的模块头）。池那几条的 id 走 body，不做
 /// 路径段 —— 判定的写法因此还是一张 (方法, 剩余路径) 的表，与原来的两条完全同形。
-/// 账号写操作收尾：引用集合若新增了「还没有监听器的订阅节点」，请求内核
-/// 补建（lazy listeners 的触发点，见 `api::proxies::provision_missing_listeners`）。
-///
-/// 对账用「改动前后引用 id 集合」的**差集**而不是无脑重启：改个备注名不该
-/// 付一次内核重启的等待（重启要重建全部监听器，几秒）；只有新增引用才投。
-/// 缩小集合（取消引用 / 删账号）不触发 —— 摘监听器等下次任何重启自然完成，
-/// 端口留着也无害（注册表不裁剪，见 `runtime::write_ports`）。
-fn sync_kernel_if_new_pool_refs(state: &ServerState, before: &std::collections::HashSet<String>) {
-    let after = state.store().referenced_pool_ids();
-    if after.is_subset(before) {
-        return; // 没有新增引用（纯改动 / 删除），不重启
-    }
-    // 只要有新增就走 provision：它内部再判断「缺口是否真实存在」（被引用的
-    // 节点可能早就有端口），不重复投命令
-    super::proxies::provision_missing_listeners(state);
-}
-
 pub async fn proxies_entry(State(state): State<ServerState>, request: axum::extract::Request) -> Response {
     let method = request.method().clone();
     let full_path = request.uri().path().to_string();
@@ -412,6 +526,19 @@ pub async fn dispatch(
 ///      （`store.add_account`，归属由这里的 provider id 给出：国际版与国内版
 ///      共用同一套凭证形态与落账号路径，差别只在落进哪一家）。
 ///
+/// ── 文件导入（小浣熊 / CatPaw / Cline / KukuAI）──────────────────
+/// payload 新增三个可选字段（契约，历史请求不受影响）：
+///   - `authFileContent`：用户手选的凭证文件**文本内容**（KukuAI 不吃文本 ——
+///     它的凭证是二进制 SQLite，收到文本明确 400 指路 `authFileB64`）；
+///   - `authFileB64`：文件 base64（前三家的凭证是文本 JSON，只识别并 400；
+///     KukuAI 的 Cookies SQLite 是二进制，真正走这条的就是它）；
+///   - `authFileName`：原文件名，仅用于错误文案与日志。
+/// `authFileContent` / `authFileB64` 任一存在 → 走「文件导入」路径，**优先于**
+/// `importDesktop`（见 ① ② 分支内的说明）；两者都没有时行为与历史逐字一致。
+/// 语义差别（两条路径别混用）：文件导入＝把文件里的**凭证解析后落库**，得到
+/// 一个**可独立转发**的账号（与「手动粘贴」同一入口，文件可来自任意机器或
+/// 备份）；`importDesktop` ＝只建一条「转发时实时读本机固定路径」的记录。
+///
 /// ── AutoClaw 曾经在这里显式 400（历史，别改回去）─────────────────
 /// W4a–W4b 之间它的凭证链路还没落地，那时这里对它的 payload 报 400：若让它落进
 /// ④ 的兜底，用户会得到一条**200 + 存进 workbuddy 组**的账号（凭证是别家的、
@@ -424,7 +551,7 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
         Ok(value) => value,
         Err(response) => return response,
     };
-    // 引用集合快照（成功落账号后对账，见 `sync_kernel_if_new_pool_refs`）
+    // 引用集合快照（成功落账号后对账，见 `reconcile_kernel_listeners`）
     let refs_before = state.store().referenced_pool_ids();
     let provider = payload
         .get("provider")
@@ -444,6 +571,31 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
         .and_then(Value::as_str)
         .map(str::to_string);
     let import_name = name.as_deref();
+    // ── 「文件导入」三字段（均为可选；文件导入契约）─────────────
+    // 用户在界面上**手选**桌面客户端的凭证文件时，前端把文件内容放进这些字段：
+    //   - `authFileContent`：文件文本内容（JSON 类文件，前端已读过整个文件）；
+    //   - `authFileB64`：文件 base64（二进制文件：KukuAI 的 Cookies SQLite 走它；
+    //     凭证是文本 JSON 的几家只识别并 400）；
+    //   - `authFileName`：原文件名，仅用于错误文案与日志（不参与解析）。
+    // 任一内容字段存在 → 走文件导入路径，**优先于** `importDesktop`：前者把文件
+    // 里的**凭证解析后落库**（得到一个可独立转发的账号，文件可来自任意机器或
+    // 备份），后者只建一条「实时读本机固定路径」的记录；两者同时给时以文件为准
+    // （用户的显式选择更强）。两个内容字段都没有时行为不变（历史契约零变化）。
+    // 接了这条路径的四家（小浣熊 / CatPaw / Cline / KukuAI）见各自分支，
+    // 别家的分支不读这三个字段。
+    let auth_file_content = payload
+        .get("authFileContent")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let auth_file_b64 = payload
+        .get("authFileB64")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let auth_file_name = payload
+        .get("authFileName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     // ── 自定义提供商（`custom-` 前缀，不在静态注册表里）─────────
     // 它**不进** `ProviderKind` 枚举 —— `kind_from_id` 对它返回 None 是设计
     // 而不是遗漏（见 `providers` 的模块头），所以必须在穷举 match **之前**
@@ -454,8 +606,11 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
     if crate::server::core::custom_providers::is_custom_provider_id(provider) {
         let result = store.add_custom_account(provider, &payload, import_name);
         return match result {
-            Ok(account) => ok_json(json!({
-                "account": account,
+            Ok(upsert) => ok_json(json!({
+                "account": upsert.account,
+                // 幂等合并（同 key / 同家无需鉴权）时为 false：前端据此把提示
+                // 说成「已更新」而不是「已添加」，见 CustomAccountUpsert 的说明
+                "created": upsert.created,
                 "list": store.list_accounts(),
             })),
             Err(error) => store_error(error),
@@ -463,14 +618,65 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
     }
     let result = match crate::server::core::providers::kind_from_id(provider) {
         Some(crate::server::core::providers::ProviderKind::Raccoon) => {
-            if import_desktop {
+            // ── 文件导入优先于 importDesktop（文件导入契约）────────────
+            // 两条路径的语义完全不同，别混用：
+            //   - `authFileContent`（文件导入）＝把文件里的**凭证解析后落库**，
+            //     得到一个**可独立转发**的账号（文件可来自另一台机器或备份，
+            //     导入后不依赖本机客户端）—— 与「手动粘贴」同一入口
+            //     `add_raccoon_account`，校验 / 撞 id 保护 / 来源标记全部复用；
+            //   - `importDesktop: true` ＝只建一条 `raccoon-desktop` 记录，
+            //     记录**不落 token**，转发时实时读本机固定路径
+            //     （`~/.box-agent/config/auth.json`）。
+            // 两者同时给时以文件为准：用户的显式文件更强。
+            // `authFileB64` 本期不实现：二进制凭证是别家（Cookies/加密库）才有
+            // 的形态，明确 400 而不是静默忽略（静默会让用户以为导入成功了）。
+            if let Some(content) = auth_file_content {
+                // 解析失败 → 400；成功 → 与「手动粘贴」同一入口落账号
+                // （400 文案统一经 describe_file_import_error 带上文件名）
+                match serde_json::from_str::<Value>(content) {
+                    Ok(parsed) => store
+                        .add_raccoon_account(&parsed, import_name)
+                        .map_err(|error| describe_file_import_error(error, auth_file_name)),
+                    Err(_) => Err(describe_file_import_error(
+                        AccountStoreError::new(
+                            "不是合法 JSON（请选择小浣熊客户端登录后生成的 auth.json）",
+                            400,
+                        ),
+                        auth_file_name,
+                    )),
+                }
+            } else if auth_file_b64.is_some() {
+                Err(binary_auth_file_unsupported(provider))
+            } else if import_desktop {
                 store.import_raccoon_desktop_account("manual")
             } else {
                 store.add_raccoon_account(&payload, import_name)
             }
         }
         Some(crate::server::core::providers::ProviderKind::CatPaw) => {
-            if import_desktop {
+            // ── 文件导入优先于 importDesktop（与上一条分支同款）────────
+            // `authFileContent`（文件导入）＝把文件里的凭证解析后落库，得到
+            // 一个可独立转发的账号（文件可来自任意机器/备份）—— 与「手动粘贴」
+            // 同一入口 `add_catpaw_account`（它认嵌套 auth.json：
+            // `auth.accessToken` + `account.uid`/`loginName`，见那边的取值候选表）；
+            // `importDesktop: true` ＝只建一条 `desktop-auth` 记录，记录**不落
+            // token**，转发时实时读本机固定路径（`~/.meituan-catpaw/auth.json`）。
+            if let Some(content) = auth_file_content {
+                match serde_json::from_str::<Value>(content) {
+                    Ok(parsed) => store
+                        .add_catpaw_account(&parsed, import_name)
+                        .map_err(|error| describe_file_import_error(error, auth_file_name)),
+                    Err(_) => Err(describe_file_import_error(
+                        AccountStoreError::new(
+                            "不是合法 JSON（请选择 CatPaw 客户端登录后生成的 auth.json）",
+                            400,
+                        ),
+                        auth_file_name,
+                    )),
+                }
+            } else if auth_file_b64.is_some() {
+                Err(binary_auth_file_unsupported(provider))
+            } else if import_desktop {
                 store.import_catpaw_desktop_account("manual")
             } else {
                 store.add_catpaw_account(&payload, import_name)
@@ -546,7 +752,8 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
         }
         // Cline：粘贴 accessToken / refreshToken → 手动添加；
         // `importDesktop: true` → 导入桌面端实时登录态（记录不落 token，
-        // 实时读 `~/.cline/data/settings/providers.json`）。
+        // 实时读 `~/.cline/data/settings/providers.json`）；
+        // `authFileContent` → 文件导入（从 providers.json 提取凭证后**落 token**）。
         // 校验（token 非空 / 长度 / 补 `workos:` 前缀 / 从 JWT 取 expiresAt 与
         // 展示名）都在 `add_cline_account` 里，与设备授权登录共用同一入口。
         // **两个池各是一个 provider**（`cline-free` / `cline-pass`），添加时
@@ -554,7 +761,26 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
         Some(kind @ (crate::server::core::providers::ProviderKind::ClineFree
             | crate::server::core::providers::ProviderKind::ClinePass)) => {
             let provider_id = crate::server::core::providers::kind_id(kind);
-            if import_desktop {
+            // ── 文件导入优先于 importDesktop（文件导入契约）────────────
+            // 两条路径的语义完全不同，别混用：
+            //   - `authFileContent`（文件导入）＝把用户手选的 `providers.json`
+            //     里的凭证**提取出来落库**，得到一个**可独立转发**的账号
+            //     （文件可来自另一台机器或备份）—— 与「手动粘贴」同一入口
+            //     `add_cline_account`（补 `workos:` 前缀 / 落 token / 撞 id 保护
+            //     全部复用）；
+            //   - `importDesktop: true` ＝只建一条 `cline-<池>-desktop` 记录，
+            //     记录**不落 token**，转发时实时读本机固定路径。
+            // 「文件文本 → 凭证」的提取口径与桌面导入共用同一份（见
+            // `account_store::cline_accounts` 的 `cline_credentials_from_settings_text`），
+            // 不在这里另写一套键名候选 —— 两处口径分叉会让「同一个文件，手选能
+            // 导入、本机路径却报格式不对」这种最难排查的形态出现。
+            if let Some(content) = auth_file_content {
+                store
+                    .add_cline_account_from_file(provider_id, content, import_name)
+                    .map_err(|error| describe_file_import_error(error, auth_file_name))
+            } else if auth_file_b64.is_some() {
+                Err(binary_auth_file_unsupported(provider))
+            } else if import_desktop {
                 store.import_cline_desktop_account(provider_id, import_name)
             } else {
                 store.add_cline_account(provider_id, &payload, import_name)
@@ -680,37 +906,94 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
         // Network\Cookies`，明文 SQLite 无需解密，见 `kuku::credentials` 模块头）
         // → 同样验证 → 落账号。
         //
+        // `authFileB64` → **文件导入**：把用户手选的 Cookies 文件解析出凭证后
+        // 落库（来源 `"file"`），文件可来自另一台机器 / 备份，导入后不依赖本机
+        // 客户端 —— 与「粘贴 Cookie」落进同一入口 `add_kuku_account`。
+        //
         // 验证失败（凭证无效 / 客户端占用 Cookies 文件）→ 400，不落空记录。
         Some(crate::server::core::providers::ProviderKind::Kuku) => {
-            let parsed = if import_desktop {
-                match crate::server::core::providers::kuku::credentials::read_desktop_credentials()
+            // ── 文件导入优先于 importDesktop（文件导入契约；本家吃**二进制**）──
+            // KukuAI 的凭证文件是 Cookies 的 SQLite 数据库（二进制），不是 JSON
+            // 文本：文件内容走 `authFileB64`（前端读文件字节后 base64），
+            // `authFileContent` 对它只是「传错了字段」—— 明确 400 指路 base64，
+            // 不静默忽略（会让用户以为导入成功了），也不硬当 Cookie 头解析
+            // （那会把「字段选错」伪装成「缺 BDUSS」）。
+            //
+            // 为什么落临时文件再把路径交给解析：读写判定（rusqlite 打开 + 查
+            // `cookies` 表）只有 `read_credentials_from_path` 这一份、按**路径**
+            // 工作，让文件导入与 importDesktop 复用同一条读取链（见
+            // `kuku_credentials_from_b64_file` 的说明）；临时文件读完即删。
+            //
+            // 与 importDesktop 的语义差别（别混用）：文件导入＝把用户手选文件里
+            // 的**凭证解析后落库**，得到一个**可独立转发**的账号（来源标记
+            // `"file"`）；`importDesktop: true` ＝只建一条记录，转发时**实时**读
+            // 本机固定路径（来源标记 `"desktop"`，占用冲突由两段式处置解）。
+            // 两者同时给时以文件为准：用户的显式文件更强。
+            if let Some(encoded) = auth_file_b64 {
+                // 两个内容字段同时出现时以 base64 为准：文本形态对 KukuAI 必然
+                // 不可用，而 base64 是能走通的那条路（见上）。
+                match kuku_credentials_from_b64_file(encoded, auth_file_name) {
+                    // 解码 / 临时文件 / 解析失败 → 400（文案已带原文件名）
+                    Err(error) => Err(error),
+                    Ok(parsed) => {
+                        // 与 importDesktop 同一条链：真实校验（userreport 换会话
+                        // 三件套 + uk）通过才落账号；网络失败同样 400 —— 要的是
+                        // 「现在真的能用」。
+                        match crate::server::core::providers::kuku::credentials::enrich_identity(
+                            &parsed,
+                            None,
+                            true,
+                        )
+                        .await
+                        {
+                            Ok(verified) => store.add_kuku_account(&verified, import_name, "file"),
+                            Err(error) => {
+                                Err(AccountStoreError::new(error.message, error.status_code))
+                            }
+                        }
+                    }
+                }
+            } else if auth_file_content.is_some() {
+                Err(describe_file_import_error(
+                    AccountStoreError::new(
+                        "KukuAI 的桌面凭证是二进制的 Cookies 数据库，不能用文本导入（请用 authFileB64 传文件内容）",
+                        400,
+                    ),
+                    auth_file_name,
+                ))
+            } else {
+                // ── 历史路径（行为逐字不变）：importDesktop → 实时读本机固定
+                //    路径；否则把 payload 当粘贴的 Cookie 解析 ──
+                let parsed = if import_desktop {
+                    match crate::server::core::providers::kuku::credentials::read_desktop_credentials()
+                    {
+                        Ok(credentials) => credentials,
+                        Err(reason) => return management_error(400, reason),
+                    }
+                } else {
+                    match crate::server::core::providers::kuku::credentials::credentials_from_payload(
+                        &payload,
+                    ) {
+                        Ok(credentials) => credentials,
+                        Err(reason) => return management_error(400, reason),
+                    }
+                };
+                let verified = match crate::server::core::providers::kuku::credentials::enrich_identity(
+                    &parsed,
+                    None,
+                    true,
+                )
+                .await
                 {
                     Ok(credentials) => credentials,
-                    Err(reason) => return management_error(400, reason),
-                }
-            } else {
-                match crate::server::core::providers::kuku::credentials::credentials_from_payload(
-                    &payload,
-                ) {
-                    Ok(credentials) => credentials,
-                    Err(reason) => return management_error(400, reason),
-                }
-            };
-            let verified = match crate::server::core::providers::kuku::credentials::enrich_identity(
-                &parsed,
-                None,
-                true,
-            )
-            .await
-            {
-                Ok(credentials) => credentials,
-                Err(error) => return management_error(error.status_code, error.message),
-            };
-            store.add_kuku_account(
-                &verified,
-                import_name,
-                if import_desktop { "desktop" } else { "manual" },
-            )
+                    Err(error) => return management_error(error.status_code, error.message),
+                };
+                store.add_kuku_account(
+                    &verified,
+                    import_name,
+                    if import_desktop { "desktop" } else { "manual" },
+                )
+            }
         }
         // MonkeyCode（长亭科技）：**粘贴 session**（`monkeycode_ai_session` cookie）
         // → 先向上游 `GET /api/v1/users/status` 校验并归一化，再落账号（`login.rs`
@@ -874,6 +1157,135 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
                 if import_desktop { "desktop" } else { "manual" },
             )
         }
+        // 智谱清言（`chatglm.cn`）：**三条添加路径**，其中「访客模式」是本家独有的
+        // （见 `chatglm_accounts.rs` 模块头）：
+        //   1. `guest: true`（或既没给令牌也不是 importDesktop）→ 后台空 body 打一次
+        //      `guest/access`，拿到一对令牌 + 一个**新设备号**后落账号。
+        //      不需要手机号 / 扫码 —— 本家「零配置就能用」的入口。
+        //      代价是没有积分体系（余额 / 签到对他们如实跳过）。
+        //   2. 粘贴令牌 → 读 `accessToken` / `token`（可从浏览器 Cookie 里取
+        //      `chatglm_token`）→ 打一次 `user/info` 做**真实校验**（顺带补 uid
+        //      与昵称，并判出它其实是访客还是登录账号）。
+        //   3. `importDesktop: true` → 读本机客户端 Cookies（**DPAPI 加密**，
+        //      仅 Windows 可解，见 `chatglm::credentials`）→ 同样校验后落账号。
+        // 校验失败一律 400（不落空记录）—— 与 OrcaTerm / KukuAI 同一口径：
+        // 添加时验证，要的是「现在真的能用」。
+        Some(crate::server::core::providers::ProviderKind::Chatglm) => {
+            let device_id = crate::server::core::providers::chatglm::credentials::resolve_device_id(
+                payload
+                    .get("deviceId")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            );
+            let plain_token = payload
+                .get("accessToken")
+                .or_else(|| payload.get("access_token"))
+                .or_else(|| payload.get("token"))
+                .or_else(|| payload.get("refreshToken"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let want_guest = payload
+                .get("guest")
+                .and_then(Value::as_bool)
+                .unwrap_or(plain_token.is_none() && !import_desktop);
+            let provider_label = "智谱清言";
+
+            // ── 路径 3：导入本机客户端登录态 ─────────────────────────
+            let (access, refresh) = if import_desktop {
+                match crate::server::core::providers::chatglm::credentials::read_desktop_credentials()
+                {
+                    Ok(Some((access, refresh))) => {
+                        let access = (!access.trim().is_empty()).then_some(access);
+                        let refresh = (!refresh.trim().is_empty()).then_some(refresh);
+                        (access, refresh)
+                    }
+                    Ok(None) => {
+                        return management_error(
+                            400,
+                            "没有在本机找到智谱清言客户端的登录态（请先打开客户端登录，\
+                             或改用「访客模式」/「粘贴令牌」）",
+                        )
+                    }
+                    Err(reason) => return management_error(400, reason),
+                }
+            } else if want_guest {
+                // ── 路径 1：访客换证（本家独有）──────────────────────
+                match crate::server::core::providers::chatglm::http::guest_access(
+                    &device_id, None,
+                )
+                .await
+                {
+                    Ok((access, refresh, _uid)) => (Some(access), Some(refresh)),
+                    Err(error) => return management_error(error.status_code, error.message),
+                }
+            } else {
+                // ── 路径 2：粘贴令牌 ────────────────────────────────
+                let Some(token) = plain_token else {
+                    return management_error(400, "请提供智谱清言的访问令牌（accessToken）");
+                };
+                // 用户可能整段粘了 `chatglm_token=xxx;` 形态
+                let token = token
+                    .trim_start_matches("chatglm_token=")
+                    .trim_end_matches(';')
+                    .trim();
+                (Some(token.to_string()), None)
+            };
+            let Some(access) = access else {
+                return management_error(400, "没有取到智谱清言的访问令牌");
+            };
+            // 真实校验：拿令牌问一次 user/info。顺带读回 uid / 昵称 / 访客标记 ——
+            // 这三样决定账号 id、展示名与「有没有积分体系」。
+            let verified = match crate::server::core::providers::chatglm::http::user_info(
+                &access, &device_id, None,
+            )
+            .await
+            {
+                Ok(info) => info,
+                Err(error) => return management_error(400, format!("{provider_label}校验失败：{}", error.message)),
+            };
+            let is_guest = verified
+                .get("is_guest")
+                .and_then(Value::as_bool)
+                .unwrap_or_else(|| {
+                    crate::server::core::providers::chatglm::credentials::token_is_guest(
+                        &access, want_guest,
+                    )
+                });
+            let uid = verified
+                .get("_id")
+                .or_else(|| verified.get("user_id"))
+                .or_else(|| verified.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let nickname = verified
+                .get("nickname")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let credentials = crate::server::core::providers::chatglm::credentials::ChatglmCredentials {
+                access_token: access,
+                // 粘贴路径拿不到 refresh_token：留空，续期会如实报「没有 refresh_token」
+                refresh_token: refresh.unwrap_or_default(),
+                device_id,
+                is_guest,
+                uid,
+                nickname,
+            };
+            store.add_chatglm_account(
+                &credentials,
+                import_name,
+                if import_desktop {
+                    "desktop"
+                } else if want_guest {
+                    "guest"
+                } else {
+                    "manual"
+                },
+            )
+        }
         // ModelScope（魔搭）的两个站点：粘贴 `ms-` 令牌 + **先探活换身份**。
         //
         // 为什么本家要出网（不是「粘贴即落盘」）：那枚令牌是不透明的，
@@ -934,8 +1346,8 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
     };
     match result {
         Ok(account) => {
-            // 落号成功后对账：新增了池引用就请求内核补监听器（lazy listeners）
-            sync_kernel_if_new_pool_refs(state, &refs_before);
+            // 落号成功后对账：新增引用补监听器、失去引用回收端口（lazy listeners）
+            reconcile_kernel_listeners(state, &refs_before);
             ok_json(json!({
                 "account": account,
                 "list": store.list_accounts(),
@@ -1018,7 +1430,7 @@ pub async fn batch_accounts(state: &ServerState, body: &Bytes) -> Response {
         Ok(value) => value,
         Err(response) => return response,
     };
-    // 引用集合快照（批量改代理成功后对账，见 `sync_kernel_if_new_pool_refs`）
+    // 引用集合快照（批量改代理成功后对账，见 `reconcile_kernel_listeners`）
     let refs_before = state.store().referenced_pool_ids();
     // ids 去重 + 过滤空串，逐字照抄 Node 版
     let mut ids: Vec<String> = Vec::new();
@@ -1077,9 +1489,9 @@ pub async fn batch_accounts(state: &ServerState, body: &Bytes) -> Response {
 
     match result {
         Ok(value) => {
-            // 批量改代理 / 删除成功后对账：新增了池引用就请求内核补监听器
-            // （lazy listeners）。删除只可能缩小集合，provision 内部会因无缺口不投。
-            sync_kernel_if_new_pool_refs(state, &refs_before);
+            // 批量改代理 / 删除成功后对账：补监听器与回收端口都由对账的
+            // 缺口检测收敛（见 `reconcile_kernel_listeners`）
+            reconcile_kernel_listeners(state, &refs_before);
             // 响应带上 action，与 Node 版 `{ action, ...result, list }` 一致
             let mut merged = Map::new();
             merged.insert("action".to_string(), Value::String(action));
@@ -1430,7 +1842,7 @@ pub async fn patch_account(state: &ServerState, id: &str, body: &Bytes) -> Respo
     if !patch.is_object() {
         return management_error(400, "请求内容必须是 JSON 对象");
     }
-    // 引用集合快照（改代理成功后对账，见 `sync_kernel_if_new_pool_refs`）
+    // 引用集合快照（改代理成功后对账，见 `reconcile_kernel_listeners`）
     let refs_before = state.store().referenced_pool_ids();
     // CatPaw 的余额查询凭证（`balanceToken`）先落盘：它是**这一家独有**的字段，
     // 通用 `update_account` 不认识它（见 `update_catpaw_balance_token` 的说明：
@@ -1565,8 +1977,8 @@ pub async fn patch_account(state: &ServerState, id: &str, body: &Bytes) -> Respo
     match state.store().update_account(&id, &patch) {
         Ok((account, mut changes)) => {
             changes.extend(balance_changes);
-            // 改代理成功后对账：新增了池引用就请求内核补监听器（lazy listeners）
-            sync_kernel_if_new_pool_refs(state, &refs_before);
+            // 改代理成功后对账：新引用的补监听器、旧引用失去的回收端口
+            reconcile_kernel_listeners(state, &refs_before);
             ok_json(json!({
                 "account": account,
                 "changes": changes,
@@ -1689,13 +2101,12 @@ pub fn delete_account(state: &ServerState, id: &str) -> Response {
     if id.is_empty() {
         return management_error(400, "缺少账号 id");
     }
+    // 引用快照要在删除**之前**取：被删账号撇下的引用要靠对账回收端口
+    // （最后一个引用消失 → 这个节点的监听器该收了）
+    let refs_before = state.store().referenced_pool_ids();
     match state.store().remove_account(id) {
         Ok(()) => {
-            // 删除只缩小引用集合：不需要补监听器；这里照调一次对账入口，
-            // 依赖它「无新增引用就不投命令」的判据成为 no-op —— 链路统一，
-            // 将来若要「最后一个引用消失时摘监听器」只改这一处
-            let before = state.store().referenced_pool_ids();
-            sync_kernel_if_new_pool_refs(state, &before);
+            reconcile_kernel_listeners(state, &refs_before);
             ok_json(json!({ "list": state.store().list_accounts() }))
         }
         Err(error) => store_error(error),

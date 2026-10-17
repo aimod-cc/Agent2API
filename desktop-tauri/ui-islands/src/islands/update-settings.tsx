@@ -17,8 +17,8 @@ import {
   cn,
 } from '@ui'
 import {
-  buildProxyPick, errorMessage, fetchProxySelection, openExternal, saveProxy,
-  shared, toast, type ProxySelection, type UpdateTokenStatus,
+  buildProxyPick, errorMessage, fetchProxySelection, forwardUpdateResult, openExternal,
+  saveProxy, shared, toast, type ProxySelection, type UpdateTokenStatus,
   EMPTY_PROXY_SELECTION,
 } from './update-shared'
 import { t } from '../i18n'
@@ -26,10 +26,11 @@ import { t } from '../i18n'
 /**
  * 「更新设置」弹窗（设置页「软件更新」面板头部那颗按钮打开）。
  *
- * ── 三块设置，各自的保存时机 ────────────────────────────────
+ * ── 四块设置，各自的保存时机 ────────────────────────────────
  *   · 自动检查更新：开关**拨动即保存**；间隔填完按「保存」（或回车）——
  *     数字输入有校验与「改没改」之分，配上明确确认键；关闭后面板上的
  *     「检查更新」仍可手动触发，只是不再到点自动查。
+ *   · 加入 beta 版：开关**拨动即保存**，保存后立刻按新通道查一次（见 saveBeta）。
  *   · 出网代理：下拉**选中即保存**（与账号页代理列同一交互，省一个确认键），
  *     检查更新与下载安装包立即走新线路；
  *   · GitHub 令牌：粘贴 → 点「保存」（有明确输入动作的设置就该有明确确认）。
@@ -37,6 +38,9 @@ import { t } from '../i18n'
  * 「自动检查更新」就是原定时任务页的「软件版本检查」（同一条后端任务，
  * id 'updateCheck'，走同一组 /api/scheduled-tasks 接口）—— 配置入口收进本
  * 弹窗、定时任务页不再渲染那一行，版本相关的设置收在一个地方。
+ * 「加入 beta 版」是后端 `updateBeta` 键（`/api/update/beta`）：打开后更新检查
+ * 走 GitHub 的 Release 列表、把预发布版一并纳入候选，关掉仍看正式发布 ——
+ * 通道判定在 `core::update::check`，本弹窗只管这一个布尔值。
  *
  * ── 令牌「已填写」的口径 ─────────────────────────────────────
  * 保存成功后**界面永远不再显示令牌本体**（后端 `/api/update/token` 只回
@@ -49,7 +53,7 @@ import { t } from '../i18n'
  * Dialog 自带右上角 ✕，Esc / 点遮罩同样能关。
  *
  * ── 状态归属 ───────────────────────────────────────────────
- * 三块设置的读数都是本组件的本地状态（每次打开现拉），不进 update-panel 的
+ * 四块设置的读数都是本组件的本地状态（每次打开现拉），不进 update-panel 的
  * 模块快照：面板那套快照服务的是「检查 / 下载」的命令式流程，弹窗跟着开跟着
  * 关，塞进去只会让两棵树多一层没必要的耦合。类型与读写函数在 update-shared.ts。
  */
@@ -113,9 +117,12 @@ export function UpdateSettingsDialog({ open, onClose }: { open: boolean; onClose
   const [checkTask, setCheckTask] = React.useState<{ enabled: boolean; interval: number } | null>(null)
   const [intervalDraft, setIntervalDraft] = React.useState('')
   const [checkBusy, setCheckBusy] = React.useState(false)
+  // 「加入 beta 版」的读数：null = 还没读到（开关禁用直到读到）
+  const [beta, setBeta] = React.useState<{ enabled: boolean } | null>(null)
+  const [betaBusy, setBetaBusy] = React.useState(false)
   const pick = buildProxyPick(selection)
 
-  // 每次打开都现拉三块设置的读数：值可能被上一轮弹窗或环境改过，
+  // 每次打开都现拉四块设置的读数：值可能被上一轮弹窗或环境改过，
   // 请求都便宜，不值得为它做缓存
   React.useEffect(() => {
     if (!open) return
@@ -126,6 +133,14 @@ export function UpdateSettingsDialog({ open, onClose }: { open: boolean; onClose
         setToken((await shared().workbuddyDesktop?.getUpdateToken()) ?? null)
       } catch {
         // 读不到按「未知」显示（token 保持 null →「读取中」徽章），保存动作会带出新状态
+      }
+    })()
+    void (async () => {
+      try {
+        const result = await shared().workbuddyDesktop?.getUpdateBeta()
+        setBeta({ enabled: result?.enabled === true })
+      } catch {
+        // 读不到保持 null：开关保持禁用，保存动作会带出新状态
       }
     })()
     void (async () => {
@@ -172,6 +187,47 @@ export function UpdateSettingsDialog({ open, onClose }: { open: boolean; onClose
     }
     if (checkTask && value === checkTask.interval) return
     await saveCheckTask({ interval: value })
+  }
+
+  /**
+   * 保存「加入 beta 版」，成功后**立刻按新通道查一次**。
+   *
+   * 为什么拨完就查：这个开关的效果只体现在「下一次检查」上 —— 不主动查一次，
+   * 面板与侧栏徽标会一直停在上一个通道的结论，用户看不出自己加入成功没有
+   * （后端每次检查现读这个键，所以这次查询就是按新通道来的）。查询失败只吞掉：
+   * 拨开关这件事本身已经成功，检查失败的原因由面板状态行统一播报
+   * （与 forwardUpdateResult 的取向一致）。
+   */
+  async function saveBeta(next: boolean): Promise<void> {
+    if (betaBusy) return
+    setBetaBusy(true)
+    // switched = 后端真的收下了这次切换（内存已生效）。落盘失败也算收下 ——
+    // 「写盘失败」只影响重启后的值，本次运行照走新通道，所以照样重查一次。
+    let switched = false
+    try {
+      const result = await shared().workbuddyDesktop?.setUpdateBeta({ enabled: next })
+      setBeta({ enabled: result?.enabled === true })
+      switched = true
+      if (result?.saved === false) {
+        toast(t('通道已切换，但写入磁盘失败（重启后会回到原设置）'), 'err')
+      } else {
+        toast(next
+          ? t('✅ 已加入 beta 版，之后的检查会包含 beta 版')
+          : t('✅ 已退出 beta 版，之后的检查只看正式版'))
+      }
+    } catch (error) {
+      toast(t('保存失败：{error}', { error: errorMessage(error) }), 'err')
+    } finally {
+      setBetaBusy(false)
+    }
+    // 请求没成功就不重查：通道没换，重查一次只会白吃一次 GitHub 限额
+    if (!switched) return
+    try {
+      await shared().workbuddyDesktop?.checkUpdate()
+      await forwardUpdateResult()
+    } catch {
+      // 重查失败不影响这次切换（下一次定时检查或手点「检查更新」会补上）
+    }
   }
 
   async function handlePick(value: string): Promise<void> {
@@ -280,6 +336,25 @@ export function UpdateSettingsDialog({ open, onClose }: { open: boolean; onClose
             </div>
             <div className='mt-1.5 text-[12px] text-subtle'>
               {t('到点自动向 GitHub 查询新版本，查到就走「检测到更新」弹窗；关闭后「检查更新」按钮仍可手动触发')}
+            </div>
+          </div>
+
+          <div className='h-px bg-hairline' />
+
+          {/* 加入 beta 版：开关拨动即保存，保存成功后顺手按新通道查一次
+              （理由见 saveBeta）。读数没到位时禁用 —— 与「自动检查更新」同一口径 */}
+          <div>
+            <div className='flex items-center justify-between gap-2'>
+              <div className='text-[13px] font-semibold text-foreground'>{t('加入 beta 版')}</div>
+              <Switch
+                checked={beta?.enabled === true}
+                disabled={betaBusy || !beta}
+                onCheckedChange={next => void saveBeta(next === true)}
+                aria-label={t('加入 beta 版')}
+              />
+            </div>
+            <div className='mt-1.5 text-[12px] text-subtle'>
+              {t('开启后只更新到 beta 版（预发布），取版本最高的一个；beta 版可能不稳定。开启期间不会因为正式版发布而自动切回正式版 —— 想切回请关闭本开关。关闭后只更新到正式版，且不会降级到版本号更低的版本。')}
             </div>
           </div>
 

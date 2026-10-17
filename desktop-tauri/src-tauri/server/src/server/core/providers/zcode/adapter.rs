@@ -242,8 +242,11 @@ impl ProviderAdapter for ZcodeAdapter {
         // 不补的话这条通道的输入/输出/缓存三列恒为 0（面板看着像没计费）。
         // 与 workbuddy 的 `normalize` 同一手法：**不覆盖**客户端已有的取值。
         ensure_include_usage(&mut outgoing);
+        let url = format!("{}/chat/completions", self.openai_base_url());
         Ok(ChatRequestPlan::chat(
-            format!("{}/chat/completions", self.openai_base_url()),
+            // 端点映射：上游经 `agent/configs` 下发的 from→to 表（fail-open，
+            // 没快照/没命中时原样放行，见 `endpoint_mapping` 的模块头）
+            super::endpoint_mapping::apply(self.region, &url),
             headers,
             outgoing,
         ))
@@ -300,7 +303,7 @@ impl ProviderAdapter for ZcodeAdapter {
             // 完全不知道下一步该做什么。这一档因此按状态码给一句可执行的话。
             .unwrap_or_else(|| {
                 if status == 401 {
-                    "凭证被上游拒绝（活动套餐认套餐 JWT、编码套餐认访问令牌）：\
+                    "凭证被上游拒绝（套餐池通道认套餐 JWT、编码套餐认访问令牌）：\
                      请在「账号」页重新登录该账号"
                 } else {
                     "上游错误"
@@ -317,7 +320,15 @@ impl ProviderAdapter for ZcodeAdapter {
         if code == Some(3007) {
             super::captcha::note_challenge_and_require_token();
         }
-        let message = match code.and_then(super::plan::code_hint) {
+        // 提示的两条来路：业务码表（`code_hint`）优先；限额档再按**错误原文**
+        // 补池子错位的引导（429「余额不足/无可用资源包」通常不是账号没钱，
+        // 而是额度记在另一个池子里，见 `plan::quota_hint` 与 issue #232）。
+        let hint = match code.and_then(super::plan::code_hint) {
+            Some(hint) => Some(hint),
+            None if status == 429 || code == Some(1005) => super::plan::quota_hint(&raw),
+            None => None,
+        };
+        let message = match hint {
             Some(hint) => format!("上游返回 {status}: {raw}（{hint}）"),
             None => format!("上游返回 {status}: {raw}"),
         };

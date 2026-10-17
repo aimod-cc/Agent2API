@@ -578,8 +578,23 @@ function ReportPage() {
   const rangeRef = React.useRef(range)
   /** 自定义区间同理（见 rangeRef 的说明）：日期一次改一个端，异步回调必须读到配好对的那份 */
   const customRef = React.useRef(custom)
+  /**
+   * 上一次**已应用**的那份数据的签名（JSON 文本）。
+   *
+   * 自动刷新是定时轮询（间隔见「定时任务」页），而两次轮询之间数据常常一个字都没变
+   * （没有新请求、没有跨整点）—— 那种时候 `setData` 进来一个内容相同的新对象，React
+   * 照样会把整页重渲染一遍：365 格热力图、两条折线、环形图、四张排行的元素全部重建一次，
+   * 而屏幕上不会有任何变化。这张签名就是用来挡掉那一轮的。
+   *
+   * 比较用 JSON 文本而不是逐字段：报表是一棵形状固定的数据树，写逐字段比较等于把
+   * 「报表有哪些字段」复制一份到这里（后端加字段就漏一个）。序列化这份数据（几十 KB）
+   * 的成本在毫秒以下，而它省掉的是整页渲染。错误态写空串 —— 从「读取失败」恢复成
+   * 正常数据时必然是一次真正的内容变化，不该被这张签名挡住。
+   */
+  const signatureRef = React.useRef('')
 
-  const applyData = React.useCallback((next: PageData) => {
+  const applyData = React.useCallback((next: PageData, signature: string) => {
+    signatureRef.current = signature
     setData(next)
   }, [])
 
@@ -605,7 +620,12 @@ function ReportPage() {
       if (token !== seq) return summaryValue
       if (!payload || typeof payload !== 'object') throw new Error('后端未返回报表数据')
       summaryValue = payload
-      applyData({ summary: payload, error: null })
+      // 内容与上一轮完全一致就不落 state（见 signatureRef 的说明）：轮询到「没有变化」
+      // 是常态，那一轮不该付整页重渲染的代价
+      const signature = JSON.stringify(payload)
+      if (signature !== signatureRef.current) {
+        applyData({ summary: payload, error: null }, signature)
+      }
       return summaryValue
     } catch (error) {
       if (token !== seq) return summaryValue
@@ -613,7 +633,7 @@ function ReportPage() {
       summaryValue = null
       // silent：只压掉控制台噪音（首屏自持加载 / 轮询用），错误态照常显示在页面上
       if (!options.silent) console.warn('读取报表数据失败:', message)
-      applyData({ summary: null, error: message || t('未知错误') })
+      applyData({ summary: null, error: message || t('未知错误') }, '')
       return null
     }
   }, [applyData])
@@ -624,7 +644,7 @@ function ReportPage() {
   const renderData = React.useCallback((next?: StatsSummary | null): void => {
     if (next === undefined) return
     summaryValue = next || null
-    if (next) applyData({ summary: next, error: null })
+    if (next) applyData({ summary: next, error: null }, JSON.stringify(next))
   }, [applyData])
 
   /** 换档位：内存为准，localStorage 只负责跨次启动恢复；换完立刻重拉一次 */

@@ -59,7 +59,7 @@ use rusqlite::{params, params_from_iter, Connection};
 use serde_json::Value;
 
 use super::record::{AttemptDetail, RequestEntry, RequestQuery, RunningProgress, SensitiveHit};
-use super::report::normalize_status_filter;
+use super::report::{normalize_status_filter, SummaryRow};
 
 /// `requests` 的列顺序（所有 SELECT 都按这个顺序取，`decode_request` 依赖它；
 /// 不写 `SELECT *` 是为了「加列时读侧要显式跟上」这件事在 diff 里可见）
@@ -72,6 +72,23 @@ const REQUEST_COLUMNS: &str = "id, ts, model, account_id, account_name, status, 
      first_response_ms, attempts, error, prompt_tokens, completion_tokens, total_tokens, \
      cache_read_tokens, provider, client_model, upstream_model, attempt_details, sensitive_hits, \
      client_reasoning, upstream_reasoning, phase, phase_started_at, is_test, route, client";
+
+/// 报表窄列查询的列顺序 —— **与 `db::schema` 的 `idx_requests_summary` 列序一致**
+/// （索引是 `ts, is_test` 前缀 + 这里的后 5 列），改任一侧都要回来对一眼。
+///
+/// 报表侧的明细只服务两件事：近 24 小时逐小时趋势（本文件的
+/// [`select_summary_rows`]）与四档命中率（已由 [`sum_cache_windows`] 在 SQL 侧
+/// 算完，不再搬行）。两件事合起来只碰这 6 列，而 `requests` 一行里另外那些列
+/// （`route` 在实测库里平均 1.5 KB、`attempt_details` / `sensitive_hits` 各是
+/// JSON 数组文本…）报表一个都用不上 —— 按 [`REQUEST_COLUMNS`] 全列读，等于把
+/// 「读 24 小时的统计口径」变成「读 24 小时里躺在行内的十几 MB 无关字节」，
+/// 这正是本次改造要消掉的主要开销（同一份数据实测：全列读 273 ms、窄列读
+/// 98 ms，Rust 侧比例相同）。
+///
+/// `is_test` 只在 WHERE 里出现（报表恒排除测试流量），不进结构体，所以不在这
+/// 份列清单里 —— 它在索引中排在 `ts` 之后、这 5 列之前。
+const SUMMARY_COLUMNS: &str =
+    "ts, model, upstream_model, total_tokens, cache_read_tokens, prompt_tokens";
 
 // `request_daily`（按天聚合）那一支的列常量、编解码与读-改-写语句在
 // `daily.rs` —— 两张表的语句分文件后各自独立演化。
@@ -413,18 +430,19 @@ pub(super) fn select_page_desc(
     Ok(out)
 }
 
-/// 取区间 `[from_ms, to_ms]` 内的明细，按**写入顺序**（ts 升序、同 ts 按 row_id）。
+/// 取区间 `[from_ms, to_ms]` 内的**完整明细**，按写入顺序（ts 升序、同 ts 按 row_id）。
 ///
-/// 两个用途，都是「要按时间顺序逐条过一遍」的场景：
-///   - 报表的缓存窗口（10 分钟 / 1 小时 / 24 小时 / 7 天）与近 24 小时趋势；
-///   - `rebuild_day` 重算某天聚合时取那一天的剩余明细。
-/// 顺序取升序（而不是报表本身需要的顺序）是为了让重算与 `record` 的累加次序
-/// 一致 —— 三个维度数组里条目的先后只影响视觉，但没必要制造差异。
+/// 现在只剩一个用途：`aggregate::rebuild_day` 重算某天聚合时取那一天的明细
+/// （报表读明细的两条路都已改窄 —— 命中率走 [`sum_cache_windows`] 的 SQL 聚合、
+/// 趋势走 [`select_summary_rows`] 的 6 列，见各自的说明；它们正是拿掉了这里
+/// 那 25 列里「报表一个字段都用不到」的大字段）。
+/// 顺序取升序是为了让重算与 `record` 的累加次序一致 —— 三个维度数组里条目的
+/// 先后只影响视觉，但没必要制造差异。
 ///
-/// `exclude_tests` **只给报表侧传 true**（模型测试的流量不进报表，见
-/// `RequestEntry::is_test`）：这几个调用点读的都是「算报表用的一份明细」，
-/// 而测试是人工反复发起的样本，混进趋势图会把真实流量读歪。请求日志那一侧
-/// 走的是 `select_page_desc`，不受这个开关影响 —— 日志要照常显示测试行。
+/// `exclude_tests` 由调用方按「这份明细要不要算真实流量」给（`rebuild_day` 传
+/// true，见 `RequestEntry::is_test`）：模型测试是人工反复发起的样本，折进聚合会
+/// 把真实流量读歪。请求日志那一侧走的是 `select_page_desc`，不受这个开关影响
+/// —— 日志要照常显示测试行。
 pub(super) fn select_between(
     conn: &Connection,
     from_ms: i64,
@@ -443,6 +461,117 @@ pub(super) fn select_between(
     let mut out = Vec::new();
     while let Some(row) = rows.next()? {
         out.push(decode_request(row)?);
+    }
+    Ok(out)
+}
+
+/// 取区间内的**报表窄列**（[`SUMMARY_COLUMNS`] 那 6 列），给近 24 小时趋势用。
+///
+/// 与 [`select_between`] 的分工：那个返回完整 `RequestEntry`（按天重算与别处
+/// 需要逐条看的场景都要），本函数只服务报表 —— 列集就是索引
+/// `idx_requests_summary` 覆盖的那几列，于是这条查询是**纯索引扫描**，一行明细
+/// 里的大字段（`route` 等）根本不会被读出来（列集与索引列序的对应关系见
+/// [`SUMMARY_COLUMNS`]）。
+///
+/// 恒排除测试流量（`is_test = 0`）：报表回答的是「真实流量长什么样」，模型测试
+/// 是人工反复发起的样本（与 `select_between` 的 `exclude_tests` 同一口径）。
+/// 因此调用方不必再传那个开关 —— 报表是这里唯一的用途。
+///
+/// 不写 `ORDER BY`：调用方按整点归桶，跨桶与桶内都不依赖行序
+/// （`report::cache_trend_24h` 的桶序由 24 个整点键决定，模型明细由
+/// `model_breakdown_json` 显式排序）。省掉排序也让 SQLite 能自由选扫描方向。
+pub(super) fn select_summary_rows(
+    conn: &Connection,
+    from_ms: i64,
+    to_ms: i64,
+) -> rusqlite::Result<Vec<SummaryRow>> {
+    let sql = format!(
+        "SELECT {SUMMARY_COLUMNS} FROM requests \
+         WHERE ts >= ?1 AND ts <= ?2 AND is_test = 0"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(params![from_ms, to_ms])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(SummaryRow {
+            ts: row.get(0)?,
+            model: row.get(1)?,
+            upstream_model: row.get(2)?,
+            total_tokens: row.get(3)?,
+            cache_read_tokens: row.get(4)?,
+            prompt_tokens: row.get(5)?,
+        });
+    }
+    Ok(out)
+}
+
+/// 各命中率窗口的 `(hitTokens, inputTokens)` 合计，**一次索引扫描算完**。
+///
+/// ── 为什么下推给 SQL ────────────────────────────────────────
+/// 改造前四档窗口是「把 7 天明细全读回 Rust，再对同一个数组遍历四遍」——
+/// 搬那次（含 `route` 等无关列）比算这次贵两个数量级。而报表页默认每秒轮询
+/// 一次（`config::DEFAULT_REPORT_AUTO_REFRESH_SECONDS`），这笔开销是**持续**的。
+/// 一次范围扫描就能同时算出四组 `CASE WHEN` 合计。
+///
+/// ── 扫描下界必须是**最长**的那个窗口（踩过一次的坑）──────────
+/// 初版写成「取最短窗口当下界」，看着像省了扫描量，实则**算错**：`WHERE`
+/// 已经把结果集限制在最近 10 分钟内了，后面 `CASE WHEN ts >= (now-24h)` 的
+/// 条件对这批行**恒为真**，于是四档算出同一个数（全等于 10 分钟窗口）。
+/// 这个错不会报错、不会抛异常，只会让报表上四档命中率长得一模一样 ——
+/// 实测数据里前三个窗口刚好同值时尤其难发现。正确形态是「扫描范围覆盖最长
+/// 窗口，各档在 `CASE WHEN` 里自己收窄」。
+///
+/// 代价上这也划算：`WHERE ts >= ?1`（最长窗口）配 `idx_requests_summary`
+/// 是**纯索引扫描**（命中的列全在索引里，不回表），实测同一份数据上
+/// 3 万行库、7 天窗口 68 ms → 3.4 ms。
+///
+/// `windows_ms` 由调用方给出（`report::CACHE_WINDOWS`，窗口值与 JSON 键名在
+/// 那里一处定义），返回顺序与入参一一对应 —— 本函数只做「按窗口求和」，不含
+/// 任何口径判断（`safe_rate` 的零除与越界处理仍在 `report` 层）。
+///
+/// 每个窗口给 `SUM(CASE WHEN ... END)` 而不是 `SUM(...) FILTER`：SQLite 到
+/// 3.30 才支持 `FILTER` 子句，而 `CASE WHEN` 在所有版本上语义相同。`COALESCE`
+/// 兜住「一个窗口都没有行」时的 NULL —— 返回 0 与「没有数据」在展示层是同一
+/// 种读数（命中率 0%），不必让调用方区分。
+pub(super) fn sum_cache_windows(
+    conn: &Connection,
+    now_ms: i64,
+    windows_ms: &[i64],
+) -> rusqlite::Result<Vec<(i64, i64)>> {
+    let Some(longest) = windows_ms.iter().copied().max() else {
+        return Ok(Vec::new());
+    };
+    // 参数位：?1 = 扫描下界（**最长**窗口，见上面那段）、?2..?n = 各窗口下界、
+    // 最后一位 = now（闭区间上界，与原来的 `ts <= now` 判定一致）
+    let mut sql = String::from("SELECT ");
+    for index in 0..windows_ms.len() {
+        if index > 0 {
+            sql.push_str(", ");
+        }
+        let slot = index + 2;
+        sql.push_str(&format!(
+            "COALESCE(SUM(CASE WHEN ts >= ?{slot} THEN cache_read_tokens END), 0), \
+             COALESCE(SUM(CASE WHEN ts >= ?{slot} THEN prompt_tokens END), 0)"
+        ));
+    }
+    let last = windows_ms.len() + 2;
+    sql.push_str(&format!(
+        " FROM requests WHERE ts >= ?1 AND ts <= ?{last} AND is_test = 0"
+    ));
+    let mut binds: Vec<i64> = Vec::with_capacity(windows_ms.len() + 2);
+    binds.push(now_ms - longest);
+    binds.extend(windows_ms.iter().map(|window| now_ms - window));
+    binds.push(now_ms);
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(params_from_iter(binds.iter()))?;
+    // 无 GROUP BY 的聚合查询恒返回一行；真出现空结果（不该发生）时按「各窗口
+    // 都没有数据」降级 —— 与 `safe_rate` 的零除口径一致，比 panic 合适
+    let Some(row) = rows.next()? else {
+        return Ok(vec![(0, 0); windows_ms.len()]);
+    };
+    let mut out = Vec::with_capacity(windows_ms.len());
+    for index in 0..windows_ms.len() {
+        out.push((row.get::<_, i64>(index * 2)?, row.get::<_, i64>(index * 2 + 1)?));
     }
     Ok(out)
 }
@@ -785,6 +914,43 @@ pub(super) fn upsert_raw(
         params![id, ts, request_body, response_body, size],
     )?;
     Ok(())
+}
+
+/// `request_raw` 的当前行数。
+///
+/// 单独一条而不是「删之前先 `SELECT COUNT(*)` 进 DELETE 的子查询」：调用方要
+/// 用它做「超限了没」的早退判据（见 `RequestStats::record` 的那一步）——
+/// 未超限时一个 `COUNT(*)` 就结束，不必让那条带 `ORDER BY` 的 DELETE 每次
+/// 都跑一遍。实测这条 COUNT 在主键索引上是**零点几毫秒**（几千行的表），
+/// 而 `SUM(size)` 同类口径要 180 ms 量级（要走 overflow 页），所以上限只能按
+/// 条数判、不能按字节判 —— 这是本函数存在的直接原因。
+pub(super) fn count_raw(conn: &Connection) -> rusqlite::Result<usize> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM request_raw", [], |row| row.get(0))?;
+    Ok(count.max(0) as usize)
+}
+
+/// 把 `request_raw` 裁到「最多保留 `keep` 行」（`overflow` = 要删掉的行数）。
+///
+/// 按 `ts` 从旧到新删：保留的是**最近**的若干条正文（预览对话服务的是
+/// 「刚发出去的那条请求长什么样」，越旧的越没有查看价值，而正文是这张表
+/// 唯一的大字段来源 —— 实测库上 1,455 行占 244 MB）。
+///
+/// `rowid` 参与排序而不是只按 `ts`：同毫秒写入的两条（同一批请求）需要一个
+/// 确定的次序，否则「删哪一条」在两次调用间可能不同（排序不稳定），清理结果
+/// 就成了随机的。与明细表「同 ts 用 row_id 定序」同一手法。
+///
+/// `overflow` 由调用方算好（它已经持着一个刚数出来的 `count_raw`）：在 SQL 里
+/// 再数一遍等于白扫一次表。`overflow` 为 0 时直接返回 —— 这条 DELETE 的
+/// `ORDER BY` 要排全表，不该在无事可做时空跑。
+pub(super) fn trim_raw_rows(conn: &Connection, overflow: usize) -> rusqlite::Result<usize> {
+    if overflow == 0 {
+        return Ok(0);
+    }
+    conn.execute(
+        "DELETE FROM request_raw WHERE id IN \
+         (SELECT id FROM request_raw ORDER BY ts ASC, rowid ASC LIMIT ?1)",
+        params![overflow as i64],
+    )
 }
 
 /// 按 id 取一条原始正文（详情弹窗用）。无行返回 None（调用方给 404）。

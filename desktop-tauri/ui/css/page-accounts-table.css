@@ -11,8 +11,8 @@
    只有它该参与伸缩 —— 所以它是**唯一**的弹性列：本文件不写它的宽度，
    accounts-columns.ts 也不给它 inline width（见那份文件的 FLEX_COLUMNS）。
 
-   预算：十个固定列合计 1193px
-   （47 + 132 + 132 + 186 + 56 + 80 + 148 + 80 + 132 + 200，逐列见下方声明）。
+   预算：九个固定列合计 1029px
+   （47 + 84 + 186 + 56 + 80 + 148 + 80 + 148 + 200，逐列见下方声明）。
    默认窗口 1060px 时列表可用宽度约 791px，也就是说**默认窗口下这张表横向滚动**，
    账号列被压到它的下限而不是「剩余宽度」。这是有意的：
    表格**不压缩列宽**（见下），宁可横滚也不把行内按钮折成两行、
@@ -42,6 +42,11 @@
    账号按家分组显示，家名与图标搬到分组带上（提供商列重复了这件事），顺序改由
    拖拽表达（组内序号 `#N` + 拖动把手，见下方「顺序列」）。固定列合计
    1193 → 1013，表格的横滚线随之从 1493 降到 1313（= 1013 + 弹性列下限 300）。
+
+   **本轮余额列 132 → 148**（逐窗口那一档改成紧凑背景条，见下方 .usage-flat-compact）：
+   那档最宽的一行是 Antigravity 的「Claude/GPT 每周 100%」，三段合计约 111px，而
+   132 的内容盒只有 104px —— 组名会被砍成「Claude/GP…」，而那正是这个功能要让人
+   看见的一组（issue #288）。固定列合计 1013 → 1029，横滚线 1313 → 1329。
 
    **勾选列 26 → 47**（本轮）：26px 的列里居中的复选框只离表格左缘 5.5px，
    看起来是「贴边」而不是居中，还与批量栏那颗「全选」错开 10.5px。
@@ -76,7 +81,7 @@
        （「可用 4300 积分」这类文案长度不可控，按省略号收口、完整值在 title 里）。
 
    最小窗口 820px 时（侧栏已收到 68px）可用宽度约 699px，而表格的下限是
-   1193 + 300（弹性列）= 1493px，于是横向滚动约 794px。
+   1029 + 300（弹性列）= 1329px，于是横向滚动约 630px。
 
    注意：这份「预算说明」在历史上曾与 CSS 的实际数值漂移过（注释里写 92/106，
    CSS 里是 132/132）。改动任何一列的默认宽度时**同时**改三处：
@@ -196,8 +201,16 @@
 /* 余额列：主额度桶的两行形态（套餐名 + 进度条与读数）需要比纯读数宽一档 ——
    84px 放不下「ZCode Trust Build」+「8800万 / 1亿 token」，套餐名会被省略成
    「ZCode Tr…」而失去意义。132 与优先级列同档，是「一行塞得下套餐名」的最小值。
-   读数更长的家（可用 4300 积分）仍按省略号收口、完整值在 title 里。 */
-.cell-usage { width: 132px; }
+   读数更长的家（可用 4300 积分）仍按省略号收口、完整值在 title 里。
+
+   **本轮 132 → 148**（逐窗口那一档改成紧凑背景条，见下方 `.usage-flat-compact`）：
+   那一档最宽的一行是 Antigravity 的「Claude/GPT 每周 100%」——三段合计约 111px
+   （组名 55 + 窗口 20 + 读数 26 + 两处 5px 间距），而 132 的内容盒只有
+   132 − 16（td 内边距）− 12（行内内边距）= 104px，组名会被砍成「Claude/GP…」。
+   而「Claude/GPT」正是这个功能要让人看见的那一组（issue #288），砍掉它就白做了。
+   148 的内容盒 120px 恰好留出余量；代价是固定列合计 1013 → 1029、
+   横滚线 1313 → 1329（16px，与这份文件「宁可横滚也不压列」的口径一致）。 */
+.cell-usage { width: 148px; }
 /* 操作列：四颗按钮的最坏情况（签到 / 已签到 / 余额 / 设置 / ⋯ 里同时出现的那四颗），
    本次改造从 250 收到 200 —— 理由见文件头的列宽预算。
    这个值是**量出来的**，不是估的：按 11.5px 字号、每颗按钮左右各 8px 内边距、
@@ -811,6 +824,90 @@ body.queue-dragging * { cursor: grabbing !important; }
   background: var(--primary);
 }
 .usage-flat-track.over i { background: var(--danger); }
+
+/* ── 紧凑形态：背景色带 + 一行内读数（`.usage-flat-compact`）───
+   条数多的格子用它（Antigravity 的两组 × 两窗口 = 4 条，见 islands 的
+   `usageWindows`：判据是这一组窗口数，不是 provider）。
+   上面那套 stack 形态一条要 22px 上下（名称/读数一行 + 条一行），4 条会把整行
+   表格撑高一大截；这里把**比例做成背景色带**、文字压在同一行里（`Gemini 5h 72%`
+   这种读法），一条只要 16px —— 信息一点没少（标签、读数、比例都在），省的是行高。
+   色带画的是**剩余**比例、半透明（0.16），文字因此始终压在浅底上：满格时也不会
+   走到「白字压饱和底」那种读不清的组合。 */
+.usage-flat-compact {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 3px;
+  padding: 2px 6px;
+  min-width: 0;
+  height: 16px;
+  border-radius: var(--r-xs);
+  background: var(--surface-inset);
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 第一条贴着格顶（与相邻几列的读数对齐），间距照 stack 形态的处置；
+   前面跟着套餐徽标时同理（那一行已经给了下边距） */
+.usage-cell > .usage-flat-compact:first-child,
+.usage-plan + .usage-flat-compact { margin-top: 0; }
+
+/* 背景色带：宽度就是剩余比例。绝对定位（不占流）—— 放流里会把文字挤到右边，
+   标签与读数的对齐跟着乱；`position: relative` 的字在上面，所以它压在底下 */
+.usage-flat-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: var(--ok);
+  opacity: 0.16;
+  transition: width 0.3s ease-out;
+}
+.usage-flat-compact.warn .usage-flat-fill { background: var(--warn); }
+.usage-flat-compact.bad .usage-flat-fill { background: var(--danger); }
+/* 没读到比例（`percent` 为 null）时不画色带，底色留着 —— 一条满格或整条空的
+   色带与「还剩多少」读起来是相反的两种意思（见 `usageWindows` 的缺失口径） */
+.usage-flat-compact.muted .usage-flat-fill { display: none; }
+
+/* 标签分两段：**组名**（可省略，同一家的几条共用一个组名）与**窗口码**
+   （不吃压缩 —— 「Gemini 5 小时」与「Gemini 每周」唯一的差别就在这半段，
+   连它一起省略会让两行长得一模一样）。百分比同样不压缩：把「100%」挤成
+   「10…」比标签被截断糟得多。组名因此占掉剩下的全部宽度、放不下才省略。 */
+.usage-flat-cname {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--text-3);
+}
+
+.usage-flat-cwin {
+  position: relative;
+  flex: none;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--text-3);
+}
+
+.usage-flat-cview {
+  position: relative;
+  flex: none;
+  /* 读数**恒贴右缘**：没有组名的那一档（OpenCode 的行只有窗口，没有组）里
+     它是唯一撑不起宽度的元素，不推一把就会与窗口名挤在左边 */
+  margin-left: auto;
+  white-space: nowrap;
+  text-align: right;
+  font-size: 10.5px;
+  font-weight: 600;
+}
+.usage-flat-compact.ok .usage-flat-cview { color: var(--ok); }
+.usage-flat-compact.warn .usage-flat-cview { color: var(--warn); }
+.usage-flat-compact.bad .usage-flat-cview { color: var(--danger); }
+.usage-flat-compact.muted .usage-flat-cview { color: var(--text-3); }
 
 /* ─── 余额明细弹层的内容（portal 渲染，样式挂在 PopoverContent 上）───
    结构照原型 prototype/codearts-balance.html：两组（积分 / token 额度）、

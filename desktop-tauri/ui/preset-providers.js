@@ -58,7 +58,13 @@
    *                      · Anthropic-Beta —— 启用 interleaved-thinking 等 beta
    *                        特性，Claude 兼容的 coding 端点按 9Router 同款下发；
    *                      · OpenRouter 的 HTTP-Referer / X-Title —— 它的推荐
-   *                        标识头（缺了不影响转发，照抄保持同款行为）。
+   *                        标识头（缺了不影响转发，照抄保持同款行为）；
+   *                      · Cline Pass 的一组 Cline 客户端伪装头 —— 它的上游按
+   *                        客户端形态校验（`X-CLIENT-TYPE: cline-sdk` 是硬门槛，
+   *                        缺了一律 403），取值抄自后端 Cline 适配器的
+   *                        DEFAULT_HEADERS（providers/cline/headers.rs，与 Agent
+   *                        内置家发出去的是同一套）。**不要抄别的网关的客户端值**
+   *                        （如 9Router 的 9router 头）—— 上游认的是 Cline 客户端。
    *   anthropicToolType  "custom" = 发 anthropic 上游时给每个工具补 type
    *                      （MiniMax 的 Claude 兼容端点拒绝无 type 的工具；
    *                      注意 DeepSeek 恰好相反、拒绝 type:"custom"，而本网关
@@ -214,6 +220,36 @@
       // 的模块头（含 2026-10-14 对着官方客户端 v2.0.27 的实测记录）
       clientEmulation: 'opencode',
       account: { noAuth: true },
+    },
+    {
+      // Cline Pass 是订阅制 coding 套餐，与上面两张 OpenCode 卡同类，按语义插在
+      // 它们后面（末尾那三家是「后到居后」追加的，见那一段的说明）。key 写
+      // `clinepass` 而不是 Agent 内置家的 `cline-pass`：预置卡的 key 只是模板
+      // 标记（卡片上是 `preset:clinepass`），与内置家的 provider id 是两个命名
+      // 空间，别混用 —— 那家的 OAuth 添加入口已从 Agent 段收起，只剩这张卡。
+      // 图标：复用 Agent 段那张 Cline 品牌图 cline.png（与内置家 cline-free /
+      // cline-pass 同一张图，卡片视觉一致）。
+      key: 'clinepass', name: 'Cline Pass', icon: 'cline.png',
+      protocol: P.openai, baseUrl: 'https://api.cline.bot/api/v1',
+      hint: wbI18n.t('Cline Pass 的 API Key 在 app.cline.bot 获取（订阅制）；端点为 OpenAI 兼容，模型清单以 Cline 控制台为准，模型名在模型管理里按裸名添加（如 glm-5.2 / kimi-k2.7-code / deepseek-v4-pro）；上游按客户端形态校验，所需的客户端请求头已随卡预置'),
+      // 请求头抄自本网关 Cline 适配器的官方客户端形态（后端 providers/cline/
+      // headers.rs 的 DEFAULT_HEADERS，与 Agent 内置家 cline-pass 发出去的是同
+      // 一套）：上游按客户端形态校验，X-CLIENT-TYPE: cline-sdk 是硬门槛（缺了
+      // 免费池一律 403），其余版本 / 平台头让请求更贴近官方 CLI。**不要抄别的
+      // 网关（如 9Router）的 9router 客户端值** —— 那家的伪装头只适用它自己。
+      quirks: {
+        headers: {
+          'User-Agent': 'Cline/3.0.62',
+          'HTTP-Referer': 'https://cline.bot',
+          'X-Title': 'Cline',
+          'X-IS-MULTIROOT': 'false',
+          'X-CLIENT-TYPE': 'cline-sdk',
+          'X-CLIENT-VERSION': '3.0.62',
+          'X-PLATFORM': 'terminal',
+          'X-PLATFORM-VERSION': '3.0.62',
+          'X-CORE-VERSION': '0.0.70',
+        },
+      },
     },
     {
       key: 'ollama-local', name: 'Ollama（本地）', icon: 'ollama-local.png',

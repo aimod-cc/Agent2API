@@ -125,6 +125,33 @@
 }
 .asst-msg.bot .body pre code { padding: 0; border: 0; background: transparent; }
 .asst-msg.bot .body table.asst-mini-table { margin: 8px 0; }
+
+/* 助手正文里的 Markdown 表格（渲染见 markdown.js 的 renderTable）：与 .asst-mini-table 同一观感 */
+.asst-msg.bot .body .md-table {
+  margin: 8px 0;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.asst-msg.bot .body .md-table th,
+.asst-msg.bot .body .md-table td {
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+
+.asst-msg.bot .body .md-table th {
+  background: var(--surface-3);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.asst-msg.bot .body .md-table th.md-ta-c,
+.asst-msg.bot .body .md-table td.md-ta-c { text-align: center; }
+
+.asst-msg.bot .body .md-table th.md-ta-r,
+.asst-msg.bot .body .md-table td.md-ta-r { text-align: right; }
+
 .asst-msg.bot .body b, .asst-msg.bot .body strong { font-weight: 650; }
 
 .asst-msg .body .mono { font-family: var(--font-mono); font-size: 11.5px; }

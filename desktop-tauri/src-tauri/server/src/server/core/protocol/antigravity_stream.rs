@@ -36,15 +36,17 @@
 //!     帧（带 usage 且 choices 为空的帧是收尾帧形态，会让部分客户端提前认为
 //!     流已结束 —— 与 `commandcode_outbound` 逐字同形）。
 //!
-//! ── thoughtSignature 的带出方案（限制见报告）─────────────────
-//! 两套参考都在服务端**按 call id / 会话缓存签名**、历史不带时回填缓存值或
-//! 默认签名；本仓刻意不做跨请求状态缓存，OpenAI chat 又没有签名字段，因此：
-//! 签名随 tool_call 增量带出，位置取 Google 自家 OpenAI 兼容端点的官方字段
-//! `extra_content.google.thought_signature`；客户端下一轮原样带回时由请求侧
-//! （`antigravity_outbound` 的 `call_signature`）回填到 `functionCall`。
-//! 客户端不回带 → 省略（不发明默认签名）。非流式客户端走聚合器时该字段由
-//! `merge_tool_call` 保留（2026-10-14 前曾被丢弃，导致下一轮工具续接被上游
-//! 400「missing a thought_signature」，issue #237）。
+//! ── thoughtSignature 的带出与回填（issue #291）───────────────
+//! 上游把历史回放里 functionCall 的签名当**硬性要求**：缺 → 400「missing a
+//! thought_signature」（issue #237 修的是非流式聚合器丢 `extra_content` 那半，
+//! 客户端带回签名的路径），伪造 → 400「Corrupted thought signature」——
+//! 不发明默认签名。签名随 tool_call 增量带出，位置取 Google 自家 OpenAI
+//! 兼容端点的官方字段 `extra_content.google.thought_signature`；**同时入
+//! 服务端缓存**（[`super::antigravity_signature_cache`]，两档键见那个模块头）
+//! —— 多数 OpenAI 兼容客户端下一轮会把非标的 `extra_content` 丢掉，请求侧
+//! （`antigravity_outbound` 的信封组装）按缓存回填，客户端带回的签名仍最优先
+//! （`call_signature` 的既有路径）。会话键从请求信封随 [`Self::new`] 带进来
+//! （兜底档的写入键）。
 //!
 //! ── 硬约束 ──────────────────────────────────────────────────
 //! release 是 `panic=abort`：本文件零 unwrap/expect/panic。
@@ -117,12 +119,17 @@ pub struct ChatFromAntigravityStream {
     tools_emitted: bool,
     /// 独占一帧的签名 part 暂存给紧随其后的 functionCall（9router 同款）
     pending_signature: Option<String>,
+    /// 本次响应所属会话的信封 `sessionId`（签名缓存兜底档的写入键，见模块头；
+    /// 分派时从请求信封带出，拿不到为空串）
+    session: String,
     /// usage（最后一帧覆盖式吸收，与两套参考同口径）
     usage: Option<Value>,
 }
 
 impl ChatFromAntigravityStream {
-    pub fn new(model: &str) -> Self {
+    /// `session` 是请求信封里的 `sessionId`（会话稳定键，签名缓存兜底档的
+    /// 写入键；拿不到给空串 —— 只损失兜底档，主键档照常工作）
+    pub fn new(model: &str, session: &str) -> Self {
         Self {
             buffer: SseLineBuffer::new(),
             model: model.to_string(),
@@ -135,6 +142,7 @@ impl ChatFromAntigravityStream {
             tool_index: 0,
             tools_emitted: false,
             pending_signature: None,
+            session: session.to_string(),
             usage: None,
         }
     }
@@ -324,6 +332,12 @@ impl ChatFromAntigravityStream {
             Some(Value::Null) | None => "{}".to_string(),
             Some(other) => json_text(other),
         };
+        if let Some(signature) = signature.as_deref() {
+            // 签名入服务端缓存（issue #291，见模块头）：多数客户端下一轮不会
+            // 回带非标的 `extra_content`，请求侧按这两档键回填
+            super::antigravity_signature_cache::remember_call(&id, signature);
+            super::antigravity_signature_cache::remember_for_session(&self.session, &name, signature);
+        }
         let index = self.tool_index;
         self.tool_index += 1;
         self.tools_emitted = true;

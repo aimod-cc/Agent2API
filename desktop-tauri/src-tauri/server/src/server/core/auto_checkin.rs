@@ -161,7 +161,7 @@ pub fn default_time() -> String {
 /// 这是「有签到或每日活跃任务」的清单，不是「有积分概念」的清单：CatPaw 有积分
 /// 查询但没有签到，因此不在此列 —— 它的账号在批量签到里被算作 `skipped`。
 /// 加一家之前先确认它的签到链路真的存在（一个点了必然报错的复选框比没有更糟）。
-pub const CHECKIN_PROVIDERS: [&str; 14] = [
+pub const CHECKIN_PROVIDERS: [&str; 15] = [
     "workbuddy",
     "workbuddy-intl",
     "raccoon",
@@ -176,10 +176,14 @@ pub const CHECKIN_PROVIDERS: [&str; 14] = [
     // 追加在**末尾**：这个数组的顺序就是界面复选框与签到中心分组行的顺序，
     // 插在中间会让所有存量用户的清单顺序变一下（没有功能影响，但没必要动）。
     "codearts",
+    // 智谱清言：「每日登录积分」即本家的签到（`chatglm::checkin`）。
+    // 访客账号会被实现判成中性未领取（没有积分体系），不算失败。
+    "chatglm",
     // ModelScope（魔搭）两个站点：签到就是调一次登录信息接口
     // （`GET {网页站}/api/v1/users/login/info`，调用即触发当日魔粒，幂等），
     // 链路 2026-10-16 实测存在，见 `providers::modelscope::checkin` 的模块头。
     // 两个站点各打各的网页站，令牌不通用（打错得 401）。
+    // 排在 chatglm 之后：上游 v3.0.8 先引入了 chatglm，保持它原来的位置不动。
     "modelscope",
     "modelscope-intl",
 ];
@@ -199,17 +203,24 @@ pub fn default_providers() -> Vec<String> {
 /// 会让这一家的勾选框再也取消不掉（读完就补回来，界面上表现为「取消勾选没反应」）。
 /// 所以补齐只做一次，靠配置里的版本号记账；版本一旦写上去，用户之后再取消勾选
 /// 就真的生效了。执行点见 `checkin_schedules::extend_providers_once`。
-pub const PROVIDERS_VERSION: i64 = 3;
+pub const PROVIDERS_VERSION: i64 = 4;
 
 /// 「哪一版加入的家」——条目清单的版本低于它 = 这家还没被提供过 ⇒ 补进去。
 /// 版本 1 = 多条目改造上线时的形态（9 家；`qoder-intl` 由 `normalize_providers`
 /// 的存量兼容规则跟着 `qoder` 带上，不在这里重复登记）。
-/// 版本 3 = ModelScope 的两个站点。
-const PROVIDERS_ADDED_IN: [(&str, i64); 4] = [
+///
+/// ⚠️ **版本号是「这一版加了哪几家」的记账，不是代码版本的序号** —— 合并上游
+/// 时最容易撞的就是它：上游 v3.0.8 用 3 装了 chatglm，本分支随后用 4 装
+/// ModelScope 的两站。两家都必须保留各自的版本号，谁都不许覆盖谁，
+/// 否则先升级到那一边的用户永远补不进另一边的家（版本号已经写进配置了）。
+///
+/// 版本 3 = chatglm（上游 v3.0.8）；版本 4 = ModelScope 国内版 / 国际版。
+const PROVIDERS_ADDED_IN: [(&str, i64); 5] = [
     ("officeace", 2),
     ("codearts", 2),
-    ("modelscope", 3),
-    ("modelscope-intl", 3),
+    ("chatglm", 3),
+    ("modelscope", 4),
+    ("modelscope-intl", 4),
 ];
 
 /// 版本 `version` 之后才加入清单的家（按注册顺序）。空数组 = 这一版没有新家，
@@ -888,8 +899,8 @@ impl AutoCheckin {
     /// 窗口最长 `2 × MAX_JITTER_MINUTES`（4 小时）。若照 `fire_for` 那样在
     /// tick 里一路 await 到底：① tick 循环被占住，其他条目到点会被延后；
     /// ② 全局 `running` 会被持有一整个窗口，期间所有手动签到都被拒。
-    /// 所以这里只做**同步的准备工作**（落账、起后台任务）后 spawn，
-    /// tick 立即返回；目标解析与 sleep 都在后台任务里、且不在锁内。
+    /// 所以这里只做**同步的准备工作**（落账、解析目标、算好计划）后 spawn，
+    /// tick 立即返回；账号之间的等待（sleep）都在后台任务里、且不在锁内。
     fn spawn_spread(&self, schedule: &Schedule, reason: &str, today: &str) {
         let key = format!("{}|{today}", schedule.id);
         {

@@ -2,6 +2,7 @@
 
 > 本文档面向维护者与 AI 代理：Agent2API（workbuddy）桌面端 + Docker 镜像的**标准发版流程**。
 > 所有发布动作都由 `.github/workflows/` 下的两个工作流自动完成，人工只负责「提交、打 tag、挂 GitHub Release、验收」。
+> beta 版（预发布）是同一套流程的变体，完整步骤见第 4 节末尾。
 
 ## 0. 两条人工红线（AI 代理必须停下等确认）
 
@@ -23,7 +24,7 @@
 
 - **合并 PR 时 base 选 `beta`**，不要选 `main`。PR 直接合进 `main`，等于把还没发布的改动提前塞进发版分支；之后还得反过来把 `main` 合回 `beta`，平白多一次合并提交、多一次冲突机会。已经把 PR 开成 base=main 的，先在 PR 页面上把 base 改成 `beta` 再合。
 - **本地改动也提交到 `beta`**（写代码、改文档、解冲突都算），推 `origin/beta`；合并结果的核对、构建自检都在 beta 上做完。
-- **只有发版才切到 `main`**：`git switch main` → 把 beta 合进来 → 按第 6、7 节写发布提交、推 main、打 tag；tag 必须落在 `main` 上。发完版后 beta 再把 main 合回来，两边保持一致。
+- **只有正式发版才切到 `main`**：`git switch main` → 把 beta 合进来 → 按第 6、7 节写发布提交、推 main、打 tag；tag 必须落在 `main` 上。发完版后 beta 再把 main 合回来，两边保持一致。（beta 版是这条规则唯一的例外：不切 `main`，tag 落在 `beta` 分支自己身上 —— 见第 4 节末尾。）
 - **代理不要自作主张选落脚分支**：用户没说要发版，就不要往 `main` 提交 / 推送，也不要把 PR 的 base 改成 `main`。
 
 ## 2. 合并 PR：保留原作者署名
@@ -66,6 +67,70 @@ GitHub 的归属规则只有一条：**提交头里的 author 邮箱，出现在
   5. `desktop-tauri/src-tauri/server/Cargo.toml`
 - 应用内「关于」与更新检查读的是 `env!("CARGO_PKG_VERSION")`（第 5 处），改完跑一次 `cargo check` 让 `Cargo.lock` 跟着刷新。
 
+### beta 版（预发布）：怎么发
+
+应用里有「设置 → 软件更新 → 更新设置 → **加入 beta 版**」开关：**打开的人才收到 beta
+更新，没打开的人只看正式发布。** beta 版不是另一条流水线，而是上面这套流程的一个变体 ——
+唯一的结构差别是「**从 `beta` 分支打带预发布后缀的 tag**」，提交、tag、Release、验收逐字照旧。
+
+第 0 节的两条红线同样适用：版本号与更新日志先给用户过目、确认了再动手。
+
+```bash
+# 1. 在 beta 分支上动手（beta 版不碰 main）
+git switch beta && git pull
+git status --short          # 必须为空，有改动先提交或清理
+
+# 2. 五处版本号一起改成「与 tag 逐字一致」的形态：
+#    tag 打 v3.1.0-beta.1 → 五处都写 3.1.0-beta.1（清单见上面）
+cargo check                 # 顺带刷新 Cargo.lock
+
+# 3. 提交并推 beta 分支（提交信息 = 这次的 beta 更新日志，格式同第 6 节）
+git commit -am "…beta 版日志…"
+git push origin beta
+
+# 4. 打 tag 并推：tag 落在 **beta 分支** 的提交上（只有正式版才要求落 main）
+git tag v3.1.0-beta.1
+git push origin v3.1.0-beta.1
+
+# 5. 两个工作流跑完后挂 Release（脚本按 tag 里的 `-` 自动标 pre-release）
+gh run list --limit 4       # 手动跑 gh 前先设代理，见第 10 节
+bash scripts/release.sh v3.1.0-beta.1
+```
+
+验收就三条：Release 显示 **Prerelease**、exe / dmg 附件齐全、Docker Hub 上 `:latest` 的
+Pushed 时间**没有**跟着变（完整清单见第 9 节）。
+
+**三处不能错**，每处错了都有明确症状：
+
+1. **五处版本号漏了后缀**（写成 `3.1.0`）：比较是按 semver 做的，运行版本 `3.1.0` 对线上
+   tag `3.1.0-beta.1` 会判成「当前比线上新」，**beta 用户永远收不到更新**。五个文件都接受
+   带后缀的版本号（Cargo / npm / tauri.conf.json 都认），照 tag 抄即可。
+2. **Release 漏标 pre-release**：标记就是开关的分界线 —— 正式通道走 GitHub 的
+   `/releases/latest`，它排除预发布，只有开了开关的人从 `/releases` 列表里看到 beta。
+   **漏标 = beta 被所有正式版用户当成正式更新收到。** `scripts/release.sh` 已按「tag 里带
+   `-`」自动标记，重跑收尾时也会把标记纠正回来，所以这一条只要走脚本就不用操心。
+3. **tag 打在 `main` 上**：beta 是集成分支，beta 版要的是它的快照。打在 `main` 上要么不含
+   beta 分支的新改动（白测一场），要么等于把还没发布的改动提前推进 `main` —— 后者正是第 1
+   节明确不做的事。
+
+docker 的 `:latest` 不会被 beta tag 移动（`.github/workflows/docker.yml`），镜像仍出
+`3.1.0-beta.1` 那个版本 tag，想尝鲜的按版本号拉。
+
+后续常见三件事：
+
+- **再发一个 beta**：核心号不变、递增序号（`3.1.0-beta.2`，五处一起改，上面那套命令照走）。
+  预发布序号能分出先后（`beta.2` > `beta.1`），已经在 beta 上的人照样收到更新 —— 所以 beta
+  之间也要保持「tag 与版本号逐字一致」。
+- **转正**（发 `3.1.0` 正式版）：按第 6、7 节在 `main` 上走，五处版本号去掉后缀。
+  **beta 用户不会自动接回正式版**：开关开着的人只看预发布版（`pick_listed_release`
+  按「当前跑的是不是 beta 版」筛），转正的 `3.1.0` 对他们不算更新 —— 要留在 beta 频道的人
+  等下一个 beta（`3.2.0-beta.1` 一出现就收得到）；想回正式版由用户自己关开关，关掉后
+  只在**版本号高于他手上那个 beta** 的正式版发布时才收到更新（`3.1.0` > `3.1.0-beta.1`，
+  但更早的 `3.0.9` 不会把他降级）。
+- **「打开了却没有反应」**：仓库里一个预发布 Release 都没有时，打开这个开关也只会看到
+  正式版 —— 第一次 beta 发出去之后才有效果（跑正式版的人打开开关时仍是「预发布一并
+  参与、取最高」，只是没有 beta 可拿）。
+
 ## 5. 提交：保证工作区干净
 
 发版前必须把工作区收干净，tag 里的代码就是发出去的代码：
@@ -82,7 +147,7 @@ cargo check               # 或前端有改动时做一次构建自检
 - 格式沿用历史版本的编号清单，每行一条，带分类前缀：`新增：` / `优化：` / `修复：` / `更新：` / `移除：`，最后一条固定 `版本：X.Y.Z → X.Y.Z+1`；
 - 内容取「上个 tag 以来的全部提交」综合整理（`git log vX.Y.Z..HEAD --oneline`），纯 CI/临时的调试提交归并成一条流程性描述即可；
 - 本次没有代码改动时用空提交承载：`git commit --allow-empty -F 更新日志.txt`（历史发版两种做法都有先例）。
-- 更新日志草稿与历史发布说明统一写在 `docs/release-notes/<版本号>.md`（如 `docs/release-notes/2.9.2.md`），不要在项目根目录新建 `.release-notes-*.md` —— `docs/` 整目录已在忽略列表里，新增文件不必再单独加忽略规则。
+- 更新日志草稿与历史发布说明统一写在 `docs/release-notes/<版本号>.md`（如 `docs/release-notes/2.9.2.md`），不要在项目根目录新建 `.release-notes-*.md` —— `docs/release-notes/` 已在忽略列表里（只忽略这个目录，`docs/` 下的其它文档正常入库），新增文件不必再单独加忽略规则。
 
 ## 7. 打 tag 并推送：一条 tag 触发全部构建
 
@@ -92,12 +157,15 @@ git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
 
+（beta 版同法，只是 tag 带预发布后缀、落在 `beta` 分支的提交上：`git tag vX.Y.Z-beta.N`
+→ `git push origin vX.Y.Z-beta.N`，见第 4 节末尾。）
+
 推 `v*` tag 会**同时触发两个工作流**（`.github/workflows/`）：
 
 | 工作流 | 产出 | 说明 |
 |---|---|---|
 | `build.yml`（build） | Windows NSIS 安装包 + macOS universal dmg | `macos` / `windows` 两个 job 构建并上传 artifact（macOS 包**只能在 CI 构建**，无法从 Windows 交叉编译）；安装包只挂 artifact，GitHub Release 由本地脚本挂载（见第 8 节） |
-| `docker.yml`（docker） | Docker Hub `aimodcc/agent2api:<版本>` + `:latest`（amd64 / arm64 双架构） | 手动 `workflow_dispatch` 触发时只出 `:dev` 测试 tag，不碰正式 tag |
+| `docker.yml`（docker） | Docker Hub `aimodcc/agent2api:<版本>` + `:latest`（amd64 / arm64 双架构） | 手动 `workflow_dispatch` 触发时只出 `:dev` 测试 tag，不碰正式 tag；beta tag（版本号带 `-`）只出 `<版本>`，**不移动 `:latest`** |
 
 跟踪进度（手动跑 gh 前要先设代理，见第 10 节）：
 
@@ -120,11 +188,16 @@ bash scripts/release.sh vX.Y.Z <run-id>   # 或显式指定 run
 （= 更新日志，见第 6 节）创建 / 更新 GitHub Release 并挂附件 → 打印验收
 提示。幂等可重跑（`--clobber` 覆盖附件）。
 
+**beta tag（`v3.1.0-beta.1`）不用改任何参数**：脚本按「tag 里带 `-`」自动把
+Release 标成 pre-release（重跑时也会把标记纠正回来），验收提示里会写明这一点 ——
+标记是应用内「加入 beta 版」开关的分界线（完整步骤见第 4 节末尾）。
+
 ## 9. 验收清单（三处核对）
 
 - [ ] GitHub Release：`gh release view vX.Y.Z`（手动跑 gh 前先设代理，见第 10 节）—— 正文日志齐全，exe / dmg 两个附件都在；
 - [ ] Docker Hub：`aimodcc/agent2api` 的 Tags 页出现 `<版本>` 与 `latest`，Pushed 时间一致；
-- [ ] 安装包「关于」页版本号与 tag 一致。
+- [ ] 安装包「关于」页版本号与 tag 一致；
+- [ ] 只有 beta 版多一条：Release 显示 **Prerelease**，且 Docker Hub 上 `latest` 没有跟着动（见第 4 节末尾的 beta 版流程）。
 
 ## 10. 已知坑与排查
 

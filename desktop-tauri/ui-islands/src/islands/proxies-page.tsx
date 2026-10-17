@@ -1,6 +1,7 @@
 /**
  * Agent2API · 网络代理页（代理池：列表 / 新增 / 编辑 / 删除 / 启停 / 连通性测试
- * / 同步 Clash Verge / 勾选批量测试与批量删除）。
+ * / 勾选批量测试与批量删除）。Clash 出口同步与订阅导入同在「订阅管理」弹窗里
+ * （见 proxies-sub-view.tsx），页面上不再单列那颗按钮。
  *
  * 对照 OmniProxy 的 ProxiesPage（那张带 CRUD + 测试 + Clash 同步 + 批量的代理表），
  * 存储与解析在 Rust 侧：`core::proxy_pool` 是唯一事实来源（`kv` 的 `proxyPool`
@@ -27,8 +28,9 @@
  *     「订阅管理」弹窗里（见下）。
  *   两种只读来源在「操作」列**只有测试**（外加订阅孤儿的删除）：去哪儿改由只读
  *   开关的悬浮提示说明，不再摆两颗永远点不动的「去 X 改」按钮占地方。
- *   同步有两处触发：进页面时的列表接口（后端自动同步）与面板头的
- *   「同步 Clash Verge」按钮（手动，会报本次变更数）。
+ *   同步有两处触发：进页面时的列表接口（后端自动同步）与「订阅管理」弹窗里的
+ *   「同步 Clash Verge」按钮（手动，会报本次变更数 —— 2026-10 从工具条搬进那个
+ *   弹窗，与订阅摆在一处：两者都是「把外面的出口集合整份镜像进池」）。
  *
  * ── 「启用」列不再只读：本页开关管的是**本端用不用它** ─────────
  * 名称与端口必须跟随来源侧，但「这条本端用不用」是用户自己的事：某条节点常年
@@ -132,7 +134,7 @@ import {
   batchRemove, batchTest, clearSelection, durationText, enableHint,
   formatTime, getSnapshot, isDisabledSubscriptionItem, isMirrorOffItem, isOrphanSubscriptionItem,
   isPicked, isReadonlyPoolItem, isUnprovisionedItem, items, loadPanel, readonlyHint, removeItem,
-  setAllPicked, subscribe, syncClash, testItem, toggleItem, togglePick, wb,
+  setAllPicked, subscribe, testItem, toggleItem, togglePick, wb,
   type ProxyPoolItem,
 } from './proxies-state'
 import {
@@ -473,7 +475,7 @@ function ProxiesPage() {
         <tr>
           <td colSpan={columns.length} className='empty'>
             {ready
-              ? t('还没有代理。点右上角「＋ 新增代理」手填一个，点「同步 Clash Verge」把 Clash 的出口导进来，或在「订阅管理」里导入订阅节点。')
+              ? t('还没有代理。点右上角「＋ 新增代理」手填一个，或在「订阅管理」里导入订阅节点、同步 Clash Verge 的出口。')
               : t('加载中…')}
           </td>
         </tr>
@@ -532,18 +534,12 @@ function ProxiesPage() {
             {t('设置')}
           </Button>
           {/* 订阅管理：订阅表的唯一入口（页面上不再有第二个面板）。
-              带订阅条数 —— 0 条时只写按钮名，免得出现「订阅管理（0）」这种读数 */}
+              带订阅条数 —— 0 条时只写按钮名，免得出现「订阅管理（0）」这种读数。
+              「同步 Clash Verge」也在这个弹窗里（与订阅同属「把外面的出口集合
+              整份镜像进池」，摆在一处），页面上因此不再单列那颗按钮 */}
           <Button variant='outline' disabled={snapshot.batchBusy}
             onClick={() => setSubsOpen(true)}>
             {subs.length ? t('订阅管理（{n}）', { n: subs.length }) : t('订阅管理')}
-          </Button>
-          {/* 同步放在刷新左边：它做的事比「刷新」多一层（把 Clash 的出口集合
-              镜像进池），而进页面时的那次自动同步是静默的 —— 用户想在
-              「我刚在 Clash 里加了出口」之后立刻见效时点它。
-              批量在跑时两个都停：它们会把正在被批量流程改写的列表整份换掉 */}
-          <Button variant='outline' disabled={snapshot.syncing || snapshot.batchBusy}
-            onClick={() => void syncClash()}>
-            {snapshot.syncing ? t('同步中…') : t('同步 Clash Verge')}
           </Button>
           <Button variant='outline' disabled={snapshot.loading || snapshot.batchBusy}
             onClick={() => { void loadPanel(); void loadSection() }}>
@@ -665,8 +661,8 @@ function ProxiesPage() {
         leading={(
           /* 脚注只留**状态**（Clash 没同步上 / 列表读失败）：那两句用法说明
              （出口怎么被账号引用、只读镜像去哪儿改）已经收进各自的入口 ——
-             账号弹窗的「出网代理」、面板头的「订阅管理」与「同步 Clash Verge」，
-             页脚常驻一大段解释只会把读数挤掉 */
+             账号弹窗的「出网代理」、面板头的「订阅管理」（含里面的
+             「同步 Clash Verge」），页脚常驻一大段解释只会把读数挤掉 */
           <>
             {/* Clash 状态常驻在页脚：同步是静默的（进页面自动跑一次），没有这句话时
                 「为什么一条 Clash 条目都没有」只能靠点按钮 + 看 toast 才知道 */}

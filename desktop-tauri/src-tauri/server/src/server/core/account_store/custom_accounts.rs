@@ -32,10 +32,11 @@
 //! `apiKey` 非空时用它的 SHA-256 前 12 位：**同一把 key 重复添加会合并更新
 //! 同一条记录** —— 与各家「同标识合并」（workbuddy 的 `user-<uid>`、Qoder 的
 //! `qoder-<region>-<hash>`）语义一致，用户粘错重试不会堆出重复账号。
-//! `noAuth` 时用 `provider_id` 派生（同一家只有一条匿名账号，同样合并且跨
-//! 重装稳定）。两者都没有时退化为随机 12 位（`getrandom`）：没有稳定标识可
-//! 派生，但 id 的唯一性不能打折（并发/重装都要安全，理由同 `custom_providers`
-//! 的 id）。派生规则见 [`account_id_for`]。
+//! 没有 key 时（显式声明无需鉴权，或凭证还没配）退化为随机 12 位
+//! （`getrandom`）：没有稳定标识可派生，而且**同一家并存多条无需鉴权账号是
+//! 刻意的**（各自可配不同的出网代理，转发按优先级轮着走），重复添加就该是
+//! 新的一条 —— id 的唯一性靠随机段保证（并发/重装都要安全，理由同
+//! `custom_providers` 的 id）。派生规则见 [`account_id_for`]。
 //! 前缀 `custom-acct-` 与 provider id 的 `custom-` **刻意不同形**：
 //! `is_custom_provider_id` 按 provider 前缀判定，账号 id 若同形会被误认成
 //! 提供商 id（两套 id 空间混淆是难查的静默错配）。
@@ -66,6 +67,21 @@ const MAX_NAME_CHARS: usize = 100;
 /// 上游 key 一般 32~256 字符，8192 与 `MAX_TOKEN_LENGTH` 同量级。
 const MAX_API_KEY_LENGTH: usize = 8192;
 
+/// `add_custom_account` 的返回：落盘记录的公开形态 + 这次是新建还是更新。
+///
+/// 幂等口径（见 [`account_id_for`]）会让「同一把 key 的重复添加」合并进既有
+/// 记录。这次提交到底落在哪一边只有存储层
+/// 知道（日志里有 🔄 / ✅ 之分），把它作为返回值交给 API 层带出去，前端才能
+/// 把提示说成「已更新」而不是「已添加」（照搬「已添加」会让人以为列表会多
+/// 出一条，实测反馈过的误导）。
+pub struct CustomAccountUpsert {
+    /// 落盘记录的公开形态（与列表快照同一形状，见 `public_account`）
+    pub account: Value,
+    /// `true` = 新建了一条记录；`false` = 合并更新了既有记录（id 命中同 key
+    /// 的账号）
+    pub created: bool,
+}
+
 impl AccountStore {
     // ─── 写：手动添加 ────────────────────────────────────────
 
@@ -89,16 +105,17 @@ impl AccountStore {
     ///   - `name` 由 `name` 参数决定（调用方已从请求体取好，与各家一致）。
     ///
     /// 幂等口径：`apiKey` 非空时同 key 重复添加 = **更新**既有记录（备注名 /
-    /// baseUrl 覆盖项随之更新，优先级与启用状态沿用）；`noAuth` 时同一家只有
-    /// **一条**匿名账号（id 由 provider 派生，重复添加同样合并）。没有撞上则
-    /// 新建。撞到**其它 provider** 的账号 id（hash 空间巧合）时报 409 而不是
-    /// 覆写。
+    /// baseUrl 覆盖项随之更新，优先级与启用状态沿用）。没有 key（无需鉴权 /
+    /// 凭证未配）则每次都是新建 —— 同一家并存多条无需鉴权账号是刻意的（各自
+    /// 可配不同的出网代理）。撞到**其它 provider** 的账号 id（hash 空间巧合）
+    /// 时报 409 而不是覆写。落在哪一边由返回值的
+    /// [`CustomAccountUpsert::created`] 表达，API 层原样透传给前端。
     pub fn add_custom_account(
         &self,
         provider_id: &str,
         payload: &Value,
         name: Option<&str>,
-    ) -> Result<Value, AccountStoreError> {
+    ) -> Result<CustomAccountUpsert, AccountStoreError> {
         let provider_id = provider_id.trim();
         if !provider_id.starts_with(custom_providers::ID_PREFIX) {
             return Err(AccountStoreError::bad_request(format!(
@@ -150,7 +167,7 @@ impl AccountStore {
         };
 
         let _guard = self.guard();
-        let id = account_id_for(provider_id, &api_key, no_auth)
+        let id = account_id_for(&api_key)
             .map_err(|error| AccountStoreError::new(error, 500))?;
         // 撞 id 保护（与 cline 同一考虑）：hash 空间巧合或手改数据都会撞上
         // 别家的记录，覆写会把那条记录的凭证一起弄丢
@@ -170,7 +187,8 @@ impl AccountStore {
         // 备注名兜底链：显式传入 → 记录里原有的 → 「账号 + apiKey 尾号」。
         // 尾号对人有参考价值（哪把 key）；无鉴权账号没有尾号可展示，退化成
         // 「<提供商名>（无需鉴权）」—— 它比一个光秃秃的「自定义账号」更能
-        // 回答「这条是什么」；两者都没有时才是那个通用兜底。
+        // 回答「这条是什么」；两者都没有时才是那个通用兜底。兜底名不做查重：
+        // 同家并存的多条无需鉴权账号默认同名（区分靠用户自己起的备注名）。
         let explicit_name = name
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -315,7 +333,10 @@ impl AccountStore {
                     .unwrap_or_else(|| provider_id.to_string()),
             ),
         );
-        Ok(self.public_account(&saved))
+        Ok(CustomAccountUpsert {
+            account: self.public_account(&saved),
+            created: existing.is_none(),
+        })
     }
 
     /// 删除某个自定义提供商名下的**全部账号**，返回删除条数。
@@ -833,25 +854,21 @@ fn credential_of_record(record: &StoredAccount) -> CustomCredential {
     }
 }
 
-/// 账号 id：`custom-acct-` + 12 位 hex。三条派生链，按凭证形态分派：
+/// 账号 id：`custom-acct-` + 12 位 hex。两条派生链，按凭证形态分派：
 ///
-///   - `apiKey` 非空 → 它的 SHA-256 前 12 位（同 key 合并，见模块头）；
-///   - `noAuth`（无 key）→ `"noauth\0" + provider_id` 的 SHA-256 前 12 位：
-///     同一家上游**只有一条**匿名账号，重复添加同样合并（与同 key 合并同一
-///     动机），且它在这家是稳定的 —— 卸载重装、改备注名都不会换 id；
-///   - 两者都没有（未配置凭证的记录）→ 随机 12 位（`getrandom`）。
+///   - `apiKey` 非空 → 它的 SHA-256 前 12 位：**同一把 key 重复添加合并更新
+///     同一条记录**（同 key 就是同一条上游线路，堆两条没有意义；用户粘错
+///     重试也不会堆出重复账号，见模块头）；
+///   - 没有 key（显式声明无需鉴权，或凭证还没配）→ 随机 12 位（`getrandom`）：
+///     **每次添加都是一条新账号**。同一家允许并存多条无需鉴权账号是刻意的
+///     （各自可配不同的出网代理、备注名，转发按优先级轮着走），它们没有任何
+///     可派生 id 的稳定标识 —— 随机段保 id 唯一，不把「重复添加」误当合并。
 ///
 /// 随机源失败时如实报错（本函数返回 Err）：本模块硬约束「绝不 panic」，
 /// 宁可让用户重试一次，也不落一条 id 可靠性没保证的记录。
-fn account_id_for(provider_id: &str, api_key: &str, no_auth: bool) -> Result<String, String> {
+fn account_id_for(api_key: &str) -> Result<String, String> {
     if !api_key.is_empty() {
         return Ok(format!("{CUSTOM_ACCOUNT_ID_PREFIX}{}", short_hash(api_key)));
-    }
-    if no_auth {
-        // `\0` 分隔：provider_id 里不可能出现它，于是「某把 key 恰好等于
-        // 这个拼接串」的碰撞在哈希之前就被排除
-        let seed = format!("noauth\u{0}{provider_id}");
-        return Ok(format!("{CUSTOM_ACCOUNT_ID_PREFIX}{}", short_hash(&seed)));
     }
     let mut bytes = [0u8; 6];
     getrandom::getrandom(&mut bytes)

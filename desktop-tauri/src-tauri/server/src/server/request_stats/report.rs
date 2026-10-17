@@ -8,8 +8,11 @@
 //!   - `overview` / `dailyTrend` / `heatmap` / `streak` 走**聚合**：
 //!     这些口径要跨年（热力图固定 365 天、`all` 可能一年以上），
 //!     而明细只留 30 天，靠明细算会越算越少。
-//!   - `cacheRates` / `cacheTrend24h` 走**明细**：窗口 ≤7 天，
-//!     且要精确到分钟/整点，按天的聚合行给不出这种精度。
+//!   - `cacheRates` 走**SQL 侧聚合**（`sql::sum_cache_windows` 一次算出四档
+//!     窗口的合计，本层只做零除与百分比）：四档窗口最长 7 天，而「按窗口求和」
+//!     没有精度损失 —— 把窗口内的明细搬回内存再遍历四遍，算出来的是一样的数。
+//!   - `cacheTrend24h` 走**明细**：要精确到本地整点，按天的聚合行给不出这种
+//!     精度；也只取近 24 小时的窄列（`sql::select_summary_rows`）。
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -32,6 +35,38 @@ pub(super) const UNKNOWN_ACCOUNT_LABEL: &str = "未知账号";
 
 /// 热力图固定返回的天数（与 range 解耦）
 pub(super) const HEATMAP_DAYS: i64 = 365;
+
+/// 报表要读的**明细窄列**（`sql::SUMMARY_COLUMNS` 的结构形态）。
+///
+/// 为什么要有这个独立类型（不复用 `RequestEntry`）：报表对明细的消费只有
+/// 「按整点归桶 + 按模型累计」两件事，用到的字段就是这 6 个。带上完整
+/// `RequestEntry` 意味着读取侧要按 25 列去取行（`route` / `attempt_details`
+/// 都在里面），而这份数据一个字段都用不上 —— 类型窄一分，读取那一侧就没法
+/// 「顺手多取几列」（见 `sql::select_summary_rows` 与 `db::schema` 的 v15 段）。
+#[derive(Clone, Debug)]
+pub(super) struct SummaryRow {
+    pub ts: i64,
+    pub model: String,
+    /// 上游实际发出的模型名（空串 = 一次都没发出去），统计键的回落见
+    /// [`model_stat_key`]
+    pub upstream_model: String,
+    pub total_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub prompt_tokens: i64,
+}
+
+/// 四档缓存命中率窗口：**JSON 键名 + 窗口毫秒**。
+///
+/// 两件事绑在一处是必须的：`cache_rates` 按这个数组的顺序取出 SQL 侧那四组
+/// 合计（`sql::sum_cache_windows` 的返回顺序与入参一一对应），键名又直接是
+/// 前端读的 `cacheRates.last10m` 等字段 —— 分成两个数组（一个放键名、一个放
+/// 毫秒值）迟早会漂成「第三档的键配了第二档的窗口」，且极难从界面上看出来。
+pub(super) const CACHE_WINDOWS: [(&str, i64); 4] = [
+    ("last10m", 10 * 60_000),
+    ("last1h", 60 * 60_000),
+    ("last24h", 24 * 60 * 60_000),
+    ("last7d", 7 * 24 * 60 * 60_000),
+];
 
 /// 逐天序列 / 连续天数的循环上限（兜底手改出来的超长区间）
 const MAX_TREND_DAYS: i64 = 4000;
@@ -248,11 +283,18 @@ pub(super) fn push_model_accum(list: &mut Vec<ModelAccum>, model: &str, tokens: 
 /// 口径的落点有三个（各维求和 = 当天总量的前提就在这里）：日报折算
 /// （`aggregate::fold_into_daily`）、近 24 小时趋势（本文件的 `cache_trend_24h`）
 /// 与整行重算（`aggregate::rebuild_day` 经前者），三处**必须调同一个函数**。
-pub(super) fn model_stat_key(item: &RequestEntry) -> &str {
-    if item.upstream_model.is_empty() {
-        &item.model
+///
+/// ── 为什么接两个 &str 而不是 &RequestEntry ───────────────────
+/// 同一口径现在要服务两种行：完整的 `RequestEntry`（按天重算）与报表的窄行
+/// [`SummaryRow`]（近 24 小时趋势，只读 6 列，见 `sql::select_summary_rows`）。
+/// 若签名收 `&RequestEntry`，窄行那一侧就只能自己再写一遍 `if upstream 空就
+/// 回落` —— 那正是这个函数要防的「同一口径两处维护」。取字段而不是取整行，
+/// 两种调用方都能直接用。
+pub(super) fn model_stat_key<'a>(model: &'a str, upstream_model: &'a str) -> &'a str {
+    if upstream_model.is_empty() {
+        model
     } else {
-        &item.upstream_model
+        upstream_model
     }
 }
 
@@ -605,8 +647,8 @@ pub(super) fn build_top_model(totals: &[ModelAccum], range_tokens: i64) -> Value
 ///
 /// 每天额外带 `models`（`[{model, label, tokens, requests}]`，按 tokens 降序）：
 /// 柱状图的悬停读数要给出「这一天总用量是多少、分别花在哪些模型上」，
-/// 而按模型的分解只存在于聚合行（`model_tokens` 列）—— 明细只在报表的近
-/// 7 天窗口里才被读，这里拿不到也不会回算（见 [`model_breakdown_json`]）。
+/// 而按模型的分解只存在于聚合行（`model_tokens` 列）—— 明细只在报表读明细的
+/// 24 小时窗口里才被读，这里拿不到也不会回算（见 [`model_breakdown_json`]）。
 pub(super) fn daily_trend(daily: &BTreeMap<String, DailyEntry>, start: &str, end: &str) -> Vec<Value> {
     let (Some(start_date), Some(end_date)) = (parse_key(start), parse_key(end)) else {
         return Vec::new();
@@ -675,27 +717,18 @@ pub(super) fn streak(daily: &BTreeMap<String, DailyEntry>, today: NaiveDate) -> 
 // ─── 缓存命中率（窗口都很短，必须从明细算）────────────────────
 
 /// 四档缓存命中率
-pub(super) fn cache_rates(entries: &[RequestEntry], now: i64) -> Value {
-    const MINUTE: i64 = 60_000;
-    json!({
-        "last10m": cache_rate(entries, now - 10 * MINUTE, now),
-        "last1h": cache_rate(entries, now - 60 * MINUTE, now),
-        "last24h": cache_rate(entries, now - 24 * 60 * MINUTE, now),
-        "last7d": cache_rate(entries, now - 7 * 24 * 60 * MINUTE, now),
-    })
-}
-
-/// 单窗口的命中率（`[since_ms, now]` 闭区间）
-fn cache_rate(entries: &[RequestEntry], since_ms: i64, now: i64) -> Value {
-    let mut hit: i64 = 0;
-    let mut input: i64 = 0;
-    for item in entries {
-        if item.ts >= since_ms && item.ts <= now {
-            hit += item.cache_read_tokens;
-            input += item.prompt_tokens;
-        }
+pub(super) fn cache_rates(totals: &[(i64, i64)]) -> Value {
+    let mut out = serde_json::Map::new();
+    for (index, (key, _window)) in CACHE_WINDOWS.iter().enumerate() {
+        // 缺项按「这个窗口没有数据」补零（不该发生：SQL 侧每个窗口都有一组
+        // 合计，见 `sql::sum_cache_windows`）—— 与 safe_rate 的零除口径一致
+        let (hit, input) = totals.get(index).copied().unwrap_or((0, 0));
+        out.insert(
+            key.to_string(),
+            json!({ "hitTokens": hit, "inputTokens": input, "rate": safe_rate(hit, input) }),
+        );
     }
-    json!({ "hitTokens": hit, "inputTokens": input, "rate": safe_rate(hit, input) })
+    Value::Object(out)
 }
 
 /// 近 24 个**本地整点**的命中率与用量趋势（无数据的整点补零）。
@@ -711,7 +744,13 @@ fn cache_rate(entries: &[RequestEntry], since_ms: i64, now: i64) -> Value {
 /// 折线图的悬停读数要给出「这一小时总用量是多少、分别花在哪些模型上」。
 /// 模型统计键走 [`model_stat_key`]（与日报折算同一口径），于是同一小时里
 /// 「各模型之和」必然等于该小时的 `totalTokens`（当份数据之内）。
-pub(super) fn cache_trend_24h(entries: &[RequestEntry], now: i64) -> Vec<Value> {
+///
+/// 入参是**报表窄行**（[`SummaryRow`]，只 6 列）而不是完整明细：本函数是改造后
+/// 唯一还要逐条读明细的地方，而它需要的字段全在窄行的列集里（见
+/// `sql::select_summary_rows`）。窗口外（`ts` 早于 23 个整点前）的行照旧跳过 ——
+/// 调用方给的可能是整个 `request_stats::SUMMARY_WINDOW_MS` 窗口，两者在边界上
+/// 不完全重合（本地时区的整点切法与「now 往前推 N 小时」差几十分钟）。
+pub(super) fn cache_trend_24h(entries: &[SummaryRow], now: i64) -> Vec<Value> {
     /// 单个整点的桶：三项总量 + 按模型的累计（模型数是个位到十位级，
     /// 线性查找即可 —— 与 `push_model_accum` 同一取舍）
     #[derive(Default)]
@@ -736,7 +775,12 @@ pub(super) fn cache_trend_24h(entries: &[RequestEntry], now: i64) -> Vec<Value> 
         slot.hit += item.cache_read_tokens;
         slot.input += item.prompt_tokens;
         slot.total += item.total_tokens;
-        push_model_accum(&mut slot.models, model_stat_key(item), item.total_tokens, 1);
+        push_model_accum(
+            &mut slot.models,
+            model_stat_key(&item.model, &item.upstream_model),
+            item.total_tokens,
+            1,
+        );
     }
 
     let mut out = Vec::with_capacity(24);

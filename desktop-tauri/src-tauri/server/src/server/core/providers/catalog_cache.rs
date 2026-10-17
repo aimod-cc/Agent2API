@@ -106,6 +106,9 @@ pub const SCOPE_ANTIGRAVITY: &str = "antigravity";
 /// OfficeAce（华为云果办 / OfficeClaw）的模型目录缓存槽
 pub const SCOPE_OFFICEACE: &str = "officeace";
 
+/// 智谱清言（`chatglm.cn`）的模型目录缓存槽
+pub const SCOPE_CHATGLM: &str = "chatglm";
+
 /// ModelScope（魔搭）**国内站**的模型目录缓存槽
 /// （`GET {推理域}/models`，OpenAI 格式目录）
 pub const SCOPE_MODELSCOPE_CN: &str = "modelscopeCn";
@@ -134,6 +137,8 @@ pub const ALL_SCOPES: &[&str] = &[
     SCOPE_MONKEYCODE_INTL,
     SCOPE_COMMANDCODE,
     SCOPE_ANTIGRAVITY,
+    SCOPE_OFFICEACE,
+    SCOPE_CHATGLM,
     SCOPE_MODELSCOPE_CN,
     SCOPE_MODELSCOPE_INTL,
 ];

@@ -270,23 +270,23 @@ fn rfc3339_to_ms(text: &str) -> Option<i64> {
 pub(super) fn parse_opencode(payload: &Value) -> Option<Value> {
     let data = map_of(payload)?;
     let usage = data.get("usage").and_then(map_of)?;
-    let mut reads: Vec<(&str, &str, UsageWindow)> = Vec::new();
-    for (key, label) in [
-        ("rolling", "5 小时"),
-        ("weekly", "每周"),
-        ("monthly", "每月"),
+    let mut reads: Vec<(&str, &str, &str, UsageWindow)> = Vec::new();
+    for (key, label, code) in [
+        ("rolling", "5 小时", "5h"),
+        ("weekly", "每周", "weekly"),
+        ("monthly", "每月", "monthly"),
     ] {
         let Some(window) = usage.get(key).and_then(map_of) else { continue };
-        reads.push((key, label, usage_window(window)));
+        reads.push((key, label, code, usage_window(window)));
     }
     if reads.is_empty() {
         return None;
     }
     let exhausted = reads
         .iter()
-        .any(|(key, _, window)| (*key == "weekly" || *key == "monthly") && window.used_percent.map(|used| used >= 100.0) == Some(true));
-    let rolling = reads.iter().find(|(key, _, _)| *key == "rolling").map(|(_, _, window)| window);
-    let primary = rolling.or_else(|| reads.first().map(|(_, _, window)| window));
+        .any(|(key, _, _, window)| (*key == "weekly" || *key == "monthly") && window.used_percent.map(|used| used >= 100.0) == Some(true));
+    let rolling = reads.iter().find(|(key, _, _, _)| *key == "rolling").map(|(_, _, _, window)| window);
+    let primary = rolling.or_else(|| reads.first().map(|(_, _, _, window)| window));
     let available = if exhausted {
         Some(0.0)
     } else {
@@ -294,12 +294,16 @@ pub(super) fn parse_opencode(payload: &Value) -> Option<Value> {
     };
     let mut wallets: Vec<Value> = Vec::new();
     let mut windows: Vec<Value> = Vec::new();
-    for (key, label, window) in &reads {
+    for (key, label, code, window) in &reads {
         // 窗口在、数读不到（上游换了字段名）：这一条照出，但不编数字 ——
         // 格子里是「—」，与「剩 0%」是两件事（见模块头的「null 不是 0」）
         let mut row = Map::new();
         row.insert("key".to_string(), Value::String((*key).to_string()));
         row.insert("label".to_string(), Value::String((*label).to_string()));
+        // `window` 是**给前端拼短标签的码**（与 `antigravity::balance` 的同名键同一
+        // 职责）：`label` 是中文全名、只进悬停，界面上的短名由前端按码译 ——
+        // 后端给中文短名的话，英文界面里会冒出一串汉字
+        row.insert("window".to_string(), Value::String((*code).to_string()));
         if let Some(remaining) = window.remaining_percent {
             row.insert("remainingPercent".to_string(), json!(remaining));
             row.insert("view".to_string(), Value::String(format!("剩 {}%", percent_text(remaining))));

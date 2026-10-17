@@ -42,6 +42,7 @@ import {
 
 import {
   ADD_METHODS,
+  MAX_NAME_LENGTH,
   addButtonTextOf,
   desktopImportAvailable,
   fieldIdOf,
@@ -72,6 +73,9 @@ import {
   type OauthController,
   type WebLoginController,
 } from './add-account-bridge'
+// 二进制文件 → base64 的读取工具（订阅导入在用，同一份足够：FileReader +
+// readAsDataURL）；`add-provider-blocks` 只借这一个函数，不引订阅那边的状态
+import { readFileAsBase64 } from './proxies-sub-state'
 import { t } from '../i18n'
 
 /**
@@ -268,6 +272,193 @@ function DesktopSection({
         >
           {busy ? t('导入中…') : t('从本机导入桌面端登录态')}
         </Button>
+      </div>
+    </DialogSection>
+  )
+}
+
+/* ─── 访客模式（智谱清言独有）────────────────── */
+
+/**
+ * 「访客模式」段：一颗按钮 + 一个可选备注名，点下去由网关换发访客凭证。
+ *
+ * ── 为什么单独一个组件（而不是并进 ManualSection）──────────────
+ * 它**没有任何凭证输入**：用户不需要知道 token 是什么，点一下就有账号。
+ * 并进「填写凭证」会让这条路径看起来像「你得先有凭证」，那正好与它的价值相反。
+ * 载荷只有 `{ provider, guest: true, name? }` —— 后端 `api::accounts` 的
+ * Chatglm 分支按 `guest` 走 `guest/access` 换证（见那边的分支说明）。
+ */
+function GuestSection({
+  config,
+  visible,
+}: {
+  config: ProviderConfig
+  visible: boolean
+}): React.ReactElement | null {
+  const guest = config.guestLogin
+  const [busy, setBusy] = React.useState(false)
+  if (!guest) return null
+  const nameId = fieldIdOf(config, { key: 'name', label: '', placeholder: '' })
+
+  async function submit(): Promise<void> {
+    await runAdd(setBusy, async () => {
+      // 备注名从输入框读（与 ManualSection 同一取值口径：空串交给后端兜底）
+      const input = document.getElementById(nameId) as HTMLInputElement | null
+      const name = input?.value.trim() || ''
+      try {
+        const data = (await postAccount({
+          provider: config.provider,
+          guest: true,
+          ...(name ? { name } : {}),
+        })) as { account?: AccountRecord } | null
+        await afterAdd(data?.account?.name || '', config.label)
+      } catch (error) {
+        toast(t('添加失败：{reason}', { reason: describeError(error) }), 'err')
+      }
+    })
+  }
+
+  return (
+    <DialogSection hidden={!visible}>
+      <h3>{t('访客模式')}</h3>
+      {guest.noteHtml ? <Note html={guest.noteHtml} /> : null}
+      <div className='form-field'>
+        <label htmlFor={nameId}>{t('备注名')}</label>
+        <input
+          id={nameId}
+          type='text'
+          maxLength={MAX_NAME_LENGTH}
+          placeholder={guest.namePlaceholder || t('可选')}
+          {...draftProps(nameId)}
+        />
+      </div>
+      <div className='field-row'>
+        <Button id={`${config.provider}-guest-button`} onClick={() => { void submit() }} disabled={busy}>
+          {busy ? guest.busyText || t('正在添加…') : guest.button}
+        </Button>
+      </div>
+    </DialogSection>
+  )
+}
+
+/* ─── 导入凭证文件（通用版；WorkBuddy 那段是另一套 payload，不要合并）─── */
+
+/**
+ * `readFileAsBase64` 返回的是**完整 data URL**（`data:…;base64,<正文>`）——
+ * 订阅那条链的服务端会自己 `split_once("base64,")`，而 `POST /api/accounts`
+ * 的 `authFileB64` 走的是裸 `BASE64.decode(encoded)`，**不认 data URL 前缀**。
+ * 因此这里剥掉逗号前的头部再交出去，否则 KukuAI 的文件导入会得到
+ * 「authFileB64 不是合法的 base64」。
+ */
+function base64BodyOf(dataUrl: string): string {
+  const comma = dataUrl.indexOf(',')
+  return comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl
+}
+
+/**
+ * 「导入凭证文件」段（通用）：用户手选桌面客户端的凭证文件，前端读内容
+ * （文本 → `authFileContent`；二进制 → `authFileB64`）交给网关解析落库。
+ *
+ * 与 `DesktopSection` 的差别：那边只有一颗按钮、读的是本机固定路径；这边选
+ * 文件、文件可来自任意机器 / 备份，落库后是**可独立转发**的账号。
+ * WorkBuddy 的同类段落不并进来：它把文件内容**摊平**成请求体字段
+ * （credentials 直读顶层键），payload 形态与这里的三字段契约不同。
+ */
+function FileImportSection({
+  config,
+  visible,
+}: {
+  config: ProviderConfig
+  visible: boolean
+}): React.ReactElement | null {
+  const [busy, setBusy] = React.useState(false)
+  // 选中文件名回显：KukuAI 的 Cookies 没有扩展名，按钮旁看不出选的是哪一份
+  const [hint, setHint] = React.useState('')
+  const fileInput = React.useRef<HTMLInputElement | null>(null)
+  const spec = config.fileImport
+  // 备注名走草稿机制（与 ManualSection 的 name 字段同一形态）
+  const nameId = `${config.provider}-file-name`
+  if (!spec) return null
+
+  async function importFile(file: File): Promise<void> {
+    const fileImport = config.fileImport
+    if (!fileImport) return
+    await runAdd(setBusy, async () => {
+      try {
+        const remark = readField(nameId)
+        const payload: Record<string, unknown> = {
+          provider: config.provider,
+          // 文件名只用于错误文案（后端会把原文件名带上），不参与解析
+          authFileName: file.name,
+        }
+        if (fileImport.binary) {
+          payload.authFileB64 = base64BodyOf(await readFileAsBase64(file))
+        } else {
+          const text = await file.text()
+          // JSON 预检只挡「选错文件」这一层：解析失败 / 不是对象在这里就变成
+          // 人话，而不是后端凭据模块吐出来的一条远端错误（与 WorkBuddy 同取向）
+          let parsed: unknown
+          try {
+            parsed = JSON.parse(text)
+          } catch {
+            toast(t('选择的文件不是合法 JSON'), 'err')
+            return
+          }
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            toast(t('不是有效的凭证文件：内容要是一个 JSON 对象'), 'err')
+            return
+          }
+          // 原始文本整串交出去：各家顶层形状不同（auth.json / settings 文件），
+          // 由后端各自的文件导入分支解析，前端不再裁剪
+          payload.authFileContent = text
+        }
+        if (remark) payload.name = remark
+        const data = (await postAccount(payload)) as { account?: AccountRecord } | null
+        setHint('')
+        await afterAdd(addedLabelOf(data?.account), config.label)
+      } catch (error) {
+        // 文件本身的问题（缺字段 / 密文解不开 / 凭证无效）后端都给 400 + 带文件名的
+        // 原因，原样透出即可
+        toast(t('导入失败：{reason}', { reason: describeError(error) }), 'err')
+      }
+    })
+  }
+
+  return (
+    <DialogSection hidden={!visible}>
+      <h3>{t('导入凭证文件')}</h3>
+      <Note text={spec.note} />
+      <div className='field-row'>
+        <label className='lb-inline' htmlFor={nameId}>{t('备注名')}</label>
+        <Input
+          id={nameId}
+          type='text'
+          maxLength={MAX_NAME_LENGTH}
+          placeholder={t('可选，留空则用文件里的昵称')}
+          {...draftProps(nameId)}
+        />
+      </div>
+      <div className='field-row'>
+        <input
+          ref={fileInput}
+          type='file'
+          // 空串 = 选择器不过滤（KukuAI 的 Cookies 没有扩展名，无从按类型筛）
+          accept={spec.accept}
+          hidden
+          onChange={event => {
+            const file = event.target.files?.[0]
+            // 清空 value：同一份文件改内容后再选一次也要能触发 onChange
+            event.target.value = ''
+            if (file) {
+              setHint(file.name)
+              void importFile(file)
+            }
+          }}
+        />
+        <Button onClick={() => fileInput.current?.click()} disabled={busy}>
+          {busy ? t('导入中…') : t('选择凭证文件导入')}
+        </Button>
+        <span className='detail'>{hint}</span>
       </div>
     </DialogSection>
   )
@@ -607,6 +798,7 @@ export function ProviderBlock({
         />
       </DialogSection>
 
+      <GuestSection config={config} visible={effective === 'guest'} />
       <OauthSection
         config={config}
         mode={oauthMode}
@@ -622,6 +814,7 @@ export function ProviderBlock({
         visible={effective === 'web'}
       />
       <ManualSection config={config} region={region} visible={effective === 'manual'} />
+      <FileImportSection config={config} visible={effective === 'file'} />
       <DesktopSection config={config} visible={effective === 'desktop'} />
     </div>
   )
@@ -671,14 +864,23 @@ function editionFromFile(record: Record<string, unknown>): Edition | null {
   return null
 }
 
+/** WorkBuddy 块「添加方式」的选项 id。不进 ADD_METHODS：本块不走通用分派，选项固定这三项 */
+type WorkBuddyMethod = 'web' | 'file' | 'desktop'
+
 /**
- * 「导入凭证文件」段（WorkBuddyBlock 专用）：
- *   ① 选文件导入 —— 官方客户端登录态（`.info`）或 wb2api 的账号 JSON；
- *   ② 从本机官方客户端读取 —— 后端扫描官方凭证目录（importDesktop 链路）。
+ * 「导入凭证文件」段（WorkBuddyBlock 专用）：选文件导入 —— 官方客户端登录态
+ * （`.info`）或 wb2api 的账号 JSON。「从本机导入桌面端登录态」是独立的添加
+ * 方式（见 `WorkBuddyDesktopImportSection`），不放在本段里。
  * 归属（国内版 / 国际版）优先按文件内容的 domain 推断：文件自己的事实比
  * 「账号版本」分段更权威，推不出才用分段当前值。
  */
-function WorkBuddyFileImportSection({ edition }: { edition: Edition }): React.ReactElement {
+function WorkBuddyFileImportSection({
+  edition,
+  visible,
+}: {
+  edition: Edition
+  visible: boolean
+}): React.ReactElement {
   const [busy, setBusy] = React.useState(false)
   const [hint, setHint] = React.useState('')
   const fileInput = React.useRef<HTMLInputElement | null>(null)
@@ -726,25 +928,10 @@ function WorkBuddyFileImportSection({ edition }: { edition: Edition }): React.Re
     })
   }
 
-  async function importFromDesktop(): Promise<void> {
-    await runAdd(setBusy, async () => {
-      try {
-        const data = (await postAccount({
-          provider: workbuddyProviderId(edition),
-          importDesktop: true,
-        })) as { account?: AccountRecord } | null
-        await afterAdd(addedLabelOf(data?.account), edition === 'intl' ? 'WorkBuddy AI' : 'WorkBuddy')
-      } catch (error) {
-        // 读不到官方客户端登录态时后端给 400 + 明确原因，原样透出即可
-        toast(t('导入失败：{reason}', { reason: describeError(error) }), 'err')
-      }
-    })
-  }
-
   return (
-    <DialogSection>
+    <DialogSection hidden={!visible}>
       <h3>{t('导入凭证文件')}</h3>
-      <Note text={t('选择官方客户端的登录态凭证文件（workbuddy-desktop.info / workbuddy-desktop-ai.info）或 wb2api 导出的账号 JSON（嵌套 / 扁平形均可），也可以直接从本机官方客户端读取。')} />
+      <Note text={t('选择官方客户端的登录态凭证文件（workbuddy-desktop.info / workbuddy-desktop-ai.info）或 wb2api 导出的账号 JSON（嵌套 / 扁平形均可）。')} />
       <p className='detail'>
         <a
           href='#'
@@ -782,12 +969,50 @@ function WorkBuddyFileImportSection({ edition }: { edition: Edition }): React.Re
         <Button onClick={() => fileInput.current?.click()} disabled={busy}>
           {busy ? t('导入中…') : t('选择凭证文件导入')}
         </Button>
-        {platform() !== 'web' ? (
-          <Button variant='outline' onClick={() => void importFromDesktop()} disabled={busy}>
-            {t('从本机导入桌面端登录态')}
-          </Button>
-        ) : null}
         <span className='detail'>{hint}</span>
+      </div>
+    </DialogSection>
+  )
+}
+
+/**
+ * 「从本机导入桌面端登录态」段（WorkBuddyBlock 专用）：后端扫描官方客户端凭证
+ * 目录、取最新的登录态文件落库（`importDesktop` 链路，见
+ * `account_store::workbuddy_import`）。与「导入凭证文件」分成两个添加方式 ——
+ * 对齐小浣熊等家 DesktopSection 的形态：一颗按钮，不选文件。
+ */
+function WorkBuddyDesktopImportSection({
+  edition,
+  visible,
+}: {
+  edition: Edition
+  visible: boolean
+}): React.ReactElement {
+  const [busy, setBusy] = React.useState(false)
+
+  async function importFromDesktop(): Promise<void> {
+    await runAdd(setBusy, async () => {
+      try {
+        const data = (await postAccount({
+          provider: workbuddyProviderId(edition),
+          importDesktop: true,
+        })) as { account?: AccountRecord } | null
+        await afterAdd(addedLabelOf(data?.account), edition === 'intl' ? 'WorkBuddy AI' : 'WorkBuddy')
+      } catch (error) {
+        // 读不到官方客户端登录态时后端给 400 + 明确原因，原样透出即可
+        toast(t('导入失败：{reason}', { reason: describeError(error) }), 'err')
+      }
+    })
+  }
+
+  return (
+    <DialogSection hidden={!visible}>
+      <h3>{t('从本机导入桌面端登录态')}</h3>
+      <Note text={t('读本机官方客户端（Tencent WorkBuddy / WorkBuddy AI）当前登录的账号：自动定位其凭证目录里最新的登录态文件（需已在本机官方客户端登录）。导入后由网关自动续期，无需跟随 2 小时时效手动换令牌。')} />
+      <div className='field-row'>
+        <Button onClick={() => void importFromDesktop()} disabled={busy}>
+          {busy ? t('导入中…') : t('从本机导入桌面端登录态')}
+        </Button>
       </div>
     </DialogSection>
   )
@@ -806,11 +1031,13 @@ function workbuddyProviderId(edition: Edition): string {
   return edition === 'intl' ? 'workbuddy-intl' : 'workbuddy'
 }
 
-/* ─── WorkBuddy（账号版本 + 网页登录 + 第三方入口开关）───────
+/* ─── WorkBuddy（账号版本 + 添加方式[网页登录 / 导入凭证文件 / 导入桌面端登录态]）───
  *
  * 结构与其余各家不同：它有两处静态分段（账号版本 / 打开方式）与一个第三方入口
- * 开关，且网页登录的文案随打开方式变。旧实现里这段 DOM 写在 index.html 里、
- * 交互在 add-account.js；迁到岛上后整块在这里，index.html 的那 47 行骨架随之删除。 */
+ * 开关，且网页登录的文案随打开方式变；「添加方式」分段在网页登录、导入凭证
+ * 文件与导入桌面端登录态之间切换（显隐同 ProviderBlock 的手法：hidden 属性，
+ * 不是行内样式）。旧实现里这段 DOM 写在 index.html 里、交互在 add-account.js；
+ * 迁到岛上后整块在这里，index.html 的那 47 行骨架随之删除。 */
 
 export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElement {
   // 三处偏好的初值来自模块级 loginPrefs：旧实现里它们住在静态 DOM 上，
@@ -818,6 +1045,9 @@ export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElem
   const [edition, setEdition] = React.useState<Edition>(loginPrefs.edition)
   const [loginMode, setLoginMode] = React.useState<LoginMode>(loginPrefs.loginMode)
   const [socialRestore, setSocialRestore] = React.useState(loginPrefs.socialRestore)
+  // 添加方式（与各家 ProviderBlock 的「添加方式」分段同一形态）：不进 loginPrefs
+  // 持久化 —— 通用块的 method 也不持久化，弹窗重开回默认项
+  const [method, setMethod] = React.useState<WorkBuddyMethod>('web')
   const editionRef = React.useRef(edition)
   const modeRef = React.useRef(loginMode)
   const socialRef = React.useRef(socialRestore)
@@ -902,6 +1132,12 @@ export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElem
       ? t('国内版登录页没有 Google / GitHub 入口（它用微信 / 手机号 / 邮箱登录）')
       : t('只有「内嵌窗口」能恢复第三方入口：系统浏览器里我们无法改动登录页')
 
+  // 分段选项随平台变化：网页托管面板没有本机官方客户端，「导入桌面端登录态」
+  // 整项收起（与 desktopImportAvailable 的 platform 判断同一口径）。当前选中项
+  // 被收起时退回网页登录，避免「所有段都藏着、一个可见的选中项也没有」。
+  const effectiveMethod: WorkBuddyMethod =
+    method === 'desktop' && platform() === 'web' ? 'web' : method
+
   return (
     <div className='add-provider-block' hidden={!active}>
       <DialogSection>
@@ -922,6 +1158,23 @@ export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElem
       </DialogSection>
 
       <DialogSection>
+        <h3>{t('添加方式')}</h3>
+        <SegmentedControl
+          aria-label={t('{label} 账号的添加方式', { label: 'WorkBuddy' })}
+          className={ADD_SEG_CLASS}
+          options={[
+            { value: 'web', label: t('网页登录') },
+            { value: 'file', label: t('导入凭证文件') },
+            ...(platform() !== 'web'
+              ? [{ value: 'desktop', label: t('导入桌面端登录态') }]
+              : []),
+          ]}
+          value={effectiveMethod}
+          onValueChange={value => setMethod(value as WorkBuddyMethod)}
+        />
+      </DialogSection>
+
+      <DialogSection hidden={effectiveMethod !== 'web'}>
         <h3>{t('网页登录')}</h3>
         <p>{t('完成登录后自动加入账号列表，昵称取自上游。')}</p>
         <div className='field-row'>
@@ -969,7 +1222,8 @@ export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElem
         </div>
       </DialogSection>
 
-      <WorkBuddyFileImportSection edition={edition} />
+      <WorkBuddyFileImportSection edition={edition} visible={effectiveMethod === 'file'} />
+      <WorkBuddyDesktopImportSection edition={edition} visible={effectiveMethod === 'desktop'} />
     </div>
   )
 }

@@ -67,6 +67,22 @@ pub const KEY_DEBUG_DIR: &str = "debugDir";
 /// `resolve_account_proxy`），这里只存取。
 pub const KEY_UPDATE_PROXY: &str = "updateProxy";
 
+/// 「加入 beta 版」开关（config.json 键，**缺省 = 关**）。
+///
+/// 开启后「检查更新」改问 GitHub 的 Release **列表**，把预发布版（beta）一并
+/// 纳入候选、取版本号最高的一个；关闭时仍问 `/releases/latest`（GitHub 自己
+/// 排除预发布与草稿）。检查结果同时喂给面板、侧栏徽标与下载安装包三条路，
+/// 所以拨一下开关不用重启，下一次检查就换通道（含定时任务）。
+///
+/// **默认关**：beta 版由 beta 分支构建、可能不稳定，只有明确想尝鲜的人才会打开
+/// （与 `debugMode` 同一取向 —— 默认关的代价只是「功能对没打开的人不存在」）。
+///
+/// 与之配套的一条约定：**beta 版的版本号必须与 tag 一致**（tag `v3.1.0-beta.1`
+/// 就要把应用版本写成 `3.1.0-beta.1`），否则版本比较会把「当前 beta」判成比
+/// 「待装的 beta」新，通道打开也收不到更新 —— 比较规则见
+/// `core::update::version` 的预发布段处理。
+pub const KEY_UPDATE_BETA: &str = "updateBeta";
+
 /// 代理内核（mihomo）的**存放目录**（config.json 键）。
 ///
 /// 值是**绝对路径**；缺省 / 空串 / 相对路径（读侧视为写坏）都回落
@@ -115,6 +131,18 @@ pub const KEY_DEBUG_MODE: &str = "debugMode";
 /// 上游，那正是模板句被误拦（400 code=11128）的原因。
 /// 转发层逐请求读快照，改完下一个请求立即生效，不重启进程。
 pub const KEY_SANITIZE_FINGERPRINTS: &str = "sanitizeBlacklistFingerprints";
+
+/// 开发者角色兼容开关（config.json 键，设置页「网关 → 开发者角色兼容」）。
+///
+/// 开启后转发层在每次出站前把请求 `messages` 里 `role: "developer"` 的消息
+/// 改写为 `role: "system"`（OpenAI 新版 API 用 developer 取代 system 承载
+/// 指令），兼容不认识 developer 角色的 OpenAI 兼容上游 —— 自定义提供商是
+/// 请求体原样透传的，不归一的话这类消息会原样发出去被上游 400。
+/// **默认开启**（与 OmniProxy 同默认）：改写语义无损（两类角色在 OpenAI 语义
+/// 上等价），而默认关会让发 developer 角色的客户端一上来就撞不认识它的上游。
+/// 转发层逐请求读快照，改完下一个请求立即生效，不重启进程。
+/// 转换实施点见 `core::upstream::payload`（send_body 的角色归一层）。
+pub const KEY_DEVELOPER_ROLE_COMPAT: &str = "developerRoleCompat";
 
 /// **Cline 转发头的逐键覆盖**（config.json 键）。
 ///

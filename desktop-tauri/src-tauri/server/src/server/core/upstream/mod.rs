@@ -387,6 +387,7 @@ impl UpstreamService {
         // 会让它悬空 —— 所以先取一份快照、再从它取两个读数值。
         let config = crate::server::config::current();
         let sanitize_fingerprints = config.sanitize_fingerprints();
+        let developer_role_compat = config.developer_role_compat();
         let prompt = config.prompt_plan();
         // Key 的提供商白名单随请求带进转发上下文：它要活过整条转发链
         //（含流式 —— 但流本身不需要它，只在选路与重试时读）。
@@ -405,6 +406,7 @@ impl UpstreamService {
             client_headers: &request.client_headers,
             telemetry: &request.telemetry,
             sanitize_fingerprints,
+            developer_role_compat,
             prompt,
             key_scope: key_scope.as_ref(),
             pinned_account: pinned_account.as_deref(),

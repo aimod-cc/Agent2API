@@ -969,8 +969,10 @@ async fn attempt_queue(
         let started_at = logging::now_ms();
         let mut refreshed = false;
         // 第三个元素是上游响应的协议（适配器在构造请求时给出）：chat 之外
-        // 还要在下面套一层响应翻译，见 `UpstreamResponse` 的说明
-        let (response, wire_model, response_protocol) = loop {
+        // 还要在下面套一层响应翻译，见 `UpstreamResponse` 的说明。第四个元素是
+        // Antigravity 请求信封里的会话键（签名缓存兜底档的写入键，issue #291；
+        // 其余家是空串 —— 提取见循环内唯一那条成功 break）
+        let (response, wire_model, response_protocol, antigravity_session) = loop {
             // 发送体在这一轮发送前取一次（同一家同池同降级状态下复用缓存项）：
             // 借用在本次迭代内有效，`continue`（401 刷新 / 内容拦截补救）时
             // 重新取 —— 于是「换了 body 的那次重试」拿到的一定是新的一份。
@@ -1136,7 +1138,21 @@ async fn attempt_queue(
                     ) {
                         service.route.sticky_bind(&conv_key, account_id, logging::now_ms());
                     }
-                    break (response, wire_model, plan.response);
+                    // Antigravity 的会话键随信封带出（签名缓存兜底档的写入键，
+                    // issue #291）：只有本家的信封有 `request.sessionId`，其余
+                    // 家给空串。`plan.body` 在这里仍归 plan 所有，取指针即可。
+                    let antigravity_session = if plan.response
+                        == crate::server::core::providers::adapter::UpstreamResponse::AntigravityGemini
+                    {
+                        plan.body
+                            .pointer("/request/sessionId")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string()
+                    } else {
+                        String::new()
+                    };
+                    break (response, wire_model, plan.response, antigravity_session);
                 }
                 Err(failure) => {
                     // ── 手动终止优先于一切重试动作 ────────────────────────
@@ -1681,9 +1697,18 @@ async fn attempt_queue(
                     super::translate::AntigravityToChatStream::new(
                         response,
                         &wire_model,
+                        &antigravity_session,
                         ctx.telemetry,
                     ),
                 ),
+                // 智谱清言：SSE 帧是「全量快照」，翻译机做差分（见那台的模块头）
+                UpstreamResponse::ChatglmSnapshot => {
+                    Box::pin(super::translate::ChatglmToChatStream::new(
+                        response,
+                        &wire_model,
+                        ctx.telemetry,
+                    ))
+                }
                 // 外层 `if` 已排除它，这一支只为 match 的穷尽性存在，**不可能
                 // 走到**。真走到说明分派被改坏了：报内部错误而不是 panic
                 // （release 是 `panic=abort`，一处 panic 带走整个网关）。

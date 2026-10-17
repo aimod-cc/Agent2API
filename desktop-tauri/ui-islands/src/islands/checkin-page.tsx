@@ -61,6 +61,11 @@ const PROVIDER_DESC: Record<string, string> = {
   // 当日魔粒），没有独立的签到按钮 —— 说明里点出这一点，用户才不会以为漏了什么。
   modelscope: t('无独立签到接口 · 每天替账号打一次登录信息（即当日魔粒）'),
   'modelscope-intl': t('与国内版同一套链路 · 站点不同、令牌不通用'),
+  // 智谱清言：本家的「签到」就是会员的每日登录积分（一次 POST，到账数在
+  // `result.score`）；后面的活动领取一并执行（活动期才有得领）。
+  // 访客账号没有积分体系，实现会如实跳过（不算失败），说明里点出这一点，
+  // 免得用户以为漏签了。
+  chatglm: t('每日登录积分 · 顺带领取会员活动 · 访客账号无积分体系（跳过）'),
 }
 
 /** 页内标签页的档位（值与 checkin-state 的 CheckinTab 一致） */
@@ -72,11 +77,11 @@ const CHECKIN_TAB_OPTIONS = [
 
 /* ─── 小组件 ───────────────────────────────── */
 
-/** 新手福利分组的提供商展示名（缺省回落 provider id 本身） */
+/** 新手福利分组的提供商展示名（缺省回落 provider id 本身）；名字进词典，非中文界面才翻得动 */
 function onboardingProviderLabel(provider: string): string {
-  return provider === 'raccoon' ? '小浣熊' : provider === 'loomy' ? 'Loomy'
+  return t(provider === 'raccoon' ? '小浣熊' : provider === 'loomy' ? 'Loomy'
     : provider === 'codearts' ? 'CodeArts'
-    : provider === 'officeace' ? 'OfficeAce 果办' : provider
+    : provider === 'officeace' ? 'OfficeAce 果办' : provider)
 }
 
 function useCheckinStore(): CheckinStore {

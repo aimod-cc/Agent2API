@@ -115,17 +115,13 @@
 
       <!-- 图标由 icons.js + app.js 注入（内联 SVG，见 icons.js 顶部说明） -->
       <nav class="nav" id="nav">
-        <!-- 【AI 助手入口 · 发版前隐藏】功能未就绪，整块入口先收起来；
-             恢复时把下面这一段反注释即可（app.js 的 PAGES、设置页 CATEGORIES
-             与 assistant 页 section 是同一批）。 -->
         <!-- 智能：AI 助手是「对话式的运维入口」——能读（模型清单 / 余额）也能改
              （启停 / 映射 / 能力位 / 顺序），横跨「运行状态」与「转发能力」两组
              的全部对象，所以给它独立分组、独立一级菜单；放最上面是给「天天用」
              留的位置。整页由 React 岛渲染（ui-islands/src/islands/assistant-page.tsx），
-             岛直接挂在这个 section 上。
+             岛直接挂在这个 section 上。 -->
         <div class="nav-group-label" data-i18n="智能">智能</div>
         <button class="nav-item" data-page="assistant" data-icon="spark"><span class="ico"></span><span class="label" data-i18n="AI 助手">AI 助手</span></button>
-        -->
 
         <div class="nav-group-label" data-i18n="运行状态">运行状态</div>
         <button class="nav-item active" data-page="overview" data-icon="overview"><span class="ico"></span><span class="label" data-i18n="报表">报表</span></button>
@@ -196,14 +192,13 @@
       <div class="content">
         <div class="content-inner">
 
-        <!-- 【AI 助手页 · 发版前隐藏】与侧边栏入口同一批；恢复时反注释这一段。
-             ─── AI 助手（智能）───
+        <!-- ─── AI 助手（智能）───
              对话页：消息流 + 工具调用卡 + 改动确认卡 + 输入区，整页由 React 岛渲染
              （ui-islands/src/islands/assistant-page.tsx）。对话请求走
              `POST /api/assistant/chat`（SSE，直接 fetch 到网关基址 —— 不走壳的桥：
              桥没有流式、且 60 秒总超时会把长回答截断，见后端 api::assistant 模块头）。
-             对外是 window.wbAssistant = { activate }。
-        <section class="page" data-page="assistant"></section> -->
+             对外是 window.wbAssistant = { activate }。 -->
+        <section class="page" data-page="assistant"></section>
 
         <!-- ─── 报表（内部标识仍是 overview，见 app.js 的 PAGES）───
              整页由 React 岛渲染（desktop-tauri/ui-islands/src/islands/report-page.tsx，

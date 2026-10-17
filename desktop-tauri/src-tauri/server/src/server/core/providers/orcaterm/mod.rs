@@ -57,6 +57,7 @@ pub mod balance;
 pub mod chat;
 pub mod credentials;
 pub mod http;
+pub mod login;
 pub mod models;
 
 /// CGI 网关（账号 / 配额 / 续期；Bearer JWT 鉴权，2026-10-16 实测）

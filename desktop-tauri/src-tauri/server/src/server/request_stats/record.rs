@@ -39,6 +39,26 @@ use serde_json::Value;
 /// 开着时的单条体积。两侧各自截断：一侧超长不该吃掉另一侧的配额。
 pub const MAX_RAW_BODY_BYTES: usize = 128 * 1024;
 
+/// `request_raw`（原始正文）的**总条数上限**：超出时按 `ts` 从旧到新删。
+///
+/// 为什么需要它：`MAX_RAW_BODY_BYTES` 只管「一条多大」，不管「一共存多少条」——
+/// 调试模式开着跑一阵，这张表就会攒成整个库里最大的一块。实测某用户的库：
+/// 明细三万余行、原始正文只有 1,455 条，后者却占 **244 MB**（平均每条 168 KB，
+/// 因为对话轮次的完整 JSON 基本都贴着上限）。库文件因此膨胀到 470 MB，而
+/// SQLite 的页面缓存只有几 MB 量级 —— 受影响的已经不只是这张表的读取，而是
+/// 同库所有查询的页命中率。
+///
+/// 为什么按**条数**判而不是按字节：条数一条 `COUNT(*)` 就数出来（主键索引上
+/// 零点几毫秒），而按字节要 `SUM(size)` / `SUM(length(...))` —— 实测在同一个库上
+/// 分别要 180 ms / 270 ms（要走 overflow 页读大字段），放进每请求都要跑的记账
+/// 路径是拿一个真问题换一个更大的问题（见 `sql::count_raw` 的原话）。
+///
+/// 1,000 条的取舍：预览对话服务的是排查（「刚才那条请求发了什么」），最近的
+/// 一千条覆盖了全部近期排查场景；按当前库的平均体积折算约 160 MB，比不限量
+/// 好得多，又不必让用户去找开关。真要看更早的正文，`ts` 与明细都还在 ——
+/// 少的是正文，不是记录本身。
+pub const MAX_RAW_ROWS: usize = 1000;
+
 /// 查询分页的默认条数与上限。
 /// 两个常量都被 `RequestStats::query_requests`（路由 `/api/stats/requests`）
 /// 与 `api::stats_api` 的 `limit` 解析使用。
@@ -725,15 +745,15 @@ pub struct DailyEntry {
     /// 字段，也让「模型累计」这个概念的读者要自己分辨哪几个字段有意义。
     ///
     /// 与 `modelTokens` 同理，这份累计必须存在：`topModel` 之外的任何区间级
-    /// 分组统计都要跨过明细的 7 天报表窗口（`all` / `month` 可能跨年），
-    /// 只靠明细算会少掉一大段。
+    /// 分组统计都要跨过报表读明细的窗口（`SUMMARY_WINDOW_MS`，`all` / `month`
+    /// 可能跨年），只靠明细算会少掉一大段。
     /// 键名不沿用 `*Tokens` 是因为它承载的语义比 tokens 宽（请求数与成功数）。
     #[serde(rename = "providerStats", default, skip_serializing_if = "Vec::is_empty")]
     pub provider_stats: Vec<ProviderAccum>,
     /// 当天的按账号累计（**契约之外的补充字段**）。
     ///
-    /// 与 `providerStats` 同一理由：区间级的账号用量排行要跨过明细的 7 天
-    /// 报表窗口，只有明细的话 `all` / `month` 会少掉一大段。
+    /// 与 `providerStats` 同一理由：区间级的账号用量排行要跨过报表读明细的
+    /// 窗口，只有明细的话 `all` / `month` 会少掉一大段。
     #[serde(rename = "accountStats", default, skip_serializing_if = "Vec::is_empty")]
     pub account_stats: Vec<AccountAccum>,
 }

@@ -1163,7 +1163,7 @@ fn finish_failure(finish_reason: Option<&str>) -> Option<(&'static str, String)>
         "network_error" => Some((
             "upstream_network_error",
             "上游报告 network_error：请求已到达上游但没有可用结果。\
-             活动套餐通道上最常见的原因是思考预算吃光了输出额度（正文因此为空，\
+             套餐池（Start Plan）通道上最常见的原因是思考预算吃光了输出额度（正文因此为空，\
              重试前请调高 max_tokens 或降低思考档位）；也可能是上游瞬时故障，\
              可直接重试。"
                 .to_string(),

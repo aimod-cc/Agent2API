@@ -27,8 +27,10 @@
 //!     订阅档取值链、组名去掉结尾 ` Models` 与 `Claude and GPT` → `Claude/GPT`
 //!     （Manager 前端 `AccountTable.tsx` 的 `.replace(/ models?$/i, …)`）；
 //!   · 不同：Manager 把摘要并进它自己的模型配额面板（`quota_groups`），本仓把它
-//!     归一成账号页的**统一余额形状**（`wallets[]` / `availableView` / …，契约见
-//!     `ProviderAdapter::query_usage`）；
+//!     归一成账号页的**统一余额形状**（`wallets[]` / `windows[]` / `availableView`
+//!     / …，契约见 `ProviderAdapter::query_usage`）。**两组窗口都出**（Gemini 与
+//!     Claude/GPT 各一份 5 小时 / 每周），余额格按 `windows[]` 一格画多条进度条 ——
+//!     这正是 issue #288 要的：第三方那组（Claude 4.6 thinking 等）的额度得看得见；
 //!   · 不同：Manager 对取不到的订阅档有持久化兜底（留上次的值），本仓**宁缺不编**
 //!     —— 拿不到就不写 `subscription` 键。
 //!
@@ -38,9 +40,10 @@
 //!      `remainingFraction`（0~1 的剩余比例），没有「还剩多少 token」这种绝对量；
 //!      写一个 0 会踩到缺省的「余额不足跳过档」（阈值 1）—— 账号会被从选路里
 //!      剔掉，而它额度充足。缺失 = 不知道 = 不参与判定。
-//!   2. **不做模型清单过滤**：上游给几个组就出几个组的窗口。本仓只转发 Gemini 是
-//!      **模型白名单**（`models.rs` 的模块头）的事；账户额度是账户的事实 ——
-//!      Claude/GPT 组的窗口也如实列出来（那正是「这个账号还剩多少」的一部分）。
+//!   2. **不做模型清单过滤**：上游给几个组就出几个组的窗口。模型白名单
+//!      （`models.rs` 的 [`super::models::is_offered_model`]）管的是「哪些模型
+//!      能转发」，账户额度是账户的事实 —— Claude/GPT 组的窗口也如实列出来
+//!      （那正是「这个账号还剩多少」的一部分）。
 //!   3. **`resetTime` 是周期重置、不是「到期」**：窗口到点会自动回满，不是余额
 //!      用完。因此不出 `credits`、不做 creditDetail —— 两者在界面上是两回事。
 //!
@@ -139,7 +142,7 @@ pub async fn query_usage(store: &AccountStore, account_id: &str) -> Result<Value
         return Err(GatewayError::with_status(502, failure(&detail)));
     };
 
-    let (wallets, available_view) = wallets_of(&summary_payload);
+    let (wallets, windows, available_view) = wallets_of(&summary_payload);
 
     // ── 订阅档（best-effort，见模块头：失败就不写这个键）────────────
     let mut raw = Map::new();
@@ -173,6 +176,9 @@ pub async fn query_usage(store: &AccountStore, account_id: &str) -> Result<Value
         // 读数与进度条的量纲都是百分比
         "unit": "%",
         "wallets": wallets,
+        // 逐窗口读数（一个组 × 一个窗口一项）：余额格按它画**多条**进度条
+        // —— 只画最紧的那一条会把另一个模型组盖掉（见 `wallets_of` 的文档）
+        "windows": windows,
         "raw": Value::Object(raw),
     });
     if !subscription.is_empty() {
@@ -274,17 +280,25 @@ fn upstream_message(payload: &Value) -> String {
         .to_string()
 }
 
-/// 摘要响应 → 钱包行 + 表头读数。
+/// 摘要响应 → 钱包行 + **逐窗口读数** + 表头读数。
 ///
-/// 行顺序 = 上游组顺序 × 组内 bucket 顺序（**不排序**：窗口的先后本身就是上游的
-/// 表述，界面上「5 小时 / 每周」按上游给的顺序读起来最自然）；每个
-/// `remainingFraction` 为有限数字的 bucket 一行，其余跳过（没有比例就没有读数，
-/// 不拿 0 冒充 —— 见模块头第 1 条）。
+/// 三份产物同源同序（上游组顺序 × 组内 bucket 顺序，**不排序**：窗口的先后本身就是
+/// 上游的表述，界面上「5 小时 / 每周」按上游给的顺序读起来最自然）：
+///   · `wallets[]` —— 账号级明细行（悬停提示逐行列，展示串带重置时刻与中文全名）；
+///   · `windows[]` —— 逐窗口读数（余额格按它**一格多条进度条**，与 `custom::balance`
+///     里 OpenCode Go 的同名形状逐键对齐）。本家一次给到**两个模型组 × 两个窗口**
+///     （Gemini 与 Claude/GPT 各一份 5 小时 / 每周）；只画「最紧的那一条」会把
+///     「另一个组还有多少」盖掉，而第三方那组（Claude/GPT）正是 issue #288 要看的。
+///   · `available_view` —— 表头读数，读「最紧的那个窗口」（并列取先出现的）。
 ///
-/// 摘要 200 但 `groups` 缺失 / 空 / 所有 bucket 都没有比例，都是「钱包为空」这一
-/// 档（`wallets: []` + `availableView` = 「无额度窗口」），不是错误。
-fn wallets_of(payload: &Value) -> (Vec<Value>, String) {
+/// 每个 `remainingFraction` 为有限数字的 bucket 一行 / 一项，其余跳过（没有比例
+/// 就没有读数，不拿 0 冒充 —— 见模块头第 1 条）。
+///
+/// 摘要 200 但 `groups` 缺失 / 空 / 所有 bucket 都没有比例，三份产物都为空
+/// （`wallets: []` / `windows: []` + 「无额度窗口」），不是错误。
+fn wallets_of(payload: &Value) -> (Vec<Value>, Vec<Value>, String) {
     let mut wallets: Vec<Value> = Vec::new();
+    let mut windows: Vec<Value> = Vec::new();
     // (剩余百分比, 展示名) —— 表头读「最紧的那个窗口」，并列取先出现的
     let mut tightest: Option<(f64, String)> = None;
     if let Some(groups) = payload.get("groups").and_then(Value::as_array) {
@@ -314,11 +328,34 @@ fn wallets_of(payload: &Value) -> (Vec<Value>, String) {
                 }
                 let window = window_name_of(bucket);
                 let display_name = if group_name.is_empty() {
-                    window
+                    window.clone()
                 } else {
                     format!("{group_name} · {window}")
                 };
-                let mut view = format!("剩 {}%", percent_text(percent));
+                let resets_at = reset_millis(bucket.get("resetTime").and_then(Value::as_str));
+                let reading = format!("剩 {}%", percent_text(percent));
+                // ── 逐窗口项（余额格那条进度条一行的读数）──────────────
+                // `view` 只放**读数本身**、重置时刻另走 `resetsAt`：短格子里
+                // 「剩 72% · 10-11 03:00 重置」会把读数挤没，而悬停提示由前端
+                // 用 resetsAt 现拼（与 OpenCode Go 那份同款：那边的 view 也不带时刻）。
+                // `group` / `window` 是**给前端拼紧凑标签的两段料**（`Gemini` + `5h`）：
+                // 组名是专名原样透出，窗口码按界面语言译 —— 后端只给码、不给译好的
+                // 中文短名，否则英文界面里会冒出一串汉字（与 `zcode::plan_state`
+                // 「状态键由后端给、文案只在前端拼」同一条纪律）
+                let mut row = Map::new();
+                row.insert("key".to_string(), Value::String(bucket_key(bucket)));
+                row.insert("label".to_string(), Value::String(display_name.clone()));
+                row.insert("group".to_string(), Value::String(group_name.clone()));
+                row.insert("window".to_string(), Value::String(window_code_of(bucket)));
+                row.insert("remainingPercent".to_string(), json!(percent));
+                row.insert("view".to_string(), Value::String(reading.clone()));
+                if let Some(at) = resets_at {
+                    row.insert("resetsAt".to_string(), Value::from(at));
+                }
+                windows.push(Value::Object(row));
+
+                // ── 明细行（悬停提示）：展示串带上重置时刻 ─────────────
+                let mut view = reading;
                 if let Some(text) = reset_text(bucket.get("resetTime").and_then(Value::as_str)) {
                     view.push_str(" · ");
                     view.push_str(&text);
@@ -344,7 +381,55 @@ fn wallets_of(payload: &Value) -> (Vec<Value>, String) {
     let available_view = tightest
         .map(|(percent, name)| format!("{name} 剩 {}%", percent_text(percent)))
         .unwrap_or_else(|| "无额度窗口".to_string());
-    (wallets, available_view)
+    (wallets, windows, available_view)
+}
+
+/// 窗口的**码**（`5h` / `weekly` / …）：给前端拼紧凑标签用的那半段 ——
+/// 专名（组名）原样透出，窗口这一段必须有码可译，否则英文界面里会冒出中文。
+///
+/// 与 [`window_name_of`] 同一套判据（含 `week` / `7d` → 每周；含 `5h` / `hour`
+/// → 5 小时），只是这里给的是码不是中文名；认不出的原样透出（不编码）。
+fn window_code_of(bucket: &Value) -> String {
+    let raw = bucket
+        .get("window")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .or_else(|| {
+            bucket
+                .get("bucketId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+        })
+        .unwrap_or("");
+    let lowered = raw.to_ascii_lowercase();
+    if lowered.contains("week") || lowered.contains("7d") {
+        return "weekly".to_string();
+    }
+    if lowered.contains("5h") || lowered.contains("hour") {
+        return "5h".to_string();
+    }
+    if lowered.contains("month") {
+        return "monthly".to_string();
+    }
+    if lowered.contains("day") || lowered.contains("24h") {
+        return "daily".to_string();
+    }
+    raw.to_string()
+}
+
+/// 窗口的稳定标识：上游 `bucketId`（`gemini-5h` / `3p-weekly`）优先 ——
+/// 它是上游对窗口的正式命名，前端拿它作 React 键与去重依据。
+/// 缺失时退回展示名，至少不落一个空键（宁可用一个丑键，也不要空串）。
+fn bucket_key(bucket: &Value) -> String {
+    bucket
+        .get("bucketId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| window_name_of(bucket))
 }
 
 /// 组名：去掉结尾的 ` Models` / ` Model`（大小写不敏感；Manager 前端
@@ -425,6 +510,14 @@ fn reset_text(raw: Option<&str>) -> Option<String> {
         .timestamp_millis_opt(at.timestamp_millis())
         .single()
         .map(|local| local.format("%m-%d %H:%M").to_string())
+}
+
+/// 重置时刻 → Unix 毫秒（同一份输入、另一种出口：展示串给 `wallets` 的悬停，
+/// 毫秒给 `windows` 的行 —— 前端自己按界面语言拼「什么时候重置」）。
+fn reset_millis(raw: Option<&str>) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(raw?.trim())
+        .ok()
+        .map(|at| at.timestamp_millis())
 }
 
 /// 百分比 → 紧凑串（`72` / `72.5`；一位小数，照抄 `zcode::monitor::percent_text`）

@@ -246,13 +246,13 @@ pub fn set_required(required: bool) -> bool {
     if required {
         logging::console_line(
             "[ZCode]",
-            "🔒 活动套餐通道改回「每条请求都要一枚验证码令牌」（上游配置翻回、或它刚拒了一次免码请求）",
+            "🔒 套餐池（Start Plan）通道改回「每条请求都要一枚验证码令牌」（上游配置翻回、或它刚拒了一次免码请求）",
         );
     } else {
         logging::console_line(
             "[ZCode]",
             "🔓 上游配置说模型请求不必再附验证码令牌（skip_model_request）：\
-             活动套餐通道改为免码直发，桌面端停止铸造令牌",
+             套餐池（Start Plan）通道改为免码直发，桌面端停止铸造令牌",
         );
         ungate();
     }

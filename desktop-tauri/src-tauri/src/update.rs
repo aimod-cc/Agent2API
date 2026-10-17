@@ -11,25 +11,32 @@
 //! 若把路径当信任输入，等于给渲染层开了任意程序执行的入口。
 //!
 //! ── 平台差异（后缀与启动方式）────────────────────────────────
-//! 安装包后缀按平台分派（见 [`installer_suffix`]）：Windows 是 NSIS 的
-//! `.exe`，macOS 是 `.dmg`。启动方式也完全不同 —— Windows 要 `runas` 提权，
-//! macOS 是「挂载磁盘映像 → 让用户把 app 拖进应用程序」，因此 dmg 走
-//! `open`（系统自己处理挂载），不像 exe 那样带静默安装参数。
+//! 安装包后缀按平台分派（见 [`allowed_installer_suffixes`]）：Windows 是 NSIS 的
+//! `.exe`，macOS 是 `.dmg`，Linux 桌面端是 `.deb` / `.AppImage`。启动方式也完全
+//! 不同 —— Windows 要 `runas` 提权，macOS 是「挂载磁盘映像 → 让用户把 app 拖进
+//! 应用程序」，Linux 则区分 deb（交给系统包管理器）与 AppImage（换文件即升级）。
 
 use std::path::{Path, PathBuf};
 
 use crate::gateway;
 
-/// 本平台的安装包后缀（小写，**不含点**）。
+/// 本平台安装包的**全部**合法后缀（小写，**不含点**），按优先级排列。
 ///
-/// 与后端 `update::version::installer_suffix` 是**同一口径的两份实现**：
-/// 后端用它挑 Release 资产，这里用它校验「要运行的这个文件是不是安装包」。
-/// 两边都按 `cfg!(target_os)` 编译期取值，所以不会出现不一致。
-pub const fn installer_suffix() -> &'static str {
+/// 与后端 `update::version` 的同类函数是**同一口径的两份实现**：后端用它挑
+/// Release 资产，这里用它校验「要运行的这个文件是不是安装包」。两边都按
+/// `cfg!(target_os)` 编译期取值，所以不会出现不一致。
+///
+/// 单值与多值的差别只来自 Linux：桌面端同时提供 deb 与 AppImage 两种产物，
+/// 用户装的是哪种只有他自己知道，所以两种后缀都得放行（挑资产时 deb 优先，
+/// 见后端 `pick_installer`）。Windows / macOS 各只有一个候选。
+pub const fn allowed_installer_suffixes() -> &'static [&'static str] {
     if cfg!(target_os = "macos") {
-        "dmg"
+        &["dmg"]
+    } else if cfg!(target_os = "windows") {
+        &["exe"]
     } else {
-        "exe"
+        // 小写比对：AppImage 的资产名后缀是 `.AppImage`
+        &["deb", "appimage"]
     }
 }
 
@@ -67,9 +74,12 @@ pub fn verify_installer(raw: &str) -> Result<PathBuf, String> {
         .and_then(|value| value.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let expected = installer_suffix();
-    if suffix != expected {
-        return Err(format!("只允许运行 .{expected} 安装包"));
+    let allowed = allowed_installer_suffixes();
+    if !allowed.contains(&suffix.as_str()) {
+        // 列出本平台允许的全部后缀：Linux 上有两种（deb / AppImage），
+        // 只说一个会让拿另一种产物的用户以为自己的包不被支持
+        let list = allowed.iter().map(|s| format!(".{s}")).collect::<Vec<_>>().join(" / ");
+        return Err(format!("只允许运行 {list} 安装包"));
     }
 
     let target = normalize(&path).ok_or_else(|| "无法解析安装包路径".to_string())?;
@@ -90,6 +100,7 @@ pub fn verify_installer(raw: &str) -> Result<PathBuf, String> {
 /// macOS：dmg 没有等价的静默参数，交给系统 `open` 挂载（用户随后自己把
 /// app 拖进「应用程序」）—— 这也是 dmg 分发的常规交互，强行静默反而会让
 /// 用户不知道安装包被挂到哪去了。
+/// Linux：按包型分流，见下面两个 `cfg` 分支的说明。
 ///
 /// 不等待安装结束：安装程序通常需要用户交互，阻塞在这里会让
 /// 界面一直转圈。调用方随后自行决定是否退出程序。
@@ -111,7 +122,11 @@ pub fn launch_installer(path: &Path, silent: bool) -> Result<(), String> {
             .map(|_| ())
             .map_err(|error| format!("打开磁盘映像失败: {error}"))
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        launch_installer_linux(path, silent)
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     {
         let mut command = std::process::Command::new(path);
         if silent {
@@ -123,6 +138,75 @@ pub fn launch_installer(path: &Path, silent: bool) -> Result<(), String> {
             .map(|_| ())
             .map_err(|error| format!("启动安装包失败: {error}"))
     }
+}
+
+/// Linux 桌面的安装包启动：deb 与 AppImage 是两条不同的路。
+///
+/// ── deb：必须交给系统包管理器 ────────────────────────────────
+/// `.deb` 不能直接执行，它是 ar 归档。正确做法是交给桌面环境登记的处理程序
+/// （`xdg-open` 会转给 GNOME Software / Discover 这类图形安装器，用户点两下
+/// 装完）。**不走 `dpkg -i`**：那需要 root，而本进程是普通用户 —— 直接
+/// `sudo` 会把「界面点了更新」变成一次静默提权，既不该由网关代劳，也没有
+/// 终端可以输密码。
+///
+/// `silent` 对 deb 没有对应语义（装不装、什么时候装由用户在图形安装器里
+/// 决定），显式忽略而不是假装支持。
+///
+/// ── AppImage：自己就能跑 ───────────────────────────────────
+/// AppImage 是可执行的单文件：加上可执行位直接启动即为「升级」（它自带
+/// 运行时，换文件就换了版本）。这里**只启动不替换**：真正的替换由用户或
+/// 外层脚本决定（把新 AppImage 覆盖到旧文件上）；本进程此刻还占着旧的
+/// 可执行文件，自己去覆盖自己会失败。
+#[cfg(target_os = "linux")]
+fn launch_installer_linux(path: &Path, silent: bool) -> Result<(), String> {
+    let is_appimage = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.eq_ignore_ascii_case("appimage"))
+        .unwrap_or(false);
+
+    if is_appimage {
+        // AppImage 需要可执行位才能真正启动（下载器落盘时默认没有）。
+        // 失败就如实报错：一个不可执行的 AppImage 启动起来只会得到
+        // Permission denied，不如在这里把话说清楚。
+        if let Err(error) = make_executable(path) {
+            return Err(format!("无法为 AppImage 添加可执行权限: {error}"));
+        }
+        let _ = silent;
+        std::process::Command::new(path)
+            .current_dir(path.parent().unwrap_or_else(|| Path::new(".")))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("启动 AppImage 失败: {error}"))
+    } else {
+        // deb：交给桌面环境登记的图形安装器（见函数说明为何不用 dpkg）
+        let _ = silent;
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| {
+                format!("调用系统安装器失败（需要桌面环境提供 xdg-open）: {error}")
+            })
+    }
+}
+
+/// 给文件加可执行位（`chmod +x`）：AppImage 启动前的必要步骤。
+///
+/// 用 `std::os::unix::fs::PermissionsExt` 而不是 spawn `chmod`：少一个进程、
+/// 少一次 PATH 查找，且失败原因直接是 io 错误（可读）。
+#[cfg(target_os = "linux")]
+fn make_executable(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = std::fs::metadata(path)?;
+    let mut permissions = metadata.permissions();
+    // 在既有权限上补三档的可执行位（rw- → rwx），保留其余位不动
+    permissions.set_mode(permissions.mode() | 0o111);
+    std::fs::set_permissions(path, permissions)
 }
 
 /// 把 `canonicalize` 得到的路径还原成 shell 能接受的普通形式。

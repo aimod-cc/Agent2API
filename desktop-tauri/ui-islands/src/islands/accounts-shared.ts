@@ -544,3 +544,23 @@ export function formatTime(value: unknown): string {
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
+
+/**
+ * 数值字段 → 展示串：**最多两位小数**，取不到给「—」。
+ *
+ * ── 为什么要有小数上限 ──────────────────────────────────────
+ * 上游有几家给的是 `*Precise` 这类**高精度浮点**（WorkBuddy 国内版的
+ * `CycleCapacityRemainPrecise` 实测回 `3547.430000335`），后端按「缺键不写、
+ * 给什么写什么」如实透传，于是那串尾巴会铺满悬停提示与积分明细。积分读到两位
+ * 小数已经比上游自己面板上给的还细，再多就是噪声。收口只在这里一处
+ * （余额读数 / 余量 / 总量 / 明细行 / 限制器实况都走它），别在十来处各写一遍。
+ *
+ * 整数不受影响（`1500.00` → `1500`，尾随零由 `Number` 归掉）；解析不出数字的值
+ * **原样透出** —— 上游偶尔给「不限」这类文案串，不能把一个有内容的值改写成「—」。
+ */
+export function numberText(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '—'
+  const number = Number(value)
+  if (!Number.isFinite(number)) return String(value)
+  return String(Number(number.toFixed(2)))
+}

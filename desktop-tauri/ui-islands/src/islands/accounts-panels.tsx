@@ -41,7 +41,7 @@ import {
   TooltipTrigger,
   cn,
 } from '@ui'
-import { formatTime, poolItemLabel, POOL_VALUE_PREFIX, shared, type AccountRecord, type LimiterRule, type TokenReading, type UsageEntry } from './accounts-shared'
+import { formatTime, numberText, poolItemLabel, POOL_VALUE_PREFIX, shared, type AccountRecord, type LimiterRule, type TokenReading, type UsageEntry } from './accounts-shared'
 import {
   accountTags, activeLimits, balanceBlockedOf, claimDoneTitle, claimedToday,
   displayNameOf, expiryMillis, formatIntervalSeconds, formatResetText,
@@ -174,7 +174,7 @@ export function GroupBandRow({ group, collapsed, colSpan }: {
               ? <img src={icon} alt='' loading='lazy' />
               : <span className='grp-logo-txt'>{String(group.label || '?').trim().slice(0, 1).toUpperCase()}</span>}
           </span>
-          <span className='grp-name'>{group.label}</span>
+          <span className='grp-name'>{t(group.label)}</span>
           <span className='grp-stat'>{t('{total} 个账号 · 启用 {enabled} · 禁用 {disabled}{limited}', {
             total: group.members.length,
             enabled: group.enabled,
@@ -327,13 +327,6 @@ export function ConnectionsCell({ account }: { account: AccountRecord }) {
       {value}
     </span>
   )
-}
-
-/** 数值 → 展示串（与余额列摘要同口径，取不到给「—」） */
-function numberText(value: unknown): string {
-  if (value === null || value === undefined || value === '') return '—'
-  const number = Number(value)
-  return Number.isFinite(number) ? String(number) : String(value)
 }
 
 /**
@@ -696,7 +689,7 @@ type UsageDetailRow = {
 
 /** token 组的平铺行（余额格里直接显示的那两行；比弹层行更紧凑） */
 type UsageFlatRow = {
-  /** 短标签（余额列只有 132px，「福利模型日额度」放不下，平铺用短名） */
+  /** 短标签（余额列只有 148px，「福利模型日额度」放不下，平铺用短名） */
   name: string
   /** 紧凑读数（万/亿缩写；「剩 0 / 1000 万」比 8 位原数好读得多） */
   view: string
@@ -707,17 +700,56 @@ type UsageFlatRow = {
   over: boolean
   /** 悬停全文（后端 balanceView + 行的口径说明） */
   title?: string
+  /**
+   * 行形态：`stack` = 名称/读数一行、条单独一行（CodeArts 的 token 池与
+   * OpenCode Go 的窗口，既有形态）；`compact` = **背景条 + 一行内读数**
+   * （Antigravity 的两组 × 两窗口，见 `usageWindows`）。
+   */
+  variant?: 'stack' | 'compact'
+  /** `compact` 形态用的百分比读数（`72%`）；与条同源，不另算 */
+  percentText?: string
+  /**
+   * `compact` 形态用的**窗口码短名**（`5h` / `每周`）：单独一段、不参与压缩。
+   * 同一组下几条读数唯一的差别就在这半段（Gemini 的 5 小时 vs 每周），
+   * 跟组名拼成一串一起省略会让它们长得一样、分不出哪条是哪条。
+   */
+  windowShort?: string
+  /** React 键：窗口的稳定标识（后端 `windows[].key`，如 `gemini-5h`）。
+   *  没有的档（CodeArts 那两行）退回 name —— 键只用在一处，缺了也不报错 */
+  id?: string
 }
 
 /**
- * 平铺在余额格里的一行：**名称 + 读数 + 占满格宽的剩余条**（两行式）。
+ * 平铺在余额格里的一行。两种形态共用同一个渲染（判据是 `row.variant`）：
  *
- * 两处共用同一个渲染：CodeArts 的两行 token 池（对话 token / 福利日额度）与
- * OpenCode Go 的三个用量窗口 —— 形态本来就是同一种（一行一个读数、下面一条
- * 比例条），所以类名也同一套（`.usage-flat-*`，尺寸全写在 CSS 里），
- * 不各写一份。条画的是**剩余**比例，超额整条走红（与积分明细同款）。
+ *   · `stack`（缺省，既有）—— **名称 + 读数**一行、下面一条占满格宽的剩余条。
+ *     CodeArts 的两行 token 池与 OpenCode Go 的三个用量窗口用它。
+ *   · `compact` —— 读数量级多（Antigravity 有 4 条：两组 × 两窗口）时的紧凑形态：
+ *     背景铺一条按比例的半透明色带，前景一行读完（短标签 + 百分比）。4 条 stack
+ *     要占 4 × 22px，横排的表格里那段高度全列都得跟着长；compact 一行的信息密度
+ *     与 stack 相同（标签 + 读数 + 比例），高度只有一半左右。
+ *
+ * 条画的是**剩余**比例，超额整条走红（与积分明细同款）。
  */
 function UsageFlatRowView({ row }: { row: UsageFlatRow }) {
+  if (row.variant === 'compact') {
+    return (
+      <span className={`usage-flat-compact ${row.tone}${row.over ? ' over' : ''}`} title={row.title}>
+        {/* 背景色带：剩余比例。读数缺失时不画（`percent` 为 null）——
+            一条满格或空格的色带与「还剩多少」读起来是相反的两种意思 */}
+        {row.percent !== null ? (
+          <i className='usage-flat-fill' style={{ width: `${row.percent}%` }} aria-hidden />
+        ) : null}
+        {/* 三段各司其职：组名可省略（同一家的几条共用一个组名），窗口码与百分比
+            不吃压缩 —— 它们才是分辨「这条是哪一条」的那半段 */}
+        {row.name ? <span className='usage-flat-cname'>{row.name}</span> : null}
+        {row.windowShort ? <span className='usage-flat-cwin'>{row.windowShort}</span> : null}
+        <span className='usage-flat-cview'>
+          {row.percentText || row.view}
+        </span>
+      </span>
+    )
+  }
   return (
     <span className='usage-flat-line' title={row.title}>
       <span className='usage-flat-head'>
@@ -734,16 +766,51 @@ function UsageFlatRowView({ row }: { row: UsageFlatRow }) {
 }
 
 /**
- * 余额文档 → **逐窗口**读数（`windows[]` 形状：OpenCode Go 的 5 小时 / 每周 / 每月），
- * 一个窗口一行平铺（形状就是 [`UsageFlatRow`]，与 CodeArts 那两行同一套渲染）。
+ * 窗口码 → 界面短名。码由后端给（`window` 键），译文只在这里拼 —— 后端返回中文的
+ * 话，非中文界面里会露出一串看不懂的汉字（与 `zcodePlanStateLabel` 同一条纪律：
+ * 状态码由后端给、文案只在前端拼）。
  *
- * 这一家的额度不是「一个池子剩多少」而是**几个窗口各自的剩余比例** —— 只报一个
+ * 复用**已有的**周期词键（`每日` / `每周` / `每月`，五种语言都有译文），不新造
+ * 一套短词：同一件事在界面上只该有一种说法。`5h` 是纯 ASCII、各语言同形，因此
+ * **不进词典**（它与「5 小时」是同一条窗口的两种写法：长名在悬停的全名里，短名
+ * 只在这里）。认不出的码原样透出 —— 上游将来多一种窗口时，界面上看到的是那个码。
+ */
+function windowCodeLabel(code: string): string {
+  switch (code.trim().toLowerCase()) {
+    case '5h': return '5h'
+    case 'weekly': return t('每周')
+    case 'monthly': return t('每月')
+    case 'daily': return t('每日')
+    default: return code.trim()
+  }
+}
+
+/**
+ * 余额文档 → **逐窗口**读数（`windows[]` 形状），一个窗口一行平铺
+ * （形状就是 [`UsageFlatRow`]，与 CodeArts 那两行同一套渲染）。
+ *
+ * ── 这一家的额度为什么必须逐窗口出 ──────────────────────────
+ * 窗口型额度不是「一个池子剩多少」而是**几个窗口各自的剩余比例** —— 只报一个
  * 数字说不清「5 小时还剩着、每周已经用光」，而后者正是「这账号还能不能跑」的答案。
  * 于是后端除主读数外给出 `windows[]`，这里一窗一条。
  *
- * 判据仍是**形状**（后端给了 windows 数组）而不是 provider：谁去查是后端的事，
- * 查回来长什么样由字段决定（与 `usageSummary` / `usagePool` 同一口径）。没有这个
- * 键的家（其余全部）走的还是原来那两条呈现，行为一字未变。
+ * ── 两家的窗口共用这一种形态（紧凑背景条）───────────────────
+ * 这一档**只有**窗口型额度（没有「一个池子剩多少」那种池子读数），所以形态可以
+ * 统一：背景铺一条按比例的半透明色带，前景一行读完（短标签 + 百分比）。
+ *   · **OpenCode Go**（3 条：5 小时 / 每周 / 每月）；
+ *   · **Antigravity**（4 条：Gemini 与 Claude/GPT 各一份 5 小时 / 每周）。
+ * 条数少也不退回「名称/读数一行 + 条一行」的老形态：同一形状两套渲染要各维护一份，
+ * 而两者的信息量本来一模一样（标签、读数、比例），只是省了行高。
+ *
+ * ── 标签：三段各司其职，短名在格子里、全名在悬停 ─────────────
+ * 132px 的内容盒（148 的列宽减去内边距）放不下「Claude/GPT · 每周」，于是拆成三段：
+ *   · **组名**（`row.group`，专名原样）—— 可省略，同一家的几条共用一个组名；
+ *   · **窗口码**（`row.window` → `windowCodeLabel`）—— 不吃压缩：同一组的两条
+ *     唯一的差别就在这半段，把它一起省略会让「Gemini 5 小时」与「Gemini 每周」
+ *     长得一模一样，用户分不出哪条是哪条；
+ *   · **百分比** —— 同样不吃压缩。
+ * 老后端 / 只给 `label` 的行照旧用 `label` 当组名（两条路都不缺词）；
+ * 全名（`label`）与重置时刻一起进悬停提示。
  *
  * 缺失一律当「不知道」：`remainingPercent` 读不到时那一行**不画条**、读数是
  * 「—」（后端没给 `view` 时按比例补一句，比例也没有就留破折号）—— 一条空条与
@@ -759,21 +826,66 @@ export function usageWindows(entry: UsageEntry): UsageFlatRow[] {
   const out: UsageFlatRow[] = []
   for (const row of rows) {
     if (!row || typeof row !== 'object') continue
-    const name = String(row.label || '').trim()
-    if (!name) continue
+    // ── 名字拆成两段：组名（可省）+ 窗口码 ────────────────────────
+    // Antigravity 的行是「组 + 窗口」（`Gemini` / `Claude/GPT` × 5 小时 / 每周）：
+    // 内容盒放不下整串，而同组两条唯一的差别恰恰是窗口那半段 —— 整串一起省略会让
+    // 它们长得一模一样、分不出哪条是哪条。所以拆开：组名一段（可省略）、
+    // 窗口码一段（不吃压缩）。
+    // OpenCode 的行只有窗口、没有组，组名那段自然是空串 —— 于是它直接显示译好的
+    // 窗口名（`Weekly`），比原先直接用后端的中文 `label` 更贴界面语言。
+    // 老后端：两个码都没有时整串退回 `label`（路不缺词）。`label`（全名）始终进悬停。
+    const label = String(row.label || '').trim()
+    const group = String(row.group || '').trim()
+    const windowCode = String(row.window || '').trim()
+    const windowShort = windowCode ? windowCodeLabel(windowCode) : ''
+    const name = group || (windowShort ? '' : label)
+    if (!name && !windowShort) continue
     const read = numberOrNull(row.remainingPercent)
     // 条画的是**剩余**比例（与积分明细同向），越界一律夹回 0~100
     const percent = read === null ? null : Math.max(0, Math.min(100, read))
+    const view = String(row.view || '').trim()
+      || (percent === null ? '—' : t('剩余 {percent}%', { percent: Math.round(percent) }))
+    // 重置时刻：后端给毫秒（`resetsAt`），这里按界面语言拼一句进悬停 ——
+    // 复用已有的 `重置 {date}` 键（五种语言都有译文），不另造一句同义文案；
+    // 与弹层里那个「重置 {date}」同款，给不出时刻就整段不写
+    const resetsAt = numberOrNull(row.resetsAt)
+    const resetLine = resetsAt !== null && resetsAt > 0
+      ? t('重置 {date}', { date: formatTime(resetsAt) })
+      : ''
     out.push({
       name,
-      view: String(row.view || '').trim()
-        || (percent === null ? '—' : t('剩余 {percent}%', { percent: Math.round(percent) })),
+      view,
       tone: percent === null ? 'muted' : percent < 20 ? 'warn' : 'ok',
       percent,
       over: false,
+      // 悬停：名字用**全名**（short 是给格子省地方的，悬停里要能看全），
+      // 后接读数与重置时刻（后者只有后端给了才算）
+      title: [label || [name, windowShort].filter(Boolean).join(' '), view, resetLine]
+        .filter(Boolean).join(' · '),
+      variant: 'compact',
+      percentText: percent === null ? '' : `${Math.round(percent)}%`,
+      windowShort,
+      id: String(row.key || '').trim() || name,
     })
   }
   return out
+}
+
+/**
+ * 逐窗口那一档的套餐徽标（`{text, free}`；读不到给 null）。
+ *
+ * 与 `usageDetailOf` 里的套餐徽标同源同形（都读 `subscription.planName`，文案走
+ * `planBadgeLabel`、免费判据走 `isFreePlan`）—— 两处显示的是同一件事，措辞与
+ * 配色必须一致，否则同一个账号在两档里会长得不一样。
+ */
+function windowsPlan(entry: UsageEntry): { text: string; free: boolean } | null {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null
+  const subscription = ((entry as Record<string, unknown>).subscription && typeof (entry as Record<string, unknown>).subscription === 'object'
+    ? (entry as Record<string, unknown>).subscription
+    : {}) as Record<string, unknown>
+  const name = String(subscription.planName || '').trim()
+  if (!name) return null
+  return { text: planBadgeLabel(name), free: isFreePlan(name) }
 }
 
 /** 明细弹层的数据形状（`usageDetailOf` 的产物） */
@@ -802,13 +914,18 @@ type UsageDetail = {
 type UnitsBridge = { formatTokens?: (value: unknown) => string }
 
 /**
- * 数值 → 紧凑读数（token 数常是七位八位的整数，余额列只有 132px，读的是量级）：
+ * 数值 → 紧凑读数（token 数常是七位八位的整数，余额列只有 148px，读的是量级）：
  * 量级词与分档全交给 units.js 的 formatTokens（简体「354万」、英文「354k」，
  * 设置页那个开关拨一下两处一起变）；拿不到桥时退回裸数字。
+ *
+ * 进桥之前先按两位小数归一次：`formatTokens` 对一万以内的数走千分位，而
+ * `toLocaleString` 保留三位小数（`39.4321` → 「39.432」）—— 与 `numberText`
+ * 的小数上限口径不一致，同一份读数在两处会显示成不同位数。
  */
 function compactNumber(value: number): string {
+  const rounded = Number.isFinite(value) ? Number(value.toFixed(2)) : value
   const api = (window as unknown as { wbUnits?: UnitsBridge }).wbUnits
-  return api?.formatTokens ? api.formatTokens(value) : String(value)
+  return api?.formatTokens ? api.formatTokens(rounded) : String(rounded)
 }
 
 /** 后端 displayName → 平铺短标签（映射不到的原样显示，不硬造）。匹配仍按上游给的中文
@@ -829,7 +946,7 @@ function flatMeterName(name: string): string {
  * 不依赖那条展示串。
  *
  * ── token 组为什么单独一份紧凑形状 ─────────────────────────
- * 平铺在格子里读，空间只有 132px：短标签 + 万/亿缩写的读数放得下；
+ * 平铺在格子里读，空间只有 148px：短标签 + 万/亿缩写的读数放得下；
  * 后端的 balanceView 是全量串（「剩 0 / 10000000 token」），留给悬停。
  * 条只在**真总量**（allowance > 1，与后端 view() 的占位包口径一致）时画 ——
  * 上游给过 `package_token_amount=1` 的占位形状，照它画条是「永远满格」的假信息。
@@ -1030,16 +1147,26 @@ export function UsageCell({ account }: { account: AccountRecord }) {
       title: summary.title,
     }
     : null
-  // ── 逐窗口读数：一格三条（`windows[]` 形状，OpenCode Go 的三个用量窗口）──
-  // 形态与 CodeArts 平铺的那两行 token 条**同一种**（名称 + 读数 + 占满格宽的
-  // 剩余条），因此共用 `UsageFlatRowView` 与 `.usage-flat-*` 那套样式，
-  // 不另写一份。判据与上面两处同一档（读数可用才画）：三条本身就在讲
-  // 「还剩多少」，挂在一句错误下面会把错误装饰成一条可信的读数。
+  // ── 逐窗口读数：一格多条（`windows[]` 形状）──────────────────
+  // 两家用同一个形状、两种形态（判据在 `usageWindows`：条数 > 3 走紧凑背景条）：
+  // OpenCode Go 的三个用量窗口（沿用名称/读数 + 独立条的既有形态）与 Antigravity
+  // 的两组 × 两窗口（Gemini / Claude/GPT 各一份 5 小时与每周 —— 后端
+  // `antigravity::balance` 的 `wallets_of`）。判据与上面两处同一档（读数可用才画）：
+  // 这几条本身就在讲「还剩多少」，挂在一句错误下面会把错误装饰成一条可信的读数。
   const windows = summary.kind === 'ok' || summary.kind === 'warn' ? usageWindows(entry) : []
   if (windows.length) {
+    // 套餐徽标：这一档原来只有逐窗口读数，而 Antigravity 的订阅档（Pro / Ultra /
+    // Free）正是「这账号值多少」的一半 —— 后端在 `subscription.planName` 里给了，
+    // 显示形态与 `UsageDetailCell` 的徽标同一枚（`.plan-chip`，免费版走中性灰）
+    const plan = windowsPlan(entry)
     return (
       <span className='usage-cell' title={summary.title}>
-        {windows.map(row => <UsageFlatRowView key={row.name} row={row} />)}
+        {plan ? (
+          <span className='usage-plan'>
+            <span className={`plan-chip${plan.free ? ' free' : ''}`}>{plan.text}</span>
+          </span>
+        ) : null}
+        {windows.map(row => <UsageFlatRowView key={row.id || row.name} row={row} />)}
         {blockedBadge}
         {pendingBadge}
         {tokenSub}

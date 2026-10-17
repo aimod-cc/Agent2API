@@ -325,6 +325,30 @@ pub fn change_lan_access(app: AppHandle, enabled: bool, panel: bool) -> Result<V
     }))
 }
 
+/// 界面直连网关时该带的凭证头（AI 助手的配置读写与流式对话）。
+///
+/// ── 为什么需要单独一条命令 ──────────────────────────────────
+/// 助手页为了流式对话/不受桥 60 秒超时限制，直接 fetch 网关基址（见
+/// ui-islands/src/islands/assistant-state.ts）。桌面形态下页面来自 Tauri
+/// 自定义协议、网关在 `127.0.0.1:{port}`：跨源 + 不带 cookie，请求里没有
+/// 任何凭证；面板认证一旦开启（设置页开过局域网访问就会注册管理员），
+/// `/api/*` 要求「面板会话或一把启用的 Key」，那条裸请求就会被 401
+/// `panel_login_required` 拒绝 —— 用户看到的就是「加载助手设置失败：请先
+/// 登录管理面板」，而桌面上并没有登录页。把壳自己用的那把 Key 交给页面，
+/// 直连通道与桥通道的凭证口径就一致了。
+///
+/// 返回 `{ 头名: 值 }`（桌面端只有 `x-api-key`）：网页端 shim 的同名方法回
+/// 面板令牌 / 用户输入的 Key，助手页对两端一视同仁，只负责合并。面板认证
+/// 没开启时多带一个头也不会被拒 —— 中间件的鉴权分支只在开启后才看它。
+#[tauri::command]
+pub fn direct_credentials() -> Result<Value, String> {
+    let mut headers = serde_json::Map::new();
+    if let Some(key) = crate::gateway::management_key() {
+        headers.insert("x-api-key".to_string(), Value::String(key));
+    }
+    Ok(Value::Object(headers))
+}
+
 /// 本机在局域网里的地址（给「局域网访问」面板显示 `http://<IP>:<端口>/v1` 用）。
 ///
 /// UDP connect 不发任何包，只是让内核按路由表选出默认出口的源地址 —— 机器
@@ -796,6 +820,16 @@ pub async fn cancel_update() -> Result<Value, String> {
 /// 本机网关就已经停了（而且 dmg 挂载后用户往往会先去看一眼再决定），
 /// 等于用一个没有必要的退出打断了正在服务的网关。所以这一支不关机、不退出，
 /// 只把映像挂上，并如实把 `restart: false` 回给界面（界面据此不提示「即将退出」）。
+///
+/// ── Linux 上为什么也不退出（与 macOS 同理，但两种包型不同）──────
+/// `.deb` 交给桌面环境的图形安装器（GNOME Software / Discover）：用户点「安装」
+/// 之后由包管理器往系统目录写文件 —— 与当前进程**不在同一个路径**（本程序跑在
+/// `~/.local/bin` 或 AppImage 自解目录这类用户目录里），没有文件占用冲突，
+/// 且安装动作的时机完全由用户决定。所以这一支同样不回收后端、不退出。
+///
+/// `.AppImage` 是个例外：它是自包含单文件，更新方式就是「用新的覆盖旧的」，
+/// 而本进程此刻正占着旧文件。因此要退回「先让出、再启动新的」那条老路
+/// （与 Windows 同一套顺序）。
 #[tauri::command]
 pub fn run_installer(app: AppHandle, path: String, restart: Option<bool>) -> Result<Value, String> {
     let target = crate::update::verify_installer(&path)?;
@@ -814,7 +848,50 @@ pub fn run_installer(app: AppHandle, path: String, restart: Option<bool>) -> Res
         }));
     }
 
-    #[cfg(not(target_os = "macos"))]
+    // Linux：deb 交给图形安装器（不退出），AppImage 走「让位 + 启动」（要退出）
+    #[cfg(target_os = "linux")]
+    {
+        let is_appimage = target
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.eq_ignore_ascii_case("appimage"))
+            .unwrap_or(false);
+
+        if is_appimage {
+            // AppImage：新文件要覆盖本进程正占着的旧可执行文件，先让位
+            // （与 Windows 同一套顺序，理由见函数说明）
+            crate::backend::shutdown(&app.state::<AppState>());
+            crate::update::launch_installer(&target, true)?;
+
+            let restart = restart.unwrap_or(true);
+            if restart {
+                app.state::<AppState>().begin_exit();
+                let handle = app.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                    handle.exit(0);
+                });
+            }
+            return Ok(json!({
+                "launched": true,
+                "path": target.to_string_lossy(),
+                "restart": restart,
+            }));
+        }
+
+        // deb：交给桌面环境的图形安装器，不回收后端、不退出（理由见函数说明）。
+        // 与 macOS 那一支同样显式消费掉未用的参数，避免 unused 告警。
+        let _ = &app;
+        let _ = restart;
+        crate::update::launch_installer(&target, false)?;
+        Ok(json!({
+            "launched": true,
+            "path": target.to_string_lossy(),
+            "restart": false,
+        }))
+    }
+
+    #[cfg(target_os = "windows")]
     {
         // 先让出 node.exe 的文件占用与 3065 端口，再让安装包去覆盖文件
         crate::backend::shutdown(&app.state::<AppState>());

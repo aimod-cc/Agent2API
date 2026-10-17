@@ -124,6 +124,13 @@ pub async fn ensure_ready(app: &AppHandle) -> Result<(), StartupFailure> {
     // 判据与监听地址解耦 —— 开了局域网访问（0.0.0.0）后依然成立。
     state.local_panel = true;
 
+    // ── 桌面壳标志（Linux 上「挑哪个更新资产」的判据）──────────────
+    // Linux 的桌面壳与容器 / headless 是**同一份编译目标**，而后端的更新检查
+    // 必须知道「本进程有没有 GUI 壳」才能决定：桌面壳挑 deb / AppImage 安装包
+    // 交给壳去装，容器挑服务端包原地替换（见 `update::version::desktop_shell`）。
+    // 不置位时的行为与改造前一致（容器侧不变），所以这里只需壳自己声明。
+    server::core::update::set_desktop_shell(true);
+
     // ── 局域网访问的安全闸门（headless 的同款语义，见 bin/agent2api-server）──
     // 监听一出回环，「一把 Key 都没有 → 全放行」的免鉴权语义不再成立：
     //   · /api/*：注册过管理员就要求会话或 Key（panel_auth 分支自动生效）；

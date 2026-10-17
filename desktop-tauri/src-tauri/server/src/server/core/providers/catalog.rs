@@ -190,6 +190,12 @@ pub(crate) fn refresh_meta(kind: ProviderKind) -> (bool, i64) {
         // `orcaterm::models` 的模块头）：永远不是远程来源，也没有刷新时刻。
         // 与 ZCode 同一口径：如实回 `(false, 0)`，界面的「来源」列显示成内置清单。
         ProviderKind::OrcaTerm => (false, 0),
+        // 智谱清言有远程目录（`operation/detail?tag=available_models`）——
+        // 如实回报它的来源与拉取时刻，界面「更新日期」列才有东西可显示。
+        ProviderKind::Chatglm => (
+            super::chatglm::models::remote_refreshed(),
+            super::chatglm::models::last_refreshed_at(),
+        ),
         // ModelScope 的两个站点各有一份独立清单（缓存按地区分格，见
         // `modelscope::models` 的模块头）：这里如实各查**自己那一格**。
         // 上游**没有**内置兜底清单，所以「有内容」就等于「远程拉到过」。

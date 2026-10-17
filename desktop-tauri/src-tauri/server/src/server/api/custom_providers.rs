@@ -90,8 +90,8 @@ pub async fn create_custom_provider(State(state): State<ServerState>, body: Byte
         .and_then(Value::as_str)
         .map(str::to_string);
     let store = state.store();
-    let account = match store.add_custom_account(&provider_id, &payload, name.as_deref()) {
-        Ok(account) => account,
+    let upsert = match store.add_custom_account(&provider_id, &payload, name.as_deref()) {
+        Ok(upsert) => upsert,
         Err(error) => {
             // 回滚提供商（此刻名下没有账号，级联删除计数为 0）；回滚本身
             // 失败不再叠加报错 —— 那种情况下日志里会有提供商创建与配置写入
@@ -115,7 +115,10 @@ pub async fn create_custom_provider(State(state): State<ServerState>, body: Byte
     );
     ok_json(json!({
         "provider": provider,
-        "account": account,
+        "account": upsert.account,
+        // 刚建的提供商名下不可能已有账号，这里恒为 true；带上它是为了让两条
+        // 添加路径的响应形状一致（前端按同一份契约读）
+        "created": upsert.created,
         "list": store.list_accounts(),
     }))
 }

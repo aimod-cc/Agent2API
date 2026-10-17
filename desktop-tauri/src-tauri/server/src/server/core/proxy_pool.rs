@@ -39,11 +39,18 @@
 //!   · 为什么不直接改写 `enabled`：那个字段是来源侧的镜像值，下一次同步就会
 //!     被写回来（`sync_clash` 按 uid 更新名称与启用），开关会自己弹回去；
 //!   · 禁用一条**订阅节点**会连带收掉它的本地监听端口（关闭流程，见
-//!     `api::proxies::pool_enable` 与 `disabled_subscription_ids_with_ports`）：
-//!     内核不再为被禁用的节点开监听器 —— 禁用的语义就是「这个端口不再听着」，
-//!     只留一个标记会让端口继续开着、地址看着能用而实际没人用它。
+//!     `api::proxies::pool_enable` 与 `reconcile_listeners`）：内核不再为被
+//!     禁用的节点开监听器 —— 禁用的语义就是「这个端口不再听着」，只留一个
+//!     标记会让端口继续开着、地址看着能用而实际没人用它。
 //!     manual / clash 没有本机端口（clash 的端口在 Clash Verge 手里），
 //!     禁用只影响本端的取用。
+//!
+//! ── 端口跟随引用（双向对账，`api::proxies::reconcile_listeners`）────
+//! 专用端口只为账号转发而存在（测试走统一测试口，见下节），于是「引用 ⇄
+//! 端口」两个方向都自动收敛：新增引用补监听器，**失去引用（删账号 / 改走
+//! 别的代理）回收端口**。账号每次写操作后对账一次，缺口非空就投一次内核
+//! 重建（重建按最新引用全量重算，一次同时补缺与回收）。「无引用却还挂着
+//! 端口」因此只是两次重建之间的瞬时态，不是需要用户手动清理的状态。
 //!
 //! ── 测试走统一测试口（不占节点端口）────────────────────────
 //! 内核里有一个固定的「测试口」监听器，背后是 select 策略组（成员 = 全部
@@ -843,7 +850,7 @@ pub struct SubscriptionNodeTarget {
     pub node: String,
     /// 内核监听端口；**None = 未分配**（lazy listeners：内核只为被账号引用的
     /// 节点开监听器，未引用的节点仍镜像进池供浏览选择，端口为空 —— 引用后
-    /// 由补建链路触发内核重启补上，见 `api::proxies::provision_missing_listeners`）
+    /// 由对账链路触发内核重启补上，见 `api::proxies::reconcile_listeners`）
     pub port: Option<u16>,
 }
 
@@ -1003,8 +1010,8 @@ pub fn subscription_node_keys(pool_ids: &std::collections::HashSet<&str>) -> std
 
 /// 内核该给哪些节点开监听器：**账号引用中的条目**（禁用中的不算）。
 ///
-/// 内核侧（`runtime::listener_node_keys`）与补建判定
-/// （`api::proxies::provision_missing_listeners`）都从这一处取，必须同一口径
+/// 内核侧（`runtime::listener_node_keys`）与对账判定
+/// （`api::proxies::reconcile_listeners`）都从这一处取，必须同一口径
 /// —— 口径不一致就会出现「判定说没有缺口、内核却不建」这类谁也解释不清的
 /// 状态。测试不在此列（测试走统一测试口，不需要端口，见模块头）。
 pub fn listener_node_keys(pool_ids: &std::collections::HashSet<&str>) -> std::collections::HashSet<String> {
@@ -1037,24 +1044,6 @@ pub fn test_target(id: &str) -> Result<TestTarget, String> {
     })
 }
 
-/// 已禁用、但监听端口还开着的订阅条目 id（关闭流程的**缺口判据**，见
-/// `api::proxies::pool_enable`）。
-///
-/// 内核只在重建配置时才关掉一条监听器（配置里没有的监听器随进程重启一起走），
-/// 所以「禁用了一个正开着端口的节点」必须触发一次重建 —— 判据就是这里列出的
-/// 东西：内核重启后 `sync_subscription_nodes` 会把它们的端口写回 null，缺口随之
-/// 消失。于是重复点击开关 / 反复开关都是幂等的（没缺口就不投重启命令），
-/// 「禁用时内核正好没装 / 端口是上一轮遗留」这类时序也自然覆盖。
-pub fn disabled_subscription_ids_with_ports() -> Vec<String> {
-    read_items()
-        .iter()
-        .filter(|item| {
-            is_subscription_item(item) && !is_enabled(item) && valid_port(item.get("port")).is_some()
-        })
-        .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string))
-        .collect()
-}
-
 /// 这条订阅条目现在**需要监听器却没有端口**吗（启用后要不要补建的判据）。
 ///
 /// 判据与 `listener_node_keys` 完全同口径（账号引用，禁用中的不算），只是限定
@@ -1077,11 +1066,13 @@ pub fn needs_listener(id: &str, referenced: &std::collections::HashSet<&str>) ->
     referenced.contains(id)
 }
 
-/// 列出池里**已分配端口**的订阅节点条目（`{id, providerId, node, port}`）。
+/// 列出池里订阅节点的**端口状态**（`{providerId, node, port}`，`port` 为
+/// null 表示未分配）。
 ///
-/// provision 链路（`api::proxies::provision_missing_listeners`）的读入口：把
-/// 「还没有端口的被引用节点」找出来交给内核补建监听器。`provider_nodes`
-/// （provider 缓存）里没有的节点跳过 —— 订阅还没拉到内容时谈不上补建。
+/// 对账链路（`api::proxies::reconcile_listeners`）的读入口：拿它和「该开
+/// 监听器的节点集合」（`listener_node_keys`）比对 —— 该开却没端口的要补建，
+/// 端口还挂着却不该开的要回收。`provider_nodes`（provider 缓存）里没有的
+/// 节点跳过 —— 订阅还没拉到内容时谈不上补建。
 pub fn subscription_entries_with_ports() -> Vec<(String, String, Option<u16>)> {
     read_items()
         .iter()

@@ -163,6 +163,7 @@
   "每天时刻": "Horário diário",
   "每执行一次签到 · 每个账号一条明细 · 结果与收益以后端落账为准": "Uma linha por conta a cada execução · resultados e ganhos conforme registrado pelo backend",
   "每日活跃任务 · 网页会话保活点亮日活，领取才加积分 · 两者可分开执行": "Tarefas de atividade diária · uma conversa no canal web acende a atividade diária, só o resgate adiciona pontos · os dois podem ser executados separadamente",
+  "每日登录积分 · 顺带领取会员活动 · 访客账号无积分体系（跳过）": "Pontos de login diário · resgata atividades de membro junto · contas de visitante não têm sistema de pontos (ignorado)",
   "每日福利 · 领取 → 确认 → 回读核实 · 按北京时间自然日重置": "Benefício diário · resgatar → confirmar → reler para verificar · redefinido no dia natural (horário de Pequim)",
   "每日签到": "Check-in diário",
   "每条条目各有时刻与范围 · 各自当天去重 · 错过时点开机自动补签": "Cada agendamento tem horário e escopo próprios · deduplicação diária por item · execuções perdidas são compensadas ao iniciar",

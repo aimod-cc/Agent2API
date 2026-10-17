@@ -104,15 +104,25 @@ export const PROVIDER_ICONS: Record<string, string> = {
   // 国内 / 国际版共用这一张，同 AutoClaw / MonkeyCode 的形态）
   modelscope: 'assets/providers/modelscope.png',
   'modelscope-intl': 'assets/providers/modelscope.png',
+  // 智谱清言：取自客户端安装包 `resources/app.asar` 内的应用图标
+  // （`assets/icon.png`，512×512，与系统里显示的应用图标为同一形象；
+  // 归一成 256×256 入库 —— 与 officeace 同一处置）
+  chatglm: 'assets/providers/chatglm.png',
 }
 
 /**
- * 新接入、尚在观察期的家：添加账号页的卡片名字后跟一枚 `(beta)`（由
- * `ProviderCard` 渲染）。它只是**入口页的提示**，不是家本身的属性 ——
- * 账号表徽章、模型管理页都不跟着变；判据是「转发通道刚上线」，
- * 观察期结束后从这张表里删掉即可。
+ * Agent 段**不露出添加入口**的内置家（精确匹配 provider id）。目前只有
+ * `cline-pass`：
+ *   ① 它支持 API Key 形态（与 OAuth token 走同一个 Bearer 头），添加入口已迁到
+ *      「预置 API」段的 Cline Pass 卡（`preset-providers.js` 的 `clinepass`）；
+ *   ② 后端 Provider 与存量账号完全不动 —— 存量账号照常转发 / 刷新 / 删除，
+ *      账号页的分组带仍会列出 cline-pass（那段走 accounts-domain 的
+ *      providerSummaries 直读 providers 摘要，不经过本文件）；
+ *   ③ 这是刻意的（与 `workbuddy-intl` 那条同类：入口只留一处），**不要当成
+ *      漏掉的 bug 把它恢复**。
+ * 注意只按 id 精确匹配：`cline-free`（免费池）不受影响，仍在 Agent 段。
  */
-const BETA_PROVIDERS = new Set(['monkeycode', 'monkeycode-intl', 'commandcode', 'antigravity'])
+const HIDDEN_AGENT_PROVIDERS = new Set(['cline-pass'])
 
 type CardItem = {
   id: string
@@ -120,7 +130,6 @@ type CardItem = {
   count: number
   preset?: boolean
   custom?: boolean
-  beta?: boolean
   /** 预置卡专用：该模板已建过的同名自定义家 id（空串 / 缺省 = 还没建过） */
   builtId?: string
 }
@@ -165,15 +174,24 @@ function providerCards(accountType: AccountType): CardItem[] {
         custom: true,
       }))
   }
-  const list = providers?.all?.() || []
+  // Cline Pass 的添加入口不在这一段（判据与缘由见 HIDDEN_AGENT_PROVIDERS）：
+  // 在映射成卡片之前就把摘要里那条剔掉，后面的名字处理都不必再想它。
+  // 过滤只落在**本函数**（PickStep 的列表构造）上：账号页分组带 / 模型管理页
+  // 读的是同一份 providers 摘要，但各自有自己的列表构造（accounts-domain 的
+  // providerSummaries、models-page 的左栏），不经过这里，所以存量 cline-pass
+  // 账号仍照常成组显示。
+  const list = (providers?.all?.() || [])
+    .filter(item => !HIDDEN_AGENT_PROVIDERS.has(String(item?.id || '')))
   // WorkBuddy 这张卡与它的弹窗标题用**中性品牌名**（不带地区）而不是注册名：
   // 这个入口内部有「账号版本」分段，两版都从这一张卡进（名字见
   // `WORKBUDDY_ENTRY_LABEL` 的说明）。与下面那条「国际版不进卡片列表」是同一件事
   // 的两半：入口一处、版本在块里选。
+  // 注册名（「AutoClaw 国内版」这类）过一遍词典：卡片名与弹窗标题都由它出，
+  // 不查表的话非中文界面会在这里印中文
   const labelOf = (id: string, fallback: string): string =>
     id === WORKBUDDY_PROVIDER
       ? WORKBUDDY_ENTRY_LABEL
-      : shared().wbProviders?.labelOf?.(id) || fallback
+      : t(shared().wbProviders?.labelOf?.(id) || fallback)
   // 摘要还没到时先放 WorkBuddy 一张：弹窗不能因为一次状态未就绪就空着。
   // 名字与注册表无关（走上面那条中性口径）—— 兜底文案与真实文案不一致的话，
   // 网络慢的那一次会让用户以为界面变了样。
@@ -184,7 +202,6 @@ function providerCards(accountType: AccountType): CardItem[] {
         id,
         label: labelOf(id, String(item.label || item.id || '')),
         count: Number(item.count) || 0,
-        beta: BETA_PROVIDERS.has(id),
       }
     })
     : [{ id: WORKBUDDY_PROVIDER, label: WORKBUDDY_ENTRY_LABEL, count: accountCountOf(WORKBUDDY_PROVIDER) }]
@@ -249,10 +266,7 @@ function ProviderCard({ item, onPick }: { item: CardItem; onPick: (id: string) =
     >
       <Logo item={item} />
       <span className='add-provider-info'>
-        <span className='add-provider-name'>
-          {item.label}
-          {item.beta ? <span className='add-provider-beta'>(beta)</span> : null}
-        </span>
+        <span className='add-provider-name'>{item.label}</span>
         <span className='add-provider-meta'>{cardMeta(item)}</span>
       </span>
       <span className='add-provider-go'>›</span>

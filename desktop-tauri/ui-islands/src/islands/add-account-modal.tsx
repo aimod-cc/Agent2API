@@ -153,10 +153,11 @@ function AddAccountModal({
       : ''
   // WorkBuddy 用中性品牌名（不带地区）：这个块内部有「账号版本」分段，标题写着
   // 「国内版」而用户当场切到国际版就自相矛盾了（与第 1 步那张卡同一口径，名字
-  // 见 add-account-configs 的 WORKBUDDY_ENTRY_LABEL）。别家用注册表名。
+  // 见 add-account-configs 的 WORKBUDDY_ENTRY_LABEL）。别家用注册表名，
+  // 注册名要过一遍词典（「AutoClaw 国内版」这类在非中文界面得翻）。
   const providerLabel = state.provider === WORKBUDDY_PROVIDER
     ? WORKBUDDY_ENTRY_LABEL
-    : shared().wbProviders?.labelOf?.(state.provider) || state.provider
+    : t(shared().wbProviders?.labelOf?.(state.provider) || state.provider)
   // 标题写在表单弹窗的头部：列表弹窗的标题始终是「添加账号」，不跟着步骤变
   const heading = isCustom
     ? (state.providerHint || state.presetKey

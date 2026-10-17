@@ -410,7 +410,7 @@ export function ProxyForm({
                 ? t('正在读取代理列表…')
                 : pool.length
                   ? t('地址与端口由「网络代理」页管理：那边改一次、测一次，所有引用它的账号一起生效')
-                  : t('「网络代理」页还没有出口 —— 去那里新增，或点「同步 Clash Verge」把 Clash 的出口导进来')}
+                  : t('「网络代理」页还没有出口 —— 去那里新增，或在「订阅管理」里点「同步 Clash Verge」把 Clash 的出口导进来')}
           </div>
         </div>
       ) : null}
@@ -453,7 +453,7 @@ export function ProxyForm({
                 ? t('正在读取代理列表…')
                 : pool.length
                   ? t('每条请求换一个出口（按顺序轮流），上游看到的 IP 因此是变化的；出口的地址与端口由「网络代理」页管理')
-                  : t('「网络代理」页还没有出口 —— 去那里新增，或点「同步 Clash Verge」把 Clash 的出口导进来')}
+                  : t('「网络代理」页还没有出口 —— 去那里新增，或在「订阅管理」里点「同步 Clash Verge」把 Clash 的出口导进来')}
           </div>
         </div>
       ) : null}
@@ -499,7 +499,7 @@ export function ProxyForm({
           <p className='detail mt-1.5'>
             {t('这是既有配置（直接引用 Clash 出口，不经过代理池）。推荐改用上面的')}
             <b>{t('「已保存的代理」')}</b>
-            {t('：到「网络代理」页点「同步 Clash Verge」把出口导进池后即可选 —— 那样能集中测试、也能被多个账号共用。')}
+            {t('：到「网络代理」页的「订阅管理」里点「同步 Clash Verge」把出口导进池后即可选 —— 那样能集中测试、也能被多个账号共用。')}
           </p>
         </div>
       ) : null}
@@ -589,20 +589,20 @@ function PlanChannelField({
         </SelectTrigger>
         <SelectContent>
           <SelectItem value={ZCODE_PLAN_CODING}>
-            {t('编码套餐（Coding Plan）— 走开放平台端点，用自己订阅的额度')}
+            {t('编码套餐（Coding Plan）— 走开放平台端点，消耗开放平台的额度（订阅套餐 / 资源包 / 充值余额）')}
           </SelectItem>
           <SelectItem value={ZCODE_PLAN_START}>
-            {t('活动套餐（Start Plan）— 走官方活动端点，用活动里领到的额度')}
+            {t('套餐池（Start Plan）— 走 zcode.z.ai 端点，消耗 ZCode 套餐池的额度（新用户体验额度 / 活动领取）')}
           </SelectItem>
         </SelectContent>
       </Select>
       {plan === ZCODE_PLAN_START && !hasJwt ? (
         <span className='detail text-destructive'>
-          {t('该账号没有套餐登录态（jwt），活动套餐会失败：请重新登录该账号')}
+          {t('该账号没有套餐登录态（jwt），套餐池通道会失败：请重新登录该账号')}
         </span>
       ) : null}
       {plan === ZCODE_PLAN_START ? (
-        <span className='detail' title={t('活动套餐的推理端点要求每条请求带一个阿里云验证码令牌；令牌由本应用在后台静默铸造，界面关闭时无法铸造')}>
+        <span className='detail' title={t('套餐池的推理端点要求每条请求带一个阿里云验证码令牌；令牌由本应用在后台静默铸造，界面关闭时无法铸造')}>
           {t('验证码令牌：{counts}', { counts: pool ? `${pool.ready} / ${pool.target || 3}` : t('读取中…') })}
           {pool && pool.ready === 0 ? t('（库存为空，正在补；补不上时转发会失败）') : ''}
         </span>

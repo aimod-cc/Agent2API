@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Agent2API",
   "mainBinaryName": "agent2api",
-  "version": "3.0.7",
+  "version": "3.0.8",
   "identifier": "com.workbuddy.local-proxy",
   "build": {
     "frontendDist": "../ui"

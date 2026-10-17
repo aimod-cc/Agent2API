@@ -83,6 +83,7 @@ export type BusyScope =
   | 'routing'
   | 'debug'
   | 'sanitize'
+  | 'developerRoleCompat'
   | 'clineHeaders'
   | 'cors'
   | 'prompt'
@@ -149,6 +150,9 @@ export type DebugState = {
 }
 
 export type SanitizeState = { status: LoadStatus; on: boolean }
+
+/** 开发者角色兼容开关；与 SanitizeState 同形 */
+export type DeveloperRoleCompatState = { status: LoadStatus; on: boolean }
 
 /** Cline 伪装头：三份表（默认 / 覆盖 / 生效）都来自后端，界面据此渲染与判断改动 */
 export type ClineHeadersState = {
@@ -268,6 +272,7 @@ export type SettingsSnapshot = {
   routing: RoutingState
   debug: DebugState
   sanitize: SanitizeState
+  developerRoleCompat: DeveloperRoleCompatState
   clineHeaders: ClineHeadersState
   cors: CorsState
   prompt: PromptState
@@ -348,6 +353,7 @@ const INITIAL: SettingsSnapshot = {
   routing: { status: 'loading', strategy: 'order', sticky: 'auto', failoverBackoff: true, sink: true, breakerEnabled: false },
   debug: { status: 'loading', on: false, count: null, limit: null },
   sanitize: { status: 'loading', on: false },
+  developerRoleCompat: { status: 'loading', on: false },
   clineHeaders: { status: 'loading', defaults: {}, overrides: {}, effective: {} },
   cors: { status: 'loading', on: false },
   prompt: {
@@ -1407,6 +1413,43 @@ export async function saveSanitize(next: boolean): Promise<void> {
   }
 }
 
+/* ─── 开发者角色兼容（developer 角色消息归一为 system）── */
+
+export function renderDeveloperRoleCompat(data?: unknown): void {
+  if (data === undefined) return
+  if (!data || typeof data !== 'object') {
+    publish({ developerRoleCompat: { status: 'unavailable', on: false } })
+    return
+  }
+  const record = data as Record<string, unknown>
+  publish({ developerRoleCompat: { status: 'ready', on: record.developerRoleCompat === true } })
+}
+
+async function loadDeveloperRoleCompat(): Promise<void> {
+  try {
+    renderDeveloperRoleCompat(await shared().workbuddyDesktop?.getDeveloperRoleCompat())
+  } catch (error) {
+    console.warn('读取开发者角色兼容设置失败:', errorMessage(error))
+    renderDeveloperRoleCompat(null)
+  }
+}
+
+export async function saveDeveloperRoleCompat(next: boolean): Promise<void> {
+  if (busyScope) { repaint(); return }
+  beginBusy('developerRoleCompat')
+  publish({ developerRoleCompat: { status: 'ready', on: next } })
+  try {
+    const saved = await shared().workbuddyDesktop?.saveDeveloperRoleCompat(next)
+    renderDeveloperRoleCompat(saved)
+    toast(next ? t('✅ 开发者角色兼容已开启') : t('已关闭开发者角色兼容'))
+  } catch (error) {
+    toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
+    await loadDeveloperRoleCompat() // 回滚到后端的真实值
+  } finally {
+    endBusy()
+  }
+}
+
 /* ─── Cline 伪装头（转发头的逐键覆盖）── */
 
 /** 非字符串值一律丢弃（后端只会给字符串，这里是给「形状不对的响应」兜底） */
@@ -2114,6 +2157,7 @@ export async function load(): Promise<void> {
     loadRouting(),
     loadDebug(),
     loadSanitize(),
+    loadDeveloperRoleCompat(),
     loadClineHeaders(),
     loadCors(),
     loadPrompt(),
@@ -2165,6 +2209,11 @@ export async function refreshDebug(): Promise<void> {
 export async function refreshSanitize(): Promise<void> {
   await loadSanitize()
   toast(t('指纹脱敏设置已刷新'))
+}
+
+export async function refreshDeveloperRoleCompat(): Promise<void> {
+  await loadDeveloperRoleCompat()
+  toast(t('开发者角色兼容设置已刷新'))
 }
 
 export async function refreshCors(): Promise<void> {

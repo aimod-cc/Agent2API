@@ -247,6 +247,17 @@ pub enum UpstreamResponse {
     /// 走翻译层的理由同上：账号轮换、限额冷却、退避重试、usage 记账与取消处理
     /// 全部留在编排层，只有字节形态在翻译器里变。
     AntigravityGemini,
+    /// 智谱清言的 **SSE 全量快照**：帧是 SSE（`data: {json}`）没错，但每帧给的是
+    /// **到目前为止的完整 `parts`**，而 OpenAI 要的是本拍新增的 delta ——
+    /// 直接透传会让下游把三份全文拼成三份，直接累加同样重复。
+    /// 因此另开一台做**差分**的状态机（`upstream::translate` 的
+    /// `ChatglmToChatStream` ← `protocol::chatglm_stream`）。
+    ///
+    /// 它与另外三台的一处关键差别：本家的**业务失败走 HTTP 200 +
+    /// `application/json`**（`-1001 剩余积分不足`），不进这台翻译机 ——
+    /// 那一档由 `ChatglmAdapter::is_error_response` 在编排层拦下，
+    /// 走既有的错误分类与账号轮换（与 ZCode 同一处置）。
+    ChatglmSnapshot,
 }
 
 /// 上游错误分类（架构文档 §4.2；三个动作的语义见模块头）。
@@ -1152,6 +1163,11 @@ pub fn adapter_for(kind: ProviderKind) -> &'static dyn ProviderAdapter {
         // 余额全部已接通（建会话 → assistant SSE，`is_stateful` 为 true，
         // 见 `orcaterm/mod.rs` 与 `orcaterm/adapter.rs` 的模块头）
         ProviderKind::OrcaTerm => &super::orcaterm::ORCATERM_ADAPTER,
+        // 智谱清言（`chatglm.cn`）：无状态转发，但响应帧是「SSE 全量快照」，
+        // 走 `UpstreamResponse::ChatglmSnapshot` 那条做差分的翻译层
+        // （见 `chatglm/mod.rs` 与 `protocol::chatglm_stream` 的模块头）。
+        // 它是本项目**唯一**「访客免登录即可用」的一家（`guest/access` 换证）。
+        ProviderKind::Chatglm => &super::chatglm::CHATGLM_ADAPTER,
         // ModelScope 的两个站点是两个 provider、两个实例（同一份实现的按地区
         // 参数化，见 `modelscope::region` 与 `modelscope::mod` 的模块头）：
         // 国内站打 `api-inference.modelscope.cn` / `modelscope.cn`，
@@ -1258,6 +1274,10 @@ pub fn implemented_kinds() -> Vec<ProviderKind> {
         // 远程模型目录（静态清单，`supports_model_refresh()` 为 false）——
         // 进本列表只代表「已实现」（与 Zcode 同一口径：刷新循环对它是空操作）。
         ProviderKind::OrcaTerm,
+        // 智谱清言：已接真身（账号 / 续期 / 目录 / 转发 / 余额 / 签到 / 领取），
+        // 且有远程目录（`operation/detail?tag=available_models`）—— 必须在
+        // 列表里，否则目录刷新循环不会问它（与 Trae / Loomy / Kuku 同一理由）。
+        ProviderKind::Chatglm,
         // ModelScope 的两个站点各算一家：与国内版各自一份模型清单（各打各的
         // 推理域）、各自的缓存槽与刷新排期 —— 两家都必须在列表里，否则国际版的
         // 目录刷新永远不会被调度（症状是「国际版账号加了、模型列表一直是空的」，

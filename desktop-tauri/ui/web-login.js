@@ -31,7 +31,11 @@
    *  刚成功的登录取消掉，界面上表现为「登录成功却提示已取消」。 */
   let flowSettling = false;
 
-  const providerLabel = id => window.wbProviders?.labelOf?.(id) || id;
+  // 注册名（「AutoClaw 国内版」这类）过一遍词典再进文案，非中文界面才翻得动
+  const providerLabel = id => {
+    const name = window.wbProviders?.labelOf?.(id) || id;
+    return window.wbI18n?.t?.(name) || name;
+  };
 
   /**
    * 建一个登录控制器。

@@ -49,7 +49,7 @@
 import * as React from 'react'
 import { Popover, PopoverContent, PopoverTrigger } from '@ui'
 import { t } from '../i18n'
-import { formatTime, type UsageEntry } from './accounts-shared'
+import { formatTime, numberText, type UsageEntry } from './accounts-shared'
 
 /** 明细里的一行（`creditRowsOf` 的产物；渲染输入与 `usageDetailOf` 的行同形） */
 export type CreditRow = {
@@ -140,15 +140,17 @@ export function creditRowsOf(entry: UsageEntry): CreditRow[] {
     // 「不限」写在读数里而不是画一个数：-1 那种哨兵值摆上屏会被读成"欠费"。
     // 单位贴在整串末尾（「剩 400 / 500 额度」），不夹在中间 —— 中间那一版读起来
     // 像「剩 400 额度 / 共 500 额度」的省略写法，数字与单位的归属全靠猜。
+    // 三个数都过 `numberText`：上游给的是高精度浮点（`39.430000335` 这种），
+    // 照直拼会把小数尾巴铺满弹层（口径见 accounts-shared 那个函数）。
     const hasTotal = total !== null && total > 0
     const amount = unlimited
       ? t('不限')
       : remain !== null
         ? hasTotal
-          ? t('剩 {remaining} / {total}', { remaining: remain, total })
-          : t('剩 {remaining}', { remaining: remain })
+          ? t('剩 {remaining} / {total}', { remaining: numberText(remain), total: numberText(total) })
+          : t('剩 {remaining}', { remaining: numberText(remain) })
         : used !== null
-          ? t('已用 {used}', { used: used })
+          ? t('已用 {used}', { used: numberText(used) })
           : '—'
     const view = !unlimited && unit && amount !== '—' ? `${amount} ${unitLabel(unit)}` : amount
     // 剩余比例：只在有真总量时算（画不出比例就不装作有）
@@ -207,7 +209,7 @@ export function creditRowsOf(entry: UsageEntry): CreditRow[] {
       daily ? t('每日重置（额度按周期回满，不是作废）') : '',
       reason,
       percent === null && remain !== null ? t('上游未给总量，画不出剩余比例') : '',
-      used !== null && total !== null ? t('已用 {used} / 共 {total}', { used, total }) : '',
+      used !== null && total !== null ? t('已用 {used} / 共 {total}', { used: numberText(used), total: numberText(total) }) : '',
     ].filter(Boolean).join(' · ')
     return { name, view, tone, percent, window: parts.length ? parts.join(' · ') : null, title, spent }
   })

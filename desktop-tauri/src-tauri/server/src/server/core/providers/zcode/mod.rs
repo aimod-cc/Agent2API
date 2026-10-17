@@ -52,6 +52,7 @@
 //!   balance.rs      套餐余额（**候选令牌链**：billing 余额桶 → 监控窗口限额）—— 已完成
 //!   monitor.rs      开放平台监控通道（窗口限额 + 套餐等级，候选链的第二候选）—— 已完成
 //!   plan.rs         活动套餐通道（系统提示词块 + Anthropic 协议 + JWT 鉴权）—— 已完成
+//!   endpoint_mapping.rs  推理端点映射（`agent/configs` 的 proxyEndpoint.mapping，fail-open）—— 已完成
 //!   reasoning.rs    GLM-5.3 家族的思考等级契约（等级 ↔ 预算、预算与 max_tokens 配对）—— 已完成
 //!   adapter.rs      `ProviderAdapter` 实现（按账号的两条通道 + 余额接线）—— 已完成
 //!   credentials.rs  凭证（访问令牌 + 套餐 JWT + 设备标识）—— 已完成
@@ -98,6 +99,7 @@ pub mod claim;
 pub mod coding_key;
 pub mod config_sync;
 pub mod credentials;
+pub mod endpoint_mapping;
 pub mod models;
 pub mod monitor;
 pub mod oauth;
@@ -140,7 +142,7 @@ pub const PLAN_START: &str = "start-plan";
 /// 「关掉会发生什么 + 依据来自哪次实测」，而不是「不许关」。
 pub const OFFICIAL_PROMPT_NOTE: &str = "\
 这段是**网关自己装上去**的，不来自客户端、也不受「模式 / 提示词文件」影响：\
-活动套餐通道按**结构**校验身份 —— 实测（2026-09-28）官方三段各自成块才过（并成一段、\
+套餐池（Start Plan）通道按**结构**校验身份 —— 实测（2026-09-28）官方三段各自成块才过（并成一段、\
 或换成客户端自带的 ZCode 提示词，都是 405/3012）。\
 所以默认装上；关掉后上游认不认，取决于它当前的口径，需要重新实测才知道。";
 
@@ -191,9 +193,13 @@ pub fn plan_of(account: &Value) -> &'static str {
 /// 通道的展示名：账号页的下拉、保存后的变更提示、错误文案共用这一处措辞
 /// （三处各写一遍的话，用户会在弹窗里看到「编码套餐」、在日志里看到
 /// 「Coding Plan」，对不上是同一条设置）。
+///
+/// Start Plan 这条叫「**套餐池**」而不是早期的「活动套餐」：那个池子里除了
+/// 官方限时活动发放的额度，还有**新注册用户的免费体验额度**（issue #134 / #232
+/// 的用户都在这一档）——叫「活动套餐」会让恰恰最需要这条通道的用户以为与己无关。
 pub fn plan_label(plan: &str) -> &'static str {
     match plan {
-        PLAN_START => "活动套餐（Start Plan）",
+        PLAN_START => "套餐池（Start Plan）",
         _ => "编码套餐（Coding Plan）",
     }
 }

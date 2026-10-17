@@ -174,7 +174,26 @@ pub async fn stats_summary(State(state): State<ServerState>, Query(params): Quer
     // 原样透传存储层的报表结果（`{range, startDate, endDate, overview, providers,
     // heatmap, cacheRates, cacheTrend24h, dailyTrend}`），路由层不加工，避免两处口径。
     // `providers` 是 W4 新增的 provider 维度汇总（见文件头的说明）
-    ok_json(state.request_stats().usage_summary(&requested, custom))
+    //
+    // ── 为什么在 `spawn_blocking` 里算 ──────────────────────────
+    // `usage_summary` 整条路是**同步**的（SQLite 读 + 纯函数），而且持着统计库
+    // 那把全局连接锁。直接在 async handler 里调用会占住一个 tokio worker 线程
+    // 直到它跑完 —— 报表是前端轮询的接口（默认每秒一次、可在定时任务里调），
+    // 这种「同步读库」不该出现在 async 运行时线程上。与 `backup_api` /
+    // `upgrade_api` 的慢操作同一处理。
+    //
+    // 锁竞争（与转发记账抢同一把 `Db` 锁）不因这一层改变 —— 那件事由「报表
+    // 只读 24 小时窄列 + 命中率下推 SQL」在**工作量**上解决（见
+    // `RequestStats::usage_summary` 的读取窗口说明）；这里解决的是「占着
+    // runtime 线程」这一半。
+    let stats = state.request_stats();
+    let result = tokio::task::spawn_blocking(move || stats.usage_summary(&requested, custom)).await;
+    match result {
+        Ok(value) => ok_json(value),
+        // 任务被取消（runtime 关闭中）或 panic：给一个可读的 500 而不是让
+        // axum 把一个无 body 的错误连接丢给前端
+        Err(error) => errors::management_error(500, format!("报表计算任务失败: {error}")),
+    }
 }
 
 /// 解析 `YYYY-MM-DD` 的日期参数：缺失 / 空白 / 格式错都给可读的 400 文案。

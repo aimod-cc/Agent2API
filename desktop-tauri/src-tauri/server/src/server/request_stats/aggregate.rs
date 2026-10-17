@@ -24,7 +24,7 @@ use super::record::{DailyEntry, RequestEntry};
 use super::report::{
     build_accounts, build_models, build_providers, build_top_model, cache_rates, cache_trend_24h,
     daily_trend, heatmap, model_stat_key, normalize_range, push_account_accum, push_model_accum,
-    push_provider_accum, range_bounds, range_totals, streak,
+    push_provider_accum, range_bounds, range_totals, streak, SummaryRow,
 };
 use super::{daily, sql};
 use super::legacy;
@@ -130,11 +130,19 @@ fn rebuild_day(conn: &rusqlite::Connection, day: NaiveDate) -> rusqlite::Result<
 /// 手写一份全零的 JSON 迟早会与正常路径的形状漂开，而形状漂开是静默的
 /// （前端只会显示空白或 0，不会报错）。
 ///
+/// 三份入参各自的来源（改造后明细只进 [SummaryRow] 这一条窄口）：
+///   - `daily`：`request_daily` 整表（overview / 趋势 / 热力图 / 排行都从它算）；
+///   - `cache_totals`：四档命中率的 `(hit, input)` 合计，由 SQL 侧按窗口聚合
+///     （`sql::sum_cache_windows`），不再把窗口内的明细搬回内存；
+///   - `entries`：近 24 小时的**窄行**（`sql::select_summary_rows`），只服务
+///     逐小时的趋势图。
+///
 /// `custom` 是 `range == "custom"` 时的起止日（本地自然日，由路由层解析校验）：
 /// 非 custom 档传 None（也允许传了不用 —— 只有 custom 分支会读它）。
 pub(super) fn summarize(
     daily: &BTreeMap<String, DailyEntry>,
-    entries: &[RequestEntry],
+    cache_totals: &[(i64, i64)],
+    entries: &[SummaryRow],
     range: &str,
     now: i64,
     custom: Option<(NaiveDate, NaiveDate)>,
@@ -160,8 +168,9 @@ pub(super) fn summarize(
     let map = heatmap(daily, now_day);
     let consecutive = streak(daily, now_day);
 
-    // cacheRates / cacheTrend24h 走明细（窗口 ≤7 天，明细够用）
-    let rates = cache_rates(entries, now);
+    // cacheRates 走 SQL 侧的窗口合计（四组 (hit, input)，见 `sql::sum_cache_windows`）；
+    // cacheTrend24h 走明细窄行（只有它还需要逐条数据）
+    let rates = cache_rates(cache_totals);
     let cache_trend = cache_trend_24h(entries, now);
 
     json!({
@@ -221,7 +230,12 @@ pub(super) fn fold_into_daily(day: &mut DailyEntry, item: &RequestEntry) {
     day.cache_input_tokens += item.prompt_tokens;
     // 模型维度用「上游真名」当统计键（见 `model_stat_key`）：映射只是代名，
     // 实际请求的仍是上游那一个模型，报表要按它归组
-    push_model_accum(&mut day.model_tokens, model_stat_key(item), item.total_tokens, 1);
+    push_model_accum(
+        &mut day.model_tokens,
+        model_stat_key(&item.model, &item.upstream_model),
+        item.total_tokens,
+        1,
+    );
     // 空 provider 也建组（见 push_provider_accum 的注释）
     push_provider_accum(
         &mut day.provider_stats,

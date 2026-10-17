@@ -160,7 +160,7 @@ function AccountsPage() {
    * 于是「哪家有账号、各有多少」不切页就能看到（家数动态，这也是它用下拉不用分段的原因）。
    */
   const providerOptions = [{ value: 'all', label: t('全部（{n}）', { n: all.length }) }]
-    .concat(providerSummaryList().map(item => ({ value: item.id, label: t('{label}（{count}）', { label: item.label, count: item.count }) })))
+    .concat(providerSummaryList().map(item => ({ value: item.id, label: t('{label}（{count}）', { label: t(item.label), count: item.count }) })))
   /** 真正会渲染出来的行（组序 → 组内序）。全选 / 计数 / 分页都以它为基准：
    *  被隐藏的组（一个启用的都没有）不该算进「当前看到的这些」—— 否则「全选（8 个）」
    *  会连看不见的行一起勾上，数字也对不上。分段计数（工具条那几枚徽标）另一回事：
@@ -313,7 +313,7 @@ function AccountsPage() {
     const next = current.map(item => item.provider === drop.provider ? { ...item, members: nextMembers } : item)
     const queue = next.flatMap(item => item.members.map(account => account.id))
     void reorderQueue(queue, t('{name} 移到 {group} 组内第 {rank} 位', {
-      name: String(moved.name || moved.id), group: group.label, rank: to + 1,
+      name: String(moved.name || moved.id), group: t(group.label), rank: to + 1,
     }))
   }, [])
 

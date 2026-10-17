@@ -23,6 +23,15 @@ pub(super) struct BillingSpec {
     pub(super) body: fn() -> Value,
     /// 是否需要客户端白名单头（只有 banner 需要）
     pub(super) whitelist_headers: bool,
+    /// 落点覆盖：`None` = 会话端点（账号自己的站点，绝大多数端点是这款）；
+    /// `Some(url)` = 固定站点。
+    ///
+    /// 只有**跨站**的一次性运营奖励端点用它（新手礼包 / 活动补偿挂在国内版
+    /// 计费站 `www.codebuddy.cn` 上，参考实现 workbuddy2api-hub 的
+    /// `billing_upstream`）—— 落点由上游运营侧固定，不跟账号的 `endpoint`
+    /// 走（账号端点可能是 `copilot.tencent.com` 这类旧出口，而这两条路是
+    /// 后加的）。
+    pub(super) base: Option<&'static str>,
 }
 
 impl BillingSpec {
@@ -97,6 +106,7 @@ pub(super) const BILLING_CHECKIN_STATUS: BillingSpec = BillingSpec {
     path: "/v2/billing/meter/checkin-activity-status",
     body: empty_body,
     whitelist_headers: false,
+    base: None,
 };
 
 pub(super) const BILLING_DAILY_CHECKIN: BillingSpec = BillingSpec {
@@ -104,6 +114,7 @@ pub(super) const BILLING_DAILY_CHECKIN: BillingSpec = BillingSpec {
     path: "/v2/billing/meter/daily-checkin",
     body: empty_body,
     whitelist_headers: false,
+    base: None,
 };
 
 /// WorkBuddy 国际版每日活跃探测端点。
@@ -116,6 +127,41 @@ pub(super) const BILLING_ACTIVITY_CHECKIN_STATUS: BillingSpec = BillingSpec {
     path: "/billing/meter/checkin-activity-status",
     body: empty_body,
     whitelist_headers: false,
+    base: None,
+};
+
+/// 活动补偿领取（一次性运营补偿，每号一次）。
+///
+/// 落地实例：2026-10 的 DeepSeek 服务故障补偿（国内版全量用户额外送
+/// 500 积分，2026-10-16 公告）；更早的登录故障补偿（1000 积分）也走这条 ——
+/// 官方口径是去「用量管理」页点领取，这条端点就是那个按钮背后的调用。
+///
+/// 口径与路径按参考实现 workbuddy2api-hub 的 `claim-compensation`：
+/// POST 空体、billing 头集合；成功回 `data.credit`（本次到账积分），
+/// 已领取 / 无可领取时回业务错误 —— 调用方静默跳过，不是故障。
+///
+/// `base` 固定国内版计费站：这条端点是后加的运营端点，落点由上游固定
+/// （见 `BillingSpec::base` 的说明），不跟账号的历史 `endpoint` 走。
+/// 国际版没有对应活动，不发起。
+pub(super) const BILLING_CLAIM_COMPENSATION: BillingSpec = BillingSpec {
+    method: "POST",
+    path: "/billing/meter/claim-compensation",
+    body: empty_body,
+    whitelist_headers: false,
+    base: Some("https://www.codebuddy.cn"),
+};
+
+/// 新手礼包领取（一次性新用户奖励，每号一次）。
+///
+/// 与活动补偿同族、同落点、同口径（参考实现 workbuddy2api-hub 两条一起领：
+/// `claim-gift` / `claim-compensation`）。没领过的账号领一份新用户积分包，
+/// 已领过的静默跳过 —— 领到的是真积分，值得顺手带上。
+pub(super) const BILLING_CLAIM_GIFT: BillingSpec = BillingSpec {
+    method: "POST",
+    path: "/billing/meter/claim-gift",
+    body: empty_body,
+    whitelist_headers: false,
+    base: Some("https://www.codebuddy.cn"),
 };
 
 /// 国际版「对话活跃上报」端点（growth 连登的唯一点亮通道）。
@@ -130,6 +176,7 @@ pub(super) const BILLING_REPORT_ACTIVITY: BillingSpec = BillingSpec {
     path: "/v2/report",
     body: report_body,
     whitelist_headers: false,
+    base: None,
 };
 
 /// 国际版成长中心连登状态（回读用）。上报是否真的计分要靠它闭环验证 ——
@@ -139,6 +186,7 @@ pub(super) const GROWTH_STREAK_STATUS: BillingSpec = BillingSpec {
     path: "/activity/growth/streak",
     body: empty_body,
     whitelist_headers: false,
+    base: None,
 };
 
 /// 活跃上报事件的缺省请求体（占位，真实体由调用方覆盖 ——
@@ -152,6 +200,7 @@ pub(super) const BILLING_USER_RESOURCE: BillingSpec = BillingSpec {
     path: "/v2/billing/meter/get-user-resource",
     body: user_resource_body,
     whitelist_headers: false,
+    base: None,
 };
 
 pub(super) const BILLING_ENTERPRISE_USAGE: BillingSpec = BillingSpec {
@@ -159,6 +208,7 @@ pub(super) const BILLING_ENTERPRISE_USAGE: BillingSpec = BillingSpec {
     path: "/v2/billing/meter/get-enterprise-user-usage",
     body: empty_body,
     whitelist_headers: false,
+    base: None,
 };
 
 /// 用量提示端点（Node 版 BILLING.dosageNotify 的对等物）。
@@ -168,6 +218,7 @@ pub(super) const BILLING_DOSAGE_NOTIFY: BillingSpec = BillingSpec {
     path: "/v2/billing/meter/get-dosage-notify",
     body: empty_body,
     whitelist_headers: false,
+    base: None,
 };
 
 pub(super) const ACTIVITY_BANNER: BillingSpec = BillingSpec {
@@ -175,6 +226,7 @@ pub(super) const ACTIVITY_BANNER: BillingSpec = BillingSpec {
     path: "/v2/activity/workbuddy/banner",
     body: empty_body,
     whitelist_headers: true,
+    base: None,
 };
 
 pub(super) const ACTIVITY_AMBASSADOR: BillingSpec = BillingSpec {
@@ -182,6 +234,7 @@ pub(super) const ACTIVITY_AMBASSADOR: BillingSpec = BillingSpec {
     path: "/v2/activity/ambassador/status",
     body: empty_body,
     whitelist_headers: false,
+    base: None,
 };
 
 // ─── 请求头 ─────────────────────────────────────────────────

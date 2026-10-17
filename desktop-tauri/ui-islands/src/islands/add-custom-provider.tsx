@@ -468,7 +468,7 @@ export function CustomProviderBlock({
             checked={existingNoAuth}
             note={existingNoAuth
               ? t('已声明无需鉴权：账号会被正常选路，出网时不带任何鉴权头')
-              : t('同一家可以混着放：有 Key 的账号与无鉴权账号各按各的规则走')}
+              : t('同一家可以混着放：有 Key 的账号与无鉴权账号各按各的规则走；无需鉴权的账号也能并存多条（各自可配不同的出网代理）')}
             onChange={toggleNoAuth(EXISTING_NOAUTH_ID, setExistingNoAuth)}
           />
           {/* 余额查询：这一家登记了方案才出现（方案来自提供商记录，不能改） */}
@@ -579,15 +579,22 @@ async function submitExisting(context: FootContext): Promise<void> {
     try {
       const data = (await shared().wbProviders?.customRequest?.(
         'POST', '/api/accounts', payload,
-      )) as { account?: { name?: string } } | null
+      )) as { account?: { name?: string }; created?: boolean } | null
       clearFields([EXISTING_APIKEY_ID, EXISTING_NAME_ID])
       clearBalanceFields(scheme, BALANCE_EXISTING_PREFIX)
       writeNoAuthDraft(EXISTING_NOAUTH_ID, false)
       const label = data?.account?.name
         || customList().find(item => item.id === providerId)?.name
         || ''
-      // 与 add-account-bridge 的 afterAdd 同键同形（label 留空，账号名的冒号前缀作为形参值拼入）
-      await afterCustomAdd(t('✅ {label}账号已添加{name}', { label: '', name: label ? `：${label}` : '' }))
+      // 后端的幂等合并只剩「同一把 Key 重复添加」一种（id 由 key 派生，见后端
+      // account_id_for；无需鉴权账号每次添加都是新的一条，同家可并存多条）。
+      // 合并时 created=false，这次提交更新的是已有账号 —— 提示必须照实说
+      // 「已更新」，照搬「已添加」会让人以为列表会多出一条（实测反馈过的误导）。
+      const suffix = label ? `：${label}` : ''
+      const message = data?.created !== false
+        ? t('✅ {label}账号已添加{name}', { label: '', name: suffix })
+        : t('✅ 已更新已有账号{name}（同一把 API Key 只保留一条，重复添加会合并）', { name: suffix })
+      await afterCustomAdd(message)
     } catch (error) {
       showSubmitError(context, error)
     }

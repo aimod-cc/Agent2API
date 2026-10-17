@@ -661,9 +661,16 @@ fn allowed_hosts(provider: &str) -> Option<&'static [&'static str]> {
         // 见 `providers::officeace::oauth` 的模块头），所以这里没有 CodeArts 那种
         // loopback 回调要放行；但「不设限」仍是必须显式写出的选择（落进默认分支
         // 会拿到 WorkBuddy 的白名单 → 窗口白屏）。
+        //
+        // OrcaTerm（腾讯云遨驰终端）同样不设限：登录窗口开在官方 OAuth 授权页
+        // （`orcaterm.com/oauth/authorize`），它会 302 到 `open.weixin.qq.com`
+        // 的微信二维码（`qrconnect`），沿途还会拉 `res.wx.qq.com` 的样式与
+        // `localhost.weixin.qq.com` 的轮询 —— 主机不可穷举。**显式列出**
+        // （落进默认分支会拿到 WorkBuddy 的白名单 → 授权页白屏，日志里什么也
+        // 看不出）。
         "catpaw" | "qoder" | "qoder-intl" | "cline-free" | "cline-pass" | "autoclaw"
         | "autoclaw-intl" | "accio" | "accio-cn" | "zcode" | "zcode-intl" | "codearts" | "trae"
-        | "kuku" | "antigravity" | "officeace" => None,
+        | "kuku" | "antigravity" | "officeace" | "orcaterm" => None,
         // WorkBuddy 的两个地区共用这一张表（表里 `workbuddy.ai` 那一行就是国际站
         // 的登录域）。**显式列出**而不是靠下面的默认分支：上面那条警告要求
         // 「新 provider 落到默认分支」必须是有意的选择，写出来才看得出是选过的
@@ -719,10 +726,24 @@ fn host_allowed(url: &url::Url, provider: &str, social_restore: bool) -> bool {
 /// 这里只是**识别**（后端 `raccoon::oauth::parse_callback_code` 才是最终校验，
 /// 它有一模一样的口径）；两边都宽一点，避免同一个 URL 在壳与后端得到不同结论。
 ///
-/// **只有小浣熊走回调**：workbuddy 的凭证由后端轮询上游取回，Qoder 走设备授权
-/// 轮询（见 `providers::qoder::oauth`），两家都没有自定义协议回调 ——
-/// 别把「没有回调」误写成「什么都算回调」。
+/// **只有小浣熊与 OrcaTerm 走自定义协议回调**：workbuddy 的凭证由后端轮询上游
+/// 取回，Qoder 走设备授权轮询（见 `providers::qoder::oauth`），两家都没有自定义
+/// 协议回调 —— 别把「没有回调」误写成「什么都算回调」。
+///
+/// ── OrcaTerm 为什么也算（本轮修正）───────────────────────────
+/// 它的授权页是官方桌面端那条链，回调固定为
+/// `orcaterm://oauth_callback?session_id=…`（见
+/// `providers/orcaterm/login.rs` 模块头）。那个 URL 里的 `session_id` 是
+/// **我们自己生成的一次性凭据**，后端据此换令牌 —— 壳侧必须把它截下来
+/// （放行给系统 = 本机没装官方客户端时是一个错误页，登录永远收不了尾）。
 fn is_login_callback(url: &url::Url, provider: &str) -> bool {
+    if provider == "orcaterm" {
+        let host_matches = url
+            .host_str()
+            .map(str::to_ascii_lowercase)
+            .is_some_and(|host| host == "oauth_callback");
+        return url.scheme() == "orcaterm" && host_matches;
+    }
     if provider != "raccoon" {
         return false;
     }
@@ -871,6 +892,11 @@ fn normalize_provider(provider: &str) -> Result<&'static str, String> {
         // 与轮询 —— 与 ZCode / CodeArts 同一条路。它的授权码由网关**轮询云端**
         // 取回（云端回调页不往本机跳），所以窗口最后停在云端页上也不影响登录判定。
         "officeace" => Ok("officeace"),
+        // OrcaTerm（腾讯云遨驰终端）：地址由**后端适配器**返回（官方 OAuth 授权页，
+        // 它会 302 到微信二维码），壳侧负责开窗口并把回调
+        // `orcaterm://oauth_callback?session_id=…` 交回网关换令牌
+        // （见 `start_orcaterm` 与 `providers/orcaterm/login.rs` 的模块头）。
+        "orcaterm" => Ok("orcaterm"),
         other => Err(format!("不支持网页登录的提供商：{other}")),
     }
 }
@@ -1077,6 +1103,12 @@ pub async fn start(
     // 读 Cookie 存储交回网关（见 `submit_kuku_login`）。
     if provider == "kuku" {
         return start_kuku(app, &mode).await;
+    }
+    // OrcaTerm：官方 OAuth 授权页（适配器给的地址，自动跳微信二维码），回调
+    // `orcaterm://oauth_callback?session_id=…` 由窗口拦下交回网关换令牌
+    // （见 `start_orcaterm`）。
+    if provider == "orcaterm" {
+        return start_orcaterm(app, &mode).await;
     }
     // CatPaw：授权地址要问一次上游 `login-config`，且 token 由上游**推**到本网关
     // 的 loopback 回调上（见 core::login::catpaw）。同样没有 edition 维度。
@@ -1339,6 +1371,82 @@ async fn start_kuku(app: &AppHandle, mode: &str) -> Result<serde_json::Value, St
     );
 
     let result = run_embedded(app, "kuku", &auth_url, "登录 KukuAI 账号", &login_state, false, None, false).await;
+    if result.as_ref().map(|value| value.get("ok").and_then(serde_json::Value::as_bool)) != Ok(Some(true)) {
+        let _ = gateway::call("POST", "/api/session/login/cancel", Some(&json!({ "state": login_state }))).await;
+    }
+    clear_active_login(app, &login_state);
+    result
+}
+
+/// OrcaTerm 网页登录：**官方 OAuth 授权页 + 微信扫码 + 后端换令牌**。
+///
+/// 窗口打开的是 `orcaterm.com/oauth/authorize?...&session_id=<uuid>` —— 实测该
+/// 页面**直接 302 到微信二维码**（appid `wx56e5199ef872dc22`，OrcaTerm 自己的
+/// 开放平台应用），用户扫完上游把浏览器重定向到
+/// `orcaterm://oauth_callback?session_id=…`，壳侧把那一跳截下来交给后端换令牌
+/// （见 `providers/orcaterm/login.rs` 的模块头，那里也记录了「为什么不走
+/// Web 控制台的 `ot_session`」）。
+///
+/// 与 raccoon 同一形态（回调 URL → 后端换码 → 落账号）。回调是自定义协议
+/// `orcaterm://oauth_callback`，必须由**我们自己的窗口**拦下，因此只支持
+/// 内嵌窗口：系统浏览器里那一跳会被交给系统处理（装了官方 OrcaTerm 客户端
+/// 时被它接走，没装则是一个错误页），网关永远等不到 `session_id`。
+async fn start_orcaterm(app: &AppHandle, mode: &str) -> Result<serde_json::Value, String> {
+    if mode == "external" {
+        return Err(
+            "OrcaTerm 的回调是自定义协议（orcaterm://oauth_callback），只能由内嵌窗口接住；\
+             请用「内嵌窗口」发起，或改用「粘贴 accessToken」/「导入桌面端登录态」添加账号"
+                .to_string(),
+        );
+    }
+    let started = gateway::call(
+        "POST",
+        "/api/session/login/start",
+        Some(&json!({ "provider": "orcaterm" })),
+    )
+    .await?;
+    let login_state = started
+        .get("state")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("后端未返回登录状态")?
+        .to_string();
+    let auth_url = started
+        .get("authUrl")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("后端未返回登录链接，请检查网络")?
+        .to_string();
+
+    {
+        let state = app.state::<crate::state::AppState>();
+        let mut guard = state.login.lock().map_err(|_| "登录状态锁不可用")?;
+        *guard = Some(ActiveLogin {
+            state: login_state.clone(),
+            edition: String::new(),
+            mode: mode.into(),
+            provider: "orcaterm".to_string(),
+        });
+    }
+    emit_login_state(
+        app,
+        LoginState {
+            active: true,
+            mode: Some(mode.into()),
+            edition: None,
+            provider: Some("orcaterm".to_string()),
+        },
+    );
+
+    let result = run_embedded(
+        app,
+        "orcaterm",
+        &auth_url,
+        "登录 OrcaTerm 账号",
+        &login_state,
+        false,
+        None,
+        false,
+    )
+    .await;
     if result.as_ref().map(|value| value.get("ok").and_then(serde_json::Value::as_bool)) != Ok(Some(true)) {
         let _ = gateway::call("POST", "/api/session/login/cancel", Some(&json!({ "state": login_state }))).await;
     }
@@ -1785,6 +1893,12 @@ async fn run_embedded(
                 }
             }
         }
+        // OrcaTerm（官方桌面端 OAuth 链，见 `providers/orcaterm/login.rs` 的
+        // 模块头）：**不需要这里做任何检测** —— 回调
+        // （`orcaterm://oauth_callback?session_id=…`）由 `on_navigation` /
+        // `on_new_window` 拦下并交给后端换令牌，成功与否统一走 `/wait`。
+        // 初版那套「读窗口 cookie 找 ot_session」已删除：那条 Cookie 在
+        // SPA 内扫码登录时根本不会被写出（见模块头的实测对照）。
         match poll_once(login_state).await {
             PollOutcome::Pending => continue,
             // 任务载荷（`{account, warning…}`）随成功结果透传：前端据此
@@ -1931,6 +2045,7 @@ async fn submit_kuku_login(
         .map_err(|error| format!("网关收尾失败: {error}"))?;
     Ok(())
 }
+
 
 /// 用系统默认浏览器打开链接。
 ///

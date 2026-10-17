@@ -34,7 +34,9 @@ use rusqlite::params;
 use serde_json::{json, Value};
 
 use crate::server::core::beijing;
-use crate::server::core::billing::checkin::{checkin_completed_today, claim_pending};
+use crate::server::core::billing::checkin::{
+    activity_report_ok, checkin_completed_today, claim_pending, web_conversation_ok,
+};
 use crate::server::db::Db;
 use crate::server::logging;
 
@@ -56,39 +58,12 @@ fn database() -> Option<&'static Db> {
 
 // ─── 记账 ────────────────────────────────────────────────────
 
-/// 行的 `activity` 段是否携带「活跃上报成功」读数（`report.succeeded`）。
-///
-/// 国际版每日活跃的几件事里，活跃上报（`/v2/report`）点亮**成长中心连登**
-/// （见 `billing::activity::report_chat_activity`）；「当日活跃」计数的判定
-/// 通道是网页会话（[`web_conversation_ok`]，issue #277）。领取依赖上游活动
-/// 开放。「活动未开启」轮次的成败认 `activity_report_ok || web_conversation_ok`
-/// —— 与 `claim_pending` 只认中性文案是同一条克制原则：上报/建会话失败、
-/// 网络错误都照旧落 failed，不会把真故障美化成成功。
-fn activity_report_ok(row: &Value) -> bool {
-    row.get("activity")
-        .and_then(|activity| activity.get("report"))
-        .and_then(|report| report.get("succeeded"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-}
-
-/// 行的 `activity` 段是否携带「网页会话建成」读数（`webConversation.succeeded`）。
-///
-/// 国际版上游把「当日活跃」（每日 30 积分的判定）记在网页通道的 agent 会话
-/// 上：`/console/as/conversations/` 建会话即计，桌面端调用不计（issue #277
-/// 的抓包结论，见 `billing::activity::create_web_conversation`）。因此这一格
-/// 与活跃上报一起，构成「这一天的日活实际完成」的判据。
-fn web_conversation_ok(row: &Value) -> bool {
-    row.get("activity")
-        .and_then(|activity| activity.get("webConversation"))
-        .and_then(|web| web.get("succeeded"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-}
-
 /// 台账的「保活」标记：桌面端保活对话（`pokeSucceeded`）或网页会话任一建成
 /// 即算 —— 两者互补（网页会话点亮「当日活跃」计数，桌面端对话维持「账号有
 /// 调用」），落同一格 `kept_active`，不另开列。
+///
+/// `activity_report_ok` / `web_conversation_ok` 的实现在 `billing::checkin`
+/// （与落账判据 `day_completed` 同源，见那里的说明），本模块只消费。
 fn kept_active_of(row: &Value) -> bool {
     row.get("activity")
         .and_then(|activity| activity.get("pokeSucceeded"))
@@ -105,9 +80,11 @@ fn kept_active_of(row: &Value) -> bool {
 ///   - 行的 `error` 非空 → **failed**（执行出错：网络 / 凭证 / 未接入）；
 ///   - claim 判「今日已完成」→ success（真领到）或 already（上游说已领过）；
 ///   - claim 判「中性未领取」→ **pending**（此刻没有可领的活动，等窗口）；
-///   - 国际版每日活跃「活动未开启但活跃上报成功」→ **already** —— 活动没开
-///     是上游运营态（谁也领不到），而活跃上报已把连登点亮，这一天的「日活」
-///     实际完成了；记 failed 会把每天的正常轮次刷成一片红（改造前的实况）。
+///   - 国际版每日活跃「活动未开启但活跃上报成功（或网页会话建成）」→
+///     **already** —— 活动没开是上游运营态（谁也领不到），而活跃链路已把
+///     这一天记成活跃（连登点亮 / 网页会话计活跃），积分由上游异步发放；
+///     记 failed 会把每天的正常轮次刷成一片红（改造前的实况）。判据与落账
+///     的 `billing::checkin::day_completed` 同源。
 ///   - 其余 → **failed**，错误原文取行的 `error`，缺了取 claim 的 `msg`
 ///     （claim.success=false 且带文案的失败，如「登录态已过期」）。
 pub fn record_row(row: &Value, provider: &str, source: &str, reason: &str) {

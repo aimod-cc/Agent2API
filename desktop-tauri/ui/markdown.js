@@ -31,8 +31,8 @@
  *
  * 支持的语法：标题(降级到 h3~h6)、粗体、斜体、行内代码、围栏代码块、
  * 无序/有序列表(含 2~4 空格缩进嵌套)、任务列表、链接、尖括号与裸链接、
- * 引用、分隔线、段落与换行。
- * 不支持的语法（按纯文本显示，不影响安全）：表格、图片、脚注、setext 标题、
+ * 引用、分隔线、表格(表头 + 分隔行，含 :--: 对齐与 \| 字面竖线)、段落与换行。
+ * 不支持的语法（按纯文本显示，不影响安全）：图片、脚注、setext 标题、
  * 原始 HTML（会被转义成可见文本）。
  */
 (() => {
@@ -85,6 +85,9 @@
   // 两种写法都认（转义只会把 `&` 变 `&amp;`，所以正文里出现 `&gt;` 只可能来自 `>`）
   const RE_QUOTE = /^ {0,3}(?:&gt;|>)\s?(.*)$/;
   const RE_ITEM = /^(\s*)([-*+]|\d{1,9}[.)])(\s+)(.*)$/;
+  // 表格分隔行：| --- | :--: | 形态（每格是可选冒号包着的连字符串，GFM 认单个 -）。
+  // 不会跟「一行全是 ---」的分隔线撞车：表格起点还要求表头行里真有 |（见 isTableStart）
+  const RE_TABLE_SPLIT = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)+\|?\s*$/;
 
   /** 强调/链接的套娃深度上限：畸形输入（如成串的 `*`）不该把调用栈吃满 */
   const MAX_INLINE_DEPTH = 4;
@@ -299,6 +302,55 @@
     return RE_ITEM.test(line);
   }
 
+  // ─── 表格 ─────────────────────────────────────
+
+  /**
+   * 表格起点：本行含 | 且下一行是分隔行（| --- | :--: |）。
+   * 单行含 | 不算 —— 普通文本里写到「a | b」仍然按段落走，不会被吃成表格。
+   */
+  function isTableStart(lines, index) {
+    return index + 1 < lines.length
+      && lines[index].includes('|')
+      && RE_TABLE_SPLIT.test(lines[index + 1]);
+  }
+
+  /** 一行 → 单元格数组：去掉首尾的包裹竖线后按 | 切；\| 表示字面竖线（与 GitHub 一致） */
+  function splitCells(row) {
+    const guarded = String(row).trim().replace(/\\\|/g, '\u0000');
+    return guarded.replace(/^\|/, '').replace(/\|$/, '').split('|')
+      .map(part => part.trim().replace(/\u0000/g, '&#124;'));
+  }
+
+  /** 分隔行的一格 → 对齐类名（:--: 居中、--: 右对齐，其余左对齐不标） */
+  function alignClass(cell) {
+    if (/^:-+:$/.test(cell)) return ' md-ta-c';
+    if (/^-+:$/.test(cell)) return ' md-ta-r';
+    return '';
+  }
+
+  /** 表格块：表头 + 分隔行 + 若干数据行；空行或非 | 行结束 */
+  function renderTable(lines, start) {
+    const head = splitCells(lines[start]);
+    const aligns = splitCells(lines[start + 1]).map(alignClass);
+    const rows = [];
+    let index = start + 2;
+
+    while (index < lines.length && lines[index].trim() && lines[index].includes('|')) {
+      rows.push(splitCells(lines[index]));
+      index += 1;
+    }
+
+    const cell = (value, tag, column) =>
+      `<${tag}${aligns[column] ? ` class="${aligns[column].trim()}"` : ''}>${inline(value)}</${tag}>`;
+    const html =
+      '<table class="md-table"><thead><tr>'
+      + head.map((value, column) => cell(value, 'th', column)).join('')
+      + '</tr></thead><tbody>'
+      + rows.map(row => `<tr>${row.map((value, column) => cell(value, 'td', column)).join('')}</tr>`).join('')
+      + '</tbody></table>';
+    return { html, next: index };
+  }
+
   /** 围栏代码块：整块原样保留（只做转义，不解析 Markdown），未闭合时吃到文末 */
   function renderFence(lines, start) {
     const marker = lines[start].match(RE_FENCE);
@@ -386,10 +438,17 @@
         continue;
       }
 
+      if (isTableStart(lines, index)) {
+        const block = renderTable(lines, index);
+        out.push(block.html);
+        index = block.next;
+        continue;
+      }
+
       // 段落：连续吃到空行或下一个块级起点。段内单换行转 <br>（GitHub 在
       // Release / Issue 正文里就是硬换行口径），说明里手写的折行因此不会挤成一坨
       const paragraph = [];
-      while (index < lines.length && !startsBlock(lines[index])) {
+      while (index < lines.length && !startsBlock(lines[index]) && !isTableStart(lines, index)) {
         paragraph.push(lines[index]);
         index += 1;
       }

@@ -65,6 +65,7 @@ import {
   load,
   panelLogout,
   refreshDebug,
+  refreshDeveloperRoleCompat,
   refreshClineHeaders,
   refreshCors,
   refreshCaptchaPool,
@@ -107,6 +108,7 @@ import {
   saveRetryField,
   saveRoutingField,
   saveSanitize,
+  saveDeveloperRoleCompat,
   saveTimeoutField,
   saveToggle,
   selectCategory,
@@ -135,9 +137,9 @@ import {
   PromptTextButton,
   gatewayEditedText,
 } from './settings-prompt-editor'
-// 【AI 助手 · 发版前隐藏】分类与 pane 已一并注释，这个 import 暂时停用；
-// 恢复时与 settings-model.ts 的 CATEGORIES、pane 三处一起反注释
-// import { AssistantSettingsPane } from './assistant-settings-pane'
+// AI 助手分类的面板（对话模型 / 系统提示词 / 工具勾选）。独立成文件、自带一份
+// 数据流（/api/assistant/config），见该文件的模块头
+import { AssistantSettingsPane } from './assistant-settings-pane'
 import { t } from '../i18n'
 
 /**
@@ -1406,6 +1408,41 @@ function GatewayPane({ snap }: { snap: SettingsSnapshot }) {
         </div>
       </section>
 
+      <section className='panel'>
+        <PanelHead
+          title={t('开发者角色兼容')}
+          tip={TIPS.developerRoleCompat}
+          badge={snap.developerRoleCompat.status === 'ready'
+            ? <StatusBadge tone='ok'>{t('已生效')}</StatusBadge>
+            : snap.developerRoleCompat.status === 'unavailable'
+              ? <StatusBadge tone='bad'>{t('不可用')}</StatusBadge>
+              : <StatusBadge tone='idle'>{t('检测中…')}</StatusBadge>}
+          actions={
+            <RefreshButton id='btn-role-compat-refresh' onClick={() => void refreshDeveloperRoleCompat()} />
+          }
+        />
+        <div className='panel-body'>
+          <div className='settings-switches'>
+            <SwitchRow
+              id='settings-developer-role-compat'
+              label={t('转发前将 developer 角色消息转换为 system，兼容不支持 developer 角色的 OpenAI 兼容上游')}
+              checked={snap.developerRoleCompat.on}
+              // 读到后端值之前不许切（否则会出现「切了但不知道后端原本是什么」，回滚也没依据）
+              disabled={snap.developerRoleCompat.status !== 'ready' || snap.busy === 'developerRoleCompat'}
+              onCheckedChange={next => void saveDeveloperRoleCompat(next)}
+            />
+          </div>
+          <div className='settings-state'>
+            {snap.developerRoleCompat.status === 'loading'
+              ? STATES.appLoading
+              : snap.developerRoleCompat.status === 'unavailable'
+                ? STATES.roleCompatUnavailable
+                : snap.developerRoleCompat.on ? STATES.roleCompatOn : STATES.roleCompatOff}
+          </div>
+          <div className='hint retention-note'>{NOTES.developerRoleCompat}</div>
+        </div>
+      </section>
+
       <ClineHeadersPanel snap={snap} />
 
       <PromptPanel snap={snap} />
@@ -2192,11 +2229,12 @@ function SettingsPage() {
         <div className={paneClass('general')} data-cat='general'>
           <GeneralPane snap={snap} />
         </div>
-        {/* 【AI 助手 · 发版前隐藏】分类已从 CATEGORIES 收起，这个 pane 一并注释；
-            恢复时与 settings-model.ts 的 CATEGORIES、import 三处一起反注释 */}
-        {/* <div className={paneClass('assistant')} data-cat='assistant'>
+        {/* AI 助手：三块面板（对话模型 / 系统提示词 / 工具勾选）。它自带一份独立的
+            加载与保存（/api/assistant/config），不经过 settings-state 的快照 —— 见
+            assistant-settings-pane.tsx 的模块头 */}
+        <div className={paneClass('assistant')} data-cat='assistant'>
           <AssistantSettingsPane />
-        </div> */}
+        </div>
         <div className={paneClass('display')} data-cat='display'>
           <DisplayPane />
         </div>

@@ -60,8 +60,17 @@ import {
   getSnapshot, toggleSubscription, type SubscriptionItem,
 } from './proxies-sub-state'
 import { KernelDownloadDialog } from './proxies-kernel-dialog'
-import { formatTime, loadSettings } from './proxies-state'
+import {
+  formatTime, loadSettings,
+  // 代理池那份 store 与同步动作（本弹窗底部的「同步 Clash Verge」用；
+  // 与上面订阅 store 的同名成员靠别名区分）
+  getSnapshot as getPoolSnapshot, subscribe as subscribePool, syncClash,
+} from './proxies-state'
 import { t } from '../i18n'
+// 赞助位（ProxyLane）：外链与 Logo 的唯一定义点在 sponsor.ts，
+// 外链经 data-external 委托交系统浏览器打开
+import { handleExternalClick } from './update-shared'
+import { PROXYLANE_LOGO_DARK, PROXYLANE_LOGO_LIGHT, PROXYLANE_URL } from './sponsor'
 
 /* ─── 内核状态条 ─────────────────────────────── */
 
@@ -204,6 +213,10 @@ export function KernelBar({ showPortRange = false }: { showPortRange?: boolean }
 
 export function SubscriptionManagerDialog({ onClose }: { onClose: () => void }) {
   const snapshot = React.useSyncExternalStore(subscribe, getSnapshot)
+  // 代理池那份 store：本弹窗底部的「同步 Clash Verge」读写的是它（见 footer）。
+  // 与上面那份订阅 store 是**两个源**，同名成员必须别名区分（都是 subscribe /
+  // getSnapshot，写混了会拿到另一份快照）。
+  const pool = React.useSyncExternalStore(subscribePool, getPoolSnapshot)
   const items = subs()
   const ready = snapshot.data !== null
   const [modal, setModal] = React.useState<{ item: SubscriptionItem | null } | null>(null)
@@ -349,6 +362,14 @@ export function SubscriptionManagerDialog({ onClose }: { onClose: () => void }) 
         <DialogFooter>
           <Button variant='default' disabled={snapshot.pending}
             onClick={() => setModal({ item: null })}>{t('＋ 新增订阅')}</Button>
+          {/* 同步 Clash Verge 从页面工具条搬到这里（2026-10）：它与订阅是同一件事
+              的两种来路 —— 都是「把外面的出口集合整份镜像进池」，摆在一起用户不必
+              先在页面上找那一颗。批量在跑时停用：同步会把正在被批量流程改写的列表
+              整份换掉（与搬过来之前同一条理由） */}
+          <Button variant='outline' disabled={pool.syncing || pool.batchBusy}
+            onClick={() => void syncClash()}>
+            {pool.syncing ? t('同步中…') : t('同步 Clash Verge')}
+          </Button>
           <div className='mr-auto' />
           <Button variant='outline' onClick={onClose}>{t('完成')}</Button>
         </DialogFooter>
@@ -395,8 +416,55 @@ function liveNodeCount(
 
 /* ─── 新增 / 编辑订阅弹窗 ───────────────────── */
 
-/** 订阅来源（新增时可选；编辑沿用条目自己的，不提供换源） */
-type SubSource = 'url' | 'local'
+/**
+ * 订阅来源（新增时可选；编辑沿用条目自己的，不提供换源）。
+ *
+ * `residential`（家庭宽带）是**赞助位**而不是第三种订阅：原生静态住宅 IP
+ * 是按 IP 买的 HTTP / SOCKS5 出口，没有订阅链接，所以这一档只放 ProxyLane
+ * 的介绍与「去哪儿买、买完怎么用」，没有可保存的内容（见 SubModal 的
+ * footer 分支）。放在这里是因为「找一个干净出口」的念头恰好发生在这张表单上
+ * （订阅 = 机场节点，家庭宽带 IP = 落地出口，两件事都是「给账号配出网」）。
+ */
+type SubSource = 'url' | 'local' | 'residential'
+
+/** 「家庭宽带」一档的介绍卡：品牌 Logo + 赞助方给定的文案 + 怎么用 + 去获取 */
+function ResidentialSponsorCard() {
+  return (
+    <div className='flex flex-col gap-2.5 rounded-lg border border-border bg-surface-2 px-3.5 py-3'>
+      {/* Logo 两版各渲染一张，靠 dark: 变体切换（与网页面板的 <picture> 同款
+          手法）：变体跟的是 data-theme，所以显式深色与「跟随系统」都对 */}
+      <a
+        href={PROXYLANE_URL}
+        data-external={PROXYLANE_URL}
+        onClick={handleExternalClick}
+        className='inline-flex w-fit items-center no-underline'
+      >
+        <img src={PROXYLANE_LOGO_LIGHT} alt='ProxyLane' className='h-[24px] w-auto dark:hidden' />
+        <img src={PROXYLANE_LOGO_DARK} alt='ProxyLane' className='hidden h-[24px] w-auto dark:block' />
+      </a>
+      {/* 品牌名裹成行内链接（与「新增代理」弹窗那行赞助提示同一手法）：句子里
+          出现品牌名的地方就是投放位，读者不必先去找按钮 */}
+      <p className='text-xs leading-[1.7] text-text-2'>
+        <a
+          className='font-semibold text-primary-fg no-underline hover:underline'
+          href={PROXYLANE_URL}
+          data-external={PROXYLANE_URL}
+          onClick={handleExternalClick}
+        >ProxyLane</a>
+        {t(' 提供 AI 账号专用的原生静态住宅 IP（Static Residential ISP）：IP 来自真实家庭宽带运营商，Scamalytics 低欺诈评分，每个 IP 独享，不限流量，$3.90 起。')}
+      </p>
+      <p className='text-xs leading-[1.7] text-text-2'>
+        {t('首次购买使用优惠码 AGENT2API25 享 75 折。')}
+      </p>
+      {/* 卡片自己的动作收在文案之后：读完就知道下一步去哪，不必回到底部找按钮 */}
+      <div>
+        <Button size='sm' render={
+          <a href={PROXYLANE_URL} data-external={PROXYLANE_URL} onClick={handleExternalClick} />
+        }>{t('去获取')}</Button>
+      </div>
+    </div>
+  )
+}
 
 function SubModal({
   item,
@@ -519,12 +587,16 @@ function SubModal({
           <DialogTitle>{editing ? t('编辑订阅') : t('新增订阅')}</DialogTitle>
         </DialogHeader>
         <DialogBody className='flex flex-col gap-3.5'>
-          <div className='flex flex-col gap-1.5'>
-            <Label htmlFor='sub-name'>{t('名称')}</Label>
-            <Input id='sub-name' maxLength={60} autoComplete='off' spellCheck={false}
-              placeholder={t('例如：我的机场')} value={name}
-              onChange={event => setName(event.currentTarget.value)} />
-          </div>
+          {/* 名称 / 启用 / 保存这一套只服务两种真订阅；「家庭宽带」是介绍卡，
+              没有可保存的内容，名称那格也跟着收起（否则空着一个必填项） */}
+          {source === 'residential' ? null : (
+            <div className='flex flex-col gap-1.5'>
+              <Label htmlFor='sub-name'>{t('名称')}</Label>
+              <Input id='sub-name' maxLength={60} autoComplete='off' spellCheck={false}
+                placeholder={t('例如：我的机场')} value={name}
+                onChange={event => setName(event.currentTarget.value)} />
+            </div>
+          )}
 
           {/* 来源只在新增时可选（编辑锁定为条目自己的来源，见 source 的说明） */}
           {!editing ? (
@@ -534,6 +606,7 @@ function SubModal({
                 options={[
                   { value: 'url', label: t('订阅链接') },
                   { value: 'local', label: t('本地 YAML 文件') },
+                  { value: 'residential', label: t('家庭宽带') },
                 ]}
                 value={source}
                 onValueChange={switchSource}
@@ -542,7 +615,7 @@ function SubModal({
             </div>
           ) : null}
 
-          {source === 'url' ? (
+          {source === 'residential' ? <ResidentialSponsorCard /> : source === 'url' ? (
             <div className='flex flex-col gap-1.5'>
               <Label htmlFor='sub-url'>{t('订阅链接')}</Label>
               <Input id='sub-url' autoComplete='off' spellCheck={false}
@@ -592,26 +665,36 @@ function SubModal({
             </div>
           )}
 
-          <div className='flex flex-row items-center gap-2.5'>
-            <Switch checked={enabled} onCheckedChange={setEnabled} aria-label={t('启用这条订阅')} />
-            <span className='text-[12.5px]'>{t('启用（禁用的订阅不参与内核同步，它的节点会从代理池移除）')}</span>
-          </div>
+          {/* 启用开关与底部说明、状态行都只服务两种真订阅（家庭宽带那一档
+              全是介绍，见 ResidentialSponsorCard） */}
+          {source === 'residential' ? null : (
+            <>
+              <div className='flex flex-row items-center gap-2.5'>
+                <Switch checked={enabled} onCheckedChange={setEnabled} aria-label={t('启用这条订阅')} />
+                <span className='text-[12.5px]'>{t('启用（禁用的订阅不参与内核同步，它的节点会从代理池移除）')}</span>
+              </div>
 
-          {/* 定时刷新只属于链接订阅；本地文件是导入那一刻的内容，两种说明分开写 */}
-          <p className='text-xs leading-[1.65] text-subtle'>
-            {source === 'url'
-              ? t('订阅内容由内核定时刷新（每 24 小时）；节点数与同步状态在保存后由轮询刷新，稍等几秒。')
-              : t('本地文件订阅的内容在导入时固定：节点会由内核起成本地监听器并镜像进代理池，节点数稍等几秒由轮询刷新。')}
-          </p>
+              {/* 定时刷新只属于链接订阅；本地文件是导入那一刻的内容，两种说明分开写 */}
+              <p className='text-xs leading-[1.65] text-subtle'>
+                {source === 'url'
+                  ? t('订阅内容由内核定时刷新（每 24 小时）；节点数与同步状态在保存后由轮询刷新，稍等几秒。')
+                  : t('本地文件订阅的内容在导入时固定：节点会由内核起成本地监听器并镜像进代理池，节点数稍等几秒由轮询刷新。')}
+              </p>
 
-          <div className='min-h-[18px] text-xs text-subtle'>{status}</div>
+              <div className='min-h-[18px] text-xs text-subtle'>{status}</div>
+            </>
+          )}
         </DialogBody>
         <DialogFooter>
           <div className='mr-auto' />
           <Button variant='outline' disabled={saving} onClick={onClose}>{t('取消')}</Button>
-          <Button variant='default' disabled={saving || decoding || reading} onClick={() => void save()}>
-            {saving ? t('保存中…') : t('保存')}
-          </Button>
+          {/* 介绍卡没有可保存的东西，它的动作（去获取）在卡片里 —— 同一件事不在
+              弹窗里放两颗按钮 */}
+          {source === 'residential' ? null : (
+            <Button variant='default' disabled={saving || decoding || reading} onClick={() => void save()}>
+              {saving ? t('保存中…') : t('保存')}
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
