@@ -144,9 +144,14 @@ pub fn activity_slot_url(client_version: &str) -> String {
 }
 
 /// 某个活动的上下文 URL
+///
+/// ⚠️ 末尾那个 `/context` 段不能省：上游的路径是三段式
+/// `{code}/context?configRevision=…`，少了它整条请求落到 `/api/client-activities/{code}`
+/// 上、直接被回 **HTTP 404**（签到因此稳定失败，报「活动上下文查询返回 HTTP 404」）。
+/// 参考实现（Go `fetchActivityContext`、TS `lobsterai-credits.ts`）都是三段式。
 pub fn activity_context_url(code: &str, config_revision: &str) -> String {
     format!(
-        "{}{}/{}?configRevision={}",
+        "{}{}/{}/context?configRevision={}",
         api_base(),
         ACTIVITY_CONTEXT_PATH,
         urlencode(code),
@@ -227,5 +232,25 @@ mod tests {
         assert!(activity_context_url("a&b", "1=2").contains("configRevision=1%3D2"));
         assert!(activity_checkin_url("c d").contains("c%20d"));
         assert_eq!(urlencode("abc-1.2_3~"), "abc-1.2_3~");
+    }
+
+    /// **路径形状**要逐段钉住，不能只测转义。
+    ///
+    /// 这一条是补的：先前只有上面那条「转义」用例，于是 `activity_context_url`
+    /// 少写了 `/context` 一段都没被发现 —— 断言全绿，真机上签到却稳定 404
+    /// （上游的路径是三段式，见该函数的说明）。凡是被上游用路径而不是参数
+    /// 区分的东西，断言就得写到路径本身。
+    #[test]
+    fn activity_paths_have_the_exact_three_segment_shape() {
+        let context = activity_context_url("daily_sign_in", "7");
+        assert!(
+            context.ends_with("/api/client-activities/daily_sign_in/context?configRevision=7"),
+            "{context}"
+        );
+        let checkin = activity_checkin_url("daily_sign_in");
+        assert!(
+            checkin.ends_with("/api/client-activities/daily_sign_in/actions/check_in"),
+            "{checkin}"
+        );
     }
 }
