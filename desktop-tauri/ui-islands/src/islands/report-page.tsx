@@ -14,6 +14,7 @@ import {
   type StatsDay, type StatsGroup, type StatsHour, type StatsSummary,
 } from './report-charts'
 import { t } from '../i18n'
+import { CreditView } from './report-credit-view'
 
 /**
  * Agent2API · 报表页（时间范围 / 统计概览 / 两张排行 / 两张环形图 / 热力图 / 缓存命中率 /
@@ -111,6 +112,20 @@ const DEFAULT_AUTO_REFRESH_MS = 1_000
 const RANGE_OPTIONS: readonly SegmentedControlOption<string>[] = RANGES.map(value => ({
   value, label: RANGE_OPTION_LABEL[value],
 }))
+
+/**
+ * 报表的两个视角（见渲染处那段注释：两个视角回答两个不同的问题）。
+ *
+ * `CREDIT_VIEW` 是个**哨兵值**而不是 `'credit'`：请求量视角支持六个时间档位
+ * （`RANGES`），两者共用一个 SegmentedControl 的语义空间会让人以为「额度也能按
+ * 时间筛」—— 而额度是**当前余量**，没有时间维度。用一个不可能与档位重名的值，
+ * 这个区别在代码里就是显式的。
+ */
+const CREDIT_VIEW = '__credit__'
+const VIEW_OPTIONS: readonly SegmentedControlOption<string>[] = [
+  { value: 'stats', label: t('请求量') },
+  { value: CREDIT_VIEW, label: t('用量与额度') },
+]
 
 /**
  * 各面板头上那枚小问号的说明（原文逐字照抄 index.html 的 data-tip，一条都不能少、
@@ -564,6 +579,14 @@ const EMPTY_DATA: PageData = { summary: null, error: null }
 
 function ReportPage() {
   const [data, setData] = React.useState<PageData>(EMPTY_DATA)
+  /**
+   * 当前视角（`'stats'` = 请求量 · `CREDIT_VIEW` = 用量与额度）。
+   *
+   * **刻意不持久化**：这一页进得来通常是「看一眼就走」，两次访问之间惦记的多半
+   * 还是默认那个视角；把它记进 localStorage 会让「上次随手点过额度」变成下一次
+   * 打开就看不到报表 —— 与账号页作用域左栏的收起态（那个该记）不是一类偏好。
+   */
+  const [view, setView] = React.useState<string>('stats')
   const [range, setRange] = React.useState<string>(readRange)
   /** 自定义区间（起止本地自然日）：只有档位选中「自定义」时随请求发出 */
   const [custom, setCustom] = React.useState<CustomRange>(readCustomRange)
@@ -772,6 +795,19 @@ function ReportPage() {
 
   return (
     <>
+      {/* ── 视角切换 ──
+           两个视角回答的是**两个不同的问题**：
+             · 请求量   —— 「转发了多少」（原有五块面板，数据来自 request_stats）
+             · 用量与额度 —— 「我的额度还能撑多久」（数据来自 accounts 的余额链）
+           数据源不同、读法不同，所以并列而不是合并（理由见 report-credit-view 的模块头）。
+           切换条住在最上面：它决定下面所有面板的归属，放行内会让第二个视角的面板
+           看起来像第一个视角的附属。 */}
+      <div className='report-view-switch'>
+        <SegmentedControl options={VIEW_OPTIONS} value={view}
+          onValueChange={value => setView(String(value))} aria-label={t('报表视角')} />
+      </div>
+      {view === CREDIT_VIEW ? <CreditView /> : (
+      <>
       {/* ── 统计概览 ──
            时间范围控件住在这一块的面板头里：它控制的就是这一页的统计口径，与旁边的读数
            同处一行最直观。选中「自定义」时右端展开两个日期输入（起止本地自然日） */}
@@ -928,6 +964,8 @@ function ReportPage() {
           </div>
         </div>
       </section>
+      </>
+      )}
     </>
   )
 }
