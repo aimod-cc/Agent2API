@@ -1168,6 +1168,10 @@ pub fn adapter_for(kind: ProviderKind) -> &'static dyn ProviderAdapter {
         // （见 `chatglm/mod.rs` 与 `protocol::chatglm_stream` 的模块头）。
         // 它是本项目**唯一**「访客免登录即可用」的一家（`guest/access` 换证）。
         ProviderKind::Chatglm => &super::chatglm::CHATGLM_ADAPTER,
+        // AtomCode（AtomGit / GitCode）：无状态 OpenAI 直通转发（上游本身就是
+        // Chat Completions）+ 目录 / 额度 / 轮换续期。四个坑见 `atomcode/mod.rs`
+        // 的模块头（网关按 UA 索签名、令牌非 JWT、续期轮换、失败被包装成 200）
+        ProviderKind::Atomcode => &super::atomcode::ATOMCODE_ADAPTER,
     }
 }
 
@@ -1271,6 +1275,9 @@ pub fn implemented_kinds() -> Vec<ProviderKind> {
         // 且有远程目录（`operation/detail?tag=available_models`）—— 必须在
         // 列表里，否则目录刷新循环不会问它（与 Trae / Loomy / Kuku 同一理由）。
         ProviderKind::Chatglm,
+        // AtomCode：远程目录（`coding-plan/models-v2`）+ 有转发能力，
+        // 进本列表才会被后台目录刷新调度
+        ProviderKind::Atomcode,
     ]
 }
 

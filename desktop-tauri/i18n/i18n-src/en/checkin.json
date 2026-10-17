@@ -232,6 +232,7 @@
   "领取": "Claim",
   "领取中": "Claiming",
   "领取中…": "Claiming…",
+  "领取免费 CodingPlan（按需：套餐有效时只回读额度）": "Claim the free CodingPlan (on demand: when the plan is active the quota is only read back)",
   "领取失败": "Claim failed",
   "领取失败：{error}": "Claim failed: {error}",
   "（共 {n} 个账号）": " ({n} accounts total)",

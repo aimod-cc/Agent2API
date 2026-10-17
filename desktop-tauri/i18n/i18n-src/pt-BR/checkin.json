@@ -232,6 +232,7 @@
   "领取": "Resgatar",
   "领取中": "Resgatando",
   "领取中…": "Resgatando…",
+  "领取免费 CodingPlan（按需：套餐有效时只回读额度）": "Resgatar o CodingPlan gratuito (sob demanda: com o plano ativo apenas lê a cota)",
   "领取失败": "Falha no resgate",
   "领取失败：{error}": "Falha no resgate: {error}",
   "（共 {n} 个账号）": "({n} contas no total)",

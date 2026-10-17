@@ -361,6 +361,11 @@ impl AccountStore {
             // tokenTail / tokenExpireAt（续期是否在工作可被肉眼校验，见
             // `orcaterm_accounts.rs`）
             self.to_orcaterm_public_account(record)
+        } else if record.provider() == super::ATOMCODE_PROVIDER_ID {
+            // AtomCode（AtomGit）：公开形态要摘掉**两个**令牌本体
+            // （accessToken 与 refreshToken）—— 只摘前者的那套在这里是漏的，
+            // refreshToken 是长期有效的续期凭据，不能随账号列表下发。
+            self.to_atomcode_public_account(record)
         } else if record
             .provider()
             .starts_with(crate::server::core::custom_providers::ID_PREFIX)

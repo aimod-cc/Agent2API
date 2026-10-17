@@ -883,6 +883,43 @@ const CHATGLM: ProviderConfig = {
   ],
 }
 
+/**
+ * AtomCode（AtomGit / GitCode）：把 AtomGit 的免费 CodingPlan 接进本网关。
+ *
+ * ── 两条来源 ────────────────────────────────────────────────
+ * ① **浏览器登录**（推荐）：网关向代理现取授权地址 → 用户在浏览器里登 AtomGit
+ *    → 网关**轮询代理**判完成并取回令牌对（授权回调由代理自己在
+ *    `acs.atomgit.com/callback` 终结，**不往本机跳**，所以壳侧不需要开回调监听）。
+ * ② **粘贴令牌对**（后备）：`accessToken` + `refreshToken`。⚠️ `refreshToken`
+ *    强烈建议填 —— 本家的令牌**不是 JWT**（实测 7 天到期，读不到 `exp`），
+ *    没有它账号无法自动续期，到期只能重新登录
+ *    （见 `providers/atomcode/credentials.rs` 的模块头）。
+ *
+ * `desktop: false`：与 CodeArts / OfficeAce 同 —— 没有「导入桌面端登录态」这条
+ * 后端路径（AtomCode 把令牌写在 `auth.toml` 里，且需要额外的机器指纹，不做这条入口）。
+ */
+const ATOMCODE: ProviderConfig = {
+  provider: 'atomcode',
+  label: t('AtomCode'),
+  desktop: false,
+  webLogin: {
+    // 整段是一个 t() 键：扫描器只认字符串字面量（拼接串提不到键），所以不拆行
+    noteHtml: t('打开 AtomGit 授权页登录：登录完成后网关会自动<b>轮询代理</b>取回令牌并加入账号列表（授权回调由代理终结，不回到本机，因此无需手工回填回调地址）。'),
+    button: t('打开授权页'),
+    busyText: t('等待 AtomCode 登录完成…'),
+  },
+  manualTitle: t('粘贴令牌对'),
+  // 整段是一个 t() 键：扫描器只认字符串字面量（拼接串提不到键），所以不拆行
+  manualNoteHtml: t('在 AtomGit 的 AtomCode 页面登出后取得两项贴进来：<code>accessToken</code> 与 <code>refreshToken</code>。<b>续期令牌建议填写</b>——本家令牌不是 JWT（约 7 天到期，读不到过期时间），没有它账号无法自动续期，到期只能重新登录。'),
+  fields: [
+    // 字段名与示例值不包 t()（各语言相同，与 CodeArts 的 JSON 示例同一处置）
+    { key: 'accessToken', label: t('访问令牌'), placeholder: 'access_token' },
+    { key: 'refreshToken', label: t('续期令牌'), optional: true, placeholder: 'refresh_token' },
+    { key: 'userId', label: t('用户 ID'), optional: true, placeholder: t('可选，用于生成账号标识') },
+    { key: 'name', label: t('备注名'), optional: true, placeholder: t('可选，留空用「AtomCode」') },
+  ],
+}
+
 /** 内置家的表单块，顺序与旧 ADD_FORMS 一致（只影响 DOM 里的块顺序，不影响界面） */
 export const BUILTIN_CONFIGS: ProviderConfig[] = [
   RACCOON,
@@ -927,9 +964,12 @@ export const BUILTIN_CONFIGS: ProviderConfig[] = [
   // OrcaTerm（腾讯云遨驰终端桌面客户端）：粘贴 accessToken / 导入桌面端登录态，
   // 排在末尾（与后端注册表 PROVIDERS 的排列一致，2026-10 接入）
   ORCATERM,
-  // 智谱清言（chatglm.cn）：访客模式 / 粘贴令牌 / 导入本机登录态，排在末尾
+// 智谱清言（chatglm.cn）：访客模式 / 粘贴令牌 / 导入本机登录态，排在末尾
   // （与后端注册表 PROVIDERS 的排列一致，2026-10 接入）
   CHATGLM,
+  // AtomCode（AtomGit / GitCode）：浏览器登录 + 粘贴令牌对，排在末尾
+  // （与后端注册表 PROVIDERS 的排列一致，后到居后）
+  ATOMCODE,
 ]
 
 /** WorkBuddy 的块 id（结构特殊，单独一个组件） */

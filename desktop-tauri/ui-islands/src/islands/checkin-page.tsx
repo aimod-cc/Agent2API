@@ -62,6 +62,9 @@ const PROVIDER_DESC: Record<string, string> = {
   // 访客账号没有积分体系，实现会如实跳过（不算失败），说明里点出这一点，
   // 免得用户以为漏签了。
   chatglm: t('每日登录积分 · 顺带领取会员活动 · 访客账号无积分体系（跳过）'),
+  // AtomCode 的「签到」不是每日发额，而是**领取免费 CodingPlan**（一次性授权）：
+  // 实现按需领取 —— 套餐有效时只回读额度、不重复领；到期或未领才走 Max→Pro→Lite。
+  atomcode: t('领取免费 CodingPlan（按需：套餐有效时只回读额度）'),
 }
 
 /** 页内标签页的档位（值与 checkin-state 的 CheckinTab 一致） */

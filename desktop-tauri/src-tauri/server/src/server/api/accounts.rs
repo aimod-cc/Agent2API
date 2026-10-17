@@ -1107,7 +1107,7 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
             // 面板传来的名字是用户自己打的 ⇒ 标 custom（此后续期/重登不改它）
             store.add_officeace_account(&payload, import_name, true)
         }
-        // OrcaTerm（腾讯云遨驰终端桌面客户端）：**粘贴 accessToken**（OAuth JWT）
+// OrcaTerm（腾讯云遨驰终端桌面客户端）：**粘贴 accessToken**（OAuth JWT）
         // → 本地归一化（剥 `Bearer ` / `ot_session=` 前缀；整段 data.bin JSON
         // 直接粘也行）→ 打一次 `GetUserInfo` 做**真实校验**（顺带补 userId 与
         // 昵称；JWT 里本来就有 userId，这一步同时确认 token 没被上游拒绝）→
@@ -1285,6 +1285,15 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
                     "manual"
                 },
             )
+        }
+        // AtomCode（AtomGit / GitCode）：粘贴令牌对（accessToken + refreshToken）。
+        // **不调上游**（与 CodeArts / OfficeAce 同口径）——令牌是浏览器登录换来的，
+        // 添加时没有可交换的授权码；目录与连通性由刷新链路验。
+        // ⚠️ refreshToken 强烈建议给：没有它账号无法自动续期（本家的令牌不是 JWT，
+        // 7 天到期后只能重新登录），见 `providers::atomcode::credentials` 的模块头。
+        Some(crate::server::core::providers::ProviderKind::Atomcode) => {
+            // 面板传来的名字是用户自己打的 ⇒ 标 custom（此后续期/重登不改它）
+            store.add_atomcode_account(&payload, import_name)
         }
         // WorkBuddy 系的两家（国内版 / 国际版）：同一套凭证形态与落账号路径，
         // 差别只有归属 —— provider id 自己就是归属（拆家后不再从 payload 里的
@@ -1562,6 +1571,13 @@ pub async fn refresh_account(state: &ServerState, body: &Bytes) -> Response {
     // 用户点「刷新 Token」收到的是腾讯那侧的错（与 CodeArts/Trae 同一条理由）。
     if state.store().officeace_account_record(&id).is_some() {
         return refresh_provider_account(state, &id, ProviderKind::OfficeAce).await;
+    }
+    // AtomCode：续期走它自己的适配器（`POST {broker}/oauth/refresh`，**会轮换**
+    // refresh token，且必须单飞 + 写回）。**这条不能省**：漏了就落到 workbuddy
+    // 兜底链路，用户点「刷新 Token」收到的是腾讯那侧的错（与 CodeArts/Trae/
+    // OfficeAce 同一条理由），而 AtomGit 的令牌会因此悄悄过期到只能重新登录。
+    if state.store().atomcode_account_record(&id).is_some() {
+        return refresh_provider_account(state, &id, ProviderKind::Atomcode).await;
     }
     // Accio（两个地区）：走适配器的强制刷新（`POST /api/auth/refresh_token`，
     // 结果按「比较再写」回写）。两个地区各查一次 —— 账号集合按 provider 隔离，
