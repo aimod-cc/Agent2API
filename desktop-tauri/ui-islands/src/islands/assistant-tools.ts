@@ -22,6 +22,7 @@
  */
 
 import { t } from '../i18n'
+import { buildView, isCustom, setCapabilities as setCustomCapabilities } from './models-custom-source'
 
 /** 工具结果：`text` 回给模型（走 role:"tool" 的消息体），`summary` 给卡片显示 */
 export type ToolResult = {
@@ -107,6 +108,9 @@ type ModelRow = {
   providerLabel?: unknown
   enabled?: unknown
   aliases?: unknown
+  capabilities?: unknown
+  capSources?: unknown
+  reasoningLevels?: unknown
 }
 type AccountRow = {
   id?: unknown
@@ -117,14 +121,50 @@ type AccountRow = {
   enabled?: unknown
 }
 
+/** 自定义提供商目录（providers.js 的缓存；模型管理页读的也是这一份） */
+function customDirectory(): Array<{ id?: unknown }> {
+  const providers = (window as unknown as {
+    wbProviders?: { customList?: () => Array<{ id?: unknown }>; refreshCustom?: () => Promise<unknown> }
+  }).wbProviders
+  return providers?.customList?.() || []
+}
+
+/**
+ * 全部模型行：内置家（`/api/models/manage`）+ **自定义家**。
+ *
+ * ── 为什么必须自己并自定义家 ─────────────────────────────────
+ * `manage` 只走编译期注册表（`catalog::manage_view` → `PROVIDERS`），自定义家
+ * 存在运行期的 `customProviders` 键里、不进那张表 —— 只读 manage 的话助手眼里
+ * 永远只有内置家，「查提供商列表」会漏掉用户自建的全部家（而且模型看不到数据
+ * 时会自己编归属）。自定义家的取数与表格渲染同源（`buildView`，见
+ * `models-custom-source` 模块头），这里只做拼接、不另写一套适配。
+ */
 async function readModels(): Promise<ModelRow[]> {
   const data = (await bridge().getModelManage?.()) as { models?: ModelRow[] } | undefined
-  return Array.isArray(data?.models) ? data.models : []
+  // 拷一份再追加：桥那边若回了同一份缓存对象，就地 push 会让下一次调用
+  // 看到上一轮追加过的自定义家行（同一批行重复计数）
+  const rows = Array.isArray(data?.models) ? data.models.slice() : []
+  const directory = (window as unknown as {
+    wbProviders?: { refreshCustom?: () => Promise<unknown> }
+  }).wbProviders
+  // 目录是 providers.js 在加载期异步拉的，首屏那几秒可能还没到 —— 空时补一次
+  if (!customDirectory().length) await directory?.refreshCustom?.().catch(() => {})
+  for (const provider of customDirectory()) {
+    const view = buildView(String(provider?.id || ''))
+    if (view) rows.push(...view.models)
+  }
+  return rows
 }
 
 async function readAccounts(): Promise<AccountRow[]> {
-  const state = (await bridge().getState?.()) as { accounts?: AccountRow[] } | undefined
-  const rows = Array.isArray(state?.accounts) ? state.accounts : []
+  const state = (await bridge().getState?.()) as
+    | { accounts?: { accounts?: AccountRow[] } | AccountRow[] }
+    | undefined
+  // `/api/session` 的 `accounts` 是**对象**（`{accounts, currentAccountId, currentAccountIds,
+  // providers}`，见 `api::session::get_session`），不是数组 —— 直接 `Array.isArray(state.accounts)`
+  // 恒为 false，四只账号类工具会全部退化成「没有找到账号」。旧版形态（裸数组）一并接住。
+  const block = state?.accounts
+  const rows = Array.isArray(block) ? block : Array.isArray(block?.accounts) ? block.accounts : []
   // 全局队列 = priority 升序（后端 priority 0 起、越小越靠前）
   return rows
     .slice()
@@ -162,38 +202,87 @@ const listModels: AssistantTool = {
   id: 'list_models',
   label: t('获取模型列表'),
   kind: 'read',
-  desc: '读取各提供商的模型清单（模型 ID、所属提供商、是否启用、已挂的映射名）以及全部映射。回答「有哪些模型」「哪些模型在多家重复」「某个名字挂在哪」这类问题之前先调用它。',
+  desc: '读取全部提供商的模型清单（模型 ID、所属提供商 id 与展示名、是否启用、已挂的映射名、**能力位**：上下文窗口 / 最大输出 Token / 工具调用 / 图片 / 视频 / 深度推理，以及每个能力值的来源）以及全部映射。内置家与用户自建的自定义家都在里面。回答「有哪些提供商 / 几家」「有哪些模型」「上下文窗口多大」「支不支持工具调用 / 图片 / 推理」「哪些模型在多家重复」「某个名字挂在哪」这类问题之前先调用它。',
   params: {
     type: 'object',
     properties: {
-      provider: { type: 'string', description: '只看某一家（提供商 id，如 codearts / workbuddy）；不填 = 全部' },
-      keyword: { type: 'string', description: '按模型 ID 或映射名做子串过滤；不填 = 不过滤' },
+      provider: {
+        type: 'string',
+        description: '只看某一家：提供商 id（如 codearts、custom-3f2a91b04c7e）或展示名（如「商汤日日新」）；不填 = 全部',
+      },
+      keyword: { type: 'string', description: '按模型 ID、模型名、映射名或提供商名做子串过滤；不填 = 不过滤' },
       enabledOnly: { type: 'boolean', description: 'true = 只看已启用的模型' },
     },
   },
   run: async args => {
-    const provider = str(args.provider, 64).toLowerCase()
+    const wanted = str(args.provider, 64).toLowerCase()
     const keyword = str(args.keyword, 128).toLowerCase()
     const enabledOnly = bool(args.enabledOnly) === true
-    const data = (await bridge().getModelManage?.()) as { models?: ModelRow[]; mappings?: Array<Record<string, unknown>> } | undefined
-    const rows = (Array.isArray(data?.models) ? data.models : []).filter(row => {
-      if (provider && str(row.provider).toLowerCase() !== provider) return false
+    const data = (await bridge().getModelManage?.()) as { mappings?: Array<Record<string, unknown>> } | undefined
+    const all = await readModels()
+    // 提供商点名：id 与展示名都认（自定义家的 id 是 custom- + 随机串，用户只会说名字）
+    const rowProvider = (row: ModelRow) => {
+      const id = str(row.provider)
+      return { id, label: str(row.providerLabel) || id }
+    }
+    const matchesProvider = (row: ModelRow) => {
+      if (!wanted) return true
+      const { id, label } = rowProvider(row)
+      return id.toLowerCase() === wanted || label.toLowerCase() === wanted
+        || id.toLowerCase().includes(wanted) || label.toLowerCase().includes(wanted)
+    }
+    const rows = all.filter(row => {
+      if (!matchesProvider(row)) return false
       if (enabledOnly && row.enabled !== true) return false
       if (keyword) {
-        const hay = [str(row.id), str(row.name), ...(Array.isArray(row.aliases) ? row.aliases.map(item => str(item)) : [])].join(' ').toLowerCase()
+        const hay = [str(row.id), str(row.name), str(row.provider), str(row.providerLabel),
+          ...(Array.isArray(row.aliases) ? row.aliases.map(item => str(item)) : [])].join(' ').toLowerCase()
         if (!hay.includes(keyword)) return false
       }
       return true
     })
-    const slim = rows.map(row => ({
-      provider: str(row.provider),
-      id: str(row.id),
-      enabled: row.enabled === true,
-      aliases: Array.isArray(row.aliases) ? row.aliases.map(item => str(item)) : [],
-    }))
+    const slim = rows.map(row => {
+      // 能力位：**稀疏**投影（只写有值的键，`null` = 未声明就不出现）。
+      // 六键齐全地写会带一堆 null（实测 payload +351%），而「键缺失 = 未声明」
+      // 与前端 `ManageModel.capabilities` 的约定一致；稀疏只 +134%。
+      const capabilities: Record<string, unknown> = {}
+      const raw = (row.capabilities && typeof row.capabilities === 'object' ? row.capabilities : {}) as Record<string, unknown>
+      for (const key of CAPABILITY_KEYS) {
+        if (raw[key] === null || raw[key] === undefined) continue
+        capabilities[key] = raw[key]
+      }
+      return {
+        provider: str(row.provider),
+        providerLabel: str(row.providerLabel) || str(row.provider),
+        id: str(row.id),
+        enabled: row.enabled === true,
+        aliases: Array.isArray(row.aliases) ? row.aliases.map(item => str(item)) : [],
+        // 空对象 = 这一家一个字都没声明（自定义家的常见形态：用户还没填）
+        capabilities,
+        // 每个能力键的来源（`upstream` / `modelsdev` / `user`）；缺失的键 = 无来源。
+        // 它决定这行数字该不该信 —— 上游实测与用户手填长得一样，可信度差着量级
+        capSources: row.capSources && typeof row.capSources === 'object' ? row.capSources : {},
+        // 模型自己能配哪些思考档（缺失 = 未声明，界面/调用方回落通用档位表）
+        reasoningLevels: Array.isArray(row.reasoningLevels) ? row.reasoningLevels : [],
+      }
+    })
+    // 提供商汇总一并给出：模型要回答「有几家 / 都是谁」时不必自己从模型行里去重，
+    // 也就不会再漏掉「一家都没登记的模型」的家
+    const providers: Record<string, { label: string; models: number }> = {}
+    for (const row of slim) {
+      const entry = providers[row.provider] || (providers[row.provider] = { label: row.providerLabel, models: 0 })
+      entry.models += 1
+    }
     return {
-      text: JSON.stringify({ total: slim.length, models: slim.slice(0, 400) }),
-      summary: t('{n} 个模型', { n: slim.length }),
+      text: JSON.stringify({
+        providerCount: Object.keys(providers).length,
+        modelCount: slim.length,
+        providers,
+        models: slim.slice(0, 400),
+        // 全部映射（含指向别家的别名）：判断「某个名字挂在哪」时要它
+        mappings: Array.isArray(data?.mappings) ? data.mappings.slice(0, 400) : [],
+      }),
+      summary: t('{n} 家 · {m} 个模型', { n: Object.keys(providers).length, m: slim.length }),
     }
   },
 }
@@ -369,11 +458,11 @@ const setModelCapability: AssistantTool = {
   id: 'set_model_capability',
   label: t('修改模型能力'),
   kind: 'write',
-  desc: '修改某个模型对下游声明的能力位：上下文窗口、最大输出 Token、工具调用 / 图片 / 视频 / 深度推理四个布尔位。只传要改的键；布尔位给 null 表示恢复上游原值。',
+  desc: '修改某个模型对下游声明的能力位：上下文窗口、最大输出 Token、工具调用 / 图片 / 视频 / 深度推理四个布尔位。只传要改的键；null = 清除这一项（内置家恢复上游原值，自定义家删掉这条用户手填的覆盖）。**内置家与自定义家都支持**。改动前请先用 `list_models` 读出当前值，别凭印象改。',
   params: {
     type: 'object',
     properties: {
-      provider: { type: 'string', description: '提供商 id' },
+      provider: { type: 'string', description: '提供商 id（内置家如 codearts，自定义家如 custom-3f2a91b04c7e）' },
       id: { type: 'string', description: '模型 ID' },
       capabilities: {
         type: 'object',
@@ -426,7 +515,13 @@ const setModelCapability: AssistantTool = {
       }
     }
     if (!provider || !id || !Object.keys(caps).length) throw new Error(t('参数不完整（需要 provider / id / capabilities）'))
-    await bridge().setModelCapabilities?.(provider, id, caps)
+    // 两条写路径（与模型管理页的 `writeCapabilities` 同一分流）：
+    //   · 自定义家：能力位存在提供商记录自己的 `models[].capabilities` 里，只能整表替换
+    //     （`POST /api/custom-providers/models`）—— 走桥的 `/api/models/capabilities`
+    //     会被后端以「未知的内置提供商」400 拒掉；
+    //   · 内置家：覆盖层落在 `modelRules.capabilities`，走桥的既有接口。
+    if (isCustom(provider)) await setCustomCapabilities(provider, id, caps as Record<string, number | boolean | null>)
+    else await bridge().setModelCapabilities?.(provider, id, caps)
     refreshApp()
     return { text: JSON.stringify({ ok: true, provider, id, capabilities: caps }), summary: t('已修改 {n} 项能力', { n: Object.keys(caps).length }) }
   },
@@ -656,7 +751,7 @@ export function toolsPayload(enabled: Record<string, boolean>): Array<Record<str
  *  文案在这里就用 `t()` 包好（定义时求值）：页面直接取 `meta.label` 即可，
  *  不会再出现「把变量喂给 t()」那种扫描器提不到键的写法。 */
 export const TOOL_META: Array<{ id: string; label: string; desc: string; tag?: 'danger' | 'cost' }> = [
-  { id: 'list_models', label: t('获取模型列表'), desc: t('读各提供商的模型清单、映射名与启用状态。') },
+  { id: 'list_models', label: t('获取模型列表'), desc: t('读全部提供商（含自定义家）的模型清单、映射名与启用状态。') },
   { id: 'list_account_balance', label: t('查询账号余额'), desc: t('读各账号的额度 / 剩余用量。') },
   { id: 'set_model_enabled', label: t('启用 / 禁用模型'), desc: t('开关模型的对外可用性，不改其它属性。') },
   { id: 'set_model_mapping', label: t('设置模型映射 ID'), desc: t('新增 / 删除映射名，支持批量加前缀与同名合并到多家。') },
