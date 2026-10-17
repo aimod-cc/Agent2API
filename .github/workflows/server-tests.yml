@@ -1,0 +1,58 @@
+name: server-tests
+
+# 跑后端单元测试。
+#
+# ── 为什么需要这道闸 ──────────────────────────────────────────
+# 本仓库有 594 个测试属性（507 个 `#[test]` + 87 个 `#[tokio::test]`），但此前没有任何工作流执行 `cargo test`：
+# `build.yml` 与 `docker.yml` 只在打 tag / 手动触发时构建安装包，
+# `warm-cache.yml` 只预热依赖缓存，`frontend-artifacts.yml` 只校验前端产物同源。
+# 也就是说：**测试写了，但从头到尾没人跑** —— 合进 beta 的改动要等装到用户机器上
+# 才第一次真正被执行。选路、余额解析、错误码映射这几族逻辑恰恰是最怕静默回归的。
+#
+# ── 判据：只测后端 crate，不碰桌面壳 ──────────────────────────
+# 判据只有一条：`cargo test -p agent2api-server` 必须通过。
+# 全仓 594 个测试（507 个 `#[test]` + 87 个 `#[tokio::test]`）全在这一个 crate 里（桌面壳 `src/` 下是 0 个），
+# 所以「只测 server」不是偷懒的折中，而是**已经覆盖了全部现有测试**。
+# 为什么不顺手把壳也编一遍：壳是 Tauri，在 Linux 上要 webkit2gtk / gtk3 一整套
+# 系统库（`server/Cargo.toml` 自己写着拆分就是为了「headless 一个都不用」，
+# 且其依赖里「刻意没有的：tauri 及其插件」）。测试 job 不该为 0 个测试背这个包。
+# 同理不加 `--all-features`：本仓库的 feature 组合没有既有的验证约定，
+# 贸然打开可能引入需要系统库或网络的构建，那会让这道闸变成噪音而不是信号。
+#
+# ── 与现有工作流的差异 ────────────────────────────────────────
+# 触发方式照抄 `frontend-artifacts.yml`（main / beta 的 push 与 pull_request），
+# 因为它已经是这个仓库里「PR 上跑校验」的既成先例；构建工具链与缓存写法照抄
+# `build.yml`（同一个 rust-toolchain 动作、同一个 rust-cache 配置口径）。
+# 失败时输出就是 cargo 自己的编译与断言错误，最常见的原因按频率排：
+#   1. 改动破坏了既有单测（看 `test result: FAILED` 上面那条 panic 的文件与行号）；
+#   2. 新增测试依赖了真实网络或本机路径（CI 上必挂，请改成打桩或用临时目录）。
+
+on:
+  push:
+    branches: [main, beta]
+  pull_request:
+    branches: [main, beta]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  server-tests:
+    name: 后端测试（agent2api-server）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # 与 build.yml 同一口径：.cargo/config.toml 把 target-dir 指到仓库根的 target/
+      - name: 缓存 Rust 依赖
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-tauri/src-tauri -> ../../target
+
+      - name: 跑测试
+        working-directory: desktop-tauri/src-tauri
+        run: cargo test -p agent2api-server
