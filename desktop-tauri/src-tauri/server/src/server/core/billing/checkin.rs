@@ -704,39 +704,71 @@ pub async fn run_checkin(
     let manual = matches!(source, "single" | "manual");
     let mut results = Vec::with_capacity(targets.len());
     for account in &targets {
-        let row = checkin_for(store, billing, account, manual).await;
-        // 落签到时间：手动单签与定时签到走的是**这一段**（两条链都调本函数），
-        // 所以账号页的「已签到」在两种路径下都会亮起来，不需要各自记一次。
-        // 写盘失败只记日志、不改签到结果 —— 上游那边积分已经领到了，
-        // 因为一次落盘失败就把成功的签到报成失败是本末倒置。
-        if let Some(account_id) = row.get("id").and_then(Value::as_str) {
-            // 判据是 [`day_completed`]（claim 说完成，或国际版活跃链路完成）——
-            // 与台账的 outcome 判定同源；判据只此一份，别在这里再写一份。
-            if day_completed(&row) && !store.mark_checkin(account_id, logging::now_ms()) {
-                logging::verbose(
-                    "[Accounts]",
-                    &format!("账号 {account_id} 的签到时间未能落盘（账号可能已被删除）"),
-                );
-            }
-        }
-        // 签到记录台账（schema v11）：每个账号行落一条明细（成败 / 错误原文 /
-        // 收益文案都在结果行里）。写盘失败只记日志：台账缺一条不该让这次
-        // 签到的响应报错 —— 与上面 mark_checkin 的取舍同构。provider 由账号
-        // 记录带上（结果行里没有这个字段，记录页的提供商筛选列要用）。
-        crate::server::core::checkin_records::record_row(
-            &row,
-            account.get("provider").and_then(Value::as_str).unwrap_or(""),
-            source,
-            reason,
-        );
-        results.push(row);
+        results.push(run_account(store, billing, account, manual, source, reason).await);
     }
-    // 「真实领取」与「今日已领取」都表示本日成功领到分，计入 succeeded；
-    // 活跃链路（保活对话 / 活跃上报 / 网页会话）单独统计在 `active` ——
-    // 它不产生「领取」，不并入 succeeded，免得把两类事混成一个数。
-    // 注意 succeeded 只是这行日志的计数：落 `checkinAt` 的判据是
-    // [`day_completed`]（活跃链路完成同样落账），两者刻意不同 —— 前者计量
-    // 「真领到的分」，后者回答「今天是否已完成」。
+    let summary = summarize_results(&results, skipped);
+    // 批量轮次进台账（签到中心时间线）。写盘失败只记日志：上游那边积分已经
+    // 领到，台账缺一条不该让这次签到的响应报错。
+    if id.is_none() {
+        crate::server::core::checkin_history::record(&summary, reason);
+    }
+    Ok(summary)
+}
+
+/// 单个账号的签到 + 落 `checkinAt` + 记签到记录台账。
+///
+/// 从 `run_checkin` 的循环体抽出（2026-10 随机窗口改造）：定时铺开路径
+/// （`auto_checkin::run_spread`）逐个账号调用它，与批量路径共用同一段记账，
+/// 不会出现「铺开签到的账号不亮『已签到』」这类两套行为。
+/// `manual` 的语义见 [`checkin_for`]（只对 CodeArts 的限流闸有意义）。
+pub async fn run_account(
+    store: &AccountStore,
+    billing: &BillingService,
+    account: &Value,
+    manual: bool,
+    source: &str,
+    reason: &str,
+) -> Value {
+    let row = checkin_for(store, billing, account, manual).await;
+    // 落签到时间：手动单签与定时签到走的是**这一段**（两条链都调本函数），
+    // 所以账号页的「已签到」在两种路径下都会亮起来，不需要各自记一次。
+    // 写盘失败只记日志、不改签到结果 —— 上游那边积分已经领到了，
+    // 因为一次落盘失败就把成功的签到报成失败是本末倒置。
+    if let Some(account_id) = row.get("id").and_then(Value::as_str) {
+        // 判据是 [`day_completed`]（claim 说完成，或国际版活跃链路完成）——
+        // 与台账的 outcome 判定同源；判据只此一份，别在这里再写一份。
+        if day_completed(&row) && !store.mark_checkin(account_id, logging::now_ms()) {
+            logging::verbose(
+                "[Accounts]",
+                &format!("账号 {account_id} 的签到时间未能落盘（账号可能已被删除）"),
+            );
+        }
+    }
+    // 签到记录台账（schema v11）：每个账号行落一条明细（成败 / 错误原文 /
+    // 收益文案都在结果行里）。写盘失败只记日志：台账缺一条不该让这次
+    // 签到的响应报错 —— 与上面 mark_checkin 的取舍同构。provider 由账号
+    // 记录带上（结果行里没有这个字段，记录页的提供商筛选列要用）。
+    crate::server::core::checkin_records::record_row(
+        &row,
+        account.get("provider").and_then(Value::as_str).unwrap_or(""),
+        source,
+        reason,
+    );
+    row
+}
+
+/// 一轮签到结果 → `{results, succeeded, active, total, skipped}` 汇总。
+///
+/// 「真实领取」与「今日已领取」都表示本日成功领到分，计入 succeeded；
+/// 活跃链路（保活对话 / 活跃上报 / 网页会话）单独统计在 `active` ——
+/// 它不产生「领取」，不并入 succeeded，免得把两类事混成一个数。
+/// 注意 succeeded 只是这行日志的计数：落 `checkinAt` 的判据是
+/// [`day_completed`]（活跃链路完成同样落账），两者刻意不同 —— 前者计量
+/// 「真领到的分」，后者回答「今天是否已完成」。
+///
+/// 抽成公开函数供 `auto_checkin::run_spread` 复用：铺开路径自己控制节奏，
+/// 但统计口径必须与批量路径逐字一致。
+pub fn summarize_results(results: &[Value], skipped: usize) -> Value {
     let succeeded = results
         .iter()
         .filter(|item| {
@@ -771,27 +803,13 @@ pub async fn run_checkin(
             results.len()
         ),
     );
-    // 批量轮次进台账（签到中心时间线）。写盘失败只记日志：上游那边积分已经
-    // 领到，台账缺一条不该让这次签到的响应报错。
-    if id.is_none() {
-        crate::server::core::checkin_history::record(
-            &json!({
-                "succeeded": succeeded,
-                "active": active,
-                "total": results.len(),
-                "skipped": skipped,
-                "results": results,
-            }),
-            reason,
-        );
-    }
-    Ok(json!({
+    json!({
         "results": results,
         "succeeded": succeeded,
         "active": active,
         "total": results.len(),
         "skipped": skipped,
-    }))
+    })
 }
 
 #[cfg(test)]

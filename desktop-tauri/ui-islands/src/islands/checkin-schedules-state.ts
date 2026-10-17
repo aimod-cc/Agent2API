@@ -132,6 +132,7 @@ export async function saveSchedule(payload: {
   label?: string
   enabled?: boolean
   time?: string
+  jitterMinutes?: number
   providers?: string[]
 }): Promise<void> {
   if (store.saving) return
@@ -148,15 +149,35 @@ export async function saveSchedule(payload: {
   }
 }
 
-/** 条目开关（不发整表单：带上这条的 time / providers，后端 upsert 需要时刻必填） */
+/** 条目开关（不发整表单：带上这条的 time / jitterMinutes / providers，后端 upsert 需要时刻必填） */
 export async function toggleScheduleEnabled(entry: ScheduleEntry, enabled: boolean): Promise<void> {
   await saveSchedule({
     id: entry.id,
     label: entry.label ?? '',
     enabled,
     time: entry.time ?? '',
+    // 必须带上：这是整表单重发，漏了会走「缺省保持原值」侥幸保住，
+    // 一旦后端那侧语义调整，点一次开关就会把随机窗口静默清零
+    jitterMinutes: Number(entry.jitterMinutes) || 0,
     providers: Array.isArray(entry.providers) ? entry.providers : [],
   })
+}
+
+/** 「启动时立即补签」开关（全局，走老接口 POST /api/auto-checkin） */
+export async function toggleStartupCatchUp(enabled: boolean): Promise<void> {
+  if (store.saving) return
+  patch({ saving: true })
+  try {
+    const next = await bridge().saveAutoCheckin?.({ startupCatchUp: enabled })
+    applySnapshot(next)
+    // 与总开关同一口径：两条分开调（扫描器只认字面量首参）
+    if (enabled) toast(t('启动补签已开启'))
+    else toast(t('启动补签已关闭'))
+  } catch (error) {
+    toast(t('保存失败：{error}', { error: errorMessage(error) }), 'err')
+  } finally {
+    patch({ saving: false })
+  }
 }
 
 /**

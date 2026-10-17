@@ -71,6 +71,8 @@ export type AutoCheckinState = {
   lastFiredToday?: boolean
   nextRunAt?: number | null
   lastResult?: CheckinHistoryEntry | null
+  /** 启动时立即补签（缺省 true；关掉后启动不补，等到窗口起点由调度触发） */
+  startupCatchUp?: boolean
   running?: boolean
 }
 
@@ -85,6 +87,8 @@ export type ScheduleEntry = {
   displayLabel?: string
   enabled?: boolean
   time?: string
+  /** 随机前后 N 分钟（0 / 缺省 = 不随机，窗口就是时刻本身） */
+  jitterMinutes?: number
   providers?: string[]
   lastFiredDate?: string | null
   lastFiredToday?: boolean

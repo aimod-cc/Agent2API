@@ -9,6 +9,7 @@ import {
 import {
   deleteSchedule, getSchedulesStore, loadSchedules, runScheduleNow, saveSchedule,
   setEditingId, subscribeSchedulesStore, toggleMaster, toggleScheduleEnabled,
+  toggleStartupCatchUp,
   type SchedulesStore,
 } from './checkin-schedules-state'
 import type { ScheduleEntry } from './checkin-state'
@@ -37,7 +38,7 @@ import type { ScheduleEntry } from './checkin-state'
  * 整段是一个键：扫描器只认字符串字面量（拼接串 / 模板串提不到键），所以不拆行。
  */
 const AUTO_CHECKIN_DESC = t(
-    '到点后自动签到勾选提供商的可用账号（WorkBuddy 国内版走每日签到接口，国际版走每日活跃任务：探测活动、领日活奖励、再用免费模型保活并在网页通道建会话点亮日活；小浣熊走桌面端每日积分链路；AutoClaw 走官方客户端的每日签到任务；Qoder 中国版走活动领取，没被下发活动的账号会得到中性提示；Qoder 国际版要先带设备风控身份（本机 Qoder 客户端 / qodercli 的 UMID 组件生成）才能看到「每日 100 Credits」活动，缺组件时会得到明确的说明而不是报错；Trae 领 SOLO 的每日签到积分（按自然日 0 点重置），上游没对该账号开活动、或凭据里没有设备号时得到的是「未领取 + 具体原因」而不是报错；Loomy 每天替账号打一次首次登录积分；KukuAI 领「免费领积分」的每日任务；CodeArts 领当日的运营福利（领取 → 确认 → 回读核实，自动执行受每天 6 次 / 间隔 10 分钟的写请求限流）；OfficeAce 果办一次领当天全部奖励（每日签到 + 新人礼））。错过时点开机后会自动补签，不会因为当时没开机而漏掉。各家签到接口都是幂等的，重复执行不会重复领取。',
+    '到点后自动签到勾选提供商的可用账号（WorkBuddy 国内版走每日签到接口，国际版走每日活跃任务：探测活动、领日活奖励、再用免费模型保活并在网页通道建会话点亮日活；小浣熊走桌面端每日积分链路；AutoClaw 走官方客户端的每日签到任务；Qoder 中国版走活动领取，没被下发活动的账号会得到中性提示；Qoder 国际版要先带设备风控身份（本机 Qoder 客户端 / qodercli 的 UMID 组件生成）才能看到「每日 100 Credits」活动，缺组件时会得到明确的说明而不是报错；Trae 领 SOLO 的每日签到积分（按自然日 0 点重置），上游没对该账号开活动、或凭据里没有设备号时得到的是「未领取 + 具体原因」而不是报错；Loomy 每天替账号打一次首次登录积分；KukuAI 领「免费领积分」的每日任务；CodeArts 领当日的运营福利（领取 → 确认 → 回读核实，自动执行受每天 6 次 / 间隔 10 分钟的写请求限流）；OfficeAce 果办一次领当天全部奖励（每日签到 + 新人礼））。设了「随机前后 N 分钟」时，本轮账号在各自窗口内分散执行（窗口夹在当天 0 点到 23:59 之间），不再全部挤在同一分钟；窗口已过则立即全部执行。错过时点开机后会自动补签，不会因为当时没开机而漏掉（可在「启动补签」关掉，改为等到窗口起点）。各家签到接口都是幂等的，重复执行不会重复领取。',
 )
 
 /* ─── store 订阅 ───────────────────────────── */
@@ -106,6 +107,9 @@ function ScheduleEditor({ entry, store }: { entry: ScheduleEntry | null; store: 
   const isNew = entry === null
   const [label, setLabel] = React.useState(entry?.label ?? '')
   const [time, setTime] = React.useState(entry?.time ?? '00:01')
+  // 随机窗口（分钟）。草稿用字符串：`type='number'` 清空时是 ''，直接存数字
+  // 会让输入框在「删光重填」时跳回 0
+  const [jitter, setJitter] = React.useState(String(entry?.jitterMinutes ?? 0))
   const [picked, setPicked] = React.useState<ReadonlySet<string>>(
     new Set(isNew ? options.map(option => option.id) : entry?.providers ?? []),
   )
@@ -115,15 +119,31 @@ function ScheduleEditor({ entry, store }: { entry: ScheduleEntry | null; store: 
     // 只在挂载 / 切换编辑对象时初始化一次：options 后到不该把用户改了一半的勾选冲掉
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-  const canSave = time.trim() !== '' && picked.size > 0
+  // 0 是合法值（关闭随机）；空串按 0 处理（用户删光内容就是想关掉）。
+  // 非整数 / 超范围不让保存：夹取交给后端会得到「填了 999 却按 120 生效」的
+  // 静默偏差，不如当场拦住。上限与后端 auto_checkin::MAX_JITTER_MINUTES 对应。
+  //
+  // 先用正则挡掉 `Number()` 会接受的非十进制写法（`1e3` / `0x10` / ` 5 `）：
+  // 它们转出来都是整数，但用户显然没想表达那个意思。
+  const jitterText = jitter.trim()
+  const jitterValue = jitterText === '' ? 0 : Number(jitterText)
+  const jitterValid =
+    (jitterText === '' || /^\d+$/.test(jitterText)) &&
+    Number.isInteger(jitterValue) &&
+    jitterValue >= 0 &&
+    jitterValue <= 120
+  const canSave = time.trim() !== '' && picked.size > 0 && jitterValid
   const pickAll = (): void => setPicked(new Set(options.map(option => option.id)))
   const clearAll = (): void => setPicked(new Set<string>())
   const submit = async (): Promise<void> => {
+    // 双重保险：按钮的 disabled 已经挡住非法输入，但回车 / 程序化点击也要挡住
+    if (!canSave) return
     await saveSchedule({
       id: entry?.id,
       label: label.trim(),
       enabled: entry?.enabled ?? true,
       time: time.trim(),
+      jitterMinutes: jitterValue,
       providers: options.map(option => option.id).filter(id => picked.has(id)),
     })
   }
@@ -153,6 +173,25 @@ function ScheduleEditor({ entry, store }: { entry: ScheduleEntry | null; store: 
             onChange={event => setTime(event.currentTarget.value)}
           />
           <span className='text-subtle text-xs'>{t('北京时间 · 错过时点开机后会自动补签')}</span>
+        </span>
+      </div>
+      <div className='ck-set-line'>
+        <span className='ck-set-k'>{t('随机前后')}</span>
+        <span className='ck-set-v flex items-center gap-2'>
+          <Input
+            type='number'
+            min={0}
+            max={120}
+            step={1}
+            inputMode='numeric'
+            className='w-[96px] max-w-[96px] text-center font-mono tabular-nums'
+            value={jitter}
+            disabled={store.saving}
+            onChange={event => setJitter(event.currentTarget.value)}
+          />
+          <span className='text-subtle text-xs'>
+            {t('分钟 · 窗口内逐个账号随机执行，0 = 到点立即执行')}
+          </span>
         </span>
       </div>
       <div className='ck-set-line ck-set-line-top'>
@@ -271,7 +310,13 @@ function ScheduleEntryRow({ entry, store }: { entry: ScheduleEntry; store: Sched
               : <Badge variant='outline' shape='tag'>{t('已停用')}</Badge>}
           </div>
           <div className='ck-prov-desc ck-sched-scope' title={providersFullList(entry, options)}>
-            {t('每天 {time} · {scope}', { time: entry.time ?? '—', scope: providersSummary(entry, options) })}
+            {Number(entry.jitterMinutes) > 0
+              ? t('每天 {time} · 随机前后 {n} 分钟 · {scope}', {
+                  time: entry.time ?? '—',
+                  n: Number(entry.jitterMinutes),
+                  scope: providersSummary(entry, options),
+                })
+              : t('每天 {time} · {scope}', { time: entry.time ?? '—', scope: providersSummary(entry, options) })}
           </div>
           <div className='ck-prov-desc'>
             {t('上次执行：{line}', { line: lastResultLine(entry) })}
@@ -530,6 +575,8 @@ function ScheduleTab(): React.ReactElement {
 
   const data = store.data
   const masterOn = data?.enabled === true
+  // 缺省开：老配置没有这个键，与后端 `startup_catch_up()` 的缺省一致
+  const startupCatchUp = data?.startupCatchUp !== false
   const entries = Array.isArray(data?.schedules) ? data!.schedules! : []
   // 保活模型链（全局一份，随卡迁入本页）：草稿非空表示用户正在编辑，否则跟随快照
   const keepalive = checkin.snapshot?.keepalive
@@ -576,6 +623,21 @@ function ScheduleTab(): React.ReactElement {
               />
               <span className='text-subtle text-xs'>
                 {masterOn ? t('开着：启用的条目按各自时刻执行') : t('关着：所有条目都不执行')}
+              </span>
+            </span>
+          </div>
+          <div className='ck-set-line'>
+            <span className='ck-set-k'>{t('启动补签')}</span>
+            <span className='ck-set-v flex items-center gap-2'>
+              <Switch
+                checked={startupCatchUp}
+                disabled={store.saving}
+                onCheckedChange={next => void toggleStartupCatchUp(next === true)}
+              />
+              <span className='text-subtle text-xs'>
+                {startupCatchUp
+                  ? t('开着：开机后今天没签过的条目立刻补签，不看随机窗口')
+                  : t('关着：开机后等到窗口起点再签，随机窗口当天生效')}
               </span>
             </span>
           </div>

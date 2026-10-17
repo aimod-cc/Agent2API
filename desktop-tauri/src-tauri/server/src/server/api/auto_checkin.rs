@@ -1,7 +1,7 @@
 //! 定时签到路由（对照 server.mjs 726-746 行）。
 //!
 //!   GET  /api/auto-checkin        读取开关、触发时刻、上次结果
-//!   POST /api/auto-checkin        修改设置 { enabled?, time? }
+//!   POST /api/auto-checkin        修改设置 { enabled?, time?, startupCatchUp? }
 //!   POST /api/auto-checkin/run    立即执行一次
 //!
 //! ── 错误信封（照抄 Node 的落点）────────────────────────────
@@ -43,7 +43,7 @@ pub async fn get_state(State(state): State<ServerState>) -> Response {
     ok_json(state.auto_checkin().state())
 }
 
-/// POST /api/auto-checkin —— 修改设置（{ enabled?, time? }）
+/// POST /api/auto-checkin —— 修改设置（{ enabled?, time?, startupCatchUp? }）
 pub async fn configure(State(state): State<ServerState>, body: Bytes) -> Response {
     // 空 body 视为 {}（Node 的 `|| '{}'`）；非法 JSON 在 Node 里由 JSON.parse
     // 抛出的 SyntaxError 走到 errorPayload → 500 proxy_error（实测如此），

@@ -23,6 +23,20 @@
 //! 「今日已签到」也按错误的日期显示。移植自 Node 版（作者在国内，`Local`
 //! 恰好等于 UTC+8）时没有显式钉住这个前提，这里补上。
 //!
+//! ── 随机窗口（`jitterMinutes`，0 = 关闭）────────────────────
+//! 每条条目可设「随机前后 N 分钟」，窗口 = `[时刻-N, 时刻+N]` 夹到当天。
+//! 窗口起点由 tick 触发**一次**，然后本轮账号在窗口内各自取一个确定性
+//! 偏移（`spread_offset_seconds`），按时间顺序执行 —— 对上游呈现的是散在
+//! 窗口里的逐个请求，而不是每天同一分钟的一串。
+//! 两个关键实现约束：
+//!   ① 铺开在**后台任务**里（`spawn_spread`），不在 tick 里 await：窗口最长
+//!      4 小时，占住 tick 会延后其他条目，占住全局 `running` 会拒掉所有手动
+//!      签到；后台任务只在每个账号执行的几秒里抢锁。
+//!   ② 偏移是**确定性哈希**（条目 id + 日期 + 时刻 + N + 账号 id），不是每次
+//!      随机：同一天的重试（Qoder 国际版窗口、停机重启）必须落在同一点，
+//!      面板的「下次执行」也才与真实行为一致。
+//! 手动签到（批量 / 单账号 / 条目「立即执行」）不铺开，行为与改造前一致。
+//!
 //! ── 补签（有意的行为，别「顺手优化」）────────────────────────
 //! Node 版 `start()` 的条件是**「今天还没签过」**，并不判「时间点是否已过」：
 //! 开着自动签到却在 00:01 时没开机、白天才启动 → 立刻补一次。
@@ -31,6 +45,8 @@
 //! 把 enabled 设为 true、time 设为 23:00（未来时点）时，Node 版立即执行了
 //! 一次 reason='启动补签' 的签到 —— 所以这里的条件同样只看日期键。
 //! 多条目之后按条目各补各的：今天没跑过的**启用**条目每条补一次。
+//! 该行为可通过 `autoCheckin.startupCatchUp`（缺省开）整体关掉，见
+//! [`startup_catch_up`]：关掉后启动只起调度循环，等各自窗口起点由 tick 触发。
 //!
 //! ── 配置读写 ────────────────────────────────────────────────
 //! 状态存在 config.json 的 `autoCheckin` 字段：`enabled` 是总开关，
@@ -61,6 +77,21 @@ pub const TICK_MS: u64 = 30_000;
 
 /// 默认触发时刻：零点一分（Node 版 DEFAULT_TIME）
 pub const DEFAULT_TIME: &str = "00:01";
+
+/// 「随机前后 N 分钟」的上限。
+///
+/// 为什么是 120 而不是更大：窗口跨度直接决定一轮签到最长铺多久，而这一轮
+/// 期间每个账号执行时都要抢全局「执行中」标记（见 `acquire_running`），
+/// 窗口越大，手动签到被拒的概率越高。2 小时足够打散「每天同一分钟」的形态，
+/// 又不至于让「立即执行」在最坏情况下等太久。
+pub const MAX_JITTER_MINUTES: u32 = 120;
+
+/// 随机窗口铺开时，为单个账号等「执行中」标记的上限。
+///
+/// 正常的争用只来自手动签到（几秒到几分钟），等 10 分钟足够；超过就说明
+/// 另一轮卡死在上游了 —— 继续等只会让铺开任务永久挂住、连带条目今天不再
+/// 重试。到点如实跳过剩余账号（见 `acquire_running`）。
+const RUNNING_WAIT_MS: i64 = 10 * 60 * 1000;
 
 /// 缺省触发时刻（`DEFAULT_TIME` 的 owned 形态，读侧兜底用）
 pub fn default_time() -> String {
@@ -335,11 +366,96 @@ pub fn today_key() -> String {
     beijing::today_key()
 }
 
+/// 随机窗口的起止分钟（当天 00:00 起的分钟数）与跨度秒数。
+///
+/// `center` = `time` 换算成分钟；`start = max(0, center - N)`、
+/// `end = min(1439, center + N)` —— **夹到当天**。跨午夜时收敛到边界，
+/// 分布因此会偏向一侧：这是有意的取舍（见模块头「随机窗口」），
+/// 因为「某天没签、次日签两次」的观感比分布不均匀更糟。
+///
+/// time 非法 → None（与 `normalize_time` 同口径，调度起不来的情形不编时间）。
+pub fn window_bounds(time_text: &str, jitter_minutes: u32) -> Option<(u32, u32)> {
+    let normalized = normalize_time(Some(&Value::String(time_text.to_string()))).ok()?;
+    let (hour, minute) = normalized.split_once(':')?;
+    let center = hour.parse::<u32>().ok()? * 60 + minute.parse::<u32>().ok()?;
+    let start = center.saturating_sub(jitter_minutes);
+    let end = (center + jitter_minutes).min(23 * 60 + 59);
+    Some((start, end))
+}
+
+/// 窗口起点的绝对时刻（北京时间，当天）。时间非法 → None。
+fn window_start_at(
+    time_text: &str,
+    jitter_minutes: u32,
+    now: DateTime<FixedOffset>,
+) -> Option<DateTime<FixedOffset>> {
+    let (start, _) = window_bounds(time_text, jitter_minutes)?;
+    minute_of_day_at(start, now)
+}
+
+/// 当天的第 `minute` 分钟（北京时间）：窗口起点的落点。
+///
+/// 固定偏移没有夏令时问题（构造恒为 `Single`），因此不需要 Node 那种
+/// 「DST 当天该时刻不存在」的兜底 —— `single()` 取不到就当 None，
+/// 也就是这台机器上的时钟环境异常到连北京时间的固定偏移都构造不出来。
+fn minute_of_day_at(minute: u32, now: DateTime<FixedOffset>) -> Option<DateTime<FixedOffset>> {
+    let naive = now.date_naive().and_hms_opt(minute / 60, minute % 60, 0)?;
+    beijing::offset().from_local_datetime(&naive).single()
+}
+
+/// 某个账号在窗口内的偏移秒数（`[0, span]`，含端点）。
+///
+/// ── 为什么是确定性哈希而不是 `getrandom` ────────────────────
+/// 同一天同一账号多次进入计算（tick 判定、重试、面板刷新）必须拿到**同一个**
+/// 偏移：否则「Qoder 国际版窗口未开」的重试会每次换时间，面板也无法预演。
+/// 用 `sha256(条目 id | 日期 | 时刻 | 随机分钟 | 账号 id)` 派生，日期参与
+/// 哈希 ⇒ 每天不同；改时刻/随机值 ⇒ 当天未触发时偏移跟着变（符合直觉）。
+/// `span == 0`（N=0 或窗口被夹成一点）→ 恒 0，行为与不随机完全一致。
+///
+/// 取模偏差在 4 小时量级（≤14400）的跨度上可以忽略，不需要拒绝采样。
+pub fn spread_offset_seconds(
+    schedule_id: &str,
+    date: &str,
+    time_text: &str,
+    jitter_minutes: u32,
+    account_id: &str,
+) -> u32 {
+    let Some((start, end)) = window_bounds(time_text, jitter_minutes) else {
+        return 0;
+    };
+    let span = (end - start) * 60;
+    if span == 0 {
+        return 0;
+    }
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(schedule_id.as_bytes());
+    hasher.update(b"|");
+    hasher.update(date.as_bytes());
+    hasher.update(b"|");
+    hasher.update(time_text.as_bytes());
+    hasher.update(b"|");
+    hasher.update(jitter_minutes.to_string().as_bytes());
+    hasher.update(b"|");
+    hasher.update(account_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    (u64::from_le_bytes(bytes) % (span as u64 + 1)) as u32
+}
+
 /// 今天的触发时刻（北京时间）；已过则返回 Some，未到返回 None。
 /// 对应 Node 版 dueNow：非法的 time 文本在这里同样表现为 None（Node 是抛异常，
 /// 但调用方一律 catch 后 return，结果一致）。
-fn due_now(time_text: &str, now: DateTime<FixedOffset>) -> Option<DateTime<FixedOffset>> {
-    let target = today_at(time_text, now)?;
+///
+/// 有随机窗口时判的是**窗口起点**（到点即开始铺开，见 `spawn_spread`），
+/// 而不是窗口中心——中心时刻本身不执行任何东西。
+fn due_now(
+    time_text: &str,
+    jitter_minutes: u32,
+    now: DateTime<FixedOffset>,
+) -> Option<DateTime<FixedOffset>> {
+    let target = window_start_at(time_text, jitter_minutes, now)?;
     if now >= target {
         Some(target)
     } else {
@@ -354,30 +470,17 @@ fn due_now(time_text: &str, now: DateTime<FixedOffset>) -> Option<DateTime<Fixed
 /// 这时「下次执行」必须是明天 —— 只按时刻算会得到今天的未来时刻，
 /// 界面显示一个其实不会跑的点。time 非法 → None（调度起不来的情形
 /// 不该编一个时间出来）。
-fn next_run_at_ms(time_text: &str, fired_today: bool, now: DateTime<FixedOffset>) -> Option<i64> {
-    let mut target = today_at(time_text, now)?;
+fn next_run_at_ms(
+    time_text: &str,
+    jitter_minutes: u32,
+    fired_today: bool,
+    now: DateTime<FixedOffset>,
+) -> Option<i64> {
+    let mut target = window_start_at(time_text, jitter_minutes, now)?;
     if fired_today || target <= now {
         target += chrono::Duration::days(1);
     }
     Some(target.timestamp_millis())
-}
-
-/// 今天的 HH:MM 时刻（北京时间）；time 文本非法时 None。
-///
-/// Node 用 `target.setHours(hour, minute, 0, 0)`（就地改到当天）；
-/// chrono 没有 set_* 的就地 API，用 `with_ymd_and_hms` 重建。
-/// 固定偏移没有夏令时问题（构造恒为 `Single`），因此不需要 Node 那种
-/// 「DST 当天该时刻不存在」的兜底 —— `single()` 取不到就当 None，
-/// 也就是这台机器上的时钟环境异常到连北京时间的固定偏移都构造不出来。
-fn today_at(time_text: &str, now: DateTime<FixedOffset>) -> Option<DateTime<FixedOffset>> {
-    let normalized = normalize_time(Some(&Value::String(time_text.to_string()))).ok()?;
-    let (hour, minute) = normalized.split_once(':')?;
-    let hour: u32 = hour.parse().ok()?;
-    let minute: u32 = minute.parse().ok()?;
-    let naive = now.date_naive().and_hms_opt(hour, minute, 0)?;
-    beijing::offset()
-        .from_local_datetime(&naive)
-        .single()
 }
 
 // ─── 状态读写 ───────────────────────────────────────────────
@@ -396,6 +499,19 @@ pub(crate) fn raw_object() -> Map<String, Value> {
 /// 条目自己的开关在 `checkin_schedules::Schedule::enabled`，两层都开着才跑。
 pub fn master_enabled() -> bool {
     raw_object().get("enabled").and_then(Value::as_bool) == Some(true)
+}
+
+/// 「启动时立即补签」（`autoCheckin.startupCatchUp`，缺省 **开**）。
+///
+/// 开着 = 改造前的行为：启动时今天没签过的条目立刻补一次，不看时点是否已过
+/// （理由见模块头「补签」）。关掉 = 启动不补，交给 tick 按窗口起点判定 ——
+/// 用户开了随机窗口又不希望「早上开机就提前签掉」时用这个开关。
+/// 缺省为开是刻意的：升级后行为零变化。
+pub fn startup_catch_up() -> bool {
+    raw_object()
+        .get("startupCatchUp")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
 }
 
 /// 合并写回 `autoCheckin`（对应 Node 版 writeState 的 `{...current, ...patch}`）。
@@ -421,6 +537,12 @@ struct Inner {
     task: Option<tokio::task::JoinHandle<()>>,
     /// 停机标志：stop() 置位后循环退出（幂等；再次 start 会重置）
     stopped: Arc<AtomicBool>,
+    /// 正在进行的「随机窗口铺开」任务，键是 `条目 id | 日期`。
+    ///
+    /// 与 `running` 是两件事：铺开任务的大部分时间在 sleep（不该占执行锁），
+    /// 但同一个条目同一天不能起两轮（每个 tick 都会看到它到点且未落账 ——
+    /// 落账在 spawned 任务结束前，必须靠这个集合挡住重复 spawn）。
+    spreads: std::collections::HashSet<String>,
 }
 
 /// 定时签到服务句柄：内部一把锁 + Clone，与 update / models 同构。
@@ -451,6 +573,22 @@ impl Drop for RunningGuard {
     }
 }
 
+/// 铺开任务的存续标记：Drop 时把 key 从 `spreads` 移除。
+///
+/// 覆盖三种出口：正常结束、提前 return、后台任务被 abort。守卫必须**移进**
+/// 被 spawn 的 future 里 —— 放在 `spawn_spread` 的外层，函数一返回就 drop，
+/// 等于什么都没保护。漏了这一步的后果是这条条目当天再也不会被 tick 重试。
+struct SpreadGuard {
+    service: AutoCheckin,
+    key: String,
+}
+
+impl Drop for SpreadGuard {
+    fn drop(&mut self) {
+        self.service.finish_spread(&self.key);
+    }
+}
+
 impl AutoCheckin {
     pub fn new(store: AccountStore, billing: BillingService) -> Self {
         Self {
@@ -460,6 +598,7 @@ impl AutoCheckin {
                 running: false,
                 task: None,
                 stopped: Arc::new(AtomicBool::new(false)),
+                spreads: std::collections::HashSet::new(),
             })),
         }
     }
@@ -499,7 +638,12 @@ impl AutoCheckin {
             .map(|schedule| {
                 let fired_today = schedule.last_fired_date.as_deref() == Some(today.as_str());
                 let next_run_at = if master && schedule.enabled {
-                    next_run_at_ms(&schedule.time, fired_today, now)
+                    next_run_at_ms(
+                        &schedule.time,
+                        schedule.jitter_minutes,
+                        fired_today,
+                        now,
+                    )
                 } else {
                     None
                 };
@@ -510,6 +654,7 @@ impl AutoCheckin {
                     "displayLabel": checkin_schedules::display_label(schedule),
                     "enabled": schedule.enabled,
                     "time": schedule.time,
+                    "jitterMinutes": schedule.jitter_minutes,
                     "providers": schedule.providers,
                     "lastFiredDate": schedule.last_fired_date,
                     "lastFiredToday": fired_today,
@@ -533,6 +678,7 @@ impl AutoCheckin {
             label: String::new(),
             enabled: false,
             time: default_time(),
+            jitter_minutes: 0,
             providers: default_providers(),
             last_fired_date: None,
             last_result: None,
@@ -557,6 +703,8 @@ impl AutoCheckin {
                 json!({ "id": id, "label": provider_label(id) })
             }).collect::<Vec<_>>(),
             "schedules": entries,
+            // 启动时立即补签（缺省 true；界面用总开关面板下面的那颗开关回显）
+            "startupCatchUp": startup_catch_up(),
             "running": self.is_running(),
         })
     }
@@ -635,23 +783,7 @@ impl AutoCheckin {
                 Some(summary)
             }
             Err(error) => {
-                // 失败也写 lastResult（failed 里放错误文案），与 Node 的 catch 分支一致
-                let failure = json!({
-                    "at": logging::now_ms(),
-                    "date": today,
-                    "reason": reason,
-                    "succeeded": 0,
-                    "active": 0,
-                    "total": 0,
-                    "skipped": 0,
-                    "failed": [error.message.clone()],
-                    "failedCount": 1,
-                });
-                write_state(json!({ "lastResult": failure.clone() }));
-                if let Some(id) = schedule_id {
-                    checkin_schedules::mark_result(id, Some(failure));
-                }
-                logging::log("[Checkin]", &format!("❌ 定时签到失败: {}", error.message));
+                self.record_failure(schedule_id, &today, reason, &error.message);
                 None
             }
         };
@@ -659,8 +791,280 @@ impl AutoCheckin {
         outcome
     }
 
+    /// 失败分支：写 lastResult（failed 里放错误文案），与 Node 的 catch 分支一致。
+    /// 两条路径共用：`fire_for` 的 `run_checkin` 报错、`spawn_spread` 的目标
+    /// 解析失败（两者都只记一处账，文案口径一致）。
+    fn record_failure(&self, schedule_id: Option<&str>, today: &str, reason: &str, message: &str) {
+        let failure = json!({
+            "at": logging::now_ms(),
+            "date": today,
+            "reason": reason,
+            "succeeded": 0,
+            "active": 0,
+            "total": 0,
+            "skipped": 0,
+            "failed": [message],
+            "failedCount": 1,
+        });
+        write_state(json!({ "lastResult": failure.clone() }));
+        if let Some(id) = schedule_id {
+            checkin_schedules::mark_result(id, Some(failure));
+        }
+        logging::log("[Checkin]", &format!("❌ 定时签到失败: {message}"));
+    }
+
+    /// 等到墙上时钟到达 `at_ms`；停机时返回 false。
+    ///
+    /// 不直接 `sleep(很长的时长)`：tokio 定时器基于**单调时钟**，机器休眠期间
+    /// 不推进，一觉醒来会白等超出预期的时间；而且单次长 sleep 期间无法响应
+    /// 停机。这里封顶 30 秒，每一段都按墙上时钟（与 tick 同源，见模块头
+    /// 「触发方式」）重新计算剩余量 —— 休眠、改系统时间都能自愈。
+    async fn wait_until(&self, at_ms: i64) -> bool {
+        loop {
+            if self.lock().stopped.load(Ordering::SeqCst) {
+                return false;
+            }
+            let remaining = at_ms - logging::now_ms();
+            if remaining <= 0 {
+                return true;
+            }
+            let chunk = remaining.min(TICK_MS as i64);
+            tokio::time::sleep(Duration::from_millis(chunk as u64)).await;
+        }
+    }
+
+    /// 抢「执行中」标记；已有轮次在跑时按 500ms 轮询等待，直到拿到、停机
+    /// 或等满 `RUNNING_WAIT_MS`。
+    ///
+    /// 给随机窗口铺开用：铺开任务逐个账号执行，每次执行前抢一次锁，执行完
+    /// 立刻放 —— 两个账号之间的 sleep 不持有锁，因此手动签到只可能在这些
+    /// 几秒钟的窗口里撞上并得到「正在执行中」，而不是整段窗口都被拒绝。
+    ///
+    /// **超时不是可选的**：另一轮签到若卡在上游（连接不断、迟迟不回），
+    /// `running` 会一直为 true。无限等待会让铺开任务永久挂住，连带 `spreads`
+    /// 里的 key 永不释放 —— 这条条目今天彻底静默。等满就如实跳过这个账号
+    /// （返回 None 让调用方 break），本次轮次照常汇总落账。
+    async fn acquire_running(&self) -> Option<RunningGuard> {
+        let deadline = logging::now_ms() + RUNNING_WAIT_MS;
+        loop {
+            {
+                let mut inner = self.lock();
+                if inner.stopped.load(Ordering::SeqCst) {
+                    return None;
+                }
+                if !inner.running {
+                    inner.running = true;
+                    return Some(RunningGuard { inner: self.inner.clone() });
+                }
+            }
+            if logging::now_ms() >= deadline {
+                logging::verbose(
+                    "[Checkin]",
+                    "另一轮签到长时间未结束，本轮随机窗口跳过剩余账号",
+                );
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    /// 起一轮「随机窗口铺开」：条目到窗口起点后，本轮账号在窗口内各自
+    /// 随机一个时刻执行。
+    ///
+    /// ── 为什么是后台任务而不是在 tick 里 await ─────────────────
+    /// 窗口最长 `2 × MAX_JITTER_MINUTES`（4 小时）。若照 `fire_for` 那样在
+    /// tick 里一路 await 到底：① tick 循环被占住，其他条目到点会被延后；
+    /// ② 全局 `running` 会被持有一整个窗口，期间所有手动签到都被拒。
+    /// 所以这里只做**同步的准备工作**（落账、起后台任务）后 spawn，
+    /// tick 立即返回；目标解析与 sleep 都在后台任务里、且不在锁内。
+    fn spawn_spread(&self, schedule: &Schedule, reason: &str, today: &str) {
+        let key = format!("{}|{today}", schedule.id);
+        {
+            let mut inner = self.lock();
+            if inner.spreads.contains(&key) {
+                return;
+            }
+            inner.spreads.insert(key.clone());
+        }
+        // 从这里起，key 的移除由 Drop 负责：**任何**提前 return 或任务 abort
+        // 都要把 key 清掉，否则这条条目今天再也不会被 tick 重试（永久静默）。
+        // 与 `RunningGuard` 同一手法，只是作用对象不同。
+        let _spread_guard = SpreadGuard { service: self.clone(), key: key.clone() };
+        // 先落日期再执行（与 fire_for 同一理由：进程中途被杀也不会反复补签）
+        write_state(json!({ "lastFiredDate": today }));
+        checkin_schedules::mark_fired(&schedule.id, Some(today));
+        let span_minutes = window_bounds(&schedule.time, schedule.jitter_minutes)
+            .map(|(start, end)| end - start)
+            .unwrap_or(0);
+        logging::log(
+            "[Checkin]",
+            &format!(
+                "⏰ 定时签到开始（{reason}，{} 分钟窗口内逐个账号随机执行）",
+                span_minutes
+            ),
+        );
+
+        // ── 目标解析在 spawn **之前**做 ──────────────────────────
+        // 两个理由：
+        // ① 解析失败要走「回退去重标记」的路径（见下），而那需要已经拿到结果；
+        // ② 账号集合在 spawn 时就定下来，后台任务跑 4 小时期间账号增删不会让
+        //    计划中途变化（与 fire_for 一次性解析目标的口径一致）。
+        let (targets, skipped) =
+            match checkin::resolve_checkin_targets(&self.store, schedule.providers.as_slice(), None) {
+                Ok(found) => found,
+                Err(error) => {
+                    // 整条条目失败：记账 + **回退今天已触发标记**，让下个 tick
+                    // 还能再来一次。不回退的话一次偶发失败会让这条条目当天彻底
+                    // 静默（fire_for 那侧失败也落账，但它是单轮执行、重试代价高；
+                    // 铺开的失败多半来自账号库暂时读不出来，值得再试）。
+                    self.record_failure(Some(&schedule.id), today, reason, &error.message);
+                    checkin_schedules::mark_fired(&schedule.id, None);
+                    return;
+                }
+            };
+        let Some((start_minute, _)) = window_bounds(&schedule.time, schedule.jitter_minutes) else {
+            // time 在读取时已归一，走到这里说明配置在调度后被改坏
+            self.record_failure(Some(&schedule.id), today, reason, "定时条目的时刻无效");
+            checkin_schedules::mark_fired(&schedule.id, None);
+            return;
+        };
+        // 起点必须由**这一轮的日期**推出，不能用「此刻」的日期：任务若恰好
+        // 跨过零点（23:5x 的窗口），用现在的时间会算出次日同一分钟，
+        // 所有账号要白睡约 24 小时。today 是 spawn 时的日期键。
+        let Some(start_at_ms) = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d")
+            .ok()
+            .and_then(|date| date.and_hms_opt(start_minute / 60, start_minute % 60, 0))
+            .and_then(|naive| beijing::offset().from_local_datetime(&naive).single())
+            .map(|target| target.timestamp_millis())
+        else {
+            self.record_failure(Some(&schedule.id), today, reason, "无法计算随机窗口的起点");
+            checkin_schedules::mark_fired(&schedule.id, None);
+            return;
+        };
+
+        // 计划也在这里算好：偏移是纯函数，不依赖后台任务的状态
+        let mut plan: Vec<(i64, Value)> = targets
+            .iter()
+            .map(|account| {
+                let account_id = account.get("id").and_then(Value::as_str).unwrap_or("");
+                let offset = spread_offset_seconds(
+                    &schedule.id,
+                    today,
+                    &schedule.time,
+                    schedule.jitter_minutes,
+                    account_id,
+                );
+                (start_at_ms + i64::from(offset) * 1000, account.clone())
+            })
+            .collect();
+        plan.sort_by_key(|(at, _)| *at);
+        logging::verbose(
+            "[Checkin]",
+            &format!(
+                "随机窗口计划（{}）: {} 个账号，窗口起点 {}，首个 {}，末个 {}",
+                checkin_schedules::display_label(schedule),
+                plan.len(),
+                start_at_ms,
+                plan.first().map(|(at, _)| *at).unwrap_or(start_at_ms),
+                plan.last().map(|(at, _)| *at).unwrap_or(start_at_ms),
+            ),
+        );
+
+        let service = self.clone();
+        let schedule = schedule.clone();
+        let reason = reason.to_string();
+        let today = today.to_string();
+        // 守卫**移进**后台任务：任务正常结束、提前 return、或被 abort（停机时
+        // `stop()` 只关循环，`spawn_task` 的 future 随运行时一起 drop）都会在
+        // Drop 里清掉 key。放在外层是不行的 —— 外层函数一返回守卫就 drop 了。
+        crate::spawn_task(async move {
+            let _spread_guard = _spread_guard;
+            service.run_spread(schedule, reason, today, plan, skipped).await;
+        });
+    }
+
+    /// 铺开任务的执行体：逐个账号等到自己的偏移时刻再签。
+    ///
+    /// 偏移已过的（窗口中途启动、补签、Qoder 国际版重试）立即执行 ——
+    /// 这正是「错过窗口就全部立刻签完」的实现，不需要单独分支。
+    async fn run_spread(
+        &self,
+        schedule: Schedule,
+        reason: String,
+        today: String,
+        plan: Vec<(i64, Value)>,
+        skipped: usize,
+    ) {
+        let mut results = Vec::with_capacity(plan.len());
+        // 本轮是否因为「等不到执行锁 / 停机」而提前收工：这种情况下还有账号
+        // 一次都没签，今天该保持未落账让后续 tick 接手（见下面的处理）。
+        let mut cut_short = false;
+        for (at, account) in plan {
+            // 睡在锁外：这段时间别人可以正常手动签到
+            if !self.wait_until(at).await {
+                cut_short = true;
+                break;
+            }
+            let Some(_guard) = self.acquire_running().await else {
+                cut_short = true;
+                break;
+            };
+            results.push(
+                checkin::run_account(
+                    &self.store,
+                    &self.billing,
+                    &account,
+                    false,
+                    "schedule",
+                    &reason,
+                )
+                .await,
+            );
+        }
+
+        // 原始汇总（带 results 数组）先记签到历史台账，再转成界面摘要：
+        // `record_success` 产出的摘要没有 results（只留前 5 条失败文案），
+        // 台账需要逐账号明细（见 checkin_history 的模块头）。
+        let result = checkin::summarize_results(&results, skipped);
+        crate::server::core::checkin_history::record(&result, &reason);
+        let summary = self.record_success(&result, &today, &reason);
+        checkin_schedules::mark_result(&schedule.id, Some(summary.clone()));
+        // ── 今天要不要保持「未落账」─────────────────────────────
+        // 两种情况都要留着让后续 tick 再试：
+        //   ① 有 Qoder 国际版账号还在等 10:00 的活动窗口（既有规则）；
+        //   ② 本轮被提前截断（停机 / 等锁超时）：剩下的账号今天还一次没签，
+        //      落账就等于把它们整天静默掉。已经签过的账号重试时是幂等的。
+        let qoder_pending = summary.get("qoderIntlPending").and_then(Value::as_bool) == Some(true);
+        if qoder_pending || cut_short {
+            checkin_schedules::mark_fired(&schedule.id, None);
+        }
+        if qoder_pending {
+            logging::log(
+                "[Checkin]",
+                "⏳ Qoder 国际版的活动窗口未开（官方每日 10:00 UTC+8），今天会自动重试到领到为止",
+            );
+        }
+        if cut_short {
+            logging::log(
+                "[Checkin]",
+                "⏸ 本轮随机窗口提前收工（停机或等执行锁超时），剩余账号由后续调度继续",
+            );
+        }
+        // key 的移除由 `SpreadGuard` 的 Drop 负责（见 spawn_spread 的注释）
+    }
+
+    /// 铺开任务收尾：从「进行中」集合移除（幂等；`SpreadGuard` 的 Drop 也走这里）。
+    fn finish_spread(&self, key: &str) {
+        self.lock().spreads.remove(key);
+    }
+
     /// 本轮是否有「Qoder 国际版账号没领到且不算已签」的行 —— 有则今天保持
     /// 未落账状态，等窗口开了重试（见 tick 的说明）。
+    ///
+    /// 判定只看这一条账号的结果，**不要求它同时是「未成功」**：重试是整条
+    /// 条目重来，已经领到的账号在下一次会返回 `alreadyCompleted`（不算 pending），
+    /// 而仍未领到的账号会继续 pending —— 「只要还有 pending 就继续等窗口」，
+    /// 领到之后下一轮就自然落到已签，不再重试。
     fn qoder_intl_pending(result: &Value) -> bool {
         result
             .get("results")
@@ -778,8 +1182,8 @@ impl AutoCheckin {
             if !schedule.enabled {
                 continue;
             }
-            // 未到点直接看下一条（time 在读取时已归一，这里不会解析失败）
-            if due_now(&schedule.time, now).is_none() {
+            // 未到窗口起点直接看下一条（time 在读取时已归一，这里不会解析失败）
+            if due_now(&schedule.time, schedule.jitter_minutes, now).is_none() {
                 continue;
             }
             // 条目级当天去重
@@ -788,6 +1192,11 @@ impl AutoCheckin {
             }
             let reason =
                 format!("到点触发（{}）", checkin_schedules::display_label(&schedule));
+            // 随机窗口：后台铺开，不占 tick 循环与全局执行锁（见 spawn_spread）
+            if schedule.jitter_minutes > 0 {
+                self.spawn_spread(&schedule, &reason, &today);
+                continue;
+            }
             match self.fire_for(&reason, Some(&schedule.id), "schedule").await {
                 Some(result) => {
                     // 领取轮次完成，但里面有「Qoder 国际版无活动」的行 → 这一条
@@ -842,11 +1251,22 @@ impl AutoCheckin {
     /// （理由见模块头部「补签」）。多条目之后按条目各补各的：今天没跑过的
     /// **启用**条目每条补一次，串在一个任务里跑（fire 的全局防重本来就只允许
     /// 一轮在跑，串行省得互相抢空）。
+    ///
+    /// 关掉「启动时立即补签」（`startup_catch_up`）时只起调度循环、不补签：
+    /// 今天还没到窗口起点的条目留给 tick —— 否则早上开机就会把当天的随机
+    /// 窗口提前签掉，等于随机失效。已过窗口的条目 tick 下一个 30 秒就会补。
     pub fn start(&self) {
         if !master_enabled() {
             return;
         }
         self.schedule();
+        if !startup_catch_up() {
+            logging::verbose(
+                "[Checkin]",
+                "启动补签已关闭：今天未执行的条目等到各自的窗口起点再由调度触发",
+            );
+            return;
+        }
         let today = today_key();
         let pending: Vec<Schedule> = checkin_schedules::list()
             .into_iter()
@@ -906,8 +1326,18 @@ impl AutoCheckin {
         let has_enabled = payload.get("enabled").is_some();
         let has_time = payload.get("time").is_some();
         let has_providers = payload.get("providers").is_some();
-        if !has_enabled && !has_time && !has_providers {
+        let has_startup_catch_up = payload.get("startupCatchUp").is_some();
+        if !has_enabled && !has_time && !has_providers && !has_startup_catch_up {
             return Err(AutoCheckinConfigError::new("没有需要更新的字段"));
+        }
+        if has_startup_catch_up {
+            // 与 enabled 同款口径：只有显式 true 才算开，其余（null / 字符串 / 0）都关
+            let on = payload.get("startupCatchUp") == Some(&Value::Bool(true));
+            write_state(json!({ "startupCatchUp": on }));
+            logging::log(
+                "[Checkin]",
+                &format!("启动时立即补签已{}", if on { "开启" } else { "关闭" }),
+            );
         }
         if has_enabled {
             // Node: `enabled !== undefined` → `patch.enabled = enabled === true`，
@@ -1014,5 +1444,167 @@ pub fn init_global(service: AutoCheckin) -> AutoCheckin {
 pub fn stop_global() {
     if let Some(service) = GLOBAL.get() {
         service.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! 随机窗口的纯函数边界。
+    //!
+    //! 只测不碰全局 config / 网络的函数（`window_bounds` /
+    //! `spread_offset_seconds` / `due_now` / `next_run_at_ms`）：这些是
+    //! 调度语义的全部来源，边界错一格就是「某天不签」或「同一天签两次」。
+    //! `tick` / `spawn_spread` 的端到端需要 mock 账号库与上游，不在这一层做。
+    use super::*;
+    use chrono::TimeZone;
+
+    /// 构造一个北京时间时刻（测试用；固定偏移恒为 `Single`）
+    fn at(month: u32, day: u32, hour: u32, minute: u32) -> DateTime<FixedOffset> {
+        beijing::offset()
+            .with_ymd_and_hms(2026, month, day, hour, minute, 0)
+            .single()
+            .expect("北京时间构造恒成功")
+    }
+
+    // ── 窗口边界 ──────────────────────────────────────────────
+
+    #[test]
+    fn window_without_jitter_is_the_point_itself() {
+        assert_eq!(window_bounds("07:20", 0), Some((7 * 60 + 20, 7 * 60 + 20)));
+    }
+
+    #[test]
+    fn window_extends_both_ways() {
+        assert_eq!(window_bounds("07:20", 30), Some((6 * 60 + 50, 7 * 60 + 50)));
+    }
+
+    #[test]
+    fn window_clamps_to_day_start() {
+        // 00:01 - 30 分钟夹到 00:00，而不是昨天 23:31
+        assert_eq!(window_bounds("00:01", 30), Some((0, 31)));
+    }
+
+    #[test]
+    fn window_clamps_to_day_end() {
+        // 23:50 + 30 分钟夹到 23:59，而不是次日 00:20
+        assert_eq!(window_bounds("23:50", 30), Some((23 * 60 + 20, 23 * 60 + 59)));
+    }
+
+    #[test]
+    fn window_rejects_invalid_time() {
+        assert_eq!(window_bounds("25:00", 10), None);
+        assert_eq!(window_bounds("", 10), None);
+    }
+
+    // ── 账号偏移 ──────────────────────────────────────────────
+
+    #[test]
+    fn spread_offset_is_deterministic() {
+        let first = spread_offset_seconds("default", "2026-10-17", "07:20", 30, "acc-1");
+        let second = spread_offset_seconds("default", "2026-10-17", "07:20", 30, "acc-1");
+        assert_eq!(first, second, "同一天同一账号必须落在同一偏移，否则重试会换时间");
+    }
+
+    #[test]
+    fn spread_offset_changes_with_date() {
+        // 日期参与哈希是「每天不同」的全部依据；这里只钉住「至少变了一个」，
+        // 不假设具体数值（哈希值是实现细节）
+        let today = spread_offset_seconds("default", "2026-10-17", "07:20", 30, "acc-1");
+        let tomorrow = spread_offset_seconds("default", "2026-10-18", "07:20", 30, "acc-1");
+        assert_ne!(today, tomorrow);
+    }
+
+    #[test]
+    fn spread_offset_stays_inside_window() {
+        let (start, end) = window_bounds("07:20", 30).unwrap();
+        let span = (end - start) * 60;
+        for index in 0..64 {
+            let account = format!("acc-{index}");
+            let offset = spread_offset_seconds("default", "2026-10-17", "07:20", 30, &account);
+            assert!(offset <= span, "偏移 {offset} 超出窗口跨度 {span}");
+        }
+    }
+
+    #[test]
+    fn spread_offset_is_zero_without_jitter() {
+        // N=0 时窗口跨度 0，偏移必须恒 0 —— 这是「不随机时行为逐字不变」的保证
+        for account in ["acc-1", "acc-2", "acc-3"] {
+            assert_eq!(
+                spread_offset_seconds("default", "2026-10-17", "07:20", 0, account),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn spread_offsets_spread_across_accounts() {
+        // 不要求完美均匀，只要求不是所有账号都堆在同一点（哈希取模的正常形态）
+        let offsets: std::collections::HashSet<u32> = (0..32)
+            .map(|index| {
+                spread_offset_seconds(
+                    "default",
+                    "2026-10-17",
+                    "07:20",
+                    30,
+                    &format!("acc-{index}"),
+                )
+            })
+            .collect();
+        assert!(offsets.len() > 16, "32 个账号只落出 {} 个不同偏移", offsets.len());
+    }
+
+    // ── 触发判定与展示 ────────────────────────────────────────
+
+    #[test]
+    fn due_now_keeps_legacy_semantics_without_jitter() {
+        let now = at(10, 17, 7, 20);
+        assert_eq!(due_now("07:20", 0, now), Some(now));
+        assert_eq!(due_now("07:21", 0, now), None);
+    }
+
+    #[test]
+    fn due_now_fires_at_window_start() {
+        let now = at(10, 17, 6, 50);
+        // 中心是 07:20，N=30 ⇒ 06:50 就到点
+        assert_eq!(due_now("07:20", 30, now), Some(now));
+        assert_eq!(due_now("07:20", 30, at(10, 17, 6, 49)), None);
+    }
+
+    #[test]
+    fn next_run_without_jitter_matches_legacy() {
+        let now = at(10, 17, 6, 0);
+        let target = at(10, 17, 7, 20);
+        assert_eq!(next_run_at_ms("07:20", 0, false, now), Some(target.timestamp_millis()));
+        // 已过 → 明天
+        let later = at(10, 17, 8, 0);
+        let tomorrow = at(10, 18, 7, 20);
+        assert_eq!(next_run_at_ms("07:20", 0, false, later), Some(tomorrow.timestamp_millis()));
+        // 今天已触发（启动补签会在时点前落账）→ 明天
+        assert_eq!(
+            next_run_at_ms("07:20", 0, true, now),
+            Some(tomorrow.timestamp_millis())
+        );
+    }
+
+    #[test]
+    fn next_run_uses_window_start() {
+        let now = at(10, 17, 6, 0);
+        let start = at(10, 17, 6, 50);
+        assert_eq!(
+            next_run_at_ms("07:20", 30, false, now),
+            Some(start.timestamp_millis())
+        );
+    }
+
+    #[test]
+    fn next_run_after_window_start_rolls_to_tomorrow() {
+        // 已过窗口起点即使还没到中心时刻，今天的窗口也已开始过 —— 展示明天，
+        // 与 tick 的 due_now（now >= start 即触发）保持一致
+        let now = at(10, 17, 7, 0);
+        let tomorrow = at(10, 18, 6, 50);
+        assert_eq!(
+            next_run_at_ms("07:20", 30, false, now),
+            Some(tomorrow.timestamp_millis())
+        );
     }
 }
