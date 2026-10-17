@@ -255,10 +255,18 @@ pub fn shim_js() -> &'static str {
   }
 
   async function waitForManualCallback(provider, state, authUrl) {
+    // 称号链必须与上面 `needsManualCallback` 的白名单**一一对应**：少一支，
+    // 那一家就会顶着别家的名字弹框（`lobsterai` 曾经落到 `'AutoClaw'`，用户看到
+    // 的是「AutoClaw 需要粘贴回调地址」而手里登的却是有道龙虾）。
+    // 末尾兜底用 provider id 本身，不用任何一家的名字 —— 名字错的代价是误导，
+    // 显示 id 最坏也只是不好看。
     var label = provider === 'raccoon' ? '小浣熊'
       : provider === 'trae' ? 'Trae'
       : provider.indexOf('accio') === 0 ? 'Accio'
-      : provider === 'codearts' ? 'CodeArts' : 'AutoClaw';
+      : provider === 'codearts' ? 'CodeArts'
+      : provider === 'autoclaw-intl' ? 'AutoClaw 国际版'
+      : provider === 'lobsterai' ? 'LobsterAI（有道龙虾）'
+      : provider;
     var callbackInstruction = '<strong>如果授权完成后账号没有自动出现</strong>，'
         + '再复制授权页浏览器地址栏中的<strong>完整地址</strong>粘到下面提交；'
         + '不要复制授权页原始地址，也不要改动参数。';
