@@ -437,6 +437,22 @@ pub struct AttemptDetail {
     /// 只记体积、不记内容：体积是运维事实，正文是用户数据。
     #[serde(rename = "bodyBytes", default)]
     pub body_bytes: Option<i64>,
+    /// 这一轮**实际下发给客户端**的响应字节数（None = 这一轮没走到流式包装）。
+    ///
+    /// 与上面的 `bodyBytes` 是**两个方向**，别混用：那个是出站请求体，这个是
+    /// 入站响应体。分开的理由和「只记体积不记内容」同源 —— 10-17 生产实测里有
+    /// 145 条「200 + 零 token + 无错误」的行，它们内部其实是两种病：
+    ///   · 一个字节都没下发（客户端拿到空流）
+    ///   · 内容下发了、但上游没给协议收尾帧
+    /// 这两类的修法相反（后者合成收尾帧近乎纯收益，前者合成会把「上游没给内容」
+    /// 洗成「模型答了个空」），而库里过去**完全分不出来** —— `request_raw` 自
+    /// 3.0.4 起不再落库，下发字节没有第二个来源。
+    ///
+    /// 计数挂在透传流上（`api::pipeline::RecordingStream`），与调试模式**无关**：
+    /// `RawCapture` 在开关关闭时直接丢弃字节，拿它的缓冲长度当体积会在关着调试时
+    /// 恒为 0 —— 那正好是要区分的那一类。
+    #[serde(rename = "forwardedBytes", default)]
+    pub forwarded_bytes: Option<i64>,
 }
 
 /// 一次**尝试内部**的退避重试（`AttemptDetail::retries` 的元素）。
@@ -886,6 +902,7 @@ impl RequestTelemetry {
             retries: Vec::new(),
             notice: None,
             body_bytes: None,
+            forwarded_bytes: None,
         });
         // 阶段：新一轮的请求**即将发出** → 等待响应（含模型思考）。
         // 位置与 OmniProxy 的「连接已建立、请求即将发出」同一时点：本函数就在
@@ -908,6 +925,23 @@ impl RequestTelemetry {
         let mut guard = self.lock();
         if let Some(last) = guard.attempts_detail.last_mut() {
             last.body_bytes = Some(bytes.max(0));
+            self.flush_live(&guard);
+        }
+    }
+
+    /// 给**最后一条**尝试明细补上「实际下发给客户端的响应字节数」。
+    ///
+    /// 调用点只有一处：`api::pipeline::RecordingStream::settle`（流的收尾点）。
+    /// 放在收尾而不是每帧，是因为这个数只在收尾时才定型，且写库是整条明细替换 ——
+    /// 逐帧回写会让每条 SSE 都多一次在途 UPDATE。
+    ///
+    /// 语义上是**观测不是判定**：0 不代表失败（客户端可能在收到收尾帧后立刻断开，
+    /// 那时字节数为 0 只说明这一路没经过本类型），所以它不参与成功/失败判断，
+    /// 也不参与「失败清零 token」的归一。
+    pub fn note_attempt_forwarded_bytes(&self, bytes: i64) {
+        let mut guard = self.lock();
+        if let Some(last) = guard.attempts_detail.last_mut() {
+            last.forwarded_bytes = Some(bytes.max(0));
             self.flush_live(&guard);
         }
     }

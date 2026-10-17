@@ -373,6 +373,11 @@ pub struct AttemptDetail {
     /// 「只记体积不记内容」的口径见 `core::upstream::usage::AttemptDetail::body_bytes`。
     #[serde(rename = "bodyBytes", default)]
     pub body_bytes: Option<i64>,
+    /// 这一轮实际下发给客户端的响应字节数（None = 没走到流式包装）。采集侧的
+    /// 来由与「为什么不能用 `RawCapture` 的缓冲长度代替」见
+    /// `core::upstream::usage::AttemptDetail::forwarded_bytes`。
+    #[serde(rename = "forwardedBytes", default)]
+    pub forwarded_bytes: Option<i64>,
 }
 
 /// 一次尝试内部的退避重试（存储契约，与采集侧同形各自定义）。
@@ -622,6 +627,8 @@ impl NewRequestEntry {
                     notice: item.notice.filter(|text| !text.is_empty()),
                     // 体字节数原样透传（None = 这一轮没发出去；采集侧的理由见 usage 的字段说明）
                     body_bytes: item.body_bytes,
+                    // 同上，方向相反：这是下发给客户端的响应字节数
+                    forwarded_bytes: item.forwarded_bytes,
                 })
                 .collect(),
             sensitive_hits: self

@@ -58,6 +58,21 @@ const ERROR_SUMMARY_CHARS: usize = 200;
 /// HTTP 状态早就发出去了（2xx），明细里只能靠这条文案解释「为什么没有 token」。
 pub const STREAM_ABORTED: &str = "响应流未完整下发（客户端中断或服务退出）";
 
+/// 上游流跑到 EOF、但**从未下发本协议的收尾帧**时，写进尝试明细的提示。
+///
+/// ── 为什么是 notice 而不是 error ────────────────────────────
+/// `RequestEntry::is_success()` 的口径是「2xx **且** `error.is_none()`」
+/// （`request_stats/record.rs`），而失败的请求要过「清零 token」的归一。
+/// 上游 EOF 这一路里，客户端**已经收到了它给的全部内容**，只是上游没补收尾帧 ——
+/// 把它记成 error 会连带抹掉真实用量，那正是 `terminal_seen()` 当初要救的东西
+/// （生产上 1176 行 CodeArts 就折在这里，见本文件顶部 `terminal::CHAT` 的说明）。
+/// 所以这里只留一条**观测**：不参与成功/失败判定，也不参与归一。
+///
+/// ── 为什么文案不能带「未完整下发」这五个字 ──────────────────
+/// 报表与排查脚本里已经有按 `STREAM_ABORTED` 文案筛的查询；复用那半句会让
+/// 「真中断」与「上游没收尾但内容齐全」两类**混成一条**，而那两类的修法相反。
+pub const STREAM_EOF_WITHOUT_TERMINAL: &str = "上游流已结束，未下发协议收尾帧";
+
 /// 一条「本协议收尾帧」的字节特征（见 [`RecordingStream`] 的说明）。
 ///
 /// 由**调用方**按自己那条协议给出（三条入口各知道自己发什么收尾），本模块
@@ -569,6 +584,8 @@ fn stored_attempt_details(list: &[usage::AttemptDetail]) -> Vec<AttemptDetail> {
             notice: item.notice.clone(),
             // 体字节数原样透传（None = 这一轮没发出去；采集侧的理由见 usage 的字段说明）
             body_bytes: item.body_bytes,
+            // 同上，方向相反：下发给客户端的响应字节数（「已记账」的收尾点写入）
+            forwarded_bytes: item.forwarded_bytes,
         })
         .collect()
 }
@@ -798,6 +815,12 @@ pub struct RecordingStream {
     terminal: Option<TerminalScan>,
     /// 响应正文累积缓冲（`request_raw` 表的响应侧采集，见 [`RawCapture`]）
     raw: RawCapture,
+    /// **实际下发给客户端的字节总数**，与调试模式无关。
+    ///
+    /// 不能拿 `raw.buf.len()` 代替：`RawCapture::push` 在开关关闭时第一个分支就
+    /// return（零开销设计），那样关着调试时这个数恒为 0 —— 而「0 字节」正是本次
+    /// 要区分出来的那一类，用一个受开关影响的量去判它等于把结论建在随机数上。
+    forwarded: i64,
 }
 
 /// 响应正文的累积缓冲。
@@ -868,7 +891,7 @@ impl RecordingStream {
         // 响应侧采集与请求侧同一道闸：调试模式关着就不攒缓冲（零开销）——
         // 这里定格一次，本请求的响应侧行为此后不再看开关（见 `RawCapture` 的说明）
         let raw = RawCapture::new(crate::server::core::debug_traffic::enabled());
-        Self { inner, context: Some(context), terminal, raw }
+        Self { inner, context: Some(context), terminal, raw, forwarded: 0 }
     }
 
     /// 记账并清空上下文（幂等：第二次调用什么都不做）。
@@ -877,6 +900,11 @@ impl RecordingStream {
     /// 或「正文就这么多」的时刻，此后不再有字节。
     fn settle(&mut self, fallback_error: Option<String>) {
         if let Some(mut context) = self.context.take() {
+            // 下发字节数在收尾点定型：两条路径（跑到 None / 被丢弃）都要有数 ——
+            // 「被丢弃」那条恰恰最需要知道「客户端到底收到多少」
+            context.telemetry.note_attempt_forwarded_bytes(self.forwarded);
+            // 响应正文在这里定稿：流的收尾点（跑到 None / 被丢弃）正是「正文完整了」
+            // 或「正文就这么多」的时刻，此后不再有字节。
             // 流式路径构造时 raw_response 恒为 None，这里用缓冲定稿直接覆盖；
             // 若未来有入口想预填响应正文，那它不该再走流式包装（自相矛盾的约定）
             context.raw_response = self.raw.into_text();
@@ -916,6 +944,8 @@ impl futures::Stream for RecordingStream {
                 if let Some(context) = &this.context {
                     context.telemetry.note_first_frame();
                 }
+                // 下发计数：每个透传成功的 chunk 都算，与调试模式无关
+                this.forwarded = this.forwarded.saturating_add(bytes.len() as i64);
                 // 响应正文采集：抄进缓冲（上限后丢弃），透传字节原样不动
                 this.raw.push(bytes);
                 // 收尾帧识别：命中即说明客户端接下来随时可能断开，那属于正常收尾
@@ -933,6 +963,17 @@ impl futures::Stream for RecordingStream {
             std::task::Poll::Pending => {}
         }
         if matches!(polled, std::task::Poll::Ready(None)) {
+            // 上游跑到 EOF、却从未下发本协议的收尾帧 ⇒ 留一条观测。
+            // 写 notice 不写 error 的理由见 `STREAM_EOF_WITHOUT_TERMINAL`：这一路
+            // 客户端**已经收到全部内容**，记成 error 会经 `is_success()` 触发
+            // 「失败清零 token」的归一，把真实用量一并抹掉。
+            // `terminal.is_none()` 的入口不写：那是调用方没给特征表，等于这里
+            // 没有判据，写进去只会变成每条都响的噪音。
+            if this.terminal.is_some() && !this.terminal_seen() {
+                if let Some(context) = &this.context {
+                    context.telemetry.note_attempt_notice(STREAM_EOF_WITHOUT_TERMINAL);
+                }
+            }
             this.settle(None);
         }
         polled
@@ -1254,6 +1295,14 @@ mod tests {
         telemetry.report_usage(&serde_json::json!({
             "prompt_tokens": 71476, "completion_tokens": 56, "total_tokens": 71532
         }));
+        // 起头一次尝试：生产上这两步都由编排层 `provider_loop` 在发送前做，
+        // 分工是 `note_attempt` 只累加计数与账号、**明细条目由 `note_attempt_started`
+        // 推入**。而 notice / bodyBytes / forwardedBytes 三个观测都挂在**最后一条**
+        // 明细上（`note_attempt_*` 系列都是 `last_mut()`）—— 少了后一步，它们全部
+        // 静默丢失。10-17 这条是被断言抓出来的：行里 `attemptDetails` 空数组，
+        // 但 `attempts` 因为下限钳位仍显示 1，看数字完全像是"有明细"。
+        telemetry.note_attempt(Some("acct-1"), "测试账号", "codearts");
+        telemetry.note_attempt_started("codearts", "测试账号");
         let context = RecordContext {
             stats,
             telemetry: telemetry.clone(),
@@ -1356,5 +1405,112 @@ mod tests {
         let error = row["error"].as_str().unwrap_or("");
         assert!(error.contains("未完整下发"), "真中断必须留摘要：{row}");
         assert_eq!(row["promptTokens"], Value::from(0), "失败的行按契约清零：{row}");
+    }
+
+    /// 走一遍「已下发这些帧、之后上游**给到 EOF**」的流（与 `record_after_hangup`
+    /// 的区别只在尾部有没有 `pending`：那条模拟客户端先关，这条模拟上游先完）。
+    async fn record_through_eof(frames: &[&'static [u8]], terminals: TerminalFrames) -> Value {
+        let (stats, _dir) = temp_stats("eof");
+        let (context, _telemetry) = context_for(stats.clone());
+        let mut stream = RecordingStream::with_terminals(
+            Box::new(futures::stream::iter(frames.to_vec().into_iter().map(|frame| {
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(frame))
+            }))),
+            context,
+            terminals,
+        );
+        // 读到 EOF：把整条流消费干净，收尾走 poll_next 的 Ready(None) 分支
+        while stream.next().await.is_some() {}
+        only_row(&stats)
+    }
+
+    /// 从行里取尝试明细（键名以落库形状为准，见 `request_stats::record`）。
+    fn details_of(row: &Value) -> Vec<Value> {
+        row.get("attemptDetails")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// 生产 P2 的形状：上游流跑到 EOF，但从未下发本协议的收尾帧。
+    ///
+    /// 断言分两头，缺一头都是空跑：
+    ///   · **必须有**观测 —— 明细里留一条提示，且**不是** `error`（写 error 会经
+    ///     `is_success()` 触发「失败清零」，那正是 terminal_seen() 当初救回来的
+    ///     1176 行的病灶）；
+    ///   · **用量必须留着** —— 客户端已经收到全部内容，这一轮不是失败。
+    #[tokio::test]
+    async fn upstream_eof_without_terminal_frame_annotates_but_keeps_usage() {
+        let row = record_through_eof(&[LAST_CHUNK.as_bytes()], terminal::CHAT).await;
+        assert_eq!(row["status"], Value::from(200), "状态码照原样：{row}");
+        assert!(row["error"].is_null(), "无收尾帧是观测不是失败，不能写进 error：{row}");
+        assert_eq!(row["promptTokens"], Value::from(71476), "这条不能走失败清零：{row}");
+        assert_eq!(row["completionTokens"], Value::from(56), "这条不能走失败清零：{row}");
+
+        let details = details_of(&row);
+        let notice = details
+            .first()
+            .and_then(|item| item.get("notice"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        assert!(
+            notice.contains("上游流已结束"),
+            "明细里必须留下这条提示，否则报表问不出原因：{row}"
+        );
+        assert!(!notice.contains("未完整下发"), "文案必须与真中断区分开，两类修法相反：{notice}");
+        let forwarded = details
+            .first()
+            .and_then(|item| item.get("forwardedBytes"))
+            .and_then(Value::as_i64);
+        assert_eq!(
+            Some(LAST_CHUNK.len() as i64),
+            forwarded,
+            "forwardedBytes 要等于逐 chunk 累加的真实下发量：{row}"
+        );
+    }
+
+    /// 正对照：同一份字节，**带**收尾帧跑到 EOF ⇒ 不打提示（判据真的落在收尾帧上，
+    /// 而不是「EOF 一律报」）。少了这条，上一条可能只是「无条件写一句 notice」。
+    #[tokio::test]
+    async fn upstream_eof_after_the_terminal_frame_stays_clean() {
+        let row =
+            record_through_eof(&[LAST_CHUNK.as_bytes(), UNSPACED_DONE.as_bytes()], terminal::CHAT)
+                .await;
+        assert!(row["error"].is_null(), "正常收尾不该有摘要：{row}");
+        let details = details_of(&row);
+        let notice = details
+            .first()
+            .and_then(|item| item.get("notice"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        assert!(!notice.contains("上游流已结束"), "下发过收尾帧就不该再提示：{row}");
+        let forwarded = details
+            .first()
+            .and_then(|item| item.get("forwardedBytes"))
+            .and_then(Value::as_i64);
+        assert_eq!(
+            Some((LAST_CHUNK.len() + UNSPACED_DONE.len()) as i64),
+            forwarded,
+            "计数要把每一帧都算进去：{row}"
+        );
+    }
+
+    /// 丢弃路径也要有 `forwardedBytes` —— 那才是「客户端收到多少」最有用的一类，
+    /// 也是本仓原来问不出来的那一格（生产 P1 的 1271 行）。
+    #[tokio::test]
+    async fn the_abort_path_also_records_how_much_was_forwarded() {
+        let row = record_after_hangup(&[LAST_CHUNK.as_bytes()], OLD_CHAT).await;
+        assert!(
+            row["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("未完整下发"),
+            "这条仍应是中断：{row}"
+        );
+        let forwarded = details_of(&row)
+            .first()
+            .and_then(|item| item.get("forwardedBytes"))
+            .and_then(Value::as_i64);
+        assert_eq!(Some(LAST_CHUNK.len() as i64), forwarded, "中断行也要留下已下发量：{row}");
     }
 }
