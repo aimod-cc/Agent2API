@@ -31,6 +31,7 @@ use serde_json::{Value, json};
 
 use crate::server::core::account_store::AccountStore;
 use crate::server::errors::GatewayError;
+use crate::server::logging;
 
 use super::credentials::{AtomcodeCredentials, from_record};
 use super::endpoints::REQUEST_TIMEOUT_MS;
@@ -101,9 +102,46 @@ fn plan_of(payload: &Value) -> (String, String) {
 }
 
 /// 把 `status-v2` 归成界面认的额度形状（**纯函数**，便于测试）
+///
+/// ── 一条**必须**遵守的契约：读不到额度就不要写 `available` ──────
+/// 限额判定走 `core::usage_records::extract_remaining`，它的规则是
+/// 「`unlimited` → 判不出；否则看 `totalLeft`；否则看 `available`」——
+/// 也就是说 **`available` 一旦出现，就会被当成真实读数**。
+///
+/// 2026-10-17 我在这一点上写错过：没有窗口时也写 `available: 0`，于是「读不到额度」
+/// 被限制器理解成「余额为 0」，账号当场被标成「余额不足 / 已跳过」——
+/// 用户看到的现象是「领完套餐还是余额不足」。**没有窗口 ≠ 余额为 0**：
+/// 前者是「这个响应我没读懂」，后者是「确实用完了」，两者必须分开。
+/// 所以这里只在**确实解析出窗口**时才写 `available` / `subscription` 的那两个数；
+/// 一个都没有就只回 `wallets: []`（记录会被 `usage_records` 摘除、不拦账号，
+/// 余额列留空 —— 与本仓「读不到的数值留空显示」同一口径）。
 pub fn shape_usage(payload: &Value) -> Value {
     let windows = shown_windows(payload);
     let (plan_name, plan_expires) = plan_of(payload);
+
+    // 诊断：把上游的真实字段形态记进**详细日志**。额度是按字段名解析的，
+    // 名字一变就静默归零（今天就栽在这），所以留一条能事后对账的痕迹。
+    // 只记键名与两条额度数组（都不含凭据），且不进普通日志。
+    logging::verbose(
+        "[AtomCode]",
+        &format!(
+            "status-v2 形态：顶层键={:?} rate_limit_windows={} current_usage={}",
+            payload
+                .as_object()
+                .map(|object| object.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default(),
+            payload
+                .get("rate_limit_windows")
+                .map(|value| serde_json::to_string(value).unwrap_or_default())
+                .map(|text| text.chars().take(600).collect::<String>())
+                .unwrap_or_else(|| "<缺>".to_string()),
+            payload
+                .get("current_usage")
+                .map(|value| serde_json::to_string(value).unwrap_or_default())
+                .map(|text| text.chars().take(400).collect::<String>())
+                .unwrap_or_else(|| "<缺>".to_string()),
+        ),
+    );
 
     let wallets: Vec<Value> = windows
         .iter()
@@ -137,12 +175,12 @@ pub fn shape_usage(payload: &Value) -> Value {
         })
         .collect();
 
-    // 主读数 = 第一个窗口的剩余次数（免费档只有一个窗口；多窗口时取最先给的那个，
-    // 与「服务端给的顺序就是展示顺序」一致）
+    // 主读数 = 第一个窗口的剩余次数。
+    // ⚠️ **只在真的解析出窗口时才写**（读到 0 条 = 这份响应我没读懂，
+    // 不是「余额为 0」）—— 理由见本函数文档「必须遵守的契约」那一节。
     let available = windows
         .first()
-        .map(|window| (window.call_limit - window.used).max(0))
-        .unwrap_or(0);
+        .map(|window| (window.call_limit - window.used).max(0));
 
     let mut subscription = json!({ "status": if plan_name.is_empty() { "unclaimed" } else { "active" } });
     if let Some(object) = subscription.as_object_mut() {
@@ -155,19 +193,30 @@ pub fn shape_usage(payload: &Value) -> Value {
         if !plan_expires.is_empty() {
             object.insert("planExpiresAt".to_string(), Value::String(plan_expires));
         }
+        // 同上：没有窗口就不写这两个数（写了 `available` 的兄弟键也一样会被
+        // 当成读数来源）
         if let Some(first) = windows.first() {
-            object.insert("remainQuota".to_string(), Value::from((first.call_limit - first.used).max(0)));
+            object.insert(
+                "remainQuota".to_string(),
+                Value::from((first.call_limit - first.used).max(0)),
+            );
             object.insert("totalQuota".to_string(), Value::from(first.call_limit));
         }
     }
 
-    json!({
-        "available": available,
+    let mut shaped = json!({
         "unit": "次",
         "wallets": wallets,
         "subscription": subscription,
         "raw": payload,
-    })
+    });
+    // 只有解析出窗口才回 `available`（见函数文档）：这是限额判定唯一的读数来源
+    if let Some(available) = available {
+        if let Some(object) = shaped.as_object_mut() {
+            object.insert("available".to_string(), Value::from(available));
+        }
+    }
+    shaped
 }
 
 /// 查额度：读记录 → 取 `status-v2` → 归一。
@@ -256,12 +305,30 @@ mod tests {
     #[test]
     fn account_without_a_plan_reports_unclaimed() {
         let shaped = shape_usage(&json!({}));
-        assert_eq!(shaped.get("available"), Some(&Value::from(0)));
         assert_eq!(
             shaped["subscription"].get("status").and_then(Value::as_str),
             Some("unclaimed")
         );
         assert_eq!(shaped.get("wallets").and_then(Value::as_array).map(Vec::len), Some(0));
+        // ⚠️ **不许**回 `available: 0` —— 读不到窗口是「这份响应没读懂」，
+        // 不是「余额为 0」。写成 0 会被 `usage_records::extract_remaining` 当成
+        // 真实读数，账号当场被标成「余额不足/已跳过」（2026-10-17 的实际故障）。
+        assert!(
+            shaped.get("available").is_none(),
+            "读不到窗口时不得写 available：那会被限额判定当成余额为 0"
+        );
+    }
+
+    /// 读不到窗口时 `subscription` 里也不该出现额度数字（同一条契约的兄弟键）。
+    #[test]
+    fn no_windows_means_no_quota_numbers_anywhere() {
+        let shaped = shape_usage(&json!({ "codingplan_free": {"plan_name": "CodingPlan Lite-体验版", "expires_at": "2026-11-08 12:00:00"} }));
+        assert!(shaped.get("available").is_none());
+        let subscription = &shaped["subscription"];
+        assert!(subscription.get("remainQuota").is_none(), "{subscription}");
+        assert!(subscription.get("totalQuota").is_none(), "{subscription}");
+        // 套餐名仍然要透出去（那是读到了的字段）
+        assert_eq!(subscription.get("planName").and_then(Value::as_str), Some("CodingPlan Lite-体验版"));
     }
 
     /// 耗尽的窗口要能看出来（界面把它收进折叠区）。
