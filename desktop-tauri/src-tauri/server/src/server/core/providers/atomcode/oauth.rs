@@ -173,7 +173,7 @@ impl BrokerLogin {
     ///
     /// **不阻塞**（不等待用户）—— 浏览器手势必须发生在用户还认为它是自己点开的
     /// 那段时间里，阻塞式登录会让 `window.open` 被拦、界面变成导航跳转。
-    pub async fn start(timeout_ms: i64) -> Result<Self, GatewayError> {
+    pub async fn start(timeout_ms: u64) -> Result<Self, GatewayError> {
         let url = format!(
             "{}{}?provider={}",
             broker_base_url(),
@@ -216,7 +216,7 @@ impl BrokerLogin {
         Ok(Self {
             state,
             login_url,
-            expires_at_ms: crate::server::logging::now_ms() + expires,
+            expires_at_ms: crate::server::logging::now_ms() + expires as i64,
         })
     }
 

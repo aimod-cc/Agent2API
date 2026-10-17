@@ -1285,6 +1285,7 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
                     "manual"
                 },
             )
+        }
         // AtomCode（AtomGit / GitCode）：粘贴令牌对（accessToken + refreshToken）。
         // **不调上游**（与 CodeArts / OfficeAce 同口径）——令牌是浏览器登录换来的，
         // 添加时没有可交换的授权码；目录与连通性由刷新链路验。

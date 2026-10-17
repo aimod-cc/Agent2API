@@ -886,24 +886,28 @@ const CHATGLM: ProviderConfig = {
 /**
  * AtomCode（AtomGit / GitCode）：把 AtomGit 的免费 CodingPlan 接进本网关。
  *
- * ── 两条来源，当前只开了一条 ──────────────────────────────────
- * ① **粘贴令牌对**（唯一可用）：从浏览器 OAuth 换来的 `accessToken` +
- *    `refreshToken`。⚠️ `refreshToken` 强烈建议填 —— 本家的令牌**不是 JWT**
- *    （实测 7 天到期，读不到 `exp`），没有它账号无法自动续期，到期只能重新登录
+ * ── 两条来源 ────────────────────────────────────────────────
+ * ① **浏览器登录**（推荐）：网关向代理现取授权地址 → 用户在浏览器里登 AtomGit
+ *    → 网关**轮询代理**判完成并取回令牌对（授权回调由代理自己在
+ *    `acs.atomgit.com/callback` 终结，**不往本机跳**，所以壳侧不需要开回调监听）。
+ * ② **粘贴令牌对**（后备）：`accessToken` + `refreshToken`。⚠️ `refreshToken`
+ *    强烈建议填 —— 本家的令牌**不是 JWT**（实测 7 天到期，读不到 `exp`），
+ *    没有它账号无法自动续期，到期只能重新登录
  *    （见 `providers/atomcode/credentials.rs` 的模块头）。
- * ② **浏览器登录**：服务端链路（发起 → 轮询 `auth/check` → 取令牌）**已就位**，
- *    但登录任务表与壳侧窗口尚未接，所以这里**不渲染**「打开登录页」按钮 ——
- *    渲染一个点了就报错的按钮比不渲染更糟。接上后照 OfficeAce 的 `webLogin`
- *    段补即可（授权回调不回到本机，网关靠轮询判完成，壳侧不需要回调监听）。
  *
- * `desktop: false`：与 CodeArts / OfficeAce 同 —— 凭据只能靠粘贴，
- * 没有「导入桌面端登录态」这条后端路径（AtomCode 把令牌写在 `auth.toml` 里，
- * + 需要额外的机器指纹，不做这条入口）。
+ * `desktop: false`：与 CodeArts / OfficeAce 同 —— 没有「导入桌面端登录态」这条
+ * 后端路径（AtomCode 把令牌写在 `auth.toml` 里，且需要额外的机器指纹，不做这条入口）。
  */
 const ATOMCODE: ProviderConfig = {
   provider: 'atomcode',
   label: t('AtomCode'),
   desktop: false,
+  webLogin: {
+    // 整段是一个 t() 键：扫描器只认字符串字面量（拼接串提不到键），所以不拆行
+    noteHtml: t('打开 AtomGit 授权页登录：登录完成后网关会自动<b>轮询代理</b>取回令牌并加入账号列表（授权回调由代理终结，不回到本机，因此无需手工回填回调地址）。'),
+    button: t('打开授权页'),
+    busyText: t('等待 AtomCode 登录完成…'),
+  },
   manualTitle: t('粘贴令牌对'),
   // 整段是一个 t() 键：扫描器只认字符串字面量（拼接串提不到键），所以不拆行
   manualNoteHtml: t('在 AtomGit 的 AtomCode 页面登出后取得两项贴进来：<code>accessToken</code> 与 <code>refreshToken</code>。<b>续期令牌建议填写</b>——本家令牌不是 JWT（约 7 天到期，读不到过期时间），没有它账号无法自动续期，到期只能重新登录。'),

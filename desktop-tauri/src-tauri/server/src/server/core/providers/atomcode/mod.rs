@@ -21,13 +21,16 @@
 //!   4. **网关会把失败包装成成功**：`HTTP 200` + 正文 `参数错误`
 //!      （或一页上游 HTML 报错），见 `errors.rs`。
 //!
-//! ── 还没接的一半：浏览器登录的界面侧 ──────────────────────────
-//! 服务端的登录链路（`oauth::BrokerLogin`：发起 → 轮询 → 取令牌）已经就位，
-//! 但**登录任务表与壳侧的「打开登录页」**还没接（`supports_web_login` 仍是
-//! 默认的 false）。在那之前，账号只能经 `POST /api/accounts` 用粘贴凭据添加
-//! （`accessToken` + `refreshToken`，字段名见 `credentials.rs`）。
-//! 这一条是**如实说明**：界面上的「浏览器登录」按钮此刻会提示不支持，
-//! 而不是弹一个永远不会完成的窗口。
+//! ── 浏览器登录：**轮询式**，所以 `supports_web_login` 保持默认 false ────
+//! 本家的授权回调由代理自己在 `acs.atomgit.com/callback` 终结，**永远不回到**
+//! 本机，因此走的是「服务端中介的轮询」那一套（与 OfficeAce / ZCode 同形）：
+//! `core::login::atomcode` 起后台任务，轮询 `auth/check` 判完成、再取令牌落账号，
+//! 由 `api::session::login_start` 按 provider 分派进去。
+//!
+//! ⚠️ **不要**把 `supports_web_login` 覆写成 true：那三个钩子
+//! （`build_login_url` / `exchange_login_code`）是给「回调带回一次性 code」那类
+//! 用的，走它们意味着路由层会去找一个**永远不会到达本机**的回调 —— 症状是
+//! 用户授权成功后界面一直挂着。OfficeAce 同样没有覆写这个位，这不是遗漏。
 //!
 //! ── 硬约束 ──────────────────────────────────────────────────
 //! release 是 `panic=abort`：本文件零 unwrap/expect/panic。
@@ -299,7 +302,9 @@ mod tests {
         assert!(adapter.supports_refresh(), "有 /oauth/refresh 续期接口");
         assert!(adapter.supports_usage(), "有 status-v2 额度窗口");
         assert!(!adapter.supports_default_model(), "本家没有默认模型概念");
-        // 浏览器登录的界面侧还没接（见模块头「还没接的一半」）
+        // 轮询式登录（`core::login::atomcode` + `api::session` 分派），
+        // **不走**「回调带 code」那三个钩子 —— 覆写成 true 会让路由层去等一个
+        // 永远不会到达本机的回调（见模块头）。
         assert!(!adapter.supports_web_login());
     }
 }
