@@ -392,7 +392,12 @@ export function CreditLeftCell({ account }: { account: AccountRecord }) {
     return <span className='muted' title={t('该提供商没有余额查询，因此读不到积分包')}>—</span>
   }
   const entry = usageEntryOf(account)
-  const nearest = nearestCreditOf(entry)
+  // 与 `CreditExpiryCell` 同一处置：「此刻」取一次、两处共用。
+  // 两列各调一次 `nearestCreditOf`、各自现取 `Date.now()` 的话，只要某个包的
+  // 过期时刻正好落在两次调用之间（毫秒级窗口），左列报 A 份、右列报 B 份 ——
+  // 两列指向不同份额度，而它们本该描述同一份。
+  const now = Date.now()
+  const nearest = nearestCreditOf(entry, now)
   if (!nearest) {
     return (
       <span className='muted' title={t('没有将到期的积分（没有一次性额度包，或这一家不给逐份读数）')}>—</span>

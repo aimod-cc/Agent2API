@@ -51,6 +51,7 @@ import * as React from 'react'
 import { Popover, PopoverContent, PopoverTrigger } from '@ui'
 import { t } from '../i18n'
 import { formatTime, type UsageEntry } from './accounts-shared'
+import { expiryMillis } from './accounts-domain'
 
 /** 明细里的一行（`creditRowsOf` 的产物；渲染输入与 `usageDetailOf` 的行同形） */
 export type CreditRow = {
@@ -147,7 +148,11 @@ export function creditRowsOf(entry: UsageEntry, now: number = Date.now()): Credi
     const unlimited = pack?.unlimited === true
     const grantAt = numberOrNull(pack?.grantAt)
     const startAt = numberOrNull(pack?.startAt)
-    const expireAt = numberOrNull(pack?.expireAt)
+    // 到期时刻走 `expiryMillis` 的同一套归一（秒 → 毫秒）：与「有效期」列、
+    // 与各处 `expiryMillis` 的调用口径一致。当前所有 provider 实测都发毫秒，
+    // 但少这一层就等于把「上游哪天改成秒」变成一次静默的 1970 年
+    const rawExpire = numberOrNull(pack?.expireAt)
+    const expireAt = rawExpire === null ? null : (expiryMillis(rawExpire) || null)
     const daily = pack?.daily === true
     const reason = String(pack?.grantReason || '').trim()
     const expired = expireAt !== null && expireAt > 0 && expireAt <= now
