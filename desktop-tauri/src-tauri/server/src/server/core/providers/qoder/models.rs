@@ -122,7 +122,9 @@ fn fallback(region: Region) -> Vec<Value> {
                 key,
                 *reasoning,
                 if *supports_effort { efforts } else { &[] },
-                *vision,
+                // 静态兜底表里的 `vision` 是我们**明确声明**的（不是"上游没给"），
+                // 所以包成 Some —— 与远程清单的未声明区分开
+                Some(*vision),
                 *enabled,
                 DEFAULT_CONTEXT_WINDOW,
                 "system",
@@ -198,7 +200,9 @@ fn entry(
     upstream_key: &str,
     reasoning: bool,
     efforts: &[&str],
-    vision: bool,
+    // `None` = 上游条目里没有 `is_vl`（未声明），闸门按放行处理；
+    // 内置兜底表那批是**明确声明**，一律 `Some(..)`
+    vision: Option<bool>,
     enabled: bool,
     context_window: i64,
     source: &str,
@@ -589,7 +593,8 @@ fn parse_catalog(payload: &Value) -> Vec<Value> {
         }
         seen.push(lowered);
 
-        let vision = item.get("is_vl").map(js_truthy).unwrap_or(false);
+        // 缺席 = 未声明（不是"不支持"）；写进条目时是 null，闸门放行
+        let vision = item.get("is_vl").map(js_truthy);
         let reasoning = item.get("is_reasoning").map(js_truthy).unwrap_or(false)
             || item.get("thinking_config").map(js_truthy).unwrap_or(false);
         // 上游在该模型条目里声明支持的思考档位，作为请求时的白名单

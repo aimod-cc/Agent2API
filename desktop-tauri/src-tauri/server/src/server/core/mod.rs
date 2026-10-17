@@ -80,6 +80,9 @@ pub mod debug_traffic;
 pub mod degrade;
 pub mod egress;
 pub mod endpoints;
+/// 历史图片剥离（发送体层的一层改写，核心判据与取舍见模块头）。
+/// 与 `sanitize` / `prompt` 同层：只在「某一家即将发送之前」按那家的能力位生效。
+pub mod image_strip;
 pub mod import_ccswitch;
 pub mod key_scope;
 pub mod legacy_api_key;

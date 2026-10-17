@@ -71,6 +71,7 @@ use serde_json::Value;
 use crate::server::logging;
 
 use super::usage::RequestTelemetry;
+use crate::server::core::image_strip::StripNotice;
 
 /// 一次转发的只读输入（打包传入，避免多参数函数在两层循环里各自展开）。
 pub(super) struct ProviderContext<'a> {
@@ -150,6 +151,15 @@ pub(super) struct SendBody<'a> {
     pub body: Cow<'a, Value>,
     /// 该家实际收到的上游模型名 —— 也是它 `rateLimits` 冷却的键。
     pub wire_model: String,
+    /// 这次发送**为这家剥掉了多少张历史图片、为什么**（`None` = 一个都没动）。
+    ///
+    /// 交出去而不是在 [`send_body`] 里直接记进尝试明细：明细那条记录要等
+    /// `note_attempt_started` 才存在，而有状态路径是先算发送体、后起头 ——
+    /// 在变换里写会静默丢掉（-17 实测）。详见 `image_strip::StripNotice`。
+    ///
+    /// 理由要一起交出去：明细里那句话的措辞按理由分（"这家不吃图"与"图太占地方"
+    /// 是两件事），而那时原始的 `Stripped` 已经被拆掉了（body 被借进 `Cow`）。
+    pub images_stripped: Option<StripNotice>,
 }
 
 /// 某一家 provider 实际要发送的请求体（**每次转发前**决定，不做跨家复用）。
@@ -264,7 +274,7 @@ pub(super) fn send_body<'a>(
     // 工具（智谱那套）也一并删掉，与透传契约矛盾。
     // 日后若某家确认支持某个原生工具，在这里（唯一闸门）按家/按类型开白即可。
     // 完整取舍见 `core::protocol::native_tool` 的模块头。
-    let mut body = if crate::server::core::custom_providers::is_custom_provider_id(provider_id) {
+    let body = if crate::server::core::custom_providers::is_custom_provider_id(provider_id) {
         body
     } else {
         match crate::server::core::protocol::native_tool::downgrade(body.as_ref()) {
@@ -289,8 +299,50 @@ pub(super) fn send_body<'a>(
         .to_string();
     if requested.is_empty() {
         // 没有 model 字段：不改写，也没有可用的冷却键（空串，与改造前一致）
-        return SendBody { body, wire_model: requested };
+        return SendBody { body, wire_model: requested, images_stripped: None };
     }
+    // ── ④ 历史图片剥离层（核心判据见 `core::image_strip`）──────────────
+    // 位置在模型名解析这一步**之后**才成立：判据是"这家收这个名字的那条条目
+    // 明确说不吃图"，而条目要按请求名去目录里取（`provider_refuses_images` 走的
+    // 就是识图闸门那一条 `manifest_entry_for`，别名解析与自定义家能力位展平因此
+    // 不会有第二份实现）。
+    //
+    // 条件写成"一次调用"而不是在这里自己与一遍：选路侧（`decide_image_gate`）
+    // 刚刚按同一个判据把这家留在候选里，这里再各读一遍迟早分叉 —— 分叉的症状是
+    // 请求带着图送进不吃图的家，正好是这次改动要消掉的那次 400。
+    //
+    // 能吃图的家也不是一律不剥：历史图片的体积越过预算时照样剥（判据见
+    // `image_strip` 模块头的第 ② 条）—— 那是"这叠图已经不值得原样重发"，
+    // 与这家能不能吃图无关。两轴合一仍是**一次调用**，理由随之交出来。
+    //
+    // 不动手的请求（当前这一问依赖图、没有图可言、或两轴都不成立）⇒ body 原样
+    // 借用（零拷贝，字节不变）。
+    let mut strip_notice: Option<StripNotice> = None;
+    let refuses_images =
+        crate::server::core::providers::catalog::provider_refuses_images(provider_id, &requested);
+    let mut body = match crate::server::core::image_strip::strip_reason_for(
+        body.as_ref(),
+        refuses_images,
+    ) {
+        Some(reason) => match crate::server::core::image_strip::strip_history_images(
+            body.as_ref(),
+            reason,
+        ) {
+            Some(stripped) => {
+                strip_notice = Some(stripped.notice());
+                logging::verbose(
+                    "[Upstream]",
+                    &format!(
+                        "剥历史图片 {} 张：provider={} model={} 理由={:?}（当前轮不依赖图片）",
+                        stripped.removed, provider_id, requested, reason
+                    ),
+                );
+                Cow::Owned(stripped.body)
+            }
+            None => body,
+        },
+        None => body,
+    };
     // 一次解析出两个属性：该家要收的名字 + 跟着那条映射走的思考等级
     // （同源，见模块头「思考等级绑定为什么也在这一步」）
     let wire = crate::server::core::providers::catalog::wire_target_for_provider(
@@ -315,7 +367,11 @@ pub(super) fn send_body<'a>(
     // 注入路径已经问过一次适配器，这里再查一次注册表是两次哈希查找，可忽略。
     let upstream_reasoning = injected.or_else(|| outbound_reasoning_of(provider_id, &body));
     ctx.telemetry.note_upstream_reasoning(upstream_reasoning);
-    SendBody { body, wire_model: wire.model }
+    SendBody {
+        body,
+        wire_model: wire.model,
+        images_stripped: strip_notice,
+    }
 }
 
 /// 承载家的 [`ProviderAdapter::outbound_reasoning`]（读发送体里随行的等级）。

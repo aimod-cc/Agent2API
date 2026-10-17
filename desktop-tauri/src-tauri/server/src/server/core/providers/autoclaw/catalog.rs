@@ -210,12 +210,12 @@ fn normalize_entry(item: &Value) -> Option<Value> {
         .filter(|text| !text.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| id.to_uppercase());
-    // 图像能力：`input` 数组里有没有 `image`
+    // 图像能力：`input` 数组里有没有 `image`。**没有这个数组 = 上游没说**（null），
+    // 不是"说不支持" —— 闸门对 null 放行（`entry_refuses_images`）
     let support_image = item
         .get("input")
         .and_then(Value::as_array)
-        .map(|items| items.iter().any(|value| value.as_str() == Some("image")))
-        .unwrap_or(false);
+        .map(|items| items.iter().any(|value| value.as_str() == Some("image")));
     // 思考能力：`reasoning` 缺省为 true（上游缺省即真，桌面端同款回退）
     let reasoning = item
         .get("reasoning")
