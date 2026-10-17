@@ -195,6 +195,12 @@ pub(crate) fn refresh_meta(kind: ProviderKind) -> (bool, i64) {
         ProviderKind::Chatglm => (
             super::chatglm::models::remote_refreshed(),
             super::chatglm::models::last_refreshed_at(),
+        // AtomCode：清单来自 `GET {codingplan}/coding-plan/models-v2`。
+        // 本家**没有内置兜底清单**（写死的模型点一下可能是「参数错误」，
+        // 见 `atomcode/models.rs` 的模块头），所以「有目录」就是「远程拉到过」。
+        ProviderKind::Atomcode => (
+            super::atomcode::models::remote_refreshed(),
+            super::atomcode::models::last_refreshed_at(),
         ),
     }
 }

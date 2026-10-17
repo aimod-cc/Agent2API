@@ -250,6 +250,15 @@ const PROVIDER_FEATURES: Record<string, ProviderFeatures> = {
   // `expiry: ''` —— 令牌有效期写在 JWT 的 `exp` 里、由网关自动续期，这一列没有
   //   可显示的事实（与 antigravity / kuku 同一处置），界面不渲染「有效期」。
   chatglm: { usage: true, creditDetail: true, edition: false, identifier: 'uid', expiry: '' },
+  // AtomCode（AtomGit / GitCode）。各位各有出处：
+  // `usage: true` —— 额度是 `status-v2` 的**每窗口调用次数**（免费档实测 200 次 /
+  //   5 小时），已接 `query_usage`（`providers/atomcode/usage.rs`），
+  //   所以余额按钮与积分列都开。
+  // `edition: false` —— 单一入口（没有国际版）。
+  // `identifier: 'userId'` —— AtomGit 用户 id（落盘时写在 `userId` 字段）。
+  // `expiry: 'expiresAt'` —— 令牌**不是 JWT**，过期时刻由 `createdAt + expiresIn`
+  //   推出后落盘（见 `providers/atomcode/credentials.rs` 的模块头）。
+  atomcode: { usage: true, edition: false, identifier: 'userId', expiry: 'expiresAt' },
 }
 
 /**

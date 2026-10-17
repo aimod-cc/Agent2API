@@ -883,6 +883,39 @@ const CHATGLM: ProviderConfig = {
   ],
 }
 
+/**
+ * AtomCode（AtomGit / GitCode）：把 AtomGit 的免费 CodingPlan 接进本网关。
+ *
+ * ── 两条来源，当前只开了一条 ──────────────────────────────────
+ * ① **粘贴令牌对**（唯一可用）：从浏览器 OAuth 换来的 `accessToken` +
+ *    `refreshToken`。⚠️ `refreshToken` 强烈建议填 —— 本家的令牌**不是 JWT**
+ *    （实测 7 天到期，读不到 `exp`），没有它账号无法自动续期，到期只能重新登录
+ *    （见 `providers/atomcode/credentials.rs` 的模块头）。
+ * ② **浏览器登录**：服务端链路（发起 → 轮询 `auth/check` → 取令牌）**已就位**，
+ *    但登录任务表与壳侧窗口尚未接，所以这里**不渲染**「打开登录页」按钮 ——
+ *    渲染一个点了就报错的按钮比不渲染更糟。接上后照 OfficeAce 的 `webLogin`
+ *    段补即可（授权回调不回到本机，网关靠轮询判完成，壳侧不需要回调监听）。
+ *
+ * `desktop: false`：与 CodeArts / OfficeAce 同 —— 凭据只能靠粘贴，
+ * 没有「导入桌面端登录态」这条后端路径（AtomCode 把令牌写在 `auth.toml` 里，
+ * + 需要额外的机器指纹，不做这条入口）。
+ */
+const ATOMCODE: ProviderConfig = {
+  provider: 'atomcode',
+  label: t('AtomCode'),
+  desktop: false,
+  manualTitle: t('粘贴令牌对'),
+  // 整段是一个 t() 键：扫描器只认字符串字面量（拼接串提不到键），所以不拆行
+  manualNoteHtml: t('在 AtomGit 的 AtomCode 页面登出后取得两项贴进来：<code>accessToken</code> 与 <code>refreshToken</code>。<b>续期令牌建议填写</b>——本家令牌不是 JWT（约 7 天到期，读不到过期时间），没有它账号无法自动续期，到期只能重新登录。'),
+  fields: [
+    // 字段名与示例值不包 t()（各语言相同，与 CodeArts 的 JSON 示例同一处置）
+    { key: 'accessToken', label: t('访问令牌'), placeholder: 'access_token' },
+    { key: 'refreshToken', label: t('续期令牌'), optional: true, placeholder: 'refresh_token' },
+    { key: 'userId', label: t('用户 ID'), optional: true, placeholder: t('可选，用于生成账号标识') },
+    { key: 'name', label: t('备注名'), optional: true, placeholder: t('可选，留空用「AtomCode」') },
+  ],
+}
+
 /** 内置家的表单块，顺序与旧 ADD_FORMS 一致（只影响 DOM 里的块顺序，不影响界面） */
 export const BUILTIN_CONFIGS: ProviderConfig[] = [
   RACCOON,
@@ -927,9 +960,12 @@ export const BUILTIN_CONFIGS: ProviderConfig[] = [
   // OrcaTerm（腾讯云遨驰终端桌面客户端）：粘贴 accessToken / 导入桌面端登录态，
   // 排在末尾（与后端注册表 PROVIDERS 的排列一致，2026-10 接入）
   ORCATERM,
-  // 智谱清言（chatglm.cn）：访客模式 / 粘贴令牌 / 导入本机登录态，排在末尾
+// 智谱清言（chatglm.cn）：访客模式 / 粘贴令牌 / 导入本机登录态，排在末尾
   // （与后端注册表 PROVIDERS 的排列一致，2026-10 接入）
   CHATGLM,
+  // AtomCode（AtomGit / GitCode）：浏览器登录 + 粘贴令牌对，排在末尾
+  // （与后端注册表 PROVIDERS 的排列一致，后到居后）
+  ATOMCODE,
 ]
 
 /** WorkBuddy 的块 id（结构特殊，单独一个组件） */

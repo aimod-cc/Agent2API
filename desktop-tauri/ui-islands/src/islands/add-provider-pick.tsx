@@ -99,10 +99,17 @@ export const PROVIDER_ICONS: Record<string, string> = {
   // （`cloudcache.tencent-cloud.com/qcloud/orcaterm/pwa/icon/orcaterm_192x192.png`，
   // 与客户端 / 官网显示的应用图标为同一形象）
   orcaterm: 'assets/providers/orcaterm.png',
-  // 智谱清言：取自客户端安装包 `resources/app.asar` 内的应用图标
+// 智谱清言：取自客户端安装包 `resources/app.asar` 内的应用图标
   // （`assets/icon.png`，512×512，与系统里显示的应用图标为同一形象；
   // 归一成 256×256 入库 —— 与 officeace 同一处置）
   chatglm: 'assets/providers/chatglm.png',
+  // AtomCode（AtomGit / GitCode）：取自官网首页的产品图标
+  // （`https://cdn-news.gitcode.com/news/atomcode-icon1.png`，524×524 RGBA，
+  // 归一成 256×256 入库 —— 与官网首页 / 客户端显示的应用图标为同一形象）。
+  // ⚠️ 官网的 `<link rel="icon">` 指向的是 GitCode **平台**的 favicon
+  // （`cdn-static.gitcode.host/static/images/logo-favicon.png`），不是本产品的形象，
+  // 所以没有采用它。
+  atomcode: 'assets/providers/atomcode.png',
 }
 
 /**

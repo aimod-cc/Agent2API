@@ -108,6 +108,8 @@ pub const SCOPE_OFFICEACE: &str = "officeace";
 
 /// 智谱清言（`chatglm.cn`）的模型目录缓存槽
 pub const SCOPE_CHATGLM: &str = "chatglm";
+/// AtomCode（AtomGit / GitCode）的模型目录缓存槽
+pub const SCOPE_ATOMCODE: &str = "atomcode";
 
 /// 全部 scope（事实来源：`cached_scopes` 按它遍历；新增一家时加在这里）。
 pub const ALL_SCOPES: &[&str] = &[
@@ -131,6 +133,7 @@ pub const ALL_SCOPES: &[&str] = &[
     SCOPE_ANTIGRAVITY,
     SCOPE_OFFICEACE,
     SCOPE_CHATGLM,
+    SCOPE_ATOMCODE,
 ];
 
 /// 一份清单缓存
