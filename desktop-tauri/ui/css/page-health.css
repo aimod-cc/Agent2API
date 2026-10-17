@@ -1,0 +1,219 @@
+/* ─────────────────────────────────────────────
+   账号健康（侧边栏「运行状态」组 · data-page="health"）
+   整页由 React 岛渲染（ui-islands/src/islands/health-page.tsx），类名 hl-
+   前缀；颜色一律取 tokens.css 的语义变量，深浅主题自动成立。
+
+   布局沿用本项目既有范式：页面骨架不滚、滚动交给内部容器（.hl-scroll）。
+   ───────────────────────────────────────────── */
+
+.page.active[data-page="health"] {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: 0;
+}
+
+.hl {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ─── 概览卡 ─── */
+.hl-cards {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-bottom: 12px;
+}
+.hl-cards-pad { flex: 1 1 auto; }
+
+.hl-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 96px;
+  padding: 10px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .12s, background .12s;
+}
+.hl-card:hover { background: var(--surface-3); }
+.hl-card.is-active { border-color: var(--primary); background: var(--primary-soft); }
+
+.hl-card-n {
+  font-family: var(--font-mono);
+  font-size: 20px;
+  line-height: 1.15;
+  font-weight: 600;
+  color: var(--text);
+}
+.hl-card-k { font-size: 11.5px; color: var(--text-2); }
+.hl-card-p {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+.hl-card.hl-bad .hl-card-n { color: var(--danger); }
+.hl-card.hl-warn .hl-card-n { color: var(--warn); }
+.hl-card.hl-info .hl-card-n { color: var(--info); }
+.hl-card.hl-ok .hl-card-n { color: var(--ok); }
+
+.hl-usable {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  justify-content: center;
+  padding: 10px 14px;
+  border-left: 2px solid var(--border);
+  text-align: right;
+}
+.hl-usable-n {
+  font-family: var(--font-mono);
+  font-size: 20px;
+  line-height: 1.15;
+  font-weight: 600;
+  color: var(--ok);
+}
+.hl-usable-k { font-size: 11.5px; color: var(--text-3); }
+
+/* ─── 工具栏 ─── */
+.hl-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 8px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.hl-spacer { flex: 1 1 auto; }
+.hl-filtering { color: var(--primary); }
+.hl-hint-warn { color: var(--warn); }
+
+/* ─── 表格（唯一滚动容器）─── */
+.hl-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--table-bg);
+}
+
+.hl-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.hl-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 8px 12px;
+  background: var(--table-head-bg);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-3);
+  font-weight: 500;
+  text-align: left;
+  white-space: nowrap;
+}
+.hl-table tbody td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--hairline);
+  vertical-align: top;
+}
+.hl-row:last-child td { border-bottom: none; }
+.hl-row:hover td { background: var(--row-hover); }
+
+.hl-c-state { width: 88px; }
+.hl-c-name { width: 220px; }
+.hl-c-expiry { width: 170px; }
+
+/* ─── 状态徽标 ─── */
+.hl-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.hl-badge.hl-bad { color: var(--danger); background: var(--danger-soft); }
+.hl-badge.hl-warn { color: var(--warn); background: var(--warn-soft); }
+.hl-badge.hl-info { color: var(--info); background: var(--info-soft); }
+.hl-badge.hl-ok { color: var(--ok); background: var(--ok-soft); }
+.hl-badge.hl-muted { color: var(--text-3); background: var(--surface-3); }
+
+/* ─── 账号名 ─── */
+.hl-name {
+  display: block;
+  color: var(--text);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hl-provider {
+  display: block;
+  margin-top: 1px;
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+/* ─── 原因列 ─── */
+.hl-reasons {
+  margin: 0;
+  padding-left: 16px;
+  color: var(--text-2);
+  line-height: 1.65;
+}
+.hl-reasons li { list-style: disc; }
+.hl-none { color: var(--text-3); }
+
+.hl-tags {
+  display: inline-flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.hl-tag {
+  padding: 1px 7px;
+  border-radius: var(--r-pill);
+  font-size: 10.5px;
+  background: var(--surface-3);
+  color: var(--text-2);
+}
+.hl-tag-bad { color: var(--danger); background: var(--danger-soft); }
+
+/* ─── 凭证到期列 ─── */
+.hl-expiry-when {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+.hl-expiry-left {
+  display: block;
+  margin-top: 1px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+.hl-expiring .hl-expiry-left,
+.hl-bad .hl-expiry-left { color: var(--warn); }
+
+/* ─── 空态 ─── */
+.hl-empty {
+  padding: 40px 16px;
+  color: var(--text-3);
+  font-size: 12.5px;
+  text-align: center;
+}
