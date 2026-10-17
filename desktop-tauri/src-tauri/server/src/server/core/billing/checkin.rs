@@ -568,38 +568,70 @@ pub async fn run_checkin(
     let manual = matches!(source, "single" | "manual");
     let mut results = Vec::with_capacity(targets.len());
     for account in &targets {
-        let row = checkin_for(store, billing, account, manual).await;
-        // 落签到时间：手动单签与定时签到走的是**这一段**（两条链都调本函数），
-        // 所以账号页的「已签到」在两种路径下都会亮起来，不需要各自记一次。
-        // 写盘失败只记日志、不改签到结果 —— 上游那边积分已经领到了，
-        // 因为一次落盘失败就把成功的签到报成失败是本末倒置。
-        if let Some(account_id) = row.get("id").and_then(Value::as_str) {
-            let completed = row
-                .get("claim")
-                .map(checkin_completed_today)
-                .unwrap_or(false);
-            if completed && !store.mark_checkin(account_id, logging::now_ms()) {
-                logging::verbose(
-                    "[Accounts]",
-                    &format!("账号 {account_id} 的签到时间未能落盘（账号可能已被删除）"),
-                );
-            }
-        }
-        // 签到记录台账（schema v11）：每个账号行落一条明细（成败 / 错误原文 /
-        // 收益文案都在结果行里）。写盘失败只记日志：台账缺一条不该让这次
-        // 签到的响应报错 —— 与上面 mark_checkin 的取舍同构。provider 由账号
-        // 记录带上（结果行里没有这个字段，记录页的提供商筛选列要用）。
-        crate::server::core::checkin_records::record_row(
-            &row,
-            account.get("provider").and_then(Value::as_str).unwrap_or(""),
-            source,
-            reason,
-        );
-        results.push(row);
+        results.push(run_account(store, billing, account, manual, source, reason).await);
     }
-    // 「真实领取」与「今日已领取」都表示本日签到已完成；只有活跃保活不计入
-    // succeeded，避免把普通签到时间与活跃任务混为一谈 —— 保活读数单独统计在
-    // `active`（`activity.pokeSucceeded`），它的成功不落 `checkinAt`。
+    let summary = summarize_results(&results, skipped);
+    // 批量轮次进台账（签到中心时间线）。写盘失败只记日志：上游那边积分已经
+    // 领到，台账缺一条不该让这次签到的响应报错。
+    if id.is_none() {
+        crate::server::core::checkin_history::record(&summary, reason);
+    }
+    Ok(summary)
+}
+
+/// 单个账号的签到 + 落 `checkinAt` + 记签到记录台账。
+///
+/// 从 `run_checkin` 的循环体抽出（2026-10 随机窗口改造）：定时铺开路径
+/// （`auto_checkin::run_spread`）逐个账号调用它，与批量路径共用同一段记账，
+/// 不会出现「铺开签到的账号不亮『已签到』」这类两套行为。
+/// `manual` 的语义见 [`checkin_for`]（只对 CodeArts 的限流闸有意义）。
+pub async fn run_account(
+    store: &AccountStore,
+    billing: &BillingService,
+    account: &Value,
+    manual: bool,
+    source: &str,
+    reason: &str,
+) -> Value {
+    let row = checkin_for(store, billing, account, manual).await;
+    // 落签到时间：手动单签与定时签到走的是**这一段**（两条链都调本函数），
+    // 所以账号页的「已签到」在两种路径下都会亮起来，不需要各自记一次。
+    // 写盘失败只记日志、不改签到结果 —— 上游那边积分已经领到了，
+    // 因为一次落盘失败就把成功的签到报成失败是本末倒置。
+    if let Some(account_id) = row.get("id").and_then(Value::as_str) {
+        let completed = row
+            .get("claim")
+            .map(checkin_completed_today)
+            .unwrap_or(false);
+        if completed && !store.mark_checkin(account_id, logging::now_ms()) {
+            logging::verbose(
+                "[Accounts]",
+                &format!("账号 {account_id} 的签到时间未能落盘（账号可能已被删除）"),
+            );
+        }
+    }
+    // 签到记录台账（schema v11）：每个账号行落一条明细（成败 / 错误原文 /
+    // 收益文案都在结果行里）。写盘失败只记日志：台账缺一条不该让这次
+    // 签到的响应报错 —— 与上面 mark_checkin 的取舍同构。provider 由账号
+    // 记录带上（结果行里没有这个字段，记录页的提供商筛选列要用）。
+    crate::server::core::checkin_records::record_row(
+        &row,
+        account.get("provider").and_then(Value::as_str).unwrap_or(""),
+        source,
+        reason,
+    );
+    row
+}
+
+/// 一轮签到结果 → `{results, succeeded, active, total, skipped}` 汇总。
+///
+/// 「真实领取」与「今日已领取」都表示本日签到已完成；只有活跃保活不计入
+/// succeeded，避免把普通签到时间与活跃任务混为一谈 —— 保活读数单独统计在
+/// `active`（`activity.pokeSucceeded`），它的成功不落 `checkinAt`。
+///
+/// 抽成公开函数供 `auto_checkin::run_spread` 复用：铺开路径自己控制节奏，
+/// 但统计口径必须与批量路径逐字一致。
+pub fn summarize_results(results: &[Value], skipped: usize) -> Value {
     let succeeded = results
         .iter()
         .filter(|item| {
@@ -638,27 +670,13 @@ pub async fn run_checkin(
             results.len()
         ),
     );
-    // 批量轮次进台账（签到中心时间线）。写盘失败只记日志：上游那边积分已经
-    // 领到，台账缺一条不该让这次签到的响应报错。
-    if id.is_none() {
-        crate::server::core::checkin_history::record(
-            &json!({
-                "succeeded": succeeded,
-                "active": active,
-                "total": results.len(),
-                "skipped": skipped,
-                "results": results,
-            }),
-            reason,
-        );
-    }
-    Ok(json!({
+    json!({
         "results": results,
         "succeeded": succeeded,
         "active": active,
         "total": results.len(),
         "skipped": skipped,
-    }))
+    })
 }
 
 #[cfg(test)]

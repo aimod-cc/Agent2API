@@ -2,7 +2,7 @@
 //!
 //! ```text
 //!   GET  /api/checkin-schedules                状态（总开关 + 条目数组 + 提供商清单）
-//!   POST /api/checkin-schedules                保存一条（按 id upsert，{id?, label?, enabled?, time?, providers?}）
+//!   POST /api/checkin-schedules                保存一条（按 id upsert，{id?, label?, enabled?, time?, jitterMinutes?, providers?}）
 //!   POST /api/checkin-schedules/{id}/delete    删除一条（DELETE 方法同受理）
 //!   POST /api/checkin-schedules/{id}/run       立即执行这一条
 //! ```

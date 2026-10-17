@@ -2,11 +2,13 @@
 //!
 //! ── 形状 ────────────────────────────────────────────────────
 //! 每条条目是一次「定点签到」的完整配置：
-//!   `{id, label, enabled, time, providers, lastFiredDate, lastResult}`
+//!   `{id, label, enabled, time, jitterMinutes, providers, lastFiredDate, lastResult}`
 //!   - `id`     稳定标识（界面按它 upsert / 删除 / 立即执行；合成条目是 "default"）
 //!   - `label`  展示名（可空；空时展示退到 `time`）
 //!   - `enabled` 条目自己的开关
 //!   - `time`   HH:MM，北京时间口径（见 `core::beijing`，issue #138）
+//!   - `jitterMinutes` 随机前后 N 分钟（0 = 不随机）；窗口与账号铺开的语义见
+//!     `core::auto_checkin` 的模块头「随机窗口」
 //!   - `providers` 这条要签的提供商（`CHECKIN_PROVIDERS` 子集，至少一家）
 //!   - `lastFiredDate` / `lastResult` 条目级的当天去重与上一轮结果
 //! 总开关沿用 `autoCheckin.enabled`（见 `core::auto_checkin`）：关了所有条目都不跑。
@@ -40,9 +42,49 @@ pub struct Schedule {
     pub label: String,
     pub enabled: bool,
     pub time: String,
+    /// 随机前后 N 分钟（0 = 不随机，时刻即触发点）。窗口与账号铺开见
+    /// `auto_checkin` 的「随机窗口」说明。
+    pub jitter_minutes: u32,
     pub providers: Vec<String>,
     pub last_fired_date: Option<String>,
     pub last_result: Option<Value>,
+}
+
+/// 读侧的随机分钟归一：缺省 / 非数字 / 负数 / 小数一律当 0，超上限夹取。
+///
+/// 读侧刻意宽容（与 `time` 坏了回落 `DEFAULT_TIME` 同一原则）：配置是用户
+/// 手改过也可能被旧版本写过，读不出来时退到「不随机」这个安全行为，
+/// 而不是让整条条目失效。写入侧的校验更严（见 `upsert`），非法值当场拒绝。
+pub fn normalize_jitter(value: Option<&Value>) -> u32 {
+    let Some(number) = value.and_then(Value::as_u64) else {
+        return 0;
+    };
+    u32::try_from(number)
+        .unwrap_or(auto_checkin::MAX_JITTER_MINUTES)
+        .min(auto_checkin::MAX_JITTER_MINUTES)
+}
+
+/// 写入侧的随机分钟校验：`None` 表示「这次请求没带该字段」（保持原值），
+/// `Some(0)` 是**合法的显式值**（关闭随机）——两者必须能区分开。
+///
+/// 非法值当场拒绝而不是悄悄夹取：用户填 999 却看到保存成功、实际只按 120
+/// 生效，比直接报错更难排查。错误文案与 `normalize_time` 的既有风格一致。
+fn parse_jitter(value: Option<&Value>) -> Result<Option<u32>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    // `as_u64` 已经挡住了负数、小数、字符串与 null，这里只剩「超上限」要判
+    value
+        .as_u64()
+        .and_then(|number| u32::try_from(number).ok())
+        .filter(|minutes| *minutes <= auto_checkin::MAX_JITTER_MINUTES)
+        .map(Some)
+        .ok_or_else(|| {
+            format!(
+                "随机分钟应为 0 - {} 的整数",
+                auto_checkin::MAX_JITTER_MINUTES
+            )
+        })
 }
 
 /// 展示名：用户起的名，没起就退到时刻（时刻是唯一必填项，一定能展示）
@@ -72,7 +114,7 @@ fn stored_entries() -> Option<Vec<Value>> {
         .cloned()
 }
 
-/// 单条的归一化：id / label / enabled / time / providers 逐个兜底。
+/// 单条的归一化：id / label / enabled / time / jitter / providers 逐个兜底。
 /// time 坏了回落 DEFAULT_TIME（调度起不来比时刻错更糟，与 auto_checkin 同）。
 fn normalize_schedule(raw: &Value) -> Schedule {
     let id = raw
@@ -92,12 +134,14 @@ fn normalize_schedule(raw: &Value) -> Schedule {
         .filter(|value| !value.is_null())
         .and_then(|value| auto_checkin::normalize_time(Some(value)).ok())
         .unwrap_or_else(auto_checkin::default_time);
+    let jitter_minutes = normalize_jitter(raw.get("jitterMinutes"));
     let providers = auto_checkin::normalize_providers(raw.get("providers"));
     Schedule {
         id,
         label,
         enabled,
         time,
+        jitter_minutes,
         providers,
         last_fired_date: raw
             .get("lastFiredDate")
@@ -139,13 +183,18 @@ fn write_entries(entries: Vec<Value>) {
     config::update_raw_field(auto_checkin::CONFIG_KEY, Value::Object(merged));
 }
 
-/// 条目 → 存储原文（保留 lastFiredDate / lastResult，条目级的去重状态跨重启）
+/// 条目 → 存储原文（保留 lastFiredDate / lastResult，条目级的去重状态跨重启）。
+///
+/// ⚠️ 新增字段必须同时加到 `normalize_schedule` 与本函数：`patch_entry` 是
+/// 「读原文 → normalize → 改 → to_value 全量写回」，漏一处就会让 `mark_fired`
+/// 每次把该字段静默清掉。
 fn to_value(schedule: &Schedule) -> Value {
     json!({
         "id": schedule.id,
         "label": schedule.label,
         "enabled": schedule.enabled,
         "time": schedule.time,
+        "jitterMinutes": schedule.jitter_minutes,
         "providers": schedule.providers,
         "lastFiredDate": schedule.last_fired_date,
         "lastResult": schedule.last_result,
@@ -168,6 +217,7 @@ pub fn upsert(payload: &Value) -> Result<Schedule, String> {
         .unwrap_or_else(|| format!("schedule-{}", crate::server::logging::now_ms()));
     let time = auto_checkin::normalize_time(payload.get("time"))
         .map_err(|error| error.message)?;
+    let jitter_minutes = parse_jitter(payload.get("jitterMinutes"))?;
     // 范围：只认注册过的提供商（去重、按注册顺序）；一条不勾到点也无账号可签
     let list_value = payload.get("providers");
     let picked: Vec<String> = CHECKIN_PROVIDERS
@@ -209,6 +259,15 @@ pub fn upsert(payload: &Value) -> Result<Schedule, String> {
             None => true,
         },
     };
+    // 随机分钟同样「缺省保持原值、新建默认 0」：界面的条目开关按钮是整表单
+    // 重发，漏带这个字段时不能把它清零（见前端 `toggleScheduleEnabled`）。
+    let jitter_minutes = match jitter_minutes {
+        Some(minutes) => minutes,
+        None => existing_entry
+            .as_ref()
+            .map(|old| old.jitter_minutes)
+            .unwrap_or(0),
+    };
     // 更新已有条目时保留它的去重状态；新建条目从「今天还没跑」开始
     let (last_fired_date, last_result) = existing_entry
         .map(|old| (old.last_fired_date, old.last_result))
@@ -225,6 +284,7 @@ pub fn upsert(payload: &Value) -> Result<Schedule, String> {
         label,
         enabled,
         time,
+        jitter_minutes,
         providers: picked,
         last_fired_date,
         last_result,
@@ -386,4 +446,69 @@ pub fn extend_providers_once() -> bool {
 /// 记下「签到范围已补到当前版本」（不动其余字段）
 fn record_providers_version() {
     auto_checkin::write_state(json!({ "providersVersion": auto_checkin::PROVIDERS_VERSION }));
+}
+
+#[cfg(test)]
+mod tests {
+    //! 随机分钟字段的归一与往返。
+    //!
+    //! 重点钉住 `normalize_schedule` ↔ `to_value` 的对称性：`patch_entry` 是
+    //! 「读原文 → normalize → 改 → to_value 全量写回」，漏了任何一侧，
+    //! `mark_fired` 都会把 `jitterMinutes` 静默清掉（用户只在第二天发现随机
+    //! 没了，极难排查）。这些函数不碰全局 config，可并行跑。
+    use super::*;
+    use serde_json::json;
+
+    fn roundtrip(raw: Value) -> Value {
+        to_value(&normalize_schedule(&raw))
+    }
+
+    #[test]
+    fn jitter_roundtrips_through_storage() {
+        let stored = roundtrip(json!({
+            "id": "s1",
+            "enabled": true,
+            "time": "07:20",
+            "jitterMinutes": 45,
+            "providers": ["trae"],
+        }));
+        assert_eq!(stored.get("jitterMinutes").and_then(Value::as_u64), Some(45));
+    }
+
+    #[test]
+    fn missing_jitter_reads_as_zero() {
+        let schedule = normalize_schedule(&json!({
+            "id": "s1",
+            "time": "07:20",
+            "providers": ["trae"],
+        }));
+        assert_eq!(schedule.jitter_minutes, 0);
+    }
+
+    #[test]
+    fn invalid_jitter_reads_as_zero_or_clamps() {
+        // 读侧宽容：手改配置写坏了不能整条条目失效
+        assert_eq!(normalize_jitter(Some(&json!(null))), 0);
+        assert_eq!(normalize_jitter(Some(&json!("abc"))), 0);
+        assert_eq!(normalize_jitter(Some(&json!(-5))), 0);
+        assert_eq!(normalize_jitter(None), 0);
+        // 超上限夹取（不报错）
+        assert_eq!(
+            normalize_jitter(Some(&json!(9999))),
+            auto_checkin::MAX_JITTER_MINUTES
+        );
+    }
+
+    #[test]
+    fn write_side_rejects_invalid_jitter() {
+        // 写入侧严格：用户填 999 却按 120 生效比直接报错更难排查。
+        // None = 「没带这个字段」→ 保持原值，与 Some(0) 必须区分开。
+        assert_eq!(parse_jitter(None).unwrap(), None);
+        assert_eq!(parse_jitter(Some(&json!(0))).unwrap(), Some(0));
+        assert_eq!(parse_jitter(Some(&json!(120))).unwrap(), Some(120));
+        assert!(parse_jitter(Some(&json!(121))).is_err());
+        assert!(parse_jitter(Some(&json!(-1))).is_err());
+        assert!(parse_jitter(Some(&json!(1.5))).is_err());
+        assert!(parse_jitter(Some(&json!("30"))).is_err());
+    }
 }
