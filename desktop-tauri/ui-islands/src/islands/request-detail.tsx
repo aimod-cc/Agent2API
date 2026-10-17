@@ -78,6 +78,14 @@ type AttemptDetail = {
   notice?: unknown
   /** 这一轮实际发给上游的体字节数（缺 = 没发出去过）*/
   bodyBytes?: unknown
+  /**
+   * 这一轮实际**下发给客户端**的响应字节数（缺 = 没走到流式包装）。
+   * 与 `bodyBytes` 是两个方向，别混：那是出站请求体、这是入站响应体。
+   * 它回答的是「客户端到底收到多少」—— 生产上「200 但零 token」那批里，
+   * 「一个字节都没下发（空流）」与「内容齐了但上游没收尾帧」两类修法相反，
+   * 靠这个数才分得开。
+   */
+  forwardedBytes?: unknown
 }
 
 /** 敏感词命中：词 + 次数 */
@@ -420,6 +428,22 @@ function attemptResult(item: AttemptDetail): React.ReactNode {
 }
 
 /**
+ * 字节数的人类可读形态。**只管正数**：非正数与缺省一律返回 `null`，由调用方
+ * 决定显示什么 —— 两个方向的「0」含义相反（发出体积 0 = 压根没发出去，下发体积
+ * 0 = 上游给了流但一个字节都没到客户端，即空流），共用一个「0 显示成 —」的
+ * 规则会把后一类正好抹掉。
+ *
+ * 只留这一份：两处各写一遍格式化，迟早分叉成分叉的表现是同一份数据显示成两个体积。
+ */
+function formatBytes(raw: unknown): string | null {
+  const value = Number(raw)
+  if (!Number.isFinite(value) || value <= 0) return null
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`
+  if (value >= 1024) return `${Math.round(value / 1024)} KB`
+  return `${value} B`
+}
+
+/**
  * 尝试明细：每次上游尝试一行（提供商 / 账号 / 结果 / 内部重试 / 提示）。数据形状见
  * 后端 AttemptDetail；明细比 attempts 短时如实说明（保头截断，列表弹层同一口径），
  * 重试链的原因与退避间隔进 title（一行放不下，也不该占一列宽度）。
@@ -432,7 +456,7 @@ function AttemptsTable({ row }: { row: RequestRow }) {
     <Table className='text-[11.5px]'>
       <TableHeader>
         <TableRow className={NO_HOVER}>
-          {[t('轮次'), t('提供商'), t('账号'), t('结果'), t('体积'), t('内部重试'), t('提示')].map(label => (
+          {[t('轮次'), t('提供商'), t('账号'), t('结果'), t('体积'), t('已下发'), t('内部重试'), t('提示')].map(label => (
             <TableHead key={label} className={ATTEMPT_HEAD}>{label}</TableHead>
           ))}
         </TableRow>
@@ -450,19 +474,26 @@ function AttemptsTable({ row }: { row: RequestRow }) {
             return `${String(retry?.reason || t('未知原因'))}${delay}`
           }).join('\n')
           const notice = String(item?.notice ?? '').trim()
-          // 体积：上游那两道墙都按请求体字节判（413 / PARSE_REQUEST_DATA_EXCEPTION），
+          // 发出体积：上游那两道墙都按请求体字节判（413 / PARSE_REQUEST_DATA_EXCEPTION），
           // 「这次到底多大」是排查它们时第一个要问的数，库里那份原文却在 128 KB 处截断。
           const bodyRaw = Number(item?.bodyBytes)
-          const bodyText = Number.isFinite(bodyRaw) && bodyRaw > 0
-            ? bodyRaw >= 1024 * 1024
-              ? `${(bodyRaw / 1024 / 1024).toFixed(1)} MB`
-              : bodyRaw >= 1024
-                ? `${Math.round(bodyRaw / 1024)} KB`
-                : `${bodyRaw} B`
-            : '—'
+          const bodyText = formatBytes(item?.bodyBytes) ?? '—'
           const bodyTitle = Number.isFinite(bodyRaw) && bodyRaw > 0
             ? t('实际发给上游 {bytes} 字节', { bytes: bodyRaw.toLocaleString() })
             : undefined
+          // 已下发体积：0 要**如实显示成 0**，不能退化成「—」—— 「上游给了流但
+          // 一个字节都没下发」正是客户端报 incomplete_stream 的那一类，把它显示成
+          // 没数据就等于把要抓的东西藏起来。缺省（undefined/null）才是不适用。
+          const forwardedMissing = item?.forwardedBytes === undefined
+            || item?.forwardedBytes === null
+          const forwardedRaw = Number(item?.forwardedBytes)
+          const forwardedText = formatBytes(item?.forwardedBytes)
+            ?? (forwardedMissing ? '—' : '0 B')
+          const forwardedTitle = forwardedMissing
+            ? undefined
+            : t('实际下发给客户端 {bytes} 字节', {
+                bytes: (Number.isFinite(forwardedRaw) ? forwardedRaw : 0).toLocaleString(),
+              })
           return (
             <TableRow key={index} className={NO_HOVER}>
               <TableCell className={ATTEMPT_CELL}>{index + 1}</TableCell>
@@ -474,6 +505,9 @@ function AttemptsTable({ row }: { row: RequestRow }) {
               <TableCell className={`${ATTEMPT_CELL} whitespace-nowrap`} title={bodyTitle}>
                 {bodyText}
               </TableCell>
+              <TableCell className={`${ATTEMPT_CELL} whitespace-nowrap`} title={forwardedTitle}>
+                {forwardedText}
+              </TableCell>
               <TableCell className={`${ATTEMPT_CELL} whitespace-nowrap`} title={retryTitle || undefined}>
                 {retries.length ? t('↻ {n} 次', { n: retries.length }) : '-'}
               </TableCell>
@@ -483,7 +517,7 @@ function AttemptsTable({ row }: { row: RequestRow }) {
         })}
         {details.length < attempts ? (
           <TableRow className={NO_HOVER}>
-            <TableCell colSpan={7} className={`${ATTEMPT_CELL} text-muted-foreground`}>
+            <TableCell colSpan={8} className={`${ATTEMPT_CELL} text-muted-foreground`}>
               {t('另有 {missing} 次尝试未记录明细（只保留最早的 {kept} 条）', {
                 missing: attempts - details.length, kept: details.length,
               })}

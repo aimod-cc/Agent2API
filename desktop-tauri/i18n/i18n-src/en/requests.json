@@ -66,6 +66,8 @@
   "失败（{status}）：{error}": "Failed ({status}): {error}",
   "失败：{error}": "Failed: {error}",
   "实际发给上游 {bytes} 字节": "{bytes} bytes actually sent upstream",
+  "已下发": "Delivered",
+  "实际下发给客户端 {bytes} 字节": "{bytes} bytes actually delivered to the client",
   "客户端": "Client",
   "将删除 {count} 条日志 · 其中 {raw} 条仍带报文原文 · 数据库占用 {db}": "Will delete {count} logs · {raw} of them still carry raw payloads · database size {db}",
   "尝试 {n} ·": "Attempt {n} ·",
