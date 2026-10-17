@@ -65,6 +65,9 @@ const PROVIDER_DESC: Record<string, string> = {
   // AtomCode 的「签到」不是每日发额，而是**领取免费 CodingPlan**（一次性授权）：
   // 实现按需领取 —— 套餐有效时只回读额度、不重复领；到期或未领才走 Max→Pro→Lite。
   atomcode: t('领取免费 CodingPlan（按需：套餐有效时只回读额度）'),
+  // LobsterAI 的签到是上游的「每日活动」三步（查活动位 → 取上下文 → 领取），
+  // 幂等由客户端与上游的「今天已领」状态共同保证，重复执行只回中性提示。
+  lobsterai: t('每日活动签到（+100 积分，已领则中性提示）'),
 }
 
 /** 页内标签页的档位（值与 checkin-state 的 CheckinTab 一致） */

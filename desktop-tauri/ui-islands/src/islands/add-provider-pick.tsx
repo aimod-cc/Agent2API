@@ -110,6 +110,12 @@ export const PROVIDER_ICONS: Record<string, string> = {
   // （`cdn-static.gitcode.host/static/images/logo-favicon.png`），不是本产品的形象，
   // 所以没有采用它。
   atomcode: 'assets/providers/atomcode.png',
+  // LobsterAI（网易有道「有道龙虾」）：图标取自 sibling 仓库 cpa-jethub-plugins 里
+  // 已核过的品牌图标（`internal/jethub/brandicons/brandicons.go` 的 `LobsterAI`
+  // 常量 —— 那正是产品站点从有道共享 CDN 引用的同一枚，不是有道自家的 favicon）。
+  // 该处是 24×24 的 SVG，已栅格化成 256×256 RGBA 入库（与 orcaterm / officeace
+  // 同一处置）。
+  lobsterai: 'assets/providers/lobsterai.png',
 }
 
 /**

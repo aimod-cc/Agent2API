@@ -192,6 +192,20 @@ pub fn panel_router(state: ServerState) -> Router {
         .route(
             "/oauth-callback",
             get(api::session::login_antigravity_callback),
+        )
+        // LobsterAI 网页登录的 loopback 回调：**浏览器 302 到这里**。
+        // ⚠️ 这一条的路径**没有带家名后缀**，与上面几条自作主张的名字（如
+        // `/auth/callback-accio`）风格不一致 —— 这是有意的：`redirect_uri` 是
+        // 我们拼给上游门户的地址，门户按它回落，而门户是否对回调路径有白名单
+        // **没有实测支撑**。参考实现用的就是裸 `/auth/callback`，这里跟随那条
+        // 已验证的形状，不为了命名风格去赌一次未经验证的兼容性。
+        // 该路径在本仓未被其它家占用（其余几家分别是 `-{vendor}` / `-accio` /
+        // `/oauth/callback` / `/oauth-callback`）。
+        // 免鉴权的理由与上面几条同一句：调用方是用户的浏览器，它没有我们的 API Key；
+        // 安全性由本次登录任务的一次性 state 承担。
+        .route(
+            "/auth/callback",
+            get(api::session::login_lobsterai_callback),
         );
 
     // 需鉴权：Node 版对这些路径都调用了 checkApiKey

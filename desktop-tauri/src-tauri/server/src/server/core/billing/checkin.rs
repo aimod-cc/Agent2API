@@ -508,6 +508,17 @@ pub async fn checkin_for(
                     .map_err(|error| error.message);
             claim_result(id, name, &display, true, claim)
         }
+        "lobsterai" => {
+            // LobsterAI：每日活动三步（查活动位 → 取上下文 → check_in），
+            // 实测 +100 积分/号/天。幂等由实现内做两道预检（上游的
+            // 「今天已领」状态 + 客户端 idempotencyKey），今天已领时如实回
+            // 中性文案而不是再领一次 —— 见 `lobsterai::checkin` 的模块头。
+            let claim =
+                crate::server::core::providers::lobsterai::checkin::claim_daily_checkin(store, &id)
+                    .await
+                    .map_err(|error| error.message);
+            claim_result(id, name, &display, true, claim)
+        }
         other => json!({
             "id": id,
             "name": name,

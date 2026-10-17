@@ -366,6 +366,11 @@ impl AccountStore {
             // （accessToken 与 refreshToken）—— 只摘前者的那套在这里是漏的，
             // refreshToken 是长期有效的续期凭据，不能随账号列表下发。
             self.to_atomcode_public_account(record)
+        } else if record.provider() == super::LOBSTERAI_PROVIDER_ID {
+            // LobsterAI：公开形态要摘掉**令牌本体 + 载荷件三件套**
+            // （refreshToken / uuid / 两个 keyfrom）。它们都是「能续期」的条件，
+            // 一起下发等于把账号的续期能力送出去；界面要的只是 canRefresh 布尔。
+            self.to_lobsterai_public_account(record)
         } else if record
             .provider()
             .starts_with(crate::server::core::custom_providers::ID_PREFIX)

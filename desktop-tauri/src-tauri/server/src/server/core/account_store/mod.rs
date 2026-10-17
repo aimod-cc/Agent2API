@@ -110,6 +110,7 @@ pub mod atomcode_accounts;
 pub mod commandcode_accounts;
 pub mod custom_accounts;
 pub mod kuku_accounts;
+pub mod lobsterai_accounts;
 pub mod loomy_accounts;
 pub mod monkeycode_accounts;
 pub mod officeace_accounts;
@@ -235,6 +236,12 @@ pub(crate) const OFFICEACE_PROVIDER_ID: &str = crate::server::core::providers::k
 /// [`LOOMY_PROVIDER_ID`] 的口径）。账号形态见 `atomcode_accounts.rs`。
 pub(crate) const ATOMCODE_PROVIDER_ID: &str = crate::server::core::providers::kind_id(
     crate::server::core::providers::ProviderKind::Atomcode,
+);
+
+/// LobsterAI（网易有道「有道龙虾」）provider id（**从注册表推导**，同
+/// [`LOOMY_PROVIDER_ID`] 的口径）。账号形态见 `lobsterai_accounts.rs`。
+pub(crate) const LOBSTERAI_PROVIDER_ID: &str = crate::server::core::providers::kind_id(
+    crate::server::core::providers::ProviderKind::LobsterAi,
 );
 
 /// Cline **免费池** provider id（账号存储内部多处要用；**从注册表推导**，同

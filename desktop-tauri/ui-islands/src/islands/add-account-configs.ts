@@ -920,6 +920,48 @@ const ATOMCODE: ProviderConfig = {
   ],
 }
 
+/**
+ * LobsterAI（网易有道「有道龙虾」`lobsterai.youdao.com`）：一家一个 provider，
+ * 没有地区 / 额度池之分。
+ *
+ * ── 只有一条添加路径：浏览器登录（授权码 + 本机 loopback 回调）──────
+ * 网关按 state 登记一轮登录并拼出授权地址，用户在门户授权（手机号 / 微信）后
+ * 门户 302 回**网关自己的端口**：`http://127.0.0.1:<网关端口>/auth/callback`，
+ * 网关拿授权码换令牌后落账号（见后端 `providers::lobsterai::oauth` 与
+ * `core::login::lobsterai`）。回调路径是裸 `/auth/callback`（不是 `-lobsterai`
+ * 后缀）：那是参考实现已验证的形状，门户是否对路径有白名单没有实测支撑。
+ *
+ * ── 没有「填写凭证」这条路径（后端如实拒绝，不是界面漏做）──────────
+ * 续期要**换码那一刻**由上游下发的三件载荷（`uuid` + 两个 `keyfrom`），粘贴
+ * 给不出它们（见后端 `account_store::lobsterai_accounts` 的模块头）。所以后端
+ * `api::accounts` 对 LobsterAI 的粘贴入口**始终回 400**，这里也就不提供手填段。
+ * `fields` 留空是被 `ProviderConfig` 逼的（该键在类型里是必填），不是漏写：
+ * 本家唯一入口就是上面那条「网页登录」。
+ *
+ * ── 没有「导入桌面端登录态」这条路径 ──────────────────────────
+ * 客户端登录态在它自己的存储里，没有 `data.bin` 那种稳定可读的明文形态
+ * （与 Accio / ZCode 同一处境），所以显式 `desktop: false`。
+ */
+const LOBSTERAI: ProviderConfig = {
+  provider: 'lobsterai',
+  label: t('LobsterAI'),
+  desktop: false,
+  // 授权页把浏览器送回**本机端口**（与 Accio 同一形态）：同机自动完成，
+  // 跨机（Docker / 远程面板）到不了网关 —— 本家没有「粘贴最终回调地址」那条
+  // 兜底，所以说明里只讲同机这一条前提，不承诺粘贴通道。
+  webLogin: {
+    // 整段是一个 t() 键：扫描器只认字符串字面量（拼接串提不到键），所以不拆行
+    noteHtml: t('打开 <b>LobsterAI（有道龙虾）</b>的官方登录页（<code>lobsterai.youdao.com</code>）并用你的 LobsterAI 账号登录：登录成功后官方页面会跳回本机并自动加入账号列表 —— 回调落在<b>网关自己的端口</b>上，所以浏览器要与网关在同一台机器上；授权码只在本机传给网关，界面不显示明文 token。'),
+    button: t('打开 LobsterAI 登录页'),
+    busyText: t('等待 LobsterAI 登录完成…'),
+    modes: [
+      { value: 'embedded', label: t('内嵌窗口（推荐）'), hint: t('将打开内嵌窗口；登录完成后自动加入账号列表。关掉窗口即取消等待') },
+      { value: 'external', label: t('系统浏览器'), hint: t('将用系统默认浏览器打开登录页（会复用浏览器里已登录的 LobsterAI 账号）；完成登录后自动加入账号列表，关掉弹窗即取消等待') },
+    ],
+  },
+  fields: [],
+}
+
 /** 内置家的表单块，顺序与旧 ADD_FORMS 一致（只影响 DOM 里的块顺序，不影响界面） */
 export const BUILTIN_CONFIGS: ProviderConfig[] = [
   RACCOON,
@@ -970,6 +1012,9 @@ export const BUILTIN_CONFIGS: ProviderConfig[] = [
   // AtomCode（AtomGit / GitCode）：浏览器登录 + 粘贴令牌对，排在末尾
   // （与后端注册表 PROVIDERS 的排列一致，后到居后）
   ATOMCODE,
+  // LobsterAI（网易有道「有道龙虾」）：只有浏览器登录一条入口，排在末尾
+  // （与后端注册表 PROVIDERS 的排列一致，后到居后）
+  LOBSTERAI,
 ]
 
 /** WorkBuddy 的块 id（结构特殊，单独一个组件） */

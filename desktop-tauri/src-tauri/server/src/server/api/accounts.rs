@@ -1295,6 +1295,17 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
             // 面板传来的名字是用户自己打的 ⇒ 标 custom（此后续期/重登不改它）
             store.add_atomcode_account(&payload, import_name)
         }
+        // LobsterAI：**没有粘贴路径**（如实拒绝，而不是落一条用不了的账号）。
+        // 它的凭证里有两个 `keyfrom` 与一个 `uuid`，只在换码那一刻由上游下发 ——
+        // 用户从别处粘不出这三样，缺了它们账号续不了期（见
+        // `providers::lobsterai::credentials` 的模块头）。所以本家只有一个入口：
+        // 网页登录落到本机 loopback 回调后由适配器落账号。
+        Some(crate::server::core::providers::ProviderKind::LobsterAi) => {
+            return management_error(
+                400,
+                "LobsterAI 只能通过「网页登录」添加：它的续期需要换码时下发的 uuid 与 keyfrom，粘贴给不出这三项",
+            );
+        }
         // WorkBuddy 系的两家（国内版 / 国际版）：同一套凭证形态与落账号路径，
         // 差别只有归属 —— provider id 自己就是归属（拆家后不再从 payload 里的
         // `edition` 反推：那是账号的属性，而落哪一家是身份问题）。
@@ -1578,6 +1589,14 @@ pub async fn refresh_account(state: &ServerState, body: &Bytes) -> Response {
     // OfficeAce 同一条理由），而 AtomGit 的令牌会因此悄悄过期到只能重新登录。
     if state.store().atomcode_account_record(&id).is_some() {
         return refresh_provider_account(state, &id, ProviderKind::Atomcode).await;
+    }
+    // LobsterAI：续期走它自己的适配器（`POST /api/auth/refresh`，**会轮换**，
+    // 且必须把 uuid 与两个 keyfrom 原样回传）。**这条不能省**：漏了就落到
+    // workbuddy 兜底链路，用户点「刷新 Token」收到的是腾讯那侧的错（与
+    // CodeArts/Trae/OfficeAce/AtomCode 同一条理由），而龙虾的令牌会因此
+    // 悄悄过期到只能重新网页登录 —— 而那一轮登录是用户手动做的。
+    if state.store().lobsterai_account_record(&id).is_some() {
+        return refresh_provider_account(state, &id, ProviderKind::LobsterAi).await;
     }
     // Accio（两个地区）：走适配器的强制刷新（`POST /api/auth/refresh_token`，
     // 结果按「比较再写」回写）。两个地区各查一次 —— 账号集合按 provider 隔离，

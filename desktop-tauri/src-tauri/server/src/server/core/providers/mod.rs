@@ -144,6 +144,7 @@ pub mod content_block;
 /// 自定义家走独立通道」的两条路径。
 pub mod custom;
 pub mod kuku;
+pub mod lobsterai;
 pub mod loomy;
 /// MonkeyCode（长亭科技的开源 AI 开发平台）。适配实现在 `monkeycode/`：
 /// 账号管理（粘贴 session）+ 模型目录（`GET /api/v1/users/models`）+
@@ -524,6 +525,22 @@ pub enum ProviderKind {
     /// 3. 网关把失败包装成成功：`HTTP 200` + 正文 `参数错误`（或一页上游 HTML
     ///    报错），见 `atomcode::errors`。
     Atomcode,
+    /// LobsterAI（网易有道「有道龙虾」，`lobsterai.youdao.com`）。适配实现在
+    /// `lobsterai/`：账号管理（浏览器登录落于本机 loopback 回调）+ **无状态
+    /// 转发** + 目录 + 积分余额 + 每日签到。
+    ///
+    /// ── 上游长什么样（Go 参考 + TS 原版，见 `lobsterai/` 各模块头）──
+    /// 对话端点是 **OpenAI 兼容的原生协议**（`POST /api/proxy/v1/chat/completions`），
+    /// **只收 SSE**（`stream:false` 回 HTTP 500）—— 本网关的转发入口恒以
+    /// `stream:true` 请求上游，这条天然满足。**没有任何签名**，纯 Bearer。
+    ///
+    /// ── 三个载荷点 ────────────────────────────────────────────
+    /// ① 两个 `X-LobsterAI-Client-*` 头按能力过滤：少了 `kimi-k3-agentic-v1`
+    /// 目录里少一个模型，少了 `thinking-level-control-v1` 发
+    /// `reasoning_effort:"off"` 直接 500；② `uuid` 与两个 `keyfrom` 只在换码时
+    /// 下发、续期必须原样回传（丢了账号永远续不了期）；③ `developer` 角色上游
+    /// 回 502，出站要降级成 `system`。
+    LobsterAi,
 }
 
 /// 一个提供商的静态元数据。
@@ -630,6 +647,9 @@ pub const PROVIDERS: &[ProviderMeta] = &[
     // 尚未接，见 `atomcode/mod.rs` 的模块头），没有国际版伴生。排在 OrcaTerm
     // 之后（后到居后，同样让同名模型优先归已有各家）。
     ProviderMeta { id: "atomcode", label: "AtomCode" },
+    // LobsterAI（网易有道「有道龙虾」）：单一入口（浏览器登录），没有地区伴生。
+    // 排在末尾（后到居后）。
+    ProviderMeta { id: "lobsterai", label: "LobsterAI" },
 ];
 
 /// provider id 在注册表里的下标（未知 id → None）。
@@ -716,6 +736,7 @@ pub fn kind_from_id(id: &str) -> Option<ProviderKind> {
         "orcaterm" => Some(ProviderKind::OrcaTerm),
         "chatglm" => Some(ProviderKind::Chatglm),
         "atomcode" => Some(ProviderKind::Atomcode),
+        "lobsterai" => Some(ProviderKind::LobsterAi),
         // 走到这里 = 上面的注册表判定已放行、这个 match 却没有对应分支：
         // 只可能是有人给 `PROVIDERS` 加了条目忘了加这里。开发期喊出来；
         // release 返回 None（见上：宁可为「未知」，不可误认成别家）。
@@ -760,6 +781,7 @@ pub const fn kind_id(kind: ProviderKind) -> &'static str {
         ProviderKind::OrcaTerm => "orcaterm",
         ProviderKind::Chatglm => "chatglm",
         ProviderKind::Atomcode => "atomcode",
+        ProviderKind::LobsterAi => "lobsterai",
     }
 }
 

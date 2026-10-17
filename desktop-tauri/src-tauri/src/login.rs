@@ -675,9 +675,14 @@ fn allowed_hosts(provider: &str) -> Option<&'static [&'static str]> {
         // 取回（`auth/check` → `auth/token`，见 `providers::atomcode::oauth` 的
         // 模块头），所以这里没有 loopback 回调要放行；但「不设限」仍是必须显式
         // 写出的选择。
+        // LobsterAI 不设限，而且这一条**必须是 None**：它的授权页完成后会
+        // **302 回本机**（`http://127.0.0.1:<网关端口>/auth/callback`），那次
+        // 导航一旦被白名单拦下，症状就是用户明明授权成功、网关永远等不到码，
+        // 而日志里什么都看不出（与 CodeArts / Trae 的 loopback 回调同一情形）。
+        // 授权页本身在 `lobsterai.youdao.com`，沿途还可能有微信登录的第三方主机。
         "catpaw" | "qoder" | "qoder-intl" | "cline-free" | "cline-pass" | "autoclaw"
         | "autoclaw-intl" | "accio" | "accio-cn" | "zcode" | "zcode-intl" | "codearts" | "trae"
-        | "kuku" | "antigravity" | "officeace" | "orcaterm" | "atomcode" => None,
+        | "kuku" | "antigravity" | "officeace" | "orcaterm" | "atomcode" | "lobsterai" => None,
         // WorkBuddy 的两个地区共用这一张表（表里 `workbuddy.ai` 那一行就是国际站
         // 的登录域）。**显式列出**而不是靠下面的默认分支：上面那条警告要求
         // 「新 provider 落到默认分支」必须是有意的选择，写出来才看得出是选过的
@@ -874,6 +879,14 @@ fn normalize_provider(provider: &str) -> Result<&'static str, String> {
         // `http://127.0.0.1:<网关端口>/oauth/callback` 落回网关自己，所以窗口
         // **必须允许**导航到本机端口（见下面 allowed_hosts 的同一条）。
         "codearts" => Ok("codearts"),
+        // LobsterAI（网易有道「有道龙虾」）：授权地址由**后端适配器**现拼
+        // （门户的 hash 路由 + `redirect_uri` 指向网关自己那个 loopback 端口，
+        // 见 `providers::lobsterai::oauth::build_authorize_url`），壳侧只负责
+        // 开窗口与轮询 —— 与 CodeArts 同一条路。它的回调落在
+        // `http://127.0.0.1:<网关端口>/auth/callback`（**裸路径**，理由见
+        // `http.rs` 那条路由的注释），所以窗口**必须允许**导航到本机端口，
+        // 见下面 allowed_hosts 的同一条。
+        "lobsterai" => Ok("lobsterai"),
         // Trae（SOLO CN）：授权地址由**后端**问上游 guidance 拼（PKCE + 回调 URL），
         // 壳侧只负责开窗口与轮询 —— 与 ZCode 同一条路。特别地，它的回调落在
         // `http://127.0.0.1:<随机端口>/authorize`（网关自己监听的那台 loopback，
@@ -1223,6 +1236,7 @@ pub async fn start(
         // OfficeAce 只有一家（自助 OAuth 一条链，没有地区/版本概念），品牌名里
         // 不需要地区
         "officeace" => "OfficeAce 果办",
+        "lobsterai" => "LobsterAI",
         _ => "WorkBuddy",
     };
     // 窗口标题：Cline 两家的池、ZCode 两家的地区、CodeArts / Trae / OfficeAce
@@ -1231,7 +1245,7 @@ pub async fn start(
     let title = if matches!(
         provider,
         "cline-free" | "cline-pass" | "zcode" | "zcode-intl" | "codearts" | "trae" | "qoder"
-        | "qoder-intl" | "antigravity" | "officeace"
+        | "qoder-intl" | "antigravity" | "officeace" | "lobsterai"
     ) {
         format!("登录 {provider_label} 账号")
     } else {

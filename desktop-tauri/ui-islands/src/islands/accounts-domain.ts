@@ -259,6 +259,25 @@ const PROVIDER_FEATURES: Record<string, ProviderFeatures> = {
   // `expiry: 'expiresAt'` —— 令牌**不是 JWT**，过期时刻由 `createdAt + expiresIn`
   //   推出后落盘（见 `providers/atomcode/credentials.rs` 的模块头）。
   atomcode: { usage: true, edition: false, identifier: 'userId', expiry: 'expiresAt' },
+  // LobsterAI（网易有道「有道龙虾」）。各位各有出处：
+  // `usage: true` —— 余额是**积分**（`GET /api/user/profile-summary`，见后端
+  //   `providers::lobsterai::endpoints` 的 `PROFILE_SUMMARY_PATH`），所以余额按钮
+  //   与积分列都开。
+  // `creditDetail: true` —— 同一份 profile-summary 还带**逐份积分包**（参考实现的
+  //   `creditItems[]` → 面额 / 已用 / 剩余 / 到期，见 Go 参考 `credits.go` 的
+  //   `creditPackage`），正是 `credits[]` 那行的形状。与 ZCode 的纯比例窗口不同，
+  //   这里每份都有绝对值，能摊成逐行读数。⚠️ 这一位是**承诺**：后端
+  //   `query_usage` 不出 `credits` 时入口不挂（accounts-panels 的
+  //   `creditRows.length` 判据），所以现在开它是安全的；后端若不实现逐份清单，
+  //   把这一位删掉即可，界面自动退回单行读数。
+  // `edition: false` —— 单一站点（`lobsterai.youdao.com`），没有国际版 / 地区之分，
+  //   所以不拼版本后缀（与 orcaterm / atomcode 同一处置）。
+  // `identifier: 'userId'` —— 身份键取 `userId`：后端落账号时的身份口径是
+  //   `userId → uid → 令牌尾段`，账号 id 也由它拼成（`lobsterai-<identity>`，
+  //   见 `account_store::lobsterai_accounts`），列上与 id 的后缀对得上。
+  // `expiry: 'expiresAt'` —— 落盘写的是毫秒 `expiresAt`（显式 > createdAt +
+  //   expiresIn > JWT 的 `exp`），与 atomcode 同一条教训。
+  lobsterai: { usage: true, creditDetail: true, edition: false, identifier: 'userId', expiry: 'expiresAt' },
 }
 
 /**

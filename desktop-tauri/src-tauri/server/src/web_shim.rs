@@ -170,7 +170,11 @@ pub fn shim_js() -> &'static str {
   function needsManualCallback(provider) {
     return provider === 'trae'
       || provider === 'accio' || provider === 'accio-cn'
-      || provider === 'codearts' || provider === 'autoclaw-intl';
+      || provider === 'codearts' || provider === 'autoclaw-intl'
+      // LobsterAI 同属这一型：授权页完成后 302 回
+      // `http://127.0.0.1:<网关端口>/auth/callback`，在 Docker 面板里那个
+      // 地址属于浏览器所在电脑、回不到容器，只能让用户把最终 URL 粘回来。
+      || provider === 'lobsterai';
   }
 
   function escapeHtml(value) {

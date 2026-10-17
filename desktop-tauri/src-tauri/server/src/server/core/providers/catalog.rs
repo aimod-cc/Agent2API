@@ -203,6 +203,13 @@ pub(crate) fn refresh_meta(kind: ProviderKind) -> (bool, i64) {
             super::atomcode::models::remote_refreshed(),
             super::atomcode::models::last_refreshed_at(),
         ),
+        // LobsterAI：清单来自 `GET {api}/api/models/available`（带 keyfrom query）。
+        // 拉不到时回落内置的 19 条静态表，所以「有远程内容」才算远程来源
+        // —— 与 Loomy / CommandCode 同一口径（`remote_refreshed` 只看落地的那些）。
+        ProviderKind::LobsterAi => (
+            super::lobsterai::models::remote_refreshed(),
+            super::lobsterai::models::last_refreshed_at(),
+        ),
     }
 }
 

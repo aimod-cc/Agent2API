@@ -304,6 +304,10 @@ impl ServerState {
         // `http://localhost:{port}/oauth-callback`（redirect_uri 由适配器在发起
         // 登录时本地拼），端口必须在第一次发起之前就位（见该模块 `set_loopback_port`）。
         crate::server::core::providers::antigravity::oauth::set_loopback_port(port);
+        // LobsterAI 的网页登录同理：授权地址里的 `redirect_uri` 要指向
+        // `http://127.0.0.1:{port}/auth/callback`，而地址由适配器在发起时本地拼
+        // （同步无参），端口必须先就位（见该模块 `set_loopback_port`）。
+        crate::server::core::providers::lobsterai::oauth::set_loopback_port(port);
         let config_dir = config::config_dir();
         // 与 Node 版一致：verbose 由环境变量 AGENT2API_VERBOSE=1 打开
         // （旧名 WORKBUDDY_VERBOSE 仍可读，新名优先），
