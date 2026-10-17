@@ -496,6 +496,18 @@ pub async fn checkin_for(
             }
             row
         }
+        "atomcode" => {
+            // AtomCode：本家的「签到」是**领取免费 CodingPlan**（一次性授权，
+            // 不是每天发积分）。实现按需领取：先探测 `status-v2`，只有确实
+            // 没有有效套餐时才走 Max → Pro → Lite 的级联，命中即停。
+            // 判定细节与「`duplicate` 是成功语义、不许只看 HTTP 200」这条
+            // 最容易写错的地方见 `atomcode::checkin` 的模块头。
+            let claim =
+                crate::server::core::providers::atomcode::checkin::claim_plan_if_needed(store, &id)
+                    .await
+                    .map_err(|error| error.message);
+            claim_result(id, name, &display, true, claim)
+        }
         other => json!({
             "id": id,
             "name": name,

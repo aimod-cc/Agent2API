@@ -36,6 +36,7 @@
 //! release 是 `panic=abort`：本文件零 unwrap/expect/panic。
 
 pub mod chat;
+pub mod checkin;
 pub mod credentials;
 pub mod endpoints;
 pub mod errors;
