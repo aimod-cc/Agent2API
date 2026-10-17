@@ -202,6 +202,19 @@ pub fn build_chat_request(
             "accept".to_string(),
             "text/event-stream, application/json".to_string(),
         ),
+        // ⚠️ `Content-Type` **必须显式发**：本仓的转发层用 `client.post(url).body(bytes)`
+        // （`core/upstream/request.rs` 的发送点），reqwest 的 `.body()` **不会**自动补
+        // 这个头 —— 只有 `.json()` 才会。而剥掉它之后上游回的是**鉴权之后的**
+        // `{"code":500,"message":"服务器内部错误"}`（HTTP 500，约 46ms 即返），
+        // 跨模型稳定复现，看上去像「网关坏了」而不是「少了个头」。
+        // 判据：同一账号打同一个域名的其它 POST（换码 `/api/auth/exchange`、
+        // 签到）都带了它且成功；伪令牌探针证明上游**先鉴权**（401 code 40100），
+        // 所以 500 出在鉴权之后。两个参考实现也都把它列在四个基础头里
+        // （TS `lobsteraiAuthHeaders`、Go `authHeaders`）。
+        (
+            "content-type".to_string(),
+            "application/json".to_string(),
+        ),
         // 两个客户端头都是功能性的（能力位过滤模型、版本决定被当成哪个客户端）
         (
             "x-lobsterai-client-capabilities".to_string(),
@@ -258,6 +271,18 @@ mod tests {
         assert_eq!(messages[2].get("role").and_then(Value::as_str), Some("system"));
         // 内容不动
         assert_eq!(messages[0].get("content").and_then(Value::as_str), Some("a"));
+    }
+
+    /// **第二道护栏**：chat 请求必须自带 `Content-Type: application/json`。
+    ///
+    /// 本仓转发层用 `client.post(url).body(bytes)` 发包，reqwest 的 `.body()`
+    /// **不补**这个头（只有 `.json()` 会）。缺了它上游回的是**鉴权之后**的
+    /// HTTP 500「服务器内部错误」，跨模型稳定复现 —— 症状像网关坏了，实际
+    /// 只是少了一个头（成因与判据见 `build_chat_request` 里的注释）。
+    #[test]
+    fn chat_request_carries_json_content_type() {
+        let plan = build(json!({"model": "glm-5.2", "messages": [{"role": "user", "content": "a"}]}));
+        assert_eq!(header_of(&plan, "content-type"), Some("application/json"));
     }
 
     /// `tool_choice` 的三种「必须删」形态；`"auto"` / 对象形态**保留**。
