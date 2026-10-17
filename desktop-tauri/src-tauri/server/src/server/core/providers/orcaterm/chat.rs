@@ -186,12 +186,45 @@ async fn create_conversation(
     let code = value.get("code").and_then(Value::as_i64).unwrap_or(-1);
     if code != 0 {
         let message = value.get("message").and_then(Value::as_str).unwrap_or("未知错误");
+        // 凭证失效在上游是「HTTP 200 + 业务码」，而本文件的自愈链（建会话与
+        // 开流两处）只认 401。这里把口径翻译成调用方认得的那一种：不翻译的话
+        // 这条信号永远触发不了 `refresh_for_retry`，账号一旦过期就永久 502
+        // （2026-10-17 实测，见 `credentials::expires_at_seconds` 的记录）。
+        // 非凭证类的业务码维持 502 —— 那些换 token 也救不回来。
+        if is_credential_rejection(code, message) {
+            return Err(GatewayError::with_status(
+                401,
+                format!("OrcaTerm 登录态已失效（code={code}：{message}）"),
+            ));
+        }
         return Err(GatewayError::with_status(
             502,
             format!("OrcaTerm 建会话失败（code={code}：{message}）"),
         ));
     }
     Ok(format!("cid-{uuid}-orcaterm"))
+}
+
+/// 判定一次 CGI 业务错误是不是「凭证失效」。
+///
+/// 上游把凭证失效表达成 **HTTP 200 + `code=-1` + `message` 提到 token**
+/// （实测原文 `Invalid or expired AccessToken`），不是 HTTP 401 —— 而
+/// [`refresh_for_retry`] 那两条自愈链只认 401。识别它，是为了把上游口径
+/// 翻译成框架认得的那一种。
+///
+/// 判据刻意收窄（必须同时提到 token 与 invalid / expired / 失效 / 过期）：
+/// 放宽会把「模型不存在」之类的业务错误也当成凭证问题，白刷一次 token
+/// 再白重试一次。
+fn is_credential_rejection(code: i64, message: &str) -> bool {
+    if code == 0 {
+        return false;
+    }
+    let text = message.to_ascii_lowercase();
+    text.contains("token")
+        && (text.contains("invalid")
+            || text.contains("expired")
+            || text.contains("失效")
+            || text.contains("过期"))
 }
 
 /// 打开对话 SSE 流。
@@ -690,4 +723,28 @@ fn random_uuid() -> String {
         &hex[16..20],
         &hex[20..]
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 上游把凭证失效表达成 HTTP 200 + 业务码（2026-10-17 生产原文）。
+    #[test]
+    fn credential_rejections_are_recognized() {
+        assert!(is_credential_rejection(-1, "Invalid or expired AccessToken"));
+        assert!(is_credential_rejection(-1, "AccessToken 已过期"));
+        assert!(is_credential_rejection(-1, "TOKEN EXPIRED"));
+    }
+
+    /// 判据要窄：非凭证类的业务错误换 token 也救不回来，别白刷一次再白重试一次。
+    #[test]
+    fn other_business_errors_are_not_credential_rejections() {
+        assert!(!is_credential_rejection(0, ""));
+        assert!(!is_credential_rejection(-1, "模型不存在"));
+        // 提到 token 但没说失效 → 不算
+        assert!(!is_credential_rejection(-1, "token 数量超出限制"));
+        // 说了失效但没提 token → 不算
+        assert!(!is_credential_rejection(-1, "会话已过期"));
+    }
 }

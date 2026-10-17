@@ -397,6 +397,33 @@ async fn call_refresh_api(
 
 // ─── 账号记录快照 ───────────────────────────────────────────
 
+/// 账号记录 → `expires_at`（**秒**）的单位归一。
+///
+/// ── 为什么需要这一步 ─────────────────────────────────────────
+/// 记录里的 `tokenExpireAt` 是**毫秒**（导入与续期回写都是 `expires_at * 1000`，
+/// 见 `account_store::orcaterm_accounts` 的模块头），而
+/// [`OrcatermCredentials::expires_at`] 是**秒**（JWT `exp` 的口径，
+/// [`OrcatermCredentials::is_expiring`] 用 `now_ms() / 1000` 与它相减）。
+/// 毫秒值当秒读会比 `now` 大三个数量级，`is_expiring()` 于是**恒返回 false**：
+/// 临期续期、定时凭证维护、面板「刷新临期凭证」三条自动路径全部静默失能，
+/// 账号在 JWT 时效（约 2 小时）到时即永久 502 —— 2026-10-17 实测（账号导入
+/// 两小时后失效，四种模型的测试同一句
+/// `建会话失败（code=-1：Invalid or expired AccessToken）`）。
+///
+/// 落点在读取侧而非写入侧：`tokenExpireAt` 的毫秒口径是**展示层依赖**的
+/// （面板按毫秒渲染「到期时间」，见 `account_store::orcaterm_accounts` 的
+/// 出参注释），改写入会顺手改坏那个读数。
+fn expires_at_seconds(record: &Value, jwt_exp: i64) -> i64 {
+    record
+        .get("tokenExpireAt")
+        .and_then(Value::as_i64)
+        .filter(|millis| *millis > 0)
+        .map(|millis| millis / 1000)
+        // 不足 1 秒（理论上不会出现）→ 按「判不出」处理，回落 JWT 的 `exp`
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(jwt_exp)
+}
+
 /// 从账号记录取转发凭证（`account_id` 为空 → 本家组内优先级最小的启用账号）。
 ///
 /// 记录里的 `accessToken` 存 JWT 本体（见账号层）。临期**不在这里刷**：
@@ -424,11 +451,7 @@ pub fn snapshot_for(
     let (jwt_user_id, jwt_exp) = claims_of(&token);
     Ok(OrcatermCredentials {
         access_token: token,
-        expires_at: record
-            .get("tokenExpireAt")
-            .and_then(Value::as_i64)
-            .filter(|value| *value > 0)
-            .unwrap_or(jwt_exp),
+        expires_at: expires_at_seconds(&record, jwt_exp),
         user_id: record
             .get("uid")
             .and_then(Value::as_str)
@@ -437,4 +460,53 @@ pub fn snapshot_for(
             .unwrap_or(jwt_user_id),
         nickname: record.get("loginName").and_then(Value::as_str).unwrap_or("").to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 造一份「记录里存毫秒」的凭证快照（其它字段填占位值）。
+    fn credentials_from_record_expiry(millis: i64) -> OrcatermCredentials {
+        let record = json!({ "tokenExpireAt": millis });
+        OrcatermCredentials {
+            access_token: "placeholder".to_string(),
+            expires_at: expires_at_seconds(&record, 0),
+            user_id: String::new(),
+            nickname: String::new(),
+        }
+    }
+
+    /// 记录里的 `tokenExpireAt` 是毫秒，读出来的 `expires_at` 必须是秒 ——
+    /// 2026-10-17 的故障就是这一步没归一（毫秒当秒读 → `is_expiring` 恒 false）。
+    #[test]
+    fn record_millis_are_normalized_to_seconds() {
+        let exp_secs = 1_760_716_800_i64;
+        let record = json!({ "tokenExpireAt": exp_secs * 1000 });
+        assert_eq!(exp_secs, expires_at_seconds(&record, 0));
+    }
+
+    /// 判不出（缺字段 / 0 / 不足 1 秒）时回落 JWT 的 `exp`。
+    #[test]
+    fn undecidable_expiry_falls_back_to_jwt_exp() {
+        let jwt_exp = 1_700_000_000_i64;
+        assert_eq!(jwt_exp, expires_at_seconds(&json!({}), jwt_exp));
+        assert_eq!(jwt_exp, expires_at_seconds(&json!({ "tokenExpireAt": 0 }), jwt_exp));
+        assert_eq!(jwt_exp, expires_at_seconds(&json!({ "tokenExpireAt": 500 }), jwt_exp));
+    }
+
+    /// 端到端口径：归一之后 10 分钟临期窗口才真的能开合（修复前毫秒值永远在
+    /// 窗口之外，临期续期 / 定时维护 / 面板刷新三条自动路径全部静默失能）。
+    #[test]
+    fn normalized_expiry_drives_the_refresh_window() {
+        let now_secs = crate::server::logging::now_ms() / 1000;
+        assert!(
+            credentials_from_record_expiry((now_secs + 300) * 1000).is_expiring(),
+            "还剩 5 分钟必须判临期"
+        );
+        assert!(
+            !credentials_from_record_expiry((now_secs + 7_200) * 1000).is_expiring(),
+            "还剩 2 小时不该判临期"
+        );
+    }
 }
