@@ -239,7 +239,7 @@ function wrapFetchError(error: unknown, base: string): Error {
  * 缓存住的旧值会一直 401 —— 重问一次桥就自愈。**401 表示服务端没有处理这次
  * 请求**，重发不会有副作用（对话也一样）。
  */
-async function requestDirect(
+export async function requestDirect(
   path: string,
   options: { method: string; body?: unknown; signal?: AbortSignal },
   retried = false,
