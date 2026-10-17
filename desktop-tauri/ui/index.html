@@ -95,6 +95,11 @@
        排在最后：工具类带 !important（原因见 ui-kit/styles/globals.css 顶部），
        顺序其实已不影响结果，但保持「后加载的是更新的体系」这条阅读线索。 -->
   <link rel="stylesheet" href="islands/ui.css">
+  <!-- 移动端 / 窄视口适配：排在**最后**——组件库工具类带 !important，
+        个别规则需要靠级联顺序压制；且全部声明都在 max-width 断点内，
+        不会外泄到桌面（桌面窗口最小 820px，永远进不来）。
+        详见文件头注释：不加载它，手机上面板会有近一半功能点不到。 -->
+  <link rel="stylesheet" href="css/responsive.css">
   <!-- 多语言运行时：查表 t() + 静态文案扫描器（data-i18n 系列）。
        词典已由上面 head 里的引导脚本同步注入（document.write），这里只放运行时逻辑。
        必须排在 units.js / app.js 等业务脚本之前 —— 它们在加载期就可能读 window.wbI18n；

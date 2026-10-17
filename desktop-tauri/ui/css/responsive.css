@@ -1,0 +1,222 @@
+/* ─────────────────────────────────────────────────────────────
+   移动端 / 窄视口适配（headless 面板经 LAN 被手机、平板访问）
+
+   ── 为什么需要这个文件 ──────────────────────────────────────
+   面板原本只为**桌面窗口**设计：`tokens.css` 给 body 写死了
+   `min-width: 720px`（护栏，配合 src-tauri 的 WIN_MIN_WIDTH=820），
+   而 `.content` / `.page` 是 `overflow: hidden`。于是当视口窄于 720px，
+   多出来的宽度既画不出来也**滚不到** —— 不是"难看"，是**功能不可达**。
+   实测 390px 下：59 个功能控件里 44 个点不到（页面被固定在 720px 宽）。
+
+   ── 桌面不受影响 ────────────────────────────────────────────
+   全部规则包在 `max-width: 720px` 内，而桌面窗口最小 820px，
+   永远进不来。桌面形态逐字节不变（已在 1280px 实测无回归）。
+
+   ── 加载位置 ────────────────────────────────────────────────
+   排在 islands/ui.css 之后（最后一个）：组件库工具类带 !important，
+   少数规则需要用它压制；全部断点内的声明都不会外泄到桌面。
+   ───────────────────────────────────────────────────────────── */
+
+@media (max-width: 720px) {
+  /* ── 1. 解开为桌面窗口写死的 720px 下限（本文件存在的根本原因） ── */
+  body { min-width: 0; }
+
+  :root {
+    /* 900px 断点把侧栏收到 68px，手机上仍偏宽（占 390px 的 17%） */
+    --sidebar-w: 56px;
+    --pad: 12px;
+    /* 80vw 限宽在窄屏等于"再压窄一次"：390px 下内容只剩 312px。
+       移动端铺满，把宽度全让给表格与日志正文。 */
+    --content-max: none;
+  }
+
+  .topbar { padding: 0 12px; }
+
+  /* ── 2. 表格页脚：定宽控件在窄屏必须能换行/收缩 ──────────────
+     五张表共用的 `.table-foot-ctl` 是 `flex: 0 0 auto` 的定宽块
+     （实测 465px，日志页含"跳至页"达 564px）。父级 `.panel` 是
+     `overflow: clip`，超出部分被**硬裁**且滚不到 —— 翻页器整块消失。
+     与是否移动端无关，临界点约 530px（日志页约 630px）。 */
+  .panel-foot { flex-wrap: wrap; }
+  .table-foot-ctl {
+    flex: 1 1 100%;
+    min-width: 0;
+    margin-left: 0;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+  .table-foot-bar { flex-wrap: wrap; }
+  /* 页脚内带 Tailwind `min-w-[...]` 的读数块，允许收缩 */
+  .table-foot-ctl > *,
+  .table-foot-count,
+  .table-foot-size,
+  .table-foot-jump { min-width: 0; }
+
+  /* ── 3. 网关页筛选行：搜索框硬编码 240px 且不换行 ─────────── */
+  .mm-filters { flex-wrap: wrap; }
+  #models-search {
+    flex: 1 1 160px;
+    width: auto;
+    min-width: 0;
+  }
+  /* 页头动作区（列设置 / 新建 / 添加模型…）。
+     page-gateway.css:72 有一条 `.page[data-page="gateway"] .panel-head .head-actions
+     { flex: 0 0 auto; flex-wrap: nowrap; }`（特异性 0,4,0），会压过普通的
+     `.panel-head .head-actions`（0,2,0）—— 必须用同等特异性才盖得住，
+     否则「列设置」按钮在 390px 下稳稳越界 40px（实测 r=430 vs vw=390）。 */
+  .page[data-page="gateway"] .panel-head .head-actions {
+    flex: 1 1 100%;
+    min-width: 0;
+    flex-wrap: wrap;
+    margin-left: 0;
+    justify-content: flex-start;
+  }
+
+  /* ── 4. 设置页分类导航：横滚条会把一半分类藏起来 ─────────────
+     900px 断点把它转成横排 + `overflow-x: auto`，实测 10 个分类共
+     881px，而可视宽只有 310px —— 后 7 个（路由/重试/超时/安全/数据/
+     反馈/更新）在手机上**看不见也想不到要横滑**。
+     改成两列网格一次铺开，全部可见可点。 */
+  .settings-layout { gap: 10px; }
+  .settings-nav {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px;
+    overflow: visible;
+    width: 100%;
+  }
+  .settings-nav-item {
+    width: auto;
+    min-width: 0;
+    padding: 0 10px;
+    justify-content: flex-start;
+  }
+
+  /* ── 5. 触控目标：30px 对触屏偏小 ─────────────────────────────
+     组件库按钮的 30px 来自 Tailwind 工具类 `.h-\[30px\]{height:30px!important}`
+     （在 islands/ui.css 的 `@layer utilities` 内）。
+     ⚠️ 直接写 `height:38px!important` **不管用**：按 CSS Cascade 5，同为
+     important 时**分层声明胜过未分层声明** → 只有不含该工具类的按钮生效，
+     实测 115/278 变高、163 个不动，「同一界面两种按钮高度」比不改更糟。
+     ✅ 正确做法是用 **`min-height`**：它与 `height:30px` 是**不同属性**，
+     本就不冲突，无需对轰 important，也不需要包 `@layer`（已实测层外层内
+     均 278/278 生效）。见文件末尾第 5b 节。 */
+  /* 侧栏与设置页分类导航不是组件库按钮，无 Tailwind 高度类，直接设即可 */
+  .nav-item { height: 40px; }
+  .settings-nav-item { height: 40px; }
+  .log-filters select,
+  .log-filters input,
+  .toolbar input,
+  .toolbar select { height: 36px; }
+
+  /* ── 6. 日志与请求正文：确保长内容换行而非被裁 ───────────────
+     `.log-row` 是 `grid-template-columns: 10px minmax(0,1fr) auto`，
+     正文列本就是 minmax(0,1fr)，配 `word-break: break-word` 默认已
+     完整换行显示（实测 50 行日志零截断）。这里只是显式兜底：
+     等宽正文里的长 token/URL 强制断行，保证"信息齐全"。 */
+  .log-row .msg,
+  .log-row .extra,
+  .req-row .msg { overflow-wrap: anywhere; }
+
+  /* 页头/工具条内侧留白收窄，把宽度还给内容 */
+  .panel-head { padding: 10px 12px; }
+  .panel-body { padding: 12px 12px; }
+  .toolbar { padding: 10px 12px; }
+  .content { padding: var(--pad) var(--pad) 0; }
+
+  /* ── 7. 签到中心：有真实账号数据后才会暴露的横向溢出 ──────────
+     空数据实例测不出来（踩过的坑）：接入真实账号后，`.ck-tabs` 的
+     分段控件 + 右侧读数、以及 `.ck-prov-main` 里「提供商名 + 操作 +
+     折叠箭头」的 min-content 会把 `.ck-main` 的**隐式网格列**撑到
+     478px（实测生产 3459：`.ck-main` sw=478 / cw=310）。
+     父级 `.panel` 是 `overflow: clip` → 右侧控件被硬裁，滚也滚不到
+     （实测 16 处不可达）。
+     对策：把网格列钉成 `minmax(0,1fr)` 不让它按内容膨胀，
+     再让这几行 flex 允许换行/收缩。 */
+  .ck-main { grid-template-columns: minmax(0, 1fr); }
+  .ck-main > * { min-width: 0; }
+  .ck-tabs { flex-wrap: wrap; }
+  .ck-prov-main { flex-wrap: wrap; }
+  .ck-prov-info { flex: 1 1 140px; min-width: 0; }
+  .ck-prov-right { flex: 0 1 auto; flex-wrap: wrap; }
+  /* 页头读数默认 nowrap，窄屏允许折行（否则它单方面顶宽面板） */
+  .panel-head .panel-sub { white-space: normal; }
+
+  /* 签到中心三个 tab（分段控件）：整体 357px 塞不进 310px，且它是
+     `inline-flex` 不换行 —— 只会把页面顶出横向滚动（实测 pageSW=359）。
+     两个方案取舍：
+       · 强行等分 → 每项仅 100px，「Scheduled check-in」被省略号截断，
+         违背"信息齐全"；
+       · 让分段控件**内部换行** → 三个 tab 折成两行，文字全部完整可读
+         （实测 clipped=false，三项均在 310px 内）。
+     选后者：手机上有的是纵向空间，缺的是横向。滑块的 thumb 在换行后
+     会错位，故隐藏（选中态本就由 seg-item 自身的高亮体现）。 */
+  .ck-tabs > [data-slot="segmented-control"] {
+    flex: 1 1 100%;
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+  .ck-tabs [data-slot="segmented-item"] {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+  .ck-tabs [data-slot="segmented-thumb"] { display: none; }
+}
+
+/* ── 6b. 极窄屏（320px 档，iPhone SE 一代等）───────────────
+   分段控件、批量条、列设置按钮仍有内在最小宽度。让工具条各组
+   整行铺开，避免被 `.panel` 的 clip 裁掉。 */
+@media (max-width: 380px) {
+  .toolbar .group,
+  .toolbar .actions,
+  .mm-filters .group,
+  .mm-filters .input-group,
+  .batch-actions { flex: 1 1 100%; min-width: 0; }
+  .panel-head .head-actions { flex: 1 1 100%; margin-left: 0; }
+  :root { --pad: 10px; }
+
+  /* 网关页搜索框：外层是组件库产物 `w-[240px] !important` 的包裹层，
+     内层 #models-search 由 page-gateway.css 定为 `flex: 0 0 auto; width:240px`
+     —— 两层都是 240px 死宽，320px 视口下必然顶出面板右缘（r=323 vs vw=320）。
+     这里收窄 mm-filters 内边距给足空间（16px → 10px，省出 12px），
+     实测正好把 240px 收进 320px 边界（r=317）。 */
+  .mm-filters { padding: 6px 10px 10px; }
+}
+
+/* ─────────────────────────────────────────────────────────────
+   5b. 触控目标放大
+
+   ── 为什么用 min-height 而不是 height ───────────────────────
+   组件库按钮的 30px 来自 Tailwind 工具类（在 islands/ui.css 的
+   `@layer utilities` 内）：`.h-\[30px\]{height:30px!important}`。
+   想用 `height:38px!important` 盖掉它**会失败**：按 CSS Cascade 5，
+   同为 important 时**分层声明胜过未分层声明** → 实测 278 个按钮里
+   只有 115 个变高（那些不含该工具类的），163 个仍是原值，
+   表现为「同一界面两种按钮高度」，比不改更糟。
+
+   `min-height` 则与 `height:30px` 是**不同属性**，本就不冲突 ——
+   无需 !important，无需对轰，也不需要包 `@layer`
+   （实测层外/层内写法均 278/278 生效）。
+
+   实测（生产 3459，gateway 页）：
+     · `height:38px!important`（层外）→ 115/278 生效（分裂，弃用）
+     · `min-height:38px`（层外）      → 278/278 生效（采用）
+
+   ── 副作用检查 ──────────────────────────────────────────────
+   表格行高由内容撑开，不会被压扁；实测 accounts 首行 33→39px、
+   行内按钮 38px、**无重叠**；页面无横向滚动。
+
+   ── 桌面不受影响 ────────────────────────────────────────────
+   包在 max-width:720px 内；桌面最小窗宽 820px，永远进不来。
+   实测桌面按钮高度分布与改动前一致（18/22/24/26/30px）。
+   ───────────────────────────────────────────────────────────── */
+@media (max-width: 720px) {
+  /* 排除拖拽手柄（.col-grip 是 9px 宽的表头把手，放大没有意义） */
+  .page.active button:not(.col-grip) { min-height: 38px; }
+  /* 搜索框/文本输入同样放宽（30px → 34px）。分页「跳至页」那个 26px 的
+     小数字框**故意不动**：它与翻页按钮同一行，放大反而挤掉页码读数。 */
+  .page.active input[type="search"],
+  .page.active input[type="text"],
+  .page.active input[type="number"],
+  .page.active input[type="password"] { min-height: 34px; }
+}
