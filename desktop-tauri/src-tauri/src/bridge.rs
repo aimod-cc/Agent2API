@@ -678,6 +678,14 @@ const BRIDGE_JS: &str = r#"
     getCors: () => call('GET', '/api/cors'),
     saveCors: enabled => call('PUT', '/api/cors', { corsEnabled: enabled === true }),
 
+    // ── 通知与告警（Webhook）──
+    // 与 web_shim.rs 的同名方法逐字同形（漏一侧的症状见上面 getCors 那段）。
+    // GET 读配置 + 可选事件清单；save 全量覆盖提交；test 同步等到结果
+    // （每个渠道的成功 / 失败原因都回，界面直接显示）。
+    getNotify: () => call('GET', '/api/notify'),
+    saveNotify: payload => call('PUT', '/api/notify', payload || {}),
+    testNotify: payload => call('POST', '/api/notify/test', payload || {}),
+
     // ── models.dev 模型元数据（能力位与逐模型思考档位）──
     // 与 web_shim.rs 的同名方法逐字同形（桌面壳走 Tauri IPC，网页端走同源
     // fetch，两边接口名与签名必须一致 —— 漏一侧的症状见上面 getCors 那段）。

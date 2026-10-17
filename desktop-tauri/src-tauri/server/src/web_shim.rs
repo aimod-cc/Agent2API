@@ -1173,6 +1173,13 @@ pub fn shim_js() -> &'static str {
       return call('PUT', '/api/cors', { corsEnabled: enabled === true });
     },
 
+    // ── 通知与告警（Webhook）──
+    // 与壳侧 bridge.rs 的同名方法逐字同形（那侧走 Tauri IPC、这侧走同源 fetch，
+    // 界面代码零改动地跑在两边，漏一侧的症状见上面 getCors 段的注释）。
+    getNotify: function () { return call('GET', '/api/notify'); },
+    saveNotify: function (payload) { return call('PUT', '/api/notify', payload || {}); },
+    testNotify: function (payload) { return call('POST', '/api/notify/test', payload || {}); },
+
     // ── 系统提示词与内容拦截降级 ──
     getPrompt: function () { return call('GET', '/api/prompt'); },
     savePrompt: function (payload) {

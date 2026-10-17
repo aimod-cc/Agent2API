@@ -88,6 +88,9 @@ pub mod login;
 pub mod model_meta;
 pub mod model_rules;
 pub mod models;
+/// 通知与告警：把「出事了」推给用户（飞书 / 企业微信 / 钉钉 / 通用 Webhook）。
+/// 桌面端托盘常驻，推送是它相对网页面板的天然优势（面板关掉就什么都不会说）。
+pub mod notify;
 pub mod prompt;
 pub mod protocol;
 pub mod providers;

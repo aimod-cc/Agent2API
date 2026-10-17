@@ -361,6 +361,10 @@ impl ServerState {
         // 下面日志裁剪天数与旧文件候选目录才不会用错值。
         let snapshot = config::init(db.clone());
         core::task_state::install(db.clone());
+        // 通知与告警：把「定时任务失败」等事件源接上（见 core::notify::hooks）。
+        // 必须在 `task_state::install` **之后** —— 它在启动时就把收尾观察者
+        // 挂上去，晚了的话首轮任务的失败就漏报了。
+        core::notify::hooks::install();
         // 每账号的余额查询记录（余额不足跳过 / 自动禁用的底座）：装库句柄时
         // 顺带做旧 kv 快照的一次性迁移与内存事实表的装载（见 usage_records 模块头）。
         core::usage_records::install(db.clone());

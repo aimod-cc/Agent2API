@@ -182,6 +182,14 @@ pub async fn refresh_expiring_accounts(store: &AccountStore) -> Vec<Value> {
                     "[Accounts]",
                     &format!("❌ 账号 {id} 凭证自动刷新失败: {}", error.message),
                 );
+                // 通知（旁路，见 core::notify）：**只有「刷不动了」才喊**。
+                // 刷新失败的原因很多（网络抖动、上游 5xx、限流），那些下一轮
+                // 自己就好了；真正要用户动手的是**凭证本身已废**（refreshToken
+                // 被作废、账号被踢出登录态）—— 那时再怎么重试都不会好，
+                // 必须去重新登录。判据看错误文案里的指纹（见 looks_like_dead_credential）。
+                if looks_like_dead_credential(&error.message) {
+                    crate::server::core::notify::hooks::on_credential_invalid(&id, &error.message);
+                }
                 json!({
                     "id": id,
                     "provider": provider,
@@ -201,6 +209,42 @@ pub async fn refresh_expiring_accounts(store: &AccountStore) -> Vec<Value> {
         if failed > 0 { "error" } else { "info" },
     );
     results
+}
+
+/// 一条刷新失败是不是「凭证已废、必须重新登录」。
+///
+/// ── 为什么用文案指纹而不是错误码 ─────────────────────────────
+/// 刷新这条链上各家给的**是 `GatewayError`（只有 message + status）**，
+/// 没有 `UpstreamErrorClass` 那种结构化分类（那是转发路径才有的东西，
+/// 见 `providers::adapter`）。要拿到分类就得先给四家的刷新实现统一加一套
+/// 错误分类 —— 那是一次跨四家的改动，而这里要的只是一个「值不值得打扰用户」
+/// 的判断，用文案指纹够了。
+///
+/// ── 判据保守一点是刻意的 ────────────────────────────────────
+/// 宁可漏报（下一轮还会再判一次）也不要误报：误报会推一条「建议重新登录」
+/// 而账号其实好好的 —— 用户白跑一趟，还学会了不信任这个通知。
+/// 所以只认那些**明确说了「要重新登录 / 凭证失效」**的措辞，以及 401。
+///
+/// 关键指纹来自各家的实际文案（已核实）：
+///   · 小浣熊：`…登录态已过期且没有 refreshToken，请打开…重新登录`
+///             `该账号没有 refreshToken，无法刷新，请重新添加账号`
+///   · 通用：`上游返回 401: …`（刷新被服务端拒绝）
+fn looks_like_dead_credential(message: &str) -> bool {
+    const FINGERPRINTS: [&str; 7] = [
+        "重新登录",
+        "重新添加账号",
+        "没有 refreshToken",
+        "没有可用凭证",
+        "refresh token 已失效",
+        "invalid_grant",
+        "登录态已过期",
+    ];
+    if FINGERPRINTS.iter().any(|needle| message.contains(needle)) {
+        return true;
+    }
+    // 401 单独判：刷新请求被服务端以 401 拒绝，说明这份 refreshToken 不被承认。
+    // 用「上游返回 401」而不是裸 `401` 是为了避开文案里恰好含 401 的其它数字。
+    message.contains("上游返回 401") || message.contains("status 401")
 }
 
 /// 维护任务的**响应体**：`{ results, refreshed, skipped, failed }`。

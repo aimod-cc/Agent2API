@@ -140,6 +140,7 @@ import {
 // AI 助手分类的面板（对话模型 / 系统提示词 / 工具勾选）。独立成文件、自带一份
 // 数据流（/api/assistant/config），见该文件的模块头
 import { AssistantSettingsPane } from './assistant-settings-pane'
+import { NotifySettingsPane } from './notify-settings-pane'
 import { t } from '../i18n'
 
 /**
@@ -2252,6 +2253,12 @@ function SettingsPage() {
         </div>
         <div className={paneClass('security')} data-cat='security'>
           <SecurityPane snap={snap} />
+        </div>
+        {/* 通知与告警：自带一份独立的加载与保存（/api/notify 三条端点，与
+            settings-state 的 /api/config 快照是两条数据流），与 AI 助手那个
+            pane 同款 —— 见 notify-settings-pane.tsx 的模块头 */}
+        <div className={paneClass('notify')} data-cat='notify'>
+          <NotifySettingsPane />
         </div>
         <div className={paneClass('data')} data-cat='data'>
           <DataPane snap={snap} />

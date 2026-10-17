@@ -560,6 +560,17 @@ pub fn panel_router(state: ServerState) -> Router {
             "/api/cors",
             get(api::cors::get_cors).put(api::cors::put_cors),
         )
+        // ── 通知与告警 ──
+        // 三条端点（GET 读配置 / PUT 全量写 / POST 发测试），挂 protected。
+        // 敏感度高：渠道 URL 本身就是凭证（拿到就能往那个群里发消息），
+        // 所以 readonly 响应里 URL 一律遮 token（见 core::notify::public_config）。
+        // 事件清单随 GET 一起回 —— 让界面从后端拿而不是自己写死，
+        // 否则「后端能发但界面没得勾」会变成静默不会发的坑。
+        .route(
+            "/api/notify",
+            get(api::notify::get_notify).put(api::notify::put_notify),
+        )
+        .route("/api/notify/test", post(api::notify::post_notify_test))
         // ── 保活换行丢弃开关 ──
         // 与 /api/sanitize、/api/debug 同形的单开关端点（GET 读 / PUT 写），挂
         // protected：它决定「声明了该能力位的提供商」的下发帧要不要丢掉只含换行

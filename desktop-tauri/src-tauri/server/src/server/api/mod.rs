@@ -96,6 +96,10 @@ pub mod model_meta;
 // 只把候选收窄到「这一家 × 这一个账号」并把流量标成测试，见该文件模块头
 pub mod model_test;
 pub mod models;
+// 通知与告警：配置读写 + 测试发送。**事件源不在这一层** —— 定时任务失败与
+// 凭证失效分别在 core::task_state 与 core::credential_maintenance 里触发，
+// 见 core::notify 的模块头（通知是旁路，不该被 HTTP 层认识）。
+pub mod notify;
 // Loomy 新手任务的查询 / 一键领取（签到后在界面弹窗），见该文件模块头
 pub mod onboarding;
 pub mod panel;
