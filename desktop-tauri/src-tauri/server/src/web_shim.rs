@@ -167,6 +167,10 @@ pub fn shim_js() -> &'static str {
   // Docker 远程面板里该地址属于浏览器所在电脑，不能自动回到容器，
   // 因此让用户把地址栏的最终 URL 粘回受保护接口。小浣熊单独改用
   // 官方授权页支持的 redirect 分支，直接把 authorization_code 导回网关。
+  // 自动路径的窗口期：先给「浏览器自己跳回网关」那条链一段时间，再决定要不要
+  // 把粘贴框推给用户。见 runLoginFlow 里那段说明。
+  var MANUAL_CALLBACK_GRACE_MS = 10000;
+
   function needsManualCallback(provider) {
     return provider === 'trae'
       || provider === 'accio' || provider === 'accio-cn'
@@ -255,8 +259,9 @@ pub fn shim_js() -> &'static str {
       : provider === 'trae' ? 'Trae'
       : provider.indexOf('accio') === 0 ? 'Accio'
       : provider === 'codearts' ? 'CodeArts' : 'AutoClaw';
-    var callbackInstruction = '授权完成后，复制授权页浏览器地址栏中的<strong>完整地址</strong>，'
-        + '粘贴到下面提交。不要复制授权页原始地址，也不要改动参数。';
+    var callbackInstruction = '<strong>如果授权完成后账号没有自动出现</strong>，'
+        + '再复制授权页浏览器地址栏中的<strong>完整地址</strong>粘到下面提交；'
+        + '不要复制授权页原始地址，也不要改动参数。';
     while (true) {
       var callbackUrl = await ensureOverlay(
         label + '需要粘贴回调地址',
@@ -481,11 +486,23 @@ pub fn shim_js() -> &'static str {
         if (!second) showLinkFallback(authUrl);
       }
       if (needsManualCallback(provider)) {
-        // 同时保留自动轮询：同机部署仍会自动完成，远程 Docker 则由用户
-        // 粘贴地址；先完成的一方结束流程，finally 会关闭残留覆盖层。
+        // 先给自动路径一段窗口期，再上兜底 —— 不是一上来就把粘贴框推到用户脸上。
+        //
+        // 这条链在「面板经回环地址访问」（桌面端、或远程机器上做了端口映射）时
+        // 是**自己走得完**的：网关给的 `redirect_uri` 就是
+        // `http://127.0.0.1:<网关端口>/…`，浏览器一跳就回来了。原来的写法把
+        // `waitForManualCallback` 直接放进 `Promise.race`，弹框几乎与授权页
+        // 同时出现，用户自然会去粘贴 —— 明明不需要（自动那条往往几秒就完成）。
+        //
+        // 真回不来的远端场景（浏览器与网关不同机且没有端口映射）照样会弹，
+        // 只是晚 10 秒 —— 那时的代价只是多等一会儿，比「让人以为必须手工粘」轻。
+        // 两边都保留：先完成的一方结束流程，finally 会关掉残留覆盖层。
         return await Promise.race([
           pollWait(started.state),
-          waitForManualCallback(provider, started.state, authUrl),
+          (async function () {
+            await sleep(MANUAL_CALLBACK_GRACE_MS);
+            return waitForManualCallback(provider, started.state, authUrl);
+          })(),
         ]);
       }
       return await pollWait(started.state);
