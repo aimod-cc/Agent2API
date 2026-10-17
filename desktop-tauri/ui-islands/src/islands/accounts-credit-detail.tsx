@@ -273,10 +273,12 @@ function CreditRowView({ row }: { row: CreditRow }) {
  *     「每天重置」不是「要作废了」；
  *   · 这两类排除后仍没有 → 返回 null，界面显示 `—`。
  *
- * 不自己再排一次序：后端两家的 `credits[]` 都已按到期升序发出（Trae：
- * `trae::usage::credit_rows` 以 `expireAt` 升序、缺失垫底；WorkBuddy：
- * `billing::usage` 先按套餐优先级、同优先级再按 `expireAt` 升序），所以
- * 「第一个未过期且有到期时刻的份」就是答案 —— 前端再排一次会让两处口径分叉。
+ * **不能**假设后端给的顺序就是「到期升序」：Trae 那条路径才是（`credit_rows`
+ * 以 `expireAt` 升序、缺失垫底），而 WorkBuddy 的 `billing::usage` 是**先按套餐
+ * 优先级**、同优先级才看到期时间 —— `plan_priority` 一不同就 `return`，到期根本不
+ * 参与比较。实测 `Free Plan Subscription`（2035 年到期）排在 `Bonus Pack`
+ * （10 天后到期）前面。所以「挑哪一份」必须自己按 `expireAt` 排一次，
+ * 详见 `nearestCreditOf` 里那段说明。
  */
 export type NearestCredit = {
   /** 到期时刻（毫秒）。**日额度包的这一位是「今天 24 点」**（见下面「取哪一份」） */
@@ -318,10 +320,35 @@ export type NearestCredit = {
  * 所以这里直接用 `expireAt`，**前端不重算一天结束的时刻** —— 重算就是第二份实现，
  * 且跨时区/跨夏令时迟早与后端对不上。
  *
- * 不自己再排一次序：后端两家的 `credits[]` 都已按到期升序发出（Trae：
- * `trae::usage::credit_rows` 以 `expireAt` 升序、缺失垫底；WorkBuddy：
- * `billing::usage` 先按套餐优先级、同优先级再按 `expireAt` 升序），所以
- * 「第一个命中的份」就是答案 —— 前端再排一次会让两处口径分叉。
+ * ── 为什么不直接「取第一个命中的」────────────────────────────
+ * 早先这里信任后端给的顺序（「两家都按到期升序发出 → 第一个就是最近到期」），
+ * 那是**错的**，实测两类反例：
+ *
+ *   · **WorkBuddy 的排序首要键是套餐优先级，不是到期时间**。`billing::usage`
+ *     的注释写着「先按套餐优先级，同优先级再按到期时间升序」——`plan_priority`
+ *     一不同就 `return`，到期时间根本不参与比较。于是 `Free Plan Subscription`
+ *     （高优先级）会排在 `Bonus Pack`（低优先级、但早 9 年到期）**前面**。
+ *     只取第一个 → 选中 2035 年到期那笔，而把 10 天后就作废的那笔藏了
+ *     （实测 sunny-00001：现取「Free Plan Subscription」剩 100 / 2035 年，
+ *     该取「Bonus Pack」剩 250 / 10-25）。
+ *   · **Trae 的排序是「缺失垫底 + 同名按名字」**（`credit_rows`），
+ *     不是「所有包按 expireAt 全序」。
+ *
+ * 所以这里**自己排一次**：按 `expireAt` 升序（缺失视为 +∞ 垫底）。
+ * 曾经担心「前端再排一次会让两处口径分叉」—— 那个顾虑针对的是**明细列表的
+ * 展示顺序**（那里照后端，见 `creditRowsOf` 不排序），与此处「挑哪一个」是
+ * 两个问题：「挑」只关心哪笔最先作废，与后端整表怎么排无关。
+ *
+ * ── 还要跳过「已经花光」的包（一级优先，不是硬排除）──────────
+ * 「最近到期」问的是「**哪笔钱**要作废了」—— 已经花光的包没有钱可作废，
+ * 它到期只是从列表里消失。若不跳过，一个 `remain=0`、今晚 24 点归零的包
+ * 会把「还剩 2000 分、下月才到期」的那笔整个遮住（实测 sunnyzt001 一例：
+ * 现值「每日签到有礼」剩 0，而真正该报的是「新用户专属福利」剩 1962）。
+ *
+ * 但**只在有"还有钱"的份时才跳过**：全都花光时仍报最先作废的那份（读数 0）——
+ * 这一列问的是「什么时候作废」，全花完时显示 `—` 反而丢了信息，
+ * 而「0」准确说出了「那一刻会作废 0 分」。判据直接复用 `CreditRow.spent`
+ * （`remain ≤ 0`，或 `remain` 缺失时 `used ≥ total`；都读不到时不猜）。
  *
  * ── `now` 为什么要能传进来 ────────────────────────────────
  * 默认取 `Date.now()` 适合**渲染**（每次画都是「此刻」）。但排序比较器会在
@@ -333,16 +360,51 @@ export function nearestCreditOf(entry: UsageEntry, now: number = Date.now()): Ne
   // `now` 一路传下去：过滤「已过期」与判 `expired` 必须是同一个时刻，
   // 否则同一份包可能在「算最近到期」和「标已过期」两处得到相反结论
   const rows = creditRowsOf(entry, now)
-  // ① 一次性包优先：`daily` 的跳过，留到第二轮
-  for (const row of rows) {
-    if (row.daily || row.expireAt === null || row.expireAt <= now) continue
-    return { expireAt: row.expireAt, name: row.name, remain: row.remain, unit: row.unit, daily: false }
+
+  /**
+   * 这一份还有钱可花吗 —— 直接复用 `CreditRow.spent` 已经算好的判据
+   * （`remain ≤ 0`，或 `remain` 缺失时 `used ≥ total`；两者都读不到时不猜），
+   * 两处各写一份迟早会漂。注意 `spent` 对日额度包恒为 false（它明天会回满），
+   * 但下面第 ① 轮已经把 `daily` 排除了，所以这里不影响。
+   */
+  const hasMoney = (row: CreditRow): boolean => !row.spent
+
+  /** 到期升序；缺失的 `expireAt` 垫底（与别处「缺失值恒排最后」同一取向） */
+  const byExpire = (a: CreditRow, b: CreditRow): number =>
+    (a.expireAt ?? Number.POSITIVE_INFINITY) - (b.expireAt ?? Number.POSITIVE_INFINITY)
+
+  // ① 一次性包：跳过日额度与已过期的，再按到期升序
+  const once = rows
+    .filter(row => !row.daily && row.expireAt !== null && row.expireAt > now)
+    .sort(byExpire)
+  // ①-a 优先取「还有钱」的第一份 —— 已花光的包没有钱可作废，不该占着这一列
+  const firstWithMoney = once.find(hasMoney)
+  if (firstWithMoney) {
+    return {
+      expireAt: firstWithMoney.expireAt as number, name: firstWithMoney.name,
+      remain: firstWithMoney.remain, unit: firstWithMoney.unit, daily: false,
+    }
   }
-  // ② 兜底：日额度包（`expireAt` = 今天 24 点）
-  for (const row of rows) {
-    if (!row.daily || row.expireAt === null || row.expireAt <= now) continue
-    return { expireAt: row.expireAt, name: row.name, remain: row.remain, unit: row.unit, daily: true }
+  // ①-b 全都花光了：仍报最先作废的那一份（读数会显示 0）。这一列问的是
+  //      「什么时候作废」，不是「哪份还有钱」—— 全花完时显示 `—` 反而丢了信息，
+  //      而「0」准确地说出了「那一刻会作废 0 分」
+  const firstAny = once[0]
+  if (firstAny) {
+    return {
+      expireAt: firstAny.expireAt as number, name: firstAny.name,
+      remain: firstAny.remain, unit: firstAny.unit, daily: false,
+    }
   }
+
+  // ② 兜底：日额度包（`expireAt` = 今天 24 点）。它「到期」是周期回满而非作废，
+  //    所以**不套 `hasMoney`**：日包今天花光了，这一列仍该说「今晚 24 点重置」
+  const daily = rows
+    .filter(row => row.daily && row.expireAt !== null && row.expireAt > now)
+    .sort(byExpire)[0]
+  if (daily) {
+    return { expireAt: daily.expireAt as number, name: daily.name, remain: daily.remain, unit: daily.unit, daily: true }
+  }
+
   return null
 }
 

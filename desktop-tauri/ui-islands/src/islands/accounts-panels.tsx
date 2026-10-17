@@ -343,13 +343,15 @@ export function CreditExpiryCell({ account }: { account: AccountRecord }) {
     return <span className='muted' title={t('该提供商没有余额查询，因此读不到积分包的到期时刻')}>—</span>
   }
   const entry = usageEntryOf(account)
-  const nearest = nearestCreditOf(entry)
+  // 「此刻」取一次、两处共用：`nearestCreditOf` 用它滤过期包，下面算倒计时也用
+  // 同一个 —— 各取一次 `Date.now()` 会让「选中了哪份」与「还剩多久」差一个瞬间
+  const now = Date.now()
+  const nearest = nearestCreditOf(entry, now)
   if (!nearest) {
     return (
       <span className='muted' title={t('没有将到期的积分（没有一次性额度包，或这一家不给逐份读数）')}>—</span>
     )
   }
-  const now = Date.now()
   const left = nearest.expireAt - now
   // 与有效期列同一套倒计时口径（分钟 / 小时 / 天三档）：两列的读数形态一致，
   // 扫读时不必在两套写法之间切换
@@ -381,7 +383,9 @@ export function CreditExpiryCell({ account }: { account: AccountRecord }) {
  *
  * 单位跟着那一份自己的 `unit` 走（Trae 的套餐包与积分包单位不同）；没有单位
  * 就不硬贴一个（与明细行的读数同一处置）。`remain` 读不到 → `—`，**但 0 要画**
- * （「0 积分」比「—」准确：那一份确实要作废，只是已经花完了）。
+ * （「0 积分」比「—」准确：那一份确实要作废，只是已经花完了 —— 这一档只在
+ * 「**所有**一次性包都花光了」时才出现，还有钱可花时优先报有钱的那份，
+ * 见 `nearestCreditOf` 的 ①-a / ①-b）。
  */
 export function CreditLeftCell({ account }: { account: AccountRecord }) {
   if (!supportsUsage(account)) {
