@@ -134,11 +134,10 @@ function unitLabel(unit: string): string {
  * 按套餐优先级 + 到期升序；排序口径与各自的聚合读数同源）。前端再排一次只会让两处
  * 的口径分叉。
  */
-export function creditRowsOf(entry: UsageEntry): CreditRow[] {
+export function creditRowsOf(entry: UsageEntry, now: number = Date.now()): CreditRow[] {
   if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return []
   const data = entry as Record<string, unknown>
   const packs = Array.isArray(data.credits) ? data.credits as Array<Record<string, unknown>> : []
-  const now = Date.now()
   return packs.map(pack => {
     const name = String(pack?.name || '').trim() || t('积分包')
     const unit = String(pack?.unit || '').trim()
@@ -323,10 +322,17 @@ export type NearestCredit = {
  * `trae::usage::credit_rows` 以 `expireAt` 升序、缺失垫底；WorkBuddy：
  * `billing::usage` 先按套餐优先级、同优先级再按 `expireAt` 升序），所以
  * 「第一个命中的份」就是答案 —— 前端再排一次会让两处口径分叉。
+ *
+ * ── `now` 为什么要能传进来 ────────────────────────────────
+ * 默认取 `Date.now()` 适合**渲染**（每次画都是「此刻」）。但排序比较器会在
+ * **一次 `sort()` 里反复调用它**（n log n 次）：若某份包在这一轮排序的时间窗内
+ * 跨过 `expireAt`，同一行会先后算出两个不同的值 → 比较器失去传递性 → 排序结果
+ * 不可预测。所以 `accounts-sort.ts` 排序时先把 `now` 快照一次、整轮复用。
  */
-export function nearestCreditOf(entry: UsageEntry): NearestCredit | null {
-  const now = Date.now()
-  const rows = creditRowsOf(entry)
+export function nearestCreditOf(entry: UsageEntry, now: number = Date.now()): NearestCredit | null {
+  // `now` 一路传下去：过滤「已过期」与判 `expired` 必须是同一个时刻，
+  // 否则同一份包可能在「算最近到期」和「标已过期」两处得到相反结论
+  const rows = creditRowsOf(entry, now)
   // ① 一次性包优先：`daily` 的跳过，留到第二轮
   for (const row of rows) {
     if (row.daily || row.expireAt === null || row.expireAt <= now) continue

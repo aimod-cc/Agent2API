@@ -70,6 +70,15 @@ export type SortContext = {
   seatOf: (account: AccountRecord) => number | null
   /** 模型作用域：该账号在这个模型上的调度状态（`状态`列显示的就是它，排序必须同源） */
   stateOf?: (id: string) => string | undefined
+  /**
+   * 「此刻」的毫秒快照（比较器内部用，调用方**不必**给）。
+   *
+   * 为什么要有：`nearestCreditOf` 会拿 `now` 滤掉「已过期」的包。若比较器每次调用
+   * 都现取 `Date.now()`，而某份包恰好在一轮 `sort()` 的时间窗内跨过 `expireAt`，
+   * 同一行就会先后算出两个值 —— 比较器失去传递性，结果不可预测。所以
+   * `accountComparator` 在**构造时**取一次、整轮复用。
+   */
+  now?: number
 }
 
 /** 数值字段 → number 或 null（判据与 accounts-panels 的 numberOrNull 逐字相同：
@@ -157,7 +166,7 @@ function limitedCountOf(account: AccountRecord, ctx: SortContext): number {
  * 24 点）。那个值在这里照样可排：它就是「今天还剩多久」，与别的行的倒计时同一量纲。
  */
 function creditExpiryOf(account: AccountRecord, ctx: SortContext): number | null {
-  const nearest = nearestCreditOf(ctx.usageOf(account))
+  const nearest = nearestCreditOf(ctx.usageOf(account), ctx.now)
   return nearest ? nearest.expireAt : null
 }
 
@@ -172,7 +181,7 @@ function creditExpiryOf(account: AccountRecord, ctx: SortContext): number | null
  * 同一量纲，混排不会产生讲不通的次序。
  */
 function creditLeftOf(account: AccountRecord, ctx: SortContext): number | null {
-  const nearest = nearestCreditOf(ctx.usageOf(account))
+  const nearest = nearestCreditOf(ctx.usageOf(account), ctx.now)
   return nearest ? nearest.remain : null
 }
 
@@ -222,9 +231,13 @@ function valueOf(key: string, account: AccountRecord, ctx: SortContext): number 
  */
 export function accountComparator(sort: AccountSort, ctx: SortContext): (a: AccountRecord, b: AccountRecord) => number {
   const sign = sort.dir === 'desc' ? -1 : 1
+  // 「此刻」在**构造时**定格一次，整轮比较复用（原因见 `SortContext.now` 的注释：
+  // 每次调用现取 `Date.now()` 会让「刚好跨过 expireAt」的那份包中途换值）
+  const now = ctx.now ?? Date.now()
+  const view: SortContext = ctx.now === undefined ? { ...ctx, now } : ctx
   return (a, b) => {
-    const left = valueOf(sort.key, a, ctx)
-    const right = valueOf(sort.key, b, ctx)
+    const left = valueOf(sort.key, a, view)
+    const right = valueOf(sort.key, b, view)
     if (left === null && right === null) return tieBreak(a, b)
     if (left === null) return 1
     if (right === null) return -1

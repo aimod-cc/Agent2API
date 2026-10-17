@@ -226,11 +226,16 @@ function avatarOf(providerId: string, label: string): React.ReactNode {
  * 悬停、还得防着它盖住表格。用户裁定：**常驻**。
  *
  * 收起只能**手动**：左上角那枚按钮（见 `.acct-rail-top`）显式切换。收起后只剩 44px 图标条，
- * 条上每个图标点一下 = 切到那一家（**不是**展开浮层 —— 浮层那套已删）。选择记在
- * localStorage（key 见 accounts-page 的 RAIL_COLLAPSED_KEY），跨次启动保持。
+ * 条上每个图标点一下 = **展开左栏并把那一家展开**（「我要看这家」）—— 浮层那套已删。
+ * 选择记在 localStorage（key 见 accounts-page 的 RAIL_COLLAPSED_KEY），跨次启动保持。
  *
- * 代价（已知并接受）：左栏常驻会占掉表格 218px，窗口不够宽时表格**横向滚动**
- * （表格 min-width 见 accounts-columns 的 tableMinWidth，横滚是它本来的兜底，不压列）。
+ * ── 图标条上的厂商图标为什么是「展开该组」而不是「切到这家」──────
+ * 作用域的单位是**模型名**（`plan_route` 收窄候选走的就是它，见 `ScopeOption`），
+ * 只有「全局 / 某个模型」两级，**没有「厂商」这一级**。于是「点厂商图标 = 切到这家」
+ * 根本无处可切 —— 早先那版取 `group.items[0]` 顶替，点「Trae」实际进了模型 `Trae28`：
+ * 用户按的是厂商，落到的是某个具体模型，且与展开态的口径冲突（那边组标题是**文件夹**，
+ * 只折叠不筛，注释见下方分组行）。故改为「展开左栏 + 展开该组」，两态语义一致：
+ * 厂商这一级永远只是文件夹，永远不会变成一次筛选。
  */
 export function ScopeRail({ collapsed, onToggleCollapse }: {
   collapsed: boolean
@@ -247,6 +252,12 @@ export function ScopeRail({ collapsed, onToggleCollapse }: {
   /** 当前作用域所在的那一家：默认展开（用户手动收过的以手动的为准，见 expandedOf） */
   const current = groups.find(group => group.items.some(item => item.value === model))?.key || ''
 
+  /** 点图标条上的厂商图标：展开左栏，并把这一组展开（不是切作用域，见上方注释） */
+  const revealGroup = (key: string) => {
+    setExpanded(prev => ({ ...prev, [key]: true }))
+    onToggleCollapse()
+  }
+
   const shown = keyword
     ? groups
       .map(group => {
@@ -262,14 +273,16 @@ export function ScopeRail({ collapsed, onToggleCollapse }: {
 
   const pinShown = hit(pinned.label)
 
-  // 收起态：只剩图标条。**每个图标都是「切到那一家」的入口**（不再有「展开浮层」这回事）
+  // 收起态：只剩图标条。**厂商图标 = 展开左栏并展开该组**（见上方注释；
+  // 「全部」那枚才是真正切作用域的那个，因为它切到的是 `SCOPE_ALL`、不是某一级文件夹）
   if (collapsed) {
     return (
       <aside className='acct-rail is-collapsed' id='acct-scope-rail'
         aria-label={t('按作用域选择：全局账号表，或某一个模型的调度视图')}>
         <div className='acct-rail-strip'>
           <button type='button' className='acct-rail-chip is-toggle'
-            title={t('展开作用域栏')} aria-label={t('展开作用域栏')} aria-expanded={false}
+            title={t('展开作用域栏')} aria-label={t('展开作用域栏')}
+            aria-expanded={false} aria-controls='acct-scope-rail'
             onClick={onToggleCollapse}>
             <span className='acct-rail-caret' aria-hidden='true'>
               <svg viewBox='0 0 10 10'>
@@ -292,8 +305,9 @@ export function ScopeRail({ collapsed, onToggleCollapse }: {
           {groups.map(group => (
             <button key={group.key} type='button'
               className={cn('acct-rail-chip', group.items.some(item => item.value === model) && 'is-on')}
-              title={group.label} aria-label={group.label}
-              onClick={() => setScheduleScope(group.items[0]?.value || SCOPE_ALL)}>
+              title={t('展开左栏，看 {label} 下的 {n} 个模型', { label: group.label, n: group.items.length })}
+              aria-label={t('展开左栏，看 {label} 下的 {n} 个模型', { label: group.label, n: group.items.length })}
+              onClick={() => revealGroup(group.key)}>
               {avatarOf(group.key, group.label)}
             </button>
           ))}
@@ -313,7 +327,8 @@ export function ScopeRail({ collapsed, onToggleCollapse }: {
         {/* 收起按钮（显式，唯一的收起入口）。与搜索框同一行，省掉一整行高度 */}
         <div className='acct-rail-top'>
           <button type='button' className='acct-rail-collapse'
-            title={t('收起作用域栏')} aria-label={t('收起作用域栏')} aria-expanded
+            title={t('收起作用域栏')} aria-label={t('收起作用域栏')}
+            aria-expanded aria-controls='acct-scope-rail'
             onClick={onToggleCollapse}>
             <span className='acct-rail-caret' aria-hidden='true'>
               <svg viewBox='0 0 10 10'>
