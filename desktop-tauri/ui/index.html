@@ -89,8 +89,7 @@
   <!-- AI 助手页（智能组）：消息流 / 工具卡 / 确认卡 / 输入区。排在页面样式之后，
        它是一个新页面，没有需要覆盖的既有规则 -->
     <link rel="stylesheet" href="css/page-assistant.css">
-    <link rel="stylesheet" href="css/page-playground.css">
-    <link rel="stylesheet" href="css/page-health.css">
+      <link rel="stylesheet" href="css/page-health.css">
   <!-- 小问号提示外观（tooltip.js 增强出来的气泡）：排在页面样式之后，
        需要时可覆盖各页面自己写的尺寸约束 -->
   <link rel="stylesheet" href="css/tooltip.css">
@@ -134,13 +133,6 @@
              岛直接挂在这个 section 上。 -->
         <div class="nav-group-label" data-i18n="智能">智能</div>
         <button class="nav-item" data-page="assistant" data-icon="spark"><span class="ico"></span><span class="label" data-i18n="AI 助手">AI 助手</span></button>
-        <!-- 试炼场：与 AI 助手同组、紧挨它 —— 两者都是「对话 + 模型下拉」，
-             但打的是**不同的接口**：助手走面板面 /api/assistant/chat（自带系统
-             提示词与工具集），这里走网关面 /v1/chat/completions（客户端实际打的
-             那一条）。所以试炼场的结论能直接代表「我的客户端能不能用」。
-             整页由 React 岛渲染（ui-islands/src/islands/playground-page.tsx），
-             岛直接挂在这个 section 上。 -->
-        <button class="nav-item" data-page="playground" data-icon="pulse"><span class="ico"></span><span class="label" data-i18n="试炼场">试炼场</span></button>
 
         <div class="nav-group-label" data-i18n="运行状态">运行状态</div>
         <button class="nav-item active" data-page="overview" data-icon="overview"><span class="ico"></span><span class="label" data-i18n="报表">报表</span></button>
@@ -224,14 +216,6 @@
              桥没有流式、且 60 秒总超时会把长回答截断，见后端 api::assistant 模块头）。
              对外是 window.wbAssistant = { activate }。 -->
         <section class="page" data-page="assistant"></section>
-
-        <!-- ─── 试炼场（data-page="playground"）───
-             整页由 React 岛渲染（ui-islands/src/islands/playground-page.tsx）。
-             对话请求走**网关面** `POST /v1/chat/completions`（与真实客户端同一条
-             接口），而不是助手那条面板面通路 —— 这是这一页存在的意义：结论直接
-             代表「客户端能不能用」。凭证复用 AI 助手页那条直连通道（问桥要第一把
-             启用的网关 Key），见 playground-state 的模块头。 -->
-        <section class="page" data-page="playground"></section>
 
         <!-- ─── 账号健康（data-page="health"）───
              整页由 React 岛渲染（ui-islands/src/islands/health-page.tsx）。纯只读：

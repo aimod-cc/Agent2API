@@ -571,13 +571,6 @@ pub fn panel_router(state: ServerState) -> Router {
             get(api::notify::get_notify).put(api::notify::put_notify),
         )
         .route("/api/notify/test", post(api::notify::post_notify_test))
-        // ── 试炼场的对话入口 ──
-        // 挂**面板面**（`/api/*`，无条件 CORS）而不是 `/v1/*`：桌面壳的页面来自
-        // Tauri 自定义协议，直连 `/v1/*` 是跨源请求，而网关面默认不应答 CORS
-        // —— 实测关掉 CORS 后 `TypeError: Failed to fetch`，而全新安装默认就是关的。
-        // 与 `/v1/chat/completions` **共用同一条转发链路**（`UpstreamService::forward`），
-        // 所以「真实客户端能不能用」的结论依然成立（见 api::playground 的模块头）。
-        .route("/api/playground/chat", post(api::playground::chat))
         // ── 保活换行丢弃开关 ──
         // 与 /api/sanitize、/api/debug 同形的单开关端点（GET 读 / PUT 写），挂
         // protected：它决定「声明了该能力位的提供商」的下发帧要不要丢掉只含换行

@@ -96,11 +96,6 @@ pub mod model_meta;
 // 只把候选收窄到「这一家 × 这一个账号」并把流量标成测试，见该文件模块头
 pub mod model_test;
 pub mod models;
-// 试炼场：`POST /api/playground/chat`。挂**面板面**而不是 `/v1/*` ——
-// 网关面默认不应答 CORS，页面直连会 Failed to fetch（见该文件模块头）。
-// 与 `/v1/chat/completions` 共用同一条 `UpstreamService::forward` 链路，
-// 所以「客户端能不能用」的结论依然成立。
-pub mod playground;
 // 通知与告警：配置读写 + 测试发送。**事件源不在这一层** —— 定时任务失败与
 // 凭证失效分别在 core::task_state 与 core::credential_maintenance 里触发，
 // 见 core::notify 的模块头（通知是旁路，不该被 HTTP 层认识）。

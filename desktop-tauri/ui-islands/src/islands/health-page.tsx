@@ -12,7 +12,7 @@
  * 具体理由写在 health-state 的模块头里，改这里前先读那段。这一页**不做任何
  * 写操作**，纯只读。
  *
- * ── 挂载：面板岛模式（与 docs-page / playground-page 同款）──
+ * ── 挂载：面板岛模式（与 docs-page / assistant-page 同款）──
  * root 直接建在 index.html 既有的 `<section class="page" data-page="health">`
  * 上，先 replaceChildren 清掉静态骨架。
  */

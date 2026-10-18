@@ -163,7 +163,7 @@ function CreditLine({ row }: { row: CreditRow }) {
 
 /* ─── 主视图 ───────────────────────────────────────────── */
 
-/** 千分位（与试炼场同款；额度是给人看的数，不显示科学计数） */
+/** 千分位（额度是给人看的数，不显示科学计数） */
 function formatNumber(value: number | null): string {
   if (value === null || !Number.isFinite(value)) return '—'
   return Math.round(value).toLocaleString('en-US')
