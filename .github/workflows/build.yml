@@ -301,9 +301,11 @@ jobs:
           if-no-files-found: error
 
   # ── Windows 服务端包（无 GUI，注册成 Windows 服务）────────────
-  # 产物是 zip：agent2api-server.exe + ui\ + install-service.ps1。
+  # 产物是 zip：agent2api-server.exe + ui\ + install-service.ps1
+  # + start-windows.bat（下游新增，见打包步骤里的说明）。
   # 用户在服务器上解压后跑 install-service.ps1，脚本用 sc.exe 把它注册成
-  # 开机自启的 Windows 服务（见 packaging/windows/install-service.ps1）。
+  # 开机自启的 Windows 服务（见 packaging/windows/install-service.ps1）；
+  # 只想在本机试用的，双击 start-windows.bat 前台跑，关窗口即停。
   #
   # 为什么不复用 windows job 的产物：那个 job 构建的是 Tauri 桌面端
   # （带窗口、托盘、WebView2），装的是 NSIS 安装包。这里的产物无 GUI，
@@ -349,6 +351,43 @@ jobs:
           Copy-Item "target/release/agent2api-server.exe" "$stage/"
           Copy-Item -Recurse "desktop-tauri/ui" "$stage/ui"
           Copy-Item "packaging/windows/install-service.ps1" "$stage/"
+
+          # ── 双击启动器（下游新增，上游包只有 install-service.ps1）──────
+          # install-service.ps1 要管理员权限、把网关注册成系统服务，适合服务器；
+          # 「本地 web」形态（自己电脑上解压后想立刻用浏览器打开面板）用不上它，
+          # 也不该为了试一下就先注册一个开机自启的服务。这里再放一个前台启动器：
+          # 双击即跑、自动开浏览器、关窗口即停，不碰 SCM、不写 ProgramData。
+          #
+          # 在校验里现生成而不入库：.bat 必须是 CRLF + 本机代码页，放仓库里
+          # 迟早被编辑器的 LF / UTF-8 改坏（cmd 读出乱码甚至把 echo 行当命令）。
+          # 数组逐行拼（不用 here-string）：YAML 块缩进会原样进 here-string，
+          # 每行前面多出的空格虽被 cmd 容忍，但会让 `if (` 与 `echo.` 变得可疑。
+          $launcher = @(
+            '@echo off'
+            'setlocal'
+            'cd /d "%~dp0"'
+            'if not exist "agent2api-server.exe" ('
+            '  echo [error] agent2api-server.exe not found next to this file.'
+            '  pause'
+            '  exit /b 1'
+            ')'
+            'if not exist "ui\index.html" ('
+            '  echo [error] ui\index.html not found. Keep the ui folder beside the exe.'
+            '  pause'
+            '  exit /b 1'
+            ')'
+            'echo.'
+            'echo   Agent2API local gateway'
+            'echo   -----------------------'
+            'echo   The panel opens in your browser (http://127.0.0.1:3065/).'
+            'echo   Keep this window open; close it or press Ctrl+C to stop.'
+            'echo.'
+            'agent2api-server.exe'
+            'echo.'
+            'echo   Server stopped.'
+            'pause'
+          )
+          $launcher | Out-File -FilePath "$stage/start-windows.bat" -Encoding ascii
 
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Compress-Archive -Path "$stage/*" -DestinationPath "dist/$name.zip" -Force
