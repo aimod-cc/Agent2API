@@ -49,7 +49,17 @@ pub(crate) struct MergeReport {
 ///
 /// `items` 是导出文件 `customProviders` 键下的原始数组；返回时**已写盘**。
 /// 整体失败（写盘不成功）返回 Err，调用方必须当成整批导入失败。
+///
+/// ── 空数组直接返回，不写盘 ─────────────────────────────────
+/// 每份导出文件都带 `customProviders` 键（没有自定义家时是空数组），
+/// 于是「从一台没有自定义家的机器导出 → 导入」是最常见的一条路径。空数组
+/// 没有东西可合并，写盘只是把读到的内容原样写回 —— 纯无用功；更糟的是它会
+/// 让「配置目录只读 / 库不可用」这类环境问题以「自定义提供商定义写入失败」
+/// 的面目**毁掉整批账号导入**（罪魁祸首却是一条都不存在的定义）。
 pub(crate) fn merge_imported(items: &[Value]) -> Result<MergeReport, String> {
+    if items.is_empty() {
+        return Ok(MergeReport { added: 0, updated: 0, warnings: Vec::new() });
+    }
     let mut current = read_items();
     let mut report = MergeReport { added: 0, updated: 0, warnings: Vec::new() };
     let mut seen: HashSet<String> = HashSet::new();

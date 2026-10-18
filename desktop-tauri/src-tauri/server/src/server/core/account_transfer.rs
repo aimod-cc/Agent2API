@@ -470,3 +470,123 @@ fn import_one_item(
     taken_ids.push(new_id);
     Ok(ImportOutcome::Added)
 }
+
+#[cfg(test)]
+mod tests {
+    //! 整条导入链的回归（identity.rs 模块头纪律②的「三步验证」）：
+    //! **导出 → 原样导入 → 二次导入**，第三步必须计 `updated` 而不是
+    //! `added`。临时库 + 目录守卫（与 `officeace_accounts` 的测试同款：
+    //! 打开前先删、删除挂 Drop），不碰真实账号数据。
+    //!
+    //! 2026-10-18 两轮修复的共同形态：这些账号「添加路径认、导入路径不认」——
+    //! 添加路径给没有 `userId` 的账号安排了次级身份（同串令牌 / 手机号 /
+    //! accessKeyId），导入侧却只有 `userId` 一个兜底，于是导出→导入整条
+    //! 失败（备份恢复时静默丢号）。本测试就是那条缺口的守门人。
+
+    use serde_json::json;
+
+    use super::*;
+
+    struct TempStore {
+        store: AccountStore,
+        dir: std::path::PathBuf,
+    }
+
+    impl Drop for TempStore {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn temp_store(tag: &str) -> TempStore {
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "account-transfer-{tag}-{}-{seq}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = crate::server::db::Db::open(&dir.join("agent2api.db")).expect("临时库该建得起来");
+        TempStore {
+            store: AccountStore::with_db(Some(db)),
+            dir,
+        }
+    }
+
+    /// 六家「没有 userId 也合法存在」的账号（OfficeAce / OrcaTerm 是上午那轮，
+    /// Accio / Loomy / MonkeyCode / Antigravity 是下午复查补的同款缺口）。
+    fn accounts_without_user_id() -> Value {
+        json!({
+            "accounts": [
+                // OfficeAce：身份是 accessKeyId（控制面临时凭据），记录没有 userId 键
+                { "id": "officeace-abc", "provider": "officeace", "name": "果办",
+                  "accessKeyId": "AK-1", "accessToken": "OA-T" },
+                // OrcaTerm：uid 落在 uid 键上（值是 userId 的值、另一个键）
+                { "id": "orcaterm-abc", "provider": "orcaterm", "name": "Orca",
+                  "uid": "1001", "accessToken": "OT-T" },
+                // Accio：不透明令牌解不出 userId（to_value 把空 userId 落 null）
+                { "id": "accio-intl-aaa", "provider": "accio", "name": "Accio 无 id",
+                  "accessToken": "AT-1", "refreshToken": "RT-1", "userId": null },
+                // Loomy：粘贴 session 只给手机号（add_loomy_account 允许）
+                { "id": "loomy-13800000000", "provider": "loomy", "name": "Loomy 手机号",
+                  "accessToken": "SESSION-1", "phone": "13800000000" },
+                // MonkeyCode：上游没给 user uuid（匿名账号，添加路径都不去重）
+                { "id": "monkeycode-anon-aabb", "provider": "monkeycode", "name": "匿名",
+                  "accessToken": "MC-SESSION" },
+                // Antigravity：只粘贴 refresh token、没有 email
+                { "id": "antigravity-xyz", "provider": "antigravity", "name": "无邮箱",
+                  "refreshToken": "GA-RT" },
+            ]
+        })
+    }
+
+    #[test]
+    fn export_then_reimport_is_idempotent_for_accounts_without_user_id() {
+        let temp = temp_store("reimport");
+        // 第一次导入：六家无 userId 账号全部计 added（修复前它们整条失败，
+        // 计进 failed，备份恢复时静默丢号）
+        let first = import_accounts(&temp.store, &accounts_without_user_id()).expect("首次导入应该成功");
+        assert_eq!(first["added"], json!(6), "六家无 userId 账号都该导得进来：{first}");
+        assert_eq!(first["updated"], json!(0));
+        assert_eq!(first["failed"], json!(0), "一条都不该失败：{first}");
+
+        // 导出 → 原样导入：必须全部计 updated、零 added（否则重复账号）
+        let exported = export_accounts(&temp.store);
+        let second = import_accounts(&temp.store, &exported).expect("二次导入应该成功");
+        assert_eq!(second["added"], json!(0), "原样回灌不该新增：{second}");
+        assert_eq!(second["updated"], json!(6), "六条都该按身份命中更新：{second}");
+        assert_eq!(second["failed"], json!(0));
+
+        // 第三次导入同样幂等（防「首次 added、之后一直 added」的假幂等）
+        let third = import_accounts(&temp.store, &exported).expect("三次导入应该成功");
+        assert_eq!(third["added"], json!(0));
+        assert_eq!(third["updated"], json!(6));
+    }
+
+    #[test]
+    fn cross_provider_same_identity_never_merges() {
+        // 跨家同 uid 不合并（文件头第 1 条）：CatPaw 与 raccoon 各有一条
+        // 身份同为「42」的记录，导出再导入后仍是两条，且凭证不互串。
+        let temp = temp_store("cross");
+        let payload = json!({
+            "accounts": [
+                { "id": "u-1", "provider": "catpaw", "uid": "42", "accessToken": "CP-TOKEN" },
+                { "id": "u-2", "provider": "raccoon", "userId": "42", "accessToken": "RC-TOKEN" },
+            ]
+        });
+        let first = import_accounts(&temp.store, &payload).expect("导入应该成功");
+        assert_eq!(first["added"], json!(2));
+        let exported = export_accounts(&temp.store);
+        let second = import_accounts(&temp.store, &exported).expect("回灌应该成功");
+        assert_eq!(second["added"], json!(0), "跨家同身份也各自命中自己那条");
+        assert_eq!(second["updated"], json!(2));
+        let catpaw = exported["accounts"]
+            .as_array()
+            .expect("accounts 数组")
+            .iter()
+            .find(|item| item["provider"] == "catpaw")
+            .expect("catpaw 那条")
+            .clone();
+        assert_eq!(catpaw["accessToken"], json!("CP-TOKEN"), "凭证不许被别家同身份记录覆盖");
+    }
+}
