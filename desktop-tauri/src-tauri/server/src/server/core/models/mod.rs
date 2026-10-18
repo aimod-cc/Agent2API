@@ -440,6 +440,10 @@ impl ModelCatalog {
                 // 不校验 HTTP 状态：与 Node 一致 —— 先按 JSON 解析，再看有没有可用模型
                 Ok(response) => match response.payload {
                     Some(payload) => {
+                        // 诊断落盘：把 `/v3/config` 的**原始响应**整份存一份（覆盖式，
+                        // 只留最近一次）。用途见 `dump_v3_config` 的说明 —— 这里先
+                        // 存，再解析，所以 `agents` 那类本模块不消费的字段也在里面。
+                        dump_v3_config(&payload);
                         let raw = payload
                             .get("data")
                             .and_then(|data| data.get("models"))
@@ -448,7 +452,15 @@ impl ModelCatalog {
                             .unwrap_or_default();
                         let allowed = apply_filters(raw.clone());
                         if !allowed.is_empty() {
-                            self.apply_remote(allowed, "auto", false);
+                            // 官方 picker 名单（`agents[name=="cli"].models`）：
+                            // 决定每条模型在「可见性」列里标什么。
+                            let picker = picker_model_ids(&payload);
+                            self.apply_remote_with_picker(
+                                allowed,
+                                "auto",
+                                false,
+                                picker.as_deref(),
+                            );
                             return RefreshOutcome::refreshed(
                                 self.count(),
                                 "v3/config",
@@ -517,6 +529,35 @@ impl ModelCatalog {
     /// modelType 按 `custom:` 前缀区分企业定制/内置模型
     /// （判定用**原始 id**，大小写不敏感的处理只用于 isDefault 那一处）。
     fn apply_remote(&self, models: Vec<Value>, custom_prefix: &str, enterprise: bool) {
+        self.apply_remote_with_picker(models, custom_prefix, enterprise, None)
+    }
+
+    /// [`Self::apply_remote`] 的实现，多一个「官方 picker 名单」参数。
+    ///
+    /// ── `picker` 是什么（2026-10-17 补上，此前缺这一层）────────────
+    /// `/v3/config` 的 `data.agents` 里有一组 `name == "cli"` 的 agent，它的
+    /// `models` 是**裸字符串数组** —— 那正是官方客户端模型选择器展示的名单。
+    /// 实测（2026-10-17，本机真实响应）：`data.models` 有 60 条，而
+    /// `agents[cli].models` 只有 18 条，其余 42 条是补全 / 改写 / 内部 / 图像 /
+    /// 视频 / 旧代条目，**官方 picker 不列**。
+    ///
+    /// 参考实现同样按这份名单收窄：`Acankao/workbuddy2api/internal/upstream/
+    /// client.go:1387` 先取 `agents[name=="cli"].models` 再按它筛
+    /// `data.models`，注释写「实测 CN v3 51 模型含大量非 cli 面模型，cli 过滤后
+    /// 与 console 口径才有可比性」；`Acankao/workbuddy2api-hub/wb_proxy.py:10565`
+    /// 的 `_agent_model_lists()` 同一手法（注释：「The catalogue the picker shows
+    /// rides in agents[].models」）。
+    ///
+    /// `None` = 这次没拿到名单（企业分支 / 上游没下发 `agents`）。此时**不标
+    /// 可见性**（条目不写 `visibility` 键）——「没依据就不下判断」，与
+    /// Trae 的「缺省 = 可见」同一纪律。
+    fn apply_remote_with_picker(
+        &self,
+        models: Vec<Value>,
+        custom_prefix: &str,
+        enterprise: bool,
+        picker: Option<&[String]>,
+    ) {
         let mapped: Vec<Value> = models
             .into_iter()
             .map(|model| {
@@ -536,6 +577,16 @@ impl ModelCatalog {
                     "built-in"
                 };
                 object.insert("modelType".to_string(), Value::String(model_type.to_string()));
+                // 可见性：在不在官方 picker 名单里。名单是大小写敏感的裸 id，
+                // 但上游 id 一贯小写；这里仍做一次不区分大小写的比较，避免
+                // 上游哪天改了大小写导致整份清单被判成不可见。
+                if let Some(list) = picker {
+                    let visible = list.iter().any(|id| id.eq_ignore_ascii_case(&raw_id));
+                    object.insert(
+                        "visibility".to_string(),
+                        Value::String(if visible { "shown" } else { "hidden" }.to_string()),
+                    );
+                }
                 Value::Object(object)
             })
             .collect();
@@ -739,6 +790,89 @@ fn encode_uri_component(value: &str) -> String {
 #[allow(dead_code)]
 pub fn builtin_models_snapshot() -> Value {
     Value::Array(builtin_models())
+}
+
+/// 从 `/v3/config` 响应里取**官方 picker 名单**（`agents[name=="cli"].models`）。
+///
+/// ── 形态（2026-10-17 实测，本机真实响应）──────────────────────
+/// ```json
+/// { "data": { "agents": [ { "name": "cli",
+///                           "models": ["auto", "hy4-preview", "hy3", …] } ] } }
+/// ```
+/// `models` 是**裸字符串 id 数组**（不是对象数组），共 18 条；`data.models`
+/// 则是 60 条带完整元数据的对象数组。两边的 id 是同一套命名，可直接比对。
+///
+/// ── 兼容形态 ────────────────────────────────────────────────
+/// `workbuddy2api-hub` 的 `_agent_model_lists()` 同时接受 `agents` 是**对象**
+/// （`{name: {...}}`）的形态 —— 桌面端缓存文件写盘时是那个样子。这里同样兼容，
+/// 免得上游一改形态就整份判成「没有名单」。
+///
+/// 返回 `None` 的情形（调用方据此**不标可见性**）：
+///   - 响应里没有 `agents`（企业分支 / 上游没下发）；
+///   - 有 `agents` 但没有 `cli` 那一组；
+///   - `models` 不是非空的字符串数组。
+fn picker_model_ids(payload: &Value) -> Option<Vec<String>> {
+    let agents = payload.get("data")?.get("agents")?;
+    let collect = |name: &str, entry: &Value| -> Option<Vec<String>> {
+        if !name.trim().eq_ignore_ascii_case("cli") {
+            return None;
+        }
+        let models = entry.get("models")?.as_array()?;
+        let ids: Vec<String> = models
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .collect();
+        if ids.is_empty() { None } else { Some(ids) }
+    };
+    if let Some(rows) = agents.as_array() {
+        for row in rows {
+            let name = row.get("name").and_then(Value::as_str).unwrap_or("");
+            if let Some(ids) = collect(name, row) {
+                return Some(ids);
+            }
+        }
+        return None;
+    }
+    if let Some(map) = agents.as_object() {
+        for (name, row) in map {
+            if let Some(ids) = collect(name, row) {
+                return Some(ids);
+            }
+        }
+    }
+    None
+}
+
+/// 把 `/v3/config` 的**原始响应**覆盖式落盘一份，供人工核对上游结构。
+///
+/// ── 为什么留着它（不是临时调试代码）────────────────────────────
+/// 本模块只消费 `data.models` 与 `data.agents[cli].models` 两处，其余字段
+/// （`modelTiers` / `modelPromotions` / `featureToggles` …）随时可能藏着下一批
+/// 「该收窄什么」的依据。没有一份原始响应，任何一次判据调整都得重新抓包 ——
+/// 而抓包要真账号、真网络、真上游。
+///
+/// ── 落点与脱敏 ──────────────────────────────────────────────
+/// `{config_dir}/debug/v3-config.json`（覆盖式，只留最近一次；`debug/` 已经是
+/// 排障产物的目录，见 `debug_traffic` 模块头）。**不做脱敏**：这份响应里没有
+/// 凭据（模型目录是公开信息），脱敏反而会把结构改坏、失去核对价值 —— 凭据在
+/// 请求头里，从来不在响应体里。
+///
+/// ── 失败一律静默 ────────────────────────────────────────────
+/// 这是排障辅助：目录创建失败、写盘失败都不该影响刷新本身（与
+/// `catalog_cache::save` 同一取舍 —— 缓存写不进去不能让刷新失败）。
+fn dump_v3_config(payload: &Value) {
+    let dir = crate::paths::config_dir().join("debug");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let text = match serde_json::to_string_pretty(payload) {
+        Ok(text) => text,
+        Err(_) => return,
+    };
+    let _ = std::fs::write(dir.join("v3-config.json"), text);
 }
 
 // ─── 进程级目录句柄（聚合目录的读取口）──────────────────────

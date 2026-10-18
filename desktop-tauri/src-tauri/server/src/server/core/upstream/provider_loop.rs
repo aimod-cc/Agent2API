@@ -1680,6 +1680,15 @@ async fn attempt_queue(
                         ctx.telemetry,
                     ),
                 ),
+                // 智谱清言：SSE 帧混着增量与收尾全文快照，翻译机按帧语义差分
+                // （见那台的模块头）
+                UpstreamResponse::ChatglmSnapshot => {
+                    Box::pin(super::translate::ChatglmToChatStream::new(
+                        response,
+                        &wire_model,
+                        ctx.telemetry,
+                    ))
+                }
                 // 外层 `if` 已排除它，这一支只为 match 的穷尽性存在，**不可能
                 // 走到**。真走到说明分派被改坏了：报内部错误而不是 panic
                 // （release 是 `panic=abort`，一处 panic 带走整个网关）。

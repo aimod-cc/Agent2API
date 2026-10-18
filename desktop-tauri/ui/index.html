@@ -3,6 +3,17 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- ─── PWA：让 iOS「添加到主屏幕」后以独立窗口打开（不是每次都跳回 Safari）───
+       iOS 只认 manifest 里 display: standalone + apple-touch-icon；没有这套声明，
+       主屏幕图标点击会退回 Safari。注意：加了之后用户必须删掉旧书签重新添加。 -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Agent2API">
+  <meta name="theme-color" content="#0f1115">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="assets/app-icon-180.png">
+  <link rel="icon" type="image/png" href="assets/app-icon-192.png">
   <title data-i18n="Agent2API · 多提供商本地网关">Agent2API · 多提供商本地网关</title>
   <script>
     // 与主题持久化配合：在 CSS 解析前先贴上 data-theme，避免深色模式首屏闪烁
@@ -71,6 +82,7 @@
   <link rel="stylesheet" href="css/page-accounts-rail.css">
   <link rel="stylesheet" href="css/page-accounts-sort.css">
   <link rel="stylesheet" href="css/page-gateway.css">
+  <link rel="stylesheet" href="css/page-agent.css">
   <link rel="stylesheet" href="css/page-logs.css">
   <link rel="stylesheet" href="css/page-tasks.css">
   <link rel="stylesheet" href="css/page-checkin.css">
@@ -100,6 +112,9 @@
        （select.css 已随 select.js 一并删除：全站最后一个原生 <select> 换成组件库的
        Select 之后，.select-shell 那一族样式再无任何引用。） -->
   <link rel="stylesheet" href="css/table-col-settings.css">
+  <!-- 移动端适配层：最后加载，断点 768px。不动既有 900px 折叠规则，
+       只处理 768px 以下真机小屏：侧边栏抽屉化 + 表格卡片化 + 卡片堆叠 -->
+  <link rel="stylesheet" href="css/mobile.css">
   <!-- 组件库产物（desktop-tauri/ui-kit/，由 ui-islands 构建时一并编译成 ui/islands/ui.css）：
        Tailwind 的 theme + utilities 两层，刻意不含 preflight —— 基础重置仍由 tokens.css
        承担，否则 h1-h6 字号、列表缩进、img 显示方式会被整体重置。
@@ -114,6 +129,14 @@
 </head>
 <body>
   <div class="shell">
+    <!-- 移动端侧边栏抽屉开关（仅 <768px 生效，见 css/mobile.css）。
+         checkbox 本身隐藏，label.for 指向的汉堡按钮与遮罩都靠 :checked ~ 兄弟选择器驱动，
+         不依赖任何 JS；桌面端整条不影响布局。
+         tabindex="-1"：它带着 aria-hidden 却是文档里第一个可聚焦元素，而隐藏只靠
+         opacity + pointer-events（这条规则在媒体查询之外，桌面端同样生效）—— 不加这一条，
+         桌面用户第一次按 Tab 焦点会落在一个看不见的控件上，同时构成 axe 的
+         aria-hidden-focus 违规。抽屉仍由 label 点击驱动，不受影响。 -->
+    <input type="checkbox" id="nav-toggle" class="nav-toggle-input" tabindex="-1" aria-hidden="true">
     <!-- ─── 左侧导航 ─── -->
     <aside class="sidebar">
       <div class="brand">
@@ -153,6 +176,13 @@
 
         <div class="nav-group-label" data-i18n="转发能力">转发能力</div>
         <button class="nav-item" data-page="gateway" data-icon="gateway"><span class="ico"></span><span class="label" data-i18n="模型管理">模型管理</span></button>
+        <!-- Agent：本机 AI 客户端的配置接管（改写它自己的配置文件）。
+             夹在「模型管理」与「网络代理」之间是因为三页是同一个转发链的三段：
+             模型管理决定「请求发往哪家上游」，网络代理决定「从哪条线路出去」，
+             这一页决定「谁把请求发进来」。整页由 React 岛渲染
+             （ui-islands/src/islands/agent-page.tsx），岛直接挂在这个 section 上。
+             对外契约 window.wbAgentPanel = { load }（app.js 切页时调）。 -->
+        <button class="nav-item" data-page="agent" data-icon="agent"><span class="ico"></span><span class="label" data-i18n="Agent">Agent</span></button>
         <!-- 网络代理：出网出口的管理页（代理池 CRUD + 连通性测试 + Clash 出口引用）。
              挨着「模型管理」是因为它管的是同一个问题的另一半：模型管理决定
              「请求发往哪家上游」，这里决定「从哪条线路出去」。账号弹窗里的
@@ -191,12 +221,24 @@
           <button data-mode="light" data-i18n="浅色">浅色</button>
           <button data-mode="dark" data-i18n="深色">深色</button>
         </div>
+        <!-- 手机端入口：同一份面板在窄屏上的另一种排布（`/m`，独立页面，
+             与这一页不共享布局）。放侧栏底部而不是一级菜单里 —— 它是
+             「换个设备继续看」，不是第 14 个功能页。新标签打开，不打断当前操作。 -->
+        <a class="sidebar-mobile-link" href="/m" target="_blank" rel="noopener" data-i18n="手机端打开">手机端打开</a>
       </div>
     </aside>
 
     <!-- ─── 主区域 ─── -->
     <main class="main">
       <header class="topbar">
+        <!-- 移动端汉堡按钮：仅 <768px 显示，点击切换 #nav-toggle 让侧边栏滑出（纯 CSS）。
+             内联 SVG 与 icons.js 同一套约定（24×24 画布 + currentColor 填充），
+             不依赖 paintIcons 的注入时序 —— 那是页面级图标，这里要首帧就在。 -->
+        <label for="nav-toggle" class="mobile-menu-btn" title="菜单" aria-label="切换菜单">
+          <svg viewBox="0 0 24 24" width="19" height="19" fill="currentColor" aria-hidden="true">
+            <path d="M3 6h18v2.5H3V6Zm0 5.25h18v2.5H3v-2.5Zm0 5.25h18v2.5H3v-2.5Z"/>
+          </svg>
+        </label>
         <div class="crumb">
           <span>Agent2API</span>
           <span class="sep">/</span>
@@ -260,6 +302,13 @@
              表骨架（colgroup + thead 的 th[data-col]）也由岛渲染，但顺序与这里原先
              写死的完全一致，列显隐 / 顺序仍由 wbColSettings.syncStaticHead 就地重排。 -->
         <section class="page" data-page="gateway"></section>
+
+        <!-- ─── Agent（本机 AI 客户端的配置接管）───
+             整页由 React 岛渲染（ui-islands/src/islands/agent-page.tsx），
+             岛直接挂在这个 section 上、不套宿主 div —— 页面 CSS 用 .page 的
+             直接子选择器（.panel 是它的直接子元素），中间插一层会破坏布局。
+             两种客户端形态（单配置 / 多配置）的区别见该岛的文件头。 -->
+        <section class="page" data-page="agent"></section>
 
         <!-- ─── 网络代理 ───
              出口（代理池）的配置中心：新增 / 编辑 / 删除 / 启停 / 测试连通性，
@@ -371,6 +420,11 @@
         </div>
       </div>
     </main>
+
+    <!-- 移动端侧边栏遮罩：<768px 下侧边栏滑出时盖住内容区，点遮罩即收起。
+         纯 CSS 兄弟选择器驱动（#nav-toggle:checked ~ .nav-scrim），无需 JS。
+         必须与 #nav-toggle 同处 .shell 下、且在它之后，兄弟选择器才成立。 -->
+    <label for="nav-toggle" class="nav-scrim" aria-hidden="true"></label>
   </div>
 
   <!-- 添加账号弹窗已迁到组件库：实现见
@@ -571,6 +625,9 @@
        它启动时就把表头把手插好并绑好委托，所以排在靠后（DOM 里的表格与列表都已存在）；
        请求日志的表头是整块重绘的，它自己用 MutationObserver 补把手，不依赖面板脚本。 -->
   <script src="table-columns.js"></script>
+  <!-- 移动端表格卡片化：窄屏下把表头列名写进每行 td 的 data-col，
+       配合 css/mobile.css 的 td::before 渲染成卡片 label。桌面端不执行。 -->
+  <script src="mobile-columns.js"></script>
   <!-- 并发上限小对话框已迁到组件库：实现见 desktop-tauri/ui-islands/src/conc-dialog.tsx，
        随 islands/ui.js 一起加载（排在 accounts-view 之前），对外仍是
        window.wbAccountConcDialog.open(account) / .close()，调用方不用改。 -->

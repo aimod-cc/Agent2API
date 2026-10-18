@@ -7,12 +7,12 @@
 [简体中文](./README.md) | [English](./docs/README.en.md) | [繁體中文](./docs/README.zh-Hant.md) | [日本語](./docs/README.ja.md) | [한국어](./docs/README.ko.md) | [Português (BR)](./docs/README.pt-BR.md)
 
 [![license](https://img.shields.io/badge/license-MIT%20%2B%20附加声明-green)](./LICENSE)
-[![release](https://img.shields.io/github/v/release/aimod-cc/agent2api?include_prereleases)](https://github.com/aimod-cc/agent2api/releases/latest)
+[![release](https://img.shields.io/github/v/release/Agent2API/agent2api?include_prereleases)](https://github.com/Agent2API/agent2api/releases/latest)
 [![docker pulls](https://img.shields.io/docker/pulls/aimodcc/agent2api)](https://hub.docker.com/r/aimodcc/agent2api)
-[![stars](https://img.shields.io/github/stars/aimod-cc/agent2api?style=flat&color=yellow)](https://github.com/aimod-cc/agent2api/stargazers)
-[![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Docker-blue)](https://github.com/aimod-cc/agent2api/releases/latest)
+[![stars](https://img.shields.io/github/stars/Agent2API/agent2api?style=flat&color=yellow)](https://github.com/Agent2API/agent2api/stargazers)
+[![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Docker-blue)](https://github.com/Agent2API/agent2api/releases/latest)
 
-[✨ 核心特性](#-核心特性) • [💬 社区与支持](#-社区与支持) • [🤝 支持的提供商](#-支持的提供商) • [🚀 快速开始](#-快速开始) • [🐳 Docker 部署](#-docker-部署) • [📸 界面预览](#-界面预览) • [🔧 开发与构建](#-开发与构建) • [📜 使用声明](#-使用声明)
+[✨ 核心特性](#-核心特性) • [💬 社区与支持](#-社区与支持) • [🤝 支持的提供商](#-支持的提供商) • [🚀 快速开始](#-快速开始) • [📦 安装与部署](./docs/install.md) • [📸 界面预览](#-界面预览) • [🔧 开发与构建](#-开发与构建) • [📜 使用声明](#-使用声明)
 
 </div>
 
@@ -31,7 +31,7 @@ Agent2API 把多家 AI 桌面客户端里已登录的账号接到一起，共用
 - 📊 **请求报表** —— 请求量、成功率、Token 消耗一览，还有缓存命中率与 365 天热力图
 - ⏰ **定时任务** —— 自动签到、凭证维护、模型目录刷新，开关与间隔在一页里管理
 - 💰 **余额与用量** —— 账号行内直接看余额与用量，支持跨账号并发查询
-- 🖥️ **两种部署** —— 桌面端托盘常驻、免装 Node；Docker 版面板与网关同端口，界面六语
+- 🖥️ **三种形态** —— 桌面端（Windows / macOS / Linux，托盘常驻）、服务端（Windows / Linux，无界面，注册成系统服务）、Docker（面板与网关同端口，amd64 / arm64）；都不需要装 Node，界面六语
 
 ## ❤️ 赞助商
 
@@ -48,7 +48,9 @@ Agent2API 把多家 AI 桌面客户端里已登录的账号接到一起，共用
 
 ## 💬 社区与支持
 
-- **QQ 群**：Agent2API 交流群，群号 `1127656296` —— 在 QQ 里搜索群号即可加入，使用答疑与问题反馈都在这里。
+- **QQ 群**：Agent2API 交流群 —— **群 1（`1127656296`）即将满员，请优先加群 2（`1130894674`）**；在 QQ 里搜索群号即可加入。
+- **Telegram 群**：<https://t.me/+9gM8YPvgRL02NGRl>
+- **Discord 群**：<https://discord.gg/z9GzSJMWp>
 - **💖 赞赏**：如果 Agent2API 帮到了你，欢迎[请作者喝杯咖啡](docs/SPONSOR.md)；赞赏完全自愿，不解锁任何功能。
 - **🤝 赞助 / 商务合作**：想赞助本项目，或想让你的产品出现在这里？发邮件到 [541675139@qq.com](mailto:541675139@qq.com)。
 
@@ -73,11 +75,15 @@ Agent2API 把多家 AI 桌面客户端里已登录的账号接到一起，共用
 | KukuAI（百度文库） | ✓ | ✗ | ✓ | ✓ | ✓ | — |
 | MonkeyCode（长亭科技，国内版 / 国际版） | ✓ | ✗ | ✓ | — | — | — |
 | Command Code | ✓ | ✗ | ✓ | — | — | — |
-| Antigravity（Google，Gemini） | ✓ | ✓ | ✓ | — | — | — |
+| Antigravity（Google，Gemini / Claude / GPT-OSS） | ✓ | ✓ | ✓ | — | — | — |
 | OfficeAce（华为云果办 / OfficeClaw） | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| OrcaTerm（腾讯云遨驰终端） | ✓ | ✓ | ✓ | ✓ | — | — |
+| 智谱清言 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | 自定义提供商 | ✓ | — | ✓ | — | — | — |
 
 > 注：模型列表的 ✓ 表示支持在线自动拉取，部分平台另有内置静态表兜底；ZCode 仅有内置静态表。Token 续期列 ✗ 表示该平台没有可用的续期接口（账号在有效期内不受影响）。Qoder 签到仅中国版可用。
+>
+> **智谱清言**是本项目**唯一支持「访客模式」**的一家：不需要登录，点一下就能换到一份可直接对话的凭证（免费额度由上游按设备发放）。代价是访客账号没有积分体系 —— 上表里的「余额查询 / 签到 / 领取类」，以及**任务中心的新手任务与每日任务**，都只对**登录账号**有效（粘贴令牌或导入客户端登录态），访客会被如实跳过。
 
 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`（含 `count_tokens`）与 `/v1/models` 对所有平台一视同仁；模型映射、全局优先级队列、429 降级、出网代理、出站指纹脱敏与请求报表同样全平台通用。
 
@@ -87,85 +93,36 @@ Agent2API 把多家 AI 桌面客户端里已登录的账号接到一起，共用
 
 ## 🚀 快速开始
 
-从 [Releases](https://github.com/aimod-cc/agent2api/releases/latest) 下载安装包（NSIS，简体中文，默认装到 `C:\Program Files\Agent2API`，安装时需要管理员授权），安装后启动即可，**无需安装 Node 或任何其它运行时**。
+三种形态，按你的环境选一个；**完整的安装、升级、卸载与排错见 [安装与部署](docs/install.md)**。
 
-1. 首次启动即在应用进程内启动本机网关（端口 3065）并打开主窗口；若检测到旧版本的数据目录或数据文件，会弹窗提示迁移，按指引操作即可。
-2. 点「账号」页的「添加账号」，选提供商后按弹窗提示完成登录或填写凭证即可（方式以弹窗为准：网页登录 / 手机验证码 / 粘贴凭证 / 导入本机登录态）。
-3. 把 OpenAI 客户端的 `base_url` 填成 `http://127.0.0.1:3065/v1`，`api_key` 随便填（例如 `sk-local`，未启用鉴权时服务端不校验）。
+| 形态 | 产物 | 界面 |
+| --- | --- | --- |
+| **桌面端**（Windows / macOS / Linux） | `Agent2API_<版本>_x64-setup.exe`、`_universal.dmg`、`_amd64.deb`、`_amd64.AppImage` | 应用窗口 |
+| **服务端**（Windows Server / Linux，无 GUI） | `agent2api-server-windows-amd64.zip`、`agent2api-server-linux-<arch>.tar.gz` | 浏览器面板 |
+| **Docker** | `aimodcc/agent2api:latest`（amd64 / arm64） | 浏览器面板 |
 
-关闭窗口默认最小化到托盘，网关继续在后台转发；彻底退出请在托盘图标右键选「退出」。
+**桌面端**：装完启动 → 「账号」页添加账号 → 客户端 `base_url` 填 `http://127.0.0.1:3065/v1`（`api_key` 随便填，例如 `sk-local`）。无需安装 Node 或任何其它运行时，网关跑在应用进程内，托盘常驻。
 
-### 验证
-
-网关起来后，用 curl 确认联通性（`model` 填 `GET /v1/models` 里任一实际存在的名字）：
-
-```bash
-curl http://127.0.0.1:3065/health
-curl http://127.0.0.1:3065/v1/models
-
-curl http://127.0.0.1:3065/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"你好"}],"stream":true}'
-```
-
-客户端接入示例（Python SDK）：
-
-```python
-from openai import OpenAI
-
-client = OpenAI(base_url="http://127.0.0.1:3065/v1", api_key="sk-local")
-resp = client.chat.completions.create(
-    model="deepseek-v4.1-flash",     # 名单里有哪家就是哪家，见 GET /v1/models
-    messages=[{"role": "user", "content": "你好"}],
-)
-print(resp.choices[0].message.content)
-```
-
-**浏览器页面**（自建 Web UI 等）用 `fetch` 直连会被跨源预检拒绝——网关默认不应答 CORS，预检落到 API Key 校验上得 401。两种解法：① 设置页「安全 → 网关跨域访问」打开（来源 `*`；此时任何网页都能借本机网关打上游，建议同时配「网关 Key」）；② 页面与网关同源——本地静态服务托管页面并把 `/v1` 反代到 `127.0.0.1:3065`。
-
-### 局域网访问
-
-默认只监听 `127.0.0.1`。开启「设置 → 通用 → 局域网访问」后改听所有网卡，局域网设备把 API 地址指向本机 IP 即可共用（界面会给出完整地址）。出于安全，开启前必须注册面板管理员：管理接口要求管理员会话或网关 Key，无可用 Key 时转发接口同样拒绝服务（开启流程会自动补一把「默认」Key）；也可选择同时开放网页面板（默认关闭）。改动重启生效。
-
-## 🐳 Docker 部署
+**服务端**（无图形界面，注册成系统服务、开机自启）：
 
 ```bash
-docker run -d --name agent2api --restart unless-stopped \
-  -p 3065:3065 -v ./data:/data \
-  aimodcc/agent2api:latest
+# Linux
+tar -xzf agent2api-server-linux-amd64.tar.gz && cd agent2api-server-linux-amd64 && sudo bash install.sh
 ```
 
-浏览器打开 `http://<主机>:3065`，首次进入会引导**注册管理员账号**；登录后在「网关 Key」页建一把 API Key 给客户端用 —— `http://<主机>:3065/v1` 即 OpenAI 兼容端点（未建 Key 前拒绝转发）。状态（SQLite 库 / 配置 / 日志）都在 `./data` 一个卷里。
-
-compose 用户（amd64 / arm64 都有镜像）：
-
-```yaml
-services:
-  agent2api:
-    image: aimodcc/agent2api:latest
-    container_name: agent2api
-    restart: unless-stopped
-    ports:
-      - "3065:3065"
-    volumes:
-      - ./data:/data
+```powershell
+# Windows Server（管理员 PowerShell）
+Expand-Archive agent2api-server-windows-amd64.zip -DestinationPath C:\agent2api-pkg
+cd C:\agent2api-pkg; .\install-service.ps1
 ```
 
-环境变量（都可选）：
+**Docker**：
 
-| 变量 | 说明 |
-| --- | --- |
-| `AGENT2API_ADMIN_USER` + `AGENT2API_ADMIN_PASSWORD` | 预置管理员账号密码（密码明文填，启动时自动转哈希）；不填走面板注册 |
-| `AGENT2API_PANEL_PORT` | 面板分端口：设后面板（界面 + `/api/*`）单独监听该端口，公网只映射主端口即可把管理面留在内网（面板端口绑回环，写 `127.0.0.1:3066:3066`） |
-| `AGENT2API_HOST` / `AGENT2API_PROXY_PORT` | 监听地址（默认 `0.0.0.0`）/ 端口（默认 `3065`） |
-| `AGENT2API_ALLOW_NO_KEY` | 置 `1` 关闭 fail-closed（未配 Key 也放行 `/v1`，仅限纯内网） |
-| `AGENT2API_CAPTCHA_ENABLED` | 登录页人机验证：默认 `1` 开启，`0` 关闭 |
-| `AGENT2API_SELF_UPDATE` | 容器内的更新入口：默认 `1` 开启（面板可「下载并更新」）；置 `0` 关闭，只走手动升级 |
-| `WORKBUDDY_UPDATE_REPO` + `WORKBUDDY_UPDATE_API_BASE` | 进阶：把「检查更新 / 下载更新」换成自建源。前者换仓库（默认跟上游 `aimod-cc/agent2api`，fork 后可改），后者换 API 根（默认 `https://api.github.com`，需返回与 GitHub 同形的 release JSON）。配了自建源后，下载白名单只额外放行**该源自己的域名**（按源的 scheme：配 `http://` 就允许明文下载，仅建议本地演练/内网镜像用）|
+```bash
+docker run -d --name agent2api --restart unless-stopped -p 3065:3065 -v ./data:/data aimodcc/agent2api:latest
+```
 
-从源码构建：克隆本仓库后 `docker compose up -d --build`（镜像里只有网关与面板，不含 Rust 工具链）。
-
-**网页端功能差异**（源于「没有本机桌面客户端」）：网页登录（WorkBuddy / Qoder / Cline）、手机验证码、粘贴凭证完全可用；需要本机回调的网页登录（AutoClaw / CatPaw / Accio / CodeArts / Trae）与「导入本机登录态」不可用，请改用粘贴凭证。
+三种形态装完后都打开面板（`http://127.0.0.1:3065/`，服务端与 Docker 换成主机 IP）注册管理员账号，再在「网关 Key」页建一把 Key。连通性自测：`curl http://127.0.0.1:3065/health`
 
 ## 📸 界面预览
 
@@ -201,6 +158,7 @@ services:
 
 - Rust >= 1.77 与 Tauri 2 工具链（编译桌面端本体；Windows 上还需 WebView2 运行时）
 - Node.js >= 18.17（只用于 `npm run tauri:*` 与前端构建脚本，桌面端运行时不依赖 Node）
+- 目标平台：Windows / macOS / Linux 桌面端、Windows / Linux 服务端（无 GUI）、Docker 服务端
 
 ### 常用脚本
 
@@ -212,7 +170,9 @@ npm run tauri:build        # 构建桌面端安装包
 npm run build:icon         # 生成图标源图（改图标设计后执行，再跑 tauri icon）
 ```
 
-打包产物为 `target/release/bundle/nsis/Agent2API_<版本>_x64-setup.exe`（当前约 3.0 MB；`src-tauri/.cargo/config.toml` 把 cargo 的 `target-dir` 指到了项目根的 `target/`）。
+打包产物为 `target/release/bundle/nsis/Agent2API_<版本>_x64-setup.exe`（3.0 版约 8.6 MB；`src-tauri/.cargo/config.toml` 把 cargo 的 `target-dir` 指到了项目根的 `target/`）。
+
+macOS 的 `.dmg` **只能在 macOS 上构建**（`npm --prefix desktop-tauri run build -- --target universal-apple-darwin`），无法从 Windows 交叉编译，所以正式产物由 CI 的 `build` 工作流产（`macos-latest` + 双目标合并）；Docker 镜像与容器内更新用的服务端包由同一工作流的 `linux-server` job 出（复用 Dockerfile 的编译路径，包内可执行文件与镜像同源同工具链）。
 
 ## 📜 使用声明
 
@@ -244,17 +204,17 @@ npm run build:icon         # 生成图标源图（改图标设计后执行，再
 
 ## ⭐ Star History
 
-<a href="https://star-history.com/#aimod-cc/agent2api&Date">
+<a href="https://star-history.com/#Agent2API/agent2api&Date">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=aimod-cc/agent2api&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=aimod-cc/agent2api&type=Date" />
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=aimod-cc/agent2api&type=Date" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Agent2API/agent2api&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Agent2API/agent2api&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Agent2API/agent2api&type=Date" />
   </picture>
 </a>
 
 <div align="center">
 
-**[下载最新版](https://github.com/aimod-cc/agent2api/releases/latest)** • **[问题反馈](https://github.com/aimod-cc/agent2api/issues)**
+**[下载最新版](https://github.com/Agent2API/agent2api/releases/latest)** • **[问题反馈](https://github.com/Agent2API/agent2api/issues)**
 
 如果这个项目对你有帮助，欢迎点一个 ⭐️ Star！
 

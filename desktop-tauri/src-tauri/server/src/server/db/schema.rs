@@ -80,6 +80,9 @@ use rusqlite::Connection;
 /// 「功能已删、数据留着」的键，登记它们的唯一目的就是让配置写入别去动它。
 pub const RESERVED_KV_KEYS: &[&str] = &[
     // 账号优先级的全局作用域（core::account_store::sql）
+    // 「Agent」页的用户配置：{ clientId: [Profile] } 整份 JSON 一个键
+    // （core::agents）。零散状态，与 desktopSettings 同一类。
+    "agentProfiles",
     "priorityScope",
     // 事件日志的下一个 id 水位（logs_store::sql）
     "logsNextId",
@@ -308,9 +311,15 @@ pub fn is_reserved(key: &str) -> bool {
 /// 两条都是 `CREATE INDEX IF NOT EXISTS`（与其余版本的幂等纪律一致）：在存量库
 /// 上建索引要扫一遍表，代价与表大小成正比、只付一次；`requests` 只有几万行时
 /// 在百毫秒量级，不会让启动明显变慢。**不要把这两条往 [`V1_SCHEMA`] 里补**：
-/// 新库按 1→15 依次跑，v15 那一步同样会建出来，而 v1 里多写一份等于同一条索引
+/// 新库按 1→16 依次跑，v15 那一步同样会建出来，而 v1 里多写一份等于同一条索引
 /// 有了两处定义 —— 将来改一处忘一处，正是 `V4_SCHEMA` 那类错位的来源。
-pub const SCHEMA_VERSION: i64 = 15;
+///
+/// ── v16：AI 助手的对话会话（[`V16_SCHEMA`]）──────────────────
+/// 助手从「一次性对话」变成「有历史记录的会话」：左边一列会话、右边一条消息流，
+/// 关掉页面再回来还能接着聊。存**整条消息流的 JSON**（而不是逐条消息一行）的
+/// 理由与 `kv` 表同一取向：读写单元天然是「一整个会话」，逐条存只会让每次保存
+/// 变成 N 次写入 + 一次事务，而没有任何一处需要「按单条消息查」。
+pub const SCHEMA_VERSION: i64 = 16;
 
 /// 版本 1 的全部表与索引：改造前所有 JSON / JSONL 文件的对应形态。
 ///
@@ -814,6 +823,41 @@ CREATE INDEX IF NOT EXISTS idx_requests_summary ON requests(
 );
 ";
 
+/// 版本 16：AI 助手的对话会话表（schema v16）。
+///
+/// ── 存什么 ──────────────────────────────────────────────────
+/// 一条会话一行。列的口径：
+///   - `id`：会话 id（前端生成，`crypto.randomUUID()` 形态的字符串）。让前端
+///     生成而不是自增：新建会话时前端立刻要用这个 id 挂消息，等一次往返再拿到
+///     它会让「点新建 → 立刻发第一句」出现一个必须等待的中间态；
+///   - `title`：侧边栏显示的名字。取第一条用户消息的前若干字（前端算好传上来），
+///     用户没改过就一直是它 —— 后端不做「自动起标题」那种额外一次上游调用；
+///   - `messages`：**整条消息流的 JSON 原文**（`[{role, content, toolCalls?,
+///     toolCallId?}, …]`，与发给上游的 wire 形态同构）。存原文而不是拆列的理由
+///     见 [`SCHEMA_VERSION`] 的 v16 段；
+///   - `model` / `reasoning`：这条会话最后用的模型与思考等级。存**会话级**而不是
+///     每条消息各带一份：用户换模型是「这条对话从现在起换个模型」，不是逐条
+///     指定；重开一条会话时前端从这两个字段恢复选择器；
+///   - `created_at` / `updated_at`：毫秒时间戳。侧边栏按 `updated_at` 倒序排
+///     （最近聊过的在最上面），`updated_at` 每次保存都刷新。
+///
+/// ── 索引 ────────────────────────────────────────────────────
+/// 只有一条 `updated_at` 倒序索引：侧边栏的全部查询就是「按最近更新排序列出」，
+/// 没有按标题 / 模型检索的需求（会话量级是几十条，前端一次全取即可）。
+const V16_SCHEMA: &str = "
+-- ── assistant_sessions：AI 助手的对话会话（schema v16）───────
+CREATE TABLE IF NOT EXISTS assistant_sessions (
+  id          TEXT PRIMARY KEY,
+  title       TEXT NOT NULL DEFAULT '',
+  messages    TEXT NOT NULL DEFAULT '[]',
+  model       TEXT,
+  reasoning   TEXT,
+  created_at  INTEGER NOT NULL DEFAULT 0,
+  updated_at  INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_assistant_sessions_updated ON assistant_sessions(updated_at DESC);
+";
+
 /// 把库升到 [`SCHEMA_VERSION`]（幂等：已是最新版时什么都不做）。
 ///
 /// **库版本高于本程序时返回 `Err` 拒绝打开**（v14 起有意反转的一条既有决定，
@@ -901,7 +945,13 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         // 失败**不报错**：数据已经删掉了，回收空间是尽力而为的优化 —— 用户
         // 之后仍可在请求日志页的「清理」弹窗里手动压缩（那条路有后台线程与
         // 进度状态，见 `RequestStats::compact`）。
+        //
+        // VACUUM 前后各做一次 checkpoint（与 `RequestStats::compact` 同形，理由
+        // 见那边模块注释）：WAL 模式下 VACUUM 的整库重建会全部落进 `-wal`，
+        // 少了尾部那次截零，空间只是从主库搬到 WAL、总占用不降反升（issue #297）。
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
         let _ = conn.execute_batch("VACUUM;");
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
     }
     Ok(())
 }
@@ -971,6 +1021,9 @@ fn apply_version(
         // v15：requests 补两条索引（status 的定位 + 报表窄列的覆盖，见
         // V15_SCHEMA 与 SCHEMA_VERSION 的 v15 段）。
         15 => conn.execute_batch(V15_SCHEMA),
+        // v16：assistant_sessions 助手对话会话表（见 V16_SCHEMA 与
+        // SCHEMA_VERSION 的 v16 段）。新表用 CREATE IF NOT EXISTS，幂等。
+        16 => conn.execute_batch(V16_SCHEMA),
         _ => Ok(()),
     }
 }

@@ -87,6 +87,23 @@ impl AccountStore {
                     .unwrap_or(false),
             ),
         );
+        // 「需要重新登录」标记（issue #215）：上游注销了会话、refresh token 一并
+        // 作废时由刷新链路落。界面据此把「刷新失败」显示成「需要重新登录」——
+        // 两者对用户的下一步动作完全不同（前者再点一次，后者必须去登录）。
+        // 键恒在（false 表示正常），前端不必判「键缺失」。
+        public.insert(
+            "needsRelogin".to_string(),
+            Value::Bool(
+                fields
+                    .get("needsRelogin")
+                    .map(js_truthy)
+                    .unwrap_or(false),
+            ),
+        );
+        public.insert(
+            "needsReloginReason".to_string(),
+            value_or(fields.get("needsReloginReason"), Value::String(String::new())),
+        );
         public.insert(
             "prefixPath".to_string(),
             value_or_nullish(

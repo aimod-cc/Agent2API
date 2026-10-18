@@ -28,14 +28,20 @@ import { Button, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, 
 import { t } from '../i18n'
 import {
   DEFAULT_SYSTEM_PROMPT,
+  clearSessions,
+  deleteSession,
   gatewayBase,
   loadAssistantConfig,
   loadModelNames,
+  loadSession,
+  loadSessions,
   parseToolArguments,
   saveAssistantConfig,
+  saveSession,
   streamChat,
   type AssistantConfig,
   type ChatMessage,
+  type SessionSummary,
   type ToolCall,
 } from './assistant-state'
 import {
@@ -49,6 +55,32 @@ import {
 
 /** 一轮对话里最多允许的「上游调用 → 工具 → 上游调用」循环次数 */
 const MAX_ROUNDS = 12
+
+/** 思考等级候选（与后端 `model_rules::REASONING_LEVELS` 逐字一致，顺序由弱到强）。
+ *
+ *  **不 import 后端**（那是 Rust 常量），也不从 `/api/models/manage` 的
+ *  `reasoningLevels` 取：那份是「映射绑定」的可选项、随 manage 响应回来，而
+ * 聊天框这个选择器要的是同一张表 —— 两处抄一份迟早漂移，所以这里**只**在
+ * 这一处写死，并在注释里指向后端那份作为事实来源。加档位时两边一起改。
+ */
+const REASONING_LEVELS = ['off', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+
+/** 侧边栏标题：取第一条用户消息的前若干字（没聊过时给占位） */
+const TITLE_MAX_CHARS = 40
+function titleFrom(messages: ChatMessage[]): string {
+  const first = messages.find(message => message.role === 'user')
+  const text = first && first.role === 'user' ? first.content.trim().replace(/\s+/g, ' ') : ''
+  if (!text) return ''
+  return text.length > TITLE_MAX_CHARS ? `${text.slice(0, TITLE_MAX_CHARS)}…` : text
+}
+
+/** 新会话 id（与后端 `core::assistant_sessions` 的「id 由前端生成」配套） */
+function newSessionId(): string {
+  const cryptoApi = (window as unknown as { crypto?: Crypto }).crypto
+  if (cryptoApi?.randomUUID) return cryptoApi.randomUUID()
+  // 极老的环境（没有 randomUUID）：时间戳 + 随机数，碰撞概率可忽略
+  return `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
 
 /* ─── UI 模型 ─────────────────────────────────────────────── */
 
@@ -177,6 +209,28 @@ function ToolCard({ item, onConfirm }: { item: ToolCardItem; onConfirm: (run: bo
 
 
 
+/**
+ * 输入框自增高的上限：按当前字号算 6 行。
+ * 之前写死 132px（12.5px 字号下的 6 行），手机上字号切到 16px 后同样的
+ * 像素值只能放 4 行多 —— 行数被悄悄改掉了。按字号算，两档都是 6 行。
+ */
+/**
+ * 当前是否窄屏（手机）。输入框字号要据此切换：
+ * iOS Safari 在 < 16px 时聚焦会自动放大整页，桌面端则不需要那么大。
+ * 用 matchMedia 而不是读 CSS 变量 —— 组件库的 Textarea 带 text-[12px]
+ * （Tailwind v4 的 utilities 在 @layer 里，CSS 里怎么写都压不过），
+ * 只有内联样式能赢；而内联样式读不了「响应式」，只能由 JS 判断。
+ */
+function isNarrow(): boolean {
+  return typeof window !== 'undefined' && window.matchMedia('(max-width: 767.98px)').matches
+}
+
+function taMaxHeight(el: HTMLTextAreaElement): number {
+  const fs = parseFloat(getComputedStyle(el).fontSize) || 12.5
+  const lh = parseFloat(getComputedStyle(el).lineHeight) || fs * 1.6
+  return Math.round(lh * 6)
+}
+
 function AssistantPage() {
   const [config, setConfig] = React.useState<AssistantConfig | null>(null)
   const [models, setModels] = React.useState<string[]>([])
@@ -186,6 +240,11 @@ function AssistantPage() {
   const [draft, setDraft] = React.useState('')
   const [status, setStatus] = React.useState('')
   const [loadingFailed, setLoadingFailed] = React.useState(false)
+  /** 历史会话列表（侧边栏）与当前打开的那一条 */
+  const [sessions, setSessions] = React.useState<SessionSummary[]>([])
+  const [activeId, setActiveId] = React.useState<string>('')
+  /** 侧边栏在窄屏下是否展开（宽屏常驻，见 CSS 的 .asst-layout） */
+  const [sidebarOpen, setSidebarOpen] = React.useState(false)
 
   const uiRef = React.useRef<UiMessage[]>([])
   const wireRef = React.useRef<ChatMessage[]>([])
@@ -193,6 +252,15 @@ function AssistantPage() {
   const controllerRef = React.useRef<AbortController | null>(null)
   const scrollRef = React.useRef<HTMLDivElement | null>(null)
   const loadedRef = React.useRef(false)
+  /** 当前会话 id（`uiRef` 那串消息归属哪一条；新建时换一个） */
+  const activeIdRef = React.useRef<string>('')
+  /** 会话标题（用户没改过就一直取第一条用户消息，见 `titleFrom`） */
+  const titleRef = React.useRef<string>('')
+  /** 保存的串行化：每轮回答结束都存一次，但两次保存不该并发（后到的会覆盖先到的） */
+  const savingRef = React.useRef<Promise<void>>(Promise.resolve())
+  /** 配置的最新值（`persist` 在异步链里读它，不能依赖闭包捕获的那一份） */
+  const configRef = React.useRef<AssistantConfig | null>(null)
+  configRef.current = config
   /** 配置加载已自动重试的次数（成功即清零；上限见 activate 内的判定） */
   const retryRef = React.useRef(0)
   /**
@@ -209,6 +277,55 @@ function AssistantPage() {
   const roundRef = React.useRef(0)
 
   const syncUI = React.useCallback(() => { setUi(uiRef.current.slice()) }, [])
+
+  /**
+   * 把当前会话落库（新建或覆盖）。
+   *
+   * ── 为什么每次回答完都存、而不是只在切走时存 ────────────────
+   * 「切走时存」在崩溃 / 关窗口 / 切页时都会丢最后一轮 —— 而那正是用户最想
+   * 留下的东西。每次回答完存一次的代价是一条本地 HTTP + 一次 upsert，可以忽略。
+   *
+   * ── 为什么要串行 ────────────────────────────────────────────
+   * 一轮对话里 `loop` 可能被调多次（工具回灌后继续），每次结束都会触发保存。
+   * 并发写同一条会话时，后到的请求**不保证**先落库 —— 那会让「刚存的最新版」
+   * 被「稍早的旧版」覆盖。这里用一条 promise 链把保存排成队。
+   */
+  const persist = React.useCallback((): Promise<void> => {
+    const id = activeIdRef.current
+    if (!id) return Promise.resolve()
+    // 只存「有内容」的会话：一条刚新建、还没发过消息的空会话不该占历史列表的
+    // 一格（它会在用户发第一句时自然出现）
+    const messages = wireRef.current
+    if (!messages.length) return Promise.resolve()
+    const title = titleRef.current || titleFrom(messages)
+    const payload = {
+      id,
+      title,
+      messages,
+      model: configRef.current?.model ?? null,
+      reasoning: configRef.current?.reasoning ?? null,
+    }
+    savingRef.current = savingRef.current
+      .catch(() => { /* 上一次的失败不该阻断这一次 */ })
+      .then(async () => {
+        try {
+          const saved = await saveSession(payload)
+          titleRef.current = saved.title
+          setSessions(prev => {
+            const rest = prev.filter(item => item.id !== saved.id)
+            return [saved, ...rest]
+          })
+        } catch (error) {
+          // 落库失败不打扰用户（内容已经在屏幕上，报错只会把人引向「模型挂了」）；
+          // 状态行留一句，下一次保存会自然重试
+          setStatus(t('这条会话没能存进历史：{message}', { message: errorText(error) }))
+        }
+      })
+    return savingRef.current
+  }, [])
+  /** `persist` 的稳定引用（`loop` 的 deps 里放它会陷入循环，见 loopRef 的说明） */
+  const persistRef = React.useRef(persist)
+  persistRef.current = persist
 
   /* 贴底：新消息进来时滚到底（用户往上翻时不打扰 —— 只在接近底部时贴） */
   React.useEffect(() => {
@@ -250,6 +367,23 @@ function AssistantPage() {
       setModels(await loadModelNames())
     } catch (error) {
       setStatus(prev => prev || t('读取模型清单失败：{message}', { message: errorText(error) }))
+    }
+    // ③ 历史会话列表（左边那列）。失败只说一句、不挡对话 —— 没有历史照样能聊
+    try {
+      setSessions(await loadSessions())
+    } catch (error) {
+      setStatus(prev => prev || t('读取历史会话失败：{message}', { message: errorText(error) }))
+    }
+    // ④ 首次进入开一条空白会话（不等用户点「新对话」：直接就能打字）。
+    //    已有 id 时不覆盖 —— 重试路径会再走一遍 activate，那次不该把正在聊的
+    //    会话换成一条新的。这里内联而不调 `resetToBlank`：那个函数定义在本
+    //    回调之后，放进 deps 会在初始化前求值（TDZ），而它做的事在这里只有
+    //    两行（清空 ref 与状态本来就已经是空的）。
+    if (!activeIdRef.current) {
+      const id = newSessionId()
+      activeIdRef.current = id
+      titleRef.current = ''
+      setActiveId(id)
     }
   }, [])
 
@@ -348,6 +482,7 @@ function AssistantPage() {
       await streamChat({
         messages: wireRef.current,
         tools: enabledTools,
+        reasoning: configRef.current?.reasoning ?? null,
         signal: controller.signal,
         onEvent: event => {
           if (event.type === 'delta') {
@@ -386,6 +521,8 @@ function AssistantPage() {
     const text = current && current.kind === 'bot' ? current.text : ''
     wireRef.current.push({ role: 'assistant', content: text, toolCalls: calls.length ? calls : undefined })
     syncUI()
+    // 每轮落一次库（串行，见 persist 的说明）：工具链中途也存，崩了不丢已答的部分
+    void persistRef.current()
     if (!calls.length) {
       setBusy(false)
       return
@@ -432,6 +569,13 @@ function AssistantPage() {
   const send = React.useCallback(async (text: string) => {
     const value = text.trim()
     if (!value || busy || awaiting) return
+    // 兜底：正常路径下 activate 已经造好 id；配置加载失败 / 重试未跑完时这里补一个，
+    // 否则 `persist` 会因为没有 id 而静默跳过（这条对话就永远进不了历史）
+    if (!activeIdRef.current) {
+      const id = newSessionId()
+      activeIdRef.current = id
+      setActiveId(id)
+    }
     roundRef.current = 0
     uiRef.current.push({ kind: 'user', text: value })
     wireRef.current.push({ role: 'user', content: value })
@@ -458,6 +602,9 @@ function AssistantPage() {
       return
     }
     await loop()
+    // 用户这条消息先落库：模型没回（报错 / 用户停止）时，这句话也该留在历史里
+    // —— 否则「发出去、出错了、切走」会把刚打的字一起丢掉
+    void persistRef.current()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [awaiting, busy, config, loop, syncUI])
 
@@ -465,18 +612,100 @@ function AssistantPage() {
     controllerRef.current?.abort()
   }, [])
 
-  const clearChat = React.useCallback(() => {
+  /** 重置成一条空白会话（点「新对话」/ 新建时用） */
+  const resetToBlank = React.useCallback((id: string) => {
     controllerRef.current?.abort()
     suspendedRef.current = null
     uiRef.current = []
     wireRef.current = []
+    activeIdRef.current = id
+    titleRef.current = ''
+    setActiveId(id)
     setAwaiting(false)
     setBusy(false)
     setStatus('')
     syncUI()
   }, [syncUI])
 
-  /** 换对话模型（顶栏选择器）：存的是对外模型名 */
+  /** 新对话：立刻造一个 id，不等后端（见 `core::assistant_sessions` 的 id 由来） */
+  const newChat = React.useCallback(() => {
+    void persistRef.current()
+    resetToBlank(newSessionId())
+    setSidebarOpen(false)
+  }, [resetToBlank])
+
+  /**
+   * 打开一条历史会话。
+   *
+   * 正在跑的时候不允许切：那一轮的增量还在往 `uiRef` 里写，切走之后它会继续
+   * 往**新会话**的数组里追加（同一个 ref）—— 结果是两条对话的内容混在一起。
+   */
+  const openSession = React.useCallback(async (id: string) => {
+    if (busy || awaiting) return
+    if (id === activeIdRef.current) { setSidebarOpen(false); return }
+    await persistRef.current()
+    try {
+      const detail = await loadSession(id)
+      // 回放：只画有正文的消息。工具调用卡（`role:"tool"`）与「只带 tool_calls、
+      // 正文为空」的 assistant 消息**不重建卡片** —— 那张卡的可执行状态在当时的
+      // 会话里才有意义，历史里重建出来会让人以为还能再点一次。它们仍留在
+      // `wireRef` 里（下一轮要按完整链路发给上游，缺了 tool 结果上游会 400）。
+      uiRef.current = detail.messages
+        .filter(message => message.role !== 'tool')
+        .filter(message => message.role === 'user' || message.content.trim().length > 0)
+        .map(message => message.role === 'user'
+          ? { kind: 'user' as const, text: message.content }
+          : { kind: 'bot' as const, text: message.content })
+      wireRef.current = detail.messages
+      activeIdRef.current = detail.id
+      titleRef.current = detail.title
+      setActiveId(detail.id)
+      suspendedRef.current = null
+      setAwaiting(false)
+      setBusy(false)
+      setStatus('')
+      syncUI()
+      // 会话自己记了模型与等级：打开就恢复（用户在聊天框里改的也是这条会话的）
+      if (config && (detail.model || detail.reasoning)) {
+        const next: AssistantConfig = {
+          ...config,
+          model: detail.model ?? config.model,
+          reasoning: detail.reasoning ?? config.reasoning,
+        }
+        setConfig(next)
+        void saveAssistantConfig(next).catch(() => { /* 恢复失败不影响这段对话 */ })
+      }
+    } catch (error) {
+      setStatus(t('打开会话失败：{message}', { message: errorText(error) }))
+    }
+    setSidebarOpen(false)
+  }, [awaiting, busy, config, syncUI])
+
+  /** 删除一条会话（删的是当前这条时顺带清屏并开一条新的） */
+  const removeSession = React.useCallback(async (id: string) => {
+    try {
+      await deleteSession(id)
+    } catch (error) {
+      setStatus(t('删除会话失败：{message}', { message: errorText(error) }))
+      return
+    }
+    setSessions(prev => prev.filter(item => item.id !== id))
+    if (id === activeIdRef.current) resetToBlank(newSessionId())
+  }, [resetToBlank])
+
+  /** 清空全部历史 */
+  const clearHistory = React.useCallback(async () => {
+    try {
+      await clearSessions()
+    } catch (error) {
+      setStatus(t('清空历史失败：{message}', { message: errorText(error) }))
+      return
+    }
+    setSessions([])
+    resetToBlank(newSessionId())
+  }, [resetToBlank])
+
+  /** 换对话模型（聊天框内的选择器）：存的是对外模型名 */
   const pickModel = React.useCallback(async (name: string) => {
     if (!name) return
     if (!config) {
@@ -493,41 +722,73 @@ function AssistantPage() {
     }
   }, [config])
 
+  /** 换思考等级（聊天框内的选择器）：空值 = 不指定，交给映射绑定 */
+  const pickReasoning = React.useCallback(async (level: string) => {
+    if (!config) {
+      setStatus(t('助手设置没读出来，暂时存不了思考等级 —— 看输入框下方的提示。'))
+      return
+    }
+    const next: AssistantConfig = { ...config, reasoning: level || null }
+    setConfig(next)
+    try {
+      await saveAssistantConfig(next)
+    } catch (error) {
+      setStatus(t('保存思考等级失败：{message}', { message: errorText(error) }))
+    }
+  }, [config])
+
   /* ─── 渲染 ─── */
 
   const composerDisabled = busy || awaiting
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null)
+  /** 当前会话的标题（空 = 还没聊过，显示占位） */
+  const activeTitle = titleRef.current || titleFrom(wireRef.current) || t('新对话')
 
   return (
-    <div className='asst-layout'>
-      <div className='asst-top'>
-        <Select value={currentModel ?? ''}
-          onValueChange={value => void pickModel(String(value))}>
-          <SelectTrigger className='asst-model-pick' aria-label={t('对话模型')}>
-            <SelectValue>
-              {currentModel
-                ? <span className='flex items-center gap-2'>
-                    <span className={cn('dot', 'ok')} />
-                    <span className='mono'>{currentModel}</span>
-                  </span>
-                : t('选择模型…')}
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent>
-            {models.length === 0 && <SelectItem value='none' disabled>{t('没有可用的模型')}</SelectItem>}
-            {models.map(name => (
-              <SelectItem key={name} value={name}>
-                {name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <span className='asst-top-hint'>{t('助手走本地网关，消耗所选账号的额度')}</span>
-        <span className='spacer' />
-        <Button variant='ghost' size='sm' onClick={clearChat} disabled={busy || awaiting || !ui.length}>
-          {t('新对话')}
-        </Button>
-      </div>
+    <div className={cn('asst-layout', sidebarOpen && 'side-open')}>
+      {/* 左边：历史会话（宽屏常驻、窄屏抽屉，见 CSS 的 .asst-side） */}
+      <aside className='asst-side'>
+        <div className='asst-side-head'>
+          <Button variant='default' size='sm' className='asst-new' onClick={newChat} disabled={busy || awaiting}>
+            <span className='plus'>+</span> {t('新对话')}
+          </Button>
+        </div>
+        <div className='asst-side-list'>
+          {sessions.length === 0 && (
+            <div className='asst-side-empty'>{t('还没有历史对话')}</div>
+          )}
+          {sessions.map(item => (
+            <div key={item.id}
+              className={cn('asst-side-item', item.id === activeId && 'active')}
+              role='button'
+              tabIndex={0}
+              onClick={() => void openSession(item.id)}
+              onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') void openSession(item.id) }}>
+              <span className='title'>{item.title || t('未命名对话')}</span>
+              <button type='button' className='del' title={t('删除这条对话')}
+                aria-label={t('删除这条对话')}
+                onClick={event => { event.stopPropagation(); void removeSession(item.id) }}>✕</button>
+            </div>
+          ))}
+        </div>
+        {sessions.length > 0 && (
+          <div className='asst-side-foot'>
+            <button type='button' className='link' onClick={() => void clearHistory()}>{t('清空全部')}</button>
+          </div>
+        )}
+      </aside>
+
+      {/* 窄屏下侧边栏是抽屉：点遮罩收起 */}
+      {sidebarOpen && <div className='asst-side-mask' onClick={() => setSidebarOpen(false)} />}
+
+      <div className='asst-main'>
+        <div className='asst-top'>
+          <button type='button' className='asst-menu' title={t('历史对话')} aria-label={t('历史对话')}
+            onClick={() => setSidebarOpen(open => !open)}>☰</button>
+          <span className='asst-title' title={activeTitle}>{activeTitle}</span>
+          <span className='spacer' />
+          <span className='asst-top-hint'>{t('助手走本地网关，消耗所选账号的额度')}</span>
+        </div>
 
       <div className='asst-scroll' ref={scrollRef}>
         {ui.length === 0 && (
@@ -604,6 +865,12 @@ function AssistantPage() {
           <Textarea
             ref={textareaRef}
             rows={1}
+            /* 窄屏字号 16px：iOS Safari 在输入框字号 < 16px 时聚焦会自动放大
+               整页且退不回去。组件库的 Textarea 默认带 `text-[12px]`，而它在
+               Tailwind v4 的 @layer utilities 里 —— 该层的声明优先级高于内联
+               样式（实测内联 16px 仍被压成 12px），只有同层的工具类能盖过它。
+               cn() 用 tailwind-merge，末尾传入的 text-[16px] 会替换掉默认值。 */
+            className={isNarrow() ? 'text-[16px]' : undefined}
             value={draft}
             placeholder={composerDisabled ? t('等这一轮跑完…') : t('直接说要改什么 / 查什么…（Enter 发送，Shift+Enter 换行）')}
             disabled={composerDisabled}
@@ -612,7 +879,7 @@ function AssistantPage() {
               // 自增高（上限 = CSS 的 max-height）：text 区不滚动时也不出现内部滚动条
               const el = event.currentTarget
               el.style.height = 'auto'
-              el.style.height = `${Math.min(el.scrollHeight, 132)}px`
+              el.style.height = `${Math.min(el.scrollHeight, taMaxHeight(el))}px`
             }}
             onKeyDown={event => {
               if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
@@ -625,6 +892,48 @@ function AssistantPage() {
             ? <button type='button' className='asst-send stop' title={t('停止')} onClick={stop}>■</button>
             : <button type='button' className='asst-send' title={t('发送')} disabled={composerDisabled || !draft.trim()}
                 onClick={() => void send(draft)}>➤</button>}
+        </div>
+        {/* 输入区上方的一排：模型 + 思考等级（聊天框里直接选，不必进设置页） */}
+        <div className='asst-picks'>
+          <Select value={currentModel ?? ''}
+            onValueChange={value => void pickModel(String(value))}>
+            <SelectTrigger className='asst-model-pick' aria-label={t('对话模型')}>
+              <SelectValue>
+                {currentModel
+                  ? <span className='flex items-center gap-2'>
+                      <span className={cn('dot', 'ok')} />
+                      <span className='mono'>{currentModel}</span>
+                    </span>
+                  : t('选择模型…')}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {models.length === 0 && <SelectItem value='none' disabled>{t('没有可用的模型')}</SelectItem>}
+              {models.map(name => (
+                <SelectItem key={name} value={name}>
+                  {name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select value={config?.reasoning ?? ''}
+            onValueChange={value => void pickReasoning(String(value))}>
+            <SelectTrigger className='asst-reason-pick' aria-label={t('思考等级')}>
+              <SelectValue>
+                {config?.reasoning
+                  ? <span className='mono'>{config.reasoning}</span>
+                  : t('思考：跟随模型')}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value=''>{t('跟随模型（不指定）')}</SelectItem>
+              {REASONING_LEVELS.map(level => (
+                <SelectItem key={level} value={level}>
+                  {level}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
         <div className='asst-composer-foot'>
           <span className='tools-state'>
@@ -643,6 +952,7 @@ function AssistantPage() {
               </span>
             : currentModel ? <span className='hint'>{t('回复由 {model} 生成 · 走本地网关', { model: currentModel })}</span> : null}
         </div>
+      </div>
       </div>
     </div>
   )

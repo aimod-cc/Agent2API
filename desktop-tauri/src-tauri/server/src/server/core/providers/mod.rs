@@ -99,9 +99,11 @@ pub mod accio;
 /// Antigravity（Google 的 AI IDE，推理走 **Google Cloud Code Assist**
 /// `v1internal`）。适配实现在 `antigravity/`：账号管理（粘贴 Google
 /// refresh token）+ token 刷新（Google OAuth 的 form 端点）+ 模型目录
-/// （`:fetchAvailableModels`，只列 Gemini）+ **会话转发**（`build_chat_request`
-/// 构造 v1internal 信封，响应走 `UpstreamResponse::AntigravityGemini` 那条
-/// Gemini SSE 翻译层）全部已接通；`is_stateful` 恒 false，见 `antigravity/mod.rs`）。
+/// （`:fetchAvailableModels`，Gemini / Claude / GPT-OSS 三个家族）+ **会话转发**
+/// （`build_chat_request` 构造 v1internal 信封，响应走
+/// `UpstreamResponse::AntigravityGemini` 那条 SSE 翻译层 —— 它收的是三家共同的
+/// wire 格式，不止 Gemini）全部已接通；`is_stateful` 恒 false，
+/// 见 `antigravity/mod.rs`）。
 pub mod antigravity;
 pub mod autoclaw;
 pub mod catalog;
@@ -110,6 +112,14 @@ pub mod catalog;
 pub mod catalog_cache;
 pub mod catalog_refresh;
 pub mod catpaw;
+/// 智谱清言（`chatglm.cn`，桌面客户端 2.0.7）：**无状态转发 + 双凭证形态**
+/// （访客免登录可换证 / 登录账号有积分）。适配实现在 `chatglm/`：请求要
+/// 签名三件套 + 设备号（实测边界见 `chatglm/sign.rs`）、多轮 messages 必须
+/// 拍平成单条（上游只认最后一条 user 消息，见 `chatglm/plan.rs`）、响应帧混着
+/// 「增量」与「收尾全文快照」两种语义，因此走 `UpstreamResponse::ChatglmSnapshot`
+/// 那条翻译层（按帧语义差分后下发，见 `protocol::chatglm_stream` 的模块头）。
+/// 余额 / 签到 / 领取类齐备，但只对登录账号有效（访客如实跳过）。
+pub mod chatglm;
 pub mod cline;
 /// CodeArts（华为云 snap-access）。适配器实现在 `codearts/`，
 /// 语义来源与施工计划见 `cpa-deploy/notes/agent2api-codearts-port-plan.md`。
@@ -435,8 +445,8 @@ pub enum ProviderKind {
     CommandCode,
     /// Antigravity（Google 的 AI IDE）。适配实现在 `antigravity/`：
     /// 账号管理（**粘贴 Google refresh token**）、token 刷新、模型目录
-    /// （**只接 Gemini**）、**会话转发**（`build_chat_request` 构造 v1internal
-    /// 信封）全部已接通，见 `antigravity/mod.rs` 的模块头）。
+    /// （**Gemini / Claude / GPT-OSS 三家族**）、**会话转发**（`build_chat_request`
+    /// 构造 v1internal 信封）全部已接通，见 `antigravity/mod.rs` 的模块头）。
     ///
     /// ── 上游长什么样（规格 `_recon/antigravity-spec.md`，参考
     /// `Acankao/Antigravity-Manager` + `Acankao/9router`）────────────
@@ -469,6 +479,29 @@ pub enum ProviderKind {
     /// 会话转发（建会话 → assistant SSE）+ 余额（月度 AI 配额）；
     /// `is_stateful` 为 true（请求内会话），见 `orcaterm/mod.rs` 的模块头。
     OrcaTerm,
+    /// 智谱清言（`chatglm.cn`，桌面客户端 2.0.7）。适配实现在 `chatglm/`：
+    /// 账号管理（**访客免登录换证** / 手机验证码 / 粘贴令牌）+ 续期
+    /// （`user/refresh`）+ 模型目录 + 无状态转发 + 余额（积分）+
+    /// 签到（每日登录积分）+ 领取类（会员活动）；`is_stateful` 为 false。
+    ///
+    /// ── 上游长什么样（从客户端 app.asar + 线上包逆向，见 `chatglm/mod.rs`）──
+    /// 全部能力都在 `chatglm.cn` 的一组 REST 接口上，请求要带**签名三件套 +
+    /// 设备号**（密钥是客户端内置的；时间戳是智谱自创的校验位算法）。
+    /// 对话响应的帧**混着两种语义**（`part.status == "init"` 是增量、带 finish 的
+    /// 帧给全文快照），因此另开一台按帧语义差分的状态机
+    /// （`UpstreamResponse::ChatglmSnapshot`）。
+    ///
+    /// ── 与别家最不同的一点：**访客凭证** ────────────────────────
+    /// `POST /chatglm/user-api/guest/access` 空 body 恒可换发访客令牌，
+    /// 不需要登录 —— 这是本家「零配置就能用」的入口（与别家「必须有账号」
+    /// 的处境不同）。代价是访客**没有积分体系**：余额 / 签到 / 领取类接口
+    /// 一律 401，那些能力对它如实跳过。
+    ///
+    /// ── 为什么是**一家**（没有地区伴生）─────────────────────────
+    /// 国际站是另一个产品（Z.AI / ZCode，已在注册表里按两家建模），
+    /// 智谱清言这一家只有 `chatglm.cn` 一个站点（测试域 `test.chatglm.cn`
+    /// 是**环境**不是地区，靠 `CHATGLM_BASE_URL` 覆盖即可）。
+    Chatglm,
 }
 
 /// 一个提供商的静态元数据。
@@ -565,6 +598,12 @@ pub const PROVIDERS: &[ProviderMeta] = &[
     // 它的模型名（glm-5.3 / kimi-k3 / deepseek-v4-* 等）与 codearts / catpaw /
     // zcode 大面积同名，同样靠末位让同名模型优先归已有各家。
     ProviderMeta { id: "orcaterm", label: "OrcaTerm" },
+    // 智谱清言（`chatglm.cn`）：单一站点（国际站是另一个产品 Z.AI/ZCode，
+    // 已按两家建模在注册表里），因此没有地区伴生。排末尾（2026-10 接入，
+    // 后到居后）。它的 GLM 系列模型名与 zcode / codearts / catpaw / orcaterm
+    // 大面积同名 —— 靠末位让同名模型优先归已有各家（那些是开放平台账号，
+    // 配额与稳定性都比本家的消费级网页端好）。
+    ProviderMeta { id: "chatglm", label: "智谱清言" },
 ];
 
 /// provider id 在注册表里的下标（未知 id → None）。
@@ -649,6 +688,7 @@ pub fn kind_from_id(id: &str) -> Option<ProviderKind> {
         "antigravity" => Some(ProviderKind::Antigravity),
         "officeace" => Some(ProviderKind::OfficeAce),
         "orcaterm" => Some(ProviderKind::OrcaTerm),
+        "chatglm" => Some(ProviderKind::Chatglm),
         // 走到这里 = 上面的注册表判定已放行、这个 match 却没有对应分支：
         // 只可能是有人给 `PROVIDERS` 加了条目忘了加这里。开发期喊出来；
         // release 返回 None（见上：宁可为「未知」，不可误认成别家）。
@@ -691,6 +731,7 @@ pub const fn kind_id(kind: ProviderKind) -> &'static str {
         ProviderKind::Antigravity => "antigravity",
         ProviderKind::OfficeAce => "officeace",
         ProviderKind::OrcaTerm => "orcaterm",
+        ProviderKind::Chatglm => "chatglm",
     }
 }
 

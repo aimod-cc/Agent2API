@@ -1,0 +1,92 @@
+apply plugin: 'com.android.application'
+
+// APK 签名密钥的路径与密码：**不进仓库**。
+//
+// 密钥（agent2api-release.jks）与密码一起公开，等于把「签一个同包名的假
+// APK 覆盖安装」的能力交给所有人；本仓库是公开的，所以两者都只在打包机上。
+// 文件缺失时 release 构建会明确报错（见下面 signingConfigs），而不是悄悄
+// 产出一个未签名包。
+def keystorePropertiesFile = rootProject.file('keystore.properties')
+def keystoreProperties = new Properties()
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
+android {
+    namespace = "com.agent2api.mobile"
+    compileSdk = rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId "com.agent2api.mobile"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        // 与 package.json 的版本对齐：apk 文件名与「关于」页都取这里。
+        versionCode rootProject.ext.apkVersionCode
+        versionName rootProject.ext.apkVersionName
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+
+    signingConfigs {
+        release {
+            // 换密钥会导致老版本无法覆盖升级（签名不一致），这份密钥要一直
+            // 用下去 —— 备份它，别只留在这一台机器上。
+            storeFile file(keystoreProperties['storeFile'] ?: '../agent2api-release.jks')
+            storePassword keystoreProperties['storePassword']
+            keyAlias keystoreProperties['keyAlias']
+            keyPassword keystoreProperties['keyPassword']
+        }
+    }
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+// release 包缺密钥或密码时，在配置阶段就失败：否则 AGP 会走到打包末尾才报
+// 「keystore was tampered with, or password was incorrect」这类看不出根因的错。
+gradle.taskGraph.whenReady { graph ->
+    def buildsRelease = graph.allTasks.any { it.name.toLowerCase().contains('release') }
+    if (buildsRelease && !keystorePropertiesFile.exists()) {
+        throw new GradleException(
+            "缺少 android/keystore.properties —— release 包需要签名密钥。" +
+            "照 keystore.properties.example 建一份，并把 agent2api-release.jks 放回 android/ 目录。"
+        )
+    }
+}
+
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}

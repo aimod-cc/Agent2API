@@ -293,15 +293,17 @@ async function pollSectionAfterChange(): Promise<void> {
 /**
  * 新增订阅的输入（两种来源二选一）：
  *   · 链接订阅 → `url`；
- *   · 本地文件 → `kind: 'local'` + `contentB64`（`fileName` 只做展示）。
- * `contentB64` 走 base64（与二维码图片同一传输形态），后端解出明文并校验。
+ *   · 本地文件 → `kind: 'local'` + `contentBase64`（`fileName` 只做展示）。
+ * `contentBase64` 走 base64（与二维码图片同一传输形态），后端
+ * `api::subscriptions::attach_local_content` 解出明文并校验 —— 字段名必须
+ * 与后端读的键一致，写成别的名字会被当成「没带文件」。
  */
 export type NewSubscriptionInput = {
   name: string
   kind?: 'url' | 'local'
   url?: string
   fileName?: string
-  contentB64?: string
+  contentBase64?: string
 }
 
 export async function addSubscription(input: NewSubscriptionInput): Promise<SubscriptionsPayload | null> {
@@ -314,14 +316,14 @@ export async function addSubscription(input: NewSubscriptionInput): Promise<Subs
   return data ?? null
 }
 
-/** 编辑订阅的载荷：本地订阅换文件时带 `contentB64`（不带 = 内容保持不变） */
+/** 编辑订阅的载荷：本地订阅换文件时带 `contentBase64`（不带 = 内容保持不变） */
 export type SaveSubscriptionPayload = {
   name: string
   url?: string
   enabled: boolean
   kind?: 'url' | 'local'
   fileName?: string
-  contentB64?: string
+  contentBase64?: string
 }
 
 export async function saveSubscription(

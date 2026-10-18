@@ -2,7 +2,7 @@ import * as React from 'react'
 import { createRoot } from 'react-dom/client'
 import { Badge, Button, Progress } from '@ui'
 import {
-  errorMessage, handleExternalClick, markdownHtml, QQ_GROUP, safeExternal, shared, toast,
+  errorMessage, handleExternalClick, markdownHtml, safeExternal, shared, toast,
   type DownloadTask, type UpdateInfo,
 } from './update-shared'
 import { showUpdateModal } from './update-modal'
@@ -177,21 +177,38 @@ function formatClock(value: number): string {
 }
 
 /**
- * 安装包形态由后端按**编译目标平台**给出（checkUpdate 的 installerKind）。兜底读 UA
- * 的理由：load() 里「发现上次遗留的下载任务」那条路可能早于任何一次 checkUpdate（那时
- * info 还是 null），只看 installerKind 会让 macOS 用户看到「会弹出 UAC 确认框」这种在
- * 那台机器上根本不存在的东西。有后端值时一律以后端为准。
+ * 桌面安装包的**包型**：`dmg`（macOS，挂载磁盘映像）/ `deb`（Linux，交给系统
+ * 图形安装器）/ `appimage`（Linux，免安装单文件）/ `nsis`（Windows，提权覆盖安装）。
+ *
+ * ── 包型由后端给（checkUpdate 的 installerKind），不再是二元判断 ──────
+ * 早先是 `isMacInstaller()` 这样一个「是不是 dmg」的布尔值 —— 双平台时代够用
+ * （非 macOS 即按 Windows 的 UAC 文案处理），但 Linux 桌面端进来后第三态就无处
+ * 安放：deb 既不提权也不挂载，套用任何一支都是错的话。
+ *
+ * ── 兜底为什么读 UA ─────────────────────────────────────────
+ * load() 里「发现上次遗留的下载任务」那条路可能早于任何一次 checkUpdate（那时
+ * info 还是 null），没有兜底会让 macOS 用户看到「会弹出 UAC 确认框」这种在那台
+ * 机器上根本不存在的东西。有后端值时一律以后端为准。
  */
-function isMacInstaller(info: UpdateInfo | null): boolean {
-  if (info?.installerKind) return info.installerKind === 'dmg'
-  return /Mac|iPhone|iPad/.test(navigator.userAgent || '')
+type InstallerKind = 'dmg' | 'deb' | 'appimage' | 'nsis'
+
+function installerKindOf(info: UpdateInfo | null): InstallerKind {
+  const raw = info?.installerKind
+  if (raw === 'dmg' || raw === 'deb' || raw === 'appimage' || raw === 'nsis') return raw
+  // 后端没给（老版本 / info 仍为 null）：按 UA 猜一个 —— Apple 相关一律当 dmg，
+  // Linux 当 deb（更常见），其余按 Windows 的 nsis。
+  const ua = navigator.userAgent || ''
+  if (/Mac|iPhone|iPad/.test(ua)) return 'dmg'
+  if (/Linux/.test(ua)) return 'deb'
+  return 'nsis'
 }
 
 /**
  * 容器内更新（Linux headless / Docker）与桌面安装包是**两条不同的路**，全文件
  * 按这一个判定分流：桌面端 selfUpdate 恒为 false，下面每个分支都原样走回旧行为。
  *
- *   · 桌面：后端给 `asset`（NSIS / dmg 安装器）→ 下载 → 由壳启动安装程序；
+ *   · 桌面：后端给 `asset`（NSIS / dmg / deb / AppImage 安装器）→ 下载 → 由壳
+ *     启动安装程序（见 run_installer）；
  *   · 容器：后端给 `serverAsset`（服务端更新包）→ 下载 → 服务端自己原地替换
  *     二进制与 ui 目录 → 重启进程（容器 restart 策略拉起）。
  */
@@ -210,9 +227,16 @@ function downloadHint(info: UpdateInfo | null): string {
   if (isSelfUpdate(info)) {
     return t('正在下载服务端更新包…（下载完成后由面板完成替换，重启容器内的服务后生效）')
   }
-  return isMacInstaller(info)
-    ? t('正在下载安装包…（下载完成后会挂载磁盘映像，把应用拖进「应用程序」即可完成安装）')
-    : t('正在下载安装包…（下载完成后启动安装程序需要管理员权限，会弹出 UAC 确认框）')
+  switch (installerKindOf(info)) {
+    case 'dmg':
+      return t('正在下载安装包…（下载完成后会挂载磁盘映像，把应用拖进「应用程序」即可完成安装）')
+    case 'deb':
+      return t('正在下载安装包…（下载完成后会交给系统安装器，按提示输入密码即可完成安装）')
+    case 'appimage':
+      return t('正在下载安装包…（下载完成后会启动新的 AppImage；把它替换掉旧文件即完成升级）')
+    default:
+      return t('正在下载安装包…（下载完成后启动安装程序需要管理员权限，会弹出 UAC 确认框）')
+  }
 }
 
 /** 「安装包已就绪」的提示：说明下一步该做什么 */
@@ -220,15 +244,27 @@ function readyHint(info: UpdateInfo | null, name: string): string {
   if (isSelfUpdate(info)) {
     return t('更新包已就绪：{name}。点「安装并重启」后，面板会校验并替换容器内的程序与界面文件，然后重启服务（页面会自动刷新）。', { name })
   }
-  return isMacInstaller(info)
-    ? t('安装包已就绪：{name}。点击「打开安装包」后会挂载磁盘映像，把应用拖进「应用程序」即可完成安装。', { name })
-    : t('安装包已就绪：{name}。点击「安装并重启」后需要管理员权限，会弹出 UAC 确认框。', { name })
+  switch (installerKindOf(info)) {
+    case 'dmg':
+      return t('安装包已就绪：{name}。点击「打开安装包」后会挂载磁盘映像，把应用拖进「应用程序」即可完成安装。', { name })
+    case 'deb':
+      return t('安装包已就绪：{name}。点击「打开安装包」后会交给系统安装器，按提示输入密码即可完成安装（本程序无需退出）。', { name })
+    case 'appimage':
+      return t('安装包已就绪：{name}。点击「安装并重启」后会启动新的 AppImage；把它移动到你的应用目录并替换旧文件即完成升级（本程序会先退出以释放文件占用）。', { name })
+    default:
+      return t('安装包已就绪：{name}。点击「安装并重启」后需要管理员权限，会弹出 UAC 确认框。', { name })
+  }
 }
 
-/** 安装按钮的文案：macOS 不重启（dmg 与运行中的进程没有文件冲突） */
+/**
+ * 安装按钮的文案。macOS 与 Linux deb 都**不重启**：它们与运行中的进程没有文件
+ * 冲突（dmg 是挂载 + 拖拽，deb 是系统包管理器往系统目录写，本程序跑在用户目录），
+ * 且安装时机由用户决定 —— 照着 Windows 那样退出反而会无故中断正在服务的网关。
+ */
 function installButtonText(info: UpdateInfo | null): string {
   if (isSelfUpdate(info)) return t('安装并重启')
-  return isMacInstaller(info) ? t('打开安装包') : t('安装并重启')
+  const kind = installerKindOf(info)
+  return kind === 'dmg' || kind === 'deb' ? t('打开安装包') : t('安装并重启')
 }
 
 /* ─── 共享快照（外部 store）──────────────────── */
@@ -461,9 +497,16 @@ function renderTask(task: DownloadTask | null | undefined): boolean {
     // 安装程序没起来），反复自动触发等于反复弹 UAC。
     if (path !== autoInstalledPath) {
       autoInstalledPath = path
-      setState(isMacInstaller(snapshot.info)
+      // 下载完成后的自动动作按包型给提示（deb 交给系统安装器、dmg 挂载、
+      // AppImage / NSIS 直接启动）
+      const kind = installerKindOf(snapshot.info)
+      setState(kind === 'dmg'
         ? t('安装包已下载完成，正在挂载磁盘映像…')
-        : t('安装包已下载完成，正在启动安装程序（需要管理员权限，会弹出 UAC 确认框）…'))
+        : kind === 'deb'
+          ? t('安装包已下载完成，正在打开系统安装器…')
+          : kind === 'appimage'
+            ? t('安装包已下载完成，正在启动新的 AppImage…')
+            : t('安装包已下载完成，正在启动安装程序（需要管理员权限，会弹出 UAC 确认框）…'))
       void install(path)
     } else {
       setState(readyHint(snapshot.info, name))
@@ -502,9 +545,9 @@ function startPolling(): void {
 /**
  * 安装：启动安装包；Windows 上由壳退出本程序，让出文件占用。
  *
- * 返回值里的 restart 是**壳按平台定的**：Windows 覆盖安装前必须先退出，macOS 挂载 dmg
- * 则不需要（也不该）退出 —— 所以这里不假设重启，按壳回传的取值决定提示语（否则 macOS
- * 用户会等一个不会发生的退出）。
+ * 返回值里的 restart 是**壳按平台定的**：Windows 覆盖安装前必须先退出；macOS 挂载 dmg
+ * 与 Linux 的 deb 都不需要（也不该）退出 —— 所以这里不假设重启，按壳回传的取值决定
+ * 提示语（否则 macOS / Linux 用户会等一个不会发生的退出）。
  */
 async function install(path: string): Promise<void> {
   const api = shared().workbuddyDesktop
@@ -512,9 +555,13 @@ async function install(path: string): Promise<void> {
   try {
     const result = await api.runInstaller(path, true)
     const willRestart = result?.restart !== false
+    // 不重启时的说法按包型分：dmg 是拖进「应用程序」，deb 是系统安装器里装完即可
+    const noRestartHint = installerKindOf(snapshot.info) === 'deb'
+      ? t('已打开系统安装器，请在它弹出的窗口里完成安装。安装完成后重新打开本程序即可。')
+      : t('安装包已挂载，请在弹出的窗口里把应用拖进「应用程序」完成安装。安装完成后重新打开本程序即可。')
     setState(willRestart
       ? t('安装程序已启动，本程序将退出以便完成覆盖安装。安装程序需要管理员权限，会弹出 UAC 确认框，请选择「是」。')
-      : t('安装包已挂载，请在弹出的窗口里把应用拖进「应用程序」完成安装。安装完成后重新打开本程序即可。'))
+      : noRestartHint)
   } catch (error) {
     setBadge(t('启动失败'), 'bad')
     // UAC 被拒时壳侧返回的提示已经说明「可重新点击安装并重启」，这里原样透出，不额外
@@ -880,10 +927,8 @@ function downloadButton(snap: Snapshot): { label: string; disabled: boolean } | 
   return { label, disabled: snap.actionBusy }
 }
 
-/** 更新日志（最新一版）：正文与「在 GitHub 查看」都在一张静态卡片里，不再折叠。
- *  第二个参数是页脚「加入 QQ 群」的动作 —— 卡片本体是普通函数不是组件（用不了
- *  hook），弹窗开关得留在面板组件里，所以从那儿递进来 */
-function changelogCard(snap: Snapshot, onJoinQq: () => void): React.ReactNode {
+/** 更新日志（最新一版）：正文与「在 GitHub 查看」都在一张静态卡片里，不再折叠。 */
+function changelogCard(snap: Snapshot): React.ReactNode {
   const info = snap.info
   const notes = String(info?.notes || '').trim()
   if (!notes) {
@@ -898,10 +943,26 @@ function changelogCard(snap: Snapshot, onJoinQq: () => void): React.ReactNode {
   const published = formatDateTime(info?.publishedAt)
   return (
     <div className='rel-note'>
+      {/* 卡头：版本号 + 预发布标记 + 「在 GitHub 查看完整说明」+ 日期。
+          链接放这里而不是正文末尾 —— 正文是限高滚动的（.rel-note-body 46vh），
+          日志一长，页脚那个入口就要滚到底才看得见，等于没有。卡头不参与滚动，
+          永远在第一屏。 */}
       <div className='rel-note-head'>
         <span className='rel-tag'>{String(info?.latestVersion || t('最新版本'))}</span>
         {/* 旧的 .badge.tag.warn → Badge 的 tag 形态 + warning 语义色 */}
         {info?.prerelease === true ? <Badge shape='tag' variant='warning'>{t('预发布')}</Badge> : null}
+        {pageUrl ? (
+          <a
+            className='rel-head-link'
+            href={pageUrl}
+            data-external={pageUrl}
+            target='_blank'
+            rel='noopener'
+            title={t('在浏览器中打开 GitHub 发布页')}
+          >
+            {t('在 GitHub 查看完整说明')}
+          </a>
+        ) : null}
         {published ? <span className='rel-date'>{published}</span> : null}
       </div>
       <div className='rel-note-body'>
@@ -913,30 +974,6 @@ function changelogCard(snap: Snapshot, onJoinQq: () => void): React.ReactNode {
             <p className='md-body-empty'>{t('这个版本没有填写发布说明。')}</p>
           </div>
         )}
-        {/* 页脚：GitHub 说明（有发布页时才有）+ 加入 QQ 群。两个入口看起来是同一副
-            长相 —— 左边是裸 <a>（.rel-foot a 管：平时无下划线，悬停才出），右边是
-            组件库 Button 的 link 变体（本身也是透明底 + 悬停下划线），尺寸/字重/颜色
-            三项按左边那条对齐。**别**为了省事换成裸 <button>：ui/css/components.css
-            那条 `button:hover:not(:disabled)`（0,3,1，带灰底）会压过页面级的同类声明，
-            鼠标一移上去就冒底色；组件库的工具类带 !important，正好压得住它。
-            QQ 那条不依赖 pageUrl（网页端没有 GitHub 链接，但群是一样的），故在条件外 */}
-        <div className='rel-foot'>
-          {pageUrl ? (
-            <a href={pageUrl} data-external={pageUrl} target='_blank' rel='noopener'>
-              {t('在 GitHub 查看完整说明')}
-            </a>
-          ) : null}
-          <Button
-            type='button'
-            variant='link'
-            size='sm'
-            className='h-auto border-0 px-0 text-[11.5px] font-semibold text-primary-fg underline-offset-auto'
-            title={t('群号：{group}', { group: QQ_GROUP })}
-            onClick={onJoinQq}
-          >
-            {t('加入 QQ 群')}
-          </Button>
-        </div>
       </div>
     </div>
   )
@@ -950,8 +987,8 @@ function UpdatePanel() {
   // 「更新设置」弹窗的开关：弹窗是本组件条件渲染的（Dialog 自带 Portal 挂 body），
   // 读数在弹窗自己那里现拉（见 update-settings.tsx 的说明），不进模块快照
   const [settingsOpen, setSettingsOpen] = React.useState(false)
-  // 「加入 QQ 群」弹窗：同上（更新日志卡片里那颗按钮点开，卡片是普通函数、挂不了
-  // hook，所以开关留在这一层）
+  // 「加入交流群」弹窗：入口在「关于作者」那一行的按钮组里，开关留在这一层
+  // （弹窗经 Portal 挂 body，与面板同一棵 React 树即可）
   const [qqGroupOpen, setQqGroupOpen] = React.useState(false)
 
   // 面板常驻（root 随应用生命周期），正常不会卸载；万一将来被卸载（骨架变化 / 页面
@@ -1084,6 +1121,18 @@ function UpdatePanel() {
               </span>
             </div>
             <div className='update-author-actions'>
+              {/* 「加入交流群」放在「收藏项目」左边：两个都是「去别处」的动作，
+                  排在同一行比散在更新日志页脚更好找。用 outline 而不是 link 变体 ——
+                  这一行是按钮组，两枚按钮同款才不显得一主一次 */}
+              <Button
+                type='button'
+                size='sm'
+                variant='outline'
+                title={t('QQ 群 / Telegram / Discord 都在这里')}
+                onClick={() => setQqGroupOpen(true)}
+              >
+                {t('加入交流群')}
+              </Button>
               <Button
                 id='btn-update-favorite'
                 type='button'
@@ -1106,7 +1155,7 @@ function UpdatePanel() {
             <span className='update-log-meta' id='update-log-meta'>{logMeta}</span>
           </div>
           <div className='update-log-body' id='update-log-body'>
-            {changelogCard(snap, () => setQqGroupOpen(true))}
+            {changelogCard(snap)}
           </div>
         </div>
       </div>
@@ -1123,7 +1172,7 @@ function UpdatePanel() {
           }}
         />
       ) : null}
-      {/* 「加入 QQ 群」：二维码 + 群号（图在项目仓库里，见 update-shared.ts 的说明） */}
+      {/* 「加入交流群」：QQ 群号（可复制）+ Telegram / Discord 外链 */}
       {qqGroupOpen ? <QqGroupDialog open onClose={() => setQqGroupOpen(false)} /> : null}
     </section>
   )

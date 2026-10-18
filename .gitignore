@@ -33,3 +33,28 @@ dist/
 # Docker 部署：密钥与运行数据不入库
 .env
 data/
+
+# ── 手机 APK（Capacitor）──────────────────────────────────────
+# android/ 是 `npx cap add android` 生成的原生工程，需要入库：
+# 图标、Manifest、网络安全策略都是手改过的，重新生成会丢。
+# 但下面这些是构建机本地状态，不该进仓库：
+desktop-tauri/mobile/android/.gradle/
+desktop-tauri/mobile/android/build/
+desktop-tauri/mobile/android/app/build/
+desktop-tauri/mobile/android/local.properties
+desktop-tauri/mobile/android/.idea/
+desktop-tauri/mobile/android/capacitor-cordova-android-plugins/build/
+# 构建中间产物（android-www 由 npm run build:apk 生成，再同步进 android/）
+desktop-tauri/mobile/android-www/
+
+# APK 签名密钥与配套密码：**不入库**。
+# 拿着密钥 + 密码就能签一个同包名的假 APK 覆盖安装；本仓库是公开的，
+# 所以两者只留在打包机上。新机器打 release 包时按
+# desktop-tauri/mobile/android/keystore.properties.example 建一份
+# keystore.properties，再把密钥放回 android/ 目录。
+*.jks
+*.keystore
+desktop-tauri/mobile/android/keystore.properties
+
+# 本地测试跑出来的运行数据（数据库、加密密钥、日志）
+.agenttest2/

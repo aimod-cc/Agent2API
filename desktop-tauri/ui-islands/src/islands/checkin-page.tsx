@@ -57,6 +57,11 @@ const PROVIDER_DESC: Record<string, string> = {
   // 它执行的是 ops 活动交付（三个接口），一句话说明里点出这一点，用户才不会
   // 拿它跟别家「一次请求」的签到比快慢。
   codearts: t('每日福利 · 领取 → 确认 → 回读核实 · 按北京时间自然日重置'),
+  // 智谱清言：本家的「签到」就是会员的每日登录积分（一次 POST，到账数在
+  // `result.score`）；后面的活动领取一并执行（活动期才有得领）。
+  // 访客账号没有积分体系，实现会如实跳过（不算失败），说明里点出这一点，
+  // 免得用户以为漏签了。
+  chatglm: t('每日登录积分 · 顺带领取会员活动 · 访客账号无积分体系（跳过）'),
 }
 
 /** 页内标签页的档位（值与 checkin-state 的 CheckinTab 一致） */
@@ -72,6 +77,7 @@ const CHECKIN_TAB_OPTIONS = [
 function onboardingProviderLabel(provider: string): string {
   return t(provider === 'raccoon' ? '小浣熊' : provider === 'loomy' ? 'Loomy'
     : provider === 'codearts' ? 'CodeArts'
+    : provider === 'chatglm' ? '智谱清言'
     : provider === 'officeace' ? 'OfficeAce 果办' : provider)
 }
 

@@ -1157,6 +1157,135 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
                 if import_desktop { "desktop" } else { "manual" },
             )
         }
+        // 智谱清言（`chatglm.cn`）：**三条添加路径**，其中「访客模式」是本家独有的
+        // （见 `chatglm_accounts.rs` 模块头）：
+        //   1. `guest: true`（或既没给令牌也不是 importDesktop）→ 后台空 body 打一次
+        //      `guest/access`，拿到一对令牌 + 一个**新设备号**后落账号。
+        //      不需要手机号 / 扫码 —— 本家「零配置就能用」的入口。
+        //      代价是没有积分体系（余额 / 签到对他们如实跳过）。
+        //   2. 粘贴令牌 → 读 `accessToken` / `token`（可从浏览器 Cookie 里取
+        //      `chatglm_token`）→ 打一次 `user/info` 做**真实校验**（顺带补 uid
+        //      与昵称，并判出它其实是访客还是登录账号）。
+        //   3. `importDesktop: true` → 读本机客户端 Cookies（**DPAPI 加密**，
+        //      仅 Windows 可解，见 `chatglm::credentials`）→ 同样校验后落账号。
+        // 校验失败一律 400（不落空记录）—— 与 OrcaTerm / KukuAI 同一口径：
+        // 添加时验证，要的是「现在真的能用」。
+        Some(crate::server::core::providers::ProviderKind::Chatglm) => {
+            let device_id = crate::server::core::providers::chatglm::credentials::resolve_device_id(
+                payload
+                    .get("deviceId")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            );
+            let plain_token = payload
+                .get("accessToken")
+                .or_else(|| payload.get("access_token"))
+                .or_else(|| payload.get("token"))
+                .or_else(|| payload.get("refreshToken"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let want_guest = payload
+                .get("guest")
+                .and_then(Value::as_bool)
+                .unwrap_or(plain_token.is_none() && !import_desktop);
+            let provider_label = "智谱清言";
+
+            // ── 路径 3：导入本机客户端登录态 ─────────────────────────
+            let (access, refresh) = if import_desktop {
+                match crate::server::core::providers::chatglm::credentials::read_desktop_credentials()
+                {
+                    Ok(Some((access, refresh))) => {
+                        let access = (!access.trim().is_empty()).then_some(access);
+                        let refresh = (!refresh.trim().is_empty()).then_some(refresh);
+                        (access, refresh)
+                    }
+                    Ok(None) => {
+                        return management_error(
+                            400,
+                            "没有在本机找到智谱清言客户端的登录态（请先打开客户端登录，\
+                             或改用「访客模式」/「粘贴令牌」）",
+                        )
+                    }
+                    Err(reason) => return management_error(400, reason),
+                }
+            } else if want_guest {
+                // ── 路径 1：访客换证（本家独有）──────────────────────
+                match crate::server::core::providers::chatglm::http::guest_access(
+                    &device_id, None,
+                )
+                .await
+                {
+                    Ok((access, refresh, _uid)) => (Some(access), Some(refresh)),
+                    Err(error) => return management_error(error.status_code, error.message),
+                }
+            } else {
+                // ── 路径 2：粘贴令牌 ────────────────────────────────
+                let Some(token) = plain_token else {
+                    return management_error(400, "请提供智谱清言的访问令牌（accessToken）");
+                };
+                // 用户可能整段粘了 `chatglm_token=xxx;` 形态
+                let token = token
+                    .trim_start_matches("chatglm_token=")
+                    .trim_end_matches(';')
+                    .trim();
+                (Some(token.to_string()), None)
+            };
+            let Some(access) = access else {
+                return management_error(400, "没有取到智谱清言的访问令牌");
+            };
+            // 真实校验：拿令牌问一次 user/info。顺带读回 uid / 昵称 / 访客标记 ——
+            // 这三样决定账号 id、展示名与「有没有积分体系」。
+            let verified = match crate::server::core::providers::chatglm::http::user_info(
+                &access, &device_id, None,
+            )
+            .await
+            {
+                Ok(info) => info,
+                Err(error) => return management_error(400, format!("{provider_label}校验失败：{}", error.message)),
+            };
+            let is_guest = verified
+                .get("is_guest")
+                .and_then(Value::as_bool)
+                .unwrap_or_else(|| {
+                    crate::server::core::providers::chatglm::credentials::token_is_guest(
+                        &access, want_guest,
+                    )
+                });
+            let uid = verified
+                .get("_id")
+                .or_else(|| verified.get("user_id"))
+                .or_else(|| verified.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let nickname = verified
+                .get("nickname")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let credentials = crate::server::core::providers::chatglm::credentials::ChatglmCredentials {
+                access_token: access,
+                // 粘贴路径拿不到 refresh_token：留空，续期会如实报「没有 refresh_token」
+                refresh_token: refresh.unwrap_or_default(),
+                device_id,
+                is_guest,
+                uid,
+                nickname,
+            };
+            store.add_chatglm_account(
+                &credentials,
+                import_name,
+                if import_desktop {
+                    "desktop"
+                } else if want_guest {
+                    "guest"
+                } else {
+                    "manual"
+                },
+            )
+        }
         // WorkBuddy 系的两家（国内版 / 国际版）：同一套凭证形态与落账号路径，
         // 差别只有归属 —— provider id 自己就是归属（拆家后不再从 payload 里的
         // `edition` 反推：那是账号的属性，而落哪一家是身份问题）。

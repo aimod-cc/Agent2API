@@ -25,8 +25,149 @@
   flex: 1;
   min-height: 0;
   display: flex;
+  /* 左栏（历史会话）+ 右栏（对话）：宽屏并排，窄屏把左栏做成抽屉 */
+  flex-direction: row;
+  position: relative;
+}
+
+/* ─── 左栏：历史会话 ───
+   宽屏常驻（固定宽度、自己滚），窄屏（见文件末尾的媒体查询）变成覆盖式抽屉。
+   与「只有消息区滚」同一条铁律：这一栏的滚动归 .asst-side-list。 */
+.asst-side {
+  flex: none;
+  width: 216px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  padding-right: 10px;
+  margin-right: 14px;
+}
+.asst-side-head { flex: none; padding-bottom: 8px; }
+.asst-side .asst-new { width: 100%; justify-content: center; gap: 6px; }
+.asst-side .asst-new .plus { font-size: 15px; line-height: 1; }
+.asst-side-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.asst-side-empty {
+  padding: 14px 8px;
+  color: var(--text-3);
+  font-size: 12px;
+  text-align: center;
+}
+.asst-side-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px;
+  border-radius: var(--r-sm);
+  color: var(--text-2);
+  font-size: 12.5px;
+  cursor: pointer;
+  /* 选中态与 hover 只换底色，不改字号 —— 列表在切换时不该跳动 */
+}
+.asst-side-item:hover { background: var(--surface-hover); color: var(--text); }
+.asst-side-item.active { background: var(--surface-hover); color: var(--text); font-weight: 600; }
+.asst-side-item .title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 删除按钮：默认淡出，行 hover / 选中时显现（列表里不该有一排叉号） */
+.asst-side-item .del {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .12s;
+}
+.asst-side-item:hover .del,
+.asst-side-item.active .del { opacity: 1; }
+.asst-side-item .del:hover { background: var(--danger-bg, rgba(220, 60, 60, .12)); color: var(--danger, #d33); }
+.asst-side-foot { flex: none; padding-top: 8px; border-top: 1px solid var(--border); }
+.asst-side-foot .link {
+  border: 0;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 11.5px;
+  cursor: pointer;
+  padding: 2px 0;
+}
+.asst-side-foot .link:hover { color: var(--danger, #d33); }
+
+/* 窄屏抽屉的遮罩（宽屏不渲染，见页面里的条件渲染） */
+.asst-side-mask { display: none; }
+
+/* ─── 右栏：对话本体（顶栏 / 消息区 / 输入区）─── */
+.asst-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
   flex-direction: column;
 }
+
+/* 顶栏：会话标题 + 窄屏的抽屉按钮 */
+.asst-menu {
+  flex: none;
+  display: none;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.asst-menu:hover { border-color: var(--control-border-hover); color: var(--text); }
+.asst-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 输入区上方的一排选择器（模型 / 思考等级） */
+.asst-picks {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-bottom: 8px;
+}
+.asst-reason-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+  color: var(--text);
+  font-size: 12px;
+}
+.asst-reason-pick:hover:not(:disabled) { border-color: var(--control-border-hover); }
 
 /* ─── 顶栏：对话模型 + 工具状态 + 新对话 ───
    放在页面内部而不是全局 .topbar：模型选择与「新对话」只属于这一页，
@@ -420,4 +561,40 @@
   color: var(--text);
   font-size: 12.5px;
   line-height: 1.85;
+}
+
+/* ─── 窄屏：左栏收成抽屉 ───
+   断点与 mobile.css 的其余页面同一档（900px）：低于它时左栏绝对定位覆盖在
+   对话之上，靠 .asst-layout.side-open 控制显隐，点遮罩收起。
+   宽屏下 .asst-side-mask 从不渲染（页面里是条件渲染），这条 display 只是兜底。 */
+@media (max-width: 900px) {
+  .asst-side {
+    position: absolute;
+    z-index: 30;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 240px;
+    padding: 0 10px 10px;
+    margin-right: 0;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    box-shadow: var(--shadow-2, 0 6px 24px rgba(0, 0, 0, .18));
+    /* 收起态用 100vw 而非 -102%：百分比按**抽屉自身宽度**（240px）算，
+       而抽屉的 left:0 是相对 .asst-layout 定位的 —— 布局容器比 240px 宽时
+       （768-900px 区间实测 614px），-244.8px 只把抽屉推到容器左缘之外，
+       仍有 105px 露在可视区内。100vw 与容器宽度无关，必然整条移出视口。
+       保留 transform 而非改 left，是为了沿用下面这条 transition。 */
+    transform: translateX(-100vw);
+    transition: transform .18s ease;
+  }
+  .asst-layout.side-open .asst-side { transform: translateX(0); }
+  .asst-side-mask {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    background: rgba(0, 0, 0, .28);
+  }
+  .asst-menu { display: inline-flex; align-items: center; justify-content: center; }
 }

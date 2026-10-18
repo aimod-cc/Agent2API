@@ -79,6 +79,12 @@ pub struct AssistantConfig {
     /// 或用户建的映射名都行）；`None` = 还没选（此时发起对话会被前端拦下并提示
     /// 去设置里选）。路由语义与普通客户端一致：同名在多家时按账号优先级主备。
     pub model: Option<String>,
+    /// 思考等级（`reasoning_effort` 的取值）；`None` = 不指定 —— 此时由映射上
+    /// 绑定的等级决定（若也没绑，则不向上游发任何档位字段）。
+    ///
+    /// 存的是**会话默认值**：聊天框里改一次就存一次，下一条消息沿用它。单次
+    /// 请求可以带 `reasoning` 覆盖它（见 `api::assistant::chat` 的读取顺序）。
+    pub reasoning: Option<String>,
     /// 系统提示词开关（**工具一只都没勾时会自动视为不注入**，见 `system_prompt`）
     pub system_prompt_enabled: bool,
     /// 系统提示词正文（空串 = 内置默认，见 [`DEFAULT_SYSTEM_PROMPT`]）
@@ -92,6 +98,7 @@ impl Default for AssistantConfig {
     fn default() -> Self {
         Self {
             model: None,
+            reasoning: None,
             system_prompt_enabled: true,
             system_prompt: String::new(),
             tools: BTreeMap::new(),
@@ -138,6 +145,7 @@ impl AssistantConfig {
             .collect();
         json!({
             "model": self.model.clone().map(Value::String).unwrap_or(Value::Null),
+            "reasoning": self.reasoning.clone().map(Value::String).unwrap_or(Value::Null),
             "systemPromptEnabled": self.system_prompt_enabled,
             "systemPrompt": self.system_prompt,
             "tools": Value::Object(tools),
@@ -183,6 +191,15 @@ pub fn from_raw(raw: &Map<String, Value>) -> AssistantConfig {
         }
         _ => None,
     };
+    // 思考等级：空串 / 缺失 = 不指定（交给映射绑定决定）。长度上限与
+    // `model_rules::normalize_reasoning` 同一口径 —— 手改库写进来的超长值
+    // 按「不指定」处理，而不是原样塞进上游请求。
+    let reasoning = block
+        .get("reasoning")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty() && text.chars().count() <= 32)
+        .map(str::to_string);
     let tools = block
         .get("tools")
         .and_then(Value::as_object)
@@ -195,6 +212,7 @@ pub fn from_raw(raw: &Map<String, Value>) -> AssistantConfig {
         .unwrap_or_default();
     AssistantConfig {
         model,
+        reasoning,
         // 只有字面 `false` 算关（默认开）：缺失 → true
         system_prompt_enabled: block
             .get("systemPromptEnabled")

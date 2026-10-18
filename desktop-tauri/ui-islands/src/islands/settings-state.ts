@@ -508,7 +508,7 @@ export function renderUnits(): void {
 export function applyUnits(on: boolean): void {
   shared().wbUnits?.setChinese?.(on)
   renderUnits()
-  toast(on ? t('✅ 已改用本地量级词（万 / 亿式）') : t('✅ 已改用 k / M 缩写'))
+  toast(on ? t('✅ 已改用本地量级词（万 / 亿式）') : t('✅ 已改用 k / M / B 缩写'))
 }
 
 /* ─── 启动与托盘 ───────────────────────────── */

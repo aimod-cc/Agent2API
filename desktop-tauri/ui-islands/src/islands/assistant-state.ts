@@ -134,6 +134,8 @@ export async function gatewayBase(force = false): Promise<string> {
  *  完全一致，同名在多家时按账号优先级主备。 */
 export type AssistantConfig = {
   model: string | null
+  /** 思考等级（`reasoning_effort` 的取值）；null = 不指定（交给映射绑定） */
+  reasoning: string | null
   systemPromptEnabled: boolean
   systemPrompt: string
   tools: Record<string, boolean>
@@ -142,46 +144,11 @@ export type AssistantConfig = {
 /**
  * 从壳的桥组装**对外可请求的模型名列表**（选择器的数据源）。
  *
- * 口径与 `/v1/models` 对齐（那就是客户端能请求的名字）：
- *   · 已启用模型的 ID（默认绑定）；
- *   · 已启用模型之上的**已启用映射名**（用户建的 `ca/xxx` 这类，同样可请求）。
- * 走桥而不是直连 `/v1/models`：桥在桌面形态稳定可用（其它页面全在用它），
- * 而直连 fetch 是助手自己的通道，配置接口不通时列表没必要跟着陪葬。
+ * 实现在 `assistant-tools` 里（与 `list_models` 共用同一份合并逻辑）：模型
+ * 清单必须把自定义提供商也算进来，否则用户自建上游的模型在助手里选不到。
+ * 这里只做转出，保留这个导入名是因为两个页面都按它取数。
  */
-export async function loadModelNames(): Promise<string[]> {
-  const bridge = (window as unknown as {
-    workbuddyDesktop?: { getModelManage?: () => Promise<unknown> }
-  }).workbuddyDesktop
-  const manage = (await bridge?.getModelManage?.()) as {
-    models?: Array<Record<string, unknown>>
-    mappings?: Array<Record<string, unknown>>
-  } | undefined
-  const models = Array.isArray(manage?.models) ? manage.models : []
-  const mappings = Array.isArray(manage?.mappings) ? manage.mappings : []
-  // 先记「provider×id 是启用的」—— 映射名能不能请求，取决于它指向的模型开没开
-  const enabledKeys = new Set<string>()
-  const names: string[] = []
-  const seen = new Set<string>()
-  for (const row of models) {
-    if (row.enabled !== true) continue
-    const provider = String(row.provider ?? '')
-    const id = String(row.id ?? '')
-    if (!provider || !id) continue
-    enabledKeys.add(`${provider}\u0001${id}`)
-    if (!seen.has(id)) { seen.add(id); names.push(id) }
-  }
-  for (const mapping of mappings) {
-    if (mapping.enabled !== true || mapping.isDefault === true) continue
-    const provider = String(mapping.provider ?? '')
-    const target = String(mapping.target ?? '')
-    const alias = String(mapping.alias ?? '')
-    if (!alias || !seen.has(alias) && enabledKeys.has(`${provider}\u0001${target}`)) {
-      seen.add(alias)
-      names.push(alias)
-    }
-  }
-  return names
-}
+export { loadModelNames } from './assistant-tools'
 
 /** 内置默认系统提示词（与后端 `DEFAULT_SYSTEM_PROMPT` 逐字相同：编辑弹窗里的
  *  「恢复默认」与「当前是否等于默认」都按这份比对） */
@@ -302,6 +269,7 @@ export async function loadAssistantConfig(): Promise<AssistantConfig> {
     : (config.model as { id?: unknown } | null)?.id
   return {
     model: typeof model === 'string' && model.trim() ? model : null,
+    reasoning: typeof config.reasoning === 'string' && config.reasoning.trim() ? config.reasoning : null,
     systemPromptEnabled: config.systemPromptEnabled !== false,
     systemPrompt: typeof config.systemPrompt === 'string' ? config.systemPrompt : '',
     tools: config.tools && typeof config.tools === 'object' ? config.tools : {},
@@ -358,11 +326,14 @@ export function toWireMessages(messages: ChatMessage[]): Array<Record<string, un
 export async function streamChat(options: {
   messages: ChatMessage[]
   tools: Array<Record<string, unknown>>
+  /** 本次请求的思考等级；缺省由后端的设置值兜底（见 api::assistant::chat） */
+  reasoning?: string | null
   signal?: AbortSignal
   onEvent: (event: ChatEvent) => void
 }): Promise<void> {
   const body: Record<string, unknown> = { messages: toWireMessages(options.messages) }
   if (options.tools.length) body.tools = options.tools
+  if (options.reasoning) body.reasoning = options.reasoning
   // 与 config 两条走同一个通道（凭证、跨源模式、401 重试都在 requestDirect 里）
   const response = await requestDirect('/api/assistant/chat', {
     method: 'POST',
@@ -459,4 +430,128 @@ export function parseToolArguments(raw: string): Record<string, unknown> {
   } catch {
     return {}
   }
+}
+
+/* ─── 历史会话（左边那列）────────────────────────────────── */
+
+/** 侧边栏要的一条会话（**不含 messages**：列表接口刻意不返回消息体） */
+export type SessionSummary = {
+  id: string
+  title: string
+  model: string | null
+  reasoning: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+/** 打开某一条时的完整形态 */
+export type SessionDetail = SessionSummary & {
+  messages: ChatMessage[]
+}
+
+/**
+ * 读消息流（后端存的是**发给上游的 wire 形态**，见 `core::assistant_sessions`）。
+ *
+ * 反序列化刻意宽松：库里的 JSON 可能是上一版前端写的、也可能是手改过的。
+ * 认不出的条目直接跳过，而不是让整条会话打不开 —— 「有一条消息坏了」不该
+ * 等于「这段对话全丢了」。
+ */
+function parseMessages(raw: unknown): ChatMessage[] {
+  if (!Array.isArray(raw)) return []
+  const messages: ChatMessage[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const row = item as Record<string, unknown>
+    const role = String(row.role ?? '')
+    const content = typeof row.content === 'string' ? row.content : ''
+    if (role === 'user') {
+      messages.push({ role: 'user', content })
+    } else if (role === 'assistant') {
+      const rawCalls = Array.isArray(row.toolCalls) ? row.toolCalls : []
+      const toolCalls: ToolCall[] = rawCalls
+        .filter((call): call is Record<string, unknown> => Boolean(call) && typeof call === 'object')
+        .map(call => ({
+          id: String(call.id ?? ''),
+          name: String(call.name ?? ''),
+          arguments: typeof call.arguments === 'string' ? call.arguments : JSON.stringify(call.arguments ?? {}),
+        }))
+        .filter(call => call.name)
+      messages.push({
+        role: 'assistant',
+        content,
+        ...(toolCalls.length ? { toolCalls } : {}),
+      })
+    } else if (role === 'tool') {
+      messages.push({ role: 'tool', toolCallId: String(row.toolCallId ?? ''), content })
+    }
+  }
+  return messages
+}
+
+function toSummary(raw: unknown): SessionSummary | null {
+  if (!raw || typeof raw !== 'object') return null
+  const row = raw as Record<string, unknown>
+  const id = typeof row.id === 'string' ? row.id : ''
+  if (!id) return null
+  return {
+    id,
+    title: typeof row.title === 'string' ? row.title : '',
+    model: typeof row.model === 'string' && row.model ? row.model : null,
+    reasoning: typeof row.reasoning === 'string' && row.reasoning ? row.reasoning : null,
+    createdAt: Number(row.createdAt) || 0,
+    updatedAt: Number(row.updatedAt) || 0,
+  }
+}
+
+/** 全部会话（按最近更新倒序，后端已排好） */
+export async function loadSessions(): Promise<SessionSummary[]> {
+  const data = await callJson<{ sessions?: unknown }>('GET', '/api/assistant/sessions')
+  const list = Array.isArray(data?.sessions) ? data.sessions : []
+  return list.map(toSummary).filter((item): item is SessionSummary => Boolean(item))
+}
+
+/** 打开一条会话（含消息流） */
+export async function loadSession(id: string): Promise<SessionDetail> {
+  const data = await callJson<{ session?: unknown }>('GET', `/api/assistant/sessions/${encodeURIComponent(id)}`)
+  const summary = toSummary(data?.session)
+  if (!summary) throw new Error(t('会话响应不完整'))
+  const messages = parseMessages((data?.session as Record<string, unknown> | undefined)?.messages)
+  return { ...summary, messages }
+}
+
+/**
+ * 保存（新建或覆盖）一条会话。
+ *
+ * `messages` 收的是页面层那两个 ref 里的**协议形态**（`ChatMessage[]`），
+ * 直接落库、不做转换：打开会话时按同一形状读回来，`toWireMessages` 在发请求
+ * 时才做最后一步转换。多存一份「UI 形态」只会让两种形状长期共存。
+ */
+export async function saveSession(input: {
+  id: string
+  title: string
+  messages: ChatMessage[]
+  model?: string | null
+  reasoning?: string | null
+}): Promise<SessionSummary> {
+  const data = await callJson<{ session?: unknown }>('POST', '/api/assistant/sessions', {
+    id: input.id,
+    title: input.title,
+    messages: input.messages,
+    model: input.model ?? null,
+    reasoning: input.reasoning ?? null,
+  })
+  const summary = toSummary(data?.session)
+  if (!summary) throw new Error(t('会话响应不完整'))
+  return summary
+}
+
+/** 删除一条会话 */
+export async function deleteSession(id: string): Promise<void> {
+  await callJson<unknown>('DELETE', `/api/assistant/sessions/${encodeURIComponent(id)}`)
+}
+
+/** 清空全部会话，返回删掉几条 */
+export async function clearSessions(): Promise<number> {
+  const data = await callJson<{ removed?: unknown }>('DELETE', '/api/assistant/sessions')
+  return Number(data?.removed) || 0
 }

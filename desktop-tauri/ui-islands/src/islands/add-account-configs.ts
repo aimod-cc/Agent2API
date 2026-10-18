@@ -72,6 +72,16 @@ export type ProviderConfig = {
   webLogin?: WebLoginConfig
   smsLogin?: SmsLoginConfig
   oauthLogin?: OauthLoginConfig
+  /**
+   * 「访客模式」——本项目的**独一份**：一键换发访客凭证，不需要任何输入。
+   *
+   * 只有智谱清言有这一条（后端 `guest/access` 空 body 恒可换发，见
+   * `providers::chatglm` 的模块头）。它在界面上是一个**没有表单**的分段：
+   * 一段说明 + 一个按钮，点下去就加号（备注名可选）。
+   * 语义上它不是「登录」，而是「先拿到一个能用的身份」—— 代价是没有积分体系
+   * （余额 / 签到对访客如实跳过），所以说明里必须写清这件事。
+   */
+  guestLogin?: { noteHtml: string; button: string; busyText?: string; namePlaceholder?: string }
   regionOptions?: RegionOption[]
   /** false = 这一家没有「从本机导入桌面端登录态」这一条来源 */
   desktop?: boolean
@@ -791,7 +801,7 @@ const OFFICEACE: ProviderConfig = {
  * Cookie 名），或整个 `data.bin` 的 JSON —— 网关会自己剥出 token。
  *
  * ── 三条添加路径 ────────────────────────────────────────────
- * 网页登录（官方 Web 控制台扫码，壳侧读 `ot_session` Cookie 交回）/
+ * 网页登录（官方 OAuth 授权页微信扫码，回调交回网关换令牌）/
  * 导入桌面端登录态 / 粘贴 accessToken。三条最终都归一成同一枚 JWT
  * （见后端 `providers::orcaterm::login` 与 `api::accounts` 的 OrcaTerm 分支）。
  *
@@ -807,12 +817,11 @@ const OFFICEACE: ProviderConfig = {
 const ORCATERM: ProviderConfig = {
   provider: 'orcaterm',
   label: 'OrcaTerm',
-  // 网页登录（后端 providers::orcaterm::login）：打开官方 Web 控制台，
-  // 用户在里面微信扫码（云账号那一套），登录成功后壳侧读窗口里的
-  // `ot_session` Cookie 交回网关落账号。窗口里会自动帮用户点开登录面板
-  // （左下角头像 → 立即登录），点不动就自己点 —— 文案要写清这条退路。
+  // 网页登录（后端 providers::orcaterm::login）：打开**官方 OAuth 授权页**，
+  // 它直接跳到微信二维码；扫完上游把浏览器带回自定义协议
+  // `orcaterm://oauth_callback?session_id=…`，壳侧截下这一跳交回网关换令牌。
   webLogin: {
-    noteHtml: t('在打开的<strong>官方 Web 控制台</strong>里用微信扫码登录（窗口会自动弹出登录面板；若没有，点左下角头像 → 立即登录）。登录成功后自动加入账号列表。'),
+    noteHtml: t('在打开的<strong>官方授权页</strong>里用微信扫码登录（页面会直接显示二维码）。扫码成功后自动加入账号列表。'),
     button: t('打开网页登录'),
     hint: t('内嵌窗口打开；扫码完成后自动加入列表，关窗即取消等待'),
     busyText: t('等待 OrcaTerm 登录完成…'),
@@ -825,6 +834,52 @@ const ORCATERM: ProviderConfig = {
   fields: [
     { key: 'accessToken', label: 'accessToken', rows: 3, placeholder: t('JWT（三段点分；也可直接粘贴 Bearer 整行或 data.bin 内容）') },
     { key: 'name', label: t('备注名'), optional: true, placeholder: t('可选，留空则用账号昵称或 userId') },
+  ],
+}
+
+/**
+ * 智谱清言（`chatglm.cn`）。逆向来源：客户端 2.0.7 的 `app.asar` +
+ * `agentmore` 线上包（见后端 `providers::chatglm` 的模块头）。
+ *
+ * ── 三条添加路径（本家在这一点上最特别）────────────────────────
+ *   1. **访客模式**（`guestLogin`）：不需要手机号也不需要扫码，后台空 body
+ *      打一次 `guest/access` 就换到一对令牌 + 一个新设备号。本家「零配置就能用」
+ *      的入口 —— 代价是**没有积分体系**（余额 / 签到 / 活动领取对访客如实跳过），
+ *      说明里必须写清；
+ *   2. **粘贴令牌**：从浏览器开发者工具复制 `chatglm_token` 的 cookie 值
+ *      （或整条 JWT）。适合已有登录账号的用户 —— 这类账号有积分，签到可用；
+ *   3. **导入本机登录态**：读本机客户端 Cookies。与 KukuAI 的明文列不同，
+ *      本家那份是 **DPAPI 加密**的（Chromium os_crypt），只有 Windows 能解，
+ *      因此 `desktopWindowsOnly`。
+ *
+ * ── 有真续期接口 ────────────────────────────────────────────
+ * `POST /chatglm/user-api/user/refresh`（refresh_token 换新令牌，实测可用）。
+ * 访客令牌失效时网关会用**同一个设备号**重新换发（设备号是身份的一部分，
+ * 换掉等于换一个新访客）。
+ */
+const CHATGLM: ProviderConfig = {
+  provider: 'chatglm',
+  label: '智谱清言',
+  guestLogin: {
+    noteHtml: t('不需要登录：点下面的按钮，网关会直接在智谱清言换发一份<strong>访客凭证</strong>并加入账号列表（也可以先填个备注名）。访客凭证可以直接用来对话，免费额度由上游按设备发放。<br><br><strong>注意</strong>：访客账号<strong>没有积分体系</strong> —— 它与「会员积分」「每日登录积分」「活动领取」相关的接口一律需要登录，因此那些能力对访客会如实跳过（账号页的积分、签到中心都不显示读数）。想要积分就用「填写凭证」粘一个已登录账号的令牌，或「导入桌面端登录态」。'),
+    button: t('添加访客账号'),
+    busyText: t('正在换发访客凭证…'),
+    namePlaceholder: t('可选，给这个访客账号起个备注名'),
+  },
+  desktop: true,
+  desktopWindowsOnly: true,
+  desktopHint: t('读取本机智谱清言客户端登录态（%APPDATA%\\chatglm\\Network\\Cookies），需已在客户端登录'),
+  desktopNote: t('读本机客户端当前的登录态。客户端的 Cookies 是 DPAPI 加密的（Chromium os_crypt），因此<strong>仅 Windows 可用</strong>；客户端正在运行时可能读不到该文件，先退出客户端再试即可（也可改用「填写凭证」粘贴令牌）。'),
+  manualTitle: t('粘贴访问令牌'),
+  manualNoteHtml: t('粘贴智谱清言的访问令牌（JWT，三段点分）。获取方式：浏览器打开 <code>chatglm.cn</code> 并登录后，在开发者工具的 Application → Cookies 里复制 <code>chatglm_token</code> 的值（也可以直接粘 <code>chatglm_token=…;</code> 整行）。粘贴后会先向上游校验一次，校验通过才落账号；登录账号的积分、签到能力都能用，之后由网关自动续期（上游有续期接口）。'),
+  fields: [
+    {
+      key: 'accessToken',
+      label: 'accessToken',
+      rows: 3,
+      placeholder: t('JWT（三段点分；也可直接粘贴 chatglm_token=… 整行）'),
+    },
+    { key: 'name', label: t('备注名'), optional: true, placeholder: t('可选，留空则用账号昵称') },
   ],
 }
 
@@ -872,6 +927,9 @@ export const BUILTIN_CONFIGS: ProviderConfig[] = [
   // OrcaTerm（腾讯云遨驰终端桌面客户端）：粘贴 accessToken / 导入桌面端登录态，
   // 排在末尾（与后端注册表 PROVIDERS 的排列一致，2026-10 接入）
   ORCATERM,
+  // 智谱清言（chatglm.cn）：访客模式 / 粘贴令牌 / 导入本机登录态，排在末尾
+  // （与后端注册表 PROVIDERS 的排列一致，2026-10 接入）
+  CHATGLM,
 ]
 
 /** WorkBuddy 的块 id（结构特殊，单独一个组件） */
@@ -918,6 +976,7 @@ export function configOf(providerId: string): ProviderConfig | undefined {
  * 是把用户手选的凭证文件解析后落库（可独立转发，文件可来自任意机器 / 备份）。
  * 失败处置与文案也各不相同（后者要选文件、要预检 JSON），因此各占一项。 */
 export const ADD_METHODS = [
+  { id: 'guest', label: t('访客模式（免登录）') },
   { id: 'oauth', label: t('网页登录（Zai / Google）') },
   { id: 'sms', label: t('手机验证码登录') },
   { id: 'web', label: t('网页登录') },
@@ -957,26 +1016,43 @@ export const desktopAccess = (): boolean =>
 /**
  * 桌面端导入在这一家、这个平台是否可用。
  *
- * AutoClaw 要按平台裁掉：它读 %APPDATA%/AutoClaw/auth.json，而那个文件里的 token
- * 是 Electron safeStorage 的密文，要先过 DPAPI（CryptUnprotectData）才能解出密钥
- * —— DPAPI 只有 Windows 有。另外三家（小浣熊 ~/.box-agent、CatPaw ~/.meituan-catpaw、
- * Cline ~/.cline）读的都是 HOME 下的明文 JSON，macOS 上照样能导入，所以只裁 AutoClaw。
+ * `desktopWindowsOnly` 的家（AutoClaw / 智谱清言）要按平台裁掉：它们读本机
+ * 客户端的登录态，而那份数据是 Electron / Chromium 的 **DPAPI 密文**
+ * （AutoClaw 的 `%APPDATA%/AutoClaw/auth.json`、智谱清言客户端 Cookies 的
+ * os_crypt 列），要先过 `CryptUnprotectData` 才能解出密钥 —— DPAPI 只有
+ * Windows 有。
+ *
+ * ── 判据是「不是 Windows」而不是「是 macOS」────────────────────
+ * 原来这里写的是 `platform() === 'macos'`，那是双平台时代的写法；第三端
+ * （Linux 桌面壳）进来之后必须反过来判 —— 否则 Linux 会**照常列出**这个入口，
+ * 用户点下去只能拿到「解密失败」，比不显示更糟。所以判据统一成
+ * 「除 Windows 外一律收起」，将来再多一个桌面平台也自动正确。
+ *
+ * 其余几家（小浣熊 `~/.box-agent`、CatPaw `~/.meituan-catpaw`、Cline
+ * `~/.cline`）读的都是 `HOME` 下的明文 JSON，macOS / Linux 上照样能导入，
+ * 因此不受这一条影响（见各 ProviderConfig 的 desktopNote）。
  */
 export function desktopImportAvailable(config: ProviderConfig): boolean {
   if (config.desktop === false) return false
+  const current = platform()
   // 网页端（headless 托管面板注入 platform='web'）：没有本机桌面客户端可读 ——
-  // 除非部署自己声明了 desktopAccess（本地 headless：网关就跑在这台机器上，
-  // 桌面客户端的登录态文件就在隔壁，见 desktopAccess() 的注释）
-  if (platform() === 'web' && !desktopAccess()) return false
-  // Windows 专属的导入（AutoClaw 的 DPAPI 密文）在本地 headless 下同样成立：
-  // 回环访问的网页端平台标识是 'web' 而不是 'windows'，所以要单独认这一支
-  if (config.desktopWindowsOnly && platform() === 'macos') return false
+  // 除非部署自己声明了 desktopAccess。本地 headless 下网关就跑在这台机器上，
+  // 桌面客户端的登录态文件就在隔壁（见 desktopAccess() 的注释）；远程部署
+  // （Docker / 公网服务器）该字段恒为 false，这一支照旧收起。
+  if (current === 'web') {
+    // 本地 headless 的平台标识仍是 'web' 而不是 'windows'，下面那条
+    // 「除 Windows 外一律收起」不能直接套 —— 本地 headless 包只在 Windows
+    // 上发布（DPAPI 解密也只在 Windows 目标编译），声明了 desktopAccess 即放行
+    return desktopAccess()
+  }
+  if (config.desktopWindowsOnly && current !== 'windows') return false
   return true
 }
 
 /** 网页登录那一段只在某个地区露出时的判据（当前没有家用，结构上保留） */
 export function methodsOf(config: ProviderConfig, region: string): MethodId[] {
   return ADD_METHODS.filter(method => {
+    if (method.id === 'guest') return Boolean(config.guestLogin)
     if (method.id === 'oauth') return Boolean(config.oauthLogin)
     if (method.id === 'sms') return Boolean(config.smsLogin)
     if (method.id === 'web') return Boolean(config.webLogin) && (!config.webLogin?.region || region === config.webLogin.region)

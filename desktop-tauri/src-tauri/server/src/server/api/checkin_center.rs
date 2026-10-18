@@ -221,6 +221,33 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
     // OfficeAce 的「新手任务」与每日签到是同一个上游动作（见 officeace::onboarding），
     // 所以它也在这张分组表里 —— 前端按 server 给的 extras.onboarding 驱动，不硬编码家。
     onboarding_rows.extend(onboarding_rows_of("officeace"));
+    // 智谱清言的新手任务是任务中心里的 `newbie` 分类（见 `chatglm::tasks`）。
+    // 它的**每日**任务与每日登录积分一起走上面的每日签到链，两块互不重复 ——
+    // 与 CodeArts「一次性归新手福利、每日归签到」同一分法。
+    //
+    // **访客排除**：本家的任务中心只对登录账号开放（访客实测 401），列进来会让
+    // 「签到后自动补领」每次都为它白打一次注定失败的查询。
+    onboarding_rows.extend(
+        accounts
+            .iter()
+            .filter(|account| {
+                account_text(account, "provider") == "chatglm"
+                    && !crate::server::core::providers::chatglm::tasks::is_guest_account(
+                        state.store(),
+                        &account_text(account, "id"),
+                    )
+            })
+            .map(|account| {
+                let id = account_text(account, "id");
+                json!({
+                    "id": id,
+                    "name": Value::from(account_display_name(account)),
+                    "provider": "chatglm",
+                    "settled": super::onboarding::settled_view(state.store(), &id, "chatglm")
+                        .unwrap_or(Value::Null),
+                })
+            }),
+    );
     // ZCode 的福利行带**本地领取台账**（`account.claimPlans`）—— 后端落盘的本地
     // 事实，带出来零上游请求，不违反「快照零上游」；界面的「今天领过哪几份」按它
     // 逐份比对（北京时间的日界判定在前端，不在后端再抄一份）。
@@ -280,6 +307,9 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
         "auto": state.auto_checkin().state(),
         // WorkBuddy 国际版日活保活的模型链（签到中心可编辑；空清单回落缺省链）
         "keepalive": crate::server::core::billing::keepalive::state(),
+        // 猫猫旅行定时排程（国内版）：开关 / 时刻 / 今日已跑时刻 / 上一轮结果。
+        // 与 `auto`（签到排程）并列 —— 两者是独立排程，各自开关与时刻。
+        "travel": crate::server::core::growth_scheduler::state(),
         "history": checkin_history::list(),
     }))
 }

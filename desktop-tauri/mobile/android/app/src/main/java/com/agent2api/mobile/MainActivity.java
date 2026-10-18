@@ -1,0 +1,5 @@
+package com.agent2api.mobile;
+
+import com.getcapacitor.BridgeActivity;
+
+public class MainActivity extends BridgeActivity {}

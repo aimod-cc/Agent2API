@@ -276,6 +276,37 @@ pub async fn cgi_action(
         .unwrap_or(Value::Null))
 }
 
+/// 调一次 **匿名** CGI 动作（不带 `Authorization`，也不带 `uin`）。
+///
+/// ── 为什么需要这一条（与 [`cgi_action`] 的区别）───────────────
+/// `OAuthExchangeToken` 是登录**之前**的动作：此时还没有任何令牌可带，
+/// 凭据就是请求体里的 `sessionId` 本身。实测该动作匿名可调（`2026-10-17`：
+/// 不带 `Authorization` 请求，返回的业务错误是「sessionId must be a UUID」
+/// 与「登录会话已过期」，说明已进入业务校验而非鉴权拒绝）。
+///
+/// 请求头保留 `Origin` / `Referer` / `User-Agent`：这三项是 CGI 网关的常规
+/// 口径（与 [`cgi_headers`] 同源），少带可能触发风控而不报错，代价为零。
+pub async fn cgi_action_anonymous(
+    action: &str,
+    data: Value,
+    proxy: Option<&crate::server::core::proxies::ResolvedProxy>,
+) -> Result<Value, GatewayError> {
+    let url = format!("{CGI_BASE}/cgi/api?action={action}");
+    let headers = vec![
+        ("Content-Type".to_string(), "application/json".to_string()),
+        ("User-Agent".to_string(), USER_AGENT.to_string()),
+        ("Origin".to_string(), "https://orcaterm.cloud.tencent.com".to_string()),
+        ("Referer".to_string(), "https://orcaterm.cloud.tencent.com/".to_string()),
+    ];
+    let body = json!({ "action": action, "data": data });
+    let value = post_json_value(&url, &headers, &body, proxy, None).await?;
+    Ok(value
+        .get("data")
+        .and_then(|data| data.get("Response"))
+        .cloned()
+        .unwrap_or(Value::Null))
+}
+
 /// `GetUserInfo`（探活 + 补身份）。返回 `(userId, nickname)`；上游业务错误
 /// 原样成错误（`VERIFY_USER_FAILED` = token 无效）。
 pub async fn fetch_user_info(

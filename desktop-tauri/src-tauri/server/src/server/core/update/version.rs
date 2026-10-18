@@ -15,7 +15,7 @@
 use serde_json::Value;
 
 /// 默认仓库（本项目的上游）；fork 后可自行覆盖（Node 版 DEFAULT_REPO）
-pub const DEFAULT_REPO: &str = "aimod-cc/agent2api";
+pub const DEFAULT_REPO: &str = "Agent2API/agent2api";
 
 /// GitHub API 根（Node 版 GITHUB_API）—— [`api_base`] 的默认值
 pub const GITHUB_API: &str = "https://api.github.com";
@@ -101,7 +101,8 @@ pub fn parse_version(text: &str) -> Option<[u64; 3]> {
 /// 这个标签是不是**预发布版**（`-beta.1` 这类 semver 预发布段）？
 ///
 /// ── 判据只用版本号，不读 Release 的 `prerelease` 标记 ──────────
-/// 本仓库「tag 带 `-` ↔ 标 pre-release」是同一条约定（见 agent.md 的发版流程），
+/// 本仓库「tag 带 `-` ↔ 标 pre-release」是同一条约定（见
+/// `.agents/skills/release-flow/SKILL.md` 的发版流程），
 /// 而版本比较本来就看标签 —— 两处若各读一个来源，漏标 pre-release 时「取最高
 /// 版本」与「是不是 beta」就会自相矛盾（它参与比较的方式与它被分类的方式不一致）。
 /// 认不出来的标签一律按正式版处理，与 [`split_version`] 的口径一致。
@@ -315,29 +316,107 @@ pub fn assert_downloadable(url: &str) -> Result<url::Url, UpdateError> {
     Ok(parsed)
 }
 
-/// 本平台的安装包后缀（小写，**不含点**）：Windows 是 NSIS 的 `exe`，
-/// macOS 是磁盘映像 `dmg`。
+/// 本平台桌面安装包的**主**资产后缀（小写，**不含点**）：Windows 是 NSIS 的
+/// `exe`、macOS 是磁盘映像 `dmg`、Linux 桌面壳是 `deb`（AppImage 启动时是
+/// `AppImage` —— 两种产物的取舍见 [`desktop_shell_suffixes`]）。
 ///
-/// 一个 Release 里会同时挂着两个平台的产物（Windows 作业与 macOS 作业各自
-/// 上传），所以「挑哪个资产」必须按平台分流 —— 否则 macOS 版会去下 exe，
-/// 再被壳侧的 `verify_installer` 拦下来，表现为「明明有新版本却装不了」。
+/// 一个 Release 里会同时挂着多个平台的产物（各平台作业各自上传），所以
+/// 「挑哪个资产」必须按平台分流 —— 否则 macOS 版会去下 exe，再被壳侧的
+/// `verify_installer` 拦下来，表现为「明明有新版本却装不了」。
 ///
-/// 编译期常量：目标平台在构建时就定了，没有运行期判断的余地。
-pub const fn installer_suffix() -> &'static str {
+/// ── Linux 为什么要在运行期分叉 ──────────────────────────────
+/// Linux 上「桌面壳」与「容器 / headless」是**同一份编译目标**
+/// （`cfg!(target_os = "linux")` 两边都真），但两者的升级路径完全不同：
+/// 桌面壳要下安装包交给壳去装，容器要下服务端包原地替换。判据只能是运行期的
+/// 「本进程有没有 GUI 壳」—— 由桌面壳启动时经 [`set_desktop_shell`] 置位，
+/// 容器里的 headless 二进制不置位。
+///
+/// 所以本函数与 [`installer_kind`] 不再能用 `const fn`；容器形态下这两个值
+/// 不会被用到（[`pick_installer`] 在那里直接返回 None，界面据此藏起按钮）。
+pub fn installer_suffix() -> &'static str {
     if cfg!(target_os = "macos") {
         "dmg"
-    } else {
+    } else if cfg!(target_os = "windows") {
         "exe"
+    } else if running_as_appimage() {
+        "AppImage"
+    } else {
+        "deb"
     }
 }
 
-/// 安装包的形态标识（给界面用的：文案里要不要提 UAC 由它决定）
-pub const fn installer_kind() -> &'static str {
+/// 安装包的形态标识（给界面用的：文案里要不要提 UAC / 挂载磁盘映像 / 系统
+/// 安装器由它决定）。取值与 [`installer_suffix`] 一致，Linux 上跟着
+/// [`running_as_appimage`] 走 —— 界面据此说「交给系统安装器」还是「替换文件」。
+pub fn installer_kind() -> &'static str {
     if cfg!(target_os = "macos") {
         "dmg"
-    } else {
+    } else if cfg!(target_os = "windows") {
         "nsis"
+    } else if running_as_appimage() {
+        "appimage"
+    } else {
+        "deb"
     }
+}
+
+/// Linux 桌面壳的安装包**全部**候选后缀，按优先级排列（挑资产时逐个找，
+/// 第一个命中即用）；非 Linux 是空表。
+///
+/// ── 次序按「用户装的是哪种」定，不是拍脑袋的偏好 ─────────────
+/// 两种产物对应两种安装方式，装错了用户就升不了级（deb 用户拿到 AppImage
+/// 只能自己 chmod +x 跑，AppImage 用户拿到 deb 要输密码装系统包）：
+///   · 本进程是 AppImage 启动的（`APPIMAGE` 环境变量非空，见
+///     [`running_as_appimage`]）→ 只认 AppImage：那是它唯一的更新方式
+///     （换文件即升级）；
+///   · 否则（deb 装的、或从源码跑的）→ deb 优先，AppImage 兜底
+///     （兜底覆盖「只发了 AppImage 的版本」与手工命名的资产）。
+fn desktop_shell_suffixes() -> &'static [&'static str] {
+    if cfg!(target_os = "linux") {
+        // AppImage 的资产名以 `.AppImage` 结尾，比对时统一转小写（见 pick_installer）
+        if running_as_appimage() {
+            &["AppImage"]
+        } else {
+            &["deb", "AppImage"]
+        }
+    } else {
+        &[]
+    }
+}
+
+/// 本进程是不是由 AppImage 启动的。
+///
+/// AppImage 的运行时规范规定：启动时设置 `APPIMAGE` 环境变量指向该 AppImage
+/// 文件自身（`runtime` 注入，用户无需做任何事）。因此它非空即「我是 AppImage」，
+/// 这是判断「该给用户推哪种包」的唯一准确依据 —— 比猜路径名可靠（用户可能
+/// 把文件改名、或从软链接启动）。
+///
+/// 为什么这条判据重要：AppImage 的升级方式是「用新文件覆盖旧文件」，
+/// 给它推 deb 等于让用户去装一份系统包、而他那份 AppImage 永远停在旧版本。
+fn running_as_appimage() -> bool {
+    std::env::var("APPIMAGE")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+// ── 「本进程跑在桌面壳里吗」────────────────────────────────
+
+/// 桌面壳标志。
+///
+/// 默认 false = headless / 容器形态（**未置位时的行为必须与改造前一致**：
+/// Linux 上不挑桌面安装包，这与原来「Linux 恒返回 None」等价）。
+/// 桌面壳在自己的启动路径里置位（`desktop-tauri/src/backend.rs`），
+/// 容器里的 `agent2api-server` 不置位。
+static DESKTOP_SHELL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 桌面壳启动时置位（幂等；与 `access::set_panel_gate` 同一模式）。
+pub fn set_desktop_shell(on: bool) {
+    DESKTOP_SHELL.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 本进程是否跑在桌面壳里（见 [`DESKTOP_SHELL`]）。
+pub fn desktop_shell() -> bool {
+    DESKTOP_SHELL.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// 资产的 `name` 字段（缺失或非字符串时给空串，与 Node 的 `String(item?.name || '')` 同）
@@ -357,9 +436,34 @@ fn asset_name(item: &Value) -> &str {
 ///   - `aarch64` 是 Apple Silicon 原生；
 ///   - `x86_64` 只在 Intel 上能跑（Apple Silicon 要靠 Rosetta 转译）。
 /// 三个都没有（用户手工命名的资产）时退回第一个 —— 至少是个 dmg。
+///
+/// ── Linux（桌面壳）：按架构，其次发行版标记 ──────────────────
+/// 同一次 Linux 构建会出 amd64 与 arm64 两套产物（deb / AppImage 各一份），
+/// 所以先按本机架构筛（`amd64` 与 `x86_64` / `arm64` 与 `aarch64` 是同一件事
+/// 的两种写法，两类都要认），同架构多个时按发行版常见命名排个先后，都不命中
+/// 就退回第一个 —— 至少是同后缀的产物。
 fn pick_preferred<'a>(candidates: &[&'a Value]) -> Option<&'a Value> {
     if cfg!(target_os = "macos") {
         for keyword in ["universal", "aarch64", "arm64", "x86_64", "x64"] {
+            if let Some(found) = candidates
+                .iter()
+                .find(|item| asset_name(item).to_lowercase().contains(keyword))
+            {
+                return Some(*found);
+            }
+        }
+        return candidates.first().copied();
+    }
+    if cfg!(target_os = "linux") {
+        // 本机架构的两种写法：`std::env::consts::ARCH` 给的是 x86_64 / aarch64，
+        // 而 Docker 与多数发布产物用 amd64 / arm64（同一套词汇，见 selfupdate）。
+        let keywords: &[&str] = match std::env::consts::ARCH {
+            "aarch64" => &["aarch64", "arm64"],
+            "x86_64" => &["x86_64", "amd64"],
+            // 未知架构：不做架构筛选，下面的 `.first()` 兜底
+            _ => &[],
+        };
+        for keyword in keywords {
             if let Some(found) = candidates
                 .iter()
                 .find(|item| asset_name(item).to_lowercase().contains(keyword))
@@ -381,33 +485,49 @@ fn pick_preferred<'a>(candidates: &[&'a Value]) -> Option<&'a Value> {
 
 /// 从 Release 资产里挑**本平台**的安装包。
 ///
-/// 后缀按 [`installer_suffix`] 分流（Windows → exe，macOS → dmg），
-/// 多个候选时按 [`pick_preferred`] 的优先级取一个。没有匹配的资产返回 None
-/// （界面据此把「下载并安装」按钮藏起来，而不是给一个点了报错的按钮）。
+/// 后缀按 [`installer_suffix`] 分流（Windows → exe，macOS → dmg，Linux 桌面壳
+/// → deb / AppImage），多个候选时按 [`pick_preferred`] 的优先级取一个。
+/// 没有匹配的资产返回 None（界面据此把「下载并安装」按钮藏起来，而不是给一个
+/// 点了报错的按钮）。
 ///
-/// ── Linux 恒为 None（容器 / headless）────────────────────────
-/// 桌面安装包在 Linux 上没有任何意义，而 [`installer_suffix`] 只有
-/// macos / 其它两支 —— 不拦的话 Linux 会去挑 Windows 的 exe，面板上就出现
-/// 一个「下载并安装」按钮，点了只会得到「软件更新在网页端不可用」。
-/// 容器里的更新走另一条路：[`server_bundle_name`] 那份 tar.gz（见 selfupdate 模块）。
+/// ── Linux：桌面壳才挑，容器恒为 None ────────────────────────
+/// Linux 上桌面安装包只对**桌面壳**有意义（容器里的更新走
+/// [`server_bundle_name`] 那份 tar.gz，见 selfupdate 模块）。而两者是同一份
+/// 编译目标，所以这里按运行期标志 [`desktop_shell`] 分叉：
+///   · 桌面壳（壳启动时置位）→ 按 deb / AppImage 挑资产；
+///   · 容器 / headless（未置位）→ None，与改造前的行为逐字一致。
+///
+/// 不拦的话容器面板上会出现一个「下载并安装」按钮，点了只会得到
+/// 「软件更新在网页端不可用」。
 pub fn pick_installer(assets: Option<&Value>) -> Option<Value> {
-    if cfg!(target_os = "linux") {
+    if cfg!(target_os = "linux") && !desktop_shell() {
         return None;
     }
     let list = assets.and_then(Value::as_array)?;
-    // 带点的后缀拼一次放循环外（循环里每次 format 会白分配）
-    let suffix = format!(".{}", installer_suffix());
-    let candidates: Vec<&Value> = list
-        .iter()
-        .filter(|item| asset_name(item).to_lowercase().ends_with(&suffix))
-        .collect();
-    let chosen = pick_preferred(&candidates)?;
-    Some(serde_json::json!({
-        "name": asset_name(chosen),
-        // `Number(installer.size) || 0`：非数字/NaN/0 都得 0
-        "size": chosen.get("size").and_then(Value::as_u64).unwrap_or(0),
-        "url": chosen.get("browser_download_url").and_then(Value::as_str).unwrap_or(""),
-    }))
+    // 候选后缀按优先级排：Windows / macOS 各一个，Linux 桌面壳是
+    // [deb, AppImage]（见 [`desktop_shell_suffixes`]）—— 第一个能挑到资产的
+    // 后缀胜出，因此 deb 优先、AppImage 兜底。
+    let suffixes: Vec<String> = if cfg!(target_os = "linux") {
+        desktop_shell_suffixes().iter().map(|s| format!(".{}", s.to_lowercase())).collect()
+    } else {
+        // 带点的后缀拼一次放循环外（循环里每次 format 会白分配）
+        vec![format!(".{}", installer_suffix())]
+    };
+    for suffix in &suffixes {
+        let candidates: Vec<&Value> = list
+            .iter()
+            .filter(|item| asset_name(item).to_lowercase().ends_with(suffix.as_str()))
+            .collect();
+        if let Some(chosen) = pick_preferred(&candidates) {
+            return Some(serde_json::json!({
+                "name": asset_name(chosen),
+                // `Number(installer.size) || 0`：非数字/NaN/0 都得 0
+                "size": chosen.get("size").and_then(Value::as_u64).unwrap_or(0),
+                "url": chosen.get("browser_download_url").and_then(Value::as_str).unwrap_or(""),
+            }));
+        }
+    }
+    None
 }
 
 /// 容器内更新包在 Release 资产里的名字：`agent2api-server-linux-<arch>.tar.gz`。
@@ -482,8 +602,15 @@ pub fn safe_file_name(name: &str) -> String {
     let cleaned = js_trim(&cleaned);
     if cleaned.is_empty() {
         // 兜底名也要带本平台的后缀：下游 `verify_installer` 会校验后缀，
-        // 给一个错后缀的兜底名等于把「资产名异常」变成「装不了」
-        format!("agent2api-update.{}", installer_suffix())
+        // 给一个错后缀的兜底名等于把「资产名异常」变成「装不了」。
+        // Linux 取候选里的第一个（deb）—— 两者壳侧都放行，见
+        // `allowed_installer_suffixes`。
+        let suffix = if cfg!(target_os = "linux") {
+            desktop_shell_suffixes().first().copied().unwrap_or("deb")
+        } else {
+            installer_suffix()
+        };
+        format!("agent2api-update.{suffix}")
     } else {
         cleaned.to_string()
     }

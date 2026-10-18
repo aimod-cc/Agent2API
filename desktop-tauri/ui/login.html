@@ -205,6 +205,23 @@
 
       // 已登录（access 会话有效）→ 直接进面板；401 → 留在本页。
       // 手里存有令牌就带上：中转环境 cookie 缺席，服务端靠这个头认会话。
+      //
+      // 跳转带 `from=login`：服务端在 `/` 上会拦「会话无效的导航」并送回本页
+      // （见 server::http::panel_boot_redirect）。而中转环境里会话只存在于
+      // localStorage 的 `x-panel-token` 头，**顶层导航带不了自定义头** ——
+      // 不带这个标记的话，登录成功后的这一跳会被判成未登录、又弹回本页，
+      // 本页再判「已登录」跳回 `/`，形成无限循环。
+      // ── 登录成功后回哪一页 ──────────────────────────────────
+      // 手机端（`/m`）被踢回登录页时会带 `?next=/m`：它要回的是手机面板，
+      // 不是桌面面板。白名单校验，只认 `/` 与 `/m` 两个站内路径 ——
+      // 拿 `next` 做开放重定向是登录页最典型的漏洞，这里不给自己留口子。
+      function postLoginTarget() {
+        var next = '';
+        try { next = new URLSearchParams(window.location.search).get('next') || ''; } catch (e) { /* 老浏览器 */ }
+        if (next === '/m') return '/m?from=login';
+        return '/?from=login';
+      }
+
       (function () {
         var headers = {};
         var token = readPanelToken('access');
@@ -214,7 +231,7 @@
           headers['Authorization'] = 'Bearer ' + token;
         }
         fetch('/api/session', { headers: headers }).then(function (resp) {
-          if (resp.ok) window.location.href = '/';
+          if (resp.ok) window.location.href = postLoginTarget();
         }).catch(function () { /* 未登录，留在本页 */ });
       })();
 
@@ -281,7 +298,10 @@
               && typeof data.refreshToken === 'string' && data.refreshToken) {
               storePanelTokens(data.accessToken, data.refreshToken);
             }
-            window.location.href = '/';
+            // `from=login` 的作用见上面「已登录探测」那段：中转环境里会话只在
+            // localStorage 的请求头里，顶层导航带不上，服务端据此放行这一趟。
+            // 手机端来的请求带 `?next=/m`，回手机面板（见 postLoginTarget）。
+            window.location.href = postLoginTarget();
             return;
           }
           var detail = result.payload && (result.payload.error || result.payload);

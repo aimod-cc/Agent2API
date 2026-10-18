@@ -820,6 +820,16 @@ pub async fn cancel_update() -> Result<Value, String> {
 /// 本机网关就已经停了（而且 dmg 挂载后用户往往会先去看一眼再决定），
 /// 等于用一个没有必要的退出打断了正在服务的网关。所以这一支不关机、不退出，
 /// 只把映像挂上，并如实把 `restart: false` 回给界面（界面据此不提示「即将退出」）。
+///
+/// ── Linux 上为什么也不退出（与 macOS 同理，但两种包型不同）──────
+/// `.deb` 交给桌面环境的图形安装器（GNOME Software / Discover）：用户点「安装」
+/// 之后由包管理器往系统目录写文件 —— 与当前进程**不在同一个路径**（本程序跑在
+/// `~/.local/bin` 或 AppImage 自解目录这类用户目录里），没有文件占用冲突，
+/// 且安装动作的时机完全由用户决定。所以这一支同样不回收后端、不退出。
+///
+/// `.AppImage` 是个例外：它是自包含单文件，更新方式就是「用新的覆盖旧的」，
+/// 而本进程此刻正占着旧文件。因此要退回「先让出、再启动新的」那条老路
+/// （与 Windows 同一套顺序）。
 #[tauri::command]
 pub fn run_installer(app: AppHandle, path: String, restart: Option<bool>) -> Result<Value, String> {
     let target = crate::update::verify_installer(&path)?;
@@ -838,7 +848,50 @@ pub fn run_installer(app: AppHandle, path: String, restart: Option<bool>) -> Res
         }));
     }
 
-    #[cfg(not(target_os = "macos"))]
+    // Linux：deb 交给图形安装器（不退出），AppImage 走「让位 + 启动」（要退出）
+    #[cfg(target_os = "linux")]
+    {
+        let is_appimage = target
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.eq_ignore_ascii_case("appimage"))
+            .unwrap_or(false);
+
+        if is_appimage {
+            // AppImage：新文件要覆盖本进程正占着的旧可执行文件，先让位
+            // （与 Windows 同一套顺序，理由见函数说明）
+            crate::backend::shutdown(&app.state::<AppState>());
+            crate::update::launch_installer(&target, true)?;
+
+            let restart = restart.unwrap_or(true);
+            if restart {
+                app.state::<AppState>().begin_exit();
+                let handle = app.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                    handle.exit(0);
+                });
+            }
+            return Ok(json!({
+                "launched": true,
+                "path": target.to_string_lossy(),
+                "restart": restart,
+            }));
+        }
+
+        // deb：交给桌面环境的图形安装器，不回收后端、不退出（理由见函数说明）。
+        // 与 macOS 那一支同样显式消费掉未用的参数，避免 unused 告警。
+        let _ = &app;
+        let _ = restart;
+        crate::update::launch_installer(&target, false)?;
+        Ok(json!({
+            "launched": true,
+            "path": target.to_string_lossy(),
+            "restart": false,
+        }))
+    }
+
+    #[cfg(target_os = "windows")]
     {
         // 先让出 node.exe 的文件占用与 3065 端口，再让安装包去覆盖文件
         crate::backend::shutdown(&app.state::<AppState>());

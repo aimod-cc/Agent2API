@@ -79,9 +79,8 @@
 //! ── thoughtSignature 的往返方案（issue #291，响应侧见 `antigravity_stream.rs`）──
 //! 上游把历史回放里 functionCall 的签名当**硬性要求**：缺 → 400「missing a
 //! thought_signature」，伪造 → 400「Corrupted thought signature」—— 签名本体
-//! 被校验，「发明默认签名」的路走不通（Manager 的
-//! `skip_thought_signature_validator` 字面量本仓拿不到，不猜）。
-//! 签名随响应的 tool_call 走 `extra_content.google.thought_signature`
+//! 被校验，「发明默认签名」的路走不通。签名随响应的 tool_call 走
+//! `extra_content.google.thought_signature`
 //! （Google 自家 OpenAI 兼容端点的官方字段位置）带出给客户端；请求侧按
 //! **三级取值**回填到 `functionCall` part：
 //!   1. 客户端带回的签名（[`call_signature`]，也容忍 `thought_signature` /
@@ -95,6 +94,15 @@
 //! 改为硬校验后补上了缓存。非流式客户端走聚合器时 `extra_content` 由
 //! `merge_tool_call` 保留（2026-10-14 前曾被丢弃、只留 id/type/name/arguments，
 //! 那是 issue #237 的 400 成因）。
+//!
+//! ── Claude 的思考块（2026-10 放开 Claude 转发时补）─────────────
+//! Claude 走同一套 wire 格式，但历史轮的校验比 Gemini 更严：**每个 assistant
+//! 轮要以思考块开头**，否则多轮必 400（出处与完整论证见
+//! [`ensure_claude_thinking_leading`]）。OpenAI 形态的客户端没有「思考块」
+//! 这个概念，所以这里替每个 model 轮补一个占位思考块（文本 `...` + 官方认可的
+//! 跳过校验哨兵签名 [`SKIP_SIGNATURE_SENTINEL`]）。**只对 Claude 补**（跟着
+//! 家族走，不看我们这一侧发不发 thinkingConfig）—— Gemini 没有这条要求，
+//! 补上去只会凭空多一段假思考。
 //!
 //! ── 硬约束 ──────────────────────────────────────────────────
 //! release 是 `panic=abort`：本文件零 unwrap/expect/panic。
@@ -124,6 +132,27 @@ const IMAGE_MAX_OUTPUT_TOKENS: i64 = 8_192;
 /// Claude Agent SDK 前导指纹声明（Manager/9router 都整句删除，坑 #12）
 const CLAUDE_SDK_PREAMBLE: &str =
     "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
+/// Claude 历史轮里补的**思考块占位文本**（Manager 在客户端没带
+/// `reasoning_content` 时用的就是这一串，逐字）。
+///
+/// 占位文本本身不承载语义 —— 上游校验的是「这一轮**以思考块开头**」这个结构
+/// （见 [`ensure_claude_thinking_leading`]）。因此不追求「像真的思考」，也
+/// **不把客户端回放的 `reasoning_content` 搬过去**：那串文本来自哪个模型无从
+/// 考证，而它在本仓的 Gemini 路径上本来就丢弃（`contents_of` 的计数日志）。
+const CLAUDE_THOUGHT_PLACEHOLDER: &str = "...";
+/// Google 官方给出的**跳过思考签名校验**哨兵值（另一个是
+/// `context_engineering_is_the_way_to_go`）。
+///
+/// 出处：Google 官方文档 `ai.google.dev/gemini-api/docs/thought-signatures`
+/// 明说「在这两个值里任选一个填进 thought signature 字段即可跳过校验」；
+/// Manager `thinking_store.rs` 的 `SENTINEL_SIGNATURE` 逐字就是它，用在
+/// **Claude 的思考块**与 Gemini 的 functionCall 两处。
+///
+/// ⚠️ 本仓此前两份注释都写着「这个字面量拿不到，不猜」—— 那是当时的事实
+/// （只有参考实现的常量、没有一手出处）。官方文档把取值写明之后它可以用了，
+/// 但**只用在 Claude 历史轮的思考块上**：functionCall 那一侧本仓有真实签名的
+/// 服务端缓存（issue #291），有真签名时不该拿哨兵顶上。
+const SKIP_SIGNATURE_SENTINEL: &str = "skip_thought_signature_validator";
 
 // ─── 请求：chat → v1internal 信封 ────────────────────────────
 
@@ -154,6 +183,22 @@ pub fn antigravity_request_from_chat(
         .unwrap_or("")
         .to_string();
     let mut contents = contents_of(messages)?;
+    // Claude 的历史轮要以思考块开头（见 [`ensure_claude_thinking_leading`]）。
+    // **判据只有家族、不看我们发不发 thinkingConfig**：上游对该家族是
+    // 「服务端强制思考」（Manager `model_forces_server_thinking` 对含 `claude`
+    // 的模型恒 true，其注释「claude-sonnet-4-6 forces server thinking by model
+    // heuristic (not client enable)」逐字），客户端把思考关掉也改不了上游这一侧
+    // 的行为 —— 而那条校验针对的正是上游行为。所以这里跟着家族走：
+    // 若改成「我们先关了思考就不补」，客户端一关思考，多轮工具调用反而必 400。
+    if models::is_claude_model(model) {
+        let added = ensure_claude_thinking_leading(&mut contents);
+        if added > 0 {
+            crate::server::logging::verbose(
+                "[Antigravity]",
+                &format!("Claude 历史轮补了 {added} 个思考块占位（该家族要求历史轮以思考块开头）"),
+            );
+        }
+    }
 
     let mut request = Map::new();
     if !image_gen {
@@ -596,6 +641,79 @@ fn push_turn(contents: &mut Vec<Value>, role: &str, parts: Vec<Value>) {
         }
     }
     contents.push(json!({ "role": role, "parts": parts }));
+}
+
+/// Claude 历史轮：**每个 assistant 轮必须以思考块开头**。
+///
+/// ── 为什么需要（不是「照抄参考」，是上游硬约束）─────────────────
+/// Antigravity 下的 Claude 走的是 Anthropic 那套「extended thinking + 手动预算」
+/// 语义，其规范（platform.claude.com 的 Turn structure）要求：开了思考的请求里
+/// **assistant 消息的内容必须以思考块开头**。缺了它上游回 400，文案是
+/// `messages.N.content.0.thinking.signature: Field required` 或
+/// `Expected thinking or redacted_thinking, but found tool_use`（Manager
+/// issue #3391 / CLIProxyAPI issue #1124 都是这一条）。
+///
+/// ⚠️ **「开了思考」这件事不由我们决定**：上游对 Claude 是服务端强制思考
+/// （Manager `model_forces_server_thinking` 对含 `claude` 的模型恒 true，注释
+/// 原话「claude-sonnet-4-6 forces server thinking by model heuristic (not client
+/// enable)」）。所以本函数对**所有** Claude 请求都补，不看我们这一侧发不发
+/// `thinkingConfig` —— 反过来的话，客户端一关思考、多轮工具调用就必 400。
+///
+/// OpenAI 形态的客户端**没有**「思考块」这个概念：它们回放历史时只给
+/// `content`（有时加一段 `reasoning_content` 纯文本），而本仓在 Gemini 路径上
+/// 本来就把它丢掉（`contents_of` 的计数日志）。于是「模型调工具 → 客户端回传
+/// 结果 → 下一轮」的第二次请求必然缺思考块，**多轮必 400** —— 单轮却一直正常，
+/// 这是这一族问题最迷惑人之处。
+///
+/// ── 补什么（两处取值各有出处）───────────────────────────────
+/// 往每个 `model` 轮的 `parts` **最前面**插一个
+/// `{"text": "...", "thought": true, "thoughtSignature": <哨兵>}`：
+///   · 文本用 [`CLAUDE_THOUGHT_PLACEHOLDER`]（Manager 在客户端没带回
+///     `reasoning_content` 时的取值，逐字）；
+///   · 签名用 [`SKIP_SIGNATURE_SENTINEL`]（Google 官方文档认可的跳过校验哨兵
+///     —— Claude 这一侧**没有**真实签名可用：客户端不带、Gemini 那套按 call id
+///     的服务端缓存只覆盖 functionCall，且那条路要的是真签名）。
+///
+/// **只插在开头**：规范问的是「以思考块开头」，插到中间或末尾都不满足；已经有
+/// 思考块（`thought == true 且带非空签名`）的轮次原样不动，不重复插。
+///
+/// 返回补了几处（调用方据此打日志；0 表示没有任何历史轮需要补）。
+fn ensure_claude_thinking_leading(contents: &mut [Value]) -> usize {
+    let mut added = 0usize;
+    for turn in contents.iter_mut() {
+        if string_field(turn, "role") != "model" {
+            continue;
+        }
+        let Some(parts) = turn.get_mut("parts").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        // 已经以带签名的思考块开头 → 不动（上游要的就是这个形态）
+        let already_leading = parts
+            .first()
+            .map(|part| {
+                is_truthy(part.get("thought").unwrap_or(&Value::Null))
+                    && part
+                        .get("thoughtSignature")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .is_some()
+            })
+            .unwrap_or(false);
+        if already_leading {
+            continue;
+        }
+        parts.insert(
+            0,
+            json!({
+                "text": CLAUDE_THOUGHT_PLACEHOLDER,
+                "thought": true,
+                "thoughtSignature": SKIP_SIGNATURE_SENTINEL,
+            }),
+        );
+        added += 1;
+    }
+    added
 }
 
 /// 首条 user 轮的文本（sessionId 派生用；没有 user 轮时给空串）

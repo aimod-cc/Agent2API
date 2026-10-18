@@ -1286,32 +1286,131 @@ pub fn seed_raccoon_defaults(ids: &[String]) -> Option<String> {
 
 // ─── 各清单的「默认启用白名单」种子 ────────────────────
 
-/// Qoder 清单的**默认启用白名单**：同 WorkBuddy 种子的语义，只是白名单里
-/// 只留一个模型。
+/// Qoder 清单的**默认启用白名单**：不再按「只留一个」收窄，改为「全开」。
 ///
-/// ── 为什么 Qoder 只留 Qwen3.8-Flash ────────────────────────
-/// Qoder 是 agent 形态的上游，目录里绝大多数条目要么是**套餐档位别名**
-/// （`Auto` / `Ultimate` / `Performance` / `Efficient` / `Sonus` / `Cantus`），
-/// 要么是需要更高档套餐才可用的模型。默认全开会让这台网关对外的模型列表
-/// 凭空多出十几个用户几乎不会点名的名字，而且它们还会参与 `/v1/models` 的
-/// 同名认领 —— 把别家真正在用的同名模型（如 `GLM-5.3` / `Kimi-K3`）挤掉。
-/// `Qwen3.8-Flash` 是免费档通常可用的那个（静态兜底清单里 `enabled` 恒为真
-/// 的两个 Qwen3.8 系模型之一，且面向日常对话），拿它当唯一默认项最贴近
-/// 「装上就能用」的预期。
-pub const QODER_DEFAULT_ENABLED: &[&str] = &["Qwen3.8-Flash"];
+/// ── 为什么从「只留 Qwen3.8-Flash」改成「全开」（2026-10-17）──────
+/// 这条白名单是**历史产物**：当时 Qoder 的清单有十几个条目、且没有可见性
+/// 判据，全开会让 `/v1/models` 凭空多出十几个用户几乎不会点名的名字（还会
+/// 参与同名认领，把别家的 `GLM-5.3` / `Kimi-K3` 挤掉）。
+///
+/// 现在「哪些不该广告」已经有了**真正的判据**（`visibility`，见
+/// `providers::qoder::models::fallback_visibility`：档位别名 `Auto` /
+/// `Ultimate` / `Performance` / `Efficient` 与上一代 `Qwen3.7*` /
+/// `Kimi-K2.8-Preview` 判 hidden）。再叠一条「只留一个」的白名单，会让
+/// **可见的模型也被关掉** —— 实测症状就是「Qoder 只剩一个 Qwen3.8-Flash
+/// 可见」，与用户预期（可见的默认开）相反。
+///
+/// 因此白名单**留空**：可见性判据负责关掉该关的，其余默认开。空白名单在
+/// [`seed_default_enabled`] 里的语义是「没有一个是白名单内的」→ 全部禁用，
+/// 所以这里不能简单清空 —— 见 [`seed_qoder_defaults`] 的实现（改成不跑
+/// 白名单种子）。
+pub const QODER_DEFAULT_ENABLED: &[&str] = &[];
 
-/// Qoder 清单的**默认规则种子**：语义与 [`seed_workbuddy_defaults`] 完全一致，
-/// 只是白名单是 [`QODER_DEFAULT_ENABLED`]。
+/// Qoder 清单的**默认规则种子**。
 ///
-/// 调用点同样两类：清单**首次落地**（`providers::qoder::models::refresh`，远程
-/// 目录从上游拉回来时），以及编排入口对**当前缓存清单**的补种（见
-/// `providers::adapter` 的 `seed_current_qoder_defaults` —— 覆盖「有账号但远程
-/// 刷新失败，手里只有静态兜底清单」与升级用户首次打开管理页的情形）。
-pub fn seed_qoder_defaults(provider: &str, label: &str, ids: &[String]) -> Option<String> {
-    seed_default_enabled(provider, label, QODER_DEFAULT_ENABLED, ids)
+/// ── 为什么不再调 `seed_default_enabled`（2026-10-17）──────────────
+/// 白名单制对 Qoder 已经**不适用**了：该关的由可见性判据负责
+/// （[`seed_hidden_disabled`]，调用点在 `providers::adapter`），白名单再关
+/// 一遍只会把可见的也关掉。所以这里直接返回 `None`（= 没有变化、不落盘）。
+///
+/// 保留函数外壳是为了不惊动调用点（`providers::qoder::models::refresh` 与
+/// `providers::adapter::seed_current_qoder_defaults` 都还在调它）—— 将来若
+/// 又要恢复某种白名单，改这一个函数即可。
+///
+/// ⚠️ 存量用户的盘上已经有那 35 条 `disabled` 记录（旧白名单种的、`seeded`
+/// 里也记了账）。光改这个函数**不会**把它们打开 —— 需要一次性迁移，见
+/// [`migrate_qoder_default_enabled`]。
+pub fn seed_qoder_defaults(_provider: &str, _label: &str, _ids: &[String]) -> Option<String> {
+    None
+}
+
+/// 一次性迁移：把**旧白名单误关**的 Qoder 模型重新打开。
+pub fn migrate_qoder_default_enabled() -> Option<String> {
+    migrate_whitelist_disabled(
+        "migration:qoder-visibility-v1",
+        &["qoder", "qoder-intl"],
+        "Qoder",
+    )
+}
+
+/// 一次性迁移：把**旧白名单误关**的 WorkBuddy 模型重新打开。
+///
+/// 背景与 Qoder 那次完全相同（见 [`migrate_whitelist_disabled`]）：旧白名单
+/// `["hy3", "hy4-preview-f", "deepseek-v4.1-flash"]` 把其余模型全关了，而
+/// 「可见性」判据（`agents[cli].models`）认为其中一批是**可见**的。
+pub fn migrate_workbuddy_default_enabled() -> Option<String> {
+    migrate_whitelist_disabled(
+        "migration:workbuddy-visibility-v1",
+        &["workbuddy", "workbuddy-intl"],
+        "WorkBuddy",
+    )
+}
+
+/// 「旧白名单误关 → 按可见性重判」的迁移实现（Qoder / WorkBuddy 共用）。
+///
+/// ── 背景 ────────────────────────────────────────────────────
+/// 两家都曾用**人工白名单**决定默认启用（Qoder 只留 `Qwen3.8-Flash`；
+/// WorkBuddy 留 3 个）。改成「按可见性判」之后，那批禁用记录会**继续生效**
+/// （`disabled` 是落盘的），症状是升级用户看到的仍是旧状态：可见的模型开关
+/// 是关的。
+///
+/// ── 迁移口径（只解种子种过的）────────────────────────────────
+/// 判据是「这条 `(provider, id)` 在 `seeded` 里有**白名单那套**记账
+/// （`{provider}:{id}`，无前缀）**且**现在在 `disabled` 里」。两个条件同时
+/// 成立才解 —— 没有白名单记账的（用户自己加的禁用、可见性种子关的）一律不动，
+/// 那是新机制的结论。
+///
+/// 分不清「种子关的」与「种子关完用户又手动关的」—— 两者在盘上同形。这是
+/// 可接受的取舍：打开比误关安全（误关是静默失效，用户根本不知道有这个模型；
+/// 误开只是多一个可见项，用户能再关）。
+///
+/// `mark` 记进 `seeded` 保证只跑一次；`providers` 是这次要处理的家。
+fn migrate_whitelist_disabled(mark: &str, providers: &[&str], label: &str) -> Option<String> {
+    let mut rules = current();
+    if rules.seeded.iter().any(|item| item.eq_ignore_ascii_case(mark)) {
+        return None;
+    }
+    let mut reopened: Vec<String> = Vec::new();
+    let targets: Vec<(String, String)> = rules
+        .disabled
+        .iter()
+        .filter(|entry| entry
+            .provider
+            .as_deref()
+            .is_some_and(|owner| providers.iter().any(|known| known.eq_ignore_ascii_case(owner))))
+        .filter_map(|entry| entry.provider.clone().map(|provider| (provider, entry.id.clone())))
+        .collect();
+    for (provider, id) in targets {
+        // 只有「旧白名单种子记过账」的那条才解（`{provider}:{id}` 那套格式）
+        let legacy_key = format!("{provider}:{id}");
+        let seeded_by_whitelist = rules.seeded.iter().any(|item| item.eq_ignore_ascii_case(&legacy_key));
+        if !seeded_by_whitelist {
+            continue;
+        }
+        set_membership(&mut rules.disabled, Some(&provider), &id, false);
+        reopened.push(format!("{provider}/{id}"));
+    }
+    rules.seeded.push(mark.to_string());
+    save(&rules);
+    if reopened.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "🧩 {label} 迁移: 重新打开 {} 个被旧白名单误关的模型 [{}]",
+        reopened.len(),
+        reopened.join(", ")
+    ))
 }
 
 /// 「默认启用白名单」种子的公共实现（WorkBuddy 与 Qoder 共用）。
+///
+/// ── 当前没有调用方（2026-10-17 起）───────────────────────────
+/// 两家都改成按**可见性**判了（见 [`seed_hidden_disabled`]）：人工白名单会把
+/// 可见的模型也关掉，与「可见的默认开」冲突。这个实现**刻意留着**：
+///   - 它是一条完整的、经过验证的白名单种子路径，将来哪家需要「只默认开某几个
+///     特定模型」时不用重写；
+///   - [`migrate_whitelist_disabled`] 的判据依赖它当年写下的 `seeded` 记账格式
+///     （`{provider}:{id}`），文档价值也在。
 ///
 /// 对 `ids` 里每个还没种过的模型：不在 `whitelist` 里的默认禁用，并把
 /// `(provider, id)` 记入 `seeded`。`label` 只进日志文案。
@@ -1321,6 +1420,7 @@ pub fn seed_qoder_defaults(provider: &str, label: &str, ids: &[String]) -> Optio
 /// 禁用 → 本次没有新禁用 → seeded 没落地」这个组合下，下次启动会**重种一遍** ——
 /// 用户在这期间手动启用过它的话，会被这一次重种悄悄改回禁用。种子是
 /// 「只对首次出现生效」的承诺，那承诺必须落盘才算数。
+#[allow(dead_code)]
 fn seed_default_enabled(
     provider: &str,
     label: &str,
@@ -1354,6 +1454,85 @@ fn seed_default_enabled(
     Some(format!(
         "🧩 {label}模型默认规则: 默认只启用 [{}]；默认禁用 {} 个 [{}]",
         whitelist.join(", "),
+        disabled_added.len(),
+        disabled_added.join(", ")
+    ))
+}
+
+// ─── 按「可见性」种子（默认只开可见的模型）──────────────
+
+/// 对一批 `(id, visibility)` 种默认规则：**不可见的模型默认关闭默认绑定**，
+/// 可见的保持默认开启。
+///
+/// ── 为什么要连「默认绑定」一起关 ─────────────────────────────
+/// 本仓的路由判定是「默认绑定关掉 = 这个名字调不动」
+/// （`catalog::builtin_target` 先过 `rules.default_enabled`，不过就直接返回
+/// `None`，请求根本到不了上游）。所以只隐藏 `/v1/models` 而不关默认绑定，
+/// 客户端仍能点名调用 —— 那与「不可见即不该出现在网关对外清单里」自相矛盾。
+/// 用户的原话是「默认的那一个关掉了，才算是不可用」，正是这个道理。
+///
+/// ── 与 `seed_default_enabled` 的分工 ────────────────────────
+/// 那个是**白名单制**（WorkBuddy / Qoder 各自挑几个「装上就能用」的模型），
+/// 判据是人工名单；这个是**可见性制**，判据来自上游 / 官方口径，名单由各家
+/// `models.rs` 算好后传进来。
+///
+/// 两套种子**共用 `rules.disabled` 这份禁用名单**（那是最终生效的东西），但
+/// **各自记账**（`seeded` 里是两套前缀）。所以：
+///   · 同一条 `(provider, id)` 只种一次，用户之后手动打开不会被改回去；
+///   · 白名单种子先把某条禁用了，本函数看到 `default_enabled` 为假就不再重复
+///     记一次 —— 结论一致，不冲突；
+///   · **反过来也成立**：本函数先关的，白名单种子看到已禁用也不会再动。
+///   Qoder 两家都跑，两条种子最终都指向「关」，因此不会互相打架。
+///
+/// 返回日志文案（没有变化时返回 `None`，调用方不必判断）。
+pub fn seed_hidden_disabled(provider: &str, label: &str, entries: &[(String, &str)]) -> Option<String> {
+    let mut rules = current();
+    let seeded_before = rules.seeded.len();
+    let mut disabled_added: Vec<String> = Vec::new();
+    for (id, visibility) in entries {
+        let id = id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        // 只处理**明确不可见**的。`shown` 与 `undeclared` 都不动 ——
+        // 「上游没说」不等于「不可用」，与 Trae 的「缺省 = 可见」同一纪律。
+        //
+        // ── 为什么只给 `hidden` 记账（可见的不记）──────────────
+        // 记账的意思是「这条已种过，以后别再见一次就重种」。对 `hidden` 那是对的
+        // （用户手动打开后不该被改回去）；对 `shown` 记账则是错的：上游哪天把某个
+        // 模型从可见改成不可见（Antigravity 就是这样一批批下线的），那条 id 在
+        // 老用户的盘上已经「种过」了，永远轮不到这一轮处理 —— 症状是「新装的
+        // 会藏、升级过来的不藏」。可见的条目没有副作用要保护，不记最安全。
+        if *visibility != "hidden" {
+            continue;
+        }
+        // ── 记账用一个**独立命名空间**（`visibility:` 前缀）─────────
+        // 不能复用 `{provider}:{id}` 那套：老用户盘上已经有那些记录（白名单
+        // 种子在升级前就把同一批 id 记过账了），复用会让新种子对**存量用户
+        // 全部跳过** —— 症状同上（新装的管用、升级的不行），是最容易漏掉的一类
+        // bug。两套种子分别记账，互不干扰；`is_seeded` 里那条
+        // `workbuddy | raccoon` 的旧格式兼容分支也碰不到这个前缀。
+        let key = format!("visibility:{provider}:{id}");
+        if rules.seeded.iter().any(|item| item.eq_ignore_ascii_case(&key)) {
+            continue;
+        }
+        rules.seeded.push(key);
+        // 只在**当前是启用状态**时才关：用户可能已经手动关过（或另一条规则
+        // 关过），这时不该再记一次「我关的」。
+        if rules.default_enabled(provider, id) {
+            set_membership(&mut rules.disabled, Some(provider), id, true);
+            disabled_added.push(id.to_string());
+        }
+    }
+    if rules.seeded.len() == seeded_before {
+        return None;
+    }
+    save(&rules);
+    if disabled_added.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "🧩 {label}可见性规则: 默认关闭 {} 个不可见模型 [{}]",
         disabled_added.len(),
         disabled_added.join(", ")
     ))

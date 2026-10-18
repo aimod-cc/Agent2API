@@ -138,7 +138,8 @@
 }
 
 .rel-date {
-  margin-left: auto;      /* 靠右，与卡头左端的版本号分列两端 */
+  /* 靠右：没有链接时自己吃掉空档；有链接时由下面的相邻规则交还给链接 */
+  margin-left: auto;
   color: var(--text-3);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
@@ -154,62 +155,149 @@
   overscroll-behavior: contain;
 }
 
-/* 「在 GitHub 查看完整说明」+「加入 QQ 群」：一条规则管左边那条链接（悬停下划线、
-   颜色、字号都在下面）。右边那颗是组件库 Button 的 link 变体，样式自带、只在 JSX 里
-   把尺寸与颜色对齐到这条 —— 页面里不再管它，也别把任何一个换成裸 <button>：下面
-   `button:hover:not(:disabled)` 那条（0,3,1）会盖过这条 `a:hover`，鼠标一移上去就
-   冒出灰底（之前几次「样式不对」就是这么来的）。
-   （JSX 里两个元素各占一行，元素之间的换行会被吃掉、不留空格，所以这个 gap 是
-   必需的，不是好看的。） */
-.rel-foot {
-  margin-top: 10px;
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  flex-wrap: wrap;
-}
+/* 卡头里的「在 GitHub 查看完整说明」。
+   放在卡头而不是正文末尾：正文是限高滚动的（.rel-note-body 46vh），日志一长，
+   页脚那个入口就得滚到底才看得见。卡头不参与滚动，永远在第一屏。
 
-.rel-foot a {
+   与 .rel-date 的 margin-left:auto 配合：链接吃掉中间的空档，日期仍靠最右。
+   日期不存在时（没有 publishedAt），链接自己顶上 auto，同样贴右。 */
+.rel-head-link {
+  margin-left: auto;
   color: var(--primary-fg);
   font-size: 11.5px;
   font-weight: 600;
   text-decoration: none;
+  white-space: nowrap;
 }
 
-.rel-foot a:hover { text-decoration: underline; }
+.rel-head-link:hover { text-decoration: underline; }
 
-/* ─── 「加入 QQ 群」弹窗 ──────────────────────────────
-   弹窗里只有一张二维码 + 一行群号，整体居中。图按定宽缩放、高度留 auto（原图是竖版，
-   硬套正方形会被压扁），白底 + 细描边是为了让浅色二维码和面板底色分得出边界 */
-.qq-qr {
-  width: 216px;
-  max-width: 100%;
-  height: auto;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: #fff;
+/* 日期紧跟链接之后（链接已经吃了 auto，这里不再 auto，否则会平分空档） */
+.rel-head-link + .rel-date { margin-left: 0; }
+
+/* ─── 「加入交流群」弹窗 ──────────────────────────────
+   四张卡片（QQ 群 ×2、Telegram、Discord）：左边品牌标、右边主副标题。
+   卡片是原生 <button>（QQ，点击复制）/ <a>（外链，点击打开）。
+
+   **这里不能换成组件库 Button**：Button 的 ghost 变体自带 `border-transparent
+   bg-transparent`，会把卡片描边与底色整条压掉（两张卡粘成一片、与 <a> 卡对不齐）。
+   改用原生元素后还要压掉 components.css 里那两条全局规则：
+     · `button { height: 30px }` —— 卡片高度得由两行内容决定；
+     · `button:hover:not(:disabled) { background: var(--control-hover) }` —— 特异性
+       0,2,1，比 `.qq-card:hover`（0,2,0）高，不显式压过的话悬停会冒出灰底。
+   下面统一用 `button.qq-card…` 形态把特异性提到 0,3,1，正好盖住那一条。 */
+.qq-intro {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
-.qq-no {
-  display: flex;
-  align-items: center;
+.qq-cards {
+  display: grid;
   gap: 8px;
 }
 
-.qq-no .k {
-  color: var(--text-3);
-  font-size: 11.5px;
+/* 卡片的公共外形：button / a 两种元素共用一套，避免两处样式漂移 */
+.qq-card,
+a.qq-card,
+button.qq-card {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  /* 按掉全局 button 的定高与内边距，让卡片高度由内容（两行字）决定 */
+  height: auto;
+  width: 100%;
+  padding: 11px 13px;
+  text-align: left;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color .14s ease, background .14s ease, box-shadow .14s ease;
 }
 
-.qq-no code {
+.qq-card:hover,
+a.qq-card:hover,
+button.qq-card:hover:not(:disabled) {
+  border-color: var(--primary-bd);
+  background: var(--primary-soft);
+}
+
+.qq-card:focus-visible,
+a.qq-card:focus-visible,
+button.qq-card:focus-visible { box-shadow: var(--ring); }
+
+/* 品牌标：34px 圆角方框 + 白色图形。Simple Icons 的图形是**单色**（品牌色），
+   所以要垫一层同色底、把图形反白 —— 这才是三家官方标的真实样子（蓝底白企鹅 /
+   蓝底白纸飞机 / 靛底白笑脸）。底色与图形色成对写在下面，改一处要改两处 */
+.qq-card-logo {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+}
+
+.qq-card-logo svg {
+  width: 21px;
+  height: 21px;
+  display: block;
+}
+
+/* 图形是品牌色填充，反白靠 filter 会把描边也一起吃掉；改为给 path 直接上白色 */
+.qq-card-logo svg path { fill: #fff !important; }
+
+/* 品牌底：与 icons.js 里三枚 path 的 fill 取同一组 hex */
+.qq-card-logo[data-brand='qq'] { background: #1EBAFC; }
+.qq-card-logo[data-brand='telegram'] { background: #26A5E4; }
+.qq-card-logo[data-brand='discord'] { background: #5865F2; }
+
+.qq-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.qq-card-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text);
+}
+
+/* 群号用等宽数字，与标题同一行基线对齐；字号略大是主读数 */
+.qq-card-title code {
   font-size: 13.5px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
+  color: var(--primary-fg);
 }
 
-.qq-hint {
-  margin: 0;
+.qq-card-sub {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-3);
+}
+
+/* 「即将满员」：卡片右上角的整卡状态，不跟标题挤在一行 */
+.qq-card-flag {
+  flex: 0 0 auto;
+  align-self: flex-start;
+}
+
+.qq-foot {
+  margin: 2px 0 0;
   color: var(--text-3);
   font-size: 11.5px;
   line-height: 1.6;

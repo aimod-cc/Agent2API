@@ -158,6 +158,8 @@ function ProxiesPage() {
   const subs = React.useSyncExternalStore(subscribeSubs, getSubSnapshot).data?.items ?? []
   const [modal, setModal] = React.useState<{ item: ProxyPoolItem | null } | null>(null)
   const [settingsOpen, setSettingsOpen] = React.useState(false)
+  /** 窄屏筛选抽屉（见 css/mobile.css 的 .px-filter-group） */
+  const [filterOpen, setFilterOpen] = React.useState(false)
   const [subsOpen, setSubsOpen] = React.useState(false)
   const [kw, setKw] = React.useState('')
   const [srcFilter, setSrcFilter] = React.useState('all')
@@ -517,6 +519,22 @@ function ProxiesPage() {
   return (
     <>
       <section className='panel'>
+        {/* 窄屏筛选抽屉的遮罩与标题栏（桌面 display:none，不占位）。
+            四个筛选控件由 CSS 搬进 .px-filter-group，这里只放壳。 */}
+        <div className={cn('px-filter-scrim', filterOpen && 'open')} onClick={() => setFilterOpen(false)} />
+        <div className={cn('px-filter-head', filterOpen && 'open')}>
+          <span className='px-filter-title'>{t('筛选')}</span>
+          <Button variant='ghost' size='sm' className='px-filter-clear'
+            disabled={!kw && vendorFilter === 'all' && srcFilter === 'all' && stFilter === 'all'}
+            onClick={() => {
+              setKw('')
+              pickVendor('all')
+              pickSource('all')
+              setStFilter('all')
+            }}>{t('清空')}</Button>
+          <Button variant='ghost' size='sm' className='px-filter-close'
+            onClick={() => setFilterOpen(false)} aria-label={t('关闭')}>✕</Button>
+        </div>
         <div className='panel-head'>
           <h2>{t('代理池')}</h2>
           <span className='panel-sub'>
@@ -527,6 +545,14 @@ function ProxiesPage() {
               不必等用户看到页脚的 Clash 说明才反应过来 */}
           <span className='text-[11px] text-subtle'>{t('订阅与 Clash 的出口自动镜像进来')}</span>
         <div className='head-actions'>
+          {/* 窄屏「筛选」入口：桌面隐藏（CSS 控制）。角标是生效的筛选条数 */}
+          <button type='button' className='px-filter-open' onClick={() => setFilterOpen(true)}
+            aria-label={t('打开筛选')}>
+            {t('筛选')}
+            {(kw ? 1 : 0) + (vendorFilter !== 'all' ? 1 : 0) + (srcFilter !== 'all' ? 1 : 0) + (stFilter !== 'all' ? 1 : 0) > 0
+              ? <span className='px-filter-badge'>{(kw ? 1 : 0) + (vendorFilter !== 'all' ? 1 : 0) + (srcFilter !== 'all' ? 1 : 0) + (stFilter !== 'all' ? 1 : 0)}</span>
+              : null}
+          </button>
           {/* 设置放在最左：低频配置项（端口范围 / 测试网址），不必挤在主操作旁边。
               弹窗是打开时才读设置（loadSettings 在弹窗内部），这里只负责开门 */}
           <Button variant='outline' disabled={snapshot.batchBusy}
@@ -585,8 +611,11 @@ function ProxiesPage() {
           </div>
         </div>
       ) : (
-        /* 内边距与 .batch-bar 的 10px 16px 对齐：两条同高，互为替换时表格不下移 */
-        <div className='flex flex-wrap items-center gap-2.5 border-b border-border px-4 py-[10px]'>
+        /* 内边距与 .batch-bar 的 10px 16px 对齐：两条同高，互为替换时表格不下移。
+           窄屏这四个控件收进右侧抽屉（见 css/mobile.css 的 .px-filter-group），
+           工具条只留一个「筛选」按钮 —— 否则面板头 + 筛选区在 812px 屏上占掉
+           近一半高度，表格只剩 200px 可看。 */
+        <div className={cn('flex flex-wrap items-center gap-2.5 border-b border-border px-4 py-[10px]', 'px-filter-group', filterOpen && 'open')}>
           <InputGroup className='w-[clamp(150px,22vw,220px)]'>
             <InputGroupInput type='search' value={kw} aria-label={t('搜索节点')}
               placeholder={t('搜索名称 / 地址 / 端口')}

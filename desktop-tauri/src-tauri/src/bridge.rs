@@ -377,6 +377,24 @@ const BRIDGE_JS: &str = r#"
       }
       return call('POST', '/api/proxies/test', body);
     },
+    // ── Agent（本机 AI 客户端的配置接管）──
+    // 与 `server/src/web_shim.rs` 的同名方法成对存在（教训同上）。契约见
+    // `api::agents` 的模块头：
+    //   · getAgents           全部客户端 + 用户配置 + 安装状态 + 派生读数
+    //   · saveAgentProfiles   保存一个客户端的配置列表（不写客户端文件）
+    //   · applyAgentProfile   写进客户端文件（单配置整段覆写 / 多配置只改
+    //                         enabled），写前自动备份；响应带 `applied`
+    //   · previewAgentProfile 写入预览（不落盘），响应带 `changed` 行号
+    //   · restoreAgentClient  按最近一次备份还原
+    //   · importAgentClient   从客户端现有文件里读回一套配置
+    //   写操作都返回整份 `{clients}`（就地替换，页面不必再拉一次）。
+    getAgents: () => call('GET', '/api/agents'),
+    saveAgentProfiles: payload => call('POST', '/api/agents/profiles', payload || {}),
+    applyAgentProfile: payload => call('POST', '/api/agents/apply', payload || {}),
+    previewAgentProfile: payload => call('POST', '/api/agents/preview', payload || {}),
+    restoreAgentClient: payload => call('POST', '/api/agents/restore', payload || {}),
+    importAgentClient: payload => call('POST', '/api/agents/import', payload || {}),
+
     // ── 代理池（「网络代理」页）──
     // 与 `server/src/web_shim.rs` 的同名方法成对存在（那个文件是 headless
     // 面板的桥）：只加一边时，另一形态下的页面会报「桥接方法缺失」——
@@ -584,6 +602,11 @@ const BRIDGE_JS: &str = r#"
     // WorkBuddy 国际版日活保活的模型链（读 / 存；与 web_shim.rs 的同名方法成对）
     getCheckinKeepalive: () => call('GET', '/api/checkin-keepalive'),
     saveCheckinKeepalive: models => call('POST', '/api/checkin-keepalive', { models }),
+    // 猫猫旅行定时排程（国内版）：读 / 存开关与时刻 / 立即巡检全部
+    // （与 web_shim.rs 的同名方法成对；调度体在 core::growth_scheduler）
+    getTravelSchedule: () => call('GET', '/api/travel-schedule'),
+    saveTravelSchedule: patch => call('POST', '/api/travel-schedule', patch),
+    runTravelScheduleNow: () => call('POST', '/api/travel-schedule/run', {}),
     // WorkBuddy 国际版日活任务的手动粒度入口（mode: full | claim | keepalive）
     runCheckinActivity: (id, mode) => call('POST', '/api/checkin-activity', { id, mode }),
     // 签到中心的聚合快照（每日签到分组 / 自动签到设置 / 签到历史 / 一次性项入口），
@@ -728,7 +751,7 @@ const BRIDGE_JS: &str = r#"
     exportLogs: () => invoke('export_logs'),
 
     // ── 请求统计报表 / 数据保留 ──
-    // range 只认 today / 7 / 30 / month / all / custom，非法值由后端返回 400
+    // range 只认 today / yesterday / 7 / 30 / month / all / custom，非法值由后端返回 400
     // （不在这里静默改口径：界面选了什么就该拿到什么，报错比默默换区间好排查）。
     // dates（`{start, end}`，`YYYY-MM-DD`）**只在 range=custom 时**给：
     // 后端对 custom 会强制要求这两个参数，其余档位带上反而是噪音

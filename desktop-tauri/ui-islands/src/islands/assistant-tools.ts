@@ -108,6 +108,14 @@ type ModelRow = {
   enabled?: unknown
   aliases?: unknown
 }
+type MappingRow = {
+  alias?: unknown
+  target?: unknown
+  provider?: unknown
+  enabled?: unknown
+  isDefault?: unknown
+  dangling?: unknown
+}
 type AccountRow = {
   id?: unknown
   provider?: unknown
@@ -117,14 +125,179 @@ type AccountRow = {
   enabled?: unknown
 }
 
-async function readModels(): Promise<ModelRow[]> {
-  const data = (await bridge().getModelManage?.()) as { models?: ModelRow[] } | undefined
-  return Array.isArray(data?.models) ? data.models : []
+/**
+ * 一份与 `/api/models/manage` 同形的视图（内置家来自后端，自定义家由
+ * `models-custom-source` 的 `buildView` 现造 —— 那层适配的取舍见其文件头）。
+ */
+type ManageViewLike = {
+  models?: ModelRow[]
+  mappings?: MappingRow[]
 }
 
+/** 自定义提供商目录里的一条记录（`providers.js` 的 `customList`） */
+type CustomProviderRecord = {
+  id?: unknown
+  name?: unknown
+  models?: unknown
+  mappings?: unknown
+}
+
+/** 目录模块（`ui/providers.js`）在本模块用到的部分 */
+type ProvidersBridge = {
+  customList?: () => CustomProviderRecord[]
+  refreshCustom?: () => Promise<unknown>
+}
+
+/**
+ * 自定义提供商的判定与「记录 → 管理视图」的适配都复用模型管理页那一份。
+ *
+ * ── 为什么要复用而不是在助手这边另写一份 ────────────────────
+ * 那层适配（默认绑定现造、同名映射并入、能力位稀疏表、legacy 条目剔除）是
+ * 模型管理页的**渲染契约**，助手读到的形状必须与它逐字一致，否则同一个模型
+ * 在「管理页看到的启用状态」与「助手说它是启用的」之间会分叉。两份实现
+ * 只会让这种分叉迟早发生。
+ */
+type CustomSourceModule = {
+  isCustom: (id: unknown) => boolean
+  buildView: (id: string) => { models?: ModelRow[]; mappings?: MappingRow[] } | null
+  /** 改一条绑定的开关 / 思考等级（`alias == target` 即默认绑定） */
+  setBinding: (
+    id: string,
+    alias: string,
+    target: string,
+    patch?: { enabled?: boolean; reasoning?: string },
+  ) => Promise<void>
+  /** 删除一条映射（默认绑定不可删 —— 与内置家同口径） */
+  removeMapping: (id: string, alias: string, target: string) => Promise<void>
+  /** 覆盖某条模型的能力位；`null` = 清除该项 */
+  setCapabilities: (
+    id: string,
+    modelId: string,
+    patch: Record<string, number | boolean | null>,
+  ) => Promise<void>
+}
+
+function customSource(): CustomSourceModule | undefined {
+  return (window as unknown as { wbModelsCustom?: CustomSourceModule }).wbModelsCustom
+}
+
+/**
+ * 取自定义家的写入模块；缺了就明确报错。
+ *
+ * 不静默跳过：`window.wbModelsCustom` 由模型管理页那个岛在模块顶层挂上（同一个
+ * bundle、加载即注册），缺它只可能是页面形态变了 —— 那时「说改动成功、其实
+ * 什么都没写」比一条明确的错误糟得多。
+ */
+function customWriter(): CustomSourceModule {
+  const source = customSource()
+  if (!source) throw new Error(t('自定义提供商模块未就绪（请刷新界面后重试）'))
+  return source
+}
+
+/** 改自定义家一条绑定的开关 / 思考等级 */
+async function customBinding(
+  provider: string,
+  alias: string,
+  target: string,
+  patch: { enabled?: boolean; reasoning?: string },
+): Promise<void> {
+  await customWriter().setBinding(provider, alias, target, patch)
+}
+
+/** 目录缓存（`providers.js` 在页面 head 之后加载，所以只能运行期取） */
+function customRecords(): CustomProviderRecord[] {
+  const providers = (window as unknown as { wbProviders?: ProvidersBridge }).wbProviders
+  const list = providers?.customList?.()
+  return Array.isArray(list) ? list : []
+}
+
+/**
+ * 读目录缓存；**空表时先补拉一次**。
+ *
+ * `providers.js` 在加载期就拉过一份，所以正常情况下缓存总是有值。但面板形态
+ * 首屏那次请求可能还没回来（用户刚打开页面就问助手），此时空表会被读成
+ * 「一家自定义提供商都没有」—— 那是一次静默的错误答案。补拉一次再读，
+ * 失败就按空表处理（目录偶发打不通不该让整条工具失败）。
+ */
+async function customRecordsFresh(): Promise<CustomProviderRecord[]> {
+  const cached = customRecords()
+  if (cached.length) return cached
+  const providers = (window as unknown as { wbProviders?: ProvidersBridge }).wbProviders
+  try {
+    await providers?.refreshCustom?.()
+  } catch { /* 目录偶发打不通：按现有缓存（空）继续 */ }
+  return customRecords()
+}
+
+/**
+ * 自定义家是否在目录里（判据与后端 `is_custom_provider_id` 同向前缀）。
+ *
+ * 这里**不看** `isCustom`（它只判前缀）：目录里没有的 `custom-xxx` 是残留
+ * 账号指向的家，管理页那边同样只认目录里存在的那些。
+ */
+function isCustomProvider(id: string): boolean {
+  const source = customSource()
+  if (source) return source.isCustom(id)
+  return id.startsWith('custom-')
+}
+
+/**
+ * 一家自定义提供商的管理视图；目录里没有这家时 `buildView` 自己回 null。
+ *
+ * 注意 `buildView` 读的是**同步**目录缓存 —— 调用方必须先 await 过一次
+ * `customRecordsFresh()`（`readModels` 就是这么做的），否则首屏那一刻会拿到
+ * 一份还没到的空目录。
+ */
+function customView(id: string): ManageViewLike | null {
+  return customSource()?.buildView(id) ?? null
+}
+
+/**
+ * 全部模型行 + 映射（内置家 + 自定义家）。
+ *
+ * ── 为什么必须合并 ──────────────────────────────────────────
+ * `GET /api/models/manage` 只遍历内置注册表（`catalog::manage_view` 的
+ * `active_manifests`），自定义家一个都不在里面 —— 它们的清单存在提供商记录里、
+ * 由模型管理页在前端适配。助手若只读那一条接口，回答「有哪些模型」时会漏掉
+ * 用户自建的全部上游，且 `set_model_*` 系列拿不到自定义家的启用状态。
+ */
+async function readModels(): Promise<{ models: ModelRow[]; mappings: MappingRow[] }> {
+  const data = (await bridge().getModelManage?.()) as ManageViewLike | undefined
+  const models: ModelRow[] = Array.isArray(data?.models) ? data.models.slice() : []
+  const mappings: MappingRow[] = Array.isArray(data?.mappings) ? data.mappings.slice() : []
+  // 自定义家逐个适配后追加。目录缓存缺失（面板形态未注入 / 还没拉到）时
+  // 只是少这一块 —— 内置家那部分照常可用，不因此整条工具失败。
+  const known = new Set(models.map(row => `${str(row.provider)}\u0001${str(row.id)}`.toLowerCase()))
+  for (const record of await customRecordsFresh()) {
+    const id = str(record.id)
+    if (!id) continue
+    const view = customView(id)
+    if (!view) continue
+    for (const row of view.models || []) {
+      const key = `${id}\u0001${str(row.id)}`.toLowerCase()
+      if (known.has(key)) continue
+      known.add(key)
+      models.push(row)
+    }
+    for (const mapping of view.mappings || []) mappings.push(mapping)
+  }
+  return { models, mappings }
+}
+
+/**
+ * 账号清单（`/api/session` 的 `accounts` 是**对象**：`{currentAccountId,
+ * currentAccountIds, accounts: [...], providers: [...]}`，数组在第二层）。
+ *
+ * 这里同时接受数组形态：`bridge.rs` 与 `web_shim.rs` 的 `getState` 都返回
+ * `/api/session` 的 `data`，形状没变过；容忍两种只为了「将来某天有人把它拍平」
+ * 时这条链不会静默退化成空表（空表的表现是「没有找到账号」，极难排查）。
+ */
 async function readAccounts(): Promise<AccountRow[]> {
-  const state = (await bridge().getState?.()) as { accounts?: AccountRow[] } | undefined
-  const rows = Array.isArray(state?.accounts) ? state.accounts : []
+  const state = (await bridge().getState?.()) as
+    | { accounts?: AccountRow[] | { accounts?: AccountRow[] } }
+    | undefined
+  const holder = state?.accounts
+  const rows = Array.isArray(holder) ? holder : Array.isArray(holder?.accounts) ? holder.accounts : []
   // 全局队列 = priority 升序（后端 priority 0 起、越小越靠前）
   return rows
     .slice()
@@ -157,44 +330,119 @@ function findAccount(accounts: AccountRow[], ref: string): AccountRow {
 
 /* ─── 九只工具 ─────────────────────────────────────────────── */
 
-/** 1 · 获取模型列表（只读） */
+/** 分页的默认页大小与上限（`list_models` 用；上限防一次把上下文打爆） */
+const PAGE_DEFAULT = 100
+const PAGE_MAX = 500
+
+/** 一页的元信息：总数 / 本页区间 / 是否还有下一页（模型与映射各一份） */
+type PageMeta = {
+  total: number
+  offset: number
+  limit: number
+  returned: number
+  hasMore: boolean
+  /** 下一页的 offset（`hasMore` 为 false 时不出现） */
+  nextOffset?: number
+}
+
+function paginate<T>(rows: T[], offset: number, limit: number): { items: T[]; meta: PageMeta } {
+  const start = Math.max(0, Math.min(offset, rows.length))
+  const items = rows.slice(start, start + limit)
+  const end = start + items.length
+  const hasMore = end < rows.length
+  return {
+    items,
+    meta: {
+      total: rows.length,
+      offset: start,
+      limit,
+      returned: items.length,
+      hasMore,
+      ...(hasMore ? { nextOffset: end } : {}),
+    },
+  }
+}
+
+/** 1 · 获取模型列表（只读，分页） */
 const listModels: AssistantTool = {
   id: 'list_models',
   label: t('获取模型列表'),
   kind: 'read',
-  desc: '读取各提供商的模型清单（模型 ID、所属提供商、是否启用、已挂的映射名）以及全部映射。回答「有哪些模型」「哪些模型在多家重复」「某个名字挂在哪」这类问题之前先调用它。',
+  desc: '分页读取各提供商的模型清单（模型 ID、所属提供商、是否启用、已挂的映射名）以及映射表。**内置家（Agent）与自定义提供商都在结果里**：自定义家的 provider 以 custom- 开头，可用 providerLabel 读它的展示名。回答「有哪些模型」「哪些模型在多家重复」「某个名字挂在哪」这类问题之前先调用它。\n\n结果分页：模型与映射各自一页，响应里带 total / offset / limit / returned / hasMore / nextOffset。hasMore 为 true 时用 nextOffset 作为下一次的 offset 继续取，直到取完；不要只看第一页就下结论。',
   params: {
     type: 'object',
     properties: {
-      provider: { type: 'string', description: '只看某一家（提供商 id，如 codearts / workbuddy）；不填 = 全部' },
+      provider: { type: 'string', description: '只看某一家（提供商 id，如 codearts / workbuddy / custom-xxxx）；不填 = 全部' },
       keyword: { type: 'string', description: '按模型 ID 或映射名做子串过滤；不填 = 不过滤' },
       enabledOnly: { type: 'boolean', description: 'true = 只看已启用的模型' },
+      section: {
+        type: 'string',
+        enum: ['models', 'mappings', 'both'],
+        description: '取哪一段：models = 只要模型行、mappings = 只要映射表、both = 两段都要（默认）。翻页时建议先按段取，免得重复传另一段',
+      },
+      offset: { type: 'number', description: '本页起点（从 0 开始）；翻页时传上一页的 nextOffset' },
+      limit: { type: 'number', description: `每页条数（默认 ${PAGE_DEFAULT}，最多 ${PAGE_MAX}）` },
     },
   },
   run: async args => {
     const provider = str(args.provider, 64).toLowerCase()
     const keyword = str(args.keyword, 128).toLowerCase()
     const enabledOnly = bool(args.enabledOnly) === true
-    const data = (await bridge().getModelManage?.()) as { models?: ModelRow[]; mappings?: Array<Record<string, unknown>> } | undefined
-    const rows = (Array.isArray(data?.models) ? data.models : []).filter(row => {
-      if (provider && str(row.provider).toLowerCase() !== provider) return false
-      if (enabledOnly && row.enabled !== true) return false
-      if (keyword) {
-        const hay = [str(row.id), str(row.name), ...(Array.isArray(row.aliases) ? row.aliases.map(item => str(item)) : [])].join(' ').toLowerCase()
-        if (!hay.includes(keyword)) return false
-      }
-      return true
-    })
-    const slim = rows.map(row => ({
-      provider: str(row.provider),
-      id: str(row.id),
-      enabled: row.enabled === true,
-      aliases: Array.isArray(row.aliases) ? row.aliases.map(item => str(item)) : [],
-    }))
-    return {
-      text: JSON.stringify({ total: slim.length, models: slim.slice(0, 400) }),
-      summary: t('{n} 个模型', { n: slim.length }),
+    const section = str(args.section, 16).toLowerCase() || 'both'
+    if (section !== 'models' && section !== 'mappings' && section !== 'both') {
+      throw new Error(t('section 只能是 models / mappings / both'))
     }
+    const offset = Math.max(0, Math.round(num(args.offset) ?? 0))
+    const limit = Math.max(1, Math.min(PAGE_MAX, Math.round(num(args.limit) ?? PAGE_DEFAULT)))
+    const data = await readModels()
+    const payload: Record<string, unknown> = {}
+
+    if (section !== 'mappings') {
+      const rows = data.models.filter(row => {
+        if (provider && str(row.provider).toLowerCase() !== provider) return false
+        if (enabledOnly && row.enabled !== true) return false
+        if (keyword) {
+          const hay = [str(row.id), str(row.name), ...(Array.isArray(row.aliases) ? row.aliases.map(item => str(item)) : [])].join(' ').toLowerCase()
+          if (!hay.includes(keyword)) return false
+        }
+        return true
+      })
+      const page = paginate(rows.map(row => ({
+        provider: str(row.provider),
+        providerLabel: str(row.providerLabel) || str(row.provider),
+        id: str(row.id),
+        enabled: row.enabled === true,
+        aliases: Array.isArray(row.aliases) ? row.aliases.map(item => str(item)) : [],
+      })), offset, limit)
+      payload.models = { ...page.meta, items: page.items }
+    }
+
+    if (section !== 'models') {
+      // 映射单列一段（含目标不在清单里的「未挂载」条目）：模型行上的 aliases 只
+      // 覆盖挂得上的那些，而「某个名字挂在哪」这类问题要的正是映射表本身。
+      const rows = data.mappings.filter(row => {
+        if (provider && str(row.provider).toLowerCase() !== provider) return false
+        if (enabledOnly && row.enabled !== true) return false
+        if (!keyword) return true
+        return [str(row.alias), str(row.target)].join(' ').toLowerCase().includes(keyword)
+      })
+      const page = paginate(rows.map(row => ({
+        provider: str(row.provider),
+        alias: str(row.alias),
+        target: str(row.target),
+        enabled: row.enabled === true,
+        isDefault: row.isDefault === true,
+        dangling: row.dangling === true,
+      })), offset, limit)
+      payload.mappings = { ...page.meta, items: page.items }
+    }
+
+    const modelsMeta = payload.models as PageMeta | undefined
+    const mappingsMeta = payload.mappings as PageMeta | undefined
+    const summary = modelsMeta
+      ? t('{n} 个模型', { n: modelsMeta.total })
+      : t('{n} 条映射', { n: mappingsMeta?.total ?? 0 })
+    return { text: JSON.stringify(payload), summary }
   },
 }
 
@@ -231,7 +479,7 @@ const setModelEnabled: AssistantTool = {
   id: 'set_model_enabled',
   label: t('启用 / 禁用模型'),
   kind: 'write',
-  desc: '开启或关闭某几个模型在网关上的可用性（粒度是「提供商 × 模型」）。禁用后下游请求不再路由到它。一次可以改多个。',
+  desc: '开启或关闭某几个模型在网关上的可用性（粒度是「提供商 × 模型」）。禁用后下游请求不再路由到它。一次可以改多个。内置家与自定义提供商（custom- 前缀）都支持。',
   params: {
     type: 'object',
     properties: {
@@ -275,6 +523,14 @@ const setModelEnabled: AssistantTool = {
       const id = str(item.id)
       const enabled = bool(item.enabled)
       if (!provider || !id || enabled === undefined) throw new Error(t('参数不完整（需要 provider / id / enabled）'))
+      if (isCustomProvider(provider)) {
+        // 自定义家的启停存在提供商记录的 models[] 里（整表替换接口），与内置家
+        // 的 modelRules 是两套存储 —— 见 models-custom-source 的文件头。
+        // `alias == target` 的「默认绑定」在那边就是模型自己的 enabled 字段。
+        await customBinding(provider, id, id, { enabled })
+        done.push(`${enabled ? '启用' : '禁用'} ${provider}/${id}`)
+        continue
+      }
       await api.setModelState?.({ provider, id, enabled })
       done.push(`${enabled ? '启用' : '禁用'} ${provider}/${id}`)
     }
@@ -290,7 +546,7 @@ const setModelMapping: AssistantTool = {
   id: 'set_model_mapping',
   label: t('设置模型映射 ID'),
   kind: 'write',
-  desc: '给模型新增或删除映射名（对外名）。同一对外名可以在多个提供商各挂一条：下游用同一个名字请求，网关按账号优先级主备切换；也可以给不同家的同名模型各加前缀（如 ca/claude-sonnet-4.5）来精确指定某一家。一次可以改多条。删掉的映射名只是不再对外可用，不删任何模型。',
+  desc: '给模型新增或删除映射名（对外名）。同一对外名可以在多个提供商各挂一条：下游用同一个名字请求，网关按账号优先级主备切换；也可以给不同家的同名模型各加前缀（如 ca/claude-sonnet-4.5）来精确指定某一家。一次可以改多条。删掉的映射名只是不再对外可用，不删任何模型。内置家与自定义提供商（custom- 前缀）都支持。',
   params: {
     type: 'object',
     properties: {
@@ -341,6 +597,18 @@ const setModelMapping: AssistantTool = {
       const id = str(item.id)
       const alias = str(item.alias, 128)
       if (!provider || !id || !alias) throw new Error(t('参数不完整（需要 provider / id / alias）'))
+      if (isCustomProvider(provider)) {
+        // 自定义家的映射是提供商记录里的 mappings 数组：新增 = 加一条，
+        // 删除 = 摘掉那条（默认绑定 alias == target 不可删，与内置家同口径）。
+        if (str(item.action) === 'remove') {
+          await customWriter().removeMapping(provider, alias, id)
+          done.push(`删除 ${alias} → ${provider}/${id}`)
+        } else {
+          await customBinding(provider, alias, id, { enabled: true })
+          done.push(`新增 ${alias} → ${provider}/${id}`)
+        }
+        continue
+      }
       if (str(item.action) === 'remove') {
         await api.removeModelMapping?.(alias, id, provider)
         done.push(`删除 ${alias} → ${provider}/${id}`)
@@ -369,7 +637,7 @@ const setModelCapability: AssistantTool = {
   id: 'set_model_capability',
   label: t('修改模型能力'),
   kind: 'write',
-  desc: '修改某个模型对下游声明的能力位：上下文窗口、最大输出 Token、工具调用 / 图片 / 视频 / 深度推理四个布尔位。只传要改的键；布尔位给 null 表示恢复上游原值。',
+  desc: '修改某个模型对下游声明的能力位：上下文窗口、最大输出 Token、工具调用 / 图片 / 视频 / 深度推理四个布尔位。只传要改的键；布尔位给 null 表示恢复上游原值（自定义提供商没有「上游原值」，给 null 等于清除这一项）。内置家与自定义提供商（custom- 前缀）都支持。',
   params: {
     type: 'object',
     properties: {
@@ -426,7 +694,14 @@ const setModelCapability: AssistantTool = {
       }
     }
     if (!provider || !id || !Object.keys(caps).length) throw new Error(t('参数不完整（需要 provider / id / capabilities）'))
-    await bridge().setModelCapabilities?.(provider, id, caps)
+    if (isCustomProvider(provider)) {
+      // 自定义家的能力位存在提供商记录的 models[] 条目里，写入口是整表保存
+      // （后端 `POST /api/models/capabilities` 对 custom- id 明确 400，见
+      // `api::model_manage::set_capabilities` 的说明）。
+      await customWriter().setCapabilities(provider, id, caps as Record<string, number | boolean | null>)
+    } else {
+      await bridge().setModelCapabilities?.(provider, id, caps)
+    }
     refreshApp()
     return { text: JSON.stringify({ ok: true, provider, id, capabilities: caps }), summary: t('已修改 {n} 项能力', { n: Object.keys(caps).length }) }
   },
@@ -437,7 +712,7 @@ const testModel: AssistantTool = {
   id: 'test_model',
   label: t('发起模型测试'),
   kind: 'run',
-  desc: '对某个模型发一次真实的对话请求，回报连通性、耗时与首字延迟。会消耗该账号的额度。回答「这个模型通不通 / 快不快」时用它。',
+  desc: '对某个模型发一次真实的对话请求，回报连通性、耗时与首字延迟。会消耗该账号的额度。回答「这个模型通不通 / 快不快」时用它。内置家与自定义提供商（custom- 前缀）都支持，模型名可以是模型 ID 或已登记的映射别名。',
   params: {
     type: 'object',
     properties: {
@@ -668,3 +943,42 @@ export const TOOL_META: Array<{ id: string; label: string; desc: string; tag?: '
 ]
 
 export { errorText }
+
+/**
+ * 组装**对外可请求的模型名列表**（助手页 / 设置页那个模型选择器的数据源）。
+ *
+ * 口径与 `/v1/models` 对齐（那就是客户端能请求的名字）：
+ *   · 已启用模型的 ID（默认绑定）；
+ *   · 已启用模型之上的**已启用映射名**（用户建的 `ca/xxx` 这类，同样可请求）。
+ *
+ * 走 `readModels()` 而不是只读 `getModelManage()`：那个接口只覆盖内置注册表，
+ * 自定义提供商（含「预置 API」卡片建的）的清单存在提供商记录里，必须从目录
+ * 缓存补进来 —— 否则用户在助手里选不到自建上游的模型，而它们在 `/v1/models`
+ * 里明明是可请求的。
+ */
+export async function loadModelNames(): Promise<string[]> {
+  const { models, mappings } = await readModels()
+  // 先记「provider×id 是启用的」—— 映射名能不能请求，取决于它指向的模型开没开
+  const enabledKeys = new Set<string>()
+  const names: string[] = []
+  const seen = new Set<string>()
+  for (const row of models) {
+    if (row.enabled !== true) continue
+    const provider = str(row.provider)
+    const id = str(row.id)
+    if (!provider || !id) continue
+    enabledKeys.add(`${provider}\u0001${id}`)
+    if (!seen.has(id)) { seen.add(id); names.push(id) }
+  }
+  for (const mapping of mappings) {
+    if (mapping.enabled !== true || mapping.isDefault === true) continue
+    const provider = str(mapping.provider)
+    const target = str(mapping.target)
+    const alias = str(mapping.alias)
+    if (!alias || !seen.has(alias) && enabledKeys.has(`${provider}\u0001${target}`)) {
+      seen.add(alias)
+      names.push(alias)
+    }
+  }
+  return names
+}

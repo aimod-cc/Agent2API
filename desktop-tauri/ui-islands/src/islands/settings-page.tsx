@@ -1933,19 +1933,19 @@ const FEEDBACK_LINKS = [
     title: t('问题反馈'),
     desc: t('遇到 Bug、报错或异常行为'),
     cta: t('去反馈'),
-    url: 'https://github.com/aimod-cc/agent2api/issues/new?template=bug_report.yml',
+    url: 'https://github.com/Agent2API/agent2api/issues/new?template=bug_report.yml',
   },
   {
     title: t('功能建议'),
     desc: t('想要的新功能或改进想法'),
     cta: t('提建议'),
-    url: 'https://github.com/aimod-cc/agent2api/issues/new?template=feature_request.yml',
+    url: 'https://github.com/Agent2API/agent2api/issues/new?template=feature_request.yml',
   },
   {
     title: t('请求提供商 / 模型支持'),
     desc: t('希望接入新的提供商或模型'),
     cta: t('去申请'),
-    url: 'https://github.com/aimod-cc/agent2api/issues/new?template=provider_request.yml',
+    url: 'https://github.com/Agent2API/agent2api/issues/new?template=provider_request.yml',
   },
 ] as const
 
@@ -2196,6 +2196,18 @@ function LanDialog({ confirm, register }: { confirm: LanConfirm; register: LanRe
 function SettingsPage() {
   const snap = useSettings()
   const panesRef = React.useRef<HTMLDivElement | null>(null)
+  /**
+   * 窄屏「一级菜单 / 二级页面」的当前层。
+   *
+   * 桌面与平板（≥768px）永远是 false：左栏导航常驻、右侧直接显示选中分类，
+   * 与改动前逐像素一致 —— 这条状态只在 CSS 的 767px 断点内起作用，
+   * 桌面端由 `.settings-layout.is-detail` 的规则排除，不产生任何视觉差异。
+   *
+   * 手机上的语义：false = 分类列表（一级），true = 某个分类的设置面板（二级）。
+   * 点分类进二级、点返回回一级。初始为 false（每次进设置页都从列表开始，
+   * 不沿用上次停留的分类 —— 手机上「上次看的那一页」没有上下文，列表更符合预期）。
+   */
+  const [mobileDetail, setMobileDetail] = React.useState(false)
 
   // 切换分类后把内容栏滚回顶部（旧实现是命令式写 scrollTop）：否则上一类的滚动位置会
   // 带到新分类上，打开「更新」却停在半截。scrollReset 每次 showCategory 都递增，
@@ -2206,9 +2218,10 @@ function SettingsPage() {
   }, [snap.scrollReset])
 
   const paneClass = (cat: string): string => (snap.category === cat ? 'settings-pane active' : 'settings-pane')
+  const activeCategory = CATEGORIES.find(item => item.id === snap.category) || CATEGORIES[0]
 
   return (
-    <div className='settings-layout'>
+    <div className={mobileDetail ? 'settings-layout is-detail' : 'settings-layout'}>
       <nav className='settings-nav' id='settings-nav'>
         {CATEGORIES.map(item => (
           <button
@@ -2216,7 +2229,10 @@ function SettingsPage() {
             type='button'
             className={snap.category === item.id ? 'settings-nav-item active' : 'settings-nav-item'}
             data-cat={item.id}
-            onClick={() => selectCategory(item.id)}
+            onClick={() => {
+              selectCategory(item.id)
+              setMobileDetail(true)
+            }}
           >
             {/* 分类图标（icons.js）：与主侧栏同款 17px 图标盒，颜色随 currentColor
                 （选中态自动变主题色） */}
@@ -2225,6 +2241,18 @@ function SettingsPage() {
           </button>
         ))}
       </nav>
+
+      {/* 二级页顶部返回栏：只在手机（≤767px）且已进入某一分类时显示，
+          桌面由 CSS 排除。文案里的分类名跟着当前分类走，让用户知道自己在哪。
+          图标复用 caretRight 并水平翻转（icons.js 里没有专用的 back 箭头，
+          为这一个按钮新增图标不值得）。 */}
+      <div className='settings-back-bar'>
+        <button type='button' className='settings-back-btn' onClick={() => setMobileDetail(false)}>
+          <span className='ico' dangerouslySetInnerHTML={{ __html: iconHtml('caretRight', 17) }} />
+          {t('返回')}
+        </button>
+        <span className='settings-back-title'>{activeCategory.label}</span>
+      </div>
 
       <div className='settings-panes' ref={panesRef}>
         <div className={paneClass('general')} data-cat='general'>

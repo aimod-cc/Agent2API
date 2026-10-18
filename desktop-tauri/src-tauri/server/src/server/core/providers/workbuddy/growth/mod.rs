@@ -35,6 +35,7 @@
 //!   growth/mod.rs     域客户端：列表/accept/上报/claim/领养（本文件）
 //!   school.rs         开学季活动域（任务 + 幸运转盘）
 //!   travel.rs         猫猫旅行状态机（buddy info / status / depart / claim）
+//!   streak.rs         连登管家（补签 → 档位兑换 → 抽奖闭环）
 //!
 //! ── 硬约束 ──────────────────────────────────────────────────
 //! release 是 `panic=abort`：本目录零 unwrap/expect/panic。
@@ -42,6 +43,7 @@
 pub mod events;
 pub mod school;
 pub mod spec;
+pub mod streak;
 pub mod travel;
 
 use serde_json::{json, Value};

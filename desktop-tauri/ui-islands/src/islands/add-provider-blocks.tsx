@@ -278,6 +278,70 @@ function DesktopSection({
   )
 }
 
+/* ─── 访客模式（智谱清言独有）────────────────── */
+
+/**
+ * 「访客模式」段：一颗按钮 + 一个可选备注名，点下去由网关换发访客凭证。
+ *
+ * ── 为什么单独一个组件（而不是并进 ManualSection）──────────────
+ * 它**没有任何凭证输入**：用户不需要知道 token 是什么，点一下就有账号。
+ * 并进「填写凭证」会让这条路径看起来像「你得先有凭证」，那正好与它的价值相反。
+ * 载荷只有 `{ provider, guest: true, name? }` —— 后端 `api::accounts` 的
+ * Chatglm 分支按 `guest` 走 `guest/access` 换证（见那边的分支说明）。
+ */
+function GuestSection({
+  config,
+  visible,
+}: {
+  config: ProviderConfig
+  visible: boolean
+}): React.ReactElement | null {
+  const guest = config.guestLogin
+  const [busy, setBusy] = React.useState(false)
+  if (!guest) return null
+  const nameId = fieldIdOf(config, { key: 'name', label: '', placeholder: '' })
+
+  async function submit(): Promise<void> {
+    await runAdd(setBusy, async () => {
+      // 备注名从输入框读（与 ManualSection 同一取值口径：空串交给后端兜底）
+      const input = document.getElementById(nameId) as HTMLInputElement | null
+      const name = input?.value.trim() || ''
+      try {
+        const data = (await postAccount({
+          provider: config.provider,
+          guest: true,
+          ...(name ? { name } : {}),
+        })) as { account?: AccountRecord } | null
+        await afterAdd(data?.account?.name || '', config.label)
+      } catch (error) {
+        toast(t('添加失败：{reason}', { reason: describeError(error) }), 'err')
+      }
+    })
+  }
+
+  return (
+    <DialogSection hidden={!visible}>
+      <h3>{t('访客模式')}</h3>
+      {guest.noteHtml ? <Note html={guest.noteHtml} /> : null}
+      <div className='form-field'>
+        <label htmlFor={nameId}>{t('备注名')}</label>
+        <input
+          id={nameId}
+          type='text'
+          maxLength={MAX_NAME_LENGTH}
+          placeholder={guest.namePlaceholder || t('可选')}
+          {...draftProps(nameId)}
+        />
+      </div>
+      <div className='field-row'>
+        <Button id={`${config.provider}-guest-button`} onClick={() => { void submit() }} disabled={busy}>
+          {busy ? guest.busyText || t('正在添加…') : guest.button}
+        </Button>
+      </div>
+    </DialogSection>
+  )
+}
+
 /* ─── 导入凭证文件（通用版；WorkBuddy 那段是另一套 payload，不要合并）─── */
 
 /**
@@ -735,6 +799,7 @@ export function ProviderBlock({
         />
       </DialogSection>
 
+      <GuestSection config={config} visible={effective === 'guest'} />
       <OauthSection
         config={config}
         mode={oauthMode}

@@ -79,6 +79,23 @@ pub fn shim_js() -> String {
 const SHIM_TEMPLATE: &str = r#"(function () {
   'use strict';
 
+  // ── 清掉登录页转来的放行标记（`?from=login`）─────────────
+  // 服务端在 `/` 上会拦「会话无效的导航」并送回登录页（见
+  // server::http::panel_boot_redirect）。中转环境里会话只存在于 localStorage
+  // 的 `x-panel-token` 头，而顶层导航带不了自定义头，所以登录页跳过来时带这个
+  // 标记、服务端放行这一趟。标记必须在页面跑起来后从地址栏抹掉：留着它，
+  // 会话过期后用户刷新页面仍会绕过那道判定，进去又是一屏 401。
+  (function () {
+    try {
+      var url = new URL(window.location.href);
+      if (!url.searchParams.has('from')) return;
+      url.searchParams.delete('from');
+      var search = url.searchParams.toString();
+      window.history.replaceState(null, '',
+        url.pathname + (search ? '?' + search : '') + url.hash);
+    } catch (e) { /* 老浏览器 / 被禁用：留着标记只是多一次放行，不影响正确性 */ }
+  })();
+
   // ── API Key 的存取 ────────────────────────────────────────
   var KEY_STORAGE = 'agent2api.webKey';
   function readStoredKey() {
@@ -979,6 +996,15 @@ const SHIM_TEMPLATE: &str = r#"(function () {
       }
       return call('POST', '/api/proxies/test', body);
     },
+    // Agent（本机 AI 客户端的配置接管；与桌面壳 bridge.rs 的同名方法成对
+    // 存在 —— 只加一边时另一形态下的页面会报「桥接方法缺失」。契约见
+    // api::agents 的模块头：写操作都返回整份 {clients}，就地替换）
+    getAgents: function () { return call('GET', '/api/agents'); },
+    saveAgentProfiles: function (payload) { return call('POST', '/api/agents/profiles', payload || {}); },
+    applyAgentProfile: function (payload) { return call('POST', '/api/agents/apply', payload || {}); },
+    previewAgentProfile: function (payload) { return call('POST', '/api/agents/preview', payload || {}); },
+    restoreAgentClient: function (payload) { return call('POST', '/api/agents/restore', payload || {}); },
+    importAgentClient: function (payload) { return call('POST', '/api/agents/import', payload || {}); },
     // 代理池（「网络代理」页；与桌面壳 bridge.rs 的同名方法成对存在，
     // 契约见 api::proxies 的模块头 —— 只加一边时另一形态下的页面会报
     // 「桥接方法缺失」，标题栏那一族有同样的教训）
@@ -1114,6 +1140,10 @@ const SHIM_TEMPLATE: &str = r#"(function () {
     // WorkBuddy 国际版日活保活的模型链（与 bridge.rs 的同名方法成对维护）
     getCheckinKeepalive: function () { return call('GET', '/api/checkin-keepalive'); },
     saveCheckinKeepalive: function (models) { return call('POST', '/api/checkin-keepalive', { models: models }); },
+    // 猫猫旅行定时排程（国内版；与 bridge.rs 的同名方法成对维护）
+    getTravelSchedule: function () { return call('GET', '/api/travel-schedule'); },
+    saveTravelSchedule: function (patch) { return call('POST', '/api/travel-schedule', patch); },
+    runTravelScheduleNow: function () { return call('POST', '/api/travel-schedule/run', {}); },
     // WorkBuddy 国际版日活任务的手动粒度入口（mode: full | claim | keepalive）
     runCheckinActivity: function (id, mode) { return call('POST', '/api/checkin-activity', { id: id, mode: mode }); },
     // 签到中心的聚合快照（与 bridge.rs 的同名方法同一路径）

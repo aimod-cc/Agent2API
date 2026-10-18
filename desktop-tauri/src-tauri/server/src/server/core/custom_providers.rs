@@ -126,8 +126,12 @@ const MAX_REASONING_CHARS: usize = 32;
 /// ── per-provider 特判字段（预置目录带来的上游修正）的长度上限 ──
 /// urlSuffix（查询串，如 "?beta=true"）：查询串一般十几个字符，128 已宽容
 const MAX_URL_SUFFIX_CHARS: usize = 128;
-/// 静态额外头的条数上限：特判用不到几条（Anthropic-Beta / Referer 类），8 足够
-const MAX_HEADER_ENTRIES: usize = 8;
+/// 静态额外头的条数上限。多数家只需要一两条（Anthropic-Beta / Referer 类），
+/// 但**客户端形态伪装**的家要整包复刻官方客户端的头族：Cline Pass 预置卡就是
+/// 9 条（与 `providers/cline/headers.rs` 的 DEFAULT_HEADERS 同一套，缺一条
+/// 上游按客户端形态校验就会 403）。取 16 —— 容得下「整包复刻 + 几条自定义」，
+/// 又仍然拦得住把 headers 当配置文件乱塞的手改数据。
+const MAX_HEADER_ENTRIES: usize = 16;
 /// 静态额外头的键 / 值长度上限：头名 RFC 形态几十字符、值（Anthropic-Beta 的
 /// beta 清单）可能上百字符，512 不拦正常值、只拦把文档粘进来的手改数据
 const MAX_HEADER_NAME_CHARS: usize = 64;

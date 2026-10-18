@@ -34,6 +34,8 @@
 //! （切片 7 之后的路由扩展），照同样的分工：新文件 + `http::router` 里登记，
 //! 并保持与 Node 版一致的分组（需鉴权的一律挂 `protected`）。
 
+// 「Agent」页：本机 AI 客户端配置接管（列表 / 保存 / 写入 / 预览 / 还原 / 导入）
+pub mod agents;
 pub mod accounts;
 // `/api/accounts/usage` 的查询与结果组装（从 accounts.rs 拆出：余额能力从
 // 「只服务 workbuddy」扩到四家混查时新增，见该文件模块头）
@@ -68,6 +70,9 @@ pub mod config_api;
 // WorkBuddy 成长任务（查询 / 执行 / 开学季 / 猫猫旅行）：从参考项目
 // workbuddy2api 的 task_runner.py 移植，见该文件模块头
 pub mod growth;
+// 猫猫旅行的**定时排程**管理接口（开关 / 时刻 / 立即巡检）：
+// 调度体在 `core::growth_scheduler`，这里只是管理面
+pub mod growth_schedule;
 // 网关面（`/v1/*`）跨域访问开关：`GET/PUT /api/cors`（与 `/api/sanitize`
 // 同形的单开关端点，见该文件模块头）
 pub mod cors;

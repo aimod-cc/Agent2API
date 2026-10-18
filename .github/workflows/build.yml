@@ -4,15 +4,27 @@ name: build
 #
 # ── 为什么需要 CI 构建 ─────────────────────────────────────────
 # Tauri 的 macOS 产物（.app / .dmg）**只能在 macOS 上生成**，无法从 Windows
-# 交叉编译。因此 Windows 上开发、又要出 Mac 包时，只能借助 CI 的 macOS runner。
+# 交叉编译；Linux 产物（deb / AppImage）同理 —— 它们链接 webkit2gtk / gtk3，
+# 同样无法从 Windows 交叉。因此这两个平台的桌面端都交给 CI 的 runner 出。
 # 本仓库是公开仓库，标准 GitHub-hosted runner（含 macOS）对公开仓库免费且
 # 不计分钟数 —— macOS runner 是私有仓库里最贵的一档，公开仓库没有这个问题。
 #
+# ── 五个 job 的分工（名字相近，别看混）────────────────────────
+#   macos           → macOS 桌面端 dmg           → artifact: macos-universal
+#   windows         → Windows 桌面端 NSIS exe    → artifact: windows-nsis
+#   linux-desktop   → Linux 桌面端 deb+AppImage  → artifact: linux-desktop
+#   linux-server    → Linux **服务端**包（无 GUI）→ artifact: linux-server-{amd64,arm64}
+#   windows-server  → Windows **服务端**包（无 GUI）→ artifact: windows-server-amd64
+#
+# 前三者是「桌面端安装包」（给用户装在自己机器上），后两者是**服务器形态**：
+# 无图形界面、命令行安装、注册成系统服务（Linux systemd / Windows SCM）。
+# linux-server 的产物同时还是容器内一键更新的载荷。
+#
 # ── 触发方式 ──────────────────────────────────────────────────
 #   · 手动 workflow_dispatch（在 Actions 页面选分支触发）：
-#     三个平台一起构建，产物作为 workflow artifact 下载，不发布 Release
+#     各平台一起构建，产物作为 workflow artifact 下载，不发布 Release
 #   · 推送 v* tag：与 docker.yml 同时触发，一次打 tag 安装包与镜像全出；
-#     Windows/macOS 包与 Linux 服务端包只挂 workflow artifact —— GitHub
+#     桌面端安装包与 Linux 服务端包只挂 workflow artifact —— GitHub
 #     Release 由发版收尾脚本在本地挂载（scripts/release.sh）：Release 本就
 #     不自动建，安装包只挂 artifact 让构建与发布解耦，发布那步重跑脚本即可
 #
@@ -141,6 +153,86 @@ jobs:
           path: target/release/bundle/nsis/*.exe
           if-no-files-found: error
 
+  # ── Linux 桌面端（deb + AppImage）────────────────────────────
+  # Tauri 的 Linux 产物同样**只能在 Linux 上生成**（链接 webkit2gtk / gtk3，
+  # 无法从 Windows 交叉编译），所以和 macOS 一样交给 CI。
+  #
+  # ── 与下面 linux-server job 的区别（两者都在 Linux 上构建，别混）──
+  #   · 本 job：**桌面端**安装包（deb / AppImage），带 Tauri 壳与 GUI 界面，
+  #     产物名以 `Agent2API_<版本>_` 开头，用户在桌面上装它；
+  #   · linux-server job：**服务端**包（容器内一键更新用的 tar.gz），
+  #     无 GUI，产物名以 `agent2api-server-linux-` 开头。
+  # 两者服务于完全不同的形态，Release 上并存（见 scripts/release.sh）。
+  #
+  # ── 平台 conf 用 tauri.linux.conf.json（与 macOS 同款做法）──────
+  # 基础 tauri.conf.json 的 targets 是 ["nsis"]（Windows 专用），Linux 构建
+  # 必须用 `--config` 覆盖成 deb + appimage，同时补上 Linux 需要的 PNG 图标
+  # 与 deb 的运行时依赖声明。理由与 macOS 那份一致：三个平台的 bundle 配置
+  # 差别太大（目标格式、图标格式、依赖声明各不同），挤在一个文件里会让
+  # 每个平台都要读一整套无关字段。
+  linux-desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 安装 Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          # 依赖在 desktop-tauri/ 下（根 package.json 没有依赖），必须显式指路
+          cache: npm
+          cache-dependency-path: desktop-tauri/package-lock.json
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 依赖
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-tauri/src-tauri -> ../../target
+
+      # ── 系统依赖：Tauri 在 Linux 上的硬要求 ──────────────────────
+      # webkit2gtk-4.1 是 WebView 本体（4.1 = libsoup3 一代，Tauri 2 用这个；
+      # 4.0 是 Tauri 1 的，装了也没用）；gtk3 是窗口层；
+      # libayatana-appindicator3 是**托盘**（本应用的关窗后唯一入口，缺它
+      # 托盘建不起来，用户关窗就再也叫不回界面）；librsvg2 供图标渲染
+      # （tauri bundler 把 SVG 图标转 PNG 时用）；patchelf 是 bundler 给
+      # AppImage 改 RPATH 时调的。缺任何一个都会在 `tauri build` 阶段报错，
+      # 而不是编译期 —— 所以这一步必须在上传产物之前。
+      - name: 安装 Linux 构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential
+          # 打印实际版本：排查「构建机换代导致行为变化」时这是第一条线索
+          pkg-config --modversion webkit2gtk-4.1 gtk+-3.0 ayatana-appindicator3-0.1
+
+      - name: 安装桌面端依赖
+        run: npm --prefix desktop-tauri ci
+
+      # 不走 tauri-action：它的默认脚本是 `npm run tauri build`，而本项目的
+      # package.json 里那条脚本叫 `build`（同 macOS job 的说明）。
+      - name: 构建 Linux 桌面端安装包
+        run: npm --prefix desktop-tauri run build -- --config src-tauri/tauri.linux.conf.json
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-desktop
+          # deb 与 AppImage 两个目录各出一份产物：
+          #   target/release/bundle/deb/*.deb
+          #   target/release/bundle/appimage/*.AppImage
+          # 同一目录下还有 .sig / 中间产物，只用通配精确取这两种。
+          path: |
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
   # ── Linux 服务端包（容器内一键更新的 Release 资产）──────────
   # 面板在容器里「一键更新」时下载的就是这里的产物：包内是可执行文件 +
   # ui/ 目录，由服务端自己替换后再重启（见 core/update/selfupdate.rs）。
@@ -178,13 +270,28 @@ jobs:
       - name: 打包并生成校验和
         run: |
           name="agent2api-server-linux-${{ matrix.arch }}.tar.gz"
-          mkdir -p dist
-          # 包内布局是硬约定：根下 agent2api-server 与 ui/（解包方按名取）
-          tar -C out/bundle -czf "dist/$name" agent2api-server ui
+          mkdir -p dist stage
+          # 先把要进包的东西归拢到一个暂存目录，再一次压成 tar.gz。
+          # 不能「先 tar 再 -r 追加」：gzip 流无法原地追加，tar 会直接
+          # 报 "Cannot update compressed archives"。
+          rm -rf stage/pkg
+          mkdir -p stage/pkg
+          cp -r out/bundle/agent2api-server out/bundle/ui stage/pkg/
+          cp packaging/linux/install.sh \
+             packaging/linux/agent2api.service \
+             packaging/linux/agent2api.env.example stage/pkg/
+          # 包内布局：根下 agent2api-server 与 ui/ 是容器内更新链的**硬约定**
+          # （selfupdate::extract_bundle 按名取这两个条目）；其余条目它读完即丢，
+          # 所以 install.sh / 单元 / env 样例跟它们同放不会影响一键更新。
+          # 同一个包于是既能被容器更新链消费，也能解包当裸机安装包用。
+          tar -C stage/pkg -czf "dist/$name" agent2api-server ui \
+            install.sh agent2api.service agent2api.env.example
           # 校验文件与包同名 + .sha256：面板按这个名字找它，找不到就拒绝安装
           ( cd dist && sha256sum "$name" > "$name.sha256" )
           cat "dist/$name.sha256"
           ls -lh dist
+          echo "── 包内条目 ──"
+          tar -tzf "dist/$name" | head -20
 
       - name: 上传产物
         uses: actions/upload-artifact@v7
@@ -193,27 +300,18 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  # ── Windows 本地包（本地 web 形态：下载 zip 解压双击运行）─────────
-  # 与 linux-server 同一套模式：产物只挂 workflow artifact，发版由
-  # scripts/release.sh 本地挂到 Release。包内布局与 Linux 版对应 ——
-  # 根下 agent2api-server.exe 与 ui/ 目录（ui/ 直接取仓库静态文件，
-  # 与 Dockerfile 的 bundle 阶段同源），解压即用。
+  # ── Windows 服务端包（无 GUI，注册成 Windows 服务）────────────
+  # 产物是 zip：agent2api-server.exe + ui\ + install-service.ps1。
+  # 用户在服务器上解压后跑 install-service.ps1，脚本用 sc.exe 把它注册成
+  # 开机自启的 Windows 服务（见 packaging/windows/install-service.ps1）。
   #
-  # 与桌面 windows job（NSIS 安装包）的分工：那个是「Tauri 壳」形态；
-  # 本包是「本地 headless + 浏览器」形态 —— 入口默认只听 127.0.0.1、
-  # 启动后自动打开浏览器、数据落 ~/.agent2api（与桌面壳同一目录，
-  # 两个形态不能同时跑，SQLite 单写者）。
+  # 为什么不复用 windows job 的产物：那个 job 构建的是 Tauri 桌面端
+  # （带窗口、托盘、WebView2），装的是 NSIS 安装包。这里的产物无 GUI，
+  # 跑的是 `cargo build -p agent2api-server`（不链接 tauri 全家桶），
+  # 两者用途完全不同 —— 一个给桌面用户，一个给服务器。
   #
-  # 为什么直接 cargo build 而不复用 Dockerfile：Windows 上没有镜像那条
-  # 「amd64 原生 / arm64 交叉」的统一路径，windows-latest runner 自带
-  # MSVC 工具链（含 C 链接器，rusqlite bundled 的 SQLite 要用），直接编
-  # 最直；步骤与桌面 job 的 Rust 安装同构。产物路径按
-  # .cargo/config.toml 的 target-dir 落在仓库根 target/ 下。
-  #
-  # 打包用 pwsh 的 Compress-Archive（runner 自带，无需额外动作）：
-  # zip 内条目保持叶子名（agent2api-server.exe / ui/**），与上面注释的
-  # 布局约定一致；校验文件与 Linux job 同格式（<hash>␣␣<name>，面板侧
-  # parse_checksum 只取第一个 token）。
+  # 为什么不走 Dockerfile：Windows 容器镜像不能跑 Linux 构建，且
+  # windows-latest runner 原生就能编，没必要多一层。
   windows-server:
     runs-on: windows-latest
     steps:
@@ -227,58 +325,40 @@ jobs:
         with:
           workspaces: desktop-tauri/src-tauri -> ../../target
 
-      - name: 构建网关二进制
-        run: cargo build --release -p agent2api-server
+      # 只编 server crate（`-p`），不碰桌面壳：少了 tauri / wry / webview2
+      # 那一整棵依赖树，构建快且产物里没有任何 GUI 依赖。
+      #
+      # ⚠️ 必须在 `desktop-tauri/src-tauri` 下跑，不能用「仓库根 + --manifest-path」：
+      # 产物目录由 `src-tauri/.cargo/config.toml` 的 `target-dir = "../../target"`
+      # 决定，而 cargo **只从 CWD 往上找配置文件** —— 从仓库根跑，这个配置根本
+      # 不会被读到，产物落到 `desktop-tauri/src-tauri/target/`，下面的打包步骤
+      # 按 `target/release/...` 去找就会「找不到文件」而失败（2026-10-17 实测，
+      # v3.0.9-beta.1 的 windows-server 作业就是这么挂的）。
+      - name: 构建服务端
         working-directory: desktop-tauri/src-tauri
+        run: cargo build --release -p agent2api-server --bin agent2api-server
 
-      - name: 打包并生成校验和
+      - name: 打包
         shell: pwsh
         run: |
-          $name = "agent2api-server-windows-amd64.zip"
-          $exe = "$env:GITHUB_WORKSPACE/target/release/agent2api-server.exe"
-          $ui = "$env:GITHUB_WORKSPACE/desktop-tauri/ui"
-          if (-not (Test-Path $exe)) { throw "找不到网关二进制：$exe" }
-          if (-not (Test-Path $ui)) { throw "找不到界面目录：$ui" }
-          New-Item -ItemType Directory -Force -Path stage | Out-Null
-          Copy-Item $exe "stage/agent2api-server.exe"
-          Copy-Item $ui "stage/ui" -Recurse
-          # 双击启动器：**在 CI 里现生成**而不是入库 —— .bat 必须是 CRLF +
-          # 本机代码页，把它放仓库里迟早被编辑器的 LF/UTF-8 改坏。这里用
-          # 数组逐行拼（而不是 here-string）：YAML 块缩进会原样进入
-          # here-string 内容，每行前面多出一串空格虽然 cmd 能容忍，但会让
-          # `if (` 的右括号判断和 `echo.` 的输出变得可疑；数组拼接没有这个
-          # 问题，每行的空格完全由这里决定。内容全 ASCII。
-          $lines = @(
-            '@echo off'
-            'setlocal'
-            'cd /d "%~dp0"'
-            'if not exist "agent2api-server.exe" ('
-            '  echo [error] agent2api-server.exe not found next to this script.'
-            '  pause'
-            '  exit /b 1'
-            ')'
-            'if not exist "ui\index.html" ('
-            '  echo [error] ui\index.html not found. Keep the ui folder beside the exe.'
-            '  pause'
-            '  exit /b 1'
-            ')'
-            'echo.'
-            'echo   Agent2API local gateway starting...'
-            'echo   The panel opens in your browser. Close this window to stop.'
-            'echo.'
-            'agent2api-server.exe'
-            'echo.'
-            'echo   Server stopped.'
-            'pause'
-          )
-          # Out-File -Encoding ascii 在 Windows runner 上写 CRLF
-          $lines | Out-File -FilePath "stage/start-windows.bat" -Encoding ascii
+          $name = "agent2api-server-windows-amd64"
+          $stage = "stage/$name"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          # 布局是 install-service.ps1 的硬约定：脚本与 exe、ui\ 同级
+          Copy-Item "target/release/agent2api-server.exe" "$stage/"
+          Copy-Item -Recurse "desktop-tauri/ui" "$stage/ui"
+          Copy-Item "packaging/windows/install-service.ps1" "$stage/"
+
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Compress-Archive -Path "stage/*" -DestinationPath "dist/$name"
-          $hash = (Get-FileHash -Algorithm SHA256 "dist/$name").Hash.ToLower()
-          "$hash  $name" | Out-File -FilePath "dist/$name.sha256" -Encoding ascii
-          Get-Content "dist/$name.sha256"
-          Get-ChildItem dist
+          Compress-Archive -Path "$stage/*" -DestinationPath "dist/$name.zip" -Force
+
+          # 校验和：与 Linux 包同格式（sha256 十六进制 + 两个空格 + 文件名），
+          # 用手动升级的用户可以照 README 里的命令核对
+          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii "dist/$name.zip.sha256"
+
+          Get-ChildItem dist | Format-Table Name, Length
 
       - name: 上传产物
         uses: actions/upload-artifact@v7

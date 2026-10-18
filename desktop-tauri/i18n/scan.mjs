@@ -39,6 +39,13 @@ const HERE = path.dirname(fileURLToPath(import.meta.url)) // desktop-tauri/i18n
 const DESKTOP = path.resolve(HERE, '..') // desktop-tauri
 const UI = path.join(DESKTOP, 'ui')
 const ISLANDS_SRC = path.join(DESKTOP, 'ui-islands', 'src')
+/**
+ * 手机端源码目录（`desktop-tauri/mobile/src`）。
+ *
+ * 手机端是独立工程（自己的 Vite + React），产物落 `ui/m/` —— 那是压缩后的
+ * bundle，键名早被压没了，扫它没有意义。这里扫源码，与 ui-islands 同一口径。
+ */
+const MOBILE_SRC = path.join(DESKTOP, 'mobile', 'src')
 const SRC_DIR = path.join(HERE, 'i18n-src')
 
 /** 目标语言目录（简体不建目录：查不到就回落简体原文，不需要词典） */
@@ -49,7 +56,7 @@ const LOCALES = ['en', 'zh-Hant', 'ja', 'ko', 'pt-BR']
  * 调整顺序会改变某些跨界键的归属，非必要不要动。
  */
 const DOMAIN_ORDER = [
-  'common', 'login', 'accounts', 'add-account', 'models', 'settings', 'assistant', 'update',
+  'common', 'login', 'accounts', 'add-account', 'models', 'agent', 'settings', 'assistant', 'update',
   'keys', 'proxies', 'docs', 'report', 'checkin', 'tasks', 'logs', 'requests',
   'tables', 'port',
 ]
@@ -59,24 +66,26 @@ const DOMAIN_ORDER = [
  * 未命中的文件归入 'common' 并在报告里 warning（提示把新文件登记进来）。
  */
 const DOMAIN_RULES = [
-  { domain: 'common', files: ['index.html', 'titlebar.js', 'tooltip.js', 'clipboard.js', 'filter-memory.js', 'app.js', 'confirm-dialog.tsx', 'input.tsx', 'input-control.tsx', 'segmented.tsx', 'index.tsx', 'markdown.js', 'icons.js'] },
+  { domain: 'common', files: ['index.html', 'm.html', 'titlebar.js', 'tooltip.js', 'clipboard.js', 'filter-memory.js', 'app.js', 'confirm-dialog.tsx', 'input.tsx', 'input-control.tsx', 'segmented.tsx', 'index.tsx', 'markdown.js', 'icons.js', 'App.tsx', 'main.tsx', 'Shell.tsx', 'NavBar.tsx', 'Icon.tsx', 'ProviderLogo.tsx', 'ui.tsx', 'i18n.ts', 'client.ts', 'gateway.ts', 'format.ts', 'providers.ts', 'providerFacts.ts', 'usePolling.ts', 'pwa.ts', 'usePwa.ts', 'servers.ts', 'auth.ts', 'store.ts'] },
   { domain: 'login', files: ['login.html', 'login-page.tsx', 'panel-captcha.js'] },
-  { domain: 'accounts', files: ['accounts-page.tsx', 'accounts-shared.ts', 'accounts-columns.ts', 'accounts-store.ts', 'accounts-panels.tsx', 'accounts-queue-drag.ts', 'accounts-dialogs.tsx', 'accounts-dialog-limiter.tsx', 'accounts-dialog-usage.tsx', 'accounts-credit-detail.tsx', 'accounts-data.ts', 'accounts-domain.ts', 'zcode-plans-modal.tsx', 'balance-query.tsx'] },
+  { domain: 'accounts', files: ['accounts-page.tsx', 'AccountsPage.tsx', 'AccountSheet.tsx', 'accounts-shared.ts', 'accounts-columns.ts', 'accounts-store.ts', 'accounts-panels.tsx', 'accounts-queue-drag.ts', 'accounts-dialogs.tsx', 'accounts-dialog-limiter.tsx', 'accounts-dialog-usage.tsx', 'accounts-credit-detail.tsx', 'accounts-data.ts', 'accounts-domain.ts', 'zcode-plans-modal.tsx', 'balance-query.tsx'] },
   { domain: 'add-account', files: ['add-custom-provider.tsx', 'custom-provider-ui.js', 'providers.js', 'preset-providers.js', 'web-login.js', 'sms-login.js', 'autoclaw-oauth.js', 'aliyun-captcha.js', 'zcode-claim.js', 'zcode-captcha-pool.js', 'codearts-welfare.js'], prefixes: ['add-account-', 'add-provider-'] },
-  { domain: 'models', files: ['model-capability.ts', 'model-capability-dialog.tsx', 'model-test-dialog.tsx'], prefixes: ['models-'] },
-  { domain: 'settings', files: ['units.js'], prefixes: ['settings-'] },
+  { domain: 'models', files: ['ModelsPage.tsx', 'model-capability.ts', 'model-capability-dialog.tsx', 'model-test-dialog.tsx'], prefixes: ['models-'] },
+  // 「Agent」页：本机 AI 客户端的配置接管（客户端清单 / 配置编辑 / 写入预览）
+  { domain: 'agent', files: ['AgentPage.tsx'], prefixes: ['agent-'] },
+  { domain: 'settings', files: ['units.js', 'SettingsPage.tsx', 'MorePage.tsx', 'PwaNotice.tsx', 'ServersPage.tsx', 'LoginPage.tsx'], prefixes: ['settings-'] },
   // AI 助手（侧边栏「智能」组的一级页 + 设置页「AI 助手」分类）：
   // 对话页、工具集、设置面板三块
-  { domain: 'assistant', prefixes: ['assistant-'] },
+  { domain: 'assistant', files: ['AssistantPage.tsx'], prefixes: ['assistant-'] },
   { domain: 'update', files: ['upgrade-panel.js'], prefixes: ['update-'] },
-  { domain: 'keys', files: ['keys-page.tsx'] },
-  { domain: 'proxies', files: ['proxies-page.tsx', 'proxies-columns.ts', 'proxies-state.ts', 'proxies-dialogs.tsx', 'proxies-sub-state.ts', 'proxies-sub-view.tsx', 'proxies-kernel-dialog.tsx', 'sponsor.ts'] },
-  { domain: 'docs', files: ['docs-page.tsx'] },
-  { domain: 'report', files: ['report-page.tsx', 'report-charts.ts'] },
-  { domain: 'checkin', files: ['checkin-page.tsx', 'checkin-state.ts', 'checkin-schedule-tab.tsx', 'checkin-records-tab.tsx', 'checkin-schedules-state.ts'] },
-  { domain: 'tasks', files: ['tasks-panel.tsx'] },
-  { domain: 'logs', files: ['logs-panel.tsx'] },
-  { domain: 'requests', files: ['requests-page.tsx', 'request-detail.tsx', 'request-hover.tsx', 'request-clear-modal.tsx', 'conversation-preview.js'] },
+  { domain: 'keys', files: ['keys-page.tsx', 'KeysPage.tsx'] },
+  { domain: 'proxies', files: ['ProxiesPage.tsx', 'proxies-page.tsx', 'proxies-columns.ts', 'proxies-state.ts', 'proxies-dialogs.tsx', 'proxies-sub-state.ts', 'proxies-sub-view.tsx', 'proxies-kernel-dialog.tsx', 'sponsor.ts'] },
+  { domain: 'docs', files: ['docs-page.tsx', 'DocsPage.tsx'] },
+  { domain: 'report', files: ['report-page.tsx', 'report-charts.ts', 'ReportPage.tsx', 'HomePage.tsx'] },
+  { domain: 'checkin', files: ['CheckinPage.tsx', 'checkin-page.tsx', 'checkin-state.ts', 'checkin-schedule-tab.tsx', 'checkin-records-tab.tsx', 'checkin-schedules-state.ts'] },
+  { domain: 'tasks', files: ['tasks-panel.tsx', 'TasksPage.tsx'] },
+  { domain: 'logs', files: ['logs-panel.tsx', 'LogsPage.tsx'] },
+  { domain: 'requests', files: ['RequestsPage.tsx', 'requests-page.tsx', 'request-detail.tsx', 'request-hover.tsx', 'request-clear-modal.tsx', 'conversation-preview.js'] },
   { domain: 'tables', files: ['table-columns.js', 'table-col-settings.tsx', 'table-shell.tsx'] },
   { domain: 'port', files: ['port-panel.tsx'] },
 ]
@@ -111,6 +120,26 @@ function islandSources() {
     }
   }
   walk(ISLANDS_SRC)
+  return out.filter(file => !EXCLUDED.has(file))
+}
+
+/**
+ * mobile/src 下所有 .ts / .tsx（递归）。
+ *
+ * 目录不存在时返回空数组：手机端是后加的工程，别的分支 / 旧检出里没有它，
+ * 扫描器不该因为一个可选目录直接崩掉。
+ */
+function mobileSources() {
+  if (!fs.existsSync(MOBILE_SRC)) return []
+  const out = []
+  const walk = dir => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) walk(full)
+      else if (/\.tsx?$/.test(entry.name)) out.push(full)
+    }
+  }
+  walk(MOBILE_SRC)
   return out.filter(file => !EXCLUDED.has(file))
 }
 
@@ -218,7 +247,16 @@ function extractFromHtml(source, file, warnings) {
 function scan() {
   const perDomain = new Map(DOMAIN_ORDER.map(domain => [domain, new Set()]))
   const warnings = []
-  const files = [...uiScripts(), path.join(UI, 'index.html'), path.join(UI, 'login.html'), ...islandSources()]
+  const files = [
+    ...uiScripts(),
+    path.join(UI, 'index.html'),
+    path.join(UI, 'login.html'),
+    // 手机端入口页（`/m` 直接命中它）。它的文案是 data-i18n 与内联 t()，
+    // 与 index.html 同一套提取通道。
+    path.join(UI, 'm.html'),
+    ...islandSources(),
+    ...mobileSources(),
+  ]
 
   for (const file of files) {
     if (!fs.existsSync(file)) continue

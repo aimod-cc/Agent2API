@@ -7,4 +7,4 @@
 # 注意：链接固定指向默认分支（main），文档合并到 main 之后按钮才可用。
 # 将来接入其它平台（爱发电 / Buy Me a Coffee / GitHub Sponsors 等）时，
 # 在这里追加对应的键（如 buy_me_a_coffee）或往 custom 数组里再加链接即可（最多 4 条）。
-custom: ["https://github.com/aimod-cc/agent2api/blob/main/docs/SPONSOR.md"]
+custom: ["https://github.com/Agent2API/agent2api/blob/main/docs/SPONSOR.md"]

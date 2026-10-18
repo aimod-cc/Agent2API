@@ -118,17 +118,18 @@ body.has-titlebar .shell {
 .titlebar-btn.is-maximized:hover .fg { fill: var(--nav-hover); }
 .titlebar-btn svg { display: block; width: 14px; height: 14px; pointer-events: none; }
 
-/* ─── 移动端：从「app-shell 固定视口」切成「正常文档流」───
-   tokens.css 只改了 body 的 min-width 与 overflow，这里把整条 app-shell 链
-   （.shell → .main → .content → .content-inner → .page.active）的高度与
-   overflow 一并放开。放开后 body 自己滚，页面内容按内容高度自然生长，
-   用户不再被困在「页面层内部滚」里。 */
+/* ─── 移动端：保持固定视口骨架，滚动归 .page.active ───
+   曾经这里把整条链（.shell → .main → .content → .content-inner → .page.active）
+   的高度与 overflow 全部放开、改由 body 滚 —— 那会让**顶栏与面板头一起滚走**。
+   手机上顶栏（汉堡 + 页面名 + 状态）应当常驻，所以恢复桌面同款骨架：
+   .shell 固定高度 → .main 列布局 → 顶栏 flex:0 → .content 撑满剩余 →
+   .page.active 自己滚。这一条现在只补移动端特有的两处：
+     ① 内容区左右留白收窄（手机屏窄，12px 比 16px 更省）
+     ② 页面底部多留一点，避免最后一行贴住屏幕边缘 / 被 iOS 手势条盖住 */
 @media (max-width: 767px) {
-  .shell { height: auto; overflow: visible; }
-  .main { overflow: visible; }
-  .content { overflow: visible; }
-  .content-inner { flex: none; min-height: 0; }
-  .page.active { overflow-y: visible; }
+  .content { padding: 0 12px; }
+  .content-inner { padding-bottom: 0; }
+  .page.active { padding-bottom: max(20px, env(safe-area-inset-bottom)); }
 }
 
 /* ─────────────────────────────
@@ -439,6 +440,27 @@ body.has-titlebar .shell {
   .theme-switch button[data-mode="system"]::after { content: "自动"; }
   .theme-switch button[data-mode="light"]::after { content: "浅"; }
   .theme-switch button[data-mode="dark"]::after { content: "深"; }
+}
+
+/* ─── 手机端入口（侧栏底部） ───
+   它是「换个设备继续看」，不是第 14 个功能页 —— 所以不占一级菜单，
+   只在这里放一条文字链。样式刻意做得比导航项轻：它不属于当前页面的功能。 */
+.sidebar-mobile-link {
+  display: block;
+  padding: 5px 2px;
+  font-size: 11px;
+  color: var(--sidebar-muted);
+  text-decoration: none;
+  text-align: center;
+  border-radius: var(--r-xs);
+  transition: color .15s ease, background .15s ease;
+}
+.sidebar-mobile-link:hover { color: var(--text); background: var(--nav-hover); }
+
+@media (max-width: 900px) {
+  /* 窄侧栏（图标栏）里放不下文字链：手机端本来就是这一档的使用者，
+     他们直接开 /m 就行，这里不必留一个只剩三个字的链接 */
+  .sidebar-mobile-link { display: none; }
 }
 
 /* ─────────────────────────────

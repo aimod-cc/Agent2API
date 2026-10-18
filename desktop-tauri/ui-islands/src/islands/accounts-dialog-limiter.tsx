@@ -32,7 +32,7 @@ import {
   tokenReadingForRule, tokenWindowInfo,
 } from './accounts-domain'
 import { tokenUsageOf, usageEntryOf } from './accounts-data'
-import { type AccountRecord, type LimiterRule, type TokenReading } from './accounts-shared'
+import { type AccountRecord, type LimiterRule, type TokenReading, numberText } from './accounts-shared'
 
 /** 一条规则在列表里的实时状态（徽章的文案与色调） */
 type RuleState = {
@@ -75,7 +75,7 @@ function ruleStateOf(account: AccountRecord, rule: LimiterRule): RuleState {
     const raw = data ? data.totalLeft ?? data.available : undefined
     const current = raw === null || raw === undefined || raw === '' || data?.unlimited
       ? ''
-      : t(' · 当前 {n}', { n: Number(raw) })
+      : t(' · 当前 {n}', { n: numberText(raw) })
     return blocked
       ? { text: t('已跳过{current}', { current }), kind: 'warn', title: t('余额低于阈值，转发时会跳过该账号（余额回升自动恢复）') }
       : { text: t('未触发{current}', { current }), kind: 'ok' }
@@ -220,7 +220,7 @@ function LimiterEditorDialog({
         if (fields.unlimited) return t('当前可用 ∞（不参与余额不足判定）')
         const raw = fields.totalLeft ?? fields.available
         if (raw !== null && raw !== undefined && raw !== '') {
-          return t('当前余额 {n}；与余额列同一数字口径，严格小于才触发（等于阈值仍可用）', { n: Number(raw) })
+          return t('当前余额 {n}；与余额列同一数字口径，严格小于才触发（等于阈值仍可用）', { n: numberText(raw) })
         }
       }
       return t('读数来自自动余额查询；与余额列同一数字口径，严格小于才触发（等于阈值仍可用）')

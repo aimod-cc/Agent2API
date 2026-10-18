@@ -228,12 +228,28 @@ const PROVIDER_FEATURES: Record<string, ProviderFeatures> = {
   // `usage: true` —— 额度是**两个模型组 × 两个窗口**（5 小时 / 每周）的剩余比例，
   //   见后端 providers::antigravity::balance（retrieveUserQuotaSummary）；
   //   上游只给比例、没有绝对数，钱包行走纯比例读数（`remainingPercent` +
-  //   `balanceView`），余额列显示「最紧张的窗口」，悬停列出全部窗口与重置时刻。
+  //   `balanceView`）。余额列**这四条都画**（逐窗口读数 `windows[]`，与 OpenCode Go
+  //   同一形状；一格四条紧凑背景条）—— Gemini 两条 + Claude/GPT 两条，后者正是
+  //   issue #288 要看的那份额度（此前只画最紧的一条，等于把第三方那组盖掉了）。
+  //   悬停提示逐条列出全名与重置时刻，另带订阅档徽标（Pro / Ultra / Free）。
   // `edition: false` —— 单一入口（Google OAuth 粘贴 / 网页登录），没有地区概念。
   // `identifier: 'userId'` —— 身份键存的就是 email（见 account_store::antigravity_accounts 模块头）。
   // `expiry: ''` —— refresh token 不过期、access token 自动续期，这一列对它没有可显示的事实
   //   （与 kuku 同一处置：界面不渲染「有效期」）。
   antigravity: { usage: true, edition: false, identifier: 'userId', expiry: '' },
+  // 智谱清言（chatglm.cn）。各位各有出处：
+  // `usage: true` —— 余额是**会员积分**（`member-api` 的活动状态 `current_score`，
+  //   外加 `payment-api` 的会员档位），见后端 `providers::chatglm::balance`。
+  //   ⚠️ **访客账号没有积分体系**：那些接口对访客一律 401，后端回 400
+  //   `usage_not_configured`（文案说明「访客本来就没有积分」），界面按「未配置查询」
+  //   如实显示而不是报错 —— 与 OfficeAce 只导 Basic 凭据那一档同一处置。
+  // `creditDetail: true` —— 逐份读数（会员积分 + 会员档位两行），主读数带活动进度。
+  // `edition: false` —— 单一站点（国际站是另一个产品 Z.AI/ZCode，已按独立 provider
+  //   建模），本家没有地区/版本之分。
+  // `identifier: 'uid'` —— 账号标识存 uid（JWT 的 `uid` 声明；访客也有）。
+  // `expiry: ''` —— 令牌有效期写在 JWT 的 `exp` 里、由网关自动续期，这一列没有
+  //   可显示的事实（与 antigravity / kuku 同一处置），界面不渲染「有效期」。
+  chatglm: { usage: true, creditDetail: true, edition: false, identifier: 'uid', expiry: '' },
 }
 
 /**
@@ -1281,6 +1297,18 @@ export type AccountTag = { text: string; kind: 'plain' | 'bad'; title: string }
  */
 export function accountTags(account: AccountRecord): AccountTag[] {
   return [
+    // 登录态被上游注销（issue #215）：refresh token 链已死，刷新不会再成功，
+    // 凭证维护也会跳过它 —— 只能重新登录。不标出来用户只会看到「刷新一直失败」。
+    // 放在最前面：它比下面任何一条都更该被看见（账号等于已经废了）。
+    account.needsRelogin
+      ? {
+        text: t('需要重新登录'),
+        kind: 'bad' as const,
+        title: account.needsReloginReason
+          ? t('{reason}。该账号的登录态已被上游注销，自动刷新不会再成功，请重新登录该账号', { reason: account.needsReloginReason })
+          : t('该账号的登录态已被上游注销，自动刷新不会再成功，请重新登录该账号'),
+      }
+      : null,
     // 没有转发能力的家：它的启用开关对转发没有意义，这里如实说明，而不是留一片空白
     // 让人以为「没标记就是好的」。判据是后端的 chatSupported，正常配置下不会出现 ——
     // 留着是为了「将来某家处于只有账号管理的过渡期」时界面能自己说清楚

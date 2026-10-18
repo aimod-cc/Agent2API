@@ -106,6 +106,9 @@ pub const SCOPE_ANTIGRAVITY: &str = "antigravity";
 /// OfficeAce（华为云果办 / OfficeClaw）的模型目录缓存槽
 pub const SCOPE_OFFICEACE: &str = "officeace";
 
+/// 智谱清言（`chatglm.cn`）的模型目录缓存槽
+pub const SCOPE_CHATGLM: &str = "chatglm";
+
 /// 全部 scope（事实来源：`cached_scopes` 按它遍历；新增一家时加在这里）。
 pub const ALL_SCOPES: &[&str] = &[
     SCOPE_WORKBUDDY,
@@ -126,6 +129,8 @@ pub const ALL_SCOPES: &[&str] = &[
     SCOPE_MONKEYCODE_INTL,
     SCOPE_COMMANDCODE,
     SCOPE_ANTIGRAVITY,
+    SCOPE_OFFICEACE,
+    SCOPE_CHATGLM,
 ];
 
 /// 一份清单缓存

@@ -1,0 +1,57 @@
+{
+  "id": "/m.html",
+  "name": "Agent2API 手机端",
+  "short_name": "Agent2API",
+  "description": "多提供商本地 AI 网关的手机面板",
+  "start_url": "/m.html",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+  "orientation": "portrait",
+  "background_color": "#f3f3f6",
+  "theme_color": "#f3f3f6",
+  "lang": "zh-CN",
+  "dir": "ltr",
+  "categories": ["productivity", "utilities"],
+  "prefer_related_applications": false,
+  "icons": [
+    {
+      "src": "/assets/app-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/assets/app-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/assets/app-icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "签到中心",
+      "short_name": "签到",
+      "url": "/m.html#checkin",
+      "icons": [{ "src": "/assets/app-icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "账号",
+      "short_name": "账号",
+      "url": "/m.html#accounts",
+      "icons": [{ "src": "/assets/app-icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "请求日志",
+      "short_name": "日志",
+      "url": "/m.html#requests",
+      "icons": [{ "src": "/assets/app-icon-192.png", "sizes": "192x192" }]
+    }
+  ]
+}

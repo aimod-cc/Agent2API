@@ -139,6 +139,19 @@ pub async fn refresh_expiring_accounts(store: &AccountStore) -> Vec<Value> {
             slots[index] = Some(skipped(&id, provider, "凭证未过期或临期"));
             continue;
         }
+        // ── 已被上游注销的账号不再重试（issue #215）──────────────
+        // 上游把会话连同 refresh token 一起作废（12153）之后，再刷多少次都不会
+        // 好。没有这道闸时，凭证维护每轮都会重试、每轮都失败 —— 日志刷屏，
+        // 真正需要关注的失败反而被淹掉。标记由刷新链路落（见
+        // `AuthService::mark_needs_relogin`），用户重新登录时清掉。
+        if store.needs_relogin(&id) {
+            slots[index] = Some(skipped(
+                &id,
+                provider,
+                "refresh token 已被上游作废，需要重新登录该账号",
+            ));
+            continue;
+        }
         pending.push((index, id, kind));
     }
 

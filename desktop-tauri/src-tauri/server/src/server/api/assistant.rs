@@ -37,12 +37,13 @@
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Map, Value};
 
 use crate::server::config::{self, AssistantConfig, MAX_SYSTEM_PROMPT_CHARS};
+use crate::server::core::assistant_sessions;
 use crate::server::core::upstream::cancellation;
 use crate::server::core::upstream::usage::RequestTelemetry;
 use crate::server::core::upstream::{ForwardOutcome, ForwardRequest};
@@ -63,6 +64,8 @@ const MAX_MODEL_CHARS: usize = 128;
 const MAX_MESSAGES: usize = 200;
 /// tools 数组的长度上限（前端目前最多 9 只，留足余量）
 const MAX_TOOLS: usize = 64;
+/// 思考等级的长度上限（与 `model_rules::normalize_reasoning` 同一口径）
+const MAX_REASONING_CHARS: usize = 32;
 
 /* ─── 设置（设置页「AI 助手」分类）───────────────────────── */
 
@@ -119,6 +122,20 @@ fn parse_config(block: &Map<String, Value>) -> Result<AssistantConfig, String> {
         }
         Some(_) => return Err("model 必须是字符串或 null".to_string()),
     };
+    let reasoning = match block.get("reasoning") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => {
+            let level = text.trim();
+            if level.is_empty() {
+                None
+            } else if level.chars().count() > MAX_REASONING_CHARS {
+                return Err(format!("思考等级最长 {MAX_REASONING_CHARS} 个字符"));
+            } else {
+                Some(level.to_string())
+            }
+        }
+        Some(_) => return Err("reasoning 必须是字符串或 null".to_string()),
+    };
     let system_prompt = match block.get("systemPrompt") {
         None | Some(Value::Null) => String::new(),
         Some(Value::String(text)) => {
@@ -139,6 +156,7 @@ fn parse_config(block: &Map<String, Value>) -> Result<AssistantConfig, String> {
     };
     Ok(AssistantConfig {
         model,
+        reasoning,
         system_prompt_enabled: block
             .get("systemPromptEnabled")
             .and_then(Value::as_bool)
@@ -203,6 +221,12 @@ pub async fn chat(State(state): State<ServerState>, body: Bytes) -> Response {
     }
     outbound_messages.extend(messages);
 
+    // 思考等级：本次请求点名的优先，没点名就用设置里存的（与模型同一套「本次
+    // 覆盖 > 默认值」语义）。写进 `reasoning_effort` —— 那是客户端显式指定的
+    // 形态，按既有口径**优先于映射上绑定的等级**（见 `model_rules::reasoning`
+    // 的模块头）；各家适配器再把它翻译成本家上游认识的档位字段。
+    let reasoning = reasoning_from(&payload).or_else(|| config.reasoning.clone());
+
     let mut upstream = json!({
         "model": model,
         "messages": outbound_messages,
@@ -211,6 +235,9 @@ pub async fn chat(State(state): State<ServerState>, body: Bytes) -> Response {
     });
     if !tools.is_empty() {
         upstream["tools"] = Value::Array(tools);
+    }
+    if let Some(level) = reasoning.as_deref() {
+        upstream["reasoning_effort"] = Value::String(level.to_string());
     }
 
     // 模型路由：对外名 → 上游名（默认值 / 映射别名 / 目录校验与 /v1/* 同源）
@@ -268,7 +295,7 @@ pub async fn chat(State(state): State<ServerState>, body: Bytes) -> Response {
                 started_at,
                 model: requested_model,
                 client_model: model.clone(),
-                client_reasoning: String::new(),
+                client_reasoning: reasoning.clone().unwrap_or_default(),
                 status: i64::from(status.as_u16()),
                 raw_request: None,
                 raw_response: None,
@@ -298,7 +325,7 @@ pub async fn chat(State(state): State<ServerState>, body: Bytes) -> Response {
                     started_at,
                     model: requested_model,
                     client_model: model.clone(),
-                    client_reasoning: String::new(),
+                    client_reasoning: reasoning.clone().unwrap_or_default(),
                     status: 200,
                     raw_request: None,
                     raw_response,
@@ -320,7 +347,7 @@ pub async fn chat(State(state): State<ServerState>, body: Bytes) -> Response {
                     started_at,
                     model: requested_model,
                     client_model: model.clone(),
-                    client_reasoning: String::new(),
+                    client_reasoning: reasoning.clone().unwrap_or_default(),
                     status,
                     raw_request: None,
                     raw_response: None,
@@ -333,6 +360,20 @@ pub async fn chat(State(state): State<ServerState>, body: Bytes) -> Response {
             errors::management_error(status as i32, message)
         }
     }
+}
+
+/// 从请求体读本次点名的思考等级（字符串；缺失 / null / 空串 → None）。
+///
+/// 只做长度与空白处理，**不校验取值**：等级表（`model_rules::REASONING_LEVELS`）
+/// 是「界面上的候选」，不是白名单 —— 用户可以在模型管理页填表外的自定义等级，
+/// 这里若只放行表内的值，同一个值在「映射绑定」与「本次覆盖」两条路上就会有
+/// 两种命运。真正的合法性由各适配器的翻译层判定（不认识的档位不会注入）。
+fn reasoning_from(payload: &Value) -> Option<String> {
+    let text = payload.get("reasoning").and_then(Value::as_str)?.trim();
+    if text.is_empty() || text.chars().count() > 32 {
+        return None;
+    }
+    Some(text.to_string())
 }
 
 /// 从请求体读本次点名的模型：**对外模型名**（字符串；缺失 / null → None）。
@@ -358,4 +399,57 @@ fn model_from(payload: &Value) -> Result<Option<String>, String> {
         }
         Some(_) => Err("model 必须是字符串".to_string()),
     }
+}
+
+/* ─── 会话（左边那列历史对话）────────────────────────────── */
+
+/// GET /api/assistant/sessions → `{sessions: [{id, title, model, reasoning,
+/// createdAt, updatedAt}, …]}`（按最近更新倒序）。
+///
+/// **不带 messages**：侧边栏只用得到标题与时间，把几十条会话的全部消息体都
+/// 拉一遍是纯浪费。打开某一条时再走下面的单条接口。
+pub async fn list_sessions(State(_state): State<ServerState>) -> Response {
+    ok_json(json!({ "sessions": assistant_sessions::list() }))
+}
+
+/// GET /api/assistant/sessions/{id} → `{session: {…, messages: [...]}}`
+pub async fn get_session(State(_state): State<ServerState>, Path(id): Path<String>) -> Response {
+    match assistant_sessions::get(&id) {
+        Some(session) => ok_json(json!({ "session": session })),
+        None => errors::management_error(404, "会话不存在"),
+    }
+}
+
+/// POST /api/assistant/sessions → `{session: {…}}`（新建或覆盖同 id 的会话）。
+///
+/// body：`{id, title?, messages, model?, reasoning?}`。id 由前端生成（见
+/// `core::assistant_sessions` 的模块头），所以这条接口同时承担「新建」与
+/// 「保存」—— 前端每轮回答结束后都调它，不必区分是第几次。
+pub async fn save_session(State(_state): State<ServerState>, body: Bytes) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(payload) => payload,
+        Err(error) => return errors::management_error(400, error.message),
+    };
+    match assistant_sessions::save(&payload) {
+        Ok(session) => ok_json(json!({ "session": session })),
+        Err(message) => errors::management_error(400, message),
+    }
+}
+
+/// DELETE /api/assistant/sessions/{id} → `{removed: true}`
+pub async fn delete_session(State(_state): State<ServerState>, Path(id): Path<String>) -> Response {
+    if assistant_sessions::remove(&id) {
+        ok_json(json!({ "removed": true }))
+    } else {
+        errors::management_error(404, "会话不存在")
+    }
+}
+
+/// DELETE /api/assistant/sessions → `{removed: n}`（清空全部会话）。
+///
+/// 与单条删除分开成两条路由（同前缀的 DELETE 落到这里）：前端「清空历史」
+/// 走它，免得发几十条单删请求。
+pub async fn clear_sessions(State(_state): State<ServerState>) -> Response {
+    let removed = assistant_sessions::clear();
+    ok_json(json!({ "removed": removed }))
 }

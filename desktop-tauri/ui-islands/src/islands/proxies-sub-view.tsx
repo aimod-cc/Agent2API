@@ -480,7 +480,7 @@ function SubModal({
   const [name, setName] = React.useState(item?.name || '')
   const [url, setUrl] = React.useState(item?.url || '')
   const [fileName, setFileName] = React.useState(item?.fileName || '')
-  const [contentB64, setContentB64] = React.useState('')
+  const [contentBase64, setContentBase64] = React.useState('')
   const [enabled, setEnabled] = React.useState(item ? item.enabled : true)
   const [saving, setSaving] = React.useState(false)
   const [decoding, setDecoding] = React.useState(false)
@@ -500,25 +500,25 @@ function SubModal({
       setStatus(<span className='text-destructive'>❌ {t('订阅链接必须是 http:// 或 https:// 开头')}</span>)
       return
     }
-    if (!editing && source === 'local' && !contentB64) {
+    if (!editing && source === 'local' && !contentBase64) {
       setStatus(<span className='text-destructive'>❌ {t('请选择要导入的 YAML 文件')}</span>)
       return
     }
     setSaving(true)
     try {
       if (editing && source === 'local') {
-        // 没重选文件就不带 contentB64 —— 后端沿用导入时的内容
+        // 没重选文件就不带 contentBase64 —— 后端沿用导入时的内容
         await saveSubscription(item!, {
           name: nameText,
           enabled,
           kind: 'local',
           fileName: fileName || undefined,
-          ...(contentB64 ? { contentB64 } : {}),
+          ...(contentBase64 ? { contentBase64 } : {}),
         })
       } else if (editing) {
         await saveSubscription(item!, { name: nameText, url: urlText, enabled, kind: 'url' })
       } else if (source === 'local') {
-        await addSubscription({ name: nameText, kind: 'local', fileName: fileName || undefined, contentB64 })
+        await addSubscription({ name: nameText, kind: 'local', fileName: fileName || undefined, contentBase64 })
       } else {
         await addSubscription({ name: nameText, kind: 'url', url: urlText })
       }
@@ -552,7 +552,7 @@ function SubModal({
     setStatus(null)
     try {
       const base64 = await readFileAsBase64(file)
-      setContentB64(base64)
+      setContentBase64(base64)
       setFileName(file.name)
       setStatus(<span className='text-success'>✅ {t('已选择「{name}」，保存后导入', { name: file.name })}</span>)
     } catch (error) {

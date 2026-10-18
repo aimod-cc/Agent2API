@@ -978,15 +978,22 @@ pub async fn login_kuku_complete(
     }
 }
 
-// ─── OrcaTerm 网页登录收尾（官方 Web 控制台）────────────────────
+// ─── OrcaTerm 网页登录收尾（兜底入口）──────────────────────────
 
-/// `POST /api/session/login/orcaterm/complete` —— 壳侧交回登录态 Cookie。
+/// `POST /api/session/login/orcaterm/complete` —— 直接交回一枚现成的令牌。
 ///
-/// OrcaTerm 的 Web 令牌住在一个普通（非 HttpOnly）Cookie `ot_session` 里，
-/// 页面脚本与 Cookie 存储都读得到；交回仍走**壳侧进程**这一步（与 KukuAI
-/// 同款），因为登录窗口是壳自己开的、Cookie 存储也归它：窗口里出现
-/// `ot_session` 即「用户已扫码登录成功」，壳把 `{state, token}` POST 到这里
-/// （state + 令牌在请求体里，不走 URL）。
+/// ── 正式链路不在这里（必读）─────────────────────────────────
+/// 网页登录走**官方 OAuth**：窗口停在授权页 → 微信扫码 → 上游把浏览器带回
+/// `orcaterm://oauth_callback?session_id=…` → 壳侧把回调 URL 交给
+/// `POST /api/session/login/callback` → 后端 `OAuthExchangeToken` 换令牌
+/// （见 `providers/orcaterm/login.rs` 模块头，那里也记录了「为什么不用控制台
+/// 的 `ot_session`」：那枚 Cookie 在 SPA 内扫码时根本不会被写出来）。
+///
+/// 本端点留给「调用方手里已经有一枚令牌」的场景（壳侧若从别处读到、外部工具
+/// 替我们拿到）：`{state, token}` POST 进来，同样做上游探活，通过才落账号。
+///
+/// 令牌形态兼容 `ot_session=…` 前缀（后端 `normalize_token` 会剥），
+/// 因此字段既叫 `token` 也接受别名 `cookie`。
 ///
 /// 该路由**免鉴权**：调用方是壳侧进程（登录窗口），不带 API Key；安全性由
 /// 登录任务的一次性 state 承担（与 kuku/complete 同口径）。

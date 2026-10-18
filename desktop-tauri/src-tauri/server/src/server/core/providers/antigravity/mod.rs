@@ -38,7 +38,7 @@
 //! ```text
 //!   ✅ 账号：粘贴 refresh token 添加（归一化 + 一次真实校验刷新）
 //!   ✅ token 刷新：临期主动刷 + 401 后强制刷（单飞 + 比较再写）
-//!   ✅ 模型目录：POST :fetchAvailableModels（只列 Gemini）+ 内置兜底清单
+//!   ✅ 模型目录：POST :fetchAvailableModels（Gemini / Claude / GPT-OSS）+ 内置兜底清单
 //!   ✅ 注册接线：ProviderKind / 注册表 / adapter_for / 目录缓存 / 账号存储 / 添加分支
 //!   ✅ 聊天转发：build_chat_request 构造 v1internal 信封 → 响应走
 //!      protocol::antigravity_stream 翻译回 chat SSE（supports_chat = true）
@@ -66,7 +66,8 @@
 //!   oauth.rs        Google token 端点：网页登录换码 + 刷新（form）+ 单飞 +
 //!                   比较再写 + invalid_grant 处置 + loopback 端口常量
 //!   project.rs      cloudaicompanionProject 发现（loadCodeAssist → onboardUser）
-//!   models.rs       :fetchAvailableModels（只列 Gemini）+ 内置兜底 + 对外 id → 上游真名映射表
+//!   models.rs       :fetchAvailableModels（Gemini / Claude / GPT-OSS）+ 内置兜底
+//!                   + 对外 id → 上游真名映射表（含 Claude 旧代重定向）
 //!   login.rs        粘贴式归一化（1// 前缀 / 引号 / Bearer）+ 一次校验刷新
 //!   adapter.rs      ProviderAdapter 实现（账号 / 刷新 / 目录 / 转发 / 思考档绑定）
 //!   balance.rs      余额读数（5 小时 / 每周额度窗口 + 订阅档）

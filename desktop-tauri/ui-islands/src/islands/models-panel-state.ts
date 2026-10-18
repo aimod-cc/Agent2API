@@ -53,7 +53,7 @@ export type CustomModelContext = { provider: string; locked: boolean }
  */
 export type CapabilityContext = { provider: string; id: string }
 
-type Filters = { provider: string; state: string; search: string; sort: string }
+type Filters = { provider: string; state: string; search: string; sort: string; visibility: string }
 
 /** 表格现造的绑定（默认绑定 alias == target 由模型行合成，不在 mappings 里另占一格） */
 export type Binding = {
@@ -198,6 +198,49 @@ export const MODEL_SORT_OPTIONS: readonly SegmentedControlOption<string>[] = MOD
   value, label: MODEL_SORT_LABEL[value],
 }))
 
+/* ─── 可见性筛选 ───────────────────────────────── */
+
+/**
+ * 可见性筛选项的取值。
+ *
+ * ── 为什么「全部」排第一 ────────────────────────────────────
+ * 与上面状态筛选（`MODEL_STATES` = `all / enabled / disabled / mapped`）同一
+ * 习惯：「全部」是**归零档**，排在首位。分段控件的滑块从左边起第一格出发，
+ * 用户想「看全」时下意识往左找，把它放在末尾会多扫一眼。
+ *
+ * 注意「排第一」不等于「默认选中」：默认值仍是 `visible`（见
+ * `DEFAULT_FILTERS`），理由见下。
+ *
+ * ── 为什么默认是 `visible` 而不是 `all` ─────────────────────
+ * 上游目录是**超集**：里面混着官方客户端根本不展示的模型（如 Antigravity 的
+ * 2.5 / 2.0 系列、Qoder 的 `enable:false` 条目）。这些模型在本仓**默认已被
+ * 关闭默认绑定**（见 `model_rules::seed_hidden_disabled`），也就是说它们本来
+ * 就不可用；管理页一打开就让它们占满表格，反而把用户真正能用的模型挤下去。
+ * 所以默认只看可见的，要看全的自己去切（切到「全部」会落盘记住）。
+ *
+ * ── 为什么有 `undeclared` 这一档 ────────────────────────────
+ * 只有四家（Antigravity / Qoder / Raccoon / CodeArts）有可见性判据，其余家
+ * 的条目根本没有 `visibility` 字段。「这家没这个信息」与「这家说它不可见」
+ * 必须分开：前者不代表不可用，混进 `hidden` 会让用户误以为那些家的模型都被
+ * 关掉了。`undeclared` 在筛选上归入 `visible`（不藏）—— 与各家「没有依据就
+ * 不藏」的纪律一致。
+ */
+const MODEL_VISIBILITIES: readonly string[] = ['all', 'visible', 'hidden', 'undeclared']
+const MODEL_VISIBILITY_LABEL: Record<string, string> = {
+  all: t('全部'), visible: t('可见'), hidden: t('不展示'), undeclared: t('未声明'),
+}
+export const MODEL_VISIBILITY_OPTIONS: readonly SegmentedControlOption<string>[] = MODEL_VISIBILITIES.map(value => ({
+  value, label: MODEL_VISIBILITY_LABEL[value],
+}))
+
+/** 归一化一行的可见性：`'shown'` → `visible`，`'hidden'` → `hidden`，其余 → `undeclared` */
+export function visibilityOf(model: ManageModel): 'visible' | 'hidden' | 'undeclared' {
+  const raw = typeof model.visibility === 'string' ? model.visibility.trim().toLowerCase() : ''
+  if (raw === 'hidden') return 'hidden'
+  if (raw === 'shown' || raw === 'visible') return 'visible'
+  return 'undeclared'
+}
+
 /**
  * 列的 key 用表格里既有的 `data-col`（index.html 的 `<col class="c-xxx" data-col="xxx">`、
  * 表头 th、table-columns.js 的列宽登记三处同名，键名只有一套）。顺序即默认渲染顺序。
@@ -208,6 +251,10 @@ const COLUMNS: ColumnDecl[] = [
   { key: 'check', label: t('选择'), align: 'center' },
   { key: 'model', label: t('上游模型') },
   { key: 'rate', label: t('倍率') },
+  // 「可见性」紧挨「来源」：两者回答的是同一类问题（这条记录哪来的 / 上游
+  // 认不认它），并排放读起来才连贯。没判据的家显示 `—`（见 models-page 的
+  // `visibilityCell`）—— 那是「这家没这个信息」，不是「确认可见」。
+  { key: 'visibility', label: t('可见性') },
   { key: 'source', label: t('来源') },
   // 能力位两列（顺序、文案与 model-capability 的键序对应）：数值合并在
   // 「上下文 / 输出」一格里，三个布尔合并成一列徽章 —— 分成五列会把
@@ -223,7 +270,7 @@ const COLUMNS: ColumnDecl[] = [
  * **按视图隐藏**，列设置里的配置本身不动 —— 切回内置家原样恢复。表头（syncStaticHead 的
  * 第三个参数）与数据行（visibleColumns）读同一份过滤结果，不会各画一个样。
  */
-const CUSTOM_HIDDEN_COLUMNS: ReadonlySet<string> = new Set(['rate', 'source'])
+const CUSTOM_HIDDEN_COLUMNS: ReadonlySet<string> = new Set(['rate', 'source', 'visibility'])
 
 /**
  * 左栏「自定义提供商」组那颗「全部」的哨兵 id：选中它时右栏聚合**所有**自定义家的
@@ -235,7 +282,14 @@ const ALL_CUSTOM = 'custom-all'
 
 const EMPTY_VIEW: ManageView = { models: [], mappings: [] }
 
-const DEFAULT_FILTERS: Filters = { provider: 'all', state: 'all', search: '', sort: 'default' }
+/**
+ * 默认筛选。
+ *
+ * `visibility: 'visible'` 是**有意偏离「全部」**的唯一一处：上游目录里混着
+ * 官方客户端根本不展示的模型（本仓已默认关闭它们的默认绑定），把它们摆在表里
+ * 只会盖住用户真能用的那些。想看全的切到「未声明 / 全部」即可（落盘，会记住）。
+ */
+const DEFAULT_FILTERS: Filters = { provider: 'all', state: 'all', search: '', sort: 'default', visibility: 'visible' }
 
 /* ─── 共享快照（外部 store）──────────────────── */
 
@@ -243,6 +297,8 @@ export type PanelState = {
   /** 左栏选中的提供商：'all' / 某个内置家 id / 某个 custom- id */
   provider: string
   stateFilter: string
+  /** 可见性筛选（全部 / 可见 / 不展示 / 未声明），见 MODEL_VISIBILITIES */
+  visibilityFilter: string
   search: string
   /** 排序档位（默认 / 倍率升序 / 倍率降序），见 MODEL_SORTS */
   sort: string
@@ -277,6 +333,8 @@ function readSavedFilters(): Filters {
     search: String(saved.search || ''),
     // 存坏的排序档位回落「默认」（与状态档位同一口径）
     sort: MODEL_SORTS.includes(saved.sort) ? saved.sort : 'default',
+    // 存坏的可见性档位回落「可见」（与默认值一致，不是「全部」）
+    visibility: MODEL_VISIBILITIES.includes(saved.visibility) ? saved.visibility : 'visible',
   }
 }
 
@@ -289,6 +347,7 @@ let filtersTouched = false
 let snapshot: PanelState = {
   provider: initialFilters.provider,
   stateFilter: initialFilters.state,
+  visibilityFilter: initialFilters.visibility,
   search: initialFilters.search,
   sort: initialFilters.sort,
   data: null,
@@ -345,7 +404,8 @@ export function restoreSavedFilters(): void {
   filtersRestored = true
   const saved = readSavedFilters()
   if (saved.provider !== snapshot.provider || saved.state !== snapshot.stateFilter
-    || saved.search !== snapshot.search || saved.sort !== snapshot.sort) {
+    || saved.search !== snapshot.search || saved.sort !== snapshot.sort
+    || saved.visibility !== snapshot.visibilityFilter) {
     patch(saved)
   }
 }
@@ -826,6 +886,15 @@ export function setSort(next: string): void {
   filtersTouched = true
   patch({ sort: value })
   saveFilters({ sort: value })
+}
+
+/** 可见性筛选项（与状态筛选同一套落盘口径） */
+export function setVisibilityFilter(next: string): void {
+  const value = MODEL_VISIBILITIES.includes(next) ? next : 'visible'
+  if (value === snapshot.visibilityFilter) return
+  filtersTouched = true
+  patch({ visibilityFilter: value })
+  saveFilters({ visibility: value })
 }
 
 export function setSearch(next: string): void {

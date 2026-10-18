@@ -555,7 +555,28 @@ function AccountsPage() {
   // 「折叠全部 / 展开全部」看的是**全部**组（与按钮实际作用的对象同一份口径）：
   // 只看可见组的话，被筛掉的那几家会与标签对不上（见 setAllGroupsCollapsed 的说明）
   const allCollapsed = allGroups.length > 0 && allGroups.every(group => store.collapsed.has(group.provider))
-
+  /**
+   * 窄屏「筛选」抽屉的开合。
+   *
+   * 桌面端工具条是平铺的（提供商 / 搜索 / 状态 / 限额 / 动作一行排开），但手机上
+   * 这四行筛选要占掉 190px —— 812px 的屏里首屏只剩一半给账号。改成：
+   *   · 工具条只留「筛选」按钮 + 常用动作（折叠 / 添加 / 查询余额）
+   *   · 四个筛选组移进右侧抽屉，点按钮滑出、点遮罩收起
+   *
+   * 抽屉与工具条里的筛选控件是**同一份 store**（受控），所以两处改任一都会立刻
+   * 反映到列表；抽屉里的改动不必「应用」就能预览（与桌面端即时生效的口径一致）。
+   *
+   * 桌面端：这个状态不参与渲染 —— 抽屉的 DOM 常驻，但由 CSS 在 ≥768px 下
+   * 把 .acct-filter-drawer 与 .acct-filter-scrim 全部 display:none，工具条里的
+   * 筛选组照常平铺（CSS 只在小屏隐藏 .acct-filter-group）。
+   */
+  const [filterOpen, setFilterOpen] = React.useState(false)
+  /** 当前生效的筛选条数：给「筛选」按钮上的角标用，让用户知道列表被收窄了 */
+  const activeFilterCount =
+    (store.filter.provider !== 'all' ? 1 : 0)
+    + (String(store.filter.q || '').trim() ? 1 : 0)
+    + (store.filter.enabled !== 'all' ? 1 : 0)
+    + (store.filter.limit !== 'all' ? 1 : 0)
   /**
    * 拖拽的落点处理：把「谁挪到了第几位」翻成一条**完整队列**再交给后端。
    *
@@ -745,6 +766,24 @@ function AccountsPage() {
             模型作用域下的行集合本就是账号的子集，筛它照样成立 */}
         <div className='acct-main'>
         <div className='toolbar'>
+          {/* 窄屏「筛选」入口：只在 ≤767px 显示（桌面由 CSS 隐藏）。
+              按钮上的角标是当前生效的筛选条数 —— 筛选条件收进抽屉后，
+              列表被收窄这件事必须仍然可见，否则用户会以为账号丢了。 */}
+          {/* 用原生 button 而不是组件库 Button：Button 自带 `inline-flex`
+              工具类，而 Tailwind v4 的 utilities 是 @layer —— 层叠层优先级
+              高于普通声明，CSS 里再怎么写 display:none 都压不住它，桌面端
+              会一直显示这个「筛选」按钮。原生 button 没有那层工具类。 */}
+          <button type='button' className='acct-filter-open'
+            onClick={() => setFilterOpen(true)}
+            aria-label={t('打开筛选')}>
+            {t('筛选')}
+            {activeFilterCount > 0 ? <span className='acct-filter-badge'>{activeFilterCount}</span> : null}
+          </button>
+
+          {/* 四个筛选组：桌面平铺在工具条里；窄屏由 CSS 移进右侧抽屉
+              （同一份 DOM，靠 .acct-filter-group 的 display 切换，不做条件渲染
+              —— 条件渲染会让桌面端的受控控件卸载重建、丢掉输入焦点） */}
+          <div className={cn('acct-filter-group', filterOpen && 'open')}>
           {/* 提供商：分组模式把「哪一家」画在了页面上（一家一段），但「只看某一家」仍是
               常用动作 —— 分组带收得掉一家、收不掉其余那几家。用下拉而不是分段按钮：家数
               是**动态**的（后端注册表加一家就多一项），分段按钮会随家数增长把工具条挤成
@@ -753,10 +792,10 @@ function AccountsPage() {
           <div className='group' data-provider-group='1'>
             <span className='label'>{t('提供商')}</span>
             <Select value={store.filter.provider} onValueChange={value => setProviderFilter(String(value))}>
-              {/* 宽度：桌面锁 200px（同排搜索框对齐）；手机上工具条改纵向排列，
-                  触发器要撑满整行，否则右边缘比同排的搜索框短 14px（见
-                  ui/css/mobile.css 的 .toolbar 段）。用 min-[768px]: 变体分隔，
-                  比在 mobile.css 里用 !important 跟 Tailwind 的任意值类斗优先级可靠。 */}
+              {/* 宽度：桌面锁 200px（同排搜索框对齐）；窄屏工具条改纵向排列，
+                  触发器要撑满整行，否则右边缘比同排的搜索框短 14px。
+                  用 min-[768px]: 变体分隔，比写 !important 跟 Tailwind 的
+                  任意值类斗优先级可靠。 */}
               <SelectTrigger className='max-w-none min-w-0 w-full min-[768px]:max-w-[200px] min-[768px]:min-w-[130px] min-[768px]:w-auto' aria-label={t('按提供商筛选账号')}>
                 <SelectValue>
                   {providerOptions.find(item => item.value === store.filter.provider)?.label || t('全部')}
@@ -806,6 +845,7 @@ function AccountsPage() {
             ]} value={store.filter.limit} onValueChange={value => setSegmentFilter('limit', value)}
               aria-label={t('限额状态')} />
           </div>
+          </div>{/* /.acct-filter-group */}
 
           <div className='actions'>
             {/* 折叠是「只看某几家」的入口：一家几十条时，收起不关心的那些比筛选更顺手。
@@ -840,6 +880,28 @@ function AccountsPage() {
             那一段）：模型作用域下的行是账号的子集，全选 / 批量操作 / 清除筛选照样成立。
             作用域与排序各自多的那几枚状态提示挂在同一行里（见下），与既有的
             「顺序已锁定 / 清除筛选 / 被隐藏的勾选」是同一档东西 */}
+        {/* ─── 窄屏筛选抽屉 ───
+            四个筛选组由 CSS 从工具条移进来（.acct-filter-group 在 ≤767px 时
+            position:fixed 到右侧抽屉位置），这里只放抽屉标题栏与遮罩。
+            桌面端整块 display:none，不占位。
+
+            为什么用 CSS 搬而不是条件渲染两份：筛选控件是受控的，两份 DOM 会
+            出现重复的 id / aria 引用，且桌面端切换时会卸载重建、丢掉输入焦点。 */}
+        <div className={cn('acct-filter-scrim', filterOpen && 'open')} onClick={() => setFilterOpen(false)} />
+        <div className={cn('acct-filter-head', filterOpen && 'open')} aria-hidden={!filterOpen}>
+          <span className='acct-filter-title'>{t('筛选')}</span>
+          <Button variant='ghost' size='sm' className='acct-filter-clear'
+            disabled={activeFilterCount === 0}
+            onClick={() => {
+              setProviderFilter('all')
+              setSearchFilter('')
+              setSegmentFilter('enabled', 'all')
+              setSegmentFilter('limit', 'all')
+            }}>{t('清空')}</Button>
+          <Button variant='ghost' size='sm' className='acct-filter-close'
+            onClick={() => setFilterOpen(false)} aria-label={t('关闭')}>✕</Button>
+        </div>
+
         <div className={cn('batch-bar', active && 'active')} id='batch-bar'>
           <label className='batch-select-all'>
             <Checkbox id='batch-select-all' checked={allPicked} indeterminate={!allPicked && somePicked}

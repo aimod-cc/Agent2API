@@ -48,9 +48,9 @@ use serde_json::{json, Map, Value};
 use crate::server::logging;
 
 pub use version::{
-    api_base, assert_downloadable, compare_versions, custom_api_base, installer_kind,
-    pick_asset_by_name, pick_installer, safe_file_name, server_bundle_name, UpdateError,
-    DEFAULT_REPO, GITHUB_API, MAX_INSTALLER_BYTES,
+    api_base, assert_downloadable, compare_versions, custom_api_base, desktop_shell,
+    installer_kind, pick_asset_by_name, pick_installer, safe_file_name, server_bundle_name,
+    set_desktop_shell, UpdateError, DEFAULT_REPO, GITHUB_API, MAX_INSTALLER_BYTES,
 };
 /// 「更新设置」弹窗的 GitHub 令牌接口（api::update 走这两条；加解密本体
 /// 只在 token 模块内部，见它的模块头）

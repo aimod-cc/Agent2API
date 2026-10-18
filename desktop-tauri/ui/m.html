@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="system">
+<head>
+<meta charset="utf-8" />
+<!-- viewport-fit=cover：让安全区（刘海 / 底部横条）由 env() 接管，
+     standalone 全屏时内容不会钻到系统栏下面。 -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<!-- 两条 theme-color 按系统深浅各取其一：PWA 里它决定状态栏 / 地址栏配色。
+     脚本还会在主题切换时改写第一条，覆盖用户手选的浅色 / 深色。 -->
+<meta name="theme-color" content="#f3f3f6" media="(prefers-color-scheme: light)" />
+<meta name="theme-color" content="#0a0a0a" media="(prefers-color-scheme: dark)" />
+<meta name="color-scheme" content="light dark" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<!-- default 让状态栏保留系统底色、正文从状态栏下方开始；black-translucent
+     会让内容钻到状态栏下面，而我们已经有 env(safe-area-inset-top) 的留白，
+     两者叠加会多出一块空白，所以不用。 -->
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="Agent2API" />
+<meta name="format-detection" content="telephone=no" />
+<title>Agent2API · 手机端</title>
+
+<!-- PWA：manifest 与图标都指向 ui/ 下既有资源，不额外复制一份 -->
+<link rel="manifest" href="m/manifest.webmanifest" />
+<link rel="icon" type="image/png" sizes="192x192" href="assets/app-icon-192.png" />
+<link rel="apple-touch-icon" sizes="180x180" href="assets/app-icon-180.png" />
+
+<link rel="stylesheet" href="m/mobile.css" />
+
+<script>
+  // 语言引导：与 index.html / login.html 同一套解析规则（改一处必须同步改另两处）。
+  // 必须早于业务脚本，否则首屏会先按简体渲染再跳一下。
+  (function () {
+    var CODES = ['zh-Hans', 'zh-Hant', 'en', 'ja', 'ko', 'pt-BR'];
+    var raw = null;
+    try { raw = localStorage.getItem('workbuddy-desktop-locale'); } catch (e) { /* 存储被禁 */ }
+    var locale = 'en';
+    if (raw && raw !== 'auto' && CODES.indexOf(raw) >= 0) {
+      locale = raw;
+    } else {
+      var tags = (navigator.languages && navigator.languages.length) ? navigator.languages : [navigator.language];
+      for (var i = 0; i < tags.length; i++) {
+        var tag = String(tags[i] || '').toLowerCase();
+        if (!tag) continue;
+        if (tag === 'zh-tw' || tag === 'zh-hk' || tag === 'zh-mo' || tag.indexOf('hant') >= 0) { locale = 'zh-Hant'; break; }
+        if (tag.indexOf('zh') === 0) { locale = 'zh-Hans'; break; }
+        if (tag.indexOf('ja') === 0) { locale = 'ja'; break; }
+        if (tag.indexOf('ko') === 0) { locale = 'ko'; break; }
+        if (tag.indexOf('pt') === 0) { locale = 'pt-BR'; break; }
+      }
+    }
+    document.documentElement.lang = locale;
+    // 简体没有词典目录（查不到即显示简体原文）；其余语言注入 manifest + 各域文件。
+    if (locale === 'zh-Hans') return;
+    document.write('<script src="i18n/manifest.js"><\/script>');
+    var domains = window.__WB_I18N_DOMAINS || [];
+    for (var d = 0; d < domains.length; d++) {
+      document.write('<script src="i18n/' + locale + '/' + domains[d] + '.js"><\/script>');
+    }
+  })();
+</script>
+
+<script>
+  // 主题引导：在首帧之前把 data-theme 定下来，避免浅色闪一下再切深色。
+  // 与桌面端 app.js 的 applyTheme 读同一个 localStorage 键。
+  (function () {
+    var mode = 'system';
+    try { mode = localStorage.getItem('workbuddy-desktop-theme') || 'system'; } catch (e) { /* 忽略 */ }
+    if (mode !== 'light' && mode !== 'dark') mode = 'system';
+    document.documentElement.dataset.theme = mode;
+    var dark = mode === 'dark' || (mode === 'system'
+      && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+    // 页面里那两条 theme-color 是按系统深浅写的（没有 JS 时也能对上）。
+    // 用户手选了主题时，系统偏好不再是判据 —— 把第一条的 media 摘掉，
+    // 它就会无条件命中，第二条随之失效。
+    var metas = document.querySelectorAll('meta[name="theme-color"]');
+    for (var i = 0; i < metas.length; i++) {
+      metas[i].setAttribute('content', dark ? '#0a0a0a' : '#f3f3f6');
+      if (i === 0) metas[i].removeAttribute('media');
+    }
+  })();
+</script>
+</head>
+<body>
+<div id="root"></div>
+<!-- Service Worker 的注册在应用里（mobile/src/lib/pwa.ts），不在这里：
+     注册后还要盯更新、判断是否可安装、维护离线状态，这些都要与界面共享
+     同一份状态，放在页面里会变成两处各记一份。 -->
+<script src="m/mobile.js"></script>
+</body>
+</html>

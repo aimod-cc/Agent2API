@@ -54,7 +54,7 @@ export type StatsSummary = {
 /* ─── 时间范围（档位与后端白名单逐字一致） ─── */
 
 /** 合法的时间范围：与后端 /api/stats/summary 的白名单逐字一致（非法值后端返回 400） */
-export const RANGES: readonly string[] = ['today', '7', '30', 'month', 'all', 'custom']
+export const RANGES: readonly string[] = ['today', 'yesterday', '7', '30', 'month', 'all', 'custom']
 export const DEFAULT_RANGE = '7'
 /**
  * 自定义区间档位：选中它时起止日由本页的两个日期输入给出（`startDate` /
@@ -67,16 +67,16 @@ export const RANGE_KEY = 'workbuddy-desktop-report-range'
 export const CUSTOM_RANGE_KEY = 'workbuddy-desktop-report-custom-range'
 /** 档位对应的展示名（键是后端白名单里的枚举值，不能翻；只有展示串走 t()） */
 export const RANGE_LABEL: Record<string, string> = {
-  today: t('今天'), 7: t('近 7 天'), 30: t('近 30 天'), month: t('本月'), all: t('全部'),
-  custom: t('自定义区间'),
+  today: t('今天'), yesterday: t('昨天'), 7: t('近 7 天'), 30: t('近 30 天'), month: t('本月'),
+  all: t('全部'), custom: t('自定义区间'),
 }
 /**
  * 分段控件上的短标签。与 RANGE_LABEL 是两套，别合并：那边是概览小格的说明文字
  * （「近 7 天」），控件里位置窄，用更短的（「7 天」）。
  */
 export const RANGE_OPTION_LABEL: Record<string, string> = {
-  today: t('今天'), 7: t('7 天'), 30: t('30 天'), month: t('本月'), all: t('全部'),
-  custom: t('自定义'),
+  today: t('今天'), yesterday: t('昨天'), 7: t('7 天'), 30: t('30 天'), month: t('本月'),
+  all: t('全部'), custom: t('自定义'),
 }
 
 /** 只有明确存过合法值才采纳；无值 / 读取抛错 / 值被改坏都回落默认的 7 天 */

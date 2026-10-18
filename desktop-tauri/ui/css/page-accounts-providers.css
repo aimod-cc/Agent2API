@@ -140,14 +140,6 @@
   font-weight: 600;
   line-height: 1.4;
 }
-/* 名字后的 `(beta)`：新接入的家在观察期的标记（名单见 add-provider-pick 的
-   BETA_PROVIDERS）。只把字号压一档、颜色退到三级 —— 它是一句注脚，
-   不该跟名字争注意力；`.add-provider-name` 的 gap 负责与名字的间距 */
-.add-provider-beta {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-3);
-}
 .add-provider-meta {
   font-size: 12px;
   line-height: 1.45;

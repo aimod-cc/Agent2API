@@ -475,19 +475,27 @@ impl LoginService {
         Ok(account_id)
     }
 
-    /// OrcaTerm 网页登录收尾：校验任务 → 归一化令牌 → 上游探活 → 落账号。
+    /// OrcaTerm 网页登录收尾（**兜底入口**）：校验任务 → 归一化令牌 → 上游
+    /// 探活 → 落账号。
+    ///
+    /// ── 现在的正式链路不在这里 ──────────────────────────────────
+    /// 网页登录走**官方 OAuth**：回调 `orcaterm://oauth_callback?session_id=…`
+    /// → `submit_login_callback` 的 OrcaTerm 分支 → `exchange_login_code`
+    /// （见 `providers/orcaterm/login.rs` 模块头）。本方法是**第二条**收尾路径：
+    /// 调用方手里已经有一枚现成令牌（壳侧若哪天从窗口里读到、或外部工具替我们
+    /// 拿到了），直接 POST `{state, token}` 到
+    /// `/api/session/login/orcaterm/complete` 即可 —— 两条路都落到同一套
+    /// 「探活通过才落库」的口径上，不重复实现校验。
     ///
     /// ── 与 KukuAI 收尾的同与异 ──────────────────────────────────
-    /// 同：交回的都是「登录窗口里的登录态」（那家是百度域 Cookie，这家是
-    /// 控制台写入的 `ot_session`），都由壳侧进程 POST 进来，任务校验、
-    /// 幂等、写回 `/wait` 的时序完全一致（见 `finish_kuku_login`）。
+    /// 同：都由壳侧进程 POST 进来，任务校验、幂等、写回 `/wait` 的时序一致
+    /// （见 `finish_kuku_login`）。
     /// 异：这家的令牌必须**当场通过上游探活**才落库（`complete_login` 里打
     /// `GetUserInfo`）—— 过期/被撤销的令牌落下来只会得到必然 401 的账号；
     /// KukuAI 那条是「凭证本身有效、业务令牌换发另说」，所以它带警告照样落。
     ///
-    /// 探活失败**不写任务终态**：令牌可能只是刚写入、上游尚未生效（实测无此
-    /// 现象，但代价为零），壳侧会退避重试；真正的错误文案由返回的 `Err`
-    /// 透给壳侧日志，最终由 `/wait` 的超时兜底。
+    /// 探活失败**不写任务终态**：令牌可能只是刚到手、上游尚未生效，调用方
+    /// 可以再试；真正的错误文案由返回的 `Err` 透出去，最终由 `/wait` 超时兜底。
     pub async fn finish_orcaterm_login(
         &self,
         state: &str,
@@ -508,7 +516,7 @@ impl LoginService {
             return Err(GatewayError::with_status(400, "登录已取消，请重新发起"));
         }
         if task.done {
-            // 幂等：同一个登录态被送来两次（Cookie 检测每拍触发）不是错误
+            // 幂等：同一个登录态被送来两次不是错误
             return Ok(String::new());
         }
         if task.provider != crate::server::core::providers::kind_id(crate::server::core::providers::ProviderKind::OrcaTerm)
@@ -518,8 +526,19 @@ impl LoginService {
                 "该登录任务不属于 OrcaTerm，请重新发起",
             ));
         }
-        let credentials =
-            crate::server::core::providers::orcaterm::login::complete_login(token).await?;
+        let credentials = match crate::server::core::providers::orcaterm::login::complete_login(token).await
+        {
+            Ok(credentials) => credentials,
+            Err(error) => {
+                // 失败也写门户日志：这条路径的错误以前只回给调用方，界面与日志面板
+                // 都看不到（本轮排查「扫码后没反应」时正缺这条线索）。
+                logging::log(
+                    "[Login]",
+                    &format!("❌ OrcaTerm 登录态校验失败: {}", error.message),
+                );
+                return Err(error);
+            }
+        };
         let store = self.store.clone();
         let account = store
             .add_orcaterm_account(&credentials, None, "web")
@@ -930,6 +949,40 @@ impl LoginService {
                 .finish_autoclaw_oauth_callback(vendor, upstream_state, code)
                 .await
                 .map(LoginCallbackSubmission::Completed);
+        }
+        // OrcaTerm 的回调是官方桌面端的自定义协议
+        // （`orcaterm://oauth_callback?session_id=…`）：URL 里带的是 `session_id`
+        // 而不是 `code`，换令牌走匿名 CGI 动作 `OAuthExchangeToken`
+        // （见 `providers/orcaterm/login.rs` 模块头）。与 Antigravity 同款收尾：
+        // 换码失败要落定任务错误，否则前端会一直等到 5 分钟超时。
+        if kind == ProviderKind::OrcaTerm {
+            return match adapter_for(kind)
+                .exchange_login_code(&self.store, callback_url, state)
+                .await
+            {
+                Ok(account_id) => {
+                    let session = json!({
+                        "accountUid": account_id,
+                        "nickname": Value::Null,
+                        "edition": task.edition,
+                        "provider": task.provider,
+                    });
+                    handle.update(|task| {
+                        task.done = true;
+                        task.session = Some(session);
+                        task.finished_at = Some(logging::now_ms());
+                    });
+                    Ok(LoginCallbackSubmission::Completed(account_id))
+                }
+                Err(error) => {
+                    finish_task_error(&handle, &error.message);
+                    logging::log(
+                        "[Login]",
+                        &format!("❌ OrcaTerm 网页登录换取凭证失败: {}", error.message),
+                    );
+                    Err(error)
+                }
+            };
         }
         // CatPaw 正常情况下由服务端 poll-token 兜底完成；若上游仍把 token
         // 放进可复制的查询串，这里也复用 public callback 的收尾逻辑。

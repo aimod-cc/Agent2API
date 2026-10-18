@@ -20,14 +20,12 @@
 //! （`session.proxy` 解析出的出口），否则会出现「能转发但刷不了 token」。
 //! 登录流程（login.rs）没有账号上下文，因此固定直连 —— 与 Node 版一致。
 
-use std::collections::HashMap;
-use std::sync::Mutex;
-
 use serde_json::{json, Value};
 
 use crate::server::core::account_store::state::json_number;
 use crate::server::core::account_store::AccountStore;
 use crate::server::core::endpoints::{resolve_edition, Context, ANONYMOUS_HEADERS};
+use crate::server::core::providers::refresh_flight;
 use crate::server::core::proxies::{session_proxy, ResolvedProxy};
 use crate::server::logging;
 
@@ -66,14 +64,66 @@ pub struct AuthService {
     context: Context,
 }
 
-/// 进程级刷新占位表（见 `AuthService` 的说明）。
+/// 进程级刷新单飞表（见 `AuthService` 的说明）。
 ///
-/// 用 `OnceLock` 而不是 `lazy_static`/`std::sync::LazyLock`：
-/// 前者无需新依赖，后者在 1.77 的 MSRV 上还不可用（`LazyLock` 稳定于 1.80）。
-fn inflight_table() -> &'static Mutex<HashMap<String, ()>> {
-    static TABLE: std::sync::OnceLock<Mutex<HashMap<String, ()>>> = std::sync::OnceLock::new();
-    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+/// ── 为什么从「占位表」换成 `refresh_flight`（2026-10，issue 同款事故）────
+/// 旧实现是一张 `HashMap<String, ()>` 占位表：插入 → `await` 真实刷新 →
+/// 无条件 `remove`。它挡住了并发，但有两个致命缺口，两个都真实发生过：
+///
+///   1. **future 被 drop 时占位永久残留**。`refresh_account` 是 async，
+///      调用方（转发链路）的 future 随时可能被取消（客户端断开、超时）。
+///      取消点在 `refresh_account_inner(...).await` 那一行之后、`remove`
+///      之前，于是这个账号**再也刷不了**，只能重启进程 —— 表现就是
+///      「点刷新一直提示正在刷新中」。
+///   2. **后到者拿到的是错误而不是结果**。旧实现直接回 409，适配器那边
+///      只好「重读 store 碰运气」：刷新还没落盘时读到的是**旧 token**，
+///      拿它去重试只会再吃一次 401。
+///
+/// `refresh_flight::Table` 把这两条都关掉了（RAII 守卫 + 后到者复用结果），
+/// 而 Raccoon / AutoClaw / Cline / CodeArts / Accio / Antigravity 六家早就
+/// 在用它 —— WorkBuddy 是唯一漏网的一家，因为它是最早写的、刷新链路
+/// 独立在 `core::auth` 而不是各家的 `refresh.rs`。
+///
+/// 值是 `RefreshedAuth`（不是 `()`）：后到者要复用 leader 的结果，
+/// 否则只能回 409 或读旧 token。
+fn refresh_flight_table() -> &'static refresh_flight::Table<RefreshedAuth> {
+    static TABLE: std::sync::OnceLock<refresh_flight::Table<RefreshedAuth>> =
+        std::sync::OnceLock::new();
+    TABLE.get_or_init(refresh_flight::Table::new)
 }
+
+/// 单飞键：账号 id + refreshToken 指纹。
+///
+/// 带上 RT 指纹的理由与另外六家一致：同一账号换号（重新 OAuth 登录）之后
+/// 的刷新不该复用旧凭证那一轮的结果。指纹是截断 SHA-256，不进日志。
+fn refresh_flight_key(id: &str, refresh_token: &str) -> String {
+    format!("workbuddy:{}:{}", id, refresh_flight::fingerprint(refresh_token))
+}
+
+/// 上游「refresh token 已作废」的业务码（`12153:refresh token is invalid`）。
+///
+/// ── 为什么要单独识别它（2026-10-17 上游批量注销会话）────────────────
+/// 这个码的含义通常是**确定性失败**：上游已经把这条会话连同 refresh token 一起
+/// 注销（issue #215 里 3~7 个账号同时中招），网关侧再刷多少次都不会好。
+/// 旧实现把它当普通失败：定时凭证维护每轮都重试、每次都失败，日志刷屏，
+/// 而真正该做的事（提示用户重新登录）没人做。
+///
+/// 但它**也会被临时触发**（网络抖动 / 上游闪断 / 刷新竞态），所以不能见一次就
+/// 判死 —— 见 [`REFRESH_TOKEN_INVALID_THRESHOLD`]。
+pub const CODE_REFRESH_TOKEN_INVALID: i64 = 12153;
+
+/// 连续多少次 12153 才判定「会话真的死了」（需重新登录）。
+///
+/// ── 这个数字从哪来（参考项目 workbuddy2api-panel 的实测）────────────
+/// 他们的旧实现是「一次 12153 即禁用」，事后排查发现 **13 个被禁用的账号全部
+/// refresh 成功** —— 都是误判的受害者。12153 会被网络抖动、上游闪断、refresh
+/// 竞态临时触发，一次失败就永久杀号会误杀健康账号。
+///
+/// 取 3 是他们的结论：容忍偶发抖动，又不会让真正失效的 session 在池里反复被
+/// 选中。中间任何一次刷新成功都会把计数清零（`clear_refresh_token_invalid`），
+/// 所以「隔几天抖一次」不会慢慢攒到阈值。
+pub const REFRESH_TOKEN_INVALID_THRESHOLD: i64 = 3;
+
 
 /// 刷新结果（供路由层与登录流程共用）
 #[derive(Clone, Debug)]
@@ -474,33 +524,59 @@ impl AuthService {
 
     /// 按账号 id 刷新并回写（对照 account-routes.mjs 的 `refreshById`）。
     ///
-    /// 并发防重：同一账号同时只允许一次真实刷新，后到者直接返回先到者的结果
-    /// —— 与 Node 版「单线程 + 无并发刷新」的实际效果一致，但显式化了。
+    /// ── 并发语义（2026-10 重做，见 `refresh_flight_table` 的说明）──────
+    /// 同一账号同时只允许一次真实刷新；**后到者等这一轮的结果并复用它**，
+    /// 而不是像旧实现那样直接回 409 让上层去「重读 store 碰运气」。
+    ///
+    /// 这条改动直接对应上游 issue #215 的事故链：refresh token 是**一次性**
+    /// 的（换发即消费），两个并发刷新同时带着同一个 RT 去换，第二个必然拿到
+    /// `12153:refresh token is invalid`，而它一旦把这个失败当成「这次刷新
+    /// 失败」，整条 RT 链就死了 —— 之后无论怎么重试都救不回来，只能重新登录。
+    /// 收敛成一次真实请求之后，这个竞态从源头消失。
+    ///
+    /// 空 `refreshToken` 的账号不进单飞表（没有可刷的东西，直接报错更快）。
     pub async fn refresh_account(&self, id: &str) -> Result<RefreshedAuth, WorkBuddyAuthError> {
-        // 不做「等前一个完成再复用结果」的复杂等待：这里用占位表把重复请求
-        // 快速拒掉（返回明确错误），因为刷新本身很快，重复触发通常来自
-        // 用户连点或启动维护，报错比静默复用更利于定位问题。
-        // 表是**进程级**的（见 `AuthService` 的说明）：本实例、适配器构造的
-        // 实例、`/api/accounts/refresh` 共用同一份占位状态。
-        {
-            let table = inflight_table();
-            let mut guard = match table.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            if guard.contains_key(id) {
-                return Err(WorkBuddyAuthError::with_status(
-                    409,
-                    format!("账号 {id} 的 token 正在刷新中，请稍后重试"),
-                ));
+        // ── 已判定会话死亡的账号直接早退，不再打上游 ────────────────
+        // 连续 N 次 12153 之后 `refresh_account_inner` 会落 `needsRelogin`；
+        // 从此再刷新是纯粹的无效请求（上游答案不会变），只会刷日志、拖慢
+        // 转发链路。凭证维护已经跳过这类账号，但转发链路的 401 重试仍会走到
+        // 这里，所以这道闸必须放在入口。
+        //
+        // 解除方式只有一个：用户重新登录（换一条 refresh token 链）。
+        if self.store.needs_relogin(id) {
+            return Err(WorkBuddyAuthError::with_code(
+                "该账号的登录态已被上游注销，请重新登录该账号",
+                Some(401),
+                Some(CODE_REFRESH_TOKEN_INVALID),
+            ));
+        }
+        // 先读一次 RT 只为构造单飞键：没有 RT 的账号走 `refresh_account_inner`
+        // 的早退分支（那里给出「没有 refreshToken，无法刷新」的准确文案）。
+        let key = match self.store.get_credentials_by_id(id) {
+            Some(creds) if !creds.refresh_token.is_empty() => {
+                refresh_flight_key(id, &creds.refresh_token)
             }
-            guard.insert(id.to_string(), ());
-        }
-        let result = self.refresh_account_inner(id).await;
-        if let Ok(mut guard) = inflight_table().lock() {
-            guard.remove(id);
-        }
-        result
+            // 没有凭证 / 没有 RT：不需要单飞，直接交给 inner 报错
+            _ => return self.refresh_account_inner(id).await,
+        };
+        let outcome = match refresh_flight_table().join(&key) {
+            refresh_flight::Join::Leader(guard) => {
+                let result = self.refresh_account_inner(id).await;
+                // 单飞表存的是 `GatewayError`（六家共用的原语）：先把本家的
+                // 错误转成它再落表，返回时再转回来 —— 两条路径（leader / waiter）
+                // 因此拿到的是同一份结果，与「后到者复用 leader 结果」的语义一致。
+                guard.finish(result.clone().map_err(|error| error.to_gateway_error()));
+                result
+            }
+            refresh_flight::Join::Waiter(waiter) => waiter.wait().await.map_err(|error| {
+                WorkBuddyAuthError::with_code(
+                    error.message,
+                    Some(error.status_code),
+                    error.upstream_code,
+                )
+            }),
+        };
+        outcome
     }
 
     async fn refresh_account_inner(&self, id: &str) -> Result<RefreshedAuth, WorkBuddyAuthError> {
@@ -531,7 +607,53 @@ impl AuthService {
         let auth = session.get("auth").cloned().unwrap_or(Value::Null);
         // 续期也走该账号自己的出口（账号没配代理 → 直连）
         let proxy = session_proxy(&session);
-        let next = self.refresh_session(&auth, &context, proxy.as_ref()).await?;
+        let next = match self.refresh_session(&auth, &context, proxy.as_ref()).await {
+            Ok(next) => next,
+            Err(error) => {
+                // ── RT 已被上游作废（12153）：连续多次才判定会话死亡 ──────
+                //
+                // issue #215 里那批「账号被踢出」的结局态：上游把会话连同
+                // refresh token 一起注销，网关侧再刷多少次都不会好。旧实现把它当
+                // 普通失败，于是凭证维护每轮重试、每轮失败，日志刷屏，而用户
+                // 始终不知道「该去重新登录」。
+                //
+                // ── 为什么不能一次就判死（参考项目踩过的坑）───────────────
+                // workbuddy2api-panel 的注释里记着：旧实现「一次 12153 即 Disable」，
+                // 事后排查发现 **13 个被禁用的号全部 refresh 成功** —— 全是误判。
+                // 12153 会被网络抖动、上游闪断、refresh 竞态临时触发，一次失败就
+                // 永久杀号会误杀健康账号。因此这里改成「连续 N 次才判定」，
+                // 中间任何一次刷新成功都把计数清零。
+                if error.upstream_code == Some(CODE_REFRESH_TOKEN_INVALID)
+                    || error.message.contains("refresh token is invalid")
+                {
+                    let streak = self.store.note_refresh_token_invalid(id);
+                    if streak < REFRESH_TOKEN_INVALID_THRESHOLD {
+                        logging::verbose(
+                            "[Accounts]",
+                            &format!(
+                                "账号 {} 刷新收到 12153（连续第 {}/{} 次，暂不判定为失效）",
+                                creds.name, streak, REFRESH_TOKEN_INVALID_THRESHOLD
+                            ),
+                        );
+                        return Err(error);
+                    }
+                    self.mark_needs_relogin(
+                        id,
+                        &creds.name,
+                        "refresh token 已失效（上游注销了会话）",
+                    );
+                    return Err(WorkBuddyAuthError::with_code(
+                        format!(
+                            "账号 {} 的 refresh token 已被上游作废（连续 {} 次），无法自动续期，请重新登录该账号",
+                            creds.name, streak
+                        ),
+                        Some(401),
+                        Some(CODE_REFRESH_TOKEN_INVALID),
+                    ));
+                }
+                return Err(error);
+            }
+        };
         if next.access_token.is_empty() {
             return Err(WorkBuddyAuthError::new("token 刷新响应缺少 accessToken"));
         }
@@ -542,6 +664,10 @@ impl AuthService {
             next.expires_at,
             next.refresh_expires_at,
         );
+        // 刷新成功 = 账号被证明还活着：清掉「需要重新登录」标记与 12153 连续
+        // 计数（用户可能刚重新登录过，也可能上游自己恢复了会话）
+        self.clear_needs_relogin(id);
+        self.store.clear_refresh_token_invalid(id);
         logging::log(
             "[Accounts]",
             &format!(
@@ -551,6 +677,25 @@ impl AuthService {
             ),
         );
         Ok(next)
+    }
+
+    /// 标记账号「需要重新登录」（落 `needsRelogin` + 原因，界面据此显示）。
+    ///
+    /// 写盘失败只记日志：这是个提示性标记，丢了不该让刷新流程报错。
+    fn mark_needs_relogin(&self, id: &str, name: &str, reason: &str) {
+        let applied = self.store.set_needs_relogin(id, Some(reason));
+        logging::log(
+            "[Accounts]",
+            &format!(
+                "⚠️ 账号 {name} 需要重新登录：{reason}{}",
+                if applied { "" } else { "（标记未能落盘）" }
+            ),
+        );
+    }
+
+    /// 清掉「需要重新登录」标记（刷新成功 / 重新登录之后调用）。
+    fn clear_needs_relogin(&self, id: &str) {
+        self.store.set_needs_relogin(id, None);
     }
 
     /// 手动刷新：当前账号（对照 `refreshStoredSession` 的 store 分支）。

@@ -1,0 +1,521 @@
+/* ─────────────────────────────────────────────
+   Agent · 客户端接管（page-agent.css）
+
+   侧栏「转发能力」组里夹在「模型管理」与「网络代理」之间的一页：
+   模型管理决定「请求发往哪家上游」，网络代理决定「从哪条线路出去」，
+   这一页决定「谁把请求发进来」。
+
+   页面骨架复用全局类名（.panel / .panel-head / .panel-foot / .toolbar /
+   .spacer），这里只加 agent-* 这一层。配色全部走 tokens.css 的语义变量，
+   深浅两套主题自动成立。
+
+   两条布局铁律：
+     · 左栏与右栏是 grid 两栏（照模型页的 .mm），左栏固定宽、右栏吃剩余；
+     · 写入预览的 <pre> 里每行是 flex 子项 —— 必须 flex: 0 0 auto，
+       否则内容超过 max-height 时每行会被压扁到 0 高（滚动条在、字看不见）。
+   ───────────────────────────────────────────── */
+
+/* ─── 页面骨架：滚动归属 ───
+   本页是「窗口内固定高度、左右两栏各自滚」的形态（同 gateway / assistant）。
+   .page.active 默认是 block + overflow-y:auto —— 那样 .agent-panel 的 flex:1
+   不生效，面板按内容长高，整页跟着滚：左栏客户端清单一滚就走，工具栏和面板头
+   也一起被卷出视野。这里把页面本身改成 flex 列、关掉它自己的滚动，让高度
+   落到 .agent-panel，再由 .agent-rail-scroll / .agent-detail 各自接管。
+   ───────────────────────────────────────────── */
+.page.active[data-page="agent"] {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: 0;
+}
+
+.agent-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 0;
+}
+.agent-panel > .panel-head,
+.agent-panel > .toolbar,
+.agent-panel > .panel-foot { flex: 0 0 auto; }
+.agent-panel > .agent-body { flex: 1 1 auto; min-height: 0; }
+
+/* ─── 工具条 ─── */
+.agent-toolbar { border-bottom: 1px solid var(--hairline); }
+/* InputGroup 自带 Tailwind 的 w-full，而 islands/ui.css 在本文件之后加载 ——
+   同优先级下会覆盖这里的宽度，搜索框就撑满整行把筛选挤到下一行。
+   两段类名把优先级提上去，宽度才收得住。 */
+.agent-toolbar .agent-search {
+  width: 240px;
+  flex: 0 1 240px;
+  min-width: 140px;
+}
+.agent-count { color: var(--text-3); font-size: 11.5px; white-space: nowrap; }
+.agent-count b { color: var(--text-2); font-variant-numeric: tabular-nums; }
+.agent-error {
+  margin: 10px 16px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--danger-bd);
+  border-radius: var(--r-sm);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 12px;
+}
+
+/* ─── 两栏主体 ───
+   高度由 .agent-panel 的剩余空间给（flex:1 + min-height:0），grid 的两栏
+   各自在内部滚。min-height:0 不能省：grid 项的默认 min-height 是 auto，
+   会被内容顶高，于是两栏都不滚、整页又长出去了。 */
+.agent-body {
+  display: grid;
+  grid-template-columns: 268px minmax(0, 1fr);
+  min-height: 0;
+}
+
+/* ─── 左栏：客户端清单 ─── */
+.agent-rail {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--sidebar-border);
+  background: var(--rail-bg);
+}
+.agent-rail-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.agent-rail-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 4px 4px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  white-space: nowrap;
+}
+.agent-rail-label:first-child { margin-top: 0; }
+.agent-rail-label::after { content: ""; flex: 1; height: 1px; background: var(--hairline); }
+
+.agent-client {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  height: auto;
+  padding: 7px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text);
+  text-align: left;
+  justify-content: flex-start;
+}
+.agent-client:hover:not(:disabled) { background: var(--nav-hover); border-color: transparent; }
+.agent-client.is-active,
+.agent-client.is-active:hover:not(:disabled) {
+  background: var(--surface);
+  border-color: var(--border);
+  box-shadow: var(--shadow-1);
+}
+/* 深色下 --surface 比 --rail-bg 暗：选中行换亮一档的 --surface-2 */
+:root[data-theme="dark"] .agent-client.is-active,
+:root[data-theme="dark"] .agent-client.is-active:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+.agent-client.is-missing { opacity: .52; }
+.agent-client-main { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.agent-client-name {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.agent-client-ver {
+  min-width: 0;
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.agent-client-sub {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-3);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.agent-client.is-direct .agent-client-name { color: var(--text-2); }
+.agent-multi {
+  flex: none;
+  padding: 0 4px;
+  border: 1px solid var(--warn-bd);
+  border-radius: var(--r-xs);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 9.5px;
+  font-weight: 700;
+}
+
+/* 状态点：实心绿 = 走网关；空心 = 没走；虚线 = 未安装 */
+.agent-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: transparent;
+  border: 1px solid var(--border-strong);
+}
+.agent-dot.is-on { background: var(--ok); border-color: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.agent-dot.is-missing { border-style: dashed; }
+
+/* ─── 头像：色相 monogram（与模型页 .pv-ico 同一口径）─── */
+.agent-avatar {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  background: oklch(0.68 0.13 var(--av-h, 260) / 18%);
+  color: oklch(0.70 0.14 var(--av-h, 260));
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  overflow: hidden;
+}
+:root[data-theme="light"] .agent-avatar {
+  background: oklch(0.68 0.13 var(--av-h, 260) / 14%);
+  color: oklch(0.52 0.15 var(--av-h, 260));
+}
+.agent-avatar.is-lg { width: 40px; height: 40px; border-radius: 10px; font-size: 15px; }
+.agent-avatar.is-sm { width: 20px; height: 20px; border-radius: 5px; font-size: 9px; }
+
+/* 真实品牌图标：不垫任何底色，图标自己长什么样就什么样。
+   两类图标分开排版（后端用 iconFull 标出第一类）：
+     · 自带底的整块图标（ChatGPT / Cursor / Zed / Cline / Kimi / Qoder /
+       OpenCode / ZCode / WorkBuddy / Gemini CLI / Crush）铺满格子，让它
+       自己的圆角贴着外框 —— 否则会看到「方块里再套一个方块」；
+     · 透明底的单色标识（Claude Code）留一圈内边距，不然会顶满整个格子。
+   黑底图标（ZCode / OpenCode / Cline / Zed）在深色主题下会和背景连成一片，
+   所以整块图标补一圈极淡的中性描边，只勾边界、不改颜色。 */
+.agent-avatar.has-icon,
+:root[data-theme="light"] .agent-avatar.has-icon {
+  background: transparent;
+}
+.agent-avatar.is-full {
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 9%);
+}
+:root[data-theme="light"] .agent-avatar.is-full {
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 10%);
+}
+.agent-avatar img {
+  width: 76%;
+  height: 76%;
+  object-fit: contain;
+  display: block;
+}
+.agent-avatar.is-full img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+}
+.agent-avatar.is-lg img { width: 74%; height: 74%; }
+.agent-avatar.is-lg.is-full img { width: 100%; height: 100%; }
+
+/* ─── 右栏：详情 ─── */
+.agent-detail {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 18px 22px;
+  overflow-anchor: none;
+}
+
+.agent-dhead { display: flex; align-items: flex-start; gap: 12px; }
+.agent-dtitle { min-width: 0; flex: 1; }
+.agent-dtitle h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 16px;
+  font-weight: 700;
+}
+.agent-mode-badge { font-size: 10.5px; }
+.agent-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 3px;
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+.agent-meta code {
+  padding: 1px 5px;
+  border-radius: var(--r-xs);
+  background: var(--surface-inset);
+  color: var(--text-2);
+  font-size: 11px;
+  max-width: 42ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-note {
+  margin-top: 12px;
+  padding: 9px 12px;
+  border: 1px solid var(--primary-bd);
+  border-radius: var(--r-sm);
+  background: var(--primary-soft);
+  color: var(--text-2);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+/* ─── 卡片 ─── */
+.agent-card {
+  margin-top: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+.agent-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 13px;
+  border-bottom: 1px solid var(--hairline);
+}
+.agent-card-head h4 { font-size: 12.5px; font-weight: 650; }
+.agent-card-sub { color: var(--text-3); font-size: 11px; }
+.agent-card-body { padding: 12px 13px; display: flex; flex-direction: column; gap: 9px; }
+
+/* ─── 配置列表 ─── */
+.agent-profiles { display: flex; flex-direction: column; gap: 6px; padding: 10px 13px 12px; }
+
+/* 「这份列表来自客户端文件」的说明条：不是错误，是状态。
+   用中性底色 + 左边一条竖线，与真正的错误（.agent-live-error）区分开。 */
+.agent-live-note {
+  margin: 8px 13px 0;
+  color: var(--text-3);
+  font-size: 11px;
+}
+.agent-live-error {
+  margin: 10px 13px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--danger-bd);
+  border-radius: var(--r-sm);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 11.5px;
+  line-height: 1.65;
+}
+.agent-profile {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 11px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-inset);
+}
+.agent-profile.is-on { border-color: var(--primary-bd); background: var(--primary-soft); }
+.agent-profile.is-editing { box-shadow: inset 0 0 0 1px var(--primary-bd); }
+.agent-profile-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.agent-profile-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.agent-tag { font-size: 10px; }
+.agent-profile-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  color: var(--text-3);
+  font-size: 11px;
+}
+.agent-profile-sub code {
+  padding: 1px 5px;
+  border-radius: var(--r-xs);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 10.5px;
+}
+.agent-profile-sub b { color: var(--text-2); font-weight: 600; }
+.agent-profile-note { color: var(--text-3); font-size: 11px; line-height: 1.5; }
+.agent-profile-act { display: flex; align-items: center; gap: 4px; }
+
+/* ─── 编辑表单 ─── */
+.agent-form {
+  margin-top: 12px;
+  padding: 12px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.agent-form-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-bottom: 9px;
+  border-bottom: 1px solid var(--hairline);
+}
+.agent-form-head b { font-size: 12.5px; font-weight: 650; }
+.agent-field {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+.agent-field > label { color: var(--text-3); font-size: 11.5px; white-space: nowrap; }
+.agent-field-body { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.agent-inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.agent-hint { color: var(--text-3); font-size: 11px; }
+.agent-url-group { width: 100%; }
+
+.agent-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+/* ─── 写入预览 ─── */
+.agent-preview-path {
+  padding: 1px 6px;
+  border-radius: var(--r-xs);
+  background: var(--surface-inset);
+  color: var(--text-2);
+  font-size: 10.5px;
+}
+.agent-preview-legend {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-3);
+  font-size: 11px;
+}
+/* 写入的副作用（注释会被清掉这类）：放在代码块上面，不能折叠 —— 它属于
+   「写之前必须知道」的信息，藏进 tooltip 就等于没说。 */
+/* 副作用提示（注释会被清掉）：跟在图例后面，一行、可截断，完整内容在 title 里 */
+.agent-warn-inline {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--warn) 70%, var(--text-3));
+}
+.agent-legend-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  display: inline-block;
+}
+.agent-legend-swatch.is-changed { background: color-mix(in srgb, var(--warn) 45%, transparent); }
+.agent-legend-swatch.is-added { background: color-mix(in srgb, var(--ok) 45%, transparent); }
+
+.agent-code {
+  margin: 0;
+  padding: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-inset);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.72;
+  overflow: auto;
+  max-height: 340px;
+  display: block;
+}
+/* 每行是 flex 子项：必须 flex: 0 0 auto，否则超长内容会把行压扁到 0 高 */
+.agent-line {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: max-content;
+  padding-right: 14px;
+}
+.agent-line.is-changed { background: color-mix(in srgb, var(--warn) 8%, transparent); }
+.agent-line.is-added { background: color-mix(in srgb, var(--ok) 8%, transparent); }
+.agent-line-no {
+  flex: none;
+  width: 40px;
+  padding-right: 10px;
+  text-align: right;
+  color: var(--text-3);
+  opacity: .65;
+  user-select: none;
+}
+.agent-line-text { white-space: pre; color: var(--text-2); }
+.agent-line.is-changed .agent-line-text { color: var(--warn); }
+.agent-line.is-added .agent-line-text { color: var(--ok); }
+
+/* ─── 未安装空态 ─── */
+.agent-empty {
+  margin-top: 20px;
+  padding: 34px 20px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-md);
+  text-align: center;
+}
+.agent-empty-title { font-size: 13.5px; font-weight: 650; }
+.agent-empty p { margin-top: 4px; color: var(--text-3); font-size: 12px; }
+.agent-empty-path {
+  display: inline-block;
+  margin-top: 12px;
+  padding: 6px 12px;
+  border-radius: var(--r-xs);
+  background: var(--surface-inset);
+  color: var(--text-2);
+  font-size: 11.5px;
+}
+
+/* ─── 窄窗口：左栏收窄、表单标签折到上一行 ─── */
+@media (max-width: 1180px) {
+  .agent-body { grid-template-columns: 232px minmax(0, 1fr); }
+}
+@media (max-width: 980px) {
+  .agent-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .agent-rail {
+    max-height: 200px;
+    border-right: 0;
+    border-bottom: 1px solid var(--sidebar-border);
+  }
+  .agent-field { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .agent-field > label { font-size: 11px; }
+}

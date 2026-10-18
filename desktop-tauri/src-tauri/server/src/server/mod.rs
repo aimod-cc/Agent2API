@@ -372,6 +372,9 @@ impl ServerState {
         // `core::billing::checkin::run_checkin`（唯一），台账全量保留 ——
         // 清历史走签到记录页自己的「清空 / 按筛选删除」（见 checkin_records 模块头）。
         core::checkin_records::install(db.clone());
+        // AI 助手的对话会话（左边那列历史会话）：装句柄即可，写入发生在每轮
+        // 回答之后（见 `core::assistant_sessions` 的模块头）。
+        core::assistant_sessions::install(db.clone());
         // 定时签到的「签到范围」一次性补齐：把加入版本晚于配置里那一版的家补进
         // 每条条目的范围（用户的期望是 OfficeAce 果办 / CodeArts 默认开启）。
         // 放在这里是因为它要读写配置快照（`config::init` 已在上方就位），且必须早于
@@ -773,6 +776,20 @@ impl ServerState {
         // 服务器停机时进程会结束，任务随之消失。用 crate::spawn_task
         // （与 auto_checkin 同一理由）保证从非 tokio 上下文调用也能进入全局运行时。
         core::scheduled_tasks::spawn(state.store.clone(), state.update.clone());
+        // 猫猫旅行定时排程（国内版）：每天定点巡检一趟（无猫领养 / idle 派出 /
+        // arrived 领奖）。与上面的间隔型任务不是同一个形状（每天定点 vs 等间隔），
+        // 理由见 `core::growth_scheduler` 的模块头。默认开启、09:00 与 21:00 两趟
+        // —— 早上派出、晚上领奖，与参考项目 `TravelHours` 同口径。
+        {
+            let (enabled, times) = core::growth_scheduler::settings();
+            if enabled {
+                logging::log(
+                    "[Travel]",
+                    &format!("猫猫旅行定时排程已启用：每天 {} 执行", times.join(" / ")),
+                );
+                core::growth_scheduler::spawn(state.store.clone());
+            }
+        }
         // ZCode 活动套餐的「推理要不要验证码令牌」由上游配置说，每 5 分钟同步一次
         // （判据、代价与三条口径见 `providers::zcode::config_sync` 的模块头）。
         // 不进上面那张定时任务表：它没有「用户可配的间隔」、也不产生任何运行状态

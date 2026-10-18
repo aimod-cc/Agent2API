@@ -1,14 +1,23 @@
 [package]
 name = "agent2api-server"
-version = "3.0.8"
+version = "3.1.0"
 description = "Agent2API 网关本体 — 多提供商本地网关（桌面端与 headless 服务器共用）"
-authors = ["aimod-cc"]
+authors = ["Agent2API"]
 edition = "2021"
 # MSRV 与桌面 crate 保持一致（rusqlite 0.40 → libsqlite3-sys 0.38 声明 1.88）
 rust-version = "1.88"
 license-file = "../../../LICENSE"
-repository = "https://github.com/aimod-cc/agent2api"
-homepage = "https://github.com/aimod-cc/agent2api"
+repository = "https://github.com/Agent2API/agent2api"
+homepage = "https://github.com/Agent2API/agent2api"
+
+# 关掉 bin 自动发现：`src/bin/service.rs` 其实是 `agent2api-server.rs` 的**模块**
+# （那边写着 `#[cfg(windows)] pub mod service;`），但 Cargo 会把 `src/bin/*.rs`
+# 一律当成独立 bin 目标 —— 于是它被当成一个「没有 main、又依赖 Windows-only
+# crate」的假二进制去编译。Linux 上（docker 镜像与 linux-server 包都走
+# `cargo build -p agent2api-server`，**不带** `--bin`）整个构建直接失败：
+#   error[E0601]: `main` function not found in crate `service`
+# 本包的 bin 目标只有下面显式声明的这一个；将来再加 bin 也要在这里登记。
+autobins = false
 
 # ── 为什么拆成独立 crate ──────────────────────────────────────
 # 网关本体（原桌面 crate 的 src/server 模块）要同时服务两种形态：
@@ -71,7 +80,9 @@ sha2 = "0.10"
 sha1 = "0.10"
 # 「从其他工具导入」：解析 cc-switch 里 Codex 供应商的 config.toml 字符串
 # （提取激活 model_provider 的 base_url，见 core/import_ccswitch.rs）
-toml = "0.9"
+# preserve_order：Agent 页写回 Codex 的 config.toml 时要保住用户原有的键序，
+# 否则每写一次就把整份文件重排一遍（注释仍会丢，写前有备份可回退）
+toml = { version = "0.9", features = ["preserve_order"] }
 # ALTCHA 机器人校验的 challenge 签名（HMAC-SHA256，见 server/altcha.rs）
 hmac = "0.12"
 chrono = "0.4"
@@ -128,6 +139,18 @@ windows = { version = "0.61", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
 ] }
+# Windows 服务形态（bin/service.rs）：`--service` 参数下把进程交给 SCM
+# （StartServiceCtrlDispatcherW + 控制事件回调 + 状态上报）。
+#
+# 为什么用这个 crate 而不是直接拼 windows-sys：SCM 的握手是「先注册
+# 控制回调 → 再上报 RUNNING → 收到 STOP 后回到 STOPPED」这一串顺序敏感的
+# 调用，顺序错了 SCM 会直接把服务判成启动失败（1053）。crate 把这层封成了
+# 回调 + `set_service_status` 两个动作，错误也被规整成 Result。
+#
+# 它与上面 `windows` 0.61 是**两条独立绑定**（内部依赖 windows-sys 0.61），
+# 但只链 Win32_System_Services / Foundation 等少数模块，体积影响可忽略；
+# 且仅 Windows 目标编译，Linux / Docker 构建完全不受影响。
+windows-service = "0.8"
 
 [dev-dependencies]
 # 路由级测试用 `ServiceExt::oneshot` 直接打 Router（不占端口、不跑 serve），

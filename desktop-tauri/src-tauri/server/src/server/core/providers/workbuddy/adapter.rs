@@ -330,11 +330,13 @@ impl ProviderAdapter for WorkBuddyAdapter {
             let auth = AuthService::for_store(store.clone());
             match auth.refresh_account(account_id).await {
                 Ok(refreshed) => Ok(refreshed.access_token),
+                // ── 409 现在只可能来自「等待 leader 超时」（2026-10）──────
+                // `refresh_account` 改用 `refresh_flight` 之后，并发的后到者
+                // **等这一轮的结果并复用它**，不再回 409 让人重读 store 碰运气
+                // （旧路径读到旧 token 只会再吃一次 401）。剩下的 409 只有
+                // 「leader 卡在网络里、等满 30 秒」，这时重读 store 仍是最快的
+                // 兜底：leader 若在超时后才落盘，这次就能拿到新值。
                 Err(error) if error.http_status() == 409 => {
-                    // 并发刷新（同一账号正被另一处刷新）：那不算失败，只是
-                    // 「刷新在别处进行中」。此刻重读 store —— 若那次刷新已落盘，
-                    // 这里就能拿到新 token；还没落盘则返回错误，
-                    // 编排层按普通失败处理（不会空转）。
                     store
                         .get_session_by_id(account_id)
                         .and_then(|entry| {
