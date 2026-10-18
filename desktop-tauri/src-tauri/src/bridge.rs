@@ -693,6 +693,19 @@ const BRIDGE_JS: &str = r#"
     saveDeveloperRoleCompat: enabled =>
       call('PUT', '/api/developer-role-compat', { developerRoleCompat: enabled === true }),
 
+    // ── 机器人校验开关（登录 / 注册的 ALTCHA proof-of-work）──
+    // 与 getSanitize / saveSanitize 同形：GET 读、PUT 写，响应体就是新状态
+    //（`{captchaEnabled}`）。**与 web_shim.rs 的同名方法成对维护** ——
+    // 这一对最初只加了 web_shim 那一侧，桌面壳漏掉；症状比 getCors 那次更隐蔽：
+    // `loadCaptcha` 里是 `await shared().workbuddyDesktop?.getCaptchaSetting()`，
+    // 方法不存在时可选链让表达式得到 `undefined` 而**不抛错**，于是
+    // `captcha.available` 被判成 `true`、`enabled` 为 `false` —— 桌面端显示出
+    // 一个「可设置且当前关闭」的开关，点下去 `saveCaptchaSetting` 同样静默，
+    // 还会弹出「✅ 机器人校验已开启」的假成功提示。加方法比给类型补 `?` 正确：
+    // 端点（/api/captcha）在网关服务端，桌面壳本来就跑着同一个网关。
+    getCaptchaSetting: () => call('GET', '/api/captcha'),
+    saveCaptchaSetting: enabled => call('PUT', '/api/captcha', { captchaEnabled: enabled === true }),
+
     // ── Cline 伪装头 ──
     // 与 getSanitize / saveSanitize 同形：GET 读（overrides + effective），
     // PUT 整体替换覆盖表（空值 = 不发该头，删行 = 回落默认值）。

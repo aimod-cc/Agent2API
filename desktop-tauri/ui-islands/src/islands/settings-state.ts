@@ -1553,8 +1553,17 @@ export async function saveCors(next: boolean): Promise<void> {
 /* ─── 机器人校验（面板登录 / 注册的 ALTCHA 开关）── */
 
 async function loadCaptcha(): Promise<void> {
+  // 方法本身可能不存在（跨版本组合：新界面配没实现它的旧壳）。**必须先判存在**：
+  // `await api?.getCaptchaSetting()` 在方法缺失时得到 `undefined` 而不会进 catch，
+  // 直接判 `available: true` 会让界面显示一个「可设置且当前关闭」的开关，点下去
+  // 同样静默、还弹「✅ 已开启」的假成功 —— 这比干脆禁用糟得多。
+  const api = shared().workbuddyDesktop
+  if (!api?.getCaptchaSetting) {
+    publish({ captcha: { available: false, enabled: false } })
+    return
+  }
   try {
-    const state = await shared().workbuddyDesktop?.getCaptchaSetting()
+    const state = await api.getCaptchaSetting()
     publish({ captcha: { available: true, enabled: state?.captchaEnabled === true } })
   } catch (error) {
     // 读失败降级禁用开关（照 retention 的模式）
@@ -1565,10 +1574,16 @@ async function loadCaptcha(): Promise<void> {
 
 export async function saveCaptcha(next: boolean): Promise<void> {
   if (busyScope) { repaint(); return }
+  const api = shared().workbuddyDesktop
+  // 同上：没有写入通道就不要先乐观地把开关拨过去再报「已开启」
+  if (!api?.saveCaptchaSetting) {
+    toast(t('当前环境不支持修改机器人校验设置'), 'err')
+    return
+  }
   beginBusy('captcha')
   publish({ captcha: { ...snapshot.captcha, enabled: next } })
   try {
-    const state = await shared().workbuddyDesktop?.saveCaptchaSetting(next)
+    const state = await api.saveCaptchaSetting(next)
     publish({ captcha: { available: true, enabled: state?.captchaEnabled === true } })
     toast(next ? t('✅ 机器人校验已开启') : t('⚠️ 机器人校验已关闭'))
   } catch (error) {
@@ -2126,8 +2141,15 @@ async function loadStorage(): Promise<void> {
  * 成功后整页跳回登录页。返回 false 表示失败（按钮要解禁）。
  */
 export async function panelLogout(): Promise<boolean> {
+  const api = shared().workbuddyDesktop
+  // 方法不存在时不能「跳过调用直接跳登录页」—— 那会让用户以为已经登出，
+  // 实际服务端会话（含 30 天续期链）还在，是安全问题而不是体验问题。
+  if (!api?.panelLogout) {
+    toast(t('当前环境不支持退出面板登录'), 'err')
+    return false
+  }
   try {
-    await shared().workbuddyDesktop?.panelLogout()
+    await api.panelLogout()
     window.location.href = '/login'
     return true
   } catch (error) {

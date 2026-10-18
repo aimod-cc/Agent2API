@@ -217,9 +217,24 @@ export type SettingsBridge = {
   getPrompt(): Promise<unknown>
   savePrompt(payload: PromptPatch): Promise<unknown>
   getStorage(): Promise<unknown>
-  getCaptchaSetting(): Promise<{ captchaEnabled?: boolean } | null | undefined>
-  saveCaptchaSetting(on: boolean): Promise<{ captchaEnabled?: boolean } | null | undefined>
-  panelLogout(): Promise<unknown>
+  /**
+   * 机器人校验开关（ALTCHA）。
+   *
+   * 先前只有网页端 shim 实现，桌面壳漏了 —— 症状比「读不到」更隐蔽：调用点是
+   * `await api?.getCaptchaSetting()`，可选链让表达式得到 `undefined` 而不抛错，
+   * 于是 `captcha.available` 被判成 `true`，桌面端显示出一个「可设置且当前
+   * 关闭」的开关，点下去弹「✅ 已开启」的假成功。已在 bridge.rs 补上同名方法
+   * （端点 /api/captcha 在网关服务端，桌面壳跑的是同一个网关），因此标为必选。
+   * 这里保留 `?` 只是为「老版本桌面壳 + 新界面」这种跨版本组合留退路。
+   */
+  getCaptchaSetting?(): Promise<{ captchaEnabled?: boolean } | null | undefined>
+  saveCaptchaSetting?(on: boolean): Promise<{ captchaEnabled?: boolean } | null | undefined>
+  /**
+   * 退出面板登录。**只有网页端有**（桌面壳的面板跟着应用走，没有「登录面板」
+   * 这个概念）—— 设置页那块整卡由 `snap.panelLogin` 门控，桌面端不渲染，
+   * 所以桌面 bridge 不实现它是对的。
+   */
+  panelLogout?(): Promise<unknown>
   /** 后端就绪状态（局域网地址展示要拼网关端口；其余字段本页不消费） */
   getBackendStatus?(): Promise<{ port?: number } | null | undefined>
   // ── 局域网访问（仅桌面端渲染，web 端 shim 不提供这几个方法）──
