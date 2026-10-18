@@ -1154,6 +1154,10 @@ const SHIM_TEMPLATE: &str = r#"(function () {
     getTravelSchedule: function () { return call('GET', '/api/travel-schedule'); },
     saveTravelSchedule: function (patch) { return call('POST', '/api/travel-schedule', patch); },
     runTravelScheduleNow: function () { return call('POST', '/api/travel-schedule/run', {}); },
+    // 成长任务每日排程（国内版；与 bridge.rs 的同名方法成对维护）
+    getGrowthTaskSchedule: function () { return call('GET', '/api/growth-task-schedule'); },
+    saveGrowthTaskSchedule: function (patch) { return call('POST', '/api/growth-task-schedule', patch); },
+    runGrowthTaskScheduleNow: function () { return call('POST', '/api/growth-task-schedule/run', {}); },
     // WorkBuddy 国际版日活任务的手动粒度入口（mode: full | claim | keepalive）
     runCheckinActivity: function (id, mode) { return call('POST', '/api/checkin-activity', { id: id, mode: mode }); },
     // 签到中心的聚合快照（与 bridge.rs 的同名方法同一路径）

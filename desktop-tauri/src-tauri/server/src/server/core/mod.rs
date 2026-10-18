@@ -86,6 +86,9 @@ pub mod degrade;
 pub mod egress;
 pub mod endpoints;
 pub mod growth_scheduler;
+/// WorkBuddy 成长任务的每日定点排程（国内版）：点亮 / 领奖。
+/// 与 `growth_scheduler`（猫猫旅行）是两套独立排程，配置键各自独立。
+pub mod growth_task_scheduler;
 pub mod import_ccswitch;
 pub mod key_scope;
 pub mod legacy_api_key;

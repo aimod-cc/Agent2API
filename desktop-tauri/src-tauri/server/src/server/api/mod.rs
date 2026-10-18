@@ -73,6 +73,9 @@ pub mod growth;
 // 猫猫旅行的**定时排程**管理接口（开关 / 时刻 / 立即巡检）：
 // 调度体在 `core::growth_scheduler`，这里只是管理面
 pub mod growth_schedule;
+// 成长任务的**每日定时排程**管理接口（与旅行同一形状，独立排程）：
+// 调度体在 `core::growth_task_scheduler`，这里只是管理面
+pub mod growth_task_schedule;
 // 网关面（`/v1/*`）跨域访问开关：`GET/PUT /api/cors`（与 `/api/sanitize`
 // 同形的单开关端点，见该文件模块头）
 pub mod cors;

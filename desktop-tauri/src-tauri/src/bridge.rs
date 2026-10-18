@@ -607,6 +607,12 @@ const BRIDGE_JS: &str = r#"
     getTravelSchedule: () => call('GET', '/api/travel-schedule'),
     saveTravelSchedule: patch => call('POST', '/api/travel-schedule', patch),
     runTravelScheduleNow: () => call('POST', '/api/travel-schedule/run', {}),
+    // 成长任务每日排程（国内版）：读 / 存开关与时刻 / 立即巡检全部
+    // （与 web_shim.rs 的同名方法成对；调度体在 core::growth_task_scheduler）。
+    // 与上面的旅行排程是**两套独立排程**（不同配置键），不是同一个东西的两个入口。
+    getGrowthTaskSchedule: () => call('GET', '/api/growth-task-schedule'),
+    saveGrowthTaskSchedule: patch => call('POST', '/api/growth-task-schedule', patch),
+    runGrowthTaskScheduleNow: () => call('POST', '/api/growth-task-schedule/run', {}),
     // WorkBuddy 国际版日活任务的手动粒度入口（mode: full | claim | keepalive）
     runCheckinActivity: (id, mode) => call('POST', '/api/checkin-activity', { id, mode }),
     // 签到中心的聚合快照（每日签到分组 / 自动签到设置 / 签到历史 / 一次性项入口），

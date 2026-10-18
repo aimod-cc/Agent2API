@@ -846,6 +846,12 @@ async fn attempt_queue(
         // provider 才能继续 —— 否则下一步 session_for 会去「该 provider 的
         // 当前账号」里找，找不到就是 401。提前拦住能把原因说清楚。
         if target.account_id.is_none() && !adapter.allows_anonymous_default_session() {
+            // 通知（旁路，见 core::notify）：这是转发**真的失败**了、且原因是
+            //「没有可用账号」——用户必须去加账号 / 启用 / 重新登录。去重窗口
+            // （6 小时）兜住「空池时每条请求都撞上」，不会刷屏。
+            crate::server::core::notify::hooks::on_no_available_account(
+                "该提供商没有可用账号，转发请求已失败：请在「账号」页添加并启用账号",
+            );
             return Err(GatewayError::with_status(
                 503,
                 "没有可用账号，无账号可转发：请在账号页添加并启用账号",
@@ -2088,6 +2094,12 @@ async fn attempt_stateful(
     // 没有账号记录（走默认登录态）时，只有声明了环境变量旁路的 provider 能继续
     // —— 与无状态路径同一判据与文案（`allows_anonymous_default_session`）
     if target.account_id.is_none() && !adapter.allows_anonymous_default_session() {
+        // 通知（旁路）：与无状态路径同一出口、同一文案（见那边说明）。
+        // 去重以 kind 为二级键，多家的空池各报一次。
+        crate::server::core::notify::hooks::on_no_available_account(&format!(
+            "{} 没有可用账号，转发请求已失败：请在「账号」页添加并启用账号",
+            meta(kind).label
+        ));
         return Err(GatewayError::with_status(
             503,
             format!(

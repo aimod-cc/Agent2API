@@ -310,6 +310,9 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
         // 猫猫旅行定时排程（国内版）：开关 / 时刻 / 今日已跑时刻 / 上一轮结果。
         // 与 `auto`（签到排程）并列 —— 两者是独立排程，各自开关与时刻。
         "travel": crate::server::core::growth_scheduler::state(),
+        // 成长任务每日排程（国内版）：同上，独立于签到与旅行
+        //（配置键 `growthTaskSchedule`，见 core::growth_task_scheduler）。
+        "growthTask": crate::server::core::growth_task_scheduler::state(),
         "history": checkin_history::list(),
     }))
 }

@@ -5,7 +5,8 @@ import { t } from '../i18n'
 import {
   getCheckinStore, setKeepaliveDraft, submitKeepaliveModels, subscribeCheckinStore,
   runTravelScheduleNow, saveTravelSchedule,
-  type CheckinStore, type TravelScheduleState,
+  runGrowthTaskScheduleNow, saveGrowthTaskSchedule,
+  type CheckinStore, type TravelScheduleState, type GrowthTaskScheduleState,
 } from './checkin-state'
 import {
   deleteSchedule, getSchedulesStore, loadSchedules, runScheduleNow, saveSchedule,
@@ -602,7 +603,128 @@ function ScheduleTab(): React.ReactElement {
         saving={checkin.travelSaving}
         running={checkin.travelRunning}
       />
+
+      <GrowthTaskPanel
+        schedule={checkin.snapshot?.growthTask}
+        saving={checkin.growthTaskSaving}
+        running={checkin.growthTaskRunning}
+      />
     </div>
+  )
+}
+
+/* ─── 成长任务每日排程 ─────────────────────── */
+
+/**
+ * 成长任务每日排程面板（国内版）。
+ *
+ * ── 为什么与签到 / 旅行分卡 ────────────────────────────────
+ * 三者的配置键各不相同（`autoCheckin` / `growthSchedule` /
+ * `growthTaskSchedule`），服务的是三件事：签到领每日积分、推进猫猫状态机、
+ * 点亮成长任务。合成一张卡会让「关掉成长任务」变成「关掉签到」的副作用。
+ *
+ * ── 默认关（与旅行相反）────────────────────────────────────
+ * 它会发上报事件、领积分，是一串写操作；由用户显式打开。界面在开关旁
+ * 直接说明这一点，避免用户以为「装好就自动跑」。
+ *
+ * ── 时刻怎么编 ──────────────────────────────────────────────
+ * 逗号分隔的 `HH:MM` 列表（缺省 `23:30`）：夜猫子任务只在 23:00-08:00
+ * 窗口内可点亮，所以缺省时刻落在窗口内。保存时后端归一化。
+ */
+function GrowthTaskPanel({
+  schedule,
+  saving,
+  running,
+}: {
+  schedule?: GrowthTaskScheduleState
+  saving: boolean
+  running: boolean
+}): React.ReactElement {
+  const enabled = schedule?.enabled === true
+  const times = Array.isArray(schedule?.times) ? schedule!.times : []
+  const fired = new Set(Array.isArray(schedule?.firedToday) ? schedule!.firedToday : [])
+  const [draft, setDraft] = React.useState<string | null>(null)
+  const text = draft ?? times.join(', ')
+  const dirty = draft !== null && draft.replace(/\s+/g, '') !== times.join(',')
+  const last = schedule?.lastResult
+  const actions = Array.isArray(last?.actions) ? last!.actions! : []
+  const submit = (): void => {
+    const list = text
+      .split(/[,，\s]+/)
+      .map(item => item.trim())
+      .filter(Boolean)
+    void saveGrowthTaskSchedule({ times: list }).then(() => setDraft(null))
+  }
+  return (
+    <section className='panel'>
+      <div className='panel-head'>
+        <h2>{t('成长任务定时排程')}</h2>
+        <span
+          className='tip-q'
+          data-tip={t(
+            '每天按这里的时刻自动执行 WorkBuddy 国内版账号的成长任务：逐个点亮、完成后领奖。夜猫子任务只有 23:00-08:00（北京时间）能点亮，所以缺省时刻是 23:30。默认关闭 —— 它会上报事件并领积分，请确认要自动执行再打开。企业版与国际版账号自动跳过，不可伪造的任务（如真实捐款）也跳过。',
+          )}
+        ></span>
+        <span className='panel-sub'>{t('每天定点执行成长任务 · 与签到 / 旅行互相独立 · 默认关')}</span>
+        <Button
+          size='sm'
+          variant='outline'
+          className='ml-auto flex-none'
+          disabled={running}
+          onClick={() => void runGrowthTaskScheduleNow()}
+        >
+          {running ? t('执行中…') : t('立即执行全部')}
+        </Button>
+      </div>
+      <div className='p-4'>
+        <div className='ck-set-line'>
+          <span className='ck-set-k'>{t('开关')}</span>
+          <span className='ck-set-v flex items-center gap-2'>
+            <Switch
+              checked={enabled}
+              disabled={saving}
+              onCheckedChange={next => void saveGrowthTaskSchedule({ enabled: next === true })}
+            />
+            <span className='text-subtle text-xs'>
+              {enabled ? t('开着：按下面的时刻自动执行') : t('关着：不自动执行（仍可手动执行）')}
+            </span>
+          </span>
+        </div>
+        <div className='ck-set-line'>
+          <span className='ck-set-k'>{t('时刻')}</span>
+          <span className='ck-set-v flex items-center gap-2'>
+            <Input
+              value={text}
+              disabled={saving}
+              placeholder='23:30'
+              onChange={event => setDraft(event.target.value)}
+            />
+            <Button size='sm' variant='outline' disabled={!dirty || saving} onClick={submit}>
+              {t('保存')}
+            </Button>
+          </span>
+        </div>
+        <div className='ck-fold-note'>
+          {t('北京时间 · 逗号分隔 · 最多 6 条 · 到点后最多晚 30 秒执行；错过时点开机后会补跑一轮。')}
+          {fired.size > 0
+            ? ` ${t('今天已执行：{list}', { list: Array.from(fired).join(' / ') })}`
+            : ''}
+        </div>
+        {last && actions.length > 0 ? (
+          <div className='ck-fold-note'>
+            {t('上一轮（{time}）：{n} 项，+{credit} 积分', {
+              time: last.at ? formatTime(Number(last.at)) : '',
+              n: actions.length,
+              credit: Number(last.credit) || 0,
+            })}
+            {actions
+              .slice(0, 6)
+              .map(action => ` · ${action.name ?? ''}: ${action.message ?? action.outcome ?? ''}`)
+              .join('')}
+          </div>
+        ) : null}
+      </div>
+    </section>
   )
 }
 

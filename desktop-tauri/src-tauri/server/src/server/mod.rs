@@ -790,6 +790,20 @@ impl ServerState {
                 core::growth_scheduler::spawn(state.store.clone());
             }
         }
+        // 成长任务每日排程（国内版）：每天定点点亮 / 领取成长任务。
+        // 与旅行是**两套独立排程**（配置键 `growthTaskSchedule`）；默认关闭 ——
+        // 它会发上报事件、领积分，是一串写操作，由用户显式打开（见
+        // `core::growth_task_scheduler` 的模块头）。
+        {
+            let (enabled, times) = core::growth_task_scheduler::settings();
+            if enabled {
+                logging::log(
+                    "[GrowthTask]",
+                    &format!("成长任务定时排程已启用：每天 {} 执行", times.join(" / ")),
+                );
+                core::growth_task_scheduler::spawn(state.store.clone());
+            }
+        }
         // ZCode 活动套餐的「推理要不要验证码令牌」由上游配置说，每 5 分钟同步一次
         // （判据、代价与三条口径见 `providers::zcode::config_sync` 的模块头）。
         // 不进上面那张定时任务表：它没有「用户可配的间隔」、也不产生任何运行状态

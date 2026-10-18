@@ -62,3 +62,24 @@ fn task_label(task_id: &str) -> String {
 pub fn on_credential_invalid(name: &str, reason: &str) {
     super::notify(NotifyEvent::credential_invalid(name, reason));
 }
+
+/// 账号被自动禁用（由 `usage_query` 的余额 / Token 两条禁用钩子在**真正写入
+/// 禁用**之后调用）。
+///
+/// `name` 是账号显示名，`reason` 是禁用判定的原文（含读数与阈值）。
+pub fn on_account_disabled(name: &str, reason: &str) {
+    super::notify(NotifyEvent::account_disabled(name, reason));
+}
+
+/// 转发时没有任何可用账号（由 `provider_loop` 在候选链为空时调用）。
+///
+/// 这是一条**全局**事件：同一时刻所有客户端都会撞上它，但去重窗口（6 小时）
+/// 内只说一次 —— 否则一个空池会随每条请求刷出一条通知。
+pub fn on_no_available_account(reason: &str) {
+    super::notify(NotifyEvent::no_available_account(reason));
+}
+
+/// 积分即将到期（由 `usage_query` 的心跳循环在查询成功落记录后扫描调用）。
+pub fn on_credit_expiring(name: &str, detail: &str) {
+    super::notify(NotifyEvent::credit_expiring(name, detail));
+}

@@ -717,6 +717,19 @@ pub fn panel_router(state: ServerState) -> Router {
             "/api/travel-schedule/run",
             post(api::growth_schedule::run_now),
         )
+        // ── 成长任务每日排程（国内版）──
+        // 与 /api/travel-schedule 逐字同形（每天定点型 + 管理信封），但**独立
+        // 排程**：成长任务（点亮 / 领奖）与旅行互不依赖，开关与时刻各自配
+        // （见 core::growth_task_scheduler）。挂 protected：POST run 会真打上游
+        //（accept / 点亮上报 / claim），敏感度与签到同级。
+        .route(
+            "/api/growth-task-schedule",
+            get(api::growth_task_schedule::get_state).post(api::growth_task_schedule::configure),
+        )
+        .route(
+            "/api/growth-task-schedule/run",
+            post(api::growth_task_schedule::run_now),
+        )
         // ── Qoder UMID 组件（设备风控身份）──
         // GET 状态 / POST 安装（安装仅 Linux，见 api::qoder_umid 的模块头）。
         // 挂 protected：安装会向 npm 下载并落地一个可执行组件，敏感度与
