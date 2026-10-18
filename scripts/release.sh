@@ -5,8 +5,9 @@
 #   bash scripts/release.sh vX.Y.Z <run-id>   # 或显式指定 run
 #
 # 做三件事：
-#   1. 下载 build 工作流的产物 artifact（windows-nsis / macos-universal，以及
-#      新版的 linux-server-amd64 / -arm64 两个容器内更新包）到 dist/；
+#   1. 下载 build 工作流的产物 artifact（windows-nsis / macos-universal，
+#      以及 linux-server-amd64 / -arm64 两个容器内更新包、
+#      windows-server-amd64 本地 web 包）到 dist/；
 #   2. 用 tag 所指提交的提交信息（= 更新日志，见 agent.md 第 5 节）创建 / 更新
 #      GitHub Release 并挂全部附件；
 #   3. 打印验收提示。
@@ -99,6 +100,19 @@ if [ -d dist/linux-server-amd64 ] && [ -d dist/linux-server-arm64 ]; then
 else
   echo "⚠️  这个 run 里没有 linux-server-* 产物（本功能上线前的 tag？）——"
   echo "    Release 将不含容器内更新包，面板更新入口会退回「手动升级命令」提示"
+fi
+
+# Windows 本地包（本地 web 形态：解压双击运行、浏览器访问面板）：
+# 与 Linux 版同格式（zip + 同名 .sha256）。同样是后加的 artifact，
+# 老 tag 的 run 没有，只提醒不中断。
+if [ -d dist/windows-server-amd64 ]; then
+  for file in dist/windows-server-amd64/*; do
+    ASSETS+=("$file")
+  done
+  echo "→ 已下载 $(basename "$(ls dist/windows-server-amd64/*.zip)")（含 .sha256）"
+else
+  echo "⚠️  这个 run 里没有 windows-server-amd64 产物（本功能上线前的 tag？）——"
+  echo "    Release 将不含 Windows 本地 web 包"
 fi
 
 # ── 2. 更新日志 = tag 所指提交的提交信息 ──────────────────────

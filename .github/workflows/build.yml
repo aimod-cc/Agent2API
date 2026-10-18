@@ -239,8 +239,42 @@ jobs:
           $ui = "$env:GITHUB_WORKSPACE/desktop-tauri/ui"
           if (-not (Test-Path $exe)) { throw "找不到网关二进制：$exe" }
           if (-not (Test-Path $ui)) { throw "找不到界面目录：$ui" }
+          New-Item -ItemType Directory -Force -Path stage | Out-Null
+          Copy-Item $exe "stage/agent2api-server.exe"
+          Copy-Item $ui "stage/ui" -Recurse
+          # 双击启动器：**在 CI 里现生成**而不是入库 —— .bat 必须是 CRLF +
+          # 本机代码页，把它放仓库里迟早被编辑器的 LF/UTF-8 改坏。这里用
+          # 数组逐行拼（而不是 here-string）：YAML 块缩进会原样进入
+          # here-string 内容，每行前面多出一串空格虽然 cmd 能容忍，但会让
+          # `if (` 的右括号判断和 `echo.` 的输出变得可疑；数组拼接没有这个
+          # 问题，每行的空格完全由这里决定。内容全 ASCII。
+          $lines = @(
+            '@echo off'
+            'setlocal'
+            'cd /d "%~dp0"'
+            'if not exist "agent2api-server.exe" ('
+            '  echo [error] agent2api-server.exe not found next to this script.'
+            '  pause'
+            '  exit /b 1'
+            ')'
+            'if not exist "ui\index.html" ('
+            '  echo [error] ui\index.html not found. Keep the ui folder beside the exe.'
+            '  pause'
+            '  exit /b 1'
+            ')'
+            'echo.'
+            'echo   Agent2API local gateway starting...'
+            'echo   The panel opens in your browser. Close this window to stop.'
+            'echo.'
+            'agent2api-server.exe'
+            'echo.'
+            'echo   Server stopped.'
+            'pause'
+          )
+          # Out-File -Encoding ascii 在 Windows runner 上写 CRLF
+          $lines | Out-File -FilePath "stage/start-windows.bat" -Encoding ascii
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Compress-Archive -Path $exe, $ui -DestinationPath "dist/$name"
+          Compress-Archive -Path "stage/*" -DestinationPath "dist/$name"
           $hash = (Get-FileHash -Algorithm SHA256 "dist/$name").Hash.ToLower()
           "$hash  $name" | Out-File -FilePath "dist/$name.sha256" -Encoding ascii
           Get-Content "dist/$name.sha256"
