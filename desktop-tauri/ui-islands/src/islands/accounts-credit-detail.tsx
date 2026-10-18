@@ -188,10 +188,12 @@ export function creditRowsOf(entry: UsageEntry, now: number = Date.now()): Credi
         // 流水恒不进「已用完 / 已过期」那组（见 CreditRow.spent）
         spent: false,
         amount,
-        // 表里那两列（「最近到期 / 最近到期积分」）只对**积分包**有意义：
-        // 一笔已经发生的收支没有「还剩多少、什么时候到期」可言，故两个量都给
-        // null —— 若把 `expireAt` 也带上，「最近到期」会拿一笔消耗的到期时刻
-        // 去和积分包比早晚，读出来的是噪音
+        // 账号表那两列（「最近到期 / 最近到期积分」）只认**积分包**：一笔已经
+        // 发生的收支没有「还剩多少」可言。`nearestCreditOf` 用 `expireAt !== null`
+        // 与 `daily` 两道过滤挑包，流水行在这里给 null / false 就自动被排除 ——
+        // 若把 `expireAt` 填上，一笔消耗的到期时刻会参与「哪份最先作废」的比较，
+        // 读出来的是噪音。（上面 `title` 里那个 `expireAt` 是**悬停文案**用的，
+        // 与这两列无关，两处别混。）
         expireAt: null,
         remain: null,
         unit: '',

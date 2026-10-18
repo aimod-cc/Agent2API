@@ -28,6 +28,12 @@ WorkingDirectory=/opt/agent2api
 # 表现为「改了配置不生效」。
 Environment=AGENT2API_PROXY_HOME=/var/lib/agent2api
 Environment=AGENT2API_UI_DIR=/opt/agent2api/ui
+# 监听地址兜底（下游改动）。二进制的默认值是 127.0.0.1（本地 web 形态的
+# 安全默认，见 bin/agent2api-server.rs），而裸机服务形态必须全网卡可达 ——
+# install.sh 生成的 agent2api.env 本来就写了 0.0.0.0，这里再兜一道：手工
+# 装的旧部署、或用户从 env 文件里删掉这一行时，服务不会悄悄退化成只能
+# 本机访问。放在 EnvironmentFile **之前**，用户在 env 文件里改的照样生效。
+Environment=AGENT2API_HOST=0.0.0.0
 EnvironmentFile=/etc/agent2api/agent2api.env
 
 # 裸机部署**强制关闭**容器内自更新，所以这条刻意放在 EnvironmentFile 之后

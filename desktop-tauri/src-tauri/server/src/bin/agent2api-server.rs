@@ -139,12 +139,18 @@ fn start_gateway(launch: &Launch) -> Result<Running, String> {
         .map_err(|reason| format!("网关初始化失败: {reason}"))?;
 
     state.panel_port = launch.panel_port;
-    // 面板进程能否读本机桌面客户端的登录态：只听回环 ⇒ 访问者都在本机
-    // ⇒ %APPDATA% 下的桌面客户端文件可读（「导入桌面端登录态」等服务端
-    // 实现本来就在本进程里，见 web_shim 模块头的 desktopAccess 说明）。
-    // 0.0.0.0 / 公网 IP ⇒ 判定为远程部署（Docker / 服务器），网页端照旧收起。
-    // 放在这里而不是 parse_launch：前台与服务两种起法都经过本函数。
-    agent2api_server::web_shim::set_desktop_access(launch.host.is_loopback());
+    // 面板进程能否读本机桌面客户端的登录态：回环监听 + Windows 目标。
+    //
+    // 两个条件缺一不可：
+    //   · 回环 —— 访问者都在本机（0.0.0.0 / 公网 IP 是远程部署，不成立）；
+    //   · Windows —— 这几条导入链路里最要紧的家（AutoClaw / 智谱清言）读的是
+    //     Electron 的 DPAPI 密文，`CryptUnprotectData` 只有 Windows 有。把
+    //     平台判定放在**编译期**（而非让 UI 猜），Linux/macOS 上编出来的
+    //     headless 天然是 false，不会出现「入口显示了、点下去解密失败」。
+    //     另外两个平台也没有对应的本地 headless 发布包。
+    // 「导入桌面端登录态」的服务端实现本来就在本进程里（见 web_shim 模块头）。
+    let desktop_access = launch.host.is_loopback() && cfg!(windows);
+    agent2api_server::web_shim::set_desktop_access(desktop_access);
     // headless 面板闸门：未注册时 /api/* 只放行注册相关端点与 API Key（强制
     // 先注册，见 access::panel_gate 与 http::require_api_key 的注释）。
     // 唯一的关闭口在下面的安全闸门里：AGENT2API_ALLOW_NO_KEY=1 是「我自己

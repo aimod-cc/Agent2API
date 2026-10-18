@@ -379,7 +379,7 @@ jobs:
             'echo.'
             'echo   Agent2API local gateway'
             'echo   -----------------------'
-            'echo   The panel opens in your browser (http://127.0.0.1:3065/).'
+            'echo   The panel opens in your browser (default http://127.0.0.1:3065/).'
             'echo   Keep this window open; close it or press Ctrl+C to stop.'
             'echo.'
             'agent2api-server.exe'

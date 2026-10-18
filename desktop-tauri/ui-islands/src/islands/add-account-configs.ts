@@ -1040,9 +1040,11 @@ export function desktopImportAvailable(config: ProviderConfig): boolean {
   // 桌面客户端的登录态文件就在隔壁（见 desktopAccess() 的注释）；远程部署
   // （Docker / 公网服务器）该字段恒为 false，这一支照旧收起。
   if (current === 'web') {
-    // 本地 headless 的平台标识仍是 'web' 而不是 'windows'，下面那条
-    // 「除 Windows 外一律收起」不能直接套 —— 本地 headless 包只在 Windows
-    // 上发布（DPAPI 解密也只在 Windows 目标编译），声明了 desktopAccess 即放行
+    // 网页端的平台标识恒为 'web'，所以下面那条「desktopWindowsOnly 只认
+    // Windows」在这里判不出东西 —— **平台条件由服务端在置位时收敛**
+    // （`cfg!(windows) && host.is_loopback()`，见 bin/agent2api-server.rs）：
+    // 非 Windows 编出来的 headless 根本不会声明 desktopAccess。这里只认这个
+    // 标志，不再自己推平台，避免两处口径分叉。
     return desktopAccess()
   }
   if (config.desktopWindowsOnly && current !== 'windows') return false

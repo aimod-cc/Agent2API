@@ -65,14 +65,24 @@ pub fn is_desktop_access() -> bool {
     DESKTOP_ACCESS.get().copied().unwrap_or(false)
 }
 
+/// 装配好的桥接脚本（`SHIM_TEMPLATE` 替换掉占位符之后的结果）。
+///
+/// 缓存的理由：脚本本身有十来万字符，而 `static_files` 每命中一次
+/// index.html 都要取它 —— 不缓存就是每次页面加载都整串 replace 一遍。
+/// 取值只取决于 [`DESKTOP_ACCESS`]，它在启动时置位、之后不再变，所以
+/// 「第一次取用时算一次」与「每次现算」结果恒等。
+static SHIM_JS: OnceLock<String> = OnceLock::new();
+
 /// 注入进 index.html 的桥接脚本全文（在所有界面脚本之前执行）。
 ///
 /// 用 `r#"…"#` 原始字符串：脚本里不出现 `"#` 序列（字符串一律单引号），
 /// 不需要任何转义。唯一的占位符 `__DESKTOP_ACCESS__` 在装配时按
 /// [`is_desktop_access`] 替换成 `true` / `false` 字面量。
-pub fn shim_js() -> String {
-    let flag = if is_desktop_access() { "true" } else { "false" };
-    SHIM_TEMPLATE.replace("__DESKTOP_ACCESS__", flag)
+pub fn shim_js() -> &'static str {
+    SHIM_JS.get_or_init(|| {
+        let flag = if is_desktop_access() { "true" } else { "false" };
+        SHIM_TEMPLATE.replace("__DESKTOP_ACCESS__", flag)
+    })
 }
 
 /// 桥接脚本模板（内容见 [`shim_js`]）。
