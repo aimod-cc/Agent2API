@@ -1,28 +1,28 @@
 /**
- * 试炼场（Playground）的数据层：走**客户端真实路径**打 `/v1/chat/completions`。
+ * 试炼场（Playground）的数据层：走 `POST /api/playground/chat`（面板面）。
  *
- * ── 为什么独立成文件、而不是复用 assistant-state ──────────────────
- * 两条链的**目标通道不同**，这是本模块存在的唯一理由：
- *   · AI 助手（assistant-state）打 `/api/assistant/chat` —— **面板面**接口，
- *     自带系统提示词与工具集，回答经过网关自己的编排。它验证的是「助手能用」。
- *   · 试炼场（本模块）打 `/v1/chat/completions` —— **网关面**接口，就是
- *     客户端（ChatBox / Cherry Studio / Claude Code…）实际打的那一条。它验证的
- *     是「我的 base_url + Key 能不能用、模型通不通、实际路由到哪个账号」。
- * 把试炼场接到面板面上会得到一个「看起来能用但客户端打不通」的假结论 ——
- * 那样这一页就失去了存在的意义。
+ * ── 为什么不是直连 `/v1/chat/completions`（这里踩过坑，别再改回去）────
+ * 最初的实现是直连 `/v1/chat/completions`，理由写得挺漂亮（「打客户端真实
+ * 走的那条路」）。但**它在全新安装上根本不能用**：
+ *   · 桌面壳的页面来自 Tauri 自定义协议（`tauri://localhost`），直连
+ *     `http://127.0.0.1:{port}/v1/*` 是**跨源**请求；
+ *   · 而网关面**默认不应答 CORS**（`corsEnabled` 默认 `false` —— 那是一道
+ *     安全边界：开着 `*` 等于把「消耗额度」的能力交给任何网页）；
+ *   · 实测：CORS 关掉后直连直接 `TypeError: Failed to fetch`。
+ * 开发机上 CORS 恰好开着，所以一直没暴露 —— 这正是「同一条注释警告过、
+ * 却没读到位」的典型。`api::assistant` 的模块头早就把这条论证写清楚了。
  *
- * ── 凭证从哪来 ─────────────────────────────────────────────────
- * `/v1/*` 需要网关 Key（`require_api_key`）。桌面形态下页面来自 Tauri 自定义
- * 协议、网关在 `127.0.0.1:{port}`，跨源且不带 cookie，所以凭证只能问壳要：
- * 复用 assistant-state 的 `requestDirect`（它内部走桥的 `directCredentials`，
- * 桌面壳回**第一把启用的网关 Key**，见 commands::direct_credentials）。
- * 不自己再写一份取凭证的逻辑 —— 那条链已经处理了「401 清缓存重试一次」
- * 「桥没就绪时按无凭证发」这些边界（见 assistant-state 的 CREDENTIALS 一段）。
+ * ── 那结论还代表真实客户端吗：代表 ─────────────────────────
+ * `/api/playground/chat` 与 `/v1/chat/completions` **共用同一条转发链路**
+ * （`UpstreamService::forward`）：token 刷新、429 换号、冷却、出站脱敏、
+ * 协议翻译、模型路由（对外名 → 上游名）全是同一份代码。
+ * 与真实客户端观察到的差异**为零** —— 见 `api/playground.rs` 的模块头。
  *
- * ── 与 OpenAI SDK 的一致性 ──────────────────────────────────────
- * 请求体按 OpenAI Chat Completions 规范组装（`model` / `messages` / `stream`
- * 加上可选参数），响应按 SSE 逐帧解析。**不省字段、不做网关特化** ——
- * 这一页要能暴露「客户端会遇到的真实问题」，多加一层善意包装就等于捂住它们。
+ * ── 与 AI 助手的分工（两者并存不重复）──────────────────────
+ *   · 助手 → `/api/assistant/chat`：**注入系统提示词 + 带 tools（能改配置）**，
+ *     是「能动手的运维入口」；
+ *   · 试炼场 → `/api/playground/chat`：**不注入提示词、不带 tools、可选采样
+ *     参数**，是「只读的连通性验证台」。
  */
 
 import { t } from '../i18n'
@@ -47,6 +47,14 @@ export type PlayRequest = {
   maxTokens?: number
   /** 只让网关按模型路由、不看真正回答（`max_tokens: 1` 的轻量探测） */
   signal?: AbortSignal
+  /**
+   * 是否向上一轮要 usage 读数（`stream_options.include_usage`）。
+   *
+   * **默认关**，与真实客户端一致：多传这个字段有些上游会直接 400，而试炼场
+   * 报一个「客户端根本不会遇到」的错就失去意义了。用户显式勾选才打开
+   * （页面在勾选项旁写明了风险）。
+   */
+  wantsUsage?: boolean
 }
 
 /** 一轮请求的收尾统计（这一页最有价值的部分：用量与首字节延迟） */
@@ -137,14 +145,16 @@ export async function runPlayground(
   handlers: PlayHandlers = {},
 ): Promise<{ text: string; reasoning: string; stats: PlayStats }> {
   const started = performance.now()
-  // 网关面直连：相对路径交给 requestDirect 拼基址（它会问壳要真实端口与 Key）
-  const path = '/v1/chat/completions'
+  // 面板面（`/api/*`，无条件 CORS）：与 /v1/chat/completions 共用同一条转发链路，
+  // 但不要求用户打开「网关跨域访问」—— 见模块头。
+  const path = '/api/playground/chat'
   const body: Record<string, unknown> = {
     model: request.model,
     messages: request.messages.map(message => ({ role: message.role, content: message.content })),
-    // 统一按流式打（见函数头）；非流式也在下面逐帧收完再一次性回调
-    stream: true,
-    stream_options: { include_usage: true },
+    // 上游固定流式（首字节耗时与逐字渲染都靠它）；**stream_options 默认不传** ——
+    // 真实客户端默认也不传，传了某些上游会 400（见后端 api::playground 的注释）。
+    // `wantsUsage` 由用户显式勾选，页面已把风险写在勾选项旁边。
+    include_usage: request.wantsUsage === true,
   }
   if (typeof request.temperature === 'number' && Number.isFinite(request.temperature)) {
     body.temperature = request.temperature

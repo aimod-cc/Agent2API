@@ -2,16 +2,21 @@
  * 试炼场（Playground）—— 侧边栏「智能」组的第二个一级菜单，React 岛。
  *
  * ── 这一页解决什么问题 ──────────────────────────────────────
- * 接客户端之前先在这里自检：模型通不通、认证对不对、实际路由到哪个账号、
- * 首字节多久、这一轮烧了多少 token。以前要验证这些只能开第三方客户端，
- * 或者对着账号页那个「测试」弹窗猜（它只回一句通不通）。
+ * 接客户端之前先在这里自检：模型通不通、认证对不对、首字节多久、这一轮烧了
+ * 多少 token。以前要验证这些只能开第三方客户端，或者对着账号页那个「测试」
+ * 弹窗猜（它只回一句通不通）。
  *
  * ── 与 AI 助手页的分工（最要紧的一条）──────────────────────
- * 两页都是「对话 + 模型下拉」，但打的**不是同一条接口**：
- *   · AI 助手 → `/api/assistant/chat`（面板面，自带系统提示词与工具集）；
- *   · 试炼场 → `/v1/chat/completions`（网关面，**客户端实际打的那一条**）。
- * 所以试炼场的结论能直接代表「我的客户端能不能用」，助手页不行。这条分工写在
- * playground-state 的模块头里，改这一页前先读那段。
+ * 两页都是「对话 + 模型下拉」，但**能力面完全不同**：
+ *   · AI 助手 → 注入管理助手人设 + 带 9 个工具（能改模型开关/映射/能力、
+ *     调顺序、查余额），是「**能动手的运维入口**」；
+ *   · 试炼场 → 不注入任何提示词、不带工具、可选采样参数、回传耗时与用量，
+ *     是「**只读的连通性验证台**」。
+ *
+ * 两者都走**面板面**（`/api/*`），与 `/v1/chat/completions` 共用同一条
+ * `UpstreamService::forward` 转发链路 —— 所以试炼场的结论依然代表真实客户端的
+ * 体验。为什么不能直连 `/v1/*`：网关面默认不应答 CORS，页面直连会
+ * `Failed to fetch`（踩过，详见 playground-state 的模块头）。
  *
  * ── 挂载：面板岛模式（与 docs-page / assistant-page 同款）─────
  * root 直接建在 index.html 既有的 `<section class="page" data-page="playground">`
@@ -136,6 +141,14 @@ function PlaygroundPage() {
   /** 关掉 = 不传 temperature（用上游默认）；与「传 1」不是一回事 */
   const [useTemperature, setUseTemperature] = React.useState(false)
   const [maxTokens, setMaxTokens] = React.useState('')
+  /**
+   * 是否向请求要 usage 读数（`stream_options.include_usage`）。
+   *
+   * **默认关**，与真实客户端一致：多传这个字段有些上游会直接 400 —— 若默认打开，
+   * 试炼场会报一个「客户端根本不会遇到」的错，这一页就不可信了。
+   * 勾上才传，风险写在勾选项旁边（见渲染处）。
+   */
+  const [wantsUsage, setWantsUsage] = React.useState(false)
   const [input, setInput] = React.useState('')
   const [messages, setMessages] = React.useState<UiMessage[]>([])
   const [busy, setBusy] = React.useState(false)
@@ -222,6 +235,7 @@ function PlaygroundPage() {
           stream: true,
           temperature: useTemperature ? temperature : undefined,
           maxTokens: Number.isFinite(maxTokensValue) ? maxTokensValue : undefined,
+          wantsUsage,
           signal: controller.signal,
         },
         {
@@ -260,7 +274,7 @@ function PlaygroundPage() {
       abortRef.current = null
       setBusy(false)
     }
-  }, [input, busy, model, messages, maxTokens, toWire, temperature, useTemperature, flushStreaming])
+  }, [input, busy, model, messages, maxTokens, toWire, temperature, useTemperature, wantsUsage, flushStreaming])
 
   /** 停止当前这一轮（abort 后 reader 循环以 AbortError 结束，不是错误） */
   const stop = React.useCallback(() => {
@@ -314,6 +328,14 @@ function PlaygroundPage() {
         <input id='pg-max-tokens' type='number' className='pg-num' min={1} placeholder={t('不限')}
           value={maxTokens} onChange={event => setMaxTokens(event.target.value)} />
 
+        {/* 用量读数：默认不勾 —— 把风险写在旁边，比事后解释「为什么报错」有用 */}
+        <label className='pg-param'
+          title={t('向请求带上 stream_options.include_usage 才能拿到 token 用量。真实客户端默认不带；部分上游不认这个字段会直接报错，所以默认关。')}>
+          <input type='checkbox' checked={wantsUsage}
+            onChange={event => setWantsUsage(event.target.checked)} />
+          {t('要用量读数')}
+        </label>
+
         <span className='pg-spacer' />
         <span className='pg-base' title={base || t('网关地址')}>{base || t('网关地址：读取中…')}</span>
         <Button variant='ghost' size='sm' onClick={clear} disabled={busy || messages.length === 0}>
@@ -327,8 +349,8 @@ function PlaygroundPage() {
           ? (
             <div className='pg-empty'>
               <p className='pg-empty-title'>{t('试炼场')}</p>
-              <p>{t('这里直接打客户端用的那条接口（/v1/chat/completions），结论可以代表真实客户端。')}</p>
-              <p>{t('选好模型、写一句话发出去：能看到回答、思考过程、首字节耗时与 token 用量。')}</p>
+              <p>{t('这里与客户端的转发链路是同一条（同样的模型路由、账号轮换与协议翻译），结论可以代表真实客户端。')}</p>
+              <p>{t('选好模型、写一句话发出去：能看到回答、思考过程、首字节耗时。token 用量要勾上「要用量读数」才有。')}</p>
             </div>
           )
           : messages.map(item => (
