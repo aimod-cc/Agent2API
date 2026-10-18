@@ -340,7 +340,7 @@ export const CATEGORIES = [
   { id: 'security', label: t('安全'), icon: 'shield' },
   // 通知与告警：低频配置（配一次、几个月不动），所以放设置页分类里，
   // **不占一级菜单** —— 一级菜单是稀缺资源，用户每次切页都要扫过它们。
-  // 「出问题的结果」在「账号健康」与「定时任务」页看，这里只管「怎么通知我」。
+  // 「出问题的结果」在「账号」与「定时任务」页看，这里只管「怎么通知我」。
   { id: 'notify', label: t('通知与告警'), icon: 'feedback' },
   { id: 'data', label: t('数据'), icon: 'database' },
   { id: 'feedback', label: t('反馈与需求'), icon: 'feedback' },

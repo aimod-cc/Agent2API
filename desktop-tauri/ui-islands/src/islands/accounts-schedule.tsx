@@ -578,14 +578,6 @@ export function queueRuns(entries: QueueEntry[], blocked: boolean): QueueRun[] {
   return runs
 }
 
-/** 队列条目 → 展示名：**不用**后端给的 `name` 作为首选 —— 账号页显示的名字有自己的
- *  兜底链（昵称 / 邮箱 / uid），两处口径不同会让同一行在两个作用域下显示成两个名字。
- *  这张表渲染时用的就是账号表那份记录，本函数只在没有记录可查时兜底。 */
-export function entryDisplayName(entry: QueueEntry, nameOf: (id: string) => string | undefined): string {
-  const id = String(entry.id || '')
-  return nameOf(id) || String(entry.name || id || '—')
-}
-
 /*
  * ── 下一版（可写覆盖）为什么先不做 ──────────────────────────
  *   · 若语义是「这个模型单独一套调度参数（顺序优先 / 轮换）」——落点是全仓库 3 处

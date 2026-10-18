@@ -35,23 +35,30 @@
  * 全量的映射是确定的，拖动不会错位。
  *
  * ── 排序与调度是同一件事（2026-10，「所见即所得」）─────────────
- * 点表头排序**不再是纯视图行为**：它按排出来的先后把整条队列重编号（`reorderBySort`
- * → 同一个 `POST /api/accounts/reorder`）。于是屏幕上那一列行的先后，就是转发实际
- * 会走的先后 —— 用户点「按最近到期时间排序」，排在最上面的那家**真的**会先接走请求。
+ * 点表头排序在**组内**档下不再只是视图行为：它按排出来的先后把整条队列重编号
+ * （`reorderBySort` → 同一个 `POST /api/accounts/reorder`）。于是屏幕上那一列行的先后，
+ * 就是转发实际会走的先后 —— 用户点「按最近到期时间排序」，排在最上面的那家**真的**
+ * 会先接走请求。
  *
  * 后端这一条本来就通：`priority` 既是 `POST /api/accounts/reorder` 写的字段，也是
  * `routing::plan_route` 排序的第一排序键，而转发选路与队列端点调的是**同一个**
  * `plan_route`（见 accounts-schedule 的模块头）。此前只是「排序没写回」这一步缺了。
  *
- * **凡是会改行序的动作都要写回**，一共三个入口，别漏：
+ * **整表档是例外，刻意不写回**：它打散厂商分组，写回去会破坏后端「同一家连续」这条
+ * 硬不变量（`priority::grouped_queue_order`），而新增账号那条链会把它整理回来 ——
+ * 也就是说那个顺序根本存不住。详见 `reorderBySort` 开头那段。
+ *
+ * **凡是会改行序且能写回的动作**，两个入口，别漏：
  *   · `onSortColumn`（点表头，三态循环）；
- *   · `onSortScope`（切「组内 / 整表」粒度 —— 两档排出来的次序不同，必须跟着写回）；
- *   · `onDrop`（拖拽，本来就走 `reorderQueue`，是这条落盘通道的源头）。
+ *   · `onSortScope`（切粒度 —— 切到「组内」写回，切到「整表」不写回）。
  * `clearSort`（取消排序）**不**写回：默认次序就是当前队列序，写回是空操作。
  *
- * 三个必须守住的口径：
+ * 五个必须守住的口径：
  *   · 只在**全局账号表**下写回 —— 模型作用域那一屏只是全局队列的**投影**（只含提供
  *     该模型的家），在那儿重排会挪动别的家的号，语义接不上；
+ *   · 模型作用域下**两种拖拽把手都锁**、**表头排序也不改 store** —— 整屏只读
+ *     （早先只锁了组顺位、排序只挡了写回没挡 `cycleSort`，两处都会让屏幕与队列分叉）；
+ *   · 只有**组内**档写回（整表档的语义与后端不变量冲突，见上）；
  *   · 写回的源是 `allGroups`（全部行、组序 → 组内序），**不是**当前可见的 `shown`
  *     —— 筛选 / 折叠下 `shown` 缺行，拿它写回后端会 400（「队列不完整」）；
  *   · 判据是「屏幕行序 == `/api/accounts` 按 `priority` 的全量序」——**不是**
@@ -331,31 +338,43 @@ function AccountsPage() {
    */
   const reorderBySort = async (next: AccountSort | null): Promise<void> => {
     if (!next) return
+    /**
+     * **整表（flat）档不写回** —— 它与后端的「同一家连续」硬不变量直接冲突。
+     *
+     * 后端的 `reorder_accounts`（`store_order.rs`）只校验「是不是全部账号的一个排列」，
+     * 组连续性**由调用方保证**；而「同家连续」是分组模式的硬不变量
+     * （`priority::grouped_queue_order` 的模块说明），新增账号那条链
+     * （`sql::put` → `normalize_grouped_queue`）会**强制**把它整理回来。
+     *
+     * flat 的语义是「打散厂商分组、全表一起排」，写出来的队列里同家的号必然被别家
+     * 隔开。于是：
+     *   ① 写回后前端 `accountGroups` 按 provider **归堆**（不是连续段）→ 屏幕序 ≠ 队列序；
+     *   ② 下一次新增任何账号，后端整理一次就把这条顺序**整个打乱**。
+     * 也就是说 flat 的「所见即所得」根本存不下来 —— 与其给用户一个下次必然被推翻的
+     * 承诺，不如让它老实做一次视图排序（写回只发生在「组内」档，那一档只动组内先后，
+     * 组序与同家连续都不受影响）。
+     */
+    if (next.scope === 'flat') return
     const comparator = accountComparator(next, sortContext)
     // 全部行（不受筛选 / 折叠影响）—— 写回要的是完整队列
     const allRows: AccountRecord[] = []
     for (const group of allGroups) allRows.push(...group.members)
     if (allRows.length < 2) return
-    // 比较器排一遍；组内档按 allGroups 的组序拼（组序不动），整表档按结果折叠
+    // 「组内」档：比较器排一遍得出组内新序，组序照 `allGroups`（组序不动）
     const sorted = allRows.slice().sort(comparator)
-    let queue: string[]
-    if (next.scope === 'flat') {
-      queue = sorted.map(account => account.id)
-    } else {
-      const rank = new Map(sorted.map((account, index) => [account.id, index]))
-      const members = new Map<string, AccountRecord[]>()
-      for (const account of allRows) {
-        const list = members.get(providerOf(account)) || []
-        list.push(account)
-        members.set(providerOf(account), list)
-      }
-      queue = []
-      for (const group of allGroups) {
-        const list = (members.get(group.provider) || [])
-          .slice()
-          .sort((a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0))
-        for (const account of list) queue.push(account.id)
-      }
+    const rank = new Map(sorted.map((account, index) => [account.id, index]))
+    const members = new Map<string, AccountRecord[]>()
+    for (const account of allRows) {
+      const list = members.get(providerOf(account)) || []
+      list.push(account)
+      members.set(providerOf(account), list)
+    }
+    const queue: string[] = []
+    for (const group of allGroups) {
+      const list = (members.get(group.provider) || [])
+        .slice()
+        .sort((a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0))
+      for (const account of list) queue.push(account.id)
     }
     // 与拖拽走同一条落盘通道（同一份 toast / 同一次刷新），不另造一条
     void reorderQueue(queue, t('已按「{label}」{dir}排序并保存', {
@@ -375,19 +394,24 @@ function AccountsPage() {
    */
   const onSortColumn = (key: string): void => {
     if (!SORTABLE_COLUMNS.has(key)) return
+    // 模型作用域：整屏只读，连排序状态都不该改。`cycleSort` 会写全局 store
+    // （`sort` 不区分作用域）—— 一旦放行，屏幕行序会从「队列序」变成「排序序」
+    // 而队列一个字不动，屏幕与转发就此分叉，且这个排序还会一路留到切回全局表。
+    // 早先这里只挡了 `reorderBySort`、没挡 `cycleSort`，就是那个分叉的来源。
+    if (scheduleScope) return
     const current = sort
     const next: AccountSort | null = !current || current.key !== key
       ? { key, dir: 'asc', scope: current?.scope || currentSortScope() }
       : current.dir === 'asc' ? { ...current, dir: 'desc' } : null
     cycleSort(key)
-    if (!scheduleScope) void reorderBySort(next)
+    void reorderBySort(next)
   }
   /**
    * 切排序粒度（组内 ⇄ 整表）。
    *
-   * **必须也写回**：这一档改的正是「行怎么排」—— 组内只动组内先后、整表把分组散开。
-   * 两档排出来的次序**不是同一个次序**，屏幕上换了一批行序，队列就必须跟着换；否则
-   * 屏幕与调度又分叉了（那正是这一版要消灭的毛病，别从档位按钮这里漏回去）。
+   * 切到**组内**要写回：这一档只改每组内部的先后，组序照旧，写回去仍满足「同一家连续」。
+   * 切到**整表**不写回（`reorderBySort` 里 `scope === 'flat'` 直接返回）—— 它会打散
+   * 分组，写回去就破坏了后端那条硬不变量，下次新增账号会被整理回来（详见那儿）。
    *
    * 没排序时不写回：那时切档只记「预选」（`setSortScope` 只存不重绘），屏幕上没有
    * 顺序变化，没有什么可写回的。
@@ -477,18 +501,27 @@ function AccountsPage() {
   }, [])
 
   /**
-   * **组顺位**的锁（拖拽模块读这一个，见下面的 effect）。
+   * **拖拽的锁**（拖拽模块按把手粒度读这一个，见下面的 effect）。
    *
-   * 上游 v3.0.5 把「顺序不可拖」拆成了两层：**组顺位**在筛选 / 搜索 / 分页下不可拖
-   * （别家的组整组不可见，落点没法定位）；**组内顺位不锁** —— 上游改为「落点按渲染
-   * 出来的行算锚点、再换算回完整 members」（见 onDrop 与 `renderedRows`），可见与
-   * 全量的映射是确定的，拖了不会错位。
+   * 全部理由按把手分两类：
    *
-   * 注意它**不含** `scheduleScope`：模型作用域下这段表格本来就由 `MainTable` 的
-   * `readOnly` 挡着，不靠这条锁。上面那条 `locked` 是**文案**用的（含模型域），
-   * 两者用途不同、不必求同。
+   *   ① 两种把手都锁 —— **模型作用域**（`scheduleScope`）。这一屏的行与行序都是
+   *      `/api/routing/queue` 算出来的：行集合只含「提供该模型的家」、行序是
+   *      `plan_route` 的产物，**它是全局队列的一个投影**。在这儿拖，`onDrop` 会把
+   *      落点换算成**全局**队列再整队重编号 —— 用户以为在只读视图里挪了一行模型位次，
+   *      实际挪走的是别的家的号。且「顺序」列显示的位次（该模型队列 `#N`）与拖拽
+   *      落点算的位次（全局组内顺位）根本不是同一件事，越拖越错。
+   *
+   *      ⚠️ 早先这里**不含** `scheduleScope`，注释声称「模型作用域下这张表由
+   *      `MainTable` 的 `readOnly` 挡着」—— 而 `MainTable` 与 `readOnly` 都不存在，
+   *      那是一句没有对应实现的假设。后果是页面一边显示「顺序已锁定」徽章，一边
+   *      真的能拖、真的写回全局队列。
+   *
+   *   ② 只锁组顺位 —— **筛选 / 搜索 / 分页**。别家的组整组不可见，整组落点只能凭
+   *      想象；而组内顺位**不锁**：落点按渲染出来的行算锚点、再换算回完整 members
+   *      （见 onDrop 与 `renderedRows`），可见与全量的映射是确定的，拖了不会错位。
    */
-  const groupLocked = filterActive() || paging.paged
+  const groupLocked = filterActive() || paging.paged || Boolean(scheduleScope)
 
   // 代理列的选项（「网络代理」页的池条目）没就绪就补拉（节流 30 秒，失败不缓存）。
   // Clash 出口那一组已经不在这一页了 —— 出口统一由代理页的「同步 Clash Verge」
@@ -596,13 +629,26 @@ function AccountsPage() {
   }
   const dragRef = React.useRef({ displayed: storeGroups, all: allGroups, renderedRows })
   React.useEffect(() => { dragRef.current = { displayed: storeGroups, all: allGroups, renderedRows } })
+  /**
+   * 作用域的 ref。`onDrop` 是「只绑一次」的回调（依赖数组为空，见它的 useCallback），
+   * 闭包里读到的 `scheduleScope` 会永久停在首次渲染那一刻 —— 所以它必须经 ref 读最新值。
+   */
+  const scopeRef = React.useRef(scheduleScope)
+  React.useEffect(() => { scopeRef.current = scheduleScope })
   /** 拖拽模块的处理器（绑定一次、读最新值，见下面的 effect） */
-  const dragHandlers = React.useRef({
-    locked: false,
-    lockReason: '',
-    onDrop: (_drop: QueueDrop) => {},
+  const dragHandlers = React.useRef<{
+    isLocked: (kind: 'group' | 'row') => boolean
+    lockReasonOf: (kind: 'group' | 'row') => string
+    onDrop: (drop: QueueDrop) => void
+  }>({
+    isLocked: () => false,
+    lockReasonOf: () => '',
+    onDrop: () => {},
   })
   const onDrop = React.useCallback((drop: QueueDrop) => {
+    // 兜底守卫：模型作用域整屏是全局队列的投影，任何落点换算到全局队列都是错的
+    // （拖拽模块已按锁挡在前面，这里防的是「将来有人改了锁的判据」）
+    if (scopeRef.current) return
     const { displayed, all: current } = dragRef.current
     if (drop.kind === 'group') {
       const from = current.findIndex(group => group.provider === drop.provider)
@@ -649,12 +695,22 @@ function AccountsPage() {
   // 顺序拖拽（组顺位 / 组内顺位）：委托在滚动容器上，表格整表重画后监听仍然有效。
   // 绑定只做一次（与列宽拖拽同一手法）—— 处理器经 ref 读最新值：锁状态与分组
   // 每次渲染都会变，若把它们做进依赖数组，每变一次就往容器上再挂一份监听。
-  React.useEffect(() => { dragHandlers.current = { locked: groupLocked, lockReason, onDrop } })
+  React.useEffect(() => {
+    dragHandlers.current = {
+      // 组顺位：`groupLocked`（筛选 / 分页 / 模型域）；组内顺位：只有模型域锁
+      // （筛选 / 分页下组内落点可按可见行换算回全量，照拖）
+      isLocked: kind => (kind === 'group' ? groupLocked : Boolean(scheduleScope)),
+      lockReasonOf: kind => (kind === 'group' ? lockReason : t('切回全局账号表')),
+      onDrop,
+    }
+  })
   React.useEffect(() => {
     bindQueueDrag(listRef.current, {
-      isLocked: () => dragHandlers.current.locked,
-      onLockedAttempt: () => toast(
-        t('当前视图不能调整组顺位：{reason} 之后再拖动', { reason: dragHandlers.current.lockReason }),
+      isLocked: kind => dragHandlers.current.isLocked(kind),
+      onLockedAttempt: kind => toast(
+        kind === 'group'
+          ? t('当前视图不能调整组顺位：{reason} 之后再拖动', { reason: dragHandlers.current.lockReasonOf(kind) })
+          : t('当前视图不能调整组内顺序：{reason} 之后再拖动', { reason: dragHandlers.current.lockReasonOf(kind) }),
         'err',
       ),
       onDrop: drop => dragHandlers.current.onDrop(drop),
@@ -920,16 +976,19 @@ function AccountsPage() {
               ? t('{groups} 家 · 显示 {rows} 行', { groups: sections.length, rows: visibleIds.length })
               : ''}
           </span>
-          {/* 排序的当前状态。排序现在**写回调度队列** —— 表里画的先后就是转发要走的
-              先后（所见即所得，见 `reorderBySort`），所以这里只报「排了哪一列、什么方向」，
-              不再声明「显示顺序不是转发顺序」。右边那两档「组内 / 整表」是**粒度**：
-              一组只在这一家内部重排（分组与组序不动），一组把分组打散、全表一起来。
-              两档都摆出来、当前的置亮 —— 单个开关按钮只能靠猜「现在点下去会去哪边」 */}
+          {/* 排序的当前状态。**组内**档会写回调度队列（表里画的先后就是转发要走的
+              先后，见 `reorderBySort`）；**整表**档只排视图、不写回 —— 它会打散厂商
+              分组，写回去违反后端「同一家连续」这条硬不变量（下次新增账号就被整理回去，
+              详见 `reorderBySort` 开头那段）。所以两档的说明必须分开写，不能一句话糊过去。
+              右边那两档「组内 / 整表」是**粒度**：一组只在这一家内部重排（分组与组序
+              不动），一组把分组打散、全表一起来。两档都摆出来、当前的置亮 —— 单个开关
+              按钮只能靠猜「现在点下去会去哪边」 */}
           {sort ? (
             <span className='batch-count' id='sort-state' data-sort-key={sort.key}
               data-sort-dir={sort.dir} data-sort-scope={sort.scope}
+              data-sort-saved={sort.scope === 'flat' ? '0' : '1'}
               title={sort.scope === 'flat'
-                ? t('整表排序：厂商分组已散开，行里带厂商标记；此顺序已写回调度队列')
+                ? t('整表排序：厂商分组已散开，行里带厂商标记。此顺序仅用于查看，不写回调度队列 —— 写回会打破「同一家连续」的队列规则')
                 : t('各厂商组内排序：分组与组序不变；组内先后已写回调度队列')}>
               {t('已按「{label}」{dir}排序', { label: sortLabel(sort.key), dir: sortDirLabel(sort.dir) })}
               <span className='sort-scope' id='sort-scope' role='group' aria-label={t('排序粒度')}>
@@ -939,7 +998,7 @@ function AccountsPage() {
                   onClick={() => onSortScope('group')}>{t('组内')}</button>
                 <button type='button' className={cn('link-btn', sort.scope === 'flat' && 'is-on')}
                   id='sort-scope-flat' data-on={sort.scope === 'flat' ? '1' : undefined}
-                  title={t('整表排序：打散厂商分组，全表一起来（行里带厂商标记；顺序写回队列）')}
+                  title={t('整表排序：打散厂商分组，全表一起来（行里带厂商标记；仅用于查看，不写回队列）')}
                   onClick={() => onSortScope('flat')}>{t('整表')}</button>
               </span>
               <button type='button' className='link-btn' id='sort-clear'
@@ -967,9 +1026,10 @@ function AccountsPage() {
             </>
           ) : null}
           {/* 锁定条：**组顺位**在筛选 / 搜索 / 分页下不可拖（别家的组整组不可见，
-              落点没法定位）；上游 v3.0.5 起组内顺位不锁 —— 落点按可见行换算（见 onDrop）。
-              模型作用域那一屏另有理由锁（那里没有「另一份顺序」可写），故用 `locked`
-              而不是上游的 `groupLocked`（那个只含筛选/分页两条）。 */}
+              落点没法定位）；组内顺位那时不锁 —— 落点按可见行换算（见 onDrop）。
+              模型作用域那一屏**两种把手都锁**（那里没有「另一份顺序」可写），
+              所以这一条用的是含 `scheduleScope` 的 `locked`，而不是只含筛选/分页的
+              `groupLocked`（后者喂给拖拽模块，按把手粒度判）。 */}
           {locked ? (
             <span className='batch-hidden'
               title={scheduleScope

@@ -101,7 +101,6 @@
   <!-- AI 助手页（智能组）：消息流 / 工具卡 / 确认卡 / 输入区。排在页面样式之后，
        它是一个新页面，没有需要覆盖的既有规则 -->
     <link rel="stylesheet" href="css/page-assistant.css">
-      <link rel="stylesheet" href="css/page-health.css">
   <!-- 小问号提示外观（tooltip.js 增强出来的气泡）：排在页面样式之后，
        需要时可覆盖各页面自己写的尺寸约束 -->
   <link rel="stylesheet" href="css/tooltip.css">
@@ -160,12 +159,6 @@
         <div class="nav-group-label" data-i18n="运行状态">运行状态</div>
         <button class="nav-item active" data-page="overview" data-icon="overview"><span class="ico"></span><span class="label" data-i18n="报表">报表</span></button>
         <button class="nav-item" data-page="accounts" data-icon="accounts"><span class="ico"></span><span class="label" data-i18n="账号">账号</span></button>
-        <!-- 账号健康：紧挨「账号」—— 账号页回答「管理它」（增删改 / 拖顺序 / 看每列），
-             这里回答「现在整体如何」（多少可用 / 冷却中 / 凭证临期 / 谁最该看一眼）。
-             数据同源（共用 accounts-store 的 snapshot 与 accounts-domain 那套已校准
-             的判据），**纯只读、不做任何写操作**。整页由 React 岛渲染
-             （ui-islands/src/islands/health-page.tsx）。 -->
-        <button class="nav-item" data-page="health" data-icon="pulse"><span class="ico"></span><span class="label" data-i18n="账号健康">账号健康</span></button>
 
         <!-- 签到中心：每日签到（7 家提供商）、新手任务（Loomy 一次性）、活动福利
              （CodeArts / ZCode）与自动签到设置的统一入口。整页由 React 岛渲染
@@ -258,12 +251,6 @@
              桥没有流式、且 60 秒总超时会把长回答截断，见后端 api::assistant 模块头）。
              对外是 window.wbAssistant = { activate }。 -->
         <section class="page" data-page="assistant"></section>
-
-        <!-- ─── 账号健康（data-page="health"）───
-             整页由 React 岛渲染（ui-islands/src/islands/health-page.tsx）。纯只读：
-             只读 accounts-store 的 snapshot 并跑既有判据汇总，不发任何写请求、
-             不新增后端接口。 -->
-        <section class="page" data-page="health"></section>
 
         <!-- ─── 报表（内部标识仍是 overview，见 app.js 的 PAGES）───
              整页由 React 岛渲染（desktop-tauri/ui-islands/src/islands/report-page.tsx，

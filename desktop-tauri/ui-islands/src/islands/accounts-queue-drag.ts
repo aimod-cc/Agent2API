@@ -33,10 +33,20 @@ export type QueueDrop =
   | { kind: 'row'; provider: string; accountId: string; index: number }
 
 export type QueueDragHandlers = {
-  /** 组顺位是否被锁住（筛选 / 搜索 / 分页进行中；组内行不受它限制） */
-  isLocked(): boolean
-  /** 组顺位锁着的时候用户还是按下了把手：给一次提示（由页面决定怎么说） */
-  onLockedAttempt(): void
+  /**
+   * 拖拽是否被锁住。`kind` 说明用户按的是哪种把手：
+   *   · `'group'` —— 分组带上的整组把手（`.queue-grip`）；
+   *   · `'row'`   —— 行内的组内顺位把手（`.order-grip`）。
+   *
+   * 为什么要分粒度：筛选 / 分页只裁行，组内落点仍能按可见行换算回完整 members，
+   * 所以那时**只锁组顺位、组内顺位照拖**；而模型作用域整屏是全局队列的投影，
+   * 两种把手**都不能拖**（行序与位次都不是这张表能改的东西）。
+   * 早先这里没有参数，锁一律只作用于组把手 —— 模型域下拖行内把手会绕过锁，
+   * 把「模型队列第 N 位」当成「全局组内第 M 位」写回全局队列。
+   */
+  isLocked(kind: 'group' | 'row'): boolean
+  /** 锁着的时候用户还是按下了把手：给一次提示（由页面决定怎么说） */
+  onLockedAttempt(kind: 'group' | 'row'): void
   /** 拖完了：把新位置交回去，顺序怎么写由调用方决定 */
   onDrop(drop: QueueDrop): void
 }
@@ -157,14 +167,15 @@ export function bindQueueDrag(host: HTMLElement | null, handlers: QueueDragHandl
     const rowGrip = target?.closest?.('.order-grip')
     if (!groupGrip && !rowGrip) return
     event.preventDefault()
-    // 锁只管**组顺位**（groupGrip）：组内行落点可按可见行换算，筛选下也拖得动
-    if (groupGrip && handlers.isLocked()) {
-      handlers.onLockedAttempt()
+    // 锁按把手粒度问：组顺位在筛选 / 分页下就锁，组内顺位那时照拖（可见→全量的
+    // 映射是确定的）；模型作用域下两种都锁（见 QueueDragHandlers.isLocked 的说明）
+    const kind: 'group' | 'row' = groupGrip ? 'group' : 'row'
+    if (handlers.isLocked(kind)) {
+      handlers.onLockedAttempt(kind)
       return
     }
     const item = (groupGrip ?? rowGrip)!.closest<HTMLElement>('tbody.acct-group, tr.acct-row')
     if (!item) return
-    const kind: 'group' | 'row' = groupGrip ? 'group' : 'row'
     const provider = item.dataset.provider
       || item.closest<HTMLElement>('tbody.acct-group')?.dataset.provider
       || ''
