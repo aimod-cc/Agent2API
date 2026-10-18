@@ -3,8 +3,9 @@
 //! ── 与桌面端的关系 ──────────────────────────────────────────
 //! 两者链接同一个网关 lib（`agent2api_server`），HTTP 契约、数据目录、
 //! 迁移逻辑完全一致。差异只有三件：
-//!   · 监听地址：本二进制按 `AGENT2API_HOST` 解析（默认 0.0.0.0，
-//!     供容器端口映射）；桌面壳固定 127.0.0.1。
+//!   · 监听地址：本二进制按 `AGENT2API_HOST` 解析（默认 127.0.0.1，与
+//!     桌面壳同口径；容器 / 服务器部署由 Dockerfile 与安装脚本显式设
+//!     0.0.0.0）；桌面壳固定 127.0.0.1。
 //!   · 界面：桌面由 Tauri 壳的 custom-protocol 出面板；本形态由网关
 //!     自己托管 `ui/` 静态目录（`set_ui_dir`），并注入网页端 bridge
 //!     （`web_shim`，UI 代码不感知差异）。
@@ -22,7 +23,8 @@
 //!
 //! ── 环境变量 ────────────────────────────────────────────────
 //!   AGENT2API_PROXY_HOME        配置/数据目录（旧名 WORKBUDDY_PROXY_HOME 兼容读）
-//!   AGENT2API_HOST              监听地址，默认 0.0.0.0
+//!   AGENT2API_HOST              监听地址，默认 127.0.0.1（容器 / 服务器
+//!                               部署设 0.0.0.0；本地 web 形态用默认即可）
 //!   AGENT2API_PROXY_PORT        监听端口（旧名 WORKBUDDY_PROXY_PORT），默认 3065
 //!   AGENT2API_PANEL_PORT        可选：面板分端口 —— 设置后管理面（界面 + /api/*）
 //!                               单独监听该端口，主端口只保留 /v1/* 网关；
@@ -99,6 +101,11 @@ fn run_foreground(launch: Launch) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    // 本地形态的便利：只听回环时替用户把浏览器打开（**下游改动**，上游没有）。
+    // AGENT2API_NO_BROWSER=1 关闭。放在网关起来之后调用，浏览器打开时端口
+    // 已经在听，不会撞上「连接被拒」再要用户手动刷新。
+    maybe_open_browser(launch.host, launch.port);
 
     // 停机信号：Ctrl+C（全平台）+ SIGTERM（unix，容器 stop 走这条）；
     // 「面板发起的重启」与两者同一条收尾路径（见 `start_gateway` 的说明）。
@@ -312,10 +319,21 @@ fn parse_launch() -> Result<Launch, String> {
             .trim()
             .parse()
             .map_err(|_| format!("AGENT2API_HOST 不是合法的 IP 地址: {value}"))?,
-        // headless 形态默认 0.0.0.0：它的宿主通常是容器 / 服务器，
-        // 绑回环会让端口映射与外部访问全部失效。对外暴露的安全由
-        // 「未配 Key 拒绝启动」闸门 + API Key 认证兜底。
-        _ => IpAddr::from(Ipv4Addr::UNSPECIFIED),
+        // headless 形态默认 127.0.0.1，与桌面壳同口径 —— **下游改动**。
+        //
+        // 上游默认 0.0.0.0，理由是「宿主通常是容器 / 服务器，绑回环会让端口
+        // 映射失效」。但「本地 web」形态（下载 zip 解压双击、浏览器访问
+        // http://127.0.0.1:3065）同样是这个二进制，访问者就在本机；默认
+        // 全网卡会让一个本地工具意外对局域网敞开。
+        //
+        // 容器 / 服务器部署不受影响：Dockerfile 的 ENV 与 docker-compose.yml
+        // 都显式设了 AGENT2API_HOST=0.0.0.0；上游的 install-service.ps1 /
+        // install.sh 装服务时同样显式写入。**未显式配置的裸服务器会变成
+        // 只能本机访问** —— 这是这条改动的已知代价，需要时设回 0.0.0.0。
+        //
+        // 同步上游时留意这一处：上游改这段注释/默认值时不要整块取上游版，
+        // 否则 desktopAccess（见 start_gateway）会连带退回 false。
+        _ => IpAddr::from(Ipv4Addr::LOCALHOST),
     };
 
     // 面板分端口（可选）：设了就把管理面（静态界面 + /api/*）挪到独立端口，
@@ -379,6 +397,43 @@ fn display_host(host: IpAddr) -> String {
         "127.0.0.1".to_string()
     } else {
         host.to_string()
+    }
+}
+
+/// 启动后把面板在默认浏览器里打开（本地形态的便利，失败只记日志）。
+///
+/// **下游改动**（上游没有这个行为）。只开回环监听这一种：访问者就在本机，
+/// 打开的就是他马上要用的面板；0.0.0.0 / 公网 IP 形态（容器、服务器）
+/// 开了也是白开 —— 那台机器的浏览器不是用户。
+/// `AGENT2API_NO_BROWSER=1` 显式关闭（无人值守 / 批量启动场景）。
+fn maybe_open_browser(host: IpAddr, port: u16) {
+    if !host.is_loopback() {
+        return;
+    }
+    if std::env::var("AGENT2API_NO_BROWSER")
+        .map(|value| value.trim() == "1")
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let url = format!("http://{}:{}/", display_host(host), port);
+    // 各平台的原生打开方式；失败（无桌面环境、无 xdg-open 等）只记一行
+    // 日志 —— 面板照常跑，用户手动输地址即可
+    let spawned = if cfg!(windows) {
+        // cmd /c start：第一个带引号的参数会被当成窗口标题，必须空串占位
+        std::process::Command::new("cmd")
+            .args(["/c", "start", "", &url])
+            .spawn()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(&url).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(&url).spawn()
+    };
+    if let Err(error) = spawned {
+        logging::console_line(
+            "[Server]",
+            &format!("未能自动打开浏览器（{error}），请手动访问 {url}"),
+        );
     }
 }
 
