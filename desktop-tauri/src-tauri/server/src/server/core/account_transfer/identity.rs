@@ -12,7 +12,18 @@
 //!   userId；Qoder = 地区 + userId（添加路径 `qoder_accounts` 按「地区 + userId」
 //!   判重，这里必须同口径 —— 只按 userId 会把国际版 / 中国版两条记录并成一条）；
 //!   Cline 两池 = account；自定义提供商（custom- 前缀）= apiKey（缺则账号 id，
-//!   与 `custom_accounts` 「同 key 合并」的幂等口径一致）。
+//!   与 `custom_accounts` 「同 key 合并」的幂等口径一致）；
+//!   **OfficeAce = accessKeyId；OrcaTerm = uid（缺则 loginName）**。
+//!
+//! ── 加新家的检查清单（这里漏一支的代价是「账号导得出去、导不回来」）──
+//! 只看「provider 有没有 `userId` 键」是不够的 —— 兜底读的就是 `userId`，
+//! 所以**凡是不写 `userId` 的家都必须有专属分支**。2026-10-18 就是靠这条
+//! 查出了 OfficeAce 与 OrcaTerm 两家的缺口（实测：导出→导入整条失败，
+//! 报「缺少 userId」）。加家时两件事都要做：
+//!   ① `identity_of_item`（导入条目）与 `identity_of_record`（本机记录）
+//!      **同时**加分支，且字段与缺省口径逐字一致；
+//!   ② 用「导出→原样导入→二次导入」三步验证：第三步必须计 `updated`
+//!      而不是 `added`（否则每条都判新增，会刷出一堆重复账号）。
 
 use std::collections::HashSet;
 
@@ -249,6 +260,49 @@ pub(super) fn identity_of_item(provider: &str, item: &Map<String, Value>) -> Res
         }
         return Err("缺少 apiKey 与 id（无法标识自定义提供商账号）".to_string());
     }
+    // OfficeAce（华为云办公云）：身份落在 `accessKeyId`（**控制面临时凭据**），
+    // 不是 userId —— 本家记录根本没有 `userId` 键。少了这一支会落进最下面的
+    // `userId` 兜底 → 报「缺少 userId（无法标识 officeace 账号）」整条失败：
+    // 账号**导得出去、导不回来**，备份恢复时静默丢号。
+    //
+    // ── 为什么身份不是「基址 + appKey」──────────────────────────
+    // 添加路径的 id 确实是 `officeace-<hash(基址|appKey)>`（见
+    // `officeace_accounts::account_id_for`），但那是**id 的生成规则**，不是
+    // 导入该用的身份：导入时 id 只作新增取名建议（本机可能因全局冲突改过名），
+    // 匹配必须靠记录里的业务字段。用 accessKeyId 与「同一条凭据重复导入落同
+    // 一条」这个目标一致 —— 同一份华为云凭据的 accessKeyId 恒定。
+    //
+    // 缺 accessKeyId 时退到账号 id（与 CommandCode / 自定义家「关键字段缺失用
+    // id」同口径）：id 全局唯一，至少能保证导入的记录不与别的账号互串。
+    if provider == kind_id(ProviderKind::OfficeAce) {
+        let access_key_id = text("accessKeyId");
+        if !access_key_id.is_empty() {
+            return Ok(access_key_id);
+        }
+        let id = text("id");
+        if !id.is_empty() {
+            return Ok(id);
+        }
+        return Err("缺少 accessKeyId 与 id（无法标识 OfficeAce 账号）".to_string());
+    }
+    // OrcaTerm（腾讯云 OrcaTerm）：身份是 `uid`（= userId，但**落在 uid 键上**，
+    // 与 CatPaw / Kuku / Trae 同类）。本家记录没有 `userId` 键，同样会落进
+    // `userId` 兜底而失败。缺 uid 时退 loginName（与 CatPaw / Kuku 同款的二级
+    // 兜底），再退账号 id。
+    if provider == kind_id(ProviderKind::OrcaTerm) {
+        let uid = text("uid");
+        if !uid.is_empty() {
+            return Ok(uid);
+        }
+        if !login_name.is_empty() {
+            return Ok(login_name);
+        }
+        let id = text("id");
+        if !id.is_empty() {
+            return Ok(id);
+        }
+        return Err("缺少 uid 与 loginName（无法标识 OrcaTerm 账号）".to_string());
+    }
     // Command Code：凭证就是身份 —— API Key 落盘在 `accessToken`（添加路径的
     // 账号 id 就是 key 的 SHA-256 前缀，与自定义家同构），记录上没有
     // userId / uid / apiKey 键。没有这一支会落进兜底按 `userId` 取 → 报
@@ -351,6 +405,34 @@ pub(super) fn identity_of_record(provider: &str, record: &StoredAccount) -> Opti
             .to_string();
         if !api_key.is_empty() {
             return Some(api_key);
+        }
+        let id = record.id().trim().to_string();
+        return (!id.is_empty()).then_some(id);
+    }
+    // OfficeAce：accessKeyId（缺则账号 id）—— 与 `identity_of_item` 同口径。
+    // 两侧都必须有这一支，否则「导出条目按 accessKeyId 匹配、本机记录算不出身份」
+    // 会让同一条账号每次导入都判为新增（重复账号，也是一种数据损坏）。
+    if provider == kind_id(ProviderKind::OfficeAce) {
+        let access_key_id = record
+            .get("accessKeyId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !access_key_id.is_empty() {
+            return Some(access_key_id);
+        }
+        let id = record.id().trim().to_string();
+        return (!id.is_empty()).then_some(id);
+    }
+    // OrcaTerm：uid（缺则 loginName，再缺用账号 id）—— 与 `identity_of_item` 同口径
+    if provider == kind_id(ProviderKind::OrcaTerm) {
+        let uid = record.uid().trim().to_string();
+        if !uid.is_empty() {
+            return Some(uid);
+        }
+        if !login_name.is_empty() {
+            return Some(login_name);
         }
         let id = record.id().trim().to_string();
         return (!id.is_empty()).then_some(id);
