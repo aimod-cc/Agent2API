@@ -44,6 +44,7 @@ import {
   ADD_METHODS,
   MAX_NAME_LENGTH,
   addButtonTextOf,
+  desktopAccess,
   desktopImportAvailable,
   fieldIdOf,
   manualNoteOf,
@@ -1068,10 +1069,11 @@ export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElem
       : t('只有「内嵌窗口」能恢复第三方入口：系统浏览器里我们无法改动登录页')
 
   // 分段选项随平台变化：网页托管面板没有本机官方客户端，「导入桌面端登录态」
-  // 整项收起（与 desktopImportAvailable 的 platform 判断同一口径）。当前选中项
-  // 被收起时退回网页登录，避免「所有段都藏着、一个可见的选中项也没有」。
+  // 整项收起（与 desktopImportAvailable 的 platform 判断同一口径），但本地
+  // headless（desktopAccess）例外 —— 网关就在本机，桌面登录态读得到。
+  // 当前选中项被收起时退回网页登录，避免「所有段都藏着、一个可见的选中项也没有」。
   const effectiveMethod: WorkBuddyMethod =
-    method === 'desktop' && platform() === 'web' ? 'web' : method
+    method === 'desktop' && platform() === 'web' && !desktopAccess() ? 'web' : method
 
   return (
     <div className='add-provider-block' hidden={!active}>
@@ -1100,7 +1102,7 @@ export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElem
           options={[
             { value: 'web', label: t('网页登录') },
             { value: 'file', label: t('导入凭证文件') },
-            ...(platform() !== 'web'
+            ...(platform() !== 'web' || desktopAccess()
               ? [{ value: 'desktop', label: t('导入桌面端登录态') }]
               : []),
           ]}

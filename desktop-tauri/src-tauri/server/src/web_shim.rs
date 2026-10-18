@@ -19,6 +19,17 @@
 //!     本地驱动；`backend:error` / `accounts:auto-maintained` 没有对应物，
 //!     订阅返回空操作（桌面端它们也只是「去查一次」的提醒）。
 //!
+//! ── 本地 headless 与远程部署的分界（`desktopAccess`）─────────
+//! 面板有两种宿主：① Docker / 公网服务器（访问者远程，`platform` 保持
+//! `'web'`，所有壳侧能力收起）；② 本地 Windows 下载 zip 双击运行
+//! （下载者就在这台机器上，回环访问）。后者的面板进程与桌面壳进程
+//! 一样**能读本机桌面客户端的登录态文件**（服务端实现含 DPAPI，本来
+//! 就在网关进程里跑），所以入口在「只听回环」时调
+//! [`set_desktop_access`]，把 `desktopAccess: true` 注入桥接对象；
+//! 界面侧据此单独放行「导入桌面端登录态」，其余 web 裁剪照旧。
+//! 未调用时默认 false（保守：桌面壳不走本模块，远程 headless 必须显式
+//! 声明才放行）。
+//!
 //! ── 登录链路在网页端的形态 ──────────────────────────────────
 //! 桌面的 startLogin 是「壳开窗口 + 壳捕获回调」；网页端改为
 //! `POST /api/session/login/start` 拿 authUrl → 打开新标签 → 轮询
@@ -38,12 +49,34 @@
 //! 这些只有壳能做的事按「能映射则映射，不能则明确拒绝」处理：
 //! 拒绝给出可读文案（界面会 toast 出来），绝不静默假成功。
 
+use std::sync::OnceLock;
+
+/// 「本面板进程能读本机桌面客户端登录态」的部署级声明（模块头有完整说明）。
+/// 由 headless 入口在解析监听地址后调用一次；未调用 = 远程部署，不放行。
+static DESKTOP_ACCESS: OnceLock<bool> = OnceLock::new();
+
+/// 声明面板进程能否读本机桌面客户端的登录态（重复调用忽略，先到为准）。
+pub fn set_desktop_access(value: bool) {
+    let _ = DESKTOP_ACCESS.set(value);
+}
+
+/// 当前部署是否放行壳侧的本机能力（见 [`set_desktop_access`]）。
+pub fn is_desktop_access() -> bool {
+    DESKTOP_ACCESS.get().copied().unwrap_or(false)
+}
+
 /// 注入进 index.html 的桥接脚本全文（在所有界面脚本之前执行）。
 ///
 /// 用 `r#"…"#` 原始字符串：脚本里不出现 `"#` 序列（字符串一律单引号），
-/// 不需要任何转义；占位符也没有 —— 平台标识直接写死 `'web'`。
-pub fn shim_js() -> &'static str {
-    r#"(function () {
+/// 不需要任何转义。唯一的占位符 `__DESKTOP_ACCESS__` 在装配时按
+/// [`is_desktop_access`] 替换成 `true` / `false` 字面量。
+pub fn shim_js() -> String {
+    let flag = if is_desktop_access() { "true" } else { "false" };
+    SHIM_TEMPLATE.replace("__DESKTOP_ACCESS__", flag)
+}
+
+/// 桥接脚本模板（内容见 [`shim_js`]）。
+const SHIM_TEMPLATE: &str = r#"(function () {
   'use strict';
 
   // ── API Key 的存取 ────────────────────────────────────────
@@ -722,8 +755,17 @@ pub fn shim_js() -> &'static str {
   };
 
   window.workbuddyDesktop = {
-    // 平台标识：界面据此裁剪本机功能（导入桌面端登录态等在 web 下隐藏）
+    // 平台标识：界面据此裁剪本机功能（导入桌面端登录态等在 web 下隐藏）。
+    // 恒为 'web' —— 所有「无桌面壳」的裁剪行为只认它，本地 headless 也不
+    // 搞特殊（端口面板、标题栏、整库恢复对话框继续收起）。
     platform: 'web',
+
+    // 面板进程能否读本机桌面客户端的登录态：由 headless 入口在解析监听
+    // 地址后置位（只听回环 ⇒ 访问者都在本机 ⇒ %APPDATA% 下的客户端文件
+    // 可读）。导入桌面端登录态这一条链路的服务端实现（含 DPAPI 解密）本来
+    // 就在网关进程里，网页端之前一律裁掉只是因为「浏览器可能连的是远程
+    // 网关」；本地形态下这个前提不成立，逐项放行。
+    desktopAccess: __DESKTOP_ACCESS__,
 
     // ── 会话 ──
     getState: function () { return call('GET', '/api/session'); },
@@ -1398,5 +1440,4 @@ pub fn shim_js() -> &'static str {
     return promise;
   };
 })();
-"#
-}
+"#;

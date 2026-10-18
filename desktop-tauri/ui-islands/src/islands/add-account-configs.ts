@@ -938,6 +938,23 @@ export type MethodId = (typeof ADD_METHODS)[number]['id']
 export const platform = (): string => shared().workbuddyDesktop?.platform || ''
 
 /**
+ * 面板进程能否读**本机**桌面客户端的登录态（桥接脚本的 `desktopAccess`）。
+ *
+ * 网页端有两种宿主：
+ *   · Docker / 公网服务器 —— 浏览器可能连着另一台机器上的网关，改个请求就能让
+ *     网关去读**那台服务器**上的文件，所以一律不放行（字段为 false）；
+ *   · 本地 headless（下载 zip 双击运行、浏览器访问 127.0.0.1）—— 网关进程就在
+ *     用户自己这台机器上，能读桌面客户端登录态；服务端实现（含 DPAPI 解密）
+ *     本来就在网关进程里，之前只是被 `platform==='web'` 一刀切掉。
+ *
+ * 桌面壳（Tauri）不走网页桥，字段缺席 → 按「能」处理（与 platform() 的
+ * 「拿不到就不裁剪」同一口径）；浏览器直连网关（没有桥）同样退回「能」，
+ * 由请求自己失败并报错，而不是悄悄少一项功能。
+ */
+export const desktopAccess = (): boolean =>
+  shared().workbuddyDesktop?.desktopAccess !== false
+
+/**
  * 桌面端导入在这一家、这个平台是否可用。
  *
  * AutoClaw 要按平台裁掉：它读 %APPDATA%/AutoClaw/auth.json，而那个文件里的 token
@@ -947,8 +964,12 @@ export const platform = (): string => shared().workbuddyDesktop?.platform || ''
  */
 export function desktopImportAvailable(config: ProviderConfig): boolean {
   if (config.desktop === false) return false
-  // 网页端（headless 托管面板注入 platform='web'）：没有本机桌面客户端可读
-  if (platform() === 'web') return false
+  // 网页端（headless 托管面板注入 platform='web'）：没有本机桌面客户端可读 ——
+  // 除非部署自己声明了 desktopAccess（本地 headless：网关就跑在这台机器上，
+  // 桌面客户端的登录态文件就在隔壁，见 desktopAccess() 的注释）
+  if (platform() === 'web' && !desktopAccess()) return false
+  // Windows 专属的导入（AutoClaw 的 DPAPI 密文）在本地 headless 下同样成立：
+  // 回环访问的网页端平台标识是 'web' 而不是 'windows'，所以要单独认这一支
   if (config.desktopWindowsOnly && platform() === 'macos') return false
   return true
 }

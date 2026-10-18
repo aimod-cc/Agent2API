@@ -84,6 +84,12 @@ export type SharedWindow = {
   workbuddyDesktop?: {
     /** 壳的编译目标平台（'macos' / 'windows' / 'linux' / 'web'） */
     readonly platform?: string
+    /**
+     * 面板进程能否读本机桌面客户端的登录态（只有网页桥会注入）。
+     * false = 远程部署（Docker / 公网服务器），壳侧本机能力收起；
+     * 缺省（桌面壳 / 浏览器直连）= 按能处理，见 add-account-configs 的注释。
+     */
+    readonly desktopAccess?: boolean
     startLogin(edition: string, mode: string, provider: string, socialRestore?: boolean): Promise<unknown>
     cancelLogin?(): Promise<unknown>
   }

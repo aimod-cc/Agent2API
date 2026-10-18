@@ -192,3 +192,63 @@ jobs:
           name: linux-server-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
+
+  # ── Windows 本地包（本地 web 形态：下载 zip 解压双击运行）─────────
+  # 与 linux-server 同一套模式：产物只挂 workflow artifact，发版由
+  # scripts/release.sh 本地挂到 Release。包内布局与 Linux 版对应 ——
+  # 根下 agent2api-server.exe 与 ui/ 目录（ui/ 直接取仓库静态文件，
+  # 与 Dockerfile 的 bundle 阶段同源），解压即用。
+  #
+  # 与桌面 windows job（NSIS 安装包）的分工：那个是「Tauri 壳」形态；
+  # 本包是「本地 headless + 浏览器」形态 —— 入口默认只听 127.0.0.1、
+  # 启动后自动打开浏览器、数据落 ~/.agent2api（与桌面壳同一目录，
+  # 两个形态不能同时跑，SQLite 单写者）。
+  #
+  # 为什么直接 cargo build 而不复用 Dockerfile：Windows 上没有镜像那条
+  # 「amd64 原生 / arm64 交叉」的统一路径，windows-latest runner 自带
+  # MSVC 工具链（含 C 链接器，rusqlite bundled 的 SQLite 要用），直接编
+  # 最直；步骤与桌面 job 的 Rust 安装同构。产物路径按
+  # .cargo/config.toml 的 target-dir 落在仓库根 target/ 下。
+  #
+  # 打包用 pwsh 的 Compress-Archive（runner 自带，无需额外动作）：
+  # zip 内条目保持叶子名（agent2api-server.exe / ui/**），与上面注释的
+  # 布局约定一致；校验文件与 Linux job 同格式（<hash>␣␣<name>，面板侧
+  # parse_checksum 只取第一个 token）。
+  windows-server:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 依赖
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-tauri/src-tauri -> ../../target
+
+      - name: 构建网关二进制
+        run: cargo build --release -p agent2api-server
+        working-directory: desktop-tauri/src-tauri
+
+      - name: 打包并生成校验和
+        shell: pwsh
+        run: |
+          $name = "agent2api-server-windows-amd64.zip"
+          $exe = "$env:GITHUB_WORKSPACE/target/release/agent2api-server.exe"
+          $ui = "$env:GITHUB_WORKSPACE/desktop-tauri/ui"
+          if (-not (Test-Path $exe)) { throw "找不到网关二进制：$exe" }
+          if (-not (Test-Path $ui)) { throw "找不到界面目录：$ui" }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path $exe, $ui -DestinationPath "dist/$name"
+          $hash = (Get-FileHash -Algorithm SHA256 "dist/$name").Hash.ToLower()
+          "$hash  $name" | Out-File -FilePath "dist/$name.sha256" -Encoding ascii
+          Get-Content "dist/$name.sha256"
+          Get-ChildItem dist
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-server-amd64
+          path: dist/*
+          if-no-files-found: error
