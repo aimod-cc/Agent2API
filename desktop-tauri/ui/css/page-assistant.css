@@ -166,35 +166,6 @@
 .asst-settings-btn { gap: 6px; color: var(--text-2); }
 .asst-settings-btn svg { color: var(--text-3); }
 
-/* 完全访问的常驻提示 */
-.asst-warnbar {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 10px;
-  padding: 7px 11px;
-  border: 1px solid var(--warn-bd);
-  border-radius: var(--r-sm);
-  background: var(--warn-soft);
-  color: var(--text-2);
-  font-size: 11.5px;
-}
-.asst-warnbar svg { flex: none; color: var(--warn); }
-.asst-textlink {
-  height: auto;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  box-shadow: none;
-  color: var(--text-3);
-  font-size: 11.5px;
-  font-weight: 500;
-}
-.asst-textlink:hover { background: transparent; border-color: transparent; color: var(--text); text-decoration: underline; }
-.asst-warnbar .asst-textlink { margin-left: auto; color: var(--warn); }
-.asst-warnbar .asst-textlink:hover { color: var(--warn); }
-
 /* ─── 消息区 ─── */
 .asst-scroll {
   flex: 1;
@@ -339,13 +310,6 @@
   line-height: 1.7;
 }
 .asst-notice.bad { border-color: var(--danger-bd); background: var(--danger-soft); }
-.asst-statusline {
-  flex: none;
-  padding: 6px 2px 0;
-  color: var(--text-3);
-  font-size: 11px;
-  line-height: 1.6;
-}
 
 /* ─── 工具卡 ───
    默认只有一行摘要（头），点开才看参数 / 结果。待确认的卡是唯一常驻展开的
@@ -536,8 +500,21 @@
 /* ─── 输入区 ───
    结构：附件行 / 文本域 / 底部工具条（+ · 权限胶囊 … 模型胶囊 · 发送）。
    与旧版相比，模型与思考等级从「输入框上方两个下拉」收进一个胶囊；
-   权限模式是这一版新增的第二个胶囊。 */
-.asst-composer-wrap { flex: none; padding-top: 10px; }
+   权限模式是这一版新增的第二个胶囊。
+
+   ── 宽度必须与消息列一致 ────────────────────────────────────
+   消息列（`.asst-flow`）是 `max-width: 840px; margin: 0 auto` 的限宽居中，
+   输入区如果铺满整个右栏，宽屏下两者会差出几百像素 —— 上下的左右边缘对不齐，
+   看起来像两块不同的东西拼在一起。这里用同一组数（840px / 居中），
+   并把内边距对齐到 `.asst-scroll` 的左右 2px，让两条边真正落在同一条竖线上。
+   改这里的 max-width 时**必须同步改 `.asst-flow`**，否则又会对不齐。 */
+.asst-composer-wrap {
+  flex: none;
+  padding: 10px 2px 0;
+  width: 100%;
+  max-width: 840px;
+  margin: 0 auto;
+}
 .asst-composer {
   position: relative;
   display: flex;

@@ -280,8 +280,11 @@ export function AssistantSettingsDrawer({
           </SheetBody>
 
           <SheetFooter className='asst-drawer-foot'>
+            {/* 这里只显示**常驻**状态（保存失败 / 配置读不出来）。成功的那类
+                反馈（「已勾选 X」「已切换到完全访问」）由父组件走顶部 toast，
+                不再占这一行 —— 否则每点一下开关，这行字就换一次。 */}
             <span className={cn('asst-hint', failed && 'bad')}>
-              {status || t('会话里的选择优先于这里的默认值')}
+              {failed && status ? status : t('会话里的选择优先于这里的默认值')}
             </span>
             <span className='spacer' />
             <Button size='sm' onClick={() => onOpenChange(false)}>{t('完成')}</Button>

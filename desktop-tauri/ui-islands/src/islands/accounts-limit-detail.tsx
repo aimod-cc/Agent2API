@@ -153,7 +153,9 @@ export function LimitDetailButton({ accountName, rows, count, soonest, onClear }
           <span className='val'>{t('{n} 个模型', { n: count })}</span>
           <span className='caret' aria-hidden>▾</span>
         </PopoverTrigger>
-        <PopoverContent align='end' sideOffset={6} className='w-[320px]' initialFocus={initialFocus}>
+        {/* `align='center'`：与「积分明细」同一处置（理由见 accounts-credit-detail
+            的同名参数）—— 这两列的按钮都靠右，'end' 会把弹层甩到表格右外侧。 */}
+        <PopoverContent align='center' sideOffset={6} className='w-[320px]' initialFocus={initialFocus}>
           {/* ⚠️ 这一层 div 是**滚动容器本身**，不是装饰：组件库给 PopoverContent 编出的
               `overflow-hidden` / `max-h-[min(70vh,560px)]` 都带 `!important`，把
               max-height / overflow-y 写在弹层自己身上会被压掉。与 .usage-pop-credit

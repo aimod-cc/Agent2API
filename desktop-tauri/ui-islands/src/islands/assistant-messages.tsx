@@ -93,6 +93,12 @@ function UserMessage({ text, images }: { text: string; images?: string[] }) {
 /* ─── 助手消息 ─────────────────────────────────────────────── */
 
 function BotMessage({ text, streaming }: { text: string; streaming?: boolean }) {
+  // 空正文且这一轮已经结束 = 这条消息没有任何可显示的内容（模型没说话、直接
+  // 调工具，这是最常见的一种形态）。早先这里只看 `text`，于是这种消息会永久
+  // 挂着三个点的思考动画 —— 工具卡都执行完了、下一轮回答也出来了，那一行还在
+  // 转，看起来像「加载永远不结束」。
+  // `streaming` 期间仍然显示三个点：那是真的在等上游第一个 token。
+  if (!text && !streaming) return null
   return (
     <div className='asst-msg bot'>
       <Avatar />

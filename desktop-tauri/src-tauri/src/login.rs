@@ -918,6 +918,17 @@ fn normalize_provider(provider: &str) -> Result<&'static str, String> {
         // `orcaterm://oauth_callback?session_id=…` 交回网关换令牌
         // （见 `start_orcaterm` 与 `providers/orcaterm/login.rs` 的模块头）。
         "orcaterm" => Ok("orcaterm"),
+        // AtomCode（AtomGit / GitCode）：授权地址由**后端适配器**向代理现取
+        // （`providers::atomcode::oauth`），壳侧只负责开窗口与轮询 —— 与
+        // ZCode / OfficeAce 同一条路。它的授权回调由代理自己在
+        // `acs.atomgit.com/callback` 终结、**永远不回到本机**，授权结果由网关
+        // 轮询代理判定（`auth/check` → `auth/token`），所以窗口最后停在代理页上
+        // 也不影响登录判定，壳侧既不用捕获自定义协议也不用转交回调。
+        //
+        // **这一条不能少**：前端（`add-account-configs.ts` 的 ATOMCODE）早就把
+        // 「网页登录」按钮画出来了，缺了它点下去就是
+        // 「登录失败：不支持网页登录的提供商：atomcode」。
+        "atomcode" => Ok("atomcode"),
         other => Err(format!("不支持网页登录的提供商：{other}")),
     }
 }
@@ -1238,6 +1249,9 @@ pub async fn start(
         // 不需要地区
         "officeace" => "OfficeAce 果办",
         "lobsterai" => "LobsterAI",
+        // AtomCode 只有一家（AtomGit / GitCode 的编码 Agent，没有地区/版本概念），
+        // 品牌名里不需要地区
+        "atomcode" => "AtomCode",
         _ => "WorkBuddy",
     };
     // 窗口标题：Cline 两家的池、ZCode 两家的地区、CodeArts / Trae / OfficeAce
@@ -1246,7 +1260,7 @@ pub async fn start(
     let title = if matches!(
         provider,
         "cline-free" | "cline-pass" | "zcode" | "zcode-intl" | "codearts" | "trae" | "qoder"
-        | "qoder-intl" | "antigravity" | "officeace" | "lobsterai"
+        | "qoder-intl" | "antigravity" | "officeace" | "lobsterai" | "atomcode"
     ) {
         format!("登录 {provider_label} 账号")
     } else {

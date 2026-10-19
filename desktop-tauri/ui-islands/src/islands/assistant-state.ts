@@ -34,6 +34,24 @@ type DesktopBridge = {
   directCredentials?: () => Promise<unknown>
 }
 
+/**
+ * 顶部轻提示（app.js 的 `#toast`，与全站其它页同一处实现）。
+ *
+ * 助手页的**瞬时**反馈（切换权限模式、勾选工具、粘贴图片被拒……）走这里，
+ * 不再落到页面底部那一行：那一行是文档流里的一个 `div`，会把输入区往上顶
+ * 一行、且不会自己消失 —— 与「提示」这件事该有的形态不符（其余页面都是
+ * 顶部浮层，三秒半自动消失）。
+ *
+ * 底部那一行仍然保留，但只承载**常驻状态**（助手配置读不出来 / 读失败），
+ * 那是需要一直看得见的信息，不该三秒后消失。
+ *
+ * 桥没就绪时静默跳过：提示是锦上添花，不能因为它把调用方的流程打断。
+ */
+export function toast(message: string, kind: 'ok' | 'err' | 'warn' = 'ok'): void {
+  const host = (window as unknown as { wbApp?: { toast?: (text: string, type?: string) => void } }).wbApp
+  host?.toast?.(message, kind)
+}
+
 function bridge(): DesktopBridge | undefined {
   return (window as unknown as { workbuddyDesktop?: DesktopBridge }).workbuddyDesktop
 }

@@ -372,7 +372,10 @@ export function CreditDetailButton({ rows, subscriptionLine, variant, kind, titl
         {variant === 'pool' ? children : <span className='val'>{children}</span>}
         <span className='caret' aria-hidden>▾</span>
       </PopoverTrigger>
-      <PopoverContent align='end' sideOffset={6} className='w-[320px]' initialFocus={initialFocus}>
+      {/* `align='center'`：浮层以读数按钮为中心展开。原来是 'end'（右缘对齐），
+          而这一列的按钮本身就靠右，弹层再向右贴齐就整个甩到表格右外侧，读起来像
+          挂在了「操作」列下面。居中后它落在自己的格子上，与哪一行是哪一行对得上。 */}
+      <PopoverContent align='center' sideOffset={6} className='w-[320px]' initialFocus={initialFocus}>
         {/* ⚠️ 这一层 div 不是装饰，是**滚动容器本身**：组件库给 PopoverContent 编出的
             `overflow-hidden` / `max-h-[min(70vh,560px)]` 都带 `!important`，把
             max-height / overflow-y 写在弹层自己身上会被它们压掉（明细一多就既滚不动

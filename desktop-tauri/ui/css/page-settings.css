@@ -504,6 +504,33 @@
   .retention-row { grid-template-columns: max-content 1fr; }
 }
 
+/* 分组卡片的两栏容器。
+   ── 为什么用 `columns` 而不是 grid ──────────────────────────
+   六张卡片高度差很大（「环境」十行、「计数」七行），grid 两列会把同一行的两张
+   拉到等高 —— 矮的那张下面留一大片空白，看着像没加载完。多列流式布局让每张卡
+   按自己的高度排列，只在换列时平衡高度，视觉上紧凑得多。
+   `break-inside: avoid` 是这条布局成立的前提：少了它，一张卡片会被从中间劈开、
+   上半截在左栏底部、下半截在右栏顶部。
+   `column-gap` 与面板之间的 14px 垂直间距分开写：面板自己带 margin-bottom，
+   横向间距必须比它大一点，否则两栏会读成一栏。 */
+.sysinfo-groups {
+  columns: 2;
+  column-gap: 14px;
+}
+.sysinfo-groups > .panel {
+  /* 列内不被拆开（见上） */
+  break-inside: avoid;
+  /* `columns` 下子元素是行内流的一部分，不设 inline-size 的话卡片会按内容宽度
+     收缩；100% 让它铺满所在那一列。 */
+  inline-size: 100%;
+}
+
+/* 窄窗口退回一栏：与 .sysinfo-row 的断点同一处（900px），
+   设置面板本身也在那个宽度退化成「导航在上」的形态。 */
+@media (max-width: 900px) {
+  .sysinfo-groups { columns: 1; }
+}
+
 /* ─── 版本信息（system-info-pane.tsx）───────────────────────────
    这一页的读者是「出问题的人 + 看截图的人」：值要能逐字核对（版本号、
    路径、端口），所以值一律等宽；键列定宽，让十几行读下来是一条竖直的
@@ -538,6 +565,15 @@
   grid-template-columns: 150px minmax(0, 1fr);
   align-items: baseline;
   gap: 4px 12px;
+}
+
+/* 两栏布局下每张卡片只有半屏宽，150px 的键列会吃掉将近一半，
+   长路径（数据目录 / 程序路径）只剩两三个字符就换行。收到 118px：
+   最长的那几个键（「WebView / 浏览器内核」「/v1 拒绝无 Key 请求」）
+   仍能放下，值列多出三十来像素。 */
+.sysinfo-groups .sysinfo-row {
+  grid-template-columns: 118px minmax(0, 1fr);
+  gap: 4px 10px;
 }
 
 .sysinfo-key {
@@ -584,7 +620,11 @@
   font-weight: 500;
 }
 
-/* 窄窗口：键列收窄（150px 在 360px 宽的设置面板里会吃掉一半） */
+/* 窄窗口：键列收窄（150px 在 360px 宽的设置面板里会吃掉一半）。
+   选择器要带上 `.sysinfo-groups` 才压得过上面那条两栏规则 —— 那时
+   `.sysinfo-groups` 已经退回单栏（columns: 1），键列反而可以更宽一点，
+   但 108px 仍比 118px 省地方，且与本文档里其余窄屏口径一致。 */
 @media (max-width: 900px) {
-  .sysinfo-row { grid-template-columns: 108px minmax(0, 1fr); }
+  .sysinfo-row,
+  .sysinfo-groups .sysinfo-row { grid-template-columns: 108px minmax(0, 1fr); }
 }

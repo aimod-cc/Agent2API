@@ -1487,7 +1487,9 @@ function UsageDetailCell({ summary, detail, blockedBadge, tokenSub }: {
           <span className='val'>{summary.text}</span>
           <span className='caret' aria-hidden>▾</span>
         </PopoverTrigger>
-        <PopoverContent align='end' sideOffset={6} className='usage-pop w-[288px]'>
+        {/* `align='center'`：与 accounts-credit-detail / accounts-limit-detail
+            同一处置 —— 余额格的按钮靠右，'end' 会把弹层甩到表格右外侧。 */}
+        <PopoverContent align='center' sideOffset={6} className='usage-pop w-[288px]'>
           {usable && detail.missing.length
             ? detail.missing.map(line => <div key={line} className='usage-pop-missing' title={line}>{line}</div>)
             : null}

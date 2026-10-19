@@ -513,9 +513,16 @@ function SystemInfoPanel() {
         </div>
       </section>
 
-      {groups.map(group => (
-        <GroupCard key={group.title} title={group.title} rows={group.rows} />
-      ))}
+      {/* 分组卡片：宽屏左右两栏、窄屏自动退回一栏（见 CSS 的 .sysinfo-groups）。
+          单栏时这一页有六张卡片、四十多行，要滚两屏多；两栏之后一屏能扫完，
+          而且浏览器的自动平衡恰好把「版本 / 环境 / 位置与端口」放在左栏、
+          「安全 / 开关 / 计数」放在右栏 —— 正好是「这台机器是什么」与
+          「它现在怎么跑」两组语义。 */}
+      <div className='sysinfo-groups'>
+        {groups.map(group => (
+          <GroupCard key={group.title} title={group.title} rows={group.rows} />
+        ))}
+      </div>
     </>
   )
 }

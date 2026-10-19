@@ -44,6 +44,7 @@ import {
   saveAssistantConfig,
   saveSession,
   streamChat,
+  toast,
   type AssistantConfig,
   type ChatMessage,
   type PermissionMode,
@@ -106,6 +107,13 @@ function AssistantPage() {
   const [awaiting, setAwaiting] = React.useState(false)
   const [draft, setDraft] = React.useState('')
   const [images, setImages] = React.useState<string[]>([])
+  /**
+   * **常驻**状态（助手配置读不出来 / 保存失败）。
+   *
+   * 只装需要一直看得见的那类信息；「已切换到完全访问」这类**瞬时**反馈一律走
+   * [`toast`]（顶部浮层，3.5 秒后自动消失），不要再往这里塞 —— 这个 state 的
+   * 落地处是空状态卡片里的一行警告，落在对话中时根本看不见。
+   */
   const [status, setStatus] = React.useState('')
   const [loadingFailed, setLoadingFailed] = React.useState(false)
   /** 历史会话列表（侧边栏）与当前打开的那一条 */
@@ -165,8 +173,15 @@ function AssistantPage() {
    * 一轮对话里 `loop` 可能被调多次（工具回灌后继续），每次结束都会触发保存。
    * 并发写同一条会话时，后到的请求**不保证**先落库 —— 那会让「刚存的最新版」
    * 被「稍早的旧版」覆盖。这里用一条 promise 链把保存排成队。
+   *
+   * ── 为什么保存后不无条件把这条挪到最上面（`bump`）────────────
+   * 切换会话前也会先 `persist()` 一次（见 `openSession`），而那时内容其实没变
+   * —— 如果保存成功就 `[saved, ...rest]`，用户每点一条历史，那条就被顶到列表
+   * 第一位，列表顺序随着浏览行为不停抖动。所以这里默认**原地更新**，只有调用方
+   * 明确表示「这条有新内容」时才置顶（`bump`）。后端仍按 `updated_at` 倒序返回
+   * （见 `assistant_sessions.rs`），重进页面时顺序才以真实活跃度为据。
    */
-  const persist = React.useCallback((): Promise<void> => {
+  const persist = React.useCallback((bump = true): Promise<void> => {
     const id = activeIdRef.current
     if (!id) return Promise.resolve()
     const messages = wireRef.current
@@ -184,13 +199,30 @@ function AssistantPage() {
       .then(async () => {
         try {
           const saved = await saveSession(payload)
-          titleRef.current = saved.title
+          // ── 只有「保存的仍是当前会话」才回写 titleRef ──────────────
+          // 点「新对话」/ 切会话时是先 `void persist(...)` 再 `resetToBlank`，
+          // 两者都不等待：保存请求飞在路上的那几百毫秒里，`titleRef` 已经被
+          // 新会话清空、`activeIdRef` 也换成了新 id。此时无条件
+          // `titleRef.current = saved.title` 会把**旧会话的标题**写回新会话，
+          // 症状正是「记录清空了、左上角标题还在，要再点一次新对话才消失」
+          // （第二次因为 wireRef 已空，persist 直接 return，不写 ref）。
+          // 列表本身照常更新：那条会话确实存下来了，与当前在看哪条无关。
+          if (activeIdRef.current === id) titleRef.current = saved.title
           setSessions(prev => {
+            const index = prev.findIndex(item => item.id === saved.id)
+            // 新会话（列表里还没有）：只能加，且加在最前面 —— 它刚被创建
+            if (index < 0) return [saved, ...prev]
+            // 已有会话：原地替换那一条。顺序保持不动，除非调用方要求置顶。
+            if (!bump) {
+              const next = prev.slice()
+              next[index] = saved
+              return next
+            }
             const rest = prev.filter(item => item.id !== saved.id)
             return [saved, ...rest]
           })
         } catch (error) {
-          setStatus(t('这条会话没能存进历史：{message}', { message: errorText(error) }))
+          toast(t('这条会话没能存进历史：{message}', { message: errorText(error) }), 'err')
         }
       })
     return savingRef.current
@@ -236,12 +268,12 @@ function AssistantPage() {
     try {
       setModels(await loadModelOptions())
     } catch (error) {
-      setStatus(prev => prev || t('读取模型清单失败：{message}', { message: errorText(error) }))
+      toast(t('读取模型清单失败：{message}', { message: errorText(error) }), 'err')
     }
     try {
       setSessions(await loadSessions())
     } catch (error) {
-      setStatus(prev => prev || t('读取历史会话失败：{message}', { message: errorText(error) }))
+      toast(t('读取历史会话失败：{message}', { message: errorText(error) }), 'err')
     }
     // 首次进入开一条空白会话（不等用户点「新对话」：直接就能打字）
     if (!activeIdRef.current) {
@@ -354,7 +386,6 @@ function AssistantPage() {
     }
     roundRef.current += 1
     setBusy(true)
-    setStatus('')
     const controller = new AbortController()
     controllerRef.current = controller
     const botIndex = uiRef.current.push({ kind: 'bot', text: '', streaming: true }) - 1
@@ -400,8 +431,16 @@ function AssistantPage() {
       return
     }
     const current = uiRef.current[botIndex]
-    if (current && current.kind === 'bot') uiRef.current[botIndex] = { ...current, streaming: false }
     const text = current && current.kind === 'bot' ? current.text : ''
+    if (current && current.kind === 'bot') {
+      // 模型没说话、直接调工具（很常见）：这条消息没有可显示的内容，**整条删掉**，
+      // 不留一条空消息在流里。否则它会以「三个点的思考动画」的形态永久挂在
+      // 工具卡上方（早先只把 streaming 置 false，而 BotMessage 当时只看 text，
+      // 于是动画永远转下去 —— 看起来像加载卡死）。
+      // 从数组里删而不是只改渲染：这条消息还会进 wireRef 与历史库，留着是脏数据。
+      if (!text) uiRef.current.splice(botIndex, 1)
+      else uiRef.current[botIndex] = { ...current, streaming: false }
+    }
     wireRef.current.push({ role: 'assistant', content: text, toolCalls: calls.length ? calls : undefined })
     syncUI()
     // 每轮落一次库（串行，见 persist 的说明）：工具链中途也存，崩了不丢已答的部分
@@ -501,12 +540,13 @@ function AssistantPage() {
     setActiveId(id)
     setAwaiting(false)
     setBusy(false)
-    setStatus('')
     syncUI()
   }, [syncUI])
 
   const newChat = React.useCallback(() => {
-    void persistRef.current()
+    // 与 openSession 同一理由：开新对话前保存旧的，但不算「有新内容」，
+    // 不该把刚才那条顶到列表第一位。
+    void persistRef.current(false)
     resetToBlank(newSessionId())
     setSidebarOpen(false)
   }, [resetToBlank])
@@ -520,7 +560,9 @@ function AssistantPage() {
   const openSession = React.useCallback(async (id: string) => {
     if (busy || awaiting) return
     if (id === activeIdRef.current) { setSidebarOpen(false); return }
-    await persistRef.current()
+    // `false`：这里保存只是为了不丢掉正在看的那条，内容并没有新增 ——
+    // 置顶会让列表跟着「点了哪条」抖动（见 persist 的说明）。
+    await persistRef.current(false)
     try {
       const detail = await loadSession(id)
       // 回放：只画有正文的消息。工具调用卡（`role:"tool"`）与「只带 tool_calls、
@@ -539,7 +581,6 @@ function AssistantPage() {
       suspendedRef.current = null
       setAwaiting(false)
       setBusy(false)
-      setStatus('')
       syncUI()
       // 会话自己记了模型与等级：打开就恢复（用户在聊天框里改的也是这条会话的）
       if (config && (detail.model || detail.reasoning)) {
@@ -552,7 +593,7 @@ function AssistantPage() {
         void saveAssistantConfig(next).catch(() => { /* 恢复失败不影响这段对话 */ })
       }
     } catch (error) {
-      setStatus(t('打开会话失败：{message}', { message: errorText(error) }))
+      toast(t('打开会话失败：{message}', { message: errorText(error) }), 'err')
     }
     setSidebarOpen(false)
   }, [awaiting, busy, config, syncUI])
@@ -561,7 +602,7 @@ function AssistantPage() {
     try {
       await deleteSession(id)
     } catch (error) {
-      setStatus(t('删除会话失败：{message}', { message: errorText(error) }))
+      toast(t('删除会话失败：{message}', { message: errorText(error) }), 'err')
       return
     }
     setSessions(prev => prev.filter(item => item.id !== id))
@@ -572,14 +613,17 @@ function AssistantPage() {
     try {
       await clearSessions()
     } catch (error) {
-      setStatus(t('清空历史失败：{message}', { message: errorText(error) }))
+      toast(t('清空历史失败：{message}', { message: errorText(error) }), 'err')
       return
     }
     setSessions([])
     resetToBlank(newSessionId())
   }, [resetToBlank])
 
-  /** 保存助手配置（抽屉与输入区的选择器共用这一条） */
+  /** 保存助手配置（抽屉与输入区的选择器共用这一条）
+   *
+   * `note` 是**瞬时**反馈（「已切换到完全访问」这类），走顶部 toast；
+   * 失败才写进底部那一行 —— 那是需要一直看得见的常驻状态。 */
   const saveConfig = React.useCallback((next: AssistantConfig, note?: string) => {
     setConfig(next)
     void (async () => {
@@ -587,7 +631,8 @@ function AssistantPage() {
         const saved = await saveAssistantConfig(next)
         setConfig(saved)
         setLoadingFailed(false)
-        if (note) setStatus(note)
+        setStatus('')
+        if (note) toast(note)
       } catch (error) {
         setLoadingFailed(true)
         setStatus(t('保存失败：{message}', { message: errorText(error) }))
@@ -598,7 +643,7 @@ function AssistantPage() {
   const pickModel = React.useCallback((name: string) => {
     if (!name) return
     if (!config) {
-      setStatus(t('助手设置没读出来，暂时存不了对话模型。'))
+      toast(t('助手设置没读出来，暂时存不了对话模型。'), 'err')
       return
     }
     saveConfig({ ...config, model: name })
@@ -606,7 +651,7 @@ function AssistantPage() {
 
   const pickReasoning = React.useCallback((level: string | null) => {
     if (!config) {
-      setStatus(t('助手设置没读出来，暂时存不了思考等级。'))
+      toast(t('助手设置没读出来，暂时存不了思考等级。'), 'err')
       return
     }
     saveConfig({ ...config, reasoning: level })
@@ -631,25 +676,25 @@ function AssistantPage() {
     const list = Array.from(files)
     const imagesOnly = list.filter(file => file.type.startsWith('image/'))
     if (!imagesOnly.length) {
-      setStatus(t('只支持图片文件（PNG / JPG / WebP / GIF）。'))
+      toast(t('只支持图片文件（PNG / JPG / WebP / GIF）。'), 'err')
       return
     }
     const oversized = imagesOnly.find(file => file.size > MAX_IMAGE_BYTES)
     if (oversized) {
-      setStatus(t('「{name}」超过 {n} MB，换一张小一点的。', {
+      toast(t('「{name}」超过 {n} MB，换一张小一点的。', {
         name: oversized.name,
         n: MAX_IMAGE_BYTES / 1024 / 1024,
-      }))
+      }), 'err')
       return
     }
     const room = MAX_IMAGES - imagesRef.current.length - pendingRef.current
     if (room <= 0) {
-      setStatus(t('一次最多 {n} 张图片。', { n: MAX_IMAGES }))
+      toast(t('一次最多 {n} 张图片。', { n: MAX_IMAGES }), 'err')
       return
     }
     const take = imagesOnly.slice(0, room)
     if (take.length < imagesOnly.length) {
-      setStatus(t('一次最多 {n} 张图片，多出的没有添加。', { n: MAX_IMAGES }))
+      toast(t('一次最多 {n} 张图片，多出的没有添加。', { n: MAX_IMAGES }), 'warn')
     }
     pendingRef.current += take.length
     for (const file of take) {
@@ -657,7 +702,7 @@ function AssistantPage() {
         .then(url => {
           if (url) setImages(current => (current.length >= MAX_IMAGES ? current : [...current, url]))
         })
-        .catch(error => setStatus(t('读取图片失败：{message}', { message: errorText(error) })))
+        .catch(error => toast(t('读取图片失败：{message}', { message: errorText(error) }), 'err'))
         .finally(() => { pendingRef.current = Math.max(0, pendingRef.current - 1) })
     }
   }, [])
@@ -726,19 +771,6 @@ function AssistantPage() {
           </Button>
         </div>
 
-        {/* 完全访问的常驻提示（只在对话中、且开了完全访问时出现） */}
-        {mode === 'full' && !empty && (
-          <div className='asst-warnbar'>
-            <svg viewBox='0 0 24 24' width='14' height='14' aria-hidden='true'>
-              <path d='M13.2 2.5L5.4 13.4h5.2l-1.1 8.1 8.3-11.3h-5.2l.6-7.7z' fill='currentColor' />
-            </svg>
-            <span>{t('完全访问已开启：改动类工具会直接执行，不再弹出确认卡。')}</span>
-            <button type='button' className='asst-textlink' onClick={() => pickMode('confirm')}>
-              {t('改回变更前确认')}
-            </button>
-          </div>
-        )}
-
         <div className='asst-scroll' ref={scrollRef}>
           {empty ? (
             <div className='asst-empty'>
@@ -798,10 +830,6 @@ function AssistantPage() {
           onSend={() => void send(draft, images)}
           onStop={stop}
         />
-
-        {status && !loadingFailed && (
-          <div className='asst-statusline'>{status}</div>
-        )}
       </div>
 
       <AssistantSettingsDrawer
