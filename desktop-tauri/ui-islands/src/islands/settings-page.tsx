@@ -2292,6 +2292,7 @@ function PasswordDialog({ password }: { password: { busy: boolean; error: string
               id='account-old-password'
               type='password'
               autoComplete='current-password'
+              placeholder={t('输入当前登录用的密码')}
               value={oldValue}
               disabled={busy}
               onChange={event => setOldValue(event.target.value)}
@@ -2315,6 +2316,7 @@ function PasswordDialog({ password }: { password: { busy: boolean; error: string
               id='account-repeat-password'
               type='password'
               autoComplete='new-password'
+              placeholder={t('再输入一次新密码')}
               value={repeat}
               disabled={busy}
               onChange={event => setRepeat(event.target.value)}
