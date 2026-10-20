@@ -421,7 +421,7 @@ function OnboardingRow({ row }: { row: { id: string; name: string; provider?: st
 }
 
 /**
- * 自动发放一行（QClaw）：**只读** —— 积分随登录到账，没有「领取」这个动作。
+ * 迁移期只读一行（QClaw）：**只读** —— 本站已停止发放积分，只剩余额可看。
  *
  * ── 为什么没有按钮 ──────────────────────────────────────────
  * 上游没有签到 / 领奖端点（全量逆向 `out/` 的 115 个 chunk 都没有，见后端
@@ -498,7 +498,7 @@ function AutoGrantRow({ row }: { row: { id: string; name: string; provider?: str
         <div className='ck-prov-info'>
           <div className='ck-prov-name'>{row.name || row.id}</div>
           <div className='ck-prov-desc'>
-            {row.note ? t(row.note) : t('积分随登录自动发放，无需签到')}
+            {row.note ? t(row.note) : t('本站已停止发放积分，余额在原有效期内仍可用')}
             {state.loading
               ? ` · ${t('余额查询中…')}`
               : state.error
@@ -515,7 +515,7 @@ function AutoGrantRow({ row }: { row: { id: string; name: string; provider?: str
               ? <Spinner className='size-4' />
               : balance ?? <span className='ck-pending'>—</span>}
           </span>
-          <Badge variant='outline' shape='tag'>{t('自动发放')}</Badge>
+          <Badge variant='outline' shape='tag'>{t('已停运')}</Badge>
         </div>
       </div>
     </div>
@@ -899,7 +899,7 @@ function CenterTab({ store }: { store: CheckinStore }) {
             )}
             {(daily?.outOfScope ?? []).length > 0 ? (
               <div className='ck-fold-note'>
-                {t('不参与每日签到：{list}。CodeArts 的一次性奖励在下方「新手福利」，它的每日福利就在上方「每日签到」里；ZCode 的套餐领取见「活动福利」；QClaw 的积分随登录自动发放，见「自动发放」。', {
+                {t('不参与每日签到：{list}。CodeArts 的一次性奖励在下方「新手福利」，它的每日福利就在上方「每日签到」里；ZCode 的套餐领取见「活动福利」；QClaw 已停运、积分随迁移到 WorkBuddy 发放，见下方「只读余额（已停运）」。', {
                   // 列表项里的 provider 名与原因都是后端数据（snapshot 的 outOfScope），原样透出
                   list: daily!.outOfScope
                     .map(item => t('{label} ×{count}（{reason}）', { label: item.label, count: item.count, reason: item.reason }))
@@ -960,9 +960,12 @@ function CenterTab({ store }: { store: CheckinStore }) {
 
         <section className='panel'>
           <div className='panel-head'>
-            <h2>{t('自动发放')}</h2>
+            {/* 标题从「自动发放」改成「只读余额（已停运）」：QClaw 已公告停运
+                （2026-12-24 停服），本站不再发放积分 —— 还叫「自动发放」会让
+                人以为每天还有到账 */}
+            <h2>{t('只读余额（已停运）')}</h2>
             <span className='panel-sub'>
-              {t('积分随登录到账 · 无需签到 · 只读：余额与到期时间由上游直接给出')}
+              {t('这些提供商已停止发放积分 · 余额在原有效期内仍可用 · 只读：余额与到期时间由上游直接给出')}
             </span>
           </div>
           {autoGrantRows.length > 0 ? (
@@ -970,7 +973,7 @@ function CenterTab({ store }: { store: CheckinStore }) {
               {autoGrantRows.map(row => <AutoGrantRow key={row.id} row={row} />)}
             </div>
           ) : (
-            <div className='ck-empty'>{t('没有随登录自动发放积分的账号（目前有 QClaw 一家）。')}</div>
+            <div className='ck-empty'>{t('没有已停运但仍可查余额的账号（目前有 QClaw 一家）。')}</div>
           )}
         </section>
 
