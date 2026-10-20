@@ -467,73 +467,152 @@ fn upstream_message(error_body: &Value) -> String {
 mod tests {
     use super::*;
 
+    /// 造一个隔离的 `~/.qclaw` 目录：先清干净（并行测试或上一轮残留），
+    /// 再按需写入 `openclaw.json`。返回 `(目录, 清理闭包)` —— 清理必须显式做，
+    /// 因为临时目录是**路径拼出来的**而不是 RAII 对象（本仓测试的既有惯例，
+    /// 见 `local.rs` 的 `models_port_parses_from_auth_gateway_url`；
+    /// `tempfile` 不在 dev-dependencies 里，别为几个用例引依赖）。
+    ///
+    /// 目录名带 `std::process::id()`：同一台机器上并行跑 cargo test 的多个
+    /// 进程不会互相清掉对方的目录。
+    fn isolated_home(tag: &str, openclaw_json: Option<&str>) -> (std::path::PathBuf, impl FnOnce()) {
+        let dir = std::env::temp_dir().join(format!("qclaw-gateway-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create dir");
+        if let Some(text) = openclaw_json {
+            std::fs::write(dir.join("openclaw.json"), text).expect("write openclaw.json");
+        }
+        let cleanup_dir = dir.clone();
+        (dir, move || {
+            let _ = std::fs::remove_dir_all(&cleanup_dir);
+        })
+    }
+
+    /// 用隔离目录跑一段测试体的薄封装，**确保清理一定执行**（哪怕断言 panic）。
+    fn with_isolated_home<T>(tag: &str, openclaw_json: Option<&str>, run: impl FnOnce() -> T) -> T {
+        let (dir, cleanup) = isolated_home(tag, openclaw_json);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            local::with_home_override(dir.clone(), run)
+        }));
+        cleanup();
+        match outcome {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
     /// body.model 只能是 agent 名；真名进 `x-openclaw-model` 头（带 `qclaw/` 前缀）。
+    ///
+    /// ── 为什么必须隔离 home（2026-10-20 实测踩到）────────────────
+    /// `gateway_for_session` 优先现场读本机 `openclaw.json`，只有读不到才用
+    /// 账号里的 `gatewayPort`。本机装过 QClaw 时文件存在，且端口由客户端
+    /// **每次启动随机分配**（实测踩到 10959，而快照写的是 9434）—— 于是
+    /// 「断言 URL 端口 == 快照端口」的用例只在**没装 QClaw 的机器 / CI**
+    /// 上通过，在开发机上必红。这类「看环境的测试」比没有更糟：它会把本机
+    /// 状态伪装成代码缺陷。
+    ///
+    /// 传 `None` = 目录里没有 `openclaw.json` ⇒ 必定走快照分支，端口与令牌
+    /// 都可确定断言。
     #[test]
     fn chat_plan_moves_model_into_header() {
-        let adapter = QclawAdapter;
-        let account = json!({
-            "auth": { "accessToken": "gw-token" },
-            "gatewayPort": 9434,
+        with_isolated_home("plan-header", None, || {
+            let adapter = QclawAdapter;
+            let account = json!({
+                "auth": { "accessToken": "gw-token" },
+                "gatewayPort": 9434,
+            });
+            let body = json!({"model": "pool-hy3-preview", "messages": [], "stream": true});
+            let headers = axum::http::HeaderMap::new();
+            let plan = adapter
+                .build_chat_request(&account, &body, &headers)
+                .expect("plan");
+            assert_eq!(plan.url, "http://127.0.0.1:9434/v1/chat/completions");
+            assert_eq!(plan.body.get("model").and_then(Value::as_str), Some("openclaw"));
+            let header = |name: &str| {
+                plan.headers
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.clone())
+            };
+            assert_eq!(header("x-openclaw-model").as_deref(), Some("qclaw/pool-hy3-preview"));
+            // 走快照分支时令牌就是账号里那枚（可确定断言了；不隔离时生产路径
+            // 会换成真文件里的令牌，只能校验「带 Bearer 前缀」）
+            assert_eq!(header("Authorization").as_deref(), Some("Bearer gw-token"));
+            // 流式补 include_usage
+            assert_eq!(
+                plan.body.pointer("/stream_options/include_usage"),
+                Some(&json!(true))
+            );
         });
-        let body = json!({"model": "pool-hy3-preview", "messages": [], "stream": true});
-        let headers = axum::http::HeaderMap::new();
-        let plan = adapter
-            .build_chat_request(&account, &body, &headers)
-            .expect("plan");
-        assert_eq!(plan.url, "http://127.0.0.1:9434/v1/chat/completions");
-        assert_eq!(plan.body.get("model").and_then(Value::as_str), Some("openclaw"));
-        let header = |name: &str| {
-            plan.headers
+    }
+
+    /// 本机 `openclaw.json` **可读**时，端口与令牌以文件为准（快照只是兜底）。
+    ///
+    /// 与上一条合起来才说明「现场读盘优先、快照兜底」这个优先级真的成立
+    /// —— 只测兜底那一半，把优先级写反了也发现不了。
+    #[test]
+    fn chat_plan_prefers_the_local_config_file_over_the_snapshot() {
+        let config = json!({
+            "gateway": {
+                "port": 18080,
+                "auth": { "token": "token-from-file" },
+            },
+        })
+        .to_string();
+        with_isolated_home("plan-prefers-file", Some(&config), || {
+            let adapter = QclawAdapter;
+            // 快照里是另一套值：断言最终用的是**文件**那套
+            let account = json!({
+                "auth": { "accessToken": "token-from-snapshot" },
+                "gatewayPort": 9434,
+            });
+            let body = json!({"model": "pool-glm-5.2"});
+            let plan = adapter
+                .build_chat_request(&account, &body, &axum::http::HeaderMap::new())
+                .expect("plan");
+            assert_eq!(plan.url, "http://127.0.0.1:18080/v1/chat/completions");
+            let auth = plan
+                .headers
                 .iter()
-                .find(|(key, _)| key == name)
-                .map(|(_, value)| value.clone())
-        };
-        assert_eq!(header("x-openclaw-model").as_deref(), Some("qclaw/pool-hy3-preview"));
-        // 令牌值**不断言具体内容**：生产路径优先现场读 `~/.qclaw/openclaw.json`
-        // （见 `gateway_for_session`），装有 QClaw 的机器上拿到的是真令牌，
-        // 会话里那份只是兜底。这里只校验「带了 Bearer 头」这个契约。
-        assert!(
-            header("Authorization")
-                .as_deref()
-                .is_some_and(|value| value.starts_with("Bearer ")),
-            "必须带 Authorization: Bearer 头"
-        );
-        // 流式补 include_usage
-        assert_eq!(
-            plan.body.pointer("/stream_options/include_usage"),
-            Some(&json!(true))
-        );
+                .find(|(key, _)| key == "Authorization")
+                .map(|(_, value)| value.clone());
+            assert_eq!(auth.as_deref(), Some("Bearer token-from-file"));
+        });
     }
 
     /// 客户端带全名（`qclaw/xxx`）时剥掉前缀，避免拼成 `qclaw/qclaw/xxx`。
     #[test]
     fn chat_plan_strips_existing_prefix() {
-        let adapter = QclawAdapter;
-        let account = json!({ "auth": { "accessToken": "t" }, "gatewayPort": 9434 });
-        let body = json!({"model": "qclaw/pool-glm-5.2"});
-        let plan = adapter
-            .build_chat_request(&account, &body, &axum::http::HeaderMap::new())
-            .expect("plan");
-        let header = plan
-            .headers
-            .iter()
-            .find(|(key, _)| key == "x-openclaw-model")
-            .map(|(_, value)| value.clone());
-        assert_eq!(header.as_deref(), Some("qclaw/pool-glm-5.2"));
+        with_isolated_home("plan-prefix", None, || {
+            let adapter = QclawAdapter;
+            let account = json!({ "auth": { "accessToken": "t" }, "gatewayPort": 9434 });
+            let body = json!({"model": "qclaw/pool-glm-5.2"});
+            let plan = adapter
+                .build_chat_request(&account, &body, &axum::http::HeaderMap::new())
+                .expect("plan");
+            let header = plan
+                .headers
+                .iter()
+                .find(|(key, _)| key == "x-openclaw-model")
+                .map(|(_, value)| value.clone());
+            assert_eq!(header.as_deref(), Some("qclaw/pool-glm-5.2"));
+        });
     }
 
     /// 缺 model 字段时是 400（适配器自己的校验，不发给上游）。
     #[test]
     fn chat_plan_requires_model() {
-        let adapter = QclawAdapter;
-        let account = json!({ "auth": { "accessToken": "t" }, "gatewayPort": 9434 });
-        let body = json!({"messages": []});
-        // `ChatRequestPlan` 没有 Debug，用 `.err()` 取错误而不是 `expect_err`
-        let error = adapter
-            .build_chat_request(&account, &body, &axum::http::HeaderMap::new())
-            .err()
-            .expect("missing model must fail");
-        assert_eq!(error.status_code, 400);
+        with_isolated_home("plan-no-model", None, || {
+            let adapter = QclawAdapter;
+            let account = json!({ "auth": { "accessToken": "t" }, "gatewayPort": 9434 });
+            let body = json!({"messages": []});
+            // `ChatRequestPlan` 没有 Debug，用 `.err()` 取错误而不是 `expect_err`
+            let error = adapter
+                .build_chat_request(&account, &body, &axum::http::HeaderMap::new())
+                .err()
+                .expect("missing model must fail");
+            assert_eq!(error.status_code, 400);
+        });
     }
 
     #[test]

@@ -109,8 +109,47 @@ pub struct CloudSession {
     pub nickname: String,
 }
 
+// ── 测试期的数据目录覆盖 ──────────────────────────────────────
+//
+// `HOME_OVERRIDE` 让测试把 `~/.qclaw` 指到临时目录。
+//
+// ── 为什么需要这层接缝（2026-10-20 实测踩到）──────────────────
+// `read_gateway()` 优先读**本机真实文件** `~/.qclaw/openclaw.json`，只有
+// 读不到才退回账号快照。于是「装了 QClaw 的机器」与 CI 会走**两条不同的
+// 分支**：CI 上文件不存在 → 走快照（端口 9434）；开发机上文件存在 → 走真
+// 文件，而端口由 QClaw **每次启动随机分配**（实测踩到 10959）。
+// 结果是任何断言「端口等于快照里那个值」的测试**只在开发机上失败** ——
+// 它把本机状态伪装成了代码缺陷，比没有测试更糟。
+//
+// 有了它，测试可以确定性地走任一分支，结果与本机装没装 QClaw 无关。
+//
+// 用 `thread_local!` 而不是 `std::env::set_var`：后者改的是**进程全局**
+// 状态，与并行跑的其它测试互相干扰（且 Rust 2024 起是 unsafe）。
+// 配套的取值/注入接口见下面的 `with_home_override` 与 `qclaw_home`。
+// 注：这里用普通注释而不是 `///` —— `thread_local!` 是宏展开，rustdoc
+// 不为它生成文档，写 `///` 会报 `unused doc comment`。
+#[cfg(test)]
+thread_local! {
+    static HOME_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = std::cell::RefCell::new(None);
+}
+
+/// 在测试作用域内把 [`qclaw_home`] 指到 `home`，离开作用域自动还原。
+#[cfg(test)]
+pub fn with_home_override<T>(home: PathBuf, run: impl FnOnce() -> T) -> T {
+    HOME_OVERRIDE.with(|cell| {
+        let previous = cell.replace(Some(home));
+        let output = run();
+        cell.replace(previous);
+        output
+    })
+}
+
 /// `~/.qclaw`（QClaw 的数据目录；Windows 上是 `%USERPROFILE%\.qclaw`）。
 pub fn qclaw_home() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(overridden) = HOME_OVERRIDE.with(|cell| cell.borrow().clone()) {
+        return Some(overridden);
+    }
     std::env::var_os("USERPROFILE")
         .map(PathBuf::from)
         .map(|home| home.join(".qclaw"))
