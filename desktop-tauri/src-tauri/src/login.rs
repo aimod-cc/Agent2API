@@ -672,10 +672,6 @@ fn allowed_hosts(provider: &str) -> Option<&'static [&'static str]> {
         // 它会按用户选的登录方式把人交给**不可穷举**的身份提供方（阿里账号 / 扫码
         // 等），与 Qoder 同一情形。落进默认分支会拿到 WorkBuddy 的白名单，
         // 症状仍是上面警告的那种静默故障（窗口一片空白、日志看不出）。
-        "catpaw" | "qoder" | "qoder-intl" | "cline-free" | "cline-pass" | "autoclaw"
-        | "autoclaw-intl" | "accio" | "accio-cn" | "zcode" | "zcode-intl" | "codearts" | "trae"
-        | "kuku" | "antigravity" | "officeace" | "orcaterm" | "qwenwork" => None,
-        //
         // AtomCode 同样不设限：授权页由代理给出（`acs.atomgit.com/auth/login`
         // 换来的 `login_url`，实际落在 AtomGit 的账号站点上），之后会按用户选的
         // 登录方式继续跳不可穷举的主机。**不用回本机** —— 凭证由网关**轮询代理**
@@ -688,9 +684,14 @@ fn allowed_hosts(provider: &str) -> Option<&'static [&'static str]> {
         // 导航一旦被白名单拦下，症状就是用户明明授权成功、网关永远等不到码，
         // 而日志里什么都看不出（与 CodeArts / Trae 的 loopback 回调同一情形）。
         // 授权页本身在 `lobsterai.youdao.com`，沿途还可能有微信登录的第三方主机。
+        //
+        // ⚠️ 这一段曾因合并被拼成两个**完全相同的 match 臂**（第二个永远不可达，
+        // 编译器逐项报 `unreachable pattern`）。新增 provider 时**追加到本臂**
+        // 或另起一条不重叠的臂，别重复列出同一个 id。
         "catpaw" | "qoder" | "qoder-intl" | "cline-free" | "cline-pass" | "autoclaw"
         | "autoclaw-intl" | "accio" | "accio-cn" | "zcode" | "zcode-intl" | "codearts" | "trae"
-        | "kuku" | "antigravity" | "officeace" | "orcaterm" | "atomcode" | "lobsterai" => None,
+        | "kuku" | "antigravity" | "officeace" | "orcaterm" | "qwenwork"
+        | "atomcode" | "lobsterai" => None,
         // WorkBuddy 的两个地区共用这一张表（表里 `workbuddy.ai` 那一行就是国际站
         // 的登录域）。**显式列出**而不是靠下面的默认分支：上面那条警告要求
         // 「新 provider 落到默认分支」必须是有意的选择，写出来才看得出是选过的
@@ -1280,8 +1281,7 @@ pub async fn start(
     let title = if matches!(
         provider,
         "cline-free" | "cline-pass" | "zcode" | "zcode-intl" | "codearts" | "trae" | "qoder"
-        | "qoder-intl" | "antigravity" | "officeace" | "qwenwork"
-        | "qoder-intl" | "antigravity" | "officeace" | "lobsterai" | "atomcode"
+        | "qoder-intl" | "antigravity" | "officeace" | "qwenwork" | "lobsterai" | "atomcode"
     ) {
         format!("登录 {provider_label} 账号")
     } else {
