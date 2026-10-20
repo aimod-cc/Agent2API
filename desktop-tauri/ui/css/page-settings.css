@@ -27,6 +27,31 @@
   gap: var(--pad);
 }
 
+/* ─── 页内分类导航已撤销 ────────────────────────────────────────
+   这 13 个分类现在平铺成主侧栏的**一级菜单**（sidebar-layout.js 的
+   SETTINGS_MENUS），进设置页的路径是「点侧栏某一项」。页内再留一列
+   同样的导航等于同一件事说两遍，还白占 140px 内容宽度 —— 整列不再显示。
+
+   ★ 只 display:none，**不从 DOM 里删节点**：
+     - sidebar-settings-sync.js 靠 `.settings-nav-item.active` 的 data-cat
+       读「当前停在哪个分类」，再投影到 <html data-settings-cat>；
+       app.js 的 markActiveNav / crumbText / syncUpdateBadge 全读那个属性。
+       删掉节点，侧栏高亮、面包屑、更新角标会一起失灵。
+     - 那个脚本的 MutationObserver 盯的是节点 class 变化，display:none
+       不影响属性变化回调（元素照样在 DOM 里可查）。
+   改 React 侧（islands/settings-page.tsx 不渲染 <nav>）也能达到同样效果，
+   但那是上游文件，还要连带重建 islands/ui.js（1.4MB 产物），下游 fork
+   每次同步上游都得多解一次冲突。一行 CSS 更划算。
+   若上游哪天自己撤掉这列导航，本段可原样删除。 */
+.settings-layout > .settings-nav { display: none; }
+
+/* 窄屏（≤900px）原本用 .settings-layout.is-detail 把「分类列表 / 分类面板」
+   分成两级；导航撤掉后列表层不复存在，内容区必须常显，否则进设置页是一片
+   空白。mobile.css 里那条 `.settings-layout:not(.is-detail) .settings-panes
+   { display: none }` 与这里同特异性但加载更晚（index.html 把 mobile.css
+   排在 page-settings.css 之后），所以叠一层类名把特异性提到 0,4,0 压过它。 */
+.settings-layout.settings-layout:not(.is-detail) > .settings-panes { display: block; }
+
 /* ─── 左栏：分类导航 ───
    观感对齐主侧栏的 .nav-item，但不能直接复用那个类名：
    app.js 的 showPage 会遍历所有 .nav-item 并按 data-page 重置 active，
