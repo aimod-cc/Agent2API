@@ -807,7 +807,7 @@ function CenterTab({ store }: { store: CheckinStore }) {
   const welfarePlanRows = snapshot?.extras.plans ?? []
   // 成长任务行（WorkBuddy 国内版；从参考项目 workbuddy2api 的 task_runner 移植）
   const growthRows = snapshot?.extras.growth ?? []
-  // 自动发放行（QClaw）：积分随登录到账、没有可领动作 —— 只读分组，见 AutoGrantRow
+  // 迁移期只读行（QClaw）：已停运、不再发放，只剩余额可看 —— 只读分组，见 AutoGrantRow
   const autoGrantRows = snapshot?.extras.autoGrant ?? []
   // 定时签到总览：条目数（启用 / 总数）与聚合「下次执行」（多条目里最近的一次）
   const scheduleEntries = Array.isArray(auto?.schedules) ? auto!.schedules! : []
