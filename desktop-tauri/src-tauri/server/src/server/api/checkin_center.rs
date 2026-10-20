@@ -45,19 +45,25 @@
 //! ```
 //! `history` 新条目在前（`checkin_history` 的落盘顺序），前端直接按序渲染时间线。
 //!
-//! ── 「自动发放」为什么是独立一段，而不是塞进每日签到 ──────────
-//! QClaw 的积分由服务端**随登录自动发放**（实测账号里躺着一笔
-//! 「老用户一次性回馈」，没有任何「领取」动作可调：客户端 bundle 里
-//! 没有签到、没有领奖端点，jprx 的 `4110` 只读余额）。它的账号如果按
-//! `CHECKIN_PROVIDERS` 进每日签到分组，界面会长出一颗「签到」按钮 ——
-//! 那颗按钮点下去必然 404/报错。**一个点了必然报错的复选框比没有更糟**。
+//! ── 「只读余额」为什么是独立一段，而不是塞进每日签到 ──────────
+//! QClaw **已公告停运**（2026-09-24 公告、**2026-12-24 00:00 正式停服**），
+//! 停新用户注册与订阅续费，官网已开「停服专区 / 申请退款 / 迁移到 WorkBuddy」。
+//! 它的账号没有任何「领取 / 签到」动作可调（客户端 bundle 里没有签到、没有领奖
+//! 端点，jprx 的 `4110` 只读余额）。若按 `CHECKIN_PROVIDERS` 进每日签到分组，
+//! 界面会长出一颗「签到」按钮 —— 那颗按钮点下去必然 404/报错。
+//! **一个点了必然报错的复选框比没有更糟**。
 //!
-//! 但它也不能默默消失：用户要在这页看到「这个账号有多少积分、什么时候到期」。
+//! 但它也不能默默消失：用户要在这页看到「这个账号还有多少积分、什么时候到期」。
 //! 所以它进 `extras.autoGrant`（与 `onboarding` / `plans` 同一层级），界面
 //! 渲染成**只读行 + 余额惰性查询**，并在「每日签到」的折叠说明里点名指路。
-//! 归属理由：积分的**获得方式**是登录即发（日频、无需动作），语义上更接近
-//! 每日签到而非一次性新手任务；只是它没有「领」这个动作，所以只借用入口不
-//! 借用按钮。
+//!
+//! ⚠️ **2026-10-20 语义更正（用户指出）**：本段旧文案写的是「积分随登录
+//! 自动发放、无需签到」，这在停运期会误导人 —— 用户现在该做的不是每天等
+//! 到账，而是**去官网迁移到 WorkBuddy 领 1000 积分补贴**（补贴发到
+//! WorkBuddy 账号、有效期 1 个月，需完成授权并实际迁移数据）。因此分组语义
+//! 改为「本站不再发放积分、只剩只读余额」，说明文案带上迁移入口。
+//! 账号内已有积分**有效期不调整**，可在原有效期内继续用；已购未用完的
+//! 订阅 / 积分包可按已用比例申请退款。
 
 use std::collections::BTreeMap;
 
@@ -115,11 +121,11 @@ fn out_of_scope_reason(account: &Value) -> &'static str {
     if account.get("isGuest").and_then(Value::as_bool) == Some(true) {
         return "访客账号没有积分体系";
     }
-    // 自动发放类（QClaw）不进 outOfScope：它们有自己的只读分组（`extras.autoGrant`），
+    // 只读余额类（QClaw）不进 outOfScope：它们有自己的只读分组（`extras.autoGrant`），
     // 文案在那边给。走到这里说明 `auto_grant_providers` 与下面的分流判据不同步 ——
     // 兜底给一句实情，不误导成「没有签到链路」。
     if auto_grant_providers().iter().any(|id| *id == provider) {
-        return "积分随登录自动发放，无需签到";
+        return "已进入停运迁移期，本站不再发放积分";
     }
     // WorkBuddy / Qoder 两个地区的国际版都在 `supports_checkin` 里显式放行
     //（前者走日活链、后者带风控领积分），还落在范围外的 intl 只可能是 Accio。
@@ -132,7 +138,7 @@ fn out_of_scope_reason(account: &Value) -> &'static str {
     "没有签到链路"
 }
 
-/// 「积分随登录自动发放、没有可领取动作」的提供商清单。
+/// 「本站不再发放积分、只剩只读余额」的提供商清单。
 ///
 /// ── 判据（加一家之前先逐条确认上游）────────────────────────
 /// 1. 账号上**真实存在**积分余额（能查到数），否则这一行只是个空壳；
@@ -140,20 +146,24 @@ fn out_of_scope_reason(account: &Value) -> &'static str {
 ///    `CHECKIN_PROVIDERS` 走真正的签到链，而不是在这里当只读行；
 /// 3. 积分有到期概念（余额里带 `expireAt`），否则「什么时候到期」这一栏没内容。
 ///
-/// 目前只有 QClaw：服务端随登录发放、`jprx 4110` 只读余额、`items[]` 带
-/// `expire_at`（实证见 `core::providers::qclaw::points`）。
+/// 目前只有 QClaw：已停运（2026-12-24 停服），`jprx 4110` 只读余额、
+/// `items[]` 带 `expire_at`（实证见 `core::providers::qclaw::points`）。
 pub const AUTO_GRANT_PROVIDERS: [&str; 1] = ["qclaw"];
 
 fn auto_grant_providers() -> &'static [&'static str] {
     &AUTO_GRANT_PROVIDERS
 }
 
-/// 自动发放行上的说明文案（后端给，前端原样透出 —— 与 outOfScope 的原因同一处置：
+/// 只读行上的说明文案（后端给，前端原样透出 —— 与 outOfScope 的原因同一处置：
 /// 「这家的积分怎么来的」是后端事实，不该在前端再抄一份）。
 fn auto_grant_note(provider: &str) -> &'static str {
     match provider {
-        "qclaw" => "积分随登录自动发放，无需签到；余额与到期时间在账号页「积分」里查",
-        _ => "积分随登录自动发放，无需签到",
+        // 带迁移入口：停运期用户该做的是搬去 WorkBuddy 领补贴，不是等每天到账
+        "qclaw" => {
+            "已停止发放积分（2026-12-24 停服）。余额在原有效期内仍可用；\
+             去 QClaw 官网「迁移到 WorkBuddy」完成迁移可领 1000 积分补贴（发到 WorkBuddy 账号）"
+        }
+        _ => "本站已停止发放积分，余额在原有效期内仍可用",
     }
 }
 
@@ -172,7 +182,7 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
     // 「提供商 + 原因」聚合（label 用注册表名，理由取排除分支的文案）。
     let mut buckets: Vec<Vec<Value>> = vec![Vec::new(); CHECKIN_PROVIDERS.len()];
     let mut out_of_scope: BTreeMap<String, (String, String, i64)> = BTreeMap::new();
-    // 自动发放类按 provider 分桶（BTreeMap 保证界面行序稳定，与本文件别处一致）
+    // 只读余额类按 provider 分桶（BTreeMap 保证界面行序稳定，与本文件别处一致）
     let mut auto_grant: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for account in &accounts {
         let provider = account_text(account, "provider");
@@ -203,7 +213,7 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
                 "streakDays": account.get("streakDays").cloned().unwrap_or(Value::from(0)),
             }));
         } else if auto_grant_providers().iter().any(|id| *id == provider) {
-            // 自动发放类（QClaw）：进自己的只读分组，见模块头。
+            // 只读余额类（QClaw，已停运）：进自己的只读分组，见模块头。
             // 这里只收集账号行；余额由前端按需惰性查询（快照零上游请求的铁律）
             auto_grant
                 .entry(provider.clone())
@@ -374,7 +384,7 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
             "onboarding": onboarding_rows,
             "plans": plan_rows,
             "growth": growth_rows,
-            // 自动发放类（QClaw）：只读行 —— 积分随登录到账、没有可领动作。
+            // 只读余额类（QClaw）：只读行 —— 已停运、不再发放，只剩余额可看。
             // 形状与 onboarding 同构（id/name/provider），多一个 note 说明文案
             "autoGrant": auto_grant
                 .into_values()

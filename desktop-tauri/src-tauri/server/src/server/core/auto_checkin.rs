@@ -161,11 +161,11 @@ pub const CHECKIN_PROVIDERS: [&str; 18] = [
     // 千问办公：`daily-credit-notice/claim`（`qwenwork::checkin`）。
     // 签到额度落在钱包的 `daily_credits` 桶里，领完余额面板立刻能看到。
     "qwenwork",
-    // ⚠️ QClaw **不在这里**：它的积分随登录自动发放，上游没有任何「领取/签到」
-    //   端点可调（客户端 bundle 无签到，jprx `4110` 只读余额）。放进这个数组
-    //   会让签到中心长出一颗点了必然报错的「签到」按钮、定时签到也会每天白打
-    //   一次注定失败的请求。它在签到中心的位置是 `extras.autoGrant` 只读分组
-    //   （见 `api::checkin_center` 模块头）。
+    // ⚠️ QClaw **不在这里**：上游没有任何「领取/签到」端点可调（客户端 bundle
+    //   无签到，jprx `4110` 只读余额），且本家**已公告停运**（2026-12-24 停服）
+    //   —— 本站不再发放积分。放进这个数组会让签到中心长出一颗点了必然报错的
+    //   「签到」按钮、定时签到也会每天白打一次注定失败的请求。它在签到中心的
+    //   位置是 `extras.autoGrant` 只读分组（见 `api::checkin_center` 模块头）。
     // ModelScope（魔搭）两个站点：签到就是调一次登录信息接口
     // （`GET {网页站}/api/v1/users/login/info`，调用即触发当日魔粒，幂等），
     // 链路 2026-10-16 实测存在，见 `providers::modelscope::checkin` 的模块头。

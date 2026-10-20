@@ -142,11 +142,12 @@ export type CheckinCenterSnapshot = {
     /** 成长任务行的账号清单（WorkBuddy 国内版；任务详情前端展开时惰性查询） */
     growth?: Array<{ id: string; name: string; provider?: string }>
     /**
-     * 自动发放行（QClaw）：积分随登录到账，**没有可领取动作**。
+     * 只读余额行（QClaw，已停运）：**没有可领取动作**，本站也不再发放。
      *
      * 与 `onboarding` 的形状同构，多一个 `note`（后端给的说明文案，原样透出）。
-     * 这几种行只用来看余额，界面上不出现「领取」按钮 —— 上游根本没有那个端点，
-     * 一颗点了必然报错的按钮比没有更糟（见 `api::checkin_center` 模块头）。
+     * 这几种行只用来看余额与到期 —— 上游根本没有领取端点，一颗点了必然报错的
+     * 按钮比没有更糟（见 `api::checkin_center` 模块头）。QClaw 自 2026-12-24
+     * 停服，行上的 `note` 会带上「迁移到 WorkBuddy 领 1000 积分补贴」的指引。
      */
     autoGrant?: Array<{ id: string; name: string; provider?: string; note?: string }>
   }
