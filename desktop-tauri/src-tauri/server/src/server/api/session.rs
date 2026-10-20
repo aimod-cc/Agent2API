@@ -227,6 +227,22 @@ pub async fn login_start(State(state): State<ServerState>, body: Bytes) -> Respo
         return ok_json(json!({ "state": task.state, "authUrl": task.auth_url,
             "edition": task.edition, "provider": region.provider_id() }));
     }
+    // 千问办公：**PKCE 设备授权**（与 Qoder 同一套协议）。
+    //
+    // 授权页与轮询都在网关域上（`gateway.qwenwork.cn/device/selectAccounts`、
+    // `/api/v1/deviceToken/poll`，实测 302 / 400 证明路径存在），
+    // 与 Qoder 的差别只有 client_id 与主机 —— 见 `providers::qwenwork::oauth`
+    // 的模块头。设备授权是「本进程现造地址 → 用户在浏览器授权 → 后台轮询换
+    // 令牌」，所以这里不必等 authUrl（地址同步就能拼出来）。
+    if kind == crate::server::core::providers::ProviderKind::Qwenwork {
+        let handle = match state.login().start_qwenwork_login() {
+            Ok(handle) => handle,
+            Err(error) => return management_error(400, error),
+        };
+        let task = handle.snapshot();
+        return ok_json(json!({ "state": task.state, "authUrl": task.auth_url,
+            "edition": task.edition, "provider": "qwenwork" }));
+    }
     // ZCode：**服务端中介的 CLI 轮询**（`/oauth/cli/init` 拿授权地址，
     // 用户在浏览器里授权后由后台任务轮询换令牌）。响应形状与 Qoder 那条
     // 一致（`{state, authUrl, edition, provider}`），前端不需要新分支。

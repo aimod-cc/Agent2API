@@ -668,9 +668,13 @@ fn allowed_hosts(provider: &str) -> Option<&'static [&'static str]> {
         // `localhost.weixin.qq.com` 的轮询 —— 主机不可穷举。**显式列出**
         // （落进默认分支会拿到 WorkBuddy 的白名单 → 授权页白屏，日志里什么也
         // 看不出）。
+        // 千问办公同样不设限：授权页在 `gateway.qwenwork.cn/device/selectAccounts`，
+        // 它会按用户选的登录方式把人交给**不可穷举**的身份提供方（阿里账号 / 扫码
+        // 等），与 Qoder 同一情形。落进默认分支会拿到 WorkBuddy 的白名单，
+        // 症状仍是上面警告的那种静默故障（窗口一片空白、日志看不出）。
         "catpaw" | "qoder" | "qoder-intl" | "cline-free" | "cline-pass" | "autoclaw"
         | "autoclaw-intl" | "accio" | "accio-cn" | "zcode" | "zcode-intl" | "codearts" | "trae"
-        | "kuku" | "antigravity" | "officeace" | "orcaterm" => None,
+        | "kuku" | "antigravity" | "officeace" | "orcaterm" | "qwenwork" => None,
         // WorkBuddy 的两个地区共用这一张表（表里 `workbuddy.ai` 那一行就是国际站
         // 的登录域）。**显式列出**而不是靠下面的默认分支：上面那条警告要求
         // 「新 provider 落到默认分支」必须是有意的选择，写出来才看得出是选过的
@@ -841,6 +845,11 @@ fn normalize_provider(provider: &str) -> Result<&'static str, String> {
         // 壳侧只透传 provider id，地区由后端按 id 反查（与 ZCode 同款）。
         "qoder" => Ok("qoder"),
         "qoder-intl" => Ok("qoder-intl"),
+        // 千问办公（QwenWorkCN）：与 Qoder 同一套 PKCE 设备授权协议（差别只有
+        // client_id 与主机），授权地址由**后端适配器**本地拼出来
+        // （`providers::qwenwork::oauth`，见其模块头），壳侧只负责开窗口与等待
+        // —— 与 Qoder / Cline 的设备授权同一条路，不经过任何回调捕获。
+        "qwenwork" => Ok("qwenwork"),
         "catpaw" => Ok("catpaw"),
         "cline-free" => Ok("cline-free"),
         "cline-pass" => Ok("cline-pass"),
@@ -1129,6 +1138,10 @@ pub async fn start(
         // 归属已经在 provider id 里 —— 与 ZCode 同款，不再读 edition 形参。
         "qoder" => "cn",
         "qoder-intl" => "intl",
+        // 千问办公只有单一站点（`gateway.qwenwork.cn`，没有地区分叉），
+        // 固定 cn —— 与 CodeArts 同一处置（后端那条链也不读这个字段，
+        // 它只用于窗口标题与日志）。
+        "qwenwork" => "cn",
         // ZCode 的两个地区由 **provider 本身**决定（界面上是两张卡片，
         // 没有地区下拉，因此面板不会传 `edition`）。不看 `edition` 形参的
         // 后果只是标题里的「国内版/国际版」四个字，但既然信息已经在
@@ -1216,6 +1229,10 @@ pub async fn start(
         // OfficeAce 只有一家（自助 OAuth 一条链，没有地区/版本概念），品牌名里
         // 不需要地区
         "officeace" => "OfficeAce 果办",
+        // 千问办公只有一家（`gateway.qwenwork.cn` + `maas.xiaoluozi.cn` 是同一套
+        // 账号的两级入口，不是两个地区，见 accounts-domain 的注释），品牌名里
+        // 不需要地区
+        "qwenwork" => "千问办公",
         _ => "WorkBuddy",
     };
     // 窗口标题：Cline 两家的池、ZCode 两家的地区、CodeArts / Trae / OfficeAce
@@ -1224,7 +1241,7 @@ pub async fn start(
     let title = if matches!(
         provider,
         "cline-free" | "cline-pass" | "zcode" | "zcode-intl" | "codearts" | "trae" | "qoder"
-        | "qoder-intl" | "antigravity" | "officeace"
+        | "qoder-intl" | "antigravity" | "officeace" | "qwenwork"
     ) {
         format!("登录 {provider_label} 账号")
     } else {

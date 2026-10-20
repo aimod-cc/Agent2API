@@ -378,6 +378,20 @@ impl AccountStore {
             // tokenTail / tokenExpireAt（续期是否在工作可被肉眼校验，见
             // `orcaterm_accounts.rs`）
             self.to_orcaterm_public_account(record)
+        } else if record.provider() == super::qwenwork_accounts::QWENWORK_PROVIDER_ID {
+            // 千问办公（QwenWorkCN）：公开形态就是通用形状，只多一道
+            // `expiresAt` 的读时兜底（老记录缺这个键时从 JWT 的 exp 补，
+            // 见 `qwenwork_accounts::to_qwenwork_public_account`）。
+            // 显式分派而不是掉进 workbuddy 兜底：那一支虽然恰好也带
+            // `expiresAt`，但它同时会冒出 uid / edition 之类与本家无关的
+            // 空字段，且将来通用形状一动就跟着漂。
+            self.to_qwenwork_public_account(record)
+        } else if record.provider() == super::qclaw_accounts::QCLAW_PROVIDER_ID {
+            // QClaw（腾讯桌面 AI 客户端）：公开形态 = 通用形状 + 两个端口字段
+            // （界面能直接看到「这个账号连的是哪个本机网关」，排障时不用去翻
+            // 配置文件，见 `qclaw_accounts::to_qclaw_public_account`）。
+            // 令牌本体不出现（`accessToken` 只在会话里给适配器用）。
+            self.to_qclaw_public_account(record)
         } else if record
             .provider()
             .starts_with(crate::server::core::custom_providers::ID_PREFIX)

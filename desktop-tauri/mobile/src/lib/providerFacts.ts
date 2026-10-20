@@ -44,6 +44,10 @@ const FACTS: Record<string, ProviderFacts> = {
   kuku: { expiry: '', identifier: 'uid' },
   officeace: { expiry: 'expiresAt', identifier: 'userId' },
   chatglm: { expiry: 'expiresAt', identifier: 'userId' },
+  // 千问办公：与桌面端 `accounts-domain.ts` 同口径（expiry: 'expiresAt'、
+  // identifier: 'uid'）—— JWT 的 exp 由导入时写入，账号标识存 userId
+  // （落库时 uid / userId 两个键写同一个值，见 account_store 的 add 路径）
+  qwenwork: { expiry: 'expiresAt', identifier: 'uid' },
   antigravity: { expiry: 'expiresAt', identifier: 'userId' },
   orcaterm: { expiry: 'expiresAt', identifier: 'userId' },
 }

@@ -1170,6 +1170,19 @@ pub fn adapter_for(kind: ProviderKind) -> &'static dyn ProviderAdapter {
         // （见 `chatglm/mod.rs` 与 `protocol::chatglm_stream` 的模块头）。
         // 它是本项目**唯一**「访客免登录即可用」的一家（`guest/access` 换证）。
         ProviderKind::Chatglm => &super::chatglm::CHATGLM_ADAPTER,
+        // 千问办公（`qwenwork.cn` 桌面客户端）：**纯无状态**转发 ——
+        // 上游推理 `maas.xiaoluozi.cn` 是标准 OpenAI 兼容协议（实测三个模型
+        // 全 200，含 SSE 与 `reasoning_content`），既不需要 Qoder 那套 COSY
+        // 签名，也没有请求体编码/响应信封要拆。因此它是本项目里「接了之后
+        // 最薄」的一家：`build_chat_request` 只是拼 URL + Bearer。
+        //
+        // 它唯一不常规的地方在**令牌时序**：会话里存的是 JWT（只能打
+        // gateway），推理要 MaaS 密钥，所以 `ensure_access_token` 多做一步
+        // 「用 JWT 签发 MaaS 密钥」（见 `qwenwork/mod.rs` 的模块头）。
+        ProviderKind::Qwenwork => &super::qwenwork::QWENWORK_ADAPTER,
+        // QClaw：上游是本机 OpenClaw 网关（回环 HTTP + 网关令牌），
+        // 无状态转发（见 `qclaw/mod.rs` 的模块头）。
+        ProviderKind::Qclaw => &super::qclaw::QCLAW_ADAPTER,
     }
 }
 
@@ -1273,6 +1286,14 @@ pub fn implemented_kinds() -> Vec<ProviderKind> {
         // 且有远程目录（`operation/detail?tag=available_models`）—— 必须在
         // 列表里，否则目录刷新循环不会问它（与 Trae / Loomy / Kuku 同一理由）。
         ProviderKind::Chatglm,
+        // 千问办公：账号导入 / 远程目录（`chat-modes`）/ 无状态转发 / 额度查询
+        // 全部已接。有远程目录 —— 必须在列表里，否则目录刷新循环不会问它
+        // （与 Trae / Loomy / Kuku / Chatglm 同一理由）。
+        ProviderKind::Qwenwork,
+        // QClaw：账号导入 / 远程目录（本机 `/proxy/llm/models`）/ 无状态转发
+        // 全部已接。有远程目录 —— 必须在列表里，否则目录刷新循环不会问它
+        // （与 Trae / Loomy / Kuku / Chatglm / Qwenwork 同一理由）。
+        ProviderKind::Qclaw,
     ]
 }
 

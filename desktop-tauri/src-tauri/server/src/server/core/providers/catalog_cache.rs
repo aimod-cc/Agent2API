@@ -109,6 +109,14 @@ pub const SCOPE_OFFICEACE: &str = "officeace";
 /// 智谱清言（`chatglm.cn`）的模型目录缓存槽
 pub const SCOPE_CHATGLM: &str = "chatglm";
 
+/// 千问办公（`gateway.qwenwork.cn/api/desktop/chat-modes`）的模型目录缓存槽。
+/// 单一域名、无地区之分（认证链复用 Qoder，但网关是自己的），所以单格。
+pub const SCOPE_QWENWORK: &str = "qwenwork";
+
+/// QClaw（本机 OpenClaw 网关 `127.0.0.1:19000/proxy/llm/models`）的模型目录
+/// 缓存槽。单一入口、无地区之分，单格。
+pub const SCOPE_QCLAW: &str = "qclaw";
+
 /// 全部 scope（事实来源：`cached_scopes` 按它遍历；新增一家时加在这里）。
 pub const ALL_SCOPES: &[&str] = &[
     SCOPE_WORKBUDDY,
@@ -131,6 +139,8 @@ pub const ALL_SCOPES: &[&str] = &[
     SCOPE_ANTIGRAVITY,
     SCOPE_OFFICEACE,
     SCOPE_CHATGLM,
+    SCOPE_QWENWORK,
+    SCOPE_QCLAW,
 ];
 
 /// 一份清单缓存

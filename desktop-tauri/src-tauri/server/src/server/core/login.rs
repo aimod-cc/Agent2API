@@ -33,6 +33,9 @@ mod catpaw;
 pub mod codearts;
 mod qoder;
 mod officeace;
+// 千问办公：与 Qoder 同一套 PKCE 设备授权，只是 client_id / 授权主机不同
+// （见 providers::qwenwork::oauth 的模块头）。
+mod qwenwork;
 mod trae;
 mod zcode;
 

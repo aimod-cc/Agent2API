@@ -58,3 +58,6 @@ desktop-tauri/mobile/android/keystore.properties
 
 # 本地测试跑出来的运行数据（数据库、加密密钥、日志）
 .agenttest2/
+
+# 本地打包产物（.workbuddy 外的手工验包，不入库）
+/dist-local/

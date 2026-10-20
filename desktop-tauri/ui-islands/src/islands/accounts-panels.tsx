@@ -530,11 +530,20 @@ export function CreditExpiryCell({ account }: { account: AccountRecord }) {
  * 这一列回答的是「马上要作废掉多少」—— 面额回答的是「当初发过多少」，两件事。
  * 一份包快到期时它还剩下多少，才是"再不用就亏了"的那个数。
  *
- * 单位跟着那一份自己的 `unit` 走（Trae 的套餐包与积分包单位不同）；没有单位
- * 就不硬贴一个（与明细行的读数同一处置）。`remain` 读不到 → `—`，**但 0 要画**
- * （「0 积分」比「—」准确：那一份确实要作废，只是已经花完了 —— 这一档只在
- * 「**所有**一次性包都花光了」时才出现，还有钱可花时优先报有钱的那份，
- * 见 `nearestCreditOf` 的 ①-a / ①-b）。
+ * ── 读数口径：两位小数 + 不贴「积分」（2026-10-20 修）──────────
+ * 数字走 `numberText`（与余额列、明细弹层同一口径：四舍五入两位、整数去尾）。
+ * 此前这里直接拼裸值 `${nearest.remain}`，上游给高精度浮点（qclaw 的
+ * `1984.093776`）时整条小数尾巴就铺在了这一列上。
+ *
+ * 单位只在**不是「积分」**时才贴：列标题已经写了「积分」，再贴一遍就是
+ * 「1984.09 积分」——而各家这一列本来都是纯数字（实测 qwenwork / qclaw
+ * 行内多带了一个 `unit`，后端已按 trae 的契约改成「只在与文档单位不同时写」）。
+ * 混单位的家（Trae 的套餐包单位是「额度」）仍保留 —— 那是这一列唯一需要
+ * 单位的场合：「400」不贴单位就分不清是积分还是额度。
+ *
+ * `remain` 读不到 → `—`，**但 0 要画**（「0」比「—」准确：那一份确实要作废，
+ * 只是已经花完了 —— 这一档只在「**所有**一次性包都花光了」时才出现，
+ * 还有钱可花时优先报有钱的那份，见 `nearestCreditOf` 的 ①-a / ①-b）。
  */
 export function CreditLeftCell({ account }: { account: AccountRecord }) {
   if (!supportsUsage(account)) {
@@ -557,7 +566,12 @@ export function CreditLeftCell({ account }: { account: AccountRecord }) {
       <span className='muted' title={t('这一份还剩多少：{name} · 上游没给剩余量', { name: nearest.name })}>—</span>
     )
   }
-  const value = `${nearest.remain}${nearest.unit ? ' ' + nearest.unit : ''}`
+  // 「积分」是这一列的默认口径（列名即单位），不再逐格重复；其余单位照贴。
+  // 口径名 → 界面文案的翻译与明细弹层同源（`accounts-credit-detail` 的
+  // `unitLabel`）：此处只需要「额度」这一个非默认取值，为它引入那一整个模块
+  // 的依赖不划算（那个文件反过来依赖本文件的类型）。
+  const unit = nearest.unit === '额度' ? t('额度') : nearest.unit === '积分' ? '' : nearest.unit
+  const value = `${numberText(nearest.remain)}${unit ? ' ' + unit : ''}`
   return (
     <span title={nearest.daily
       ? t('今天剩余：{name} · 这一份还剩 {value}（每天 24 点回满）', { name: nearest.name, value })

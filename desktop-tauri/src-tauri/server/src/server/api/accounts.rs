@@ -1286,6 +1286,219 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
                 },
             )
         }
+        // 千问办公（`gateway.qwenwork.cn`）：**两条添加路径**，其中「导入本机登录态」
+        // 是唯一实用的入口 —— 上游没有开放平台，用户不可能自己拿到 JWT。
+        //   1. `importDesktop: true` → 读 `%APPDATA%\QwenWorkCN\auth-v2.dat`
+        //      （Chromium os_crypt：DPAPI 主密钥 + AES-256-GCM，见
+        //      `qwenwork::auth` 的模块头）。**不需要客户端在运行**，只要
+        //      Agent2API 与千问办公跑在同一个 Windows 用户下。
+        //   2. 粘贴令牌 → 读 `accessToken` / `token`（换机器、或本机解密失败时的兜底）。
+        // 两条路径都走同一步**真实校验**（`GET /api/v1/userinfo`）再落库 ——
+        // 与 OrcaTerm / KukuAI / 智谱清言同一口径：添加时验证，要的是「现在真的能用」。
+        // 校验失败一律 400/401（不落空记录）。
+        Some(crate::server::core::providers::ProviderKind::Qwenwork) => {
+            use crate::server::core::providers::qwenwork;
+            let provider_label = "千问办公";
+
+            // ── 路径 1：导入本机客户端登录态 ─────────────────────────
+            let credentials = if import_desktop {
+                match qwenwork::auth::read_local_credentials() {
+                    Ok(creds) => creds,
+                    // 透传 `status_code` 而不是硬编码 400：本函数自己就把
+                    // 「客户端没装 / 没登录 / 解密失败」都编成了 400（见
+                    // `qwenwork::auth::read_local_credentials`），与下面校验
+                    // 失败同一口径（那一条更要透传 —— 401 是「重新登录」的
+                    // 信号，吞成 400 会让前端把它显示成普通的参数错误）
+                    Err(error) => return management_error(error.status_code, error.message),
+                }
+            } else {
+                // ── 路径 2：粘贴令牌 ────────────────────────────────
+                let Some(token) = payload
+                    .get("accessToken")
+                    .or_else(|| payload.get("access_token"))
+                    .or_else(|| payload.get("token"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                else {
+                    return management_error(
+                        400,
+                        format!(
+                            "请提供{provider_label}登录令牌，或先用「从本机导入」\
+                             （需要先安装并登录{provider_label}客户端）"
+                        ),
+                    );
+                };
+                // 用户可能整段粘了 `Authorization: Bearer xxx` 形态
+                let token = token
+                    .trim_start_matches("Bearer ")
+                    .trim_start_matches("bearer ")
+                    .trim();
+                // 粘贴路径同样要 user.id；JWT 自带 sub，这里从 payload 解
+                // （解不开就要求用户一并给出 userId —— 宁可让用户补一个字段，
+                //  也不猜一个 id 出来，那会让同一个人被导成两个账号）
+                let user_id = payload
+                    .get("userId")
+                    .or_else(|| payload.get("user_id"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| qwenwork::auth::user_id_from_jwt(token))
+                    .unwrap_or_default();
+                if user_id.is_empty() {
+                    return management_error(
+                        400,
+                        format!(
+                            "无法从令牌中读出{provider_label}用户 id，请在请求里一并提供 \
+                             userId 字段"
+                        ),
+                    );
+                }
+                crate::server::core::providers::qwenwork::auth::Credentials {
+                    token: token.to_string(),
+                    refresh_token: String::new(),
+                    expires_at: qwenwork::auth::expires_at_from_jwt(token),
+                    user_id,
+                    username: String::new(),
+                    name: String::new(),
+                    plan_name: String::new(),
+                }
+            };
+
+            // ── 真实校验：拿 JWT 问一次 userinfo（顺带补昵称 / 套餐名）────
+            let verified = match qwenwork::QwenworkAdapter::verify_and_enrich(
+                &credentials.token,
+                credentials.clone(),
+            )
+            .await
+            {
+                Ok(creds) => creds,
+                Err(error) => {
+                    // 透传 `status_code`：`verify_and_enrich` 刻意把 401/403
+                    // 映射成 401（那才是「令牌失效，回客户端重登」的信号），
+                    // 其它情况编 502（上游故障）—— 这里硬编码 400 会把它
+                    // 们全部抹成同一种「参数错误」，与 OrcaTerm / KukuAI /
+                    // 智谱清言等各家的 `error.status_code` 口径不一致
+                    return management_error(
+                        error.status_code,
+                        format!("{provider_label}校验失败：{}", error.message),
+                    )
+                }
+            };
+            store.add_qwenwork_account(
+                &verified,
+                import_name,
+                if import_desktop { "desktop" } else { "manual" },
+            )
+        }
+        // QClaw（腾讯桌面 AI 客户端）：**两条添加路径**，其中「从本机导入」是
+        // 唯一实用的入口 —— 凭证是本机 OpenClaw 网关的令牌
+        // （`~/.qclaw/openclaw.json` 的 `gateway.auth.token`），用户不可能
+        // 自己「申请」一枚，它只存在于本机。
+        //   1. `importDesktop: true` → 读本机网关配置 + 探活 + 尽力解密
+        //      localStorage 补身份（昵称 / uid；解不开只让备注名退化）；
+        //   2. 粘贴令牌 → `accessToken`（网关令牌）+ `gatewayPort`
+        //      （换机器 / 读不到配置文件时的兜底）。
+        // 两条路径都走同一步**真实校验**（`GET /v1/models` 探活）再落库 ——
+        // 与 OrcaTerm / KukuAI / 智谱清言 / 千问办公同一口径：添加时验证，
+        // 要的是「现在真的能用」。探活要求 **QClaw 客户端正在运行**（网关是
+        // 它拉起的），这一点与别家「不需要客户端在跑」不同，UI 文案已说明。
+        Some(crate::server::core::providers::ProviderKind::Qclaw) => {
+            use crate::server::core::account_store::qclaw_accounts::QclawCredentials;
+            use crate::server::core::providers::qclaw;
+            let provider_label = "QClaw";
+
+            // ── 路径 1：导入本机网关配置 ─────────────────────────
+            // 产出 `(凭证, 有效期)`：后者是云端 JWT 的 exp（账号页「有效期」列），
+            // 粘贴路径没有可信 JWT 来源，给 None（那一列不渲染，与 chatglm 同处置）
+            let (credentials, expires_at) = if import_desktop {
+                let gateway = match qclaw::local::read_gateway() {
+                    Ok(gateway) => gateway,
+                    Err(error) => return management_error(error.status_code, error.message),
+                };
+                // 探活：网关活着且令牌对。QClaw 没在跑时连接被拒 → 502，
+                // 令牌被拒（重启后变了）→ 401，两种文案都在 probe 里给全
+                if let Err(error) = qclaw::local::probe_chat_gateway(&gateway).await {
+                    return management_error(error.status_code, error.message);
+                }
+                // 身份与「有效期」出自**同一次**解密（`read_cloud_session`
+                // 一次拿全：JWT / 登录键 / guid / 身份）。解密失败只让备注名
+                // 退化成「QClaw 本机网关」、有效期留空，账号本身完全可用 ——
+                // 转发用的是网关令牌，不是这枚云端 JWT（见 `qclaw::local` 模块头）
+                let session = qclaw::local::read_cloud_session();
+                let expires_at = qclaw::local::jwt_expires_at(&session.jwt);
+                (
+                    QclawCredentials {
+                        token: gateway.token,
+                        chat_port: gateway.chat_port,
+                        models_port: gateway.models_port,
+                        uid: session.user_id,
+                        nickname: session.nickname,
+                    },
+                    expires_at,
+                )
+            } else {
+                // ── 路径 2：粘贴网关令牌 ─────────────────────────
+                let Some(token) = payload
+                    .get("accessToken")
+                    .or_else(|| payload.get("access_token"))
+                    .or_else(|| payload.get("token"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                else {
+                    return management_error(
+                        400,
+                        format!(
+                            "请提供{provider_label}网关令牌，或先用「从本机导入」\
+                             （需要 QClaw 客户端正在运行）"
+                        ),
+                    );
+                };
+                let chat_port = payload
+                    .get("gatewayPort")
+                    .or_else(|| payload.get("port"))
+                    .and_then(Value::as_u64)
+                    .and_then(|port| u16::try_from(port).ok())
+                    .filter(|port| *port > 0)
+                    .unwrap_or(qclaw::local::DEFAULT_CHAT_PORT);
+                let models_port = payload
+                    .get("modelsPort")
+                    .and_then(Value::as_u64)
+                    .and_then(|port| u16::try_from(port).ok())
+                    .filter(|port| *port > 0)
+                    .unwrap_or(qclaw::local::DEFAULT_MODELS_PORT);
+                let gateway = qclaw::local::LocalGateway {
+                    chat_port,
+                    token: token.to_string(),
+                    models_port,
+                };
+                // 与路径 1 同一支探活：粘贴的令牌+端口必须真的能通
+                if let Err(error) = qclaw::local::probe_chat_gateway(&gateway).await {
+                    return management_error(error.status_code, error.message);
+                }
+                (
+                    QclawCredentials {
+                        token: token.to_string(),
+                        chat_port,
+                        models_port,
+                        // 粘贴路径没有可信的身份来源（网关令牌里不含用户信息），
+                        // uid 留空 → 落库时用令牌摘要做稳定身份（见 add_qclaw_account）
+                        uid: String::new(),
+                        nickname: String::new(),
+                    },
+                    // 也没有 JWT 来源（网关令牌不是 JWT）→ 有效期留空
+                    None,
+                )
+            };
+            store.add_qclaw_account(
+                &credentials,
+                import_name,
+                if import_desktop { "desktop" } else { "manual" },
+                expires_at,
+            )
+        }
         // WorkBuddy 系的两家（国内版 / 国际版）：同一套凭证形态与落账号路径，
         // 差别只有归属 —— provider id 自己就是归属（拆家后不再从 payload 里的
         // `edition` 反推：那是账号的属性，而落哪一家是身份问题）。
@@ -1871,6 +2084,38 @@ pub async fn patch_account(state: &ServerState, id: &str, body: &Bytes) -> Respo
         }
         match state.store().update_zcode_plan(&id, value) {
             Ok(changes) => balance_changes.extend(changes),
+            Err(error) => return store_error(error),
+        }
+    }
+    // 千问办公的登录令牌（`accessToken`）：本家**没有自动续期接口**（网关无
+    // refresh 端点，JWT 七天过期后必须回客户端重登再导回），「换一枚令牌」
+    // 因此是这一家独有的运维动作 —— 与 balanceToken / zcodePlan 同一处境，
+    // 不进通用 `apply_patch`（它只认 name / nameCustom / priority），在这里
+    // 显式落盘。身份键（`uid` / `userId`）随新令牌一并更新，MaaS 缓存按新旧
+    // 两个 user_id 分别作废（见 `update_qwenwork_token` 的说明）。
+    if let Some(value) = patch.get("accessToken").and_then(Value::as_str) {
+        if state.store().qwenwork_account_record(&id).is_none() {
+            // 与上面两段同一口径：「账号不存在」与「账号存在但不是千问办公」
+            // 分开说（静默忽略会让用户以为存进去了）
+            let known = state
+                .store()
+                .list_accounts()
+                .get("accounts")
+                .and_then(Value::as_array)
+                .map(|accounts| {
+                    accounts
+                        .iter()
+                        .any(|item| item.get("id").and_then(Value::as_str) == Some(id))
+                })
+                .unwrap_or(false);
+            return if known {
+                management_error(400, "只有千问办公账号有登录令牌（accessToken）")
+            } else {
+                store_error(AccountStoreError::new("账号不存在", 404))
+            };
+        }
+        match state.store().update_qwenwork_token(&id, value) {
+            Ok(()) => {}
             Err(error) => return store_error(error),
         }
     }

@@ -40,6 +40,7 @@ const ICONS: Record<string, string> = {
   officeace: 'assets/providers/officeace.png',
   orcaterm: 'assets/providers/orcaterm.png',
   chatglm: 'assets/providers/chatglm.png',
+  qwenwork: 'assets/providers/qwenwork.png',
 }
 
 /** 后端没给 label 时的兜底展示名（认不出的 id 原样显示） */
@@ -69,6 +70,7 @@ const LABELS: Record<string, string> = {
   officeace: 'OfficeAce 果办',
   orcaterm: 'OrcaTerm',
   chatglm: '智谱清言',
+  qwenwork: '千问办公',
 }
 
 /** 图标地址；认不出的 id 返回空串（调用方画首字徽章） */

@@ -293,6 +293,16 @@ pub async fn checkin_for(
                     .map_err(|error| error.message);
             claim_result(id, name, &display, true, claim)
         }
+        "qwenwork" => {
+            // 千问办公：`POST /api/v1/adapter/user/daily-credit-notice/claim`
+            // （`{"credits": N}`，**幂等** —— 当天已领回 0 而不是报错）。
+            // 与 Qoder 的 campaign 状态机完全不同，见 `qwenwork::checkin` 的模块头。
+            let claim =
+                crate::server::core::providers::qwenwork::checkin::claim_daily_checkin(store, &id)
+                    .await
+                    .map_err(|error| error.message);
+            claim_result(id, name, &display, true, claim)
+        }
         "trae" => {
             // SOLO 那一条通道的每日签到（`providers::trae::checkin`）。它的
             // `alreadyCompleted` / 中性结果都由实现自己给：活动未下发、

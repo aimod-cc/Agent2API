@@ -136,6 +136,14 @@ export type CheckinCenterSnapshot = {
     plans: Array<{ id: string; name: string; provider?: string; claimAt?: number | null; claimPlans?: Record<string, number> | null }>
     /** 成长任务行的账号清单（WorkBuddy 国内版；任务详情前端展开时惰性查询） */
     growth?: Array<{ id: string; name: string; provider?: string }>
+    /**
+     * 自动发放行（QClaw）：积分随登录到账，**没有可领取动作**。
+     *
+     * 与 `onboarding` 的形状同构，多一个 `note`（后端给的说明文案，原样透出）。
+     * 这几种行只用来看余额，界面上不出现「领取」按钮 —— 上游根本没有那个端点，
+     * 一颗点了必然报错的按钮比没有更糟（见 `api::checkin_center` 模块头）。
+     */
+    autoGrant?: Array<{ id: string; name: string; provider?: string; note?: string }>
   }
   auto: SchedulesSnapshot
   /** WorkBuddy 国际版日活保活的模型链（后端快照直接给当前生效值 + 缺省值） */

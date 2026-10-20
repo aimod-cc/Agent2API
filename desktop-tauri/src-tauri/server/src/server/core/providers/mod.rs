@@ -153,6 +153,18 @@ pub mod officeace;
 /// 多轮拍平为单条输入）+ 余额（月度 AI 配额）全部已接通；
 /// `is_stateful` 为 true（请求内会话，与 KukuAI 同形态），见 `orcaterm/mod.rs`。
 pub mod orcaterm;
+/// 千问办公（QwenWork 中国版，`qwenwork.cn` 桌面客户端）。适配实现在
+/// `qwenwork/`：导入本机登录态（DPAPI + AES-256-GCM）→ JWT →
+/// `POST /api/desktop-sessions` 换 MaaS 密钥 → 标准 OpenAI 兼容推理。
+/// **无状态**（`is_stateful` 默认 false）：上游推理不需要 COSY 签名、
+/// 不需要请求体编码、响应也没有信封 —— 与 Qoder 那家正好相反。
+pub mod qwenwork;
+/// QClaw（腾讯桌面 AI 客户端）。适配实现在 `qclaw/`：**导入本机网关** +
+/// 无状态推理转发 + 模型目录。上游是客户端自己拉起的 OpenClaw 本机网关
+/// （`127.0.0.1:9434/v1/chat/completions` + `x-openclaw-model` 头选模型），
+/// 凭证是 `~/.qclaw/openclaw.json` 里的网关令牌（随客户端重启而变，
+/// 因此每次请求现场重读）。完整依据见 `qclaw/mod.rs` 的模块头。
+pub mod qclaw;
 pub mod onboarding_memory;
 /// **本地就绪闸门**：一条通道在「还没出本机就注定发不出去」时，让选路绕开它
 /// （当前唯一的用户是 ZCode 活动套餐的令牌池，判据与取舍见模块头）。
@@ -502,6 +514,58 @@ pub enum ProviderKind {
     /// 智谱清言这一家只有 `chatglm.cn` 一个站点（测试域 `test.chatglm.cn`
     /// 是**环境**不是地区，靠 `CHATGLM_BASE_URL` 覆盖即可）。
     Chatglm,
+    /// 千问办公（QwenWork 中国版，`qwenwork.cn` 桌面客户端）。适配实现在
+    /// `qwenwork/`：**账号管理（导入本机登录态）+ 无状态推理转发 + 模型目录
+    /// + 额度查询**。`is_stateful()` 保持默认 false —— 上游推理是**标准
+    /// OpenAI 兼容协议**，通用编排层一次发送即可完成。
+    ///
+    /// ── 上游长什么样（2026-10-19 从客户端 app.asar + 线上包实证）────
+    /// 它是 Qoder 的换皮（认证路径逐字复用），但服务拆成三个域名：
+    /// ```text
+    ///   openapi.qoder.com.cn   凭据（jobToken/exchange、deviceToken/*）
+    ///   gateway.qwenwork.cn    账号 / 额度 / 模型目录 / 签发 MaaS 密钥
+    ///   maas.xiaoluozi.cn      推理（OpenAI 兼容）
+    /// ```
+    /// 推理链路是**两级令牌**：本机登录态（DPAPI + AES-256-GCM 的
+    /// `auth-v2.dat`）→ JWT → `POST /api/desktop-sessions` 换出
+    /// `sk-mm-v1.*` MaaS 密钥（2 小时）→ 打 `/v1/chat/completions`。
+    /// 两级互不通用（JWT 打推理回 401，MaaS 密钥打 gateway 也 401）。
+    ///
+    /// ── 与 [`ProviderKind::Qoder`] 的关键差别（别照抄那家）─────────
+    /// Qoder 的推理要 COSY 自签名 + 请求体编码 + 响应信封拆解，所以它是
+    /// `is_stateful`；千问办公这三件全都不需要，因此是普通无状态家 ——
+    /// 模块里没有 `cosy.rs` / `protocol.rs` / `stream.rs`。
+    ///
+    /// ── 模型名是三个短名 ────────────────────────────────────
+    /// `flash`（标准 0.1x）/ `pro`（高级 1x）/ `qwen3.8-max-preview`
+    /// （千问最强 1.8x），全部 `format: openai/chat-completions`。
+    /// 上游只认这几个 `key` 的原值，**不要**改写成 `qwen3.8-max` 之类。
+    Qwenwork,
+    /// QClaw（腾讯桌面 AI 客户端，内部跑 OpenClaw 网关）。适配实现在
+    /// `qclaw/`：**导入本机网关配置**（`~/.qclaw/openclaw.json` 的
+    /// `gateway.port` + `gateway.auth.token`）+ 无状态推理转发 + 模型目录。
+    ///
+    /// ── 这一家与别家的根本不同：**推理上游是本机回环地址** ──────
+    /// 别家打公网 HTTPS 上的云端网关，本家打 `127.0.0.1:9434`（QClaw
+    /// 客户端自己拉起的 OpenClaw 网关）：
+    /// ```text
+    ///   POST http://127.0.0.1:9434/v1/chat/completions
+    ///     Authorization: Bearer <gateway.auth.token>
+    ///     body.model = "openclaw"               ← 只能是 agent 名
+    ///     x-openclaw-model: qclaw/<模型 id>      ← 真正的模型选择
+    ///   GET  http://127.0.0.1:19000/proxy/llm/models   ← 模型清单
+    /// ```
+    /// 由此派生三处与别家不同的处置（理由见 `qclaw/mod.rs` 模块头）：
+    ///   1. **出网必须直连**（回环地址走代理必败）→ `system_proxy_when_unset`
+    ///      显式 false；
+    ///   2. **每次请求现场重读 `openclaw.json`**（令牌随 QClaw 重启而变，
+    ///      记录里只存快照兜底）；
+    ///   3. **响应恒回显 `openclaw`** → `sse_model_rewrite = true`。
+    ///
+    /// ── 没有地区伴生 ────────────────────────────────────────
+    /// QClaw 只有一个客户端、一个本机网关（云端模型池由网关自己路由），
+    /// 没有 cn / intl 双站点，拆地区没有依据。
+    Qclaw,
 }
 
 /// 一个提供商的静态元数据。
@@ -604,6 +668,18 @@ pub const PROVIDERS: &[ProviderMeta] = &[
     // 大面积同名 —— 靠末位让同名模型优先归已有各家（那些是开放平台账号，
     // 配额与稳定性都比本家的消费级网页端好）。
     ProviderMeta { id: "chatglm", label: "智谱清言" },
+    // 千问办公（QwenWork 中国版）：单一站点（认证链复用 Qoder，但网关与推理
+    // 都是自己的域名），没有地区伴生。排末尾（2026-10 接入，后到居后）。
+    // 它的模型名（flash / pro / qwen3.8-max-preview）与别家**不重名**，
+    // 因此排位不影响同名归属，只是遵循「新家追加在末尾」的书写约定。
+    ProviderMeta { id: "qwenwork", label: "千问办公" },
+    // QClaw（腾讯桌面 AI 客户端）：单一入口（导入本机网关配置），没有地区
+    // 伴生（一个客户端、一个本机网关，云端模型池由网关自己路由）。
+    // 排末尾（2026-10 接入，后到居后）。它的模型名（pool-glm-5.2 /
+    // pool-deepseek-v4-pro / pool-kimi-k2.6 / pool-minimax-m3 …）与
+    // codearts / catpaw / zcode / chatglm 大面积同名 —— 同样靠末位让同名
+    // 模型优先归已有各家（那些是开放平台账号，配额与稳定性更好）。
+    ProviderMeta { id: "qclaw", label: "QClaw" },
 ];
 
 /// provider id 在注册表里的下标（未知 id → None）。
@@ -689,6 +765,8 @@ pub fn kind_from_id(id: &str) -> Option<ProviderKind> {
         "officeace" => Some(ProviderKind::OfficeAce),
         "orcaterm" => Some(ProviderKind::OrcaTerm),
         "chatglm" => Some(ProviderKind::Chatglm),
+        "qwenwork" => Some(ProviderKind::Qwenwork),
+        "qclaw" => Some(ProviderKind::Qclaw),
         // 走到这里 = 上面的注册表判定已放行、这个 match 却没有对应分支：
         // 只可能是有人给 `PROVIDERS` 加了条目忘了加这里。开发期喊出来；
         // release 返回 None（见上：宁可为「未知」，不可误认成别家）。
@@ -732,6 +810,8 @@ pub const fn kind_id(kind: ProviderKind) -> &'static str {
         ProviderKind::OfficeAce => "officeace",
         ProviderKind::OrcaTerm => "orcaterm",
         ProviderKind::Chatglm => "chatglm",
+        ProviderKind::Qwenwork => "qwenwork",
+        ProviderKind::Qclaw => "qclaw",
     }
 }
 

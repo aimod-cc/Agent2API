@@ -883,6 +883,133 @@ const CHATGLM: ProviderConfig = {
   ],
 }
 
+/**
+ * 千问办公（`QwenWorkCN`）。逆向来源见后端 `providers::qwenwork` 的模块头。
+ *
+ * ── 本家的特殊之处：**只有两条路径，且第一条是唯一实用的** ─────────
+ * 上游没有开放平台、也没有网页登录可走 OAuth，用户**不可能自己拿到 JWT** ——
+ * 它只存在于本机客户端的 `auth-v2.dat` 里（Chromium os_crypt：
+ * DPAPI 主密钥 + AES-256-GCM）。因此「从本机导入」是主入口，
+ * 「粘贴令牌」只作换机器 / 解密失败时的兜底（此时用户还得在令牌之外
+ * 一并给 `userId`，因为粘贴路径没有可信的身份来源）。
+ *
+ * ── 导入不需要客户端在跑 ────────────────────────────────────
+ * DPAPI 以**当前 Windows 用户**身份解密，不看进程。所以文案里要明确
+ * 「先登录一次，之后关掉客户端也能导入」，否则用户会以为必须先开着。
+ *
+ * ── 没有 `guestLogin` ───────────────────────────────────────
+ * 上游不发访客身份：MaaS 密钥的签发要先有一枚账号 JWT。别照着智谱清言
+ * 那份抄出一个「访客模式」按钮 —— 它调不出任何东西。
+ *
+ * ── 额度只有百分比 ──────────────────────────────────────────
+ * 免费版 `GET /api/v2/quota/usage` 的 `user_quota` 是 null，只有
+ * `total_usage_percentage`。所以「积分 / 签到」这类绝对数值能力在本家
+ * 不成立（见 `accounts-domain.ts` 的能力表）。
+ */
+const QWENWORK: ProviderConfig = {
+  provider: 'qwenwork',
+  label: '千问办公',
+  addButton: t('添加千问办公账号'),
+  desktop: true,
+  desktopWindowsOnly: true,
+  desktopHint: t(
+    '读取本机千问办公客户端登录态（%APPDATA%\\QwenWorkCN\\auth-v2.dat），需已在客户端登录过',
+  ),
+  // 单字面量（不拼接）：i18n 扫描器按 t() 调用的首个字符串字面量提键，运行时拿到的
+  // 却是拼接全文 —— 拆两段写的话词典里永远只有前半段做键，整条 note 在非中文
+  // 界面下永远回落中文（见 i18n/scan.mjs 的 extractFromCode）
+  desktopNote: t(
+    '读本机客户端当前的登录态。它是 Chromium <code>os_crypt</code> 加密的（DPAPI 主密钥 + AES-256-GCM），因此<strong>仅 Windows 可用</strong>。DPAPI 按<strong>当前 Windows 用户</strong>解密，<strong>不需要客户端正在运行</strong> —— 只要在本机登录过一次即可（换机器时请在目标机器上重新登录一次客户端）。',
+  ),
+  webLogin: {
+    // PKCE 设备授权（与 Qoder 同一套协议，差别只有 client_id 与主机）：
+    // 授权页 `gateway.qwenwork.cn/device/selectAccounts`，网关轮询
+    // `/api/v1/deviceToken/poll` 拿令牌 —— 没有回调、没有自定义协议跳转，
+    // 所以内嵌窗口与系统浏览器都可行（见后端 `providers::qwenwork::oauth`）。
+    noteHtml: t('打开千问办公的官方授权页完成设备码授权：登录完成后网关自动拿到登录态并加入账号列表（不需要手工回填任何回调地址）。'),
+    button: t('打开千问办公网页登录'),
+    busyText: t('等待千问办公授权完成…'),
+    edition: 'cn',
+    modes: [
+      { value: 'embedded', label: t('内嵌窗口（推荐）'), hint: t('内嵌窗口用全新环境，多账号互不影响；关窗即取消等待') },
+      { value: 'external', label: t('系统浏览器'), hint: t('系统浏览器打开（复用已登录账号）；完成后自动加入列表') },
+    ],
+  },
+  manualTitle: t('粘贴登录令牌'),
+  // 同上：单字面量，保证扫描键与运行时键一致
+  manualNoteHtml: t(
+    '粘贴千问办公的登录令牌（JWT，三段点分）。一般用「从本机导入」就够了；这里适合换机器迁移、或本机解密失败时手动兜底 —— 此时还需要一并填写 <code>userId</code>（令牌里解不出时会提示）。粘贴后会先向上游校验一次，校验通过才落账号。',
+  ),
+  fields: [
+    {
+      key: 'accessToken',
+      label: 'accessToken',
+      rows: 3,
+      placeholder: t('JWT（三段点分；也可直接粘贴 Bearer 整行）'),
+    },
+    {
+      key: 'userId',
+      label: 'userId',
+      optional: true,
+      placeholder: t('可选，仅当令牌里读不出用户 id 时需要'),
+    },
+    { key: 'name', label: t('备注名'), optional: true, placeholder: t('可选，留空则用账号昵称') },
+  ],
+}
+
+/**
+ * QClaw（腾讯桌面 AI 客户端）。逆向来源见后端 `providers::qclaw` 的模块头。
+ *
+ * ── 本家的特殊之处：**凭证是本机网关令牌，不是云端令牌** ─────────
+ * QClaw 客户端内部跑着一个 OpenClaw 网关（`127.0.0.1:9434`），转发打的是它，
+ * 凭证是 `~/.qclaw/openclaw.json` 里的 `gateway.auth.token`。用户不可能自己
+ * 「申请」一枚 —— 它只存在于本机，因此「从本机导入」是主入口，
+ * 「粘贴网关令牌」只作读不到配置文件时的兜底（换机器请在新机器上导入一次）。
+ *
+ * ── 导入要求 QClaw 正在运行（与别家不同，务必写清）────────────
+ * 别家导入登录态「不需要客户端在跑」（DPAPI 按用户解密，不看进程）。
+ * 本家不行：网关是客户端拉起的，端口与令牌都以它在运行为前提 ——
+ * 后端导入时会真连一次 `GET /v1/models` 探活，连不上直接报错。
+ *
+ * ── 没有 `webLogin` / `guestLogin` / 额度 / 签到 ─────────────────
+ * 上游没有可走的 OAuth（开放平台域名只是官网），也不发访客身份；
+ * 云端额度不透出本机网关（`usage` 帧恒 0），没有签到活动接口。
+ * 别照着别家抄出这些按钮 —— 它们调不出任何东西。
+ */
+const QCLAW: ProviderConfig = {
+  provider: 'qclaw',
+  label: 'QClaw',
+  addButton: t('添加 QClaw 账号'),
+  desktop: true,
+  desktopWindowsOnly: true,
+  desktopHint: t(
+    '读取本机 QClaw 客户端网关配置（%USERPROFILE%\\.qclaw\\openclaw.json），需 QClaw 正在运行',
+  ),
+  desktopNote: t(
+    '读本机 QClaw 客户端拉起的 OpenClaw 网关配置（端口 + 令牌）。与别家不同，本家<strong>需要 QClaw 正在运行</strong> —— 网关是客户端拉起的，端口和令牌都以它在运行为前提；后端会真连一次做校验。' +
+      '顺带（尽力而为地）解密本机登录态补全昵称与用户 id，解不开也不影响使用。',
+  ),
+  manualTitle: t('粘贴网关令牌'),
+  manualNoteHtml: t(
+    '粘贴 QClaw 本机网关的令牌（<code>~/.qclaw/openclaw.json</code> 里 <code>gateway.auth.token</code> 的值）。一般用「从本机导入」就够了；这里适合读不到配置文件时手动兜底 —— 端口留空则用默认的 9434。粘贴后会先连一次网关做校验，通过才落账号。',
+  ),
+  fields: [
+    {
+      key: 'accessToken',
+      label: 'gatewayToken',
+      rows: 3,
+      placeholder: t('openclaw.json 里 gateway.auth.token 的值'),
+    },
+    {
+      key: 'gatewayPort',
+      label: 'gatewayPort',
+      optional: true,
+      placeholder: t('可选，默认 9434'),
+    },
+    { key: 'name', label: t('备注名'), optional: true, placeholder: t('可选，留空则用账号昵称') },
+  ],
+}
+
 /** 内置家的表单块，顺序与旧 ADD_FORMS 一致（只影响 DOM 里的块顺序，不影响界面） */
 export const BUILTIN_CONFIGS: ProviderConfig[] = [
   RACCOON,
@@ -930,6 +1057,12 @@ export const BUILTIN_CONFIGS: ProviderConfig[] = [
   // 智谱清言（chatglm.cn）：访客模式 / 粘贴令牌 / 导入本机登录态，排在末尾
   // （与后端注册表 PROVIDERS 的排列一致，2026-10 接入）
   CHATGLM,
+  // 千问办公（QwenWorkCN）：导入本机登录态（主入口）/ 网页登录（PKCE 设备授权）/
+  // 粘贴令牌，排在末尾（与后端注册表 PROVIDERS 的排列一致，2026-10 接入）
+  QWENWORK,
+  // QClaw（腾讯桌面 AI 客户端）：导入本机网关配置（主入口）/ 粘贴网关令牌，
+  // 排在末尾（与后端注册表 PROVIDERS 的排列一致，2026-10 接入）
+  QCLAW,
 ]
 
 /** WorkBuddy 的块 id（结构特殊，单独一个组件） */

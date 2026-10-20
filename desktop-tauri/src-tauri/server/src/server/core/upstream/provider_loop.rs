@@ -1323,6 +1323,27 @@ async fn attempt_queue(
                                 *reset_at,
                                 &failure.error.message,
                             );
+                            // 账号级额度池的家（全部模型共用同一个 remaining，
+                            // 见 `ProviderAdapter::quota_cooldown_models` 的说明）：
+                            // 把整组其余名字一并标冷却 —— 只记 wire_model 一个键的
+                            // 话，顺延到同账号的下一个模型会再白撞一次同样的
+                            // insufficient quota（与会话式路径的
+                            // `mark_conversation_limited` 同一语义，那里吃的就是
+                            // 这个分组）。默认实现只返回 wire_model 本身，循环体
+                            // 一次都不进，其余各家行为逐字不变。
+                            for name in adapter.quota_cooldown_models(&account_id, &wire_model) {
+                                if name != wire_model {
+                                    rotate::mark_account_limited(
+                                        service,
+                                        &account_id,
+                                        &name,
+                                        *status as i32,
+                                        *upstream_code,
+                                        *reset_at,
+                                        &failure.error.message,
+                                    );
+                                }
+                            }
                             let limit_at =
                                 rotate::account_limit_reset_at(service, &account_id, &wire_model);
                             // 限流垫底（Sink）：它还**有**额度时被 429 的（额度尽是

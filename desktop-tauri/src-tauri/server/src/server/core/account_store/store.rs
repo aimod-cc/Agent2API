@@ -616,6 +616,28 @@ impl AccountStore {
                 }
             }
         }
+        // ── QClaw 的两个端口字段（`qclaw::adapter` 用）────────────────
+        // 与 OfficeAce 那支同一手法、同一理由：适配器只能看到会话，而
+        // 「连哪个端口」的事实在账号记录里（`qclaw_accounts.rs` 的落盘形态）。
+        // 转发主路径是现场重读 `openclaw.json`（令牌随 QClaw 重启而变，见
+        // `providers::qclaw` 模块头），这两个端口只在「文件读不到」时兜底 ——
+        // 没有它们，那条兜底路径就只能猜默认端口。
+        // 数字字段（不是字符串），空值/0 不写。
+        if record.provider() == crate::server::core::account_store::qclaw_accounts::QCLAW_PROVIDER_ID
+        {
+            if let Some(object) = session.as_object_mut() {
+                for key in ["gatewayPort", "modelsPort"] {
+                    if let Some(port) = record
+                        .get(key)
+                        .and_then(Value::as_u64)
+                        .and_then(|port| u16::try_from(port).ok())
+                        .filter(|port| *port > 0)
+                    {
+                        object.insert(key.to_string(), Value::from(port));
+                    }
+                }
+            }
+        }
         session
     }
 

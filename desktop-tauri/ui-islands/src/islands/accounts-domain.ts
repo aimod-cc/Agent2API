@@ -250,6 +250,48 @@ const PROVIDER_FEATURES: Record<string, ProviderFeatures> = {
   // `expiry: ''` —— 令牌有效期写在 JWT 的 `exp` 里、由网关自动续期，这一列没有
   //   可显示的事实（与 antigravity / kuku 同一处置），界面不渲染「有效期」。
   chatglm: { usage: true, creditDetail: true, edition: false, identifier: 'uid', expiry: '' },
+  // 千问办公（QwenWorkCN，Qoder 换皮）。各位的出处：
+  // `usage: true` —— 余额取自 `GET {gateway}/api/v1/adapter/user/account-context
+  //   ?include=…` 的 `data.quota.remaining`（实测 1738.6854），套餐名与到期取同一
+  //   响应的 `data.plan`；钱包背包取 `…/adapter/user/wallets`（**带
+  //   `{"code":"ok","data":…}` 信封**，后端已解）。见 `providers::qwenwork::usage`。
+  // `creditDetail: true` —— 逐份读数两行（每日刷新积分 / 其他积分，行名照上游
+  //   官方弹窗的两个分类），各带到期时刻。每日那份标 `daily`，界面据此把「到期」
+  //   读成「今天 24 点回满」。
+  // **不设 `claim`** —— 那个位是「领体验套餐」（ZCode 专用，走另一套 API）。
+  //   本家的签到能力由后端提供（`auto_checkin::CHECKIN_PROVIDERS` +
+  //   `qwenwork::checkin`），签到中心按它自动列出，不需要这里再声明。
+  // `edition: false` —— 单一站点（gateway.qwenwork.cn + maas.xiaoluozi.cn 是同一
+  //   套账号的两级入口，不是两个地区），与 chatglm 同一口径。
+  // `identifier: 'uid'` —— 账号标识存 userId（JWT 的 sub）。
+  // `expiry: 'expiresAt'` —— JWT 的 `exp` 由导入时写入（**不是** `tokenExpiresAt`：
+  //   公开形态只透出 `expiresAt`，写别的键界面上永远是 null）。这家不像
+  //   chatglm / orcaterm 那样有自动续期接口，过期了必须回客户端重新登录再导入，
+  //   所以「有效期」这一列对本家是有意义的事实（与 qoder / officeace 同一处置）。
+  qwenwork: {
+    usage: true, creditDetail: true,
+    edition: false, identifier: 'uid', expiry: 'expiresAt',
+  },
+  // QClaw（腾讯桌面 AI 客户端）。各位的出处：
+  // `usage: true` —— 余额在**云端** jprx 网关（`providers::qclaw::points`：
+  //   `data/4110` Q点账户）。推理链路那个本机网关的 usage 帧恒 0，但云端
+  //   Q点账户有完整读数，所以这家是「转发不产用量、余额照常查」。
+  // `creditDetail: true` —— 四桶（每日免费 / 订阅 / 积分包 / 活动）+ 逐份
+  //   积分包各一行（`balance_detail.items[]` 各带 expire_time），「最近到期」
+  //   两列取 items 里最早作废的那一份（与 qwenwork 同一口径）。
+  // `edition: false` —— 单一入口（一个客户端、一个本机网关，没有地区/版本之分）。
+  // `identifier: 'uid'` —— 账号标识存 uid（云端用户 id；登录态解不开时是
+  //   网关令牌摘要，见后端 `qclaw_accounts`）。
+  // `expiry: 'expiresAt'` —— **云端 JWT 的 exp**（导入时从 leveldb 解出写入，
+  //   会话 30 天一期）。注意与网关令牌区分：那个随 QClaw 重启而变、没有
+  //   可展示的「有效期」；这一列说的是云端登录态什么时候过期（过期后本机
+  //   网关的云端转发会失效，与 qwenwork / qoder 同一处置）。
+  // 签到中心：后端 `CHECKIN_PROVIDERS` 已含 qclaw（无签到接口的中性行），
+  //   按它自动列出，不需要这里再声明。
+  qclaw: {
+    usage: true, creditDetail: true,
+    edition: false, identifier: 'uid', expiry: 'expiresAt',
+  },
 }
 
 /**

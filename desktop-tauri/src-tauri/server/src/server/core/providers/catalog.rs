@@ -196,6 +196,20 @@ pub(crate) fn refresh_meta(kind: ProviderKind) -> (bool, i64) {
             super::chatglm::models::remote_refreshed(),
             super::chatglm::models::last_refreshed_at(),
         ),
+        // 千问办公的清单来自 `GET {gateway}/api/desktop/chat-modes`（三条付费模型）。
+        // 静态兜底（`models::fallback_manifest`）只是离线保底，判据与 raccoon /
+        // kuku 同款：**有远程内容**才算远程来源。
+        ProviderKind::Qwenwork => (
+            super::qwenwork::models::remote_refreshed(),
+            super::qwenwork::models::last_refreshed_at(),
+        ),
+        // QClaw 的清单来自本机网关（`GET 127.0.0.1:19000/proxy/llm/models`）。
+        // 静态兜底（11 条）只是离线保底，判据与 qwenwork / kuku 同款：
+        // **有远程内容**才算远程来源。
+        ProviderKind::Qclaw => (
+            super::qclaw::models::remote_refreshed(),
+            super::qclaw::models::last_refreshed_at(),
+        ),
     }
 }
 

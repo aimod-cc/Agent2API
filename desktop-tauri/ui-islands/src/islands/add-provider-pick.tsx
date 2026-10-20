@@ -103,6 +103,13 @@ export const PROVIDER_ICONS: Record<string, string> = {
   // （`assets/icon.png`，512×512，与系统里显示的应用图标为同一形象；
   // 归一成 256×256 入库 —— 与 officeace 同一处置）
   chatglm: 'assets/providers/chatglm.png',
+  // 千问办公：取自客户端 `QwenWorkCN.exe` 的 RT_GROUP_ICON（256×256 那张，
+  // 从 exe 的 .rsrc 段直接提出来 —— 与系统里显示的应用图标为同一形象）
+  qwenwork: 'assets/providers/qwenwork.png',
+  // QClaw（腾讯桌面 AI 客户端）：取自安装包
+  // `resources/icons/app/win/icon.ico` 的 256×256 项（Vista+ 的 ICO 里
+  // 256 项就是现成的 PNG 载荷，直接落盘 —— 与系统里显示的应用图标为同一形象）
+  qclaw: 'assets/providers/qclaw.png',
 }
 
 /**

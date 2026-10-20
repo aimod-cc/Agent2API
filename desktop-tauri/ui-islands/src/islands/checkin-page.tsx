@@ -2,7 +2,7 @@ import { createRoot } from 'react-dom/client'
 import * as React from 'react'
 import { Badge, Button, Progress, SegmentedControl, Spinner } from '@ui'
 import { PROVIDER_ICONS } from './add-provider-pick'
-import { formatTime, shared, type OnboardingTask } from './accounts-shared'
+import { formatTime, numberText, shared, type OnboardingTask } from './accounts-shared'
 import { claimedPlanIdsToday } from './accounts-domain'
 import {
   bridge, claimOnboarding, getCheckinStore, groupTone, loadCheckinCenter, nextScheduleRun,
@@ -13,7 +13,7 @@ import {
 } from './checkin-state'
 import { ScheduleTab } from './checkin-schedule-tab'
 import { RecordsTab } from './checkin-records-tab'
-import { openZcodePlans } from './accounts-data'
+import { openZcodePlans, queryUsageFor } from './accounts-data'
 import { t } from '../i18n'
 
 /**
@@ -62,6 +62,11 @@ const PROVIDER_DESC: Record<string, string> = {
   // 访客账号没有积分体系，实现会如实跳过（不算失败），说明里点出这一点，
   // 免得用户以为漏签了。
   chatglm: t('每日登录积分 · 顺带领取会员活动 · 访客账号无积分体系（跳过）'),
+  // 千问办公：`daily-credit-notice/claim` 一次 POST 领每日积分，幂等
+  // （当天已领回 `credits: 0`，不报错）。**不是 Qoder 那套活动状态机** ——
+  // 上游没有 campaign 列表，也没有「可领/已领」两态可查（查询端点实测 404），
+  // 所以「今天签没签」只能由这次请求的返回值回答。
+  qwenwork: t('领取每日积分 · 幂等（当天已领回 0，不报错）'),
 }
 
 /** 页内标签页的档位（值与 checkin-state 的 CheckinTab 一致） */
@@ -397,7 +402,108 @@ function OnboardingRow({ row }: { row: { id: string; name: string; provider?: st
 }
 
 /**
- * 活动福利一行（ZCode 的限时套餐领取；本页只提供入口，领取由弹窗内的逐份按钮发起）。
+ * 自动发放一行（QClaw）：**只读** —— 积分随登录到账，没有「领取」这个动作。
+ *
+ * ── 为什么没有按钮 ──────────────────────────────────────────
+ * 上游没有签到 / 领奖端点（全量逆向 `out/` 的 115 个 chunk 都没有，见后端
+ * `providers::qclaw::points` 模块头）。给这一行放一颗「签到」按钮，用户点下去
+ * 只会拿到一个必然失败的结论 —— 有按钮而无动作，比没有按钮更误导。
+ * 所以这里只有两件事：**看到钱**（惰性查一次余额）与**看到到期日**。
+ *
+ * ── 为什么挂载即查、且不参与「全部查询」 ─────────────────────
+ * 快照是零上游请求的（见 `api::checkin_center`），余额因此不在快照里。这一行
+ * 的余额查询与账号页那颗「查询余额」是同一条路（`queryUsageFor`），刷新后
+ * 拿到的就是账号页看到的同一份读数 —— 不另立口径。
+ * 它不进 `onboarding` 的批量查询：那批是「领一次性福利」，这里没有东西可领。
+ */
+function AutoGrantRow({ row }: { row: { id: string; name: string; provider?: string; note?: string } }) {
+  const provider = row.provider ?? 'qclaw'
+  const [state, setState] = React.useState<{
+    loading: boolean
+    error: string | null
+    /** 可用余额（读数主导）；拿不到就是 null（不是 0 —— 「不知道」不等于「没钱」） */
+    available: number | null
+    unit: string
+    /** 最近到期的时刻（ms）与那份的剩余量 */
+    nearestAt: number | null
+    nearestRemain: number | null
+  }>({ loading: true, error: null, available: null, unit: '', nearestAt: null, nearestRemain: null })
+
+  React.useEffect(() => {
+    let alive = true
+    void (async () => {
+      try {
+        const data = await queryUsageFor(row.id)
+        if (!alive) return
+        const result = (data?.results ?? []).find(item => item.id === row.id) as Record<string, unknown> | undefined
+        const usage = (result?.usage ?? null) as Record<string, unknown> | null
+        const failure = typeof result?.error === 'string' ? result.error : null
+        if (!usage) {
+          setState({ loading: false, error: failure ?? t('查询无结果'), available: null, unit: '', nearestAt: null, nearestRemain: null })
+          return
+        }
+        const num = (key: string): number | null => {
+          const value = usage[key]
+          return typeof value === 'number' && Number.isFinite(value) ? value : null
+        }
+        setState({
+          loading: false,
+          error: failure,
+          available: num('available'),
+          unit: typeof usage.unit === 'string' ? usage.unit : '',
+          nearestAt: num('nearestExpiry'),
+          nearestRemain: num('nearestExpiryCredits'),
+        })
+      } catch (error) {
+        if (alive) {
+          setState({
+            loading: false,
+            error: error instanceof Error ? error.message : String(error),
+            available: null, unit: '', nearestAt: null, nearestRemain: null,
+          })
+        }
+      }
+    })()
+    return () => { alive = false }
+  }, [row.id])
+
+  // 读数走 `numberText`（与账号页余额列、积分明细弹层同一口径：收两位、整数去尾）。
+  // 这里不贴单位：行下方说明已经交代了这是「积分」，而且账号页那一列也不贴
+  // ——两处显示同一个数,口径要一致。
+  const balance = state.available === null ? null : numberText(state.available)
+
+  return (
+    <div className='ck-prov-row'>
+      <div className='ck-prov-main'>
+        <ProviderLogo id={provider} label={t('QClaw')} />
+        <div className='ck-prov-info'>
+          <div className='ck-prov-name'>{row.name || row.id}</div>
+          <div className='ck-prov-desc'>
+            {row.note ? t(row.note) : t('积分随登录自动发放，无需签到')}
+            {state.loading
+              ? ` · ${t('余额查询中…')}`
+              : state.error
+                ? ` · ${t('余额查询失败：{error}', { error: state.error })}`
+                : state.nearestAt
+                  ? ` · ${t('最近到期 {date}', { date: formatTime(state.nearestAt) })}`
+                  : ''}
+          </div>
+        </div>
+        <div className='ck-prov-right'>
+          {/* 读数替换掉「N 账号 · M 已签」那个计数位：这里没有签到的计数可言 */}
+          <span className='ck-prov-count'>
+            {state.loading
+              ? <Spinner className='size-4' />
+              : balance ?? <span className='ck-pending'>—</span>}
+          </span>
+          <Badge variant='outline' shape='tag'>{t('自动发放')}</Badge>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
  *
  * ── 为什么是按份判、不按「今天领过没」───────────────────────
  * 「已领取过」在上游是按**套餐**判的（领了 A 之后 B 照样能领），所以这一行不按
@@ -682,6 +788,8 @@ function CenterTab({ store }: { store: CheckinStore }) {
   const welfarePlanRows = snapshot?.extras.plans ?? []
   // 成长任务行（WorkBuddy 国内版；从参考项目 workbuddy2api 的 task_runner 移植）
   const growthRows = snapshot?.extras.growth ?? []
+  // 自动发放行（QClaw）：积分随登录到账、没有可领动作 —— 只读分组，见 AutoGrantRow
+  const autoGrantRows = snapshot?.extras.autoGrant ?? []
   // 定时签到总览：条目数（启用 / 总数）与聚合「下次执行」（多条目里最近的一次）
   const scheduleEntries = Array.isArray(auto?.schedules) ? auto!.schedules! : []
   const scheduleEnabled = scheduleEntries.filter(entry => entry.enabled === true).length
@@ -772,7 +880,7 @@ function CenterTab({ store }: { store: CheckinStore }) {
             )}
             {(daily?.outOfScope ?? []).length > 0 ? (
               <div className='ck-fold-note'>
-                {t('不参与每日签到：{list}。CodeArts 的一次性奖励在下方「新手福利」，它的每日福利就在上方「每日签到」里；ZCode 的套餐领取见「活动福利」。', {
+                {t('不参与每日签到：{list}。CodeArts 的一次性奖励在下方「新手福利」，它的每日福利就在上方「每日签到」里；ZCode 的套餐领取见「活动福利」；QClaw 的积分随登录自动发放，见「自动发放」。', {
                   // 列表项里的 provider 名与原因都是后端数据（snapshot 的 outOfScope），原样透出
                   list: daily!.outOfScope
                     .map(item => t('{label} ×{count}（{reason}）', { label: item.label, count: item.count, reason: item.reason }))
@@ -828,6 +936,22 @@ function CenterTab({ store }: { store: CheckinStore }) {
             </div>
           ) : (
             <div className='ck-empty'>{t('没有可领套餐的账号（ZCode 未添加）。')}</div>
+          )}
+        </section>
+
+        <section className='panel'>
+          <div className='panel-head'>
+            <h2>{t('自动发放')}</h2>
+            <span className='panel-sub'>
+              {t('积分随登录到账 · 无需签到 · 只读：余额与到期时间由上游直接给出')}
+            </span>
+          </div>
+          {autoGrantRows.length > 0 ? (
+            <div>
+              {autoGrantRows.map(row => <AutoGrantRow key={row.id} row={row} />)}
+            </div>
+          ) : (
+            <div className='ck-empty'>{t('没有随登录自动发放积分的账号（目前有 QClaw 一家）。')}</div>
           )}
         </section>
 
