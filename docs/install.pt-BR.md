@@ -233,21 +233,22 @@ Os instaladores de desktop (Windows / macOS) já incluem a pasta `ui/` do painel
 
 ## Celular
 
-Há duas formas — escolha a que precisar:
+Há três formas — escolha a que precisar:
 
 | Forma | Como instalar | Indicada para |
 | --- | --- | --- |
-| **Navegador / PWA** | Abra `/m` no navegador do celular; opcionalmente "Adicionar à tela inicial" | Consulta rápida, sem instalar nada |
+| **Navegador / PWA** | Abra `/m` no navegador do celular; opcionalmente "Adicionar à tela inicial" | Consulta rápida, sem instalar nada, opção mais simples no iPhone |
 | **APK Android** | Instale `Agent2API-<versão>.apk` | Ícone na tela inicial, tela cheia, vários servidores |
+| **IPA iOS** | Instale `Agent2API-<versão>.ipa` (não assinado — você reassina) | Ícone na tela inicial, tela cheia |
 
-As duas rodam o mesmo código de interface. A diferença é quem serve a página: o PWA é servido pelo gateway (então "também expor o painel de gerenciamento web" precisa estar ligado), enquanto o APK leva a interface dentro do pacote (então consegue abrir a interface offline e não precisa dessa opção).
+As três rodam o mesmo código de interface. A diferença é quem serve a página: o PWA é servido pelo gateway (então "também expor o painel de gerenciamento web" precisa estar ligado), enquanto o APK / IPA levam a interface dentro do pacote (então conseguem abrir a interface offline e não precisam dessa opção).
 
 ### Pré-requisitos (por forma)
 
 **Desktop (Windows / macOS / Linux)**: as duas opções precisam estar ligadas; uma sem a outra não funciona.
 
 1. "Configurações → Geral → Acesso pela rede local" — permite que dispositivos da rede acessem o gateway. O fluxo de ativação pede o registro de um administrador do painel e cria automaticamente uma chave chamada "padrão".
-2. "Configurações → Geral → Acesso pela rede local → também expor o painel de gerenciamento web" — serve a pasta estática `ui/`. **Necessária para a forma navegador / PWA** (`/m` é servido pelo gateway, então retorna 404 enquanto esta opção estiver desligada). **O APK não precisa dela** (a interface está no pacote), mas ainda precisa da opção 1 — sem ela o gateway escuta apenas em `127.0.0.1` e o celular não alcança.
+2. "Configurações → Geral → Acesso pela rede local → também expor o painel de gerenciamento web" — serve a pasta estática `ui/`. **Necessária para a forma navegador / PWA** (`/m` é servido pelo gateway, então retorna 404 enquanto esta opção estiver desligada). **O APK / IPA não precisam dela** (a interface está no pacote), mas ainda precisam da opção 1 — sem ela o gateway escuta apenas em `127.0.0.1` e o celular não alcança.
 
 Ambas exigem reinício para valer.
 
@@ -265,17 +266,36 @@ A primeira visita redireciona para a página de login; entre com o administrador
 
 Na primeira execução aparece uma tela "Servidores". São três passos:
 
-1. Toque em "Adicionar" e informe o `IP:porta` do gateway (por exemplo `192.168.1.23:3065`; a porta padrão é 3065);
+1. Toque em "Adicionar" e informe o `IP ou domínio:porta` do gateway (por exemplo `192.168.1.23:3065`). O protocolo pode ser `http://` ou `https://` (http é assumido se omitido); sem porta, http usa 3065 e https usa a 443 padrão;
 2. Toque em "Conectar e salvar" — ele testa o gateway antes, então endereço errado ou gateway sem acesso pela rede local são reportados ali mesmo;
 3. Aparece a página de login. Informe a conta de administrador e a senha deste gateway (se ainda não houver administrador, vira "Criar conta de administrador").
 
-**Vários servidores**: toque em "Adicionar" de novo. Cada servidor guarda o próprio login — trocar não exige entrar de novo, e voltar também não. O ponto de entrada é "Configurações → Servidores"; toque em uma linha para trocar.
+**Vários servidores**: toque em "Adicionar" de novo. Cada servidor guarda o próprio login — trocar não exige entrar de novo, e voltar também não. O ponto de entrada é "Configurações → Servidores"; toque em uma linha para trocar. **A página de login também tem "Trocar de servidor"**, então depois de sair da conta (ou ser desconectado) você não precisa entrar de novo só para chegar a essa lista.
 
 **Limitações conhecidas do APK**:
 
-- Apenas Android. O iOS exige uma conta Apple Developer para assinar, ou instalação pelo Xcode (assinaturas de sideload expiram em 7 dias).
-- Fala com endereços `http://` da rede local em texto claro. O risco é "interceptável na mesma rede local"; o gateway em si continua exigindo login de administrador. Para eliminar, configure TLS no gateway e informe um endereço `https://` (a análise é a mesma, apenas não prefixa `http`).
+- Sem esquema, usa um endereço `http://` de rede local em texto claro. O risco é "interceptável na mesma rede local"; o gateway em si continua exigindo login de administrador. Para eliminar isso, configure TLS no gateway (um proxy reverso ou túnel serve) e informe um endereço `https://` — o esquema é preservado como digitado, e um certificado inválido faz o teste de conexão falhar na hora.
 - A interface segue a versão do APK, não a do gateway. Se uma atualização do gateway adicionar telas novas, é preciso um APK mais novo para vê-las; mudanças apenas de dados não são afetadas.
+
+### Instalar o IPA (iOS)
+
+O `Agent2API-<versão>.ipa` do Release é **não assinado por padrão** — a Apple não permite que desenvolvedores distribuam apps instaláveis livremente, então um pacote não assinado precisa ser reassinado uma vez com o seu Apple ID. Três caminhos:
+
+| Caminho | Requer | Validade |
+| --- | --- | --- |
+| **AltStore / SideStore / Sideloadly** | Um computador (na primeira vez) + Apple ID gratuito | 7 dias, depois reassinar |
+| **Apple Developer Program** | US$ 99/ano, certificado e perfil de provisionamento próprios | 1 ano |
+| **App Store / TestFlight** | US$ 99/ano + revisão | Longo prazo |
+
+Para fazer sideload: arraste o `.ipa` para o AltStore (ou SideStore), reassine com seu Apple ID e instale. Contas gratuitas têm limite de 3 apps simultâneos e exigem reassinatura a cada 7 dias.
+
+**Se você só quer consultar o gateway pelo iPhone, basta abrir `/m` no Safari e "Adicionar à tela inicial"** — não precisa do IPA e evita a reassinatura.
+
+**Limitações conhecidas do IPA**:
+
+- **Atualização dentro do app só abre um link**: o iOS não permite que um app baixe e instale código executável, então "Atualização de software" nas configurações mostra um botão "Baixar" que abre a página do Release, em vez de baixar como no Android. A forma PWA atualiza pelo Service Worker — basta recarregar.
+- Gateways `http://` em texto claro: o `Info.plist` já relaxa o ATS e declara o uso de rede local. Na primeira conexão o sistema pede "permitir acesso à rede local" — é obrigatório aceitar, senão toda requisição falha sem explicação visível.
+- O resto é igual ao APK: a interface segue a versão do pacote e o esquema padrão é http.
 
 ### Adicionar à tela inicial (navegador / PWA)
 

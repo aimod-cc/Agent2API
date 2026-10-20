@@ -28,7 +28,7 @@
 //!   "daily": {
 //!     "providers": [ { "id", "label",
 //!                      "accounts": [ { "id", "name", "available", "checkinAt",
-//!                                      "checkedInToday" } ],
+//!                                      "checkedInToday", "streakDays" } ],
 //!                      "doneCount", "totalCount" } ],
 //!     "outOfScope": [ { "label", "reason", "count" } ],
 //!     "todayDone": 6, "todayEligible": 9
@@ -108,6 +108,13 @@ fn account_display_name(account: &Value) -> String {
 /// 判据改了这里要跟着改 —— 两处写的都是「这个账号为什么不能签到」。
 fn out_of_scope_reason(account: &Value) -> &'static str {
     let provider = account_text(account, "provider");
+    // 智谱清言的**访客账号**：与「没有签到链路」是两回事 —— 上游这一站有签到
+    // （登录账号就能签），只是访客没有积分体系（相关接口对访客一律 401）。
+    // 判在 provider / edition 之前：本家的 edition 恒 cn，不会与下面那条撞；
+    // 文案与 `resolve_checkin_targets` 单账号拒绝时那句同义。
+    if account.get("isGuest").and_then(Value::as_bool) == Some(true) {
+        return "访客账号没有积分体系";
+    }
     // 自动发放类（QClaw）不进 outOfScope：它们有自己的只读分组（`extras.autoGrant`），
     // 文案在那边给。走到这里说明 `auto_grant_providers` 与下面的分流判据不同步 ——
     // 兜底给一句实情，不误导成「没有签到链路」。
@@ -190,6 +197,10 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
                 // 版本（cn / intl，缺失 null）：WorkBuddy 国际版在这张表里执行的是
                 // 「领日活」（活跃保活），按钮文案与提示要跟国内版的「签到」分开
                 "edition": account.get("edition").cloned().unwrap_or(Value::Null),
+                // 成长中心连登天数（WorkBuddy 国内版；签到后回读落库，见
+                // `AccountStore::mark_streak_days`）。恒为数字（0 = 还没读到过），
+                // 与公开形态同一口径 —— 界面按数字读，不必判「字段缺失」。
+                "streakDays": account.get("streakDays").cloned().unwrap_or(Value::from(0)),
             }));
         } else if auto_grant_providers().iter().any(|id| *id == provider) {
             // 自动发放类（QClaw）：进自己的只读分组，见模块头。

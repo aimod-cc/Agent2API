@@ -604,9 +604,6 @@
   .acct-table tbody td:empty { display: none; }
   /* 连接数收起后，余额那一格补到整行，不留半截空位 */
   .acct-table tr.acct-row:has(.cell-connections:empty) .cell-usage { grid-column: 1 / 4; }
-
-  /* 展开的限流明细行（.acct-panels，单 td 跨全部列）整行铺开，不套两列网格 */
-  .acct-table tr.acct-panels { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* ═══ 请求日志：多列 grid -> 卡片 ═══
@@ -1246,13 +1243,9 @@
      抽屉宽 240px 在 320px 视口里占 3/4，收窄到 min(240px, 78vw)。 */
   .asst-side { width: min(240px, 78vw); }
 
-  /* 顶栏那一排（新对话 / 标题 / 模型选择）在窄屏换行，别让标题被压成 0 宽 */
+  /* 顶栏那一排（新对话 / 标题 / 助手设置）在窄屏换行，别让标题被压成 0 宽 */
   .asst-top { flex-wrap: wrap; row-gap: 6px; }
   .asst-title { flex: 1 1 100%; order: -1; }
-
-  /* 输入区与模型选择：窄屏整行铺开，按钮不再被挤成小方块 */
-  .asst-model-pick { max-width: 100%; }
-  .asst-picks { flex-wrap: wrap; }
 
   /* 助手消息里的表格（markdown 渲染）在窄屏允许横滚，不撑破气泡 */
   .asst-msg .md-table, .asst-msg .asst-mini-table {
@@ -1263,7 +1256,7 @@
   .asst-msg.user .bubble { max-width: 100%; }
 
   /* 代码块：长行折行，避免整页被一条命令撑宽 */
-  .asst-msg.bot .body pre {
+  .asst-msg.bot .md pre {
     white-space: pre-wrap;
     word-break: break-word;
     overflow-wrap: anywhere;
@@ -1502,6 +1495,16 @@
     padding-right: 10px;
     border-right: 1px solid var(--hairline);
   }
+  /* 限流格在卡片里改回竖排：它的内容现在是「整格可点的读数条 + 一行小字」，
+     而上面那条通用规则把它设成了横排（当年只有一枚小徽章时才成立）。横排时
+     读数条按 calc(100% + 16px) 的出血宽度参与 flex 计算，会把下面那行「最早 …
+     恢复」挤成零宽。竖排后两者各占一行，读数条仍然是整格宽、好点。 */
+  .acct-table tr.acct-row .cell-limits {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 3px;
+  }
+  .acct-table tr.acct-row .cell-limits > .lim-sub { padding-right: 10px; }
   .acct-table tr.acct-row .cell-expiry { padding-left: 0; }
   /* 有效期格本身推到右缘，与卡片右边缘对齐 */
   .acct-table tr.acct-row .cell-expiry { justify-content: flex-end; }
@@ -1798,32 +1801,21 @@
      结构本身是对的（.asst-main 是 flex 列，.asst-scroll 滚、.asst-composer
      flex:none）。手机上要补的是三件小事：
 
-     ① 输入框字号 12.5px 会触发 iOS Safari 的**自动放大**（< 16px 时聚焦就
-        把页面放大，之后退不回去）。给 16px 是 iOS 的通行做法 —— 视觉上大
-        一点，但换来「点输入框页面不会乱跳」。
+     ① 输入框字号在窄屏由 page-assistant.css 的 900px 断点提到 16px（见那里
+        的说明：iOS Safari 在字号 < 16px 时聚焦会自动放大整页）。
      ② 输入区底部让出安全区（iPhone 手势条），否则发送按钮会被压住。
      ③ 消息区滚到底部时留一点余量，最后一条不被输入区贴住。 */
-  /* 字号 16px：iOS Safari 在输入框字号 < 16px 时聚焦会自动放大整页且退不回去。
-     组件库的 Textarea 带 `text-[12px]`（Tailwind v4 的 utilities 在 @layer 里，
-     CSS 的 !important 也压不过它），所以字号改由组件内联 style 控制 ——
-     这里只负责给出那个变量在窄屏下的值。 */
-  .page.active[data-page="assistant"] { --asst-ta-font: 16px; }
   .asst-composer {
     padding-bottom: max(8px, env(safe-area-inset-bottom));
   }
   .asst-scroll { padding-bottom: 8px; }
-  /* 输入区总高 268px 太占地方（textarea 的 max-height 132 + 两行 pill + 提示行）。
-     手机上把 textarea 收到 4 行以内、提示行收掉 —— 键盘弹起时可视区本来就矮，
-     输入区不该再吃掉三分之一屏。 */
-  .page.active[data-page="assistant"] .asst-ta-wrap textarea { max-height: 96px; }
-  .asst-composer-foot .hint { display: none; }
+  /* 输入区不该吃掉三分之一屏：手机上把文本域收到 4 行、底部说明行收掉。 */
+  .asst-composer textarea { max-height: 96px; }
+  .asst-footline { display: none; }
 
   /* 顶栏在窄屏已经换行（.asst-top 由 page-assistant.css 的 900px 断点处理），
      这里补一句：提示文案在手机上没信息量，占一行高度，收掉 */
   .asst-top .asst-top-hint { display: none; }
-  /* 模型选择 / 思考档：两个 pill 并排会超出，允许各占一行 */
-  .asst-picks { flex-wrap: wrap; gap: 6px; }
-  .asst-picks > * { flex: 1 1 auto; min-width: 0; }
   /* 建议问句（空态的四条）：整行铺开，点击区域够大 */
   .asst-suggests { width: 100%; }
   .asst-suggests > * { width: 100%; }

@@ -655,6 +655,14 @@ const BRIDGE_JS: &str = r#"
     // checkUpdate 走壳命令：当前版本号只有壳知道（后端是独立进程），
     // 由壳把版本带上去交给后端比较
     checkUpdate: () => invoke('check_update'),
+    // 设置页「版本信息」：一次取全（版本 / 环境 / 路径 / 开关 / 计数）。
+    // 桌面端另由壳命令补三件**只有壳知道**的事：运行时 package_info 版本
+    // （后端编译期常量在「装的是哪个包」这件事上不是权威）、WebView2 版本
+    // （界面白屏 / 渲染异常时它是决定性的）、是否 dev 构建。
+    // 与 `web_shim.rs` 的同名方法必须成对存在 —— 少一边时另一半形态会报
+    // 「桥接方法缺失」。
+    getSystemInfo: options =>
+      invoke('system_info', { hideUsername: options?.hideUsername === true }),
     // 最近一次「检查更新」的结果（定时任务写入；app.js 轮询它亮侧栏徽标）
     getUpdateStatus: () => call('GET', '/api/update/status'),
     // 「软件更新」的出网线路：null = 直连。更新面板「检查更新」左侧的下拉读写
@@ -694,17 +702,9 @@ const BRIDGE_JS: &str = r#"
       call('PUT', '/api/developer-role-compat', { developerRoleCompat: enabled === true }),
 
     // ── 机器人校验开关（登录 / 注册的 ALTCHA proof-of-work）──
-    // 与 getSanitize / saveSanitize 同形：GET 读、PUT 写，响应体就是新状态
-    //（`{captchaEnabled}`）。**与 web_shim.rs 的同名方法成对维护** ——
-    // 这一对最初只加了 web_shim 那一侧，桌面壳漏掉；症状比 getCors 那次更隐蔽：
-    // `loadCaptcha` 里是 `await shared().workbuddyDesktop?.getCaptchaSetting()`，
-    // 方法不存在时可选链让表达式得到 `undefined` 而**不抛错**，于是
-    // `captcha.available` 被判成 `true`、`enabled` 为 `false` —— 桌面端显示出
-    // 一个「可设置且当前关闭」的开关，点下去 `saveCaptchaSetting` 同样静默，
-    // 还会弹出「✅ 机器人校验已开启」的假成功提示。加方法比给类型补 `?` 正确：
-    // 端点（/api/captcha）在网关服务端，桌面壳本来就跑着同一个网关。
-    getCaptchaSetting: () => call('GET', '/api/captcha'),
-    saveCaptchaSetting: enabled => call('PUT', '/api/captcha', { captchaEnabled: enabled === true }),
+    // 见下面那组「机器人校验（两端各一个开关）」—— 本组已并入上游版本，
+    // 这里不再单独定义（曾因两侧各自新加一对同名方法而产生重复。
+    // 桌面壳与 web_shim.rs 必须成对维护）。
 
     // ── Cline 伪装头 ──
     // 与 getSanitize / saveSanitize 同形：GET 读（overrides + effective），
@@ -727,6 +727,25 @@ const BRIDGE_JS: &str = r#"
     getNotify: () => call('GET', '/api/notify'),
     saveNotify: payload => call('PUT', '/api/notify', payload || {}),
     testNotify: payload => call('POST', '/api/notify/test', payload || {}),
+    // ── 机器人校验（两端各一个开关）与面板账户（设置页「账户」分类）──
+    // 与 web_shim.rs 的同名方法逐字同形。此前这组只存在于网页桥：桌面端
+    // 读不到 `getCaptchaSetting`，设置页那张开关一直是置灰的（这也是它后来
+    // 从「安全」搬到「账户」的原因之一）。
+    getCaptchaSetting: () => call('GET', '/api/captcha'),
+    // patch 是 `{captchaDesktop?, captchaWeb?}`（部分更新）；旧签名传布尔值时
+    // 视为「两端一起改」，兼容还没刷新的界面缓存（旧 islands/ui.js）。
+    saveCaptchaSetting: patch =>
+      call(
+        'PUT',
+        '/api/captcha',
+        typeof patch === 'boolean' ? { captchaEnabled: patch } : (patch || {}),
+      ),
+    getPanelAccount: () => call('GET', '/api/panel/account'),
+    changePanelPassword: (oldPassword, newPassword) =>
+      call('POST', '/api/panel/change-password', {
+        oldPassword: String(oldPassword || ''),
+        newPassword: String(newPassword || ''),
+      }),
 
     // ── models.dev 模型元数据（能力位与逐模型思考档位）──
     // 与 web_shim.rs 的同名方法逐字同形（桌面壳走 Tauri IPC，网页端走同源
@@ -886,6 +905,16 @@ const BRIDGE_JS: &str = r#"
         username: String(username || '').trim(),
         password: String(password || ''),
       }),
+    // ── 面板会话（桌面端的登录通道，见 panel_session 模块头）──
+    // 窗口启动时查一次：未注册管理员 → 免登录直进主界面；注册过且当前没有
+    // 有效会话 → 加载登录页。登录页把拿到的令牌交给 panelSessionStore。
+    panelSessionStatus: () => invoke('panel_session_status'),
+    panelSessionStore: (accessToken, refreshToken) =>
+      invoke('panel_session_store', {
+        accessToken: String(accessToken || ''),
+        refreshToken: String(refreshToken || ''),
+      }),
+    panelSessionClear: () => invoke('panel_session_clear'),
     changeLanAccess: (enabled, panel) =>
       invoke('change_lan_access', { enabled: enabled === true, panel: panel === true }),
     localIp: () => invoke('local_ip'),
@@ -947,6 +976,19 @@ const BRIDGE_JS: &str = r#"
     // 系统对话框；参数名 includeLogs 必须与 Rust 侧 export_database 的形参一致
     exportDatabase: includeLogs => invoke('export_database', { includeLogs }),
     importDatabase: () => invoke('import_database'),
+
+    // ── 云同步（设置页「数据 → 云同步」）──
+    // 上传 / 下载要打外网传几 MB，通用 call 的 60 秒超时不够，所以这两条走
+    // 壳命令（`cloud_sync_upload` / `cloud_sync_download`，内部放宽到 300 秒）；
+    // 其余四条都是小请求，走通用 call 即可。
+    // 密码类字段传空串 = 沿用后端已保存的那份（见 api::cloud_sync 的模块头）。
+    getCloudSync: () => call('GET', '/api/cloud-sync'),
+    saveCloudSync: payload => call('PUT', '/api/cloud-sync', payload || {}),
+    testCloudSync: payload => call('POST', '/api/cloud-sync/test', payload || {}),
+    getCloudSyncRemote: () => call('GET', '/api/cloud-sync/remote'),
+    cloudSyncUpload: () => invoke('cloud_sync_upload'),
+    cloudSyncDownload: () => invoke('cloud_sync_download'),
+    importCloudSyncKey: password => invoke('cloud_sync_import_key', { password }),
   };
 })();
 "#;

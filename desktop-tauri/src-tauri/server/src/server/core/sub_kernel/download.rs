@@ -25,12 +25,19 @@
 //! 不做「校验失败但继续」的降级。
 //!
 //! ── 解压 ────────────────────────────────────────────────────
-//! Windows 资产是 zip（官方只出 zip），解压用系统 PowerShell 的
-//! `Expand-Archive`（不引第三方 zip 依赖树；PowerShell 5.1 起 Windows 自带）；
-//! macOS / Linux 资产是 .gz，用已在依赖树里的 flate2。解出的二进制统一改名
-//! 到 `kernel_binary_name()`（config / 状态文件引用固定名，不随版本漂移）。
+//! Windows 资产是 zip（官方只出 zip），解压用进程内的 [`super::zip`]（单条目
+//! 读取 + flate2）—— 不再 spawn PowerShell 的 `Expand-Archive`：那是外部
+//! 进程，会被 AppLocker / ExecutionPolicy 拒执行、被路径里的单引号弄坏命令、
+//! 也会命中杀软对「拉子进程 + 监听端口」的启发式（详见 zip.rs 模块头）。
+//! macOS / Linux 资产是裸 .gz，用已在依赖树里的 flate2。
+//!
+//! ── 落盘与安装（版本化）──────────────────────────────────────
+//! 下载写 `{kernelDir}/downloads/<资产名>.part`，**边下边算 sha256**（省掉
+//! 装完再读一遍几十 MB 的开销）；校验通过才由 [`super::layout`] 解压进
+//! `versions/<版本>/` 并原子切 `current` 指针。半截包在启动时清（见
+//! `layout::cleanup_residue`），失败路径也会当场删掉。
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -39,7 +46,7 @@ use serde_json::json;
 use crate::server::config;
 use crate::server::core::egress;
 use crate::server::core::proxies::{resolve_account_proxy, ProxyResolution, CLASH_MIXED_UID};
-use crate::server::core::sub_kernel::{kernel_binary_name, kernel_dir, log_line, KERNEL_VERSION};
+use crate::server::core::sub_kernel::{kernel_dir, log_line, KERNEL_VERSION};
 
 /// 下载请求的 UA（GitHub 不校验 UA，给个非空的便于排障）
 const USER_AGENT: &str = "agent2api";
@@ -94,7 +101,12 @@ pub async fn run_download() -> Result<DownloadOutcome, String> {
     };
     let dir = kernel_dir();
     std::fs::create_dir_all(&dir).map_err(|error| format!("创建内核目录失败: {error}"))?;
-    let archive_path = dir.join(asset);
+    // 半截包放 downloads/ 下的 .part：安装只看 versions/ 与 current 指针，
+    // 下载中的文件绝不会被当成「已装好的内核」
+    let download_dir = crate::server::core::sub_kernel::layout::download_dir();
+    std::fs::create_dir_all(&download_dir)
+        .map_err(|error| format!("创建下载目录失败（{}）: {error}", download_dir.display()))?;
+    let archive_path = download_dir.join(format!("{asset}.part"));
     let url = format!("https://github.com/MetaCubeX/mihomo/releases/download/{KERNEL_VERSION}/{asset}");
     log_line(&format!("⬇️ 开始下载代理内核 {KERNEL_VERSION}（{asset}）"));
 
@@ -105,10 +117,12 @@ pub async fn run_download() -> Result<DownloadOutcome, String> {
 
     // 依次试各出口（网络层失败才换；HTTP 状态码直接报）
     let mut last_error = String::new();
+    let mut actual = String::new();
     for (index, proxy) in candidates.into_iter().enumerate() {
         match download_to_file(&url, &archive_path, proxy.as_ref()).await {
-            Ok(()) => {
+            Ok(digest) => {
                 last_error.clear();
+                actual = digest;
                 break;
             }
             // 用户叫停：整次下载到此为止（不换线路、不往校验 / 解压走）
@@ -129,16 +143,23 @@ pub async fn run_download() -> Result<DownloadOutcome, String> {
         return Err(last_error);
     }
 
-    // sha256 校验（对不上整体拒绝，坏文件删掉）
-    let actual = file_sha256(&archive_path)?;
+    // sha256 校验（边下边算的；对不上整体拒绝，坏文件删掉）
     if !actual.eq_ignore_ascii_case(sha256) {
         let _ = std::fs::remove_file(&archive_path);
-        return Err("内核下载校验失败（sha256 与官方发布值不匹配），已删除坏文件".to_string());
+        return Err("内核下载校验失败（sha256 与官方发布值不符），已删除坏文件".to_string());
     }
 
-    // 解压安装（统一改名到固定名）
-    install_binary(&archive_path, &dir)?;
+    // 解压安装：解到 versions/.staging-* → 校验产物 → 原子切 current。
+    // 失败时**不动当前安装**（旧版本照常可用），只删暂存目录
+    let install = crate::server::core::sub_kernel::layout::install_from_archive(
+        &archive_path,
+        KERNEL_VERSION,
+    )?;
     let _ = std::fs::remove_file(&archive_path);
+    log_line(&format!(
+        "📦 内核已安装到 {}",
+        install.dir.to_string_lossy()
+    ));
     Ok(DownloadOutcome::Done)
 }
 
@@ -177,7 +198,7 @@ fn egress_candidates() -> Result<Vec<Option<crate::server::core::proxies::Resolv
     Ok(candidates)
 }
 
-/// 流式下载到文件，进度进快照（界面轮询渲染）。
+/// 流式下载到文件，进度进快照（界面轮询渲染）；**边下边算 sha256**，返回摘要。
 ///
 /// 不给总超时（几十 MB 的资产不可能在固定时限内下完）；卡死场景由
 /// egress 客户端的 read_timeout 兜底（与软件更新的下载同语义）。
@@ -185,7 +206,8 @@ async fn download_to_file(
     url: &str,
     path: &std::path::Path,
     proxy: Option<&crate::server::core::proxies::ResolvedProxy>,
-) -> Result<(), DownloadError> {
+) -> Result<String, DownloadError> {
+    use sha2::Digest;
     let client = egress::client_for(proxy);
     let response = client
         .get(url)
@@ -210,6 +232,7 @@ async fn download_to_file(
         .map_err(|error| DownloadError::Failed(format!("创建下载文件失败: {error}")))?;
     let mut stream = response.bytes_stream();
     use futures::StreamExt;
+    let mut hasher = sha2::Sha256::new();
     let mut received: u64 = 0;
     let mut next_report = PROGRESS_STEP;
     loop {
@@ -231,6 +254,7 @@ async fn download_to_file(
             chunk.map_err(|error| DownloadError::Failed(format!("下载中断: {error}")))?;
         file.write_all(&chunk)
             .map_err(|error| DownloadError::Failed(format!("写入下载文件失败: {error}")))?;
+        hasher.update(&chunk);
         received += chunk.len() as u64;
         if received >= next_report {
             next_report = received + PROGRESS_STEP;
@@ -240,24 +264,14 @@ async fn download_to_file(
     file.flush()
         .map_err(|error| DownloadError::Failed(format!("写入下载文件失败: {error}")))?;
     crate::server::core::sub_kernel::record_download_progress(received, total);
-    Ok(())
-}
-
-/// 文件的 sha256（流式读，不动内存里的整份文件）
-fn file_sha256(path: &std::path::Path) -> Result<String, String> {
-    use sha2::Digest;
-    let mut file =
-        std::fs::File::open(path).map_err(|error| format!("打开下载文件失败: {error}"))?;
-    let mut hasher = sha2::Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| format!("读取下载文件失败: {error}"))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
+    // 服务器给了 Content-Length 却没收够：这半截包校验必然不过，早点说清楚
+    if total > 0 && received != total {
+        return Err(DownloadError::Failed(format!(
+            "下载不完整（收到 {received} / {total} 字节）"
+        )));
+    }
+    if received == 0 {
+        return Err(DownloadError::Failed("下载到 0 字节（线路可能返回了空响应）".to_string()));
     }
     Ok(hasher
         .finalize()
@@ -266,89 +280,22 @@ fn file_sha256(path: &std::path::Path) -> Result<String, String> {
         .collect())
 }
 
-/// 解压安装：Windows zip 走 PowerShell Expand-Archive，unix .gz 走 flate2；
-/// 解出的二进制统一改名到 `kernel_binary_name()`。
-fn install_binary(archive_path: &std::path::Path, dir: &std::path::Path) -> Result<(), String> {
-    let binary_path = dir.join(kernel_binary_name());
-    // 旧二进制先删（Windows 上 rename 到已存在的目标会失败）
-    let _ = std::fs::remove_file(&binary_path);
-    #[cfg(windows)]
-    {
-        let extract_dir = dir.join("extract");
-        let _ = std::fs::remove_dir_all(&extract_dir);
-        std::fs::create_dir_all(&extract_dir)
-            .map_err(|error| format!("创建解压目录失败: {error}"))?;
-        let archive = archive_path.to_string_lossy().to_string();
-        let destination = extract_dir.to_string_lossy().to_string();
-        // powershell 也是控制台程序：桌面端不加 CREATE_NO_WINDOW 就会在解压那几秒
-        // 闪一个黑框（与内核进程本身同一个成因，见 runtime::start_kernel 的说明）
-        use std::os::windows::process::CommandExt;
-        let output = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                &format!("Expand-Archive -LiteralPath '{archive}' -DestinationPath '{destination}' -Force"),
-            ])
-            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-            .output()
-            .map_err(|error| format!("调用 PowerShell 解压失败: {error}"))?;
-        if !output.status.success() {
-            let _ = std::fs::remove_dir_all(&extract_dir);
-            return Err(format!(
-                "解压内核失败（{}）",
-                String::from_utf8_lossy(&output.stderr).trim().chars().take(200).collect::<String>()
-            ));
-        }
-        // 解出的 exe 名是 `mihomo-windows-amd64-<版本>.exe`，改名到固定名
-        let extracted = std::fs::read_dir(&extract_dir)
-            .map_err(|error| format!("读取解压目录失败: {error}"))?
-            .filter_map(|entry| entry.ok())
-            .find(|entry| {
-                let name = entry.file_name().to_string_lossy().to_lowercase();
-                name.starts_with("mihomo-") && name.ends_with(".exe")
-            })
-            .ok_or_else(|| "解压结果里没有内核二进制".to_string())?;
-        std::fs::rename(extracted.path(), &binary_path)
-            .map_err(|error| format!("安装内核失败: {error}"))?;
-        let _ = std::fs::remove_dir_all(&extract_dir);
-    }
-    #[cfg(not(windows))]
-    {
-        let archive = std::fs::File::open(archive_path)
-            .map_err(|error| format!("打开下载文件失败: {error}"))?;
-        let mut decoder = flate2::read::GzDecoder::new(archive);
-        let mut binary = std::fs::File::create(&binary_path)
-            .map_err(|error| format!("安装内核失败: {error}"))?;
-        std::io::copy(&mut decoder, &mut binary)
-            .map_err(|error| format!("解压内核失败: {error}"))?;
-        // 可执行位（unix 上从网络下载的二进制默认没有执行权限）
-        use std::os::unix::fs::PermissionsExt;
-        let _ = binary.set_permissions(std::fs::Permissions::from_mode(0o755));
-    }
-    Ok(())
-}
-
-/// 卸载内核：删掉整个内核目录（二进制 / `config.yaml` / `kernel-state.json` /
-/// `providers` 缓存 / 下载残留）。
+/// 卸载内核：摘掉 `current` 指针 → 删内核目录 → 删不掉的降级成回收位。
 ///
-/// ── 调用方必须先停内核进程 ───────────────────────────────────
-/// worker 的 Remove 分支先 `stop_kernel()`（等子进程退出）再进来：Windows 上
-/// 正在运行的可执行文件删不掉（共享冲突），而且「先停再删」本来也是更直白的语义。
+/// ── 与旧实现的关键区别 ──────────────────────────────────────
+/// 旧实现直接 `remove_dir_all`，进程没停干净就整个失败、界面报「文件被占用」。
+/// 现在第一步是摘指针（之后 `installed()` 立刻为 false），文件删不干净不影响
+/// 「内核已卸载」这个结论 —— 残留改名进 `.trash-*`，下次启动由
+/// `layout::cleanup_residue` 清。调用方仍应先停进程（`Command::Remove` 分支
+/// 已经这么做），但那只是为了让「一次删干净」成为常态，不再是成败前提。
 ///
 /// 目录不存在（重复点删除 / 从没装过）**按成功处理** —— 这个动作的目标状态是
-/// 「内核不在磁盘上」，它已经成立了。真删不掉才报错（被杀软或别的进程占着），
-/// 让界面能把原因说出来，而不是静默留一半文件。
+/// 「内核不在磁盘上」，它已经成立了。
 ///
 /// 只删内核自身：订阅（`core::subscriptions`）与账号引用都不在内核目录里，
 /// 不受影响 —— 订阅节点的端口回收见 `proxy_pool::unprovision_subscription_nodes`。
-pub fn uninstall() -> Result<(), String> {
-    let dir = kernel_dir();
-    if !dir.exists() {
-        return Ok(());
-    }
-    std::fs::remove_dir_all(&dir)
-        .map_err(|error| format!("删除内核目录失败（{}）：{error}", dir.display()))
+pub fn uninstall() -> Result<crate::server::core::sub_kernel::layout::UninstallOutcome, String> {
+    crate::server::core::sub_kernel::layout::uninstall()
 }
 
 /// 等待一段时间的辅助（下载重试之间用）

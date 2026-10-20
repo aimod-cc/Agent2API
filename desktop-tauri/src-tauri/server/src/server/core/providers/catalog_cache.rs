@@ -108,6 +108,19 @@ pub const SCOPE_OFFICEACE: &str = "officeace";
 
 /// 智谱清言（`chatglm.cn`）的模型目录缓存槽
 pub const SCOPE_CHATGLM: &str = "chatglm";
+/// AtomCode（AtomGit / GitCode）的模型目录缓存槽
+pub const SCOPE_ATOMCODE: &str = "atomcode";
+
+/// ModelScope（魔搭）**国内站**的模型目录缓存槽
+/// （`GET {推理域}/models`，OpenAI 格式目录）
+pub const SCOPE_MODELSCOPE_CN: &str = "modelscopeCn";
+/// ModelScope **国际站**（两个站点各一份清单 —— 实测两地各 36 条且内容不同，
+/// 缓存必须分开，否则先刷的那一站会把另一站的清单覆盖掉，
+/// 见 `providers::modelscope::region` 的模块头）
+pub const SCOPE_MODELSCOPE_INTL: &str = "modelscopeIntl";
+
+/// LobsterAI（网易有道「有道龙虾」）的模型目录缓存槽
+pub const SCOPE_LOBSTERAI: &str = "lobsterai";
 
 /// 千问办公（`gateway.qwenwork.cn/api/desktop/chat-modes`）的模型目录缓存槽。
 /// 单一域名、无地区之分（认证链复用 Qoder，但网关是自己的），所以单格。
@@ -141,6 +154,10 @@ pub const ALL_SCOPES: &[&str] = &[
     SCOPE_CHATGLM,
     SCOPE_QWENWORK,
     SCOPE_QCLAW,
+    SCOPE_MODELSCOPE_CN,
+    SCOPE_MODELSCOPE_INTL,
+    SCOPE_ATOMCODE,
+    SCOPE_LOBSTERAI,
 ];
 
 /// 一份清单缓存

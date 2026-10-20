@@ -525,6 +525,9 @@ pub fn save_client(client_id: &str, profiles: &[Profile]) -> Result<(), String> 
     let text = serde_json::to_string(&Value::Object(all))
         .map_err(|error| format!("配置序列化失败: {error}"))?;
     access::kv_put(KV_KEY, &text);
+    // `agentProfiles` 在云同步范围内，但它是保留键、不经过 `config::update`，
+    // 所以在这里显式通知（见 `cloud_sync::auto_sync` 模块头的两路触发说明）。
+    crate::server::core::cloud_sync::auto_sync::notify_change();
     Ok(())
 }
 

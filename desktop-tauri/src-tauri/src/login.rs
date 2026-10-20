@@ -661,7 +661,7 @@ fn allowed_hosts(provider: &str) -> Option<&'static [&'static str]> {
         // 见 `providers::officeace::oauth` 的模块头），所以这里没有 CodeArts 那种
         // loopback 回调要放行；但「不设限」仍是必须显式写出的选择（落进默认分支
         // 会拿到 WorkBuddy 的白名单 → 窗口白屏）。
-        //
+//
         // OrcaTerm（腾讯云遨驰终端）同样不设限：登录窗口开在官方 OAuth 授权页
         // （`orcaterm.com/oauth/authorize`），它会 302 到 `open.weixin.qq.com`
         // 的微信二维码（`qrconnect`），沿途还会拉 `res.wx.qq.com` 的样式与
@@ -675,6 +675,22 @@ fn allowed_hosts(provider: &str) -> Option<&'static [&'static str]> {
         "catpaw" | "qoder" | "qoder-intl" | "cline-free" | "cline-pass" | "autoclaw"
         | "autoclaw-intl" | "accio" | "accio-cn" | "zcode" | "zcode-intl" | "codearts" | "trae"
         | "kuku" | "antigravity" | "officeace" | "orcaterm" | "qwenwork" => None,
+        //
+        // AtomCode 同样不设限：授权页由代理给出（`acs.atomgit.com/auth/login`
+        // 换来的 `login_url`，实际落在 AtomGit 的账号站点上），之后会按用户选的
+        // 登录方式继续跳不可穷举的主机。**不用回本机** —— 凭证由网关**轮询代理**
+        // 取回（`auth/check` → `auth/token`，见 `providers::atomcode::oauth` 的
+        // 模块头），所以这里没有 loopback 回调要放行；但「不设限」仍是必须显式
+        // 写出的选择。
+        //
+        // LobsterAI 不设限，而且这一条**必须是 None**：它的授权页完成后会
+        // **302 回本机**（`http://127.0.0.1:<网关端口>/auth/callback`），那次
+        // 导航一旦被白名单拦下，症状就是用户明明授权成功、网关永远等不到码，
+        // 而日志里什么都看不出（与 CodeArts / Trae 的 loopback 回调同一情形）。
+        // 授权页本身在 `lobsterai.youdao.com`，沿途还可能有微信登录的第三方主机。
+        "catpaw" | "qoder" | "qoder-intl" | "cline-free" | "cline-pass" | "autoclaw"
+        | "autoclaw-intl" | "accio" | "accio-cn" | "zcode" | "zcode-intl" | "codearts" | "trae"
+        | "kuku" | "antigravity" | "officeace" | "orcaterm" | "atomcode" | "lobsterai" => None,
         // WorkBuddy 的两个地区共用这一张表（表里 `workbuddy.ai` 那一行就是国际站
         // 的登录域）。**显式列出**而不是靠下面的默认分支：上面那条警告要求
         // 「新 provider 落到默认分支」必须是有意的选择，写出来才看得出是选过的
@@ -876,6 +892,14 @@ fn normalize_provider(provider: &str) -> Result<&'static str, String> {
         // `http://127.0.0.1:<网关端口>/oauth/callback` 落回网关自己，所以窗口
         // **必须允许**导航到本机端口（见下面 allowed_hosts 的同一条）。
         "codearts" => Ok("codearts"),
+        // LobsterAI（网易有道「有道龙虾」）：授权地址由**后端适配器**现拼
+        // （门户的 hash 路由 + `redirect_uri` 指向网关自己那个 loopback 端口，
+        // 见 `providers::lobsterai::oauth::build_authorize_url`），壳侧只负责
+        // 开窗口与轮询 —— 与 CodeArts 同一条路。它的回调落在
+        // `http://127.0.0.1:<网关端口>/auth/callback`（**裸路径**，理由见
+        // `http.rs` 那条路由的注释），所以窗口**必须允许**导航到本机端口，
+        // 见下面 allowed_hosts 的同一条。
+        "lobsterai" => Ok("lobsterai"),
         // Trae（SOLO CN）：授权地址由**后端**问上游 guidance 拼（PKCE + 回调 URL），
         // 壳侧只负责开窗口与轮询 —— 与 ZCode 同一条路。特别地，它的回调落在
         // `http://127.0.0.1:<随机端口>/authorize`（网关自己监听的那台 loopback，
@@ -906,6 +930,17 @@ fn normalize_provider(provider: &str) -> Result<&'static str, String> {
         // `orcaterm://oauth_callback?session_id=…` 交回网关换令牌
         // （见 `start_orcaterm` 与 `providers/orcaterm/login.rs` 的模块头）。
         "orcaterm" => Ok("orcaterm"),
+        // AtomCode（AtomGit / GitCode）：授权地址由**后端适配器**向代理现取
+        // （`providers::atomcode::oauth`），壳侧只负责开窗口与轮询 —— 与
+        // ZCode / OfficeAce 同一条路。它的授权回调由代理自己在
+        // `acs.atomgit.com/callback` 终结、**永远不回到本机**，授权结果由网关
+        // 轮询代理判定（`auth/check` → `auth/token`），所以窗口最后停在代理页上
+        // 也不影响登录判定，壳侧既不用捕获自定义协议也不用转交回调。
+        //
+        // **这一条不能少**：前端（`add-account-configs.ts` 的 ATOMCODE）早就把
+        // 「网页登录」按钮画出来了，缺了它点下去就是
+        // 「登录失败：不支持网页登录的提供商：atomcode」。
+        "atomcode" => Ok("atomcode"),
         other => Err(format!("不支持网页登录的提供商：{other}")),
     }
 }
@@ -1233,6 +1268,10 @@ pub async fn start(
         // 账号的两级入口，不是两个地区，见 accounts-domain 的注释），品牌名里
         // 不需要地区
         "qwenwork" => "千问办公",
+        "lobsterai" => "LobsterAI",
+        // AtomCode 只有一家（AtomGit / GitCode 的编码 Agent，没有地区/版本概念），
+        // 品牌名里不需要地区
+        "atomcode" => "AtomCode",
         _ => "WorkBuddy",
     };
     // 窗口标题：Cline 两家的池、ZCode 两家的地区、CodeArts / Trae / OfficeAce
@@ -1242,6 +1281,7 @@ pub async fn start(
         provider,
         "cline-free" | "cline-pass" | "zcode" | "zcode-intl" | "codearts" | "trae" | "qoder"
         | "qoder-intl" | "antigravity" | "officeace" | "qwenwork"
+        | "qoder-intl" | "antigravity" | "officeace" | "lobsterai" | "atomcode"
     ) {
         format!("登录 {provider_label} 账号")
     } else {

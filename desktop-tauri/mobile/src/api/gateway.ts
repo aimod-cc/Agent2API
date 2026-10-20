@@ -168,7 +168,14 @@ export type RequestPage = {
 }
 
 export function fetchRequests(
-  params: { offset?: number; limit?: number; status?: 'ok' | 'error'; model?: string; provider?: string },
+  params: {
+    offset?: number
+    limit?: number
+    /** 后端只认这三个值，其余忽略（见 report::normalize_status_filter） */
+    status?: 'ok' | 'error' | 'running'
+    model?: string
+    provider?: string
+  },
   signal?: AbortSignal,
 ): Promise<RequestPage> {
   const query = new URLSearchParams()
@@ -237,8 +244,16 @@ export type CheckinCenter = {
     todayEligible?: number
   }
   extras?: {
-    onboarding?: Array<{ id?: string; name?: string; provider?: string }>
-    plans?: Array<{ id?: string; name?: string; provider?: string; claimAt?: number }>
+    /** 新手福利：`settled` 非空 = 一次性福利已结清（零上游即可渲染） */
+    onboarding?: Array<{ id?: string; name?: string; provider?: string; settled?: unknown }>
+    /** ZCode 活动套餐：`claimPlans` 是本地领取台账 `{planId: 毫秒}` */
+    plans?: Array<{
+      id?: string
+      name?: string
+      provider?: string
+      claimAt?: number | null
+      claimPlans?: Record<string, number> | null
+    }>
   }
   auto?: { enabled?: boolean; time?: string; providers?: string[] }
   history?: Array<{
@@ -260,6 +275,138 @@ export function fetchCheckinCenter(signal?: AbortSignal): Promise<CheckinCenter>
 /** 批量签到（不带 id = 全部可签账号） */
 export function runCheckin(id?: string): Promise<unknown> {
   return apiCall('/api/accounts/checkin', { method: 'POST', body: id ? { id } : {} })
+}
+
+/* ─── 新手福利（一次性任务） ─────────────────────── */
+
+export type OnboardingTask = {
+  key?: string
+  title?: string
+  group?: string
+  points?: number
+  done?: boolean
+  blocked?: boolean
+}
+
+export type OnboardingStatus = {
+  tasks?: OnboardingTask[]
+  earned?: number
+  total?: number
+  unclaimed?: number
+  /** 一次性福利已全部结清：界面此后按本地记忆渲染，不再查上游 */
+  settled?: boolean
+  settledAt?: number | null
+  /** OfficeAce 之类会回一句「本次到账 N 积分」，有就优先显示它 */
+  message?: string
+}
+
+/**
+ * 新手福利任务状态。
+ *
+ * `refresh = true` 才真的去问上游（桌面端「查询任务」那颗按钮的语义）；
+ * 平时走服务端的结算记忆，零上游请求。
+ */
+export function fetchOnboarding(id: string, refresh = false): Promise<OnboardingStatus> {
+  const suffix = refresh ? '?refresh=1' : ''
+  return apiCall<OnboardingStatus>(`/api/accounts/${encodeURIComponent(id)}/onboarding${suffix}`)
+}
+
+export type OnboardingClaimResult = OnboardingStatus & {
+  results?: Array<{ key?: string; ok?: boolean; already?: boolean; error?: string }>
+  claimed?: number
+  failed?: number
+  claimedPoints?: number
+}
+
+/** 一键领取全部未完成的新手任务（服务端幂等，重复点不会重复加分） */
+export function claimOnboarding(id: string): Promise<OnboardingClaimResult> {
+  return apiCall<OnboardingClaimResult>(`/api/accounts/${encodeURIComponent(id)}/onboarding/claim`, {
+    method: 'POST',
+    body: {},
+  })
+}
+
+/* ─── ZCode 活动套餐 ─────────────────────────────── */
+
+export type ZcodePlan = {
+  planId?: string
+  name?: string
+  description?: string
+  priority?: number
+  startsAt?: number
+  endsAt?: number
+  entitlements?: Array<{
+    showName?: string
+    unitType?: string
+    grantUnits?: number
+    period?: string
+    effectiveAt?: number
+  }>
+}
+
+export type ZcodePreview = {
+  plans?: ZcodePlan[]
+  /** false = 上游活动接口还没部署（活动未开始，不是错误） */
+  deployed?: boolean
+  activated?: boolean | null
+  activationError?: string | null
+}
+
+/** 探测可领套餐（只读；列表为空时后端会补报一次激活事件再重探） */
+export function previewZcodePlans(id: string): Promise<ZcodePreview> {
+  return apiCall<ZcodePreview>(`/api/accounts/${encodeURIComponent(id)}/zcode-claim/preview`, {
+    method: 'POST',
+    body: {},
+  })
+}
+
+export type ZcodeCaptchaConfig = {
+  enabled?: boolean
+  prefix?: string
+  sceneId?: string
+  region?: string
+  skipModelRequest?: boolean
+}
+
+/** 上游此刻要不要滑块验证码（不要就别弹） */
+export function fetchZcodeCaptchaConfig(id: string): Promise<ZcodeCaptchaConfig> {
+  return apiCall<ZcodeCaptchaConfig>(
+    `/api/accounts/${encodeURIComponent(id)}/zcode-claim/captcha-config`,
+    { method: 'POST', body: {} },
+  )
+}
+
+export type ZcodeClaimResult = {
+  ok?: boolean
+  planId?: string
+  startsAt?: number
+  endsAt?: number
+  claimedAt?: number
+  /** 失败语义键：already_claimed / quota_exhausted / captcha … */
+  failure?: string
+  /** 后端归一过的中文失败原因（界面直接显示，不再自己写一套） */
+  failureLabel?: string
+  code?: number
+  message?: string
+  failureEndsAt?: number
+  activated?: boolean | null
+  activationError?: string | null
+}
+
+/**
+ * 领取一份套餐。
+ *
+ * 注意失败也走 200（`ok: false` + `failure`）——「已领过」「额度用尽」都是
+ * 正常业务结果，不是 HTTP 错误，所以调用方要读 `ok` 而不是只 catch。
+ */
+export function claimZcodePlan(
+  id: string,
+  payload: { planId?: string; captchaVerifyParam?: string; captchaRegion?: string },
+): Promise<ZcodeClaimResult> {
+  return apiCall<ZcodeClaimResult>(`/api/accounts/${encodeURIComponent(id)}/zcode-claim`, {
+    method: 'POST',
+    body: payload,
+  })
 }
 
 /* ─── 模型管理 ─────────────────────────────────── */
@@ -340,13 +487,18 @@ export type PoolItem = {
   port?: number
   address?: string
   lastTest?: { at?: number; success?: boolean; ip?: string; error?: string } | null
-  usedBy?: number
+  /** 引用它的账号（后端带的是**数组**，桌面端同一字段也是这个形状） */
+  usedBy?: Array<{ id?: string; name?: string; enabled?: boolean }>
+  /** 孤儿订阅节点：所属订阅已不存在（后端标注） */
+  orphan?: boolean
   [key: string]: unknown
 }
 
 export type PoolPayload = {
   items?: PoolItem[]
   clash?: { available?: boolean; error?: string | null; options?: unknown[] }
+  /** 内核装没装：订阅节点没有端口时的首要成因（没内核就没有监听器） */
+  kernelInstalled?: boolean
 }
 
 export function fetchProxyPool(signal?: AbortSignal): Promise<PoolPayload> {
@@ -419,4 +571,91 @@ export function fetchAgents(signal?: AbortSignal): Promise<{ clients?: AgentClie
 
 export function restoreAgentClient(id: string): Promise<unknown> {
   return apiCall('/api/agents/restore', { method: 'POST', body: { id } })
+}
+
+/* ─── 账号余额 ─────────────────────────────── */
+
+export type UsageRow = {
+  id?: string
+  name?: string | null
+  /** 后端按家给不同形状；前端只读其中几个通用键，故用 Record */
+  usage?: Record<string, unknown> | null
+  error?: string | null
+  code?: string | number | null
+  /** 这一行的结论时刻（毫秒） */
+  at?: number
+}
+
+export type UsageSnapshot = {
+  /** 全部行里最新的结论时刻 */
+  at?: number
+  results?: UsageRow[]
+  skipped?: number
+}
+
+/** 最近一次查询结果的快照（只读记录表，不触发上游查询） */
+export function fetchUsageSnapshot(signal?: AbortSignal): Promise<UsageSnapshot> {
+  return apiCall<UsageSnapshot>('/api/accounts/usage/snapshot', { signal })
+}
+
+/** 手动查询单个账号余额（会真的打上游，可能慢） */
+export function fetchAccountUsage(id: string): Promise<{ results?: UsageRow[]; skipped?: number }> {
+  return apiCall<{ results?: UsageRow[]; skipped?: number }>(
+    `/api/accounts/usage?id=${encodeURIComponent(id)}`,
+  )
+}
+
+/** 改备注名（后端 PATCH 支持 name 字段，空串会被 400 拒绝） */
+export function renameAccount(id: string, name: string): Promise<unknown> {
+  return apiCall(`/api/accounts/${encodeURIComponent(id)}`, { method: 'PATCH', body: { name } })
+}
+
+/** 清除限流标记；不传 model = 清除该账号全部模型 */
+export function clearAccountRateLimits(id: string, model?: string): Promise<unknown> {
+  return apiCall(`/api/accounts/${encodeURIComponent(id)}/rate-limits/clear`, {
+    method: 'POST',
+    body: model ? { model } : {},
+  })
+}
+
+/** 把账号设为全局队列第一位（设为首选） */
+export function promoteAccount(id: string): Promise<unknown> {
+  return apiCall('/api/accounts/current', { method: 'POST', body: { id } })
+}
+
+/* ─── 签到记录 ─────────────────────────────── */
+
+export type CheckinRecordRow = {
+  rowId?: number
+  ts?: number
+  /** 北京时间的自然日 */
+  date?: string
+  /** schedule / startup / manual / single / activity */
+  source?: string
+  reason?: string
+  accountId?: string
+  accountName?: string
+  provider?: string
+  /** success / already / pending / failed */
+  outcome?: string
+  ok?: boolean
+  message?: string | null
+  error?: string | null
+  keptActive?: boolean
+}
+
+export type CheckinRecordPage = { records?: CheckinRecordRow[]; total?: number }
+
+export function fetchCheckinRecords(
+  params: { limit?: number; offset?: number; outcome?: string; provider?: string; keyword?: string; start?: number },
+  signal?: AbortSignal,
+): Promise<CheckinRecordPage> {
+  const query = new URLSearchParams()
+  if (params.offset) query.set('offset', String(params.offset))
+  query.set('limit', String(params.limit ?? 50))
+  if (params.outcome) query.set('outcome', params.outcome)
+  if (params.provider) query.set('provider', params.provider)
+  if (params.keyword) query.set('keyword', params.keyword)
+  if (params.start) query.set('start', String(params.start))
+  return apiCall<CheckinRecordPage>(`/api/checkin-records?${query.toString()}`, { signal })
 }

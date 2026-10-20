@@ -22,10 +22,15 @@
 //!      给它的是中性拒绝而不是错误；
 //!   3. `summer_day_*` 是限时活动，活动下线后状态接口恒回「未开启」。
 //!
-//! ── 访客一律跳过（实测 401 `user needs login`）────────────────
-//! 所以两个 claim 都先判凭证形态：访客直接给**中性未领取**（`success: false`
-//! 但不是错误）—— 与 Qoder 国际版 / Trae 那些「不该算失败」的格子同一处置，
-//! 免得自动签到把「访客本来就没得签」反复记成失败。
+//! ── 访客账号**不在签到范围**（2026-10；实测 401 `user needs login`）──
+//! 访客没有积分体系，上面那几条接口对访客一律 401 —— 所以它由签到范围判定
+//! 直接排除（`billing::checkin::supports_checkin` 的 `isGuest` 分支），在
+//! 签到中心按「不参与每日签到」列出原因，不会进入本链。
+//!
+//! 本文件里的访客分支因此是**纵深防御**：凭证形态判定的判据（先看记录里的
+//! `isGuest`、再退读 JWT 声明）与排除用的是同一份，只要范围判定改了、或
+//! 有人绕过 `run_checkin` 直接调这两个入口，这里的守卫保证返回值仍是**中性
+//! 未领取**（`success: false` 但不是错误），而不是一个假的「领取成功」。
 //!
 //! ── 返回形状（`billing::checkin` 的契约）──────────────────────
 //! `{success, msg}` —— 与 WorkBuddy / 小浣熊 / AutoClaw / Qoder / Loomy /
@@ -42,7 +47,10 @@ use crate::server::logging;
 
 use super::{credentials, endpoints, http};
 
-/// 访客的中性结果（不是失败：访客本来就没有积分体系）
+/// 访客的中性结果（不是失败：访客本来就没有积分体系）。
+///
+/// 正常情况下走不到这里（访客已被签到范围排除，见模块头）；保留是为了
+/// 绕过范围判定直接调用时仍给出如实答复，而不是报到上游去换一个 401。
 fn guest_result() -> Value {
     json!({
         "success": false,
@@ -50,7 +58,7 @@ fn guest_result() -> Value {
     })
 }
 
-/// 取凭证并判形态；访客返回 `None`（调用方给中性结果）
+/// 取凭证并判形态；访客返回 `None`（调用方给中性结果，见 `guest_result`）
 async fn login_credentials(
     store: &AccountStore,
     account_id: &str,

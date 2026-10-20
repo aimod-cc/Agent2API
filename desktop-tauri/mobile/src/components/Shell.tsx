@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Icon, type IconName } from './Icon'
 import { useStore, store } from '../state/store'
 import { LoginPage } from '../pages/LoginPage'
+import { isRateLimited } from '../lib/format'
 import { t } from '../i18n'
 
 /**
@@ -25,11 +26,54 @@ const TABS: TabDef[] = [
 /** 一级页集合：这些 screen 显示底部标签栏 */
 export const PRIMARY_SCREENS = new Set(TABS.map(tab => tab.id))
 
+/**
+ * 软键盘是否弹起。
+ *
+ * ── 为什么需要这个判断 ────────────────────────────────────────
+ * Android 的 `adjustResize` 会让 WebView 随键盘一起缩小，标签栏是 flex 布局
+ * 的最后一个子项，于是它被顶到键盘正上方 —— 用户看到的是「输入框 + 一条
+ * 导航栏 + 键盘」，而他要的是「输入框 + 键盘」。聊天类应用的通行做法就是
+ * 键盘弹起时把标签栏收起来（WhatsApp / Telegram 都是这样）。
+ *
+ * ── 怎么判 ────────────────────────────────────────────────────
+ * `visualViewport` 的高度比 `innerHeight` 小出一大截（> 120px）就是键盘在
+ * 占位。阈值取 120 而不是 0：移动浏览器的地址栏收起 / 展开也会让两者差几十
+ * 像素，那是正常滚动，不该把标签栏闪一下。
+ *
+ * 没有 `visualViewport` 的老 WebView 直接返回 false —— 标签栏常驻，行为与
+ * 改动前一致，不会因为拿不到 API 就少一条导航。
+ */
+export function useKeyboardOpen(): boolean {
+  const [open, setOpen] = useState(false)
+
+  useEffect(() => {
+    const viewport = window.visualViewport
+    if (!viewport) return
+    const threshold = 120
+    const check = () => {
+      const covered = window.innerHeight - viewport.height - viewport.offsetTop
+      setOpen(covered > threshold)
+    }
+    viewport.addEventListener('resize', check)
+    viewport.addEventListener('scroll', check)
+    check()
+    return () => {
+      viewport.removeEventListener('resize', check)
+      viewport.removeEventListener('scroll', check)
+    }
+  }, [])
+
+  return open
+}
+
 export function TabBar() {
   const state = useStore()
+  const keyboardOpen = useKeyboardOpen()
   const active = state.stack.length === 0 ? state.route.screen : ''
   if (!PRIMARY_SCREENS.has(state.route.screen) || state.stack.length > 0) return null
-  const limited = state.session?.accounts?.accounts?.filter(a => a.enabled && hasRateLimit(a)).length || 0
+  // 键盘弹起时让位：那一条高度留给输入框，而不是导航
+  if (keyboardOpen) return null
+  const limited = state.session?.accounts?.accounts?.filter(a => a.enabled && isRateLimited(a)).length || 0
   return (
     <nav className='m-tabbar' aria-label={t('主导航')}>
       {TABS.map(tab => (
@@ -48,10 +92,6 @@ export function TabBar() {
       ))}
     </nav>
   )
-}
-
-function hasRateLimit(account: { rateLimits?: Record<string, unknown> }): boolean {
-  return Boolean(account.rateLimits && Object.keys(account.rateLimits).length)
 }
 
 /** 轻提示 */
@@ -83,7 +123,15 @@ export function AuthGate() {
   const [busy, setBusy] = useState(false)
   if (!state.authLost) return null
 
-  // 打包形态走应用内登录页（login / key 两种模式它都覆盖）
+  /**
+   * APK 里登录页是整屏的，用户被登出后看不到「设置 → 服务器」。
+   * 登录页给了「换一台服务器」入口，它把用户压进服务器页 —— 这一屏必须让开，
+   * 否则登录页盖住整个界面，列表点不到。authLost 故意不清：用户取消返回后
+   * 登录页会重新盖上来，换到新服务器也会按新地址重新弹。
+   */
+  if (state.packaged && state.route.screen === 'servers') return null
+
+  // 打包形态走整屏的应用内登录页（login / key 两种模式它都覆盖）
   if (state.packaged) return <LoginPage mode={state.authLost} />
 
   const submit = async () => {

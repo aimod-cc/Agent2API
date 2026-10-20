@@ -332,6 +332,31 @@ pub async fn login_start(State(state): State<ServerState>, body: Bytes) -> Respo
         return ok_json(json!({ "state": task_state, "authUrl": auth_url,
             "edition": task_edition, "provider": "officeace" }));
     }
+    // AtomCode（AtomGit / GitCode）：**服务端中介的轮询登录**（与 OfficeAce /
+    // ZCode 同一形态，见 `core::login::atomcode` 的模块头）—— 授权地址由本进程
+    // 向代理现取，用户在浏览器里登完，后台任务**轮询代理**判完成并取令牌，
+    // **不需要壳侧开回调监听**（AtomCode 的回调由代理自己在
+    // `acs.atomgit.com/callback` 终结，永远不回到本机）。
+    // 响应形状与另外几条登录链一致（`{state, authUrl, edition, provider}`）。
+    if kind == crate::server::core::providers::ProviderKind::Atomcode {
+        let handle = match state.login().start_atomcode_login() {
+            Ok(handle) => handle,
+            Err(error) => return management_error(400, error),
+        };
+        let (task_state, auth_url, task_edition) = match state
+            .login()
+            .wait_for_auth_url(&handle, Duration::from_millis(AUTH_URL_WAIT_MS))
+            .await
+        {
+            Ok(values) => values,
+            Err(error) => {
+                logging::log("[Login]", &format!("❌ 发起 AtomCode 登录失败: {error}"));
+                return management_error(502, error);
+            }
+        };
+        return ok_json(json!({ "state": task_state, "authUrl": auth_url,
+            "edition": task_edition, "provider": "atomcode" }));
+    }
     // Cline：**设备授权登录**（WorkOS RFC 8628）。形态上介于「网页登录」与
     // 「Qoder 设备授权」之间：同步问上游要 user_code 与授权页地址（一次 POST），
     // 把地址交给界面打开；用户确认后由后台任务轮询换令牌。
@@ -1261,6 +1286,37 @@ fn oauth_callback_page(status: i32, message: &str) -> Response {
 /// 因此直接按它查任务表即可（与 AutoClaw 的「变体匹配 + 最近发起」不同）。
 ///
 /// 响应是给人看的 HTML（浏览器停在这一页），不走 `ok_json` 那套信封。
+// ─── /auth/callback（LobsterAI 的 loopback 回调）─────────────
+
+/// LobsterAI 网页登录的回调。**浏览器 302 到这里**（授权页完成后顶层导航回我们
+/// 交给上游门户的 `redirect_uri`，查询串带 `code` / `state`）。
+///
+/// 路径是裸 `/auth/callback`（与别家带家名后缀的风格不一致）——理由见
+/// `http.rs` 里那条路由的注释：`redirect_uri` 是我们给门户的，而门户是否对
+/// 回调路径有白名单没有实测支撑，所以跟随参考实现那条已验证的形状。
+///
+/// 免鉴权的理由与 accio / autoclaw / codearts / antigravity 四条 loopback 回调
+/// 同一句：调用方是**用户的浏览器**，它当然没有我们的 API Key；安全性由本次
+/// 登录任务生成的一次性 `state` 承担（见 `core::login::lobsterai`）。
+pub async fn login_lobsterai_callback(
+    State(state): State<ServerState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let code = params.get("code").cloned().unwrap_or_default();
+    let task_state = params.get("state").cloned().unwrap_or_default();
+    if let Some(error) = params.get("error").filter(|value| !value.trim().is_empty()) {
+        return oauth_callback_page(400, &format!("登录失败：授权被拒绝（{error}）"));
+    }
+    match state.login().finish_lobsterai_login(&code, &task_state).await {
+        Ok(_) => oauth_callback_page(200, "登录成功，已返回网关，可以关闭此页面。"),
+        Err(error) => {
+            // 这一轮已经作废：把 pending 也丢掉，免得留在表里等超时
+            state.login().drop_lobsterai_pending(&task_state);
+            oauth_callback_page(error.status_code, &format!("登录失败：{}", error.message))
+        }
+    }
+}
+
 pub async fn login_accio_callback(
     State(state): State<ServerState>,
     Query(params): Query<std::collections::HashMap<String, String>>,

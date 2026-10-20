@@ -83,16 +83,21 @@ fn write_raw(value: &Value) -> Result<(), String> {
         return Err("设置数据库不可用".to_string());
     };
     let text = serde_json::to_string(value).map_err(|error| format!("编码代理设置失败: {error}"))?;
-    db.with(|conn| {
-        conn.execute(
-            "INSERT INTO kv (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            rusqlite::params![KV_KEY, text],
-        )
-        .map(|_| ())
-        .map_err(|error| format!("保存代理设置失败: {error}"))
-    })
-    .ok_or_else(|| "设置数据库不可用".to_string())?
+    let written = db
+        .with(|conn| {
+            conn.execute(
+                "INSERT INTO kv (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![KV_KEY, text],
+            )
+            .map(|_| ())
+            .map_err(|error| format!("保存代理设置失败: {error}"))
+        })
+        .ok_or_else(|| "设置数据库不可用".to_string())?;
+    written?;
+    // 保留键不走 `config::update`，显式通知自动同步（见 cloud_sync::auto_sync）
+    crate::server::core::cloud_sync::auto_sync::notify_change();
+    Ok(())
 }
 
 /// 端口字段 → 合法的 u16（数字或数字字符串；与 proxy_pool 的 valid_port 同口径）

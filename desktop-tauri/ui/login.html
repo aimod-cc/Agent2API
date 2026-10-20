@@ -164,7 +164,17 @@
         } catch (e) { /* 隐私模式等：存不了就只能依赖 cookie */ }
       }
 
-      // ── 会话传输探测：cookie 在本环境能不能往返 ─────────────────
+      // ── 桌面形态（Tauri 壳内）──────────────────────────────────
+      // 桌面窗口的页面源是 `tauri://localhost`，网关在 `127.0.0.1:{port}` ——
+      // 跨源，登录响应的 HttpOnly cookie 到不了网关，cookie 通道在这里**必然**
+      // 不可用。所以桌面形态固定走「令牌进响应体 + 交给壳保管」这条通道：
+      // 登录成功后 `panelSessionStore` 把令牌加密写进桌面设置，壳之后每个管理
+      // 请求自动带 `x-panel-token` 头（见 panel_session）。
+      // 定义**必须**在 headerMode 之前：下面的探测在桌面形态下整段跳过。
+      var desktop = window.workbuddyDesktop && window.workbuddyDesktop.platform !== 'web'
+        ? window.workbuddyDesktop
+        : null;
+
       // fnOS docker 管理页这类宿主中转入口会把 Set-Cookie/Cookie 掐掉。
       // 服务端种**两枚**探针 cookie（`/api/panel/cookie-probe` 连打
       // 两发，第二发两枚都读得回 = roundtrip:true）。探测通过 → 纯 cookie
@@ -177,13 +187,15 @@
       // 对得上），登录却弹回 —— 它把两条拼成一条逗号分隔的，`Path=/` 因此
       // 降级成一个名叫 `path` 的 cookie（回带名单里 path|domain|max-age|
       // expires|session|version 那几项就是碎片），新会话没按 `/` 存进罐子。
-      var headerMode = false;
+      var headerMode = !!desktop;
       // 探针改**值比对**：cookie 按主机算、不分端口 —— 从 fnOS（:5666）中转
       // 进来时，浏览器会把直连 :3065 时存下的**旧探针**一起带上；只判「有没
       // 有」会被它骗成「通道完好」（实测弹回登录页）。所以第一发记住服务端
       // 刚发的值，第二发用 ?expect= / ?expect-b= 让服务端比对 —— 旧探针的值
       // 对不上才算不通。两发都用 POST：与登录同动词，防中转按方法区别对待 Set-Cookie。
-      var probeDone = fetch('/api/panel/cookie-probe?step=1', { method: 'POST', cache: 'no-store' })
+      var probeDone = desktop
+        ? Promise.resolve()
+        : fetch('/api/panel/cookie-probe?step=1', { method: 'POST', cache: 'no-store' })
         .then(function (resp) { return resp.json(); })
         .then(function (payload) {
           var data = payload && payload.data;
@@ -219,10 +231,20 @@
         var next = '';
         try { next = new URLSearchParams(window.location.search).get('next') || ''; } catch (e) { /* 老浏览器 */ }
         if (next === '/m') return '/m?from=login';
+        // 桌面壳内：回到应用自己的界面（tauri://localhost/index.html）
+        if (desktop) return '/index.html';
         return '/?from=login';
       }
 
+      // 已登录探测：桌面形态问壳（它会用存好的令牌真的打一次 /api/session，
+      // 顺带完成续期）；网页端照旧带头打一次。
       (function () {
+        if (desktop && typeof desktop.panelSessionStatus === 'function') {
+          desktop.panelSessionStatus().then(function (state) {
+            if (state && state.authenticated) window.location.href = postLoginTarget();
+          }).catch(function () { /* 未登录，留在本页 */ });
+          return;
+        }
         var headers = {};
         var token = readPanelToken('access');
         if (token) {
@@ -297,10 +319,18 @@
             if (data && typeof data.accessToken === 'string' && data.accessToken
               && typeof data.refreshToken === 'string' && data.refreshToken) {
               storePanelTokens(data.accessToken, data.refreshToken);
+              // 桌面形态：令牌同时交给壳（加密落盘），之后每个管理请求由壳自动
+              // 带上 —— 浏览器 localStorage 在 tauri:// 下也读得到，但壳重启后
+              // 只有它自己存的那份还在（见 panel_session）。
+              if (desktop && typeof desktop.panelSessionStore === 'function') {
+                desktop.panelSessionStore(data.accessToken, data.refreshToken)
+                  .catch(function () { /* 存不进：本次会话仍可用，下次启动重新登录 */ });
+              }
             }
             // `from=login` 的作用见上面「已登录探测」那段：中转环境里会话只在
             // localStorage 的请求头里，顶层导航带不上，服务端据此放行这一趟。
             // 手机端来的请求带 `?next=/m`，回手机面板（见 postLoginTarget）。
+            // 桌面壳内没有服务端那道导航判定（页面来自 tauri://），直接回主界面。
             window.location.href = postLoginTarget();
             return;
           }

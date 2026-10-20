@@ -87,16 +87,21 @@ fn write_items(items: &[Value]) -> Result<(), String> {
     let db = database()?;
     let text = serde_json::to_string(&json!({ "items": items }))
         .map_err(|error| format!("编码订阅失败: {error}"))?;
-    db.with(|conn| {
-        conn.execute(
-            "INSERT INTO kv (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            rusqlite::params![KV_KEY, text],
-        )
-        .map(|_| ())
-        .map_err(|error| format!("保存订阅失败: {error}"))
-    })
-    .ok_or_else(|| "订阅数据库不可用".to_string())?
+    let written = db
+        .with(|conn| {
+            conn.execute(
+                "INSERT INTO kv (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![KV_KEY, text],
+            )
+            .map(|_| ())
+            .map_err(|error| format!("保存订阅失败: {error}"))
+        })
+        .ok_or_else(|| "订阅数据库不可用".to_string())?;
+    written?;
+    // 保留键不走 `config::update`，显式通知自动同步（见 cloud_sync::auto_sync）
+    crate::server::core::cloud_sync::auto_sync::notify_change();
+    Ok(())
 }
 
 // ─── 正规化与校验 ───────────────────────────────────────────
@@ -401,6 +406,36 @@ pub fn ids() -> std::collections::HashSet<String> {
         .iter()
         .map(|item| text_of(item, "id"))
         .collect()
+}
+
+/// 与 [`ids`] 同义，但**区分「读不到」与「确实为空」**。
+///
+/// 调用方是代理池的孤儿清理（`proxy_pool::prune_orphan_subscription_items`）：
+/// 它会删掉 providerId 不在集合里的镜像条目。若拿 `read_items()` 那种「读失败
+/// 也返回空表」的口径去喂它，一次读库异常就会把**全部**订阅节点判成孤儿清掉
+/// —— 那是不可逆的数据丢失。所以清理路径必须走这里：`Err` 时调用方跳过清理。
+pub fn live_ids() -> Result<std::collections::HashSet<String>, String> {
+    let db = database()?;
+    let raw = db
+        .with(|conn| {
+            conn.query_row("SELECT value FROM kv WHERE key = ?1", [KV_KEY], |row| {
+                row.get::<_, String>(0)
+            })
+            .ok()
+        })
+        .ok_or_else(|| "订阅数据库繁忙".to_string())?;
+    // 没有记录 = 一条订阅都还没有（正常状态，不是错误）
+    let Some(raw) = raw else {
+        return Ok(std::collections::HashSet::new());
+    };
+    // 有记录但解析不出来 = 存储坏了：**不能**当成空表，否则上面那个误删又回来了
+    let value: Value = serde_json::from_str(&raw)
+        .map_err(|error| format!("订阅数据解析失败: {error}"))?;
+    let items = value
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "订阅数据形状异常".to_string())?;
+    Ok(items.iter().map(|item| text_of(item, "id")).collect())
 }
 
 /// 订阅来源类型（"local" / "url"）；`None` = 订阅不存在。

@@ -47,6 +47,16 @@ export type SubscriptionItem = {
 export type KernelStatus = {
   installed: boolean
   version: string
+  /**
+   * 磁盘上实际生效的版本（版本化目录后可能与 pin 的 `version` 不同，
+   * 比如旧布局迁移过来的）；未安装为 null / 缺省。
+   */
+  installedVersion?: string | null
+  /**
+   * 卸载后磁盘上仍有删不掉的文件（已移入回收位，下次启动清理）。界面据此
+   * 说明「已卸载，残留稍后清理」，而不是假装磁盘上什么都没有。
+   */
+  pendingCleanup?: boolean
   asset?: string
   running: boolean
   controllerPort?: number
@@ -576,7 +586,7 @@ export async function stopKernel(): Promise<void> {
  * ── 为什么带一段轮询 ───────────────────────────────────────
  * 命令是异步的（走内核 worker 的串行队列），投出去那一刻返回的快照还是
  * 删之前的样子。这里轮询到 `installed` 真的落成 false 再收手，然后刷代理池
- * —— 池里那一批订阅节点要跟着变成「未分配端口」（只刷内核状态的话，地址列
+ * —— 池里那一批订阅节点要跟着丢掉监听端口（只刷内核状态的话，地址列
  * 会停在旧端口上，看着像还能用）。
  */
 export async function removeKernel(): Promise<void> {
@@ -588,7 +598,7 @@ export async function removeKernel(): Promise<void> {
   const version = kernel()?.version
   const ok = await window.wbConfirm?.ask?.({
     title: t('删除内核'),
-    html: t('确定删除已下载的内核{version}？内核文件与端口映射会被移除，订阅节点会变成「未分配端口」，引用它们的账号会暂时回退直连；订阅本身保留，重新下载内核后会重新分配端口。', {
+    html: t('确定删除已下载的内核{version}？内核文件与端口映射会被移除，订阅节点会失去监听端口（地址列显示「端口准备中」），引用它们的账号会暂时回退直连；订阅本身保留，重新下载内核后会重新分配端口。', {
       version: version ? `（${version}）` : '',
     }),
     okText: t('删除内核'),
@@ -617,7 +627,13 @@ export async function removeKernel(): Promise<void> {
     // 「没抛错」就报成功的话，用户会看到「已删除」而内核还好端端在跑
     const finalKernel = state.data?.kernel
     if (finalKernel?.installed === false) {
-      toast(t('已删除内核（订阅与账号引用保留，重新下载后会重新分配端口）'))
+      // 卸载已降级：指针一摘就算卸载成功，磁盘上可能还剩删不掉的文件
+      // （内核进程占着 exe）。残留会在下次启动时清理，如实说一句
+      if (finalKernel.pendingCleanup) {
+        toast(t('已删除内核（订阅与账号引用保留；有文件仍被占用，将在下次启动时清理）'))
+      } else {
+        toast(t('已删除内核（订阅与账号引用保留，重新下载后会重新分配端口）'))
+      }
       refreshPool()
     } else {
       const reason =

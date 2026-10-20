@@ -23,7 +23,7 @@ O Agent2API reúne as contas já conectadas de vários clientes de IA em um úni
 ## ✨ Principais recursos
 
 - 🔌 **Compatível com OpenAI** — aponte o `base_url` do seu cliente para o gateway: Chat, Responses e Messages são todos suportados
-- 🏪 **17 provedores integrados** — WorkBuddy, Raccoon, CatPaw, Qoder, Trae e outros funcionam de imediato, além de provedores personalizados via passthrough
+- 🏪 **22 provedores integrados** — WorkBuddy, Raccoon, CatPaw, Qoder, Trae e outros funcionam de imediato, além de provedores personalizados via passthrough
 - 🔁 **Credenciais que se renovam sozinhas** — tokens são renovados antes de expirar, os próximos do vencimento podem ser atualizados em lote e o catálogo de modelos se mantém atual
 - 🪂 **Rotação de várias contas** — contas entram na fila por prioridade, um 429 passa para a próxima e contas em cooldown são puladas sem espera
 - 🛡️ **Proxies de saída** — cada conta pode ter seu próprio IP de saída; o fingerprint enviado imita o cliente oficial
@@ -79,6 +79,9 @@ Panorama dos recursos de proxy reverso por plataforma (✓ suportado · ✗ não
 | OfficeAce (Huawei Cloud, OfficeClaw) | ✓ | ✓ | ✓ | ✓ | ✓ | — |
 | OrcaTerm (Tencent Cloud) | ✓ | ✓ | ✓ | ✓ | — | — |
 | Zhipu Qingyan | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| ModelScope (MoDa, China / global) | ✓ | ✗ | ✓ | ✓ | ✓ | — |
+| AtomCode (AtomGit / GitCode) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| LobsterAI (NetEase Youdao, Youdao Lobster) | ✓ | ✓ | ✓ | ✓ | ✓ | — |
 | Provedores personalizados | ✓ | — | ✓ | — | — | — |
 
 > Nota: em Lista de modelos, ✓ significa busca automática online (algumas plataformas também mantêm uma tabela estática interna como fallback); o ZCode tem apenas a tabela estática interna. ✗ em Renovação automática do token significa que a plataforma não tem um fluxo de renovação disponível (a conta continua funcionando enquanto as credenciais forem válidas). O check-in do Qoder é somente na versão da China.
@@ -123,6 +126,8 @@ docker run -d --name agent2api --restart unless-stopped -p 3065:3065 -v ./data:/
 ```
 
 Em qualquer forma, abra o painel depois (`http://127.0.0.1:3065/`; use o IP do host nas formas servidor e Docker), registre o administrador e crie uma chave na página "Gateway Keys". Teste de conectividade: `curl http://127.0.0.1:3065/health`
+
+**Celular**: abra `http://<IP do gateway>:3065/m` no navegador (dá para "Adicionar à tela inicial" e virar um PWA em tela cheia). Para um ícone próprio, instale o `Agent2API-<versão>.apk` (Android) ou `Agent2API-<versão>.ipa` (iOS, não assinado — reassine você mesmo) do Release. Detalhes: [Instalação e implantação → Celular](install.pt-BR.md#celular).
 
 ## 📸 Capturas de tela
 
@@ -178,7 +183,7 @@ O `.dmg` do macOS **só pode ser compilado no macOS** (`npm --prefix desktop-tau
 
 ### Apenas para aprendizado e discussão
 
-Este projeto é um exercício prático de proxy reverso HTTP, passthrough de streaming SSE, adaptação de protocolos de múltiplos upstreams e empacotamento desktop (Tauri), e destina-se **apenas a aprendizado e pesquisa pessoal**. Não é um produto oficial e não tem qualquer vínculo, endosso ou patrocínio de Tencent e WorkBuddy / CodeBuddy, Meituan e CatPaw, SenseTime e 小浣熊, Zhipu e AutoClaw / autoglm, Alibaba e Qoder / Accio, Huawei Cloud e CodeArts / OfficeAce, ByteDance e Trae, iFlytek e Loomy, Baidu Wenku e KukuAI, 长亭科技 e MonkeyCode, Command Code, ou Google e Antigravity.
+Este projeto é um exercício prático de proxy reverso HTTP, passthrough de streaming SSE, adaptação de protocolos de múltiplos upstreams e empacotamento desktop (Tauri), e destina-se **apenas a aprendizado e pesquisa pessoal**. Não é um produto oficial e não tem qualquer vínculo, endosso ou patrocínio de Tencent e WorkBuddy / CodeBuddy, Meituan e CatPaw, SenseTime e 小浣熊, Zhipu e AutoClaw / autoglm, Alibaba e Qoder / Accio, Huawei Cloud e CodeArts / OfficeAce, ByteDance e Trae, iFlytek e Loomy, Baidu Wenku e KukuAI, 长亭科技 e MonkeyCode, Command Code, Google e Antigravity, Alibaba e ModelScope (MoDa), GitCode / AtomGit e AtomCode, ou NetEase Youdao e LobsterAI (Youdao Lobster).
 
 ### Sobre o comportamento de proxy reverso
 

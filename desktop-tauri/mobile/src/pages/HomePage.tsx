@@ -2,9 +2,17 @@ import { useEffect, useState } from 'react'
 import { PageHead, IconButton, SectionHead, Empty, ErrorNote, copyWithToast } from '../components/ui'
 import { ProviderLogo, GlyphLogo } from '../components/ProviderLogo'
 import { Icon } from '../components/Icon'
+import { PullIndicator, usePullToRefresh } from '../components/PullToRefresh'
 import { useStore, store } from '../state/store'
-import { fetchCheckinCenter, fetchRequests, type CheckinCenter, type RequestPage } from '../api/gateway'
-import { formatCompact, formatInt, formatDuration, ellipsisMiddle } from '../lib/format'
+import {
+  fetchCheckinCenter,
+  fetchRequests,
+  fetchStatsSummary,
+  type CheckinCenter,
+  type RequestPage,
+  type StatsSummary,
+} from '../api/gateway'
+import { formatCompact, formatInt, formatDuration, ellipsisMiddle, isRateLimited } from '../lib/format'
 import { apiBase, baseLabel } from '../lib/servers'
 import { providerLabel } from '../lib/providers'
 import { usePolling } from '../lib/usePolling'
@@ -22,16 +30,23 @@ export function HomePage() {
   const session = state.session
   const accounts = session?.accounts?.accounts || []
   const enabled = accounts.filter(item => item.enabled).length
-  const limited = accounts.filter(item => item.enabled && hasRateLimit(item)).length
+  const limited = accounts.filter(item => item.enabled && isRateLimited(item)).length
   const [checkin, setCheckin] = useState<CheckinCenter | null>(null)
   const [requests, setRequests] = useState<RequestPage | null>(null)
+  const [today, setToday] = useState<StatsSummary | null>(null)
   const [error, setError] = useState('')
 
   const load = async () => {
     try {
-      const [center, page] = await Promise.all([fetchCheckinCenter(), fetchRequests({ limit: 3 })])
+      // 今日请求数走报表汇总（区间内的请求数）；该接口失败不应拖垮整页，失败时按 0 显示
+      const [center, page, summary] = await Promise.all([
+        fetchCheckinCenter(),
+        fetchRequests({ limit: 3 }),
+        fetchStatsSummary('today').catch(() => null),
+      ])
       setCheckin(center)
       setRequests(page)
+      setToday(summary)
       setError('')
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure))
@@ -41,6 +56,13 @@ export function HomePage() {
   // 首页只轮询签到与最近请求：会话本身由 App 启动时拉一次，
   // 用户下拉刷新（下面的按钮）才重拉
   usePolling(load, 60_000)
+
+  const pull = usePullToRefresh({
+    onRefresh: async () => {
+      await store.refresh(true)
+      await load()
+    },
+  })
 
   useEffect(() => {
     if (!session) void store.refresh()
@@ -54,7 +76,8 @@ export function HomePage() {
   const recent = requests?.entries || []
 
   return (
-    <div className='m-page'>
+    <div className='m-page' ref={pull.bindRef}>
+      <PullIndicator pull={pull.pull} refreshing={pull.refreshing} />
       <PageHead
         title={t('网关运行中')}
         subtitle={t('{n} 个账号启用 · {m} 个限流中', { n: enabled, m: limited })}
@@ -127,7 +150,7 @@ export function HomePage() {
             <div style={{ width: 1, background: 'rgba(255,255,255,.22)', margin: '2px 4px' }} />
             <HeroMetric label={t('限流中')} value={`${limited}`} />
             <div style={{ width: 1, background: 'rgba(255,255,255,.22)', margin: '2px 4px' }} />
-            <HeroMetric label={t('今日请求')} value={formatInt(requests?.total || 0)} />
+            <HeroMetric label={t('今日请求')} value={formatInt(today?.overview?.requests || 0)} />
           </div>
 
           <div
@@ -142,7 +165,7 @@ export function HomePage() {
             }}
           >
             <span>{t('今日签到 {done}/{total}', { done, total: eligible })}</span>
-            <span>{t('最近请求 {n} 条', { n: requests?.matched || 0 })}</span>
+            <span>{t('累计请求 {n} 条', { n: requests?.total || 0 })}</span>
           </div>
         </div>
       </div>
@@ -374,9 +397,5 @@ export function StatusDot({ status }: { status?: number }) {
   const tone = !status ? 'warn' : status >= 200 && status < 400 ? 'ok' : 'bad'
   const color = tone === 'ok' ? 'var(--m-ok)' : tone === 'warn' ? 'var(--m-warn)' : 'var(--m-danger)'
   return <i style={{ width: 7, height: 7, borderRadius: '50%', background: color, flex: 'none' }} />
-}
-
-function hasRateLimit(account: { rateLimits?: Record<string, unknown> }): boolean {
-  return Boolean(account.rateLimits && Object.keys(account.rateLimits).length)
 }
 

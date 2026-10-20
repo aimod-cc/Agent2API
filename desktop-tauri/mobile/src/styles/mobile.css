@@ -147,11 +147,64 @@ button { font: inherit; color: inherit; }
 }
 .m-scroll::-webkit-scrollbar { display: none; }
 
+/*
+ * 页面自带固定头部时，外层不再滚（滚动交给页面里的 .m-body）。
+ * 两层都设 overflow 会出现「滚到一半卡住」的嵌套滚动 —— 触摸端尤其明显。
+ * 用 :has() 而不是让 JS 传 class：切换页面时不必多一次 render 才对齐布局。
+ */
+.m-scroll:has(> .m-page.m-fixed) {
+  overflow: hidden;
+}
+
 .m-page { padding-bottom: 22px; animation: m-fade 0.18s ease; }
 @keyframes m-fade {
   from { opacity: 0.55; transform: translateY(3px); }
   to { opacity: 1; transform: none; }
 }
+
+/* 助手流式输出时那颗闪动的光标（见 pages/AssistantPage 的 streaming 分支）。
+   两步切换而不是淡入淡出：方块光标本来就该是硬闪，和终端一致。 */
+@keyframes m-caret {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+/*
+ * 固定头部 + 独立滚动列表。
+ *
+ * 默认整页一起滚（`.m-page` 在 `.m-scroll` 里）。列表页（账号 / 请求日志 /
+ * 运行日志 / 模型）不该这样：筛选条跟着滚走之后，想换个筛选还得先滑回顶部。
+ * 这些页面把根节点换成 `.m-page m-fixed`：
+ *
+ *   .m-scroll（不滚，改成 flex 容器）
+ *     └ .m-page.m-fixed（占满高度，纵向 flex）
+ *         ├ .m-sticky（页头 + 搜索 + 筛选，flex: none，永不滚走）
+ *         └ .m-body（flex: 1，自己滚）
+ *
+ * 为什么要多一层 `.m-sticky` 而不是给每个子元素加 sticky：sticky 只在同一个
+ * 滚动容器里生效，而这些页面的标题、搜索框、筛选条是三个兄弟节点，各自
+ * sticky 会在滚动时互相盖住、且背景不连续。收进一个容器最省事。
+ */
+.m-page.m-fixed {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  padding-bottom: 0;
+}
+.m-sticky { flex: none; }
+.m-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  padding-bottom: 22px;
+}
+.m-body::-webkit-scrollbar { display: none; }
+
 
 /* ═══════════ 顶部标题 / 二级页返回栏 ═══════════ */
 
@@ -491,6 +544,16 @@ button { font: inherit; color: inherit; }
 .m-app[data-offline='true'] .m-head { padding-top: 10px; }
 .m-app[data-offline='true'] .m-navbar { padding-top: 8px; }
 
+/*
+ * AI 助手页的紧凑页头。
+ *
+ * 它是手写的（对话页要省纵向空间，不能用 26px 大标题的 .m-head），所以
+ * 安全区得自己补。离线通知条出现时它已经占掉了 safe-t，这里退回 10px，
+ * 与上面 .m-head / .m-navbar 的覆盖同口径 —— 否则刘海机型会多一条空白。
+ */
+.m-assistant-head { padding: calc(var(--m-safe-t) + 10px) 14px 10px; }
+.m-app[data-offline='true'] .m-assistant-head { padding-top: 10px; }
+
 /* 有新版本：浮在标签栏之上的胶囊条，拇指够得到 */
 .m-notice-update {
   position: fixed;
@@ -578,3 +641,42 @@ button { font: inherit; color: inherit; }
   background: var(--m-surface-3);
   white-space: nowrap;
 }
+
+/* ═══════════ 下拉刷新 ═══════════ */
+
+/*
+ * 指示器贴住滚动容器顶部，高度由组件的 pull 值控制，超出部分裁掉。
+ * 使用前提：父级必须是定位上下文 —— 下面的 .m-page 规则负责这一点。
+ * 若把指示器放进别的容器，那个容器需要自带 position: relative。
+ */
+.m-ptr {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.m-ptr-inner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 8px;
+  font-size: 12px;
+  color: var(--m-text-3);
+}
+
+@keyframes m-ptr-rotate {
+  to { transform: rotate(360deg); }
+}
+.m-ptr-spin {
+  animation: m-ptr-rotate .9s linear infinite;
+}
+
+/* 指示器定位基准：原 .m-page 没有 position 声明，这里补一条，不覆盖任何规则 */
+.m-page { position: relative; }

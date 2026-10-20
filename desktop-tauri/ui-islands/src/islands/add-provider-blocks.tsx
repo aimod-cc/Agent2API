@@ -43,6 +43,7 @@ import {
 import {
   ADD_METHODS,
   MAX_NAME_LENGTH,
+  WEB_LOGIN_HINT,
   addButtonTextOf,
   desktopAccess,
   desktopImportAvailable,
@@ -487,6 +488,10 @@ function WebLoginSection({
   const controllerRef = React.useRef<WebLoginController | null>(null)
   modeRef.current = mode
   regionRef.current = region
+  // 网页端没有「内嵌窗口 / 系统浏览器」之分：桥接层收下 mode 后不使用它，
+  // 一律 window.open 开新标签页（见 web_shim.rs 的 startLogin）。这一级整级
+  // 收起，提示换成与实际行为一致的那一句。
+  const isWeb = platform() === 'web'
 
   React.useEffect(() => {
     const engine = shared().wbWebLogin
@@ -502,7 +507,10 @@ function WebLoginSection({
       busyText: web.busyText,
       texts: () => {
         const active = modes?.find(item => item.value === modeRef.current)
-        return { button: web.button, hint: active?.hint || web.hint || '' }
+        return {
+          button: web.button,
+          hint: isWeb ? (web.webHint || WEB_LOGIN_HINT) : (active?.hint || web.hint || ''),
+        }
       },
       // 传哪个 edition 给壳侧：写死的 edition → 地区分段当前值（Qoder 两站都要登录）
       // → 'cn'（其余家既没有地区级，后端那条链也不读这个字段）
@@ -533,7 +541,7 @@ function WebLoginSection({
     <DialogSection hidden={!visible}>
       <h3>{t('网页登录')}</h3>
       <Note html={web.noteHtml} />
-      {web.modes?.length ? (
+      {web.modes?.length && !isWeb ? (
         <div className='flex flex-col gap-2.5 border-l-2 border-border pl-[11px]'>
           <span className='text-[12.5px] text-subtle'>{t('打开方式')}</span>
           <SegmentedControl
@@ -561,7 +569,9 @@ function WebLoginSection({
           {t('取消等待')}
         </Button>
         <span className='detail' id={`${prefix}-web-hint`}>
-          {web.hint || web.modes?.[0]?.hint || ''}
+          {isWeb
+            ? (web.webHint || WEB_LOGIN_HINT)
+            : (web.hint || web.modes?.[0]?.hint || '')}
         </span>
       </div>
     </DialogSection>
@@ -686,9 +696,14 @@ function OauthSection({
   const modeRef = React.useRef(mode)
   const controllerRef = React.useRef<OauthController | null>(null)
   modeRef.current = mode
+  // 与 WebLoginSection 同一条判据：网页端没有「内嵌窗口 / 系统浏览器」之分，
+  // 桥接层一律在新标签页里打开（见 web_shim.rs 的 startAutoclawOauthLogin）
+  const isWeb = platform() === 'web'
 
   const hintOf = (): string =>
-    oauth?.modes?.find(item => item.value === modeRef.current)?.hint || oauth?.hint || ''
+    isWeb
+      ? (oauth?.webHint || WEB_LOGIN_HINT)
+      : (oauth?.modes?.find(item => item.value === modeRef.current)?.hint || oauth?.hint || '')
 
   React.useEffect(() => {
     const engine = shared().wbAutoclawOauth
@@ -715,7 +730,7 @@ function OauthSection({
     <DialogSection hidden={!visible}>
       <h3>{oauth.title || t('网页登录')}</h3>
       <Note html={oauth.noteHtml} />
-      {oauth.modes?.length ? (
+      {oauth.modes?.length && !isWeb ? (
         <div className='flex flex-col gap-2.5 border-l-2 border-border pl-[11px]'>
           <span className='text-[12.5px] text-subtle'>{t('打开方式')}</span>
           <SegmentedControl
@@ -739,7 +754,7 @@ function OauthSection({
       </div>
       <div className='field-row'>
         <span className='detail' id={`${prefix}-oauth-hint`}>
-          {oauth.modes?.[0]?.hint || oauth.hint || ''}
+          {hintOf()}
         </span>
       </div>
     </DialogSection>
@@ -1046,6 +1061,10 @@ export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElem
   const [edition, setEdition] = React.useState<Edition>(loginPrefs.edition)
   const [loginMode, setLoginMode] = React.useState<LoginMode>(loginPrefs.loginMode)
   const [socialRestore, setSocialRestore] = React.useState(loginPrefs.socialRestore)
+  // 网页端没有「内嵌窗口 / 系统浏览器」之分：桥接层一律在新标签页里打开，
+  // mode 收下即弃（见 web_shim.rs 的 startLogin）。整行打开方式与第三方入口
+  // 开关都收起 —— 后者只在「内嵌窗口」下生效，留着必然是个灰按不动的假选项。
+  const webPanel = platform() === 'web'
   // 添加方式（与各家 ProviderBlock 的「添加方式」分段同一形态）：不进 loginPrefs
   // 持久化 —— 通用块的 method 也不持久化，弹窗重开回默认项
   const [method, setMethod] = React.useState<WorkBuddyMethod>('web')
@@ -1073,6 +1092,9 @@ export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElem
       hintId: 'web-login-hint',
       busyText: t('等待网页登录…'),
       texts: () => {
+        // 网页端只有一条路：新标签页。模式相关的文案（「内嵌窗口」「关窗即
+        // 取消」）在这里都不成立 —— 桥接层的 startLogin 收下 mode 却不使用它
+        if (webPanel) return { button: t('打开网页登录'), hint: WEB_LOGIN_HINT }
         const external = modeRef.current === 'external'
         return {
           button: external ? t('在浏览器中打开登录页') : t('打开网页登录'),
@@ -1179,32 +1201,38 @@ export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElem
       <DialogSection hidden={effectiveMethod !== 'web'}>
         <h3>{t('网页登录')}</h3>
         <p>{t('完成登录后自动加入账号列表，昵称取自上游。')}</p>
-        <div className='field-row'>
-          <span className='text-[12.5px] whitespace-nowrap text-subtle'>{t('打开方式')}</span>
-          <SegmentedControl
-            aria-label={t('网页登录的打开方式')}
-            className={ADD_SEG_CLASS}
-            options={[
-              { value: 'embedded', label: t('内嵌窗口') },
-              { value: 'external', label: t('系统默认浏览器') },
-            ]}
-            value={loginMode}
-            onValueChange={pickLoginMode}
-          />
-          <label className='flex items-center gap-2' title={socialTitle}>
-            <Switch
-              checked={socialRestore}
-              disabled={!socialUsable}
-              onCheckedChange={next => {
-                // 勾选本身只影响发起登录时传给壳侧的值，不需要重建界面
-                setSocialRestore(next)
-                loginPrefs.socialRestore = next
-              }}
-            />
-            <span className='text-[12.5px] text-subtle'>{t('恢复 Google / GitHub 入口')}</span>
-          </label>
-        </div>
-        <p>{t('系统浏览器可复用已有登录态（国际版推荐）；内嵌窗口更干净。')}</p>
+        {/* 网页端没有「内嵌窗口 / 系统浏览器」之分（桥接层一律开新标签页），
+            整行收起 —— 连带那个只在「内嵌窗口」下生效的 Google / GitHub 开关 */}
+        {webPanel ? null : (
+          <>
+            <div className='field-row'>
+              <span className='text-[12.5px] whitespace-nowrap text-subtle'>{t('打开方式')}</span>
+              <SegmentedControl
+                aria-label={t('网页登录的打开方式')}
+                className={ADD_SEG_CLASS}
+                options={[
+                  { value: 'embedded', label: t('内嵌窗口') },
+                  { value: 'external', label: t('系统默认浏览器') },
+                ]}
+                value={loginMode}
+                onValueChange={pickLoginMode}
+              />
+              <label className='flex items-center gap-2' title={socialTitle}>
+                <Switch
+                  checked={socialRestore}
+                  disabled={!socialUsable}
+                  onCheckedChange={next => {
+                    // 勾选本身只影响发起登录时传给壳侧的值，不需要重建界面
+                    setSocialRestore(next)
+                    loginPrefs.socialRestore = next
+                  }}
+                />
+                <span className='text-[12.5px] text-subtle'>{t('恢复 Google / GitHub 入口')}</span>
+              </label>
+            </div>
+            <p>{t('系统浏览器可复用已有登录态（国际版推荐）；内嵌窗口更干净。')}</p>
+          </>
+        )}
         <div className='field-row'>
           {/* 按钮与提示的文本子节点必须是常量：引擎会直接改它们的 textContent */}
           <Button id='web-login-button' onClick={() => controllerRef.current?.start()}>
@@ -1219,7 +1247,9 @@ export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElem
             {t('取消等待')}
           </Button>
           <span className='detail' id='web-login-hint'>
-            {t('内嵌窗口打开；完成后自动加入列表，关窗即取消等待')}
+            {webPanel
+              ? WEB_LOGIN_HINT
+              : t('内嵌窗口打开；完成后自动加入列表，关窗即取消等待')}
           </span>
         </div>
       </DialogSection>

@@ -292,6 +292,10 @@ impl ServerState {
         if let Some(reason) = config_migration::pending_reason() {
             return Err(reason);
         }
+        // 进程启动时刻：设置页「版本信息」的「已运行」由它算。记录点放在
+        // 最前面 —— 后面每一步都可能耗时（开库、迁移、模型清单预热），
+        // 那些时间同样是「这个进程已经跑了多久」的一部分。
+        crate::server::core::system_info::record_start();
         // Accio 的 OAuth 回调要落在本机端口上，而授权地址由**适配器**拼
         // （`ProviderAdapter::build_login_url` 是同步无参的，拿不到 ServerState）。
         // 端口在进程生命周期内不变，这里写一次、之后只读 —— 与各家 models 的
@@ -304,6 +308,10 @@ impl ServerState {
         // `http://localhost:{port}/oauth-callback`（redirect_uri 由适配器在发起
         // 登录时本地拼），端口必须在第一次发起之前就位（见该模块 `set_loopback_port`）。
         crate::server::core::providers::antigravity::oauth::set_loopback_port(port);
+        // LobsterAI 的网页登录同理：授权地址里的 `redirect_uri` 要指向
+        // `http://127.0.0.1:{port}/auth/callback`，而地址由适配器在发起时本地拼
+        // （同步无参），端口必须先就位（见该模块 `set_loopback_port`）。
+        crate::server::core::providers::lobsterai::oauth::set_loopback_port(port);
         let config_dir = config::config_dir();
         // 与 Node 版一致：verbose 由环境变量 AGENT2API_VERBOSE=1 打开
         // （旧名 WORKBUDDY_VERBOSE 仍可读，新名优先），
@@ -401,9 +409,37 @@ impl ServerState {
         // 订阅存储（「订阅管理」维护的订阅链接）：同一个 `Db`（与 proxyPool
         // 同一形态）。位置只要求早于任何一次 `/api/subscriptions*` 请求。
         core::subscriptions::install(db.clone());
+        // 云同步（设置页「数据 → 云同步」）：设置与状态落在 kv 的保留键
+        // `cloudSync`，装库句柄即可。自动同步的工作线程在下面 spawn ——
+        // 必须先装句柄再起线程，否则第一轮读设置会拿到默认值。
+        core::cloud_sync::install(db.clone());
+        if let Some(db) = db.clone() {
+            core::cloud_sync::auto_sync::spawn_worker(db);
+        }
         // 订阅内核（mihomo sidecar）的命令 worker：单条队列串行消费内核操作
         // （下载 / 重建配置 / 重启 / 停止），见 `core::sub_kernel` 的模块头。
         core::sub_kernel::spawn_worker();
+        // 启动时清一次孤儿订阅节点：正常路径下内核同步会摘掉它们，但内核未安装 /
+        // 手动关闭期间删掉的订阅没有人来收（旧版本还可能因为缺这一步留下历史
+        // 遗留）。清理放在内核启动之前 —— 它不依赖内核，读到什么就按什么清。
+        // 读订阅失败时 `live_ids` 返回 Err，这里整段跳过（宁可留着也不误删）。
+        match core::subscriptions::live_ids() {
+            Ok(live) => match core::proxy_pool::prune_orphan_subscription_items(&live) {
+                Ok(changes) if changes > 0 => logging::console_line(
+                    "[Subscription]",
+                    &format!("已清理 {changes} 个不属于任何订阅的节点"),
+                ),
+                Ok(_) => {}
+                Err(error) => logging::console_line(
+                    "[Subscription]",
+                    &format!("清理孤儿订阅节点失败: {error}"),
+                ),
+            },
+            Err(error) => logging::console_line(
+                "[Subscription]",
+                &format!("跳过孤儿节点清理（{error}）"),
+            ),
+        }
         // 内核已安装且有启用的订阅 → 自动拉起（清理上次运行遗留的进程后
         // 重建配置）。**未安装时不自动下载**：二进制 ~20-40MB，下载必须有
         // 用户的手势（界面上的「下载内核」按钮），启动时静默拉网不合适。

@@ -4,6 +4,7 @@ import { store } from '../state/store'
 import { fetchLogs, type LogEntry } from '../api/gateway'
 import { formatClock } from '../lib/format'
 import { usePolling } from '../lib/usePolling'
+import { usePullToRefresh, PullIndicator } from '../components/PullToRefresh'
 import { t } from '../i18n'
 
 /**
@@ -39,10 +40,14 @@ export function LogsPage() {
 
   usePolling(load, 30_000, [level, keyword])
 
+  const pull = usePullToRefresh({ onRefresh: load })
+
   return (
-    <div className='m-page'>
-      <PageIntro actions={<IconButton name='refresh' label={t('刷新')} onClick={() => void load()} />}
-      />
+    <div className='m-page m-fixed' ref={pull.bindRef}>
+      <PullIndicator pull={pull.pull} refreshing={pull.refreshing} />
+      <div className='m-sticky'>
+        <PageIntro actions={<IconButton name='refresh' label={t('刷新')} onClick={() => void load()} />}
+        />
 
       <div className='m-section' style={{ marginTop: 0 }}>
         <div
@@ -95,7 +100,9 @@ export function LogsPage() {
           </button>
         ))}
       </div>
+      </div>
 
+      <div className='m-body'>
       {error ? <ErrorNote text={error} /> : null}
       {!entries ? <SkeletonList rows={5} height={58} /> : null}
 
@@ -175,6 +182,7 @@ export function LogsPage() {
         >
           {t('复制当前筛选结果')}
         </button>
+      </div>
       </div>
     </div>
   )

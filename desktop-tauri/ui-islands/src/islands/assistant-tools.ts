@@ -107,11 +107,14 @@ type ModelRow = {
   providerLabel?: unknown
   enabled?: unknown
   aliases?: unknown
+  /** 生效能力位（`/api/models/manage` 的 capabilities，见 core::providers::catalog::view） */
+  capabilities?: unknown
 }
 type MappingRow = {
   alias?: unknown
   target?: unknown
   provider?: unknown
+  providerLabel?: unknown
   enabled?: unknown
   isDefault?: unknown
   dangling?: unknown
@@ -981,4 +984,72 @@ export async function loadModelNames(): Promise<string[]> {
     }
   }
   return names
+}
+
+/** 模型选择器的一条候选（按提供商分组展示；`supportsImages` 用于图片输入的
+ *  拦截提示 —— 未声明视为不支持，宁可提示一句也不要静默把图发上去被上游拒）。 */
+export type ModelOption = {
+  /** 对外可请求的名字（原始 ID 或映射名） */
+  name: string
+  /** 这家提供商的展示名（分组标题） */
+  provider: string
+  /** 模型自己声明的图片能力；未声明 = false */
+  supportsImages: boolean
+  /** 这条名字是从映射来的（选择器上给一个小标） */
+  viaMapping: boolean
+}
+
+/**
+ * 模型候选表（聊天框那个选择器的数据源）。
+ *
+ * 与 [`loadModelNames`] 同一套「可请求」判据，只是多带分组与能力位：
+ * 选择器要按提供商分组、要在选图后判断当前模型收不收图，这两件事都需要
+ * 比纯名字更多的信息。**不另写一份筛选规则** —— 两处口径必须逐字一致，
+ * 否则会出现「列表里有但发不出去」（列表只认名字，发送还要过网关的模型门禁）。
+ */
+export async function loadModelOptions(): Promise<ModelOption[]> {
+  const { models, mappings } = await readModels()
+  const options: ModelOption[] = []
+  const seen = new Set<string>()
+  const enabledKeys = new Set<string>()
+  /** provider×id → 能力位（映射名要继承它指向的那个模型的能力） */
+  const capabilities = new Map<string, boolean>()
+
+  for (const row of models) {
+    if (row.enabled !== true) continue
+    const provider = str(row.provider)
+    const id = str(row.id)
+    if (!provider || !id) continue
+    const key = `${provider}\u0001${id}`
+    enabledKeys.add(key)
+    const caps = row.capabilities as Record<string, unknown> | undefined
+    const images = caps?.supportsImages === true
+    capabilities.set(key, images)
+    if (seen.has(id)) continue
+    seen.add(id)
+    options.push({
+      name: id,
+      provider: str(row.providerLabel) || provider,
+      supportsImages: images,
+      viaMapping: false,
+    })
+  }
+
+  for (const mapping of mappings) {
+    if (mapping.enabled !== true || mapping.isDefault === true) continue
+    const provider = str(mapping.provider)
+    const target = str(mapping.target)
+    const alias = str(mapping.alias)
+    if (!alias || seen.has(alias)) continue
+    const key = `${provider}\u0001${target}`
+    if (!enabledKeys.has(key)) continue
+    seen.add(alias)
+    options.push({
+      name: alias,
+      provider: str((mapping as { providerLabel?: unknown }).providerLabel) || provider,
+      supportsImages: capabilities.get(key) === true,
+      viaMapping: true,
+    })
+  }
+  return options
 }

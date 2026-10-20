@@ -34,7 +34,7 @@
   "操作失败：{reason}": "Operation failed: {reason}",
   "新建 API Key": "New API Key",
   "新建 Key 与设置可用范围（提供商 / 模型白名单）在桌面端完成。": "",
-  "显示": "Show",
+  "显示": "Shown",
   "未启用鉴权": "Auth not enabled",
   "未命名": "Untitled",
   "模型：{names}": "Models: {names}",

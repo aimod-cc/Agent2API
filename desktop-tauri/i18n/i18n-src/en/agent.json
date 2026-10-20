@@ -60,7 +60,7 @@
   "未检测到": "Not detected",
   "未检测到安装": "No installation detected",
   "未走网关": "Not via gateway",
-  "本机": "Local",
+  "本机": "This device",
   "本机服务": "Local service",
   "本机没有找到 {name}": "{name} was not found on this machine",
   "本机网关": "Local gateway",

@@ -67,6 +67,16 @@ const PROVIDER_DESC: Record<string, string> = {
   // 上游没有 campaign 列表，也没有「可领/已领」两态可查（查询端点实测 404），
   // 所以「今天签没签」只能由这次请求的返回值回答。
   qwenwork: t('领取每日积分 · 幂等（当天已领回 0，不报错）'),
+  // ModelScope（魔搭）的两个站点：签到就是调一次登录信息接口（调用即触发
+  // 当日魔粒），没有独立的签到按钮 —— 说明里点出这一点，用户才不会以为漏了什么。
+  modelscope: t('无独立签到接口 · 每天替账号打一次登录信息（即当日魔粒）'),
+  'modelscope-intl': t('与国内版同一套链路 · 站点不同、令牌不通用'),
+  // AtomCode 的「签到」不是每日发额，而是**领取免费 CodingPlan**（一次性授权）：
+  // 实现按需领取 —— 套餐有效时只回读额度、不重复领；到期或未领才走 Max→Pro→Lite。
+  atomcode: t('领取免费 CodingPlan（按需：套餐有效时只回读额度）'),
+  // LobsterAI 的签到是上游的「每日活动」三步（查活动位 → 取上下文 → 领取），
+  // 幂等由客户端与上游的「今天已领」状态共同保证，重复执行只回中性提示。
+  lobsterai: t('每日活动签到（+100 积分，已领则中性提示）'),
 }
 
 /** 页内标签页的档位（值与 checkin-state 的 CheckinTab 一致） */
@@ -137,9 +147,18 @@ function AccountRows({ group }: { group: CheckinProviderGroup }) {
           // WorkBuddy 的日活接口（上游稳定 400「该账号不是 WorkBuddy 国际版
           // 账号」）。只有 `workbuddy-intl` 这一组执行日活链。
           const dailyActivity = group.id === 'workbuddy-intl'
+          // 成长中心连登天数（WorkBuddy 国内版）：签到后顺带发的那条每日活跃
+          // 上报点亮它，后端回读后落库（`streakDays`），这里只读不查上游。
+          // 0 = 还没读到过（新账号 / 首次签到还没跑），不显示成「连登 0 天」。
+          const streakDays = group.id === 'workbuddy' && account.streakDays ? account.streakDays : 0
           return (
             <tr key={account.id}>
-              <td>{account.name || account.id}</td>
+              <td>
+                {account.name || account.id}
+                {streakDays > 0 ? (
+                  <span className='text-subtle'> · {t('连登 {n} 天', { n: streakDays })}</span>
+                ) : null}
+              </td>
               <td>
                 {account.checkedInToday
                   ? <Badge variant='success' shape='tag'>{t('已签')}</Badge>

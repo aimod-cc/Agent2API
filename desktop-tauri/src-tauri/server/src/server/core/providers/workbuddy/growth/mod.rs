@@ -36,10 +36,12 @@
 //!   school.rs         开学季活动域（任务 + 幸运转盘）
 //!   travel.rs         猫猫旅行状态机（buddy info / status / depart / claim）
 //!   streak.rs         连登管家（补签 → 档位兑换 → 抽奖闭环）
+//!   daily_activity.rs 每日活跃上报（点亮连登 / 活跃地图的唯一通道）
 //!
 //! ── 硬约束 ──────────────────────────────────────────────────
 //! release 是 `panic=abort`：本目录零 unwrap/expect/panic。
 
+pub mod daily_activity;
 pub mod events;
 pub mod school;
 pub mod spec;

@@ -566,7 +566,10 @@ export function CreditDetailButton({ rows, subscriptionLine, variant, kind, titl
         {variant === 'pool' ? children : <span className='val'>{children}</span>}
         <span className='caret' aria-hidden>▾</span>
       </PopoverTrigger>
-      <PopoverContent align='end' sideOffset={6} className='w-[320px]' initialFocus={initialFocus}>
+      {/* `align='center'`：浮层以读数按钮为中心展开。原来是 'end'（右缘对齐），
+          而这一列的按钮本身就靠右，弹层再向右贴齐就整个甩到表格右外侧，读起来像
+          挂在了「操作」列下面。居中后它落在自己的格子上，与哪一行是哪一行对得上。 */}
+      <PopoverContent align='center' sideOffset={6} className='w-[320px]' initialFocus={initialFocus}>
         {/* ⚠️ 这一层 div 不是装饰，是**滚动容器本身**：组件库给 PopoverContent 编出的
             `overflow-hidden` / `max-h-[min(70vh,560px)]` 都带 `!important`，把
             max-height / overflow-y 写在弹层自己身上会被它们压掉（明细一多就既滚不动
@@ -586,7 +589,11 @@ export function CreditDetailButton({ rows, subscriptionLine, variant, kind, titl
                 title={t('展开或收起（默认收起）')}
                 onClick={() => setSpentOpen(value => !value)}
               >
-                <span className='caret' aria-hidden>▾</span>
+                {/* ⚠️ 这个 span 必须**空着**：三角由 CSS 的 border 画
+                    （见 page-accounts-table.css 的 .usage-pop-spent-head .caret），
+                    里面再塞一个 ▾ 字形就会叠出两个箭头 —— 一个 border 画的、
+                    一个字形溢出的（width/height 是 0，字形照样画得出来）。 */}
+                <span className='caret' aria-hidden />
                 <span>{t('已用完 / 已过期')}</span>
                 <span className='n'>{t('{count} 份', { count: spentRows.length })}</span>
               </button>

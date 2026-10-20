@@ -177,6 +177,7 @@ pub fn check_envelope(value: &Value, _what: &str) -> Result<Value, GatewayError>
         status_code: 502,
         upstream_code: Some(status),
         code: None,
+        retry_after_secs: None,
     })
 }
 

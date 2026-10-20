@@ -31,6 +31,11 @@ export type CheckinAccountRow = {
   checkedInToday: boolean
   /** cn / intl（缺失 null）：WorkBuddy 国际版在这张表里执行的是「领日活」 */
   edition?: string | null
+  /**
+   * 成长中心连登天数（WorkBuddy 国内版；签到后回读落库，见后端
+   * `AccountStore::mark_streak_days`）。缺失 / 0 = 还没读到过，界面不显示。
+   */
+  streakDays?: number | null
 }
 
 export type CheckinProviderGroup = {
@@ -729,6 +734,16 @@ export async function signSingleAccount(id: string, mode: 'checkin' | 'full' | '
       | undefined
     const reportOk = activity?.report?.succeeded === true
     const webOk = activity?.webConversation?.succeeded === true
+    // WorkBuddy 国内版签到顺带发的那条每日活跃上报（点亮连登 / 活跃地图）：
+    // 与上面 `activity` 分开读 —— 上报成功不等于积分领到，两个事实分开讲。
+    const growth = row?.growth as
+      | { reported?: boolean; streakDays?: number | null; error?: string | null }
+      | null
+      | undefined
+    const streakText =
+      growth?.streakDays !== null && growth?.streakDays !== undefined
+        ? ' · ' + t('连登 {n} 天', { n: growth.streakDays })
+        : ''
     if (row?.error) {
       toast(t('签到失败：{error}', { error: String(row.error) }), 'err')
     } else if (mode === 'keepalive') {
@@ -739,7 +754,7 @@ export async function signSingleAccount(id: string, mode: 'checkin' | 'full' | '
         toast(t('✅ {message}', { message: claim?.msg || t('活跃保活完成') }))
       else toast(claim?.msg || t('活跃保活失败'), 'err')
     } else if (claim?.success === true) {
-      toast(t('✅ {message}', { message: claim.msg || t('签到成功') }))
+      toast(t('✅ {message}', { message: (claim.msg || t('签到成功')) + streakText }))
     } else if (claim?.alreadyCompleted === true) {
       toast(claim?.msg || t('今日已领取'), 'err')
     } else if (reportOk) {

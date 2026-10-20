@@ -70,9 +70,11 @@ pub const CATEGORY_DAILY: &str = "daily";
 /// 这个账号是不是访客（访客没有任务中心，实测 401）。
 ///
 /// 判定复用凭证模块（`credentials::from_record`：先看记录里的 `isGuest`，
-/// 再看 JWT 声明），**不能读管理视图**——`list_accounts()` 那一层已经把
-/// `isGuest` 剥掉了，按它筛会一个都筛不掉。读不到凭证时按访客处理：
-/// 列进新手任务分组只会换来一次注定失败的查询。
+/// 再看 JWT 声明），**读的是原始记录** —— 与公开形态那个 `isGuest`
+/// （`chatglm_accounts::guest_of_record`，签到范围判定读的那份）同源，只是
+/// 兜底方向相反：本函数**读不出来就当访客**（列进新手任务分组只会换来一次
+/// 注定失败的查询），签到范围那边**读不出来就不排除**（凭证损坏的账号要留在
+/// 清单里把故障如实报出来，不能跟着访客一起被静默踢掉）。
 pub fn is_guest_account(store: &AccountStore, account_id: &str) -> bool {
     let record = store.chatglm_account_record(account_id);
     match credentials::from_record(record.as_ref()) {

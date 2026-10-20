@@ -1,0 +1,245 @@
+/* ─────────────────────────────────────────────
+   设置 → 显示 → 侧边栏菜单（自定义分组 / 顺序 / 显隐）
+
+   这一页的控件全部来自组件库（Switch / Button / Input / Popover / Badge），
+   本文件只负责**版式**：分组卡片、拖拽把手、行网格、以及拖动期间挂在 body 上的
+   全局态。颜色一律取 tokens.css 的语义变量，深浅两套主题共用同一组声明。
+
+   类名统一 sc- 前缀（sidebar customize），与 ui-islands 里各页面的
+   page-*.css 一样只服务本面板。
+   ───────────────────────────────────────────── */
+
+/* ─── 分组卡片 ───
+   一块卡片 = 一个分组：组头（把手 / 名称 / 计数 / 动作）+ 菜单行。
+   卡片之间留 8px，比行间距大一档 —— 让「组」这个层级在视觉上真的成组。 */
+.sc-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sc-group {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  /* 卡片坐在面板（--surface）里，取凹槽底 —— 与 .settings-switches /
+     .retention-list 同一手法，组内的行再用 --surface-2 浮一层 */
+  background: var(--surface-inset);
+  transition: border-color .15s ease, opacity .15s ease;
+}
+
+/* 被拖动的那一块压淡：让下面的落点更醒目。节点本身不参与重排
+   （重排是数据层的事 + 重绘，见 sidebar-pane.tsx 的 startDrag） */
+.sc-group.is-dragging { opacity: .45; }
+
+/* 整组隐藏：虚线边框 + 标题降一档。组内的行照常可编辑 ——
+   隐藏不等于清空，重新显示时那些行的显隐状态要原样还在 */
+.sc-group.is-hidden { border-style: dashed; }
+.sc-group.is-hidden .sc-group-title { color: var(--text-3); }
+.sc-group.is-hidden .sc-items { opacity: .55; }
+
+/* ─── 组头 ─── */
+.sc-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.sc-group.is-hidden .sc-group-head { border-bottom-color: transparent; }
+
+/* 分组名：看起来是文字、行为是按钮（点了进改名）。所以清掉 button 的默认外观，
+   只在悬停时给一条虚线下划线提示「这里可以改」 */
+.sc-group-title {
+  height: auto;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px dashed transparent;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 650;
+  line-height: 1.5;
+  text-align: left;
+}
+
+.sc-group-title:hover:not(:disabled) {
+  background: none;
+  border-color: transparent;
+  border-bottom-color: var(--border-strong);
+  color: var(--text);
+}
+
+/* 改名输入框：尺寸贴着原来的文字块，切换时组头高度不跳 */
+.sc-rename {
+  width: 132px;
+  height: 24px;
+  padding: 0 7px;
+  border-radius: var(--r-xs);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.sc-group-meta {
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.sc-group-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+
+/* ─── 拖拽把手 ───
+   与账号页分组模式的把手同一形态（六点图标 + grab / grabbing 光标）。
+   做成 <span role="button"> 而不是 <button>：它在行/组头里只是拖动入口，
+   不参与「点击动作」，用 span 可以避开通用 button 的整块外观与 30px 行高。 */
+.sc-grip {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 24px;
+  color: var(--text-3);
+  cursor: grab;
+  /* 触摸设备上别让浏览器把拖动解释成滚动 */
+  touch-action: none;
+  border-radius: var(--r-xs);
+}
+
+.sc-grip:hover { color: var(--text); }
+.sc-grip:active { cursor: grabbing; }
+.sc-grip:focus-visible { box-shadow: var(--ring); }
+
+/* ─── 组头的小图标按钮（＋ / 眼睛）───
+   26px 见方、无边框、悬停才出底 —— 组头里已经有标题与计数，
+   再画两枚带框的按钮会把那一行压得太重。 */
+.sc-icon-btn {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-3);
+}
+
+.sc-icon-btn:hover:not(:disabled) {
+  background: var(--nav-hover);
+  border-color: transparent;
+  color: var(--text);
+}
+
+.sc-icon-btn:disabled { opacity: .38; cursor: not-allowed; }
+
+/* ─── 删除（文字按钮）───
+   危险动作，但不必常驻红底：悬停时才转成 danger 语义色，
+   平时与组头其它动作同档，避免「每个分组上都挂一颗红按钮」。 */
+.sc-text-btn {
+  height: 24px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.sc-text-btn:hover:not(:disabled) {
+  background: var(--danger-soft);
+  border-color: transparent;
+  color: var(--danger);
+}
+
+.sc-text-btn:disabled { opacity: .38; cursor: not-allowed; }
+
+/* ─── 菜单行 ─── */
+.sc-items {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px;
+}
+
+.sc-item {
+  padding: 3px 4px;
+  border-radius: var(--r-sm);
+}
+
+.sc-item:hover { background: var(--surface-2); }
+
+/* 单独隐藏的菜单：整行降透明度。仍然可点 —— 用户要能把它打开回来 */
+.sc-item.is-hidden { opacity: .5; }
+
+/* 被拖动的那一行：压得更淡，且不吃指针事件 —— 否则 elementFromPoint
+   每次都命中它自己，落点判定永远算不出下一行 */
+.sc-item.is-dragging { opacity: .3; pointer-events: none; }
+
+.sc-item-ico {
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  color: var(--text-2);
+}
+
+.sc-item-ico svg { display: block; }
+
+.sc-item-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+/* 固定项那一枚「固定」徽章不参与压缩：行宽不够时先压标签 */
+.sc-item > .badge { flex: 0 0 auto; }
+
+/* ─── 空分组提示 ───
+   一个空组不画任何行会让组头孤零零悬着；虚线框说明「这里等着放东西」。 */
+.sc-empty {
+  margin: 2px;
+  padding: 9px 8px;
+  border: 1px dashed var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text-3);
+  font-size: 11px;
+  text-align: center;
+}
+
+/* ─── 新建分组 ─── */
+.sc-add { padding-top: 2px; }
+
+.sc-add-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sc-add-form input { flex: 1 1 auto; height: 30px; }
+
+/* ─── 拖动期间挂在 body 上的全局态 ───
+   与表格列设置的 body.colset-dragging 同义：拖过文本会触发原生的拖选，
+   拖拽会话就「断」了；光标统一成抓取态，让「正在拖」这件事在指针上也看得见。 */
+body.sc-dragging { user-select: none; cursor: grabbing; }
+body.sc-dragging * { cursor: grabbing !important; }
+
+/* 窄窗口：动作区会挤，删掉「删除」的文字只留图标级尺寸不合适（按钮是纯文字），
+   改为让组头换行 —— 组名一行、动作一行，比把名字截断好读 */
+@media (max-width: 900px) {
+  .sc-group-head { flex-wrap: wrap; }
+  .sc-group-meta { flex: 1 1 auto; }
+  .sc-group-actions { flex: 1 1 100%; justify-content: flex-end; }
+}

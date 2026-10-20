@@ -1,6 +1,6 @@
 [package]
 name = "agent2api-server"
-version = "3.1.0"
+version = "3.2.0-beta.1"
 description = "Agent2API 网关本体 — 多提供商本地网关（桌面端与 headless 服务器共用）"
 authors = ["Agent2API"]
 edition = "2021"
@@ -138,6 +138,10 @@ windows = { version = "0.61", features = [
     # 枚举注册表卸载项定位客户端安装目录
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
+    # 内核进程管理（core/sub_kernel/runtime.rs）：OpenProcess / TerminateProcess
+    # / QueryFullProcessImageNameW 取代 spawn taskkill（理由见 kill_by_pid 的
+    # 说明）。Foundation 由 Win32 父特性自动带上（CloseHandle 在它里面）。
+    "Win32_System_Threading",
 ] }
 # Windows 服务形态（bin/service.rs）：`--service` 参数下把进程交给 SCM
 # （StartServiceCtrlDispatcherW + 控制事件回调 + 状态上报）。

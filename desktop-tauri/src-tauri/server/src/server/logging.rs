@@ -199,6 +199,15 @@ fn log_file_path() -> PathBuf {
     crate::paths::config_dir().join("logs").join("server.log")
 }
 
+/// 日志文件路径的对外只读形态（设置页「版本信息」展示用）。
+///
+/// 与 [`log_file_path`] 同一份口径：排障时用户要看的就是「日志到底落在哪」，
+/// 而那个位置可能被 `AGENT2API_LOG_FILE` 改过 —— 页面显示约定路径会把人
+/// 引到一个空文件上。
+pub fn log_file_path_public() -> PathBuf {
+    log_file_path()
+}
+
 /// 打开（并按需轮转）日志文件。
 ///
 /// 轮转用 `.1` 后缀覆盖旧的那一代，不做多代滚动 —— 服务日志的主要用途是

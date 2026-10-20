@@ -6,15 +6,18 @@
 #
 # 做三件事：
 #   1. 下载 build 工作流的产物 artifact（windows-nsis / macos-universal /
-#      linux-desktop，以及 linux-server-amd64 / -arm64 两个容器内更新包）到 dist/；
+#      linux-desktop / android-apk / ios-ipa，以及 linux-server-amd64 / -arm64
+#      两个容器内更新包）到 dist/；
 #   2. 用 tag 所指提交的提交信息（= 更新日志，见 .agents/skills/release-flow/SKILL.md
 #      第 5 节）创建 / 更新 GitHub Release 并挂全部附件；
 #   3. 打印验收提示。
 #
 # ── artifact 与新老 tag 的关系 ──────────────────────────────────
-# 三类 artifact 都是分阶段加上的，老 tag 的 run 里可能缺：
+# 各类 artifact 都是分阶段加上的，老 tag 的 run 里可能缺：
 #   · linux-server-*（容器内一键更新，v3.0.4 起）
-#   · linux-desktop（Linux 桌面端 deb / AppImage，本次新增）
+#   · linux-desktop（Linux 桌面端 deb / AppImage，v3.0.9 起）
+#   · android-apk（手机端 APK）
+#   · ios-ipa（手机端 iOS 包，未签名 / 已签名两种都可能）
 # 缺任一类时脚本**只提醒、不中断** —— 历史 tag 仍可重跑收尾。
 #
 # 幂等可重跑：附件 `--clobber` 覆盖上传。
@@ -149,6 +152,34 @@ else
   echo "    Release 将不含 Windows 服务端包，Windows Server 用户只能自己编译"
 fi
 
+# Android APK（build 工作流的 android job 上传，含 .sha256）。
+# 接入 CI 之前的 tag 没有这个 artifact —— 提醒一句继续走。
+#
+# 与前面几个包不同，APK 的附件名**就是用户看到的文件名**：安装文档里写的是
+# `Agent2API-<版本>.apk`，android job 已按这个形状重命名，这里原样上传即可。
+if [ -d dist/android-apk ]; then
+  for file in dist/android-apk/*; do
+    ASSETS+=("$file")
+  done
+  echo "→ 已下载 $(basename "$(ls dist/android-apk/*.apk)")（含 .sha256）"
+else
+  echo "⚠️  这个 run 里没有 android-apk 产物（APK 接入 CI 之前的 tag？）——"
+  echo "    Release 将不含手机端安装包，Android 用户只能从旧版本或自行编译获取"
+fi
+
+# iOS IPA（build 工作流的 ios job 上传，含 .sha256）。
+# 默认是**未签名**包：用户拿 AltStore / SideStore 用自己的 Apple ID 重签后安装；
+# 配齐 iOS 签名 secret 的仓库出的是已签名包。两种都能挂 Release，脚本不区分。
+if [ -d dist/ios-ipa ]; then
+  for file in dist/ios-ipa/*; do
+    ASSETS+=("$file")
+  done
+  echo "→ 已下载 $(basename "$(ls dist/ios-ipa/*.ipa)")（含 .sha256）"
+else
+  echo "⚠️  这个 run 里没有 ios-ipa 产物（iOS 接入 CI 之前的 tag？）——"
+  echo "    Release 将不含 iOS 安装包，iPhone 用户只能走 PWA 或自行编译"
+fi
+
 # ── 2. 更新日志 = tag 所指提交的提交信息 ──────────────────────
 NOTES_FILE=$(mktemp)
 trap 'rm -f "$NOTES_FILE"' EXIT
@@ -191,6 +222,10 @@ echo "      agent2api-server-linux-{amd64,arm64}.tar.gz 与各自的 .sha256 都
 echo "  [6] 服务端包（无 GUI）：Release 里还有 windows-server-amd64.zip（含 .sha256）。"
 echo "      两个平台的包解包后都应看到安装脚本 —— Linux: install.sh / agent2api.service"
 echo "      / agent2api.env.example；Windows: install-service.ps1"
+echo "  [7] 手机端：Release 里有 Agent2API-${TAG#v}.apk 与 .sha256；装到 Android 上"
+echo "      能启动、能添加网关并登录（版本号看系统「应用信息」页，手机端界面不显示）"
+echo "  [8] iOS：Release 里有 Agent2API-${TAG#v}.ipa 与 .sha256；未签名包需用"
+echo "      AltStore / SideStore 重签后安装，已签名包可直接走 TestFlight / 描述文件"
 if [ "$PRERELEASE" = true ]; then
-  echo "  [7] Docker 镜像：只出 $TAG 那个版本 tag（beta tag 不移动 :latest）"
+  echo "  [9] Docker 镜像：只出 $TAG 那个版本 tag（beta tag 不移动 :latest）"
 fi

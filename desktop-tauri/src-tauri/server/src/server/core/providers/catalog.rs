@@ -210,6 +210,31 @@ pub(crate) fn refresh_meta(kind: ProviderKind) -> (bool, i64) {
             super::qclaw::models::remote_refreshed(),
             super::qclaw::models::last_refreshed_at(),
         ),
+        // ModelScope 的两个站点各有一份独立清单（缓存按地区分格，见
+        // `modelscope::models` 的模块头）：这里如实各查**自己那一格**。
+        // 上游**没有**内置兜底清单，所以「有内容」就等于「远程拉到过」。
+        ProviderKind::Modelscope | ProviderKind::ModelscopeIntl => {
+            let region = super::modelscope::Region::from_kind(kind)
+                .unwrap_or(super::modelscope::Region::Cn);
+            (
+                super::modelscope::models::remote_refreshed(region),
+                super::modelscope::models::last_refreshed_at(region),
+            )
+        }
+        // AtomCode：清单来自 `GET {codingplan}/coding-plan/models-v2`。
+        // 本家**没有内置兜底清单**（写死的模型点一下可能是「参数错误」，
+        // 见 `atomcode/models.rs` 的模块头），所以「有目录」就是「远程拉到过」。
+        ProviderKind::Atomcode => (
+            super::atomcode::models::remote_refreshed(),
+            super::atomcode::models::last_refreshed_at(),
+        ),
+        // LobsterAI：清单来自 `GET {api}/api/models/available`（带 keyfrom query）。
+        // 拉不到时回落内置的 19 条静态表，所以「有远程内容」才算远程来源
+        // —— 与 Loomy / CommandCode 同一口径（`remote_refreshed` 只看落地的那些）。
+        ProviderKind::LobsterAi => (
+            super::lobsterai::models::remote_refreshed(),
+            super::lobsterai::models::last_refreshed_at(),
+        ),
     }
 }
 

@@ -23,7 +23,7 @@ Agent2API는 여러 AI 데스크톱 클라이언트에 로그인된 계정을 �
 ## ✨ 핵심 기능
 
 - 🔌 **OpenAI 호환** —— 클라이언트에 `base_url`만 넣으면 바로 사용. Chat / Responses / Messages 세 가지 프로토콜 모두 지원
-- 🏪 **내장 공급자 17곳** —— WorkBuddy, 小浣熊, CatPaw, Qoder, Trae 등 바로 사용 가능하며 사용자 지정 공급자도 지원
+- 🏪 **내장 공급자 22곳** —— WorkBuddy, 小浣熊, CatPaw, Qoder, Trae 등 바로 사용 가능하며 사용자 지정 공급자도 지원
 - 🔁 **자격 증명 자동 갱신** —— 토큰은 만료 전 자동 교체, 만료 임박분은 일괄 갱신, 모델 카탈로그도 함께 최신화
 - 🪂 **다중 계정 로테이션** —— 우선순위대로 큐잉, 429는 다음 계정으로, 한도 쿨다운 중엔 기다리지 않고 건너뜀
 - 🛡️ **아웃바운드 프록시** —— 계정마다 전용 출구 IP 지정, 아웃바운드 핑거프린트는 공식 클라이언트로 위장
@@ -79,6 +79,9 @@ Agent2API는 여러 AI 데스크톱 클라이언트에 로그인된 계정을 �
 | OfficeAce(Huawei Cloud, OfficeClaw) | ✓ | ✓ | ✓ | ✓ | ✓ | — |
 | OrcaTerm(Tencent Cloud) | ✓ | ✓ | ✓ | ✓ | — | — |
 | 智谱清言(Zhipu Qingyan) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| ModelScope(魔搭, 중국판 / 국제판) | ✓ | ✗ | ✓ | ✓ | ✓ | — |
+| AtomCode(AtomGit / GitCode) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| LobsterAI(NetEase Youdao, 有道龙虾) | ✓ | ✓ | ✓ | ✓ | ✓ | — |
 | 사용자 지정 프로바이더 | ✓ | — | ✓ | — | — | — |
 
 > 참고: 모델 목록의 ✓는 온라인 자동 가져오기를 지원한다는 뜻입니다(일부 플랫폼은 내장 정적 목록도 함께 사용). ZCode는 내장 정적 목록만 제공합니다. 토큰 자동 갱신의 ✗는 해당 플랫폼에 사용 가능한 갱신 수단이 없다는 뜻입니다(계정은 자격 증명이 유효한 동안 정상적으로 사용 가능). Qoder 출석은 중국판에서만 지원됩니다.
@@ -123,6 +126,8 @@ docker run -d --name agent2api --restart unless-stopped -p 3065:3065 -v ./data:/
 ```
 
 어느 형태든 설치 후 패널(`http://127.0.0.1:3065/`. 서버와 Docker 는 호스트 IP 로 바꿔서)을 열어 관리자 계정을 등록하고, "게이트웨이 키" 페이지에서 키를 만드세요. 연결 확인: `curl http://127.0.0.1:3065/health`
+
+**모바일**: 브라우저에서 `http://<게이트웨이 IP>:3065/m`를 열면 됩니다("홈 화면에 추가"로 전체 화면 PWA 가능). 독립 아이콘이 필요하면 Release의 `Agent2API-<버전>.apk`(Android) 또는 `Agent2API-<버전>.ipa`(iOS, 미서명 — 직접 재서명 필요)를 설치하세요. 자세한 내용: [설치 및 배포 → 모바일](install.ko.md#모바일).
 
 ## 📸 화면 미리보기
 
@@ -178,7 +183,7 @@ macOS 의 `.dmg` 는 **macOS 에서만 빌드할 수 있습니다**(`npm --prefi
 
 ### 학습과 교류 목적에 한정
 
-이 프로젝트는 HTTP 리버스 프록시, SSE 스트리밍 패스스루, 다중 업스트림 프로토콜 적응, 데스크톱 패키징(Tauri) 같은 기술 주제를 익히기 위한 실습 프로젝트이며, **개인 학습과 연구 목적으로만** 제공됩니다. 공식 제품이 아니며 Tencent 및 WorkBuddy / CodeBuddy, Meituan 및 CatPaw, SenseTime 및 小浣熊, Zhipu 및 AutoClaw / autoglm, Alibaba 및 Qoder / Accio, Huawei Cloud 및 CodeArts / OfficeAce, ByteDance 및 Trae, iFlytek 및 Loomy, Baidu Wenku 및 KukuAI, 长亭科技 및 MonkeyCode, Command Code, Google 및 Antigravity 와 아무런 관련이 없고, 그 승인이나 후원도 받지 않았습니다.
+이 프로젝트는 HTTP 리버스 프록시, SSE 스트리밍 패스스루, 다중 업스트림 프로토콜 적응, 데스크톱 패키징(Tauri) 같은 기술 주제를 익히기 위한 실습 프로젝트이며, **개인 학습과 연구 목적으로만** 제공됩니다. 공식 제품이 아니며 Tencent 및 WorkBuddy / CodeBuddy, Meituan 및 CatPaw, SenseTime 및 小浣熊, Zhipu 및 AutoClaw / autoglm, Alibaba 및 Qoder / Accio, Huawei Cloud 및 CodeArts / OfficeAce, ByteDance 및 Trae, iFlytek 및 Loomy, Baidu Wenku 및 KukuAI, 长亭科技 및 MonkeyCode, Command Code, Google 및 Antigravity, Alibaba 및 ModelScope(魔搭), GitCode / AtomGit 및 AtomCode, NetEase Youdao 및 LobsterAI(有道龙虾) 와 아무런 관련이 없고, 그 승인이나 후원도 받지 않았습니다.
 
 ### 리버스 프록시 동작에 대하여
 

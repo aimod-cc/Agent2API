@@ -8,6 +8,7 @@ import { fetchRequests, type RequestPage, type RequestRow } from '../api/gateway
 import { ellipsisMiddle, formatClock, formatDuration, formatInt } from '../lib/format'
 import { providerLabel } from '../lib/providers'
 import { usePolling } from '../lib/usePolling'
+import { usePullToRefresh, PullIndicator } from '../components/PullToRefresh'
 import { t } from '../i18n'
 
 /**
@@ -35,11 +36,16 @@ export function RequestsPage() {
   const [detail, setDetail] = useState<RequestRow | null>(null)
   const [loadingMore, setLoadingMore] = useState(false)
 
+  // 当前筛选对应的服务端 status 参数：失败与在途都走服务端筛选，
+  // 这样「加载更早」翻页时不会混进其它状态的记录；「有重试」后端没有对应参数，仍靠客户端过滤。
+  const statusParam: 'ok' | 'error' | 'running' | undefined =
+    filter === 'error' ? 'error' : filter === 'running' ? 'running' : undefined
+
   const load = async () => {
     try {
       const next = await fetchRequests({
         limit: PAGE_SIZE,
-        status: filter === 'error' ? 'error' : undefined,
+        status: statusParam,
       })
       setPage(next)
       setExtra([])
@@ -51,6 +57,8 @@ export function RequestsPage() {
 
   usePolling(load, 30_000, [filter])
 
+  const pull = usePullToRefresh({ onRefresh: load })
+
   const rows = [...(page?.entries || []), ...extra]
   const filtered = rows.filter(row => {
     if (filter === 'retry') return (row.attempts || 1) > 1
@@ -61,7 +69,9 @@ export function RequestsPage() {
   const loadMore = async () => {
     setLoadingMore(true)
     try {
-      const next = await fetchRequests({ offset: rows.length, limit: PAGE_SIZE })
+      // offset 用已加载的原始条数：服务端分页按未过滤的行算，
+      // 「有重试 / 在途」这类客户端二次过滤不影响翻页基准
+      const next = await fetchRequests({ offset: rows.length, limit: PAGE_SIZE, status: statusParam })
       setExtra(prev => [...prev, ...(next.entries || [])])
     } catch (failure) {
       store.toast(failure instanceof Error ? failure.message : String(failure), 'err')
@@ -75,9 +85,11 @@ export function RequestsPage() {
   const running = Number(page?.running) || 0
 
   return (
-    <div className='m-page'>
-      <PageIntro actions={<IconButton name='refresh' label={t('刷新')} onClick={() => void load()} />}
-      />
+    <div className='m-page m-fixed' ref={pull.bindRef}>
+      <PullIndicator pull={pull.pull} refreshing={pull.refreshing} />
+      <div className='m-sticky'>
+        <PageIntro actions={<IconButton name='refresh' label={t('刷新')} onClick={() => void load()} />}
+        />
 
       <div className='m-section' style={{ marginTop: 0 }}>
         <div
@@ -118,7 +130,9 @@ export function RequestsPage() {
           ))}
         </div>
       </div>
+      </div>
 
+      <div className='m-body'>
       {error ? <ErrorNote text={error} /> : null}
       {!page ? <SkeletonList rows={4} height={104} /> : null}
 
@@ -143,6 +157,8 @@ export function RequestsPage() {
           </button>
         </div>
       ) : null}
+
+      </div>
 
       <RequestSheet row={detail} onClose={() => setDetail(null)} />
     </div>

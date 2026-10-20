@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { PageIntro, IconButton, Badge, Empty, ErrorNote, SkeletonList } from '../components/ui'
 import { GlyphLogo } from '../components/ProviderLogo'
 import { Icon } from '../components/Icon'
+import { PullIndicator, usePullToRefresh } from '../components/PullToRefresh'
 import { store } from '../state/store'
 import {
   fetchProxyPool,
@@ -41,6 +42,8 @@ export function ProxiesPage() {
   }
 
   usePolling(load, 120_000)
+
+  const pull = usePullToRefresh({ onRefresh: load })
 
   const items = data?.items || []
   const enabled = items.filter(item => item.enabled).length
@@ -99,7 +102,8 @@ export function ProxiesPage() {
   }
 
   return (
-    <div className='m-page'>
+    <div className='m-page' ref={pull.bindRef}>
+      <PullIndicator pull={pull.pull} refreshing={pull.refreshing} />
       <PageIntro actions={<IconButton name='refresh' label={t('刷新')} onClick={() => void load()} />}
       />
 
@@ -157,7 +161,7 @@ export function ProxiesPage() {
                     {item.name || t('未命名')}
                   </div>
                   <div style={{ fontSize: 11.5, color: 'var(--m-text-3)', marginTop: 2, fontFamily: 'var(--m-mono)' }}>
-                    {addressOf(item)}
+                    {addressOf(item, data?.kernelInstalled)}
                   </div>
                 </div>
                 <SwitchSmall
@@ -192,7 +196,7 @@ export function ProxiesPage() {
                   />
                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{text}</span>
                 </span>
-                {item.usedBy ? <span style={{ flex: 'none' }}>{t('{n} 个账号引用', { n: item.usedBy })}</span> : null}
+                {item.usedBy?.length ? <span style={{ flex: 'none' }}>{t('{n} 个账号引用', { n: item.usedBy.length })}</span> : null}
                 {last?.at ? <span style={{ flex: 'none' }}>{formatRelative(last.at)}</span> : null}
                 <button
                   type='button'
@@ -228,11 +232,19 @@ export function ProxiesPage() {
   )
 }
 
-function addressOf(item: PoolItem): string {
+function addressOf(item: PoolItem, installed?: boolean): string {
   if (item.address) return String(item.address)
   const protocol = item.protocol || 'http'
   if (item.host && item.port) return `${protocol}://${item.host}:${item.port}`
-  return t('未分配端口')
+  // 订阅节点没有地址 —— 按成因分档，与桌面端同一口径。**首要判据是内核**：
+  // 没装内核就没有监听器，此时说「未被使用」会把用户引去账号页（做无用功）
+  if (item.source === 'subscription') {
+    if (installed === false) return t('内核未安装')
+    if (item.orphan) return t('订阅已移除')
+    if (item.enabled === false) return t('已禁用')
+    return item.usedBy?.length ? t('端口准备中') : t('未被使用')
+  }
+  return t('地址不完整')
 }
 
 function SwitchSmall({

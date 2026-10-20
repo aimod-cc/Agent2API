@@ -233,21 +233,22 @@ The desktop installers (Windows / macOS) already ship the web panel's `ui/` fold
 
 ## Mobile
 
-There are two forms — pick what you need:
+There are three forms — pick what you need:
 
 | Form | How to install | Good for |
 | --- | --- | --- |
-| **Browser / PWA** | Open `/m` in a phone browser; optionally "Add to Home Screen" | Quick look, nothing to install |
+| **Browser / PWA** | Open `/m` in a phone browser; optionally "Add to Home Screen" | Quick look, nothing to install, the easiest option on iPhone |
 | **Android APK** | Install `Agent2API-<version>.apk` | Home-screen icon, full screen, multiple servers |
+| **iOS IPA** | Install `Agent2API-<version>.ipa` (unsigned — you re-sign it) | Home-screen icon, full screen |
 
-Both forms run the same UI code. The difference is who serves the page: the PWA is served by the gateway (so "also expose the web management panel" must be on), while the APK ships the UI inside the package (so it can start the UI offline and does not need that switch).
+All three run the same UI code. The difference is who serves the page: the PWA is served by the gateway (so "also expose the web management panel" must be on), while the APK / IPA ship the UI inside the package (so they can start the UI offline and do not need that switch).
 
 ### Prerequisites (by form)
 
 **Desktop (Windows / macOS / Linux)**: both switches, one without the other will not work.
 
 1. "Settings → General → LAN access" — lets devices on the LAN reach the gateway. The enable flow asks you to register a panel administrator first and adds a key named "default" automatically.
-2. "Settings → General → LAN access → also expose the web management panel" — serves the `ui/` static folder. **Required for the browser / PWA form** (`/m` is served by the gateway, so it returns 404 while this switch is off). **The APK does not need it** (the UI is inside the package), but it still needs switch 1 — otherwise the gateway only listens on `127.0.0.1` and the phone cannot reach it.
+2. "Settings → General → LAN access → also expose the web management panel" — serves the `ui/` static folder. **Required for the browser / PWA form** (`/m` is served by the gateway, so it returns 404 while this switch is off). **The APK / IPA do not need it** (the UI is inside the package), but they still need switch 1 — otherwise the gateway only listens on `127.0.0.1` and the phone cannot reach it.
 
 Both require a restart to take effect.
 
@@ -265,17 +266,36 @@ The first visit redirects to the login page; sign in with the panel administrato
 
 On first launch you get a "Servers" screen. Three steps:
 
-1. Tap "Add" and enter the gateway's `IP:port` (e.g. `192.168.1.23:3065`; the port defaults to 3065);
+1. Tap "Add" and enter the gateway's `IP or domain:port` (e.g. `192.168.1.23:3065`). The scheme may be `http://` or `https://` (http is assumed if omitted); without a port, http gets 3065 and https uses the standard 443;
 2. Tap "Connect & save" — it probes the gateway first, so a wrong address or a gateway without LAN access is reported right there;
 3. A login page appears. Enter this gateway's administrator account and password (if none exists yet, it becomes "Create admin account").
 
-**Multiple servers**: tap "Add" again. Each server keeps its own sign-in — switching over does not require signing in again, and neither does switching back. The entry point is "Settings → Servers"; tap a row to switch to it.
+**Multiple servers**: tap "Add" again. Each server keeps its own sign-in — switching over does not require signing in again, and neither does switching back. The entry point is "Settings → Servers"; tap a row to switch to it. **The login page also has a "Switch server" link**, so after signing out (or being signed out) you don't have to log in first just to reach that list.
 
 **Known limitations of the APK**:
 
-- Android only. iOS requires an Apple Developer account for signing, or installing via Xcode yourself (sideloaded signatures expire after 7 days).
-- It talks to `http://` LAN addresses in cleartext. The risk is "sniffable on the same LAN"; the gateway itself still requires administrator login. To remove it, give the gateway TLS and enter an `https://` address (the parsing is the same, it just will not prepend `http`).
+- Without a scheme it uses a cleartext `http://` LAN address. The risk is "sniffable on the same LAN"; the gateway itself still requires administrator login. To remove it, give the gateway TLS (a reverse proxy or tunnel works) and enter an `https://` address — the scheme is preserved as typed, and an invalid certificate makes the probe fail immediately.
 - The UI follows the APK version, not the gateway. If a gateway upgrade adds new screens, you need a newer APK to see them; pure data changes are unaffected.
+
+### Install the IPA (iOS)
+
+`Agent2API-<version>.ipa` in the Release is **unsigned by default** — Apple does not let developers hand out installable apps freely, so an unsigned package has to be re-signed once with your own Apple ID. Three routes:
+
+| Route | Requires | Validity |
+| --- | --- | --- |
+| **AltStore / SideStore / Sideloadly** | A computer (first time) + a free Apple ID | 7 days, re-sign afterwards |
+| **Apple Developer Program** | $99/year, your own certificate and provisioning profile | 1 year |
+| **App Store / TestFlight** | $99/year + review | Long term |
+
+To sideload: drop the `.ipa` into AltStore (or SideStore), re-sign with your Apple ID, install. Free accounts are capped at 3 apps at a time and must be re-signed every 7 days.
+
+**If you only want to check the gateway from an iPhone, just open `/m` in Safari and "Add to Home Screen"** — no IPA needed. It looks nearly identical to a native app and saves you the re-signing chore.
+
+**Known limitations of the IPA**:
+
+- **In-app updates can only link out**: iOS does not allow an app to download and install executable code, so "Software update" in settings shows a "Get it" button that opens the Release page instead of downloading like Android does. The PWA form updates through the Service Worker — just refresh.
+- Cleartext `http://` gateways: `Info.plist` already relaxes ATS and declares the local-network usage. The first connection triggers an "allow local network" prompt — you must accept it, otherwise every request fails with no visible explanation.
+- Everything else matches the APK: the UI follows the package version, and http is the default scheme.
 
 ### Add to home screen (browser / PWA)
 
@@ -288,7 +308,7 @@ Opening it from the home screen icon lands directly on the mobile home page. Whe
 
 When a new version is available, a "Restart & update" bar floats at the bottom: after a gateway upgrade the new UI is already downloaded, and one tap switches to it (ignoring it is fine too — it takes effect on the next open).
 
-> **Why no native app or store package**: the mobile UI always talks to a gateway running on **another machine** (the gateway needs to read that machine's client logins and write its config files — it cannot run on a phone). It is fundamentally "remote access to an HTTP service", and the browser is the right carrier: same-origin auth, no install, and it upgrades together with the gateway. The PWA form adds full screen and a home-screen icon, so it feels like a native app.
+> **Why no store package**: the mobile UI always talks to a gateway running on **another machine** (the gateway needs to read that machine's client logins and write its config files — it cannot run on a phone). It is fundamentally "remote access to an HTTP service", and the browser is the right carrier: same-origin auth, no install, and it upgrades together with the gateway. The PWA form adds full screen and a home-screen icon, so it feels like a native app; the APK / IPA package that same UI to get a standalone icon and an offline shell.
 >
 > **Service Worker (offline shell) only works over `https` or `localhost`**: LAN access uses `http://<IP>`, where browsers do not provide SW, so the mobile UI will not open while offline. That is a browser security restriction, not a missing feature — in normal use the gateway is online, so it does not matter.
 

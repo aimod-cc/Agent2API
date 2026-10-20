@@ -9,7 +9,7 @@
   "。一把启用的 Key 都没有时不鉴权（默认网关只监听 127.0.0.1；在设置页开启「局域网访问」后监听所有网卡，鉴权与安全闸门随之启用）。": ". Se nenhuma Key estiver habilitada, não há autenticação (por padrão, o gateway escuta apenas 127.0.0.1; após habilitar “Acesso LAN” na página de configurações, ele passa a escutar todas as interfaces de rede, e a autenticação e as barreiras de segurança entram em vigor).",
   "。用「网关 Key」页里任一启用的 Key；一把都没有时不鉴权。": "",
   "不受鉴权限制，配 Key 前就能拉": "",
-  "启用": "habilitada",
+  "启用": "ativos",
   "填进客户端的「API 地址 / Base URL」": "Preencha no campo “Endereço da API / Base URL” do cliente",
   "复制命令": "",
   "复制地址": "Copiar endereço",

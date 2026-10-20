@@ -69,6 +69,10 @@ fn main() -> ExitCode {
     // 恰恰是最需要看日志的情形。所以先把文件通道打开，再做任何可能报错的事。
     #[cfg(windows)]
     if service::requested() {
+        // 运行形态标志：设置页「版本信息」要能区分「Windows 服务」与
+        // 「前台跑的 headless」。`--service` 只在这里出现一次，置位后
+        // 运行期再没有别的可观察痕迹（SCM 拉起与双击启动的进程一模一样）。
+        agent2api_server::server::core::system_info::set_service_mode(true);
         logging::init_file_sink();
         let launch = match parse_launch() {
             Ok(launch) => launch,

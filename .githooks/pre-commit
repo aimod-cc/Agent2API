@@ -1,0 +1,89 @@
+#!/bin/sh
+#
+# pre-commit：本次提交若动了前端源码，就自动重建入库产物并一起提交。
+#
+# ── 为什么需要它 ──────────────────────────────────────────────
+# 本仓库把前端构建产物**入库**（ui/islands/ui.js、ui/islands/ui.css、
+# ui/i18n/**、ui/m/**、ui/sw.js），Tauri 打包（tauri.conf.json 的
+# frontendDist 指向 ui/）与 Docker 镜像（Dockerfile COPY ui/）都直接取
+# 这些字节 —— 仓库里那几份就是用户拿到的界面，没有任何构建兜底。
+#
+# 于是「改了源码忘了重建」会一路进分支，而 review 看不出 1 MB 压缩产物
+# 里少了什么。CI 的 frontend-artifacts 闸能在推送后拦住，但那时代码已经
+# 进了远端；这道钩子把拦截提前到本地提交前 —— 忘了也交不上去。
+#
+# ── 行为 ──────────────────────────────────────────────────────
+# 检测暂存区里是否含前端源码改动，有则重建对应产物并 git add：
+#   ui-islands / ui-kit → desktop-tauri/ui/islands/{ui.js,ui.css}
+#   mobile              → desktop-tauri/ui/m/** 与 desktop-tauri/ui/sw.js
+#   i18n                → desktop-tauri/ui/i18n/**
+# 任何一步构建失败都会中止提交（产物没更新，提交出去就与源码不同源）。
+#
+# ── 逃生门 ────────────────────────────────────────────────────
+# 刻意想分开提交（例如先提源码再提产物）时：
+#   git commit --no-verify
+# 关掉钩子（本机生效）：
+#   git config --unset core.hooksPath
+
+set -e
+
+# 暂存区名单落到临时文件：管道里的 while 跑在子 shell 里，变量传不出来
+staged="$(mktemp)"
+trap 'rm -f "$staged"' EXIT
+git diff --cached --name-only --diff-filter=ACMR > "$staged"
+
+need_islands=0
+need_mobile=0
+need_i18n=0
+
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  case "$f" in
+    # ui-kit 以源码方式被两端引用：岛走 vite alias，手机端引它的样式
+    desktop-tauri/ui-kit/* | desktop-tauri/ui-islands/*)
+      need_islands=1
+      need_mobile=1
+      ;;
+    desktop-tauri/i18n/*)
+      need_i18n=1
+      ;;
+    # 手机端原生工程不参与 Web 产物，改了不用重建
+    desktop-tauri/mobile/android/* | desktop-tauri/mobile/ios/* | desktop-tauri/mobile/android-www/*)
+      ;;
+    desktop-tauri/mobile/*)
+      need_mobile=1
+      ;;
+  esac
+done < "$staged"
+
+if [ "$need_islands" = 0 ] && [ "$need_mobile" = 0 ] && [ "$need_i18n" = 0 ]; then
+  exit 0
+fi
+
+if ! command -v npm > /dev/null 2>&1; then
+  echo "pre-commit: 检测到前端源码改动，但找不到 npm，无法重建产物。" >&2
+  echo "  装好 Node 后重试，或用 git commit --no-verify 跳过（不推荐）。" >&2
+  exit 1
+fi
+
+echo "pre-commit: 检测到前端源码改动，重建入库产物……"
+
+if [ "$need_islands" = 1 ]; then
+  npm --prefix desktop-tauri/ui-islands run build
+fi
+if [ "$need_mobile" = 1 ]; then
+  npm --prefix desktop-tauri/mobile run build
+fi
+if [ "$need_i18n" = 1 ]; then
+  npm --prefix desktop-tauri/i18n run build
+fi
+
+# 只 add 产物所在目录：ui/ 根下的 app.js、css/ 等是手写文件，不归钩子管
+[ "$need_islands" = 1 ] && git add desktop-tauri/ui/islands
+[ "$need_mobile" = 1 ] && git add desktop-tauri/ui/m desktop-tauri/ui/sw.js
+[ "$need_i18n" = 1 ] && git add desktop-tauri/ui/i18n
+
+# 产物更新后可能在暂存区留下差异（也可能没有 —— 那说明本来就同源），
+# 两种情况都放行；真正的把关交给构建是否成功
+echo "pre-commit: 产物已重建并加入本次提交"
+exit 0

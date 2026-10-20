@@ -34,7 +34,7 @@
   "操作失败：{reason}": "Falha na operação: {reason}",
   "新建 API Key": "Nova API Key",
   "新建 Key 与设置可用范围（提供商 / 模型白名单）在桌面端完成。": "",
-  "显示": "Mostrar",
+  "显示": "Visível",
   "未启用鉴权": "Sem autenticação",
   "未命名": "Sem nome",
   "模型：{names}": "Modelos: {names}",

@@ -149,6 +149,7 @@ impl Db {
         let conn = Connection::open(path).map_err(|error| format!("打开数据库失败: {error}"))?;
         apply_pragmas(&conn)?;
         schema::migrate(&conn).map_err(|error| format!("建表/升级 schema 失败: {error}"))?;
+        install_cloud_sync_hook(&conn);
         Ok(Db {
             inner: Arc::new(DbInner {
                 conn: Mutex::new(conn),
@@ -272,6 +273,31 @@ fn apply_pragmas(conn: &Connection) -> Result<(), String> {
          PRAGMA busy_timeout=5000;",
     )
     .map_err(|error| format!("设置数据库 PRAGMA 失败: {error}"))
+}
+
+/// 给主连接装云同步的变更钩子（`core::cloud_sync::auto_sync`）。
+///
+/// ── 只监听三张业务表 ────────────────────────────────────────
+/// `accounts` / `account_usage_records` / `checkin_records`。**不含 `kv`**：
+/// `kv` 里混着 `logsNextId` 这种每秒都在变的本机状态，而 `update_hook` 的回调
+/// 在语句执行期间被调用（连接锁已被持有），在回调里再查「改的是哪个键」属于
+/// 重入 —— 那会让每一次日志写入都多一次查询。kv 的触发改在写入点显式通知
+/// （见 `auto_sync` 模块头）。
+///
+/// ── 注册失败不阻断启动 ──────────────────────────────────────
+/// 钩子只服务自动同步这一个可选功能。注册不上（旧版 SQLite 等）时最坏是
+/// 「自动同步不触发」，手动上传照样可用 —— 不该让整个网关起不来。
+fn install_cloud_sync_hook(conn: &Connection) {
+    let result = conn.update_hook(Some(|_action, _db: &str, table: &str, _rowid: i64| {
+        crate::server::core::cloud_sync::auto_sync::on_table_change(table);
+    }));
+    if let Err(error) = result {
+        // 此时日志库还没装（`Db::open` 早于 `logging::init_store`），只能走控制台
+        crate::server::logging::console_line(
+            "[CloudSync]",
+            &format!("⚠️ 自动同步的数据库钩子注册失败（自动同步将不触发）: {error}"),
+        );
+    }
 }
 
 /// 测试专用：会**自己删文件**的临时库。

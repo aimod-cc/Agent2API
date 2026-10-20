@@ -17,7 +17,7 @@
 //! 都会直接带走整个桌面应用，所以错误一律走 Result + 本模块的类型，
 //! 不用 unwrap/expect。
 
-use axum::http::StatusCode;
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::TimeZone;
@@ -39,6 +39,12 @@ pub struct GatewayError {
     pub status_code: i32,
     pub upstream_code: Option<i64>,
     pub code: Option<String>,
+    /// `Retry-After`（秒）；`None` = 不带这个头。
+    ///
+    /// 只有**算得出恢复时刻**的限额类错误才该有值（见
+    /// [`GatewayError::with_retry_after_seconds`]）：给不出时刻就不给头，
+    /// 让客户端按自己的退避来 —— 编一个等待时长比不给更坏。
+    pub retry_after_secs: Option<u64>,
 }
 
 impl GatewayError {
@@ -49,6 +55,7 @@ impl GatewayError {
             status_code: 500,
             upstream_code: None,
             code: None,
+            retry_after_secs: None,
         }
     }
 
@@ -59,6 +66,7 @@ impl GatewayError {
             status_code: status,
             upstream_code: None,
             code: None,
+            retry_after_secs: None,
         }
     }
 
@@ -91,6 +99,16 @@ impl GatewayError {
     /// 是否为账号限额错误（HTTP 429 或上游 code 6004）
     pub fn is_quota_limit(&self) -> bool {
         self.status_code == 429 || self.upstream_code == Some(QUOTA_LIMIT_CODE)
+    }
+
+    /// 挂上 `Retry-After`（秒）。
+    ///
+    /// 用在**已知恢复时刻**的限额类错误上（上游给了窗口重置文案、我们算得出
+    /// 还差多久）。⚠️ 算不出就别挂 —— 客户端会照这个值退避，编一个时长比不给更坏。
+    /// 0 秒会被响应侧忽略（见 `response`）。
+    pub fn with_retry_after_seconds(mut self, seconds: u64) -> Self {
+        self.retry_after_secs = Some(seconds);
+        self
     }
 
     /// 归一后的状态码：非 100..600 的取值一律当 500（防止把非法码塞进 HTTP 响应）
@@ -149,8 +167,25 @@ impl GatewayError {
     /// 转发链路里 `Err(error) => error.payload_response()` 比
     /// `IntoResponse::into_response(error)` 可读。
     pub fn payload_response(self) -> Response {
+        self.response()
+    }
+
+    /// 唯一的响应构造点：状态码 + body（+ 有恢复时刻时挂 `Retry-After`）。
+    ///
+    /// `IntoResponse` 与 `payload_response` 都走这里，免得两条路只改了一条
+    /// （之前它们各写一遍 `(status, Json(payload))`）。
+    fn response(self) -> Response {
         let status = self.http_status();
-        (status, Json(self.payload())).into_response()
+        // 0 秒不当 `Retry-After` 发：上游说「马上就好」时让客户端自己退避，
+        // 而不是收到一个 `Retry-After: 0` 立刻再打一发。
+        let retry_after = self.retry_after_secs.filter(|seconds| *seconds > 0);
+        let mut response = (status, Json(self.payload())).into_response();
+        if let Some(seconds) = retry_after {
+            if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
+                response.headers_mut().insert(header::RETRY_AFTER, value);
+            }
+        }
+        response
     }
 
     /// HTTP 状态码
@@ -171,8 +206,7 @@ impl std::error::Error for GatewayError {}
 /// 状态码 + OpenAI 风格 body（无需每个 handler 手写转换）。
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
-        let status = self.http_status();
-        (status, Json(self.payload())).into_response()
+        self.response()
     }
 }
 
@@ -314,6 +348,14 @@ pub fn management_error(status: i32, message: impl Into<String>) -> Response {
 /// 的 `\s+`（日期与时间之间至少一个空白）与 `\s*UTC+8` 后缀也补齐了 ——
 /// 上一版只认「一个空格 + 19 字符定长窗口」且不校验 UTC+8。
 pub fn parse_quota_reset_at(text: &str) -> i64 {
+    parse_quota_reset_at_at(text, crate::server::logging::now_ms())
+}
+
+/// [`parse_quota_reset_at`] 的**可注入「现在」**版本。
+///
+/// 只有「当日 / 今日 HH:MM」那一形需要知道今天是哪天（见 `scan_same_day_window`），
+/// 所以把 now 提出来当入参 —— 线上入口仍是不带 now 的那个，测试钉死日期用这个。
+pub fn parse_quota_reset_at_at(text: &str, now_ms: i64) -> i64 {
     let bytes = text.as_bytes();
     // 空白判定：`\s` 在 Node 正则里含空格/制表/换行（字节层面判 ASCII 空白即可）
     let space = |index: usize| -> bool {
@@ -377,7 +419,76 @@ pub fn parse_quota_reset_at(text: &str) -> i64 {
         }
         index += 1;
     }
-    0
+    // ② 「当日 / 今日 HH:MM」—— 另一种常见写法：没有日期、没有秒、也没有
+    //    `UTC+8` 后缀，所以上面的扫描认不出来。AtomCode 的配额文案就是这个形态：
+    //    「…当前滚动窗口约在当日 18:18 结束并重置额度，请稍后重试。」
+    //    （2026-10-18 在 dev 上逐字抓过）。⚠️ 改这一形之前，这类文案解析出来是 0，
+    //    于是冷却落到「10 分钟兜底」而不是真正的窗口重置点。
+    scan_same_day_window(text, now_ms).unwrap_or(0)
+}
+
+/// 「当日 / 今日 HH:MM」→ 北京时间**当天**那个时刻的毫秒时间戳。
+///
+/// 判据（比完整时刻形宽松，因为它本来就没给日期与秒）：
+///   · 关键词 `当日` / `今日` 之后的 **16 个字符**内出现 `H[H]:MM`；
+///   · 越界（`25:00` 之类）与「分钟后面还接数字」都不认；
+///   · 算出来**已经过去** ⇒ `None`（这个窗口早就重置了。返回一个过去的时刻
+///     等于让调用方写一条立刻过期的冷却，比不解析更坏）。
+fn scan_same_day_window(text: &str, now_ms: i64) -> Option<i64> {
+    let date = crate::server::core::beijing::date_time_of_ms(now_ms)?.date_naive();
+    for keyword in ["当日", "今日"] {
+        let Some(at) = text.find(keyword) else {
+            continue;
+        };
+        // 按**字符**取窗口：`&rest[..16]` 落在汉字中间会 panic
+        // （release profile 是 panic=abort，这类切片错误会带走整个进程）
+        let rest: String = text[at + keyword.len()..].chars().take(16).collect();
+        let Some((hour, minute)) = first_clock(&rest) else {
+            continue;
+        };
+        let Some(naive) = date.and_hms_opt(hour, minute, 0) else {
+            continue;
+        };
+        let instant = crate::server::core::beijing::offset()
+            .from_local_datetime(&naive)
+            .single()?;
+        let millis = instant.timestamp_millis();
+        if millis > now_ms {
+            return Some(millis);
+        }
+    }
+    None
+}
+
+/// 文本里第一处 `H[H]:MM`（小时 1–2 位、分钟必须 2 位，且分钟之后不再接数字）。
+fn first_clock(text: &str) -> Option<(u32, u32)> {
+    let bytes = text.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if !bytes[index].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+        let mut cursor = index;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+            cursor += 1;
+        }
+        let hour_digits = cursor - index;
+        // 全是 ASCII 数字 ⇒ 按字节切片天然落在字符边界上
+        let hour = text[index..cursor].parse::<u32>().ok();
+        let minute = (bytes.get(cursor) == Some(&b':')
+            && bytes.get(cursor + 1).is_some_and(u8::is_ascii_digit)
+            && bytes.get(cursor + 2).is_some_and(u8::is_ascii_digit))
+        .then(|| u32::from(bytes[cursor + 1] - b'0') * 10 + u32::from(bytes[cursor + 2] - b'0'));
+        let trailing_digit = bytes.get(cursor + 3).is_some_and(u8::is_ascii_digit);
+        if let (Some(hour), Some(minute)) = (hour, minute) {
+            if (1..=2).contains(&hour_digits) && !trailing_digit && hour < 24 && minute < 60 {
+                return Some((hour, minute));
+            }
+        }
+        index = cursor;
+    }
+    None
 }
 
 /// `YYYY-MM-DD HH:MM:SS`（UTC+8）→ 毫秒时间戳；字段非法时 None。
@@ -401,7 +512,7 @@ fn to_utc_plus_8_millis(
 /// 恢复时间的本地化展示（对应 Node 版 `toLocaleString('zh-CN', { hour12:false })`）。
 /// 统一按 UTC+8 渲染：上游恢复时间本身就是 UTC+8 标定的，
 /// 用本机时区反而会让用户对不上上游给的原文。
-fn format_reset_at_text(reset_at: i64) -> String {
+pub(crate) fn format_reset_at_text(reset_at: i64) -> String {
     // 固定偏移 +8 一定能构造成功；万一失败就给空串（这只是展示文案，
     // 绝不能因为一个格式化失败把请求带崩 —— release 是 panic=abort）
     let Some(offset) = chrono::FixedOffset::east_opt(8 * 3600) else {
@@ -494,5 +605,76 @@ mod panel_401_cookie_tests {
             "refresh 还活着时 401 不许清 cookie —— 清了就把静默续期砍掉"
         );
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[cfg(test)]
+mod quota_reset_text_tests {
+    //! 上游配额文案里「什么时候恢复」的**两种写法**。
+    //!
+    //! 一种是完整时刻（`… 2026-09-11 19:43:46 UTC+8 重置`，Node 版正则那一形），
+    //! 另一种只有当日时刻（`… 当前滚动窗口约在当日 18:18 结束并重置额度 …`，
+    //! AtomCode 的实测原话）。第二种在解析器认出它之前会被读成 0，于是账号冷却
+    //! 落到「10 分钟兜底」而不是真正的窗口重置点。
+
+    use super::*;
+
+    /// 北京时间某个整分的毫秒时间戳（钉死日期用；秒固定 0）。
+    fn beijing(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
+        crate::server::core::beijing::offset()
+            .with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .single()
+            .expect("合法时刻")
+            .timestamp_millis()
+    }
+
+    #[test]
+    fn the_same_day_window_form_is_readable() {
+        // 2026-10-18 在 dev 上逐字抓到的原话
+        let text = "模型「glm5.3-flash」在当前 CodingPlan 用量窗口内已达上限。\
+                    当前滚动窗口约在当日 18:18 结束并重置额度，请稍后重试。";
+        let now = beijing(2026, 10, 18, 12, 0);
+        assert_eq!(
+            beijing(2026, 10, 18, 18, 18),
+            parse_quota_reset_at_at(text, now),
+            "「当日 18:18」应读成北京时间当天 18:18"
+        );
+        // 「今日」是同一件事的另一种说法
+        assert_eq!(
+            beijing(2026, 10, 18, 18, 18),
+            parse_quota_reset_at_at("约在今日 18:18 结束并重置额度", now)
+        );
+    }
+
+    #[test]
+    fn a_same_day_window_already_in_the_past_is_not_invented() {
+        // 文案是旧的（窗口早就过了）：返回 0 让调用方用自己的兜底，
+        // 而不是拿一个过去的时刻去写冷却 —— 那种冷却等于没冷却。
+        let now = beijing(2026, 10, 18, 12, 0);
+        assert_eq!(0, parse_quota_reset_at_at("约在今日 09:05 结束并重置额度", now));
+    }
+
+    #[test]
+    fn the_full_utc_plus_8_stamp_still_parses() {
+        // 回归：新增第二种形态不能把原来那一形弄坏
+        let text = "您的使用量已超出频率限制，将在 2026-09-11 19:43:46 UTC+8 重置";
+        assert_eq!(
+            beijing(2026, 9, 11, 19, 43) + 46_000,
+            parse_quota_reset_at(text)
+        );
+        assert_eq!(0, parse_quota_reset_at("正文里没有任何时刻"));
+    }
+
+    #[test]
+    fn malformed_clocks_are_not_read() {
+        let now = beijing(2026, 10, 18, 12, 0);
+        for text in [
+            "当日 25:00 结束",   // 小时越界
+            "当日 18:6 结束",    // 分钟只有一位
+            "当日 1818 结束",    // 没有冒号
+            "当日 18:180 结束",  // 分钟后面还接着数字
+        ] {
+            assert_eq!(0, parse_quota_reset_at_at(text, now), "不该认得：{text}");
+        }
     }
 }

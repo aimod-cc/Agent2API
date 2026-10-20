@@ -758,6 +758,30 @@ pub trait ProviderAdapter: Send + Sync {
         &[]
     }
 
+    /// 本家的「**正文**拒绝标记」：上游把拒绝写成正文时，用来识别它的固定子串。
+    ///
+    /// ── 为什么还要一条按正文判的钩子 ────────────────────────────
+    /// 有些上游的拒绝**不在 `finish_reason` 上**：它回 `200` + 一条正常的 SSE
+    /// 内容帧（正文是写死的话术），`finish_reason` 干脆不存在，然后 `[DONE]`。
+    /// 实测：AtomCode 的 CodingPlan 用量窗口耗尽后就是这样（2026-10-18 在 dev 上
+    /// 复现，客户端侧 426 字节，正文
+    /// 「模型「xxx」在当前 CodingPlan 用量窗口内已达上限。当前滚动窗口约在当日
+    /// HH:MM 结束并重置额度，请稍后重试。」）。只看状态码与 `finish_reason` 的话，
+    /// 这既不是失败也不算拒答 —— 于是一次**配额耗尽**被当成一次成功答复，
+    /// 账号不冷却、不换家，下一发还打它。
+    ///
+    /// ── 命中后的处置与 `finish_reason` 那条**不同**（别混）───────
+    /// `stream_refusal_finishes` 判的是**内容策略**拒绝：那是内容问题、换谁都会拒，
+    /// 所以处置是「不罚账号、换家」。
+    /// 本方法判的是**本账号的额度**问题：必须**罚账号**（按上游给的窗口重置时刻
+    /// 写冷却，见 `rotate::mark_account_limited` 的文本兜底）+ 换家。
+    ///
+    /// 取值是**逐字固定子串**（大小写敏感、按字节比对）——只写实测见过的那句，
+    /// 别写「可能出现的措辞」。默认空 = 不认任何正文标记，别家逐字节不变。
+    fn stream_refusal_markers(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// 本 provider 是否支持**主动**刷新凭证（模块头扩展 5）。
     ///
     /// 默认 false = 这家没有续期手段（没有 refreshToken、上游也没有刷新接口）。
@@ -1183,6 +1207,16 @@ pub fn adapter_for(kind: ProviderKind) -> &'static dyn ProviderAdapter {
         // QClaw：上游是本机 OpenClaw 网关（回环 HTTP + 网关令牌），
         // 无状态转发（见 `qclaw/mod.rs` 的模块头）。
         ProviderKind::Qclaw => &super::qclaw::QCLAW_ADAPTER,
+        ProviderKind::Modelscope => &super::modelscope::MODELSCOPE_ADAPTER,
+        ProviderKind::ModelscopeIntl => &super::modelscope::MODELSCOPE_INTL_ADAPTER,
+        // AtomCode（AtomGit / GitCode）：无状态 OpenAI 直通转发（上游本身就是
+        // Chat Completions）+ 目录 / 额度 / 轮换续期。四个坑见 `atomcode/mod.rs`
+        // 的模块头（网关按 UA 索签名、令牌非 JWT、续期轮换、失败被包装成 200）
+        ProviderKind::Atomcode => &super::atomcode::ATOMCODE_ADAPTER,
+        // LobsterAI（网易有道「有道龙虾」）：无状态 OpenAI 兼容转发（上游只收
+        // SSE，网关恒以 stream:true 请求）+ 目录 / 积分 / 签到 + loopback 网页登录。
+        // 三个载荷点见 `lobsterai/mod.rs` 的模块头
+        ProviderKind::LobsterAi => &super::lobsterai::LOBSTERAI_ADAPTER,
     }
 }
 
@@ -1294,6 +1328,18 @@ pub fn implemented_kinds() -> Vec<ProviderKind> {
         // 全部已接。有远程目录 —— 必须在列表里，否则目录刷新循环不会问它
         // （与 Trae / Loomy / Kuku / Chatglm / Qwenwork 同一理由）。
         ProviderKind::Qclaw,
+        // ModelScope 的两个站点各算一家：与国内版各自一份模型清单（各打各的
+        // 推理域）、各自的缓存槽与刷新排期 —— 两家都必须在列表里，否则国际版的
+        // 目录刷新永远不会被调度（症状是「国际版账号加了、模型列表一直是空的」，
+        // 与 WorkBuddy 国际版那条同一理由）。
+        ProviderKind::Modelscope,
+        ProviderKind::ModelscopeIntl,
+        // AtomCode：远程目录（`coding-plan/models-v2`）+ 有转发能力，
+        // 进本列表才会被后台目录刷新调度
+        ProviderKind::Atomcode,
+        // LobsterAI：远程目录（`GET /api/models/available`）+ 有转发能力，
+        // 进本列表才会被后台目录刷新调度
+        ProviderKind::LobsterAi,
     ]
 }
 

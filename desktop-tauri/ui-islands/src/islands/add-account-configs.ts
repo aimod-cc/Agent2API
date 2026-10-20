@@ -43,8 +43,17 @@ export type WebLoginConfig = {
   button: string
   hint?: string
   busyText?: string
-  /** 有这一级时多一个「打开方式」分段（没有的家只给内嵌窗口） */
+  /**
+   * 有这一级时多一个「打开方式」分段（没有的家只给内嵌窗口）。
+   *
+   * 只在桌面壳里渲染：网页端（`platform() === 'web'`）没有「内嵌窗口」与
+   * 「系统浏览器」之分 —— 桥接层的 startLogin 收下 mode 后并不会用它，
+   * 一律 `window.open` 开新标签页（见 web_shim.rs 的同名方法）。所以网页端
+   * 整级收起，改由 `webHint` 说明唯一那条路。
+   */
   modes?: MethodMode[]
+  /** 网页端那一条提示（缺省用通用的「将在新标签页中打开」） */
+  webHint?: string
   /** 这一家的网页登录只在某个地区可用（当前没有家用它，结构上保留） */
   region?: string
   /** 写死的变体选择器（传给壳侧 start_login 的第一个参数） */
@@ -57,8 +66,19 @@ export type OauthLoginConfig = {
   title?: string
   noteHtml?: string
   hint?: string
+  /** 同 WebLoginConfig.modes：网页端整级收起，用 webHint 替代 */
   modes?: MethodMode[]
+  webHint?: string
 }
+
+/** 网页端唯一打开方式的提示（没有 webHint 的家用它） */
+export const WEB_LOGIN_HINT = t('将在新标签页中打开授权页；完成后自动加入账号列表。')
+
+/**
+ * 回调落在本机 / 网关端口那几家的网页端提示：跨机部署时官方页面跳回的地址
+ * 属于浏览器所在电脑、回不到网关，需要用户把最终回调地址粘回来。
+ */
+export const WEB_LOGIN_PASTE_HINT = t('将在新标签页中打开授权页；完成后自动加入账号列表。若页面跳回本机地址后账号没有出现，按提示把地址栏里的完整回调地址粘贴回来即可。')
 
 export type ProviderConfig = {
   provider: string
@@ -129,10 +149,15 @@ const RACCOON: ProviderConfig = {
   // 访问面板 —— 上游白名单如此，不满足时网页端发起前就会弹指引拦下
   // （见 web_shim 的 raccoonCallbackOriginProblem）。
   webLogin: {
-    noteHtml: t('在<strong>内嵌窗口</strong>里完成官方登录，成功后自动加入账号列表。'),
+    // 桌面端在内嵌窗口里跑；网页端没有内嵌窗口，统一在新标签页里打开，
+    // 所以这句不写死「内嵌窗口」（否则网页端看到的是一句不成立的话）
+    noteHtml: t('在打开的官方登录页里完成登录，成功后自动加入账号列表。'),
     button: t('打开网页登录'),
     hint: t('内嵌窗口打开；完成后自动加入列表，关窗即取消等待'),
     busyText: t('等待小浣熊登录完成…'),
+    // 网页端走的是官方 redirect 分支（见上方注释），浏览器在哪台机器上都能
+    // 直接回网关，没有粘贴回调那一步
+    webHint: WEB_LOGIN_HINT,
   },
   manualTitle: t('粘贴 token / refreshToken'),
   manualNoteHtml: t('refreshToken 可选，填了到期可自动续期；两者都能从<a href="#" class="raccoon-hint-link" data-raccoon-hint>小浣熊客户端登录态文件</a>里取到。'),
@@ -227,6 +252,9 @@ const AUTOCLAW_INTL: ProviderConfig = {
       { value: 'embedded', label: t('内嵌窗口（推荐）'), hint: t('内嵌窗口打开；关窗即取消等待（Google 账号被拒时改用系统浏览器）') },
       { value: 'external', label: t('系统浏览器'), hint: t('系统浏览器打开（复用已登录的 Zai / Google 账号）；完成后自动加入列表') },
     ],
+    // 网页端由 web_shim 的 runLoginFlow 开新标签页；这条链靠服务端轮询
+    // 落定结果（不是回调），所以不需要「粘贴回调地址」那句话
+    webHint: WEB_LOGIN_HINT,
   },
   fields: [
     { key: 'token', label: 'token', rows: 3, placeholder: t('明文 JWT（国际版账号的 access token）') },
@@ -343,6 +371,7 @@ function accioForm(spec: { provider: string; label: string; site: string; siteNo
         { value: 'embedded', label: t('内嵌窗口（推荐）'), hint: t('将打开内嵌窗口；登录完成后自动加入账号列表。关掉窗口即取消等待') },
         { value: 'external', label: t('系统浏览器'), hint: t('将用系统默认浏览器打开登录页（会复用浏览器里已登录的 Accio 账号）；完成登录后自动加入账号列表，关掉弹窗即取消等待') },
       ],
+      webHint: WEB_LOGIN_PASTE_HINT,
     },
     manualTitle: t('填写凭证'),
     manualNoteHtml: t('accessToken 是 Accio 的登录凭证（一长串不透明 token，不是 JWT）；refreshToken 可选，填了之后到期能自动续期。请填写 <b>{label}</b>账号的凭证 —— {siteNote}（最容易拿到的办法：直接用上方的「网页登录」，不需要手工找 token。）', { label, siteNote }),
@@ -443,6 +472,7 @@ const CODEARTS: ProviderConfig = {
         hint: t('将用系统默认浏览器打开授权页（会复用浏览器里已登录的华为云账号）；浏览器与网关不在同一台机器时，按上方说明把最终回调地址粘贴回面板'),
       },
     ],
+    webHint: WEB_LOGIN_PASTE_HINT,
   },
   manualTitle: t('粘贴登录凭据'),
   manualNoteHtml: t('整份粘贴官方插件 / CLIProxyAPI 落盘的凭据 JSON（形如 <code>{"codearts_provider_credential":{…}}</code>，铺平的也行）。<br>必填：<code>access_key_id</code>、<code>secret_access_key</code>、<code>security_token</code>。<b>要能自动续期，必须连 <code>refresh_token</code> 与 <code>oauth_context</code> 一起粘</b> —— 临时凭据约一小时到期，缺这半块就续不回来，只能重新登录。'),
@@ -499,6 +529,9 @@ const TRAE: ProviderConfig = {
         hint: t('将用系统默认浏览器打开授权页（会复用浏览器里已登录的 Trae 账号）；同机完成后自动加入，Docker / 远程面板按提示粘贴地址栏回调地址。'),
       },
     ],
+    // 回调只落在本机端口（上游逐字校验 127.0.0.1），浏览器与网关不同机时
+    // 官方页面跳回的地址回不到容器 —— 网页端必须说明「可能要粘回来」
+    webHint: WEB_LOGIN_PASTE_HINT,
   },
   manualTitle: t('填写凭证'),
   manualNoteHtml: t('accessToken 是 Trae 的 <code>Cloud-IDE-JWT</code>（三段点分），refreshToken 用于到期自动续期（本家 <b>refreshToken 一次一换</b>：换发一次旧的即作废，所以两份程序别同时刷同一个账号）。<br>手工粘贴时请连 <b>machineId / deviceId</b> 一起填：上游把它们与登录时上传的设备公钥绑在一起判设备，凭空换一对会撞 <code>2xxxx</code> 那族设备绑定拒绝。<br>没有这三样时的正路是用上方的「网页登录」；容器 / 远程部署形态按提示粘贴地址栏回调地址即可。'),
@@ -568,9 +601,12 @@ const KUKU: ProviderConfig = {
   // 自动化）。登录成功后壳侧检测到 Cookie 里出现 BDUSS，自动读取**完整会话**
   // （含 HttpOnly 的 BAIDUID_BFESS 等）交回网关，窗口自动关闭、账号落列表。
   webLogin: {
-    noteHtml: t('在打开的窗口里用百度账号登录 KukuAI 主站（手机验证码 / 扫码均可），登录成功后自动加入账号列表。网关会向百度换发 KukuAI 业务会话令牌（依赖本机已安装库库AI 客户端）。'),
+    noteHtml: t('在打开的登录页里用百度账号登录 KukuAI 主站（手机验证码 / 扫码均可），登录成功后自动加入账号列表。网关会向百度换发 KukuAI 业务会话令牌（依赖本机已安装库库AI 客户端）。'),
     button: t('打开网页登录'),
     busyText: t('等待 KukuAI 登录完成…'),
+    // 这条链靠壳侧读本机客户端的 Cookie 落定（网页端没有壳，见 web_shim.rs
+    // 的登录状态机），因此文案只描述「登录页已打开」，不承诺完成方式
+    webHint: WEB_LOGIN_HINT,
   },
   manualTitle: t('粘贴 Cookie'),
   manualNote: t('BDUSS 必填；请粘贴**完整 Cookie**（Cookie 编辑器一键导出即可）—— 其中 **PTOKEN 必须保留**，网关要用它向百度换发 KukuAI 业务会话令牌，缺了它模型刷新会报「未登录」。支持整段 Cookie 头、Cookie 编辑器导出的 JSON 数组，或 {BDUSS, STOKEN} 对象。KukuAI 没有刷新机制，登录态过期后重新粘贴即可。'),
@@ -723,7 +759,7 @@ const ANTIGRAVITY: ProviderConfig = {
   // 网页登录：Google 账号授权页 + loopback 回调。回调落在网关自己的端口，
   // 所以两种打开方式都可用（会复用系统浏览器里已登录的 Google 账号）。
   webLogin: {
-    noteHtml: t('在打开的窗口里登录 Google 账号（Antigravity 的授权页），授权完成后自动加入账号列表。'),
+    noteHtml: t('在打开的登录页里登录 Google 账号（Antigravity 的授权页），授权完成后自动加入账号列表。'),
     button: t('打开 Antigravity 网页登录'),
     busyText: t('等待 Google 授权完成…'),
     modes: [
@@ -779,6 +815,8 @@ const OFFICEACE: ProviderConfig = {
         hint: t('将用系统默认浏览器打开授权页（会复用浏览器里已登录的华为云账号）；授权码由网关轮询云端取回，与浏览器跑在哪台机器无关，完成后自动加入账号列表'),
       },
     ],
+    // 授权码由网关轮询云端取回，浏览器在哪都一样
+    webHint: WEB_LOGIN_HINT,
   },
   manualTitle: t('粘贴网关凭据'),
   manualNoteHtml: t('从别的机器（或 OfficeAce 桌面端 <code>models.json</code>）取三项贴进来：模型网关基址（<code>baseUrl</code>，形如 <code>https://modelgw-…/v2</code>）与 <code>modelAppKey</code> / <code>modelAppSecret</code>。这三项就能转发（网关凭据不过期）；控制面临时凭据（<code>accessKeyId</code> 等）可选，留空则额度/自动续期不可用，但不影响转发。'),
@@ -825,6 +863,9 @@ const ORCATERM: ProviderConfig = {
     button: t('打开网页登录'),
     hint: t('内嵌窗口打开；扫码完成后自动加入列表，关窗即取消等待'),
     busyText: t('等待 OrcaTerm 登录完成…'),
+    // 网页端：授权页把浏览器带到 orcaterm:// 自定义协议，网页端没有壳去接它；
+    // 结果由网关侧轮询落定，所以只承诺「新标签页打开」
+    webHint: WEB_LOGIN_HINT,
   },
   desktop: true,
   desktopHint: t('读取本机 OrcaTerm 客户端登录态（%APPDATA%\\com.orcaterm-desktop.app\\data.bin），需已在 OrcaTerm 客户端登录'),
@@ -958,6 +999,100 @@ const QWENWORK: ProviderConfig = {
 }
 
 /**
+ * ModelScope（魔搭）的两个站点：一家一个 provider，粘贴 `ms-` 令牌。
+ *
+ * ── 一枚令牌两用（这是本家最省事的地方）──────────────────────
+ * 同一个 `ms-` 令牌既作 `Authorization: Bearer` 调推理，又作
+ * `Cookie: m_session_id=<令牌>` 读账号身份 / 魔粒余额 / 每日签到（实测确认）。
+ * 所以凭据只有一个字段，用户从魔搭的「访问令牌」页复制一次就够。
+ *
+ * ── 两个站点是两套独立账号 ─────────────────────────────────
+ * 国内站（modelscope.cn）与国际站（modelscope.ai）账号体系分开：令牌打错站点
+ * 会得到 401，所以两家各一张卡、各填各的令牌。
+ *
+ * ── 没有续期、没有桌面端导入 ───────────────────────────────
+ * 令牌长期有效（上游没有 refresh 接口），失效只能重新获取；魔搭没有桌面客户端
+ * （与 Loomy / MonkeyCode 同一处境），因此不渲染「导入桌面端登录态」。
+ *
+ * ── 添加时的一次探活（会拦下添加）──────────────────────────
+ * 令牌不透明、解不出身份，所以网关添加前必须打一次上游换回账号身份 ——
+ * 令牌无效 / 站点点错会在添加的那一刻就说清楚，而不是等第一次转发才失败。
+ */
+function modelscopeForm(spec: {
+  provider: string
+  label: string
+  site: string
+  siteNote: string
+}): ProviderConfig {
+  const { provider, label, site, siteNote } = spec
+  return {
+    provider,
+    label,
+    // 没有桌面客户端，也就没有可导入的登录态文件（理由见上方注释）
+    desktop: false,
+    manualTitle: t('粘贴 API 令牌'),
+    // 整段是一个 t() 键：扫描器只认字符串字面量（拼接串提不到键），所以不拆行
+    manualNoteHtml: t('粘贴 ModelScope 的 API 令牌（<code>ms-</code> 开头，在 {site} 的「访问令牌」页获取）。<br>{siteNote}<br>这枚令牌<b>两用</b>：网关既用它调推理，也用它读账号身份、魔粒余额与每日签到。令牌长期有效、没有续期接口，失效后重新获取再粘一次即可。', { site, siteNote }),
+    fields: [
+      // 字段名不包 t()（各语言相同，与别家同一处置）
+      { key: 'accessToken', label: 'accessToken', rows: 3, placeholder: t('ms- 开头的 API 令牌') },
+      { key: 'name', label: t('备注名'), optional: true, placeholder: t('可选，留空则用上游账号昵称') },
+    ],
+  }
+}
+
+const MODELSCOPE = modelscopeForm({
+  provider: 'modelscope',
+  label: t('ModelScope 国内版'),
+  site: 'modelscope.cn',
+  siteNote: t('这里填国内站（modelscope.cn）的账号：请粘贴国内站的令牌。国际站（modelscope.ai）是另一家 provider、另一套账号，两边的令牌不通用。'),
+})
+
+const MODELSCOPE_INTL = modelscopeForm({
+  provider: 'modelscope-intl',
+  label: t('ModelScope 国际版'),
+  site: 'modelscope.ai',
+  siteNote: t('这里填国际站（modelscope.ai）的账号：请粘贴国际站的令牌。国内站（modelscope.cn）是另一家 provider、另一套账号，两边的令牌不通用。'),
+})
+
+/**
+ * AtomCode（AtomGit / GitCode）：把 AtomGit 的免费 CodingPlan 接进本网关。
+ *
+ * ── 两条来源 ────────────────────────────────────────────────
+ * ① **浏览器登录**（推荐）：网关向代理现取授权地址 → 用户在浏览器里登 AtomGit
+ *    → 网关**轮询代理**判完成并取回令牌对（授权回调由代理自己在
+ *    `acs.atomgit.com/callback` 终结，**不往本机跳**，所以壳侧不需要开回调监听）。
+ * ② **粘贴令牌对**（后备）：`accessToken` + `refreshToken`。⚠️ `refreshToken`
+ *    强烈建议填 —— 本家的令牌**不是 JWT**（实测 7 天到期，读不到 `exp`），
+ *    没有它账号无法自动续期，到期只能重新登录
+ *    （见 `providers/atomcode/credentials.rs` 的模块头）。
+ *
+ * `desktop: false`：与 CodeArts / OfficeAce 同 —— 没有「导入桌面端登录态」这条
+ * 后端路径（AtomCode 把令牌写在 `auth.toml` 里，且需要额外的机器指纹，不做这条入口）。
+ */
+const ATOMCODE: ProviderConfig = {
+  provider: 'atomcode',
+  label: t('AtomCode'),
+  desktop: false,
+  webLogin: {
+    // 整段是一个 t() 键：扫描器只认字符串字面量（拼接串提不到键），所以不拆行
+    noteHtml: t('打开 AtomGit 授权页登录：登录完成后网关会自动<b>轮询代理</b>取回令牌并加入账号列表（授权回调由代理终结，不回到本机，因此无需手工回填回调地址）。'),
+    button: t('打开授权页'),
+    busyText: t('等待 AtomCode 登录完成…'),
+  },
+  manualTitle: t('粘贴令牌对'),
+  // 整段是一个 t() 键：扫描器只认字符串字面量（拼接串提不到键），所以不拆行
+  manualNoteHtml: t('在 AtomGit 的 AtomCode 页面登出后取得两项贴进来：<code>accessToken</code> 与 <code>refreshToken</code>。<b>续期令牌建议填写</b>——本家令牌不是 JWT（约 7 天到期，读不到过期时间），没有它账号无法自动续期，到期只能重新登录。'),
+  fields: [
+    // 字段名与示例值不包 t()（各语言相同，与 CodeArts 的 JSON 示例同一处置）
+    { key: 'accessToken', label: t('访问令牌'), placeholder: 'access_token' },
+    { key: 'refreshToken', label: t('续期令牌'), optional: true, placeholder: 'refresh_token' },
+    { key: 'userId', label: t('用户 ID'), optional: true, placeholder: t('可选，用于生成账号标识') },
+    { key: 'name', label: t('备注名'), optional: true, placeholder: t('可选，留空用「AtomCode」') },
+  ],
+}
+
+/**
  * QClaw（腾讯桌面 AI 客户端）。逆向来源见后端 `providers::qclaw` 的模块头。
  *
  * ── 本家的特殊之处：**凭证是本机网关令牌，不是云端令牌** ─────────
@@ -1010,6 +1145,51 @@ const QCLAW: ProviderConfig = {
   ],
 }
 
+/**
+ * LobsterAI（网易有道「有道龙虾」`lobsterai.youdao.com`）：一家一个 provider，
+ * 没有地区 / 额度池之分。
+ *
+ * ── 只有一条添加路径：浏览器登录（授权码 + 本机 loopback 回调）──────
+ * 网关按 state 登记一轮登录并拼出授权地址，用户在门户授权（手机号 / 微信）后
+ * 门户 302 回**网关自己的端口**：`http://127.0.0.1:<网关端口>/auth/callback`，
+ * 网关拿授权码换令牌后落账号（见后端 `providers::lobsterai::oauth` 与
+ * `core::login::lobsterai`）。回调路径是裸 `/auth/callback`（不是 `-lobsterai`
+ * 后缀）：那是参考实现已验证的形状，门户是否对路径有白名单没有实测支撑。
+ *
+ * ── 没有「填写凭证」这条路径（后端如实拒绝，不是界面漏做）──────────
+ * 续期要**换码那一刻**由上游下发的三件载荷（`uuid` + 两个 `keyfrom`），粘贴
+ * 给不出它们（见后端 `account_store::lobsterai_accounts` 的模块头）。所以后端
+ * `api::accounts` 对 LobsterAI 的粘贴入口**始终回 400**，这里也就不提供手填段。
+ * `fields` 留空是被 `ProviderConfig` 逼的（该键在类型里是必填），不是漏写：
+ * 本家唯一入口就是上面那条「网页登录」。
+ *
+ * ── 没有「导入桌面端登录态」这条路径 ──────────────────────────
+ * 客户端登录态在它自己的存储里，没有 `data.bin` 那种稳定可读的明文形态
+ * （与 Accio / ZCode 同一处境），所以显式 `desktop: false`。
+ */
+const LOBSTERAI: ProviderConfig = {
+  provider: 'lobsterai',
+  label: t('LobsterAI'),
+  desktop: false,
+  // 授权页把浏览器送回**本机端口**（与 Accio 同一形态）：同机自动完成，
+  // 跨机（Docker / 远程面板）到不了网关 —— 本家没有「粘贴最终回调地址」那条
+  // 兜底，所以说明里只讲同机这一条前提，不承诺粘贴通道。
+  webLogin: {
+    // 整段是一个 t() 键：扫描器只认字符串字面量（拼接串提不到键），所以不拆行
+    noteHtml: t('打开 <b>LobsterAI（有道龙虾）</b>的官方登录页（<code>lobsterai.youdao.com</code>）并用你的 LobsterAI 账号登录：登录成功后官方页面会跳回本机并自动加入账号列表 —— 回调落在<b>网关自己的端口</b>上，所以浏览器要与网关在同一台机器上；授权码只在本机传给网关，界面不显示明文 token。'),
+    button: t('打开 LobsterAI 登录页'),
+    busyText: t('等待 LobsterAI 登录完成…'),
+    modes: [
+      { value: 'embedded', label: t('内嵌窗口（推荐）'), hint: t('将打开内嵌窗口；登录完成后自动加入账号列表。关掉窗口即取消等待') },
+      { value: 'external', label: t('系统浏览器'), hint: t('将用系统默认浏览器打开登录页（会复用浏览器里已登录的 LobsterAI 账号）；完成登录后自动加入账号列表，关掉弹窗即取消等待') },
+    ],
+    // 本家没有粘贴兜底：跨机时网页端只能靠用户自己在浏览器地址栏确认
+    // 页面跳回去了，所以提示里只承诺「新标签页打开」
+    webHint: WEB_LOGIN_HINT,
+  },
+  fields: [],
+}
+
 /** 内置家的表单块，顺序与旧 ADD_FORMS 一致（只影响 DOM 里的块顺序，不影响界面） */
 export const BUILTIN_CONFIGS: ProviderConfig[] = [
   RACCOON,
@@ -1054,7 +1234,7 @@ export const BUILTIN_CONFIGS: ProviderConfig[] = [
   // OrcaTerm（腾讯云遨驰终端桌面客户端）：粘贴 accessToken / 导入桌面端登录态，
   // 排在末尾（与后端注册表 PROVIDERS 的排列一致，2026-10 接入）
   ORCATERM,
-  // 智谱清言（chatglm.cn）：访客模式 / 粘贴令牌 / 导入本机登录态，排在末尾
+// 智谱清言（chatglm.cn）：访客模式 / 粘贴令牌 / 导入本机登录态，排在末尾
   // （与后端注册表 PROVIDERS 的排列一致，2026-10 接入）
   CHATGLM,
   // 千问办公（QwenWorkCN）：导入本机登录态（主入口）/ 网页登录（PKCE 设备授权）/
@@ -1063,6 +1243,14 @@ export const BUILTIN_CONFIGS: ProviderConfig[] = [
   // QClaw（腾讯桌面 AI 客户端）：导入本机网关配置（主入口）/ 粘贴网关令牌，
   // 排在末尾（与后端注册表 PROVIDERS 的排列一致，2026-10 接入）
   QCLAW,
+  MODELSCOPE,
+  MODELSCOPE_INTL,
+  // AtomCode（AtomGit / GitCode）：浏览器登录 + 粘贴令牌对，排在末尾
+  // （与后端注册表 PROVIDERS 的排列一致，后到居后）
+  ATOMCODE,
+  // LobsterAI（网易有道「有道龙虾」）：只有浏览器登录一条入口，排在末尾
+  // （与后端注册表 PROVIDERS 的排列一致，后到居后）
+  LOBSTERAI,
 ]
 
 /** WorkBuddy 的块 id（结构特殊，单独一个组件） */

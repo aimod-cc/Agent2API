@@ -106,10 +106,13 @@ pub mod catpaw_import;
 pub mod chatglm_accounts;
 pub mod cline_accounts;
 pub mod codearts_accounts;
+pub mod atomcode_accounts;
 pub mod commandcode_accounts;
 pub mod custom_accounts;
 pub mod kuku_accounts;
+pub mod lobsterai_accounts;
 pub mod loomy_accounts;
+pub mod modelscope_accounts;
 pub mod monkeycode_accounts;
 pub mod officeace_accounts;
 pub mod orcaterm_accounts;
@@ -213,6 +216,20 @@ pub(crate) fn is_monkeycode_family(provider_id: &str) -> bool {
     provider_id == MONKEYCODE_PROVIDER_ID || provider_id == MONKEYCODE_INTL_PROVIDER_ID
 }
 
+/// 这个 provider 是不是 **ModelScope 系**（两个站点之一）。
+///
+/// 与 [`is_autoclaw_family`] / [`is_monkeycode_family`] 同一形态、同一理由：
+/// 账号层有几处判断只关心「是不是 ModelScope」（公开形态、令牌长度校验），
+/// 不关心哪个站点 —— 那些分支走本函数，于是加站点或改名时只改这里一处，
+/// 而不是散在各文件里的 `id == "modelscope"`（那种写法对国际版恒为假，
+/// 是个不会报错的静默失配）。
+///
+/// 判据从 `Region` 互查推导（同 [`is_accio_family`] / [`is_zcode_family`]），
+/// **不要**用 `starts_with("modelscope-")` —— 国际版的 id 也以它开头。
+pub(crate) fn is_modelscope_family(provider_id: &str) -> bool {
+    crate::server::core::providers::modelscope::Region::from_provider_id(provider_id).is_some()
+}
+
 /// Command Code provider id（账号存储内部多处要用；**从注册表推导**）。
 /// 账号形态见 `commandcode_accounts.rs`（单一 provider、没有地区之分）。
 pub(crate) const COMMANDCODE_PROVIDER_ID: &str = crate::server::core::providers::kind_id(
@@ -230,6 +247,28 @@ pub(crate) const ANTIGRAVITY_PROVIDER_ID: &str = crate::server::core::providers:
 /// [`LOOMY_PROVIDER_ID`] 的口径）。账号形态见 `officeace_accounts.rs`。
 pub(crate) const OFFICEACE_PROVIDER_ID: &str = crate::server::core::providers::kind_id(
     crate::server::core::providers::ProviderKind::OfficeAce,
+);
+
+/// AtomCode（AtomGit / GitCode）provider id（**从注册表推导**，同
+/// [`LOOMY_PROVIDER_ID`] 的口径）。账号形态见 `atomcode_accounts.rs`。
+pub(crate) const ATOMCODE_PROVIDER_ID: &str = crate::server::core::providers::kind_id(
+    crate::server::core::providers::ProviderKind::Atomcode,
+);
+
+/// LobsterAI（网易有道「有道龙虾」）provider id（**从注册表推导**，同
+/// [`LOOMY_PROVIDER_ID`] 的口径）。账号形态见 `lobsterai_accounts.rs`。
+pub(crate) const LOBSTERAI_PROVIDER_ID: &str = crate::server::core::providers::kind_id(
+    crate::server::core::providers::ProviderKind::LobsterAi,
+);
+
+/// 智谱清言（`chatglm.cn`）provider id（**从注册表推导**，同
+/// [`LOOMY_PROVIDER_ID`] 的口径）。账号形态见 `chatglm_accounts.rs`。
+///
+/// 本家是唯一有**访客形态**的家（`guest/access` 免登录换证），所以公开形态
+/// 要多注入一个 `isGuest`（见 `store_view::public_account`），签到范围判定
+/// 也按它把访客排除（见 `billing::checkin::supports_checkin`）。
+pub(crate) const CHATGLM_PROVIDER_ID: &str = crate::server::core::providers::kind_id(
+    crate::server::core::providers::ProviderKind::Chatglm,
 );
 
 /// Cline **免费池** provider id（账号存储内部多处要用；**从注册表推导**，同

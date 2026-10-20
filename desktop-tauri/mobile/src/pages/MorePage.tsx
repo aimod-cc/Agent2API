@@ -2,6 +2,8 @@ import { PageHead, SectionHead, IconButton } from '../components/ui'
 import { Icon, type IconName } from '../components/Icon'
 import { store, useStore } from '../state/store'
 import { apiBase, baseLabel } from '../lib/servers'
+import { isRateLimited } from '../lib/format'
+import { usePullToRefresh, PullIndicator } from '../components/PullToRefresh'
 import { t } from '../i18n'
 
 /**
@@ -17,9 +19,10 @@ type Entry = { id: string; label: string; icon: IconName; badge?: string }
 export function MorePage() {
   const { session } = useStore()
   const accounts = session?.accounts?.accounts || []
-  const limited = accounts.filter(
-    item => item.enabled && item.rateLimits && Object.keys(item.rateLimits).length,
-  ).length
+  const limited = accounts.filter(item => item.enabled && isRateLimited(item)).length
+
+  // 本页没有自己的列表请求：下拉只需重拉会话（角标与网关状态都来自它）
+  const pull = usePullToRefresh({ onRefresh: () => store.refresh(true) })
 
   const groups: Array<{ title: string; entries: Entry[] }> = [
     {
@@ -36,6 +39,7 @@ export function MorePage() {
     {
       title: t('诊断'),
       entries: [
+        { id: 'checkin-records', label: t('签到记录'), icon: 'checkin' },
         { id: 'requests', label: t('请求日志'), icon: 'request', badge: limited ? String(limited) : undefined },
         { id: 'logs', label: t('运行日志'), icon: 'log' },
         { id: 'tasks', label: t('定时任务'), icon: 'task' },
@@ -51,7 +55,8 @@ export function MorePage() {
   ]
 
   return (
-    <div className='m-page'>
+    <div className='m-page' ref={pull.bindRef}>
+      <PullIndicator pull={pull.pull} refreshing={pull.refreshing} />
       <PageHead
         title={t('更多')}
         subtitle={t('转发链路 · 诊断 · 系统')}

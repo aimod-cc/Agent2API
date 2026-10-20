@@ -479,6 +479,61 @@ pub(super) fn account_limit_reset_at(service: &UpstreamService, account_id: &str
         .unwrap_or(0)
 }
 
+/// 候选中**最早**的限额恢复时间戳（毫秒；一个都没有时 0）。
+///
+/// ── 用途：把「还要等多久」告诉客户端 ────────────────────────
+/// 所有候选账号都被限流时，编排层给客户端的错误文案里带上这个时刻
+/// （`provider_loop` 的「均已限额或禁用」分支）。不带的话客户端只能立刻
+/// 重试、再撞一次同样的墙；带上之后（Claude Code / Codex 这类客户端会读
+/// 文案里的时间）才能做**合法的退避等待**。
+///
+/// ── 为什么取**最早**的而不是最晚的 ─────────────────────────
+/// 「最早」= 第一个可能恢复、值得再试的时刻。取最晚会让客户端多睡一段
+/// 本不必睡的时间（账号是逐个恢复的，不是同时）。
+///
+/// ── 为什么读记录而不读内存 ──────────────────────────────────
+/// 与 `account_limit_reset_at` 同源（都从账号记录现读）：限额是**落盘事实**
+/// （重启后仍在），内存里那份不进这里 —— 两处口径一致才不会出现「日志说
+/// 10 分钟后恢复、实际记录里是明天零点」的分歧。
+///
+/// `providers` 是本次请求的候选家；冷却键按 [`routing::CooldownKeys`] 解析
+/// （与写入侧同一个键）。**启用中的账号全都算**，包括本轮已经撞过的那几个 ——
+/// 它们刚被标记，恢复时刻正是客户端最该等的那个。
+///
+/// `accounts_in_providers` 只按 provider 过滤、**不过滤禁用账号**（那是选路
+/// 层的事），所以这里自己剔一遍：一个被禁用的账号即便留着未过期的冷却记录也
+/// 不算候选，报它的恢复时刻会把用户引向一个系统根本不会去的账号。
+pub(super) fn earliest_limit_reset_at(
+    service: &UpstreamService,
+    providers: &[&str],
+    keys: &routing::CooldownKeys<'_>,
+) -> i64 {
+    let now = logging::now_ms();
+    let accounts: Vec<Value> = accounts_in_providers(service, providers, None)
+        .into_iter()
+        .filter(|account| !matches!(account.get("enabled"), Some(Value::Bool(false))))
+        .collect();
+    earliest_limit_reset_at_in(&accounts, keys, now)
+}
+
+/// [`earliest_limit_reset_at`] 的纯函数内核（账号清单与「现在」都由调用方给，
+/// 便于单测直接覆盖排序语义）。
+///
+/// 过期的冷却不必再筛：`rate_limit_reset_at` 只回**未来**时刻或 0
+/// （见那里的说明），所以这里直接对非零值取最小。
+fn earliest_limit_reset_at_in(
+    accounts: &[Value],
+    keys: &routing::CooldownKeys<'_>,
+    now: i64,
+) -> i64 {
+    accounts
+        .iter()
+        .map(|account| routing::rate_limit_reset_at(account, keys, now))
+        .filter(|reset| *reset > 0)
+        .min()
+        .unwrap_or(0)
+}
+
 /// 全部账号达到并发上限时的**挤占**挑选：余量（`limit - count`）最大者优先。
 ///
 /// ── 排序口径（任务约定，改动前先读）──────────────────────────
@@ -720,4 +775,86 @@ pub(super) fn report_limit_event(
             "resetAtText": if reset_at > 0 { format_reset_text(reset_at as f64) } else { String::new() },
         })),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::earliest_limit_reset_at_in;
+    use crate::server::core::routing::CooldownKeys;
+    use serde_json::json;
+
+    /// 造一条带限额冷却的账号记录（形状与 `mark_rate_limited` 落盘的一致）
+    fn limited(id: &str, provider: &str, model: &str, reset_at: i64) -> serde_json::Value {
+        json!({
+            "id": id,
+            "provider": provider,
+            "enabled": true,
+            "rateLimits": { model: { "status": 429, "resetAt": reset_at } },
+        })
+    }
+
+    fn unlimited(id: &str, provider: &str) -> serde_json::Value {
+        json!({ "id": id, "provider": provider, "enabled": true })
+    }
+
+    /// 取**最早**的恢复时刻（不是最晚）：客户端该睡到第一个可能恢复的点
+    #[test]
+    fn the_earliest_reset_wins() {
+        let keys = CooldownKeys::new("Qwen/Qwen3.8-Flash-Next");
+        let now = 1_000_000i64;
+        let accounts = vec![
+            limited("a", "modelscope", "Qwen/Qwen3.8-Flash-Next", now + 600_000),
+            limited("b", "modelscope", "Qwen/Qwen3.8-Flash-Next", now + 60_000),
+            limited("c", "modelscope", "Qwen/Qwen3.8-Flash-Next", now + 300_000),
+        ];
+        assert_eq!(earliest_limit_reset_at_in(&accounts, &keys, now), now + 60_000);
+    }
+
+    /// 没有处在冷却期的账号 → 0（调用方据此退回原句，不拼「最早…恢复」）
+    #[test]
+    fn no_future_reset_reports_zero() {
+        let keys = CooldownKeys::new("m");
+        let now = 1_000_000i64;
+        assert_eq!(earliest_limit_reset_at_in(&[], &keys, now), 0);
+        assert_eq!(
+            earliest_limit_reset_at_in(&[unlimited("a", "modelscope")], &keys, now),
+            0
+        );
+    }
+
+    /// **已过期**的冷却不算数（记录还在但时刻已过 = 未限额，与
+    /// `rate_limit_reset_at` 的口径一致）——算进去会让文案报一个过去的时刻
+    #[test]
+    fn an_expired_cooldown_is_not_counted() {
+        let keys = CooldownKeys::new("m");
+        let now = 1_000_000i64;
+        let accounts = vec![
+            limited("a", "modelscope", "m", now - 1),
+            limited("b", "modelscope", "m", now),
+        ];
+        assert_eq!(earliest_limit_reset_at_in(&accounts, &keys, now), 0);
+    }
+
+    /// 冷却**按模型**分键：别的模型的冷却不该影响本模型的「还要等多久」
+    #[test]
+    fn another_models_cooldown_is_ignored() {
+        let keys = CooldownKeys::new("m");
+        let now = 1_000_000i64;
+        let accounts = vec![limited("a", "modelscope", "other-model", now + 600_000)];
+        assert_eq!(earliest_limit_reset_at_in(&accounts, &keys, now), 0);
+    }
+
+    /// 多账号时取全体最早（这条覆盖的是「取 min 而不是取第一个」）
+    #[test]
+    fn the_minimum_spans_all_accounts() {
+        let keys = CooldownKeys::new("m");
+        let now = 1_000_000i64;
+        let accounts = vec![
+            limited("a", "modelscope", "m", now + 900_000),
+            unlimited("b", "modelscope"),
+            limited("c", "modelscope", "m", now + 120_000),
+            limited("d", "modelscope-intl", "m", now + 500_000),
+        ];
+        assert_eq!(earliest_limit_reset_at_in(&accounts, &keys, now), now + 120_000);
+    }
 }

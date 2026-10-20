@@ -183,6 +183,16 @@ pub const RESERVED_KV_KEYS: &[&str] = &[
     // 与上面的 `modelCatalogCache` 是两码事：那个存各家上游的**模型清单**，
     // 这个存模型的**元数据**（能力位 / 思考档位），刷新链路与失效语义各不同。
     "modelsDevCatalog",
+    // 云同步的配置与同步状态（core::cloud_sync）：整份
+    // `{provider, webdav:{…}, s3:{…}, syncPassword(信封), enabled, autoSync,
+    //   remoteRoot, profile, status:{lastSyncAt, lastSnapshotId, …}}` 一个键。
+    //
+    // 为什么是保留键而不是配置项：它含**远端凭据**（WebDAV 密码 / S3 Secret
+    // Access Key 的密文信封）与同步密码信封，属于「其它零散状态」一类；
+    // 更关键的是**它自己不能被云同步上传** —— 否则等于把远端凭据再传到远端，
+    // 换机时还会被旧凭据覆盖。保留键的身份让 `cloud_sync::snapshot` 的键筛选
+    // 天然排除它，不必再维护一份「别同步这个键」的清单。
+    "cloudSync",
 ];
 
 /// 这个键是否属于「其它零散状态」（即不归网关配置管）。

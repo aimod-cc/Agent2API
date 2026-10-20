@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { PageIntro, IconButton, Badge, Empty, ErrorNote, SkeletonList } from '../components/ui'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { Icon } from '../components/Icon'
+import { PullIndicator, usePullToRefresh } from '../components/PullToRefresh'
 import { store } from '../state/store'
 import { fetchManage, refreshModels, setModelEnabled, type ManageModel } from '../api/gateway'
 import { usePolling } from '../lib/usePolling'
@@ -41,6 +42,8 @@ export function ModelsPage() {
   }
 
   usePolling(load, 120_000)
+
+  const pull = usePullToRefresh({ onRefresh: load })
 
   const filtered = useMemo(() => {
     const keyword = query.trim().toLowerCase()
@@ -98,9 +101,11 @@ export function ModelsPage() {
   }
 
   return (
-    <div className='m-page'>
-      <PageIntro actions={<IconButton name='refresh' label={t('刷新清单')} onClick={() => void refresh()} />}
-      />
+    <div className='m-page m-fixed' ref={pull.bindRef}>
+      <PullIndicator pull={pull.pull} refreshing={pull.refreshing} />
+      <div className='m-sticky'>
+        <PageIntro actions={<IconButton name='refresh' label={t('刷新清单')} onClick={() => void refresh()} />}
+        />
 
       <div className='m-section' style={{ marginTop: 0 }}>
         <div
@@ -139,7 +144,9 @@ export function ModelsPage() {
         <Chip label={t('已启用')} count={enabledCount} on={filter === 'enabled'} onClick={() => setFilter('enabled')} />
         <Chip label={t('不展示')} count={hiddenCount} on={filter === 'hidden'} onClick={() => setFilter('hidden')} />
       </div>
+      </div>
 
+      <div className='m-body'>
       {error ? <ErrorNote text={error} /> : null}
       {!models ? <SkeletonList rows={4} height={70} /> : null}
 
@@ -252,6 +259,7 @@ export function ModelsPage() {
         <div className='m-card m-card-pad' style={{ fontSize: 11.5, color: 'var(--m-text-3)', lineHeight: 1.7 }}>
           {t('映射、思考等级、上下文窗口与工具调用能力在桌面端「模型管理」里改；手机端只做启停。')}
         </div>
+      </div>
       </div>
     </div>
   )

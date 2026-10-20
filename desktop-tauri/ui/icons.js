@@ -49,6 +49,10 @@
     settings: '<path d="m20.1 12.9-.1-.9.1-.9 2-1.5-2-3.5-2.3 1a7.6 7.6 0 0 0-1.6-.9L15.9 3h-4l-.3 2.5c-.6.2-1.1.5-1.6.9l-2.3-1-2 3.5 2 1.5-.1.9.1.9-2 1.5 2 3.5 2.3-1c.5.4 1 .7 1.6.9l.3 2.5h4l.3-2.5c.6-.2 1.1-.5 1.6-.9l2.3 1 2-3.5-2-1.5ZM13.9 15a3 3 0 1 1 0-6 3 3 0 0 1 0 6Z"/>',
     // 状态灯（侧栏底部网关状态用）
     pulse: '<circle cx="12" cy="12" r="5"/>',
+    // 信息：圆 + i。设置页「版本信息」分类图标（与手机端 Icon.tsx 的 info
+    // 同一造型：描边圆 + 竖点 + 竖线），也是通用「说明」意象。
+    info: '<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">'
+      + '<circle cx="12" cy="12" r="8.4"/><path d="M12 11v5.2M12 7.8v.2"/></g>',
     // AI 助手：四角星 + 一颗小星。主侧栏「智能」组的导航图标与设置页左栏的
     // 分类图标共用（两处都是「助手」这一件事，不该出现两种造型）；填充式，
     // 与主侧栏那组一致 —— 小星在 17px 下仍能看出是两点，不至于糊成一团。
@@ -144,6 +148,14 @@
     /** 折叠箭头（分组带的展开 / 收起）：向下 = 已展开；收起态由 CSS 旋转 -90° */
     chevronDown: '<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
       + '<path d="m6 9 6 6 6-6"/></g>',
+    /**
+     * 排序（分组带上「当前排序规则」那枚小标记）。
+     * 上下两个箭头 + 各自的短尾：读作「可以调先后」，与设置页那组描边图标同一套
+     * 约定（1.8 粗细、圆头）。显示 10px 时线宽约 0.75px —— 这一枚是脚注级的小标记，
+     * 比旁边 10.5px 的字略淡是刻意的。
+     */
+    sort: '<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+      + '<path d="M8 5v14m0 0-3-3m3 3 3-3"/><path d="M16 19V5m0 0-3 3m3-3 3 3"/></g>',
     /**
      * 折叠面板的展开箭头（`details.panel-fold` 的 summary 里，置于标题之前）。
      * 向右 = 收起；展开后由 CSS 旋转 90° 指向下方 —— 两个状态只差一个变换，

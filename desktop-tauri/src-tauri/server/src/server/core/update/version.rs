@@ -567,8 +567,28 @@ pub fn pick_asset_by_name(assets: Option<&Value>, wanted: &str) -> Option<Value>
     }))
 }
 
-/// JS `String.prototype.trim` 的空白集合 = White_Space ∪ {U+FEFF}。
+/// Android APK 的资产名约定：`Agent2API-<版本>.apk`（CI 的 android job 按这个
+/// 形状重命名，安装文档里写的也是它）。
 ///
+/// 与 [`pick_installer`] 分开的原因：那条按**本机平台**挑安装包，而手机端要的
+/// 恰恰是「另一个平台」的产物 —— 网关跑在电脑上，用户却在手机上点更新。所以
+/// 这条不看 `cfg!(target_os)`，只按后缀 `.apk` 挑。
+///
+/// 多个候选（例如同时挂了 universal 与分架构包）时取第一个：当前 CI 只产一个，
+/// 等真出现多包再补优先级。
+pub fn pick_android_apk(assets: Option<&Value>) -> Option<Value> {
+    let list = assets.and_then(Value::as_array)?;
+    let chosen = list
+        .iter()
+        .find(|item| asset_name(item).to_lowercase().ends_with(".apk"))?;
+    Some(serde_json::json!({
+        "name": asset_name(chosen),
+        "size": chosen.get("size").and_then(Value::as_u64).unwrap_or(0),
+        "url": chosen.get("browser_download_url").and_then(Value::as_str).unwrap_or(""),
+    }))
+}
+
+/// JS `String.prototype.trim` 的空白集合 = White_Space ∪ {U+FEFF}。
 /// 这里为 safe_file_name 的 `.trim()` 复制一份：规则只有一行，重复的代价
 /// 小于把它提升成全局公共设施（项目里另有几处同款实现，各自模块内可见）。
 fn js_trim(value: &str) -> &str {

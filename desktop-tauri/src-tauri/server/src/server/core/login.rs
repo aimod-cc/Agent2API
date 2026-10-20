@@ -28,7 +28,9 @@
 //! 不额外起后台定时器。
 
 mod accio;
+mod atomcode;
 mod autoclaw;
+mod lobsterai;
 mod catpaw;
 pub mod codearts;
 mod qoder;
@@ -865,6 +867,44 @@ impl LoginService {
                 self.drop_accio_pending(state);
             }
             return result.map(LoginCallbackSubmission::Completed);
+        }
+        // LobsterAI 的回调是标准 `code` / `state` 查询串（与 Accio / Antigravity
+        // 同形），两个入口共用这一套收尾：
+        //   ① 浏览器直接落到网关的 `/auth/callback`（该路由不经过本函数）；
+        //   ② 网页端 / 远程面板用户在登录弹窗里**手工粘贴整条回调 URL** ——
+        //      浏览器与网关不同机且没有端口映射时，回环地址回不到网关，由
+        //      `web_shim.rs` 的 `needsManualCallback` 拉到这条。
+        //
+        // 少了这一支，②会一路落到函数末尾那句「该登录任务不接收授权码回调」，
+        // 把一个能用的功能变成 400 —— 而 `needsManualCallback` 里明明声明了
+        // 这家要粘贴。两支要么都在，要么都不在。
+        //
+        // `state` 用请求体里那个（任务表的键），回调串里的 state 只用于逐字比对。
+        if kind == ProviderKind::LobsterAi {
+            let parsed = url::Url::parse(callback_url).map_err(|_| {
+                GatewayError::with_status(400, "LobsterAI 登录回调地址无效")
+            })?;
+            let params: std::collections::HashMap<String, String> = parsed
+                .query_pairs()
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect();
+            if let Some(error) = params.get("error").filter(|value| !value.trim().is_empty()) {
+                return Err(GatewayError::with_status(400, format!("授权被拒绝（{error}）")));
+            }
+            let callback_state = params.get("state").map(String::as_str).unwrap_or("");
+            let code = params.get("code").map(String::as_str).unwrap_or("");
+            if callback_state.trim() != state {
+                return Err(GatewayError::with_status(400, "回调地址与当前 LobsterAI 登录任务不匹配"));
+            }
+            return match self.finish_lobsterai_login(code, state).await {
+                Ok(account_id) => Ok(LoginCallbackSubmission::Completed(account_id)),
+                Err(error) => {
+                    // 与 public 回调路由同一处置：这一轮已经作废，pending 也丢掉，
+                    // 免得留在表里等超时
+                    self.drop_lobsterai_pending(state);
+                    Err(error)
+                }
+            };
         }
         // Antigravity 的回调同样是标准 `code` / `state` 查询串（Google OAuth
         // 授权码 + loopback）。与 Accio 同款，这里同时服务两个入口：

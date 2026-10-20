@@ -54,6 +54,26 @@ export function url(path: string): string {
   return `${base}${path}`
 }
 
+/** 把相对路径拼成完整地址（PWA 下原样返回，交给浏览器按同源处理） */
+export function resolveUrl(path: string): string {
+  return url(path)
+}
+
+/**
+ * 当前会话的鉴权头（给「不能走 apiCall」的调用方用，例如 SSE 流）。
+ *
+ * 与 {@link apiCall} 内部 `buildHeaders` 是同一份实现 —— 两处各写一份的话，
+ * 「登录过期」在不同页面上会表现成不同的样子。
+ */
+export function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  return buildHeaders(extra)
+}
+
+/** 静默续期（对话流 401 时用）。成功返回 true */
+export function refreshPanelAuth(): Promise<boolean> {
+  return tryRefresh()
+}
+
 export function readApiKey(): string {
   return readServerKey(activeServerId())
 }
@@ -99,8 +119,25 @@ function buildHeaders(extra?: Record<string, string>): Record<string, string> {
   return headers
 }
 
-/** 静默续期。成功返回 true */
+/** 在飞的续期请求：同一时刻最多一个，其余 401 等它（见 tryRefresh） */
+let refreshInFlight: Promise<boolean> | null = null
+
+/**
+ * 静默续期，并发 401 单飞：access 过期那一刻页面会同时收到多个 401，
+ * 各自去换的话，后到的带着同一把（刚被轮换的）refresh 上行，只能靠服务端
+ * 的宽限窗兜底（`access::ROTATION_GRACE_MS`）。这里同一时刻只放行一次轮换
+ * 请求，其余等同一个结果 —— 先到者换到的新令牌直接被所有等待者共用。
+ * 成功返回 true
+ */
 async function tryRefresh(): Promise<boolean> {
+  if (refreshInFlight) return refreshInFlight
+  refreshInFlight = doRefresh().finally(() => {
+    refreshInFlight = null
+  })
+  return refreshInFlight
+}
+
+async function doRefresh(): Promise<boolean> {
   const auth = readPanelAuth()
   const headers = buildHeaders()
   if (auth?.refresh) {

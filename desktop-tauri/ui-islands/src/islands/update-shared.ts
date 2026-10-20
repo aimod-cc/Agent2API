@@ -48,6 +48,14 @@ export type UpdateInfo = {
   installerKind?: string
   /** 检查时刻（后端给的；前端不用本地时钟冒充） */
   checkedAt?: number
+  /** 后端记录的最近一次检查失败原因（成功时为空）。桌面壳的 checkUpdate 不带它，
+   *  只有 /api/update/status 有 —— 面板据此判断「缓存里的结果是不是已被一次失败覆盖」 */
+  lastError?: string | null
+  /** 最近一次**尝试**检查的时刻（成功与失败都记）。与 checkedAt（最近一次成功）比较，
+   *  大于它说明之后又失败过一次 */
+  lastAttemptAt?: number
+  /** 后端那一轮检查是否正在执行（在途时不把旧的 lastError 当成「这次失败」） */
+  checking?: boolean
   /** 仅 getUpdateStatus 有：后端定时任务还没查过时为 false */
   checked?: boolean
   /* ── 容器内更新（Linux headless / Docker 专有，桌面端恒为 false/null）──
@@ -430,8 +438,13 @@ export function buildProxyPick(selection: ProxySelection): {
 
   const items: Array<{ value: string; label: string; disabled?: boolean }> = [{ value: '', label: t('直连') }]
   for (const item of poolItems) {
-    // 「名字（协议 主机:端口）」—— 与账号页代理列、账号弹窗的代理表单同一格式
-    items.push({ value: `${POOL_VALUE_PREFIX}${item.id}`, label: poolItemLabel(item) })
+    // 「名字（协议 主机:端口）」—— 与账号页代理列、账号弹窗的代理表单同一格式。
+    // 禁用项置灰：出口解析会失败（更新走直连），与账号页代理列同一口径
+    items.push({
+      value: `${POOL_VALUE_PREFIX}${item.id}`,
+      label: poolItemLabel(item),
+      disabled: item.enabled === false,
+    })
   }
   if (selection.pool === null) {
     // 还没读到（弹窗刚打开、请求在途）：给一句「读取中」而不是

@@ -42,7 +42,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Map, Value};
 
-use crate::server::config::{self, AssistantConfig, MAX_SYSTEM_PROMPT_CHARS};
+use crate::server::config::{self, AssistantConfig, PermissionMode, MAX_SYSTEM_PROMPT_CHARS};
 use crate::server::core::assistant_sessions;
 use crate::server::core::upstream::cancellation;
 use crate::server::core::upstream::usage::RequestTelemetry;
@@ -67,7 +67,7 @@ const MAX_TOOLS: usize = 64;
 /// 思考等级的长度上限（与 `model_rules::normalize_reasoning` 同一口径）
 const MAX_REASONING_CHARS: usize = 32;
 
-/* ─── 设置（设置页「AI 助手」分类）───────────────────────── */
+/* ─── 设置（助手页的「助手设置」抽屉）───────────────────────── */
 
 /// GET /api/assistant/config
 ///
@@ -157,6 +157,13 @@ fn parse_config(block: &Map<String, Value>) -> Result<AssistantConfig, String> {
     Ok(AssistantConfig {
         model,
         reasoning,
+        // 权限模式：只认 confirm / full，缺失与未知值都回落到「变更前确认」
+        // （解析取向与 assistant_config::from_raw 一致）
+        mode: match block.get("mode") {
+            None | Some(Value::Null) => PermissionMode::default(),
+            Some(Value::String(text)) => PermissionMode::from_str_lenient(text),
+            Some(_) => return Err("mode 必须是字符串".to_string()),
+        },
         system_prompt_enabled: block
             .get("systemPromptEnabled")
             .and_then(Value::as_bool)
@@ -184,7 +191,7 @@ pub async fn chat(State(state): State<ServerState>, body: Bytes) -> Response {
         return errors::management_error(400, format!("messages 最多 {MAX_MESSAGES} 条"));
     }
     // 本次请求点名的模型优先；没点名用设置里的。两者都没有时说清下一步 ——
-    // 「去设置里选一个」比「模型未指定」这种网关腔有用得多。
+    // 「去助手页选一个」比「模型未指定」这种网关腔有用得多。
     // 这里的 model 是**对外模型名**（/v1/models 的 data[].id，映射名也算），
     // 路由交给公共管道解析 —— 同名在多家时按账号优先级主备，与普通客户端一致。
     let config = config::assistant_config();
@@ -195,7 +202,7 @@ pub async fn chat(State(state): State<ServerState>, body: Bytes) -> Response {
             None => {
                 return errors::management_error(
                     400,
-                    "还没有选择对话模型：去「设置 → AI 助手」里选一个，或先在模型管理页确认有已启用的模型",
+                    "还没有选择对话模型：去助手页的「助手设置」里选一个，或先在模型管理页确认有已启用的模型",
                 )
             }
         },

@@ -1107,7 +1107,7 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
             // 面板传来的名字是用户自己打的 ⇒ 标 custom（此后续期/重登不改它）
             store.add_officeace_account(&payload, import_name, true)
         }
-        // OrcaTerm（腾讯云遨驰终端桌面客户端）：**粘贴 accessToken**（OAuth JWT）
+// OrcaTerm（腾讯云遨驰终端桌面客户端）：**粘贴 accessToken**（OAuth JWT）
         // → 本地归一化（剥 `Bearer ` / `ot_session=` 前缀；整段 data.bin JSON
         // 直接粘也行）→ 打一次 `GetUserInfo` 做**真实校验**（顺带补 userId 与
         // 昵称；JWT 里本来就有 userId，这一步同时确认 token 没被上游拒绝）→
@@ -1499,6 +1499,56 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
                 expires_at,
             )
         }
+        // ModelScope（魔搭）的两个站点：粘贴 `ms-` 令牌 + **先探活换身份**。
+        //
+        // 为什么本家要出网（不是「粘贴即落盘」）：那枚令牌是不透明的，
+        // 解不出身份 —— 不出网就只能拿令牌尾号当账号 id，同一个账号换一次令牌
+        // 就会变成两条记录。所以照 Qoder / OfficeAce 的既有分工：**网络在锁外**
+        // （这里 await 一次探活），把结果作为参数交给同步的落账号入口
+        // （`add_modelscope_account` 只在锁内做读-改-写）。
+        //
+        // 探活顺带触发当日签到（见 `modelscope::probe` 的模块头）——
+        // 添加账号的人当天就把魔粒拿到手，这是上游的接口语义决定的，
+        // 不是这里额外做了一件事。
+        //
+        // 地区由 kind 反查（provider 身份是权威，payload 里没有地区字段）。
+        Some(kind @ (crate::server::core::providers::ProviderKind::Modelscope
+            | crate::server::core::providers::ProviderKind::ModelscopeIntl)) => {
+            let region = crate::server::core::providers::modelscope::Region::from_kind(kind)
+                .unwrap_or(crate::server::core::providers::modelscope::Region::Cn);
+            let token = crate::server::core::providers::modelscope::credentials::token_from_payload(&payload);
+            if token.is_empty() {
+                Err(AccountStoreError::new(
+                    "缺少令牌（accessToken / apiKey / token / session）",
+                    400,
+                ))
+            } else {
+                match crate::server::core::providers::modelscope::probe::identify(region, &token).await {
+                    Ok(identity) => store.add_modelscope_account(region, &payload, &identity, import_name),
+                    Err(error) => Err(AccountStoreError::new(error.message, error.status_code)),
+                }
+            }
+        }
+        // AtomCode（AtomGit / GitCode）：粘贴令牌对（accessToken + refreshToken）。
+        // **不调上游**（与 CodeArts / OfficeAce 同口径）——令牌是浏览器登录换来的，
+        // 添加时没有可交换的授权码；目录与连通性由刷新链路验。
+        // ⚠️ refreshToken 强烈建议给：没有它账号无法自动续期（本家的令牌不是 JWT，
+        // 7 天到期后只能重新登录），见 `providers::atomcode::credentials` 的模块头。
+        Some(crate::server::core::providers::ProviderKind::Atomcode) => {
+            // 面板传来的名字是用户自己打的 ⇒ 标 custom（此后续期/重登不改它）
+            store.add_atomcode_account(&payload, import_name)
+        }
+        // LobsterAI：**没有粘贴路径**（如实拒绝，而不是落一条用不了的账号）。
+        // 它的凭证里有两个 `keyfrom` 与一个 `uuid`，只在换码那一刻由上游下发 ——
+        // 用户从别处粘不出这三样，缺了它们账号续不了期（见
+        // `providers::lobsterai::credentials` 的模块头）。所以本家只有一个入口：
+        // 网页登录落到本机 loopback 回调后由适配器落账号。
+        Some(crate::server::core::providers::ProviderKind::LobsterAi) => {
+            return management_error(
+                400,
+                "LobsterAI 只能通过「网页登录」添加：它的续期需要换码时下发的 uuid 与 keyfrom，粘贴给不出这三项",
+            );
+        }
         // WorkBuddy 系的两家（国内版 / 国际版）：同一套凭证形态与落账号路径，
         // 差别只有归属 —— provider id 自己就是归属（拆家后不再从 payload 里的
         // `edition` 反推：那是账号的属性，而落哪一家是身份问题）。
@@ -1775,6 +1825,21 @@ pub async fn refresh_account(state: &ServerState, body: &Bytes) -> Response {
     // 用户点「刷新 Token」收到的是腾讯那侧的错（与 CodeArts/Trae 同一条理由）。
     if state.store().officeace_account_record(&id).is_some() {
         return refresh_provider_account(state, &id, ProviderKind::OfficeAce).await;
+    }
+    // AtomCode：续期走它自己的适配器（`POST {broker}/oauth/refresh`，**会轮换**
+    // refresh token，且必须单飞 + 写回）。**这条不能省**：漏了就落到 workbuddy
+    // 兜底链路，用户点「刷新 Token」收到的是腾讯那侧的错（与 CodeArts/Trae/
+    // OfficeAce 同一条理由），而 AtomGit 的令牌会因此悄悄过期到只能重新登录。
+    if state.store().atomcode_account_record(&id).is_some() {
+        return refresh_provider_account(state, &id, ProviderKind::Atomcode).await;
+    }
+    // LobsterAI：续期走它自己的适配器（`POST /api/auth/refresh`，**会轮换**，
+    // 且必须把 uuid 与两个 keyfrom 原样回传）。**这条不能省**：漏了就落到
+    // workbuddy 兜底链路，用户点「刷新 Token」收到的是腾讯那侧的错（与
+    // CodeArts/Trae/OfficeAce 同一条理由），而龙虾的令牌会因此
+    // 悄悄过期到只能重新网页登录 —— 而那一轮登录是用户手动做的。
+    if state.store().lobsterai_account_record(&id).is_some() {
+        return refresh_provider_account(state, &id, ProviderKind::LobsterAi).await;
     }
     // Accio（两个地区）：走适配器的强制刷新（`POST /api/auth/refresh_token`，
     // 结果按「比较再写」回写）。两个地区各查一次 —— 账号集合按 provider 隔离，

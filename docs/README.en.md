@@ -23,7 +23,7 @@ Agent2API brings the signed-in accounts of several AI desktop clients together b
 ## ✨ Key Features
 
 - 🔌 **OpenAI-compatible** — point your client at the gateway with a custom `base_url`; Chat, Responses and Messages protocols are all supported
-- 🏪 **17 built-in providers** — WorkBuddy, Raccoon, CatPaw, Qoder, Trae and more work out of the box, plus custom providers via passthrough
+- 🏪 **22 built-in providers** — WorkBuddy, Raccoon, CatPaw, Qoder, Trae and more work out of the box, plus custom providers via passthrough
 - 🔁 **Credentials that renew themselves** — tokens refresh before they expire, near-expiry ones can be renewed in bulk, and the model catalog stays current
 - 🪂 **Multi-account rotation** — accounts queue by priority, a 429 moves on to the next account, and rate-limited accounts are skipped instead of stalling
 - 🛡️ **Egress proxies** — give each account its own exit IP; outbound fingerprints imitate the official clients
@@ -79,6 +79,9 @@ Reverse-proxy capabilities at a glance (✓ supported · ✗ not supported · �
 | OfficeAce (Huawei Cloud, OfficeClaw) | ✓ | ✓ | ✓ | ✓ | ✓ | — |
 | OrcaTerm (Tencent Cloud) | ✓ | ✓ | ✓ | ✓ | — | — |
 | Zhipu Qingyan | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| ModelScope (MoDa, domestic / international) | ✓ | ✗ | ✓ | ✓ | ✓ | — |
+| AtomCode (AtomGit / GitCode) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| LobsterAI (NetEase Youdao, Youdao Lobster) | ✓ | ✓ | ✓ | ✓ | ✓ | — |
 | Custom providers | ✓ | — | ✓ | — | — | — |
 
 > Note: in Model list, ✓ means automatic online fetching is supported (some platforms also keep a built-in static table as a fallback); ZCode only has a built-in static table. ✗ in Token auto-refresh means the platform has no usable refresh flow (the account keeps working while its credentials are valid). Qoder check-in is available on the China version only.
@@ -123,6 +126,8 @@ docker run -d --name agent2api --restart unless-stopped -p 3065:3065 -v ./data:/
 ```
 
 Whichever form you pick, open the panel afterwards (`http://127.0.0.1:3065/`; use the host IP for the server and Docker forms), register the admin account, then create a key on the "Gateway Keys" page. Connectivity check: `curl http://127.0.0.1:3065/health`
+
+**Mobile**: open `http://<gateway IP>:3065/m` in a browser (you can "Add to Home Screen" for a full-screen PWA). For a standalone icon, install `Agent2API-<version>.apk` (Android) or `Agent2API-<version>.ipa` (iOS, unsigned — re-sign it yourself) from the Release. Details: [Install & deploy → Mobile](install.en.md#mobile).
 
 ## 📸 Screenshots
 
@@ -178,7 +183,7 @@ The macOS `.dmg` **can only be built on macOS** (`npm --prefix desktop-tauri run
 
 ### For learning and discussion only
 
-This project is a hands-on exercise in HTTP reverse proxying, SSE streaming passthrough, multi-upstream protocol adaptation and desktop packaging (Tauri), and is **for personal learning and research only**. It is not an official product and has no affiliation with, endorsement from or sponsorship by Tencent and WorkBuddy / CodeBuddy, Meituan and CatPaw, SenseTime and Raccoon, Zhipu and AutoClaw / autoglm, Alibaba and Qoder / Accio, Huawei Cloud and CodeArts / OfficeAce, ByteDance and Trae, iFlytek and Loomy, Baidu Wenku and KukuAI, Chaitin and MonkeyCode, Command Code, or Google and Antigravity.
+This project is a hands-on exercise in HTTP reverse proxying, SSE streaming passthrough, multi-upstream protocol adaptation and desktop packaging (Tauri), and is **for personal learning and research only**. It is not an official product and has no affiliation with, endorsement from or sponsorship by Tencent and WorkBuddy / CodeBuddy, Meituan and CatPaw, SenseTime and Raccoon, Zhipu and AutoClaw / autoglm, Alibaba and Qoder / Accio, Huawei Cloud and CodeArts / OfficeAce, ByteDance and Trae, iFlytek and Loomy, Baidu Wenku and KukuAI, Chaitin and MonkeyCode, Command Code, Google and Antigravity, Alibaba and ModelScope (MoDa), GitCode / AtomGit and AtomCode, or NetEase Youdao and LobsterAI (Youdao Lobster).
 
 ### About the reverse-proxy behaviour
 

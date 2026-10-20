@@ -275,6 +275,63 @@ pub async fn panel_register(username: String, password: String) -> Result<Value,
     }
 }
 
+// ── 面板登录（桌面壳的会话通道）──────────────────────────────
+//
+// ── 为什么桌面端也需要这套东西 ──────────────────────────────
+// 桌面窗口加载 `tauri://localhost`，网关在 `127.0.0.1:{port}`：跨源，登录响应
+// 的 HttpOnly cookie 到不了网关。所以桌面形态走网页端「中转模式」的同一条
+// 通道 —— 令牌进响应体、之后每个请求带 `x-panel-token` 头（实现见
+// `panel_session`）。这组命令只做三件事：查状态、存令牌、清令牌。
+//
+// 什么时候需要登录由 `admin_registered()` 决定：没注册过管理员时面板免鉴权
+// （桌面端「当正常软件用」的默认形态），注册过就必须登录 —— 注册本身发生在
+// 「开启局域网访问」的流程里，或用户主动从登录页注册。
+
+/// 当前面板会话状态（窗口启动时、以及每次从登录页回来时查询）。
+///
+/// 返回 `{ registered, authenticated }`：
+///   · `registered = false` → 不需要登录，直接进主界面；
+///   · `registered = true && authenticated = false` → 窗口应加载登录页；
+///   · 两者都 true → 直接进主界面。
+///
+/// `authenticated` 的判断方式是**真的打一次 `/api/session`**：本地有没有令牌
+/// 不代表它还有效（可能过期、可能被改密码撤销），只有服务端说了才算。这里
+/// 顺带触发 `gateway::call` 的自动续期 —— access 过期但 refresh 还活着时，
+/// 这一次探测就会把新令牌换回来，用户完全无感。
+#[tauri::command]
+pub async fn panel_session_status() -> Result<Value, String> {
+    let registered = crate::server::access::admin_registered();
+    if !registered {
+        return Ok(json!({ "registered": false, "authenticated": false }));
+    }
+    let authenticated = crate::gateway::call("GET", "/api/session", None)
+        .await
+        .is_ok();
+    Ok(json!({ "registered": true, "authenticated": authenticated }))
+}
+
+/// 保存登录页交来的令牌（登录 / 注册成功后由页面调用）。
+///
+/// 令牌加密后写进桌面设置（见 `panel_session`），壳随后每个管理请求自动带上。
+#[tauri::command]
+pub fn panel_session_store(access_token: String, refresh_token: String) -> Result<Value, String> {
+    if access_token.is_empty() || refresh_token.is_empty() {
+        return Err("令牌为空".to_string());
+    }
+    crate::panel_session::store(&access_token, &refresh_token)?;
+    Ok(json!({ "saved": true }))
+}
+
+/// 清除本机的面板会话（登出 / 会话失效后由界面调用）。
+///
+/// 只清**本机**这份令牌；服务端那条会话链由界面另行调用 `/api/panel/logout`
+/// 撤销（那条请求会带上下面的令牌，所以必须在清之前发）。
+#[tauri::command]
+pub fn panel_session_clear() -> Result<Value, String> {
+    crate::panel_session::clear();
+    Ok(json!({ "cleared": true }))
+}
+
 /// 切换局域网访问：校验 →（需要时补首把 Key）→ 写设置 → 重启应用。
 ///
 /// ── 开启前必须有面板管理员 ──────────────────────────────────
@@ -765,6 +822,49 @@ pub async fn import_database(app: AppHandle) -> Result<Value, String> {
     gateway::call("POST", "/api/backup/import", Some(&payload)).await
 }
 
+/// 云同步上传 / 下载的请求预算。
+///
+/// 60 秒是管理 API 的通用超时，而这两条要打外网传几 MB：慢速云盘 / 家用上行
+/// 上 60 秒很容易不够，被壳提前掐断时后端其实还在传（用户看到「超时」，远端
+/// 却可能已经写了一半）。300 秒与后端传输层的单次超时（`cloud_sync::webdav`
+/// 的 `TRANSFER_TIMEOUT_SECS`）对齐 —— 两边预算一致，谁先到都不会造成
+/// 「壳说失败、后端还在跑」的分叉。
+const CLOUD_SYNC_TIMEOUT_MS: u64 = 300_000;
+
+/// 云同步上传（设置页「数据 → 云同步」的「上传」）。
+#[tauri::command]
+pub async fn cloud_sync_upload() -> Result<Value, String> {
+    gateway::call_with_timeout(
+        "POST",
+        "/api/cloud-sync/upload",
+        Some(&json!({})),
+        CLOUD_SYNC_TIMEOUT_MS,
+    )
+    .await
+}
+
+/// 云同步下载（下载成功会整体替换本机业务数据）。
+#[tauri::command]
+pub async fn cloud_sync_download() -> Result<Value, String> {
+    gateway::call_with_timeout(
+        "POST",
+        "/api/cloud-sync/download",
+        Some(&json!({})),
+        CLOUD_SYNC_TIMEOUT_MS,
+    )
+    .await
+}
+
+/// 用同步密码解出远端账号密钥并装到本机。
+///
+/// 走壳命令而不是通用 `call`：密码作为参数出现在 Tauri IPC 里，不经过
+/// HTTP 请求体（少一处可能被中间层记录的落点）。
+#[tauri::command]
+pub async fn cloud_sync_import_key(password: String) -> Result<Value, String> {
+    let payload = json!({ "password": password });
+    gateway::call("POST", "/api/cloud-sync/import-key", Some(&payload)).await
+}
+
 /// 检查新版本：把本应用版本作为 query 参数交给后端比较。
 ///
 /// 版本号必须由壳提供 —— 后端以独立进程运行，不知道自己被哪个壳打包，
@@ -776,6 +876,53 @@ pub async fn check_update(app: AppHandle) -> Result<Value, String> {
     let current = app.package_info().version.to_string();
     let path = format!("/api/update/check?current={}", urlencoding(&current));
     gateway::call("GET", &path, None).await
+}
+
+/// 设置页「版本信息」：后端那份环境快照 + 壳侧独有的三项。
+///
+/// ── 为什么不让界面直接打 `/api/system-info` ──────────────────
+/// 桌面端的界面来自 Tauri 自定义协议、网关在 `127.0.0.1:{port}`：跨源，且
+/// 面板认证开启后裸 fetch 会被 401 挡下（与 `direct_credentials` 那段注释
+/// 说的是同一件事）。走壳命令由 `gateway::request_builder` 自动补凭证，
+/// 两种形态（开 / 没开面板认证）都不用界面操心。
+///
+/// ── 壳侧补的三项 ────────────────────────────────────────────
+///   · `app.version`：运行时 `package_info` 覆盖后端编译期常量 —— 与
+///     `check_update` 同一口径（版本号在 Cargo.toml 与 tauri.conf.json 各一份，
+///     装到机器上的那个包以 tauri.conf.json 为准）；
+///   · `runtime.webviewVersion`：WebView2 / WKWebView 的版本。界面白屏、
+///     CSS 不生效、`structuredClone` 之类的 API 缺失时，这是第一个要看的值；
+///     拿不到（Linux 上没装运行时等）就给空串，界面显示「—」；
+///   · `runtime.debugBuild`：后端那份说的是 **server crate** 的编译形态，
+///     而用户装的是壳 —— 桌面端以壳为准（`tauri dev` 与正式包都是同一个
+///     server crate，但壳一个带 `[Dev]` 一个不带）。
+#[tauri::command]
+pub async fn system_info(app: AppHandle, hide_username: Option<bool>) -> Result<Value, String> {
+    let path = if hide_username.unwrap_or(false) {
+        "/api/system-info?hideUsername=1"
+    } else {
+        "/api/system-info"
+    };
+    let mut info = gateway::call("GET", path, None).await?;
+
+    // 三处覆盖都做「有才写」：结构异常（老后端 / 响应被改）时保持后端那份，
+    // 不让整条命令因为少一个对象就失败。
+    if let Some(object) = info.as_object_mut() {
+        if let Some(app_section) = object.get_mut("app").and_then(Value::as_object_mut) {
+            app_section.insert(
+                "version".to_string(),
+                Value::String(app.package_info().version.to_string()),
+            );
+        }
+        if let Some(runtime) = object.get_mut("runtime").and_then(Value::as_object_mut) {
+            // wry 的 webview_version 只在运行时可用；Linux 缺 webkit2gtk 等
+            // 极端情形下会失败 —— 失败给空串，不把整条命令带崩。
+            let webview = tauri::webview_version().unwrap_or_default();
+            runtime.insert("webviewVersion".to_string(), Value::String(webview));
+            runtime.insert("debugBuild".to_string(), Value::Bool(cfg!(debug_assertions)));
+        }
+    }
+    Ok(info)
 }
 
 /// 下载安装包（后端负责联网与落盘，这里只转发参数）

@@ -104,6 +104,22 @@ pub fn supports_checkin(account: &Value) -> bool {
     // 上面那条按 `edition` 的 intl 一刀切与本家无关（它没有版本概念，恒 cn）。
     // Trae 曾与 CodeArts 同列排除表；SOLO 转积分制后模型调用花的就是签到钱包
     // 那份钱，它已在 `providers::trae::checkin` 接入本链，不要再加回来。
+    //
+    // ── 智谱清言的**访客账号**不在签到范围 ──────────────────────
+    // 访客没有积分体系：上游对每日登录积分 / 积分活动 / 任务中心一律 401
+    // （实测，见 `providers::chatglm::checkin` 的模块头），所以它进本链的
+    // **唯一**后果是负面的 —— 永远显示「待签」、把「今日签到进度」的分母
+    // 撑大（`checkin_center` 按本判据分组），并在签到记录台账里每天落一条
+    // 失败（那句中性文案不在 `claim_pending` 的白名单里）。因此按访客形态
+    // 排除，改由签到中心的「不参与每日签到」如实说明原因
+    // （`api::checkin_center::out_of_scope_reason`）—— 静默消失比签不上更糟。
+    //
+    // 判据读公开形态的 `isGuest`（`store_view::public_account` 只对本家注入，
+    // 见那里的说明）：**必须走公开形态**，因为签到中心的分组与批量签到的
+    // 目标解析读的是同一份快照 —— 判据只此一处，两处才不会分叉。
+    if account.get("isGuest").and_then(Value::as_bool) == Some(true) {
+        return false;
+    }
     !crate::server::core::account_store::is_accio_family(provider)
 }
 
@@ -192,7 +208,17 @@ pub fn resolve_checkin_targets(
         // 唯一的拒绝理由：上游这一站根本没有签到/活跃任务（Qoder 等的国际版）。
         // 文案与签到中心「范围外」分组那句同义 —— 两处说法不一致会让用户以为
         // 遇到的是两个不同的问题。WorkBuddy 国际版已由活跃任务分支放行。
+        //
+        // 访客单独给一句：它「不支持签到」的原因与别家不同（不是这一站没接链
+        // 路，而是访客本来就没有积分体系），用户看到「该账号暂不支持签到」
+        // 会去翻设置找原因。文案与签到中心的范围外原因同义。
         if !supports_checkin(&found[0]) {
+            if found[0].get("isGuest").and_then(Value::as_bool) == Some(true) {
+                return Err(CheckinError::new(
+                    "访客账号没有积分体系，仅登录账号可签到",
+                    400,
+                ));
+            }
             return Err(CheckinError::new("该账号暂不支持签到或每日活跃任务", 400));
         }
         return Ok((found, 0));
@@ -402,8 +428,9 @@ pub async fn checkin_for(
         "chatglm" => {
             // 智谱清言：本家的「签到」是**每日登录积分**
             // （`POST /chatglm/member-api/member/daily_login_score`，返回
-            // `result.score` 为本次到账数）。访客账号没有积分体系，实现如实
-            // 返回中性未领取（`success:false` + 说明文案），不落失败台账 ——
+            // `result.score` 为本次到账数）。**访客账号到不了这里** —— 它已被
+            // `supports_checkin` 的 `isGuest` 分支排除在签到范围外（没有积分
+            // 体系，相关接口对访客一律 401），实现里的访客分支只是纵深防御，
             // 见 `chatglm::checkin` 的模块头。
             let claim =
                 crate::server::core::providers::chatglm::checkin::claim_daily_login_score(store, &id)
@@ -458,6 +485,22 @@ pub async fn checkin_for(
             }
             row
         }
+        // ModelScope（魔搭）的两个站点：签到 = 调一次登录信息接口
+        // （`GET {网页站}/api/v1/users/login/info`，**调用即触发当日魔粒**，
+        // 幂等；见 `providers::modelscope::checkin` 的模块头）。
+        // 两个站点各打各的网页站、令牌不通用 —— 地区由 provider id 反查
+        // （账号集合按 provider 隔离，同一 id 不可能同时属于两家）。
+        "modelscope" | "modelscope-intl" => {
+            let region =
+                crate::server::core::providers::modelscope::Region::from_provider_id(provider_id)
+                    .unwrap_or(crate::server::core::providers::modelscope::Region::Cn);
+            let claim = crate::server::core::providers::modelscope::checkin::claim_daily_checkin(
+                region, store, &id,
+            )
+            .await
+            .map_err(|error| error.message);
+            claim_result(id, name, &display, true, claim)
+        }
         // 兜底只服务默认那家（WorkBuddy 国内版）——**不是**「剩下所有家」。
         // 这里曾经是无所不包的 `_`：一个 provider 只要没在上面列出，就会拿自己的
         // 令牌去打腾讯的签到接口，稳定报错且看不出原因（Qoder 接入前正是这个处境）。
@@ -476,7 +519,82 @@ pub async fn checkin_for(
                 .claim_daily_checkin(Some(&entry.session))
                 .await
                 .map_err(|error| error.message);
-            let mut row = claim_result(id, name, &display, false, claim);
+            let mut row = claim_result(id.clone(), name, &display, false, claim);
+            // ── 每日活跃上报：点亮成长中心连登 / 活跃地图 ──────────────
+            // 签到（`daily-checkin`）只推进**签到活动**自己的连签，成长中心的
+            // 连登与热力图只认 `/v2/report` 的一条 `chat_request_send` 事件
+            // （2026-10-19 实测：签到后签到连签 14→15，而 `growth/streak`
+            // 的 days 与当日热力格一格未动；补发一条上报后 0→1 / 0→2）。
+            // 见 `growth::daily_activity` 的模块头。
+            //
+            // 结果落在行的 `growth` 键上，**刻意不叫 `activity`**：那个键是
+            // 国际版日活链路的读数，`day_completed` / 台账会把它当成「今天
+            // 已完成」—— 对国内版，上报只点亮地图，不等于积分领到了，
+            // 混用会让签到失败的账号被记成已签。
+            //
+            // 企业版没有个人成长体系（`/activity/growth/*` 一律 403），
+            // 与下面两条一次性奖励同一门控；上报对它零收益（上游仍回 200）。
+            if !is_enterprise_session(&entry.session) {
+                let growth_row = match crate::server::core::providers::workbuddy::growth::GrowthAccount::from_store(store, &id) {
+                    Some(growth_account) => {
+                        match crate::server::core::providers::workbuddy::growth::daily_activity::report(
+                            &growth_account,
+                        )
+                        .await
+                        {
+                            Ok(report) => {
+                                // 连登天数落库：签到中心 / 账号页读它，不必每次
+                                // 打开都打一发上游。写盘失败只记日志（同 mark_checkin）。
+                                if let Some(days) = report.streak_days {
+                                    if !store.mark_streak_days(&id, days) {
+                                        logging::verbose(
+                                            "[Accounts]",
+                                            &format!("账号 {id} 的连登天数未能落盘"),
+                                        );
+                                    }
+                                }
+                                if report.sent {
+                                    logging::verbose(
+                                        "[Accounts]",
+                                        &format!(
+                                            "账号 {display}: 每日活跃已上报{}",
+                                            report
+                                                .streak_days
+                                                .map(|days| format!("（连登 {days} 天）"))
+                                                .unwrap_or_default()
+                                        ),
+                                    );
+                                }
+                                json!({
+                                    "reported": report.sent,
+                                    "streakDays": report.streak_days.map(Value::from).unwrap_or(Value::Null),
+                                    "error": Value::Null,
+                                })
+                            }
+                            // 附加收益失败：只记日志，绝不影响签到结果
+                            Err(error) => {
+                                logging::verbose(
+                                    "[Accounts]",
+                                    &format!("账号 {display} 每日活跃上报失败: {error}"),
+                                );
+                                json!({
+                                    "reported": false,
+                                    "streakDays": Value::Null,
+                                    "error": error,
+                                })
+                            }
+                        }
+                    }
+                    None => json!({
+                        "reported": false,
+                        "streakDays": Value::Null,
+                        "error": "没有可用凭证",
+                    }),
+                };
+                if let Some(object) = row.as_object_mut() {
+                    object.insert("growth".to_string(), growth_row);
+                }
+            }
             // ── 一次性运营奖励：挂在签到末尾顺带领 ────────────────
             // 新手礼包与活动补偿（如 2026-10 的 DeepSeek 故障补偿 500 积分）
             // 都没有自己的入口，官方口径是去「用量管理 / 个人中心」手动点领取
@@ -521,6 +639,29 @@ pub async fn checkin_for(
                 }
             }
             row
+        }
+        "atomcode" => {
+            // AtomCode：本家的「签到」是**领取免费 CodingPlan**（一次性授权，
+            // 不是每天发积分）。实现按需领取：先探测 `status-v2`，只有确实
+            // 没有有效套餐时才走 Max → Pro → Lite 的级联，命中即停。
+            // 判定细节与「`duplicate` 是成功语义、不许只看 HTTP 200」这条
+            // 最容易写错的地方见 `atomcode::checkin` 的模块头。
+            let claim =
+                crate::server::core::providers::atomcode::checkin::claim_plan_if_needed(store, &id)
+                    .await
+                    .map_err(|error| error.message);
+            claim_result(id, name, &display, true, claim)
+        }
+        "lobsterai" => {
+            // LobsterAI：每日活动三步（查活动位 → 取上下文 → check_in），
+            // 实测 +100 积分/号/天。幂等由实现内做两道预检（上游的
+            // 「今天已领」状态 + 客户端 idempotencyKey），今天已领时如实回
+            // 中性文案而不是再领一次 —— 见 `lobsterai::checkin` 的模块头。
+            let claim =
+                crate::server::core::providers::lobsterai::checkin::claim_daily_checkin(store, &id)
+                    .await
+                    .map_err(|error| error.message);
+            claim_result(id, name, &display, true, claim)
         }
         other => json!({
             "id": id,

@@ -46,19 +46,21 @@ import {
   displayNameOf, expiryMillis, formatIntervalSeconds, formatResetText,
   formatTokenCount, identifierOf, isDesktopAccount, isEnabled, isFreePlan, planBadgeLabel,
   providerFeatures,
-  providerOf, RESET_UNKNOWN, supportsClaim, supportsCreditDetail, supportsUsage, supportsUsageDetail,
+  providerOf, supportsClaim, supportsCreditDetail, supportsUsage, supportsUsageDetail,
   tokenBlockedOf, tokenCountdownText, tokenDisableTriggeredOf, tokenReadingForRule,
   tokenRulesOf, tokenWindowInfo, zcodePlanStateLabel,
 } from './accounts-domain'
 import { CreditDetailButton, creditRowsOf, nearestCreditOf } from './accounts-credit-detail'
+import { LimitDetailButton, limitRowsOf } from './accounts-limit-detail'
 import type { AccountSort } from './accounts-store'
 import {
   PROXY_CUSTOM_CURRENT, PROXY_CUSTOM_EDIT, applyProxyPick,
-  connectionsOf, maskName, openBatchDialog, openSettingsDialog, openZcodePlans,
-  poolError, proxyPoolSnapshot, queryUsageOnce, setAccountEnabled, setGroupEnabled, setPanelOpen,
+  connectionsOf, getStore, groupSortRules, maskName, openBatchDialog, openGroupDialog, openSettingsDialog, openZcodePlans,
+  poolError, proxyPoolSnapshot, queryUsageOnce, setAccountEnabled, setGroupEnabled,
   tokenUsageOf, toggleGroupCollapsed, toggleNamesHidden, usageEntryOf, usageFailureOf,
 } from './accounts-data'
 import type { AccountGroup } from './accounts-domain'
+import { groupSortSummary } from './accounts-group-settings'
 import { PROVIDER_ICONS } from './add-provider-pick'
 import { t } from '../i18n'
 
@@ -81,16 +83,31 @@ function iconHtml(name: string, size: number): string {
  * 把手是**唯一**的拖动起点（不是整行都能拖）：行里还有开关、下拉、按钮，整行可拖会
  * 让「点一下开关」变成「拖走了一行」。序号显示的是它在**本组内**的位次，组与组之间的
  * 先后由分组带的顺位表达 —— 两者合起来才是真实的尝试顺序。
+ *
+ * ── `sortActive`：这一组开着排序规则时把手锁定 ────────────────
+ * 顺序此时由规则算出来，拖它没有意义（松手之后一次重排又会按规则排回去）。
+ * 把手压淡、光标换成禁止，点击给一次说明（由 accounts-queue-drag 的 onLockedAttempt
+ * 统一提示）—— 静默不响应会让人以为界面卡了。
  */
-export function OrderCell({ account, rank, hint }: { account: AccountRecord; rank: number; hint?: string }) {
+export function OrderCell({ account, rank, hint, sortActive }: {
+  account: AccountRecord
+  rank: number
+  hint?: string
+  sortActive?: boolean
+}) {
   // 位次的说法随作用域变：全局表里它是**组内**序号（组与组的先后由分组带的顺位表达），
   // 模型调度作用域里它是**该模型队列**里的位次（组顺位那一层在那边没有意义）。
-  // 两种口径下的 `#N` 都是事实，只是「N 是第几位」要由 hint 说清
+  // 两种口径下的 `#N` 都是事实，只是「N 是第几位」要由 hint 说清。
+  // `sortActive`（上游）：这一组开着排序规则时把手锁定 —— 顺序由规则算出来，拖它没有意义。
   const label = hint || t('组内第 {rank} 位', { rank })
   return (
     <div className='order-cell'>
-      <span className='order-grip' role='button' tabIndex={-1} aria-label={t('拖动调整组内顺序')}
-        title={t('按住拖动，调整这个账号在本组内的顺序')}
+      <span className={`order-grip${sortActive ? ' locked' : ''}`} role='button' tabIndex={-1}
+        aria-label={t('拖动调整组内顺序')}
+        aria-disabled={sortActive || undefined}
+        title={sortActive
+          ? t('这一组开着排序规则：关掉规则后才能手动拖')
+          : t('按住拖动，调整这个账号在本组内的顺序')}
         dangerouslySetInnerHTML={{ __html: iconHtml('gripVertical', 14) }} />
       <span className='order-rank' title={label}>{`#${rank}`}</span>
     </div>
@@ -158,7 +175,7 @@ function GroupMenu({ group, ids, collapsed }: { group: AccountGroup; ids: string
 type GroupBalance = {
   /** 能相加的账号数 */
   counted: number
-  /** 本组账号总数（含没查 / 失败 / 只给比例的） */
+  /** 参与统计的账号数（整组口径 = 组内全部；按筛选口径 = 可见的那些） */
   total: number
   /** 合计；一个都加不起来时 null */
   sum: number | null
@@ -174,15 +191,23 @@ type GroupBalance = {
   pending: number
   /** 半次失败（两台网关有一台没回话）：读数计入，但要点 ⚠ */
   partial: number
+  /** 求和口径：整组（默认）还是当前筛选后的可见行 —— tooltip 要照着说 */
+  scope: 'group' | 'filtered'
 }
 
 /**
- * 组头合计：这一组**全部**账号的可用余额之和。
+ * 组头合计：这一组账号的可用余额之和。
  *
- * ── 为什么按整组求和，不按筛选 / 分页 ────────────────────────
- * 与相邻那句「N 个账号 · 启用 x · 禁用 y」同一口径：组头回答的是「这一家有多少
- * 家底」，不是「这一屏显示了多少」。而且组折叠起来之后，行都没了，组头这个合计
- * 是唯一还看得见的余额读数 —— 它要是随筛选跳，收起来就连个稳当的数都没有。
+ * ── 两种口径（设置 → 显示 → 账号列表 的开关切）──────────────
+ *   · **整组**（默认）：算这一组**全部**账号，不受筛选 / 搜索 / 分页影响。
+ *     组头回答的是「这一家有多少家底」，而组折叠起来之后行都没了，组头这个
+ *     合计是唯一还看得见的余额读数 —— 它要是随筛选跳，收起来连个稳当的数都没有。
+ *   · **按筛选**（用户显式打开）：只算当前可见的行，与筛选徽标所见即所得。
+ *     总量口径会让人困惑：明明只显示一行 100，合计却是 1,000（另一行的 900
+ *     被筛掉了却仍计入）—— 打开这个开关就得到 100。
+ *
+ * 分页**不**参与这个开关：口径说的是「筛选 / 搜索」，翻页只是看同一份结果的
+ * 不同屏，把合计切成「当前页之和」会让同一个筛选下每翻一页数字都变。
  *
  * ── 为什么禁用账号也算 ────────────────────────────────────
  * 余额是**资产**不是流量：禁用只表示不参与转发，额度仍在账上。只算启用的话，
@@ -197,10 +222,10 @@ type GroupBalance = {
  * 单位不同的不相加：同一家理论上不会出现，真出现就按第一个计入的单位记账，
  * 其余算「没计入」—— 把两种单位加成一个数才是真正的谎。
  */
-function groupBalanceOf(members: AccountRecord[]): GroupBalance {
+function groupBalanceOf(members: AccountRecord[], scope: 'group' | 'filtered' = 'group'): GroupBalance {
   const out: GroupBalance = {
     counted: 0, total: members.length, sum: null, unlimited: 0, unit: '',
-    failed: 0, uncountable: 0, pending: 0, partial: 0,
+    failed: 0, uncountable: 0, pending: 0, partial: 0, scope,
   }
   let sum = 0
   for (const account of members) {
@@ -244,9 +269,13 @@ function balanceAmountText(value: number): string {
   return api?.formatTokens ? api.formatTokens(value) : numberText(value)
 }
 
-/** 合计的悬停全文：先讲口径（整组、不受筛选影响），再把没算进来的逐条交代 */
+/** 合计的悬停全文：先讲口径（整组 / 按筛选），再把没算进来的逐条交代 */
 function groupBalanceTitle(balance: GroupBalance): string {
-  const parts = [t('本组 {n} 个账号的可用余额之和，按整组统计（不受筛选、搜索影响）', { n: balance.total })]
+  const parts = [
+    balance.scope === 'filtered'
+      ? t('当前筛选下 {n} 个账号的可用余额之和（随筛选、搜索变化，不受分页影响）', { n: balance.total })
+      : t('本组 {n} 个账号的可用余额之和，按整组统计（不受筛选、搜索影响）', { n: balance.total }),
+  ]
   parts.push(t('{n} 个已计入', { n: balance.counted }))
   if (balance.unlimited) parts.push(t('含 {n} 个不限额度账号，合计记为 ∞', { n: balance.unlimited }))
   if (balance.pending) parts.push(t('{n} 个还没查到（未查询或正在查询）', { n: balance.pending }))
@@ -294,8 +323,8 @@ function GroupBalanceBadge({ balance }: { balance: GroupBalance }) {
  *
  * 从左到右：拖动把手（整组顺位的唯一拖动起点）→ 顺位 → 家图标 + 家名 → 统计
  * （N 个账号 · 启用 x · 禁用 y · 限流 z）→ 可用合计 → 右侧折叠箭头与 ⋯ 菜单。
- * 统计与合计读的都是**整组**（不受筛选影响）：它们回答「这一家有多少账号、多少
- * 家底」，不是「当前显示几行」。
+ * 统计读的永远是**整组**（「这一家有多少账号」不随筛选变）；合计的口径由设置里
+ * 的开关决定（见 `groupBalanceOf`）：默认整组，打开后只算当前可见的行。
  *
  * 样式刻意保持中性（surface 底 + 一条 hairline）：一家一色会让整页像调色板，
  * 而「哪一段是哪一家」由家名与图标已经说清楚了。
@@ -312,14 +341,34 @@ export function GroupBandRow({ group, collapsed, colSpan, extra, hideRank }: {
   hideRank?: boolean
 }) {
   const icon = PROVIDER_ICONS[group.provider]
-  // 合计只在「有求和的余地」时出现：一个账号的组，合计与下面那行读数逐字重复；
-  // 不支持余额查询的家，挂一个永远的「—」只是噪音
-  const balance = group.members.length > 1 && group.members.some(supportsUsage)
-    ? groupBalanceOf(group.members)
+  // 合计口径：默认整组（`members`），设置里打开「按筛选」后改用可见行（`accounts`）。
+  // 分页不参与 —— 见 groupBalanceOf 的说明。
+  const filtered = getStore().groupTotalFiltered
+  const members = filtered ? group.accounts : group.members
+  // 「值不值得画合计」看的是**整组**有几个账号（一个账号的组，合计与下面那行读数
+  // 逐字重复）；而**加哪些账号**看的是当前口径。两者不能合成一个判据：按筛选口径下
+  // 筛出唯一一行时，合计正是用户要的那个数（100），不能因为「可见只剩一行」就藏掉。
+  const worthSumming = group.members.length > 1 && members.length > 0
+  const balance = worthSumming && members.some(supportsUsage)
+    ? groupBalanceOf(members, filtered ? 'filtered' : 'group')
     : null
+  /**
+   * 整条分组带可点折叠。
+   *
+   * 判定「这一下算不算点击带宽」交给事件目标：落在按钮 / 拖动把手 / 链接 / 表单控件
+   * 上的点击都有各自的动作，不能顺手把组收起来。放在容器上而不是每个子元素上，
+   * 是因为带宽里还有家名、统计、合计这些纯文本 —— 用户点它们时心里想的就是「收起来」。
+   */
+  const onBandClick = (event: React.MouseEvent<HTMLTableCellElement>) => {
+    if ((event.target as Element | null)?.closest?.('button, a, input, select, label, .queue-grip')) return
+    // 拖选文字时（正在复制账号名）不折叠：那一下是选择而不是点击
+    if (String(window.getSelection?.() || '').length > 0) return
+    toggleGroupCollapsed(group.provider)
+  }
+  const sortSummary = groupSortSummary(groupSortRules(group.provider))
   return (
     <tr className='grp-band' data-provider={group.provider}>
-      <td colSpan={colSpan}>
+      <td colSpan={colSpan} onClick={onBandClick}>
         <div className='grp-band-inner'>
           <span className='queue-grip' role='button' tabIndex={-1} aria-label={t('拖动调整整组顺序')}
             title={t('按住拖动，调整这一家的组顺位（整组一起动）')}
@@ -342,12 +391,24 @@ export function GroupBandRow({ group, collapsed, colSpan, extra, hideRank }: {
             limited: group.limited > 0 ? t(' · 限流 {n}', { n: group.limited }) : '',
           })}</span>
           {balance ? <GroupBalanceBadge balance={balance} /> : null}
+          {sortSummary ? (
+            <button type='button' className='grp-sort-mark'
+              title={t('当前排序规则：{rules}。点击调整', { rules: sortSummary })}
+              onClick={() => openGroupDialog(group.provider)}>
+              <span dangerouslySetInnerHTML={{ __html: iconHtml('sort', 10) }} />
+              {sortSummary}
+            </button>
+          ) : null}
           <span className='grp-spacer' />
           {extra}
           <button type='button' className='grp-iconbtn grp-fold' aria-expanded={!collapsed}
             title={collapsed ? t('展开这一组') : t('折叠这一组')}
             onClick={() => toggleGroupCollapsed(group.provider)}
             dangerouslySetInnerHTML={{ __html: iconHtml('chevronDown', 14) }} />
+          <button type='button' className='grp-iconbtn' title={t('分组设置')}
+            aria-label={t('分组设置')}
+            onClick={() => openGroupDialog(group.provider)}
+            dangerouslySetInnerHTML={{ __html: iconHtml('settings', 14) }} />
           <GroupMenu group={group} ids={group.accounts.map(account => account.id)} collapsed={collapsed} />
         </div>
       </td>
@@ -399,13 +460,20 @@ export function StatusCell({ account }: { account: AccountRecord }) {
 /**
  * 限流：这个账号**当前限流中的模型**。限额在后端按「账号 × 模型」记，四家通用 ——
  * 所以这一列对四家都成立，不再需要「选个模型看队列」的筛选器。
- * 有限流时是一枚可点的黄色徽章（点开 / 收起行下的明细面板），正常时是绿点「正常」。
+ * 有限流时是一枚可点的读数条（点开行下的明细弹层，见 accounts-limit-detail），
+ * 正常时是绿点「正常」。
  *
  * 「已限流」分段把限制器的跳过档也算进来（isLimitedNow 的口径），这一列必须同口径：
  * 没有模型限额但被限制器拦下的账号不亮绿点，给一枚黄色「余额不足 / Token 限额」
  * 说明它为何归入已限流（跳过的细节仍由余额列的徽章承载，这里不复述）。
+ *
+ * 三家形态的判据都是「有没有生效中的限额记录」，不为任何一家开特例 ——
+ * 记录怎么来（429 / 限额码 / 上游的 Retry-After）是转发层的事，界面只认这一份。
  */
-export function LimitsCell({ account, open }: { account: AccountRecord; open: boolean }) {
+export function LimitsCell({ account, onClear }: {
+  account: AccountRecord
+  onClear: (model: string) => void
+}) {
   const entries = activeLimits(account)
   if (!entries.length) {
     if (balanceBlockedOf(account, usageEntryOf(account))) {
@@ -430,19 +498,14 @@ export function LimitsCell({ account, open }: { account: AccountRecord; open: bo
       </Badge>
     )
   }
-  const soonest = formatResetText(entries[0].resetAt)
   return (
-    <>
-      <Badge variant='warning' shape='tag' render={<button type='button' />}
-        className={open ? 'ring-2 ring-warning-soft' : undefined}
-        title={t('点击{action}各模型的限流明细', { action: open ? t('收起') : t('查看') })}
-        onClick={() => setPanelOpen(account.id, 'limits', !open)}>
-        {t('{n} 个模型 ▾', { n: entries.length })}
-      </Badge>
-      <span className='lim-sub' title={t('最早恢复')}>
-        {t('最早 {soonest} 恢复', { soonest: soonest === RESET_UNKNOWN ? t('待定') : soonest })}
-      </span>
-    </>
+    <LimitDetailButton
+      accountName={displayNameOf(account)}
+      rows={limitRowsOf(account)}
+      count={entries.length}
+      soonest={formatResetText(entries[0].resetAt)}
+      onClear={onClear}
+    />
   )
 }
 
@@ -458,9 +521,18 @@ export function LimitsCell({ account, open }: { account: AccountRecord; open: bo
  * 刷新响应都是 13 位毫秒），不归一时 `1791009732` 当毫秒读就是 1970-01-21，账号一进
  * 面板就红着显示「已过期」。归一规则与理由写在 accounts-domain.ts 那一处，
  * 后端 `providers::trae::Credential::expires_at_ms` 是同一个口径。
+ *
+ * ── 「长期有效」与「—」是两件事 ────────────────────────────
+ * 主凭证本来就没有到期时刻的家（Antigravity 的 Google refresh token、智谱清言、
+ * ModelScope、Command Code）显示「长期有效」—— 它回答的是「要不要担心过期」。
+ * 而「—」只表示「这条记录里读不到到期时间」（KukuAI 的 BDUSS 就是这种：读不出
+ * 时刻，但上游随时可能作废）。判据是能力表的 `longLived` 位，不是「字段为空」。
  */
 export function ExpiryCell({ account }: { account: AccountRecord }) {
   const features = providerFeatures(providerOf(account))
+  if (features.longLived) {
+    return <span title={t('主凭证没有固定到期时刻，到期由网关自动续期或本来就不会过期')}>{t('长期有效')}</span>
+  }
   const expiresAt = expiryMillis(features.edition ? account.expiresAt : account[features.expiry])
   if (!expiresAt) return <span className='muted' title={t('记录里没有过期时间')}>—</span>
   const left = expiresAt - Date.now()
@@ -1537,7 +1609,9 @@ function UsageDetailCell({ summary, detail, blockedBadge, tokenSub }: {
           <span className='val'>{summary.text}</span>
           <span className='caret' aria-hidden>▾</span>
         </PopoverTrigger>
-        <PopoverContent align='end' sideOffset={6} className='usage-pop w-[288px]'>
+        {/* `align='center'`：与 accounts-credit-detail / accounts-limit-detail
+            同一处置 —— 余额格的按钮靠右，'end' 会把弹层甩到表格右外侧。 */}
+        <PopoverContent align='center' sideOffset={6} className='usage-pop w-[288px]'>
           {usable && detail.missing.length
             ? detail.missing.map(line => <div key={line} className='usage-pop-missing' title={line}>{line}</div>)
             : null}
@@ -1735,8 +1809,16 @@ export function ProxyCell({ account }: { account: AccountRecord }) {
   for (const item of poolItems) {
     // 文案是「名字（协议 主机:端口）」—— 名字是用户在「网络代理」页起的，
     // 地址是后端解析出来的实时值（见 poolItemLabel）。同一格里多条目同名时
-    // 地址是唯一能分辨它们的读数，不能只写名字
-    items.push({ value: `${POOL_VALUE_PREFIX}${item.id}`, label: poolItemLabel(item) })
+    // 地址是唯一能分辨它们的读数，不能只写名字。
+    //
+    // 禁用项**置灰不可选**：选它只会「保存成功 → 解析失败 → 回退直连」，
+    // 用户看到的是「代理已禁用」这种事后解释。要改就去「网络代理」页启用它。
+    // （当前值恰好是禁用项时照常显示 —— 触发器读的是这一项的 label，含「已禁用」）
+    items.push({
+      value: `${POOL_VALUE_PREFIX}${item.id}`,
+      label: poolItemLabel(item),
+      disabled: item.enabled === false,
+    })
   }
   if (pool === null) {
     // 还没读到（首帧 / 自愈 effect 尚未跑完）：给一句「读取中」而不是
@@ -1896,79 +1978,6 @@ export function MoreMenu({ account, atFront }: { account: AccountRecord; atFront
         </div>
       </PopoverContent>
     </Popover>
-  )
-}
-
-/* ─── 展开的明细行（限流）──────────────────── */
-
-/**
- * 限流明细面板：这个账号**当前限流中的模型**逐行列出 —— 模型名、恢复时间、上游给的
- * 原因，以及「清除标记」动作（单条）与「全部清除」。
- *
- * 为什么值得一整块面板：限流是按模型的（一个账号完全可能 A 模型限流、B 模型正常），
- * 把模型名列出来才能回答「到底是谁把我限了」；而「清除标记」是真实动作，悬浮层里
- * 放不下也点不稳。「清除标记」只作用于本机这份冷却标记（下一次请求若上游仍限流会
- * 再次被标记），所以它是安全且可逆的，不需要二次确认。
- */
-function LimitPanel({ account, onClose, onClear }: {
-  account: AccountRecord
-  onClose: () => void
-  onClear: (model: string) => void
-}) {
-  const entries = activeLimits(account)
-  const close = (
-    <Button variant='ghost' size='icon-xs' className='panel-close' title={t('收起')} onClick={onClose}>✕</Button>
-  )
-  if (!entries.length) {
-    // 已展开但记录恰好全部过期时给一句中性说明 —— 数据是两次读盘之间变了的，
-    // 不该渲染成一块空面板
-    return <div className='row-panel limit-panel'>{t('当前没有限流中的模型。')}{close}</div>
-  }
-  return (
-    <div className='row-panel limit-panel'>
-      {close}
-      <div className='lp-head'>
-        <b>{displayNameOf(account)}</b>
-        <span className='muted'>{t('{n} 个模型限流中 · 记录来自上游 429 / 限额码，到恢复时间自动解除', { n: entries.length })}</span>
-        <Button variant='outline' size='xs' title={t('清掉该账号全部模型的限流标记')}
-          onClick={() => onClear('')}>{t('全部清除')}</Button>
-      </div>
-      {entries.map(entry => {
-        const reset = formatResetText(entry.resetAt)
-        const reason = entry.message || (entry.status ? t('上游返回 {status}', { status: entry.status }) : '')
-        return (
-          <div className='lp-row' key={entry.model}>
-            <span className='lp-model' title={entry.model}>{entry.model}</span>
-            <Badge variant='warning' shape='tag'>{t('限流中')}</Badge>
-            <span className='lp-reset' title={t('到恢复时间后自动解除，无需手动操作')}>
-              {reset === RESET_UNKNOWN ? t('恢复时间未知') : t('{time} 恢复', { time: reset })}
-            </span>
-            <span className='lp-reason' title={reason}>{reason}</span>
-            <Button variant='outline' size='2xs'
-              title={t('清掉本机的限流标记，立刻重新尝试该模型（上游若仍在限流会再次被标记）')}
-              onClick={() => onClear(entry.model)}>{t('清除标记')}</Button>
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
-export function PanelsRow({ account, colSpan, limitsOpen, onClear }: {
-  account: AccountRecord
-  colSpan: number
-  /** 展开态由页面从 store 读出来传进来（这一层只负责画） */
-  limitsOpen: boolean
-  onClear: (id: string, model: string) => void
-}) {
-  if (!limitsOpen) return null
-  return (
-    <tr className='acct-panels' data-panels-for={account.id}>
-      <td colSpan={colSpan}>
-        <LimitPanel account={account} onClose={() => setPanelOpen(account.id, 'limits', false)}
-          onClear={model => onClear(account.id, model)} />
-      </td>
-    </tr>
   )
 }
 

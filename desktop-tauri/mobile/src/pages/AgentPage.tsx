@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { PageIntro, IconButton, Badge, Empty, ErrorNote, SkeletonList } from '../components/ui'
 import { GlyphLogo } from '../components/ProviderLogo'
 import { Icon } from '../components/Icon'
+import { PullIndicator, usePullToRefresh } from '../components/PullToRefresh'
 import { store } from '../state/store'
 import { fetchAgents, restoreAgentClient, type AgentClient } from '../api/gateway'
 import { usePolling } from '../lib/usePolling'
@@ -37,6 +38,8 @@ export function AgentPage() {
 
   usePolling(load, 120_000)
 
+  const pull = usePullToRefresh({ onRefresh: load })
+
   const restore = async (client: AgentClient) => {
     if (!client.id) return
     if (!window.confirm(t('确定按最近一次备份还原「{name}」？', { name: client.name || client.id }))) return
@@ -53,7 +56,8 @@ export function AgentPage() {
   }
 
   return (
-    <div className='m-page'>
+    <div className='m-page' ref={pull.bindRef}>
+      <PullIndicator pull={pull.pull} refreshing={pull.refreshing} />
       <PageIntro subtitle={t('改写网关所在机器上的客户端配置')}
         actions={<IconButton name='refresh' label={t('刷新')} onClick={() => void load()} />}
       />

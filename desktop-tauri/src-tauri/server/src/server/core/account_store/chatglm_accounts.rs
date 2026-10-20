@@ -46,6 +46,36 @@ fn chatglm_id() -> &'static str {
     kind_id(ProviderKind::Chatglm)
 }
 
+/// 记录是不是**访客**（公开形态的 `isGuest` 与签到范围判定读的同一份事实）。
+///
+/// ── 为什么不用 `credentials::from_record` ─────────────────────
+/// 签到范围是「**确凿是访客才排除**」，而 `from_record` 的访客判定带一条宽松
+/// 兜底（记录里缺 `isGuest` 键时，没有 refresh token 就当访客）—— 那是给转发
+/// 链路用的，用在这里会把「只粘了登录 access token、没有 refresh token」的
+/// 账号误判成访客、从签到清单里静默踢掉。所以本函数只认两种**确凿**证据：
+///   1. 记录里的 `isGuest`（添加时判定并落盘的权威值）；
+///   2. 缺键时 JWT 里**明说** `is_guest: true`（`token_is_guest` 的 fallback
+///      给 `false`，声明取不到就不排除）。
+/// 读不出任何证据一律给 `false`：让它留在签到范围里，「缺少令牌」这类真实
+/// 故障才会被如实报出来。
+///
+/// 与 `tasks::is_guest_account`（新手任务列表）的取向差异是有意的：那边给
+/// `true`（列进去只会换来一次注定 401 的查询），两处判据同源、兜底方向相反。
+pub fn guest_of_record(record: &StoredAccount) -> bool {
+    if let Some(flag) = record.get("isGuest").and_then(Value::as_bool) {
+        return flag;
+    }
+    // 缺键（手改 / 更早版本写的记录）：退回读 JWT 声明。令牌按**记录契约**
+    // 在顶层，`auth.accessToken` 是会话形态的残留，两种都认（与
+    // `credentials::from_record` 的字段读取同一口径）。
+    let token = record
+        .get("accessToken")
+        .or_else(|| record.get("auth").and_then(|auth| auth.get("accessToken")))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    crate::server::core::providers::chatglm::credentials::token_is_guest(token, false)
+}
+
 impl AccountStore {
     // ─── 读：账号记录 ────────────────────────────────────────
 

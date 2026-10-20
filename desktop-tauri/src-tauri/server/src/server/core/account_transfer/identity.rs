@@ -7,41 +7,24 @@
 //! （连凭证一起丢）。因此这里所有判定都产出「provider + 身份」二元组，
 //! 由调用方按二元组匹配本机记录。
 //!
-//! 身份字段（各家落盘字段的事实来源见 account_store 各模块）：
-//!   WorkBuddy 两地区 = uid；
-//!   CatPaw / Kuku / OrcaTerm = uid（缺则 loginName；OrcaTerm 再缺账号 id）；
-//!   raccoon / AutoClaw 两地区 = userId；
-//!   Qoder 两地区 = 地区 + userId（添加路径 `qoder_accounts` 按「地区 + userId」
-//!     判重，这里必须同口径 —— 只按 userId 会把国际版 / 中国版两条记录并成一条）；
-//!   Cline 两池 = account；
-//!   CodeArts = domainId + userId（同一个人不同华为云账号是两条，见该分支）；
-//!   Trae = variant + uid（solo / cn 两个谱系是同一个人也是两条）；
-//!   OfficeAce = accessKeyId（缺则账号 id）；
-//!   Command Code = accessToken（= API Key，缺则账号 id）；
-//!   Accio 两地区 = userId（缺则 accessToken，再缺账号 id）；
-//!   Loomy = userId（缺则 phone，再缺账号 id）；
-//!   MonkeyCode 两地区 = userId（缺则 accessToken，再缺账号 id）；
-//!   Antigravity = userId（= email；缺则 refreshToken，再缺账号 id）；
-//!   自定义提供商（custom- 前缀）= apiKey（缺则账号 id，与 `custom_accounts`
-//!      「同 key 合并」的幂等口径一致）。
-//! 剩下落到 `userId` 兜底的只有 raccoon / AutoClaw 两地区 / ZCode 两地区 ——
-//! 那几家的记录确实只有 `userId` 一个身份键（ZCode / MonkeyCode 的地区已编码在
-//! provider id 里，匹配又按 provider 作用域，与「地区 + userId」等效；MonkeyCode
-//! 仍单列分支，因为它有一批**没有 userId** 的匿名账号，兜底会整条拒掉）。
+//! ── 判据只此一份：`identity_from_fields` ─────────────────────
+//! 导入条目（导出文件里的一条 JSON）与本机记录（`StoredAccount`）的身份**必须
+//! 用同一个函数算**：两边各写一份的旧实现里，同一条账号在导出侧与本机侧可能
+//! 算出两个身份（缺省值不一致、字段优先级不一致），判重随即失效 —— 表现是
+//! 重复添加或该合并的没合并。现在两侧都只调 [`identity_from_fields`]，它读的
+//! 是同一张字段表，口径不可能再分叉。
 //!
-//! ── 加新家的检查清单（这里漏一支的代价是「账号导得出去、导不回来」）──
-//! 只看「provider 有没有 `userId` 键」是不够的 —— 兜底读的就是 `userId`，
-//! 所以**凡是不写 `userId` 的家都必须有专属分支**。2026-10-18 上午靠这条查出
-//! 了 OfficeAce 与 OrcaTerm 两家的缺口（实测：导出→导入整条失败，报「缺少
-//! userId」）；同日下午复查又按同一把尺子量出 **Accio / Loomy / MonkeyCode /
-//! Antigravity** 四家 —— 它们写 userId，但都有一批**合法存在却没有 userId**
-//! 的账号（不透明令牌解不出 id、只粘了 session、只粘了 refresh token），
-//! 添加路径给这些账号安排了次级身份（同串令牌 / 手机号），导入侧却没有。
-//! 加家时两件事都要做：
-//!   ① `identity_of_item`（导入条目）与 `identity_of_record`（本机记录）
-//!      **同时**加分支，且字段与缺省口径逐字一致；
-//!   ② 用「导出→原样导入→二次导入」三步验证：第三步必须计 `updated`
-//!      而不是 `added`（否则每条都判新增，会刷出一堆重复账号）。
+//! ── 新增一家 provider 要改这里吗：不用 ───────────────────────
+//! 只有**身份语义确实特殊**的家才在 [`identity_from_fields`] 里占一条分支
+//! （WorkBuddy 的 uid 必填、Qoder 的「地区 + userId」、Trae 的「variant + uid」
+//! 这类 —— 少一段就会把两条真实账号并成一条）。其余全部走
+//! [`GENERIC_IDENTITY_KEYS`] 的通用链：按固定顺序取第一个非空字段。
+//! 新家只要把身份落在这些常见字段上（userId / uid / loginName / account /
+//! apiKey / accessToken / modelAppKey…），**本文件一行都不用改**。
+//!
+//! 这条通用链是「每加一家就要回来补分支」这个维护负担的**根治手段**：漏补的
+//! 旧症状（`缺少 userId` 整条失败，账号导得出去、导不回来）不会再出现。
+//! 2026-10 的 OfficeAce 就是那样漏的 —— 它的记录只有 `modelAppKey`。
 
 use std::collections::HashSet;
 
@@ -55,8 +38,58 @@ use crate::server::core::providers::{
     is_known_provider_id, kind_id, ProviderKind, DEFAULT_PROVIDER_ID,
 };
 
-/// 桌面端实时登录态的固定账号 id（记录里按设计不落 token，凭证实时读客户端文件）。
+/// 通用身份链：**按顺序**取第一个非空字符串。
 ///
+/// ── 顺序是怎么定的 ──────────────────────────────────────────
+/// 先「稳定的业务身份」（userId / uid / loginName / account / email / phone），
+/// 再「凭证即身份」的家（apiKey / accessToken / jwt / modelAppKey），最后才是
+/// 账号 id。id 放最后是因为它是**派生值**：各家的添加路径都用身份算出 id
+/// （`user-<uid>`、`qoder-<region>-<sha256>`、`<provider>-<hash>`…），所以同一条
+/// 账号在另一台机器上算出的 id 也一致 —— 拿它兜底能救回「身份字段缺失但 id
+/// 完好」的记录，而不会把不同账号错并（id 在全局唯一）。
+///
+/// 顺序本身就是口径：导入条目与本机记录读同一张表，谁在前谁在后**两边一样**，
+/// 判重因此不可能因字段优先级漂移而失效。加字段时追加在合适的位置即可，
+/// 但别插在已有字段前面 —— 那会改变存量文件的匹配结果。
+const GENERIC_IDENTITY_KEYS: &[&str] = &[
+    "userId",
+    "uid",
+    "loginName",
+    "account",
+    "email",
+    "phone",
+    "username",
+    "apiKey",
+    "accessToken",
+    "jwt",
+    "modelAppKey",
+    "id",
+];
+
+/// 「这条记录带凭证吗」的已知凭证键（任一非空即算有）。
+///
+/// 与 [`GENERIC_IDENTITY_KEYS`] 同一思路：不按 provider 枚举，而是列出全仓
+/// 出现过的凭证落盘键。旧实现只认 `accessToken` / `refreshToken`，于是
+/// OfficeAce（`modelAppKey` + `modelAppSecret`）、自定义家（`apiKey`）、
+/// ZCode（`jwt`）这些账号会被整条判成「缺少凭证」—— 导得出去、导不回来。
+///
+/// 新增一家时若凭证落在这些键之外（比如某个 `xxxToken`），**要么复用现成键，
+/// 要么在这里补一行**；漏补的症状仍是「导出正常、导入全失败」，但这次只需要
+/// 在一个数组里加一项，不必再改判定逻辑。
+pub(super) const CREDENTIAL_KEYS: &[&str] = &[
+    "accessToken",
+    "refreshToken",
+    "apiKey",
+    "modelAppKey",
+    "modelAppSecret",
+    "secretAccessKey",
+    "securityToken",
+    "jwt",
+    "accessKeyId",
+    "secretKey",
+];
+
+/// 桌面端实时登录态的固定账号 id（记录里按设计不落 token，凭证实时读客户端文件）。///
 /// **全局保留**：任何 provider 的导入记录用了这些 id 都跳过 —— 既避免把引用
 /// 变成普通账号，也避免占住 id 让后续 importDesktop 无法创建/刷新。
 ///
@@ -163,10 +196,29 @@ fn qoder_region(fields: &Map<String, Value>) -> Result<Option<String>, ()> {
     }
 }
 
-/// 导入记录的业务身份；无法确定身份时 Err（该条失败，不做猜测性匹配）。
-pub(super) fn identity_of_item(provider: &str, item: &Map<String, Value>) -> Result<String, String> {
+/// 从一张字段表算业务身份 —— **导入条目与本机记录共用这一份**（见模块头）。
+///
+/// 返回 `Ok(identity)`；无法确定身份时 `Err(原因)`（导入侧据此让该条失败，
+/// 不做猜测性匹配）。
+///
+/// ── 特殊家为什么还要分支 ────────────────────────────────────
+/// 通用链只按字段顺序取值，覆盖不了三类**语义**约束：
+///   1. **必填**：WorkBuddy 缺 uid 时不能拿别家字段凑（凑出来的身份在两侧
+///      口径不同，判重会错）；
+///   2. **多段身份**：Qoder 的「地区 + userId」、Trae 的「variant + uid」、
+///      CodeArts 的「domain + userId」—— 只取一段会把同一个人在两地 / 两谱系 /
+///      两域下的两条真实账号并成一条，而被覆盖那条的凭证（尤其一次性 refresh
+///      token）就此作废；
+///   3. **取值优先级与通用链不同**：CatPaw / Kuku 是 uid 优先、loginName 兜底，
+///      而通用链里 userId 排在 uid 前面 —— 这两家的记录里 `userId` 是**别的东西**
+///      （CatPaw 的 `userId` 是 payload 别名，不是本家身份）。
+///
+/// 除此之外**一律走通用链**：新增一家 provider 时，只要身份落在
+/// [`GENERIC_IDENTITY_KEYS`] 里就不必改本文件。
+fn identity_from_fields(provider: &str, fields: &Map<String, Value>) -> Result<String, String> {
     let text = |key: &str| {
-        item.get(key)
+        fields
+            .get(key)
             .and_then(Value::as_str)
             .unwrap_or("")
             .trim()
@@ -175,6 +227,7 @@ pub(super) fn identity_of_item(provider: &str, item: &Map<String, Value>) -> Res
     let uid = text("uid");
     let login_name = text("loginName");
     let user_id = text("userId");
+
     // 「workbuddy 系」= 国内版 + 国际版：两家身份字段同形（uid），
     // 见 `providers::workbuddy::is_workbuddy_family` 的说明
     if crate::server::core::providers::workbuddy::is_workbuddy_family(provider) {
@@ -183,45 +236,23 @@ pub(super) fn identity_of_item(provider: &str, item: &Map<String, Value>) -> Res
         }
         return Ok(uid);
     }
-    if provider == kind_id(ProviderKind::CatPaw) {
+    // CatPaw / Kuku：uid 优先、loginName 兜底。两家记录里的 `userId` 不是本家
+    // 身份（CatPaw 的是 payload 别名），所以**不能**交给通用链 —— 通用链里
+    // userId 排在 uid 前，取到的会是一个与本机侧不同的值。
+    if provider == kind_id(ProviderKind::CatPaw) || provider == kind_id(ProviderKind::Kuku) {
         if !uid.is_empty() {
             return Ok(uid);
         }
         if !login_name.is_empty() {
             return Ok(login_name);
         }
-        return Err("缺少 uid 与 loginName（无法标识 CatPaw 账号）".to_string());
-    }
-    // Kuku：账号标识是 `uid`（= userreport 的 uk，本家 id 也从它派生），缺则
-    // loginName —— 与 CatPaw 同一套字段口径。没有这一支会落进兜底按 `userId`
-    // 取，而本家记录没有该字段：账号导得出去、导不回来（报「缺少 userId」整条
-    // 失败）。
-    if provider == kind_id(ProviderKind::Kuku) {
-        if !uid.is_empty() {
-            return Ok(uid);
-        }
-        if !login_name.is_empty() {
-            return Ok(login_name);
-        }
-        return Err("缺少 uid 与 loginName（无法标识 Kuku 账号）".to_string());
-    }
-    // Cline 的账号标识落在 `account`（邮箱或 `usr-…` id）而不是 `userId`
-    // —— 见 `account_store::cline_accounts` 的公开形态。少了这一支，
-    // Cline 账号导出后再导入会因「缺少 userId」整条失败。
-    // **两个池共用这一支**（判据是「属于 Cline 系」，不是某个具体 provider id）。
-    if crate::server::core::account_store::is_cline_family(provider) {
-        let account = text("account");
-        if !account.is_empty() {
-            return Ok(account);
-        }
-        return Err("缺少 account（无法标识 Cline 账号）".to_string());
+        return Err("缺少 uid 与 loginName（无法标识该账号）".to_string());
     }
     // CodeArts：`domain_id + user_id` 两段身份 —— 与 `codearts_accounts::same_identity`
     // 的判重口径逐字一致。只按 userId 会把**同一个人不同华为云账号（域）下的两条**
     // 并成一条：导入时后一条覆盖前一条，而被覆盖那条的一次性 refresh token
     // 就此作废（不是"少一条记录"，是"烧掉一份登录凭据"）。
     if provider == kind_id(ProviderKind::CodeArts) {
-        let user_id = text("userId");
         if user_id.is_empty() {
             return Err("缺少 userId（无法标识 CodeArts 账号）".to_string());
         }
@@ -236,7 +267,7 @@ pub(super) fn identity_of_item(provider: &str, item: &Map<String, Value>) -> Res
         if user_id.is_empty() {
             return Err("缺少 userId（无法标识 Qoder 账号）".to_string());
         }
-        let region = match qoder_region(item) {
+        let region = match qoder_region(fields) {
             Ok(Some(region)) => region,
             Ok(None) => {
                 // 键缺失：按 **provider id** 推（拆家后它是权威；导入条目
@@ -255,8 +286,6 @@ pub(super) fn identity_of_item(provider: &str, item: &Map<String, Value>) -> Res
     // Trae：账号标识是 `uid`（与 workbuddy / catpaw 同类，落在 uid 而不是 userId），
     // 且判重口径是 **(variant, uid) 两段** —— 见 `trae_accounts::add_trae_account`：
     // 同一个人可以在 solo 与 cn 两个谱系各有一条记录，只按 uid 会把两条并成一条。
-    // 少了这一支的话，本家账号导得出去、导不回来（落到下面的 userId 兜底，
-    // 报「缺少 userId（无法标识 trae 账号）」整条失败）。
     if provider == kind_id(ProviderKind::Trae) {
         if uid.is_empty() {
             return Err("缺少 uid（无法标识 Trae 账号）".to_string());
@@ -264,358 +293,99 @@ pub(super) fn identity_of_item(provider: &str, item: &Map<String, Value>) -> Res
         let variant = text("variant");
         return Ok(format!("{}:{uid}", if variant.is_empty() { "solo" } else { &variant }));
     }
-    // 自定义提供商：凭证就是身份 —— apiKey 非空时与添加路径「同 key 合并」
-    // 完全同口径（添加路径的账号 id 就是 key 的 SHA-256 前缀）；空 key 没有
-    // 稳定标识，退到账号 id（空 key 的记录 id 是随机的，但全局唯一仍然成立）。
-    if provider.starts_with(crate::server::core::custom_providers::ID_PREFIX) {
-        let api_key = text("apiKey");
-        if !api_key.is_empty() {
-            return Ok(api_key);
+
+    // ── 通用链：新增一家 provider 时这里不用改（见模块头）──────────
+    for key in GENERIC_IDENTITY_KEYS {
+        let value = text(key);
+        if !value.is_empty() {
+            return Ok(value);
         }
-        let id = text("id");
-        if !id.is_empty() {
-            return Ok(id);
-        }
-        return Err("缺少 apiKey 与 id（无法标识自定义提供商账号）".to_string());
     }
-    // OfficeAce（华为云办公云）：身份落在 `accessKeyId`（**控制面临时凭据**），
-    // 不是 userId —— 本家记录根本没有 `userId` 键。少了这一支会落进最下面的
-    // `userId` 兜底 → 报「缺少 userId（无法标识 officeace 账号）」整条失败：
-    // 账号**导得出去、导不回来**，备份恢复时静默丢号。
-    //
-    // ── 为什么身份不是「基址 + appKey」──────────────────────────
-    // 添加路径的 id 确实是 `officeace-<hash(基址|appKey)>`（见
-    // `officeace_accounts::account_id_for`），但那是**id 的生成规则**，不是
-    // 导入该用的身份：导入时 id 只作新增取名建议（本机可能因全局冲突改过名），
-    // 匹配必须靠记录里的业务字段。用 accessKeyId 与「同一条凭据重复导入落同
-    // 一条」这个目标一致 —— 同一份华为云凭据的 accessKeyId 恒定。
-    //
-    // 缺 accessKeyId 时退到账号 id（与 CommandCode / 自定义家「关键字段缺失用
-    // id」同口径）：id 全局唯一，至少能保证导入的记录不与别的账号互串。
-    if provider == kind_id(ProviderKind::OfficeAce) {
-        let access_key_id = text("accessKeyId");
-        if !access_key_id.is_empty() {
-            return Ok(access_key_id);
-        }
-        let id = text("id");
-        if !id.is_empty() {
-            return Ok(id);
-        }
-        return Err("缺少 accessKeyId 与 id（无法标识 OfficeAce 账号）".to_string());
-    }
-    // OrcaTerm（腾讯云 OrcaTerm）：身份是 `uid`（= userId，但**落在 uid 键上**，
-    // 与 CatPaw / Kuku / Trae 同类）。本家记录没有 `userId` 键，同样会落进
-    // `userId` 兜底而失败。缺 uid 时退 loginName（与 CatPaw / Kuku 同款的二级
-    // 兜底），再退账号 id。
-    if provider == kind_id(ProviderKind::OrcaTerm) {
-        let uid = text("uid");
-        if !uid.is_empty() {
-            return Ok(uid);
-        }
-        if !login_name.is_empty() {
-            return Ok(login_name);
-        }
-        let id = text("id");
-        if !id.is_empty() {
-            return Ok(id);
-        }
-        return Err("缺少 uid 与 loginName（无法标识 OrcaTerm 账号）".to_string());
-    }
-    // Command Code：凭证就是身份 —— API Key 落盘在 `accessToken`（添加路径的
-    // 账号 id 就是 key 的 SHA-256 前缀，与自定义家同构），记录上没有
-    // userId / uid / apiKey 键。没有这一支会落进兜底按 `userId` 取 → 报
-    // 「缺少 userId」整条失败；空 token 的记录退到账号 id（与自定义家
-    // 「缺 apiKey 用 id」同口径）。
-    if provider == kind_id(ProviderKind::CommandCode) {
-        let access_token = text("accessToken");
-        if !access_token.is_empty() {
-            return Ok(access_token);
-        }
-        let id = text("id");
-        if !id.is_empty() {
-            return Ok(id);
-        }
-        return Err("缺少 accessToken 与 id（无法标识 Command Code 账号）".to_string());
-    }
-    // Accio（两个地区共用一套凭证形态）：身份是「userId，缺则 accessToken」——
-    // 与 `accio_accounts::add_accio_account` 的判重口径逐字一致（那边是
-    // `same_user || same_token`：有 userId 按 userId 匹配，没有就按同一串
-    // accessToken 匹配）。Accio 的 accessToken 是**不透明串**，解不出 userId，
-    // 网页登录也可能拿不到 —— 那类账号**合法存在**（`Credentials::to_value`
-    // 把空 userId 落成 null，添加路径靠 same_token 防重）。导入侧没有这一支
-    // 就会落进最下面的 userId 兜底：无 userId 的 Accio 账号「导得出去、
-    // 导不回来」（报「缺少 userId」整条失败，备份恢复时静默丢号）。
-    // 再退账号 id（与 OfficeAce / CommandCode 同款兜底）：id 全局唯一，
-    // 至少保证导入的记录不与别的账号互串。
-    if crate::server::core::account_store::is_accio_family(provider) {
-        if !user_id.is_empty() {
-            return Ok(user_id);
-        }
-        let access_token = text("accessToken");
-        if !access_token.is_empty() {
-            return Ok(access_token);
-        }
-        let id = text("id");
-        if !id.is_empty() {
-            return Ok(id);
-        }
-        return Err("缺少 userId 与 accessToken（无法标识 Accio 账号）".to_string());
-    }
-    // Loomy：身份是「userId，缺则手机号」—— 与 `loomy_accounts::add_loomy_account`
-    // 同口径（那边明确要求「userId 或手机号至少给一个」，账号 id 就是
-    // `loomy-{userId|phone}`）。短信登录的响应里带 userid，但**粘贴 session**
-    // 的形态允许只给手机号 —— 那类账号合法存在，落进 userId 兜底会整条失败
-    // （导得出去、导不回来）。再退账号 id（同款兜底）。
-    if provider == kind_id(ProviderKind::Loomy) {
-        if !user_id.is_empty() {
-            return Ok(user_id);
-        }
-        let phone = text("phone");
-        if !phone.is_empty() {
-            return Ok(phone);
-        }
-        let id = text("id");
-        if !id.is_empty() {
-            return Ok(id);
-        }
-        return Err("缺少 userId 与 phone（无法标识 Loomy 账号）".to_string());
-    }
-    // MonkeyCode（两个地区共用）：身份是「userId」—— 与
-    // `monkeycode_accounts::add_monkeycode_account` 同口径（有 userId 按 userId
-    // 判重；地区已编码在 provider id 里，匹配又按 provider 作用域，「地区 +
-    // userId」两段不会串）。**没有 userId 的账号也合法存在**：上游没给 user
-    // uuid 时添加路径用随机 id 且不去重（见 `anonymous_account_id` 的注释）——
-    // 那类记录导得出去，落进 userId 兜底却整条失败。次级身份用 accessToken
-    // （= session）：同一串 session 就是同一个账号；且添加路径对匿名账号
-    // **不去重**，而导入路径必须幂等（「导出→导入→二次导入」第三步要判
-    // updated），按 accessToken 匹配正好补上这一环。再退账号 id（同款兜底）。
-    if crate::server::core::account_store::is_monkeycode_family(provider) {
-        if !user_id.is_empty() {
-            return Ok(user_id);
-        }
-        let access_token = text("accessToken");
-        if !access_token.is_empty() {
-            return Ok(access_token);
-        }
-        let id = text("id");
-        if !id.is_empty() {
-            return Ok(id);
-        }
-        return Err("缺少 userId 与 accessToken（无法标识 MonkeyCode 账号）".to_string());
-    }
-    // Antigravity：身份是「userId（= email），缺则 refreshToken」—— 与
-    // `antigravity_accounts` 的 id 派生口径同源（那边是 email → refresh token
-    // 摘要：email 对同一个 Google 账号稳定，重新授权换令牌不变；只粘了令牌
-    // 没有 email 的账号按令牌摘要派生 id，同样合法）。落进 userId 兜底会让
-    // 「只粘贴了 refresh token」的账号导得出去、导不回来 —— antigravity_accounts
-    // 模块头原话说这类账号「在导出时会得到一句缺少 userId 的失败原因」，
-    // 那正是要消灭的静默丢号。用 refreshToken（长期凭证）而不是 accessToken
-    // （短期、刷新即变）。再退账号 id（同款兜底）。
-    if provider == kind_id(ProviderKind::Antigravity) {
-        if !user_id.is_empty() {
-            return Ok(user_id);
-        }
-        let refresh_token = text("refreshToken");
-        if !refresh_token.is_empty() {
-            return Ok(refresh_token);
-        }
-        let id = text("id");
-        if !id.is_empty() {
-            return Ok(id);
-        }
-        return Err("缺少 userId 与 refreshToken（无法标识 Antigravity 账号）".to_string());
-    }
-    if user_id.is_empty() {
-        return Err(format!("缺少 userId（无法标识 {provider} 账号）"));
-    }
-    Ok(user_id)
+    Err(format!("缺少可用的身份字段（无法标识 {provider} 账号）"))
 }
 
-/// 本机记录的业务身份（与 `identity_of_item` 同一口径）；身份字段缺失时 None。
+/// **编译期护栏**：新增一家 provider 时必须在这里表态。
+///
+/// ── 它解决什么问题 ──────────────────────────────────────────
+/// 这套导入导出最贵的维护成本不是写分支，而是**忘记**写分支 —— 症状是
+/// 「导出正常、导入整条失败」，而且只有用户真的去导才会发现。2026-10 的
+/// OfficeAce 就是这样漏的（记录里只有 `modelAppKey`，落到旧的 `userId`
+/// 兜底直接报「缺少 userId」）。
+///
+/// 这个 `match` 的臂**不参与任何运行时判断**，唯一作用是：`ProviderKind`
+/// 新增一个变体时，编译器在这里报 `non-exhaustive patterns`，逼着作者回答
+/// 「这家走通用链够不够」。回答完把新家写进 [`Generic`](IdentityShape::Generic)
+/// 那一臂即可 —— 一行，不需要改判定逻辑。
+///
+/// 返回值只用于让 match 有产出（也便于测试断言覆盖齐全），运行时**不读**。
+#[allow(dead_code)]
+fn identity_shape_of(kind: ProviderKind) -> IdentityShape {
+    use IdentityShape::{Generic, NeedsBranch};
+    match kind {
+        // ── 身份语义特殊、必须走专属分支的家 ────────────────────
+        // 判据见 `identity_from_fields` 的分支注释：必填、多段身份、或取值
+        // 优先级与通用链不同（CatPaw / Kuku 的 `userId` 不是本家身份）。
+        ProviderKind::WorkBuddy
+        | ProviderKind::WorkBuddyIntl
+        | ProviderKind::CatPaw
+        | ProviderKind::Kuku
+        | ProviderKind::CodeArts
+        | ProviderKind::Qoder
+        | ProviderKind::QoderIntl
+        | ProviderKind::Trae => NeedsBranch,
+        // ── 其余全部走通用身份链 ────────────────────────────────
+        // 新增一家 provider 时：**先默认加在这里**。只有当它的身份确实不能用
+        // 通用链表达（出现上面三类约束）时才移到 NeedsBranch，并在
+        // `identity_from_fields` 里补分支。
+        ProviderKind::Raccoon
+        | ProviderKind::AutoClaw
+        | ProviderKind::AutoClawIntl
+        | ProviderKind::ClineFree
+        | ProviderKind::ClinePass
+        | ProviderKind::Accio
+        | ProviderKind::AccioCn
+        | ProviderKind::Zcode
+        | ProviderKind::ZcodeIntl
+        | ProviderKind::Loomy
+        | ProviderKind::MonkeyCode
+        | ProviderKind::MonkeyCodeIntl
+        | ProviderKind::CommandCode
+        | ProviderKind::Antigravity
+        | ProviderKind::OfficeAce
+        | ProviderKind::OrcaTerm
+        | ProviderKind::Chatglm
+        | ProviderKind::Modelscope
+        | ProviderKind::ModelscopeIntl
+        | ProviderKind::Atomcode
+        | ProviderKind::LobsterAi
+        // 千问办公 / QClaw：身份都落在通用链的常见字段上 —— 前者 `userId`
+        // （+ `accessToken` 兜底），后者 `uid`（+ 网关令牌摘要兜底，见
+        // `account_store::qclaw_accounts`）。无「必填 / 多段 / 优先级不同」
+        // 三类约束，因此不需要专属分支（与上游对 OfficeAce / OrcaTerm 的
+        // 处置一致 —— 同步上游时本地那几支专属分支已随之删除）。
+        | ProviderKind::Qwenwork
+        | ProviderKind::Qclaw => Generic,
+    }
+}
+
+/// [`identity_shape_of`] 的两种形态（只为让穷尽 match 有产出，运行时不读）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum IdentityShape {
+    /// 走 [`identity_from_fields`] 里的专属分支
+    NeedsBranch,
+    /// 走 [`GENERIC_IDENTITY_KEYS`] 通用链
+    Generic,
+}
+
+/// 导入记录的业务身份；无法确定身份时 Err（该条失败，不做猜测性匹配）。
+pub(super) fn identity_of_item(provider: &str, item: &Map<String, Value>) -> Result<String, String> {
+    identity_from_fields(provider, item)
+}
+
+/// 本机记录的业务身份（与 `identity_of_item` 同一份判据）；身份缺失时 None。
 pub(super) fn identity_of_record(provider: &str, record: &StoredAccount) -> Option<String> {
-    let login_name = record
-        .get("loginName")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if crate::server::core::providers::workbuddy::is_workbuddy_family(provider) {
-        let uid = record.uid().trim().to_string();
-        return (!uid.is_empty()).then_some(uid);
-    }
-    if provider == kind_id(ProviderKind::CatPaw) {
-        let uid = record.uid().trim().to_string();
-        if !uid.is_empty() {
-            return Some(uid);
-        }
-        return (!login_name.is_empty()).then_some(login_name);
-    }
-    // Kuku：uid（缺则 loginName）—— 与 `identity_of_item` 同口径
-    if provider == kind_id(ProviderKind::Kuku) {
-        let uid = record.uid().trim().to_string();
-        if !uid.is_empty() {
-            return Some(uid);
-        }
-        return (!login_name.is_empty()).then_some(login_name);
-    }
-    // Trae：`uid` + variant 两段身份（与 `identity_of_item` 同口径 —— 两处
-    // 缺省都必须按 `solo` 算，否则导出去的同一条账号会在判重时对不上）。
-    if provider == kind_id(ProviderKind::Trae) {
-        let uid = record.uid().trim().to_string();
-        if uid.is_empty() {
-            return None;
-        }
-        let variant = record
-            .get("variant")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        return Some(format!("{}:{uid}", if variant.is_empty() { "solo" } else { &variant }));
-    }
-    // Cline：身份在 `account` 键上（与 `identity_of_item` 同一口径，两池共用）
-    if crate::server::core::account_store::is_cline_family(provider) {
-        let account = record
-            .get("account")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        return (!account.is_empty()).then_some(account);
-    }
-    // Qoder：地区 + userId（与 `identity_of_item` 同口径，地区取 `mode` /
-    // `edition`，键缺失按 provider id 推、再退国际版 —— 两处缺省必须一致）。
-    // 地区值非法的记录视为无法识别身份（不参与匹配，导入按新增走；正常数据
-    // 不会出现这种记录）。
-    if crate::server::core::account_store::is_qoder_family(provider) {
-        let user_id = record.user_id().trim().to_string();
-        if user_id.is_empty() {
-            return None;
-        }
-        let region = match qoder_region(record.fields()) {
-            Ok(Some(region)) => region,
-            Ok(None) => crate::server::core::providers::qoder::endpoints::Region::from_provider_id(provider)
-                .map(|region| region.id().to_string())
-                .unwrap_or_else(|| "global".to_string()),
-            Err(()) => return None,
-        };
-        return Some(format!("{region}:{user_id}"));
-    }
-    // 自定义提供商：apiKey 非空即身份（同 key 合并），否则账号 id
-    if provider.starts_with(crate::server::core::custom_providers::ID_PREFIX) {
-        let api_key = record
-            .get("apiKey")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if !api_key.is_empty() {
-            return Some(api_key);
-        }
-        let id = record.id().trim().to_string();
-        return (!id.is_empty()).then_some(id);
-    }
-    // OfficeAce：accessKeyId（缺则账号 id）—— 与 `identity_of_item` 同口径。
-    // 两侧都必须有这一支，否则「导出条目按 accessKeyId 匹配、本机记录算不出身份」
-    // 会让同一条账号每次导入都判为新增（重复账号，也是一种数据损坏）。
-    if provider == kind_id(ProviderKind::OfficeAce) {
-        let access_key_id = record
-            .get("accessKeyId")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if !access_key_id.is_empty() {
-            return Some(access_key_id);
-        }
-        let id = record.id().trim().to_string();
-        return (!id.is_empty()).then_some(id);
-    }
-    // OrcaTerm：uid（缺则 loginName，再缺用账号 id）—— 与 `identity_of_item` 同口径
-    if provider == kind_id(ProviderKind::OrcaTerm) {
-        let uid = record.uid().trim().to_string();
-        if !uid.is_empty() {
-            return Some(uid);
-        }
-        if !login_name.is_empty() {
-            return Some(login_name);
-        }
-        let id = record.id().trim().to_string();
-        return (!id.is_empty()).then_some(id);
-    }
-    // Command Code：accessToken（= API Key）即身份，缺则账号 id ——
-    // 与 `identity_of_item` 同口径
-    if provider == kind_id(ProviderKind::CommandCode) {
-        let access_token = record.access_token().trim().to_string();
-        if !access_token.is_empty() {
-            return Some(access_token);
-        }
-        let id = record.id().trim().to_string();
-        return (!id.is_empty()).then_some(id);
-    }
-    // Accio：userId（缺则 accessToken，再缺用账号 id）—— 与 `identity_of_item`
-    // 同口径。两侧都必须有这一支：只给导入条目加分支会让「条目按 accessToken
-    // 算身份、本机记录算不出身份」，同一条账号每次导入都判新增（重复账号，
-    // 也是一种数据损坏）。
-    if crate::server::core::account_store::is_accio_family(provider) {
-        let user_id = record.user_id().trim().to_string();
-        if !user_id.is_empty() {
-            return Some(user_id);
-        }
-        let access_token = record.access_token().trim().to_string();
-        if !access_token.is_empty() {
-            return Some(access_token);
-        }
-        let id = record.id().trim().to_string();
-        return (!id.is_empty()).then_some(id);
-    }
-    // Loomy：userId → phone → 账号 id —— 与 `identity_of_item` 同口径
-    if provider == kind_id(ProviderKind::Loomy) {
-        let user_id = record.user_id().trim().to_string();
-        if !user_id.is_empty() {
-            return Some(user_id);
-        }
-        let phone = record
-            .get("phone")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if !phone.is_empty() {
-            return Some(phone);
-        }
-        let id = record.id().trim().to_string();
-        return (!id.is_empty()).then_some(id);
-    }
-    // MonkeyCode：userId → accessToken → 账号 id —— 与 `identity_of_item` 同口径
-    if crate::server::core::account_store::is_monkeycode_family(provider) {
-        let user_id = record.user_id().trim().to_string();
-        if !user_id.is_empty() {
-            return Some(user_id);
-        }
-        let access_token = record.access_token().trim().to_string();
-        if !access_token.is_empty() {
-            return Some(access_token);
-        }
-        let id = record.id().trim().to_string();
-        return (!id.is_empty()).then_some(id);
-    }
-    // Antigravity：userId（= email）→ refreshToken → 账号 id ——
-    // 与 `identity_of_item` 同口径
-    if provider == kind_id(ProviderKind::Antigravity) {
-        let user_id = record.user_id().trim().to_string();
-        if !user_id.is_empty() {
-            return Some(user_id);
-        }
-        let refresh_token = record.refresh_token().trim().to_string();
-        if !refresh_token.is_empty() {
-            return Some(refresh_token);
-        }
-        let id = record.id().trim().to_string();
-        return (!id.is_empty()).then_some(id);
-    }
-    let user_id = record.user_id().trim().to_string();
-    (!user_id.is_empty()).then_some(user_id)
+    identity_from_fields(provider, record.fields()).ok()
 }
 
 /// 分配一个**真正全局唯一**的账号 id：优先用导入原值，被占用时依次尝试
@@ -685,10 +455,6 @@ mod tests {
         fields.as_object().expect("对象").clone()
     }
 
-    fn record(fields: serde_json::Value) -> StoredAccount {
-        StoredAccount::from_map(fields.as_object().expect("对象").clone())
-    }
-
     #[test]
     fn trae_identity_is_variant_plus_uid_and_never_falls_through_to_userid() {
         // 回归本家那条"导得出去、导不回来"：兜底按 `userId` 取身份，
@@ -716,194 +482,103 @@ mod tests {
         assert!(identity_of_item("trae", &item(json!({"uid": "  ", "userId": "51029416092912"}))).is_err(), "空 uid 不能拿 userId 凑");
     }
 
+    /// **新增 provider 不必改本文件**：身份落在通用链的常见字段上即可。
+    ///
+    /// 锁的是「每加一家就要回来补分支」这个维护负担的根治 —— 旧实现里
+    /// OfficeAce（只有 `modelAppKey`）落到 `userId` 兜底，报「缺少 userId」
+    /// 整条失败，账号导得出去、导不回来。
     #[test]
-    fn officeace_identity_prefers_access_key_id_then_id_on_both_sides() {
-        // 回归 4db8a60：OfficeAce 的身份落在 accessKeyId（控制面临时凭据），
-        // 本家记录没有 userId 键 —— 缺这一支时整条导入报「缺少 userId」，
-        // 账号导得出去、导不回来。
+    fn generic_chain_covers_providers_without_a_branch() {
+        // OfficeAce：记录里只有 modelAppKey（+ modelAppSecret），没有 uid/userId
         assert_eq!(
-            "AK-1",
-            identity_of_item("officeace", &item(json!({"id": "officeace-abc", "accessKeyId": "AK-1"})))
-                .expect("应识别出身份")
+            "app-key-1",
+            identity_of_item(
+                "officeace",
+                &item(json!({"modelAppKey": "app-key-1", "modelAppSecret": "s", "id": "officeace-x"}))
+            )
+            .expect("通用链应认出 modelAppKey")
         );
+        // 自定义家：apiKey 即身份（与「同 key 合并」的添加路径同口径）
         assert_eq!(
-            "officeace-abc",
-            identity_of_item("officeace", &item(json!({"id": "officeace-abc"})))
-                .expect("缺 accessKeyId 退账号 id")
+            "sk-abc",
+            identity_of_item(
+                "custom-openai",
+                &item(json!({"apiKey": "sk-abc", "id": "custom-openai-1"}))
+            )
+            .expect("apiKey 即身份")
         );
+        // Command Code：key 落在 accessToken
         assert_eq!(
-            Some("AK-1".to_string()),
-            identity_of_record("officeace", &record(json!({"id": "officeace-abc", "accessKeyId": "AK-1"})))
+            "user_abc",
+            identity_of_item("commandcode", &item(json!({"accessToken": "user_abc"})))
+                .expect("accessToken 即身份")
         );
+        // 身份字段全缺时才退到 id（派生值，但全局唯一，救得回「身份缺失但 id 完好」的记录）
         assert_eq!(
-            Some("officeace-abc".to_string()),
-            identity_of_record("officeace", &record(json!({"id": "officeace-abc"}))),
-            "记录侧缺 accessKeyId 时同样退账号 id（两侧必须同口径）"
+            "atomcode-1",
+            identity_of_item("atomcode", &item(json!({"id": "atomcode-1"}))).expect("退到 id")
         );
+        // 什么都没有 = 无法识别（导入该条失败，不做猜测性匹配）
+        assert!(identity_of_item("officeace", &item(json!({"name": "无身份"}))).is_err());
     }
 
+    /// 两侧**必须**算出同一个身份：这是判重能不能成立的前提。
+    ///
+    /// 旧实现把同一套规则在 `identity_of_item` 与 `identity_of_record` 里各写
+    /// 一遍，任何一处缺省值漂移都会让同一条账号匹配不上（重复添加）。现在
+    /// 两侧共用一个函数，这条测试钉住「同一份字段 → 同一个答案」。
     #[test]
-    fn orcaterm_identity_prefers_uid_then_login_name_then_id_on_both_sides() {
-        // 回归 4db8a60：OrcaTerm 的 uid 落在 `uid` 键上（值是 userId 的值、
-        // 但是另一个键），本家记录没有 userId 键。
-        assert_eq!(
-            "1001",
-            identity_of_item("orcaterm", &item(json!({"id": "orcaterm-abc", "uid": "1001", "loginName": "me"})))
-                .expect("应识别出身份")
-        );
-        assert_eq!(
-            "me",
-            identity_of_item("orcaterm", &item(json!({"id": "orcaterm-abc", "loginName": "me"})))
-                .expect("缺 uid 退 loginName")
-        );
-        assert_eq!(
-            "orcaterm-abc",
-            identity_of_item("orcaterm", &item(json!({"id": "orcaterm-abc"}))).expect("再退账号 id")
-        );
-        assert_eq!(
-            Some("1001".to_string()),
-            identity_of_record("orcaterm", &record(json!({"id": "orcaterm-abc", "uid": "1001"})))
-        );
-        assert_eq!(
-            Some("me".to_string()),
-            identity_of_record("orcaterm", &record(json!({"id": "orcaterm-abc", "loginName": "me"})))
-        );
+    fn item_and_record_agree_on_every_provider() {
+        for provider in [
+            "workbuddy", "workbuddy-intl", "raccoon", "catpaw", "autoclaw", "autoclaw-intl",
+            "qoder", "qoder-intl", "cline-free", "cline-pass", "codearts", "trae", "loomy",
+            "kuku", "commandcode", "antigravity", "officeace", "orcaterm", "chatglm",
+            "modelscope", "atomcode", "lobsterai", "zcode",
+        ] {
+            let fields = item(json!({
+                "id": "acc-1",
+                "provider": provider,
+                "uid": "u-1",
+                "userId": "u-1",
+                "loginName": "name-1",
+                "account": "acc-1@example.com",
+                "apiKey": "key-1",
+                "accessToken": "token-1",
+                "modelAppKey": "app-1",
+                "variant": "solo",
+                "mode": "cn",
+            }));
+            let from_item = identity_of_item(provider, &fields);
+            let record = StoredAccount::from_map(fields);
+            let from_record = identity_of_record(provider, &record);
+            assert_eq!(
+                from_item.ok(),
+                from_record,
+                "provider={provider}：导入条目与本机记录算出的身份必须一致"
+            );
+        }
     }
 
+    /// 特殊家仍走专属分支（通用链不能替代它们）。
     #[test]
-    fn accio_identity_prefers_user_id_then_access_token_on_both_sides() {
-        // 回归「导得出去、导不回来」第二季：Accio 的 accessToken 是**不透明
-        // 串**、解不出 userId，网页登录也可能拿不到 —— 添加路径
-        // （`add_accio_account`）的判重是 `same_user || same_token`，无
-        // userId 的账号靠 same_token 防重、合法存在（`Credentials::to_value`
-        // 把空 userId 落成 null）。导入侧曾落进 userId 兜底整条失败。
+    fn special_providers_keep_their_multi_segment_identity() {
+        // CodeArts：domain + userId 两段（只按 userId 会把两个域下的账号并成一条）
         assert_eq!(
-            "u-1",
-            identity_of_item("accio", &item(json!({"userId": "u-1", "accessToken": "t-1"}))).expect("应识别出身份")
+            "dom-a\u{0}u-1",
+            identity_of_item("codearts", &item(json!({"domainId": "dom-a", "userId": "u-1"})))
+                .expect("两段身份")
         );
+        // Qoder：地区 + userId 两段
         assert_eq!(
-            "u-1",
-            identity_of_item("accio-cn", &item(json!({"userId": "u-1", "accessToken": "t-1"})))
-                .expect("国内版同口径（两个地区是两家 provider）")
+            "cn:u-1",
+            identity_of_item("qoder", &item(json!({"userId": "u-1", "mode": "cn"})))
+                .expect("两段身份")
         );
+        // CatPaw：uid 优先（通用链里 userId 排在 uid 前，会取错值）
         assert_eq!(
-            "t-1",
-            identity_of_item("accio", &item(json!({"userId": null, "accessToken": "t-1"})))
-                .expect("无 userId 按 accessToken 认身份（与 same_token 同口径）")
-        );
-        assert_eq!(
-            "t-1",
-            identity_of_item("accio-cn", &item(json!({"accessToken": "t-1"}))).expect("键缺失同理")
-        );
-        // 本机记录侧必须同口径：同一条账号在两侧算出同一个身份，否则每次
-        // 导入都判新增（重复账号，也是一种数据损坏）
-        assert_eq!(
-            Some("u-1".to_string()),
-            identity_of_record("accio", &record(json!({"id": "accio-intl-abc", "userId": "u-1", "accessToken": "t-1"})))
-        );
-        assert_eq!(
-            Some("t-1".to_string()),
-            identity_of_record("accio", &record(json!({"id": "accio-intl-abc", "userId": null, "accessToken": "t-1"}))),
-            "userId 落盘是 null（Credentials::to_value 的口径），按 null 视为缺失"
-        );
-        assert_eq!(
-            Some("accio-intl-abc".to_string()),
-            identity_of_record("accio", &record(json!({"id": "accio-intl-abc"}))),
-            "两侧关键字段都空时退账号 id（通不过导入校验，但函数要自洽）"
-        );
-    }
-
-    #[test]
-    fn loomy_identity_prefers_user_id_then_phone_on_both_sides() {
-        // Loomy 的身份是「userId 缺则手机号」（`add_loomy_account` 明确要求
-        // 「userId 或手机号至少给一个」，账号 id 就是 `loomy-{userId|phone}`）。
-        // 短信登录响应带 userid，但**粘贴 session** 的形态允许只给手机号 ——
-        // 那类账号合法存在，曾落进 userId 兜底整条失败。
-        assert_eq!(
-            "u-1",
-            identity_of_item("loomy", &item(json!({"userId": "u-1", "phone": "13800000000"}))).expect("应识别出身份")
-        );
-        assert_eq!(
-            "13800000000",
-            identity_of_item("loomy", &item(json!({"phone": "13800000000"})))
-                .expect("无 userId 按手机号认身份")
-        );
-        assert!(
-            identity_of_item("loomy", &item(json!({"accessToken": "s"}))).is_err(),
-            "userId 与 phone 两个都没有才该失败"
-        );
-        assert_eq!(
-            Some("13800000000".to_string()),
-            identity_of_record("loomy", &record(json!({"id": "loomy-13800000000", "phone": "13800000000", "accessToken": "s"})))
-        );
-        assert_eq!(
-            Some("u-1".to_string()),
-            identity_of_record("loomy", &record(json!({"id": "loomy-u-1", "userId": "u-1", "phone": "13800000000"})))
-        );
-    }
-
-    #[test]
-    fn monkeycode_identity_prefers_user_id_then_access_token_on_both_sides() {
-        // MonkeyCode 以「地区 + userId」识别，地区已编码在 provider id 里
-        // （匹配又按 provider 作用域，两段不会串）。上游没给 user uuid 时
-        // 添加路径用随机 id 且**不去重**（`anonymous_account_id`）—— 匿名
-        // 账号合法存在，导得出去却曾落进 userId 兜底整条失败。次级身份按
-        // accessToken（= session）认：同一串 session 就是同一个账号，且
-        // 保证「导出→导入→二次导入」第三步计 updated（添加路径对匿名账号
-        // 不去重，导入路径必须幂等）。
-        assert_eq!(
-            "uuid-1",
-            identity_of_item("monkeycode", &item(json!({"userId": "uuid-1", "accessToken": "s-1"}))).expect("应识别出身份")
-        );
-        assert_eq!(
-            "s-1",
-            identity_of_item("monkeycode", &item(json!({"accessToken": "s-1"})))
-                .expect("无 userId 按 session 认身份")
-        );
-        assert_eq!(
-            "s-1",
-            identity_of_item("monkeycode-intl", &item(json!({"accessToken": "s-1"}))).expect("国际版同口径")
-        );
-        assert_eq!(
-            Some("uuid-1".to_string()),
-            identity_of_record("monkeycode", &record(json!({"id": "mc-uuid-1", "userId": "uuid-1", "accessToken": "s-1"})))
-        );
-        assert_eq!(
-            Some("s-1".to_string()),
-            identity_of_record("monkeycode-intl", &record(json!({"id": "mc-intl-anon-aabbcc", "accessToken": "s-1"}))),
-            "匿名记录（没有 userId 键）按 session 算身份"
-        );
-    }
-
-    #[test]
-    fn antigravity_identity_prefers_user_id_then_refresh_token_on_both_sides() {
-        // Antigravity 的 userId 存的是 email；「只粘贴 refresh token」的账号
-        // 按「email → refresh token 摘要」派生 id、合法存在，曾落进 userId
-        // 兜底整条失败（antigravity_accounts 模块头原话：那类账号「会得到
-        // 一句缺少 userId 的失败原因」）。次级身份用 refreshToken（长期
-        // 凭证）而不是 accessToken（短期、刷新即变）。
-        assert_eq!(
-            "a@b.com",
-            identity_of_item("antigravity", &item(json!({"userId": "a@b.com", "refreshToken": "r-1"}))).expect("应识别出身份")
-        );
-        assert_eq!(
-            "r-1",
-            identity_of_item("antigravity", &item(json!({"refreshToken": "r-1"})))
-                .expect("无 email 按 refresh token 认身份")
-        );
-        assert_eq!(
-            "r-1",
-            identity_of_item("antigravity", &item(json!({"userId": "  ", "refreshToken": "r-1"})))
-                .expect("空白 userId 视为缺失，退 refreshToken")
-        );
-        assert_eq!(
-            Some("a@b.com".to_string()),
-            identity_of_record("antigravity", &record(json!({"id": "antigravity-xyz", "userId": "a@b.com", "refreshToken": "r-1"})))
-        );
-        assert_eq!(
-            Some("r-1".to_string()),
-            identity_of_record("antigravity", &record(json!({"id": "antigravity-xyz", "refreshToken": "r-1"}))),
-            "email 缺失时 userId 键不写（落盘口径），记录侧退 refreshToken"
+            "uid-1",
+            identity_of_item("catpaw", &item(json!({"uid": "uid-1", "userId": "alias-1"})))
+                .expect("uid 优先")
         );
     }
 }

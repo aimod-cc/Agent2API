@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { PageIntro, IconButton, Empty, ErrorNote, SkeletonList } from '../components/ui'
 import { GlyphLogo } from '../components/ProviderLogo'
 import { Icon } from '../components/Icon'
+import { PullIndicator, usePullToRefresh } from '../components/PullToRefresh'
 import { store } from '../state/store'
 import {
   fetchScheduledTasks,
@@ -39,6 +40,8 @@ export function TasksPage() {
   }
 
   usePolling(load, 30_000)
+
+  const pull = usePullToRefresh({ onRefresh: load })
 
   const list = tasks || []
   const backend = list.filter(item => item.runner === 'backend')
@@ -100,7 +103,8 @@ export function TasksPage() {
   }
 
   return (
-    <div className='m-page'>
+    <div className='m-page' ref={pull.bindRef}>
+      <PullIndicator pull={pull.pull} refreshing={pull.refreshing} />
       <PageIntro actions={<IconButton name='refresh' label={t('刷新')} onClick={() => void load()} />}
       />
 

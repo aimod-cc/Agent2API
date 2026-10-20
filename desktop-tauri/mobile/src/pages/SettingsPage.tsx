@@ -7,7 +7,12 @@ import { locale, localeOptions, setLocale } from '../i18n'
 import { storeApiKey } from '../api/client'
 import { usePwa } from '../lib/usePwa'
 import { applyUpdate, promptInstall } from '../lib/pwa'
+import { APP_VERSION } from '../lib/appUpdate'
+import { AppUpdatePanel } from '../components/AppUpdatePanel'
+import { CommunitySheet } from '../components/CommunitySheet'
+import { SystemInfoSheet } from '../components/SystemInfoSheet'
 import { apiBase, baseLabel } from '../lib/servers'
+import { usePullToRefresh, PullIndicator } from '../components/PullToRefresh'
 import { t } from '../i18n'
 
 /**
@@ -26,8 +31,13 @@ export function SettingsPage() {
   const { session, packaged, server, servers } = useStore()
   const pwa = usePwa()
   const [installing, setInstalling] = useState(false)
+  const [community, setCommunity] = useState(false)
+  const [systemInfo, setSystemInfo] = useState(false)
   const currentLocale = locale()
   const options = localeOptions()
+
+  // 本页没有自己的列表请求：下拉只需重拉会话（网关状态来自它）
+  const pull = usePullToRefresh({ onRefresh: () => store.refresh(true) })
 
   const install = async () => {
     setInstalling(true)
@@ -48,7 +58,8 @@ export function SettingsPage() {
   }
 
   return (
-    <div className='m-page'>
+    <div className='m-page' ref={pull.bindRef}>
+      <PullIndicator pull={pull.pull} refreshing={pull.refreshing} />
       <PageIntro subtitle={t('外观 · 接入 · 关于')}
         actions={<IconButton name='refresh' label={t('刷新')} onClick={() => void store.refresh(true)} />}
       />
@@ -65,7 +76,9 @@ export function SettingsPage() {
               <div className='m-grow'>
                 <div className='m-t1'>{server?.name || baseLabel(server?.base || '')}</div>
                 <div className='m-t2 m-mono' style={{ fontSize: 11.5 }}>
-                  {servers.length > 1 ? t('{n} 台可选 · 点此切换', { n: servers.length }) : baseLabel(server?.base || '')}
+                  {servers.length > 1
+                    ? t('{n} 台可选 · 点此切换', { n: servers.length })
+                    : t('点此添加或切换服务器')}
                 </div>
               </div>
               <span className='m-chev'>
@@ -327,18 +340,40 @@ export function SettingsPage() {
         </div>
       ) : null}
 
+      {/*
+        APK 的更新走安装包（浏览器里没有这条路径：PWA 的更新是 Service Worker，
+        见上面的「应用状态」）。两套互斥，不会同时出现。
+      */}
+      {packaged ? <AppUpdatePanel /> : null}
+
       <div className='m-section' style={{ paddingBottom: 8 }}>
         <div className='m-card'>
-          <div className='m-row'>
+          {/* 「Agent2API 手机端」这一行点开是版本信息抽屉：本机版本 + 所连网关
+              的版本 / 形态 / 系统 / 路径（手机端出问题时第一句要问的就是这些，
+              而用户手里只有手机，不该被要求跑回电脑前翻设置页）。
+              版本号仍常驻在右侧 —— 一眼能读到的那个数最常用。 */}
+          <button type='button' className='m-row' onClick={() => setSystemInfo(true)}>
             <span className='m-logo'>
               <Icon name='info' />
             </span>
             <div className='m-grow'>
               <div className='m-t1'>{t('Agent2API 手机端')}</div>
-              <div className='m-t2'>{t('与网关同源的面板；完整管理功能在桌面端')}</div>
+              <div className='m-t2'>{t('版本信息 · 所连网关环境')}</div>
             </div>
-          </div>
-          <div className='m-row' style={{ borderTop: '1px solid var(--m-line)' }}>
+            {/* 版本号常驻：排查问题时第一句就要问「你装的哪版」 */}
+            <span className='m-mono' style={{ flex: 'none', fontSize: 11.5, color: 'var(--m-text-3)' }}>
+              v{APP_VERSION}
+            </span>
+            <span className='m-chev'>
+              <Icon name='chev' />
+            </span>
+          </button>
+          <button
+            type='button'
+            className='m-row'
+            style={{ borderTop: '1px solid var(--m-line)' }}
+            onClick={() => setCommunity(true)}
+          >
             <span className='m-logo'>
               <Icon name='heart' />
             </span>
@@ -349,9 +384,12 @@ export function SettingsPage() {
             <span className='m-chev'>
               <Icon name='chev' />
             </span>
-          </div>
+          </button>
         </div>
       </div>
+
+      <CommunitySheet open={community} onClose={() => setCommunity(false)} />
+      <SystemInfoSheet open={systemInfo} onClose={() => setSystemInfo(false)} />
     </div>
   )
 }

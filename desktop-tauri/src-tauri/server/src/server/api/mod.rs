@@ -58,6 +58,9 @@ pub mod chat;
 // 签到中心的聚合快照（GET /api/checkin-center）：分组口径在后端唯一化，
 // 资格类状态由前端按需惰性查询，见该文件模块头
 pub mod checkin_center;
+// 云同步（设置页「数据 → 云同步」）：WebDAV / S3 兼容存储上的业务数据快照。
+// 范围与密钥封装见 `core::cloud_sync` 的模块头
+pub mod cloud_sync;
 // 签到记录明细台账（GET/DELETE /api/checkin-records）：每账号一行的成败与
 // 收益明细，记账点在 `core::billing::checkin::run_checkin`，见该文件模块头
 pub mod checkin_records;
@@ -137,3 +140,6 @@ pub mod zcode_captcha;
 // 令牌池的**补货节奏**设置（目标 / 轮询间隔 / 单轮上限），见该文件模块头
 pub mod zcode_captcha_pool;
 pub mod zcode_claim;
+// 设置页「版本信息」：环境 / 版本 / 路径 / 开关状态的一次性读数
+// （`GET /api/system-info`，见该文件模块头）
+pub mod system_info;

@@ -2,10 +2,19 @@
    布局：应用外框 / 侧边栏 / 顶栏 / 内容区
    ───────────────────────────────────────────── */
 
-/* ─── 应用外框 ─── */
+/* ─── 应用外框 ───
+   行高必须显式写成 minmax(0, 1fr)：只给列不给行时，那一行是隐式的 auto 行，
+   会被**内容最高的子项**撑开 —— 侧栏内容（品牌 + 15 个导航项 + 底部状态区）
+   在完整宽度下约 745px，窗口一旦压矮到它以下，行仍按 745px 算，而外框是
+   overflow: hidden，于是侧栏底部与右侧内容区的下沿一起被裁到窗口外，且
+   没有任何滚动条（裁它们的是外框，不是它们自己）。
+   锁成 minmax(0, 1fr) 后两个子项都只拿窗口高度：侧栏里 .nav 的
+   flex:1 + min-height:0 + overflow-y:auto 这才真正生效（导航自己滚，品牌与
+   底部状态区常驻），主区域的高度链也回到 .main → .content → .page.active。 */
 .shell {
   display: grid;
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   height: 100vh;
   overflow: hidden;
 }
@@ -232,6 +241,19 @@ body.has-titlebar .shell {
 }
 
 .nav-group-label:first-child { padding-top: 0; }
+
+/* 一个菜单都不显示时的提示（用户在设置里把可见项全关了）。
+   用虚线框说明「这里是空的，不是没加载出来」。 */
+.nav-empty {
+  margin: 4px 2px;
+  padding: 10px 9px;
+  border: 1px dashed var(--sidebar-border);
+  border-radius: var(--r-sm);
+  color: var(--sidebar-muted);
+  font-size: 11px;
+  line-height: 1.7;
+  text-align: center;
+}
 
 @media (max-width: 900px) { .nav-group-label { display: none; } }
 

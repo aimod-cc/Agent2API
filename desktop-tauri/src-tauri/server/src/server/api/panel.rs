@@ -17,7 +17,7 @@
 //! 还没有任何凭证，安全性由锁定与 bcrypt 的校验成本承担。
 
 use axum::body::Bytes;
-use axum::extract::{ConnectInfo, Query};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{header::SET_COOKIE, HeaderMap};
 use axum::response::Response;
 use std::net::SocketAddr;
@@ -28,6 +28,7 @@ use crate::server::config;
 use crate::server::errors;
 use crate::server::http::{ok_json, parse_body};
 use crate::server::logging;
+use crate::server::ServerState;
 
 fn body_str<'a>(payload: &'a serde_json::Value, field: &str) -> String {
     payload
@@ -41,8 +42,10 @@ fn body_str<'a>(payload: &'a serde_json::Value, field: &str) -> String {
 /// 机器人校验（ALTCHA proof-of-work，见 `server::altcha`）：开关开启时，
 /// 注册 / 登录的请求体必须带登录页算好的 payload，否则 400。失败**不计入**
 /// 登录失败锁定 —— 那把锁针对「密码猜错」，校验没过说明还没走到验密码那步。
-fn check_captcha(payload: &serde_json::Value) -> Result<(), Response> {
-    if !config::current().captcha_enabled() {
+///
+/// `local_panel` 决定读哪一端的开关（桌面壳与 headless 是两套独立的设置）。
+fn check_captcha(payload: &serde_json::Value, local_panel: bool) -> Result<(), Response> {
+    if !config::current().captcha_enabled(local_panel) {
         return Ok(());
     }
     let Some(token) = payload.get("captcha").and_then(serde_json::Value::as_str) else {
@@ -57,8 +60,8 @@ fn check_captcha(payload: &serde_json::Value) -> Result<(), Response> {
 /// （不带管理 API 的 success/data 信封）—— 官方 widget 直接读顶层字段，
 /// 包了信封它就解析失败（altcha-lib 的 challengeHandler 同样发裸对象）。
 /// 开关关闭时回 400 —— 前端据此隐藏验证行。
-pub async fn captcha_challenge() -> Response {
-    match altcha::challenge() {
+pub async fn captcha_challenge(State(state): State<ServerState>) -> Response {
+    match altcha::challenge(state.local_panel) {
         Some(challenge) => crate::server::http::raw_json(challenge),
         None => errors::management_error(400, "机器人校验未启用"),
     }
@@ -266,6 +269,7 @@ pub async fn panel_status() -> Response {
 /// 密码要求：至少 8 位。bcrypt 哈希只落库（`kv` 的 `panelAdmin`），明文
 /// 不留痕。注册成功直接签发会话 —— 用户注册完就进面板，不再输一次。
 pub async fn panel_setup(
+    State(state): State<ServerState>,
     headers: HeaderMap,
     Query(query): Query<std::collections::HashMap<String, String>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -275,7 +279,7 @@ pub async fn panel_setup(
         return management_error(409, "管理员账号已存在，无需重复注册");
     }
     let payload = parse_body(&body).unwrap_or(serde_json::Value::Null);
-    if let Err(response) = check_captcha(&payload) {
+    if let Err(response) = check_captcha(&payload, state.local_panel) {
         return response;
     }
     let username = body_str(&payload, "username");
@@ -314,6 +318,7 @@ pub async fn panel_setup(
 
 /// `POST /api/panel/login` —— 账号密码换双令牌。
 pub async fn panel_login(
+    State(state): State<ServerState>,
     headers: HeaderMap,
     Query(query): Query<std::collections::HashMap<String, String>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -327,7 +332,7 @@ pub async fn panel_login(
         return management_error(429, "登录失败次数过多，请 5 分钟后再试");
     }
     let payload = parse_body(&body).unwrap_or(serde_json::Value::Null);
-    if let Err(response) = check_captcha(&payload) {
+    if let Err(response) = check_captcha(&payload, state.local_panel) {
         return response;
     }
     let username = body_str(&payload, "username");
@@ -362,6 +367,65 @@ pub async fn panel_login(
         ),
     );
     issue_response(session, body_mode)
+}
+
+/// `POST /api/panel/change-password` —— 修改管理员密码（设置页「账户」）。
+///
+/// body：`{oldPassword, newPassword}`。要求旧密码（不能只凭一条已登录会话改密码：
+/// 会话令牌可能已经泄露）；成功后撤销**其他**会话链，当前这条保留（见
+/// `access::change_password`）。
+///
+/// 挂 protected：调用方必须已登录 —— 这条端点的语义是「已登录的人改自己的密码」，
+/// 不承担「忘记密码时重置」的职责（那是删库重注册，见 docs 的重置说明）。
+pub async fn panel_change_password(headers: HeaderMap, body: Bytes) -> Response {
+    if !access::admin_registered() {
+        return management_error(400, "尚未注册管理员账号");
+    }
+    let payload = parse_body(&body).unwrap_or(serde_json::Value::Null);
+    let old_password = body_str(&payload, "oldPassword");
+    let new_password = body_str(&payload, "newPassword");
+    if old_password.is_empty() {
+        return management_error(400, "请输入当前密码");
+    }
+    if new_password.len() < 8 {
+        return management_error(400, "新密码至少 8 位");
+    }
+    if new_password == old_password {
+        return management_error(400, "新密码不能与当前密码相同");
+    }
+    let hash = match access::hash_password(&new_password) {
+        Ok(hash) => hash,
+        Err(error) => {
+            logging::log("[Security]", &format!("❌ 修改密码失败：{error}"));
+            return management_error(500, "密码加密失败，请重试");
+        }
+    };
+    match access::change_password(&headers, &old_password, &hash) {
+        Ok(true) => {
+            logging::log("[Security]", "✅ 面板管理员密码已修改（其他会话已撤销）");
+            ok_json(serde_json::json!({ "changed": true }))
+        }
+        Ok(false) => management_error(400, "当前密码不正确"),
+        Err(reason) => {
+            logging::log("[Security]", &format!("❌ 修改密码失败：{reason}"));
+            management_error(500, &reason)
+        }
+    }
+}
+
+/// `GET /api/panel/account` —— 当前管理员信息（设置页「账户」）。
+///
+/// 只回用户名与「是否由环境变量播种」这类展示信息，**绝不回哈希**。
+pub async fn panel_account() -> Response {
+    let Some(username) = access::admin_username() else {
+        return ok_json(serde_json::json!({ "registered": false }));
+    };
+    ok_json(serde_json::json!({
+        "registered": true,
+        "username": username,
+        // 环境变量只在首次播种时参与；库里有记录就完全以库为准（改密码有效）
+        "loginEnabled": access::panel_auth_enabled(),
+    }))
 }
 
 /// `POST /api/panel/refresh` —— 用长效 refresh 轮换出新的双令牌。

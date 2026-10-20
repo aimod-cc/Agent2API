@@ -23,7 +23,7 @@ Agent2API 把多家 AI 桌面客戶端裡已登入的帳號接到一起，共用
 ## ✨ 核心特性
 
 - 🔌 **OpenAI 相容** —— 客戶端填上 `base_url` 就能用，Chat / Responses / Messages 三種協定都支援
-- 🏪 **內建 17 家供應商** —— WorkBuddy、小浣熊、CatPaw、Qoder、Trae 等開箱即用，也支援自訂供應商
+- 🏪 **內建 22 家供應商** —— WorkBuddy、小浣熊、CatPaw、Qoder、Trae 等開箱即用，也支援自訂供應商
 - 🔁 **憑證自動續期** —— Token 到期自動換新，臨期憑證可批次刷新，模型目錄也不會過期
 - 🪂 **多帳號輪轉** —— 依優先順序排隊，429 自動換帳號，限額冷卻期內不空等
 - 🛡️ **出口代理** —— 每個帳號可配獨立出口，出站指紋按官方客戶端偽裝
@@ -79,6 +79,9 @@ Agent2API 把多家 AI 桌面客戶端裡已登入的帳號接到一起，共用
 | OfficeAce（華為雲果辦 / OfficeClaw） | ✓ | ✓ | ✓ | ✓ | ✓ | — |
 | OrcaTerm（騰訊雲遨馳終端） | ✓ | ✓ | ✓ | ✓ | — | — |
 | 智譜清言 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| ModelScope（魔搭，中國版 / 國際版） | ✓ | ✗ | ✓ | ✓ | ✓ | — |
+| AtomCode（AtomGit / GitCode） | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| LobsterAI（網易有道「有道龍蝦」） | ✓ | ✓ | ✓ | ✓ | ✓ | — |
 | 自訂供應商 | ✓ | — | ✓ | — | — | — |
 
 > 註：模型清單的 ✓ 表示支援遠端自動拉取，部分平台另有內建靜態清單備援；ZCode 僅有內建靜態清單。Token 續期欄 ✗ 表示該平台沒有可用的續期介面（帳號在有效期內不受影響）。Qoder 簽到僅中國版可用。
@@ -123,6 +126,8 @@ docker run -d --name agent2api --restart unless-stopped -p 3065:3065 -v ./data:/
 ```
 
 三種形態裝完後都開啟面板（`http://127.0.0.1:3065/`，伺服器端與 Docker 換成主機 IP）註冊管理員帳號，再在「閘道 Key」頁建一把 Key。連線性自測：`curl http://127.0.0.1:3065/health`
+
+**手機端**：瀏覽器開啟 `http://<閘道IP>:3065/m` 即可（可「加入主畫面」變成全螢幕 PWA）；想要獨立圖示就裝 Release 裡的 `Agent2API-<版本>.apk`（Android）或 `Agent2API-<版本>.ipa`（iOS，未簽名，需自行重簽）。細節見[安裝與部署 → 手機端](install.zh-Hant.md#手機端)。
 
 ## 📸 介面預覽
 
@@ -178,7 +183,7 @@ macOS 的 `.dmg` **只能在 macOS 上建置**（`npm --prefix desktop-tauri run
 
 ### 僅供學習與交流
 
-本專案是一個用於學習 HTTP 反向代理、SSE 串流透傳、多上游協定適配與桌面端打包（Tauri）等技術主題的實踐專案，**僅供個人學習與研究使用**。它不是官方產品，與騰訊公司及 WorkBuddy / CodeBuddy、美團及 CatPaw、商湯及小浣熊、智譜及 AutoClaw / autoglm、阿里巴巴及 Qoder / Accio、華為雲及 CodeArts / OfficeAce、字節跳動及 Trae、科大訊飛及 Loomy、百度文庫及 KukuAI、長亭科技及 MonkeyCode、Command Code、Google 及 Antigravity 均無任何關聯，未獲得其授權、認可或贊助。
+本專案是一個用於學習 HTTP 反向代理、SSE 串流透傳、多上游協定適配與桌面端打包（Tauri）等技術主題的實踐專案，**僅供個人學習與研究使用**。它不是官方產品，與騰訊公司及 WorkBuddy / CodeBuddy、美團及 CatPaw、商湯及小浣熊、智譜及 AutoClaw / autoglm、阿里巴巴及 Qoder / Accio、華為雲及 CodeArts / OfficeAce、字節跳動及 Trae、科大訊飛及 Loomy、百度文庫及 KukuAI、長亭科技及 MonkeyCode、Command Code、Google 及 Antigravity、阿里巴巴及 ModelScope（魔搭）、GitCode / AtomGit 及 AtomCode、網易有道及 LobsterAI（有道龍蝦）均無任何關聯，未獲得其授權、認可或贊助。
 
 ### 關於反向代理行為
 

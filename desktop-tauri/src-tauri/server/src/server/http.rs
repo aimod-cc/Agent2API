@@ -207,6 +207,20 @@ pub fn panel_router(state: ServerState) -> Router {
         .route(
             "/oauth-callback",
             get(api::session::login_antigravity_callback),
+        )
+        // LobsterAI 网页登录的 loopback 回调：**浏览器 302 到这里**。
+        // ⚠️ 这一条的路径**没有带家名后缀**，与上面几条自作主张的名字（如
+        // `/auth/callback-accio`）风格不一致 —— 这是有意的：`redirect_uri` 是
+        // 我们拼给上游门户的地址，门户按它回落，而门户是否对回调路径有白名单
+        // **没有实测支撑**。参考实现用的就是裸 `/auth/callback`，这里跟随那条
+        // 已验证的形状，不为了命名风格去赌一次未经验证的兼容性。
+        // 该路径在本仓未被其它家占用（其余几家分别是 `-{vendor}` / `-accio` /
+        // `/oauth/callback` / `/oauth-callback`）。
+        // 免鉴权的理由与上面几条同一句：调用方是用户的浏览器，它没有我们的 API Key；
+        // 安全性由本次登录任务的一次性 state 承担。
+        .route(
+            "/auth/callback",
+            get(api::session::login_lobsterai_callback),
         );
 
     // 需鉴权：Node 版对这些路径都调用了 checkApiKey
@@ -332,18 +346,65 @@ pub fn panel_router(state: ServerState) -> Router {
         // 改造前的两条写路由（relocate / progress）随「三类数据各自一个目录」
         // 的语义一起删除，理由见 `api::storage_api` 的模块头。
         .route("/api/storage", get(api::storage_api::get_storage))
+        // ── 设置页「版本信息」──
+        // 一次取全：版本 / 环境 / 路径 / 开关状态 / 关键计数（见 api::system_info
+        // 的模块头）。挂 protected —— 数据目录、可执行文件路径与 Key 数量都属于
+        // 管理面信息；免鉴权会把部署结构暴露给任何能访问端口的人。
+        // `?hideUsername=1` 是**纯展示**参数（主目录前缀换成 `~`），由后端做
+        // 脱敏，这样界面「复制全部信息」拿到的也是脱敏后的文本。
+        .route("/api/system-info", get(api::system_info::get_system_info))
         // ── 数据结构升级（旧 JSON/JSONL → 统一 SQLite 库）──
         // 启动时**不自动迁移**，由用户在弹窗里点「升级」触发（需求：必须让用户
         // 知道数据换了存储形态、旧数据保留）。挂 protected：run 会写库里的
         // 全部业务表（账号、日志、统计、配置），与 /api/config 同级敏感。
         .route("/api/upgrade", get(api::upgrade_api::get_upgrade))
         .route("/api/upgrade/run", post(api::upgrade_api::run_upgrade))
+        // ── 面板账户（设置页「账户」）──
+        // 改密码要求旧密码并撤销其他会话；账号信息只回用户名与启用状态。
+        // 两者都挂 protected：必须先登录（或带 Key）才谈得上「改自己的密码」。
+        .route(
+            "/api/panel/account",
+            get(api::panel::panel_account),
+        )
+        .route(
+            "/api/panel/change-password",
+            post(api::panel::panel_change_password),
+        )
         // ── 整库备份 / 恢复（设置页，SQL 文本形态）──
         // 挂 protected：导出把全部凭证写进指定路径，导入整体替换数据库，
         // 都是 /api/config 级别敏感；文件由后端按壳选的路径直读直写
         // （大文件不过 HTTP，见 api::backup_api 的模块头）。
         .route("/api/backup/export", post(api::backup_api::export_backup))
         .route("/api/backup/import", post(api::backup_api::import_backup))
+        // 网页端（含 Docker / LAN 面板）的两条：浏览器只能下载附件、上传文件，
+        // 内容因此必须过 HTTP。upload 单独放宽请求体上限 —— 管理面外层是
+        // 32MB，整库备份动辄上百 MB；这一层比外层更靠近处理函数，按 axum 的
+        // 扩展覆盖规则（内层后写胜出）生效，见 `gateway_router` 里同一套说明。
+        .route("/api/backup/download", get(api::backup_api::download_backup))
+        .merge(
+            Router::new()
+                .route("/api/backup/upload", post(api::backup_api::upload_backup))
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    api::backup_api::MAX_BACKUP_UPLOAD,
+                )),
+        )
+        // ── 云同步（设置页「数据 → 云同步」）──
+        // 挂 protected：上传把全部账号密文与网关 Key 送到远端，下载整体替换
+        // 本机业务数据，保存写入远端凭据 —— 三者都是 /api/config 级别敏感。
+        // 上传 / 下载要打外网传几 MB，壳侧为它们单独放宽了超时（见
+        // `commands::cloud_sync_upload` / `cloud_sync_download`）。
+        .route(
+            "/api/cloud-sync",
+            get(api::cloud_sync::get_settings).put(api::cloud_sync::put_settings),
+        )
+        .route("/api/cloud-sync/test", post(api::cloud_sync::post_test))
+        .route("/api/cloud-sync/remote", get(api::cloud_sync::get_remote))
+        .route("/api/cloud-sync/upload", post(api::cloud_sync::post_upload))
+        .route("/api/cloud-sync/download", post(api::cloud_sync::post_download))
+        .route(
+            "/api/cloud-sync/import-key",
+            post(api::cloud_sync::post_import_key),
+        )
         // ── 账号管理（对照 workbuddy-account-routes.mjs）──
         // 用 any(...) 注册两条入口（无尾段 + 通配尾段），方法/路径的判定交给
         // api::accounts::dispatch —— 这是为了复刻 Node 版 tryHandle 的判定顺序
@@ -504,7 +565,7 @@ pub fn panel_router(state: ServerState) -> Router {
         // 结论失败也返回 2xx（上游的错误放在响应体的 status / error 里，
         // 理由见 api::model_test 模块头）
         .route("/api/models/test", post(api::model_test::run_model_test))
-        // ── AI 助手（侧边栏「AI 助手」页 + 设置页「AI 助手」分类）──
+        // ── AI 助手（侧边栏「AI 助手」页：对话 + 会话 + 页面内设置抽屉）──
         // 对话那条会**真打上游、消耗额度**（与 /v1/chat/completions、
         // /api/models/test 同一量级），设置那条写配置，三条一起挂 protected。
         // 对话做成流式（SSE），前端必须绕开桌面壳的桥（桥无流式且 60 秒超时）

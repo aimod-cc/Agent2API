@@ -34,6 +34,24 @@ type DesktopBridge = {
   directCredentials?: () => Promise<unknown>
 }
 
+/**
+ * 顶部轻提示（app.js 的 `#toast`，与全站其它页同一处实现）。
+ *
+ * 助手页的**瞬时**反馈（切换权限模式、勾选工具、粘贴图片被拒……）走这里，
+ * 不再落到页面底部那一行：那一行是文档流里的一个 `div`，会把输入区往上顶
+ * 一行、且不会自己消失 —— 与「提示」这件事该有的形态不符（其余页面都是
+ * 顶部浮层，三秒半自动消失）。
+ *
+ * 底部那一行仍然保留，但只承载**常驻状态**（助手配置读不出来 / 读失败），
+ * 那是需要一直看得见的信息，不该三秒后消失。
+ *
+ * 桥没就绪时静默跳过：提示是锦上添花，不能因为它把调用方的流程打断。
+ */
+export function toast(message: string, kind: 'ok' | 'err' | 'warn' = 'ok'): void {
+  const host = (window as unknown as { wbApp?: { toast?: (text: string, type?: string) => void } }).wbApp
+  host?.toast?.(message, kind)
+}
+
 function bridge(): DesktopBridge | undefined {
   return (window as unknown as { workbuddyDesktop?: DesktopBridge }).workbuddyDesktop
 }
@@ -128,6 +146,11 @@ export async function gatewayBase(force = false): Promise<string> {
 
 /* ─── 配置读写 ─────────────────────────────────────────────── */
 
+/** 工具权限模式：
+ *  · `confirm` 变更前确认 —— 改动类工具先渲染确认卡；
+ *  · `full` 完全访问 —— 改动类工具直接执行，不再询问。 */
+export type PermissionMode = 'confirm' | 'full'
+
 /** 助手配置（与后端 `AssistantConfig::to_value` 同形）。
  *  `model` 是**对外模型名**（与 /v1/models 的 `data[].id` 同一口径：原始 ID 或
  *  映射名都行），不再是「提供商 + 模型」的组合 —— 助手的路由语义与普通客户端
@@ -136,6 +159,8 @@ export type AssistantConfig = {
   model: string | null
   /** 思考等级（`reasoning_effort` 的取值）；null = 不指定（交给映射绑定） */
   reasoning: string | null
+  /** 权限模式（改动类工具要不要先问） */
+  mode: PermissionMode
   systemPromptEnabled: boolean
   systemPrompt: string
   tools: Record<string, boolean>
@@ -270,6 +295,7 @@ export async function loadAssistantConfig(): Promise<AssistantConfig> {
   return {
     model: typeof model === 'string' && model.trim() ? model : null,
     reasoning: typeof config.reasoning === 'string' && config.reasoning.trim() ? config.reasoning : null,
+    mode: config.mode === 'full' ? 'full' : 'confirm',
     systemPromptEnabled: config.systemPromptEnabled !== false,
     systemPrompt: typeof config.systemPrompt === 'string' ? config.systemPrompt : '',
     tools: config.tools && typeof config.tools === 'object' ? config.tools : {},
@@ -286,8 +312,16 @@ export async function saveAssistantConfig(config: AssistantConfig): Promise<Assi
 /** 一个工具调用（流式分片聚合后的完整形态） */
 export type ToolCall = { id: string; name: string; arguments: string }
 
+/**
+ * 一条用户消息：文本 + 可选的图片（data URL）。
+ *
+ * 图片用一个独立字段而不是把 content 直接改成多模态数组，是因为页面层
+ * 到处在用 `content` 取标题、取纯文本；数组会让每一处都多一次解包。
+ * 真正发请求时由 [`toWireMessages`] 拼成 OpenAI 的
+ * `[{type:"text"}, {type:"image_url"}]` 形态 —— 那才是上游认的形状。
+ */
 export type ChatMessage =
-  | { role: 'user'; content: string }
+  | { role: 'user'; content: string; images?: string[] }
   | { role: 'assistant'; content: string; toolCalls?: ToolCall[] }
   | { role: 'tool'; toolCallId: string; content: string }
 
@@ -313,7 +347,15 @@ export function toWireMessages(messages: ChatMessage[]): Array<Record<string, un
       }
       return wire
     }
-    return { role: 'user', content: message.content }
+    // 用户消息：纯文本仍发字符串（上游对字符串的兼容性最好），带图才发
+    // 多模态数组 —— 那是有图片时唯一能表达「这段文字配这几张图」的形态。
+    if (!message.images?.length) return { role: 'user', content: message.content }
+    const parts: Array<Record<string, unknown>> = []
+    if (message.content.trim()) parts.push({ type: 'text', text: message.content })
+    for (const url of message.images) {
+      if (url) parts.push({ type: 'image_url', image_url: { url } })
+    }
+    return { role: 'user', content: parts }
   })
 }
 
@@ -463,10 +505,36 @@ function parseMessages(raw: unknown): ChatMessage[] {
     if (!item || typeof item !== 'object') continue
     const row = item as Record<string, unknown>
     const role = String(row.role ?? '')
-    const content = typeof row.content === 'string' ? row.content : ''
     if (role === 'user') {
-      messages.push({ role: 'user', content })
+      // content 两种形态：字符串（纯文本）或多模态块数组（带图）。块数组要
+      // 拆回「文本 + 图片 data URL」，页面层才不用到处判类型。
+      const rawContent = row.content
+      if (Array.isArray(rawContent)) {
+        const texts: string[] = []
+        const images: string[] = []
+        for (const part of rawContent) {
+          if (!part || typeof part !== 'object') continue
+          const block = part as Record<string, unknown>
+          if (block.type === 'text' && typeof block.text === 'string') texts.push(block.text)
+          if (block.type === 'image_url') {
+            const holder = block.image_url
+            const url = typeof holder === 'string'
+              ? holder
+              : (holder as { url?: unknown } | null | undefined)?.url
+            if (typeof url === 'string' && url) images.push(url)
+          }
+        }
+        messages.push({ role: 'user', content: texts.join('\n'), ...(images.length ? { images } : {}) })
+      } else {
+        const content = typeof rawContent === 'string' ? rawContent : ''
+        // 本版前端另存的一份 images 字段（历史里可能有过）也兼容读回来
+        const images = Array.isArray(row.images)
+          ? row.images.filter((url): url is string => typeof url === 'string' && Boolean(url))
+          : []
+        messages.push({ role: 'user', content, ...(images.length ? { images } : {}) })
+      }
     } else if (role === 'assistant') {
+      const content = typeof row.content === 'string' ? row.content : ''
       const rawCalls = Array.isArray(row.toolCalls) ? row.toolCalls : []
       const toolCalls: ToolCall[] = rawCalls
         .filter((call): call is Record<string, unknown> => Boolean(call) && typeof call === 'object')
@@ -482,6 +550,7 @@ function parseMessages(raw: unknown): ChatMessage[] {
         ...(toolCalls.length ? { toolCalls } : {}),
       })
     } else if (role === 'tool') {
+      const content = typeof row.content === 'string' ? row.content : ''
       messages.push({ role: 'tool', toolCallId: String(row.toolCallId ?? ''), content })
     }
   }

@@ -1,4 +1,4 @@
-//! AI 助手配置（设置页「AI 助手」分类 / 「AI 助手」页的会话底座）。
+//! AI 助手配置（「AI 助手」页的对话底座 / 页面内设置抽屉）。
 //!
 //! ── 存什么 ──────────────────────────────────────────────────
 //! 一块 JSON 存在配置库的 [`KEY_ASSISTANT_CONFIG`] 键下（与 `clineUpstreamHeaders`
@@ -6,6 +6,7 @@
 //!
 //!   {
 //!     "model": "claude-sonnet-4.5" | null,   // 对外模型名（与 /v1/models 同一口径）
+//!     "mode": "confirm" | "full",      // 权限模式（改动类工具要不要先问）
 //!     "systemPromptEnabled": true,
 //!     "systemPrompt": "……",            // 空串 = 用内置默认（DEFAULT_SYSTEM_PROMPT）
 //!     "tools": { "list_models": true, "set_account_enabled": false, ... }
@@ -17,10 +18,14 @@
 //! 让「它到底存了什么」在一个文件里读完，不必在四千行的 mod.rs 里翻。
 //!
 //! ── 工具勾选的默认值 ────────────────────────────────────────
-//! 存量安装（库里没有这个键）给的是 [`DEFAULT_ENABLED_TOOLS`]：只读的两只 +
-//! 「改模型」那一组能自己收尾的四只。**调整账号顺序与禁用账号默认不勾** ——
-//! 它们动的是转发链路的可用性，让用户自己确认过再给助手这个权限。
+//! 存量安装（库里没有这个键）给的是 [`DEFAULT_ENABLED_TOOLS`]：**全部九只**。
+//! 助手的价值在于「真的能把事做完」，默认少给权限只会让第一次提问就撞上
+//! 「这个工具没勾」；风险由确认卡兜住 —— 改动类工具默认都要用户点「执行」。
 //! 用户存过一次之后以库里的值为准（哪怕存的是全不勾）。
+//!
+//! ── 权限模式 ────────────────────────────────────────────────
+//! [`PermissionMode`] 只影响**前端要不要弹确认卡**，不改后端能力边界：工具表
+//! 与执行路径完全一样。默认 `Confirm` —— 新装用户不会在不知情时被直接改配置。
 //!
 //! ── 与「设置页现有系统提示词」的关系 ────────────────────────
 //! **无关**。设置页「网关 → 系统提示词」那一份管的是**转发给客户端的请求**
@@ -56,8 +61,16 @@ pub const ALL_TOOL_IDS: [&str; 9] = [
     "set_account_enabled",
 ];
 
-/// 存量安装的默认勾选工具（见模块头）。
-pub const DEFAULT_ENABLED_TOOLS: [&str; 6] = [
+/// 旧版本（默认集是 6 只时）的推荐勾选。
+///
+/// 用于**存量迁移**：那一版界面每次保存都会把 9 项展开写回库（勾 6 假 3），
+/// 于是「从没动过工具」的用户在库里也留着一份显式的 6 真 3 假。不识别它的话，
+/// 新默认集（全选）对他们永远不会生效 —— 用户只会在助手页看到「3 个工具没勾」，
+/// 而他从没做过这个选择。
+///
+/// 判据是**逐项相等**：只要用户动过任何一项，库里就不再等于这组值，按他的
+/// 选择走（那是真实意图，不该被默认值覆盖）。
+const LEGACY_DEFAULT_TOOLS: [&str; 6] = [
     "list_models",
     "list_account_balance",
     "set_model_enabled",
@@ -66,11 +79,58 @@ pub const DEFAULT_ENABLED_TOOLS: [&str; 6] = [
     "test_model",
 ];
 
+/// 库里的勾选表是否恰好等于「旧默认集展开后的形态」
+fn is_legacy_default_tools(tools: &BTreeMap<String, bool>) -> bool {
+    ALL_TOOL_IDS.iter().all(|id| {
+        tools
+            .get(*id)
+            .copied()
+            .unwrap_or_else(|| LEGACY_DEFAULT_TOOLS.contains(id))
+            == LEGACY_DEFAULT_TOOLS.contains(id)
+    })
+}
+
+/// 存量安装的默认勾选工具（见模块头：全部九只）。
+pub const DEFAULT_ENABLED_TOOLS: [&str; 9] = ALL_TOOL_IDS;
+
 /// 内置默认系统提示词（`systemPrompt` 为空串时用它）。
 ///
 /// 与设置页「编辑系统提示词」弹窗里那份**逐字相同** —— 用户点「恢复默认」拿到的
 /// 就是这一段，「清空保存」等价。改这里等于改所有未自定义用户的助手行为。
 pub const DEFAULT_SYSTEM_PROMPT: &str = "你是 Agent2API 的内置助手，帮用户管理本机的模型转发配置。\n\n说话简洁，别铺垫。配置项一律用等宽字写出准确的 ID（模型名、账号名、提供商名），不要用「那个模型」这类含糊说法。\n\n调用改动类工具之前，先用一句话说清将要改动什么；确认卡由界面渲染，不要跳过它直接执行。\n\n拿不准的配置先去读（获取模型列表 / 查询账号余额），不要凭印象改。";
+
+/// 权限模式：改动类工具要不要先弹确认卡。
+///
+/// 只影响前端流程（`confirm` 停在确认卡上、`full` 直接执行），**不扩大工具的
+/// 能力边界** —— 发出去的工具表与执行路径完全一样。所以它存在配置里而不是
+/// 做成一把安全开关：换台机器沿用同一个习惯即可。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PermissionMode {
+    /// 变更前确认（默认）：只读工具直接跑，改动类先列清单等用户点「执行」
+    #[default]
+    Confirm,
+    /// 完全访问：改动类工具直接执行，结果仍以卡片留在对话里
+    Full,
+}
+
+impl PermissionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PermissionMode::Confirm => "confirm",
+            PermissionMode::Full => "full",
+        }
+    }
+
+    /// 宽松解析：只认字面 `full`，其余（缺失 / 写坏 / 未知值）一律回落到
+    /// 更安全的那一档 —— 配置被手改坏时不该把用户悄悄推进「不再询问」。
+    pub fn from_str_lenient(text: &str) -> Self {
+        if text.trim().eq_ignore_ascii_case("full") {
+            PermissionMode::Full
+        } else {
+            PermissionMode::Confirm
+        }
+    }
+}
 
 /// AI 助手配置快照
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,6 +145,8 @@ pub struct AssistantConfig {
     /// 存的是**会话默认值**：聊天框里改一次就存一次，下一条消息沿用它。单次
     /// 请求可以带 `reasoning` 覆盖它（见 `api::assistant::chat` 的读取顺序）。
     pub reasoning: Option<String>,
+    /// 权限模式（改动类工具要不要先问，见 [`PermissionMode`]）
+    pub mode: PermissionMode,
     /// 系统提示词开关（**工具一只都没勾时会自动视为不注入**，见 `system_prompt`）
     pub system_prompt_enabled: bool,
     /// 系统提示词正文（空串 = 内置默认，见 [`DEFAULT_SYSTEM_PROMPT`]）
@@ -99,6 +161,7 @@ impl Default for AssistantConfig {
         Self {
             model: None,
             reasoning: None,
+            mode: PermissionMode::default(),
             system_prompt_enabled: true,
             system_prompt: String::new(),
             tools: BTreeMap::new(),
@@ -146,6 +209,7 @@ impl AssistantConfig {
         json!({
             "model": self.model.clone().map(Value::String).unwrap_or(Value::Null),
             "reasoning": self.reasoning.clone().map(Value::String).unwrap_or(Value::Null),
+            "mode": self.mode.as_str(),
             "systemPromptEnabled": self.system_prompt_enabled,
             "systemPrompt": self.system_prompt,
             "tools": Value::Object(tools),
@@ -200,7 +264,7 @@ pub fn from_raw(raw: &Map<String, Value>) -> AssistantConfig {
         .map(str::trim)
         .filter(|text| !text.is_empty() && text.chars().count() <= 32)
         .map(str::to_string);
-    let tools = block
+    let tools: BTreeMap<String, bool> = block
         .get("tools")
         .and_then(Value::as_object)
         .map(|tools| {
@@ -210,9 +274,19 @@ pub fn from_raw(raw: &Map<String, Value>) -> AssistantConfig {
                 .collect()
         })
         .unwrap_or_default();
+    // 存量迁移：库里的值恰好是「旧默认集」时视为没调过，清空显式值让它跟着
+    // 新默认集（全选）走。见 is_legacy_default_tools 的说明。
+    let tools = if is_legacy_default_tools(&tools) { BTreeMap::new() } else { tools };
     AssistantConfig {
         model,
         reasoning,
+        // 缺失 / 写坏一律回落「变更前确认」：配置被手改时不该把人悄悄推进
+        // 「不再询问」那一档（见 PermissionMode::from_str_lenient）
+        mode: block
+            .get("mode")
+            .and_then(Value::as_str)
+            .map(PermissionMode::from_str_lenient)
+            .unwrap_or_default(),
         // 只有字面 `false` 算关（默认开）：缺失 → true
         system_prompt_enabled: block
             .get("systemPromptEnabled")

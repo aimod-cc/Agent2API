@@ -25,6 +25,14 @@ import path from 'node:path'
  * 产出不同的 sw.js，那道闸必然报错。改用 mobile.js + mobile.css 的
  * 内容哈希：产物变了版本就变，产物没变就完全一致，两边都满足。
  *
+ * ── 参与哈希的字节必须先做行尾归一 ──────────────────────────
+ * `public/sw.js` 是**被检出的源文件**，不是构建产出：工作区里它是 CRLF
+ * 还是 LF 取决于检出环境（本机 autocrlf=true 给出 CRLF，CI 的 Linux
+ * 给出 LF）。直接拿原始字节去哈希，同一份源码在两处会算出不同的版本号，
+ * 于是 CI 每次都判定 sw.js 被改动、那道闸永远红（2026-10 实际踩到）。
+ * 所以哈希前统一把 CRLF 收敛成 LF，落盘的产物也写 LF —— 版本号只由
+ * 文件内容决定，与谁在哪儿构建无关。
+ *
  * ── 只在 web 目标下跑 ───────────────────────────────────────
  * APK 目标（`--mode apk`）没有 Service Worker（界面在包里，不经过 HTTP），
  * 这个插件在那儿无事可做。
@@ -38,18 +46,31 @@ function swBuildStamp(): Plugin {
       const target = path.resolve(__dirname, '../ui/sw.js')
       if (!fs.existsSync(built)) return
 
+      // CRLF → LF。逐字节做，避免经过字符串解码改动内容（见文件头的说明）
+      const normalizeEol = (buf: Buffer): Buffer => {
+        const out = Buffer.allocUnsafe(buf.length)
+        let n = 0
+        for (let i = 0; i < buf.length; i++) {
+          if (buf[i] === 0x0d && buf[i + 1] === 0x0a) continue
+          out[n++] = buf[i]
+        }
+        return out.subarray(0, n)
+      }
+
       const hash = createHash('sha256')
       // sw.js 自身也算：只改缓存策略、不改 JS/CSS 时，版本号同样要变，
       // 否则浏览器不重装 SW，新策略永远不生效。
-      hash.update(fs.readFileSync(path.resolve(__dirname, 'public', 'sw.js')))
+      hash.update(normalizeEol(fs.readFileSync(path.resolve(__dirname, 'public', 'sw.js'))))
       for (const name of ['mobile.js', 'mobile.css']) {
         const file = path.resolve(__dirname, '../ui/m', name)
-        if (fs.existsSync(file)) hash.update(fs.readFileSync(file))
+        if (fs.existsSync(file)) hash.update(normalizeEol(fs.readFileSync(file)))
       }
       // 12 位十六进制足够区分版本，也不会把缓存名拉得太长
       const stamp = hash.digest('hex').slice(0, 12)
 
-      const text = fs.readFileSync(built, 'utf8').replace(/__BUILD__/g, stamp)
+      // 写出去的产物同样归一：否则本机（CRLF 检出）会产出 CRLF 的 sw.js，
+      // 与 CI 的 LF 版本在字节上对不上
+      const text = normalizeEol(fs.readFileSync(built)).toString('utf8').replace(/__BUILD__/g, stamp)
       fs.writeFileSync(target, text)
       // 产物目录里不留副本：它在那儿会被当成「可注册的 SW」，而 scope 不对
       fs.rmSync(built)
@@ -132,6 +153,11 @@ function apkBundle(): Plugin {
  */
 export default defineConfig(({ mode }) => {
   const apk = mode === 'apk'
+  // 本工程版本号：与 android/variables.gradle 读的是同一个 package.json 字段
+  // （APK 的 versionName 也来自它），设置页「关于」与「检查更新」用这个值。
+  const pkgVersion = JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, 'package.json'), 'utf8'),
+  ).version as string
   return {
     plugins: apk
       ? [react(), tailwindcss(), apkBundle()]
@@ -144,6 +170,8 @@ export default defineConfig(({ mode }) => {
     },
     define: {
       'process.env.NODE_ENV': JSON.stringify('production'),
+      // 构建期注入版本号：避免运行期再去请求 package.json（APK 里根本没有它）
+      __APP_VERSION__: JSON.stringify(pkgVersion),
     },
     build: {
       outDir: apk ? 'android-www' : '../ui/m',

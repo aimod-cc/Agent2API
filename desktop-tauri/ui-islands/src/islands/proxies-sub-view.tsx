@@ -132,9 +132,11 @@ export function KernelBar({ showPortRange = false }: { showPortRange?: boolean }
         </Badge>
         <span className='text-[12.5px] text-text-2'>
           {/* 版本号是 t 的形参（占位符不传参会原样显示 "{version}"）；
-              未安装时不显示版本段，只留按需下载的说明 */}
+              未安装时不显示版本段，只留按需下载的说明。
+              显示的是**磁盘上实际生效的版本**（installedVersion，旧布局迁移
+              过来时可能与期望版本不同），缺失时回落到 status.version */}
           {status?.installed
-            ? t('内核 {version}', { version: status.version }) + '　·　'
+            ? t('内核 {version}', { version: status.installedVersion || status.version }) + '　·　'
             : ''}
           {status?.running
             ? t('控制端口 {port} · {n} 个节点监听器', { port: status?.controllerPort ?? '—', n: status?.listenerCount ?? 0 })

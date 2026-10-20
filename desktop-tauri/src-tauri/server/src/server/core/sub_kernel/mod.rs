@@ -42,7 +42,9 @@ use crate::server::core::proxy_pool;
 use crate::server::logging;
 
 pub mod download;
+pub mod layout;
 pub mod runtime;
+pub mod zip;
 
 /// 内核版本（pin 死：换版本时改这里并同步 4 份 sha256 —— 不追 latest，
 /// 避免上游发版悄悄改行为）
@@ -130,9 +132,10 @@ pub fn kernel_binary_name() -> &'static str {
     }
 }
 
-/// 内核是否已安装（二进制存在即视为已装）
+/// 内核是否已安装（`current` 指针 → 版本目录 → 二进制 + `.ok` 标记，缺一不可；
+/// 旧布局的根目录 exe 也算，见 `layout::resolve_install`）
 pub fn installed() -> bool {
-    kernel_dir().join(kernel_binary_name()).exists()
+    layout::installed()
 }
 
 // ─── 一条订阅的输入形态 ─────────────────────────────────────
@@ -256,7 +259,16 @@ fn send(command: Command) {
 }
 
 /// 起 worker（bootstrap 调用一次；重复调用无副作用 —— sender 只 set 一次）。
+///
+/// 起 worker 之前先做两件磁盘上的事（都是 best-effort，失败不影响功能）：
+///   ① `layout::migrate_legacy()`：老布局的根目录 `mihomo.exe` 搬进
+///      `versions/<版本>/` —— 必须赶在自动拉起内核**之前**做，否则内核一跑
+///      起来，运行中的 exe 就 rename 不动了；
+///   ② `layout::cleanup_residue()`：清半截下载包、解压暂存目录、回收位与
+///      不被指针引用的旧版本目录。
 pub fn spawn_worker() {
+    layout::migrate_legacy();
+    layout::cleanup_residue();
     let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
     if SENDER.set(tx).is_err() {
         return;
@@ -342,10 +354,15 @@ async fn execute(command: Command) {
             // 两步都做：cleanup_stale_kernel 收拾上次运行遗留的（pid 从状态文件里来，
             // 控制器的 secret 对上才杀），stop_kernel 收当前这个子进程句柄 ——
             // 只做后者时，遗留进程占着二进制会让删除失败。
+            //
+            // 但**不再依赖「进程一定停干净」**：uninstall 会先摘 current 指针
+            // （之后 installed() 立刻为 false），删不掉的文件改名进回收位，
+            // 下次启动由 layout::cleanup_residue 清 —— 用户的操作不被一个还活着
+            // 的进程挡住。
             runtime::cleanup_stale_kernel().await;
             runtime::stop_kernel().await;
             match download::uninstall() {
-                Ok(()) => {
+                Ok(outcome) => {
                     // 内核没了 = 订阅节点的监听器全没了：端口必须一起回收，否则
                     // 池里那些地址指向的是**没人监听**的端口，界面上却看着像能用。
                     // 不摘条目（保 id / 保账号引用），只把端口置空 —— 重装内核后
@@ -371,6 +388,17 @@ async fn execute(command: Command) {
                         "[Subscription]",
                         &format!("🗑️ 已删除代理内核 {KERNEL_VERSION}（订阅与账号引用保留）"),
                     );
+                    if outcome.residue {
+                        // 指针已摘（installed 立刻为 false），只是磁盘上还有
+                        // 删不掉的残留 —— 如实说一句，别让用户以为目录是空的
+                        logging::log(
+                            "[Subscription]",
+                            &format!(
+                                "🧹 仍有残留文件未能删除（{}），将在下次启动时清理",
+                                outcome.detail.as_deref().unwrap_or("被进程占用")
+                            ),
+                        );
+                    }
                 }
                 Err(error) => {
                     patch_status(|snapshot| {
@@ -508,6 +536,12 @@ pub fn status_json() -> Value {
         json!({
             "installed": installed(),
             "version": KERNEL_VERSION,
+            // 磁盘上实际生效的版本（版本化目录后可能与 pin 的 KERNEL_VERSION
+            // 不同 —— 比如旧布局迁移过来的）；未安装为 null
+            "installedVersion": layout::installed_version(),
+            // 卸载后仍有删不掉的文件（已移入回收位，下次启动清理）：界面据此
+            // 说明「已卸载，残留稍后清理」，而不是假装磁盘上什么都没有
+            "pendingCleanup": layout::pending_cleanup(),
             "asset": asset_for_current_platform().map(|(name, _)| name),
             "running": running,
             "controllerPort": controller_port,

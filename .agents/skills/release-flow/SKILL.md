@@ -60,13 +60,16 @@ GitHub 的归属规则只有一条：**提交头里的 author 邮箱出现在某
 
 - 版本号形如 `X.Y.Z`（如 `2.7.2`），日常小版本「递增 0.01」= 末位 +1（如 `2.7.8` → `2.7.9`）。
 - **递增幅度以用户要求为准**：默认用上面的「递增 0.01」；用户另有要求时（如「这次递增 0.1」）一律听用户的，按用户指定的幅度算出新版本号，不要自作主张套用默认幅度。
-- **版本号要同步改 5 处**（缺一处会导致安装包与显示版本对不上）：
+- **版本号要同步改 6 处**（缺一处会导致安装包与显示版本对不上）：
   1. `package.json`（根）
   2. `desktop-tauri/package.json`
   3. `desktop-tauri/src-tauri/Cargo.toml`
   4. `desktop-tauri/src-tauri/tauri.conf.json`
   5. `desktop-tauri/src-tauri/server/Cargo.toml`
+  6. `desktop-tauri/mobile/package.json` —— 手机端安装包的版本号都从这里读：Android 的 `versionName` / `versionCode` 由 `android/variables.gradle` 读它（`versionCode` 由 semver 折算，只增不减，见该文件注释）；iOS 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` 由 `build.yml` 的 ios job 读它并传给 xcodebuild。不改它两端的包都还是旧版本号，产物名 `Agent2API-<版本>.apk` / `.ipa` 也取自这里
+- **改完第 6 处，必须顺手把 `desktop-tauri/mobile/package-lock.json` 根部的 `version` 也改成同一个值**（文件顶层的 `"version"` 与 `packages[""].version` 两处）。`npm ci` 对这两处不一致是**静默容忍**的（实测不会报错，也不会自动改），漏改 CI 照绿，但仓库里会留下版本号不一致的 lock 文件，下次谁跑 `npm install` 又会把它改回来，平白多出一个无关 diff。桌面端那几处没有这个问题（`desktop-tauri/package-lock.json` 的版本本来就落后，不随发版改）。
 - 应用内「关于」与更新检查读的是 `env!("CARGO_PKG_VERSION")`（第 5 处），改完跑一次 `cargo check` 让 `Cargo.lock` 跟着刷新。
+- 手机端界面目前**不显示**包自身版本号（只显示所连网关的版本）；要核对版本，看系统「应用信息」页，或直接看 Release 附件名。
 - **顺手过一遍安装文档**：安装说明已经从 README 搬进 `docs/install.md`（README 只留速查表 + 一个链接），另有 5 份译文 `docs/install.{en,zh-Hant,ja,ko,pt-BR}.md`，六份内容一一对应。凡是这次改动碰到了**安装 / 升级 / 卸载步骤、产物体名、默认端口、环境变量、安装脚本参数**，六份都要同步改；README 速查表受影响时也一起改。
 
 ## 5. 正式版发版流程
@@ -82,7 +85,7 @@ cargo check               # 或前端有改动时做一次构建自检
 git switch main && git pull
 git merge beta
 
-# 3. 五处版本号一起改（默认末位 +1，幅度听用户）；改完刷新 Cargo.lock
+# 3. 六处版本号一起改（默认末位 +1，幅度听用户）；改完刷新 Cargo.lock
 cargo check
 
 # 4. 写发布提交：提交信息 = 更新日志
@@ -109,7 +112,7 @@ bash scripts/release.sh vX.Y.Z
 
 | 工作流 | 产出 | 说明 |
 |---|---|---|
-| `build.yml`（build） | 桌面端三平台安装包 + Linux 服务端包 | 四个 job：`macos`（dmg）/ `windows`（NSIS exe）/ `linux-desktop`（deb + AppImage）/ `linux-server`（容器内更新用的 tar.gz）。macOS 与 Linux 桌面端的产物**只能在各自平台上构建**，无法从 Windows 交叉编译；所有产物只挂 artifact，GitHub Release 由本地脚本挂载 |
+| `build.yml`（build） | 桌面端三平台安装包 + 两个服务端包 + Android APK + iOS IPA | 七个 job：`macos`（dmg）/ `windows`（NSIS exe）/ `linux-desktop`（deb + AppImage）/ `linux-server`（容器内更新用的 tar.gz）/ `windows-server`（无 GUI 的 zip）/ `android`（APK）/ `ios`（IPA，跑在 `macos-26`）。macOS / iOS 与 Linux 桌面端的产物**只能在各自平台上构建**，无法从 Windows 交叉编译；所有产物只挂 artifact，GitHub Release 由本地脚本挂载 |
 | `docker.yml`（docker） | Docker Hub `aimodcc/agent2api:<版本>` + `:latest`（amd64 / arm64 双架构） | 手动 `workflow_dispatch` 触发时只出 `:dev` 测试 tag，不碰正式 tag；beta tag（版本号带 `-`）只出 `<版本>`，**不移动 `:latest`** |
 
 跟踪进度：
@@ -139,8 +142,8 @@ beta 版不是另一条流水线，而是第 5 节流程的一个变体 —— �
 git switch beta && git pull
 git status --short          # 必须为空
 
-# 2. 五处版本号一起改成「与 tag 逐字一致」的形态：
-#    tag 打 v3.1.0-beta.1 → 五处都写 3.1.0-beta.1（清单见第 4 节）
+# 2. 六处版本号一起改成「与 tag 逐字一致」的形态：
+#    tag 打 v3.1.0-beta.1 → 六处都写 3.1.0-beta.1（清单见第 4 节）
 cargo check                 # 顺带刷新 Cargo.lock
 
 # 3. 提交并推 beta 分支（提交信息 = 这次的 beta 更新日志，格式同第 5 节）
@@ -156,11 +159,11 @@ gh run list --limit 4
 bash scripts/release.sh v3.1.0-beta.1
 ```
 
-验收就三条：Release 显示 **Prerelease**、exe / dmg / deb / AppImage 附件齐全、Docker Hub 上 `:latest` 的 Pushed 时间**没有**跟着变（完整清单见第 7 节）。
+验收就四条：Release 显示 **Prerelease**、exe / dmg / deb / AppImage / APK 附件齐全、Docker Hub 上 `:latest` 的 Pushed 时间**没有**跟着变、APK 能装能连（完整清单见第 7 节）。
 
 **三处不能错**，每处错了都有明确症状：
 
-1. **五处版本号漏了后缀**（写成 `3.1.0`）：比较是按 semver 做的，运行版本 `3.1.0` 对线上 tag `3.1.0-beta.1` 会判成「当前比线上新」，**beta 用户永远收不到更新**。五个文件都接受带后缀的版本号（Cargo / npm / tauri.conf.json 都认），照 tag 抄即可。
+1. **六处版本号漏了后缀**（写成 `3.1.0`）：比较是按 semver 做的，运行版本 `3.1.0` 对线上 tag `3.1.0-beta.1` 会判成「当前比线上新」，**beta 用户永远收不到更新**。六个文件都接受带后缀的版本号（Cargo / npm / tauri.conf.json 都认），照 tag 抄即可。APK 的 `versionCode` 由 semver 前三段折算、不带后缀（见 `android/variables.gradle`），beta 与同号正式版取同一个值，不构成冲突。
 2. **Release 漏标 pre-release**：标记就是开关的分界线 —— 正式通道走 GitHub 的 `/releases/latest`，它排除预发布，只有开了开关的人从 `/releases` 列表里看到 beta。**漏标 = beta 被所有正式版用户当成正式更新收到。** `scripts/release.sh` 已按「tag 里带 `-`」自动标记，重跑收尾时也会把标记纠正回来，走脚本就不用操心。
 3. **tag 打在 `main` 上**：beta 是集成分支，beta 版要的是它的快照。打在 `main` 上要么不含 beta 分支的新改动（白测一场），要么等于把还没发布的改动提前推进 `main`。
 
@@ -168,14 +171,16 @@ docker 的 `:latest` 不会被 beta tag 移动（`.github/workflows/docker.yml`�
 
 后续常见三件事：
 
-- **再发一个 beta**：核心号不变、递增序号（`3.1.0-beta.2`，五处一起改，上面那套命令照走）。预发布序号能分出先后（`beta.2` > `beta.1`），已经在 beta 上的人照样收到更新 —— 所以 beta 之间也要保持「tag 与版本号逐字一致」。
-- **转正**（发 `3.1.0` 正式版）：按第 5 节在 `main` 上走，五处版本号去掉后缀。**beta 用户不会自动接回正式版**：开关开着的人只看预发布版（`pick_listed_release` 按「当前跑的是不是 beta 版」筛），转正的 `3.1.0` 对他们不算更新 —— 要留在 beta 频道的人等下一个 beta（`3.2.0-beta.1` 一出现就收得到）；想回正式版由用户自己关开关，关掉后只在**版本号高于他手上那个 beta** 的正式版发布时才收到更新（`3.1.0` > `3.1.0-beta.1`，但更早的 `3.0.9` 不会把他降级）。
+- **再发一个 beta**：核心号不变、递增序号（`3.1.0-beta.2`，六处一起改，上面那套命令照走）。预发布序号能分出先后（`beta.2` > `beta.1`），已经在 beta 上的人照样收到更新 —— 所以 beta 之间也要保持「tag 与版本号逐字一致」。
+- **转正**（发 `3.1.0` 正式版）：按第 5 节在 `main` 上走，六处版本号去掉后缀。**beta 用户不会自动接回正式版**：开关开着的人只看预发布版（`pick_listed_release` 按「当前跑的是不是 beta 版」筛），转正的 `3.1.0` 对他们不算更新 —— 要留在 beta 频道的人等下一个 beta（`3.2.0-beta.1` 一出现就收得到）；想回正式版由用户自己关开关，关掉后只在**版本号高于他手上那个 beta** 的正式版发布时才收到更新（`3.1.0` > `3.1.0-beta.1`，但更早的 `3.0.9` 不会把他降级）。
 - **「打开了却没有反应」**：仓库里一个预发布 Release 都没有时，打开这个开关也只会看到正式版 —— 第一次 beta 发出去之后才有效果。
 
 ## 7. 验收清单
 
 - [ ] GitHub Release：`gh release view vX.Y.Z`（手动跑 gh 前先设代理，见第 8 节）—— 正文日志齐全，四个桌面端附件都在：Windows `Agent2API_<版本>_x64-setup.exe`、macOS `Agent2API_<版本>_universal.dmg`、Linux `Agent2API_<版本>_amd64.deb` 与 `Agent2API_<版本>_amd64.AppImage`（另有两个 `agent2api-server-linux-*.tar.gz` + `.sha256`，那是容器内更新包，见第 5 节）；
 - [ ] Linux 桌面端：装 deb（或 `chmod +x` 后跑 AppImage）能启动，且面板「设置 → 软件更新」能检查到版本、给出对应包型的安装入口（deb → 系统安装器，AppImage → 换文件）；
+- [ ] 手机端 APK：Release 里有 `Agent2API-<版本>.apk` 与 `.sha256`；装到 Android 上能启动、添加网关并登录，系统「应用信息」里的版本号与 tag 一致（APK 的 `versionName` 取自 `desktop-tauri/mobile/package.json`，见第 4 节第 6 处）；
+- [ ] 手机端 iOS：Release 里有 `Agent2API-<版本>.ipa` 与 `.sha256`（未签名包需用 AltStore / SideStore 重签；配了 iOS 签名 secret 的仓库出的是已签名包）。CI 的 `ios` job 在 `macos-26` 上跑，日志里能读到 `xcodebuild -version` 与版本号解析结果；
 - [ ] Docker Hub：`aimodcc/agent2api` 的 Tags 页出现 `<版本>` 与 `latest`，Pushed 时间一致；
 - [ ] 安装包「关于」页版本号与 tag 一致；
 - [ ] 安装文档对得上实际产物：`docs/install.md` 与 5 份译文的产物名、端口、命令、环境变量跟这次 Release 一致（README 里那几张速查表同理）；
@@ -191,3 +196,23 @@ docker 的 `:latest` 不会被 beta tag 移动（`.github/workflows/docker.yml`�
   ```
 
   只设 `HTTPS_PROXY` 就够（gh 的请求全是 HTTPS，实测不读 `HTTP_PROXY`）。`scripts/release.sh` 已内置这一步（从 git 配置读取后透传给 gh），用脚本发版无需手动设。代理没开时 gh 会立刻报 `proxyconnect tcp: ... connection refused` 而不回退直连 —— 与 `git push` 的表现一致。
+
+- **APK 签名走四个 secret，缺一个 `android` job 直接红**：`ANDROID_KEYSTORE_BASE64` / `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD`。密钥本体（`*.jks`）与 `keystore.properties` 都在 `.gitignore` 里，只在打包机与仓库 secret 各存一份。**2026-10-19 已配好**（仓库 `Agent2API/agent2api`，来源是打包机 `desktop-tauri/mobile/android/` 下的 `agent2api-release.jks` 与 `keystore.properties`，keyAlias 为 `agent2api`）；换机器或密钥轮换时按下述方式重配。
+- **重配 / 补配 secret 的操作**（在打包机上执行，值从本地文件读，不要手抄）：
+
+  ```bash
+  cd desktop-tauri/mobile/android
+  # base64 必须是单行（-w0），带换行会解出损坏的 jks
+  base64 -w0 agent2api-release.jks > /tmp/ks.b64
+  gh secret set ANDROID_KEYSTORE_BASE64 --repo Agent2API/agent2api < /tmp/ks.b64
+  # 其余三个直接取 keystore.properties 的值，去掉键名与换行
+  sed -n 's/^storePassword=//p' keystore.properties | tr -d '\n' | gh secret set ANDROID_KEYSTORE_PASSWORD --repo Agent2API/agent2api
+  sed -n 's/^keyAlias=//p'      keystore.properties | tr -d '\n' | gh secret set ANDROID_KEY_ALIAS --repo Agent2API/agent2api
+  sed -n 's/^keyPassword=//p'   keystore.properties | tr -d '\n' | gh secret set ANDROID_KEY_PASSWORD --repo Agent2API/agent2api
+  rm -f /tmp/ks.b64
+  gh secret list --repo Agent2API/agent2api   # 只显示名字与更新时间，值读不回来（GitHub 设计如此）
+  ```
+
+  校验密钥本身是否可用：`keytool -list -keystore agent2api-release.jks -storepass <storePassword>`，应看到别名 `agent2api` 的 `PrivateKeyEntry`。**换密钥的后果**是已安装用户无法覆盖升级（签名不一致），不是重装一遍就好 —— 原密钥丢了等于断了 APK 的升级路径。
+- **APK 构建的两处环境差异**（`build.yml` 的 android job 已处理，改这块时别删）：`android/gradle.properties` 里的 `org.gradle.java.home` 是本机 Windows 绝对路径，runner 上要删掉回落 `JAVA_HOME`；`gradle-wrapper.properties` 的 `distributionUrl` 指向腾讯云镜像，runner 在海外要换回官方源。
+- **APK 的产物名由 `mobile/package.json` 的 version 决定**：`Agent2API-<版本>.apk`，`release.sh` 原样挂上 Release。安装文档六份里写的也是这个名字，改命名规则要连文档一起改。

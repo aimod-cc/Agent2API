@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { PageHead, SectionHead, Empty, ErrorNote, StatCard, SkeletonList } from '../components/ui'
+import { PullIndicator, usePullToRefresh } from '../components/PullToRefresh'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { useStore } from '../state/store'
 import { fetchStatsSummary, type StatsRange, type StatsSummary } from '../api/gateway'
@@ -35,21 +36,21 @@ export function ReportPage() {
   const [error, setError] = useState('')
   const [firstLoad, setFirstLoad] = useState(true)
 
-  usePolling(
-    async () => {
-      try {
-        const next = await fetchStatsSummary(range)
-        setData(next)
-        setError('')
-      } catch (failure) {
-        setError(failure instanceof Error ? failure.message : String(failure))
-      } finally {
-        setFirstLoad(false)
-      }
-    },
-    60_000,
-    [range],
-  )
+  const load = async () => {
+    try {
+      const next = await fetchStatsSummary(range)
+      setData(next)
+      setError('')
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure))
+    } finally {
+      setFirstLoad(false)
+    }
+  }
+
+  usePolling(load, 60_000, [range])
+
+  const pull = usePullToRefresh({ onRefresh: load })
 
   const overview = data?.overview
   const requests = Number(overview?.requests) || 0
@@ -70,7 +71,8 @@ export function ReportPage() {
   const totalTokens = topModels.reduce((sum, item) => sum + (Number(item.totalTokens) || 0), 0)
 
   return (
-    <div className='m-page'>
+    <div className='m-page' ref={pull.bindRef}>
+      <PullIndicator pull={pull.pull} refreshing={pull.refreshing} />
       <PageHead
         title={t('报表')}
         subtitle={

@@ -392,6 +392,22 @@ impl AccountStore {
             // 配置文件，见 `qclaw_accounts::to_qclaw_public_account`）。
             // 令牌本体不出现（`accessToken` 只在会话里给适配器用）。
             self.to_qclaw_public_account(record)
+        } else if super::is_modelscope_family(&record.provider()) {
+            // ModelScope（魔搭）的两个站点（`modelscope` / `modelscope-intl`）共用
+            // 这一份公开形态：账号字段两地完全一致，差别只在域名（那是转发与凭证
+            // 层的事，公开形态不体现）。去掉令牌本体，只留尾 4 位与「有没有令牌」
+            // （见 `modelscope_accounts.rs`）。
+            self.to_modelscope_public_account(record)
+        } else if record.provider() == super::ATOMCODE_PROVIDER_ID {
+            // AtomCode（AtomGit）：公开形态要摘掉**两个**令牌本体
+            // （accessToken 与 refreshToken）—— 只摘前者的那套在这里是漏的，
+            // refreshToken 是长期有效的续期凭据，不能随账号列表下发。
+            self.to_atomcode_public_account(record)
+        } else if record.provider() == super::LOBSTERAI_PROVIDER_ID {
+            // LobsterAI：公开形态要摘掉**令牌本体 + 载荷件三件套**
+            // （refreshToken / uuid / 两个 keyfrom）。它们都是「能续期」的条件，
+            // 一起下发等于把账号的续期能力送出去；界面要的只是 canRefresh 布尔。
+            self.to_lobsterai_public_account(record)
         } else if record
             .provider()
             .starts_with(crate::server::core::custom_providers::ID_PREFIX)
@@ -432,6 +448,21 @@ impl AccountStore {
                 // 恒为数字（无记录时 0）而不是缺键：界面按 `Number(...) || 0` 读，
                 // 两种形态都能吃，但恒定的形状让「字段缺失」与「值为 0」不再需要分开判。
                 fields.insert("checkinAt".to_string(), Value::from(record.checkin_at()));
+                // 成长中心连登天数（WorkBuddy 国内版；签到后回读落库，见
+                // `AccountStore::mark_streak_days`）。恒为数字键（0 = 还没读到过），
+                // 与 checkinAt 同一理由：界面按数字读，不必判「字段缺失」。
+                // 只有国内版会写这个字段，别家恒 0 —— 不按 provider 分支是刻意的：
+                // 形状恒定，读侧不必查表。
+                fields.insert(
+                    "streakDays".to_string(),
+                    Value::from(
+                        record
+                            .fields()
+                            .get("streakDays")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(0),
+                    ),
+                );
                 // 单账号并发上限（所有家通用的账号属性）：跨家统一注入的理由与上面
                 // 三条相同 —— 选路（`routing::max_concurrent_of`）与前端账号菜单读的
                 // 是**同一份事实**。恒为数字键（0 = 不限），且**只在这里写一次**：
@@ -491,6 +522,21 @@ impl AccountStore {
                     "displayName".to_string(),
                     Value::String(display_name_of(&fields, &record.id().to_string())),
                 );
+                // 智谱清言的**访客标记**：签到范围判定
+                // （`billing::checkin::supports_checkin`）与签到中心的「范围外」
+                // 原因都读它，两处必须看到同一份事实 —— 而访客形态只存在记录
+                // 里（公开形态是逐个字段组装的，不会自动带上 `isGuest`）。
+                //
+                // 只对本家注入：别的家没有访客形态，给所有账号加一个恒 false 的
+                // 键只会让读侧多一个「要不要判它」的疑问。判据见
+                // `chatglm_accounts::guest_of_record`（只认确凿的访客证据，
+                // 与新手任务列表那边的兜底方向刻意相反）。
+                if record.provider() == super::CHATGLM_PROVIDER_ID {
+                    fields.insert(
+                        "isGuest".to_string(),
+                        Value::Bool(super::chatglm_accounts::guest_of_record(record)),
+                    );
+                }
                 Value::Object(fields)
             }
             // 各家形状恒为对象；真出现异常形态时原样透出，不在这里改语义
