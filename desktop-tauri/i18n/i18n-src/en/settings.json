@@ -572,6 +572,7 @@
   "用 models.dev 补齐上游没声明的模型能力与思考档位（联网刷新，内嵌快照始终生效）": "Fill in model capabilities and reasoning levels the upstream never declares, using models.dev (refreshed online; the bundled snapshot always applies)",
   "用于加密上云的账号密钥。请自己记牢 —— 它不保存到云端，换机下载时必须输入同一个密码，否则账号数据无法解密。": "Used to encrypt the account key that goes to the cloud. Remember it — it is not stored in the cloud, and you must enter the same password when restoring on another machine, otherwise the account data cannot be decrypted.",
   "用浏览器菜单里的「添加到主屏幕」把这一页装成 App：全屏打开、没有地址栏，和原生应用一样。": "Use \"Add to Home Screen\" in the browser menu to install this page as an app: full screen, no address bar, just like a native app.",
+  "界面": "Interface",
   "界面缩放": "Interface Zoom",
   "界面缩放比例": "Interface Zoom Level",
   "界面语言": "Interface Language",

@@ -464,7 +464,11 @@ export const CATEGORIES = [
   // 「助手设置」抽屉（见 assistant-settings-drawer.tsx）—— 那几项都是聊着聊着
   // 就想改的，留在这里意味着每次调整都要离开对话页再回来。分类不再保留，
   // 老用户 localStorage 里存着的 'assistant' 由 settings-state 的兜底回落到首项。
-  { id: 'display', label: t('显示'), icon: 'display' },
+  // 分类名用「界面」而不是「显示」：**中文即键**的词典里，「显示」已经被
+  // Key 列表 / 表格列设置的「显示/隐藏」占用了（英文译作 Shown），做分类名
+  // 会在英文界面显示成 "Shown" 而不是 "Display"。这一栏装的是主题 / 缩放 /
+  // 计量单位 / 侧边栏菜单，叫「界面」也更贴切。
+  { id: 'display', label: t('界面'), icon: 'display' },
   { id: 'gateway', label: t('网关'), icon: 'traffic' },
   { id: 'routing', label: t('路由'), icon: 'route' },
   { id: 'retry', label: t('重试'), icon: 'refresh' },

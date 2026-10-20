@@ -129,6 +129,14 @@ function applyZoom(percent) {
 // ─── 页面导航 ────────────────────────────────
 
 const PAGE_KEY = 'workbuddy-desktop-page';
+/**
+ * 设置页当前分类的存储键。
+ *
+ * **必须与 islands/settings-model.ts 的 SETTINGS_CAT_KEY 逐字一致**：侧栏点分类
+ * 时先写它、再切页，设置页 load() 头一行的 restoreCategory() 就是读它把分类
+ * 铺上去的。写错这里，症状是「点侧栏分类没反应、总停在通用」。
+ */
+const SETTINGS_CAT_KEY = 'workbuddy-desktop-settings-cat';
 const PAGES = ['assistant', 'overview', 'accounts', 'checkin', 'gateway', 'agent', 'proxies', 'keys', 'docs', 'logs', 'tasks', 'requests', 'settings'];
 /** 页签中文名：顶栏面包屑用。overview 的用户可见名是「报表」、gateway 的是「模型管理」
  *  （内部标识保持不变：localStorage 记忆、showPage 与 CSS 的 [data-page] 选择器都依赖它） */
@@ -213,18 +221,54 @@ function navItemHtml(menu) {
     ? '<span class="count" id="nav-count-requests" style="display:none">0</span>'
     : menu.key === 'logs'
       ? '<span class="count" id="nav-count-logs" style="display:none">0</span>'
-      : menu.key === 'settings'
+      : menu.key === 'settings-about'
+        // 「新版本可用」提示挂在「更新」那一项上（它原先是唯一的「设置」项，
+        // 设置页拆成 13 项后，更新提示归到名副其实的那一项）
         ? `<span class="count" id="nav-count-update" style="display:none">${esc(wbI18n.t('新'))}</span>`
         : '';
-  return `<button class="nav-item" data-page="${menu.key}" data-icon="${menu.icon}">`
+  /**
+   * 三个属性各司其职，别合并：
+   *   · `data-nav` = 导航身份（menu.key）。选中态按它比对 —— 设置页的 13 项
+   *     都指向同一个页面，用 data-page 比对会一起亮；
+   *   · `data-page` = **要切到哪个页面**。设置分类项一律是 'settings'：它们的
+   *     key（`settings-general` 之类）不在 PAGES 里，塞进 data-page 会让
+   *     showPage 认不出而回退到「报表」；
+   *   · `data-cat` = 设置页内落到哪一栏，只有分类项有。
+   */
+  const cat = menu.cat ? ` data-cat="${menu.cat}"` : '';
+  const page = menu.page || menu.key;
+  return `<button class="nav-item" data-nav="${menu.key}" data-page="${page}"${cat} data-icon="${menu.icon}">`
     + '<span class="ico"></span>'
     + `<span class="label">${label}</span>${badge}</button>`;
 }
 
-/** 把选中态标到当前页那一项上（showPage 与 renderSidebar 共用） */
+/**
+ * 把选中态标到当前页那一项上（showPage 与 renderSidebar 共用）。
+ *
+ * ── 为什么按 data-nav 而不是 data-page ────────────────────────
+ * 设置页的 13 个分类项 data-page 全是 'settings'（见 navItemHtml 的说明），
+ * 按 data-page 比对会让它们**一起亮**。所以选中态比对的是导航身份 data-nav。
+ *
+ * 设置页的分类项还有第二层：13 项该只亮**当前分类**那一项。那需要知道
+ * 「现在是哪个分类」，而分类状态的唯一投影在设置页的页内导航上（React 岛
+ * 内部状态，宿主读不到）—— 那层同步由 sidebar-settings-sync.js 观察
+ * `.settings-nav-item.active` 补上；这里只负责「不亮成一片」的基础判断：
+ * 当前在设置页时，非分类项（settings 之外的一级菜单）都不亮，分类项交给
+ * 那个脚本按实地状态点亮。
+ */
 function markActiveNav() {
+  // 设置页当前停在哪个分类：由 sidebar-settings-sync.js 在标题属性上写下的
+  // 投影（读不到时退回 null = 让分类项全部不亮，而不是全亮）
+  const activeCat = document.documentElement.dataset.settingsCat || '';
   document.querySelectorAll('.nav-item').forEach(item => {
-    item.classList.toggle('active', item.dataset.page === currentPage);
+    const nav = item.dataset.nav || item.dataset.page;
+    if (nav === 'settings-general' || String(nav).startsWith('settings-')) {
+      // 分类项：只在「当前页是设置」且分类对得上时亮
+      const isCat = item.dataset.cat === activeCat;
+      item.classList.toggle('active', currentPage === 'settings' && isCat);
+      return;
+    }
+    item.classList.toggle('active', nav === currentPage);
   });
 }
 
@@ -249,6 +293,27 @@ function syncNavBadges() {
   syncUpdateBadge();
 }
 
+/**
+ * 顶栏面包屑的文本。
+ *
+ * 设置页是个特例：侧栏把它的 13 个分类平铺成了一级菜单，停在「重试」上时
+ * 面包屑只写「设置」看不出自己在哪一栏，所以带上分类名（「设置 / 重试」）。
+ *
+ * 分类名的来源是 `SETTINGS_MENUS`（侧栏那一份权威表，经 wbSidebarLayout 取用）
+ * —— 直接查表而不是维护第二份 name→label 映射，避免两处漂移。取不到时退回
+ * 只写「设置」（如岛屿未就绪、表被换掉），不抛错。
+ */
+function crumbText(page) {
+  const base = PAGE_LABELS[page] || page;
+  if (page !== 'settings') return base;
+  const cat = document.documentElement.dataset.settingsCat || '';
+  const label = sidebarApi()?.menusByCat?.()[cat];
+  // 拼接而不是走 t() 的占位符：i18n 扫描器把含 {xxx} 的字面量当成插值模板、
+  // 提取不到键（见 scan.mjs 的非字面量警告）。分类名本身已经是译文，
+  // 这里的「A / B」只是分隔符，没有语序问题 —— 不占一条词典反而更省。
+  return label ? `${base} / ${wbI18n.t(label)}` : base;
+}
+
 function showPage(name, { persist = true } = {}) {
   const page = PAGES.includes(name) ? name : 'overview';
   currentPage = page;
@@ -257,7 +322,7 @@ function showPage(name, { persist = true } = {}) {
   });
   markActiveNav();
   const crumb = $('crumb-page');
-  if (crumb) crumb.textContent = PAGE_LABELS[page] || page;
+  if (crumb) crumb.textContent = crumbText(page);
   // 移动端：切页后收起侧边栏抽屉。#nav-toggle 是纯 CSS 开关（见 css/mobile.css），
   // 点导航项只切页不 uncheck，抽屉会一直开着；桌面端该元素恒为 unchecked，这行无副作用。
   { const t = document.getElementById('nav-toggle'); if (t) t.checked = false; }
@@ -734,8 +799,14 @@ function syncUpdateBadge() {
   if (!badge) return;
   const info = lastUpdateInfo;
   const latest = String(info?.latestVersion || '').trim();
-  // 进设置页即视为「已看到」：结果与更新日志就在那个面板里
-  if (currentPage === 'settings') seenUpdateVersion = latest;
+  // 进「更新」那一栏即视为「已看到」：结果与更新日志就在那个面板里。
+  // 判据用**分类**而不是「在设置页」—— 13 个分类平铺成一级菜单之后，
+  // 进「通用」并不等于看过更新日志，早先那句 `currentPage === 'settings'`
+  // 在拆分后会把没看过的情况也标成已读（角标该亮却不亮）。
+  // 分类由 sidebar-settings-sync.js 投影在 <html data-settings-cat> 上；
+  // 拿不到时（同步脚本未就绪）退回「在设置页就算看过」的保守判断。
+  const cat = document.documentElement.dataset.settingsCat || '';
+  if (currentPage === 'settings' && (cat === 'about' || !cat)) seenUpdateVersion = latest;
   if (info?.hasUpdate !== true || !latest || latest === seenUpdateVersion) {
     badge.style.display = 'none';
     return;
@@ -994,6 +1065,15 @@ window.wbApp = {
   formatTime,
   showPage,
   get currentPage() { return currentPage; },
+  /**
+   * 重刷侧栏选中态。给 sidebar-settings-sync.js 用：切设置分类**不经过
+   * showPage**（页内点导航只走岛的 showCategory），而那 13 个一级项的高亮
+   * 判断在本文件里 —— 所以那边写完 <html data-settings-cat> 后调这里补刷。
+   * 高亮逻辑只此一份，不另抄一套到宿主脚本里（两份必然漂）。
+   */
+  syncNavActive: markActiveNav,
+  /** 重刷三颗角标（切设置分类时调：更新角标的判据依赖当前分类，见 syncUpdateBadge） */
+  syncNavBadges: syncNavBadges,
   getState: () => state,
   runAccountAction,
   refresh,
@@ -1020,7 +1100,21 @@ window.wbApp = {
 // （首帧渲染在文件上方、第一个桥调用之前 —— 见那里的说明）
 $('nav').addEventListener('click', event => {
   const item = event.target.closest('.nav-item[data-page]');
-  if (item) showPage(item.dataset.page);
+  if (!item) return;
+  const cat = item.dataset.cat;
+  if (cat) {
+    // 设置分类项：顺序不能改 —— 先写分类偏好，再 showPage。
+    // showPage('settings') 会触发设置页的 load()，而 load() 的**头一行**就是
+    // 同步的 restoreCategory()（读这个键）。若先切页后写偏好，偏好会被上一次
+    // 的值盖回去，用户点了「重试」却停在「通用」。
+    // 末尾那次 showCategory 是兜底：存储不可用时 restoreCategory 拿不到值，
+    // 这一句仍能把分类拨到位（showCategory 不写偏好，符合它的既有语义）。
+    try { localStorage.setItem(SETTINGS_CAT_KEY, cat); } catch { /* 存储不可用：这次照样切 */ }
+    showPage('settings');
+    window.wbSettingsPanel?.showCategory?.(cat);
+    return;
+  }
+  showPage(item.dataset.page);
 });
 
 /**

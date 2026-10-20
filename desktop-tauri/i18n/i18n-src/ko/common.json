@@ -6,6 +6,7 @@
   "Agent2API · 多提供商本地网关": "Agent2API · 다중 제공자 로컬 게이트웨이",
   "QQ 群号": "QQ 그룹 번호",
   "Webhook 地址（https://…）": "",
+  "{base} / {cat}": "",
   "{key} 需要 true / false / null": "{key}은(는) true / false / null 중 하나여야 합니다",
   "{key} 需要数字": "{key}은(는) 숫자여야 합니다",
   "{n} 个启用": "{n}개 활성",

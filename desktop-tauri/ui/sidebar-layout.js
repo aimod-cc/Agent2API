@@ -48,6 +48,50 @@
    * 刷新后这张表按新语言重建，不存在「译文过期」这种状态。
    * `icon` 是 icons.js 里的键。
    */
+  /**
+   * 设置页的分类表（13 项）。
+   *
+   * ⚠ **这是侧栏这一份的权威来源**，必须与 ui-islands 的 `CATEGORIES`
+   * （islands/settings-model.ts）逐字对齐：`cat` 是切分类的入参，`icon` 是
+   * icons.js 的键，`label` 是中文即键。两处不一致时最坏的后果是「侧栏能点到
+   * 一个设置页不认识的分类」，showCategory 会兜底回第一类 —— 不崩，但会让人
+   * 以为点了没反应。改动前先看那边的 CATEGORIES。
+   *
+   * ── 为什么 key 是 `settings-<cat>` 而不是直接叫 cat ────────
+   * 一级菜单的 key 是**导航身份**，与设置页内部的分类 id 是两层概念：前者要
+   * 进 PAGES/PAGE_LABELS 那套页面体系（见 file 头「三处必须同时改」），后者
+   * 只是设置页内的分栏。加前缀把两者隔开，将来设置页增删分类也不会撞上别的
+   * 一级菜单键。**`cat` 才是写给 showCategory 的**，派生关系只在这一张表里。
+   *
+   * ── 为什么 13 项全是 fixed ────────────────────────────────
+   * 「设置」原先是单独一条固定项，理由是不许隐藏（隐藏了只能清缓存找回来）。
+   * 现在它被这 13 项取代，而**设置页没有其它入口** —— 一旦全部隐藏，
+   * 用户就再也进不去设置。所以整组保持不可隐藏、每项也不可单独隐藏：
+   * 这与它替代的那条固定项是同一档约束，不是新增规则。
+   */
+  const SETTINGS_MENUS = [
+    { key: 'settings-general', cat: 'general', label: wbI18n.t('通用'), icon: 'sliders' },
+    // 标签「界面」（cat 仍是 display）：与设置页 CATEGORIES 同源同因 ——
+    // 「显示」在中文即键的词典里被「显示/隐藏」占了（英文 Shown），
+    // 分类名换成「界面」才不会串味
+    { key: 'settings-display', cat: 'display', label: wbI18n.t('界面'), icon: 'display' },
+    { key: 'settings-gateway', cat: 'gateway', label: wbI18n.t('网关'), icon: 'traffic' },
+    { key: 'settings-routing', cat: 'routing', label: wbI18n.t('路由'), icon: 'route' },
+    { key: 'settings-retry', cat: 'retry', label: wbI18n.t('重试'), icon: 'refresh' },
+    { key: 'settings-timeout', cat: 'timeout', label: wbI18n.t('超时'), icon: 'timer' },
+    { key: 'settings-security', cat: 'security', label: wbI18n.t('安全'), icon: 'shield' },
+    { key: 'settings-account', cat: 'account', label: wbI18n.t('账户'), icon: 'accounts' },
+    // 标签「通知与告警」，图标沿用 feedback（icons.js 里没有专用图）
+    { key: 'settings-notify', cat: 'notify', label: wbI18n.t('通知与告警'), icon: 'feedback' },
+    { key: 'settings-data', cat: 'data', label: wbI18n.t('数据'), icon: 'database' },
+    { key: 'settings-feedback', cat: 'feedback', label: wbI18n.t('反馈与需求'), icon: 'feedback' },
+    { key: 'settings-system', cat: 'system', label: wbI18n.t('版本信息'), icon: 'info' },
+    // 标签「更新」而 cat 仍是 'about'：那是上游契约（update-panel 按
+    // `.settings-pane[data-cat="about"]` 找挂载点，用户 localStorage 里存的
+    // 也是这个值），改 cat 会让两者当场失配
+    { key: 'settings-about', cat: 'about', label: wbI18n.t('更新'), icon: 'download' },
+  ].map(menu => ({ ...menu, fixed: true, page: 'settings' }));
+
   const MENUS = [
     { key: 'assistant', label: wbI18n.t('AI 助手'), icon: 'spark' },
     { key: 'overview', label: wbI18n.t('报表'), icon: 'overview' },
@@ -61,12 +105,20 @@
     { key: 'requests', label: wbI18n.t('请求日志'), icon: 'requests' },
     { key: 'logs', label: wbI18n.t('日志'), icon: 'logs' },
     { key: 'tasks', label: wbI18n.t('定时任务'), icon: 'tasks' },
-    // 固定项：不可隐藏，所在分组也不可整组隐藏（隐藏了用户只能清缓存找回来）
-    { key: 'settings', label: wbI18n.t('设置'), icon: 'settings', fixed: true },
+    // 设置页的 13 个分类，平铺为一级菜单（见 SETTINGS_MENUS 的说明）
+    ...SETTINGS_MENUS,
   ];
 
   const MENU_BY_KEY = new Map(MENUS.map(menu => [menu.key, menu]));
   const MENU_KEYS = MENUS.map(menu => menu.key);
+  /** 设置分类项 key（老存盘迁移用：一条 `settings` 展开成这 13 条） */
+  const SETTINGS_KEYS = SETTINGS_MENUS.map(menu => menu.key);
+
+  /**
+   * cat id → 分类名（中文即键）。给宿主侧用：面包屑要写「设置 / 重试」，
+   * 而分类名只在这张表里 —— 让调用方查表而不是自己抄一份映射。
+   */
+  const CAT_LABELS = new Map(SETTINGS_MENUS.map(menu => [menu.cat, menu.label]));
 
   /**
    * 内置分组的展示名。
@@ -116,8 +168,10 @@
           items: ['gateway', 'agent', 'proxies', 'keys', 'docs'] },
         { id: 'g-diag', label: '诊断', custom: false, hidden: false,
           items: ['requests', 'logs', 'tasks'] },
+        // 「系统」组：设置页的 13 个分类平铺在这里（它们取代了原先单独一条
+        // 「设置」）——见 SETTINGS_MENUS 的说明
         { id: 'g-system', label: '系统', custom: false, hidden: false,
-          items: ['settings'] },
+          items: SETTINGS_KEYS.slice() },
       ],
       hidden: [],
     };
@@ -157,11 +211,18 @@
       if (!group || typeof group !== 'object') continue;
       const items = [];
       const rawItems = Array.isArray(group.items) ? group.items : [];
-      for (const key of rawItems) {
-        // 不认识的键（旧版本 / 手改坏了）与重复项都在这里丢掉
-        if (!isMenuKey(key) || seen.has(key)) continue;
-        seen.add(key);
-        items.push(key);
+      for (const rawKey of rawItems) {
+        // 老存盘迁移：设置页原先是一条合并的 `settings`，本次拆成 13 条分类项。
+        // **原地展开**，而不是「当成不认识的键丢掉、再靠下面的 missing 补位」——
+        // 补位只会把它们全塞进**第一组**（概览），用户的「系统」组当场空掉，
+        // 等于丢掉了他自己调过的分组安排；原地展开则位置与所在组都保持不变。
+        const keys = rawKey === 'settings' ? SETTINGS_KEYS : [rawKey];
+        for (const key of keys) {
+          // 不认识的键（旧版本 / 手改坏了）与重复项都在这里丢掉
+          if (!isMenuKey(key) || seen.has(key)) continue;
+          seen.add(key);
+          items.push(key);
+        }
       }
       const label = typeof group.label === 'string' ? group.label.trim() : '';
       groups.push({
@@ -381,6 +442,8 @@
     writeLayout,
     cloneLayout,
     menuOf: key => MENU_BY_KEY.get(key),
+    /** 设置分类的 cat id → 分类名；给面包屑这类宿主侧展示用（见 CAT_LABELS） */
+    menusByCat: () => Object.fromEntries(CAT_LABELS),
     groupLabel,
     isFixedMenu,
     locate,

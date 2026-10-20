@@ -76,7 +76,15 @@ const DOMAIN_RULES = [
   // 「设置 → 版本信息」面板（桌面端 system-info-pane.tsx 与手机端
   // SystemInfoSheet.tsx 共用同一批文案：版本 / 环境 / 路径 / 开关）。
   // 归 settings 域 —— 它读的就是设置页的分类之一，文案与设置页其它面板同类。
-  { domain: 'settings', files: ['units.js', 'SettingsPage.tsx', 'MorePage.tsx', 'PwaNotice.tsx', 'ServersPage.tsx', 'LoginPage.tsx', 'system-info-pane.tsx', 'SystemInfoSheet.tsx', 'sidebar-layout.js'], prefixes: ['settings-', 'sidebar-'] },
+  //
+  // ⚠ 补 `settings-model.ts`（下游 2026-10-20）：设置页的分类表 CATEGORIES
+  // 就在这个文件里，而分类名（通用 / 显示 / 路由 / 重试 / …）**只有那一处**
+  // 是权威来源。它原先不在清单中，症状是部分分类名没进词典 ——
+  // 凡是同一串文字恰好也出现在别处（如「通用」出现在提示词说明里）的能被动
+  // 扫到，而「显示」「重试」「通知与告警」这类只此一处的就永远缺，英文界面
+  // 直接露中文。侧栏现在把这 13 个分类平铺成了一级菜单（sidebar-layout.js
+  // 另有一份同源表），缺译会直接显眼。
+  { domain: 'settings', files: ['units.js', 'SettingsPage.tsx', 'settings-model.ts', 'MorePage.tsx', 'PwaNotice.tsx', 'ServersPage.tsx', 'LoginPage.tsx', 'system-info-pane.tsx', 'SystemInfoSheet.tsx', 'sidebar-layout.js'], prefixes: ['settings-', 'sidebar-'] },
   // AI 助手（侧边栏「智能」组的一级页 + 设置页「AI 助手」分类）：
   // 对话页、工具集、设置面板三块
   { domain: 'assistant', files: ['AssistantPage.tsx', 'assistant.ts', 'assistantTools.ts', 'MarkdownLite.tsx'], prefixes: ['assistant-'] },
