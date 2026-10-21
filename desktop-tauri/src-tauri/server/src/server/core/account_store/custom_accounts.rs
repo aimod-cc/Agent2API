@@ -352,7 +352,15 @@ impl AccountStore {
         let records = self.with_conn(&_guard, |conn| sql::load_by_provider(conn, provider_id))?;
         let mut removed = 0usize;
         for record in &records {
-            let deleted = self.with_conn(&_guard, |conn| sql::delete(conn, record.id()))?;
+            let deleted = self.with_conn_mut(&_guard, |conn| {
+                let tx = conn.transaction()?;
+                let deleted = sql::delete(&tx, record.id())?;
+                if deleted {
+                    sql::delete_explicit_group_account_members(&tx, record.id())?;
+                }
+                tx.commit()?;
+                Ok(deleted)
+            })?;
             if deleted {
                 removed += 1;
             }

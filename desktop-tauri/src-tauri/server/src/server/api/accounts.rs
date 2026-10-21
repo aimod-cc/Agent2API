@@ -1474,7 +1474,7 @@ pub async fn batch_accounts(state: &ServerState, body: &Bytes) -> Response {
         .to_string();
 
     let result = match action.as_str() {
-        "remove" => state.store().batch_remove(&ids),
+        "remove" => state.with_management_lock(|| state.store().batch_remove(&ids)),
         "enable" | "disable" => {
             let enabled = action == "enable";
             state.store().batch_update(&ids, &json!({ "enabled": enabled }))
@@ -2136,14 +2136,16 @@ pub fn delete_account(state: &ServerState, id: &str) -> Response {
     if id.is_empty() {
         return management_error(400, "缺少账号 id");
     }
-    // 引用快照要在删除**之前**取：被删账号撇下的引用要靠对账回收端口
-    // （最后一个引用消失 → 这个节点的监听器该收了）
-    let refs_before = state.store().referenced_pool_ids();
-    match state.store().remove_account(id) {
-        Ok(()) => {
-            reconcile_kernel_listeners(state, &refs_before);
-            ok_json(json!({ "list": state.store().list_accounts() }))
+    state.with_management_lock(|| {
+        // 引用快照要在删除**之前**取：被删账号撇下的引用要靠对账回收端口
+        // （最后一个引用消失 → 这个节点的监听器该收了）
+        let refs_before = state.store().referenced_pool_ids();
+        match state.store().remove_account(id) {
+            Ok(()) => {
+                reconcile_kernel_listeners(state, &refs_before);
+                ok_json(json!({ "list": state.store().list_accounts() }))
+            }
+            Err(error) => store_error(error),
         }
-        Err(error) => store_error(error),
-    }
+    })
 }

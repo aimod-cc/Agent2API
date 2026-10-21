@@ -26,6 +26,7 @@ use axum::response::Response;
 use serde_json::Value;
 
 use crate::server::config;
+use crate::server::core::account_groups::AccountGroupScope;
 use crate::server::core::key_scope::{self, KeyScope};
 use crate::server::core::limiter;
 use crate::server::core::providers::catalog::{
@@ -172,10 +173,29 @@ pub fn resolve_model(
     state: &ServerState,
     payload: &mut Value,
     scope: Option<&KeyScope>,
+    group_scope: Option<&AccountGroupScope>,
 ) -> Result<String, GatewayError> {
     let requested = model_field_text(payload);
     // 客户端是否**点名**了模型：默认值注入后这个事实就丢了，先记下来
     let client_named = !requested.is_empty();
+    if let Some(group_scope) = group_scope {
+        let snapshot = config::current();
+        let model = crate::server::core::providers::catalog::resolve_group_model(
+            state.store(),
+            group_scope,
+            scope,
+            &requested,
+            client_named,
+            snapshot.default_model(),
+        )?;
+        if !model.is_empty() {
+            if let Some(object) = payload.as_object_mut() {
+                object.insert("model".to_string(), Value::String(model.clone()));
+            }
+            config::remember_request_model(&model);
+        }
+        return Ok(model);
+    }
     if !client_named {
         // 客户端没点名 → 网关默认。三级回落链的候选集合走
         // `default_model_catalog()`（按「认不认默认模型概念」收窄后的聚合清单）：

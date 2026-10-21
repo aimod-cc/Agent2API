@@ -88,6 +88,31 @@ const LEGACY_NAME: &str = "默认 Key";
 /// 与旧版一致的最小长度
 pub const MIN_KEY_LENGTH: usize = 8;
 
+/// API Key 的账号池路由模式。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RouteMode {
+    #[default]
+    DefaultPool,
+    AccountGroup,
+}
+
+impl RouteMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DefaultPool => "default_pool",
+            Self::AccountGroup => "account_group",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "default_pool" => Some(Self::DefaultPool),
+            "account_group" => Some(Self::AccountGroup),
+            _ => None,
+        }
+    }
+}
+
 /// 一条 Key 记录
 #[derive(Clone, Debug)]
 pub struct ApiKeyEntry {
@@ -100,6 +125,10 @@ pub struct ApiKeyEntry {
     pub allowed_providers: Vec<String>,
     /// 可用模型白名单（**对外模型名**，含映射 alias）；**空 = 不限制**
     pub allowed_models: Vec<String>,
+    /// 账号池选择模式。
+    pub route_mode: RouteMode,
+    /// `account_group` 模式绑定的唯一账号组。
+    pub account_group_id: Option<String>,
     /// 这条记录的 `key` **解不开**（密钥文件被删/被换），处于降级态。
     ///
     /// 为 true 时 `key` 里放的是**原样的密文信封**（不是明文）：
@@ -232,6 +261,21 @@ impl ApiKeyEntry {
             .filter(|id| !id.is_empty())
             .map(str::to_string)?;
         let (key, key_unreadable) = decode_key(raw, &id);
+        let route_mode = value
+            .get("routeMode")
+            .and_then(Value::as_str)
+            .and_then(RouteMode::parse)
+            .unwrap_or_default();
+        let account_group_id = (route_mode == RouteMode::AccountGroup)
+            .then(|| {
+                value
+                    .get("accountGroupId")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string)
+            })
+            .flatten();
         Some(Self {
             id,
             name: value
@@ -244,6 +288,8 @@ impl ApiKeyEntry {
             created_at: value.get("createdAt").and_then(Value::as_i64).unwrap_or(0),
             allowed_providers: string_list(value.get("allowedProviders")),
             allowed_models: string_list(value.get("allowedModels")),
+            route_mode,
+            account_group_id,
             key_unreadable,
         })
     }
@@ -276,6 +322,8 @@ impl ApiKeyEntry {
             "createdAt": self.created_at,
             "allowedProviders": list_value(&self.allowed_providers),
             "allowedModels": list_value(&self.allowed_models),
+            "routeMode": self.route_mode.as_str(),
+            "accountGroupId": self.account_group_id,
         }))
     }
 
@@ -294,6 +342,8 @@ impl ApiKeyEntry {
             "createdAt": self.created_at,
             "allowedProviders": list_value(&self.allowed_providers),
             "allowedModels": list_value(&self.allowed_models),
+            "routeMode": self.route_mode.as_str(),
+            "accountGroupId": self.account_group_id,
         })
     }
 }
@@ -354,6 +404,8 @@ fn legacy_entry(raw: &Map<String, Value>) -> Option<ApiKeyEntry> {
         // 与它升级前的行为（放行一切）逐字一致
         allowed_providers: Vec::new(),
         allowed_models: Vec::new(),
+        route_mode: RouteMode::DefaultPool,
+        account_group_id: None,
         key_unreadable,
     })
 }
@@ -583,6 +635,28 @@ pub fn add(
     allowed_providers: Vec<String>,
     allowed_models: Vec<String>,
 ) -> Result<ApiKeyEntry, String> {
+    add_with_route(
+        name,
+        key,
+        allowed_providers,
+        allowed_models,
+        RouteMode::DefaultPool,
+        None,
+    )
+}
+
+/// 新增带路由模式的 Key。
+pub fn add_with_route(
+    name: &str,
+    key: Option<&str>,
+    allowed_providers: Vec<String>,
+    allowed_models: Vec<String>,
+    route_mode: RouteMode,
+    account_group_id: Option<String>,
+) -> Result<ApiKeyEntry, String> {
+    if route_mode == RouteMode::AccountGroup && !allowed_providers.is_empty() {
+        return Err("account_group 模式不能同时设置 allowedProviders".to_string());
+    }
     let mut entries = list();
     let key = match key.map(str::trim).filter(|k| !k.is_empty()) {
         Some(given) => {
@@ -597,6 +671,12 @@ pub fn add(
         return Err("这把 Key 已经存在".to_string());
     }
     let created_at = now_millis();
+    let account_group_id = match route_mode {
+        RouteMode::DefaultPool => None,
+        RouteMode::AccountGroup => account_group_id
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty()),
+    };
     let entry = ApiKeyEntry {
         id: format!("k{created_at:x}{}", entries.len()),
         name: name.trim().to_string(),
@@ -605,6 +685,8 @@ pub fn add(
         created_at,
         allowed_providers,
         allowed_models,
+        route_mode,
+        account_group_id,
         // 刚生成的 Key 当然是明文可读的，与降级态无关
         key_unreadable: false,
     };
@@ -629,10 +711,40 @@ pub fn update(
     allowed_providers: Option<Vec<String>>,
     allowed_models: Option<Vec<String>>,
 ) -> Result<ApiKeyEntry, String> {
+    update_with_route(
+        id,
+        name,
+        enabled,
+        allowed_providers,
+        allowed_models,
+        None,
+        None,
+    )
+}
+
+/// 改名 / 启停 / 白名单 / 路由模式的部分更新。
+pub fn update_with_route(
+    id: &str,
+    name: Option<&str>,
+    enabled: Option<bool>,
+    allowed_providers: Option<Vec<String>>,
+    allowed_models: Option<Vec<String>>,
+    route_mode: Option<RouteMode>,
+    account_group_id: Option<Option<String>>,
+) -> Result<ApiKeyEntry, String> {
     let mut entries = list();
-    let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) else {
+    let Some(index) = entries.iter().position(|entry| entry.id == id) else {
         return Err("Key 不存在".to_string());
     };
+    let resulting_route_mode = route_mode.unwrap_or(entries[index].route_mode);
+    if resulting_route_mode == RouteMode::AccountGroup
+        && allowed_providers
+            .as_ref()
+            .is_some_and(|providers| !providers.is_empty())
+    {
+        return Err("account_group 模式不能同时设置 allowedProviders".to_string());
+    }
+    let entry = &mut entries[index];
     if let Some(name) = name {
         entry.name = name.trim().to_string();
     }
@@ -644,6 +756,19 @@ pub fn update(
     }
     if let Some(list) = allowed_models {
         entry.allowed_models = list;
+    }
+    if let Some(route_mode) = route_mode {
+        entry.route_mode = route_mode;
+        if route_mode == RouteMode::DefaultPool {
+            entry.account_group_id = None;
+        }
+    }
+    if let Some(account_group_id) = account_group_id {
+        if entry.route_mode == RouteMode::AccountGroup {
+            entry.account_group_id = account_group_id
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty());
+        }
     }
     let updated = entry.clone();
     save(&entries)?;

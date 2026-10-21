@@ -7,6 +7,9 @@
 mod routing;
 mod view;
 
+#[cfg(test)]
+mod account_group_tests;
+
 use serde_json::Value;
 
 use crate::server::core::account_store::AccountStore;
@@ -25,7 +28,8 @@ pub use routing::{
 };
 pub use view::{
     advertised_manifest_contains, advertised_model_ids, has_available_providers, manage_view,
-    models_by_provider, models_response, session_models, suggest_advertised,
+    group_models_response, models_by_provider, models_response, resolve_group_model, session_models,
+    suggest_advertised,
 };
 
 /// 原始能力清单不应用绑定开关；关闭原始 ID 后，别名仍需解析到这条上游记录。

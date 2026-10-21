@@ -327,6 +327,15 @@ const BRIDGE_JS: &str = r#"
     updateKey: (id, patch) => call('PATCH', '/api/keys/' + encodeURIComponent(id), patch),
     deleteKey: id => call('DELETE', '/api/keys/' + encodeURIComponent(id)),
 
+    // ── 账号组 ──
+    getAccountGroups: () => call('GET', '/api/account-groups'),
+    createAccountGroup: name => call('POST', '/api/account-groups', { name: String(name || '') }),
+    renameAccountGroup: (id, name) => call('PATCH', '/api/account-groups/' + encodeURIComponent(id), { name: String(name || '') }),
+    replaceAccountGroupMembers: (id, members) => call('PUT', '/api/account-groups/' + encodeURIComponent(id) + '/members', {
+      members: Array.isArray(members) ? members : [],
+    }),
+    deleteAccountGroup: id => call('DELETE', '/api/account-groups/' + encodeURIComponent(id)),
+
     // ── 多账号 ──
     // switchAccount 仅把账号移到全局队列第一位，不改变启用状态
     switchAccount: id => call('POST', '/api/accounts/current', { id }),

@@ -38,7 +38,11 @@ use std::collections::HashSet;
 
 use axum::extract::Request;
 
-use crate::server::core::api_keys::ApiKeyEntry;
+use crate::server::core::account_groups::{AccountGroupScope, AccountGroupService};
+use crate::server::core::account_store::AccountStore;
+use crate::server::core::api_keys::{ApiKeyEntry, RouteMode};
+use crate::server::core::routing;
+use crate::server::errors::GatewayError;
 
 /// 本次请求命中的 Key 所带来的限制（**已归一**：空列表 = 不限制）。
 ///
@@ -52,6 +56,8 @@ pub struct KeyScope {
     allowed_providers: HashSet<String>,
     /// 允许的对外模型名（小写），空集合 = 不限制
     allowed_models: HashSet<String>,
+    route_mode: RouteMode,
+    account_group_id: Option<String>,
 }
 
 impl KeyScope {
@@ -60,7 +66,17 @@ impl KeyScope {
         Self {
             allowed_providers: normalize(&entry.allowed_providers),
             allowed_models: normalize(&entry.allowed_models),
+            route_mode: entry.route_mode,
+            account_group_id: entry.account_group_id.clone(),
         }
+    }
+
+    pub fn is_account_group(&self) -> bool {
+        self.route_mode == RouteMode::AccountGroup
+    }
+
+    pub fn account_group_id(&self) -> Option<&str> {
+        self.account_group_id.as_deref()
     }
 
     /// **只有这一家**（模型测试专用：测试要打在**这一行所属的家**上，
@@ -78,6 +94,8 @@ impl KeyScope {
         Self {
             allowed_providers,
             allowed_models: HashSet::new(),
+            route_mode: RouteMode::DefaultPool,
+            account_group_id: None,
         }
     }
 
@@ -128,6 +146,33 @@ impl KeyScope {
         };
         format!("提供商 {providers}；模型 {models}")
     }
+}
+
+/// Resolve the request-local account-group snapshot for one authenticated Key.
+pub fn resolve_request_group_scope(
+    scope: Option<&KeyScope>,
+    groups: &AccountGroupService,
+    store: &AccountStore,
+) -> Result<Option<AccountGroupScope>, GatewayError> {
+    let Some(scope) = scope else {
+        return Ok(None);
+    };
+    if !scope.is_account_group() {
+        return Ok(None);
+    }
+    let Some(group_id) = scope.account_group_id() else {
+        return Err(GatewayError::with_status(503, "账号组引用不可用")
+            .with_code("account_group_unavailable"));
+    };
+    let snapshot = store.list_accounts();
+    let accounts = routing::accounts_of(&snapshot);
+    let resolved = groups.resolve(group_id, &accounts).map_err(|error| {
+        GatewayError::with_status(503, error.message).with_code("account_group_unavailable")
+    })?;
+    Ok(Some(AccountGroupScope::from_canonical(
+        group_id,
+        resolved.accounts,
+    )))
 }
 
 /// 一组白名单归一成小写集合（去空白、去空项）

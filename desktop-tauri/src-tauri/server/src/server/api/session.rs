@@ -1453,13 +1453,13 @@ pub async fn session_refresh(State(state): State<ServerState>) -> Response {
 // ─── POST /api/session/logout 与 POST /auth/logout ─────────
 
 pub async fn session_logout(State(state): State<ServerState>) -> Response {
-    state.auth().clear_session();
+    state.with_management_lock(|| state.auth().clear_session());
     crate::server::http::ok_empty()
 }
 
 /// POST /auth/logout —— 与 /api/session/logout 同一动作与同一响应形状
 pub async fn auth_logout(State(state): State<ServerState>) -> Response {
-    state.auth().clear_session();
+    state.with_management_lock(|| state.auth().clear_session());
     crate::server::http::ok_empty()
 }
 

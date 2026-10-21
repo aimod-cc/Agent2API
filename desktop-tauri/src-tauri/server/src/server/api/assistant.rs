@@ -248,7 +248,7 @@ pub async fn chat(State(state): State<ServerState>, body: Bytes) -> Response {
     }
 
     // 模型路由：对外名 → 上游名（默认值 / 映射别名 / 目录校验与 /v1/* 同源）
-    let requested_model = match pipeline::resolve_model(&state, &mut upstream, None) {
+    let requested_model = match pipeline::resolve_model(&state, &mut upstream, None, None) {
         Ok(name) => name,
         Err(error) => return errors::management_error(error.http_status().as_u16() as i32, error.message),
     };
@@ -285,6 +285,7 @@ pub async fn chat(State(state): State<ServerState>, body: Bytes) -> Response {
             // **不钉提供商**：对话模型是对外名，路由语义与 /v1/chat/completions
             // 完全一致 —— 同名在多家时按账号优先级主备，失败自动落下一家
             allowed_providers: None,
+            account_group_scope: None,
             pinned_account: None,
             // 尊重模型启停：助手用的是「已启用的模型」，用户关掉的模型不该
             // 因为助手而继续消耗额度（与生产请求同一道门禁）

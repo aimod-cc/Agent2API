@@ -78,6 +78,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::server::config;
+use crate::server::core::account_groups::AccountGroupScope;
 use crate::server::core::custom_providers;
 use crate::server::core::protocol::strip_internal_fields;
 use crate::server::core::providers::adapter::{
@@ -196,6 +197,7 @@ fn defer_to_next_account(
     switches_left: &mut usize,
     switch_total: usize,
     pinned: Option<&str>,
+    scope: Option<&AccountGroupScope>,
 ) -> bool {
     if let Some(account_id) = target.account_id.clone() {
         if !tried_ids.contains(&account_id) {
@@ -203,7 +205,7 @@ fn defer_to_next_account(
         }
     }
     let Some(next) =
-        rotate::pick_next_account(service, provider_ids, cooldown_keys, tried_ids, pinned)
+        rotate::pick_next_account(service, provider_ids, cooldown_keys, tried_ids, pinned, scope)
     else {
         return false;
     };
@@ -403,6 +405,7 @@ pub(super) async fn forward_with_providers(
     connections: &mut ConnectionGuard,
 ) -> Result<ForwardOutcome, GatewayError> {
     let model = model_of(ctx.body);
+    let group_scope = ctx.account_group_scope.as_ref();
     // 候选家来自 `route_for_forward`（目录里没有这个模型名时会回落成默认
     // provider 一家；模型有家承载但全被禁用时**不回落**，见那个函数）——
     // 本函数是唯一消费方，日志也打在这里。
@@ -412,14 +415,18 @@ pub(super) async fn forward_with_providers(
     // 的门禁会把被测对象挡在门外。候选直接取 Key 白名单（测试恒带
     // `provider_only`，就是被钉住的那一家）；发送侧的按家改写照常走生产语义，
     // 关闭的默认绑定解析不出目标、名字原样直发，见 `ForwardRequest` 的说明。
-    let candidates = if ctx.ignore_model_gate {
+    let candidates = if group_scope.is_some() {
+        Vec::new()
+    } else if ctx.ignore_model_gate {
         ctx.key_scope
             .map(crate::server::core::key_scope::KeyScope::allowed_provider_ids)
             .unwrap_or_default()
     } else {
         route_for_forward(&model)
     };
-    if crate::server::core::providers::catalog::providers_for_model(&model).is_empty() {
+    if group_scope.is_none()
+        && crate::server::core::providers::catalog::providers_for_model(&model).is_empty()
+    {
         logging::verbose(
             "[Upstream]",
             &format!(
@@ -428,7 +435,7 @@ pub(super) async fn forward_with_providers(
             ),
         );
     }
-    if candidates.is_empty() {
+    if group_scope.is_none() && candidates.is_empty() {
         // 空链有两条来源（见 `route_for_forward`）：注册表里连默认 provider 都
         // 没有，或者这个名字的承载家**全被关闭**（那时不回落默认家）。后者是
         // 用户可操作的，文案要指出去哪儿改，不能只说「没有可用的提供商」。
@@ -448,7 +455,11 @@ pub(super) async fn forward_with_providers(
     // 能提供这个模型」（能力事实），白名单只把其中不被允许的那几家剔除。
     // 过滤与「全被排除时的错误」都在 `filter_by_key_scope` 里（它要能提前返回
     // 错误，所以返回 Result）。
-    let candidates = filter_by_key_scope(candidates, ctx.key_scope, &model)?;
+    let candidates = if group_scope.is_some() {
+        candidates
+    } else {
+        filter_by_key_scope(candidates, ctx.key_scope, &model)?
+    };
     // 候选链已是 id 空间（`route_for_forward` 的返回值，见 router 的模块头）：
     // 内置家与自定义家的 id 同列，自定义 id 直接透传给选路与分派。
     let provider_ids: Vec<&str> = candidates.iter().map(String::as_str).collect();
@@ -465,7 +476,7 @@ pub(super) async fn forward_with_providers(
             if with_mapping { "，含映射" } else { "" },
         ),
     );
-    attempt_queue(service, &ctx, &provider_ids, slot, connections).await
+    attempt_queue(service, &ctx, &provider_ids, slot, connections, group_scope).await
 }
 
 /// 按网关 Key 的**可用提供商**白名单过滤候选链（R9，照抄 OmniProxy 的
@@ -536,6 +547,7 @@ async fn attempt_queue(
     provider_ids: &[&str],
     slot: &mut Option<InFlightGuard>,
     connections: &mut ConnectionGuard,
+    scope: Option<&AccountGroupScope>,
 ) -> Result<ForwardOutcome, GatewayError> {
     let model = model_of(ctx.body);
     let model_label = if model.is_empty() { "(默认)".to_string() } else { model.clone() };
@@ -549,8 +561,15 @@ async fn attempt_queue(
     // 标识、也没有可用的会话特征（无 messages），粘性自动不生效。整个请求周期
     // 只用这一个键 —— 429 顺延的后续选路查的是同一个会话，粘住的账号失败后
     // 同样顺延（粘性不等于无条件）。
-    let conv_key = super::route_state::RouteState::conversation_key(ctx.client_headers, &ctx.body);
+    let raw_conv_key = super::route_state::RouteState::conversation_key(ctx.client_headers, &ctx.body);
+    let conv_key = match scope {
+        Some(scope) if !raw_conv_key.is_empty() => {
+            format!("g:{}:{}", scope.group_id(), raw_conv_key)
+        }
+        _ => raw_conv_key,
+    };
     let mut tried_ids: Vec<String> = Vec::new();
+    let mut last_error: Option<GatewayError> = None;
     // ── 两份独立的预算（见 config::RetrySettings）─────────────────────
     //   - `budget`：同一个账号上还能**原地重发**几次。整份请求共用一份，
     //     由 `send_with_retry` 逐次扣减 —— 于是它天然花在「第一个真正发出去的
@@ -607,15 +626,26 @@ async fn attempt_queue(
         if ctx.telemetry.is_cancelled() {
             return Err(cancellation::cancelled_error());
         }
-        let mut target = rotate::select_target_account(
+        let target = rotate::select_target_account(
             service,
             provider_ids,
             &cooldown_keys,
             &tried_ids,
             ctx.pinned_account,
             &conv_key,
+            scope,
         )
-        .await?;
+        .await;
+        let mut target = match target {
+            Ok(target) => target,
+            Err(error)
+                if scope.is_some()
+                    && error.code.as_deref() == Some("account_group_no_available_account") =>
+            {
+                return Err(last_error.unwrap_or(error));
+            }
+            Err(error) => return Err(error),
+        };
         if let Some(override_proxy) = ctx.proxy_override {
             target.proxy = override_proxy.clone();
             target.proxy_notice = None;
@@ -639,7 +669,16 @@ async fn attempt_queue(
         if custom_providers::is_custom_provider_id(&target.provider) {
             let custom_provider_id = target.provider.clone();
             let custom_account_id = target.account_id.clone();
-            match attempt_custom(service, ctx, target, slot, connections, degraded).await {
+            match attempt_custom(
+                service,
+                ctx,
+                target,
+                slot,
+                connections,
+                degraded,
+            )
+            .await
+            {
                 Ok(outcome) => return Ok(outcome),
                 Err(error) => {
                     // 手动终止优先（与无状态路径同一判定与理由）：不把已受理的
@@ -708,6 +747,7 @@ async fn attempt_queue(
                         &cooldown_keys,
                         &tried_ids,
                         ctx.pinned_account,
+                        scope,
                     ) {
                         Some(next) => {
                             // 换号额度用尽 → 队列里即使还有人也不再顺延
@@ -726,6 +766,7 @@ async fn attempt_queue(
                                         .unwrap_or_else(|| "-".to_string()),
                                 ),
                             );
+                            last_error = Some(error.clone());
                             continue 'accounts;
                         }
                         None => return Err(error),
@@ -816,6 +857,7 @@ async fn attempt_queue(
                         &cooldown_keys,
                         &tried_ids,
                         ctx.pinned_account,
+                        scope,
                     ) {
                         Some(next) => {
                             // 换号额度用尽 → 队列里即使还有人也不再顺延
@@ -836,6 +878,7 @@ async fn attempt_queue(
                                         .unwrap_or_else(|| "-".to_string()),
                                 ),
                             );
+                            last_error = Some(error.clone());
                             continue 'accounts;
                         }
                         None => return Err(error),
@@ -852,9 +895,36 @@ async fn attempt_queue(
                 "没有可用账号，无账号可转发：请在账号页添加并启用账号",
             ));
         }
-        let mut session = match rotate::session_for(service, provider_id, target.account_id.as_deref()).await {
+        let mut session = match rotate::session_for(
+            service,
+            provider_id,
+            target.account_id.as_deref(),
+            scope,
+        )
+        .await
+        {
             Ok(session) => session,
             Err(error) => {
+                if let Some(scope) = scope {
+                    if let Some(account_id) = target.account_id.clone() {
+                        if !tried_ids.contains(&account_id) {
+                            tried_ids.push(account_id);
+                        }
+                    }
+                    let has_next = rotate::pick_next_account(
+                        service,
+                        provider_ids,
+                        &cooldown_keys,
+                        &tried_ids,
+                        ctx.pinned_account,
+                        Some(scope),
+                    )
+                    .is_some();
+                    if has_next && take_switch(&mut switches_left, switch_total) {
+                        continue 'accounts;
+                    }
+                    return Err(last_error.unwrap_or_else(rotate::account_group_no_available_account));
+                }
                 // ── 默认登录态的兜底（Agent2API W3-T4）──────────────────
                 // `session_for(None)` 只认「auth 层认识的默认登录态」：workbuddy 是
                 // `WORKBUDDY_TOKEN` 环境变量 + 账号文件派生的当前账号。小浣熊的
@@ -898,7 +968,7 @@ async fn attempt_queue(
                 Ok(_) => {
                     // 刷新可能已回写：重取会话，让头里的 token 是最新的
                     if let Ok(fresh) =
-                        rotate::session_for(service, provider_id, Some(&account_id)).await
+                        rotate::session_for(service, provider_id, Some(&account_id), scope).await
                     {
                         session = fresh;
                     }
@@ -1034,7 +1104,9 @@ async fn attempt_queue(
                         &mut switches_left,
                         switch_total,
                         ctx.pinned_account,
+                        scope,
                     ) {
+                        last_error = Some(error.clone());
                         continue 'accounts;
                     }
                     return Err(error);
@@ -1260,6 +1332,7 @@ async fn attempt_queue(
                                 service,
                                 provider_id,
                                 target.account_id.as_deref(),
+                                scope,
                             )
                             .await
                             {
@@ -1338,6 +1411,7 @@ async fn attempt_queue(
                                 &cooldown_keys,
                                 &tried_ids,
                                 ctx.pinned_account,
+                                scope,
                             ) {
                                 Some(next) => {
                                     let next_label = account_display(&next);
@@ -1387,6 +1461,7 @@ async fn attempt_queue(
                                         next_priority,
                                         provider_id,
                                     );
+                                    last_error = Some(failure.error.clone());
                                     // 换这一家的下一个账号（跳到外层选路循环）
                                     continue 'accounts;
                                 }
@@ -1506,7 +1581,9 @@ async fn attempt_queue(
                         &mut switches_left,
                         switch_total,
                         ctx.pinned_account,
+                        scope,
                     ) {
+                        last_error = Some(failure.error.clone());
                         continue 'accounts;
                     }
                     return Err(failure.error);
@@ -1663,20 +1740,19 @@ async fn attempt_queue(
                              且没有其他可用的账号或提供商可接管。请调整内容后重试，或在设置中更换该模型的服务商"
                         )
                     };
+                    let refusal_error =
+                        quota_refusal_error(client_text, refusal_reset_at, is_quota);
                     match rotate::pick_next_account(
                         service,
                         provider_ids,
                         &cooldown_keys,
                         &tried_ids,
                         ctx.pinned_account,
+                        scope,
                     ) {
                         Some(next) => {
                             if !take_switch(&mut switches_left, switch_total) {
-                                return Err(quota_refusal_error(
-                                    client_text,
-                                    refusal_reset_at,
-                                    is_quota,
-                                ));
+                                return Err(refusal_error.clone());
                             }
                             let next_home = {
                                 let next_provider = rotate::provider_of(&next);
@@ -1709,10 +1785,11 @@ async fn attempt_queue(
                                         .unwrap_or_else(|| "-".to_string()),
                                 ),
                             );
+                            last_error = Some(refusal_error);
                             continue 'accounts;
                         }
                         None => {
-                            return Err(quota_refusal_error(client_text, refusal_reset_at, is_quota))
+                            return Err(refusal_error)
                         }
                     }
             }
@@ -1871,6 +1948,11 @@ async fn attempt_queue(
                 log_aggregated(&aggregated);
                 return Ok(ForwardOutcome::Completion { body: aggregated.body });
             }
+        }
+    }
+    if scope.is_some() {
+        if let Some(last_error) = last_error {
+            return Err(last_error);
         }
     }
     Err(GatewayError::with_status(500, "上游转发重试次数超限"))

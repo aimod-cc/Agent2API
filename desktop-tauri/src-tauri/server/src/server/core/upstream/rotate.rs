@@ -44,6 +44,7 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use crate::server::config;
+use crate::server::core::account_groups::AccountGroupScope;
 use crate::server::core::proxies::ResolvedProxy;
 use crate::server::core::providers::readiness;
 use crate::server::core::routing;
@@ -64,7 +65,18 @@ pub(super) async fn session_for(
     service: &UpstreamService,
     provider: &str,
     account_id: Option<&str>,
+    scope: Option<&AccountGroupScope>,
 ) -> Result<Value, GatewayError> {
+    if scope.is_some() {
+        let Some(id) = account_id else {
+            return Err(account_group_no_available_account());
+        };
+        return service
+            .store
+            .get_session_by_id(id)
+            .map(|entry| entry.session)
+            .ok_or_else(account_group_no_available_account);
+    }
     if let Some(id) = account_id {
         if let Some(entry) = service.store.get_session_by_id(id) {
             return Ok(entry.session);
@@ -126,10 +138,17 @@ pub(super) async fn select_target_account(
     tried_ids: &[String],
     pinned: Option<&str>,
     conv_key: &str,
+    scope: Option<&AccountGroupScope>,
 ) -> Result<RouteTarget, GatewayError> {
-    let accounts = accounts_in_providers(service, providers, pinned);
+    let accounts = match scope {
+        Some(scope) => super::account_group_pool::accounts_in_group(scope, keys, pinned),
+        None => accounts_in_providers(service, providers, pinned),
+    };
     // 这些家都没有账号记录 → 用第一家的默认登录态（环境变量旁路等）
     if accounts.is_empty() {
+        if scope.is_some() {
+            return Err(account_group_no_available_account());
+        }
         return Ok(RouteTarget {
             provider: providers.first().copied().unwrap_or_default().to_string(),
             account_id: None,
@@ -159,23 +178,24 @@ pub(super) async fn select_target_account(
     // 起点往后走，否则一条请求会连跳好几位。粘性命中的轮次不前进 —— 会话
     // 一直粘着同一个账号时，轮转的「下一棒」留给新会话。
     //
-    // 家内轮询（`Provider`）的取用条件与 `Rotate` 逐字相同（第一次选路 +
-    // 没钉账号 + 没粘住）——「一次请求只消耗一格环位」对两种轮转是同一个口径；
-    // 差别只在它取的是**每家各一个**起始位（见 `rotate_take_per_provider`）。
     let may_rotate = tried_ids.is_empty() && pinned.is_none() && snap.sticky_hit.is_none();
-    let cursor = if may_rotate && settings.strategy == config::RouteStrategy::Rotate {
-        Some(service.route.rotate_take(keys.request_model()))
+    let route_key = || {
+        scope
+            .map(|scope| format!("g:{}:{}", scope.group_id(), keys.request_model()))
+            .unwrap_or_else(|| keys.request_model().to_string())
+    };
+    let cursor = if settings.strategy == config::RouteStrategy::Rotate && may_rotate {
+        let key = route_key();
+        Some(service.route.rotate_take(&key))
     } else {
         None
     };
-    // 游标只传「哪几家」用来定键名（`provider_sizes`），各家的**人数不参与
-    // 取模** —— 取模发生在 `plan_route` 内部、用的是过滤（禁用 / 冷却 / 并发满 /
-    // 无凭证）之后的实际成员数。推进与环绕必须用同一把尺子：2026-10-14 之前
-    // 这里按未过滤人数取模，两个模数一旦不等，家内就会出现「同一个账号连续
-    // 被选中两次」的不均匀。
+    // Provider 策略在家内按 provider 各维护一条游标。组模式前缀进组 id，
+    // 与默认池隔离；sizes 使用限制器过滤后的候选，轮次与真实可试集合一致。
     let provider_cursors = if may_rotate && settings.strategy == config::RouteStrategy::Provider {
+        let key = route_key();
         Some(service.route.rotate_take_per_provider(
-            keys.request_model(),
+            &key,
             &routing::provider_sizes(&candidates),
         ))
     } else {
@@ -191,7 +211,17 @@ pub(super) async fn select_target_account(
         provider_cursors: provider_cursors.as_ref(),
         sticky_account: snap.sticky_hit.as_deref(),
     };
-    let plan = routing::plan_route(&candidates, keys, &counts, tried_ids, now, &meta);
+    let plan = match scope {
+        Some(_) => routing::plan_route_preserving_input_order(
+            &candidates,
+            keys,
+            &counts,
+            tried_ids,
+            now,
+            &meta,
+        ),
+        None => routing::plan_route(&candidates, keys, &counts, tried_ids, now, &meta),
+    };
     let decision = decision_json(&plan, &settings, now);
     let mut excluded: Vec<String> = tried_ids.to_vec();
     for entry in &plan.ordered {
@@ -220,18 +250,28 @@ pub(super) async fn select_target_account(
             .filter(|account| !matches!(account.get("enabled"), Some(Value::Bool(false))))
             .count();
         if !balance_blocked_ids.is_empty() && enabled_total > 0 {
-            return Err(GatewayError::with_status(
+            let error = GatewayError::with_status(
                 503,
                 format!(
                     "所有启用中的账号都被限制器拦下（已跳过 {} 个账号），无账号可转发：请检查余额读数与 Token 周期用量，或到账号设置的「限制器」里调整规则",
                     balance_blocked_ids.len()
                 ),
-            ));
+            );
+            return Err(if scope.is_some() {
+                error.with_code("account_group_no_available_account")
+            } else {
+                error
+            });
         }
-        return Err(GatewayError::with_status(
+        let error = GatewayError::with_status(
             503,
             "所有账号均已禁用，无账号可转发：请在账号页启用至少一个账号",
-        ));
+        );
+        return Err(if scope.is_some() {
+            error.with_code("account_group_no_available_account")
+        } else {
+            error
+        });
     }
 
     // ── 第二级兜底（并发感知）──────────────────────────────────
@@ -300,6 +340,9 @@ pub(super) async fn select_target_account(
             }
         }
     }
+    if scope.is_some() {
+        return Err(account_group_no_available_account());
+    }
     Ok(RouteTarget {
         provider: providers.first().copied().unwrap_or_default().to_string(),
         account_id: None,
@@ -360,15 +403,22 @@ pub(super) fn accounts_in_providers(
             None => true,
         })
         .collect();
+    readiness_candidates_or_original_pool(&accounts)
+}
+
+/// Apply the provider readiness optimization while preserving the original pool
+/// when every candidate is gated, so the real upstream error remains visible.
+pub(super) fn readiness_candidates_or_original_pool(accounts: &[Value]) -> Vec<Value> {
     let routable: Vec<Value> = accounts
         .iter()
         .filter(|account| !readiness::gated(provider_of(account)))
         .cloned()
         .collect();
     if routable.is_empty() {
-        return accounts;
+        accounts.to_vec()
+    } else {
+        routable
     }
-    routable
 }
 
 /// 组装选路结果；代理解析失败时把提示**带进选路结果**（本次回退直连）。
@@ -614,8 +664,12 @@ pub(super) fn pick_next_account(
     keys: &routing::CooldownKeys<'_>,
     tried_ids: &[String],
     pinned: Option<&str>,
+    scope: Option<&AccountGroupScope>,
 ) -> Option<Value> {
-    let accounts = accounts_in_providers(service, providers, pinned);
+    let accounts = match scope {
+        Some(scope) => super::account_group_pool::accounts_in_group(scope, keys, pinned),
+        None => accounts_in_providers(service, providers, pinned),
+    };
     // 换号顺延与第一级选路同一份候选剔除：被限制器拦下的账号不会在 429 之后
     // 被当作「下一个」重新塞进来
     let (candidates, balance_blocked_ids) = filter_limiter_blocked(&accounts, pinned);
@@ -636,8 +690,22 @@ pub(super) fn pick_next_account(
         provider_cursors: None,
         sticky_account: None,
     };
-    let plan = routing::plan_route(&candidates, keys, &counts, tried_ids, now, &meta);
+    let plan = match scope {
+        Some(_) => routing::plan_route_preserving_input_order(
+            &candidates,
+            keys,
+            &counts,
+            tried_ids,
+            now,
+            &meta,
+        ),
+        None => routing::plan_route(&candidates, keys, &counts, tried_ids, now, &meta),
+    };
     plan.ordered.into_iter().next().map(|entry| entry.account)
+}
+
+pub(super) fn account_group_no_available_account() -> GatewayError {
+    GatewayError::with_status(503, "组内无可用账号").with_code("account_group_no_available_account")
 }
 
 /// 选路决策快照（请求日志「路由回放」的数据源）。

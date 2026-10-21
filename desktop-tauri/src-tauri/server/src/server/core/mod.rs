@@ -62,6 +62,7 @@
 //! api/ 里的 handler 负责把 HTTP 输入转成 core 调用、再把结果转成响应。
 
 pub mod account_store;
+pub mod account_groups;
 // 本机 AI 客户端的接管注册表（「Agent」页）：客户端定义 + 配置读写
 pub mod agents;
 pub mod account_transfer;

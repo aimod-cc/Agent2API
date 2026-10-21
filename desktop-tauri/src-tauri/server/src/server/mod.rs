@@ -158,6 +158,7 @@ use tokio::sync::oneshot;
 
 use crate::port_conflict::{ConflictKind, PortConflict};
 use crate::server::core::account_store::AccountStore;
+use crate::server::core::account_groups::AccountGroupService;
 use crate::server::core::auth::AuthService;
 use crate::server::core::auto_checkin::AutoCheckin;
 use crate::server::core::billing::BillingService;
@@ -203,6 +204,8 @@ pub struct ServerState {
     ui_dir: Option<PathBuf>,
     /// 账号存储句柄（内部一把 Mutex，绝不在持锁时做网络请求）
     store: AccountStore,
+    /// 账号组存储与跨管理操作同步锁
+    account_groups: AccountGroupService,
     /// 鉴权服务句柄（会话读取 / token 刷新）
     auth: AuthService,
     /// 登录服务句柄（无头登录 + 登录任务表）
@@ -530,6 +533,7 @@ impl ServerState {
         // 的其余部分（日志、模型目录、健康检查、配置页）不依赖账号，让它们继续
         // 可用比整体拒绝启动更有用 —— 用户能在界面上看到那条 ❌ 日志并处理磁盘问题。
         let store = AccountStore::with_db(db.clone());
+        let account_groups = AccountGroupService::new(db.clone());
         // 账号存储句柄给订阅内核（lazy listeners：内核 runtime 读「哪些订阅节点
         // 需要监听器」决定给谁开 —— 账号引用 ∪ 被「测试」钉住的节点，见
         // `sub_kernel::runtime::listener_node_keys`）。AccountStore 是轻量 Arc
@@ -613,6 +617,26 @@ impl ServerState {
         // `account_bootstrap` 的模块头里 —— 那一段是本次改动最容易读错的地方，
         // 值得一个能被直接找到的位置，所以整组搬到了那个文件。
         if !upgrade_pending {
+            let outcome = db.as_ref().and_then(|db| {
+                db.with(|conn| {
+                    crate::server::core::account_groups::legacy::disable_legacy_group_keys_once(
+                        conn,
+                    )
+                })
+            });
+            match outcome {
+                None => {}
+                Some(Ok(true)) => logging::console_line(
+                    "[Storage]",
+                    "已禁用绑定到已丢弃账号组的旧 Key",
+                ),
+                Some(Ok(false)) => {}
+                Some(Err(error)) => logging::console_line(
+                    "[Storage]",
+                    &format!("清理旧账号组 Key 失败，继续启动: {error}"),
+                ),
+            }
+            config::reload();
             account_bootstrap::run(&store);
             // 统计侧的一次性口径订正：模型维度从「请求名（映射别名）」重算成
             // 「上游真名」（见 `RequestStats::remap_model_dimension_once`）。
@@ -629,6 +653,7 @@ impl ServerState {
             config_dir,
             ui_dir: None,
             store,
+            account_groups,
             auth,
             login,
             billing,
@@ -839,6 +864,16 @@ impl ServerState {
     /// 账号存储句柄
     pub fn store(&self) -> &AccountStore {
         &self.store
+    }
+
+    /// 账号组服务句柄
+    pub fn account_groups(&self) -> &AccountGroupService {
+        &self.account_groups
+    }
+
+    /// 包住跨配置/SQLite 的完整管理操作。
+    pub fn with_management_lock<R>(&self, action: impl FnOnce() -> R) -> R {
+        self.account_groups.with_management_lock(action)
     }
 
     /// 鉴权服务句柄

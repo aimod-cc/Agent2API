@@ -118,6 +118,11 @@ pub const RESERVED_KV_KEYS: &[&str] = &[
     // **需要**标记键而其余项不需要：配置项是开放集合，没法问「配置迁过了
     // 没有」（理由与完整论证见 db::migrate::config 的模块头）。
     "configMigrated",
+    // 旧账号组 Key 的一次性清理标记（core::account_groups::legacy）。
+    // v17 丢弃旧组表后，启动或升级路径只把旧 account_group Key 禁用一次；
+    // 标记必须与 Key JSON 更新同事务落库，并登记在这里，否则下一次配置写入
+    // 会把它当成已删除的配置项清掉，导致每次启动都重复改写同一批 Key。
+    "accountGroupsLegacyCleared",
     // 请求明细 / 聚合的迁移完成标记（request_stats::legacy）。
     //
     // 这两项用标记键，而 `logs` / `accounts` / `debug_traffic` 三项不用，
@@ -329,7 +334,13 @@ pub fn is_reserved(key: &str) -> bool {
 /// 关掉页面再回来还能接着聊。存**整条消息流的 JSON**（而不是逐条消息一行）的
 /// 理由与 `kv` 表同一取向：读写单元天然是「一整个会话」，逐条存只会让每次保存
 /// 变成 N 次写入 + 一次事务，而没有任何一处需要「按单条消息查」。
-pub const SCHEMA_VERSION: i64 = 16;
+///
+/// ── v17：账号组和有序成员（[`V17_SCHEMA`]）──────────────────
+/// beta 的 v16 已被 assistant_sessions 占用，而旧功能分支的账号组表也用了
+/// v16。升级到 v17 时先幂等重放 beta v16，确保 assistant_sessions 存在，再
+/// 按外键顺序删除旧账号组表并创建当前形状的空表。旧组和成员数据按产品决定
+/// 丢弃，不复制旧行；Key 的一次性禁用由启动/升级路径在 schema 迁移后完成。
+pub const SCHEMA_VERSION: i64 = 17;
 
 /// 版本 1 的全部表与索引：改造前所有 JSON / JSONL 文件的对应形态。
 ///
@@ -868,6 +879,37 @@ CREATE TABLE IF NOT EXISTS assistant_sessions (
 CREATE INDEX IF NOT EXISTS idx_assistant_sessions_updated ON assistant_sessions(updated_at DESC);
 ";
 
+/// 版本 17：账号组和有序成员。
+///
+/// 必须在 DROP 前重放 beta v16，兼容来自旧功能分支的同 version 库；旧成员表
+/// 先于组表删除，避免外键依赖阻塞。新表不恢复旧行，成员表只保存 provider
+/// 或显式账号的引用，provider 的账号集合在请求时从账号快照动态展开。
+const V17_GROUP_SCHEMA: &str = "
+DROP TABLE IF EXISTS account_group_members;
+DROP TABLE IF EXISTS account_groups;
+
+CREATE TABLE IF NOT EXISTS account_groups (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  name_key TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS account_group_members (
+  group_id TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  member_type TEXT NOT NULL,
+  member_id TEXT NOT NULL,
+  PRIMARY KEY (group_id, position),
+  UNIQUE (group_id, member_type, member_id),
+  FOREIGN KEY (group_id) REFERENCES account_groups(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_account_group_members_lookup
+  ON account_group_members(group_id, position);
+";
+
 /// 把库升到 [`SCHEMA_VERSION`]（幂等：已是最新版时什么都不做）。
 ///
 /// **库版本高于本程序时返回 `Err` 拒绝打开**（v14 起有意反转的一条既有决定，
@@ -1034,6 +1076,12 @@ fn apply_version(
         // v16：assistant_sessions 助手对话会话表（见 V16_SCHEMA 与
         // SCHEMA_VERSION 的 v16 段）。新表用 CREATE IF NOT EXISTS，幂等。
         16 => conn.execute_batch(V16_SCHEMA),
+        // v17：先补齐 beta v16，再丢弃旧组表并重建当前形状。整个分支仍在
+        // migrate 的版本事务内，失败时 DDL 与 user_version 一起回滚。
+        17 => {
+            conn.execute_batch(V16_SCHEMA)?;
+            conn.execute_batch(V17_GROUP_SCHEMA)
+        }
         _ => Ok(()),
     }
 }

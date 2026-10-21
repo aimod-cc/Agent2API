@@ -34,6 +34,7 @@
 //! （切片 7 之后的路由扩展），照同样的分工：新文件 + `http::router` 里登记，
 //! 并保持与 Node 版一致的分组（需鉴权的一律挂 `protected`）。
 
+pub mod account_groups;
 // 「Agent」页：本机 AI 客户端配置接管（列表 / 保存 / 写入 / 预览 / 还原 / 导入）
 pub mod agents;
 pub mod accounts;
@@ -136,3 +137,14 @@ pub mod zcode_claim;
 // 设置页「版本信息」：环境 / 版本 / 路径 / 开关状态的一次性读数
 // （`GET /api/system-info`，见该文件模块头）
 pub mod system_info;
+
+#[cfg(test)]
+mod account_groups_http_support;
+#[cfg(test)]
+mod account_groups_barrier_tests;
+#[cfg(test)]
+mod account_groups_http_tests;
+#[cfg(test)]
+mod account_group_keys_http_tests;
+#[cfg(test)]
+mod account_group_models_http_tests;

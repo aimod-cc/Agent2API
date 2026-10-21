@@ -116,6 +116,10 @@ pub(super) struct ProviderContext<'a> {
     /// 语义不会中途漂移。传引用是因为它由 `upstream::forward` 的栈帧持有，
     /// 生命周期覆盖整条转发链。
     pub key_scope: Option<&'a crate::server::core::key_scope::KeyScope>,
+    /// Request-time account-group snapshot. It is owned by the context so
+    /// every retry observes the same canonical membership.
+    pub account_group_scope:
+        Option<crate::server::core::account_groups::AccountGroupScope>,
     /// 只准用这个账号（模型测试；`None` = 走全局优先级队列）。
     ///
     /// 与 `key_scope` 同一分工：它是「本次转发的收窄条件」，被选路与换号两处

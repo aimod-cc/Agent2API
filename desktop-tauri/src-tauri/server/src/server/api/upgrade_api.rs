@@ -139,6 +139,21 @@ pub async fn run_upgrade(State(state): State<ServerState>) -> Response {
             db.with(|conn| crate::server::db::migrate::run_legacy_migrations(conn, &config_dir));
         // 只有真导入了东西才补做后续动作（一项都没成时库里的配置与账号都没变）
         if matches!(outcomes, Some(ref list) if !list.is_empty()) {
+            let cleanup = db.with(|conn| {
+                crate::server::core::account_groups::legacy::disable_legacy_group_keys_once(conn)
+            });
+            match cleanup {
+                None => {}
+                Some(Ok(true)) => logging::log(
+                    "[Storage]",
+                    "已禁用绑定到已丢弃账号组的旧 Key",
+                ),
+                Some(Ok(false)) => {}
+                Some(Err(error)) => logging::log(
+                    "[Storage]",
+                    &format!("清理旧账号组 Key 失败，继续升级后的启动步骤: {error}"),
+                ),
+            }
             // 配置快照必须重装：迁移把配置搬进库之后，库才是真相来源（见模块头）。
             crate::server::config::reload();
             // 账号侧的启动期迁移必须**补做一次**（见 `account_bootstrap` 的

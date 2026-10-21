@@ -34,7 +34,7 @@ use axum::extract::Request;
 use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, get, patch, post};
+use axum::routing::{any, get, patch, post, put};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
@@ -626,6 +626,18 @@ pub fn panel_router(state: ServerState) -> Router {
         .route(
             "/api/custom-providers/fetch-models",
             post(api::custom_providers::fetch_custom_models),
+        )
+        .route(
+            "/api/account-groups",
+            get(api::account_groups::list_groups).post(api::account_groups::create_group),
+        )
+        .route(
+            "/api/account-groups/{id}",
+            patch(api::account_groups::update_group).delete(api::account_groups::delete_group),
+        )
+        .route(
+            "/api/account-groups/{id}/members",
+            put(api::account_groups::replace_group_members),
         )
         .route("/api/keys", get(api::keys_api::list_keys).post(api::keys_api::create_key))
         .route("/api/keys/{id}", patch(api::keys_api::update_key).delete(api::keys_api::delete_key))

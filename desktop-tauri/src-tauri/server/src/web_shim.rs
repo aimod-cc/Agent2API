@@ -1360,6 +1360,23 @@ pub fn shim_js() -> &'static str {
     updateKey: function (id, patch) { return call('PATCH', '/api/keys/' + encodeURIComponent(id), patch); },
     deleteKey: function (id) { return call('DELETE', '/api/keys/' + encodeURIComponent(id)); },
 
+    // ── 账号组 ──
+    getAccountGroups: function () { return call('GET', '/api/account-groups'); },
+    createAccountGroup: function (name) {
+      return call('POST', '/api/account-groups', { name: String(name || '') });
+    },
+    renameAccountGroup: function (id, name) {
+      return call('PATCH', '/api/account-groups/' + encodeURIComponent(id), { name: String(name || '') });
+    },
+    replaceAccountGroupMembers: function (id, members) {
+      return call('PUT', '/api/account-groups/' + encodeURIComponent(id) + '/members', {
+        members: Array.isArray(members) ? members : [],
+      });
+    },
+    deleteAccountGroup: function (id) {
+      return call('DELETE', '/api/account-groups/' + encodeURIComponent(id));
+    },
+
     // ── 多账号 ──
     switchAccount: function (id) { return call('POST', '/api/accounts/current', { id: id }); },
     refreshAccountToken: function (id) { return call('POST', '/api/accounts/refresh', id ? { id: id } : {}); },

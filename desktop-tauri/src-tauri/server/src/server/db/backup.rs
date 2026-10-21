@@ -597,6 +597,20 @@ pub fn import_from_file(db: &Db, source: &Path, config_dir: &Path) -> Result<Val
     let safety = safety?;
 
     // 锁已释放：重装内存态（config 快照、面板刷新令牌），短效令牌清空。
+    // 备份可能来自旧 schema：先禁用已丢弃账号组上的 Key，再 reload 配置快照。
+    match db.with(|conn| {
+        crate::server::core::account_groups::legacy::disable_legacy_group_keys_once(conn)
+    }) {
+        None => {}
+        Some(Ok(true)) => {
+            logging::log("[Storage]", "已禁用绑定到已丢弃账号组的旧 Key");
+        }
+        Some(Ok(false)) => {}
+        Some(Err(error)) => logging::log(
+            "[Storage]",
+            &format!("清理旧账号组 Key 失败，继续恢复流程: {error}"),
+        ),
+    }
     crate::server::config::reload();
     crate::server::access::load_refresh_tokens();
     crate::server::access::clear_access_tokens();

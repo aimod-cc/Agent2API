@@ -12,12 +12,13 @@ import {
   DialogTitle,
   Input,
   Label,
-  MultiSelect,
   Switch,
   type MultiSelectOption,
 } from '@ui'
 import { TableFooter, useClientPaging } from './table-shell'
 import { t } from '../i18n'
+import { KeyRoutingFields, type KeyRouteMode, type KeyRoutingValue } from './key-routing-fields'
+import { KeyModelFields, modelCandidatesFor, pickedFromOptions } from './key-model-fields'
 
 /**
  * Agent2API · 网关 Key 页（列表 / 新建 / 启停 / 删除 / 可用范围）—— React 岛。
@@ -35,8 +36,8 @@ import { t } from '../i18n'
  *
  * ── 两个多选走组件库的 MultiSelect ───────────────────────────
  * 「可用提供商 / 可用模型」是**受控**的 React state（不再渲染原生 `<select multiple>`
- * 再让 select.js 增强）：候选、勾选、联动全在这一层算 —— 联动规则见 modelOptions，
- * 提交给后端的取值口径见 pickedFromOptions。
+ * 再让 select.js 增强）：候选、勾选、联动全在 key-model-fields.tsx 算，提交给后端的
+ * 取值口径也由该模块统一归一。
  *
  * ── 弹窗走组件库的 Dialog（与 request-clear-modal / conc-dialog 同一手法）──
  * 旧的 `#key-modal`（.modal-mask 一族）不再使用：Esc / 点遮罩关闭、焦点陷阱、滚动
@@ -70,6 +71,8 @@ type KeyEntry = {
   /** 白名单，**空数组 = 不限制** */
   allowedProviders?: string[]
   allowedModels?: string[]
+  routeMode?: string
+  accountGroupId?: string | null
 }
 
 /**
@@ -83,7 +86,7 @@ type KeysPayload = {
   keys?: KeyEntry[]
   authRequired?: boolean
   providers?: ProviderOption[]
-  /** 每家 → 对外名清单，模型候选的**唯一**数据源（按当前勾选的提供商取并集） */
+  /** 每家 → 对外名清单，模型候选的**唯一**数据源（组模式再按所选组 preview.providers 收窄） */
   modelsByProvider?: Record<string, string[]>
   created?: KeyEntry
 }
@@ -97,10 +100,18 @@ type KeysBridge = {
     key?: string
     allowedProviders: string[]
     allowedModels: string[]
+    routeMode: KeyRouteMode
+    accountGroupId: string | null
   }): Promise<KeysPayload | null | undefined>
   updateKey(
     id: string,
-    patch: { enabled?: boolean; allowedProviders?: string[]; allowedModels?: string[] },
+    patch: {
+      enabled?: boolean
+      allowedProviders?: string[]
+      allowedModels?: string[]
+      routeMode?: KeyRouteMode
+      accountGroupId?: string | null
+    },
   ): Promise<KeysPayload | null | undefined>
   deleteKey(id: string): Promise<KeysPayload | null | undefined>
 }
@@ -260,37 +271,7 @@ function modelsByProviderOf(payload: KeysPayload | null): Record<string, string[
 
 /** 提供商显示名：注册名过词典；注册表里没有的 id 回落原样（旧数据里可能有已下线的家） */
 function providerLabel(id: string): string {
-  return t(shared().wbProviders?.labelOf?.(id) || id)
-}
-
-/**
- * 按**当前勾选的提供商**取对外名并集，铺成多选选项。
- * `selected` 里的名字即使不在并集里也照样保留（铺成已勾选状态）—— 用户取消勾选某家
- * 之后，那家独有的模型仍要看得见、能自己取消，否则「保存范围」会变成一次静默的
- * 数据修改。一家都没勾时返回**空数组**（没有约束范围就没有候选）。
- */
-function modelOptions(
-  table: Record<string, string[]>,
-  selectedProviders: string[],
-  selected: string[],
-): MultiSelectOption[] {
-  const names = new Map<string, string>() // 小写 → 原始名（先到先得，保住后端给的大小写）
-  const put = (value: unknown) => {
-    const text = String(value ?? '').trim()
-    if (!text) return
-    const key = text.toLowerCase()
-    if (!names.has(key)) names.set(key, text)
-  }
-  selectedProviders.forEach(id => {
-    const list = table[id] ?? table[String(id).toLowerCase()]
-    if (Array.isArray(list)) list.forEach(put)
-  })
-  // 已勾选的模型无论是否还在并集里都要铺出来（见函数说明）
-  selected.forEach(put)
-  // 选项**值**是模型名（提交给后端的身份）不进词典；展示 label 走 t()
-  const out = [...names.values()].map(value => ({ value, label: t(value) }))
-  out.sort((a, b) => (a.value.toLowerCase() < b.value.toLowerCase() ? -1 : 1))
-  return out
+  return shared().wbProviders?.labelOf?.(id) || id
 }
 
 /**
@@ -299,11 +280,13 @@ function modelOptions(
  * Key 的限制。无限制时显示「不限制」而不是省略：省略与「没读到」长得一样。
  */
 function restrictionText(k: KeyEntry): string {
-  const providers = Array.isArray(k.allowedProviders) ? k.allowedProviders : []
+  const providers = k.routeMode === 'account_group'
+    ? []
+    : Array.isArray(k.allowedProviders) ? k.allowedProviders : []
   const models = Array.isArray(k.allowedModels) ? k.allowedModels : []
   if (!providers.length && !models.length) return t('不限制')
   const parts: string[] = []
-  // providerLabel 的输出已是译文（注册名在这里过词典），原样透出
+  // providerLabel 的输出是展示名（providers.js 侧已处理多语言），原样透出
   if (providers.length) parts.push(providers.map(providerLabel).join(t('、')))
   // 模型那半边只报个数：一屏 Row 里塞不下十几个模型名，悬停由 title 给全量
   if (models.length) parts.push(t('{n} 个模型', { n: models.length }))
@@ -312,9 +295,14 @@ function restrictionText(k: KeyEntry): string {
 
 /** 限制摘要的完整说明（悬停 title 用；列不宽，详情只能挂这里） */
 function restrictionTitle(k: KeyEntry): string {
-  const providers = Array.isArray(k.allowedProviders) ? k.allowedProviders : []
+  const providers = k.routeMode === 'account_group'
+    ? []
+    : Array.isArray(k.allowedProviders) ? k.allowedProviders : []
   const models = Array.isArray(k.allowedModels) ? k.allowedModels : []
   if (!providers.length && !models.length) {
+    if (k.routeMode === 'account_group') {
+      return t('这把 Key 不限制模型（候选由账号组决定）')
+    }
     return t('这把 Key 不限制提供商与模型（可用全部上游与全部对外模型）')
   }
   const lines: string[] = []
@@ -323,49 +311,11 @@ function restrictionTitle(k: KeyEntry): string {
   return lines.join('\n')
 }
 
-/**
- * 弹窗里「当前选的摘要」。为什么要有它：限制是**看不见的** —— 弹窗一关，列表上只剩
- * 「限制：…」一行；而多选的触发器只显示连接后的一行文案，清单长了会被省略号收掉。
- * 用户点完「保存范围」就看不到弹窗了，勾了哪几家 / 哪些模型得在这儿给他核对一遍。
- */
-function restrictionSummary(providers: readonly string[], models: readonly string[]): string {
-  if (!providers.length && !models.length) {
-    return t('当前不限制：这把 Key 可以用全部提供商与全部对外模型')
-  }
-  const parts: string[] = []
-  if (providers.length) parts.push(t('提供商：{names}', { names: providers.map(providerLabel).join(t('、')) }))
-  if (models.length) parts.push(t('模型：{names}', { names: models.join(t('、')) }))
-  // 只限制了模型、没限制提供商（旧数据里可能存在这种组合）：模型候选此刻只剩已勾的
-  // 那几个（没有提供商就没有并集可铺），要说清怎么把候选拿回来 —— 否则用户会以为
-  // 「模型清单坏了，加不了新的」
-  if (!providers.length) {
-    parts.push(t('（模型候选需先选提供商；不选则沿用当前这几项，保存后仍按模型白名单生效）'))
-  }
-  return parts.join('　')
-}
-
 /* ─── 多选的选项与取值 ───────────────────────── */
 
 /** 白名单字段是后端给的，可能缺失 / 形状不对（非数组一律当空，与旧实现同口径） */
 function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.map(item => String(item)) : []
-}
-
-/**
- * 把 state 里的勾选值按**候选表**归一：只留候选里存在的项、顺序照候选表、写法以候选
- * 为准（模型名的大小写可能与清单不一致，旧实现就是按小写比对后把候选的写法写回 DOM）。
- * 这就是旧实现 `[...select.selectedOptions].map(option => option.value)` 的口径 ——
- * 那时「勾选」只存在于渲染出来的 option 上，候选里没有的 id 落不到 DOM 里，提交时自然
- * 被丢掉。**提交给后端的两个数组必须逐字保持这个口径**。
- */
-function pickedFromOptions(values: readonly string[], options: readonly MultiSelectOption[]): string[] {
-  const canonical = new Map(options.map(option => [option.value.toLowerCase(), option.value]))
-  const chosen = new Set<string>()
-  values.forEach(value => {
-    const hit = canonical.get(String(value).toLowerCase())
-    if (hit) chosen.add(hit)
-  })
-  return options.filter(option => chosen.has(option.value)).map(option => option.value)
 }
 
 /* ─── 弹窗（新建 / 改可用范围共用）──────────────── */
@@ -398,6 +348,14 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
   const [pickedModels, setPickedModels] = React.useState<string[]>(
     () => stringList(target?.allowedModels),
   )
+  const initialRouting: KeyRoutingValue = {
+    routeMode: target?.routeMode === 'account_group' ? 'account_group' : 'default_pool',
+    accountGroupId: typeof target?.accountGroupId === 'string' ? target.accountGroupId : null,
+  }
+  const routingRef = React.useRef<KeyRoutingValue>(initialRouting)
+  const [canSave, setCanSave] = React.useState(
+    initialRouting.routeMode !== 'account_group',
+  )
 
   /**
    * 提供商候选 = 后端下发的整张表（内置家 + 已建的自定义家）。自定义家必须在这一层
@@ -420,31 +378,8 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
     [pickedProviders, providerOptions],
   )
 
-  /**
-   * 模型候选跟着「已勾选的提供商」重建：勾一家立刻多出这家的对外名，取消一家则收回去。
-   * 但**已勾选的模型一律留在候选里**（见 modelOptions）—— 用户没动过模型那栏，
-   * 保存就不该悄悄少几项。
-   */
-  const modelCandidates = React.useMemo(
-    () => modelOptions(modelsByProvider, allowedProviders, pickedModels),
-    [modelsByProvider, allowedProviders, pickedModels],
-  )
-
-  const allowedModels = React.useMemo(
-    () => pickedFromOptions(pickedModels, modelCandidates),
-    [pickedModels, modelCandidates],
-  )
-
-  /**
-   * 空候选的说明文案分两种：没勾提供商时是「先选提供商」，勾了却是空才是「这几家
-   * 现在没有可用模型」（后端没给该家的清单 = 没登录态）。有候选时不写这句 ——
-   * 那时浮层里空只可能是搜索没匹配上。
-   */
-  const modelEmptyHint = modelCandidates.length
-    ? t('没有匹配的选项')
-    : allowedProviders.length
-      ? t('这几家当前没有可用模型（账号未登录或清单为空）')
-      : t('请先在上面选择可用提供商')
+  /** 组 provider 范围由 KeyRoutingFields 提供；它只参与提交归一，不参与自身渲染。 */
+  const scopeProvidersRef = React.useRef<string[] | null>(null)
 
   /** 收尾：解除在途守卫（写两处，避免两边漂移） */
   function stopSaving(): void {
@@ -454,6 +389,21 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
 
   async function save(): Promise<void> {
     if (savingRef.current) return
+    const routing = routingRef.current
+    const scopeProviders = scopeProvidersRef.current
+    if (routing.routeMode === 'account_group' && !routing.accountGroupId) {
+      setStatus(t('请选择账号组'))
+      return
+    }
+    if (routing.routeMode === 'account_group' && scopeProviders === null) return
+    const modelCandidates = modelCandidatesFor(
+      modelsByProvider,
+      routing.routeMode,
+      scopeProviders,
+      allowedProviders,
+      pickedModels,
+    )
+    if (modelCandidates === null) return
     // 两个白名单直接用归一后的勾选（见 pickedFromOptions），字段名与取值口径都与旧实现一致
     savingRef.current = true
     setSaving(true)
@@ -461,9 +411,28 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
     try {
       const api = shared().workbuddyDesktop
       if (!api) throw new Error(t('后端桥不可用'))
+      const allowedModels = pickedFromOptions(pickedModels, modelCandidates)
       if (editingId) {
-        // 只提交两个白名单：别名与启停都不动（部分更新语义，见后端 api_keys::update）
-        const next = await api.updateKey(editingId, { allowedProviders, allowedModels })
+        const routingChanged = routing.routeMode !== initialRouting.routeMode
+          || routing.accountGroupId !== initialRouting.accountGroupId
+        // A legacy group Key may still carry allowedProviders. Group routing
+        // ignores that field at runtime, but editing the Key must not erase it
+        // unless the user is explicitly switching from default_pool to a group.
+        const allowedProvidersPatch = routing.routeMode === 'default_pool'
+          ? allowedProviders
+          : initialRouting.routeMode === 'account_group'
+            ? undefined
+            : []
+        const next = await api.updateKey(editingId, {
+          ...(allowedProvidersPatch === undefined ? {} : {
+            allowedProviders: allowedProvidersPatch,
+          }),
+          allowedModels,
+          ...(routingChanged ? {
+            routeMode: routing.routeMode,
+            accountGroupId: routing.accountGroupId,
+          } : {}),
+        })
         // 先解除守卫再关窗（旧实现同序：saving = false 在 closeModal 之前）
         stopSaving()
         onSaved(next)
@@ -477,7 +446,11 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
         return
       }
       const next = await api.createKey({
-        name: name.trim(), key: trimmedKey || undefined, allowedProviders, allowedModels,
+        name: name.trim(), key: trimmedKey || undefined,
+        allowedProviders: routing.routeMode === 'default_pool' ? allowedProviders : [],
+        allowedModels,
+        routeMode: routing.routeMode,
+        accountGroupId: routing.accountGroupId,
       })
       stopSaving()
       onSaved(next, next?.created?.id)
@@ -533,44 +506,26 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
                   onKeyDown={event => { if (event.key === 'Enter') void save() }} />
               </div>
             )}
-            {/* 两个多选走组件库的 MultiSelect（受控）。宽度规则（min 180 / max 260）原先是
-                page-gateway.css 按 `#key-allowed-providers` / `#key-allowed-models` 给的，
-                而 MultiSelect 的触发器不吃 id（组件库不转发）—— 那条规则成了死规则，
-                等价的宽度锚只能自己带：flex-auto 就是旧 CSS 里的 `flex: 1 1 auto`。
-                触发器上没有可见 label 与之关联（同样没有 id 可给 htmlFor），所以 aria-label
-                必须给，否则读屏只念到一串连接起来的选项名。 */}
-            <div className='flex flex-wrap items-center gap-2.5'>
-              <Label className='text-[12.5px] whitespace-nowrap text-subtle'>{t('可用提供商')}</Label>
-              <MultiSelect
-                value={allowedProviders}
-                onValueChange={setPickedProviders}
-                options={providerOptions}
-                placeholder={t('留空 = 不限制')}
-                searchPlaceholder={t('搜索提供商…')}
-                aria-label={t('可用提供商')}
-                className='flex-auto min-w-[180px] max-w-[260px]'
-              />
-            </div>
-            <div className='flex flex-wrap items-center gap-2.5'>
-              <Label className='text-[12.5px] whitespace-nowrap text-subtle'>{t('可用模型')}</Label>
-              <MultiSelect
-                value={allowedModels}
-                onValueChange={setPickedModels}
-                options={modelCandidates}
-                placeholder={t('留空 = 不限制')}
-                emptyHint={modelEmptyHint}
-                searchPlaceholder={t('搜索模型…')}
-                aria-label={t('可用模型')}
-                className='flex-auto min-w-[180px] max-w-[260px]'
-              />
-            </div>
-            <p>
-              {t('留空表示不限制；同时设置时请求需同时满足两个条件（模型在白名单内且路由到允许的提供商）。 「可用模型」的候选跟着上面勾选的提供商走：没勾提供商时它是空的（还没有约束范围）， 勾了几家就列出这几家能收的全部对外名。')}
-            </p>
-            {/* 当前选的摘要：多选的触发器上只显示「连接后的一行文案」，清单长了会被省略号
-                收掉 —— 勾了哪几家 / 哪些模型要在这儿摊开。id 沿用旧实现的：page-gateway.css
-                按它给这行加了上边距（它是「当前选择」而不是「使用说明」）。 */}
-            <p id='key-restrict-summary'>{restrictionSummary(allowedProviders, allowedModels)}</p>
+            <KeyRoutingFields initial={initialRouting} onChange={value => {
+              routingRef.current = value
+              setCanSave(value.routeMode !== 'account_group')
+            }}>
+              {(current, scopeProviders) => {
+                scopeProvidersRef.current = scopeProviders
+                return <KeyModelFields
+                  current={current}
+                  scopeProviders={scopeProviders}
+                  providerOptions={providerOptions}
+                  allowedProviders={allowedProviders}
+                  setPickedProviders={setPickedProviders}
+                  pickedModels={pickedModels}
+                  setPickedModels={setPickedModels}
+                  modelsByProvider={modelsByProvider}
+                  providerLabel={providerLabel}
+                  onScopeReady={setCanSave}
+                />
+              }}
+            </KeyRoutingFields>
           </DialogSection>
           <div className='min-h-[18px] text-[11.5px] text-muted-foreground'>{status}</div>
         </DialogBody>
@@ -579,7 +534,7 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
           <Button variant='outline' onClick={onClose} disabled={saving}>
             {t('取消')}
           </Button>
-          <Button variant='default' disabled={saving} onClick={() => void save()}>
+          <Button variant='default' disabled={saving || !canSave} onClick={() => void save()}>
             {editing ? t('保存范围') : t('创建')}
           </Button>
         </DialogFooter>

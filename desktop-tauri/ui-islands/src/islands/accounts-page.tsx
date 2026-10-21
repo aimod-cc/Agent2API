@@ -85,6 +85,7 @@ import {
 } from './accounts-panels'
 import { bindQueueDrag, type QueueDrop } from './accounts-queue-drag'
 import { AccountsDialogs } from './accounts-dialogs'
+import { AccountGroupsPanel } from './account-groups-panel'
 
 /** 列设置的句柄（注册在挂载后的布局 effect 里，见下方说明） */
 let colHandle: ColSettingsHandle | null = null
@@ -424,7 +425,8 @@ function AccountsPage() {
   }
 
   return (
-    <>
+    <AccountGroupsPanel>
+      <>
       <section className='panel account-table'>
         <div className='toolbar'>
           {/* 窄屏「筛选」入口：只在 ≤767px 显示（桌面由 CSS 隐藏）。
@@ -665,7 +667,8 @@ function AccountsPage() {
         />
       </section>
       <AccountsDialogs />
-    </>
+      </>
+    </AccountGroupsPanel>
   )
 }
 

@@ -46,6 +46,7 @@
 //! SSE 流的中断（客户端断开、上游断开）是**正常路径**，一律用 Result/Option。
 
 pub mod aggregate;
+mod account_group_pool;
 pub mod cancellation;
 pub mod connections;
 pub mod continuation;
@@ -82,6 +83,16 @@ use self::sse::{FramePolicy, ReasoningCoalescer};
 
 #[cfg(test)]
 mod capture_tests;
+#[cfg(test)]
+mod account_group_route_tests;
+#[cfg(test)]
+mod account_group_failover_tests;
+#[cfg(test)]
+mod account_group_failure_matrix_tests;
+#[cfg(test)]
+mod account_group_compat_tests;
+#[cfg(test)]
+mod account_group_routing_error_tests;
 
 /// 去重等待上限（对照 Node 的 INFLIGHT_WAIT_MS）
 const INFLIGHT_WAIT_MS: u64 = 45_000;
@@ -214,6 +225,9 @@ pub struct ForwardRequest {
     /// 本文件在 `server::core::upstream` 下，`super::key_scope` 指的是
     /// `server::core::upstream::key_scope`（不存在）—— 这里跨了一层模块。
     pub allowed_providers: Option<crate::server::core::key_scope::KeyScope>,
+    /// Request-time account-group snapshot. Group routing uses this scope as
+    /// its sole candidate source and never falls back to the default pool.
+    pub account_group_scope: Option<crate::server::core::account_groups::AccountGroupScope>,
     /// **只准用这个账号**转发（`None` = 走正常的全局优先级队列）。
     ///
     /// 目前唯一的调用方是模型测试（`api::model_test`）：它问的是「这一行的这个
@@ -396,6 +410,7 @@ impl UpstreamService {
         // 会因为「同时持有 request 的可变借用（上面改过 body）」而借不过 ——
         // 移出后所有权清晰，也不必再多一次克隆。
         let key_scope = request.allowed_providers;
+        let account_group_scope = request.account_group_scope;
         // 钉住的账号与它同样处理：ownership 移出来、借给 context，
         // 于是 `request` 在下面不再被借用（理由同上一条）
         let pinned_account = request.pinned_account;
@@ -409,6 +424,7 @@ impl UpstreamService {
             developer_role_compat,
             prompt,
             key_scope: key_scope.as_ref(),
+            account_group_scope,
             pinned_account: pinned_account.as_deref(),
             // bool 是 Copy，直接读：不存在上面那两条的借用问题
             ignore_model_gate: request.ignore_model_gate,

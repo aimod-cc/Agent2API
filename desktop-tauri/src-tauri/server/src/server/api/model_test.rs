@@ -703,6 +703,7 @@ async fn run_forward(
         // 上游（适配器会读会话类头，见 `passthrough_session_headers`）
         client_headers: Default::default(),
         telemetry: telemetry.clone(),
+        account_group_scope: None,
         // 钉住这一家（同一个对外名可能挂在多家上，见模块头）
         allowed_providers: Some(KeyScope::provider_only(provider)),
         // 钉住这一个账号，且不顺延

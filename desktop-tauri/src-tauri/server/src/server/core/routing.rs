@@ -433,6 +433,19 @@ fn compare_by_priority(a: &Value, b: &Value) -> std::cmp::Ordering {
     by_priority_order((a_priority, a_added as i64), (b_priority, b_added as i64))
 }
 
+pub(crate) fn provider_accounts_in_default_order(
+    accounts: &[Value],
+    provider: &str,
+) -> Vec<Value> {
+    let mut provider_accounts: Vec<Value> = accounts
+        .iter()
+        .filter(|account| provider_of(account) == provider)
+        .cloned()
+        .collect();
+    provider_accounts.sort_by(compare_by_priority);
+    provider_accounts
+}
+
 /// 公开形态里的 priority（归一后的数值）——对应 Node 在日志里打印的 `priority`。
 /// 这里沿用 store 归一后的值（Rust 的公开形态一定带这个字段）。
 fn normalize_priority_value_of(account: &Value) -> Value {
@@ -641,6 +654,33 @@ pub fn plan_route(
     now: i64,
     meta: &PlanMeta<'_>,
 ) -> RoutePlan {
+    plan_route_impl(accounts, keys, counts, excluded, now, meta, false)
+}
+
+/// 生成组内选路计划：复用 [`plan_route`] 的过滤、状态和原因规则，
+/// 但保留组快照给出的 canonical 顺序。Rotate 按组专属游标环绕；Provider
+/// 把这份未按全局优先级重排的列表交给同一个 `provider_order` 分段轮询。
+/// 全局 priority/added_at 不能改写组内顺序。
+pub fn plan_route_preserving_input_order(
+    accounts: &[Value],
+    keys: &CooldownKeys<'_>,
+    counts: &HashMap<String, usize>,
+    excluded: &[String],
+    now: i64,
+    meta: &PlanMeta<'_>,
+) -> RoutePlan {
+    plan_route_impl(accounts, keys, counts, excluded, now, meta, true)
+}
+
+fn plan_route_impl(
+    accounts: &[Value],
+    keys: &CooldownKeys<'_>,
+    counts: &HashMap<String, usize>,
+    excluded: &[String],
+    now: i64,
+    meta: &PlanMeta<'_>,
+    preserve_input_order: bool,
+) -> RoutePlan {
     let mut ordered: Vec<Value> = Vec::new();
     let mut blocked: Vec<PlanEntry> = Vec::new();
     for account in accounts {
@@ -705,7 +745,21 @@ pub fn plan_route(
     // 429」，退避解决的是「反复失败反复撞」—— 它们在顺序优先下同样成立；
     // 若只对负载均衡生效，默认策略下这两个开关就是摆设。稳定排序保证
     // 同档内的先后仍由策略的基础序决定（顺序优先下 = 位次）。
-    let mut arranged = base_order(&ordered, meta.strategy, meta);
+    let mut arranged = if preserve_input_order {
+        let mut input_order = ordered;
+        match meta.strategy {
+            RouteStrategy::Order => {}
+            RouteStrategy::Rotate if input_order.len() > 1 => {
+                let start = meta.cursor.unwrap_or(0) % input_order.len();
+                input_order.rotate_left(start);
+            }
+            RouteStrategy::Provider => input_order = provider_order(input_order, meta),
+            RouteStrategy::Rotate => {}
+        }
+        input_order
+    } else {
+        base_order(&ordered, meta.strategy, meta)
+    };
 
     // ── 粘性命中的可用账号提到最前（它可用，请求就会走它 —— 排序必须如实反映）
     //
@@ -1161,5 +1215,3 @@ mod tests {
         assert_eq!(order, vec!["a1", "a2", "b1", "b2"]);
     }
 }
-
-

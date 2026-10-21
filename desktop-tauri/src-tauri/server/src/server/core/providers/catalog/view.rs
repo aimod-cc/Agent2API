@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use serde_json::{json, Map, Value};
 
+use crate::server::core::account_groups::AccountGroupScope;
 use crate::server::core::account_store::AccountStore;
 use crate::server::core::capability;
 use crate::server::core::key_scope::{self, KeyScope};
@@ -11,9 +12,11 @@ use crate::server::core::model_meta;
 use crate::server::core::model_rules;
 use crate::server::core::models::{list_item, list_response_from, model_id, suggest_from};
 use crate::server::core::providers::{kind_from_id, kind_id, ProviderKind};
+use crate::server::core::routing;
+use crate::server::errors::GatewayError;
 
 use super::routing::{builtin_target, entry_id_in_manifest};
-use super::{active_manifests, aggregate_source, manifest_for, refresh_meta};
+use super::{active_manifests, aggregate_source, advertised_manifest_for, manifest_for, refresh_meta};
 
 /// 一家会对外广告哪些名字：清单里原生的上游 id + **已启用**的映射别名。
 ///
@@ -77,11 +80,107 @@ pub fn models_response(store: &AccountStore, scope: Option<&KeyScope>) -> Value 
         .filter(|item| key_scope::allows_model(scope, &model_id(item)))
         .collect();
     let builtin_count = data.len();
-    super::super::custom::append_models_response(store, scope, &mut data);
+    super::super::custom::append_models_response(store, scope, &mut data, None);
     // 自定义家贡献了条目时，这份列表就不再是单/多家内置的来源了 ——
     // 与「多家内置」同一个词（aggregate），下游据此知道列表是拼出来的。
     let source = if data.len() > builtin_count { "aggregate" } else { source };
     list_response_from(data, source, refreshed_at)
+}
+
+/// Collect the usable providers in the canonical order of one request-local group.
+/// The group scope is the source of truth here: the global account store must not
+/// add providers that are outside the group.
+fn group_provider_ids(group_scope: &AccountGroupScope) -> Vec<String> {
+    let mut seen = HashSet::new();
+    group_scope
+        .accounts()
+        .iter()
+        .filter(|account| {
+            !matches!(account.get("enabled"), Some(Value::Bool(false)))
+                && !matches!(account.get("hasCredentials"), Some(Value::Bool(false)))
+        })
+        .filter_map(|account| {
+            let provider = routing::provider_of(account).to_string();
+            seen.insert(provider.clone()).then_some(provider)
+        })
+        .collect()
+}
+
+/// Build the model directory from one request-local account-group snapshot.
+/// Built-in providers follow the first usable provider occurrence in the group;
+/// custom providers use the same provider order and do not require a global
+/// account-store entry.
+pub fn group_models_response(
+    store: &AccountStore,
+    group_scope: &AccountGroupScope,
+    scope: Option<&KeyScope>,
+) -> Value {
+    let provider_ids = group_provider_ids(group_scope);
+    let active: Vec<_> = provider_ids
+        .iter()
+        .filter_map(|provider| {
+            let kind = kind_from_id(provider)?;
+            let manifest = advertised_manifest_for(store, kind);
+            (!manifest.is_empty()).then_some((kind, manifest))
+        })
+        .collect();
+    let (source, refreshed_at) = aggregate_source(&active);
+    let mut data: Vec<_> = public_builtin_items(&active)
+        .into_iter()
+        .map(|(_, item)| item)
+        .filter(|item| key_scope::allows_model(scope, &model_id(item)))
+        .collect();
+    let builtin_count = data.len();
+    super::super::custom::append_models_response(store, scope, &mut data, Some(&provider_ids));
+    let source = if data.len() > builtin_count { "aggregate" } else { source };
+    list_response_from(data, source, refreshed_at)
+}
+
+/// Resolve a request model against the exact directory exposed to one group.
+/// This function is intentionally side-effect free; the API pipeline owns
+/// payload mutation and configuration access.
+pub fn resolve_group_model(
+    store: &AccountStore,
+    group_scope: &AccountGroupScope,
+    scope: Option<&KeyScope>,
+    requested: &str,
+    client_named: bool,
+    default_model: &str,
+) -> Result<String, GatewayError> {
+    let response = group_models_response(store, group_scope, scope);
+    let models = response
+        .get("data")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let requested = requested.trim();
+
+    if client_named {
+        if models
+            .iter()
+            .any(|item| model_id(item).eq_ignore_ascii_case(requested))
+        {
+            return Ok(requested.to_string());
+        }
+        return Err(
+            GatewayError::with_status(
+                404,
+                format!("模型不存在: {requested}。完整列表见 GET /v1/models"),
+            )
+            .with_code("model_not_found"),
+        );
+    }
+
+    let selected = models
+        .iter()
+        .find(|item| model_id(item).eq_ignore_ascii_case(default_model.trim()))
+        .or_else(|| {
+            models
+                .iter()
+                .find(|item| item.get("is_default").and_then(Value::as_bool).unwrap_or(false))
+        })
+        .or_else(|| models.first());
+    Ok(selected.map(model_id).unwrap_or_default())
 }
 
 /// 一家可用提供商都没有时（没加账号），入口校验要跳过「广告里有才放行」与

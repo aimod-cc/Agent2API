@@ -245,7 +245,10 @@ impl AccountStore {
         self.with_conn_mut(&_guard, |conn| {
             let tx = conn.transaction()?;
             for id in &targets {
-                sql::delete(&tx, id)?;
+                let removed = sql::delete(&tx, id)?;
+                if removed {
+                    sql::delete_explicit_group_account_members(&tx, id)?;
+                }
             }
             tx.commit()
         })?;
