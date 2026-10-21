@@ -73,6 +73,8 @@ const MAX_TREND_DAYS: i64 = 4000;
 
 /// 合法的时间区间取值
 const RANGE_TODAY: &str = "today";
+/// 「昨天」：本地自然日的昨天 0 点至 24 点（与 `today` 共用同一套日界线）
+const RANGE_YESTERDAY: &str = "yesterday";
 const RANGE_7: &str = "7";
 const RANGE_30: &str = "30";
 const RANGE_MONTH: &str = "month";
@@ -85,6 +87,7 @@ pub(super) const RANGE_CUSTOM: &str = "custom";
 pub(super) fn normalize_range(range: &str) -> &'static str {
     match range.trim() {
         RANGE_TODAY => RANGE_TODAY,
+        RANGE_YESTERDAY => RANGE_YESTERDAY,
         RANGE_30 => RANGE_30,
         RANGE_MONTH => RANGE_MONTH,
         RANGE_ALL => RANGE_ALL,
@@ -95,7 +98,9 @@ pub(super) fn normalize_range(range: &str) -> &'static str {
 
 /// 区间边界（闭合的本地日期键 `[startDate, endDate]`）。
 ///
-/// - `today` 就是今天；`7` / `30` 从今天往前推（含今天，所以减 days-1）
+/// - `today` 就是今天；`yesterday` 是昨天一整天（昨天 0 点 ~ 昨天 24 点，
+///   与 `today` 共用同一套本地日界线）
+/// - `7` / `30` 从今天往前推（含今天，所以减 days-1）
 /// - `month` 为本月 1 号到今天（本地时区）
 /// - `all` 取聚合里最早的一天；**完全没有数据**时给「今天往前 29 天」，
 ///   让前端拿到一个合法区间而不是空串或 null
@@ -124,6 +129,12 @@ pub(super) fn range_bounds(
             let start = custom_start.min(end);
             return (date_key(start), date_key(end));
         }
+    }
+    // 「昨天」是唯一 end 不是今天的档位：单日区间 = 昨天 0 点到昨天 24 点。
+    // 先于 `end = today` 处理，免得把今天的行算进来。
+    if range == RANGE_YESTERDAY {
+        let yesterday = today - ChronoDuration::days(1);
+        return (date_key(yesterday), date_key(yesterday));
     }
     let end = today;
     let start = match range {

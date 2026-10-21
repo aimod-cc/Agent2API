@@ -99,15 +99,29 @@ export const PROVIDER_ICONS: Record<string, string> = {
   // （`cloudcache.tencent-cloud.com/qcloud/orcaterm/pwa/icon/orcaterm_192x192.png`，
   // 与客户端 / 官网显示的应用图标为同一形象）
   orcaterm: 'assets/providers/orcaterm.png',
+// 智谱清言：取自客户端安装包 `resources/app.asar` 内的应用图标
+  // （`assets/icon.png`，512×512，与系统里显示的应用图标为同一形象；
+  // 归一成 256×256 入库 —— 与 officeace 同一处置）
+  chatglm: 'assets/providers/chatglm.png',
+  // ModelScope（魔搭）：取自官网 favicon（`https://modelscope.cn/favicon.ico`，
+  // 内含 128×128 的一帧，归一成 256×256 入库 —— 与站点标签页上显示的是同一形象；
+  // 国内 / 国际版共用这一张，同 AutoClaw / MonkeyCode 的形态）
+  modelscope: 'assets/providers/modelscope.png',
+  'modelscope-intl': 'assets/providers/modelscope.png',
+  // AtomCode（AtomGit / GitCode）：取自官网首页的产品图标
+  // （`https://cdn-news.gitcode.com/news/atomcode-icon1.png`，524×524 RGBA，
+  // 归一成 256×256 入库 —— 与官网首页 / 客户端显示的应用图标为同一形象）。
+  // ⚠️ 官网的 `<link rel="icon">` 指向的是 GitCode **平台**的 favicon
+  // （`cdn-static.gitcode.host/static/images/logo-favicon.png`），不是本产品的形象，
+  // 所以没有采用它。
+  atomcode: 'assets/providers/atomcode.png',
+  // LobsterAI（网易有道「有道龙虾」）：图标取自 sibling 仓库 cpa-jethub-plugins 里
+  // 已核过的品牌图标（`internal/jethub/brandicons/brandicons.go` 的 `LobsterAI`
+  // 常量 —— 那正是产品站点从有道共享 CDN 引用的同一枚，不是有道自家的 favicon）。
+  // 该处是 24×24 的 SVG，已栅格化成 256×256 RGBA 入库（与 orcaterm / officeace
+  // 同一处置）。
+  lobsterai: 'assets/providers/lobsterai.png',
 }
-
-/**
- * 新接入、尚在观察期的家：添加账号页的卡片名字后跟一枚 `(beta)`（由
- * `ProviderCard` 渲染）。它只是**入口页的提示**，不是家本身的属性 ——
- * 账号表徽章、模型管理页都不跟着变；判据是「转发通道刚上线」，
- * 观察期结束后从这张表里删掉即可。
- */
-const BETA_PROVIDERS = new Set(['monkeycode', 'monkeycode-intl', 'commandcode', 'antigravity'])
 
 /**
  * Agent 段**不露出添加入口**的内置家（精确匹配 provider id）。目前只有
@@ -129,7 +143,6 @@ type CardItem = {
   count: number
   preset?: boolean
   custom?: boolean
-  beta?: boolean
   /** 预置卡专用：该模板已建过的同名自定义家 id（空串 / 缺省 = 还没建过） */
   builtId?: string
 }
@@ -175,7 +188,7 @@ function providerCards(accountType: AccountType): CardItem[] {
       }))
   }
   // Cline Pass 的添加入口不在这一段（判据与缘由见 HIDDEN_AGENT_PROVIDERS）：
-  // 在映射成卡片之前就把摘要里那条剔掉，后面的名字 / beta 处理都不必再想它。
+  // 在映射成卡片之前就把摘要里那条剔掉，后面的名字处理都不必再想它。
   // 过滤只落在**本函数**（PickStep 的列表构造）上：账号页分组带 / 模型管理页
   // 读的是同一份 providers 摘要，但各自有自己的列表构造（accounts-domain 的
   // providerSummaries、models-page 的左栏），不经过这里，所以存量 cline-pass
@@ -202,7 +215,6 @@ function providerCards(accountType: AccountType): CardItem[] {
         id,
         label: labelOf(id, String(item.label || item.id || '')),
         count: Number(item.count) || 0,
-        beta: BETA_PROVIDERS.has(id),
       }
     })
     : [{ id: WORKBUDDY_PROVIDER, label: WORKBUDDY_ENTRY_LABEL, count: accountCountOf(WORKBUDDY_PROVIDER) }]
@@ -267,10 +279,7 @@ function ProviderCard({ item, onPick }: { item: CardItem; onPick: (id: string) =
     >
       <Logo item={item} />
       <span className='add-provider-info'>
-        <span className='add-provider-name'>
-          {item.label}
-          {item.beta ? <span className='add-provider-beta'>(beta)</span> : null}
-        </span>
+        <span className='add-provider-name'>{item.label}</span>
         <span className='add-provider-meta'>{cardMeta(item)}</span>
       </span>
       <span className='add-provider-go'>›</span>

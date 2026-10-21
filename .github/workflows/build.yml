@@ -4,15 +4,35 @@ name: build
 #
 # ── 为什么需要 CI 构建 ─────────────────────────────────────────
 # Tauri 的 macOS 产物（.app / .dmg）**只能在 macOS 上生成**，无法从 Windows
-# 交叉编译。因此 Windows 上开发、又要出 Mac 包时，只能借助 CI 的 macOS runner。
+# 交叉编译；Linux 产物（deb / AppImage）同理 —— 它们链接 webkit2gtk / gtk3，
+# 同样无法从 Windows 交叉。因此这两个平台的桌面端都交给 CI 的 runner 出。
 # 本仓库是公开仓库，标准 GitHub-hosted runner（含 macOS）对公开仓库免费且
 # 不计分钟数 —— macOS runner 是私有仓库里最贵的一档，公开仓库没有这个问题。
 #
+# ── 六个 job 的分工（名字相近，别看混）────────────────────────
+#   macos           → macOS 桌面端 dmg           → artifact: macos-universal
+#   windows         → Windows 桌面端 NSIS exe    → artifact: windows-nsis
+#   linux-desktop   → Linux 桌面端 deb+AppImage  → artifact: linux-desktop
+#   linux-server    → Linux **服务端**包（无 GUI）→ artifact: linux-server-{amd64,arm64}
+#   windows-server  → Windows **服务端**包（无 GUI）→ artifact: windows-server-amd64
+#   android         → Android APK（Capacitor）   → artifact: android-apk
+#   ios             → iOS IPA（Capacitor）       → artifact: ios-ipa
+#
+# 前三者是「桌面端安装包」（给用户装在自己机器上），中间两者是**服务器形态**：
+# 无图形界面、命令行安装、注册成系统服务（Linux systemd / Windows SCM）。
+# linux-server 的产物同时还是容器内一键更新的载荷。
+#
+# android / ios 是**手机端**：Capacitor 把 `desktop-tauri/mobile` 的界面打进
+# 安装包，与 PWA 形态共用同一份 UI 代码。它的 Web 形态（`ui/m/**`）不需要在
+# 这里构建 —— 那份产物**入库**，由 frontend-artifacts.yml 校验可复现，桌面端 /
+# 服务端 / Docker 的 `ui/` 静态目录直接带上它，发版流程一行都不用改。这里只补
+# 「需要签名密钥、只能在打包机上出」的那一半。
+#
 # ── 触发方式 ──────────────────────────────────────────────────
 #   · 手动 workflow_dispatch（在 Actions 页面选分支触发）：
-#     三个平台一起构建，产物作为 workflow artifact 下载，不发布 Release
+#     各平台一起构建，产物作为 workflow artifact 下载，不发布 Release
 #   · 推送 v* tag：与 docker.yml 同时触发，一次打 tag 安装包与镜像全出；
-#     Windows/macOS 包与 Linux 服务端包只挂 workflow artifact —— GitHub
+#     桌面端安装包与 Linux 服务端包只挂 workflow artifact —— GitHub
 #     Release 由发版收尾脚本在本地挂载（scripts/release.sh）：Release 本就
 #     不自动建，安装包只挂 artifact 让构建与发布解耦，发布那步重跑脚本即可
 #
@@ -40,12 +60,23 @@ name: build
 # （甚至因为找不到 lock 文件而直接报错）。
 #
 # ── 签名 ──────────────────────────────────────────────────────
-# 默认**不签名**（ad-hoc）。macOS 上未签名的应用 Gatekeeper 会拦下，
+# 桌面端默认**不签名**（ad-hoc）。macOS 上未签名的应用 Gatekeeper 会拦下，
 # 用户需要在「系统设置 → 隐私与安全性」里手动放行一次。要消除这一步需要
 # Apple Developer 账号（$99/年）做 Developer ID 签名 + 公证，届时在仓库里配
 # APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY /
 # APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID 这几个 secret 即可，
 # tauri-action 与 tauri CLI 会自动完成签名与公证。
+#
+# APK 则**必须签名**（Android 不接受未签名的 release 包），密钥与密码不入库
+# （见 .gitignore），由下面 android job 从四个 secret 还原：
+#   ANDROID_KEYSTORE_BASE64   agent2api-release.jks 的 base64（单行）
+#   ANDROID_KEYSTORE_PASSWORD keystore.properties 的 storePassword
+#   ANDROID_KEY_ALIAS         keyAlias（当前是 agent2api）
+#   ANDROID_KEY_PASSWORD      keyPassword
+# ⚠️ 这四样换不得：换了密钥签名就不一致，已装的用户无法覆盖升级。原密钥
+# 除了打包机之外要另存一份，secret 只是它的第二份副本。
+# 生成 base64：base64 -w0 agent2api-release.jks（Windows 用
+# [Convert]::ToBase64String([IO.File]::ReadAllBytes('agent2api-release.jks'))）
 
 on:
   workflow_dispatch:
@@ -141,6 +172,86 @@ jobs:
           path: target/release/bundle/nsis/*.exe
           if-no-files-found: error
 
+  # ── Linux 桌面端（deb + AppImage）────────────────────────────
+  # Tauri 的 Linux 产物同样**只能在 Linux 上生成**（链接 webkit2gtk / gtk3，
+  # 无法从 Windows 交叉编译），所以和 macOS 一样交给 CI。
+  #
+  # ── 与下面 linux-server job 的区别（两者都在 Linux 上构建，别混）──
+  #   · 本 job：**桌面端**安装包（deb / AppImage），带 Tauri 壳与 GUI 界面，
+  #     产物名以 `Agent2API_<版本>_` 开头，用户在桌面上装它；
+  #   · linux-server job：**服务端**包（容器内一键更新用的 tar.gz），
+  #     无 GUI，产物名以 `agent2api-server-linux-` 开头。
+  # 两者服务于完全不同的形态，Release 上并存（见 scripts/release.sh）。
+  #
+  # ── 平台 conf 用 tauri.linux.conf.json（与 macOS 同款做法）──────
+  # 基础 tauri.conf.json 的 targets 是 ["nsis"]（Windows 专用），Linux 构建
+  # 必须用 `--config` 覆盖成 deb + appimage，同时补上 Linux 需要的 PNG 图标
+  # 与 deb 的运行时依赖声明。理由与 macOS 那份一致：三个平台的 bundle 配置
+  # 差别太大（目标格式、图标格式、依赖声明各不同），挤在一个文件里会让
+  # 每个平台都要读一整套无关字段。
+  linux-desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 安装 Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          # 依赖在 desktop-tauri/ 下（根 package.json 没有依赖），必须显式指路
+          cache: npm
+          cache-dependency-path: desktop-tauri/package-lock.json
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 依赖
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-tauri/src-tauri -> ../../target
+
+      # ── 系统依赖：Tauri 在 Linux 上的硬要求 ──────────────────────
+      # webkit2gtk-4.1 是 WebView 本体（4.1 = libsoup3 一代，Tauri 2 用这个；
+      # 4.0 是 Tauri 1 的，装了也没用）；gtk3 是窗口层；
+      # libayatana-appindicator3 是**托盘**（本应用的关窗后唯一入口，缺它
+      # 托盘建不起来，用户关窗就再也叫不回界面）；librsvg2 供图标渲染
+      # （tauri bundler 把 SVG 图标转 PNG 时用）；patchelf 是 bundler 给
+      # AppImage 改 RPATH 时调的。缺任何一个都会在 `tauri build` 阶段报错，
+      # 而不是编译期 —— 所以这一步必须在上传产物之前。
+      - name: 安装 Linux 构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential
+          # 打印实际版本：排查「构建机换代导致行为变化」时这是第一条线索
+          pkg-config --modversion webkit2gtk-4.1 gtk+-3.0 ayatana-appindicator3-0.1
+
+      - name: 安装桌面端依赖
+        run: npm --prefix desktop-tauri ci
+
+      # 不走 tauri-action：它的默认脚本是 `npm run tauri build`，而本项目的
+      # package.json 里那条脚本叫 `build`（同 macOS job 的说明）。
+      - name: 构建 Linux 桌面端安装包
+        run: npm --prefix desktop-tauri run build -- --config src-tauri/tauri.linux.conf.json
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-desktop
+          # deb 与 AppImage 两个目录各出一份产物：
+          #   target/release/bundle/deb/*.deb
+          #   target/release/bundle/appimage/*.AppImage
+          # 同一目录下还有 .sig / 中间产物，只用通配精确取这两种。
+          path: |
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
   # ── Linux 服务端包（容器内一键更新的 Release 资产）──────────
   # 面板在容器里「一键更新」时下载的就是这里的产物：包内是可执行文件 +
   # ui/ 目录，由服务端自己替换后再重启（见 core/update/selfupdate.rs）。
@@ -178,17 +289,436 @@ jobs:
       - name: 打包并生成校验和
         run: |
           name="agent2api-server-linux-${{ matrix.arch }}.tar.gz"
-          mkdir -p dist
-          # 包内布局是硬约定：根下 agent2api-server 与 ui/（解包方按名取）
-          tar -C out/bundle -czf "dist/$name" agent2api-server ui
+          mkdir -p dist stage
+          # 先把要进包的东西归拢到一个暂存目录，再一次压成 tar.gz。
+          # 不能「先 tar 再 -r 追加」：gzip 流无法原地追加，tar 会直接
+          # 报 "Cannot update compressed archives"。
+          rm -rf stage/pkg
+          mkdir -p stage/pkg
+          cp -r out/bundle/agent2api-server out/bundle/ui stage/pkg/
+          cp packaging/linux/install.sh \
+             packaging/linux/agent2api.service \
+             packaging/linux/agent2api.env.example stage/pkg/
+          # 包内布局：根下 agent2api-server 与 ui/ 是容器内更新链的**硬约定**
+          # （selfupdate::extract_bundle 按名取这两个条目）；其余条目它读完即丢，
+          # 所以 install.sh / 单元 / env 样例跟它们同放不会影响一键更新。
+          # 同一个包于是既能被容器更新链消费，也能解包当裸机安装包用。
+          tar -C stage/pkg -czf "dist/$name" agent2api-server ui \
+            install.sh agent2api.service agent2api.env.example
           # 校验文件与包同名 + .sha256：面板按这个名字找它，找不到就拒绝安装
           ( cd dist && sha256sum "$name" > "$name.sha256" )
           cat "dist/$name.sha256"
           ls -lh dist
+          echo "── 包内条目 ──"
+          tar -tzf "dist/$name" | head -20
 
       - name: 上传产物
         uses: actions/upload-artifact@v7
         with:
           name: linux-server-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  # ── Windows 服务端包（无 GUI，注册成 Windows 服务）────────────
+  # 产物是 zip：agent2api-server.exe + ui\ + install-service.ps1。
+  # 用户在服务器上解压后跑 install-service.ps1，脚本用 sc.exe 把它注册成
+  # 开机自启的 Windows 服务（见 packaging/windows/install-service.ps1）。
+  #
+  # 为什么不复用 windows job 的产物：那个 job 构建的是 Tauri 桌面端
+  # （带窗口、托盘、WebView2），装的是 NSIS 安装包。这里的产物无 GUI，
+  # 跑的是 `cargo build -p agent2api-server`（不链接 tauri 全家桶），
+  # 两者用途完全不同 —— 一个给桌面用户，一个给服务器。
+  #
+  # 为什么不走 Dockerfile：Windows 容器镜像不能跑 Linux 构建，且
+  # windows-latest runner 原生就能编，没必要多一层。
+  windows-server:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 依赖
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-tauri/src-tauri -> ../../target
+
+      # 只编 server crate（`-p`），不碰桌面壳：少了 tauri / wry / webview2
+      # 那一整棵依赖树，构建快且产物里没有任何 GUI 依赖。
+      #
+      # ⚠️ 必须在 `desktop-tauri/src-tauri` 下跑，不能用「仓库根 + --manifest-path」：
+      # 产物目录由 `src-tauri/.cargo/config.toml` 的 `target-dir = "../../target"`
+      # 决定，而 cargo **只从 CWD 往上找配置文件** —— 从仓库根跑，这个配置根本
+      # 不会被读到，产物落到 `desktop-tauri/src-tauri/target/`，下面的打包步骤
+      # 按 `target/release/...` 去找就会「找不到文件」而失败（2026-10-17 实测，
+      # v3.0.9-beta.1 的 windows-server 作业就是这么挂的）。
+      - name: 构建服务端
+        working-directory: desktop-tauri/src-tauri
+        run: cargo build --release -p agent2api-server --bin agent2api-server
+
+      - name: 打包
+        shell: pwsh
+        run: |
+          $name = "agent2api-server-windows-amd64"
+          $stage = "stage/$name"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          # 布局是 install-service.ps1 的硬约定：脚本与 exe、ui\ 同级
+          Copy-Item "target/release/agent2api-server.exe" "$stage/"
+          Copy-Item -Recurse "desktop-tauri/ui" "$stage/ui"
+          Copy-Item "packaging/windows/install-service.ps1" "$stage/"
+
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path "$stage/*" -DestinationPath "dist/$name.zip" -Force
+
+          # 校验和：与 Linux 包同格式（sha256 十六进制 + 两个空格 + 文件名），
+          # 用手动升级的用户可以照 README 里的命令核对
+          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii "dist/$name.zip.sha256"
+
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-server-amd64
+          path: dist/*
+          if-no-files-found: error
+
+  # ── Android APK（Capacitor）──────────────────────────────────
+  # 手机端的**安装包**形态。Web 形态（PWA）不在这里构建：`ui/m/**` 入库、
+  # 由 frontend-artifacts.yml 校验可复现，桌面端 / 服务端 / Docker 的 `ui/`
+  # 静态目录直接带上它，一行都不用改。这里补的是「必须签名、只能在打包机
+  # 上出」的那一半。
+  #
+  # ── 为什么用 ubuntu-latest 而不是 macOS / Windows ────────────
+  # Android 构建与宿主平台无关（AGP 出的是同一个 APK），而 GitHub 的
+  # ubuntu runner 自带 Android SDK（ANDROID_HOME 已设，含 compileSdk 36
+  # 与 build-tools 36.0.0 —— 与 android/variables.gradle 对得上），
+  # 不需要额外下载 SDK。macOS runner 对公开仓库虽然免费，但启动与排队
+  # 都更慢，没必要。
+  #
+  # ── 为什么必须先装 ui-kit ────────────────────────────────────
+  # 手机端以**源码**方式接入组件库（vite alias 指到 ../ui-kit/src），而
+  # ui-kit/styles/globals.css 里的 `@import "tailwindcss"` / `tw-animate-css`
+  # / `shadcn` 要从**它自己**的 node_modules 解析。只装 mobile 不装 ui-kit
+  # 时样式解析不到，构建出的 mobile.css 会缺一大块 —— 与
+  # frontend-artifacts.yml 里同一条注意事项。
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 安装 Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          # 两个 lock 文件都要列：mobile 的构建依赖 ui-kit 的源码与样式
+          cache-dependency-path: |
+            desktop-tauri/ui-kit/package-lock.json
+            desktop-tauri/mobile/package-lock.json
+
+      # Capacitor 8 生成的 capacitor.build.gradle 要求 Java 21
+      # （sourceCompatibility / targetCompatibility = VERSION_21）。
+      - name: 安装 JDK 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # 缓存 Gradle 分发包与依赖（~/.gradle）。首次构建要下 wrapper 与
+      # 一整棵 AGP / androidx 依赖树，命中后只剩编译。
+      - name: 设置 Gradle 缓存
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: 安装依赖
+        run: |
+          npm --prefix desktop-tauri/ui-kit ci
+          npm --prefix desktop-tauri/mobile ci
+
+      # ── 签名密钥：从 secret 还原 ─────────────────────────────
+      # 密钥与密码不入库（见 .gitignore），这里用四个 secret 现场拼出
+      # android/agent2api-release.jks 与 keystore.properties。
+      #
+      # 缺 secret 时**明确失败**，不产未签名包：Android 不接受未签名的
+      # release APK，而「静默跳过」的结果是 Release 少一个安装包、用户
+      # 装不上 —— 让流水线红在配置缺失上，比让发版悄悄缺件好排查。
+      #
+      # ⚠️ keystore.properties 的 storeFile 是 `../agent2api-release.jks`，
+      # 相对于 android/app/ 解析 → 密钥要放在 android/ 目录下。
+      - name: 还原 APK 签名密钥
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          missing=""
+          [ -n "$ANDROID_KEYSTORE_BASE64" ]   || missing="$missing ANDROID_KEYSTORE_BASE64"
+          [ -n "$ANDROID_KEYSTORE_PASSWORD" ] || missing="$missing ANDROID_KEYSTORE_PASSWORD"
+          [ -n "$ANDROID_KEY_ALIAS" ]         || missing="$missing ANDROID_KEY_ALIAS"
+          [ -n "$ANDROID_KEY_PASSWORD" ]      || missing="$missing ANDROID_KEY_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error::缺少 secret:$missing"
+            echo "APK 必须签名才能安装，流水线不产未签名包。到仓库"
+            echo "Settings → Secrets and variables → Actions 补齐这四个 secret，"
+            echo "生成方式见 .github/workflows/build.yml 顶部「签名」一节。"
+            exit 1
+          fi
+
+          cd desktop-tauri/mobile/android
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > agent2api-release.jks
+          # 用 printf 而不是 heredoc：YAML 块标量会给每行加缩进，
+          # heredoc 的结束符必须顶格，缩进后会一直读到文件尾
+          printf 'storeFile=../agent2api-release.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "$ANDROID_KEYSTORE_PASSWORD" "$ANDROID_KEY_ALIAS" "$ANDROID_KEY_PASSWORD" \
+            > keystore.properties
+          ls -l agent2api-release.jks
+
+      - name: 构建 APK
+        run: |
+          cd desktop-tauri/mobile/android
+
+          # gradle.properties 里的 org.gradle.java.home 是本机 Windows 路径
+          # （C:/Program Files/Eclipse Adoptium/jdk-21…），Linux runner 上
+          # 不存在，Gradle 会直接报「无效的源发行版」或找不到 JVM。删掉这行，
+          # 让它回落到 setup-java 设好的 JAVA_HOME。
+          sed -i '/^org\.gradle\.java\.home=/d' gradle.properties
+
+          # wrapper 默认走腾讯云镜像（本机在国内用它加速）；runner 在海外，
+          # 该镜像慢且不稳。CI 改官方源，并用 -bin 而不是 -all
+          # （-all 含源码与文档，约 200 MB，构建用不到）。
+          sed -i 's|^distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.14.3-bin.zip|' \
+            gradle/wrapper/gradle-wrapper.properties
+          grep '^distributionUrl=' gradle/wrapper/gradle-wrapper.properties
+
+          # 入库的 gradlew 是 100644（Windows 上生成，没有执行位），
+          # Linux 上要补一下才能 ./gradlew
+          chmod +x gradlew
+
+          # 先出 Web 产物再同步进原生工程：
+          #   tsc --noEmit → vite build --mode apk（产物落 android-www/）
+          #   → cap sync android（拷进 app/src/main/assets/public）
+          #
+          # ⚠️ 只回一级：当前位置是 desktop-tauri/mobile/android，上一级 mobile
+          # 才是 build:apk 所在的 package。曾写成 `cd ../..`，退到了 desktop-tauri
+          # —— 那个 package.json 没有 build:apk 脚本，CI 报
+          # `npm error Missing script: "build:apk"`（tag v3.2.0-beta.1 首跑即此）。
+          cd ..
+          npm run build:apk
+          cd android
+          ./gradlew assembleRelease --no-daemon
+
+      - name: 打包并生成校验和
+        run: |
+          # 版本号取 mobile/package.json（与 gradle 的 versionName 同源），
+          # 产物名与历史 Release 资产保持一致：Agent2API-<版本>.apk
+          # 用 node 读而不是 jq：node 是这套流程本来就有的依赖，
+          # ubuntu runner 虽然带 jq，但少一个工具就少一处环境假设
+          version="$(node -p "require('./desktop-tauri/mobile/package.json').version")"
+          src="desktop-tauri/mobile/android/app/build/outputs/apk/release/app-release.apk"
+          [ -f "$src" ] || { echo "::error::没有产出 $src"; exit 1; }
+
+          mkdir -p dist
+          cp "$src" "dist/Agent2API-$version.apk"
+          # 与 linux-server / windows-server 包同格式（sha256 + 两个空格 + 文件名）
+          ( cd dist && sha256sum "Agent2API-$version.apk" > "Agent2API-$version.apk.sha256" )
+
+          ls -lh dist
+          cat "dist/Agent2API-$version.apk.sha256"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-apk
+          path: dist/*
+          if-no-files-found: error
+
+  # ── iOS IPA（Capacitor）───────────────────────────────────────
+  # 手机端的 iOS 安装包。与 android job 共用同一份 Web 产物
+  # （`npm run build:native` → `android-www/` → `cap sync ios`）。
+  #
+  # ── 为什么必须 macos-26 ──────────────────────────────────────
+  # Capacitor 8 要求 Xcode 26.0+（见官方支持策略），而 Xcode 只能在 macOS 上
+  # 跑。`macos-26` 镜像默认带 Xcode 26.x；`macos-latest` 目前也已迁到 26，
+  # 但显式写死版本号，避免 GitHub 换默认镜像时构建突然失败。
+  #
+  # ── 签名策略：默认出**未签名** IPA ────────────────────────────
+  # 这里不碰 App Store 分发（那需要 Apple Developer Program、证书、描述文件
+  # 与 App Store Connect 凭据，都得用户自己配）。默认产出的是**未签名 .ipa**：
+  # 可以用 AltStore / SideStore / Sideloadly 拿自己的 Apple ID 重签安装。
+  #
+  # 要出已签名包时，在仓库 Secrets 里配齐下面四个，job 会自动改走签名分支：
+  #   IOS_CERTIFICATE_BASE64   .p12 分发证书的 base64
+  #   IOS_CERTIFICATE_PASSWORD .p12 的密码
+  #   IOS_PROVISIONING_PROFILE  .mobileprovision 的 base64
+  #   IOS_TEAM_ID               Apple Developer Team ID
+  # 生成 base64：base64 -i cert.p12 | tr -d '\n'
+  # 缺任何一个都退回未签名包，并在日志里明确说明，不静默产出半成品。
+  #
+  # ── 版本号从哪来 ────────────────────────────────────────────
+  # 与 APK 同源：`desktop-tauri/mobile/package.json` 的 version。
+  # xcodebuild 用 MARKETING_VERSION / CURRENT_PROJECT_VERSION 覆盖 pbxproj 里的
+  # 1.0 / 1，保证与 tag 逐字一致（beta 后缀也能带上）。CFBundleVersion 只允许
+  # 数字与点，所以预发布后缀只进 MARKETING_VERSION，build number 用折算整数。
+  ios:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 安装 Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          # 与 android job 同因：mobile 的构建依赖 ui-kit 的源码与样式
+          cache-dependency-path: |
+            desktop-tauri/ui-kit/package-lock.json
+            desktop-tauri/mobile/package-lock.json
+
+      - name: 确认 Xcode 版本
+        run: |
+          xcodebuild -version
+          # Capacitor 8 要求 26.0+；低于这个版本直接失败，不产出装不上的包
+          major="$(xcodebuild -version | head -1 | sed -E 's/Xcode ([0-9]+).*/\1/')"
+          if [ "$major" -lt 26 ]; then
+            echo "::error::需要 Xcode 26.0+（Capacitor 8 的要求），当前是 $major"
+            exit 1
+          fi
+
+      - name: 安装依赖
+        run: |
+          npm --prefix desktop-tauri/ui-kit ci
+          npm --prefix desktop-tauri/mobile ci
+
+      # 先出 Web 产物再同步进原生工程：
+      #   tsc --noEmit → vite build --mode apk（产物落 android-www/）
+      #   → cap sync ios（拷进 ios/App/App/public，并重写 CapApp-SPM/Package.swift）
+      - name: 构建 Web 产物并同步到 iOS 工程
+        run: cd desktop-tauri/mobile && npm run build:ios
+
+      - name: 解析版本号
+        id: version
+        run: |
+          cd desktop-tauri/mobile
+          version="$(node -p "require('./package.json').version")"
+          # 3.1.0-beta.1 → MARKETING_VERSION 保留完整后缀；build number 用三段折算
+          build="$(node -p "
+            const v = require('./package.json').version.split('-')[0].split('.');
+            String(Number(v[0]) * 10000 + Number(v[1]) * 100 + Number(v[2] || 0));
+          ")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "版本: $version / build $build"
+
+      # ── 可选签名：四个 secret 齐了才走 ──────────────────────
+      - name: 还原 iOS 签名材料
+        id: signing
+        env:
+          IOS_CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+        run: |
+          if [ -z "$IOS_CERTIFICATE_BASE64" ] || [ -z "$IOS_CERTIFICATE_PASSWORD" ] \
+             || [ -z "$IOS_PROVISIONING_PROFILE" ] || [ -z "$IOS_TEAM_ID" ]; then
+            echo "::notice::未配置 iOS 签名 secret，产出未签名 IPA（可用 AltStore / SideStore 重签安装）"
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # runner 是干净的，导入的证书要有个 keychain 落点
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          security create-keychain -p "" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "" "$KEYCHAIN"
+
+          echo "$IOS_CERTIFICATE_BASE64" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$IOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo "$IOS_PROVISIONING_PROFILE" | base64 -d \
+            > "$HOME/Library/MobileDevice/Provisioning Profiles/profile.mobileprovision"
+
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: 构建未签名 Archive
+        run: |
+          cd desktop-tauri/mobile/ios/App
+
+          # CODE_SIGNING_ALLOWED=NO 让 xcodebuild 不去找证书 —— 签名在下一步
+          # 单独处理，这样「有没有配 secret」不会影响这一步能否跑通。
+          xcodebuild \
+            -project App.xcodeproj \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            MARKETING_VERSION="${{ steps.version.outputs.version }}" \
+            CURRENT_PROJECT_VERSION="${{ steps.version.outputs.build }}" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            archive
+
+          app="$RUNNER_TEMP/App.xcarchive/Products/Applications/App.app"
+          [ -d "$app" ] || { echo "::error::Archive 里没有 App.app"; exit 1; }
+
+      - name: 打包 IPA（签名 / 未签名两条路）
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          app="$RUNNER_TEMP/App.xcarchive/Products/Applications/App.app"
+          mkdir -p dist
+
+          if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
+            # 已签名：走官方导出流程（会重签并嵌入描述文件）
+            cat > "$RUNNER_TEMP/ExportOptions.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store-connect</string>
+            <key>teamID</key>
+            <string>${{ secrets.IOS_TEAM_ID }}</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>uploadSymbols</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+
+            xcodebuild -exportArchive \
+              -archivePath "$RUNNER_TEMP/App.xcarchive" \
+              -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+              -exportPath "$RUNNER_TEMP/export"
+
+            src="$(find "$RUNNER_TEMP/export" -maxdepth 1 -name '*.ipa' | head -1)"
+            [ -n "$src" ] || { echo "::error::导出目录里没有 .ipa"; exit 1; }
+            cp "$src" "dist/Agent2API-$version.ipa"
+            echo "→ 已导出签名 IPA"
+          else
+            # 未签名：手工拼 Payload 结构（AltStore / SideStore 能直接重签这个形态）
+            mkdir -p "$RUNNER_TEMP/Payload"
+            cp -R "$app" "$RUNNER_TEMP/Payload/"
+            ( cd "$RUNNER_TEMP" && zip -qry "$GITHUB_WORKSPACE/dist/Agent2API-$version.ipa" Payload )
+            echo "→ 已打包未签名 IPA"
+          fi
+
+          ( cd dist && shasum -a 256 "Agent2API-$version.ipa" > "Agent2API-$version.ipa.sha256" )
+          ls -lh dist
+          cat "dist/Agent2API-$version.ipa.sha256"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-ipa
           path: dist/*
           if-no-files-found: error

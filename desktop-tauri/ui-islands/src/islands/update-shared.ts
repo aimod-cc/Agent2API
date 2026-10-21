@@ -48,6 +48,14 @@ export type UpdateInfo = {
   installerKind?: string
   /** 检查时刻（后端给的；前端不用本地时钟冒充） */
   checkedAt?: number
+  /** 后端记录的最近一次检查失败原因（成功时为空）。桌面壳的 checkUpdate 不带它，
+   *  只有 /api/update/status 有 —— 面板据此判断「缓存里的结果是不是已被一次失败覆盖」 */
+  lastError?: string | null
+  /** 最近一次**尝试**检查的时刻（成功与失败都记）。与 checkedAt（最近一次成功）比较，
+   *  大于它说明之后又失败过一次 */
+  lastAttemptAt?: number
+  /** 后端那一轮检查是否正在执行（在途时不把旧的 lastError 当成「这次失败」） */
+  checking?: boolean
   /** 仅 getUpdateStatus 有：后端定时任务还没查过时为 false */
   checked?: boolean
   /* ── 容器内更新（Linux headless / Docker 专有，桌面端恒为 false/null）──
@@ -190,6 +198,8 @@ export type SharedWindow = {
   wbSettingsPanel?: { showCategory?: (category: string) => void }
   /** 更新日志的 Markdown 渲染（保持调用，不在这里重写它） */
   wbMarkdown?: { render?: (text: string) => string }
+  /** 内联 SVG 图标集（ui/icons.js 注入；交流群弹窗的品牌标从这里取） */
+  wbIcons?: { icon?: (name: string, size?: number) => string }
 }
 
 export function shared(): SharedWindow {
@@ -231,31 +241,30 @@ export async function openExternal(url: string): Promise<void> {
 }
 
 /**
- * 官方 QQ 群号。两处用：面板页脚那颗「加入 QQ 群」的悬停提示，以及加群弹窗里
- * 显示的「群号」（可复制，给人搜不到码时手打）。
+ * 官方 QQ 群号（两个群）。加群弹窗里逐个显示并可复制；群 1 已接近满员，加群时
+ * 优先给群 2 —— 这条提示写在弹窗里，不在常量上。
+ *
+ * 为什么不摆二维码：二维码是打进包里的静态图，换群 / 换码就得跟着发一次版。
+ * 现在群号会变（群 1 满员、后续可能再开群），只留群号 + 复制按钮，改一个常量即可。
+ *
+ * 顺带记一笔：桌面版 QQ 能接的两条加群路子都坏在 QQ 自己那一层 —— `mqqapi://`
+ * 的群名片 QQ NT 不认，`qm.qq.com/q/…` 那条分享链接只认 QQ 内置浏览器。所以
+ * 这里只给群号（手打 / 复制到 QQ 搜索），不假装能一键跳转。
  */
-export const QQ_GROUP = '1127656296'
+export const QQ_GROUPS = [
+  { no: '1127656296', nearlyFull: true },
+  { no: '1130894674', nearlyFull: false },
+] as const
 
 /**
- * 加群二维码：**随界面一起打包**的一张小图（`ui/assets/qq-group/<群号>.jpg`，
- * 与 provider 图标同在 `ui/assets/` 下，同样按相对路径引用）。
- *
- * ── 为什么落在这里，而不是外链 ──────────────────────────────
- * 先后试过两条远程路子，都不成立：
- *   · `mqqapi://card/show_pslcard?…&card_type=group`（社区里流传最广的「一键加群」）：
- *     协议确实注册了、能拉起 QQ 主程序，但桌面版 QQ NT 9.9.36 打开那张群名片后自己
- *     弹「当前QQ暂不支持该内容」；这个拒绝**发生在 QQ 里面**，壳只看得到 ShellExecuteW
- *     成功，判断不了、也就接不了「失败再换一条路」的兜底。
- *   · 群里「分享 → 复制加群链接」给出的 `https://qm.qq.com/q/xxxx`：它是给 QQ 内置
- *     浏览器 / 手机 QQ 用的加群页（靠 `qqapi.wk.js` 那套 App 内 SDK 完成加群），
- *     系统浏览器里走不通。
- * 外链托管（GitHub raw、自建 Worker）也都不如内置：图是死的、就那么一张，放进安装包
- * 不用联网、不受网络环境影响，扫码这条路也不依赖对方 QQ 的版本。
- *
- * 代价说清楚：图在包里，**换群 / 换码必须跟着发一次版**（改文件名 + 这一个常量），
- * 不像外链那样能只换服务端。文件名就用群号，两处对得上即可。
+ * 其它社区入口。都是普通 https 链接，交给系统默认浏览器打开（与更新日志里的
+ * GitHub 链接同一条路：`data-external` 委托 + openReleasePage）。
+ * 展示名不放在这里 —— 它要跟着界面语言走，由调用方写 t() 字面量。
  */
-export const QQ_GROUP_QR = `assets/qq-group/${QQ_GROUP}.jpg`
+export const COMMUNITY_LINKS = [
+  { id: 'telegram', url: 'https://t.me/+9gM8YPvgRL02NGRl' },
+  { id: 'discord', url: 'https://discord.gg/z9GzSJMWp' },
+] as const
 
 /** 更新日志正文：渲染交给 wbMarkdown（不重写它），只做缺失兜底 */
 export function markdownHtml(notes: string): string {
@@ -429,8 +438,13 @@ export function buildProxyPick(selection: ProxySelection): {
 
   const items: Array<{ value: string; label: string; disabled?: boolean }> = [{ value: '', label: t('直连') }]
   for (const item of poolItems) {
-    // 「名字（协议 主机:端口）」—— 与账号页代理列、账号弹窗的代理表单同一格式
-    items.push({ value: `${POOL_VALUE_PREFIX}${item.id}`, label: poolItemLabel(item) })
+    // 「名字（协议 主机:端口）」—— 与账号页代理列、账号弹窗的代理表单同一格式。
+    // 禁用项置灰：出口解析会失败（更新走直连），与账号页代理列同一口径
+    items.push({
+      value: `${POOL_VALUE_PREFIX}${item.id}`,
+      label: poolItemLabel(item),
+      disabled: item.enabled === false,
+    })
   }
   if (selection.pool === null) {
     // 还没读到（弹窗刚打开、请求在途）：给一句「读取中」而不是

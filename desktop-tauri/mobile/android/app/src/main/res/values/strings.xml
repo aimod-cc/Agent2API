@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Agent2API</string>
+    <string name="title_activity_main">Agent2API</string>
+    <string name="package_name">com.agent2api.mobile</string>
+    <string name="custom_url_scheme">com.agent2api.mobile</string>
+</resources>

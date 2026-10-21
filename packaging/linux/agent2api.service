@@ -1,0 +1,63 @@
+[Unit]
+Description=Agent2API 网关（多提供商本地网关，无界面服务形态）
+Documentation=https://github.com/Agent2API/agent2api
+# 网关要出网调上游（模型清单、账号签到、版本检查），等网络真就绪再启动，
+# 否则首次拉清单会全是 DNS 失败，日志里一片红但服务其实没坏。
+After=network-online.target
+Wants=network-online.target
+# 防重启风暴：10 分钟内超过 5 次就不再无限重试，让 systemd 标记 failed，
+# `systemctl status` 能直接看到「启动失败」而不是悄无声息地反复重启。
+# ⚠️ 这两项属于 [Unit] 段 —— 写在 [Service] 里会被 systemd 静默忽略
+# （不报错，但限制不生效），排查「为什么还在无限重启」时容易踩。
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# install.sh 会把这里的用户名 / 路径按实际安装位置改写
+User=agent2api
+Group=agent2api
+WorkingDirectory=/opt/agent2api
+
+# ── 配置：全部走环境变量 ────────────────────────────────────
+# 变量清单见 /etc/agent2api/agent2api.env（由 install.sh 生成）。
+#
+# ⚠️ 顺序有意义：systemd 按出现顺序赋值，**同名变量的后者覆盖前者**。
+# 所以 EnvironmentFile 必须放在前两条 Environment= **之后** —— 否则用户在
+# env 文件里改的 AGENT2API_PROXY_HOME / _UI_DIR 会被硬编码默认值顶掉，
+# 表现为「改了配置不生效」。
+Environment=AGENT2API_PROXY_HOME=/var/lib/agent2api
+Environment=AGENT2API_UI_DIR=/opt/agent2api/ui
+EnvironmentFile=/etc/agent2api/agent2api.env
+
+# 裸机部署**强制关闭**容器内自更新，所以这条刻意放在 EnvironmentFile 之后
+# （要的就是覆盖用户配置）：那个实现是「替换文件后退出进程，等外部把它们
+# 拉起来」，而它替换的 /opt 下文件属 root、服务账号无权写 —— 打开也只会在
+# 「写文件」那一步失败。升级请走 install.sh --upgrade。
+Environment=AGENT2API_SELF_UPDATE=0
+
+ExecStart=/opt/agent2api/agent2api-server
+
+# ── 崩了就拉起来 ────────────────────────────────────────────
+# Rust 侧是 panic=abort：任何未捕获 panic 直接 abort 整个进程。网关承载的是
+# 转发请求，偶发上游畸形响应可能触发，没有自动拉起就是「服务挂了等人发现」。
+Restart=always
+RestartSec=3
+
+# ── 优雅停机 ────────────────────────────────────────────────
+# SIGTERM → 网关走既有收尾路径：停 HTTP → 等在途请求跑完（SSE 长连接可能
+# 还没断）。给足 30 秒，超时 systemd 才 SIGKILL。
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# ── 加固 ────────────────────────────────────────────────────
+# 网关只需要：读自己的程序与界面、读写数据目录、出网。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# 唯一可写的路径（SQLite 库 / 配置 / 日志都在这下面）
+ReadWritePaths=/var/lib/agent2api
+
+[Install]
+WantedBy=multi-user.target

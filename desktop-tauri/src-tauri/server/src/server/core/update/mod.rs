@@ -48,9 +48,10 @@ use serde_json::{json, Map, Value};
 use crate::server::logging;
 
 pub use version::{
-    api_base, assert_downloadable, compare_versions, custom_api_base, installer_kind,
-    pick_asset_by_name, pick_installer, safe_file_name, server_bundle_name, UpdateError,
-    DEFAULT_REPO, GITHUB_API, MAX_INSTALLER_BYTES,
+    api_base, assert_downloadable, compare_versions, custom_api_base, desktop_shell,
+    installer_kind, pick_android_apk, pick_asset_by_name, pick_installer, safe_file_name,
+    server_bundle_name, set_desktop_shell, UpdateError, DEFAULT_REPO, GITHUB_API,
+    MAX_INSTALLER_BYTES,
 };
 /// 「更新设置」弹窗的 GitHub 令牌接口（api::update 走这两条；加解密本体
 /// 只在 token 模块内部，见它的模块头）
@@ -246,6 +247,12 @@ impl UpdateManager {
                 .and_then(Value::as_bool)
                 == Some(true),
             "asset": asset.clone().unwrap_or(Value::Null),
+            // ── 手机端（APK）────────────────────────────────────
+            // 与 `asset` 并列：网关同时服务电脑和手机，两边各取所需。
+            // 手机端拿这个 GitHub 下载地址自己去下（手机自己出网，不经网关中转）。
+            // 该版本没挂 apk 时是 null，手机端据此藏起「立即更新」。
+            "androidAsset": downloadable(latest.as_ref().and_then(|value| value.get("androidAsset")))
+                .unwrap_or(Value::Null),
             // ── 容器内更新（Linux / Docker）──────────────────────
             // selfUpdate 说的是「这个部署能不能原地更新」（平台 + 环境开关），
             // serverAsset 说的是「这一版有没有可下的包」—— 两者分开，面板才能

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 与 ui/assets/app-icon-512.png 的底色一致（品牌蓝） -->
+    <color name="ic_launcher_background">#007AFF</color>
+</resources>

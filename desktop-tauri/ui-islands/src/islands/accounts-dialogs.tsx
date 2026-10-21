@@ -18,6 +18,7 @@
  */
 
 import * as React from 'react'
+import { useSyncExternalStore } from 'react'
 import {
   Button,
   Checkbox,
@@ -61,7 +62,9 @@ import {
 import { limiterDraftOf, LimiterSection, readLimiterChanges } from './accounts-dialog-limiter'
 import {
   allAccounts, clashOptions, closeDialog, findAccount, getStore, proxyPoolOptions,
+  subscribe,
 } from './accounts-data'
+import { GroupSettingsDialog } from './accounts-group-settings'
 
 /** 名称长度上限，与后端 custom_providers::MAX_NAME_CHARS 一致（前端先挡一次） */
 const MAX_PROVIDER_NAME_CHARS = 64
@@ -395,7 +398,10 @@ export function ProxyForm({
               </SelectTrigger>
               <SelectContent>
                 {(pool ?? []).map(item => (
-                  <SelectItem key={item.id} value={item.id}>
+                  // 已禁用的条目置灰不可选：选它保存后解析必然失败（转发回退直连），
+                  // 用户只会看到「代理已禁用」。要启用请去「网络代理」页。
+                  // 当前值恰好是禁用项时仍正常显示（触发器读的是同一份 label）
+                  <SelectItem key={item.id} value={item.id} disabled={item.enabled === false}>
                     {poolItemLabel(item)}
                   </SelectItem>
                 ))}
@@ -440,7 +446,13 @@ export function ProxyForm({
               <MultiSelect id={`${idPrefix}-rotate-exits`}
                 value={draft.rotateIds}
                 onValueChange={values => set({ rotateIds: values.map(String) })}
-                options={(pool ?? []).map(item => ({ value: item.id, label: poolItemLabel(item) }))}
+                // 禁用项置灰：后端轮询取用时会跳过它们（`candidate_ids` 只留启用项），
+                // 列出来能选等于让用户白挑一条永不生效的出口
+                options={(pool ?? []).map(item => ({
+                  value: item.id,
+                  label: poolItemLabel(item),
+                  disabled: item.enabled === false,
+                }))}
                 placeholder={t('选择要轮询的代理（可多选）')}
                 aria-label={t('轮询的代理')} />
               <Button variant='outline' size='sm' onClick={() => loadPool(true)}>{t('重新读取')}</Button>
@@ -1125,7 +1137,7 @@ export function AccountSettingsDialog({ id, onClose }: { id: string; onClose: ()
                   </div>
                   <p className='detail acct-dlg-hint'>
                     {concDefault > 0
-                      ? t('并发上限 受上游硬顶约束，达到上限的账号跳过、请求转给其他账号（原列表 ⋯ 菜单的「并发上限」入口已并入这里）')
+                      ? t('并发上限 填 0 即按本家默认 {default}；填 1 或 2 就按填的算，更大的数会被本家上限截断（原列表 ⋯ 菜单的「并发上限」入口已并入这里）', { default: concDefault })
                       : t('并发上限 0~{max}；达到上限的账号跳过、请求转给其他账号（原列表 ⋯ 菜单的「并发上限」入口已并入这里）', { max: CONC_MAX })}
                   </p>
                 </div>
@@ -1261,9 +1273,9 @@ function BatchDialog({ ids, action, onClose }: { ids: string[]; action: string; 
   const [busy, setBusy] = React.useState(false)
   const [result, setResult] = React.useState<React.ReactNode>('')
   const accounts = ids.map(id => findAccount(id)).filter((account): account is AccountRecord => account !== null)
-  /** 选中的账号里「本家没有『不限』这一档」的硬顶（CodeArts 3，其余 0）：只影响提示
-   *  文案 —— 这些家即使填 0、或填一个比硬顶更小的数，实际并发仍由硬顶决定
-   *  （见 store_util 的 `max_concurrent_public_for`）。空选区取 0 */
+  /** 选中的账号里「本家没有『不限』这一档」的默认并发（CodeArts 3，其余 0）：只影响
+   *  提示文案 —— 这些家填 0 等于按默认并发；填 1 / 2 就按填的算，填更大的数会被
+   *  上游硬顶截断（见 store_util 的 `max_concurrent_public_for`）。空选区取 0 */
   const concHardCap = accounts.reduce(
     (cap, account) => Math.max(cap, Number(providerFeatures(providerOf(account)).concurrencyDefault) || 0),
     0,
@@ -1404,7 +1416,7 @@ const verb = { enable: t('启用'), disable: t('禁用'), proxy: t('修改代理
                 </div>
                 <p className='detail acct-dlg-hint'>
                   {concHardCap > 0
-                    ? t('并发上限 0~{max}；有上游硬顶的家（如 CodeArts）以它的硬顶为准；达到上限的账号会被跳过、请求转给其他账号', { max: CONC_MAX })
+                    ? t('并发上限 0~{max}；CodeArts 等有默认值的家填 0 即按本家默认；达到上限的账号会被跳过、请求转给其他账号', { max: CONC_MAX })
                     : t('并发上限 0~{max}；达到上限的账号会被跳过、请求转给其他账号', { max: CONC_MAX })}
                 </p>
               </div>
@@ -1427,15 +1439,21 @@ const verb = { enable: t('启用'), disable: t('禁用'), proxy: t('修改代理
 /* ─── 供页面调用的入口 ───────────────────────── */
 
 /**
- * 两个弹窗的宿主：按 store 里的 dialog 状态挂载。
+ * 三个弹窗的宿主：按 store 里的 dialog 状态挂载。
  * 弹窗走组件库的 Dialog（Esc / 点遮罩关闭、焦点陷阱、滚动锁定都内建），关闭即卸载 ——
  * index.html 里那两个常驻的 `#account-modal` / `#batch-modal` 因此不再需要。
+ *
+ * 分组设置（`kind: 'group'`）的单体在 accounts-group-settings.tsx：它只跟一家打交道，
+ * 内容与账号设置、批量操作都不重叠，没必要塞进这个已经一千五百行的文件。
  */
 export function AccountsDialogs() {
-  const store = getStore()
+  const store = useSyncExternalStore(subscribe, () => getStore())
   if (!store.dialog) return null
   if (store.dialog.kind === 'settings') {
     return <AccountSettingsDialog key={store.dialog.id} id={store.dialog.id} onClose={closeDialog} />
+  }
+  if (store.dialog.kind === 'group') {
+    return <GroupSettingsDialog key={store.dialog.provider} provider={store.dialog.provider} onClose={closeDialog} />
   }
   return <BatchDialog key={store.dialog.ids.join(',')} ids={store.dialog.ids} action={store.dialog.action}
     onClose={closeDialog} />

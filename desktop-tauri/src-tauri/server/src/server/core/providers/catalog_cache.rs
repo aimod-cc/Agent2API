@@ -106,6 +106,22 @@ pub const SCOPE_ANTIGRAVITY: &str = "antigravity";
 /// OfficeAce（华为云果办 / OfficeClaw）的模型目录缓存槽
 pub const SCOPE_OFFICEACE: &str = "officeace";
 
+/// 智谱清言（`chatglm.cn`）的模型目录缓存槽
+pub const SCOPE_CHATGLM: &str = "chatglm";
+/// AtomCode（AtomGit / GitCode）的模型目录缓存槽
+pub const SCOPE_ATOMCODE: &str = "atomcode";
+
+/// ModelScope（魔搭）**国内站**的模型目录缓存槽
+/// （`GET {推理域}/models`，OpenAI 格式目录）
+pub const SCOPE_MODELSCOPE_CN: &str = "modelscopeCn";
+/// ModelScope **国际站**（两个站点各一份清单 —— 实测两地各 36 条且内容不同，
+/// 缓存必须分开，否则先刷的那一站会把另一站的清单覆盖掉，
+/// 见 `providers::modelscope::region` 的模块头）
+pub const SCOPE_MODELSCOPE_INTL: &str = "modelscopeIntl";
+
+/// LobsterAI（网易有道「有道龙虾」）的模型目录缓存槽
+pub const SCOPE_LOBSTERAI: &str = "lobsterai";
+
 /// 全部 scope（事实来源：`cached_scopes` 按它遍历；新增一家时加在这里）。
 pub const ALL_SCOPES: &[&str] = &[
     SCOPE_WORKBUDDY,
@@ -126,6 +142,12 @@ pub const ALL_SCOPES: &[&str] = &[
     SCOPE_MONKEYCODE_INTL,
     SCOPE_COMMANDCODE,
     SCOPE_ANTIGRAVITY,
+    SCOPE_OFFICEACE,
+    SCOPE_CHATGLM,
+    SCOPE_MODELSCOPE_CN,
+    SCOPE_MODELSCOPE_INTL,
+    SCOPE_ATOMCODE,
+    SCOPE_LOBSTERAI,
 ];
 
 /// 一份清单缓存

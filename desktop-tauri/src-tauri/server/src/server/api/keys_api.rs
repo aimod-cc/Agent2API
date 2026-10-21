@@ -38,7 +38,7 @@ use axum::response::Response;
 use serde_json::{json, Value};
 
 use crate::server::config;
-use crate::server::core::api_keys;
+use crate::server::core::api_keys::{self, RouteMode};
 use crate::server::errors;
 use crate::server::http::{ok_json, parse_body};
 use crate::server::logging;
@@ -151,14 +151,94 @@ fn body_object(body: &Bytes) -> Result<serde_json::Map<String, Value>, Response>
         .ok_or_else(|| errors::management_error(400, "请求体必须是 JSON 对象"))
 }
 
+/// Parse the two route fields as one atomic PATCH/POST update.
+///
+/// Old clients may omit both fields. Once either is present, both must be
+/// present so a partial request cannot silently detach a Key from its group.
+fn parse_route_fields(
+    object: &serde_json::Map<String, Value>,
+) -> Result<Option<(RouteMode, Option<String>)>, Response> {
+    let mode_value = object.get("routeMode");
+    let group_value = object.get("accountGroupId");
+    if mode_value.is_none() && group_value.is_none() {
+        return Ok(None);
+    }
+    if mode_value.is_none() || group_value.is_none() {
+        return Err(errors::management_error(
+            400,
+            "routeMode 和 accountGroupId 必须同时提供",
+        ));
+    }
+    let mode = match mode_value {
+        Some(Value::String(value)) => RouteMode::parse(value.trim()).ok_or_else(|| {
+            errors::management_error(400, format!("未知的 routeMode: {value}"))
+        })?,
+        Some(_) => return Err(errors::management_error(400, "routeMode 必须是字符串")),
+        None => unreachable!(),
+    };
+    let group_id = match group_value {
+        Some(Value::Null) => None,
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err(errors::management_error(400, "accountGroupId 不能为空"));
+            }
+            Some(value.to_string())
+        }
+        Some(_) => return Err(errors::management_error(400, "accountGroupId 必须是字符串或 null")),
+        None => unreachable!(),
+    };
+    match (mode, group_id) {
+        (RouteMode::DefaultPool, None) => Ok(Some((mode, None))),
+        (RouteMode::DefaultPool, Some(_)) => Err(errors::management_error(
+            400,
+            "default_pool 不能绑定账号组",
+        )),
+        (RouteMode::AccountGroup, Some(group_id)) => Ok(Some((mode, Some(group_id)))),
+        (RouteMode::AccountGroup, None) => Err(errors::management_error(
+            400,
+            "account_group 必须绑定账号组",
+        )),
+    }
+}
+
+/// Validate only the route and provider allowlist supplied by this request.
+fn ensure_group_route(
+    state: &ServerState,
+    route: Option<(RouteMode, Option<String>)>,
+    allowed_providers: Option<&[String]>,
+) -> Result<(), Response> {
+    let Some((route_mode, group_id)) = route.as_ref() else {
+        return Ok(());
+    };
+    if *route_mode != RouteMode::AccountGroup {
+        return Ok(());
+    }
+    if allowed_providers.is_some_and(|providers| !providers.is_empty()) {
+        return Err(errors::management_error(
+            400,
+            "account_group 模式不能同时设置 allowedProviders",
+        ));
+    }
+    let Some(group_id) = group_id.as_deref() else {
+        return Err(errors::management_error(400, "account_group 必须绑定账号组"));
+    };
+    state
+        .account_groups()
+        .get(group_id)
+        .map(|_| ())
+        .map_err(|error| errors::management_error(error.status_code, error.message))
+}
+
 /// 面板管理员已注册时，拒绝让「最后一把启用的 Key」消失（删除或停用）。
 ///
 /// 管理员一注册，`/api/*` 就要求会话或 Key 认证（`require_api_key` 的
-/// panel_auth 分支），而桌面壳的管理请求靠自动携带第一把启用的 Key 通过
-/// 这道认证 —— 一把启用的都不剩时，壳会被自己的闸门挡在管理 API 外面，
-/// 界面整体不可用且无法自救（建 Key 也要先过闸门；headless 的网页面板
-/// 可以靠登录会话自救，桌面壳没有会话通道）。这是注册后世界里的保护性
-/// 约束：先建新的、再动旧的。注册前的免鉴权模式不受影响。
+/// panel_auth 分支）。桌面壳现在有会话通道（`panel_session`：登录后带
+/// `x-panel-token`），**但也有走到 Key 的场合** —— 登录页本身要在没有会话时
+/// 打开、会话失效后的兜底、以及 `AGENT2API_ALLOW_NO_KEY` 之类不经过登录的部署。
+/// 一把启用的 Key 都不剩时，这些路径全都会被闸门挡在外面，而建 Key 本身也要
+/// 先过闸门（死锁）。所以保留这条保护：先建新的、再动旧的。注册前的免鉴权
+/// 模式不受影响。
 fn guard_last_active_key(entries: &[api_keys::ApiKeyEntry], target_id: &str, action: &str) -> Result<(), Response> {
     if !crate::server::access::panel_auth_enabled() {
         return Ok(());
@@ -203,16 +283,34 @@ pub async fn create_key(State(state): State<ServerState>, body: Bytes) -> Respon
         Ok(value) => value.unwrap_or_default(),
         Err(response) => return response,
     };
-    match api_keys::add(name, key, allowed_providers, allowed_models) {
-        Ok(entry) => {
+    let route = match parse_route_fields(&object) {
+        Ok(Some(route)) => route,
+        Ok(None) => (RouteMode::DefaultPool, None),
+        Err(response) => return response,
+    };
+    let result = state.with_management_lock(|| -> Result<(api_keys::ApiKeyEntry, Value), Response> {
+        ensure_group_route(&state, Some(route.clone()), Some(&allowed_providers))?;
+        let entry = api_keys::add_with_route(
+            name,
+            key,
+            allowed_providers,
+            allowed_models,
+            route.0,
+            route.1,
+        )
+        .map_err(|message| errors::management_error(400, message))?;
+        let mut payload = list_json(&state);
+        if let Some(map) = payload.as_object_mut() {
+            map.insert("created".to_string(), entry.public_json());
+        }
+        Ok((entry, payload))
+    });
+    match result {
+        Ok((entry, payload)) => {
             logging::log("[Config]", &format!("✅ 新增 API Key「{}」，客户端需带 Authorization: Bearer <key>", entry.name));
-            let mut payload = list_json(&state);
-            if let Some(map) = payload.as_object_mut() {
-                map.insert("created".to_string(), entry.public_json());
-            }
             ok_json(payload)
         }
-        Err(message) => errors::management_error(400, message),
+        Err(response) => response,
     }
 }
 
@@ -234,13 +332,49 @@ pub async fn update_key(State(state): State<ServerState>, Path(id): Path<String>
         Ok(value) => value,
         Err(response) => return response,
     };
-    if let Some(false) = enabled {
-        // 停用受与删除同一道约束：它同样会让「启用的 Key」归零
-        if let Err(response) = guard_last_active_key(&api_keys::list(), &id, "停用") {
-            return response;
+    let route = match parse_route_fields(&object) {
+        Ok(route) => route,
+        Err(response) => return response,
+    };
+    let result = state.with_management_lock(|| -> Result<api_keys::ApiKeyEntry, Response> {
+        let entries = api_keys::list();
+        let current = entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .ok_or_else(|| errors::management_error(404, "Key 不存在"))?;
+        let final_route = route
+            .clone()
+            .unwrap_or((current.route_mode, current.account_group_id.clone()));
+        if current.route_mode != RouteMode::AccountGroup
+            && final_route.0 == RouteMode::AccountGroup
+            && allowed_providers.is_none()
+            && !current.allowed_providers.is_empty()
+        {
+            return Err(errors::management_error(
+                400,
+                "切换到 account_group 前必须显式清空 allowedProviders",
+            ));
         }
-    }
-    match api_keys::update(&id, name, enabled, allowed_providers, allowed_models) {
+        ensure_group_route(&state, Some(final_route), allowed_providers.as_deref())?;
+        if let Some(false) = enabled {
+            // 停用受与删除同一道约束：它同样会让「启用的 Key」归零
+            guard_last_active_key(&entries, &id, "停用")?;
+        }
+        match route {
+            Some((route_mode, account_group_id)) => api_keys::update_with_route(
+                &id,
+                name,
+                enabled,
+                allowed_providers,
+                allowed_models,
+                Some(route_mode),
+                Some(account_group_id),
+            ),
+            None => api_keys::update(&id, name, enabled, allowed_providers, allowed_models),
+        }
+        .map_err(|message| errors::management_error(404, message))
+    });
+    match result {
         Ok(entry) => {
             logging::log(
                 "[Config]",
@@ -248,16 +382,17 @@ pub async fn update_key(State(state): State<ServerState>, Path(id): Path<String>
             );
             ok_json(list_json(&state))
         }
-        Err(message) => errors::management_error(404, message),
+        Err(response) => response,
     }
 }
 
 /// DELETE /api/keys/{id}
 pub async fn delete_key(State(state): State<ServerState>, Path(id): Path<String>) -> Response {
-    if let Err(response) = guard_last_active_key(&api_keys::list(), &id, "删除") {
-        return response;
-    }
-    match api_keys::remove(&id) {
+    let result = state.with_management_lock(|| -> Result<(), Response> {
+        guard_last_active_key(&api_keys::list(), &id, "删除")?;
+        api_keys::remove(&id).map_err(|message| errors::management_error(404, message))
+    });
+    match result {
         Ok(()) => {
             let remaining = config::current().api_key_set();
             logging::log(
@@ -266,6 +401,6 @@ pub async fn delete_key(State(state): State<ServerState>, Path(id): Path<String>
             );
             ok_json(list_json(&state))
         }
-        Err(message) => errors::management_error(404, message),
+        Err(response) => response,
     }
 }

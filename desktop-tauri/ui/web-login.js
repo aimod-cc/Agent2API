@@ -112,7 +112,9 @@
         try {
           const result = await config.start();
           if (result?.canceled) {
-            toast(wbI18n.t('已取消登录等待'));
+            // silent：取消是别处（「取消等待」按钮 / 关闭添加账号弹窗）发起的，
+            // 那边已经提示过，这里不再重复 toast
+            if (!result.silent) toast(wbI18n.t('已取消登录等待'));
             return;
           }
           flowSettling = true;

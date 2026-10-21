@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CAPACITOR_DEBUG</key>
+	<string>$(CAPACITOR_DEBUG)</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Agent2API</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<!--
+	  App Transport Security（ATS）。
+
+	  ── 为什么要放开明文 http ─────────────────────────────────────
+	  网关跑在局域网里、通常没有证书，App 里填的地址是
+	  `http://192.168.x.x:3065` 这种形态。iOS 默认会拦掉所有明文连接，
+	  在 WKWebView 里只表现为 fetch 失败，界面上完全看不出原因。
+
+	  ── 为什么两个键都要开 ───────────────────────────────────────
+	  · NSAllowsArbitraryLoads         —— 覆盖 URLSession 一侧（原生插件、
+	    以及 WebView 内部走 URLSession 的那些请求）。
+	  · NSAllowsArbitraryLoadsInWebContent —— 覆盖 WKWebView 里的页面请求。
+	    注意它一旦出现，系统就会**忽略** NSAllowsArbitraryLoads（Apple
+	    文档明确写了这个优先级），所以两个都写，才能保证原生与 Web 两条
+	    链路都放行。
+	  · NSAllowsLocalNetworking —— iOS 17 起 ATS 默认连「IP 地址」都拦，
+	    这一项放行私有网段与 .local 域名。网关地址是用户自己填的，可能落在
+	    10.x / 172.16-31.x / 192.168.x / 100.64.x（tailscale），无法枚举，
+	    所以只能整体放开。
+
+	  ── 风险面 ───────────────────────────────────────────────────
+	  与 Android 的 network_security_config 同一取舍：明文只影响「链路」，
+	  面板仍然要求管理员登录；风险是同一局域网内可嗅探到密码与令牌。想消除
+	  它就给网关配 TLS，然后在 App 里填 https 地址（代码走同一条路径）。
+	  提交 App Store 时这几项需要在审核备注里说明用途（局域网设备管理）。
+	-->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<!--
+	  访问局域网设备需要用户授权（iOS 14+）。缺这一项时，第一次连网关会
+	  直接失败且没有任何提示，用户完全不知道该去哪开权限。
+	-->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>用于连接你在局域网里运行的 Agent2API 网关。</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_http._tcp</string>
+		<string>_https._tcp</string>
+	</array>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>UIWindowSceneSessionRoleApplication</key>
+			<array>
+				<dict>
+					<key>UISceneConfigurationName</key>
+					<string>Default Configuration</string>
+					<key>UISceneDelegateClassName</key>
+					<string>$(PRODUCT_MODULE_NAME).SceneDelegate</string>
+					<key>UISceneStoryboardFile</key>
+					<string>Main</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
+	<key>UIMainStoryboardFile</key>
+	<string>Main</string>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>armv7</string>
+	</array>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<true/>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+</dict>
+</plist>

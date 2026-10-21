@@ -1107,7 +1107,7 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
             // 面板传来的名字是用户自己打的 ⇒ 标 custom（此后续期/重登不改它）
             store.add_officeace_account(&payload, import_name, true)
         }
-        // OrcaTerm（腾讯云遨驰终端桌面客户端）：**粘贴 accessToken**（OAuth JWT）
+// OrcaTerm（腾讯云遨驰终端桌面客户端）：**粘贴 accessToken**（OAuth JWT）
         // → 本地归一化（剥 `Bearer ` / `ot_session=` 前缀；整段 data.bin JSON
         // 直接粘也行）→ 打一次 `GetUserInfo` 做**真实校验**（顺带补 userId 与
         // 昵称；JWT 里本来就有 userId，这一步同时确认 token 没被上游拒绝）→
@@ -1156,6 +1156,185 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
                 import_name,
                 if import_desktop { "desktop" } else { "manual" },
             )
+        }
+        // 智谱清言（`chatglm.cn`）：**三条添加路径**，其中「访客模式」是本家独有的
+        // （见 `chatglm_accounts.rs` 模块头）：
+        //   1. `guest: true`（或既没给令牌也不是 importDesktop）→ 后台空 body 打一次
+        //      `guest/access`，拿到一对令牌 + 一个**新设备号**后落账号。
+        //      不需要手机号 / 扫码 —— 本家「零配置就能用」的入口。
+        //      代价是没有积分体系（余额 / 签到对他们如实跳过）。
+        //   2. 粘贴令牌 → 读 `accessToken` / `token`（可从浏览器 Cookie 里取
+        //      `chatglm_token`）→ 打一次 `user/info` 做**真实校验**（顺带补 uid
+        //      与昵称，并判出它其实是访客还是登录账号）。
+        //   3. `importDesktop: true` → 读本机客户端 Cookies（**DPAPI 加密**，
+        //      仅 Windows 可解，见 `chatglm::credentials`）→ 同样校验后落账号。
+        // 校验失败一律 400（不落空记录）—— 与 OrcaTerm / KukuAI 同一口径：
+        // 添加时验证，要的是「现在真的能用」。
+        Some(crate::server::core::providers::ProviderKind::Chatglm) => {
+            let device_id = crate::server::core::providers::chatglm::credentials::resolve_device_id(
+                payload
+                    .get("deviceId")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            );
+            let plain_token = payload
+                .get("accessToken")
+                .or_else(|| payload.get("access_token"))
+                .or_else(|| payload.get("token"))
+                .or_else(|| payload.get("refreshToken"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let want_guest = payload
+                .get("guest")
+                .and_then(Value::as_bool)
+                .unwrap_or(plain_token.is_none() && !import_desktop);
+            let provider_label = "智谱清言";
+
+            // ── 路径 3：导入本机客户端登录态 ─────────────────────────
+            let (access, refresh) = if import_desktop {
+                match crate::server::core::providers::chatglm::credentials::read_desktop_credentials()
+                {
+                    Ok(Some((access, refresh))) => {
+                        let access = (!access.trim().is_empty()).then_some(access);
+                        let refresh = (!refresh.trim().is_empty()).then_some(refresh);
+                        (access, refresh)
+                    }
+                    Ok(None) => {
+                        return management_error(
+                            400,
+                            "没有在本机找到智谱清言客户端的登录态（请先打开客户端登录，\
+                             或改用「访客模式」/「粘贴令牌」）",
+                        )
+                    }
+                    Err(reason) => return management_error(400, reason),
+                }
+            } else if want_guest {
+                // ── 路径 1：访客换证（本家独有）──────────────────────
+                match crate::server::core::providers::chatglm::http::guest_access(
+                    &device_id, None,
+                )
+                .await
+                {
+                    Ok((access, refresh, _uid)) => (Some(access), Some(refresh)),
+                    Err(error) => return management_error(error.status_code, error.message),
+                }
+            } else {
+                // ── 路径 2：粘贴令牌 ────────────────────────────────
+                let Some(token) = plain_token else {
+                    return management_error(400, "请提供智谱清言的访问令牌（accessToken）");
+                };
+                // 用户可能整段粘了 `chatglm_token=xxx;` 形态
+                let token = token
+                    .trim_start_matches("chatglm_token=")
+                    .trim_end_matches(';')
+                    .trim();
+                (Some(token.to_string()), None)
+            };
+            let Some(access) = access else {
+                return management_error(400, "没有取到智谱清言的访问令牌");
+            };
+            // 真实校验：拿令牌问一次 user/info。顺带读回 uid / 昵称 / 访客标记 ——
+            // 这三样决定账号 id、展示名与「有没有积分体系」。
+            let verified = match crate::server::core::providers::chatglm::http::user_info(
+                &access, &device_id, None,
+            )
+            .await
+            {
+                Ok(info) => info,
+                Err(error) => return management_error(400, format!("{provider_label}校验失败：{}", error.message)),
+            };
+            let is_guest = verified
+                .get("is_guest")
+                .and_then(Value::as_bool)
+                .unwrap_or_else(|| {
+                    crate::server::core::providers::chatglm::credentials::token_is_guest(
+                        &access, want_guest,
+                    )
+                });
+            let uid = verified
+                .get("_id")
+                .or_else(|| verified.get("user_id"))
+                .or_else(|| verified.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let nickname = verified
+                .get("nickname")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let credentials = crate::server::core::providers::chatglm::credentials::ChatglmCredentials {
+                access_token: access,
+                // 粘贴路径拿不到 refresh_token：留空，续期会如实报「没有 refresh_token」
+                refresh_token: refresh.unwrap_or_default(),
+                device_id,
+                is_guest,
+                uid,
+                nickname,
+            };
+            store.add_chatglm_account(
+                &credentials,
+                import_name,
+                if import_desktop {
+                    "desktop"
+                } else if want_guest {
+                    "guest"
+                } else {
+                    "manual"
+                },
+            )
+        }
+        // ModelScope（魔搭）的两个站点：粘贴 `ms-` 令牌 + **先探活换身份**。
+        //
+        // 为什么本家要出网（不是「粘贴即落盘」）：那枚令牌是不透明的，
+        // 解不出身份 —— 不出网就只能拿令牌尾号当账号 id，同一个账号换一次令牌
+        // 就会变成两条记录。所以照 Qoder / OfficeAce 的既有分工：**网络在锁外**
+        // （这里 await 一次探活），把结果作为参数交给同步的落账号入口
+        // （`add_modelscope_account` 只在锁内做读-改-写）。
+        //
+        // 探活顺带触发当日签到（见 `modelscope::probe` 的模块头）——
+        // 添加账号的人当天就把魔粒拿到手，这是上游的接口语义决定的，
+        // 不是这里额外做了一件事。
+        //
+        // 地区由 kind 反查（provider 身份是权威，payload 里没有地区字段）。
+        Some(kind @ (crate::server::core::providers::ProviderKind::Modelscope
+            | crate::server::core::providers::ProviderKind::ModelscopeIntl)) => {
+            let region = crate::server::core::providers::modelscope::Region::from_kind(kind)
+                .unwrap_or(crate::server::core::providers::modelscope::Region::Cn);
+            let token = crate::server::core::providers::modelscope::credentials::token_from_payload(&payload);
+            if token.is_empty() {
+                Err(AccountStoreError::new(
+                    "缺少令牌（accessToken / apiKey / token / session）",
+                    400,
+                ))
+            } else {
+                match crate::server::core::providers::modelscope::probe::identify(region, &token).await {
+                    Ok(identity) => store.add_modelscope_account(region, &payload, &identity, import_name),
+                    Err(error) => Err(AccountStoreError::new(error.message, error.status_code)),
+                }
+            }
+        }
+        // AtomCode（AtomGit / GitCode）：粘贴令牌对（accessToken + refreshToken）。
+        // **不调上游**（与 CodeArts / OfficeAce 同口径）——令牌是浏览器登录换来的，
+        // 添加时没有可交换的授权码；目录与连通性由刷新链路验。
+        // ⚠️ refreshToken 强烈建议给：没有它账号无法自动续期（本家的令牌不是 JWT，
+        // 7 天到期后只能重新登录），见 `providers::atomcode::credentials` 的模块头。
+        Some(crate::server::core::providers::ProviderKind::Atomcode) => {
+            // 面板传来的名字是用户自己打的 ⇒ 标 custom（此后续期/重登不改它）
+            store.add_atomcode_account(&payload, import_name)
+        }
+        // LobsterAI：**没有粘贴路径**（如实拒绝，而不是落一条用不了的账号）。
+        // 它的凭证里有两个 `keyfrom` 与一个 `uuid`，只在换码那一刻由上游下发 ——
+        // 用户从别处粘不出这三样，缺了它们账号续不了期（见
+        // `providers::lobsterai::credentials` 的模块头）。所以本家只有一个入口：
+        // 网页登录落到本机 loopback 回调后由适配器落账号。
+        Some(crate::server::core::providers::ProviderKind::LobsterAi) => {
+            return management_error(
+                400,
+                "LobsterAI 只能通过「网页登录」添加：它的续期需要换码时下发的 uuid 与 keyfrom，粘贴给不出这三项",
+            );
         }
         // WorkBuddy 系的两家（国内版 / 国际版）：同一套凭证形态与落账号路径，
         // 差别只有归属 —— provider id 自己就是归属（拆家后不再从 payload 里的
@@ -1295,7 +1474,7 @@ pub async fn batch_accounts(state: &ServerState, body: &Bytes) -> Response {
         .to_string();
 
     let result = match action.as_str() {
-        "remove" => state.store().batch_remove(&ids),
+        "remove" => state.with_management_lock(|| state.store().batch_remove(&ids)),
         "enable" | "disable" => {
             let enabled = action == "enable";
             state.store().batch_update(&ids, &json!({ "enabled": enabled }))
@@ -1433,6 +1612,21 @@ pub async fn refresh_account(state: &ServerState, body: &Bytes) -> Response {
     // 用户点「刷新 Token」收到的是腾讯那侧的错（与 CodeArts/Trae 同一条理由）。
     if state.store().officeace_account_record(&id).is_some() {
         return refresh_provider_account(state, &id, ProviderKind::OfficeAce).await;
+    }
+    // AtomCode：续期走它自己的适配器（`POST {broker}/oauth/refresh`，**会轮换**
+    // refresh token，且必须单飞 + 写回）。**这条不能省**：漏了就落到 workbuddy
+    // 兜底链路，用户点「刷新 Token」收到的是腾讯那侧的错（与 CodeArts/Trae/
+    // OfficeAce 同一条理由），而 AtomGit 的令牌会因此悄悄过期到只能重新登录。
+    if state.store().atomcode_account_record(&id).is_some() {
+        return refresh_provider_account(state, &id, ProviderKind::Atomcode).await;
+    }
+    // LobsterAI：续期走它自己的适配器（`POST /api/auth/refresh`，**会轮换**，
+    // 且必须把 uuid 与两个 keyfrom 原样回传）。**这条不能省**：漏了就落到
+    // workbuddy 兜底链路，用户点「刷新 Token」收到的是腾讯那侧的错（与
+    // CodeArts/Trae/OfficeAce 同一条理由），而龙虾的令牌会因此
+    // 悄悄过期到只能重新网页登录 —— 而那一轮登录是用户手动做的。
+    if state.store().lobsterai_account_record(&id).is_some() {
+        return refresh_provider_account(state, &id, ProviderKind::LobsterAi).await;
     }
     // Accio（两个地区）：走适配器的强制刷新（`POST /api/auth/refresh_token`，
     // 结果按「比较再写」回写）。两个地区各查一次 —— 账号集合按 provider 隔离，
@@ -1942,14 +2136,16 @@ pub fn delete_account(state: &ServerState, id: &str) -> Response {
     if id.is_empty() {
         return management_error(400, "缺少账号 id");
     }
-    // 引用快照要在删除**之前**取：被删账号撇下的引用要靠对账回收端口
-    // （最后一个引用消失 → 这个节点的监听器该收了）
-    let refs_before = state.store().referenced_pool_ids();
-    match state.store().remove_account(id) {
-        Ok(()) => {
-            reconcile_kernel_listeners(state, &refs_before);
-            ok_json(json!({ "list": state.store().list_accounts() }))
+    state.with_management_lock(|| {
+        // 引用快照要在删除**之前**取：被删账号撇下的引用要靠对账回收端口
+        // （最后一个引用消失 → 这个节点的监听器该收了）
+        let refs_before = state.store().referenced_pool_ids();
+        match state.store().remove_account(id) {
+            Ok(()) => {
+                reconcile_kernel_listeners(state, &refs_before);
+                ok_json(json!({ "list": state.store().list_accounts() }))
+            }
+            Err(error) => store_error(error),
         }
-        Err(error) => store_error(error),
-    }
+    })
 }

@@ -131,16 +131,13 @@ const IMPORT_ALLOWED_PRAGMAS: &[&str] = &["foreign_keys", "user_version"];
 
 // ── 导出 ────────────────────────────────────────────────────────
 
-/// 导出整库为 SQL 文本并写到 `target`。
+/// 导出整库为 SQL 文本并写到 `target`（桌面壳：用户选好路径，后端直写）。
 ///
 /// `include_logs = false` 为精简导出（跳过日志与调试报文五张表）。
 /// 返回 `{ bytes, tables: {表名: 行数} }` 给前端展示。
 pub fn export_to_file(db: &Db, target: &Path, include_logs: bool) -> Result<Value, String> {
-    let snapshot = snapshot_to_memory(db)?;
-    let skip: &[&str] = if include_logs { &[] } else { LOG_TABLES };
-    let dump = dump_sql(&snapshot, skip)?;
+    let (dump, tables) = export_sql(db, include_logs)?;
     atomic_write(target, dump.as_bytes())?;
-    let tables = table_row_counts(&snapshot, skip);
     logging::log(
         "[Storage]",
         &format!(
@@ -151,6 +148,19 @@ pub fn export_to_file(db: &Db, target: &Path, include_logs: bool) -> Result<Valu
         ),
     );
     Ok(json!({ "bytes": dump.len(), "tables": tables }))
+}
+
+/// 导出整库为 SQL 文本（网页端：内容直接进 HTTP 响应体，见 `backup_api`）。
+///
+/// 与 `export_to_file` 共用同一条 dump 链路 —— 两者只差「写文件」与
+/// 「交给 HTTP」这一步，格式与表清单必须完全一致（同一份备份在两端可互导）。
+/// 返回 `(SQL 文本, [{table, rows}])`。
+pub fn export_sql(db: &Db, include_logs: bool) -> Result<(String, Vec<Value>), String> {
+    let snapshot = snapshot_to_memory(db)?;
+    let skip: &[&str] = if include_logs { &[] } else { LOG_TABLES };
+    let dump = dump_sql(&snapshot, skip)?;
+    let tables = table_row_counts(&snapshot, skip);
+    Ok((dump, tables))
 }
 
 /// 主库 → 内存库的一致性快照（主连接锁只持拷贝那一下，见模块头）。
@@ -587,6 +597,20 @@ pub fn import_from_file(db: &Db, source: &Path, config_dir: &Path) -> Result<Val
     let safety = safety?;
 
     // 锁已释放：重装内存态（config 快照、面板刷新令牌），短效令牌清空。
+    // 备份可能来自旧 schema：先禁用已丢弃账号组上的 Key，再 reload 配置快照。
+    match db.with(|conn| {
+        crate::server::core::account_groups::legacy::disable_legacy_group_keys_once(conn)
+    }) {
+        None => {}
+        Some(Ok(true)) => {
+            logging::log("[Storage]", "已禁用绑定到已丢弃账号组的旧 Key");
+        }
+        Some(Ok(false)) => {}
+        Some(Err(error)) => logging::log(
+            "[Storage]",
+            &format!("清理旧账号组 Key 失败，继续恢复流程: {error}"),
+        ),
+    }
     crate::server::config::reload();
     crate::server::access::load_refresh_tokens();
     crate::server::access::clear_access_tokens();
@@ -704,9 +728,12 @@ impl TempRestoreDb {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
         }
+        // CREATE 必须显式带上：open_with_flags 的标志原样传给 sqlite3_open_v2，
+        // 只有 READ_WRITE 时打开不存在的文件直接报 unable to open database file
+        // —— 实测（2026-10-19）整库恢复一进来就死在这一步，桌面端与网页端一起坏。
         let conn = Connection::open_with_flags(
             &path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
         )
         .map_err(|e| format!("创建暂存库失败: {e}"))?;
         Ok(Self { path, conn })

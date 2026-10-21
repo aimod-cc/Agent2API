@@ -51,6 +51,7 @@ use futures::Stream;
 
 use crate::server::core::protocol::anthropic_outbound::ChatFromAnthropicStream;
 use crate::server::core::protocol::antigravity_stream::ChatFromAntigravityStream;
+use crate::server::core::protocol::chatglm_stream::ChatFromChatglmStream;
 use crate::server::core::protocol::commandcode_outbound::ChatFromCommandCodeStream;
 
 /// 上游 Anthropic SSE → 标准 chat SSE 的字节流（`reqwest::Response` 直接进来）。
@@ -222,6 +223,113 @@ impl Stream for CommandCodeToChatStream {
                 Poll::Ready(None) => {
                     // 上游 EOF：转换器收尾（正常 finish 帧 / usage 帧 / [DONE]，
                     // 或「没有完成事件」的截断错误帧 —— 判定在那台状态机里）
+                    self.upstream_done = true;
+                    for frame in self.machine.finish() {
+                        self.pending.push_back(frame);
+                    }
+                }
+                Poll::Ready(Some(Ok(bytes))) => {
+                    if let Some(capture) = &self.capture {
+                        capture.push(&bytes);
+                    }
+                    for frame in self.machine.push(&bytes[..]) {
+                        self.pending.push_back(frame);
+                    }
+                }
+                Poll::Ready(Some(Err(error))) => {
+                    self.upstream_done = true;
+                    // 文案已在构造时描述好（见 inner 字段说明）：原样上抛，
+                    // 由下游的流 / 聚合器转成错误帧或 502
+                    return Poll::Ready(Some(Err(error)));
+                }
+            }
+        }
+    }
+}
+
+/// 上游 **智谱清言 SSE（增量帧 + 收尾全文快照混排）** → 标准 chat SSE 的字节流
+/// （`reqwest::Response` 直接进来）。
+///
+/// 与另外三台逐行同构：管道结构同样是
+/// `响应字节 → 空闲守卫 → 转换器 → 帧队列`，错误同样在构造时就描述成文案折进
+/// `io::Error`，`pending` 队列同样保证「同一个上游 chunk 产出的多帧不乱序」，
+/// EOF 时同样调 `machine.finish()` 完成「收尾 / 报截断」的判定。
+///
+/// ── 与另外三台的实质差别：一轮回答里混着「增量」与「全文快照」两种帧 ──
+/// `part.status == "init"` 的帧是**本拍新增的一小段**，带 finish 的帧给的是
+/// **整段全文快照**（实测帧序列见 `protocol::chatglm_stream` 的模块头），
+/// 而 OpenAI 要的是统一口径的 delta。因此那台状态机
+/// （`protocol::chatglm_stream`）按帧语义差分：增量帧原样下发，快照帧只补
+/// 还没下发过的后缀。一律按快照差分会让收尾全文被当成重复内容**再发一遍**
+/// （用户实测「AI 回答了两遍」）。
+///
+/// ── 上游状态码仍是成败判据 ──────────────────────────────────
+/// 本家正常返回 `text/event-stream`；但**业务失败会以 HTTP 200 +
+/// `application/json` 返回**（如 `-1001 剩余积分不足`），那一档由
+/// `ChatglmAdapter::is_error_response` 在编排层拦下并走既有错误分类，
+/// 不进这台状态机（见那边的说明）。
+pub struct ChatglmToChatStream {
+    /// 上游字节流（已描述错误、已装空闲守卫）
+    inner: futures::stream::BoxStream<'static, Result<Bytes, std::io::Error>>,
+    /// 协议状态机（快照帧 → 增量 chat 帧）
+    machine: ChatFromChatglmStream,
+    /// 已翻译待下发的帧（一个上游 chunk 可能产出多帧）
+    pending: VecDeque<Bytes>,
+    /// 上游已结束（不再 poll 上游，把 pending 与收尾帧吐完即 None）
+    upstream_done: bool,
+    /// 调试模式的采集器（None = 未开启）
+    capture: Option<Arc<crate::server::core::debug_traffic::TrafficCapture>>,
+}
+
+impl ChatglmToChatStream {
+    /// `model` 是**上游真名**（下发帧里的 `model` 字段，见模块头）。
+    pub fn new(
+        response: reqwest::Response,
+        model: &str,
+        telemetry: &Arc<super::usage::RequestTelemetry>,
+    ) -> Self {
+        use futures::StreamExt;
+        // reqwest 错误就地描述成文案（折进 io::Error 之后只剩文本可读）；
+        // 空闲守卫用设置页「请求超时」的「流式响应空闲超时」那一档 ——
+        // 与另外三台四处同源，改设置四处一起变
+        let described = response.bytes_stream().map(|item| {
+            item.map_err(|error| {
+                std::io::Error::other(crate::server::core::egress::describe_error_detail(&error))
+            })
+        });
+        let guarded = super::stall::idle_guard(
+            Box::pin(described),
+            Duration::from_millis(crate::server::config::timeout_settings().stream_idle_ms()),
+        );
+        Self {
+            inner: guarded,
+            machine: ChatFromChatglmStream::new(model),
+            pending: VecDeque::new(),
+            upstream_done: false,
+            capture: telemetry.capture(),
+        }
+    }
+}
+
+impl Stream for ChatglmToChatStream {
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        use futures::StreamExt;
+        loop {
+            // 先把转换器攒下的帧发完，再拉上游 —— 顺序反了会让同一个上游 chunk
+            // 产出的多帧乱序（内容帧必须先于本轮的收尾帧 / 错误帧）
+            if let Some(frame) = self.pending.pop_front() {
+                return Poll::Ready(Some(Ok(frame)));
+            }
+            if self.upstream_done {
+                return Poll::Ready(None);
+            }
+            match self.inner.poll_next_unpin(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => {
+                    // 上游 EOF：转换器收尾（正常 finish 帧 / usage 帧 / [DONE]，
+                    // 或「没有完成信号」的截断错误帧 —— 判定在那台状态机里）
                     self.upstream_done = true;
                     for frame in self.machine.finish() {
                         self.pending.push_back(frame);

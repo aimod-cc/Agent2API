@@ -69,6 +69,11 @@ pub(super) fn builtin_target(
 }
 
 /// 原始能力查询不应用开关，供管理 API 展开旧版全局规则。
+///
+/// 自定义家的那一段同样**不应用开关**：它回答「谁登记了这个名字」，而
+/// `mappings` 里的别名也是登记过、可被请求的名字（与模型 ID 同列）。
+/// 只看 `models[]` 会让「按映射名测这一家」被判成「清单里没有这个模型」——
+/// 而按别名请求恰恰是自定义家最常见的用法（见 `custom_providers` 的模块头）。
 pub fn providers_for_model(model: &str) -> Vec<String> {
     let model = model.trim();
     if model.is_empty() {
@@ -87,7 +92,21 @@ pub fn providers_for_model(model: &str) -> Vec<String> {
     }).map(|(kind, _)| kind_id(kind).to_string()).collect();
     result.extend(custom_providers::list().into_iter().filter_map(|provider| {
         let models = provider.get("models")?.as_array()?;
-        models.iter().any(|entry| model_id(entry).eq_ignore_ascii_case(model))
+        let declared = models.iter().any(|entry| model_id(entry).eq_ignore_ascii_case(model));
+        // 映射别名也算「这一家认识这个名字」：别名是对外可请求的名字，
+        // 判定口径与 `carriers_of_model` 的「能力」那一半一致。
+        let mapped = provider
+            .get("mappings")
+            .and_then(Value::as_array)
+            .is_some_and(|mappings| {
+                mappings.iter().any(|mapping| {
+                    mapping
+                        .get("alias")
+                        .and_then(Value::as_str)
+                        .is_some_and(|alias| alias.eq_ignore_ascii_case(model))
+                })
+            });
+        (declared || mapped)
             .then(|| provider.get("id").and_then(Value::as_str).unwrap_or("").to_string())
     }));
     result

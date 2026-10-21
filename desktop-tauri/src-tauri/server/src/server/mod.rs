@@ -158,6 +158,7 @@ use tokio::sync::oneshot;
 
 use crate::port_conflict::{ConflictKind, PortConflict};
 use crate::server::core::account_store::AccountStore;
+use crate::server::core::account_groups::AccountGroupService;
 use crate::server::core::auth::AuthService;
 use crate::server::core::auto_checkin::AutoCheckin;
 use crate::server::core::billing::BillingService;
@@ -203,6 +204,8 @@ pub struct ServerState {
     ui_dir: Option<PathBuf>,
     /// 账号存储句柄（内部一把 Mutex，绝不在持锁时做网络请求）
     store: AccountStore,
+    /// 账号组存储与跨管理操作同步锁
+    account_groups: AccountGroupService,
     /// 鉴权服务句柄（会话读取 / token 刷新）
     auth: AuthService,
     /// 登录服务句柄（无头登录 + 登录任务表）
@@ -292,6 +295,10 @@ impl ServerState {
         if let Some(reason) = config_migration::pending_reason() {
             return Err(reason);
         }
+        // 进程启动时刻：设置页「版本信息」的「已运行」由它算。记录点放在
+        // 最前面 —— 后面每一步都可能耗时（开库、迁移、模型清单预热），
+        // 那些时间同样是「这个进程已经跑了多久」的一部分。
+        crate::server::core::system_info::record_start();
         // Accio 的 OAuth 回调要落在本机端口上，而授权地址由**适配器**拼
         // （`ProviderAdapter::build_login_url` 是同步无参的，拿不到 ServerState）。
         // 端口在进程生命周期内不变，这里写一次、之后只读 —— 与各家 models 的
@@ -304,6 +311,10 @@ impl ServerState {
         // `http://localhost:{port}/oauth-callback`（redirect_uri 由适配器在发起
         // 登录时本地拼），端口必须在第一次发起之前就位（见该模块 `set_loopback_port`）。
         crate::server::core::providers::antigravity::oauth::set_loopback_port(port);
+        // LobsterAI 的网页登录同理：授权地址里的 `redirect_uri` 要指向
+        // `http://127.0.0.1:{port}/auth/callback`，而地址由适配器在发起时本地拼
+        // （同步无参），端口必须先就位（见该模块 `set_loopback_port`）。
+        crate::server::core::providers::lobsterai::oauth::set_loopback_port(port);
         let config_dir = config::config_dir();
         // 与 Node 版一致：verbose 由环境变量 AGENT2API_VERBOSE=1 打开
         // （旧名 WORKBUDDY_VERBOSE 仍可读，新名优先），
@@ -368,6 +379,9 @@ impl ServerState {
         // `core::billing::checkin::run_checkin`（唯一），台账全量保留 ——
         // 清历史走签到记录页自己的「清空 / 按筛选删除」（见 checkin_records 模块头）。
         core::checkin_records::install(db.clone());
+        // AI 助手的对话会话（左边那列历史会话）：装句柄即可，写入发生在每轮
+        // 回答之后（见 `core::assistant_sessions` 的模块头）。
+        core::assistant_sessions::install(db.clone());
         // 定时签到的「签到范围」一次性补齐：把加入版本晚于配置里那一版的家补进
         // 每条条目的范围（用户的期望是 OfficeAce 果办 / CodeArts 默认开启）。
         // 放在这里是因为它要读写配置快照（`config::init` 已在上方就位），且必须早于
@@ -394,9 +408,37 @@ impl ServerState {
         // 订阅存储（「订阅管理」维护的订阅链接）：同一个 `Db`（与 proxyPool
         // 同一形态）。位置只要求早于任何一次 `/api/subscriptions*` 请求。
         core::subscriptions::install(db.clone());
+        // 云同步（设置页「数据 → 云同步」）：设置与状态落在 kv 的保留键
+        // `cloudSync`，装库句柄即可。自动同步的工作线程在下面 spawn ——
+        // 必须先装句柄再起线程，否则第一轮读设置会拿到默认值。
+        core::cloud_sync::install(db.clone());
+        if let Some(db) = db.clone() {
+            core::cloud_sync::auto_sync::spawn_worker(db);
+        }
         // 订阅内核（mihomo sidecar）的命令 worker：单条队列串行消费内核操作
         // （下载 / 重建配置 / 重启 / 停止），见 `core::sub_kernel` 的模块头。
         core::sub_kernel::spawn_worker();
+        // 启动时清一次孤儿订阅节点：正常路径下内核同步会摘掉它们，但内核未安装 /
+        // 手动关闭期间删掉的订阅没有人来收（旧版本还可能因为缺这一步留下历史
+        // 遗留）。清理放在内核启动之前 —— 它不依赖内核，读到什么就按什么清。
+        // 读订阅失败时 `live_ids` 返回 Err，这里整段跳过（宁可留着也不误删）。
+        match core::subscriptions::live_ids() {
+            Ok(live) => match core::proxy_pool::prune_orphan_subscription_items(&live) {
+                Ok(changes) if changes > 0 => logging::console_line(
+                    "[Subscription]",
+                    &format!("已清理 {changes} 个不属于任何订阅的节点"),
+                ),
+                Ok(_) => {}
+                Err(error) => logging::console_line(
+                    "[Subscription]",
+                    &format!("清理孤儿订阅节点失败: {error}"),
+                ),
+            },
+            Err(error) => logging::console_line(
+                "[Subscription]",
+                &format!("跳过孤儿节点清理（{error}）"),
+            ),
+        }
         // 内核已安装且有启用的订阅 → 自动拉起（清理上次运行遗留的进程后
         // 重建配置）。**未安装时不自动下载**：二进制 ~20-40MB，下载必须有
         // 用户的手势（界面上的「下载内核」按钮），启动时静默拉网不合适。
@@ -491,6 +533,7 @@ impl ServerState {
         // 的其余部分（日志、模型目录、健康检查、配置页）不依赖账号，让它们继续
         // 可用比整体拒绝启动更有用 —— 用户能在界面上看到那条 ❌ 日志并处理磁盘问题。
         let store = AccountStore::with_db(db.clone());
+        let account_groups = AccountGroupService::new(db.clone());
         // 账号存储句柄给订阅内核（lazy listeners：内核 runtime 读「哪些订阅节点
         // 需要监听器」决定给谁开 —— 账号引用 ∪ 被「测试」钉住的节点，见
         // `sub_kernel::runtime::listener_node_keys`）。AccountStore 是轻量 Arc
@@ -574,6 +617,26 @@ impl ServerState {
         // `account_bootstrap` 的模块头里 —— 那一段是本次改动最容易读错的地方，
         // 值得一个能被直接找到的位置，所以整组搬到了那个文件。
         if !upgrade_pending {
+            let outcome = db.as_ref().and_then(|db| {
+                db.with(|conn| {
+                    crate::server::core::account_groups::legacy::disable_legacy_group_keys_once(
+                        conn,
+                    )
+                })
+            });
+            match outcome {
+                None => {}
+                Some(Ok(true)) => logging::console_line(
+                    "[Storage]",
+                    "已禁用绑定到已丢弃账号组的旧 Key",
+                ),
+                Some(Ok(false)) => {}
+                Some(Err(error)) => logging::console_line(
+                    "[Storage]",
+                    &format!("清理旧账号组 Key 失败，继续启动: {error}"),
+                ),
+            }
+            config::reload();
             account_bootstrap::run(&store);
             // 统计侧的一次性口径订正：模型维度从「请求名（映射别名）」重算成
             // 「上游真名」（见 `RequestStats::remap_model_dimension_once`）。
@@ -590,6 +653,7 @@ impl ServerState {
             config_dir,
             ui_dir: None,
             store,
+            account_groups,
             auth,
             login,
             billing,
@@ -769,6 +833,20 @@ impl ServerState {
         // 服务器停机时进程会结束，任务随之消失。用 crate::spawn_task
         // （与 auto_checkin 同一理由）保证从非 tokio 上下文调用也能进入全局运行时。
         core::scheduled_tasks::spawn(state.store.clone(), state.update.clone());
+        // 猫猫旅行定时排程（国内版）：每天定点巡检一趟（无猫领养 / idle 派出 /
+        // arrived 领奖）。与上面的间隔型任务不是同一个形状（每天定点 vs 等间隔），
+        // 理由见 `core::growth_scheduler` 的模块头。默认开启、09:00 与 21:00 两趟
+        // —— 早上派出、晚上领奖，与参考项目 `TravelHours` 同口径。
+        {
+            let (enabled, times) = core::growth_scheduler::settings();
+            if enabled {
+                logging::log(
+                    "[Travel]",
+                    &format!("猫猫旅行定时排程已启用：每天 {} 执行", times.join(" / ")),
+                );
+                core::growth_scheduler::spawn(state.store.clone());
+            }
+        }
         // ZCode 活动套餐的「推理要不要验证码令牌」由上游配置说，每 5 分钟同步一次
         // （判据、代价与三条口径见 `providers::zcode::config_sync` 的模块头）。
         // 不进上面那张定时任务表：它没有「用户可配的间隔」、也不产生任何运行状态
@@ -786,6 +864,16 @@ impl ServerState {
     /// 账号存储句柄
     pub fn store(&self) -> &AccountStore {
         &self.store
+    }
+
+    /// 账号组服务句柄
+    pub fn account_groups(&self) -> &AccountGroupService {
+        &self.account_groups
+    }
+
+    /// 包住跨配置/SQLite 的完整管理操作。
+    pub fn with_management_lock<R>(&self, action: impl FnOnce() -> R) -> R {
+        self.account_groups.with_management_lock(action)
     }
 
     /// 鉴权服务句柄

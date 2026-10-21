@@ -54,7 +54,7 @@ use crate::server::core::providers::ProviderKind;
 
 use identity::{
     allocate_priority, allocate_unique_id, identity_of_item, identity_of_record,
-    is_desktop_item, is_reserved_desktop_id, resolve_provider,
+    is_desktop_item, is_reserved_desktop_id, resolve_provider, CREDENTIAL_KEYS,
 };
 use normalize::normalize_imported;
 
@@ -318,9 +318,18 @@ fn import_one_item(
         ));
     }
 
-    // ── 凭证：至少要有一个 token（只有引用字段的记录不构成可迁移账号）──
-    // 自定义账号的凭证是 apiKey（可空 —— 与添加路径同口径，部分上游不需要
-    // key），不适用 token 检查；apiKey 的长度与归一在 normalize 的专属分支里做。
+    // ── 凭证：至少要有一个可用的凭证字段（只有引用字段的记录不构成可迁移账号）──
+    //
+    // ── 为什么不能只认 accessToken / refreshToken ─────────────────
+    // 各家的凭证键不同：自定义账号是 `apiKey`（且可空 —— 与添加路径同口径，
+    // 部分上游不需要 key）、OfficeAce 是 `modelAppKey` + `modelAppSecret` 那一对、
+    // ZCode 还带 `jwt`、Command Code 把 key 落在 `accessToken`。旧实现只认
+    // 前两个键，于是 OfficeAce 的账号**导得出去、导不回来**（每条都报
+    // 「缺少 accessToken 与 refreshToken」）—— 每加一家就要回来补一次，正是
+    // 这套逻辑要根治的维护负担。
+    //
+    // 现在按「记录里有没有**任何**一个已知凭证键」判：判据来自同一张表
+    // （`CREDENTIAL_KEYS`），新增一家时只要凭证落在这几个键上就不用改这里。
     let is_custom_provider =
         provider.starts_with(crate::server::core::custom_providers::ID_PREFIX);
     let access_token = object
@@ -335,8 +344,16 @@ fn import_one_item(
         .unwrap_or("")
         .trim()
         .to_string();
-    if !is_custom_provider && access_token.is_empty() && refresh_token.is_empty() {
-        return Err("缺少 accessToken 与 refreshToken".to_string());
+    let has_any_credential = CREDENTIAL_KEYS.iter().any(|key| {
+        object
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    });
+    // 自定义账号的 apiKey 可空（`noAuth` 形态），不强制要求凭证
+    if !is_custom_provider && !has_any_credential {
+        return Err("缺少凭证（accessToken / refreshToken / apiKey / modelAppKey 等均为空）"
+            .to_string());
     }
     if access_token.chars().count() > MAX_TOKEN_LENGTH
         || refresh_token.chars().count() > MAX_TOKEN_LENGTH
@@ -395,8 +412,9 @@ fn import_one_item(
                 target.insert(key, value);
             }
         }
-        // 非 WorkBuddy 记录不该带腾讯端点字段：旧版导入曾把它们注入别家记录，
-        // 这里在合并时清掉（其余各家的适配器都不读这些键，见各家凭证模块）
+        // 非 WorkBuddy 记录不该带腾讯端点字段：旧版导入曾把它们注入别家记录。
+        // 判据只问「是不是 WorkBuddy 系」，**不枚举别家** —— 新增一家 provider
+        // 时不需要回来加一行（这正是旧实现最费维护的地方）。
         if !crate::server::core::providers::workbuddy::is_workbuddy_family(&provider) {
             for key in ["edition", "prefixPath", "endpoint", "platform"] {
                 state.accounts[index].remove(key);

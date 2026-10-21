@@ -220,15 +220,18 @@ pub async fn remove_custom_provider(State(state): State<ServerState>, body: Byte
     }
     let label = custom_providers::label_of(&id);
     let store = state.store();
-    let accounts_removed = match custom_providers::remove(&id, store) {
-        Ok(count) => count,
-        Err(message) => return errors::management_error(400, message),
+    let (accounts_removed, stripped) = match state.with_management_lock(|| {
+        let accounts_removed = custom_providers::remove(&id, store)
+            .map_err(|message| errors::management_error(400, message))?;
+        // 先删 provider，再清白名单，避免删除失败时意外放宽 Key 的访问范围。
+        Ok::<_, Response>((
+            accounts_removed,
+            api_keys::strip_provider_from_allowlists(&id),
+        ))
+    }) {
+        Ok(result) => result,
+        Err(response) => return response,
     };
-    // 白名单清理在删家**之后**：反过来的话（先放宽白名单、再删家）一旦第二步失败，
-    // 就留下「限制已经松开、家却还在」的状态 —— 那是静默放宽权限，比留个死 id 严重。
-    // 这一步失败不改变响应（家已经删了，事实如此），失败的后果是那几把 Key 维持
-    // 原来的「谁都进不来」，用户重存一次可用范围即可 —— 与清理前逐字一致。
-    let stripped = api_keys::strip_provider_from_allowlists(&id);
     let unrestricted = stripped
         .iter()
         .filter(|entry| entry.allowed_providers.is_empty())

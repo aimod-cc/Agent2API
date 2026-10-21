@@ -107,4 +107,17 @@ export {
 } from './popover'
 export { Pager, type PagerProps } from './pager'
 export { NavItem, navItemVariants, type NavItemProps } from './nav-item'
+export {
+  Sheet,
+  SheetTrigger,
+  SheetClose,
+  SheetPortal,
+  SheetOverlay,
+  SheetContent,
+  SheetTitle,
+  SheetDescription,
+  SheetHeader,
+  SheetBody,
+  SheetFooter,
+} from './sheet'
 export { cn } from './lib/cn'

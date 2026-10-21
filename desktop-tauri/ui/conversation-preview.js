@@ -268,8 +268,25 @@
 
   // ─── 响应侧：SSE / JSON → 助手气泡 ────────────
 
-  /** 以 data: 行开头即按 SSE 解析（任务口径；event: 行的帧也由 data 承载内容） */
-  const looksSse = raw => /^\s*data:/.test(raw);
+  /**
+   * 第一个「有内容的行」以 data: 开头即按 SSE 解析（event: 行的帧也由 data 承载内容）。
+   *
+   * 判据取**第一个非空、非注释行**而不是整段开头：上游可以在正文之前先发
+   * 保活注释行，`^: heartbeat` 这类开头（SSE 规范里冒号开头是注释，客户端应忽略）
+   * 一来就卡在首字符，只看开头会把纯 SSE 的流判成 JSON，JSON.parse 再失败，
+   * 整段正文只好降级成「响应原文」折叠 —— WorkBuddy 的实测报文就是这样
+   * （`: heartbeat` + 空行 + 56 帧 data:，逐帧解析器本身完全能读）。
+   * 逐帧分帧那边本来就只收 data: 行（见 sseFrames），注释行天然被跳过，
+   * 所以这里放宽不会把非 SSE 的文本误判成流。
+   */
+  function looksSse(raw) {
+    for (const line of String(raw ?? '').split(/\r?\n/)) {
+      const text = line.trim();
+      if (!text || text.startsWith(':')) continue;
+      return text.startsWith('data:');
+    }
+    return false;   // 整段只有空行与注释：没有可解析的帧
+  }
 
   /** SSE 分帧：帧间空行分隔，data 行可多行（按 SSE 规范用 \n 连接） */
   function sseFrames(raw) {

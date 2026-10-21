@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FileProvider 的共享路径。
+
+  `cache-path` 覆盖 `getCacheDir()`：应用内更新把 APK 下到
+  `cache/updates/agent2api-update.apk`，安装器通过这里拿到 content:// URI。
+  保留原有的 `external-path` —— Capacitor 的文件相关插件按它工作。
+-->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <external-path name="my_images" path="." />
+    <cache-path name="my_cache_images" path="." />
+</paths>

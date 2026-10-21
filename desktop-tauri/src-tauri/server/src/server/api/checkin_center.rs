@@ -28,7 +28,7 @@
 //!   "daily": {
 //!     "providers": [ { "id", "label",
 //!                      "accounts": [ { "id", "name", "available", "checkinAt",
-//!                                      "checkedInToday" } ],
+//!                                      "checkedInToday", "streakDays" } ],
 //!                      "doneCount", "totalCount" } ],
 //!     "outOfScope": [ { "label", "reason", "count" } ],
 //!     "todayDone": 6, "todayEligible": 9
@@ -93,6 +93,13 @@ fn account_display_name(account: &Value) -> String {
 /// 判据改了这里要跟着改 —— 两处写的都是「这个账号为什么不能签到」。
 fn out_of_scope_reason(account: &Value) -> &'static str {
     let provider = account_text(account, "provider");
+    // 智谱清言的**访客账号**：与「没有签到链路」是两回事 —— 上游这一站有签到
+    // （登录账号就能签），只是访客没有积分体系（相关接口对访客一律 401）。
+    // 判在 provider / edition 之前：本家的 edition 恒 cn，不会与下面那条撞；
+    // 文案与 `resolve_checkin_targets` 单账号拒绝时那句同义。
+    if account.get("isGuest").and_then(Value::as_bool) == Some(true) {
+        return "访客账号没有积分体系";
+    }
     // WorkBuddy / Qoder 两个地区的国际版都在 `supports_checkin` 里显式放行
     //（前者走日活链、后者带风控领积分），还落在范围外的 intl 只可能是 Accio。
     if account.get("edition").and_then(Value::as_str) == Some("intl") {
@@ -142,6 +149,10 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
                 // 版本（cn / intl，缺失 null）：WorkBuddy 国际版在这张表里执行的是
                 // 「领日活」（活跃保活），按钮文案与提示要跟国内版的「签到」分开
                 "edition": account.get("edition").cloned().unwrap_or(Value::Null),
+                // 成长中心连登天数（WorkBuddy 国内版；签到后回读落库，见
+                // `AccountStore::mark_streak_days`）。恒为数字（0 = 还没读到过），
+                // 与公开形态同一口径 —— 界面按数字读，不必判「字段缺失」。
+                "streakDays": account.get("streakDays").cloned().unwrap_or(Value::from(0)),
             }));
         } else {
             let label = crate::server::core::providers::label_of(&provider);
@@ -221,6 +232,33 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
     // OfficeAce 的「新手任务」与每日签到是同一个上游动作（见 officeace::onboarding），
     // 所以它也在这张分组表里 —— 前端按 server 给的 extras.onboarding 驱动，不硬编码家。
     onboarding_rows.extend(onboarding_rows_of("officeace"));
+    // 智谱清言的新手任务是任务中心里的 `newbie` 分类（见 `chatglm::tasks`）。
+    // 它的**每日**任务与每日登录积分一起走上面的每日签到链，两块互不重复 ——
+    // 与 CodeArts「一次性归新手福利、每日归签到」同一分法。
+    //
+    // **访客排除**：本家的任务中心只对登录账号开放（访客实测 401），列进来会让
+    // 「签到后自动补领」每次都为它白打一次注定失败的查询。
+    onboarding_rows.extend(
+        accounts
+            .iter()
+            .filter(|account| {
+                account_text(account, "provider") == "chatglm"
+                    && !crate::server::core::providers::chatglm::tasks::is_guest_account(
+                        state.store(),
+                        &account_text(account, "id"),
+                    )
+            })
+            .map(|account| {
+                let id = account_text(account, "id");
+                json!({
+                    "id": id,
+                    "name": Value::from(account_display_name(account)),
+                    "provider": "chatglm",
+                    "settled": super::onboarding::settled_view(state.store(), &id, "chatglm")
+                        .unwrap_or(Value::Null),
+                })
+            }),
+    );
     // ZCode 的福利行带**本地领取台账**（`account.claimPlans`）—— 后端落盘的本地
     // 事实，带出来零上游请求，不违反「快照零上游」；界面的「今天领过哪几份」按它
     // 逐份比对（北京时间的日界判定在前端，不在后端再抄一份）。
@@ -280,6 +318,9 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
         "auto": state.auto_checkin().state(),
         // WorkBuddy 国际版日活保活的模型链（签到中心可编辑；空清单回落缺省链）
         "keepalive": crate::server::core::billing::keepalive::state(),
+        // 猫猫旅行定时排程（国内版）：开关 / 时刻 / 今日已跑时刻 / 上一轮结果。
+        // 与 `auto`（签到排程）并列 —— 两者是独立排程，各自开关与时刻。
+        "travel": crate::server::core::growth_scheduler::state(),
         "history": checkin_history::list(),
     }))
 }

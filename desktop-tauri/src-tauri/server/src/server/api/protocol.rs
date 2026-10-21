@@ -88,6 +88,7 @@ async fn forward_chat(
     stream: bool,
     dedupe_key: String,
     scope: Option<KeyScope>,
+    account_group_scope: Option<crate::server::core::account_groups::AccountGroupScope>,
     telemetry: Arc<RequestTelemetry>,
 ) -> Result<ForwardOutcome, GatewayError> {
     // 自动续写的上下文（开关 `autoContinue` **默认关**，关着时不做任何 clone）。
@@ -102,6 +103,7 @@ async fn forward_chat(
         client_headers: client_headers.clone(),
         telemetry: telemetry.clone(),
         allowed_providers: scope.clone(),
+        account_group_scope: account_group_scope.clone(),
         max_rounds,
     });
     let outcome = state
@@ -113,6 +115,7 @@ async fn forward_chat(
             client_headers: client_headers.clone(),
             telemetry: telemetry.clone(),
             allowed_providers: scope,
+            account_group_scope,
             // 两个协议入口都不是模型测试：不钉账号，走全局优先级队列
             pinned_account: None,
             // 关闭的模型对生产请求保持「模型已在网关中关闭」（`ignore_model_gate`
@@ -148,6 +151,14 @@ pub async fn responses_endpoint(
     body: Bytes,
 ) -> Response {
     let scope = key_scope.map(|Extension(scope)| scope);
+    let account_group_scope = match crate::server::core::key_scope::resolve_request_group_scope(
+        scope.as_ref(),
+        state.account_groups(),
+        state.store(),
+    ) {
+        Ok(group_scope) => group_scope,
+        Err(error) => return error.payload_response(),
+    };
     let started_at = logging::now_ms();
     // 请求来源客户端（UA 识别，见 `core::client`）：早失败路径与收尾记账共用
     let client = crate::server::core::client::classify(&pipeline::user_agent_of(&headers));
@@ -186,7 +197,12 @@ pub async fn responses_endpoint(
 
     // 模型解析走公共管道（默认模型回落 / 别名映射 / 目录校验）。
     // 第三参是这把 Key 的可用模型白名单（None = 不限制），同 /v1/chat/completions
-    let requested_model = match pipeline::resolve_model(&state, &mut chat_body, scope.as_ref()) {
+    let requested_model = match pipeline::resolve_model(
+        &state,
+        &mut chat_body,
+        scope.as_ref(),
+        account_group_scope.as_ref(),
+    ) {
         Ok(model) => model,
         Err(error) => {
             record_early_failure(&state, started_at, &pipeline::model_field_text(&raw), &client_reasoning, &client, &error);
@@ -245,6 +261,7 @@ pub async fn responses_endpoint(
         stream,
         pipeline::sha256_hex(&body),
         scope,
+        account_group_scope,
         telemetry.clone(),
     )
     .await;
@@ -345,6 +362,14 @@ pub async fn messages_endpoint(
     body: Bytes,
 ) -> Response {
     let scope = key_scope.map(|Extension(scope)| scope);
+    let account_group_scope = match crate::server::core::key_scope::resolve_request_group_scope(
+        scope.as_ref(),
+        state.account_groups(),
+        state.store(),
+    ) {
+        Ok(group_scope) => group_scope,
+        Err(error) => return error.payload_response(),
+    };
     let started_at = logging::now_ms();
     // 请求来源客户端（UA 识别，见 `core::client`）：早失败路径与收尾记账共用
     let client = crate::server::core::client::classify(&pipeline::user_agent_of(&headers));
@@ -368,7 +393,12 @@ pub async fn messages_endpoint(
     // 下游等级从**翻译后的 chat 体**读：Anthropic 的 thinking/output_config →
     // reasoning_effort 是网关自己的映射（anthropic_effort），比通用并集链更准
     let client_reasoning = pipeline::client_reasoning_of(&chat_body);
-    let requested_model = match pipeline::resolve_model(&state, &mut chat_body, scope.as_ref()) {
+    let requested_model = match pipeline::resolve_model(
+        &state,
+        &mut chat_body,
+        scope.as_ref(),
+        account_group_scope.as_ref(),
+    ) {
         Ok(model) => model,
         Err(error) => {
             record_early_failure(&state, started_at, &pipeline::model_field_text(&raw), &client_reasoning, &client, &error);
@@ -426,6 +456,7 @@ pub async fn messages_endpoint(
         stream,
         pipeline::sha256_hex(&body),
         scope,
+        account_group_scope,
         telemetry.clone(),
     )
     .await;

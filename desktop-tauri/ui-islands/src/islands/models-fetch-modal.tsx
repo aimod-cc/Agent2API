@@ -700,8 +700,38 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
     )
   }
 
+  /** 勾 / 取消勾一个模型：复选框与整行点击共用这一条出口，两处口径不会走偏 */
+  function togglePicked(id: string, next: boolean) {
+    setPicked(prev => {
+      const out = new Set(prev)
+      if (next) out.add(id)
+      else out.delete(id)
+      return out
+    })
+  }
+
+  /**
+   * 整行点击（自定义家）：复选框之外的格子 —— 模型 id、状态徽章 —— 点一下也能勾 / 取消勾，
+   * 不必对准那个 14px 的小方块。两种点击要**让路**：
+   *
+   * ① 复选框自己（含它内部那个隐藏 input）：点它时 Base UI 已经翻转过一次，整行这层再算一次
+   *    就是「翻两次 = 没反应」。键盘（Tab 到复选框按空格）走的是复选框本身，不受这里影响。
+   * ② 拖选文本：用户想复制模型 id 时会以一次落在行内的 click 收尾，那一份不该改勾选 —— 所以
+   *    只在「选区确实在本行里」时才让路（页面别处的选区不挡这一行的点击）。
+   *
+   * 「已添加」的行整行不响应（复选框本身也是禁用的），与旧口径一致：不重复导入。
+   */
+  function rowPick(event: React.MouseEvent<HTMLTableRowElement>, id: string, added: boolean) {
+    if (added) return
+    const target = event.target as Element | null
+    if (target?.closest('[data-slot="checkbox"], input[type="checkbox"]')) return
+    const selection = window.getSelection()
+    if (selection && !selection.isCollapsed && event.currentTarget.contains(selection.anchorNode)) return
+    togglePicked(id, !picked.has(id))
+  }
+
   /** 自定义家的表体：一行一个上游模型 + 勾选框 + 是否已在清单里。已在清单里的行整体压淡、复选框
-   *  禁用（不重复导入），徽章文案说明后果。 */
+   *  禁用（不重复导入），徽章文案说明后果；其余行整行可点（见 rowPick）。 */
   function customBody() {
     if (status === 'idle') return stateRow(t('点右侧「获取模型」从上游拉取这家的模型清单'))
     if (status === 'loading') return stateRow(t('正在获取…'))
@@ -713,12 +743,11 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
     return shown.map(id => {
       const has = managed.has(norm(id))
       return (
-        <TableRow key={id} className={has ? 'opacity-50' : undefined}>
+        <TableRow key={id} className={has ? 'opacity-50' : 'cursor-pointer'}
+          onClick={event => rowPick(event, id, has)}>
           <TableCell>
             <Checkbox checked={picked.has(id)} disabled={has} aria-label={id}
-              onCheckedChange={next => setPicked(prev => {
-                const out = new Set(prev); if (next) out.add(id); else out.delete(id); return out
-              })} />
+              onCheckedChange={next => togglePicked(id, Boolean(next))} />
           </TableCell>
           <TableCell>{nameCell(id)}</TableCell>
           <TableCell>
@@ -822,8 +851,10 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
       }}
     >
       {/* 宽度：内置家是宽表（旧 .modal-wide ≈ 920px），自定义家只有三列（旧
-          .modal-narrow ≈ 552px，与宽表区分开）；两侧各留 24px 与遮罩内边距对齐 */}
-      <DialogContent className={custom ? 'w-[min(552px,calc(100vw-48px))]' : 'w-[min(920px,calc(100vw-48px))]'}>
+          .modal-narrow ≈ 552px，与宽表区分开）；两侧各留 24px 与遮罩内边距对齐。
+          两档都在旧值上加宽 10%（920 → 1012 / 552 → 607）：七列那张表挤在 920px 里时
+          「说明」那格几乎每行都折行，宽一点能少折几行。 */}
+      <DialogContent className={custom ? 'w-[min(607px,calc(100vw-48px))]' : 'w-[min(1012px,calc(100vw-48px))]'}>
         <DialogHeader>
           <DialogTitle>{t('获取模型 — {name}', { name })}</DialogTitle>
         </DialogHeader>

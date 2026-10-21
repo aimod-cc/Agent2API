@@ -37,6 +37,14 @@ export type QueueDragHandlers = {
   isLocked(): boolean
   /** 组顺位锁着的时候用户还是按下了把手：给一次提示（由页面决定怎么说） */
   onLockedAttempt(): void
+  /**
+   * 这一组是否开着排序规则（组内顺位被规则接管）。**只有组内把手会问它**：
+   * 规则生效时拖出来的顺序松手就会被排回去，所以先拦住并给一次说明。
+   * 缺省（不实现）= 永不因排序规则锁定，与引入这条判据之前的行为一致。
+   */
+  isRowLocked?(provider: string): boolean
+  /** 组内把手被排序规则拦下：给一次提示 */
+  onRowLockedAttempt?(provider: string): void
   /** 拖完了：把新位置交回去，顺序怎么写由调用方决定 */
   onDrop(drop: QueueDrop): void
 }
@@ -168,6 +176,12 @@ export function bindQueueDrag(host: HTMLElement | null, handlers: QueueDragHandl
     const provider = item.dataset.provider
       || item.closest<HTMLElement>('tbody.acct-group')?.dataset.provider
       || ''
+    // 组内排序规则生效时，组内把手被规则接管（拖了也会被排回去）：拦在起拖这一刻，
+    // 而不是让用户白拖一次再发现顺序没变
+    if (kind === 'row' && provider && handlers.isRowLocked?.(provider)) {
+      handlers.onRowLockedAttempt?.(provider)
+      return
+    }
     const accountId = item.dataset.id || ''
     if (kind === 'row' && !accountId) return
     const items = siblingsOf(item, kind)

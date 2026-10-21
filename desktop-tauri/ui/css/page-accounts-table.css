@@ -11,8 +11,8 @@
    只有它该参与伸缩 —— 所以它是**唯一**的弹性列：本文件不写它的宽度，
    accounts-columns.ts 也不给它 inline width（见那份文件的 FLEX_COLUMNS）。
 
-   预算：十个固定列合计 1193px
-   （47 + 132 + 132 + 186 + 56 + 80 + 148 + 80 + 132 + 200，逐列见下方声明）。
+   预算：九个固定列合计 1029px
+   （47 + 84 + 186 + 56 + 80 + 148 + 80 + 148 + 200，逐列见下方声明）。
    默认窗口 1060px 时列表可用宽度约 791px，也就是说**默认窗口下这张表横向滚动**，
    账号列被压到它的下限而不是「剩余宽度」。这是有意的：
    表格**不压缩列宽**（见下），宁可横滚也不把行内按钮折成两行、
@@ -42,6 +42,12 @@
    账号按家分组显示，家名与图标搬到分组带上（提供商列重复了这件事），顺序改由
    拖拽表达（组内序号 `#N` + 拖动把手，见下方「顺序列」）。固定列合计
    1193 → 1013，表格的横滚线随之从 1493 降到 1313（= 1013 + 弹性列下限 300）。
+
+   **本轮余额列 132 → 148**（逐窗口那一档原先改成紧凑背景条，现已统一为
+   `.usage-meter` 细线形态，见下方「余额列：统一读数形态」）：
+   那档最宽的一行是 Antigravity 的「Claude/GPT 每周 100%」，三段合计约 111px，而
+   132 的内容盒只有 104px —— 组名会被砍成「Claude/GP…」，而那正是这个功能要让人
+   看见的一组（issue #288）。固定列合计 1013 → 1029，横滚线 1313 → 1329。
 
    **勾选列 26 → 47**（本轮）：26px 的列里居中的复选框只离表格左缘 5.5px，
    看起来是「贴边」而不是居中，还与批量栏那颗「全选」错开 10.5px。
@@ -76,7 +82,7 @@
        （「可用 4300 积分」这类文案长度不可控，按省略号收口、完整值在 title 里）。
 
    最小窗口 820px 时（侧栏已收到 68px）可用宽度约 699px，而表格的下限是
-   1193 + 300（弹性列）= 1493px，于是横向滚动约 794px。
+   1029 + 300（弹性列）= 1329px，于是横向滚动约 630px。
 
    注意：这份「预算说明」在历史上曾与 CSS 的实际数值漂移过（注释里写 92/106，
    CSS 里是 132/132）。改动任何一列的默认宽度时**同时**改三处：
@@ -196,8 +202,16 @@
 /* 余额列：主额度桶的两行形态（套餐名 + 进度条与读数）需要比纯读数宽一档 ——
    84px 放不下「ZCode Trust Build」+「8800万 / 1亿 token」，套餐名会被省略成
    「ZCode Tr…」而失去意义。132 与优先级列同档，是「一行塞得下套餐名」的最小值。
-   读数更长的家（可用 4300 积分）仍按省略号收口、完整值在 title 里。 */
-.cell-usage { width: 132px; }
+   读数更长的家（可用 4300 积分）仍按省略号收口、完整值在 title 里。
+
+   **本轮 132 → 148**（逐窗口那一档当时改成紧凑背景条，现已统一为 `.usage-meter`）：
+   那一档最宽的一行是 Antigravity 的「Claude/GPT 每周 100%」——三段合计约 111px
+   （组名 55 + 窗口 20 + 读数 26 + 两处 5px 间距），而 132 的内容盒只有
+   132 − 16（td 内边距）= 116px，组名会被砍成「Claude/GP…」。
+   而「Claude/GPT」正是这个功能要让人看见的那一组（issue #288），砍掉它就白做了。
+   148 的内容盒 132px 恰好留出余量；代价是固定列合计 1013 → 1029、
+   横滚线 1313 → 1329（16px，与这份文件「宁可横滚也不压列」的口径一致）。 */
+.cell-usage { width: 148px; }
 /* 操作列：四颗按钮的最坏情况（签到 / 已签到 / 余额 / 设置 / ⋯ 里同时出现的那四颗），
    本次改造从 250 收到 200 —— 理由见文件头的列宽预算。
    这个值是**量出来的**，不是估的：按 11.5px 字号、每颗按钮左右各 8px 内边距、
@@ -384,20 +398,31 @@
 .queue-grip:hover { background: color-mix(in srgb, var(--text) 10%, transparent); color: var(--text-2); }
 
 .acct-row.dragging,
-.grp-band.dragging { opacity: .45; }
+.grp-band.dragging,
+.acct-group.dragging { opacity: .45; }
 
 /* 拖动中：整页光标切成抓取态，提示「现在松手就会落位」 */
 body.queue-dragging,
 body.queue-dragging * { cursor: grabbing !important; }
 
 /* 落点提示：插在这一行的**上面 / 下面**。用 inset box-shadow 而不是 border ——
-   加 border 会把这一行撑高 2px，拖动中整张表跟着跳，落点反而看不清。 */
+   加 border 会把这一行撑高 2px，拖动中整张表跟着跳，落点反而看不清。
+
+   ── 为什么组要选两层（2026-10 修）──────────────────────────
+   `bindQueueDrag` 把 `drop-before` / `drop-after` 加在**同级项**上：行是 `<tr>`，
+   组是 `<tbody class="acct-group">`（见 accounts-queue-drag 的 siblingsOf）。
+   而原先这里只写了 `.grp-band.drop-before > td` —— 类挂在 tbody 上，这条选择器
+   永远匹配不到，于是**组内拖动有落点线、整组拖动却一条线都没有**。
+   组的落点还要选对行：插入点在整段之上 → 画在组头（tbody 的第一行）；
+   在整段之下 → 画在**最后一行**（展开时是最后一条账号，折叠时就是组头自己），
+   画在组头上会跑到这一家中间去。 */
 .acct-row.drop-before > td,
 .acct-row.drop-after > td,
-.grp-band.drop-before > td,
-.grp-band.drop-after > td { box-shadow: inset 0 2px 0 0 var(--primary); }
+.acct-group.drop-before > .grp-band > td,
+.grp-band.drop-before > td { box-shadow: inset 0 2px 0 0 var(--primary); }
 
 .acct-row.drop-after > td,
+.acct-group.drop-after > tr:last-child > td,
 .grp-band.drop-after > td { box-shadow: inset 0 -2px 0 0 var(--primary); }
 
 /* 组内序号：#N。与分组带的「第 N 顺位」是同一种读数的两个层级，
@@ -413,11 +438,18 @@ body.queue-dragging * { cursor: grabbing !important; }
 
 /* ─── 分组带（一家一段的横幅，占满一行的通栏格）───
    刻意保持**中性**：一家一色会让整页看着像调色板，而「这一段是哪一家」由家名
-   与图标已经说清楚了。分组带只负责两件事：说清这是谁、以及可拖（顺位）。 */
+   与图标已经说清楚了。分组带只负责两件事：说清这是谁、以及可拖（顺位）。
+
+   ── 整条可点折叠（2026-10）────────────────────────────────
+   带宽里的家名、统计、合计、空白处都能点：收起一家是高频动作，要求用户瞄准
+   右侧那颗小箭头是没必要的。按钮与拖动把手各自保留原动作（见 GroupBandRow 的
+   onClick 排除名单）。箭头在悬停整条时提亮 —— 它是键盘 / 读屏的真正入口，
+   鼠标用户则由整条承载。 */
 .acct-group .grp-band > td {
   padding: 0;
   background: var(--surface-2);
   border-bottom: 1px solid var(--border);
+  cursor: pointer;
 }
 
 .grp-band-inner {
@@ -427,6 +459,11 @@ body.queue-dragging * { cursor: grabbing !important; }
   min-height: 32px;
   padding: 0 8px;
 }
+
+/* 控件与把手在自己的地盘上换回各自的光标：一眼就能分出「这几处是控件」 */
+.grp-band .grp-iconbtn { cursor: pointer; }
+.grp-band .queue-grip { cursor: grab; }
+.grp-band:hover .grp-iconbtn.grp-fold { background: var(--nav-hover); color: var(--text); }
 
 /* 组顺位：与 .order-rank 同色同一档字号 —— 组的先后与组内先后是同一类读数。
    title 里说清「拖动可改」，格子本身不放控件。 */
@@ -472,6 +509,34 @@ body.queue-dragging * { cursor: grabbing !important; }
   font-variant-numeric: tabular-nums;
 }
 
+/* 组头「可用合计」：与左边那句账号统计是**两件事**（多少人 vs 多少家底），
+   所以用一条淡竖线分开，而不是再接一个「·」—— 那句统计内部就是用 · 分隔的，
+   再接一项会被读成第五个统计项。 */
+.grp-balance {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  margin-left: 3px;
+  padding-left: 9px;
+  border-left: 1px solid var(--hairline);
+  font-size: 11px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 「可用合计」四个字压到最淡：它是标签，读数才是这一枚要抢的那一眼。
+   行内余额列（.usage-sum.ok）用的是同一族绿 —— 同一个数字在两处出现时
+   颜色必须一致，否则组头像是另一套口径。 */
+.grp-balance .k { color: var(--text-3); }
+.grp-balance .v { font-weight: 650; color: var(--ok); }
+.grp-balance .u { color: var(--text-3); }
+/* 「计入 8/10」比合计淡一档：它是脚注，不是第二个读数 */
+.grp-balance .n { color: var(--text-3); }
+.grp-balance.warn .v { color: var(--warn); }
+.grp-balance.muted .v { color: var(--text-3); font-weight: 600; }
+.grp-balance .warn-mark { color: var(--warn); font-size: 10px; }
+
 .grp-spacer { flex: 1 1 auto; }
 
 .grp-iconbtn {
@@ -499,6 +564,37 @@ body.queue-dragging * { cursor: grabbing !important; }
 .acct-group.collapsed .grp-fold svg { transform: rotate(-90deg); }
 
 /* 折叠时分组带的下边框仍然留着：它同时是与下一段的分隔线 */
+
+/* ─── 当前排序规则的标记（分组带右侧那枚小胶囊）───
+   只在**有规则生效**时出现。用品牌柔色而不是中性灰：它是一条正在生效的规则，
+   不是脚注；点它等同点齿轮（两个入口同一件事，不必让用户去猜哪个能改）。
+   宽度不设上限但走省略号：规则摘要最长会到「到期 近→远 · 添加 新→旧」，
+   窄窗口下宁可截断也不要把它挤成两行撑高分组带。 */
+.grp-sort-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 1 auto;
+  min-width: 0;
+  height: 18px;
+  padding: 0 7px;
+  margin-left: 2px;
+  border: 1px solid var(--primary-bd);
+  border-radius: var(--r-pill);
+  background: var(--primary-soft);
+  box-shadow: none;
+  color: var(--primary-fg);
+  font-size: 10.5px;
+  font-weight: 600;
+  font-synthesis: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.grp-sort-mark:hover { border-color: var(--primary); }
+.grp-sort-mark span { display: inline-flex; flex: 0 0 auto; }
+.grp-sort-mark svg { display: block; }
 
 /* ─── 连接数列 ───
    只在有连接时显示一个绿色数字（与 OmniProxy 上游管理页的「连接」列同款观感），
@@ -595,46 +691,92 @@ body.queue-dragging * { cursor: grabbing !important; }
    与 `#toast.warn` / `.badge.warn` 同一语义。 */
 .usage-sum.warn { color: var(--warn); font-weight: 600; }
 
-/* ─── 余额列：主额度桶的两行形态 ───
-   第一行套餐名（用户问得最多的那句「这 1 亿是哪个活动给的」），第二行进度条 +
-   「剩余 / 总量」。只有在后端给出了**桶的总额**时才用这套（ZCode 的套餐额度），
-   其余各家仍是上面那条纯读数 —— 判据在 islands 的 `usagePool`，这里只管样子。
+/* ─── 余额列：统一读数形态（`.usage-meter`）───────────────────────
+   一条读数 = 「标签 …… 读数」一行 + 下面一条 3px 细线。
+   **全站余额读数只有这一种形态**：逐窗口读数（Antigravity 两组 × 两窗口、
+   OpenCode Go 三窗口）、CodeArts 的 token 池、主额度桶（ZCode / Trae）。
+   原先按 provider 分成两套（背景色带 / 名称+独立条），同一类数据在表格里
+   是两种长相，纵向扫读时对不上。
 
-   进度条画的是**剩余**比例：与紧挨着的读数同一方向。轨道/条体的观感由组件库的
-   Progress 自带（6px 胶囊、主色条体），这里只给它一个固定宽度（弹性布局下
-   `w-full` 的根节点会随文字挤压，固定 40px 让同一列里每行的条都一样长）。 */
-.usage-pool {
+   线的口径：
+     · 高度 3px、圆头 —— 比读数轻，满格时不会铺成一块抢眼的亮色；
+     · 轨道取 hairline（全站最淡的那条），条体取语义色（绿 / 黄 / 红）；
+     · 画的是**剩余**比例，与右侧读数同向（条长 = 还剩多少）；
+     · `percent` 为 null 时只留空轨道、不画条 —— 空轨道 = 上游没给比例，
+       0% = 用光了，两者不能画成同一个样子。 */
+.usage-meter {
   display: block;
-  font-size: 11px;
+  min-width: 0;
   font-variant-numeric: tabular-nums;
 }
+.usage-meter + .usage-meter { margin-top: 7px; }
+/* 第一条贴着格顶（与相邻几列的读数对齐） */
+.usage-cell > .usage-meter:first-child,
+.usage-plan + .usage-meter { margin-top: 0; }
 
-.usage-pool-name {
-  display: block;
-  color: var(--text-3);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.usage-pool-line {
+.usage-meter-head {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 4px;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
 }
 
-.usage-pool-bar { flex: 0 0 40px; }
-
-.usage-pool-view {
+/* 组名：可省略（同一家的几条共用一个组名时只写一次） */
+.usage-meter-name {
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 10px;
+  color: var(--text-3);
 }
 
-.usage-pool-view.ok { color: var(--ok); font-weight: 600; }
-.usage-pool-view.warn { color: var(--warn); font-weight: 600; }
+/* 窗口码：不吃压缩 —— 同一组下几条唯一的差别就在这半段 */
+.usage-meter-win {
+  flex: none;
+  font-size: 10px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+/* 读数：恒贴右缘（没有组名的那一档全靠它撑起宽度） */
+.usage-meter-val {
+  flex: none;
+  margin-left: auto;
+  font-size: 10.5px;
+  font-weight: 650;
+  white-space: nowrap;
+  text-align: right;
+}
+.usage-meter.ok .usage-meter-val { color: var(--ok); }
+.usage-meter.warn .usage-meter-val { color: var(--warn); }
+.usage-meter.bad .usage-meter-val { color: var(--danger); }
+.usage-meter.muted .usage-meter-val { color: var(--text-3); font-weight: 500; }
+
+.usage-meter-track {
+  display: block;
+  height: 3px;
+  margin-top: 3px;
+  border-radius: 999px;
+  background: var(--hairline);
+  overflow: hidden;
+}
+.usage-meter-track i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--ok);
+  transition: width .35s ease-out;
+}
+.usage-meter.warn .usage-meter-track i { background: var(--warn); }
+.usage-meter.bad .usage-meter-track i,
+.usage-meter-track.over i { background: var(--danger); }
+
+/* ─── 余额列：主额度桶（ZCode / Trae）───
+   套餐名单独一行（用户问得最多的那句「这 1 亿是哪个活动给的」），
+   下面走统一的 `.usage-meter`（读数 + 细线）。判据在 islands 的 `usagePool`。
+   旧的 `.usage-pool-*` 一组已随统一形态删除（原先还挂着组件库 Progress）。 */
 
 /* ─── 余额列：套餐徽标 + 明细弹层的两行形态（usageDetail 能力位，CodeArts）───
    第一行是套餐徽标（试用版 / 免费版 —— 两个权益不同的账号第一眼就能分开），
@@ -752,65 +894,6 @@ body.queue-dragging * { cursor: grabbing !important; }
 .usage-toggle[aria-expanded="true"] { background: var(--primary-soft); border-color: var(--primary-bd); }
 .usage-toggle[aria-expanded="true"] .caret { transform: translateY(-50%) rotate(180deg); }
 
-/* ── 余额格里的平铺行（一行一个读数 + 一条占满格宽的剩余条）───
-   CodeArts 的 token 池那两行（对话 token / 福利模型日额度）与 OpenCode Go 的
-   三个用量窗口（5 小时 / 每周 / 每月）共用这一套：形态本来就是同一种，
-   渲染也同一处（islands 的 `UsageFlatRowView`）。
-   标签用短名（福利模型日额度 → 福利日额度），读数万/亿缩写（3541691 → 354 万），
-   原值都在悬停 title。条与积分明细同款：5px 胶囊、画**剩余**比例、超额整条走红
-   —— 但只在读得到比例时画，无上限 / 占位包 / 读不出数都不画。 */
-.usage-flat-line {
-  display: block;
-  margin-top: 4px;
-  min-width: 0;
-}
-
-/* 上面没有别的块时不留那段间距（OpenCode 的窗口格：一格就是三条平铺行，
-   第一条得贴着格顶，与相邻几列的读数对齐） */
-.usage-cell > .usage-flat-line:first-child { margin-top: 0; }
-
-.usage-flat-head {
-  display: flex;
-  align-items: baseline;
-  gap: 5px;
-  min-width: 0;
-}
-
-.usage-flat-name {
-  flex: none;
-  font-size: 10.5px;
-  color: var(--text-3);
-  white-space: nowrap;
-}
-
-.usage-flat-view {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-.usage-flat-view.ok { color: var(--ok); font-weight: 600; }
-.usage-flat-view.warn { color: var(--warn); font-weight: 600; }
-.usage-flat-view.bad { color: var(--danger); font-weight: 600; }
-.usage-flat-view.muted { color: var(--text-3); }
-
-.usage-flat-track {
-  display: block;
-  height: 5px;
-  margin-top: 3px;
-  border-radius: 999px;
-  background: var(--surface-inset);
-  overflow: hidden;
-}
-.usage-flat-track i {
-  display: block;
-  height: 100%;
-  border-radius: 999px;
-  background: var(--primary);
-}
-.usage-flat-track.over i { background: var(--danger); }
 
 /* ─── 余额明细弹层的内容（portal 渲染，样式挂在 PopoverContent 上）───
    结构照原型 prototype/codearts-balance.html：两组（积分 / token 额度）、
@@ -883,22 +966,26 @@ body.queue-dragging * { cursor: grabbing !important; }
 .usage-pop-view.bad { color: var(--danger); }
 .usage-pop-view.muted { color: var(--text-3); font-weight: 500; }
 
-/* 剩余进度条：6px 胶囊、轨道 surface-inset；画的是**剩余**比例（与 usage-pool 同向）。
-   超额整条走红 —— 画不满的「剩余 0%」读起来像「没用过」，与事实相反。 */
+/* 剩余细线：与余额格里那套 `.usage-meter-track` 同源同形（3px、hairline 轨道、
+   语义色条体），弹层里只是上下留白宽一点。画的是**剩余**比例；超额走红 ——
+   画不满的「剩余 0%」读起来像「没用过」，与事实相反。 */
 .usage-pop-track {
   display: block;
-  height: 6px;
+  height: 3px;
   margin-top: 6px;
   border-radius: 999px;
-  background: var(--surface-inset);
+  background: var(--hairline);
   overflow: hidden;
 }
 .usage-pop-track i {
   display: block;
   height: 100%;
   border-radius: 999px;
-  background: var(--primary);
+  background: var(--ok);
 }
+.usage-pop-track.warn i { background: var(--warn); }
+.usage-pop-track.bad i { background: var(--danger); }
+.usage-pop-track.muted i { background: var(--text-3); }
 .usage-pop-track.over i { background: var(--danger); }
 
 .usage-pop-total {
@@ -926,24 +1013,20 @@ body.queue-dragging * { cursor: grabbing !important; }
    两件式：箭头十来个像素，是这一列里最难点中的东西。两种格形态各配一个变体：
 
      · 单行读数（WorkBuddy）→ 直接 `.usage-toggle`，`.val` 居中，与 CodeArts 同款；
-     · 主额度桶（Trae）→ 同一个 `.usage-toggle` 加 `.usage-pool-line` 把间距与
-       对齐改回桶那套（进度条与读数一起住在按钮里，左对齐 —— 左边有进度条，
-       居中会让条与读数分家）。
+     · 主额度桶（Trae）→ 同一个 `.usage-toggle` 加 `.usage-pool-line`：桶形态的
+       内容现在是统一的 `.usage-meter`（读数 + 细线），按钮只负责把它的左右出血
+       与上下留白调回桶那套，并给右侧绝对定位的 caret 留出位置。
 
    逐份明细的长度由上游说了算（每日签到发的包能堆到几十份），所以弹层给一个
    最大高度 + 滚动：明细本来就是要翻的东西，但把整页顶下去不是。 */
 .usage-toggle.usage-pool-line {
-  gap: 6px;
+  display: block;
   /* 上下留白比单行那款更紧：这一行上面还有套餐名，桶形态本来就矮一号 */
   padding: 2px 8px;
   margin: 4px -8px 0;
 }
-/* 桶形态的读数占满剩余宽度并自己省略（与它在 .usage-pool-line 里时一致）；
-   右侧给绝对定位的 caret 留位 —— caret 不占布局宽度，不留位就会与长读数叠字 */
-.usage-toggle.usage-pool-line .usage-pool-view {
-  flex: 1;
-  padding-right: 12px;
-}
+/* 细线的右端让开 caret（它绝对定位、不占布局宽度，不让位就会压住读数尾部） */
+.usage-toggle.usage-pool-line .usage-meter { padding-right: 12px; }
 
 /* 明细弹层：比 CodeArts 那份（288px）宽一点 —— 每行要多放「领取 → 到期」一行。
    高度与滚动都写在**这一层**（`PopoverContent` 的直接子元素）上，而不是弹层自己：
@@ -1067,103 +1150,98 @@ body.queue-dragging * { cursor: grabbing !important; }
   color: var(--primary-fg);
 }
 
-/* ─── 展开的明细行（限流 / 签到）───
-   整宽一行，内容由 accounts-model.js 生成（.row-panel）。
-   明细行自带浅凹底：它是「附属于上一行」的补充信息，不该与账号行同权重。
+/* ─── 限流明细弹层（列上那个可点读数条的浮层内容）───
+   外壳与「积分明细」同一套（.usage-pop-credit 那份：内边距、最大高度、滚动都在
+   弹层里的这一层上，理由见上面那段）。这里只补三样余额明细没有的东西：
 
-   面板自身的外观在 page-accounts.css 里**是按 .acct-card 限定**的
-   （`.acct-card .row-panel { … }
+     · `.usage-pop-limit`  —— 滚动容器本身（与 .usage-pop-credit 同构，宽度同为
+       320px；两者各留一份而不是共用一个类名：将来只改其中一处时不会连带改坏另一处）
+     · `.lp-pop-subline`   —— 行内第二行：左侧「恢复时刻 · 原因」，右侧「清除」按钮
+     · `.lp-pop-track`     —— **冷却进度**线（满格 = 马上恢复）
 
-`），那份选择器在表格里不命中 ——
-   这里补一套同等形制的规则（含右上角的「收起」按钮），而不是去改那个文件里
-   仍然服务于卡片视图的选择器：两处各写一份，改卡片那边不会悄悄改到表格。 */
-.acct-panels > td {
-  padding: 0 10px 8px;
-  border-bottom: 1px solid var(--hairline);
-  background: var(--table-bg);
+   ⚠️ `.lp-pop-track` 与余额明细的 `.usage-pop-track` 方向相反：那条画「剩余」
+   （越长越有余量），这条画「进度」（越长越接近解除）。共用元素会让两处读数
+   互相解释错，所以类名、颜色（恒灰）都分开。 */
+.usage-pop-limit {
+  padding: 10px 14px 12px;
+  max-height: min(408px, 60vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* 这一层是弹层的初始焦点（见 accounts-limit-detail.tsx 的 initialFocus）：
+     聚焦它只是为了别让焦点落到列表末尾把滚动位置拽下去，不画焦点框 */
+  outline: none;
 }
 
-.acct-panels .row-panel {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 4px 12px;
-  position: relative;
-  margin: 0;
-  /* 右侧多留 30px 给绝对定位的「收起」按钮，内容不会压到它下面 */
-  padding: 10px 30px 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--surface-inset);
-  color: var(--text-2);
-  font-size: 11.5px;
-}
+/* 模型名走等宽字体：它是转发时逐字匹配的键，与界面上其余文案不是一类东西 */
+.lp-pop-model { font-family: var(--font-mono); }
 
-/* 「收起」按钮固定到右上角（面板是 flex 容器，跟着内容排会被挤到文字后面） */
-.acct-panels .row-panel .panel-close {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border-color: transparent;
-  border-radius: var(--r-xs);
-  background: transparent;
-  box-shadow: none;
-  color: var(--text-3);
-  font-size: 11px;
-}
-
-.acct-panels .row-panel .panel-close:hover { background: var(--surface-3); border-color: transparent; color: var(--text); }
-
-.acct-panels .row-panel b { color: var(--text); font-variant-numeric: tabular-nums; }
-
-/* ─── 限流明细面板 ───
-   与签到的 .row-panel 同形制；这里要的是块状逐行布局，覆盖它的 flex 换行。 */
-.acct-panels .row-panel.limit-panel { display: block; padding-right: 34px; }
-
-.limit-panel .lp-head {
+/* 第二行：左侧一句「今天 14:20 恢复 · 429 rate_limit_exceeded」，右侧一枚安静的
+   「清除」。按钮用 ghost + xs（24px 高）而不是更小的档 —— 这一行是弹层里唯一的
+   可点目标，再小就点不准了；它比左侧文字高 1px，用 baseline 对齐会把它顶偏，
+   所以整行按 center 对齐。 */
+.lp-pop-subline {
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-bottom: 4px;
+  gap: 8px;
+  margin-top: 3px;
+  min-width: 0;
 }
 
-.limit-panel .lp-head .muted { color: var(--text-3); font-weight: 400; }
-.limit-panel .lp-head button { margin-left: auto; height: 24px; font-size: 11.5px; }
-
-.limit-panel .lp-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 5px 0;
-  border-top: 1px solid var(--hairline);
-  font-size: 11.5px;
-}
-
-.limit-panel .lp-model {
-  flex: 0 1 auto;
-  max-width: 280px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  font-weight: 600;
-}
-
-.limit-panel .lp-reset { flex: 0 0 auto; color: var(--text-2); font-variant-numeric: tabular-nums; }
-.limit-panel .lp-reason {
+.lp-pop-reason {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 「清除」在静息态几乎不显形（ghost：无底无描边、灰字），悬停才浮出底色 ——
+   它是「我知道自己在做什么」时才点的动作，不该在扫读时抢注意力 */
+.lp-pop-subline button { flex: 0 0 auto; }
+
+.lp-pop-track {
+  display: block;
+  height: 3px;
+  margin-top: 6px;
+  border-radius: 999px;
+  background: var(--hairline);
+  overflow: hidden;
+}
+.lp-pop-track i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  /* 恒灰：冷却走完之前它既不是「好」也不是「坏」，走完了这一行本身也就消失了 */
+  background: var(--text-3);
+}
+
+/* 页脚：左一句条数说明、右一颗「全部清除」。向两侧出血到弹层内边距之外，
+   靠一整条底色与上面的记录分开（与积分明细的「已用完 / 已过期」页脚同款思路）。 */
+.lp-pop-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px -14px -12px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--hairline);
+  background: var(--surface-2);
+}
+
+.lp-pop-note {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
   color: var(--text-3);
 }
-.limit-panel .lp-row button { flex: 0 0 auto; height: 22px; padding: 0 7px; font-size: 11px; }
+
+.lp-pop-foot button { flex: 0 0 auto; }
 
 /* ─── 窄窗口 ───
    表格有最小宽度（900px），更窄时按列宽原样横滚 —— 滚动行为本身在

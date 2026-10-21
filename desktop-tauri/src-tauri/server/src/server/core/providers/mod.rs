@@ -99,10 +99,18 @@ pub mod accio;
 /// Antigravity（Google 的 AI IDE，推理走 **Google Cloud Code Assist**
 /// `v1internal`）。适配实现在 `antigravity/`：账号管理（粘贴 Google
 /// refresh token）+ token 刷新（Google OAuth 的 form 端点）+ 模型目录
-/// （`:fetchAvailableModels`，只列 Gemini）+ **会话转发**（`build_chat_request`
-/// 构造 v1internal 信封，响应走 `UpstreamResponse::AntigravityGemini` 那条
-/// Gemini SSE 翻译层）全部已接通；`is_stateful` 恒 false，见 `antigravity/mod.rs`）。
+/// （`:fetchAvailableModels`，Gemini / Claude / GPT-OSS 三个家族）+ **会话转发**
+/// （`build_chat_request` 构造 v1internal 信封，响应走
+/// `UpstreamResponse::AntigravityGemini` 那条 SSE 翻译层 —— 它收的是三家共同的
+/// wire 格式，不止 Gemini）全部已接通；`is_stateful` 恒 false，
+/// 见 `antigravity/mod.rs`）。
 pub mod antigravity;
+/// AtomCode（AtomGit / GitCode）。适配实现在 `atomcode/`：账号管理（粘贴令牌对
+/// 或后续的浏览器登录）+ **无状态 OpenAI 直通转发**（上游本身就是 Chat
+/// Completions，`is_stateful` 恒 false）+ 目录（`coding-plan/models-v2`）+
+/// 额度（`status-v2` 的**每窗口调用次数**）+ 续期（`/oauth/refresh`，会轮换）。
+/// 三条平面与四个坑见 `atomcode/mod.rs` 的模块头。
+pub mod atomcode;
 pub mod autoclaw;
 pub mod catalog;
 /// 远程模型清单的**持久化缓存**（各家的清单在进程重启后由它读回，见模块头）。
@@ -110,6 +118,14 @@ pub mod catalog;
 pub mod catalog_cache;
 pub mod catalog_refresh;
 pub mod catpaw;
+/// 智谱清言（`chatglm.cn`，桌面客户端 2.0.7）：**无状态转发 + 双凭证形态**
+/// （访客免登录可换证 / 登录账号有积分）。适配实现在 `chatglm/`：请求要
+/// 签名三件套 + 设备号（实测边界见 `chatglm/sign.rs`）、多轮 messages 必须
+/// 拍平成单条（上游只认最后一条 user 消息，见 `chatglm/plan.rs`）、响应帧混着
+/// 「增量」与「收尾全文快照」两种语义，因此走 `UpstreamResponse::ChatglmSnapshot`
+/// 那条翻译层（按帧语义差分后下发，见 `protocol::chatglm_stream` 的模块头）。
+/// 余额 / 签到 / 领取类齐备，但只对登录账号有效（访客如实跳过）。
+pub mod chatglm;
 pub mod cline;
 /// CodeArts（华为云 snap-access）。适配器实现在 `codearts/`，
 /// 语义来源与施工计划见 `cpa-deploy/notes/agent2api-codearts-port-plan.md`。
@@ -129,6 +145,7 @@ pub mod content_block;
 /// 自定义家走独立通道」的两条路径。
 pub mod custom;
 pub mod kuku;
+pub mod lobsterai;
 pub mod loomy;
 /// MonkeyCode（长亭科技的开源 AI 开发平台）。适配实现在 `monkeycode/`：
 /// 账号管理（粘贴 session）+ 模型目录（`GET /api/v1/users/models`）+
@@ -136,6 +153,11 @@ pub mod loomy;
 /// 含工具自动批准与提问自动应答）全部已接通；`is_stateful` 为 true，
 /// 见 `monkeycode/mod.rs` 的模块头。
 pub mod monkeycode;
+/// ModelScope（魔搭）的两个站点。适配实现在 `modelscope/`：
+/// 账号管理（粘贴 `ms-` 令牌 + 探活取身份）+ **无状态 OpenAI 兼容转发** +
+/// 每日签到 + 魔粒余额；无续期、无桌面端导入。**一套实现、两个 provider**
+/// （`modelscope` / `modelscope-intl`，两站账号体系分开，见 `modelscope/region.rs`）。
+pub mod modelscope;
 pub mod officeace;
 /// OrcaTerm（腾讯云遨驰终端桌面客户端）。适配实现在 `orcaterm/`：
 /// 账号管理（**粘贴 accessToken** / 导入桌面端 `data.bin` 登录态）+
@@ -435,8 +457,8 @@ pub enum ProviderKind {
     CommandCode,
     /// Antigravity（Google 的 AI IDE）。适配实现在 `antigravity/`：
     /// 账号管理（**粘贴 Google refresh token**）、token 刷新、模型目录
-    /// （**只接 Gemini**）、**会话转发**（`build_chat_request` 构造 v1internal
-    /// 信封）全部已接通，见 `antigravity/mod.rs` 的模块头）。
+    /// （**Gemini / Claude / GPT-OSS 三家族**）、**会话转发**（`build_chat_request`
+    /// 构造 v1internal 信封）全部已接通，见 `antigravity/mod.rs` 的模块头）。
     ///
     /// ── 上游长什么样（规格 `_recon/antigravity-spec.md`，参考
     /// `Acankao/Antigravity-Manager` + `Acankao/9router`）────────────
@@ -469,6 +491,85 @@ pub enum ProviderKind {
     /// 会话转发（建会话 → assistant SSE）+ 余额（月度 AI 配额）；
     /// `is_stateful` 为 true（请求内会话），见 `orcaterm/mod.rs` 的模块头。
     OrcaTerm,
+    /// 智谱清言（`chatglm.cn`，桌面客户端 2.0.7）。适配实现在 `chatglm/`：
+    /// 账号管理（**访客免登录换证** / 手机验证码 / 粘贴令牌）+ 续期
+    /// （`user/refresh`）+ 模型目录 + 无状态转发 + 余额（积分）+
+    /// 签到（每日登录积分）+ 领取类（会员活动）；`is_stateful` 为 false。
+    ///
+    /// ── 上游长什么样（从客户端 app.asar + 线上包逆向，见 `chatglm/mod.rs`）──
+    /// 全部能力都在 `chatglm.cn` 的一组 REST 接口上，请求要带**签名三件套 +
+    /// 设备号**（密钥是客户端内置的；时间戳是智谱自创的校验位算法）。
+    /// 对话响应的帧**混着两种语义**（`part.status == "init"` 是增量、带 finish 的
+    /// 帧给全文快照），因此另开一台按帧语义差分的状态机
+    /// （`UpstreamResponse::ChatglmSnapshot`）。
+    ///
+    /// ── 与别家最不同的一点：**访客凭证** ────────────────────────
+    /// `POST /chatglm/user-api/guest/access` 空 body 恒可换发访客令牌，
+    /// 不需要登录 —— 这是本家「零配置就能用」的入口（与别家「必须有账号」
+    /// 的处境不同）。代价是访客**没有积分体系**：余额 / 签到 / 领取类接口
+    /// 一律 401，那些能力对它如实跳过。
+    ///
+    /// ── 为什么是**一家**（没有地区伴生）─────────────────────────
+    /// 国际站是另一个产品（Z.AI / ZCode，已在注册表里按两家建模），
+    /// 智谱清言这一家只有 `chatglm.cn` 一个站点（测试域 `test.chatglm.cn`
+    /// 是**环境**不是地区，靠 `CHATGLM_BASE_URL` 覆盖即可）。
+    Chatglm,
+    /// ModelScope（魔搭）**国内站**（`modelscope`）。适配实现在 `modelscope/`：
+    /// 账号管理（粘贴 `ms-` 令牌 + 探活取身份）、无状态 OpenAI 兼容转发、
+    /// 每日签到与魔粒余额。
+    ///
+    /// ── 与 [`ProviderKind::ModelscopeIntl`] 是同一套协议的两个站点 ────
+    /// 与 AutoClaw / ZCode / MonkeyCode 同一思路：魔搭的**两个站点各有独立的
+    /// 账号体系**（国内令牌打国际站网页接口得 `401 access forbidden`，实测），
+    /// 所以地区必须是 provider 身份而不是账号上的字段。
+    /// 拆成两个 provider 还解决一个具体故障：模型目录只有一份的话，
+    /// 两个站（各自 36 条、内容不同）会互相覆盖。
+    ///
+    /// 实现是**一套**：`modelscope::ModelScopeAdapter` 持有一个 `modelscope::Region`，
+    /// 两个静态实例（`MODELSCOPE_ADAPTER` / `MODELSCOPE_INTL_ADAPTER`）由
+    /// `adapter_for` 按 kind 给出。地区 → provider 的互查在 `modelscope::Region`
+    /// （`kind` / `provider_id` / `from_provider_id`），别处不要再写
+    /// `"modelscope-intl"` 这类字面量。
+    ///
+    /// provider id 都是新名字（本家是全新接入，没有需要保住的存量 id）。
+    Modelscope,
+    /// ModelScope（魔搭）**国际站**（`modelscope-intl`，站点 `www.modelscope.ai`）。
+    /// 与 [`ProviderKind::Modelscope`] 同一套协议、不同站点（网页站与推理域都不同，
+    /// 见 `modelscope::region`）。
+    ModelscopeIntl,
+    /// AtomCode（AtomGit / GitCode 的编码 Agent，`atomcode.atomgit.com`）。
+    ///
+    /// ── 上游长什么样（官方 Rust CLI + 本地 Go 参考实现，见 `atomcode/` 各模块头）──
+    /// 三条平面：登录代理 `acs.atomgit.com`（浏览器 OAuth，**回调不回到本机**，
+    /// 靠轮询判完成）、CodingPlan REST `api.gitcode.com/api/v5`（目录 / 套餐 /
+    /// 领取 / 用量）、聊天网关 `api-ai.gitcode.com/v1`（**OpenAI Chat
+    /// Completions 原生**）。
+    ///
+    /// ── 三个与别家不同的硬事实（每一条都能让整条链路静默失效）────────
+    /// 1. 网关**刻意不用官方默认的 `llm-api.atomgit.com/v1`**：那个要求闭源
+    ///    请求签名，而网关是**按 User-Agent** 决定要不要签名的（自称
+    ///    `atomcode/<ver>` 立刻 `403 ATOMCODE_SIG_MISSING`）。见
+    ///    `atomcode::endpoints` 的实测表。
+    /// 2. 令牌**不是 JWT**：过期只能由 `created_at + expires_in` 推；
+    ///    续期会**轮换** refresh token（必须单飞且必须写回）。
+    /// 3. 网关把失败包装成成功：`HTTP 200` + 正文 `参数错误`（或一页上游 HTML
+    Atomcode,
+    /// LobsterAI（网易有道「有道龙虾」，`lobsterai.youdao.com`）。适配实现在
+    /// `lobsterai/`：账号管理（浏览器登录落于本机 loopback 回调）+ **无状态
+    /// 转发** + 目录 + 积分余额 + 每日签到。
+    ///
+    /// ── 上游长什么样（Go 参考 + TS 原版，见 `lobsterai/` 各模块头）──
+    /// 对话端点是 **OpenAI 兼容的原生协议**（`POST /api/proxy/v1/chat/completions`），
+    /// **只收 SSE**（`stream:false` 回 HTTP 500）—— 本网关的转发入口恒以
+    /// `stream:true` 请求上游，这条天然满足。**没有任何签名**，纯 Bearer。
+    ///
+    /// ── 三个载荷点 ────────────────────────────────────────────
+    /// ① 两个 `X-LobsterAI-Client-*` 头按能力过滤：少了 `kimi-k3-agentic-v1`
+    /// 目录里少一个模型，少了 `thinking-level-control-v1` 发
+    /// `reasoning_effort:"off"` 直接 500；② `uuid` 与两个 `keyfrom` 只在换码时
+    /// 下发、续期必须原样回传（丢了账号永远续不了期）；③ `developer` 角色上游
+    /// 回 502，出站要降级成 `system`。
+    LobsterAi,
 }
 
 /// 一个提供商的静态元数据。
@@ -565,6 +666,29 @@ pub const PROVIDERS: &[ProviderMeta] = &[
     // 它的模型名（glm-5.3 / kimi-k3 / deepseek-v4-* 等）与 codearts / catpaw /
     // zcode 大面积同名，同样靠末位让同名模型优先归已有各家。
     ProviderMeta { id: "orcaterm", label: "OrcaTerm" },
+    // 智谱清言（`chatglm.cn`）：单一站点（国际站是另一个产品 Z.AI/ZCode，
+    // 已按两家建模在注册表里），因此没有地区伴生。排末尾（2026-10 接入，
+    // 后到居后）。它的 GLM 系列模型名与 zcode / codearts / catpaw / orcaterm
+    // 大面积同名 —— 靠末位让同名模型优先归已有各家（那些是开放平台账号，
+    // 配额与稳定性都比本家的消费级网页端好）。
+    ProviderMeta { id: "chatglm", label: "智谱清言" },
+    // ModelScope（魔搭）的两个站点**相邻**排列（与 AutoClaw / Qoder / ZCode /
+    // MonkeyCode 同一理由：同一条产品线的两个版本，中间隔着别家会让「找国际版」
+    // 变成一次扫描）。顺序也决定模型目录合并时同名模型先归谁家 ——
+    // 国内版在前（用户直觉里「魔搭就是国内那个站」）。
+    //
+    // 两个地区**都带版本后缀**（与 WorkBuddy 同款）：它们是两家独立的提供商
+    // （账号体系、模型目录都分开），名字是用户区分它们的唯一线索 ——
+    // 只给国际版加后缀会让「ModelScope」读起来像「两地通吃的那一家」。
+    ProviderMeta { id: "modelscope", label: "ModelScope 国内版" },
+    ProviderMeta { id: "modelscope-intl", label: "ModelScope 国际版" },
+    // AtomCode（AtomGit / GitCode）：单一地区、单一入口（浏览器登录的界面侧
+    // 尚未接，见 `atomcode/mod.rs` 的模块头），没有国际版伴生。排在末尾
+    // （后到居后，同样让同名模型优先归已有各家）。
+    ProviderMeta { id: "atomcode", label: "AtomCode" },
+    // LobsterAI（网易有道「有道龙虾」）：单一入口（浏览器登录），没有地区伴生。
+    // 排在末尾（后到居后）。
+    ProviderMeta { id: "lobsterai", label: "LobsterAI" },
 ];
 
 /// provider id 在注册表里的下标（未知 id → None）。
@@ -649,6 +773,11 @@ pub fn kind_from_id(id: &str) -> Option<ProviderKind> {
         "antigravity" => Some(ProviderKind::Antigravity),
         "officeace" => Some(ProviderKind::OfficeAce),
         "orcaterm" => Some(ProviderKind::OrcaTerm),
+        "chatglm" => Some(ProviderKind::Chatglm),
+        "modelscope" => Some(ProviderKind::Modelscope),
+        "modelscope-intl" => Some(ProviderKind::ModelscopeIntl),
+        "atomcode" => Some(ProviderKind::Atomcode),
+        "lobsterai" => Some(ProviderKind::LobsterAi),
         // 走到这里 = 上面的注册表判定已放行、这个 match 却没有对应分支：
         // 只可能是有人给 `PROVIDERS` 加了条目忘了加这里。开发期喊出来；
         // release 返回 None（见上：宁可为「未知」，不可误认成别家）。
@@ -691,6 +820,11 @@ pub const fn kind_id(kind: ProviderKind) -> &'static str {
         ProviderKind::Antigravity => "antigravity",
         ProviderKind::OfficeAce => "officeace",
         ProviderKind::OrcaTerm => "orcaterm",
+        ProviderKind::Chatglm => "chatglm",
+        ProviderKind::Modelscope => "modelscope",
+        ProviderKind::ModelscopeIntl => "modelscope-intl",
+        ProviderKind::Atomcode => "atomcode",
+        ProviderKind::LobsterAi => "lobsterai",
     }
 }
 

@@ -225,8 +225,11 @@
 /* 勾选列的表头 / 单元格都居中：一整列只有复选框，居中才与账号页勾选列同一观感
    （数据行走列设置的 ta-center；th 上的 text-align 是全局 left，这里单独补） */
 .models-table th[data-col="check"] { text-align: center; }
-.models-table .c-model { width: 19%; }
+.models-table .c-model { width: 17%; }
 .models-table .c-rate { width: 5.5%; }
+/* 可见性列：「可见 / 不展示」两个短词，6% 够放下。宽度从「上游模型」列匀来
+   （那一列原来 19%，长模型名的截断阈值本来也够宽） */
+.models-table .c-visibility { width: 6%; }
 .models-table .c-source { width: 6.5%; }
 /* 能力位两列：数值一格（上下文 / 最大输出）、四枚图标圆点一格。
    并入映射列的宽度从这里来 —— 五列会把它挤到装不下 chips（见 models-page
@@ -356,6 +359,15 @@
 .src.remote { color: var(--text-2); }
 .src.remote i { background: var(--primary); opacity: 1; }
 .src.manual i { background: var(--warn); opacity: 1; }
+
+/* ── 「可见性」列 ────────────────────────────────────────
+   与「来源」列同一套色点语法（两列并排，扫表时读的是点的颜色）：
+   可见 = 品牌蓝、不展示 = 琥珀（与「手动」同一档 —— 都是「需要留意的
+   非默认状态」）。「未声明 / 没判据」走 `.rate` 的 `—`，不上色。 */
+.src.shown-visibility { color: var(--text-2); }
+.src.shown-visibility i { background: var(--primary); opacity: 1; }
+.src.hidden-visibility { color: var(--warn); }
+.src.hidden-visibility i { background: var(--warn); opacity: 1; }
 
 /* ── 「能力」列：四枚图标圆点（2026-10 重设计）──────────────
    文字徽章 → 图标圆点：四个键在每一行都出现，扫表时读的是「几个亮圆」，

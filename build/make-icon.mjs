@@ -124,50 +124,91 @@ function shapeAlpha(nx, ny) {
 // ─── 光栅化（3×3 超采样）────────────────────────────────────
 
 const SS = 3;
-const pixels = Buffer.alloc(SIZE * SIZE * 4);
 
 /** 线性插值：目前只用于把纯白箭头按覆盖率混到纯色底上 */
 function lerp(a, b, t) {
   return a + (b - a) * t;
 }
 
-for (let y = 0; y < SIZE; y++) {
-  for (let x = 0; x < SIZE; x++) {
-    let rectHits = 0;
-    let arrowHits = 0;
-    for (let sy = 0; sy < SS; sy++) {
-      for (let sx = 0; sx < SS; sx++) {
-        const px = (x + (sx + 0.5) / SS) / SIZE - 0.5;
-        const py = (y + (sy + 0.5) / SS) / SIZE - 0.5;
-        const { rect, arrow } = shapeAlpha(px, py);
-        if (rect <= 0) rectHits++;
-        if (arrow <= 0) arrowHits++;
+/**
+ * 把一块画布光栅化成 RGBA 像素。
+ *
+ * `shape` 收归一化坐标（[-0.5, 0.5]），返回 `{ rect, arrow }` 两个 SDF 值。
+ * 分成「底」与「箭头」两层是为了让两者各自带抗锯齿覆盖率 —— 箭头压在底上，
+ * 边缘不能直接取整。
+ */
+function rasterize(size, shape) {
+  const pixels = Buffer.alloc(size * size * 4);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      let rectHits = 0;
+      let arrowHits = 0;
+      for (let sy = 0; sy < SS; sy++) {
+        for (let sx = 0; sx < SS; sx++) {
+          const px = (x + (sx + 0.5) / SS) / size - 0.5;
+          const py = (y + (sy + 0.5) / SS) / size - 0.5;
+          const { rect, arrow } = shape(px, py);
+          if (rect <= 0) rectHits++;
+          if (arrow <= 0) arrowHits++;
+        }
       }
-    }
-    const total = SS * SS;
-    const rectA = rectHits / total;
-    const arrowA = arrowHits / total;
-    if (rectA === 0) continue;
+      const total = SS * SS;
+      const rectA = rectHits / total;
+      const arrowA = arrowHits / total;
+      if (rectA === 0) continue;
 
-    // 底色改为纯苹果蓝 #007AFF（与 iOS/macOS 系统蓝同族的观感），不再做对角渐变，
-    // 这样图标在浅色/深色壁纸和 Dock 里都保持同一个可辨识的品牌蓝。
-    let r = 0x00;
-    let g = 0x7a;
-    let b = 0xff;
-    // 箭头为纯白，按覆盖率与底色混合
-    if (arrowA > 0) {
-      r = lerp(r, 255, arrowA);
-      g = lerp(g, 255, arrowA);
-      b = lerp(b, 255, arrowA);
+      // 底色改为纯苹果蓝 #007AFF（与 iOS/macOS 系统蓝同族的观感），不再做对角渐变，
+      // 这样图标在浅色/深色壁纸和 Dock 里都保持同一个可辨识的品牌蓝。
+      let r = 0x00;
+      let g = 0x7a;
+      let b = 0xff;
+      // 箭头为纯白，按覆盖率与底色混合
+      if (arrowA > 0) {
+        r = lerp(r, 255, arrowA);
+        g = lerp(g, 255, arrowA);
+        b = lerp(b, 255, arrowA);
+      }
+      const i = (y * size + x) * 4;
+      pixels[i] = Math.round(r);
+      pixels[i + 1] = Math.round(g);
+      pixels[i + 2] = Math.round(b);
+      pixels[i + 3] = Math.round(rectA * 255);
     }
-    const i = (y * SIZE + x) * 4;
-    pixels[i] = Math.round(r);
-    pixels[i + 1] = Math.round(g);
-    pixels[i + 2] = Math.round(b);
-    pixels[i + 3] = Math.round(rectA * 255);
   }
+  return pixels;
 }
+
+const pixels = rasterize(SIZE, shapeAlpha);
 
 mkdirSync(dirname(OUT), { recursive: true });
 writeFileSync(OUT, encodePng(SIZE, SIZE, pixels));
 console.log(`[icon] 已生成 ${OUT}`);
+
+// ─── PWA maskable 图标 ──────────────────────────────────────
+//
+// 「maskable」是 Android 自适应图标用的那一档：系统会**按自己的形状裁剪**
+// （圆形、方形、水滴…），并可能把图形放大到 1.33 倍。规范要求关键内容落在
+// 中心 80% 直径的圆内，否则会被裁掉。
+//
+// 所以这一版与 source.png 有两处必须不同，不能直接复用同一张图：
+//   ① **满铺、不透明、无圆角** —— 带透明圆角的图被裁成圆形后，四角会露出
+//      底色（黑边），且规范明确要求 maskable 图标不能有透明像素；
+//   ② **箭头缩到 60%** —— 留出被裁剪的余量，放大 1.33 倍后仍完整。
+//
+// 输出直接落到 `ui/assets/`（手机端静态资源目录），不进 tauri icons ——
+// 那一套是桌面端安装包用的，与 PWA 无关。
+const MASKABLE_OUT = join(HERE, '..', 'desktop-tauri', 'ui', 'assets', 'app-icon-maskable-512.png');
+const MASKABLE_SIZE = 512;
+/** 箭头缩放：0.6 时箭头横向跨度约 0.34，落在 80% 安全圆内绰绰有余 */
+const MASKABLE_SCALE = 0.6;
+
+const maskablePixels = rasterize(MASKABLE_SIZE, (nx, ny) => {
+  // 底：满铺整块画布（SDF 恒 <0），于是没有透明像素、也没有圆角
+  const rect = -1;
+  // 箭头：坐标放大 = 图形缩小，居中不变
+  const { arrow } = shapeAlpha(nx / MASKABLE_SCALE, ny / MASKABLE_SCALE);
+  return { rect, arrow };
+});
+
+writeFileSync(MASKABLE_OUT, encodePng(MASKABLE_SIZE, MASKABLE_SIZE, maskablePixels));
+console.log(`[icon] 已生成 ${MASKABLE_OUT}`);

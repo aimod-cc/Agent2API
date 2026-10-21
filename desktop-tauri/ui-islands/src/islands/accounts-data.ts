@@ -30,7 +30,7 @@
 
 import {
   errorMessage, POOL_VALUE_PREFIX, shared, toast,
-  type AccountRecord, type ClashSnapshot, type PanelKind, type PoolItem,
+  type AccountRecord, type ClashSnapshot,
   type TokenReading, type UsageEntry,
 } from './accounts-shared'
 import {
@@ -40,8 +40,9 @@ import {
 import * as domain from './accounts-domain'
 import { t } from '../i18n'
 import {
-  allAccounts, bump, findAccount, getStore, isPicked, openPanelsFor, panelOpen, patch,
+  allAccounts, bump, findAccount, getStore, isPicked, patch,
 } from './accounts-store'
+import { proxyPoolSnapshot, refreshProxyPool } from './proxy-pool-cache'
 
 // 状态层原样再导出：视图侧（accounts-page / panels / dialogs）只认本文件这一条路径
 export * from './accounts-store'
@@ -230,87 +231,19 @@ export function invalidateClashCache(): void {
 /* ─── 代理池（「网络代理」页的命名代理，账号页的代理下拉）─── */
 
 /**
- * 代理池列表缓存。与 clash 那份（放 store 里）不同：它**只有代理表单用**
- * （账号表的代理列读的是账号自己的 proxy 描述，不需要池），所以不进 store，
- * 一个模块变量 + 在途 Promise 就够。
+ * 池列表的**唯一一份缓存**在 `proxy-pool-cache.ts`：账号页与「网络代理」页
+ * 共用它（那一页每次写操作都拿到后端回报的整份列表，写进同一份缓存，这里
+ * 立刻能看到）。
+ *
+ * 为什么不再是本文件的模块变量：曾经它只在这里，且读过一次就永不失效
+ * （`invalidateProxyPoolCache` 全项目没有调用点）。后果是在网络代理页禁用
+ * 节点 / 删除订阅之后，账号页的代理下拉还列着那些条目，选中才被后端拒绝。
  */
-let poolCache: PoolItem[] | null = null
-let poolInflight: Promise<PoolItem[]> | null = null
+export {
+  acceptProxyPool, ensureProxyPoolOptions, invalidateProxyPoolCache, poolError,
+  proxyPoolOptions, proxyPoolSnapshot, refreshProxyPool, subscribeProxyPool,
+} from './proxy-pool-cache'
 
-/** 已缓存的池列表（`null` = 还没读过）；表单首帧用它避免下拉先空一拍 */
-export function proxyPoolSnapshot(): PoolItem[] | null {
-  return poolCache
-}
-
-/** 清掉缓存（表单里的「重新读取」用） */
-export function invalidateProxyPoolCache(): void {
-  poolCache = null
-}
-
-/**
- * 读一次代理池（模块级缓存；并发调用合并成一次）。
- * 与 clashOptions 同一条纪律：桥异常时可能 resolve 出 `undefined`（而不是 reject），
- * 那种情况按失败处理 —— 不校验的话会伪装成「池里一条都没有」。
- */
-export async function proxyPoolOptions(options: { force?: boolean } = {}): Promise<PoolItem[]> {
-  if (!options.force && poolCache) return poolCache
-  if (!poolInflight) {
-    poolInflight = (async () => {
-      try {
-        const data = await shared().workbuddyDesktop?.getProxyPool?.()
-        if (!data || typeof data !== 'object' || !Array.isArray(data.items)) {
-          throw new Error(t('代理池响应异常（{type}）', { type: typeof data }))
-        }
-        return data.items
-      } finally {
-        poolInflight = null
-      }
-    })()
-  }
-  const items = await poolInflight
-  poolCache = items
-  return items
-}
-
-/** 代理池读取失败的原因（成功后清空）—— 代理列据此显示「读取失败」的说明项 */
-let lastPoolError: string | null = null
-
-export function poolError(): string | null {
-  return lastPoolError
-}
-
-/**
- * 代理列的池条目自愈：没读到就补拉（节流 30 秒，与 `ensureClashOptions` 同一套
- * 理由 —— 没有它，「失败 → 重画 → 又拉」会变成死循环；有它，网络 / 桥恢复后
- * 最多半分钟自己补上）。
- */
-let poolRetryAt = 0
-let poolWarned = false
-
-export function ensureProxyPoolOptions(): void {
-  if (poolCache || Date.now() < poolRetryAt) return
-  if (typeof shared().workbuddyDesktop?.getProxyPool !== 'function') {
-    // 桥没挂上（加载失败等）：本页面会话内不再尝试，并告警一次
-    if (!poolWarned) {
-      poolWarned = true
-      console.warn('[accounts] 桥未提供 getProxyPool：代理列的「已保存的代理」选项不可用')
-    }
-    poolRetryAt = Infinity
-    return
-  }
-  poolRetryAt = Date.now() + 30_000
-  void proxyPoolOptions()
-    .then(() => {
-      poolRetryAt = 0
-      lastPoolError = null
-      // 读到了要重画一次：这一格渲染时读的是同步快照，没有订阅者通知它
-      bump()
-    })
-    .catch(error => {
-      lastPoolError = errorMessage(error)
-      bump()
-    })
-}
 
 /* ─── 弹窗 ─────────────────────────────────── */
 
@@ -329,6 +262,18 @@ export function openBatchDialog(ids: string[], action = 'enable'): void {
   patch({ dialog: { kind: 'batch', ids: selected, action } })
 }
 
+/**
+ * 打开某一家的**分组设置**弹窗（分组带上齿轮那颗按钮）。
+ *
+ * 不做「这一家还在不在」的存在性校验：分组带本身是从分组视图渲染出来的，
+ * 打不开的组根本点不到；而设置里有些项（将来的默认展开 / 新账号落点）在
+ * 账号被删光之后仍然有意义，硬拦一次反而让弹窗随账号数闪没。
+ */
+export function openGroupDialog(provider: string): void {
+  if (!provider) return
+  patch({ dialog: { kind: 'group', provider } })
+}
+
 /* ─── 删除账号后的缓存清理 ───────────────────── */
 
 /** 清掉已删除账号的本地缓存（app.js 每次 refresh 后调用） */
@@ -338,15 +283,13 @@ export function refreshCaches(validIds: Set<string>): void {
   // 失败结论的时刻表跟着条目一起清：账号删掉后同 id 可能被「重新添加」复用，
   // 留着的旧时刻会让那条新记录继承一个本该作废的失败结论
   for (const id of [...usageFailureAt.keys()]) if (!validIds.has(id)) usageFailureAt.delete(id)
-  const panels = new Map(getStore().panels)
-  for (const id of [...panels.keys()]) if (!validIds.has(id)) { panels.delete(id); touched = true }
   const connections = new Map(getStore().connections)
   for (const id of [...connections.keys()]) if (!validIds.has(id)) { connections.delete(id); touched = true }
   const inflight = new Set(getStore().usageInflight)
   for (const id of [...inflight]) if (!validIds.has(id)) { inflight.delete(id); touched = true }
   const selected = new Set(getStore().selected)
   for (const id of [...selected]) if (!validIds.has(id)) { selected.delete(id); touched = true }
-  if (touched) patch({ panels, connections, usageInflight: inflight, selected })
+  if (touched) patch({ connections, usageInflight: inflight, selected })
 }
 
 /* ─── 连接数（实时，2 秒一轮）────────────────────
@@ -834,12 +777,6 @@ export async function clearLimits(id: string, model?: string): Promise<void> {
 }
 
 /**
- * 代理列下拉的保存。值只有两种：空串 = 直连（proxy 传 null），否则是 Clash 出口 uid
- * （`{source:'clash', listenerUid}`）——「自定义代理…」不是值而是动作：把下拉恢复成
- * 原选中，再打开账号设置弹窗（完整代理表单在那里）。成功后用后端回报的变更说明播报，
- * 与后端文案保持一份事实。
- */
-/**
  * 代理列选中即保存（`value` 是下拉的值）。下拉的选项只有三类：
  *   ''                     → 直连（proxy = null）
  *   `pool:<proxyId>`       → 引用「网络代理」页的池条目
@@ -848,6 +785,13 @@ export async function clearLimits(id: string, model?: string): Promise<void> {
  *
  * 出口统一走代理池之后，这里**不再**产生 `{source:'clash'}` —— 存量里那种
  * 记录仍照原样转发，用户在这个下拉里选一条池条目或切回直连就会改写它。
+ *
+ * ── 禁用条目为什么在这里再挡一次 ─────────────────────────────
+ * 视图层已经把禁用条目置灰（`disabled`），但下拉的选项来自缓存，极端情况下
+ * （缓存刚被别处刷新、弹层已经展开）仍可能点到一条已禁用的。后端
+ * `normalize_account_proxy` 有意**不**校验池的当下状态（保存账号不依赖池的
+ * 读库结果），所以这里不挡的话会「保存成功 → 解析失败 → 回退直连」，用户只
+ * 看到一句「代理已禁用」。挡在这里，提示与视图上的置灰是同一个事实。
  */
 export async function applyProxyPick(id: string, value: string, fallback: string): Promise<void> {
   if (value === PROXY_CUSTOM_EDIT) {
@@ -858,6 +802,16 @@ export async function applyProxyPick(id: string, value: string, fallback: string
   // 当前自定义配置的显示项：选它自己不是一次修改
   if (value === PROXY_CUSTOM_CURRENT) return
   if (value === fallback) return
+  if (value.startsWith(POOL_VALUE_PREFIX)) {
+    const poolId = value.slice(POOL_VALUE_PREFIX.length)
+    const item = (proxyPoolSnapshot() || []).find(entry => entry.id === poolId)
+    if (item && item.enabled === false) {
+      toast(t('「{name}」已在「网络代理」页禁用，请先启用它或换一条', {
+        name: item.name || poolId,
+      }), 'err')
+      return
+    }
+  }
   try {
     const proxy = value === ''
       ? null
@@ -926,7 +880,6 @@ export type RowContext = {
   rank: number
   picked: boolean
   usageEntry: UsageEntry
-  limitsOpen: boolean
   connections: number
 }
 
@@ -940,7 +893,6 @@ export function rowContext(
     rank,
     picked: isPicked(account.id),
     usageEntry: usageMap.get(account.id),
-    limitsOpen: panelOpen(account.id, 'limits'),
     connections: connectionsOf(account.id),
   }
 }
@@ -948,8 +900,15 @@ export function rowContext(
 export type AccountsViewApi = {
   render(): void
   refreshCaches(validIds: Set<string>): void
-  openPanels(ids: string[], kind: PanelKind): void
   syncConnections(): Promise<boolean>
+  /**
+   * 强制重读「网络代理」页的代理池（切回本页时调）。
+   *
+   * 代理列的下拉读的是共享缓存，平时由网络代理页的写操作就地更新；这一条是
+   * 兜底 —— 池可能在应用外被改过（另一个窗口、手工改库），而本页在切页前
+   * 可能一次都没重新读过。失败不抛，界面按 `poolError()` 显示「读取失败」。
+   */
+  refreshProxyPool(): Promise<void>
   applyBalances(
     balances: { results?: Array<Record<string, unknown>>; at?: unknown } | null | undefined,
   ): number
@@ -1062,8 +1021,8 @@ export function installAccountsApi(): void {
   window.wbAccountsView = {
     render: () => bump(),
     refreshCaches,
-    openPanels: openPanelsFor,
     syncConnections,
+    refreshProxyPool,
     applyBalances,
     syncBalancesSnapshot,
     queryUsageFor,

@@ -36,6 +36,8 @@
 //!                        数据底座
 //!   key_scope.rs         本次请求命中的网关 Key 及其可用提供商 / 可用模型限制
 //!                        （R9；中间件放入请求扩展，handler 与转发层读出）
+//!   assistant_sessions.rs AI 助手的对话会话（assistant_sessions 表，schema v16）——
+//!                        左边那列历史会话的存储；管理 API 在 `api::assistant`
 //!   crypto.rs            通用对称加解密（AES-256-GCM + `enc1:` 信封），按
 //!                        `SecretScope` 分密钥域；GitHub 令牌与账号表共用
 //!                        （实现原在 `update/token.rs`，抽出供账号表复用）
@@ -60,10 +62,14 @@
 //! api/ 里的 handler 负责把 HTTP 输入转成 core 调用、再把结果转成响应。
 
 pub mod account_store;
+pub mod account_groups;
+// 本机 AI 客户端的接管注册表（「Agent」页）：客户端定义 + 配置读写
+pub mod agents;
 pub mod account_transfer;
 pub mod api_keys;
 pub mod auth;
 pub mod auth_http;
+pub mod assistant_sessions;
 pub mod auto_checkin;
 pub mod beijing;
 pub mod billing;
@@ -73,6 +79,9 @@ pub mod checkin_records;
 pub mod checkin_schedules;
 pub mod clash;
 pub mod client;
+// 云同步（设置页「数据 → 云同步」）：WebDAV / S3 兼容存储上的业务数据快照。
+// 范围、密钥封装与自动同步的触发口径见该模块头
+pub mod cloud_sync;
 pub mod credential_maintenance;
 pub mod crypto;
 pub mod custom_providers;
@@ -80,6 +89,7 @@ pub mod debug_traffic;
 pub mod degrade;
 pub mod egress;
 pub mod endpoints;
+pub mod growth_scheduler;
 pub mod import_ccswitch;
 pub mod key_scope;
 pub mod legacy_api_key;
@@ -100,6 +110,9 @@ pub mod sanitize;
 pub mod scheduled_tasks;
 pub mod sub_kernel;
 pub mod subscriptions;
+// 运行环境探测（系统 / 架构 / 容器 / 服务形态 / 路径脱敏）：设置页「版本信息」
+// 的数据底座，见该模块头。纯读，不依赖 ServerState。
+pub mod system_info;
 pub mod task_state;
 pub mod update;
 pub mod upstream;

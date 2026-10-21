@@ -21,6 +21,27 @@ import { t } from '../i18n'
 
 // ── 从 HEAD 恢复的类型（桥成员的返回形状）──────────────
 
+/** 机器人校验状态（`/api/captcha`）：两端各一个开关 + 本进程形态 */
+export type CaptchaSetting = {
+  captchaDesktop?: boolean
+  captchaWeb?: boolean
+  /** true = 本进程是桌面壳；false = headless（Docker / 服务端） */
+  localPanel?: boolean
+}
+
+/** 写入机器人校验：两个字段都可选，缺省的那一端不改 */
+export type CaptchaPatch = {
+  captchaDesktop?: boolean
+  captchaWeb?: boolean
+}
+
+/** 面板账户信息（`/api/panel/account`） */
+export type PanelAccount = {
+  registered?: boolean
+  username?: string
+  loginEnabled?: boolean
+}
+
 export type DatabaseTableStat = { table?: string; rows?: number }
 
 /** 整库导出结果（壳命令 export_database） */
@@ -32,6 +53,8 @@ export type DatabaseExportResult = {
 }
 
 export type DatabaseImportResult = {
+  /** 用户在文件框里点了取消（桌面壳 / 网页端选文件都可能是这个出口） */
+  canceled?: boolean
   /** 恢复后的各表行数 */
   tables?: DatabaseTableStat[]
   /** 替换前自动建的安全备份文件名（{config_dir}/backups/ 下） */
@@ -109,6 +132,87 @@ export type AppSettings = {
   lanPanel: boolean
   /** 轻量模式：关窗销毁界面进程（释放 WebView2 内存），托盘按需重建 */
   lightweightMode: boolean
+}
+
+/**
+ * 「版本信息」的读数（`GET /api/system-info`，桌面壳命令同名）。
+ *
+ * 每个字段都可能是 null / 缺失（后端按分项降级，见 `api::system_info`）：
+ * 界面一律按「—」显示，不猜。`deployment` 是后端判定的运行形态
+ * （desktop / windows-service / docker / systemd / foreground），
+ * `runtime.webviewVersion` 桌面端是 WebView2 / WKWebView、网页端是浏览器内核。
+ */
+export type SystemInfo = {
+  app?: {
+    version?: string | null
+    channel?: string | null
+    schemaVersion?: number | null
+    dbSchemaVersion?: number | null
+    upstreamClientVersion?: string | null
+    upstreamCliVersion?: string | null
+  }
+  runtime?: {
+    deployment?: string | null
+    container?: boolean | null
+    os?: string | null
+    osVersion?: string | null
+    arch?: string | null
+    webviewVersion?: string | null
+    startedAt?: number | null
+    uptimeSeconds?: number | null
+    pid?: number | null
+    debugBuild?: boolean | null
+    verbose?: boolean | null
+  }
+  deployment?: {
+    host?: string | null
+    port?: number | null
+    panelPort?: number | null
+    uiHosted?: boolean | null
+    localPanel?: boolean | null
+    configDir?: string | null
+    dbFile?: string | null
+    dbBytes?: number | null
+    dbAvailable?: boolean | null
+    logFile?: string | null
+    exePath?: string | null
+    installerKind?: string | null
+    selfUpdate?: boolean | null
+    backupAvailable?: boolean | null
+  }
+  security?: {
+    adminRegistered?: boolean | null
+    panelAuth?: boolean | null
+    apiKeyCount?: number | null
+    allowNoKey?: boolean | null
+    v1FailClosed?: boolean | null
+    panelGate?: boolean | null
+    githubTokenFilled?: boolean | null
+    githubTokenOrigin?: string | null
+    updateProxy?: boolean | null
+  }
+  features?: {
+    debugMode?: boolean | null
+    sanitizeFingerprints?: boolean | null
+    cors?: boolean | null
+    developerRoleCompat?: boolean | null
+    keepaliveStrip?: boolean | null
+    autoContinue?: boolean | null
+    autoContinueMaxRounds?: number | null
+    modelsDev?: boolean | null
+    captchaEnabled?: boolean | null
+    updateBeta?: boolean | null
+  }
+  stats?: {
+    accounts?: number | null
+    enabledAccounts?: number | null
+    limitedAccounts?: number | null
+    models?: number | null
+    inFlight?: number | null
+    requests?: number | null
+    logs?: number | null
+    upgradePending?: boolean | null
+  }
 }
 
 /** 导入失败项：customProvider 标记的那条不是账号，是自定义提供商定义 */
@@ -217,9 +321,17 @@ export type SettingsBridge = {
   getPrompt(): Promise<unknown>
   savePrompt(payload: PromptPatch): Promise<unknown>
   getStorage(): Promise<unknown>
-  getCaptchaSetting(): Promise<{ captchaEnabled?: boolean } | null | undefined>
-  saveCaptchaSetting(on: boolean): Promise<{ captchaEnabled?: boolean } | null | undefined>
+  getCaptchaSetting(): Promise<CaptchaSetting | null | undefined>
+  saveCaptchaSetting(patch: CaptchaPatch): Promise<CaptchaSetting | null | undefined>
+  /** 面板账户信息（设置页「账户」分类）；未注册时 registered=false */
+  getPanelAccount(): Promise<PanelAccount | null | undefined>
+  /** 改密码：要求旧密码；成功后后端撤销其他会话链，本会话保留 */
+  changePanelPassword(oldPassword: string, newPassword: string): Promise<unknown>
   panelLogout(): Promise<unknown>
+  /** 面板会话状态（桌面壳的登录通道）；网页端由 shim 以 cookie 状态回答 */
+  panelSessionStatus?(): Promise<{ registered?: boolean; authenticated?: boolean } | null | undefined>
+  /** 清除本机的面板会话令牌（登出时与 panelLogout 配套） */
+  panelSessionClear?(): Promise<unknown>
   /** 后端就绪状态（局域网地址展示要拼网关端口；其余字段本页不消费） */
   getBackendStatus?(): Promise<{ port?: number } | null | undefined>
   // ── 局域网访问（仅桌面端渲染，web 端 shim 不提供这几个方法）──
@@ -233,6 +345,13 @@ export type SettingsBridge = {
   localIp?(): Promise<string | null | undefined>
   /** 打开外链的唯一出口（只放行 http(s)）：桌面走系统浏览器，网页端 shim 是 window.open */
   openReleasePage?(url: string): Promise<unknown>
+  /**
+   * 设置页「版本信息」的一次性读数（桌面壳命令 / 网页端 shim 同名方法）。
+   *
+   * `hideUsername` 是**纯展示**参数：命中的路径在主目录前缀处换成 `~`，
+   * 脱敏在后端做 —— 这样「复制全部信息」拿到的也是脱敏后的文本。
+   */
+  getSystemInfo?(options?: { hideUsername?: boolean }): Promise<SystemInfo | null | undefined>
   // ── 以下成员从 HEAD 恢复（并行改动移走了定义但 settings-state.ts 仍引用）──
     exportDatabase?(includeLogs: boolean): Promise<DatabaseExportResult | null | undefined>
     importDatabase?(): Promise<DatabaseImportResult | null | undefined>
@@ -243,6 +362,16 @@ export type SettingsBridge = {
     getModelsDev(): Promise<ModelsDevState | null | undefined>
     saveModelsDev(on: boolean): Promise<ModelsDevState | null | undefined>
     refreshModelsDev(): Promise<{ result?: ModelsDevRefreshResult; status?: ModelsDevState } | null | undefined>
+    // ── 云同步（设置页「数据 → 云同步」，面板见 settings-cloud-sync.tsx）──
+    // 全部可选：网页端 shim 与桌面桥都提供，但老壳（升级前）没有这几个方法 ——
+    // 面板据此显示「不可用」而不是崩掉。
+    getCloudSync?(): Promise<unknown>
+    saveCloudSync?(payload: Record<string, unknown>): Promise<unknown>
+    testCloudSync?(payload: Record<string, unknown>): Promise<unknown>
+    getCloudSyncRemote?(): Promise<unknown>
+    cloudSyncUpload?(): Promise<unknown>
+    cloudSyncDownload?(): Promise<unknown>
+    importCloudSyncKey?(password: string): Promise<unknown>
 }
 
 /**
@@ -272,6 +401,8 @@ export type SharedWindow = {
   wbUnits?: { isChinese?: () => boolean; setChinese?: (on: boolean) => void }
   /** 软件更新面板的岛（update-panel.tsx）：切到设置页时让它自己刷新一次 */
   wbUpdatePanel?: { load?: () => Promise<void> | void }
+  /** 版本信息面板的岛（system-info-pane.tsx）：同上 */
+  wbSystemInfoPane?: { load?: () => Promise<void> | void }
   /** 内联图标集（icons.js）：左栏分类图标由它渲染（返回 SVG 串，注入用） */
   wbIcons?: { icon?: (name: string, size?: number) => string }
 }
@@ -329,17 +460,26 @@ export async function openExternal(url: string): Promise<void> {
  */
 export const CATEGORIES = [
   { id: 'general', label: t('通用'), icon: 'sliders' },
-  // AI 助手：对话模型 / 系统提示词 / 工具勾选（面板在 assistant-settings-pane.tsx）。
-  // 紧挨「通用」放 —— 它是这一页里最常回来改的一类（换模型、调工具）
-  { id: 'assistant', label: t('AI 助手'), icon: 'spark' },
+  // 注：AI 助手的配置（对话模型 / 系统提示词 / 工具勾选）已搬到助手页自己的
+  // 「助手设置」抽屉（见 assistant-settings-drawer.tsx）—— 那几项都是聊着聊着
+  // 就想改的，留在这里意味着每次调整都要离开对话页再回来。分类不再保留，
+  // 老用户 localStorage 里存着的 'assistant' 由 settings-state 的兜底回落到首项。
   { id: 'display', label: t('显示'), icon: 'display' },
   { id: 'gateway', label: t('网关'), icon: 'traffic' },
   { id: 'routing', label: t('路由'), icon: 'route' },
   { id: 'retry', label: t('重试'), icon: 'refresh' },
   { id: 'timeout', label: t('超时'), icon: 'timer' },
   { id: 'security', label: t('安全'), icon: 'shield' },
+  // 账户：管理员用户名 / 改密码 / 两端的人机验证开关 / 重置说明。
+  // 紧跟「安全」放 —— 同为「谁能进管理面」这一层语义。
+  { id: 'account', label: t('账户'), icon: 'accounts' },
   { id: 'data', label: t('数据'), icon: 'database' },
   { id: 'feedback', label: t('反馈与需求'), icon: 'feedback' },
+  // 「版本信息」：软件版本 / 运行环境 / 路径 / 开关状态 / 关键计数，可一键
+  // 复制成纯文本（面板在 system-info-pane.tsx）。紧挨「反馈与需求」—— 两者
+  // 是同一件事的两端：出问题了先来这儿截图，再去那儿提 issue。
+  // `system` 是新的内部 id，不与任何既有分类 / localStorage 取值冲突。
+  { id: 'system', label: t('版本信息'), icon: 'info' },
   { id: 'about', label: t('更新'), icon: 'download' },
 ] as const
 
@@ -694,12 +834,14 @@ export const TIPS = {
   displayTheme: t('控制界面的深浅色，与左侧边栏底部的三个主题按钮是同一个设置（改哪一处，另一处立刻跟上）。「跟随系统」会随操作系统当前的浅色 / 深色自动切换，并在系统主题变化时即时跟上；选「浅色」或「深色」则把界面固定在该模式，不再随系统变化。窗口标题栏的深浅色会一并同步，不会出现深色界面配一条浅色标题栏的情况。'),
   displayZoom: t('等比放大或缩小整个界面（文字、控件、间距一起变），效果与浏览器按 Ctrl +/- 相同：80%–130%、5% 一档。窗口本身不缩放，变的是页面内容的显示比例，设置立即生效并记住，下次启动直接按这个比例打开。放得越大可视范围越小，窗口较窄或表格较宽时不建议调得太大。'),
   displayLanguage: t('界面语言。可选简体中文、繁體中文、English、日本語、한국어、Português (Brasil)，或「跟随系统」（按浏览器 / 系统的语言列表自动选）。切换后整页立即刷新；该偏好只存在本机（localStorage），不影响账号、密钥与转发。'),
+  accountList: t('账号页表格的两项显示偏好，只存在本机（localStorage），不影响账号数据与转发。「积分合计只统计当前筛选出来的账号」：账号页每一家的分组带右侧有一枚「可用合计」，默认按整组求和 —— 不受筛选、搜索影响，被筛掉的账号也计入（余额是资产，禁用也只表示不参与转发，额度仍在账上）。打开这一项后改为只累加当前可见的行：例如筛出 1 个 100 积分的账号，合计就是 100，而不是同组两个账号之和 1,000。分页不参与这个口径 —— 翻页看的是同一份结果的不同屏，合计不随页码变化。「隐藏账号名」与表头「账号」旁边那颗眼睛是同一个开关：打开后账号列的名字整体显示成星号，适合截图分享时遮挡账号。'),
   tray: t('默认关闭窗口不会退出程序，而是把窗口缩到系统托盘，转发继续在后台运行（OpenAI 客户端不受影响）；要彻底退出程序，请在托盘图标上右键选「退出」。关掉这个开关后，点关闭按钮即退出程序、转发随之中断。「开机自动启动」开启后，登录系统时会自动启动本程序（通常直接驻留托盘），不需要手动打开。'),
   lightweight: t('开启后，关闭窗口不只是隐藏，而是把界面窗口整个销毁：底层的 WebView2 六个常驻进程（约 200MB 内存）随之退出，网关转发、定时签到、余额查询都在后台进程里继续，不受影响；需要界面时点托盘图标重新打开（WebView 冷启动约 1 秒）。注意：界面销毁期间「ZCode 套餐池（Start Plan）」通道的验证码令牌由界面铸造，无法补充 —— 走该通道的请求会以 503 落进请求日志（写明原因），重新打开界面即自动恢复。此开关只在「关闭窗口时最小化到托盘」开启时有意义，最小化窗口不受影响。'),
   lan: t('默认网关只监听 127.0.0.1，只有本机能访问。开启后网关改听所有网卡，同一局域网内的设备可以把 API 地址指向本机 IP 一起使用。出于安全考虑，开启前必须先注册一个面板管理员：管理接口从此要求管理员会话或网关 Key，模型额度不会对局域网裸奔；一把启用的网关 Key 都没有时，转发接口也会拒绝服务，直到创建第一把。改动需要重启应用生效。「同时开放网页管理面板」把管理界面也出给局域网（其他设备的浏览器打开本机 IP 即可管理），默认关闭 —— 桌面端的面板仍只由本程序自己出。'),
-  units: t('控制报表与请求日志里 Token 读数的写法：开启后按中文量级显示（1.2亿 / 8400万），关闭则用 k / M 缩写（与上游文档、接口字段的写法一致）。这只影响显示口径，不改变任何统计与存储的数值。'),
+  units: t('控制报表与请求日志里 Token 读数的写法：开启后按中文量级显示（1.2亿 / 8400万），关闭则用 k / M / B 缩写（与上游文档、接口字段的写法一致）。这只影响显示口径，不改变任何统计与存储的数值。'),
   queue: t('只对「排队制」的上游生效（目前是 Qoder 的免费模型）：模型繁忙时上游不报错，只回一句「建议 N 秒后再来」（业务码 10605），网关按建议时长等一会儿再发同一请求，等满次数仍排不上才把「排队中」作为错误返回（HTTP 503，文案会说明这不是登录态或额度问题）。等待发生在首个字节之前，吃的是「等待响应超时」那份预算 —— 两项设置一起决定一次请求最多卡多久；排队不会标记账号限额、也不会换账号（换谁都一样在排队）。保存后对下一个请求立即生效，不用重启。'),
   captchaPool: t('ZCode「套餐池（Start Plan）」通道的每条推理请求都要附一个当次铸造的阿里云无痕验证令牌（一次性、约 2 分钟过期）：令牌由界面里的铸造守卫静默铸好、推给网关入池，转发时逐条取用。这里的三个值管的是补货节奏：①「库存目标」= 库存低于它守卫才补铸、补到它为止，默认 3 个；②「轮询间隔」= 守卫多久看一次库存，默认 2500 毫秒，只影响反应速度（库存够用时不会多铸）；③「单轮铸造上限」= 发现缺货时一轮最多铸几个，默认 1 个（连铸之间固定隔 500 毫秒）。请求密集、请求日志里连续出现「需要人机验证令牌」的 503 时，把目标与单轮上限适当调大、轮询调快，能让池子跟得上消耗 —— 代价是上游（阿里云）对铸造频率有风控，铸得越多越快越容易触发限流，且用不掉的令牌 2 分钟即过期作废、等于白烧配额，所以建议小步调。保存后对下一轮补货立即生效，不用重启。'),
+  captchaSides: t('两张开关分别管桌面端（应用内窗口，也包含开启局域网访问后从其他设备访问的那份面板）与网页端（Docker / 服务端自托管的浏览器面板）。默认都开启；桌面端只在本机使用、嫌验证耗时可以关掉，网页端暴露在网络上，建议保持开启。'),
   timeouts: t('上游请求四个阶段各自的等待上限（秒，1~3600）：①「连接中超时」= 建立 TCP/TLS 连接或代理隧道的最大等待，默认 30 秒；②「等待响应超时」= 请求发出后等上游响应头的最大时间，默认 300 秒 —— 网关请求上游恒带 stream，响应头在 SSE 建立时就到达，与模型思考多久无关；③「流式响应空闲超时」= 流式响应相邻两块数据之间允许的最大空闲，收到新数据即重新计时，默认 300 秒 —— 上游长时间不吐数据即判定连接僵死并断开；④「非流式响应超时」= 读完整份非流式响应体的总预算（一次性计时、不重置），默认 300 秒。四项都是「等待上限」，只要数据还在来，正常的流式回答就一直往下传。保存后对下一个请求立即生效，不用重启。'),
   retry: t('请求转发到上游失败时（服务器瞬时错误、连接失败，以及 WorkBuddy 的 11-128 敏感词拦截），网关会等一段间隔后再发一次。次数分两档，管的是两件事：①「同一账号重试次数」在同一账号上原地重发几次 —— 一般是提示词被上游拦截、或链路瞬时抖动，等一会儿重发往往就好了；②「切换账号重试次数」这份请求最多再换几个账号试 —— 首发的那个账号不算，每换一个扣一次，不分是不是同一家（换到同一家的下一个账号也算一次），换满还失败就把错误返回给客户端。两项都设为 0 表示失败不重试、直接报错。注意账号级限额（429）不占这里的换号次数 —— 那类失败走「冷却该账号并换下一个账号」的降级，与这里的重试是两条路。另有「指定错误码直接换号」名单（默认 402）：命中名单的上游状态码不在同一账号重发，直接按队列换下一个账号继续试（换号也占「切换账号重试次数」），换满仍失败才把错误返回给客户端。'),
   routing: t('转发一个请求时按什么顺序挑账号：①「路由策略」决定排队规则 —— 顺序优先是排第 1 的接走所有请求、直到它不能答（限流 / 故障 / 额度尽）才轮到下一位；负载均衡是每条请求换下一位，把负载摊到各个账号上。②「会话粘性」让同一会话（相同的模型 + 相同的开头消息）尽量跟住同一个账号 —— 多轮对话的上下文缓存能复用、少换号少浪费；自动档粘 5 分钟、会话内档粘 6 小时、每轮与关闭都不粘。账号的排队位次（账号表的第一列）在所有策略下都是地基，策略在它之上再排。此外路由还有三层自愈保护：转发失败的账号退避休息一会儿（15 分钟起步翻倍、封顶 1 小时）、被 429 的账号垫底排到队尾 30 分钟、余额不足 / Token 周期用量到顶的账号由限制器拦下 —— 前两层可以在下面按需开关，限制器由账号的「限制器」设置管。'),
@@ -740,7 +882,7 @@ export const NOTES = {
   storageFile: t('配置目录下的 agent2api.db（账号、日志、请求记录、调试报文与设置都在里面）。'),
   storageSize: t('库主文件的大小（不含运行期间的 WAL 临时文件，退出时已自动并回）。'),
   storage: t('数据统一保存在配置目录下的 agent2api.db；如需更换位置，请设置环境变量 AGENT2API_PROXY_HOME 后重启程序。'),
-  captcha: t('开启后，登录页在浏览器后台自动完成验证（对真人无感），而脚本每次尝试都要先算一道题 —— 暴力破解与抢注的成本显著上升。仅影响面板的登录 / 注册，与 API 客户端的 API Key 无关。'),
+  captcha: t('开启后，登录页在浏览器后台自动完成验证（对真人无感），而脚本每次尝试都要先算一道题 —— 暴力破解与抢注的成本显著上升。仅影响面板的登录 / 注册，与 API 客户端的 API Key 无关。桌面端与网页端各自独立：桌面端主要服务本机与局域网，网页端（Docker / 服务端）直接暴露在网络上的登录页风险更高，建议保持开启。'),
   panelLogin: t('当前浏览器以管理员身份登录着本面板。「退出登录」会撤销这台设备的登录会话（30 天内的自动续期一并失效），需要重新输入账号密码；其他已登录的设备不受影响。'),
   exportDanger: t('导出文件内含 accessToken / refreshToken / apiKey 等凭证与自定义提供商定义，可直接用于登录。请妥善保管，不要外传或上传到公共位置。'),
   backupDanger: t('备份文件内含全部账号凭证、网关 API Key 与面板管理员凭据，可直接用于登录。请妥善保管，不要外传或上传到公共位置。'),
@@ -755,7 +897,7 @@ export const STATES = {
   appLightOn: t('轻量模式已开启：关窗即销毁界面进程（释放约 200MB 内存），网关在后台继续；界面销毁期间 ZCode 套餐池（Start Plan）通道不可用，相关请求会在请求日志里注明原因'),
   appLightOff: t('未开启轻量模式：关窗仅隐藏窗口，界面进程常驻内存，随时打开不等待'),
   unitsOn: t('当前显示为「1.2亿 / 8400万」这类中文量级。'),
-  unitsOff: t('当前显示为「1.20M / 8.4k」这类英文缩写。'),
+  unitsOff: t('当前显示为「1.20M / 8.4k / 1.2B」这类英文缩写。'),
   debugUnavailable: t('未能读取调试模式设置，请稍后重试'),
   debugOn: t('正在保存上游原始报文：'),
   debugOff: t('未开启，转发时不保存任何原始报文。'),
@@ -783,6 +925,8 @@ export const STATES = {
   zoomWeb: t('网页端的界面缩放由浏览器自己控制（Ctrl + / Ctrl -，或浏览器菜单里的缩放），此项不可调。'),
   zoomDefault: t('当前按 100% 显示（默认比例）。'),
   languageHint: t('界面语言只保存在本机（localStorage）。切换后整页立即刷新，不影响账号、密钥与转发。'),
+  groupTotalFilteredOn: t('合计只累加当前筛选后可见的账号，筛选、搜索一改数字就跟着变。'),
+  groupTotalFilteredOff: t('合计按整组统计（默认）：不受筛选、搜索影响，被筛掉与已禁用的账号也计入。'),
 } as const
 
 // ── 以下成员从 HEAD 恢复 ──────────────────────────────

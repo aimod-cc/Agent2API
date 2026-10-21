@@ -44,6 +44,7 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use crate::server::config;
+use crate::server::core::account_groups::AccountGroupScope;
 use crate::server::core::proxies::ResolvedProxy;
 use crate::server::core::providers::readiness;
 use crate::server::core::routing;
@@ -64,7 +65,18 @@ pub(super) async fn session_for(
     service: &UpstreamService,
     provider: &str,
     account_id: Option<&str>,
+    scope: Option<&AccountGroupScope>,
 ) -> Result<Value, GatewayError> {
+    if scope.is_some() {
+        let Some(id) = account_id else {
+            return Err(account_group_no_available_account());
+        };
+        return service
+            .store
+            .get_session_by_id(id)
+            .map(|entry| entry.session)
+            .ok_or_else(account_group_no_available_account);
+    }
     if let Some(id) = account_id {
         if let Some(entry) = service.store.get_session_by_id(id) {
             return Ok(entry.session);
@@ -126,10 +138,17 @@ pub(super) async fn select_target_account(
     tried_ids: &[String],
     pinned: Option<&str>,
     conv_key: &str,
+    scope: Option<&AccountGroupScope>,
 ) -> Result<RouteTarget, GatewayError> {
-    let accounts = accounts_in_providers(service, providers, pinned);
+    let accounts = match scope {
+        Some(scope) => super::account_group_pool::accounts_in_group(scope, keys, pinned),
+        None => accounts_in_providers(service, providers, pinned),
+    };
     // 这些家都没有账号记录 → 用第一家的默认登录态（环境变量旁路等）
     if accounts.is_empty() {
+        if scope.is_some() {
+            return Err(account_group_no_available_account());
+        }
         return Ok(RouteTarget {
             provider: providers.first().copied().unwrap_or_default().to_string(),
             account_id: None,
@@ -159,23 +178,24 @@ pub(super) async fn select_target_account(
     // 起点往后走，否则一条请求会连跳好几位。粘性命中的轮次不前进 —— 会话
     // 一直粘着同一个账号时，轮转的「下一棒」留给新会话。
     //
-    // 家内轮询（`Provider`）的取用条件与 `Rotate` 逐字相同（第一次选路 +
-    // 没钉账号 + 没粘住）——「一次请求只消耗一格环位」对两种轮转是同一个口径；
-    // 差别只在它取的是**每家各一个**起始位（见 `rotate_take_per_provider`）。
     let may_rotate = tried_ids.is_empty() && pinned.is_none() && snap.sticky_hit.is_none();
-    let cursor = if may_rotate && settings.strategy == config::RouteStrategy::Rotate {
-        Some(service.route.rotate_take(keys.request_model()))
+    let route_key = || {
+        scope
+            .map(|scope| format!("g:{}:{}", scope.group_id(), keys.request_model()))
+            .unwrap_or_else(|| keys.request_model().to_string())
+    };
+    let cursor = if settings.strategy == config::RouteStrategy::Rotate && may_rotate {
+        let key = route_key();
+        Some(service.route.rotate_take(&key))
     } else {
         None
     };
-    // 游标只传「哪几家」用来定键名（`provider_sizes`），各家的**人数不参与
-    // 取模** —— 取模发生在 `plan_route` 内部、用的是过滤（禁用 / 冷却 / 并发满 /
-    // 无凭证）之后的实际成员数。推进与环绕必须用同一把尺子：2026-10-14 之前
-    // 这里按未过滤人数取模，两个模数一旦不等，家内就会出现「同一个账号连续
-    // 被选中两次」的不均匀。
+    // Provider 策略在家内按 provider 各维护一条游标。组模式前缀进组 id，
+    // 与默认池隔离；sizes 使用限制器过滤后的候选，轮次与真实可试集合一致。
     let provider_cursors = if may_rotate && settings.strategy == config::RouteStrategy::Provider {
+        let key = route_key();
         Some(service.route.rotate_take_per_provider(
-            keys.request_model(),
+            &key,
             &routing::provider_sizes(&candidates),
         ))
     } else {
@@ -191,7 +211,17 @@ pub(super) async fn select_target_account(
         provider_cursors: provider_cursors.as_ref(),
         sticky_account: snap.sticky_hit.as_deref(),
     };
-    let plan = routing::plan_route(&candidates, keys, &counts, tried_ids, now, &meta);
+    let plan = match scope {
+        Some(_) => routing::plan_route_preserving_input_order(
+            &candidates,
+            keys,
+            &counts,
+            tried_ids,
+            now,
+            &meta,
+        ),
+        None => routing::plan_route(&candidates, keys, &counts, tried_ids, now, &meta),
+    };
     let decision = decision_json(&plan, &settings, now);
     let mut excluded: Vec<String> = tried_ids.to_vec();
     for entry in &plan.ordered {
@@ -220,18 +250,28 @@ pub(super) async fn select_target_account(
             .filter(|account| !matches!(account.get("enabled"), Some(Value::Bool(false))))
             .count();
         if !balance_blocked_ids.is_empty() && enabled_total > 0 {
-            return Err(GatewayError::with_status(
+            let error = GatewayError::with_status(
                 503,
                 format!(
                     "所有启用中的账号都被限制器拦下（已跳过 {} 个账号），无账号可转发：请检查余额读数与 Token 周期用量，或到账号设置的「限制器」里调整规则",
                     balance_blocked_ids.len()
                 ),
-            ));
+            );
+            return Err(if scope.is_some() {
+                error.with_code("account_group_no_available_account")
+            } else {
+                error
+            });
         }
-        return Err(GatewayError::with_status(
+        let error = GatewayError::with_status(
             503,
             "所有账号均已禁用，无账号可转发：请在账号页启用至少一个账号",
-        ));
+        );
+        return Err(if scope.is_some() {
+            error.with_code("account_group_no_available_account")
+        } else {
+            error
+        });
     }
 
     // ── 第二级兜底（并发感知）──────────────────────────────────
@@ -300,6 +340,9 @@ pub(super) async fn select_target_account(
             }
         }
     }
+    if scope.is_some() {
+        return Err(account_group_no_available_account());
+    }
     Ok(RouteTarget {
         provider: providers.first().copied().unwrap_or_default().to_string(),
         account_id: None,
@@ -360,15 +403,22 @@ pub(super) fn accounts_in_providers(
             None => true,
         })
         .collect();
+    readiness_candidates_or_original_pool(&accounts)
+}
+
+/// Apply the provider readiness optimization while preserving the original pool
+/// when every candidate is gated, so the real upstream error remains visible.
+pub(super) fn readiness_candidates_or_original_pool(accounts: &[Value]) -> Vec<Value> {
     let routable: Vec<Value> = accounts
         .iter()
         .filter(|account| !readiness::gated(provider_of(account)))
         .cloned()
         .collect();
     if routable.is_empty() {
-        return accounts;
+        accounts.to_vec()
+    } else {
+        routable
     }
-    routable
 }
 
 /// 组装选路结果；代理解析失败时把提示**带进选路结果**（本次回退直连）。
@@ -479,6 +529,61 @@ pub(super) fn account_limit_reset_at(service: &UpstreamService, account_id: &str
         .unwrap_or(0)
 }
 
+/// 候选中**最早**的限额恢复时间戳（毫秒；一个都没有时 0）。
+///
+/// ── 用途：把「还要等多久」告诉客户端 ────────────────────────
+/// 所有候选账号都被限流时，编排层给客户端的错误文案里带上这个时刻
+/// （`provider_loop` 的「均已限额或禁用」分支）。不带的话客户端只能立刻
+/// 重试、再撞一次同样的墙；带上之后（Claude Code / Codex 这类客户端会读
+/// 文案里的时间）才能做**合法的退避等待**。
+///
+/// ── 为什么取**最早**的而不是最晚的 ─────────────────────────
+/// 「最早」= 第一个可能恢复、值得再试的时刻。取最晚会让客户端多睡一段
+/// 本不必睡的时间（账号是逐个恢复的，不是同时）。
+///
+/// ── 为什么读记录而不读内存 ──────────────────────────────────
+/// 与 `account_limit_reset_at` 同源（都从账号记录现读）：限额是**落盘事实**
+/// （重启后仍在），内存里那份不进这里 —— 两处口径一致才不会出现「日志说
+/// 10 分钟后恢复、实际记录里是明天零点」的分歧。
+///
+/// `providers` 是本次请求的候选家；冷却键按 [`routing::CooldownKeys`] 解析
+/// （与写入侧同一个键）。**启用中的账号全都算**，包括本轮已经撞过的那几个 ——
+/// 它们刚被标记，恢复时刻正是客户端最该等的那个。
+///
+/// `accounts_in_providers` 只按 provider 过滤、**不过滤禁用账号**（那是选路
+/// 层的事），所以这里自己剔一遍：一个被禁用的账号即便留着未过期的冷却记录也
+/// 不算候选，报它的恢复时刻会把用户引向一个系统根本不会去的账号。
+pub(super) fn earliest_limit_reset_at(
+    service: &UpstreamService,
+    providers: &[&str],
+    keys: &routing::CooldownKeys<'_>,
+) -> i64 {
+    let now = logging::now_ms();
+    let accounts: Vec<Value> = accounts_in_providers(service, providers, None)
+        .into_iter()
+        .filter(|account| !matches!(account.get("enabled"), Some(Value::Bool(false))))
+        .collect();
+    earliest_limit_reset_at_in(&accounts, keys, now)
+}
+
+/// [`earliest_limit_reset_at`] 的纯函数内核（账号清单与「现在」都由调用方给，
+/// 便于单测直接覆盖排序语义）。
+///
+/// 过期的冷却不必再筛：`rate_limit_reset_at` 只回**未来**时刻或 0
+/// （见那里的说明），所以这里直接对非零值取最小。
+fn earliest_limit_reset_at_in(
+    accounts: &[Value],
+    keys: &routing::CooldownKeys<'_>,
+    now: i64,
+) -> i64 {
+    accounts
+        .iter()
+        .map(|account| routing::rate_limit_reset_at(account, keys, now))
+        .filter(|reset| *reset > 0)
+        .min()
+        .unwrap_or(0)
+}
+
 /// 全部账号达到并发上限时的**挤占**挑选：余量（`limit - count`）最大者优先。
 ///
 /// ── 排序口径（任务约定，改动前先读）──────────────────────────
@@ -559,8 +664,12 @@ pub(super) fn pick_next_account(
     keys: &routing::CooldownKeys<'_>,
     tried_ids: &[String],
     pinned: Option<&str>,
+    scope: Option<&AccountGroupScope>,
 ) -> Option<Value> {
-    let accounts = accounts_in_providers(service, providers, pinned);
+    let accounts = match scope {
+        Some(scope) => super::account_group_pool::accounts_in_group(scope, keys, pinned),
+        None => accounts_in_providers(service, providers, pinned),
+    };
     // 换号顺延与第一级选路同一份候选剔除：被限制器拦下的账号不会在 429 之后
     // 被当作「下一个」重新塞进来
     let (candidates, balance_blocked_ids) = filter_limiter_blocked(&accounts, pinned);
@@ -581,8 +690,22 @@ pub(super) fn pick_next_account(
         provider_cursors: None,
         sticky_account: None,
     };
-    let plan = routing::plan_route(&candidates, keys, &counts, tried_ids, now, &meta);
+    let plan = match scope {
+        Some(_) => routing::plan_route_preserving_input_order(
+            &candidates,
+            keys,
+            &counts,
+            tried_ids,
+            now,
+            &meta,
+        ),
+        None => routing::plan_route(&candidates, keys, &counts, tried_ids, now, &meta),
+    };
     plan.ordered.into_iter().next().map(|entry| entry.account)
+}
+
+pub(super) fn account_group_no_available_account() -> GatewayError {
+    GatewayError::with_status(503, "组内无可用账号").with_code("account_group_no_available_account")
 }
 
 /// 选路决策快照（请求日志「路由回放」的数据源）。
@@ -720,4 +843,86 @@ pub(super) fn report_limit_event(
             "resetAtText": if reset_at > 0 { format_reset_text(reset_at as f64) } else { String::new() },
         })),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::earliest_limit_reset_at_in;
+    use crate::server::core::routing::CooldownKeys;
+    use serde_json::json;
+
+    /// 造一条带限额冷却的账号记录（形状与 `mark_rate_limited` 落盘的一致）
+    fn limited(id: &str, provider: &str, model: &str, reset_at: i64) -> serde_json::Value {
+        json!({
+            "id": id,
+            "provider": provider,
+            "enabled": true,
+            "rateLimits": { model: { "status": 429, "resetAt": reset_at } },
+        })
+    }
+
+    fn unlimited(id: &str, provider: &str) -> serde_json::Value {
+        json!({ "id": id, "provider": provider, "enabled": true })
+    }
+
+    /// 取**最早**的恢复时刻（不是最晚）：客户端该睡到第一个可能恢复的点
+    #[test]
+    fn the_earliest_reset_wins() {
+        let keys = CooldownKeys::new("Qwen/Qwen3.8-Flash-Next");
+        let now = 1_000_000i64;
+        let accounts = vec![
+            limited("a", "modelscope", "Qwen/Qwen3.8-Flash-Next", now + 600_000),
+            limited("b", "modelscope", "Qwen/Qwen3.8-Flash-Next", now + 60_000),
+            limited("c", "modelscope", "Qwen/Qwen3.8-Flash-Next", now + 300_000),
+        ];
+        assert_eq!(earliest_limit_reset_at_in(&accounts, &keys, now), now + 60_000);
+    }
+
+    /// 没有处在冷却期的账号 → 0（调用方据此退回原句，不拼「最早…恢复」）
+    #[test]
+    fn no_future_reset_reports_zero() {
+        let keys = CooldownKeys::new("m");
+        let now = 1_000_000i64;
+        assert_eq!(earliest_limit_reset_at_in(&[], &keys, now), 0);
+        assert_eq!(
+            earliest_limit_reset_at_in(&[unlimited("a", "modelscope")], &keys, now),
+            0
+        );
+    }
+
+    /// **已过期**的冷却不算数（记录还在但时刻已过 = 未限额，与
+    /// `rate_limit_reset_at` 的口径一致）——算进去会让文案报一个过去的时刻
+    #[test]
+    fn an_expired_cooldown_is_not_counted() {
+        let keys = CooldownKeys::new("m");
+        let now = 1_000_000i64;
+        let accounts = vec![
+            limited("a", "modelscope", "m", now - 1),
+            limited("b", "modelscope", "m", now),
+        ];
+        assert_eq!(earliest_limit_reset_at_in(&accounts, &keys, now), 0);
+    }
+
+    /// 冷却**按模型**分键：别的模型的冷却不该影响本模型的「还要等多久」
+    #[test]
+    fn another_models_cooldown_is_ignored() {
+        let keys = CooldownKeys::new("m");
+        let now = 1_000_000i64;
+        let accounts = vec![limited("a", "modelscope", "other-model", now + 600_000)];
+        assert_eq!(earliest_limit_reset_at_in(&accounts, &keys, now), 0);
+    }
+
+    /// 多账号时取全体最早（这条覆盖的是「取 min 而不是取第一个」）
+    #[test]
+    fn the_minimum_spans_all_accounts() {
+        let keys = CooldownKeys::new("m");
+        let now = 1_000_000i64;
+        let accounts = vec![
+            limited("a", "modelscope", "m", now + 900_000),
+            unlimited("b", "modelscope"),
+            limited("c", "modelscope", "m", now + 120_000),
+            limited("d", "modelscope-intl", "m", now + 500_000),
+        ];
+        assert_eq!(earliest_limit_reset_at_in(&accounts, &keys, now), now + 120_000);
+    }
 }

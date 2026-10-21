@@ -458,6 +458,21 @@ pub(crate) fn delete(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
     Ok(conn.execute("DELETE FROM accounts WHERE id = ?1", params![id])? > 0)
 }
 
+/// 删除账号对应的显式账号成员。
+///
+/// 这条清理不能放进 [`delete`]：`put` 的更新/导入路径也是 DELETE + INSERT，
+/// 那条路径必须保留已有组成员。调用方负责把本 helper 放进账号删除事务。
+pub(crate) fn delete_explicit_group_account_members(
+    conn: &Connection,
+    account_id: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM account_group_members WHERE member_type = 'account' AND member_id = ?1",
+        params![account_id],
+    )?;
+    Ok(())
+}
+
 /// 一行 INSERT（[`put`] / [`update_in_place`] 的公共落点）
 fn insert_row(conn: &Connection, record: &StoredAccount) -> rusqlite::Result<()> {
     conn.execute(
@@ -547,7 +562,10 @@ pub(crate) fn save_state(conn: &mut Connection, state: &AccountState) -> rusqlit
             continue;
         }
         if !state.accounts.iter().any(|record| record.id() == *id) {
-            tx.execute("DELETE FROM accounts WHERE id = ?1", params![id])?;
+            let removed = tx.execute("DELETE FROM accounts WHERE id = ?1", params![id])?;
+            if removed > 0 {
+                delete_explicit_group_account_members(&tx, id)?;
+            }
         }
     }
     // 新增 / 更新

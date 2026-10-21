@@ -80,6 +80,9 @@ use rusqlite::Connection;
 /// 「功能已删、数据留着」的键，登记它们的唯一目的就是让配置写入别去动它。
 pub const RESERVED_KV_KEYS: &[&str] = &[
     // 账号优先级的全局作用域（core::account_store::sql）
+    // 「Agent」页的用户配置：{ clientId: [Profile] } 整份 JSON 一个键
+    // （core::agents）。零散状态，与 desktopSettings 同一类。
+    "agentProfiles",
     "priorityScope",
     // 事件日志的下一个 id 水位（logs_store::sql）
     "logsNextId",
@@ -115,6 +118,11 @@ pub const RESERVED_KV_KEYS: &[&str] = &[
     // **需要**标记键而其余项不需要：配置项是开放集合，没法问「配置迁过了
     // 没有」（理由与完整论证见 db::migrate::config 的模块头）。
     "configMigrated",
+    // 旧账号组 Key 的一次性清理标记（core::account_groups::legacy）。
+    // v17 丢弃旧组表后，启动或升级路径只把旧 account_group Key 禁用一次；
+    // 标记必须与 Key JSON 更新同事务落库，并登记在这里，否则下一次配置写入
+    // 会把它当成已删除的配置项清掉，导致每次启动都重复改写同一批 Key。
+    "accountGroupsLegacyCleared",
     // 请求明细 / 聚合的迁移完成标记（request_stats::legacy）。
     //
     // 这两项用标记键，而 `logs` / `accounts` / `debug_traffic` 三项不用，
@@ -180,6 +188,16 @@ pub const RESERVED_KV_KEYS: &[&str] = &[
     // 与上面的 `modelCatalogCache` 是两码事：那个存各家上游的**模型清单**，
     // 这个存模型的**元数据**（能力位 / 思考档位），刷新链路与失效语义各不同。
     "modelsDevCatalog",
+    // 云同步的配置与同步状态（core::cloud_sync）：整份
+    // `{provider, webdav:{…}, s3:{…}, syncPassword(信封), enabled, autoSync,
+    //   remoteRoot, profile, status:{lastSyncAt, lastSnapshotId, …}}` 一个键。
+    //
+    // 为什么是保留键而不是配置项：它含**远端凭据**（WebDAV 密码 / S3 Secret
+    // Access Key 的密文信封）与同步密码信封，属于「其它零散状态」一类；
+    // 更关键的是**它自己不能被云同步上传** —— 否则等于把远端凭据再传到远端，
+    // 换机时还会被旧凭据覆盖。保留键的身份让 `cloud_sync::snapshot` 的键筛选
+    // 天然排除它，不必再维护一份「别同步这个键」的清单。
+    "cloudSync",
 ];
 
 /// 这个键是否属于「其它零散状态」（即不归网关配置管）。
@@ -308,9 +326,21 @@ pub fn is_reserved(key: &str) -> bool {
 /// 两条都是 `CREATE INDEX IF NOT EXISTS`（与其余版本的幂等纪律一致）：在存量库
 /// 上建索引要扫一遍表，代价与表大小成正比、只付一次；`requests` 只有几万行时
 /// 在百毫秒量级，不会让启动明显变慢。**不要把这两条往 [`V1_SCHEMA`] 里补**：
-/// 新库按 1→15 依次跑，v15 那一步同样会建出来，而 v1 里多写一份等于同一条索引
+/// 新库按 1→16 依次跑，v15 那一步同样会建出来，而 v1 里多写一份等于同一条索引
 /// 有了两处定义 —— 将来改一处忘一处，正是 `V4_SCHEMA` 那类错位的来源。
-pub const SCHEMA_VERSION: i64 = 15;
+///
+/// ── v16：AI 助手的对话会话（[`V16_SCHEMA`]）──────────────────
+/// 助手从「一次性对话」变成「有历史记录的会话」：左边一列会话、右边一条消息流，
+/// 关掉页面再回来还能接着聊。存**整条消息流的 JSON**（而不是逐条消息一行）的
+/// 理由与 `kv` 表同一取向：读写单元天然是「一整个会话」，逐条存只会让每次保存
+/// 变成 N 次写入 + 一次事务，而没有任何一处需要「按单条消息查」。
+///
+/// ── v17：账号组和有序成员（[`V17_SCHEMA`]）──────────────────
+/// beta 的 v16 已被 assistant_sessions 占用，而旧功能分支的账号组表也用了
+/// v16。升级到 v17 时先幂等重放 beta v16，确保 assistant_sessions 存在，再
+/// 按外键顺序删除旧账号组表并创建当前形状的空表。旧组和成员数据按产品决定
+/// 丢弃，不复制旧行；Key 的一次性禁用由启动/升级路径在 schema 迁移后完成。
+pub const SCHEMA_VERSION: i64 = 17;
 
 /// 版本 1 的全部表与索引：改造前所有 JSON / JSONL 文件的对应形态。
 ///
@@ -814,6 +844,72 @@ CREATE INDEX IF NOT EXISTS idx_requests_summary ON requests(
 );
 ";
 
+/// 版本 16：AI 助手的对话会话表（schema v16）。
+///
+/// ── 存什么 ──────────────────────────────────────────────────
+/// 一条会话一行。列的口径：
+///   - `id`：会话 id（前端生成，`crypto.randomUUID()` 形态的字符串）。让前端
+///     生成而不是自增：新建会话时前端立刻要用这个 id 挂消息，等一次往返再拿到
+///     它会让「点新建 → 立刻发第一句」出现一个必须等待的中间态；
+///   - `title`：侧边栏显示的名字。取第一条用户消息的前若干字（前端算好传上来），
+///     用户没改过就一直是它 —— 后端不做「自动起标题」那种额外一次上游调用；
+///   - `messages`：**整条消息流的 JSON 原文**（`[{role, content, toolCalls?,
+///     toolCallId?}, …]`，与发给上游的 wire 形态同构）。存原文而不是拆列的理由
+///     见 [`SCHEMA_VERSION`] 的 v16 段；
+///   - `model` / `reasoning`：这条会话最后用的模型与思考等级。存**会话级**而不是
+///     每条消息各带一份：用户换模型是「这条对话从现在起换个模型」，不是逐条
+///     指定；重开一条会话时前端从这两个字段恢复选择器；
+///   - `created_at` / `updated_at`：毫秒时间戳。侧边栏按 `updated_at` 倒序排
+///     （最近聊过的在最上面），`updated_at` 每次保存都刷新。
+///
+/// ── 索引 ────────────────────────────────────────────────────
+/// 只有一条 `updated_at` 倒序索引：侧边栏的全部查询就是「按最近更新排序列出」，
+/// 没有按标题 / 模型检索的需求（会话量级是几十条，前端一次全取即可）。
+const V16_SCHEMA: &str = "
+-- ── assistant_sessions：AI 助手的对话会话（schema v16）───────
+CREATE TABLE IF NOT EXISTS assistant_sessions (
+  id          TEXT PRIMARY KEY,
+  title       TEXT NOT NULL DEFAULT '',
+  messages    TEXT NOT NULL DEFAULT '[]',
+  model       TEXT,
+  reasoning   TEXT,
+  created_at  INTEGER NOT NULL DEFAULT 0,
+  updated_at  INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_assistant_sessions_updated ON assistant_sessions(updated_at DESC);
+";
+
+/// 版本 17：账号组和有序成员。
+///
+/// 必须在 DROP 前重放 beta v16，兼容来自旧功能分支的同 version 库；旧成员表
+/// 先于组表删除，避免外键依赖阻塞。新表不恢复旧行，成员表只保存 provider
+/// 或显式账号的引用，provider 的账号集合在请求时从账号快照动态展开。
+const V17_GROUP_SCHEMA: &str = "
+DROP TABLE IF EXISTS account_group_members;
+DROP TABLE IF EXISTS account_groups;
+
+CREATE TABLE IF NOT EXISTS account_groups (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  name_key TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS account_group_members (
+  group_id TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  member_type TEXT NOT NULL,
+  member_id TEXT NOT NULL,
+  PRIMARY KEY (group_id, position),
+  UNIQUE (group_id, member_type, member_id),
+  FOREIGN KEY (group_id) REFERENCES account_groups(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_account_group_members_lookup
+  ON account_group_members(group_id, position);
+";
+
 /// 把库升到 [`SCHEMA_VERSION`]（幂等：已是最新版时什么都不做）。
 ///
 /// **库版本高于本程序时返回 `Err` 拒绝打开**（v14 起有意反转的一条既有决定，
@@ -901,7 +997,13 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         // 失败**不报错**：数据已经删掉了，回收空间是尽力而为的优化 —— 用户
         // 之后仍可在请求日志页的「清理」弹窗里手动压缩（那条路有后台线程与
         // 进度状态，见 `RequestStats::compact`）。
+        //
+        // VACUUM 前后各做一次 checkpoint（与 `RequestStats::compact` 同形，理由
+        // 见那边模块注释）：WAL 模式下 VACUUM 的整库重建会全部落进 `-wal`，
+        // 少了尾部那次截零，空间只是从主库搬到 WAL、总占用不降反升（issue #297）。
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
         let _ = conn.execute_batch("VACUUM;");
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
     }
     Ok(())
 }
@@ -971,6 +1073,15 @@ fn apply_version(
         // v15：requests 补两条索引（status 的定位 + 报表窄列的覆盖，见
         // V15_SCHEMA 与 SCHEMA_VERSION 的 v15 段）。
         15 => conn.execute_batch(V15_SCHEMA),
+        // v16：assistant_sessions 助手对话会话表（见 V16_SCHEMA 与
+        // SCHEMA_VERSION 的 v16 段）。新表用 CREATE IF NOT EXISTS，幂等。
+        16 => conn.execute_batch(V16_SCHEMA),
+        // v17：先补齐 beta v16，再丢弃旧组表并重建当前形状。整个分支仍在
+        // migrate 的版本事务内，失败时 DDL 与 user_version 一起回滚。
+        17 => {
+            conn.execute_batch(V16_SCHEMA)?;
+            conn.execute_batch(V17_GROUP_SCHEMA)
+        }
         _ => Ok(()),
     }
 }

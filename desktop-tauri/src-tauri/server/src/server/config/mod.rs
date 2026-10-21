@@ -164,10 +164,11 @@ pub struct RuntimeConfig {
     /// 生效，不重启进程），解析一次存下来最省事。默认 `false`，见 `KEY_CORS_ENABLED`。
     /// 只作用于网关面，面板路由不受它影响。
     cors_enabled: bool,
-    /// AI 助手配置（设置页「AI 助手」分类：对话模型 / 系统提示词 / 工具勾选）。
+    /// AI 助手配置（助手页「助手设置」抽屉：默认行为 / 系统提示词 / 工具勾选）。
     ///
-    /// 与 `prompt` 同一模式：低频读取 + 整块进出（只有设置页与助手的对话入口取它），
-    /// 解析一次存下来即可。整块存在一个配置键下（见 `assistant_config` 模块头）。
+    /// 与 `prompt` 同一模式：低频读取 + 整块进出（只有助手页的设置抽屉与对话
+    /// 入口取它），解析一次存下来即可。整块存在一个配置键下（见
+    /// `assistant_config` 模块头）。
     assistant: AssistantConfig,
     /// 「丢弃保活换行分片」开关（`/api/keepalive-strip`，默认关）。
     ///
@@ -195,12 +196,17 @@ pub struct RuntimeConfig {
     /// 只服务 `Debug` 与占位构造（真正读默认值请走 `auto_continue_max_rounds()`
     /// 那条轻量读取，未初始化时它自己会走 `parse` 的兜底）。
     auto_continue_max_rounds: i64,
-    /// 面板机器人校验开关（设置页「通用 → 机器人校验」，ALTCHA proof-of-work）。
+    /// 面板机器人校验开关（设置页「账户 → 机器人校验」，ALTCHA proof-of-work）。
     ///
     /// 与 `debug_mode` 同一理由：登录 / 注册端点逐请求判一次（改完开关下一个
     /// 请求就生效），解析一次存下来最省事。默认 `true`，见 `KEY_CAPTCHA_ENABLED`；
     /// 配置项缺失时可由环境变量 `AGENT2API_CAPTCHA_ENABLED` 兜底（默认 1 开、0 关）。
-    captcha_enabled: bool,
+    ///
+    /// **分两端的两个值**：桌面壳与 headless 共用同一个后端，但暴露面不同 ——
+    /// 桌面端是本机（可能外加局域网），headless 是真实网络。两个开关各自独立，
+    /// 调用方按 `ServerState.local_panel` 取对应的那一个。
+    captcha_desktop: bool,
+    captcha_web: bool,
     /// models.dev 模型元数据开关（设置页「通用 → models.dev 模型元数据」）。
     ///
     /// 它是「这个模型的能力/档位能不能由社区库补」的**联网**总闸，默认 `true`
@@ -317,8 +323,20 @@ impl RuntimeConfig {
     }
 
     /// 面板机器人校验开关（登录 / 注册端点逐请求判一次）。
-    pub fn captcha_enabled(&self) -> bool {
-        self.captcha_enabled
+    ///
+    /// `local_panel = true` 取桌面端那项，否则取网页端那项 —— 与
+    /// `ServerState.local_panel` 的语义一致（桌面壳恒 true，headless 恒 false）。
+    pub fn captcha_enabled(&self, local_panel: bool) -> bool {
+        if local_panel {
+            self.captcha_desktop
+        } else {
+            self.captcha_web
+        }
+    }
+
+    /// 两端各自的开关（设置页渲染两张开关用）。
+    pub fn captcha_settings(&self) -> (bool, bool) {
+        (self.captcha_desktop, self.captcha_web)
     }
 
     /// models.dev 模型元数据的**联网刷新**开关（`core::model_meta::refresh` 读）。
@@ -594,13 +612,17 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
         // 「8 轮上限」是系统给的值。
         auto_continue_max_rounds: auto_continue_rounds_from(&raw),
         // 只有字面 `false` 算关闭：**默认开**。登录 / 注册的暴破与抢注防护
-        // 宁可多一道不可少一道（见 KEY_CAPTCHA_ENABLED 的说明）。配置项缺失
-        // 时环境变量兜底：登录页人机验证组件环境变量，默认为1开启，0为关闭
-        // （见 env_captcha_enabled）
-        captcha_enabled: raw
-            .get(KEY_CAPTCHA_ENABLED)
-            .and_then(Value::as_bool)
-            .unwrap_or_else(env_captcha_enabled),
+        // 宁可多一道不可少一道（见 KEY_CAPTCHA_ENABLED 的说明）。
+        //
+        // 取值链（分端键 → 旧单开关 → 环境变量 → 默认开）：升级前用户只改过
+        // `captchaEnabled`，那个值必须同时成为两端的新默认值 —— 否则老用户
+        // 关掉的开关会在升级后自己打开。`env_captcha_enabled` 仍只作最终兜底。
+        captcha_desktop: captcha_switch_from(
+            &raw,
+            KEY_CAPTCHA_DESKTOP,
+            env_captcha_enabled(),
+        ),
+        captcha_web: captcha_switch_from(&raw, KEY_CAPTCHA_WEB, env_captcha_enabled()),
         // 只有字面 `false` 算关闭：**默认开**（理由见 KEY_MODELS_DEV_ENABLED）。
         // 没有环境变量兜底：它不是「部署时才知道要不要开」的东西（Docker 与
         // 桌面端都一样，内嵌快照保证功能在离线时也有内容）。
@@ -1196,12 +1218,50 @@ where
     F: FnOnce(&mut RuntimeConfig),
 {
     let mut next = current();
+    let before = synced_fingerprint(&next.raw);
     mutate(&mut next);
     let saved = save_raw(&next.raw);
+    // 先算改动后的指纹再交出所有权：`next` 要移进内存快照
+    let changed = before != synced_fingerprint(&next.raw);
     if let Ok(mut guard) = CONFIG.write() {
         *guard = Some(next);
     }
+    // 云同步的自动上传：只有**同步范围内的键**真的变了才发信号。
+    //
+    // ── 为什么在这里而不是在 `save_raw` 里 ─────────────────────
+    // `save_raw` 也被迁移等路径调用，而那些路径不该触发上传（迁移跑在启动期，
+    // 远端还没配）。`update` 是「运行期改配置」的唯一入口（所有 setter 都经它），
+    // 语义正好。
+    //
+    // ── 为什么要在改之前先算一份指纹 ───────────────────────────
+    // `set_debug_mode` 这类 setter 会在「值没变」时也调 `update`（界面拨回原值）。
+    // 不比对的话每次拨动都会上传一次；比对之后只有真变了才发信号。
+    if changed {
+        crate::server::core::cloud_sync::auto_sync::notify_change();
+    }
     saved
+}
+
+/// 同步范围内 kv 键的指纹：键名 + 值的稳定序列化。
+///
+/// 只用于「这次 `update` 有没有改动云同步关心的内容」，因此不必是密码学哈希
+/// —— 但用 sha256 可以避免把整份配置（含提示词全文）留在内存里做比较。
+fn synced_fingerprint(raw: &Map<String, Value>) -> String {
+    use crate::server::core::cloud_sync::snapshot::is_synced_kv_key;
+    use sha2::{Digest as _, Sha256};
+
+    let mut hasher = Sha256::new();
+    // `raw` 是 `serde_json::Map`（默认 BTreeMap），迭代顺序稳定
+    for (key, value) in raw {
+        if !is_synced_kv_key(key) {
+            continue;
+        }
+        hasher.update(key.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(value.to_string().as_bytes());
+        hasher.update(b"\n");
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 /// 把整份配置写进统一库（对应 Node 版 `saveConfig`）。
@@ -1863,16 +1923,47 @@ pub fn set_auto_continue_max_rounds(rounds: i64) -> bool {
     })
 }
 
-/// 写入机器人校验开关（设置页「通用 → 机器人校验」）。
+/// 机器人校验分端开关的取值：分端键 → 旧单开关 → 环境变量兜底。
+///
+/// 旧单开关只当「默认值」用，不参与写入 —— 分端键一旦写过，它就不再影响
+/// 这一端。这样升级前后的行为连续（老用户关着就还是关着），而用户在新界面
+/// 里改某一端时也不会顺手把另一端改掉。
+fn captcha_switch_from(
+    raw: &serde_json::Map<String, Value>,
+    key: &str,
+    fallback: bool,
+) -> bool {
+    raw.get(key)
+        .and_then(Value::as_bool)
+        .or_else(|| raw.get(KEY_CAPTCHA_ENABLED).and_then(Value::as_bool))
+        .unwrap_or(fallback)
+}
+
+/// 写入机器人校验开关（设置页「账户 → 机器人校验」）。
+///
+/// `desktop = None` 表示不改桌面端那一项（PUT 允许部分字段）。两端同时改变时
+/// 一次落盘、一次刷新内存快照 —— 分两次写会出现「桌面端已开、网页端还没开」
+/// 的中间态被某个并发登录请求读到。
 ///
 /// 与 `set_sanitize_fingerprints` 同一模式：内存立即生效（登录 / 注册端点
 /// 逐请求读快照），写盘时不吃掉 config.json 里的其它字段。
-pub fn set_captcha_enabled(enabled: bool) -> bool {
+pub fn set_captcha_patch(desktop: Option<bool>, web: Option<bool>) -> bool {
+    if desktop.is_none() && web.is_none() {
+        return true;
+    }
     update(|config| {
-        config
-            .raw
-            .insert(KEY_CAPTCHA_ENABLED.to_string(), Value::Bool(enabled));
-        config.captcha_enabled = enabled;
+        if let Some(enabled) = desktop {
+            config
+                .raw
+                .insert(KEY_CAPTCHA_DESKTOP.to_string(), Value::Bool(enabled));
+            config.captcha_desktop = enabled;
+        }
+        if let Some(enabled) = web {
+            config
+                .raw
+                .insert(KEY_CAPTCHA_WEB.to_string(), Value::Bool(enabled));
+            config.captcha_web = enabled;
+        }
     })
 }
 

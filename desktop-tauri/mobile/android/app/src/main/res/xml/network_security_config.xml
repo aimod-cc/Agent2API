@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  明文流量（http）策略。
+
+  ── 为什么必须放开 ──────────────────────────────────────────
+  Android 9（API 28）起默认禁止明文 http。网关跑在局域网里、通常没有
+  证书，不放开的话所有请求会被系统直接拦掉 —— 报错是「Cleartext HTTP
+  traffic not permitted」，在 WebView 里只表现为 fetch 失败，从界面上
+  完全看不出原因。
+
+  ── 为什么是全局放开，而不是只放局域网网段 ──────────────────
+  想按网段放，但 Android 的 `<domain>` 只支持精确主机名 / IP 或以点开头
+  的后缀，**不支持 CIDR**。`192.168.0.0/16` 这种写法无效，逐个枚举私有
+  网段的所有 IP 也不现实。而网关地址是用户填的、可能落在任何私有段
+  （10.x / 172.16–31.x / 192.168.x）或 tailscale 的 100.64.x 里。
+
+  所以这里放开全局明文，并把风险如实记在这里：
+    · 明文只保护「链路」，不保护「服务」—— 面板仍然要求管理员登录；
+    · 风险面是「同一局域网内可嗅探到密码与令牌」；
+    · 想消除它，可以给网关配 TLS 后在 App 里填 https 地址（代码走同一
+      条路径，`normalizeBase` 只补 http 是因为那是最常见形态）。
+  对一个「连自己家局域网网关」的工具，这个取舍比「连不上」更可接受。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

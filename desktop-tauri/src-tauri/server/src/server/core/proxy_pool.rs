@@ -159,16 +159,21 @@ fn write_items(items: &[Value]) -> Result<(), String> {
     let db = database()?;
     let text = serde_json::to_string(&json!({ "items": items }))
         .map_err(|error| format!("编码代理池失败: {error}"))?;
-    db.with(|conn| {
-        conn.execute(
-            "INSERT INTO kv (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            rusqlite::params![KV_KEY, text],
-        )
-        .map(|_| ())
-        .map_err(|error| format!("保存代理池失败: {error}"))
-    })
-    .ok_or_else(|| "代理池数据库不可用".to_string())?
+    let written = db
+        .with(|conn| {
+            conn.execute(
+                "INSERT INTO kv (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![KV_KEY, text],
+            )
+            .map(|_| ())
+            .map_err(|error| format!("保存代理池失败: {error}"))
+        })
+        .ok_or_else(|| "代理池数据库不可用".to_string())?;
+    written?;
+    // 保留键不走 `config::update`，显式通知自动同步（见 cloud_sync::auto_sync）
+    crate::server::core::cloud_sync::auto_sync::notify_change();
+    Ok(())
 }
 
 // ─── 正规化与校验 ───────────────────────────────────────────
@@ -799,6 +804,40 @@ pub fn record_test(id: &str, result: &TestOutcome) -> Result<Vec<Value>, String>
     object.insert("lastTest".to_string(), last_test);
     write_items(&items)?;
     Ok(list())
+}
+
+/// 摘掉**不属于任何现存订阅**的订阅镜像条目，返回清理条数。
+///
+/// 正常路径下这件事由内核同步做（`sync_subscription_nodes` 按 providerId
+/// 摘条目）。但内核同步只有在「内核装好且没被手动关闭」时才会跑：
+///   · 内核未安装 —— restart 早退在 `installed()` 上；
+///   · 手动关闭内核 —— 变更只落库不重启（见 `sub_kernel::is_manually_halted`）。
+/// 这两种状态下删掉订阅，镜像条目就没有任何同步会来收，从此挂在池里变成
+/// 「孤儿」：用户明明删了订阅，节点却还在列表上。所以 api 层在变更后**直接**
+/// 调这里做一次兜底清理 —— 不依赖内核，读到什么就按什么清。
+///
+/// `live_provider_ids` 由调用方从订阅存储取（本模块不认识订阅存储，依赖方向
+/// 是 subscriptions / sub_kernel → proxy_pool）。只动 subscription 条目：
+/// manual / clash 从不被碰。
+pub fn prune_orphan_subscription_items(
+    live_provider_ids: &std::collections::HashSet<String>,
+) -> Result<usize, String> {
+    let mut items = read_items();
+    let before = items.len();
+    items.retain(|item| {
+        if !is_subscription_item(item) {
+            return true;
+        }
+        item.get("providerId")
+            .and_then(Value::as_str)
+            .map(|provider_id| live_provider_ids.contains(provider_id))
+            .unwrap_or(false) // 没有归属信息的坏行（手工改库）：清掉
+    });
+    let changes = before - items.len();
+    if changes > 0 {
+        write_items(&items)?;
+    }
+    Ok(changes)
 }
 
 /// 删除一条订阅节点的**孤儿**条目（所属订阅已不存在）。

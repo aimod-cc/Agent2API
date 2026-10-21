@@ -4,8 +4,16 @@
 //! 上游把历史回放里的 `functionCall` 签名当**硬性要求**：不带直接 400（实测
 //! 文案「Function call is missing a thought_signature in functionCall parts」）；
 //! 带一个伪造的同样 400（「Corrupted thought signature」—— 签名本体被校验，
-//! 「发明默认签名 / 哨兵值」的路走不通，Manager 的
-//! `skip_thought_signature_validator` 字面量本仓拿不到，不猜）。
+//! 「发明默认签名」的路走不通）。
+//! ⚠️ 这里说的是 **functionCall** 那一侧（issue #291 的实测结论，本模块的
+//! 存在理由）。另外两处别混进来：
+//!   · Google 官方文档确实给了两个「跳过校验」的哨兵值
+//!     （`skip_thought_signature_validator` / `context_engineering_is_the_way_to_go`），
+//!     但本仓**只**把它用在 Claude 的思考块占位上
+//!     （`antigravity_outbound::SKIP_SIGNATURE_SENTINEL`）—— functionCall 这侧
+//!     有真签名可用时没有理由拿哨兵顶；
+//!   · Claude 的历史轮思考块是**另一条**校验（要求「以思考块开头」），
+//!     与这里按 call id 缓存的是两回事，见 `ensure_claude_thinking_leading`。
 //! 网关把签名放在 `tool_calls[].extra_content.google.thought_signature`
 //! （Google 自家 OpenAI 兼容端点的字段位置）随响应带出 —— 但那是非标字段，
 //! 多数 OpenAI 兼容客户端下一轮会把它丢掉，于是「模型调工具 → 客户端回传

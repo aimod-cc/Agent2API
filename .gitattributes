@@ -1,0 +1,7 @@
+# 钩子脚本必须以 LF 检出。
+#
+# Windows 上 core.autocrlf=true 会把文本文件检出成 CRLF，而 CRLF 的
+# `#!/bin/sh` 会让 Git Bash 报 "bad interpreter"，钩子直接失效（还不会
+# 报错提示，只是静默不跑）。只约束 .githooks/ 下的文件，仓库其余部分
+# 维持现状，不做全仓库行尾规范化。
+.githooks/** text eol=lf

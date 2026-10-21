@@ -7,6 +7,9 @@
 mod routing;
 mod view;
 
+#[cfg(test)]
+mod account_group_tests;
+
 use serde_json::Value;
 
 use crate::server::core::account_store::AccountStore;
@@ -25,7 +28,8 @@ pub use routing::{
 };
 pub use view::{
     advertised_manifest_contains, advertised_model_ids, has_available_providers, manage_view,
-    models_by_provider, models_response, session_models, suggest_advertised,
+    group_models_response, models_by_provider, models_response, resolve_group_model, session_models,
+    suggest_advertised,
 };
 
 /// 原始能力清单不应用绑定开关；关闭原始 ID 后，别名仍需解析到这条上游记录。
@@ -190,6 +194,37 @@ pub(crate) fn refresh_meta(kind: ProviderKind) -> (bool, i64) {
         // `orcaterm::models` 的模块头）：永远不是远程来源，也没有刷新时刻。
         // 与 ZCode 同一口径：如实回 `(false, 0)`，界面的「来源」列显示成内置清单。
         ProviderKind::OrcaTerm => (false, 0),
+        // 智谱清言有远程目录（`operation/detail?tag=available_models`）——
+        // 如实回报它的来源与拉取时刻，界面「更新日期」列才有东西可显示。
+        ProviderKind::Chatglm => (
+            super::chatglm::models::remote_refreshed(),
+            super::chatglm::models::last_refreshed_at(),
+        ),
+        // ModelScope 的两个站点各有一份独立清单（缓存按地区分格，见
+        // `modelscope::models` 的模块头）：这里如实各查**自己那一格**。
+        // 上游**没有**内置兜底清单，所以「有内容」就等于「远程拉到过」。
+        ProviderKind::Modelscope | ProviderKind::ModelscopeIntl => {
+            let region = super::modelscope::Region::from_kind(kind)
+                .unwrap_or(super::modelscope::Region::Cn);
+            (
+                super::modelscope::models::remote_refreshed(region),
+                super::modelscope::models::last_refreshed_at(region),
+            )
+        }
+        // AtomCode：清单来自 `GET {codingplan}/coding-plan/models-v2`。
+        // 本家**没有内置兜底清单**（写死的模型点一下可能是「参数错误」，
+        // 见 `atomcode/models.rs` 的模块头），所以「有目录」就是「远程拉到过」。
+        ProviderKind::Atomcode => (
+            super::atomcode::models::remote_refreshed(),
+            super::atomcode::models::last_refreshed_at(),
+        ),
+        // LobsterAI：清单来自 `GET {api}/api/models/available`（带 keyfrom query）。
+        // 拉不到时回落内置的 19 条静态表，所以「有远程内容」才算远程来源
+        // —— 与 Loomy / CommandCode 同一口径（`remote_refreshed` 只看落地的那些）。
+        ProviderKind::LobsterAi => (
+            super::lobsterai::models::remote_refreshed(),
+            super::lobsterai::models::last_refreshed_at(),
+        ),
     }
 }
 

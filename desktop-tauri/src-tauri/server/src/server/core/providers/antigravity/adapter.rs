@@ -166,8 +166,15 @@ impl ProviderAdapter for AntigravityAdapter {
             })?;
         let url = endpoints::stream_generate_url(endpoints::V1_BASE_URL_DAILY);
         // content 请求的头集合（不带 `x-goog-user-project`、不带
-        // `x-goog-api-client`，见 endpoints.rs 的模块头）
-        let headers = endpoints::content_headers(access_token);
+        // `x-goog-api-client`，见 endpoints.rs 的模块头）。
+        // Claude 模型另带 `anthropic-beta`（规格 §5.3：这一个头**仅 Claude**）——
+        // 判据取**上游真名**（`wire_model`）：旧代 id 已被映射表重定向到 4.6，
+        // 按对外的名字判会漏掉「客户端写旧名、真名是 claude-*」那一半。
+        let headers = if models::is_claude_model(&wire_model) {
+            endpoints::claude_content_headers(access_token)
+        } else {
+            endpoints::content_headers(access_token)
+        };
         Ok(ChatRequestPlan::antigravity_gemini(url, headers, envelope))
     }
 

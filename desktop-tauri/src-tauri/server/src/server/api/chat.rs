@@ -78,6 +78,14 @@ pub async fn chat_completions(
     body: Bytes,
 ) -> Response {
     let scope = key_scope.map(|Extension(scope)| scope);
+    let account_group_scope = match crate::server::core::key_scope::resolve_request_group_scope(
+        scope.as_ref(),
+        state.account_groups(),
+        state.store(),
+    ) {
+        Ok(group_scope) => group_scope,
+        Err(error) => return error.payload_response(),
+    };
     // 请求开始时刻（请求统计用）。放在最前面：它要覆盖 body 解析与选路的耗时
     let started_at = logging::now_ms();
     // 请求来源客户端（UA 识别，见 `core::client`）：在 headers 被 move 进转发层
@@ -124,7 +132,12 @@ pub async fn chat_completions(
     // 下游等级与下游模型名同一时机采集（payload 被就地改写前；改写只动 model，
     // 两边前后一致，见 client_reasoning_of 的说明）
     let client_reasoning = pipeline::client_reasoning_of(&payload);
-    let requested_model = match pipeline::resolve_model(&state, &mut payload, scope.as_ref()) {
+    let requested_model = match pipeline::resolve_model(
+        &state,
+        &mut payload,
+        scope.as_ref(),
+        account_group_scope.as_ref(),
+    ) {
         Ok(model) => model,
         Err(error) => {
             record_early_failure(
@@ -205,6 +218,7 @@ pub async fn chat_completions(
         client_headers: headers.clone(),
         telemetry: telemetry.clone(),
         allowed_providers: scope.clone(),
+        account_group_scope: account_group_scope.clone(),
         max_rounds,
     });
     let outcome = state
@@ -218,6 +232,7 @@ pub async fn chat_completions(
             // 提供商白名单进转发层（选路时按承载家过滤）；模型白名单已经在
             // `resolve_model` 里判过（见那里的说明，两者分工不同）
             allowed_providers: scope,
+            account_group_scope,
             // 转发主链路不钉账号：谁承载由全局优先级队列决定
             pinned_account: None,
             // 关闭的模型对生产请求保持「模型已在网关中关闭」（`ignore_model_gate`
@@ -367,7 +382,25 @@ pub async fn chat_completions(
 /// 与 `key_scope` 模块头列的三条「不限制」情形是同一套语义。
 pub async fn list_models(State(state): State<ServerState>, headers: HeaderMap) -> Response {
     let scope = crate::server::http::key_scope_from_headers(&headers);
-    let body = crate::server::core::providers::catalog::models_response(state.store(), scope.as_ref());
+    let group_scope = match crate::server::core::key_scope::resolve_request_group_scope(
+        scope.as_ref(),
+        state.account_groups(),
+        state.store(),
+    ) {
+        Ok(group_scope) => group_scope,
+        Err(error) => return error.payload_response(),
+    };
+    let body = match group_scope.as_ref() {
+        Some(group_scope) => crate::server::core::providers::catalog::group_models_response(
+            state.store(),
+            group_scope,
+            scope.as_ref(),
+        ),
+        None => crate::server::core::providers::catalog::models_response(
+            state.store(),
+            scope.as_ref(),
+        ),
+    };
     // 异步刷新模型目录，不阻塞响应（对照 Node 的 `void refreshModelCatalog()`）
     spawn_catalog_refresh(&state);
     // Anthropic 客户端（Claude Code / Claude Desktop）走同一路径，但它们

@@ -136,17 +136,62 @@ impl ProviderAdapter for OrcatermAdapter {
         })
     }
 
-    /// 支持**网页登录**：打开官方 Web 控制台（`orcaterm.cloud.tencent.com/terminal`），
-    /// 用户在里面微信扫码登录，登录成功后壳侧读登录窗口的 `ot_session`
-    /// Cookie 交回网关（见 `login.rs` 模块头）。
+    /// 支持**网页登录**：官方 OAuth 授权页 → 微信扫码 → `orcaterm://oauth_callback`
+    /// → 后端用 `OAuthExchangeToken` 换令牌落账号（见 `login.rs` 模块头）。
     fn supports_web_login(&self) -> bool {
         true
     }
 
-    /// 构造控制台地址 + 一次性 state（`login.rs`）。
+    /// 构造授权页地址 + 一次性 state（`login.rs`）。
+    ///
+    /// `state` 同时是 OAuth 的 `session_id`：回调 URL 里带的就是它，后端据此
+    /// 换令牌（见 `login.rs` 模块头）。
     fn build_login_url(&self) -> Option<(String, String)> {
         let state = super::login::new_login_state();
         Some((super::login::build_login_url(&state), state))
+    }
+
+    /// 回调换令牌：回调 URL 里的 `session_id` → `OAuthExchangeToken` → 落账号。
+    ///
+    /// 与 CodeArts / AutoClaw 同款形态（回调 URL 交由后端换码），差别在于这里的
+    /// 凭据是 `session_id` 而非 `code`（见 `login.rs` 模块头）。
+    fn exchange_login_code<'a>(
+        &'a self,
+        store: &'a AccountStore,
+        callback_url: &'a str,
+        state: &'a str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<String, GatewayError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let session_id = super::login::callback_session_id(callback_url).ok_or_else(|| {
+                GatewayError::with_status(400, "OrcaTerm 回调里没有 session_id，请重新发起网页登录")
+            })?;
+            // 逐字比对发起时生成的那个值（深度防御：调用链上游已校验过 state，
+            // 但「只有本模块知道该长什么样」的校验放在这里最可靠）。
+            if session_id != state {
+                return Err(GatewayError::with_status(
+                    400,
+                    "OrcaTerm 回调的 session_id 与本次登录不匹配，请重新发起网页登录",
+                ));
+            }
+            let credentials = super::login::exchange_session(&session_id).await?;
+            let account = store
+                .add_orcaterm_account(&credentials, None, "web")
+                .map_err(|error| GatewayError::with_status(error.status_code, error.message))?;
+            let account_id = account
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let label = account
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("OrcaTerm 账号")
+                .to_string();
+            crate::server::logging::log("[Login]", &format!("✅ OrcaTerm 网页登录成功: {label}"));
+            Ok(account_id)
+        })
     }
 
     /// 支持续期：上游有 `OAuthRefreshToken`（2026-10-16 实测，见

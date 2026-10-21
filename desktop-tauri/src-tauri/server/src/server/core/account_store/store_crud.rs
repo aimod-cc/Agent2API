@@ -457,7 +457,15 @@ impl AccountStore {
             .unwrap_or_else(|| id.to_string());
         // 单行删除，`false` 表示本来就没有这一行 → 404（与旧实现数数组长度的
         // 判据等价：删之前找不到这个 id）
-        let removed = self.with_conn(&_guard, |conn| sql::delete(conn, id))?;
+        let removed = self.with_conn_mut(&_guard, |conn| {
+            let tx = conn.transaction()?;
+            let removed = sql::delete(&tx, id)?;
+            if removed {
+                sql::delete_explicit_group_account_members(&tx, id)?;
+            }
+            tx.commit()?;
+            Ok(removed)
+        })?;
         if !removed {
             return Err(AccountStoreError::not_found("账号不存在"));
         }

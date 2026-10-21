@@ -3,7 +3,51 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- ─── PWA：让 iOS「添加到主屏幕」后以独立窗口打开（不是每次都跳回 Safari）───
+       iOS 只认 manifest 里 display: standalone + apple-touch-icon；没有这套声明，
+       主屏幕图标点击会退回 Safari。注意：加了之后用户必须删掉旧书签重新添加。 -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Agent2API">
+  <meta name="theme-color" content="#0f1115">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="assets/app-icon-180.png">
+  <link rel="icon" type="image/png" href="assets/app-icon-192.png">
   <title data-i18n="Agent2API · 多提供商本地网关">Agent2API · 多提供商本地网关</title>
+  <script>
+    // ── 桌面端的面板登录守卫 ──────────────────────────────────
+    // 只有「注册过管理员」之后才需要登录（未注册 = 桌面当正常软件用，免登录）。
+    // 判据与网页端 `panel_boot_redirect` 同源（服务端判的是浏览器导航），但桌面
+    // 窗口的页面来自 tauri://，服务端看不到这次导航，只能在页面侧拦。
+    //
+    // 为什么要先藏一下：判断要问壳（异步），而页面主体一旦开始渲染，注册过管理员
+    // 的用户会先看到整块界面再被跳走。`data-auth-pending` 由下面的首屏样式隐藏，
+    // 判定完成后移除 —— 最坏情况是几十毫秒空白，而不是闪一屏主界面。
+    (function () {
+      var desktop = window.workbuddyDesktop;
+      if (!desktop || desktop.platform === 'web'
+        || typeof desktop.panelSessionStatus !== 'function') return;
+      document.documentElement.dataset.authPending = '1';
+      desktop.panelSessionStatus().then(function (state) {
+        if (state && state.registered && !state.authenticated) {
+          // replace 而不是 assign：登录页不该出现在「后退」栈里
+          window.location.replace('login.html');
+          return;
+        }
+        delete document.documentElement.dataset.authPending;
+      }).catch(function () {
+        // 查不到状态（后端还没起来 / 桥异常）：不拦，按免登录处理 ——
+        // 各面板自己的 401 提示会说明问题，比停在一个空白页好
+        delete document.documentElement.dataset.authPending;
+      });
+    })();
+  </script>
+  <style>
+    /* 登录守卫生效期间藏住首屏（见上面那段脚本）。放在 head 里而不是外链 CSS：
+       要在 CSS 解析前就命中，否则首屏仍会闪一下。 */
+    html[data-auth-pending] body { visibility: hidden; }
+  </style>
   <script>
     // 与主题持久化配合：在 CSS 解析前先贴上 data-theme，避免深色模式首屏闪烁
     (() => {
@@ -67,11 +111,15 @@
        它要覆盖 page-accounts.css 里 .acct-scroll 的滚动方向等既有声明 -->
   <link rel="stylesheet" href="css/page-accounts-table.css">
   <link rel="stylesheet" href="css/page-gateway.css">
+  <link rel="stylesheet" href="css/page-agent.css">
   <link rel="stylesheet" href="css/page-logs.css">
   <link rel="stylesheet" href="css/page-tasks.css">
   <link rel="stylesheet" href="css/page-checkin.css">
   <link rel="stylesheet" href="css/page-requests.css">
   <link rel="stylesheet" href="css/page-settings.css">
+  <!-- 设置 → 显示 → 侧边栏菜单（分组卡片 / 拖拽把手 / 行网格）。排在
+       page-settings.css 之后：它复用那里的面板骨架，只补自己的零件 -->
+  <link rel="stylesheet" href="css/page-sidebar-pane.css">
   <!-- 更新日志（Markdown 正文 / 版本卡片 / 导航更新提示）：排在页面样式之后，
        需要时可覆盖 page-settings.css 里为旧的纯文本说明写的规则 -->
   <link rel="stylesheet" href="css/update-notes.css">
@@ -89,6 +137,9 @@
        （select.css 已随 select.js 一并删除：全站最后一个原生 <select> 换成组件库的
        Select 之后，.select-shell 那一族样式再无任何引用。） -->
   <link rel="stylesheet" href="css/table-col-settings.css">
+  <!-- 移动端适配层：最后加载，断点 768px。不动既有 900px 折叠规则，
+       只处理 768px 以下真机小屏：侧边栏抽屉化 + 表格卡片化 + 卡片堆叠 -->
+  <link rel="stylesheet" href="css/mobile.css">
   <!-- 组件库产物（desktop-tauri/ui-kit/，由 ui-islands 构建时一并编译成 ui/islands/ui.css）：
        Tailwind 的 theme + utilities 两层，刻意不含 preflight —— 基础重置仍由 tokens.css
        承担，否则 h1-h6 字号、列表缩进、img 显示方式会被整体重置。
@@ -103,6 +154,14 @@
 </head>
 <body>
   <div class="shell">
+    <!-- 移动端侧边栏抽屉开关（仅 <768px 生效，见 css/mobile.css）。
+         checkbox 本身隐藏，label.for 指向的汉堡按钮与遮罩都靠 :checked ~ 兄弟选择器驱动，
+         不依赖任何 JS；桌面端整条不影响布局。
+         tabindex="-1"：它带着 aria-hidden 却是文档里第一个可聚焦元素，而隐藏只靠
+         opacity + pointer-events（这条规则在媒体查询之外，桌面端同样生效）—— 不加这一条，
+         桌面用户第一次按 Tab 焦点会落在一个看不见的控件上，同时构成 axe 的
+         aria-hidden-focus 违规。抽屉仍由 label 点击驱动，不受影响。 -->
+    <input type="checkbox" id="nav-toggle" class="nav-toggle-input" tabindex="-1" aria-hidden="true">
     <!-- ─── 左侧导航 ─── -->
     <aside class="sidebar">
       <div class="brand">
@@ -114,48 +173,18 @@
       </div>
 
       <!-- 图标由 icons.js + app.js 注入（内联 SVG，见 icons.js 顶部说明） -->
-      <nav class="nav" id="nav">
-        <!-- 智能：AI 助手是「对话式的运维入口」——能读（模型清单 / 余额）也能改
-             （启停 / 映射 / 能力位 / 顺序），横跨「运行状态」与「转发能力」两组
-             的全部对象，所以给它独立分组、独立一级菜单；放最上面是给「天天用」
-             留的位置。整页由 React 岛渲染（ui-islands/src/islands/assistant-page.tsx），
-             岛直接挂在这个 section 上。 -->
-        <div class="nav-group-label" data-i18n="智能">智能</div>
-        <button class="nav-item" data-page="assistant" data-icon="spark"><span class="ico"></span><span class="label" data-i18n="AI 助手">AI 助手</span></button>
-
-        <div class="nav-group-label" data-i18n="运行状态">运行状态</div>
-        <button class="nav-item active" data-page="overview" data-icon="overview"><span class="ico"></span><span class="label" data-i18n="报表">报表</span></button>
-        <button class="nav-item" data-page="accounts" data-icon="accounts"><span class="ico"></span><span class="label" data-i18n="账号">账号</span></button>
-
-        <!-- 签到中心：每日签到（7 家提供商）、新手任务（Loomy 一次性）、活动福利
-             （CodeArts / ZCode）与自动签到设置的统一入口。整页由 React 岛渲染
-             （desktop-tauri/ui-islands/src/islands/checkin-page.tsx，随 islands/ui.js
-             一起加载），岛直接挂在这个 section 上。自动签到的设置卡从「定时任务」页
-             移到这里 —— 签到的执行、范围与历史从此只有这一个出处。 -->
-        <button class="nav-item" data-page="checkin" data-icon="checkin"><span class="ico"></span><span class="label" data-i18n="签到中心">签到中心</span></button>
-
-        <div class="nav-group-label" data-i18n="转发能力">转发能力</div>
-        <button class="nav-item" data-page="gateway" data-icon="gateway"><span class="ico"></span><span class="label" data-i18n="模型管理">模型管理</span></button>
-        <!-- 网络代理：出网出口的管理页（代理池 CRUD + 连通性测试 + Clash 出口引用）。
-             挨着「模型管理」是因为它管的是同一个问题的另一半：模型管理决定
-             「请求发往哪家上游」，这里决定「从哪条线路出去」。账号弹窗里的
-             「出网代理」仍可用，但推荐在这里配好、账号按名字引用 ——
-             改一次地址，所有引用的账号一起生效。 -->
-        <button class="nav-item" data-page="proxies" data-icon="proxies"><span class="ico"></span><span class="label" data-i18n="网络代理">网络代理</span></button>
-        <button class="nav-item" data-page="keys" data-icon="key"><span class="ico"></span><span class="label" data-i18n="网关 Key">网关 Key</span></button>
-        <!-- 文档：接口地址（Base URL / 三种对话协议 / 模型列表）与将来的使用说明。
-             它原先在「网关 Key」页里，R8 按需求搬成独立一级菜单 —— 接口地址是
-             「接客户端」这件事本身要查的东西，与「管理 Key」不是同一类操作，
-             混在一页里用户要在两件事之间来回滚。图标用 logs（文档 + 文本行），
-             语义上就是「文档」，不新画 SVG（见 icons.js）。 -->
-        <button class="nav-item" data-page="docs" data-icon="logs"><span class="ico"></span><span class="label" data-i18n="文档">文档</span></button>
-
-        <div class="nav-group-label" data-i18n="诊断">诊断</div>
-        <button class="nav-item" data-page="requests" data-icon="requests"><span class="ico"></span><span class="label" data-i18n="请求日志">请求日志</span><span class="count" id="nav-count-requests" style="display:none">0</span></button>
-        <button class="nav-item" data-page="logs" data-icon="logs"><span class="ico"></span><span class="label" data-i18n="日志">日志</span><span class="count" id="nav-count-logs" style="display:none">0</span></button>
-        <button class="nav-item" data-page="tasks" data-icon="tasks"><span class="ico"></span><span class="label" data-i18n="定时任务">定时任务</span></button>
-        <button class="nav-item" data-page="settings" data-icon="settings"><span class="ico"></span><span class="label" data-i18n="设置">设置</span><span class="count" id="nav-count-update" style="display:none" data-i18n="新">新</span></button>
-      </nav>
+      <!-- 导航项由 sidebar-layout.js + app.js 在启动时**渲染**，这里只留空容器。
+           为什么不再写静态 DOM：分组、组内顺序、显隐都是用户在
+           「设置 → 显示 → 侧边栏菜单」里可改的偏好，静态 DOM 无法表达。
+           渲染规则（默认分组 / 校验 / 升级补位）只有一处：ui/sidebar-layout.js。
+           下面这些**契约**在动态渲染时必须原样保留，破坏任何一条都会静默失效：
+             · 每个菜单是 <button class="nav-item" data-page="<键>">，键与 app.js 的
+               PAGES / PAGE_LABELS 逐字一致（localStorage 记忆、showPage、CSS 的
+               [data-page] 选择器都依赖它）；
+             · 三颗角标的 id：nav-count-requests / nav-count-logs / nav-count-update
+               —— app.js 的徽标逻辑按 id 取元素，找不到就静默不亮；
+             · 分组标题用 .nav-group-label，窄屏（≤900px）由 layout.css 整列隐藏。 -->
+      <nav class="nav" id="nav"></nav>
 
       <div class="sidebar-foot">
         <!-- 网关状态：常驻显示，不必切到「网关」页也能确认服务是否在监听。
@@ -174,12 +203,24 @@
           <button data-mode="light" data-i18n="浅色">浅色</button>
           <button data-mode="dark" data-i18n="深色">深色</button>
         </div>
+        <!-- 手机端入口：同一份面板在窄屏上的另一种排布（`/m`，独立页面，
+             与这一页不共享布局）。放侧栏底部而不是一级菜单里 —— 它是
+             「换个设备继续看」，不是第 14 个功能页。新标签打开，不打断当前操作。 -->
+        <a class="sidebar-mobile-link" href="/m" target="_blank" rel="noopener" data-i18n="手机端打开">手机端打开</a>
       </div>
     </aside>
 
     <!-- ─── 主区域 ─── -->
     <main class="main">
       <header class="topbar">
+        <!-- 移动端汉堡按钮：仅 <768px 显示，点击切换 #nav-toggle 让侧边栏滑出（纯 CSS）。
+             内联 SVG 与 icons.js 同一套约定（24×24 画布 + currentColor 填充），
+             不依赖 paintIcons 的注入时序 —— 那是页面级图标，这里要首帧就在。 -->
+        <label for="nav-toggle" class="mobile-menu-btn" title="菜单" aria-label="切换菜单">
+          <svg viewBox="0 0 24 24" width="19" height="19" fill="currentColor" aria-hidden="true">
+            <path d="M3 6h18v2.5H3V6Zm0 5.25h18v2.5H3v-2.5Zm0 5.25h18v2.5H3v-2.5Z"/>
+          </svg>
+        </label>
         <div class="crumb">
           <span>Agent2API</span>
           <span class="sep">/</span>
@@ -237,6 +278,13 @@
              表骨架（colgroup + thead 的 th[data-col]）也由岛渲染，但顺序与这里原先
              写死的完全一致，列显隐 / 顺序仍由 wbColSettings.syncStaticHead 就地重排。 -->
         <section class="page" data-page="gateway"></section>
+
+        <!-- ─── Agent（本机 AI 客户端的配置接管）───
+             整页由 React 岛渲染（ui-islands/src/islands/agent-page.tsx），
+             岛直接挂在这个 section 上、不套宿主 div —— 页面 CSS 用 .page 的
+             直接子选择器（.panel 是它的直接子元素），中间插一层会破坏布局。
+             两种客户端形态（单配置 / 多配置）的区别见该岛的文件头。 -->
+        <section class="page" data-page="agent"></section>
 
         <!-- ─── 网络代理 ───
              出口（代理池）的配置中心：新增 / 编辑 / 删除 / 启停 / 测试连通性，
@@ -348,6 +396,11 @@
         </div>
       </div>
     </main>
+
+    <!-- 移动端侧边栏遮罩：<768px 下侧边栏滑出时盖住内容区，点遮罩即收起。
+         纯 CSS 兄弟选择器驱动（#nav-toggle:checked ~ .nav-scrim），无需 JS。
+         必须与 #nav-toggle 同处 .shell 下、且在它之后，兄弟选择器才成立。 -->
+    <label for="nav-toggle" class="nav-scrim" aria-hidden="true"></label>
   </div>
 
   <!-- 添加账号弹窗已迁到组件库：实现见
@@ -437,6 +490,10 @@
   <!-- Token 计量单位的展示口径（中文亿/万 ⇄ 英文 M/k）：报表页与请求日志页都读它，
        设置页的开关写它，所以排在所有业务脚本之前，它们执行时就能用上。 -->
   <script src="units.js"></script>
+  <!-- 侧边栏布局（分组 / 顺序 / 显隐）的唯一数据口径。必须排在 app.js 与
+       islands/ui.js 之前：前者启动时按它渲染 #nav，后者里的设置页编辑面板
+       经 window.wbSidebarLayout 读写同一份模型。 -->
+  <script src="sidebar-layout.js"></script>
   <script src="app.js"></script>
   <!-- React 岛（源码 desktop-tauri/ui-islands/，产物已随仓库提交）。三类：
        · 挂载点式：分段筛选（.island 宿主）、页面级面板（直接挂 .page section）；
@@ -541,6 +598,9 @@
        它启动时就把表头把手插好并绑好委托，所以排在靠后（DOM 里的表格与列表都已存在）；
        请求日志的表头是整块重绘的，它自己用 MutationObserver 补把手，不依赖面板脚本。 -->
   <script src="table-columns.js"></script>
+  <!-- 移动端表格卡片化：窄屏下把表头列名写进每行 td 的 data-col，
+       配合 css/mobile.css 的 td::before 渲染成卡片 label。桌面端不执行。 -->
+  <script src="mobile-columns.js"></script>
   <!-- 并发上限小对话框已迁到组件库：实现见 desktop-tauri/ui-islands/src/conc-dialog.tsx，
        随 islands/ui.js 一起加载（排在 accounts-view 之前），对外仍是
        window.wbAccountConcDialog.open(account) / .close()，调用方不用改。 -->

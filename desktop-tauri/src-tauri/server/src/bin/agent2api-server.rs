@@ -13,6 +13,13 @@
 //!     转发面（/v1/*）没配 Key 时 fail-closed（登录面板自建第一把即恢复；
 //!     桌面默认只听回环，同一风险不存在；确要裸跑见 `AGENT2API_ALLOW_NO_KEY`）。
 //!
+//! ── 两种起法（同一个可执行文件）──────────────────────────────
+//!   · `agent2api-server`             前台跑：日志打 stderr，Ctrl+C 停；
+//!   · `agent2api-server --service`   Windows 服务（仅 Windows）：交给 SCM
+//!                                    托管，日志落文件，`sc.exe stop` 停。
+//! Linux 上对应的形态是 systemd 单元（前台跑即可，由 systemd 管进程），
+//! 不需要这个参数 —— 发行包里带的 `agent2api.service` 就是干这个的。
+//!
 //! ── 环境变量 ────────────────────────────────────────────────
 //!   AGENT2API_PROXY_HOME        配置/数据目录（旧名 WORKBUDDY_PROXY_HOME 兼容读）
 //!   AGENT2API_HOST              监听地址，默认 0.0.0.0
@@ -21,6 +28,8 @@
 //!                               单独监听该端口，主端口只保留 /v1/* 网关；
 //!                               公网部署只映射主端口，即可把面板留在内网
 //!   AGENT2API_UI_DIR            管理界面静态目录，默认 `ui/`（相对可执行文件）
+//!   AGENT2API_LOG_FILE          日志文件路径（可选）。服务形态下不设也能跑：
+//!                               按 `{PROXY_HOME}/logs/server.log` 落盘
 //!   AGENT2API_ADMIN_USER        面板管理员账号（与下面的密码变量之一同时设置）
 //!   AGENT2API_ADMIN_PASSWORD    面板管理员密码（明文，启动时自动转 bcrypt 哈希）
 //!   AGENT2API_ADMIN_PASSWORD_HASH 面板管理员密码的 bcrypt 哈希（优先于明文；
@@ -37,62 +46,102 @@ use std::process::ExitCode;
 
 use agent2api_server::server::{config, logging, start, ServerState};
 
+/// 解析后的启动参数。前台与服务形态共用同一份，避免两边口径漂移。
+struct Launch {
+    port: u16,
+    host: IpAddr,
+    panel_port: Option<u16>,
+    ui_dir: PathBuf,
+}
+
+/// 网关跑起来之后交出去的两条通道：收尾时要用。
+struct Running {
+    shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    /// 面板「安装并重启」的信号（容器内更新用）
+    restart_rx: tokio::sync::mpsc::Receiver<()>,
+}
+
 fn main() -> ExitCode {
-    // 端口口径与桌面壳一致：新名 > 旧名 > 默认（非法值当未设置）
-    let port = env_port("AGENT2API_PROXY_PORT")
-        .or_else(|| env_port("WORKBUDDY_PROXY_PORT"))
-        .unwrap_or(3065);
-    let host: IpAddr = match std::env::var("AGENT2API_HOST") {
-        Ok(value) if !value.trim().is_empty() => match value.trim().parse() {
-            Ok(host) => host,
-            Err(_) => {
-                eprintln!("❌ AGENT2API_HOST 不是合法的 IP 地址: {value}");
+    // Windows 服务形态判定放在**参数解析之前**：服务进程没有控制台，
+    // 配置写错（端口非法之类）时 eprintln 会全部丢掉，而「配置错导致起不来」
+    // 恰恰是最需要看日志的情形。所以先把文件通道打开，再做任何可能报错的事。
+    #[cfg(windows)]
+    if service::requested() {
+        // 运行形态标志：设置页「版本信息」要能区分「Windows 服务」与
+        // 「前台跑的 headless」。`--service` 只在这里出现一次，置位后
+        // 运行期再没有别的可观察痕迹（SCM 拉起与双击启动的进程一模一样）。
+        agent2api_server::server::core::system_info::set_service_mode(true);
+        logging::init_file_sink();
+        let launch = match parse_launch() {
+            Ok(launch) => launch,
+            Err(reason) => {
+                // 此时文件通道已开，console_line 会同时写进文件
+                logging::console_line("[Server]", &format!("❌ {reason}"));
                 return ExitCode::FAILURE;
             }
-        },
-        // headless 形态默认 0.0.0.0：它的宿主通常是容器 / 服务器，
-        // 绑回环会让端口映射与外部访问全部失效。对外暴露的安全由
-        // 「未配 Key 拒绝启动」闸门 + API Key 认证兜底。
-        _ => IpAddr::from(Ipv4Addr::UNSPECIFIED),
-    };
-    let ui_dir = resolve_ui_dir();
+        };
+        return run_as_windows_service(launch);
+    }
 
-    // 面板分端口（可选）：设了就把管理面（静态界面 + /api/*）挪到独立端口，
-    // 主端口只留 /v1/* 网关 —— 想收敛暴露面时，公网只映射主端口即可。
-    // 与主端口相同没有意义（等于没分），直接报错不让部署带着歧义上线。
-    let panel_port = match std::env::var("AGENT2API_PANEL_PORT") {
-        Ok(value) if !value.trim().is_empty() => match value.trim().parse::<u16>() {
-            Ok(p) if p == port => {
-                eprintln!("❌ AGENT2API_PANEL_PORT 与网关端口相同（{p}）：分端口部署要求两者不同");
-                return ExitCode::FAILURE;
-            }
-            Ok(p) => Some(p),
-            Err(_) => {
-                eprintln!("❌ AGENT2API_PANEL_PORT 不是合法端口: {value}");
-                return ExitCode::FAILURE;
-            }
-        },
-        _ => None,
-    };
-
-    // bootstrap：开库、读配置、探测旧数据、装日志库（与桌面同一套时序）。
-    // 失败只可能来自目录迁移防御性校验、以及「库 schema 版本高于本程序」
-    // —— 两者都原样透出，不能带错继续。
-    let mut state = match ServerState::bootstrap(port, host) {
-        Ok(state) => state,
+    let launch = match parse_launch() {
+        Ok(launch) => launch,
         Err(reason) => {
-            eprintln!("❌ 网关初始化失败: {reason}");
+            eprintln!("❌ {reason}");
             return ExitCode::FAILURE;
         }
     };
 
-    state.panel_port = panel_port;
+    run_foreground(launch)
+}
+
+/// 前台形态：Ctrl+C / SIGTERM / 面板重启 三条停机路径。
+fn run_foreground(launch: Launch) -> ExitCode {
+    let running = match start_gateway(&launch) {
+        Ok(running) => running,
+        Err(reason) => {
+            eprintln!("❌ {reason}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // 停机信号：Ctrl+C（全平台）+ SIGTERM（unix，容器 stop 走这条）；
+    // 「面板发起的重启」与两者同一条收尾路径（见 `start_gateway` 的说明）。
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("❌ 创建 Tokio 运行时失败: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Running {
+        shutdown_tx,
+        restart_rx,
+    } = running;
+    runtime.block_on(wait_for_shutdown_signal(restart_rx));
+    finish(shutdown_tx);
+    ExitCode::SUCCESS
+}
+
+/// 把网关跑起来：开库、装闸门、绑端口、起 HTTP 服务。
+///
+/// 前台与服务形态共用 —— 两者的差异只在「怎么等停机」，不在这里。
+fn start_gateway(launch: &Launch) -> Result<Running, String> {
+    // bootstrap：开库、读配置、探测旧数据、装日志库（与桌面同一套时序）。
+    // 失败只可能来自目录迁移防御性校验、以及「库 schema 版本高于本程序」
+    // —— 两者都原样透出，不能带错继续。
+    let mut state = ServerState::bootstrap(launch.port, launch.host)
+        .map_err(|reason| format!("网关初始化失败: {reason}"))?;
+
+    state.panel_port = launch.panel_port;
     // headless 面板闸门：未注册时 /api/* 只放行注册相关端点与 API Key（强制
     // 先注册，见 access::panel_gate 与 http::require_api_key 的注释）。
     // 唯一的关闭口在下面的安全闸门里：AGENT2API_ALLOW_NO_KEY=1 是「我自己
     // 要全放行」的显式声明，闸门不得拦它。
     agent2api_server::server::access::set_panel_gate(true);
-    if let Some(p) = panel_port {
+    if let Some(p) = launch.panel_port {
         logging::log(
             "[Server]",
             &format!(
@@ -108,17 +157,54 @@ fn main() -> ExitCode {
     // env 预置的管理员同步进库（明文在此前已转哈希，库里只存哈希）
     agent2api_server::server::access::sync_env_admin_to_store();
 
-    // ── 安全闸门：/v1/* 的 fail-closed 与注册提示 ───────────────
-    // 桌面形态的安全边界是「只监听 127.0.0.1」，免鉴权语义（一把 Key 都
-    // 没配 → 全放行）在此之上成立；本形态绑 0.0.0.0、对外可见：
-    //   · 转发面（/v1/*）：只认 API Key。没有任何 Key 时 fail-closed
-    //     （拒绝服务并引导去面板建第一把），额度绝不对全网开放；
-    //   · 管理面（/api/*）：管理员注册后需要登录。**未注册的窗口期**放行
-    //     （否则连「创建管理员」都进不去）—— 这是刻意的取舍：抢注只可能
-    //     发生在「部署完到用户注册」之间，所以启动日志会强烈提醒立即注册；
-    //     注册一完成，管理面立即要求登录。介意这个窗口的，用环境变量
-    //     预置管理员（AGENT2API_ADMIN_USER / …_PASSWORD_HASH，跳过注册）。
-    // 纯内网确要无 Key 裸跑的，显式设 AGENT2API_ALLOW_NO_KEY=1 自己负责。
+    apply_security_gates();
+
+    state.set_ui_dir(launch.ui_dir.clone());
+
+    // 「面板发起的重启」通道：面板点了「安装并重启」之后，自更新模块的钩子
+    // 往这里发一个信号，主线程照 SIGTERM 那条路优雅停机并返回 —— 服务由
+    // 外部监管者拉起（容器 restart 策略 / systemd Restart= / SCM 恢复策略）。
+    //
+    // 放 start() 之前注册：请求只会由正在跑的服务器发来，而钩子只需要这个
+    // 发送端（停机动作仍在主线程做，见 `finish`）。
+    let (restart_tx, restart_rx) = tokio::sync::mpsc::channel::<()>(1);
+    agent2api_server::server::core::update::selfupdate::set_restart_hook(Box::new(move || {
+        // 钩子跑在自更新的后台线程里：try_send 不阻塞、也不要求运行时上下文
+        let _ = restart_tx.try_send(());
+    }));
+
+    let shutdown_tx = start(&state).map_err(|conflict| format!("网关启动失败：{}", conflict.message))?;
+
+    logging::log(
+        "[Server]",
+        &format!(
+            "headless 运行中：面板 http://{}:{}/ ｜ API http://{}:{}/v1",
+            display_host(launch.host),
+            launch.port,
+            display_host(launch.host),
+            launch.port
+        ),
+    );
+
+    Ok(Running {
+        shutdown_tx,
+        restart_rx,
+    })
+}
+
+/// 安全闸门：/v1/* 的 fail-closed 与注册提示。
+///
+/// 桌面形态的安全边界是「只监听 127.0.0.1」，免鉴权语义（一把 Key 都
+/// 没配 → 全放行）在此之上成立；本形态绑 0.0.0.0、对外可见：
+///   · 转发面（/v1/*）：只认 API Key。没有任何 Key 时 fail-closed
+///     （拒绝服务并引导去面板建第一把），额度绝不对全网开放；
+///   · 管理面（/api/*）：管理员注册后需要登录。**未注册的窗口期**放行
+///     （否则连「创建管理员」都进不去）—— 这是刻意的取舍：抢注只可能
+///     发生在「部署完到用户注册」之间，所以启动日志会强烈提醒立即注册；
+///     注册一完成，管理面立即要求登录。介意这个窗口的，用环境变量
+///     预置管理员（AGENT2API_ADMIN_USER / …_PASSWORD_HASH，跳过注册）。
+/// 纯内网确要无 Key 裸跑的，显式设 AGENT2API_ALLOW_NO_KEY=1 自己负责。
+fn apply_security_gates() {
     if !config::current().active_api_keys().is_empty() {
         logging::log("[Security]", "API Key 认证已启用");
     } else if std::env::var("AGENT2API_ALLOW_NO_KEY")
@@ -150,59 +236,111 @@ fn main() -> ExitCode {
             );
         }
     }
+}
 
-    state.set_ui_dir(ui_dir);
-
-    // 容器内更新的「重启」通道：面板点了「安装并重启」之后，自更新模块的钩子
-    // 往这里发一个信号，主线程照 SIGTERM 那条路优雅停机并返回 —— 容器由
-    // `restart: unless-stopped` 拉起（同一个容器、可写层保留），刚换上去的
-    // 程序与界面随之生效。桌面形态不注册钩子（那边重启归壳管），
-    // /api/update/restart 会以 400 拒绝。
-    //
-    // 放 start() 之前注册：请求只会由正在跑的服务器发来，而钩子只需要这个
-    // 发送端（停机动作仍在主线程做，见下面 block_on 的等待项）。
-    let (restart_tx, restart_rx) = tokio::sync::mpsc::channel::<()>(1);
-    agent2api_server::server::core::update::selfupdate::set_restart_hook(Box::new(move || {
-        // 钩子跑在自更新的后台线程里：try_send 不阻塞、也不要求运行时上下文
-        let _ = restart_tx.try_send(());
-    }));
-
-    let shutdown_tx = match start(&state) {
-        Ok(tx) => tx,
-        Err(conflict) => {
-            eprintln!("❌ 网关启动失败：{}", conflict.message);
-            return ExitCode::FAILURE;
-        }
-    };
-
-    logging::log(
-        "[Server]",
-        &format!(
-            "headless 运行中：面板 http://{}:{}/ ｜ API http://{}:{}/v1",
-            display_host(host),
-            port,
-            display_host(host),
-            port
-        ),
-    );
-
-    // 停机信号：Ctrl+C（全平台）+ SIGTERM（unix，容器 stop 走这条）；
-    // 「面板发起的重启」与两者同一条收尾路径（见上面 restart_rx 的说明）。
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            eprintln!("❌ 创建 Tokio 运行时失败: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    runtime.block_on(wait_for_shutdown_signal(restart_rx));
+/// 收尾：通知 HTTP 服务停机，给在途请求留出跑完的时间。
+fn finish(shutdown_tx: tokio::sync::oneshot::Sender<()>) {
     let _ = shutdown_tx.send(());
-    // 给在途请求留出跑完的时间（start 内部会等 graceful shutdown 收尾）
+    // `start` 内部会等 graceful shutdown 收尾，这里只补一小段余量
     std::thread::sleep(std::time::Duration::from_millis(300));
-    ExitCode::SUCCESS
+}
+
+// ─── Windows 服务形态 ────────────────────────────────────────
+
+#[cfg(windows)]
+pub mod service;
+
+/// Windows 服务形态：把网关交给 SCM 托管。
+///
+/// 调用方（main）已经打开日志文件通道 —— 服务进程没有控制台，
+/// 不开文件通道等于整场运行都是哑的。
+#[cfg(windows)]
+fn run_as_windows_service(launch: Launch) -> ExitCode {
+    // SCM 要求进程启动后尽快连上 dispatcher；run_service 里再去做开库等
+    // 耗时动作（并且先报 StartPending）。
+    let start_fn: service::StartFn = Box::new(move |stop, ready| {
+        let Running {
+            shutdown_tx,
+            mut restart_rx,
+        } = start_gateway(&launch)?;
+        // 端口已绑、开始接受请求 —— 这时才让 SCM 看到 Running
+        ready.signal();
+
+        // 停机有两条来源，收尾路径相同：
+        //   · SCM 的 STOP / SHUTDOWN 控制事件（`sc.exe stop`、关机）；
+        //   · 面板「安装并重启」的自更新钩子（替文件后要求进程退出，
+        //     由 SCM 的恢复策略把新版本拉起来 —— 与容器 restart 同语义）。
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("创建 Tokio 运行时失败: {error}"))?;
+        runtime.block_on(async move {
+            tokio::select! {
+                _ = stop.into_async().wait() => {}
+                _ = restart_rx.recv() => {}
+            }
+        });
+
+        finish(shutdown_tx);
+        Ok(())
+    });
+
+    match service::dispatch(start_fn) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(reason) => {
+            // 服务模式没有控制台：走日志通道，否则这条关键错误（典型是
+            // 「连接 SCM 失败」）只会在无处可去的 stderr 里消失
+            logging::console_line("[Server]", &format!("❌ {reason}"));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+// ─── 参数解析 ──────────────────────────────────────────────
+
+/// 解析启动参数（端口 / 地址 / 面板端口 / UI 目录）。
+fn parse_launch() -> Result<Launch, String> {
+    // 端口口径与桌面壳一致：新名 > 旧名 > 默认（非法值当未设置）
+    let port = env_port("AGENT2API_PROXY_PORT")
+        .or_else(|| env_port("WORKBUDDY_PROXY_PORT"))
+        .unwrap_or(3065);
+
+    let host: IpAddr = match std::env::var("AGENT2API_HOST") {
+        Ok(value) if !value.trim().is_empty() => value
+            .trim()
+            .parse()
+            .map_err(|_| format!("AGENT2API_HOST 不是合法的 IP 地址: {value}"))?,
+        // headless 形态默认 0.0.0.0：它的宿主通常是容器 / 服务器，
+        // 绑回环会让端口映射与外部访问全部失效。对外暴露的安全由
+        // 「未配 Key 拒绝启动」闸门 + API Key 认证兜底。
+        _ => IpAddr::from(Ipv4Addr::UNSPECIFIED),
+    };
+
+    // 面板分端口（可选）：设了就把管理面（静态界面 + /api/*）挪到独立端口，
+    // 主端口只留 /v1/* 网关 —— 想收敛暴露面时，公网只映射主端口即可。
+    // 与主端口相同没有意义（等于没分），直接报错不让部署带着歧义上线。
+    let panel_port = match std::env::var("AGENT2API_PANEL_PORT") {
+        Ok(value) if !value.trim().is_empty() => {
+            let p: u16 = value
+                .trim()
+                .parse()
+                .map_err(|_| format!("AGENT2API_PANEL_PORT 不是合法端口: {value}"))?;
+            if p == port {
+                return Err(format!(
+                    "AGENT2API_PANEL_PORT 与网关端口相同（{p}）：分端口部署要求两者不同"
+                ));
+            }
+            Some(p)
+        }
+        _ => None,
+    };
+
+    Ok(Launch {
+        port,
+        host,
+        panel_port,
+        ui_dir: resolve_ui_dir(),
+    })
 }
 
 /// 读端口环境变量：未设置 / 非数字 / 0 一律当未设置（与桌面 env_port 同口径）
@@ -243,7 +381,7 @@ fn display_host(host: IpAddr) -> String {
 }
 
 /// 等待停机信号：Ctrl+C（全平台）、SIGTERM（unix，容器 stop 走这条），
-/// 或面板发起的重启（容器内更新完成后走这条，见 main 里注册的钩子）。
+/// 或面板发起的重启（外部监管者拉起新进程，见 `start_gateway` 的说明）。
 async fn wait_for_shutdown_signal(mut restart: tokio::sync::mpsc::Receiver<()>) {
     #[cfg(unix)]
     {

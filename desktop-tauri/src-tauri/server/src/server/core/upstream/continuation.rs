@@ -78,6 +78,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::server::config;
+use crate::server::core::account_groups::AccountGroupScope;
 use crate::server::core::key_scope::KeyScope;
 use crate::server::core::upstream::{ForwardOutcome, ForwardRequest, UpstreamService, usage};
 use crate::server::core::upstream::refusal;
@@ -642,6 +643,7 @@ pub struct Continuation {
     pub client_headers: HeaderMap,
     pub telemetry: Arc<usage::RequestTelemetry>,
     pub allowed_providers: Option<KeyScope>,
+    pub account_group_scope: Option<AccountGroupScope>,
     /// 总轮数上限（**含首轮**）：`2` = 最多续写一轮
     pub max_rounds: usize,
 }
@@ -801,6 +803,7 @@ impl Continuation {
         let telemetry = self.telemetry.clone();
         let client_headers = self.client_headers.clone();
         let allowed_providers = self.allowed_providers.clone();
+        let account_group_scope = self.account_group_scope.clone();
         let mode = self.stream;
         let max_rounds = self.max_rounds;
         let mut working = self.base_body.clone();
@@ -909,6 +912,7 @@ impl Continuation {
                         &client_headers,
                         &telemetry,
                         allowed_providers.clone(),
+                        account_group_scope.clone(),
                         working.clone(),
                     )
                     .await
@@ -963,6 +967,7 @@ impl Continuation {
             &self.client_headers,
             &self.telemetry,
             self.allowed_providers.clone(),
+            self.account_group_scope.clone(),
             body,
         )
         .await
@@ -984,6 +989,7 @@ async fn forward_round_with(
     client_headers: &HeaderMap,
     telemetry: &Arc<usage::RequestTelemetry>,
     allowed_providers: Option<KeyScope>,
+    account_group_scope: Option<AccountGroupScope>,
     body: Value,
 ) -> Result<ForwardOutcome, crate::server::errors::GatewayError> {
     service
@@ -994,6 +1000,7 @@ async fn forward_round_with(
             client_headers: client_headers.clone(),
             telemetry: telemetry.clone(),
             allowed_providers,
+            account_group_scope,
             // 与主链路同口径：续写轮也不钉账号、也不关模型闸门、也不带代理覆盖
             pinned_account: None,
             ignore_model_gate: false,

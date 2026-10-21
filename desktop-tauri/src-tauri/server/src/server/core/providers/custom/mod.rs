@@ -28,11 +28,25 @@ pub(crate) fn catalog_providers(store: &AccountStore) -> Vec<(String, Vec<Value>
     }).collect()
 }
 
-pub fn append_models_response(store: &AccountStore, scope: Option<&KeyScope>, data: &mut Vec<Value>) {
+pub fn append_models_response(
+    store: &AccountStore,
+    scope: Option<&KeyScope>,
+    data: &mut Vec<Value>,
+    provider_order: Option<&[String]>,
+) {
     let mut claimed: std::collections::HashSet<_> = data.iter()
         .map(|item| model_id(item).to_lowercase()).collect();
-    for (provider, models) in catalog_providers(store) {
-        if !key_scope::allows_provider(scope, &provider) { continue; }
+    let providers = match provider_order {
+        None => catalog_providers(store),
+        Some(provider_ids) => provider_ids.iter().filter_map(|provider| {
+            let provider_record = custom_providers::get(provider)?;
+            Some((provider.clone(), custom_providers::public_models(&provider_record)))
+        }).collect(),
+    };
+    for (provider, models) in providers {
+        if provider_order.is_none() && !key_scope::allows_provider(scope, &provider) {
+            continue;
+        }
         for model in models {
             let id = model_id(&model);
             if key_scope::allows_model(scope, &id) && claimed.insert(id.to_lowercase()) {

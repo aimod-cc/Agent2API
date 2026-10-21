@@ -80,7 +80,7 @@ use crate::server::ServerState;
 /// `/api/stats/summary` 的合法 range 取值（与 `request_stats::report` 的
 /// `normalize_range` 白名单逐字一致；那边是存储层的归一，这里是路由层的校验）。
 /// `custom` 另需 `startDate` / `endDate`（见 `stats_summary`）。
-const RANGES: [&str; 6] = ["today", "7", "30", "month", "all", "custom"];
+const RANGES: [&str; 7] = ["today", "yesterday", "7", "30", "month", "all", "custom"];
 /// range 缺省值：与存储层「非法/缺省按 7 处理」的默认口径相同
 const DEFAULT_RANGE: &str = "7";
 

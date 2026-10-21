@@ -512,8 +512,10 @@ fn migrate_legacy_snapshot() {
 }
 
 /// 启动时把表里的成功读数装进内存事实表（选路的初始视野）。
-fn reload_facts() {
-    let facts: HashMap<String, BalanceFact> = load_all()
+///
+/// 云同步下载后会重装一次（表被整体替换，事实表必须跟着换）—— 因此本函数
+/// 是 `pub(crate)` 而不是私有：`cloud_sync::download_locked` 是唯一的外部调用点。
+pub(crate) fn reload_facts() {    let facts: HashMap<String, BalanceFact> = load_all()
         .into_iter()
         .filter(|(_, record)| record.usage.is_some())
         .filter_map(|(id, record)| {

@@ -755,10 +755,8 @@ async fn restart_with_config(
     // 杀旧进程（重启语义；首次启动时是 no-op）
     kill_child();
 
-    let binary = dir.join(crate::server::core::sub_kernel::kernel_binary_name());
-    if !binary.exists() {
-        return Err("代理内核未安装（先在「订阅管理」下载内核）".to_string());
-    }
+    let binary = crate::server::core::sub_kernel::layout::binary_path()
+        .ok_or_else(|| "代理内核未安装（先在「订阅管理」下载内核）".to_string())?;
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -896,34 +894,91 @@ pub async fn run_refresh(sub_id: &str, providers: &[ProviderInput]) -> Result<()
     Ok(())
 }
 
-/// 启动前的遗留进程清理：状态文件里的 pid 还活着且确实是本内核
-/// （控制器以我们的 secret 响应）才杀 —— pid 复用会误伤无关进程。
+/// 启动前的遗留进程清理：状态文件里的 pid 还活着且确实是本内核才杀 ——
+/// pid 复用会误伤无关进程，所以「是不是我们的」有两道判据：
+///   ① 控制器端口活着且以我们的 secret 响应（最强判据）；
+///   ② 控制器不响应（内核卡死 / 控制器端口被别的程序占了）时，看该 pid 的
+///      映像路径是否落在内核目录里 —— 卡死的进程照样占着 exe，只认 ① 的话
+///      「删除内核」会一直删不掉（实测踩过）。
 ///
 /// 桌面端正常退出走 backend::shutdown（杀内核），这里兜「上次崩溃 /
 /// 被任务管理器强杀」的情况。
 pub async fn cleanup_stale_kernel() {
     let state = read_state();
-    let (Some(pid), Some(controller_port), Some(secret)) = (
-        state.get("pid").and_then(Value::as_u64),
-        state.get("controllerPort").and_then(json_u16),
-        state.get("secret").and_then(Value::as_str),
-    ) else {
+    let Some(pid) = state.get("pid").and_then(Value::as_u64) else {
         return;
     };
-    if !controller_alive_port(controller_port) {
-        return; // 内核已死，pid 记录过期，无需处理
-    }
-    // 控制器活着：确认是我们的（secret 对上）才按 pid 杀
-    if controller_get(controller_port, secret, "/version").await.is_none() {
-        return;
-    }
-    if kill_by_pid(pid) {
+    let controller_port = state.get("controllerPort").and_then(json_u16);
+    let secret = state.get("secret").and_then(Value::as_str).unwrap_or("");
+
+    // ① 控制器活着且认我们的 secret → 一定是本内核
+    let confirmed = match controller_port {
+        Some(port) if controller_alive_port(port) && !secret.is_empty() => {
+            controller_get(port, secret, "/version").await.is_some()
+        }
+        _ => false,
+    };
+    // ② 控制器不响应：按映像路径确认（pid 复用 + 路径对不上就不动）
+    let confirmed = confirmed || process_is_kernel_binary(pid);
+
+    if confirmed && kill_by_pid(pid) {
         logging::log(
             "[Subscription]",
             &format!("🧹 已清理上次运行遗留的内核进程（pid {pid}）"),
         );
     }
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // 杀完等 exe 句柄释放（最多 3 秒）：紧接着的删除 / 重装才不会撞共享冲突
+    let binary = crate::server::core::sub_kernel::layout::binary_path();
+    if let Some(binary) = binary {
+        wait_until_deletable(&binary, 3_000);
+    }
+}
+
+/// 该 pid 的映像路径是否落在内核目录里（Windows；其它平台恒 false ——
+/// 那些平台删运行中的文件不报共享冲突，不需要这道兜底）。
+#[cfg(windows)]
+fn process_is_kernel_binary(pid: u64) -> bool {
+    let Ok(pid) = u32::try_from(pid) else {
+        return false;
+    };
+    let Some(image) = process_image_path(pid) else {
+        return false;
+    };
+    let image = std::path::PathBuf::from(image);
+    // 规范化再比：状态文件里记的是相对路径时也能对上
+    let image = std::fs::canonicalize(&image).unwrap_or(image);
+    let kernel_root = std::fs::canonicalize(crate::server::core::sub_kernel::kernel_dir())
+        .unwrap_or_else(|_| crate::server::core::sub_kernel::kernel_dir());
+    image.starts_with(&kernel_root)
+}
+
+#[cfg(not(windows))]
+fn process_is_kernel_binary(_pid: u64) -> bool {
+    false
+}
+
+/// 进程的映像路径（QueryFullProcessImageNameW；打不开句柄返回 None）
+#[cfg(windows)]
+fn process_image_path(pid: u32) -> Option<String> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let mut buffer = [0u16; 1024];
+    let mut size = buffer.len() as u32;
+    let result = unsafe {
+        QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buffer.as_mut_ptr()),
+            &mut size,
+        )
+    };
+    let _ = unsafe { CloseHandle(handle) };
+    result.ok()?;
+    Some(String::from_utf16_lossy(&buffer[..size as usize]))
 }
 
 /// 控制端口探活（本地 TCP connect，超时 300ms）
@@ -934,21 +989,44 @@ fn controller_alive_port(port: u16) -> bool {
     std::net::TcpStream::connect_timeout(&address, Duration::from_millis(300)).is_ok()
 }
 
-/// 按 pid 杀进程（Windows taskkill / unix kill；进程已退出返回 false）
+/// 按 pid 杀进程（Windows 走 Win32 API / unix kill；进程已退出返回 false）
+///
+/// ── 为什么不再 spawn `taskkill` ──────────────────────────────
+/// 「监听本地端口 + 拉起 taskkill / powershell 查进程再杀」这套字符串与行为
+/// 特征会命中杀软对流量拦截类木马的启发式（联想电脑管家 / 火绒报
+/// Trojan/Intercept.a，退出码 0xFFFFFFFF），桌面壳的 `backend.rs` 早就改成
+/// 纯 Win32 了，这里补齐同一取向：OpenProcess + TerminateProcess，导入表里
+/// 不再有命令行工具的名字。
 fn kill_by_pid(pid: u64) -> bool {
     #[cfg(windows)]
     {
-        // taskkill 是控制台程序：不加 CREATE_NO_WINDOW 时桌面端会闪一个黑框
-        // （这条路径在「清理上次运行遗留的内核进程」与端口回收时都会走）
-        use std::os::windows::process::CommandExt;
-        match std::process::Command::new("taskkill")
-            .args(["/F", "/PID", &pid.to_string()])
-            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-            .output()
-        {
-            Ok(output) => output.status.success(),
-            Err(_) => false,
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_TERMINATE,
+            PROCESS_SYNCHRONIZE,
+        };
+        let Ok(pid) = u32::try_from(pid) else {
+            return false;
+        };
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_TERMINATE | PROCESS_SYNCHRONIZE,
+                false,
+                pid,
+            )
+        };
+        let Ok(handle) = handle else {
+            // 打不开句柄：进程已退出，或者权限不足（系统进程）
+            return false;
+        };
+        let terminated = unsafe { TerminateProcess(handle, 1) }.is_ok();
+        if terminated {
+            // 等它真的退出：返回时进程已死，调用方紧接着删文件才不会撞上
+            // 「句柄还没释放」的窗口（比固定 sleep 可靠，也不白等）
+            unsafe { WaitForSingleObject(handle, 5_000) };
         }
+        let _ = unsafe { CloseHandle(handle) };
+        terminated
     }
     #[cfg(not(windows))]
     {
@@ -959,6 +1037,30 @@ fn kill_by_pid(pid: u64) -> bool {
             Ok(output) => output.status.success(),
             Err(_) => false,
         }
+    }
+}
+
+/// 等一个文件重新可删（进程退出后句柄释放有几十毫秒的延迟）。
+///
+/// 判据用「独占打开」：Windows 上打开成功说明没有别的进程握着它。返回 true
+/// 表示可以放心删；超时返回 false，调用方走降级路径（改名进回收位）。
+fn wait_until_deletable(path: &std::path::Path, timeout_ms: u64) -> bool {
+    if !path.exists() {
+        return true;
+    }
+    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        // 只试 rename（不真的改名）：Windows 上 rename 一个被占用的文件会
+        // 报共享冲突，这是最直接的「可删」探针，也不会留下副作用
+        let probe = path.with_extension("probe-tmp");
+        if std::fs::rename(path, &probe).is_ok() {
+            let _ = std::fs::rename(&probe, path);
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 

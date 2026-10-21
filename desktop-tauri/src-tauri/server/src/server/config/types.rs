@@ -208,7 +208,24 @@ pub const KEY_STRIP_NEWLINE_KEEPALIVE: &str = "stripNewlineKeepalive";
 /// `parse::env_captcha_enabled`）—— Docker 想从第一次启动就关掉校验的，
 /// 在 compose / `.env` 里设它即可；设置页改过一次之后以库里的值为准
 /// （优先级「配置里的值 > 环境变量」）。
+///
+/// ── 分端（2026-10 起）──────────────────────────────────────
+/// 本键是**旧版的单开关**，现在只作为两端的共同默认值：读取时优先看
+/// [`KEY_CAPTCHA_DESKTOP`] / [`KEY_CAPTCHA_WEB`]，两者都没有才回落它。
+/// 升级时两个分端键缺省即回落旧值 —— 老用户改过的开关状态不会丢。
 pub const KEY_CAPTCHA_ENABLED: &str = "captchaEnabled";
+
+/// 桌面端（Tauri 壳）的机器人校验开关。
+///
+/// 桌面形态默认**开启**（与旧单开关一致）：登录 / 注册端点对局域网里的
+/// 其他设备同样开放，ALTCHA 是同一道门槛。用户可在设置里单独关掉 ——
+/// 本机访问而嫌算力开销时，关掉只影响桌面形态。
+pub const KEY_CAPTCHA_DESKTOP: &str = "captchaDesktop";
+
+/// 网页端（headless / Docker / 浏览器面板）的机器人校验开关。
+///
+/// headless 形态默认**开启**：这是暴露在真实网络上的登录页，暴破成本最低。
+pub const KEY_CAPTCHA_WEB: &str = "captchaWeb";
 
 /// models.dev 模型元数据开关的键（config.json 键，见 `core::model_meta`）。
 ///
