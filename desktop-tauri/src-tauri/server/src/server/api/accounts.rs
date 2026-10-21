@@ -1481,7 +1481,7 @@ pub async fn batch_accounts(state: &ServerState, body: &Bytes) -> Response {
 /// 刷新账号 token（**按账号所属 provider 分派**）。
 ///
 /// workbuddy 账号走既有的 `AuthService::refresh_account`；小浣熊、AutoClaw、
-/// CodeArts、**Trae / ZCode**、Accio、Cline 账号各走自家适配器的
+/// CodeArts、**Trae / ZCode**、Accio、Cline、OrcaTerm 账号各走自家适配器的
 /// `refresh_access_token`；**CatPaw / MonkeyCode / Command Code 账号没有可刷新的
 /// 东西**（§9.1：`X-Passport-Token` 过期只能在桌面端重新登录，没有 refreshToken；
 /// 后两家是静态 session / API Key，上游根本没有续期接口），
@@ -1667,6 +1667,16 @@ pub async fn refresh_account(state: &ServerState, body: &Bytes) -> Response {
     // （`refresh_account` 的文档里把这条列为「加带 refreshToken 的家时必须一起加」）。
     if state.store().antigravity_account_record(&id).is_some() {
         return refresh_provider_account(state, &id, ProviderKind::Antigravity).await;
+    }
+    // OrcaTerm：**有**真续期接口（`OAuthRefreshToken`，传旧 accessToken 换新，
+    // 见 `providers::orcaterm::credentials` 的模块头）。这条分派同样不能省 ——
+    // 与 Antigravity / Trae 漏登记时同一性质：漏了就落到下面的 workbuddy 兜底
+    // 链路，用户点「刷新 Token」收到的是腾讯鉴权端点的错。
+    // 它的凭证曾因 `expires_at` 单位错位而从不自动续期（2026-10-17 实测，见
+    // `providers::orcaterm::credentials::expires_at_seconds` 的记录），这条
+    // 手动通路是当时唯一能救回账号的入口 —— 更不能缺。
+    if state.store().orcaterm_account_record(&id).is_some() {
+        return refresh_provider_account(state, &id, ProviderKind::OrcaTerm).await;
     }
     // WorkBuddy 系（国内版 / 国际版）的兜底：两条链路都按**账号自己的**
     // endpoint / prefixPath / platform / edition 续期
