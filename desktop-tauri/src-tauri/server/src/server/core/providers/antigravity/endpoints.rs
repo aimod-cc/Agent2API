@@ -302,6 +302,26 @@ pub fn content_headers(access_token: &str) -> Vec<(String, String)> {
     ]
 }
 
+/// **Claude 模型**的 content 请求头：在 [`content_headers`] 之上补
+/// `anthropic-beta`（规格 §3.2 的头表 + §5.3：`anthropic-beta` **仅 Claude**）。
+///
+/// 值取 Manager 的 `claude-code-20250219`（`handlers/openai.rs` 与
+/// `handlers/claude.rs` 两处逐字相同的常量；9router 的 gemini 分支用的是更长的
+/// 三连 `claude-code-20250219,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14`
+/// —— 两者都能通，本仓取 Manager 那一份，与其余头集合的出处保持一致）。
+///
+/// **只给 Claude 加**：Gemini 的请求带上它没有依据（规格头表把它标成「仅
+/// Claude」），多一个非官方头只会离官方指纹更远。
+pub fn claude_content_headers(access_token: &str) -> Vec<(String, String)> {
+    let mut headers = content_headers(access_token);
+    headers.push(("anthropic-beta".to_string(), ANTHROPIC_BETA_CLAUDE.to_string()));
+    headers
+}
+
+/// Claude 请求要带的 `anthropic-beta` 值（Manager 逐字，见
+/// [`claude_content_headers`]）
+const ANTHROPIC_BETA_CLAUDE: &str = "claude-code-20250219";
+
 /// **非 content** 方法（模型目录 / project 发现 / 额度）的头集合。
 ///
 /// 与 [`content_headers`] 的两处差别（都是有依据的，别顺手统一）：

@@ -20,32 +20,38 @@
 
 use super::{current, save};
 
-/// WorkBuddy 清单的**默认启用白名单**：模型首次出现在清单里时，只有这里的
-/// 模型保持默认启用，其余一律默认**禁用**（管理页可见、开关关着，用户可手动
-/// 启用 —— 与小浣熊种子同一哲学：「默认值」只决定初始状态，不决定 forever）。
+/// WorkBuddy 清单的**默认启用白名单**：已停用（改为按可见性判），保留常量作
+/// 文档与迁移依据。
 ///
-/// **两个地区共用同一份**（`workbuddy` / `workbuddy-intl`）：两家的清单来自
-/// 同一套上游模型表（各自站点下发），白名单里的三个名字两地都有；分开维护
-/// 两份只会让「国际版默认关了一堆、国内版默认开着」这类不一致有机会出现。
+/// ── 为什么停用（2026-10-17，与 Qoder 同一轮）───────────────────
+/// 这条白名单只允许 3 个模型默认启用，其余一律默认禁用。它的前提是「清单里
+/// 混着大量不该广告的名字，靠人工挑几个最安全的」。现在那个前提被**真正的
+/// 判据**取代了：`/v3/config` 的 `agents[cli].models` 是官方客户端的 picker
+/// 名单（实测 18 条，而 `data.models` 有 60 条），按它标 `visibility` 之后，
+/// 「该关什么」由上游说了算。
+///
+/// 两套机制叠在一起会有个恶果：白名单关掉的那些**本来可见**的模型（`glm-5.3`
+/// / `kimi-k3-1` / `minimax-m3` …）在管理页显示「可见」、开关却是关的 ——
+/// 用户看到的是自相矛盾的状态。与 Qoder 那次修的是同一个问题。
+///
+/// 保留这个常量（而不是删掉）有两个用途：一是迁移要按它的历史形态判断
+/// 「谁被误关过」；二是将来若要恢复人工白名单，这里有现成的形状。
 pub const WORKBUDDY_DEFAULT_ENABLED: &[&str] = &["hy3", "hy4-preview-f", "deepseek-v4.1-flash"];
 
-/// WorkBuddy 清单的**默认规则种子**：对 `ids` 里每个还没种过的模型记入
-/// `seeded`，不在 [`WORKBUDDY_DEFAULT_ENABLED`] 里的同时默认禁用。
+/// WorkBuddy 清单的**默认规则种子**：已停用，不再关任何模型。
 ///
-/// 调用点有两类：清单**首次落地**（`core::models` 的 `apply_remote`，覆盖
-/// /v3/config 与企业清单两条路径），以及编排入口对**当前缓存清单**的补种
-/// （见 `providers::adapter` 的 `seed_current_workbuddy_defaults` —— 覆盖启动时
-/// 只有内置清单、或刷新失败停留在旧清单的情形）。幂等：种过的 id 不再动，
-/// 用户事后在管理页的手动启用 / 禁用不会被清单刷新改回去。
+/// ── 为什么不再调 `seed_default_enabled`（2026-10-17）─────────────
+/// 与 [`super::seed_qoder_defaults`] 完全同因：该关的由可见性判据负责
+/// （[`super::seed_hidden_disabled`]，调用点在 `providers::adapter`），白名单
+/// 再关一遍只会把**可见的也关掉**。
 ///
-/// ── `provider` 为什么是参数（2026-10 拆家）────────────────────
-/// 种子按 `(provider, id)` 记账，而 WorkBuddy 现在是两家：只种国内版会让
-/// 国际版的新模型停在全开状态（而两家的模型名很可能同名，用户看到的是
-/// 「同一个名字在两个分组里默认状态不一样」）。白名单两地共用一份，
-/// 差异只在 provider 键上。展示名从注册表查（`label_of`），别处不要再写名字。
-pub fn seed_workbuddy_defaults(provider: &str, ids: &[String]) -> Option<String> {
-    let label = crate::server::core::providers::label_of(provider);
-    super::seed_default_enabled(provider, &label, WORKBUDDY_DEFAULT_ENABLED, ids)
+/// 保留函数外壳是为了不惊动调用点（`core::models` 的 `apply_remote` 与
+/// `providers::adapter::seed_current_workbuddy_defaults` 都还在调它）。
+///
+/// ⚠️ 存量用户盘上已有旧白名单种的 `disabled` 记录，靠
+/// [`super::migrate_workbuddy_default_enabled`] 一次性解开。
+pub fn seed_workbuddy_defaults(_provider: &str, _ids: &[String]) -> Option<String> {
+    None
 }
 
 /// 拆家前后的 provider id（迁移专用；别处一律走 `workbuddy::Region`）

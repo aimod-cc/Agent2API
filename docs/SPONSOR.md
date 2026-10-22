@@ -12,7 +12,11 @@
 
 **同样有用的支持**：给仓库点一个 Star · 在 Issues 里反馈问题与建议 · 提交 Pull Request · 把它分享给需要的朋友。
 
-**QQ 群**：Agent2API 交流群，群号 `1127656296`（在 QQ 里搜索群号即可加入）；使用答疑与问题反馈都在这里。
+**QQ 群**：Agent2API 交流群 —— **群 1（`1127656296`）即将满员，请优先加群 2（`1130894674`）**；在 QQ 里搜索群号即可加入。
+
+**Telegram 群**：<https://t.me/+9gM8YPvgRL02NGRl>
+
+**Discord 群**：<https://discord.gg/z9GzSJMWp>
 
 **赞助 / 商务合作**：想赞助本项目，或想让你的产品出现在 README 里？发邮件到 [541675139@qq.com](mailto:541675139@qq.com)。
 
@@ -24,6 +28,10 @@ Donations are entirely voluntary: they unlock nothing and do not change how the 
 
 Other ways to help just as much: ⭐ star the repository · 🐛 file issues or suggestions · 🔧 send pull requests · 📣 share it with friends.
 
-**QQ group**: Agent2API chat group, number `1127656296` (search it in QQ to join); questions and feedback are welcome there.
+**QQ groups**: Agent2API chat groups — **group 1 (`1127656296`) is almost full, please join group 2 (`1130894674`) first**; search the number in QQ to join.
+
+**Telegram group**: <https://t.me/+9gM8YPvgRL02NGRl>
+
+**Discord server**: <https://discord.gg/z9GzSJMWp>
 
 **Sponsorship / business**: want to sponsor the project, or feature your product in the README? Email [541675139@qq.com](mailto:541675139@qq.com).

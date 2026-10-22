@@ -54,7 +54,7 @@ use crate::server::core::providers::ProviderKind;
 
 use identity::{
     allocate_priority, allocate_unique_id, identity_of_item, identity_of_record,
-    is_desktop_item, is_reserved_desktop_id, resolve_provider,
+    is_desktop_item, is_reserved_desktop_id, resolve_provider, CREDENTIAL_KEYS,
 };
 use normalize::normalize_imported;
 
@@ -318,9 +318,18 @@ fn import_one_item(
         ));
     }
 
-    // ── 凭证：至少要有一个 token（只有引用字段的记录不构成可迁移账号）──
-    // 自定义账号的凭证是 apiKey（可空 —— 与添加路径同口径，部分上游不需要
-    // key），不适用 token 检查；apiKey 的长度与归一在 normalize 的专属分支里做。
+    // ── 凭证：至少要有一个可用的凭证字段（只有引用字段的记录不构成可迁移账号）──
+    //
+    // ── 为什么不能只认 accessToken / refreshToken ─────────────────
+    // 各家的凭证键不同：自定义账号是 `apiKey`（且可空 —— 与添加路径同口径，
+    // 部分上游不需要 key）、OfficeAce 是 `modelAppKey` + `modelAppSecret` 那一对、
+    // ZCode 还带 `jwt`、Command Code 把 key 落在 `accessToken`。旧实现只认
+    // 前两个键，于是 OfficeAce 的账号**导得出去、导不回来**（每条都报
+    // 「缺少 accessToken 与 refreshToken」）—— 每加一家就要回来补一次，正是
+    // 这套逻辑要根治的维护负担。
+    //
+    // 现在按「记录里有没有**任何**一个已知凭证键」判：判据来自同一张表
+    // （`CREDENTIAL_KEYS`），新增一家时只要凭证落在这几个键上就不用改这里。
     let is_custom_provider =
         provider.starts_with(crate::server::core::custom_providers::ID_PREFIX);
     let access_token = object
@@ -335,8 +344,16 @@ fn import_one_item(
         .unwrap_or("")
         .trim()
         .to_string();
-    if !is_custom_provider && access_token.is_empty() && refresh_token.is_empty() {
-        return Err("缺少 accessToken 与 refreshToken".to_string());
+    let has_any_credential = CREDENTIAL_KEYS.iter().any(|key| {
+        object
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    });
+    // 自定义账号的 apiKey 可空（`noAuth` 形态），不强制要求凭证
+    if !is_custom_provider && !has_any_credential {
+        return Err("缺少凭证（accessToken / refreshToken / apiKey / modelAppKey 等均为空）"
+            .to_string());
     }
     if access_token.chars().count() > MAX_TOKEN_LENGTH
         || refresh_token.chars().count() > MAX_TOKEN_LENGTH
@@ -395,8 +412,9 @@ fn import_one_item(
                 target.insert(key, value);
             }
         }
-        // 非 WorkBuddy 记录不该带腾讯端点字段：旧版导入曾把它们注入别家记录，
-        // 这里在合并时清掉（其余各家的适配器都不读这些键，见各家凭证模块）
+        // 非 WorkBuddy 记录不该带腾讯端点字段：旧版导入曾把它们注入别家记录。
+        // 判据只问「是不是 WorkBuddy 系」，**不枚举别家** —— 新增一家 provider
+        // 时不需要回来加一行（这正是旧实现最费维护的地方）。
         if !crate::server::core::providers::workbuddy::is_workbuddy_family(&provider) {
             for key in ["edition", "prefixPath", "endpoint", "platform"] {
                 state.accounts[index].remove(key);
@@ -469,4 +487,124 @@ fn import_one_item(
     // id 记入占用集合：同批后续记录不会分到同一个 id
     taken_ids.push(new_id);
     Ok(ImportOutcome::Added)
+}
+
+#[cfg(test)]
+mod tests {
+    //! 整条导入链的回归（identity.rs 模块头纪律②的「三步验证」）：
+    //! **导出 → 原样导入 → 二次导入**，第三步必须计 `updated` 而不是
+    //! `added`。临时库 + 目录守卫（与 `officeace_accounts` 的测试同款：
+    //! 打开前先删、删除挂 Drop），不碰真实账号数据。
+    //!
+    //! 2026-10-18 两轮修复的共同形态：这些账号「添加路径认、导入路径不认」——
+    //! 添加路径给没有 `userId` 的账号安排了次级身份（同串令牌 / 手机号 /
+    //! accessKeyId），导入侧却只有 `userId` 一个兜底，于是导出→导入整条
+    //! 失败（备份恢复时静默丢号）。本测试就是那条缺口的守门人。
+
+    use serde_json::json;
+
+    use super::*;
+
+    struct TempStore {
+        store: AccountStore,
+        dir: std::path::PathBuf,
+    }
+
+    impl Drop for TempStore {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn temp_store(tag: &str) -> TempStore {
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "account-transfer-{tag}-{}-{seq}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = crate::server::db::Db::open(&dir.join("agent2api.db")).expect("临时库该建得起来");
+        TempStore {
+            store: AccountStore::with_db(Some(db)),
+            dir,
+        }
+    }
+
+    /// 六家「没有 userId 也合法存在」的账号（OfficeAce / OrcaTerm 是上午那轮，
+    /// Accio / Loomy / MonkeyCode / Antigravity 是下午复查补的同款缺口）。
+    fn accounts_without_user_id() -> Value {
+        json!({
+            "accounts": [
+                // OfficeAce：身份是 accessKeyId（控制面临时凭据），记录没有 userId 键
+                { "id": "officeace-abc", "provider": "officeace", "name": "果办",
+                  "accessKeyId": "AK-1", "accessToken": "OA-T" },
+                // OrcaTerm：uid 落在 uid 键上（值是 userId 的值、另一个键）
+                { "id": "orcaterm-abc", "provider": "orcaterm", "name": "Orca",
+                  "uid": "1001", "accessToken": "OT-T" },
+                // Accio：不透明令牌解不出 userId（to_value 把空 userId 落 null）
+                { "id": "accio-intl-aaa", "provider": "accio", "name": "Accio 无 id",
+                  "accessToken": "AT-1", "refreshToken": "RT-1", "userId": null },
+                // Loomy：粘贴 session 只给手机号（add_loomy_account 允许）
+                { "id": "loomy-13800000000", "provider": "loomy", "name": "Loomy 手机号",
+                  "accessToken": "SESSION-1", "phone": "13800000000" },
+                // MonkeyCode：上游没给 user uuid（匿名账号，添加路径都不去重）
+                { "id": "monkeycode-anon-aabb", "provider": "monkeycode", "name": "匿名",
+                  "accessToken": "MC-SESSION" },
+                // Antigravity：只粘贴 refresh token、没有 email
+                { "id": "antigravity-xyz", "provider": "antigravity", "name": "无邮箱",
+                  "refreshToken": "GA-RT" },
+            ]
+        })
+    }
+
+    #[test]
+    fn export_then_reimport_is_idempotent_for_accounts_without_user_id() {
+        let temp = temp_store("reimport");
+        // 第一次导入：六家无 userId 账号全部计 added（修复前它们整条失败，
+        // 计进 failed，备份恢复时静默丢号）
+        let first = import_accounts(&temp.store, &accounts_without_user_id()).expect("首次导入应该成功");
+        assert_eq!(first["added"], json!(6), "六家无 userId 账号都该导得进来：{first}");
+        assert_eq!(first["updated"], json!(0));
+        assert_eq!(first["failed"], json!(0), "一条都不该失败：{first}");
+
+        // 导出 → 原样导入：必须全部计 updated、零 added（否则重复账号）
+        let exported = export_accounts(&temp.store);
+        let second = import_accounts(&temp.store, &exported).expect("二次导入应该成功");
+        assert_eq!(second["added"], json!(0), "原样回灌不该新增：{second}");
+        assert_eq!(second["updated"], json!(6), "六条都该按身份命中更新：{second}");
+        assert_eq!(second["failed"], json!(0));
+
+        // 第三次导入同样幂等（防「首次 added、之后一直 added」的假幂等）
+        let third = import_accounts(&temp.store, &exported).expect("三次导入应该成功");
+        assert_eq!(third["added"], json!(0));
+        assert_eq!(third["updated"], json!(6));
+    }
+
+    #[test]
+    fn cross_provider_same_identity_never_merges() {
+        // 跨家同 uid 不合并（文件头第 1 条）：CatPaw 与 raccoon 各有一条
+        // 身份同为「42」的记录，导出再导入后仍是两条，且凭证不互串。
+        let temp = temp_store("cross");
+        let payload = json!({
+            "accounts": [
+                { "id": "u-1", "provider": "catpaw", "uid": "42", "accessToken": "CP-TOKEN" },
+                { "id": "u-2", "provider": "raccoon", "userId": "42", "accessToken": "RC-TOKEN" },
+            ]
+        });
+        let first = import_accounts(&temp.store, &payload).expect("导入应该成功");
+        assert_eq!(first["added"], json!(2));
+        let exported = export_accounts(&temp.store);
+        let second = import_accounts(&temp.store, &exported).expect("回灌应该成功");
+        assert_eq!(second["added"], json!(0), "跨家同身份也各自命中自己那条");
+        assert_eq!(second["updated"], json!(2));
+        let catpaw = exported["accounts"]
+            .as_array()
+            .expect("accounts 数组")
+            .iter()
+            .find(|item| item["provider"] == "catpaw")
+            .expect("catpaw 那条")
+            .clone();
+        assert_eq!(catpaw["accessToken"], json!("CP-TOKEN"), "凭证不许被别家同身份记录覆盖");
+    }
 }

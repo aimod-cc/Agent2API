@@ -154,11 +154,12 @@ fn body_object(body: &Bytes) -> Result<serde_json::Map<String, Value>, Response>
 /// 面板管理员已注册时，拒绝让「最后一把启用的 Key」消失（删除或停用）。
 ///
 /// 管理员一注册，`/api/*` 就要求会话或 Key 认证（`require_api_key` 的
-/// panel_auth 分支），而桌面壳的管理请求靠自动携带第一把启用的 Key 通过
-/// 这道认证 —— 一把启用的都不剩时，壳会被自己的闸门挡在管理 API 外面，
-/// 界面整体不可用且无法自救（建 Key 也要先过闸门；headless 的网页面板
-/// 可以靠登录会话自救，桌面壳没有会话通道）。这是注册后世界里的保护性
-/// 约束：先建新的、再动旧的。注册前的免鉴权模式不受影响。
+/// panel_auth 分支）。桌面壳现在有会话通道（`panel_session`：登录后带
+/// `x-panel-token`），**但也有走到 Key 的场合** —— 登录页本身要在没有会话时
+/// 打开、会话失效后的兜底、以及 `AGENT2API_ALLOW_NO_KEY` 之类不经过登录的部署。
+/// 一把启用的 Key 都不剩时，这些路径全都会被闸门挡在外面，而建 Key 本身也要
+/// 先过闸门（死锁）。所以保留这条保护：先建新的、再动旧的。注册前的免鉴权
+/// 模式不受影响。
 fn guard_last_active_key(entries: &[api_keys::ApiKeyEntry], target_id: &str, action: &str) -> Result<(), Response> {
     if !crate::server::access::panel_auth_enabled() {
         return Ok(());

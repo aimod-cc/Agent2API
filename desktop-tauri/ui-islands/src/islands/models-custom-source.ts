@@ -70,6 +70,18 @@ export type ManageModel = {
   reasoningLevels?: unknown
   /** 默认思考档位（与 `reasoningLevels` 同源；缺失 = 未声明） */
   reasoningDefaultLevel?: unknown
+  /**
+   * **可见性**：这个模型在官方客户端里是否会被列出。
+   *
+   * `'shown'` / `'hidden'` / `'undeclared'`，由各家 `models.rs` 在自己的解析层
+   * 算出（判据各异：Antigravity 按世代、Qoder 读上游 `enable`、Raccoon 读
+   * `visible`、CodeArts 读 `display_enabled`）。
+   *
+   * **缺失 / `null`** = 这家没有可见性判据（当前是除那四家之外的所有家）。
+   * 这与 `'shown'` 是两件事：前者是「这家没这个信息」，后者是「这家说它可见」。
+   * 界面必须把两者分开显示，否则用户会以为「没有判据」是「确认可见」。
+   */
+  visibility?: unknown
 }
 
 /** 一条映射（含表格现造的默认绑定：alias == target） */

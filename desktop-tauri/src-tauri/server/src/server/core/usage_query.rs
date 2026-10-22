@@ -242,10 +242,31 @@ async fn query_usage_inner(
                     error.code,
                 ));
             }
+            // 续期**成功**了，但重试仍失败 —— 这是与上面那支**完全不同**的一种
+            // 故障，不能共用「凭证已过期」那句文案。
+            //
+            // 真实案例（MiniMax Code 国际版，2026-10-21）：续期接口 200、发回
+            // 全新令牌，但网关对**新旧令牌一视同仁**地回 `invalid access token`。
+            // 老文案在那种情况下会把用户送进「重新登录 → 还是不行 → 再登录」的
+            // 死循环（实测已重复登录三次，每次都「成功」，余额每次都报同一句）。
+            // 所以这里必须把「换过令牌了」这个事实说出来，并给出**不是重登**的建议。
+            //
+            // 归因是**推断**（我们无法从 401 本身区分网关故障与账号未授权），
+            // 文案按「两种可能」写，不假装知道是哪一种。
             adapter
                 .query_usage(store, id)
                 .await
-                .map_err(|retry| UsageFailure::Request(retry.message, retry.code))
+                .map_err(|retry| {
+                    UsageFailure::Request(
+                        format!(
+                            "{}；已自动续期并拿到新令牌，但上游仍然拒绝 —— \
+                             这通常不是本地凭证的问题：请确认该账号在上游侧已开通对应权益\
+                             （若刚登过仍如此，重登不会改变结果，建议先在官方客户端里核对账号状态）",
+                            retry.message
+                        ),
+                        retry.code,
+                    )
+                })
         }
     }
 }
@@ -319,6 +340,7 @@ pub async fn query_all(store: &AccountStore, id: Option<&str>) -> Result<Value, 
     for (account, row) in queried.iter().zip(results.iter()) {
         write_row_record(row);
         enforce_low_balance_disable(store, account, row);
+        maybe_alert_credit_expiring(account, row);
     }
     Ok(json!({ "results": results, "skipped": skipped }))
 }
@@ -378,13 +400,15 @@ fn enforce_low_balance_disable(store: &AccountStore, account: &Value, row: &Valu
         .filter(|name| !name.is_empty())
         .unwrap_or(id);
     match store.update_account(id, &json!({ "enabled": false })) {
-        Ok(_) => logging::log_with_level(
-            "[Usage]",
-            &format!(
+        Ok(_) => {
+            let detail = format!(
                 "账号「{display}」余额 {remaining} 低于阈值 {threshold}，已自动禁用（余额回升后请手动启用，自动查询继续）"
-            ),
-            "warn",
-        ),
+            );
+            logging::log_with_level("[Usage]", &detail, "warn");
+            // 通知（旁路，见 core::notify）：这是**用户必须动手**的硬动作
+            //（禁用不自动恢复），与凭证失效同一档 —— 主动推一条比躺在日志里有用。
+            crate::server::core::notify::hooks::on_account_disabled(&display, &detail);
+        }
         Err(error) => logging::verbose(
             "[Usage]",
             &format!("账号 {id} 余额不足自动禁用失败：{}", error.message),
@@ -392,10 +416,97 @@ fn enforce_low_balance_disable(store: &AccountStore, account: &Value, row: &Valu
     }
 }
 
+// ─── 积分到期预警钩子 ────────────────────────────────────────
+
+/// 距到期多久开始提醒（毫秒）：3 天。
+///
+/// 取值理由：上游积分批次通常按天/周发放，3 天足以让用户「想起来用掉」，
+/// 又不至于因为提前太久而在每个批次上都喊一次（那些批次离到期还很远时
+/// 不该打扰）。真正作废那一刻的损失已经无法挽回，预警必须**早于**它。
+const CREDIT_ALERT_WINDOW_MS: i64 = 3 * 24 * 60 * 60 * 1000;
+
+/// 「积分即将到期」钩子：查询**成功**落记录后扫描该账号的 `credits[]`。
+///
+/// ── 判定（三条全要）────────────────────────────────────────
+///   1. `usage.credits[]` 里有一条，其 `expireAt` **落在未来 3 天内**；
+///   2. 该条**尚有剩余**（`remain` 或 `used < total` 判得出正数）——
+///      已经花完的包到期不作废任何东西，提醒它只是噪音；
+///   3. 该条**不是日额度包**（`daily == true`）—— 日包的 `expireAt` 是
+///      「今天 24 点回满」的周期边界，不是「这笔钱作废」（见
+///      `billing::credit_packs_from` 的说明）。对日包提醒到期会每天喊一次，
+///      且喊的内容还是错的。
+///
+/// ── 为什么挂在这里而不是定时任务 ────────────────────────────
+/// 到期读数是**查询的副产品**（`usage.credits[]` 只在 `query_usage` 回来时
+/// 新鲜），另起一条任务去读反而要重查一遍上游或读一份可能过期的记录。
+/// 挂在「查询成功」之后，读到的就是这一刻的真实读数 —— 与余额禁用同一挂法。
+///
+/// ── 去重靠 key ──────────────────────────────────────────────
+/// `key` 是账号显示名，`notify` 的 6 小时窗口去重兜住「同一账号连续多轮都
+/// 有临期包」——否则每轮查询都会发一条。窗口过后（用户还没处理）再提醒，
+/// 那正是要的。
+fn maybe_alert_credit_expiring(account: &Value, row: &Value) {
+    // 查询失败（没有 usage）不判：读数是旧值，拿它提醒等于把旧结论又喊一遍
+    let Some(usage) = row.get("usage").filter(|usage| !usage.is_null()) else {
+        return;
+    };
+    let Some(credits) = usage.get("credits").and_then(Value::as_array) else {
+        return;
+    };
+    let now = logging::now_ms();
+    let mut soonest: Option<(i64, String)> = None;
+    for pack in credits {
+        // 日额度包的「到期」是周期边界，不是作废（见函数头）
+        if pack.get("daily").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let Some(expire_at) = pack.get("expireAt").and_then(Value::as_i64) else {
+            continue;
+        };
+        if expire_at <= now || expire_at > now.saturating_add(CREDIT_ALERT_WINDOW_MS) {
+            continue;
+        }
+        // 剩余量：优先读 `remain`，缺失时用 total - used 兜底；判不出正数就跳过
+        let remain = pack
+            .get("remain")
+            .and_then(Value::as_f64)
+            .or_else(|| {
+                let total = pack.get("total").and_then(Value::as_f64)?;
+                let used = pack.get("used").and_then(Value::as_f64).unwrap_or(0.0);
+                Some(total - used)
+            })
+            .unwrap_or(0.0);
+        if remain <= 0.0 {
+            continue;
+        }
+        let name = pack
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or("积分包")
+            .to_string();
+        // 取最近到期的那个包作为提醒主体（多条临期只报最先作废的那一笔，
+        // 提醒一条比刷三条有用 —— 与通知「不刷屏」的取向一致）
+        if soonest.as_ref().map(|(at, _)| expire_at < *at).unwrap_or(true) {
+            soonest = Some((expire_at, name));
+        }
+    }
+    let Some((expire_at, pack_name)) = soonest else { return };
+    let display = account
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| account.get("id").and_then(Value::as_str).unwrap_or("账号"));
+    let when = crate::server::core::beijing::date_time_of_ms(expire_at)
+        .map(|time| time.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| "即将".to_string());
+    let detail = format!("「{pack_name}」将于 {when} 到期（北京时间），仍有剩余。");
+    crate::server::core::notify::hooks::on_credit_expiring(display, &detail);
+}
+
 // ─── Token 限制器的自动禁用钩子 ──────────────────────────────
 
 /// 「Token 限额自动禁用」钩子：sweeper 每轮（10 秒）在窗口事实刷新后判定。
-///
 /// 命中条件（三条全要）：
 ///   1. 账号启用中（幂等：已禁用的账号不再执行、不再重复打日志）；
 ///   2. 配了启用的 Token **disable** 规则（skip 档不归它管 —— 选路过滤在拦）；
@@ -423,9 +534,8 @@ fn enforce_token_disable(store: &AccountStore, accounts: &[Value], now: i64) {
             .filter(|name| !name.is_empty())
             .unwrap_or(id);
         match store.update_account(id, &json!({ "enabled": false })) {
-            Ok(_) => logging::log_with_level(
-                "[Usage]",
-                &format!(
+            Ok(_) => {
+                let detail = format!(
                     "账号「{display}」{}消耗 {} Token 达到上限 {}，已自动禁用（重置也不恢复，请手动启用）",
                     if rule.reset == limiter::LimiterReset::Daily {
                         "今日".to_string()
@@ -434,9 +544,11 @@ fn enforce_token_disable(store: &AccountStore, accounts: &[Value], now: i64) {
                     },
                     used,
                     rule.threshold,
-                ),
-                "warn",
-            ),
+                );
+                logging::log_with_level("[Usage]", &detail, "warn");
+                // 通知（旁路）：与余额禁用同一档硬动作，同样需要用户手动启用
+                crate::server::core::notify::hooks::on_account_disabled(&display, &detail);
+            }
             Err(error) => logging::verbose(
                 "[Usage]",
                 &format!("账号 {id} Token 限额自动禁用失败：{}", error.message),
@@ -524,6 +636,7 @@ async fn sweep_due(store: &AccountStore) {
     for ((account, _), row) in due.iter().zip(results.into_iter()) {
         write_row_record(&row);
         enforce_low_balance_disable(store, account, &row);
+        maybe_alert_credit_expiring(account, &row);
     }
 }
 

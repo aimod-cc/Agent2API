@@ -24,16 +24,35 @@
  * checkin-state.ts，签到完成后自动处理的那条链也在那边。）
  */
 
-import { shared, type AccountRecord, type AccountsSnapshot, type ClashSnapshot, type PanelKind } from './accounts-shared'
+import { shared, type AccountRecord, type AccountsSnapshot, type ClashSnapshot } from './accounts-shared'
 import {
   accountGroups, byPriorityOrder, filterCounts, matchesFilter, positionMap, providerSummaries,
-  visibleAccounts, type AccountFilter, type AccountGroup, type TokenUsageLookup, type UsageLookup,
+  visibleAccounts, DEFAULT_GROUP_SORT,
+  type AccountFilter, type AccountGroup, type GroupSortRule, type TokenUsageLookup, type UsageLookup,
 } from './accounts-domain'
 
-/** 弹窗状态：账号设置（单个）/ 批量操作（多选 + 动作），关闭即 null */
+/**
+ * 表头排序（点表头那一列）。
+ *
+ * `scope` 决定那张表是**按厂商分组**的这件事要不要让步：
+ *   · `group`（默认）只在各家组内重排，组与组的先后（= 各家队首的先后）不动；
+ *   · `flat` 打散分组按整表排 —— 找「余额最高的那个账号」时它才真的排得出全局第一名。
+ * 两种作用域都保留「顺序」列的真实位次（`#N`），所以排序期间也没有信息被抹掉。
+ */
+export type AccountSortScope = 'group' | 'flat'
+
+export type AccountSort = {
+  /** 列 key（`ACCOUNT_COLUMNS` 的 key，也是 `th[data-col]`） */
+  key: string
+  dir: 'asc' | 'desc'
+  scope: AccountSortScope
+}
+
+/** 弹窗状态：账号设置（单个）/ 批量操作（多选 + 动作）/ 分组设置（单组），关闭即 null */
 export type AccountsDialog =
   | { kind: 'settings'; id: string }
   | { kind: 'batch'; ids: string[]; action: string }
+  | { kind: 'group'; provider: string }
   | null
 
 export type AccountsStore = {
@@ -43,17 +62,30 @@ export type AccountsStore = {
   /** 折叠起来的分组（provider id）。列表长了之后「只看某几家」靠它，见页头那颗按钮 */
   collapsed: ReadonlySet<string>
   selected: ReadonlySet<string>
-  panels: ReadonlyMap<string, ReadonlySet<PanelKind>>
   connections: ReadonlyMap<string, number>
   /** Clash 出口列表缓存（`null` = 还没读到）；**只有代理表单的 Clash 直引档用**
    *  （存量配置专用）—— 账号页的代理下拉列的是「网络代理」页的池条目 */
   clash: ClashSnapshot | null
   dialog: AccountsDialog
   namesHidden: boolean
+  /** 表头排序（`null` = 默认次序：全局按优先级队列，模型作用域按调度队列） */
+  sort: AccountSort | null
   /** 批量查询余额在途（工具条按钮的文案与禁用态） */
   usageBusy: boolean
   /** 余额查询在途的账号（行上那颗「余额」按钮的去重闸） */
   usageInflight: ReadonlySet<string>
+  /**
+   * 组头「可用合计」是否只累加**当前筛选 / 搜索后可见的行**。
+   * 默认关闭（= 按整组求和，见 accounts-panels 的 groupBalanceOf）；开关在
+   * 设置 → 显示 → 账号列表里。与 namesHidden 同属「怎么看这张表」的偏好。
+   */
+  groupTotalFiltered: boolean
+  /**
+   * 每家自己的**组内排序规则**（provider → 规则数组，按数组顺序比较）。
+   * 没有键 = 用 `DEFAULT_GROUP_SORT`（积分到期 → 添加时间），规则可被关掉；
+   * 见 accounts-domain 的 sortGroupMembers。与 collapsed 同一档展示偏好，落盘保存。
+   */
+  groupSort: Readonly<Record<string, GroupSortRule[]>>
 }
 
 /* ─── 跨次启动的记忆键 ───────────────────────── */
@@ -64,6 +96,53 @@ const COLLAPSED_KEY = 'workbuddy-desktop-accounts-collapsed'
 /** 账号名隐藏开关（表头「账号」旁边那颗眼睛）：打开后账号列的名字整体显示成星号。
  *  这是「怎么看这张表」的偏好，与列宽同一档，存 localStorage 跨次启动保留 */
 const NAMES_HIDDEN_KEY = 'workbuddy-desktop-accounts-names-hidden'
+/** 表头排序：与筛选 / 折叠同一档的「怎么看这张表」偏好。它不隐藏任何行，所以跨次启动
+ *  保留是安全的（存了排序而排序不明显，靠批量栏那枚「已按 X 排序」的提示交代） */
+const SORT_KEY = 'workbuddy-desktop-accounts-sort'
+/**
+ * 组头合计的口径开关：`'1'` = 只加当前筛选后的可见行，缺省 / 其它 = 整组求和。
+ *
+ * 这个键是账号页与设置页**共用的契约**：两边都经本文件的 `readGroupTotalFiltered` /
+ * `setGroupTotalFiltered` 读写，不各自写一份字面量 —— 分开写的话，改键名时漏一处
+ * 就是「开关拨了不生效」。
+ */
+export const GROUP_TOTAL_FILTERED_KEY = 'workbuddy-desktop-accounts-group-total-filtered'
+
+/**
+ * 组内排序规则的记忆键：`{ [provider]: GroupSortRule[] }`。
+ *
+ * 只存**显式改过**的那些家（没改的留给 `DEFAULT_GROUP_SORT`）——
+ * 存全量的话，默认值以后要调整（比如把「添加时间」提到前面）时，
+ * 所有老用户都会被自己那份旧快照钉死在新默认之外。
+ */
+export const GROUP_SORT_KEY = 'workbuddy-desktop-accounts-group-sort'
+
+/** 读回组内排序规则（坏数据整段丢弃，不让一个手改坏的键把整页排序拖垮） */
+function loadGroupSort(): Record<string, GroupSortRule[]> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(GROUP_SORT_KEY) || '{}') as unknown
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+    const out: Record<string, GroupSortRule[]> = {}
+    for (const [provider, value] of Object.entries(raw as Record<string, unknown>)) {
+      if (!Array.isArray(value)) continue
+      const rules: GroupSortRule[] = []
+      for (const item of value) {
+        if (!item || typeof item !== 'object') continue
+        const entry = item as Record<string, unknown>
+        if (entry.key === 'credit') {
+          rules.push({ key: 'credit', on: entry.on !== false, dir: entry.dir === 'late' ? 'late' : 'soon' })
+        } else if (entry.key === 'added') {
+          rules.push({ key: 'added', on: entry.on !== false, dir: entry.dir === 'old' ? 'old' : 'new' })
+        }
+      }
+      // 两条规则都没了的记录不入表：那是「回到默认」而不是「一条规则都不参与」
+      if (rules.length) out[provider] = rules
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
 
 /**
  * 读回筛选档位。
@@ -96,9 +175,49 @@ function loadCollapsed(): Set<string> {
   }
 }
 
+/** 账号名掩码的当前偏好（设置页也要读同一份，故与 loadNamesHidden 同源导出） */
+export function readNamesHidden(): boolean {
+  return loadNamesHidden()
+}
+
+/** 组头合计口径的当前偏好（设置页读它摆开关） */
+export function readGroupTotalFiltered(): boolean {
+  return loadGroupTotalFiltered()
+}
+
 function loadNamesHidden(): boolean {
   try {
     return localStorage.getItem(NAMES_HIDDEN_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 读回表头排序。
+ *
+ * `scope` 只认 group / flat 两个值（存盘里出现过第三个值时退回 group 而不是丢掉整条
+ * 排序）：`flat` 会打散厂商分组，是个更重的手法 —— 认不出就按轻的那一档走。
+ */
+function loadSort(): AccountSort | null {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SORT_KEY) || 'null') as Partial<AccountSort> | null
+    const key = String(raw?.key || '')
+    if (!key) return null
+    return {
+      key,
+      dir: raw?.dir === 'desc' ? 'desc' : 'asc',
+      scope: raw?.scope === 'flat' ? 'flat' : 'group',
+    }
+  } catch {
+    return null
+  }
+}
+
+/** 组头合计口径：只有明确存过 '1' 才算「按筛选」，没存过 / 存坏都按整组（默认关闭） */
+function loadGroupTotalFiltered(): boolean {
+  try {
+    return localStorage.getItem(GROUP_TOTAL_FILTERED_KEY) === '1'
   } catch {
     return false
   }
@@ -111,13 +230,15 @@ let store: AccountsStore = {
   filter: loadFilter(),
   collapsed: loadCollapsed(),
   selected: new Set<string>(),
-  panels: new Map<string, ReadonlySet<PanelKind>>(),
   connections: new Map<string, number>(),
   clash: null,
   dialog: null,
   namesHidden: loadNamesHidden(),
+  sort: loadSort(),
   usageBusy: false,
   usageInflight: new Set<string>(),
+  groupTotalFiltered: loadGroupTotalFiltered(),
+  groupSort: loadGroupSort(),
 }
 
 const listeners = new Set<() => void>()
@@ -197,9 +318,49 @@ export function groupView(
     account => matchesFilter(account, store.filter, usageOf, tokenUsageOf),
     usageOf,
     tokenUsageOf,
+    groupSortRules,
   )
   const groups = allGroups.filter(group => group.accounts.length > 0)
   return { groups, allGroups }
+}
+
+/**
+ * 某一家当前的排序规则（没配过 = 默认规则的一份副本）。
+ *
+ * 返回副本而不是 `DEFAULT_GROUP_SORT` 本身：设置弹窗会就地改数组（上移 / 下移），
+ * 直接把默认值递出去等于让一次取消不掉的操作写进模块常量。
+ */
+export function groupSortRules(provider: string): GroupSortRule[] {
+  const saved = store.groupSort[provider]
+  if (saved) return saved.map(rule => ({ ...rule }))
+  return DEFAULT_GROUP_SORT.map(rule => ({ ...rule }))
+}
+
+/** 这一家有没有**显式改过**规则（设置弹窗据此决定「恢复默认」是否可点） */
+export function hasCustomGroupSort(provider: string): boolean {
+  return Boolean(store.groupSort[provider])
+}
+
+/**
+ * 写入某一家的排序规则。
+ *
+ * `null` = 删掉这条记录（回到默认）。空数组**不当作删除**：那是用户把两条规则
+ * 都关掉了（想纯手动排序），与「恢复默认」是两件事 —— 混成一个会让「关掉所有
+ * 规则」在下次启动时悄悄变回默认排序。
+ */
+export function setGroupSortRules(provider: string, rules: GroupSortRule[] | null): void {
+  if (!provider) return
+  const next: Record<string, GroupSortRule[]> = { ...store.groupSort }
+  if (rules === null) delete next[provider]
+  else next[provider] = rules.map(rule => ({ ...rule }))
+  persistGroupSort(next)
+  patch({ groupSort: next })
+}
+
+function persistGroupSort(groupSort: Readonly<Record<string, GroupSortRule[]>>): void {
+  try {
+    localStorage.setItem(GROUP_SORT_KEY, JSON.stringify(groupSort))
+  } catch { /* 隐私模式等存不了就算了：本次会话内仍然生效 */ }
 }
 
 export function providerSummaryList(): Array<{ id: string; label: string; count: number }> {
@@ -325,6 +486,68 @@ export function setAllGroupsCollapsed(providers: string[], collapsed: boolean): 
   patch({ collapsed: next })
 }
 
+/* ─── 表头排序 ─────────────────────────────────
+ * 语义与筛选同一档（「怎么看这张表」），但**不隐藏任何行** —— 所以它不参与
+ * `filterActive()` 那条「顺序已锁」的判定（排序期间拖拽的语义见 accounts-page：
+ * 有排序时拖拽落点与真实队列对不上，那一处单独锁）。 */
+
+/** 没有排序时用户选过的作用域档位（下一次点表头时由 `cycleSort` 带上） */
+let sortScope: AccountSortScope = 'group'
+
+function persistSort(sort: AccountSort | null): void {
+  try {
+    if (sort) localStorage.setItem(SORT_KEY, JSON.stringify(sort))
+    else localStorage.removeItem(SORT_KEY)
+  } catch { /* 隐私模式等存不了就算了：本次会话内仍然生效 */ }
+}
+
+/** 当前排序（`null` = 默认次序） */
+export function accountSort(): AccountSort | null {
+  return store.sort
+}
+
+/**
+ * 点表头：同一列上是 升序 → 降序 → 取消；换一列则从那列的升序起。
+ *
+ * 三态而不是两态：这张表的**默认次序本身有意义**（全局 = 优先级队列，模型作用域 =
+ * 调度队列），两态会给不出一条「回到默认」的路 —— 用户点了表头就再也回不到队列序。
+ */
+export function cycleSort(key: string): void {
+  const current = store.sort
+  let next: AccountSort | null
+  if (!current || current.key !== key) next = { key, dir: 'asc', scope: current?.scope || sortScope }
+  else if (current.dir === 'asc') next = { ...current, dir: 'desc' }
+  else next = null
+  persistSort(next)
+  patch({ sort: next })
+}
+
+/**
+ * 切排序的作用域（组内 / 整表）。
+ *
+ * 没有排序时**只记住这一档**、不重绘：那时页面上根本没有排序在生效，为一次「预选」
+ * 重画整张表不值当；下一次点表头时由 `cycleSort` 带上它。
+ */
+export function setSortScope(scope: AccountSortScope): void {
+  const current = store.sort
+  sortScope = scope
+  if (!current) return
+  persistSort({ ...current, scope })
+  patch({ sort: { ...current, scope } })
+}
+
+/** 取消排序（批量栏那枚提示里的 ×） */
+export function clearSort(): void {
+  if (!store.sort) return
+  persistSort(null)
+  patch({ sort: null })
+}
+
+/** 当前生效的作用域档位（没排序时就是那次预选） */
+export function currentSortScope(): AccountSortScope {
+  return store.sort?.scope || sortScope
+}
+
 /* ─── 勾选（只作用于当前勾选，不随筛选变化自动增减）─── */
 
 export function isPicked(id: string): boolean {
@@ -351,42 +574,45 @@ export function clearSelection(): void {
   patch({ selected: new Set<string>() })
 }
 
-/* ─── 行内明细面板的展开态 ─────────────────────
- * 这一份 Map 是「面板开着没」的**唯一判据来源**：单账号按钮、批量展开、渲染三处都只读它，
- * 谁都不自己另存一份布尔量。以后再加入口也必须走这里的函数，否则这条保证就断了。
- * 余额没有明细行（读数直接落在余额列上），所以只有 limits / checkin 两种 kind。 */
-
-export function panelOpen(id: string, kind: PanelKind): boolean {
-  return store.panels.get(id)?.has(kind) === true
-}
-
-export function setPanelOpen(id: string, kind: PanelKind, open: boolean): void {
-  if (!id) return
-  const panels = new Map(store.panels)
-  const set = new Set(panels.get(id) || [])
-  if (open) set.add(kind)
-  else set.delete(kind)
-  if (set.size) panels.set(id, set)
-  else panels.delete(id)
-  patch({ panels })
-}
-
-export function openPanelsFor(ids: string[], kind: PanelKind): void {
-  const panels = new Map(store.panels)
-  for (const id of ids) {
-    const set = new Set(panels.get(id) || [])
-    set.add(kind)
-    panels.set(id, set)
-  }
-  patch({ panels })
-}
-
 /* ─── 账号名隐藏 ─────────────────────────────── */
 
 export function toggleNamesHidden(): void {
   const next = !store.namesHidden
   try { localStorage.setItem(NAMES_HIDDEN_KEY, next ? '1' : '0') } catch { /* 存不了只影响下次启动 */ }
   patch({ namesHidden: next })
+}
+
+/** 显式写入账号名掩码（设置页的开关用它；账号页表头那颗眼睛走 toggle） */
+export function setNamesHidden(next: boolean): void {
+  try { localStorage.setItem(NAMES_HIDDEN_KEY, next ? '1' : '0') } catch { /* 存不了只影响下次启动 */ }
+  patch({ namesHidden: next })
+}
+
+/* ─── 组头合计口径 ───────────────────────────── */
+
+/**
+ * 从存储里重读合计口径并同步到本页（只在**别的文档 / 窗口**改过时用得上）。
+ *
+ * 同一个文档内设置页与账号页共用这一份 store，设置页的写入直接走
+ * `setGroupTotalFiltered`，本页不需要再读盘。这条路径留给「另一个窗口 / 另一份
+ * 面板」改了偏好之后的 `storage` 事件 —— 不跟的话，那个窗口里拨的开关要刷新
+ * 整页才生效。没变化时不 patch，免得每次存储事件都白白重画一遍表格。
+ */
+export function syncGroupTotalPreference(): void {
+  const next = loadGroupTotalFiltered()
+  if (next === store.groupTotalFiltered) return
+  patch({ groupTotalFiltered: next })
+}
+
+/**
+ * 写入合计口径（设置页的开关调它；账号页订阅同一份 store，因此立即重画）。
+ *
+ * 落盘与内存两件事一起做：只落盘的话，同文档里已经挂载的账号页收不到
+ * `storage` 事件（那个事件只在**别的**文档 / 窗口里触发），切回去还是旧口径。
+ */
+export function setGroupTotalFiltered(next: boolean): void {
+  try { localStorage.setItem(GROUP_TOTAL_FILTERED_KEY, next ? '1' : '0') } catch { /* 存不了只影响下次启动 */ }
+  patch({ groupTotalFiltered: next })
 }
 
 /**

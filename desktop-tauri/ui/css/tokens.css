@@ -297,15 +297,20 @@ body {
   body { min-width: 0; }
 }
 
-/* ─── 移动端：从「app-shell 固定视口」切成「正常文档流」───
-   桌面端 body 不滚（height:100% + overflow:hidden），滚动发生在 .page.active 里；
-   但这个结构在手机上会把用户困在容器里 —— 滚到底后惯性滚动被 .content 的
-   overflow:hidden 截断，外面的页脚 / 顶栏永远滑不到。改成正常文档流后 body
-   自己滚，所有页面内容按内容高度自然生长，用户想滑多远就滑多远。
-   侧栏 / 顶栏 / 面板头保持原样（侧栏本来就是 position:fixed，不受影响）。 */
+/* ─── 移动端：保持「固定视口 + 内容区自己滚」 ───
+   曾经为了让手机能滚动，这里把 html/body 放成 height:auto + 正常文档流，
+   代价是**顶栏跟着滚走**：往下翻账号时「账号」标题与汉堡按钮会消失，
+   回顶部只能反向滑很久。手机上顶栏应当常驻。
+   现在改回固定视口（与桌面同一套骨架），滚动交给 .page.active：
+     .shell(100dvh) -> .main(flex列) -> .topbar(固定) + .content(撑满) -> .page.active(滚)
+   100dvh 而不是 100vh：移动浏览器地址栏收起/展开时 100vh 会算进被遮住的那段，
+   内容底部会被顶出可视区；dvh 跟随动态视口，收起地址栏后不跳。
+   旧浏览器不认 dvh 时前面的 100vh 兜底（layout.css 里已有）。
+   注意：不再给 body 设 overflow —— 固定视口下它本来就滚不动，
+   设了反而会在个别 WebView 里多出一条橡皮筋。 */
 @media (max-width: 767px) {
-  html, body { height: auto; overflow: visible; }
-  body { overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  html, body { height: 100%; overflow: hidden; }
+  .shell { height: 100dvh; }
 }
 
 h1, h2, h3, h4, p { margin: 0; }

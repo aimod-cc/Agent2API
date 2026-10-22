@@ -41,6 +41,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use axum::http::HeaderMap;
 
 use crate::server::db::Db;
+use crate::server::logging;
 
 /// 会话 cookie 名：**一枚装两段**（`agent2api-panel=<access>.<refresh>`）。
 ///
@@ -94,6 +95,11 @@ const LEGACY_REFRESH_COOKIE: &str = "agent2api-panel-rt";
 const ACCESS_TTL: Duration = Duration::from_secs(2 * 3600);
 /// refresh token 有效期（长效）
 const REFRESH_TTL: Duration = Duration::from_secs(30 * 24 * 3600);
+/// 并发轮换的宽限窗：一把 refresh 被合法轮换后的这段时间里，同一把再上来
+/// 按「同一台浏览器的并发续期」处理（见 `rotate_session` 的宽限分支），
+/// 窗外照旧判重放、整链作废。一分钟足够覆盖多标签页同时撞上 access 过期的
+/// 现场（客户端单飞只合并得了同一页面上下文内的并发）。
+const ROTATION_GRACE_MS: i64 = 60_000;
 /// 登录失败锁定：同一来源连续失败 5 次，锁 5 分钟（按 IP 不是全局 ——
 /// 全局锁会把「攻击者锁死管理员」变成一种攻击，Tinyauth 那个 CVE 的教训）
 const LOCKOUT_THRESHOLD: u32 = 5;
@@ -134,10 +140,18 @@ fn sha256_hex(value: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-// ── 管理员（环境变量优先，其次库里的注册记录）────────────────
-
+// ── 管理员（库是唯一真相；环境变量只在首次播种）────────────────
+//
+// 语义与 sub2api / new-api 一致：`AGENT2API_ADMIN_USER` + 密码只在**库中还没有
+// 管理员**时作为种子写入 `kv.panelAdmin`，此后所有校验都只读库 —— 面板里改的
+// 密码立即生效，环境变量改回旧值不会把密码「改回去」。
+//
+// 旧实现是「环境变量一直优先」（`verify_login` 先试 env、`sync_env_admin_to_store`
+// 每次启动覆盖式写入）。后果是配了 env 的部署在面板里永远改不掉密码：新哈希写进
+// 库，登录却仍拿 env 那份比对。改成播种后这两个症状一起消失。
 static ENV_ADMIN: OnceLock<Option<(String, String)>> = OnceLock::new();
 
+/// 环境变量里的种子管理员（仅用于首次播种，**不参与登录校验**）。
 fn env_admin() -> Option<&'static (String, String)> {
     // OnceLock<Option<(String, String)>>：首次调用时读入，此后返回静态引用。
     // 密码有两个变量：HASH（已是 bcrypt 哈希）优先；PASSWORD（明文）则
@@ -251,10 +265,99 @@ pub fn setup_admin(username: &str, password_hash: &str) -> Result<bool, String> 
     Ok(changed > 0)
 }
 
-/// 环境变量预置的管理员同步进库（`kv` 的 `panelAdmin`，与面板注册同一处）：
-/// env_admin() 里明文已转成 bcrypt 哈希，落库的自然也是哈希 —— 数据库的
-/// 任何角落都不会出现明文密码。env 是显式的部署意图，覆盖式写入（改了
-/// env 重启即生效）；没配 env 则什么都不做，走面板注册路径。
+/// 面板当前登录的管理员用户名（未注册返回 None）。
+pub fn admin_username() -> Option<String> {
+    store_admin().map(|(username, _)| username)
+}
+
+/// 改密码：校验旧密码 → 写入新哈希 → **撤销除当前会话外的所有会话链**。
+///
+/// 撤销其余会话的理由与常见做法一致：改密码通常意味着「旧密码可能泄露」，
+/// 只改哈希却留着别处的活会话，等于泄露的会话还能用 30 天（refresh 寿命）。
+/// 当前这条会话保留 —— 用户刚在界面上完成操作，立刻把他自己踢下线是坏体验
+/// （也容易让人以为改密码失败了）。
+///
+/// 返回 `Ok(true)` = 已改；`Ok(false)` = 旧密码不对；`Err` = 存储/加密失败。
+pub fn change_password(
+    headers: &HeaderMap,
+    old_password: &str,
+    new_password_hash: &str,
+) -> Result<bool, String> {
+    let Some((username, _)) = store_admin() else {
+        return Err("尚未注册管理员账号".to_string());
+    };
+    if !verify_login(&username, old_password) {
+        return Ok(false);
+    }
+    let Some(db) = db() else {
+        return Err("数据库不可用，无法保存新密码".to_string());
+    };
+    let payload = serde_json::json!({ "username": username, "hash": new_password_hash });
+    db.with_mut(|conn| {
+        conn.execute(
+            "INSERT INTO kv (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![KV_ADMIN_KEY, payload.to_string()],
+        )
+    })
+    .and_then(|result| result.ok())
+    .filter(|changed| *changed > 0)
+    .ok_or_else(|| "写入新密码失败".to_string())?;
+
+    revoke_other_sessions(headers);
+    Ok(true)
+}
+
+/// 撤销**除请求里这条之外**的所有会话链（改密码用）。
+///
+/// 「当前会话」按请求里的 access 候选定位：命中的那条 access 记录带着 session
+/// id，其余链全部作废。定位不到（请求只带了 refresh、或 access 恰好过期）时
+/// 退化为「全撤销」—— 宁可多踢一次，也不留一条来历不明的活会话。
+fn revoke_other_sessions(headers: &HeaderMap) {
+    let current_session = {
+        let table = match access_tokens().lock() {
+            Ok(table) => table,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        access_candidates(headers)
+            .iter()
+            .find_map(|token| table.get(&sha256_hex(token)).map(|(session, _)| session.clone()))
+    };
+
+    {
+        let mut table = match refresh_tokens().lock() {
+            Ok(table) => table,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match &current_session {
+            Some(session) => table.retain(|record| record.session == *session),
+            None => table.clear(),
+        }
+        persist_refresh_tokens(&mut table);
+    }
+    {
+        let mut table = match access_tokens().lock() {
+            Ok(table) => table,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match &current_session {
+            Some(session) => table.retain(|_, (session_of, _)| session_of == session),
+            None => table.clear(),
+        }
+        persist_access_tokens(&mut table);
+    }
+}
+
+/// 环境变量预置的管理员**首次播种**进库（`kv` 的 `panelAdmin`）。
+///
+/// 只在库里**还没有**管理员时写入（`ON CONFLICT DO NOTHING`）：
+///   · 首次部署 → 用 env 的账号密码建立管理员，之后面板登录就能用；
+///   · 之后每次启动 → 库里已有记录，env 被忽略 —— 用户在面板里改的密码
+///     不会被环境的旧值覆盖回去；
+///   · 想改凭据 → 在面板「设置 → 账户」改密码，或删掉 `panelAdmin` 重新注册。
+///
+/// env_admin() 里明文已转成 bcrypt 哈希，落库的自然是哈希 —— 数据库的任何角落
+/// 都不会出现明文密码。没配 env 则什么都不做，走面板注册路径。
 /// 启动时（`attach_db` 之后）调用一次。
 pub fn sync_env_admin_to_store() {
     let Some((user, hash)) = env_admin() else {
@@ -264,13 +367,22 @@ pub fn sync_env_admin_to_store() {
         return;
     };
     let payload = serde_json::json!({ "username": user, "hash": hash });
-    let _ = db.with_mut(|conn| {
-        conn.execute(
-            "INSERT INTO kv (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            rusqlite::params![KV_ADMIN_KEY, payload.to_string()],
-        )
-    });
+    let changed = db
+        .with_mut(|conn| {
+            conn.execute(
+                "INSERT INTO kv (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO NOTHING",
+                rusqlite::params![KV_ADMIN_KEY, payload.to_string()],
+            )
+        })
+        .and_then(|result| result.ok())
+        .unwrap_or(0);
+    if changed > 0 {
+        logging::log(
+            "[Security]",
+            "✅ 已用环境变量播种面板管理员（此后以库为准，改密码请用设置页）",
+        );
+    }
 }
 
 /// 校验账号密码。bcrypt 哈希兼容 `htpasswd -nBC` 的输出格式。
@@ -280,11 +392,9 @@ fn verify_credentials(username: &str, password: &str, expected: &(String, String
     user_ok && pass_ok
 }
 
-/// 按面板提交的凭证找管理员并校验（环境变量优先，其次库里的注册记录）。
+/// 按面板提交的凭证校验管理员（**只读库** —— 环境变量仅在首次播种时参与，
+/// 理由见 `sync_env_admin_to_store`）。
 pub fn verify_login(username: &str, password: &str) -> bool {
-    if let Some(expected) = env_admin() {
-        return verify_credentials(username, password, expected);
-    }
     store_admin().is_some_and(|expected| verify_credentials(username, password, &expected))
 }
 
@@ -370,6 +480,12 @@ struct RefreshRecord {
     expires_at: i64,
     /// 已被轮换（旧令牌不能再换；再次出现 = 泄露，整链作废）
     rotated: bool,
+    /// 轮换发生时刻（毫秒；0 = 从未轮换）。并发续期的宽限判据要用它
+    /// （见 `rotate_session`）。`#[serde(default)]`：升级前落库的记录没有
+    /// 这个字段，反序列化按「从未轮换」处理 —— 旧记录一旦已轮换就永远在
+    /// 宽限窗之外，重放判据与旧版一致。
+    #[serde(default)]
+    rotated_at: i64,
 }
 
 static REFRESH_TOKENS: OnceLock<Mutex<Vec<RefreshRecord>>> = OnceLock::new();
@@ -553,6 +669,7 @@ impl IssuedSession {
                     session,
                     expires_at: now_ms() + REFRESH_TTL.as_millis() as i64,
                     rotated: false,
+                    rotated_at: 0,
                 });
                 persist_refresh_tokens(&mut table);
             }
@@ -563,6 +680,7 @@ impl IssuedSession {
                     session,
                     expires_at: now_ms() + REFRESH_TTL.as_millis() as i64,
                     rotated: false,
+                    rotated_at: 0,
                 });
                 persist_refresh_tokens(&mut table);
             }
@@ -729,6 +847,27 @@ pub fn session_valid(headers: &HeaderMap) -> bool {
         .any(|token| table.contains_key(&sha256_hex(token)))
 }
 
+/// 请求里是否带了**任何**凭证候选（会话 cookie 的任一段、`x-panel-token`、
+/// `x-panel-refresh`、`Authorization: Bearer`、`x-api-key`）。
+///
+/// ── 为什么需要这个判据 ──────────────────────────────────────
+/// 「面板会话无效」那一行原先对所有 401 一视同仁，但其中两种情形的含义完全不同：
+///   · **什么都没带** —— 浏览器第一次打开面板、登录页每次加载的 `/api/session`
+///     探测。这是正常未登录，不是安全事件；而主界面首屏一次会并发十几条
+///     `/api/*`，按 error 记等于把正常流程刷成一屏红字，还会顶起侧栏的未读
+///     错误徽标、把 500 条的日志表挤满。
+///   · **带了但对不上** —— 罐里的僵尸 cookie、重放、Key 配错。这才是要报的。
+///
+/// 判据只看「有没有候选」，不看值对不对 —— 值对不对正是那行日志在记的内容。
+///
+/// 探针 cookie（`PROBE_COOKIE`）**不算**凭证：它不关联任何会话，登录前就会被
+/// 种下，把它算进来会让「未登录」全部误判成「带了凭证」。
+pub fn presents_credentials(headers: &HeaderMap) -> bool {
+    !access_candidates(headers).is_empty()
+        || !refresh_candidates(headers).is_empty()
+        || headers.contains_key("x-api-key")
+}
+
 /// 本次请求里能看到的 access 指纹（诊断日志用，最多两把 —— 排查「同名 cookie
 /// 重复上行」时要能看见每一把分别是什么，值本身绝不进日志）。
 pub fn access_fingerprints(headers: &HeaderMap) -> Vec<String> {
@@ -748,6 +887,13 @@ pub fn access_fingerprints(headers: &HeaderMap) -> Vec<String> {
 /// 命中了一条已轮换记录，说明它泄露了（活链上新令牌在浏览器手里）—— 整条会话链
 /// 作废，逼着重新登录。之所以要先穷尽活候选：罐里同时躺着新旧两把是**正常现象**
 /// （合并型中转就是这么留脏的），把"读到了旧的那把"当成泄露会把好环境踢成反复重登。
+///
+/// 已轮换记录有一条**宽限**（`ROTATION_GRACE_MS`）：宽限窗内刚被轮换的令牌再
+/// 上来，按「同一台浏览器的并发续期」处理而不是泄露 —— access 过期那一刻，
+/// 多枚标签页 / 多个页面上下文会带着**同一把**还没轮换的 refresh 同时来换，
+/// 先到的成功、后到的就会撞上「已轮换」；这是正常现场，不是攻击。客户端的
+/// 单飞去重只合并得了同一页面上下文内的并发，跨标签页的只能在服务端兜
+/// （见 `rotate_session` 宽限分支）。窗外的重放照旧整链作废。
 pub fn rotate_session(headers: &HeaderMap) -> Option<IssuedSession> {
     let candidates = refresh_candidates(headers);
     if candidates.is_empty() {
@@ -768,6 +914,7 @@ pub fn rotate_session(headers: &HeaderMap) -> Option<IssuedSession> {
     if let Some(index) = live {
         let session = table[index].session.clone();
         table[index].rotated = true;
+        table[index].rotated_at = now;
         drop(table);
         return Some(IssuedSession::issue(session));
     }
@@ -782,6 +929,23 @@ pub fn rotate_session(headers: &HeaderMap) -> Option<IssuedSession> {
     // 按「刷新失败」处理，不动任何链。
     let index = replay?;
     let session = table[index].session.clone();
+    // ── 并发轮换的宽限分支 ─────────────────────────────────────
+    // 这把 refresh 在宽限窗内刚被合法轮换、且链上还有活记录 → 判良性：从链上
+    // 现存的活记录再签发一组新令牌给这个后来者。**不动**那条活记录 —— 它属于
+    // 先到的那次轮换，动它等于把「先到者拿着的新 refresh」作废掉。宽限窗外
+    // （或链上已无活记录，例如登出 / 别处已判过重放）照旧整链作废。
+    // 代价：偷来的令牌在「合法用户轮换后的一分钟」内也能换出新令牌 —— 窗只有
+    // 一分钟，且令牌在那之前本就有效，泄露窗口没有实质扩大。
+    if now - table[index].rotated_at <= ROTATION_GRACE_MS {
+        if let Some(live) = table
+            .iter()
+            .find(|record| record.session == session && !record.rotated)
+        {
+            let session = live.session.clone();
+            drop(table);
+            return Some(IssuedSession::issue(session));
+        }
+    }
     table.retain(|record| record.session != session);
     persist_refresh_tokens(&mut table);
     drop(table);
@@ -1274,17 +1438,38 @@ mod credential_candidate_tests {
         assert!(rotate_session(&request(&session_cookie(&third), &[])).is_some());
     }
 
-    /// 重放检测没被削弱：只拿**已轮换**的旧令牌来换（没有一把活的在场），
-    /// 仍是整条会话链作废。
+    /// 重放检测没被削弱：宽限窗**外**只拿已轮换的旧令牌来换（没有一把活的
+    /// 在场），仍是整条会话链作废；窗内的同一行为则是良性并发续期（多标签页
+    /// 同时撞上 access 过期的正常现场，见 `rotate_session` 的宽限分支）。
     #[test]
     fn a_replayed_refresh_alone_still_kills_its_chain() {
         let first = IssuedSession::new_session();
         let second = rotate_session(&request(&refresh_only_cookie(&first.refresh_token), &[]))
             .expect("首次轮换应成功");
 
-        // 旧令牌单独上行 → 判重放，None
+        // 宽限窗内旧令牌单独上行 = 并发续期：照常签发，且不杀链
+        let concurrent = rotate_session(&request(&refresh_only_cookie(&first.refresh_token), &[]))
+            .expect("宽限窗内的重复 refresh 该按并发续期签发新令牌");
+        assert!(
+            session_valid(&request(&session_cookie(&concurrent), &[])),
+            "宽限续期签发的新 access 要有效"
+        );
+        assert!(
+            rotate_session(&request(&session_cookie(&second), &[])).is_some(),
+            "宽限续期不许动链上原有的活 refresh"
+        );
+
+        // 把已轮换记录拨到宽限窗之外 → 同一把旧令牌再上来就是泄露：整链作废
+        {
+            let mut table = refresh_tokens().lock().unwrap();
+            for record in table.iter_mut() {
+                if record.rotated {
+                    record.rotated_at = now_ms() - ROTATION_GRACE_MS - 1;
+                }
+            }
+        }
         let replayed = rotate_session(&request(&refresh_only_cookie(&first.refresh_token), &[]));
-        assert!(replayed.is_none(), "已轮换令牌单独来换必须判重放");
+        assert!(replayed.is_none(), "宽限窗外的已轮换令牌必须判重放");
 
         // 同链的**活**令牌也应随之作废（整链撤销）—— 这一条才是「整链」二字的意思
         assert!(

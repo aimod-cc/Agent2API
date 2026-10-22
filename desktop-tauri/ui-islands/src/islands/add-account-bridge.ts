@@ -55,7 +55,7 @@ export type PresetRecord = {
   /** Base URL 输入框的占位提示（自建面板没有固定地址时给一句「填你自己的站点」） */
   placeholder?: string
   quirks?: CustomProviderRecord['quirks']
-  /** 客户端形态伪装：随创建写进提供商记录（OpenCode Zen 用它过免费档的三道校验） */
+  /** 客户端形态伪装：随创建写进提供商记录（OpenCode Zen 用它过免费档的形状校验） */
   clientEmulation?: string
   /** 该家账号的默认取值（表单初始勾选态）：noAuth = 预勾「该上游无需鉴权」 */
   account?: { noAuth?: boolean }
@@ -84,8 +84,23 @@ export type SharedWindow = {
   workbuddyDesktop?: {
     /** 壳的编译目标平台（'macos' / 'windows' / 'linux' / 'web'） */
     readonly platform?: string
+    /**
+     * 面板进程能否读本机桌面客户端的登录态（只有网页桥会注入）。
+     * false = 远程部署（Docker / 公网服务器），壳侧本机能力收起；
+     * 缺省（桌面壳 / 浏览器直连）= 按能处理，见 add-account-configs 的注释。
+     */
+    readonly desktopAccess?: boolean
     startLogin(edition: string, mode: string, provider: string, socialRestore?: boolean): Promise<unknown>
     cancelLogin?(): Promise<unknown>
+    /**
+     * 打开外链（**唯一**能用的出口）：桌面壳走 `open_release_page` 命令
+     * （Windows 上是 `ShellExecuteW`），网页端 shim 把它映射成 `window.open`。
+     *
+     * ⚠️ 渲染层**不能**直接 `window.open`：WebView2 的 `NewWindowRequested`
+     * 壳侧没接管，Tauri 默认把它丢弃 —— 表现就是「点了完全没反应」，不报错、
+     * 控制台也没有记录。这条踩过两次（本次设备码登录的「打开授权页」）。
+     */
+    openReleasePage?(url: string): Promise<unknown>
   }
   wbApp?: {
     toast?: (message: string, kind?: 'err' | 'ok' | 'warn') => void
@@ -225,9 +240,70 @@ export async function postAccount(payload: Record<string, unknown>): Promise<unk
   })
 }
 
+/**
+ * 通用的受保护接口调用（走壳的 `api_request` 桥，与 `postAccount` 同一条通路）。
+ *
+ * ── 为什么不多带一个 path 参数的工具函数 ──────────────────────
+ * 本子系统原先只发一个固定路径（`/api/accounts`），所以 `postAccount` 里把路径
+ * 写死了。设备码登录要发 `/api/session/login/start`、`/wait`、`/cancel` 三条
+ * 不同的路径，再复制三份「取 internals → 判可用 → invoke」只会让「桌面运行时
+ * 不可用」这条判断散成四份。这里收一道，`postAccount` 保留原名不动
+ * （它的调用点很多，改名不带来任何收益）。
+ */
+export async function callApi(
+  method: 'GET' | 'POST',
+  path: string,
+  body?: Record<string, unknown>,
+): Promise<unknown> {
+  const internals = shared().__TAURI_INTERNALS__
+  if (!internals || typeof internals.invoke !== 'function') {
+    throw new Error(t('桌面运行时不可用（Tauri 未初始化）'))
+  }
+  return internals.invoke('api_request', {
+    request: { method, path, ...(body === undefined ? {} : { body }) },
+  })
+}
+
 /** 添加成功后展示的账号名：公开形态里 name 一定在，标识字段按各家兜底 */
 export function addedLabelOf(account?: AccountRecord | null): string {
   return account?.name || account?.uid || account?.userId || ''
+}
+
+/**
+ * 打开外链：**只走桥命令**（`open_release_page`），**不用 `window.open`**。
+ *
+ * ── 为什么必须这样（踩过两次，别再退回去）─────────────────────
+ * WebView2 的 `NewWindowRequested` 壳侧没接管，Tauri 默认把它丢弃 ——
+ * 症状是「点了完全没反应」：不报错、控制台没有记录、连弹窗拦截提示都没有。
+ * 设备码登录的「打开授权页」就是这么坏的。
+ *
+ * 桥命令在桌面端是 `ShellExecuteW`（系统默认浏览器，见 `commands::open_release_page`
+ * 与 `login::open_in_browser`），网页端 shim 才映射成 `window.open` ——
+ * 两端名字与签名一致，调用方不感知差异。只放行 http(s)（壳侧也再挡一道）。
+ *
+ * 失败一律 toast 出来：静默失败正是这次 bug 的形态，不能再让它无声。
+ *
+ * @returns 是否真的叫出了打开动作（调用方可以据此给兜底提示，例如让用户手抄链接）
+ */
+export async function openExternalUrl(url: string): Promise<boolean> {
+  const target = String(url || '').trim()
+  if (!/^https?:\/\//i.test(target)) {
+    toast(t('链接地址不受支持'), 'err')
+    return false
+  }
+  const bridge = shared().workbuddyDesktop
+  if (!bridge || typeof bridge.openReleasePage !== 'function') {
+    // 升级前的老壳没有这个方法：如实报出来（带链接），别假装成功
+    toast(t('当前壳不支持直接打开浏览器，请手动访问：{url}', { url: target }), 'err')
+    return false
+  }
+  try {
+    await bridge.openReleasePage(target)
+    return true
+  } catch (error) {
+    toast(t('打开链接失败：{error}', { error: describeError(error) }), 'err')
+    return false
+  }
 }
 
 /**

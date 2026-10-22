@@ -1,0 +1,189 @@
+/* Agent2API · 账号页左栏「作用域树」（全局 + 厂商 → 模型）
+
+   ── 这一条把账号页的面板从「一条竖列」改成「左栏 + 主列」两栏 ──────
+   page-accounts.css 里 .account-table 是 flex column（工具条 / 批量栏 / 列表 / 页脚
+   四块竖排）。加了左栏之后它必须是两栏，所以这一条 display:grid 覆盖掉那个 flex ——
+   四块竖排顺序一个字没改，只是整组挪进 .acct-main（jsx 里多一层 div），
+   于是「工具条以上」的结构变化为零。grid-template-rows 显式写 minmax(0,1fr)：
+   grid 行高默认按内容算，不写这条左栏与主列都只有内容高，列表区就没有可分配的剩余高度。
+
+   ── 常驻左栏：默认展开，收起要**手动**─────────────────────
+   左栏默认常驻 218px，**不随窗口宽度自动收起**。窄了也不收 —— 表格放不下就横向滚动
+   （表格 min-width 由 accounts-columns 的 tableMinWidth 算出，横滚是它本来的兜底）。
+   收起只有一条路：左栏左上角那枚显式按钮（.acct-rail-collapse），收起后剩 44px 图标条
+   （.acct-rail-strip），条上每个图标点一下 = 切到那一家。
+   早先那套「窄了自动收成图标条 + 悬停 / :focus-visible 浮层展开」**已删** ——
+   「结构在哪」不该靠悬停去摸，且浮层会盖住表格。
+
+   ── 复用了模型管理页左栏的三个通用件 ─────────────────────
+   .rail-scroll / .rail-label / .rail-empty 定义在 page-gateway.css。这不是巧合式复用：
+   账号页的「账号设置弹窗」左栏（.acct-dlg-rail）早就在复用同一套（见 page-accounts.css
+   的自述「与模型管理左栏同一形态」）。容器（.acct-rail）**没有**复用 .prov-rail ——
+   那边带 overflow:hidden；这里虽然不再有溢出浮层，但保持独立更简单。
+   ───────────────────────────────────────────── */
+
+/* ── 选择器为什么要写这么长（踩过的坑）─────────────────────
+   上游 layout.css 有一条 `.page[data-page="accounts"] .panel { display:flex;
+   flex-direction:column; flex:1; min-height:0 }`（选择器权重 3）。
+   第一版这里写的是 `.panel.account-table`（权重 2）—— **被它压掉**，于是面板仍是
+   flex：左栏与主列上下堆成一列，左栏横铺满整个面板宽（实测 1637px），
+   而 `getComputedStyle().gridTemplateColumns` 照样报得出 `218px minmax(0,1fr)`
+   —— 那是**指定值**不是**使用值**，看它以为生效了，是这次排查绕远的直接原因。
+   要压过上游那条就得用同一条链再加一个类（权重 4 > 3）。
+   ───────────────────────────────────────────── */
+
+.page[data-page="accounts"] .panel.account-table {
+  display: grid;
+  grid-template-columns: 218px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+
+/* 收起态：左栏只剩图标条。类由 ScopeRail 的 collapsed 挂（用户手动切、记 localStorage） */
+.page[data-page="accounts"] .panel.account-table.rail-collapsed {
+  grid-template-columns: 44px minmax(0, 1fr);
+}
+
+/* 主列：工具条 / 批量栏 / 列表 / 页脚仍旧竖排 —— 与改造前逐字同一套排布 */
+.acct-main {
+  grid-column: 2;
+  grid-row: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.acct-rail {
+  grid-column: 1;
+  grid-row: 1;
+  /* 不再有溢出浮层，但仍保留 relative：收起按钮与滚动区的定位基准都在这一层内 */
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid var(--sidebar-border);
+  /* 比主区浅一档：它是面板内嵌的一段导航，用 --surface 会和表格糊成一块 */
+  background: var(--rail-bg);
+}
+
+/* 收起态：容器不再是 flex 列（里面只有一个图标条），且不画右分隔线 —— 44px 图标条
+   自己就是一条视觉边界，再叠一条竖线会显得左栏没对齐 */
+.acct-rail.is-collapsed {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  border-right: 1px solid var(--sidebar-border);
+}
+
+.acct-rail-body {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  padding: 8px 8px 10px;
+}
+
+/* 收起按钮 + 搜索框同一行：按钮 20px 见方，搜索框吃剩余宽度 */
+.acct-rail-top {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  margin-bottom: 6px;
+}
+
+.acct-rail-collapse {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: background-color 150ms ease-out, color 150ms ease-out;
+}
+
+.acct-rail-collapse:hover { background: var(--nav-hover); color: var(--text); }
+
+.acct-rail-search { flex: 1; min-width: 0; }
+
+/* ─── 收起态：图标条（每个图标 = 切到那一家）─────────── */
+
+.acct-rail-strip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 6px;
+  overflow-y: auto;
+}
+
+.acct-rail-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: background-color 150ms ease-out, border-color 150ms ease-out, color 150ms ease-out;
+}
+
+.acct-rail-chip:hover { background: var(--nav-hover); color: var(--text); }
+
+/* 选中项所在的厂商（或「全局」）自己亮起来 —— 收起态看不到文字，就靠这一枚自证 */
+.acct-rail-chip.is-on {
+  border-color: var(--nav-selected-border);
+  background: var(--nav-selected-bg);
+  color: var(--nav-selected-fg);
+}
+
+/* 最上面那枚是「展开」而不是切作用域：与下面的厂商图标拉开一点距离 */
+.acct-rail-chip.is-toggle { margin-bottom: 4px; color: var(--text-3); }
+
+.acct-rail-chip.is-toggle:hover { color: var(--text); }
+
+/* ─── 分组行 / 叶子行的小件 ─── */
+
+/* 折叠箭头：与左侧头像同宽的一枚 10px 小图，撑开分组行文字与叶子行的缩进差 */
+.acct-rail-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 10px;
+  color: var(--text-3);
+}
+
+.acct-rail-caret svg { width: 10px; height: 10px; }
+
+/* 厂商头像 16px：收录过图标的走真实图标，否则首字母方块（与账号页分组带 .grp-logo
+   同一取舍、同一尺寸；两处若尺寸分叉，同一家在两处会显示成两个大小） */
+.acct-rail-av {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.acct-rail-av img { width: 16px; height: 16px; object-fit: contain; }
+
+/* 首字母块有底色，有图标的家不该也有 —— 由 :has 摘掉（WebView2 认） */
+.acct-rail-av:has(img) { background: transparent; }

@@ -27,6 +27,31 @@
   gap: var(--pad);
 }
 
+/* ─── 页内分类导航已撤销 ────────────────────────────────────────
+   这 13 个分类现在平铺成主侧栏的**一级菜单**（sidebar-layout.js 的
+   SETTINGS_MENUS），进设置页的路径是「点侧栏某一项」。页内再留一列
+   同样的导航等于同一件事说两遍，还白占 140px 内容宽度 —— 整列不再显示。
+
+   ★ 只 display:none，**不从 DOM 里删节点**：
+     - sidebar-settings-sync.js 靠 `.settings-nav-item.active` 的 data-cat
+       读「当前停在哪个分类」，再投影到 <html data-settings-cat>；
+       app.js 的 markActiveNav / crumbText / syncUpdateBadge 全读那个属性。
+       删掉节点，侧栏高亮、面包屑、更新角标会一起失灵。
+     - 那个脚本的 MutationObserver 盯的是节点 class 变化，display:none
+       不影响属性变化回调（元素照样在 DOM 里可查）。
+   改 React 侧（islands/settings-page.tsx 不渲染 <nav>）也能达到同样效果，
+   但那是上游文件，还要连带重建 islands/ui.js（1.4MB 产物），下游 fork
+   每次同步上游都得多解一次冲突。一行 CSS 更划算。
+   若上游哪天自己撤掉这列导航，本段可原样删除。 */
+.settings-layout > .settings-nav { display: none; }
+
+/* 窄屏（≤900px）原本用 .settings-layout.is-detail 把「分类列表 / 分类面板」
+   分成两级；导航撤掉后列表层不复存在，内容区必须常显，否则进设置页是一片
+   空白。mobile.css 里那条 `.settings-layout:not(.is-detail) .settings-panes
+   { display: none }` 与这里同特异性但加载更晚（index.html 把 mobile.css
+   排在 page-settings.css 之后），所以叠一层类名把特异性提到 0,4,0 压过它。 */
+.settings-layout.settings-layout:not(.is-detail) > .settings-panes { display: block; }
+
 /* ─── 左栏：分类导航 ───
    观感对齐主侧栏的 .nav-item，但不能直接复用那个类名：
    app.js 的 showPage 会遍历所有 .nav-item 并按 data-page 重置 active，
@@ -502,4 +527,129 @@
    这里只把标签列放宽一点，避免较长的字段标签在 118px 里挤成两行 */
 @media (max-width: 900px) {
   .retention-row { grid-template-columns: max-content 1fr; }
+}
+
+/* 分组卡片的两栏容器。
+   ── 为什么用 `columns` 而不是 grid ──────────────────────────
+   六张卡片高度差很大（「环境」十行、「计数」七行），grid 两列会把同一行的两张
+   拉到等高 —— 矮的那张下面留一大片空白，看着像没加载完。多列流式布局让每张卡
+   按自己的高度排列，只在换列时平衡高度，视觉上紧凑得多。
+   `break-inside: avoid` 是这条布局成立的前提：少了它，一张卡片会被从中间劈开、
+   上半截在左栏底部、下半截在右栏顶部。
+   `column-gap` 与面板之间的 14px 垂直间距分开写：面板自己带 margin-bottom，
+   横向间距必须比它大一点，否则两栏会读成一栏。 */
+.sysinfo-groups {
+  columns: 2;
+  column-gap: 14px;
+}
+.sysinfo-groups > .panel {
+  /* 列内不被拆开（见上） */
+  break-inside: avoid;
+  /* `columns` 下子元素是行内流的一部分，不设 inline-size 的话卡片会按内容宽度
+     收缩；100% 让它铺满所在那一列。 */
+  inline-size: 100%;
+}
+
+/* 窄窗口退回一栏：与 .sysinfo-row 的断点同一处（900px），
+   设置面板本身也在那个宽度退化成「导航在上」的形态。 */
+@media (max-width: 900px) {
+  .sysinfo-groups { columns: 1; }
+}
+
+/* ─── 版本信息（system-info-pane.tsx）───────────────────────────
+   这一页的读者是「出问题的人 + 看截图的人」：值要能逐字核对（版本号、
+   路径、端口），所以值一律等宽；键列定宽，让十几行读下来是一条竖直的
+   对齐线，而不是每行各偏一点。 */
+
+/* 顶部环境徽章行：形态 + 版本 + 系统，一行读完 */
+.sysinfo-headline {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.sysinfo-headline-version {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.sysinfo-headline-os {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+/* 键值行：定宽键列 + 吃掉剩余宽度的值列。
+   `min-width: 0` 是长路径折行的前提（grid 项默认 min-width:auto，
+   不加它，一个 200 字符的路径会把整行撑出横向滚动）。 */
+.sysinfo-row {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 4px 12px;
+}
+
+/* 两栏布局下每张卡片只有半屏宽，150px 的键列会吃掉将近一半，
+   长路径（数据目录 / 程序路径）只剩两三个字符就换行。收到 118px：
+   最长的那几个键（「WebView / 浏览器内核」「/v1 拒绝无 Key 请求」）
+   仍能放下，值列多出三十来像素。 */
+.sysinfo-groups .sysinfo-row {
+  grid-template-columns: 118px minmax(0, 1fr);
+  gap: 4px 10px;
+}
+
+.sysinfo-key {
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.sysinfo-value {
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.55;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 值里的机器可读部分（版本号 / 路径 / 端口 / PID） */
+.sysinfo-mono {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  word-break: break-all;
+}
+
+/* 括号里的补充说明（库大小这类）：比主值淡一档，不抢读数 */
+.sysinfo-dim { color: var(--text-3); }
+
+/* 「隐藏用户名」开关行：左文右开关，说明在文字下方换行 */
+.sysinfo-toggle {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hairline);
+}
+
+.sysinfo-toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--text);
+  font-weight: 500;
+}
+
+/* 窄窗口：键列收窄（150px 在 360px 宽的设置面板里会吃掉一半）。
+   选择器要带上 `.sysinfo-groups` 才压得过上面那条两栏规则 —— 那时
+   `.sysinfo-groups` 已经退回单栏（columns: 1），键列反而可以更宽一点，
+   但 108px 仍比 118px 省地方，且与本文档里其余窄屏口径一致。 */
+@media (max-width: 900px) {
+  .sysinfo-row,
+  .sysinfo-groups .sysinfo-row { grid-template-columns: 108px minmax(0, 1fr); }
 }

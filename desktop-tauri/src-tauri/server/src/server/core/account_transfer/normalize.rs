@@ -177,12 +177,13 @@ pub(super) fn normalize_imported(
     if crate::server::core::providers::workbuddy::is_workbuddy_family(&provider) {
         normalize_workbuddy_known_fields(&mut record, item, before);
     } else {
-        // 非 WorkBuddy：edition / prefixPath / endpoint / platform 是 WorkBuddy 的
-        // 已知字段（腾讯端点身份），不属于其余各家的 schema。一律不写入 ——
-        // 既不给新记录注入腾讯端点，也不让导出文件里的残留值覆盖别家记录。
-        for key in ["edition", "prefixPath", "endpoint", "platform"] {
-            record.remove(key);
-        }
+        // 非 WorkBuddy：edition / prefixPath / endpoint / platform 是腾讯端点
+        // 身份，不属于其余各家的 schema，一律不写入。
+        //
+        // 判据只有「是不是 WorkBuddy 系」一条，**不枚举别家** —— 新增一家
+        // provider 时不需要回来加一行（旧实现的维护负担不在这里，而在
+        // `identity.rs` 的逐家身份分支，那边已经改成通用链）。
+        strip_foreign_endpoint_keys(&mut record, &provider);
     }
 
     // 自定义提供商账号：apiKey / baseUrl / tokenTail 是本家 schema，
@@ -193,6 +194,22 @@ pub(super) fn normalize_imported(
 
     // provider 已在上面落位：这里不再重复写入
     Ok(record)
+}
+
+/// 把**别家的端点残留**从记录里剔掉（新增与更新两条路径都调用）。
+///
+/// 一份被跨家污染过的旧文件（早年的导出把腾讯端点写进了别家记录）会把这些键
+/// 带进来；别家的适配器不读它们，留着只会让排障时看到假的归属。
+///
+/// 判据只看 provider 是否属于 WorkBuddy 系，**不枚举别家**：新增一家 provider
+/// 时不需要回来加一行 —— 这正是旧实现最费维护的地方。
+fn strip_foreign_endpoint_keys(record: &mut Map<String, Value>, provider: &str) {
+    if crate::server::core::providers::workbuddy::is_workbuddy_family(provider) {
+        return;
+    }
+    for key in ["edition", "prefixPath", "endpoint", "platform"] {
+        record.remove(key);
+    }
 }
 
 /// 自定义提供商账号的专属字段：apiKey（凭证）、noAuth（无需鉴权标记）、

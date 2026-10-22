@@ -180,11 +180,28 @@ struct LegacyAppSettings {
     _lan_access: bool,
     _lan_panel: bool,
     _lightweight_mode: bool,
+    /// 面板会话令牌（两个字段都是密文）。旧版文件不会有，`default` 让缺失照常通过。
+    _panel_session: LegacyPanelSession,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct LegacyPanelSession {
+    _refresh: String,
+    _access: String,
 }
 
 impl Default for LegacyAppSettings {
     fn default() -> Self {
-        Self { _close_to_tray: true, _autostart: false, _proxy_port: 0, _lan_access: false, _lan_panel: false, _lightweight_mode: false }
+        Self {
+            _close_to_tray: true,
+            _autostart: false,
+            _proxy_port: 0,
+            _lan_access: false,
+            _lan_panel: false,
+            _lightweight_mode: false,
+            _panel_session: LegacyPanelSession::default(),
+        }
     }
 }
 

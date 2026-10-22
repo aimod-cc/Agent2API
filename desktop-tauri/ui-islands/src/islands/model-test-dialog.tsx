@@ -533,9 +533,12 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
   const proxyItems: Array<{ value: string; label: string; disabled?: boolean }> = [
     { value: '', label: t('跟随账号配置') },
     { value: PROXY_DIRECT, label: t('直连（不使用代理）') },
+    // 已禁用的池条目置灰：测试会走它解析（失败即回退直连），选它测出来的
+    // 结论不是用户想要的那个 —— 与账号页代理列同一口径
     ...(pool ?? []).map(item => ({
       value: `${POOL_VALUE_PREFIX}${item.id}`,
       label: poolItemLabel(item),
+      disabled: item.enabled === false,
     })),
   ]
   if (pool === null) {

@@ -12,10 +12,12 @@
 //! 的 GET 后缀段与 POST 后缀段各一条。
 //!
 //! ── 按提供商分派 ────────────────────────────────────────────
-//! 新手任务目前三家有：Loomy（任务表 + 逐项上报，`loomy::onboarding`）、
+//! 新手任务目前五家有：Loomy（任务表 + 逐项上报，`loomy::onboarding`）、
 //! 小浣熊（首次登录奖励双任务探测 —— 电脑端 / 手机端各一条端点，
-//! `raccoon::onboarding`），以及 CodeArts（运营活动里的**新人注册礼**这一条，
-//! `codearts::onboarding` —— 与每日福利共用 delivery/claim/confirm 执行体）。
+//! `raccoon::onboarding`），CodeArts（运营活动里的**新人注册礼**这一条，
+//! `codearts::onboarding` —— 与每日福利共用 delivery/claim/confirm 执行体），
+//! OfficeAce（与每日签到同一个上游动作），以及智谱清言（任务中心的 `newbie`
+//! 分类，`chatglm::tasks` —— 逐条 click + complete）。
 //! 分派键是账号记录里的 provider 字段；查不到记录或缺省一律走 Loomy ——
 //! 与既有行为一致（`loomy_account_record` 会对别家 id 报 404，兜底语义不变）。
 //!
@@ -68,6 +70,10 @@ const CODEARTS_PROVIDER_ID: &str =
 /// `officeace::onboarding` 的模块头。
 const OFFICEACE_PROVIDER_ID: &str =
     crate::server::core::account_store::OFFICEACE_PROVIDER_ID;
+/// 智谱清言的分派键：它的新手任务是**任务中心里的 `newbie` 分类**
+/// （`GET /chatglm/agent-api/task/center` 的 `categories[code=newbie]`），
+/// 领取 = 逐条 click + complete（见 `chatglm::tasks` 的模块头）。
+const CHATGLM_PROVIDER_ID: &str = "chatglm";
 
 /// 从账号存储里查一条账号的 provider id（查不到账号给空串 —— 分派会落到
 /// Loomy 分支，由 `loomy_account_record` 报 404，与既有兜底行为一致）。
@@ -101,6 +107,9 @@ pub fn settled_view(store: &AccountStore, account_id: &str, provider: &str) -> O
         CODEARTS_PROVIDER_ID => {
             codearts_onboarding::settled_view(store.codearts_account_record(account_id).as_ref())
         }
+        CHATGLM_PROVIDER_ID => crate::server::core::providers::onboarding_memory::snapshot(
+            store.chatglm_account_record(account_id).as_ref(),
+        ),
         _ => loomy_onboarding::settled_view(store.loomy_account_record(account_id).as_ref()),
     }
 }
@@ -120,6 +129,14 @@ pub async fn status(state: &ServerState, account_id: &str, refresh: bool) -> Res
         OFFICEACE_PROVIDER_ID => {
             officeace_onboarding::get_tasks(state.store(), account_id, refresh).await
         }
+        CHATGLM_PROVIDER_ID => {
+            crate::server::core::providers::chatglm::tasks::get_tasks(
+                state.store(),
+                account_id,
+                refresh,
+            )
+            .await
+        }
         _ => loomy_onboarding::get_tasks(state.store(), account_id, refresh).await,
     };
     match result {
@@ -135,6 +152,10 @@ pub async fn claim(state: &ServerState, account_id: &str) -> Response {
         RACCOON_PROVIDER_ID => raccoon_onboarding::claim_all(state.store(), account_id).await,
         CODEARTS_PROVIDER_ID => codearts_onboarding::claim_all(state.store(), account_id).await,
         OFFICEACE_PROVIDER_ID => officeace_onboarding::claim_all(state.store(), account_id).await,
+        CHATGLM_PROVIDER_ID => {
+            crate::server::core::providers::chatglm::tasks::claim_all(state.store(), account_id)
+                .await
+        }
         _ => loomy_onboarding::claim_all(state.store(), account_id).await,
     };
     match result {

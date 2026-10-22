@@ -1,0 +1,132 @@
+/* ─────────────────────────────────────────────
+   报表页 ·「用量与额度」视角（report-credit-view.tsx，类名 cr- 前缀）
+   与报表既有的「请求量」视角并列，由 report-page.tsx 顶部的视角切换条决定渲染谁。
+   颜色一律取 tokens.css 的语义变量，深浅主题自动成立。
+   ───────────────────────────────────────────── */
+
+/* ─── 视角切换条 ─── */
+.report-view-switch {
+  flex: none;
+  display: flex;
+  align-items: center;
+  padding-bottom: 12px;
+}
+
+/* ─── 额度面板 ─── */
+.cr-panel { margin-bottom: 0; }
+
+.cr-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 一条账号（一块） */
+.cr-acct {
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  padding: 10px 14px;
+}
+.cr-acct.is-empty { background: transparent; }
+
+.cr-acct-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.cr-acct-name {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 260px;
+}
+.cr-acct-provider {
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+.cr-acct-pad { flex: 1 1 auto; }
+.cr-acct-total {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  color: var(--text);
+}
+.cr-acct-unit {
+  margin-left: 2px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+.cr-acct-expiry {
+  font-size: 11.5px;
+  color: var(--warn);
+  white-space: nowrap;
+}
+
+/* ─── 逐份明细 ─── */
+.cr-lines {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cr-line {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) auto minmax(80px, 140px);
+  align-items: center;
+  gap: 8px 10px;
+}
+.cr-name {
+  color: var(--text-2);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cr-view {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+}
+.cr-window {
+  grid-column: 1 / -1;
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+/* 剩余量条（画的是**剩余**，与账号页积分明细同向） */
+.cr-bar {
+  display: block;
+  height: 4px;
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.cr-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--r-pill);
+}
+.cr-bar-fill.cr-ok { background: var(--ok); }
+.cr-bar-fill.cr-warn { background: var(--warn); }
+.cr-bar-fill.cr-bad { background: var(--danger); }
+.cr-bar-fill.cr-muted { background: var(--border-strong); }
+
+/* ─── 空态 ─── */
+.cr-none {
+  margin-top: 6px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+.cr-empty {
+  padding: 40px 16px;
+  color: var(--text-3);
+  font-size: 12.5px;
+  text-align: center;
+}

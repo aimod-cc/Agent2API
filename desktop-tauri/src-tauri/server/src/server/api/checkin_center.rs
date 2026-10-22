@@ -28,14 +28,15 @@
 //!   "daily": {
 //!     "providers": [ { "id", "label",
 //!                      "accounts": [ { "id", "name", "available", "checkinAt",
-//!                                      "checkedInToday" } ],
+//!                                      "checkedInToday", "streakDays" } ],
 //!                      "doneCount", "totalCount" } ],
 //!     "outOfScope": [ { "label", "reason", "count" } ],
 //!     "todayDone": 6, "todayEligible": 9
 //!   },
 //!   "extras": {
 //!     "onboarding": [ { "id", "name", "provider" } ],
-//!     "plans":      [ { "id", "name", "provider", "claimAt", "claimPlans" } ]
+//!     "plans":      [ { "id", "name", "provider", "claimAt", "claimPlans" } ],
+//!     "autoGrant":  [ { "id", "name", "provider", "note" } ]
 //!   },
 //!   "auto": { …与 GET /api/auto-checkin 同形… },
 //!   "history": [ { "at", "date", "reason", "succeeded", "total", "skipped",
@@ -43,6 +44,26 @@
 //! }
 //! ```
 //! `history` 新条目在前（`checkin_history` 的落盘顺序），前端直接按序渲染时间线。
+//!
+//! ── 「只读余额」为什么是独立一段，而不是塞进每日签到 ──────────
+//! QClaw **已公告停运**（2026-09-24 公告、**2026-12-24 00:00 正式停服**），
+//! 停新用户注册与订阅续费，官网已开「停服专区 / 申请退款 / 迁移到 WorkBuddy」。
+//! 它的账号没有任何「领取 / 签到」动作可调（客户端 bundle 里没有签到、没有领奖
+//! 端点，jprx 的 `4110` 只读余额）。若按 `CHECKIN_PROVIDERS` 进每日签到分组，
+//! 界面会长出一颗「签到」按钮 —— 那颗按钮点下去必然 404/报错。
+//! **一个点了必然报错的复选框比没有更糟**。
+//!
+//! 但它也不能默默消失：用户要在这页看到「这个账号还有多少积分、什么时候到期」。
+//! 所以它进 `extras.autoGrant`（与 `onboarding` / `plans` 同一层级），界面
+//! 渲染成**只读行 + 余额惰性查询**，并在「每日签到」的折叠说明里点名指路。
+//!
+//! ⚠️ **2026-10-20 语义更正（用户指出）**：本段旧文案写的是「积分随登录
+//! 自动发放、无需签到」，这在停运期会误导人 —— 用户现在该做的不是每天等
+//! 到账，而是**去官网迁移到 WorkBuddy 领 1000 积分补贴**（补贴发到
+//! WorkBuddy 账号、有效期 1 个月，需完成授权并实际迁移数据）。因此分组语义
+//! 改为「本站不再发放积分、只剩只读余额」，说明文案带上迁移入口。
+//! 账号内已有积分**有效期不调整**，可在原有效期内继续用；已购未用完的
+//! 订阅 / 积分包可按已用比例申请退款。
 
 use std::collections::BTreeMap;
 
@@ -93,6 +114,19 @@ fn account_display_name(account: &Value) -> String {
 /// 判据改了这里要跟着改 —— 两处写的都是「这个账号为什么不能签到」。
 fn out_of_scope_reason(account: &Value) -> &'static str {
     let provider = account_text(account, "provider");
+    // 智谱清言的**访客账号**：与「没有签到链路」是两回事 —— 上游这一站有签到
+    // （登录账号就能签），只是访客没有积分体系（相关接口对访客一律 401）。
+    // 判在 provider / edition 之前：本家的 edition 恒 cn，不会与下面那条撞；
+    // 文案与 `resolve_checkin_targets` 单账号拒绝时那句同义。
+    if account.get("isGuest").and_then(Value::as_bool) == Some(true) {
+        return "访客账号没有积分体系";
+    }
+    // 只读余额类（QClaw）不进 outOfScope：它们有自己的只读分组（`extras.autoGrant`），
+    // 文案在那边给。走到这里说明 `auto_grant_providers` 与下面的分流判据不同步 ——
+    // 兜底给一句实情，不误导成「没有签到链路」。
+    if auto_grant_providers().iter().any(|id| *id == provider) {
+        return "已进入停运迁移期，本站不再发放积分";
+    }
     // WorkBuddy / Qoder 两个地区的国际版都在 `supports_checkin` 里显式放行
     //（前者走日活链、后者带风控领积分），还落在范围外的 intl 只可能是 Accio。
     if account.get("edition").and_then(Value::as_str) == Some("intl") {
@@ -101,7 +135,44 @@ fn out_of_scope_reason(account: &Value) -> &'static str {
     if crate::server::core::account_store::is_accio_family(&provider) {
         return "未接入签到链路";
     }
+    // Marvis（腾讯马维斯）：上游**没有签到概念** —— 客户端只有「每人每天
+    // 1000 万免费 Token」的额度池，没有可领的每日动作（`MarvisAgent` /
+    // `MarvisHost` 二进制里没有任何 checkin / claim / reward 端点，排除过程
+    // 见 `providers::marvis::mod` 的模块头）。文案要说实情，不要笼统说
+    // 「没有签到链路」—— 用户会以为是本站没做。
+    if provider == crate::server::core::account_store::marvis_provider_id() {
+        return "上游没有签到活动（每天 1000 万 Token 的额度池，无需领取）";
+    }
     "没有签到链路"
+}
+
+/// 「本站不再发放积分、只剩只读余额」的提供商清单。
+///
+/// ── 判据（加一家之前先逐条确认上游）────────────────────────
+/// 1. 账号上**真实存在**积分余额（能查到数），否则这一行只是个空壳；
+/// 2. 上游**没有任何**「领取 / 签到」端点可调 —— 有的话就该进
+///    `CHECKIN_PROVIDERS` 走真正的签到链，而不是在这里当只读行；
+/// 3. 积分有到期概念（余额里带 `expireAt`），否则「什么时候到期」这一栏没内容。
+///
+/// 目前只有 QClaw：已停运（2026-12-24 停服），`jprx 4110` 只读余额、
+/// `items[]` 带 `expire_at`（实证见 `core::providers::qclaw::points`）。
+pub const AUTO_GRANT_PROVIDERS: [&str; 1] = ["qclaw"];
+
+fn auto_grant_providers() -> &'static [&'static str] {
+    &AUTO_GRANT_PROVIDERS
+}
+
+/// 只读行上的说明文案（后端给，前端原样透出 —— 与 outOfScope 的原因同一处置：
+/// 「这家的积分怎么来的」是后端事实，不该在前端再抄一份）。
+fn auto_grant_note(provider: &str) -> &'static str {
+    match provider {
+        // 带迁移入口：停运期用户该做的是搬去 WorkBuddy 领补贴，不是等每天到账
+        "qclaw" => {
+            "已停止发放积分（2026-12-24 停服）。余额在原有效期内仍可用；\
+             去 QClaw 官网「迁移到 WorkBuddy」完成迁移可领 1000 积分补贴（发到 WorkBuddy 账号）"
+        }
+        _ => "本站已停止发放积分，余额在原有效期内仍可用",
+    }
 }
 
 /// 签到中心的聚合快照（不发任何上游请求 —— 资格类状态由前端按需惰性查询）
@@ -119,6 +190,8 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
     // 「提供商 + 原因」聚合（label 用注册表名，理由取排除分支的文案）。
     let mut buckets: Vec<Vec<Value>> = vec![Vec::new(); CHECKIN_PROVIDERS.len()];
     let mut out_of_scope: BTreeMap<String, (String, String, i64)> = BTreeMap::new();
+    // 只读余额类按 provider 分桶（BTreeMap 保证界面行序稳定，与本文件别处一致）
+    let mut auto_grant: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for account in &accounts {
         let provider = account_text(account, "provider");
         let provider = if provider.is_empty() {
@@ -142,7 +215,23 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
                 // 版本（cn / intl，缺失 null）：WorkBuddy 国际版在这张表里执行的是
                 // 「领日活」（活跃保活），按钮文案与提示要跟国内版的「签到」分开
                 "edition": account.get("edition").cloned().unwrap_or(Value::Null),
+                // 成长中心连登天数（WorkBuddy 国内版；签到后回读落库，见
+                // `AccountStore::mark_streak_days`）。恒为数字（0 = 还没读到过），
+                // 与公开形态同一口径 —— 界面按数字读，不必判「字段缺失」。
+                "streakDays": account.get("streakDays").cloned().unwrap_or(Value::from(0)),
             }));
+        } else if auto_grant_providers().iter().any(|id| *id == provider) {
+            // 只读余额类（QClaw，已停运）：进自己的只读分组，见模块头。
+            // 这里只收集账号行；余额由前端按需惰性查询（快照零上游请求的铁律）
+            auto_grant
+                .entry(provider.clone())
+                .or_default()
+                .push(json!({
+                    "id": account_text(account, "id"),
+                    "name": Value::from(account_display_name(account)),
+                    "provider": provider,
+                    "note": auto_grant_note(&provider),
+                }));
         } else {
             let label = crate::server::core::providers::label_of(&provider);
             let reason = out_of_scope_reason(account);
@@ -221,6 +310,33 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
     // OfficeAce 的「新手任务」与每日签到是同一个上游动作（见 officeace::onboarding），
     // 所以它也在这张分组表里 —— 前端按 server 给的 extras.onboarding 驱动，不硬编码家。
     onboarding_rows.extend(onboarding_rows_of("officeace"));
+    // 智谱清言的新手任务是任务中心里的 `newbie` 分类（见 `chatglm::tasks`）。
+    // 它的**每日**任务与每日登录积分一起走上面的每日签到链，两块互不重复 ——
+    // 与 CodeArts「一次性归新手福利、每日归签到」同一分法。
+    //
+    // **访客排除**：本家的任务中心只对登录账号开放（访客实测 401），列进来会让
+    // 「签到后自动补领」每次都为它白打一次注定失败的查询。
+    onboarding_rows.extend(
+        accounts
+            .iter()
+            .filter(|account| {
+                account_text(account, "provider") == "chatglm"
+                    && !crate::server::core::providers::chatglm::tasks::is_guest_account(
+                        state.store(),
+                        &account_text(account, "id"),
+                    )
+            })
+            .map(|account| {
+                let id = account_text(account, "id");
+                json!({
+                    "id": id,
+                    "name": Value::from(account_display_name(account)),
+                    "provider": "chatglm",
+                    "settled": super::onboarding::settled_view(state.store(), &id, "chatglm")
+                        .unwrap_or(Value::Null),
+                })
+            }),
+    );
     // ZCode 的福利行带**本地领取台账**（`account.claimPlans`）—— 后端落盘的本地
     // 事实，带出来零上游请求，不违反「快照零上游」；界面的「今天领过哪几份」按它
     // 逐份比对（北京时间的日界判定在前端，不在后端再抄一份）。
@@ -276,10 +392,22 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
             "onboarding": onboarding_rows,
             "plans": plan_rows,
             "growth": growth_rows,
+            // 只读余额类（QClaw）：只读行 —— 已停运、不再发放，只剩余额可看。
+            // 形状与 onboarding 同构（id/name/provider），多一个 note 说明文案
+            "autoGrant": auto_grant
+                .into_values()
+                .flatten()
+                .collect::<Vec<Value>>(),
         },
         "auto": state.auto_checkin().state(),
         // WorkBuddy 国际版日活保活的模型链（签到中心可编辑；空清单回落缺省链）
         "keepalive": crate::server::core::billing::keepalive::state(),
+        // 猫猫旅行定时排程（国内版）：开关 / 时刻 / 今日已跑时刻 / 上一轮结果。
+        // 与 `auto`（签到排程）并列 —— 两者是独立排程，各自开关与时刻。
+        "travel": crate::server::core::growth_scheduler::state(),
+        // 成长任务每日排程（国内版）：同上，独立于签到与旅行
+        //（配置键 `growthTaskSchedule`，见 core::growth_task_scheduler）。
+        "growthTask": crate::server::core::growth_task_scheduler::state(),
         "history": checkin_history::list(),
     }))
 }

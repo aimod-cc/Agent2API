@@ -1,14 +1,19 @@
 {
   "name": "agent2api",
-  "version": "3.0.8",
+  "version": "3.2.0-beta.1",
   "description": "Agent2API - 多提供商本地网关：把 WorkBuddy / 小浣熊 / CatPaw / AutoClaw 等客户端登录态包装成 OpenAI 兼容接口，附带账号管理、出站指纹脱敏与请求报表",
   "type": "module",
   "private": true,
   "scripts": {
+    "prepare": "git config core.hooksPath .githooks || exit 0",
     "build:icon": "node build/make-icon.mjs",
     "tauri:install": "npm --prefix desktop-tauri install",
     "tauri:dev": "npm --prefix desktop-tauri run dev",
-    "tauri:build": "npm --prefix desktop-tauri run build"
+    "tauri:build": "npm --prefix desktop-tauri run build",
+    "mobile:install": "npm --prefix desktop-tauri/mobile install",
+    "mobile:build": "npm --prefix desktop-tauri/mobile run build",
+    "mobile:watch": "npm --prefix desktop-tauri/mobile run watch",
+    "ui:islands": "npm --prefix desktop-tauri/ui-islands run build"
   },
   "keywords": [
     "agent2api",
@@ -24,10 +29,10 @@
     "sse",
     "llm"
   ],
-  "author": "aimod-cc",
+  "author": "Agent2API",
   "repository": {
     "type": "git",
-    "url": "https://github.com/aimod-cc/agent2api.git"
+    "url": "https://github.com/Agent2API/agent2api.git"
   },
   "license": "SEE LICENSE IN LICENSE",
   "engines": {

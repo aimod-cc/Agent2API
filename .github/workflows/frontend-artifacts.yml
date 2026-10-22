@@ -3,10 +3,11 @@ name: frontend-artifacts
 # 校验「入库的前端构建产物」与源码同源。
 #
 # ── 为什么需要单独一道闸 ──────────────────────────────────────
-# 本仓库把构建产物**入库**（`ui/islands/ui.js`、`ui/islands/ui.css`、`ui/i18n/**`），
-# 而 Tauri 打包的正是 `ui/` 这个静态目录（见 tauri.conf.json 的 frontendDist）——
-# 也就是说上线的字节就是仓库里那几份。于是「只改源码不重新构建」与「手改产物」
-# 都能一路合进 beta 并被打进安装包，而常规 review 看不出 1.1 MB 压缩文件里少了什么。
+# 本仓库把构建产物**入库**（`ui/islands/ui.js`、`ui/islands/ui.css`、`ui/i18n/**`、
+# `ui/m/**`），而 Tauri 打包的正是 `ui/` 这个静态目录（见 tauri.conf.json 的
+# frontendDist）—— 也就是说上线的字节就是仓库里那几份。于是「只改源码不重新构建」
+# 与「手改产物」都能一路合进 beta 并被打进安装包，而常规 review 看不出 1.1 MB
+# 压缩文件里少了什么。
 #
 # 2026-10 合并 #228 / #235 时踩到过这个面：两个 PR 各自重建过产物，在 `ui.js` 上
 # 必然撞车，而**取任何一边都会静默回退另一边的 UI 改动**（那一次是靠人工核对
@@ -50,6 +51,7 @@ jobs:
           cache-dependency-path: |
             desktop-tauri/ui-kit/package-lock.json
             desktop-tauri/ui-islands/package-lock.json
+            desktop-tauri/mobile/package-lock.json
             desktop-tauri/i18n/package-lock.json
 
       # ui-kit 也必须装，不是可选项：岛构建以**源码**方式接入它（vite alias 指到
@@ -61,12 +63,15 @@ jobs:
         run: |
           npm --prefix desktop-tauri/ui-kit ci
           npm --prefix desktop-tauri/ui-islands ci
+          npm --prefix desktop-tauri/mobile ci
           npm --prefix desktop-tauri/i18n ci
 
       - name: 重建产物
         run: |
           # 岛产物：build 脚本是 `tsc --noEmit && vite build`，顺带做类型检查
           npm --prefix desktop-tauri/ui-islands run build
+          # 手机端产物：同样带类型检查，产物落 ui/m/
+          npm --prefix desktop-tauri/mobile run build
           # 多语言词典产物
           npm --prefix desktop-tauri/i18n run build
 
@@ -89,6 +94,7 @@ jobs:
           echo
           echo "本地修复方式："
           echo "  npm --prefix desktop-tauri/ui-islands run build"
+          echo "  npm --prefix desktop-tauri/mobile run build"
           echo "  node desktop-tauri/i18n/build.mjs"
-          echo "（不要手动编辑 ui/islands/ui.js 或 ui/i18n/** —— 它们是产物，重建即可）"
+          echo "（不要手动编辑 ui/islands/ui.js、ui/m/** 或 ui/i18n/** —— 它们是产物，重建即可）"
           exit 1

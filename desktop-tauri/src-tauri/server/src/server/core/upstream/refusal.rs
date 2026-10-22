@@ -80,6 +80,34 @@ pub fn is_refusal(finishes: &[&str], finish: &str) -> bool {
         .any(|marker| marker.eq_ignore_ascii_case(finish))
 }
 
+/// 预读窗口里是否出现任一「**正文**拒绝标记」（逐字子串，大小写敏感）。
+///
+/// 集合来自适配器的 `stream_refusal_markers`；空集恒为 `None`（默认不认）。
+/// 与 [`is_refusal`] 是同一道门控的两个判据：那条看 `finish_reason`，
+/// 这条看正文 —— 有些上游的拒绝在正文里、`finish_reason` 干脆不存在
+/// （见 trait 上该方法的长注释）。
+///
+/// 代价方向与整条门控一致：宁可漏拦（继续当正常答复发出去），不可误拦
+/// （把正常答复判死）。所以只做**字面子串**匹配，不做任何宽泛推断 ——
+/// 标记串由各家按实测逐字写。
+pub fn matched_refusal_marker<'a>(bytes: &[u8], markers: &'a [&'a str]) -> Option<&'a str> {
+    markers
+        .iter()
+        .copied()
+        .find(|marker| !marker.is_empty() && contains_bytes(bytes, marker.as_bytes()))
+}
+
+/// `haystack` 里是否包含 `needle`（空 needle 恒假）。
+///
+/// 与 `api::pipeline` 里那个同名函数同形但**故意不共用**：那个在 `api` 层、
+/// 只为收尾帧特征服务；这里在 `upstream` 层、为正文标记服务。两处的
+/// 「最长特征/窗口」语义不同，合到一起会把两条独立演进的判据绑死。
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack.len() >= needle.len()
+        && haystack.windows(needle.len()).any(|window| window == needle)
+}
+
 impl HeldHead {
     /// 把「预读到的字节 + 剩余流」拼成一条**完整**的下游字节流。
     ///

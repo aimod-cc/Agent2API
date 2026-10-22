@@ -190,6 +190,75 @@ pub(crate) fn refresh_meta(kind: ProviderKind) -> (bool, i64) {
         // `orcaterm::models` 的模块头）：永远不是远程来源，也没有刷新时刻。
         // 与 ZCode 同一口径：如实回 `(false, 0)`，界面的「来源」列显示成内置清单。
         ProviderKind::OrcaTerm => (false, 0),
+        // 智谱清言有远程目录（`operation/detail?tag=available_models`）——
+        // 如实回报它的来源与拉取时刻，界面「更新日期」列才有东西可显示。
+        ProviderKind::Chatglm => (
+            super::chatglm::models::remote_refreshed(),
+            super::chatglm::models::last_refreshed_at(),
+        ),
+        // 千问办公的清单来自 `GET {gateway}/api/desktop/chat-modes`（三条付费模型）。
+        // 静态兜底（`models::fallback_manifest`）只是离线保底，判据与 raccoon /
+        // kuku 同款：**有远程内容**才算远程来源。
+        ProviderKind::Qwenwork => (
+            super::qwenwork::models::remote_refreshed(),
+            super::qwenwork::models::last_refreshed_at(),
+        ),
+        // QClaw 的清单来自本机网关（`GET 127.0.0.1:19000/proxy/llm/models`）。
+        // 静态兜底（11 条）只是离线保底，判据与 qwenwork / kuku 同款：
+        // **有远程内容**才算远程来源。
+        ProviderKind::Qclaw => (
+            super::qclaw::models::remote_refreshed(),
+            super::qclaw::models::last_refreshed_at(),
+        ),
+        // ModelScope 的两个站点各有一份独立清单（缓存按地区分格，见
+        // `modelscope::models` 的模块头）：这里如实各查**自己那一格**。
+        // 上游**没有**内置兜底清单，所以「有内容」就等于「远程拉到过」。
+        ProviderKind::Modelscope | ProviderKind::ModelscopeIntl => {
+            let region = super::modelscope::Region::from_kind(kind)
+                .unwrap_or(super::modelscope::Region::Cn);
+            (
+                super::modelscope::models::remote_refreshed(region),
+                super::modelscope::models::last_refreshed_at(region),
+            )
+        }
+        // AtomCode：清单来自 `GET {codingplan}/coding-plan/models-v2`。
+        // 本家**没有内置兜底清单**（写死的模型点一下可能是「参数错误」，
+        // 见 `atomcode/models.rs` 的模块头），所以「有目录」就是「远程拉到过」。
+        ProviderKind::Atomcode => (
+            super::atomcode::models::remote_refreshed(),
+            super::atomcode::models::last_refreshed_at(),
+        ),
+        // LobsterAI：清单来自 `GET {api}/api/models/available`（带 keyfrom query）。
+        // 拉不到时回落内置的 19 条静态表，所以「有远程内容」才算远程来源
+        // —— 与 Loomy / CommandCode 同一口径（`remote_refreshed` 只看落地的那些）。
+        ProviderKind::LobsterAi => (
+            super::lobsterai::models::remote_refreshed(),
+            super::lobsterai::models::last_refreshed_at(),
+        ),
+        // Marvis 没有远程目录（`GET /v1/models` 恒 404，见 `marvis/models.rs`），
+        // 静态清单恒可用 ⇒ 「已刷新」恒为 true、「上次刷新时刻」恒为 0（从未刷过）。
+        // 这与 ZCode 一类静态清单的家同一口径：界面显示「内置清单」而不是
+        // 「从未刷新」的告警。
+        ProviderKind::Marvis => (true, 0),
+        // MiniMax Code：清单来自 `GET /mavis/api/v1/models`（**免鉴权**，实测 200）。
+        // 静态兜底（两条：M3 / M3.1-Flash）只是离线保底，判据与 qwenwork / qclaw
+        // 同款：**有远程内容**才算远程来源。两个站点各读各的格子（见 `models.rs`）。
+        ProviderKind::Minimax => (
+            super::minimax::models::remote_refreshed(super::minimax::Region::Cn),
+            super::minimax::models::last_refreshed_at(super::minimax::Region::Cn),
+        ),
+        ProviderKind::MinimaxIntl => (
+            super::minimax::models::remote_refreshed(super::minimax::Region::Intl),
+            super::minimax::models::last_refreshed_at(super::minimax::Region::Intl),
+        ),
+        // Coze：清单来自 `GET /v1/workspaces` → `GET /v1/bots?workspace_id=`
+        // （PAT 可打）。本家**没有静态兜底** —— 清单是「这个用户发布过哪些
+        // 机器人」，编一份出来只会让客户端点一个不存在的 bot_id。因此
+        // 「有内容」就等于「远程拉到过」（与 AtomCode / Loomy 同一判据）。
+        ProviderKind::Coze => (
+            super::coze::models::remote_refreshed(),
+            super::coze::models::last_refreshed_at(),
+        ),
     }
 }
 
@@ -210,6 +279,34 @@ pub fn active_manifests(store: &AccountStore) -> Vec<(ProviderKind, Vec<Value>)>
         .filter_map(|kind| {
             let manifest = advertised_manifest_for(store, kind);
             (!manifest.is_empty()).then_some((kind, manifest))
+        })
+        .collect()
+}
+
+/// **管理页**用的「有账号、但清单为空」的家（左栏也要列出它们）。
+///
+/// ── 为什么要有这第二个清单（与 `active_manifests` 的分工）──────
+/// `active_manifests` 把空清单的家整个过滤掉，那个口径对**对外目录**是对的：
+/// 一个模型 id 都没有的家不该出现在 `/v1/models` 里，否则客户端会点到一个
+/// 必然 404 的名字。但**管理页**是「清单的可视检查」，它得能回答「这家为什么
+/// 没有模型」—— 一家都不列的话，用户看到的是「我明明加了账号，模型页却没有
+/// 这一家」，那与「这家还没接」在界面上长得一模一样。
+///
+/// 触发它的第一家在 2026-10 接入的 Coze：**模型 = 用户自己的机器人**
+/// （`bot_id`），新账号没有发布过 bot 时清单天然为空 —— 这是真实状态，
+/// 不是故障，但必须让用户**看得见**这一家、点得开、读得到解释。
+///
+/// 判据：`provider_available`（有账号，或有环境变量凭证）**且**清单为空。
+/// 不进 `advertised_manifest`、不进路由候选链 —— 本函数只有 `view.rs` 的
+/// `manage_view` 读，对外目录一行都不受影响。
+pub fn empty_manifests(store: &AccountStore) -> Vec<(ProviderKind, i64)> {
+    all_kinds()
+        .into_iter()
+        .filter(|kind| provider_available(store, *kind))
+        .filter(|kind| advertised_manifest_for(store, *kind).is_empty())
+        .map(|kind| {
+            let (_, refreshed_at) = refresh_meta(kind);
+            (kind, refreshed_at)
         })
         .collect()
 }

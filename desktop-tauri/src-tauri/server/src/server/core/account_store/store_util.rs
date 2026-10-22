@@ -169,16 +169,26 @@ pub(crate) fn max_concurrent_public(value: Option<&Value>) -> u64 {
 /// 第 4 个被上游回 **409**，而 409 是账号级冲突、不触发降级换号，客户端拿到一个
 /// 「明明有别家空着却报错」的结果。
 ///
+/// ── 只把 0 换成默认，不取大（曾经写成 `max(配置, 3)` 的教训）──────────
+/// 取大把**合法的 1 / 2** 也一起抬成了 3：库里存的是 1、准入闸按 1 拦，界面和
+/// 选路却读到 3。界面表现为「设成 1、保存后还是 3」；选路表现为在途 1 个仍被
+/// 选中、进门被 409 挡回，而有状态路径的 409 不换号 —— 设 1 反而比设 3 更容易
+/// 撞错误。同理要按准入闸的上限 [`MAX_SESSION_LIMIT`] 截断：存储层放行 0–999
+/// （所有家共用一条写入闸），闸门只认到 64，公开形态若报 999，选路会以为还有
+/// 935 个空位。
+///
 /// 别家 0 就是 0（不限）—— 两家的差别只在这一个函数里，各家的公开形态
 /// 不必各写一遍。
 pub(crate) fn max_concurrent_public_for(provider: &str, value: Option<&Value>) -> u64 {
     let configured = max_concurrent_public(value);
-    if provider == super::codearts_accounts::CODEARTS_PROVIDER_ID {
-        configured.max(
-            crate::server::core::providers::codearts::session::DEFAULT_SESSION_LIMIT as u64,
-        )
+    if provider != super::codearts_accounts::CODEARTS_PROVIDER_ID {
+        return configured;
+    }
+    use crate::server::core::providers::codearts::session::{DEFAULT_SESSION_LIMIT, MAX_SESSION_LIMIT};
+    if configured == 0 {
+        u64::from(DEFAULT_SESSION_LIMIT)
     } else {
-        configured
+        configured.min(u64::from(MAX_SESSION_LIMIT))
     }
 }
 

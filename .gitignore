@@ -13,6 +13,7 @@ desktop-tauri/src-tauri/gen/schemas/
 .zcode/
 .verify/
 prototype/
+.codeartsdoer/
 # ZCode 的忽略配置文件本身（本机工具配置，不入库）
 .zcodeignore
 
@@ -24,6 +25,20 @@ desktop-tauri/web
 logs/
 desktop-tauri/window-shot.png
 
+# 逆向取证工作区（181MB / 2325 个文件，且含**真实凭证**）
+# marvis-cred.json 里是 mv_ 令牌 + openid，marvis-aksk.json 是 AKSK，
+# apiKeys.bak.json 是 API Key，还有多份 token-dump / headers 抓包。
+# 本仓库是公开的 ⇒ 一律不入库。要留证据请脱敏后写进 docs/ 或 providers/<家>/ 的模块头。
+_recon/
+
+# JVM / JIT 崩溃转储（cargo test OOM 时留下的大文件，与仓库内容无关）
+hs_err_pid*.log
+replay_pid*.log
+
+# curl 调试残留（-D 响应头 / -c cookie jar），含会话令牌，不入库
+desktop-tauri/src-tauri/h1.txt
+desktop-tauri/src-tauri/c1.txt
+
 # 发布说明草稿只在本机留存，不入库；docs/ 下的其它文档正常入库
 /docs/release-notes/
 
@@ -33,3 +48,40 @@ dist/
 # Docker 部署：密钥与运行数据不入库
 .env
 data/
+
+# ── 手机 APK（Capacitor）──────────────────────────────────────
+# android/ 是 `npx cap add android` 生成的原生工程，需要入库：
+# 图标、Manifest、网络安全策略都是手改过的，重新生成会丢。
+# 但下面这些是构建机本地状态，不该进仓库：
+desktop-tauri/mobile/android/.gradle/
+desktop-tauri/mobile/android/build/
+desktop-tauri/mobile/android/app/build/
+desktop-tauri/mobile/android/local.properties
+desktop-tauri/mobile/android/.idea/
+desktop-tauri/mobile/android/capacitor-cordova-android-plugins/build/
+# 构建中间产物（android-www 由 npm run build:apk 生成，再同步进 android/）
+desktop-tauri/mobile/android-www/
+
+# APK 签名密钥与配套密码：**不入库**。
+# 拿着密钥 + 密码就能签一个同包名的假 APK 覆盖安装；本仓库是公开的，
+# 所以两者只留在打包机上。新机器打 release 包时按
+# desktop-tauri/mobile/android/keystore.properties.example 建一份
+# keystore.properties，再把密钥放回 android/ 目录。
+*.jks
+*.keystore
+desktop-tauri/mobile/android/keystore.properties
+
+# 本地测试跑出来的运行数据（数据库、加密密钥、日志）
+.agenttest2/
+
+# ── iOS（Capacitor）────────────────────────────────────────────
+# ios/ 是 `npx cap add ios` 生成的原生工程，需要入库：
+# Info.plist（ATS / 本地网络用途）、AppIcon、Splash 都是手改过的，
+# 重新生成会丢。
+# 构建机本地状态与生成物不入库（ios/.gitignore 已覆盖大部分，这里补两条
+# 全局的，避免换机器时把 Xcode 的派生数据带进来）：
+desktop-tauri/mobile/ios/App/build/
+desktop-tauri/mobile/ios/DerivedData/
+
+# 本地打包产物（.workbuddy 外的手工验包，不入库）
+/dist-local/

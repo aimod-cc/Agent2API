@@ -130,7 +130,6 @@ use serde_json::Value;
 use crate::server::core::account_store::AccountStore;
 use crate::server::errors::GatewayError;
 
-use super::qoder;
 use super::raccoon;
 use super::{catalog_cache, ProviderKind};
 
@@ -247,6 +246,19 @@ pub enum UpstreamResponse {
     /// 走翻译层的理由同上：账号轮换、限额冷却、退避重试、usage 记账与取消处理
     /// 全部留在编排层，只有字节形态在翻译器里变。
     AntigravityGemini,
+    /// 智谱清言的 **SSE 混合帧**：帧是 SSE（`data: {json}`）没错，但一轮回答里
+    /// 混着两种语义 —— `part.status == "init"` 的帧给的是**本拍新增的一小段**，
+    /// 带 finish 的帧给的是**整段全文快照**。而 OpenAI 要的是统一口径的 delta：
+    /// 全文快照直接透传会让下游把整段回答拼两遍（实测故障），
+    /// 把增量帧当快照差分则会丢内容。
+    /// 因此另开一台**按帧语义差分**的状态机（`upstream::translate` 的
+    /// `ChatglmToChatStream` ← `protocol::chatglm_stream`）。
+    ///
+    /// 它与另外三台的一处关键差别：本家的**业务失败走 HTTP 200 +
+    /// `application/json`**（`-1001 剩余积分不足`），不进这台翻译机 ——
+    /// 那一档由 `ChatglmAdapter::is_error_response` 在编排层拦下，
+    /// 走既有的错误分类与账号轮换（与 ZCode 同一处置）。
+    ChatglmSnapshot,
 }
 
 /// 上游错误分类（架构文档 §4.2；三个动作的语义见模块头）。
@@ -746,6 +758,30 @@ pub trait ProviderAdapter: Send + Sync {
         &[]
     }
 
+    /// 本家的「**正文**拒绝标记」：上游把拒绝写成正文时，用来识别它的固定子串。
+    ///
+    /// ── 为什么还要一条按正文判的钩子 ────────────────────────────
+    /// 有些上游的拒绝**不在 `finish_reason` 上**：它回 `200` + 一条正常的 SSE
+    /// 内容帧（正文是写死的话术），`finish_reason` 干脆不存在，然后 `[DONE]`。
+    /// 实测：AtomCode 的 CodingPlan 用量窗口耗尽后就是这样（2026-10-18 在 dev 上
+    /// 复现，客户端侧 426 字节，正文
+    /// 「模型「xxx」在当前 CodingPlan 用量窗口内已达上限。当前滚动窗口约在当日
+    /// HH:MM 结束并重置额度，请稍后重试。」）。只看状态码与 `finish_reason` 的话，
+    /// 这既不是失败也不算拒答 —— 于是一次**配额耗尽**被当成一次成功答复，
+    /// 账号不冷却、不换家，下一发还打它。
+    ///
+    /// ── 命中后的处置与 `finish_reason` 那条**不同**（别混）───────
+    /// `stream_refusal_finishes` 判的是**内容策略**拒绝：那是内容问题、换谁都会拒，
+    /// 所以处置是「不罚账号、换家」。
+    /// 本方法判的是**本账号的额度**问题：必须**罚账号**（按上游给的窗口重置时刻
+    /// 写冷却，见 `rotate::mark_account_limited` 的文本兜底）+ 换家。
+    ///
+    /// 取值是**逐字固定子串**（大小写敏感、按字节比对）——只写实测见过的那句，
+    /// 别写「可能出现的措辞」。默认空 = 不认任何正文标记，别家逐字节不变。
+    fn stream_refusal_markers(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// 本 provider 是否支持**主动**刷新凭证（模块头扩展 5）。
     ///
     /// 默认 false = 这家没有续期手段（没有 refreshToken、上游也没有刷新接口）。
@@ -1152,6 +1188,48 @@ pub fn adapter_for(kind: ProviderKind) -> &'static dyn ProviderAdapter {
         // 余额全部已接通（建会话 → assistant SSE，`is_stateful` 为 true，
         // 见 `orcaterm/mod.rs` 与 `orcaterm/adapter.rs` 的模块头）
         ProviderKind::OrcaTerm => &super::orcaterm::ORCATERM_ADAPTER,
+        // 智谱清言（`chatglm.cn`）：无状态转发，但响应帧混着「增量」与
+        // 「收尾全文快照」两种语义，走 `UpstreamResponse::ChatglmSnapshot`
+        // 那条按帧语义差分的翻译层
+        // （见 `chatglm/mod.rs` 与 `protocol::chatglm_stream` 的模块头）。
+        // 它是本项目**唯一**「访客免登录即可用」的一家（`guest/access` 换证）。
+        ProviderKind::Chatglm => &super::chatglm::CHATGLM_ADAPTER,
+        // 千问办公（`qwenwork.cn` 桌面客户端）：**纯无状态**转发 ——
+        // 上游推理 `maas.xiaoluozi.cn` 是标准 OpenAI 兼容协议（实测三个模型
+        // 全 200，含 SSE 与 `reasoning_content`），既不需要 Qoder 那套 COSY
+        // 签名，也没有请求体编码/响应信封要拆。因此它是本项目里「接了之后
+        // 最薄」的一家：`build_chat_request` 只是拼 URL + Bearer。
+        //
+        // 它唯一不常规的地方在**令牌时序**：会话里存的是 JWT（只能打
+        // gateway），推理要 MaaS 密钥，所以 `ensure_access_token` 多做一步
+        // 「用 JWT 签发 MaaS 密钥」（见 `qwenwork/mod.rs` 的模块头）。
+        ProviderKind::Qwenwork => &super::qwenwork::QWENWORK_ADAPTER,
+        // QClaw：上游是本机 OpenClaw 网关（回环 HTTP + 网关令牌），
+        // 无状态转发（见 `qclaw/mod.rs` 的模块头）。
+        ProviderKind::Qclaw => &super::qclaw::QCLAW_ADAPTER,
+        ProviderKind::Modelscope => &super::modelscope::MODELSCOPE_ADAPTER,
+        ProviderKind::ModelscopeIntl => &super::modelscope::MODELSCOPE_INTL_ADAPTER,
+        // AtomCode（AtomGit / GitCode）：无状态 OpenAI 直通转发（上游本身就是
+        // Chat Completions）+ 目录 / 额度 / 轮换续期。四个坑见 `atomcode/mod.rs`
+        // 的模块头（网关按 UA 索签名、令牌非 JWT、续期轮换、失败被包装成 200）
+        ProviderKind::Atomcode => &super::atomcode::ATOMCODE_ADAPTER,
+        // LobsterAI（网易有道「有道龙虾」）：无状态 OpenAI 兼容转发（上游只收
+        // SSE，网关恒以 stream:true 请求）+ 目录 / 积分 / 签到 + loopback 网页登录。
+        // 三个载荷点见 `lobsterai/mod.rs` 的模块头
+        ProviderKind::LobsterAi => &super::lobsterai::LOBSTERAI_ADAPTER,
+        ProviderKind::Marvis => &super::marvis::MARVIS_ADAPTER,
+        // MiniMax Code：无状态转发，但上游说的是 **Anthropic Messages**
+        // （`UpstreamResponse::Anthropic`，与 ZCode 活动套餐通道同一台翻译机）；
+        // 账号走设备码登录（`core::login` 那条链），见 `minimax/mod.rs`。
+        // 两个站点各一个实例（地区 → 实例的唯一映射在 `minimax::Region`）。
+        ProviderKind::Minimax => &super::minimax::MINIMAX_ADAPTER,
+        ProviderKind::MinimaxIntl => &super::minimax::MINIMAX_INTL_ADAPTER,
+        // Coze（扣子）：**会话式转发** —— `api.coze.cn/v3/chat` 回的是
+        // `conversation.message.delta` / `conversation.chat.completed` 这类
+        // 自命名 SSE 事件，翻译只能在读流那一层做（`is_stateful` 为 true，
+        // 见 `coze/chat.rs` 的模块头）。凭证是整包 Cookie，PAT 由
+        // `coze::credentials::ensure_pat` 按需铸造并进程内缓存。
+        ProviderKind::Coze => &super::coze::COZE_ADAPTER,
     }
 }
 
@@ -1251,6 +1329,54 @@ pub fn implemented_kinds() -> Vec<ProviderKind> {
         // 远程模型目录（静态清单，`supports_model_refresh()` 为 false）——
         // 进本列表只代表「已实现」（与 Zcode 同一口径：刷新循环对它是空操作）。
         ProviderKind::OrcaTerm,
+        // 智谱清言：已接真身（账号 / 续期 / 目录 / 转发 / 余额 / 签到 / 领取），
+        // 且有远程目录（`operation/detail?tag=available_models`）—— 必须在
+        // 列表里，否则目录刷新循环不会问它（与 Trae / Loomy / Kuku 同一理由）。
+        ProviderKind::Chatglm,
+        // 千问办公：账号导入 / 远程目录（`chat-modes`）/ 无状态转发 / 额度查询
+        // 全部已接。有远程目录 —— 必须在列表里，否则目录刷新循环不会问它
+        // （与 Trae / Loomy / Kuku / Chatglm 同一理由）。
+        ProviderKind::Qwenwork,
+        // QClaw：账号导入 / 远程目录（本机 `/proxy/llm/models`）/ 无状态转发
+        // 全部已接。有远程目录 —— 必须在列表里，否则目录刷新循环不会问它
+        // （与 Trae / Loomy / Kuku / Chatglm / Qwenwork 同一理由）。
+        ProviderKind::Qclaw,
+        // ModelScope 的两个站点各算一家：与国内版各自一份模型清单（各打各的
+        // 推理域）、各自的缓存槽与刷新排期 —— 两家都必须在列表里，否则国际版的
+        // 目录刷新永远不会被调度（症状是「国际版账号加了、模型列表一直是空的」，
+        // 与 WorkBuddy 国际版那条同一理由）。
+        ProviderKind::Modelscope,
+        ProviderKind::ModelscopeIntl,
+        // AtomCode：远程目录（`coding-plan/models-v2`）+ 有转发能力，
+        // 进本列表才会被后台目录刷新调度
+        ProviderKind::Atomcode,
+        // LobsterAI：远程目录（`GET /api/models/available`）+ 有转发能力，
+        // 进本列表才会被后台目录刷新调度
+        ProviderKind::LobsterAi,
+        // Marvis（腾讯马维斯）：适配器已接真身（账号 / 静态目录 / 无状态转发），
+        // 进本列表 = 「接线了」，会参与后台目录刷新调度。
+        //
+        // 注意它的 `supports_model_refresh()` 是 **false**（上游无目录接口，
+        // `GET /v1/models` 恒 404，见 `marvis/models.rs`），所以刷新循环对它是
+        // 空操作 —— 这与 ZCode 的情形相同：本列表回答的是「这家接线了没有」，
+        // 不是「这家的目录能不能远程刷」。
+        ProviderKind::Marvis,
+        // MiniMax Code：适配器已接真身（设备码登录 / 凭据续期 / 远程目录 /
+        // Anthropic 转发 / 积分余额 / 签到），并且**真有远程目录**
+        // （`supports_model_refresh()` 为 true，`GET /mavis/api/v1/models` 实测 200）
+        // —— 不在本列表的话刷新循环根本不会问它，症状是「点了刷新、日志里
+        // 一句 minimax 都没有」。
+        ProviderKind::Minimax,
+        // 国际版同理：两地把网关了（国内 `agent.minimax.cn` / 国际
+        // `agent.minimaxi.com`），各有独立的缓存槽与刷新排期 —— 漏了这一项
+        // 的症状是「国际版账号加了、模型列表一直是空的（只有兜底两条）」。
+        ProviderKind::MinimaxIntl,
+        // Coze（扣子）：适配器已接真身（凭据 / 目录 / 会话转发 / 余额 / 签到），
+        // 且有远程目录（`GET /v1/workspaces` → `GET /v1/bots`，`model` 即
+        // `bot_id`）—— 必须在列表里，否则目录刷新循环不会问它（与 Trae /
+        // Loomy / Kuku 同一理由）。用户没有已发布的 bot 时清单为空，那是
+        // 真实状态，不是「没接」。
+        ProviderKind::Coze,
     ]
 }
 
@@ -1328,6 +1454,11 @@ fn seed_current_raccoon_defaults() {
 /// `(provider, id)` 记账，只种国内版会让国际版的新模型停在全开状态，
 /// 而两家的模型名很可能同名。
 fn seed_current_workbuddy_defaults() {
+    // 一次性迁移：解开旧白名单（hy3 / hy4-preview-f / deepseek-v4.1-flash 之外
+    // 全关）误关的那批模型。必须在可见性种子之前，理由与 Qoder 那边相同。
+    if let Some(summary) = crate::server::core::model_rules::migrate_workbuddy_default_enabled() {
+        crate::server::logging::log("[Models]", &summary);
+    }
     for region in super::workbuddy::Region::ALL {
         let ids: Vec<String> = crate::server::core::models::global_catalog(region)
             .list()
@@ -1352,7 +1483,13 @@ fn seed_current_workbuddy_defaults() {
 /// 没有账号 / 远程刷新失败时手里只剩静态兜底清单，而**升级用户**的清单正是
 /// 那份兜底 —— 不补种的话，他们打开管理页看到的仍是旧的全开状态。
 fn seed_current_qoder_defaults() {
-    qoder::models::seed_default_rules();
+    // 先跑一次性迁移：把旧白名单（只留 `Qwen3.8-Flash`）误关的那批模型重新
+    // 打开。必须在可见性种子**之前** —— 否则 visibility 种子会把它们记成
+    // 「已经处理过」，迁移再来解就晚了（虽然结果一样，但日志顺序会看不懂）。
+    if let Some(summary) = crate::server::core::model_rules::migrate_qoder_default_enabled() {
+        crate::server::logging::log("[Models]", &summary);
+    }
+    super::qoder::models::seed_default_rules();
 }
 
 /// 对**当前清单**里的 Cline 模型补一次默认映射种子（带池前缀的模型自动获得
@@ -1381,6 +1518,68 @@ fn seed_current_cline_defaults() {
     }
 }
 
+/// 对**当前清单**里「上游说有、官方客户端不展示」的模型补一次默认禁用种子。
+///
+/// ── 为什么单列一个函数（而不并进上面那几个）──────────────────
+/// 上面几个走的是**白名单制**（由人挑几个「装上就能用」的），本函数走
+/// **可见性制**：判据来自各家 `models.rs` 算出的 `visibility` 字段（Antigravity
+/// 按世代、Qoder 读上游 `enable`、Raccoon 读 `visible`、CodeArts 读
+/// `display_enabled`）。判据在谁手里，就在谁那里算 —— 聚合层只负责读。
+///
+/// ── 为什么「默认关闭」= 真正不可用 ─────────────────────────
+/// 本仓的路由门是「默认绑定关掉 = 这个名字调不动」
+/// （`catalog::builtin_target` 先过 `default_enabled`，不过就返回 `None`），
+/// 所以关掉默认绑定同时达到两个效果：不出现在 `/v1/models`，也不接受点名调用。
+/// 只隐藏列表不关绑定会留下「列表里没有、但点名能用」的矛盾状态。
+///
+/// 只对**有判据的四家**生效（其余家的清单没有 `visibility` 键，这里自然跳过）：
+/// 别的家目前没有可靠判据，按「没依据就不藏」处理（见
+/// `officeace/probe.rs` 的同一纪律）。
+fn seed_hidden_visibility_defaults() {
+    for kind in [
+        super::ProviderKind::WorkBuddy,
+        super::ProviderKind::WorkBuddyIntl,
+        super::ProviderKind::Antigravity,
+        super::ProviderKind::Qoder,
+        super::ProviderKind::QoderIntl,
+        super::ProviderKind::Raccoon,
+        super::ProviderKind::CodeArts,
+    ] {
+        let provider = crate::server::core::providers::kind_id(kind);
+        let entries: Vec<(String, &str)> = adapter_for(kind)
+            .list_models()
+            .iter()
+            .filter_map(|item| {
+                let id = item.get("id").and_then(Value::as_str)?.trim().to_string();
+                if id.is_empty() {
+                    return None;
+                }
+                // 没有可见性判据的条目直接跳过（不给种子记账 —— 将来这家补上
+                // 判据时还能正常种）
+                let visibility = item.get("visibility").and_then(Value::as_str)?;
+                // `'static` 生命周期：这里把三种取值转成常量字符串，
+                // 免得把 Json 值借给 `seed_hidden_disabled` 活过本次循环
+                let owned: &'static str = match visibility {
+                    "hidden" => "hidden",
+                    "shown" => "shown",
+                    _ => "undeclared",
+                };
+                Some((id, owned))
+            })
+            .collect();
+        if entries.is_empty() {
+            continue;
+        }
+        if let Some(summary) = crate::server::core::model_rules::seed_hidden_disabled(
+            provider,
+            &crate::server::core::providers::label_of(provider),
+            &entries,
+        ) {
+            crate::server::logging::log("[Models]", &summary);
+        }
+    }
+}
+
 /// 让所有**已实现**的 provider 各刷新一次模型目录（**自动**路径入口）。
 ///
 /// 调用点：`api::chat::spawn_catalog_refresh`（客户端拉 `/v1/models` 的后台刷新）
@@ -1399,10 +1598,14 @@ pub async fn refresh_implemented(store: &AccountStore) -> Vec<Value> {
     seed_current_workbuddy_defaults();
     seed_current_qoder_defaults();
     seed_current_cline_defaults();
+    seed_hidden_visibility_defaults();
     let results = super::catalog_refresh::refresh(store, &serde_json::Map::new(), None, false).await;
     // 刷新落地后补种一次：新增的带前缀 / 别名模型在这一刻才出现在清单里
     // （与开头那次同一件事 —— 那时种的是缓存恢复的清单）
     seed_current_cline_defaults();
+    // 可见性种子必须在**刷新之后**再跑一次：远程清单一落地，「上游说有但官方
+    // 不展示」的那批 id 才第一次出现（缓存恢复时它们可能还不存在）。
+    seed_hidden_visibility_defaults();
     results
 }
 
@@ -1430,6 +1633,9 @@ pub fn restore_cached_catalogs() {
     seed_current_workbuddy_defaults();
     seed_current_qoder_defaults();
     seed_current_cline_defaults();
+    // 启动这一刻手里是缓存恢复的清单（或内置兜底）：可见性种子要跟着就位，
+    // 否则「重启后不可见模型又变成可用了」。
+    seed_hidden_visibility_defaults();
     // 留痕：哪些家的清单是从持久化缓存恢复的、各是什么时候拉的。没有这条
     // 日志，「这次的清单是刚拉的还是上次的」在排障时只能靠翻数据库回答。
     let restored = catalog_cache::cached_scopes();
@@ -1514,8 +1720,11 @@ pub async fn refresh_implemented_forced(
     seed_current_workbuddy_defaults();
     seed_current_qoder_defaults();
     seed_current_cline_defaults();
+    seed_hidden_visibility_defaults();
     let results = super::catalog_refresh::refresh(store, accounts, providers, true).await;
     seed_current_cline_defaults();
+    // 手动刷新落地的新清单里可能第一次出现「不可见」的条目，种子要跟上
+    seed_hidden_visibility_defaults();
     results
 }
 

@@ -14,6 +14,7 @@ import {
   type StatsDay, type StatsGroup, type StatsHour, type StatsSummary,
 } from './report-charts'
 import { t } from '../i18n'
+import { CreditView } from './report-credit-view'
 
 /**
  * Agent2API · 报表页（时间范围 / 统计概览 / 两张排行 / 两张环形图 / 热力图 / 缓存命中率 /
@@ -113,6 +114,20 @@ const RANGE_OPTIONS: readonly SegmentedControlOption<string>[] = RANGES.map(valu
 }))
 
 /**
+ * 报表的两个视角（见渲染处那段注释：两个视角回答两个不同的问题）。
+ *
+ * `CREDIT_VIEW` 是个**哨兵值**而不是 `'credit'`：请求量视角支持六个时间档位
+ * （`RANGES`），两者共用一个 SegmentedControl 的语义空间会让人以为「额度也能按
+ * 时间筛」—— 而额度是**当前余量**，没有时间维度。用一个不可能与档位重名的值，
+ * 这个区别在代码里就是显式的。
+ */
+const CREDIT_VIEW = '__credit__'
+const VIEW_OPTIONS: readonly SegmentedControlOption<string>[] = [
+  { value: 'stats', label: t('请求量') },
+  { value: CREDIT_VIEW, label: t('用量与额度') },
+]
+
+/**
  * 各面板头上那枚小问号的说明（原文逐字照抄 index.html 的 data-tip，一条都不能少、
  * 不能改：每一条都是踩过的边界）。仍是 `.tip-q` + data-tip 的既有形态 —— 与定时任务页
  * 同一处理，由 tooltip.js 的 MutationObserver 增强 React 插入的节点。
@@ -123,6 +138,12 @@ const TIP_MODELS = t('所选范围内每个模型各消耗了多少 Token，按�
 const TIP_PROVIDERS_PIE = t('所选范围内每个提供商各消耗了多少 Token，按用量从多到少排，扇区角度即占比。同一个模型名可能有多家都能提供，网关按设置页「转发路由」的优先级依次尝试，所以占比也反映了实际落到谁身上。中心是这一维的合计（等于概览里的总 Token），右侧每行给出该提供商的 Token 用量与百分比。「未知」是指那批请求没记下承载它的提供商 —— 主要是记录提供商这个功能上线之前的旧明细，其次是请求在选定上游之前就失败了。')
 const TIP_CACHE_RATES = t('命中率 = 缓存读取 Token / 输入 Token（promptTokens）。窗口越短越贴近「此刻」：上游把缓存读取与输入分开上报时，该比值合法地可能超过 100%，此处不夹取值、如实展示。')
 const TIP_DAILY_TREND = t('每天的总 Token 用量（输入 + 输出）。柱顶标出当天的读数；区间很长、柱子挤到放不下时只标最高的那几天，其余悬停柱子即可读到。')
+/**
+ * 时间范围控件旁的小问号。两个容易误读的口径都在这里说清：
+ * 「近 N 天」是含今天在内往前数 N 天（所以是 N-1 天前到今天），不是「前 N 天」；
+ * 「昨天」是本地自然日的昨天一整天，与「今天」共用同一套日界线。
+ */
+const TIP_RANGE = t('时间范围。「今天」是本地自然日今天 0 点到现在；「昨天」是昨天一整天（0 点到 24 点）；「近 7 天 / 近 30 天」含今天在内往前数，即今天与之前的 6 / 29 天，不是「不含今天的 7 / 30 天」。')
 
 /* ─── 模块级状态（跨渲染的守卫、缓存与入口登记）────── */
 
@@ -564,6 +585,14 @@ const EMPTY_DATA: PageData = { summary: null, error: null }
 
 function ReportPage() {
   const [data, setData] = React.useState<PageData>(EMPTY_DATA)
+  /**
+   * 当前视角（`'stats'` = 请求量 · `CREDIT_VIEW` = 用量与额度）。
+   *
+   * **刻意不持久化**：这一页进得来通常是「看一眼就走」，两次访问之间惦记的多半
+   * 还是默认那个视角；把它记进 localStorage 会让「上次随手点过额度」变成下一次
+   * 打开就看不到报表 —— 与账号页作用域左栏的收起态（那个该记）不是一类偏好。
+   */
+  const [view, setView] = React.useState<string>('stats')
   const [range, setRange] = React.useState<string>(readRange)
   /** 自定义区间（起止本地自然日）：只有档位选中「自定义」时随请求发出 */
   const [custom, setCustom] = React.useState<CustomRange>(readCustomRange)
@@ -772,12 +801,28 @@ function ReportPage() {
 
   return (
     <>
+      {/* ── 视角切换 ──
+           两个视角回答的是**两个不同的问题**：
+             · 请求量   —— 「转发了多少」（原有五块面板，数据来自 request_stats）
+             · 用量与额度 —— 「我的额度还能撑多久」（数据来自 accounts 的余额链）
+           数据源不同、读法不同，所以并列而不是合并（理由见 report-credit-view 的模块头）。
+           切换条住在最上面：它决定下面所有面板的归属，放行内会让第二个视角的面板
+           看起来像第一个视角的附属。 */}
+      <div className='report-view-switch'>
+        <SegmentedControl options={VIEW_OPTIONS} value={view}
+          onValueChange={value => setView(String(value))} aria-label={t('报表视角')} />
+      </div>
+      {view === CREDIT_VIEW ? <CreditView /> : (
+      <>
       {/* ── 统计概览 ──
            时间范围控件住在这一块的面板头里：它控制的就是这一页的统计口径，与旁边的读数
            同处一行最直观。选中「自定义」时右端展开两个日期输入（起止本地自然日） */}
       <section className='panel'>
         <div className='panel-head'>
           <h2>{t('统计概览')}</h2>
+          {/* 「近 N 天」是否含今天，光看选项文案有歧义（含今天 = 往前数 N-1 天）。
+              说明挂成小问号而不是写进选项：控件里已有 7 段，再加后缀会把整行撑开 */}
+          <TipQ text={TIP_RANGE} />
           <span className='panel-sub' id='report-range-label'>{RANGE_LABEL[rangeKey] || ''}</span>
           <div className='head-actions'>
             <SegmentedControl options={RANGE_OPTIONS} value={range}
@@ -928,6 +973,8 @@ function ReportPage() {
           </div>
         </div>
       </section>
+      </>
+      )}
     </>
   )
 }

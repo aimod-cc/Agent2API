@@ -2,10 +2,19 @@
    布局：应用外框 / 侧边栏 / 顶栏 / 内容区
    ───────────────────────────────────────────── */
 
-/* ─── 应用外框 ─── */
+/* ─── 应用外框 ───
+   行高必须显式写成 minmax(0, 1fr)：只给列不给行时，那一行是隐式的 auto 行，
+   会被**内容最高的子项**撑开 —— 侧栏内容（品牌 + 15 个导航项 + 底部状态区）
+   在完整宽度下约 745px，窗口一旦压矮到它以下，行仍按 745px 算，而外框是
+   overflow: hidden，于是侧栏底部与右侧内容区的下沿一起被裁到窗口外，且
+   没有任何滚动条（裁它们的是外框，不是它们自己）。
+   锁成 minmax(0, 1fr) 后两个子项都只拿窗口高度：侧栏里 .nav 的
+   flex:1 + min-height:0 + overflow-y:auto 这才真正生效（导航自己滚，品牌与
+   底部状态区常驻），主区域的高度链也回到 .main → .content → .page.active。 */
 .shell {
   display: grid;
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   height: 100vh;
   overflow: hidden;
 }
@@ -118,17 +127,18 @@ body.has-titlebar .shell {
 .titlebar-btn.is-maximized:hover .fg { fill: var(--nav-hover); }
 .titlebar-btn svg { display: block; width: 14px; height: 14px; pointer-events: none; }
 
-/* ─── 移动端：从「app-shell 固定视口」切成「正常文档流」───
-   tokens.css 只改了 body 的 min-width 与 overflow，这里把整条 app-shell 链
-   （.shell → .main → .content → .content-inner → .page.active）的高度与
-   overflow 一并放开。放开后 body 自己滚，页面内容按内容高度自然生长，
-   用户不再被困在「页面层内部滚」里。 */
+/* ─── 移动端：保持固定视口骨架，滚动归 .page.active ───
+   曾经这里把整条链（.shell → .main → .content → .content-inner → .page.active）
+   的高度与 overflow 全部放开、改由 body 滚 —— 那会让**顶栏与面板头一起滚走**。
+   手机上顶栏（汉堡 + 页面名 + 状态）应当常驻，所以恢复桌面同款骨架：
+   .shell 固定高度 → .main 列布局 → 顶栏 flex:0 → .content 撑满剩余 →
+   .page.active 自己滚。这一条现在只补移动端特有的两处：
+     ① 内容区左右留白收窄（手机屏窄，12px 比 16px 更省）
+     ② 页面底部多留一点，避免最后一行贴住屏幕边缘 / 被 iOS 手势条盖住 */
 @media (max-width: 767px) {
-  .shell { height: auto; overflow: visible; }
-  .main { overflow: visible; }
-  .content { overflow: visible; }
-  .content-inner { flex: none; min-height: 0; }
-  .page.active { overflow-y: visible; }
+  .content { padding: 0 12px; }
+  .content-inner { padding-bottom: 0; }
+  .page.active { padding-bottom: max(20px, env(safe-area-inset-bottom)); }
 }
 
 /* ─────────────────────────────
@@ -231,6 +241,19 @@ body.has-titlebar .shell {
 }
 
 .nav-group-label:first-child { padding-top: 0; }
+
+/* 一个菜单都不显示时的提示（用户在设置里把可见项全关了）。
+   用虚线框说明「这里是空的，不是没加载出来」。 */
+.nav-empty {
+  margin: 4px 2px;
+  padding: 10px 9px;
+  border: 1px dashed var(--sidebar-border);
+  border-radius: var(--r-sm);
+  color: var(--sidebar-muted);
+  font-size: 11px;
+  line-height: 1.7;
+  text-align: center;
+}
 
 @media (max-width: 900px) { .nav-group-label { display: none; } }
 
@@ -439,6 +462,27 @@ body.has-titlebar .shell {
   .theme-switch button[data-mode="system"]::after { content: "自动"; }
   .theme-switch button[data-mode="light"]::after { content: "浅"; }
   .theme-switch button[data-mode="dark"]::after { content: "深"; }
+}
+
+/* ─── 手机端入口（侧栏底部） ───
+   它是「换个设备继续看」，不是第 14 个功能页 —— 所以不占一级菜单，
+   只在这里放一条文字链。样式刻意做得比导航项轻：它不属于当前页面的功能。 */
+.sidebar-mobile-link {
+  display: block;
+  padding: 5px 2px;
+  font-size: 11px;
+  color: var(--sidebar-muted);
+  text-decoration: none;
+  text-align: center;
+  border-radius: var(--r-xs);
+  transition: color .15s ease, background .15s ease;
+}
+.sidebar-mobile-link:hover { color: var(--text); background: var(--nav-hover); }
+
+@media (max-width: 900px) {
+  /* 窄侧栏（图标栏）里放不下文字链：手机端本来就是这一档的使用者，
+     他们直接开 /m 就行，这里不必留一个只剩三个字的链接 */
+  .sidebar-mobile-link { display: none; }
 }
 
 /* ─────────────────────────────

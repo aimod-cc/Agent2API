@@ -96,6 +96,19 @@ pub struct ModelConfig {
     /// 与 AutoClaw 那条「上游给的是档位文案就原样显示，不换算成编造的数」
     /// 同一条口径（见 `autoclaw/catalog.rs` 的 `creditConsumptionLevel`）。
     pub credit_display: String,
+    /// 上游声明的「是否出现在官方客户端里」（`display_enabled`）。
+    ///
+    /// ── 为什么不全在解析时丢掉 ──────────────────────────────────
+    /// agent 源历史上把 `display_enabled != true` 的条目**直接丢弃**
+    /// （见 [`parse_agent_detail`] 的注释：那是照参考实现做的）。但 builtin 源
+    /// 从来没读过这个字段，于是同一个上游字段在两个源里待遇不同：`builtin.json`
+    /// 里 `Qwen3-VL-235B` / `kimi-k2.6-vl` 是 `enable: true` + `display_enabled:
+    /// false`，在官方客户端不展示，却被本仓广告出去。
+    ///
+    /// 现在改成**两个源都保留、由清单层决定怎么用**：`true` = 官方展示；
+    /// `false` = 上游明确说不展示；`None` = 上游没给这个字段（builtin 源与
+    /// benefit 源都没有），按可见处理（与 Trae 的「缺省 = 可见」同一纪律）。
+    pub display_enabled: Option<bool>,
 }
 
 /// 合并后的清单 + 诊断信息。
@@ -159,6 +172,10 @@ pub fn parse_builtin(body: &str) -> Result<Vec<ModelConfig>, String> {
             max_output_tokens: capped_output(entry, "max_tokens"),
             supports_images: entry.get("supports_images").and_then(Value::as_bool).unwrap_or(false),
             credit_display: credit_display_of(entry),
+            // builtin 源**不**按它过滤（历史上从没读过这个字段，且多模态模型
+            // 只在这里出现 —— 丢掉这个源等于丢识图能力）。读进来只为让管理页
+            // 与 `visibility` 列能如实显示「上游说不展示」。
+            display_enabled: entry.get("display_enabled").and_then(Value::as_bool),
             id,
             source: ModelSource::Builtin,
         });
@@ -184,9 +201,12 @@ pub fn parse_agent_detail(body: &str, language: &str) -> Result<Vec<ModelConfig>
         if parameters.get("enabled").and_then(Value::as_bool) == Some(false) {
             continue;
         }
-        if parameters.get("display_enabled").and_then(Value::as_bool) != Some(true) {
-            continue;
-        }
+        // `display_enabled` **不再丢弃**（早先照参考实现 skip 掉，与 builtin 源
+        // 待遇不一致）。理由：这个字段表达的正是「官方客户端列不列它」，正是
+        // 「可见性」列要显示的东西；把它当成解析期硬过滤，那个信息就没了，
+        // 管理页也就无从告诉用户「这条上游能用但不展示」。现在原样记进
+        // `display_enabled`，由清单层的 `visibility` 决定怎么用。
+        let display_enabled = parameters.get("display_enabled").and_then(Value::as_bool);
         // 扩展把 model_parameters 摊在 model_alias 上，所以嵌套的 model_id 优先
         let id = first_non_empty(&[
             text(&parameters, "model_id"),
@@ -210,6 +230,7 @@ pub fn parse_agent_detail(body: &str, language: &str) -> Result<Vec<ModelConfig>
             max_output_tokens: capped_output(&parameters, "max_tokens"),
             supports_images: parameters.get("supports_images").and_then(Value::as_bool).unwrap_or(false),
             credit_display: credit_display_of(&entry),
+            display_enabled,
             id,
             source: ModelSource::Agent,
         });
@@ -289,6 +310,9 @@ pub fn parse_benefit(body: &str) -> Result<Vec<ModelConfig>, String> {
             // 福利网关的条目没有 `credit`（实测三个源里只有 agent 与 builtin 带），
             // 留空 = 界面那一列显示 `—`，不是"倍率为 0"。
             credit_display: String::new(),
+            // 福利网关的条目不带 `display_enabled`（实测三个源里只有 agent 与
+            // builtin 有），`None` = 上游没说 = 按可见处理。
+            display_enabled: None,
             id,
             source: ModelSource::Benefit,
         });
@@ -670,6 +694,9 @@ fn catalog_from_persisted() -> Option<Catalog> {
             max_output_tokens: entry.get("maxOutputTokens").and_then(Value::as_i64).unwrap_or(0),
             supports_images: entry.get("supportsImages").and_then(Value::as_bool).unwrap_or(false),
             credit_display: text("credits"),
+            // 落盘缓存里存的是 `display_enabled`（见 `entries_of`）；缺失 = 老格式
+            // 或该源本来没有这个字段，按「没声明」处理（不是「不可见」）。
+            display_enabled: entry.get("display_enabled").and_then(Value::as_bool),
             name: id.clone(),
             source,
             id,
@@ -763,6 +790,17 @@ fn entries_of(catalog: &Catalog) -> Vec<Value> {
             if !model.credit_display.is_empty() {
                 entry.insert("credits".to_string(), Value::String(model.credit_display.clone()));
             }
+            // 上游的展示开关原样落盘（`catalog_from_persisted` 读它恢复），
+            // 同时翻成跨家统一的 `visibility` 键给管理页。
+            //
+            // 三态：`Some(true)` = 官方展示；`Some(false)` = 上游说不展示；
+            // `None` = 上游没给这个字段 → 按可见处理。**只有显式 false 才判藏**
+            // —— 与 Trae 的「缺省 = 可见」同一纪律（上游删字段不能把整张表滤空）。
+            if let Some(flag) = model.display_enabled {
+                entry.insert("display_enabled".to_string(), Value::Bool(flag));
+            }
+            let visibility = if model.display_enabled == Some(false) { "hidden" } else { "shown" };
+            entry.insert("visibility".to_string(), Value::String(visibility.to_string()));
             Value::Object(entry)
         })
         .collect()
@@ -883,9 +921,17 @@ mod tests {
         assert_eq!("1.8x", display_of("upper-only"), "只有高档时退回它，而不是回空");
     }
 
-    /// 两条过滤规则：`enabled == false` 与 **`display_enabled` 缺失**都要跳过。
+    /// 过滤规则：`enabled == false` 跳过；`display_enabled` **不再丢条目**，
+    /// 而是记进字段供可见性列使用。
+    ///
+    /// ── 为什么口径从「缺失即跳过」改成「保留 + 标记」──────────────
+    /// 早先照参考实现把 `display_enabled != true` 的条目在解析期丢掉，后果是
+    /// 「上游能用但不展示」这个事实在清单里根本不存在 —— 管理页既看不到这些
+    /// 模型，也就无从告诉用户它们为什么不在 `/v1/models` 里。现在保留它们、
+    /// 带上 `display_enabled`，由清单层默认禁用默认绑定（与用户的要求一致：
+    /// 不可见的模型默认全关）。
     #[test]
-    fn agent_detail_filters_invisible_and_disabled_models() {
+    fn agent_detail_filters_disabled_models_and_keeps_visibility_flag() {
         let body = r#"{"gpts":{"models":[
             {"model_alias":"A","model_parameters":{"model_id":"A","display_enabled":true}},
             {"model_alias":"B","model_parameters":{"model_id":"B","display_enabled":true,"enabled":false}},
@@ -895,10 +941,16 @@ mod tests {
         ]}}"#;
         let models = parse_agent_detail(body, "en-us").unwrap();
         let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
-        // B 被 enabled:false 禁；C/D 没有 display_enabled；E 连 model_parameters 都没有 —— 全跳过。
-        // `display_enabled` 是**必须显式为 true** 的字段（参考实现：nil 也跳过），
-        // 这正是 trial 账号 detail 会 200 却一个模型都不给的情形。
-        assert_eq!(vec!["A"], ids);
+        // B 被 `enabled:false` 禁 —— 这条仍然是解析期硬过滤（不能用就别列）。
+        // C/D/E 保留：C/E 的 `display_enabled` 缺失（`None` = 没声明 → 按可见），
+        // D 显式 false（`Some(false)` → 不可见）。E 连 model_parameters 都没有，
+        // id 从 `model_alias` 取。
+        assert_eq!(vec!["A", "C", "D", "E"], ids);
+        let flag = |id: &str| models.iter().find(|model| model.id == id).and_then(|model| model.display_enabled);
+        assert_eq!(Some(true), flag("A"));
+        assert_eq!(None, flag("C"), "缺字段 = 没声明");
+        assert_eq!(Some(false), flag("D"), "显式 false 要保住");
+        assert_eq!(None, flag("E"));
     }
 
     /// trial 账号的 detail 会 200 但没有 `gpts.models` —— 必须报"没有目录"而不是编造。
@@ -1047,6 +1099,7 @@ mod tests {
                     max_output_tokens: 131072,
                     supports_images: false,
                     credit_display: "0.7x".to_string(),
+                    display_enabled: None,
                     source: ModelSource::Agent,
                 },
                 ModelConfig {
@@ -1058,6 +1111,7 @@ mod tests {
                     max_output_tokens: 0,
                     supports_images: true,
                     credit_display: String::new(),
+                    display_enabled: None,
                     source: ModelSource::Builtin,
                 },
             ],
@@ -1116,6 +1170,7 @@ mod tests {
             max_output_tokens: 0,
             supports_images: false,
             credit_display: String::new(),
+            display_enabled: None,
             source,
         };
         let merged = merge_agent_and_builtin(
@@ -1157,6 +1212,7 @@ mod restart_tests {
                     max_output_tokens: 131_072,
                     supports_images: false,
                     credit_display: String::new(),
+                    display_enabled: None,
                     source: ModelSource::Agent,
                 },
                 ModelConfig {
@@ -1168,6 +1224,7 @@ mod restart_tests {
                     max_output_tokens: 0,
                     supports_images: true,
                     credit_display: String::new(),
+                    display_enabled: None,
                     source: ModelSource::Builtin,
                 },
             ],
@@ -1203,6 +1260,7 @@ mod restart_tests {
                 max_output_tokens: 0,
                 supports_images: false,
                 credit_display: String::new(),
+                display_enabled: None,
                 source: ModelSource::Benefit,
             }],
             warnings: vec![],
@@ -1227,6 +1285,7 @@ mod restart_tests {
                 max_output_tokens: 0,
                 supports_images: false,
                 credit_display: String::new(),
+                display_enabled: None,
                 source,
             });
         }

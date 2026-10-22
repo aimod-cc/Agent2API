@@ -1,0 +1,81 @@
+/* ─────────────────────────────────────────────
+   通知与告警（设置页 · data-page="settings" 的 notify 分类）
+   面板由 ui-islands/src/islands/notify-settings-pane.tsx 渲染，类名 notify-
+   前缀。沿用设置页既有的 .panel / .field-row / .field-label / .field-note
+   版式，这里只补渠道列表相关的几处。
+   ───────────────────────────────────────────── */
+
+/* ─── 事件勾选（一行横向排开，多了会换行）─── */
+.notify-events {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+.notify-event {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  cursor: pointer;
+  user-select: none;
+}
+.notify-event input[type='checkbox'] {
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+/* ─── 渠道列表 ─── */
+.notify-channels {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.notify-channel {
+  padding: 10px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+
+.notify-channel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.notify-name { flex: 1 1 auto; min-width: 0; }
+.notify-type { flex: none; width: 240px; }
+
+/* Webhook 地址：等宽字体 —— 这类长串用户会逐段核对 */
+.notify-url {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+/* 渠道块里的说明文字比设置页通用的更紧凑一点 */
+.notify-channel .field-note {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+/* ─── 错误与操作 ─── */
+.notify-error {
+  margin: 10px 0 0;
+  padding: 8px 11px;
+  color: var(--danger);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-bd);
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.notify-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}

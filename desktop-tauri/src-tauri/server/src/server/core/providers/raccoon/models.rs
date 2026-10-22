@@ -211,7 +211,7 @@ fn listing_entry(model: &Value) -> Value {
         .get("name")
         .map(|value| super::jwt::js_text(value))
         .unwrap_or_default();
-    out.insert("id".to_string(), Value::String(model_id));
+    out.insert("id".to_string(), Value::String(model_id.clone()));
     if let Some(display) = object.get("displayName") {
         out.insert("name".to_string(), display.clone());
     }
@@ -231,7 +231,37 @@ fn listing_entry(model: &Value) -> Value {
             out.insert(target.to_string(), value.clone());
         }
     }
+    // 可见性：远程清单已经由 `normalize_catalog_entry` 算出 `visibility`，
+    // 这里原样搬运；**静态兜底表**没有上游字段可读，按 [`fallback_visibility`]
+    // 判 —— 兜底表里那三条 `raccoon-` 开头的内部 Work 模型，远程目录实测就是
+    // `visible: false`（本机 `kv.modelCatalogCache` 的 9 条里 3 条），
+    // 与本判据结论一致。
+    let visibility = match object.get("visibility").and_then(Value::as_str) {
+        Some(value) => value.to_string(),
+        None => fallback_visibility(&model_id).to_string(),
+    };
+    out.insert("visibility".to_string(), Value::String(visibility));
     Value::Object(out)
+}
+
+/// 静态兜底表的可见性判据（远程清单不读它 —— 那边有上游 `visible` 字段）。
+///
+/// 判据是**名字形态**：`raccoon-` + ≤8 位十六进制是内部 Work 模型
+/// （与 `model_rules::is_opaque_raccoon_id` 同一判据，那个函数用于默认禁用）。
+/// 远程目录对这三条给的是 `visible: false`，兜底表没有这个字段，只能按同一
+/// 形态推。`raccoon-chat-ml-5-5`（桌面端本地配置的默认模型）与 `sn-*` 系
+/// 一律按可见处理：前者不在远程目录里、没有任何官方口径，后者实测 `visible: true`。
+fn fallback_visibility(id: &str) -> &'static str {
+    let lowered = id.trim().to_ascii_lowercase();
+    let Some(suffix) = lowered.strip_prefix("raccoon-") else {
+        return "shown";
+    };
+    // ≤8 位纯十六进制 = 内部 Work 模型（与 `model_rules::is_opaque_raccoon_id`
+    // 同一判据；那边是私有的，这里按同一形态判，两处结论必须一致）
+    let opaque = !suffix.is_empty()
+        && suffix.len() <= 8
+        && suffix.chars().all(|ch| ch.is_ascii_hexdigit());
+    if opaque { "hidden" } else { "shown" }
 }
 
 /// 是否已经成功采用过远程清单（排障与 `meta.source` 用）
@@ -532,9 +562,19 @@ fn normalize_catalog_entry(entry: &Value) -> Option<Value> {
             .map(|text| Value::String(text.to_string()))
             .unwrap_or(Value::Null),
     );
+    let visible = !matches!(object.get("visible"), Some(Value::Bool(false)));
+    normalized.insert("visible".to_string(), Value::Bool(visible));
+    // 可见性：上游 `/model_catalog` 每条自带 `visible`，`false` 表示官方客户端
+    // 不列它（本仓实测 9 条里 3 条是 `false`，全是 `raccoon-` 开头的内部 Work
+    // 模型）。缺字段 / `null` = 上游没说 = 按可见处理（与 Trae 的「缺省 = 可见」
+    // 同一纪律：上游删字段时不能把整张表判成不可见）。
+    //
+    // 注意这**不是** `is_opaque_raccoon_id` 那条名字启发式的替代品：那条判的是
+    // 「名字长得像内部哈希」，这条判的是「上游自己说不展示」。两者结论目前一致，
+    // 但后者才是依据 —— 上游若把某个 `sn-*` 标成 `visible:false`，启发式抓不到。
     normalized.insert(
-        "visible".to_string(),
-        Value::Bool(!matches!(object.get("visible"), Some(Value::Bool(false)))),
+        "visibility".to_string(),
+        Value::String(if visible { "shown" } else { "hidden" }.to_string()),
     );
     Some(Value::Object(normalized))
 }

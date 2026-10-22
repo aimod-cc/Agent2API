@@ -71,8 +71,10 @@
    *                      翻译器默认输出无 type 形态，两家各按各的特判走）。
    *   clientEmulation    "opencode" = 按 **OpenCode 官方 CLI 的形状**补齐出站请求
    *                      （无 Key 时用匿名凭证 `public`、补 `ses_…` 会话头、
-   *                      请求体补 `bash` / `read` 两个桩工具 —— 上游免费档的
-   *                      三道校验，2026-09 实测 403 FreeTierError 就是这个）。
+   *                      请求体补 `read` 桩工具 —— 上游免费档过门的硬要求，
+   *                      2026-09 实测 403 FreeTierError 就是这个；2026-10-20
+   *                      复测已放宽：不再要 shell 类工具、四个会话头里只有
+   *                      `x-opencode-session` 是必需的）。
    *                      **它会改写请求体**，所以只有 OpenCode Zen 默认开着，
    *                      别的家不要加。
    *
@@ -215,9 +217,10 @@
       // （custom_providers::migrate_base_url），不必手改。
       protocol: P.openai, baseUrl: 'https://opencode.ai/inference/v1',
       hint: wbI18n.t('免费模型不用填 Key（默认勾上「该上游无需鉴权」，网关自动用匿名凭证）；付费模型则填 Zen 的 API Key。免费档上游只认官方客户端形态，已默认开启「伪装 OpenCode 官方客户端」'),
-      // 免费档的四道校验（匿名凭证 / 四个会话头 / 不带 request·project 头 /
-      // 请求体形态）由该开关统一补齐，见后端 providers::custom::emulation
-      // 的模块头（含 2026-10-14 对着官方客户端 v2.0.27 的实测记录）
+      // 免费档的过门硬要求（opencode/ 前缀 UA / 合格形状的 x-opencode-session /
+      // 不带 request·project 头 / 请求体 stream+read）由该开关统一补齐，
+      // 见后端 providers::custom::emulation
+      // 的模块头（含 2026-10-20 的消融复测记录）
       clientEmulation: 'opencode',
       account: { noAuth: true },
     },

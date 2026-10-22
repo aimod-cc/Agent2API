@@ -31,6 +31,11 @@ export type CheckinAccountRow = {
   checkedInToday: boolean
   /** cn / intl（缺失 null）：WorkBuddy 国际版在这张表里执行的是「领日活」 */
   edition?: string | null
+  /**
+   * 成长中心连登天数（WorkBuddy 国内版；签到后回读落库，见后端
+   * `AccountStore::mark_streak_days`）。缺失 / 0 = 还没读到过，界面不显示。
+   */
+  streakDays?: number | null
 }
 
 export type CheckinProviderGroup = {
@@ -136,11 +141,75 @@ export type CheckinCenterSnapshot = {
     plans: Array<{ id: string; name: string; provider?: string; claimAt?: number | null; claimPlans?: Record<string, number> | null }>
     /** 成长任务行的账号清单（WorkBuddy 国内版；任务详情前端展开时惰性查询） */
     growth?: Array<{ id: string; name: string; provider?: string }>
+    /**
+     * 只读余额行（QClaw，已停运）：**没有可领取动作**，本站也不再发放。
+     *
+     * 与 `onboarding` 的形状同构，多一个 `note`（后端给的说明文案，原样透出）。
+     * 这几种行只用来看余额与到期 —— 上游根本没有领取端点，一颗点了必然报错的
+     * 按钮比没有更糟（见 `api::checkin_center` 模块头）。QClaw 自 2026-12-24
+     * 停服，行上的 `note` 会带上「迁移到 WorkBuddy 领 1000 积分补贴」的指引。
+     */
+    autoGrant?: Array<{ id: string; name: string; provider?: string; note?: string }>
   }
   auto: SchedulesSnapshot
   /** WorkBuddy 国际版日活保活的模型链（后端快照直接给当前生效值 + 缺省值） */
   keepalive?: KeepaliveState
+  /**
+   * 猫猫旅行定时排程（国内版；`GET /api/travel-schedule` 同形）。
+   *
+   * 与 `auto`（签到排程）是**两个独立排程**：旅行服务的是养成玩法，用户可能
+   * 只想自动签到、不想自动派猫。开关与时刻各自配（参考项目也是两套）。
+   */
+  travel?: TravelScheduleState
+  /**
+   * 成长任务每日排程（国内版；`GET /api/growth-task-schedule` 同形）。
+   *
+   * 与 `travel`（猫猫旅行）也是**两个独立排程**：前者点亮 / 领取成长任务，
+   * 后者推进猫猫状态机，两者互不依赖、各自开关与时刻。
+   */
+  growthTask?: GrowthTaskScheduleState
   history: CheckinHistoryEntry[]
+}
+
+/** 成长任务每日排程的状态（`GET /api/growth-task-schedule`）。 */
+export type GrowthTaskScheduleState = {
+  enabled: boolean
+  /** 计划时刻（`HH:MM`，北京时间），升序 */
+  times: string[]
+  /** 今天已经跑过的**计划时刻** */
+  firedToday: string[]
+  lastFiredDate: string | null
+  lastFiredTime?: string | null
+  /** 上一轮摘要：`{accounts, actions[], credit, energy, done, failed, at}` */
+  lastResult?: {
+    at?: number
+    accounts?: number
+    actions?: Array<{ name?: string; code?: string; outcome?: string; message?: string; credit?: number; energy?: number }>
+    credit?: number
+    energy?: number
+    done?: number
+    failed?: number
+  } | null
+  running?: boolean
+}
+export type TravelScheduleState = {
+  enabled: boolean
+  /** 计划时刻（`HH:MM`，北京时间），升序 */
+  times: string[]
+  /** 今天已经跑过的**计划时刻**（界面据此把条目标灰） */
+  firedToday: string[]
+  lastFiredDate: string | null
+  /** 上一轮的实际执行时刻（`HH:MM`） */
+  lastFiredTime?: string | null
+  /** 上一轮摘要：`{accounts, actions[], credit, failed, at}` */
+  lastResult?: {
+    at?: number
+    accounts?: number
+    actions?: Array<{ accountId?: string; name?: string; outcome?: string; message?: string; credit?: number }>
+    credit?: number
+    failed?: number
+  } | null
+  running?: boolean
 }
 
 /**
@@ -261,6 +330,14 @@ type CheckinBridge = {
   /** WorkBuddy 国际版日活保活的模型链（读 / 存；与 bridge.rs、web_shim.rs 三处成对） */
   getCheckinKeepalive?(): Promise<KeepaliveState>
   saveCheckinKeepalive?(models: string[]): Promise<KeepaliveState>
+  /** 猫猫旅行定时排程（读 / 存 / 立即巡检；与 bridge.rs、web_shim.rs 三处成对） */
+  getTravelSchedule?(): Promise<TravelScheduleState | null | undefined>
+  saveTravelSchedule?(patch: Record<string, unknown>): Promise<TravelScheduleState | null | undefined>
+  runTravelScheduleNow?(): Promise<{ summary?: unknown; schedule?: TravelScheduleState } | null | undefined>
+  /** 成长任务每日排程（与旅行同形；见 core::growth_task_scheduler） */
+  getGrowthTaskSchedule?(): Promise<GrowthTaskScheduleState | null | undefined>
+  saveGrowthTaskSchedule?(patch: Record<string, unknown>): Promise<GrowthTaskScheduleState | null | undefined>
+  runGrowthTaskScheduleNow?(): Promise<{ summary?: unknown; schedule?: GrowthTaskScheduleState } | null | undefined>
   /** WorkBuddy 国际版日活任务的手动粒度入口（mode: full | claim | keepalive） */
   runCheckinActivity?(id: string, mode: string): Promise<Record<string, unknown> | null | undefined>
   checkinAllAccounts?(id?: string | null): Promise<{
@@ -405,6 +482,16 @@ export type CheckinStore = {
   keepaliveSaving: boolean
   /** 保活模型链的编辑草稿：null = 跟随后端值；数组 = 用户正在编辑的清单 */
   keepaliveDraft: string[] | null
+  /** 猫猫旅行排程保存中（开关 / 时刻控件临时禁用） */
+  travelSaving: boolean
+  /** 猫猫旅行全池巡检在途 */
+  travelRunning: boolean
+  /** 猫猫旅行时刻的编辑草稿：null = 跟随后端值 */
+  travelTimesDraft: string[] | null
+  /** 成长任务排程保存中（开关 / 时刻控件临时禁用） */
+  growthTaskSaving: boolean
+  /** 成长任务全池巡检在途 */
+  growthTaskRunning: boolean
   /** 单账号签到在途（行内按钮的去重闸） */
   signing: ReadonlySet<string>
   /** 新手任务的按账号缓存（Loomy / 小浣熊） */
@@ -425,6 +512,11 @@ let store: CheckinStore = {
   autoTimeDraft: null,
   keepaliveSaving: false,
   keepaliveDraft: null,
+  travelSaving: false,
+  travelRunning: false,
+  travelTimesDraft: null,
+  growthTaskSaving: false,
+  growthTaskRunning: false,
   signing: new Set<string>(),
   onboarding: new Map<string, OnboardingCache>(),
   growth: new Map<string, GrowthCache>(),
@@ -493,6 +585,7 @@ export async function loadCheckinCenter(): Promise<void> {
       // 时刻草稿跟着后端值走（首次加载 / 异地修改后都以服务端为准）
       autoTimeDraft: null,
       keepaliveDraft: null,
+      travelTimesDraft: null,
     })
     // 快照带回了结算记忆 ⇒ 直接用它铺缓存，页面不必为已领完的账号再查一次上游
     seedSettledCaches(data.extras?.onboarding ?? [])
@@ -642,6 +735,16 @@ export async function signSingleAccount(id: string, mode: 'checkin' | 'full' | '
       | undefined
     const reportOk = activity?.report?.succeeded === true
     const webOk = activity?.webConversation?.succeeded === true
+    // WorkBuddy 国内版签到顺带发的那条每日活跃上报（点亮连登 / 活跃地图）：
+    // 与上面 `activity` 分开读 —— 上报成功不等于积分领到，两个事实分开讲。
+    const growth = row?.growth as
+      | { reported?: boolean; streakDays?: number | null; error?: string | null }
+      | null
+      | undefined
+    const streakText =
+      growth?.streakDays !== null && growth?.streakDays !== undefined
+        ? ' · ' + t('连登 {n} 天', { n: growth.streakDays })
+        : ''
     if (row?.error) {
       toast(t('签到失败：{error}', { error: String(row.error) }), 'err')
     } else if (mode === 'keepalive') {
@@ -652,7 +755,7 @@ export async function signSingleAccount(id: string, mode: 'checkin' | 'full' | '
         toast(t('✅ {message}', { message: claim?.msg || t('活跃保活完成') }))
       else toast(claim?.msg || t('活跃保活失败'), 'err')
     } else if (claim?.success === true) {
-      toast(t('✅ {message}', { message: claim.msg || t('签到成功') }))
+      toast(t('✅ {message}', { message: (claim.msg || t('签到成功')) + streakText }))
     } else if (claim?.alreadyCompleted === true) {
       toast(claim?.msg || t('今日已领取'), 'err')
     } else if (reportOk) {
@@ -771,6 +874,152 @@ export async function submitKeepaliveModels(models: string[]): Promise<void> {
     toast(t('保存失败：{error}', { error: errorMessage(error) }), 'err')
   } finally {
     patch({ keepaliveSaving: false })
+  }
+}
+
+/* ─── 猫猫旅行定时排程（国内版；与签到排程独立）─── */
+
+/** 快照里只换 travel 段（保存 / 巡检响应是新状态，其余快照原样保留） */
+function mergeTravel(next: TravelScheduleState): CheckinCenterSnapshot | null {
+  const current = getCheckinStore().snapshot
+  if (!current) return current
+  return { ...current, travel: next }
+}
+
+/**
+ * 保存旅行排程（开关 / 时刻）。
+ *
+ * 与签到排程的保存同款：响应是后端归一化后的完整状态（时刻已排序去重），
+ * 界面以它为准重绘 —— 不自己算归一化，避免与后端两套口径。
+ */
+export async function saveTravelSchedule(patchBody: Record<string, unknown>): Promise<void> {
+  const store = getCheckinStore()
+  if (store.travelSaving) return
+  patch({ travelSaving: true })
+  try {
+    const next = await bridge().saveTravelSchedule?.(patchBody)
+    if (next) {
+      patch({ snapshot: mergeTravel(next) })
+      toast(t('已保存：猫猫旅行排程'))
+    }
+  } catch (error) {
+    toast(t('保存失败：{error}', { error: errorMessage(error) }), 'err')
+  } finally {
+    patch({ travelSaving: false })
+  }
+}
+
+/**
+ * 立即巡检一轮（全部国内版账号）。
+ *
+ * 与单账号的「巡检一次」不是同一件事：那个只跑当前行，这个跑全池
+ * （对应定时排程的手动触发）。响应带本轮摘要与刷新后的排程状态。
+ */
+export async function runTravelScheduleNow(): Promise<void> {
+  const store = getCheckinStore()
+  if (store.travelRunning) return
+  patch({ travelRunning: true })
+  try {
+    const result = await bridge().runTravelScheduleNow?.()
+    const schedule = result?.schedule as TravelScheduleState | undefined
+    if (schedule) patch({ snapshot: mergeTravel(schedule) })
+    const summary = (result?.summary ?? {}) as {
+      actions?: unknown
+      credit?: unknown
+      failed?: unknown
+    }
+    const actions = Array.isArray(summary.actions) ? summary.actions.length : 0
+    const credit = numberOf(summary.credit) ?? 0
+    const failed = numberOf(summary.failed) ?? 0
+    toast(
+      failed > 0
+        ? t('猫猫旅行：{n} 个动作，+{credit} 积分，{failed} 个失败', { n: actions, credit, failed })
+        : t('猫猫旅行：{n} 个动作，+{credit} 积分', { n: actions, credit }),
+      failed > 0 ? 'err' : 'ok',
+    )
+    // 全池跑过之后，单账号缓存里的旅行状态已过期：清掉那些缓存，
+    // 让下次展开重新查（否则界面还显示「在途」，实际已领奖）
+    if (actions > 0) {
+      const map = new Map(getCheckinStore().growth)
+      for (const [id, cache] of map) {
+        if (cache.travel) map.set(id, { ...cache, travel: null })
+      }
+      patch({ growth: map })
+    }
+  } catch (error) {
+    toast(t('猫猫旅行失败：{error}', { error: errorMessage(error) }), 'err')
+  } finally {
+    patch({ travelRunning: false })
+  }
+}
+
+/* ─── 成长任务每日排程（国内版；与签到 / 旅行都独立）─── */
+
+/** 快照里只换 growthTask 段 */
+function mergeGrowthTask(next: GrowthTaskScheduleState): CheckinCenterSnapshot | null {
+  const current = getCheckinStore().snapshot
+  if (!current) return current
+  return { ...current, growthTask: next }
+}
+
+/** 保存成长任务排程（开关 / 时刻）。响应是后端归一化后的完整状态。 */
+export async function saveGrowthTaskSchedule(patchBody: Record<string, unknown>): Promise<void> {
+  const store = getCheckinStore()
+  if (store.growthTaskSaving) return
+  patch({ growthTaskSaving: true })
+  try {
+    const next = await bridge().saveGrowthTaskSchedule?.(patchBody)
+    if (next) {
+      patch({ snapshot: mergeGrowthTask(next) })
+      toast(t('已保存：成长任务排程'))
+    }
+  } catch (error) {
+    toast(t('保存失败：{error}', { error: errorMessage(error) }), 'err')
+  } finally {
+    patch({ growthTaskSaving: false })
+  }
+}
+
+/**
+ * 立即巡检一轮成长任务（全部国内版账号）。
+ *
+ * 与单账号的「一键完成」不是同一件事：那个只跑当前行、由界面逐条调执行端点；
+ * 这个跑全池、在后端串行完成（对应定时排程的手动触发）。
+ */
+export async function runGrowthTaskScheduleNow(): Promise<void> {
+  const store = getCheckinStore()
+  if (store.growthTaskRunning) return
+  patch({ growthTaskRunning: true })
+  try {
+    const result = await bridge().runGrowthTaskScheduleNow?.()
+    const schedule = result?.schedule as GrowthTaskScheduleState | undefined
+    if (schedule) patch({ snapshot: mergeGrowthTask(schedule) })
+    const summary = (result?.summary ?? {}) as {
+      done?: unknown
+      credit?: unknown
+      energy?: unknown
+      failed?: unknown
+    }
+    const done = numberOf(summary.done)
+    const credit = numberOf(summary.credit)
+    const energy = numberOf(summary.energy)
+    const failed = numberOf(summary.failed)
+    toast(
+      failed > 0
+        ? t('成长任务：{done} 项完成、{failed} 项失败，+{credit} 积分 +{energy} 能量', { done, failed, credit, energy })
+        : t('成长任务：{done} 项完成，+{credit} 积分 +{energy} 能量', { done, credit, energy }),
+      failed > 0 ? 'err' : 'ok',
+    )
+    // 全池跑过之后单账号缓存里的任务状态已过期，清掉让下次展开重新查
+    if (done > 0) {
+      const map = new Map(getCheckinStore().growth)
+      for (const [id, cache] of map) map.set(id, { ...cache, tasks: [] })
+      patch({ growth: map })
+    }
+  } catch (error) {
+    toast(t('成长任务失败：{error}', { error: errorMessage(error) }), 'err')
+  } finally {
+    patch({ growthTaskRunning: false })
   }
 }
 

@@ -11,8 +11,10 @@
 //! traveling     → 在途，跳过（等下一趟）
 //! arrived       → 领奖（带 record_id；reward_credit 入账）
 //! ```
-//! 参考项目把它挂成每日 09:00 的排程；本仓做成界面上的「巡检一次」
-//! （手动触发）+ 可被成长任务板块的定时链调用 —— 一趟只推进一步，不轮询。
+//! 参考项目把它挂成每日 09:00 的排程；本仓同样支持**定时排程**
+//! （见 [`run_for_accounts`]，由 `core::growth_scheduler` 调用）与界面上的
+//! 「巡检一次」（手动触发）。一趟只推进一步，不轮询 —— 定时排程一天跑两趟
+//! （默认 09:00 / 21:00）就足够覆盖「早上派出、晚上领奖」的闭环。
 //!
 //! ── 跳过与失败为什么必须分开 ────────────────────────────────
 //! 跳过是**预期**的正常态（在途、已达当日上限、领养门槛未达、防抖挡下），
@@ -267,4 +269,81 @@ pub async fn run_once(account: &GrowthAccount) -> TravelReport {
             credit: 0,
         },
     }
+}
+
+// ─── 多账号批量巡检（定时排程用）────────────────────────────
+
+/// 一个账号的巡检汇总。
+pub struct AccountTravelReport {
+    pub account_id: String,
+    pub name: String,
+    /// run_once 的 outcome（no_buddy 不会出现：无猫走 adopt）
+    pub outcome: &'static str,
+    pub message: String,
+    pub credit: i64,
+}
+
+/// 对一批账号跑一趟巡检（**串行** + 账号间错峰）。
+///
+/// ── 与单账号入口的分工 ──────────────────────────────────────
+/// `api::growth::travel_run` 是「用户点了某一个账号的按钮」，本函数是
+/// 「定时排程扫一遍全部账号」。两者共用 [`run_once`] 这一份状态机 ——
+/// 区别只在遍历与门控，不在动作本身。
+///
+/// ── 门控 ────────────────────────────────────────────────────
+/// 只服务 WorkBuddy 国内版的个人账号（企业版没有成长体系，国际版没有
+/// CN 任务中心）—— 与 `growth::streak::run_for_accounts` 同一口径。
+///
+/// ── 为什么跳过也要进报告 ────────────────────────────────────
+/// 旅行的「跳过」分两种：`traveling`（在途，等下一趟，正常）与
+/// `daily_limit_reached`（今天派出过了，正常）。两者都是**用户可能想确认
+/// 的状态**（「为什么今天没派出」），所以不像 streak 那样把无事可做的账号
+/// 整条吞掉 —— 但定时任务只把「有动作 / 有失败」的写进摘要，避免日志刷屏
+/// （见 `core::growth_scheduler`）。
+pub async fn run_for_accounts(
+    store: &crate::server::core::account_store::AccountStore,
+    accounts: &[serde_json::Value],
+) -> Vec<AccountTravelReport> {
+    /// 账号间错峰（毫秒）：参考项目 `travelAccountDelay` 同口径。
+    const ACCOUNT_GAP_MS: u64 = 800;
+
+    let mut reports: Vec<AccountTravelReport> = Vec::new();
+    let mut first = true;
+    for account in accounts {
+        let id = account.get("id").and_then(Value::as_str).unwrap_or("");
+        if id.is_empty() || !super::supports_growth(account) {
+            continue;
+        }
+        // 企业版没有个人成长体系（上游固定 400 code 10001）
+        if account
+            .get("enterpriseId")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+        {
+            continue;
+        }
+        let name = account
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .or_else(|| account.get("nickname").and_then(Value::as_str))
+            .unwrap_or(id)
+            .to_string();
+        let Some(growth_account) = GrowthAccount::from_store(store, id) else {
+            continue;
+        };
+        if !first {
+            tokio::time::sleep(std::time::Duration::from_millis(ACCOUNT_GAP_MS)).await;
+        }
+        first = false;
+        let report = run_once(&growth_account).await;
+        reports.push(AccountTravelReport {
+            account_id: id.to_string(),
+            name,
+            outcome: report.outcome,
+            message: report.message,
+            credit: report.credit,
+        });
+    }
+    reports
 }

@@ -227,6 +227,63 @@ pub async fn login_start(State(state): State<ServerState>, body: Bytes) -> Respo
         return ok_json(json!({ "state": task.state, "authUrl": task.auth_url,
             "edition": task.edition, "provider": region.provider_id() }));
     }
+    // 千问办公：**PKCE 设备授权**（与 Qoder 同一套协议）。
+    //
+    // 授权页与轮询都在网关域上（`gateway.qwenwork.cn/device/selectAccounts`、
+    // `/api/v1/deviceToken/poll`，实测 302 / 400 证明路径存在），
+    // 与 Qoder 的差别只有 client_id 与主机 —— 见 `providers::qwenwork::oauth`
+    // 的模块头。设备授权是「本进程现造地址 → 用户在浏览器授权 → 后台轮询换
+    // 令牌」，所以这里不必等 authUrl（地址同步就能拼出来）。
+    if kind == crate::server::core::providers::ProviderKind::Qwenwork {
+        let handle = match state.login().start_qwenwork_login() {
+            Ok(handle) => handle,
+            Err(error) => return management_error(400, error),
+        };
+        let task = handle.snapshot();
+        return ok_json(json!({ "state": task.state, "authUrl": task.auth_url,
+            "edition": task.edition, "provider": "qwenwork" }));
+    }
+    // MiniMax Code（两个地区）：**OAuth 2.0 设备码（RFC 8628）+ PKCE**。设备码是
+    // 「先申请、用户去浏览器输码、我们轮询」的协议，所以这里等得到 authUrl（含
+    // user_code），响应形状与 Qoder / Qwenwork 那条一致
+    // （`{state, authUrl, userCode, edition, provider}`），前端不需要新分支。
+    // 见 `providers::minimax::login` 的模块头。
+    //
+    // ── 地区取谁：**provider id**，不是请求里的 `edition` ────────
+    // 界面上两个地区是两张卡片（`minimax` / `minimax-intl`），点哪张就发哪个
+    // provider id —— 那是权威。它决定「设备码问哪台授权服务器、令牌落进哪一家
+    // 账号库」，判错会让国际版账号落进国内版那一组（转发稳定 401）。
+    // 与 ZCode / Qoder 拆家后的写法同款。
+    if let Some(region) = crate::server::core::providers::minimax::Region::from_kind(kind) {
+        let handle = match state.login().start_minimax_login(region) {
+            Ok(handle) => handle,
+            Err(error) => return management_error(400, error),
+        };
+        // 设备码要等一次上游往返才拿到，所以按 AuthUrlWait 的上限轮询任务状态
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(crate::server::core::login::AUTH_URL_WAIT_MS);
+        loop {
+            let task = handle.snapshot();
+            if task.auth_url.is_some() {
+                // `userCode` 必须随首次响应一起回去：设备码要**显示给用户**
+                // （授权页未必自动填码），等 `/wait` 第一拍再给就晚了一拍。
+                return ok_json(json!({ "state": task.state, "authUrl": task.auth_url,
+                    "userCode": task.user_code, "edition": task.edition,
+                    "provider": region.provider_id() }));
+            }
+            if task.done {
+                return management_error(
+                    502,
+                    task.error.unwrap_or_else(|| "MiniMax Code 登录发起失败".to_string()),
+                );
+            }
+            if tokio::time::Instant::now() >= deadline {
+                // 任务仍在后台跑（与既有 502 语义一致：只是这一次没等到 URL）
+                return management_error(502, "MiniMax Code 登录发起超时（任务仍在后台继续）");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        }
+    }
     // ZCode：**服务端中介的 CLI 轮询**（`/oauth/cli/init` 拿授权地址，
     // 用户在浏览器里授权后由后台任务轮询换令牌）。响应形状与 Qoder 那条
     // 一致（`{state, authUrl, edition, provider}`），前端不需要新分支。
@@ -315,6 +372,31 @@ pub async fn login_start(State(state): State<ServerState>, body: Bytes) -> Respo
         };
         return ok_json(json!({ "state": task_state, "authUrl": auth_url,
             "edition": task_edition, "provider": "officeace" }));
+    }
+    // AtomCode（AtomGit / GitCode）：**服务端中介的轮询登录**（与 OfficeAce /
+    // ZCode 同一形态，见 `core::login::atomcode` 的模块头）—— 授权地址由本进程
+    // 向代理现取，用户在浏览器里登完，后台任务**轮询代理**判完成并取令牌，
+    // **不需要壳侧开回调监听**（AtomCode 的回调由代理自己在
+    // `acs.atomgit.com/callback` 终结，永远不回到本机）。
+    // 响应形状与另外几条登录链一致（`{state, authUrl, edition, provider}`）。
+    if kind == crate::server::core::providers::ProviderKind::Atomcode {
+        let handle = match state.login().start_atomcode_login() {
+            Ok(handle) => handle,
+            Err(error) => return management_error(400, error),
+        };
+        let (task_state, auth_url, task_edition) = match state
+            .login()
+            .wait_for_auth_url(&handle, Duration::from_millis(AUTH_URL_WAIT_MS))
+            .await
+        {
+            Ok(values) => values,
+            Err(error) => {
+                logging::log("[Login]", &format!("❌ 发起 AtomCode 登录失败: {error}"));
+                return management_error(502, error);
+            }
+        };
+        return ok_json(json!({ "state": task_state, "authUrl": auth_url,
+            "edition": task_edition, "provider": "atomcode" }));
     }
     // Cline：**设备授权登录**（WorkOS RFC 8628）。形态上介于「网页登录」与
     // 「Qoder 设备授权」之间：同步问上游要 user_code 与授权页地址（一次 POST），
@@ -978,15 +1060,58 @@ pub async fn login_kuku_complete(
     }
 }
 
-// ─── OrcaTerm 网页登录收尾（官方 Web 控制台）────────────────────
+// ─── Coze 网页登录收尾（Cookie 交回）────────────────────────────
 
-/// `POST /api/session/login/orcaterm/complete` —— 壳侧交回登录态 Cookie。
+/// `POST /api/session/login/coze/complete` —— 壳侧交回登录态。
 ///
-/// OrcaTerm 的 Web 令牌住在一个普通（非 HttpOnly）Cookie `ot_session` 里，
-/// 页面脚本与 Cookie 存储都读得到；交回仍走**壳侧进程**这一步（与 KukuAI
-/// 同款），因为登录窗口是壳自己开的、Cookie 存储也归它：窗口里出现
-/// `ot_session` 即「用户已扫码登录成功」，壳把 `{state, token}` POST 到这里
-/// （state + 令牌在请求体里，不走 URL）。
+/// Coze 的登录方式会经过第三方身份提供方（抖音 / 微信 / 阿里 / 短信），
+/// 成功后的跳转**不携带授权码**（凭证在 `.coze.cn` 域的 Cookie 里），而
+/// `sessionid_ss` 是 **HttpOnly** Cookie，登录窗口的页面脚本读不到 ——
+/// 因此交回由**壳侧进程**完成：窗口里出现 `sessionid_ss` 后，壳读 WebView2
+/// 的 Cookie 存储（`cookies()` 含 HttpOnly）把 `.coze.cn` 域**整包** Cookie
+/// 拼成 Cookie 头 POST 到这里（`state` + `cookie` 在请求体里，不走 URL）。
+///
+/// 该路由**免鉴权**：调用方是壳侧进程（登录窗口），不带 API Key；安全性由
+/// 登录任务的一次性 state 承担（与 kuku/complete 同口径）。
+pub async fn login_coze_complete(
+    State(state): State<ServerState>,
+    Json(payload): Json<Value>,
+) -> Response {
+    let task_state = payload
+        .get("state")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    let cookie = payload
+        .get("cookie")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if task_state.is_empty() || cookie.is_empty() {
+        return management_error(400, "登录失败：回调缺少 state 或登录态 Cookie，请重新发起登录。");
+    }
+    match state.login().finish_coze_login(task_state, cookie).await {
+        Ok(_) => ok_json(json!({ "ok": true })),
+        Err(error) => management_error(error.status_code, &format!("登录失败：{}", error.message)),
+    }
+}
+
+// ─── OrcaTerm 网页登录收尾（兜底入口）──────────────────────────
+
+/// `POST /api/session/login/orcaterm/complete` —— 直接交回一枚现成的令牌。
+///
+/// ── 正式链路不在这里（必读）─────────────────────────────────
+/// 网页登录走**官方 OAuth**：窗口停在授权页 → 微信扫码 → 上游把浏览器带回
+/// `orcaterm://oauth_callback?session_id=…` → 壳侧把回调 URL 交给
+/// `POST /api/session/login/callback` → 后端 `OAuthExchangeToken` 换令牌
+/// （见 `providers/orcaterm/login.rs` 模块头，那里也记录了「为什么不用控制台
+/// 的 `ot_session`」：那枚 Cookie 在 SPA 内扫码时根本不会被写出来）。
+///
+/// 本端点留给「调用方手里已经有一枚令牌」的场景（壳侧若从别处读到、外部工具
+/// 替我们拿到）：`{state, token}` POST 进来，同样做上游探活，通过才落账号。
+///
+/// 令牌形态兼容 `ot_session=…` 前缀（后端 `normalize_token` 会剥），
+/// 因此字段既叫 `token` 也接受别名 `cookie`。
 ///
 /// 该路由**免鉴权**：调用方是壳侧进程（登录窗口），不带 API Key；安全性由
 /// 登录任务的一次性 state 承担（与 kuku/complete 同口径）。
@@ -1238,6 +1363,37 @@ fn oauth_callback_page(status: i32, message: &str) -> Response {
 /// 因此直接按它查任务表即可（与 AutoClaw 的「变体匹配 + 最近发起」不同）。
 ///
 /// 响应是给人看的 HTML（浏览器停在这一页），不走 `ok_json` 那套信封。
+// ─── /auth/callback（LobsterAI 的 loopback 回调）─────────────
+
+/// LobsterAI 网页登录的回调。**浏览器 302 到这里**（授权页完成后顶层导航回我们
+/// 交给上游门户的 `redirect_uri`，查询串带 `code` / `state`）。
+///
+/// 路径是裸 `/auth/callback`（与别家带家名后缀的风格不一致）——理由见
+/// `http.rs` 里那条路由的注释：`redirect_uri` 是我们给门户的，而门户是否对
+/// 回调路径有白名单没有实测支撑，所以跟随参考实现那条已验证的形状。
+///
+/// 免鉴权的理由与 accio / autoclaw / codearts / antigravity 四条 loopback 回调
+/// 同一句：调用方是**用户的浏览器**，它当然没有我们的 API Key；安全性由本次
+/// 登录任务生成的一次性 `state` 承担（见 `core::login::lobsterai`）。
+pub async fn login_lobsterai_callback(
+    State(state): State<ServerState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let code = params.get("code").cloned().unwrap_or_default();
+    let task_state = params.get("state").cloned().unwrap_or_default();
+    if let Some(error) = params.get("error").filter(|value| !value.trim().is_empty()) {
+        return oauth_callback_page(400, &format!("登录失败：授权被拒绝（{error}）"));
+    }
+    match state.login().finish_lobsterai_login(&code, &task_state).await {
+        Ok(_) => oauth_callback_page(200, "登录成功，已返回网关，可以关闭此页面。"),
+        Err(error) => {
+            // 这一轮已经作废：把 pending 也丢掉，免得留在表里等超时
+            state.login().drop_lobsterai_pending(&task_state);
+            oauth_callback_page(error.status_code, &format!("登录失败：{}", error.message))
+        }
+    }
+}
+
 pub async fn login_accio_callback(
     State(state): State<ServerState>,
     Query(params): Query<std::collections::HashMap<String, String>>,

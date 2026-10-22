@@ -129,7 +129,15 @@ function applyZoom(percent) {
 // ─── 页面导航 ────────────────────────────────
 
 const PAGE_KEY = 'workbuddy-desktop-page';
-const PAGES = ['assistant', 'overview', 'accounts', 'checkin', 'gateway', 'proxies', 'keys', 'docs', 'logs', 'tasks', 'requests', 'settings'];
+/**
+ * 设置页当前分类的存储键。
+ *
+ * **必须与 islands/settings-model.ts 的 SETTINGS_CAT_KEY 逐字一致**：侧栏点分类
+ * 时先写它、再切页，设置页 load() 头一行的 restoreCategory() 就是读它把分类
+ * 铺上去的。写错这里，症状是「点侧栏分类没反应、总停在通用」。
+ */
+const SETTINGS_CAT_KEY = 'workbuddy-desktop-settings-cat';
+const PAGES = ['assistant', 'overview', 'accounts', 'checkin', 'gateway', 'agent', 'proxies', 'keys', 'docs', 'logs', 'tasks', 'requests', 'settings'];
 /** 页签中文名：顶栏面包屑用。overview 的用户可见名是「报表」、gateway 的是「模型管理」
  *  （内部标识保持不变：localStorage 记忆、showPage 与 CSS 的 [data-page] 选择器都依赖它） */
 const PAGE_LABELS = {
@@ -138,6 +146,7 @@ const PAGE_LABELS = {
   accounts: wbI18n.t('账号'),
   checkin: wbI18n.t('签到中心'),
   gateway: wbI18n.t('模型管理'),
+  agent: 'Agent',
   proxies: wbI18n.t('网络代理'),
   keys: wbI18n.t('网关 Key'),
   docs: wbI18n.t('文档'),
@@ -150,17 +159,170 @@ const PAGE_LABELS = {
 /** 当前页（子模块据此判断是否需要重新加载） */
 let currentPage = 'overview';
 
+/**
+ * 侧边栏布局（分组 / 顺序 / 显隐）：数据口径全部在 ui/sidebar-layout.js，
+ * 这里只负责「按它把 #nav 画出来」与「设置页改完后重画」。
+ *
+ * 每次重画都是整块重建 #nav 的子节点 —— 与账号表「整表重建」同一取舍：
+ * 布局变更频率极低（用户手动调一次），增量更新换不来任何收益，却要维护
+ * 「哪个节点对应哪个菜单」的映射。三颗角标是**按 id 重建**的，所以重画之后
+ * 它们的显示状态会回到初始（隐藏），需要立刻补一次重绘（见 syncNavBadges）。
+ */
+function sidebarApi() {
+  return window.wbSidebarLayout;
+}
+
+/** 当前生效的布局（每次都从 localStorage 读：设置页改完只需派事件，不必传值） */
+function readSidebarLayout() {
+  return sidebarApi()?.readLayout?.() || null;
+}
+
+/**
+ * 画导航。
+ *
+ * 契约（与 index.html 里那段注释同源，改这里必须一起看）：
+ *   · 菜单键 = data-page，与 PAGES / PAGE_LABELS 逐字一致；
+ *   · 角标 id 固定三颗：nav-count-requests / -logs / -update；
+ *   · 分组标题用 .nav-group-label（≤900px 由 layout.css 整列隐藏）。
+ * 图标不在这里注入：画完调 paintIcons()，它按 data-icon 从 icons.js 取图形。
+ */
+function renderSidebar() {
+  const nav = $('nav');
+  const api = sidebarApi();
+  if (!nav || !api) return;
+
+  const layout = api.readLayout();
+  const groups = api.renderGroups(layout);
+
+  // 一个菜单都不剩：留一句提示，否则侧边栏只剩品牌与底部，像加载失败
+  if (!groups.length) {
+    nav.innerHTML = `<div class="nav-empty" data-i18n="侧边栏没有显示任何菜单。到「设置 → 显示 → 侧边栏菜单」里打开需要的项。">${esc(wbI18n.t('侧边栏没有显示任何菜单。到「设置 → 显示 → 侧边栏菜单」里打开需要的项。'))}</div>`;
+    return;
+  }
+
+  const parts = [];
+  for (const group of groups) {
+    parts.push(`<div class="nav-group-label">${esc(api.groupLabel(group.label))}</div>`);
+    for (const menu of group.items) {
+      parts.push(navItemHtml(menu));
+    }
+  }
+  nav.innerHTML = parts.join('');
+  paintIcons();
+  // 选中态与角标跟着重画：showPage 只负责「当前页」，重画后它认得的节点已经换了
+  markActiveNav();
+  syncNavBadges();
+}
+
+/** 一颗导航项。角标只给三个菜单，id 必须与 app.js 里的取用点逐字一致 */
+function navItemHtml(menu) {
+  const label = esc(wbI18n.t(menu.label));
+  const badge = menu.key === 'requests'
+    ? '<span class="count" id="nav-count-requests" style="display:none">0</span>'
+    : menu.key === 'logs'
+      ? '<span class="count" id="nav-count-logs" style="display:none">0</span>'
+      : menu.key === 'settings-about'
+        // 「新版本可用」提示挂在「更新」那一项上（它原先是唯一的「设置」项，
+        // 设置页拆成 13 项后，更新提示归到名副其实的那一项）
+        ? `<span class="count" id="nav-count-update" style="display:none">${esc(wbI18n.t('新'))}</span>`
+        : '';
+  /**
+   * 三个属性各司其职，别合并：
+   *   · `data-nav` = 导航身份（menu.key）。选中态按它比对 —— 设置页的 13 项
+   *     都指向同一个页面，用 data-page 比对会一起亮；
+   *   · `data-page` = **要切到哪个页面**。设置分类项一律是 'settings'：它们的
+   *     key（`settings-general` 之类）不在 PAGES 里，塞进 data-page 会让
+   *     showPage 认不出而回退到「报表」；
+   *   · `data-cat` = 设置页内落到哪一栏，只有分类项有。
+   */
+  const cat = menu.cat ? ` data-cat="${menu.cat}"` : '';
+  const page = menu.page || menu.key;
+  return `<button class="nav-item" data-nav="${menu.key}" data-page="${page}"${cat} data-icon="${menu.icon}">`
+    + '<span class="ico"></span>'
+    + `<span class="label">${label}</span>${badge}</button>`;
+}
+
+/**
+ * 把选中态标到当前页那一项上（showPage 与 renderSidebar 共用）。
+ *
+ * ── 为什么按 data-nav 而不是 data-page ────────────────────────
+ * 设置页的 13 个分类项 data-page 全是 'settings'（见 navItemHtml 的说明），
+ * 按 data-page 比对会让它们**一起亮**。所以选中态比对的是导航身份 data-nav。
+ *
+ * 设置页的分类项还有第二层：13 项该只亮**当前分类**那一项。那需要知道
+ * 「现在是哪个分类」，而分类状态的唯一投影在设置页的页内导航上（React 岛
+ * 内部状态，宿主读不到）—— 那层同步由 sidebar-settings-sync.js 观察
+ * `.settings-nav-item.active` 补上；这里只负责「不亮成一片」的基础判断：
+ * 当前在设置页时，非分类项（settings 之外的一级菜单）都不亮，分类项交给
+ * 那个脚本按实地状态点亮。
+ */
+function markActiveNav() {
+  // 设置页当前停在哪个分类：由 sidebar-settings-sync.js 在标题属性上写下的
+  // 投影（读不到时退回 null = 让分类项全部不亮，而不是全亮）
+  const activeCat = document.documentElement.dataset.settingsCat || '';
+  document.querySelectorAll('.nav-item').forEach(item => {
+    const nav = item.dataset.nav || item.dataset.page;
+    if (nav === 'settings-general' || String(nav).startsWith('settings-')) {
+      // 分类项：只在「当前页是设置」且分类对得上时亮
+      const isCat = item.dataset.cat === activeCat;
+      item.classList.toggle('active', currentPage === 'settings' && isCat);
+      return;
+    }
+    item.classList.toggle('active', nav === currentPage);
+  });
+}
+
+/**
+ * 重画之后补一次角标。
+ *
+ * 三颗角标的数据都由轮询维护在模块级变量里（runningRequests / unreadFailures /
+ * lastUpdateInfo / 未读日志水位），重画把 DOM 换掉之后新节点是「隐藏 + 0」，
+ * 必须按现有内存值重新点一次，否则用户改完布局要等下一轮轮询（最长 20 秒）
+ * 才重新看到提示。查询本身不发 —— 这里只用已经拿到的数。
+ *
+ * `navBadgesReady` 是必须的：首次渲染发生在模块顶部（那时还不能被桥调用中断），
+ * 而那些计数用的是 `let`（TDZ）—— 提前读会抛 ReferenceError，把整段脚本带崩。
+ * 首次渲染只画结构就够了（角标本来就该是隐藏的），等这些变量都初始化完再置位。
+ */
+let navBadgesReady = false;
+
+function syncNavBadges() {
+  if (!navBadgesReady) return;
+  paintRequestsBadge();
+  paintLogsBadgeFromMemory();
+  syncUpdateBadge();
+}
+
+/**
+ * 顶栏面包屑的文本。
+ *
+ * 设置页是个特例：侧栏把它的 13 个分类平铺成了一级菜单，停在「重试」上时
+ * 面包屑只写「设置」看不出自己在哪一栏，所以带上分类名（「设置 / 重试」）。
+ *
+ * 分类名的来源是 `SETTINGS_MENUS`（侧栏那一份权威表，经 wbSidebarLayout 取用）
+ * —— 直接查表而不是维护第二份 name→label 映射，避免两处漂移。取不到时退回
+ * 只写「设置」（如岛屿未就绪、表被换掉），不抛错。
+ */
+function crumbText(page) {
+  const base = PAGE_LABELS[page] || page;
+  if (page !== 'settings') return base;
+  const cat = document.documentElement.dataset.settingsCat || '';
+  const label = sidebarApi()?.menusByCat?.()[cat];
+  // 拼接而不是走 t() 的占位符：i18n 扫描器把含 {xxx} 的字面量当成插值模板、
+  // 提取不到键（见 scan.mjs 的非字面量警告）。分类名本身已经是译文，
+  // 这里的「A / B」只是分隔符，没有语序问题 —— 不占一条词典反而更省。
+  return label ? `${base} / ${wbI18n.t(label)}` : base;
+}
+
 function showPage(name, { persist = true } = {}) {
   const page = PAGES.includes(name) ? name : 'overview';
   currentPage = page;
   document.querySelectorAll('.page').forEach(section => {
     section.classList.toggle('active', section.dataset.page === page);
   });
-  document.querySelectorAll('.nav-item').forEach(item => {
-    item.classList.toggle('active', item.dataset.page === page);
-  });
+  markActiveNav();
   const crumb = $('crumb-page');
-  if (crumb) crumb.textContent = PAGE_LABELS[page] || page;
+  if (crumb) crumb.textContent = crumbText(page);
   // 移动端：切页后收起侧边栏抽屉。#nav-toggle 是纯 CSS 开关（见 css/mobile.css），
   // 点导航项只切页不 uncheck，抽屉会一直开着；桌面端该元素恒为 unchecked，这行无副作用。
   { const t = document.getElementById('nav-toggle'); if (t) t.checked = false; }
@@ -208,6 +370,11 @@ function showPage(name, { persist = true } = {}) {
   if (page === 'gateway') {
     void window.wbModelsPanel?.refreshAll?.();
   }
+  // Agent 页自持客户端清单与配置，切进去时拉一次最新（配置文件可能被
+  // 客户端自己改过、也可能刚在别的窗口里被别的工具改过）
+  if (page === 'agent') {
+    void window.wbAgentPanel?.load?.();
+  }
   // 网络代理页自持清单（代理池），切进去时拉一次最新：别的窗口 / 别的页面
   // （账号弹窗里改过引用）都可能让它变过。面板内部保证「这次刷新一定落地」
   if (page === 'proxies') {
@@ -217,6 +384,9 @@ function showPage(name, { persist = true } = {}) {
   // 切走的这段时间里缓存已经过期，不补一下会先看到几秒前的旧数字
   if (page === 'accounts') {
     void window.wbAccountsView?.syncConnections?.();
+    // 代理列的下拉读的是与「网络代理」页共用的那份池缓存：那一页的写操作会就地
+    // 更新它，但池也可能在应用外被改过（另一个窗口 / 手工改库），切回来时重读一次
+    void window.wbAccountsView?.refreshProxyPool?.();
   }
   // 网关 Key 页持有数据，切进去时拉一次最新（模型管理页在上面已经拉过）
   if (page === 'keys') {
@@ -322,6 +492,14 @@ function renderTopbarStatus() {
 let lastSeenLogId = readSeenLogId();
 /** 未读错误查询是否在飞：日志面板轮询与全局轮询都会触发它，同一时刻只该有一次 */
 let unreadErrorsInFlight = false;
+/**
+ * 最近一次查到的未读错误数（0 = 没有）。
+ *
+ * 为什么要留在内存里：侧边栏重画（用户改了分组 / 顺序 / 显隐）会把角标节点整个
+ * 换掉，新节点是「隐藏 + 0」。重画之后必须按这个值重新点一次，否则要等下一轮
+ * 轮询（最长 20 秒）提示才回来。查询本身不发 —— 这里只用已经拿到的数。
+ */
+let unreadLogErrors = 0;
 
 /** 读回持久化的水位；无值 / 值被改坏一律当作「还没有水位」 */
 function readSeenLogId() {
@@ -392,6 +570,23 @@ function updateLogsBadge(stats) {
   void refreshUnreadErrors(badge);
 }
 
+/**
+ * 按内存里已有的未读数重画日志角标（不发查询）。
+ * 侧边栏重画之后由 syncNavBadges 调 —— 新节点是「隐藏 + 0」，
+ * 不补这一下，用户改完布局要等下一轮轮询才重新看到提示。
+ */
+function paintLogsBadgeFromMemory() {
+  const badge = $('nav-count-logs');
+  if (!badge) return;
+  if (currentPage === 'logs' || !unreadLogErrors) {
+    badge.style.display = 'none';
+    return;
+  }
+  badge.textContent = unreadLogErrors > 99 ? '99+' : String(unreadLogErrors);
+  badge.title = wbI18n.t('{n} 条错误日志未读，点开「日志」查看', { n: unreadLogErrors });
+  badge.style.display = '';
+}
+
 /** 查未读错误数并重画徽标。失败静默：查询偶尔失败不该反过来抹掉已有提示 */
 async function refreshUnreadErrors(badge) {
   if (unreadErrorsInFlight || lastSeenLogId === null) return;
@@ -402,13 +597,17 @@ async function refreshUnreadErrors(badge) {
     // 等待期间水位被推进（用户进了日志页），这次结果已过期，别拿旧数覆盖新状态
     if (from !== lastSeenLogId || currentPage === 'logs') return;
     const unread = Number(result?.matched) || 0;
+    unreadLogErrors = unread;
+    // 重画过的侧边栏可能已经换掉了这个 badge 节点：按 id 重新取一次，
+    // 拿旧引用去改只会改到一个已经不在文档里的元素
+    const live = $('nav-count-logs') || badge;
     if (!unread) {
-      badge.style.display = 'none';
+      live.style.display = 'none';
       return;
     }
-    badge.textContent = unread > 99 ? '99+' : String(unread);
-    badge.title = wbI18n.t('{n} 条错误日志未读，点开「日志」查看', { n: unread });
-    badge.style.display = '';
+    live.textContent = unread > 99 ? '99+' : String(unread);
+    live.title = wbI18n.t('{n} 条错误日志未读，点开「日志」查看', { n: unread });
+    live.style.display = '';
   } catch {
     // 保持上一次的显示
   } finally {
@@ -581,6 +780,15 @@ let lastUpdateInfo = null;
 let seenUpdateVersion = '';
 
 /**
+ * 三颗角标的内存值都初始化完了 —— 从这里开始 syncNavBadges 才有意义。
+ *
+ * 首次 renderSidebar() 发生在模块顶部（见那里的说明：它不能被桥调用中断），
+ * 那时上面这些 `let` 还在 TDZ 里，读一下就抛 ReferenceError。置位放在
+ * 「所有角标状态声明之后」是刻意的：早一行都可能踩到 TDZ。
+ */
+navBadgesReady = true;
+
+/**
  * 按当前状态重画「设置」导航项上的更新提示。
  * 更新是设置页里的功能，所以提示挂在设置项上，不新增顶级页面。
  * 无更新、检查失败、版本号无法比较一律不显示（启动阶段的网络失败不该打扰用户）；
@@ -591,8 +799,14 @@ function syncUpdateBadge() {
   if (!badge) return;
   const info = lastUpdateInfo;
   const latest = String(info?.latestVersion || '').trim();
-  // 进设置页即视为「已看到」：结果与更新日志就在那个面板里
-  if (currentPage === 'settings') seenUpdateVersion = latest;
+  // 进「更新」那一栏即视为「已看到」：结果与更新日志就在那个面板里。
+  // 判据用**分类**而不是「在设置页」—— 13 个分类平铺成一级菜单之后，
+  // 进「通用」并不等于看过更新日志，早先那句 `currentPage === 'settings'`
+  // 在拆分后会把没看过的情况也标成已读（角标该亮却不亮）。
+  // 分类由 sidebar-settings-sync.js 投影在 <html data-settings-cat> 上；
+  // 拿不到时（同步脚本未就绪）退回「在设置页就算看过」的保守判断。
+  const cat = document.documentElement.dataset.settingsCat || '';
+  if (currentPage === 'settings' && (cat === 'about' || !cat)) seenUpdateVersion = latest;
   if (info?.hasUpdate !== true || !latest || latest === seenUpdateVersion) {
     badge.style.display = 'none';
     return;
@@ -797,6 +1011,46 @@ applyTheme(localStorage.getItem('workbuddy-desktop-theme') || 'system');
 // 尽力而为的反闪烁，若桥当时还没就绪就会静默失败，由这行补齐。
 applyZoom(storedZoom());
 
+/**
+ * 侧边栏首帧：按本机布局画出 #nav。
+ *
+ * ⚠ 位置是**契约**：必须在第一个桥调用（下面这行 `api.onStateChanged`）之前。
+ *
+ * 为什么不能再往后放：以前侧边栏是 index.html 里的静态 DOM，桥没就绪时页面
+ * 照样有导航；改成数据渲染之后，这一句要是排在桥调用后面，只要桥缺失
+ * （浏览器直开 / 注入失败）在那一行抛错，整段脚本中断，#nav 就永远是空的 ——
+ * 用户看到的是一个没有导航的窗口，比任何功能失效都糟。
+ * 它只读 localStorage、不依赖任何岛与桥，没有任何理由排在后面。
+ *
+ * 也不能挪进 DOMContentLoaded：那会让首帧闪一下空侧边栏。
+ */
+renderSidebar();
+
+/**
+ * 设置页改完布局后的重画入口。
+ *
+ * 为什么走事件而不是直接调用：设置页的编辑面板是 React 岛，它改完只知道自己
+ * 手里那份数据变了；重画侧边栏是 app.js 的职责。事件里不带数据 —— 布局的唯一
+ * 真相在 localStorage，重画时现读，避免「事件传的值」与「存盘的值」在某个
+ * 中间态对不上（比如用户连点两下）。
+ *
+ * ⚠ 与 renderSidebar 同一个理由排在桥调用之前：它只读 localStorage、只改 DOM，
+ * 不依赖桥。排到 `api.onStateChanged` 后面的话，桥缺失时这条监听根本不会注册，
+ * 用户在设置页改完布局、左侧侧边栏毫无反应 —— 而且没有任何报错。
+ *
+ * 顺带处理「当前页被隐藏了」：用户把自己正看着的那一页藏起来之后，侧边栏里
+ * 没有它的入口了，但页面还开着 —— 看起来像卡住。这时落到第一个可见页。
+ */
+window.addEventListener('wb:sidebar-layout', () => {
+  renderSidebar();
+  const api = sidebarApi();
+  const layout = api?.readLayout?.();
+  if (!layout || !api) return;
+  if (api.isVisible(layout, currentPage)) return;
+  const fallback = api.firstVisibleKey(layout);
+  if (fallback) showPage(fallback);
+});
+
 api.onStateChanged(next => {
   if (!next?.accounts && !next?.session && !next?.health) return;
   // 合并：旧 state + 新字段
@@ -811,6 +1065,15 @@ window.wbApp = {
   formatTime,
   showPage,
   get currentPage() { return currentPage; },
+  /**
+   * 重刷侧栏选中态。给 sidebar-settings-sync.js 用：切设置分类**不经过
+   * showPage**（页内点导航只走岛的 showCategory），而那 13 个一级项的高亮
+   * 判断在本文件里 —— 所以那边写完 <html data-settings-cat> 后调这里补刷。
+   * 高亮逻辑只此一份，不另抄一套到宿主脚本里（两份必然漂）。
+   */
+  syncNavActive: markActiveNav,
+  /** 重刷三颗角标（切设置分类时调：更新角标的判据依赖当前分类，见 syncUpdateBadge） */
+  syncNavBadges: syncNavBadges,
   getState: () => state,
   runAccountAction,
   refresh,
@@ -834,9 +1097,24 @@ window.wbApp = {
 // ─── 初始化 ───────────────────────────────────
 
 // 导航：点击切换页面，记住上次所在页
+// （首帧渲染在文件上方、第一个桥调用之前 —— 见那里的说明）
 $('nav').addEventListener('click', event => {
   const item = event.target.closest('.nav-item[data-page]');
-  if (item) showPage(item.dataset.page);
+  if (!item) return;
+  const cat = item.dataset.cat;
+  if (cat) {
+    // 设置分类项：顺序不能改 —— 先写分类偏好，再 showPage。
+    // showPage('settings') 会触发设置页的 load()，而 load() 的**头一行**就是
+    // 同步的 restoreCategory()（读这个键）。若先切页后写偏好，偏好会被上一次
+    // 的值盖回去，用户点了「重试」却停在「通用」。
+    // 末尾那次 showCategory 是兜底：存储不可用时 restoreCategory 拿不到值，
+    // 这一句仍能把分类拨到位（showCategory 不写偏好，符合它的既有语义）。
+    try { localStorage.setItem(SETTINGS_CAT_KEY, cat); } catch { /* 存储不可用：这次照样切 */ }
+    showPage('settings');
+    window.wbSettingsPanel?.showCategory?.(cat);
+    return;
+  }
+  showPage(item.dataset.page);
 });
 
 /**
@@ -875,7 +1153,20 @@ paintIcons();
 // 恢复页是「设置」时，启动设置就永远停在「检测中…」（局域网开关随之显示
 // 默认值，看着像没保存）。DOMContentLoaded 在全部同步脚本执行完才触发，
 // 借它把初始切换对齐到「岛已就绪」之后，与用户手动切页完全同行为。
-const initialPage = localStorage.getItem(PAGE_KEY) || 'overview';
+//
+// 恢复前先过一道「这页还看得见吗」：用户可能在上次退出前把它（或它所在的分组）
+// 隐藏了。停在一个侧边栏里找不到入口的页面上，看起来就像页面丢了 —— 这时落到
+// 第一个可见页。一个菜单都不剩时保持原值（那种情况下用户会看到侧边栏的提示语，
+// 页面本身仍是可用的，没必要再猜一个）。
+function restoredPage() {
+  const saved = localStorage.getItem(PAGE_KEY) || 'overview';
+  const api = sidebarApi();
+  const layout = api?.readLayout?.();
+  if (!layout || !api) return saved;
+  if (api.isVisible(layout, saved)) return saved;
+  return api.firstVisibleKey(layout) || saved;
+}
+const initialPage = restoredPage();
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', () => {
     showPage(initialPage, { persist: false });

@@ -28,11 +28,19 @@
 //! 不额外起后台定时器。
 
 mod accio;
+mod atomcode;
 mod autoclaw;
+mod lobsterai;
 mod catpaw;
 pub mod codearts;
 mod qoder;
 mod officeace;
+// 千问办公：与 Qoder 同一套 PKCE 设备授权，只是 client_id / 授权主机不同
+// （见 providers::qwenwork::oauth 的模块头）。
+mod qwenwork;
+// MiniMax Code：OAuth 2.0 设备码（RFC 8628）+ PKCE —— 与 Qwenwork 同一条
+// 「起任务 → 轮询 → 落账号」的骨架，协议不同（见 providers::minimax::login）。
+mod minimax;
 mod trae;
 mod zcode;
 
@@ -83,6 +91,13 @@ pub struct LoginTaskState {
     /// 缺省（default）为空串，`new_handle_for_provider` 会写上一家；
     /// 空串在回调侧按「不认识」拒绝，不会静默落到某一家。
     pub provider: String,
+    /// **设备码登录**里那个短码（`XXXX-XXXX`），设备授权流程专用。
+    ///
+    /// 为什么进任务状态而不是只藏在 `auth_url` 里：设备码要**显示**给用户
+    /// （授权页可能没自动填码，用户得手输），而 `authUrl` 的 `?user_code=…`
+    /// 藏在查询串里，界面去解析 URL 才能拿到它 —— 那是把一条后端契约
+    /// 泄漏成前端字符串处理。别的登录形态（回调 / 设备令牌）不填，恒为 None。
+    pub user_code: Option<String>,
     pub canceled: bool,
     finished_at: Option<i64>,
 }
@@ -92,7 +107,15 @@ impl LoginTaskState {
     /// `{pending:true}` / `{done:true,error}` / `{done:true,session}`
     pub fn to_wait_response(&self) -> Value {
         if !self.done {
-            return json!({ "pending": true });
+            // `pending` 时把设备码带上：前端要**一边等一边显示**这个短码，
+            // 等结果出来再给就晚了（用户早该在授权页输完了）。
+            // 没有设备码的家不多带任何键（键不存在 ≠ 键为空）。
+            return match self.user_code.as_deref() {
+                Some(code) if !code.is_empty() => {
+                    json!({ "pending": true, "userCode": code })
+                }
+                _ => json!({ "pending": true }),
+            };
         }
         if let Some(error) = &self.error {
             return json!({ "done": true, "error": error });
@@ -326,6 +349,11 @@ impl LoginService {
             if state.starts_with("trae-") {
                 self.close_trae_login();
             }
+            // MiniMax Code（两个地区）：设备码是「Bearer 级的授权凭据」——
+            // 用户点了取消还留着它，等于留一个 5 分钟的口子（虽然换令牌仍需
+            // 本进程里的 PKCE verifier，但没必要留着）。这里把码划掉，后台轮询
+            // 下一拍就会看到「已作废」并退出，不再白打上游。
+            crate::server::core::providers::minimax::login::mark_canceled(state);
         }
         canceled
     }
@@ -371,6 +399,8 @@ impl LoginService {
                 session: None,
                 edition: info.id.to_string(),
                 provider: provider.to_string(),
+                // 设备码登录才填；别的形态恒 None（`/start` 与 `/wait` 见键才带出去）
+                user_code: None,
                 canceled: false,
                 finished_at: None,
             })),
@@ -475,19 +505,92 @@ impl LoginService {
         Ok(account_id)
     }
 
-    /// OrcaTerm 网页登录收尾：校验任务 → 归一化令牌 → 上游探活 → 落账号。
+    /// Coze 网页登录收尾：校验任务 → 从整包 Cookie 提取凭证 → 复核 → 落账号。
+    ///
+    /// ── 与其它网页登录回调的差别（与 KukuAI 同一条链）────────────
+    /// Coze 的登录方式会经过第三方身份提供方（抖音 / 微信 / 阿里 / 短信），
+    /// 成功后的跳转**不携带授权码** —— 凭证在 `.coze.cn` 域的 Cookie 里，
+    /// 且 `sessionid_ss` 是 HttpOnly，页面脚本读不到。因此由壳侧读 WebView2
+    /// 的 Cookie 存储后 POST 到 `POST /api/session/login/coze/complete`，
+    /// 这里完成「任务校验 → 复核 → 落账号 → 写任务状态」四步。
+    pub async fn finish_coze_login(
+        &self,
+        state: &str,
+        cookie: &str,
+    ) -> Result<String, GatewayError> {
+        let state = state.trim();
+        if state.is_empty() {
+            return Err(GatewayError::with_status(400, "缺少 state，无法确认这次回调归属"));
+        }
+        let Some(handle) = self.tasks.get(state) else {
+            return Err(GatewayError::with_status(
+                404,
+                "登录任务不存在或已过期，请重新发起网页登录",
+            ));
+        };
+        let task = handle.snapshot();
+        if task.canceled {
+            return Err(GatewayError::with_status(400, "登录已取消，请重新发起"));
+        }
+        if task.done {
+            // 幂等：同一个回调被送来两次不是错误
+            return Ok(String::new());
+        }
+        if task.provider
+            != crate::server::core::providers::kind_id(crate::server::core::providers::ProviderKind::Coze)
+        {
+            return Err(GatewayError::with_status(
+                400,
+                "该登录任务不属于 Coze，请重新发起",
+            ));
+        }
+        let (credentials, warning) =
+            crate::server::core::providers::coze::login::complete_login(cookie).await?;
+        let store = self.store.clone();
+        let account = store
+            .add_coze_account(&credentials, None, "web")
+            .map_err(|error| GatewayError::with_status(error.status_code, error.message))?;
+        let account_id = account
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let label = account
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("Coze 账号")
+            .to_string();
+        let mut payload = json!({ "account": account, "edition": task.edition });
+        // 复核未通过的警告随任务载荷透传前端（账号已落库；提示重新登录）
+        if let Some(warning) = warning {
+            payload["warning"] = Value::String(warning);
+        }
+        finish_task(&handle, &payload);
+        logging::log("[Login]", &format!("✅ Coze 网页登录成功: {label}"));
+        Ok(account_id)
+    }
+
+    /// OrcaTerm 网页登录收尾（**兜底入口**）：校验任务 → 归一化令牌 → 上游
+    /// 探活 → 落账号。
+    ///
+    /// ── 现在的正式链路不在这里 ──────────────────────────────────
+    /// 网页登录走**官方 OAuth**：回调 `orcaterm://oauth_callback?session_id=…`
+    /// → `submit_login_callback` 的 OrcaTerm 分支 → `exchange_login_code`
+    /// （见 `providers/orcaterm/login.rs` 模块头）。本方法是**第二条**收尾路径：
+    /// 调用方手里已经有一枚现成令牌（壳侧若哪天从窗口里读到、或外部工具替我们
+    /// 拿到了），直接 POST `{state, token}` 到
+    /// `/api/session/login/orcaterm/complete` 即可 —— 两条路都落到同一套
+    /// 「探活通过才落库」的口径上，不重复实现校验。
     ///
     /// ── 与 KukuAI 收尾的同与异 ──────────────────────────────────
-    /// 同：交回的都是「登录窗口里的登录态」（那家是百度域 Cookie，这家是
-    /// 控制台写入的 `ot_session`），都由壳侧进程 POST 进来，任务校验、
-    /// 幂等、写回 `/wait` 的时序完全一致（见 `finish_kuku_login`）。
+    /// 同：都由壳侧进程 POST 进来，任务校验、幂等、写回 `/wait` 的时序一致
+    /// （见 `finish_kuku_login`）。
     /// 异：这家的令牌必须**当场通过上游探活**才落库（`complete_login` 里打
     /// `GetUserInfo`）—— 过期/被撤销的令牌落下来只会得到必然 401 的账号；
     /// KukuAI 那条是「凭证本身有效、业务令牌换发另说」，所以它带警告照样落。
     ///
-    /// 探活失败**不写任务终态**：令牌可能只是刚写入、上游尚未生效（实测无此
-    /// 现象，但代价为零），壳侧会退避重试；真正的错误文案由返回的 `Err`
-    /// 透给壳侧日志，最终由 `/wait` 的超时兜底。
+    /// 探活失败**不写任务终态**：令牌可能只是刚到手、上游尚未生效，调用方
+    /// 可以再试；真正的错误文案由返回的 `Err` 透出去，最终由 `/wait` 超时兜底。
     pub async fn finish_orcaterm_login(
         &self,
         state: &str,
@@ -508,7 +611,7 @@ impl LoginService {
             return Err(GatewayError::with_status(400, "登录已取消，请重新发起"));
         }
         if task.done {
-            // 幂等：同一个登录态被送来两次（Cookie 检测每拍触发）不是错误
+            // 幂等：同一个登录态被送来两次不是错误
             return Ok(String::new());
         }
         if task.provider != crate::server::core::providers::kind_id(crate::server::core::providers::ProviderKind::OrcaTerm)
@@ -518,8 +621,19 @@ impl LoginService {
                 "该登录任务不属于 OrcaTerm，请重新发起",
             ));
         }
-        let credentials =
-            crate::server::core::providers::orcaterm::login::complete_login(token).await?;
+        let credentials = match crate::server::core::providers::orcaterm::login::complete_login(token).await
+        {
+            Ok(credentials) => credentials,
+            Err(error) => {
+                // 失败也写门户日志：这条路径的错误以前只回给调用方，界面与日志面板
+                // 都看不到（本轮排查「扫码后没反应」时正缺这条线索）。
+                logging::log(
+                    "[Login]",
+                    &format!("❌ OrcaTerm 登录态校验失败: {}", error.message),
+                );
+                return Err(error);
+            }
+        };
         let store = self.store.clone();
         let account = store
             .add_orcaterm_account(&credentials, None, "web")
@@ -844,6 +958,44 @@ impl LoginService {
             }
             return result.map(LoginCallbackSubmission::Completed);
         }
+        // LobsterAI 的回调是标准 `code` / `state` 查询串（与 Accio / Antigravity
+        // 同形），两个入口共用这一套收尾：
+        //   ① 浏览器直接落到网关的 `/auth/callback`（该路由不经过本函数）；
+        //   ② 网页端 / 远程面板用户在登录弹窗里**手工粘贴整条回调 URL** ——
+        //      浏览器与网关不同机且没有端口映射时，回环地址回不到网关，由
+        //      `web_shim.rs` 的 `needsManualCallback` 拉到这条。
+        //
+        // 少了这一支，②会一路落到函数末尾那句「该登录任务不接收授权码回调」，
+        // 把一个能用的功能变成 400 —— 而 `needsManualCallback` 里明明声明了
+        // 这家要粘贴。两支要么都在，要么都不在。
+        //
+        // `state` 用请求体里那个（任务表的键），回调串里的 state 只用于逐字比对。
+        if kind == ProviderKind::LobsterAi {
+            let parsed = url::Url::parse(callback_url).map_err(|_| {
+                GatewayError::with_status(400, "LobsterAI 登录回调地址无效")
+            })?;
+            let params: std::collections::HashMap<String, String> = parsed
+                .query_pairs()
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect();
+            if let Some(error) = params.get("error").filter(|value| !value.trim().is_empty()) {
+                return Err(GatewayError::with_status(400, format!("授权被拒绝（{error}）")));
+            }
+            let callback_state = params.get("state").map(String::as_str).unwrap_or("");
+            let code = params.get("code").map(String::as_str).unwrap_or("");
+            if callback_state.trim() != state {
+                return Err(GatewayError::with_status(400, "回调地址与当前 LobsterAI 登录任务不匹配"));
+            }
+            return match self.finish_lobsterai_login(code, state).await {
+                Ok(account_id) => Ok(LoginCallbackSubmission::Completed(account_id)),
+                Err(error) => {
+                    // 与 public 回调路由同一处置：这一轮已经作废，pending 也丢掉，
+                    // 免得留在表里等超时
+                    self.drop_lobsterai_pending(state);
+                    Err(error)
+                }
+            };
+        }
         // Antigravity 的回调同样是标准 `code` / `state` 查询串（Google OAuth
         // 授权码 + loopback）。与 Accio 同款，这里同时服务两个入口：
         //   ① 浏览器直接落到网关的 `/oauth-callback` 路由（public 回调 handler
@@ -930,6 +1082,40 @@ impl LoginService {
                 .finish_autoclaw_oauth_callback(vendor, upstream_state, code)
                 .await
                 .map(LoginCallbackSubmission::Completed);
+        }
+        // OrcaTerm 的回调是官方桌面端的自定义协议
+        // （`orcaterm://oauth_callback?session_id=…`）：URL 里带的是 `session_id`
+        // 而不是 `code`，换令牌走匿名 CGI 动作 `OAuthExchangeToken`
+        // （见 `providers/orcaterm/login.rs` 模块头）。与 Antigravity 同款收尾：
+        // 换码失败要落定任务错误，否则前端会一直等到 5 分钟超时。
+        if kind == ProviderKind::OrcaTerm {
+            return match adapter_for(kind)
+                .exchange_login_code(&self.store, callback_url, state)
+                .await
+            {
+                Ok(account_id) => {
+                    let session = json!({
+                        "accountUid": account_id,
+                        "nickname": Value::Null,
+                        "edition": task.edition,
+                        "provider": task.provider,
+                    });
+                    handle.update(|task| {
+                        task.done = true;
+                        task.session = Some(session);
+                        task.finished_at = Some(logging::now_ms());
+                    });
+                    Ok(LoginCallbackSubmission::Completed(account_id))
+                }
+                Err(error) => {
+                    finish_task_error(&handle, &error.message);
+                    logging::log(
+                        "[Login]",
+                        &format!("❌ OrcaTerm 网页登录换取凭证失败: {}", error.message),
+                    );
+                    Err(error)
+                }
+            };
         }
         // CatPaw 正常情况下由服务端 poll-token 兜底完成；若上游仍把 token
         // 放进可复制的查询串，这里也复用 public callback 的收尾逻辑。

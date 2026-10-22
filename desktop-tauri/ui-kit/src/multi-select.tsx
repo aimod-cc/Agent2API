@@ -31,6 +31,14 @@ import { t } from './i18n'
 type MultiSelectOption<Value extends string = string> = {
   value: Value
   label: string
+  /**
+   * 置灰不可选（仍显示在清单里）。
+   *
+   * 用来说明「这一项存在、但现在不能选」—— 比如账号表单里「网络代理」页已禁用
+   * 的池条目：直接从选项里删掉会让用户以为它被删了，而选了才报错又太晚。
+   * 与 SelectItem 的 `disabled` 同一语义。
+   */
+  disabled?: boolean
 }
 
 type MultiSelectProps<Value extends string = string> = {
@@ -168,6 +176,7 @@ function MultiSelect<Value extends string = string>({
                 <ComboboxPrimitive.Item
                   key={option.value}
                   value={option}
+                  disabled={option.disabled === true}
                   className={cn(
                     'grid cursor-pointer grid-cols-[14px_minmax(0,1fr)] items-center gap-2 rounded-sm px-[9px] py-[5px]',
                     'text-[12.5px] leading-[1.4] text-foreground select-none outline-none',

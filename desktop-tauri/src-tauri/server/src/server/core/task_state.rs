@@ -59,6 +59,29 @@ use serde_json::Value;
 use crate::server::db::Db;
 use crate::server::logging;
 
+/// 任务收尾的观察者：`(任务 id, 是否成功, 摘要, 连续失败次数)`。
+///
+/// ── 为什么用回调注册，而不是在这里直接调通知 ──────────────────
+/// 本模块是**排期基础件**：它不该认识「通知」这件事（那是上层策略）。
+/// 直接 `use crate::server::core::notify` 会把一个旁路功能焊进基础件，
+/// 且 notify 若要读任务状态就会形成循环依赖。注册式让依赖方向保持单向：
+/// 由 `server::mod` 在启动时把 notify 的处理器挂上来。
+///
+/// ── 为什么在 `finish` 里调，而不是各调用点 ───────────────────
+/// `finish` 是**唯一**的收尾汇聚点（5 处调用都经它），在这一处挂钩就没有
+/// 「某个任务忘了发通知」的可能 —— 新增任务自动获得通知能力。
+pub type TaskObserver = fn(task_id: &str, success: bool, summary: &str, failures: u32);
+
+static OBSERVER: OnceLock<TaskObserver> = OnceLock::new();
+
+/// 注册收尾观察者。**只生效一次**（重复注册忽略，与 `OnceLock` 语义一致）：
+/// 生产路径只有 `server::mod` 的一处调用，重复注册通常意味着有人在测试里
+/// 乱挂，静默忽略比 panic 合理。
+pub fn observe_task_finish(observer: TaskObserver) {
+    let _ = OBSERVER.set(observer);
+}
+
+
 /// `kv` 表里的键名（保留键，见 `db::schema::RESERVED_KV_KEYS`）
 const KV_KEY: &str = "backgroundTaskState";
 
@@ -355,6 +378,14 @@ impl RunGuard {
         interval_ms: i64,
     ) -> Result<TaskState, String> {
         self.heartbeat.abort();
+        // 观察者要用到摘要，而下面的闭包会把 `summary` 消费掉（成功分支丢、
+        // 失败分支存进 last_error）—— 在进闭包前留一份给观察者。
+        // 只在「会用到」时才克隆（失败路径 + 装了观察者），成功路径零成本。
+        let summary_for_observer = if !success && OBSERVER.get().is_some() {
+            Some(summary.clone())
+        } else {
+            None
+        };
         let result = change(&self.key, |state| {
             if state.owner != self.owner {
                 return;
@@ -383,6 +414,17 @@ impl RunGuard {
             state.lease_until = 0;
         });
         self.finished = result.is_ok();
+        // ── 收尾通知（观察者模式，见 TaskObserver 的说明）────────────
+        // 只在**失败**时喊：成功是常态，每次成功都推一条会让通知变成噪音，
+        // 用户很快就会关掉它，于是真正要紧的那条也看不到了。
+        // 失败次数从落库后的状态里读（`change` 已把它 +1）；读不到就当第 1 次
+        // —— 宁可多说一句，不可漏报。具体「第几次才值得打扰」由观察者决定。
+        if result.is_ok() && !success {
+            if let (Some(observer), Some(summary)) = (OBSERVER.get(), summary_for_observer.as_deref()) {
+                let failures = read(&self.key).map(|state| state.failures).unwrap_or(1);
+                observer(&self.key, false, summary, failures);
+            }
+        }
         result
     }
 }

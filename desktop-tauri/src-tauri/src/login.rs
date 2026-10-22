@@ -661,16 +661,51 @@ fn allowed_hosts(provider: &str) -> Option<&'static [&'static str]> {
         // 见 `providers::officeace::oauth` 的模块头），所以这里没有 CodeArts 那种
         // loopback 回调要放行；但「不设限」仍是必须显式写出的选择（落进默认分支
         // 会拿到 WorkBuddy 的白名单 → 窗口白屏）。
+//
+        // OrcaTerm（腾讯云遨驰终端）同样不设限：登录窗口开在官方 OAuth 授权页
+        // （`orcaterm.com/oauth/authorize`），它会 302 到 `open.weixin.qq.com`
+        // 的微信二维码（`qrconnect`），沿途还会拉 `res.wx.qq.com` 的样式与
+        // `localhost.weixin.qq.com` 的轮询 —— 主机不可穷举。**显式列出**
+        // （落进默认分支会拿到 WorkBuddy 的白名单 → 授权页白屏，日志里什么也
+        // 看不出）。
+        // 千问办公同样不设限：授权页在 `gateway.qwenwork.cn/device/selectAccounts`，
+        // 它会按用户选的登录方式把人交给**不可穷举**的身份提供方（阿里账号 / 扫码
+        // 等），与 Qoder 同一情形。落进默认分支会拿到 WorkBuddy 的白名单，
+        // 症状仍是上面警告的那种静默故障（窗口一片空白、日志看不出）。
+        // AtomCode 同样不设限：授权页由代理给出（`acs.atomgit.com/auth/login`
+        // 换来的 `login_url`，实际落在 AtomGit 的账号站点上），之后会按用户选的
+        // 登录方式继续跳不可穷举的主机。**不用回本机** —— 凭证由网关**轮询代理**
+        // 取回（`auth/check` → `auth/token`，见 `providers::atomcode::oauth` 的
+        // 模块头），所以这里没有 loopback 回调要放行；但「不设限」仍是必须显式
+        // 写出的选择。
         //
-        // OrcaTerm（腾讯云遨驰终端）同样不设限：登录窗口开在官方 Web 控制台
-        // （`orcaterm.cloud.tencent.com`），而扫码登录是**云账号**那一套 ——
-        // 控制台会拉 `cloud.tencent.com` 的 `wxQrcode`、再把
-        // `open.weixin.qq.com/connect/qrconnect` 以 iframe 嵌进来，之后还可能
-        // 跳账号中心 / 协议页等不可穷举的主机。**显式列出**（落进默认分支会拿到
-        // WorkBuddy 的白名单 → 控制台白屏，日志上什么也看不出）。
+        // LobsterAI 不设限，而且这一条**必须是 None**：它的授权页完成后会
+        // **302 回本机**（`http://127.0.0.1:<网关端口>/auth/callback`），那次
+        // 导航一旦被白名单拦下，症状就是用户明明授权成功、网关永远等不到码，
+        // 而日志里什么都看不出（与 CodeArts / Trae 的 loopback 回调同一情形）。
+        // 授权页本身在 `lobsterai.youdao.com`，沿途还可能有微信登录的第三方主机。
+        //
+        // ⚠️ 这一段曾因合并被拼成两个**完全相同的 match 臂**（第二个永远不可达，
+        // 编译器逐项报 `unreachable pattern`）。新增 provider 时**追加到本臂**
+        // 或另起一条不重叠的臂，别重复列出同一个 id。
         "catpaw" | "qoder" | "qoder-intl" | "cline-free" | "cline-pass" | "autoclaw"
         | "autoclaw-intl" | "accio" | "accio-cn" | "zcode" | "zcode-intl" | "codearts" | "trae"
-        | "kuku" | "antigravity" | "officeace" | "orcaterm" => None,
+        | "kuku" | "antigravity" | "officeace" | "orcaterm" | "qwenwork"
+        | "atomcode" | "lobsterai"
+        // MiniMax Code：授权页在国内 `account.minimax.cn/oauth-authorize`、
+        // 国际版在 `account.minimax.io/oauth-authorize`，而它按用户选的登录方式
+        // 会继续跳不可穷举的身份提供方（手机号 / 微信 / 邮箱验证）。本家的登录是
+        // **设备码**（没有本地回调端口），所以这里缺的只是「别把授权页拦住」这
+        // 一点 —— 落进默认分支会拿到 WorkBuddy 的白名单，症状是窗口一片空白
+        // （本文件上方警告过的那种静默故障）。两个地区同一条处置。
+        | "minimax" | "minimax-intl" => None,
+        // Coze（扣子）同样不设限，而且这一条必须是 None：登录窗口开在
+        // `www.coze.cn`，但登录方式会让用户去**不可穷举**的身份提供方 ——
+        // 抖音账号（`sso.douyin.com`）、微信扫码（`open.weixin.qq.com`）、
+        // 阿里账号、短信验证链路都在其中（见 `providers::coze::login` 的模块头）。
+        // 落进默认分支会拿到 WorkBuddy 的白名单，症状是本文件上方警告过的
+        // 那种静默故障：登录窗口一片空白、日志里什么也看不出。
+        | "coze" => None,
         // WorkBuddy 的两个地区共用这一张表（表里 `workbuddy.ai` 那一行就是国际站
         // 的登录域）。**显式列出**而不是靠下面的默认分支：上面那条警告要求
         // 「新 provider 落到默认分支」必须是有意的选择，写出来才看得出是选过的
@@ -726,10 +761,24 @@ fn host_allowed(url: &url::Url, provider: &str, social_restore: bool) -> bool {
 /// 这里只是**识别**（后端 `raccoon::oauth::parse_callback_code` 才是最终校验，
 /// 它有一模一样的口径）；两边都宽一点，避免同一个 URL 在壳与后端得到不同结论。
 ///
-/// **只有小浣熊走回调**：workbuddy 的凭证由后端轮询上游取回，Qoder 走设备授权
-/// 轮询（见 `providers::qoder::oauth`），两家都没有自定义协议回调 ——
-/// 别把「没有回调」误写成「什么都算回调」。
+/// **只有小浣熊与 OrcaTerm 走自定义协议回调**：workbuddy 的凭证由后端轮询上游
+/// 取回，Qoder 走设备授权轮询（见 `providers::qoder::oauth`），两家都没有自定义
+/// 协议回调 —— 别把「没有回调」误写成「什么都算回调」。
+///
+/// ── OrcaTerm 为什么也算（本轮修正）───────────────────────────
+/// 它的授权页是官方桌面端那条链，回调固定为
+/// `orcaterm://oauth_callback?session_id=…`（见
+/// `providers/orcaterm/login.rs` 模块头）。那个 URL 里的 `session_id` 是
+/// **我们自己生成的一次性凭据**，后端据此换令牌 —— 壳侧必须把它截下来
+/// （放行给系统 = 本机没装官方客户端时是一个错误页，登录永远收不了尾）。
 fn is_login_callback(url: &url::Url, provider: &str) -> bool {
+    if provider == "orcaterm" {
+        let host_matches = url
+            .host_str()
+            .map(str::to_ascii_lowercase)
+            .is_some_and(|host| host == "oauth_callback");
+        return url.scheme() == "orcaterm" && host_matches;
+    }
     if provider != "raccoon" {
         return false;
     }
@@ -827,6 +876,17 @@ fn normalize_provider(provider: &str) -> Result<&'static str, String> {
         // 壳侧只透传 provider id，地区由后端按 id 反查（与 ZCode 同款）。
         "qoder" => Ok("qoder"),
         "qoder-intl" => Ok("qoder-intl"),
+        // 千问办公（QwenWorkCN）：与 Qoder 同一套 PKCE 设备授权协议（差别只有
+        // client_id 与主机），授权地址由**后端适配器**本地拼出来
+        // （`providers::qwenwork::oauth`，见其模块头），壳侧只负责开窗口与等待
+        // —— 与 Qoder / Cline 的设备授权同一条路，不经过任何回调捕获。
+        "qwenwork" => Ok("qwenwork"),
+        // MiniMax Code（两个地区）：OAuth 设备码 + PKCE，授权地址由**后端**申请
+        // （设备码是一次上游往返），壳侧只负责开窗口与等待 —— 与 Qwenwork /
+        // Qoder 的设备授权同一条路，不经过任何回调捕获。**这一条不能只写国内版**：
+        // 少了 `minimax-intl` 前端会收到「未知的 provider」，国际版登录按钮直接失败。
+        "minimax" => Ok("minimax"),
+        "minimax-intl" => Ok("minimax-intl"),
         "catpaw" => Ok("catpaw"),
         "cline-free" => Ok("cline-free"),
         "cline-pass" => Ok("cline-pass"),
@@ -853,6 +913,14 @@ fn normalize_provider(provider: &str) -> Result<&'static str, String> {
         // `http://127.0.0.1:<网关端口>/oauth/callback` 落回网关自己，所以窗口
         // **必须允许**导航到本机端口（见下面 allowed_hosts 的同一条）。
         "codearts" => Ok("codearts"),
+        // LobsterAI（网易有道「有道龙虾」）：授权地址由**后端适配器**现拼
+        // （门户的 hash 路由 + `redirect_uri` 指向网关自己那个 loopback 端口，
+        // 见 `providers::lobsterai::oauth::build_authorize_url`），壳侧只负责
+        // 开窗口与轮询 —— 与 CodeArts 同一条路。它的回调落在
+        // `http://127.0.0.1:<网关端口>/auth/callback`（**裸路径**，理由见
+        // `http.rs` 那条路由的注释），所以窗口**必须允许**导航到本机端口，
+        // 见下面 allowed_hosts 的同一条。
+        "lobsterai" => Ok("lobsterai"),
         // Trae（SOLO CN）：授权地址由**后端**问上游 guidance 拼（PKCE + 回调 URL），
         // 壳侧只负责开窗口与轮询 —— 与 ZCode 同一条路。特别地，它的回调落在
         // `http://127.0.0.1:<随机端口>/authorize`（网关自己监听的那台 loopback，
@@ -878,12 +946,30 @@ fn normalize_provider(provider: &str) -> Result<&'static str, String> {
         // 与轮询 —— 与 ZCode / CodeArts 同一条路。它的授权码由网关**轮询云端**
         // 取回（云端回调页不往本机跳），所以窗口最后停在云端页上也不影响登录判定。
         "officeace" => Ok("officeace"),
-        // OrcaTerm（腾讯云遨驰终端）：地址由**后端适配器**返回（官方 Web 控制台
-        // 首页 `orcaterm.cloud.tencent.com/terminal`），壳侧负责开窗口、在窗口里
-        // 等控制台写入的 `ot_session` Cookie 出现后交回网关
-        // （`POST /api/session/login/orcaterm/complete`，见 `run_embedded` 的
-        // 等待循环与 `submit_orcaterm_login`）。
+        // OrcaTerm（腾讯云遨驰终端）：地址由**后端适配器**返回（官方 OAuth 授权页，
+        // 它会 302 到微信二维码），壳侧负责开窗口并把回调
+        // `orcaterm://oauth_callback?session_id=…` 交回网关换令牌
+        // （见 `start_orcaterm` 与 `providers/orcaterm/login.rs` 的模块头）。
         "orcaterm" => Ok("orcaterm"),
+        // AtomCode（AtomGit / GitCode）：授权地址由**后端适配器**向代理现取
+        // （`providers::atomcode::oauth`），壳侧只负责开窗口与轮询 —— 与
+        // ZCode / OfficeAce 同一条路。它的授权回调由代理自己在
+        // `acs.atomgit.com/callback` 终结、**永远不回到本机**，授权结果由网关
+        // 轮询代理判定（`auth/check` → `auth/token`），所以窗口最后停在代理页上
+        // 也不影响登录判定，壳侧既不用捕获自定义协议也不用转交回调。
+        //
+        // **这一条不能少**：前端（`add-account-configs.ts` 的 ATOMCODE）早就把
+        // 「网页登录」按钮画出来了，缺了它点下去就是
+        // 「登录失败：不支持网页登录的提供商：atomcode」。
+        "atomcode" => Ok("atomcode"),
+        // Coze（扣子）：授权地址由**后端适配器**返回（`providers::coze::login`
+        // 的主站地址 `https://www.coze.cn/`），壳侧负责开窗口，并在 Cookie 存储
+        // 出现 `sessionid_ss` 后把 `.coze.cn` 域**整包** Cookie 交回网关
+        // （`POST /api/session/login/coze/complete`，见下面的 Cookie 交回分支）。
+        // 与 KukuAI 同一形态：没有可捕获的自定义协议回调，登录态只能从
+        // WebView2 的 Cookie 存储读 —— 因此这条路**必须**在 `run_embedded` 的
+        // 等待循环里有对应的交回分支，否则窗口登录成功、网关永远等不到凭证。
+        "coze" => Ok("coze"),
         other => Err(format!("不支持网页登录的提供商：{other}")),
     }
 }
@@ -1091,8 +1177,15 @@ pub async fn start(
     if provider == "kuku" {
         return start_kuku(app, &mode).await;
     }
-    // OrcaTerm：官方 Web 控制台（适配器给的地址），登录成功后壳侧读窗口里的
-    // `ot_session` Cookie 交回网关（见 `submit_orcaterm_login`）。
+    // Coze（扣子）：主站 `www.coze.cn` 登录，登录成功后由壳侧读 Cookie 存储
+    // 把 `.coze.cn` 域**整包** Cookie 交回网关（见 `submit_coze_login`）。
+    // 与 KukuAI 同一形态：没有可捕获的自定义协议回调。
+    if provider == "coze" {
+        return start_coze(app, &mode).await;
+    }
+    // OrcaTerm：官方 OAuth 授权页（适配器给的地址，自动跳微信二维码），回调
+    // `orcaterm://oauth_callback?session_id=…` 由窗口拦下交回网关换令牌
+    // （见 `start_orcaterm`）。
     if provider == "orcaterm" {
         return start_orcaterm(app, &mode).await;
     }
@@ -1115,6 +1208,19 @@ pub async fn start(
         // 归属已经在 provider id 里 —— 与 ZCode 同款，不再读 edition 形参。
         "qoder" => "cn",
         "qoder-intl" => "intl",
+        // 千问办公只有单一站点（`gateway.qwenwork.cn`，没有地区分叉），
+        // 固定 cn —— 与 CodeArts 同一处置（后端那条链也不读这个字段，
+        // 它只用于窗口标题与日志）。
+        "qwenwork" => "cn",
+        // MiniMax Code 的两个地区由 **provider 本身**决定（界面上是两张卡片，
+        // 没有地区下拉，因此面板不会传 `edition`）：国内 `cn`、国际 `intl`。
+        // 与 ZCode / Qoder 同款 —— 写死 `cn` 会让国际版窗口标题显示「国内版」。
+        "minimax" => "cn",
+        "minimax-intl" => "intl",
+        // Coze 只有单一站点（`www.coze.cn`；国际版 coze.com 是另一套账号体系，
+        // 未验证 ⇒ 不拆家），固定 cn —— 与 CodeArts 同一处置（后端那条链不读
+        // 这个字段，它只用于窗口标题与日志）。
+        "coze" => "cn",
         // ZCode 的两个地区由 **provider 本身**决定（界面上是两张卡片，
         // 没有地区下拉，因此面板不会传 `edition`）。不看 `edition` 形参的
         // 后果只是标题里的「国内版/国际版」四个字，但既然信息已经在
@@ -1202,6 +1308,21 @@ pub async fn start(
         // OfficeAce 只有一家（自助 OAuth 一条链，没有地区/版本概念），品牌名里
         // 不需要地区
         "officeace" => "OfficeAce 果办",
+        // 千问办公只有一家（`gateway.qwenwork.cn` + `maas.xiaoluozi.cn` 是同一套
+        // 账号的两级入口，不是两个地区，见 accounts-domain 的注释），品牌名里
+        // 不需要地区
+        "qwenwork" => "千问办公",
+        "lobsterai" => "LobsterAI",
+        // MiniMax Code 的两个地区：注册表里已经带「国内版 / 国际版」，
+        // 直接沿用那两个字，别在这里另起一套说法
+        "minimax" => "MiniMax Code 国内版",
+        "minimax-intl" => "MiniMax Code 国际版",
+        // AtomCode 只有一家（AtomGit / GitCode 的编码 Agent，没有地区/版本概念），
+        // 品牌名里不需要地区
+        "atomcode" => "AtomCode",
+        // Coze（扣子）只有一家（国内站 `www.coze.cn`，没有地区/版本概念），
+        // 品牌名里不需要地区
+        "coze" => "Coze 扣子",
         _ => "WorkBuddy",
     };
     // 窗口标题：Cline 两家的池、ZCode 两家的地区、CodeArts / Trae / OfficeAce
@@ -1210,7 +1331,8 @@ pub async fn start(
     let title = if matches!(
         provider,
         "cline-free" | "cline-pass" | "zcode" | "zcode-intl" | "codearts" | "trae" | "qoder"
-        | "qoder-intl" | "antigravity" | "officeace"
+        | "qoder-intl" | "antigravity" | "officeace" | "qwenwork" | "lobsterai" | "atomcode"
+        | "minimax" | "minimax-intl" | "coze"
     ) {
         format!("登录 {provider_label} 账号")
     } else {
@@ -1364,20 +1486,93 @@ async fn start_kuku(app: &AppHandle, mode: &str) -> Result<serde_json::Value, St
     result
 }
 
-/// OrcaTerm 网页登录：**官方 Web 控制台 + 壳侧读 `ot_session` Cookie 交回**。
+/// Coze（扣子）网页登录：**主站登录 + 壳侧读 Cookie 存储交回**。
 ///
-/// 与 KukuAI 同一形态（`start_kuku`）：官方页面上怎么登录由用户自己决定
-/// （控制台里的微信扫码由云账号那一套驱动），壳侧只在窗口里等一枚登录态
-/// Cookie 出现。因此 `mode = "external"` 同样要拒绝 —— 系统浏览器里的
-/// Cookie 壳读不到，等下去只会等到 5 分钟超时。
+/// 与 KukuAI 同一形态，两条理由都一样：
+///   1. 登录成功后的跳转**不携带授权码** —— 凭证在 `.coze.cn` 域 Cookie 里
+///      （`sessionid_ss` / `sid_guard` / `ttwid` …），因此不走「导航拦截 →
+///      提交回调 URL」那条链，而是由壳侧在窗口里出现 `sessionid_ss` 后读
+///      WebView2 的 Cookie 存储（HttpOnly，页面脚本读不到）POST 网关的
+///      `POST /api/session/login/coze/complete`（见 `run_embedded` 的等待循环
+///      与 `submit_coze_login`）；
+///   2. 登录方式会把人交给**不可穷举**的身份提供方（抖音账号 / 微信扫码 /
+///      阿里账号 / 短信），所以既没有固定的「登录成功 URL」可等，也不能给
+///      白名单设限（见 `allowed_hosts` 的 `coze` 分支）。
 ///
-/// 窗口打开时会注入一段脚本**帮用户点开登录面板**（控制台首页左下角
-/// 头像 → 立即登录；不点的话用户得自己找那个入口），见
-/// [`orcaterm_login_panel_script`] 的说明与边界。
+/// 只支持内嵌窗口：系统浏览器里壳读不到 Cookie 存储，登录完成网关永远等不到
+/// 凭证 —— 明确拒绝而不是静默退回内嵌（与 KukuAI 同一处置）。
+async fn start_coze(app: &AppHandle, mode: &str) -> Result<serde_json::Value, String> {
+    if mode == "external" {
+        return Err(
+            "Coze 的登录依赖壳侧读取登录窗口的 Cookie，只支持内嵌窗口；\
+             请用「内嵌窗口」发起，或改用「粘贴 Cookie」添加账号"
+                .to_string(),
+        );
+    }
+    let started = gateway::call(
+        "POST",
+        "/api/session/login/start",
+        Some(&json!({ "provider": "coze" })),
+    )
+    .await?;
+    let login_state = started
+        .get("state")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("后端未返回登录状态")?
+        .to_string();
+    let auth_url = started
+        .get("authUrl")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("后端未返回登录链接，请检查网络")?
+        .to_string();
+
+    {
+        let state = app.state::<crate::state::AppState>();
+        let mut guard = state.login.lock().map_err(|_| "登录状态锁不可用")?;
+        *guard = Some(ActiveLogin {
+            state: login_state.clone(),
+            edition: String::new(),
+            mode: mode.into(),
+            provider: "coze".to_string(),
+        });
+    }
+    emit_login_state(
+        app,
+        LoginState {
+            active: true,
+            mode: Some(mode.into()),
+            edition: None,
+            provider: Some("coze".to_string()),
+        },
+    );
+
+    let result =
+        run_embedded(app, "coze", &auth_url, "登录 Coze 扣子账号", &login_state, false, None, false)
+            .await;
+    if result.as_ref().map(|value| value.get("ok").and_then(serde_json::Value::as_bool)) != Ok(Some(true)) {
+        let _ = gateway::call("POST", "/api/session/login/cancel", Some(&json!({ "state": login_state }))).await;
+    }
+    clear_active_login(app, &login_state);
+    result
+}
+
+/// OrcaTerm 网页登录：**官方 OAuth 授权页 + 微信扫码 + 后端换令牌**。
+///
+/// 窗口打开的是 `orcaterm.com/oauth/authorize?...&session_id=<uuid>` —— 实测该
+/// 页面**直接 302 到微信二维码**（appid `wx56e5199ef872dc22`，OrcaTerm 自己的
+/// 开放平台应用），用户扫完上游把浏览器重定向到
+/// `orcaterm://oauth_callback?session_id=…`，壳侧把那一跳截下来交给后端换令牌
+/// （见 `providers/orcaterm/login.rs` 的模块头，那里也记录了「为什么不走
+/// Web 控制台的 `ot_session`」）。
+///
+/// 与 raccoon 同一形态（回调 URL → 后端换码 → 落账号）。回调是自定义协议
+/// `orcaterm://oauth_callback`，必须由**我们自己的窗口**拦下，因此只支持
+/// 内嵌窗口：系统浏览器里那一跳会被交给系统处理（装了官方 OrcaTerm 客户端
+/// 时被它接走，没装则是一个错误页），网关永远等不到 `session_id`。
 async fn start_orcaterm(app: &AppHandle, mode: &str) -> Result<serde_json::Value, String> {
     if mode == "external" {
         return Err(
-            "OrcaTerm 的登录依赖壳侧读取登录窗口的 Cookie，只支持内嵌窗口；\
+            "OrcaTerm 的回调是自定义协议（orcaterm://oauth_callback），只能由内嵌窗口接住；\
              请用「内嵌窗口」发起，或改用「粘贴 accessToken」/「导入桌面端登录态」添加账号"
                 .to_string(),
         );
@@ -1638,10 +1833,17 @@ async fn run_embedded(
     // 临时风控限流（同一凭证几分钟后即恢复，2026-10-07 实测对照），
     // 密集重试只会延长风控窗口。
     let mut kuku_retry_block_until: Option<tokio::time::Instant> = None;
-
-    // OrcaTerm 的登录检测（官方 Web 控制台的 `ot_session` Cookie）：
-    // 状态与逻辑都在 [`OrcatermWatch`] 里，主循环只多一行调用。
-    let mut orcaterm_watch = OrcatermWatch::default();
+    // Coze 登录态只交回一次。判据是 Cookie 存储里出现 `sessionid_ss`
+    // （`.coze.cn` 域，HttpOnly）—— 它的登录方式会经过第三方身份提供方
+    // （抖音 / 微信 / 阿里 / 短信），没有固定的「登录成功 URL」可等，
+    // 因此与 KukuAI 同一条「读 Cookie 存储」的链（见 `submit_coze_login`）。
+    // 首次发现后再等 3 秒才交回：登录瞬间 `sid_guard` / `ttwid` 等伴生 Cookie
+    // 可能尚未写完，立刻交回会带着半套会话，`passport/account/info/v2/` 判未登录。
+    let coze_submitted = Arc::new(AtomicBool::new(false));
+    let mut coze_check_tick: u32 = 0;
+    let mut coze_last_nav: u64 = 0;
+    let mut coze_session_seen_at: Option<tokio::time::Instant> = None;
+    let mut coze_retry_block_until: Option<tokio::time::Instant> = None;
 
     // 导航拦截与弹窗拦截**共用同一个标志**：两种入口收到的可能是同一个回调
     // （页面先改 location、再被 WebView2 派生出一条弹窗请求），分开各一个标志
@@ -1686,11 +1888,6 @@ async fn run_embedded(
             Some(phone) => window.initialization_script(kuku_sms_script(phone)),
             None => window,
         }
-    } else if provider == "orcaterm" {
-        // OrcaTerm：注入「帮用户点开登录面板」的脚本（控制台首页左下角
-        // 头像 → 立即登录）。纯尽力而为：点不动就什么都不做，用户自己点
-        // （见 `orcaterm_login_panel_script` 的边界说明）。
-        window.initialization_script(orcaterm_login_panel_script())
     } else if social_restore {
         window.initialization_script_for_all_frames(social_restore_script())
     } else {
@@ -1732,11 +1929,9 @@ async fn run_embedded(
                 }
                 return false;
             }
-            // KukuAI 主站登录：每次导航（含跳 passport、登录后回跳主站）
-            // 计数 +1，等待循环据此立即读一次 Cookie 存储做登录检测。
-            // OrcaTerm 同理：扫码登录会经历若干次导航（云账号登录页 →
-            // 控制台回跳），每次导航都值得马上读一次 Cookie。
-            if provider == "kuku" || provider == "orcaterm" {
+            // KukuAI / Coze 主站登录：每次导航（含跳第三方身份提供方、登录后
+            // 回跳主站）计数 +1，等待循环据此立即读一次 Cookie 存储做登录检测。
+            if provider == "kuku" || provider == "coze" {
                 nav_counter_for_nav.fetch_add(1, Ordering::SeqCst);
             }
             host_allowed(url, provider, social_restore)
@@ -1758,14 +1953,11 @@ async fn run_embedded(
         // 同属一个 WebView2 数据目录、共享 Cookie 存储，弹窗里登录成功后
         // 等待循环照样能从 Cookie 读到 BDUSS）。
         .on_new_window(move |url, _features| {
-            if provider == "kuku" {
-                return tauri::webview::NewWindowResponse::Allow;
-            }
-            // OrcaTerm 同款放行：云账号的登录链路（`cloud.tencent.com` 的
-            // wxQrcode / 账号中心）可能用 `window.open` 打开新页，一律 Deny 会
-            // 让「点了登录没反应」。弹窗与主窗口同属一个 WebView2 数据目录、
-            // 共享 Cookie 存储，弹窗里登录成功后等待循环照样能读到 `ot_session`。
-            if provider == "orcaterm" {
+            // Coze 与 KukuAI 同一处置：登录按钮可能以弹窗打开身份提供方的页面。
+            // 一律 Deny 会让用户点登录毫无反应 —— 弹窗与主窗口同属一个 WebView2
+            // 数据目录、共享 Cookie 存储，弹窗里登录成功后等待循环照样能读到
+            // `sessionid_ss`，所以放行不影响登录判定。
+            if provider == "kuku" || provider == "coze" {
                 return tauri::webview::NewWindowResponse::Allow;
             }
             if let Some(target) = autoclaw_callback_forward(&url) {
@@ -1894,18 +2086,72 @@ async fn run_embedded(
                 }
             }
         }
-        // OrcaTerm（官方 Web 控制台登录，见 `providers/orcaterm/login.rs` 的
-        // 模块头）：成功判据是窗口里出现 `ot_session` Cookie —— 那正是控制台
-        // 自己的登录态载体（未登录时该 Cookie 完全不存在，2026-10-16 实测对照）。
-        if provider == "orcaterm" {
-            orcaterm_watch
-                .tick(
-                    &window,
-                    login_state,
-                    nav_counter_for_check.load(Ordering::SeqCst),
-                )
-                .await;
+        // Coze（扣子）：**读 Cookie 存储**里是否出现 `sessionid_ss` 作为成功
+        // 判据（与 KukuAI 同一条链，见 `submit_coze_login`；读 cookie 走独立
+        // 线程 + 超时，Windows 上同步调 cookies() 会死锁）。
+        // 触发时机：导航事件之后立即读一次（登录必然经过导航：跳第三方
+        // 身份提供方、回跳主站），另有每 4 拍（8 秒）兜底。首次发现后再等
+        // 3 秒才交回（等 `sid_guard` / `ttwid` 等伴生 Cookie 写完）。
+        if provider == "coze" {
+            coze_check_tick += 1;
+            let nav_count = nav_counter_for_check.load(Ordering::SeqCst);
+            let navigated = nav_count != coze_last_nav;
+            if navigated {
+                coze_last_nav = nav_count;
+            }
+            let mut should_submit = false;
+            if !coze_submitted.load(Ordering::SeqCst)
+                && (navigated || coze_session_seen_at.is_some() || coze_check_tick % 4 == 0)
+            {
+                match read_window_cookies(&window).await {
+                    Ok(cookies) => {
+                        let (header, has_session) = coze_cookie_header(&cookies);
+                        eprintln!(
+                            "[login] Coze Cookie 检测：共 {} 条，sessionid_ss {}（头长 {}）",
+                            cookies.len(),
+                            if has_session { "已出现" } else { "未出现" },
+                            header.len()
+                        );
+                        if has_session {
+                            let first_seen = *coze_session_seen_at
+                                .get_or_insert_with(tokio::time::Instant::now);
+                            if first_seen.elapsed() >= Duration::from_secs(3) {
+                                should_submit = true;
+                            } else {
+                                eprintln!("[login] Coze 已发现 sessionid_ss，等 3 秒让会话稳定后再交回…");
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("[login] Coze 读取窗口 Cookie 失败（下轮重试）: {error}");
+                    }
+                }
+            }
+            if should_submit && !coze_submitted.load(Ordering::SeqCst) {
+                let blocked = coze_retry_block_until
+                    .map(|until| tokio::time::Instant::now() < until)
+                    .unwrap_or(false);
+                if blocked {
+                    eprintln!("[login] Coze 交回退避中（30 秒），等下一轮再试");
+                } else {
+                    coze_submitted.store(true, Ordering::SeqCst);
+                    if let Err(error) = submit_coze_login(&window, login_state).await {
+                        eprintln!("[login] 交回 Coze 登录态失败（下轮重试）: {error}");
+                        coze_submitted.store(false, Ordering::SeqCst);
+                        coze_retry_block_until =
+                            Some(tokio::time::Instant::now() + Duration::from_secs(30));
+                    } else {
+                        coze_session_seen_at = None;
+                    }
+                }
+            }
         }
+        // OrcaTerm（官方桌面端 OAuth 链，见 `providers/orcaterm/login.rs` 的
+        // 模块头）：**不需要这里做任何检测** —— 回调
+        // （`orcaterm://oauth_callback?session_id=…`）由 `on_navigation` /
+        // `on_new_window` 拦下并交给后端换令牌，成功与否统一走 `/wait`。
+        // 初版那套「读窗口 cookie 找 ot_session」已删除：那条 Cookie 在
+        // SPA 内扫码登录时根本不会被写出（见模块头的实测对照）。
         match poll_once(login_state).await {
             PollOutcome::Pending => continue,
             // 任务载荷（`{account, warning…}`）随成功结果透传：前端据此
@@ -2034,6 +2280,59 @@ fn kuku_log_bduss_candidates(cookies: &[tauri::webview::Cookie<'static>]) {
     }
 }
 
+/// Coze 登录态交回：用户在窗口里登录成功后，读 WebView2 的 Cookie 存储
+/// （含 HttpOnly —— 页面脚本 `document.cookie` 读不到 `sessionid_ss`），
+/// 把 `.coze.cn` 域的**整包** Cookie 拼成 Cookie 头 POST 网关收尾
+/// （见 `read_window_cookies` 与 `providers::coze::login` 的模块头）。
+///
+/// 为什么必须整包：`passport/account/info/v2/` 与 `incentive/*` 校验完整浏览器
+/// 会话 —— 只带 `sessionid_ss` 时任务中心与机器人列表会判「未登录」。
+async fn submit_coze_login(
+    window: &tauri::WebviewWindow,
+    login_state: &str,
+) -> Result<(), String> {
+    let cookies = read_window_cookies(window).await?;
+    let (cookie_header, has_session) = coze_cookie_header(&cookies);
+    if !has_session {
+        return Err("登录窗口没有 sessionid_ss（登录态尚未写入），请稍后重试".to_string());
+    }
+    let payload = json!({ "state": login_state, "cookie": cookie_header });
+    gateway::call("POST", "/api/session/login/coze/complete", Some(&payload))
+        .await
+        .map_err(|error| format!("网关收尾失败: {error}"))?;
+    Ok(())
+}
+
+/// 把 `coze.cn` 域的 Cookie 拼成请求头（去重保序），并回答「有没有 `sessionid_ss`」。
+///
+/// 域判据是 `ends_with("coze.cn")`：登录过程会在 `.www.coze.cn` /
+/// `.coze.cn` / 若干子域上各写一份，**整包带上**才是上游认的形态。
+/// `Hm_*` / `HMACCOUNT` 是统计用的第三方 Cookie（域不在本家，防御性过滤）。
+fn coze_cookie_header(cookies: &[tauri::webview::Cookie<'static>]) -> (String, bool) {
+    let mut parts: Vec<String> = Vec::new();
+    let mut has_session = false;
+    let mut seen: Vec<String> = Vec::new();
+    for cookie in cookies {
+        let domain = cookie.domain().unwrap_or("").to_ascii_lowercase();
+        if !domain.trim_start_matches('.').ends_with("coze.cn") {
+            continue;
+        }
+        let name = cookie.name().to_string();
+        if name.starts_with("Hm_")
+            || name == "HMACCOUNT"
+            || seen.iter().any(|existing| existing == &name)
+        {
+            continue;
+        }
+        if name == "sessionid_ss" || name == "sessionid" {
+            has_session = true;
+        }
+        seen.push(name.clone());
+        parts.push(format!("{name}={}", cookie.value()));
+    }
+    (parts.join("; "), has_session)
+}
+
 /// KukuAI 登录态交回：用户在主站窗口里登录成功后，读 WebView2 的 Cookie
 /// 存储（含 HttpOnly —— 页面脚本 `document.cookie` 读不到 BDUSS），把完整
 /// 百度域会话拼成 Cookie 头 POST 网关收尾（见 `read_window_cookies` 的说明）。
@@ -2053,207 +2352,6 @@ async fn submit_kuku_login(
     Ok(())
 }
 
-// ─── OrcaTerm（官方 Web 控制台登录）──────────────────────────
-
-/// OrcaTerm 登录检测的滚动状态。
-///
-/// 抽成一个类型而不是在 [`run_embedded`] 的等待循环里再摊一份内联变量：
-/// 那段循环里 KukuAI 的检测已经占了一大块（它有自己的影子 Cookie 时序），
-/// 再塞一份带退避的状态会让主循环难以通读。判据与 KukuAI 同款但更简单 ——
-/// `ot_session` 是一枚普通 Cookie，没有 HttpOnly 影子副本要等。
-#[derive(Default)]
-struct OrcatermWatch {
-    /// 当前节拍（每拍按时长递增；每 4 拍兜底读一次 Cookie）
-    tick: u32,
-    /// 上一次见到的导航计数（导航之后立刻读一次 Cookie）
-    last_nav: u64,
-    /// 首次发现 `ot_session` 的时刻（之后等 [`Self::STABLE_AFTER`] 再交回）
-    seen_at: Option<tokio::time::Instant>,
-    /// 本次登录是否已经交回过（成功或正在提交中）
-    submitted: bool,
-    /// 交回失败后的退避截止时刻（后端探活失败多为上游尚未生效 / 网络抖动，
-    /// 密集重试没有意义）
-    retry_block_until: Option<tokio::time::Instant>,
-}
-
-impl OrcatermWatch {
-    /// 发现 `ot_session` 之后等这么久再交回：控制台写入 Cookie 与页面把
-    /// 登录态落定（跳首页、拉身份）是两步，抢在中间交回拿到的仍是可用令牌，
-    /// 但没有必要冒这个险 —— 3 秒足够，且不影响用户感受（窗口本来还开着）。
-    const STABLE_AFTER: Duration = Duration::from_secs(3);
-    /// 交回失败后的退避时长（与 KukuAI 同一口径）
-    const RETRY_BACKOFF: Duration = Duration::from_secs(30);
-
-    /// 一拍：必要时读一次登录窗口的 Cookie，发现 `ot_session` 就交回网关。
-    ///
-    /// 读 Cookie 走独立线程 + 超时（Windows 上同步调 `cookies()` 会死锁，
-    /// 见 [`read_window_cookies`]）；读失败只记日志，下一拍再来。
-    async fn tick(
-        &mut self,
-        window: &tauri::WebviewWindow,
-        login_state: &str,
-        nav_count: u64,
-    ) {
-        if self.submitted {
-            return;
-        }
-        self.tick = self.tick.wrapping_add(1);
-        let navigated = nav_count != self.last_nav;
-        if navigated {
-            self.last_nav = nav_count;
-        }
-        // 触发时机：导航之后立即读；已经发现过 `ot_session` 时每拍都读
-        // （要拿最新的那次值交回）；否则每 4 拍兜底一次，防止「登录后长时间
-        // 不导航」漏掉。
-        let should_read = navigated || self.seen_at.is_some() || self.tick % 4 == 0;
-        if !should_read {
-            return;
-        }
-        let token = match read_window_cookies(window).await {
-            Ok(cookies) => {
-                let token = orcaterm_session_token(&cookies);
-                if token.is_none() && self.tick % 25 == 0 {
-                    // 慢节拍诊断（约 50 秒一次）：把「窗口停在哪一页、有多少条
-                    // Cookie」记下来 —— 扫码后迟迟不给 `ot_session` 时，这两条
-                    // 信息能立刻区分「还停在登录页（用户没扫完）」与
-                    // 「已登录但登录态换了存放方式（上游改版）」。
-                    let url = window
-                        .url()
-                        .map(|url| url.to_string())
-                        .unwrap_or_default();
-                    eprintln!(
-                        "[login] OrcaTerm 仍未捕获 ot_session（当前页面 {url}，共 {} 条 Cookie）",
-                        cookies.len()
-                    );
-                }
-                token
-            }
-            Err(error) => {
-                eprintln!("[login] OrcaTerm 读取窗口 Cookie 失败（下轮重试）: {error}");
-                return;
-            }
-        };
-        let Some(token) = token else {
-            return;
-        };
-        let is_first = self.seen_at.is_none();
-        let first_seen = *self.seen_at.get_or_insert_with(tokio::time::Instant::now);
-        if is_first {
-            eprintln!(
-                "[login] OrcaTerm 窗口已出现 ot_session（长度 {}），等 {} 秒后交回…",
-                token.len(),
-                Self::STABLE_AFTER.as_secs()
-            );
-        }
-        if first_seen.elapsed() < Self::STABLE_AFTER {
-            return;
-        }
-        let blocked = self
-            .retry_block_until
-            .map(|until| tokio::time::Instant::now() < until)
-            .unwrap_or(false);
-        if blocked {
-            return;
-        }
-        self.submitted = true;
-        match submit_orcaterm_login(login_state, &token).await {
-            Ok(()) => eprintln!("[login] 已把 OrcaTerm 登录态交回网关"),
-            Err(error) => {
-                eprintln!("[login] 交回 OrcaTerm 登录态失败（下轮重试）: {error}");
-                self.submitted = false;
-                self.seen_at = None;
-                self.retry_block_until = Some(tokio::time::Instant::now() + Self::RETRY_BACKOFF);
-            }
-        }
-    }
-}
-
-/// 从登录窗口的 Cookie 里挑出 OrcaTerm 的 `ot_session` 值。
-///
-/// 判据不只是名字：控制台首页在**未登录**时不会写这个 Cookie（实测对照），
-/// 但为空串或残值（用户手删、上游撤销后留的覆盖写）都要排除，所以要求
-/// 取值是 JWT 形态（三段点分且够长）。域名不做硬过滤，但多条候选时取**最长**
-/// 的一条 —— 登录态在同一窗口里只会有一条（每个数据目录一份 Cookie 存储），
-/// 取最长是为了容错而不是为了选路。
-fn orcaterm_session_token(cookies: &[tauri::webview::Cookie<'static>]) -> Option<String> {
-    let mut best: Option<String> = None;
-    for cookie in cookies {
-        if cookie.name() != "ot_session" {
-            continue;
-        }
-        let value = cookie.value().trim();
-        if value.split('.').count() != 3 || value.len() < 60 {
-            continue;
-        }
-        if best.as_deref().map(|current| value.len() > current.len()).unwrap_or(true) {
-            best = Some(value.to_string());
-        }
-    }
-    best
-}
-
-/// OrcaTerm 登录态交回：把窗口里的 `ot_session` POST 给网关收尾。
-///
-/// 与前几家的差别：交回的是**令牌本身**（不是 Cookie 头）—— OrcaTerm 的
-/// 登录态就是这一枚 JWT，Cookie 只是它的存放形态（见
-/// `providers/orcaterm/login.rs` 的模块头）。后端会再剥一次 `ot_session=`
-/// 前缀并打一次上游探活，验过才落账号。
-async fn submit_orcaterm_login(login_state: &str, token: &str) -> Result<(), String> {
-    let payload = json!({ "state": login_state, "token": token });
-    gateway::call("POST", "/api/session/login/orcaterm/complete", Some(&payload))
-        .await
-        .map_err(|error| format!("网关收尾失败: {error}"))?;
-    Ok(())
-}
-
-/// 打开 OrcaTerm 控制台后**帮用户点开登录面板**的注入脚本。
-///
-/// ── 为什么只做「点两下」这一件事 ─────────────────────────────
-/// 控制台的登录入口藏在左下角头像的浮层里（头像 → 立即登录 → 微信扫码），
-/// 而登录窗口是壳自己开的、用户没有浏览器的地址栏与既有登录态，
-/// 让它去找那个入口是没必要的门槛 —— 脚本只把入口替他点开，**扫码本身
-/// 仍由用户在官方页面上完成**（云账号的二维码、风控、协议勾选全在上游页面里，
-/// 与 KukuAI 放弃 passport 页面自动化同一条边界：不替用户完成登录动作本身，
-/// 也不复刻上游前端的实现）。
-///
-/// ── 边界（点不动就算了）─────────────────────────────────────
-/// 选择器取自控制台真实 DOM（2026-10-16 实测：`.orcaterm-header-avatar`
-/// 点击后浮层里出现 `.orcaterm-user-account-bubble__login-btn`，点它才插入
-/// `open.weixin.qq.com/connect/qrconnect` 的 iframe）。上游改版会让它失效，
-/// 因此：只点一次、失败不再重试、出现二维码即收手；用户仍可自己点头像 →
-/// 立即登录（前端那块文案也这么写）。
-fn orcaterm_login_panel_script() -> String {
-    r#"
-(function () {
-  var tries = 0;
-  var avatarClicked = false;
-  var loginClicked = false;
-  function hasQr() {
-    var frames = document.querySelectorAll('iframe');
-    for (var i = 0; i < frames.length; i++) {
-      if (/open\.weixin\.qq\.com\/connect\/qrconnect/.test(frames[i].src || '')) return true;
-    }
-    return false;
-  }
-  function loggedIn() {
-    return /(^|;\s*)ot_session=/.test(document.cookie || '');
-  }
-  function tick() {
-    if (hasQr() || loggedIn() || tries++ > 60) return;
-    if (!avatarClicked) {
-      var avatar = document.querySelector('.orcaterm-header-avatar');
-      if (avatar) { avatar.click(); avatarClicked = true; }
-    } else if (!loginClicked) {
-      var button = document.querySelector('.orcaterm-user-account-bubble__login-btn');
-      if (button) { button.click(); loginClicked = true; }
-    }
-    setTimeout(tick, 700);
-  }
-  setTimeout(tick, 1200);
-})();
-"#
-    .to_string()
-}
 
 /// 用系统默认浏览器打开链接。
 ///

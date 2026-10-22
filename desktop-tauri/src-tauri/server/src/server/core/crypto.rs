@@ -93,6 +93,15 @@ pub enum SecretScope {
     UpdateToken,
     /// 账号表（`accounts`）。预留：支持 `AGENT2API_ACCOUNT_KEY` 兜底
     Accounts,
+    /// 云同步的「同步密码」（`core::cloud_sync`）。
+    ///
+    /// ── 为什么必须是独立密钥域 ──────────────────────────────────
+    /// 同步密码要用来加解密**远端那份 `account.key`**，而本机的账号域密钥本身
+    /// 也在同步范围里。若拿账号域密钥去封同步密码，下载并替换 `account.key`
+    /// 之后，本机保存的那份同步密码就再也解不开了 —— 用户会看到「密码明明
+    /// 没改，却说密码错」。独立一把 `cloud-sync.key` 只属于这台机器、不参与
+    /// 同步，这条死循环才不存在。
+    CloudSync,
 }
 
 impl SecretScope {
@@ -104,6 +113,7 @@ impl SecretScope {
         match self {
             SecretScope::UpdateToken => "update-token.key",
             SecretScope::Accounts => "account.key",
+            SecretScope::CloudSync => "cloud-sync.key",
         }
     }
 
@@ -115,6 +125,7 @@ impl SecretScope {
         match self {
             SecretScope::UpdateToken => "重存一次令牌即可自愈",
             SecretScope::Accounts => "重新保存一次账号即可自愈",
+            SecretScope::CloudSync => "在「设置 → 数据 → 云同步」里重新输入同步密码即可自愈",
         }
     }
 }
@@ -131,9 +142,12 @@ fn cache_for(scope: SecretScope) -> &'static std::sync::Mutex<Option<[u8; KEY_LE
         std::sync::OnceLock::new();
     static ACCOUNTS: std::sync::OnceLock<std::sync::Mutex<Option<[u8; KEY_LEN]>>> =
         std::sync::OnceLock::new();
+    static CLOUD_SYNC: std::sync::OnceLock<std::sync::Mutex<Option<[u8; KEY_LEN]>>> =
+        std::sync::OnceLock::new();
     match scope {
         SecretScope::UpdateToken => UPDATE_TOKEN.get_or_init(|| std::sync::Mutex::new(None)),
         SecretScope::Accounts => ACCOUNTS.get_or_init(|| std::sync::Mutex::new(None)),
+        SecretScope::CloudSync => CLOUD_SYNC.get_or_init(|| std::sync::Mutex::new(None)),
     }
 }
 
@@ -313,6 +327,47 @@ fn short_fingerprint(bytes: &[u8]) -> String {
         let _ = write!(text, "{byte:02x}");
     }
     text
+}
+
+/// 公开的指纹口径：任意字节 → 前 16 位十六进制。
+///
+/// 云同步要用它给**远端那份 `account.key.enc` 里封装的密钥**算指纹（与
+/// [`key_fingerprint`] 对本地密钥算的是同一口径），才能回答「远端那把钥匙是不是
+/// 我现在这把」。不暴露这个函数的话调用方会自己写一遍 sha256 截断 —— 两处口径
+/// 一旦漂移，指纹比对就会给出错误的「一致 / 不一致」结论。
+pub fn fingerprint_of(bytes: &[u8]) -> String {
+    short_fingerprint(bytes)
+}
+
+// ─── 缓存重置（云同步专用）───────────────────────────────────
+
+/// 丢掉某个域的进程内密钥缓存，下一次 `seal` / `open` 重新从磁盘（或环境变量）解析。
+///
+/// ── 唯一调用方是云同步下载 ────────────────────────────────────
+/// 下载会**替换 `account.key`**（把远端那份装到本机）。而 `secret_key` 把密钥缓存在
+/// 进程内，不重置的话本次运行剩下的时间里账号表用的还是**旧密钥** —— 新写进去的
+/// 密文用旧钥匙封、下一次启动用新钥匙开，账号全部解不开。这是云同步最容易踩的
+/// 一个坑，所以重置入口放在 crypto 自己这里（而不是让调用方去碰私有缓存）。
+///
+/// `Accounts` 之外的域不会被替换，重置它们只是多一次读文件，但**不做**：调用方
+/// 只该传真的换过密钥的那个域，保留「重置 = 我确实换了文件」的语义。
+pub fn reset_cache(scope: SecretScope) {
+    if let Ok(mut guard) = cache_for(scope).lock() {
+        *guard = None;
+    }
+}
+
+/// 该域密钥文件的**路径**（不读、不生成）。云同步据此做备份 / 替换。
+pub fn key_file_path(scope: SecretScope) -> std::path::PathBuf {
+    crate::paths::config_dir().join(scope.key_file())
+}
+
+/// 只读地取该域密钥的原始 32 字节（不生成新密钥，见 [`existing_key`]）。
+///
+/// 云同步上传时用它取 `account.key` 的字节去加密上云；本机还没有密钥
+/// （从未保存过账号）时返回 `None`，那种情况不需要同步密钥文件。
+pub fn existing_key_bytes(scope: SecretScope) -> Option<[u8; KEY_LEN]> {
+    existing_key(scope)
 }
 
 // ─── 加密 / 解密（对外）─────────────────────────────────────

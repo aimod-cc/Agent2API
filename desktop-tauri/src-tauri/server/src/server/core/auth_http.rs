@@ -137,7 +137,44 @@ pub async fn send_raw(
     proxy: Option<&ResolvedProxy>,
     timeout_ms: Option<u64>,
 ) -> Result<ApiResponse, reqwest::Error> {
-    let client = egress::client_for(proxy);
+    send_raw_with_redirects(method, url, body, headers, proxy, timeout_ms, true).await
+}
+
+/// 与 [`send_raw`] 相同，但可以关掉「自动跟随 3xx」。
+///
+/// ── 什么时候必须关（真实踩过）───────────────────────────────
+/// MiniMax 国际站 `agent.minimax.io` 对**大陆出口 IP** 回 307 跳
+/// `agent.minimaxi.com`。那个域只认国内令牌，于是国际令牌必然拿到
+/// `401 invalid access token` —— **跳转把「出口 IP 不在服务范围」伪装成了
+/// 「令牌失效」**，排查时会被引向「重新登录」，越试越糊涂。
+/// 关掉跳转后，我们能看到真实的 307 与它的 `Location`，就能给出准确提示。
+///
+/// 客户端自己也是 `redirect: 'error'`，这里与它对齐。
+pub async fn send_raw_no_redirect(
+    method: &str,
+    url: &str,
+    body: Option<&Value>,
+    headers: &[(String, String)],
+    proxy: Option<&ResolvedProxy>,
+    timeout_ms: Option<u64>,
+) -> Result<ApiResponse, reqwest::Error> {
+    send_raw_with_redirects(method, url, body, headers, proxy, timeout_ms, false).await
+}
+
+async fn send_raw_with_redirects(
+    method: &str,
+    url: &str,
+    body: Option<&Value>,
+    headers: &[(String, String)],
+    proxy: Option<&ResolvedProxy>,
+    timeout_ms: Option<u64>,
+    follow_redirects: bool,
+) -> Result<ApiResponse, reqwest::Error> {
+    let client = if follow_redirects {
+        egress::client_for(proxy)
+    } else {
+        egress::client_without_redirects(proxy)
+    };
     let mut builder = match method {
         "POST" => client.post(url),
         _ => client.get(url),

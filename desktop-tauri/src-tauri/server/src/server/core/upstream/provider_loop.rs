@@ -87,7 +87,7 @@ use crate::server::core::providers::custom::forward as custom_forward;
 use crate::server::core::providers::readiness;
 use crate::server::core::providers::router::route_for_forward;
 use crate::server::core::providers::{kind_from_id, kind_id, meta, ProviderKind};
-use crate::server::errors::GatewayError;
+use crate::server::errors::{parse_quota_reset_at, GatewayError};
 use crate::server::logging;
 
 use super::payload::{send_body, ProviderContext, SendBody};
@@ -95,7 +95,8 @@ use super::request::{read_upstream_error, send_chat_request, TransportRequest};
 use super::usage::LogPhase;
 use super::{
     account_display, account_label, cancellation, connections::ConnectionGuard, describe_proxy,
-    refusal, reset_hint, rotate, ForwardOutcome, InFlightGuard, RouteTarget, UpstreamService,
+    format_reset_text, refusal, reset_hint, rotate, ForwardOutcome, InFlightGuard, RouteTarget,
+    UpstreamService,
     MAX_ROUTE_ATTEMPTS,
 };
 
@@ -846,6 +847,12 @@ async fn attempt_queue(
         // provider 才能继续 —— 否则下一步 session_for 会去「该 provider 的
         // 当前账号」里找，找不到就是 401。提前拦住能把原因说清楚。
         if target.account_id.is_none() && !adapter.allows_anonymous_default_session() {
+            // 通知（旁路，见 core::notify）：这是转发**真的失败**了、且原因是
+            //「没有可用账号」——用户必须去加账号 / 启用 / 重新登录。去重窗口
+            // （6 小时）兜住「空池时每条请求都撞上」，不会刷屏。
+            crate::server::core::notify::hooks::on_no_available_account(
+                "该提供商没有可用账号，转发请求已失败：请在「账号」页添加并启用账号",
+            );
             return Err(GatewayError::with_status(
                 503,
                 "没有可用账号，无账号可转发：请在账号页添加并启用账号",
@@ -1317,6 +1324,27 @@ async fn attempt_queue(
                                 *reset_at,
                                 &failure.error.message,
                             );
+                            // 账号级额度池的家（全部模型共用同一个 remaining，
+                            // 见 `ProviderAdapter::quota_cooldown_models` 的说明）：
+                            // 把整组其余名字一并标冷却 —— 只记 wire_model 一个键的
+                            // 话，顺延到同账号的下一个模型会再白撞一次同样的
+                            // insufficient quota（与会话式路径的
+                            // `mark_conversation_limited` 同一语义，那里吃的就是
+                            // 这个分组）。默认实现只返回 wire_model 本身，循环体
+                            // 一次都不进，其余各家行为逐字不变。
+                            for name in adapter.quota_cooldown_models(&account_id, &wire_model) {
+                                if name != wire_model {
+                                    rotate::mark_account_limited(
+                                        service,
+                                        &account_id,
+                                        &name,
+                                        *status as i32,
+                                        *upstream_code,
+                                        *reset_at,
+                                        &failure.error.message,
+                                    );
+                                }
+                            }
                             let limit_at =
                                 rotate::account_limit_reset_at(service, &account_id, &wire_model);
                             // 限流垫底（Sink）：它还**有**额度时被 429 的（额度尽是
@@ -1390,8 +1418,28 @@ async fn attempt_queue(
                                     continue 'accounts;
                                 }
                                 None => {
+                                    // 所有候选都在冷却 / 禁用里 —— 把**最早的恢复时刻**
+                                    // 带进文案：客户端（Claude Code / Codex 等会读这条
+                                    // 文案的）才能做合法的退避等待，而不是立刻重试再撞
+                                    // 一次同样的墙。取不到（缓存里没有未来时刻）时退回
+                                    // 原句，逐字与改造前相同。
+                                    let earliest_reset = rotate::earliest_limit_reset_at(
+                                        service,
+                                        provider_ids,
+                                        &cooldown_keys,
+                                    );
+                                    let wait_hint = if earliest_reset > 0 {
+                                        let text = format_reset_text(earliest_reset as f64);
+                                        if text.is_empty() {
+                                            String::new()
+                                        } else {
+                                            format!("，最早 {text} 恢复")
+                                        }
+                                    } else {
+                                        String::new()
+                                    };
                                     let message = format!(
-                                        "{}（所有候选账号对模型 {model} 均已限额或禁用）",
+                                        "{}（所有候选账号对模型 {model} 均已限额或禁用{wait_hint}）",
                                         failure.error.message
                                     );
                                     rotate::report_limit_event(
@@ -1538,22 +1586,75 @@ async fn attempt_queue(
         // 字节 + 剩余流重建）。用枚举而不是 `Option`，是为了让 `response` 在**恰好
         // 一支**里被移动 —— 否则借用检查器无法证明「None 那支没被移走」。
         let refusal_finishes = adapter.stream_refusal_finishes();
-        let gate = if !refusal_finishes.is_empty()
+        // 正文拒绝标记（见 `ProviderAdapter::stream_refusal_markers`）：有些上游把
+        // **配额耗尽**写成一次 200 + 正常正文，`finish_reason` 干脆不存在 ——
+        // 只看状态码与 `finish_reason` 会把它当成一次成功答复（账号不冷却、不换家）。
+        let refusal_markers = adapter.stream_refusal_markers();
+        let gate = if (!refusal_finishes.is_empty() || !refusal_markers.is_empty())
             && response_protocol == crate::server::core::providers::adapter::UpstreamResponse::Chat
             && response.status().is_success()
         {
             let head = refusal::hold_head(response).await;
-            if let Some(finish) = head.finish_reason.as_deref() {
-                if refusal::is_refusal(refusal_finishes, finish) {
-                    let message = format!(
-                        "上游拒答（finish_reason={finish}，疑似内容策略拦截）：本次答复不采纳"
-                    );
+            // 两条判据汇成一个三元组 `(给明细的文案, 是不是配额型, 给客户端标签)`：
+            //   · 配额型（**正文标记**命中）⇒ **罚账号**（冷却到正文里的窗口重置时刻）+ 换家；
+            //   · 内容型（`finish_reason` 命中）⇒ 不罚账号（内容问题，换谁都会拒）+ 换家。
+            let refusal_hit =
+                match refusal::matched_refusal_marker(&head.buffered, refusal_markers) {
+                    Some(marker) => Some((
+                        format!("上游以正文拒绝本次答复（命中标记「{marker}」）：本次答复不采纳"),
+                        true,
+                        "命中正文配额标记".to_string(),
+                    )),
+                    None => head
+                        .finish_reason
+                        .as_deref()
+                        .filter(|finish| refusal::is_refusal(refusal_finishes, finish))
+                        .map(|finish| {
+                            (
+                                format!("上游拒答（finish_reason={finish}，疑似内容策略拦截）：本次答复不采纳"),
+                                false,
+                                format!("finish_reason={finish}"),
+                            )
+                        }),
+                };
+            if let Some((message, is_quota, refusal_label)) = refusal_hit {
+                    // 上游那句原话：配额型的**窗口重置时刻**要从它里面读出来
+                    // （认「当日 HH:MM」与「… HH:MM:SS UTC+8」两种形态，见
+                    // `errors::parse_quota_reset_at`）。SSE 噪声原样喂进去没问题 ——
+                    // 它只在字节流里找时刻，不做 JSON 解析。
+                    let upstream_text = String::from_utf8_lossy(&head.buffered).to_string();
+                    // 给客户端的等待时长（秒）：0 = 认不出恢复时刻，那就只回 429 不带头
+                    let mut refusal_reset_at: i64 = 0;
+                    // 配额型：这一家的额度用完了 ⇒ 罚账号。冷却时长交给
+                    // `mark_account_limited` 的文本兜底去解析正文里的窗口重置时刻
+                    // （「…当前滚动窗口约在当日 HH:MM 结束并重置额度…」）；解析不出时
+                    // 它自己的兜底是 10 分钟。
+                    if is_quota {
+                        if let Some(account_id) = &target.account_id {
+                            refusal_reset_at = parse_quota_reset_at(&upstream_text);
+                            let reset_text = rotate::mark_account_limited(
+                                service,
+                                account_id,
+                                &model,
+                                429,
+                                None,
+                                if refusal_reset_at > 0 { Some(refusal_reset_at) } else { None },
+                                &message,
+                            );
+                            logging::console_line(
+                                "[Upstream]",
+                                &format!(
+                                    "⚠️ {provider_id} 账号 {account_id} 配额拒绝（正文标记命中），已限流{reset_text}"
+                                ),
+                            );
+                        }
+                    }
                     ctx.telemetry.finish_last_attempt(Some(i64::from(head.status)), Some(&message));
                     logging::console_line(
                         "[Upstream]",
                         &format!(
-                            "⚠️ {provider_id} 对模型 {model_label} 返回拒答帧（finish_reason={finish}），\
-                             本家不采纳该答复"
+                            "⚠️ {provider_id} 对模型 {model_label} 以「{refusal_label}」拒绝本次答复，\
+                             本家不采纳"
                         ),
                     );
                     // 与其它失败同一落点：把这一轮记为失败、按队列顺延下一家。
@@ -1566,12 +1667,29 @@ async fn attempt_queue(
                             tried_ids.push(account_id);
                         }
                     }
-                    // 队列没人 / 换号次数用尽时给客户端的那句话：拒答本身不是
-                    // 网关坏了，要说清「换一家或改内容」这条路还在。
-                    let client_text = format!(
-                        "上游拒答（finish_reason={finish}）：该答复疑似被上游内容策略拦截，\
-                         且没有其他可用的账号或提供商可接管。请调整内容后重试，或在设置中更换该模型的服务商"
-                    );
+                    // 队列没人 / 换号次数用尽时给客户端的那句话：要说清是哪一类拒绝 ——
+                    // 内容型是「换一家或改内容」，配额型是「等窗口重置后重试」。
+                    let client_text = if is_quota {
+                        // 说清是哪一类拒绝，并把**恢复时刻**写进 body（与 `Retry-After`
+                        // 同一个数）—— 只读 body 的客户端也知道要等多久。
+                        let when = if refusal_reset_at > 0 {
+                            format!(
+                                "，额度预计在 {} 重置",
+                                crate::server::errors::format_reset_at_text(refusal_reset_at)
+                            )
+                        } else {
+                            String::new()
+                        };
+                        format!(
+                            "上游配额拒绝（该账号的用量窗口已耗尽{when}）：没有其他可用的账号或提供商可接管。\
+                             请在窗口重置后重试，或在设置中更换该模型的服务商"
+                        )
+                    } else {
+                        format!(
+                            "上游拒答（{refusal_label}）：该答复疑似被上游内容策略拦截，\
+                             且没有其他可用的账号或提供商可接管。请调整内容后重试，或在设置中更换该模型的服务商"
+                        )
+                    };
                     match rotate::pick_next_account(
                         service,
                         provider_ids,
@@ -1581,7 +1699,11 @@ async fn attempt_queue(
                     ) {
                         Some(next) => {
                             if !take_switch(&mut switches_left, switch_total) {
-                                return Err(GatewayError::with_status(502, client_text));
+                                return Err(quota_refusal_error(
+                                    client_text,
+                                    refusal_reset_at,
+                                    is_quota,
+                                ));
                             }
                             let next_home = {
                                 let next_provider = rotate::provider_of(&next);
@@ -1616,9 +1738,10 @@ async fn attempt_queue(
                             );
                             continue 'accounts;
                         }
-                        None => return Err(GatewayError::with_status(502, client_text)),
+                        None => {
+                            return Err(quota_refusal_error(client_text, refusal_reset_at, is_quota))
+                        }
                     }
-                }
             }
             Gate::Held(head)
         } else {
@@ -1680,6 +1803,15 @@ async fn attempt_queue(
                         ctx.telemetry,
                     ),
                 ),
+                // 智谱清言：SSE 帧混着增量与收尾全文快照，翻译机按帧语义差分
+                // （见那台的模块头）
+                UpstreamResponse::ChatglmSnapshot => {
+                    Box::pin(super::translate::ChatglmToChatStream::new(
+                        response,
+                        &wire_model,
+                        ctx.telemetry,
+                    ))
+                }
                 // 外层 `if` 已排除它，这一支只为 match 的穷尽性存在，**不可能
                 // 走到**。真走到说明分派被改坏了：报内部错误而不是 panic
                 // （release 是 `panic=abort`，一处 panic 带走整个网关）。
@@ -2079,6 +2211,12 @@ async fn attempt_stateful(
     // 没有账号记录（走默认登录态）时，只有声明了环境变量旁路的 provider 能继续
     // —— 与无状态路径同一判据与文案（`allows_anonymous_default_session`）
     if target.account_id.is_none() && !adapter.allows_anonymous_default_session() {
+        // 通知（旁路）：与无状态路径同一出口、同一文案（见那边说明）。
+        // 去重以 kind 为二级键，多家的空池各报一次。
+        crate::server::core::notify::hooks::on_no_available_account(&format!(
+            "{} 没有可用账号，转发请求已失败：请在「账号」页添加并启用账号",
+            meta(kind).label
+        ));
         return Err(GatewayError::with_status(
             503,
             format!(
@@ -2558,6 +2696,30 @@ async fn send_with_retry(
     }
 }
 
+/// 拒答落到客户端时的错误形态。
+///
+/// ── 为什么配额型是 429 而内容型仍是 502 ───────────────────────
+/// 配额型：**本账号的额度用完了** —— 同号重试无用，但等窗口重置后同一份请求
+/// 大概率能成。这正是 429 + `Retry-After` 的语义（与 Trae 的
+/// `SoftRate | PlanLimit → 429` 同一口径），客户端据此退避而不是放弃。
+/// 内容型：**这份内容被上游拦了**，换一家也会被拦；回 429 等于让客户端按退避
+/// 重试同一份内容 —— 那是骗它排队。所以保持 502，文案里说的是「改内容或换服务商」。
+///
+/// `reset_at > 0` 才挂 `Retry-After`：算不出恢复时刻就不给头（见
+/// `GatewayError::with_retry_after_seconds` 的说明）。
+fn quota_refusal_error(client_text: String, reset_at: i64, is_quota: bool) -> GatewayError {
+    if !is_quota {
+        return GatewayError::with_status(502, client_text);
+    }
+    let error = GatewayError::with_status(429, client_text);
+    let seconds = (reset_at - logging::now_ms()) / 1000;
+    if seconds > 0 {
+        error.with_retry_after_seconds(seconds as u64)
+    } else {
+        error
+    }
+}
+
 #[cfg(test)]
 mod local_failure {
     //! 「本机就发不出去」这一条在编排层的两条判据。
@@ -2588,5 +2750,30 @@ mod local_failure {
         // 用户把名单清空也挡不住本地失败换号，反过来用户点名 556 也不该有额外效果。
         // 这条用例的存在是为了让「改成走名单」这个念头先撞上说明。
         assert!(!direct_switch_status(i64::from(readiness::LOCAL_PRECONDITION_STATUS)));
+    }
+
+    #[test]
+    fn a_quota_refusal_reaches_the_client_as_429_with_the_wait_it_knows() {
+        // 配额拒答：客户端要能据此**退避**，所以 429 +（已知时）`Retry-After`。
+        let now = crate::server::logging::now_ms();
+        let error = super::quota_refusal_error("配额拒绝".to_string(), now + 90_000, true);
+        assert_eq!(429, error.status_code);
+        assert_eq!(Some(90), error.retry_after_secs);
+        // 算不出恢复时刻（0）：仍然是 429，但**不带头** —— 不给编造的等待时长
+        let unknown = super::quota_refusal_error("配额拒绝".to_string(), 0, true);
+        assert_eq!(429, unknown.status_code);
+        assert_eq!(None, unknown.retry_after_secs);
+        // 已过的恢复时刻同理（冷却已失效），不给一个负数/零头
+        let stale = super::quota_refusal_error("配额拒绝".to_string(), now - 60_000, true);
+        assert_eq!(None, stale.retry_after_secs);
+    }
+
+    #[test]
+    fn a_content_refusal_stays_502_so_clients_do_not_queue_on_the_same_body() {
+        // 内容型：换一家也会被拦 ⇒ 不能用「等一会儿再来」的语义骗客户端排队。
+        let now = crate::server::logging::now_ms();
+        let error = super::quota_refusal_error("内容拒答".to_string(), now + 90_000, false);
+        assert_eq!(502, error.status_code);
+        assert_eq!(None, error.retry_after_secs, "内容型不该带 Retry-After");
     }
 }

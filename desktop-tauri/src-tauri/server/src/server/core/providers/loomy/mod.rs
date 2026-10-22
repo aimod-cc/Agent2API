@@ -107,30 +107,27 @@ impl ProviderAdapter for LoomyAdapter {
         // model 原样透传：Loomy 的模型 id 就是上游 id（没有路由前缀那套），
         // 入口校验已按目录收窄过，这里不需要二次映射。
         //
-        // 图片格式适配（见 `images` 模块头）：deepseek 系模型只认
-        // `<image_base64>` 标记，标准 image_url 会被上游当文本读（用户报的
-        // 「图片被截断/不支持图片识别」）；其余模型保持 image_url。
+        // 图片格式适配（见 `images` 模块头）：只有**上游没有视觉通路**的模型
+        // （目录里 `vision: false`，如 `deepseek-v4-flash-0731`）才转
+        // `<image_base64>` 标记；目录声明支持图片输入的模型（如
+        // `DeepSeek-V4.1-Flash`）保持标准 image_url —— 对它来说标记反而会把
+        // base64 当纯文本塞进 prompt，体积越大涨得越狠。
         // 判断用**客户端请求名**（body.model 此刻还没被 wire 改写）：
-        // 目录名与映射别名都含 `deepseek`，宽松匹配两段链路都成立。
+        // wire 解析与目录查询都在 `images` 内部按同一口径完成。
         let requested_model = body
             .get("model")
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let payload = if images::prefers_tag_format(&requested_model) {
-            let (rewritten, converted) = images::rewrite_to_tag(body);
-            if converted > 0 {
-                logging::verbose(
-                    "[Loomy]",
-                    &format!(
-                        "模型 {requested_model} 只认 <image_base64> 标记：已转换 {converted} 个图片块"
-                    ),
-                );
-            }
-            rewritten
-        } else {
-            body.clone()
-        };
+        let (payload, converted) = images::adapt_images(body, &requested_model);
+        if converted > 0 {
+            logging::verbose(
+                "[Loomy]",
+                &format!(
+                    "模型 {requested_model} 无视觉通路：已把 {converted} 个图片块转成 <image_base64> 标记"
+                ),
+            );
+        }
         Ok(ChatRequestPlan::chat(
             format!("{}/chat/completions", endpoints::model_base_url()),
             headers,

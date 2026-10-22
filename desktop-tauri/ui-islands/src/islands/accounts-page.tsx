@@ -34,6 +34,36 @@
  * 不锁 —— 落点按渲染出来的行算出锚点、再换算回完整 members（见 onDrop），可见与
  * 全量的映射是确定的，拖动不会错位。
  *
+ * ── 排序与调度是同一件事（2026-10，「所见即所得」）─────────────
+ * 点表头排序在**组内**档下不再只是视图行为：它按排出来的先后把整条队列重编号
+ * （`reorderBySort` → 同一个 `POST /api/accounts/reorder`）。于是屏幕上那一列行的先后，
+ * 就是转发实际会走的先后 —— 用户点「按最近到期时间排序」，排在最上面的那家**真的**
+ * 会先接走请求。
+ *
+ * 后端这一条本来就通：`priority` 既是 `POST /api/accounts/reorder` 写的字段，也是
+ * `routing::plan_route` 排序的第一排序键，而转发选路与队列端点调的是**同一个**
+ * `plan_route`（见 accounts-schedule 的模块头）。此前只是「排序没写回」这一步缺了。
+ *
+ * **整表档是例外，刻意不写回**：它打散厂商分组，写回去会破坏后端「同一家连续」这条
+ * 硬不变量（`priority::grouped_queue_order`），而新增账号那条链会把它整理回来 ——
+ * 也就是说那个顺序根本存不住。详见 `reorderBySort` 开头那段。
+ *
+ * **凡是会改行序且能写回的动作**，两个入口，别漏：
+ *   · `onSortColumn`（点表头，三态循环）；
+ *   · `onSortScope`（切粒度 —— 切到「组内」写回，切到「整表」不写回）。
+ * `clearSort`（取消排序）**不**写回：默认次序就是当前队列序，写回是空操作。
+ *
+ * 五个必须守住的口径：
+ *   · 只在**全局账号表**下写回 —— 模型作用域那一屏只是全局队列的**投影**（只含提供
+ *     该模型的家），在那儿重排会挪动别的家的号，语义接不上；
+ *   · 模型作用域下**两种拖拽把手都锁**、**表头排序也不改 store** —— 整屏只读
+ *     （早先只锁了组顺位、排序只挡了写回没挡 `cycleSort`，两处都会让屏幕与队列分叉）；
+ *   · 只有**组内**档写回（整表档的语义与后端不变量冲突，见上）；
+ *   · 写回的源是 `allGroups`（全部行、组序 → 组内序），**不是**当前可见的 `shown`
+ *     —— 筛选 / 折叠下 `shown` 缺行，拿它写回后端会 400（「队列不完整」）；
+ *   · 判据是「屏幕行序 == `/api/accounts` 按 `priority` 的全量序」——**不是**
+ *     `ordered ++ blocked`（`ordered` 只是可跑子集，被跳过者仍占着号、屏幕画在原位）。
+ *
  * ── 静态表头（本页最容易出错的地方）────────────────────
  * `<colgroup>` 的 `col[data-col]` 与 `<thead>` 的 `th[data-col]`（见 accounts-panels.tsx
  * 的 TableHead）是**字面量**渲染，永远按列定义的原始顺序渲染全部列、且不随任何状态
@@ -69,21 +99,33 @@ import { t } from '../i18n'
 import { Button, Checkbox, Input, SegmentedControl, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, cn } from '@ui'
 import { TableFooter, useClientPaging } from './table-shell'
 import { shared, toast, type AccountRecord, type ColSettingsHandle } from './accounts-shared'
-import { isDesktopAccount, isEnabled, providerOf, supportsUsage } from './accounts-domain'
+import { isDesktopAccount, isEnabled, isLimitedNow, matchesFilter, providerOf, supportsUsage, type AccountGroup } from './accounts-domain'
 import { ACCOUNT_COLUMNS, bindColumnGrips, columnWidths, tableMinWidth } from './accounts-columns'
 import {
-  allAccounts, clearFilter, clearLimits, clearSelection, ensureProxyPoolOptions, filterActive,
-  getStore, groupView, installAccountsApi, normalizeProviderFilter, openBatchDialog, panelOpen,
+  allAccounts, bump, clearFilter, clearLimits, clearSelection, connectionsOf, ensureProxyPoolOptions,
+  filterActive, getStore, groupSortRules, groupView, installAccountsApi, normalizeProviderFilter, openBatchDialog,
   providerSummaryList, queryAllUsage, reorderQueue, rowContext, seats, segmentCounts,
   setAllGroupsCollapsed, setAllPicked, setProviderFilter, setSearchFilter, setSegmentFilter,
-  snapshot, startConnectionsPolling, subscribe, tokenUsageOf, togglePick, usageEntryOf,
+  snapshot, startConnectionsPolling, subscribe, subscribeProxyPool, syncGroupTotalPreference,
+  tokenUsageOf, togglePick, usageEntryOf, GROUP_TOTAL_FILTERED_KEY,
 } from './accounts-data'
 import {
-  AccountCell, ActionsCell, ConnectionsCell, ExpiryCell, GroupBandRow, LimitsCell, OrderCell,
-  PanelsRow, ProxyCell, StatusCell, TableHead, UsageCell,
+  accountSort, clearSort, currentSortScope, cycleSort, setSortScope,
+  type AccountSort, type AccountSortScope,
+} from './accounts-store'
+import { SORTABLE_COLUMNS, accountComparator, sortDirLabel, sortLabel, type SortContext } from './accounts-sort'
+import {
+  AccountCell, ActionsCell, ConnectionsCell, CreditExpiryCell, CreditLeftCell, ExpiryCell,
+  GroupBandRow, LimitsCell, OrderCell, ProxyCell, StatusCell, TableHead, UsageCell,
 } from './accounts-panels'
 import { bindQueueDrag, type QueueDrop } from './accounts-queue-drag'
 import { AccountsDialogs } from './accounts-dialogs'
+// 「模型调度」作用域：左栏那棵树 + 队列取数（见那个文件的模块头）。
+// **视图不再由它画** —— 模型作用域只是换一批行、换一个行序，表还是这张表
+import {
+  ScopeRail, StateBadge, queueRuns, stickyLabel, strategyLabel,
+  useScheduleQueue, useScheduleScope, type QueueEntry,
+} from './accounts-schedule'
 
 /** 列设置的句柄（注册在挂载后的布局 effect 里，见下方说明） */
 let colHandle: ColSettingsHandle | null = null
@@ -104,14 +146,38 @@ let tableEl: HTMLTableElement | null = null
 /** 表头已经同步过的「表格在不在 + 可见列与对齐」签名：只有它变了才重排表头（见 syncHead） */
 let headSignature = ''
 
+/** 左栏收起状态的键（'1' = 收起只剩图标条，缺省 = 常驻展开）。与列宽 / 折叠分组同一套惯例 */
+const RAIL_COLLAPSED_KEY = 'workbuddy-desktop-accounts-rail-collapsed'
+
 /** 当前可见列（顺序即配置顺序；列设置未就绪时退回全部列） */
 function visibleColumns(): Array<(typeof ACCOUNT_COLUMNS)[number] & { align: 'left' | 'center' | 'right' }> {
   return colHandle ? colHandle.apply(ACCOUNT_COLUMNS) : ACCOUNT_COLUMNS
 }
 
+/** 该账号所属组的排序规则是否生效（生效时组内把手锁定：拖了也会被规则排回去） */
+function sortActiveIn(account: AccountRecord): boolean {
+  return groupSortRules(providerOf(account)).some(rule => rule.on)
+}
+
 /** 触发一次重绘（store 换快照 → 订阅者重画） */
 function requestRender(): void {
   window.wbAccountsView?.render?.()
+}
+
+/**
+ * 一屏里的一段（分组带 + 它下面的行）。
+ *
+ * 全局作用域 = 账号表的厂商分组（`AccountGroup` 原样过来）；模型作用域 = 调度队列
+ * 按连续段切出来的一段（组是**合成**的，只喂给分组带画带子）。两个作用域共用这份形状，
+ * 于是行渲染、分组带、折叠、⋯ 菜单都只有一处实现。
+ */
+type TableSection = {
+  provider: string
+  label: string
+  group: AccountGroup
+  rows: AccountRecord[]
+  /** 这一家在这个模型上的倍率（只有模型作用域有；`—` = 模型清单里没有这一家的这一项） */
+  rate?: string
 }
 
 /**
@@ -141,14 +207,23 @@ function syncHead(): void {
 function AccountsPage() {
   const store = React.useSyncExternalStore(subscribe, getStore)
   const listRef = React.useRef<HTMLDivElement | null>(null)
+  /** 面板本身（左栏 / 表格两栏的容器）。左栏收起改由用户手动切之后这里不再度量宽度，
+   *  留着 ref 是因为面板节点本身仍要被指认（排障时 `#acct-scope-rail` 的同级就是它） */
+  const panelRef = React.useRef<HTMLElement | null>(null)
   /** 登记列设置之后强制重画一次用的本地计数器（不依赖 store 订阅的时序，见下） */
   const [, forceTick] = React.useReducer((tick: number) => tick + 1, 0)
 
   const loaded = Boolean(snapshot())
   const all = allAccounts()
+  /** 作用域：`''` = 全局账号表；否则是**模型名** —— 行集合与行序都换成该模型的调度队列 */
+  const scheduleScope = useScheduleScope()
+  const sched = useScheduleQueue(scheduleScope)
+  const sort = accountSort()
+  /** 整表排序（打散分组按一条排）。组内排序则保留厂商分段 */
+  const flatSort = Boolean(sort && sort.scope === 'flat')
   // groups = 要渲染的（当前筛选下一条都看不见的组不留空壳）；allGroups = 全部组，
   // 拼队列与「折叠 / 展开全部」都用它
-  const { groups, allGroups } = groupView(usageEntryOf, tokenUsageOf)
+  const { groups: storeGroups, allGroups } = groupView(usageEntryOf, tokenUsageOf)
   // 限流维度的分段把「余额不足已跳过 / Token 限额已跳过」都算进已限流
   // （isLimitedNow 的口径），所以筛选与计数要带上余额与 Token 两份读数的查找口
   // —— 缓存每次 bump 后这里重算
@@ -161,12 +236,214 @@ function AccountsPage() {
    */
   const providerOptions = [{ value: 'all', label: t('全部（{n}）', { n: all.length }) }]
     .concat(providerSummaryList().map(item => ({ value: item.id, label: t('{label}（{count}）', { label: t(item.label), count: item.count }) })))
-  /** 真正会渲染出来的行（组序 → 组内序）。全选 / 计数 / 分页都以它为基准：
+  /** 家名表：整表排序时分组带没了，行里要挂一枚厂商标记顶上（见 accounts-panels 的 AccountCell） */
+  const providerLabels = new Map(providerSummaryList().map(item => [item.id, item.label]))
+
+  /* ── 模型作用域：队列 → 行 ──────────────────────────────
+     作用域 = 模型名，所以「这个模型的队列」就是这一屏的全部候选。渲染这一侧**一行排序
+     都不自己写**：`entryOf` 的顺序就是 `/api/routing/queue` 给的顺序（后端与转发共用
+     `routing::plan_route`，见 accounts-schedule 的文件头）。 */
+  /** id → 队列条目（「顺序」列的位次与「状态」列的调度状态都从它来） */
+  const entryOf = new Map<string, { entry: QueueEntry; seat: number | null; skipped: boolean }>()
+  if (scheduleScope) {
+    ;(sched.queue?.ordered || []).forEach((entry, index) => {
+      const id = String(entry.id || '')
+      if (id) entryOf.set(id, { entry, seat: index + 1, skipped: false })
+    })
+    for (const entry of sched.queue?.blocked || []) {
+      const id = String(entry.id || '')
+      if (id) entryOf.set(id, { entry, seat: null, skipped: true })
+    }
+  }
+  /** 模型作用域下这一屏的行：队列条目 → 账号记录（队列里认不出的 id 直接不画） */
+  const scopeRecords = new Map<string, AccountRecord>()
+  for (const account of all) scopeRecords.set(account.id, account)
+
+  /**
+   * 这一屏的分段（分组带 + 它下面的行）。
+   *
+   * 两个作用域都用同一份形状：全局 = 账号表的厂商分组；模型域 = 队列按**连续段**切的
+   * 段（`queueRuns` 的说明里写了为什么不按 provider 归堆）。保留「段」这层是为了让分组带
+   * 上那几件（家图标、统计、⋯ 菜单、倍率）在两种作用域下都能用同一份组件。
+   */
+  const sections: TableSection[] = []
+  if (scheduleScope) {
+    const ordered = sched.queue?.ordered || []
+    const blocked = sched.queue?.blocked || []
+    const runs = [...queueRuns(ordered, false), ...queueRuns(blocked, true)]
+    runs.forEach((run, index) => {
+      const rows: AccountRecord[] = []
+      for (const entry of run.entries) {
+        const account = scopeRecords.get(String(entry.id || ''))
+        // 工具栏那四档筛选在模型作用域下**照旧生效**（它筛的是账号，与作用域无关）
+        if (account && matchesFilter(account, store.filter, usageEntryOf, tokenUsageOf)) rows.push(account)
+      }
+      if (!rows.length) return
+      // 合成的「组」：只喂给 GroupBandRow 画带子（统计读的是这一段自己）
+      const group: AccountGroup = {
+        provider: run.provider,
+        label: run.label,
+        rank: index + 1,
+        members: rows,
+        // 合成段没有「显示顺序 vs 转发顺序」之分（行序就是队列序，见上面那句），
+        // 所以两个字段同源 —— 列上要 `queueMembers` 的地方（整队重排）在模型
+        // 作用域下本来就不开放（`locked` 含 scheduleScope）。
+        queueMembers: rows,
+        accounts: rows,
+        enabled: rows.filter(isEnabled).length,
+        disabled: rows.filter(account => !isEnabled(account)).length,
+        limited: rows.filter(account => isLimitedNow(account, usageEntryOf(account), tokenUsageOf(account))).length,
+      }
+      sections.push({
+        provider: run.provider,
+        label: run.label,
+        group,
+        rows,
+        rate: sched.rates.get(`${run.provider}::${scheduleScope.toLowerCase()}`) || '—',
+      })
+    })
+  } else {
+    for (const group of storeGroups) {
+      sections.push({ provider: group.provider, label: group.label, group, rows: group.accounts })
+    }
+  }
+
+  /* ── 排序 ────────────────────────────────────────────
+     比较器在 accounts-sort（那一列取什么值、缺失值怎么排都在那边）。这里只负责
+     把「哪一列、升还是降、组内还是整表」翻成行序。 */
+  const seatMap = seats()
+  /** 顺序列在**这个作用域**下说的「第几位」：全局 = 全队列位次，模型域 = 该模型队列位次 */
+  const scopeSeatOf = scheduleScope
+    ? (account: AccountRecord): number | null => entryOf.get(account.id)?.seat ?? null
+    : (account: AccountRecord): number | null => seatMap.get(account.id)?.position ?? null
+  const sortContext: SortContext = {
+    usageOf: usageEntryOf,
+    tokenUsageOf,
+    connectionsOf,
+    seatOf: scopeSeatOf,
+    stateOf: scheduleScope ? (id => entryOf.get(id)?.entry.state) : undefined,
+  }
+  const compare = sort ? accountComparator(sort, sortContext) : null
+  /**
+   * 把「按某列排序」的结果**写回调度队列**（所见即所得）。
+   *
+   * ── 为什么能写回 ──────────────────────────────────────────
+   * 排出来的次序是「同一家的行连续」的：比较器排完全部行后按 `provider` **折叠成组**
+   * （`flatMap` 的组序取比较器给的第一行所属组的先后，但组内只有比较器排过的那一段），
+   * 组这一层继续由 `allGroups` 的组序承载。于是结果**仍是一条合法的全局队列** ——
+   * 满足 `reorder_accounts` 的两个不变量（是全部账号的一个排列、同一家连续）。
+   *
+   * ── 具体算哪一份 ─────────────────────────────────────────
+   * 源行取 `allGroups.flatMap(group => group.members)`（= 当前队列序，组序 → 组内序），
+   * **不是** `shown` —— `shown` 只是「当前筛选 / 折叠下看得见的那些」，拿它去写回会
+   * 把没显示的行漏掉，后端直接 400（「队列不完整」）。
+   *
+   * ── 「组内」档怎么写回 ────────────────────────────────────
+   * 组内档只改每组内部的先后，**组序照 `allGroups`**：折叠时 `group.members` 会被
+   * 比较器排成该组的新序，各组之间仍按 `allGroups` 的组序拼 —— 与屏幕画出来的次序
+   * 逐字一致（屏幕也是组序 → 组内序）。「整表」档则把所有行放一起排、再按结果折叠。
+   *
+   * `next` 为 `null`（点了「取消排序」，回到默认次序）时不写回：默认次序就是**当前**
+   * 队列序，写回是空操作 —— 而「取消排序」的意图正是「别再动了」，不该顺手重排一遍。
+   */
+  const reorderBySort = async (next: AccountSort | null): Promise<void> => {
+    if (!next) return
+    /**
+     * **整表（flat）档不写回** —— 它与后端的「同一家连续」硬不变量直接冲突。
+     *
+     * 后端的 `reorder_accounts`（`store_order.rs`）只校验「是不是全部账号的一个排列」，
+     * 组连续性**由调用方保证**；而「同家连续」是分组模式的硬不变量
+     * （`priority::grouped_queue_order` 的模块说明），新增账号那条链
+     * （`sql::put` → `normalize_grouped_queue`）会**强制**把它整理回来。
+     *
+     * flat 的语义是「打散厂商分组、全表一起排」，写出来的队列里同家的号必然被别家
+     * 隔开。于是：
+     *   ① 写回后前端 `accountGroups` 按 provider **归堆**（不是连续段）→ 屏幕序 ≠ 队列序；
+     *   ② 下一次新增任何账号，后端整理一次就把这条顺序**整个打乱**。
+     * 也就是说 flat 的「所见即所得」根本存不下来 —— 与其给用户一个下次必然被推翻的
+     * 承诺，不如让它老实做一次视图排序（写回只发生在「组内」档，那一档只动组内先后，
+     * 组序与同家连续都不受影响）。
+     */
+    if (next.scope === 'flat') return
+    const comparator = accountComparator(next, sortContext)
+    // 全部行（不受筛选 / 折叠影响）—— 写回要的是完整队列
+    const allRows: AccountRecord[] = []
+    for (const group of allGroups) allRows.push(...group.members)
+    if (allRows.length < 2) return
+    // 「组内」档：比较器排一遍得出组内新序，组序照 `allGroups`（组序不动）
+    const sorted = allRows.slice().sort(comparator)
+    const rank = new Map(sorted.map((account, index) => [account.id, index]))
+    const members = new Map<string, AccountRecord[]>()
+    for (const account of allRows) {
+      const list = members.get(providerOf(account)) || []
+      list.push(account)
+      members.set(providerOf(account), list)
+    }
+    const queue: string[] = []
+    for (const group of allGroups) {
+      const list = (members.get(group.provider) || [])
+        .slice()
+        .sort((a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0))
+      for (const account of list) queue.push(account.id)
+    }
+    // 与拖拽走同一条落盘通道（同一份 toast / 同一次刷新），不另造一条
+    void reorderQueue(queue, t('已按「{label}」{dir}排序并保存', {
+      label: sortLabel(next.key), dir: sortDirLabel(next.dir),
+    }))
+  }
+  /**
+   * 点表头排序 —— **所见即所得**：排序的结果同时写回调度队列，屏幕上那个顺序就是
+   * 转发会走的顺序（见本文件模块头「排序与调度是同一件事」）。
+   *
+   * 过一道 `SORTABLE_COLUMNS`：认不出的列在 accounts-sort 里取不到值，排了也不动
+   * —— 挡在这里，免得将来给表头加了新列却忘了补比较器时「点了没反应」。
+   *
+   * 只在**全局账号表**下写回。模型作用域那一屏的行序是后端算的调度队列（`plan_route`
+   * 的产物，只含「提供该模型的家」），它只是**全局队列的一个投影** —— 在那儿重排会把
+   * 别的家的号一起挪走，语义接不上，所以那一档维持只读（左栏切回全局才能排）。
+   */
+  const onSortColumn = (key: string): void => {
+    if (!SORTABLE_COLUMNS.has(key)) return
+    // 模型作用域：整屏只读，连排序状态都不该改。`cycleSort` 会写全局 store
+    // （`sort` 不区分作用域）—— 一旦放行，屏幕行序会从「队列序」变成「排序序」
+    // 而队列一个字不动，屏幕与转发就此分叉，且这个排序还会一路留到切回全局表。
+    // 早先这里只挡了 `reorderBySort`、没挡 `cycleSort`，就是那个分叉的来源。
+    if (scheduleScope) return
+    const current = sort
+    const next: AccountSort | null = !current || current.key !== key
+      ? { key, dir: 'asc', scope: current?.scope || currentSortScope() }
+      : current.dir === 'asc' ? { ...current, dir: 'desc' } : null
+    cycleSort(key)
+    void reorderBySort(next)
+  }
+  /**
+   * 切排序粒度（组内 ⇄ 整表）。
+   *
+   * 切到**组内**要写回：这一档只改每组内部的先后，组序照旧，写回去仍满足「同一家连续」。
+   * 切到**整表**不写回（`reorderBySort` 里 `scope === 'flat'` 直接返回）—— 它会打散
+   * 分组，写回去就破坏了后端那条硬不变量，下次新增账号会被整理回来（详见那儿）。
+   *
+   * 没排序时不写回：那时切档只记「预选」（`setSortScope` 只存不重绘），屏幕上没有
+   * 顺序变化，没有什么可写回的。
+   */
+  const onSortScope = (scope: AccountSortScope): void => {
+    const current = sort
+    setSortScope(scope)
+    if (!current || scheduleScope) return
+    void reorderBySort({ ...current, scope })
+  }
+  /** 默认次序下的全部可见行（组序 → 组内序）。全选 / 计数 / 分页都以它为基准：
    *  被隐藏的组（一个启用的都没有）不该算进「当前看到的这些」—— 否则「全选（8 个）」
    *  会连看不见的行一起勾上，数字也对不上。分段计数（工具条那几枚徽标）另一回事：
    *  它说的是「一共有多少个」，不该被显示规则影响。 */
-  const shown = groups.flatMap(group => group.accounts)
-  const seatMap = seats()
+  const shownDefault = sections.flatMap(section => section.rows)
+  /** 排序之后的行序：组内排序逐段排，整表排序把分段散开（那时不画分组带） */
+  const shown = !compare ? shownDefault
+    : flatSort ? shownDefault.slice().sort(compare)
+      : sections.flatMap(section => section.rows.slice().sort(compare))
+  /** 组内序号（全量成员里的位次，与排序、筛选、分页都无关）：顺序列的 `#N` 说的事实 */
+  const rankMap = new Map<string, number>()
+  for (const group of allGroups) group.members.forEach((member, index) => rankMap.set(member.id, index + 1))
   const columns = visibleColumns()
   /**
    * 客户端分页（通用表格外壳）：默认给「全部」这一档 —— 分组模式下按行分页会把
@@ -178,18 +455,109 @@ function AccountsPage() {
    */
   const paging = useClientPaging(shown.length, 'accounts', { defaultSize: 'all' })
   const pageRows = paging.paged ? paging.slice(shown) : shown
-  /** 组顺位的锁（组内行不锁，落点可按可见行换算）：提示语要说清是卡在哪一条上 */
-  const groupLocked = filterActive() || paging.paged
-  const lockReason = filterActive() ? t('清除筛选') : t('把每页调回「全部」')
+  const pageIds = new Set(pageRows.map(account => account.id))
+  /**
+   * 渲染用的分段：**行序必须取自 `shown`**，不能直接用 `section.rows`。
+   *
+   * `section.rows` 说的是「这一段里有谁」，带的是**默认次序**（全局 = 优先级队列位次，
+   * 模型域 = 后端算的调度队列序）。排序排的是 `shown`；若画的时候又按 `section.rows`
+   * 取行，排序就等于白排（行集合一样、顺序不动）——分页只负责「留哪些行」，
+   * 次序一律由 `shown` 定。
+   *
+   * 一页里落不下一行的那一段直接不画：分组带留在那儿、底下却空着，看着像加载失败。
+   */
+  const pageOrder = new Map(pageRows.map((account, index) => [account.id, index]))
+  const renderSections = sections
+    .map(section => ({
+      section,
+      rows: section.rows
+        .filter(account => pageIds.has(account.id))
+        .sort((a, b) => (pageOrder.get(a.id) ?? 0) - (pageOrder.get(b.id) ?? 0)),
+    }))
+    .filter(item => item.rows.length > 0)
+  /**
+   * 顺序能不能拖。三条各自独立的理由，提示语要说清卡在哪一条上：
+   *   · 筛选 / 搜索 —— 行被裁过，落点与真实队列对不上；
+   *   · 分页        —— 同上（渲染出来的行只是队列的一段）；
+   *   · **模型作用域** —— 行序是后端算的调度队列，这里没有「另一份顺序」可写。
+   *
+   * **排序不再进这条判据**：排序现在会写回队列（见 `reorderBySort`），行序与队列序
+   * 是同一件事 —— 此时再拖，落点算出来的先后本来就是对的。早先那条「行序已不是队列序」
+   * 的理由随写回一起消失了。
+   */
+  const locked = filterActive() || paging.paged || Boolean(scheduleScope)
+  const lockReason = scheduleScope ? t('切回全局账号表')
+    : filterActive() ? t('清除筛选')
+      : t('把每页调回「全部」')
+
+  /**
+   * 左栏收起状态：**只由用户手动切**，不随窗口宽度自动收。
+   *
+   * 早先是「面板放不下『左栏 + 表格最小宽』就自动收成图标条、悬停浮层展开」——
+   * 用户裁定改成常驻（见 accounts-schedule 的 ScopeRail 模块头）：结构一直在页面上，
+   * 不靠悬停去摸；收起要显式点那枚按钮。代价是窄窗口下表格横向滚动（接受）。
+   *
+   * 选择落 localStorage（与折叠分组 / 列宽同一套持久化惯例），跨次启动保持。
+   */
+  const [railCollapsed, setRailCollapsed] = React.useState<boolean>(() => {
+    try { return localStorage.getItem(RAIL_COLLAPSED_KEY) === '1' } catch { return false }
+  })
+  const toggleRailCollapsed = React.useCallback(() => {
+    setRailCollapsed(prev => {
+      const next = !prev
+      try { localStorage.setItem(RAIL_COLLAPSED_KEY, next ? '1' : '0') } catch { /* 存不了只影响下次启动 */ }
+      return next
+    })
+  }, [])
+
+  /**
+   * **拖拽的锁**（拖拽模块按把手粒度读这一个，见下面的 effect）。
+   *
+   * 全部理由按把手分两类：
+   *
+   *   ① 两种把手都锁 —— **模型作用域**（`scheduleScope`）。这一屏的行与行序都是
+   *      `/api/routing/queue` 算出来的：行集合只含「提供该模型的家」、行序是
+   *      `plan_route` 的产物，**它是全局队列的一个投影**。在这儿拖，`onDrop` 会把
+   *      落点换算成**全局**队列再整队重编号 —— 用户以为在只读视图里挪了一行模型位次，
+   *      实际挪走的是别的家的号。且「顺序」列显示的位次（该模型队列 `#N`）与拖拽
+   *      落点算的位次（全局组内顺位）根本不是同一件事，越拖越错。
+   *
+   *      ⚠️ 早先这里**不含** `scheduleScope`，注释声称「模型作用域下这张表由
+   *      `MainTable` 的 `readOnly` 挡着」—— 而 `MainTable` 与 `readOnly` 都不存在，
+   *      那是一句没有对应实现的假设。后果是页面一边显示「顺序已锁定」徽章，一边
+   *      真的能拖、真的写回全局队列。
+   *
+   *   ② 只锁组顺位 —— **筛选 / 搜索 / 分页**。别家的组整组不可见，整组落点只能凭
+   *      想象；而组内顺位**不锁**：落点按渲染出来的行算锚点、再换算回完整 members
+   *      （见 onDrop 与 `renderedRows`），可见与全量的映射是确定的，拖了不会错位。
+   */
+  const groupLocked = filterActive() || paging.paged || Boolean(scheduleScope)
 
   // 代理列的选项（「网络代理」页的池条目）没就绪就补拉（节流 30 秒，失败不缓存）。
   // Clash 出口那一组已经不在这一页了 —— 出口统一由代理页的「同步 Clash Verge」
   // 导入池，这里只读池（见 accounts-panels 的 ProxyCell）
   React.useEffect(() => { ensureProxyPoolOptions() })
 
+  // 池列表是账号页与「网络代理」页共用的一份缓存（见 proxy-pool-cache.ts）：那一页
+  // 禁用节点 / 删除订阅 / 同步 Clash 之后会把新列表写进来，这里订阅到就重画 ——
+  // 代理下拉的选项因此不会停在旧数据上（曾经它是一次性缓存，删掉的节点还留在
+  // 下拉里，选中才被后端拒绝）
+  React.useEffect(() => subscribeProxyPool(() => { bump() }), [])
+
   // 存盘里筛的那一家已经不在摘要里（账号删光、家也删了）就复位成「全部」—— 否则下拉
   // 找不到那一项、回落显示「全部」，列表却仍按它过滤（见 store 的 normalizeProviderFilter）
   React.useEffect(() => { normalizeProviderFilter() }, [store.version])
+
+  // 设置页拨了「积分合计只统计当前筛选出来的账号」之后，本页要立刻按新口径重画。
+  // 本页自己的写入走 store（同文档内 localStorage 不触发自己的 storage 事件），
+  // 这条监听只接**别处**（设置页 / 另一个窗口）的写入。
+  React.useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === null || event.key === GROUP_TOTAL_FILTERED_KEY) syncGroupTotalPreference()
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [])
 
   // 列设置的注册必须在挂载后：按钮要插进本岛渲染出来的 `.batch-actions`，而
   // syncStaticHead 要求登记表已存在（它按 id 查配置）。用布局 effect 是为了让首屏的
@@ -247,7 +615,28 @@ function AccountsPage() {
   // 「折叠全部 / 展开全部」看的是**全部**组（与按钮实际作用的对象同一份口径）：
   // 只看可见组的话，被筛掉的那几家会与标签对不上（见 setAllGroupsCollapsed 的说明）
   const allCollapsed = allGroups.length > 0 && allGroups.every(group => store.collapsed.has(group.provider))
-
+  /**
+   * 窄屏「筛选」抽屉的开合。
+   *
+   * 桌面端工具条是平铺的（提供商 / 搜索 / 状态 / 限额 / 动作一行排开），但手机上
+   * 这四行筛选要占掉 190px —— 812px 的屏里首屏只剩一半给账号。改成：
+   *   · 工具条只留「筛选」按钮 + 常用动作（折叠 / 添加 / 查询余额）
+   *   · 四个筛选组移进右侧抽屉，点按钮滑出、点遮罩收起
+   *
+   * 抽屉与工具条里的筛选控件是**同一份 store**（受控），所以两处改任一都会立刻
+   * 反映到列表；抽屉里的改动不必「应用」就能预览（与桌面端即时生效的口径一致）。
+   *
+   * 桌面端：这个状态不参与渲染 —— 抽屉的 DOM 常驻，但由 CSS 在 ≥768px 下
+   * 把 .acct-filter-drawer 与 .acct-filter-scrim 全部 display:none，工具条里的
+   * 筛选组照常平铺（CSS 只在小屏隐藏 .acct-filter-group）。
+   */
+  const [filterOpen, setFilterOpen] = React.useState(false)
+  /** 当前生效的筛选条数：给「筛选」按钮上的角标用，让用户知道列表被收窄了 */
+  const activeFilterCount =
+    (store.filter.provider !== 'all' ? 1 : 0)
+    + (String(store.filter.q || '').trim() ? 1 : 0)
+    + (store.filter.enabled !== 'all' ? 1 : 0)
+    + (store.filter.limit !== 'all' ? 1 : 0)
   /**
    * 拖拽的落点处理：把「谁挪到了第几位」翻成一条**完整队列**再交给后端。
    *
@@ -261,19 +650,32 @@ function AccountsPage() {
    *  下标（按渲染出来的组数出来的）换算成「插在哪个可见组之前」的锚点；`renderedRows`
    *  给组内行做同一件事 —— 组内落点按**真画出来的行**（本页那一段）换算，见 onDrop。 */
   const renderedRows = new Map<string, string[]>()
-  for (const group of groups) {
+  for (const group of storeGroups) {
     renderedRows.set(group.provider,
       pageRows.filter(account => providerOf(account) === group.provider).map(account => account.id))
   }
-  const dragRef = React.useRef({ displayed: groups, all: allGroups, renderedRows })
-  React.useEffect(() => { dragRef.current = { displayed: groups, all: allGroups, renderedRows } })
+  const dragRef = React.useRef({ displayed: storeGroups, all: allGroups, renderedRows })
+  React.useEffect(() => { dragRef.current = { displayed: storeGroups, all: allGroups, renderedRows } })
+  /**
+   * 作用域的 ref。`onDrop` 是「只绑一次」的回调（依赖数组为空，见它的 useCallback），
+   * 闭包里读到的 `scheduleScope` 会永久停在首次渲染那一刻 —— 所以它必须经 ref 读最新值。
+   */
+  const scopeRef = React.useRef(scheduleScope)
+  React.useEffect(() => { scopeRef.current = scheduleScope })
   /** 拖拽模块的处理器（绑定一次、读最新值，见下面的 effect） */
-  const dragHandlers = React.useRef({
-    locked: false,
-    lockReason: '',
-    onDrop: (_drop: QueueDrop) => {},
+  const dragHandlers = React.useRef<{
+    isLocked: (kind: 'group' | 'row') => boolean
+    lockReasonOf: (kind: 'group' | 'row') => string
+    onDrop: (drop: QueueDrop) => void
+  }>({
+    isLocked: () => false,
+    lockReasonOf: () => '',
+    onDrop: () => {},
   })
   const onDrop = React.useCallback((drop: QueueDrop) => {
+    // 兜底守卫：模型作用域整屏是全局队列的投影，任何落点换算到全局队列都是错的
+    // （拖拽模块已按锁挡在前面，这里防的是「将来有人改了锁的判据」）
+    if (scopeRef.current) return
     const { displayed, all: current } = dragRef.current
     if (drop.kind === 'group') {
       const from = current.findIndex(group => group.provider === drop.provider)
@@ -288,16 +690,22 @@ function AccountsPage() {
       const to = anchor === null || at < 0 ? rest.length : at
       if (to === from) return
       const next = [...rest.slice(0, to), moved, ...rest.slice(to)]
-      const queue = next.flatMap(group => group.members.map(account => account.id))
+      // 拼队列用 `queueMembers`（真实转发顺序）而不是 `members`（当前排序规则下的
+      // 显示顺序）：拿显示顺序拼队列，拖一次整组就会把规则排出来的先后写成真实优先级。
+      // 组内行同样（见下面的分支）。
+      const queue = next.flatMap(group => group.queueMembers.map(account => account.id))
       void reorderQueue(queue, t('{name} 移到第 {rank} 顺位', { name: moved.label, rank: to + 1 }))
       return
     }
     const group = current.find(item => item.provider === drop.provider)
     if (!group) return
-    const from = group.members.findIndex(account => account.id === drop.accountId)
+    // 组内拖动只在「没有排序规则」时才走得通（起拖那一刻已被 isRowLocked 拦下），
+    // 此时 queueMembers 与 members 逐项相同；仍按 queueMembers 取，是为了让
+    // 「拼队列只用真实转发顺序」这条纪律在这个分支上也成立，而不是靠调用时机。
+    const from = group.queueMembers.findIndex(account => account.id === drop.accountId)
     if (from < 0) return
-    const moved = group.members[from]
-    const rest = group.members.filter((_, position) => position !== from)
+    const moved = group.queueMembers[from]
+    const rest = group.queueMembers.filter((_, position) => position !== from)
     // 落点下标来自**渲染出来的**那些行（筛选 / 搜索 / 分页会把组内的行裁掉一部分），
     // 而重排要的是完整 members —— 按锚点换算：插到第 N 个渲染行之前 = 完整 members
     // 里那行所在的下标之前；N 等于渲染行数 = 插到组尾（被裁掉的行留在原处）。
@@ -310,8 +718,10 @@ function AccountsPage() {
     const to = anchor === null || at < 0 ? rest.length : at
     if (to === from) return
     const nextMembers = [...rest.slice(0, to), moved, ...rest.slice(to)]
-    const next = current.map(item => item.provider === drop.provider ? { ...item, members: nextMembers } : item)
-    const queue = next.flatMap(item => item.members.map(account => account.id))
+    const next = current.map(item => item.provider === drop.provider
+      ? { ...item, members: nextMembers, queueMembers: nextMembers }
+      : item)
+    const queue = next.flatMap(item => item.queueMembers.map(account => account.id))
     void reorderQueue(queue, t('{name} 移到 {group} 组内第 {rank} 位', {
       name: String(moved.name || moved.id), group: t(group.label), rank: to + 1,
     }))
@@ -320,20 +730,50 @@ function AccountsPage() {
   // 顺序拖拽（组顺位 / 组内顺位）：委托在滚动容器上，表格整表重画后监听仍然有效。
   // 绑定只做一次（与列宽拖拽同一手法）—— 处理器经 ref 读最新值：锁状态与分组
   // 每次渲染都会变，若把它们做进依赖数组，每变一次就往容器上再挂一份监听。
-  React.useEffect(() => { dragHandlers.current = { locked: groupLocked, lockReason, onDrop } })
+  React.useEffect(() => {
+    dragHandlers.current = {
+      // 组顺位：`groupLocked`（筛选 / 分页 / 模型域）；组内顺位：只有模型域锁
+      // （筛选 / 分页下组内落点可按可见行换算回全量，照拖）
+      isLocked: kind => (kind === 'group' ? groupLocked : Boolean(scheduleScope)),
+      lockReasonOf: kind => (kind === 'group' ? lockReason : t('切回全局账号表')),
+      onDrop,
+    }
+  })
   React.useEffect(() => {
     bindQueueDrag(listRef.current, {
-      isLocked: () => dragHandlers.current.locked,
-      onLockedAttempt: () => toast(
-        t('当前视图不能调整组顺位：{reason} 之后再拖动', { reason: dragHandlers.current.lockReason }),
+      isLocked: kind => dragHandlers.current.isLocked(kind),
+      onLockedAttempt: kind => toast(
+        kind === 'group'
+          ? t('当前视图不能调整组顺位：{reason} 之后再拖动', { reason: dragHandlers.current.lockReasonOf(kind) })
+          : t('当前视图不能调整组内顺序：{reason} 之后再拖动', { reason: dragHandlers.current.lockReasonOf(kind) }),
+        'err',
+      ),
+      isRowLocked: provider => groupSortRules(provider).some(rule => rule.on),
+      onRowLockedAttempt: provider => toast(
+        t('「{name}」开着排序规则：先关掉规则，才能手动调整组内顺序', {
+          name: t(shared().wbProviders?.labelOf?.(provider) || provider),
+        }),
         'err',
       ),
       onDrop: drop => dragHandlers.current.onDrop(drop),
     })
   }, [])
 
-  /** 单元格：按列 key 分发（勾选列的内容依赖行上下文，其余列是「账号 + 上下文」的纯函数） */
-  function cell(key: string, account: AccountRecord, ctx: ReturnType<typeof rowContext>) {
+  /**
+   * 单元格：按列 key 分发（勾选列的内容依赖行上下文，其余列是「账号 + 上下文」的纯函数）。
+   *
+   * 两处在模型作用域下换口径（列**不换**、表头一个字不动，换的是这一格说的是什么）：
+   *   · 「顺序」= 这个模型队列里的位次（被跳过的没有位次，显示 —）；
+   *   · 「状态」= 调度状态（可用 / 本轮已试 / 限流冷却 / 并发已满 / 已禁用…），
+   *     原因句挂在这一枚徽章的悬停提示上 —— 不新增一列的理由见最终报告。
+   */
+  function cell(
+    key: string,
+    account: AccountRecord,
+    ctx: ReturnType<typeof rowContext>,
+    entry: { entry: QueueEntry; seat: number | null; skipped: boolean } | undefined,
+    flat: boolean,
+  ) {
     switch (key) {
       case 'pick':
         return (
@@ -342,19 +782,35 @@ function AccountsPage() {
             onCheckedChange={next => togglePick(account.id, next)} />
         )
       case 'order':
-        return <OrderCell account={account} rank={ctx.rank} />
+        if (scheduleScope) {
+          return entry?.seat
+            ? <OrderCell account={account} rank={entry.seat}
+              hint={t('这个模型队列里第 {rank} 位', { rank: entry.seat })} />
+            : <span className='muted' title={t('被跳过：这一轮不会用到它，所以没有位次')}>—</span>
+        }
+        // 上游的 `sortActive`：这一组开着排序规则时把手锁定（拖了也会被排回去）
+        return <OrderCell account={account} rank={ctx.rank} sortActive={sortActiveIn(account)} />
       case 'account':
-        return <AccountCell account={account} namesHidden={store.namesHidden} />
+        return <AccountCell account={account} namesHidden={store.namesHidden}
+          providerLabel={flat ? providerLabels.get(providerOf(account)) || '' : undefined} />
       case 'proxy':
         return <ProxyCell account={account} />
       case 'connections':
         return <ConnectionsCell account={account} />
       case 'status':
-        return <StatusCell account={account} />
+        return scheduleScope && entry
+          ? <StateBadge state={entry.entry.state} reason={entry.entry.reason} />
+          : <StatusCell account={account} />
       case 'limits':
-        return <LimitsCell account={account} open={ctx.limitsOpen} />
+        return <LimitsCell account={account} onClear={model => void clearLimits(account.id, model)} />
       case 'expiry':
         return <ExpiryCell account={account} />
+      // 「最近到期」两列读的是**积分包**（credits[]），不是账号凭据 —— 与上面
+      // 有效期列的两套时刻各管一件事，取值口径都在 accounts-credit-detail
+      case 'creditExpiry':
+        return <CreditExpiryCell account={account} />
+      case 'creditLeft':
+        return <CreditLeftCell account={account} />
       case 'usage':
         return <UsageCell account={account} />
       case 'actions':
@@ -364,10 +820,66 @@ function AccountsPage() {
     }
   }
 
+  /** 一行 + 它的行内明细面板（行名与备注名一律以账号表这份数据为准 —— 队列条目只带
+   *  id 与后端给的名字，账号页显示的名字另有兜底链，见 accounts-domain 的 displayNameOf） */
+  function rowNodes(rows: AccountRecord[], flat: boolean) {
+    return rows.map(account => {
+      const entry = entryOf.get(account.id)
+      const rank = rankMap.get(account.id) || 1
+      const ctx = rowContext(account, seatMap, rank)
+      return (
+        <React.Fragment key={account.id}>
+          <tr className={cn('acct-row', !isEnabled(account) && 'disabled', ctx.picked && 'selected',
+            entry?.skipped && 'skipped')}
+            data-id={account.id} data-provider={providerOf(account)}
+            data-sched={entry ? (entry.entry.state || '') : undefined}
+            data-desktop={isDesktopAccount(account) ? '1' : undefined}>
+            {columns.map(column => (
+              <td key={column.key} className={`cell-${column.key} ta-${column.align}`}>
+                {cell(column.key, account, ctx, entry, flat)}
+              </td>
+            ))}
+          </tr>
+        </React.Fragment>
+      )
+    })
+  }
+
   return (
     <>
-      <section className='panel account-table'>
+      <section className={cn('panel account-table', railCollapsed && 'rail-collapsed')} ref={panelRef}>
+        {/* 作用域树常驻在表格**左侧**（原来是工具条里的一个下拉）—— 它切的是「这张表
+            在看什么」，比工具条里那些筛选档位高一层；模型上百条（实测 77 个 / 9 家）时，
+            常驻的「厂商 → 模型」树比下拉少两次操作，且这层结构一直留在页面上。
+            **默认常驻展开**；收起只能点左栏左上角那枚按钮（不随窗口自动收，理由见
+            accounts-schedule 的 ScopeRail 模块头与 css/page-accounts-rail.css）*/}
+        <ScopeRail collapsed={railCollapsed} onToggleCollapse={toggleRailCollapsed} />
+
+        {/* 工具条 / 批量栏 / 列表 / 页脚整组挪进主列（多这一层 div 是为了让左栏与它们
+            并列成两栏）。这一组内部的排布与顺序一个字未改 —— **作用域切换不改工具条**：
+            第一版曾在模型作用域下把下面这四个筛选组整组收走，代价是「同一张表，切了个
+            作用域工具条就变了样」。四个筛选组筛的是**账号**，与「在看哪个作用域」无关，
+            模型作用域下的行集合本就是账号的子集，筛它照样成立 */}
+        <div className='acct-main'>
         <div className='toolbar'>
+          {/* 窄屏「筛选」入口：只在 ≤767px 显示（桌面由 CSS 隐藏）。
+              按钮上的角标是当前生效的筛选条数 —— 筛选条件收进抽屉后，
+              列表被收窄这件事必须仍然可见，否则用户会以为账号丢了。 */}
+          {/* 用原生 button 而不是组件库 Button：Button 自带 `inline-flex`
+              工具类，而 Tailwind v4 的 utilities 是 @layer —— 层叠层优先级
+              高于普通声明，CSS 里再怎么写 display:none 都压不住它，桌面端
+              会一直显示这个「筛选」按钮。原生 button 没有那层工具类。 */}
+          <button type='button' className='acct-filter-open'
+            onClick={() => setFilterOpen(true)}
+            aria-label={t('打开筛选')}>
+            {t('筛选')}
+            {activeFilterCount > 0 ? <span className='acct-filter-badge'>{activeFilterCount}</span> : null}
+          </button>
+
+          {/* 四个筛选组：桌面平铺在工具条里；窄屏由 CSS 移进右侧抽屉
+              （同一份 DOM，靠 .acct-filter-group 的 display 切换，不做条件渲染
+              —— 条件渲染会让桌面端的受控控件卸载重建、丢掉输入焦点） */}
+          <div className={cn('acct-filter-group', filterOpen && 'open')}>
           {/* 提供商：分组模式把「哪一家」画在了页面上（一家一段），但「只看某一家」仍是
               常用动作 —— 分组带收得掉一家、收不掉其余那几家。用下拉而不是分段按钮：家数
               是**动态**的（后端注册表加一家就多一项），分段按钮会随家数增长把工具条挤成
@@ -376,10 +888,10 @@ function AccountsPage() {
           <div className='group' data-provider-group='1'>
             <span className='label'>{t('提供商')}</span>
             <Select value={store.filter.provider} onValueChange={value => setProviderFilter(String(value))}>
-              {/* 宽度：桌面锁 200px（同排搜索框对齐）；手机上工具条改纵向排列，
-                  触发器要撑满整行，否则右边缘比同排的搜索框短 14px（见
-                  ui/css/mobile.css 的 .toolbar 段）。用 min-[768px]: 变体分隔，
-                  比在 mobile.css 里用 !important 跟 Tailwind 的任意值类斗优先级可靠。 */}
+              {/* 宽度：桌面锁 200px（同排搜索框对齐）；窄屏工具条改纵向排列，
+                  触发器要撑满整行，否则右边缘比同排的搜索框短 14px。
+                  用 min-[768px]: 变体分隔，比写 !important 跟 Tailwind 的
+                  任意值类斗优先级可靠。 */}
               <SelectTrigger className='max-w-none min-w-0 w-full min-[768px]:max-w-[200px] min-[768px]:min-w-[130px] min-[768px]:w-auto' aria-label={t('按提供商筛选账号')}>
                 <SelectValue>
                   {providerOptions.find(item => item.value === store.filter.provider)?.label || t('全部')}
@@ -429,14 +941,19 @@ function AccountsPage() {
             ]} value={store.filter.limit} onValueChange={value => setSegmentFilter('limit', value)}
               aria-label={t('限额状态')} />
           </div>
+          </div>{/* /.acct-filter-group */}
 
           <div className='actions'>
             {/* 折叠是「只看某几家」的入口：一家几十条时，收起不关心的那些比筛选更顺手。
                 「全部」就是全部 —— 作用对象是全部组，不按当前筛选收窄（见 store 里
                 setAllGroupsCollapsed 的说明） */}
+            {/* 模型作用域下它置灰：队列那几段的折叠在那边没有意义（段序就是队列序，
+                收起来只会把「这次会用谁」盖掉），而按钮作用的对象是账号表的分组 */}
             <Button id='btn-fold-groups' variant='outline'
-              disabled={!allGroups.length}
-              title={allCollapsed ? t('展开全部分组') : t('折叠全部分组（只留组头）')}
+              disabled={!allGroups.length || Boolean(scheduleScope)}
+              title={scheduleScope
+                ? t('模型作用域下分组带随队列走，不折叠')
+                : allCollapsed ? t('展开全部分组') : t('折叠全部分组（只留组头）')}
               onClick={() => setAllGroupsCollapsed(allGroups.map(group => group.provider), !allCollapsed)}>
               {allCollapsed ? t('展开全部') : t('折叠全部')}
             </Button>
@@ -455,6 +972,32 @@ function AccountsPage() {
           </div>
         </div>
 
+        {/* 批量栏是「对账号表做什么」的控制条。作用域切换**不改它**（理由见上面工具条
+            那一段）：模型作用域下的行是账号的子集，全选 / 批量操作 / 清除筛选照样成立。
+            作用域与排序各自多的那几枚状态提示挂在同一行里（见下），与既有的
+            「顺序已锁定 / 清除筛选 / 被隐藏的勾选」是同一档东西 */}
+        {/* ─── 窄屏筛选抽屉 ───
+            四个筛选组由 CSS 从工具条移进来（.acct-filter-group 在 ≤767px 时
+            position:fixed 到右侧抽屉位置），这里只放抽屉标题栏与遮罩。
+            桌面端整块 display:none，不占位。
+
+            为什么用 CSS 搬而不是条件渲染两份：筛选控件是受控的，两份 DOM 会
+            出现重复的 id / aria 引用，且桌面端切换时会卸载重建、丢掉输入焦点。 */}
+        <div className={cn('acct-filter-scrim', filterOpen && 'open')} onClick={() => setFilterOpen(false)} />
+        <div className={cn('acct-filter-head', filterOpen && 'open')} aria-hidden={!filterOpen}>
+          <span className='acct-filter-title'>{t('筛选')}</span>
+          <Button variant='ghost' size='sm' className='acct-filter-clear'
+            disabled={activeFilterCount === 0}
+            onClick={() => {
+              setProviderFilter('all')
+              setSearchFilter('')
+              setSegmentFilter('enabled', 'all')
+              setSegmentFilter('limit', 'all')
+            }}>{t('清空')}</Button>
+          <Button variant='ghost' size='sm' className='acct-filter-close'
+            onClick={() => setFilterOpen(false)} aria-label={t('关闭')}>✕</Button>
+        </div>
+
         <div className={cn('batch-bar', active && 'active')} id='batch-bar'>
           <label className='batch-select-all'>
             <Checkbox id='batch-select-all' checked={allPicked} indeterminate={!allPicked && somePicked}
@@ -469,14 +1012,70 @@ function AccountsPage() {
           </span>
           {/* 分组已经逐段给出「哪家有几个」，这里只留一句「当前显示了几家的几行」 */}
           <span className='batch-summary' id='accounts-group-summary'>
-            {groups.length
-              ? t('{groups} 家 · 显示 {rows} 行', { groups: groups.length, rows: visibleIds.length })
+            {sections.length
+              ? t('{groups} 家 · 显示 {rows} 行', { groups: sections.length, rows: visibleIds.length })
               : ''}
           </span>
-          {/* 锁定条只管**组顺位**（组内行按可见行换算落点，筛选下照常拖得动） */}
-          {groupLocked ? (
-            <span className='batch-hidden' title={t('筛选 / 搜索 / 分页生效时组顺位不可拖动（别家的组整组不可见，落点没法定位）')}>
-              {t('组顺位已锁定')}
+          {/* 排序的当前状态。**组内**档会写回调度队列（表里画的先后就是转发要走的
+              先后，见 `reorderBySort`）；**整表**档只排视图、不写回 —— 它会打散厂商
+              分组，写回去违反后端「同一家连续」这条硬不变量（下次新增账号就被整理回去，
+              详见 `reorderBySort` 开头那段）。所以两档的说明必须分开写，不能一句话糊过去。
+              右边那两档「组内 / 整表」是**粒度**：一组只在这一家内部重排（分组与组序
+              不动），一组把分组打散、全表一起来。两档都摆出来、当前的置亮 —— 单个开关
+              按钮只能靠猜「现在点下去会去哪边」 */}
+          {sort ? (
+            <span className='batch-count' id='sort-state' data-sort-key={sort.key}
+              data-sort-dir={sort.dir} data-sort-scope={sort.scope}
+              data-sort-saved={sort.scope === 'flat' ? '0' : '1'}
+              title={sort.scope === 'flat'
+                ? t('整表排序：厂商分组已散开，行里带厂商标记。此顺序仅用于查看，不写回调度队列 —— 写回会打破「同一家连续」的队列规则')
+                : t('各厂商组内排序：分组与组序不变；组内先后已写回调度队列')}>
+              {t('已按「{label}」{dir}排序', { label: sortLabel(sort.key), dir: sortDirLabel(sort.dir) })}
+              <span className='sort-scope' id='sort-scope' role='group' aria-label={t('排序粒度')}>
+                <button type='button' className={cn('link-btn', sort.scope === 'group' && 'is-on')}
+                  id='sort-scope-group' data-on={sort.scope === 'group' ? '1' : undefined}
+                  title={t('组内排序：只在每一家内部重排，分组与组序不变（组内先后写回队列）')}
+                  onClick={() => onSortScope('group')}>{t('组内')}</button>
+                <button type='button' className={cn('link-btn', sort.scope === 'flat' && 'is-on')}
+                  id='sort-scope-flat' data-on={sort.scope === 'flat' ? '1' : undefined}
+                  title={t('整表排序：打散厂商分组，全表一起来（行里带厂商标记；仅用于查看，不写回队列）')}
+                  onClick={() => onSortScope('flat')}>{t('整表')}</button>
+              </span>
+              <button type='button' className='link-btn' id='sort-clear'
+                title={t('取消排序，回到默认次序（不影响已写回的队列顺序）')}
+                onClick={() => clearSort()}>{t('取消排序')}</button>
+            </span>
+          ) : null}
+          {/* 模型作用域的只读状态：这一份队列表到底是算给谁的、里面几个能用几个被跳过，
+              以及策略 / 粘性这两条正在生效的调度参数（它们只在这里露脸，别处要看只能去设置页） */}
+          {scheduleScope ? (
+            <>
+              <span className='batch-summary' id='sched-queue-summary'>
+                {t('调度队列：{n} 个可用 · 跳过 {m} 个', {
+                  n: sched.queue?.ordered?.length || 0, m: sched.queue?.blocked?.length || 0,
+                })}
+              </span>
+              <span className='batch-summary' id='sched-policy-summary'>
+                {t('策略 {strategy} · 会话粘性 {sticky}', {
+                  strategy: strategyLabel(sched.queue?.strategy), sticky: stickyLabel(sched.queue?.sticky),
+                })}
+              </span>
+              <Button id='btn-sched-reload' variant='ghost' size='xs' disabled={sched.busy}
+                title={t('重新算一次这个模型的调度队列（限流冷却 / 并发释放后队列会变）')}
+                onClick={sched.reload}>{sched.busy ? t('读取中…') : t('刷新队列')}</Button>
+            </>
+          ) : null}
+          {/* 锁定条：**组顺位**在筛选 / 搜索 / 分页下不可拖（别家的组整组不可见，
+              落点没法定位）；组内顺位那时不锁 —— 落点按可见行换算（见 onDrop）。
+              模型作用域那一屏**两种把手都锁**（那里没有「另一份顺序」可写），
+              所以这一条用的是含 `scheduleScope` 的 `locked`，而不是只含筛选/分页的
+              `groupLocked`（后者喂给拖拽模块，按把手粒度判）。 */}
+          {locked ? (
+            <span className='batch-hidden'
+              title={scheduleScope
+                ? t('{reason}之后顺序才可拖动（模型作用域是全局队列的投影，这里没有可写的顺序）', { reason: lockReason })
+                : t('{reason}之后组顺位才可拖动（别家的组整组不可见，落点没法定位）', { reason: lockReason })}>
+              {scheduleScope ? t('顺序已锁定') : t('组顺位已锁定')}
             </span>
           ) : null}
           {filterActive() ? (
@@ -500,13 +1099,26 @@ function AccountsPage() {
         </div>
 
         <div className='acct-scroll' id='account-list' ref={listRef}>
+          {/* ── 列表区：**两个作用域共用这一张表** ─────────────────────
+              模型作用域只是换了一批行（该模型的队列）与一个行序（队列序），表结构、
+              表头、行渲染一律共用 —— 切作用域时**列标题与工具条都不该变样**。
+              所以在下面这几条分支里，作用域只影响「空态说什么」，不影响画什么。 */}
           {!loaded ? (
             <div className='empty'><span className='spinner' />{t('正在加载…')}</div>
+          ) : scheduleScope && sched.busy && !sched.queue ? (
+            <div className='empty'><span className='spinner' />{t('正在读取调度队列…')}</div>
+          ) : scheduleScope && sched.error ? (
+            <div className='empty'>
+              {t('读取调度队列失败：{error}', { error: sched.error })}
+              <Button variant='ghost' size='xs' onClick={sched.reload}>{t('重试')}</Button>
+            </div>
           ) : !all.length ? (
             <div className='empty'>{t('暂无账号，请点击右上角「添加账号」')}</div>
           ) : !shown.length ? (
             <div className='empty'>
-              {t('当前筛选条件下没有账号')}
+              {filterActive()
+                ? t('当前筛选条件下没有账号')
+                : scheduleScope ? t('这个模型的队列里没有账号') : t('当前筛选条件下没有账号')}
               {filterActive() ? (
                 <button type='button' className='link-btn' onClick={() => clearFilter()}>{t('清除筛选')}</button>
               ) : null}
@@ -518,35 +1130,28 @@ function AccountsPage() {
                   由列宽算出（不再由 CSS 写死，见 accounts-columns 的 tableMinWidth） */}
               <ColGroup />
               <TableHead namesHidden={store.namesHidden} allPicked={allPicked} somePicked={somePicked}
-                disabled={!visibleIds.length} onToggleAll={next => setAllPicked(visibleIds, next)} />
-              {groups.map(group => {
-                const collapsed = store.collapsed.has(group.provider)
-                const rows = pageRows.filter(account => providerOf(account) === group.provider)
+                disabled={!visibleIds.length} onToggleAll={next => setAllPicked(visibleIds, next)}
+                sort={sort} onSort={onSortColumn} />
+              {flatSort ? (
+                // 整表排序：分段被散开，一条通到底（分组带没了，家名改由行内的厂商标记顶上）
+                <tbody className='acct-group'>{rowNodes(pageRows, true)}</tbody>
+              ) : renderSections.map(({ section, rows }, index) => {
+                // 折叠是**账号表**那层分组的事：模型作用域下分组带随队列走（段序就是队列序），
+                // 拿别处的折叠状态把它盖掉，只会让「这次会用谁」凭空消失
+                const collapsed = scheduleScope ? false : store.collapsed.has(section.provider)
                 return (
-                  <tbody key={group.provider} className='acct-group' data-provider={group.provider}>
-                    <GroupBandRow group={group} collapsed={collapsed} colSpan={columns.length} />
-                    {collapsed ? null : rows.map(account => {
-                      // 组内序号取**全量成员**里的位次（不是当前页 / 当前可见里的位次）：
-                      // 筛选时号会跳，但号本身说的是「在这一家里的第几位」这个事实
-                      const rank = group.members.findIndex(member => member.id === account.id) + 1
-                      const ctx = rowContext(account, seatMap, rank > 0 ? rank : 1)
-                      return (
-                        <React.Fragment key={account.id}>
-                          <tr className={cn('acct-row', !isEnabled(account) && 'disabled', ctx.picked && 'selected')}
-                            data-id={account.id} data-provider={group.provider}
-                            data-desktop={isDesktopAccount(account) ? '1' : undefined}>
-                            {columns.map(column => (
-                              <td key={column.key} className={`cell-${column.key} ta-${column.align}`}>
-                                {cell(column.key, account, ctx)}
-                              </td>
-                            ))}
-                          </tr>
-                          <PanelsRow account={account} colSpan={columns.length}
-                            limitsOpen={panelOpen(account.id, 'limits')}
-                            onClear={(id, model) => void clearLimits(id, model)} />
-                        </React.Fragment>
-                      )
-                    })}
+                  <tbody key={`${section.provider}-${index}`} className='acct-group' data-provider={section.provider}>
+                    <GroupBandRow group={section.group} collapsed={collapsed} colSpan={columns.length}
+                      hideRank={Boolean(scheduleScope)}
+                      // 倍率是 (提供商, 模型) 级属性，摆在分组带上说「这一家在这个模型上的单价」；
+                      // 做成一列的话，同一个模型下全表每行都是同一个数
+                      extra={section.rate === undefined ? undefined : (
+                        <span className='batch-summary' data-sched-rate='1'
+                          title={t('这一家在这个模型上的倍率（与模型管理页同一份数据）')}>
+                          {t('倍率 {rate}', { rate: section.rate })}
+                        </span>
+                      )} />
+                    {collapsed ? null : rowNodes(rows, false)}
                   </tbody>
                 )
               })}
@@ -556,7 +1161,8 @@ function AccountsPage() {
 
         {/* 页脚是纯控制条（读数 / 每页条数 / 跳页 / 翻页器，通用件 table-shell.tsx）。
             左侧原先那两句说明（优先级是全局队列 / 拖表头调列宽 / 设为首选的含义）
-            按用户要求移除 —— 五张表的页脚现在都不带说明文字了。 */}
+            按用户要求移除 —— 五张表的页脚现在都不带说明文字了。
+            模型作用域下它照旧在：那边的行也是一张表，分页照样成立 */}
         <TableFooter
           total={shown.length}
           range={paging.paged ? { start: paging.rangeStart, end: paging.rangeEnd } : null}
@@ -566,6 +1172,7 @@ function AccountsPage() {
           onSizeChange={paging.setSize}
           onPageChange={paging.goto}
         />
+        </div>
       </section>
       <AccountsDialogs />
     </>
@@ -594,6 +1201,8 @@ function ColGroup() {
       {col('status')}
       {col('limits')}
       {col('expiry')}
+      {col('creditExpiry')}
+      {col('creditLeft')}
       {col('usage')}
       {col('actions')}
     </colgroup>

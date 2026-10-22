@@ -28,6 +28,7 @@ mod gateway;
 mod legacy_install;
 mod login;
 mod login_profile;
+mod panel_session;
 mod settings;
 mod state;
 mod tray;
@@ -272,6 +273,9 @@ pub fn run() {
             commands::change_port,
             commands::panel_admin_status,
             commands::panel_register,
+            commands::panel_session_status,
+            commands::panel_session_store,
+            commands::panel_session_clear,
             commands::change_lan_access,
             // 界面直连网关时的凭证头（AI 助手页不经桥发请求，见 commands.rs）
             commands::direct_credentials,
@@ -290,7 +294,11 @@ pub fn run() {
             commands::import_accounts,
             commands::export_database,
             commands::import_database,
+            commands::cloud_sync_upload,
+            commands::cloud_sync_download,
+            commands::cloud_sync_import_key,
             commands::check_update,
+            commands::system_info,
             commands::download_update,
             commands::update_progress,
             commands::cancel_update,

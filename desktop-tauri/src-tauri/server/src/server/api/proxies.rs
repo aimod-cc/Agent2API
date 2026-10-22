@@ -257,6 +257,10 @@ fn pool_payload(state: &ServerState) -> Value {
     json!({
         "items": items,
         "clash": crate::server::core::proxies::clash_proxy_options(),
+        // 内核装没装：订阅节点「没有端口」的**首要**成因就是它（没内核就没有
+        // 监听器）。下游两处都要用 —— 网络代理页的地址列与账号页的代理下拉，
+        // 后者拿不到订阅接口的快照，所以由池列表一起带出去。
+        "kernelInstalled": sub_kernel::installed(),
     })
 }
 

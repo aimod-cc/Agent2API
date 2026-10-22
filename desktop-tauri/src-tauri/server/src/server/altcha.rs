@@ -99,15 +99,16 @@ fn secret() -> String {
     generated
 }
 
-/// 机器人校验是否启用（设置页开关，默认开）。
-pub fn enabled() -> bool {
-    config::current().captcha_enabled()
+/// 机器人校验是否启用（设置页开关，默认开）。`local_panel` 决定读哪一端
+/// 的开关（桌面壳恒 true、headless 恒 false，见 `config::captcha_enabled`）。
+pub fn enabled(local_panel: bool) -> bool {
+    config::current().captcha_enabled(local_panel)
 }
 
 /// 签发一道 challenge（登录页的 `GET /api/panel/captcha` 用）。
 /// 开关关闭时返回 `None`（端点回 400，前端跳过校验）。
-pub fn challenge() -> Option<Value> {
-    if !enabled() {
+pub fn challenge(local_panel: bool) -> Option<Value> {
+    if !enabled(local_panel) {
         return None;
     }
     let salt = access::random_hex(12);

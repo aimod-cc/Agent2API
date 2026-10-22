@@ -34,6 +34,8 @@
 //! （切片 7 之后的路由扩展），照同样的分工：新文件 + `http::router` 里登记，
 //! 并保持与 Node 版一致的分组（需鉴权的一律挂 `protected`）。
 
+// 「Agent」页：本机 AI 客户端配置接管（列表 / 保存 / 写入 / 预览 / 还原 / 导入）
+pub mod agents;
 pub mod accounts;
 // `/api/accounts/usage` 的查询与结果组装（从 accounts.rs 拆出：余额能力从
 // 「只服务 workbuddy」扩到四家混查时新增，见该文件模块头）
@@ -56,6 +58,9 @@ pub mod chat;
 // 签到中心的聚合快照（GET /api/checkin-center）：分组口径在后端唯一化，
 // 资格类状态由前端按需惰性查询，见该文件模块头
 pub mod checkin_center;
+// 云同步（设置页「数据 → 云同步」）：WebDAV / S3 兼容存储上的业务数据快照。
+// 范围与密钥封装见 `core::cloud_sync` 的模块头
+pub mod cloud_sync;
 // 签到记录明细台账（GET/DELETE /api/checkin-records）：每账号一行的成败与
 // 收益明细，记账点在 `core::billing::checkin::run_checkin`，见该文件模块头
 pub mod checkin_records;
@@ -68,6 +73,12 @@ pub mod config_api;
 // WorkBuddy 成长任务（查询 / 执行 / 开学季 / 猫猫旅行）：从参考项目
 // workbuddy2api 的 task_runner.py 移植，见该文件模块头
 pub mod growth;
+// 猫猫旅行的**定时排程**管理接口（开关 / 时刻 / 立即巡检）：
+// 调度体在 `core::growth_scheduler`，这里只是管理面
+pub mod growth_schedule;
+// 成长任务的**每日定时排程**管理接口（与旅行同一形状，独立排程）：
+// 调度体在 `core::growth_task_scheduler`，这里只是管理面
+pub mod growth_task_schedule;
 // 网关面（`/v1/*`）跨域访问开关：`GET/PUT /api/cors`（与 `/api/sanitize`
 // 同形的单开关端点，见该文件模块头）
 pub mod cors;
@@ -96,6 +107,10 @@ pub mod model_meta;
 // 只把候选收窄到「这一家 × 这一个账号」并把流量标成测试，见该文件模块头
 pub mod model_test;
 pub mod models;
+// 通知与告警：配置读写 + 测试发送。**事件源不在这一层** —— 定时任务失败与
+// 凭证失效分别在 core::task_state 与 core::credential_maintenance 里触发，
+// 见 core::notify 的模块头（通知是旁路，不该被 HTTP 层认识）。
+pub mod notify;
 // Loomy 新手任务的查询 / 一键领取（签到后在界面弹窗），见该文件模块头
 pub mod onboarding;
 pub mod panel;
@@ -125,3 +140,6 @@ pub mod zcode_captcha;
 // 令牌池的**补货节奏**设置（目标 / 轮询间隔 / 单轮上限），见该文件模块头
 pub mod zcode_captcha_pool;
 pub mod zcode_claim;
+// 设置页「版本信息」：环境 / 版本 / 路径 / 开关状态的一次性读数
+// （`GET /api/system-info`，见该文件模块头）
+pub mod system_info;

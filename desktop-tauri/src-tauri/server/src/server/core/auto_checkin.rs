@@ -121,11 +121,24 @@ pub fn default_time() -> String {
 ///     受闸（`checkin_for` 传 manual=false），用户在面板上点不受闸；
 ///     ② 「暂无可领取活动 / 等待重试」是**中性未领取**（不落当日台账，定时链
 ///     稍后重试），不是失败 —— `claim_pending` 认这两个文案。
+///   - **千问办公**：`daily-credit-notice/claim`（`qwenwork::checkin`）。
+///     签到额度落在钱包的 `daily_credits` 桶里，领完余额面板立刻能看到。
+///   - **QClaw**：**没有可领取的接口** —— 每日积分由服务端随登录/活跃自动
+///     发放（客户端只在零点重拉读数，全量逆向无任何 claim 端点，见
+///     `providers::qclaw::points` 模块头）。列进来是应用户要求「账号要显示
+///     在签到中心」：那一行是中性结论（顺手探活云端登录态），不落
+///     `checkinAt`、不计成功、不重试。余额查询在账号页「余额」列
+///     （`supports_usage = true`），与这一行各管一件事。
+///   - **ModelScope 国内版 / 国际版**：**没有独立签到接口** —— 调一次登录信息
+///     接口（`GET /api/v1/users/login/info`）**本身就触发当日魔粒签到**（幂等），
+///     见 `providers::modelscope::checkin`。两个站点各打各的网页站，令牌不通用
+///     （打错得 401）。链路依据是 CPA 的 `modelscope-ratelimit` 插件源码，
+///     2026-10 实测复核。
 ///
 /// 这是「有签到或每日活跃任务」的清单，不是「有积分概念」的清单：CatPaw 有积分
 /// 查询但没有签到，因此不在此列 —— 它的账号在批量签到里被算作 `skipped`。
 /// 加一家之前先确认它的签到链路真的存在（一个点了必然报错的复选框比没有更糟）。
-pub const CHECKIN_PROVIDERS: [&str; 12] = [
+pub const CHECKIN_PROVIDERS: [&str; 21] = [
     "workbuddy",
     "workbuddy-intl",
     "raccoon",
@@ -140,6 +153,48 @@ pub const CHECKIN_PROVIDERS: [&str; 12] = [
     // 追加在**末尾**：这个数组的顺序就是界面复选框与签到中心分组行的顺序，
     // 插在中间会让所有存量用户的清单顺序变一下（没有功能影响，但没必要动）。
     "codearts",
+    // 智谱清言：「每日登录积分」即本家的签到（`chatglm::checkin`）。
+    // **访客账号不在本链范围内** —— 访客没有积分体系（相关接口对访客一律 401），
+    // 由 `billing::checkin::supports_checkin` 的 `isGuest` 分支排除，改在签到
+    // 中心的「不参与每日签到」里如实说明原因（见那里的说明）。
+    "chatglm",
+    // 千问办公：`daily-credit-notice/claim`（`qwenwork::checkin`）。
+    // 签到额度落在钱包的 `daily_credits` 桶里，领完余额面板立刻能看到。
+    "qwenwork",
+    // ⚠️ QClaw **不在这里**：上游没有任何「领取/签到」端点可调（客户端 bundle
+    //   无签到，jprx `4110` 只读余额），且本家**已公告停运**（2026-12-24 停服）
+    //   —— 本站不再发放积分。放进这个数组会让签到中心长出一颗点了必然报错的
+    //   「签到」按钮、定时签到也会每天白打一次注定失败的请求。它在签到中心的
+    //   位置是 `extras.autoGrant` 只读分组（见 `api::checkin_center` 模块头）。
+    // ModelScope（魔搭）两个站点：签到就是调一次登录信息接口
+    // （`GET {网页站}/api/v1/users/login/info`，调用即触发当日魔粒，幂等），
+    // 链路 2026-10-16 实测存在，见 `providers::modelscope::checkin` 的模块头。
+    // 两个站点各打各的网页站，令牌不通用（打错得 401）。
+    "modelscope",
+    "modelscope-intl",
+    // AtomCode（AtomGit / GitCode）：本家的「签到」是**领取免费 CodingPlan**
+    // （一次性授权，见 `atomcode::checkin` 的模块头）。挂在这里是因为
+    // 「新账号必须领一次」「套餐到期要能续领」两件事都需要一个逐账号、
+    // 每天跑一次的调度与台账 —— 签到链本来就有。
+    "atomcode",
+    // LobsterAI（网易有道「有道龙虾」）：每日活动三步（查活动位 → 取上下文 →
+    // check_in），实测 +100 积分/号/天。幂等靠客户端（idempotencyKey + 上游
+    // 的 `claimedToday` 预检），见 `lobsterai::checkin` 的模块头。
+    "lobsterai",
+    // MiniMax Code（两个地区）：七天一轮共 4000 积分（400/400/400/1000/400/400/1000），
+    // 每天一份、30 天后到期。链路 **2026-10-21 实测存在**，见
+    // `providers::minimax::checkin` 的模块头（客户端 archon 页的 signin store
+    // 直接调 `signin/status` 与 `signin/claim`，台账里 `credit_type=2` 的批次
+    // 就是它发的）。幂等：当天重复领回 `claim_result: 2`，不算失败。
+    // 国际版（`agent.minimaxi.com`）是同一套签到接口、另一个网关 ——
+    // 两份都要在清单里，否则国际版账号在签到中心长不出勾选框。
+    "minimax",
+    "minimax-intl",
+    // Coze（扣子）：两条独立的领奖链 —— 活动奖励（`incentive/activity/reward`，
+    // 只能 Cookie 打，type 1/2 分别对应 30 天 / 7 天有效期）与下载客户端奖励
+    // （`ug/v1/activity/client_download_reward`，要 PAT）。两条都幂等，
+    // 见 `providers::coze::checkin` 的模块头。
+    "coze",
 ];
 
 /// 缺省的签到提供商集合（全选）
@@ -157,12 +212,43 @@ pub fn default_providers() -> Vec<String> {
 /// 会让这一家的勾选框再也取消不掉（读完就补回来，界面上表现为「取消勾选没反应」）。
 /// 所以补齐只做一次，靠配置里的版本号记账；版本一旦写上去，用户之后再取消勾选
 /// 就真的生效了。执行点见 `checkin_schedules::extend_providers_once`。
-pub const PROVIDERS_VERSION: i64 = 2;
+pub const PROVIDERS_VERSION: i64 = 8;
 
 /// 「哪一版加入的家」——条目清单的版本低于它 = 这家还没被提供过 ⇒ 补进去。
 /// 版本 1 = 多条目改造上线时的形态（9 家；`qoder-intl` 由 `normalize_providers`
 /// 的存量兼容规则跟着 `qoder` 带上，不在这里重复登记）。
-const PROVIDERS_ADDED_IN: [(&str, i64); 2] = [("officeace", 2), ("codearts", 2)];
+/// 版本 3 = 智谱清言。
+/// 版本 4 = 千问办公（本 fork）。
+/// 版本 5 = ModelScope 两个站点 / AtomCode / LobsterAI 三家（上游）与本次同步
+///   一并带入。**它们统一记 5 而不是各自的原值**：本地线与上游线各自用过「4」
+///   这个号（本地是千问办公），若沿用原值，配置已记到 4 的存量用户
+///   `providers_added_after(4)` 就只剩更晚的家，这几家永远补不进签到清单
+///   （表现为「升级了但新家不在勾选清单里」）。记 5 后任何 < 5 的配置都能补齐，
+///   且对已在清单里的家自动去重，不会重复追加。
+/// 版本 6 = MiniMax Code（本 fork，2026-10）。
+/// 版本 7 = MiniMax Code 国际版（`minimax-intl`，2026-10-21 拆两地区时补）。
+///   **必须单独占一个版本号**：版本 6 的配置已经记过 `minimax`，若把国际版也记 6，
+///   那批条目 `providers_added_after(6)` 就只剩「更晚的家」—— 国际版永远补不进
+///   清单（表现为「升级了但国际版不在勾选清单里」）。
+/// 版本 8 = Coze（扣子，本 fork，2026-10-21）。
+const PROVIDERS_ADDED_IN: [(&str, i64); 11] = [
+    ("officeace", 2),
+    ("codearts", 2),
+    ("chatglm", 3),
+    ("qwenwork", 4),
+    ("modelscope", 5),
+    ("modelscope-intl", 5),
+    ("atomcode", 5),
+    ("lobsterai", 5),
+    // 版本 6 = MiniMax Code（本 fork）。README 六列里它有真正的七天签到，
+    // 积分台账的 `credit_type=2` 批次就是它发的（见 `providers::minimax::checkin`）。
+    ("minimax", 6),
+    // 版本 7 = MiniMax Code 国际版（同一个签到接口、另一个网关）。
+    ("minimax-intl", 7),
+    // 版本 8 = Coze（扣子，本 fork）。两条领奖链（活动奖励 + 下载客户端奖励），
+    // 都是幂等的（见 `providers::coze::checkin`）。
+    ("coze", 8),
+];
 
 /// 版本 `version` 之后才加入清单的家（按注册顺序）。空数组 = 这一版没有新家，
 /// 或配置比代码还新（装过更新的版本又退回来）——两种情况都只记账、不动清单。

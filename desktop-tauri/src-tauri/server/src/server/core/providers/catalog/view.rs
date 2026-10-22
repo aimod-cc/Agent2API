@@ -228,6 +228,17 @@ pub fn manage_view(store: &AccountStore) -> Value {
                 // 缓存恢复的清单与刚拉的清单**都是 `remote`**，时效只能靠这个
                 // 时间戳说明（见 `providers::catalog_cache` 的模块头）。
                 "refreshedAt": refreshed_at,
+                // **可见性**：这个模型在官方客户端里是否会被列出。
+                //
+                // `"shown"` / `"hidden"` / `"undeclared"` 三态，由各家 `models.rs`
+                // 在自己的解析层算出（判据各不相同：Antigravity 按世代、Qoder 读
+                // 上游 `enable`、Raccoon 读 `visible`、CodeArts 读 `display_enabled`）。
+                // 聚合层不重新判断 —— 它不认识各家的规则，只负责透传。
+                //
+                // 缺失（`null`）= 这家没有可见性判据（当前是除上面四家之外的所有
+                // provider）。界面据此显示 `—`，**不**把它当成「可见」或「不可见」：
+                // 「这家没这个信息」和「这家说它不可见」是两件事。
+                "visibility": item.get("visibility").cloned().unwrap_or(Value::Null),
             }));
         }
     }

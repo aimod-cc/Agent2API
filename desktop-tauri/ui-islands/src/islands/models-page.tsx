@@ -122,14 +122,15 @@ import type { ManageModel, ManageView } from './models-custom-source'
 // 内置家的图标映射（与添加账号弹窗、签到中心同一份，别处不要照抄这份映射）
 import { PROVIDER_ICONS } from './add-provider-pick'
 import {
-  GROUP_LIMIT, MODEL_SORT_OPTIONS, MODEL_STATE_OPTIONS, accept, bindingKeyOf, bindingsOf, builtinRailCounts,
+  GROUP_LIMIT, MODEL_SORT_OPTIONS, MODEL_STATE_OPTIONS, MODEL_VISIBILITY_OPTIONS, accept, bindingKeyOf, bindingsOf, builtinRailCounts,
   closeCapability, closeCustomModel, closeMapping, collapseGroup, currentProvider, customProviderOptions,
   customRailItems, directoryReady, esc, errorMessage, expandGroup, formatTime, getSnapshot, isAllCustomView,
   levelOf, load, models, openAddCustomProvider, openCapability, openCustomModel, openMapping, providerLabelOf,
   providerOptions, refreshAll,
   refreshModels, registerColumnSettings, removeCustomProvider, render, resolveProvider, restoreSavedFilters,
   pruneForeignTableNodes,
-  rowEnabled, rowKeyOf, runRowAction, same, selectProvider, setSearch, setSort, setStateFilter, setTableEl,
+  rowEnabled, rowKeyOf, runRowAction, same, selectProvider, setSearch, setSort, setStateFilter,
+  setVisibilityFilter, setTableEl, visibilityOf,
   shared, subscribe, syncHead, toast, upstreamOptions, viewData, visibleColumns, writeAddModel,
   writeBinding, writeRemoveMapping, writeRemoveModel,
   type Align, type Binding, type ColumnView, type CustomModelContext, type MappingContext,
@@ -307,11 +308,18 @@ const CAP_ICON: Partial<Record<CapabilityKey, React.ReactNode>> = {
   ),
 }
 
-/** 搜索 / 状态 / 提供商三个条件（口径与旧实现逐条对齐） */
-function matches(model: ManageModel, keyword: string, provider: string, stateFilter: string): boolean {
+/** 搜索 / 状态 / 可见性 / 提供商四个条件（口径与旧实现逐条对齐） */
+function matches(model: ManageModel, keyword: string, provider: string, stateFilter: string, visibilityFilter: string): boolean {
   if (stateFilter === 'enabled' && !rowEnabled(model)) return false
   if (stateFilter === 'disabled' && rowEnabled(model)) return false
   if (stateFilter === 'mapped' && !(model.aliases || []).length) return false
+  // 可见性筛选：`visible` 档**含** `undeclared` —— 只有四家有判据，其余家的条目
+  // 根本没有这个字段。「没有判据」不等于「不可用」，混进 hidden 会让用户以为
+  // 那些家的模型都被关掉了（与各家「没依据就不藏」的纪律同源）。
+  const visibility = visibilityOf(model)
+  if (visibilityFilter === 'visible' && visibility === 'hidden') return false
+  if (visibilityFilter === 'hidden' && visibility !== 'hidden') return false
+  if (visibilityFilter === 'undeclared' && visibility !== 'undeclared') return false
   if (provider !== 'all' && (model.provider || '') !== provider) return false
   if (!keyword) return true
   const hay = [model.id, model.name, ...(model.aliases || [])].join(' ').toLowerCase()
@@ -339,6 +347,8 @@ function ModelsPage() {
    * 一律按「当前数据里还解析得出来」算（`selectedModels`），残键自然失效。
    */
   const [selection, setSelection] = React.useState<ReadonlySet<string>>(new Set())
+  /** 窄屏筛选抽屉（见 css/mobile.css 的 .mm-filter-*） */
+  const [filterOpen, setFilterOpen] = React.useState(false)
   /** 选中了一个已被删除的自定义家（目录缓存里确实没有这条记录，而不是「还没加载完」）；
       「自定义 · 全部」是聚合哨兵、目录里没有它的记录，不算「已删除」 */
   const customMissing = custom && !isAllCustomView() && directoryReady() && !customSource.record(provider)
@@ -374,7 +384,7 @@ function ModelsPage() {
   const view = viewData()
   const all = Array.isArray(view.models) ? view.models : []
   const keyword = state.search.trim().toLowerCase()
-  const shown = all.filter(model => matches(model, keyword, provider, state.stateFilter))
+  const shown = all.filter(model => matches(model, keyword, provider, state.stateFilter, state.visibilityFilter))
   /** 排序档位（'default' / 'rate-asc' / 'rate-desc'）；组内排序读它，见 rows() 里那一段 */
   const sort = state.sort
   const columns = visibleColumns()
@@ -618,6 +628,46 @@ function ModelsPage() {
   }
 
   /**
+   * 「可见性」列：这个模型在**官方客户端**里会不会被列出来。
+   *
+   * ── 三档 + 一档「没有判据」──────────────────────────────────
+   *   · **不展示**（`hidden`）：上游说有、官方客户端不列。本仓已默认关闭它的
+   *     默认绑定（`model_rules::seed_hidden_disabled`）—— 也就是说它既不出现在
+   *     `/v1/models`，也不接受点名调用。用户仍可在这一行手动打开（打开就是
+   *     「我知道它不展示，但我要用」）。
+   *   · **可见**（`shown`）：官方客户端会列它。
+   *   · **未声明**（`undeclared`）：这家有判据、但这条上游没表态。
+   *   · **`—`**（没有 `visibility` 字段）：这家**根本没有**可见性判据。
+   *
+   * 最后两档必须分开显示：`undeclared` 是「这家说不知道」，`—` 是「这家压根
+   * 没这个信息」。混成一个，用户会以为所有没有判据的家都「确认可见」。
+   */
+  function visibilityCell(model: ManageModel) {
+    const visibility = visibilityOf(model)
+    if (visibility === 'hidden') {
+      return (
+        <span className='src hidden-visibility'
+          title={t('上游能列出这个模型，但官方客户端不展示它；本仓已默认关闭它的默认绑定（点这一行的开关可以手动打开）')}>
+          <i aria-hidden='true' />{t('不展示')}
+        </span>
+      )
+    }
+    if (visibility === 'visible') {
+      return (
+        <span className='src shown-visibility' title={t('官方客户端会展示这个模型')}>
+          <i aria-hidden='true' />{t('可见')}
+        </span>
+      )
+    }
+    if (visibility === 'undeclared') {
+      return <span className='rate' title={t('这家有可见性判据，但这一条上游没有表态 —— 按可见处理')}>—</span>
+    }
+    // 没有判据的家：这一格本来就该按视图隐藏吗？不 —— 家是逐行判的（聚合视图里
+    // 有判据的家与没判据的家混在同一张表上），所以给一个带说明的 `—`。
+    return <span className='rate' title={t('这家提供商没有可见性判据（目前只有 Antigravity / Qoder / 小浣熊 / CodeArts 有）')}>—</span>
+  }
+
+  /**
    * 「上下文 / 输出」列：两个 token 数合在一格（上下文 / 最大输出）。
    *
    * 展示的是**生效值**（清单原值 + 覆盖，归一后读）；被覆盖过的那一项挂一枚
@@ -754,6 +804,8 @@ function ModelsPage() {
         )
       case 'source':
         return <td className={cellClass('cell-source', column.align)}>{sourceCell(model)}</td>
+      case 'visibility':
+        return <td className={cellClass('cell-visibility', column.align)}>{visibilityCell(model)}</td>
       case 'budget':
         return <td className={cellClass('cell-budget', column.align)}>{budgetCell(model)}</td>
       case 'caps':
@@ -935,12 +987,30 @@ function ModelsPage() {
                     onClick={() => refreshModels()}>{t('获取模型')}</Button>
                   <Button id='btn-add-custom-model' variant='outline' size='sm'
                     onClick={() => openCustomModel()}>{t('＋ 添加模型')}</Button>
+                  {/* 窄屏「筛选」入口：桌面隐藏（CSS 控制）。角标是生效的筛选条数 */}
+                  <button type='button' className='mm-filter-open' onClick={() => setFilterOpen(true)}
+                    aria-label={t('打开筛选')}>
+                    {t('筛选')}
+                    {(() => {
+                      const n = (state.stateFilter !== 'all' ? 1 : 0)
+                        + (state.visibilityFilter !== 'all' ? 1 : 0)
+                        + (state.sort !== 'default' ? 1 : 0)
+                        + (String(state.search || '').trim() ? 1 : 0)
+                      return n > 0 ? <span className='mm-filter-badge'>{n}</span> : null
+                    })()}
+                  </button>
                 </div>
               </div>
-              <div className='mm-filters'>
+              <div className={cn('mm-filters', filterOpen && 'open')}>
                 {/* 状态筛选：语义、键盘、滑块都在组件库里，取值仍以快照为准（完全受控） */}
                 <SegmentedControl options={MODEL_STATE_OPTIONS} value={state.stateFilter}
                   onValueChange={setStateFilter} aria-label={t('按状态筛选')} className='shrink-0' />
+                {/* 可见性筛选：上游目录是超集，里面混着官方客户端不展示的模型
+                    （本仓已默认关闭它们的默认绑定）。默认停「可见」—— 一打开就
+                    让它们占满表格会把用户真能用的模型挤下去。切到「全部」即可
+                    看到清单全貌（落盘，下次打开记住）。 */}
+                <SegmentedControl options={MODEL_VISIBILITY_OPTIONS} value={state.visibilityFilter}
+                  onValueChange={setVisibilityFilter} aria-label={t('按可见性筛选')} className='shrink-0' />
                 {/* 排序档位（issue #161）：默认 / 倍率升序 / 倍率降序。挑便宜模型时
                     按倍率排比按名称排有用得多 —— 与状态筛选同一套（受控 + 落盘） */}
                 <SegmentedControl options={MODEL_SORT_OPTIONS} value={state.sort}
@@ -966,6 +1036,21 @@ function ModelsPage() {
                   </span>
                 ) : null}
               </div>
+              {/* 窄屏筛选抽屉的遮罩与标题栏（桌面 display:none，不占位）。
+                  三个分段筛选与搜索框由 CSS 从 .mm-filters 搬进右侧抽屉。 */}
+              <div className={cn('mm-filter-scrim', filterOpen && 'open')} onClick={() => setFilterOpen(false)} />
+              <div className={cn('mm-filter-head', filterOpen && 'open')}>
+                <span className='mm-filter-title'>{t('筛选')}</span>
+                <Button variant='ghost' size='sm' className='mm-filter-clear'
+                  onClick={() => {
+                    setStateFilter('all')
+                    setVisibilityFilter('all')
+                    setSort('default')
+                    setSearch('')
+                  }}>{t('清空')}</Button>
+                <Button variant='ghost' size='sm' className='mm-filter-close'
+                  onClick={() => setFilterOpen(false)} aria-label={t('关闭')}>✕</Button>
+              </div>
             </div>
             <div className='models-table-wrap'>
               {/* 表骨架（colgroup + thead）是**字面量**、永远按 index.html 的原始顺序渲染全部
@@ -981,6 +1066,7 @@ function ModelsPage() {
                   <col className='c-check' data-col='check' />
                   <col className='c-model' data-col='model' />
                   <col className='c-rate' data-col='rate' />
+                  <col className='c-visibility' data-col='visibility' />
                   <col className='c-source' data-col='source' />
                   <col className='c-budget' data-col='budget' />
                   <col className='c-caps' data-col='caps' />
@@ -991,6 +1077,7 @@ function ModelsPage() {
                   <th data-col='check'>{allPickNode}</th>
                   <th data-col='model'>{t('上游模型')}</th>
                   <th data-col='rate'>{t('倍率')}</th>
+                  <th data-col='visibility' title={t('这个模型在官方客户端里是否会被展列；不展示的那些默认已关闭（含默认绑定）')}>{t('可见性')}</th>
                   <th data-col='source'>{t('来源')}</th>
                   {/* 表头只留短标题，完整口径进问号提示（原括号长标题让表头喧宾夺主）。
                       这是静态内容：重渲染时逐字不变，不会破坏「静态表头」的约定。

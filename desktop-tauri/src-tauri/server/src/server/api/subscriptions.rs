@@ -77,8 +77,15 @@ fn saved_payload() -> Response {
 /// 有启用的订阅 → 重启内核（重建 proxy-providers 与监听器，节点镜像进池）；
 /// 一条启用订阅都不剩 → 停内核（留着只会空跑健康检查）。内核未安装时投
 /// 命令也无害（restart 早退在「未安装」上，worker 串行消费）。
+///
+/// ── 为什么还要顺手清一次孤儿节点 ────────────────────────────
+/// 池里的订阅镜像靠内核同步维护，而内核**不一定会跑**：未安装时 restart
+/// 直接早退，手动关闭时空闲的变更只落库。这两种状态下删订阅（或把订阅
+/// 删到只剩禁用的），镜像条目就没有任何同步会来收 —— 用户已经删了订阅，
+/// 节点却还挂在「网络代理」页上。这里直接按订阅存储清一次，与内核状态无关。
 fn sync_kernel_after_change() {
     let enabled = subscriptions::enabled_provider_inputs();
+    prune_orphan_pool_items();
     if enabled.is_empty() {
         sub_kernel::request_stop();
     } else if sub_kernel::is_manually_halted() {
@@ -90,6 +97,37 @@ fn sync_kernel_after_change() {
         );
     } else {
         sub_kernel::request_restart(enabled);
+    }
+}
+
+/// 按**订阅存储里现存的 id** 清掉池里的孤儿节点（见上面的说明）。
+///
+/// 每次订阅写操作都跑：正常有内核时它是 no-op（同步已经把该摘的摘了），
+/// 内核不跑时才是唯一会清理的地方。失败只记日志 —— 清理是兜底，不该让
+/// 用户的订阅操作因此失败。
+fn prune_orphan_pool_items() {
+    // 必须用 live_ids（读不到 = Err）而不是 ids（读不到 = 空表）：空表会被
+    // 清理函数理解成「一条订阅都没有」，进而把全部订阅节点删光
+    let live = match subscriptions::live_ids() {
+        Ok(ids) => ids,
+        Err(error) => {
+            logging::log(
+                "[Subscription]",
+                &format!("⚠️ 跳过孤儿节点清理（{error}）"),
+            );
+            return;
+        }
+    };
+    match crate::server::core::proxy_pool::prune_orphan_subscription_items(&live) {
+        Ok(changes) if changes > 0 => logging::log(
+            "[Subscription]",
+            &format!("🧹 已清理 {changes} 个不属于任何订阅的节点"),
+        ),
+        Ok(_) => {}
+        Err(error) => logging::log(
+            "[Subscription]",
+            &format!("❌ 清理孤儿订阅节点失败: {error}"),
+        ),
     }
 }
 

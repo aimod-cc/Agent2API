@@ -581,8 +581,8 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
     // 里的**凭证解析后落库**（得到一个可独立转发的账号，文件可来自任意机器或
     // 备份），后者只建一条「实时读本机固定路径」的记录；两者同时给时以文件为准
     // （用户的显式选择更强）。两个内容字段都没有时行为不变（历史契约零变化）。
-    // 接了这条路径的四家（小浣熊 / CatPaw / Cline / KukuAI）见各自分支，
-    // 别家的分支不读这三个字段。
+    // 接了这条路径的六家（小浣熊 / CatPaw / Cline / KukuAI / OfficeAce / Coze）
+    // 见各自分支，别家的分支不读这三个字段。
     let auth_file_content = payload
         .get("authFileContent")
         .and_then(Value::as_str)
@@ -995,6 +995,62 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
                 )
             }
         }
+        // Coze（扣子）：**粘贴整包 Cookie**（`.coze.cn` 域的 Cookie 头 / Cookie
+        // 编辑器数组 / `{name: value}` 对象）→ 打 `passport/account/info/v2/`
+        // 复核并取 `user_id_str` / `screen_name` → 落账号。
+        //
+        // `importDesktop` **不提供**：桌面客户端的 Cookie 库
+        // （`%APPDATA%\Roaming\Coze\Network\Cookies`）被 Chromium 独占锁住，
+        // 与马维斯同一处境（要读先得关客户端或提权）—— 给了入口只会稳定失败。
+        // 网页登录那条路（壳侧 WebView2 读 Cookie）另走
+        // `api::session::login/*` + `core::login::finish_coze_login`。
+        Some(crate::server::core::providers::ProviderKind::Coze) => {
+            if import_desktop {
+                return management_error(
+                    400,
+                    "Coze 不支持导入桌面端登录态（客户端 Cookie 库被独占锁住），\
+                     请用「网页登录」或粘贴 www.coze.cn 的完整 Cookie 添加账号",
+                );
+            }
+            // 文件导入（`authFileContent`）：Coze 的凭证就是一段 Cookie 文本，
+            // 与粘贴同一条链 —— 用户可以从别的机器导出后导入。`authFileB64`
+            // 对它没有意义（不是二进制），明确 400 指路文本字段。
+            if auth_file_b64.is_some() {
+                return management_error(
+                    400,
+                    &format!(
+                        "凭证文件{}无法导入：Coze 的凭证是 Cookie 文本，请用「粘贴 Cookie」或文本文件导入（不要传 authFileB64）",
+                        auth_file_name.map(|name| format!("「{name}」")).unwrap_or_default()
+                    ),
+                );
+            }
+            let raw = match auth_file_content.as_deref() {
+                Some(text) => serde_json::Value::String(text.to_string()),
+                None => payload.clone(),
+            };
+            let parsed = match crate::server::core::providers::coze::credentials::credentials_from_payload(
+                &raw,
+            ) {
+                Ok(credentials) => credentials,
+                Err(reason) => return management_error(400, reason),
+            };
+            // 添加时验证：要的是「现在真的能用」（与 OrcaTerm / KukuAI 同一口径）。
+            // 复核顺带补全 uid / 昵称；uid 拿不到时账号层用 cookie 尾兜底 id。
+            let verified = match crate::server::core::providers::coze::credentials::enrich_identity(
+                &parsed,
+                None,
+            )
+            .await
+            {
+                Ok(credentials) => credentials,
+                Err(error) => return management_error(error.status_code, error.message),
+            };
+            store.add_coze_account(
+                &verified,
+                import_name,
+                if auth_file_content.is_some() { "file" } else { "manual" },
+            )
+        }
         // MonkeyCode（长亭科技）：**粘贴 session**（`monkeycode_ai_session` cookie）
         // → 先向上游 `GET /api/v1/users/status` 校验并归一化，再落账号（`login.rs`
         // 里顺带 best-effort 发现 image_id）。两个站点走同一份实现、按地区参数化
@@ -1073,6 +1129,50 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
                 };
             store.add_commandcode_account(&credentials, import_name, "manual")
         }
+        // Marvis（腾讯马维斯）：**粘贴凭证三件套**（`mv_` 令牌 + openid + guid），
+        // 这三项由 `_recon/marvis-cred-extract.py` 以管理员身份从客户端进程内存
+        // 提取后整段粘进来（本家凭证不落明文：`login.db` 是密文、`mskv` 容器有
+        // 调用方签名校验，见 `providers::marvis::credentials` 的模块头）。
+        //
+        // 与 Antigravity 的区别：本家的令牌**有可判的本地形态**（`mv_` 前缀），
+        // 所以先做形状校验再探活，形状不对时不必白打一次上游。
+        //
+        // 探活（一次 `max_tokens:1` 的真实对话）失败**不阻断保存**：离线录入是
+        // 合理场景（用户先录进去、联网后再用），错误文案会带回来让界面提示。
+        //
+        // `importDesktop` 不提供：本机登录态在客户端加密容器里，不是可读文件
+        // （与 Command Code / Antigravity 同一处境，但原因不同）。
+        Some(crate::server::core::providers::ProviderKind::Marvis) => {
+            // ── 两条入口 ────────────────────────────────────────────
+            // ① `importDesktop: true` → **本机导入**：网关派生一个提权提取器，
+            //    从已登录客户端的内存里取三件套（用户只需点一次 UAC）。这是
+            //    主入口 —— 凭证不落明文，用户没有别的「不粘贴」的办法。
+            // ② 否则 → 手工粘贴 JSON（`_recon/marvis-cred-extract.py` 的输出），
+            //    用于打包版没有 `_recon/`、或用户已在别处提取过的场景。
+            let record = if import_desktop {
+                match crate::server::core::providers::marvis::import::import_from_local().await {
+                    Ok(record) => record,
+                    Err(error) => return management_error(error.status_code, error.message),
+                }
+            } else {
+                if let Err(error) =
+                    crate::server::core::providers::marvis::credentials::validate_shape(&payload)
+                {
+                    return management_error(error.status_code, error.message);
+                }
+                payload.clone()
+            };
+            // 探活：只用于给出提示，不因失败而拒绝落账号（离线录入是合理场景）
+            let outcome = crate::server::core::providers::marvis::probe::probe(&record).await;
+            if !outcome.ok {
+                crate::server::logging::log(
+                    "[Accounts]",
+                    &format!("Marvis 探活未通过（仍保存）：{}", outcome.message),
+                );
+            }
+            let source = if import_desktop { "desktop" } else { "manual" };
+            store.add_marvis_account(&record, import_name, source)
+        }
         // Antigravity（Google 的 AI IDE）：**粘贴 Google refresh token**
         // → 本地归一化（剥引号 / `refresh_token=` 整行 / 空白；`1//` 是令牌本体，
         // 不剥）→ 打一次 Google token 端点做**真实校验**（refresh_token 没有可判
@@ -1099,6 +1199,84 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
             };
             store.add_antigravity_account(&credentials, import_name, "manual")
         }
+        // MiniMax Code 的两个地区（`minimax` / `minimax-intl`）：**主入口是设备码
+        // 登录**（`/api/session/login/start` 的 `provider: "minimax"` 或
+        // `"minimax-intl"`，见 `core::login::minimax`），这里处理的是**两条侧门**：
+        //   ① `importDesktop: true` → 从本机已登录的客户端**复制**令牌
+        //      （`~/.minimax/auth/prod/<region>/mcode-public/auth.json`）。**只读不写** ——
+        //      客户端的 `auth.json` 与 `auth-state.json` 带一对必须相等的
+        //      `generation` 计数器，写一次就让它判定「在别处登录过」并要求重登
+        //      （见 `providers::minimax::credentials` 的模块头）；
+        //   ② 否则 → 粘贴访问令牌（`mmoat_…`）。JWT 里能读出 `user.id` 与
+        //      `exp:`，所以手工粘贴**不需要用户再填别的东西**；刷新令牌没有
+        //      就只能用一小时（界面上「刷新 Token」会如实提示）。
+        // 探活（一次 `max_tokens:1` 的真实对话）失败**不阻断保存**：离线录入
+        // 是合理场景，错误文案会带回来让界面提示。
+        //
+        // 两个地区**共用这一支**：地区由 provider id 反查（`Region::from_provider_id`），
+        // 与 AutoClaw / Qoder 拆家后的写法同款 —— 写死一个地区会让国际版账号落进
+        // 国内版那一组，症状是「加号成功、转发稳定 401」。
+        Some(crate::server::core::providers::ProviderKind::Minimax)
+        | Some(crate::server::core::providers::ProviderKind::MinimaxIntl) => {
+            let region = crate::server::core::providers::minimax::Region::from_provider_id(provider)
+                .unwrap_or(crate::server::core::providers::minimax::Region::Cn);
+            let mut record = if import_desktop {
+                match crate::server::core::providers::minimax::import::import_from_desktop(region) {
+                    Ok(record) => record,
+                    Err(error) => return management_error(error.status_code, error.message),
+                }
+            } else {
+                if let Err(error) =
+                    crate::server::core::providers::minimax::credentials::validate_shape(&payload)
+                {
+                    return management_error(error.status_code, error.message);
+                }
+                payload.clone()
+            };
+            // 探活**不传代理**：账号还没入库，它的出口设置（PATCH `proxy`）
+            // 此刻不存在。国际版在没有代理时会探活失败并给出「配代理」的提示 ——
+            // 那正是用户下一步要做的事，不算误报（文案里已写清）。
+            //
+            // ── 探活顺带补身份（2026-10-22）──────────────────────────
+            // 线上令牌是不透明 `mmoat_`，`user.id` 读不出来；而账户类接口签名
+            // 要带 `user_id=<身份>`（缺它 ⇒ 余额恒空、签到 `invalid signature`），
+            // 且续期端点不回身份 ⇒ 落库时不补就再也补不回来。
+            // 失败的探活也可能带回身份（`identity` 与 `ok` 是两件事），一起用。
+            let outcome = crate::server::core::providers::minimax::probe::probe(
+                region,
+                &record,
+                None,
+            )
+            .await;
+            if !outcome.identity.is_empty() {
+                if let Some(object) = record.as_object_mut() {
+                    let missing = object
+                        .get("userId")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .unwrap_or("")
+                        .is_empty();
+                    if missing {
+                        object.insert(
+                            "userId".to_string(),
+                            serde_json::Value::String(outcome.identity.clone()),
+                        );
+                        crate::server::logging::verbose(
+                            "[Accounts]",
+                            "MiniMax Code：探活顺带补全了账号身份（userId）",
+                        );
+                    }
+                }
+            }
+            if !outcome.ok {
+                crate::server::logging::log(
+                    "[Accounts]",
+                    &format!("MiniMax Code 探活未通过（仍保存）：{}", outcome.message),
+                );
+            }
+            let source = if import_desktop { "desktop" } else { "manual" };
+            store.add_minimax_account(region, &record, import_name, source)
+        }
         // OfficeAce（华为云果办 / OfficeClaw）：粘贴模型网关的 Basic 凭据
         // （`baseUrl` + `modelAppKey`/`modelAppSecret`，可选控制面临时凭据）。
         // **不调上游**（与 CodeArts 同口径）——凭据是导入/登录换来的，添加时
@@ -1107,7 +1285,7 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
             // 面板传来的名字是用户自己打的 ⇒ 标 custom（此后续期/重登不改它）
             store.add_officeace_account(&payload, import_name, true)
         }
-        // OrcaTerm（腾讯云遨驰终端桌面客户端）：**粘贴 accessToken**（OAuth JWT）
+// OrcaTerm（腾讯云遨驰终端桌面客户端）：**粘贴 accessToken**（OAuth JWT）
         // → 本地归一化（剥 `Bearer ` / `ot_session=` 前缀；整段 data.bin JSON
         // 直接粘也行）→ 打一次 `GetUserInfo` 做**真实校验**（顺带补 userId 与
         // 昵称；JWT 里本来就有 userId，这一步同时确认 token 没被上游拒绝）→
@@ -1156,6 +1334,398 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
                 import_name,
                 if import_desktop { "desktop" } else { "manual" },
             )
+        }
+        // 智谱清言（`chatglm.cn`）：**三条添加路径**，其中「访客模式」是本家独有的
+        // （见 `chatglm_accounts.rs` 模块头）：
+        //   1. `guest: true`（或既没给令牌也不是 importDesktop）→ 后台空 body 打一次
+        //      `guest/access`，拿到一对令牌 + 一个**新设备号**后落账号。
+        //      不需要手机号 / 扫码 —— 本家「零配置就能用」的入口。
+        //      代价是没有积分体系（余额 / 签到对他们如实跳过）。
+        //   2. 粘贴令牌 → 读 `accessToken` / `token`（可从浏览器 Cookie 里取
+        //      `chatglm_token`）→ 打一次 `user/info` 做**真实校验**（顺带补 uid
+        //      与昵称，并判出它其实是访客还是登录账号）。
+        //   3. `importDesktop: true` → 读本机客户端 Cookies（**DPAPI 加密**，
+        //      仅 Windows 可解，见 `chatglm::credentials`）→ 同样校验后落账号。
+        // 校验失败一律 400（不落空记录）—— 与 OrcaTerm / KukuAI 同一口径：
+        // 添加时验证，要的是「现在真的能用」。
+        Some(crate::server::core::providers::ProviderKind::Chatglm) => {
+            let device_id = crate::server::core::providers::chatglm::credentials::resolve_device_id(
+                payload
+                    .get("deviceId")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            );
+            let plain_token = payload
+                .get("accessToken")
+                .or_else(|| payload.get("access_token"))
+                .or_else(|| payload.get("token"))
+                .or_else(|| payload.get("refreshToken"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let want_guest = payload
+                .get("guest")
+                .and_then(Value::as_bool)
+                .unwrap_or(plain_token.is_none() && !import_desktop);
+            let provider_label = "智谱清言";
+
+            // ── 路径 3：导入本机客户端登录态 ─────────────────────────
+            let (access, refresh) = if import_desktop {
+                match crate::server::core::providers::chatglm::credentials::read_desktop_credentials()
+                {
+                    Ok(Some((access, refresh))) => {
+                        let access = (!access.trim().is_empty()).then_some(access);
+                        let refresh = (!refresh.trim().is_empty()).then_some(refresh);
+                        (access, refresh)
+                    }
+                    Ok(None) => {
+                        return management_error(
+                            400,
+                            "没有在本机找到智谱清言客户端的登录态（请先打开客户端登录，\
+                             或改用「访客模式」/「粘贴令牌」）",
+                        )
+                    }
+                    Err(reason) => return management_error(400, reason),
+                }
+            } else if want_guest {
+                // ── 路径 1：访客换证（本家独有）──────────────────────
+                match crate::server::core::providers::chatglm::http::guest_access(
+                    &device_id, None,
+                )
+                .await
+                {
+                    Ok((access, refresh, _uid)) => (Some(access), Some(refresh)),
+                    Err(error) => return management_error(error.status_code, error.message),
+                }
+            } else {
+                // ── 路径 2：粘贴令牌 ────────────────────────────────
+                let Some(token) = plain_token else {
+                    return management_error(400, "请提供智谱清言的访问令牌（accessToken）");
+                };
+                // 用户可能整段粘了 `chatglm_token=xxx;` 形态
+                let token = token
+                    .trim_start_matches("chatglm_token=")
+                    .trim_end_matches(';')
+                    .trim();
+                (Some(token.to_string()), None)
+            };
+            let Some(access) = access else {
+                return management_error(400, "没有取到智谱清言的访问令牌");
+            };
+            // 真实校验：拿令牌问一次 user/info。顺带读回 uid / 昵称 / 访客标记 ——
+            // 这三样决定账号 id、展示名与「有没有积分体系」。
+            let verified = match crate::server::core::providers::chatglm::http::user_info(
+                &access, &device_id, None,
+            )
+            .await
+            {
+                Ok(info) => info,
+                Err(error) => return management_error(400, format!("{provider_label}校验失败：{}", error.message)),
+            };
+            let is_guest = verified
+                .get("is_guest")
+                .and_then(Value::as_bool)
+                .unwrap_or_else(|| {
+                    crate::server::core::providers::chatglm::credentials::token_is_guest(
+                        &access, want_guest,
+                    )
+                });
+            let uid = verified
+                .get("_id")
+                .or_else(|| verified.get("user_id"))
+                .or_else(|| verified.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let nickname = verified
+                .get("nickname")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let credentials = crate::server::core::providers::chatglm::credentials::ChatglmCredentials {
+                access_token: access,
+                // 粘贴路径拿不到 refresh_token：留空，续期会如实报「没有 refresh_token」
+                refresh_token: refresh.unwrap_or_default(),
+                device_id,
+                is_guest,
+                uid,
+                nickname,
+            };
+            store.add_chatglm_account(
+                &credentials,
+                import_name,
+                if import_desktop {
+                    "desktop"
+                } else if want_guest {
+                    "guest"
+                } else {
+                    "manual"
+                },
+            )
+        }
+        // 千问办公（`gateway.qwenwork.cn`）：**两条添加路径**，其中「导入本机登录态」
+        // 是唯一实用的入口 —— 上游没有开放平台，用户不可能自己拿到 JWT。
+        //   1. `importDesktop: true` → 读 `%APPDATA%\QwenWorkCN\auth-v2.dat`
+        //      （Chromium os_crypt：DPAPI 主密钥 + AES-256-GCM，见
+        //      `qwenwork::auth` 的模块头）。**不需要客户端在运行**，只要
+        //      Agent2API 与千问办公跑在同一个 Windows 用户下。
+        //   2. 粘贴令牌 → 读 `accessToken` / `token`（换机器、或本机解密失败时的兜底）。
+        // 两条路径都走同一步**真实校验**（`GET /api/v1/userinfo`）再落库 ——
+        // 与 OrcaTerm / KukuAI / 智谱清言同一口径：添加时验证，要的是「现在真的能用」。
+        // 校验失败一律 400/401（不落空记录）。
+        Some(crate::server::core::providers::ProviderKind::Qwenwork) => {
+            use crate::server::core::providers::qwenwork;
+            let provider_label = "千问办公";
+
+            // ── 路径 1：导入本机客户端登录态 ─────────────────────────
+            let credentials = if import_desktop {
+                match qwenwork::auth::read_local_credentials() {
+                    Ok(creds) => creds,
+                    // 透传 `status_code` 而不是硬编码 400：本函数自己就把
+                    // 「客户端没装 / 没登录 / 解密失败」都编成了 400（见
+                    // `qwenwork::auth::read_local_credentials`），与下面校验
+                    // 失败同一口径（那一条更要透传 —— 401 是「重新登录」的
+                    // 信号，吞成 400 会让前端把它显示成普通的参数错误）
+                    Err(error) => return management_error(error.status_code, error.message),
+                }
+            } else {
+                // ── 路径 2：粘贴令牌 ────────────────────────────────
+                let Some(token) = payload
+                    .get("accessToken")
+                    .or_else(|| payload.get("access_token"))
+                    .or_else(|| payload.get("token"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                else {
+                    return management_error(
+                        400,
+                        format!(
+                            "请提供{provider_label}登录令牌，或先用「从本机导入」\
+                             （需要先安装并登录{provider_label}客户端）"
+                        ),
+                    );
+                };
+                // 用户可能整段粘了 `Authorization: Bearer xxx` 形态
+                let token = token
+                    .trim_start_matches("Bearer ")
+                    .trim_start_matches("bearer ")
+                    .trim();
+                // 粘贴路径同样要 user.id；JWT 自带 sub，这里从 payload 解
+                // （解不开就要求用户一并给出 userId —— 宁可让用户补一个字段，
+                //  也不猜一个 id 出来，那会让同一个人被导成两个账号）
+                let user_id = payload
+                    .get("userId")
+                    .or_else(|| payload.get("user_id"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| qwenwork::auth::user_id_from_jwt(token))
+                    .unwrap_or_default();
+                if user_id.is_empty() {
+                    return management_error(
+                        400,
+                        format!(
+                            "无法从令牌中读出{provider_label}用户 id，请在请求里一并提供 \
+                             userId 字段"
+                        ),
+                    );
+                }
+                crate::server::core::providers::qwenwork::auth::Credentials {
+                    token: token.to_string(),
+                    refresh_token: String::new(),
+                    expires_at: qwenwork::auth::expires_at_from_jwt(token),
+                    user_id,
+                    username: String::new(),
+                    name: String::new(),
+                    plan_name: String::new(),
+                }
+            };
+
+            // ── 真实校验：拿 JWT 问一次 userinfo（顺带补昵称 / 套餐名）────
+            let verified = match qwenwork::QwenworkAdapter::verify_and_enrich(
+                &credentials.token,
+                credentials.clone(),
+            )
+            .await
+            {
+                Ok(creds) => creds,
+                Err(error) => {
+                    // 透传 `status_code`：`verify_and_enrich` 刻意把 401/403
+                    // 映射成 401（那才是「令牌失效，回客户端重登」的信号），
+                    // 其它情况编 502（上游故障）—— 这里硬编码 400 会把它
+                    // 们全部抹成同一种「参数错误」，与 OrcaTerm / KukuAI /
+                    // 智谱清言等各家的 `error.status_code` 口径不一致
+                    return management_error(
+                        error.status_code,
+                        format!("{provider_label}校验失败：{}", error.message),
+                    )
+                }
+            };
+            store.add_qwenwork_account(
+                &verified,
+                import_name,
+                if import_desktop { "desktop" } else { "manual" },
+            )
+        }
+        // QClaw（腾讯桌面 AI 客户端）：**两条添加路径**，其中「从本机导入」是
+        // 唯一实用的入口 —— 凭证是本机 OpenClaw 网关的令牌
+        // （`~/.qclaw/openclaw.json` 的 `gateway.auth.token`），用户不可能
+        // 自己「申请」一枚，它只存在于本机。
+        //   1. `importDesktop: true` → 读本机网关配置 + 探活 + 尽力解密
+        //      localStorage 补身份（昵称 / uid；解不开只让备注名退化）；
+        //   2. 粘贴令牌 → `accessToken`（网关令牌）+ `gatewayPort`
+        //      （换机器 / 读不到配置文件时的兜底）。
+        // 两条路径都走同一步**真实校验**（`GET /v1/models` 探活）再落库 ——
+        // 与 OrcaTerm / KukuAI / 智谱清言 / 千问办公同一口径：添加时验证，
+        // 要的是「现在真的能用」。探活要求 **QClaw 客户端正在运行**（网关是
+        // 它拉起的），这一点与别家「不需要客户端在跑」不同，UI 文案已说明。
+        Some(crate::server::core::providers::ProviderKind::Qclaw) => {
+            use crate::server::core::account_store::qclaw_accounts::QclawCredentials;
+            use crate::server::core::providers::qclaw;
+            let provider_label = "QClaw";
+
+            // ── 路径 1：导入本机网关配置 ─────────────────────────
+            // 产出 `(凭证, 有效期)`：后者是云端 JWT 的 exp（账号页「有效期」列），
+            // 粘贴路径没有可信 JWT 来源，给 None（那一列不渲染，与 chatglm 同处置）
+            let (credentials, expires_at) = if import_desktop {
+                let gateway = match qclaw::local::read_gateway() {
+                    Ok(gateway) => gateway,
+                    Err(error) => return management_error(error.status_code, error.message),
+                };
+                // 探活：网关活着且令牌对。QClaw 没在跑时连接被拒 → 502，
+                // 令牌被拒（重启后变了）→ 401，两种文案都在 probe 里给全
+                if let Err(error) = qclaw::local::probe_chat_gateway(&gateway).await {
+                    return management_error(error.status_code, error.message);
+                }
+                // 身份与「有效期」出自**同一次**解密（`read_cloud_session`
+                // 一次拿全：JWT / 登录键 / guid / 身份）。解密失败只让备注名
+                // 退化成「QClaw 本机网关」、有效期留空，账号本身完全可用 ——
+                // 转发用的是网关令牌，不是这枚云端 JWT（见 `qclaw::local` 模块头）
+                let session = qclaw::local::read_cloud_session();
+                let expires_at = qclaw::local::jwt_expires_at(&session.jwt);
+                (
+                    QclawCredentials {
+                        token: gateway.token,
+                        chat_port: gateway.chat_port,
+                        models_port: gateway.models_port,
+                        uid: session.user_id,
+                        nickname: session.nickname,
+                    },
+                    expires_at,
+                )
+            } else {
+                // ── 路径 2：粘贴网关令牌 ─────────────────────────
+                let Some(token) = payload
+                    .get("accessToken")
+                    .or_else(|| payload.get("access_token"))
+                    .or_else(|| payload.get("token"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                else {
+                    return management_error(
+                        400,
+                        format!(
+                            "请提供{provider_label}网关令牌，或先用「从本机导入」\
+                             （需要 QClaw 客户端正在运行）"
+                        ),
+                    );
+                };
+                let chat_port = payload
+                    .get("gatewayPort")
+                    .or_else(|| payload.get("port"))
+                    .and_then(Value::as_u64)
+                    .and_then(|port| u16::try_from(port).ok())
+                    .filter(|port| *port > 0)
+                    .unwrap_or(qclaw::local::DEFAULT_CHAT_PORT);
+                let models_port = payload
+                    .get("modelsPort")
+                    .and_then(Value::as_u64)
+                    .and_then(|port| u16::try_from(port).ok())
+                    .filter(|port| *port > 0)
+                    .unwrap_or(qclaw::local::DEFAULT_MODELS_PORT);
+                let gateway = qclaw::local::LocalGateway {
+                    chat_port,
+                    token: token.to_string(),
+                    models_port,
+                };
+                // 与路径 1 同一支探活：粘贴的令牌+端口必须真的能通
+                if let Err(error) = qclaw::local::probe_chat_gateway(&gateway).await {
+                    return management_error(error.status_code, error.message);
+                }
+                (
+                    QclawCredentials {
+                        token: token.to_string(),
+                        chat_port,
+                        models_port,
+                        // 粘贴路径没有可信的身份来源（网关令牌里不含用户信息），
+                        // uid 留空 → 落库时用令牌摘要做稳定身份（见 add_qclaw_account）
+                        uid: String::new(),
+                        nickname: String::new(),
+                    },
+                    // 也没有 JWT 来源（网关令牌不是 JWT）→ 有效期留空
+                    None,
+                )
+            };
+            store.add_qclaw_account(
+                &credentials,
+                import_name,
+                if import_desktop { "desktop" } else { "manual" },
+                expires_at,
+            )
+        }
+        // ModelScope（魔搭）的两个站点：粘贴 `ms-` 令牌 + **先探活换身份**。
+        //
+        // 为什么本家要出网（不是「粘贴即落盘」）：那枚令牌是不透明的，
+        // 解不出身份 —— 不出网就只能拿令牌尾号当账号 id，同一个账号换一次令牌
+        // 就会变成两条记录。所以照 Qoder / OfficeAce 的既有分工：**网络在锁外**
+        // （这里 await 一次探活），把结果作为参数交给同步的落账号入口
+        // （`add_modelscope_account` 只在锁内做读-改-写）。
+        //
+        // 探活顺带触发当日签到（见 `modelscope::probe` 的模块头）——
+        // 添加账号的人当天就把魔粒拿到手，这是上游的接口语义决定的，
+        // 不是这里额外做了一件事。
+        //
+        // 地区由 kind 反查（provider 身份是权威，payload 里没有地区字段）。
+        Some(kind @ (crate::server::core::providers::ProviderKind::Modelscope
+            | crate::server::core::providers::ProviderKind::ModelscopeIntl)) => {
+            let region = crate::server::core::providers::modelscope::Region::from_kind(kind)
+                .unwrap_or(crate::server::core::providers::modelscope::Region::Cn);
+            let token = crate::server::core::providers::modelscope::credentials::token_from_payload(&payload);
+            if token.is_empty() {
+                Err(AccountStoreError::new(
+                    "缺少令牌（accessToken / apiKey / token / session）",
+                    400,
+                ))
+            } else {
+                match crate::server::core::providers::modelscope::probe::identify(region, &token).await {
+                    Ok(identity) => store.add_modelscope_account(region, &payload, &identity, import_name),
+                    Err(error) => Err(AccountStoreError::new(error.message, error.status_code)),
+                }
+            }
+        }
+        // AtomCode（AtomGit / GitCode）：粘贴令牌对（accessToken + refreshToken）。
+        // **不调上游**（与 CodeArts / OfficeAce 同口径）——令牌是浏览器登录换来的，
+        // 添加时没有可交换的授权码；目录与连通性由刷新链路验。
+        // ⚠️ refreshToken 强烈建议给：没有它账号无法自动续期（本家的令牌不是 JWT，
+        // 7 天到期后只能重新登录），见 `providers::atomcode::credentials` 的模块头。
+        Some(crate::server::core::providers::ProviderKind::Atomcode) => {
+            // 面板传来的名字是用户自己打的 ⇒ 标 custom（此后续期/重登不改它）
+            store.add_atomcode_account(&payload, import_name)
+        }
+        // LobsterAI：**没有粘贴路径**（如实拒绝，而不是落一条用不了的账号）。
+        // 它的凭证里有两个 `keyfrom` 与一个 `uuid`，只在换码那一刻由上游下发 ——
+        // 用户从别处粘不出这三样，缺了它们账号续不了期（见
+        // `providers::lobsterai::credentials` 的模块头）。所以本家只有一个入口：
+        // 网页登录落到本机 loopback 回调后由适配器落账号。
+        Some(crate::server::core::providers::ProviderKind::LobsterAi) => {
+            return management_error(
+                400,
+                "LobsterAI 只能通过「网页登录」添加：它的续期需要换码时下发的 uuid 与 keyfrom，粘贴给不出这三项",
+            );
         }
         // WorkBuddy 系的两家（国内版 / 国际版）：同一套凭证形态与落账号路径，
         // 差别只有归属 —— provider id 自己就是归属（拆家后不再从 payload 里的
@@ -1434,6 +2004,21 @@ pub async fn refresh_account(state: &ServerState, body: &Bytes) -> Response {
     if state.store().officeace_account_record(&id).is_some() {
         return refresh_provider_account(state, &id, ProviderKind::OfficeAce).await;
     }
+    // AtomCode：续期走它自己的适配器（`POST {broker}/oauth/refresh`，**会轮换**
+    // refresh token，且必须单飞 + 写回）。**这条不能省**：漏了就落到 workbuddy
+    // 兜底链路，用户点「刷新 Token」收到的是腾讯那侧的错（与 CodeArts/Trae/
+    // OfficeAce 同一条理由），而 AtomGit 的令牌会因此悄悄过期到只能重新登录。
+    if state.store().atomcode_account_record(&id).is_some() {
+        return refresh_provider_account(state, &id, ProviderKind::Atomcode).await;
+    }
+    // LobsterAI：续期走它自己的适配器（`POST /api/auth/refresh`，**会轮换**，
+    // 且必须把 uuid 与两个 keyfrom 原样回传）。**这条不能省**：漏了就落到
+    // workbuddy 兜底链路，用户点「刷新 Token」收到的是腾讯那侧的错（与
+    // CodeArts/Trae/OfficeAce 同一条理由），而龙虾的令牌会因此
+    // 悄悄过期到只能重新网页登录 —— 而那一轮登录是用户手动做的。
+    if state.store().lobsterai_account_record(&id).is_some() {
+        return refresh_provider_account(state, &id, ProviderKind::LobsterAi).await;
+    }
     // Accio（两个地区）：走适配器的强制刷新（`POST /api/auth/refresh_token`，
     // 结果按「比较再写」回写）。两个地区各查一次 —— 账号集合按 provider 隔离，
     // 同一 id 不可能同时属于两家（撞 id 在存储层就报错了）。
@@ -1538,6 +2123,48 @@ pub async fn refresh_account(state: &ServerState, body: &Bytes) -> Response {
     // （`refresh_account` 的文档里把这条列为「加带 refreshToken 的家时必须一起加」）。
     if state.store().antigravity_account_record(&id).is_some() {
         return refresh_provider_account(state, &id, ProviderKind::Antigravity).await;
+    }
+    // Marvis：**没有刷新机制**（上游没有可复现的刷新端点 —— `LoginInfo` 里的
+    // `refreshToken` 是客户端内部行为，见 `providers::marvis::credentials` 的
+    // 模块头）。不显式拦下的话会落到下面的 workbuddy 兜底链路，用户会收到一条
+    // 与腾讯另一套鉴权端点相关的错 —— 与 Command Code / CatPaw 漏登记时同一性质。
+    if state.store().marvis_account_record(&id).is_some() {
+        return management_error(
+            400,
+            "Marvis 的令牌没有刷新接口（上游无续期端点）：请在客户端重新登录后，\
+             以管理员身份运行 _recon/marvis-cred-extract.py，再把新的 JSON 粘贴到\
+             本页重新添加（会更新同一条账号记录）",
+        );
+    }
+    // MiniMax Code（两个地区）：**有**可刷新的 refreshToken（OAuth，单次有效、
+    // 每次轮换），走自家续期（`grant_type=refresh_token` 打各自的授权服务器：
+    // 国内版 `account.minimax.cn`、国际版 `account.minimaxi.com`）。
+    // 这条分派不能省：漏了就落到下面的 workbuddy 兜底链路，用户点「刷新 Token」
+    // 收到的是腾讯鉴权端点的错 —— 与 Antigravity / Command Code 漏登记时同一性质。
+    //
+    // 两个地区**逐个查**（账号集合按 provider 隔离，同一 id 不可能同时属于两家，
+    // 与 Accio / AutoClaw / Qoder 同一条遍历）；查到的那个地区既决定「是不是本家」，
+    // 也决定打哪台授权服务器 —— 所以必须把 region 一起传下去，不能只判存在性。
+    for region in crate::server::core::providers::minimax::Region::ALL {
+        if state.store().minimax_account_record(region, &id).is_none() {
+            continue;
+        }
+        let record = state
+            .store()
+            .minimax_account_record(region, &id)
+            .unwrap_or_default();
+        let can_refresh = record
+            .get("refreshToken")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty());
+        if !can_refresh {
+            return management_error(
+                400,
+                "这个 MiniMax Code 账号没有刷新令牌（只有访问令牌，约 1 小时有效）：\
+                 请在账号页重新登录一次，或粘贴带 refreshToken 的凭据",
+            );
+        }
+        return refresh_provider_account(state, &id, region.kind()).await;
     }
     // WorkBuddy 系（国内版 / 国际版）的兜底：两条链路都按**账号自己的**
     // endpoint / prefixPath / platform / edition 续期
@@ -1742,6 +2369,38 @@ pub async fn patch_account(state: &ServerState, id: &str, body: &Bytes) -> Respo
         }
         match state.store().update_zcode_plan(&id, value) {
             Ok(changes) => balance_changes.extend(changes),
+            Err(error) => return store_error(error),
+        }
+    }
+    // 千问办公的登录令牌（`accessToken`）：本家**没有自动续期接口**（网关无
+    // refresh 端点，JWT 七天过期后必须回客户端重登再导回），「换一枚令牌」
+    // 因此是这一家独有的运维动作 —— 与 balanceToken / zcodePlan 同一处境，
+    // 不进通用 `apply_patch`（它只认 name / nameCustom / priority），在这里
+    // 显式落盘。身份键（`uid` / `userId`）随新令牌一并更新，MaaS 缓存按新旧
+    // 两个 user_id 分别作废（见 `update_qwenwork_token` 的说明）。
+    if let Some(value) = patch.get("accessToken").and_then(Value::as_str) {
+        if state.store().qwenwork_account_record(&id).is_none() {
+            // 与上面两段同一口径：「账号不存在」与「账号存在但不是千问办公」
+            // 分开说（静默忽略会让用户以为存进去了）
+            let known = state
+                .store()
+                .list_accounts()
+                .get("accounts")
+                .and_then(Value::as_array)
+                .map(|accounts| {
+                    accounts
+                        .iter()
+                        .any(|item| item.get("id").and_then(Value::as_str) == Some(id))
+                })
+                .unwrap_or(false);
+            return if known {
+                management_error(400, "只有千问办公账号有登录令牌（accessToken）")
+            } else {
+                store_error(AccountStoreError::new("账号不存在", 404))
+            };
+        }
+        match state.store().update_qwenwork_token(&id, value) {
+            Ok(()) => {}
             Err(error) => return store_error(error),
         }
     }

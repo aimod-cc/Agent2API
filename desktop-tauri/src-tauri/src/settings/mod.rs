@@ -88,7 +88,11 @@ pub(crate) fn legacy_file_path() -> PathBuf {
 ///
 /// `default` 用在结构体上（而非逐字段）：这样后续新增字段时，**旧设置记录里
 /// 缺这个键不会导致整份设置反序列化失败**——缺的字段各自取 Default。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// 不再派生 `Copy`：`panel_session` 里是两个字符串（密文），这份结构从「几个
+/// 布尔与一个 u16」变成了带堆数据的类型。所有调用点本来就按值传 / 按引用读，
+/// 去掉 `Copy` 后 clone 是显式的 —— 也正好提醒「这份设置现在包含凭据密文」。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppSettings {
     /// 关闭窗口时最小化到托盘而不是退出
@@ -130,13 +134,60 @@ pub struct AppSettings {
     /// 兑现。代价同上（令牌池在打开窗口前不补货）。
     /// 默认 false。
     pub lightweight_mode: bool,
+    /// 面板会话令牌（access + refresh）。**只在注册过管理员后才有值**。
+    ///
+    /// ── 为什么壳要自己存一份 ────────────────────────────────────
+    /// 桌面窗口加载的是 `tauri://localhost`，网关在 `127.0.0.1:{port}` —— 两者
+    /// 跨源，登录响应里的 HttpOnly cookie 到不了网关（也不该到：那个源不是
+    /// 网关）。所以桌面形态走的是网页端「中转模式」的同一条通道：令牌进响应体，
+    /// 之后每个请求带 `x-panel-token` / `x-panel-refresh` 头。壳必须在重启后
+    /// 还能拿到它们，否则每次开机都要重新登录。
+    ///
+    /// ── 为什么是加密的 ─────────────────────────────────────────
+    /// 这是一对**管理面凭据**（能改配置、导出全部账号）。`AppSettings` 整份是
+    /// 明文 JSON 写进 `kv` 表的 —— 直接放进去等于「拷走库就接管面板」。所以只
+    /// 存密文：用账号域同一把密钥（`crypto::SecretScope::Accounts`）封，
+    /// 与账号凭证同一个信任边界（能读 `account.key` 的人本来就能读账号）。
+    /// 解不开（密钥换过 / 文件丢了）按「没有令牌」处理 —— 重新登录即可自愈。
+    ///
+    /// 序列化成 `refresh`（密文）与 `access`（密文）两个字段；默认空串 = 未登录。
+    #[serde(default)]
+    pub panel_session: PanelSession,
+}
+
+/// 面板会话的持久化形态（两者都是 `enc1:` 信封；空串 = 没有）。
+///
+/// 分开存而不是打包成一个 JSON：access 会频繁轮换（每 2 小时），refresh 只在
+/// 轮换时更新 —— 两个字段各自替换，读侧不必解析一层嵌套。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PanelSession {
+    /// 长效 refresh（30 天）的密文
+    pub refresh: String,
+    /// 短效 access（2 小时）的密文
+    pub access: String,
+}
+
+impl PanelSession {
+    /// 是否有一份可尝试的令牌（可能已过期，交给服务端判）
+    pub fn is_present(&self) -> bool {
+        !self.refresh.is_empty() || !self.access.is_empty()
+    }
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         // 关闭到托盘默认开启：网关的价值在于后台持续转发，
         // 用户点关闭通常只是想收起界面，而不是让转发中断
-        Self { close_to_tray: true, autostart: false, proxy_port: 0, lan_access: false, lan_panel: false, lightweight_mode: false }
+        Self {
+            close_to_tray: true,
+            autostart: false,
+            proxy_port: 0,
+            lan_access: false,
+            lan_panel: false,
+            lightweight_mode: false,
+            panel_session: PanelSession::default(),
+        }
     }
 }
 

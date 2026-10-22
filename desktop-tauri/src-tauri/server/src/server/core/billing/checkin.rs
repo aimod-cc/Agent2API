@@ -104,6 +104,22 @@ pub fn supports_checkin(account: &Value) -> bool {
     // 上面那条按 `edition` 的 intl 一刀切与本家无关（它没有版本概念，恒 cn）。
     // Trae 曾与 CodeArts 同列排除表；SOLO 转积分制后模型调用花的就是签到钱包
     // 那份钱，它已在 `providers::trae::checkin` 接入本链，不要再加回来。
+    //
+    // ── 智谱清言的**访客账号**不在签到范围 ──────────────────────
+    // 访客没有积分体系：上游对每日登录积分 / 积分活动 / 任务中心一律 401
+    // （实测，见 `providers::chatglm::checkin` 的模块头），所以它进本链的
+    // **唯一**后果是负面的 —— 永远显示「待签」、把「今日签到进度」的分母
+    // 撑大（`checkin_center` 按本判据分组），并在签到记录台账里每天落一条
+    // 失败（那句中性文案不在 `claim_pending` 的白名单里）。因此按访客形态
+    // 排除，改由签到中心的「不参与每日签到」如实说明原因
+    // （`api::checkin_center::out_of_scope_reason`）—— 静默消失比签不上更糟。
+    //
+    // 判据读公开形态的 `isGuest`（`store_view::public_account` 只对本家注入，
+    // 见那里的说明）：**必须走公开形态**，因为签到中心的分组与批量签到的
+    // 目标解析读的是同一份快照 —— 判据只此一处，两处才不会分叉。
+    if account.get("isGuest").and_then(Value::as_bool) == Some(true) {
+        return false;
+    }
     !crate::server::core::account_store::is_accio_family(provider)
 }
 
@@ -192,7 +208,17 @@ pub fn resolve_checkin_targets(
         // 唯一的拒绝理由：上游这一站根本没有签到/活跃任务（Qoder 等的国际版）。
         // 文案与签到中心「范围外」分组那句同义 —— 两处说法不一致会让用户以为
         // 遇到的是两个不同的问题。WorkBuddy 国际版已由活跃任务分支放行。
+        //
+        // 访客单独给一句：它「不支持签到」的原因与别家不同（不是这一站没接链
+        // 路，而是访客本来就没有积分体系），用户看到「该账号暂不支持签到」
+        // 会去翻设置找原因。文案与签到中心的范围外原因同义。
         if !supports_checkin(&found[0]) {
+            if found[0].get("isGuest").and_then(Value::as_bool) == Some(true) {
+                return Err(CheckinError::new(
+                    "访客账号没有积分体系，仅登录账号可签到",
+                    400,
+                ));
+            }
             return Err(CheckinError::new("该账号暂不支持签到或每日活跃任务", 400));
         }
         return Ok((found, 0));
@@ -293,6 +319,16 @@ pub async fn checkin_for(
                     .map_err(|error| error.message);
             claim_result(id, name, &display, true, claim)
         }
+        "qwenwork" => {
+            // 千问办公：`POST /api/v1/adapter/user/daily-credit-notice/claim`
+            // （`{"credits": N}`，**幂等** —— 当天已领回 0 而不是报错）。
+            // 与 Qoder 的 campaign 状态机完全不同，见 `qwenwork::checkin` 的模块头。
+            let claim =
+                crate::server::core::providers::qwenwork::checkin::claim_daily_checkin(store, &id)
+                    .await
+                    .map_err(|error| error.message);
+            claim_result(id, name, &display, true, claim)
+        }
         "trae" => {
             // SOLO 那一条通道的每日签到（`providers::trae::checkin`）。它的
             // `alreadyCompleted` / 中性结果都由实现自己给：活动未下发、
@@ -363,6 +399,16 @@ pub async fn checkin_for(
                     .map_err(|error| error.message);
             claim_result(id, name, &display, true, claim)
         }
+        "coze" => {
+            // Coze：**两条独立的领奖链**（活动奖励走 Cookie、下载客户端奖励走
+            // PAT），幂等（当天已领回 code:0 但 activity_points 为空）。
+            // 凭证分界与两个坑见 `coze::checkin` 的模块头。
+            let claim =
+                crate::server::core::providers::coze::checkin::claim_daily_checkin(store, &id)
+                    .await
+                    .map_err(|error| error.message);
+            claim_result(id, name, &display, true, claim)
+        }
         "officeace" => {
             // OfficeAce：`POST /v1/subscription/bonus/claim`（V11 签名）一次把当天
             // 所有可领的奖励（每日签到 + 一次性新人礼）发下来；一天一个活动只能领
@@ -389,6 +435,82 @@ pub async fn checkin_for(
             .map(welfare_claim_of);
             claim_result(id, name, &display, true, claim)
         }
+        "chatglm" => {
+            // 智谱清言：本家的「签到」是**每日登录积分**
+            // （`POST /chatglm/member-api/member/daily_login_score`，返回
+            // `result.score` 为本次到账数）。**访客账号到不了这里** —— 它已被
+            // `supports_checkin` 的 `isGuest` 分支排除在签到范围外（没有积分
+            // 体系，相关接口对访客一律 401），实现里的访客分支只是纵深防御，
+            // 见 `chatglm::checkin` 的模块头。
+            let claim =
+                crate::server::core::providers::chatglm::checkin::claim_daily_login_score(store, &id)
+                    .await
+                    .map_err(|error| error.message);
+            // ── 领取类：会员积分活动与季节性活动 ────────────────────
+            // 本家的「领取类」没有独立的界面入口，与 WorkBuddy 的一次性运营
+            // 奖励同一处置：**挂在签到末尾顺带领**（活动期才有得领，非活动期
+            // 实现自己回中性文案，不算失败）。读数细节进 `bonus` 格。
+            // 注意顺序：`claim_result` 会消费 `id`，所以先领再构造结果行。
+            let bonus =
+                crate::server::core::providers::chatglm::checkin::claim_bonus(store, &id)
+                    .await
+                    .map_err(|error| error.message);
+            let bonus_ok = bonus
+                .as_ref()
+                .ok()
+                .and_then(|value| value.get("success").and_then(Value::as_bool))
+                .unwrap_or(false);
+            logging::log(
+                "[Checkin]",
+                &format!(
+                    "智谱清言账号 {display}: 活动领取 {}",
+                    if bonus_ok { "成功" } else { "无可领取" }
+                ),
+            );
+            // ── 每日任务：任务中心 `categories[code=daily]` ─────────
+            // 用户口径：每日任务接我们的每日签到（新手任务另走 onboarding）。
+            // 与「每日登录积分」并列在同一次签到里执行：登录积分是签到本身，
+            // 每日任务是签到后顺手领的日常。上游按天重置（UTC+8 零点），
+            // 重复领幂等（`points_awarded:0`），见 `chatglm::tasks` 模块头。
+            let daily =
+                crate::server::core::providers::chatglm::tasks::claim_daily_tasks(store, &id)
+                    .await
+                    .map_err(|error| error.message);
+            let mut row = claim_result(id, name, &display, true, claim);
+            if let Some(object) = row.as_object_mut() {
+                object.insert(
+                    "bonus".to_string(),
+                    match &bonus {
+                        Ok(value) => value.clone(),
+                        Err(message) => serde_json::json!({ "success": false, "msg": message }),
+                    },
+                );
+                object.insert(
+                    "dailyTasks".to_string(),
+                    match &daily {
+                        Ok(value) => value.clone(),
+                        Err(message) => serde_json::json!({ "success": false, "msg": message }),
+                    },
+                );
+            }
+            row
+        }
+        // ModelScope（魔搭）的两个站点：签到 = 调一次登录信息接口
+        // （`GET {网页站}/api/v1/users/login/info`，**调用即触发当日魔粒**，
+        // 幂等；见 `providers::modelscope::checkin` 的模块头）。
+        // 两个站点各打各的网页站、令牌不通用 —— 地区由 provider id 反查
+        // （账号集合按 provider 隔离，同一 id 不可能同时属于两家）。
+        "modelscope" | "modelscope-intl" => {
+            let region =
+                crate::server::core::providers::modelscope::Region::from_provider_id(provider_id)
+                    .unwrap_or(crate::server::core::providers::modelscope::Region::Cn);
+            let claim = crate::server::core::providers::modelscope::checkin::claim_daily_checkin(
+                region, store, &id,
+            )
+            .await
+            .map_err(|error| error.message);
+            claim_result(id, name, &display, true, claim)
+        }
         // 兜底只服务默认那家（WorkBuddy 国内版）——**不是**「剩下所有家」。
         // 这里曾经是无所不包的 `_`：一个 provider 只要没在上面列出，就会拿自己的
         // 令牌去打腾讯的签到接口，稳定报错且看不出原因（Qoder 接入前正是这个处境）。
@@ -407,7 +529,82 @@ pub async fn checkin_for(
                 .claim_daily_checkin(Some(&entry.session))
                 .await
                 .map_err(|error| error.message);
-            let mut row = claim_result(id, name, &display, false, claim);
+            let mut row = claim_result(id.clone(), name, &display, false, claim);
+            // ── 每日活跃上报：点亮成长中心连登 / 活跃地图 ──────────────
+            // 签到（`daily-checkin`）只推进**签到活动**自己的连签，成长中心的
+            // 连登与热力图只认 `/v2/report` 的一条 `chat_request_send` 事件
+            // （2026-10-19 实测：签到后签到连签 14→15，而 `growth/streak`
+            // 的 days 与当日热力格一格未动；补发一条上报后 0→1 / 0→2）。
+            // 见 `growth::daily_activity` 的模块头。
+            //
+            // 结果落在行的 `growth` 键上，**刻意不叫 `activity`**：那个键是
+            // 国际版日活链路的读数，`day_completed` / 台账会把它当成「今天
+            // 已完成」—— 对国内版，上报只点亮地图，不等于积分领到了，
+            // 混用会让签到失败的账号被记成已签。
+            //
+            // 企业版没有个人成长体系（`/activity/growth/*` 一律 403），
+            // 与下面两条一次性奖励同一门控；上报对它零收益（上游仍回 200）。
+            if !is_enterprise_session(&entry.session) {
+                let growth_row = match crate::server::core::providers::workbuddy::growth::GrowthAccount::from_store(store, &id) {
+                    Some(growth_account) => {
+                        match crate::server::core::providers::workbuddy::growth::daily_activity::report(
+                            &growth_account,
+                        )
+                        .await
+                        {
+                            Ok(report) => {
+                                // 连登天数落库：签到中心 / 账号页读它，不必每次
+                                // 打开都打一发上游。写盘失败只记日志（同 mark_checkin）。
+                                if let Some(days) = report.streak_days {
+                                    if !store.mark_streak_days(&id, days) {
+                                        logging::verbose(
+                                            "[Accounts]",
+                                            &format!("账号 {id} 的连登天数未能落盘"),
+                                        );
+                                    }
+                                }
+                                if report.sent {
+                                    logging::verbose(
+                                        "[Accounts]",
+                                        &format!(
+                                            "账号 {display}: 每日活跃已上报{}",
+                                            report
+                                                .streak_days
+                                                .map(|days| format!("（连登 {days} 天）"))
+                                                .unwrap_or_default()
+                                        ),
+                                    );
+                                }
+                                json!({
+                                    "reported": report.sent,
+                                    "streakDays": report.streak_days.map(Value::from).unwrap_or(Value::Null),
+                                    "error": Value::Null,
+                                })
+                            }
+                            // 附加收益失败：只记日志，绝不影响签到结果
+                            Err(error) => {
+                                logging::verbose(
+                                    "[Accounts]",
+                                    &format!("账号 {display} 每日活跃上报失败: {error}"),
+                                );
+                                json!({
+                                    "reported": false,
+                                    "streakDays": Value::Null,
+                                    "error": error,
+                                })
+                            }
+                        }
+                    }
+                    None => json!({
+                        "reported": false,
+                        "streakDays": Value::Null,
+                        "error": "没有可用凭证",
+                    }),
+                };
+                if let Some(object) = row.as_object_mut() {
+                    object.insert("growth".to_string(), growth_row);
+                }
+            }
             // ── 一次性运营奖励：挂在签到末尾顺带领 ────────────────
             // 新手礼包与活动补偿（如 2026-10 的 DeepSeek 故障补偿 500 积分）
             // 都没有自己的入口，官方口径是去「用量管理 / 个人中心」手动点领取
@@ -452,6 +649,52 @@ pub async fn checkin_for(
                 }
             }
             row
+        }
+        "atomcode" => {
+            // AtomCode：本家的「签到」是**领取免费 CodingPlan**（一次性授权，
+            // 不是每天发积分）。实现按需领取：先探测 `status-v2`，只有确实
+            // 没有有效套餐时才走 Max → Pro → Lite 的级联，命中即停。
+            // 判定细节与「`duplicate` 是成功语义、不许只看 HTTP 200」这条
+            // 最容易写错的地方见 `atomcode::checkin` 的模块头。
+            let claim =
+                crate::server::core::providers::atomcode::checkin::claim_plan_if_needed(store, &id)
+                    .await
+                    .map_err(|error| error.message);
+            claim_result(id, name, &display, true, claim)
+        }
+        "lobsterai" => {
+            // LobsterAI：每日活动三步（查活动位 → 取上下文 → check_in），
+            // 实测 +100 积分/号/天。幂等由实现内做两道预检（上游的
+            // 「今天已领」状态 + 客户端 idempotencyKey），今天已领时如实回
+            // 中性文案而不是再领一次 —— 见 `lobsterai::checkin` 的模块头。
+            let claim =
+                crate::server::core::providers::lobsterai::checkin::claim_daily_checkin(store, &id)
+                    .await
+                    .map_err(|error| error.message);
+            claim_result(id, name, &display, true, claim)
+        }
+        "minimax" | "minimax-intl" => {
+            // MiniMax Code（两个站点共用这一支，地区由 provider id 反查）：
+            // `POST {gw}/minimax-cloud/api/v1/signin/claim`
+            // （**幂等** —— 当天已领回 `claim_result: 2`，本实现把它翻成
+            // `success: true` + `alreadyCompleted: true`，与 AutoClaw 同一处置）。
+            // 七天一轮共 4000 积分，见 `minimax::checkin` 的模块头。
+            //
+            // `log_success_msg = true`：本家的 claim 文案带具体收益
+            // （「第 3 天 +400 积分」），拼进日志才有排查价值。
+            //
+            // 地区一定要传：它决定打哪台网关、以及 SIG 用的 region 参数 ——
+            // 写死国内版会让国际版账号的签到稳定 `invalid signature`。
+            let region = crate::server::core::providers::minimax::Region::from_provider_id(
+                provider_id,
+            )
+            .unwrap_or(crate::server::core::providers::minimax::Region::Cn);
+            let claim = crate::server::core::providers::minimax::checkin::claim_daily_checkin(
+                region, store, &id,
+            )
+            .await
+            .map_err(|error| error.message);
+            claim_result(id, name, &display, true, claim)
         }
         other => json!({
             "id": id,
@@ -742,6 +985,32 @@ pub async fn run_checkin(
             reason,
         );
     }
+    // ── 连登管家：补签 → 档位兑换 → 抽奖（挂签到末尾，与参考项目同款）──
+    //
+    // 为什么挂在这里而不是独立排程：三件事的判据都依赖「今天签到了没有」
+    // （连登天数当天 +1 之后才可能解锁新档位），紧跟签到跑最准；而签到是
+    // 手动与定时共用的唯一入口（`run_checkin` 是两条链的共同执行体），
+    // 挂这里天然覆盖两条路径，不必各写一遍。
+    //
+    // ── 为什么是**后台任务**而不是 await ────────────────────────
+    // 三件事每个账号要 4~6 个上游请求（热力图 / 连登状态 / 兑换 / 抽奖余额 /
+    // 逐次抽奖），加上账号间 800ms 错峰，十几个账号就是几十秒到几分钟 ——
+    // 而管理 API 有 60 秒单请求超时（`gateway::REQUEST_TIMEOUT_MS`）。同步
+    // await 会让前端「立即全部签到」超时报错，而后端其实已经跑完，用户以为
+    // 失败了会再点一次。所以这里**只起任务不等待**：签到结果立刻返回，
+    // 连登管家的收益异步进日志与账号余额。
+    //
+    // 失败**不影响**签到结果：三件事在上游都是幂等的附加收益，且都只服务
+    // 国内版个人账号（门控在 `run_for_accounts` 里）。任何一步出错只进日志，
+    // 绝不把一次成功的签到报成失败 —— 与上面 mark_checkin / record_row 的
+    // 取舍同构。
+    //
+    // 只在**批量轮次**跑（`id.is_none()`）：单账号手动签到是「我只想签这一个」，
+    // 顺手替它兑换抽奖会让用户以为点错了按钮；批量（定时 / 手动全量）才是
+    // 「维护一遍所有账号」的意图。
+    if id.is_none() {
+        spawn_streak_bonus(store.clone(), targets.clone());
+    }
     Ok(json!({
         "results": results,
         "succeeded": succeeded,
@@ -749,6 +1018,40 @@ pub async fn run_checkin(
         "total": results.len(),
         "skipped": skipped,
     }))
+}
+
+/// 连登管家：后台跑「补签 → 档位兑换 → 抽奖」，不阻塞签到响应。
+///
+/// 抽成独立函数的原因有三条：
+///   1. **不阻塞**：见 `run_checkin` 里那段「为什么是后台任务」；
+///   2. **隔离失败**：里面任何错误都只进日志，不会冒泡到签到结果；
+///   3. **串行闸**：同一时刻只允许一轮在跑（手动连点签到不会叠出两轮
+///      重复兑换 / 抽奖 —— 上游幂等，但重复打请求本身是浪费且招风控）。
+fn spawn_streak_bonus(store: AccountStore, targets: Vec<Value>) {
+    /// 进程内串行闸：`swap(true)` 抢到才跑，跑完复位。
+    static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        logging::verbose("[Streak]", "上一轮连登管家仍在执行，本次跳过");
+        return;
+    }
+    crate::spawn_task(async move {
+        let reports = crate::server::core::providers::workbuddy::growth::streak::run_for_accounts(
+            &store, &targets,
+        )
+        .await;
+        let done: usize = reports.iter().map(|report| report.done).sum();
+        let failed: usize = reports.iter().map(|report| report.failed).sum();
+        if done > 0 || failed > 0 {
+            logging::log(
+                "[Streak]",
+                &format!(
+                    "连登管家完成：{done} 项动作{}",
+                    if failed > 0 { format!("，{failed} 项失败") } else { String::new() }
+                ),
+            );
+        }
+        RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    });
 }
 
 #[cfg(test)]

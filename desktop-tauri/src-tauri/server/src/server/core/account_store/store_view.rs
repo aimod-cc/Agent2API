@@ -87,6 +87,23 @@ impl AccountStore {
                     .unwrap_or(false),
             ),
         );
+        // 「需要重新登录」标记（issue #215）：上游注销了会话、refresh token 一并
+        // 作废时由刷新链路落。界面据此把「刷新失败」显示成「需要重新登录」——
+        // 两者对用户的下一步动作完全不同（前者再点一次，后者必须去登录）。
+        // 键恒在（false 表示正常），前端不必判「键缺失」。
+        public.insert(
+            "needsRelogin".to_string(),
+            Value::Bool(
+                fields
+                    .get("needsRelogin")
+                    .map(js_truthy)
+                    .unwrap_or(false),
+            ),
+        );
+        public.insert(
+            "needsReloginReason".to_string(),
+            value_or(fields.get("needsReloginReason"), Value::String(String::new())),
+        );
         public.insert(
             "prefixPath".to_string(),
             value_or_nullish(
@@ -339,6 +356,12 @@ impl AccountStore {
             // 公开形态带 uid(=uk) / loginName(=昵称) / tokenTail（见
             // `kuku_accounts.rs`）
             self.to_kuku_public_account(record)
+        } else if record.provider() == super::coze_accounts::COZE_PROVIDER_ID {
+            // Coze（扣子）：单一站点（`www.coze.cn`），入口有两条 —— 网页登录与
+            // 粘贴整包 Cookie，落进同一条记录。公开形态带 uid(=passport user_id)
+            // / loginName(=昵称) / tokenTail（见 `coze_accounts.rs`）。
+            // **不带 expiresAt**：Cookie 没有到期时刻可读、也没有续期。
+            self.to_coze_public_account(record)
         } else if record.provider() == super::COMMANDCODE_PROVIDER_ID {
             // Command Code：单一入口（粘贴 `user_` API Key），公开形态去掉 key
             // 本体、只留尾号与「有没有 key」（见 `commandcode_accounts.rs`）
@@ -361,6 +384,49 @@ impl AccountStore {
             // tokenTail / tokenExpireAt（续期是否在工作可被肉眼校验，见
             // `orcaterm_accounts.rs`）
             self.to_orcaterm_public_account(record)
+        } else if record.provider() == super::qwenwork_accounts::QWENWORK_PROVIDER_ID {
+            // 千问办公（QwenWorkCN）：公开形态就是通用形状，只多一道
+            // `expiresAt` 的读时兜底（老记录缺这个键时从 JWT 的 exp 补，
+            // 见 `qwenwork_accounts::to_qwenwork_public_account`）。
+            // 显式分派而不是掉进 workbuddy 兜底：那一支虽然恰好也带
+            // `expiresAt`，但它同时会冒出 uid / edition 之类与本家无关的
+            // 空字段，且将来通用形状一动就跟着漂。
+            self.to_qwenwork_public_account(record)
+        } else if record.provider() == super::qclaw_accounts::QCLAW_PROVIDER_ID {
+            // QClaw（腾讯桌面 AI 客户端）：公开形态 = 通用形状 + 两个端口字段
+            // （界面能直接看到「这个账号连的是哪个本机网关」，排障时不用去翻
+            // 配置文件，见 `qclaw_accounts::to_qclaw_public_account`）。
+            // 令牌本体不出现（`accessToken` 只在会话里给适配器用）。
+            self.to_qclaw_public_account(record)
+        } else if super::is_modelscope_family(&record.provider()) {
+            // ModelScope（魔搭）的两个站点（`modelscope` / `modelscope-intl`）共用
+            // 这一份公开形态：账号字段两地完全一致，差别只在域名（那是转发与凭证
+            // 层的事，公开形态不体现）。去掉令牌本体，只留尾 4 位与「有没有令牌」
+            // （见 `modelscope_accounts.rs`）。
+            self.to_modelscope_public_account(record)
+        } else if record.provider() == super::ATOMCODE_PROVIDER_ID {
+            // AtomCode（AtomGit）：公开形态要摘掉**两个**令牌本体
+            // （accessToken 与 refreshToken）—— 只摘前者的那套在这里是漏的，
+            // refreshToken 是长期有效的续期凭据，不能随账号列表下发。
+            self.to_atomcode_public_account(record)
+        } else if record.provider() == super::LOBSTERAI_PROVIDER_ID {
+            // LobsterAI：公开形态要摘掉**令牌本体 + 载荷件三件套**
+            // （refreshToken / uuid / 两个 keyfrom）。它们都是「能续期」的条件，
+            // 一起下发等于把账号的续期能力送出去；界面要的只是 canRefresh 布尔。
+            self.to_lobsterai_public_account(record)
+        } else if record.provider() == super::MARVIS_PROVIDER_ID {
+            // Marvis（腾讯马维斯）：公开形态要摘掉**令牌本体 + openid**。
+            // openid 是登录身份（换令牌还是同一个人），泄漏它等于半个账号；
+            // guid 保留 —— 它是设备号，界面用它区分「哪台机器提取的」，
+            // 且单独拿去打上游没有 token 也没用。
+            self.to_marvis_public_account(record)
+        } else if super::is_minimax_family(&record.provider()) {
+            // MiniMax Code（两个站点都走这一支）：公开形态要摘掉**两个令牌本体**
+            // （accessToken 与 refreshToken）。后者是长期续期凭据（单次有效、
+            // 每次轮换），泄漏它等于把账号的续期能力送出去；界面只需要
+            // `canRefresh` 布尔。判据走 `family_matches`（不认前缀）——
+            // 写 `== "minimax"` 会让国际版掉进通用形态、把 refreshToken 下发出去。
+            self.to_minimax_public_account(record)
         } else if record
             .provider()
             .starts_with(crate::server::core::custom_providers::ID_PREFIX)
@@ -401,6 +467,21 @@ impl AccountStore {
                 // 恒为数字（无记录时 0）而不是缺键：界面按 `Number(...) || 0` 读，
                 // 两种形态都能吃，但恒定的形状让「字段缺失」与「值为 0」不再需要分开判。
                 fields.insert("checkinAt".to_string(), Value::from(record.checkin_at()));
+                // 成长中心连登天数（WorkBuddy 国内版；签到后回读落库，见
+                // `AccountStore::mark_streak_days`）。恒为数字键（0 = 还没读到过），
+                // 与 checkinAt 同一理由：界面按数字读，不必判「字段缺失」。
+                // 只有国内版会写这个字段，别家恒 0 —— 不按 provider 分支是刻意的：
+                // 形状恒定，读侧不必查表。
+                fields.insert(
+                    "streakDays".to_string(),
+                    Value::from(
+                        record
+                            .fields()
+                            .get("streakDays")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(0),
+                    ),
+                );
                 // 单账号并发上限（所有家通用的账号属性）：跨家统一注入的理由与上面
                 // 三条相同 —— 选路（`routing::max_concurrent_of`）与前端账号菜单读的
                 // 是**同一份事实**。恒为数字键（0 = 不限），且**只在这里写一次**：
@@ -460,6 +541,21 @@ impl AccountStore {
                     "displayName".to_string(),
                     Value::String(display_name_of(&fields, &record.id().to_string())),
                 );
+                // 智谱清言的**访客标记**：签到范围判定
+                // （`billing::checkin::supports_checkin`）与签到中心的「范围外」
+                // 原因都读它，两处必须看到同一份事实 —— 而访客形态只存在记录
+                // 里（公开形态是逐个字段组装的，不会自动带上 `isGuest`）。
+                //
+                // 只对本家注入：别的家没有访客形态，给所有账号加一个恒 false 的
+                // 键只会让读侧多一个「要不要判它」的疑问。判据见
+                // `chatglm_accounts::guest_of_record`（只认确凿的访客证据，
+                // 与新手任务列表那边的兜底方向刻意相反）。
+                if record.provider() == super::CHATGLM_PROVIDER_ID {
+                    fields.insert(
+                        "isGuest".to_string(),
+                        Value::Bool(super::chatglm_accounts::guest_of_record(record)),
+                    );
+                }
                 Value::Object(fields)
             }
             // 各家形状恒为对象；真出现异常形态时原样透出，不在这里改语义
@@ -729,7 +825,7 @@ fn display_name_of(public: &Map<String, Value>, id: &str) -> String {
 /// 未登记的家按 userId 兜底 —— 与前端 GENERIC_FEATURES 一致）。
 fn identifier_key_of(provider: &str) -> Option<&'static str> {
     match provider {
-        "workbuddy" | "workbuddy-intl" | "catpaw" | "trae" | "kuku" => Some("uid"),
+        "workbuddy" | "workbuddy-intl" | "catpaw" | "trae" | "kuku" | "coze" => Some("uid"),
         "cline-free" | "cline-pass" => Some("account"),
         "officeace" => Some("id"),
         _ => Some("userId"),

@@ -127,9 +127,35 @@ fn fallback(region: Region) -> Vec<Value> {
                 DEFAULT_CONTEXT_WINDOW,
                 "system",
                 &credits_of_text(factor),
+                fallback_visibility(id),
             )
         })
         .collect()
+}
+
+/// 静态兜底表的可见性：按**世代 + 档位别名**判。
+///
+/// 官方 IDE 的模型选择器只列当前一代的模型；`Qwen3.7-Max` / `Qwen3.7-Plus` /
+/// `Kimi-K2.8-Preview` 这些是上一代，`Auto` / `Ultimate` / `Performance` /
+/// `Efficient` 是**档位别名**（不是具体模型，官方选择器把它们当「自动/档位」
+/// 而不是可点名的模型）。两类都算 `hidden`。
+///
+/// `Sonus` / `Cantus` 是官方在售的内置模型（Qoder 论坛公告、
+/// docs.qoder.com/events/cantuslaunch），**不能**因为名字陌生就判隐藏。
+///
+/// ── 远程路径**不读这个函数**，理由见 [`entry`] 的 `visibility` 参数说明：
+/// 上游那个 `enable` 是「这个套餐能不能用」，不是「客户端展不展示」。
+fn fallback_visibility(id: &str) -> &'static str {
+    const TIER_ALIASES: &[&str] = &["Auto", "Ultimate", "Performance", "Efficient"];
+    if TIER_ALIASES.iter().any(|alias| alias.eq_ignore_ascii_case(id)) {
+        return "hidden";
+    }
+    // 上一代：3.7 及更早的 Qwen、K2.8 Preview
+    let lowered = id.to_ascii_lowercase();
+    if lowered.starts_with("qwen3.7") || lowered.contains("k2.8-preview") {
+        return "hidden";
+    }
+    "shown"
 }
 
 /// 倍率数值 → `credits` 列的展示文本。
@@ -203,12 +229,19 @@ fn entry(
     context_window: i64,
     source: &str,
     credits: &str,
+    visibility: &str,
 ) -> Value {
     let mut model = json!({
         "id": id,
         "name": id,
         "upstreamKey": upstream_key,
         "enabled": enabled,
+        // 可见性**不能**直接拿 `enabled` 顶替（两者语义不同）：`enabled` 是
+        // 网关自己的启用位，静态兜底表里 `Auto` / `Ultimate` / `Performance`
+        // 这些档位别名恰好是 `enabled: false`，但它们不可见的理由不是「没启用」。
+        // 真正的判据由调用方显式传 `visibility`（远程目录读上游 `enable`，
+        // 静态兜底表按 [`fallback_visibility`] 判世代）。
+        "visibility": visibility,
         "reasoning": reasoning,
         "supportsReasoning": reasoning,
         "supportsImages": vision,
@@ -616,6 +649,23 @@ fn parse_catalog(payload: &Value) -> Vec<Value> {
             context_window,
             source,
             &credits,
+            // ── 可见性**不能**读上游 `enable`（2026-10-17 修正）──────────
+            // 早先把 `enable` 当可见性判据是**错的**，实测数据否掉了它：
+            // 一个普通账号拉回来的目录里 17 条只有 `Qwen3.8-Flash` 是
+            // `enable: true`，其余（`GLM-5.3` / `Kimi-K3` / `DeepSeek-V4-Pro`
+            // …）全是 `false` —— 而它们明明出现在 Qoder 官方客户端的模型列表
+            // 里。`enable` 的语义是「**当前账号当前套餐**能不能用这个模型」，
+            // 是**逐账号的权益位**，不是「客户端展不展示」。
+            //
+            // 参考实现那两处也不是在说「可见性」：9router 那行注释讲的是
+            // 「IDE picker 里不列、但 chat 仍接受」——它描述的是**这种情况会
+            // 发生**，不是判据；magpie 按 `Enable` 丢弃是为了只广告「本账号
+            // 现在能用」的模型（它自己的取舍），与官方展示口径无关。
+            //
+            // 所以这里改回与静态兜底同一套**世代 / 档位**判据：那条才是
+            // 「官方客户端会列什么」的依据，而且远程与兜底两条路的结论一致
+            // （不会出现「断网时显示 X、联网后变成 Y」）。
+            fallback_visibility(&id),
         );
         if let Some(object) = model.as_object_mut() {
             object.insert(

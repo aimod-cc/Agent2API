@@ -415,6 +415,11 @@ mod tests {
     /// 准入闸回 **409**；409 是账号级冲突、不触发降级换号，于是客户端明明有
     /// 空着的账号却拿到一个错误。报 3 之后选路就会满员跳过（参考实现里
     /// `candidateSessionAvailable` 承担的同一步）。
+    ///
+    /// 但**只有 0 才换成默认**：1 / 2 是合法配置（准入闸 `limit_for` 照此放行），
+    /// 从前按 `max(配置, 3)` 报数，界面读回 3、选路也按 3 判，用户看到的就是
+    /// 「设成 1 保存后还是 3」。超过闸门上限的值同理按 `MAX_SESSION_LIMIT` 报，
+    /// 否则选路会以为还有几百个空位。
     #[test]
     fn an_unconfigured_concurrency_limit_publishes_the_upstream_cap() {
         let store = store();
@@ -432,8 +437,21 @@ mod tests {
         assert_eq!(Some(3), published(&store), "没配过上限也要报 3，选路据此在满员时跳过本账号");
         store.update_account(&id, &json!({ "maxConcurrent": 5 })).unwrap();
         assert_eq!(Some(5), published(&store), "配了就按配的数");
+        // 低于默认值的配置必须原样报出：取大会让界面读回 3、选路按 3 判，
+        // 而准入闸按 1 拦 —— 设 1 反而比设 3 更容易撞 409
+        store.update_account(&id, &json!({ "maxConcurrent": 1 })).unwrap();
+        assert_eq!(Some(1), published(&store), "设 1 就报 1，不能被默认值 3 抬上去");
+        store.update_account(&id, &json!({ "maxConcurrent": 2 })).unwrap();
+        assert_eq!(Some(2), published(&store), "设 2 就报 2");
         store.update_account(&id, &json!({ "maxConcurrent": 0 })).unwrap();
         assert_eq!(Some(3), published(&store), "0 在本家不是「不限」，回到默认值");
+        // 存储层放行到 999，闸门只认到 MAX_SESSION_LIMIT：报原值会让选路误判余量
+        store.update_account(&id, &json!({ "maxConcurrent": 999 })).unwrap();
+        assert_eq!(
+            Some(u64::from(crate::server::core::providers::codearts::session::MAX_SESSION_LIMIT)),
+            published(&store),
+            "超过闸门上限的配置按闸门实际上限报，与 limit_for 的截断口径一致"
+        );
     }
 }
 

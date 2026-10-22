@@ -99,10 +99,18 @@ pub mod accio;
 /// Antigravity（Google 的 AI IDE，推理走 **Google Cloud Code Assist**
 /// `v1internal`）。适配实现在 `antigravity/`：账号管理（粘贴 Google
 /// refresh token）+ token 刷新（Google OAuth 的 form 端点）+ 模型目录
-/// （`:fetchAvailableModels`，只列 Gemini）+ **会话转发**（`build_chat_request`
-/// 构造 v1internal 信封，响应走 `UpstreamResponse::AntigravityGemini` 那条
-/// Gemini SSE 翻译层）全部已接通；`is_stateful` 恒 false，见 `antigravity/mod.rs`）。
+/// （`:fetchAvailableModels`，Gemini / Claude / GPT-OSS 三个家族）+ **会话转发**
+/// （`build_chat_request` 构造 v1internal 信封，响应走
+/// `UpstreamResponse::AntigravityGemini` 那条 SSE 翻译层 —— 它收的是三家共同的
+/// wire 格式，不止 Gemini）全部已接通；`is_stateful` 恒 false，
+/// 见 `antigravity/mod.rs`）。
 pub mod antigravity;
+/// AtomCode（AtomGit / GitCode）。适配实现在 `atomcode/`：账号管理（粘贴令牌对
+/// 或后续的浏览器登录）+ **无状态 OpenAI 直通转发**（上游本身就是 Chat
+/// Completions，`is_stateful` 恒 false）+ 目录（`coding-plan/models-v2`）+
+/// 额度（`status-v2` 的**每窗口调用次数**）+ 续期（`/oauth/refresh`，会轮换）。
+/// 三条平面与四个坑见 `atomcode/mod.rs` 的模块头。
+pub mod atomcode;
 pub mod autoclaw;
 pub mod catalog;
 /// 远程模型清单的**持久化缓存**（各家的清单在进程重启后由它读回，见模块头）。
@@ -110,6 +118,14 @@ pub mod catalog;
 pub mod catalog_cache;
 pub mod catalog_refresh;
 pub mod catpaw;
+/// 智谱清言（`chatglm.cn`，桌面客户端 2.0.7）：**无状态转发 + 双凭证形态**
+/// （访客免登录可换证 / 登录账号有积分）。适配实现在 `chatglm/`：请求要
+/// 签名三件套 + 设备号（实测边界见 `chatglm/sign.rs`）、多轮 messages 必须
+/// 拍平成单条（上游只认最后一条 user 消息，见 `chatglm/plan.rs`）、响应帧混着
+/// 「增量」与「收尾全文快照」两种语义，因此走 `UpstreamResponse::ChatglmSnapshot`
+/// 那条翻译层（按帧语义差分后下发，见 `protocol::chatglm_stream` 的模块头）。
+/// 余额 / 签到 / 领取类齐备，但只对登录账号有效（访客如实跳过）。
+pub mod chatglm;
 pub mod cline;
 /// CodeArts（华为云 snap-access）。适配器实现在 `codearts/`，
 /// 语义来源与施工计划见 `cpa-deploy/notes/agent2api-codearts-port-plan.md`。
@@ -122,6 +138,21 @@ pub mod codearts;
 /// `UpstreamResponse::CommandCodeNdjson` 那条翻译层，见 `commandcode/mod.rs`。
 pub mod commandcode;
 pub mod content_block;
+/// Coze（扣子，`coze.cn`）。适配实现在 `coze/`：账号管理（**网页登录 / 粘贴
+/// 整包 Cookie**）+ **会话式转发**（`api.coze.cn/v3/chat`，SSE 事件流，
+/// `is_stateful()` 为 true）+ 机器人目录（model 即 `bot_id`）+ 积分余额 /
+/// 逐份到期 / 订阅 + 每日签到。
+///
+/// ── 反代机制（客户端逆向 + 活凭证实测，见 `coze/mod.rs`）──────────
+/// 网页 Cookie 登录态向 `impersonate_coze_user` 换**10 分钟 PAT**，PAT 打
+/// 推理与账户接口；任务中心 / 机器人列表 / 身份这几条**只能 Cookie 打**。
+/// 因此账号存整包 Cookie，PAT 由网关按需铸造、进程内缓存、临期 60 秒重铸。
+///
+/// ── 模型 = 机器人 ────────────────────────────────────────
+/// v3/chat 是 bot 维度的（没有「选模型」这一步），所以目录出的是用户的
+/// bot 清单、model 名就是 `bot_id`；bot 必须发布「Agent As API」渠道，
+/// 未发布回 `code:4015`（`chat.rs` 把它翻成可读指引）。
+pub mod coze;
 /// 自定义提供商的**运行期接线**（目录聚合的追加段 + Chat Completions 协议
 /// 转发）。它不进本文件的身份体系（`ProviderKind` / `PROVIDERS`，见
 /// `custom_providers` 的模块头），但目录合并与转发的分派点都以 id 字符串
@@ -129,6 +160,7 @@ pub mod content_block;
 /// 自定义家走独立通道」的两条路径。
 pub mod custom;
 pub mod kuku;
+pub mod lobsterai;
 pub mod loomy;
 /// MonkeyCode（长亭科技的开源 AI 开发平台）。适配实现在 `monkeycode/`：
 /// 账号管理（粘贴 session）+ 模型目录（`GET /api/v1/users/models`）+
@@ -136,6 +168,11 @@ pub mod loomy;
 /// 含工具自动批准与提问自动应答）全部已接通；`is_stateful` 为 true，
 /// 见 `monkeycode/mod.rs` 的模块头。
 pub mod monkeycode;
+/// ModelScope（魔搭）的两个站点。适配实现在 `modelscope/`：
+/// 账号管理（粘贴 `ms-` 令牌 + 探活取身份）+ **无状态 OpenAI 兼容转发** +
+/// 每日签到 + 魔粒余额；无续期、无桌面端导入。**一套实现、两个 provider**
+/// （`modelscope` / `modelscope-intl`，两站账号体系分开，见 `modelscope/region.rs`）。
+pub mod modelscope;
 pub mod officeace;
 /// OrcaTerm（腾讯云遨驰终端桌面客户端）。适配实现在 `orcaterm/`：
 /// 账号管理（**粘贴 accessToken** / 导入桌面端 `data.bin` 登录态）+
@@ -143,6 +180,31 @@ pub mod officeace;
 /// 多轮拍平为单条输入）+ 余额（月度 AI 配额）全部已接通；
 /// `is_stateful` 为 true（请求内会话，与 KukuAI 同形态），见 `orcaterm/mod.rs`。
 pub mod orcaterm;
+/// Marvis（腾讯「马维斯」桌面 AI 助手）。适配实现在 `marvis/`：
+/// 账号管理（粘贴凭证三件套）+ **无状态 OpenAI 兼容转发** + 设备指纹
+/// （`beacon_wrapper.dll` 离线生成 uskey）；无续期 / 无目录 / 无余额 / 无签到
+/// （各自的排除过程写在对映模块头），见 `marvis/mod.rs`。
+pub mod marvis;
+/// MiniMax Code **国内版**（`agent.minimax.cn` / MiniMax Code 桌面客户端）。适配实现在
+/// `minimax/`：设备码 OAuth 登录（RFC 8628 + PKCE）+ **无状态 Anthropic
+/// Messages 转发** + 远程模型目录（免鉴权）+ 积分余额 / 逐份批次到期 + 七天签到
+/// + refresh_token 续期。**不是**马维斯那家（协议与鉴权体系完全不同），见
+/// `minimax/mod.rs` 的模块头。
+///
+/// 与 [`ProviderKind::MinimaxIntl`] 是同一套协议的两个站点（见 `minimax/region.rs`）。
+pub mod minimax;
+/// 千问办公（QwenWork 中国版，`qwenwork.cn` 桌面客户端）。适配实现在
+/// `qwenwork/`：导入本机登录态（DPAPI + AES-256-GCM）→ JWT →
+/// `POST /api/desktop-sessions` 换 MaaS 密钥 → 标准 OpenAI 兼容推理。
+/// **无状态**（`is_stateful` 默认 false）：上游推理不需要 COSY 签名、
+/// 不需要请求体编码、响应也没有信封 —— 与 Qoder 那家正好相反。
+pub mod qwenwork;
+/// QClaw（腾讯桌面 AI 客户端）。适配实现在 `qclaw/`：**导入本机网关** +
+/// 无状态推理转发 + 模型目录。上游是客户端自己拉起的 OpenClaw 本机网关
+/// （`127.0.0.1:9434/v1/chat/completions` + `x-openclaw-model` 头选模型），
+/// 凭证是 `~/.qclaw/openclaw.json` 里的网关令牌（随客户端重启而变，
+/// 因此每次请求现场重读）。完整依据见 `qclaw/mod.rs` 的模块头。
+pub mod qclaw;
 pub mod onboarding_memory;
 /// **本地就绪闸门**：一条通道在「还没出本机就注定发不出去」时，让选路绕开它
 /// （当前唯一的用户是 ZCode 活动套餐的令牌池，判据与取舍见模块头）。
@@ -435,8 +497,8 @@ pub enum ProviderKind {
     CommandCode,
     /// Antigravity（Google 的 AI IDE）。适配实现在 `antigravity/`：
     /// 账号管理（**粘贴 Google refresh token**）、token 刷新、模型目录
-    /// （**只接 Gemini**）、**会话转发**（`build_chat_request` 构造 v1internal
-    /// 信封）全部已接通，见 `antigravity/mod.rs` 的模块头）。
+    /// （**Gemini / Claude / GPT-OSS 三家族**）、**会话转发**（`build_chat_request`
+    /// 构造 v1internal 信封）全部已接通，见 `antigravity/mod.rs` 的模块头）。
     ///
     /// ── 上游长什么样（规格 `_recon/antigravity-spec.md`，参考
     /// `Acankao/Antigravity-Manager` + `Acankao/9router`）────────────
@@ -469,6 +531,225 @@ pub enum ProviderKind {
     /// 会话转发（建会话 → assistant SSE）+ 余额（月度 AI 配额）；
     /// `is_stateful` 为 true（请求内会话），见 `orcaterm/mod.rs` 的模块头。
     OrcaTerm,
+    /// 智谱清言（`chatglm.cn`，桌面客户端 2.0.7）。适配实现在 `chatglm/`：
+    /// 账号管理（**访客免登录换证** / 手机验证码 / 粘贴令牌）+ 续期
+    /// （`user/refresh`）+ 模型目录 + 无状态转发 + 余额（积分）+
+    /// 签到（每日登录积分）+ 领取类（会员活动）；`is_stateful` 为 false。
+    ///
+    /// ── 上游长什么样（从客户端 app.asar + 线上包逆向，见 `chatglm/mod.rs`）──
+    /// 全部能力都在 `chatglm.cn` 的一组 REST 接口上，请求要带**签名三件套 +
+    /// 设备号**（密钥是客户端内置的；时间戳是智谱自创的校验位算法）。
+    /// 对话响应的帧**混着两种语义**（`part.status == "init"` 是增量、带 finish 的
+    /// 帧给全文快照），因此另开一台按帧语义差分的状态机
+    /// （`UpstreamResponse::ChatglmSnapshot`）。
+    ///
+    /// ── 与别家最不同的一点：**访客凭证** ────────────────────────
+    /// `POST /chatglm/user-api/guest/access` 空 body 恒可换发访客令牌，
+    /// 不需要登录 —— 这是本家「零配置就能用」的入口（与别家「必须有账号」
+    /// 的处境不同）。代价是访客**没有积分体系**：余额 / 签到 / 领取类接口
+    /// 一律 401，那些能力对它如实跳过。
+    ///
+    /// ── 为什么是**一家**（没有地区伴生）─────────────────────────
+    /// 国际站是另一个产品（Z.AI / ZCode，已在注册表里按两家建模），
+    /// 智谱清言这一家只有 `chatglm.cn` 一个站点（测试域 `test.chatglm.cn`
+    /// 是**环境**不是地区，靠 `CHATGLM_BASE_URL` 覆盖即可）。
+    Chatglm,
+    /// 千问办公（QwenWork 中国版，`qwenwork.cn` 桌面客户端）。适配实现在
+    /// `qwenwork/`：**账号管理（导入本机登录态）+ 无状态推理转发 + 模型目录
+    /// + 额度查询**。`is_stateful()` 保持默认 false —— 上游推理是**标准
+    /// OpenAI 兼容协议**，通用编排层一次发送即可完成。
+    ///
+    /// ── 上游长什么样（2026-10-19 从客户端 app.asar + 线上包实证）────
+    /// 它是 Qoder 的换皮（认证路径逐字复用），但服务拆成三个域名：
+    /// ```text
+    ///   openapi.qoder.com.cn   凭据（jobToken/exchange、deviceToken/*）
+    ///   gateway.qwenwork.cn    账号 / 额度 / 模型目录 / 签发 MaaS 密钥
+    ///   maas.xiaoluozi.cn      推理（OpenAI 兼容）
+    /// ```
+    /// 推理链路是**两级令牌**：本机登录态（DPAPI + AES-256-GCM 的
+    /// `auth-v2.dat`）→ JWT → `POST /api/desktop-sessions` 换出
+    /// `sk-mm-v1.*` MaaS 密钥（2 小时）→ 打 `/v1/chat/completions`。
+    /// 两级互不通用（JWT 打推理回 401，MaaS 密钥打 gateway 也 401）。
+    ///
+    /// ── 与 [`ProviderKind::Qoder`] 的关键差别（别照抄那家）─────────
+    /// Qoder 的推理要 COSY 自签名 + 请求体编码 + 响应信封拆解，所以它是
+    /// `is_stateful`；千问办公这三件全都不需要，因此是普通无状态家 ——
+    /// 模块里没有 `cosy.rs` / `protocol.rs` / `stream.rs`。
+    ///
+    /// ── 模型名是三个短名 ────────────────────────────────────
+    /// `flash`（标准 0.1x）/ `pro`（高级 1x）/ `qwen3.8-max-preview`
+    /// （千问最强 1.8x），全部 `format: openai/chat-completions`。
+    /// 上游只认这几个 `key` 的原值，**不要**改写成 `qwen3.8-max` 之类。
+    Qwenwork,
+    /// QClaw（腾讯桌面 AI 客户端，内部跑 OpenClaw 网关）。适配实现在
+    /// `qclaw/`：**导入本机网关配置**（`~/.qclaw/openclaw.json` 的
+    /// `gateway.port` + `gateway.auth.token`）+ 无状态推理转发 + 模型目录。
+    ///
+    /// ── 这一家与别家的根本不同：**推理上游是本机回环地址** ──────
+    /// 别家打公网 HTTPS 上的云端网关，本家打 `127.0.0.1:9434`（QClaw
+    /// 客户端自己拉起的 OpenClaw 网关）：
+    /// ```text
+    ///   POST http://127.0.0.1:9434/v1/chat/completions
+    ///     Authorization: Bearer <gateway.auth.token>
+    ///     body.model = "openclaw"               ← 只能是 agent 名
+    ///     x-openclaw-model: qclaw/<模型 id>      ← 真正的模型选择
+    ///   GET  http://127.0.0.1:19000/proxy/llm/models   ← 模型清单
+    /// ```
+    /// 由此派生三处与别家不同的处置（理由见 `qclaw/mod.rs` 模块头）：
+    ///   1. **出网必须直连**（回环地址走代理必败）→ `system_proxy_when_unset`
+    ///      显式 false；
+    ///   2. **每次请求现场重读 `openclaw.json`**（令牌随 QClaw 重启而变，
+    ///      记录里只存快照兜底）；
+    ///   3. **响应恒回显 `openclaw`** → `sse_model_rewrite = true`。
+    ///
+    /// ── 没有地区伴生 ────────────────────────────────────────
+    /// QClaw 只有一个客户端、一个本机网关（云端模型池由网关自己路由），
+    /// 没有 cn / intl 双站点，拆地区没有依据。
+    Qclaw,
+    /// ModelScope（魔搭）**国内站**（`modelscope`）。适配实现在 `modelscope/`：
+    /// 账号管理（粘贴 `ms-` 令牌 + 探活取身份）、无状态 OpenAI 兼容转发、
+    /// 每日签到与魔粒余额。
+    ///
+    /// ── 与 [`ProviderKind::ModelscopeIntl`] 是同一套协议的两个站点 ────
+    /// 与 AutoClaw / ZCode / MonkeyCode 同一思路：魔搭的**两个站点各有独立的
+    /// 账号体系**（国内令牌打国际站网页接口得 `401 access forbidden`，实测），
+    /// 所以地区必须是 provider 身份而不是账号上的字段。
+    /// 拆成两个 provider 还解决一个具体故障：模型目录只有一份的话，
+    /// 两个站（各自 36 条、内容不同）会互相覆盖。
+    ///
+    /// 实现是**一套**：`modelscope::ModelScopeAdapter` 持有一个 `modelscope::Region`，
+    /// 两个静态实例（`MODELSCOPE_ADAPTER` / `MODELSCOPE_INTL_ADAPTER`）由
+    /// `adapter_for` 按 kind 给出。地区 → provider 的互查在 `modelscope::Region`
+    /// （`kind` / `provider_id` / `from_provider_id`），别处不要再写
+    /// `"modelscope-intl"` 这类字面量。
+    ///
+    /// provider id 都是新名字（本家是全新接入，没有需要保住的存量 id）。
+    Modelscope,
+    /// ModelScope（魔搭）**国际站**（`modelscope-intl`，站点 `www.modelscope.ai`）。
+    /// 与 [`ProviderKind::Modelscope`] 同一套协议、不同站点（网页站与推理域都不同，
+    /// 见 `modelscope::region`）。
+    ModelscopeIntl,
+    /// AtomCode（AtomGit / GitCode 的编码 Agent，`atomcode.atomgit.com`）。
+    ///
+    /// ── 上游长什么样（官方 Rust CLI + 本地 Go 参考实现，见 `atomcode/` 各模块头）──
+    /// 三条平面：登录代理 `acs.atomgit.com`（浏览器 OAuth，**回调不回到本机**，
+    /// 靠轮询判完成）、CodingPlan REST `api.gitcode.com/api/v5`（目录 / 套餐 /
+    /// 领取 / 用量）、聊天网关 `api-ai.gitcode.com/v1`（**OpenAI Chat
+    /// Completions 原生**）。
+    ///
+    /// ── 三个与别家不同的硬事实（每一条都能让整条链路静默失效）────────
+    /// 1. 网关**刻意不用官方默认的 `llm-api.atomgit.com/v1`**：那个要求闭源
+    ///    请求签名，而网关是**按 User-Agent** 决定要不要签名的（自称
+    ///    `atomcode/<ver>` 立刻 `403 ATOMCODE_SIG_MISSING`）。见
+    ///    `atomcode::endpoints` 的实测表。
+    /// 2. 令牌**不是 JWT**：过期只能由 `created_at + expires_in` 推；
+    ///    续期会**轮换** refresh token（必须单飞且必须写回）。
+    /// 3. 网关把失败包装成成功：`HTTP 200` + 正文 `参数错误`（或一页上游 HTML
+    Atomcode,
+    /// LobsterAI（网易有道「有道龙虾」，`lobsterai.youdao.com`）。适配实现在
+    /// `lobsterai/`：账号管理（浏览器登录落于本机 loopback 回调）+ **无状态
+    /// 转发** + 目录 + 积分余额 + 每日签到。
+    ///
+    /// ── 上游长什么样（Go 参考 + TS 原版，见 `lobsterai/` 各模块头）──
+    /// 对话端点是 **OpenAI 兼容的原生协议**（`POST /api/proxy/v1/chat/completions`），
+    /// **只收 SSE**（`stream:false` 回 HTTP 500）—— 本网关的转发入口恒以
+    /// `stream:true` 请求上游，这条天然满足。**没有任何签名**，纯 Bearer。
+    ///
+    /// ── 三个载荷点 ────────────────────────────────────────────
+    /// ① 两个 `X-LobsterAI-Client-*` 头按能力过滤：少了 `kimi-k3-agentic-v1`
+    /// 目录里少一个模型，少了 `thinking-level-control-v1` 发
+    /// `reasoning_effort:"off"` 直接 500；② `uuid` 与两个 `keyfrom` 只在换码时
+    /// 下发、续期必须原样回传（丢了账号永远续不了期）；③ `developer` 角色上游
+    /// 回 502，出站要降级成 `system`。
+    LobsterAi,
+    /// Marvis（腾讯「马维斯」桌面 AI 助手，`marvis.qq.com`）。适配实现在
+    /// `marvis/`：账号管理（**粘贴提取出来的凭证三件套**：`mv_` 令牌 + openid +
+    /// guid）+ **无状态 OpenAI 兼容转发**；无续期、无目录接口、无余额、无签到。
+    ///
+    /// ── 上游长什么样（本机 Windows 1.60.3000.228 实测，见 `marvis/mod.rs`）──
+    /// `POST https://yybadaccess.3g.qq.com/v1/chat/completions` 是**标准 OpenAI
+    /// 协议零转换**（SSE / `tool_calls` / `usage` 全一致），模型名 `main-auto`
+    /// 由服务端路由，真实模型从响应头 `Marvis-Actual-Model` 回来。
+    ///
+    /// ── 与另外三家腾讯产品（WorkBuddy / QClaw / OrcaTerm）没有共用代码 ──
+    /// 鉴权体系完全不同：本家用一组 `Ual-Access-*` 头 + **设备指纹 `uskey`**
+    /// （`beacon_wrapper.dll` 离线生成，Windows 版 544B / 前缀 `CsDVDCER`，
+    /// macOS 版 992B / `CiDVDCER` —— 照抄参考实现必错）。
+    ///
+    /// ── 三层鉴权的实测结论（决定了本家的实现边界）──────────────
+    /// `access_token`（缺 → 401/4100403）→ `uskey`（缺 → 403/4100404）→
+    /// `Ual-Access-Signature`（**实测不校验**：空签名同样 200）。因此
+    /// 只需现场生成 uskey，不必复现签名算法。
+    ///
+    /// ── 凭证为什么不落明文 ──────────────────────────────────────
+    /// `db/login.db` 的 `userinfo` 是密文、`marvis_seckv.dll` 的 `mskv_get`
+    /// 会 `WinVerifyTrust` 校验调用方签名（只认腾讯签名进程）。所以添加账号
+    /// 走「管理员跑一次 `_recon/marvis-cred-extract.py` → 粘贴三件套」，
+    /// 与 OrcaTerm / Kuku 的「粘贴 / 导入本机登录态」同一形态。
+    Marvis,
+    /// MiniMax Code（`agent.minimax.cn`，MiniMax 的 AI 编程客户端）。适配实现在
+    /// `minimax/`：设备码 OAuth 登录 + **无状态 Anthropic Messages 转发** +
+    /// 远程模型目录 + 积分余额 / 批次到期 + 七天签到 + refresh_token 续期。
+    ///
+    /// ── 上游长什么样（2026-10-21 实测，见 `minimax/mod.rs`）──────────
+    /// `POST https://agent.minimax.cn/mavis/api/v1/llm/v1/messages` 是**标准
+    /// Anthropic Messages**（客户端 provider 声明 `npm: '@ai-sdk/anthropic'`），
+    /// 只认 `Authorization: Bearer`（发 `x-api-key` 会被 401 `token is required`）。
+    ///
+    /// ── 三条与别家都不同的实测事实 ────────────────────────────
+    /// ① **两套门禁**：推理端点只看 Bearer（签名与查询串都不影响判定），
+    ///    而账户/签到端点要三个 MD5 签名头（缺了回 `400 invalid signature`）；
+    /// ② **模型强制推理**：发 `thinking:{"type":"disabled"}` 会被 400 拒掉；
+    /// ③ **令牌每小时轮换**：`mmoat_` 访问令牌 1 小时、`mmort_` 刷新令牌单次
+    ///    有效且每次续期都换新的 —— 所以账号 id 由 JWT 的 `user.id` 派生
+    ///    （令牌会变、身份不变），续期后必须立刻落盘。
+    ///
+    /// ── 与马维斯（Marvis）没有共用代码 ────────────────────────
+    /// 两家名字像、都以桌面客户端为主，但协议完全不同：Marvis 是 OpenAI 兼容 +
+    /// `Ual-Access-*` 头组 + 设备指纹 uskey；本家是 Anthropic Messages + 单一
+    /// Bearer + 账户接口 MD5 签名。**别把两者混成一个 provider。**
+    ///
+    /// ── 与 [`ProviderKind::MinimaxIntl`] 是同一套协议的两个站点 ────
+    /// 地区必须是 provider 身份而不是账号字段：客户端按 `<env>/<region>` 分目录
+    /// 存登录态、两地授权服务器不同域（令牌互不通用）、模型目录只有一份缓存槽
+    /// （不拆就会互相覆盖）。国内版沿用裸 id `minimax`（存量账号记的就是它），
+    /// 国际版是 `minimax-intl`。互查在 `minimax::Region`，别处不要再写
+    /// `"minimax-intl"` 这类字面量。
+    Minimax,
+    /// MiniMax Code **国际版**（`minimax-intl`，网关 `agent.minimaxi.com`、
+    /// 授权服务器 `account.minimax.io`）。
+    ///
+    /// 与 [`ProviderKind::Minimax`] 同一套协议、不同站点：推理 / 目录 / 余额 /
+    /// 签到 / 续期的**请求形状完全一致**，只有域名分叉（见 `minimax/region.rs`
+    /// 的实测表）。⚠️ 网关写 `agent.minimaxi.com` 而不是客户端常量表里的
+    /// `agent.minimax.io`：后者实测只回 307 跳到前者，直接打权威域少一跳。
+    MinimaxIntl,
+    /// Coze（扣子，`coze.cn` / `api.coze.cn`）。适配实现在 `coze/`：账号管理
+    /// （网页登录 / 粘贴整包 Cookie）+ **会话式转发**（v3/chat 的 SSE 事件流，
+    /// `is_stateful()` 为 true）+ 机器人目录 + 余额 / 到期 / 订阅 + 每日签到。
+    ///
+    /// ── 反代机制（客户端 app.asar 逆向 + 活凭证实测，2026-10-21）──
+    /// 凭证是 `.coze.cn` 域**整包 Cookie**（网页登录态）；网关用它向
+    /// `POST /api/permission_api/coze_web_app/impersonate_coze_user` 铸一枚
+    /// **10 分钟 PAT**（`cztei_` 前缀，Bearer），PAT 打推理与 `trade/*` 系列。
+    /// ⚠️ `expires_in` 回的是**绝对 epoch 秒**不是剩余秒数（`credentials.rs` 双判）。
+    ///
+    /// ── 三条链的凭证分界（实测，别混）──────────────────────────
+    ///   - PAT：`trade/credit/*`（余额 / 明细 / 订阅）、`ug/.../client_download_reward`、
+    ///     `coze_claw/*`、`api.coze.cn/v3/chat`；
+    ///   - 只能 Cookie：`incentive/user_task/list`、`incentive/activity/reward`、
+    ///     `bot/get_bot_list`、`passport/account/info/v2/` —— 打 PAT 一律
+    ///     `700012006 登录认证失败`。
+    ///
+    /// ── 没有续期 ────────────────────────────────────────────
+    /// Cookie 是网页登录态（不是 JWT），上游没有刷新接口 ——
+    /// `supports_refresh` 保持默认 false，过期只能重新登录（与 Kuku / CatPaw
+    /// 同一处境）。PAT 不是账号级凭证，由 `credentials::ensure_pat` 按需铸造。
+    ///
+    /// ── 签到形态 ────────────────────────────────────────────
+    /// 两条独立的领奖链（活动奖励走 Cookie、下载客户端奖励走 PAT），已接进
+    /// `core::auto_checkin`（清单里列 `coze`），claim 见 `coze::checkin`。
+    Coze,
 }
 
 /// 一个提供商的静态元数据。
@@ -565,6 +846,64 @@ pub const PROVIDERS: &[ProviderMeta] = &[
     // 它的模型名（glm-5.3 / kimi-k3 / deepseek-v4-* 等）与 codearts / catpaw /
     // zcode 大面积同名，同样靠末位让同名模型优先归已有各家。
     ProviderMeta { id: "orcaterm", label: "OrcaTerm" },
+    // 智谱清言（`chatglm.cn`）：单一站点（国际站是另一个产品 Z.AI/ZCode，
+    // 已按两家建模在注册表里），因此没有地区伴生。排末尾（2026-10 接入，
+    // 后到居后）。它的 GLM 系列模型名与 zcode / codearts / catpaw / orcaterm
+    // 大面积同名 —— 靠末位让同名模型优先归已有各家（那些是开放平台账号，
+    // 配额与稳定性都比本家的消费级网页端好）。
+    ProviderMeta { id: "chatglm", label: "智谱清言" },
+    // 千问办公（QwenWork 中国版）：单一站点（认证链复用 Qoder，但网关与推理
+    // 都是自己的域名），没有地区伴生。排末尾（2026-10 接入，后到居后）。
+    // 它的模型名（flash / pro / qwen3.8-max-preview）与别家**不重名**，
+    // 因此排位不影响同名归属，只是遵循「新家追加在末尾」的书写约定。
+    ProviderMeta { id: "qwenwork", label: "千问办公" },
+    // QClaw（腾讯桌面 AI 客户端）：单一入口（导入本机网关配置），没有地区
+    // 伴生（一个客户端、一个本机网关，云端模型池由网关自己路由）。
+    // 排末尾（2026-10 接入，后到居后）。它的模型名（pool-glm-5.2 /
+    // pool-deepseek-v4-pro / pool-kimi-k2.6 / pool-minimax-m3 …）与
+    // codearts / catpaw / zcode / chatglm 大面积同名 —— 同样靠末位让同名
+    // 模型优先归已有各家（那些是开放平台账号，配额与稳定性更好）。
+    ProviderMeta { id: "qclaw", label: "QClaw" },
+    // ModelScope（魔搭）的两个站点**相邻**排列（与 AutoClaw / Qoder / ZCode /
+    // MonkeyCode 同一理由：同一条产品线的两个版本，中间隔着别家会让「找国际版」
+    // 变成一次扫描）。顺序也决定模型目录合并时同名模型先归谁家 ——
+    // 国内版在前（用户直觉里「魔搭就是国内那个站」）。
+    //
+    // 两个地区**都带版本后缀**（与 WorkBuddy 同款）：它们是两家独立的提供商
+    // （账号体系、模型目录都分开），名字是用户区分它们的唯一线索 ——
+    // 只给国际版加后缀会让「ModelScope」读起来像「两地通吃的那一家」。
+    ProviderMeta { id: "modelscope", label: "ModelScope 国内版" },
+    ProviderMeta { id: "modelscope-intl", label: "ModelScope 国际版" },
+    // AtomCode（AtomGit / GitCode）：单一地区、单一入口（浏览器登录的界面侧
+    // 尚未接，见 `atomcode/mod.rs` 的模块头），没有国际版伴生。排在末尾
+    // （后到居后，同样让同名模型优先归已有各家）。
+    ProviderMeta { id: "atomcode", label: "AtomCode" },
+    // LobsterAI（网易有道「有道龙虾」）：单一入口（浏览器登录），没有地区伴生。
+    // 排在末尾（后到居后）。
+    ProviderMeta { id: "lobsterai", label: "LobsterAI" },
+    // Marvis（腾讯「马维斯」）：单一入口（粘贴凭证三件套：mv_ 令牌 + openid +
+    // guid），没有地区伴生。排在末尾（2026-10 接入，后到居后）。
+    //
+    // 它的模型清单只有 `main-auto` 一个路由别名，与别家**不重名** ——
+    // 因此排位不影响同名归属，只是遵循「新家追加在末尾」的书写约定。
+    ProviderMeta { id: "marvis", label: "马维斯 Marvis" },
+    // MiniMax Code 国内版（`agent.minimax.cn`）：设备码登录 / 粘贴访问令牌 /
+    // 导入本机登录态。**两个站点相邻排列**（与 ModelScope / AutoClaw / Qoder /
+    // ZCode / MonkeyCode 同一理由：同一条产品线的两个版本，中间隔着别家会让
+    // 「找国际版」变成一次扫描）。顺序也决定模型目录合并时同名模型先归谁家 ——
+    // 两家的模型名完全相同（`MiniMax-M3` 等），国内版在前 ⇒ 同名先归国内版
+    // （那是绝大多数用户的那一版）。排在末尾（2026-10 接入，后到居后）。
+    ProviderMeta { id: "minimax", label: "MiniMax Code 国内版" },
+    // MiniMax Code 国际版（`agent.minimaxi.com`）。与国内版同一套协议、不同
+    // 站点（见 `minimax/region.rs`）。
+    ProviderMeta { id: "minimax-intl", label: "MiniMax Code 国际版" },
+    // Coze（扣子，字节跳动）：单一站点（`www.coze.cn` / `api.coze.cn`），
+    // 没有地区伴生（国际版 coze.com 是另一套账号体系，未验证 ⇒ 按「判不出来
+    // 不拆」只开国内版）。排末尾（2026-10 接入，后到居后）。
+    //
+    // 它的「模型」是用户自己的机器人（`bot_id`），与别家的模型名**不重名**，
+    // 因此排位不影响同名归属，只是遵循「新家追加在末尾」的书写约定。
+    ProviderMeta { id: "coze", label: "Coze 扣子" },
 ];
 
 /// provider id 在注册表里的下标（未知 id → None）。
@@ -649,6 +988,17 @@ pub fn kind_from_id(id: &str) -> Option<ProviderKind> {
         "antigravity" => Some(ProviderKind::Antigravity),
         "officeace" => Some(ProviderKind::OfficeAce),
         "orcaterm" => Some(ProviderKind::OrcaTerm),
+        "chatglm" => Some(ProviderKind::Chatglm),
+        "qwenwork" => Some(ProviderKind::Qwenwork),
+        "qclaw" => Some(ProviderKind::Qclaw),
+        "modelscope" => Some(ProviderKind::Modelscope),
+        "modelscope-intl" => Some(ProviderKind::ModelscopeIntl),
+        "atomcode" => Some(ProviderKind::Atomcode),
+        "lobsterai" => Some(ProviderKind::LobsterAi),
+        "marvis" => Some(ProviderKind::Marvis),
+        "minimax" => Some(ProviderKind::Minimax),
+        "minimax-intl" => Some(ProviderKind::MinimaxIntl),
+        "coze" => Some(ProviderKind::Coze),
         // 走到这里 = 上面的注册表判定已放行、这个 match 却没有对应分支：
         // 只可能是有人给 `PROVIDERS` 加了条目忘了加这里。开发期喊出来；
         // release 返回 None（见上：宁可为「未知」，不可误认成别家）。
@@ -691,6 +1041,17 @@ pub const fn kind_id(kind: ProviderKind) -> &'static str {
         ProviderKind::Antigravity => "antigravity",
         ProviderKind::OfficeAce => "officeace",
         ProviderKind::OrcaTerm => "orcaterm",
+        ProviderKind::Chatglm => "chatglm",
+        ProviderKind::Qwenwork => "qwenwork",
+        ProviderKind::Qclaw => "qclaw",
+        ProviderKind::Modelscope => "modelscope",
+        ProviderKind::ModelscopeIntl => "modelscope-intl",
+        ProviderKind::Atomcode => "atomcode",
+        ProviderKind::LobsterAi => "lobsterai",
+        ProviderKind::Marvis => "marvis",
+        ProviderKind::Minimax => "minimax",
+        ProviderKind::MinimaxIntl => "minimax-intl",
+        ProviderKind::Coze => "coze",
     }
 }
 
