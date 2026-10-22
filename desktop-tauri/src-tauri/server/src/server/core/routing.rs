@@ -63,24 +63,34 @@ use crate::server::core::account_store::store_util::js_truthy;
 /// 真名是**按家**解析的：同一个 `gpt-6-astra` 在 workbuddy 家映射到
 /// `deepseek-v4.1-flash`，在 catpaw 家可能映射到别的 target。而选路要对
 /// **账号列表**逐个判定，同一家往往有多个账号 —— 不缓存的话，一家有几个账号
-/// 就把 `wire_target_for_provider`（内含一次 `model_rules::current()` 克隆与
-/// 一轮清单扫描）跑几遍。缓存键是 provider id，规模恒等于候选家数（≤6）。
+/// 就把候选链解析（内含一次 `model_rules::current()` 克隆与一轮清单扫描）
+/// 跑几遍。缓存键是 provider id，规模恒等于候选家数（≤6）。
+///
+/// ── 缓存的是**候选链**而不是单名（家内主备，2026-10）──────────
+/// 同一 alias 在一家挂多条映射时，转发侧按位逐个尝试，限额冷却必须逐位判定：
+/// 「第一个目标撞了限额、第二个目标明明还有额度」的账号不该被整条摘掉。所以
+/// [`Self::for_provider_all`] 给出链上全部真名，[`rate_limit_reset_at`] 按
+/// 「任一可用 = 账号可用」判定；单答案的 [`Self::for_provider`] 取链首，供
+/// 视图 / 日志这类「按家问一个名字」的路径继续使用。
 ///
 /// 用 `Mutex` 而不是 `RefCell`：本结构会被**异步**的选路路径持有（`select_target_account`
 /// 是 async），而 `RefCell` 不是 `Sync` —— 它会让整个 handler 的 future 失去
 /// `Send`，编译期直接失败（这正好也说明它跨 await 存在）。锁的临界区只有
-/// 几次哈希查找，且与 `wire_target_for_provider` 的解析不重叠（解析在锁外做，
-/// 结果才写回），不存在锁竞争问题。
+/// 几次哈希查找，且与候选链的解析不重叠（解析在锁外做，结果才写回），
+/// 不存在锁竞争问题。
 pub struct CooldownKeys<'a> {
     /// 客户端请求名（原始形态，未解析）
     requested: &'a str,
-    /// provider id → 该家收到的上游真名
-    resolved: Mutex<HashMap<String, String>>,
+    /// provider id → 该家候选链上的全部上游真名（每位一个额度桶）
+    resolved_all: Mutex<HashMap<String, Vec<String>>>,
 }
 
 impl<'a> CooldownKeys<'a> {
     pub fn new(requested: &'a str) -> Self {
-        Self { requested, resolved: Mutex::new(HashMap::new()) }
+        Self {
+            requested,
+            resolved_all: Mutex::new(HashMap::new()),
+        }
     }
 
     /// 请求名原文（轮转游标按它分键：不同模型的候选集合不同，各轮各的）
@@ -88,57 +98,85 @@ impl<'a> CooldownKeys<'a> {
         self.requested
     }
 
-    /// 该家实际收到的上游模型名 —— 也就是它的冷却键。
+    /// 该家**候选链上全部**上游真名 —— 每个都是独立的额度桶。
     ///
-    /// 解析不出（请求名为空 / 该家既不原生承载、也没有映射指向它）时原样返回
-    /// 请求名：与转发侧 `wire_target_for_provider` 的 ④ 兜底同一口径 ——
-    /// 那时发出去的就是请求名，键也该是它。
+    /// 同一 alias 在一家挂多条映射（家内主备）时，转发侧按位逐个尝试
+    /// （`catalog::wire_targets_for_provider` 的顺序），限额冷却必须逐位判定：
+    /// 否则「第一个目标撞了限额、第二个目标明明还有额度」的账号会被整条摘掉
+    /// —— 那正是家内候选链要修的浪费。解析不出时返回空表（与
+    /// [`Self::for_provider`] 的「原样返回请求名」不同：那边总能构造一次发送，
+    /// 这边没有可冷却的键）。
     ///
-    /// 锁中毒（别的线程 panic 过）时**不做缓存**、直接现算 —— 缓存只是加速，
-    /// 选路结果不该因为一个内部加速器而失败。
-    pub fn for_provider(&self, provider_id: &str) -> String {
+    /// 锁中毒时**不做缓存**、直接现算 —— 缓存只是加速，选路结果不该因为一个
+    /// 内部加速器而失败。传 `None` 账号解析：候选链按家算，同家账号共享同一份
+    /// 清单与规则（见 `wire_targets_for_provider` 的 `_account` 说明）。
+    pub fn for_provider_all(&self, provider_id: &str) -> Vec<String> {
         if self.requested.is_empty() || provider_id.is_empty() {
-            return self.requested.to_string();
+            return Vec::new();
         }
-        if let Ok(cache) = self.resolved.lock() {
+        if let Ok(cache) = self.resolved_all.lock() {
             if let Some(cached) = cache.get(provider_id) {
                 return cached.clone();
             }
         }
-        // 传 `None` 账号：`wire_target_for_provider` 当前不读它（同家多条映射
-        // 由 target 的通道前缀判定，见那里的说明），而选路时账号还没被选中 ——
-        // 「按账号解析」在判定阶段根本无从谈起。
-        //
-        // ── 自定义提供商走自己的解析（第二阶段）───────────────────
-        // modelRules 的映射表不认识 custom id（添加侧按注册表校验），
-        // `wire_target_for_provider` 对它只会原样返回请求名 —— 而自定义家的
-        // 真名解析有自己的数据源（提供商记录上的 `mappings`，见
-        // `custom_providers::wire_model_for`）。跳过这一步会让 alias 请求的
-        // 冷却写在请求名上：正是本模块头描述的那类「判定漏命中、已限额账号
-        // 被反复选中」的事故形态，所以这里必须按家分派。
-        let wire =
+        let wires: Vec<String> =
             if crate::server::core::custom_providers::is_custom_provider_id(provider_id) {
-                crate::server::core::providers::custom::forward::cooldown_model(
+                // 自定义家的真名解析有自己的数据源（提供商记录上的 `mappings`）
+                // 且目前是单答案 —— 家内候选链尚未覆盖（见 bindings::resolve）。
+                // 跳过这一步会让 alias 请求的冷却写在请求名上：正是本模块头描述
+                // 的那类「判定漏命中、已限额账号被反复选中」的事故形态。
+                vec![crate::server::core::providers::custom::forward::cooldown_model(
                     provider_id,
                     self.requested,
-                )
+                )]
             } else {
-                crate::server::core::providers::catalog::wire_target_for_provider(
+                crate::server::core::providers::catalog::wire_targets_for_provider(
                     self.requested,
                     provider_id,
                     None,
                 )
-                .model
+                .into_iter()
+                .map(|target| target.model)
+                .collect()
             };
-        if let Ok(mut cache) = self.resolved.lock() {
-            cache.insert(provider_id.to_string(), wire.clone());
+        if let Ok(mut cache) = self.resolved_all.lock() {
+            cache.insert(provider_id.to_string(), wires.clone());
         }
-        wire
+        wires
     }
 
-    /// 某条账号记录的冷却键：按它所属的家解析（每条账号记录只属于一家）。
+    /// 该家实际收到的**第一个**上游模型名 —— 单答案消费方的兼容入口。
+    ///
+    /// 语义 = 候选链首位（[`Self::for_provider_all`] 的第一项），解析不出时
+    /// 原样返回请求名（与改造前逐字一致）。转发侧的发送名已不从这里取
+    /// （target 循环按位传目标），剩下的调用方都是「按家问一个名字」的视图、
+    /// 日志与记账路径 —— 单目标配置（绝大多数）行为不变；多目标配置下它代表
+    /// 「主位」，要逐位判定请改用 [`Self::for_provider_all`]。
+    pub fn for_provider(&self, provider_id: &str) -> String {
+        self.for_provider_all(provider_id)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| self.requested.to_string())
+    }
+
+    /// 某条账号记录的**全部**冷却键：按它所属的家解析（每条账号记录只属于一家）。
+    pub fn for_account_all(&self, account: &Value) -> Vec<String> {
+        self.for_provider_all(provider_of(account))
+    }
+
+    /// 某条账号记录的冷却键（首位）：按它所属的家解析。
     pub fn for_account(&self, account: &Value) -> String {
         self.for_provider(provider_of(account))
+    }
+
+    /// 注入式构造（**仅测试**）：绕过按家解析，直接给定各家的候选链。
+    ///
+    /// 冷却判定的测试要回答的是「链上多个真名时怎么算恢复时间」，而真实解析
+    /// 依赖提供商清单与 modelRules —— 那是另一个模块的状态，拉进来只会把测试
+    /// 变成集成测试。生产入口仍是 [`Self::new`]。
+    #[cfg(test)]
+    pub(crate) fn with_chain(requested: &'a str, chains: HashMap<String, Vec<String>>) -> Self {
+        Self { requested, resolved_all: Mutex::new(chains) }
     }
 }
 
@@ -157,21 +195,48 @@ pub fn is_rate_limited(account: &Value, keys: &CooldownKeys<'_>, now: i64) -> bo
 /// Node 版口径：`Number(limit.resetAt) || 0`，只有大于 now 才返回，
 /// 否则返回 0 —— 这个 0 在选路里表示「当前可用」，不是「立刻恢复」。
 ///
-/// 冷却键按 [`CooldownKeys`] 解析（真名，不是请求名）。
+/// ── 候选链语义（家内主备，2026-10）───────────────────────────
+/// 冷却键按 [`CooldownKeys::for_account_all`] 逐位判定：候选链上**只要还有
+/// 一个目标没在冷却，这个账号就继续参与** —— 撞限额的那一位会被发送侧的
+/// target 循环跳过（免费目标优先，见 `provider_loop::lane_targets`），而不是
+/// 把整个账号摘掉。全部都在冷却时返回**最早**的恢复时间（第一个腾出额度的
+/// 目标的时刻），与选路第二级「恢复最早的试一次」同一把尺子。
+///
+/// 单目标配置（绝大多数）与改造前逐字等价：链上只有一位，「任一可用」退化成
+/// 「那一位可用」。
+///
+/// ── 链为空时的兜底（复核补丁）─────────────────────────────────
+/// 解析不出任何目标（未知名、该家既不原生承载也没映射指向它）时，发送侧会
+/// **原样把请求名发出去**（`wire_targets_for_provider` 返回空表 → `wire: None`
+/// → `wire_target_for_provider` 的兜底），限额也就记在请求名上。所以这里必须
+/// 退回单答案键（`for_account`，解析不出时正是请求名）—— 否则「按请求名记下的
+/// 冷却」在判定侧查不到，账号会被反复选中、反复撞同一个 429，正是本模块头
+/// 点名的那类事故。这就把「链为空」也拉回改造前的口径。
 pub fn rate_limit_reset_at(account: &Value, keys: &CooldownKeys<'_>, now: i64) -> i64 {
-    let key = keys.for_account(account);
-    let Some(limit) = account
-        .get("rateLimits")
-        .and_then(|limits| limits.get(key.as_str()))
-    else {
+    let Some(limits) = account.get("rateLimits") else {
         return 0;
     };
-    let reset_at = limit
-        .get("resetAt")
-        .and_then(js_number)
-        .unwrap_or(0.0);
-    if reset_at > now as f64 {
-        reset_at as i64
+    let mut chain = keys.for_account_all(account);
+    if chain.is_empty() {
+        chain.push(keys.for_account(account));
+    }
+    let mut earliest = f64::INFINITY;
+    for key in chain {
+        let reset_at = limits
+            .get(key.as_str())
+            .and_then(|limit| limit.get("resetAt"))
+            .and_then(js_number)
+            .unwrap_or(0.0);
+        // 没有记录 / 已过期 = 这一位可用 = 账号整体可用（0）
+        if reset_at <= now as f64 {
+            return 0;
+        }
+        if reset_at < earliest {
+            earliest = reset_at;
+        }
+    }
+    if earliest.is_finite() {
+        earliest as i64
     } else {
         0
     }
@@ -1159,6 +1224,104 @@ mod tests {
         let plan = plan_route(&accounts, &keys, &counts, &[], 1_700_000_000_000, &meta);
         let order: Vec<&str> = plan.ordered.iter().map(|entry| entry.id.as_str()).collect();
         assert_eq!(order, vec!["a1", "a2", "b1", "b2"]);
+    }
+
+    // ── 家内候选链的冷却判定（rate_limit_reset_at 的「任一可用 = 账号可用」）──
+
+    /// 一条带 `rateLimits` 的账号记录；`now` 取一个远未来的常数，测试里
+    /// 直接用绝对时间戳构造「在冷却 / 已过期」两种状态。
+    fn account_with_limits(limits: Value) -> Value {
+        json!({ "id": "a1", "provider": "prov", "priority": 10, "rateLimits": limits })
+    }
+
+    /// 候选链上只要还有一个目标没在冷却，账号就继续可用（reset 0）——
+    /// 撞限额的那一位由发送侧的 target 循环跳过，而不是把整个账号摘掉。
+    #[test]
+    fn a_chain_with_any_free_target_keeps_the_account_usable() {
+        let now = 1_700_000_000_000i64;
+        let keys = CooldownKeys::with_chain(
+            "free",
+            [("prov".to_string(), vec!["model-a".to_string(), "model-b".to_string()])]
+                .into_iter()
+                .collect(),
+        );
+        let account = account_with_limits(json!({
+            "model-a": { "resetAt": (now + 60_000) as f64 },
+        }));
+        assert_eq!(rate_limit_reset_at(&account, &keys, now), 0);
+        assert!(!is_rate_limited(&account, &keys, now));
+    }
+
+    /// 全部都在冷却时，返回**最早**的恢复时间（第一个腾出额度的目标的时刻）
+    /// —— 与选路第二级「恢复最早的试一次」同一把尺子。
+    #[test]
+    fn an_all_cooled_chain_reports_the_earliest_reset() {
+        let now = 1_700_000_000_000i64;
+        let keys = CooldownKeys::with_chain(
+            "free",
+            [("prov".to_string(), vec!["model-a".to_string(), "model-b".to_string()])]
+                .into_iter()
+                .collect(),
+        );
+        let account = account_with_limits(json!({
+            "model-a": { "resetAt": (now + 90_000) as f64 },
+            "model-b": { "resetAt": (now + 30_000) as f64 },
+        }));
+        assert_eq!(rate_limit_reset_at(&account, &keys, now), now + 30_000);
+        assert!(is_rate_limited(&account, &keys, now));
+    }
+
+    /// 链上任何一位没有记录 / 已过期 = 那一位可用 = 整体可用（单目标配置
+    /// 与改造前逐字等价：链上只有一位，「任一可用」退化成「那一位可用」）。
+    #[test]
+    fn an_expired_entry_counts_as_free() {
+        let now = 1_700_000_000_000i64;
+        let keys = CooldownKeys::with_chain(
+            "free",
+            [("prov".to_string(), vec!["model-a".to_string()])].into_iter().collect(),
+        );
+        let account = account_with_limits(json!({
+            "model-a": { "resetAt": (now - 1) as f64 },
+        }));
+        assert_eq!(rate_limit_reset_at(&account, &keys, now), 0);
+    }
+
+    /// 链为空（这个名字在这一家解析不出目标）时退回**单答案键**，也就是
+    /// 请求名 —— 与改造前逐字一致。
+    ///
+    /// 为什么必须有这条：解析不出目标时发送侧原样发请求名（`wire: None`），
+    /// 限额也记在请求名上；若判定侧只认链、读不到那条记录，账号就会被反复
+    /// 选中再撞一次 429。
+    #[test]
+    fn an_empty_chain_falls_back_to_the_request_name_key() {
+        let now = 1_700_000_000_000i64;
+        let keys = CooldownKeys::with_chain("free", HashMap::new());
+        let account = account_with_limits(json!({
+            "free": { "resetAt": (now + 60_000) as f64 },
+        }));
+        assert_eq!(rate_limit_reset_at(&account, &keys, now), now + 60_000);
+        assert!(is_rate_limited(&account, &keys, now));
+        // 对照：请求名上没有记录 → 可用（不是「一律冷却」）
+        let fresh = account_with_limits(json!({}));
+        assert_eq!(rate_limit_reset_at(&fresh, &keys, now), 0);
+    }
+
+    /// 单答案兼容入口 `for_provider` 取链上首位；链为空（解析不出）时原样
+    /// 返回请求名 —— 与改造前的兜底口径一致。
+    #[test]
+    fn for_provider_returns_the_chain_head_and_falls_back_to_the_request_name() {
+        let keys = CooldownKeys::with_chain(
+            "free",
+            [("prov".to_string(), vec!["model-b".to_string(), "model-a".to_string()])]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(keys.for_provider("prov"), "model-b");
+        // 没有这一家的链 → 回落请求名
+        assert_eq!(keys.for_provider("other"), "free");
+        // 请求名为空 → 空链 → 兜底请求名（空串）
+        let empty = CooldownKeys::with_chain("", HashMap::new());
+        assert_eq!(empty.for_provider("prov"), "");
     }
 }
 
