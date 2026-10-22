@@ -23,7 +23,7 @@ Agent2API brings the signed-in accounts of several AI desktop clients together b
 ## ✨ Key Features
 
 - 🔌 **OpenAI-compatible** — point your client at the gateway with a custom `base_url`; Chat, Responses and Messages protocols are all supported
-- 🏪 **22 built-in providers** — WorkBuddy, Raccoon, CatPaw, Qoder, Trae and more work out of the box, plus custom providers via passthrough
+- 🏪 **24 built-in providers** — WorkBuddy, Raccoon, CatPaw, Qoder, Trae and more work out of the box, plus custom providers via passthrough
 - 🔁 **Credentials that renew themselves** — tokens refresh before they expire, near-expiry ones can be renewed in bulk, and the model catalog stays current
 - 🪂 **Multi-account rotation** — accounts queue by priority, a 429 moves on to the next account, and rate-limited accounts are skipped instead of stalling
 - 🛡️ **Egress proxies** — give each account its own exit IP; outbound fingerprints imitate the official clients
@@ -82,6 +82,9 @@ Reverse-proxy capabilities at a glance (✓ supported · ✗ not supported · �
 | ModelScope (MoDa, domestic / international) | ✓ | ✗ | ✓ | ✓ | ✓ | — |
 | AtomCode (AtomGit / GitCode) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | LobsterAI (NetEase Youdao, Youdao Lobster) | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| Marvis (Tencent) | ✓ | ✗ | ✗ | ✗ | ✗ | — |
+| MiniMax Code (China / International) | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| Coze (ByteDance) | ✓ | ✗ | ✓ | ✓ | ✓ | ✓ |
 | Custom providers | ✓ | — | ✓ | — | — | — |
 
 > Note: in Model list, ✓ means automatic online fetching is supported (some platforms also keep a built-in static table as a fallback); ZCode only has a built-in static table. ✗ in Token auto-refresh means the platform has no usable refresh flow (the account keeps working while its credentials are valid). Qoder check-in is available on the China version only.
@@ -183,7 +186,7 @@ The macOS `.dmg` **can only be built on macOS** (`npm --prefix desktop-tauri run
 
 ### For learning and discussion only
 
-This project is a hands-on exercise in HTTP reverse proxying, SSE streaming passthrough, multi-upstream protocol adaptation and desktop packaging (Tauri), and is **for personal learning and research only**. It is not an official product and has no affiliation with, endorsement from or sponsorship by Tencent and WorkBuddy / CodeBuddy, Meituan and CatPaw, SenseTime and Raccoon, Zhipu and AutoClaw / autoglm, Alibaba and Qoder / Accio, Huawei Cloud and CodeArts / OfficeAce, ByteDance and Trae, iFlytek and Loomy, Baidu Wenku and KukuAI, Chaitin and MonkeyCode, Command Code, Google and Antigravity, Alibaba and ModelScope (MoDa), GitCode / AtomGit and AtomCode, or NetEase Youdao and LobsterAI (Youdao Lobster).
+This project is a hands-on exercise in HTTP reverse proxying, SSE streaming passthrough, multi-upstream protocol adaptation and desktop packaging (Tauri), and is **for personal learning and research only**. It is not an official product and has no affiliation with, endorsement from or sponsorship by Tencent and WorkBuddy / CodeBuddy, Meituan and CatPaw, SenseTime and Raccoon, Zhipu and AutoClaw / autoglm, Alibaba and Qoder / Accio, Huawei Cloud and CodeArts / OfficeAce, ByteDance and Trae, iFlytek and Loomy, Baidu Wenku and KukuAI, Chaitin and MonkeyCode, Command Code, Google and Antigravity, Alibaba and ModelScope (MoDa), GitCode / AtomGit and AtomCode, NetEase Youdao and LobsterAI (Youdao Lobster), Tencent and Marvis, or MiniMax and MiniMax Code.
 
 ### About the reverse-proxy behaviour
 

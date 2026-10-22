@@ -691,7 +691,21 @@ fn allowed_hosts(provider: &str) -> Option<&'static [&'static str]> {
         "catpaw" | "qoder" | "qoder-intl" | "cline-free" | "cline-pass" | "autoclaw"
         | "autoclaw-intl" | "accio" | "accio-cn" | "zcode" | "zcode-intl" | "codearts" | "trae"
         | "kuku" | "antigravity" | "officeace" | "orcaterm" | "qwenwork"
-        | "atomcode" | "lobsterai" => None,
+        | "atomcode" | "lobsterai"
+        // MiniMax Code：授权页在国内 `account.minimax.cn/oauth-authorize`、
+        // 国际版在 `account.minimax.io/oauth-authorize`，而它按用户选的登录方式
+        // 会继续跳不可穷举的身份提供方（手机号 / 微信 / 邮箱验证）。本家的登录是
+        // **设备码**（没有本地回调端口），所以这里缺的只是「别把授权页拦住」这
+        // 一点 —— 落进默认分支会拿到 WorkBuddy 的白名单，症状是窗口一片空白
+        // （本文件上方警告过的那种静默故障）。两个地区同一条处置。
+        | "minimax" | "minimax-intl" => None,
+        // Coze（扣子）同样不设限，而且这一条必须是 None：登录窗口开在
+        // `www.coze.cn`，但登录方式会让用户去**不可穷举**的身份提供方 ——
+        // 抖音账号（`sso.douyin.com`）、微信扫码（`open.weixin.qq.com`）、
+        // 阿里账号、短信验证链路都在其中（见 `providers::coze::login` 的模块头）。
+        // 落进默认分支会拿到 WorkBuddy 的白名单，症状是本文件上方警告过的
+        // 那种静默故障：登录窗口一片空白、日志里什么也看不出。
+        | "coze" => None,
         // WorkBuddy 的两个地区共用这一张表（表里 `workbuddy.ai` 那一行就是国际站
         // 的登录域）。**显式列出**而不是靠下面的默认分支：上面那条警告要求
         // 「新 provider 落到默认分支」必须是有意的选择，写出来才看得出是选过的
@@ -867,6 +881,12 @@ fn normalize_provider(provider: &str) -> Result<&'static str, String> {
         // （`providers::qwenwork::oauth`，见其模块头），壳侧只负责开窗口与等待
         // —— 与 Qoder / Cline 的设备授权同一条路，不经过任何回调捕获。
         "qwenwork" => Ok("qwenwork"),
+        // MiniMax Code（两个地区）：OAuth 设备码 + PKCE，授权地址由**后端**申请
+        // （设备码是一次上游往返），壳侧只负责开窗口与等待 —— 与 Qwenwork /
+        // Qoder 的设备授权同一条路，不经过任何回调捕获。**这一条不能只写国内版**：
+        // 少了 `minimax-intl` 前端会收到「未知的 provider」，国际版登录按钮直接失败。
+        "minimax" => Ok("minimax"),
+        "minimax-intl" => Ok("minimax-intl"),
         "catpaw" => Ok("catpaw"),
         "cline-free" => Ok("cline-free"),
         "cline-pass" => Ok("cline-pass"),
@@ -942,6 +962,14 @@ fn normalize_provider(provider: &str) -> Result<&'static str, String> {
         // 「网页登录」按钮画出来了，缺了它点下去就是
         // 「登录失败：不支持网页登录的提供商：atomcode」。
         "atomcode" => Ok("atomcode"),
+        // Coze（扣子）：授权地址由**后端适配器**返回（`providers::coze::login`
+        // 的主站地址 `https://www.coze.cn/`），壳侧负责开窗口，并在 Cookie 存储
+        // 出现 `sessionid_ss` 后把 `.coze.cn` 域**整包** Cookie 交回网关
+        // （`POST /api/session/login/coze/complete`，见下面的 Cookie 交回分支）。
+        // 与 KukuAI 同一形态：没有可捕获的自定义协议回调，登录态只能从
+        // WebView2 的 Cookie 存储读 —— 因此这条路**必须**在 `run_embedded` 的
+        // 等待循环里有对应的交回分支，否则窗口登录成功、网关永远等不到凭证。
+        "coze" => Ok("coze"),
         other => Err(format!("不支持网页登录的提供商：{other}")),
     }
 }
@@ -1149,6 +1177,12 @@ pub async fn start(
     if provider == "kuku" {
         return start_kuku(app, &mode).await;
     }
+    // Coze（扣子）：主站 `www.coze.cn` 登录，登录成功后由壳侧读 Cookie 存储
+    // 把 `.coze.cn` 域**整包** Cookie 交回网关（见 `submit_coze_login`）。
+    // 与 KukuAI 同一形态：没有可捕获的自定义协议回调。
+    if provider == "coze" {
+        return start_coze(app, &mode).await;
+    }
     // OrcaTerm：官方 OAuth 授权页（适配器给的地址，自动跳微信二维码），回调
     // `orcaterm://oauth_callback?session_id=…` 由窗口拦下交回网关换令牌
     // （见 `start_orcaterm`）。
@@ -1178,6 +1212,15 @@ pub async fn start(
         // 固定 cn —— 与 CodeArts 同一处置（后端那条链也不读这个字段，
         // 它只用于窗口标题与日志）。
         "qwenwork" => "cn",
+        // MiniMax Code 的两个地区由 **provider 本身**决定（界面上是两张卡片，
+        // 没有地区下拉，因此面板不会传 `edition`）：国内 `cn`、国际 `intl`。
+        // 与 ZCode / Qoder 同款 —— 写死 `cn` 会让国际版窗口标题显示「国内版」。
+        "minimax" => "cn",
+        "minimax-intl" => "intl",
+        // Coze 只有单一站点（`www.coze.cn`；国际版 coze.com 是另一套账号体系，
+        // 未验证 ⇒ 不拆家），固定 cn —— 与 CodeArts 同一处置（后端那条链不读
+        // 这个字段，它只用于窗口标题与日志）。
+        "coze" => "cn",
         // ZCode 的两个地区由 **provider 本身**决定（界面上是两张卡片，
         // 没有地区下拉，因此面板不会传 `edition`）。不看 `edition` 形参的
         // 后果只是标题里的「国内版/国际版」四个字，但既然信息已经在
@@ -1270,9 +1313,16 @@ pub async fn start(
         // 不需要地区
         "qwenwork" => "千问办公",
         "lobsterai" => "LobsterAI",
+        // MiniMax Code 的两个地区：注册表里已经带「国内版 / 国际版」，
+        // 直接沿用那两个字，别在这里另起一套说法
+        "minimax" => "MiniMax Code 国内版",
+        "minimax-intl" => "MiniMax Code 国际版",
         // AtomCode 只有一家（AtomGit / GitCode 的编码 Agent，没有地区/版本概念），
         // 品牌名里不需要地区
         "atomcode" => "AtomCode",
+        // Coze（扣子）只有一家（国内站 `www.coze.cn`，没有地区/版本概念），
+        // 品牌名里不需要地区
+        "coze" => "Coze 扣子",
         _ => "WorkBuddy",
     };
     // 窗口标题：Cline 两家的池、ZCode 两家的地区、CodeArts / Trae / OfficeAce
@@ -1282,6 +1332,7 @@ pub async fn start(
         provider,
         "cline-free" | "cline-pass" | "zcode" | "zcode-intl" | "codearts" | "trae" | "qoder"
         | "qoder-intl" | "antigravity" | "officeace" | "qwenwork" | "lobsterai" | "atomcode"
+        | "minimax" | "minimax-intl" | "coze"
     ) {
         format!("登录 {provider_label} 账号")
     } else {
@@ -1428,6 +1479,76 @@ async fn start_kuku(app: &AppHandle, mode: &str) -> Result<serde_json::Value, St
     );
 
     let result = run_embedded(app, "kuku", &auth_url, "登录 KukuAI 账号", &login_state, false, None, false).await;
+    if result.as_ref().map(|value| value.get("ok").and_then(serde_json::Value::as_bool)) != Ok(Some(true)) {
+        let _ = gateway::call("POST", "/api/session/login/cancel", Some(&json!({ "state": login_state }))).await;
+    }
+    clear_active_login(app, &login_state);
+    result
+}
+
+/// Coze（扣子）网页登录：**主站登录 + 壳侧读 Cookie 存储交回**。
+///
+/// 与 KukuAI 同一形态，两条理由都一样：
+///   1. 登录成功后的跳转**不携带授权码** —— 凭证在 `.coze.cn` 域 Cookie 里
+///      （`sessionid_ss` / `sid_guard` / `ttwid` …），因此不走「导航拦截 →
+///      提交回调 URL」那条链，而是由壳侧在窗口里出现 `sessionid_ss` 后读
+///      WebView2 的 Cookie 存储（HttpOnly，页面脚本读不到）POST 网关的
+///      `POST /api/session/login/coze/complete`（见 `run_embedded` 的等待循环
+///      与 `submit_coze_login`）；
+///   2. 登录方式会把人交给**不可穷举**的身份提供方（抖音账号 / 微信扫码 /
+///      阿里账号 / 短信），所以既没有固定的「登录成功 URL」可等，也不能给
+///      白名单设限（见 `allowed_hosts` 的 `coze` 分支）。
+///
+/// 只支持内嵌窗口：系统浏览器里壳读不到 Cookie 存储，登录完成网关永远等不到
+/// 凭证 —— 明确拒绝而不是静默退回内嵌（与 KukuAI 同一处置）。
+async fn start_coze(app: &AppHandle, mode: &str) -> Result<serde_json::Value, String> {
+    if mode == "external" {
+        return Err(
+            "Coze 的登录依赖壳侧读取登录窗口的 Cookie，只支持内嵌窗口；\
+             请用「内嵌窗口」发起，或改用「粘贴 Cookie」添加账号"
+                .to_string(),
+        );
+    }
+    let started = gateway::call(
+        "POST",
+        "/api/session/login/start",
+        Some(&json!({ "provider": "coze" })),
+    )
+    .await?;
+    let login_state = started
+        .get("state")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("后端未返回登录状态")?
+        .to_string();
+    let auth_url = started
+        .get("authUrl")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("后端未返回登录链接，请检查网络")?
+        .to_string();
+
+    {
+        let state = app.state::<crate::state::AppState>();
+        let mut guard = state.login.lock().map_err(|_| "登录状态锁不可用")?;
+        *guard = Some(ActiveLogin {
+            state: login_state.clone(),
+            edition: String::new(),
+            mode: mode.into(),
+            provider: "coze".to_string(),
+        });
+    }
+    emit_login_state(
+        app,
+        LoginState {
+            active: true,
+            mode: Some(mode.into()),
+            edition: None,
+            provider: Some("coze".to_string()),
+        },
+    );
+
+    let result =
+        run_embedded(app, "coze", &auth_url, "登录 Coze 扣子账号", &login_state, false, None, false)
+            .await;
     if result.as_ref().map(|value| value.get("ok").and_then(serde_json::Value::as_bool)) != Ok(Some(true)) {
         let _ = gateway::call("POST", "/api/session/login/cancel", Some(&json!({ "state": login_state }))).await;
     }
@@ -1712,6 +1833,17 @@ async fn run_embedded(
     // 临时风控限流（同一凭证几分钟后即恢复，2026-10-07 实测对照），
     // 密集重试只会延长风控窗口。
     let mut kuku_retry_block_until: Option<tokio::time::Instant> = None;
+    // Coze 登录态只交回一次。判据是 Cookie 存储里出现 `sessionid_ss`
+    // （`.coze.cn` 域，HttpOnly）—— 它的登录方式会经过第三方身份提供方
+    // （抖音 / 微信 / 阿里 / 短信），没有固定的「登录成功 URL」可等，
+    // 因此与 KukuAI 同一条「读 Cookie 存储」的链（见 `submit_coze_login`）。
+    // 首次发现后再等 3 秒才交回：登录瞬间 `sid_guard` / `ttwid` 等伴生 Cookie
+    // 可能尚未写完，立刻交回会带着半套会话，`passport/account/info/v2/` 判未登录。
+    let coze_submitted = Arc::new(AtomicBool::new(false));
+    let mut coze_check_tick: u32 = 0;
+    let mut coze_last_nav: u64 = 0;
+    let mut coze_session_seen_at: Option<tokio::time::Instant> = None;
+    let mut coze_retry_block_until: Option<tokio::time::Instant> = None;
 
     // 导航拦截与弹窗拦截**共用同一个标志**：两种入口收到的可能是同一个回调
     // （页面先改 location、再被 WebView2 派生出一条弹窗请求），分开各一个标志
@@ -1797,9 +1929,9 @@ async fn run_embedded(
                 }
                 return false;
             }
-            // KukuAI 主站登录：每次导航（含跳 passport、登录后回跳主站）
-            // 计数 +1，等待循环据此立即读一次 Cookie 存储做登录检测。
-            if provider == "kuku" {
+            // KukuAI / Coze 主站登录：每次导航（含跳第三方身份提供方、登录后
+            // 回跳主站）计数 +1，等待循环据此立即读一次 Cookie 存储做登录检测。
+            if provider == "kuku" || provider == "coze" {
                 nav_counter_for_nav.fetch_add(1, Ordering::SeqCst);
             }
             host_allowed(url, provider, social_restore)
@@ -1821,7 +1953,11 @@ async fn run_embedded(
         // 同属一个 WebView2 数据目录、共享 Cookie 存储，弹窗里登录成功后
         // 等待循环照样能从 Cookie 读到 BDUSS）。
         .on_new_window(move |url, _features| {
-            if provider == "kuku" {
+            // Coze 与 KukuAI 同一处置：登录按钮可能以弹窗打开身份提供方的页面。
+            // 一律 Deny 会让用户点登录毫无反应 —— 弹窗与主窗口同属一个 WebView2
+            // 数据目录、共享 Cookie 存储，弹窗里登录成功后等待循环照样能读到
+            // `sessionid_ss`，所以放行不影响登录判定。
+            if provider == "kuku" || provider == "coze" {
                 return tauri::webview::NewWindowResponse::Allow;
             }
             if let Some(target) = autoclaw_callback_forward(&url) {
@@ -1946,6 +2082,66 @@ async fn run_embedded(
                         );
                     } else {
                         kuku_bduss_seen_at = None;
+                    }
+                }
+            }
+        }
+        // Coze（扣子）：**读 Cookie 存储**里是否出现 `sessionid_ss` 作为成功
+        // 判据（与 KukuAI 同一条链，见 `submit_coze_login`；读 cookie 走独立
+        // 线程 + 超时，Windows 上同步调 cookies() 会死锁）。
+        // 触发时机：导航事件之后立即读一次（登录必然经过导航：跳第三方
+        // 身份提供方、回跳主站），另有每 4 拍（8 秒）兜底。首次发现后再等
+        // 3 秒才交回（等 `sid_guard` / `ttwid` 等伴生 Cookie 写完）。
+        if provider == "coze" {
+            coze_check_tick += 1;
+            let nav_count = nav_counter_for_check.load(Ordering::SeqCst);
+            let navigated = nav_count != coze_last_nav;
+            if navigated {
+                coze_last_nav = nav_count;
+            }
+            let mut should_submit = false;
+            if !coze_submitted.load(Ordering::SeqCst)
+                && (navigated || coze_session_seen_at.is_some() || coze_check_tick % 4 == 0)
+            {
+                match read_window_cookies(&window).await {
+                    Ok(cookies) => {
+                        let (header, has_session) = coze_cookie_header(&cookies);
+                        eprintln!(
+                            "[login] Coze Cookie 检测：共 {} 条，sessionid_ss {}（头长 {}）",
+                            cookies.len(),
+                            if has_session { "已出现" } else { "未出现" },
+                            header.len()
+                        );
+                        if has_session {
+                            let first_seen = *coze_session_seen_at
+                                .get_or_insert_with(tokio::time::Instant::now);
+                            if first_seen.elapsed() >= Duration::from_secs(3) {
+                                should_submit = true;
+                            } else {
+                                eprintln!("[login] Coze 已发现 sessionid_ss，等 3 秒让会话稳定后再交回…");
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("[login] Coze 读取窗口 Cookie 失败（下轮重试）: {error}");
+                    }
+                }
+            }
+            if should_submit && !coze_submitted.load(Ordering::SeqCst) {
+                let blocked = coze_retry_block_until
+                    .map(|until| tokio::time::Instant::now() < until)
+                    .unwrap_or(false);
+                if blocked {
+                    eprintln!("[login] Coze 交回退避中（30 秒），等下一轮再试");
+                } else {
+                    coze_submitted.store(true, Ordering::SeqCst);
+                    if let Err(error) = submit_coze_login(&window, login_state).await {
+                        eprintln!("[login] 交回 Coze 登录态失败（下轮重试）: {error}");
+                        coze_submitted.store(false, Ordering::SeqCst);
+                        coze_retry_block_until =
+                            Some(tokio::time::Instant::now() + Duration::from_secs(30));
+                    } else {
+                        coze_session_seen_at = None;
                     }
                 }
             }
@@ -2082,6 +2278,59 @@ fn kuku_log_bduss_candidates(cookies: &[tauri::webview::Cookie<'static>]) {
             );
         }
     }
+}
+
+/// Coze 登录态交回：用户在窗口里登录成功后，读 WebView2 的 Cookie 存储
+/// （含 HttpOnly —— 页面脚本 `document.cookie` 读不到 `sessionid_ss`），
+/// 把 `.coze.cn` 域的**整包** Cookie 拼成 Cookie 头 POST 网关收尾
+/// （见 `read_window_cookies` 与 `providers::coze::login` 的模块头）。
+///
+/// 为什么必须整包：`passport/account/info/v2/` 与 `incentive/*` 校验完整浏览器
+/// 会话 —— 只带 `sessionid_ss` 时任务中心与机器人列表会判「未登录」。
+async fn submit_coze_login(
+    window: &tauri::WebviewWindow,
+    login_state: &str,
+) -> Result<(), String> {
+    let cookies = read_window_cookies(window).await?;
+    let (cookie_header, has_session) = coze_cookie_header(&cookies);
+    if !has_session {
+        return Err("登录窗口没有 sessionid_ss（登录态尚未写入），请稍后重试".to_string());
+    }
+    let payload = json!({ "state": login_state, "cookie": cookie_header });
+    gateway::call("POST", "/api/session/login/coze/complete", Some(&payload))
+        .await
+        .map_err(|error| format!("网关收尾失败: {error}"))?;
+    Ok(())
+}
+
+/// 把 `coze.cn` 域的 Cookie 拼成请求头（去重保序），并回答「有没有 `sessionid_ss`」。
+///
+/// 域判据是 `ends_with("coze.cn")`：登录过程会在 `.www.coze.cn` /
+/// `.coze.cn` / 若干子域上各写一份，**整包带上**才是上游认的形态。
+/// `Hm_*` / `HMACCOUNT` 是统计用的第三方 Cookie（域不在本家，防御性过滤）。
+fn coze_cookie_header(cookies: &[tauri::webview::Cookie<'static>]) -> (String, bool) {
+    let mut parts: Vec<String> = Vec::new();
+    let mut has_session = false;
+    let mut seen: Vec<String> = Vec::new();
+    for cookie in cookies {
+        let domain = cookie.domain().unwrap_or("").to_ascii_lowercase();
+        if !domain.trim_start_matches('.').ends_with("coze.cn") {
+            continue;
+        }
+        let name = cookie.name().to_string();
+        if name.starts_with("Hm_")
+            || name == "HMACCOUNT"
+            || seen.iter().any(|existing| existing == &name)
+        {
+            continue;
+        }
+        if name == "sessionid_ss" || name == "sessionid" {
+            has_session = true;
+        }
+        seen.push(name.clone());
+        parts.push(format!("{name}={}", cookie.value()));
+    }
+    (parts.join("; "), has_session)
 }
 
 /// KukuAI 登录态交回：用户在主站窗口里登录成功后，读 WebView2 的 Cookie

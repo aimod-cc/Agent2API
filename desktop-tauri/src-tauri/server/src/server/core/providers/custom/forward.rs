@@ -22,7 +22,7 @@
 //!     `reasoning_effort`（思考等级绑定）—— 都是「客户端语义」的修正，不是
 //!     协议翻译。**唯一的例外**是记录显式开了 `clientEmulation`
 //!     （见 [`emulation`]：OpenCode Zen 的免费档要求请求体是「智能体形态」，
-//!     要补两个桩工具）—— 那是 opt-in 的形态伪装，默认一个字节都不动；
+//!     要补 `read` 桩工具）—— 那是 opt-in 的形态伪装，默认一个字节都不动；
 //!   - 响应：上游永远以 `stream:true` 被请求（编排层入口已强制注入），流式
 //!     客户端拿 SSE 逐帧透传（reasoning 合并照走 `ForwardStream`），非流式
 //!     客户端拿聚合后的完整 JSON（照走 `aggregate_sse_completion`）—— 两者的
@@ -360,7 +360,7 @@ struct ProviderQuirks {
     tool_type_custom: bool,
     /// 是否按 **OpenCode 官方 CLI 的形状**补齐出站请求（`clientEmulation`，
     /// 见 [`emulation`]）：无 key 用匿名凭证 `public`、补官方会话头、请求体补
-    /// 两个桩工具 —— OpenCode Zen 的免费档只有这个形状才放行。**会改写请求体**，
+    /// `read` 桩工具 —— OpenCode Zen 的免费档只有这个形状才放行。**会改写请求体**，
     /// 所以只在记录显式声明时生效。
     emulate_opencode: bool,
 }
@@ -448,7 +448,7 @@ impl ProviderQuirks {
         emulation::apply_headers(headers, api_key, &session);
     }
 
-    /// 请求体补成「智能体形态」（`stream: true` + `bash` / `read` 桩工具）。
+    /// 请求体补成「智能体形态」（`stream: true` + `read` 桩工具）。
     /// 未开启伪装时**一个字节都不动** —— 透传是自定义家的默认语义。
     ///
     /// **Go 面同样一个字节都不动**：它拒绝被塞桩工具的请求（社区实测

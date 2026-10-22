@@ -1217,6 +1217,19 @@ pub fn adapter_for(kind: ProviderKind) -> &'static dyn ProviderAdapter {
         // SSE，网关恒以 stream:true 请求）+ 目录 / 积分 / 签到 + loopback 网页登录。
         // 三个载荷点见 `lobsterai/mod.rs` 的模块头
         ProviderKind::LobsterAi => &super::lobsterai::LOBSTERAI_ADAPTER,
+        ProviderKind::Marvis => &super::marvis::MARVIS_ADAPTER,
+        // MiniMax Code：无状态转发，但上游说的是 **Anthropic Messages**
+        // （`UpstreamResponse::Anthropic`，与 ZCode 活动套餐通道同一台翻译机）；
+        // 账号走设备码登录（`core::login` 那条链），见 `minimax/mod.rs`。
+        // 两个站点各一个实例（地区 → 实例的唯一映射在 `minimax::Region`）。
+        ProviderKind::Minimax => &super::minimax::MINIMAX_ADAPTER,
+        ProviderKind::MinimaxIntl => &super::minimax::MINIMAX_INTL_ADAPTER,
+        // Coze（扣子）：**会话式转发** —— `api.coze.cn/v3/chat` 回的是
+        // `conversation.message.delta` / `conversation.chat.completed` 这类
+        // 自命名 SSE 事件，翻译只能在读流那一层做（`is_stateful` 为 true，
+        // 见 `coze/chat.rs` 的模块头）。凭证是整包 Cookie，PAT 由
+        // `coze::credentials::ensure_pat` 按需铸造并进程内缓存。
+        ProviderKind::Coze => &super::coze::COZE_ADAPTER,
     }
 }
 
@@ -1340,6 +1353,30 @@ pub fn implemented_kinds() -> Vec<ProviderKind> {
         // LobsterAI：远程目录（`GET /api/models/available`）+ 有转发能力，
         // 进本列表才会被后台目录刷新调度
         ProviderKind::LobsterAi,
+        // Marvis（腾讯马维斯）：适配器已接真身（账号 / 静态目录 / 无状态转发），
+        // 进本列表 = 「接线了」，会参与后台目录刷新调度。
+        //
+        // 注意它的 `supports_model_refresh()` 是 **false**（上游无目录接口，
+        // `GET /v1/models` 恒 404，见 `marvis/models.rs`），所以刷新循环对它是
+        // 空操作 —— 这与 ZCode 的情形相同：本列表回答的是「这家接线了没有」，
+        // 不是「这家的目录能不能远程刷」。
+        ProviderKind::Marvis,
+        // MiniMax Code：适配器已接真身（设备码登录 / 凭据续期 / 远程目录 /
+        // Anthropic 转发 / 积分余额 / 签到），并且**真有远程目录**
+        // （`supports_model_refresh()` 为 true，`GET /mavis/api/v1/models` 实测 200）
+        // —— 不在本列表的话刷新循环根本不会问它，症状是「点了刷新、日志里
+        // 一句 minimax 都没有」。
+        ProviderKind::Minimax,
+        // 国际版同理：两地把网关了（国内 `agent.minimax.cn` / 国际
+        // `agent.minimaxi.com`），各有独立的缓存槽与刷新排期 —— 漏了这一项
+        // 的症状是「国际版账号加了、模型列表一直是空的（只有兜底两条）」。
+        ProviderKind::MinimaxIntl,
+        // Coze（扣子）：适配器已接真身（凭据 / 目录 / 会话转发 / 余额 / 签到），
+        // 且有远程目录（`GET /v1/workspaces` → `GET /v1/bots`，`model` 即
+        // `bot_id`）—— 必须在列表里，否则目录刷新循环不会问它（与 Trae /
+        // Loomy / Kuku 同一理由）。用户没有已发布的 bot 时清单为空，那是
+        // 真实状态，不是「没接」。
+        ProviderKind::Coze,
     ]
 }
 

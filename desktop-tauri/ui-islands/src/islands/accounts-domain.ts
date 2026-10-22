@@ -386,6 +386,67 @@ const PROVIDER_FEATURES: Record<string, ProviderFeatures> = {
   // `expiry: 'expiresAt'` —— 落盘写的是毫秒 `expiresAt`（显式 > createdAt +
   //   expiresIn > JWT 的 `exp`），与 atomcode 同一条教训。
   lobsterai: { usage: true, creditDetail: true, edition: false, identifier: 'userId', expiry: 'expiresAt' },
+  // Marvis（腾讯「马维斯」）。各位各有出处：
+  // `usage: true` —— 额度本身是存在的：官方口径「每天 1000 万免费 Token」，
+  //   客户端日志里能看到回包（`total_tokens=10000000` / `avail_tokens=9981078`，
+  //   见 `providers/marvis/balance.rs` 的模块头）。直连不通：读数只走
+  //   CloudAssetService 的 AK/SK 签名（`md5(body+ts+access_key+nonce)`），而那个
+  //   `access_key` 在客户端 `CONFIG` 里是 Fernet 密文；换 AKSK 的端点
+  //   （`/marvis_client/marvis_create_aksk`，文档串标 UAL_ONLY）穷举
+  //   3 businessid × 8 body 全 403/400；`aksks` 表 0 行；`MarvisHost` 的
+  //   10123 无 wallet 路由；agent 管道同用户开不了（受限 DACL）。
+  //   ⇒ 五路都堵，改读**客户端自己写进 `Marvis.log` 的 `token.wallet` 回包**
+  //   （当前用户可读的普通文件，代价为零、不用 UAC）。与后端
+  //   `supports_usage` 同一口径。
+  // `usageDetail: true` —— **照 CodeArts 的 token 口径**（第 195 行那一家）：
+  //   余额是「剩 x / 共 y token」一行放不下，明细弹层给「已用 x / y token（z%）」。
+  //   弹层读 `wallets[].usedTokens` / `allowanceTokens` / `usedPercent`，后端
+  //   `balance.rs` 的 normalize 正是照这三个键写的（缺了会落到「既无积分也无
+  //   token 量」的兜底灰字 —— 第一版就踩过）。
+  //   ⇒ **只填余额一列**：日额度每天重置、没有到期时刻，`query_usage` 不写
+  //   `credits[]`，所以「最近到期 / 最近到期积分」两列对它恒为空（那两列要
+  //   `credits[].expireAt`，而日额度包在 `creditExpiryOf` 里是被显式跳过的）。
+  //   ⇒ `creditDetail: false`（不登记）：没有逐份积分包，明细入口会点出空列表。
+  // `edition: false` —— 单一站点（`yybadaccess.3g.qq.com`）、一套账号，
+  //   没有国际版 / 地区之分。
+  // `identifier: 'guid'` —— 公开形态里摘掉了 `accessToken` 与 `openid`
+  //   （见 `account_store::marvis_accounts::to_marvis_public_account`），
+  //   留下的 `guid` 是设备号，用它做标识列既非空又不泄漏登录身份。
+  // `expiry: ''` + `longLived: true` —— 令牌有 `expireTime` 但上游**没有**
+  //   刷新端点（`refreshToken` 是客户端内部行为），到期只能重新提取；
+  //   不展示一个「会自动续期」的假有效期，与 commandcode 同一处置。
+  //   （`longLived` 只被 `ExpiryCell` 与 `isLongLivedCredential` 读：它决定有效期列
+  //   写「长期有效」还是「—」，**不参与**任何临期刷新判定 —— 后端
+  //   `credentials_expiring` 对没有续期端点的家恒为 false，与这一位无关。）
+  marvis: { usage: true, usageDetail: true, edition: false, identifier: 'guid', expiry: '', longLived: true },
+  // MiniMax Code（`agent.minimax.cn`）。各位各有出处：
+  // `usage: true` —— 积分余额来自 `POST /matrix/api/v1/commerce/get_membership_info`
+  //   的 `op_credit_summary.total_remaining_amount`（上游返回的是 11459.454 这种
+  //   带小数的字符串，后端已转成数字）。⚠️ 同一响应里的 `total_remains_credit` /
+  //   `opcredit_balance` 是**旧账**，在积分池账号上恒为 0 —— 后端只在摘要整块
+  //   缺失时才兜底取它们（见 `providers::minimax::balance` 的模块头）。
+  // `creditDetail: true` —— 逐份积分批次：`GET /minimax-cloud/api/v1/credit/details`
+  //   的 `details[]` 带 `remaining_amount` + `expire_at_ms`（**发放日 + 30 个自然日**
+  //   到期，逐日发放形成 30 天错峰阶梯）。后端按「还有剩余且未过期」写进
+  //   `credits[]`（`expireAt` / `remain` / `name`），所以「最近到期」与
+  //   「最近到期积分」两列都有真实读数 —— 这是本家与 Marvis（日额度、无到期）
+  //   最大的差别，别把两家混为一谈。
+  // `edition: false` —— 单一站点（国际版 `agent.minimax.io` 是另一套域名，
+  //   账号体系是否分开未验证 ⇒ 按「判不出来不拆」只开国内版）。
+  // `identifier: 'userId'` —— 公开形态里摘掉了两个令牌本体（accessToken 与
+  //   refreshToken，见 `account_store::minimax_accounts::to_minimax_public_account`），
+  //   留下的 `userId` 是 JWT 里的登录身份，既非空又不泄漏凭据。
+  // `expiry: 'expiresAt'` —— 访问令牌 1 小时有效，落盘写的是毫秒 `expiresAt`
+  //   （显式 > JWT 的 `exp`），与 atomcode / lobsterai 同一条口径。
+  //   有续期（refresh_token），所以**不标** `longLived`（那一档表示「不会自续」）。
+  minimax: { usage: true, creditDetail: true, edition: false, identifier: 'userId', expiry: 'expiresAt' },
+  // MiniMax Code **国际版**（`agent.minimax.io`）：与国内版同一套协议、同一套能力位，
+  // 只有域名与授权服务器不同（拆家理由见 `providers::minimax::region` 的模块头）。
+  //
+  // ⚠️ 能力位必须**逐项重复一遍**而不是靠前缀兜底：本表是按 provider id 精确查的，
+  // 漏一条就掉进 GENERIC_FEATURES —— 余额列显示「—」、到期两列空着、
+  // 标识列按 `userId` 读成空。这是 MonkeyCode 两家漏登记时的原样症状。
+  'minimax-intl': { usage: true, creditDetail: true, edition: false, identifier: 'userId', expiry: 'expiresAt' },
   // MonkeyCode（长亭科技）的两个站点。此前**漏登记**（后端 `PROVIDERS` 有、本表没有），
   // 于是它掉进 GENERIC_FEATURES：余额列一律显示「—」（`supportsUsage` 走兜底 false），
   // 标识列按 `userId` 读成空，有效期列去读一个不存在的 `tokenExpiresAt`。
@@ -412,6 +473,23 @@ const PROVIDER_FEATURES: Record<string, ProviderFeatures> = {
   // 没有登记 `creditDetail`：`query_usage` 只给 `available` 与 subscription，
   // 不出逐份 `credits[]`，挂入口会点开一个空框。
   orcaterm: { usage: true, edition: false, identifier: 'uid', expiry: 'tokenExpireAt' },
+  // Coze（扣子，`coze.cn`）。逐项出处：
+  // `usage: true` —— 积分余额来自 `GET /api/marketplace/trade/credit/balance`
+  //   的 `total_remain`（实测 889 / 1500），见 `providers::coze::balance`。
+  // `creditDetail: true` —— 逐份积分包：`credit/balance/detail` 的 `items[]`
+  //   带 `remaining` + `expired_at`（epoch 秒）+ `source`（21 订阅 / 22 购买 /
+  //   24 活动 / 27 退款）。后端只收「还有剩余且未过期」的包写进 `credits[]`
+  //   （`name` / `remain` / `total` / `used` / `expireAt` 毫秒 / `grantAt`），
+  //   并按到期升序排好 —— 所以「最近到期」与「最近到期积分」两列都有真实读数。
+  // `edition: false` —— 单一站点（国内站 `www.coze.cn`；国际版 coze.com 是另
+  //   一套账号体系，未验证 ⇒ 不拆家）。
+  // `identifier: 'uid'` —— 公开形态给的是 `uid`（passport 的 `user_id_str`，
+  //   见 `coze_accounts.rs`）。
+  // `expiry: ''` —— Cookie 是网页登录态、上游没有刷新接口（`supports_refresh`
+  //   保持 false），没有可展示的到期时刻；与 kuku / catpaw 同一处置，不渲染
+  //   一个假的「会自动续期」有效期。**不要**改成 `expiresAt`：那会让有效期列
+  //   永远显示「—」，而旁边还挂着一个说不清的字段名。
+  coze: { usage: true, creditDetail: true, edition: false, identifier: 'uid', expiry: '' },
 }
 
 /**
@@ -1148,6 +1226,18 @@ const CREDIT_EXPIRY_PROVIDERS: ReadonlySet<string> = new Set([
   'workbuddy-intl',
   'trae',
   'officeace',
+  // MiniMax Code：`credits[].expireAt` 来自台账的 `expire_at_ms`（毫秒，
+  // 发放日 + 30 个自然日到期），且只写「还有剩余」的批次 —— 与
+  // `creditExpiryOf` 的三条跳过规则（record / daily / unlimited）都不冲突。
+  // 后端见 `providers::minimax::balance::credit_rows`。
+  'minimax',
+  // 国际版同一条台账契约（`credit/details` 的 `expire_at_ms`），只是网关不同
+  'minimax-intl',
+  // Coze（扣子）：`credits[].expireAt` 来自 `credit/balance/detail` 的
+  // `expired_at`（epoch 秒 ×1000，后端已转毫秒），且只写「还有剩余且未过期」
+  // 的包 —— 与 creditExpiryOf 的三条跳过规则（record / daily / unlimited）
+  // 都不冲突。后端见 `providers::coze::balance::credits_of`。
+  'coze',
 ])
 
 /**

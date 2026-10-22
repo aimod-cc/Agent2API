@@ -23,7 +23,7 @@ Agent2API 把多家 AI 桌面客戶端裡已登入的帳號接到一起，共用
 ## ✨ 核心特性
 
 - 🔌 **OpenAI 相容** —— 客戶端填上 `base_url` 就能用，Chat / Responses / Messages 三種協定都支援
-- 🏪 **內建 22 家供應商** —— WorkBuddy、小浣熊、CatPaw、Qoder、Trae 等開箱即用，也支援自訂供應商
+- 🏪 **內建 24 家供應商** —— WorkBuddy、小浣熊、CatPaw、Qoder、Trae 等開箱即用，也支援自訂供應商
 - 🔁 **憑證自動續期** —— Token 到期自動換新，臨期憑證可批次刷新，模型目錄也不會過期
 - 🪂 **多帳號輪轉** —— 依優先順序排隊，429 自動換帳號，限額冷卻期內不空等
 - 🛡️ **出口代理** —— 每個帳號可配獨立出口，出站指紋按官方客戶端偽裝
@@ -82,6 +82,9 @@ Agent2API 把多家 AI 桌面客戶端裡已登入的帳號接到一起，共用
 | ModelScope（魔搭，中國版 / 國際版） | ✓ | ✗ | ✓ | ✓ | ✓ | — |
 | AtomCode（AtomGit / GitCode） | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | LobsterAI（網易有道「有道龍蝦」） | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| 馬維斯 Marvis（騰訊） | ✓ | ✗ | ✗ | ✗ | ✗ | — |
+| MiniMax Code（國內版 / 國際版） | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| Coze 扣子（字節跳動） | ✓ | ✗ | ✓ | ✓ | ✓ | ✓ |
 | 自訂供應商 | ✓ | — | ✓ | — | — | — |
 
 > 註：模型清單的 ✓ 表示支援遠端自動拉取，部分平台另有內建靜態清單備援；ZCode 僅有內建靜態清單。Token 續期欄 ✗ 表示該平台沒有可用的續期介面（帳號在有效期內不受影響）。Qoder 簽到僅中國版可用。
@@ -183,7 +186,7 @@ macOS 的 `.dmg` **只能在 macOS 上建置**（`npm --prefix desktop-tauri run
 
 ### 僅供學習與交流
 
-本專案是一個用於學習 HTTP 反向代理、SSE 串流透傳、多上游協定適配與桌面端打包（Tauri）等技術主題的實踐專案，**僅供個人學習與研究使用**。它不是官方產品，與騰訊公司及 WorkBuddy / CodeBuddy、美團及 CatPaw、商湯及小浣熊、智譜及 AutoClaw / autoglm、阿里巴巴及 Qoder / Accio、華為雲及 CodeArts / OfficeAce、字節跳動及 Trae、科大訊飛及 Loomy、百度文庫及 KukuAI、長亭科技及 MonkeyCode、Command Code、Google 及 Antigravity、阿里巴巴及 ModelScope（魔搭）、GitCode / AtomGit 及 AtomCode、網易有道及 LobsterAI（有道龍蝦）均無任何關聯，未獲得其授權、認可或贊助。
+本專案是一個用於學習 HTTP 反向代理、SSE 串流透傳、多上游協定適配與桌面端打包（Tauri）等技術主題的實踐專案，**僅供個人學習與研究使用**。它不是官方產品，與騰訊公司及 WorkBuddy / CodeBuddy、美團及 CatPaw、商湯及小浣熊、智譜及 AutoClaw / autoglm、阿里巴巴及 Qoder / Accio、華為雲及 CodeArts / OfficeAce、字節跳動及 Trae、科大訊飛及 Loomy、百度文庫及 KukuAI、長亭科技及 MonkeyCode、Command Code、Google 及 Antigravity、阿里巴巴及 ModelScope（魔搭）、GitCode / AtomGit 及 AtomCode、網易有道及 LobsterAI（有道龍蝦）、騰訊及馬維斯 Marvis、MiniMax 及 MiniMax Code 均無任何關聯，未獲得其授權、認可或贊助。
 
 ### 關於反向代理行為
 

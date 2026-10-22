@@ -581,8 +581,8 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
     // 里的**凭证解析后落库**（得到一个可独立转发的账号，文件可来自任意机器或
     // 备份），后者只建一条「实时读本机固定路径」的记录；两者同时给时以文件为准
     // （用户的显式选择更强）。两个内容字段都没有时行为不变（历史契约零变化）。
-    // 接了这条路径的四家（小浣熊 / CatPaw / Cline / KukuAI）见各自分支，
-    // 别家的分支不读这三个字段。
+    // 接了这条路径的六家（小浣熊 / CatPaw / Cline / KukuAI / OfficeAce / Coze）
+    // 见各自分支，别家的分支不读这三个字段。
     let auth_file_content = payload
         .get("authFileContent")
         .and_then(Value::as_str)
@@ -995,6 +995,62 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
                 )
             }
         }
+        // Coze（扣子）：**粘贴整包 Cookie**（`.coze.cn` 域的 Cookie 头 / Cookie
+        // 编辑器数组 / `{name: value}` 对象）→ 打 `passport/account/info/v2/`
+        // 复核并取 `user_id_str` / `screen_name` → 落账号。
+        //
+        // `importDesktop` **不提供**：桌面客户端的 Cookie 库
+        // （`%APPDATA%\Roaming\Coze\Network\Cookies`）被 Chromium 独占锁住，
+        // 与马维斯同一处境（要读先得关客户端或提权）—— 给了入口只会稳定失败。
+        // 网页登录那条路（壳侧 WebView2 读 Cookie）另走
+        // `api::session::login/*` + `core::login::finish_coze_login`。
+        Some(crate::server::core::providers::ProviderKind::Coze) => {
+            if import_desktop {
+                return management_error(
+                    400,
+                    "Coze 不支持导入桌面端登录态（客户端 Cookie 库被独占锁住），\
+                     请用「网页登录」或粘贴 www.coze.cn 的完整 Cookie 添加账号",
+                );
+            }
+            // 文件导入（`authFileContent`）：Coze 的凭证就是一段 Cookie 文本，
+            // 与粘贴同一条链 —— 用户可以从别的机器导出后导入。`authFileB64`
+            // 对它没有意义（不是二进制），明确 400 指路文本字段。
+            if auth_file_b64.is_some() {
+                return management_error(
+                    400,
+                    &format!(
+                        "凭证文件{}无法导入：Coze 的凭证是 Cookie 文本，请用「粘贴 Cookie」或文本文件导入（不要传 authFileB64）",
+                        auth_file_name.map(|name| format!("「{name}」")).unwrap_or_default()
+                    ),
+                );
+            }
+            let raw = match auth_file_content.as_deref() {
+                Some(text) => serde_json::Value::String(text.to_string()),
+                None => payload.clone(),
+            };
+            let parsed = match crate::server::core::providers::coze::credentials::credentials_from_payload(
+                &raw,
+            ) {
+                Ok(credentials) => credentials,
+                Err(reason) => return management_error(400, reason),
+            };
+            // 添加时验证：要的是「现在真的能用」（与 OrcaTerm / KukuAI 同一口径）。
+            // 复核顺带补全 uid / 昵称；uid 拿不到时账号层用 cookie 尾兜底 id。
+            let verified = match crate::server::core::providers::coze::credentials::enrich_identity(
+                &parsed,
+                None,
+            )
+            .await
+            {
+                Ok(credentials) => credentials,
+                Err(error) => return management_error(error.status_code, error.message),
+            };
+            store.add_coze_account(
+                &verified,
+                import_name,
+                if auth_file_content.is_some() { "file" } else { "manual" },
+            )
+        }
         // MonkeyCode（长亭科技）：**粘贴 session**（`monkeycode_ai_session` cookie）
         // → 先向上游 `GET /api/v1/users/status` 校验并归一化，再落账号（`login.rs`
         // 里顺带 best-effort 发现 image_id）。两个站点走同一份实现、按地区参数化
@@ -1073,6 +1129,50 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
                 };
             store.add_commandcode_account(&credentials, import_name, "manual")
         }
+        // Marvis（腾讯马维斯）：**粘贴凭证三件套**（`mv_` 令牌 + openid + guid），
+        // 这三项由 `_recon/marvis-cred-extract.py` 以管理员身份从客户端进程内存
+        // 提取后整段粘进来（本家凭证不落明文：`login.db` 是密文、`mskv` 容器有
+        // 调用方签名校验，见 `providers::marvis::credentials` 的模块头）。
+        //
+        // 与 Antigravity 的区别：本家的令牌**有可判的本地形态**（`mv_` 前缀），
+        // 所以先做形状校验再探活，形状不对时不必白打一次上游。
+        //
+        // 探活（一次 `max_tokens:1` 的真实对话）失败**不阻断保存**：离线录入是
+        // 合理场景（用户先录进去、联网后再用），错误文案会带回来让界面提示。
+        //
+        // `importDesktop` 不提供：本机登录态在客户端加密容器里，不是可读文件
+        // （与 Command Code / Antigravity 同一处境，但原因不同）。
+        Some(crate::server::core::providers::ProviderKind::Marvis) => {
+            // ── 两条入口 ────────────────────────────────────────────
+            // ① `importDesktop: true` → **本机导入**：网关派生一个提权提取器，
+            //    从已登录客户端的内存里取三件套（用户只需点一次 UAC）。这是
+            //    主入口 —— 凭证不落明文，用户没有别的「不粘贴」的办法。
+            // ② 否则 → 手工粘贴 JSON（`_recon/marvis-cred-extract.py` 的输出），
+            //    用于打包版没有 `_recon/`、或用户已在别处提取过的场景。
+            let record = if import_desktop {
+                match crate::server::core::providers::marvis::import::import_from_local().await {
+                    Ok(record) => record,
+                    Err(error) => return management_error(error.status_code, error.message),
+                }
+            } else {
+                if let Err(error) =
+                    crate::server::core::providers::marvis::credentials::validate_shape(&payload)
+                {
+                    return management_error(error.status_code, error.message);
+                }
+                payload.clone()
+            };
+            // 探活：只用于给出提示，不因失败而拒绝落账号（离线录入是合理场景）
+            let outcome = crate::server::core::providers::marvis::probe::probe(&record).await;
+            if !outcome.ok {
+                crate::server::logging::log(
+                    "[Accounts]",
+                    &format!("Marvis 探活未通过（仍保存）：{}", outcome.message),
+                );
+            }
+            let source = if import_desktop { "desktop" } else { "manual" };
+            store.add_marvis_account(&record, import_name, source)
+        }
         // Antigravity（Google 的 AI IDE）：**粘贴 Google refresh token**
         // → 本地归一化（剥引号 / `refresh_token=` 整行 / 空白；`1//` 是令牌本体，
         // 不剥）→ 打一次 Google token 端点做**真实校验**（refresh_token 没有可判
@@ -1098,6 +1198,84 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
                 Err(error) => return management_error(error.status_code, error.message),
             };
             store.add_antigravity_account(&credentials, import_name, "manual")
+        }
+        // MiniMax Code 的两个地区（`minimax` / `minimax-intl`）：**主入口是设备码
+        // 登录**（`/api/session/login/start` 的 `provider: "minimax"` 或
+        // `"minimax-intl"`，见 `core::login::minimax`），这里处理的是**两条侧门**：
+        //   ① `importDesktop: true` → 从本机已登录的客户端**复制**令牌
+        //      （`~/.minimax/auth/prod/<region>/mcode-public/auth.json`）。**只读不写** ——
+        //      客户端的 `auth.json` 与 `auth-state.json` 带一对必须相等的
+        //      `generation` 计数器，写一次就让它判定「在别处登录过」并要求重登
+        //      （见 `providers::minimax::credentials` 的模块头）；
+        //   ② 否则 → 粘贴访问令牌（`mmoat_…`）。JWT 里能读出 `user.id` 与
+        //      `exp:`，所以手工粘贴**不需要用户再填别的东西**；刷新令牌没有
+        //      就只能用一小时（界面上「刷新 Token」会如实提示）。
+        // 探活（一次 `max_tokens:1` 的真实对话）失败**不阻断保存**：离线录入
+        // 是合理场景，错误文案会带回来让界面提示。
+        //
+        // 两个地区**共用这一支**：地区由 provider id 反查（`Region::from_provider_id`），
+        // 与 AutoClaw / Qoder 拆家后的写法同款 —— 写死一个地区会让国际版账号落进
+        // 国内版那一组，症状是「加号成功、转发稳定 401」。
+        Some(crate::server::core::providers::ProviderKind::Minimax)
+        | Some(crate::server::core::providers::ProviderKind::MinimaxIntl) => {
+            let region = crate::server::core::providers::minimax::Region::from_provider_id(provider)
+                .unwrap_or(crate::server::core::providers::minimax::Region::Cn);
+            let mut record = if import_desktop {
+                match crate::server::core::providers::minimax::import::import_from_desktop(region) {
+                    Ok(record) => record,
+                    Err(error) => return management_error(error.status_code, error.message),
+                }
+            } else {
+                if let Err(error) =
+                    crate::server::core::providers::minimax::credentials::validate_shape(&payload)
+                {
+                    return management_error(error.status_code, error.message);
+                }
+                payload.clone()
+            };
+            // 探活**不传代理**：账号还没入库，它的出口设置（PATCH `proxy`）
+            // 此刻不存在。国际版在没有代理时会探活失败并给出「配代理」的提示 ——
+            // 那正是用户下一步要做的事，不算误报（文案里已写清）。
+            //
+            // ── 探活顺带补身份（2026-10-22）──────────────────────────
+            // 线上令牌是不透明 `mmoat_`，`user.id` 读不出来；而账户类接口签名
+            // 要带 `user_id=<身份>`（缺它 ⇒ 余额恒空、签到 `invalid signature`），
+            // 且续期端点不回身份 ⇒ 落库时不补就再也补不回来。
+            // 失败的探活也可能带回身份（`identity` 与 `ok` 是两件事），一起用。
+            let outcome = crate::server::core::providers::minimax::probe::probe(
+                region,
+                &record,
+                None,
+            )
+            .await;
+            if !outcome.identity.is_empty() {
+                if let Some(object) = record.as_object_mut() {
+                    let missing = object
+                        .get("userId")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .unwrap_or("")
+                        .is_empty();
+                    if missing {
+                        object.insert(
+                            "userId".to_string(),
+                            serde_json::Value::String(outcome.identity.clone()),
+                        );
+                        crate::server::logging::verbose(
+                            "[Accounts]",
+                            "MiniMax Code：探活顺带补全了账号身份（userId）",
+                        );
+                    }
+                }
+            }
+            if !outcome.ok {
+                crate::server::logging::log(
+                    "[Accounts]",
+                    &format!("MiniMax Code 探活未通过（仍保存）：{}", outcome.message),
+                );
+            }
+            let source = if import_desktop { "desktop" } else { "manual" };
+            store.add_minimax_account(region, &record, import_name, source)
         }
         // OfficeAce（华为云果办 / OfficeClaw）：粘贴模型网关的 Basic 凭据
         // （`baseUrl` + `modelAppKey`/`modelAppSecret`，可选控制面临时凭据）。
@@ -1945,6 +2123,48 @@ pub async fn refresh_account(state: &ServerState, body: &Bytes) -> Response {
     // （`refresh_account` 的文档里把这条列为「加带 refreshToken 的家时必须一起加」）。
     if state.store().antigravity_account_record(&id).is_some() {
         return refresh_provider_account(state, &id, ProviderKind::Antigravity).await;
+    }
+    // Marvis：**没有刷新机制**（上游没有可复现的刷新端点 —— `LoginInfo` 里的
+    // `refreshToken` 是客户端内部行为，见 `providers::marvis::credentials` 的
+    // 模块头）。不显式拦下的话会落到下面的 workbuddy 兜底链路，用户会收到一条
+    // 与腾讯另一套鉴权端点相关的错 —— 与 Command Code / CatPaw 漏登记时同一性质。
+    if state.store().marvis_account_record(&id).is_some() {
+        return management_error(
+            400,
+            "Marvis 的令牌没有刷新接口（上游无续期端点）：请在客户端重新登录后，\
+             以管理员身份运行 _recon/marvis-cred-extract.py，再把新的 JSON 粘贴到\
+             本页重新添加（会更新同一条账号记录）",
+        );
+    }
+    // MiniMax Code（两个地区）：**有**可刷新的 refreshToken（OAuth，单次有效、
+    // 每次轮换），走自家续期（`grant_type=refresh_token` 打各自的授权服务器：
+    // 国内版 `account.minimax.cn`、国际版 `account.minimaxi.com`）。
+    // 这条分派不能省：漏了就落到下面的 workbuddy 兜底链路，用户点「刷新 Token」
+    // 收到的是腾讯鉴权端点的错 —— 与 Antigravity / Command Code 漏登记时同一性质。
+    //
+    // 两个地区**逐个查**（账号集合按 provider 隔离，同一 id 不可能同时属于两家，
+    // 与 Accio / AutoClaw / Qoder 同一条遍历）；查到的那个地区既决定「是不是本家」，
+    // 也决定打哪台授权服务器 —— 所以必须把 region 一起传下去，不能只判存在性。
+    for region in crate::server::core::providers::minimax::Region::ALL {
+        if state.store().minimax_account_record(region, &id).is_none() {
+            continue;
+        }
+        let record = state
+            .store()
+            .minimax_account_record(region, &id)
+            .unwrap_or_default();
+        let can_refresh = record
+            .get("refreshToken")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty());
+        if !can_refresh {
+            return management_error(
+                400,
+                "这个 MiniMax Code 账号没有刷新令牌（只有访问令牌，约 1 小时有效）：\
+                 请在账号页重新登录一次，或粘贴带 refreshToken 的凭据",
+            );
+        }
+        return refresh_provider_account(state, &id, region.kind()).await;
     }
     // WorkBuddy 系（国内版 / 国际版）的兜底：两条链路都按**账号自己的**
     // endpoint / prefixPath / platform / edition 续期

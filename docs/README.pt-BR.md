@@ -23,7 +23,7 @@ O Agent2API reúne as contas já conectadas de vários clientes de IA em um úni
 ## ✨ Principais recursos
 
 - 🔌 **Compatível com OpenAI** — aponte o `base_url` do seu cliente para o gateway: Chat, Responses e Messages são todos suportados
-- 🏪 **22 provedores integrados** — WorkBuddy, Raccoon, CatPaw, Qoder, Trae e outros funcionam de imediato, além de provedores personalizados via passthrough
+- 🏪 **24 provedores integrados** — WorkBuddy, Raccoon, CatPaw, Qoder, Trae e outros funcionam de imediato, além de provedores personalizados via passthrough
 - 🔁 **Credenciais que se renovam sozinhas** — tokens são renovados antes de expirar, os próximos do vencimento podem ser atualizados em lote e o catálogo de modelos se mantém atual
 - 🪂 **Rotação de várias contas** — contas entram na fila por prioridade, um 429 passa para a próxima e contas em cooldown são puladas sem espera
 - 🛡️ **Proxies de saída** — cada conta pode ter seu próprio IP de saída; o fingerprint enviado imita o cliente oficial
@@ -82,6 +82,9 @@ Panorama dos recursos de proxy reverso por plataforma (✓ suportado · ✗ não
 | ModelScope (MoDa, China / global) | ✓ | ✗ | ✓ | ✓ | ✓ | — |
 | AtomCode (AtomGit / GitCode) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | LobsterAI (NetEase Youdao, Youdao Lobster) | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| Marvis (Tencent) | ✓ | ✗ | ✗ | ✗ | ✗ | — |
+| MiniMax Code (China / Internacional) | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| Coze 扣子 (ByteDance) | ✓ | ✗ | ✓ | ✓ | ✓ | ✓ |
 | Provedores personalizados | ✓ | — | ✓ | — | — | — |
 
 > Nota: em Lista de modelos, ✓ significa busca automática online (algumas plataformas também mantêm uma tabela estática interna como fallback); o ZCode tem apenas a tabela estática interna. ✗ em Renovação automática do token significa que a plataforma não tem um fluxo de renovação disponível (a conta continua funcionando enquanto as credenciais forem válidas). O check-in do Qoder é somente na versão da China.
@@ -183,7 +186,7 @@ O `.dmg` do macOS **só pode ser compilado no macOS** (`npm --prefix desktop-tau
 
 ### Apenas para aprendizado e discussão
 
-Este projeto é um exercício prático de proxy reverso HTTP, passthrough de streaming SSE, adaptação de protocolos de múltiplos upstreams e empacotamento desktop (Tauri), e destina-se **apenas a aprendizado e pesquisa pessoal**. Não é um produto oficial e não tem qualquer vínculo, endosso ou patrocínio de Tencent e WorkBuddy / CodeBuddy, Meituan e CatPaw, SenseTime e 小浣熊, Zhipu e AutoClaw / autoglm, Alibaba e Qoder / Accio, Huawei Cloud e CodeArts / OfficeAce, ByteDance e Trae, iFlytek e Loomy, Baidu Wenku e KukuAI, 长亭科技 e MonkeyCode, Command Code, Google e Antigravity, Alibaba e ModelScope (MoDa), GitCode / AtomGit e AtomCode, ou NetEase Youdao e LobsterAI (Youdao Lobster).
+Este projeto é um exercício prático de proxy reverso HTTP, passthrough de streaming SSE, adaptação de protocolos de múltiplos upstreams e empacotamento desktop (Tauri), e destina-se **apenas a aprendizado e pesquisa pessoal**. Não é um produto oficial e não tem qualquer vínculo, endosso ou patrocínio de Tencent e WorkBuddy / CodeBuddy, Meituan e CatPaw, SenseTime e 小浣熊, Zhipu e AutoClaw / autoglm, Alibaba e Qoder / Accio, Huawei Cloud e CodeArts / OfficeAce, ByteDance e Trae, iFlytek e Loomy, Baidu Wenku e KukuAI, 长亭科技 e MonkeyCode, Command Code, Google e Antigravity, Alibaba e ModelScope (MoDa), GitCode / AtomGit e AtomCode, NetEase Youdao e LobsterAI (Youdao Lobster), Tencent e Marvis, ou MiniMax e MiniMax Code.
 
 ### Sobre o comportamento de proxy reverso
 

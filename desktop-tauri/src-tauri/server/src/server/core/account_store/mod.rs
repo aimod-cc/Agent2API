@@ -108,9 +108,14 @@ pub mod cline_accounts;
 pub mod codearts_accounts;
 pub mod atomcode_accounts;
 pub mod commandcode_accounts;
+/// Coze（扣子）：账号记录 / 公开形态。凭证是整包 Cookie（落在 `accessToken`
+/// 那一列，与 KukuAI 同一处置），PAT 不进记录（10 分钟一枚，进程内缓存）。
+pub mod coze_accounts;
 pub mod custom_accounts;
 pub mod kuku_accounts;
 pub mod lobsterai_accounts;
+pub mod marvis_accounts;
+pub mod minimax_accounts;
 pub mod loomy_accounts;
 pub mod modelscope_accounts;
 pub mod monkeycode_accounts;
@@ -260,6 +265,47 @@ pub(crate) const ATOMCODE_PROVIDER_ID: &str = crate::server::core::providers::ki
 pub(crate) const LOBSTERAI_PROVIDER_ID: &str = crate::server::core::providers::kind_id(
     crate::server::core::providers::ProviderKind::LobsterAi,
 );
+
+/// Marvis（腾讯马维斯）provider id（**从注册表推导**，同 [`LOOMY_PROVIDER_ID`]
+/// 的口径）。账号形态见 `marvis_accounts.rs`。
+///
+/// 本家的账号 id 由 **openid** 派生（不是令牌哈希）：令牌会过期重取，
+/// 而 openid 是稳定的登录身份 —— 重新提取令牌应更新同一条记录，
+/// 而不是每换一次就多一个账号。
+pub(crate) const MARVIS_PROVIDER_ID: &str = crate::server::core::providers::kind_id(
+    crate::server::core::providers::ProviderKind::Marvis,
+);
+
+/// Marvis 的 provider id 字符串（给 `api::checkin_center` 这类需要
+/// 「与常量比较」但不在本模块内的调用点用）。
+pub fn marvis_provider_id() -> &'static str {
+    MARVIS_PROVIDER_ID
+}
+
+/// 这个 provider 是不是 **MiniMax Code 系**（两个地区之一）。
+///
+/// 与 [`is_cline_family`] / [`is_autoclaw_family`] 同一形态、同一理由：账号层有
+/// 几处判断只关心「是不是 MiniMax」（公开形态要摘两个令牌、会话里要注入
+/// `userId` 供签名用），不关心哪个地区 —— 那些分支全走本函数，将来加地区或改名
+/// 时只改这里一处。
+///
+/// ── 为什么没有 `MINIMAX_PROVIDER_ID` 常量 ─────────────────────
+/// 本家拆两地区之前有一个裸常量，拆后**所有**运行时判据都必须用本函数（拿常量
+/// 比较只覆盖国内版）。留一个「只认国内版」的常量在这里，等于给后来者一支随时
+/// 会扣响的枪：他会自然地 `provider == MINIMAX_PROVIDER_ID`，然后国际版就在
+/// 某一处悄悄失效。真需要国内版的 id 时，写 `Region::Cn.provider_id()` ——
+/// 那是显式的、看得出是「只要国内版」。
+///
+/// 判据走注册表（`Region::from_provider_id`），**绝不**用 `starts_with("minimax")`：
+/// 那会把 `minimax-intl` 误算进国内版，也会把将来某个 `minimax-x` 的陌生 id 当成自家。
+///
+/// 账号 id 的生成口径（与身份派生有关，别丢）：由 JWT 的 `user.id` 派生
+/// （不是令牌哈希）—— 访问令牌每小时轮换、刷新令牌每次续期都换新，而 `user.id`
+/// 恒定，所以「重新登录更新同一条记录」天然成立；拿不到 `user.id` 时才退回令牌
+/// 哈希。细节见 `minimax_accounts.rs` 的模块头。
+pub(crate) fn is_minimax_family(provider_id: &str) -> bool {
+    crate::server::core::providers::minimax::Region::from_provider_id(provider_id).is_some()
+}
 
 /// 智谱清言（`chatglm.cn`）provider id（**从注册表推导**，同
 /// [`LOOMY_PROVIDER_ID`] 的口径）。账号形态见 `chatglm_accounts.rs`。

@@ -128,6 +128,22 @@ export const PROVIDER_ICONS: Record<string, string> = {
   // 该处是 24×24 的 SVG，已栅格化成 256×256 RGBA 入库（与 orcaterm / officeace
   // 同一处置）。
   lobsterai: 'assets/providers/lobsterai.png',
+  // Marvis（腾讯「马维斯」）：图标取自官网 `marvis.qq.com/favicon.ico` 里
+  // 内嵌的 256×256 PNG 条目（该 .ico 共 10 档 16→256，全是 PNG 编码，
+  // 已直接提取最大档入库，未做重采样 —— 与 orcaterm / officeace / lobsterai
+  // 同一处置：用产品自己的形象，不用腾讯平台 favicon）。
+  marvis: 'assets/providers/marvis.png',
+  // MiniMax Code：复用仓库里既有的 `minimax.png`（128×128 RGBA，与预置卡
+  // 「Minimax Coding」同一个品牌形象；`minimax-cn.png` 与它字节相同）。
+  // 不另取 `agent.minimax.cn/favicon.ico` —— 实测该路径 404（回的是整站
+  // HTML），而品牌图标与「开放平台」那两张预置卡本就该一致，换个来源反而
+  // 会让同一家公司在我们这里有两个不同的图标。
+  minimax: 'assets/providers/minimax.png',
+  // 国际版同一品牌形象（`minimax.png` 与 `minimax-cn.png` 字节相同，两地区共用）
+  'minimax-intl': 'assets/providers/minimax.png',
+  // Coze（扣子）：取自官网 `www.coze.cn/favicon.ico` 内嵌的 PNG 条目
+  // （最大档归一成 256×256 入库 —— 与浏览器标签页上是同一形象）。
+  coze: 'assets/providers/coze.png',
 }
 
 /**

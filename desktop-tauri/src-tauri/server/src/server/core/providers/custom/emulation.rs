@@ -10,27 +10,36 @@
 //! ```
 //! 这次重测用的是**官方客户端自己的出站请求**（`opencode serve` 起一个实例，
 //! `BUN_CONFIG_VERBOSE_FETCH=curl` 把它的请求原文打出来）做字节级对照，再逐项
-//! 消融。当前这道门要求四条同时成立：
-//!   1. 凭证是**字面量** `public`（`Authorization: Bearer public`）——
-//!      匿名通道，不需要注册、也不需要登录；
-//!   2. **四个会话头同时在场且同值**：`x-opencode-session`、
-//!      `x-opencode-session-id`、`x-session-affinity`、`x-session-id`。
-//!      缺 `x-opencode-session-id` 实测即 403；
+//! 消融。**2026-10-20 同法复测**：门已比 v2.0.27 那轮记录**放宽**，当前硬要求
+//! 只剩下面这几条（缺一即 403 `FreeTierError`）：
+//!   1. `User-Agent` 以 `opencode/` 开头 —— **只校验前缀**，版本号与平台串都不查
+//!      （`opencode/2.0.32 (linux x64; node22)` 同样放行）；旧记录当成必需项的
+//!      **匿名凭证 `Authorization: Bearer public` 实测可省**，本模块仍铺它
+//!      （没填 key 时用字面量 `public`）—— 与官方免费档的默认形态一致，无害；
+//!   2. **至少**带一个会话头 `x-opencode-session`，值为
+//!      `ses_<12位小写 hex><14位 Base62>` 且低 12 位 ≥ [`LOW12_FLOOR`]。
+//!      旧记录说的「四个会话头同时在场且同值」已放宽：`x-opencode-session-id` /
+//!      `x-session-affinity` / `X-Session-Id` 三个**不是必需项**（只留
+//!      `x-opencode-session` 一个即 200，全去掉才 403）。本模块照旧补齐四个头
+//!      （ [`apply_headers`] ）保持与官方客户端字节级对齐，属冗余但无害；
 //!   3. `x-opencode-request` 与 `x-opencode-project` **一个都不能发** —— 实测
 //!      带上任何取值（含 `msg_…`、真实 sha1）都 403，官方 v2 客户端这两个头
 //!      本来也不发；
-//!   4. 请求体须是「智能体形态」：`stream: true`，且 `tools` 里同时含一个
-//!      shell 类工具（`bash` 或 `shell`）与一个 `read`（名字要小写逐字相同，
-//!      参数与描述不查；见 [`SHELL_TOOL_ALIASES`]）。
+//!   4. 请求体须是「智能体形态」：`stream: true`，且 `tools` 里含一个 `read`
+//!      （名字要小写逐字相同，参数与描述不查）。**2026-10-20 复测：只需
+//!      `read` 这一个** —— 旧记录说的「还要一个 shell 类工具（bash/shell）」
+//!      已放宽（仅 bash → 403、仅 read → 200），细节见 [`STUB_TOOLS`]。
 //!
 //! 会话 id 只校验**形状与取值**（`ses_<12位小写 hex><14位 Base62>`，低 12 位
 //! ≥ [`LOW12_FLOOR`]），**不校验它是否在服务端注册过** —— 本模块的派生算法
 //! （[`session_id`]，低 12 位钉 [`LOW12_TAG`]）实测直接放行，不需要本机装或跑
-//! 官方客户端。端点也换过：`/zen/v1` 已废弃（打它一律 403），当前是
+//! 官方客户端。另：`x-opencode-client: cli` 也**不是必需项**（去掉仍 200）。
+//! 端点也换过：`/zen/v1` 已废弃（打它一律 403），当前是
 //! `/inference/v1`（预置卡的 baseUrl 已同步，存量记录走 `custom_providers`
 //! 的读侧迁移）。
 //!
-//! 本模块就实现这四条。**它是有意为之的 opt-in**：只在提供商记录显式写了
+//! 本模块就实现这几条（多出的 `Bearer public` 与另三个会话头是有意保留的对齐
+//! 冗余，理由见上）。**它是有意为之的 opt-in**：只在提供商记录显式写了
 //! `clientEmulation: "opencode"` 时才生效（预置卡「OpenCode Zen」会带上
 //! 它），手写的家与本网关的其它路径完全不受影响。
 //!
@@ -54,10 +63,10 @@
 //!     工具并列存在 —— 上游要的就是这个形态；
 //!   · 上游随时可能收紧这套校验（2026-09、2026-10-09、2026-10-13、2026-10-14
 //!     都动过），失效时表现为 403 `FreeTierError`。再遇到这类 403，排查顺序是
-//!     **端点是不是 `/inference/v1` → 四个会话头齐不齐 → 有没有多带
-//!     `x-opencode-request` / `x-opencode-project` → 会话 id 的低 12 位 →
-//!     请求体的 `stream` 与工具对**，最后才怀疑上游又改了规则（判据是「四条的
-//!     产物都对、却仍然 403」）。
+//!     **端点是不是 `/inference/v1` → 有没有带合格形状的 `x-opencode-session` →
+//!     有没有多带 `x-opencode-request` / `x-opencode-project` → UA 是不是
+//!     `opencode/` 开头 → 会话 id 的低 12 位 → 请求体的 `stream` 与 `read`**，
+//!     最后才怀疑上游又改了规则（判据是「上面这些产物都对、却仍然 403」）。
 //!     排这个门的正解是**抓官方客户端自己的出站请求**做对照
 //!     （`BUN_CONFIG_VERBOSE_FETCH=curl opencode serve`），别照着社区方案猜 ——
 //!     那批方案大多还打在废弃的 `/zen/v1` 上，照着抄只会一起坏。
@@ -81,13 +90,22 @@ pub const ANONYMOUS_KEY: &str = "public";
 /// 伪装成官方 CLI 的 User-Agent（对照实现实测可通过的版本号）
 const USER_AGENT: &str = "opencode/1.18.31 (windows amd64; node22)";
 
-/// 免费档校验要求的桩工具名（大小写敏感，实测只有小写通过）：一个 shell 类
-/// 工具 + 一个 `read`，两者齐了才放行。
-const STUB_TOOLS: [&str; 2] = ["bash", "read"];
-
-/// 「shell 类工具」的等价名 —— 上游认 `bash` 或 `shell` 任一（官方 v2 客户端
-/// 发的是 `shell`）。本模块补桩一律用 [`STUB_TOOLS`] 里的 `bash`。
-const SHELL_TOOL_ALIASES: [&str; 2] = ["bash", "shell"];
+/// 免费档校验要求的桩工具名（大小写敏感，实测只有小写通过）。
+///
+/// ── 2026-10-20 复测：只需 `read`，「shell 类」已不再是必需项 ──────
+/// 旧记录（对着 v2.0.27）是「一个 shell 类工具 + 一个 `read`，两者齐了才
+/// 放行」。同日的逐项消融显示上游**已放宽**：
+///   - 仅 `read`            → 200
+///   - 仅 `bash`            → 403
+///   - 仅 `shell`           → 403
+///   - 仅 `grep`            → 403
+///   - `Bash` + `Read`（大写）→ 403
+/// 所以本表只留 `read`。**不再补 `bash` 有两个好处**：少给上游一个假工具
+/// （模型误调它的机会归零），客户端自带工具时下发体更干净。
+///
+/// 之所以仍然保留「补齐」这个动作（而不是干脆不管）：客户端**原本没有
+/// tools** 时，请求体里就没有 `read` 声明，上游照样 403 —— 这一条没变。
+const STUB_TOOLS: [&str; 1] = ["read"];
 
 /// 会话标识的 Base62 字母表（与对照实现逐字一致）
 const BASE62: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -242,11 +260,16 @@ fn base62_fixed(bytes: &[u8], width: usize) -> String {
 /// 没填才用匿名字面量（免费档）。这与 `ProviderQuirks::apply_to` 的合并口径
 /// 相同，转发侧先铺默认头、再调本函数，顺序不能反过来。
 ///
-/// ── 头集合是**实测**出来的，多一个少一个都不行 ────────────────
-///   · **四个会话头必须同时在场且同值**（缺 `x-opencode-session-id` → 403）；
+/// ── 头集合是**实测**出来的 ──────────────────────────────────
+///   · **`x-opencode-session` 是硬要求**（合格形状见 [`is_acceptable_session_id`]）；
+///     另三个会话头（`x-opencode-session-id` / `x-session-affinity` /
+///     `X-Session-Id`）2026-10-20 复测**不是必需项**，照官方客户端补齐纯属对齐
+///     冗余 —— 多带无害，别当成判据去删（上游若回到「四头同值」的老规矩，这里
+///     一步到位就是现成的）。
 ///   · **不发** `x-opencode-request` / `x-opencode-project` —— 官方 v2 客户端
 ///     这两个头本来也不发，实测带上任何取值都 403。旧实现发的
 ///     `req_…` / `prj_…` 正是 2026-10 这轮 403 的成因之一，别再加回来。
+///   · UA 才是真正过门的头（`opencode/` 前缀），缺了实测 403。
 pub fn apply_headers(headers: &mut Vec<(String, String)>, api_key: &str, session: &str) {
     let credential = if api_key.trim().is_empty() {
         ANONYMOUS_KEY
@@ -258,7 +281,9 @@ pub fn apply_headers(headers: &mut Vec<(String, String)>, api_key: &str, session
         // 官方 CLI 的形状头：缺了「看起来就不像官方客户端」，实测会掉进 403
         ("User-Agent".to_string(), USER_AGENT.to_string()),
         ("x-opencode-client".to_string(), "cli".to_string()),
-        // 四个会话头（同一场对话同一个 id，上游按它做提示词缓存亲和）
+        // 会话头族：同一场对话同一个 id，上游按它做提示词缓存亲和。硬要求只有
+        // 第一个（x-opencode-session），其余三个是照官方客户端的补齐冗余
+        // （2026-10-20 复测：只留第一个也 200）
         ("x-opencode-session".to_string(), session.to_string()),
         ("x-opencode-session-id".to_string(), session.to_string()),
         ("x-session-affinity".to_string(), session.to_string()),
@@ -308,17 +333,15 @@ fn merge(
     }
 }
 
-/// 请求体补齐「智能体形态」：`stream: true` + `tools` 里必须同时含一个
-/// shell 类工具与一个 `read`（见模块头第 4 条）。
+/// 请求体补齐「智能体形态」：`stream: true` + `tools` 里含一个 `read`
+/// （见模块头第 4 条，以及 [`STUB_TOOLS`] 上 2026-10-20 的复测说明）。
 ///
 /// 返回是否改动了请求体（只给日志用）。四条细节：
 ///   · `stream` 恒置 true（上游免费档只接受流式；非流式下游由网关聚合器收敛
 ///     —— 这与编排层对**所有**上游的既有策略一致，不是这里新加的行为）；
-///   · **缺哪个补哪个，客户端自带的工具一律原样保留**（不覆盖它的参数定义）。
-///     注意是「缺就补」而不是「没有才补」：客户端只带自己的业务工具时，若不含
-///     shell / `read` 这两样，照样过不了检 —— 实测这种请求一律 403；
-///   · shell 侧认**两个等价名**：客户端自己带了 `bash` 或 `shell`，都不再补
-///     （上游两者都认，见 [`SHELL_TOOL_ALIASES`]）；
+///   · **缺 `read` 才补，客户端自带的工具一律原样保留**（不覆盖它的参数定义）。
+///     注意是「缺就补」而不是「没有才补」：客户端只带自己的业务工具、不含
+///     `read` 时照样过不了检 —— 实测这种请求一律 403；
 ///   · 客户端**原本没有 tools** 时补 `tool_choice: "none"`：桩工具只为过检，
 ///     明确禁止模型调用它。客户端自带工具时不动 `tool_choice` —— 那会破坏
 ///     它本来能用的工具调用。
@@ -340,13 +363,7 @@ pub fn ensure_agent_shape(body: &mut Value) -> bool {
         .unwrap_or_default();
     let declared = tool_names(&tools);
     for name in STUB_TOOLS {
-        // shell 侧用等价名匹配：`bash` 这条只要客户端带了 `bash` 或 `shell` 就算满足
-        let satisfied = if name == "bash" {
-            declared.iter().any(|item| SHELL_TOOL_ALIASES.contains(&item.as_str()))
-        } else {
-            declared.iter().any(|item| item.as_str() == name)
-        };
-        if satisfied {
+        if declared.iter().any(|item| item == name) {
             continue;
         }
         tools.push(stub_tool(name));
@@ -374,9 +391,11 @@ fn tool_names(tools: &[Value]) -> Vec<String> {
 }
 
 /// 一个桩工具（参数与描述不参与上游校验，给可辨识的名字是为了让人读日志时
-/// 一眼看出它是网关补的）
+/// 一眼看出它是网关补的）。
+///
+/// 参数名取 `filePath` 是照抄官方客户端 `read` 工具的形状；上游只校验**工具名**
+/// （小写逐字 `read`），参数定义不查 —— 这里保持形似是为了让抓包对照时一眼能认出。
 fn stub_tool(name: &str) -> Value {
-    let property = if name == "bash" { "command" } else { "filePath" };
     json!({
         "type": "function",
         "function": {
@@ -384,7 +403,7 @@ fn stub_tool(name: &str) -> Value {
             "description": "(internal placeholder — do not call)",
             "parameters": {
                 "type": "object",
-                "properties": { property: { "type": "string" } },
+                "properties": { "filePath": { "type": "string" } },
             },
         },
     })

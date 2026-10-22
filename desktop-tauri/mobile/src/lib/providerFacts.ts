@@ -75,6 +75,9 @@ const FACTS: Record<string, ProviderFacts> = {
   qwenwork: { expiry: 'expiresAt', identifier: 'uid', usage: true },
   // QClaw：导入本机网关配置，令牌长期有效（本机回环网关，无到期概念）。
   qclaw: { expiry: '', identifier: 'userId', longLived: true, usage: true },
+  // Coze（扣子）：Cookie 读不出到期时刻，上游没有刷新接口 —— 与 KukuAI 同一
+  // 处置（`expiry: ''`、不标 longLived）。余额来自 `trade/credit/balance`。
+  coze: { expiry: '', identifier: 'uid', usage: true },
 }
 
 const FALLBACK: ProviderFacts = { expiry: 'expiresAt', identifier: 'userId', usage: false }

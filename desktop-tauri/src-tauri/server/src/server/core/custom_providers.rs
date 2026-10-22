@@ -142,13 +142,13 @@ const MAX_HEADER_VALUE_CHARS: usize = 512;
 pub const TOOL_TYPE_CUSTOM: &str = "custom";
 
 /// 客户端形态伪装的唯一合法值：OpenCode 官方 CLI。开着它时转发会按官方客户端的
-/// 形状补齐请求（`Bearer public` 匿名凭证、`ses_…` 会话头、`bash` / `read` 桩
-/// 工具），否则 OpenCode Zen 的免费档一律 403 `FreeTierError`（实现与实测记录
+/// 形状补齐请求（`Bearer public` 匿名凭证、`ses_…` 会话头、`read` 桩工具），
+/// 否则 OpenCode Zen 的免费档一律 403 `FreeTierError`（实现与实测记录
 /// 见 `providers::custom::emulation`）。空串 = 不伪装（默认）。
 ///
 /// **它是 opt-in 且会改写请求体**，所以必须由**记录显式声明**（预置卡
 /// 「OpenCode Zen」会写入它），不能按 baseUrl 猜 —— 猜错的后果是给别的上游
-/// 塞两个假工具。
+/// 塞假工具。
 pub const CLIENT_EMULATION_OPENCODE: &str = "opencode";
 
 /// ── 余额查询方案（`balanceScheme`）────────────────────────────

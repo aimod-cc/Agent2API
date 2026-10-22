@@ -356,6 +356,12 @@ impl AccountStore {
             // 公开形态带 uid(=uk) / loginName(=昵称) / tokenTail（见
             // `kuku_accounts.rs`）
             self.to_kuku_public_account(record)
+        } else if record.provider() == super::coze_accounts::COZE_PROVIDER_ID {
+            // Coze（扣子）：单一站点（`www.coze.cn`），入口有两条 —— 网页登录与
+            // 粘贴整包 Cookie，落进同一条记录。公开形态带 uid(=passport user_id)
+            // / loginName(=昵称) / tokenTail（见 `coze_accounts.rs`）。
+            // **不带 expiresAt**：Cookie 没有到期时刻可读、也没有续期。
+            self.to_coze_public_account(record)
         } else if record.provider() == super::COMMANDCODE_PROVIDER_ID {
             // Command Code：单一入口（粘贴 `user_` API Key），公开形态去掉 key
             // 本体、只留尾号与「有没有 key」（见 `commandcode_accounts.rs`）
@@ -408,6 +414,19 @@ impl AccountStore {
             // （refreshToken / uuid / 两个 keyfrom）。它们都是「能续期」的条件，
             // 一起下发等于把账号的续期能力送出去；界面要的只是 canRefresh 布尔。
             self.to_lobsterai_public_account(record)
+        } else if record.provider() == super::MARVIS_PROVIDER_ID {
+            // Marvis（腾讯马维斯）：公开形态要摘掉**令牌本体 + openid**。
+            // openid 是登录身份（换令牌还是同一个人），泄漏它等于半个账号；
+            // guid 保留 —— 它是设备号，界面用它区分「哪台机器提取的」，
+            // 且单独拿去打上游没有 token 也没用。
+            self.to_marvis_public_account(record)
+        } else if super::is_minimax_family(&record.provider()) {
+            // MiniMax Code（两个站点都走这一支）：公开形态要摘掉**两个令牌本体**
+            // （accessToken 与 refreshToken）。后者是长期续期凭据（单次有效、
+            // 每次轮换），泄漏它等于把账号的续期能力送出去；界面只需要
+            // `canRefresh` 布尔。判据走 `family_matches`（不认前缀）——
+            // 写 `== "minimax"` 会让国际版掉进通用形态、把 refreshToken 下发出去。
+            self.to_minimax_public_account(record)
         } else if record
             .provider()
             .starts_with(crate::server::core::custom_providers::ID_PREFIX)
@@ -806,7 +825,7 @@ fn display_name_of(public: &Map<String, Value>, id: &str) -> String {
 /// 未登记的家按 userId 兜底 —— 与前端 GENERIC_FEATURES 一致）。
 fn identifier_key_of(provider: &str) -> Option<&'static str> {
     match provider {
-        "workbuddy" | "workbuddy-intl" | "catpaw" | "trae" | "kuku" => Some("uid"),
+        "workbuddy" | "workbuddy-intl" | "catpaw" | "trae" | "kuku" | "coze" => Some("uid"),
         "cline-free" | "cline-pass" => Some("account"),
         "officeace" => Some("id"),
         _ => Some("userId"),

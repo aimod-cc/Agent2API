@@ -101,7 +101,7 @@
   "✅ 顺序已调整": "",
   "　出口 IP {ip}": "　IP de saída {ip}",
   "、": ", ",
-  "、补官方会话头、请求体补两个占位工具（上游免费档的三道校验）。": ", adiciona os cabeçalhos de sessão oficiais e inclui dois tools de preenchimento no corpo da requisição (as três validações do plano gratuito do upstream).",
+  "、补官方会话头、请求体补占位工具（上游免费档的过门校验）。": ", adiciona os cabeçalhos de sessão oficiais e um tool de preenchimento no corpo da requisição (as validações de formato do plano gratuito do upstream).",
   "「{name}」已在「网络代理」页禁用，请先启用它或换一条": "\"{name}\" está desativado na página \"Proxy de rede\". Ative-o primeiro ou escolha outro.",
   "「{name}」开着排序规则：先关掉规则，才能手动调整组内顺序": "“{name}” está com regras de ordenação ativas: desligue-as antes de ajustar a ordem dentro do grupo",
   "「{name}」本身": "o próprio 「{name}」",

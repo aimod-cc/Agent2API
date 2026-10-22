@@ -138,6 +138,21 @@ pub mod codearts;
 /// `UpstreamResponse::CommandCodeNdjson` 那条翻译层，见 `commandcode/mod.rs`。
 pub mod commandcode;
 pub mod content_block;
+/// Coze（扣子，`coze.cn`）。适配实现在 `coze/`：账号管理（**网页登录 / 粘贴
+/// 整包 Cookie**）+ **会话式转发**（`api.coze.cn/v3/chat`，SSE 事件流，
+/// `is_stateful()` 为 true）+ 机器人目录（model 即 `bot_id`）+ 积分余额 /
+/// 逐份到期 / 订阅 + 每日签到。
+///
+/// ── 反代机制（客户端逆向 + 活凭证实测，见 `coze/mod.rs`）──────────
+/// 网页 Cookie 登录态向 `impersonate_coze_user` 换**10 分钟 PAT**，PAT 打
+/// 推理与账户接口；任务中心 / 机器人列表 / 身份这几条**只能 Cookie 打**。
+/// 因此账号存整包 Cookie，PAT 由网关按需铸造、进程内缓存、临期 60 秒重铸。
+///
+/// ── 模型 = 机器人 ────────────────────────────────────────
+/// v3/chat 是 bot 维度的（没有「选模型」这一步），所以目录出的是用户的
+/// bot 清单、model 名就是 `bot_id`；bot 必须发布「Agent As API」渠道，
+/// 未发布回 `code:4015`（`chat.rs` 把它翻成可读指引）。
+pub mod coze;
 /// 自定义提供商的**运行期接线**（目录聚合的追加段 + Chat Completions 协议
 /// 转发）。它不进本文件的身份体系（`ProviderKind` / `PROVIDERS`，见
 /// `custom_providers` 的模块头），但目录合并与转发的分派点都以 id 字符串
@@ -165,6 +180,19 @@ pub mod officeace;
 /// 多轮拍平为单条输入）+ 余额（月度 AI 配额）全部已接通；
 /// `is_stateful` 为 true（请求内会话，与 KukuAI 同形态），见 `orcaterm/mod.rs`。
 pub mod orcaterm;
+/// Marvis（腾讯「马维斯」桌面 AI 助手）。适配实现在 `marvis/`：
+/// 账号管理（粘贴凭证三件套）+ **无状态 OpenAI 兼容转发** + 设备指纹
+/// （`beacon_wrapper.dll` 离线生成 uskey）；无续期 / 无目录 / 无余额 / 无签到
+/// （各自的排除过程写在对映模块头），见 `marvis/mod.rs`。
+pub mod marvis;
+/// MiniMax Code **国内版**（`agent.minimax.cn` / MiniMax Code 桌面客户端）。适配实现在
+/// `minimax/`：设备码 OAuth 登录（RFC 8628 + PKCE）+ **无状态 Anthropic
+/// Messages 转发** + 远程模型目录（免鉴权）+ 积分余额 / 逐份批次到期 + 七天签到
+/// + refresh_token 续期。**不是**马维斯那家（协议与鉴权体系完全不同），见
+/// `minimax/mod.rs` 的模块头。
+///
+/// 与 [`ProviderKind::MinimaxIntl`] 是同一套协议的两个站点（见 `minimax/region.rs`）。
+pub mod minimax;
 /// 千问办公（QwenWork 中国版，`qwenwork.cn` 桌面客户端）。适配实现在
 /// `qwenwork/`：导入本机登录态（DPAPI + AES-256-GCM）→ JWT →
 /// `POST /api/desktop-sessions` 换 MaaS 密钥 → 标准 OpenAI 兼容推理。
@@ -634,6 +662,94 @@ pub enum ProviderKind {
     /// 下发、续期必须原样回传（丢了账号永远续不了期）；③ `developer` 角色上游
     /// 回 502，出站要降级成 `system`。
     LobsterAi,
+    /// Marvis（腾讯「马维斯」桌面 AI 助手，`marvis.qq.com`）。适配实现在
+    /// `marvis/`：账号管理（**粘贴提取出来的凭证三件套**：`mv_` 令牌 + openid +
+    /// guid）+ **无状态 OpenAI 兼容转发**；无续期、无目录接口、无余额、无签到。
+    ///
+    /// ── 上游长什么样（本机 Windows 1.60.3000.228 实测，见 `marvis/mod.rs`）──
+    /// `POST https://yybadaccess.3g.qq.com/v1/chat/completions` 是**标准 OpenAI
+    /// 协议零转换**（SSE / `tool_calls` / `usage` 全一致），模型名 `main-auto`
+    /// 由服务端路由，真实模型从响应头 `Marvis-Actual-Model` 回来。
+    ///
+    /// ── 与另外三家腾讯产品（WorkBuddy / QClaw / OrcaTerm）没有共用代码 ──
+    /// 鉴权体系完全不同：本家用一组 `Ual-Access-*` 头 + **设备指纹 `uskey`**
+    /// （`beacon_wrapper.dll` 离线生成，Windows 版 544B / 前缀 `CsDVDCER`，
+    /// macOS 版 992B / `CiDVDCER` —— 照抄参考实现必错）。
+    ///
+    /// ── 三层鉴权的实测结论（决定了本家的实现边界）──────────────
+    /// `access_token`（缺 → 401/4100403）→ `uskey`（缺 → 403/4100404）→
+    /// `Ual-Access-Signature`（**实测不校验**：空签名同样 200）。因此
+    /// 只需现场生成 uskey，不必复现签名算法。
+    ///
+    /// ── 凭证为什么不落明文 ──────────────────────────────────────
+    /// `db/login.db` 的 `userinfo` 是密文、`marvis_seckv.dll` 的 `mskv_get`
+    /// 会 `WinVerifyTrust` 校验调用方签名（只认腾讯签名进程）。所以添加账号
+    /// 走「管理员跑一次 `_recon/marvis-cred-extract.py` → 粘贴三件套」，
+    /// 与 OrcaTerm / Kuku 的「粘贴 / 导入本机登录态」同一形态。
+    Marvis,
+    /// MiniMax Code（`agent.minimax.cn`，MiniMax 的 AI 编程客户端）。适配实现在
+    /// `minimax/`：设备码 OAuth 登录 + **无状态 Anthropic Messages 转发** +
+    /// 远程模型目录 + 积分余额 / 批次到期 + 七天签到 + refresh_token 续期。
+    ///
+    /// ── 上游长什么样（2026-10-21 实测，见 `minimax/mod.rs`）──────────
+    /// `POST https://agent.minimax.cn/mavis/api/v1/llm/v1/messages` 是**标准
+    /// Anthropic Messages**（客户端 provider 声明 `npm: '@ai-sdk/anthropic'`），
+    /// 只认 `Authorization: Bearer`（发 `x-api-key` 会被 401 `token is required`）。
+    ///
+    /// ── 三条与别家都不同的实测事实 ────────────────────────────
+    /// ① **两套门禁**：推理端点只看 Bearer（签名与查询串都不影响判定），
+    ///    而账户/签到端点要三个 MD5 签名头（缺了回 `400 invalid signature`）；
+    /// ② **模型强制推理**：发 `thinking:{"type":"disabled"}` 会被 400 拒掉；
+    /// ③ **令牌每小时轮换**：`mmoat_` 访问令牌 1 小时、`mmort_` 刷新令牌单次
+    ///    有效且每次续期都换新的 —— 所以账号 id 由 JWT 的 `user.id` 派生
+    ///    （令牌会变、身份不变），续期后必须立刻落盘。
+    ///
+    /// ── 与马维斯（Marvis）没有共用代码 ────────────────────────
+    /// 两家名字像、都以桌面客户端为主，但协议完全不同：Marvis 是 OpenAI 兼容 +
+    /// `Ual-Access-*` 头组 + 设备指纹 uskey；本家是 Anthropic Messages + 单一
+    /// Bearer + 账户接口 MD5 签名。**别把两者混成一个 provider。**
+    ///
+    /// ── 与 [`ProviderKind::MinimaxIntl`] 是同一套协议的两个站点 ────
+    /// 地区必须是 provider 身份而不是账号字段：客户端按 `<env>/<region>` 分目录
+    /// 存登录态、两地授权服务器不同域（令牌互不通用）、模型目录只有一份缓存槽
+    /// （不拆就会互相覆盖）。国内版沿用裸 id `minimax`（存量账号记的就是它），
+    /// 国际版是 `minimax-intl`。互查在 `minimax::Region`，别处不要再写
+    /// `"minimax-intl"` 这类字面量。
+    Minimax,
+    /// MiniMax Code **国际版**（`minimax-intl`，网关 `agent.minimaxi.com`、
+    /// 授权服务器 `account.minimax.io`）。
+    ///
+    /// 与 [`ProviderKind::Minimax`] 同一套协议、不同站点：推理 / 目录 / 余额 /
+    /// 签到 / 续期的**请求形状完全一致**，只有域名分叉（见 `minimax/region.rs`
+    /// 的实测表）。⚠️ 网关写 `agent.minimaxi.com` 而不是客户端常量表里的
+    /// `agent.minimax.io`：后者实测只回 307 跳到前者，直接打权威域少一跳。
+    MinimaxIntl,
+    /// Coze（扣子，`coze.cn` / `api.coze.cn`）。适配实现在 `coze/`：账号管理
+    /// （网页登录 / 粘贴整包 Cookie）+ **会话式转发**（v3/chat 的 SSE 事件流，
+    /// `is_stateful()` 为 true）+ 机器人目录 + 余额 / 到期 / 订阅 + 每日签到。
+    ///
+    /// ── 反代机制（客户端 app.asar 逆向 + 活凭证实测，2026-10-21）──
+    /// 凭证是 `.coze.cn` 域**整包 Cookie**（网页登录态）；网关用它向
+    /// `POST /api/permission_api/coze_web_app/impersonate_coze_user` 铸一枚
+    /// **10 分钟 PAT**（`cztei_` 前缀，Bearer），PAT 打推理与 `trade/*` 系列。
+    /// ⚠️ `expires_in` 回的是**绝对 epoch 秒**不是剩余秒数（`credentials.rs` 双判）。
+    ///
+    /// ── 三条链的凭证分界（实测，别混）──────────────────────────
+    ///   - PAT：`trade/credit/*`（余额 / 明细 / 订阅）、`ug/.../client_download_reward`、
+    ///     `coze_claw/*`、`api.coze.cn/v3/chat`；
+    ///   - 只能 Cookie：`incentive/user_task/list`、`incentive/activity/reward`、
+    ///     `bot/get_bot_list`、`passport/account/info/v2/` —— 打 PAT 一律
+    ///     `700012006 登录认证失败`。
+    ///
+    /// ── 没有续期 ────────────────────────────────────────────
+    /// Cookie 是网页登录态（不是 JWT），上游没有刷新接口 ——
+    /// `supports_refresh` 保持默认 false，过期只能重新登录（与 Kuku / CatPaw
+    /// 同一处境）。PAT 不是账号级凭证，由 `credentials::ensure_pat` 按需铸造。
+    ///
+    /// ── 签到形态 ────────────────────────────────────────────
+    /// 两条独立的领奖链（活动奖励走 Cookie、下载客户端奖励走 PAT），已接进
+    /// `core::auto_checkin`（清单里列 `coze`），claim 见 `coze::checkin`。
+    Coze,
 }
 
 /// 一个提供商的静态元数据。
@@ -765,6 +881,29 @@ pub const PROVIDERS: &[ProviderMeta] = &[
     // LobsterAI（网易有道「有道龙虾」）：单一入口（浏览器登录），没有地区伴生。
     // 排在末尾（后到居后）。
     ProviderMeta { id: "lobsterai", label: "LobsterAI" },
+    // Marvis（腾讯「马维斯」）：单一入口（粘贴凭证三件套：mv_ 令牌 + openid +
+    // guid），没有地区伴生。排在末尾（2026-10 接入，后到居后）。
+    //
+    // 它的模型清单只有 `main-auto` 一个路由别名，与别家**不重名** ——
+    // 因此排位不影响同名归属，只是遵循「新家追加在末尾」的书写约定。
+    ProviderMeta { id: "marvis", label: "马维斯 Marvis" },
+    // MiniMax Code 国内版（`agent.minimax.cn`）：设备码登录 / 粘贴访问令牌 /
+    // 导入本机登录态。**两个站点相邻排列**（与 ModelScope / AutoClaw / Qoder /
+    // ZCode / MonkeyCode 同一理由：同一条产品线的两个版本，中间隔着别家会让
+    // 「找国际版」变成一次扫描）。顺序也决定模型目录合并时同名模型先归谁家 ——
+    // 两家的模型名完全相同（`MiniMax-M3` 等），国内版在前 ⇒ 同名先归国内版
+    // （那是绝大多数用户的那一版）。排在末尾（2026-10 接入，后到居后）。
+    ProviderMeta { id: "minimax", label: "MiniMax Code 国内版" },
+    // MiniMax Code 国际版（`agent.minimaxi.com`）。与国内版同一套协议、不同
+    // 站点（见 `minimax/region.rs`）。
+    ProviderMeta { id: "minimax-intl", label: "MiniMax Code 国际版" },
+    // Coze（扣子，字节跳动）：单一站点（`www.coze.cn` / `api.coze.cn`），
+    // 没有地区伴生（国际版 coze.com 是另一套账号体系，未验证 ⇒ 按「判不出来
+    // 不拆」只开国内版）。排末尾（2026-10 接入，后到居后）。
+    //
+    // 它的「模型」是用户自己的机器人（`bot_id`），与别家的模型名**不重名**，
+    // 因此排位不影响同名归属，只是遵循「新家追加在末尾」的书写约定。
+    ProviderMeta { id: "coze", label: "Coze 扣子" },
 ];
 
 /// provider id 在注册表里的下标（未知 id → None）。
@@ -856,6 +995,10 @@ pub fn kind_from_id(id: &str) -> Option<ProviderKind> {
         "modelscope-intl" => Some(ProviderKind::ModelscopeIntl),
         "atomcode" => Some(ProviderKind::Atomcode),
         "lobsterai" => Some(ProviderKind::LobsterAi),
+        "marvis" => Some(ProviderKind::Marvis),
+        "minimax" => Some(ProviderKind::Minimax),
+        "minimax-intl" => Some(ProviderKind::MinimaxIntl),
+        "coze" => Some(ProviderKind::Coze),
         // 走到这里 = 上面的注册表判定已放行、这个 match 却没有对应分支：
         // 只可能是有人给 `PROVIDERS` 加了条目忘了加这里。开发期喊出来；
         // release 返回 None（见上：宁可为「未知」，不可误认成别家）。
@@ -905,6 +1048,10 @@ pub const fn kind_id(kind: ProviderKind) -> &'static str {
         ProviderKind::ModelscopeIntl => "modelscope-intl",
         ProviderKind::Atomcode => "atomcode",
         ProviderKind::LobsterAi => "lobsterai",
+        ProviderKind::Marvis => "marvis",
+        ProviderKind::Minimax => "minimax",
+        ProviderKind::MinimaxIntl => "minimax-intl",
+        ProviderKind::Coze => "coze",
     }
 }
 

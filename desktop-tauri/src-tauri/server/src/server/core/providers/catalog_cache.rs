@@ -130,6 +130,35 @@ pub const SCOPE_QWENWORK: &str = "qwenwork";
 /// 缓存槽。单一入口、无地区之分，单格。
 pub const SCOPE_QCLAW: &str = "qclaw";
 
+/// Marvis（腾讯马维斯）的模型目录缓存槽。
+///
+/// 本家**没有**远程目录（`GET /v1/models` 恒 404，见 `marvis/models.rs`），
+/// 清单是静态兜底 —— 这一格存在的意义是「口径完整」：`ALL_SCOPES` 漏了不会
+/// 报错（缓存能写进内存，重启后读不回来，见 SKILL 2.3），所以新家一律登记，
+/// 即使当前它从不写这份缓存。
+pub const SCOPE_MARVIS: &str = "marvis";
+
+/// MiniMax Code（`GET /mavis/api/v1/models`，**免鉴权**）**国内版**的模型目录缓存槽。
+///
+/// 国内版网关单一域名（`agent.minimax.cn`）。本家**真有远程目录**，
+/// 所以这一格是真在用的（不像 `SCOPE_MARVIS` 只是口径完整）。
+pub const SCOPE_MINIMAX: &str = "minimax";
+
+/// MiniMax Code **国际版**的模型目录缓存槽（网关 `agent.minimaxi.com`）。
+///
+/// 与 [`SCOPE_MINIMAX`] 分格：两个地区是两个 provider、两条独立的刷新排期，
+/// 共用一格会让「谁最后刷谁的内容留在缓存里」，而界面按 provider 各读各的
+/// 「上次刷新时刻」—— 于是出现「国际版刚刷过、国内版显示从未刷新」这种
+/// 自相矛盾的读数。两格都在本项目里真实写入（两地目录接口都实测 200）。
+pub const SCOPE_MINIMAX_INTL: &str = "minimax-intl";
+
+/// Coze（扣子）的**机器人目录**缓存槽（`GET /v1/workspaces` → `GET /v1/bots`）。
+///
+/// 本家的「模型」是用户自己的 bot（`bot_id`），清单是**用户特定**的 ——
+/// 所以这一格必须真实写入（没有静态兜底可回落，空清单就是「这个账号还没有
+/// 已发布的机器人」）。清空它不影响任何内置清单。
+pub const SCOPE_COZE: &str = "coze";
+
 /// 全部 scope（事实来源：`cached_scopes` 按它遍历；新增一家时加在这里）。
 pub const ALL_SCOPES: &[&str] = &[
     SCOPE_WORKBUDDY,
@@ -158,6 +187,10 @@ pub const ALL_SCOPES: &[&str] = &[
     SCOPE_MODELSCOPE_INTL,
     SCOPE_ATOMCODE,
     SCOPE_LOBSTERAI,
+    SCOPE_MARVIS,
+    SCOPE_MINIMAX,
+    SCOPE_MINIMAX_INTL,
+    SCOPE_COZE,
 ];
 
 /// 一份清单缓存

@@ -364,7 +364,25 @@ fn identity_shape_of(kind: ProviderKind) -> IdentityShape {
         // 三类约束，因此不需要专属分支（与上游对 OfficeAce / OrcaTerm 的
         // 处置一致 —— 同步上游时本地那几支专属分支已随之删除）。
         | ProviderKind::Qwenwork
-        | ProviderKind::Qclaw => Generic,
+        | ProviderKind::Qclaw
+        // Marvis（腾讯马维斯）：身份落在通用链的 `openid` 上（本家的登录身份，
+        // 换令牌还是同一个人）。无「必填 / 多段 / 优先级不同」三类约束 ——
+        // `openid` 是必填项这一点由 `marvis_accounts::add_marvis_account` 的
+        // 入参校验负责，不是身份链要判的事。
+        | ProviderKind::Marvis
+        // MiniMax Code（两个站点）：身份落在通用链的 `userId` 上（JWT 的
+        // `user.id`，令牌每小时轮换但身份不变）。无「必填 / 多段 / 优先级不同」
+        // 三类约束。两个地区都要列 —— 漏一个会让国际版账号的导入判重失效
+        // （同一个号被重复添加成两条）。
+        | ProviderKind::Minimax
+        | ProviderKind::MinimaxIntl => Generic,
+        // Coze（扣子）：身份落在通用链的 `uid` 上（passport 的 `user_id_str`，
+        // 公开形态与 KukuAI 同形）。无「必填 / 多段 / 优先级不同」三类约束 ——
+        // uid 由 `add_coze_account` 用 cookie 尾兜底，记录里恒非空。
+        // 注意它**不**像 KukuAI 那样走专属分支：KukuAI 需要它是因为导出导入
+        // 要带三件套，而 Coze 的整包 Cookie 就在 `accessToken` 那一列，
+        // 通用链原样搬运即可。
+        ProviderKind::Coze => Generic,
     }
 }
 
@@ -533,7 +551,10 @@ mod tests {
             "workbuddy", "workbuddy-intl", "raccoon", "catpaw", "autoclaw", "autoclaw-intl",
             "qoder", "qoder-intl", "cline-free", "cline-pass", "codearts", "trae", "loomy",
             "kuku", "commandcode", "antigravity", "officeace", "orcaterm", "chatglm",
-            "modelscope", "atomcode", "lobsterai", "zcode",
+            "modelscope", "modelscope-intl", "atomcode", "lobsterai", "zcode", "minimax",
+            // MiniMax Code 国际版：与国内版同一套身份链（`userId`），但 provider id
+            // 不同 —— 漏了它，导入国际版账号时「条目与记录算出的身份」没人钉住。
+            "minimax-intl",
         ] {
             let fields = item(json!({
                 "id": "acc-1",

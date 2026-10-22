@@ -770,7 +770,7 @@ function ProviderSection({
       <p className='detail'>
         {t('开启后，网关按 OpenCode 官方 CLI 的形状发请求：没填 Key 的账号用匿名凭证')}
         <code>{'public'}</code>
-        {t('、补官方会话头、请求体补两个占位工具（上游免费档的三道校验）。')}
+        {t('、补官方会话头、请求体补占位工具（上游免费档的过门校验）。')}
         <strong>{t('它会改写请求体')}</strong>
         {t('，只对 OpenCode Zen 这类上游有意义，别的家请关掉。')}
       </p>

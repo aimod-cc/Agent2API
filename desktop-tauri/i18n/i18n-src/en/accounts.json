@@ -101,7 +101,7 @@
   "✅ 顺序已调整": "",
   "　出口 IP {ip}": " Exit IP {ip}",
   "、": ", ",
-  "、补官方会话头、请求体补两个占位工具（上游免费档的三道校验）。": ", adds official session headers, and adds two placeholder tools to the request body (the three checks of the upstream free tier).",
+  "、补官方会话头、请求体补占位工具（上游免费档的过门校验）。": ", adds official session headers and a placeholder tool in the request body (the upstream free tier's shape checks).",
   "「{name}」已在「网络代理」页禁用，请先启用它或换一条": "\"{name}\" is disabled on the \"Network proxy\" page. Enable it first or pick another one.",
   "「{name}」开着排序规则：先关掉规则，才能手动调整组内顺序": "“{name}” has sorting rules on: turn them off before adjusting the order inside the group",
   "「{name}」本身": "\"{name}\" itself",

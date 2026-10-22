@@ -616,6 +616,48 @@ impl AccountStore {
                 }
             }
         }
+        // ── Marvis 的两个附加键（`marvis::credentials` 用）──────────────        // 与 OfficeAce / QClaw 那两支同一手法、同一理由：会话是转发链交给适配器
+        // 的**唯一**形态（`build_chat_request` 的 `account` 参数），而本家除
+        // `auth.accessToken` 外还需要两项才能拼出 `Ual-Access-*` 头：
+        //   - `openid`：`Ual-Access-Openid`（登录身份）；
+        //   - `guid`：`Ual-Access-Guid`（设备号，**不是** qimei36）。
+        // 缺了它们 `marvis::credentials::from_record` 读到空值、转发直接报
+        // 「凭证不完整」—— 这正是「测试未通过：需要 accessToken / openid / guid
+        // 三项」那条报错的成因（2026-10-21 实测）。
+        //
+        // 注意 `guid` 是**记录顶层**的字段名，与会话里通用的 `account.uid`
+        // 不是一回事（后者对本家恒空）—— 别让协议层去猜通用字段的取值约定。
+        // 条件判据是 provider id，对别家的会话是逐字空操作；空值不写。
+        if record.provider() == super::MARVIS_PROVIDER_ID {
+            if let Some(object) = session.as_object_mut() {
+                for key in ["openid", "guid", "qimei36"] {
+                    let value = record.get(key).and_then(Value::as_str).unwrap_or("");
+                    if !value.trim().is_empty() {
+                        object.insert(key.to_string(), Value::String(value.to_string()));
+                    }
+                }
+            }
+        }
+        // ── MiniMax Code 的 `userId`（`minimax::balance` 用）────────────
+        // 与上面几支同一手法、同一理由：账户类接口的设备查询串里要带
+        // `user_id=<realUserID>`（客户端的 `buildPublicParams` 同款），
+        // 而会话的通用字段 `account.uid` 对本家恒空 —— 本家把登录身份存在
+        // 记录顶层 `userId`（来自 JWT 的 `user.id`）。
+        // 缺它的后果不是报错而是**签名对不上**（查询串少一段 ⇒ 上游回
+        // `invalid signature`），最难查的一类；所以这里必须注入。
+        //
+        // ⚠️ 判据走 `is_minimax_family`（**两个地区都认**），不要写
+        // `== MINIMAX_PROVIDER_ID`：后者只覆盖国内版，国际版账号的会话里没有
+        // `userId` ⇒ 余额 / 签到的签名恒不合法（`invalid signature`），
+        // 而转发（不签名那条路）却一切正常 —— 典型的「只有一半功能坏了」。
+        if super::is_minimax_family(&record.provider()) {
+            if let Some(object) = session.as_object_mut() {
+                let value = record.get("userId").and_then(Value::as_str).unwrap_or("");
+                if !value.trim().is_empty() {
+                    object.insert("userId".to_string(), Value::String(value.to_string()));
+                }
+            }
+        }
         // ── QClaw 的两个端口字段（`qclaw::adapter` 用）────────────────
         // 与 OfficeAce 那支同一手法、同一理由：适配器只能看到会话，而
         // 「连哪个端口」的事实在账号记录里（`qclaw_accounts.rs` 的落盘形态）。

@@ -399,6 +399,16 @@ pub async fn checkin_for(
                     .map_err(|error| error.message);
             claim_result(id, name, &display, true, claim)
         }
+        "coze" => {
+            // Coze：**两条独立的领奖链**（活动奖励走 Cookie、下载客户端奖励走
+            // PAT），幂等（当天已领回 code:0 但 activity_points 为空）。
+            // 凭证分界与两个坑见 `coze::checkin` 的模块头。
+            let claim =
+                crate::server::core::providers::coze::checkin::claim_daily_checkin(store, &id)
+                    .await
+                    .map_err(|error| error.message);
+            claim_result(id, name, &display, true, claim)
+        }
         "officeace" => {
             // OfficeAce：`POST /v1/subscription/bonus/claim`（V11 签名）一次把当天
             // 所有可领的奖励（每日签到 + 一次性新人礼）发下来；一天一个活动只能领
@@ -661,6 +671,29 @@ pub async fn checkin_for(
                 crate::server::core::providers::lobsterai::checkin::claim_daily_checkin(store, &id)
                     .await
                     .map_err(|error| error.message);
+            claim_result(id, name, &display, true, claim)
+        }
+        "minimax" | "minimax-intl" => {
+            // MiniMax Code（两个站点共用这一支，地区由 provider id 反查）：
+            // `POST {gw}/minimax-cloud/api/v1/signin/claim`
+            // （**幂等** —— 当天已领回 `claim_result: 2`，本实现把它翻成
+            // `success: true` + `alreadyCompleted: true`，与 AutoClaw 同一处置）。
+            // 七天一轮共 4000 积分，见 `minimax::checkin` 的模块头。
+            //
+            // `log_success_msg = true`：本家的 claim 文案带具体收益
+            // （「第 3 天 +400 积分」），拼进日志才有排查价值。
+            //
+            // 地区一定要传：它决定打哪台网关、以及 SIG 用的 region 参数 ——
+            // 写死国内版会让国际版账号的签到稳定 `invalid signature`。
+            let region = crate::server::core::providers::minimax::Region::from_provider_id(
+                provider_id,
+            )
+            .unwrap_or(crate::server::core::providers::minimax::Region::Cn);
+            let claim = crate::server::core::providers::minimax::checkin::claim_daily_checkin(
+                region, store, &id,
+            )
+            .await
+            .map_err(|error| error.message);
             claim_result(id, name, &display, true, claim)
         }
         other => json!({

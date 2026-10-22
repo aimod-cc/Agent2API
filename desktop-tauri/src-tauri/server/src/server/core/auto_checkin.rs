@@ -138,7 +138,7 @@ pub fn default_time() -> String {
 /// 这是「有签到或每日活跃任务」的清单，不是「有积分概念」的清单：CatPaw 有积分
 /// 查询但没有签到，因此不在此列 —— 它的账号在批量签到里被算作 `skipped`。
 /// 加一家之前先确认它的签到链路真的存在（一个点了必然报错的复选框比没有更糟）。
-pub const CHECKIN_PROVIDERS: [&str; 18] = [
+pub const CHECKIN_PROVIDERS: [&str; 21] = [
     "workbuddy",
     "workbuddy-intl",
     "raccoon",
@@ -181,6 +181,20 @@ pub const CHECKIN_PROVIDERS: [&str; 18] = [
     // check_in），实测 +100 积分/号/天。幂等靠客户端（idempotencyKey + 上游
     // 的 `claimedToday` 预检），见 `lobsterai::checkin` 的模块头。
     "lobsterai",
+    // MiniMax Code（两个地区）：七天一轮共 4000 积分（400/400/400/1000/400/400/1000），
+    // 每天一份、30 天后到期。链路 **2026-10-21 实测存在**，见
+    // `providers::minimax::checkin` 的模块头（客户端 archon 页的 signin store
+    // 直接调 `signin/status` 与 `signin/claim`，台账里 `credit_type=2` 的批次
+    // 就是它发的）。幂等：当天重复领回 `claim_result: 2`，不算失败。
+    // 国际版（`agent.minimaxi.com`）是同一套签到接口、另一个网关 ——
+    // 两份都要在清单里，否则国际版账号在签到中心长不出勾选框。
+    "minimax",
+    "minimax-intl",
+    // Coze（扣子）：两条独立的领奖链 —— 活动奖励（`incentive/activity/reward`，
+    // 只能 Cookie 打，type 1/2 分别对应 30 天 / 7 天有效期）与下载客户端奖励
+    // （`ug/v1/activity/client_download_reward`，要 PAT）。两条都幂等，
+    // 见 `providers::coze::checkin` 的模块头。
+    "coze",
 ];
 
 /// 缺省的签到提供商集合（全选）
@@ -198,7 +212,7 @@ pub fn default_providers() -> Vec<String> {
 /// 会让这一家的勾选框再也取消不掉（读完就补回来，界面上表现为「取消勾选没反应」）。
 /// 所以补齐只做一次，靠配置里的版本号记账；版本一旦写上去，用户之后再取消勾选
 /// 就真的生效了。执行点见 `checkin_schedules::extend_providers_once`。
-pub const PROVIDERS_VERSION: i64 = 5;
+pub const PROVIDERS_VERSION: i64 = 8;
 
 /// 「哪一版加入的家」——条目清单的版本低于它 = 这家还没被提供过 ⇒ 补进去。
 /// 版本 1 = 多条目改造上线时的形态（9 家；`qoder-intl` 由 `normalize_providers`
@@ -211,7 +225,13 @@ pub const PROVIDERS_VERSION: i64 = 5;
 ///   `providers_added_after(4)` 就只剩更晚的家，这几家永远补不进签到清单
 ///   （表现为「升级了但新家不在勾选清单里」）。记 5 后任何 < 5 的配置都能补齐，
 ///   且对已在清单里的家自动去重，不会重复追加。
-const PROVIDERS_ADDED_IN: [(&str, i64); 8] = [
+/// 版本 6 = MiniMax Code（本 fork，2026-10）。
+/// 版本 7 = MiniMax Code 国际版（`minimax-intl`，2026-10-21 拆两地区时补）。
+///   **必须单独占一个版本号**：版本 6 的配置已经记过 `minimax`，若把国际版也记 6，
+///   那批条目 `providers_added_after(6)` 就只剩「更晚的家」—— 国际版永远补不进
+///   清单（表现为「升级了但国际版不在勾选清单里」）。
+/// 版本 8 = Coze（扣子，本 fork，2026-10-21）。
+const PROVIDERS_ADDED_IN: [(&str, i64); 11] = [
     ("officeace", 2),
     ("codearts", 2),
     ("chatglm", 3),
@@ -220,6 +240,14 @@ const PROVIDERS_ADDED_IN: [(&str, i64); 8] = [
     ("modelscope-intl", 5),
     ("atomcode", 5),
     ("lobsterai", 5),
+    // 版本 6 = MiniMax Code（本 fork）。README 六列里它有真正的七天签到，
+    // 积分台账的 `credit_type=2` 批次就是它发的（见 `providers::minimax::checkin`）。
+    ("minimax", 6),
+    // 版本 7 = MiniMax Code 国际版（同一个签到接口、另一个网关）。
+    ("minimax-intl", 7),
+    // 版本 8 = Coze（扣子，本 fork）。两条领奖链（活动奖励 + 下载客户端奖励），
+    // 都是幂等的（见 `providers::coze::checkin`）。
+    ("coze", 8),
 ];
 
 /// 版本 `version` 之后才加入清单的家（按注册顺序）。空数组 = 这一版没有新家，

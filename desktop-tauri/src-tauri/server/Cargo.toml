@@ -142,6 +142,33 @@ windows = { version = "0.61", features = [
     # / QueryFullProcessImageNameW 取代 spawn taskkill（理由见 kill_by_pid 的
     # 说明）。Foundation 由 Win32 父特性自动带上（CloseHandle 在它里面）。
     "Win32_System_Threading",
+    # Marvis 本机凭证导入（providers/marvis/import.rs）：ShellExecuteW(…, "runas")
+    # 派生**提权**的提取器进程 —— 客户端进程自设受限 DACL，非管理员读不了它的
+    # 内存（同用户 OpenProcess 也 err=5），所以只能提权读。
+    #
+    # 为什么不用 `powershell Start-Process -Verb RunAs`（先试过，走不通）：
+    # 本环境的安全策略**禁止**从进程派生链调 PowerShell（"Invoking PowerShell
+    # from Bash bypasses PowerShell security checks"），运行期同样被拦 ——
+    # 表现为「导入一直等到超时」。ShellExecuteW 是这条动作的**原生**入口，
+    # 不受该策略影响，且不需要经过任何 shell。
+    "Win32_UI_Shell",
+    # `SW_SHOWNORMAL`（ShellExecuteW 的显示方式参数）在 WindowsAndMessaging 里
+    "Win32_UI_WindowsAndMessaging",
+    # Marvis 余额读数（providers/marvis/balance.rs）：客户端日志的时间戳只有
+    # `MM-DD HH:MM:SS.mmm`（没有年份、且是**本机时区**），要补当年、换算成真实
+    # UTC 毫秒、再判「是不是昨天 / 多久以前」，就要用到下面这三组时区换算。
+    #
+    # ⚠️ 在 windows 0.61 里这几个函数**分属不同模块**（照直觉全放 Time 里编不过）：
+    #   GetLocalTime                   → Win32::System::SystemInformation
+    #   FileTimeToSystemTime           → Win32::System::Time
+    #   SystemTimeToTzSpecificLocalTime→ Win32::System::Time
+    #   TzSpecificLocalTimeToSystemTime→ Win32::System::Time
+    #
+    # ⚠️ 别用 `FileTimeToLocalFileTime`：它返回的是「偏移过时区差的文件时间」，
+    # 不是一个合法的 UTC 文件时间，再解年月日会得到 1601 年（实测踩过）。
+    "Win32_System_Time",
+    "Win32_System_SystemInformation",
+    "Win32_Storage_FileSystem",
 ] }
 # Windows 服务形态（bin/service.rs）：`--service` 参数下把进程交给 SCM
 # （StartServiceCtrlDispatcherW + 控制事件回调 + 状态上报）。

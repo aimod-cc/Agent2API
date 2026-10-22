@@ -60,7 +60,9 @@ import {
 import {
   afterAdd,
   addedLabelOf,
+  callApi,
   clearFields,
+  openExternalUrl,
   closeAddModals,
   describeError,
   draftProps,
@@ -290,6 +292,240 @@ function DesktopSection({
  * 载荷只有 `{ provider, guest: true, name? }` —— 后端 `api::accounts` 的
  * Chatglm 分支按 `guest` 走 `guest/access` 换证（见那边的分支说明）。
  */
+/**
+ * 「设备码登录」段：MiniMax Code 唯一可用的自动登录方式（2026-10 接入）。
+ *
+ * ── 为什么单独一段，不复用 `OauthSection` ────────────────────────
+ * `OauthSection` 渲染的是 AutoClaw 专用的两颗按钮（「使用 Zai 账号登录」/
+ * 「使用 Google 账号登录」），点击全由 `autoclaw-oauth.js` 绑；本家既没有这两个
+ * 身份提供方，也没有任何引擎认得它的按钮 id —— 塞进去的症状就是**点了没反应**，
+ * 控制台连请求都没有（第一次接入实测）。所以这一段自己发请求、自己轮询。
+ *
+ * ── 交互与后端契约 ─────────────────────────────────────────────
+ * ```text
+ *   POST /api/session/login/start  {provider}   → {state, authUrl, userCode}
+ *   GET  /api/session/login/wait?state=<state>  → {pending:true[,userCode]} | {done:true,…}
+ *   POST /api/session/login/cancel {state}      → {canceled}
+ * ```
+ * `userCode` 必须显示出来：授权页未必自动填码，用户得看得见、能手输。
+ * 后端把它放在 `LoginTaskState.user_code` 里，`/start` 与 `/wait` 都会带回来。
+ *
+ * ── 打开授权页 ────────────────────────────────────────────────
+ * 一律走桥命令 `openExternalUrl`（桌面端 `ShellExecuteW` → **系统默认浏览器**，
+ * 网页端 shim 才是 `window.open`）。**不要直接 `window.open`**：WebView2 的
+ * `NewWindowRequested` 壳侧没接管、Tauri 默认丢弃，表现是「点了完全没反应」
+ * （不报错、控制台也没有记录 —— 这个 bug 真的发生过一次）。
+ *
+ * 不用内置窗口：设备码这条链**不需要本地回调端口**（令牌由我们轮询换），
+ * 所以系统浏览器就够了，跨机部署（Docker / 远程面板）同样可用 —— 这也是它比
+ * 「内嵌窗口抓回调」那几家更适合远程部署的原因。
+ */
+function DeviceCodeSection({
+  config,
+  visible,
+}: {
+  config: ProviderConfig
+  visible: boolean
+}): React.ReactElement | null {
+  const spec = config.deviceCodeLogin
+  const [busy, setBusy] = React.useState(false)
+  const [phase, setPhase] = React.useState<'idle' | 'waiting' | 'error'>('idle')
+  const [userCode, setUserCode] = React.useState('')
+  const [authUrl, setAuthUrl] = React.useState('')
+  const [message, setMessage] = React.useState('')
+  /** 当前任务的 state（取消与轮询都用它）；null = 没有在等的任务 */
+  const taskRef = React.useRef<string>('')
+  /** 组件卸载后不再 setState（用户在等待期间切走了「添加方式」） */
+  const aliveRef = React.useRef(true)
+  React.useEffect(() => {
+    aliveRef.current = true
+    return () => {
+      aliveRef.current = false
+    }
+  }, [])
+  if (!spec) return null
+
+  /** 复位到未发起态（不动后端任务：调用方决定要不要取消） */
+  function reset(): void {
+    taskRef.current = ''
+    if (!aliveRef.current) return
+    setBusy(false)
+    setPhase('idle')
+    setMessage('')
+    setUserCode('')
+    setAuthUrl('')
+  }
+
+  /** 轮询直到 done。间隔 1.5 秒：后端自己 3 秒一拍问上游，再密只是空转。 */
+  async function poll(state: string): Promise<void> {
+    for (let round = 0; round < 240; round += 1) {
+      // 用户取消 / 关窗 / 切走 → 立刻停（否则会一直转到超时）
+      if (!aliveRef.current || taskRef.current !== state) return
+      await new Promise(resolve => setTimeout(resolve, 1500))
+      if (!aliveRef.current || taskRef.current !== state) return
+      let payload: Record<string, unknown>
+      try {
+        payload = (await callApi('GET', `/api/session/login/wait?state=${encodeURIComponent(state)}`)) as Record<string, unknown>
+      } catch (error) {
+        // 任务过期（表里保留 10 分钟）是终态；其余错误也停 —— 继续轮只会重复同一条错
+        if (aliveRef.current) {
+          setBusy(false)
+          setPhase('error')
+          setMessage(describeError(error))
+        }
+        taskRef.current = ''
+        return
+      }
+      if (payload.pending === true) {
+        // 有些形态的设备码是「发起后才有」（`/start` 没等到），这里补一次
+        const code = typeof payload.userCode === 'string' ? payload.userCode : ''
+        if (code && aliveRef.current) setUserCode(code)
+        continue
+      }
+      const error = typeof payload.error === 'string' ? payload.error : ''
+      if (error) {
+        if (aliveRef.current) {
+          setBusy(false)
+          setPhase('error')
+          setMessage(error)
+        }
+        taskRef.current = ''
+        return
+      }
+      // 成功：关窗、刷新、提示（与其它登录方式同一收尾）
+      const session = (payload.session || {}) as {
+        nickname?: string
+        probe?: { ok?: boolean; message?: string }
+      }
+      taskRef.current = ''
+      if (aliveRef.current) {
+        setBusy(false)
+        setPhase('idle')
+      }
+      // 登录换到令牌 ≠ 令牌可用：后端在落库前打过一次真实探活（`probe`）。
+      // 探活失败时**仍然保存**（离线录入是合理场景），但必须如实告知 —— 否则
+      // 用户会看到一个「登录成功」的账号，之后余额一直报错却找不到原因。
+      // 这是「国际版令牌被网关拒绝」那个坑的正面处置：把坏消息提前说出来。
+      const probe = session.probe
+      if (probe && probe.ok === false) {
+        toast(
+          t('⚠️ {label}账号已添加，但探活未通过：{message}', {
+            label: config.label,
+            message: probe.message || t('令牌当前不可用'),
+          }),
+          'warn',
+        )
+      }
+      await afterAdd(session.nickname || '', config.label)
+      return
+    }
+    if (aliveRef.current) {
+      setBusy(false)
+      setPhase('error')
+      setMessage(t('等待授权超时，请重新发起'))
+    }
+    taskRef.current = ''
+  }
+
+  async function start(): Promise<void> {
+    if (busy) return
+    setBusy(true)
+    setPhase('waiting')
+    setMessage('')
+    try {
+      const payload = (await callApi('POST', '/api/session/login/start', {
+        // provider 一定要传：两个地区是两个 provider，后端按它选授权服务器
+        provider: config.provider,
+      })) as Record<string, unknown>
+      const state = typeof payload.state === 'string' ? payload.state : ''
+      const url = typeof payload.authUrl === 'string' ? payload.authUrl : ''
+      const code = typeof payload.userCode === 'string' ? payload.userCode : ''
+      if (!state || !url) {
+        throw new Error(t('后端没有返回授权地址（登录发起失败）'))
+      }
+      taskRef.current = state
+      if (!aliveRef.current) return
+      setAuthUrl(url)
+      setUserCode(code)
+      // 自动打开授权页：用户刚点了按钮，这一步是他期待的（不是弹窗滥用）。
+      // 走桥命令（系统默认浏览器），**不是 window.open** —— 后者在 WebView2 里
+      // 被静默丢弃，症状正是「点了没反应」。失败不阻断：下面那颗
+      // 「打开授权页」是兜底，且失败原因已经 toast 出来了。
+      void openExternalUrl(url)
+      await poll(state)
+    } catch (error) {
+      if (aliveRef.current) {
+        setBusy(false)
+        setPhase('error')
+        setMessage(describeError(error))
+      }
+      taskRef.current = ''
+    }
+  }
+
+  async function cancel(): Promise<void> {
+    const state = taskRef.current
+    taskRef.current = ''
+    reset()
+    if (!state) return
+    try {
+      await callApi('POST', '/api/session/login/cancel', { state })
+    } catch {
+      // 取消失败不影响本地复位：后端任务最长 5 分钟后自己超时
+    }
+  }
+
+  return (
+    <DialogSection hidden={!visible}>
+      <h3>{spec.title || t('网页登录（浏览器授权）')}</h3>
+      {spec.noteHtml ? <Note html={spec.noteHtml} /> : null}
+      {userCode ? (
+        <div className='form-field'>
+          <label>{spec.codeLabel || t('设备码')}</label>
+          {/* 设备码要能被选中复制（readOnly 的 input 而不是 div），
+              字号放大一档 —— 它是这一屏用户唯一要照着输的东西 */}
+          <input
+            type='text'
+            readOnly
+            value={userCode}
+            aria-label={spec.codeLabel || t('设备码')}
+            style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: '16px', letterSpacing: '0.08em' }}
+            onFocus={event => event.currentTarget.select()}
+          />
+        </div>
+      ) : null}
+      <div className='field-row'>
+        <Button
+          id={`${config.provider}-device-start`}
+          onClick={() => { void start() }}
+          disabled={busy}
+        >
+          {busy ? spec.busyText || t('等待浏览器里确认授权…') : spec.button || t('开始登录（获取设备码）')}
+        </Button>
+        {authUrl ? (
+          <Button
+            id={`${config.provider}-device-open`}
+            variant='outline'
+            onClick={() => { void openExternalUrl(authUrl) }}
+          >
+            {spec.openButton || t('打开授权页')}
+          </Button>
+        ) : null}
+        {busy ? (
+          <Button id={`${config.provider}-device-cancel`} variant='outline' onClick={() => { void cancel() }}>
+            {t('取消')}
+          </Button>
+        ) : null}
+      </div>
+      <div className='field-row'>
+        <span className='detail'>
+          {phase === 'error' && message ? message : (spec.hint || '')}
+        </span>
+      </div>
+    </DialogSection>
+  )
+}
+
 function GuestSection({
   config,
   visible,
@@ -821,6 +1057,7 @@ export function ProviderBlock({
         onModeChange={setOauthMode}
         visible={effective === 'oauth'}
       />
+      <DeviceCodeSection config={config} visible={effective === 'device'} />
       <SmsSection config={config} visible={effective === 'sms'} />
       <WebLoginSection
         config={config}

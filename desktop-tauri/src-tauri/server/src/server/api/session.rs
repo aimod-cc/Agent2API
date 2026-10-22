@@ -243,6 +243,47 @@ pub async fn login_start(State(state): State<ServerState>, body: Bytes) -> Respo
         return ok_json(json!({ "state": task.state, "authUrl": task.auth_url,
             "edition": task.edition, "provider": "qwenwork" }));
     }
+    // MiniMax Code（两个地区）：**OAuth 2.0 设备码（RFC 8628）+ PKCE**。设备码是
+    // 「先申请、用户去浏览器输码、我们轮询」的协议，所以这里等得到 authUrl（含
+    // user_code），响应形状与 Qoder / Qwenwork 那条一致
+    // （`{state, authUrl, userCode, edition, provider}`），前端不需要新分支。
+    // 见 `providers::minimax::login` 的模块头。
+    //
+    // ── 地区取谁：**provider id**，不是请求里的 `edition` ────────
+    // 界面上两个地区是两张卡片（`minimax` / `minimax-intl`），点哪张就发哪个
+    // provider id —— 那是权威。它决定「设备码问哪台授权服务器、令牌落进哪一家
+    // 账号库」，判错会让国际版账号落进国内版那一组（转发稳定 401）。
+    // 与 ZCode / Qoder 拆家后的写法同款。
+    if let Some(region) = crate::server::core::providers::minimax::Region::from_kind(kind) {
+        let handle = match state.login().start_minimax_login(region) {
+            Ok(handle) => handle,
+            Err(error) => return management_error(400, error),
+        };
+        // 设备码要等一次上游往返才拿到，所以按 AuthUrlWait 的上限轮询任务状态
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(crate::server::core::login::AUTH_URL_WAIT_MS);
+        loop {
+            let task = handle.snapshot();
+            if task.auth_url.is_some() {
+                // `userCode` 必须随首次响应一起回去：设备码要**显示给用户**
+                // （授权页未必自动填码），等 `/wait` 第一拍再给就晚了一拍。
+                return ok_json(json!({ "state": task.state, "authUrl": task.auth_url,
+                    "userCode": task.user_code, "edition": task.edition,
+                    "provider": region.provider_id() }));
+            }
+            if task.done {
+                return management_error(
+                    502,
+                    task.error.unwrap_or_else(|| "MiniMax Code 登录发起失败".to_string()),
+                );
+            }
+            if tokio::time::Instant::now() >= deadline {
+                // 任务仍在后台跑（与既有 502 语义一致：只是这一次没等到 URL）
+                return management_error(502, "MiniMax Code 登录发起超时（任务仍在后台继续）");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        }
+    }
     // ZCode：**服务端中介的 CLI 轮询**（`/oauth/cli/init` 拿授权地址，
     // 用户在浏览器里授权后由后台任务轮询换令牌）。响应形状与 Qoder 那条
     // 一致（`{state, authUrl, edition, provider}`），前端不需要新分支。
@@ -1014,6 +1055,42 @@ pub async fn login_kuku_complete(
         return management_error(400, "登录失败：回调缺少 state 或登录态 Cookie，请重新发起短信登录。");
     }
     match state.login().finish_kuku_login(task_state, cookie).await {
+        Ok(_) => ok_json(json!({ "ok": true })),
+        Err(error) => management_error(error.status_code, &format!("登录失败：{}", error.message)),
+    }
+}
+
+// ─── Coze 网页登录收尾（Cookie 交回）────────────────────────────
+
+/// `POST /api/session/login/coze/complete` —— 壳侧交回登录态。
+///
+/// Coze 的登录方式会经过第三方身份提供方（抖音 / 微信 / 阿里 / 短信），
+/// 成功后的跳转**不携带授权码**（凭证在 `.coze.cn` 域的 Cookie 里），而
+/// `sessionid_ss` 是 **HttpOnly** Cookie，登录窗口的页面脚本读不到 ——
+/// 因此交回由**壳侧进程**完成：窗口里出现 `sessionid_ss` 后，壳读 WebView2
+/// 的 Cookie 存储（`cookies()` 含 HttpOnly）把 `.coze.cn` 域**整包** Cookie
+/// 拼成 Cookie 头 POST 到这里（`state` + `cookie` 在请求体里，不走 URL）。
+///
+/// 该路由**免鉴权**：调用方是壳侧进程（登录窗口），不带 API Key；安全性由
+/// 登录任务的一次性 state 承担（与 kuku/complete 同口径）。
+pub async fn login_coze_complete(
+    State(state): State<ServerState>,
+    Json(payload): Json<Value>,
+) -> Response {
+    let task_state = payload
+        .get("state")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    let cookie = payload
+        .get("cookie")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if task_state.is_empty() || cookie.is_empty() {
+        return management_error(400, "登录失败：回调缺少 state 或登录态 Cookie，请重新发起登录。");
+    }
+    match state.login().finish_coze_login(task_state, cookie).await {
         Ok(_) => ok_json(json!({ "ok": true })),
         Err(error) => management_error(error.status_code, &format!("登录失败：{}", error.message)),
     }

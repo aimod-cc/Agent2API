@@ -154,6 +154,15 @@ pub fn panel_router(state: ServerState) -> Router {
             "/api/session/login/kuku/complete",
             post(api::session::login_kuku_complete),
         )
+        // Coze 网页登录收尾：壳侧在登录窗口出现 `sessionid_ss` 后读取 WebView2
+        // Cookie 存储（HttpOnly，页面脚本读不到），把 state + `.coze.cn` 域
+        // **整包** Cookie 一并 POST 交到这里。**免鉴权**：调用方是壳侧进程
+        // （登录窗口），不带 API Key；安全性由登录任务的一次性 state 承担
+        // （与 kuku/complete 同款）。
+        .route(
+            "/api/session/login/coze/complete",
+            post(api::session::login_coze_complete),
+        )
         // OrcaTerm 网页登录收尾（**兜底入口**）：正式链路是官方 OAuth —— 壳侧
         // 把 `orcaterm://oauth_callback?session_id=…` 交给
         // `/api/session/login/callback`，由后端 `OAuthExchangeToken` 换令牌

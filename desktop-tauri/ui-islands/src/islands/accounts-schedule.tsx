@@ -76,8 +76,8 @@ export type QueueSnapshot = {
   blocked?: QueueEntry[]
 }
 
-/** `/api/models/manage` 里我们只读这两样 */
-type ManageModel = { id?: string; provider?: string; credits?: unknown }
+/** `/api/models/manage` 里我们只读这几样（credits 给分组带的倍率，name 给作用域叶子的显示名） */
+type ManageModel = { id?: string; provider?: string; providerLabel?: string; credits?: unknown }
 
 /** `/api/session` 快照里我们只读这两样（models 是广告中的模型清单） */
 type SessionState = {
@@ -98,6 +98,66 @@ function bridge(): {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/* ─── 全量模型清单（作用域树的同步数据源）───────────────
+   `getModelManage` 是异步的，而作用域树是**同步渲染**的（`scopeModel()` 在
+   render 里直接调）。所以拉取结果放模块级，拉到的时刻通知订阅者重渲染 ——
+   与 `scope` 同一手法（见下面那段注释），不引入第二套状态机制。
+   ⚠️ 这里存的是 `/api/models/manage` 的**全量**（不跨家合并同名），
+   与 `/api/session` 的广告视图是两份不同口径的数据，别混用。 */
+let manageCache: ManageModel[] = []
+const manageListeners = new Set<() => void>()
+let manageLoading = false
+/** 最近一次拉全量清单的状态：'' = 正常；非空 = 给左栏显示的原因（不再静默回退） */
+let manageIssue = ''
+
+function subscribeManage(listener: () => void): () => void {
+  manageListeners.add(listener)
+  return () => { manageListeners.delete(listener) }
+}
+
+/** getSnapshot 必须返回**同一个引用**直到真的换了数据，否则 React 会无限重渲染 */
+function manageSnapshot(): ManageModel[] {
+  return manageCache
+}
+
+function manageModels(): ManageModel[] {
+  return manageCache
+}
+
+/** 拉一次全量清单（并发去抖：同一时刻只发一个请求） */
+function loadManageModels(): void {
+  const request = bridge().workbuddyDesktop?.getModelManage
+  if (!request || manageLoading) return
+  manageLoading = true
+  void Promise.resolve(request())
+    .then(view => {
+      manageCache = (view?.models || []) as ManageModel[]
+      manageIssue = manageCache.length
+        ? ''
+        : t('模型清单为空：先去模型管理页点「获取模型」')
+      // 一条 verbose 级证据：排查「左栏怎么少了几个」时先看这行（9 条 vs 5 条）
+      console.debug('[scope] 全量模型清单', manageCache.length, '条；家数',
+        new Set(manageCache.map(model => model.provider)).size)
+      for (const listener of manageListeners) listener()
+    })
+    .catch(error => {
+      // 拉不到就保持上一份。**不静默**：`bridge` 缺失或接口报错时，
+      // 左栏会一直停在会话快照的子集（用户看到的就是「怎么只有 5 个」），
+      // 所以把原因记下来，由左栏底部那行小字说出来。
+      manageIssue = t('读不到完整模型清单：{reason}', { reason: errorMessage(error) })
+      for (const listener of manageListeners) listener()
+    })
+    .finally(() => { manageLoading = false })
+}
+
+/** 订阅全量清单变化（作用域树组件用；同时触发一次拉取） */
+function useManageModels(): { models: ManageModel[]; issue: string } {
+  React.useEffect(() => { loadManageModels() }, [])
+  const models = React.useSyncExternalStore(subscribeManage, manageSnapshot)
+  // issue 与 models 同一批通知（失败时 models 不变），所以两者一起返回
+  return { models, issue: manageIssue }
 }
 
 /* ─── 作用域（全局 / 单模型）的共享状态 ─────────────────
@@ -150,6 +210,37 @@ type ScopeOption = {
 type ScopeGroup = { key: string; label: string; items: ScopeOption[] }
 
 /**
+ * 作用域树的**数据来源：全量清单**（`/api/models/manage`），不是广告视图。
+ *
+ * ── 为什么不能读 `/api/session` 的 `models`（2026-10-22 修正）──────
+ * 那份是**对外广告视图**：同名模型按注册表顺序只保留第一家（`public_builtin_items`
+ * 的 `claimed` 去重），因为「列表里能看到什么，就只允许点什么」。那个口径对
+ * `/v1/models` 是对的 —— 客户端点一个名字必须落到唯一一家。
+ * 但**作用域树问的是另一件事**：「这一家有账号，它自己有哪些模型」。
+ * 拿广告视图当数据源，用户看到的是「我加了 Coze，可它只有 5 个模型」——
+ * 实测 Coze 9 个模型里 4 个（glm-5.3-flash / glm-5.1 / minimax-m3 / qwen3.7-plus）
+ * 被 workbuddy / qoder 抢了去，界面上凭空少了 4 个，而账号页明明只该回答
+ * 「这家有什么」。
+ *
+ * 因此左栏走 `getModelManage`（模型管理页同一份全量数据，按 `(provider, id)`
+ * 去重，不做跨家同名合并）；**右栏的队列仍然按真实路由算** ——
+ * `getRoutingQueue(model)` 会如实告诉用户「这个模型名这次实际走哪家」。
+ * 两边的分工是：左栏「这家拥有什么」，右栏「这个请求会去哪里」。
+ *
+ * ── 回退 ────────────────────────────────────────────────────
+ * manage 视图是异步拉的，首屏那一瞬可能还没到（`bridge()` 在 web 形态下也可能
+ * 没有这个成员）。此时回落到会话快照的 `models` —— 少几家也比左栏空着好，
+ * 拿到全量后 React 会重渲染换成完整清单。
+ */
+function scopeCatalog(): Array<{ id?: string; provider?: string; providerLabel?: string }> {
+  const full = manageModels()
+  if (full.length) {
+    return full.map(model => ({ id: model.id, provider: model.provider, providerLabel: model.providerLabel }))
+  }
+  return bridge().wbApp?.getState?.()?.models || []
+}
+
+/**
  * 作用域树 = 钉住的「全局」+ 按承载家分组（文件夹）的模型（叶子）。
  *
  * 必须按模型名去重：`/api/session` 的 `models` 是「模型 × 承载家」的清单，同一个模型
@@ -161,33 +252,47 @@ type ScopeGroup = { key: string; label: string; items: ScopeOption[] }
  * 组内按模型名升序，便于扫读。
  */
 function scopeModel(): { pinned: ScopeOption; groups: ScopeGroup[] } {
-  const carriers = new Map<string, Array<{ id: string; label: string }>>()
-  for (const model of bridge().wbApp?.getState?.()?.models || []) {
+  // ── 按**提供商**分组，不再按模型名归并（2026-10-22 修正）──────────
+  // 旧实现以模型名做键（`carriers`），同名模型只归 `owners[0]` —— 那是「选路」
+  // 的口径（`plan_route(model)` 只认模型名），但拿它当**左栏组织方式**会让
+  // 「我加了 Coze，它名下却只有 5 个模型」：Coze 9 个里有 4 个与 workbuddy /
+  // qoder 同名（glm-5.3-flash / glm-5.1 / minimax-m3 / qwen3.7-plus），
+  // 全被归到排在前面的那家去了。
+  //
+  // 现在与**模型管理页左栏同一口径**（`builtinRailCounts`）：按 `provider` 分组、
+  // 一家列全它自己的模型，同名模型在不同家各占一条。这样搜索「glm-5.1」
+  // 能同时命中 workbuddy 与 Coze 两条，用户要的就是这个。
+  //
+  // ⚠️ 作用域的 `value` 仍然是**模型名**（右栏 `getRoutingQueue(model)` 与
+  // 后端选路都以它为输入）—— 所以点开某一家下的 `glm-5.1`，右栏如实显示
+  // 「这个请求实际会走 workbuddy」。左栏回答「这家拥有什么」，
+  // 右栏回答「这个请求去哪里」，两者故意不是同一件事。
+  const buckets = new Map<string, ScopeGroup>()
+  const seen = new Map<string, Set<string>>()
+  for (const model of scopeCatalog()) {
     const id = String(model?.id || '').trim()
     if (!id) continue
     const providerId = String(model?.provider || '').trim() || 'other'
     const providerLabel = String(model?.providerLabel || model?.provider || '').trim() || providerId
-    const list = carriers.get(id) || []
-    if (!list.some(entry => entry.id === providerId)) list.push({ id: providerId, label: providerLabel })
-    carriers.set(id, list)
+    const group = buckets.get(providerId)
+      || (() => {
+        const created: ScopeGroup = { key: providerId, label: providerLabel, items: [] }
+        buckets.set(providerId, created)
+        return created
+      })()
+    // 同一家内部仍按模型名去重（`/api/models/manage` 已按 (provider, id) 去过，
+    // 这里只是防御 —— 别让同一家出现两条一模一样的叶子）
+    const owned = seen.get(providerId) || new Set<string>()
+    const lower = id.toLowerCase()
+    if (owned.has(lower)) continue
+    owned.add(lower)
+    seen.set(providerId, owned)
+    group.items.push({ value: id, label: id, tip: `${providerLabel} · ${id}` })
   }
 
-  const buckets = new Map<string, ScopeGroup>()
-  for (const [id, owners] of carriers) {
-    const first = owners[0]
-    const option: ScopeOption = {
-      value: id,
-      label: id,
-      tip: owners.length > 1 ? `${id} · ${owners.map(entry => entry.label).join(' / ')}` : id,
-    }
-    const group = buckets.get(first.id)
-    if (group) group.items.push(option)
-    else buckets.set(first.id, { key: first.id, label: first.label, items: [option] })
-  }
-
-  const groups = [...buckets.values()].sort(
-    (a, b) => b.items.length - a.items.length || a.label.localeCompare(b.label)
-  )
+  const groups = [...buckets.values()]
+    .filter(group => group.items.length > 0)
+    .sort((a, b) => b.items.length - a.items.length || a.label.localeCompare(b.label))
   for (const group of groups) group.items.sort((a, b) => a.value.localeCompare(b.value))
 
   return {
@@ -242,7 +347,12 @@ export function ScopeRail({ collapsed, onToggleCollapse }: {
   onToggleCollapse: () => void
 }) {
   const model = useScheduleScope()
-  const { pinned, groups } = scopeModel()
+  // 订阅全量清单：拉到之后 `scopeCatalog()` 换成完整数据，本组件随之重渲染
+  // （首屏可能还是会话快照的子集，见 `scopeCatalog` 的回退说明）
+  const { models: catalog, issue: catalogIssue } = useManageModels()
+  // 树只在清单换了一份时重建（`catalog` 是模块级引用，稳定）—— 每次渲染都
+  // 重建会让下面 `expanded` 里记录的组键与新对象错位，展开态反复丢失。
+  const { pinned, groups } = React.useMemo(() => scopeModel(), [catalog, model])
   const [query, setQuery] = React.useState('')
   const [expanded, setExpanded] = React.useState<Record<string, boolean>>({})
 
@@ -388,6 +498,12 @@ export function ScopeRail({ collapsed, onToggleCollapse }: {
           {!shown.length && !pinShown ? <div className='rail-empty'>{t('没有匹配的模型')}</div> : null}
           {!groups.length ? (
             <div className='rail-empty'>{t('还没有可用模型（添加账号后可见）')}</div>
+          ) : null}
+          {/* 全量清单拉不到时的**显式提示**。没有它，左栏会安静地停在会话快照
+              的子集上（那份按模型名跨家去重，Coze 只剩 5 个独有模型），
+              用户只能看到「怎么少了几个」，而界面上没有任何线索。 */}
+          {catalogIssue ? (
+            <div className='rail-empty' role='status'>{catalogIssue}</div>
           ) : null}
         </div>
       </div>

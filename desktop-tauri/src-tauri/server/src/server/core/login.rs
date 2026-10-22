@@ -38,6 +38,9 @@ mod officeace;
 // 千问办公：与 Qoder 同一套 PKCE 设备授权，只是 client_id / 授权主机不同
 // （见 providers::qwenwork::oauth 的模块头）。
 mod qwenwork;
+// MiniMax Code：OAuth 2.0 设备码（RFC 8628）+ PKCE —— 与 Qwenwork 同一条
+// 「起任务 → 轮询 → 落账号」的骨架，协议不同（见 providers::minimax::login）。
+mod minimax;
 mod trae;
 mod zcode;
 
@@ -88,6 +91,13 @@ pub struct LoginTaskState {
     /// 缺省（default）为空串，`new_handle_for_provider` 会写上一家；
     /// 空串在回调侧按「不认识」拒绝，不会静默落到某一家。
     pub provider: String,
+    /// **设备码登录**里那个短码（`XXXX-XXXX`），设备授权流程专用。
+    ///
+    /// 为什么进任务状态而不是只藏在 `auth_url` 里：设备码要**显示**给用户
+    /// （授权页可能没自动填码，用户得手输），而 `authUrl` 的 `?user_code=…`
+    /// 藏在查询串里，界面去解析 URL 才能拿到它 —— 那是把一条后端契约
+    /// 泄漏成前端字符串处理。别的登录形态（回调 / 设备令牌）不填，恒为 None。
+    pub user_code: Option<String>,
     pub canceled: bool,
     finished_at: Option<i64>,
 }
@@ -97,7 +107,15 @@ impl LoginTaskState {
     /// `{pending:true}` / `{done:true,error}` / `{done:true,session}`
     pub fn to_wait_response(&self) -> Value {
         if !self.done {
-            return json!({ "pending": true });
+            // `pending` 时把设备码带上：前端要**一边等一边显示**这个短码，
+            // 等结果出来再给就晚了（用户早该在授权页输完了）。
+            // 没有设备码的家不多带任何键（键不存在 ≠ 键为空）。
+            return match self.user_code.as_deref() {
+                Some(code) if !code.is_empty() => {
+                    json!({ "pending": true, "userCode": code })
+                }
+                _ => json!({ "pending": true }),
+            };
         }
         if let Some(error) = &self.error {
             return json!({ "done": true, "error": error });
@@ -331,6 +349,11 @@ impl LoginService {
             if state.starts_with("trae-") {
                 self.close_trae_login();
             }
+            // MiniMax Code（两个地区）：设备码是「Bearer 级的授权凭据」——
+            // 用户点了取消还留着它，等于留一个 5 分钟的口子（虽然换令牌仍需
+            // 本进程里的 PKCE verifier，但没必要留着）。这里把码划掉，后台轮询
+            // 下一拍就会看到「已作废」并退出，不再白打上游。
+            crate::server::core::providers::minimax::login::mark_canceled(state);
         }
         canceled
     }
@@ -376,6 +399,8 @@ impl LoginService {
                 session: None,
                 edition: info.id.to_string(),
                 provider: provider.to_string(),
+                // 设备码登录才填；别的形态恒 None（`/start` 与 `/wait` 见键才带出去）
+                user_code: None,
                 canceled: false,
                 finished_at: None,
             })),
@@ -477,6 +502,71 @@ impl LoginService {
         }
         finish_task(&handle, &payload);
         logging::log("[Login]", &format!("✅ KukuAI 网页登录成功: {label}"));
+        Ok(account_id)
+    }
+
+    /// Coze 网页登录收尾：校验任务 → 从整包 Cookie 提取凭证 → 复核 → 落账号。
+    ///
+    /// ── 与其它网页登录回调的差别（与 KukuAI 同一条链）────────────
+    /// Coze 的登录方式会经过第三方身份提供方（抖音 / 微信 / 阿里 / 短信），
+    /// 成功后的跳转**不携带授权码** —— 凭证在 `.coze.cn` 域的 Cookie 里，
+    /// 且 `sessionid_ss` 是 HttpOnly，页面脚本读不到。因此由壳侧读 WebView2
+    /// 的 Cookie 存储后 POST 到 `POST /api/session/login/coze/complete`，
+    /// 这里完成「任务校验 → 复核 → 落账号 → 写任务状态」四步。
+    pub async fn finish_coze_login(
+        &self,
+        state: &str,
+        cookie: &str,
+    ) -> Result<String, GatewayError> {
+        let state = state.trim();
+        if state.is_empty() {
+            return Err(GatewayError::with_status(400, "缺少 state，无法确认这次回调归属"));
+        }
+        let Some(handle) = self.tasks.get(state) else {
+            return Err(GatewayError::with_status(
+                404,
+                "登录任务不存在或已过期，请重新发起网页登录",
+            ));
+        };
+        let task = handle.snapshot();
+        if task.canceled {
+            return Err(GatewayError::with_status(400, "登录已取消，请重新发起"));
+        }
+        if task.done {
+            // 幂等：同一个回调被送来两次不是错误
+            return Ok(String::new());
+        }
+        if task.provider
+            != crate::server::core::providers::kind_id(crate::server::core::providers::ProviderKind::Coze)
+        {
+            return Err(GatewayError::with_status(
+                400,
+                "该登录任务不属于 Coze，请重新发起",
+            ));
+        }
+        let (credentials, warning) =
+            crate::server::core::providers::coze::login::complete_login(cookie).await?;
+        let store = self.store.clone();
+        let account = store
+            .add_coze_account(&credentials, None, "web")
+            .map_err(|error| GatewayError::with_status(error.status_code, error.message))?;
+        let account_id = account
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let label = account
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("Coze 账号")
+            .to_string();
+        let mut payload = json!({ "account": account, "edition": task.edition });
+        // 复核未通过的警告随任务载荷透传前端（账号已落库；提示重新登录）
+        if let Some(warning) = warning {
+            payload["warning"] = Value::String(warning);
+        }
+        finish_task(&handle, &payload);
+        logging::log("[Login]", &format!("✅ Coze 网页登录成功: {label}"));
         Ok(account_id)
     }
 

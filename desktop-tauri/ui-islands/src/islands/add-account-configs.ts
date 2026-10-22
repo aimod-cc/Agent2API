@@ -71,6 +71,38 @@ export type OauthLoginConfig = {
   webHint?: string
 }
 
+/**
+ * 「设备码登录」—— 授权在**浏览器里**完成、网关轮询换令牌的那一类。
+ *
+ * ── 为什么不能复用 `oauthLogin`（这是踩过的坑）──────────────────
+ * `oauthLogin` 那一段是 **AutoClaw 专用**的：它渲染的是「使用 Zai 账号登录」
+ * 与「使用 Google 账号登录」两颗写死的按钮，点击事件由 `autoclaw-oauth.js`
+ * 那个引擎绑（`start('zai' | 'google')`）。MiniMax Code 既没有这两个身份提供方，
+ * 也没有任何引擎认得它的按钮 id —— 于是**点下去什么都不会发生**，
+ * 控制台连请求都没有。第一次接入就是把它塞进 `oauthLogin`，症状正是「点了没反应」。
+ *
+ * ── 本段的交互（与设备授权协议同构）────────────────────────────
+ * 一个按钮 → 后端申请设备码并返回 `authUrl` + `userCode` → 界面把**设备码**
+ * 显示出来（授权页未必自动填码，用户得看得见、能手输）+ 一个「打开授权页」链接
+ * → 前端轮询 `/api/session/login/wait` 直到 `{done:true}`。
+ *
+ * `provider` 由外层 `ProviderConfig.provider` 提供（两个地区的 provider id 不同，
+ * 发起时按当前卡片的 id 传，否则国际版会去问国内版的授权服务器）。
+ */
+export type DeviceCodeLoginConfig = {
+  title?: string
+  noteHtml?: string
+  /** 未发起时的说明 */
+  hint?: string
+  /** 等待中的按钮文案 */
+  busyText?: string
+  button?: string
+  /** 「打开授权页」那颗链接的文案 */
+  openButton?: string
+  /** 设备码那一行的标题 */
+  codeLabel?: string
+}
+
 /** 网页端唯一打开方式的提示（没有 webHint 的家用它） */
 export const WEB_LOGIN_HINT = t('将在新标签页中打开授权页；完成后自动加入账号列表。')
 
@@ -92,6 +124,14 @@ export type ProviderConfig = {
   webLogin?: WebLoginConfig
   smsLogin?: SmsLoginConfig
   oauthLogin?: OauthLoginConfig
+  /**
+   * 「设备码登录」（授权在浏览器里完成、网关轮询换令牌）。
+   *
+   * 与 `oauthLogin` 的差别是**谁在页面上点按钮**：那个是 AutoClaw 专用的两颗
+   * 身份提供方按钮（Zai / Google），本项是自己那一个按钮 + 设备码展示。
+   * 别把这一家塞进 `oauthLogin` —— 见 `DeviceCodeLoginConfig` 的说明。
+   */
+  deviceCodeLogin?: DeviceCodeLoginConfig
   /**
    * 「访客模式」——本项目的**独一份**：一键换发访客凭证，不需要任何输入。
    *
@@ -688,6 +728,58 @@ const MONKEYCODE_INTL = monkeycodeForm({
 })
 
 /**
+ * Marvis（腾讯「马维斯」桌面 AI 助手，`marvis.qq.com`）：一家一个 provider，
+ * 没有地区之分（只有一个站点 `yybadaccess.3g.qq.com`、一套账号）。
+ *
+ * ── 凭证是**三件套**，且必须从客户端进程内存里提出来 ─────────────
+ * 上游要求三个头同时在场：`Ual-Access-Access-Token`（`mv_` 令牌）、
+ * `Ual-Access-Openid`、`Ual-Access-Guid`（设备号，**不是** qimei36）。
+ *
+ * 这三样**不落明文**：`db/login.db` 的 userinfo 是密文、`marvis_seckv.dll`
+ * 的 `mskv_get` 会 `WinVerifyTrust` 校验调用方签名（只认腾讯签名进程，
+ * Python 调必被拒 `-3`）。所以本家唯一的取法是**以管理员身份跑一次**
+ * `_recon/marvis-cred-extract.py`，它从 `Marvis.exe` / `MarvisHost.exe`
+ * 的内存里抓 `Ual-Access-*` 请求头块，输出一个 JSON —— 整段粘进来即可。
+ *
+ * ── 没有续期、没有桌面端导入 ───────────────────────────────
+ * `MarvisHost` 的 `LoginInfo` 里确实有 `refreshToken` 字段，但刷新是**客户端
+ * 内部行为**（走 IPC 与它自己的会话），上游没有可复现的公开刷新端点。所以
+ * 令牌过期只能重新提取一次（会**更新同一条**账号记录 —— 账号 id 由 openid
+ * 派生，不是令牌哈希）。也因此不渲染「刷新 Token」控件。
+ *
+ * ── 添加时的一次线上探活 ───────────────────────────────────
+ * 网关发一次 `max_tokens:1` 的最小对话验证（本家没有任何只读身份接口）。
+ * **失败不阻断添加**：离线录入是合理场景，文案会带回来提示原因
+ * （令牌失效 vs 设备指纹缺失的文案不同，见 `providers::marvis::probe`）。
+ */
+const MARVIS: ProviderConfig = {
+  provider: 'marvis',
+  label: t('马维斯 Marvis'),
+  // ── 主入口：导入本机登录态（不粘贴）──────────────────────────
+  // 网关派生一个**提权**的提取器进程，从已登录客户端的内存里取三件套
+  // （客户端进程自设受限 DACAL，非管理员读不了，见
+  // `providers::marvis::import` 的模块头）。用户的操作只有一次 UAC 确认。
+  //
+  // 没有 `webLogin`：马维斯**没有网页版**（官网只有下载入口），登录只发生在
+  // 客户端自己的 CEF 里，且 `marvis_oauth` 需要客户端侧已注册的登录会话
+  // （纯 HTTP 复现恒 -109，已排除 7 种原因）。⇒ 没有可复现的网页登录链。
+  desktop: true,
+  desktopHint: t('从本机马维斯客户端读取登录凭证（需要客户端已登录；会弹一次管理员授权）'),
+  desktopNote: t('网关会以管理员身份读取马维斯客户端的内存来取凭证 —— 客户端的令牌不落明文（登录库是密文、密钥容器校验调用方签名），只在进程内存里，而客户端进程又设了访问限制，普通权限读不到。所以这一步会弹一次 UAC，点「是」即可，之后无需再操作。请确保客户端处于登录状态。'),
+  manualTitle: t('手工粘贴凭证'),
+  manualNote: t('只有在「导入本机登录态」不可用时才需要：以管理员身份运行 _recon/marvis-cred-extract.py，把生成的 JSON 整段粘贴进来。需要三项：accessToken（mv_ 开头）、openid、guid。令牌没有续期接口，过期后重新导入一次即可（会更新同一条账号记录）。'),
+  fields: [
+    {
+      key: 'credentials',
+      label: 'JSON',
+      rows: 5,
+      placeholder: t('{"access_token":"mv_…","openid":"oAN1…","guid":"a79a…"}（整段粘贴）'),
+    },
+    { key: 'name', label: t('备注名'), optional: true, placeholder: t('可选，留空则用令牌尾号') },
+  ],
+}
+
+/**
  * Command Code（`api.commandcode.ai`）：一家一个 provider，没有地区之分
  * （规格 §9：参考里只有这一个主机，没有 cn / intl 双域名、没有 region 头）。
  *
@@ -1190,7 +1282,179 @@ const LOBSTERAI: ProviderConfig = {
   fields: [],
 }
 
-/** 内置家的表单块，顺序与旧 ADD_FORMS 一致（只影响 DOM 里的块顺序，不影响界面） */
+/**
+ * MiniMax Code（`agent.minimax.cn`，MiniMax 的 AI 编程客户端）：一家一个
+ * provider，没有地区之分（国际版 `agent.minimax.io` 是另一套域名，账号体系是否
+ * 分开未验证 ⇒ 先只开国内版）。
+ *
+ * ── 三条入口，主入口是**网页登录** ─────────────────────────────
+ * 客户端的登录就是 OAuth 2.0 设备授权（RFC 8628）+ PKCE：申请一个设备码、
+ * 用户在浏览器里授权、网关轮询换令牌。整条链**纯 HTTP 可复现**（实测能拿到
+ * `device_code` 与 `verification_uri_complete`），所以不需要读任何本机文件 ——
+ * 这一点与马维斯（令牌只在进程内存里、要 UAC 提权提取）完全不同。
+ *
+ * ── 为什么「导入本机登录态」只是**只读快照** ───────────────────
+ * 客户端的 `auth.json` 与 `auth-state.json` 带一对必须相等的 `generation`
+ * 计数器。我们写一次就让它判定「在别处登录过」并要求用户重新扫码；更要紧的是
+ * `refresh_token` **单次有效** —— 我们拿它续期，客户端手里那枚立刻失效。
+ * 所以导入只是把那一刻的令牌复制进我们自己的账号库，之后各续各的
+ * （见 `providers::minimax::import` 的模块头）。
+ *
+ * ── 令牌有效期 ──────────────────────────────────────────────
+ * 访问令牌 1 小时、刷新令牌单次有效每次轮换。粘贴路径若只给访问令牌，
+ * 一小时后就要重新登录 —— 界面上「刷新 Token」会如实提示这一点。
+ */
+const MINIMAX_CODE: ProviderConfig = {
+  provider: 'minimax',
+  label: t('MiniMax Code'),
+  // ── 主入口：设备码登录（浏览器授权 + 网关轮询）─────────────────
+  // 设备码是「先申请码 → 用户在浏览器授权 → 网关轮询换令牌」的协议，不需要本地
+  // 回调端口；所以跨机部署也能用（用户在**任意**机器的浏览器里授权都行）。
+  //
+  // ⚠️ 用 `deviceCodeLogin` 而**不是** `oauthLogin`：后者是 AutoClaw 专用的
+  // 「Zai / Google」两颗按钮 + `autoclaw-oauth.js` 引擎，本家塞进去会得到
+  // 一个点了没有任何反应的分段（控制台连请求都没有）—— 第一次接入的实测症状。
+  deviceCodeLogin: {
+    title: t('网页登录（浏览器授权）'),
+    noteHtml: t('点按钮后网关会申请一个<b>设备码</b>，并把授权页打开；用你的 MiniMax 账号确认授权，网关拿到令牌后自动加入账号列表。<br>授权在浏览器里完成，网关不接触密码；跨机部署（Docker / 远程面板）同样可用。'),
+    hint: t('设备码 5 分钟内有效；在授权页确认后这里会自动完成'),
+    button: t('开始登录（获取设备码）'),
+    busyText: t('等待浏览器里确认授权…'),
+    openButton: t('打开授权页'),
+    codeLabel: t('设备码'),
+  },
+  // ── 次入口：导入本机客户端登录态（只读）──────────────────────
+  desktop: true,
+  desktopHint: t('从本机 MiniMax Code 客户端读取登录态（只读，不会改动客户端）'),
+  desktopNote: t('读取 %USERPROFILE%/.minimax/auth 下客户端已保存的令牌，<b>只读不写</b> —— 客户端用一对必须相等的版本号判断「是否在别处登录过」，写一次就会让它要求你重新扫码。注意：导入是一次快照，之后网关与客户端各自续期，两边的刷新令牌会互相轮换，建议只在一处使用。'),
+  manualTitle: t('粘贴访问令牌'),
+  manualNote: t('适合已在别处登录、或客户端数据目录被改过的场景。只需要 accessToken（<code>mmoat_</code> 开头）；JWT 里能读出身份与到期，无需再填别的。只给访问令牌时约 1 小时有效、无法自动续期 —— 想要自动续期请用上面的网页登录。'),
+  fields: [
+    {
+      key: 'accessToken',
+      label: 'accessToken',
+      rows: 3,
+      placeholder: t('mmoat_… 或客户端 auth.json 里的 accessToken 值'),
+    },
+    {
+      key: 'refreshToken',
+      label: 'refreshToken',
+      rows: 2,
+      optional: true,
+      placeholder: t('mmort_…（可选；有它才能自动续期）'),
+    },
+    { key: 'name', label: t('备注名'), optional: true, placeholder: t('可选，留空则用令牌尾号') },
+  ],
+}
+/**
+ * MiniMax Code **国际版**（`agent.minimax.io`）：与国内版同一套协议、同一份表单，
+ * 只有两个常量不同 —— 网关域与国际授权服务器（`account.minimax.io`）。
+ *
+ * ── 为什么拆成两家 provider 而不是账号上的地区字段 ──────────────
+ * 与 AutoClaw / Qoder / ZCode 拆家同一条理由（SKILL 1.2）：两地域名不同、
+ * 令牌不通用、模型目录各一份。做成账号字段的后果每次都一样 —— 目录缓存互相覆盖、
+ * 同名模型无法分别点名、转发可能落到另一地区的账号上。
+ *
+ * ── 表单为什么**复制**而不是复用一个工厂函数 ──────────────────
+ * 两家的表单几乎相同，但 `desktopNote` / `manualNote` 里点名的目录不同
+ * （`auth/prod/en/…` 与 `auth/prod/cn/…`）。抽工厂就要让文案成为参数，
+ * 而文案是 `t()` 的键 —— 参数化后扫描器提不到键。两段各写一份更好读，
+ * 代价是改文案时两处都要动（`MINIMAX_CODE` 是本家，与之成对）。
+ */
+const MINIMAX_CODE_INTL: ProviderConfig = {
+  provider: 'minimax-intl',
+  label: t('MiniMax Code 国际版'),
+  deviceCodeLogin: {
+    title: t('网页登录（浏览器授权）'),
+    noteHtml: t('点按钮后网关会申请一个<b>设备码</b>，并把授权页打开；用你的 MiniMax 账号确认授权，网关拿到令牌后自动加入账号列表。<br>国际版与国内版是两套账号，请用国际站（<code>agent.minimax.io</code>）的账号登录。'),
+    hint: t('设备码 5 分钟内有效；在授权页确认后这里会自动完成'),
+    button: t('开始登录（获取设备码）'),
+    busyText: t('等待浏览器里确认授权…'),
+    openButton: t('打开授权页'),
+    codeLabel: t('设备码'),
+  },
+  desktop: true,
+  desktopHint: t('从本机 MiniMax Code 客户端读取国际版登录态（只读，不会改动客户端）'),
+  desktopNote: t('读取 <code>%USERPROFILE%/.minimax/auth/prod/en</code> 下客户端已保存的令牌，<b>只读不写</b>。客户端按「环境 / 地区」分目录存两套登录态，国际版在 <code>en</code> 目录里；没在国际站登录过时这里读不到，请改用上面的网页登录。'),
+  manualTitle: t('粘贴访问令牌'),
+  manualNote: t('贴国际站的访问令牌（<code>mmoat_</code> 开头）。国内站的令牌拿到这里会被上游拒（401）—— 两地账号体系不同，不能互换。'),
+  fields: [
+    {
+      key: 'accessToken',
+      label: 'accessToken',
+      rows: 3,
+      placeholder: t('mmoat_…（国际站 account.minimax.io 签发）'),
+    },
+    {
+      key: 'refreshToken',
+      label: 'refreshToken',
+      rows: 2,
+      optional: true,
+      placeholder: t('mmort_…（可选；有它才能自动续期）'),
+    },
+    { key: 'name', label: t('备注名'), optional: true, placeholder: t('可选，留空则用令牌尾号') },
+  ],
+}
+/**
+ * Coze（扣子，`www.coze.cn`）：一家一个 provider，没有地区之分。
+ *
+ * ── 凭证形态 ────────────────────────────────────────────────
+ * 登录态是 `.coze.cn` 域的**一整包 Cookie**（`sessionid_ss` / `sid_guard` /
+ * `ttwid` / `odin_tt` …）。**必须整包**：后端拿着它去换 10 分钟 PAT（打推理与
+ * `trade/*` 积分接口），而任务中心 / 机器人列表 / 身份这几条**只能 Cookie 打**
+ * ——只挑几个会让签到与模型刷新报「未登录」（见 `providers::coze::credentials`）。
+ * 粘贴支持三种形态（与后端 `parse_cookie_parts` 同口径）：Cookie 头串、
+ * Cookie 编辑器导出的 `[{name, value}]` 数组、`{name: value}` 对象。
+ *
+ * ── 为什么没有「导入桌面端登录态」───────────────────────────
+ * 客户端 Cookie 库（`%APPDATA%\Roaming\Coze\Network\Cookies`）被 Chromium
+ * **独占锁**住（与马维斯同一处境），读它要么先关客户端、要么提权 —— 给了入口
+ * 只会稳定失败。本家走网页登录（壳侧从 WebView2 的 Cookie 存储读，天然含
+ * HttpOnly），或粘贴 Cookie / 导入文本 Cookie 文件。
+ *
+ * ── 没有刷新机制 ────────────────────────────────────────────
+ * Cookie 是网页登录态（不是 JWT），上游没有刷新接口，过期只能重新登录
+ * （与 KukuAI / CatPaw 同一处境，所以 `expiry: ''`、不渲染「有效期」与
+ * 「刷新 Token」那类控件）。PAT 由网关按需铸造，用户不需要关心。
+ *
+ * ── 「模型」是用户自己的机器人 ──────────────────────────────
+ * 推理是 bot 维度的（`bot_id`），所以模型清单 = 你的机器人列表。**没有已发布
+ * 机器人的账号清单是空的**，那不是故障：去扣子把机器人发布到「Agent As API」
+ * 渠道后点「刷新模型」即可。
+ */
+const COZE: ProviderConfig = {
+  provider: 'coze',
+  label: t('Coze 扣子'),
+  // 主站登录：打开 www.coze.cn，用户用平时的方式登录（抖音账号 / 微信扫码 /
+  // 手机号短信都由官方页面处理）；登录成功后壳侧检测到 Cookie 里出现
+  // sessionid_ss，自动读取 `.coze.cn` 域整包 Cookie 交回网关，窗口关闭、
+  // 账号落列表。只支持内嵌窗口（系统浏览器里壳读不到 Cookie 存储）。
+  webLogin: {
+    noteHtml: t('在打开的窗口里登录 Coze（抖音账号 / 微信扫码 / 手机号均可），登录成功后自动加入账号列表。请用<b>内嵌窗口</b>：系统浏览器里网关读不到登录窗口的 Cookie。'),
+    button: t('打开网页登录'),
+    busyText: t('等待 Coze 登录完成…'),
+    webHint: WEB_LOGIN_HINT,
+    modes: [
+      { value: 'embedded', label: t('内嵌窗口（必须）'), hint: t('登录态由壳侧从窗口的 Cookie 存储读出；完成后自动加入列表') },
+    ],
+  },
+  manualTitle: t('粘贴 Cookie'),
+  manualNote: t('请粘贴 <b>www.coze.cn 的完整 Cookie</b>（浏览器开发者工具 → Network → 任取一条 www.coze.cn 请求的 Cookie 头，或 Cookie 编辑器一键导出）。整包带上最稳：任务中心与机器人列表只认 Cookie，少了几项会报「未登录」。支持整段 Cookie 头、Cookie 编辑器导出的 JSON 数组，或 {name: value} 对象。Coze 没有刷新机制，登录态过期后重新登录或重新粘贴即可。'),
+  fields: [
+    { key: 'cookie', label: 'Cookie', rows: 5, placeholder: t('sessionid_ss=…; sid_guard=…; ttwid=…（或 Cookie 编辑器导出的 JSON）') },
+    { key: 'name', label: t('备注名'), optional: true, placeholder: t('可选，留空则用账号昵称') },
+  ],
+  // 不提供「导入桌面端登录态」：客户端 Cookie 库被 Chromium 独占锁住，
+  // 读它要先关客户端或提权（见上方注释）。
+  desktop: false,
+  // 「导入凭证文件」：凭证就是一段 Cookie 文本，用户可以从别的机器导出后导入
+  // （文本 → authFileContent，与「粘贴 Cookie」同一条链）。
+  fileImport: {
+    accept: '.txt,.json,text/plain,application/json',
+    note: t('选择一份存着 www.coze.cn Cookie 的文本文件（整段 Cookie 头或 Cookie 编辑器导出的 JSON 都可以）。导入后凭证直接落在网关、可独立转发，不依赖本机客户端（Coze 客户端运行时占着 Cookie 库，读不了）。'),
+  },
+}
+
 export const BUILTIN_CONFIGS: ProviderConfig[] = [
   RACCOON,
   CATPAW,
@@ -1251,6 +1515,19 @@ export const BUILTIN_CONFIGS: ProviderConfig[] = [
   // LobsterAI（网易有道「有道龙虾」）：只有浏览器登录一条入口，排在末尾
   // （与后端注册表 PROVIDERS 的排列一致，后到居后）
   LOBSTERAI,
+  // Marvis（腾讯「马维斯」）：粘贴凭证三件套（mv_ 令牌 + openid + guid），
+  // 排在末尾（与后端注册表 PROVIDERS 的排列一致，2026-10 接入）
+  MARVIS,
+  // MiniMax Code（`agent.minimax.cn`）：网页登录（OAuth 设备码 + PKCE，主入口）/
+  // 导入本机客户端登录态 / 粘贴访问令牌，排在末尾（与后端注册表 PROVIDERS 的
+  // 排列一致，2026-10 接入）
+  MINIMAX_CODE,
+  // MiniMax Code 国际版：与国内版同一套协议、两个站点（拆家理由见 `MINIMAX_CODE_INTL`
+  // 的注释），与后端 `PROVIDERS` 相邻排列一致
+  MINIMAX_CODE_INTL,
+  // Coze（扣子）：网页登录 / 粘贴整包 Cookie / 导入 Cookie 文本文件，
+  // 排在末尾（与后端注册表 PROVIDERS 的排列一致，2026-10 接入）
+  COZE,
 ]
 
 /** WorkBuddy 的块 id（结构特殊，单独一个组件） */
@@ -1299,6 +1576,10 @@ export function configOf(providerId: string): ProviderConfig | undefined {
 export const ADD_METHODS = [
   { id: 'guest', label: t('访客模式（免登录）') },
   { id: 'oauth', label: t('网页登录（Zai / Google）') },
+  // 设备码登录：授权在浏览器里完成、网关轮询换令牌。与上面那条 `oauth` **不是**
+  // 同一件事 —— 那个是 AutoClaw 专用的两颗身份提供方按钮，本项是自己那一个按钮
+  // 外加设备码展示（见 `DeviceCodeLoginConfig`）。
+  { id: 'device', label: t('网页登录（浏览器授权）') },
   { id: 'sms', label: t('手机验证码登录') },
   { id: 'web', label: t('网页登录') },
   { id: 'manual', label: t('填写凭证') },
@@ -1377,6 +1658,7 @@ export function methodsOf(config: ProviderConfig, region: string): MethodId[] {
   return ADD_METHODS.filter(method => {
     if (method.id === 'guest') return Boolean(config.guestLogin)
     if (method.id === 'oauth') return Boolean(config.oauthLogin)
+    if (method.id === 'device') return Boolean(config.deviceCodeLogin)
     if (method.id === 'sms') return Boolean(config.smsLogin)
     if (method.id === 'web') return Boolean(config.webLogin) && (!config.webLogin?.region || region === config.webLogin.region)
     if (method.id === 'file') return Boolean(config.fileImport)

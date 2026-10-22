@@ -135,6 +135,14 @@ fn out_of_scope_reason(account: &Value) -> &'static str {
     if crate::server::core::account_store::is_accio_family(&provider) {
         return "未接入签到链路";
     }
+    // Marvis（腾讯马维斯）：上游**没有签到概念** —— 客户端只有「每人每天
+    // 1000 万免费 Token」的额度池，没有可领的每日动作（`MarvisAgent` /
+    // `MarvisHost` 二进制里没有任何 checkin / claim / reward 端点，排除过程
+    // 见 `providers::marvis::mod` 的模块头）。文案要说实情，不要笼统说
+    // 「没有签到链路」—— 用户会以为是本站没做。
+    if provider == crate::server::core::account_store::marvis_provider_id() {
+        return "上游没有签到活动（每天 1000 万 Token 的额度池，无需领取）";
+    }
     "没有签到链路"
 }
 
