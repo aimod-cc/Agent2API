@@ -173,8 +173,8 @@ pub(super) struct SendBody<'a> {
 /// 与 `note_attempt` 的「最后一次为准」不同，命中按**并集**累加：候选链上
 /// A 家处理过、降级到 B 家又处理一次，同一条规则会被两轮各命中一次。
 /// 「这次请求命中了什么」才是用户要的答案（B 家只是同一份内容又匹配了一遍），
-/// 所以同一家重复发送时不重复计（`send_cache` 已经保证了这一点：同一家同池
-/// 的发送体只算一次），跨家则合并计数。
+/// 所以同一家重复发送时不重复计 —— 由调用方按家去重后传 `count_redactions`
+/// （见下），跨家则合并计数。
 /// 实时性上也有必要：命中发生在**某一家即将发送时**，那时请求还没收尾，
 /// telemetry 槽位还开着（记账点读快照在最后）。
 ///
@@ -183,11 +183,27 @@ pub(super) struct SendBody<'a> {
 /// 在另一个进程里（`reasoning_patch_async`）。三处调用点（
 /// `provider_loop` 的两条发送路径）本来就在 async 函数里，改成 async 不
 /// 产生额外的状态机成本。
+///
+/// ── `wire`：候选链上的目标（家内主备，2026-10）───────────────
+/// `Some` = 转发层的 target 循环已经按位选好这一轮要发的目标，这里**只应用、
+/// 不再解析** —— 「一次解析、两个产物同源」的既有约束（见 [`SendBody`] 的
+/// 说明）在多目标形态下的延伸：解析点挪到循环开头（`lane_targets`，一次算出
+/// 整条链），发送位只是取链上第 n 项。`None` = 维持旧语义，按单答案解析
+/// （`wire_target_for_provider`）—— 自定义家与会话式路径、以及候选链为空
+/// （模型名解析不出）的兜底都走这条，行为逐字不变。
+///
+/// ── `count_redactions`：这一次要不要记「敏」命中 ──────────────────
+/// 调用方按**家**去重：同一次请求里，同一家的发送体可能被重算好几遍（家内
+/// 顺延换位次、内容拦截后翻转降级标记、账号换池），但过的是**同一份内容**，
+/// 命中明细也必然相同 —— 由 `send_cache` 之外的一层（`provider_loop` 的
+/// `redaction_counted`）保证「一家只记一次」。`false` = 只改写字节、不记账。
 pub(super) async fn send_body<'a>(
     ctx: &'a ProviderContext<'_>,
     provider_id: &str,
     account: Option<&Value>,
     degraded: bool,
+    wire: Option<&crate::server::core::providers::catalog::WireTarget>,
+    count_redactions: bool,
 ) -> SendBody<'a> {
     // ── ⓪ 角色归一层（开发者角色兼容开关）───────────────────────────
     // 在所有改写**之前**：先把 developer 角色归一成 system，后面各层（提示词、
@@ -249,7 +265,7 @@ pub(super) async fn send_body<'a>(
                 // 命中表可能为空：`sanitize_text` 末尾的去空白也能单独构成一次
                 // 改动（预检命中、但没有任何规则真正替换）。那时不该往请求日志
                 // 的「敏」标签里写一条空记录。
-                if !hits.is_empty() {
+                if count_redactions && !hits.is_empty() {
                     ctx.telemetry.note_sensitive_hits(&hits);
                 }
                 Cow::Owned(scrubbed)
@@ -298,12 +314,16 @@ pub(super) async fn send_body<'a>(
         return SendBody { body, wire_model: requested };
     }
     // 一次解析出两个属性：该家要收的名字 + 跟着那条映射走的思考等级
-    // （同源，见模块头「思考等级绑定为什么也在这一步」）
-    let wire = crate::server::core::providers::catalog::wire_target_for_provider(
-        &requested,
-        provider_id,
-        account,
-    );
+    // （同源，见模块头「思考等级绑定为什么也在这一步」）。
+    // `wire` 已由转发层按位选好（家内候选链）时直接应用；否则走单答案解析。
+    let wire = match wire {
+        Some(target) => target.clone(),
+        None => crate::server::core::providers::catalog::wire_target_for_provider(
+            &requested,
+            provider_id,
+            account,
+        ),
+    };
     ctx.telemetry.note_upstream_model(&wire.model);
     rewrite_model(&mut body, &requested, &wire.model, provider_id);
     let injected = apply_reasoning(

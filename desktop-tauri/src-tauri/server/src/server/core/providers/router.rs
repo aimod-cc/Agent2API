@@ -1,5 +1,12 @@
 //! 模型转发候选。只允许开启的默认绑定或别名进入全局账号队列。
 //! provider 顺序仅用于稳定展示，实际尝试顺序仍由账号优先级决定。
+//!
+//! 候选粒度是**家**（提供商家族）：本函数回答「哪些家能承载这个名字」，
+//! 选路与换号在此基础上按账号全局优先级走。同一 alias 在**同一家内**的多条
+//! 映射（家内主备）不在这里展开 —— 那是发送侧 per-账号的候选链
+//! （`catalog::wire_targets_for_provider` → `upstream::provider_loop` 的
+//! `lane_targets`），两层各管各的粒度：家决定「谁有资格」，链决定
+//! 「这一家先发哪个模型」。
 
 use crate::server::core::providers::catalog::{forwarding_providers, providers_for_model};
 use crate::server::core::providers::DEFAULT_PROVIDER_ID;

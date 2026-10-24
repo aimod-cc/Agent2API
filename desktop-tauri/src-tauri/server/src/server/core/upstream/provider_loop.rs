@@ -11,13 +11,21 @@
 //!        └ 429 → 标记该账号对该模型冷却，回到账号循环选下一个（可能换了一家）
 //! ```
 //!
+//! ── 家内候选链（同一 alias 在一家挂多条映射，2026-10）────────
+//! 账号循环的每轮里还有一层**位次游标**（`lane`）：同一对外名在这一家映射到
+//! 多个上游模型时，`lane_targets` 按序给出整条链（免费目标优先），模型作用域
+//! 的失败（限额 / 上游 404）在本账号内换下一位，链走完才轮到账号顺延 ——
+//! 与「同一别名挂多家」的跨家主备同算法，只是候选粒度细化到「家 × 上游模型」。
+//! 顺序约定与兼容性说明见 `catalog::target_candidates`。
+//!
 //! 曾经是「外层按 provider 路由优先级轮询、内层在该家账号里选路」两层循环；
 //! 现在各家的账号排在同一条队里，先用哪一家由账号优先级本身决定，provider
 //! 只是每个账号的属性（决定用哪个适配器发）。候选池按 provider 过滤只剩一个
 //! 目的：不把不提供该模型的家的账号放进来。
 //!
 //! ── 错误分类怎么驱动控制流（架构文档 §4.2 的三个动作）────────
-//!   1. `QuotaLimited` → 标记该账号对该模型冷却 + 换下一个候选账号；
+//!   1. `QuotaLimited` → 标记该账号对该模型冷却；本账号链上还有下一位就换位
+//!      （家内顺延，见下），否则换下一个候选账号；
 //!   2. `TokenExpired` → 调 `refresh_access_token` 刷新凭证，**同一账号**
 //!      原样重试一次（只一次：再失败按普通失败处理，不会空转）；
 //!   3. `Fatal` → 原样透传给客户端。
@@ -72,7 +80,7 @@
 //! 模型目录刷新、定时任务、账号被标记限额）。判断一条日志该去哪边，就看
 //! **它的条数会不会跟着用户发请求一起涨**。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -83,6 +91,7 @@ use crate::server::core::protocol::strip_internal_fields;
 use crate::server::core::providers::adapter::{
     adapter_for, ProviderAdapter, RetryAdvice, UpstreamErrorClass,
 };
+use crate::server::core::providers::catalog::WireTarget;
 use crate::server::core::providers::custom::forward as custom_forward;
 use crate::server::core::providers::readiness;
 use crate::server::core::providers::router::route_for_forward;
@@ -595,10 +604,29 @@ async fn attempt_queue(
     // 那一份发送体是另一份副本，键不同就自然落进另一条缓存项 —— 不必手工失效
     // 缓存，也不会把「降级前那份」错发给后面的账号。
     //
+    // 键的第四维是**这一档实际要发的上游模型名**（不是位次序号 `lane`）。
+    // 为什么不能只用序号：位次 → 目标的对应关系是**按账号**算出来的
+    // （`lane_targets` 的「免费优先」分区读的是该账号自己的冷却状态），同家
+    // 同池的两个账号完全可能把不同目标排在同一位次上。用序号做键时，第二个
+    // 账号会命中第一个账号那一档的发送体 —— 于是「这一家先发哪个模型」被上一个
+    // 账号的冷却状态决定，发出去的模型名与本次 `lane_targets` 的结论不符（429
+    // 记账也跟着记到错误的真名上）。用发送名做键则与「这份发送体由哪条映射
+    // 算出」一一对应：位次相同**且目标相同**才复用。
+    //
     // 值里同时带着**该家实际收到的上游模型名**（`SendBody::wire_model`）——
     // 它是限额冷却的键，与发出去的字节同源（见 `payload::SendBody`）。
     // 缓存因此不只省一次脱敏：429 记账与成功清理都从这里取真名，不必再解析一遍。
-    let mut send_cache: HashMap<(&'static str, String, bool), SendBody<'_>> = HashMap::new();
+    let mut send_cache: HashMap<(&'static str, String, bool, Option<String>), SendBody<'_>> =
+        HashMap::new();
+    // 「敏」命中表按**家**只记一次。同一次请求里换位次（家内顺延）、翻转降级
+    // 标记、换池都会重算发送体、重过一遍脱敏层，而命中的是**同一份内容**——
+    // 计数跟着翻倍就是虚高（口径见 `payload::send_body` 的 `count_redactions`）。
+    let mut redaction_counted: HashSet<&'static str> = HashSet::new();
+    // 家内候选链的**解析**结果按家缓存（顺序不缓存 —— 那是账号的函数）。
+    // 同一个家在一次请求里往往有多个账号轮流承载，而解析要走一次
+    // `model_rules::current()`（克隆整份 config raw，含提示词全文）与一遍
+    // `manifest_for` 的清单扫描；放在账号循环外就只付一次。
+    let mut chain_cache: HashMap<&'static str, Vec<WireTarget>> = HashMap::new();
 
     // 标签是必需的：下面「429 降级到下一个账号」发生在**内层发送循环**里，
     // 裸 `continue` 会回到内层（用同一个账号再发一次，正好是要避免的事）。
@@ -974,6 +1002,27 @@ async fn attempt_queue(
             .trim()
             .to_string();
 
+        // ── 家内候选链（同一 alias 在这一家的多条映射，按序主备）────────
+        // 链的**内容**按家解析一次并缓存（`chain_cache`：解析内含一次 config
+        // 克隆与一遍清单扫描，同一个家在一次请求里常被多个账号轮流承载，
+        // 没必要按账号重算）；链的**顺序**是账号的函数，逐账号重排（免费目标
+        // 优先，见 `lane_targets`）。`lane` 是发送游标 —— 模型作用域的失败
+        // （限额 / 404）在**本账号内**顺延到下一位，链走完才轮到账号顺延。
+        // 链为空 = 这个名字在这一家解析不出任何目标，发送侧退回单答案路径
+        // （`wire: None`，发送名原样），与改造前逐字一致。位置在
+        // note_attempt_started 之后、发送循环之前：逐位冷却查询要用到本账号的
+        // 记录（`target.account_id`）。
+        let chain = chain_cache
+            .entry(provider_id)
+            .or_insert_with(|| {
+                crate::server::core::providers::catalog::wire_targets_for_provider(
+                    &model, provider_id, None,
+                )
+            })
+            .clone();
+        let lane_wires = lane_targets(chain, service, target.account_id.as_deref());
+        let mut lane = 0usize;
+
         // ── 一次账号内的发送链：最多三次（首次 + 内容拦截补救一次 + 401 刷新重试一次）──
         // 为什么把刷新重试并进同一个循环：重试**自己也可能是** 429
         // （额度确实用尽）。若把它当成独立分支直接返回，就会把一条限额错误
@@ -983,7 +1032,8 @@ async fn attempt_queue(
         // 同一层还承载「内容拦截 → 换中性提示词重试一次」（动作 0）：它同样是
         // 「不换账号、就地再发一次」，只是换了 body 而不是凭证。两个 `continue`
         // 各自有一个一次性开关（`degraded` / `refreshed`），所以迭代次数有上界
-        // ——不存在「一直重发」的路径。
+        // ——不存在「一直重发」的路径。家内顺延（换 lane）不设一次性开关：
+        // 链长由用户配置的映射条数决定，每位至多发一次（失败即换位）。
         let started_at = logging::now_ms();
         let mut refreshed = false;
         // 第三个元素是上游响应的协议（适配器在构造请求时给出）：chat 之外
@@ -992,16 +1042,31 @@ async fn attempt_queue(
         // 其余家是空串 —— 提取见循环内唯一那条成功 break）
         let (response, wire_model, response_protocol, antigravity_session) = loop {
             // 发送体在这一轮发送前取一次（同一家同池同降级状态下复用缓存项）：
-            // 借用在本次迭代内有效，`continue`（401 刷新 / 内容拦截补救）时
-            // 重新取 —— 于是「换了 body 的那次重试」拿到的一定是新的一份。
+            // 借用在本次迭代内有效，`continue`（401 刷新 / 内容拦截补救 /
+            // 家内顺延）时重新取 —— 于是「换了 body 的那次重试」拿到的一定是
+            // 新的一份。键带**这一档的目标名**（见 send_cache 的说明）：`lane`
+            // 只是本账号内的位次，同一个位次在不同账号上可能指向不同模型，只有
+            // 目标名相同才是同一份发送体。
             //
             // ── 为什么不再用 `or_insert_with`（插件架构改动）───────────
             // `send_body` 现在是 async（要问插件家「这个思考档位怎么翻译」），
             // 而 `or_insert_with` 的闭包不能 await。改成「先查、miss 时 await
             // 生成、再插入」—— 语义等价，代价是 miss 那次多一次哈希查找。
-            let cache_key = (provider_id, account_pool.clone(), degraded);
+            let lane_wire = lane_wires.get(lane);
+            let cache_key = send_cache_key(provider_id, &account_pool, degraded, lane_wire);
             if !send_cache.contains_key(&cache_key) {
-                let built = send_body(ctx, provider_id, target.account.as_ref(), degraded).await;
+                // 只有「这一家的第一次发送」才记「敏」命中（见 send_cache
+                // 上方的说明）：重算发送体不等于又命中了一遍同样的内容。
+                let count_redactions = redaction_counted.insert(provider_id);
+                let built = send_body(
+                    ctx,
+                    provider_id,
+                    target.account.as_ref(),
+                    degraded,
+                    lane_wire,
+                    count_redactions,
+                )
+                .await;
                 send_cache.insert(cache_key.clone(), built);
             }
             let send = match send_cache.get(&cache_key) {
@@ -1331,6 +1396,47 @@ async fn attempt_queue(
                         Some(i64::from(failure.error.status_code)),
                         Some(&failure.error.message),
                     );
+                    // ── 家内顺延（模型作用域的失败先在本账号内换候选）──────
+                    // 见 `lane_targets` 与 `lane` 的说明。这里收「上游 404 =
+                    // 模型不在这份套餐 / 路由不存在」这一位：换账号发同一个名字
+                    // 是同样的 404（原判据 DETERMINISTIC_NOT_FOUND_STATUSES 的
+                    // 既有结论），换链上下一个目标才是有意义的动作。限额（429）
+                    // 的顺延在动作 1 里 —— 那边必须先把冷却落盘再换位（见该处
+                    // 说明）。模型测试（pinned）不顺延：测试问的是
+                    // 「这个账号 × 这个模型行不行」，换模型答就不是这个答案了。
+                    //
+                    // 位置在明细定稿之后、动作 1/3 之前：这条 `continue` 留在
+                    // 内层发送循环里 —— 不进 tried_ids（账号没换）、不吃换号
+                    // 预算、不触发退避 / 熔断（404 是模型的事实，不是账号健康
+                    // 的问题，动作 3 的 route_state 标记因此被跳过）。
+                    let not_found = matches!(
+                        &failure.class,
+                        UpstreamErrorClass::Fatal { status, .. }
+                            if DETERMINISTIC_NOT_FOUND_STATUSES.contains(status)
+                    );
+                    if not_found {
+                        if let Some(next) =
+                            next_lane(lane, lane_wires.len(), ctx.pinned_account.is_some())
+                        {
+                            lane = next;
+                            ctx.telemetry.note_attempt(
+                                target.account_id.as_deref(),
+                                &attempt_account,
+                                provider_id,
+                            );
+                            ctx.telemetry.note_attempt_started(provider_id, &attempt_account);
+                            logging::console_line(
+                                "[Upstream]",
+                                &format!(
+                                    "⚠️ 账号 {attempt_account} 对模型 {} 上游 404（模型不在其套餐或路由），\
+                                     家内候选顺延 → {}",
+                                    limit_model_label(&model, &wire_model),
+                                    lane_wires[lane].model,
+                                ),
+                            );
+                            continue;
+                        }
+                    }
                     // ── 动作 1：限额 → 标记冷却 + 换下一个账号 ──────────
                     if let (
                         UpstreamErrorClass::QuotaLimited {
@@ -1342,35 +1448,70 @@ async fn attempt_queue(
                         Some(account_id),
                     ) = (&failure.class, target.account_id.clone())
                     {
+                        // 冷却记账移出 `tried_ids` 去重（家内顺延后，同一账号的
+                        // 另一位撞限额是**另一个额度桶**，键不同 —— 漏标会让
+                        // 后续请求把已耗尽的账号再选中一次、再白撞一个 429）。
+                        // push 本身仍幂等。原实现「contains 就整段跳过」的分支
+                        // 在旧流程里实际不可达（选路排除已尝试、顺延只取未尝试
+                        // 的账号），因此这里对既有行为零回归。
                         if !tried_ids.contains(&account_id) {
                             tried_ids.push(account_id.clone());
-                            // 冷却键 = **上游真名**（不是请求名）：上游按它记额度，
-                            // 判定侧（`cooldown_keys`）也按它查，两处同源见
-                            // `routing::CooldownKeys`。
-                            let reset_text = rotate::mark_account_limited(
-                                service,
-                                &account_id,
-                                &wire_model,
-                                *status as i32,
-                                *upstream_code,
-                                *reset_at,
-                                &failure.error.message,
+                        }
+                        // 冷却键 = **上游真名**（不是请求名）：上游按它记额度，
+                        // 判定侧（`cooldown_keys`）也按它查，两处同源见
+                        // `routing::CooldownKeys`。真名取自发送体（与发出去的
+                        // 字节同源）—— 家内顺延后这里是**当前位次**的名字。
+                        let reset_text = rotate::mark_account_limited(
+                            service,
+                            &account_id,
+                            &wire_model,
+                            *status as i32,
+                            *upstream_code,
+                            *reset_at,
+                            &failure.error.message,
+                        );
+                        let limit_at =
+                            rotate::account_limit_reset_at(service, &account_id, &wire_model);
+                        // 限流垫底（Sink）：它还**有**额度时被 429 的（额度尽是
+                        // 正常冷却，不算），排到所有没被 429 过的后面 —— 负载
+                        // 摊开，而不是每次都回到队列头再撞一遍。成功一次或
+                        // 重启后放出（见 route_state.rs）。
+                        if config::routing_settings().sink && ctx.pinned_account.is_none() {
+                            service.route.sink_mark(&account_id, logging::now_ms());
+                        }
+                        // 日志文案与账号页的「限流」列同口径：以真名为主，
+                        // 映射生效时补 `请求名 →` 前缀（见 `limit_model_label`）
+                        let limit_label = limit_model_label(&model, &wire_model);
+                        let from_label =
+                            account_label(target.account.as_ref(), &account_id, &session);
+                        // ── 家内顺延：冷却已落盘 → 本账号内换下一位候选 ────
+                        // 必须在标记**之后**判定：先换位后标记的话，这一位在
+                        // 后续请求里仍会被 `lane_targets` 当作可用目标再撞一次
+                        // 429。顺延后开一条新明细（与账号轮换同一记账形态），
+                        // `continue` 回发送循环 —— send_cache 的键带目标名，
+                        // 新位次自然拿到新发送体。
+                        if let Some(next) =
+                            next_lane(lane, lane_wires.len(), ctx.pinned_account.is_some())
+                        {
+                            lane = next;
+                            ctx.telemetry.note_attempt(
+                                target.account_id.as_deref(),
+                                &attempt_account,
+                                provider_id,
                             );
-                            let limit_at =
-                                rotate::account_limit_reset_at(service, &account_id, &wire_model);
-                            // 限流垫底（Sink）：它还**有**额度时被 429 的（额度尽是
-                            // 正常冷却，不算），排到所有没被 429 过的后面 —— 负载
-                            // 摊开，而不是每次都回到队列头再撞一遍。成功一次或
-                            // 重启后放出（见 route_state.rs）。
-                            if config::routing_settings().sink && ctx.pinned_account.is_none() {
-                                service.route.sink_mark(&account_id, logging::now_ms());
-                            }
-                            // 日志文案与账号页的「限流」列同口径：以真名为主，
-                            // 映射生效时补 `请求名 →` 前缀（见 `limit_model_label`）
-                            let limit_label = limit_model_label(&model, &wire_model);
-                            let from_label =
-                                account_label(target.account.as_ref(), &account_id, &session);
-                            match rotate::pick_next_account(
+                            ctx.telemetry.note_attempt_started(provider_id, &attempt_account);
+                            logging::console_line(
+                                "[Upstream]",
+                                &format!(
+                                    "⚠️ 账号 {from_label} 对模型 {limit_label} 已限额{}，\
+                                     家内候选顺延 → {}（本账号内换映射目标）",
+                                    reset_hint(&reset_text),
+                                    lane_wires[lane].model,
+                                ),
+                            );
+                            continue;
+                        }
+                        match rotate::pick_next_account(
                                 service,
                                 provider_ids,
                                 &cooldown_keys,
@@ -1476,7 +1617,6 @@ async fn attempt_queue(
                                     .with_optional_code(*upstream_code));
                                 }
                             }
-                        }
                     }
                     // ── 动作 3：其它错误 → 换队列里的下一个账号 ──────────
                     // 旧版（按家轮询）遇到任何一家失败都会换下一家再试；全局队列把
@@ -2054,7 +2194,9 @@ async fn attempt_custom(
     // **即将发送**。`send_body` 对自定义 id 是零改写（它的模型名改写只认
     // modelRules），处理结果就是「提示词/脱敏后的客户端请求体」—— 自定义
     // 语义的改写（映射 alias → 真名、思考等级）在 forward 里做。
-    let send = send_body(ctx, &provider_id, target.account.as_ref(), degraded).await;
+    // `wire: None`：自定义家的映射解析是单答案（见 bindings::resolve 的说明），
+    // 家内候选链尚未覆盖 —— 按单答案路径解析，行为不变。
+    let send = send_body(ctx, &provider_id, target.account.as_ref(), degraded, None, true).await;
     // 「上游模型」列以**真名**为准：send_body 对自定义 id 是零改写（它记的
     // 是请求名），真名的解析与改写发生在 forward 内部 —— 这里按同源解析
     // 覆盖一次（note_upstream_model 是覆盖式，最后一次为准；空串被内部过滤）。
@@ -2250,7 +2392,9 @@ async fn attempt_stateful(
     // `degraded` 由调用方（账号循环）给出：本路径**没有**就地补救（有状态
     // provider 一次转发就是一个会话轮次，没有「换提示词重发」这一步），
     // 但降级期内（状态机已生效）首发的提示词也要跟着换。
-    let send = send_body(ctx, provider_id, target.account.as_ref(), degraded).await;
+    // `wire: None`：会话式路径维持单答案解析（家内候选链不进本路径 —— 它
+    // 没有账号内重试的机制，见 attempt_stateful 对 CatPaw 的说明），行为不变。
+    let send = send_body(ctx, provider_id, target.account.as_ref(), degraded, None, true).await;
     // 内置家透传出口的内部字段剥离：与无状态路径同一理由（见那里的说明）
     let stripped = strip_internal_fields(&send.body);
     let body: &serde_json::Value = &stripped;
@@ -2456,6 +2600,94 @@ fn limit_model_label(requested: &str, wire: &str) -> String {
         return wire.to_string();
     }
     format!("{requested} → {wire}")
+}
+
+/// 本账号这一轮要按序尝试的发送目标：把**已按家解析好**的候选链按「免费优先」
+/// 重排（链本身由调用方按家缓存，见 `attempt_queue` 的 `chain_cache`）。
+///
+/// ── 两段为什么分开 ──────────────────────────────────────────
+/// 链的**内容**是家 × 请求名的函数（`catalog::target_candidates`：原生承载有则
+/// 独占、Cline 池前缀项、其余映射条目，组内保持 `modelRules.mappings` 的配置
+/// 顺序 —— 首位与旧实现的唯一答案逐字相等）；链的**顺序**才是账号的函数（冷却
+/// 状态逐账号）。同一个家在一个请求里常常有多个账号轮流承载，把解析留在外面
+/// 只做一次，换来的是「一次 config 克隆 + 一遍清单扫描」不用按账号重复付。
+///
+/// ── 免费优先（已限额的目标稳定地排到链尾）──────────────────
+/// 多条候选时，把已处于限额冷却的目标排到未限额的后面：额度用尽的目标再发
+/// 一次只会白吃一个 429（外加把冷却标记重写一遍），而链上其他目标可能就在
+/// 这一发之间答出来。**组内保持原序** —— 用稳定分区而不是排序，不引入任何
+/// 按名称的次序。全部都在冷却时按原序硬试一遍：与选路第二级「恢复最早的
+/// 试一次」同一取舍（上游若已实际解除限额可直接成功，否则把真实 429 与
+/// 恢复时间带回来）。
+///
+/// 冷却判定逐位读账号记录上的 `rateLimits[真名]`（`account_limit_reset_at`
+/// 同一数据源与判据：0 = 未在冷却）。没有账号记录（默认登录态 / 环境变量
+/// 旁路）时不做冷却过滤 —— 那类通道本就不落限额标记。
+///
+/// ── 空表的语义 ──────────────────────────────────────────────
+/// 链为空 = 名字在这一家解析不出任何目标（未知模型），调用方据此给 `send_body`
+/// 传 `wire: None` 退回单答案路径（发送名原样 = 请求名）—— 与改造前「未知名字
+/// 交给默认家」的既有语义衔接。
+fn lane_targets(all: Vec<WireTarget>, service: &UpstreamService, account_id: Option<&str>) -> Vec<WireTarget> {
+    // 单候选（或空）不过滤：空表交给调用方兜底，单条没有可让位的对象。
+    if all.len() <= 1 {
+        return all;
+    }
+    let Some(account_id) = account_id else {
+        return all;
+    };
+    order_lane(all, |model| {
+        rotate::account_limit_reset_at(service, account_id, model) == 0
+    })
+}
+
+/// 模型作用域的失败之后该不该在本账号内顺延，顺延到哪一位。
+///
+/// 两处顺延（动作 1 的限额 429、动作 3 之前的「上游 404 = 模型不在套餐」）共用
+/// 这一条判据，免得两边各写一遍 `lane + 1 < len`：
+///
+///   - **模型测试（pinned）不顺延**：测试问的是「这个账号 × 这个模型行不行」，
+///     换一个模型去答就不是这个问题的答案了；
+///   - 链上只有这一位、或链为空（这个名字在这一家解析不出目标）时没有可换的
+///     对象 —— 返回 `None`，交给调用方走既有的换号路径。
+///
+/// `Some(n)` 只表示「换到第 n 位」，不表达任何记账 / 退避语义：那两条由调用方
+/// 各自决定（限额需先落盘冷却，404 不需要）。
+fn next_lane(lane: usize, chain_len: usize, pinned: bool) -> Option<usize> {
+    if pinned {
+        return None;
+    }
+    let next = lane + 1;
+    (next < chain_len).then_some(next)
+}
+
+/// `send_cache` 的键：家 + 池 + 降级标记 + **这一档的目标名**。
+///
+/// 最后一维为什么是目标名而不是位次序号 —— 见 `send_cache` 声明处的说明：
+/// 位次 → 目标按账号算，序号相同不代表发送名相同。`None` = 这一档没有候选
+/// （链为空，走单答案兜底），与任何具体目标都不共用。
+fn send_cache_key(
+    provider_id: &'static str,
+    pool: &str,
+    degraded: bool,
+    wire: Option<&WireTarget>,
+) -> (&'static str, String, bool, Option<String>) {
+    (provider_id, pool.to_string(), degraded, wire.map(|target| target.model.clone()))
+}
+
+/// 把候选链按「未在冷却的排前面」稳定分区 —— `lane_targets` 的排序本体。
+///
+/// 抽成纯函数是为了可测：`lane_targets` 自己要读全局配置（`modelRules`）与
+/// 账号记录，测起来是集成测试；而**顺序契约**（稳定分区、组内保持原序、
+/// 全冷却时按原序硬试）完全可以脱离数据源单独钉死，见本文件的
+/// `lane_ordering` 用例组。
+fn order_lane(all: Vec<WireTarget>, is_free: impl Fn(&str) -> bool) -> Vec<WireTarget> {
+    let (free, cooled): (Vec<_>, Vec<_>) = all.into_iter().partition(|target| is_free(&target.model));
+    // 全在冷却：按原序硬试（见 `lane_targets` 函数头「免费优先」末段的取舍）
+    if free.is_empty() {
+        return cooled;
+    }
+    free.into_iter().chain(cooled).collect()
 }
 
 /// 下发帧的改写策略：能力位由适配器回答，全局开关由配置回答，通用层不出现

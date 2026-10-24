@@ -377,3 +377,107 @@ fn a_deterministic_404_skips_the_in_place_resend() {
         "404 的豁免不许顺手把 400 也豁免了"
     );
 }
+
+// ── 家内候选链：排序契约与发送体缓存键 ────────────────────────────
+//
+// 这两组都是「纯排序 / 纯键」的契约，不碰全局配置与账号库，因此不起服务器、
+// 不建临时库（`lane_targets` 本身要读 `modelRules` 与账号记录，那一层是集成
+// 形状，见 `lane_targets` 的说明）。
+
+fn chain(models: &[&str]) -> Vec<WireTarget> {
+    models
+        .iter()
+        .map(|model| WireTarget { model: (*model).to_string(), reasoning: None })
+        .collect()
+}
+
+fn order_of(all: Vec<WireTarget>, cooled: &[&str]) -> Vec<String> {
+    order_lane(all, |model| !cooled.contains(&model))
+        .into_iter()
+        .map(|target| target.model)
+        .collect()
+}
+
+/// 没在冷却的排前面，**组内保持原序**（稳定分区，不是排序）。
+#[test]
+fn lane_ordering_puts_the_uncooled_first_and_keeps_the_group_order() {
+    // 第 1 位在冷却 → 它掉到链尾，其余相对次序不变
+    assert_eq!(
+        order_of(chain(&["m1", "m2", "m3"]), &["m1"]),
+        vec!["m2", "m3", "m1"]
+    );
+    // 中间一位在冷却 → 同样只让它自己往后掉
+    assert_eq!(
+        order_of(chain(&["m1", "m2", "m3"]), &["m2"]),
+        vec!["m1", "m3", "m2"]
+    );
+    // 两位在冷却 → 冷却组内部仍按原序（m1 在 m3 之前）
+    assert_eq!(
+        order_of(chain(&["m1", "m2", "m3"]), &["m3", "m1"]),
+        vec!["m2", "m1", "m3"]
+    );
+}
+
+/// 一位都没在冷却 → 原样返回（绝大多数请求的形态，不该有任何重排）。
+#[test]
+fn lane_ordering_leaves_a_fully_free_chain_untouched() {
+    assert_eq!(order_of(chain(&["m1", "m2"]), &[]), vec!["m1", "m2"]);
+}
+
+/// 全在冷却 → 按**原序**硬试，而不是返回空表：与选路第二级「恢复最早的试
+/// 一次」同一取舍（上游若已实际解除限额可直接成功）。
+#[test]
+fn lane_ordering_tries_an_all_cooled_chain_in_its_original_order() {
+    assert_eq!(
+        order_of(chain(&["m1", "m2"]), &["m1", "m2"]),
+        vec!["m1", "m2"]
+    );
+    assert_eq!(order_of(chain(&["only"]), &["only"]), vec!["only"]);
+}
+
+/// 家内顺延的判据：两处顺延（429 / 404）共用，三条边界各钉一条。
+#[test]
+fn next_lane_advances_only_while_the_chain_has_another_target() {
+    // 链上还有下一位 → 顺延
+    assert_eq!(next_lane(0, 2, false), Some(1));
+    assert_eq!(next_lane(0, 3, false), Some(1));
+    assert_eq!(next_lane(1, 3, false), Some(2));
+    // 走完了 → 没有下一位（交给换号）
+    assert_eq!(next_lane(1, 2, false), None);
+    // 只有一位（单目标配置，绝大多数请求）→ 从不顺延
+    assert_eq!(next_lane(0, 1, false), None);
+    // 链为空（解析不出目标）→ 无从顺延
+    assert_eq!(next_lane(0, 0, false), None);
+    // 模型测试（pinned）→ 任何情况都不顺延：换模型答就不是那个问题的答案
+    assert_eq!(next_lane(0, 3, true), None);
+}
+
+/// `send_cache` 的键必须带**目标名**，不能只用位次序号。
+///
+/// 这是本组用例的重点：位次 → 目标的对应关系是按账号算的（免费优先分区读的是
+/// 各账号自己的冷却状态），同家同池的两个账号会把不同目标排在同一位次上。
+/// 键里只放序号时，第二个账号会命中第一个账号那一档的发送体 —— 发错模型。
+#[test]
+fn send_cache_key_distinguishes_targets_at_the_same_lane_index() {
+    // 账号 A 的链：m1 在冷却 → 第 0 位是 m2
+    let a = order_lane(chain(&["m1", "m2"]), |model| model != "m1");
+    // 账号 B 的链：都没在冷却 → 第 0 位是 m1
+    let b = order_lane(chain(&["m1", "m2"]), |_| true);
+    assert_eq!(a[0].model, "m2");
+    assert_eq!(b[0].model, "m1");
+
+    let key_a = send_cache_key("workbuddy", "", false, Some(&a[0]));
+    let key_b = send_cache_key("workbuddy", "", false, Some(&b[0]));
+    assert_ne!(key_a, key_b, "同位次但目标不同 → 必须是两条缓存项");
+
+    // 同一目标照旧复用（缓存的意义所在）
+    assert_eq!(
+        key_a,
+        send_cache_key("workbuddy", "", false, Some(&chain(&["m2"])[0]))
+    );
+    // 池 / 降级标记仍是独立维度
+    assert_ne!(key_a, send_cache_key("workbuddy", "free", false, Some(&a[0])));
+    assert_ne!(key_a, send_cache_key("workbuddy", "", true, Some(&a[0])));
+    // 链为空（单答案兜底档）不与任何具体目标共用
+    assert_ne!(key_a, send_cache_key("workbuddy", "", false, None));
+}
