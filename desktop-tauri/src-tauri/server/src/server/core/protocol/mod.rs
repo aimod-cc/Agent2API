@@ -329,6 +329,9 @@ pub const FIELD_CACHE_CONTROL: &str = "_wb_cache_control";
 pub const FIELD_IS_ERROR: &str = "_wb_is_error";
 /// reasoning encrypted_content 的暂存字段（assistant 消息上，值 = 原样的加密串）
 pub const FIELD_ENCRYPTED_CONTENT: &str = "_wb_encrypted_content";
+/// reasoning item id 的暂存字段（与 encrypted_content 同一消息，保持 store=false
+/// 连续性载荷的身份对应关系）
+pub const FIELD_REASONING_ITEM_ID: &str = "_wb_reasoning_item_id";
 
 /// 内部暂存字段的前缀：剥离按**前缀**而不是逐个常量 —— 将来加新字段时
 /// 剥离层自动覆盖，不会因为忘了同步清单而把内部字段漏给上游。
@@ -376,9 +379,92 @@ fn has_internal_fields(value: &Value) -> bool {
         .is_some_and(|object| object.keys().any(|key| key.starts_with(INTERNAL_FIELD_PREFIX)))
 }
 
+/// 剥离**发给 Chat 客户端**的响应体上的内部暂存字段。
+///
+/// 与 [`strip_internal_fields`] 的分工：那个处理**请求**体（`messages` /
+/// `tools`），这个处理**响应**体（顶层 + `choices[].delta` /
+/// `choices[].message`）。
+///
+/// 为什么 Chat 出口要剥而内部不剥：`_wb_` 字段是网关内部的连续性载荷，
+/// Responses / Anthropic 出口的转换器要读它们（见 `responses_outbound` 与
+/// `responses::PendingReasoning`）；而 Chat 客户端没有这条消费链，留着只是把
+/// 内部字段（以及体积可观的 `encrypted_content`）漏给调用方。
+///
+/// 没有任何内部字段时返回 `Cow::Borrowed`（零拷贝：绝大多数响应的形态）。
+pub fn strip_internal_chat_fields(body: &Value) -> Cow<'_, Value> {
+    let Some(object) = body.as_object() else {
+        return Cow::Borrowed(body);
+    };
+    let top_dirty = object.keys().any(|key| key.starts_with(INTERNAL_FIELD_PREFIX));
+    let choices_dirty = object
+        .get("choices")
+        .and_then(Value::as_array)
+        .is_some_and(|choices| choices.iter().any(chat_choice_dirty));
+    if !top_dirty && !choices_dirty {
+        return Cow::Borrowed(body);
+    }
+    let mut next = object.clone();
+    next.retain(|key, _| !key.starts_with(INTERNAL_FIELD_PREFIX));
+    if let Some(choices) = next.get_mut("choices").and_then(Value::as_array_mut) {
+        for choice in choices.iter_mut() {
+            if let Some(choice) = choice.as_object_mut() {
+                for slot in ["delta", "message"] {
+                    if let Some(payload) = choice.get_mut(slot) {
+                        strip_on_object(payload);
+                    }
+                }
+            }
+        }
+    }
+    Cow::Owned(Value::Object(next))
+}
+
+/// chat 的一个 choice 上，`delta` / `message` 是否带内部暂存字段
+fn chat_choice_dirty(choice: &Value) -> bool {
+    ["delta", "message"].iter().any(|slot| {
+        choice
+            .get(*slot)
+            .is_some_and(has_internal_fields)
+    })
+}
+
 /// 原地剥掉一个对象上的内部暂存字段（对象本身存在才调用）
 fn strip_on_object(value: &mut Value) {
     if let Some(object) = value.as_object_mut() {
         object.retain(|key, _| !key.starts_with(INTERNAL_FIELD_PREFIX));
+    }
+}
+
+#[cfg(test)]
+mod internal_fields_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Chat 出口剥离：内部字段只在 `delta` / `message` 上出现时也要清掉，
+    /// 其余内容原样保留；没有内部字段时走零拷贝分支。
+    #[test]
+    fn chat_egress_strips_internal_fields() {
+        let body = json!({
+            "id": "c",
+            "_wb_top": 1,
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "content": "",
+                    "_wb_reasoning_item_id": "rs_1",
+                    "_wb_encrypted_content": "blob",
+                },
+            }],
+        });
+        let clean = strip_internal_chat_fields(&body);
+        assert!(clean.get("_wb_top").is_none());
+        let delta = &clean["choices"][0]["delta"];
+        assert!(delta.get("_wb_reasoning_item_id").is_none());
+        assert!(delta.get("_wb_encrypted_content").is_none());
+        assert_eq!(delta["role"], "assistant");
+
+        let plain = json!({ "choices": [{ "delta": { "content": "hi" } }] });
+        assert!(matches!(strip_internal_chat_fields(&plain), Cow::Borrowed(_)));
     }
 }

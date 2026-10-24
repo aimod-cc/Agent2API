@@ -27,7 +27,7 @@ use serde_json::{json, Map, Value};
 use super::{
     content_parts, content_text, event_frame, freeform, is_truthy, json_text, native_tool,
     random_id, string_field, string_value, tool_plan, SseLineBuffer, TOOL_IMAGE_PLACEHOLDER,
-    FIELD_ENCRYPTED_CONTENT,
+    FIELD_ENCRYPTED_CONTENT, FIELD_REASONING_ITEM_ID,
 };
 use crate::server::logging;
 
@@ -371,6 +371,9 @@ struct PendingReasoning {
     /// 「同一轮每条 assistant 都带」，加密体只挂**第一条**（9Router 同款 ——
     /// 同一加密体重复出现在多条消息上，上游会当成多段推理）。
     encrypted: Option<String>,
+    /// 与 `encrypted` 同属一个 reasoning 项的原始 item id。store=false 时
+    /// 上游用 id + encrypted_content 共同校验连续性，不能重新生成。
+    item_id: Option<String>,
     /// 这段正文是否已经挂到过消息上。
     ///
     /// 用来区分「同一轮的第二个 reasoning 项」与「下一轮的第一个 reasoning 项」：
@@ -401,17 +404,24 @@ impl PendingReasoning {
         }
     }
 
-    /// 记下 reasoning 项携带的加密连续性载体（新 reasoning 项到来时覆盖旧值；
-    /// 不动 `attached` —— 轮次归属由正文那一侧管理）
-    fn stash_encrypted(&mut self, value: &Value) {
-        if let Some(encrypted) = value.as_str().filter(|text| !text.is_empty()) {
-            self.encrypted = Some(encrypted.to_string());
-        }
+    /// 记下 reasoning 项的连续性载荷。`encrypted_content` 是 store=false 的
+    /// 必需载体；id 与它来自同一个 item，只有二者一起保留才能被上游接受。
+    /// 新 reasoning 项到来时覆盖旧值；不动 `attached`，轮次归属仍由正文管理。
+    fn stash_continuity(&mut self, id: &Value, encrypted: &Value) {
+        let Some(encrypted) = encrypted.as_str().filter(|text| !text.is_empty()) else {
+            return;
+        };
+        self.encrypted = Some(encrypted.to_string());
+        self.item_id = id
+            .as_str()
+            .filter(|text| !text.is_empty())
+            .map(str::to_string);
     }
 
-    /// 取走加密载体（**取走即清**：只挂本轮第一条 assistant 消息）
-    fn take_encrypted(&mut self) -> Option<String> {
-        self.encrypted.take()
+    /// 取走连续性载荷（取走即清：只挂本轮第一条 assistant 消息）
+    fn take_continuity(&mut self) -> Option<(Option<String>, String)> {
+        let encrypted = self.encrypted.take()?;
+        Some((self.item_id.take(), encrypted))
     }
 
     /// 本轮要挂到 assistant 消息上的 reasoning（**不清空** —— 同一轮的每条
@@ -428,7 +438,19 @@ impl PendingReasoning {
     fn end_turn(&mut self) {
         self.text = None;
         self.encrypted = None;
+        self.item_id = None;
         self.attached = false;
+    }
+}
+
+/// 把 reasoning 连续性载荷挂到第一条 assistant 形态上。
+fn attach_reasoning_continuity(message: &mut Map<String, Value>, pending: &mut PendingReasoning) {
+    let Some((item_id, encrypted)) = pending.take_continuity() else {
+        return;
+    };
+    message.insert(FIELD_ENCRYPTED_CONTENT.to_string(), Value::String(encrypted));
+    if let Some(item_id) = item_id {
+        message.insert(FIELD_REASONING_ITEM_ID.to_string(), Value::String(item_id));
     }
 }
 
@@ -512,11 +534,9 @@ fn push_input_item(
                 arguments,
                 pending.attach(),
             );
-            // 加密载体只挂本轮第一条 assistant（见 take_encrypted 的说明）
-            if let Some(encrypted) = pending.take_encrypted() {
-                if let Some(object) = call_message.as_object_mut() {
-                    object.insert(FIELD_ENCRYPTED_CONTENT.to_string(), Value::String(encrypted));
-                }
+            // 连续性载荷只挂本轮第一条 assistant
+            if let Some(object) = call_message.as_object_mut() {
+                attach_reasoning_continuity(object, pending);
             }
             messages.push(call_message);
         }
@@ -558,13 +578,17 @@ fn push_input_item(
                     input
                 }
             };
-            messages.push(tool_call_message(
+            let mut call_message = tool_call_message(
                 &call_id_of(item),
                 &name,
                 // 按降级时的约定包成 `{"input": "…"}`，与出站声明一致
                 freeform::wrap_freeform_input(&raw),
                 pending.attach(),
-            ));
+            );
+            if let Some(object) = call_message.as_object_mut() {
+                attach_reasoning_continuity(object, pending);
+            }
+            messages.push(call_message);
         }
         // reasoning 项：正文不属于任何一轮对话，但**不能丢** —— 它要挂到本轮的
         // assistant 消息上（见 [`PendingReasoning`]）。这里只暂存，
@@ -573,10 +597,13 @@ fn push_input_item(
             if let Some(text) = reasoning_text_of(item) {
                 pending.stash(text);
             }
-            // 加密连续性载体（store=false 多轮，Codex / Grok CLI）同样暂存，
-            // 由出站翻译（responses_outbound）恢复到发给 Responses 上游的
-            // reasoning 项里；其它出口随 strip 剥离（严格上游会拒）
-            pending.stash_encrypted(item.get("encrypted_content").unwrap_or(&Value::Null));
+            // 加密连续性载荷（store=false 多轮，Codex / Grok CLI）连同原 id
+            // 一起暂存，由出站翻译恢复到 Responses reasoning 项；其它出口随
+            // strip 剥离（严格上游会拒未知字段）。
+            pending.stash_continuity(
+                item.get("id").unwrap_or(&Value::Null),
+                item.get("encrypted_content").unwrap_or(&Value::Null),
+            );
         }
         "input_text" | "text" => {
             messages.push(json!({ "role": "user", "content": string_field(item, "text") }));
@@ -643,10 +670,8 @@ fn push_input_item(
                 if let Some(reasoning) = reasoning {
                     message.insert("reasoning_content".to_string(), Value::String(reasoning));
                 }
-                // 加密载体只挂本轮第一条 assistant（见 take_encrypted 的说明）
-                if let Some(encrypted) = pending.take_encrypted() {
-                    message.insert(FIELD_ENCRYPTED_CONTENT.to_string(), Value::String(encrypted));
-                }
+                // 连续性载荷只挂本轮第一条 assistant
+                attach_reasoning_continuity(&mut message, pending);
             } else if role != "tool" {
                 // 非 assistant、非 tool 的消息 = 上一轮结束：清掉本轮的 reasoning，
                 // 免得它被挂到下一轮的 assistant 消息上（挂错轮次会 400）。
@@ -1020,12 +1045,35 @@ pub fn responses_from_chat(chat: &Value, model: &str, request: &Value) -> Value 
         let from_field = string_field(&message, "reasoning_content");
         if from_field.is_empty() { string_field(&message, "reasoning") } else { from_field }
     };
-    if !reasoning.is_empty() {
-        output.push(json!({
+    let encrypted = message
+        .get(FIELD_ENCRYPTED_CONTENT)
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty());
+    if !reasoning.is_empty() || encrypted.is_some() {
+        let id = encrypted
+            .and_then(|_| message.get(FIELD_REASONING_ITEM_ID))
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| random_id("rs"));
+        let mut item = json!({
             "type": "reasoning",
-            "id": random_id("rs"),
-            "summary": [{ "type": "summary_text", "text": reasoning }],
-        }));
+            "id": id,
+            "summary": if reasoning.is_empty() {
+                Vec::<Value>::new()
+            } else {
+                vec![json!({ "type": "summary_text", "text": reasoning })]
+            },
+        });
+        if let Some(encrypted) = encrypted {
+            if let Some(object) = item.as_object_mut() {
+                object.insert(
+                    "encrypted_content".to_string(),
+                    Value::String(encrypted.to_string()),
+                );
+            }
+        }
+        output.push(item);
     }
     let text = content_text(message.get("content").unwrap_or(&Value::Null));
     let tool_calls = message.get("tool_calls").and_then(Value::as_array);
@@ -1273,6 +1321,8 @@ pub struct ResponsesStream {
     reasoning_index: i64,
     reasoning_id: String,
     reasoning: String,
+    /// store=false 时与 reasoning_id 成对回传的连续性载荷
+    reasoning_encrypted: Option<String>,
     /// 工具调用：按上游给的 index 累积（同一 index 的分片属于同一次调用）
     tools: std::collections::BTreeMap<i64, ToolAccum>,
     /// 下一个可用的 output_index
@@ -1326,6 +1376,7 @@ impl ResponsesStream {
             reasoning_index: -1,
             reasoning_id: String::new(),
             reasoning: String::new(),
+            reasoning_encrypted: None,
             tools: std::collections::BTreeMap::new(),
             next_index: 0,
             usage: None,
@@ -1489,6 +1540,9 @@ impl ResponsesStream {
         let Some(delta) = choice.and_then(|choice| choice.get("delta")) else {
             return out;
         };
+        // 上游 Responses 的 reasoning item 身份。必须先于思考正文处理：
+        // `output_item.added` 的元数据先到，之后才能在同一个 item_id 下发 delta。
+        out.extend(self.apply_reasoning_continuity(delta));
         // 思考增量
         let reasoning = {
             let from_field = string_field(delta, "reasoning_content");
@@ -1696,6 +1750,27 @@ impl ResponsesStream {
         vec![self.event("response.created", json!({ "response": response }))]
     }
 
+    /// 接收内部 Chat 帧携带的 reasoning 身份字段；只有内部 Responses 翻译层会发。
+    fn apply_reasoning_continuity(&mut self, delta: &Value) -> Vec<bytes::Bytes> {
+        let item_id = string_field(delta, FIELD_REASONING_ITEM_ID);
+        let encrypted = string_field(delta, FIELD_ENCRYPTED_CONTENT);
+        if item_id.is_empty() && encrypted.is_empty() {
+            return Vec::new();
+        }
+        if !self.reasoning_open && !item_id.is_empty() {
+            self.reasoning_id = item_id;
+        }
+        if !encrypted.is_empty() {
+            self.reasoning_encrypted = Some(encrypted);
+        }
+        // encrypted-only 的 reasoning 也要成为一个真实的 output item，否则
+        // store=false 的下一轮没有可回传的连续性载荷。
+        if !self.reasoning_open {
+            return self.open_reasoning();
+        }
+        Vec::new()
+    }
+
     fn open_reasoning(&mut self) -> Vec<bytes::Bytes> {
         if self.reasoning_open {
             return Vec::new();
@@ -1703,18 +1778,29 @@ impl ResponsesStream {
         self.reasoning_open = true;
         self.reasoning_index = self.next_index;
         self.next_index += 1;
-        self.reasoning_id = random_id("rs");
+        if self.reasoning_id.is_empty() {
+            self.reasoning_id = random_id("rs");
+        }
+        let mut item = json!({
+            "type": "reasoning",
+            "id": self.reasoning_id,
+            "status": "in_progress",
+            "summary": [],
+        });
+        if let Some(encrypted) = &self.reasoning_encrypted {
+            if let Some(object) = item.as_object_mut() {
+                object.insert(
+                    "encrypted_content".to_string(),
+                    Value::String(encrypted.clone()),
+                );
+            }
+        }
         vec![
             self.event(
                 "response.output_item.added",
                 json!({
                     "output_index": self.reasoning_index,
-                    "item": {
-                        "type": "reasoning",
-                        "id": self.reasoning_id,
-                        "status": "in_progress",
-                        "summary": [],
-                    },
+                    "item": item,
                 }),
             ),
             self.event(
@@ -1734,12 +1820,24 @@ impl ResponsesStream {
             return Vec::new();
         }
         self.reasoning_closed = true;
-        let item = json!({
+        let mut item = json!({
             "type": "reasoning",
             "id": self.reasoning_id,
             "status": "completed",
-            "summary": [{ "type": "summary_text", "text": self.reasoning }],
+            "summary": if self.reasoning.is_empty() {
+                Vec::<Value>::new()
+            } else {
+                vec![json!({ "type": "summary_text", "text": self.reasoning })]
+            },
         });
+        if let Some(encrypted) = &self.reasoning_encrypted {
+            if let Some(object) = item.as_object_mut() {
+                object.insert(
+                    "encrypted_content".to_string(),
+                    Value::String(encrypted.clone()),
+                );
+            }
+        }
         self.output_items.push((self.reasoning_index, item.clone()));
         vec![
             self.event(
@@ -1956,6 +2054,8 @@ pub struct ResponsesCollector {
     buffer: SseLineBuffer,
     text: String,
     reasoning: String,
+    reasoning_id: String,
+    reasoning_encrypted: Option<String>,
     tools: std::collections::BTreeMap<i64, ToolAccum>,
     usage: Option<Value>,
     finish_reason: Option<String>,
@@ -1969,6 +2069,8 @@ impl ResponsesCollector {
             buffer: SseLineBuffer::new(),
             text: String::new(),
             reasoning: String::new(),
+            reasoning_id: String::new(),
+            reasoning_encrypted: None,
             tools: std::collections::BTreeMap::new(),
             usage: None,
             finish_reason: None,
@@ -2025,6 +2127,14 @@ impl ResponsesCollector {
             if from_field.is_empty() { string_field(delta, "reasoning") } else { from_field }
         };
         self.reasoning.push_str(&reasoning);
+        let reasoning_id = string_field(delta, FIELD_REASONING_ITEM_ID);
+        if !reasoning_id.is_empty() {
+            self.reasoning_id = reasoning_id;
+        }
+        let encrypted = string_field(delta, FIELD_ENCRYPTED_CONTENT);
+        if !encrypted.is_empty() {
+            self.reasoning_encrypted = Some(encrypted);
+        }
         if let Some(text) = delta.get("content").and_then(Value::as_str) {
             self.text.push_str(text);
         }
@@ -2051,12 +2161,30 @@ impl ResponsesCollector {
     pub fn into_response(self, model: &str, request: &Value) -> Value {
         let plan = tool_plan::plan_tools(request);
         let mut output: Vec<Value> = Vec::new();
-        if !self.reasoning.is_empty() {
-            output.push(json!({
+        if !self.reasoning.is_empty() || self.reasoning_encrypted.is_some() {
+            let id = if self.reasoning_id.is_empty() {
+                random_id("rs")
+            } else {
+                self.reasoning_id.clone()
+            };
+            let mut item = json!({
                 "type": "reasoning",
-                "id": random_id("rs"),
-                "summary": [{ "type": "summary_text", "text": self.reasoning }],
-            }));
+                "id": id,
+                "summary": if self.reasoning.is_empty() {
+                    Vec::<Value>::new()
+                } else {
+                    vec![json!({ "type": "summary_text", "text": self.reasoning })]
+                },
+            });
+            if let Some(encrypted) = self.reasoning_encrypted {
+                if let Some(object) = item.as_object_mut() {
+                    object.insert(
+                        "encrypted_content".to_string(),
+                        Value::String(encrypted),
+                    );
+                }
+            }
+            output.push(item);
         }
         if !self.text.is_empty() || self.tools.is_empty() {
             output.push(json!({

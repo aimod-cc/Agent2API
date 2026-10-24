@@ -27,6 +27,7 @@ use serde_json::{json, Map, Value};
 use super::{
     chat_frame, content_parts, content_text, is_truthy, json_number_of, json_text, native_tool,
     random_id, string_field, string_value, SseLineBuffer, FIELD_ENCRYPTED_CONTENT,
+    FIELD_REASONING_ITEM_ID,
 };
 use super::responses::{image_url_of, tool_output_parts, ConvertError, ToolOutput};
 use super::tool_plan;
@@ -199,9 +200,11 @@ fn push_assistant_items(items: &mut Vec<Value>, message: &Value) {
         .and_then(Value::as_str)
         .filter(|text| !text.is_empty());
     if !reasoning.is_empty() || encrypted.is_some() {
+        // id 只回填**上游真实给过的**那个（见 `_wb_reasoning_item_id`）。
+        // 没暂存到就不带：伪造一个 `rs_` 配真实的 `encrypted_content`，严格
+        // 上游按 item id 查项时会整轮拒绝 —— 这比不带 id 更糟。
         let mut item = json!({
             "type": "reasoning",
-            "id": random_id("rs"),
             "summary": if reasoning.is_empty() {
                 Vec::<Value>::new()
             } else {
@@ -210,6 +213,13 @@ fn push_assistant_items(items: &mut Vec<Value>, message: &Value) {
         });
         if let Some(encrypted) = encrypted {
             if let Some(object) = item.as_object_mut() {
+                let id = message
+                    .get(FIELD_REASONING_ITEM_ID)
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty());
+                if let Some(id) = id {
+                    object.insert("id".to_string(), Value::String(id.to_string()));
+                }
                 object.insert(
                     "encrypted_content".to_string(),
                     Value::String(encrypted.to_string()),
@@ -461,6 +471,8 @@ pub struct ChatFromResponsesStream {
     /// 已宣告的工具：item_id / call_id → 槽位（chat 的 tool_calls index +
     /// 是否已发过参数增量）
     tools: BTreeMap<String, ToolSlot>,
+    /// 已转发的 reasoning 连续性字段，按 upstream item id 去重。
+    reasoning_items: BTreeMap<String, ReasoningSlot>,
     next_tool_index: i64,
     /// 上游最近的 usage（Responses 口径；收尾时折成 chat 形态）
     usage: Option<Value>,
@@ -473,6 +485,13 @@ struct ToolSlot {
     has_arguments: bool,
 }
 
+/// reasoning item 的 id 与 encrypted_content 可能分别出现在 added / done 事件。
+#[derive(Default)]
+struct ReasoningSlot {
+    id_sent: bool,
+    encrypted_sent: bool,
+}
+
 impl ChatFromResponsesStream {
     pub fn new(model: &str) -> Self {
         Self {
@@ -483,6 +502,7 @@ impl ChatFromResponsesStream {
             started: false,
             finished: false,
             tools: BTreeMap::new(),
+            reasoning_items: BTreeMap::new(),
             next_tool_index: 0,
             usage: None,
         }
@@ -579,6 +599,9 @@ impl ChatFromResponsesStream {
             "response.output_item.added" => {
                 let item = event.get("item").unwrap_or(&Value::Null);
                 let item_kind = string_field(item, "type").to_lowercase();
+                if item_kind == "reasoning" {
+                    return self.reasoning_continuity(event, item);
+                }
                 if !matches!(item_kind.as_str(), "function_call" | "custom_tool_call") {
                     return Vec::new();
                 }
@@ -647,6 +670,9 @@ impl ChatFromResponsesStream {
             "response.output_item.done" => {
                 let item = event.get("item").unwrap_or(&Value::Null);
                 let item_kind = string_field(item, "type").to_lowercase();
+                if item_kind == "reasoning" {
+                    return self.reasoning_continuity(event, item);
+                }
                 let arguments = match item_kind.as_str() {
                     "function_call" => {
                         let raw = json_text(item.get("arguments").unwrap_or(&Value::Null));
@@ -668,8 +694,20 @@ impl ChatFromResponsesStream {
             }
             // 上游错误（事件流里的失败）：折成 chat 错误帧 + [DONE]
             "error" | "response.failed" => self.fail(event),
-            // 终态：收尾（usage 已在开头收过）
-            "response.completed" | "response.done" => self.complete(None),
+            // 终态：收尾（usage 已在开头收过）。部分兼容网关只在最终 response
+            // 里带完整 output，没有逐项 done；这里补扫 reasoning 连续性字段。
+            "response.completed" | "response.done" => {
+                let mut out = Vec::new();
+                if let Some(items) = event.pointer("/response/output").and_then(Value::as_array) {
+                    for item in items {
+                        if string_field(item, "type").eq_ignore_ascii_case("reasoning") {
+                            out.extend(self.reasoning_continuity(event, item));
+                        }
+                    }
+                }
+                out.extend(self.complete(None));
+                out
+            }
             "response.incomplete" => {
                 let reason = event
                     .pointer("/response/incomplete_details/reason")
@@ -680,6 +718,54 @@ impl ChatFromResponsesStream {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// 把上游 reasoning 项的 id / encrypted_content 转成内部 Chat 帧。
+    ///
+    /// 两者可能分别出现在 `response.output_item.added` 与 `.done`，因此按
+    /// item id 记录已转发状态；缺 id 时才退回 output_index 作为键。
+    fn reasoning_continuity(&mut self, event: &Value, item: &Value) -> Vec<bytes::Bytes> {
+        let id = string_field(item, "id");
+        let encrypted = string_field(item, "encrypted_content");
+        if id.is_empty() && encrypted.is_empty() {
+            return Vec::new();
+        }
+        let key = if !id.is_empty() {
+            id.clone()
+        } else {
+            format!(
+                "output_index:{}",
+                event.get("output_index").map(string_value).unwrap_or_default()
+            )
+        };
+        let (send_id, send_encrypted) = {
+            let slot = self.reasoning_items.entry(key).or_default();
+            let send_id = !id.is_empty() && !slot.id_sent;
+            let send_encrypted = !encrypted.is_empty() && !slot.encrypted_sent;
+            if send_id {
+                slot.id_sent = true;
+            }
+            if send_encrypted {
+                slot.encrypted_sent = true;
+            }
+            (send_id, send_encrypted)
+        };
+        if !send_id && !send_encrypted {
+            return Vec::new();
+        }
+        let mut delta = Map::new();
+        if send_id {
+            delta.insert(FIELD_REASONING_ITEM_ID.to_string(), Value::String(id));
+        }
+        if send_encrypted {
+            delta.insert(
+                FIELD_ENCRYPTED_CONTENT.to_string(),
+                Value::String(encrypted),
+            );
+        }
+        let mut out = self.start();
+        out.push(self.delta_frame(Value::Object(delta)));
+        out
     }
 
     /// 首帧（role assistant）：与官方 bridge 同款 —— 空响应或只有工具的流

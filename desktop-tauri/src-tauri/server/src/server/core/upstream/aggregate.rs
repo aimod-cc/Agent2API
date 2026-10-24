@@ -30,6 +30,7 @@ use crate::server::errors::GatewayError;
 
 use super::cancellation;
 use super::sse::{is_newline_keepalive, FramePolicy, ModelRewrite};
+use crate::server::core::protocol::{FIELD_ENCRYPTED_CONTENT, FIELD_REASONING_ITEM_ID};
 use super::usage::RequestTelemetry;
 
 /// 流式读取的上限保护：单条 SSE 行长度（解析失败的行会原样丢掉，
@@ -196,6 +197,8 @@ struct CompletionAccumulator {
     role: String,
     content: String,
     reasoning: String,
+    reasoning_item_id: String,
+    reasoning_encrypted: Option<String>,
     finish: String,
     usage: Option<Value>,
     chunk_count: usize,
@@ -302,6 +305,20 @@ impl CompletionAccumulator {
                 self.reasoning.push_str(reasoning);
             }
         }
+        if let Some(item_id) = delta
+            .get(FIELD_REASONING_ITEM_ID)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+        {
+            self.reasoning_item_id = item_id.to_string();
+        }
+        if let Some(encrypted) = delta
+            .get(FIELD_ENCRYPTED_CONTENT)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+        {
+            self.reasoning_encrypted = Some(encrypted.to_string());
+        }
         if let Some(finish) = choice.get("finish_reason").and_then(Value::as_str) {
             if !finish.is_empty() {
                 self.finish = finish.to_string();
@@ -358,6 +375,15 @@ impl CompletionAccumulator {
         message.insert("content".to_string(), Value::String(self.content));
         if !self.reasoning.is_empty() {
             message.insert("reasoning_content".to_string(), Value::String(self.reasoning));
+        }
+        if !self.reasoning_item_id.is_empty() {
+            message.insert(
+                FIELD_REASONING_ITEM_ID.to_string(),
+                Value::String(self.reasoning_item_id),
+            );
+        }
+        if let Some(encrypted) = self.reasoning_encrypted {
+            message.insert(FIELD_ENCRYPTED_CONTENT.to_string(), Value::String(encrypted));
         }
         if !self.tool_calls.is_empty() {
             message.insert(

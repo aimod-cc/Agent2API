@@ -240,6 +240,9 @@ pub async fn chat_completions(
                 Some(context) => context.stream(source),
                 None => source,
             };
+            // 内部暂存字段（`_wb_`）是网关自己的连续性载荷，Responses /
+            // Anthropic 出口会消费；Chat 客户端没有这条链路，不能看到它们。
+            let source = scrub_internal_chat_frames(source);
             let status = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
             let context = RecordContext {
                 stats,
@@ -279,6 +282,8 @@ pub async fn chat_completions(
                 Some(context) => context.complete(body).await,
                 None => body,
             };
+            let body =
+                crate::server::core::protocol::strip_internal_chat_fields(&body).into_owned();
             // 响应正文在记账前抄一份（完整 JSON 文本；序列化失败或调试模式
             // 关着给 None，那一侧少存一份正文不影响明细）
             let raw_response = pipeline::capture_raw_json(&body);
@@ -492,4 +497,52 @@ pub fn spawn_catalog_refresh(state: &ServerState) {
     crate::spawn_task(async move {
         crate::server::core::providers::adapter::refresh_implemented(&store).await;
     });
+}
+
+/// Chat 出口的 SSE 清洗：剥掉内部暂存字段（`_wb_` 前缀）后再下发。
+///
+/// 只在帧里真的出现 `_wb_` 时才重新序列化（绝大多数帧原样返回），因此
+/// 热路径上没有额外解析成本。为什么会出现在这里：上游是 Responses 协议时，
+/// 内部的 chat 帧承载 `_wb_reasoning_item_id` / `_wb_encrypted_content`，
+/// Responses 与 Anthropic 出口要读它们，Chat 客户端不该看到。
+fn scrub_internal_chat_frames(
+    source: Box<dyn futures::Stream<Item = Result<Bytes, std::io::Error>> + Send + Unpin>,
+) -> Box<dyn futures::Stream<Item = Result<Bytes, std::io::Error>> + Send + Unpin> {
+    use futures::StreamExt;
+    Box::new(source.flat_map(|item| {
+        let frames: Vec<Result<Bytes, std::io::Error>> = match item {
+            Ok(chunk) => scrub_internal_chat_chunk(&chunk).into_iter().map(Ok).collect(),
+            Err(error) => vec![Err(error)],
+        };
+        futures::stream::iter(frames)
+    }))
+}
+
+/// 一帧字节的清洗本体（一帧可能含多行 `data:`）。
+fn scrub_internal_chat_chunk(chunk: &Bytes) -> Vec<Bytes> {
+    let Ok(text) = std::str::from_utf8(chunk) else {
+        return vec![chunk.clone()];
+    };
+    if !text.contains("_wb_") {
+        return vec![chunk.clone()];
+    }
+    let mut out = String::with_capacity(chunk.len());
+    for line in text.split_inclusive('\n') {
+        let Some(payload) = line.strip_prefix("data: ") else {
+            out.push_str(line);
+            continue;
+        };
+        let payload = payload.trim_end_matches('\n').trim_end_matches('\r');
+        if let Ok(value) = serde_json::from_str::<Value>(payload) {
+            let stripped = crate::server::core::protocol::strip_internal_chat_fields(&value);
+            if let Ok(clean) = serde_json::to_string(&stripped) {
+                out.push_str("data: ");
+                out.push_str(&clean);
+                out.push('\n');
+                continue;
+            }
+        }
+        out.push_str(line);
+    }
+    vec![Bytes::from(out)]
 }
