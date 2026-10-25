@@ -592,6 +592,25 @@ impl AccountStore {
                     "limiters".to_string(),
                     crate::server::core::limiter::effective_rules_json_in(record.fields()),
                 );
+                // ── 出网代理：跨家统一注入（插件家否则**永远显示「直连」**）──
+                // 与 `maxConcurrent` 完全同一个坑，而且更隐蔽：它是「值对了但
+                // 读不到」而不是「值丢了」。`apply_patch` 把 `proxy` 正确写进
+                // 记录（`record.set_proxy`），但公开形态原先只有各家的
+                // `to_*_public_account` 里各自投影一份 —— 插件家走
+                // `to_plugin_public_account`，那个骨架里没有 `proxy`，于是：
+                //   · 库里明明存着 `{source:"pool",proxyId:"…"}`；
+                //   · 界面读到 `proxy: undefined` → 整列显示「直连」；
+                //   · 再选一次同一条时 `apply_patch` 判「值没变」→ `changes: []`
+                //     → 前端仍弹「✅ 代理已更新」（假成功），用户点了无数次
+                //     也不会变 —— 实测在 Cline Free 上复现。
+                //
+                // 恒为「对象或 null」而不是缺键：`null` 就是直连（与写入侧
+                // `normalize_account_proxy` 的 `None → Value::Null` 同一口径），
+                // 前端 `ProxyCell` 按 `proxy?.config?.source` 读，两种形态都能吃。
+                fields.insert(
+                    "proxy".to_string(),
+                    describe_account_proxy(Some(&record.proxy())),
+                );
                 // 跨家统一注入的**账号展示名**：与前端 `displayNameOf` 同口径的
                 // 唯一后端实现（规则见本文件底部的 `display_name_of`）。
                 // 恒为非空字符串（`displayName` 全兜底失效时退 id），请求日志 /
