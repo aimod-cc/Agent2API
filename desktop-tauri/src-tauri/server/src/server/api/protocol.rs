@@ -419,6 +419,10 @@ pub async fn messages_endpoint(
         telemetry.set_cancel_token(token);
     }
     let mut guard = DisconnectGuard::new(state.request_stats(), telemetry_id.clone());
+    // `message_start` 必须立刻发、而上游 usage 要到流末尾才到；这里先按
+    // 请求体估一个输入 token 数占位（真实值在 `message_delta` 覆盖）。
+    // 纯内存扫一遍消息 + 工具定义，不增加任何网络等待。
+    let prompt_estimate = anthropic::estimate_chat_tokens(&chat_body);
     let outcome = forward_chat(
         &state,
         chat_body,
@@ -455,7 +459,7 @@ pub async fn messages_endpoint(
             let model = requested_model.clone();
             let context = RecordContext { status: i64::from(status.as_u16()), ..context };
             if stream {
-                let mut machine = anthropic::AnthropicStream::new(&model);
+                let mut machine = anthropic::AnthropicStream::with_input_tokens(&model, prompt_estimate);
                 let transformed = pipeline::transformed_stream(
                     source,
                     context,
