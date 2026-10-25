@@ -238,6 +238,30 @@ pub fn account_features_of(provider: &str) -> Option<proto::AccountFeatures> {
     found
 }
 
+/// 某一家申报的「有没有续期能力」（没装 / 没这一家 = `false`）。
+///
+/// ── 为什么要有这个 store 层的读数入口 ──────────────────────────
+/// 「手动刷新 Token」这个入口由界面按公开视图的 `hasRefreshToken` 决定是否
+/// 渲染，而公开视图在 `account_store` 层拼装 —— 那里拿不到适配器（插件家
+/// 的 id 也不在 `ProviderKind` 枚举里）。`plugin_update_secret` 那边的
+/// `hasRefreshToken` 原先恒写 `false`，于是**插件家一律没有刷新按钮**，
+/// 哪怕插件明明白白申报了 `refresh: true` 并且实现了 `token.refresh`。
+///
+/// 与 [`account_features_of`] 同一形态：读握手带回的 `ProviderInfo`。
+pub fn refresh_capable(provider: &str) -> bool {
+    let Some(host) = current() else {
+        return false;
+    };
+    let Ok(guard) = host.providers.lock() else {
+        return false;
+    };
+    guard
+        .iter()
+        .find(|info| info.id.as_str() == provider)
+        .map(|info| info.capabilities.refresh)
+        .unwrap_or(false)
+}
+
 /// 某一家申报的签到能力（没申报 = `None`）。
 pub fn checkin_of(provider: &str) -> Option<proto::CheckinInfo> {
     let host = current()?;

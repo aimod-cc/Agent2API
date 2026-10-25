@@ -302,13 +302,66 @@ impl AccountStore {
             public.insert(key.to_string(), record.get(key).cloned().unwrap_or(Value::Null));
         }
         public.insert("enabled".to_string(), Value::Bool(record.enabled()));
-        public.insert("hasRefreshToken".to_string(), Value::Bool(false));
+        // ── 手动「刷新 Token」入口的开关，按插件申报的续期能力给 ────────
+        // 原先恒写 `false`，于是**插件家一律没有刷新按钮** —— 哪怕插件
+        // 申报了 `refresh: true` 并且实现了 `token.refresh`
+        // （OfficeAce / CodeArts 两家都是），用户在凭证过期时只剩
+        // 「重新登录」一条路。界面读的就是这个字段
+        // （`hasRefreshToken ? <刷新项> : …`），点下去走
+        // `POST /api/accounts/refresh` → 适配器的 `refresh_access_token`。
+        public.insert(
+            "hasRefreshToken".to_string(),
+            Value::Bool(crate::server::core::plugin_host::refresh_capable(
+                &record.provider(),
+            )),
+        );
         public.insert("tokenTail".to_string(), Value::Null);
         // 插件自己的展示字段（uid / 邮箱 / 余额……）：原样并进来。撞键时
         // 插件赢 —— 它比网关更清楚自己那条账号该显示什么。
         if let Some(Value::Object(extra)) = record.get(PUBLIC_KEY) {
             for (key, value) in extra {
                 public.insert(key.clone(), value.clone());
+            }
+        }
+        // ── 但**用户设过的备注名**要赢回来，这是上面「插件赢」的唯一例外 ──
+        // 备注名走 `PATCH /api/accounts/{id}`，只写记录顶层的 `name` +
+        // `nameCustom`（见 `apply_patch`）；而 12 家插件都会往
+        // `pluginPublic.name` 里写它按自己口径算的展示名（邮箱、app key 前缀…）。
+        // 不把备注名补回来，用户改完就在列表里纹丝不动 —— 前端 `displayNameOf`
+        // 在 `nameCustom` 为真时读的正是这个 `name`，读到的是插件那份旧的。
+        //
+        // 判据用 `nameCustom` 而不是「顶层 name 非空」：插件在添加账号时写的
+        // 种子名也落在顶层，拿它当用户意图会把默认名误判成备注名。
+        if record
+            .get("nameCustom")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            if let Some(name) = record.get("name") {
+                public.insert("name".to_string(), name.clone());
+            }
+        }
+        // ── 有效期：按插件**申报的键名**从 secret 取值 ────────────────
+        // 协议里 `AccountFeatures::expiry` 就是为这一列准备的（各家键名真的
+        // 不同：OrcaTerm 是 `tokenExpireAt`、比别家少一个 s），插件在握手时
+        // 申报「我用哪个键表示到期」，网关在这里按名取值放上公开视图。
+        //
+        // 之前没人读这个申报，于是插件家的有效期列**永远是空的** —— 而续期
+        // 其实已经把新值写进 secret 了（见 `plugin_update_secret` 的
+        // `expiresAt`），只是从没暴露到公开视图这一层。
+        //
+        // 只在申报了键名时才读：没申报的家（旧插件 / 没有到期概念的家）保持
+        // 原有形态，界面按自己的兜底表显示「—」，不凭空猜一个字段名出来。
+        // 值放在**申报的那个键名**下（不是统一改名 `expiresAt`）—— 前端
+        // `expiry` 表就是按各家自己的键名取的。
+        if let Some(features) =
+            crate::server::core::plugin_host::account_features_of(&record.provider())
+        {
+            let secret = secret_of(record);
+            for key in &features.expiry {
+                if let Some(value) = secret.get(key).filter(|value| !value.is_null()) {
+                    public.insert(key.clone(), value.clone());
+                }
             }
         }
         Value::Object(public)

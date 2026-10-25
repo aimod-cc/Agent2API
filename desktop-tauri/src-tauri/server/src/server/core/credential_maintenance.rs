@@ -30,8 +30,9 @@
 //! 展示。真正会抛错的只有「整个请求都发不出去」那一层（由 HTTP 客户端负责）。
 //!
 //! ── 锁与 panic 的两条硬约束 ─────────────────────────────────
-//!   1. **不持锁跨 await**：账号快照与逐账号的临期判定都是同步的（各自的取数
-//!      函数内部取锁即释放），网络刷新在锁外逐个 await；
+//!   1. **不持锁跨 await**：账号快照取完即释放锁；临期判定会 await（插件家
+//!      要问它自己的存储，见下），但那些取数函数**内部取锁即释放**，await
+//!      期间本模块不持有任何锁；网络刷新同样在锁外逐个 await；
 //!   2. **不 unwrap/expect**：本模块在后台任务与 HTTP handler 两条路径上跑，
 //!      而 release 是 `panic = "abort"`，任何一处 panic 都会带走整个应用。
 //!
@@ -139,7 +140,15 @@ pub async fn refresh_expiring_accounts(store: &AccountStore) -> Vec<Value> {
         }
         // 临期判定的详细理由见 trait 的 `credentials_expiring`：
         // 判不出来（没有过期信息 / 账号不存在 / 没有 refreshToken）一律 false
-        if !adapter.credentials_expiring(store, &id) {
+        //
+        // ── 必须走**异步**版（插件家的凭证要问它自己）────────────────
+        // 同步版在插件适配器上是硬编码 `false`（`RpcAdapter::credentials_expiring`），
+        // 它的实现说明写着「真正的实现在 `credentials_expiring_async`」。
+        // 调同步版会让**所有插件家**在这一步被判成「未临期」而永远跳过 ——
+        // 症状是凭证过期后每轮维护都报「无需刷新」，接口一路 401/过期错误，
+        // 而真正能续期的 `token.expiring` RPC 一次都没被问过。
+        // 内置家的异步版默认转调同步版（见 trait），所以这一改对它们无影响。
+        if !adapter.credentials_expiring_async(store, &id).await {
             slots[index] = Some(skipped(&id, provider, "凭证未过期或临期"));
             continue;
         }
