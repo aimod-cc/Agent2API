@@ -447,6 +447,11 @@ pub fn build_upstream_body(
             "version": "1.0.0",
             "type": "agent",
             "stage": "start",
+            // 官方 agent 循环的 business 固定带 `model_key`（官方运行时 `d8()`
+            // 的第 5 个参数就是当前模型键）。上游后台的模型归属/计费优先读它，
+            // 缺了会把请求记到账号默认档 Auto —— 即使 model_config.key 与
+            // X-Model-Key 都是正确的。
+            "model_key": upstream_key,
             "id": super::cosy::random_uuid().unwrap_or_default(),
             "name": last_user_text.chars().take(30).collect::<String>(),
             "begin_at": crate::server::logging::now_ms(),
@@ -553,5 +558,38 @@ pub fn truthy(value: &Value) -> bool {
         Value::Number(number) => number.as_f64().map(|item| item != 0.0).unwrap_or(false),
         Value::String(text) => !text.is_empty(),
         Value::Array(_) | Value::Object(_) => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 上游后台按 `business.model_key` 归属模型；缺了会把请求记成账号默认档
+    /// Auto（即使 `model_config.key` / `X-Model-Key` 正确）。
+    #[test]
+    fn business_carries_requested_model_key() {
+        let messages = vec![json!({ "role": "user", "content": "hi" })];
+        let body = build_upstream_body(
+            "kmodel_latest",
+            &json!({ "key": "kmodel_latest", "source": "system" }),
+            &messages,
+            None,
+            Some(16),
+            &ThinkingChoice {
+                enable: None,
+                effort: None,
+            },
+            "uid",
+            None,
+        );
+        assert_eq!(
+            body.pointer("/business/model_key").and_then(Value::as_str),
+            Some("kmodel_latest")
+        );
+        assert_eq!(
+            body.pointer("/model_config/key").and_then(Value::as_str),
+            Some("kmodel_latest")
+        );
     }
 }
