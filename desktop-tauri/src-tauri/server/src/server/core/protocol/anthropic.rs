@@ -676,6 +676,35 @@ pub(super) fn parse_json_object(value: &Value) -> Value {
 }
 
 /// Chat 的 usage → Anthropic 的 usage
+/// 输入 token 的粗估（CJK 一字一 token，其余约 4 字符一 token）。
+///
+/// 只用于 `message_start` 的占位：上游真实用量要到流末尾才出现，而
+/// `message_start` 必须在首帧就发。真实值随后在 `message_delta` 覆盖。
+pub fn estimate_chat_tokens(chat: &Value) -> i64 {
+    let payload = json!({
+        "messages": chat.get("messages").cloned().unwrap_or_else(|| json!([])),
+        "tools": chat.get("tools").cloned().unwrap_or_else(|| json!([])),
+    });
+    let text = payload.to_string();
+    let (mut cjk, mut total) = (0i64, 0i64);
+    for ch in text.chars() {
+        total += 1;
+        if is_cjk_char(ch) {
+            cjk += 1;
+        }
+    }
+    cjk + ((total - cjk) + 3) / 4
+}
+
+fn is_cjk_char(ch: char) -> bool {
+    matches!(ch as u32,
+        0x1100..=0x11ff
+        | 0x2e80..=0x9fff
+        | 0xac00..=0xd7af
+        | 0xf900..=0xfaff
+        | 0xff00..=0xffef)
+}
+
 pub fn usage_to_anthropic(usage: Option<&Value>) -> Value {
     let Some(usage) = usage.filter(|value| value.is_object()) else {
         return json!({ "input_tokens": 0, "output_tokens": 0 });
@@ -731,6 +760,12 @@ pub struct AnthropicStream {
 
 impl AnthropicStream {
     pub fn new(model: &str) -> Self {
+        Self::with_input_tokens(model, 0)
+    }
+
+    /// `input_tokens` 用于 `message_start` 的占位（上游真实用量要到流末尾
+    /// 才出现）；`message_delta` 会用真实值覆盖。
+    pub fn with_input_tokens(model: &str, input_tokens: i64) -> Self {
         Self {
             buffer: SseLineBuffer::new(),
             message_id: random_id("msg"),
@@ -748,7 +783,7 @@ impl AnthropicStream {
             has_tool: false,
             stop_reason: None,
             usage: None,
-            input_tokens: 0,
+            input_tokens,
         }
     }
 
@@ -789,23 +824,20 @@ impl AnthropicStream {
             .stop_reason
             .clone()
             .unwrap_or_else(|| if self.has_tool { "tool_use".to_string() } else { "end_turn".to_string() });
+        // 真实 Anthropic 流把 `input_tokens` / `cache_read_input_tokens` 放在
+        // 收尾的 `message_delta`（开头那帧只报 0 占位，见
+        // `anthropic_outbound::ChatFromAnthropicStream::absorb_usage`）。
+        // 只回传 output_tokens 会让客户端（含 Claude Code 的 context-hud）
+        // 认为本次请求没有输入，上下文用量永远是 0。
         out.push(self.event(
             "message_delta",
             json!({
                 "delta": { "stop_reason": stop_reason, "stop_sequence": Value::Null },
-                "usage": { "output_tokens": self.output_tokens() },
+                "usage": usage_to_anthropic(self.usage.as_ref()),
             }),
         ));
         out.push(self.event("message_stop", json!({})));
         out
-    }
-
-    fn output_tokens(&self) -> i64 {
-        self.usage
-            .as_ref()
-            .and_then(|usage| usage.get("completion_tokens"))
-            .and_then(Value::as_i64)
-            .unwrap_or(0)
     }
 
     fn consume(&mut self, chunk: &Value) -> Vec<bytes::Bytes> {
@@ -833,7 +865,8 @@ impl AnthropicStream {
             }
         }
         if let Some(usage) = chunk.get("usage").filter(|value| value.is_object()) {
-            // Anthropic 的 message_delta 只报 output_tokens，input 在 message_start
+            // 上游的 usage 只在流末尾出现；`input_tokens` 留到收尾的
+            // `message_delta` 一起下发（见 `finish`）。
             self.input_tokens = usage.get("prompt_tokens").and_then(Value::as_i64).unwrap_or(0);
             self.usage = Some(usage.clone());
         }
