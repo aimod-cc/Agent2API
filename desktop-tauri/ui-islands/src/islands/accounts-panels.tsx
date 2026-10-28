@@ -51,7 +51,7 @@ import {
   tokenBlockedOf, tokenCountdownText, tokenDisableTriggeredOf, tokenExpiryOf, tokenReadingForRule,
   tokenRulesOf, tokenWindowInfo, zcodePlanStateLabel,
 } from './accounts-domain'
-import { CreditDetailButton, creditRowsOf } from './accounts-credit-detail'
+import { CreditDetailButton, creditRowsOf, expiringSoonOf } from './accounts-credit-detail'
 import { LimitDetailButton, limitRowsOf } from './accounts-limit-detail'
 import { LimiterStatus } from './accounts-limiter-status'
 import { limiterHit } from './accounts-limiter-model'
@@ -195,6 +195,13 @@ type GroupBalance = {
   pending: number
   /** 半次失败（两台网关有一台没回话）：读数计入，但要点 ⚠ */
   partial: number
+  /**
+   * 7 天内到期、还能花的积分之和（口径与余额格那枚徽标同源）。
+   * 只有出 `credits[]` 的家会贡献；其余家恒为 0，界面据此不画那一句。
+   */
+  expiringSum: number
+  /** 上面那些包的份数 */
+  expiringCount: number
   /** 求和口径：整组（默认）还是当前筛选后的可见行 —— tooltip 要照着说 */
   scope: 'group' | 'filtered'
 }
@@ -229,7 +236,7 @@ type GroupBalance = {
 function groupBalanceOf(members: AccountRecord[], scope: 'group' | 'filtered' = 'group'): GroupBalance {
   const out: GroupBalance = {
     counted: 0, total: members.length, sum: null, unlimited: 0, unit: '',
-    failed: 0, uncountable: 0, pending: 0, partial: 0, scope,
+    failed: 0, uncountable: 0, pending: 0, partial: 0, expiringSum: 0, expiringCount: 0, scope,
   }
   let sum = 0
   for (const account of members) {
@@ -258,6 +265,11 @@ function groupBalanceOf(members: AccountRecord[], scope: 'group' | 'filtered' = 
     if (unit !== out.unit) { out.uncountable++; continue }
     out.counted++
     sum += value
+    // 即将过期：判据与余额格那枚徽标同源（`creditRowsOf` → `expiringSoonOf`）。
+    // 不在这里另写一套「7 天内到期」的判断，否则两处迟早对不上。
+    const soon = expiringSoonOf(creditRowsOf(entry))
+    out.expiringSum += soon.sum
+    out.expiringCount += soon.count
   }
   if (out.counted) out.sum = Number(sum.toFixed(2))
   return out
@@ -286,6 +298,11 @@ function groupBalanceTitle(balance: GroupBalance): string {
   if (balance.failed) parts.push(t('{n} 个查询失败', { n: balance.failed }))
   if (balance.uncountable) parts.push(t('{n} 个读数没有绝对数（只给比例或无额度），未计入', { n: balance.uncountable }))
   if (balance.partial) parts.push(t('{n} 个读数只读到一半（读数可信但不完整）', { n: balance.partial }))
+  if (balance.expiringCount) {
+    parts.push(t('其中 {n} 积分将在 7 天内到期（{c} 份）', {
+      n: balanceAmountText(balance.expiringSum), c: balance.expiringCount,
+    }))
+  }
   return parts.join('；')
 }
 
@@ -317,6 +334,16 @@ function GroupBalanceBadge({ balance }: { balance: GroupBalance }) {
       <b className='v'>{amount}</b>
       {unit ? <span className='u'>{unit}</span> : null}
       {note ? <span className='n'>{note}</span> : null}
+      {balance.expiringCount > 0 ? (
+        <span
+          className='n soon'
+          title={t('本组 7 天内到期、过期即作废的积分合计 {n}（{c} 个积分包）', {
+            n: balanceAmountText(balance.expiringSum), c: balance.expiringCount,
+          })}
+        >
+          {t('含即将过期 {n}', { n: balanceAmountText(balance.expiringSum) })}
+        </span>
+      ) : null}
       {warned ? <span className='warn-mark' aria-hidden>⚠</span> : null}
     </span>
   )
@@ -1334,7 +1361,21 @@ export function UsageCell({ account }: { account: AccountRecord }) {
   // 读入口走 usageEntryOf（不是裸的 usageEntries().get）：它会作废「比账号记录还旧」
   // 的失败结论，理由与后端快照出口一致
   const entry = usageEntryOf(account)
-  const summary = usageSummary(entry)
+  const rawSummary = usageSummary(entry)
+  // 即将过期：只在读数可用时算，并**并进摘要的悬停提示**。摘要的 `title` 同时供
+  // 余额格读数、池形态与明细入口使用（三处共用一份），在这里追加一次就都带上了 ——
+  // 分开各拼一份，迟早有一处忘了改。
+  const expiringRows = rawSummary.kind === 'ok' || rawSummary.kind === 'warn' ? creditRowsOf(entry) : []
+  const expiring = expiringSoonOf(expiringRows)
+  const summary = expiring.count
+    ? {
+      ...rawSummary,
+      title: rawSummary.title
+        + t(' · 7 天内到期 {n}', { n: numberText(expiring.sum) })
+        // 今天内到期的那部分单独报一句：7 天是「该安排了」，今天内是「今天不花就没了」
+        + (expiring.todayCount > 0 ? t('（今天内 {d}）', { d: numberText(expiring.todaySum) }) : ''),
+    }
+    : rawSummary
   // 限制器的跳过徽章：与后端选路过滤同一判据（balanceBlockedOf / tokenBlockedOf），
   // 让「为什么这个账号不接请求」在界面上有处可看。禁用档不标 —— 那一档
   // 状态列的「已禁用」开关就是答案；跳过档账号仍是启用的，不标就看不出。
@@ -1366,7 +1407,7 @@ export function UsageCell({ account }: { account: AccountRecord }) {
   // 都没有，挂一个点开是空框的入口更糟。
   // 空数组同样不挂 —— 后端不写 `credits` 键就是「这家这次没有逐份读数」
   // （企业账号、上游没给包），界面不去证明一个空清单。
-  const creditRows = summary.kind === 'ok' || summary.kind === 'warn' ? creditRowsOf(entry) : []
+  const creditRows = expiringRows
   const creditDetail = supportsCreditDetail(account) && creditRows.length
     ? {
       rows: creditRows,

@@ -856,5 +856,18 @@
   "账号列表刷新失败": "Failed to refresh the account list.",
   "账号已保存，但列表刷新失败：{error}": "The account was saved, but the list failed to refresh: {error}",
   "失败后允许换号": "Allow account switching after failure",
-  "关闭后，该账号转发失败时返回本次错误，不再顺延其他账号。禁用、无凭证和限制器等保护仍生效。": "When off, forwarding failures on this account return the error without switching to another account. Disabled-account, missing-credential, and limiter protections still apply."
+  "关闭后，该账号转发失败时返回本次错误，不再顺延其他账号。禁用、无凭证和限制器等保护仍生效。": "When off, forwarding failures on this account return the error without switching to another account. Disabled-account, missing-credential, and limiter protections still apply.",
+  "7天 {n}": "{n} in 7d",
+  "即将过期 {n} 积分（7 天内 {c} 份）": "{n} credits expiring within 7 days ({c} packs)",
+  "今天到期": "Expires today",
+  "明天到期": "Expires tomorrow",
+  "{days} 天后到期": "Expires in {days} days",
+  " · 7 天内到期 {n}": " · {n} expiring within 7 days",
+  "含即将过期 {n}": "incl. {n} expiring",
+  "本组 7 天内到期、过期即作废的积分合计 {n}（{c} 个积分包）": "Credits in this group expiring within 7 days: {n} ({c} packs) — forfeited once expired",
+  "其中 {n} 积分将在 7 天内到期（{c} 份）": "{n} credits will expire within 7 days ({c} packs)",
+  "{hours} 小时后到期": "Expires in {hours} h",
+  "{minutes} 分钟后到期": "Expires in {minutes} min",
+  "（今天内 {d}）": " ({d} today)",
+  "即将过期 {n} 积分（7 天内 {c} 份，今天内 {d}）": "{n} credits expiring within 7 days ({c} packs, {d} of them today)"
 }

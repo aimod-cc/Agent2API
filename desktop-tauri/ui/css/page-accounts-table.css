@@ -533,6 +533,10 @@ body.queue-dragging * { cursor: grabbing; }
 .grp-balance .u { color: var(--text-3); }
 /* 「计入 8/10」比合计淡一档：它是脚注，不是第二个读数 */
 .grp-balance .n { color: var(--text-3); }
+/* 组头那枚「含即将过期 x」：与同行那两句口径说明同一个位置，但取 warn 色 ——
+   它是「这笔钱会作废」的提醒，不是口径解释。只在真有这类包时出现
+   （判据在 `GroupBalanceBadge`），没有这个概念的家一个字不多。 */
+.grp-balance .n.soon { color: var(--warn); font-variant-numeric: tabular-nums; }
 .grp-balance.warn .v { color: var(--warn); }
 .grp-balance.muted .v { color: var(--text-3); font-weight: 600; }
 .grp-balance .warn-mark { color: var(--warn); font-size: 10px; }
@@ -927,6 +931,64 @@ body.queue-dragging * { cursor: grabbing; }
 .usage-pop-view.warn { color: var(--warn); }
 .usage-pop-view.bad { color: var(--danger); }
 .usage-pop-view.muted { color: var(--text-3); font-weight: 500; }
+
+/* ─── 即将过期（7 天内到期、过期即作废的积分）───
+   三处形态共用一套色：余额格框内那枚胶囊、弹层顶部的汇总条、弹层行首的
+   「还剩几天」标签。统一取 --warn —— 这是「会作废」的提醒，不是报错。
+   它与「有效期」列（token 到期日）不是一回事，数值也不必相等。 */
+
+/* 框内胶囊：`可用 8946` 与它同住一个 `.usage-toggle` 里，紧贴 caret 左侧。
+   这格宽一百多像素（`.usage-toggle` 是 calc(100% + 16px) 的出血宽度），装不下
+   「7 天内到期 249.98」那种全称，所以文案在 `CreditDetailButton` 里缩成
+   「7天 249.98」，完整句子走悬停 title（与按钮本身同一份）。
+   `:has()` 那两条让读数贴左、并给绝对定位的 caret 让出 18px —— 没有胶囊的框
+   不受影响，仍走 `.val` 居中那份原有规则。 */
+.usage-toggle:has(.usage-toggle-soon) { padding-right: 18px; gap: 4px; }
+.usage-toggle:has(.usage-toggle-soon) .val { padding: 0 2px; text-align: left; }
+
+.usage-toggle-soon {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 弹层顶部那行汇总：字号与底子照 `.usage-pop-total` 那一档，底色换 warn ——
+   它与末尾那个「可用合计」讲的是两件事，不该长得一样。 */
+.usage-pop-soon {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 2px 0 4px;
+  padding: 5px 8px;
+  border-radius: var(--r-xs);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-bd);
+  color: var(--warn);
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 行首那枚「今天到期 / 3 天后到期」：跟在名称后面。只出现在置顶那一组
+   （判据是 `CreditRow.soon`），其余行的排版一个字不动。 */
+.usage-pop-soon-tag {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+}
 
 /* 剩余细线：与余额格里那套 `.usage-meter-track` 同源同形（3px、hairline 轨道、
    语义色条体），弹层里只是上下留白宽一点。画的是**剩余**比例；超额走红 ——

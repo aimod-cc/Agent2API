@@ -856,5 +856,18 @@
   "账号列表刷新失败": "Falha ao atualizar a lista de contas.",
   "账号已保存，但列表刷新失败：{error}": "A conta foi salva, mas a lista não pôde ser atualizada: {error}",
   "失败后允许换号": "Permitir troca de conta após falha",
-  "关闭后，该账号转发失败时返回本次错误，不再顺延其他账号。禁用、无凭证和限制器等保护仍生效。": "Quando desativado, uma falha de encaminhamento nesta conta retorna o erro sem trocar para outra conta. As proteções para contas desativadas, credenciais ausentes e limitadores continuam ativas."
+  "关闭后，该账号转发失败时返回本次错误，不再顺延其他账号。禁用、无凭证和限制器等保护仍生效。": "Quando desativado, uma falha de encaminhamento nesta conta retorna o erro sem trocar para outra conta. As proteções para contas desativadas, credenciais ausentes e limitadores continuam ativas.",
+  "7天 {n}": "{n} em 7d",
+  "即将过期 {n} 积分（7 天内 {c} 份）": "{n} créditos expirando em 7 dias ({c} pacotes)",
+  "今天到期": "Expira hoje",
+  "明天到期": "Expira amanhã",
+  "{days} 天后到期": "Expira em {days} dias",
+  " · 7 天内到期 {n}": " · {n} expirando em 7 dias",
+  "含即将过期 {n}": "incl. {n} expirando",
+  "本组 7 天内到期、过期即作废的积分合计 {n}（{c} 个积分包）": "Créditos deste grupo que expiram em 7 dias: {n} ({c} pacotes) — perdidos ao expirar",
+  "其中 {n} 积分将在 7 天内到期（{c} 份）": "{n} créditos expiram em 7 dias ({c} pacotes)",
+  "{hours} 小时后到期": "Expira em {hours} h",
+  "{minutes} 分钟后到期": "Expira em {minutes} min",
+  "（今天内 {d}）": " ({d} hoje)",
+  "即将过期 {n} 积分（7 天内 {c} 份，今天内 {d}）": "{n} créditos expirando em 7 dias ({c} pacotes, {d} hoje)"
 }
