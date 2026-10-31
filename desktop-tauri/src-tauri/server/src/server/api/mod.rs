@@ -130,6 +130,7 @@ pub mod plugin_theme;
 pub mod prompt;
 pub mod protocol;
 pub mod proxies;
+pub mod qoder_cookie;
 pub mod qoder_umid;
 pub mod queue_api;
 pub mod retry_api;

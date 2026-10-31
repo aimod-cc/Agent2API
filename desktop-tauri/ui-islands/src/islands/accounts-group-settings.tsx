@@ -97,11 +97,13 @@ export function groupSortSummary(rules: GroupSortRule[]): string {
 /**
  * 一行规则：优先级号 / 勾选 / 名称与说明 / 方向 / 上下移。
  *
- * `state` 有三种，视觉与可操作性各不相同：
+ * `state` 有四种，视觉与可操作性各不相同：
  *   · `ready`       —— 可用（可勾、可切方向）
  *   · `no-data`     —— 这一家的后端会产出到期，但**这一组此刻一条都没读到**
  *                      （没点过「查询余额」，或包都过期了）。仍然可勾 —— 用户先设
  *                      好规则、之后查到数据就自然生效；说明行写「暂无数据」。
+ *   · `no-credential` —— Qoder 这一组还没有任何账号配置网页 Cookie。没有这枚
+ *                      凭证就永远读不到到期，规则禁用，先去账号设置获取。
  *   · `unsupported` —— 这一家的数据里根本没有到期字段。勾选框禁用、方向位换成
  *                      「不可用」，整行不压淡（压淡是「这次没勾」的语义）。
  */
@@ -109,12 +111,15 @@ function RuleRow({ rule, priority, isLast, state, busy, onChange }: {
   rule: GroupSortRule
   priority: number
   isLast: boolean
-  state: 'ready' | 'no-data' | 'unsupported'
+  state: 'ready' | 'no-data' | 'unsupported' | 'no-credential'
   busy: boolean
   onChange: (patch: Partial<GroupSortRule>) => void
 }) {
   const meta = ruleMeta(rule.key)
-  const blocked = state === 'unsupported'
+  const blocked = state === 'unsupported' || state === 'no-credential'
+  const blockedHint = state === 'no-credential'
+    ? t('未获取网页 Cookie，请先在账号设置里获取')
+    : t('这一家查不到积分到期时间')
   const off = !blocked && !rule.on
   return (
     <div className={cn(
@@ -134,9 +139,9 @@ function RuleRow({ rule, priority, isLast, state, busy, onChange }: {
         <span className={cn(
           'overflow-hidden text-ellipsis whitespace-nowrap text-[10.5px]',
           blocked ? 'text-warning' : state === 'no-data' ? 'text-subtle' : 'text-subtle',
-        )} title={blocked ? t('这一家查不到积分到期时间') : undefined}>
+        )} title={blocked ? blockedHint : undefined}>
           {blocked
-            ? t('这一家查不到积分到期时间')
+            ? blockedHint
             : state === 'no-data'
               ? rule.on
                 ? t('暂无数据：先查询一次余额，之后会自动按到期排序')
@@ -158,7 +163,7 @@ function RuleRow({ rule, priority, isLast, state, busy, onChange }: {
         </Select>
       ) : (
         <span className='rounded-xs border border-dashed border-border py-1 text-center text-[10.5px] text-subtle'>
-          {t('不可用')}
+          {state === 'no-credential' ? t('待配置') : t('不可用')}
         </span>
       )}
       <span className='flex flex-col gap-px'>
@@ -216,9 +221,16 @@ export function GroupSettingsDialog({ provider, onClose }: { provider: string; o
    * 到期（没点过「查询余额」、或者都过期了），这一项不该假装可用。
    */
   const creditSupported = supportsCreditExpiry(provider)
+  const isQoder = provider === 'qoder' || provider === 'qoder-intl'
   // 依赖 store 的 version 而不是空数组：查完余额（usageEntryOf 有新读数）之后
   // 这一项要从「暂无数据」翻成可用，弹窗开着时也得跟着变
   const version = getStore().version
+  const creditHasCookie = React.useMemo(
+    () => allAccounts()
+      .filter(account => providerOf(account) === provider)
+      .some(account => account.hasWebCookie === true),
+    [provider, version],
+  )
   const creditHasData = React.useMemo(
     () => allAccounts()
       .filter(account => providerOf(account) === provider)
@@ -227,8 +239,12 @@ export function GroupSettingsDialog({ provider, onClose }: { provider: string; o
         : creditExpiryOf(usageEntryOf(account)) !== null),
     [provider, version],
   )
-  const creditState: 'ready' | 'no-data' | 'unsupported' =
-    !creditSupported ? 'unsupported' : creditHasData ? 'ready' : 'no-data'
+  const creditState: 'ready' | 'no-data' | 'unsupported' | 'no-credential' =
+    !creditSupported
+      ? 'unsupported'
+      : isQoder && !creditHasCookie
+        ? 'no-credential'
+        : creditHasData ? 'ready' : 'no-data'
   const summary = groupSortSummary(rules)
   const customized = hasCustomGroupSort(provider)
   const busy = getStore().sortBusy
@@ -304,9 +320,11 @@ export function GroupSettingsDialog({ provider, onClose }: { provider: string; o
               {t('账号页与全局路由共用此消耗顺序，网关按最新余额数据选路，不需要保持页面打开。模型独立顺序会覆盖全局。')}
             </p>
             <p className='m-0 mt-1.5 px-2.5 text-[10.5px] leading-relaxed text-subtle'>
-              {creditSupported
-                ? t('本提供商默认启用最快到期优先，账号添加时间默认关闭；关闭全部规则可恢复手动顺序。')
-                : t('本提供商不支持积分到期排序，默认保持手动顺序；可按需启用账号添加时间排序。')}
+              {creditState === 'no-credential'
+                ? t('该组还没有 Qoder 网页 Cookie；配置后才会默认启用最快到期优先，当前保持手动顺序。')
+                : creditSupported
+                  ? t('本提供商默认启用最快到期优先，账号添加时间默认关闭；关闭全部规则可恢复手动顺序。')
+                  : t('本提供商不支持积分到期排序，默认保持手动顺序；可按需启用账号添加时间排序。')}
             </p>
           </GroupSettingSection>
 
@@ -327,7 +345,9 @@ export function GroupSettingsDialog({ provider, onClose }: { provider: string; o
         <DialogFooter>
           <Button variant='ghost' size='sm' disabled={!customized || busy}
             title={customized
-              ? creditSupported ? t('恢复默认：最快到期优先，账号添加时间关闭') : t('恢复默认：仅按手动顺序')
+              ? creditState === 'no-credential'
+                ? t('恢复默认：仅按手动顺序（未配置网页 Cookie）')
+                : creditSupported ? t('恢复默认：最快到期优先，账号添加时间关闭') : t('恢复默认：仅按手动顺序')
               : t('当前已经是默认规则')}
             onClick={() => void setGroupSortRules(provider, null)}>
             {t('恢复默认')}

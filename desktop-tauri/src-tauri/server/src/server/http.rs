@@ -798,6 +798,12 @@ pub fn panel_router(state: ServerState) -> Router {
             get(api::qoder_umid::get_status).post(api::qoder_umid::get_status),
         )
         .route("/api/qoder-umid/install", post(api::qoder_umid::install))
+        // ── Qoder 网页 Cookie（积分到期明细）──
+        // 账号级：info 读配置状态 / set 校验并保存 / clear 清除。
+        // 挂 protected：Cookie 是敏感会话，且写入会改变余额明细与到期排序。
+        .route("/api/qoder-cookie/info", get(api::qoder_cookie::info))
+        .route("/api/qoder-cookie/set", post(api::qoder_cookie::set))
+        .route("/api/qoder-cookie/clear", post(api::qoder_cookie::clear))
         // ── 间隔型定时任务（凭证自动维护 / 模型目录刷新 / 两个前端自动刷新）──
         // 挂 protected：它能改后端后台任务的执行节奏（间隔 1 分钟会让网关持续
         // 打上游），并触发真打上游的刷新，敏感度与 /api/retention 同级。

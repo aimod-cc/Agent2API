@@ -51,11 +51,29 @@ pub fn supports_credit_expiry(provider: &str) -> bool {
         .unwrap_or_else(|| matches!(provider, "workbuddy" | "workbuddy-intl" | "trae" | "officeace"))
 }
 
-pub fn rules_for(provider: &str, settings: &AccountSortSettings) -> Vec<AccountSortRule> {
-    settings.get(provider).cloned().unwrap_or_else(|| vec![
-        AccountSortRule::Credit { on: supports_credit_expiry(provider), dir: CreditSortDirection::Soon },
+pub fn rules_for(
+    provider: &str,
+    settings: &AccountSortSettings,
+    credit_available: bool,
+) -> Vec<AccountSortRule> {
+    let mut rules = settings.get(provider).cloned().unwrap_or_else(|| vec![
+        AccountSortRule::Credit {
+            on: supports_credit_expiry(provider) && credit_available,
+            dir: CreditSortDirection::Soon,
+        },
         AccountSortRule::Added { on: false, dir: AddedSortDirection::New },
-    ])
+    ]);
+    // Qoder 没有网页 Cookie 时就算旧设置里勾了到期规则也不该继续生效：
+    // 所有账号都没有 expireAt，规则只会显示「到期 近→远」却实际回落到手动。
+    // 这里只压有效规则，不改落库配置 —— 之后配置 Cookie 时原设置会自动恢复。
+    if !credit_available {
+        for rule in &mut rules {
+            if let AccountSortRule::Credit { on, .. } = rule {
+                *on = false;
+            }
+        }
+    }
+    rules
 }
 
 pub fn manual_groups(accounts: &[Value]) -> Vec<(String, Vec<Value>)> {
@@ -108,7 +126,17 @@ pub fn sorting(accounts: &[Value], now: i64) -> AccountSorting {
     let facts = credit_slot().lock().map(|facts| facts.clone()).unwrap_or_default();
     for (provider, mut members) in manual_groups(accounts) {
         let credit_supported = supports_credit_expiry(&provider);
-        let rules = rules_for(&provider, &configured);
+        // Qoder 的到期数据依赖账号级网页 Cookie。组内没有任何账号配置 Cookie 时，
+        // 不要把「最快到期优先」当成默认/有效规则；其他家没有这个账号级前提，
+        // 保持原行为（查一次余额后自然有数据）。
+        let credit_available = if matches!(provider.as_str(), "qoder" | "qoder-intl") {
+            members.iter().any(|account| {
+                account.get("hasWebCookie").and_then(Value::as_bool) == Some(true)
+            })
+        } else {
+            true
+        };
+        let rules = rules_for(&provider, &configured, credit_available);
         for account in &members {
             if let Some(id) = routing::account_id(account) {
                 let expiry = facts.get(id).and_then(|expiries| expiries.iter().find(|expiry| **expiry > now)).copied();

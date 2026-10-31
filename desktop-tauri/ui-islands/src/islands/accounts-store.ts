@@ -5,8 +5,8 @@ import {
   type HiddenAccountProvider, type HiddenAccountsSummary,
 } from './accounts-shared'
 import {
-  accountGroups, filterCounts, matchesFilter, positionMap, providerSummaries,
-  defaultGroupSortRules,
+  accountGroups, filterCounts, matchesFilter, positionMap, providerOf, providerSummaries,
+  defaultGroupSortRules, supportsCreditExpiry,
   type AccountFilter, type AccountGroup, type GroupSortRule, type TokenUsageLookup, type UsageLookup,
 } from './accounts-domain'
 
@@ -289,15 +289,31 @@ export function groupView(
   return { groups, allGroups }
 }
 
-/** 已保存的选择优先；未配置的家按当前申报能力生成默认规则。 */
+/**
+ * 这一家此刻是否有「积分到期时间」的排序依据。
+ *
+ * Qoder 的到期数据依赖账号级网页 Cookie；组内一个 Cookie 都没有时，
+ * 不能让默认规则显示成「到期 近→远」。其他家没有这个账号级前提，保持原行为。
+ */
+function creditAvailableForProvider(provider: string): boolean {
+  if (!supportsCreditExpiry(provider)) return false
+  if (provider !== 'qoder' && provider !== 'qoder-intl') return true
+  return allAccounts().some(account => providerOf(account) === provider && account.hasWebCookie === true)
+}
+
+/** 已保存的选择优先；未配置的家按当前申报能力和账号前提生成默认规则。 */
 export function groupSortRules(provider: string): GroupSortRule[] {
   const effective = store.sorting?.rules[provider] || snapshot()?.sorting?.rules[provider]
   const saved = effective || store.groupSort[provider]
+  const creditAvailable = creditAvailableForProvider(provider)
   if (saved) {
-    const rules = saved.map(rule => ({ ...rule }))
-    return [...rules, ...defaultGroupSortRules(provider).filter(rule => !rules.some(current => current.key === rule.key)).map(rule => ({ ...rule, on: false }))]
+    // 只压有效视图，不改落库配置：之后配置网页 Cookie，旧选择会自动恢复。
+    const rules = saved.map(rule => (
+      rule.key === 'credit' && !creditAvailable ? { ...rule, on: false } : { ...rule }
+    ))
+    return [...rules, ...defaultGroupSortRules(provider, creditAvailable).filter(rule => !rules.some(current => current.key === rule.key)).map(rule => ({ ...rule, on: false }))]
   }
-  return defaultGroupSortRules(provider)
+  return defaultGroupSortRules(provider, creditAvailable)
 }
 
 /** 这一家有没有**显式改过**规则（设置弹窗据此决定「恢复默认」是否可点） */
