@@ -352,6 +352,249 @@
   --ui-focus-ring: 0 0 0 3px oklch(0.623 0.206 255.3 / 30%);
 }
 
+/* ─── 枫叶·白（maple-light）─────────────────────────────
+   暖米白底 + 陶红强调的固定浅色色板。与「浅色」的区别只在色相：
+   底色偏暖（米白而非冷灰），主色是陶红而非品牌蓝，语义色全部往暖里调，
+   避免蓝绿冷色打断整体暖调。明暗固定，不随系统变化。
+
+   ⚠ 这套与下面的「枫叶·黑」逐项对应，改一处务必对照另一处。 */
+:root[data-theme='maple-light'] {
+  --ui-radius: 0.625rem;
+  --ui-font-sans: 'Noto Sans SC', 'Segoe UI Variable Display', 'Segoe UI',
+    'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, sans-serif;
+  --ui-font-mono: 'Cascadia Mono', 'Cascadia Code', Consolas, 'Courier New', monospace;
+
+  --ui-background: oklch(96.13% 0.0111 89.72);
+  --ui-foreground: oklch(23.57% 0.0024 67.71);
+  --ui-card: oklch(98.48% 0.0054 95.1);
+  --ui-card-foreground: oklch(23.57% 0.0024 67.71);
+  --ui-popover: oklch(100% 0 89.88);
+  --ui-popover-foreground: oklch(23.57% 0.0024 67.71);
+  --ui-primary: oklch(67.24% 0.1308 38.76);
+  --ui-primary-foreground: oklch(100% 0 89.88);
+  --ui-secondary: oklch(93.22% 0.0144 84.58);
+  --ui-secondary-foreground: oklch(51.32% 0.077 52.26);
+  --ui-muted: oklch(94.67% 0.0127 86.83);
+  --ui-muted-foreground: oklch(52.52% 0.0147 86.87);
+  --ui-accent: color-mix(in srgb, var(--ui-primary) 12%, oklch(98.48% 0.0054 95.1));
+  --ui-accent-foreground: oklch(23.57% 0.0024 67.71);
+
+  --ui-destructive: oklch(53.49% 0.152 33.68);
+  --ui-destructive-foreground: oklch(100% 0 89.88);
+  --ui-success: oklch(55.72% 0.0741 158.03);
+  --ui-success-foreground: oklch(100% 0 89.88);
+  --ui-warning: oklch(67.08% 0.1233 76.49);
+  --ui-warning-foreground: oklch(23.57% 0.0024 67.71);
+  --ui-info: oklch(56.79% 0.06 248.93);
+  --ui-info-foreground: oklch(100% 0 89.88);
+  --ui-neutral: oklch(72.14% 0.0176 79.32);
+  --ui-neutral-foreground: oklch(23.57% 0.0024 67.71);
+  --ui-border: color-mix(in srgb, oklch(23.57% 0.0024 67.71) 8%, transparent);
+  --ui-input: oklch(90.76% 0.0157 86.43);
+  --ui-ring: oklch(67.24% 0.1308 38.76);
+
+  --ui-primary-soft: color-mix(in srgb, var(--ui-primary) 12%, oklch(98.48% 0.0054 95.1));
+  --ui-primary-fg: oklch(53.33% 0.1291 40.28);
+  --ui-primary-bd: color-mix(in srgb, var(--ui-primary) 32%, oklch(98.48% 0.0054 95.1));
+  --ui-primary-tint: color-mix(in srgb, var(--ui-primary) 16%, transparent);
+  --ui-primary-hover: oklch(60.81% 0.1339 40.52);
+  --ui-primary-on: color-mix(in srgb, var(--ui-surface) 8%, white);
+  --ui-surface: oklch(98.48% 0.0054 95.1);
+  --ui-surface-2: oklch(94.97% 0.0127 86.83);
+  --ui-surface-3: oklch(92.89% 0.0157 86.43);
+  --ui-surface-inset: oklch(91.95% 0.0169 88);
+  --ui-raised: oklch(100% 0 89.88);
+  --ui-border-strong: color-mix(in srgb, oklch(23.57% 0.0024 67.71) 14%, transparent);
+  --ui-hairline: color-mix(in srgb, oklch(23.57% 0.0024 67.71) 6%, transparent);
+  --ui-mask: color-mix(in srgb, oklch(27.6% 0.0081 59.33) 46%, transparent);
+
+  --ui-destructive-soft: color-mix(in srgb, var(--ui-destructive) 12%, oklch(98.48% 0.0054 95.1));
+  --ui-destructive-bd: color-mix(in srgb, var(--ui-destructive) 30%, oklch(98.48% 0.0054 95.1));
+  --ui-destructive-hover: color-mix(in srgb, var(--ui-destructive) 22%, var(--ui-surface));
+  --ui-success-soft: color-mix(in srgb, var(--ui-success) 12%, oklch(98.48% 0.0054 95.1));
+  --ui-success-bd: color-mix(in srgb, var(--ui-success) 30%, oklch(98.48% 0.0054 95.1));
+  --ui-warning-soft: color-mix(in srgb, var(--ui-warning) 14%, oklch(98.48% 0.0054 95.1));
+  --ui-warning-bd: color-mix(in srgb, var(--ui-warning) 32%, oklch(98.48% 0.0054 95.1));
+  --ui-info-soft: color-mix(in srgb, var(--ui-info) 12%, oklch(98.48% 0.0054 95.1));
+  --ui-info-bd: color-mix(in srgb, var(--ui-info) 30%, oklch(98.48% 0.0054 95.1));
+  --ui-cn: oklch(53.49% 0.152 33.68);
+  --ui-cn-soft: color-mix(in srgb, var(--ui-cn) 12%, oklch(98.48% 0.0054 95.1));
+  --ui-cn-bd: color-mix(in srgb, var(--ui-cn) 30%, oklch(98.48% 0.0054 95.1));
+  --ui-intl: oklch(50.94% 0.0807 296.03);
+  --ui-intl-soft: color-mix(in srgb, var(--ui-intl) 12%, oklch(98.48% 0.0054 95.1));
+  --ui-intl-bd: color-mix(in srgb, var(--ui-intl) 30%, oklch(98.48% 0.0054 95.1));
+  --ui-sensitive: oklch(47.84% 0.0817 340.78);
+  --ui-sensitive-soft: color-mix(in srgb, var(--ui-sensitive) 14%, oklch(98.48% 0.0054 95.1));
+  --ui-sensitive-bd: color-mix(in srgb, var(--ui-sensitive) 32%, oklch(98.48% 0.0054 95.1));
+
+  --ui-control-bg: oklch(92.06% 0.0161 82.79);
+  --ui-control-hover: oklch(89.34% 0.0191 83.06);
+  --ui-control-border: color-mix(in srgb, oklch(23.57% 0.0024 67.71) 10%, transparent);
+  --ui-control-border-hover: color-mix(in srgb, oklch(23.57% 0.0024 67.71) 18%, transparent);
+
+  --ui-text-2: oklch(40.27% 0.0156 86.89);
+  --ui-nav-hover: color-mix(in srgb, oklch(23.57% 0.0024 67.71) 5%, transparent);
+  --ui-sidebar-bg: oklch(93.82% 0.0144 84.58);
+  --ui-sidebar-fg: oklch(40.27% 0.0156 86.89);
+  --ui-sidebar-muted: oklch(62.45% 0.0172 86.45);
+  --ui-rail-bg: oklch(94.97% 0.0127 86.83);
+  --ui-nav-selected-bg: oklch(89.09% 0.0281 76.19);
+  --ui-nav-selected-border: oklch(84.27% 0.0367 71.36);
+  --ui-nav-selected-fg: oklch(49.11% 0.0947 46.26);
+  --ui-nav-count-bg: oklch(89.76% 0.0298 75.67);
+
+  --ui-table-bg: var(--ui-surface);
+  --ui-table-head-bg: var(--ui-surface);
+  --ui-row-hover: var(--ui-surface-2);
+
+  --ui-chart-1: oklch(67.24% 0.1308 38.76);
+  --ui-chart-2: oklch(73.11% 0.0672 69.5);
+  --ui-chart-3: oklch(70.45% 0.0488 142.14);
+  --ui-chart-4: oklch(67.53% 0.0535 345.7);
+  --ui-chart-5: oklch(65.7% 0.0383 247.11);
+
+  --ui-sidebar: var(--ui-sidebar-bg);
+  --ui-sidebar-foreground: var(--ui-sidebar-fg);
+  --ui-sidebar-primary: oklch(67.24% 0.1308 38.76);
+  --ui-sidebar-primary-foreground: oklch(100% 0 89.88);
+  --ui-sidebar-accent: color-mix(in srgb, var(--ui-primary) 12%, oklch(93.82% 0.0144 84.58));
+  --ui-sidebar-accent-foreground: oklch(49.11% 0.0947 46.26);
+  --ui-sidebar-border: color-mix(in srgb, oklch(23.57% 0.0024 67.71) 7%, transparent);
+  --ui-sidebar-ring: oklch(67.24% 0.1308 38.76);
+
+  --ui-skeleton-base: oklch(93.82% 0.0144 84.58);
+  --ui-skeleton-highlight: oklch(97.05% 0.0098 87.47);
+
+  --ui-shadow-1: 0 1px 2px oklch(23.57% 0.0024 67.71 / 5%);
+  --ui-shadow-2: 0 1px 3px oklch(23.57% 0.0024 67.71 / 6%),
+    0 10px 26px -16px oklch(23.57% 0.0024 67.71 / 18%);
+  --ui-shadow-3: 0 2px 8px oklch(23.57% 0.0024 67.71 / 7%),
+    0 22px 54px -22px oklch(23.57% 0.0024 67.71 / 22%);
+  --ui-glow: 0 1px 2px oklch(23.57% 0.0024 67.71 / 6%),
+    0 8px 20px -14px oklch(67.24% 0.1308 38.76 / 40%);
+  --ui-focus-ring: 0 0 0 3px color-mix(in srgb, var(--ui-primary) 28%, transparent);
+}
+
+/* ─── 枫叶·黑（maple-dark）─────────────────────────────
+   暖石墨底 + 同一抹陶红的固定深色色板。底色不是纯黑，而是带一点暖色相的
+   深灰 —— 纯黑配暖色强调会显得脏，也和暖调的描边、阴影对不上。
+
+   ⚠ 与上面的「枫叶·白」逐项对应，改一处务必对照另一处。 */
+:root[data-theme='maple-dark'] {
+  --ui-radius: 0.625rem;
+  --ui-font-sans: 'Noto Sans SC', 'Segoe UI Variable Display', 'Segoe UI',
+    'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, sans-serif;
+  --ui-font-mono: 'Cascadia Mono', 'Cascadia Code', Consolas, 'Courier New', monospace;
+
+  --ui-background: oklch(21.38% 0.0042 84.59);
+  --ui-foreground: oklch(93.72% 0.0112 89.73);
+  --ui-card: oklch(25.23% 0.004 84.58);
+  --ui-card-foreground: oklch(93.72% 0.0112 89.73);
+  --ui-popover: oklch(27.79% 0.0062 78.23);
+  --ui-popover-foreground: oklch(93.72% 0.0112 89.73);
+  --ui-primary: oklch(67.24% 0.1308 38.76);
+  --ui-primary-foreground: oklch(100% 0 89.88);
+  --ui-secondary: oklch(29.08% 0.0084 75.25);
+  --ui-secondary-foreground: oklch(88.21% 0.0354 57.57);
+  --ui-muted: oklch(27.41% 0.0047 67.63);
+  --ui-muted-foreground: oklch(71.38% 0.0184 84.59);
+  --ui-accent: var(--ui-primary);
+  --ui-accent-foreground: oklch(100% 0 89.88);
+
+  --ui-destructive: oklch(68.2% 0.1415 34.55);
+  --ui-destructive-foreground: oklch(21.38% 0.0042 84.59);
+  --ui-success: oklch(69.69% 0.088 155.51);
+  --ui-success-foreground: oklch(21.38% 0.0042 84.59);
+  --ui-warning: oklch(77.06% 0.111 77.17);
+  --ui-warning-foreground: oklch(21.38% 0.0042 84.59);
+  --ui-info: oklch(69.22% 0.0586 247.07);
+  --ui-info-foreground: oklch(21.38% 0.0042 84.59);
+  --ui-neutral: oklch(62.45% 0.0172 86.45);
+  --ui-neutral-foreground: oklch(21.38% 0.0042 84.59);
+  --ui-border: color-mix(in srgb, oklch(93.72% 0.0112 89.73) 10%, transparent);
+  --ui-input: color-mix(in srgb, oklch(93.72% 0.0112 89.73) 17%, transparent);
+  --ui-ring: oklch(67.24% 0.1308 38.76);
+
+  --ui-primary-soft: color-mix(in srgb, var(--ui-primary) 16%, transparent);
+  --ui-primary-fg: oklch(79.04% 0.0879 44.67);
+  --ui-primary-bd: color-mix(in srgb, var(--ui-primary) 38%, transparent);
+  --ui-primary-tint: color-mix(in srgb, var(--ui-primary) 16%, transparent);
+  --ui-primary-hover: oklch(72.99% 0.1154 40.87);
+  --ui-primary-on: color-mix(in srgb, var(--ui-surface) 8%, white);
+  --ui-surface: oklch(25.23% 0.004 84.58);
+  --ui-surface-2: oklch(28.2% 0.0061 78.23);
+  --ui-surface-3: oklch(29.89% 0.0083 75.26);
+  --ui-surface-inset: oklch(23.54% 0.0041 84.59);
+  --ui-raised: oklch(29.08% 0.0084 75.25);
+  --ui-border-strong: color-mix(in srgb, oklch(93.72% 0.0112 89.73) 17%, transparent);
+  --ui-hairline: color-mix(in srgb, oklch(93.72% 0.0112 89.73) 7%, transparent);
+  --ui-mask: color-mix(in srgb, black 55%, transparent);
+
+  --ui-destructive-soft: color-mix(in srgb, var(--ui-destructive) 16%, transparent);
+  --ui-destructive-bd: color-mix(in srgb, var(--ui-destructive) 34%, transparent);
+  --ui-destructive-hover: color-mix(in srgb, var(--ui-destructive) 22%, var(--ui-surface));
+  --ui-success-soft: color-mix(in srgb, var(--ui-success) 16%, transparent);
+  --ui-success-bd: color-mix(in srgb, var(--ui-success) 34%, transparent);
+  --ui-warning-soft: color-mix(in srgb, var(--ui-warning) 16%, transparent);
+  --ui-warning-bd: color-mix(in srgb, var(--ui-warning) 34%, transparent);
+  --ui-info-soft: color-mix(in srgb, var(--ui-info) 16%, transparent);
+  --ui-info-bd: color-mix(in srgb, var(--ui-info) 34%, transparent);
+  --ui-cn: oklch(68.2% 0.1415 34.55);
+  --ui-cn-soft: color-mix(in srgb, var(--ui-cn) 16%, transparent);
+  --ui-cn-bd: color-mix(in srgb, var(--ui-cn) 34%, transparent);
+  --ui-intl: oklch(70.6% 0.0755 299.74);
+  --ui-intl-soft: color-mix(in srgb, var(--ui-intl) 16%, transparent);
+  --ui-intl-bd: color-mix(in srgb, var(--ui-intl) 34%, transparent);
+  --ui-sensitive: oklch(74.38% 0.0738 333.23);
+  --ui-sensitive-soft: color-mix(in srgb, var(--ui-sensitive) 18%, transparent);
+  --ui-sensitive-bd: color-mix(in srgb, var(--ui-sensitive) 36%, transparent);
+
+  --ui-control-bg: oklch(29.08% 0.0084 75.25);
+  --ui-control-hover: oklch(32.24% 0.0096 80.66);
+  --ui-control-border: color-mix(in srgb, oklch(93.72% 0.0112 89.73) 12%, transparent);
+  --ui-control-border-hover: color-mix(in srgb, oklch(93.72% 0.0112 89.73) 20%, transparent);
+
+  --ui-text-2: oklch(82.13% 0.0161 86.44);
+  --ui-nav-hover: color-mix(in srgb, oklch(93.72% 0.0112 89.73) 6%, transparent);
+  --ui-sidebar-bg: oklch(23.96% 0.004 84.59);
+  --ui-sidebar-fg: oklch(82.13% 0.0161 86.44);
+  --ui-sidebar-muted: oklch(62.45% 0.0172 86.45);
+  --ui-rail-bg: oklch(26.1% 0.0079 84.59);
+  --ui-nav-selected-bg: oklch(31.32% 0.0236 53.22);
+  --ui-nav-selected-border: oklch(37.44% 0.0354 54.38);
+  --ui-nav-selected-fg: oklch(84.98% 0.0632 52.57);
+  --ui-nav-count-bg: oklch(34.49% 0.0298 51.89);
+
+  --ui-table-bg: var(--ui-surface);
+  --ui-table-head-bg: var(--ui-surface);
+  --ui-row-hover: var(--ui-surface-2);
+
+  --ui-chart-1: oklch(67.24% 0.1308 38.76);
+  --ui-chart-2: oklch(77.88% 0.0654 68.94);
+  --ui-chart-3: oklch(76.03% 0.0515 142.35);
+  --ui-chart-4: oklch(73.76% 0.0533 346.25);
+  --ui-chart-5: oklch(71.42% 0.039 244.61);
+
+  --ui-sidebar: var(--ui-sidebar-bg);
+  --ui-sidebar-foreground: var(--ui-sidebar-fg);
+  --ui-sidebar-primary: oklch(67.24% 0.1308 38.76);
+  --ui-sidebar-primary-foreground: oklch(100% 0 89.88);
+  --ui-sidebar-accent: color-mix(in srgb, oklch(93.72% 0.0112 89.73) 9%, transparent);
+  --ui-sidebar-accent-foreground: var(--ui-primary);
+  --ui-sidebar-border: color-mix(in srgb, oklch(93.72% 0.0112 89.73) 8%, transparent);
+  --ui-sidebar-ring: oklch(67.24% 0.1308 38.76);
+
+  --ui-skeleton-base: oklch(29.08% 0.0084 75.25);
+  --ui-skeleton-highlight: oklch(33.81% 0.0095 80.67);
+
+  --ui-shadow-1: 0 1px 2px oklch(0 0 0 / 40%);
+  --ui-shadow-2: 0 1px 2px oklch(0 0 0 / 40%), 0 12px 28px -18px oklch(0 0 0 / 80%);
+  --ui-shadow-3: 0 2px 10px oklch(0 0 0 / 45%), 0 26px 60px -24px oklch(0 0 0 / 85%);
+  --ui-glow: 0 1px 2px oklch(0 0 0 / 40%),
+    0 10px 22px -14px oklch(67.24% 0.1308 38.76 / 50%);
+  --ui-focus-ring: 0 0 0 3px color-mix(in srgb, var(--ui-primary) 32%, transparent);
+}
+
 /* system 模式跟随系统深浅，与 ui/css/tokens.css 同款写法。
 
    ⚠️ 下面这一块的取值必须与上面 :root[data-theme='dark'] **逐字一致**，只换选择器。

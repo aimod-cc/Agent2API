@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { flushSync } from 'react-dom'
 import { createRoot } from 'react-dom/client'
-import { AppFrame, Badge, BadgeDot, Button, Empty, NavList, NavItem, PageHeader, SegmentedControl, Sheet, SheetClose, SheetContent, Sidebar, SidebarContent, SidebarFooter, SidebarGroupLabel, SidebarHeader, Toaster, toastManager, useMediaQuery } from '@ui'
+import { AppFrame, Badge, BadgeDot, Button, Empty, NavList, NavItem, PageHeader, Sheet, SheetClose, SheetContent, Sidebar, SidebarContent, SidebarFooter, SidebarGroupLabel, SidebarHeader, Toaster, toastManager, useMediaQuery } from '@ui'
 import { t } from './i18n'
 
 type Menu = { key: string; label: string; icon: string }
@@ -11,7 +11,6 @@ type ShellApi = {
   sidebar(groups: Group[]): void
   page(page: string, label: string): void
   status(items: Status[], title?: string): void
-  theme(mode: string): void
   closeNavigation(): void
   toast(message: string, kind?: string): void
 }
@@ -26,7 +25,6 @@ const host = () => window as unknown as HostWindow
 let groups: Group[] = []
 let page = 'overview'
 let label = t('报表')
-let mode = localStorage.getItem('workbuddy-desktop-theme') || 'system'
 let status: Status[] = []
 let title = ''
 const listeners = new Set<() => void>()
@@ -52,13 +50,6 @@ function Navigation() {
       })}
     </React.Fragment>) : <Empty className='nav-empty px-2 py-3 text-[11px]'>{t('侧边栏没有显示任何菜单。到「设置 → 显示 → 侧边栏菜单」里打开需要的项。')}</Empty>}
   </>
-}
-
-function ThemeControl() {
-  React.useSyncExternalStore(listener => { listeners.add(listener); return () => listeners.delete(listener) }, () => revision)
-  return <SegmentedControl className='w-full' value={mode} aria-label={t('显示模式')} options={[
-    { value: 'system', label: t('跟随系统') }, { value: 'light', label: t('浅色') }, { value: 'dark', label: t('深色') },
-  ]} onValueChange={value => host().wbApp?.applyTheme(value)} />
 }
 
 function TopbarStatus() {
@@ -94,7 +85,6 @@ function Frame() {
     }}><Navigation /></NavList>
     <SidebarFooter className='sidebar-foot'>
       <div className='sidebar-status' id='sidebar-status' title={t('本地网关监听状态')} />
-      <div id='theme-switch'><ThemeControl /></div>
     </SidebarFooter>
   </Sidebar>
   return <AppFrame className='shell' data-navigation-open={open ? 'true' : undefined}>
@@ -130,7 +120,6 @@ function install() {
     sidebar(next) { groups = next; flushSync(publish) },
     page(next, text) { page = next; label = text; publish() },
     status(next, text = '') { status = next; title = text; publish() },
-    theme(next) { mode = next; publish() },
     closeNavigation() { window.dispatchEvent(new Event('wb:navigation-close')) },
     toast(message, kind = 'ok') { toastManager.add({ id: 'desktop-feedback', title: message, type: kind === 'err' ? 'error' : kind === 'warn' ? 'warning' : 'success', timeout: 3500 }) },
   }

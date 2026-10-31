@@ -534,8 +534,11 @@ export const SETTINGS_CAT_KEY = 'workbuddy-desktop-settings-cat'
  *     WebView 颜色偏好的问题（那段长注释在 app.js）；
  *   · 缩放要走 WebView 层（壳命令 set_zoom），不是页面自己能做完的事。
  * 本页只做两件事：**读** localStorage 把控件摆到当前值上；改动时调
- * `wbApp.applyTheme / applyZoom`，再靠 'wb:theme' / 'wb:zoom' 事件跟随 ——
- * 侧边栏的主题三键与这里的档位是同一个设置的两个入口，必须互相同步。
+ * `wbApp.applyTheme / applyZoom`，再靠 'wb:theme' / 'wb:zoom' 事件跟随。
+ *
+ * 主题只有本页这一个入口：侧边栏底部那组三键已移除（三个键挤在侧栏最底、
+ * 与页面内容无关的位置，且与设置页是同一份设置的两套控件，同步逻辑白占
+ * 复杂度）。`wb:theme` 事件保留，因为插件页与设置页自身仍需要它。
  *
  * 键名与 app.js 里的字面量是同一份契约（两侧各写一份，改一处必然漂）；
  * 事件名同理（app.js 派发，本页监听）。
@@ -557,18 +560,32 @@ export const ZOOM_PERCENTS: number[] = Array.from(
 )
 
 /**
- * 显示模式三档：value 与 app.js / `data-theme` 的取值逐字一致（system / light / dark）。
- * 文案取侧边栏那三个按钮的 title（跟随设备 → 跟随系统，是同一件事的两种叫法，
- * 这里用了更书面的一种）。
+ * 显示模式五档：前三档是裸配色，后两档是「枫叶」联名主题。
+ *
+ * value 与 app.js / `data-theme` 的取值逐字一致 —— 它们整体就是 html 上
+ * `data-theme` 属性的取值，CSS 侧按选择器分块（见 ui-kit/styles/theme.css）。
+ * 「枫叶·白 / 枫叶·黑」不是深浅模式，而是两套**独立色板**：它们各自固定
+ * 明暗（白 / 黑），不随系统变 —— 名字里的白黑就是它们的样子，选它即钉死。
+ *
+ * ⚠ 新增一档要同时改四处，缺一处就出现「能选但没效果」或「选完丢设置」：
+ *   1. 这里（控件选项与类型）
+ *   2. ui-kit/styles/theme.css（令牌块）
+ *   3. ui/app.js 与 ui/index.html 的 `applyTheme`（决定是否跟随系统）
+ *   4. i18n 词典（settings.json 的键，五语言）
  */
 export const THEME_MODES = [
   { value: 'system', label: t('跟随系统') },
   { value: 'light', label: t('浅色') },
   { value: 'dark', label: t('深色') },
+  { value: 'maple-light', label: t('枫叶·白') },
+  { value: 'maple-dark', label: t('枫叶·黑') },
 ] as const
 
 /** 显示模式取值（SegmentedControl 的泛型参数要用它，免得在视图里转字面量联合） */
 export type ThemeMode = (typeof THEME_MODES)[number]['value']
+
+/** 合法取值集合：读 localStorage 时逐项校验，避免手改存储后把非法值塞进 data-theme */
+export const THEME_MODE_VALUES: readonly ThemeMode[] = THEME_MODES.map(item => item.value)
 
 /**
  * 语言选项已迁到运行时：界面语言的可选列表由 ui/i18n.js 暴露的 `wbI18n.LOCALES`
@@ -580,7 +597,7 @@ export type ThemeMode = (typeof THEME_MODES)[number]['value']
 export function readThemeMode(): ThemeMode {
   try {
     const mode = localStorage.getItem(THEME_KEY)
-    return mode === 'light' || mode === 'dark' ? mode : 'system'
+    return THEME_MODE_VALUES.includes(mode as ThemeMode) ? (mode as ThemeMode) : 'system'
   } catch {
     return 'system'
   }
@@ -821,7 +838,7 @@ export function formatCount(value: unknown): string {
 
 /** 标题右侧问号（`[data-tip]`）的说明全文：desktop-tooltip.tsx 仍在页面上跑，照旧服务这些元素 */
 export const TIPS = {
-  displayTheme: t('控制界面的深浅色，与左侧边栏底部的三个主题按钮是同一个设置（改哪一处，另一处立刻跟上）。「跟随系统」会随操作系统当前的浅色 / 深色自动切换，并在系统主题变化时即时跟上；选「浅色」或「深色」则把界面固定在该模式，不再随系统变化。窗口标题栏的深浅色会一并同步，不会出现深色界面配一条浅色标题栏的情况。'),
+  displayTheme: t('控制界面的配色。「跟随系统」随操作系统的浅色 / 深色自动切换；「浅色」「深色」把界面固定在该模式；「枫叶·白」「枫叶·黑」是两套暖色独立色板（暖米白 / 暖石墨底配陶红强调），各自固定明暗、不随系统变化。窗口标题栏的深浅色会一并同步，不会出现深色界面配一条浅色标题栏。'),
   displayZoom: t('等比放大或缩小整个界面（文字、控件、间距一起变），效果与浏览器按 Ctrl +/- 相同：80%–130%、5% 一档。窗口本身不缩放，变的是页面内容的显示比例，设置立即生效并记住，下次启动直接按这个比例打开。放得越大可视范围越小，窗口较窄或表格较宽时不建议调得太大。'),
   displayLanguage: t('界面语言。可选简体中文、繁體中文、English、日本語、한국어、Português (Brasil)，或「跟随系统」（按浏览器 / 系统的语言列表自动选）。切换后整页立即刷新；该偏好只存在本机（localStorage），不影响账号、密钥与转发。'),
   accountList: t('账号页表格的两项显示偏好，只存在本机（localStorage），不影响账号数据与转发。「积分合计只统计当前筛选出来的账号」：账号页每一家的分组带右侧有一枚「可用合计」，默认按整组求和 —— 不受筛选、搜索影响，被筛掉的账号也计入（余额是资产，禁用也只表示不参与转发，额度仍在账上）。打开这一项后改为只累加当前可见的行：例如筛出 1 个 100 积分的账号，合计就是 100，而不是同组两个账号之和 1,000。分页不参与这个口径 —— 翻页看的是同一份结果的不同屏，合计不随页码变化。「隐藏账号名」与表头「账号」旁边那颗眼睛是同一个开关：打开后账号列的名字整体显示成星号，适合截图分享时遮挡账号。'),
@@ -914,6 +931,8 @@ export const STATES = {
   themeSystem: t('当前跟随操作系统的深浅色设置，系统切换时界面会自动跟上。'),
   themeLight: t('当前固定为浅色模式，不随系统变化。'),
   themeDark: t('当前固定为深色模式，不随系统变化。'),
+  themeMapleLight: t('枫叶·白：暖米白底配陶红强调的固定浅色主题，不随系统变化。'),
+  themeMapleDark: t('枫叶·黑：暖石墨底配同一抹陶红的固定深色主题，不随系统变化。'),
   zoomWeb: t('网页端的界面缩放由浏览器自己控制（Ctrl + / Ctrl -，或浏览器菜单里的缩放），此项不可调。'),
   zoomDefault: t('当前按 100% 显示（默认比例）。'),
   languageHint: t('界面语言只保存在本机（localStorage）。切换后整页立即刷新，不影响账号、密钥与转发。'),

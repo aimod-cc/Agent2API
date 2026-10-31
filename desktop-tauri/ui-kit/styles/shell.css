@@ -190,26 +190,7 @@ body.has-titlebar .shell {
 @media (min-width: 768px) and (max-width: 900px) {
   .nav-item { justify-content: center; padding: 9px 0; }
   .nav-item [data-slot='nav-item-label'], .nav-item .count { display: none; }
-  #theme-switch [data-slot='segmented-control'] { flex-direction: column; }
 }
 .nav-item .ico svg { display: block; }
 .panel-fold:not([data-open]) > .panel-head { border-bottom: 0; }
-}
-
-@layer utilities {
-  #theme-switch [data-slot='segmented-item'] {
-    flex: 1 1 0;
-    min-width: 0;
-    min-height: 24px;
-    height: auto;
-    justify-content: center;
-    padding: 3px 4px;
-    text-align: center;
-    white-space: normal;
-    line-height: 1.4;
-  }
-
-  @media (min-width: 768px) and (max-width: 900px) {
-    #theme-switch [data-slot='segmented-item'] { flex: none; }
-  }
 }
