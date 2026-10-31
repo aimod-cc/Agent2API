@@ -25,6 +25,7 @@ impl Host {
     }
 
     pub async fn shutdown(&self) {
+        self.activity.retire();
         let _serial = self.starting.lock().await;
         let scoped = self.scoped_runtime_package();
         let run = {
@@ -282,8 +283,8 @@ impl Host {
 
     fn fail_pending(&self, message: &str) {
         if let Ok(mut pending) = self.pending.lock() {
-            for (_, sender) in pending.drain() {
-                let _ = sender.send(Err(proto::WireError::with_code(message, proto::WireError::INTERNAL)));
+            for (_, call) in pending.drain() {
+                let _ = call.tx.send(Err(proto::WireError::with_code(message, proto::WireError::INTERNAL)));
             }
         }
         if let Ok(mut streams) = self.streams.lock() {

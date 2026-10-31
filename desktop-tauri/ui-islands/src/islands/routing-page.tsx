@@ -12,6 +12,7 @@ import {
 } from './routing-settings'
 import { RoutingTracePage } from './routing-trace-page'
 import { RoutingStickyDialog } from './routing-sticky'
+import { GlobalRoutingScopeDialog } from './routing-scope-dialog'
 import {
   accountOrder, accountOrderLocked, accountOrderRules, addModel, cloneProfile, loadWorkspace, moveAccount, patch, saveProfile,
   selectModel, snapshot, subscribe,
@@ -19,7 +20,7 @@ import {
 import { IconButton, RouteIcon } from './routing-ui'
 import { host, type ReplayRow } from './routing-types'
 
-type Modal = { kind: 'settings' | 'sticky' | 'add-model' | 'add-provider' }
+type Modal = { kind: 'settings' | 'sticky' | 'add-model' | 'add-provider' | 'scope' }
   | { kind: 'provider' | 'sort'; id: string }
   | { kind: 'account'; id: string }
 let requestTrace: ((row?: ReplayRow | null) => void) | undefined
@@ -94,10 +95,11 @@ export function RoutingPage() {
         <div className='routing-map-head'>
           <div className='routing-map-title'>
             <b>{state.model || t('全局配置')}</b>
-            <Badge variant='brand' shape='tag'>{state.model ? workspace?.customized ? t('独立配置') : t('继承全局') : workspace?.globalCustomized ? t('全局配置') : t('默认路由')}</Badge>
+            <Badge variant='brand' shape='tag'>{state.model ? workspace?.customized ? t('独立配置') : t('继承全局') : workspace?.profile.providerScope === 'all' ? t('自动参与') : t('指定提供商')}</Badge>
             {state.busy ? <span className='routing-save-state'><Spinner className='size-3' />{t('保存中…')}</span> : null}
           </div>
           <div className='routing-map-actions'>
+            {!state.model ? <Button variant='outline' size='sm' disabled={!workspace || state.busy} onClick={() => setModal({ kind: 'scope' })}>{t('参与范围')}</Button> : null}
             {state.model && !workspace?.customized ? <Button variant='outline' size='sm' disabled={!workspace || state.busy} onClick={() => void saveProfile(cloneProfile())}>{t('创建独立配置')}</Button> : null}
             <Button variant='outline' size='sm' disabled={!workspace} onClick={openReplay}>
               <RouteIcon name='requests' /><span>{t('请求跟踪')}</span>
@@ -113,6 +115,10 @@ export function RoutingPage() {
             <Button variant='ghost' size='sm' className={cn(state.model && 'text-destructive')} disabled={!workspace || state.busy || !(state.model ? workspace.customized : workspace.globalCustomized)} onClick={() => void reset()}>{state.model ? t('删除') : t('恢复默认')}</Button>
           </div>
         </div>
+        {workspace && !state.model && workspace.profile.providerScope !== 'all' ? <div className='flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-4 py-2 text-xs'>
+          <span className='min-w-0 flex-1 text-muted-foreground'>{t('当前全局路由使用固定参与名单，新增提供商不会自动加入。')}</span>
+          <Button variant='outline' size='sm' disabled={state.busy} onClick={() => setModal({ kind: 'scope' })}>{t('改为自动参与')}</Button>
+        </div> : null}
         {workspace ? <RoutingCanvas workspace={workspace} search={state.search} zoom={state.zoom} selected={state.selectedProvider}
           onAccount={id => setModal({ kind: 'account', id })} onProvider={id => setModal({ kind: 'provider', id })}
           onSettings={() => setModal({ kind: 'settings' })} onAddProvider={() => setModal({ kind: 'add-provider' })}
@@ -123,6 +129,7 @@ export function RoutingPage() {
     </div>
     </div>
     <div className='routing-trace-view' hidden={mode !== 'trace'}><RoutingTracePage active={mode === 'trace'} initialRow={initialTrace} onConfig={model => { void selectModel(model); setMode('config') }} /></div>
+    {workspace && modal?.kind === 'scope' ? <GlobalRoutingScopeDialog workspace={workspace} onClose={closeModal} /> : null}
     {workspace && modal?.kind === 'settings' ? <RoutingSettingsDialog workspace={workspace} onClose={closeModal} /> : null}
     {workspace && modal?.kind === 'provider' ? <ProviderRoutingDialog key={`${state.model}:${modal.id}`} provider={modal.id} workspace={workspace} onSort={() => setModal({ kind: 'sort', id: modal.id })} onClose={closeModal} /> : null}
     {workspace && modal?.kind === 'sort' ? <GroupSettingsDialog provider={modal.id} onClose={closeModal} /> : null}

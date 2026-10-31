@@ -318,18 +318,30 @@ pub fn image_download_client(
     host: &str,
     addresses: &[std::net::SocketAddr],
 ) -> Result<reqwest::Client, String> {
+    resolved_client(proxy, system_proxy_when_unset, host, addresses)
+}
+
+pub fn resolved_client(
+    proxy: Option<&ResolvedProxy>,
+    system_proxy_when_unset: bool,
+    host: &str,
+    addresses: &[std::net::SocketAddr],
+) -> Result<reqwest::Client, String> {
     let timeouts = crate::server::config::timeout_settings();
     let mut builder = base_builder(&timeouts)
-        .redirect(reqwest::redirect::Policy::none())
-        .resolve_to_addrs(host, addresses);
+        .redirect(reqwest::redirect::Policy::none());
+    if !addresses.is_empty() {
+        builder = builder.resolve_to_addrs(host, addresses);
+    }
     if let Some(proxy) = proxy {
+        if proxy.port.is_none_or(|port| port == 0) { return Err("代理端口无效".to_string()); }
         let parsed = reqwest::Proxy::all(build_proxy_url(proxy))
-            .map_err(|_| "图片下载代理无效".to_string())?;
-        builder = builder.proxy(parsed);
+            .map_err(|_| "代理地址无效".to_string())?;
+        builder = builder.no_proxy().proxy(parsed);
     } else if !system_proxy_when_unset {
         builder = builder.no_proxy();
     }
-    builder.build().map_err(|_| "无法创建图片下载连接".to_string())
+    builder.build().map_err(|_| "无法创建出站连接".to_string())
 }
 
 pub fn client_for_github(proxy: Option<&ResolvedProxy>) -> Result<Arc<reqwest::Client>, String> {

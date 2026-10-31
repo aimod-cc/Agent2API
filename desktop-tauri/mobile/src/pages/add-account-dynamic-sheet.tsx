@@ -129,7 +129,10 @@ function DynamicForm({ provider, label, source, onAdded }: {
     clearCallback()
     setError('')
     void readDynamicMethods(provider, controller.signal).then(result => {
-      if (!controller.signal.aborted) setMethods(parseMethods(result, provider))
+      if (controller.signal.aborted) return
+      const parsed = parseMethods(result, provider)
+      if (provider === 'deepseek-web') parsed.methods = parsed.methods.filter(method => method.type !== 'oauth')
+      setMethods(parsed)
     }).catch(failure => {
       if (controller.signal.aborted) return
       const builtin = source === 'builtin' || provider.endsWith('-subscription')

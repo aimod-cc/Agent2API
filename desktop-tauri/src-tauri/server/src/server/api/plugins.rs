@@ -5,7 +5,6 @@ use axum::response::Response;
 use base64::Engine;
 use serde_json::{json, Value};
 
-use crate::server::core::account_store::plugin_accounts;
 use crate::server::core::plugin_host;
 use crate::server::core::plugin_host::update::MAX_PACK_BYTES;
 use crate::server::errors::management_error;
@@ -71,20 +70,11 @@ pub async fn install(body: Bytes) -> Response {
     }
 }
 
-async fn reload_result(enabled: bool) -> Value {
-    if let Some(store) = plugin_accounts::shared() {
-        plugin_host::reload_host(store).await;
+async fn change_pack(id: &str, change: plugin_host::operations::PackChange) -> Response {
+    match plugin_host::operations::change(id.to_string(), change).await {
+        Ok(result) => ok_json(result),
+        Err(error) => management_error(error.status_code, error.message),
     }
-    let reloaded = plugin_host::list_packs().iter().filter(|pack| pack.enabled)
-        .all(|pack| plugin_host::host_for_pack(&pack.id).is_some_and(|host| host.ready()));
-    let mut result = plugin_host::management_snapshot();
-    result["ok"] = json!(true);
-    result["hostError"] = if enabled && !reloaded {
-        json!("设置已保存，但插件未能启动；请检查日志或重启应用")
-    } else {
-        Value::Null
-    };
-    result
 }
 
 pub async fn uninstall(body: Bytes) -> Response {
@@ -96,21 +86,7 @@ pub async fn uninstall(body: Bytes) -> Response {
     if id.is_empty() {
         return management_error(400, "缺少插件包 id");
     }
-    let _guard = plugin_host::operations::mutation_guard().await;
-    if plugin_host::operations::active(id) {
-        return management_error(409, "这个插件正在下载或安装，请完成后再卸载");
-    }
-    if !plugin_host::list_packs().iter().any(|pack| pack.id == id) {
-        return management_error(404, "没有安装这个插件包");
-    }
-    plugin_host::shutdown_all().await;
-    plugin_host::clear_providers();
-    let outcome = plugin_host::uninstall(id);
-    let result = reload_result(!plugin_host::list_packs().is_empty()).await;
-    match outcome {
-        Ok(()) => ok_json(result),
-        Err(error) => management_error(400, error),
-    }
+    change_pack(id, plugin_host::operations::PackChange::Uninstall).await
 }
 
 pub async fn set_enabled(body: Bytes) -> Response {
@@ -125,14 +101,7 @@ pub async fn set_enabled(body: Bytes) -> Response {
     if id.is_empty() {
         return management_error(400, "缺少插件包 id");
     }
-    let _guard = plugin_host::operations::mutation_guard().await;
-    if plugin_host::operations::active(id) {
-        return management_error(409, "这个插件正在下载或安装");
-    }
-    if let Err(error) = plugin_host::set_pack_enabled(id, enabled) {
-        return management_error(400, error);
-    }
-    ok_json(reload_result(plugin_host::list_packs().iter().any(|pack| pack.enabled)).await)
+    change_pack(id, plugin_host::operations::PackChange::Enabled(enabled)).await
 }
 
 pub async fn set_provider(body: Bytes) -> Response {
@@ -148,14 +117,9 @@ pub async fn set_provider(body: Bytes) -> Response {
     if id.is_empty() || provider.is_empty() {
         return management_error(400, "缺少插件包 id 或提供商 id");
     }
-    let _guard = plugin_host::operations::mutation_guard().await;
-    if plugin_host::operations::active(id) {
-        return management_error(409, "这个插件正在下载或安装");
-    }
-    if let Err(error) = plugin_host::set_provider_enabled(id, provider, enabled) {
-        return management_error(400, error);
-    }
-    ok_json(reload_result(plugin_host::list_packs().iter().any(|pack| pack.enabled)).await)
+    change_pack(id, plugin_host::operations::PackChange::Provider {
+        id: provider.to_string(), enabled,
+    }).await
 }
 
 pub async fn check_update() -> Response {

@@ -56,6 +56,8 @@ export type Account = {
   isGuest?: boolean
   /** 按模型记的限流记录 */
   rateLimits?: Record<string, RateLimitInfo>
+  upstreamCooldownUntil?: number | null
+  upstreamBlockedReason?: string
   [key: string]: unknown
 }
 
@@ -277,10 +279,15 @@ export type ManageModel = {
   upstreamStatus?: 'undeployed' | null
   capabilities?: unknown
   reasoningLevels?: unknown
+  reasoningDefaultLevel?: unknown
+  reasoningFixedLevel?: unknown
+  reasoningBindingSupported?: unknown
+  reasoningSource?: unknown
   refreshedAt?: unknown
 }
 
-export type ManageView = { models?: ManageModel[] }
+export type ManageMapping = { alias?: string; target?: string; provider?: string; enabled?: boolean; isDefault?: boolean }
+export type ManageView = { models?: ManageModel[]; mappings?: ManageMapping[] }
 
 export function fetchManage(signal?: AbortSignal): Promise<ManageView> {
   return apiCall<ManageView>('/api/models/manage', { signal })
@@ -502,7 +509,7 @@ export function renameAccount(id: string, name: string): Promise<unknown> {
   return apiCall(`/api/accounts/${encodeURIComponent(id)}`, { method: 'PATCH', body: { name } })
 }
 
-/** 清除限流标记；不传 model = 清除该账号全部模型 */
+/** 不传 model 时清除账号冷却与全部模型限流标记。 */
 export function clearAccountRateLimits(id: string, model?: string): Promise<unknown> {
   return apiCall(`/api/accounts/${encodeURIComponent(id)}/rate-limits/clear`, {
     method: 'POST',

@@ -13,9 +13,15 @@ pub const MAX_ROUTING_MODELS: usize = 500;
 pub const MAX_ROUTING_PROVIDERS: usize = 256;
 pub const MAX_ROUTING_ACCOUNTS: usize = 10_000;
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RoutingProviderScope { All, Selected }
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RoutingProfile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_scope: Option<RoutingProviderScope>,
     pub providers: Vec<String>,
     #[serde(default)]
     pub disabled_providers: Vec<String>,
@@ -23,6 +29,18 @@ pub struct RoutingProfile {
     pub account_order: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub excluded_accounts: Vec<String>,
+}
+
+impl RoutingProfile {
+    pub fn scope(&self) -> RoutingProviderScope {
+        // 旧名单无法区分主动移除和后来新增，缺少范围标记时保留原有限制。
+        self.provider_scope.unwrap_or(RoutingProviderScope::Selected)
+    }
+
+    pub fn includes_provider(&self, provider: &str) -> bool {
+        (self.scope() == RoutingProviderScope::All || self.providers.iter().any(|id| id == provider))
+            && !self.disabled_providers.iter().any(|id| id == provider)
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -105,7 +123,8 @@ pub fn validate_shape(profile: &RoutingProfile) -> Result<(), String> {
     unique(&profile.providers, MAX_ROUTING_PROVIDERS, "提供商列表")?;
     unique(&profile.disabled_providers, MAX_ROUTING_PROVIDERS, "停用提供商列表")?;
     unique(&profile.excluded_accounts, MAX_ROUTING_ACCOUNTS, "排除账号列表")?;
-    if profile.disabled_providers.iter().any(|id| !profile.providers.contains(id)) {
+    if profile.scope() == RoutingProviderScope::Selected
+        && profile.disabled_providers.iter().any(|id| !profile.providers.contains(id)) {
         return Err("停用提供商必须保留在当前路由列表中".to_string());
     }
     if profile.account_order.len() > MAX_ROUTING_PROVIDERS {
@@ -131,6 +150,10 @@ pub fn validate_shape(profile: &RoutingProfile) -> Result<(), String> {
 
 pub fn save_routing_profile(model: &str, profile: Option<RoutingProfile>) -> Result<(), String> {
     let model = normalize_model(model)?;
+    let profile = profile.map(|mut profile| {
+        profile.provider_scope = Some(profile.scope());
+        profile
+    });
     if let Some(profile) = &profile { validate_shape(profile)?; }
     let mut result = Ok(());
     let saved = super::update(|config: &mut RuntimeConfig| {

@@ -144,7 +144,7 @@ export function parseMethods(value: unknown, provider = ''): MethodsState {
   })
   return {
     phase: 'ready', methods, instructions: loginText(data.instructions),
-    reason: methods.length ? '' : t('插件没有声明可用的账号登录方式，请查看账号登录帮助或联系插件作者'),
+    reason: methods.length ? '' : t('插件没有声明可用的账号登录方式，请更新插件或联系插件作者'),
   }
 }
 

@@ -129,10 +129,11 @@
    小注用同色弱化：它只解释口径，不该抢列名的注意力。 */
 .acct-table thead th .th-label { display: inline-flex; align-items: center; gap: 4px; }
 
-/* 表头的「隐藏账号名」眼睛（只在账号列出现）：一颗纯图标小按钮，贴在列名后面。
+/* 表头的「隐藏账号名」眼睛：一颗纯图标小按钮，贴在账号相关列名后面。
    默认继承表头小字的灰色、不抢注意力；隐藏生效时常亮主色（.on）——
    「整列此刻是打码状态」不用悬停就能看出来。 */
-.acct-table thead th .name-eye {
+.acct-table thead th .name-eye,
+.req-head .name-eye {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -145,9 +146,12 @@
   color: inherit;
   cursor: pointer;
 }
-.acct-table thead th .name-eye:hover { background: var(--surface-3); color: var(--text-2); }
+.acct-table thead th .name-eye:hover,
+.req-head .name-eye:hover { background: var(--surface-3); color: var(--text-2); }
 .acct-table thead th .name-eye.on,
-.acct-table thead th .name-eye.on:hover { color: var(--primary); }
+.acct-table thead th .name-eye.on:hover,
+.req-head .name-eye.on,
+.req-head .name-eye.on:hover { color: var(--primary); }
 
 /* ─── 列宽拖动把手 ───
    把手本身的样式（.col-grip / body.col-resizing）已挪到 components.css ——

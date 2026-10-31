@@ -687,10 +687,6 @@ pub(crate) fn spawn_plugin_login_poll(
     provider: String,
 ) {
     crate::spawn_task(async move {
-        let Some(adapter) = handle.adapter() else {
-            crate::server::core::login::fail_plugin_login(&handle, "登录任务未绑定执行体，请重新发起");
-            return;
-        };
         let deadline = tokio::time::Instant::now()
             + std::time::Duration::from_millis(crate::server::core::login::LOGIN_TIMEOUT_MS);
         let interval = Duration::from_millis(interval_ms.clamp(1_000, LOGIN_TIMEOUT_MS));
@@ -709,6 +705,10 @@ pub(crate) fn spawn_plugin_login_poll(
                 handle.cancel_provider_flow_locked(&flow).await;
                 return;
             }
+            let Some(adapter) = handle.adapter() else {
+                crate::server::core::login::fail_plugin_login(&handle, "登录任务未绑定执行体，请重新发起");
+                return;
+            };
             let poll = adapter.login_poll_async(&flow).await;
             // 请求在 await 中被取消或由回调落定：迟到的 Done 不得再落库。
             let task = handle.snapshot();
@@ -1444,6 +1444,13 @@ pub async fn login_oauth_start(State(state): State<ServerState>, body: Bytes) ->
             interval,
             region.provider_id().to_string(),
         );
+    } else {
+        let login = state.login().clone();
+        let flow = flow.clone();
+        crate::spawn_task(async move {
+            tokio::time::sleep(Duration::from_millis(LOGIN_TIMEOUT_MS)).await;
+            login.cancel_async(&flow).await;
+        });
     }
     logging::log(
         "[Login]",

@@ -13,6 +13,7 @@
 
 import { shared } from './add-account-bridge'
 import { DOUBAOWORK } from './add-doubaowork-config'
+import { DEEPSEEK_WEB } from './add-provider-deepseek'
 import { t } from '../i18n'
 
 /* ─── 类型 ───────────────────────────────── */
@@ -1149,6 +1150,7 @@ export const BUILTIN_CONFIGS: ProviderConfig[] = [
   // （与后端注册表 PROVIDERS 的排列一致，后到居后）
   LOBSTERAI,
   DOUBAOWORK,
+  DEEPSEEK_WEB,
 ]
 
 /** WorkBuddy 的块 id（结构特殊，单独一个组件） */

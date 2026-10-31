@@ -258,7 +258,7 @@ export function CapabilityDialog({ context, onClose }: { context: CapabilityCont
           {levelsInfo ? (
             <div className='rounded-md border border-border bg-surface-inset px-3 py-2.5 text-xs leading-[1.7] text-subtle'>
               <div className='flex flex-wrap items-center gap-x-2 gap-y-1'>
-                <span>{t('可配思考档位')}</span>
+                <span>{levelsInfo.fixedLevel ? t('固定思考档位') : t('可配思考档位')}</span>
                 <span className='font-mono text-[12px] text-primary-fg'>
                   {levelsInfo.levels.join(' / ')}
                 </span>
@@ -267,7 +267,11 @@ export function CapabilityDialog({ context, onClose }: { context: CapabilityCont
                 ) : null}
               </div>
               <div className='mt-1'>
-                {t('这是模型自己能配的档位（来自上游目录），只读；要改某一档请到映射弹窗里选。')}
+                {levelsInfo.fixedLevel
+                  ? t('上游固定为 {level}，绑定其他等级也无法调高。', { level: levelsInfo.fixedLevel })
+                  : levelsInfo.source === 'modelsdev'
+                    ? t('社区参考档位，不代表当前上游通道支持；实际以该通道目录为准。')
+                    : t('这是模型自己能配的档位（来自上游目录），只读；要改某一档请到映射弹窗里选。')}
               </div>
             </div>
           ) : null}

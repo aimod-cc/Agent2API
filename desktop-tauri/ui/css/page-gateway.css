@@ -107,9 +107,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  /* 允许折行：这一行现在住着状态筛选 + 倍率排序（issue #161）+ 搜索框（240px）
-     + 勾选后的批量条，在最小窗口宽度（820px）下四者同时在场会超出通栏宽度 ——
-     折行比横向溢出好，与 .panel-head 的 flex-wrap 同一取舍（见上面的说明）。 */
+  /* 筛选、搜索和批量条在窄窗口下允许整体折行。 */
   flex-wrap: wrap;
   row-gap: 8px;
   width: 100%;
@@ -187,6 +185,28 @@
    骨架与列宽拖动，不跟着这组覆盖走。 */
 .page[data-page="gateway"] .models-table thead th { padding: 8px 10px; font-size: 11px; letter-spacing: 0; }
 .page[data-page="gateway"] .models-table td { padding: 7px 10px; }
+
+@media (max-width: 767px) {
+  .page[data-page="gateway"] .models-table thead:has(th[data-col="rate"]) {
+    display: block;
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--table-head-bg);
+  }
+  .page[data-page="gateway"] .models-table thead tr {
+    display: flex;
+    margin: 0 0 10px;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: var(--table-head-bg);
+  }
+  .page[data-page="gateway"] .models-table thead th:not([data-col="rate"]) { display: none; }
+  .page[data-page="gateway"] .models-table thead th[data-col="rate"] { position: static; }
+  .page[data-page="gateway"] .models-table thead .col-grip { display: none; }
+  .page[data-page="gateway"] .models-table [data-table-sort] { min-height: 30px; }
+}
 
 /* 表头的问号提示（完整口径从括号长标题挪进 title，见 models-page）——
    「模型映射」「上下文 / 输出」「能力」三处共用；后两处讲的是来源标记怎么读 */

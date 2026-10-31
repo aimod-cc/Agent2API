@@ -27,7 +27,10 @@ function CardHead({ id, name, version, icon, children }: {
 
 export function OperationProgress({ operation }: { operation: PluginOperation }) {
   const stage = operation.stage === 'downloading' ? t('正在下载…')
-    : operation.stage === 'verifying' ? t('正在校验包内容…') : t('正在安装…')
+    : operation.stage === 'verifying' ? t('正在校验包内容…')
+    : operation.stage === 'waiting' ? t('等待当前任务结束，插件继续服务…')
+    : operation.stage === 'loading' ? t('正在加载新插件…')
+    : operation.stage === 'restoring' ? t('正在恢复旧版本插件…') : t('正在安装…')
   const download = operation.stage === 'downloading'
   return <div className='px-4 pb-4 pt-3' aria-live='polite'>
     <div className='mb-1.5 flex items-center justify-between gap-2 text-[11.5px]'>

@@ -138,6 +138,12 @@ pub(super) async fn select_target_account(
     conv_key: &str,
 ) -> Result<RouteTarget, GatewayError> {
     let accounts = scoped_accounts(service, providers, keys.request_model(), pinned);
+    if accounts.is_empty() && accounts_in_providers(service, providers, pinned).iter().any(|account| {
+        account.get("upstreamCooldownUntil").and_then(Value::as_i64).is_some_and(|until| until > logging::now_ms())
+    }) {
+        return Err(GatewayError::with_status(429, "候选账号处于上游账号级冷却，请等待恢复后重试")
+            .with_code("account_cooling_down"));
+    }
     if pinned.is_some_and(|id| !accounts.iter().any(|account| routing::account_id(account) == Some(id))) {
         return Err(GatewayError::with_status(401,
             "指定账号不存在或不属于当前提供商；未回退到队首或默认登录态")
@@ -409,6 +415,10 @@ fn scoped_accounts(
     let accounts = if pinned.is_some() { accounts } else {
         crate::server::core::routing_scope::apply_accounts(&accounts, model)
     };
+    let accounts: Vec<Value> = accounts.into_iter().filter(|account| {
+        pinned.is_some() || !account.get("upstreamCooldownUntil").and_then(Value::as_i64)
+            .is_some_and(|until| until > logging::now_ms())
+    }).collect();
     let routable: Vec<Value> = accounts.iter()
         .filter(|account| !readiness::gated(provider_of(account)))
         .cloned().collect();

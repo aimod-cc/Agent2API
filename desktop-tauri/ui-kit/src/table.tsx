@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { Button } from './button'
 import { cn } from './lib/cn'
 
 /**
@@ -60,7 +61,14 @@ function TableRow({ className, ...props }: React.ComponentProps<'tr'>) {
   )
 }
 
-function TableHead({ className, ...props }: React.ComponentProps<'th'>) {
+type TableSortDirection = 'asc' | 'desc'
+type TableHeadProps = React.ComponentProps<'th'> & {
+  sortDirection?: TableSortDirection | false
+  onSortChange?: (direction: TableSortDirection) => void
+  sortLabel?: string
+}
+
+function TableHead({ className, children, sortDirection = false, onSortChange, sortLabel, ...props }: TableHeadProps) {
   return (
     <th
       data-slot='table-head'
@@ -70,7 +78,24 @@ function TableHead({ className, ...props }: React.ComponentProps<'th'>) {
         className
       )}
       {...props}
-    />
+      aria-sort={onSortChange
+        ? (sortDirection === 'asc' ? 'ascending' : sortDirection === 'desc' ? 'descending' : 'none')
+        : props['aria-sort']}
+    >
+      {onSortChange ? (
+        <Button type='button' variant='ghost' size='xs' data-table-sort=''
+          className='h-auto max-w-full gap-1 border-0 px-0 py-0 align-middle [font-size:inherit] font-semibold tracking-[inherit] text-inherit hover:bg-transparent active:translate-y-0'
+          aria-label={sortLabel} title={[sortLabel, props.title].filter(Boolean).join('\n') || undefined}
+          onClick={() => onSortChange(sortDirection === 'asc' ? 'desc' : 'asc')}>
+          <span className='min-w-0 truncate'>{children}</span>
+          <svg viewBox='0 0 24 24' className='size-3' aria-hidden='true'
+            fill='none' stroke='currentColor' strokeWidth='2' strokeLinecap='round' strokeLinejoin='round'>
+            <path d='m8 9 4-4 4 4' className={sortDirection === 'asc' ? 'text-primary-fg' : 'opacity-35'} />
+            <path d='m8 15 4 4 4-4' className={sortDirection === 'desc' ? 'text-primary-fg' : 'opacity-35'} />
+          </svg>
+        </Button>
+      ) : children}
+    </th>
   )
 }
 
@@ -94,4 +119,7 @@ function TableCaption({ className, ...props }: React.ComponentProps<'caption'>) 
   )
 }
 
-export { Table, TableHeader, TableBody, TableFooter, TableHead, TableRow, TableCell, TableCaption }
+export {
+  Table, TableHeader, TableBody, TableFooter, TableHead, TableRow, TableCell, TableCaption,
+  type TableHeadProps, type TableSortDirection,
+}

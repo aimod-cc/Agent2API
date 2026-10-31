@@ -348,7 +348,6 @@ pub(super) fn exhausted_accounts(previous: Option<&Value>, limit: i64) -> Vec<St
 /// `billing::checkin` 模块头「签到不看 enabled」）。真正该不该签由
 /// `resolve_checkin_targets` 的 `supports_checkin` 与范围过滤决定。
 pub(super) fn unsigned_accounts(store: &AccountStore) -> Vec<String> {
-    let today = beijing::today_key();
     store
         .list_accounts()
         .get("accounts")
@@ -356,10 +355,7 @@ pub(super) fn unsigned_accounts(store: &AccountStore) -> Vec<String> {
         .map(|items| {
             items
                 .iter()
-                .filter(|account| {
-                    let at = account.get("checkinAt").and_then(Value::as_i64).unwrap_or(0);
-                    !beijing::date_key_of_ms(at).is_some_and(|key| key == today)
-                })
+                .filter(|account| !crate::server::core::account_store::checkin_state::checked_in_today(account))
                 .filter_map(|account| account.get("id").and_then(Value::as_str))
                 .map(str::to_string)
                 .collect()

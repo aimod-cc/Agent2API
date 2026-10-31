@@ -284,10 +284,14 @@ export function patch(next: Partial<Store>): void {
 
 /* ─── 读 ───────────────────────────────────── */
 
+let centerRequest = 0
+
 /** 拉聚合快照（页面打开 / 任何写动作之后） */
 export async function loadCenter(): Promise<void> {
+  const request = ++centerRequest
   try {
     const data = await bridge().getCheckinCenter?.()
+    if (request !== centerRequest) return
     if (!data) {
       patch({ loaded: true, loadError: '后端未返回签到中心数据' })
       return
@@ -302,7 +306,7 @@ export async function loadCenter(): Promise<void> {
       travelTimesDraft: null,
     })
   } catch (error) {
-    patch({ loaded: true, loadError: errorMessage(error) })
+    if (request === centerRequest) patch({ loaded: true, loadError: errorMessage(error) })
   }
 }
 

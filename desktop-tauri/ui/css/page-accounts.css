@@ -198,27 +198,6 @@
   padding: 6px 10px;
 }
 
-/* ─── 账号设置弹窗：左侧分组导航 + 右侧内容区 ───
-   单列长滚动换成分区结构（见 islands/accounts-dialogs.tsx 的五分组）：
-   导航只承载「切」，内容区一屏一组；字段标签定宽右对齐，控件左边缘落同一条线。 */
-.acct-dlg { display: flex; min-height: 460px; align-items: stretch; }
-
-/* 弹窗内只补栏宽：容器（底色 / 分隔线 / 内边距）与条目的选中态、悬浮态、字重
-   都是 .prov-rail + NavItem 组件自带的（与模型管理左栏同一形态，见 page-gateway.css） */
-.acct-dlg-rail { flex: 0 0 148px; min-height: 0; }
-
-.acct-dlg-main { flex: 1; min-width: 0; padding: 14px 20px 16px; }
-.acct-dlg-pane-head h3 { font-size: 13.5px; font-weight: 600; }
-.acct-dlg-pane-head p { font-size: 12px; color: var(--text-3); line-height: 1.7; margin-top: 2px; }
-/* 内容区字段：标签定宽右对齐（原型网格的落点），跨弹窗分段共用。
-   行距在内容区统一给（全局 .field-row 没有 margin —— 旧弹窗的行距是逐行手挂
-   mt-2.5 撑出来的，分组结构下再逐行挂迟早漏一行，就长成「没有间距」的样子）。 */
-.acct-dlg-main .field-row { margin: 10px 0; min-height: 30px; }
-.acct-dlg-main .field-row > label,
-.acct-dlg-main .field-row > [data-slot='field'] > [data-slot='field-label'] { width: 76px; flex: none; text-align: right; }
-.acct-dlg-main .field-row > label:empty { width: 76px; }
-.acct-dlg-hint { margin-left: 86px; }
-
 /* ─── 余额列：Token 限制器的第二行读数 ───
    「周期 Token 31 万 / 50 万 · 剩 23 分」：配了 Token 规则的账号才有这一行
    （见 islands/accounts-panels.tsx 的 prominentTokenLimit）。观感与 .lim-sub

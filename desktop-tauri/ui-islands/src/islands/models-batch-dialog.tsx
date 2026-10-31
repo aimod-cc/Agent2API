@@ -44,9 +44,9 @@ import {
   Field, FieldLabel,
 } from '@ui'
 import { isCustom, type ManageModel } from './models-custom-source'
-import { CUSTOM_LEVEL, commonLevels } from './models-reasoning'
+import { CUSTOM_LEVEL, POSITIVE_REASONING_LEVELS, commonLevels, modelReasoning } from './models-reasoning'
 import {
-  accept, bindingsOf, errorMessage, getSnapshot, shared, toast, writeBinding, writeRemoveModel,
+  accept, bindingsOf, errorMessage, getSnapshot, shared, toast, writeBinding, writeRemoveModel, same,
 } from './models-panel-state'
 import { t } from '../i18n'
 
@@ -79,13 +79,14 @@ export function ModelBatchDialog({ models, onClose, onDone }: {
   /**
    * 思考等级草稿（照 MappingDialog 的形态）：'' = 清除 / 不覆盖、候选等级、CUSTOM_LEVEL。
    *
-   * 候选取所选模型的**交集**（`commonLevels`）：批量设的同一个档位，只要有一个目标
-   * 不认识就等于白设一个它不认的参数；任何目标未声明档位时回落通用表 —— 拿一个子集
-   * 去限制用户，等于替上游猜它认不认。
+   * 候选取各目标可用档位的交集。未声明的目标使用通用候选，明确不可绑定的目标
+   * 不回落；没有交集时只允许清除，避免把通用档位误当成共同支持的档位。
    */
   const candidates = commonLevels(getSnapshot().data, models)
+  const managedReasoning = models.some(model => typeof model.reasoningBindingSupported === 'boolean')
+  const allowsCustomLevel = !managedReasoning
   const [reasoning, setReasoning] = React.useState(() => ({
-    select: candidates[0] || '',
+    select: candidates.find(level => !['off', 'none'].includes(level.toLowerCase())) || '',
     custom: '',
   }))
   const [busy, setBusy] = React.useState(false)
@@ -109,9 +110,35 @@ export function ModelBatchDialog({ models, onClose, onDone }: {
   async function run(): Promise<void> {
     if (busy) return
     if (!models.length) { toast(t('没有选中的模型'), 'err'); return }
+    if (action === 'enable') {
+      const selected = new Map<string, string>()
+      for (const model of models) {
+        for (const binding of bindingsOf(model)) {
+          const key = JSON.stringify([(model.provider || '').toLowerCase(), binding.alias.toLowerCase()])
+          const previous = selected.get(key)
+          if (previous && !same(previous, model.id)) {
+            setResult(<span className='text-destructive'>{t('所选模型含同一提供商的同名绑定「{id}」，请分别启用，避免相互关闭', { id: binding.alias })}</span>)
+            return
+          }
+          selected.set(key, model.id)
+        }
+      }
+    }
     if (action === 'reasoning' && reasoning.select === CUSTOM_LEVEL && !level) {
       setResult(<span className='text-destructive'>{t('请填写自定义思考等级，或改选候选档 / 「清除」')}</span>)
       return
+    }
+    if (action === 'reasoning' && level && managedReasoning) {
+      const rank = POSITIVE_REASONING_LEVELS.findIndex(value => value === level.toLowerCase())
+      const incompatible = models.some(model => {
+        const info = modelReasoning(model)
+        return info.bindingSupported === false || (info.fixedLevel && info.fixedLevel.toLowerCase() !== level.toLowerCase())
+          || (rank < 0 && !info.levels.some(value => value.toLowerCase() === level.toLowerCase()))
+      })
+      if (incompatible) {
+        setResult(<span className='text-destructive'>{t('所选模型没有共同可用档位，请分别设置或清除绑定。')}</span>)
+        return
+      }
     }
     if (action === 'delete') {
       if (removableCount === 0) {
@@ -170,7 +197,7 @@ export function ModelBatchDialog({ models, onClose, onDone }: {
   }
 
   return (
-    <Dialog open onOpenChange={next => { if (next || busy) return; onClose() }}>
+    <Dialog open onOpenChange={(next, details) => { if (next) return; if (busy) { details.cancel(); return }; onClose() }}>
       <DialogContent>
         <DialogHeader><DialogTitle>{t('批量操作 · 已选 {n} 个模型', { n: models.length })}</DialogTitle></DialogHeader>
         <DialogBody>
@@ -204,7 +231,8 @@ export function ModelBatchDialog({ models, onClose, onDone }: {
                       {candidates.map(levelName => (
                         <SelectItem key={levelName} value={levelName}>{levelName}</SelectItem>
                       ))}
-                      <SelectItem value={CUSTOM_LEVEL}>{t('自定义等级…')}</SelectItem>
+                      {allowsCustomLevel
+                        ? <SelectItem value={CUSTOM_LEVEL}>{t('自定义等级…')}</SelectItem> : null}
                     </SelectContent>
                   </Select>
                 </Field>
@@ -215,6 +243,8 @@ export function ModelBatchDialog({ models, onClose, onDone }: {
                       onChange={event => setReasoning(prev => ({ ...prev, custom: event.currentTarget.value }))} />
                   </Field>
                 ) : null}
+                {!candidates.length && managedReasoning
+                  ? <p className='detail mt-1.5'>{t('所选模型没有共同可用档位，请分别设置或清除绑定。')}</p> : null}
                 <p className='detail mt-1.5'>
                   {t('设置 / 清除会应用到选中模型的')}<b>{t('全部映射')}</b>{t('（默认绑定与别名 chips）；「清除」= 不给这些映射指定等级（选「不覆盖」的口径与映射弹窗一致）')}
                 </p>

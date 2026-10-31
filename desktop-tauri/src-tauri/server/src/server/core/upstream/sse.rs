@@ -96,13 +96,14 @@ pub struct FramePolicy {
     pub rewrite: Option<ModelRewrite>,
     /// 丢弃「整片只有换行」的 content 分片（见模块头与 [`is_newline_keepalive`]）
     pub strip_newline_chunks: bool,
+    pub native_tools: Vec<String>,
 }
 
 impl FramePolicy {
     /// 只带 model 回写、其余按默认（自定义家的转发路径用它：那家的保活形态
     /// 没有实测过，不去动它的字节）
     pub fn with_rewrite(rewrite: Option<ModelRewrite>) -> Self {
-        Self { rewrite, strip_newline_chunks: false }
+        Self { rewrite, strip_newline_chunks: false, native_tools: Vec::new() }
     }
 
     /// 由**能力位 × 全局开关**装配（转发链上唯一的生产入口，见
@@ -119,7 +120,7 @@ impl FramePolicy {
     /// 单独成片的那个换行 —— 少一个换行的外观损失换掉整屏断句，值不值由用户判，
     /// 所以判权留在面板 / 环境变量上，而不是编译期替他决定。
     pub fn assembled(rewrite: Option<ModelRewrite>, declared: bool, switch_on: bool) -> Self {
-        Self { rewrite, strip_newline_chunks: declared && switch_on }
+        Self { rewrite, strip_newline_chunks: declared && switch_on, native_tools: Vec::new() }
     }
 }
 
@@ -233,6 +234,7 @@ pub struct ReasoningCoalescer {
     /// 丢弃保活换行分片（见模块头与 [`is_newline_keepalive`]）。
     /// false = 帧的字节与接入前逐字一致。
     strip_newline_chunks: bool,
+    native_tools: super::native_tools::Repair,
 }
 
 impl Default for ReasoningCoalescer {
@@ -250,6 +252,7 @@ impl ReasoningCoalescer {
             telemetry: None,
             rewrite: None,
             strip_newline_chunks: false,
+            native_tools: Default::default(),
         }
     }
 
@@ -261,6 +264,7 @@ impl ReasoningCoalescer {
     /// 装上帧改写策略（model 名回写 + 保活换行的丢弃；见模块头）。
     /// 未被调用时行为与接入前逐字节一致。
     pub fn with_policy(mut self, policy: FramePolicy) -> Self {
+        self.native_tools = super::native_tools::Repair::new(&policy.native_tools);
         self.rewrite = policy.rewrite;
         self.strip_newline_chunks = policy.strip_newline_chunks;
         self
@@ -298,6 +302,10 @@ impl ReasoningCoalescer {
             out.push(self.coalesced_frame());
             self.acc.clear();
         }
+        if let Some(frame) = self.native_tools.flush(&serde_json::json!({
+            "id": self.meta.id, "model": self.meta.model, "created": self.meta.created,
+            "object": "chat.completion.chunk",
+        })) { out.push(sse_frame(&frame)); }
         out
     }
 
@@ -317,10 +325,18 @@ impl ReasoningCoalescer {
                 out.push(self.coalesced_frame());
                 self.acc.clear();
             }
+            if let Some(frame) = self.native_tools.flush(&serde_json::json!({
+                "id": self.meta.id, "model": self.meta.model, "created": self.meta.created,
+                "object": "chat.completion.chunk",
+            })) { out.push(sse_frame(&frame)); }
             out.push(Bytes::from_static(b"data: [DONE]\n\n"));
             return;
         }
         let Ok(chunk) = serde_json::from_str::<Value>(data) else {
+            if let Some(frame) = self.native_tools.flush(&serde_json::json!({
+                "id": self.meta.id, "model": self.meta.model, "created": self.meta.created,
+                "object": "chat.completion.chunk",
+            })) { out.push(sse_frame(&frame)); }
             // 解析失败的行原样透传：上游的异常帧不能被我们吞掉
             out.push(plain_frame(line));
             return;
@@ -406,7 +422,14 @@ impl ReasoningCoalescer {
             out.push(self.coalesced_frame());
             self.acc.clear();
         }
-        out.push(self.rewritten_frame(line, &chunk));
+        if !self.native_tools.enabled() {
+            out.push(self.rewritten_frame(line, &chunk));
+            return;
+        }
+        for chunk in self.native_tools.transform(&chunk) {
+            let serialized = serde_json::to_string(&chunk).ok().map(|text| format!("data: {text}"));
+            out.push(self.rewritten_frame(serialized.as_deref().unwrap_or(line), &chunk));
+        }
     }
 
     /// 透传一帧，必要时把 `model` 改写成客户端请求的名字。
@@ -545,6 +568,7 @@ mod tests {
         ReasoningCoalescer::new().with_policy(FramePolicy {
             rewrite: None,
             strip_newline_chunks: strip,
+            ..Default::default()
         })
     }
 
@@ -745,6 +769,7 @@ mod tests {
         let mut coalescer = ReasoningCoalescer::new().with_policy(FramePolicy {
             rewrite: None,
             strip_newline_chunks: declared_but_switched_off,
+            ..Default::default()
         });
         let out: String = coalescer
             .push(stream.as_bytes())

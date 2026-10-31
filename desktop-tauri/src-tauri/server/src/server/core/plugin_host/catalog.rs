@@ -308,6 +308,7 @@ async fn apply_automatic() {
             continue;
         };
         if entry["error"] == true
+            || super::operations::active(id)
             || entry["official"] != true
             || entry["version"].as_str().is_none()
         {
@@ -354,9 +355,6 @@ async fn apply_automatic() {
         {
             logging::verbose("[Plugin]", &format!("自动处理 {id}：{error}"));
             continue;
-        }
-        while super::operations::active(id) {
-            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 }

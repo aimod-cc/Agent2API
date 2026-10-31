@@ -1,87 +1,32 @@
-
-
 import * as React from 'react'
 import { createRoot } from 'react-dom/client'
 import {
-  Badge,
-  Button,
-  Checkbox,
-  Dialog,
-  DialogBody,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  Input,
-  InputGroup,
-  InputGroupAddon,
-  InputGroupInput,
-  Label,
-  NavList,
-  NavItem,
-  SegmentedControl,
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-  Switch,
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-  cn,
-  TableCell, TableRow, Card, CardHeader, ResponsiveSheet, Table, TableHeader, TableHead, TableBody } from '@ui'
+  Badge, Button, Checkbox, InputGroup, InputGroupAddon, InputGroupInput, NavList, NavItem,
+  SegmentedControl, cn, TableCell, TableRow, Card, CardHeader, ResponsiveSheet,
+  Table, TableHeader, TableHead, TableBody, Sidebar, Empty,
+} from '@ui'
 import { TableFooter, useClientPaging } from './table-shell'
-import {
-  BOOLEAN_KEYS, CAPABILITY_LABELS, capabilitiesOf, capabilityState, capabilityTip, capSourceOf,
-  exactTokens, formatTokens, normalizeOverrides,
-  type CapabilityKey,
-} from './model-capability'
 import { CapabilityDialog } from './model-capability-dialog'
-import { ModelTestDialog, testBlockReason, type ModelTestTarget } from './model-test-dialog'
+import { ModelTestDialog, type ModelTestTarget } from './model-test-dialog'
 import { ModelBatchDialog } from './models-batch-dialog'
-import { CUSTOM_LEVEL, levels as reasoningLevels } from './models-reasoning'
+import { ModelCell } from './models-cells'
+import { MappingDialog, CustomModelDialog } from './models-dialogs'
 import * as customSource from './models-custom-source'
-import { ALL_CUSTOM } from './models-custom-source'
-import type { ManageModel, ManageView } from './models-custom-source'
-// 内置家的图标映射（与添加账号弹窗、签到中心同一份，别处不要照抄这份映射）
+import { ALL_CUSTOM, type ManageModel } from './models-custom-source'
 import { PROVIDER_ICONS } from './add-provider-pick'
 import { providerPresetIconOf } from './add-provider-metadata'
 import {
-  GROUP_LIMIT, MODEL_SORT_OPTIONS, MODEL_STATE_OPTIONS, MODEL_VISIBILITY_OPTIONS, accept, bindingKeyOf, bindingsOf, builtinRailCounts,
-  closeCapability, closeCustomModel, closeMapping, collapseGroup, currentProvider, customProviderOptions,
-  customRailItems, directoryReady, esc, errorMessage, expandGroup, formatTime, getSnapshot, isAllCustomView,
-  levelOf, load, models, openAddCustomProvider, openCapability, openCustomModel, openMapping, providerLabelOf,
-  providerOptions, refreshAll,
-  refreshModels, registerColumnSettings, removeCustomProvider, render, resolveProvider, restoreSavedFilters,
-  pruneForeignTableNodes,
-  rowEnabled, rowKeyOf, runRowAction, same, selectProvider, setSearch, setSort, setStateFilter,
-  setVisibilityFilter, setTableEl, visibilityOf,
-  shared, subscribe, syncHead, toast, upstreamOptions, viewData, visibleColumns, writeAddModel,
-  writeBinding, writeRemoveMapping, writeRemoveModel,
-  type Align, type Binding, type ColumnView, type CustomModelContext, type MappingContext,
+  GROUP_LIMIT, MODEL_STATE_OPTIONS, MODEL_VISIBILITY_OPTIONS, builtinRailCounts,
+  closeCapability, closeCustomModel, closeMapping, collapseGroup, customRailItems, directoryReady,
+  expandGroup, getSnapshot, isAllCustomView, openAddCustomProvider, openCustomModel, providerLabelOf,
+  refreshAll, refreshModels, registerColumnSettings, removeCustomProvider, render, resolveProvider,
+  restoreSavedFilters, pruneForeignTableNodes, rowEnabled, rowKeyOf, selectProvider, setSearch, setSort,
+  setStateFilter, setVisibilityFilter, setTableEl, visibilityOf, shared, subscribe, syncHead, viewData,
+  visibleColumns,
 } from './models-panel-state'
 import { t } from '../i18n'
-import { Sidebar, Empty } from '@ui'
-
 
 /* ─── 页面本体 ───────────────────────────────── */
-
-/** 单元格的外壳类名（对齐由列设置给，三档互斥，与 table-col-settings 的 applyAlign 同一套） */
-const cellClass = (base: string, align?: Align): string => (align ? `${base} ta-${align}` : base)
-
-/**
- * 按 `(提供商, 上游 id)` 找表格里那一行。
- *
- * 用途只有一个：思考等级下拉要读**这个目标模型自己认识哪些档位**（见
- * `models-reasoning.levels` 的三级回落）。找不到（孤儿映射指向的模型不在当前
- * 表格里、或 provider 为空表示「全局」）就返回 undefined，调用方回落通用候选表。
- */
-function modelRow(provider: string, id: string): ManageModel | undefined {
-  const wanted = (id || '').trim()
-  if (!wanted) return undefined
-  return models().find(model => same(model.provider, provider) && same(model.id, wanted))
-}
 
 /**
  * 自定义家条目悬浮时把右侧计数让给删除 ×（两者占同一块位置，不藏就会叠字）。
@@ -91,16 +36,10 @@ function modelRow(provider: string, id: string): ManageModel | undefined {
  */
 const RAIL_HIDE_COUNT_ON_HOVER = '[.pv-row:hover_&_[data-slot=nav-item-count]]:invisible'
 
-/** 倍率文案：后端给的 `x1.5` 这类字符串只留数值部分（照抄旧实现） */
-function formatCredits(credits: unknown): string {
-  const match = /x\s*([\d.]+)/i.exec(String(credits || ''))
-  return match ? `${match[1]}x` : String(credits || '')
-}
-
 /**
  * 倍率的**数值**（排序用；解析不出返回 null）。
  *
- * 与 `formatCredits` 共用同一段正则：倍率是各家上游用同一套文本口径写进来的
+ * 倍率是各家上游用同一套文本口径写进来的
  * （`x0.7 credits`，见各家的 `attach_rates`），所以「取不出数值」与「显示成 —」
  * 恰好是同一批行 —— 两处不会出现「显示的倍率和排序依据不是一个数」。
  *
@@ -179,48 +118,6 @@ function providerAvatar(id: string, label: string, glyph?: React.ReactNode): Rea
       {icon ? <img src={icon} alt='' /> : (glyph ?? providerGlyph(label))}
     </span>
   )
-}
-
-/* ─── 能力图标（「能力」列的四枚圆点）──────────────────────
-   文字徽章 → 图标圆点：四个键在每一行都出现，文字版是满屏的小框框；
-   图标版扫表时读的是「几个亮圆」，具体语义由悬停提示兜底。几何与 icons.js
-   同一套约定（24 画布 / 描边 2 / 圆头圆角），内联在本文件 —— icons.js 是
-   vanilla 层的字符串表，岛这边拿不到，也不该为四枚图标跨层取。 */
-
-const CAP_ICON: Partial<Record<CapabilityKey, React.ReactNode>> = {
-  supportsToolCall: (
-    // 扳手（Feather「tool」）
-    <svg viewBox='0 0 24 24' aria-hidden='true'>
-      <path fill='none' stroke='currentColor' strokeWidth='2' strokeLinecap='round' strokeLinejoin='round'
-        d='M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z' />
-    </svg>
-  ),
-  supportsImages: (
-    // 相片（Feather「image」：框 + 焦点 + 山形）
-    <svg viewBox='0 0 24 24' aria-hidden='true'>
-      <g fill='none' stroke='currentColor' strokeWidth='2' strokeLinecap='round' strokeLinejoin='round'>
-        <rect x='3' y='3' width='18' height='18' rx='2.5' /><circle cx='8.5' cy='8.5' r='1.5' />
-        <path d='M21 15l-5-5L5 21' />
-      </g>
-    </svg>
-  ),
-  supportsVideo: (
-    // 播放（圆 + 三角）：「视频」在小尺寸下比摄像机轮廓更可辨
-    <svg viewBox='0 0 24 24' aria-hidden='true'>
-      <g fill='none' stroke='currentColor' strokeWidth='2' strokeLinecap='round' strokeLinejoin='round'>
-        <circle cx='12' cy='12' r='9' /><path d='M10 8.5l6 3.5-6 3.5z' />
-      </g>
-    </svg>
-  ),
-  supportsReasoning: (
-    // 灯泡（Lucide「lightbulb」）
-    <svg viewBox='0 0 24 24' aria-hidden='true'>
-      <g fill='none' stroke='currentColor' strokeWidth='2' strokeLinecap='round' strokeLinejoin='round'>
-        <path d='M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5' />
-        <path d='M9 18h6M10 22h4' />
-      </g>
-    </svg>
-  ),
 }
 
 /** 搜索 / 状态 / 可见性 / 提供商四个条件（口径与旧实现逐条对齐） */
@@ -428,356 +325,13 @@ function ModelsPage() {
     )
   }
 
-  /** chip 上那枚等级标（未绑定时也渲染虚线样式，否则「怎么绑等级」会变成一个查不出的问题） */
-  function levelBadge(alias: string, target: string, providerId: string, busy: boolean) {
-    const level = levelOf(alias, target, providerId)
-    return (
-      // 16px 小件（2xs 档）：原来那枚 mono 10px 的小药丸。已绑定走实心档、未绑定走虚线档，
-      // 与旧 CSS 的 `.alias-level` / `.alias-level.unset` 同一套语义（mono 粗体也照旧）；
-      // shadow-none 是清掉通用 button 规则的投影（旧 CSS 同样显式清过）
-      <Button variant={level ? 'secondary' : 'dashed'} size='2xs' disabled={busy}
-        className='font-mono font-bold shadow-none'
-        title={level ? t('思考等级 {level}（点击修改）', { level }) : t('设置思考等级（当前未绑定）')}
-        onClick={() => openMapping({ alias, target, provider: providerId })}>
-        {level || t('＋等级')}
-      </Button>
-    )
-  }
-
-  /** 映射 chips：每条 chip 属于自己所在的那一行（提供商 × 上游模型），删除时带三元组精确定位 */
-  function aliasCell(model: ManageModel) {
-    const providerId = model.provider || ''
-    const bindings = bindingsOf(model)
-    const [head, ...rest] = bindings
-
-    /**
-     * 删除一条映射：同名映射允许多条，按（对外名 + 上游模型 + 提供商）三元组定位。
-     * 不用先弹确认框的那条路（等级标）见下 —— 它只写一个字段，保存前还能取消。
-     */
-    async function confirmUnmap(alias: string): Promise<void> {
-      const ok = await shared().wbConfirm?.ask?.({
-        title: t('删除映射'),
-        html: t('确定删除映射「<strong>{alias} → {target}</strong>」？', { alias: esc(alias), target: esc(model.id) }),
-        okText: t('删除'),
-        okClass: 'danger',
-      })
-      if (!ok) return
-      void runRowAction(
-        bindingKeyOf(alias, model.id, providerId),
-        () => writeRemoveMapping(providerId, alias, model.id),
-        t('映射已删除'),
-      )
-    }
-
-    const chip = (binding: Binding) => {
-      const alias = binding.alias
-      const on = binding.enabled !== false
-      const busy = state.pending.has(bindingKeyOf(alias, model.id, providerId))
-      return (
-        <span className={cn('alias', !on && 'map-off')} key={`${alias}\u0001${binding.isDefault ? 'd' : 'm'}`}>
-          {/* 映射自己的开关（关掉 = 这条别名暂时不存在，可再打开）。行禁用时 chips 随行压淡，
-              映射开关另用 map-off 弱化 —— 两个维度独立，一眼可辨。size='sm' 是 24×14 的小号，
-              与旧 CSS 里 `.alias .switch .track` 同尺寸：标准档（36×21）塞进 22px 的药丸里
-              会把 chip 连同整张表的行高一起撑高 */}
-          <Switch size='sm' checked={on} disabled={busy}
-            title={on ? t('映射已启用，点击关闭') : t('映射已关闭，点击启用')}
-            aria-label={t('{action}映射 {alias}', { action: on ? t('关闭') : t('启用'), alias })}
-            onCheckedChange={next => {
-              void runRowAction(
-                bindingKeyOf(alias, model.id, providerId),
-                () => writeBinding(providerId, alias, model.id, { enabled: next }),
-                next ? t('映射已启用') : t('映射已关闭'),
-              )
-            }} />
-          {/* 名字本身就是复制入口（data-copy 走 clipboard.js 的全局委托，点一下
-              toast「已复制」）；title 同时承担两件事 —— 提示可点、长名字被
-              ellipsis 截断时悬停能看全 */}
-          <span className='t' data-copy={alias} title={t('点击复制：{name}', { name: alias })}>{alias}</span>
-          {binding.isDefault ? <span className='binding-default'>{t('默认')}</span> : null}
-          {levelBadge(alias, model.id, providerId, busy)}
-          {binding.isDefault ? null : (
-            // 16px 的删除小件（icon-2xs 档）：字号 / 行高照旧 CSS 的 `.alias .x` 给，
-            // 免得 × 跟着 chip 的 11px 一起缩水
-            <Button variant='ghost' size='icon-2xs' className='text-[12px] leading-none'
-              disabled={busy} title={t('删除映射 {alias}', { alias })}
-              onClick={() => void confirmUnmap(alias)}>×</Button>
-          )}
-        </span>
-      )
-    }
-    // 「＋ 映射」并排跟在**默认**那条右边（它是这一列的入口，不是一条绑定）：默认绑定永远
-    // 存在（没有映射时是合成出来的那条），所以这一行永远有内容
-    return (
-      <div className='aliases'>
-        <div className='alias-row'>
-          {head ? chip(head) : null}
-          {/* dashed = 「这里还能再添一个」的入口语义（对应旧的 .alias-add），与旁边那些
-              实心按钮一眼分开 */}
-          <Button variant='dashed' size='xs'
-            onClick={() => openMapping({ target: model.id, provider: providerId })}>{t('＋ 映射')}</Button>
-        </div>
-        {rest.map(chip)}
-      </div>
-    )
-  }
-
-  /**
-   * 「来源」列：这一家的清单当前是远程拉的还是内置静态表（后端给的 source，前端只做文案映射）。
-   * 呈现为「色点 + 小字」（.src）而不是描边徽标：这一列每行都在重复同一个词，徽标的框
-   * 只会添噪 —— 点色语义见 page-gateway.css（远程 = 品牌蓝 / 内置 = 灰 / 手动 = 琥珀）。
-   */
-  function sourceCell(model: ManageModel) {
-    if (model.source === 'manual') {
-      return <span className='src manual' title={t('手动登记的上游模型；移除它会直接删掉这条登记')}><i aria-hidden='true' />{t('手动')}</span>
-    }
-    // 自定义家的行（source 留空串）：只在聚合视图里出现 —— 选中该家时这一列整个
-    // 按视图隐藏。给个明确的「自定义」档而不是落「—」：聚合视图里「—」读起来像
-    // 「来源未知」，而它恰恰是唯一确定的一档（清单就是用户登记的）
-    if (!model.source && customSource.isCustom(model.provider)) {
-      return <span className='src manual' title={t('用户登记的自定义模型；整份清单只属于这一家')}><i aria-hidden='true' />{t('自定义')}</span>
-    }
-    if (model.source !== 'remote' && model.source !== 'builtin') return <span className='rate'>—</span>
-    const remote = model.source === 'remote'
-    const at = formatTime(Number(model.refreshedAt) || 0)
-    const hint = remote
-      ? (at ? t('来自上游目录接口，清单拉取于 {at}；刷新失败时保留上一份成功结果', { at }) : t('来自上游目录接口；刷新失败时保留上一份成功结果'))
-      : t('上游目录尚未拉到，用的是内置静态清单；点「刷新模型清单」可重试')
-    return <span className={cn('src', remote ? 'remote' : 'builtin')} title={hint}><i aria-hidden='true' />{remote ? t('远程') : t('内置')}</span>
-  }
-
-  /**
-   * 「可见性」列：这个模型在**官方客户端**里会不会被列出来。
-   *
-   * ── 三档 + 一档「没有判据」──────────────────────────────────
-   *   · **不展示**（`hidden`）：上游说有、官方客户端不列。本仓已默认关闭它的
-   *     默认绑定（`model_rules::seed_hidden_disabled`）—— 也就是说它既不出现在
-   *     `/v1/models`，也不接受点名调用。用户仍可在这一行手动打开（打开就是
-   *     「我知道它不展示，但我要用」）。
-   *   · **可见**（`shown`）：官方客户端会列它。
-   *   · **未声明**（`undeclared`）：这家有判据、但这条上游没表态。
-   *   · **`—`**（没有 `visibility` 字段）：这家**根本没有**可见性判据。
-   *
-   * 最后两档必须分开显示：`undeclared` 是「这家说不知道」，`—` 是「这家压根
-   * 没这个信息」。混成一个，用户会以为所有没有判据的家都「确认可见」。
-   */
-  function visibilityCell(model: ManageModel) {
-    const visibility = visibilityOf(model)
-    if (visibility === 'hidden') {
-      return (
-        <span className='src hidden-visibility'
-          title={t('上游能列出这个模型，但官方客户端不展示它；本仓已默认关闭它的默认绑定（点这一行的开关可以手动打开）')}>
-          <i aria-hidden='true' />{t('不展示')}
-        </span>
-      )
-    }
-    if (visibility === 'visible') {
-      return (
-        <span className='src shown-visibility' title={t('官方客户端会展示这个模型')}>
-          <i aria-hidden='true' />{t('可见')}
-        </span>
-      )
-    }
-    if (visibility === 'undeclared') {
-      return <span className='rate' title={t('这家有可见性判据，但这一条上游没有表态 —— 按可见处理')}>—</span>
-    }
-    // 没有判据的家：这一格本来就该按视图隐藏吗？不 —— 家是逐行判的（聚合视图里
-    // 有判据的家与没判据的家混在同一张表上），所以给一个带说明的 `—`。
-    return <span className='rate' title={t('这家提供商没有可见性判据（目前只有 Antigravity / Qoder / 小浣熊 / CodeArts 有）')}>—</span>
-  }
-
-  /**
-   * 「上下文 / 输出」列：两个 token 数合在一格（上下文 / 最大输出）。
-   *
-   * 展示的是**生效值**（清单原值 + 覆盖，归一后读）；被覆盖过的那一项挂一枚
-   * 小点（`.cap-mark`，title 说明），未声明的显示 `—`。整格是一个按钮：
-   * 点它打开能力弹窗（两列入口同一个 —— 能力是一个整体，没必要各开一个）。
-   *
-   * **来源也标出来**：这两个数正是 models.dev 补得最多的地方（上游普遍不给），
-   * 所以它补的那些值带一条虚线底边（`.filled`）—— 文字上加不了圆点那样的环，
-   * 虚线底边是同一套语义里唯一贴得上去的写法；悬停提示里还会逐项写明
-   * 「；其中 最大输出 Token 由 models.dev 补齐」。不标的话，用户没法知道这个数
-   * 是上游说的还是社区库说的 —— 两者的可信度不一样。
-   */
-  function budgetCell(model: ManageModel) {
-    const caps = capabilitiesOf(model)
-    const overrides = normalizeOverrides(model.capOverrides)
-    const input = typeof caps.maxInputTokens === 'number' ? caps.maxInputTokens : null
-    const output = typeof caps.maxOutputTokens === 'number' ? caps.maxOutputTokens : null
-    const hint = t('上下文窗口 {input} / 最大输出 Token {output} —— 点击修改模型能力', { input: exactTokens(input), output: exactTokens(output) })
-      + tokenOriginSuffix(model)
-    return (
-      <Button size='default' variant='ghost' type='button' className='caps-open' title={hint}
-        onClick={() => openCapability(model.provider || '', model.id)}>
-        <span className={cn('cap-num', input === null && 'unset', capSourceOf(model, 'maxInputTokens') === 'modelsdev' && 'filled')}>
-          {formatTokens(input)}
-          {overrides.includes('maxInputTokens') ? <i className='cap-mark' title={t('已覆盖上游值')} /> : null}
-        </span>
-        <span className='cap-sep'>/</span>
-        <span className={cn('cap-num', output === null && 'unset', capSourceOf(model, 'maxOutputTokens') === 'modelsdev' && 'filled')}>
-          {formatTokens(output)}
-          {overrides.includes('maxOutputTokens') ? <i className='cap-mark' title={t('已覆盖上游值')} /> : null}
-        </span>
-      </Button>
-    )
-  }
-
-  /**
-   * 悬停提示的**来源尾巴**（只写「不是上游给的」那两档；上游声明/未声明不必写）：
-   * 一格里两个数可能来自不同地方，所以逐项指名，而不是一句笼统的「部分来自
-   * models.dev」。
-   */
-  function tokenOriginSuffix(model: ManageModel): string {
-    const filled = (['maxInputTokens', 'maxOutputTokens'] as const)
-      .filter(key => capSourceOf(model, key) === 'modelsdev')
-      .map(key => CAPABILITY_LABELS[key])
-    return filled.length ? t('；其中 {keys} 由 models.dev 补齐', { keys: filled.join(t('、')) }) : ''
-  }
-
-  /**
-   * 「能力」列：四枚图标圆点（工具 / 图片 / 视频 / 思考），三态各有一副样式 ——
-   * 支持（品牌淡底）/ 明确不支持（灰实底）/ 未声明（虚线圈）。语义全靠悬停提示
-   * （`capabilityTip` 会写明「上游未声明时下游按不支持处理」这类事实），
-   * 图标只负责「扫一眼知道有几项是亮的」。
-   */
-  function capsCell(model: ManageModel) {
-    const caps = capabilitiesOf(model)
-    const overrides = normalizeOverrides(model.capOverrides)
-    return (
-      <Button size='default' variant='ghost' type='button' className='caps-open caps-badges'
-        title={t('对下游声明的能力（工具调用 / 图片识别 / 视频识别 / 支持思考）—— 点击修改')}
-        onClick={() => openCapability(model.provider || '', model.id)}>
-        {BOOLEAN_KEYS.map(key => {
-          const value = caps[key] ?? null
-          const state = capabilityState(value)
-          const overridden = overrides.includes(key)
-          const source = capSourceOf(model, key)
-          return (
-            <span key={key} className={cn('cap-dot', state, source === 'modelsdev' && 'filled', overridden && 'marked')}
-              title={capabilityTip(key, value, overridden, source)}>
-              {CAP_ICON[key]}
-              {overridden ? <i className='cap-mark' /> : null}
-            </span>
-          )
-        })}
-      </Button>
-    )
-  }
-
-  /**
-   * 各列的单元格（不含对齐类）。放在一个 switch 里而不是行内联的三元链，是为了让「某一列长
-   * 什么样」只有一处实现 —— 列设置重排时才不会各画一个样。
-   *
-   * 操作列只移除「可移除的」：内置家里是手动登记的那些（source=manual，上游目录带来的行由
-   * 清单决定存在性，开关才是它的手段），自定义家里每一行都是用户自己登记进来的、都可以移除。
-   * 对外名称统一在模型映射列切换。
-   */
-  function cellFor(column: ColumnView, model: ManageModel, busyRow: boolean) {
-    /**
-     * 「移除」删掉的是那条**登记**（它的存在完全由这次登记决定，没有「上游刷新会把它带回来」
-     * 这回事，移除后 /v1/models、路由同时消失）。判据用后端给的 source，前端不自己推断。
-     */
-    async function confirmRemoveModel(): Promise<void> {
-      const ok = await shared().wbConfirm?.ask?.({
-        title: t('移除自定义模型'),
-        html: t('确定移除自定义模型「<strong>{id}</strong>」？这条登记会被<b>直接移除</b>，之后 <code>/v1/models</code> 不再广告它、请求它也会被拒。', { id: esc(model.id) }),
-        okText: t('移除'),
-        okClass: 'danger',
-      })
-      if (!ok) return
-      void runRowAction(
-        rowKeyOf(model),
-        () => writeRemoveModel(model.provider || '', model.id),
-        // 文案按**行**的归属判（聚合视图里两家的行混在一张表上，视图级 custom 不再适用）
-        customSource.isCustom(model.provider || '') ? t('模型已移除') : t('自定义模型已移除'),
-      )
-    }
-
-    switch (column.key) {
-      case 'check':
-        return (
-          <TableCell className={cellClass('cell-check', column.align)}>
-            <Checkbox checked={selection.has(rowKeyOf(model))} title={t('勾选后可批量操作')}
-              aria-label={t('勾选后可批量操作')}
-              onCheckedChange={next => togglePick(rowKeyOf(model), next === true)} />
-          </TableCell>
-        )
-      case 'model':
-        return (
-          <TableCell className={cellClass('cell-model', column.align)}>
-            {/* 名字本身就是复制入口（data-copy 走 clipboard.js 的全局委托，点一下
-                toast「已复制」）；title 同时承担两件事 —— 提示可点、长 ID 被
-                ellipsis 截断时悬停能看全。曾经这里另挂一颗 ⧉ 小按钮，已去掉：
-                点名字更省事，也少一个悬停才显形的控件 */}
-            <div className='mid'>
-              <span className='t' data-copy={model.id} title={t('点击复制：{name}', { name: model.id })}>{model.id}</span>
-              {model.kind === 'image' ? <span className='binding-default' title='POST /v1/images/generations'>{t('图片生成')}</span> : null}
-              {model.supports_image_editing ? <span className='binding-default' title='POST /v1/images/edits'>{t('图片编辑')}</span> : null}
-              {model.upstreamStatus === 'undeployed' ? (
-                <Badge variant='warning' shape='tag'
-                  title={t('上游目录列出了这个模型，但推理端尚未识别；保留在清单中，后续探测成功后自动清除标记')}>
-                  {t('上游未部署')}
-                </Badge>
-              ) : null}
-            </div>
-            {model.name && model.name !== model.id ? <div className='mname'>{model.name}</div> : null}
-          </TableCell>
-        )
-      case 'rate':
-        return (
-          <TableCell className={cellClass('cell-rate', column.align)}>
-            <span className='rate'>{model.credits ? formatCredits(model.credits) : '—'}</span>
-          </TableCell>
-        )
-      case 'source':
-        return <TableCell className={cellClass('cell-source', column.align)}>{sourceCell(model)}</TableCell>
-      case 'visibility':
-        return <TableCell className={cellClass('cell-visibility', column.align)}>{visibilityCell(model)}</TableCell>
-      case 'budget':
-        return <TableCell className={cellClass('cell-budget', column.align)}>{budgetCell(model)}</TableCell>
-      case 'caps':
-        return <TableCell className={cellClass('cell-caps', column.align)}>{capsCell(model)}</TableCell>
-      case 'alias':
-        return <TableCell className={cellClass('cell-alias', column.align)}>{aliasCell(model)}</TableCell>
-      case 'act': {
-        // 「测试」的门禁（该家没有可用账号）由 model-test-dialog 统一判定，这里只把
-        // 理由挂到 title 上 —— 禁用而不说原因等于让用户猜。未启用的行**不置灰**：
-        // 「先测通、再决定要不要启用」正是这颗按钮的用法（后端给测试开了直达跳，
-        // 见 model-test-dialog 的 testBlockReason）
-        const blocked = testBlockReason(model.provider || '', model)
-        // 移除按钮判据按**行**判（聚合视图里内置与自定义的行混在一张表上，视图级的
-        // custom 布尔不再适用）：内置家只露手动登记的（source=manual，上游目录带来的
-        // 行由清单决定存在性），自定义家的每一行都是用户登记的、都可以移除
-        const removable = model.source === 'manual' || customSource.isCustom(model.provider || '')
-        return (
-          <TableCell className={cellClass('cell-act r', column.align)}>
-            <div className='row-actions'>
-              <Button variant='ghost' size='sm' disabled={Boolean(blocked)}
-                title={blocked || t('以这个上游模型发一次最小请求，走真实转发链路')}
-                onClick={() => setTestTarget({ provider: model.provider || '', id: model.id })}>
-                {t('测试')}
-              </Button>
-              {removable ? (
-                <Button variant='ghost' size='sm' className='text-destructive' disabled={busyRow}
-                  onClick={() => void confirmRemoveModel()}>{t('移除')}</Button>
-              ) : null}
-            </div>
-          </TableCell>
-        )
-      }
-      default:
-        return null
-    }
-  }
-
   function modelRow(model: ManageModel) {
-    const busyRow = state.pending.has(rowKeyOf(model))
     // 勾选的行挂 .sel：品牌淡底（比 hover 高一档），让「选中的是哪几行」在滚动后仍可辨
     const picked = selection.has(rowKeyOf(model))
     return (
       <TableRow key={`${model.provider || ''}\u0001${model.id}`} className={cn(picked && 'sel')}>
-        {columns.map(column => (
-          <React.Fragment key={column.key}>{cellFor(column, model, busyRow)}</React.Fragment>
-        ))}
+        <ModelCell model={model} selection={selection} togglePick={togglePick}
+          setTestTarget={setTestTarget} columns={columns} />
       </TableRow>
     )
   }
@@ -924,7 +478,6 @@ function ModelsPage() {
                     {(() => {
                       const n = (state.stateFilter !== 'all' ? 1 : 0)
                         + (state.visibilityFilter !== 'all' ? 1 : 0)
-                        + (state.sort !== 'default' ? 1 : 0)
                         + (String(state.search || '').trim() ? 1 : 0)
                       return n > 0 ? <Badge variant='brand' shape='tag' className='mm-filter-badge'>{n}</Badge> : null
                     })()}
@@ -936,7 +489,6 @@ function ModelsPage() {
                 actions={<Button variant='ghost' size='sm' onClick={() => {
                   setStateFilter('all')
                   setVisibilityFilter('all')
-                  setSort('default')
                   setSearch('')
                 }}>{t('清空')}</Button>}>
                 {/* 状态筛选：语义、键盘、滑块都在组件库里，取值仍以快照为准（完全受控） */}
@@ -948,10 +500,6 @@ function ModelsPage() {
                     看到清单全貌（落盘，下次打开记住）。 */}
                 <SegmentedControl options={MODEL_VISIBILITY_OPTIONS} value={state.visibilityFilter}
                   onValueChange={setVisibilityFilter} aria-label={t('按可见性筛选')} className='shrink-0' />
-                {/* 排序档位（issue #161）：默认 / 倍率升序 / 倍率降序。挑便宜模型时
-                    按倍率排比按名称排有用得多 —— 与状态筛选同一套（受控 + 落盘） */}
-                <SegmentedControl options={MODEL_SORT_OPTIONS} value={state.sort}
-                  onValueChange={setSort} aria-label={t('按倍率排序')} className='shrink-0' />
                 {/* 搜索框：InputGroup + addon 图标（与 input-control.tsx 的用法一致）。
                     刻意**不带** data-island-input：那是输入框岛（就地升级）的钩子，
                     两个岛同时挂一个输入框会打架。宽度：桌面 240px；手机上整行
@@ -975,14 +523,9 @@ function ModelsPage() {
               </ResponsiveSheet>
             </CardHeader>
             <div className='models-table-wrap'>
-              {/* 表骨架（colgroup + thead）是**字面量**、永远按 index.html 的原始顺序渲染全部
-                  8 列、不随任何状态变化：列的显隐与顺序由 wbColSettings.syncStaticHead 就地
-                  重排（隐藏 = 从 DOM 摘掉，不能重建 —— <col> 上带着拖出来的列宽、<th> 里插着
-                  列宽把手）。React 只在同一位置同类型的子节点上做属性 diff，除勾选列外这几个
-                  th 的 props 与文本逐字不变，重渲染时一次 DOM 写都不会发生，摘掉的列不会被塞
-                  回来（勾选列是全选复选框，唯一内容会变的 th —— 只会被更新、不会被重建，
-                  完整论证见文件头的「静态表头」一节）。
-                  数据行相反：完全按 visibleColumns() 逐列渲染，与表头读同一份配置。 */}
+              {/* 列设置会就地移动或摘下 th / col，因此表头骨架始终渲染全部列，
+                  不按可见列重建；动态内容只更新原节点，保留列宽和拖动把手。
+                  数据行按 visibleColumns() 的顺序渲染。 */}
               <Table container={false} className='models-table' ref={el => setTableEl(el)}>
                 <colgroup>
                   <col className='c-check' data-col='check' />
@@ -998,7 +541,18 @@ function ModelsPage() {
                 <TableHeader><TableRow>
                   <TableHead data-col='check'>{allPickNode}</TableHead>
                   <TableHead data-col='model'>{t('上游模型')}</TableHead>
-                  <TableHead data-col='rate'>{t('倍率')}</TableHead>
+                  <TableHead data-col='rate'
+                    sortDirection={sort === 'rate-asc' ? 'asc' : sort === 'rate-desc' ? 'desc' : false}
+                    sortLabel={sort === 'rate-asc'
+                      ? t('倍率升序，点击切换为降序')
+                      : sort === 'rate-desc'
+                        ? t('倍率降序，点击切换为升序')
+                        : t('按倍率升序排列')}
+                    title={t('按提供商分组排序，已启用模型优先；未知倍率排在末尾')}
+                    onSortChange={direction => {
+                      setSort(`rate-${direction}`)
+                      paging.goto(1)
+                    }}>{t('倍率')}</TableHead>
                   <TableHead data-col='visibility' title={t('这个模型在官方客户端里是否会被展列；不展示的那些默认已关闭（含默认绑定）')}>{t('可见性')}</TableHead>
                   <TableHead data-col='source'>{t('来源')}</TableHead>
                   {/* 表头只留短标题，完整口径进问号提示（原括号长标题让表头喧宾夺主）。
@@ -1082,360 +636,6 @@ function ModelsPage() {
           onDone={() => { setSelection(new Set()); setBatchOpen(false) }} />
         : null}
     </>
-  )
-}
-
-/* ─── 映射弹窗 ───────────────────────────────── */
-
-/** 弹窗里问号那枚说明（原文照抄 index.html 的 data-tip，别删条目 —— 每一条都是踩过的边界） */
-const REASONING_TIP = t('绑定在「对外名 → 上游模型」这一条映射上的思考等级（列表照抄 OmniProxy 的手动绑定），选「不覆盖」表示不给这条映射指定等级。它会跟着这条映射注入转发，由承载的那家翻译成自己的档位字段（CatPaw 归并成 low/high/max，Qoder 按模型声明的档位归一）。以下几种情况故意不注入：① off / none（关闭思考）—— 本项目没有安全的表达方式；② 表外的自定义等级（各家能力范围不同，无法判断上游收不收）；③ 客户端请求体里已经自己指定了档位（那是更明确的意图，绑定不覆盖）；④ 这家上游不认识档位字段（如 WorkBuddy / 小浣熊 / AutoClaw / Cline）。注入与跳过都会写进详细日志。')
-
-/** 上游下拉的初值：候选里有就用候选里的原始拼写（value 必须与 option 逐字相同才会选中） */
-function pickUpstream(providerId: string, keep: string, locked: boolean): string {
-  const options = upstreamOptions(providerId)
-  const wanted = (keep || '').trim()
-  const hit = options.find(item => item.id.toLowerCase() === wanted.toLowerCase())
-  if (hit) return hit.id
-  // 锁定态**保住** keep：孤儿映射的 target 恰恰常常不在该家清单里（那正是它挂不上行的原因），
-  // 丢掉它会让「设置思考等级」保存时把三元组换成另一个模型，等级存到错的地方而界面上看不出异常
-  if (locked && wanted) return wanted
-  return options[0]?.id || ''
-}
-
-/**
- * 映射弹窗。入口只剩行内两处 —— 行尾「＋ 映射」新建、点别名 chip 改等级 —— 所以 context
- * 总是带着这一行的身份：提供商与上游模型锁定（改了就变成另一条映射），`context.alias` 有值时
- * 连对外名也锁定，只留等级可动（「设置思考等级」形态）。
- *
- * 上游模型**只能是下拉**（数据来自该家当前清单）。这里曾经放开过「手动输入上游模型 ID」，
- * 已删除：对外名只有在目标模型已被广告时才会跟着进广告视图，而入口校验以广告视图为准 ——
- * 手输一个清单里没有的名字，映射建了也永远调不通。要用清单外的模型，正确做法是顶部的
- * 「＋ 添加模型」把它登记进该家清单，之后它自然出现在这里的下拉里。
- */
-function MappingDialog({ context, onClose }: { context: MappingContext; onClose: () => void }) {
-  const editing = Boolean(context.alias)
-  const [provider, setProvider] = React.useState(() => context.provider || providerOptions()[0]?.id || '')
-  const [alias, setAlias] = React.useState(context.alias || '')
-  // 初值用上面那个 provider（context.provider 为空时它已经落到了首项），两者必须同源
-  const [upstream, setUpstream] = React.useState(() => pickUpstream(provider, context.target, true))
-  const [status, setStatus] = React.useState('')
-  const [saving, setSaving] = React.useState(false)
-  /**
-   * 思考等级：`select` 是下拉的当前值（'' = 不覆盖 / 某个等级 / CUSTOM_LEVEL），`custom` 是
-   * 自定义输入框里的字。keep 不在候选里（用户上次填的自定义值、或后端调整过候选表）时落到
-   * 「自定义」那一项并把值填进输入框 —— 直接丢掉会让「改别的字段时顺手把等级抹掉」。
-   *
-   * 候选表按**当前选中的目标模型**取（三级回落见 `models-reasoning.levels`）：先把等级绑在
-   * A 模型上、再把上游改成 B，B 不认识这个档位时同样落到「自定义」，不静默改值。
-   */
-  const [reasoning, setReasoning] = React.useState(() => {
-    const candidates = reasoningLevels(getSnapshot().data, modelRow(provider, upstream))
-    const current = editing ? levelOf(context.alias, context.target, context.provider) : ''
-    if (current && candidates.includes(current)) return { select: current, custom: '' }
-    return { select: current ? CUSTOM_LEVEL : '', custom: current }
-  })
-
-  const candidates = reasoningLevels(getSnapshot().data, modelRow(provider, upstream))
-  /** 提供商候选：表格里出现过的家，再补上上下文那一家（孤儿映射可能属于「整个没进表格」的家） */
-  const providerChoices = (() => {
-    const options = providerOptions()
-    for (const id of [context.provider, provider]) {
-      if (id && !options.some(item => item.id === id)) {
-        options.push({ id, label: t(shared().wbProviders?.labelOf?.(id) || id) })
-      }
-    }
-    return options
-  })()
-  /** 上游候选：锁定态下 keep 不在清单里时补进去（见 pickUpstream 的说明） */
-  const upstreamChoices = (() => {
-    const options = upstreamOptions(provider)
-    const wanted = (upstream || '').trim()
-    if (wanted && !options.some(item => item.id.toLowerCase() === wanted.toLowerCase())) {
-      options.unshift({ id: wanted, label: t('{name}（不在该家当前清单里）', { name: wanted }), off: true })
-    }
-    return options
-  })()
-
-  const providerLabel = providerChoices.find(item => item.id === provider)?.label || provider || t('(全局)')
-  /**
-   * 显示用的等级：已选的档位不在当前候选里（换了上游 / 后端换了候选表）时按「自定义」呈现
-   * —— 与初始化同一条规则，值留在输入框里而不是被静默抹掉（派生态，不改 state）。
-   */
-  const active = reasoning.select && reasoning.select !== CUSTOM_LEVEL && !candidates.includes(reasoning.select)
-    ? { select: CUSTOM_LEVEL, custom: reasoning.custom || reasoning.select }
-    : reasoning
-  const level = active.select === CUSTOM_LEVEL ? active.custom.trim() : active.select
-  const showCustomLevel = active.select === CUSTOM_LEVEL
-
-  /** 换了一家，上游候选整体换掉（保留同名项，切回来时不用重选） */
-  function changeProvider(next: string): void {
-    setProvider(next)
-    setUpstream(pickUpstream(next, upstream, true))
-  }
-
-  async function save(): Promise<void> {
-    if (saving) return
-    const wanted = editing ? (context.alias || '') : alias.trim()
-    const target = upstream
-    if (!wanted) { setStatus(t('请填写对外映射名')); return }
-    // 下拉为空 = 这一家清单里一个模型都没有（还没加账号 / 清单没拉到）
-    if (!target) { setStatus(t('该提供商当前没有可选的上游模型')); return }
-    if (!provider) { setStatus(t('请选择提供商')); return }
-    if (!editing && same(wanted, target)
-      && models().some(model => same(model.id, target) && same(model.provider, provider))) {
-      setStatus(t('原始 ID 已作为默认绑定，请直接使用该绑定的开关或等级按钮'))
-      return
-    }
-    setSaving(true)
-    setStatus(t('保存中…'))
-    try {
-      // `reasoning` **总是显式给出**（空串 = 清空绑定）：三元组相同走的也是这条接口，而用户
-      // 在这个弹窗里看到的就是他要的结果 —— 传 undefined（= 不改）会让「从 high 改成不覆盖」
-      // 这一步静默无效
-      accept(await writeBinding(provider, wanted, target, { reasoning: level }))
-      setSaving(false)
-      onClose()
-      const suffix = level ? t(' · 思考等级 {level}', { level }) : ''
-      // 展示名走注册表 / 自定义目录：直接印 provider id 时，自定义家会显示成一串
-      // custom-3f2a91b04c7e，用户认不出是哪一家
-      const label = t(shared().wbProviders?.labelOf?.(provider) || provider)
-      toast(editing ? t('✅ 已更新 {name} 的思考等级', { name: wanted }) : t('✅ 已添加映射 {name} → {target}（{label}）{suffix}', { name: wanted, target, label, suffix }))
-    } catch (error) {
-      setStatus(t('保存失败：{message}', { message: errorMessage(error) }))
-      setSaving(false)
-    }
-  }
-
-  const onEnter = (event: React.KeyboardEvent) => {
-    if (event.key !== 'Enter') return
-    event.preventDefault()
-    void save()
-  }
-
-  return (
-    <Dialog open onOpenChange={(next, eventDetails) => {
-      if (next) return
-      // 保存中不许关：关掉会让「到底存没存进去」变成未知状态。必须走 eventDetails.cancel()
-      // —— 光「不更新 open prop」拦不住 Base UI 的 store
-      if (saving) { eventDetails.cancel(); return }
-      onClose()
-    }}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{editing ? t('设置思考等级') : t('添加模型映射')}</DialogTitle>
-        </DialogHeader>
-        <DialogBody>
-          <div className='flex flex-col gap-1.5'>
-            <Label htmlFor='mapping-provider'>{t('提供商')}</Label>
-            {/* 锁定 = 行内入口：提供商与上游模型就是这一行，不允许改 */}
-            <Select value={provider} disabled onValueChange={next => changeProvider(String(next))}>
-              <SelectTrigger id='mapping-provider' className='w-full'>
-                <SelectValue>{providerChoices.find(item => item.id === provider)?.label || provider}</SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                {providerChoices.map(item => (
-                  <SelectItem key={item.id} value={item.id}>{item.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className='grid grid-cols-[1fr_24px_1fr] items-end gap-2.5'>
-            <div className='flex min-w-0 flex-col gap-1.5'>
-              <Label htmlFor='mapping-alias'>{t('对外映射名（下游请求时用）')}</Label>
-              <Input id='mapping-alias' maxLength={128} placeholder={t('例如 gpt-4o')} autoComplete='off'
-                autoFocus={!editing} value={alias} disabled={editing}
-                onChange={event => setAlias(event.currentTarget.value)} onKeyDown={onEnter} />
-            </div>
-            <div className='pb-2 text-center text-muted-foreground'>→</div>
-            <div className='flex min-w-0 flex-col gap-1.5'>
-              <Label htmlFor='mapping-upstream'>{t('转发到上游模型')}</Label>
-              <Select value={upstream} disabled onValueChange={next => setUpstream(String(next))}>
-                <SelectTrigger id='mapping-upstream' className='w-full'>
-                  <SelectValue>{upstreamChoices.find(item => item.id === upstream)?.label || upstream}</SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {upstreamChoices.map(item => (
-                    <SelectItem key={item.id} value={item.id}>
-                      {item.label}{item.off ? t('（已禁用）') : ''}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          {/* 预览：当前选择会变成哪一条映射（等级一起显示，保存前就能核对） */}
-          <div className='rounded-md border border-border bg-surface-inset px-3 py-2.5 font-mono text-[12px] text-subtle'>
-            {t('下游请求 ')}<b className='text-primary-fg'>{alias.trim() || t('<对外名>')}</b>{t(' → 转发')}{' '}
-            <b className='text-primary-fg'>{upstream || t('<上游模型>')}</b>{t('（{label}）', { label: providerLabel })}
-            {level ? <>{t(' · 思考等级 ')}<b className='text-primary-fg'>{level}</b></> : null}
-          </div>
-          <div className='flex flex-col gap-1.5'>
-            <div className='flex items-center gap-[7px]'>
-              <Label htmlFor='mapping-reasoning'>{t('思考等级')}</Label>
-              {/* 问号走组件库 Tooltip（旧的 data-tip + desktop-tooltip.tsx 是同一目标的更简陋版本） */}
-              <Tooltip>
-                <TooltipTrigger render={<span className='tip-q' tabIndex={0} aria-label={t('思考等级的注入规则')} />}>?</TooltipTrigger>
-                <TooltipContent>{REASONING_TIP}</TooltipContent>
-              </Tooltip>
-            </div>
-            <Select value={active.select} onValueChange={next => {
-              const value = String(next)
-              setReasoning(prev => ({ ...prev, select: value }))
-            }}>
-              {/* 改等级形态没别的可填，把焦点直接放在等级下拉上（旧实现是 setTimeout 里 focus） */}
-              <SelectTrigger id='mapping-reasoning' className='w-full' autoFocus={editing}>
-                <SelectValue>{active.select === CUSTOM_LEVEL
-                  ? t('自定义等级…')
-                  : (active.select || t('不覆盖'))}</SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value=''>{t('不覆盖')}</SelectItem>
-                {candidates.map(candidate => (
-                  <SelectItem key={candidate} value={candidate}>{candidate}</SelectItem>
-                ))}
-                <SelectItem value={CUSTOM_LEVEL}>{t('自定义等级…')}</SelectItem>
-              </SelectContent>
-            </Select>
-
-            {showCustomLevel ? (
-              <Input id='mapping-reasoning-custom' maxLength={32} autoFocus
-                placeholder={t('自定义等级（例如 custom-high）')} autoComplete='off'
-                disabled={saving} value={active.custom}
-                onChange={event => setReasoning(prev => ({ ...prev, custom: event.currentTarget.value }))}
-                onKeyDown={onEnter} />
-            ) : null}
-          </div>
-          <p className='text-xs leading-[1.65] text-subtle'>
-            {t('对外名可自由命名，允许与上游模型 ID 同名（同名时该上游的原生路由优先，映射作兜底）； 支持字母、数字与 ')}<code>- _ . / :</code>{t('。同一对外名可在多个提供商各添加一条： 下游用同一个名字请求，网关按账号优先级主备切换，失败自动落到下一个提供商。')}
-          </p>
-          {/* 状态行：高度固定，出现错误时弹窗不跳高 */}
-          <div className='min-h-[18px] text-xs text-subtle'>{status}</div>
-        </DialogBody>
-        <DialogFooter>
-          <div className='mr-auto' />
-          <Button variant='outline' onClick={onClose}>{t('取消')}</Button>
-          <Button variant='default' disabled={saving} onClick={() => void save()}>
-            {editing ? t('保存等级') : t('保存映射')}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-/* ─── 添加模型弹窗 ───────────────────────────── */
-
-/**
- * 「＋ 添加模型」：手动登记一个「上游目录里没有、但实际能路由」的模型（灰度中的新模型、按
- * 账号下发却没进目录的模型）。登记后它**真的进入该家清单**（后端在 `catalog::manifest_for`
- * 里拼接），于是表格里出现这一行、`/v1/models` 会广告它、路由与转发也都认它 —— 与内置模型
- * 相比只少几个能力位元数据（用户无从知道那些值，编一个等于对下游撒谎）。
- */
-function CustomModelDialog({ initial, onClose }: { initial: CustomModelContext; onClose: () => void }) {
-  const [provider, setProvider] = React.useState(initial.provider)
-  const [id, setId] = React.useState('')
-  const [status, setStatus] = React.useState('')
-  const [saving, setSaving] = React.useState(false)
-
-  const choices = (() => {
-    const options = customProviderOptions()
-    if (provider && !options.some(item => item.id === provider)) {
-      options.push({ id: provider, label: t(shared().wbProviders?.labelOf?.(provider) || provider) })
-    }
-    return options
-  })()
-  // 候选里没有当前值时退回首项（原生 select 赋一个不存在的值也是这个结果）
-  const providerValue = choices.some(item => item.id === provider) ? provider : (choices[0]?.id || '')
-  const providerLabel = choices.find(item => item.id === providerValue)?.label || providerValue || t('(未选)')
-
-  async function save(): Promise<void> {
-    if (saving) return
-    const value = id.trim()
-    if (!providerValue) { setStatus(t('请选择提供商')); return }
-    if (!value) { setStatus(t('请填写上游模型 ID')); return }
-    setSaving(true)
-    setStatus(t('保存中…'))
-    try {
-      const next = await writeAddModel(providerValue, value)
-      accept(next)
-      setSaving(false)
-      onClose()
-      const label = choices.find(item => item.id === providerValue)?.label || providerValue
-      if (customSource.isCustom(currentProvider())) {
-        // 自定义家的清单就是用户自己的登记表，登记了必然出现在表里，所以只有一句成功提示
-        toast(t('✅ 已登记模型 {name}（{label}）', { name: value, label }))
-      } else {
-        // 内置家：登记成功但表格里看不到这一行时，必须说清为什么 —— 表格只列「当前有可用
-        // 登录态」的家，给一个还没加账号的家登记模型不会立刻出现。不说的话用户会以为没保存成功
-        const view = next as ManageView | null
-        const visible = Array.isArray(view?.models)
-          && view.models.some(item => item.id === value && (item.provider || '') === providerValue)
-        if (visible) toast(t('✅ 已登记自定义模型 {name}（{label}）', { name: value, label }))
-        else toast(t('✅ 已登记 {name}（{label}），但该提供商还没有可用账号，这一行要加上账号后才会显示', { name: value, label }), 'err')
-      }
-    } catch (error) {
-      setStatus(t('保存失败：{message}', { message: errorMessage(error) }))
-      setSaving(false)
-    }
-  }
-
-  const onEnter = (event: React.KeyboardEvent) => {
-    if (event.key !== 'Enter') return
-    event.preventDefault()
-    void save()
-  }
-
-  return (
-    <Dialog open onOpenChange={(next, eventDetails) => {
-      // 保存中不许关：关掉会让「到底存没存进去」变成未知状态
-      if (next) return
-      if (saving) { eventDetails.cancel(); return }
-      onClose()
-    }}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{t('添加自定义模型')}</DialogTitle>
-        </DialogHeader>
-        <DialogBody>
-          <div className='flex flex-col gap-1.5'>
-            <Label htmlFor='custom-model-provider'>{t('提供商')}</Label>
-            <Select value={providerValue} disabled={initial.locked}
-              onValueChange={next => setProvider(String(next))}>
-              <SelectTrigger id='custom-model-provider' className='w-full'>
-                <SelectValue>{providerLabel}</SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                {choices.map(item => (
-                  <SelectItem key={item.id} value={item.id}>{item.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className='flex flex-col gap-1.5'>
-            <Label htmlFor='custom-model-id'>{t('上游模型 ID')}</Label>
-            <Input id='custom-model-id' maxLength={128} placeholder={t('例如 gpt-5.5-preview')}
-              autoComplete='off' spellCheck={false} autoFocus value={id}
-              onChange={event => setId(event.currentTarget.value)} onKeyDown={onEnter} />
-          </div>
-          <div className='rounded-md border border-border bg-surface-inset px-3 py-2.5 font-mono text-[12px] text-subtle'>
-            {t('在 ')}<b className='text-primary-fg'>{providerLabel}</b>{t(' 上登记上游模型')}{' '}
-            <b className='text-primary-fg'>{id.trim() || t('<上游模型 ID>')}</b>{t('（登记后即可用这个名字请求）')}
-          </div>
-          <p className='text-xs leading-[1.65] text-subtle'>
-            {t('填上游真正认识的那个模型 ID（不是给下游用的名字）。登记后它会进入该家的模型清单： 表格里出现这一行、')}<code>/v1/models</code>{t(' 会广告它、请求它也会被转发到这家。 支持字母、数字与 ')}<code>- _ . / :</code>{t('。')}
-          </p>
-          <p className='text-xs leading-[1.65] text-subtle'>
-            {t('「来源」列会标成')}<b>{t('手动')}</b>{t('，与远程目录 / 内置清单区分开。删除自定义模型是')}<b>{t('直接移除')}</b>{t('这条登记（不像内置模型那样只是隐藏），因为它的存在完全由这次登记决定。')}
-          </p>
-          <div className='min-h-[18px] text-xs text-subtle'>{status}</div>
-        </DialogBody>
-        <DialogFooter>
-          <div className='mr-auto' />
-          <Button variant='outline' onClick={onClose}>{t('取消')}</Button>
-          <Button variant='default' disabled={saving} onClick={() => void save()}>{t('保存')}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   )
 }
 

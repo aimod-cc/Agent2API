@@ -19,12 +19,8 @@
 //! 一样可信，而它们的可信度差着量级。
 //!
 //! ── 思考档位的归一（同一处完成）─────────────────────────────
-//! 三家各用自己的键名声明「这个模型认识哪些档位」：ZCode 是
-//! `reasoningLevels`（本就是出口键名），Accio 是 `reasoningEfforts`，Qoder 是
-//! `efforts`。这些键**各自有主**（三家的适配器按它们翻译/回退，见
-//! `providers/accio/protocol.rs`、`providers/qoder/protocol.rs`），本模块只
-//! **只读**地把它们归一成出口那一对键（`reasoningLevels` +
-//! `reasoningDefaultLevel`），原键一个都不改、不删。
+//! 各家的档位列表、默认档和固定档在此归一，原字段保持不变。
+//! 上游明确声明空表或不支持绑定时，不用 models.dev 的档位覆盖通道事实。
 //!
 //! 归一后的档位列表来源优先级：**这家自己声明 > models.dev 的 effort 列表**。
 //! 都拿不到就**不出这个键** —— 前端据此回落通用档位表（「未声明」与「一档都
@@ -115,23 +111,51 @@ pub fn apply(item: &mut Value) {
 
 /// 归一逐模型档位（原键只读，见模块头）。
 fn normalize_levels(item: &mut Value, record: Option<&Record>) {
-    let declared = LEVEL_KEYS
-        .iter()
-        .find_map(|key| item.get(*key).and_then(levels_of))
-        .filter(|levels| !levels.is_empty());
-    let levels = match declared {
-        Some(levels) => levels,
-        None => record.map(|record| record.levels.clone()).unwrap_or_default(),
+    let declared = item.pointer("/reasoning/supportedEfforts").and_then(levels_of)
+        .or_else(|| LEVEL_KEYS.iter().find_map(|key| item.get(*key).and_then(levels_of)));
+    let binding_supported = item.get("reasoningBindingSupported").and_then(Value::as_bool);
+    let fixed = if binding_supported == Some(false) { None } else {
+        item.get("reasoningFixedLevel").and_then(level_text).or_else(|| {
+            if declared.as_ref().is_some_and(|levels| !levels.is_empty()) { return None; }
+            item.pointer("/reasoning/effort").and_then(level_text)
+        })
     };
-    if levels.is_empty() {
-        return;
+    let explicit = declared.is_some() || fixed.is_some() || binding_supported == Some(false);
+    let levels = if binding_supported == Some(false) { Vec::new() }
+    else if let Some(fixed) = &fixed {
+        vec![fixed.clone()]
+    } else if explicit {
+        declared.unwrap_or_default()
+    } else {
+        record.map(|record| record.levels.clone()).unwrap_or_default()
+    };
+    let default = item.get("reasoningDefaultLevel").and_then(level_text)
+        .or_else(|| item.pointer("/reasoning/defaultEffort").and_then(level_text))
+        .or_else(|| item.pointer("/reasoning/effort").and_then(level_text))
+        .and_then(|value| {
+            if levels.is_empty() && item.get("supportsReasoning").and_then(Value::as_bool) != Some(false) { Some(value) }
+            else { levels.iter().find(|level| level.eq_ignore_ascii_case(&value)).cloned() }
+        }).or_else(|| fixed.clone());
+    let source = item.get("reasoningSource").and_then(Value::as_str)
+        .filter(|source| matches!(*source, "upstream" | "modelsdev" | "undeclared"))
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            (if explicit { "upstream" } else if !levels.is_empty() { "modelsdev" } else { "undeclared" })
+                .to_string()
+        });
+    let Some(object) = item.as_object_mut() else { return };
+    if explicit || !levels.is_empty() {
+        object.insert("reasoningLevels".into(), json!(levels));
     }
-    if let Some(object) = item.as_object_mut() {
-        object.insert(
-            "reasoningLevels".to_string(),
-            Value::Array(levels.into_iter().map(Value::String).collect()),
-        );
-    }
+    object.remove("reasoningDefaultLevel");
+    object.remove("reasoningFixedLevel");
+    if let Some(default) = default { object.insert("reasoningDefaultLevel".into(), json!(default)); }
+    if let Some(fixed) = fixed { object.insert("reasoningFixedLevel".into(), json!(fixed)); }
+    object.insert("reasoningSource".into(), json!(source));
+}
+
+fn level_text(value: &Value) -> Option<String> {
+    value.as_str().map(str::trim).filter(|value| !value.is_empty()).map(str::to_string)
 }
 
 /// 从清单项的一个档位键里读出档位表（非数组 / 空串 / 数字一律丢弃）。

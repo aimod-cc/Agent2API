@@ -1,10 +1,10 @@
-//! 全局顺序来自账号库与消耗规则；只有模型独立配置覆盖顺序。
+//! 全局顺序来自账号库与消耗规则；参与范围独立于展示名单。
 
 use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::server::config::{self, RoutingProfile};
+use crate::server::config::{self, RoutingProfile, RoutingProviderScope};
 use super::{account_order, routing};
 
 pub fn providers_for(model: &str, available: &[String]) -> Vec<String> {
@@ -16,8 +16,12 @@ pub fn providers_for(model: &str, available: &[String]) -> Vec<String> {
             } else {
                 available.to_vec()
             };
-            providers.retain(|id| available.contains(id) && profile.providers.contains(id)
-                && !profile.disabled_providers.contains(id));
+            if profile.scope() == RoutingProviderScope::All {
+                for provider in available {
+                    if !providers.contains(provider) { providers.push(provider.clone()); }
+                }
+            }
+            providers.retain(|id| available.contains(id) && profile.includes_provider(id));
             providers
         }
         None => available.to_vec(),
@@ -32,8 +36,7 @@ pub fn apply_accounts(accounts: &[Value], model: &str) -> Vec<Value> {
         let sorting = account_order::sorting(accounts, crate::server::logging::now_ms());
         let mut ordered = account_order::ordered_accounts(accounts, &sorting);
         if let Some(profile) = &profiles.global {
-            ordered.retain(|account| profile.providers.iter().any(|id| id == routing::provider_of(account))
-                && !profile.disabled_providers.iter().any(|id| id == routing::provider_of(account))
+            ordered.retain(|account| profile.includes_provider(routing::provider_of(account))
                 && !routing::account_id(account).is_some_and(|id| profile.excluded_accounts.iter().any(|excluded| excluded == id)));
         }
         ordered
@@ -49,9 +52,15 @@ pub fn apply_accounts(accounts: &[Value], model: &str) -> Vec<Value> {
 pub fn project_accounts(accounts: &[Value], profile: &RoutingProfile) -> Vec<Value> {
     let sorting = account_order::sorting(accounts, crate::server::logging::now_ms());
     let baseline = account_order::ordered_accounts(accounts, &sorting);
+    let mut providers = profile.providers.clone();
+    if profile.scope() == RoutingProviderScope::All {
+        for provider in &sorting.provider_order {
+            if !providers.contains(provider) { providers.push(provider.clone()); }
+        }
+    }
     let mut ordered = Vec::new();
-    for provider in &profile.providers {
-        if profile.disabled_providers.contains(provider) { continue; }
+    for provider in &providers {
+        if !profile.includes_provider(provider) { continue; }
         let mut members: Vec<Value> = baseline.iter()
             .filter(|account| routing::provider_of(account) == provider)
             .filter(|account| routing::account_id(account)
@@ -72,23 +81,34 @@ pub fn materialize_profile(accounts: &[Value], available: &[String], model: &str
     let sorting = account_order::sorting(accounts, crate::server::logging::now_ms());
     let independent = profiles.model_profile(model).is_some();
     let mut profile = profiles.effective(model).cloned().unwrap_or_else(|| RoutingProfile {
+        provider_scope: Some(RoutingProviderScope::All),
         providers: available.to_vec(),
         ..Default::default()
     });
+    let scope = profile.scope();
+    profile.provider_scope = Some(scope);
+    if independent && scope == RoutingProviderScope::All {
+        for provider in available {
+            if !profile.providers.contains(provider) { profile.providers.push(provider.clone()); }
+        }
+    }
     if !independent {
         let mut providers = sorting.provider_order.clone();
         providers.extend(available.iter().filter(|id| !sorting.provider_order.contains(id)).cloned());
-        for id in &profile.providers {
+        for id in profile.providers.iter().chain(&profile.disabled_providers) {
             if !providers.contains(id) { providers.push(id.clone()); }
         }
-        providers.retain(|id| profile.providers.contains(id));
+        if scope == RoutingProviderScope::Selected {
+            providers.retain(|id| profile.providers.contains(id));
+        }
         profile.providers = providers;
         profile.account_order.clear();
     }
     if !independent && !model.is_empty() {
         profile.providers.retain(|id| available.contains(id));
-        profile.disabled_providers.retain(|id| profile.providers.contains(id));
-        profile.account_order.retain(|provider, _| profile.providers.contains(provider));
+        if scope == RoutingProviderScope::Selected {
+            profile.disabled_providers.retain(|id| profile.providers.contains(id));
+        }
     }
     for provider in &profile.providers {
         let ids = profile.account_order.entry(provider.clone()).or_default();

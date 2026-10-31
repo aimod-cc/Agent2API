@@ -157,6 +157,64 @@
   color: var(--text-3);
 }
 
+/* ─── 「全部」段的分组带 ───
+   只在分段停在「全部」时出现：四个分类的卡片同处一屏，靠一条通栏细带子分段
+   （grid-column: 1/-1；与账号页 .grp-band 同一套语言：名字 12.5px/650 +
+   右侧读数 11.5px --text-3 + 一条 hairline 收尾）。
+
+   吸顶是它的主要价值：全部段有五六十张卡，滚到中段时「这一屏是哪一类」得
+   自己说清楚，否则只是一锅混在一起的卡片。底色必须不透明、且等于所在分区块
+   的底色（--surface-inset），否则卡片会从带子底下透出来。 */
+.add-provider-band {
+  grid-column: 1 / -1;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 2px 8px;
+  margin-top: 2px;
+  background: var(--surface-inset);
+  border-bottom: 1px solid var(--hairline);
+}
+.add-provider-grid > .add-provider-band:first-child { margin-top: 0; }
+/* 换组时多留一口气：带子上方的间距比卡片行距大一档 */
+.add-provider-grid > .add-provider-band:not(:first-child) { margin-top: 16px; }
+.add-provider-band-name {
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--text);
+  white-space: nowrap;
+}
+.add-provider-band-stat {
+  font-size: 11.5px;
+  color: var(--text-3);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.add-provider-band-fill { flex: 1 1 auto; }
+/* 「只看这一类」：带子右端的收窄入口。分组是给浏览用的，看到想要的类别还是要
+   能一键收回单分类段 —— 否则分段栏就白留了。整条带子悬停时它才提亮（鼠标用户
+   是扫着带子看的），键盘与读屏始终按普通按钮走。 */
+.add-provider-band-only {
+  flex: none;
+  height: 22px;
+  border-radius: var(--r-pill);
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-weight: 500;
+  opacity: .85;
+}
+.add-provider-band:hover .add-provider-band-only { opacity: 1; }
+.add-provider-band-only:hover { color: var(--primary-fg); }
+
+/* ─── 跨分类命中提示 ───
+   单分类段里搜不到、别的分类有命中时才出现（结构是组件库的 Alert，拦在卡片
+   网格上方、不进滚动区）。它救的正是「搜索框只过滤当前分段」这件事：用户在
+   「API 模板」段搜 Cline，看不到结果就会以为没有。 */
+.add-provider-hint-go { margin-left: auto; flex: none; }
+
 /* ─── 「导入」段：cc-switch 等工具的扫描结果 ───
    面板顶替卡片网格的位置（互斥显隐），列表高度与网格同一上限 —— 弹窗高度
    锁定后它内部滚动，总高不随条目数变。 */
@@ -359,4 +417,50 @@
 /* 自定义提供商管理弹窗的列表（.cp-*）曾在这里：那颗「自定义提供商」按钮与
    弹窗已整体移除（模型清单统一到「模型管理」页，编辑与删除搬进账号设置的
    「提供商」一段），相关规则随之删除。 */
+
+.compact-login-dialog [data-slot='dialog-header'] { padding: 19px 22px; padding-right: 46px; gap: 11px; flex-shrink: 0; }
+.compact-login-dialog [data-slot='dialog-title'] { font-size: 16px; }
+.compact-login-logo { width: 28px; height: 28px; object-fit: contain; flex: none; }
+.compact-login-dialog [data-slot='dialog-body'] { padding: 20px 22px; min-height: 0; }
+.compact-account-login { display: flex; flex-direction: column; min-width: 0; }
+.compact-account-login[hidden] { display: none; }
+.compact-login-methods { width: 100%; }
+.compact-login-methods [data-slot='segmented-item'] { flex: 1; min-height: 32px; justify-content: center; }
+.compact-login-recommend { color: var(--primary-fg); font-size: 9px; font-weight: 400; }
+.compact-login-description { margin-top: 18px; }
+.compact-login-description p { margin: 0; font-size: 12px; line-height: 1.9; color: var(--text-2); }
+.compact-login-description p > span { font-size: 11px; color: var(--text-3); }
+.compact-login-field { margin-top: 18px; display: flex; flex-direction: column; gap: 7px; }
+.compact-login-field [data-slot='label'] { font-size: 12px; font-weight: 500; color: var(--text-2); }
+.compact-login-field [data-slot='label'] > span { margin-left: 6px; font-size: 10px; font-weight: 400; color: var(--text-3); }
+.compact-login-label { display: flex; align-items: center; justify-content: space-between; }
+.compact-login-label > button { padding: 0; height: 20px; font-size: 10px; }
+.compact-login-field [data-slot='input-group'],
+.compact-login-field > [data-slot='input'] { height: 38px; }
+.compact-login-field [data-slot='input-group'] [data-slot='input-group-control'] { height: 36px; }
+.compact-login-field svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
+.compact-login-hint { margin: 6px 0 0; font-size: 10px; line-height: 1.7; color: var(--text-3); }
+.compact-login-error { margin: 8px 0 0; color: var(--danger); font-size: 11px; }
+.compact-login-guide { padding: 12px; margin: 12px 0 0; background: var(--primary-soft); border: 1px solid var(--primary-bd); border-radius: var(--r-sm); font-size: 11px; line-height: 1.8; color: var(--text-2); }
+.compact-login-proxy { margin-top: 19px; border-top: 1px solid var(--hairline); }
+.compact-login-proxy-trigger { width: 100%; display: flex; justify-content: flex-start; height: 34px; margin-top: 5px; padding: 0; font-size: 11px; }
+.compact-login-proxy-trigger:hover { background: transparent; }
+.compact-login-proxy-summary { margin-left: auto; color: var(--text-3); }
+.compact-login-proxy-trigger > svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; color: var(--text-3); }
+.compact-login-proxy-trigger[data-panel-open] > svg { transform: rotate(90deg); }
+.compact-login-proxy-body { padding: 8px 0 0; }
+.compact-login-footer { padding: 15px 22px; background: var(--surface); flex-shrink: 0; }
+.compact-login-footer-content { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.compact-login-security { display: flex; align-items: center; gap: 5px; color: var(--text-3); font-size: 9px; }
+.compact-login-security svg,
+.compact-login-actions svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
+.compact-login-security svg { width: 12px; height: 12px; }
+.compact-login-actions { display: flex; align-items: center; gap: 8px; }
+.compact-login-actions > button { min-height: 34px; }
+.compact-account-login > [data-slot='alert'] { margin-top: 14px; }
+@media (max-width: 560px) {
+  .compact-login-footer-content { flex-wrap: wrap; }
+  .compact-login-security, .compact-login-actions { width: 100%; }
+  .compact-login-actions > button:last-child { flex: 1; }
+}
 

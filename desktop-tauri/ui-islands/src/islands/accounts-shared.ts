@@ -247,6 +247,8 @@ export type AccountRecord = {
   source?: string
   proxy?: ProxyConfig | null
   rateLimits?: Record<string, RateLimitInfo>
+  upstreamCooldownUntil?: number | null
+  upstreamBlockedReason?: string
   [key: string]: unknown
 }
 

@@ -57,79 +57,30 @@ use crate::server::core::providers::cline::models::{friendly_alias, Pool};
 ///
 /// 返回给日志的摘要；没有任何新动作时返回 None（不落盘）。
 pub fn seed_cline_defaults(provider: &str, ids: &[String]) -> Option<String> {
-    let mut rules = current();
-    let seeded_before = rules.seeded.len();
-    let mut mappings_added: Vec<String> = Vec::new();
-    // 本家是哪个池：友好名的判据要用它（免费池的裸 id 要剥厂商前缀，见
-    // `models::friendly_alias`）。查不出池（不该发生：调用方传的就是两个池的
-    // provider id）时按订阅池处理 —— 那是最保守的一支（不剥任何前缀）。
-    let pool = crate::server::core::providers::cline::models::Pool::from_provider_id(provider)
-        .unwrap_or(Pool::Pass);
-    for id in ids {
-        let id = id.trim();
-        if id.is_empty() {
-            continue;
+    let added = super::mutations::mutate(|rules| {
+        let mut added = Vec::new();
+        let pool = Pool::from_provider_id(provider).unwrap_or(Pool::Pass);
+        for id in ids {
+            let id = id.trim();
+            if id.is_empty() { continue; }
+            seed_extra_aliases(rules, provider, id, ids, &mut added);
+            if rules.is_seeded(provider, id) { continue; }
+            rules.seeded.push(format!("{provider}:{id}"));
+            let Some(alias) = friendly_alias(pool, id) else { continue };
+            if !alias_valid(alias) || ids.iter().any(|id| id.eq_ignore_ascii_case(alias)) { continue; }
+            if rules.mappings.iter().any(|mapping| mapping.alias.eq_ignore_ascii_case(alias)
+                && mapping.provider.as_deref().map_or(true, |owner| owner.eq_ignore_ascii_case(provider)))
+            { continue; }
+            rules.mappings.push(Mapping {
+                alias: alias.to_string(), target: id.to_string(), provider: Some(provider.to_string()),
+                reasoning: None, enabled: true,
+            });
+            added.push(format!("{alias} → {id}"));
         }
-        // 额外对外名先处理：**不受下面主 seeded 短路影响**（理由见 extra_alias_key）。
-        // 这里补的正是「两池同名、去前缀先到先得最多只给一个池」的另一半 ——
-        // `EXTRA_ALIASES` 点名的两条总是会拿到别名，与哪家先跑无关。
-        // 返回的「动过 seeded」不需要单独接：下面的 len 判断把主种子与
-        // 额外别名键的 seeded 变化一起覆盖了。
-        seed_extra_aliases(&mut rules, provider, id, ids, &mut mappings_added);
-        if rules.is_seeded(provider, id) {
-            continue;
-        }
-        rules.seeded.push(format!("{provider}:{id}"));
-        // 剥出友好名：带通道前缀的剥通道前缀，免费池的裸 id 剥厂商前缀
-        // （`z-ai/glm-5.3-flash` → `glm-5.3-flash`）。上游本来就给的友好名
-        // 与「不该剥」的条目（`openai/gpt-6-astra` 那类）返回 None，不建映射。
-        let Some(alias) = friendly_alias(pool, id) else {
-            continue;
-        };
-        if alias.is_empty() || !alias_valid(alias) {
-            continue;
-        }
-        // 纪律 2 + 3：别名被占用或与任何上游 id 同名 → 只记 seeded。
-        // `has_alias` 是「任何人占用都不动」—— 于是两池同名时先跑的池拿到别名；
-        // 没拿到的池由 `EXTRA_ALIASES` 点名补上（不受此限制）。
-        //
-        // **纪律 2 只挡映射占用，不挡别家的原生 id**：`glm-5.3-flash` 同时是
-        // CatPaw / AutoClaw 的原生模型名，那不妨碍这里给它建别名 ——
-        // 同一对外名由多家承载正是本项目主备路由的常态（见 `model_rules` 模块头），
-        // 候选链会把两家一起列上，谁先谁后按账号优先级走。
-        if rules.has_alias(alias)
-            || ids.iter().any(|other| other.eq_ignore_ascii_case(alias))
-        {
-            continue;
-        }
-        rules.mappings.retain(|m| {
-            !(m.alias.eq_ignore_ascii_case(alias) && m.provider.as_deref() == Some(provider))
-        });
-        rules.mappings.push(Mapping {
-            alias: alias.to_string(),
-            target: id.to_string(),
-            provider: Some(provider.to_string()),
-            // 种子建的映射不绑思考等级（那是用户手动绑定的东西，见 mod.rs 模块头）
-            reasoning: None,
-            enabled: true,
-        });
-        mappings_added.push(format!("{alias} → {id}"));
-    }
-    if rules.seeded.len() == seeded_before {
-        // 没有新模型：一个字节都不用落盘（与 `seed_default_enabled` 同一判据）。
-        // 这一步是必需的：本函数在**每次目录刷新**后都会被调用，无条件 save 会让
-        // 「用户什么都没变」的刷新也重写一次 config.json。
-        return None;
-    }
-    save(&rules);
-    if mappings_added.is_empty() {
-        // 有新的种子标记、但都没建映射（无前缀 / 别名冲突）—— 落盘即可，日志不必吵
-        return None;
-    }
-    Some(format!(
-        "🧩 Cline 模型默认映射: [{}]",
-        mappings_added.join(", ")
-    ))
+        Ok(added)
+    }).ok()?;
+    if added.is_empty() { return None; }
+    Some(format!("🧩 Cline 模型默认映射: [{}]", added.join(", ")))
 }
 
 // ─── Cline 拆分为两家 provider 的存量键迁移 ──────────────────

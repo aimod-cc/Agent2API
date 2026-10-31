@@ -162,6 +162,11 @@ pub fn store_value(key: &str, value: Value) -> Result<(), String> {
     change(key, |state| state.value = Some(value)).map(|_| ())
 }
 
+pub(crate) fn update_value(key: &str, update: impl FnOnce(&mut Value)) -> Result<Value, String> {
+    change(key, |state| update(state.value.get_or_insert(Value::Null)))
+        .map(|state| state.value.unwrap_or(Value::Null))
+}
+
 /// 记录一次**外部发起**的真实请求（用户手动点的那一轮）：把定时排期顺延一个
 /// 间隔，避免「刚点完、到点或重启后又立刻再跑一遍」。
 ///

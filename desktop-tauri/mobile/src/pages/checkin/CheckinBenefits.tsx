@@ -11,8 +11,8 @@ import { CheckinPlansSheet } from './CheckinPlansSheet'
 import { store } from '../../state/store'
 import { t } from '../../i18n'
 
-export function CheckinBenefits({ center, section, busy, action }: {
-  center: CheckinCenter; section: CheckinSection; busy: string; action: CheckinAction
+export function CheckinBenefits({ center, section, busy, action, onChange }: {
+  center: CheckinCenter; section: CheckinSection; busy: string; action: CheckinAction; onChange: () => void
 }) {
   const [planId, setPlanId] = useState('')
   const plan = center.extras?.plans?.find(item => item.id === planId)
@@ -54,7 +54,7 @@ export function CheckinBenefits({ center, section, busy, action }: {
           </Card>
         </div> : <Empty text={t('没有支持成长任务的账号（需要 WorkBuddy 国内版）。')} />}
       </div>
-      {plan ? <CheckinPlansSheet key={plan.id} entry={plan} onClose={() => setPlanId('')} /> : null}
+      {plan ? <CheckinPlansSheet key={plan.id} entry={plan} onClose={() => setPlanId('')} onChange={onChange} /> : null}
     </>
   )
 }

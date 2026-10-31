@@ -7,101 +7,11 @@ import { refreshUsageAfterCheckin, usageEntryOf } from './accounts-data'
 import { findAccount, getStore, subscribe } from './accounts-store'
 import { errorMessage, shared } from './accounts-shared'
 import { ZcodeCaptchaStatus } from './accounts-zcode-plan'
+import { planClaimResultApplies, planClaimState, planQueryErrors, type ClaimResult, type Entitlement, type OwnedPlan, type PreviewResult } from '../../../ui-shared/zcode-plans'
 
-/**
- * Agent2API · ZCode「套餐明细」弹窗（账号页「领套餐」与签到中心 ZCode 行的本体）。
- *
- * ── 这个弹窗解决什么 ────────────────────────────────────────
- * 旧版点「领套餐」是一串原生确认框：先说「可领取的套餐」（一份只读清单），
- * 再多选时给一组圆钮，领完只弹一条 toast。三个问题都在那一版里：
- *   1. **看不到状态**：账号页与签到中心没有第二处显示「今天这份领过没」，
- *      只有按钮的悬停提示里有；领完回去看，界面上没有任何变化；
- *   2. **看不到已领到的套餐**：名下有哪些套餐只在余额列的悬停提示里出现一个
- *      「代表套餐」的名字，而且只认「生效中」的；
- *   3. **待生效的套餐完全消失**：活动套餐常常不是立刻生效的（官方客户端显示
- *      「待生效 今天 23:00 · 过期时间 10月12日 09:00」），旧后端把那类整条丢掉，
- *      界面上就是「领取成功但什么都看不到」。
- *
- * 于是这里把「可领取」与「我的套餐」放在同一份列表里两段呈现：上面是官方此刻
- * 发什么（逐份标「今日已领」，逐份点「领取」），下面是账号名下已有的（含**待生效**
- * 与已过期，状态按后端给的三态标签渲染）。
- *
- * ── 两份清单的来源完全不同（别混）────────────────────────────
- *   · 可领取：`zcodeClaimPreview`（**实时探测上游**，不要验证码，见 ui/zcode-claim.js）；
- *   · 我的套餐：余额读数里的 `plans` 数组（后端 `providers::zcode::balance` 归一，
- *     本条链路的 `source` = `zcode.z.ai/billing`）。它只在查过余额之后才有值，
- *     所以第一次打开时若还没有读数，这里会**静默补查一次**（单账号，与签到后的
- *     自动刷新同一条链）。
- *
- * ── 「今天领过哪几份」只有一处判据 ──────────────────────────
- * 走账号页域层的 `claimedPlanIdsToday`（北京时间的日界也在那边）：本弹窗与
- * 签到中心的行状态两处共用，界面不会一处说一处不认。
- * 领取成功后把本地状态即时标上（并重探一次上游），不必等账号刷新回来。
- *
- * ── 领取本身不在这里 ────────────────────────────────────────
- * 验证码与请求在 `ui/zcode-claim.js`（`wbZcodeClaim.claim`），本弹窗只管点哪一份、
- * 以及领完刷新哪些东西（余额读数 + 账号状态）。
- *
- * 对外接口：`window.wbZcodePlans.open({ id, name? })` —— 命令式弹窗的既有形态
- * （见 confirm-dialog.tsx / models-fetch-modal.tsx）。
- */
+/** 本期活动目录和账号领取状态由插件合并；余额明细仍来自账号余额查询。 */
 
-/* ─── 类型 ───────────────────────────────────── */
-
-/** 一条权益（领取预览与余额读数里的形状同名同单位，见后端 `entitlements_of`） */
-type Entitlement = {
-  showName?: string
-  unitType?: string
-  grantUnits?: number
-  period?: string
-  effectiveAt?: number | null
-}
-
-/** 可领取的一份套餐（后端 `api::zcode_claim::plan_to_json`，时间是 unix 秒） */
-type PreviewPlan = {
-  planId?: string
-  name?: string
-  description?: string
-  priority?: number
-  startsAt?: number | null
-  endsAt?: number | null
-  entitlements?: Entitlement[]
-  claimed?: boolean
-  claimedAt?: number | null
-  source?: 'preview' | 'marketing'
-}
-
-/** 探测响应（后端 `preview`） */
-type PreviewResult = {
-  deployed?: boolean
-  plans?: PreviewPlan[]
-  activated?: boolean | null
-  activationError?: string | null
-  previewError?: string | null
-  marketingError?: string | null
-}
-
-/** 余额读数里的一份套餐（后端 `providers::zcode::balance` 的 `plans` 数组，unix 秒） */
-type OwnedPlan = {
-  planId?: string
-  name?: string
-  state?: string
-  startsAt?: number | null
-  endsAt?: number | null
-  /** 最早的、还没到的生效时间（后端按官方口径取的**权益** `effective_at`） */
-  pendingUntil?: number | null
-  entitlements?: Entitlement[]
-}
-
-/** 领取结果（后端 api::zcode_claim 的响应） */
-type ClaimResult = {
-  ok?: boolean
-  failure?: string
-  failureLabel?: string
-  message?: string
-  planId?: string
-  marketingError?: string | null
-}
+/* ─── 桥接 ───────────────────────────────────── */
 
 /** `wbZcodeClaim`（ui/zcode-claim.js）的公开面 */
 type ClaimBridge = {
@@ -243,7 +153,9 @@ function PlansModal({ options, onClose }: { options: OpenOptions; onClose: () =>
   const [receiptError, setReceiptError] = React.useState('')
   const [claiming, setClaiming] = React.useState('')
   const [claimPhase, setClaimPhase] = React.useState('')
+  const [claimResults, setClaimResults] = React.useState<Record<string, ClaimResult>>({})
   const [verifyingChannel, setVerifyingChannel] = React.useState(false)
+  const previewRequest = React.useRef(0)
   const claimController = React.useRef<AbortController | null>(null)
   const mounted = React.useRef(true)
   React.useEffect(() => {
@@ -262,7 +174,15 @@ function PlansModal({ options, onClose }: { options: OpenOptions; onClose: () =>
   const data = entry && typeof entry === 'object' && !Array.isArray(entry)
     ? entry as Record<string, unknown>
     : null
-  const ownedPlans = data && Array.isArray(data.plans) ? data.plans as OwnedPlan[] : []
+  const activityPlans = preview.status === 'ready' ? preview.result.plans || [] : []
+  const queryErrors = preview.status === 'ready' ? planQueryErrors(preview.result) : []
+  const balancePlans = data && Array.isArray(data.plans) ? data.plans as OwnedPlan[] : []
+  const ownedPlans = [...balancePlans]
+  for (const plan of activityPlans) {
+    const owned = plan.ownedPlan
+    if (owned && !ownedPlans.some(item => owned.userPlanId
+      ? item.userPlanId === owned.userPlanId : item.planId === owned.planId)) ownedPlans.push(owned)
+  }
   // 台账里今天领过、但上面的读数里还没有的那些 id。**为什么要有这一段**：
   // 刚领到的那一份可能不会立刻出现在上游的余额读数里（读数要重新查、上游也可能
   // 稍后才把这份计划挂到账号上），那样「领到了却什么都看不到」会原样重现。
@@ -278,12 +198,16 @@ function PlansModal({ options, onClose }: { options: OpenOptions; onClose: () =>
       setPreview({ status: 'error', message: t('当前环境不支持领取（桥接方法缺失）') })
       return
     }
+    const request = ++previewRequest.current
     setPreview({ status: 'loading' })
     try {
       const result = await bridge.preview(id) as PreviewResult
-      if (mounted.current) setPreview({ status: 'ready', result: result || {} })
+      if (mounted.current && request === previewRequest.current) {
+        setPreview({ status: 'ready', result: result || {} })
+        void window.wbCheckin?.load?.()
+      }
     } catch (error) {
-      if (mounted.current) setPreview({ status: 'error', message: errorMessage(error) })
+      if (mounted.current && request === previewRequest.current) setPreview({ status: 'error', message: errorMessage(error) })
     }
   }, [bridge, id])
 
@@ -311,14 +235,19 @@ function PlansModal({ options, onClose }: { options: OpenOptions; onClose: () =>
         if (mounted.current) setClaimPhase(phase)
       }) as ClaimResult | null
       if (!mounted.current || controller.signal.aborted) return
+      if (result) setClaimResults(results => ({ ...results, [result.planId || planId]: result }))
       // 「已领过」同样是既成事实：本地标上、并重探一次（上游此刻的清单才是事实）
       if (result?.ok || result?.failure === 'already_claimed') {
         setReceiptError(result.marketingError || '')
         const settled = result.planId || planId
+        setClaimResults(results => ({ ...results, [settled]: {
+          ...result, claimedAt: result.claimedAt || Date.now(),
+        } }))
         if (settled) setClaimedNow(list => (list.includes(settled) ? list : [...list, settled]))
         // 余额静默刷新（不 await：toast 是单例，领取结果那条不能被顶掉）
         void refreshUsageAfterCheckin(id)
         void shared().wbApp?.refresh?.()
+        void window.wbCheckin?.load?.()
         void loadPreview()
       }
     } finally {
@@ -357,7 +286,7 @@ function PlansModal({ options, onClose }: { options: OpenOptions; onClose: () =>
           </section>
           <section>
             <div className='mb-1.5 flex items-center gap-2 text-[12px] font-semibold text-muted-foreground'>
-              {t('可领取的套餐')}
+              {t('本期活动')}
               <Badge variant='outline' shape='tag'>{t('官方限时活动')}</Badge>
               <Button variant='outline' size='xs' className='ml-auto'
                 disabled={preview.status === 'loading' || Boolean(claiming) || verifyingChannel}
@@ -365,7 +294,7 @@ function PlansModal({ options, onClose }: { options: OpenOptions; onClose: () =>
             </div>
             {preview.status === 'loading' ? (
               <div className='flex items-center gap-2 py-2 text-[12.5px] text-muted-foreground'>
-                <Spinner className='size-3' />{t('正在探测可领取的套餐…')}
+                <Spinner className='size-3' />{t('正在查询本期活动…')}
               </div>
             ) : preview.status === 'error' ? (
               <div className='py-1 text-[12.5px] text-destructive'>
@@ -373,57 +302,69 @@ function PlansModal({ options, onClose }: { options: OpenOptions; onClose: () =>
                 <Button variant='outline' size='xs' className='ml-2'
                   onClick={() => void loadPreview()}>{t('重试')}</Button>
               </div>
-            ) : !preview.result.deployed ? (
+            ) : activityPlans.length === 0 ? (
               <p className='py-1 text-[12.5px] text-muted-foreground'>
-                {t('当前没有可领取的套餐（活动尚未开始）')}
-              </p>
-            ) : (preview.result.plans || []).length === 0 ? (
-              <p className='py-1 text-[12.5px] text-muted-foreground'>
-                {preview.result.previewError || preview.result.marketingError
-                  ? t('部分套餐来源查询失败，暂不能确认是否有可领取套餐')
-                  : t('当前没有可领取的套餐')}
+                {queryErrors.length
+                  ? t('部分来源查询失败，暂不能确认本期活动或领取状态')
+                  : t('当前未发现本期活动，不代表账号不符合资格')}
               </p>
             ) : (
               <ul className='m-0 list-none p-0'>
-                {(preview.result.plans || []).map(plan => {
+                {activityPlans.map(plan => {
                   const planId = String(plan.planId || '')
-                  const taken = claimed.includes(planId) || plan.claimed === true
+                  const savedResult = claimResults[planId]
+                  const result = planClaimResultApplies(plan, savedResult) ? savedResult : undefined
+                  const locallySettled = result?.ok || result?.failure === 'already_claimed'
+                  const state = planClaimState(plan, locallySettled ? [planId] : plan.claimState ? [] : stored)
+                  const taken = state === 'claimed'
+                  const rejected = !taken && (result?.failure === 'ineligible' || state === 'ineligible')
+                  const statusLabel = taken ? t('已领取') : rejected ? t('当前不符合资格')
+                    : state === 'unknown' ? t('状态待确认') : t('可领取')
                   const entitlements = entitlementLine(plan)
-                  const future = (plan.entitlements || []).map(item => Number(item.effectiveAt))
-                    .filter(at => Number.isFinite(at) && at > Date.now() / 1000)
-                  const effectiveAt = future.length ? Math.min(...future) : 0
+                  const owned = plan.ownedPlan
                   const window_ = windowText(plan)
+                  const expiresAt = owned?.endsAt || plan.claimEndsAt || result?.endsAt
+                  const message = result && !result.ok && result.failure !== 'already_claimed'
+                    ? result.message || result.failureLabel : plan.claimMessage
                   return (
                     <li key={planId || plan.name}
                       className='flex items-start justify-between gap-3 border-b border-hairline py-2 last:border-b-0'>
                       <div className='min-w-0'>
                         <div className='flex items-center gap-2 text-[13px] font-medium'>
                           <span className='truncate'>{plan.name || planId || t('套餐')}</span>
-                          {taken
-                            ? <Badge variant='success' shape='tag'>{t('已领取')}</Badge>
-                            : null}
+                          <Badge variant={taken ? 'success' : rejected ? 'warning' : 'outline'} shape='tag'>{statusLabel}</Badge>
+                          {owned?.state ? <Badge variant={STATE_VARIANT[owned.state] || 'outline'} shape='tag'>
+                            {zcodePlanStateLabel(owned.state)}
+                          </Badge> : null}
                         </div>
-                        {effectiveAt ? <div className='text-[12px] text-muted-foreground'>
-                          {t('待生效 {time}', { time: effectiveText(effectiveAt) })}
+                        {owned?.pendingUntil ? <div className='text-[12px] text-muted-foreground'>
+                          {t('待生效 {time}', { time: effectiveText(owned.pendingUntil) })}
                         </div> : null}
-                        {window_ ? <div className='text-[12px] text-muted-foreground'>{window_}</div> : null}
+                        {window_ ? <div className='text-[12px] text-muted-foreground'>
+                          {t('活动时间：{time}', { time: window_ })}
+                        </div> : null}
+                        {expiresAt ? <div className='text-[12px] text-muted-foreground'>
+                          {t('账号套餐到期：{time}', { time: stampText(expiresAt) })}
+                        </div> : null}
+                        {message ? <div className='text-[12px] text-muted-foreground'>{message}</div> : null}
                         {entitlements ? <div className='text-[12px] text-muted-foreground'>{entitlements}</div> : null}
                         {plan.description ? <div className='text-[12px] text-muted-foreground'>{plan.description}</div> : null}
                       </div>
                       <Button variant='outline' size='xs' className='flex-none'
-                        disabled={claiming !== '' || verifyingChannel || taken}
+                        disabled={claiming !== '' || verifyingChannel || taken || !planId}
                         onClick={() => void claim(planId)}>
-                        {claiming === planId ? t('领取中…') : taken ? t('已领取') : t('领取')}
+                        {claiming === planId ? t('领取中…') : taken ? t('已领取')
+                          : state === 'unknown' || rejected ? t('尝试领取') : t('领取')}
                       </Button>
                     </li>
                   )
                 })}
               </ul>
             )}
-            {preview.status === 'ready' && (preview.result.previewError || preview.result.marketingError) ? (
+            {preview.status === 'ready' && queryErrors.length > 0 ? (
               <p className='mt-1.5 text-[11.5px] text-muted-foreground'>
-                {t('部分套餐来源查询失败，已保留其他来源的结果：{message}', {
-                  message: [preview.result.previewError, preview.result.marketingError].filter(Boolean).join('；'),
+                {t('部分来源查询失败，已保留其他结果：{message}', {
+                  message: queryErrors.join('；'),
                 })}
               </p>
             ) : null}
@@ -431,7 +372,7 @@ function PlansModal({ options, onClose }: { options: OpenOptions; onClose: () =>
               {t('套餐已领取，但营销回执未完成，不会重复领取：{message}', { message: receiptError })}
             </p> : null}
             <p className='mt-1.5 text-[11.5px] text-muted-foreground'>
-              {t('可领取清单合并每日赠送与限时营销活动；按套餐去重，已领取的不重复提交。只有主动领取时才会进行人机验证。')}
+              {t('活动目录合并账号预览、营销活动与匿名探测。已领取仅依据领取记录或账号名下套餐；状态待确认时可尝试领取，资格以上游返回为准。')}
             </p>
             {preview.status === 'ready' && preview.result.activationError ? (
               <p className='text-[11.5px] text-muted-foreground'>
@@ -483,7 +424,7 @@ function PlansModal({ options, onClose }: { options: OpenOptions; onClose: () =>
                     ? Number((account.claimPlans as Record<string, unknown>)[planId]) || 0
                     : 0
                   return (
-                    <li key={planId || plan.name}
+                    <li key={plan.userPlanId || planId || plan.name}
                       className='flex items-start justify-between gap-3 border-b border-hairline py-2 last:border-b-0'>
                       <div className='min-w-0'>
                         <div className='flex items-center gap-2 text-[13px] font-medium'>
@@ -530,7 +471,7 @@ function PlansModal({ options, onClose }: { options: OpenOptions; onClose: () =>
           <span className='min-w-0 text-[11.5px] text-muted-foreground'>
             {claimed.length > 0
               ? t('今天（北京时间）已领取 {n} 份：{plans}', { n: claimed.length, plans: claimed.join(t('、')) })
-              : t('今天还没有领过：上面「可领取的套餐」里逐份点「领取」即可')}
+              : t('本期活动按套餐分别展示，领取资格以上游返回为准')}
           </span>
           <div className='mr-auto' />
           {claiming ? <Button variant='outline' disabled={claimPhase === 'submitting'}

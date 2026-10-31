@@ -36,6 +36,8 @@ const SKELETON_KEYS: &[&str] = &[
     "addedAt",
     "updatedAt",
     "rateLimits",
+    "upstreamCooldownUntil",
+    "upstreamBlockedReason",
     "limiterGroups",
     "limiters",
     "lowBalance",
@@ -376,6 +378,18 @@ impl AccountStore {
             return Err(format!("账号 {id} 不存在"));
         };
         let key = format!("{LEDGER_PREFIX}{kind}");
+        if kind == super::checkin_state::LEDGER_KIND {
+            let previous_at = record.get(&key).and_then(|state| state.get("at")).and_then(Value::as_i64);
+            let next_at = value.get("at").and_then(Value::as_i64);
+            if previous_at.zip(next_at).is_some_and(|(previous, next)| next < previous) {
+                return Ok(());
+            }
+            let checkin_at = record.checkin_at();
+            super::checkin_state::apply(&mut record, value)?;
+            if record.get(&key) == Some(value) && record.checkin_at() == checkin_at {
+                return Ok(());
+            }
+        }
         record.set(&key, value.clone());
         // 两种名称指向同一份结清记忆，写入和清除必须同步。
         let alias = match kind {
@@ -386,7 +400,9 @@ impl AccountStore {
         if let Some(alias) = alias {
             record.set(&format!("{LEDGER_PREFIX}{alias}"), value.clone());
         }
-        record.set_updated_at(logging::now_ms());
+        if kind != super::checkin_state::LEDGER_KIND {
+            record.set_updated_at(logging::now_ms());
+        }
         self.with_conn(&guard, |conn| {
             crate::server::core::account_store::sql::update_in_place(conn, &record)
         })

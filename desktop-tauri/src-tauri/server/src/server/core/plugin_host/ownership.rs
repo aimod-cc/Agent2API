@@ -29,9 +29,17 @@ pub(super) fn category(dir: &Path) -> ProviderCategory {
 }
 
 pub(super) fn owners(registry: &PackRegistry) -> BTreeMap<String, String> {
+    owners_with(registry, None)
+}
+
+pub(super) fn owners_with(registry: &PackRegistry, prepared: Option<&InstalledPack>) -> BTreeMap<String, String> {
     let mut owners = BTreeMap::new();
     for pack in registry.packs.iter().filter(|pack| pack.enabled) {
-        for provider in declared_ids(pack).into_iter().filter(|id| {
+        let ids = match prepared.filter(|prepared| prepared.id == pack.id) {
+            Some(prepared) => prepared.manifest_providers.iter().map(|provider| provider.id.0.clone()).collect(),
+            None => declared_ids(pack),
+        };
+        for provider in ids.into_iter().filter(|id| {
             !reserved(id) && !crate::server::core::providers::availability::is_suspended(id)
         }) {
             owners.entry(provider).or_insert_with(|| pack.id.clone());

@@ -765,6 +765,10 @@ impl AccountStore {
             let current = record.enabled();
             if next != current {
                 record.set_enabled(next);
+                if next && !record.get("upstreamCooldownUntil").and_then(Value::as_i64)
+                    .is_some_and(|until| until > logging::now_ms()) {
+                    record.remove("upstreamBlockedReason");
+                }
                 changes.push(if next { "已启用".to_string() } else { "已禁用".to_string() });
             }
         }

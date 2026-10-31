@@ -96,7 +96,8 @@ pub(crate) struct LoginProxySelection {
 
 struct LoginTaskContext {
     /// 固定启动 flow 的执行体及其 owner；卸载/重载后不再按 id 改投新进程。
-    adapter: Arc<dyn ProviderAdapter>,
+    adapter: Mutex<Option<Arc<dyn ProviderAdapter>>>,
+    provider: &'static str,
     store: AccountStore,
     proxy: Option<LoginProxySelection>,
 }
@@ -149,7 +150,9 @@ impl LoginTaskHandle {
     }
 
     pub(crate) fn adapter(&self) -> Option<Arc<dyn ProviderAdapter>> {
-        self.context.as_ref().map(|context| context.adapter.clone())
+        self.context.as_ref().and_then(|context| {
+            context.adapter.lock().unwrap_or_else(|error| error.into_inner()).clone()
+        })
     }
 
     /// 不持任务的同步锁 await；与 poll/callback 使用同一操作锁串行清理。
@@ -167,6 +170,9 @@ impl LoginTaskHandle {
                 logging::log("[Login]", &format!("{} 的登录流程清理未确认，请更新提供商或重新发起登录", adapter.provider_id()));
             }
         }
+        if let Some(context) = &self.context {
+            context.adapter.lock().unwrap_or_else(|error| error.into_inner()).take();
+        }
     }
 
     /// 代理配置用既有单行写路保存；旧插件的 secret.proxy 出口快照同写。
@@ -175,7 +181,7 @@ impl LoginTaskHandle {
         let Some(context) = &self.context else { return Ok(()) };
         let Some(proxy) = &context.proxy else { return Ok(()) };
         let builtin = crate::server::core::providers::availability::BUILTIN_SUBSCRIPTION_IDS
-            .contains(&context.adapter.provider_id());
+            .contains(&context.provider);
         // 本体 secret 是纯凭证，不混入代理（否则 identityStamp/CAS 会漂移）。
         // 原插件保留 secret.proxy 快照；配置与快照同一行原子保存。
         let saved = context.store.with_lock(|guard| {
@@ -184,7 +190,7 @@ impl LoginTaskHandle {
                 let Some(mut record) = crate::server::core::account_store::sql::load_by_id(&tx, account_id)? else {
                     return Ok(Err(GatewayError::with_status(500, "登录账号不存在，未能保存登录代理")));
                 };
-                if record.provider() != context.adapter.provider_id() {
+                if record.provider() != context.provider {
                     return Ok(Err(GatewayError::with_status(500, "登录账号归属不匹配，未能保存登录代理")));
                 }
                 if !builtin {
@@ -432,7 +438,8 @@ impl LoginService {
     ) -> LoginTaskHandle {
         let mut handle = self.new_handle_for_provider(edition, adapter.provider_id());
         handle.context = Some(Arc::new(LoginTaskContext {
-            adapter, store: self.store.clone(), proxy,
+            provider: adapter.provider_id(), adapter: Mutex::new(Some(adapter)),
+            store: self.store.clone(), proxy,
         }));
         handle
     }

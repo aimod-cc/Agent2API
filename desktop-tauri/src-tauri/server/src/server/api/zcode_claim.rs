@@ -132,7 +132,10 @@ pub async fn preview(state: &ServerState, account_id: &str) -> Response {
         return management_error(status, message);
     }
     match call_action(state, account_id, "claim.preview", &Value::Null).await {
-        Ok(body) => ok_json(body),
+        Ok(body) => {
+            record_daily_checkin(state, account_id, &body);
+            ok_json(body)
+        },
         Err((status, message)) => management_error(status, message),
     }
 }
@@ -181,6 +184,7 @@ pub async fn claim_plan(state: &ServerState, account_id: &str, body: &Bytes) -> 
         Ok(outcome) => outcome,
         Err((status, message)) => return management_error(status, message),
     };
+    record_daily_checkin(state, account_id, &outcome);
     if let Some(object) = outcome.as_object() {
         let ok = object.get("ok").and_then(Value::as_bool).unwrap_or(false);
         let failure = object.get("failure").and_then(Value::as_str).unwrap_or("");
@@ -189,7 +193,7 @@ pub async fn claim_plan(state: &ServerState, account_id: &str, body: &Bytes) -> 
         // 成功的、以及「上游说已领过」，都要写：后者同样是「这一期到手了」。
         // 其余失败不落 —— 验证码没过、额度耗尽都不意味着套餐已经领到。
         let claimed_at = if ok || failure == "already_claimed" {
-            record_claim(state, account_id, plan_id)
+            record_claim(state, account_id, plan_id, object.get("claimedAt").and_then(Value::as_i64))
         } else {
             0
         };
@@ -202,12 +206,20 @@ pub async fn claim_plan(state: &ServerState, account_id: &str, body: &Bytes) -> 
     ok_json(outcome)
 }
 
+fn record_daily_checkin(state: &ServerState, account_id: &str, body: &Value) {
+    let Some(snapshot) = body.get("dailyCheckin").filter(|value| value.is_object()) else { return; };
+    if let Err(message) = state.store().plugin_set_ledger(account_id, "dailyCheckin", snapshot) {
+        crate::server::logging::verbose("[Claim]", &message);
+    }
+}
+
 /// 落一次领取状态，返回落库的时刻（毫秒；0 = 没落成，界面按「未领取」处理）。
 ///
 /// 写盘失败只记日志、不改领取结果：额度在上游已经到账，因为一次落盘失败把
 /// 成功的领取报成失败是本末倒置（与 `billing::checkin::run_checkin` 同一口径）。
-fn record_claim(state: &ServerState, account_id: &str, plan_id: &str) -> i64 {
-    let at = crate::server::logging::now_ms();
+fn record_claim(state: &ServerState, account_id: &str, plan_id: &str, claimed_at: Option<i64>) -> i64 {
+    let now = crate::server::logging::now_ms();
+    let at = claimed_at.filter(|at| *at > 0 && *at <= now).unwrap_or(now);
     if state.store().mark_zcode_claim(account_id, plan_id, at) {
         at
     } else {

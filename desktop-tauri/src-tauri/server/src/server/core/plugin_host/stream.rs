@@ -163,6 +163,7 @@ impl UsageSniffer {
 pub(crate) struct RpcStream {
     /// 宿主（Drop 时要发 abort / 清登记）。
     host: Arc<Host>,
+    lease: Option<Arc<super::activity::UsageLease>>,
     /// 本次调用的 RPC id。
     id: i64,
     /// 插件的 chunk / 收尾事件。
@@ -190,7 +191,7 @@ impl RpcStream {
     ///
     /// `pending` 是「已经从通道里取出来、但还没下发」的正文（见
     /// [`Self::with_pending`] 的说明）。
-    pub(crate) fn with_pending(
+    pub(super) fn with_pending(
         provider: &'static str,
         host: Arc<Host>,
         id: i64,
@@ -199,6 +200,7 @@ impl RpcStream {
         telemetry: Arc<RequestTelemetry>,
         failure: Option<FailureSlot>,
         private_failure: Option<PrivateFailureSlot>,
+        lease: Arc<super::activity::UsageLease>,
     ) -> Self {
         let (credit, mut credit_rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
         let pump_host = host.clone();
@@ -218,6 +220,7 @@ impl RpcStream {
         }
         Self {
             host,
+            lease: Some(lease),
             id,
             events,
             credit,
@@ -386,14 +389,15 @@ impl Stream for RpcStream {
 
 impl Drop for RpcStream {
     fn drop(&mut self) {
-        // 先清登记：插件随后到达的最终应答会落进「没有对应流」的分支被丢弃。
-        self.host.close_stream(self.id);
-        // 正常收尾（`ended`）不必取消 —— 插件那边已经结束了，多发一个 abort
-        // 只会让「刚好在最后一帧之后到达」的取消被误判成客户端断开。
-        if !self.ended {
+        let unfinished = self.host.close_stream(self.id);
+        if unfinished {
             let host = self.host.clone();
             let id = self.id;
-            tokio::spawn(async move { host.abort(id).await });
+            let lease = self.lease.take();
+            crate::spawn_task(async move {
+                let _lease = lease;
+                host.abort(id).await;
+            });
         }
     }
 }

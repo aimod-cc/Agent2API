@@ -300,7 +300,7 @@ pub async fn set_custom_models(State(_state): State<ServerState>, body: Bytes) -
         object.get("mappings").cloned().unwrap_or(Value::Null),
     ) {
         Ok(updated) => updated,
-        Err(message) => return errors::management_error(400, message),
+        Err(error) => return errors::management_error(error.status_code, error.message),
     };
     let model_count = updated
         .get("models")

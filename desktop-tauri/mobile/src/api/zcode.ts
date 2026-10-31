@@ -2,51 +2,8 @@ import { apiCall } from './client'
 import { serverIdentity } from '../lib/servers'
 import { t } from '../i18n'
 
-export type Entitlement = {
-  showName?: string
-  unitType?: string
-  grantUnits?: number
-  period?: string
-  effectiveAt?: number | null
-}
-
-export type PreviewPlan = {
-  planId?: string
-  name?: string
-  description?: string
-  priority?: number
-  startsAt?: number | null
-  endsAt?: number | null
-  entitlements?: Entitlement[]
-  claimed?: boolean
-  claimedAt?: number | null
-  source?: 'preview' | 'marketing'
-}
-
-export type OwnedPlan = PreviewPlan & {
-  state?: string
-  pendingUntil?: number | null
-}
-
-export type PreviewResult = {
-  deployed?: boolean
-  plans?: PreviewPlan[]
-  activationError?: string | null
-  previewError?: string | null
-  marketingError?: string | null
-}
-
-export type ClaimResult = {
-  ok?: boolean
-  failure?: string
-  failureLabel?: string
-  message?: string
-  planId?: string
-  claimedAt?: number
-  startsAt?: number
-  endsAt?: number
-  marketingError?: string | null
-}
+export type { Entitlement, PreviewPlan, OwnedPlan, PreviewResult, ClaimResult } from '../../../ui-shared/zcode-plans'
+import type { PreviewResult, ClaimResult } from '../../../ui-shared/zcode-plans'
 
 export type CaptchaPhase = 'preparing' | 'verifying' | 'submitting'
 export type CaptchaPoolStats = {

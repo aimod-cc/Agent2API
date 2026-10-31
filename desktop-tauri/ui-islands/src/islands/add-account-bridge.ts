@@ -244,7 +244,7 @@ export function describeError(error: unknown): string {
   return text ? t(text) : t('未知错误')
 }
 
-/** API 返回/抛错里的 HTTP 状态应保留；裸字符串只接受明确的 501/未实现标记。 */
+/** 优先读取 HTTP 状态；原生桥仅返回文字时，只认网关明确的能力缺失文案。 */
 export function isMethodsUnavailable(error: unknown, depth = 0): boolean {
   if (error && typeof error === 'object' && depth < 4) {
     const record = error as Record<string, unknown>
@@ -255,7 +255,9 @@ export function isMethodsUnavailable(error: unknown, depth = 0): boolean {
     if (record.code === 'not_implemented' || record.code === 'auth_methods_unavailable') return true
     if (record.error && record.error !== error && isMethodsUnavailable(record.error, depth + 1)) return true
   }
-  return /\b501\b|auth\.methods[^\n]*(?:not implemented|no method|未实现|不支持)/i.test(errorText(error))
+  const text = errorText(error)
+  return text === '该提供商尚未申报动态登录方式，请使用既有登录入口'
+    || /\b501\b|auth\.methods[^\n]*(?:not implemented|no method|未实现|不支持)/i.test(text)
 }
 
 export function runtimeProviderOf(provider: string): RuntimeProviderRecord | undefined {

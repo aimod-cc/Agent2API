@@ -121,8 +121,9 @@ pub async fn put_profile(State(state): State<ServerState>, body: Bytes) -> Respo
         let previous = config::routing_profiles();
         let old = previous.effective(&model);
         let known: HashSet<String> = available_providers(&accounts).into_iter()
-            .chain(old.into_iter().flat_map(|profile| profile.providers.iter().cloned())).collect();
-        if let Some(id) = profile.providers.iter().find(|id| !known.contains(*id) && !providers::is_known_provider_id(id)) {
+            .chain(old.into_iter().flat_map(|profile| profile.providers.iter().chain(&profile.disabled_providers).cloned())).collect();
+        if let Some(id) = profile.providers.iter().chain(&profile.disabled_providers)
+            .find(|id| !known.contains(*id) && !providers::is_known_provider_id(id)) {
             return errors::management_error(400, format!("未知提供商「{id}」"));
         }
         for (provider, ids) in &profile.account_order {

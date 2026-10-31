@@ -154,8 +154,11 @@ export function capabilityState(value: unknown): CapabilityState {
  * 空的档位表 —— 「上游没声明」与「一档都没有」对用户是两件事。
  */
 export function reasoningLevelsOf(
-  model: { reasoningLevels?: unknown; reasoningDefaultLevel?: unknown } | null | undefined,
-): { levels: string[]; defaultLevel: string } | null {
+  model: {
+    reasoningLevels?: unknown; reasoningDefaultLevel?: unknown
+    reasoningFixedLevel?: unknown; reasoningSource?: unknown
+  } | null | undefined,
+): { levels: string[]; defaultLevel: string; fixedLevel: string; source: string } | null {
   const raw = model?.reasoningLevels
   if (!Array.isArray(raw)) return null
   const levels = raw.filter(
@@ -163,7 +166,13 @@ export function reasoningLevelsOf(
   )
   if (!levels.length) return null
   const preset = model?.reasoningDefaultLevel
-  return { levels, defaultLevel: typeof preset === 'string' ? preset.trim() : '' }
+  const fixed = model?.reasoningFixedLevel
+  const source = model?.reasoningSource
+  return {
+    levels, defaultLevel: typeof preset === 'string' ? preset.trim() : '',
+    fixedLevel: typeof fixed === 'string' ? fixed.trim() : '',
+    source: typeof source === 'string' ? source : '',
+  }
 }
 
 /** 单键的 tooltip 文案（表格里四枚徽章与数值列共用） */

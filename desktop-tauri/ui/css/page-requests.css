@@ -54,6 +54,7 @@
 
 /* 表头格子是列宽把手的定位锚（.col-grip 绝对定位挂在它内側右缘，见 components.css） */
 .req-head > span { position: relative; }
+.req-head .req-target-label { display: inline-flex; align-items: center; gap: 4px; }
 
 /* ── 横向滚动 ──────────────────────────────────────────────
    拖动把列拖宽、或窗口窄到装不下所有列时，让列表横向滚动，而不是把列压没：

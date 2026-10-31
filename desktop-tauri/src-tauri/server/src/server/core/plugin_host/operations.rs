@@ -8,11 +8,13 @@ use serde_json::{json, Value};
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard};
 
 use super::{catalog, packages, update};
-use crate::server::core::account_store::plugin_accounts;
 use crate::server::core::task_state::{self, Claim, ManualBackoff};
 use crate::server::logging;
 
+mod activation;
+mod management;
 mod policy;
+pub use management::{change, PackChange};
 use policy::InstallPolicy;
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -71,6 +73,18 @@ fn persist(id: &str) {
     }
 }
 
+pub(super) fn set_stage(id: &str, stage: &str) {
+    let changed = tasks().lock().map(|mut tasks| {
+        let Some(task) = tasks.get_mut(id) else { return false };
+        if task.stage == stage { return false; }
+        task.stage = stage.to_string();
+        task.percent = None;
+        task.updated_at = logging::now_ms();
+        true
+    }).unwrap_or(false);
+    if changed { persist(id); }
+}
+
 pub fn active(id: &str) -> bool {
     tasks()
         .lock()
@@ -111,40 +125,20 @@ pub fn snapshot() -> Value {
 }
 
 pub async fn install_prepared(prepared: packages::PreparedPack) -> Result<Value, String> {
-    install_with_policy(prepared, None).await
-}
-
-async fn install_with_policy(
-    prepared: packages::PreparedPack,
-    policy: Option<(InstallPolicy, &str, &update::PackAsset)>,
-) -> Result<Value, String> {
-    let _guard = mutation_guard().await;
-    if let Some((policy, id, asset)) = policy {
-        policy.validate(id, asset)?;
-    }
-    let store = plugin_accounts::shared();
-    super::shutdown_all().await;
-    super::clear_providers();
-    let outcome = tokio::task::spawn_blocking(move || prepared.install())
-        .await
-        .map_err(|error| format!("插件安装任务中断：{error}"))
-        .and_then(|result| result);
-    if let Some(store) = store {
-        super::reload_host(store).await;
-    }
-    let installed = outcome?;
-    let pack = super::list_packs().into_iter().find(|pack| pack.id == installed.id)
-        .unwrap_or(installed);
-    let reloaded = super::host_for_pack(&pack.id).is_some_and(|host| host.ready());
-    let mut result = super::management_snapshot();
-    result["pack"] = serde_json::to_value(&pack).map_err(|error| error.to_string())?;
-    result["hostError"] = if pack.enabled && !reloaded {
-        json!("插件已安装，但本次没能启动；请检查日志或重启应用")
-    } else {
-        Value::Null
+    let id = prepared.id().to_string();
+    let guard = claim_operation(&id, InstallPolicy::Manual)?;
+    let operation = Operation {
+        id: id.clone(), action: "install".to_string(), stage: "waiting".to_string(), active: true,
+        version: prepared.record(&super::PackRegistry::load()).version,
+        updated_at: logging::now_ms(), ..Default::default()
     };
-    catalog::wake();
-    Ok(result)
+    tasks().lock().map_err(|_| "插件任务状态不可用".to_string())?.insert(id.clone(), operation);
+    persist(&id);
+    crate::spawn_task(async move {
+        let result = activation::install(prepared, None).await;
+        finish_operation(&id, result.as_ref(), guard, InstallPolicy::Manual);
+        result
+    }).await.map_err(|error| format!("插件安装任务中断：{error}"))?
 }
 
 pub fn start_cached(
@@ -183,6 +177,49 @@ pub(super) fn start_required(
     start_asset(id, "repair", asset, InstallPolicy::Required { automatic })
 }
 
+fn claim_operation(id: &str, policy: InstallPolicy) -> Result<task_state::RunGuard, String> {
+    if active(id) { return Err("这个插件正在下载或安装".to_string()); }
+    match task_state::claim(
+        &record_key(id), 60_000, true,
+        if policy.automatic() || matches!(policy, InstallPolicy::Required { .. }) {
+            ManualBackoff::Respect
+        } else { ManualBackoff::Bypass },
+        1000,
+    )? {
+        Claim::Acquired(guard) => Ok(guard),
+        Claim::Deferred(state) => Err(state.waiting_message()),
+    }
+}
+
+fn finish_operation(
+    id: &str,
+    result: Result<&Value, &String>,
+    guard: task_state::RunGuard,
+    policy: InstallPolicy,
+) {
+    let success = result.is_ok_and(|result| result["hostError"].is_null());
+    let mut value = Value::Null;
+    mutate(id, |operation| {
+        operation.active = false;
+        operation.done = success;
+        operation.stage = if success { "done" } else { "failed" }.to_string();
+        operation.percent = success.then_some(100.0);
+        match result {
+            Ok(result) => operation.host_error = result["hostError"].as_str().map(str::to_string),
+            Err(error) => operation.error = Some(error.clone()),
+        }
+        operation.result = None;
+        value = serde_json::to_value(&*operation).unwrap_or(Value::Null);
+    });
+    let message = value["error"].as_str().or_else(|| value["hostError"].as_str())
+        .unwrap_or("插件安装完成").to_string();
+    if !success { logging::log("[Plugin]", &message); }
+    let interval = if matches!(policy, InstallPolicy::Required { .. }) {
+        super::compatibility::RETRY_INTERVAL_MS
+    } else { 60_000 };
+    let _ = guard.finish(success, message, Some(value), 0, interval);
+}
+
 fn start_asset(
     id: &str,
     action: &str,
@@ -191,20 +228,7 @@ fn start_asset(
 ) -> Result<Operation, String> {
     policy.validate(id, &asset)?;
     crate::server::core::update::assert_downloadable(&asset.url).map_err(|error| error.message)?;
-    let guard = match task_state::claim(
-        &record_key(id),
-        60_000,
-        true,
-        if policy.automatic() || matches!(policy, InstallPolicy::Required { .. }) {
-            ManualBackoff::Respect
-        } else {
-            ManualBackoff::Bypass
-        },
-        1000,
-    )? {
-        Claim::Acquired(guard) => guard,
-        Claim::Deferred(state) => return Err(state.waiting_message()),
-    };
+    let guard = claim_operation(id, policy)?;
     let operation = Operation {
         id: id.to_string(),
         action: action.to_string(),
@@ -225,39 +249,7 @@ fn start_asset(
     let id = id.to_string();
     crate::spawn_task(async move {
         let result = run(&id, &asset, policy).await;
-        let mut finish_value = Value::Null;
-        let success = result.as_ref().is_ok_and(|result| result["hostError"].is_null());
-        mutate(&id, |operation| {
-            operation.active = false;
-            match result {
-                Ok(result) => {
-                    operation.done = success;
-                    operation.stage = if success { "done" } else { "failed" }.to_string();
-                    operation.percent = Some(100.0);
-                    operation.host_error = result["hostError"].as_str().map(str::to_string);
-                    operation.result = None;
-                }
-                Err(error) => {
-                    operation.stage = "failed".to_string();
-                    operation.error = Some(error);
-                }
-            }
-            finish_value = serde_json::to_value(&*operation).unwrap_or(Value::Null);
-        });
-        let message = finish_value["error"]
-            .as_str()
-            .or_else(|| finish_value["hostError"].as_str())
-            .unwrap_or("插件安装完成")
-            .to_string();
-        if !success {
-            logging::log("[Plugin]", &message);
-        }
-        let interval = if matches!(policy, InstallPolicy::Required { .. }) {
-            super::compatibility::RETRY_INTERVAL_MS
-        } else {
-            60_000
-        };
-        let _ = guard.finish(success, message, Some(finish_value), 0, interval);
+        finish_operation(&id, result.as_ref(), guard, policy);
     });
     Ok(operation)
 }
@@ -293,12 +285,8 @@ async fn run(
     .await
     .map_err(|error| format!("插件校验任务中断：{error}"))??;
     policy.validate(id, asset)?;
-    mutate(id, |task| {
-        task.stage = "installing".to_string();
-        task.percent = None;
-    });
-    persist(id);
-    install_with_policy(prepared, Some((policy, id, asset))).await
+    set_stage(id, "waiting");
+    activation::install(prepared, Some((policy, asset.clone()))).await
 }
 
 pub async fn start(id: &str, action: &str, target: &str) -> Result<Operation, String> {

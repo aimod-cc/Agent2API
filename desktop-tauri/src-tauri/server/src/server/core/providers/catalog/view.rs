@@ -160,6 +160,7 @@ fn push_managed_model(
     provider: &str,
     source: &str,
     refreshed_at: i64,
+    manifest: &[Value],
     item: Value,
 ) {
     let id = model_id(&item);
@@ -189,11 +190,11 @@ fn push_managed_model(
         aliases.push(mapping.alias.clone());
         mappings.push(json!({
             "alias": effective.alias, "target": id, "provider": provider,
-            "enabled": effective.enabled, "reasoning": effective.reasoning,
+            "enabled": rules.binding_enabled(provider, &effective.alias, &id, manifest), "reasoning": effective.reasoning,
             "isDefault": false, "dangling": false, "carried": true,
         }));
     }
-    let source = if rules.custom.iter().any(|custom| custom.matches(provider, &id)) {
+    let source = if item.get("_manualModel").and_then(Value::as_bool) == Some(true) {
         "manual"
     } else { source };
     // 覆盖键列表从**本次快照**里查（不调 model_rules::current() —— 那会
@@ -229,6 +230,9 @@ fn push_managed_model(
         // 用哪一档」。缺失（null）= 该模型未声明，界面据此回落通用档位表。
         "reasoningLevels": item.get("reasoningLevels"),
         "reasoningDefaultLevel": item.get("reasoningDefaultLevel"),
+        "reasoningFixedLevel": item.get("reasoningFixedLevel"),
+        "reasoningBindingSupported": item.get("reasoningBindingSupported"),
+        "reasoningSource": item.get("reasoningSource"),
         // 这一家的清单是什么时候拉到的（毫秒；0 = 从未成功拉过）。
         // 缓存恢复的清单与刚拉的清单**都是 `remote`**，时效只能靠这个
         // 时间戳说明（见 `providers::catalog_cache` 的模块头）。
@@ -285,10 +289,10 @@ pub fn manage_view(store: &AccountStore) -> Value {
             "source": if count == 0 { "none" } else { source },
             "refreshedAt": refreshed_at,
         }));
-        for item in manifest {
+        for item in manifest.iter().cloned() {
             push_managed_model(
                 &rules, &mut models, &mut mappings, &mut attached, &mut claimed,
-                &provider, source, refreshed_at, item,
+                &provider, source, refreshed_at, &manifest, item,
             );
         }
     }
@@ -298,9 +302,12 @@ pub fn manage_view(store: &AccountStore) -> Value {
             Some(provider) => entry_id_in_manifest(&manifest_for_provider(provider), &mapping.target).is_some(),
             None => !super::providers_for_model(&mapping.target).is_empty(),
         };
+        let enabled = mapping.provider.as_deref().map_or(mapping.enabled, |provider| {
+            rules.binding_enabled(provider, &mapping.alias, &mapping.target, &manifest_for_provider(provider))
+        });
         mappings.push(json!({
             "alias": mapping.alias, "target": mapping.target, "provider": mapping.provider,
-            "enabled": mapping.enabled, "reasoning": mapping.reasoning,
+            "enabled": enabled, "reasoning": mapping.reasoning,
             "isDefault": mapping.alias.eq_ignore_ascii_case(&mapping.target),
             "dangling": true, "carried": carried,
         }));

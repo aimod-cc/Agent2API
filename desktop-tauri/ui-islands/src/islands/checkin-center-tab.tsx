@@ -222,17 +222,18 @@ function AccountTable({ group }: { group: ProviderGroup }): React.ReactElement {
       </TableHeader>
       <TableBody>
         {group.accounts.map(account => (
-          <AccountRow key={account.id} account={account} modes={modes} dailyActivity={dailyActivity} />
+          <AccountRow key={account.id} account={account} modes={modes} dailyActivity={dailyActivity} manualPlans={group.manualPlans === true} />
         ))}
       </TableBody>
     </Table>
   )
 }
 
-function AccountRow({ account, modes, dailyActivity }: {
+function AccountRow({ account, modes, dailyActivity, manualPlans }: {
   account: CheckinAccount
   modes: string[]
   dailyActivity: boolean
+  manualPlans: boolean
 }): React.ReactElement {
   const busy = (mode: string) => store.signing.has(`${account.id}:${mode}`)
   return (
@@ -249,6 +250,10 @@ function AccountRow({ account, modes, dailyActivity }: {
         {account.checkedInToday
           ? <Badge variant="success" shape="tag">已签</Badge>
           : <Badge variant="brand" shape="tag">待签</Badge>}
+        {account.dailyCheckin && account.dailyCheckin.totalCount > 0
+          ? <span className="ck-sub"> · {t('已领 {done} / {total} 份套餐', {
+            done: account.dailyCheckin.completedCount, total: account.dailyCheckin.totalCount,
+          })}</span> : null}
       </TableCell>
       <TableCell className="ck-sub">{formatTime(account.checkinAt)}</TableCell>
       <TableCell className="ck-right">
@@ -271,9 +276,15 @@ function AccountRow({ account, modes, dailyActivity }: {
                 size="sm"
                 variant="ghost"
                 disabled={busy('checkin') || !account.available}
-                onClick={() => void signSingle(account.id, 'checkin')}
+                onClick={() => {
+                  if (manualPlans && window.wbZcodePlans?.open) {
+                    window.wbZcodePlans.open({ id: account.id, name: account.name })
+                  } else {
+                    void signSingle(account.id, 'checkin')
+                  }
+                }}
               >
-                {busy('checkin') ? '签到中…' : account.checkedInToday ? '重签' : '签到'}
+                {manualPlans ? t('套餐明细') : busy('checkin') ? '签到中…' : account.checkedInToday ? '重签' : '签到'}
               </Button>
             )}
         </span>

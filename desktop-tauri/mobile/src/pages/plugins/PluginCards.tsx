@@ -7,7 +7,10 @@ import { t } from '../../i18n'
 function PluginProgress({ operation }: { operation?: PluginOperation }) {
   if (!operation) return null
   const stage = operation.stage === 'downloading' ? t('网关正在下载…')
-    : operation.stage === 'verifying' ? t('网关正在校验…') : t('网关正在安装…')
+    : operation.stage === 'verifying' ? t('网关正在校验…')
+    : operation.stage === 'waiting' ? t('等待当前任务结束，插件继续服务…')
+    : operation.stage === 'loading' ? t('正在加载新插件…')
+    : operation.stage === 'restoring' ? t('正在恢复旧版本插件…') : t('网关正在安装…')
   return <>
     {operation.active ? <div className='my-3' aria-live='polite'>
       <p className='m-ck-note'>{operation.required ? `${t('正在补齐插件…')} · ` : ''}{stage}{operation.stage === 'downloading' && operation.percent != null ? ` ${Math.round(operation.percent)}%` : ''}</p>

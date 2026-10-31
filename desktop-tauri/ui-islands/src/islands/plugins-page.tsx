@@ -209,7 +209,6 @@ function PluginsPage(): React.ReactElement {
       </CardHeader>
       <div className='p-4'>
         <Input ref={fileRef} type='file' accept='.zip,application/zip' className='hidden' onChange={event => void onFile(event)} />
-        <p className='mb-3 text-[12px] text-subtle'>{packSizeLimitMessage(maxPackBytes)}</p>
         {error || syncError ? <p className='mb-3 text-[12px] text-destructive'>{error || syncError}</p> : null}
         {busy === 'file' ? <div className='mb-3 flex flex-col gap-2'>
           <span className='text-[12px] text-subtle'>{t('正在读取、校验并安装插件包…')}</span>

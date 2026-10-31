@@ -16,6 +16,7 @@ use crate::server::core::models::model_id;
 use crate::server::core::providers::adapter::adapter_by_id;
 use crate::server::core::providers::{kind_from_id, kind_id, ProviderKind, PROVIDERS};
 
+pub(crate) use routing::entry_id_in_manifest;
 pub use routing::{
     default_model_catalog, default_model_usable, forwarding_providers, model_blocked_everywhere,
     providers_for_model, wire_target_for_provider, WireTarget,
@@ -24,6 +25,13 @@ pub use view::{
     advertised_manifest_contains, advertised_model_ids, has_available_providers, manage_view,
     models_by_provider, models_response, session_models, suggest_advertised,
 };
+
+pub(crate) fn upstream_manifests() -> Vec<(String, Vec<Value>)> {
+    all_provider_ids().into_iter().map(|provider| {
+        let models = adapter_by_id(&provider).map(|adapter| adapter.list_models()).unwrap_or_default();
+        (provider, models)
+    }).collect()
+}
 
 /// 原始能力清单不应用绑定开关；关闭原始 ID 后，别名仍需解析到这条上游记录。
 /// 用户自建模型、models.dev 补齐与能力覆盖都在这一处应用，插件与内置身份共用。
@@ -37,6 +45,8 @@ pub(crate) fn manifest_for_provider(provider: &str) -> Vec<Value> {
         if !id.is_empty()
             && !models.iter().any(|existing| model_id(existing).eq_ignore_ascii_case(&id))
         {
+            let mut item = item;
+            item["_manualModel"] = Value::Bool(true);
             models.push(item);
         }
     }

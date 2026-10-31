@@ -193,7 +193,7 @@ impl GatewayCallbacks for StoreCallbacks {
             let provider = self.check_account(&account, None)?;
             let view = if public.is_object() {
                 Some(public)
-            } else if let Some(adapter) = registry::lookup(&provider) {
+            } else if let Some(adapter) = registry::callback_adapter(&provider) {
                 adapter.plugin_account_view(&secret).await.ok()
             } else {
                 None
@@ -370,7 +370,7 @@ pub async fn start(store: AccountStore) -> Option<Arc<Host>> {
     first
 }
 
-async fn start_pack(
+pub(super) async fn start_pack(
     store: AccountStore,
     pack: &install::InstalledPack,
     owners: &std::collections::BTreeMap<String, String>,
@@ -436,7 +436,13 @@ async fn start_pack(
     super::runtime::install_pack(&pack.id, super::ownership::category(&dir), host.clone());
     match host.ensure().await {
         Ok(providers) => {
+            let enabled_ids: Vec<String> = providers.iter().map(|info| info.id.0.clone())
+                .filter(|id| !crate::server::core::providers::availability::is_suspended(id)
+                    && owners.get(id).map(String::as_str) == Some(pack.id.as_str())
+                    && pack.providers.get(id).copied().unwrap_or(true)).collect();
+            super::runtime::set_providers(&pack.id, enabled_ids);
             let mut loaded = Vec::new();
+            let mut adapters = Vec::new();
             let mut restored = Vec::new();
             for info in providers {
                 let id = info.id.0.clone();
@@ -462,9 +468,11 @@ async fn start_pack(
                 }
                 let mut adapter = RpcAdapter::new(id.clone(), kind, host.clone(), info);
                 adapter.load_image_capability().await;
-                registry::install(id.clone(), Arc::new(adapter));
+                adapters.push((id.clone(), Arc::new(adapter)));
                 loaded.push(id);
             }
+            if !host.ready() { return None; }
+            registry::stage_all(adapters);
             let count = loaded.len();
             super::runtime::set_providers(&pack.id, loaded);
             logging::log(
@@ -486,24 +494,29 @@ async fn start_pack(
     }
 }
 
-/// 重启装配：关掉当前宿主 → 清空适配器注册表 → 按注册表重新装配。
-///
-/// ── 什么时候调 ──────────────────────────────────────────────
-/// 安装 / 升级 / 卸载 / 启停插件包之后（`api::plugins`）。用户点完按钮
-/// 就该生效，不必重启整个网关 —— 那是插件架构对「装个插件要重开应用」的
-/// 直接反驳。
-///
-/// ── 顺序为什么是「先关再清再装」───────────────────────────────
-///   · 先 `shutdown()`：子进程还在跑时换二进制，Windows 上会因文件占用失败；
-///   · 再 `registry::clear()`：旧的 `RpcAdapter` 持有旧宿主的 `Arc`，不清掉
-///     它们会继续把请求发给一个已关闭的进程（表现为「装了新包还是 503」）；
-///   · 最后 `start()`：它读注册表、spawn、握手、重建适配器。
-///
-/// 关闭失败不阻断：拿不到宿主就是「本来就没在跑」，照样往下走。
+/// 只重载空闲的插件包；正在使用旧执行体的请求不能被管理操作回收。
 pub async fn reload(store: AccountStore) -> Option<Arc<Host>> {
-    super::shutdown_all().await;
-    registry::clear();
-    start(store).await
+    let _mutation = super::operations::mutation_guard().await;
+    let registry = PackRegistry::load();
+    let mut ids = super::runtime::loaded_ids();
+    ids.extend(registry.packs.iter().map(|pack| pack.id.clone()));
+    ids.sort();
+    ids.dedup();
+    for id in ids {
+        let scope = super::switching::ChangeScope::between(&registry, &registry, &id, None);
+        let Some(switch) = scope.begin() else {
+            logging::log("[Plugin]", &format!("插件包「{id}」仍有任务，未执行重载"));
+            continue;
+        };
+        if let Err(error) = scope.stop().await {
+            logging::log("[Plugin]", &error);
+            continue;
+        }
+        switch.clear_adapters();
+        if let Err(error) = scope.start(&store).await { logging::log("[Plugin]", &error); }
+        drop(switch);
+    }
+    super::runtime::current()
 }
 
 /// 网关监听端口（`ServerState::bootstrap` 时写入一次）。

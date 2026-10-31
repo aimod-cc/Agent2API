@@ -20,6 +20,7 @@ import { accountName, activeLimits, formatExpiry, formatRelative, formatStamp, i
 import { expiryOf, hasExpiry, isLongLivedCredential, supportsUsage } from '../lib/providerFacts'
 import { mergeUsageRow, usageIndex, usageText } from '../lib/usage'
 import { credentialExpiryRowsOf, credentialExpiryText } from '../../../ui-shared/credential-expiry'
+import { upstreamCooldownOf, upstreamSuspendedReasonOf } from '../../../ui-shared/account-upstream-state'
 import { providerLabel } from '../lib/providers'
 import { serverIdentity } from '../lib/servers'
 import { t } from '../i18n'
@@ -141,12 +142,12 @@ export function AccountSheet({
     }
   }
 
-  /** 清除限流：不传 model = 清掉这个账号全部模型 */
+  /** 不传 model 时同时清除账号冷却和全部模型限流。 */
   const clearLimit = async (model?: string) => {
     if (!account) return
     const question = model
       ? t('确定清除模型「{model}」的限流标记？', { model })
-      : t('确定清除全部模型的限流标记？')
+      : t('确定清除该账号的冷却与全部模型限流标记？')
     if (!await confirmDialog(question)) return
     await run('clear', () => clearAccountRateLimits(account.id, model), t('限流已清除'))
   }
@@ -157,6 +158,8 @@ export function AccountSheet({
   }
 
   const limits = account ? activeLimits(account) : []
+  const cooldown = upstreamCooldownOf(account)
+  const suspendedReason = upstreamSuspendedReasonOf(account)
   const expiresAt = account ? expiryOf(account) : 0
   const credentialRows = account ? credentialExpiryRowsOf(account, expiresAt) : []
   const usageView = usageText(usageRow)
@@ -365,6 +368,14 @@ export function AccountSheet({
                     </span>
                   </div>
                 ) : null}
+                {suspendedReason ? (
+                  <div className='m-row' style={{ alignItems: 'flex-start' }}>
+                    <span className='m-k'>{t('上游限制 · 已禁用')}</span>
+                    <span className='m-v' style={{ color: 'var(--m-danger)', whiteSpace: 'normal', wordBreak: 'break-word', lineHeight: 1.5 }}>
+                      {suspendedReason}
+                    </span>
+                  </div>
+                ) : null}
                 {account.needsRelogin ? (
                   <div className='m-row' style={{ alignItems: 'flex-start' }}>
                     <span className='m-k'>{t('需要重新登录')}</span>
@@ -375,7 +386,7 @@ export function AccountSheet({
                 ) : null}
               </div>
 
-              {limits.length ? (
+              {limits.length || cooldown ? (
                 <>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0 2px' }}>
                     <span style={{ flex: 1, fontSize: 12, color: 'var(--m-text-3)' }}>{t('限流明细')}</span>
@@ -389,6 +400,16 @@ export function AccountSheet({
                     </Button>
                   </div>
                   <div className='m-rows'>
+                    {cooldown ? (
+                      <div className='m-row' style={{ alignItems: 'flex-start' }}>
+                        <span className='m-k'>{t('账号冷却')}</span>
+                        <div className='m-v' style={{ whiteSpace: 'normal', wordBreak: 'break-word', lineHeight: 1.5 }}>
+                          <div title={formatStamp(cooldown.resetAt)}>{t('{time} 恢复', { time: formatRelative(cooldown.resetAt) })}</div>
+                          <div>{t('账号全部模型暂时停止转发 · 到恢复时间自动解除')}</div>
+                          {cooldown.message ? <div>{cooldown.message}</div> : null}
+                        </div>
+                      </div>
+                    ) : null}
                     {limits.map(({ model, resetAt }) => (
                       <div key={model} className='m-row'>
                         <span className='m-k m-mono' style={{ fontSize: 11 }}>
@@ -470,7 +491,7 @@ export function AccountSheet({
 }
 
 function statusTone(account: Account): 'ok' | 'warn' | 'bad' | 'mute' {
-  if (account.needsRelogin) return 'bad'
+  if (account.needsRelogin || upstreamSuspendedReasonOf(account)) return 'bad'
   if (!account.enabled) return 'mute'
   if (isRateLimited(account)) return 'warn'
   const expiresAt = expiryOf(account)
@@ -480,7 +501,9 @@ function statusTone(account: Account): 'ok' | 'warn' | 'bad' | 'mute' {
 
 function statusText(account: Account): string {
   if (account.needsRelogin) return t('需重登')
+  if (upstreamSuspendedReasonOf(account)) return t('上游限制 · 已禁用')
   if (!account.enabled) return t('已禁用')
+  if (upstreamCooldownOf(account)) return t('账号冷却')
   if (isRateLimited(account)) return t('限流中')
   const expiresAt = expiryOf(account)
   if (expiresAt > 0 && expiresAt <= Date.now()) return t('已过期')

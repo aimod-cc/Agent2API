@@ -58,7 +58,7 @@ const LOCALES = ['en', 'zh-Hant', 'ja', 'ko', 'pt-BR']
  * 调整顺序会改变某些跨界键的归属，非必要不要动。
  */
 const DOMAIN_ORDER = [
-  'common', 'login', 'accounts', 'add-account', 'models', 'routing', 'agent', 'settings', 'assistant', 'update',
+  'common', 'login', 'accounts', 'account-settings', 'add-account', 'models', 'routing', 'agent', 'settings', 'assistant', 'update',
   'keys', 'proxies', 'docs', 'report', 'checkin', 'tasks', 'logs', 'requests',
   'tables', 'port',
 ]
@@ -70,7 +70,8 @@ const DOMAIN_ORDER = [
 const DOMAIN_RULES = [
   { domain: 'common', files: ['index.html', 'm.html', 'desktop-shell.tsx', 'desktop-titlebar.tsx', 'desktop-tooltip.tsx', 'island-registry.ts', 'clipboard.js', 'filter-memory.js', 'app.js', 'confirm-dialog.tsx', 'input.tsx', 'input-control.tsx', 'segmented.tsx', 'index.tsx', 'markdown.js', 'icons.js', 'App.tsx', 'main.tsx', 'Shell.tsx', 'NavBar.tsx', 'Icon.tsx', 'ProviderLogo.tsx', 'ui.tsx', 'PullToRefresh.tsx', 'AppUpdatePanel.tsx', 'CommunitySheet.tsx', 'i18n.ts', 'client.ts', 'gateway.ts', 'format.ts', 'providers.ts', 'providerFacts.ts', 'usePolling.ts', 'pwa.ts', 'usePwa.ts', 'appUpdate.ts', 'community.ts', 'servers.ts', 'auth.ts', 'store.ts', 'routes.ts'] },
   { domain: 'login', files: ['login.html', 'login-page.tsx', 'panel-captcha.js'] },
-  { domain: 'accounts', files: ['accounts-page.tsx', 'accounts-hidden-notice.tsx', 'HiddenAccountsNotice.tsx', 'accounts-refresh.ts', 'accounts-update.ts', 'AccountsPage.tsx', 'AccountSheet.tsx', 'AccountsFilterSheet.tsx', 'accounts-shared.ts', 'accounts-columns.ts', 'accounts-store.ts', 'accounts-panels.tsx', 'accounts-queue-drag.ts', 'accounts-dialogs.tsx', 'accounts-batch-dialog.tsx', 'accounts-settings-dialog.tsx', 'accounts-zcode-plan.tsx', 'accounts-proxy-form.tsx', 'accounts-dialog-limiter.tsx', 'accounts-dialog-usage.tsx', 'accounts-credit-detail.tsx', 'credential-expiry.ts', 'usage-readings.ts', 'usage-query-state.ts', 'accounts-usage.ts', 'accounts-usage-cache.ts', 'accounts-limit-detail.tsx', 'accounts-data.ts', 'accounts-domain.ts', 'accounts-group-settings.tsx', 'usage.ts', 'zcode-plans-modal.tsx', 'balance-query.tsx'], prefixes: ['accounts-limiter-', 'accounts-usage-', 'accounts-export', 'accounts-authorization'] },
+  { domain: 'account-settings', files: ['accounts-settings-dialog.tsx', 'accounts-settings-fields.tsx'] },
+  { domain: 'accounts', files: ['accounts-page.tsx', 'accounts-hidden-notice.tsx', 'HiddenAccountsNotice.tsx', 'accounts-refresh.ts', 'accounts-update.ts', 'AccountsPage.tsx', 'AccountSheet.tsx', 'AccountsFilterSheet.tsx', 'accounts-shared.ts', 'accounts-columns.ts', 'accounts-store.ts', 'accounts-panels.tsx', 'accounts-queue-drag.ts', 'accounts-dialogs.tsx', 'accounts-batch-dialog.tsx', 'accounts-zcode-plan.tsx', 'accounts-proxy-form.tsx', 'accounts-dialog-limiter.tsx', 'accounts-dialog-usage.tsx', 'accounts-credit-detail.tsx', 'credential-expiry.ts', 'usage-readings.ts', 'usage-query-state.ts', 'accounts-usage.ts', 'accounts-usage-cache.ts', 'accounts-limit-detail.tsx', 'accounts-data.ts', 'accounts-domain.ts', 'accounts-group-settings.tsx', 'usage.ts', 'zcode-plans-modal.tsx', 'balance-query.tsx'], prefixes: ['accounts-limiter-', 'accounts-usage-', 'accounts-export', 'accounts-authorization'] },
   { domain: 'add-account', files: ['add-dynamic-provider.tsx', 'add-custom-provider.tsx', 'custom-provider-ui.js', 'providers.js', 'preset-providers.js', 'web-login.js', 'sms-login.js', 'autoclaw-oauth.js', 'aliyun-captcha.js', 'zcode-claim.js', 'zcode-captcha-pool.js', 'codearts-welfare.js'], prefixes: ['add-account-', 'add-provider-', 'add-doubaowork-'] },
   { domain: 'models', files: ['ModelsPage.tsx', 'model-capability.ts', 'model-capability-dialog.tsx', 'model-test-dialog.tsx', 'model-test-result.tsx'], prefixes: ['models-'] },
   { domain: 'routing', prefixes: ['routing-'] },
@@ -88,7 +89,7 @@ const DOMAIN_RULES = [
   { domain: 'proxies', files: ['ProxiesPage.tsx', 'proxies-page.tsx', 'proxies-columns.ts', 'proxies-state.ts', 'proxies-dialogs.tsx', 'proxy-editor-sheet.tsx', 'proxy-retirement-dialog.tsx', 'sponsor.ts'] },
   { domain: 'docs', files: ['docs-page.tsx', 'DocsPage.tsx', 'DocsProviderData.ts', 'provider-docs-view.tsx'], prefixes: ['docs-provider-', 'docs-api-'] },
   { domain: 'report', files: ['report-page.tsx', 'report-charts.ts', 'ReportPage.tsx', 'HomePage.tsx', 'chart-data.ts', 'chart-labels.tsx', 'chart-tooltips.tsx', 'report-recharts.tsx', 'source-stats.tsx', 'api-key-detail.tsx', 'daily-trend-panel.tsx', 'SourceUsageSection.tsx', 'MobileReportTrend.tsx'] },
-  { domain: 'checkin', files: ['checkin.ts', 'zcode.ts', 'CheckinPage.tsx', 'ZcodeCaptchaPanel.tsx'], prefixes: ['checkin-', 'Checkin'] },
+  { domain: 'checkin', files: ['checkin.ts', 'zcode.ts', 'zcode-plans.ts', 'CheckinPage.tsx', 'ZcodeCaptchaPanel.tsx'], prefixes: ['checkin-', 'Checkin'] },
   { domain: 'tasks', files: ['tasks-panel.tsx', 'TasksPage.tsx'] },
   { domain: 'logs', files: ['logs.ts', 'LogsPage.tsx'], prefixes: ['logs-'] },
   { domain: 'requests', files: ['RequestsPage.tsx', 'requests-page.tsx', 'request-detail.tsx', 'request-raw-panes.tsx', 'request-hover.tsx', 'request-clear-modal.tsx', 'conversation-preview.js', 'source-filters.tsx', 'request-cells.tsx', 'request-phase.ts'] },
@@ -134,7 +135,7 @@ function islandSources() {
   walk(ISLANDS_SRC)
   if (fs.existsSync(SHARED_SRC)) {
     for (const entry of fs.readdirSync(SHARED_SRC, { withFileTypes: true })) {
-      if (entry.isFile() && (entry.name === 'logs.ts' || entry.name === 'credential-expiry.ts' || entry.name === 'usage-readings.ts' || entry.name === 'usage-query-state.ts' || entry.name === 'use-model-api-keys.ts' || entry.name === 'updates.ts' || entry.name === 'proxy-retirement-dialog.tsx' || /^(assistant-|agent-|docs-api-|model-api-key).*\.tsx?$/.test(entry.name))) {
+      if (entry.isFile() && (entry.name === 'logs.ts' || entry.name === 'credential-expiry.ts' || entry.name === 'usage-readings.ts' || entry.name === 'usage-query-state.ts' || entry.name === 'zcode-plans.ts' || entry.name === 'use-model-api-keys.ts' || entry.name === 'updates.ts' || entry.name === 'proxy-retirement-dialog.tsx' || /^(assistant-|agent-|docs-api-|model-api-key).*\.tsx?$/.test(entry.name))) {
         out.push(path.join(SHARED_SRC, entry.name))
       }
     }

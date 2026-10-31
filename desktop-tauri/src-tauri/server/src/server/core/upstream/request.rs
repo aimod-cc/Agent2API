@@ -60,6 +60,7 @@ fn connect_timeout_seconds() -> u64 {
 }
 
 /// 一次上游请求的全部素材（协议无关形态；provider 差异在构造阶段已消解）
+#[derive(Clone)]
 pub struct TransportRequest {
     /// 上游完整 URL（由适配器给出）
     pub url: String,
@@ -83,16 +84,19 @@ pub struct TransportRequest {
 pub struct UpstreamErrorDetail {
     pub code: Option<i64>,
     pub message: String,
+    pub payload: Option<Value>,
 }
 
 impl UpstreamErrorDetail {
     /// 适配器入参形态：`{code, message}`（键名与上游 JSON 一致，
     /// 于是适配器可以直接用 `error_body.get("code")` 读，不需要中间结构体）
     pub fn to_value(&self) -> Value {
-        json!({
-            "code": self.code.map(Value::from).unwrap_or(Value::Null),
-            "message": self.message,
-        })
+        let mut body = self.payload.clone().filter(Value::is_object).unwrap_or_else(|| json!({}));
+        if let Some(object) = body.as_object_mut() {
+            if let Some(code) = self.code { object.insert("code".into(), Value::from(code)); }
+            object.insert("message".into(), Value::String(self.message.clone()));
+        }
+        body
     }
 }
 
@@ -113,6 +117,7 @@ pub async fn read_upstream_error(
         capture.push(text.as_bytes());
     }
     let mut code = None;
+    let mut parsed = None;
     let mut message = if capture.is_some() {
         text.clone()
     } else {
@@ -141,8 +146,9 @@ pub async fn read_upstream_error(
         if let Some(candidate) = candidate {
             message = candidate.to_string();
         }
+        parsed = Some(payload);
     }
-    UpstreamErrorDetail { code, message }
+    UpstreamErrorDetail { code, message, payload: parsed }
 }
 
 /// 发一次上游请求（不读 body，保留原始响应给流式转发与错误解析）。
@@ -159,6 +165,13 @@ pub async fn send_chat_request(
         None if plan.system_proxy_when_unset => egress::client_for_system_proxy(),
         None => egress::client_for(None),
     };
+    send_chat_with_client(plan, &client).await
+}
+
+pub(super) async fn send_chat_with_client(
+    plan: &TransportRequest,
+    client: &reqwest::Client,
+) -> Result<reqwest::Response, UpstreamRequestError> {
     let mut builder = client.post(&plan.url).body(plan.payload.clone());
     for (key, value) in &plan.headers {
         builder = builder.header(key, value);
@@ -201,7 +214,16 @@ pub async fn send_chat_request(
                 )
             };
             let safe_to_retry = error.is_connect() || error.is_builder();
-            Err(UpstreamRequestError { message, reason, safe_to_retry })
+            let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+            let mut certificate_error = false;
+            while let Some(error) = cause {
+                let message = error.to_string().to_ascii_lowercase();
+                certificate_error |= message.contains("certificate") || message.contains("invalid peer")
+                    || message.contains("unknownissuer") || message.contains("certnotvalid");
+                cause = error.source();
+            }
+            let network_failure = !certificate_error && !error.is_builder() && (error.is_connect() || error.is_timeout());
+            Err(UpstreamRequestError { message, reason, safe_to_retry, network_failure })
         }
         Err(_elapsed) => {
             let seconds = headers_budget.as_secs();
@@ -209,6 +231,7 @@ pub async fn send_chat_request(
                 reason: format!("等待响应超时({seconds}秒)"),
                 message: format!("等待响应超时({seconds}秒，出口 {via})"),
                 safe_to_retry: false,
+                network_failure: true,
             })
         }
     }
@@ -224,6 +247,7 @@ pub struct UpstreamRequestError {
     pub reason: String,
     /// 只有请求尚未写出（建连或构造失败）才允许非幂等的生图自动重试。
     pub safe_to_retry: bool,
+    pub network_failure: bool,
 }
 
 impl UpstreamRequestError {

@@ -227,17 +227,21 @@ impl AccountStore {
     /// 与 `mark_checkin` 同一口径：**不**动 `updatedAt`（那是「记录被改过」的
     /// 时间，会显示在账号页的「更新于 …」上；落一次领取结果不是用户改动）。
     pub fn mark_zcode_claim(&self, account_id: &str, plan_id: &str, at: i64) -> bool {
+        if at <= 0 { return false; }
         let guard = self.guard();
         let Some(mut record) = self.record_by_id(&guard, account_id) else {
             return false;
         };
-        record.set_claim_at(at);
+        if at > record.claim_at() {
+            record.set_claim_at(at);
+            record.set_claim_plan_id(plan_id.trim());
+        }
         let plan_id = plan_id.trim();
         if !plan_id.is_empty() {
-            record.set_claim_plan_id(plan_id);
             let mut ledger = record.claim_plans();
-            ledger.insert(plan_id.to_string(), Value::from(at));
-            prune_claim_ledger(&mut ledger, at);
+            let current = ledger.get(plan_id).and_then(Value::as_i64).unwrap_or(0);
+            ledger.insert(plan_id.to_string(), Value::from(at.max(current)));
+            prune_claim_ledger(&mut ledger, logging::now_ms());
             record.set_claim_plans(ledger);
         }
         self.with_conn(&guard, |conn| sql::update_in_place(conn, &record))

@@ -96,6 +96,7 @@ pub mod antigravity_accounts;
 pub mod autoclaw_accounts;
 pub mod catpaw_accounts;
 pub mod chatglm_accounts;
+pub(crate) mod checkin_state;
 pub mod cline_accounts;
 pub mod codearts_accounts;
 pub mod atomcode_accounts;

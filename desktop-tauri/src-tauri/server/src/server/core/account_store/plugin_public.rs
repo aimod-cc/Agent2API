@@ -83,7 +83,7 @@ pub(super) fn is_private_field(key: &str) -> bool {
     matches!(key,
         "pluginSecret" | "pluginPublic" | "pluginIdentity" | "accessToken" | "refreshToken"
         | "access_token" | "refresh_token" | "apiKey" | "api_key" | "password"
-        | "balanceToken" | "access_key_id" | "secret_access_key" | "security_token" | "oauth_context"
+        | "balanceToken" | "workbuddyWebSession" | "access_key_id" | "secret_access_key" | "security_token" | "oauth_context"
     )
 }
 

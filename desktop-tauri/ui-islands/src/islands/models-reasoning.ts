@@ -15,6 +15,10 @@
  *     这种无从解释的空档）。
  */
 
+import { modelReasoning, type ReasoningModel } from '../../../ui-shared/models-reasoning'
+
+export { bindingReasoningLevel, modelReasoning, POSITIVE_REASONING_LEVELS } from '../../../ui-shared/models-reasoning'
+
 /**
  * 「自定义等级」在下拉里的哨兵值：它不是一个真的等级，选中它只是把输入框露出来。
  * 用 `__custom__` 而不是空串 —— 空串是「不覆盖」那一项的值，两者必须分开。
@@ -50,15 +54,16 @@ export type ReasoningMapping = {
  *      （`model_rules::REASONING_LEVELS`，照抄 OmniProxy 的通用表）；
  *   ③ 连后端都没给（旧版网关 / 首次加载失败）→ 本地兜底表（与后端同源）。
  *
- * 「自定义等级」入口在任何一档都存在：候选表之外的等级照旧能填能存，
- * 只是不参与转发（判据在后端 `effort_rank`）。
+ * 已声明但为空的档位表不回落；固定档位只列一档。
  */
 export function levels(
   data: { reasoningLevels?: unknown } | null | undefined,
-  model?: { reasoningLevels?: unknown } | null | undefined,
+  model?: ReasoningModel | null,
 ): string[] {
-  const declared = declaredLevels(model)
-  if (declared.length) return declared
+  const info = modelReasoning(model)
+  if (info.bindingSupported === false) return []
+  if (info.declared) return info.bindingSupported === true
+    ? info.levels.filter(level => !['off', 'none'].includes(level.toLowerCase())) : info.levels
   const list = data?.reasoningLevels
   if (Array.isArray(list) && list.length) {
     return list.filter((level): level is string => typeof level === 'string')
@@ -66,27 +71,14 @@ export function levels(
   return [...FALLBACK_LEVELS]
 }
 
-/** 模型自己声明的档位（空串 / 非字符串一律丢弃；没有这个键 = 未声明 → 空数组） */
-function declaredLevels(model?: { reasoningLevels?: unknown } | null): string[] {
-  const raw = model?.reasoningLevels
-  if (!Array.isArray(raw)) return []
-  return raw.filter(
-    (level): level is string => typeof level === 'string' && level.trim() !== '',
-  )
-}
-
-/** 多条映射共用的候选：**交集**（批量设置档位时只列所有目标都认识的档位） */
+/** 多条映射共用的候选；明确声明为空时不回落到通用档位。 */
 export function commonLevels(
   data: { reasoningLevels?: unknown } | null | undefined,
-  models: ReadonlyArray<{ reasoningLevels?: unknown } | null | undefined>,
+  models: ReadonlyArray<ReasoningModel | null | undefined>,
 ): string[] {
-  const known = models.map(declaredLevels).filter(list => list.length > 0)
-  // 任一目标未声明（或一个目标都没有）→ 无法求交集，回落通用表：
-  // 用一个子集去限制用户，等于替上游猜它认不认
-  if (!known.length || known.length !== models.length) return levels(data)
-  const [first, ...rest] = known
-  const shared = first.filter(candidate => rest.every(list => list.includes(candidate)))
-  return shared.length ? shared : levels(data)
+  if (!models.length) return levels(data)
+  const [first, ...rest] = models.map(model => levels(data, model))
+  return first.filter(candidate => rest.every(list => list.some(level => level.toLowerCase() === candidate.toLowerCase())))
 }
 
 /** 三元组 → 索引键（小写；用不可能出现在任何名字里的 \u0001 作分隔符） */

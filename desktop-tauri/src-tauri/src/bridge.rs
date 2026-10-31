@@ -298,10 +298,11 @@ const BRIDGE_JS: &str = r#"
     // 那是一次静默的数据丢失。
     getModelManage: () => call('GET', '/api/models/manage'),
     setModelState: payload => call('POST', '/api/models/state', payload),
-    addModelMapping: (alias, target, provider, reasoning, enabled) => call('POST', '/api/models/mappings', {
+    addModelMapping: (alias, target, provider, reasoning, enabled, create) => call('POST', '/api/models/mappings', {
       alias, target, provider,
       ...(reasoning === undefined ? {} : { reasoning }),
       ...(enabled === undefined ? {} : { enabled }),
+      ...(create === undefined ? {} : { create }),
     }),
     removeModelMapping: (alias, target, provider) => call('POST', '/api/models/mappings/remove', { alias, target, provider }),
     // 自定义模型（手动登记上游目录里没有的模型）。「移除」而不是「隐藏」——

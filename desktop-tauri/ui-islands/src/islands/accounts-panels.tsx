@@ -57,6 +57,7 @@ import { accountReloginText } from './accounts-authorization'
 import { credentialExpiryRowsOf, credentialExpiryText, type CredentialExpiryRow } from '../../../ui-shared/credential-expiry'
 import { creditStatisticsWalletsOf, isSnapshotWallet, snapshotReadingsOf, usageAggregateOf, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
 import { LimitDetailButton, limitRowsOf } from './accounts-limit-detail'
+import { upstreamCooldownOf, upstreamSuspendedReasonOf } from '../../../ui-shared/account-upstream-state'
 import { LimiterStatus } from './accounts-limiter-status'
 import { limiterHit } from './accounts-limiter-model'
 import {
@@ -474,7 +475,12 @@ export function LimitsCell({ account, onClear }: {
   onClear: (model: string) => void
 }) {
   const entries = activeLimits(account)
-  if (!entries.length) {
+  const cooldown = upstreamCooldownOf(account)
+  const suspendedReason = upstreamSuspendedReasonOf(account)
+  if (suspendedReason) {
+    return <Badge variant='destructive' shape='tag' title={suspendedReason}>{t('上游限制 · 已禁用')}</Badge>
+  }
+  if (!entries.length && !cooldown) {
     if (Array.isArray(account.limiterGroups) && limiterHit(account)) {
       return <LimiterStatus account={account} onOpen={() => openSettingsDialog(account.id)} />
     }
@@ -505,7 +511,8 @@ export function LimitsCell({ account, onClear }: {
       accountName={displayNameOf(account)}
       rows={limitRowsOf(account)}
       count={entries.length}
-      soonest={formatResetText(entries[0].resetAt)}
+      cooldown={cooldown}
+      soonest={formatResetText(cooldown ? cooldown.resetAt : entries[0].resetAt)}
       onClear={onClear}
     />
   )

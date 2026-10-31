@@ -1,5 +1,7 @@
 /** 通用格式化与少量纯函数工具（无 React 依赖，页面与数据层共用） */
 
+import { upstreamCooldownOf } from '../../../ui-shared/account-upstream-state'
+
 /** 紧凑数字：1.2 万 / 3.4 亿；小于一万保留原样 */
 export function formatCompact(value: number): string {
   if (!Number.isFinite(value)) return '—'
@@ -141,8 +143,10 @@ export function activeLimits(account: {
 
 /** 账号此刻是否处于限流中（与 {@link activeLimits} 同一口径） */
 export function isRateLimited(account: {
+  upstreamCooldownUntil?: number | null
+  upstreamBlockedReason?: string
   rateLimits?: Record<string, { resetAt?: number }>
 }): boolean {
-  return activeLimits(account).length > 0
+  return upstreamCooldownOf(account) !== null || activeLimits(account).length > 0
 }
 

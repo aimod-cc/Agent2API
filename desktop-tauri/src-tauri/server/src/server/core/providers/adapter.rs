@@ -151,6 +151,9 @@ pub struct ChatRequestPlan {
     pub body: Value,
     /// 上游**响应**说的是哪套协议（默认 [`UpstreamResponse::Chat`]）
     pub response: UpstreamResponse,
+    /// 插件出站归一后的档位；外层 None 为未提供，Some(None) 为明确无档位。
+    pub reasoning: Option<Option<String>>,
+    pub policy: super::policy::ChatPolicy,
 }
 
 impl ChatRequestPlan {
@@ -169,6 +172,8 @@ impl ChatRequestPlan {
             headers,
             body,
             response: UpstreamResponse::Chat,
+            reasoning: None,
+            policy: super::policy::ChatPolicy::default(),
         }
     }
 
@@ -187,6 +192,8 @@ impl ChatRequestPlan {
             headers,
             body,
             response: UpstreamResponse::AiSdkNdjson,
+            reasoning: None,
+            policy: super::policy::ChatPolicy::default(),
         }
     }
 
@@ -208,6 +215,8 @@ impl ChatRequestPlan {
             headers,
             body,
             response: UpstreamResponse::AntigravityGemini,
+            reasoning: None,
+            policy: super::policy::ChatPolicy::default(),
         }
     }
 }
@@ -542,19 +551,11 @@ pub trait ProviderAdapter: Send + Sync {
     ///   - `model_rules::reasoning_rank(level)`：通用 6 档的强弱序号
     ///     （0 = minimal … 5 = max），表外的自定义等级返回 None。
     ///     CatPaw 拿它 `rank / 2` 折成自己的三档（见那家适配器的实现）；
-    ///     自定义等级一律 `Skip` —— 用户可能填了任何东西，而错值在 CatPaw 是
-    ///     当场 400，在别家是未知参数，都不如不注入。
+    ///     表外值没有通用强弱序；只有本家目录明确声明支持时才可注入。
     ///
     /// ── 为什么默认是「不接」而不是「透传一个通用字段」────────────
-    /// 默认实现返回 `Skip`，且**所有没覆写的家都应当保持它**。理由是本项目的
-    /// 一条既有事实：多数家（workbuddy / 小浣熊 / Cline 等）的
-    /// `build_chat_request` 是 `body.clone()` 原样透传，需要翻译档位的家
-    /// 各有各的现算路径（见各适配器对 [`Self::reasoning_patch`] 的覆写）——
-    /// **没有任何证据**表明它们认识一个通用档位
-    /// 字段。给上游塞一个它不认识的键不叫「让绑定生效」，只是把未知参数推过去：
-    /// 好一点的情况是被忽略（用户以为生效了，其实没有），坏一点是 400。
-    /// 所以接一家要有一家的证据（上游枚举、实测、上游自己的 resolver 认这个键），
-    /// 并在这里覆写；「看起来应该支持」不是证据。
+    /// 默认实现返回 `Skip`。字段名和模型档位范围必须由实现确认，不能仅凭
+    /// supportsReasoning 推断可调；WorkBuddy 的判定与归一在提供商插件内。
     ///
     /// ── 实现必须自己判的第三条：客户端是不是已经指定了 ──────────────
     /// 客户端在请求体里显式传了档位（CatPaw 的 `reasoning_effort` /
@@ -669,6 +670,14 @@ pub trait ProviderAdapter: Send + Sync {
         Box<dyn std::future::Future<Output = UpstreamErrorClass> + Send + 'a>,
     > {
         Box::pin(async move { self.classify_error(status, error_body) })
+    }
+
+    fn error_policy_async<'a>(
+        &'a self,
+        _status: u16,
+        _body: &'a Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = super::policy::ErrorPolicy> + Send + 'a>> {
+        Box::pin(async { super::policy::ErrorPolicy::default() })
     }
 
     /// 会话式转发（`attempt_stateful`）失败后的分类。
@@ -1657,6 +1666,14 @@ pub fn adapter_by_id(id: &str) -> Option<Arc<dyn ProviderAdapter>> {
     }
     // 内置家兜底
     super::kind_from_id(id).map(Into::into)
+}
+
+pub async fn adapter_by_id_ready(id: &str) -> Result<Option<Arc<dyn ProviderAdapter>>, GatewayError> {
+    if super::availability::is_suspended(id) { return Ok(None); }
+    if let Some(adapter) = crate::server::core::plugin_host::lookup_ready(id).await? {
+        return Ok(Some(adapter));
+    }
+    Ok(super::kind_from_id(id).map(Into::into))
 }
 
 /// **只**查内置实现（跳过插件注册表）。

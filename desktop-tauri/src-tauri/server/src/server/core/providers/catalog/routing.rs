@@ -14,7 +14,7 @@ pub struct WireTarget {
     pub reasoning: Option<String>,
 }
 
-pub(super) fn entry_id_in_manifest(manifest: &[Value], requested: &str) -> Option<String> {
+pub(crate) fn entry_id_in_manifest(manifest: &[Value], requested: &str) -> Option<String> {
     let requested = requested.trim();
     if requested.is_empty() {
         return None;
@@ -55,25 +55,10 @@ pub(super) fn builtin_target(
             });
         }
     }
-    let candidates: Vec<_> = mappings.into_iter()
-        .filter(|mapping| !mapping.alias.eq_ignore_ascii_case(&mapping.target))
-        .filter(|mapping| rules.binding(provider, &mapping.alias, &mapping.target)
-            .is_some_and(|effective| effective.enabled))
-        .filter_map(|mapping| {
-            entry_id_in_manifest(manifest, &mapping.target).map(|target| (mapping, target))
-        })
-        .collect();
-    let prefix = super::super::cline::models::Pool::from_provider_id(provider)
-        .map(super::super::cline::models::Pool::target_prefix);
-    let selected = candidates.iter()
-        .filter(|(mapping, _)| mapping.provider.is_some())
-        .find(|(_, target)| prefix.is_some_and(|prefix| target.starts_with(prefix)))
-        .or_else(|| candidates.iter().find(|(mapping, _)| mapping.provider.is_some()))
-        .or_else(|| candidates.first());
-    selected.map(|(mapping, target)| WireTarget {
-        model: target.clone(),
-        reasoning: rules.binding(provider, &mapping.alias, &mapping.target)
-            .and_then(|effective| effective.reasoning.clone()),
+    let mapping = rules.selected_mapping(provider, requested, manifest)?;
+    entry_id_in_manifest(manifest, &mapping.target).map(|model| WireTarget {
+        model,
+        reasoning: mapping.reasoning.clone(),
     })
 }
 

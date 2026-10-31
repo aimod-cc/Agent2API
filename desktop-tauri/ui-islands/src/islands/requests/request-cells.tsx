@@ -1,6 +1,8 @@
 import * as React from 'react'
 import { Badge, Button, HtmlContent, StatusDot } from '@ui'
 import { t } from '../../i18n'
+import { NameEyeButton } from '../accounts-panels'
+import { maskName } from '../accounts-store'
 import { apiKeyRequestLabel, clientRequestLabel } from './source-filters'
 
 export type RequestEntry = {
@@ -183,7 +185,7 @@ function runningFirstLine(entry: RequestEntry): React.ReactNode {
  * 一处实现 —— 列设置重排时才不会各画一个样。类名与旧实现的产出逐字一致（CSS 与窄窗口重排都按
  * 这些类名走），空态占位的类名也照旧（重试列空时只有 .req-none，没有 .req-retry）。
  */
-export function RequestCell({ entry, column }: { entry: RequestEntry; column: VisibleColumn }): React.ReactNode {
+export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntry; column: VisibleColumn; namesHidden: boolean }): React.ReactNode {
   const { align, key } = column
   const base = column.sel.slice(1) + (key === 'dur' || key === 'speed' ? ' req-num' : '')
   const className = `${base} ta-${align}`
@@ -220,7 +222,9 @@ export function RequestCell({ entry, column }: { entry: RequestEntry; column: Vi
               title={t('这条明细没有记录提供商（旧数据或请求未走到转发）')}>—</span>
           )}
           {entry.accountName ? (
-            <span className='req-acct' title={entry.accountId || entry.accountName}>{entry.accountName}</span>
+            <span className='req-acct' title={namesHidden ? undefined : entry.accountId || entry.accountName}>
+              {namesHidden ? maskName(entry.accountName) : entry.accountName}
+            </span>
           ) : (
             <span className='req-acct is-empty'
               title={t('请求在任何账号接手之前就失败了')}>—</span>
@@ -440,14 +444,19 @@ export function RequestCell({ entry, column }: { entry: RequestEntry; column: Vi
 }
 
 /** 表头：按可见列逐格产出，顺序与数据行逐格一致（两处都走 visibleColumns） */
-export function headRow(columns: VisibleColumn[]): React.ReactNode {
+export function headRow(columns: VisibleColumn[], namesHidden: boolean): React.ReactNode {
   return (
     <div className='req-head' key='__head'>
       {columns.map(column => (
         <span key={column.key} data-col={column.key}
           className={`${column.sel.slice(1)}${column.key === 'dur' || column.key === 'speed' ? ' req-num' : ''} ta-${column.align}`}
           title={column.key === 'speed' ? SPEED_TIP : undefined}>
-          {column.label}
+          {column.key === 'target' ? (
+            <span className='req-target-label'>
+              {column.label}
+              <NameEyeButton hidden={namesHidden} />
+            </span>
+          ) : column.label}
         </span>
       ))}
     </div>

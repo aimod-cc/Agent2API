@@ -8,6 +8,7 @@ import {
 import { showUpdateModal } from './update-modal'
 import { UpdateSettingsDialog } from './update-settings'
 import { QqGroupDialog } from './update-qq-group'
+import { SupportDialog } from './update-support-dialog'
 import { t } from '../i18n'
 import { HtmlContent } from '@ui'
 import { Empty } from '@ui'
@@ -1097,6 +1098,7 @@ function UpdatePanel() {
   // 「加入交流群」弹窗：入口在「关于作者」那一行的按钮组里，开关留在这一层
   // （弹窗经 Portal 挂 body，与面板同一棵 React 树即可）
   const [qqGroupOpen, setQqGroupOpen] = React.useState(false)
+  const [supportOpen, setSupportOpen] = React.useState(false)
 
   // 面板常驻（root 随应用生命周期），正常不会卸载；万一将来被卸载（骨架变化 / 页面
   // 重载），把进度轮询收掉 —— 悬挂的定时器会一直按 1 秒打后端
@@ -1199,12 +1201,10 @@ function UpdatePanel() {
           ? <Progress value={snap.percent} />
           : null}
 
-        {/* 关于作者 + 收藏项目：作者主页与仓库地址都从接口返回的 sourceRepository
-            现拼（fork 后自动指向 fork 者），拿到数据前整行不渲染 */}
-        {owner && repo ? (
-          <div className='update-author' id='update-author'>
-            <div className='update-author-text'>
-              <strong>{t('关于作者')}</strong>
+        <div className='update-author' id='update-author'>
+          <div className='update-author-text'>
+            <strong>{t('关于作者')}</strong>
+            {owner && repo ? (
               <span>
                 {t('本工具由')}{' '}
                 <a id='update-author-link' href={owner} data-external={owner} target='_blank' rel='noopener'>
@@ -1212,20 +1212,21 @@ function UpdatePanel() {
                 </a>{' '}
                 {t('个人开发并开源维护，免费使用，也不会收集你的账号数据。如果它帮到了你，欢迎到项目仓库点个 Star 支持一下。')}
               </span>
-            </div>
-            <div className='update-author-actions'>
-              {/* 「加入交流群」放在「收藏项目」左边：两个都是「去别处」的动作，
-                  排在同一行比散在更新日志页脚更好找。用 outline 而不是 link 变体 ——
-                  这一行是按钮组，两枚按钮同款才不显得一主一次 */}
-              <Button
-                type='button'
-                size='sm'
-                variant='outline'
-                title={t('QQ 群 / Telegram 都在这里')}
-                onClick={() => setQqGroupOpen(true)}
-              >
-                {t('加入交流群')}
-              </Button>
+            ) : (
+              <span>{t('如果 Agent2API 帮到了你，欢迎请作者喝杯咖啡。')}</span>
+            )}
+          </div>
+          <div className='update-author-actions'>
+            <Button
+              type='button'
+              size='sm'
+              variant='outline'
+              title={t('QQ 群 / Telegram 都在这里')}
+              onClick={() => setQqGroupOpen(true)}
+            >
+              {t('加入交流群')}
+            </Button>
+            {owner && repo ? (
               <Button
                 id='btn-update-favorite'
                 type='button'
@@ -1236,9 +1237,21 @@ function UpdatePanel() {
               >
                 {t('收藏项目')}
               </Button>
-            </div>
+            ) : null}
+            <Button
+              id='btn-update-support'
+              type='button'
+              size='sm'
+              variant='outline'
+              onClick={() => setSupportOpen(true)}
+            >
+              <svg viewBox='0 0 24 24' width='14' height='14' fill='none' stroke='currentColor' strokeWidth='1.8' strokeLinecap='round' strokeLinejoin='round' aria-hidden='true'>
+                <path d='M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8Z' />
+              </svg>
+              {t('支持作者')}
+            </Button>
           </div>
-        ) : null}
+        </div>
 
         {/* 更新日志：只展示最新一次发布的说明，数据来自「检查更新」的结果
             （与上方「最新版本」同源） */}
@@ -1267,6 +1280,7 @@ function UpdatePanel() {
       ) : null}
       {/* 「加入交流群」：QQ 群号（可复制）+ Telegram 外链 */}
       {qqGroupOpen ? <QqGroupDialog open onClose={() => setQqGroupOpen(false)} /> : null}
+      {supportOpen ? <SupportDialog open onClose={() => setSupportOpen(false)} /> : null}
     </Card>
   )
 }

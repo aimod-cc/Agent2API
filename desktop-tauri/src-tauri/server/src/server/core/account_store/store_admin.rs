@@ -85,6 +85,25 @@ impl AccountStore {
             .is_ok()
     }
 
+    pub fn suspend_upstream_account(&self, id: &str, reason: &str) -> Result<(), String> {
+        let guard = self.guard();
+        let mut record = self.record_by_id(&guard, id).ok_or_else(|| "账号不存在".to_string())?;
+        record.set_enabled(false);
+        record.set("upstreamBlockedReason", Value::String(truncate_chars(reason, 300)));
+        record.set_updated_at(logging::now_ms());
+        self.with_conn(&guard, |conn| sql::update_in_place(conn, &record)).map_err(|error| error.to_string())
+    }
+
+    pub fn cooldown_upstream_account(&self, id: &str, until: i64, reason: &str) -> Result<(), String> {
+        let guard = self.guard();
+        let mut record = self.record_by_id(&guard, id).ok_or_else(|| "账号不存在".to_string())?;
+        if until <= logging::now_ms() { return Ok(()); }
+        record.set("upstreamCooldownUntil", Value::from(until));
+        record.set("upstreamBlockedReason", Value::String(truncate_chars(reason, 300)));
+        record.set_updated_at(logging::now_ms());
+        self.with_conn(&guard, |conn| sql::update_in_place(conn, &record)).map_err(|error| error.to_string())
+    }
+
     /// 账号是否被标记为「需要重新登录」（凭证维护据此跳过）。
     pub fn needs_relogin(&self, id: &str) -> bool {
         let _guard = self.guard();
@@ -260,11 +279,13 @@ impl AccountStore {
         let count = match record.get("rateLimits") {
             Some(Value::Object(limits)) => limits.len(),
             _ => 0,
-        };
+        } + usize::from(record.get("upstreamCooldownUntil").is_some());
         if count == 0 {
             return 0;
         }
         record.remove("rateLimits");
+        record.remove("upstreamCooldownUntil");
+        if record.enabled() { record.remove("upstreamBlockedReason"); }
         record.set_updated_at(logging::now_ms());
         if self
             .with_conn(&_guard, |conn| sql::update_in_place(conn, &record))

@@ -87,6 +87,7 @@
   let customInflight = null;
   /** 最近一次 GET /api/custom-providers 的列表（后端按 createdAt 升序） */
   let customItems = [];
+  let customRevisions = new Map();
   /** id → 展示名；添加 / 编辑 / 删除后由 refreshCustom() 更新 */
   const customNames = new Map();
 
@@ -98,6 +99,15 @@
     for (const item of customItems) {
       customNames.set(item.id, typeof item.name === 'string' && item.name ? item.name : item.id);
     }
+  }
+
+  function absorbCustom(provider) {
+    if (!provider || typeof provider.id !== 'string' || !provider.id.startsWith('custom-')) return;
+    customRevisions.set(provider.id, (customRevisions.get(provider.id) || 0) + 1);
+    const next = customItems.filter(item => item.id !== provider.id);
+    next.push(provider);
+    next.sort((left, right) => Number(left.createdAt || 0) - Number(right.createdAt || 0));
+    absorbCustomProviders(next);
   }
 
   /**
@@ -131,10 +141,14 @@
    */
   function fetchCustomProviders() {
     if (!customInflight) {
+      const revisions = new Map(customRevisions);
       customInflight = customRequest('GET', '/api/custom-providers')
         .then(data => {
+          const updated = customItems.filter(item => customRevisions.get(item.id) !== revisions.get(item.id));
+          const changedIds = new Set(updated.map(item => item.id));
+          const incoming = (Array.isArray(data?.providers) ? data.providers : []).filter(item => !changedIds.has(item?.id));
           const before = [...customNames.entries()];
-          absorbCustomProviders(data?.providers);
+          absorbCustomProviders([...incoming, ...updated].sort((left, right) => Number(left.createdAt || 0) - Number(right.createdAt || 0)));
           const changed = before.length !== customNames.size
             || before.some(([id, name]) => customNames.get(id) !== name);
           // 账号数据还没就绪（首次 refresh 未返回）时不补重绘：那会把列表容器里
@@ -229,6 +243,7 @@
     // 自定义提供商目录（custom- 前缀）：列表缓存、刷新与通用管理 API 调用。
     // 添加 / 编辑表单与账号页的管理弹窗都从这里取数，保证同一份目录只有一处实现
     customList,
+    absorbCustom,
     refreshCustom,
     customRequest,
     // 协议下拉的选项（添加表单与编辑弹窗共用，见上面 PROTOCOL_OPTIONS 的说明）

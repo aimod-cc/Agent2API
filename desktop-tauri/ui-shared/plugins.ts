@@ -93,7 +93,7 @@ export type PluginUpdate = {
 export type PluginOperation = {
   id: string
   action: string
-  stage: 'downloading' | 'verifying' | 'installing' | 'done' | 'failed'
+  stage: 'downloading' | 'verifying' | 'waiting' | 'installing' | 'loading' | 'restoring' | 'done' | 'failed'
   active: boolean
   done: boolean
   received: number

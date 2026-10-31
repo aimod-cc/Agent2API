@@ -1,12 +1,14 @@
+import { modelReasoning } from '../../../ui-shared/models-reasoning'
+import { activeModelBindings } from '../../../ui-shared/models-bindings'
 import { InputGroup, InputGroupInput, InputGroupAddon, InputGroupButton } from '@ui'
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { PageIntro, IconButton, Badge, Empty, ErrorNote, SkeletonList } from '../components/ui'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { Icon } from '../components/Icon'
 import { PullIndicator, usePullToRefresh } from '../components/PullToRefresh'
 import { store } from '../state/store'
 import { providerLabel } from '../lib/providers'
-import { fetchManage, refreshModels, setModelEnabled, type ManageModel } from '../api/gateway'
+import { fetchManage, refreshModels, setModelEnabled, type ManageModel, type ManageMapping } from '../api/gateway'
 import { usePolling } from '../lib/usePolling'
 import { t } from '../i18n'
 import { Input, Card, Button } from '@ui'
@@ -31,19 +33,25 @@ type Filter = 'all' | 'enabled' | 'hidden'
 
 export function ModelsPage() {
   const [models, setModels] = useState<ManageModel[] | null>(null)
+  const [mappings, setMappings] = useState<ManageMapping[]>([])
   const [error, setError] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
   const [query, setQuery] = useState('')
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [busy, setBusy] = useState('')
+  const revision = useRef(0)
   const [refreshResults, setRefreshResults] = useState<Array<{ provider: string; providerLabel?: string; status: string; message?: string }>>([])
 
   const load = async () => {
+    const current = ++revision.current
     try {
       const view = await fetchManage()
+      if (current !== revision.current) return
       setModels(view.models || [])
+      setMappings(view.mappings || [])
       setError('')
     } catch (failure) {
+      if (current !== revision.current) return
       setError(failure instanceof Error ? failure.message : String(failure))
     }
   }
@@ -81,12 +89,20 @@ export function ModelsPage() {
   const hiddenCount = (models || []).filter(item => item.visibility === 'hidden').length
 
   const toggle = async (model: ManageModel, next: boolean) => {
-    if (!model.id || !model.provider) return
+    if (!model.id || !model.provider || busy) return
+    const conflicts = next ? activeModelBindings(
+      (models || []).filter(item => item.provider === model.provider),
+      mappings.filter(item => !item.provider || item.provider === model.provider),
+      model.id, model.id,
+    ) : []
     setBusy(`${model.provider}:${model.id}`)
     try {
       const view = await setModelEnabled({ id: model.id, provider: model.provider, enabled: next })
+      revision.current++
       setModels(view.models || [])
-      store.toast(next ? t('已启用 {name}', { name: model.id }) : t('已禁用 {name}', { name: model.id }))
+      setMappings(view.mappings || [])
+      store.toast(next ? (conflicts.length ? t('已启用 {name}，其他同名绑定已自动关闭', { name: model.id })
+        : t('已启用 {name}', { name: model.id })) : t('已禁用 {name}', { name: model.id }))
     } catch (failure) {
       store.toast(failure instanceof Error ? failure.message : String(failure), 'err')
     } finally {
@@ -202,6 +218,7 @@ export function ModelsPage() {
                   const key = `${model.provider}:${model.id}`
                   const hidden = model.visibility === 'hidden'
                   const caps = readCaps(model.capabilities)
+                  const reasoningInfo = modelReasoning(model)
                   return (
                     <div
                       key={key}
@@ -248,10 +265,21 @@ export function ModelsPage() {
                             </UiBadge>
                           ) : null}
                         </div>
+                        {reasoningInfo.fixedLevel ? (
+                          <p className='mt-1 text-[10.5px] text-subtle'>{t('固定思考档位：{level}', { level: reasoningInfo.fixedLevel })}</p>
+                        ) : reasoningInfo.levels.length ? (
+                          <p className='mt-1 text-[10.5px] text-subtle'>
+                            {reasoningInfo.source === 'modelsdev' ? t('社区参考档位：{levels}', { levels: reasoningInfo.levels.join(' / ') })
+                              : t('上游可用档位：{levels}', { levels: reasoningInfo.levels.join(' / ') })}
+                            {reasoningInfo.defaultLevel ? ` · ${t('默认档位：{level}', { level: reasoningInfo.defaultLevel })}` : ''}
+                          </p>
+                        ) : reasoningInfo.bindingSupported === false ? (
+                          <p className='mt-1 text-[10.5px] text-subtle'>{t('当前通道未声明可用档位，映射等级不会注入；请先获取模型目录。')}</p>
+                        ) : null}
                       </div>
                       <SwitchSmall
                         checked={Boolean(model.enabled)}
-                        disabled={busy === key}
+                        disabled={Boolean(busy)}
                         label={String(model.id)}
                         onChange={next => void toggle(model, next)}
                       />

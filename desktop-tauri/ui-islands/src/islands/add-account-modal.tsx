@@ -49,12 +49,13 @@ import {
   NEW_PROVIDER_CARD_ID,
   PRESET_CARD_PREFIX,
   PickStep,
+  TYPE_ALL,
   TYPE_IMPORT,
-  TYPE_PROXY,
   type AccountType,
 } from './add-provider-pick'
 import { ProviderBlock, WorkBuddyBlock } from './add-provider-blocks'
 import { DynamicProviderBlock } from './add-dynamic-provider'
+import { DeepseekAccountBlock } from './add-provider-deepseek-block'
 import { t } from '../i18n'
 
 type Step = 'pick' | 'form'
@@ -73,10 +74,15 @@ type IslandState = {
   showToken: number
 }
 
-/** 打开弹窗（以及点「添加账号」）时的复位落点：第 1 步 + Agent 段 + WorkBuddy */
+/**
+ * 打开弹窗（以及点「添加账号」）时的复位落点：第 1 步 + **「全部」段** + WorkBuddy。
+ * 落「全部」而不是 Agent：搜索框只过滤当前分段，默认停在 Agent 时，找一家在
+ * 别段里的（Cline Pass、某家的自定义中转）会先看到「没有匹配」—— 进来就该看见全部。
+ * 单分类段照样在分段栏里，知道找哪一类时那是更短的路。
+ */
 const INITIAL: IslandState = {
   step: 'pick',
-  accountType: TYPE_PROXY,
+  accountType: TYPE_ALL,
   search: '',
   provider: WORKBUDDY_PROVIDER,
   providerHint: '',
@@ -104,6 +110,7 @@ function AddAccountModal({
   const [state, setState] = React.useState<IslandState>(INITIAL)
   /** 摘要 / 自定义目录异步到位后的重画信号（值本身不参与渲染） */
   const [version, setVersion] = React.useState(0)
+  const [loginFooterHost, setLoginFooterHost] = React.useState<HTMLDivElement | null>(null)
   const bump = React.useCallback(() => setVersion(value => value + 1), [])
 
   const reset = React.useCallback(() => {
@@ -145,7 +152,8 @@ function AddAccountModal({
 
   const config = configOf(state.provider)
   const isCustom = state.provider === CUSTOM_PROVIDER
-  const hasBlock = state.provider === WORKBUDDY_PROVIDER || isCustom || Boolean(config)
+  const isDeepseek = state.provider === 'deepseek-web'
+  const hasBlock = state.provider === WORKBUDDY_PROVIDER || isCustom || isDeepseek || Boolean(config)
   const customMode: CustomMode = state.providerHint ? 'existing' : 'create'
   const customLabel = state.providerHint
     ? customList().find(item => item.id === state.providerHint)?.name || ''
@@ -166,7 +174,7 @@ function AddAccountModal({
       : state.presetKey
         ? t('使用 {name} 模板新建提供商', { name: customLabel })
         : t('新建自定义提供商'))
-    : t('登录 / 添加 {name} 账号', { name: providerLabel })
+    : isDeepseek ? t('添加 DeepSeek 账号') : t('登录 / 添加 {name} 账号', { name: providerLabel })
 
   /** 第 1 步点一张卡：三种特殊取值分别落到自定义块的哪种模式（见 pickProvider 的旧注释） */
   function pick(id: string): void {
@@ -247,15 +255,17 @@ function AddAccountModal({
             不画子层遮罩，遮罩同时是「点空白处」的落点（useDialogRoot 的 outsidePress
             认遮罩本身），所以这一档不能省。 */}
         <Dialog open={state.step === 'form'} onOpenChange={next => { if (!next) backToPick() }}>
-          <DialogContent keepMounted overlayForceRender className='w-[min(620px,calc(100vw-48px))]'>
+          <DialogContent keepMounted overlayForceRender className={isDeepseek
+            ? 'compact-login-dialog w-[min(540px,calc(100vw-48px))]' : 'w-[min(620px,calc(100vw-48px))]'}>
             <DialogHeader>
+              {isDeepseek ? <img src='assets/providers/deepseek.png' alt='' className='compact-login-logo' /> : null}
               <DialogTitle>{heading}</DialogTitle>
             </DialogHeader>
             <DialogBody>
               {/* 各家的块整块常驻、只切显隐：块内的登录引擎把状态放在自己的闭包里，
                   节点被卸载就等于把「刚发出去的验证码绑在哪个 deviceId 上」丢掉 */}
               <WorkBuddyBlock active={state.provider === WORKBUDDY_PROVIDER} />
-              {BUILTIN_CONFIGS.map(item => (
+              {BUILTIN_CONFIGS.filter(item => item.provider !== 'deepseek-web').map(item => (
                 <ProviderBlock
                   key={item.provider}
                   config={item}
@@ -274,6 +284,8 @@ function AddAccountModal({
                   version={version}
                 />
               </div>
+              <DeepseekAccountBlock active={isDeepseek && state.step === 'form'}
+                footerHost={loginFooterHost} onClose={backToPick} />
               {hasBlock ? null : (
                 <DynamicProviderBlock
                   key={state.provider}
@@ -286,7 +298,9 @@ function AddAccountModal({
             </DialogBody>
             {/* 表单弹窗这条操作条归自定义块（它把自己的主按钮搬进来）；内置家的主按钮
                 仍在各自段落里，因此只有自定义块在场时才渲染这条 */}
-            {isCustom ? (
+            {isDeepseek ? <DialogFooter className='compact-login-footer'>
+              <div ref={setLoginFooterHost} className='compact-login-footer-content' />
+            </DialogFooter> : isCustom ? (
               <DialogFooter>
                 <CustomFootActions mode={customMode} presetKey={state.presetKey} providerId={state.providerHint} />
               </DialogFooter>

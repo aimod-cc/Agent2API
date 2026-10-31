@@ -226,9 +226,7 @@ pub async fn run_once(store: &AccountStore, reason: &str, plan_time: Option<&str
         .await
     {
         Ok(summary) => summary,
-        Err(_) if !plugin_host::lookup(PROVIDER)
-            .is_some_and(|current| std::sync::Arc::ptr_eq(&current, &adapter)) =>
-        {
+        Err(error) if error.code.as_deref() == Some("plugin_updating") => {
             return RunOutcome::Skipped("提供商插件正在重新加载，本轮已跳过".to_string());
         }
         Err(error) if error.status_code == 501 => {

@@ -89,12 +89,39 @@ pub fn detach() {
     if let Ok(mut hosts) = table().lock() { hosts.clear(); }
 }
 
+pub(super) fn loaded_hosts(ids: &[String]) -> Vec<Arc<Host>> {
+    let hosts = table().lock().unwrap_or_else(|error| error.into_inner());
+    ids.iter().filter_map(|id| hosts.get(id).map(|pack| pack.host.clone())).collect()
+}
+
+pub(super) fn providers_for_host(host: &Arc<Host>) -> Vec<String> {
+    table().lock().unwrap_or_else(|error| error.into_inner()).values()
+        .filter(|pack| Arc::ptr_eq(&pack.host, host))
+        .flat_map(|pack| pack.providers.iter().cloned()).collect()
+}
+
+pub(super) fn loaded_ids() -> Vec<String> {
+    table().lock().unwrap_or_else(|error| error.into_inner()).keys().cloned().collect()
+}
+
+pub(super) async fn shutdown_packs(ids: &[String]) -> Result<(), String> {
+    for id in ids {
+        let Some(host) = host_for_pack(id) else { continue };
+        host.shutdown().await;
+        if host.current_run().is_some() {
+            return Err(format!("插件包「{id}」尚未确认退出，已停止替换文件"));
+        }
+        let mut hosts = table().lock().unwrap_or_else(|error| error.into_inner());
+        if hosts.get(id).is_some_and(|pack| Arc::ptr_eq(&pack.host, &host)) { hosts.remove(id); }
+    }
+    Ok(())
+}
+
 pub async fn shutdown_all() {
     let hosts: Vec<Arc<Host>> = table().lock()
-        .map(|hosts| hosts.values().map(|pack| pack.host.clone()).collect())
+        .map(|mut hosts| std::mem::take(&mut *hosts).into_values().map(|pack| pack.host).collect())
         .unwrap_or_default();
     for host in hosts { host.shutdown().await; }
-    detach();
 }
 
 pub(super) fn status() -> Option<HostStatus> {

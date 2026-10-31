@@ -1,15 +1,15 @@
-/** 单账号设置弹窗：基本、凭证与套餐、查询设置、限制器和网络。 */
+/** 单账号设置弹窗与提供商共用连接设置。 */
 
 import * as React from 'react'
 import {
-  Button, Checkbox, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader,
-  DialogSection, DialogTitle, Input, Label, NavList, NavItem, Select, SelectContent,
-  SelectItem, SelectTrigger, SelectValue, Switch,
-  Field, FieldGroup, FieldLabel,
+  Badge, BadgeDot, Button, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader,
+  DialogSection, DialogTitle, Input, NavList, NavItem, Sidebar, Switch,
+  Field, FieldDescription, FieldLabel,
 } from '@ui'
+import '../styles/accounts-settings-dialog.css'
 import { t } from '../i18n'
 import {
-  ACCOUNT_CONCURRENCY_MAX as CONC_MAX, errorMessage, shared, toast,
+  ACCOUNT_CONCURRENCY_MAX as CONC_MAX, errorMessage, esc, shared, toast,
   type AccountRecord, type LimiterGroup,
 } from './accounts-shared'
 import {
@@ -28,13 +28,13 @@ import { limiterDraftOf, LimiterSection, readLimiterChanges } from './accounts-d
 import { allAccounts, findAccount, syncBalancesSnapshot } from './accounts-data'
 import { refreshSavedAccounts, updateAccountConfirmed } from './accounts-update'
 import { draftOfProxy, ProxyForm, readProxyDraft, type ProxyDraft, type ProxyPayload } from './accounts-proxy-form'
-import { Sidebar } from '@ui'
-
-/** 与后端 custom_providers::MAX_NAME_CHARS 一致。 */
-const MAX_PROVIDER_NAME_CHARS = 64
+import {
+  AccountSettingsIcon, BalanceTokenField, CustomCredentialFields, ProviderSection,
+  type ProviderSettings,
+} from './accounts-settings-fields'
 
 type AccountLike = AccountRecord
-type PaneId = 'basic' | 'credential' | 'query' | 'limiter' | 'network'
+type PaneId = 'basic' | 'credential' | 'query' | 'limiter' | 'network' | 'provider'
 
 function peersOf(account: AccountLike, all: AccountLike[]): AccountLike[] {
   const provider = providerOf(account)
@@ -45,174 +45,13 @@ function labelOf(account: AccountLike | null | undefined): string {
   return displayNameOf(account) || account?.id || ''
 }
 
-/* ─── 账号设置弹窗 ───────────────────────────── */
-
-/** 余额凭证行：**只有 CatPaw 账号有这一项**，所以按 provider 条件渲染 */
-function BalanceTokenField({
-  configured, value, onChange, onClear, clearBusy,
-}: {
-  configured: boolean
-  value: string
-  onChange: (next: string) => void
-  onClear: () => void
-  clearBusy: boolean
-}) {
-  return (
-    <Field orientation='horizontal' className='field-row mt-2.5'>
-      <FieldLabel htmlFor='account-balance-token-input'>{t('余额查询凭证')}</FieldLabel>
-      <Input id='account-balance-token-input' className='min-w-[220px]'
-        placeholder={configured ? t('已配置，留空则不修改') : t('一般不用填')}
-        title={t('积分查询已复用转发用的登录凭证，这里通常留空即可。只有旧版本填过、或从旧代理导入过凭证时才有值')}
-        value={value} onChange={event => onChange(event.currentTarget.value)} />
-      {configured ? (
-        <Button variant='outline' size='sm' disabled={clearBusy} onClick={onClear}
-          title={t('清除已配置的余额查询凭证')}>{t('清除')}</Button>
-      ) : null}
-    </Field>
-  )
-}
-
-/**
- * 自定义账号的**凭证段**（API Key / 无需鉴权）：只有自定义家渲染（内置八家的
- * 凭证各有自己的登录链路，改不了也不该在这儿改）。
- *
- * ── 为什么这里能改 Key（添加表单之外唯一的入口）──────────────
- * 添加表单只在「加账号」那一刻经过；建完账号后要换一把 Key、或者当初忘了勾
- * 「无需鉴权」（账号因此被选路跳过），都必须有地方改。改凭证**不动账号 id**
- * （id 是身份，见后端 `update_custom_credentials`），所以改完仍是同一条账号。
- *
- * ── 两个字段互斥（与后端同一不变量）─────────────────────────
- * 勾了「无需鉴权」就没有 Key 可填（输入框禁用、保存时后端也会把 key 清掉）；
- * 填了 Key 就自动摘掉「无需鉴权」。界面上不做花哨的联动提示，只把禁用的输入框
- * 与一句说明摆在那里 —— 两件事同时成立本来就是矛盾的输入。
- */
-function CustomCredentialFields({
-  hasApiKey, noAuth, value, onValue,
-  onToggleNoAuth, onClear, clearBusy,
-}: {
-  hasApiKey: boolean
-  noAuth: boolean
-  value: string
-  onValue: (next: string) => void
-  onToggleNoAuth: (next: boolean) => void
-  onClear: () => void
-  clearBusy: boolean
-}) {
-  return (
-    <>
-      <Field orientation='horizontal' className='field-row mt-2.5'>
-        <FieldLabel htmlFor='account-api-key-input'>{t('API Key')}</FieldLabel>
-        <Input id='account-api-key-input' type='password' autoComplete='new-password'
-          className='min-w-[220px]' disabled={noAuth}
-          placeholder={hasApiKey ? t('已配置，留空则不修改') : 'sk-…'}
-          title={t('上游的 API Key。留空 = 不修改（改凭证不会换账号 id）；要清掉已配的凭证用右边的「清除」')}
-          value={value} onChange={event => onValue(event.currentTarget.value)} />
-        {hasApiKey && !noAuth ? (
-          <Button variant='outline' size='sm' disabled={clearBusy} onClick={onClear}
-            title={t('清除已配置的 API Key（转发时会因缺少凭证被跳过）')}>{t('清除')}</Button>
-        ) : null}
-      </Field>
-      <Field orientation='horizontal' className='field-row mt-2.5'>
-        <FieldLabel className='inline-flex cursor-pointer items-center gap-2.5 font-normal'>
-          <Checkbox checked={noAuth} aria-label={t('该上游无需鉴权')}
-            onCheckedChange={next => onToggleNoAuth(next === true)} />
-          <span className='text-xs text-subtle'>{t('该上游无需鉴权（转发与拉取模型都不发送鉴权头）')}</span>
-        </FieldLabel>
-      </Field>
-      <p className='detail'>
-        {t('上游本来不要凭证时（本地 Ollama、OpenCode Zen 的免费档）勾上这一项：账号会被正常选路；只把 Key 留空')}
-        <strong>{t('又不勾')}</strong>
-        {t('会被当成「未配置凭证」而跳过。')}
-      </p>
-    </>
-  )
-}
-
-/** 自定义提供商的「提供商」一段（内置家不渲染：它们的协议与地址写在代码里） */
-function ProviderSection({
-  provider, name, protocol, baseUrl, count, emulation,
-  onName, onProtocol, onBaseUrl, onEmulation, onRemove,
-}: {
-  provider: { id: string; name?: string; protocol?: string; baseUrl?: string }
-  name: string
-  protocol: string
-  baseUrl: string
-  count: number
-  /** 客户端形态伪装（'' = 不伪装；'opencode' = 按官方 CLI 形状补齐请求） */
-  emulation: string
-  onName: (next: string) => void
-  onProtocol: (next: string) => void
-  onBaseUrl: (next: string) => void
-  onEmulation: (next: string) => void
-  onRemove: () => void
-}) {
-  const protocols = shared().wbProviders?.PROTOCOL_OPTIONS || [
-    { value: 'openai', label: t('OpenAI 兼容') },
-    { value: 'anthropic', label: 'Anthropic' },
-  ]
-  const current = protocols.find(option => option.value === protocol)?.label || protocol
-  return (
-    <DialogSection>
-      <h3>{t('提供商')}</h3>
-      <p>
-        {t('这一栏改的是')}<strong>{t('「{name}」本身', { name: provider.name || provider.id })}</strong>
-        {t('（名下 {count} 个账号共用）', { count })}
-        {t('改协议 / Base URL 会改变它们的转发方式，正在进行的请求可能失败；模型清单与映射在「模型管理」页。')}
-      </p>
-      <Field orientation='horizontal' className='field-row'>
-        <FieldLabel htmlFor='account-provider-name'>{t('名称')}</FieldLabel>
-        <Input id='account-provider-name' maxLength={MAX_PROVIDER_NAME_CHARS} className='min-w-[220px]'
-          placeholder={t('提供商显示名，1~{max} 个字符', { max: MAX_PROVIDER_NAME_CHARS })}
-          value={name} onChange={event => onName(event.currentTarget.value)} />
-      </Field>
-      <Field orientation='horizontal' className='field-row mt-2.5'>
-        <FieldLabel htmlFor='account-provider-protocol'>{t('协议')}</FieldLabel>
-        <Select value={protocol} onValueChange={value => onProtocol(String(value))}>
-          <SelectTrigger id='account-provider-protocol' className='min-w-[180px]'>
-            <SelectValue>{current}</SelectValue>
-          </SelectTrigger>
-          <SelectContent>
-            {protocols.map(option => (
-              <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </Field>
-      <Field orientation='horizontal' className='field-row mt-2.5'>
-        <FieldLabel htmlFor='account-provider-baseurl'>{t('Base URL')}</FieldLabel>
-        <Input id='account-provider-baseurl' className='min-w-[260px]'
-          placeholder={t('OpenAI 兼容填到 /v1；Anthropic 填根地址')}
-          value={baseUrl} onChange={event => onBaseUrl(event.currentTarget.value)} />
-      </Field>
-      <Field orientation='horizontal' className='field-row mt-2.5'>
-        <FieldLabel className='inline-flex cursor-pointer items-center gap-2.5 font-normal'>
-          <Checkbox checked={emulation === 'opencode'} aria-label={t('伪装 OpenCode 官方客户端')}
-            onCheckedChange={next => onEmulation(next === true ? 'opencode' : '')} />
-          <span className='text-xs text-subtle'>{t('伪装 OpenCode 官方客户端（OpenCode Zen 免费档要它才放行）')}</span>
-        </FieldLabel>
-      </Field>
-      <p className='detail'>
-        {t('开启后，网关按 OpenCode 官方 CLI 的形状发请求：没填 Key 的账号用匿名凭证')}
-        <code>{'public'}</code>
-        {t('、补官方会话头、请求体补两个占位工具（上游免费档的三道校验）。')}
-        <strong>{t('它会改写请求体')}</strong>
-        {t('，只对 OpenCode Zen 这类上游有意义，别的家请关掉。')}
-      </p>
-      <FieldGroup orientation='horizontal' className='field-row mt-3'>
-        <Button variant='destructive' onClick={onRemove}>{t('删除提供商')}</Button>
-        <span className='detail'>{t('级联删除名下全部账号，不可恢复')}</span>
-      </FieldGroup>
-    </DialogSection>
-  )
-}
-
 export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane = 'basic', routeContext }: {
   id: string; onClose: () => void
   initialAccount?: AccountRecord
   initialPane?: PaneId
   routeContext?: React.ReactNode
 }) {
-  const account = initialAccount || findAccount(id)
+  const [account, setAccount] = React.useState(() => initialAccount || findAccount(id))
   const [enabled, setEnabled] = React.useState(account?.enabled !== false)
   const [allowRouteSkip, setAllowRouteSkip] = React.useState(account?.allowRouteSkip !== false)
   const [name, setName] = React.useState(account?.name || '')
@@ -222,9 +61,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
   const [planChannel, setPlanChannel] = React.useState(() => zcodePlanOf(account))
   const [busy, setBusy] = React.useState(false)
   const [status, setStatus] = React.useState<React.ReactNode>('')
-  const [provider, setProvider] = React.useState<{
-    id: string; name?: string; protocol?: string; baseUrl?: string; clientEmulation?: string
-  } | null>(null)
+  const [provider, setProvider] = React.useState<ProviderSettings | null>(null)
   const [providerName, setProviderName] = React.useState('')
   const [providerProtocol, setProviderProtocol] = React.useState('chat_completions')
   const [providerBaseUrl, setProviderBaseUrl] = React.useState('')
@@ -247,6 +84,32 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
   const [pane, setPane] = React.useState<PaneId>(initialPane)
   // 并发上限草稿（原列表 ⋯ 菜单的 conc-dialog 迁入「基本」分组）：0~999，0 = 不限
   const [concDraft, setConcDraft] = React.useState(() => String(Number(account?.maxConcurrent) || 0))
+  const [confirming, setConfirming] = React.useState(false)
+  const actionLock = React.useRef(false)
+  const paneScroll = React.useRef<HTMLDivElement | null>(null)
+  const panePositions = React.useRef<Partial<Record<PaneId, number>>>({})
+  const initial = React.useRef({
+    enabled, allowRouteSkip, name, proxyDraft, planChannel, usageDraft,
+    balanceQueryDraft, limiterDraft, concDraft, noAuthDraft,
+  })
+  const credentialLabel = providerOf(account).startsWith('custom-') ? t('凭证设置') : t('凭证与套餐')
+  const paneInfo: Record<PaneId, { title: string; description: string; icon: string }> = {
+    basic: { title: t('基本信息'), description: t('设置账号名称、启用状态与转发行为。'), icon: 'sliders' },
+    credential: { title: credentialLabel, description: t('管理当前账号的凭证与可用套餐。'), icon: 'key' },
+    query: { title: t('查询设置'), description: t('配置余额查询凭证与自动刷新间隔。'), icon: 'refresh' },
+    limiter: { title: t('限制器'), description: t('用明确的规则保护当前账号的额度。'), icon: 'shield' },
+    network: { title: t('网络'), description: t('设置当前账号访问上游的出网方式。'), icon: 'proxies' },
+    provider: { title: t('连接设置'), description: t('统一管理提供商的协议、地址与兼容选项。'), icon: 'agent' },
+  }
+  const currentPane = paneInfo[pane]
+  React.useLayoutEffect(() => {
+    if (paneScroll.current) paneScroll.current.scrollTop = panePositions.current[pane] || 0
+  }, [pane])
+
+  function selectPane(next: PaneId): void {
+    if (paneScroll.current) panePositions.current[pane] = paneScroll.current.scrollTop
+    setPane(next)
+  }
 
   // 「提供商」那一段：目录里查得到才算自定义家（id 前缀只说明「长得像」，而记录本身
   // 才带着协议 / Base URL 的现值 —— 三个字段要拿它预填）。
@@ -307,13 +170,60 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
   // 用户在那一列看到的就是这句话的后果）
   const balanceNeedsCredentials = Boolean(balanceSpec && balanceSpec.fields.length)
     && !balanceQueryConfigured(target.balanceQuery)
+  const providerCount = peers.length + 1
+  const before = initial.current
+  const same = (left: unknown, right: unknown): boolean => JSON.stringify(left) === JSON.stringify(right)
+  const dirtyPanes: Record<PaneId, boolean> = {
+    basic: enabled !== before.enabled || allowRouteSkip !== before.allowRouteSkip
+      || (name.trim() || before.name) !== before.name || concDraft !== before.concDraft,
+    credential: Boolean(balanceToken.trim() || apiKeyDraft.trim())
+      || noAuthDraft !== before.noAuthDraft || planChannel !== before.planChannel,
+    query: !same(usageDraft, before.usageDraft) || !same(balanceQueryDraft, before.balanceQueryDraft),
+    limiter: !same(limiterDraft, before.limiterDraft),
+    network: !same(proxyDraft, before.proxyDraft),
+    provider: Boolean(provider && (
+      providerName.trim() !== (provider.name || '') || providerProtocol !== (provider.protocol || 'chat_completions')
+      || providerBaseUrl.trim() !== (provider.baseUrl || '') || providerEmulation !== (provider.clientEmulation || '')
+    )),
+  }
+  const dirtyCount = Object.values(dirtyPanes).filter(Boolean).length
+  const interactionBusy = busy || confirming
+
+  async function askConfirmation(title: string, text: string, okText: string, danger = false): Promise<boolean> {
+    if (actionLock.current) return false
+    actionLock.current = true
+    setConfirming(true)
+    try {
+      const ask = shared().wbConfirm?.ask
+      if (!ask) throw new Error(t('确认弹窗不可用，请重新打开页面'))
+      return await ask({ title, html: esc(text).replace(/\n/g, '<br>'), okText,
+        okClass: danger ? 'danger' : 'primary', bodyClass: danger ? 'danger-zone' : '' })
+    } catch (error) {
+      toast(errorMessage(error), 'err')
+      return false
+    } finally {
+      actionLock.current = false
+      setConfirming(false)
+    }
+  }
+
+  async function close(): Promise<void> {
+    if (interactionBusy || actionLock.current) return
+    if (dirtyCount && !await askConfirmation(t('放弃未保存的修改？'),
+      t('所有分区中尚未保存的修改都会被放弃。已确认的独立清除操作不受影响。'), t('放弃修改'))) return
+    onClose()
+  }
 
   /** 清除余额凭证（立即落库，不走保存按钮 —— 它是一个独立的撤销动作） */
   async function clearBalanceToken(): Promise<void> {
-    if (busy) return
+    if (interactionBusy || actionLock.current) return
+    if (!await askConfirmation(t('清除余额查询凭证？'),
+      t('确认后立即生效，不受底部保存按钮控制。通常可继续复用转发用的登录凭证。'), t('清除'), true)) return
+    actionLock.current = true
     setBusy(true)
     try {
-      await updateAccountConfirmed(id, { balanceToken: null })
+      const saved = await updateAccountConfirmed(id, { balanceToken: null })
+      setAccount(saved)
       setBalanceToken('')
       toast(t('✅ 已清除余额查询凭证'))
       try {
@@ -324,6 +234,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
     } catch (error) {
       toast(t('清除失败：{error}', { error: errorMessage(error) }), 'err')
     } finally {
+      actionLock.current = false
       setBusy(false)
     }
   }
@@ -334,10 +245,14 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
    * 而列表上那枚「未配置凭证」徽章会立刻出现，用户看得到后果。
    */
   async function clearApiKey(): Promise<void> {
-    if (busy) return
+    if (interactionBusy || actionLock.current) return
+    if (!await askConfirmation(t('清除已存 API Key？'),
+      t('确认后立即生效，不受底部保存按钮控制。没有凭证且未开启「无需鉴权」时，此账号将被转发跳过。'), t('清除'), true)) return
+    actionLock.current = true
     setBusy(true)
     try {
-      await updateAccountConfirmed(id, { apiKey: null })
+      const saved = await updateAccountConfirmed(id, { apiKey: null })
+      setAccount(saved)
       setApiKeyDraft('')
       toast(t('✅ 已清除 API Key（该账号现在没有凭证，转发会被跳过）'))
       try {
@@ -348,6 +263,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
     } catch (error) {
       toast(t('清除失败：{error}', { error: errorMessage(error) }), 'err')
     } finally {
+      actionLock.current = false
       setBusy(false)
     }
   }
@@ -362,10 +278,14 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
    * 清掉之后余额列会显示「未配置」，用户看得到后果。
    */
   async function clearBalanceQueryField(key: BalanceFieldKey): Promise<void> {
-    if (busy) return
+    if (interactionBusy || actionLock.current) return
+    if (!await askConfirmation(t('清除查询凭证？'),
+      t('确认后立即生效，余额查询可能显示「未配置」。取消账号设置不会恢复已清除的凭证。'), t('清除'), true)) return
+    actionLock.current = true
     setBusy(true)
     try {
-      await updateAccountConfirmed(id, { balanceQuery: { [key]: null } })
+      const saved = await updateAccountConfirmed(id, { balanceQuery: { [key]: null } })
+      setAccount(saved)
       setBalanceQueryDraft(prev => ({ ...prev, [key]: '' }))
       toast(t('✅ 已清除查询凭证'))
       try {
@@ -376,6 +296,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
     } catch (error) {
       toast(t('清除失败：{error}', { error: errorMessage(error) }), 'err')
     } finally {
+      actionLock.current = false
       setBusy(false)
     }
   }
@@ -392,8 +313,10 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
     if (!isCustomAccount) return null
     const key = apiKeyDraft.trim()
     const patch: Record<string, unknown> = {}
-    if (key) patch.apiKey = key
-    else if (noAuthDraft !== (target.noAuth === true)) patch.noAuth = noAuthDraft
+    if (noAuthDraft) {
+      if (target.noAuth !== true) patch.noAuth = true
+    } else if (key) patch.apiKey = key
+    else if (target.noAuth === true) patch.noAuth = false
     return Object.keys(patch).length ? patch : null
   }
 
@@ -406,6 +329,11 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
     // 却发现账号的改动生效了。所以在账号落库之前先验一遍
     if (!nextName) return { error: t('请填写提供商名称') }
     if (!nextBase) return { error: t('请填写提供商的 Base URL') }
+    try {
+      if (!['http:', 'https:'].includes(new URL(nextBase).protocol)) throw new Error('invalid protocol')
+    } catch {
+      return { error: t('请填写有效的 HTTP 或 HTTPS 地址') }
+    }
     const beforeEmulation = typeof provider.clientEmulation === 'string' ? provider.clientEmulation : ''
     if (
       provider.name === nextName && provider.protocol === providerProtocol
@@ -418,16 +346,20 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
   }
 
   async function save(): Promise<void> {
-    if (busy) return
+    if (interactionBusy || actionLock.current || !dirtyCount) return
+    setStatus('')
     let proxy: ProxyPayload
     try {
       proxy = readProxyDraft(proxyDraft)
     } catch (error) {
+      selectPane('network')
+      setStatus(<span className='text-destructive'>{errorMessage(error)}</span>)
       toast(errorMessage(error), 'err')
       return
     }
     const providerPatch = readProviderPatch()
     if (providerPatch && 'error' in providerPatch) {
+      selectPane('provider')
       setStatus(<span className='text-destructive'>{providerPatch.error}</span>)
       return
     }
@@ -435,6 +367,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
     // 校验不过先在前端挡住（后端 apply_patch 对同一规则也会 400）
     const usageChanges = supportsUsage(target) ? readUsageChanges(target, usageDraft) : null
     if (usageChanges && 'error' in usageChanges) {
+      selectPane('query')
       setStatus(<span className='text-destructive'>{usageChanges.error}</span>)
       return
     }
@@ -452,13 +385,19 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
     // CodeArts 家 0 由上游解释成默认并发，见能力表 concurrencyDefault）
     const concRaw = Number(concDraft)
     if (!Number.isFinite(concRaw) || concRaw < 0) {
+      selectPane('basic')
+      setStatus(<span className='text-destructive'>{t('并发上限必须是 0~{max} 的整数', { max: CONC_MAX })}</span>)
       toast(t('并发上限必须是 0~{max} 的整数', { max: CONC_MAX }), 'err')
       return
     }
     const concNext = Math.min(CONC_MAX, Math.round(concRaw))
     const concCurrent = Number(target.maxConcurrent) || 0
     const concPatch: Record<string, unknown> = concNext !== concCurrent ? { maxConcurrent: concNext } : {}
+    if (providerPatch && !await askConfirmation(t('保存提供商共用配置？'),
+      t('「{name}」名下 {count} 个账号共用这些连接设置。修改协议或 Base URL 可能中断正在进行的请求。',
+        { name: provider?.name || provider?.id || '', count: providerCount }), t('确认保存'))) return
 
+    actionLock.current = true
     setBusy(true)
     try {
       // CatPaw 的余额凭证是**按需附加**的字段（别的家没有这一项，输入框也不存在）：
@@ -492,6 +431,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
       if ((nextName !== target.name || target.nameCustom === true) && saved.nameCustom !== true) {
         throw new Error(t('账号更新结果未确认，请刷新后核对设置'))
       }
+      setAccount(saved)
       // 提供商那一段排在账号之后（账号是本弹窗的主角，先落库）。它失败时账号已经存下了，
       // 所以留在弹窗里把那句话说清楚 —— 笼统报成「保存失败」会把两件事混成一件
       if (providerPatch) {
@@ -500,6 +440,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
           if (!updateProvider) throw new Error(t('账号更新接口不可用，请重新打开页面'))
           await updateProvider(providerPatch)
         } catch (error) {
+          selectPane('provider')
           setStatus(<span className='text-destructive'>{t('账号已保存，但提供商未更新：{error}', { error: errorMessage(error) })}</span>)
           try { await refreshSavedAccounts() }
           catch (refreshError) { toast(t('账号已保存，但列表刷新失败：{error}', { error: errorMessage(refreshError) }), 'err') }
@@ -526,185 +467,206 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
       setStatus(<span className='text-destructive'>{errorMessage(error)}</span>)
       toast(t('保存失败：{error}', { error: errorMessage(error) }), 'err')
     } finally {
+      actionLock.current = false
       setBusy(false)
     }
   }
 
-  // 「凭证与套餐」按家出现：有什么配什么（CatPaw 余额凭证 / 自定义账号凭证与
-  // 提供商 / ZCode 套餐通道）。内置家什么都没有时整组不出现。
+  // 内置账号仅在有余额凭证或套餐通道时显示凭证分区。
   const concDefault = Number(providerFeatures(providerOf(target)).concurrencyDefault) || 0
   const hasCredentialPane = isCatpaw || isCustomAccount || supportsPlanChannel(target)
+  const accountPanes: PaneId[] = ['basic', ...(hasCredentialPane ? ['credential' as const] : []),
+    ...(supportsUsage(target) ? ['query' as const] : []), 'limiter', 'network']
+  const providerLabel = provider?.name || shared().wbProviders?.labelOf?.(providerOf(target)) || providerOf(target)
+
+  async function removeProvider(): Promise<void> {
+    if (interactionBusy || actionLock.current || !provider) return
+    actionLock.current = true
+    setConfirming(true)
+    try {
+      const remove = shared().wbCustomProvidersUi?.remove
+      if (!remove) throw new Error(t('账号更新接口不可用，请重新打开页面'))
+      if (await remove(provider.id)) onClose()
+    } catch (error) {
+      toast(t('删除失败：{error}', { error: errorMessage(error) }), 'err')
+    } finally {
+      actionLock.current = false
+      setConfirming(false)
+    }
+  }
+
+  async function openModels(): Promise<void> {
+    if (interactionBusy || actionLock.current) return
+    if (dirtyCount && !await askConfirmation(t('放弃未保存的修改？'),
+      t('前往模型管理会关闭账号设置，尚未保存的修改不会生效。'), t('前往模型管理'))) return
+    onClose()
+    shared().wbApp?.showPage?.('gateway')
+  }
 
   return (
-    <Dialog open onOpenChange={next => {
-      // 保存中不许关：关掉会让「到底存没存进去」变成未知状态
-      if (next || busy) return
-      onClose()
+    <Dialog open onOpenChange={(next, details) => {
+      if (next) return
+      details.cancel()
+      void close()
     }}>
-      <DialogContent className='w-[min(900px,calc(100vw-48px))]'>
-        <DialogHeader><DialogTitle>{t('账号设置 · {name}', { name: labelOf(account) })}</DialogTitle></DialogHeader>
-        <DialogBody className='p-0'>
+      <DialogContent className='acct-settings-dialog' showCloseButton={!interactionBusy}>
+        <DialogHeader className='acct-dlg-header'>
+          <div className='acct-dlg-avatar'><AccountSettingsIcon name={isCustomAccount ? 'agent' : 'accounts'} size={23} /></div>
+          <div className='acct-dlg-identity'>
+            <div className='acct-dlg-title-row'><DialogTitle>{t('账号设置')}</DialogTitle>
+              {isCustomAccount ? <Badge variant='secondary' shape='tag'>{t('自定义 API')}</Badge> : null}
+            </div>
+            <p><span>{labelOf(account)}</span><span className='acct-dlg-title-dot'>·</span>
+              <span className={`acct-dlg-account-state${account.enabled === false ? ' off' : ''}`}>
+                <BadgeDot />{account.enabled === false ? t('已停用') : t('已启用')}
+              </span>
+            </p>
+          </div>
+        </DialogHeader>
+        <DialogBody className='acct-dlg-body'>
           <div className='acct-dlg'>
-            {/* 分组导航复用模型管理左栏的形态（.prov-rail 容器 + NavItem，见 page-gateway.css）：
-                选中态 / 悬浮态 / 字重都在组件里，这里只给弹窗内的栏宽 */}
-            <Sidebar className='prov-rail acct-dlg-rail' aria-label={t('账号设置分组')}>
-              <NavList className='rail-scroll'>
-                <div className='rail-label'>{t('账号设置')}</div>
-                {([['basic', t('基本')], ...(hasCredentialPane ? [['credential', t('凭证与套餐')] as const] : []),
-                  ...(supportsUsage(target) ? [['query', t('查询设置')] as const] : []),
-                  ['limiter', t('限制器')], ['network', t('网络')]] as Array<[PaneId, string]>).map(([id, label]) => (
-                    <NavItem key={id} active={pane === id} title={label} className='shadow-none'
-                      onClick={() => setPane(id)}>{label}</NavItem>
-                  ))}
+            <Sidebar className='acct-dlg-rail' aria-label={t('账号设置分组')}>
+              <NavList className='acct-dlg-nav'>
+                <div className='acct-dlg-nav-label'>{t('当前账号')}</div>
+                {accountPanes.map(id => <NavItem key={id} active={pane === id} title={paneInfo[id].title}
+                  disabled={interactionBusy} className='shadow-none'
+                  icon={<AccountSettingsIcon name={paneInfo[id].icon} />}
+                  trailing={dirtyPanes[id] ? <span className='acct-dlg-dirty-dot' aria-label={t('有未保存的修改')} /> : undefined}
+                  onClick={() => selectPane(id)}>{paneInfo[id].title}</NavItem>)}
+                {provider ? <>
+                  <div className='acct-dlg-nav-divider' />
+                  <div className='acct-dlg-nav-label'>{t('提供商')}<span>{t('共用')}</span></div>
+                  <NavItem active={pane === 'provider'} disabled={interactionBusy} title={paneInfo.provider.title}
+                    icon={<AccountSettingsIcon name={paneInfo.provider.icon} />}
+                    trailing={dirtyPanes.provider ? <span className='acct-dlg-dirty-dot' aria-label={t('有未保存的修改')} /> : undefined}
+                    onClick={() => selectPane('provider')}>{paneInfo.provider.title}</NavItem>
+                </> : null}
               </NavList>
+              {provider ? <div className='acct-dlg-rail-context'><strong><AccountSettingsIcon name='accounts' size={14} />{providerLabel}</strong>
+                <p>{t('{count} 个账号共用连接配置', { count: providerCount })}</p>
+              </div> : null}
             </Sidebar>
             <div className='acct-dlg-main'>
-              {pane === 'basic' ? (
-                <div>
-                  <div className='acct-dlg-pane-head'>
-                    <h3>{t('基本')}</h3>
-                    <p>{t('这条账号是谁、排第几、能不能接请求。')}</p>
-                  </div>
-                  <Field orientation='horizontal' className='field-row'>
-                    <FieldLabel>{t('启用')}</FieldLabel>
-                    <Switch checked={enabled} onCheckedChange={setEnabled} aria-label={t('启用该账号')} />
-                    <span className='detail'>{t('关闭则不参与转发（余额查询照常，见「查询设置」）')}</span>
-                  </Field>
-                  <Field orientation='horizontal' className='field-row'>
-                    <FieldLabel htmlFor='account-name-input'>{t('备注名')}</FieldLabel>
-                    <Input id='account-name-input' maxLength={100} placeholder={t('账号显示名称')} className='max-w-[280px]'
-                      value={name} onChange={event => setName(event.currentTarget.value)} />
-                  </Field>
-                  {routeContext || <FieldGroup orientation='horizontal' className='field-row'>
-                    <Label>{t('转发顺序')}</Label>
-                    <span className='detail'>
-                      {t('在列表里拖：拖分组带调整整组顺位，拖行首把手调整组内先后（顺序由拖拽表达，不再填数字）')}
-                    </span>
-                  </FieldGroup>}
-                  <Field orientation='horizontal' className='field-row'>
-                    <FieldLabel htmlFor='account-route-skip'>{t('失败后允许换号')}</FieldLabel>
-                    <Switch id='account-route-skip' checked={allowRouteSkip} onCheckedChange={setAllowRouteSkip} />
-                  </Field>
-                  <p className='detail'>{t('关闭后，该账号转发失败时返回本次错误，不再顺延其他账号。禁用、无凭证和限制器等保护仍生效。')}</p>
-                  <Field orientation='horizontal' className='field-row'>
-                    <FieldLabel htmlFor='account-conc-input'>{t('并发上限')}</FieldLabel>
-                    <Input id='account-conc-input' type='number' min={0} max={CONC_MAX} step={1}
-                      className='max-w-[110px]' value={concDraft}
-                      onChange={event => setConcDraft(event.currentTarget.value)} />
-                    <span className='detail'>{concDefault > 0 ? t('0 = 按本家默认 {default}', { default: concDefault }) : t('0 = 不限')}</span>
-                  </Field>
-                  <p className='detail acct-dlg-hint'>
-                    {concDefault > 0
-                      ? t('并发上限 填 0 即按本家默认 {default}；填 1 或 2 就按填的算，更大的数会被本家上限截断（原列表 ⋯ 菜单的「并发上限」入口已并入这里）', { default: concDefault })
-                      : t('并发上限 0~{max}；达到上限的账号跳过、请求转给其他账号（原列表 ⋯ 菜单的「并发上限」入口已并入这里）', { max: CONC_MAX })}
-                  </p>
-                </div>
-              ) : null}
+              <div className='acct-dlg-pane-head'>
+                <div><h3>{currentPane.title}</h3><p>{currentPane.description}</p></div>
+                <span className={`acct-dlg-scope${pane === 'provider' ? ' shared' : ''}`}>
+                  <AccountSettingsIcon name='accounts' size={13} />
+                  {pane === 'provider' ? t('{count} 个账号共用', { count: providerCount }) : t('仅当前账号')}
+                </span>
+              </div>
+              <div ref={paneScroll} className='acct-dlg-scroll' aria-busy={busy}>
+                <div className='acct-dlg-pane' inert={interactionBusy ? true : undefined}>
+                  {pane === 'basic' ? (
+                    <>
+                      <DialogSection className='acct-dlg-card'>
+                        <div className='acct-dlg-card-head'><h3>{t('账号信息')}</h3></div>
+                        <Field className='acct-dlg-field'>
+                          <FieldLabel htmlFor='account-name-input'>{t('备注名')}</FieldLabel>
+                          <Input id='account-name-input' maxLength={100} placeholder={t('账号显示名称')}
+                            value={name} onChange={event => setName(event.currentTarget.value)} />
+                        </Field>
+                        <div className='acct-dlg-readonly'><span>{t('账号 ID')}</span><code>{target.id}</code></div>
+                        <Field className='acct-dlg-toggle-field'>
+                          <div><FieldLabel htmlFor='account-enabled'>{t('启用账号')}</FieldLabel>
+                            <FieldDescription>{t('关闭后不参与转发，余额查询不受影响。')}</FieldDescription>
+                          </div>
+                          <Switch id='account-enabled' checked={enabled} onCheckedChange={setEnabled} />
+                        </Field>
+                      </DialogSection>
+                      <DialogSection className='acct-dlg-card'>
+                        <div className='acct-dlg-card-head'><h3>{t('转发行为')}</h3></div>
+                        <Field className='acct-dlg-toggle-field'>
+                          <div><FieldLabel htmlFor='account-route-skip'>{t('失败后允许换号')}</FieldLabel>
+                            <FieldDescription>{t('关闭后，该账号转发失败时返回本次错误，不再顺延其他账号。禁用、无凭证和限制器等保护仍生效。')}</FieldDescription>
+                          </div>
+                          <Switch id='account-route-skip' checked={allowRouteSkip} onCheckedChange={setAllowRouteSkip} />
+                        </Field>
+                        <Field className='acct-dlg-concurrency'>
+                          <div><FieldLabel htmlFor='account-conc-input'>{t('并发上限')}</FieldLabel>
+                            <FieldDescription>{t('达到上限后，将请求交给其他账号。')}</FieldDescription>
+                          </div>
+                          <Input id='account-conc-input' type='number' min={0} max={CONC_MAX} step={1}
+                            value={concDraft} onChange={event => setConcDraft(event.currentTarget.value)} />
+                        </Field>
+                        <p className='detail acct-dlg-concurrency-hint'>{concDefault > 0
+                          ? t('0 = 按本家默认 {default}', { default: concDefault }) : t('0 = 不限')}</p>
+                      </DialogSection>
+                      {routeContext ? <div className='acct-dlg-route-context'>{routeContext}</div>
+                        : <p className='detail acct-dlg-quiet-note'><AccountSettingsIcon name='route' size={14} />
+                          {t('在账号列表中拖动分组或行首把手，调整转发顺序。')}</p>}
+                    </>
+                  ) : null}
 
-              {pane === 'credential' && hasCredentialPane ? (
-                <div>
-                  <div className='acct-dlg-pane-head'>
-                    <h3>{t('凭证与套餐')}</h3>
-                    <p>{t('这一段按提供商出现：有什么配什么。')}</p>
-                  </div>
-                  {isCatpaw ? (
-                    <BalanceTokenField configured={account.hasBalanceToken === true} value={balanceToken}
-                      onChange={setBalanceToken} clearBusy={busy}
-                      onClear={() => void clearBalanceToken()} />
-                  ) : null}
-                  {isCustomAccount ? (
-                    <CustomCredentialFields
-                      hasApiKey={target.hasApiKey === true}
-                      noAuth={noAuthDraft}
-                      value={apiKeyDraft}
-                      onValue={setApiKeyDraft}
-                      onToggleNoAuth={setNoAuthDraft}
-                      onClear={() => void clearApiKey()}
-                      clearBusy={busy} />
-                  ) : null}
-                  {supportsPlanChannel(target) ? (
-                    <PlanChannelField plan={planChannel} hasJwt={account.canClaim === true}
-                      onChange={setPlanChannel} />
-                  ) : null}
-                  {provider ? (
-                    <ProviderSection provider={provider} count={peers.length + 1}
-                      name={providerName} protocol={providerProtocol} baseUrl={providerBaseUrl}
-                      emulation={providerEmulation}
-                      onName={setProviderName} onProtocol={setProviderProtocol} onBaseUrl={setProviderBaseUrl}
-                      onEmulation={setProviderEmulation}
-                      onRemove={() => {
-                        if (busy) return
-                        // 删掉了就把本弹窗一起关掉（账号也没了）
-                        void Promise.resolve(shared().wbCustomProvidersUi?.remove?.(provider.id)).then(removed => {
-                          if (removed) onClose()
-                        })
-                      }} />
-                  ) : null}
-                </div>
-              ) : null}
+                  {pane === 'credential' && hasCredentialPane ? <>
+                    {isCatpaw ? <BalanceTokenField configured={account.hasBalanceToken === true} value={balanceToken}
+                      onChange={setBalanceToken} clearBusy={interactionBusy} onClear={() => void clearBalanceToken()} /> : null}
+                    {isCustomAccount ? <CustomCredentialFields hasApiKey={target.hasApiKey === true} noAuth={noAuthDraft}
+                      value={apiKeyDraft} clearBusy={interactionBusy} onClear={() => void clearApiKey()}
+                      onValue={next => { setApiKeyDraft(next); if (next.trim()) setNoAuthDraft(false) }}
+                      onToggleNoAuth={next => { setNoAuthDraft(next); if (next) setApiKeyDraft('') }} /> : null}
+                    {supportsPlanChannel(target) ? <DialogSection className='acct-dlg-card acct-dlg-form-card'>
+                      <div className='acct-dlg-card-head'><h3>{t('使用套餐')}</h3></div>
+                      <PlanChannelField plan={planChannel} hasJwt={account.canClaim === true} onChange={setPlanChannel} />
+                    </DialogSection> : null}
+                    {provider ? <div className='acct-dlg-related'>
+                      <AccountSettingsIcon name='agent' size={18} />
+                      <div><h3>{t('要修改连接地址或协议？')}</h3><p>{t('{count} 个账号共用提供商的连接配置。', { count: providerCount })}</p></div>
+                      <Button variant='link' size='xs' onClick={() => selectPane('provider')}>{t('连接设置')}<AccountSettingsIcon name='caretRight' size={12} /></Button>
+                    </div> : null}
+                  </> : null}
 
-              {pane === 'query' && supportsUsage(target) ? (
-                <div>
-                  <div className='acct-dlg-pane-head'>
-                    <h3>{t('查询设置')}</h3>
-                    <p>{t('余额列读数的自动刷新；也是「限制器」余额规则的数据来源。')}</p>
-                  </div>
-                  {/* 余额方案要的凭证（只有登记了方案的自定义家才有这一段；
-                      DeepSeek 这类不需要额外信息的家只有一行方案说明） */}
-                  {balanceSpec ? (
-                    <BalanceQuerySection
-                      spec={balanceSpec}
-                      values={balanceQueryDraft}
-                      configured={balanceConfigured}
-                      onValue={(key, next) => setBalanceQueryDraft(prev => ({ ...prev, [key]: next }))}
-                      onClear={key => void clearBalanceQueryField(key)}
-                      clearBusy={busy}
-                      idPrefix='account-balance-query'
-                    />
-                  ) : null}
-                  {balanceNeedsCredentials ? (
-                    <p className='detail mt-2.5 text-subtle'>
-                      {t('查询凭证还没配齐：填好后余额列才有读数，在此之前会显示「未配置」。')}
-                    </p>
-                  ) : null}
-                  <UsageSettingsSection draft={usageDraft} onChange={setUsageDraft} />
-                </div>
-              ) : null}
+                  {pane === 'query' && supportsUsage(target) ? <>
+                    <DialogSection className='acct-dlg-card acct-dlg-form-card'>
+                      <div className='acct-dlg-card-head'><h3>{t('自动查询余额')}</h3></div>
+                      <UsageSettingsSection draft={usageDraft} onChange={setUsageDraft} />
+                    </DialogSection>
+                    {balanceSpec ? <DialogSection className='acct-dlg-card acct-dlg-form-card'>
+                      <div className='acct-dlg-card-head'><h3>{t('查询凭证')}</h3><Badge variant='secondary' shape='tag'>{balanceSpec.label}</Badge></div>
+                      <BalanceQuerySection spec={balanceSpec} values={balanceQueryDraft} configured={balanceConfigured}
+                        onValue={(key, next) => setBalanceQueryDraft(prev => ({ ...prev, [key]: next }))}
+                        onClear={key => void clearBalanceQueryField(key)} clearBusy={interactionBusy} idPrefix='account-balance-query' />
+                      {balanceNeedsCredentials ? <p className='detail text-subtle'>{t('查询凭证还没配齐：填好后余额列才有读数，在此之前会显示「未配置」。')}</p> : null}
+                    </DialogSection> : null}
+                    <p className='detail acct-dlg-quiet-note'><AccountSettingsIcon name='info' size={14} />{t('余额读数也是限制器余额规则的数据来源。')}</p>
+                  </> : null}
 
-              {pane === 'limiter' ? (
-                <div>
-                  <div className='acct-dlg-pane-head'>
-                    <h3>{t('限制器')}</h3>
-                    <p>
-                      {t('按规则限制该账号参与转发：没有规则（或全部停用）= 不限制；跳过档自动恢复，禁用档需手动启用。')}
-                    </p>
-                  </div>
-                  <LimiterSection account={target} draft={limiterDraft} onChange={setLimiterDraft} allowBalance={supportsUsage(target)} />
-                </div>
-              ) : null}
+                  {pane === 'limiter' ? <>
+                    <LimiterSection account={target} draft={limiterDraft} onChange={setLimiterDraft} allowBalance={supportsUsage(target)} />
+                    <p className='detail acct-dlg-quiet-note'><AccountSettingsIcon name='info' size={14} />
+                      {t('没有规则或全部停用时不限制；跳过后自动恢复，禁用后需手动启用。')}</p>
+                  </> : null}
 
-              {pane === 'network' ? (
-                <div>
-                  <div className='acct-dlg-pane-head'>
-                    <h3>{t('网络')}</h3>
-                    <p>{t('这条账号访问上游走哪条线路。')}</p>
-                  </div>
-                  <ProxyForm draft={proxyDraft} onChange={setProxyDraft} idPrefix='account-proxy'
-                    allowRotate={allowRotate} />
-                  {account.proxy?.error ? (
-                    <p className='detail text-destructive'>
-                      {t('当前代理不可用：{error}（转发时会回退直连）', { error: account.proxy.error })}
-                    </p>
-                  ) : null}
+                  {pane === 'network' ? <>
+                    <DialogSection className='acct-dlg-card acct-dlg-network-card'>
+                      <div className='acct-dlg-card-head'><h3>{t('出网方式')}</h3></div>
+                      <ProxyForm draft={proxyDraft} onChange={setProxyDraft} idPrefix='account-proxy' allowRotate={allowRotate} />
+                      {account.proxy?.error ? <p className='detail text-destructive'>
+                        {t('当前代理不可用：{error}（转发时会回退直连）', { error: account.proxy.error })}
+                      </p> : null}
+                    </DialogSection>
+                    <p className='detail acct-dlg-quiet-note'><AccountSettingsIcon name='shield' size={14} />{t('代理只作用于当前账号，不改变其他账号的出网方式。')}</p>
+                  </> : null}
+                  {pane === 'provider' && provider ? <ProviderSection provider={provider} count={providerCount}
+                    name={providerName} protocol={providerProtocol} baseUrl={providerBaseUrl} emulation={providerEmulation}
+                    onName={setProviderName} onProtocol={setProviderProtocol} onBaseUrl={setProviderBaseUrl} onEmulation={setProviderEmulation}
+                    disabled={interactionBusy} onRemove={() => void removeProvider()} onModels={() => void openModels()} /> : null}
                 </div>
-              ) : null}
+              </div>
             </div>
           </div>
         </DialogBody>
-        <DialogFooter>
-          <div className='detail mr-auto' style={{ minHeight: 18 }}>{status}</div>
-          <Button variant='outline' disabled={busy} onClick={onClose}>{t('取消')}</Button>
-          <Button variant='default' disabled={busy} onClick={() => void save()}>{busy ? t('保存中…') : t('保存')}</Button>
+        <DialogFooter className='acct-dlg-footer'>
+          <div className={`acct-dlg-save-state${dirtyCount ? ' dirty' : ''}`} role='status'>
+            <AccountSettingsIcon name={status ? 'info' : dirtyCount ? 'timer' : 'shield'} size={16} />
+            <div><strong>{status || (busy ? t('正在保存…') : dirtyCount
+              ? t('{count} 个分区有未保存的更改', { count: dirtyCount }) : t('没有未保存的更改'))}</strong>
+              <p>{dirtyPanes.provider ? t('包含提供商共用配置，将影响 {count} 个账号', { count: providerCount }) : t('各分区的更改将统一保存')}</p>
+            </div>
+          </div>
+          <div className='acct-dlg-footer-actions'>
+            <Button variant='outline' disabled={interactionBusy} onClick={() => void close()}>{t('取消')}</Button>
+            <Button variant='default' disabled={interactionBusy || !dirtyCount} onClick={() => void save()}>{busy ? t('保存中…') : t('保存更改')}</Button>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -131,8 +131,9 @@ async fn aggregate_frame_stream_inner(
     // 下面这个 `while let` 永不退出 —— 聚合明明已经读到上游 EOF，却要空转到
     // 非流式总超时（默认 300 秒）才报 502（详见 `cancellable` 的说明）。
     let mut stream = cancellation::cancellable(stream, telemetry.cancel_token());
-    let mut buffer = String::new();
+    let mut buffer = Vec::<u8>::new();
     let mut acc = CompletionAccumulator {
+        native_tools: super::native_tools::Repair::new(&policy.native_tools),
         rewrite: policy.rewrite,
         strip_newline_chunks: policy.strip_newline_chunks,
         ..Default::default()
@@ -164,10 +165,10 @@ async fn aggregate_frame_stream_inner(
             telemetry.note_first_frame();
         }
         // 原始字节由输入侧（HTTP 字节流或协议翻译流）采集，聚合器只消费 chat 帧。
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        buffer.extend_from_slice(&chunk);
         // 逐行消费（只处理到最后一个 '\n' 之前的内容）
-        while let Some(index) = buffer.find('\n') {
-            let line = buffer[..index].trim().to_string();
+        while let Some(index) = buffer.iter().position(|byte| *byte == b'\n') {
+            let line = String::from_utf8_lossy(&buffer[..index]).trim().to_string();
             buffer.drain(..=index);
             if line.is_empty() {
                 continue;
@@ -179,11 +180,14 @@ async fn aggregate_frame_stream_inner(
         }
     }
     // 尾行（上游没以换行结尾）
-    let tail = buffer.trim().to_string();
+    let tail = String::from_utf8_lossy(&buffer).trim().to_string();
     if !tail.is_empty() {
         acc.consume_line(&tail, &telemetry)?;
     }
 
+    if let Some(frame) = acc.native_tools.flush(&json!({ "id": acc.id, "model": acc.model, "created": acc.created })) {
+        acc.consume_chunk(&frame, &telemetry)?;
+    }
     Ok(acc.into_completion())
 }
 
@@ -205,6 +209,7 @@ struct CompletionAccumulator {
     /// 丢弃「整片只有换行」的 content 分片（WorkBuddy / AutoClaw 的保活节拍，
     /// 判据与理由见 `sse::is_newline_keepalive`）。false = 与接入前逐字一致。
     strip_newline_chunks: bool,
+    native_tools: super::native_tools::Repair,
 }
 
 impl CompletionAccumulator {
@@ -214,15 +219,25 @@ impl CompletionAccumulator {
             return Ok(());
         };
         let data = data.trim();
-        if data.is_empty() || data == "[DONE]" {
+        if data == "[DONE]" {
+            if let Some(frame) = self.native_tools.flush(&json!({ "id": self.id, "model": self.model, "created": self.created })) {
+                self.consume_chunk(&frame, telemetry)?;
+            }
             return Ok(());
         }
+        if data.is_empty() { return Ok(()); }
         // Node: `try { handleChunk(JSON.parse(line)) } catch { /* 非 JSON 行忽略 */ }`
         // —— 非 JSON 行静默忽略，但 handleChunk 抛出的 WorkBuddyUpstreamError 要透出
         let Ok(chunk) = serde_json::from_str::<Value>(data) else {
+            if let Some(frame) = self.native_tools.flush(&json!({ "id": self.id, "model": self.model, "created": self.created })) {
+                self.consume_chunk(&frame, telemetry)?;
+            }
             return Ok(());
         };
-        self.consume_chunk(&chunk, telemetry)
+        for chunk in self.native_tools.transform(&chunk) {
+            self.consume_chunk(&chunk, telemetry)?;
+        }
+        Ok(())
     }
 
     fn consume_chunk(&mut self, chunk: &Value, telemetry: &RequestTelemetry) -> Result<(), GatewayError> {

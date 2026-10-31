@@ -51,22 +51,15 @@ use axum::response::Response;
 use serde_json::{json, Value};
 
 use crate::server::core::auto_checkin::{self};
-use crate::server::core::beijing;
 use crate::server::core::billing::checkin;
 use crate::server::core::checkin_history;
 use crate::server::core::providers::{kind_id, ProviderKind};
 use crate::server::http::ok_json;
 use crate::server::ServerState;
 
-/// `checkedInToday` 的判定：`checkinAt`（ms）落在今天（**北京时间**，
-/// 上游自然日口径 —— 见 `core::beijing`；跟机器时区走会让海外部署下
-/// 的「今日已签到」错位，issue #138）。
-/// 时间戳缺失 / 非法都算「今天没签」—— 与账号页「checkinAt 落在今天即算签过」
-/// 的口径一致（见 store_admin::mark_checkin 的说明）。
-fn checked_in_today(checkin_at: Option<i64>) -> bool {
-    checkin_at
-        .and_then(beijing::date_key_of_ms)
-        .is_some_and(|key| key == beijing::today_key())
+/// 插件提供了当天的逐项完成状态时优先采用；旧插件回落到签到时间戳。
+fn checked_in_today(account: &Value) -> bool {
+    crate::server::core::account_store::checkin_state::checked_in_today(account)
 }
 
 /// 账号快照里的字段（缺失按空值兜底，与 billing::checkin 的读取口径一致）
@@ -176,9 +169,8 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
                 "name": Value::from(account_display_name(account)),
                 "available": account.get("available").and_then(Value::as_bool).unwrap_or(true),
                 "checkinAt": account.get("checkinAt").cloned().unwrap_or(Value::Null),
-                "checkedInToday": checked_in_today(
-                    account.get("checkinAt").and_then(Value::as_i64),
-                ),
+                "checkedInToday": checked_in_today(account),
+                "dailyCheckin": account.get("dailyCheckin").cloned().unwrap_or(Value::Null),
                 // 版本（cn / intl，缺失 null）：WorkBuddy 国际版在这张表里执行的是
                 // 「领日活」（活跃保活），按钮文案与提示要跟国内版的「签到」分开
                 "edition": account.get("edition").cloned().unwrap_or(Value::Null),
@@ -197,7 +189,7 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
         }
     }
 
-    let provider_rows: Vec<Value> = checkin_providers
+    let mut provider_rows: Vec<Value> = checkin_providers
         .iter()
         .zip(buckets.into_iter())
         .map(|(id, rows)| {
@@ -208,12 +200,14 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
             // 插件申报的链路信息（说明 / 执行档位 / 附加 UI 钩子）。
             // 没申报的旧插件不带这几个键，界面走自己的兜底（与申报前一致）。
             let declared = crate::server::core::plugin_host::checkin_of(id);
+            let manual_plans = declared.as_ref().is_some_and(|declared| declared.daily && declared.plans);
             let mut row = json!({
                 "id": id,
                 "label": auto_checkin::provider_label(id),
                 "accounts": rows,
                 "doneCount": done,
                 "totalCount": rows.len(),
+                "manualPlans": manual_plans,
             });
             if let Some(declared) = declared {
                 if let Some(object) = row.as_object_mut() {
@@ -234,6 +228,7 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
             row
         })
         .collect();
+    provider_rows.sort_by_key(|row| row.get("totalCount").and_then(Value::as_u64).unwrap_or(0) == 0);
     let today_done: u64 = provider_rows
         .iter()
         .map(|row| row.get("doneCount").and_then(Value::as_u64).unwrap_or(0))

@@ -24,6 +24,7 @@ import { accountName, formatExpiry, formatRelative, isRateLimited } from '../lib
 import { expiryOf, hasExpiry, isLongLivedCredential, supportsUsage } from '../lib/providerFacts'
 import { usageIndex, usageText } from '../lib/usage'
 import { credentialExpiryRowsOf, credentialExpiryText } from '../../../ui-shared/credential-expiry'
+import { upstreamCooldownOf, upstreamSuspendedReasonOf } from '../../../ui-shared/account-upstream-state'
 import { providerLabel } from '../lib/providers'
 import { usePolling } from '../lib/usePolling'
 import { usePullToRefresh, PullIndicator } from '../components/PullToRefresh'
@@ -418,9 +419,11 @@ function AccountRow({
   busy: boolean
 }) {
   const limited = isRateLimited(account)
+  const cooldown = upstreamCooldownOf(account)
+  const suspendedReason = upstreamSuspendedReasonOf(account)
   const expiresAt = expiryOf(account)
   const expired = expiresAt > 0 && expiresAt <= Date.now()
-  const tone = account.needsRelogin
+  const tone = account.needsRelogin || suspendedReason
     ? 'bad'
     : !account.enabled
       ? 'mute'
@@ -431,13 +434,17 @@ function AccountRow({
           : 'ok'
   const badgeText = account.needsRelogin
     ? t('需重登')
-    : !account.enabled
-      ? t('已禁用')
-      : limited
-        ? t('限流')
-        : expired
-          ? t('已过期')
-          : t('正常')
+    : suspendedReason
+      ? t('上游限制 · 已禁用')
+      : !account.enabled
+        ? t('已禁用')
+        : cooldown
+          ? t('账号冷却')
+          : limited
+            ? t('限流')
+            : expired
+              ? t('已过期')
+              : t('正常')
   // 有效期：这家没有这个概念时不显示，而不是显示「—」（少一行噪音）；
   // 长期有效的家写「长期有效」—— 与「—」（读不到到期时间）是两件事
   const credentialRows = credentialExpiryRowsOf(account, expiresAt)
@@ -520,6 +527,11 @@ function AccountRow({
               </span>
             </div>)}
           </div> : null}
+          {suspendedReason || cooldown ? (
+            <div className={`text-xs ${suspendedReason ? 'text-destructive' : 'text-warning'} whitespace-normal break-words mt-1`}>
+              {suspendedReason || [t('{time} 恢复', { time: formatRelative(cooldown?.resetAt) }), cooldown?.message].filter(Boolean).join(' · ')}
+            </div>
+          ) : null}
           {account.needsRelogin ? (
             <div className='text-xs text-destructive whitespace-normal break-words mt-1'>
               {account.needsReloginReason || t('登录授权已失效，请重新登录；自动续期无法恢复已过期或已撤销的刷新令牌。')}

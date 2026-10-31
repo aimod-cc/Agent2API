@@ -9,15 +9,19 @@ import { formatStamp } from '../../lib/format'
 import type { CheckinAction } from '../CheckinPage'
 import { CheckinBenefits } from './CheckinBenefits'
 import { CheckinUmid } from './CheckinUmid'
+import { CheckinPlansSheet } from './CheckinPlansSheet'
 import { t } from '../../i18n'
 
-export function CheckinDaily({ center, busy, action, onRecords }: {
+export function CheckinDaily({ center, busy, action, onRecords, onChange }: {
   center: CheckinCenter
   busy: string
   action: CheckinAction
   onRecords: () => void
+  onChange: () => void
 }) {
   const [section, setSection] = useState<CheckinSection>('daily')
+  const [planId, setPlanId] = useState('')
+  const plan = center.extras?.plans?.find(entry => entry.id === planId)
   const sections = CHECKIN_SECTION_OPTIONS.map(option => ({ ...option, label: t(option.label) }))
   const daily = center.daily
   const groups = daily?.providers || []
@@ -94,13 +98,20 @@ export function CheckinDaily({ center, busy, action, onRecords }: {
                   <Badge tone={!account.available ? 'bad' : account.checkedInToday ? 'ok' : 'warn'}>
                     {!account.available ? t('凭证不可用') : account.checkedInToday ? t('今日已签') : t('待签')}
                   </Badge>
+                  {account.dailyCheckin && account.dailyCheckin.totalCount > 0 ? <span className='m-ck-note'>
+                    {t('已领 {done} / {total} 份套餐', { done: account.dailyCheckin.completedCount, total: account.dailyCheckin.totalCount })}
+                  </span> : null}
                 </div>
                 <div className='m-ck-actions'>
                   {modesOf(group).map(mode => (
                     <Button key={mode} variant='outline' size='sm'
                       disabled={Boolean(busy) || center.auto?.running || !account.available || !['checkin', 'keepalive', 'claim', 'full'].includes(mode)}
-                      onClick={() => void sign(account.id, mode)}>
-                      {busy === account.id ? t('执行中…') : checkinModeLabel(mode)}
+                      onClick={() => {
+                        if (group.manualPlans && mode === 'checkin') setPlanId(account.id)
+                        else void sign(account.id, mode)
+                      }}>
+                      {group.manualPlans && mode === 'checkin' ? t('套餐明细')
+                        : busy === account.id ? t('执行中…') : checkinModeLabel(mode)}
                     </Button>
                   ))}
                 </div>
@@ -122,7 +133,8 @@ export function CheckinDaily({ center, busy, action, onRecords }: {
         </div>
       ) : null}
 
-      <CheckinBenefits center={center} section={section} busy={busy} action={action} />
+      <CheckinBenefits center={center} section={section} busy={busy} action={action} onChange={onChange} />
+      {plan ? <CheckinPlansSheet key={plan.id} entry={plan} onClose={() => setPlanId('')} onChange={onChange} /> : null}
       {section === 'daily' && !groups.length && !center.extras?.onboarding?.length && !center.extras?.plans?.length && !center.extras?.growth?.length
         ? <Empty text={t('安装插件并添加账号后，支持的签到与福利会自动显示')} /> : null}
     </>

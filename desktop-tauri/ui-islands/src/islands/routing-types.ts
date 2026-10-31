@@ -3,7 +3,10 @@ import type { AccountRecord, AccountSorting } from './accounts-shared'
 
 export type RouteOrderChange = { kind: 'provider' } | { kind: 'account'; provider: string }
 
+export type RouteProviderScope = 'all' | 'selected'
+
 export type RouteProfile = {
+  providerScope?: RouteProviderScope
   providers: string[]
   disabledProviders: string[]
   accountOrder: Record<string, string[]>

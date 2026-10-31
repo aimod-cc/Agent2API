@@ -1,4 +1,12 @@
 {
+  "支持作者": "Apoiar o autor",
+  "如果 Agent2API 帮到了你，欢迎请作者喝杯咖啡。": "Se o Agent2API ajudou você, considere oferecer um café ao autor.",
+  "赞赏完全自愿，不解锁任何功能，也不影响正常使用。": "As doações são totalmente voluntárias. Não desbloqueiam recursos nem afetam o uso normal.",
+  "微信赞赏": "WeChat",
+  "支付宝": "Alipay",
+  "赞赏方式": "Método de doação",
+  "微信赞赏码": "Código de doação do WeChat",
+  "支付宝收款码": "Código QR de pagamento do Alipay",
   "检查更新与下载安装包使用所选线路；未选择代理时先直连，失败后尝试 Clash Verge 混合端口；指定代理不可用时不会自动改走直连。": "A verificação de atualizações e o download do instalador usam a rota selecionada. Sem proxy selecionado, tenta primeiro a conexão direta e, se falhar, a porta mista do Clash Verge. Um proxy especificado indisponível nunca volta automaticamente à conexão direta.",
   " · 检查于 {time}": " · verificado em {time}",
   " 已发布（当前 {current}），更新日志如下：": " lançada (atual: {current}); notas de versão abaixo:",

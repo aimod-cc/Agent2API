@@ -169,6 +169,16 @@ impl Host {
 
     pub(super) async fn serve_callback(&self, frame: proto::Frame, run: Arc<ProcessRun>) {
         if !self.is_current_run(&run) || run.failed.load(Ordering::Acquire) { return; }
+        let lease = self.activity.acquire();
+        if lease.is_none() && !run.is_expected_exit() {
+            let _ = self.write_for_run(proto::Frame {
+                id: frame.id,
+                error: Some(proto::WireError::with_code("插件正在切换", "plugin_updating")),
+                ..Default::default()
+            }, run).await;
+            return;
+        }
+        let _lease = lease;
         let Some(method) = frame.method.clone() else { return };
         let id = frame.id;
         let params = frame.params.unwrap_or(serde_json::Value::Null);

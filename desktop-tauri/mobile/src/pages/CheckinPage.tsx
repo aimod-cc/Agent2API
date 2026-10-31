@@ -25,6 +25,7 @@ export function CheckinPage() {
   const busyRef = useRef('')
   const mounted = useRef(true)
   const identity = serverIdentity()
+  const loadRequest = useRef(0)
 
   useEffect(() => {
     mounted.current = true
@@ -33,13 +34,14 @@ export function CheckinPage() {
 
   const load = useCallback(async () => {
     if (!mounted.current || serverIdentity() !== identity) return
+    const request = ++loadRequest.current
     try {
       const next = await getCheckinCenter()
-      if (!mounted.current || serverIdentity() !== identity) return
+      if (!mounted.current || serverIdentity() !== identity || request !== loadRequest.current) return
       setCenter(next)
       setError('')
     } catch (cause) {
-      if (mounted.current && serverIdentity() === identity) setError(cause instanceof Error ? cause.message : String(cause))
+      if (mounted.current && serverIdentity() === identity && request === loadRequest.current) setError(cause instanceof Error ? cause.message : String(cause))
     }
   }, [identity])
 
@@ -84,7 +86,7 @@ export function CheckinPage() {
       </div>
       {error ? <ErrorNote text={error} /> : null}
       {!center && tab !== 'records' ? <SkeletonList rows={3} height={92} /> : null}
-      {center && tab === 'center' ? <CheckinDaily center={center} busy={busy} action={action} onRecords={() => setTab('records')} /> : null}
+      {center && tab === 'center' ? <CheckinDaily center={center} busy={busy} action={action} onRecords={() => setTab('records')} onChange={load} /> : null}
       {center && tab === 'schedule' ? <CheckinSchedules center={center} busy={busy} action={action} /> : null}
       {tab === 'records' ? <CheckinRecords providers={center?.auto?.providerOptions || []} /> : null}
     </div>

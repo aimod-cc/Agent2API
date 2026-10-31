@@ -38,7 +38,7 @@ function TitleBar({ api }: { api: WindowBridge }) {
   const icon = (window as unknown as { wbIcons?: { icon(name: string, size: number): string } }).wbIcons?.icon('brand', 16) || ''
   return <WindowTitleBar className={isMac ? 'titlebar is-macos pl-[84px] pr-3.5' : 'titlebar'}>
     <div className='titlebar-brand pointer-events-none flex min-w-0 items-center gap-2 text-[12.5px] font-semibold [&_*]:pointer-events-none'>
-      <span dangerouslySetInnerHTML={{ __html: icon }} /><span className='txt truncate'>{title}</span>
+      <span className='flex shrink-0 items-center [&>svg]:block' dangerouslySetInnerHTML={{ __html: icon }} /><span className='txt truncate'>{title}</span>
     </div>
     {!isMac && <div className='ml-auto flex h-full shrink-0'>
       <WindowControl action='minimize' title={t('最小化')} aria-label={t('最小化')} onClick={() => { void api.windowMinimize?.().catch(() => {}) }}><WindowIcon action='minimize' /></WindowControl>

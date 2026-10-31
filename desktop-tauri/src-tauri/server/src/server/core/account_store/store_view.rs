@@ -488,6 +488,10 @@ impl AccountStore {
         };
         match shaped {
             Value::Object(mut fields) => {
+                for key in ["upstreamCooldownUntil", "upstreamBlockedReason"] {
+                    if let Some(value) = record.get(key) { fields.insert(key.to_string(), value.clone()); }
+                    else { fields.remove(key); }
+                }
                 if !record.has_plugin_secret() {
                     super::plugin_public::credential_fields(record, &mut fields);
                 }
@@ -557,6 +561,9 @@ impl AccountStore {
                     }
                 }
                 fields.insert("checkinAt".to_string(), Value::from(record.checkin_at()));
+                fields.insert("checkedInToday".to_string(), Value::Bool(super::checkin_state::completed(record)));
+                fields.insert("dailyCheckin".to_string(), super::checkin_state::record_status(record)
+                    .cloned().unwrap_or(Value::Null));
                 // 成长中心连登天数（WorkBuddy 国内版；签到后回读落库，见
                 // `AccountStore::mark_streak_days`）。恒为数字键（0 = 还没读到过），
                 // 与 checkinAt 同一理由：界面按数字读，不必判「字段缺失」。

@@ -76,12 +76,21 @@ export function cloneProfile(): RouteProfile {
   if (!current.workspace) throw new Error(t('路由配置尚未读取'))
   return structuredClone(current.workspace.profile)
 }
+export function independentProfile(profile = cloneProfile()): RouteProfile {
+  const next = structuredClone(profile)
+  next.providerScope = 'selected'
+  next.disabledProviders = next.disabledProviders.filter(id => next.providers.includes(id))
+  return next
+}
+
 export async function saveProfile(profile: RouteProfile | null, model = current.model, orderChange?: RouteOrderChange): Promise<boolean> {
   if (current.busy) return false
+  const createsIndependent = Boolean(model && current.model === model && current.workspace && !current.workspace.customized)
+  const next = profile && createsIndependent ? independentProfile(profile) : profile
   loadSequence += 1
   patch({ busy: true, loading: false, error: '' })
   try {
-    const workspace = await bridge().saveRoutingProfile({ model: model || null, profile, orderChange })
+    const workspace = await bridge().saveRoutingProfile({ model: model || null, profile: next, orderChange })
     adoptAccountSorting(workspace.sorting)
     if (!model) void host().wbApp?.refresh?.()
     if (current.model === model) {
@@ -161,7 +170,7 @@ export async function moveProvider(id: string, direction: -1 | 1): Promise<void>
 export async function addModel(model: string): Promise<boolean> {
   if (!model.trim()) return false
   const workspace = await bridge().getRoutingWorkspace(model)
-  const profile = structuredClone(workspace.profile)
+  const profile = independentProfile(workspace.profile)
   profile.excludedAccounts = profile.excludedAccounts.filter(id => workspace.accounts.some(account => account.id === id))
   for (const provider of workspace.providers) {
     if (!profile.providers.includes(provider.id)) profile.providers.push(provider.id)

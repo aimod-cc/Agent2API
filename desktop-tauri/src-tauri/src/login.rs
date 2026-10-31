@@ -703,6 +703,9 @@ fn allowed_hosts(provider: &str) -> Option<&'static [&'static str]> {
 /// `social_restore` 勾选时对 WorkBuddy 国际版额外放行 [`SOCIAL_IDENTITY_HOSTS`]：
 /// 恢复出来的 Google / GitHub 按钮做的是顶层跳转，不放行就会白屏（理由见该常量）。
 fn host_allowed(url: &url::Url, provider: &str, social_restore: bool) -> bool {
+    if provider == "deepseek-web" {
+        return url.as_str() == "about:blank" || crate::deepseek_login::allowed(url);
+    }
     if provider == "doubaowork" {
         return url.as_str() == "about:blank" || crate::doubaowork_login::allowed(url);
     }
@@ -1063,6 +1066,17 @@ pub async fn start_with_options(
     options: Option<Value>,
 ) -> Result<Value, String> {
     let dynamic = options.as_ref().is_some_and(|value| value.get("methodIndex").is_some());
+    if provider.trim() == "deepseek-web" {
+        if current_login(app).is_some() {
+            return Err("已有登录流程在进行，请先完成当前登录或等待超时".into());
+        }
+        if mode == "external" {
+            return Err("DeepSeek 自动网页登录需要桌面内嵌窗口；系统浏览器登录后请使用粘贴令牌。".into());
+        }
+        let mut options = options.unwrap_or_else(|| json!({}));
+        if !dynamic { options["methodIndex"] = json!(1); }
+        return crate::deepseek_login::start(app, &options).await;
+    }
     if !dynamic {
         // 旧入口也能带登录代理：界面上的代理选择器对内置家同样生效
         // （antigravity 这类上游在无头服务器上只有应用内代理能出网）。
@@ -1872,13 +1886,27 @@ pub(crate) async fn run_cookie_login(
     title: &str,
     flow: &str,
 ) -> Result<serde_json::Value, String> {
+    run_cookie_login_with_proxy(app, provider, auth_url, title, flow, None).await
+}
+
+pub(crate) async fn run_cookie_login_with_proxy(
+    app: &AppHandle,
+    provider: &'static str,
+    auth_url: &str,
+    title: &str,
+    flow: &str,
+    proxy: Option<url::Url>,
+) -> Result<serde_json::Value, String> {
     {
         let state = app.state::<crate::state::AppState>();
         let mut guard = state.login.lock().map_err(|_| "登录状态锁不可用")?;
+        if guard.is_some() {
+            return Err("已有登录流程在进行，请先完成当前登录或等待超时".into());
+        }
         *guard = Some(ActiveLogin { state: flow.into(), edition: String::new(), mode: "embedded".into(), provider: provider.into() });
     }
     emit_login_state(app, LoginState { active: true, mode: Some("embedded".into()), edition: None, provider: Some(provider.into()) });
-    let result = run_embedded(app, provider, auth_url, title, flow, false, None, false).await;
+    let result = run_embedded_with_proxy(app, provider, auth_url, title, flow, false, None, false, proxy).await;
     clear_active_login(app, flow);
     result
 }
@@ -1910,6 +1938,20 @@ async fn run_embedded(
     social_restore: bool,
     kuku_phone: Option<&str>,
     start_hidden: bool,
+) -> Result<serde_json::Value, String> {
+    run_embedded_with_proxy(app, provider, auth_url, title, login_state, social_restore, kuku_phone, start_hidden, None).await
+}
+
+async fn run_embedded_with_proxy(
+    app: &AppHandle,
+    provider: &'static str,
+    auth_url: &str,
+    title: &str,
+    login_state: &str,
+    social_restore: bool,
+    kuku_phone: Option<&str>,
+    start_hidden: bool,
+    proxy: Option<url::Url>,
 ) -> Result<serde_json::Value, String> {
     let window_label = login_window_label(login_state);
     // ── 每次登录一个独立环境（修复：第二次添加账号会看到上一个账号的登录态）──
@@ -1954,6 +1996,7 @@ async fn run_embedded(
     // 密集重试只会延长风控窗口。
     let mut kuku_retry_block_until: Option<tokio::time::Instant> = None;
     let mut doubaowork_submitted = false;
+    let mut deepseek_submitted = false;
 
     // 导航拦截与弹窗拦截**共用同一个标志**：两种入口收到的可能是同一个回调
     // （页面先改 location、再被 WebView2 派生出一条弹窗请求），分开各一个标志
@@ -1973,6 +2016,10 @@ async fn run_embedded(
         .min_inner_size(760.0, 560.0)
         .visible(!start_hidden)
         .center();
+    let window = match proxy {
+        Some(proxy) => window.proxy_url(proxy),
+        None => window,
+    };
 
     // 恢复第三方登录入口：登录页按上游开关把 Google / GitHub / X 隐藏了，
     // 注入脚本持续摘掉那段样式（理由与边界见 social_restore_script）。
@@ -2050,6 +2097,9 @@ async fn run_embedded(
         // 同属一个 WebView2 数据目录、共享 Cookie 存储，弹窗里登录成功后
         // 等待循环照样能从 Cookie 读到 BDUSS）。
         .on_new_window(move |url, _features| {
+            if provider == "deepseek-web" && crate::deepseek_login::allowed(&url) {
+                return tauri::webview::NewWindowResponse::Allow;
+            }
             if provider == "doubaowork" && crate::doubaowork_login::allowed(&url) {
                 return tauri::webview::NewWindowResponse::Allow;
             }
@@ -2180,6 +2230,18 @@ async fn run_embedded(
         // `on_new_window` 拦下并交给后端换令牌，成功与否统一走 `/wait`。
         // 初版那套「读窗口 cookie 找 ot_session」已删除：那条 Cookie 在
         // SPA 内扫码登录时根本不会被写出（见模块头的实测对照）。
+        if provider == "deepseek-web" && !deepseek_submitted {
+            match crate::deepseek_login::credentials(&window).await {
+                Ok(Some(credentials)) if login_is_current(app, login_state) => {
+                    deepseek_submitted = true;
+                    submit_callback(login_state, &credentials).await;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!("[login] {error}");
+                }
+            }
+        }
         if provider == "doubaowork" && !doubaowork_submitted {
             match crate::doubaowork_login::cookie(&window).await {
                 Ok(Some(cookie)) => {

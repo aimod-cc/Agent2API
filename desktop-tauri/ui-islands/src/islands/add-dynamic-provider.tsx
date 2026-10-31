@@ -1,8 +1,7 @@
 /** 未在内置表单登记的运行时 provider：动态方法、纯文本说明与旧插件兼容入口。 */
 import * as React from 'react'
 import {
-  Alert, AlertDescription, AlertTitle, Button, Dialog, DialogBody, DialogContent,
-  DialogHeader, DialogSection, DialogTitle, Input, Label, SegmentedControl,
+  Alert, AlertDescription, AlertTitle, Button, DialogSection, Input, Label, SegmentedControl,
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Spinner, Textarea,
 } from '@ui'
 import { t } from '../i18n'
@@ -138,7 +137,6 @@ export function DynamicProviderBlock({
   const [mode, setMode] = React.useState<'external' | 'embedded'>('external')
   const [saving, setSaving] = React.useState(false)
   const [error, setError] = React.useState('')
-  const [helpOpen, setHelpOpen] = React.useState(false)
   const [progress, setProgress] = React.useState<LoginProgress>({})
   const [hasCallback, setHasCallback] = React.useState(false)
   const [callbackBusy, setCallbackBusy] = React.useState(false)
@@ -455,15 +453,11 @@ export function DynamicProviderBlock({
   const instructionLines = [methodsState.instructions, method?.instructions,
     progress.instructions, progress.hint].filter((line): line is string => Boolean(line))
   const instructions = [...new Set(instructionLines)].join('\n')
-  const helpTitle = t('账号登录帮助（account login）')
   const commonFields = method && method.type !== 'unsupported' && !legacyBrowser
 
   return <div className='add-provider-block' hidden={!active}>
     <DialogSection>
-      <div className='flex flex-wrap items-center justify-between gap-2'>
-        <h3>{t('账号登录方式')}</h3>
-        <Button variant='ghost' size='sm' onClick={() => setHelpOpen(true)}>{helpTitle}</Button>
-      </div>
+      <h3>{t('账号登录方式')}</h3>
       {methodsState.phase === 'loading' ? <p role='status'><Spinner /> {t('正在读取插件登录方式…')}</p>
         : methodsState.reason ? <Alert variant={methodsState.phase === 'error' ? 'destructive' : 'warning'}>
           <AlertTitle>{methodsState.phase === 'error' ? t('无法读取登录方式') : t('登录方式说明')}</AlertTitle>
@@ -605,31 +599,5 @@ export function DynamicProviderBlock({
     {!methodAvailable && methodsState.phase !== 'loading' ? <Button variant='outline' size='sm' className='self-start'
       disabled={locked} onClick={() => setReload(value => value + 1)}>{t('重新读取登录方式')}</Button> : null}
     {error && !methodAvailable ? <Alert variant='destructive'><AlertDescription>{error}</AlertDescription></Alert> : null}
-
-    <Dialog open={helpOpen && active} onOpenChange={setHelpOpen}>
-      <DialogContent overlayForceRender>
-        <DialogHeader><DialogTitle>{helpTitle}</DialogTitle></DialogHeader>
-        <DialogBody>
-          <p className='text-xs leading-relaxed text-subtle'>
-            {t('先选择插件声明的账号登录方式，再填写必需字段。OAuth 由共享登录桥负责等待、取消和错误；API 凭证通过账号规范化入口添加。')}
-          </p>
-          {methodsState.methods.map(item => <DialogSection key={item.id}>
-            <h3>{methodLabel(item)}</h3>
-            {item.instructions ? <p className='whitespace-pre-wrap break-words'>{item.instructions}</p> : null}
-            {item.reason ? <p>{item.reason}</p> : null}
-          </DialogSection>)}
-          {instructions ? <Alert><AlertTitle>{t('插件登录指引')}</AlertTitle>
-            <AlertDescription className='whitespace-pre-wrap break-words'>{instructions}</AlertDescription>
-          </Alert> : null}
-          <p className='text-xs leading-relaxed text-subtle'>
-            {t('设备码授权时，请按网关给出的指引在官方页面确认设备授权码。没有授权地址不等于失败，可能需要在网关本机客户端完成操作；请以共享登录桥返回的状态为准。')}
-          </p>
-          <Button variant='outline' className='self-start' onClick={() => {
-            setHelpOpen(false)
-            shared().wbApp?.showPage?.('plugins')
-          }}>{t('查看提供商插件')}</Button>
-        </DialogBody>
-      </DialogContent>
-    </Dialog>
   </div>
 }

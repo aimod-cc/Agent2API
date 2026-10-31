@@ -68,6 +68,8 @@ use crate::server::db::Db;
 mod account_sort;
 mod assistant_config;
 mod github_access;
+mod mutations;
+pub(crate) use mutations::try_update_raw_field;
 pub(crate) mod parse;
 mod routing_profiles;
 mod sanitize_config;
@@ -90,7 +92,7 @@ pub use sanitize_config::{
 };
 pub use routing_profiles::{
     normalize_model as normalize_routing_model, routing_profiles, save_routing_profile,
-    validate_shape as validate_routing_profile, RoutingProfile, RoutingProfiles,
+    validate_shape as validate_routing_profile, RoutingProfile, RoutingProfiles, RoutingProviderScope,
 };
 pub use types::*;
 pub use update_policy::{

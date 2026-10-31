@@ -158,6 +158,8 @@ export function RoutingCanvas({ workspace, search, zoom, selected, onAccount, on
   const [inactiveExpanded, setInactiveExpanded] = React.useState(false)
   const [disabledAccountsExpanded, setDisabledAccountsExpanded] = React.useState<Set<string>>(new Set())
   const profile = workspace.profile
+  const automatic = profile.providerScope === 'all' && (!workspace.model || workspace.customized)
+  const addProviderLabel = automatic ? t('恢复提供商') : t('添加提供商')
   const accounts = new Map(workspace.accounts.map(account => [account.id, account]))
   const queue = new Map<string, RouteEntry>([...workspace.queue.ordered, ...workspace.queue.blocked].map(entry => [entry.id, entry]))
   const providerRanks = new Map<string, number>()
@@ -201,7 +203,9 @@ export function RoutingCanvas({ workspace, search, zoom, selected, onAccount, on
           <Button variant='outline' className='w-full' onClick={onSettings}><RouteIcon name='settings' />{t('统一路由设置')}</Button>
           <div className='routing-gateway-shortcuts'><Button variant='ghost' size='sm' onClick={onReplay}>{t('请求跟踪')}</Button><Button variant='ghost' size='sm' onClick={onSticky}>{t('会话粘滞')} · {workspace.stickyCount}</Button></div>
         </div>
-        <div className='routing-scope-note'><RouteIcon name={workspace.customized ? 'lock' : 'proxies'} /><p>{workspace.customized ? t('当前模型配置独立保存，不影响全局和其他模型。') : t('没有独立配置的模型沿用全局路由。')}</p></div>
+        <div className='routing-scope-note'><RouteIcon name={workspace.customized ? 'lock' : 'proxies'} /><p>{workspace.customized ? t('当前模型配置独立保存，不影响全局和其他模型。')
+          : profile.providerScope === 'all' ? t('默认自动参与；新增可用提供商无需再添加路由，明确停用项保持不变。')
+            : t('当前继承全局固定名单；新增提供商需手动添加或在全局配置中改为自动参与。')}</p></div>
       </div>
       <div className='routing-provider-column'>
         <div className='routing-column-head'>
@@ -214,7 +218,7 @@ export function RoutingCanvas({ workspace, search, zoom, selected, onAccount, on
           </div>
         </div>
         <div className='routing-provider-list'>
-        {!providers.length ? <Empty>{query ? t('没有匹配的提供商或账号') : t('还没有参与路由的提供商')}<Button variant='outline' onClick={onAddProvider}>{t('添加提供商')}</Button></Empty> : null}
+        {!providers.length ? <Empty>{query ? t('没有匹配的提供商或账号') : t('还没有参与路由的提供商')}<Button variant='outline' onClick={onAddProvider}>{addProviderLabel}</Button></Empty> : null}
         {renderedProviders.map((provider) => {
           const label = workspace.providers.find(item => item.id === provider)?.label || provider
           const unavailable = workspace.providers.find(item => item.id === provider)?.available === false
@@ -297,7 +301,7 @@ export function RoutingCanvas({ workspace, search, zoom, selected, onAccount, on
           </React.Fragment>
         })}
         {!inactiveExpanded && !query ? inactiveToggle : null}
-        <Button variant='ghost' className='routing-add-provider' onClick={onAddProvider}><RouteIcon name='plus' />{t('添加提供商')}</Button>
+        <Button variant='ghost' className='routing-add-provider' disabled={automatic && !workspace.providers.some(provider => profile.disabledProviders.includes(provider.id))} onClick={onAddProvider}><RouteIcon name='plus' />{addProviderLabel}</Button>
         </div>
       </div>
     </div>

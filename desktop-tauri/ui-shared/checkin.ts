@@ -1,9 +1,18 @@
+export type DailyCheckinState = {
+  at: number
+  completed: boolean
+  completedCount: number
+  totalCount: number
+  sourcesComplete: boolean
+}
+
 export type CheckinAccount = {
   id: string
   name: string
   available: boolean
   checkinAt: number | null
   checkedInToday: boolean
+  dailyCheckin?: DailyCheckinState | null
   edition: string | null
   streakDays: number
 }
@@ -17,6 +26,7 @@ export type ProviderGroup = {
   description?: string | null
   modes?: string[] | null
   uiHooks?: string[] | null
+  manualPlans?: boolean
 }
 
 export type OutOfScope = { label: string; reason: string; count: number }
