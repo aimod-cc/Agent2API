@@ -1048,10 +1048,16 @@ export function positionMap(all: AccountRecord[] | null | undefined, sorting?: A
  */
 export type { GroupSortRule } from './accounts-shared'
 
-/** 默认规则不依赖余额缓存，支持积分到期的提供商在查到数据后自动排序。 */
-export function defaultGroupSortRules(provider: string): GroupSortRule[] {
+/**
+ * 默认规则。`creditAvailable` 由调用方按「这一家此刻有没有可用到期依据」给：
+ * Qoder 需要账号配置网页 Cookie，其余家沿用原有能力位。
+ */
+export function defaultGroupSortRules(
+  provider: string,
+  creditAvailable = supportsCreditExpiry(provider),
+): GroupSortRule[] {
   return [
-    { key: 'credit', on: supportsCreditExpiry(provider), dir: 'soon' },
+    { key: 'credit', on: creditAvailable, dir: 'soon' },
     { key: 'added', on: false, dir: 'new' },
   ]
 }
