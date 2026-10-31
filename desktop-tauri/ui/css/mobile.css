@@ -893,3 +893,29 @@
   /* 签到页：全选 / 清空 小按钮 */
   .ck-mini-btn { min-height: 30px; }
 }
+
+/* ═══ 分段控件通用兜底：容器内横滚，绝不顶出父容器 ═══
+   上面只对已知容器（.toolbar .group / .mm-filters）做了「铺满 + 内部等分」。
+   但分段控件还会以裸奔形态出现在别的工具条里 —— 例如网络代理页的筛选行
+   （proxies-page.tsx 的 div.flex.flex-wrap.items-center.gap-2.5，没有
+   .toolbar 也没有 .mm-filters 标识）。那条容器 flex-wrap:wrap 只对它的
+   直接子项生效，而一个 11 档的分段控件自身就是 362px 宽的单个子项，
+   比 288px 的容器还宽 —— 换行帮不上忙，于是它被 .panel 的 overflow:clip
+   裁掉右端（实测 right=414 > 视口 360，「订阅 / 全部」等档位看不见也点不到）。
+
+   修法：让分段控件自己成为滚动盒。这样任何父容器下都不会溢出，
+   也不需要为每个新页面重新登记一次。档位少（放得下）时 overflow-x:auto
+   不产生滚动条，视觉与原来一致；档位多时在控件内部横滑。
+   注意不改 flex 值 —— 已铺满的容器里靠各自的 flex:1 1 0 等分，
+   这里再加 flex 会破坏那份等分。 */
+@media (max-width: 767px) {
+  [data-slot="segmented-control"] {
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;          /* Firefox */
+    -webkit-overflow-scrolling: touch;
+  }
+  [data-slot="segmented-control"]::-webkit-scrollbar { height: 0; }
+}
+

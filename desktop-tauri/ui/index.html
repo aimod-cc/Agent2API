@@ -95,6 +95,13 @@
        排在最后：工具类带 !important（原因见 ui-kit/styles/globals.css 顶部），
        顺序其实已不影响结果，但保持「后加载的是更新的体系」这条阅读线索。 -->
   <link rel="stylesheet" href="islands/ui.css">
+  <!-- 移动端适配层（真机 ≤767px）：抽屉化侧栏、表格卡片化、面板头两行制、
+       页脚整行铺开、面包屑收窄。全部规则锁在 @media (max-width:767px) 内，
+       桌面端不生效。
+       必须排在 islands/ui.css 之后 —— 组件库的 Tailwind utilities 带 !important，
+       mobile.css 要用同等重要的声明压住它们（如强制关掉 JS 写进表格的
+       min-width），只能靠级联顺序取胜。 -->
+  <link rel="stylesheet" href="css/mobile.css">
   <!-- 多语言运行时：查表 t() + 静态文案扫描器（data-i18n 系列）。
        词典已由上面 head 里的引导脚本同步注入（document.write），这里只放运行时逻辑。
        必须排在 units.js / app.js 等业务脚本之前 —— 它们在加载期就可能读 window.wbI18n；
@@ -103,6 +110,12 @@
 </head>
 <body>
   <div class="shell">
+    <!-- 移动端抽屉开关（≤767px 生效，见 css/mobile.css）。
+         必须是 .sidebar 的前序兄弟：#nav-toggle:checked ~ .sidebar 靠这个相邻
+         关系开合，挪到 sidebar 后面就失效。桌面端靠 .nav-toggle-input 的
+         position:absolute 脱离文档流 —— .shell 是「2 列 + 100vh」的 grid，
+         在流内的多余子元素会多出一个隐式行、把富余高度分走一半。 -->
+    <input type="checkbox" id="nav-toggle" class="nav-toggle-input" aria-label="打开导航菜单">
     <!-- ─── 左侧导航 ─── -->
     <aside class="sidebar">
       <div class="brand">
@@ -177,9 +190,19 @@
       </div>
     </aside>
 
+    <!-- 抽屉遮罩：同为 .shell 的直接子元素、且在 .sidebar 之后
+         （#nav-toggle:checked ~ .nav-scrim 靠这个顺序生效）。
+         桌面端 display:none 彻底不占位，理由同上面的 input 注释。 -->
+    <label for="nav-toggle" class="nav-scrim" aria-label="关闭导航菜单"></label>
+
     <!-- ─── 主区域 ─── -->
     <main class="main">
       <header class="topbar">
+        <!-- 汉堡：label 指向 #nav-toggle，纯 CSS 开合（见 css/mobile.css）。
+             桌面端 .mobile-menu-btn 恒为 display:none，不占位。 -->
+        <label for="nav-toggle" class="mobile-menu-btn" aria-label="打开导航菜单">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+        </label>
         <div class="crumb">
           <span>Agent2API</span>
           <span class="sep">/</span>
@@ -604,5 +627,11 @@
   <!-- 数据结构升级弹窗：启动时问一次 /api/upgrade，有待迁移数据就弹。
        排在最后：它的 refreshPanels() 要调各面板的 load()，那些都得先挂好 -->
   <script src="upgrade-panel.js"></script>
+  <!-- 移动端卡片化的列名注入（配合 css/mobile.css）：把 th[data-col] / 表头文字
+       写进对应 td 的 data-col，供 td::before { content: attr(data-col) } 渲染。
+       只在 ≤767px 执行，桌面端不碰 DOM；监听所有 .page 子树（60ms 合并），
+       React 岛重渲染后自动补写。
+       排在最后：要等 islands/ui.js 把各页面挂好、且表头已在 DOM 里。 -->
+  <script src="mobile-columns.js"></script>
 </body>
 </html>
