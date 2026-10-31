@@ -1,6 +1,6 @@
 import { PageHead, SectionHead, IconButton } from '../components/ui'
 import { Icon, type IconName } from '../components/Icon'
-import { store, useStore } from '../state/store'
+import { store, useStore, type ThemeMode } from '../state/store'
 import { apiBase, baseLabel } from '../lib/servers'
 import { isRateLimited } from '../lib/format'
 import { usePullToRefresh, PullIndicator } from '../components/PullToRefresh'
@@ -193,14 +193,16 @@ export function MorePage() {
   )
 }
 
-/** 主题三档：跟随系统 / 浅色 / 深色 */
+/** 主题五档：跟随系统 / 浅色 / 深色 / 枫叶·白 / 枫叶·黑（与桌面端设置页同一份取值） */
 export function ThemeSwitch() {
   const { theme } = useStore()
-  const options: Array<{ value: 'system' | 'light' | 'dark'; label: string }> = [
+  const options: Array<{ value: ThemeMode; label: string }> = [
     { value: 'system', label: t('系统') },
     { value: 'light', label: t('浅色') },
     { value: 'dark', label: t('深色') },
+    { value: 'maple-light', label: t('枫叶·白') },
+    { value: 'maple-dark', label: t('枫叶·黑') },
   ]
   return <SegmentedControl options={options} value={theme} aria-label={t('主题')}
-    onValueChange={value => store.setTheme(value as 'system' | 'light' | 'dark')} />
+    onValueChange={value => store.setTheme(value)} />
 }

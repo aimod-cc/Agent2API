@@ -20,7 +20,9 @@
     (() => {
       const mode = localStorage.getItem('workbuddy-desktop-theme') || 'system';
       document.documentElement.dataset.theme = mode;
-      const dark = mode === 'dark'
+      // 「枫叶·白 / 枫叶·黑」是固定明暗的独立色板，不随系统变 —— 名字里的
+      // 白 / 黑就是它们的底色（判定与 app.js 的 applyTheme 同一口径）。
+      const dark = mode === 'dark' || mode === 'maple-dark'
         || (mode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
       document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
       // 界面缩放（设置页「显示」）也在这里抢先交一次：缩放是 WebView 层的效果，

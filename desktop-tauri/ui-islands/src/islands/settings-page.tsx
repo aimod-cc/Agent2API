@@ -455,10 +455,12 @@ function GeneralPane({ snap }: { snap: SettingsSnapshot }) {
 
 /* ─── 显示分类 ─────────────────────────────── */
 
-/** 显示模式三档的状态行文案（三条文案在 settings-model 的 STATES 里） */
+/** 显示模式五档的状态行文案（五条文案在 settings-model 的 STATES 里） */
 function themeStateText(mode: ThemeMode): string {
   if (mode === 'light') return STATES.themeLight
   if (mode === 'dark') return STATES.themeDark
+  if (mode === 'maple-light') return STATES.themeMapleLight
+  if (mode === 'maple-dark') return STATES.themeMapleDark
   return STATES.themeSystem
 }
 
@@ -470,8 +472,8 @@ function themeStateText(mode: ThemeMode): string {
  *
  * 主题与缩放的**唯一应用入口都在 app.js**（见 settings-model 的显示偏好一节）：
  * 这里改完只调 wbApp.applyTheme / applyZoom，再靠 'wb:theme' / 'wb:zoom' 事件
- * 跟随 —— 侧边栏底部的主题三键是同一个设置的另一个入口，两边必须互相同步；
- * 谁也不去读对方的状态，只认事件里带的新值。
+ * 跟随。主题只有本页这一个入口（侧边栏底部那组三键已移除），监听事件的理由
+ * 只剩下头内联脚本的抢先应用与其它窗口的写入。
  *
  * 网页端：主题照常可用（data-theme 是纯 CSS 生效，窗口主题在 shim 里是空实现）；
  * 界面缩放禁用 —— 浏览器里的缩放归浏览器自己的 Ctrl +/- 管。
@@ -486,7 +488,7 @@ function DisplayPane() {
   // 端别取自桥（platform）而不是 navigator：与设置页其它端别判断同一口径
   const isWeb = shared().workbuddyDesktop?.platform === 'web'
 
-  // 跟随别人的改动（侧边栏三键、index.html 头部内联脚本的抢先应用、或本页自身）：
+  // 跟随别的入口的改动（index.html 头部内联脚本的抢先应用、其它窗口的写入）：
   // 事件里带着新值，直接采纳，不必回头读 localStorage
   React.useEffect(() => {
     const onTheme = (event: Event) => setTheme(String((event as CustomEvent).detail || 'system') as ThemeMode)

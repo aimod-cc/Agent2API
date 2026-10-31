@@ -31,7 +31,7 @@ import {
   type ServerEntry,
 } from '../lib/servers'
 
-export type ThemeMode = 'system' | 'light' | 'dark'
+export type ThemeMode = 'system' | 'light' | 'dark' | 'maple-light' | 'maple-dark'
 
 type Listener = () => void
 
@@ -65,7 +65,8 @@ const THEME_KEY = 'workbuddy-desktop-theme'
 function readTheme(): ThemeMode {
   try {
     const value = localStorage.getItem(THEME_KEY)
-    if (value === 'light' || value === 'dark' || value === 'system') return value
+    if (value === 'light' || value === 'dark' || value === 'system'
+      || value === 'maple-light' || value === 'maple-dark') return value
   } catch {
     /* 隐私模式 */
   }
@@ -86,7 +87,9 @@ function readInitialRoute(): Route {
 function applyTheme(mode: ThemeMode): void {
   document.documentElement.dataset.theme = mode
   const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-  const effective = mode === 'dark' || (mode === 'system' && systemDark) ? 'dark' : 'light'
+  // 枫叶两档固定明暗（名字里的白 / 黑），不随系统变；判定与桌面端 app.js 同一口径
+  const effective = mode === 'dark' || mode === 'maple-dark'
+    || (mode === 'system' && systemDark) ? 'dark' : 'light'
   document.documentElement.style.colorScheme = effective
   // 手机浏览器 / PWA 状态栏配色。页面里有两套 media 版 theme-color（见
   // m.html），这里把第一条的 media 摘掉后统一改写 —— 否则手选主题会被

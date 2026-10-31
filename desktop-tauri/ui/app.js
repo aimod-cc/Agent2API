@@ -47,13 +47,17 @@ function applyTheme(mode) {
   // 下面读到的就是被污染的值，界面会永远卡死在手动主题上。
   // 这行还要排在读 matchMedia 之前：先交回系统才读得到真实值；
   // 交回系统是异步生效的，读到旧值时靠「change 监听 + 落定后复核」双保险兜住。
+  // 「枫叶」两档是独立色板，明暗在名字里就定死了（枫叶·白 / 枫叶·黑），
+  // 窗口主题按它们各自的明暗同步，不跟随系统。
+  const windowTheme = mode === 'system' ? null : (mode === 'maple-dark' ? 'dark' : mode === 'maple-light' ? 'light' : mode);
   let pendingWindowTheme;
   try {
-    pendingWindowTheme = window.workbuddyDesktop?.setWindowTheme?.(mode === 'system' ? null : mode);
+    pendingWindowTheme = window.workbuddyDesktop?.setWindowTheme?.(windowTheme);
   } catch { /* 非桌面环境忽略 */ }
-  // system 模式下 color-scheme 也要跟随系统，否则原生控件会停留在浅色
+  // system 模式下 color-scheme 也要跟随系统，否则原生控件会停留在浅色；
+  // 枫叶两档按自身明暗定死（见 THEME_DARK_MODES / THEME_LIGHT_MODES）
   const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-  const effective = mode === 'dark' || (mode === 'system' && systemDark) ? 'dark' : 'light';
+  const effective = mode === 'dark' || mode === 'maple-dark' || (mode === 'system' && systemDark) ? 'dark' : 'light';
   document.documentElement.style.colorScheme = effective;
   // 双保险①：文件末尾的 change 监听，兜「运行中系统主题变化」（以及多数切回 system 的场景）。
   // 双保险②：这里的落定后复核，兜「切回 system 时 WebView2 未必派发 change」——
@@ -69,10 +73,9 @@ function applyTheme(mode) {
     if ((settledDark ? 'dark' : 'light') !== effective) applyTheme('system');
   })?.catch?.(() => { /* 命令失败时不做复核，界面保持本次结果 */ });
   localStorage.setItem('workbuddy-desktop-theme', mode);
-  window.wbShell?.theme(mode);
-  // 通知其它控制面（设置页「显示 → 显示模式」那组档位）：主题有两个入口
-  // （侧边栏三键与设置页），谁改了都要让另一处跟上 —— 事件单向广播，
-  // 两边都不去读对方的状态。detail 是本函数最初收到的 mode 原值。
+  // 通知其它控制面（设置页「显示 → 显示模式」那组档位）：主题只有一个入口了
+  // （侧边栏底部那组三键已移除），保留事件是因为 index.html 头部内联脚本与
+  // 其它窗口仍需要它，插件页另走下面的 postMessage。
   window.dispatchEvent(new CustomEvent('wb:theme', { detail: mode }));
   // 插件页（iframe，独立文档）收不到上面这个事件，也读不到 localStorage ——
   // 主题由这里单独推一次，否则用户切了深浅色、插件页还停在原来的配色。
