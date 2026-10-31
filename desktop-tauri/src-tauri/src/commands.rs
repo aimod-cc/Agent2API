@@ -514,6 +514,19 @@ pub async fn cancel_login(app: AppHandle) -> Result<Value, String> {
     Ok(json!({ "canceled": true }))
 }
 
+/// 打开 Qoder 网页登录窗口，读取 `qoder_session_cookie` 并交给网关保存。
+///
+/// 这是「积分到期明细」的自动获取入口：Cookie 是网页会话，openapi 的
+/// accessToken 读不到逐份积分包（见插件 `qoder/balance.rs` 的模块头）。
+#[tauri::command]
+pub async fn capture_qoder_web_cookie(
+    app: AppHandle,
+    account_id: String,
+    provider: String,
+) -> Result<Value, String> {
+    login::capture_qoder_web_cookie(&app, &account_id, &provider).await
+}
+
 /// 导出运行日志：拉取 JSONL 原文，弹系统保存框落盘。
 #[tauri::command]
 pub async fn export_logs(app: AppHandle, query: Option<String>) -> Result<Value, String> {

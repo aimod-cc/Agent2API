@@ -2411,3 +2411,117 @@ pub fn open_in_browser(url: &str) -> Result<(), String> {
         .map(|_| ())
         .map_err(|error| format!("打开系统浏览器失败: {error}"))
 }
+
+// ─── Qoder 网页 Cookie（积分到期明细）──────────────────────────
+
+/// 打开 Qoder 网页并读取 `qoder_session_cookie`，交给网关保存。
+///
+/// 与 KukuAI 的登录收尾同一条思路：登录窗口用的是**临时数据目录**，用户
+/// 在窗口里完成登录后，壳侧用 WebView 的 Cookie 存储（含 HttpOnly）读取
+/// `qoder_session_cookie`，再 POST 给后端。区别是这里不创建账号，只更新
+/// 指定账号的 `webCookie` —— 后端/插件会校验 Cookie 的 `user_id` 与账号一致。
+///
+/// 只支持桌面端：外部浏览器/headless 没有 WebView Cookie 存储，只能走
+/// 账号设置里的手动粘贴兜底。
+pub async fn capture_qoder_web_cookie(
+    app: &AppHandle,
+    account_id: &str,
+    provider: &str,
+) -> Result<Value, String> {
+    let account_id = account_id.trim();
+    if account_id.is_empty() {
+        return Err("缺少 Qoder 账号 id".to_string());
+    }
+    let url = match provider {
+        "qoder" => "https://qoder.com.cn/account/usage",
+        "qoder-intl" => "https://qoder.com/account/usage",
+        other => return Err(format!("不支持为提供商「{other}」获取 Qoder 网页 Cookie")),
+    };
+    let auth = url::Url::parse(url).map_err(|_| "Qoder 网页地址无效".to_string())?;
+    let profile = LoginProfile::new()?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_millis())
+        .unwrap_or(0);
+    let label = format!("qoder-cookie-{stamp}");
+    let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(auth))
+        .data_directory(profile.path().to_path_buf())
+        .general_autofill_enabled(false)
+        .title("登录 Qoder 以获取网页 Cookie")
+        .inner_size(1100.0, 820.0)
+        .min_inner_size(760.0, 560.0)
+        .center()
+        .build()
+        .map_err(|_| "打开 Qoder 登录窗口失败".to_string())?;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5 * 60);
+    let mut attempts = 0u32;
+    let mut last_error: String;
+    loop {
+        if app.get_webview_window(&label).is_none() {
+            drop(profile);
+            return Err("登录窗口已关闭，未获取到 Qoder 网页 Cookie".to_string());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let _ = window.destroy();
+            drop(profile);
+            return Err("等待 Qoder 登录超时（5 分钟）".to_string());
+        }
+        if let Ok(cookies) = read_window_cookies(&window).await {
+            if let Some(cookie) = qoder_cookie_header(&cookies) {
+                let payload = json!({ "accountId": account_id, "cookie": cookie });
+                match gateway::call("POST", "/api/qoder-cookie/set", Some(&payload)).await {
+                    Ok(value) => {
+                        let _ = window.destroy();
+                        drop(profile);
+                        return Ok(value);
+                    }
+                    Err(error) => {
+                        // Cookie 可能刚写入、会话还没完全生效；重试几次再报错。
+                        attempts = attempts.saturating_add(1);
+                        last_error = error;
+                        if attempts >= 5 {
+                            let _ = window.destroy();
+                            drop(profile);
+                            return Err(format!("保存 Qoder 网页 Cookie 失败：{last_error}"));
+                        }
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// 从 WebView Cookie 存储里拼 Qoder 域的 Cookie 头；没有会话 Cookie 时返回 None。
+///
+/// 与 KukuAI 的 `kuku_cookie_header` 同形：跳过统计 Cookie，保留同名的第一条；
+/// Qoder 网页接口实测只带 `qoder_session_cookie` 就能 200，其余 WAF Cookie
+/// 一并带上是为了抗上游风控变化。
+fn qoder_cookie_header(cookies: &[tauri::webview::Cookie<'static>]) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    let mut has_session = false;
+    for cookie in cookies {
+        let name = cookie.name().to_string();
+        let domain = cookie.domain().unwrap_or("").to_string();
+        let is_qoder = domain.ends_with("qoder.com.cn")
+            || domain.ends_with("qoder.cn")
+            || domain.ends_with("qoder.com");
+        if !is_qoder || name.is_empty() {
+            continue;
+        }
+        if name.starts_with("Hm_") || name == "HMACCOUNT" || name == "gfprotpl" {
+            continue;
+        }
+        if seen.iter().any(|existing| existing == &name) {
+            continue;
+        }
+        if name == "qoder_session_cookie" {
+            has_session = true;
+        }
+        seen.push(name.clone());
+        parts.push(format!("{name}={}", cookie.value()));
+    }
+    has_session.then(|| parts.join("; "))
+}

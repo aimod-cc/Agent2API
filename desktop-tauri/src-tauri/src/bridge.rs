@@ -184,6 +184,13 @@ const BRIDGE_JS: &str = r#"
       }),
     getLoginState: () => invoke('login_state'),
     cancelLogin: () => invoke('cancel_login'),
+    // Qoder 网页 Cookie（积分到期明细）：壳打开内嵌登录窗口，读 HttpOnly
+    // Cookie 后交给网关保存。只支持桌面端；网页端/headless 用手动粘贴兜底。
+    captureQoderWebCookie: (accountId, provider) =>
+      invoke('capture_qoder_web_cookie', {
+        accountId: String(accountId || ''),
+        provider: String(provider || ''),
+      }),
     // ── AutoClaw 国际版 OAuth（**授权地址由界面先拿好**）──────────
     // 与 startLogin 的区别：那条是「壳去问后端要地址」，这条是「界面已经
     // 拿到地址了，壳只负责开窗口并等待」。原因是这条链前面有一次**必须在

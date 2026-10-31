@@ -73,6 +73,58 @@ function BalanceTokenField({
 }
 
 /**
+ * Qoder 网页 Cookie（积分到期明细）。
+ *
+ * 网页接口只认网页会话 Cookie，openapi 的 accessToken 读不到逐份积分包；
+ * 所以这里给桌面端一个「打开页面自动获取」的入口。手动兜底仍在添加账号/
+ * 重新导入表单的 `网页 Cookie（可选）` 字段里。
+ */
+function QoderWebCookieField({ account, configured }: { account: AccountRecord; configured: boolean }) {
+  const [busy, setBusy] = React.useState(false)
+  const [saved, setSaved] = React.useState(configured)
+  const captureFn = shared().workbuddyDesktop?.captureQoderWebCookie
+  const canCapture = Boolean(captureFn)
+
+  const capture = async () => {
+    if (!captureFn) {
+      toast(t('当前环境不支持自动获取；请在添加账号/重新导入时粘贴网页 Cookie'), 'err')
+      return
+    }
+    setBusy(true)
+    try {
+      const result = await captureFn(account.id, providerOf(account))
+      setSaved(result?.configured !== false)
+      toast(t('✅ 已获取 Qoder 网页 Cookie'))
+      try { await refreshSavedAccounts() } catch { /* 列表刷新失败不影响已保存的 Cookie */ }
+    } catch (error) {
+      toast(t('获取 Cookie 失败：{error}', { error: errorMessage(error) }), 'err')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className='mt-3 rounded-sm border border-hairline px-2.5 py-2.5'>
+      <div className='flex items-center gap-2'>
+        <span className='text-xs font-medium'>{t('网页 Cookie（积分到期明细）')}</span>
+        <span className={saved ? 'text-[10.5px] text-success' : 'text-[10.5px] text-subtle'}>
+          {saved ? t('已配置') : t('未配置')}
+        </span>
+      </div>
+      <p className='detail mt-1'>
+        {t('用于读取 Qoder 积分包的到期时间，不影响聊天登录。打开窗口登录一次即可；Cookie 失效后重新获取。')}
+      </p>
+      <div className='mt-2 flex items-center gap-2'>
+        <Button size='sm' disabled={busy || !canCapture} onClick={() => void capture()}>
+          {busy ? t('等待登录完成…') : saved ? t('重新获取') : t('打开页面获取')}
+        </Button>
+        {!canCapture ? <span className='detail'>{t('当前环境不支持自动获取，请用重新导入时的网页 Cookie 字段')}</span> : null}
+      </div>
+    </div>
+  )
+}
+
+/**
  * 自定义账号的**凭证段**（API Key / 无需鉴权）：只有自定义家渲染（内置八家的
  * 凭证各有自己的登录链路，改不了也不该在这儿改）。
  *
@@ -284,6 +336,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
   const target: AccountRecord = account
   const peers = peersOf(target, allAccounts())
   const isCatpaw = providerOf(target) === 'catpaw'
+  const isQoder = ['qoder', 'qoder-intl'].includes(providerOf(target))
   // 自定义账号：凭证段（API Key / 无需鉴权）只对它渲染。判据用 provider 前缀 ——
   // 与后端 `custom_account_provider` 一致（提供商被删后残留的账号同样该能改凭证）
   const isCustomAccount = providerOf(target).startsWith('custom-')
@@ -533,7 +586,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
   // 「凭证与套餐」按家出现：有什么配什么（CatPaw 余额凭证 / 自定义账号凭证与
   // 提供商 / ZCode 套餐通道）。内置家什么都没有时整组不出现。
   const concDefault = Number(providerFeatures(providerOf(target)).concurrencyDefault) || 0
-  const hasCredentialPane = isCatpaw || isCustomAccount || supportsPlanChannel(target)
+  const hasCredentialPane = isCatpaw || isQoder || isCustomAccount || supportsPlanChannel(target)
 
   return (
     <Dialog open onOpenChange={next => {
@@ -607,6 +660,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
                     <h3>{t('凭证与套餐')}</h3>
                     <p>{t('这一段按提供商出现：有什么配什么。')}</p>
                   </div>
+                  {isQoder ? <QoderWebCookieField account={target} configured={target.hasWebCookie === true} /> : null}
                   {isCatpaw ? (
                     <BalanceTokenField configured={account.hasBalanceToken === true} value={balanceToken}
                       onChange={setBalanceToken} clearBusy={busy}

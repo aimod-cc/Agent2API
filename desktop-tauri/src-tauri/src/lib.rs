@@ -291,6 +291,7 @@ pub fn run() {
             commands::login_kuku_sms_verify,
             commands::login_state,
             commands::cancel_login,
+            commands::capture_qoder_web_cookie,
             commands::export_logs,
             commands::pick_folder,
             commands::get_app_settings,

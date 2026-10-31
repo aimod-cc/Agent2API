@@ -752,11 +752,13 @@ export function creditExpiryOf(entry: UsageEntry, now = Date.now()): number | nu
  *       毫秒 `expireAt`，并按到期升序排好
  *     · officeace —— `officeace/subscription.rs` 的套餐配额 / 奖励活动行都带
  *       `expireAt`（毫秒，`expire_ms > 0` 才写）
+ *     · qoder / qoder-intl —— 配置网页 Cookie（`webCookie`）后，
+ *       `resource_package_quota.quota_detail` 的逐份 `expires_at` 写成 `expireAt`；
+ *       未配置 Cookie 时只出聚合行、不参与到期排序
  *
  *   ❌ 有明细、但**明细里没有到期时间**（不进名单）：
  *     · raccoon —— 明细只有 `name` + `remain`（上游只给余额一个数）
  *     · zcode —— `credits_of` 只写 total/used/remain，纯比例窗口整行跳过
- *     · qoder —— 代码注释明确写着「不写 `expireAt` / `grantAt`：桶级没有这些字段」
  *     · loomy —— 永久积分 / 每日赠送两行，都没有到期
  *     · modelscope —— 魔粒余额两行，没有到期
  *     · lobsterai —— 测试明确断言「未核实格式的字段一律不写」

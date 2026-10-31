@@ -195,6 +195,8 @@ export type AccountRecord = {
    */
   isGuest?: boolean
   hasBalanceToken?: boolean
+  /** Qoder：是否已配置网页 Cookie（用于读取逐份积分包到期时间） */
+  hasWebCookie?: boolean
   /**
    * 自定义账号：记录里有没有非空 `apiKey`（设置弹窗据此决定输入框的提示文案与
    * 有无「清除」按钮）。**值本身绝不透出**，后端只给这个布尔。
@@ -316,6 +318,12 @@ export type AccountExportResult = {
 
 export type AccountsBridge = {
   platform?: string
+  /** Qoder：打开内嵌网页登录，读取会话 Cookie 并保存（仅桌面端） */
+  captureQoderWebCookie?(accountId: string, provider: string): Promise<{
+    configured?: boolean
+    packages?: number
+    earliestExpireAt?: number | null
+  } | null | undefined>
   exportAccountFiles(selection: AccountExportSelection): Promise<AccountExportResult | null | undefined>
   getAccountConnections(): Promise<{ counts?: Record<string, unknown> } | null | undefined>
   updateAccount(id: string, patch: Record<string, unknown>): Promise<AccountUpdateResult | null | undefined>
