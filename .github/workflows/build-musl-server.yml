@@ -94,8 +94,11 @@ jobs:
         working-directory: desktop-tauri/src-tauri
         run: |
           set -euo pipefail
-          BIN="target/${{ matrix.target }}/release/agent2api-server"
-          test -x "$BIN"
+          # 仓库根的 .cargo/config.toml 把 target-dir 指到了仓库根的 target/，
+          # 不要假设产物在 src-tauri/target 下；直接问 cargo 最稳。
+          TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
+          BIN="$TARGET_DIR/${{ matrix.target }}/release/agent2api-server"
+          test -x "$BIN" || { echo "::error::没找到产物 $BIN"; exit 1; }
           file "$BIN"
           # 静态构建不允许出现 PT_INTERP；出现了说明 CRT 没接对，直接失败
           if readelf -l "$BIN" | grep -q INTERP; then
@@ -108,7 +111,8 @@ jobs:
         working-directory: desktop-tauri/src-tauri
         run: |
           set -euo pipefail
-          BIN="target/${{ matrix.target }}/release/agent2api-server"
+          TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
+          BIN="$TARGET_DIR/${{ matrix.target }}/release/agent2api-server"
           NAME="agent2api-server-linux-${{ matrix.arch }}-musl.tar.gz"
           tar -czf "$NAME" -C "$(dirname "$BIN")" agent2api-server
           sha256sum "$NAME" > "$NAME.sha256"
