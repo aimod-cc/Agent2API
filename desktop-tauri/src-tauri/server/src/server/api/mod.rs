@@ -138,6 +138,7 @@ pub mod retry_api;
 // 见该文件模块头
 pub mod role_compat;
 pub mod routing_api;
+pub mod routing_flow;
 pub mod routing_trace;
 pub mod routing_workspace;
 pub mod sanitize;

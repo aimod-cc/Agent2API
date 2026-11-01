@@ -335,8 +335,9 @@ impl RouteState {
         self.sticky.bind(key, model, account_id, source, now, ttl_ms, generation);
     }
 
-    pub(super) fn sticky_list(&self, model: Option<&str>, now: i64, ttl_ms: i64) -> Vec<serde_json::Value> {
-        self.sticky.list(model, now, ttl_ms)
+    pub(super) fn sticky_list(&self, model: Option<&str>, now: i64) -> Vec<serde_json::Value> {
+        let (profiles, base) = crate::server::config::routing_snapshot();
+        self.sticky.list(model, now, |name| profiles.settings_for(name, base).sticky.ttl_ms().unwrap_or(0))
     }
 
     pub(super) fn sticky_clear(&self, id: Option<&str>, model: Option<&str>) -> usize {

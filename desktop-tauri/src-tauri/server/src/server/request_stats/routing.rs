@@ -15,20 +15,20 @@ impl RequestStats {
             let guard = self.guard();
             self.with_conn(&guard, |conn| {
                 let (running, requests, successful, duration): (i64, i64, i64, i64) = conn.query_row(
-                    "SELECT COALESCE(SUM(status = 0), 0),
-                     COALESCE(SUM(ts >= ?1 AND status <> 0 AND is_test = 0), 0),
+                    "SELECT COALESCE(SUM(status = 0 AND error IS NULL AND ts >= ?3), 0),
+                     COALESCE(SUM(ts >= ?1 AND (status <> 0 OR error IS NOT NULL) AND is_test = 0), 0),
                      COALESCE(SUM(ts >= ?1 AND status >= 200 AND status < 300 AND error IS NULL AND is_test = 0), 0),
                      COALESCE(SUM(CASE WHEN ts >= ?1 AND status >= 200 AND status < 300 AND error IS NULL AND is_test = 0 THEN duration_ms ELSE 0 END), 0)
-                     FROM requests WHERE (?2 = '' OR model = ?2 COLLATE NOCASE)
-                     AND (ts >= ?1 OR status = 0)",
-                    params![start, model], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                     FROM requests WHERE (?2 = '' OR COALESCE(NULLIF(client_model, ''), model) = ?2 COLLATE NOCASE)
+                     AND (ts >= ?1 OR (status = 0 AND error IS NULL AND ts >= ?3))",
+                    params![start, model, crate::server::logging::process_started_at()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )?;
                 let mut stmt = conn.prepare(
-                    "SELECT account_id, COUNT(*) FROM requests WHERE status = 0
-                     AND (?1 = '' OR model = ?1 COLLATE NOCASE) AND account_id <> '' GROUP BY account_id",
+                    "SELECT account_id, COUNT(*) FROM requests WHERE status = 0 AND error IS NULL AND ts >= ?2
+                     AND (?1 = '' OR COALESCE(NULLIF(client_model, ''), model) = ?1 COLLATE NOCASE) AND account_id <> '' GROUP BY account_id",
                 )?;
                 let mut counts = serde_json::Map::new();
-                let mut rows = stmt.query(params![model])?;
+                let mut rows = stmt.query(params![model, crate::server::logging::process_started_at()])?;
                 while let Some(row) = rows.next()? {
                     counts.insert(row.get::<_, String>(0)?, Value::from(row.get::<_, i64>(1)?));
                 }

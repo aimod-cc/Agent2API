@@ -136,8 +136,9 @@ pub(super) async fn select_target_account(
     tried_ids: &[String],
     pinned: Option<&str>,
     conv_key: &str,
+    request_routing: &super::route_context::RequestRouting,
 ) -> Result<RouteTarget, GatewayError> {
-    let accounts = scoped_accounts(service, providers, keys.request_model(), pinned);
+    let accounts = scoped_accounts(service, providers, keys.request_model(), pinned, Some(request_routing));
     if accounts.is_empty() && accounts_in_providers(service, providers, pinned).iter().any(|account| {
         account.get("upstreamCooldownUntil").and_then(Value::as_i64).is_some_and(|until| until > logging::now_ms())
     }) {
@@ -150,7 +151,7 @@ pub(super) async fn select_target_account(
             .with_code("account_scope_mismatch"));
     }
     if accounts.is_empty() && pinned.is_none()
-        && config::routing_profiles().effective(keys.request_model()).is_some()
+        && request_routing.profile.is_some()
     {
         return Err(GatewayError::with_status(
             503, "当前模型路由没有参与转发的账号，请在路由页检查提供商与账号范围",
@@ -180,7 +181,7 @@ pub(super) async fn select_target_account(
     // ── 策略与运行期状态快照（route_state.rs 的那份内存，读不改写）────
     // 粘性查找在这里顺手续了最近使用时刻 —— 「auto 档 5 分钟没往来就放手」
     // 的计时由它维持。
-    let settings = config::routing_settings();
+    let settings = request_routing.settings;
     let ttl = routing::sticky_ttl_ms(settings.sticky);
     let snap = service.route.snapshot_for_model(conv_key, keys.request_model(), now, ttl);
     // 轮转游标只在「本请求的第一次选路」前进：429 顺延的后续选路沿用同一
@@ -221,9 +222,11 @@ pub(super) async fn select_target_account(
     };
     let plan = routing::plan_route(&accounts, keys, &counts, tried_ids, now, &meta);
     let mut decision = decision_json(&plan, &settings, now);
-    decision["scope"] = Value::String(config::routing_profiles().scope(keys.request_model()).to_string());
-    if !conv_key.is_empty() && ttl > 0 {
-        decision["stickyId"] = Value::String(super::route_sticky::entry_id(conv_key, keys.request_model()));
+    decision["scope"] = Value::String(request_routing.scope.clone());
+    decision["configSnapshot"] = request_routing.json();
+    if !conv_key.is_empty() {
+        decision["sessionId"] = Value::String(super::route_sticky::entry_id(conv_key, keys.request_model()));
+        if ttl > 0 { decision["stickyId"] = decision["sessionId"].clone(); }
     }
     let mut excluded: Vec<String> = tried_ids.to_vec();
     for entry in &plan.ordered {
@@ -337,7 +340,7 @@ pub(super) async fn select_target_account(
             "指定账号没有可用凭证；未回退到队首或默认登录态")
             .with_code("account_scope_mismatch"));
     }
-    if config::routing_profiles().effective(keys.request_model()).is_some() {
+    if request_routing.profile.is_some() {
         return Err(GatewayError::with_status(
             503, "当前模型路由中的账号都没有可用凭证，请在路由页检查账号状态",
         ));
@@ -410,9 +413,12 @@ fn scoped_accounts(
     providers: &[&str],
     model: &str,
     pinned: Option<&str>,
+    request_routing: Option<&super::route_context::RequestRouting>,
 ) -> Vec<Value> {
     let accounts = accounts_in_providers(service, providers, pinned);
-    let accounts = if pinned.is_some() { accounts } else {
+    let accounts = if pinned.is_some() { accounts } else if let Some(request_routing) = request_routing {
+        request_routing.accounts(accounts)
+    } else {
         crate::server::core::routing_scope::apply_accounts(&accounts, model)
     };
     let accounts: Vec<Value> = accounts.into_iter().filter(|account| {
@@ -569,7 +575,7 @@ pub(super) fn earliest_limit_reset_at(
     keys: &routing::CooldownKeys<'_>,
 ) -> i64 {
     let now = logging::now_ms();
-    let accounts: Vec<Value> = scoped_accounts(service, providers, keys.request_model(), None)
+    let accounts: Vec<Value> = scoped_accounts(service, providers, keys.request_model(), None, None)
         .into_iter()
         .filter(|account| !matches!(account.get("enabled"), Some(Value::Bool(false))))
         .collect();
@@ -680,17 +686,18 @@ pub(super) fn pick_next_account(
     keys: &routing::CooldownKeys<'_>,
     tried_ids: &[String],
     pinned: Option<&str>,
+    request_routing: &super::route_context::RequestRouting,
 ) -> Option<Value> {
     if tried_ids.last().is_some_and(|last| !allows_route_skip(service, last)) {
         return None;
     }
-    let accounts = scoped_accounts(service, providers, keys.request_model(), pinned);
+    let accounts = scoped_accounts(service, providers, keys.request_model(), pinned, Some(request_routing));
     // 换号顺延与第一级选路同一份候选剔除：被限制器拦下的账号不会在 429 之后
     // 被当作「下一个」重新塞进来
     let (candidates, balance_blocked_ids) = filter_limiter_blocked(&accounts, keys, pinned);
     let counts = connection_counts(service);
     let now = logging::now_ms();
-    let settings = config::routing_settings();
+    let settings = request_routing.settings;
     // 顺延不走粘性（粘住的是「答对了的账号」，刚失败的那个不该被粘回来）；
     // 空会话键使 sticky_lookup 直接返回 None，其余快照（垫底 / 休息 / 熔断）
     // 照常参与排序

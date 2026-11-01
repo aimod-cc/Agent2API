@@ -215,6 +215,7 @@ impl Host {
             return;
         }
         let outcome: Result<serde_json::Value, proto::WireError> = match method.as_str() {
+            "transport.capabilities" => Ok(serde_json::json!({ "multipart": true })),
             proto::methods::plugin::STORE_GET => {
                 self.callbacks.store_get(text("provider"), text("account")).await
             }

@@ -11,8 +11,8 @@ export const requestKey = (row: ReplayRow) => row.traceKey || `${row.id}:${row.t
 export const sameRequest = (left: ReplayRow, right: ReplayRow) => left.traceKey && right.traceKey
   ? left.traceKey === right.traceKey : left.id === right.id && left.ts === right.ts
 export const requestModel = (row: ReplayRow) => row.clientModel || row.model || t('模型未记录')
-export const isTraceRunning = (row: ReplayRow) => row.status === 0 && !row.error
-export const isTraceSuccess = (row: ReplayRow) => row.status >= 200 && row.status < 300 && !row.error
+export const isTraceRunning = (row: ReplayRow) => row.status === 0 && row.error == null
+export const isTraceSuccess = (row: ReplayRow) => row.status >= 200 && row.status < 300 && row.error == null
 export const traceProvider = (id?: string, label?: string) => label || (id ? host().wbProviders?.labelOf(id) || id : t('提供商未记录'))
 export function traceAttempts(row: ReplayRow): TraceAttempt[] {
   const entries = Array.isArray(row.attemptDetails) ? row.attemptDetails : []

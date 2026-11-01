@@ -12,7 +12,7 @@ import { RouteIcon, RouteStateBadge } from './routing-ui'
 import { displayNameOf } from './accounts-domain'
 import { groupSortSummary } from './accounts-group-settings'
 
-export function RoutingSettingsDialog({ workspace, onClose }: { workspace: RoutingWorkspace; onClose(): void }) {
+export function RoutingSettingsDialog({ workspace, onClose, protectionOnly = false }: { workspace: RoutingWorkspace; onClose(): void; protectionOnly?: boolean }) {
   const [draft, setDraft] = React.useState<RouteSettings>(() => ({ ...workspace.settings }))
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState('')
@@ -26,7 +26,8 @@ export function RoutingSettingsDialog({ workspace, onClose }: { workspace: Routi
     }
     setBusy(true)
     try {
-      await bridge().setRoutingConfig(draft)
+      const { routingStrategy, routingSticky, ...protection } = draft
+      await bridge().setRoutingConfig(protectionOnly ? protection : draft)
       await loadWorkspace()
       notify(t('统一路由设置已保存'))
       onClose()
@@ -35,10 +36,10 @@ export function RoutingSettingsDialog({ workspace, onClose }: { workspace: Routi
   }
   return <Dialog open onOpenChange={open => { if (!open && !busy) onClose() }}>
     <DialogContent className='w-[min(680px,calc(100vw-48px))]'>
-      <DialogHeader><RouteIcon name='settings' /><DialogTitle>{t('统一路由设置')}</DialogTitle></DialogHeader>
+      <DialogHeader><RouteIcon name='settings' /><DialogTitle>{protectionOnly ? t('全局保护设置') : t('统一路由设置')}</DialogTitle></DialogHeader>
       <DialogBody>
-        <p className='text-xs text-muted-foreground'>{t('所有模型共用路由策略与保护设置；全局顺序和消耗规则与账号页联动，模型独立配置可明确覆盖顺序。')}</p>
-        <DialogSection>
+        <p className='text-xs text-muted-foreground'>{t('保护设置由所有模型共用；模型独立配置可覆盖参与范围、顺序、策略与粘滞。')}</p>
+        {!protectionOnly ? <DialogSection>
           <Field><FieldLabel>{t('路由策略')}</FieldLabel><FieldContent>
             <SegmentedControl aria-label={t('路由策略')} value={draft.routingStrategy} disabled={busy} options={[
               { value: 'order', label: t('顺序优先') }, { value: 'rotate', label: t('负载均衡') }, { value: 'provider', label: t('家内轮询') },
@@ -52,7 +53,7 @@ export function RoutingSettingsDialog({ workspace, onClose }: { workspace: Routi
             ]} onValueChange={value => update('routingSticky', value)} />
             <FieldDescription>{draft.routingSticky === 'auto' ? t('五分钟没有往来即释放；客户端会话标识优先，内容哈希兜底。') : draft.routingSticky === 'session' ? t('会话最长保持六小时无往来；可以随时在会话粘滞中解除。') : t('每轮重新选路，不保留跨请求的账号绑定。')}</FieldDescription>
           </FieldContent></Field>
-        </DialogSection>
+        </DialogSection> : null}
         <DialogSection>
           <h3 className='text-sm font-semibold'>{t('自愈保护')}</h3>
           {([

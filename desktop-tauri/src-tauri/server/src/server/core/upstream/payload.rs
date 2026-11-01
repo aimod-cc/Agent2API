@@ -69,6 +69,7 @@ pub(super) struct ProviderContext<'a> {
     /// 客户端请求体（**原始**：已 stream:true；未做任何内容处理；未注入 system
     /// —— 那是适配器的事）。各 provider 的实际发送体由 [`send_body`] 决定。
     pub body: &'a Value,
+    pub routing: super::route_context::RequestRouting,
     /// 客户端是否要流式（决定成功后的形态：SSE 透传 or 聚合）
     pub stream: bool,
     pub images: Option<crate::server::core::providers::images::ImageOperation>,

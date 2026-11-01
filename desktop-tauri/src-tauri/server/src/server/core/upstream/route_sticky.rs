@@ -83,10 +83,12 @@ impl StickySessions {
         entry.ttl_ms = ttl_ms;
     }
 
-    pub(super) fn list(&self, model: Option<&str>, now: i64, ttl_ms: i64) -> Vec<Value> {
+    pub(super) fn list(&self, model: Option<&str>, now: i64, ttl_for: impl Fn(&str) -> i64) -> Vec<Value> {
         let Ok(mut table) = self.table.lock() else { return Vec::new() };
-        if ttl_ms <= 0 { return Vec::new(); }
-        table.entries.retain(|_, entry| now.saturating_sub(entry.last_seen) <= ttl_ms.min(entry.ttl_ms));
+        table.entries.retain(|_, entry| {
+            let ttl = ttl_for(&entry.model).min(entry.ttl_ms);
+            ttl > 0 && now.saturating_sub(entry.last_seen) <= ttl
+        });
         let mut entries: Vec<&StickyEntry> = table.entries.values()
             .filter(|entry| model.map_or(true, |model| entry.model.eq_ignore_ascii_case(model)))
             .collect();
@@ -99,8 +101,8 @@ impl StickySessions {
             "source": entry.source,
             "createdAt": entry.created_at,
             "lastSeen": entry.last_seen,
-            "expiresAt": entry.last_seen + ttl_ms.min(entry.ttl_ms),
-            "remainingMs": (entry.last_seen + ttl_ms.min(entry.ttl_ms) - now).max(0),
+            "expiresAt": entry.last_seen + ttl_for(&entry.model).min(entry.ttl_ms),
+            "remainingMs": (entry.last_seen + ttl_for(&entry.model).min(entry.ttl_ms) - now).max(0),
             "hits": entry.hits,
         })).collect()
     }

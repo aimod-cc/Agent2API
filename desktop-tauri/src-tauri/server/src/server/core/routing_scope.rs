@@ -7,6 +7,25 @@ use serde_json::Value;
 use crate::server::config::{self, RoutingProfile, RoutingProviderScope};
 use super::{account_order, routing};
 
+pub fn available_providers(accounts: &[Value]) -> Vec<String> {
+    let mut sorted = accounts.to_vec();
+    sorted.sort_by_key(|account| account.get("priority").and_then(Value::as_i64).unwrap_or(i64::MAX));
+    let mut ids = Vec::new();
+    for account in sorted {
+        let id = routing::provider_of(&account).to_string();
+        if !ids.contains(&id) { ids.push(id); }
+    }
+    for id in crate::server::core::plugin_host::installed_ids() {
+        if !ids.contains(&id) { ids.push(id); }
+    }
+    for provider in crate::server::core::custom_providers::list() {
+        if let Some(id) = provider.get("id").and_then(Value::as_str) {
+            if !ids.iter().any(|known| known == id) { ids.push(id.to_string()); }
+        }
+    }
+    ids
+}
+
 pub fn providers_for(model: &str, available: &[String]) -> Vec<String> {
     let profiles = config::routing_profiles();
     match profiles.effective(model) {
@@ -77,7 +96,10 @@ pub fn project_accounts(accounts: &[Value], profile: &RoutingProfile) -> Vec<Val
 }
 
 pub fn materialize_profile(accounts: &[Value], available: &[String], model: &str) -> RoutingProfile {
-    let profiles = config::routing_profiles();
+    materialize_profile_with(accounts, available, model, &config::routing_profiles())
+}
+
+pub fn materialize_profile_with(accounts: &[Value], available: &[String], model: &str, profiles: &config::RoutingProfiles) -> RoutingProfile {
     let sorting = account_order::sorting(accounts, crate::server::logging::now_ms());
     let independent = profiles.model_profile(model).is_some();
     let mut profile = profiles.effective(model).cloned().unwrap_or_else(|| RoutingProfile {

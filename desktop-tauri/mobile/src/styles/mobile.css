@@ -232,6 +232,21 @@ body {
 
 /* ═══════════ 抽屉内的通用块 ═══════════ */
 
+[data-slot='sheet-body'],
+[data-slot='dialog-body'] { min-height: 0; }
+
+/* 正文滚动时保留内容的自然高度，避免带 overflow 的卡片被 flex 压扁。 */
+[data-slot='sheet-body'] > *,
+[data-slot='dialog-body'] > *,
+[data-slot='dialog-header'],
+[data-slot='dialog-footer'] { flex-shrink: 0; }
+
+.m-kv { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.m-kv-cell { min-width: 0; overflow-wrap: anywhere; }
+.m-rows .m-row { align-items: flex-start; }
+.m-rows .m-k { flex-shrink: 0; max-width: 40%; overflow-wrap: anywhere; }
+.m-rows .m-v { min-width: 0; overflow-wrap: anywhere; text-align: right; }
+
 /* 触摸设备上按钮不选中文字 */
 .m-app button,
 .m-app .m-row { -webkit-user-select: none; user-select: none; }

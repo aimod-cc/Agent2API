@@ -85,7 +85,6 @@ use crate::server::core::providers::adapter::{
 };
 use crate::server::core::providers::custom::forward as custom_forward;
 use crate::server::core::providers::readiness;
-use crate::server::core::providers::router::route_for_forward;
 use crate::server::core::providers::{kind_from_id, meta};
 #[cfg(test)]
 use crate::server::core::providers::adapter::adapter_for;
@@ -206,6 +205,7 @@ fn defer_to_next_account(
     switches_left: &mut usize,
     switch_total: usize,
     pinned: Option<&str>,
+    request_routing: &super::route_context::RequestRouting,
 ) -> bool {
     if let Some(account_id) = target.account_id.clone() {
         if !tried_ids.contains(&account_id) {
@@ -213,7 +213,7 @@ fn defer_to_next_account(
         }
     }
     let Some(next) =
-        rotate::pick_next_account(service, provider_ids, cooldown_keys, tried_ids, pinned)
+        rotate::pick_next_account(service, provider_ids, cooldown_keys, tried_ids, pinned, request_routing)
     else {
         return false;
     };
@@ -427,11 +427,13 @@ pub(super) async fn forward_with_providers(
             .map(crate::server::core::key_scope::KeyScope::allowed_provider_ids)
             .unwrap_or_default()
     } else if let Some(operation) = ctx.images {
-        crate::server::core::routing_scope::providers_for(
-            &model, &crate::server::core::providers::images::operation_providers(&model, operation),
-        )
+        ctx.routing.providers(crate::server::core::providers::images::operation_providers(&model, operation))
     } else {
-        route_for_forward(&model)
+        let available = crate::server::core::providers::catalog::forwarding_providers(&model);
+        let available = if available.is_empty() && crate::server::core::providers::catalog::providers_for_model(&model).is_empty() {
+            vec![crate::server::core::providers::DEFAULT_PROVIDER_ID.to_string()]
+        } else { available };
+        ctx.routing.providers(available)
     };
     let candidates: Vec<_> = if ctx.images.is_some() {
         candidates
@@ -462,9 +464,8 @@ pub(super) async fn forward_with_providers(
             )
             .with_code("model_not_found"));
         }
-        let profiles = config::routing_profiles();
-        if let Some(profile) = profiles.effective(&model) {
-            let hint = if profiles.model_profile(&model).is_some() {
+        if let Some(profile) = &ctx.routing.profile {
+            let hint = if !ctx.routing.scope.is_empty() {
                 "请在路由页该模型的独立配置中添加或启用提供商"
             } else if profile.scope() == config::RoutingProviderScope::Selected {
                 "请在路由页「全局配置 → 参与范围」中改为自动参与，或将提供商加入指定名单"
@@ -587,6 +588,15 @@ async fn attempt_queue(
     let conv_key = super::route_state::RouteState::conversation_key(ctx.client_headers, &ctx.body);
     let sticky_generation = service.route.sticky_generation();
     let sticky_source = super::route_state::RouteState::conversation_source(ctx.client_headers, &ctx.body);
+    if !conv_key.is_empty() {
+        let mut decision = json!({
+            "sessionId": super::route_sticky::entry_id(&conv_key, &model), "sessionSource": sticky_source,
+            "strategy": ctx.routing.settings.strategy.as_str(), "sticky": ctx.routing.settings.sticky.as_str(),
+            "scope": ctx.routing.scope, "configSnapshot": ctx.routing.json(),
+        });
+        if ctx.routing.settings.sticky.ttl_ms().is_some() { decision["stickyId"] = decision["sessionId"].clone(); }
+        ctx.telemetry.set_route_decision(decision);
+    }
     let mut conversation_ids = None;
     let mut tried_ids: Vec<String> = Vec::new();
     // ── 两份独立的预算（见 config::RetrySettings）─────────────────────
@@ -652,6 +662,7 @@ async fn attempt_queue(
             &tried_ids,
             ctx.pinned_account,
             &conv_key,
+            &ctx.routing,
         )
         .await?;
         if let Some(override_proxy) = ctx.proxy_override {
@@ -667,7 +678,8 @@ async fn attempt_queue(
         // 决策快照挂进 telemetry（最后一次为准：请求日志的「路由回放」显示
         // 的是最终承载那次选路的完整排序 —— 与 attempts 明细的换号链互补，
         // 那边回答「试了谁」，这边回答「当时为什么这么排」）。
-        if let Some(decision) = target.decision.clone() {
+        if let Some(mut decision) = target.decision.clone() {
+            decision["sessionSource"] = Value::String(sticky_source.to_string());
             ctx.telemetry.set_route_decision(decision);
         }
         // 连接计数改绑到这一轮选中的账号：失败重试换账号时计数跟着走，
@@ -688,7 +700,7 @@ async fn attempt_queue(
                     if let Some(account_id) = custom_account_id.as_deref() {
                         service.route.sticky_bind(
                             &conv_key, &model, account_id, sticky_source, logging::now_ms(),
-                            config::routing_settings().sticky.ttl_ms().unwrap_or(0), sticky_generation,
+                            ctx.routing.settings.sticky.ttl_ms().unwrap_or(0), sticky_generation,
                         );
                         service.route.backoff_clear(account_id);
                         service.route.sink_clear(account_id);
@@ -736,12 +748,12 @@ async fn attempt_queue(
                                 );
                                 // 与内置家的动作 1 同款：还有额度时被 429 的
                                 // 垫底（见那边的说明）
-                                if config::routing_settings().sink && ctx.pinned_account.is_none() {
+                                if ctx.routing.settings.sink && ctx.pinned_account.is_none() {
                                     service.route.sink_mark(&account_id, logging::now_ms());
                                 }
                             } else {
                                 // 与内置家的动作 3 同款：失败退避 + 熔断计数
-                                let route_settings = config::routing_settings();
+                                let route_settings = ctx.routing.settings;
                                 if route_settings.failover_backoff {
                                     service.route.backoff_mark(&account_id, logging::now_ms());
                                 }
@@ -762,6 +774,7 @@ async fn attempt_queue(
                         &cooldown_keys,
                         &tried_ids,
                         ctx.pinned_account,
+                        &ctx.routing,
                     ) {
                         Some(next) => {
                             // 换号额度用尽 → 队列里即使还有人也不再顺延
@@ -828,7 +841,7 @@ async fn attempt_queue(
                     if let Some(account_id) = stateful_account_id.as_deref() {
                         service.route.sticky_bind(
                             &conv_key, &model, account_id, sticky_source, logging::now_ms(),
-                            config::routing_settings().sticky.ttl_ms().unwrap_or(0), sticky_generation,
+                            ctx.routing.settings.sticky.ttl_ms().unwrap_or(0), sticky_generation,
                         );
                         service.route.backoff_clear(account_id);
                         service.route.sink_clear(account_id);
@@ -894,6 +907,7 @@ async fn attempt_queue(
                         &cooldown_keys,
                         &tried_ids,
                         ctx.pinned_account,
+                        &ctx.routing,
                     ) {
                         Some(next) => {
                             // 换号额度用尽 → 队列里即使还有人也不再顺延
@@ -1153,6 +1167,7 @@ async fn attempt_queue(
                         &mut switches_left,
                         switch_total,
                         ctx.pinned_account,
+                        &ctx.routing,
                     ) {
                         continue 'accounts;
                     }
@@ -1267,7 +1282,7 @@ async fn attempt_queue(
                     // 「配置开着且有会话键」时绑 —— Turn / Off 档 ttl 为 None。
                     // 绑定无条件覆盖：会话换到新账号（前一个失败顺延过来）
                     // 时，粘的必须是现在这个能干活的。
-                    let route_settings = config::routing_settings();
+                    let route_settings = ctx.routing.settings;
                     if let Some(account_id) = target.account_id.as_deref() {
                         if route_settings.breaker_enabled {
                             service
@@ -1552,7 +1567,7 @@ async fn attempt_queue(
                             // 正常冷却，不算），排到所有没被 429 过的后面 —— 负载
                             // 摊开，而不是每次都回到队列头再撞一遍。成功一次或
                             // 重启后放出（见 route_state.rs）。
-                            if config::routing_settings().sink && ctx.pinned_account.is_none() {
+                            if ctx.routing.settings.sink && ctx.pinned_account.is_none() {
                                 service.route.sink_mark(&account_id, logging::now_ms());
                             }
                             // 日志文案与账号页的「限流」列同口径：以真名为主，
@@ -1575,6 +1590,7 @@ async fn attempt_queue(
                                 &cooldown_keys,
                                 &tried_ids,
                                 ctx.pinned_account,
+                                &ctx.routing,
                             ) {
                                 Some(next) => {
                                     let next_label = account_display(&next);
@@ -1699,7 +1715,7 @@ async fn attempt_queue(
                             // 翻倍，上限 1 小时）；熔断：连续失败到阈值打开。
                             // 429（额度尽）不走这里 —— 它有自己的冷却机制，
                             // 且「等重置」比「退避」精确。
-                            let route_settings = config::routing_settings();
+                            let route_settings = ctx.routing.settings;
                             if route_settings.failover_backoff {
                                 service.route.backoff_mark(&account_id, logging::now_ms());
                             }
@@ -1743,6 +1759,7 @@ async fn attempt_queue(
                         &mut switches_left,
                         switch_total,
                         ctx.pinned_account,
+                        &ctx.routing,
                     ) {
                         continue 'accounts;
                     }
@@ -1913,6 +1930,7 @@ async fn attempt_queue(
                         &cooldown_keys,
                         &tried_ids,
                         ctx.pinned_account,
+                        &ctx.routing,
                     ) {
                         Some(next) => {
                             if !take_switch(&mut switches_left, switch_total) {

@@ -29,6 +29,10 @@ pub struct RoutingProfile {
     pub account_order: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub excluded_accounts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticky: Option<String>,
 }
 
 impl RoutingProfile {
@@ -59,6 +63,14 @@ impl RoutingProfiles {
 
     pub fn effective(&self, model: &str) -> Option<&RoutingProfile> {
         self.model_profile(model).or(self.global.as_ref())
+    }
+
+    pub fn settings_for(&self, model: &str, mut settings: super::RoutingSettings) -> super::RoutingSettings {
+        for profile in [self.global.as_ref(), self.model_profile(model)].into_iter().flatten() {
+            if let Some(strategy) = &profile.strategy { settings.strategy = super::RouteStrategy::from_id(strategy); }
+            if let Some(sticky) = &profile.sticky { settings.sticky = super::StickyMode::from_id(sticky); }
+        }
+        settings
     }
 
     pub fn scope<'a>(&self, model: &'a str) -> &'a str {
@@ -94,6 +106,16 @@ pub fn routing_profiles() -> Arc<RoutingProfiles> {
         .unwrap_or_default()
 }
 
+pub fn routing_snapshot() -> (Arc<RoutingProfiles>, super::RoutingSettings) {
+    CONFIG.read().ok().and_then(|guard| guard.as_ref().map(|config| (config.routing_profiles.clone(), config.routing)))
+        .unwrap_or_default()
+}
+
+pub fn settings_for_model(model: &str) -> super::RoutingSettings {
+    CONFIG.read().ok().and_then(|guard| guard.as_ref().map(|config| config.routing_profiles.settings_for(model, config.routing)))
+        .unwrap_or_default()
+}
+
 pub fn normalize_model(model: &str) -> Result<String, String> {
     let model = model.trim();
     if model.chars().count() > 256 || model.chars().any(char::is_control) {
@@ -103,6 +125,12 @@ pub fn normalize_model(model: &str) -> Result<String, String> {
 }
 
 pub fn validate_shape(profile: &RoutingProfile) -> Result<(), String> {
+    if profile.strategy.as_deref().is_some_and(|value| !["order", "rotate", "provider"].contains(&value)) {
+        return Err("路由策略必须为 order、rotate 或 provider".to_string());
+    }
+    if profile.sticky.as_deref().is_some_and(|value| !["auto", "session", "turn", "off"].contains(&value)) {
+        return Err("会话粘滞必须为 auto、session、turn 或 off".to_string());
+    }
     fn unique(values: &[String], max: usize, label: &str) -> Result<(), String> {
         if values.len() > max {
             return Err(format!("{label}最多允许 {max} 项"));

@@ -317,6 +317,7 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/routing/sticky", get(api::routing_workspace::get_sticky))
         .route("/api/routing/sticky/clear", post(api::routing_workspace::clear_sticky))
         .route("/api/routing/replays", get(api::routing_workspace::get_replays))
+        .route("/api/routing/flow", get(api::routing_flow::get_flow))
         .route("/api/routing/trace", get(api::routing_trace::get_trace))
         .route("/api/routing/trace/request", get(api::routing_trace::get_trace_request))
         // ── 调试模式（设置页「通用 → 调试模式」）──

@@ -371,7 +371,7 @@ function QuickEntry({
   onClick: () => void
 }) {
   return (
-    <Button size='default' variant='ghost'
+    <Button size='default' variant='ghost' className='h-auto min-w-0 whitespace-normal'
       type='button'
       onClick={onClick}
       style={{
@@ -387,6 +387,7 @@ function QuickEntry({
       }}
     >
       <span
+        className='shrink-0'
         style={{
           width: 42,
           height: 42,

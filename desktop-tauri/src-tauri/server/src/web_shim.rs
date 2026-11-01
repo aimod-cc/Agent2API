@@ -1691,6 +1691,7 @@ pub fn shim_js() -> &'static str {
     getRoutingSticky: function (model) { return call('GET', '/api/routing/sticky' + toQuery({ model: model })); },
     clearRoutingSticky: function (payload) { return call('POST', '/api/routing/sticky/clear', payload || {}); },
     getRoutingReplays: function (query) { return call('GET', '/api/routing/replays' + toQuery(query)); },
+    getRoutingFlow: function (query) { return call('GET', '/api/routing/flow' + toQuery(query)); },
     getRoutingTrace: function (query) { return call('GET', '/api/routing/trace' + toQuery(query)); },
     getRoutingTraceRequest: function (query) { return call('GET', '/api/routing/trace/request' + toQuery(query)); },
     setRoutingConfig: function (patch) { return call('PUT', '/api/routing', patch || {}); },

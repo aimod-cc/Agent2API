@@ -222,7 +222,7 @@ pub(crate) fn queue_for_accounts(state: &ServerState, model: Option<String>, acc
         ))
         .filter_map(|account| routing::account_id(account).map(str::to_string))
         .collect();
-    let settings = config::routing_settings();
+    let settings = config::routing_settings_for_model(model.as_deref().unwrap_or(""));
     // 面板只**看**当前状态，不做粘性查找、不前进轮转游标 —— 预演不该刷新
     // 任何会话的计时，也不该消耗下一次轮转。家内轮询的各家游标同理，所以
     // 两种轮转策略都传 `None`：面板看到的是「各家都从第 0 位起」的静态序。

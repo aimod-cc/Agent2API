@@ -51,6 +51,7 @@ pub mod connections;
 pub mod continuation;
 mod image_tasks;
 mod images;
+mod multipart;
 mod native_tools;
 mod http_dns;
 mod network_fallback;
@@ -60,6 +61,7 @@ mod payload;
 mod provider_loop;
 mod rotate;
 mod route_state;
+mod route_context;
 mod conversation_ids;
 mod route_sticky;
 pub mod sse;
@@ -322,9 +324,7 @@ impl UpstreamService {
     }
 
     pub fn route_sticky_sessions(&self, model: Option<&str>, now: i64) -> Vec<Value> {
-        self.route.sticky_list(model, now, crate::server::core::routing::sticky_ttl_ms(
-            crate::server::config::routing_settings().sticky,
-        ))
+        self.route.sticky_list(model, now)
     }
 
     pub fn clear_route_sticky(&self, id: Option<&str>, model: Option<&str>) -> usize {
@@ -389,6 +389,9 @@ impl UpstreamService {
         if cancel.as_ref().is_some_and(|token| token.is_cancelled()) {
             return Err(cancellation::cancelled_error());
         }
+        let routing = route_context::RequestRouting::capture(
+            request.body.get("model").and_then(Value::as_str).unwrap_or(""), &self.store,
+        );
         let mut slot = self.begin_slot(&request.dedupe_key, cancel.as_ref()).await;
         // 账号级活跃连接计数：**本请求**的凭证，随选路改绑到实际使用的账号。
         // 建在这里（而不是选路处）是因为它必须活到响应体发完 —— 流式路径由
@@ -440,6 +443,7 @@ impl UpstreamService {
         let proxy_override = request.proxy_override;
         let context = payload::ProviderContext {
             body: &upstream_body,
+            routing,
             stream: request.stream,
             images,
             client_headers: &request.client_headers,

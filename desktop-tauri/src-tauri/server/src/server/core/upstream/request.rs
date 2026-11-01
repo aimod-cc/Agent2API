@@ -172,8 +172,27 @@ pub(super) async fn send_chat_with_client(
     plan: &TransportRequest,
     client: &reqwest::Client,
 ) -> Result<reqwest::Response, UpstreamRequestError> {
-    let mut builder = client.post(&plan.url).body(plan.payload.clone());
+    let multipart = plan.headers.iter().any(|(key, value)| {
+        key.eq_ignore_ascii_case("content-type") && value.eq_ignore_ascii_case("multipart/form-data")
+    });
+    let mut builder = client.post(&plan.url);
+    if multipart {
+        let form = super::multipart::request_form(&plan.payload).map_err(|message| {
+            UpstreamRequestError {
+                message,
+                reason: "上传请求构造失败".to_string(),
+                safe_to_retry: false,
+                network_failure: false,
+            }
+        })?;
+        builder = builder.multipart(form);
+    } else {
+        builder = builder.body(plan.payload.clone());
+    }
     for (key, value) in &plan.headers {
+        if multipart && key.eq_ignore_ascii_case("content-type") {
+            continue;
+        }
         builder = builder.header(key, value);
     }
     if let Some(timeout) = NO_TOTAL_TIMEOUT {

@@ -201,7 +201,7 @@ function RequestCard({ row, onClick }: { row: RequestRow; onClick: () => void })
   const tone = !status ? 'warn' : status >= 200 && status < 400 ? 'ok' : 'bad'
   const note = buildNote(row)
   return (
-    <Button size='default' variant='ghost'
+    <Button size='default' variant='ghost' className='h-auto min-w-0 whitespace-normal [overflow-wrap:anywhere]'
       type='button'
       onClick={onClick}
       style={{
@@ -245,11 +245,11 @@ function RequestCard({ row, onClick }: { row: RequestRow; onClick: () => void })
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, fontSize: 11.5, color: 'var(--m-text-3)', minWidth: 0 }}>
         <ProviderLogo id={row.provider} />
-        <span style={{ flex: 'none' }}>{providerLabel(row.provider, row.providerLabel)}</span>
+        <span className='min-w-0 flex-1 truncate'>{providerLabel(row.provider, row.providerLabel)}</span>
         {row.accountName ? (
           <>
-            <span style={{ opacity: 0.45 }}>·</span>
-            <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <span className='shrink-0' style={{ opacity: 0.45 }}>·</span>
+            <span className='min-w-0 flex-1 truncate'>
               {row.accountName}
             </span>
           </>

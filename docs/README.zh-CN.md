@@ -22,7 +22,7 @@ Agent2API 是一个 **AI 路由网关 + Agent 客户端接管**项目。它将�
 
 ## ✨ 核心特性
 
-- 🔌 **统一模型接口** —— 支持 OpenAI Chat / Responses / Images 与 Anthropic Messages 协议，以及统一的模型列表；小浣熊、Loomy、Antigravity、ModelScope 提供文生图，Loomy、Antigravity 与 ModelScope 还支持参考图编辑；生图与编辑也可由 AI 助手工具调用
+- 🔌 **统一模型接口** —— 支持 OpenAI Chat / Responses / Images 与 Anthropic Messages 协议，以及统一的模型列表；小浣熊、Loomy、Antigravity、ModelScope 提供文生图，小浣熊、Loomy、Antigravity 与 ModelScope 还支持参考图编辑；生图与编辑也可由 AI 助手工具调用
 - 🧭 **AI 路由** —— 模型映射、账号优先级、负载均衡、会话粘性与失败切换集中配置
 - 🤖 **Agent 客户端接管** —— 管理本机客户端的多套连接配置，导入现有配置、预览写入内容并切换网关或自定义服务
 - 🧩 **插件扩展** —— 额外提供商实现独立安装和更新，不随主程序打包；自定义提供商无需插件

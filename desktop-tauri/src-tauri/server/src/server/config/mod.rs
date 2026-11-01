@@ -72,6 +72,7 @@ mod mutations;
 pub(crate) use mutations::try_update_raw_field;
 pub(crate) mod parse;
 mod routing_profiles;
+pub(crate) mod routing_workspace;
 mod sanitize_config;
 pub(crate) mod sql;
 mod types;
@@ -91,7 +92,8 @@ pub use sanitize_config::{
     KEY_SANITIZE_RULES, MAX_SANITIZE_PROVIDERS,
 };
 pub use routing_profiles::{
-    normalize_model as normalize_routing_model, routing_profiles, save_routing_profile,
+    normalize_model as normalize_routing_model, routing_profiles, routing_snapshot, save_routing_profile,
+    settings_for_model as routing_settings_for_model,
     validate_shape as validate_routing_profile, RoutingProfile, RoutingProfiles, RoutingProviderScope,
 };
 pub use types::*;

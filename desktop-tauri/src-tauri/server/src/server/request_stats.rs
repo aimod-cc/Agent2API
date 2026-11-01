@@ -81,6 +81,8 @@ mod record;
 mod report;
 mod routing;
 mod trace;
+mod flow;
+pub use flow::FlowQuery;
 mod retention;
 mod source;
 mod source_report;

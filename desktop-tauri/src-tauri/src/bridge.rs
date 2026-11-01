@@ -365,6 +365,7 @@ const BRIDGE_JS: &str = r#"
     getRoutingSticky: model => call('GET', '/api/routing/sticky' + toQuery({ model })),
     clearRoutingSticky: payload => call('POST', '/api/routing/sticky/clear', payload || {}),
     getRoutingReplays: query => call('GET', '/api/routing/replays' + toQuery(query)),
+    getRoutingFlow: query => call('GET', '/api/routing/flow' + toQuery(query)),
     getRoutingTrace: query => call('GET', '/api/routing/trace' + toQuery(query)),
     getRoutingTraceRequest: query => call('GET', '/api/routing/trace/request' + toQuery(query)),
     setRoutingConfig: patch => call('PUT', '/api/routing', patch || {}),
