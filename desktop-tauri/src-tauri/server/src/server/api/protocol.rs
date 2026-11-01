@@ -457,7 +457,13 @@ pub async fn messages_endpoint(
             let model = requested_model.clone();
             let context = RecordContext { status: i64::from(status.as_u16()), ..context };
             if stream {
-                let mut machine = anthropic::AnthropicStream::new(&model);
+                // `message_start` 必须在首帧立刻发，而上游 usage 要到流末尾才到；
+                // 先按下游原始 Anthropic 请求体（含 system / tools）估一个输入
+                // token 占位，真实值随后在 `message_delta` 覆盖。纯内存扫描，
+                // 不增加任何网络等待。
+                let prompt_estimate = anthropic::estimate_chat_tokens(&raw);
+                let mut machine =
+                    anthropic::AnthropicStream::with_input_tokens(&model, prompt_estimate);
                 let transformed = pipeline::transformed_stream(
                     source,
                     context,

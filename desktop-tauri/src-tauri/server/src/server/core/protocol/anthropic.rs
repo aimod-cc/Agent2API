@@ -675,6 +675,42 @@ pub(super) fn parse_json_object(value: &Value) -> Value {
     }
 }
 
+/// 输入 token 的粗估（CJK 一字一 token，其余约 4 字符一 token）。
+///
+/// 只用于 `message_start` 的占位：上游真实用量要到流末尾才出现，而
+/// `message_start` 必须在首帧就发 —— 这一帧发 0 的话，把「读到就记账」
+/// 的客户端（如 ZCode 的输入栏上下文容量，同 Claude Code 的 context-hud
+/// 口径）会把整轮请求记成没有输入，meter 退化成只算输出（866/1M）。
+/// 真实值随后在 `message_delta` 覆盖（见 [`AnthropicStream::finish`]）。
+///
+/// 口径取保守偏高：占位只在收尾帧之前可见，宁可先报得大一点，
+/// 也不要让客户端短暂地以为上下文是空的。
+pub fn estimate_chat_tokens(chat: &Value) -> i64 {
+    let payload = json!({
+        "system": chat.get("system").cloned().unwrap_or(Value::Null),
+        "messages": chat.get("messages").cloned().unwrap_or_else(|| json!([])),
+        "tools": chat.get("tools").cloned().unwrap_or_else(|| json!([])),
+    });
+    let text = payload.to_string();
+    let (mut cjk, mut total) = (0i64, 0i64);
+    for ch in text.chars() {
+        total += 1;
+        if is_cjk_char(ch) {
+            cjk += 1;
+        }
+    }
+    cjk + ((total - cjk) + 3) / 4
+}
+
+fn is_cjk_char(ch: char) -> bool {
+    matches!(ch as u32,
+        0x1100..=0x11ff
+        | 0x2e80..=0x9fff
+        | 0xac00..=0xd7af
+        | 0xf900..=0xfaff
+        | 0xff00..=0xffef)
+}
+
 /// Chat 的 usage → Anthropic 的 usage
 pub fn usage_to_anthropic(usage: Option<&Value>) -> Value {
     let Some(usage) = usage.filter(|value| value.is_object()) else {
@@ -726,10 +762,19 @@ pub struct AnthropicStream {
     has_tool: bool,
     stop_reason: Option<String>,
     usage: Option<Value>,
+    /// `message_start` 的 `input_tokens` 占位（见 [`estimate_chat_tokens`]）。
+    /// 只有收尾帧之前可见；`message_delta` 用上游真实值覆盖。
+    input_tokens_estimate: i64,
 }
 
 impl AnthropicStream {
     pub fn new(model: &str) -> Self {
+        Self::with_input_tokens(model, 0)
+    }
+
+    /// 带输入占位的构造：`input_tokens` 只用于 `message_start` 首帧，
+    /// 上游真实用量到达后在 `message_delta` 覆盖（见 [`Self::finish`]）。
+    pub fn with_input_tokens(model: &str, input_tokens: i64) -> Self {
         Self {
             buffer: SseLineBuffer::new(),
             message_id: random_id("msg"),
@@ -747,6 +792,7 @@ impl AnthropicStream {
             has_tool: false,
             stop_reason: None,
             usage: None,
+            input_tokens_estimate: input_tokens.max(0),
         }
     }
 
@@ -1001,6 +1047,12 @@ impl AnthropicStream {
         }
         self.started = true;
         let mut usage = usage_to_anthropic(self.usage.as_ref());
+        // 首帧常常还没有 usage（上游 usage 在流末尾）：这时用请求体估算值占位，
+        // 别发 0 —— 那样客户端会把整轮请求记成「没有输入」（见
+        // `estimate_chat_tokens` 的注释）。
+        if usage["input_tokens"].as_i64().unwrap_or(0) <= 0 {
+            usage["input_tokens"] = json!(self.input_tokens_estimate);
+        }
         usage["output_tokens"] = json!(0);
         vec![self.event(
             "message_start",
@@ -1196,5 +1248,90 @@ pub fn responses_error_code(status: u16) -> &'static str {
         429 => "rate_limit_error",
         500..=599 => "server_error",
         _ => "api_error",
+    }
+}
+
+#[cfg(test)]
+mod stream_usage_tests {
+    use super::*;
+
+    fn frames(bytes: &[bytes::Bytes]) -> Vec<Value> {
+        bytes
+            .iter()
+            .filter_map(|chunk| {
+                let text = String::from_utf8_lossy(chunk);
+                let data = text
+                    .lines()
+                    .find_map(|line| line.strip_prefix("data:"))?
+                    .trim()
+                    .to_string();
+                serde_json::from_str::<Value>(&data).ok()
+            })
+            .collect()
+    }
+
+    fn chat_chunk(content: Option<&str>) -> Vec<bytes::Bytes> {
+        let mut delta = json!({});
+        if let Some(text) = content {
+            delta["content"] = json!(text);
+        }
+        let chunk = json!({
+            "id": "chatcmpl_1",
+            "choices": [{ "index": 0, "delta": delta }],
+        });
+        format!("data: {chunk}\n\n").into_bytes().into()
+    }
+
+    /// 回归：上游 usage 只在流末尾出现时，首帧 `message_start` 不能报 0 ——
+    /// 按「读到就记账」的客户端（ZCode 输入栏上下文容量）会把整轮请求
+    /// 记成没有输入，meter 退化成只算输出。
+    #[test]
+    fn message_start_carries_input_estimate_before_usage_arrives() {
+        let mut stream = AnthropicStream::with_input_tokens("glm-5.3-flash", 1234);
+        let out = stream.push(&chat_chunk(Some("hi")));
+        let start = frames(&out)
+            .into_iter()
+            .find(|frame| frame["type"] == "message_start")
+            .expect("message_start 应在首个增量帧前发出");
+        assert_eq!(start["message"]["usage"]["input_tokens"], json!(1234));
+        assert_eq!(start["message"]["usage"]["output_tokens"], json!(0));
+    }
+
+    /// 收尾帧依旧以**上游真实** usage 为准（估算只做占位，不覆盖真实值）。
+    #[test]
+    fn message_delta_overrides_estimate_with_real_usage() {
+        let mut stream = AnthropicStream::with_input_tokens("glm-5.3-flash", 1234);
+        let mut out = stream.push(&chat_chunk(Some("hi")));
+        let usage_chunk = json!({
+            "id": "chatcmpl_1",
+            "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+            "usage": { "prompt_tokens": 105391, "completion_tokens": 7,
+                       "prompt_tokens_details": { "cached_tokens": 104192 } },
+        });
+        out.extend(stream.push(format!("data: {usage_chunk}\n\n").as_bytes()));
+        out.extend(stream.finish());
+        let delta = frames(&out)
+            .into_iter()
+            .find(|frame| frame["type"] == "message_delta")
+            .expect("收尾应有 message_delta");
+        // usage_to_anthropic：input_tokens 不含缓存命中部分
+        assert_eq!(delta["usage"]["input_tokens"], json!(1199));
+        assert_eq!(delta["usage"]["cache_read_input_tokens"], json!(104192));
+        assert_eq!(delta["usage"]["output_tokens"], json!(7));
+    }
+
+    /// 估算口径：明显正数、随内容增长，且 system 也计入（ZCode 的系统提示
+    /// 与工具定义是输入的大头）。
+    #[test]
+    fn estimate_counts_system_and_messages() {
+        let small = json!({ "messages": [{ "role": "user", "content": "hi" }] });
+        let with_system = json!({
+            "system": [{ "type": "text", "text": "x".repeat(4000) }],
+            "messages": [{ "role": "user", "content": "hi" }],
+        });
+        let a = estimate_chat_tokens(&small);
+        let b = estimate_chat_tokens(&with_system);
+        assert!(a > 0, "空请求也应给出正数占位：{a}");
+        assert!(b > a, "system 必须计入估算：{b} 应大于 {a}");
     }
 }
