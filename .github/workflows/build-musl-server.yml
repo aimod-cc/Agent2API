@@ -1,0 +1,136 @@
+name: build-musl-server
+
+# ── 这份工作流为什么只允许手动触发 ────────────────────────────
+# 本仓库的构建按规范全部搬到构建仓库（Agent2Builder/agent2api-releases），
+# 源码仓库的 build.yml 只做派发 —— 目的是别让「推一个 tag」变成「开七台虚拟机」。
+# 所以这里**不挂 tag 触发**：推 tag 依旧只跑那个十几秒的 dispatch job，
+# 想出一份 musl 静态包时手动点一次即可。等这份配方验证稳定后，
+# 直接把文件搬到构建仓库、改成跟着 repository_dispatch 跑就行。
+#
+# ── 为什么要 musl 静态产物 ────────────────────────────────────
+# 现在 Release 里的 `agent2api-server-linux-arm64.tar.gz` 是 **glibc 动态链接**：
+#
+#   · 依赖目标机的 `/lib/ld-linux-aarch64.so.1` 与 `libc.so.6`。Alpine、distroless、
+#     Android（Magisk / KernelSU 模块）上都没有这个 loader，必须随包再搬一份
+#     loader + libc，并在启动时 `--library-path` 指过去；
+#   · glibc 的解析器固定读 `/etc/resolv.conf`。这些环境里那个文件要么不存在
+#     （于是退回 `127.0.0.1:53`，直接 connection refused），要么不属于本服务，
+#     想接管就得在打包时对 libc 二进制做等长路径改写。
+#
+# musl 静态构建把这几个问题一起消掉：单文件、无 PT_INTERP、不需要 loader，
+# 也不受宿主 glibc 版本漂移影响。代价是体积（musl 静态约 14MB）与 libc 差异
+# （没有 NSS 模块、没有 /etc/nsswitch.conf），对本项目这种「只用
+# getaddrinfo + TLS」的服务端没有实际影响。实测见 docs/build-musl-server.md。
+#
+# ── 产物 ──────────────────────────────────────────────────────
+#   agent2api-server-linux-{arm64,amd64}-musl.tar.gz
+#   agent2api-server-linux-{arm64,amd64}-musl.tar.gz.sha256   （sha256sum 格式）
+# 命名与现有资产同规则，容器内一键更新/安装脚本的 `update_asset` 指过来即可。
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '要构建的 ref（留空 = 当前默认分支）'
+        required: false
+        type: string
+      attach_release:
+        description: '构建完成后把产物挂到同名 tag 的 Release 上（默认只留 artifact）'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-musl-server-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.arch }} musl
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-musl
+            arch: arm64
+          - target: x86_64-unknown-linux-musl
+            arch: amd64
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: 安装 Rust（带 musl target）
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: 缓存依赖
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-tauri/src-tauri
+          key: musl-${{ matrix.target }}
+
+      # zig 提供 musl 的 C 运行时与汇编器：ring 的 .S 与 rusqlite 的 bundled
+      # SQLite 都要走 C 编译器，cargo-zigbuild 会把它们都路由给 zig。
+      - name: 安装 zig 与 cargo-zigbuild
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --user ziglang==0.13.0
+          cargo install --locked cargo-zigbuild
+
+      - name: 编译（只编服务端 crate）
+        working-directory: desktop-tauri/src-tauri
+        run: |
+          set -euo pipefail
+          cargo zigbuild --release -p agent2api-server --target "${{ matrix.target }}"
+
+      - name: 自检：必须是静态、必须是目标架构
+        working-directory: desktop-tauri/src-tauri
+        run: |
+          set -euo pipefail
+          # 仓库根的 .cargo/config.toml 把 target-dir 指到了仓库根的 target/，
+          # 不要假设产物在 src-tauri/target 下；直接问 cargo 最稳。
+          TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
+          BIN="$TARGET_DIR/${{ matrix.target }}/release/agent2api-server"
+          test -x "$BIN" || { echo "::error::没找到产物 $BIN"; exit 1; }
+          file "$BIN"
+          # 静态构建不允许出现 PT_INTERP；出现了说明 CRT 没接对，直接失败
+          if readelf -l "$BIN" | grep -q INTERP; then
+            echo "::error::产物仍然是动态链接（存在 PT_INTERP）"
+            exit 1
+          fi
+          readelf -h "$BIN" | grep -E 'Class|Machine'
+
+      - name: 打包 + sha256
+        working-directory: desktop-tauri/src-tauri
+        run: |
+          set -euo pipefail
+          TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
+          BIN="$TARGET_DIR/${{ matrix.target }}/release/agent2api-server"
+          NAME="agent2api-server-linux-${{ matrix.arch }}-musl.tar.gz"
+          tar -czf "$NAME" -C "$(dirname "$BIN")" agent2api-server
+          sha256sum "$NAME" > "$NAME.sha256"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          mv "$NAME" "$NAME.sha256" "$GITHUB_WORKSPACE/out/"
+          ls -l "$GITHUB_WORKSPACE/out"
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent2api-server-linux-${{ matrix.arch }}-musl
+          path: out/*
+          if-no-files-found: error
+
+      - name: 挂到同名 Release（可选）
+        if: ${{ github.event.inputs.attach_release == 'true' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          prerelease: true
+          files: out/*
