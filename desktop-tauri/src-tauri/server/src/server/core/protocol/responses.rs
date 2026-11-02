@@ -69,7 +69,15 @@ pub fn chat_from_responses(body: &Value) -> Result<Value, ConvertError> {
     if let Some(value) = body.get("max_output_tokens").filter(|value| is_truthy(value)) {
         out.insert("max_completion_tokens".to_string(), value.clone());
     }
-    for key in ["temperature", "top_p", "service_tier", "parallel_tool_calls", "user", "metadata"] {
+    for key in [
+        "temperature",
+        "top_p",
+        "service_tier",
+        "parallel_tool_calls",
+        "user",
+        "metadata",
+        "prompt_cache_key",
+    ] {
         if let Some(value) = body.get(key) {
             if !value.is_null() {
                 out.insert(key.to_string(), value.clone());
