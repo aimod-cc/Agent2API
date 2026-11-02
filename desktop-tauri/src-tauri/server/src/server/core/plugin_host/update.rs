@@ -221,7 +221,9 @@ pub async fn read_index_result() -> Result<Vec<IndexEntry>, String> {
             response.status.as_u16()
         ));
     }
-    let mut entries = parse_index(response.value, response.official, Some(&url)).await?;
+    let base_url = url.rsplit_once('/').map(|(base, _)| format!("{base}/"));
+    let mut entries =
+        parse_index(response.value, response.official, base_url.as_deref()).await?;
     if let Some(custom) = read_custom_index_result().await {
         entries.extend(custom);
     }
