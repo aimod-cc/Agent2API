@@ -417,24 +417,35 @@ impl ProviderAdapter for RpcAdapter {
         })
     }
 
+    /// 上游响应是否「其实是错误」（HTTP 200 但正文是业务失败）。
+    ///
+    /// ── 为什么这一位必须问插件 ──────────────────────────────────
+    /// 这条判据是 provider 知识：ZCode 的活动套餐通道用 HTTP 200 +
+    /// `application/json` 返回 `{"code":1005,"msg":"exceed quota limit"}`，
+    /// 智谱清言用 200 + `-1001 剩余积分不足`。网关自己只看得到状态码与头，
+    /// 不知道哪家的 2xx 其实是失败。默认实现（`!(200..300).contains`）在
+    /// 这里会把它们当成功，直接交给 SSE 翻译层 —— 结果是 `output` 为空的
+    /// 一次「成功」响应，账号也不会进冷却。
+    ///
+    /// ── 插件问不到时为什么回落到默认 ────────────────────────────
+    /// RPC 失败说明插件挂了；此时按 HTTP 状态码判成功至少与内置家同一口径，
+    /// 不会因为一次控制面超时把所有 2xx 响应都当成错误而误罚账号。
     fn is_error_response_async<'a>(
         &'a self,
         status: u16,
         headers: &'a HeaderMap,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, GatewayError>> + Send + 'a>> {
         Box::pin(async move {
-            if !(200..300).contains(&status) {
-                return Ok(true);
-            }
+            let default = !(200..300).contains(&status);
             let mut params = self.base();
             params.insert("status".into(), Value::from(status));
             params.insert("headers".into(), headers_json(headers));
+            // 控制面问不到时回落到 HTTP 状态码：一次 RPC 超时不该把所有 2xx
+            // 响应都判成错误，从而误罚账号。
             let value = self.control(
                 proto::methods::gateway::IS_ERROR_RESPONSE, Value::Object(params),
-            ).await?;
-            value.as_bool().ok_or_else(|| GatewayError::with_status(
-                502, "插件返回的响应类型判定不是布尔值",
-            ))
+            ).await;
+            Ok(value.ok().and_then(|value| value.as_bool()).unwrap_or(default))
         })
     }
 
