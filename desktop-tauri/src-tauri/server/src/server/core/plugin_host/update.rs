@@ -13,6 +13,8 @@ use crate::server::core::update::client::{
 use crate::server::core::update::{compare_versions, is_prerelease_version, source};
 
 pub const INDEX_REPO: &str = "Agent2plugin/Agent2plugin";
+pub const CUSTOM_INDEX_URL: &str =
+    "https://raw.githubusercontent.com/SsuJojo/Agent2Providers/main/.agent2api/index.json";
 pub const FALLBACK_REPO: &str = "Agent2Builder/agent2api-providers-releases";
 const GITHUB_API: &str = "https://api.github.com";
 const QUERY_TIMEOUT_MS: u64 = 30_000;
@@ -38,6 +40,8 @@ pub struct IndexEntry {
     pub description: String,
     pub official: bool,
     pub require_signed: bool,
+    pub author: Option<String>,
+    pub index_url: Option<String>,
     pub manifest: String,
     pub icon: String,
     pub repo: String,
@@ -143,22 +147,9 @@ async fn fetch(url: &str) -> Result<reqwest::Response, String> {
     Ok(response)
 }
 
-pub async fn read_index_result() -> Result<Vec<IndexEntry>, String> {
-    let url = format!("https://raw.githubusercontent.com/{INDEX_REPO}/main/index.json");
-    let response = fetch_json(&url, &github_headers(), QUERY_TIMEOUT_MS, |value| {
-        value.get("plugins").and_then(Value::as_array).is_some()
-    })
-    .await
-    .map_err(|error| describe_error(&error.message, 0))?;
-    if !response.status.is_success() {
-        return Err(format!(
-            "读取插件索引失败：HTTP {}",
-            response.status.as_u16()
-        ));
-    }
-    let require_signed = !response.official;
-    let document = response.value;
-    let items = document
+async fn parse_index(value: Value, official: bool, index_url: Option<&str>) -> Result<Vec<IndexEntry>, String> {
+    let require_signed = !official;
+    let items = value
         .get("plugins")
         .and_then(Value::as_array)
         .ok_or_else(|| "插件索引缺少 plugins 数组".to_string())?;
@@ -174,12 +165,26 @@ pub async fn read_index_result() -> Result<Vec<IndexEntry>, String> {
                 return None;
             }
             let name = text(item, "name");
+            let author = item
+                .get("author")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string);
             Some(IndexEntry {
                 name: if name.is_empty() { id.clone() } else { name },
                 id,
                 description: text(item, "description"),
-                official: item.get("official").and_then(Value::as_bool) == Some(true),
+                official: official && item.get("official").and_then(Value::as_bool) == Some(true),
                 require_signed,
+                author: author.or_else(|| {
+                    (!official).then(|| {
+                        index_url
+                            .and_then(|url| url::Url::parse(url).ok())
+                            .and_then(|url| url.path().split('/').nth(1).map(str::to_string))
+                            .unwrap_or_else(|| "第三方".to_string())
+                    })
+                }),
+                index_url: index_url.map(str::to_string),
                 manifest: text(item, "manifest"),
                 icon: text(item, "icon"),
                 repo: item
@@ -191,11 +196,43 @@ pub async fn read_index_result() -> Result<Vec<IndexEntry>, String> {
         .collect())
 }
 
+async fn read_custom_index_result() -> Option<Vec<IndexEntry>> {
+    let response = fetch_json(CUSTOM_INDEX_URL, &github_headers(), QUERY_TIMEOUT_MS, |value| {
+        value.get("plugins").and_then(Value::as_array).is_some()
+    })
+    .await
+    .ok()?;
+    if !response.status.is_success() {
+        return None;
+    }
+    parse_index(response.value, false, Some(CUSTOM_INDEX_URL)).await.ok()
+}
+
+pub async fn read_index_result() -> Result<Vec<IndexEntry>, String> {
+    let url = format!("https://raw.githubusercontent.com/{INDEX_REPO}/main/index.json");
+    let response = fetch_json(&url, &github_headers(), QUERY_TIMEOUT_MS, |value| {
+        value.get("plugins").and_then(Value::as_array).is_some()
+    })
+    .await
+    .map_err(|error| describe_error(&error.message, 0))?;
+    if !response.status.is_success() {
+        return Err(format!(
+            "读取插件索引失败：HTTP {}",
+            response.status.as_u16()
+        ));
+    }
+    let mut entries = parse_index(response.value, response.official, Some(&url)).await?;
+    if let Some(custom) = read_custom_index_result().await {
+        entries.extend(custom);
+    }
+    Ok(entries)
+}
+
 pub async fn read_index() -> Vec<IndexEntry> {
     read_index_result().await.unwrap_or_default()
 }
 
-fn index_path(path: &str) -> Option<String> {
+fn index_path(base_url: Option<&str>, path: &str) -> Option<String> {
     if path.is_empty()
         || path.starts_with('/')
         || path.contains('\\')
@@ -204,14 +241,22 @@ fn index_path(path: &str) -> Option<String> {
     {
         return None;
     }
-    Some(format!(
-        "https://raw.githubusercontent.com/{INDEX_REPO}/main/{path}"
-    ))
+    Some(match base_url {
+        Some(base) => {
+            let base = base.trim_end_matches('/');
+            format!("{base}/{path}")
+        }
+        None => format!("https://raw.githubusercontent.com/{INDEX_REPO}/main/{path}"),
+    })
 }
 
 pub async fn read_detail(path: &str) -> Option<PluginDetail> {
+    read_detail_in(None, path).await
+}
+
+pub async fn read_detail_in(base_url: Option<&str>, path: &str) -> Option<PluginDetail> {
     let response = fetch_json(
-        &index_path(path)?,
+        &index_path(base_url, path)?,
         &github_headers(),
         QUERY_TIMEOUT_MS,
         |value| value.is_object() && value.get("release").is_some_and(Value::is_object),
@@ -243,7 +288,11 @@ pub async fn read_detail(path: &str) -> Option<PluginDetail> {
 }
 
 pub async fn read_store_icon(path: &str) -> Option<String> {
-    let response = fetch(&index_path(path)?).await.ok()?;
+    read_store_icon_in(None, path).await
+}
+
+pub async fn read_store_icon_in(base_url: Option<&str>, path: &str) -> Option<String> {
+    let response = fetch(&index_path(base_url, path)?).await.ok()?;
     if !response.status().is_success() || response.content_length().unwrap_or(0) > 2 * 1024 * 1024 {
         return None;
     }

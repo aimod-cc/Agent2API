@@ -8,8 +8,8 @@ function Card({ children, installed }: { children: React.ReactNode; installed?: 
   return <UiCard render={<article />} className={'flex flex-col ' + (installed ? 'border-success/40' : '')}>{children}</UiCard>
 }
 
-function CardHead({ id, name, version, icon, children }: {
-  id: string; name: string; version?: string | null; icon?: string | null; children?: React.ReactNode
+function CardHead({ id, name, version, icon, author, children }: {
+  id: string; name: string; version?: string | null; icon?: string | null; author?: string | null; children?: React.ReactNode
 }) {
   const title = pluginName(id, name)
   return <div className='flex gap-3 px-4 pt-4'>
@@ -21,6 +21,7 @@ function CardHead({ id, name, version, icon, children }: {
         {title}{version ? <span className='text-[11.5px] font-normal tabular-nums text-muted-foreground'>v{version}</span> : null}
       </h3>
       <div className='flex flex-wrap gap-1.5'>{children}</div>
+      {author ? <div className='text-[11px] text-muted-foreground'>{t('作者：{author}', { author })}</div> : null}
     </div>
   </div>
 }
@@ -53,7 +54,7 @@ export function StorePluginCard({ item, target, operation, disabled, onInstall, 
   const platform = item.platforms.find(platform => platform.target === target)
   const installable = Boolean(item.version && platform && !item.error)
   return <Card>
-    <CardHead id={item.id} name={item.name} version={item.version} icon={item.icon}>
+    <CardHead id={item.id} name={item.name} version={item.version} icon={item.icon} author={item.author || item.publisher}>
       {item.official ? <Badge variant='brand'>{t('官方')}</Badge> : null}
       {item.prerelease ? <Badge variant='warning'>{t('beta 版')}</Badge> : null}
       {!item.version ? <Badge variant='outline'>{t('暂未发布')}</Badge> : null}
@@ -90,7 +91,8 @@ export function InstalledPluginCard({ pack, store, host, update, operation, disa
   const blocked = update?.error === true && !required
   const packHost = pack.host === undefined ? host : pack.host
   return <Card installed>
-    <CardHead id={pack.id} name={store?.name || pack.name} version={pack.version} icon={pack.icon || store?.icon}>
+    <CardHead id={pack.id} name={store?.name || pack.name} version={pack.version} icon={pack.icon || store?.icon}
+      author={store?.author || store?.publisher || pack.author || pack.publisher}>
       <Badge variant={pack.enabled ? 'default' : 'secondary'}>{pack.enabled ? t('已启用') : t('已停用')}</Badge>
       <Badge variant={pack.signed ? 'success' : 'warning'}>{pack.signed ? t('已签名') : t('未签名')}</Badge>
       {pack.version.includes('-') ? <Badge variant='warning'>{t('beta 版')}</Badge> : null}
