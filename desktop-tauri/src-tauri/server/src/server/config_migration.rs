@@ -408,10 +408,20 @@ fn copy_dir_all(from: &Path, to: &Path, skip: &Path) -> io::Result<()> {
 fn is_sqlite_database_name(name: &std::ffi::OsStr) -> bool {
     let name = name.to_string_lossy();
     let base = crate::server::db::FILE_NAME;
-    if name == base {
+    // 大小写不敏感：Windows / macOS 的默认文件系统上 `AGENT2API.DB` 与
+    // `agent2api.db` 是**同一个文件**，按精确匹配判会把它整份拷过去。
+    // 用 `get(..base.len())` 而不是 `to_ascii_lowercase()`：只为比较前
+    // `base.len()` 个字符，不必为几百 MB 无关文件名的分配整串小写。
+    let matches_base = name
+        .get(..base.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(base));
+    if !matches_base {
+        return false;
+    }
+    if name.len() == base.len() {
         return true;
     }
-    match name.strip_prefix(base) {
+    match name.get(base.len()..) {
         Some(rest) => {
             rest.starts_with('-')
                 && rest.len() > 1
@@ -488,6 +498,17 @@ mod tests {
             assert!(
                 !is_sqlite_database_name(OsStr::new(name)),
                 "{name} 是普通文件，不该被跳过"
+            );
+        }
+    }
+
+    /// Windows / macOS 默认大小写不敏感：大小写变体是同一个文件，同样要跳过。
+    #[test]
+    fn database_name_match_is_case_insensitive() {
+        for name in ["AGENT2API.DB", "Agent2Api.Db-WAL", "agent2api.DB-shm"] {
+            assert!(
+                is_sqlite_database_name(OsStr::new(name)),
+                "{name} 是同一个库文件的大小写变体，必须被迁移跳过"
             );
         }
     }
