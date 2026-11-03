@@ -5,6 +5,11 @@ use rusqlite::backup::Backup;
 use rusqlite::Connection;
 
 use super::complete_backup;
+use super::retention::{prune_backups, BackupKind};
+
+/// 保留最近几份「恢复前安全备份」。整库级留影每份都等于整个库，
+/// 留 2 份足够覆盖「这次恢复错了 + 上一次也错了」的回退链，再多就是纯占盘。
+const KEEP_SAFETY_BACKUPS: usize = 2;
 
 pub(super) fn create(main: &mut Connection, config_dir: &Path) -> Result<PathBuf, String> {
     let backup_dir = config_dir.join("backups");
@@ -47,5 +52,9 @@ pub(super) fn create(main: &mut Connection, config_dir: &Path) -> Result<PathBuf
     );
     let saved = backup_dir.join(name);
     std::fs::rename(&target, &saved).map_err(|error| format!("保存安全备份失败: {error}"))?;
+    // 写成功之后再清旧的：反过来的话，清理期间新备份还没落盘，
+    // 一旦进程在这里退出就同时少了「旧的」和「新的」。
+    // 清理失败不影响本次恢复（见 retention 模块头）。
+    prune_backups(&backup_dir, BackupKind::PreRestore, KEEP_SAFETY_BACKUPS);
     Ok(saved)
 }

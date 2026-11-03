@@ -1930,6 +1930,21 @@ function DataPane({ snap }: { snap: SettingsSnapshot }) {
               </span>
               <div className='hint'>{NOTES.storageSize}</div>
             </div>
+            {/* 空洞读数：只在确实有可回收空间时出现 —— 0 时多一行「可回收 0 B」
+                只会让用户以为这里坏了。占比过低（<1%）时压缩也不值得，
+                与后端「只有占比够高才值得 VACUUM」的口径一致。 */}
+            {counts && storage.reclaimableBytes > 0 && storage.freePageRatio >= 0.01 ? (
+              <div className='retention-row'>
+                <Label htmlFor='storage-db-reclaim'>{t('可回收空洞')}</Label>
+                <span className='storage-line'>
+                  <span className='storage-path' id='storage-db-reclaim'>
+                    {formatBytes(storage.reclaimableBytes)}
+                    {` (${Math.round(storage.freePageRatio * 100)}%)`}
+                  </span>
+                </span>
+                <div className='hint'>{NOTES.storageReclaim}</div>
+              </div>
+            ) : null}
           </div>
           <div className='retention-list storage-counts'>
             <StorageCount label={t('账号')} value={count(storage.accounts)} />

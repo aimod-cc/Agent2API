@@ -338,12 +338,38 @@ fn sweep_stale_staging(parent: &Path, target_name: &str) {
 ///
 /// `skip` 是暂存目录里的所有权标记文件路径：它只属于本次迁移，源目录里即使
 /// 恰好同名也不该把它覆盖/写坏（那会让清理逻辑认不出自己的目录）。
+///
+/// ── 为什么必须排除 SQLite 库 ────────────────────────────────
+/// 这条迁移写于「配置目录只有 config.json / accounts.json / logs.jsonl」的
+/// 时代（见模块头），当时整份拷贝的代价可以忽略。统一库落地后
+/// `{config_dir}/agent2api.db` 是**几 GB 级**的单一文件，并且带着 `-wal` /
+/// `-shm`；无条件递归拷贝会让一次启动凭空多出「一份整库」的磁盘占用，
+/// 在小容量系统盘上直接触顶（用户实测：C 盘被吃满）。
+///
+/// 因此这里跳过库文件三件套与它的临时伴随文件。跳过是**安全**的：
+///   - 旧版程序根本不会写 `agent2api.db`（统一库是本程序引入的），
+///     迁移的语义是「把旧版的数据搬过来」，库文件不属于旧版数据；
+///   - 若旧目录里真有一份库，它也来自更早的本程序运行 —— 那种情况下
+///     新目录通常已存在（迁移在第一次启动就完成了），走不到这条拷贝路径。
+///
+/// 判据按文件名匹配而不是按体积：体积阈值会随数据增长失效，而文件名是
+/// 结构化事实（见 `db::FILE_NAME` 与 SQLite 的固定伴随后缀）。
 fn copy_dir_all(from: &Path, to: &Path, skip: &Path) -> io::Result<()> {
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
         let source = entry.path();
         let destination = to.join(entry.file_name());
         if destination == skip {
+            continue;
+        }
+        if is_sqlite_database_name(&entry.file_name()) {
+            crate::server::logging::console_line(
+                "[Config]",
+                &format!(
+                    "迁移跳过数据库文件（统一库由新版本自行建库，不随配置目录搬运）: {}",
+                    source.display()
+                ),
+            );
             continue;
         }
         if is_link_like(&entry.metadata()?) {
@@ -367,6 +393,42 @@ fn copy_dir_all(from: &Path, to: &Path, skip: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// SQLite 库文件名是否属于「不随配置目录搬运」的那一组。
+///
+/// 覆盖 `agent2api.db` 与 SQLite 为它维护的伴随后缀：
+///   - `-wal`（预写日志）、`-shm`（共享内存索引）—— 运行期必须与主库同进同退；
+///   - `-journal`（回滚日志）—— 非 WAL 模式或崩溃恢复期间出现。
+///
+/// 判据是「主库名 + `-` 开头 + 纯字母数字」，而不是枚举有限几种后缀：
+/// SQLite 的实验特性与不同编译选项会造出 `-wal2` / `-shm2` 这类变体，
+/// 用前缀规则一次覆盖。`agent2api.db.backup` 这种用户手工改名**不**跳过 ——
+/// 它不是活库，搬走既不占运行期资源，也保留了用户自己留的那份。
+fn is_sqlite_database_name(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    let base = crate::server::db::FILE_NAME;
+    // 大小写不敏感：Windows / macOS 的默认文件系统上 `AGENT2API.DB` 与
+    // `agent2api.db` 是**同一个文件**，按精确匹配判会把它整份拷过去。
+    // 用 `get(..base.len())` 而不是 `to_ascii_lowercase()`：只为比较前
+    // `base.len()` 个字符，不必为几百 MB 无关文件名的分配整串小写。
+    let matches_base = name
+        .get(..base.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(base));
+    if !matches_base {
+        return false;
+    }
+    if name.len() == base.len() {
+        return true;
+    }
+    match name.get(base.len()..) {
+        Some(rest) => {
+            rest.starts_with('-')
+                && rest.len() > 1
+                && rest[1..].chars().all(|c| c.is_ascii_alphanumeric())
+        }
+        None => false,
+    }
 }
 
 /// 是否是链接类目录项：符号链接，或 Windows 重解析点（junction / mount point）。
@@ -404,4 +466,79 @@ fn env_dir_override_set() -> bool {
                 .map(|value| !value.trim().is_empty())
                 .unwrap_or(false)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    /// 库三件套（主库 + WAL + SHM）都必须被排除，否则迁移会多拷一份整库。
+    #[test]
+    fn sqlite_database_files_are_skipped() {
+        for name in ["agent2api.db", "agent2api.db-wal", "agent2api.db-shm", "agent2api.db-journal"] {
+            assert!(
+                is_sqlite_database_name(OsStr::new(name)),
+                "{name} 必须被迁移跳过（否则会整库复制一份）"
+            );
+        }
+    }
+
+    /// 配置文件与用户手工改名的库副本照常搬运，不受影响。
+    #[test]
+    fn ordinary_config_files_are_not_skipped() {
+        for name in [
+            "config.json",
+            "accounts.json",
+            "logs.jsonl",
+            "agent2api.db.backup",
+            "agent2api.dbx",
+            "my-agent2api.db",
+        ] {
+            assert!(
+                !is_sqlite_database_name(OsStr::new(name)),
+                "{name} 是普通文件，不该被跳过"
+            );
+        }
+    }
+
+    /// Windows / macOS 默认大小写不敏感：大小写变体是同一个文件，同样要跳过。
+    #[test]
+    fn database_name_match_is_case_insensitive() {
+        for name in ["AGENT2API.DB", "Agent2Api.Db-WAL", "agent2api.DB-shm"] {
+            assert!(
+                is_sqlite_database_name(OsStr::new(name)),
+                "{name} 是同一个库文件的大小写变体，必须被迁移跳过"
+            );
+        }
+    }
+
+    /// 端到端：源目录里放一份假库，迁移后目标目录里不该出现它。
+    #[test]
+    fn copy_dir_all_skips_database_bytes() {
+        let root = std::env::temp_dir().join(format!(
+            "cfg-migrate-test-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let from = root.join("from");
+        let to = root.join("to");
+        std::fs::create_dir_all(&from).expect("建源目录");
+        std::fs::create_dir_all(&to).expect("建目标目录");
+        std::fs::write(from.join("config.json"), b"{}").expect("写配置");
+        std::fs::write(from.join("agent2api.db"), vec![0u8; 4096]).expect("写假库");
+        std::fs::write(from.join("agent2api.db-wal"), vec![0u8; 16]).expect("写假 WAL");
+
+        let skip = to.join(".marker");
+        copy_dir_all(&from, &to, &skip).expect("拷贝应当成功");
+
+        assert!(to.join("config.json").is_file(), "配置文件必须搬过去");
+        assert!(!to.join("agent2api.db").exists(), "库文件不该被复制");
+        assert!(!to.join("agent2api.db-wal").exists(), "WAL 不该被复制");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
