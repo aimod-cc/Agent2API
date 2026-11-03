@@ -265,6 +265,69 @@ fn autoclaw_402_406_with_body_stays_fatal() {
     }
 }
 
+/// 对照组：正文没有顶层 `message` / `code`，但有结构化内容（如
+/// `{"error":{"type":"insufficient_quota"}}`）—— 不能当成「空体」兜底。
+///
+/// 这是本次修复最容易误伤的一种形态：只看顶层键是否存在会把它判成空体，
+/// 而它其实是上游给了明确说明的正文。
+#[test]
+fn autoclaw_402_406_with_structured_body_stays_fatal() {
+    for status in [402u16, 406] {
+        let body = serde_json::json!({ "error": { "type": "insufficient_quota" } });
+        let fatal = UpstreamErrorClass::Fatal {
+            status,
+            message: format!("上游返回 {status}: insufficient_quota"),
+            upstream_code: None,
+        };
+        let class = super::rpc::autoclaw_quota_fallback("autoclaw", status, fatal, &body);
+        assert!(
+            matches!(class, UpstreamErrorClass::Fatal { .. }),
+            "带结构化正文的 {status} 不该被当成空体兜底，实际 {class:?}"
+        );
+    }
+}
+
+/// 对照组：状态码不在 {402,403,406} 时，即使正文是 810000 也不兜底。
+///
+/// 810000 这条判据原本只认 403；扩到 402/406 时**不能**顺手放开到所有
+/// 状态码 —— 那会把 500 之类的上游故障也当成额度耗尽去冷却。
+#[test]
+fn autoclaw_810000_outside_the_three_statuses_is_ignored() {
+    let body = serde_json::json!({ "code": 810000, "message": "GLM-5.3 免费额度已用完" });
+    for status in [400u16, 429, 500, 502] {
+        let fatal = UpstreamErrorClass::Fatal {
+            status,
+            message: format!("上游返回 {status}"),
+            upstream_code: Some(810000),
+        };
+        let class = super::rpc::autoclaw_quota_fallback("autoclaw", status, fatal, &body);
+        assert!(
+            matches!(class, UpstreamErrorClass::Fatal { .. }),
+            "状态码 {status} 不该被 810000 判据覆盖（429 已由上层处理）"
+        );
+    }
+}
+
+/// 对照组：非 AutoClaw 家的 402 / 406 空体不受影响。
+#[test]
+fn other_providers_empty_402_406_stay_fatal() {
+    for provider in ["workbuddy", "raccoon", "trae", "some-custom"] {
+        for status in [402u16, 406] {
+            let body = serde_json::json!({ "code": null, "message": "" });
+            let fatal = UpstreamErrorClass::Fatal {
+                status,
+                message: format!("上游返回 {status}: "),
+                upstream_code: None,
+            };
+            let class = super::rpc::autoclaw_quota_fallback(provider, status, fatal, &body);
+            assert!(
+                matches!(class, UpstreamErrorClass::Fatal { .. }),
+                "{provider} 的 {status} 不该被 AutoClaw 兜底覆盖"
+            );
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn build_chat_request_goes_through_rpc() {
     let Some((host, providers)) = boot().await else {

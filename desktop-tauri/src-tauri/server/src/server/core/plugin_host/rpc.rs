@@ -1459,15 +1459,23 @@ fn upstream_error_class(class: proto::ErrorClass) -> UpstreamErrorClass {
 /// 这一条纯判据，留在网关侧做兜底覆盖最稳。
 ///
 /// ── 判据 ────────────────────────────────────────────────────
-/// 只认 AutoClaw 两地（`autoclaw` / `autoclaw-intl`）+ HTTP 403 +
-/// 业务码 810000（或正文含「免费额度已用完」）。其它家的 403 不动。
-/// 另外 402 / 406 + **空响应体**也按额度耗尽兜底：生产库实测 AutoClaw 家
-/// 在额度耗尽时会把同一判据换成这两个状态码，且正文为空拿不到任何证据
-/// （issue #6）—— 状态码即证据，空体 + 这两个码没有「正常业务含义」。
+/// 只认 AutoClaw 两地（`autoclaw` / `autoclaw-intl`），且状态码必须是
+/// **402 / 403 / 406** 之一。其它家的 403、其它状态码一律不动 ——
+/// 判据收得窄，误伤的代价（把一次真实计费墙/上游故障当成限流去冷却）
+/// 远高于漏判（下一轮还会再判一次）。
+///
+/// 分两条：
+///   1. 有正文证据：业务码 810000 或正文含「免费额度已用完」→ 按天重置，
+///      冷却到下一个北京零点；
+///   2. **空响应体**的 402 / 406：生产库实测 AutoClaw 额度耗尽会以这两个
+///      状态码 + 空正文出现（issue #6），拿不到任何文案证据 ——
+///      「空体 + 402/406」在 AutoClaw 上没有正常业务含义，状态码即证据。
+///      恢复时刻不猜，交给上层按 `Retry-After` 或默认短期冷却。
 ///
 /// ── reset_at ────────────────────────────────────────────────
 /// 上游不给恢复时刻；免费额度按天重置（上游的日口径都是北京时间零点），
-    /// 取下一个北京零点，与 CodeArts 福利日池的冷却口径同一来源。
+/// 取下一个北京零点，与 CodeArts 福利日池的冷却口径同一来源。
+/// 空体兜底那一条是例外（见上）：没有「按天」的依据，不做跨天猜测。
 pub(super) fn autoclaw_quota_fallback(
     provider_id: &str,
     status: u16,
@@ -1479,11 +1487,14 @@ pub(super) fn autoclaw_quota_fallback(
     if matches!(class, UpstreamErrorClass::QuotaLimited { .. }) {
         return class;
     }
-    if !is_autoclaw_family(provider_id) {
+    // 状态码先收窄：402 / 406 是本次新增，403 是原有判据。
+    // 这一步放在最前面，保证「任何 provider 的其它状态码」都原样返回。
+    if !matches!(status, 402 | 403 | 406) || !is_autoclaw_family(provider_id) {
         return class;
     }
     let code = error_body.get("code").and_then(Value::as_i64);
     let message = error_body.get("message").and_then(Value::as_str).unwrap_or("");
+    // ① 有正文证据：业务码 / 文案。
     if code == Some(810000) || message.contains("免费额度已用完") {
         let now_ms = crate::server::logging::now_ms();
         return UpstreamErrorClass::QuotaLimited {
@@ -1493,22 +1504,55 @@ pub(super) fn autoclaw_quota_fallback(
             status,
         };
     }
-    // 空响应体的 402 / 406：没有文案证据，但生产库（issue #6）里 AutoClaw
-    // 额度耗尽就是这个形态 —— 状态码即证据。reset_at 不猜：上层
-    // provider_loop 会优先采用上游 Retry-After，没有则落默认短期冷却。
-    if message.is_empty()
-        && code.is_none()
-        && matches!(status, 402 | 406)
+    // ② 空响应体的 402 / 406（issue #6）。
+    //
+    // 判据必须核验「体确实是空的」，而不是只看顶层 `message` 缺省：
+    // 上游也可能返回 `{"error":{"type":"insufficient_quota"}}` 这类
+    // 没有 `message` / `code` 顶层键的**有内容**正文 —— 那种形态说明
+    // 上游给了结构化说明，应当保持原本的 Fatal 透传，而不是猜成限流。
+    if matches!(status, 402 | 406)
         && matches!(class, UpstreamErrorClass::Fatal { .. })
+        && is_blank_error_body(error_body)
     {
         return UpstreamErrorClass::QuotaLimited {
             reset_at: None,
             message: format!("上游返回 {status}: 请求额度受限（上游未返回详情），按限流冷却"),
-            upstream_code: None,
+            // 正文没给业务码时保留分类器已有的那个（插件可能从状态行/头部
+            // 解析出过），不要因为走了兜底分支就丢掉。
+            upstream_code: match &class {
+                UpstreamErrorClass::Fatal { upstream_code, .. } => *upstream_code,
+                _ => None,
+            },
             status,
         };
     }
     class
+}
+
+/// 错误正文是否是「空白」（没有任何可用信息）。
+///
+/// `UpstreamErrorDetail::to_value()` 对空响应体固定产出
+/// `{"code":null,"message":""}`，所以最常见的形态是「键在、值为空」；
+/// 但插件也可能把一段非 JSON 文本原样塞进 `message`，或有上游返回
+/// `{"error":{...}}` 这类结构。判据因此是**逐值检查**：只含
+/// null / 空串 / 空对象 / 空数组时才算空 —— 出现任何非空内容就判为
+/// 「有正文」，退回原分类。
+fn is_blank_error_body(body: &Value) -> bool {
+    fn blank(value: &Value) -> bool {
+        match value {
+            Value::Null => true,
+            Value::String(text) => text.trim().is_empty(),
+            Value::Array(items) => items.iter().all(blank),
+            Value::Object(map) => map.values().all(blank),
+            Value::Bool(_) | Value::Number(_) => false,
+        }
+    }
+    match body {
+        // 非对象（数组 / 字符串 / 数字）不是错误正文的常规形态；
+        // 只有「什么都读不到」才算空。
+        Value::Object(map) => map.values().all(blank),
+        other => blank(other),
+    }
 }
 
 /// 从分类结果里取出已有文案（Fatal/其它档的 message 已含 `上游返回 {status}:`）。
