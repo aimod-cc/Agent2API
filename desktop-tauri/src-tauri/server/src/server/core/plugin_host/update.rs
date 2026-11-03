@@ -52,6 +52,8 @@ pub struct PluginDetail {
     pub protocol: u32,
     pub repo: String,
     pub tag_template: String,
+    /// 备用 tag 模板（如 beta 线的 `v{version}-fork-beta.{run}`）。
+    pub alt_tag_templates: Vec<String>,
     pub asset_template: String,
     pub homepage: String,
     pub require_signed: bool,
@@ -285,6 +287,18 @@ pub async fn read_detail_in(base_url: Option<&str>, path: &str) -> Option<Plugin
             .map(|value| text(value, "tag"))
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "v{version}".to_string()),
+        alt_tag_templates: release
+            .and_then(|value| value.get("altTags"))
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
         asset_template: release
             .map(|value| text(value, "asset"))
             .filter(|value| !value.is_empty())
@@ -370,10 +384,21 @@ fn pick_release_assets(
     id: &str,
     detail: Option<&PluginDetail>,
 ) -> Option<ReleaseAssets> {
-    let tag = detail
-        .map(|detail| detail.tag_template.as_str())
-        .unwrap_or("v{version}");
-    let version = release_version(release, tag)?;
+    let templates = detail
+        .map(|detail| {
+            let mut templates = vec![detail.tag_template.clone()];
+            templates.extend(detail.alt_tag_templates.iter().cloned());
+            templates
+        })
+        .unwrap_or_else(|| vec!["v{version}".to_string()]);
+    let mut version = None;
+    for template in &templates {
+        if let Some(parsed) = release_version(release, template) {
+            version = Some(parsed);
+            break;
+        }
+    }
+    let version = version?;
     let template = detail
         .map(|detail| detail.asset_template.as_str())
         .unwrap_or("{id}-{version}-{target}.zip")
@@ -764,6 +789,7 @@ mod tests {
             protocol: 1,
             repo: "SsuJojo/Agent2Providers".to_string(),
             tag_template: "v{version}-fork.{run}".to_string(),
+            alt_tag_templates: Vec::new(),
             asset_template: "{id}-{version}-{target}.zip".to_string(),
             homepage: String::new(),
             require_signed: true,
@@ -771,6 +797,30 @@ mod tests {
         let assets = pick_release_assets(&release, "ssujojo-providers", Some(&detail))
             .expect("应当解析 fork run tag");
         assert_eq!(assets.version, "0.2.1");
+        assert_eq!(assets.platforms.len(), 1);
+    }
+
+    #[test]
+    fn parses_fork_beta_run_tag_template() {
+        let release = json!({
+            "tag_name": "v3.3.0-beta.6-fork-beta.3",
+            "assets": [
+                { "name": "ssujojo-providers-3.3.0-beta.6-x86_64-pc-windows-msvc.zip",
+                  "browser_download_url": "https://example.com/beta.zip", "size": 100 }
+            ]
+        });
+        let detail = PluginDetail {
+            protocol: 1,
+            repo: "SsuJojo/Agent2Providers".to_string(),
+            tag_template: "v{version}-fork.{run}".to_string(),
+            alt_tag_templates: vec!["v{version}-fork-beta.{run}".to_string()],
+            asset_template: "{id}-{version}-{target}.zip".to_string(),
+            homepage: String::new(),
+            require_signed: true,
+        };
+        let assets = pick_release_assets(&release, "ssujojo-providers", Some(&detail))
+            .expect("应当解析 fork-beta run tag");
+        assert_eq!(assets.version, "3.3.0-beta.6");
         assert_eq!(assets.platforms.len(), 1);
     }
 }
