@@ -226,6 +226,162 @@ fn other_autoclaw_403_stays_fatal() {
     );
 }
 
+/// 空响应体的 402 按额度耗尽兜底（issue #6）：生产库实测 AutoClaw 额度耗尽
+/// 会以 402 + 空正文出现，插件分类器拿不到证据落 Fatal ⇒ 不冷却不换号。
+/// reset_at 留 None：上层接 Retry-After 或默认短期冷却。
+///
+/// 两种「空体」形状都要覆盖：状态码路径给的是空对象，`provider_http` 路径
+/// 给的是插件渲染过的占位文案（见 `is_placeholder_message`）。
+#[test]
+fn autoclaw_empty_body_402_falls_back_to_quota_limited() {
+    for body in [
+        serde_json::json!({}),
+        serde_json::json!({ "code": null, "message": "" }),
+        serde_json::json!({ "message": "上游错误" }),
+        serde_json::json!({ "message": "上游返回 402: 上游错误" }),
+    ] {
+        let fatal = UpstreamErrorClass::Fatal {
+            status: 402,
+            message: "上游返回 402: 上游错误".into(),
+            upstream_code: None,
+        };
+        let class = super::rpc::autoclaw_quota_fallback("autoclaw", 402, fatal, &body);
+        let UpstreamErrorClass::QuotaLimited { reset_at, status: got, .. } = &class else {
+            panic!("空体 402 应当被兜底成 QuotaLimited，实际 {class:?}（body {body}）");
+        };
+        assert_eq!(*got, 402);
+        assert!(reset_at.is_none(), "空体兜底不该猜恢复时刻，实际 {reset_at:?}");
+    }
+}
+
+/// 空响应体的 406 **不**兜底（审查结论）：406 在 AutoClaw 上是上游预校验
+/// 拒收的统一形态（max_tokens 取小值 / system 首句指纹 / 请求形态风控），
+/// 一律当额度耗尽会冷却健康账号、并吞掉插件拼好的 `UPSTREAM_406_HINT`。
+#[test]
+fn autoclaw_empty_body_406_stays_fatal() {
+    let hint = "上游返回 406: 上游错误；上游拒收（406）且未给出原因，实测过的方向：……";
+    for message in ["上游返回 406: 上游错误", hint] {
+        let fatal = UpstreamErrorClass::Fatal {
+            status: 406,
+            message: message.into(),
+            upstream_code: None,
+        };
+        for body in [serde_json::json!({}), serde_json::json!({ "message": "上游错误" })] {
+            let class = super::rpc::autoclaw_quota_fallback("autoclaw", 406, fatal.clone(), &body);
+            let UpstreamErrorClass::Fatal { message: kept, .. } = &class else {
+                panic!("空体 406 不该被兜底，实际 {class:?}");
+            };
+            assert_eq!(kept, message, "406 的原始文案（含提示）必须原样保留");
+        }
+    }
+}
+
+/// 对照组：带业务 body 的 402 / 406（真实计费墙、请求形态问题等）不兜底。
+#[test]
+fn autoclaw_402_406_with_body_stays_fatal() {
+    for status in [402u16, 406] {
+        let body = serde_json::json!({ "message": "余额不足，请充值" });
+        let fatal = UpstreamErrorClass::Fatal {
+            status,
+            message: format!("上游返回 {status}: 余额不足，请充值"),
+            upstream_code: None,
+        };
+        let class = super::rpc::autoclaw_quota_fallback("autoclaw", status, fatal, &body);
+        assert!(
+            matches!(class, UpstreamErrorClass::Fatal { .. }),
+            "带 body 的 {status} 不该被兜底，实际 {class:?}"
+        );
+    }
+}
+
+/// 对照组：只有「占位词」才算空体 —— 任何带信息量的正文都要保持 Fatal。
+///
+/// 这一条防的是 `is_placeholder_message` 判得太宽：把「上游错误（余额不足）」
+/// 这类仍含上游信息的文案误判成占位词，会让一次真实计费墙被当成额度过期。
+#[test]
+fn autoclaw_402_message_with_content_is_not_treated_as_blank() {
+    for message in [
+        "上游返回 402: 余额不足，请充值",
+        "上游返回 402: 上游错误（余额不足）",
+        "上游错误：计费账户已欠费",
+    ] {
+        let body = serde_json::json!({ "message": message });
+        let fatal = UpstreamErrorClass::Fatal {
+            status: 402,
+            message: message.into(),
+            upstream_code: None,
+        };
+        let class = super::rpc::autoclaw_quota_fallback("autoclaw", 402, fatal, &body);
+        assert!(
+            matches!(class, UpstreamErrorClass::Fatal { .. }),
+            "{message} 含上游信息，不该当空体兜底，实际 {class:?}"
+        );
+    }
+}
+
+/// 对照组：正文没有顶层 `message` / `code`，但有结构化内容（如
+/// `{"error":{"type":"insufficient_quota"}}`）—— 不能当成「空体」兜底。
+///
+/// 这是本次修复最容易误伤的一种形态：只看顶层键是否存在会把它判成空体，
+/// 而它其实是上游给了明确说明的正文。
+#[test]
+fn autoclaw_402_406_with_structured_body_stays_fatal() {
+    for status in [402u16, 406] {
+        let body = serde_json::json!({ "error": { "type": "insufficient_quota" } });
+        let fatal = UpstreamErrorClass::Fatal {
+            status,
+            message: format!("上游返回 {status}: insufficient_quota"),
+            upstream_code: None,
+        };
+        let class = super::rpc::autoclaw_quota_fallback("autoclaw", status, fatal, &body);
+        assert!(
+            matches!(class, UpstreamErrorClass::Fatal { .. }),
+            "带结构化正文的 {status} 不该被当成空体兜底，实际 {class:?}"
+        );
+    }
+}
+
+/// 对照组：状态码不在 {402,403,406} 时，即使正文是 810000 也不兜底。
+///
+/// 810000 这条判据原本只认 403；扩到 402/406 时**不能**顺手放开到所有
+/// 状态码 —— 那会把 500 之类的上游故障也当成额度耗尽去冷却。
+#[test]
+fn autoclaw_810000_outside_the_three_statuses_is_ignored() {
+    let body = serde_json::json!({ "code": 810000, "message": "GLM-5.3 免费额度已用完" });
+    for status in [400u16, 429, 500, 502] {
+        let fatal = UpstreamErrorClass::Fatal {
+            status,
+            message: format!("上游返回 {status}"),
+            upstream_code: Some(810000),
+        };
+        let class = super::rpc::autoclaw_quota_fallback("autoclaw", status, fatal, &body);
+        assert!(
+            matches!(class, UpstreamErrorClass::Fatal { .. }),
+            "状态码 {status} 不该被 810000 判据覆盖（429 已由上层处理）"
+        );
+    }
+}
+
+/// 对照组：非 AutoClaw 家的 402 / 406 空体不受影响。
+#[test]
+fn other_providers_empty_402_406_stay_fatal() {
+    for provider in ["workbuddy", "raccoon", "trae", "some-custom"] {
+        for status in [402u16, 406] {
+            let body = serde_json::json!({ "code": null, "message": "" });
+            let fatal = UpstreamErrorClass::Fatal {
+                status,
+                message: format!("上游返回 {status}: "),
+                upstream_code: None,
+            };
+            let class = super::rpc::autoclaw_quota_fallback(provider, status, fatal, &body);
+            assert!(
+                matches!(class, UpstreamErrorClass::Fatal { .. }),
+                "{provider} 的 {status} 不该被 AutoClaw 兜底覆盖"
+            );
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn build_chat_request_goes_through_rpc() {
     let Some((host, providers)) = boot().await else {
