@@ -871,6 +871,21 @@ mod tests {
         json!({ "id": id, "provider": provider, "priority": priority })
     }
 
+    fn limited_account(
+        id: &str,
+        provider: &str,
+        priority: i64,
+        model: &str,
+        reset_at: i64,
+    ) -> Value {
+        json!({
+            "id": id,
+            "provider": provider,
+            "priority": priority,
+            "rateLimits": { model: { "resetAt": reset_at } },
+        })
+    }
+
     fn ordered_ids(accounts: &[Value], meta: &PlanMeta<'_>) -> Vec<String> {
         provider_order(accounts.to_vec(), meta)
             .iter()
@@ -1020,6 +1035,41 @@ mod tests {
         // 剩下两位仍按优先级（置顶只动命中那一项，不整体重排）
         assert_eq!(plan.ordered[1].id, "a1");
         assert_eq!(plan.ordered[2].id, "a2");
+    }
+
+    /// 冷却优先于会话粘性：粘住的账号仍在冷却时不能置顶，必须让位给可用候选。
+    ///
+    /// 粘性只在「收集阶段后仍留在 `ordered`」的账号里生效 —— 被限额冷却的账号
+    /// 在收集阶段就进了 `blocked`，粘性无法把一个不可用的账号捞回队首。
+    /// 这条用例把「粘性命中 + 该账号正在冷却」钉成契约，防止有人把置顶挪到收集前。
+    #[test]
+    fn cooldown_blocks_sticky_promotion() {
+        let empty_numbers: HashMap<String, i64> = HashMap::new();
+        let empty_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let counts: HashMap<String, usize> = HashMap::new();
+        let now = 1_700_000_000_000i64;
+        let keys = CooldownKeys::new("test-model");
+        // a2 粘性命中，但它正在冷却；a1/a3 可用。
+        let accounts = vec![
+            account("a1", "A", 100),
+            limited_account("a2", "A", 110, "test-model", now + 60_000),
+            account("a3", "A", 120),
+        ];
+        let meta = PlanMeta {
+            strategy: RouteStrategy::Order,
+            sunk: &empty_numbers,
+            resting: &empty_numbers,
+            open: &empty_ids,
+            limiter_blocked: &empty_ids,
+            cursor: None,
+            provider_cursors: None,
+            sticky_account: Some("a2"),
+        };
+        let plan = plan_route(&accounts, &keys, &counts, &[], now, &meta);
+        let order: Vec<&str> = plan.ordered.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(order, vec!["a1", "a3"], "冷却中的粘性账号必须被剔除，而不是置顶");
+        assert!(!plan.sticky_hit, "粘性不能对已被滤除的冷却账号宣称为命中");
+        assert!(plan.blocked.iter().any(|entry| entry.id == "a2" && entry.state == "cooldown"));
     }
 
     /// 家内轮询下也一样：命中项置顶后，家内顺序的**其余部分**照常环绕。

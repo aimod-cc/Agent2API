@@ -417,7 +417,7 @@ impl ProviderAdapter for RpcAdapter {
         })
     }
 
-    /// 上游响应是否「其实是错误」（HTTP 200 但正文是业务失败）。
+    /// 上游响应是否「其实是错误」（HTTP 200 但正文是业务失败；非 2xx 一律是错误）。
     ///
     /// ── 为什么这一位必须问插件 ──────────────────────────────────
     /// 这条判据是 provider 知识：ZCode 的活动套餐通道用 HTTP 200 +
@@ -427,21 +427,29 @@ impl ProviderAdapter for RpcAdapter {
     /// 这里会把它们当成功，直接交给 SSE 翻译层 —— 结果是 `output` 为空的
     /// 一次「成功」响应，账号也不会进冷却。
     ///
-    /// ── 插件问不到时为什么回落到默认 ────────────────────────────
-    /// RPC 失败说明插件挂了；此时按 HTTP 状态码判成功至少与内置家同一口径，
-    /// 不会因为一次控制面超时把所有 2xx 响应都当成错误而误罚账号。
+    /// ── 插件问不到时为什么 2xx 回落为成功 ────────────────────────
+    /// 非 2xx 在进入这条判据之前已经按错误处理（HTTP 状态码本身即证据，插件
+    /// 对状态码的「不是错误」答复不能覆盖，否则未覆写的家会把 429 当正常流透传）；
+    /// 2xx 时 RPC 失败说明插件挂了，保持成功至少与内置家同一口径，不会因为一次
+    /// 控制面超时把所有 2xx 响应都当成错误而误罚账号。
     fn is_error_response_async<'a>(
         &'a self,
         status: u16,
         headers: &'a HeaderMap,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, GatewayError>> + Send + 'a>> {
         Box::pin(async move {
-            let default = !(200..300).contains(&status);
+            // 非 2xx 一律按错误处理：插件对 HTTP 状态码的「不是错误」回答不能
+            // 覆盖这个事实（SDK 默认 `is_error_response` 返回 false，未覆写的家
+            // 会把 429 当正常流透传，错误永远进不了分类 / 冷却 / 换号）。
+            if !(200..300).contains(&status) {
+                return Ok(true);
+            }
+            let default = false;
             let mut params = self.base();
             params.insert("status".into(), Value::from(status));
             params.insert("headers".into(), headers_json(headers));
-            // 控制面问不到时回落到 HTTP 状态码：一次 RPC 超时不该把所有 2xx
-            // 响应都判成错误，从而误罚账号。
+            // 2xx 时插件可以把它「升级」成错误（HTTP 200 + JSON 业务失败）；
+            // 控制面问不到则保持成功，一次 RPC 超时不该把所有 2xx 都误罚。
             let value = self.control(
                 proto::methods::gateway::IS_ERROR_RESPONSE, Value::Object(params),
             ).await;
