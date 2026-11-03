@@ -84,7 +84,7 @@ impl RequestStats {
         file_size(&file) + file_size(&PathBuf::from(format!("{}-wal", file.to_string_lossy())))
     }
 
-    /// 空闲页占比（0.0 ~ 1.0）与可回收字节数；库不可用时返回 `None`。
+    /// 库内空闲页读数：`(空闲页数, 总页数, 可回收字节数)`；库不可用时返回 `None`。
     ///
     /// ── 为什么需要这个读数 ──────────────────────────────────────
     /// 库开了 `auto_vacuum=0`（见 `db::apply_pragmas`），删除行只把页标成空闲，
@@ -97,9 +97,17 @@ impl RequestStats {
     /// 因此把判据暴露出来：只有占比够高（调用方决定阈值）时才值得付一次
     /// VACUUM 的代价。`PRAGMA freelist_count` 与 `page_count` 都是 O(1) 的
     /// 头字段读，不扫表，可以放在概览接口里。
-    pub fn free_space(&self) -> Option<(u64, u64, u64)> {
-        let db = self.db.clone()?;
-        db.with(|conn| {
+    ///
+    /// 由调用方传入自己持有的 `guard`（与 `with_conn` 同形）：`stats()` 要在
+    /// **同一次持锁**里既读条数又读空洞，保证这一行里的两个数字出自同一份
+    /// 快照。这里若自己去 `guard()` 会二次加锁 —— 那把 `Mutex` 不可重入，
+    /// 在 `stats()` 里调用会当场死锁。三行 PRAGMA 都是读，与记账事务只会
+    /// 排队、不会互相阻塞出问题。
+    pub(super) fn free_space(
+        &self,
+        guard: &std::sync::MutexGuard<'_, ()>,
+    ) -> Option<(u64, u64, u64)> {
+        self.with_conn(guard, |conn| {
             let page_size: i64 = conn.query_row("PRAGMA page_size;", [], |row| row.get(0))?;
             let page_count: i64 = conn.query_row("PRAGMA page_count;", [], |row| row.get(0))?;
             let free: i64 = conn.query_row("PRAGMA freelist_count;", [], |row| row.get(0))?;
@@ -108,8 +116,7 @@ impl RequestStats {
                 page_count.max(0) as u64,
                 (page_size.max(0) as u64) * (free.max(0) as u64),
             ))
-        })?
-        .ok()
+        })
     }
 
     /// 压缩数据库：`checkpoint(TRUNCATE)` → `VACUUM` → 再 `checkpoint(TRUNCATE)`

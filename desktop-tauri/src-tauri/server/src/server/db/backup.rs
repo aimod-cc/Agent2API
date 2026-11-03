@@ -25,6 +25,7 @@ use crate::server::logging;
 
 mod archive;
 mod keys;
+pub(crate) mod retention;
 mod restore;
 mod safety;
 mod sql_import;
