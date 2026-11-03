@@ -1721,6 +1721,8 @@ pub fn shim_js() -> &'static str {
     // 代理池（「网络代理」页；与桌面壳 bridge.rs 的同名方法成对存在，
     // 契约见 api::proxies 的模块头 —— 只加一边时另一形态下的页面会报
     // 「桥接方法缺失」，标题栏那一族有同样的教训）
+    getMaintenancePolicy: function () { return call('GET', '/api/maintenance-policy'); },
+    saveMaintenancePolicy: function (payload) { return call('PUT', '/api/maintenance-policy', payload); },
     getProxyPool: function () { return call('GET', '/api/proxies/pool'); },
     createProxyPoolItem: function (payload) { return call('POST', '/api/proxies/pool', payload || {}); },
     updateProxyPoolItem: function (payload) { return call('POST', '/api/proxies/pool/update', payload || {}); },

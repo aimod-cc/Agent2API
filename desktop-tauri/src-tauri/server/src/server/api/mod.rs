@@ -34,6 +34,7 @@
 //! 并保持与 Node 版一致的分组（需鉴权的一律挂 `protected`）。
 
 // 「Agent」页：本机 AI 客户端配置接管（列表 / 保存 / 写入 / 预览 / 还原 / 导入）
+pub mod maintenance;
 pub mod agents;
 pub mod agent_resources;
 pub mod accounts;

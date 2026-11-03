@@ -261,11 +261,33 @@ impl RpcAdapter {
         let host = execution.host.clone();
         let method = method.to_string();
         let provider = self.id;
+        let maintenance = crate::server::core::maintenance::for_call(provider, &method);
         // 调用方取消等待不能让已发送的管理动作失去保护，完成或超时后才释放租约。
         crate::spawn_task(async move {
             let _lease = lease;
-            host.call_coded(&method, params, timeout).await
-                .map_err(|error| rpc_error(provider, error, &method))
+            let mut params = params;
+            let permit = if let Some(settings) = maintenance {
+                use crate::server::core::maintenance::{self, Admission};
+                let account = params.get("account").and_then(Value::as_str).unwrap_or("").to_string();
+                match maintenance::acquire(settings, provider, &method, &account).await? {
+                    Admission::Cached(value) => return Ok(value),
+                    Admission::Run(permit) => {
+                        // Fail closed with an old plugin instead of reporting proxy success.
+                        let capabilities = host.call_coded(maintenance::CAPABILITIES_METHOD,
+                            serde_json::json!({"provider":provider}), CONTROL_TIMEOUT).await
+                            .map_err(|_| GatewayError::with_status(409,"Plugin upgrade required for maintenance egress"))?;
+                        let supported = capabilities.get("version").and_then(Value::as_u64)==Some(1)
+                            && capabilities.get("operations").and_then(Value::as_array)
+                                .map(|ops|ops.iter().any(|v|v.as_str()==Some(method.as_str()))).unwrap_or(false);
+                        if !supported {return Err(GatewayError::with_status(409,"Plugin does not support maintenance egress for this operation"));}
+                        permit.apply(&mut params);
+                        Some(permit)
+                    }
+                }
+            } else {None};
+            let result = host.call_coded(&method, params, timeout).await;
+            if let Some(permit) = &permit {permit.finish(&result);}
+            result.map_err(|error| rpc_error(provider, error, &method))
         }).await.map_err(|_| GatewayError::with_status(503, "插件调用任务中断"))?
     }
 
