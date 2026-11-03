@@ -71,6 +71,28 @@ pub use registry::{install as install_provider, installed_ids, lookup, remove, c
 pub use registry::{serves as serves_provider};
 pub use rpc::{HostOptions, RpcAdapter};
 pub(crate) use rpc_cache::meta as model_catalog_meta;
+
+/// 把插件给的分类投影成宿主错误（**只给测试**；生产走 `errors::strict` 的
+/// 内部调用点）。`errors::strict` 是 `pub(super)`，外层拿不到，这里只开一条缝。
+#[cfg(test)]
+pub(crate) fn projected_conversation_error(
+    provider: &str,
+    status: u16,
+    class: crate::server::core::providers::adapter::UpstreamErrorClass,
+    body: &serde_json::Value,
+    headers: Option<&std::collections::BTreeMap<String, String>>,
+) -> crate::server::errors::GatewayError {
+    errors::strict::conversation(provider, status, class, body, headers)
+}
+
+/// 从投影后的错误里取回宿主分类（与生产 `classify_conversation_error` 同源）。
+#[cfg(test)]
+pub(crate) fn projected_conversation_class(
+    provider: &str,
+    error: &crate::server::errors::GatewayError,
+) -> crate::server::core::providers::adapter::UpstreamErrorClass {
+    errors::strict::cached_class(provider, error)
+}
 pub use management::snapshot as management_snapshot;
 pub(crate) use packages::prepare as prepare_pack;
 pub(crate) use compatibility::provider_error as provider_compatibility_error;

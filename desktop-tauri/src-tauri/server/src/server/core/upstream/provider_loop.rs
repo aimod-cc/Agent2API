@@ -302,6 +302,29 @@ const PAYLOAD_SIZE_REJECTION_STATUSES: &[u16] = &[413];
 /// 一个是「字节」，一个是「名字」，出处与措辞不同，将来各自的排除面也可能变。
 const DETERMINISTIC_NOT_FOUND_STATUSES: &[u16] = &[404];
 
+/// 这一类的失败**换账号也没有意义**：结论由「这份请求体」决定，与是哪个账号
+/// 无关。
+///
+/// ── 为什么 413 在这里（而 404 不在）──────────────────────────
+/// 404 是「这个账号 / 这一家的套餐里没有这个模型」—— 换一个账号确实可能命中
+/// （见 [`DETERMINISTIC_NOT_FOUND_STATUSES`] 的说明），所以它照旧换号。
+/// 413 是「这份字节超过了入口的上限」：入口的墙按字节量，同一份 body 换谁都
+/// 一样大。issue #6 的形状正是如此 —— CatPaw 的 openresty 卡在 1 MiB，会话式
+/// 路径拿到的又是默认 Fatal，于是它会**把每个候选账号都撞一遍同样的 413**，
+/// 客户端白等 N 个往返，最后拿到的还是「HTTP 413: <html>…」。
+///
+/// 只收 413 这一个码：400 / 409 这类「语义由上游决定」的码仍走换号顺延，那
+/// 正是 `fallback_retry_advice` 刻意没有扩大的范围。
+const PAYLOAD_BOUND_STATUSES: &[u16] = &[413];
+
+/// 这次失败是否属于「换号也白换」的确定性体积拒绝。
+fn payload_bound_failure(class: &UpstreamErrorClass) -> bool {
+    matches!(
+        class,
+        UpstreamErrorClass::Fatal { status, .. } if PAYLOAD_BOUND_STATUSES.contains(status)
+    )
+}
+
 /// 轮询出网档（`core::proxy_rotate`）在 429 时**原地换出口**的次数上限。
 ///
 /// 为什么是 3：OpenCode Zen 免费档的 429 按 IP 判（这个出口的额度用完），换出口
@@ -918,6 +941,15 @@ async fn attempt_queue(
                     // 拆散取值 —— 拆散后「漏带一个字段」编译期与运行期都不报错
                     // （本分支此前就把 `reset_at` 写成死 `None`，见那个函数的说明）。
                     let class = adapter.classify_conversation_error(&error);
+                    // ── 体积拒绝不换号（issue #6）──────────────────────
+                    // 会话式路径没有「原地重发」这一步，它的兜底就是换号；
+                    // 而入口的字节墙与账号无关 —— 换过去只会把同一份体再撞
+                    // 一次，客户端白等 N 个往返才拿到同一个 413。原样交回，
+                    // 文案由插件翻成人话（`catpaw::body_limit`）。
+                    if payload_bound_failure(&class) {
+                        note_deferral_notice(ctx.telemetry, "未换号（请求体超过入口上限，换账号无效）");
+                        return Err(error);
+                    }
                     // Scoped runtime 的原生 loader 已拥有单次 token 恢复；宿主不再消费
                     // refresh，也不把 Fatal/权限/WAF/取消/超时改成账号顺延。
                     if strict_runtime && !matches!(&class, UpstreamErrorClass::QuotaLimited { .. }) {
@@ -1386,6 +1418,22 @@ async fn attempt_queue(
                     // 一样按动作 1 / 动作 3 换号顺延：直接换下一个账号继续试，
                     // 换满或没有更多账号时错误才原样返回客户端。
                     let named_switch = direct_switch_status(i64::from(failure.error.status_code));
+                    // ── 体积拒绝不换号（issue #6）──────────────────────
+                    // 与有状态路径同一条判据：入口按字节量，换账号不会让这份
+                    // 体变小。原地重发那一档已经由 `fallback_retry_advice` 挡住，
+                    // 这里补上「换号」这一档 —— 否则每个候选账号都要白撞一次
+                    // 413，客户端最后拿到的仍是同一个错误。
+                    if payload_bound_failure(&failure.class) {
+                        ctx.telemetry.finish_last_attempt(
+                            Some(i64::from(failure.error.status_code)),
+                            Some(&failure.error.message),
+                        );
+                        note_deferral_notice(
+                            ctx.telemetry,
+                            "未换号（请求体超过入口上限，换账号无效）",
+                        );
+                        return Err(failure.error);
+                    }
                     // ── 动作 0：内容策略拦截 → 换中性提示词，同账号立即重试一次 ──
                     // 上游按逐字精确匹配审核，命中即整单拦截；这是**误报**而不是
                     // 账号问题（余额健康、未限流、session 未死），所以既不罚账号
