@@ -226,6 +226,45 @@ fn other_autoclaw_403_stays_fatal() {
     );
 }
 
+/// 空响应体的 402 / 406 也按额度耗尽兜底（issue #6）：生产库实测 AutoClaw
+/// 额度耗尽会以这两个状态码 + 空正文出现，插件分类器拿不到证据落 Fatal
+/// ⇒ 不冷却不换号。reset_at 留 None：上层接 Retry-After 或默认短期冷却。
+#[test]
+fn autoclaw_empty_body_402_and_406_fall_back_to_quota_limited() {
+    for status in [402u16, 406] {
+        let body = serde_json::json!({}); // 空体
+        let fatal = UpstreamErrorClass::Fatal {
+            status,
+            message: format!("上游返回 {status}: "),
+            upstream_code: None,
+        };
+        let class = super::rpc::autoclaw_quota_fallback("autoclaw", status, fatal, &body);
+        let UpstreamErrorClass::QuotaLimited { reset_at, status: got, .. } = &class else {
+            panic!("空体 {status} 应当被兜底成 QuotaLimited，实际 {class:?}");
+        };
+        assert_eq!(*got, status);
+        assert!(reset_at.is_none(), "空体兜底不该猜恢复时刻，实际 {reset_at:?}");
+    }
+}
+
+/// 对照组：带业务 body 的 402 / 406（真实计费墙、请求形态问题等）不兜底。
+#[test]
+fn autoclaw_402_406_with_body_stays_fatal() {
+    for status in [402u16, 406] {
+        let body = serde_json::json!({ "message": "余额不足，请充值" });
+        let fatal = UpstreamErrorClass::Fatal {
+            status,
+            message: format!("上游返回 {status}: 余额不足，请充值"),
+            upstream_code: None,
+        };
+        let class = super::rpc::autoclaw_quota_fallback("autoclaw", status, fatal, &body);
+        assert!(
+            matches!(class, UpstreamErrorClass::Fatal { .. }),
+            "带 body 的 {status} 不该被兜底，实际 {class:?}"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn build_chat_request_goes_through_rpc() {
     let Some((host, providers)) = boot().await else {

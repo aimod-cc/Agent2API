@@ -1461,6 +1461,9 @@ fn upstream_error_class(class: proto::ErrorClass) -> UpstreamErrorClass {
 /// ── 判据 ────────────────────────────────────────────────────
 /// 只认 AutoClaw 两地（`autoclaw` / `autoclaw-intl`）+ HTTP 403 +
 /// 业务码 810000（或正文含「免费额度已用完」）。其它家的 403 不动。
+/// 另外 402 / 406 + **空响应体**也按额度耗尽兜底：生产库实测 AutoClaw 家
+/// 在额度耗尽时会把同一判据换成这两个状态码，且正文为空拿不到任何证据
+/// （issue #6）—— 状态码即证据，空体 + 这两个码没有「正常业务含义」。
 ///
 /// ── reset_at ────────────────────────────────────────────────
 /// 上游不给恢复时刻；免费额度按天重置（上游的日口径都是北京时间零点），
@@ -1473,7 +1476,7 @@ pub(super) fn autoclaw_quota_fallback(
 ) -> UpstreamErrorClass {
     use crate::server::core::account_store::is_autoclaw_family;
 
-    if status != 403 || matches!(class, UpstreamErrorClass::QuotaLimited { .. }) {
+    if matches!(class, UpstreamErrorClass::QuotaLimited { .. }) {
         return class;
     }
     if !is_autoclaw_family(provider_id) {
@@ -1481,16 +1484,31 @@ pub(super) fn autoclaw_quota_fallback(
     }
     let code = error_body.get("code").and_then(Value::as_i64);
     let message = error_body.get("message").and_then(Value::as_str).unwrap_or("");
-    if code != Some(810000) && !message.contains("免费额度已用完") {
-        return class;
+    if code == Some(810000) || message.contains("免费额度已用完") {
+        let now_ms = crate::server::logging::now_ms();
+        return UpstreamErrorClass::QuotaLimited {
+            reset_at: Some(next_beijing_midnight_ms(now_ms)),
+            message: class_message(&class, status, message),
+            upstream_code: code,
+            status,
+        };
     }
-    let now_ms = crate::server::logging::now_ms();
-    UpstreamErrorClass::QuotaLimited {
-        reset_at: Some(next_beijing_midnight_ms(now_ms)),
-        message: class_message(&class, status, message),
-        upstream_code: code,
-        status,
+    // 空响应体的 402 / 406：没有文案证据，但生产库（issue #6）里 AutoClaw
+    // 额度耗尽就是这个形态 —— 状态码即证据。reset_at 不猜：上层
+    // provider_loop 会优先采用上游 Retry-After，没有则落默认短期冷却。
+    if message.is_empty()
+        && code.is_none()
+        && matches!(status, 402 | 406)
+        && matches!(class, UpstreamErrorClass::Fatal { .. })
+    {
+        return UpstreamErrorClass::QuotaLimited {
+            reset_at: None,
+            message: format!("上游返回 {status}: 请求额度受限（上游未返回详情），按限流冷却"),
+            upstream_code: None,
+            status,
+        };
     }
+    class
 }
 
 /// 从分类结果里取出已有文案（Fatal/其它档的 message 已含 `上游返回 {status}:`）。
