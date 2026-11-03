@@ -350,10 +350,12 @@ fn other_fatal_statuses_still_get_the_fallback_resend() {
     );
 }
 
-/// 413 是「这份字节太大」：换账号不会让同一份 body 变小。
+/// 413 是「这份字节太大」：**同一家**换账号不会让这份 body 变小。
 ///
 /// issue #6 的形状：CatPaw 入口的 openresty 卡在 1 MiB，会话式路径拿到默认
 /// Fatal 后会把队列里每个候选账号都撞一遍同样的 413，客户端白等 N 个往返。
+/// 但字节墙是每家自己的（CodeArts 约 6 MiB、Loomy 约 12 MB），换一家仍可能过，
+/// 所以判据按**家**收窄。
 #[test]
 fn a_payload_bound_failure_does_not_switch_accounts() {
     assert!(
@@ -376,6 +378,15 @@ fn a_payload_bound_failure_does_not_switch_accounts() {
             reset_at: None,
         }),
         "限额分类有自己的记账与冷却路径，不该被体积判据接管"
+    );
+    // 同家换号无意义 → 拦；跨家换号有意义 → 放行。
+    assert!(
+        payload_bound_blocks_switch("catpaw", "catpaw"),
+        "同一家的另一个账号面对的是同一堵字节墙，不该白撞"
+    );
+    assert!(
+        !payload_bound_blocks_switch("codearts", "catpaw"),
+        "别家的墙更宽（CodeArts 约 6 MiB），跨家回退必须留着"
     );
 }
 

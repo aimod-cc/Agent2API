@@ -175,6 +175,14 @@ pub fn list_response_from(data: Vec<Value>, source: &str, last_refreshed_at: i64
 }
 
 /// 模型 id 归一化：小写 + 去掉非 ASCII 字母数字，`deepseek-v4.1-flash` → `deepseekv41flash`
+fn normalize_model_id(value: &str) -> String {
+    value
+        .to_lowercase()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,14 +212,6 @@ mod tests {
             "没有字节限制的家不该被这个键污染"
         );
     }
-}
-
-fn normalize_model_id(value: &str) -> String {
-    value
-        .to_lowercase()
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .collect()
 }
 
 /// 经典 Levenshtein 距离（模型 id 都很短，O(nm) 足够）
