@@ -84,6 +84,34 @@ impl RequestStats {
         file_size(&file) + file_size(&PathBuf::from(format!("{}-wal", file.to_string_lossy())))
     }
 
+    /// 空闲页占比（0.0 ~ 1.0）与可回收字节数；库不可用时返回 `None`。
+    ///
+    /// ── 为什么需要这个读数 ──────────────────────────────────────
+    /// 库开了 `auto_vacuum=0`（见 `db::apply_pragmas`），删除行只把页标成空闲，
+    /// 文件**不会缩小**。用户删掉大量历史正文（或 v13 升级清了整张
+    /// `request_raw`）之后，库里会留下成千上万个空闲页：文件看着还是 2.5GB，
+    /// 实际数据只有 1.1GB。这份「虚胖」在设置页原样显示成占用，用户既看不到
+    /// 原因，也找不到该不该压缩的依据 —— 实测出现过「库里 1.3GB 是空洞，
+    /// 用户以为程序在偷偷占盘」（C 盘爆满）。
+    ///
+    /// 因此把判据暴露出来：只有占比够高（调用方决定阈值）时才值得付一次
+    /// VACUUM 的代价。`PRAGMA freelist_count` 与 `page_count` 都是 O(1) 的
+    /// 头字段读，不扫表，可以放在概览接口里。
+    pub fn free_space(&self) -> Option<(u64, u64, u64)> {
+        let db = self.db.clone()?;
+        db.with(|conn| {
+            let page_size: i64 = conn.query_row("PRAGMA page_size;", [], |row| row.get(0))?;
+            let page_count: i64 = conn.query_row("PRAGMA page_count;", [], |row| row.get(0))?;
+            let free: i64 = conn.query_row("PRAGMA freelist_count;", [], |row| row.get(0))?;
+            Ok::<_, rusqlite::Error>((
+                free.max(0) as u64,
+                page_count.max(0) as u64,
+                (page_size.max(0) as u64) * (free.max(0) as u64),
+            ))
+        })?
+        .ok()
+    }
+
     /// 压缩数据库：`checkpoint(TRUNCATE)` → `VACUUM` → 再 `checkpoint(TRUNCATE)`
     /// —— 首尾两次 checkpoint 缺一不可（理由见下），中间那次 VACUUM 重建整库
     /// 文件回收空闲页。**后台线程**执行，返回启动结果。

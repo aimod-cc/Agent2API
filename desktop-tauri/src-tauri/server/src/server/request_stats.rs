@@ -755,11 +755,26 @@ impl RequestStats {
         let (total, daily_days, first_ts, last_ts, downstream_raw, upstream_raw) =
             loaded.unwrap_or((0, 0, None, None, 0, 0));
         let file = self.file().to_string_lossy().to_string();
+        // 空闲页读数（见 `free_space` 的说明）：`auto_vacuum=0` 下删除行只把页
+        // 标成空闲，文件不会缩小。界面据此能把「库 2.5GB、其中 1.3GB 是空洞」
+        // 说明白，而不是让用户以为程序在偷偷占盘。
+        let (free_pages, total_pages, reclaimable) = self
+            .free_space()
+            .map(|(free, total, bytes)| (free, total, bytes))
+            .unwrap_or((0, 0, 0));
         json!({
             "total": total,
             "dailyDays": daily_days,
             "downstreamRaw": downstream_raw,
             "upstreamRaw": upstream_raw,
+            // 空闲页：reclaimableBytes 是「压缩一次能还给文件系统多少」，
+            // freePageRatio 是占比（0..1，保留三位小数）。
+            "reclaimableBytes": reclaimable,
+            "freePageRatio": if total_pages == 0 {
+                0.0
+            } else {
+                ((free_pages as f64 / total_pages as f64) * 1000.0).round() / 1000.0
+            },
             "file": file,
             // 与 file 同值：明细与聚合同居一个库。保留这个字段是为了不破坏
             // 既有读取方（`file` 的语义已经说明它指库文件），但**不要再把两者
