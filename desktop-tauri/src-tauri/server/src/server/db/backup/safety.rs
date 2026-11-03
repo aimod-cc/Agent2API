@@ -5,7 +5,7 @@ use rusqlite::backup::Backup;
 use rusqlite::Connection;
 
 use super::complete_backup;
-use super::retention::prune_backups;
+use super::retention::{prune_backups, BackupKind};
 
 /// 保留最近几份「恢复前安全备份」。整库级留影每份都等于整个库，
 /// 留 2 份足够覆盖「这次恢复错了 + 上一次也错了」的回退链，再多就是纯占盘。
@@ -55,6 +55,6 @@ pub(super) fn create(main: &mut Connection, config_dir: &Path) -> Result<PathBuf
     // 写成功之后再清旧的：反过来的话，清理期间新备份还没落盘，
     // 一旦进程在这里退出就同时少了「旧的」和「新的」。
     // 清理失败不影响本次恢复（见 retention 模块头）。
-    prune_backups(&backup_dir, "pre-restore-", ".db", KEEP_SAFETY_BACKUPS);
+    prune_backups(&backup_dir, BackupKind::PreRestore, KEEP_SAFETY_BACKUPS);
     Ok(saved)
 }

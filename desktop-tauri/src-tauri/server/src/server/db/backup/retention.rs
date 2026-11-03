@@ -13,6 +13,15 @@
 //! 时间戳是结构化事实，排序稳定；同秒内的多份再用文件 mtime 与名字兜底，
 //! 保证「删的一定是最旧的」。
 //!
+//! ── 为什么必须校验**完整**文件名格式 ────────────────────────
+//! 这个函数会**删文件**，而 `backups/` 是用户也能打开的普通目录：只按
+//! 「前缀 + 后缀」匹配的话，用户自己放的 `cloud-sync-笔记.json`、
+//! `pre-restore-手动备份.db` 都会被当成程序产物计数，超上限时被删掉 ——
+//! 那是不可逆的数据丢失。因此只认本程序**确实会生成**的两种名字：
+//!   - `pre-restore-{YYYYmmdd}_{HHMMSS}-{随机串}.db`（`safety.rs`）
+//!   - `cloud-sync-{YYYYmmdd}-{HHMMSS}.json`（`cloud_sync::snapshot`）
+//! 任何形状不符的文件一律跳过，不计数、不删除。
+//!
 //! ── 失败语义 ────────────────────────────────────────────────
 //! 尽力而为：清理失败只打一行警告，绝不让「备份已经写成功了，但删旧的失败」
 //! 反过来把恢复 / 下载判成失败。删不掉的旧备份最坏只是继续占盘。
@@ -21,11 +30,61 @@ use std::path::Path;
 
 use crate::server::logging;
 
-/// 只保留最近 `keep` 份匹配 `{prefix}*{suffix}` 的文件，返回删掉的数量。
+/// 备份文件的种类：决定「什么样的文件名才算本程序生成的备份」。
+#[derive(Clone, Copy)]
+pub(crate) enum BackupKind {
+    /// 整库恢复前的安全备份：`pre-restore-20261103_163000-a1b2c3.db`
+    PreRestore,
+    /// 云同步下载前的业务快照：`cloud-sync-20261103-163000.json`
+    CloudSync,
+}
+
+impl BackupKind {
+    fn matches(self, name: &str) -> bool {
+        match self {
+            Self::PreRestore => {
+                // 前缀 + `YYYYmmdd_HHMMSS` + `-` + 随机串 + `.db`
+                let Some(rest) = name.strip_prefix("pre-restore-") else {
+                    return false;
+                };
+                let Some(rest) = rest.strip_suffix(".db") else {
+                    return false;
+                };
+                let Some((stamp, random)) = rest.split_once('-') else {
+                    return false;
+                };
+                is_stamp(stamp, '_') && !random.is_empty() && random.chars().all(|c| c.is_ascii_alphanumeric())
+            }
+            Self::CloudSync => {
+                // 前缀 + `YYYYmmdd-HHMMSS` + `.json`
+                let Some(rest) = name.strip_prefix("cloud-sync-") else {
+                    return false;
+                };
+                let Some(stamp) = rest.strip_suffix(".json") else {
+                    return false;
+                };
+                is_stamp(stamp, '-')
+            }
+        }
+    }
+}
+
+/// `YYYYmmdd` + 分隔符 + `HHMMSS`（都是 ASCII 数字）。
+fn is_stamp(stamp: &str, separator: char) -> bool {
+    let Some((date, time)) = stamp.split_once(separator) else {
+        return false;
+    };
+    date.len() == 8
+        && time.len() == 6
+        && date.chars().all(|c| c.is_ascii_digit())
+        && time.chars().all(|c| c.is_ascii_digit())
+}
+
+/// 只保留最近 `keep` 份**本程序生成**的该种备份，返回删掉的数量。
 ///
 /// `keep == 0` 视为「不清理」而不是「全删」：调用方误传 0 时把用户的留影
 /// 全删掉是不可接受的，而「保留 0 份」这个需求本身也不存在。
-pub(crate) fn prune_backups(dir: &Path, prefix: &str, suffix: &str, keep: usize) -> usize {
+pub(crate) fn prune_backups(dir: &Path, kind: BackupKind, keep: usize) -> usize {
     if keep == 0 {
         return 0;
     }
@@ -39,7 +98,7 @@ pub(crate) fn prune_backups(dir: &Path, prefix: &str, suffix: &str, keep: usize)
         let Some(name) = name.to_str() else {
             continue;
         };
-        if !name.starts_with(prefix) || !name.ends_with(suffix) {
+        if !kind.matches(name) {
             continue;
         }
         let Ok(file_type) = entry.file_type() else {
@@ -74,7 +133,7 @@ pub(crate) fn prune_backups(dir: &Path, prefix: &str, suffix: &str, keep: usize)
     if removed > 0 {
         logging::console_line(
             "[Backup]",
-            &format!("已清理 {removed} 份旧备份（{prefix}*{suffix}，保留最近 {keep} 份）"),
+            &format!("已清理 {removed} 份旧备份（保留最近 {keep} 份）"),
         );
     }
     removed
@@ -108,7 +167,7 @@ mod tests {
         std::fs::write(dir.join("pre-restore-20260101_000000-abc.db"), b"x").expect("写整库备份");
         std::fs::write(dir.join("notes.txt"), b"x").expect("写无关文件");
 
-        let removed = prune_backups(&dir, "cloud-sync-", ".json", 2);
+        let removed = prune_backups(&dir, BackupKind::CloudSync, 2);
 
         assert_eq!(removed, 1, "三份只该删最旧的一份");
         assert!(!dir.join("cloud-sync-20260101-000000.json").exists());
@@ -130,9 +189,48 @@ mod tests {
         let dir = temp_dir("below-limit");
         std::fs::write(dir.join("pre-restore-20260101_000000-abc.db"), b"x").expect("写备份");
 
-        assert_eq!(prune_backups(&dir, "pre-restore-", ".db", 2), 0);
-        assert_eq!(prune_backups(&dir, "pre-restore-", ".db", 0), 0);
+        assert_eq!(prune_backups(&dir, BackupKind::PreRestore, 2), 0);
+        assert_eq!(prune_backups(&dir, BackupKind::PreRestore, 0), 0);
         assert!(dir.join("pre-restore-20260101_000000-abc.db").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 用户放在 backups/ 里、只是「长得像」的文件绝不能被删。
+    ///
+    /// 这条是审查的阻塞项：只按前后缀匹配时，下面每一个都会被算成备份，
+    /// 超过上限就被删掉 —— 而这是不可逆的。
+    #[test]
+    fn lookalike_files_are_never_touched() {
+        let dir = temp_dir("lookalike");
+        // 程序真正会生成的三份（超过 keep = 2）
+        for stamp in ["20260101-000000", "20260102-000000", "20260103-000000"] {
+            std::fs::write(dir.join(format!("cloud-sync-{stamp}.json")), b"{}").expect("写备份");
+        }
+        let lookalikes = [
+            "cloud-sync-notes.json",
+            "cloud-sync-20260101-000000.backup.json",
+            "cloud-sync-2026010-000000.json",
+            "cloud-sync-20260101-00000.json",
+            "cloud-sync-20260101_000000.json",
+            "pre-restore-manual.db",
+            "pre-restore-20260101-000000-abc.db",
+            "pre-restore-20260101_000000-.db",
+            "pre-restore-20260101_000000-abc.sqlite",
+        ];
+        for name in lookalikes {
+            std::fs::write(dir.join(name), b"user data").expect("写用户文件");
+        }
+
+        let removed = prune_backups(&dir, BackupKind::CloudSync, 2);
+
+        assert_eq!(removed, 1, "只删真正超出的那一份程序备份");
+        for name in lookalikes {
+            assert!(
+                dir.join(name).exists(),
+                "{name} 不是程序生成的备份，绝不能删"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }
