@@ -104,12 +104,11 @@ impl GatewayCallbacks for StoreCallbacks {
             self.check_provider(&provider)?;
             // 空 id = 已授权 provider 的队首账号；不向默认 WorkBuddy 回落。
             let id = if account.is_empty() {
-                self.store
-                    .accounts_for_provider(&provider)
-                    .first()
-                    .and_then(|item| item.get("id"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
+                let store = self.store.clone();
+                let provider = provider.clone();
+                crate::server::core::blocking::run(move || {
+                    store.route_account_ids_for_provider(&provider).into_iter().next()
+                }).await.map_err(|error| proto::WireError::with_code(error.message, proto::WireError::INTERNAL))?
             } else {
                 Some(account)
             };
@@ -120,7 +119,10 @@ impl GatewayCallbacks for StoreCallbacks {
                 ));
             };
             self.check_account(&id, Some(&provider))?;
-            let Some(record) = self.store.plugin_account(&id) else {
+            let store = self.store.clone();
+            let record = crate::server::core::blocking::run(move || store.plugin_account(&id)).await
+                .map_err(|error| proto::WireError::with_code(error.message, proto::WireError::INTERNAL))?;
+            let Some(record) = record else {
                 return Err(proto::WireError::with_code(
                     "账号不存在",
                     proto::WireError::NOT_FOUND,
@@ -144,18 +146,13 @@ impl GatewayCallbacks for StoreCallbacks {
     > {
         Box::pin(async move {
             self.check_provider(&provider)?;
-            let list: Vec<serde_json::Value> = self
-                .store
-                .accounts_for_provider(&provider)
-                .into_iter()
-                .filter_map(|item| {
-                    item.get("id")
-                        .and_then(serde_json::Value::as_str)
-                        .filter(|id| self.check_account(id, Some(&provider)).is_ok())
-                        .and_then(|id| self.store.plugin_account(id))
-                        .filter(|record| record.get("provider").and_then(serde_json::Value::as_str) == Some(provider.as_str()))
-                })
-                .collect();
+            let store = self.store.clone();
+            let list = crate::server::core::blocking::run(move || {
+                store.route_account_ids_for_provider(&provider).into_iter()
+                    .filter_map(|id| store.plugin_account(&id))
+                    .filter(|record| record.get("provider").and_then(serde_json::Value::as_str) == Some(provider.as_str()))
+                    .collect::<Vec<_>>()
+            }).await.map_err(|error| proto::WireError::with_code(error.message, proto::WireError::INTERNAL))?;
             Ok(serde_json::Value::Array(list))
         })
     }
@@ -169,8 +166,15 @@ impl GatewayCallbacks for StoreCallbacks {
         Box<dyn std::future::Future<Output = Result<serde_json::Value, proto::WireError>> + Send + '_>,
     > {
         Box::pin(async move {
-            self.check_account(&account, None)?;
-            match self.store.plugin_update_secret(&account, &expect, &secret) {
+            let provider = self.check_account(&account, None)?;
+            let store = self.store.clone();
+            let updated = crate::server::core::blocking::run(move || {
+                if store.account_provider_of(&account).as_deref() != Some(provider.as_str()) {
+                    return Err("账号归属已变化".to_string());
+                }
+                store.plugin_update_secret(&account, &expect, &secret)
+            }).await.map_err(|error| proto::WireError::with_code(error.message, proto::WireError::INTERNAL))?;
+            match updated {
                 Ok(true) => Ok(serde_json::json!({ "updated": true })),
                 // 「期望值已变」不是错误：说明另一个刷新先落盘了，
                 // 插件应当重新读一遍再决定，而不是重试写。
@@ -200,7 +204,13 @@ impl GatewayCallbacks for StoreCallbacks {
             };
             // account_view 可能等待 RPC；写之前复核归属，不能借等待窗口切到包外账号。
             self.check_account(&account, Some(&provider))?;
-            self.store.plugin_update_account(&account, &expect, &secret, view.as_ref())
+            let store = self.store.clone();
+            crate::server::core::blocking::run(move || {
+                if store.account_provider_of(&account).as_deref() != Some(provider.as_str()) {
+                    return Err("账号归属已变化".to_string());
+                }
+                store.plugin_update_account(&account, &expect, &secret, view.as_ref())
+            }).await.map_err(|error| proto::WireError::with_code(error.message, proto::WireError::INTERNAL))?
                 .map(|updated| serde_json::json!({ "updated": updated }))
                 .map_err(|message| proto::WireError::with_code(message, proto::WireError::INTERNAL))
         })
@@ -214,16 +224,17 @@ impl GatewayCallbacks for StoreCallbacks {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), proto::WireError>> + Send + '_>>
     {
         Box::pin(async move {
-            self.check_account(&account, None)?;
-            self.store.mark_rate_limited(
-                &account,
-                &model,
-                429,
-                None,
-                reset_at.map(|value| value as f64),
-                "插件上报限额",
-            );
-            Ok(())
+            let provider = self.check_account(&account, None)?;
+            let store = self.store.clone();
+            crate::server::core::blocking::run(move || {
+                if store.account_provider_of(&account).as_deref() != Some(provider.as_str()) {
+                    return Err("账号归属已变化".to_string());
+                }
+                store.mark_rate_limited(&account, &model, 429, None,
+                    reset_at.map(|value| value as f64), "插件上报限额");
+                Ok(())
+            }).await.map_err(|error| proto::WireError::with_code(error.message, proto::WireError::INTERNAL))?
+                .map_err(|message| proto::WireError::with_code(message, super::CALLBACK_FORBIDDEN))
         })
     }
 

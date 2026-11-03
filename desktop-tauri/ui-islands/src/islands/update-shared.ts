@@ -18,9 +18,9 @@
  */
 
 import type * as React from 'react'
-import type { UpdateChannels, ForceUpdatePolicy } from '../../../ui-shared/updates'
-import { githubErrorMessage } from '../../../ui-shared/updates'
-export type { UpdateChannels } from '../../../ui-shared/updates'
+import type { AssetProbe, UpdateChannels, ForceUpdatePolicy } from '../../../ui-shared/updates'
+import { assetMissingReason, githubErrorMessage } from '../../../ui-shared/updates'
+export type { UpdateChannels, AssetProbe } from '../../../ui-shared/updates'
 // 代理池的共享类型与值前缀与账号页共用一份 —— 两处下拉的值域必须一致
 // （`pool:<id>`），各写一份迟早会漂移。accounts-shared 是纯类型 + 常量的
 // 自包含模块（不 import 任何业务模块），这里引用它不产生循环。
@@ -79,6 +79,50 @@ export type UpdateInfo = {
   serverAsset?: { url?: string; name?: string; size?: number } | null
   /** 更新已应用到容器内、只差重启（面板据此把按钮换成「立即重启」） */
   pendingRestart?: boolean
+  /** 这一版**到底传了哪些文件**（后缀清单 / 总数 / 有没有被更新源的访问方式挡掉）：
+   *  两条路都没有可下的包时，界面据此说明原因，见 missingAssetReasonFor。
+   *  升级前落库的检查结果里没有它 —— 调用方必须能退化成「只说本机要什么」 */
+  assetProbe?: AssetProbe | null
+}
+
+/**
+ * 容器内更新（Linux headless / Docker）与桌面安装包是**两条不同的路**，全文件
+ * 按这一个判定分流：桌面端 selfUpdate 恒为 false，下面每个分支都原样走回旧行为。
+ *
+ *   · 桌面：后端给 `asset`（NSIS / dmg / deb / AppImage 安装器）→ 下载 → 由壳
+ *     启动安装程序（见 run_installer）；
+ *   · 容器：后端给 `serverAsset`（服务端更新包）→ 下载 → 服务端自己原地替换
+ *     二进制与 ui 目录 → 重启进程（容器 restart 策略拉起）。
+ */
+export function isSelfUpdate(info: UpdateInfo | null | undefined): boolean {
+  return info?.selfUpdate === true
+}
+
+/** 本次要下载的资产：容器内更新取服务端包，桌面取安装器 */
+export function downloadAsset(info: UpdateInfo | null | undefined): { url?: string; name?: string } | null {
+  if (!info) return null
+  return isSelfUpdate(info) ? (info.serverAsset ?? null) : (info.asset ?? null)
+}
+
+/** installerKind → 该平台安装包的后缀。只在后端没给 assetProbe 时兜底用
+ *  （正常口径以后端的 expectedSuffixes 为准，它是 pick_installer 的同一份表） */
+function installerSuffixOf(info: UpdateInfo | null | undefined): string {
+  switch (String(info?.installerKind || '')) {
+    case 'dmg': return '.dmg'
+    case 'deb': return '.deb'
+    case 'appimage': return '.AppImage'
+    case 'nsis': return '.exe'
+    default: return ''
+  }
+}
+
+/** [assetMissingReason] 的入口：补上「本机」的那半边（容器还是桌面、要什么后缀）。
+ *  提示一律经它拼原因，别在调用点各写一份 —— 那就是三处口径互相漂移的开始 */
+export function missingAssetReasonFor(info: UpdateInfo | null | undefined): string {
+  return assetMissingReason(info?.assetProbe, {
+    selfUpdate: isSelfUpdate(info),
+    fallbackSuffix: installerSuffixOf(info),
+  }, t)
 }
 
 /** 下载任务快照（downloadUpdate / updateProgress 的返回） */

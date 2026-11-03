@@ -84,9 +84,9 @@
   background: var(--rail-bg);
 }
 .agent-rail-scroll {
-  --ui-selection-bg: var(--surface);
-  --ui-selection-border: var(--border);
-  --ui-selection-shadow: var(--shadow-1);
+  /* 选中色不再在本页覆盖：全站侧栏统一走主色实心块（见 ui-kit/styles/nav.css
+     与 theme.css 的 --ui-nav-selected-*）。原先这里是「浅色 --surface / 深色
+     --surface-2 + 描边 + 投影」的浮起小卡片，与其它侧栏是两套观感。 */
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
@@ -126,11 +126,6 @@
   justify-content: flex-start;
 }
 .agent-client:hover:not(:disabled):not([data-active]) { background: var(--nav-hover); border-color: transparent; }
-/* 深色下 --surface 比 --rail-bg 暗：选中行换亮一档的 --surface-2 */
-:root[data-theme="dark"] .agent-rail-scroll { --ui-selection-bg: var(--surface-2); }
-@media (prefers-color-scheme: dark) {
-  :root[data-theme="system"] .agent-rail-scroll { --ui-selection-bg: var(--surface-2); }
-}
 .agent-client.is-missing { opacity: .52; }
 .agent-client-main { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .agent-client-name {

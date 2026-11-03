@@ -11,6 +11,7 @@ import { ModelTestDialog, type ModelTestTarget } from './model-test-dialog'
 import { ModelBatchDialog } from './models-batch-dialog'
 import { ModelCell } from './models-cells'
 import { MappingDialog, CustomModelDialog } from './models-dialogs'
+import { DanglingMappings } from './models-dangling'
 import * as customSource from './models-custom-source'
 import { ALL_CUSTOM, type ManageModel } from './models-custom-source'
 import { PROVIDER_ICONS } from './add-provider-pick'
@@ -66,6 +67,9 @@ const PROVIDER_HUES: Record<string, number> = {
   raccoon: 60, catpaw: 85,
   autoclaw: 250, 'autoclaw-intl': 295,
   qoder: 330, 'qoder-intl': 350, 'cline-free': 200, 'cline-pass': 200,
+  // 千问办公两版（与 Qoder 同一套协议栈的另一家产品）：手工给一对
+  // 相邻但可辨的色相，而不是让未登记 id 落到哈希上（那种颜色是随机的）。
+  qwenwork: 300, 'qwenwork-intl': 315,
   codearts: 210, loomy: 155, kuku: 15,
   accio: 320, 'accio-intl': 335, trae: 170, zcode: 285,
 }
@@ -599,6 +603,10 @@ function ModelsPage() {
                 <TableBody id='models'>{body()}</TableBody>
               </Table>
             </div>
+            {/* 未挂载的映射：目标上游已不在任何模型行上（上游下线 / 那一家的行没出现），
+                chip 因此无处渲染。放在表格与表尾之间 —— 它是「这批数据有问题」的提醒，
+                不该混进按模型行的分页 / 分组里（见 models-dangling.tsx 的文件头）。 */}
+            <DanglingMappings />
             {/* 表尾：读数 / 每页条数 / 跳页 / 翻页器由通用表格外壳（table-shell.tsx）统一渲染。
                 左侧说明只剩「自定义家」那一条（内置家原先那句按用户要求移除）；其余几张表
                 的页脚说明也都去掉了，页脚现在是清一色的控制条 */}

@@ -47,6 +47,7 @@ pub fn save_override(def: &ClientDef, raw: &str) -> Result<(), String> {
                 .file_name()
                 .is_some_and(|name| name == "provider_config.json"),
             "crush" => path.file_name().is_some_and(|name| name == "crush.json"),
+            "dsh" => path.file_name().is_some_and(|name| name == "settings.yaml"),
             "cursor-cli" => path
                 .file_name()
                 .is_some_and(|name| name == "cli-config.json"),
@@ -101,6 +102,7 @@ pub fn candidates(def: &ClientDef) -> Vec<PathBuf> {
             .unwrap_or_else(|| home.clone())
             .join(".gemini/settings.json")],
         "zcode" => vec![home.join(".zcode/v2/provider_config.json")],
+        "dsh" => vec![dir("DSH_HOME", ".dsh").join("settings.yaml")],
         "workbuddy" => vec![
             dir("WORKBUDDY_CONFIG_DIR", ".workbuddy").join("models.json"),
             home.join(".codebuddy/models.json"),
@@ -344,6 +346,7 @@ fn package_version(binary: Option<&Path>, def: &ClientDef) -> Option<String> {
         "cline" => "cline",
         "opencode" => "opencode-ai",
         "kimi-code" => "@moonshot-ai/kimi-code",
+        "dsh" => "@deepseek-ai/dsh",
         _ => return None,
     };
     let parent = binary?.parent()?;

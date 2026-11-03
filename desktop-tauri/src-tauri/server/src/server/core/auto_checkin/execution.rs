@@ -25,8 +25,8 @@ impl AutoCheckin {
     /// `schedule_id` 给 Some：范围用**那条条目自己勾选的提供商**，去重标记落
     /// 条目级（`checkin_schedules::mark_fired` / `mark_result`）；给 None
     /// （手动全量）：范围是全部提供商，只落配置级标记。
-    /// `source` 是签到记录台账的触发来源（schedule / manual / startup，
-    /// 见 `core::checkin_records` 的模块头）。
+    /// `source` 是签到记录台账的触发来源（schedule / makeup / manual /
+    /// startup，见 `core::checkin_records` 的模块头）。
     pub async fn fire_for(
         &self,
         reason: &str,
@@ -78,7 +78,7 @@ impl AutoCheckin {
         if let Some(only) = only {
             providers.retain(|id| only.iter().any(|picked| picked == id));
         }
-        if retry_round.is_some() && matches!(source, "schedule" | "startup") {
+        if retry_round.is_some() && matches!(source, "schedule" | "makeup" | "startup") {
             let current = schedule.as_ref()?;
             if !master_enabled() || !current.enabled {
                 return None;

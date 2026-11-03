@@ -401,7 +401,12 @@ export async function setBinding(id: string, alias: string, target: string, patc
 /** 删除一条映射（默认绑定不可删 —— 界面上它没有删除按钮） */
 export async function removeMapping(id: string, alias: string, target: string): Promise<void> {
   await submit(id, draft => {
-    if (same(alias, target)) throw new Error(t('原始 ID 的默认绑定不能删除，请关闭它的开关'))
+    // 默认绑定（alias == target）跟着模型行存在：模型还在，只能关不能删。
+    // 模型已经不在了（手改过数据、或模型被移除后残留）时它没有开关可点 —— 与内置家
+    // 同一口径（后端 model_manage::remove_mapping 也用「还有没有模型行」判定），放行删除。
+    if (same(alias, target) && draft.models.some(model => same(model.id, target))) {
+      throw new Error(t('原始 ID 的默认绑定不能删除，请关闭它的开关'))
+    }
     const before = draft.mappings.length
     draft.mappings = draft.mappings.filter(item => !(same(item.alias, alias) && same(item.target, target)))
     if (draft.mappings.length === before) throw new Error(t('映射「{alias} → {target}」不存在', { alias, target }))

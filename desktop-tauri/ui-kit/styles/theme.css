@@ -119,14 +119,31 @@
   --color-skeleton-base: var(--ui-skeleton-base);
   --color-skeleton-highlight: var(--ui-skeleton-highlight);
 
-  --radius-xs: calc(var(--ui-radius) * 0.5);
-  --radius-sm: calc(var(--ui-radius) * 0.6);
-  --radius-md: calc(var(--ui-radius) * 0.8);
-  --radius-lg: var(--ui-radius);
-  --radius-xl: calc(var(--ui-radius) * 1.4);
-  --radius-2xl: calc(var(--ui-radius) * 1.8);
-  --radius-3xl: calc(var(--ui-radius) * 2.2);
-  --radius-4xl: calc(var(--ui-radius) * 2.6);
+  /* ── 圆角阶梯（全站唯一一份，别再往页面样式表里写 px）──────────────
+     依据 Apple 26 一代设计规范：
+       · 26 一代（Liquid Glass，WWDC 2025）把圆角整体调大，并立了**同心**
+         （concentric）这条规矩 —— 嵌套的圆角矩形共用同一个圆心，内层圆角 = 外层
+         圆角 − 两者间距；间距超过外层圆角时内层退化成直角。Apple 为此专门发了
+         `ConcentricRectangle`（SwiftUI）与 `UICornerConfiguration.containerConcentric`
+         （UIKit 26），HIG 的原文是「分组用更大的圆角，去对齐系统里控件的曲率」。
+       · 公开可查的取值：iOS 26 的按钮默认是胶囊、写死圆角的档位是 8pt
+         （`buttonBorderShape(.roundedRectangle(radius: 8))`）；macOS 26 的系统窗口
+         圆角 26pt、浮动侧栏 19pt、26 之前的老窗口 10pt。
+
+     所以这份阶梯的取法是：
+       · 小档 6 / 8 / 10 逐档相差 2px —— 容器内缩 2px 的内嵌块（分段控件的选项与
+         滑块就是这一种）正好落在下一档上，天然同心，不用一处一处算；
+       · 8 = Apple 那个按钮档位，10 = 本项目的控件档（按钮 / 输入 / 卡片 / 分组框）；
+       · 14 = 弹窗与面板；26 = 与 macOS 26 的系统窗口同圆（用到「跟系统窗口一样圆」
+         的地方才取它）；更小的图形细节（头像角标、图表图例点）不在这条线上，别硬套。 */
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-2xl: 22px;
+  --radius-3xl: 26px;
+  --radius-4xl: 30px;
   --radius-pill: 999px;
 
   --shadow-1: var(--ui-shadow-1);
@@ -138,7 +155,9 @@
 }
 
 :root {
-  --ui-radius: 1rem;
+  /* 基准圆角 = 弹窗 / 面板那一档（与上面的 --radius-lg 同一取值；保留这个变量名
+     是因为旧样式表里 `var(--radius)` / `var(--r-lg)` 还在用）。 */
+  --ui-radius: 14px;
   /* 字体栈首位的 Public Sans 与设计稿一致，但项目尚未引入字体文件
      （@fontsource-variable/public-sans），当前实际落在系统字体上 —— 与
      既有界面同款。装上字体包即自动切换，无需改这里。 */
@@ -219,9 +238,9 @@
   --ui-sidebar-fg: oklch(0.43287 0.01676 258.37);
   --ui-sidebar-muted: oklch(0.512 0.02088 261.29);
   --ui-rail-bg: oklch(0.955 0.004 286);
-  --ui-nav-selected-bg: oklch(0.89318 0.04237 253.82);
-  --ui-nav-selected-border: oklch(0.83311 0.05788 254.15);
-  --ui-nav-selected-fg: oklch(0.42649 0.12275 255.6);
+  --ui-nav-selected-bg: var(--ui-primary);
+  --ui-nav-selected-border: var(--ui-primary);
+  --ui-nav-selected-fg: var(--ui-primary-foreground);
   --ui-nav-count-bg: oklch(0.84405 0.05294 251.09);
   --ui-table-bg: var(--ui-surface);
   --ui-table-head-bg: var(--ui-surface);
@@ -324,9 +343,9 @@
   --ui-sidebar-fg: oklch(0.79794 0.01342 266.68);
   --ui-sidebar-muted: oklch(0.67832 0.0176 262.73);
   --ui-rail-bg: oklch(0.24 0.005 286);
-  --ui-nav-selected-bg: oklch(0.34658 0.05986 253.12);
-  --ui-nav-selected-border: oklch(0.46337 0.07464 249.11);
-  --ui-nav-selected-fg: oklch(0.93281 0.03331 250.99);
+  --ui-nav-selected-bg: var(--ui-primary);
+  --ui-nav-selected-border: var(--ui-primary);
+  --ui-nav-selected-fg: var(--ui-primary-foreground);
   --ui-nav-count-bg: oklch(0.43273 0.06483 250.27);
 
   --ui-chart-1: oklch(0.76 0.14 250);
@@ -432,9 +451,9 @@
     --ui-sidebar-fg: oklch(0.79794 0.01342 266.68);
     --ui-sidebar-muted: oklch(0.67832 0.0176 262.73);
     --ui-rail-bg: oklch(0.24 0.005 286);
-    --ui-nav-selected-bg: oklch(0.34658 0.05986 253.12);
-    --ui-nav-selected-border: oklch(0.46337 0.07464 249.11);
-    --ui-nav-selected-fg: oklch(0.93281 0.03331 250.99);
+    --ui-nav-selected-bg: var(--ui-primary);
+    --ui-nav-selected-border: var(--ui-primary);
+    --ui-nav-selected-fg: var(--ui-primary-foreground);
     --ui-nav-count-bg: oklch(0.43273 0.06483 250.27);
 
     --ui-chart-1: oklch(0.76 0.14 250);

@@ -185,9 +185,30 @@ services:
 | `AGENT2API_ALLOW_NO_KEY` | `1`이면 fail-closed 해제(키 미설정이어도 `/v1` 허용, 순수 내부망 한정) |
 | `AGENT2API_CAPTCHA_ENABLED` | 로그인 페이지 사람 확인 위젯: 기본 `1`(켜짐), `0`은 끔 |
 | `AGENT2API_SELF_UPDATE` | 컨테이너 안의 업데이트 창구: 기본 `1`(켜짐. 패널에서 "다운로드 후 업데이트" 가능). `0`이면 꺼지고 수동 업그레이드만 가능 |
+| `AGENT2API_IMAGE_CACHE_MB` | 생성 이미지의 다운로드 메모리 캐시 상한(MiB, 기본 `128`, 범위 8~4096). 잘못된 값 / 범위 밖은 기본값으로 폴백 |
+| `AGENT2API_IMAGE_COMPRESS_CACHE_MB` | 세션 이미지 압축 결과의 메모리 캐시 상한(MiB, 기본 `128`, 범위 8~4096, 기준 동일) |
 | `WORKBUDDY_UPDATE_REPO` + `WORKBUDDY_UPDATE_API_BASE` | 심화: "업데이트 확인 / 업데이트 다운로드"를 자체 소스로 교체합니다. 전자는 저장소를 바꾸고(기본값은 업스트림 `aimod-cc/Agent2API`, fork 후 변경 가능), 후자는 API 루트를 바꿉니다(기본 `https://api.github.com`, GitHub와 같은 형태의 release JSON을 반환해야 함). 자체 소스 설정 후 다운로드 허용 목록은 **그 소스 자신의 호스트**만 추가로 허용합니다(스킴은 소스를 따름: `http://`를 설정하면 평문 다운로드도 허용. 로컬 연습 / 내부 미러용) |
 
 소스에서 빌드하려면: 이 저장소를 클론한 뒤 `docker compose up -d --build`(이미지에는 게이트웨이와 패널만 들어가며 Rust 도구 체인은 포함되지 않습니다).
+
+### 메모리 사용량
+
+이미지 안의 게이트웨이(Linux 대상)에는 jemalloc 할당자가 내장되어 있습니다. 장시간 실행과 다계정 동시 포워딩에서 시스템 기본 할당자보다 메모리 단편화가 덜 생기고 RSS도 천천히 늘어나는 일이 줄어듭니다 —— 소형 메모리 머신이 가장 자주 눌리거나 OOM 으로 죽는 지점이 바로 여기입니다.
+
+소형 머신에서는 컨테이너에 메모리 상한을 두는 것을 권합니다. 초과하면 커널이 프로세스를 종료하고 `restart: unless-stopped` 가 다시 띄웁니다. 호스트(또는 같은 머신의 다른 서비스)를 끌어내리는 대신 "한 번 재시작"으로 끝납니다.
+
+```bash
+# docker run
+docker run -d --name agent2api --restart unless-stopped --memory=1g \
+  -p 3065:3065 -v ./data:/data \
+  aimodcc/agent2api:latest
+```
+
+compose 사용자는 서비스에 `mem_limit: 1g` 한 줄을 추가하세요(`docker-compose.yml` 에 주석 예시가 있습니다). swarm 또는 `docker compose --compatibility` 에서는 `deploy.resources.limits.memory` 를 씁니다. 1g 는 출발점일 뿐이며 실제 동시 처리량에 맞춰 조정하세요.
+
+메모리에 상주하는 두 이미지 캐시 상한은 모두 환경 변수로 줄일 수 있습니다(기본 각 `128` MiB): `AGENT2API_IMAGE_CACHE_MB`(생성 이미지 다운로드 캐시), `AGENT2API_IMAGE_COMPRESS_CACHE_MB`(세션 이미지 압축 결과 캐시). 잘못된 값이나 범위 밖 값은 기본값으로 폴백하며 서비스 시작을 막지 않습니다.
+
+`MALLOC_ARENA_MAX=2` 같은 glibc 할당자 튜닝은 **jemalloc 을 내장하지 않은 형태**(구버전 이미지, 직접 빌드한 서버, 데스크톱)에만 의미가 있습니다. 이 이미지에는 설정할 필요가 없습니다.
 
 **웹 패널 기능 차이**( 이 PC에 데스크톱 클라이언트가 없음에서 비롯됩니다): 웹 로그인(WorkBuddy / Qoder / Cline), SMS 인증 코드, 자격 증명 붙여넣기는 완전히 사용 가능합니다. 이 PC 콜백이 필요한 웹 로그인(AutoClaw / CatPaw / Accio / CodeArts / Trae)과 "이 PC 로그인 상태 가져오기"는 사용할 수 없으니 자격 증명 붙여넣기를 쓰세요. 데스크톱에서 "웹 관리 패널도 공개"를 켠 뒤 브라우저로 열어도 같은 차이가 적용됩니다 —— 동일한 화면, 동일한 판정입니다.
 

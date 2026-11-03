@@ -95,6 +95,7 @@ pub use routing_profiles::{
     normalize_model as normalize_routing_model, routing_profiles, routing_snapshot, save_routing_profile,
     settings_for_model as routing_settings_for_model,
     validate_shape as validate_routing_profile, RoutingProfile, RoutingProfiles, RoutingProviderScope,
+    KEY_ROUTING_PROFILES,
 };
 pub use types::*;
 pub use update_policy::{
@@ -150,6 +151,12 @@ pub struct RuntimeConfig {
     /// 与 queue 同一理由：stats 端点**每次被铸造器轮询**都要取它（改完设置
     /// 下一轮就生效，不重启进程），解析一次存下来最省事。
     captcha_pool: CaptchaPoolSettings,
+    /// 会话图片压缩（设置页「网关 → 图片压缩」区域）。
+    ///
+    /// 与 timeouts 同一理由：转发层**每次发送前**都要取它（改完设置下一个
+    /// 请求就生效，不重启进程），解析一次存下来最省事。默认开，见
+    /// `KEY_IMAGE_COMPRESS_ENABLED` 的取舍说明。
+    image_compress: ImageCompressSettings,
     /// 账号路由的策略 / 粘性 / 退避 / 垫底 / 熔断（账号页「路由」区域）。
     ///
     /// 与 timeouts 同一理由：转发层**每次选路**都要取它（改完设置下一个
@@ -157,6 +164,7 @@ pub struct RuntimeConfig {
     routing: RoutingSettings,
     routing_profiles: std::sync::Arc<RoutingProfiles>,
     account_sort: std::sync::Arc<AccountSortSettings>,
+    model_rules: std::sync::Arc<crate::server::core::model_rules::ModelRules>,
     /// 事件日志的保存目录（原始配置值；None = 未设置，用配置目录）。
     /// 低频字段（启动 + 设置页读写），不值得为它发明解析层，存原始值即可。
     log_dir: Option<String>,
@@ -305,6 +313,11 @@ impl RuntimeConfig {
     /// 开发者角色兼容是否开启（转发层每次发送前判一次，见字段说明）
     pub fn developer_role_compat(&self) -> bool {
         self.developer_role_compat
+    }
+
+    /// 会话图片压缩设置（转发层每次发送前取一份 `Copy` 快照，见字段说明）
+    pub fn image_compress_settings(&self) -> &ImageCompressSettings {
+        &self.image_compress
     }
 
     /// 网关面（`/v1/*`）跨域访问是否开启（CORS 中间件逐请求判一次，见字段说明）
@@ -543,6 +556,7 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
     let timeouts = timeouts_from(&raw);
     let queue = queue_from(&raw);
     let captcha_pool = captcha_pool_from(&raw);
+    let image_compress = image_compress_from(&raw);
     let routing = routing_from(&raw);
     RuntimeConfig {
         // 文件里有就用文件的，否则环境变量兜底（对应 `if (config.apiKey && !opts.apiKey)`）。
@@ -561,9 +575,11 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
         timeouts,
         queue,
         captcha_pool,
+        image_compress,
         routing,
         routing_profiles: routing_profiles::from_raw(&raw),
         account_sort: account_sort::from_raw(&raw),
+        model_rules: std::sync::Arc::new(crate::server::core::model_rules::ModelRules::from_raw(&raw)),
         log_dir: string_field(&raw, KEY_LOG_DIR),
         request_stats_dir: string_field(&raw, KEY_REQUEST_STATS_DIR),
         debug_dir: string_field(&raw, KEY_DEBUG_DIR),
@@ -924,9 +940,11 @@ pub fn init(db: Option<Db>) -> RuntimeConfig {
     });
     let _ = DB.set(db);
     let snapshot = build(read_raw());
+    crate::server::core::providers::catalog::invalidate();
     if let Ok(mut guard) = CONFIG.write() {
         *guard = Some(snapshot.clone());
     }
+    crate::server::core::providers::catalog::invalidate();
     snapshot
 }
 
@@ -942,9 +960,11 @@ pub fn init(db: Option<Db>) -> RuntimeConfig {
 /// 没有任何旧文件时不必多读一次库。
 pub fn reload() -> RuntimeConfig {
     let snapshot = build(read_raw());
+    crate::server::core::providers::catalog::invalidate();
     if let Ok(mut guard) = CONFIG.write() {
         *guard = Some(snapshot.clone());
     }
+    crate::server::core::providers::catalog::invalidate();
     snapshot
 }
 
@@ -971,6 +991,13 @@ pub fn current() -> RuntimeConfig {
         }
     }
     build(Map::new())
+}
+
+pub(crate) fn model_rules_snapshot() -> std::sync::Arc<crate::server::core::model_rules::ModelRules> {
+    if let Some(rules) = CONFIG.read().ok().and_then(|config| config.as_ref().map(|config| config.model_rules.clone())) {
+        return rules;
+    }
+    std::sync::Arc::new(crate::server::core::model_rules::ModelRules::default())
 }
 
 /// 在配置读锁内跑一个**只读、短小**的闭包，只借出快照的 `raw` 表（**不克隆**）。
@@ -1211,14 +1238,22 @@ where
     // 读改写必须串行，否则两个模型的独立配置会互相覆盖。
     let _update_guard = CONFIG_UPDATE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut next = current();
+    let previous = next.clone();
     let before = synced_fingerprint(&next.raw);
     mutate(&mut next);
+    if previous.raw().get(crate::server::core::model_rules::KEY_MODEL_RULES)
+        != next.raw().get(crate::server::core::model_rules::KEY_MODEL_RULES) {
+        next.model_rules = std::sync::Arc::new(crate::server::core::model_rules::ModelRules::from_raw(&next.raw));
+    }
     let saved = save_raw(&next.raw);
     // 先算改动后的指纹再交出所有权：`next` 要移进内存快照
     let changed = before != synced_fingerprint(&next.raw);
+    let catalog_changed = crate::server::core::providers::catalog::config_changed(&previous, &next);
+    if catalog_changed { crate::server::core::providers::catalog::invalidate(); }
     if let Ok(mut guard) = CONFIG.write() {
         *guard = Some(next);
     }
+    if catalog_changed { crate::server::core::providers::catalog::invalidate(); }
     // 云同步的自动上传：只有**同步范围内的键**真的变了才发信号。
     //
     // ── 为什么在这里而不是在 `save_raw` 里 ─────────────────────
@@ -1391,6 +1426,13 @@ pub fn remember_request_model(model: &str) {
 /// 写入 config.json 里任意字段（其他字段原样保留）。低频路径专用。
 pub fn update_raw_field(key: &str, value: Value) -> bool {
     update_raw_field_with(key, move |current| *current = value)
+}
+
+/// 一次改动多个配置键（整份 raw 交给调用方）。用于启动期一次性迁移：
+/// 逐键 `update_raw_field` 会每键落一次库，且派生快照只重建被点名的几项；
+/// 批量改完由调用方补一次 `reload()`，让所有派生快照与库对齐。
+pub(crate) fn update_raw_fields(mutate: impl FnOnce(&mut Map<String, Value>)) -> bool {
+    update(move |config| mutate(&mut config.raw))
 }
 
 pub(crate) fn update_raw_field_with(key: &str, mutate: impl FnOnce(&mut Value)) -> bool {
@@ -1682,6 +1724,56 @@ pub fn set_captcha_pool(patch: CaptchaPoolPatch) -> bool {
             next.max_per_round = max_per_round;
         }
         config.captcha_pool = next;
+    })
+}
+
+// ─── 会话图片压缩（imageCompressEnabled / MaxEdge / Quality / ThresholdKb）──
+
+/// 只取图片压缩设置（**不克隆整份 raw**）。
+///
+/// 与 `timeout_settings()` 同一取舍：转发层每次发送前都要取一次，读锁取一份
+/// `Copy` 快照即可。未初始化时给默认值（**关**）。
+pub fn image_compress_settings() -> ImageCompressSettings {
+    if let Ok(guard) = CONFIG.read() {
+        if let Some(config) = guard.as_ref() {
+            return config.image_compress;
+        }
+    }
+    ImageCompressSettings::default()
+}
+
+/// 更新会话图片压缩设置（`None` = 该项不动），返回是否写盘成功。
+///
+/// 调用方（`api::image_compress::put_image_compress`）**必须先校验范围**：本函数
+/// 按「已合法」处理，越界值会被 `bounded_int_field` 的回读逻辑丢弃。与
+/// `set_captcha_pool` 同一模式：内存快照与 raw 底稿一起改。
+pub fn set_image_compress(patch: ImageCompressPatch) -> bool {
+    update(|config| {
+        let mut next = config.image_compress;
+        if let Some(enabled) = patch.enabled {
+            config
+                .raw
+                .insert(KEY_IMAGE_COMPRESS_ENABLED.to_string(), Value::Bool(enabled));
+            next.enabled = enabled;
+        }
+        let mut write_int = |key: &str, value: i64, slot: &mut i64| {
+            config.raw.insert(key.to_string(), Value::from(value));
+            *slot = value;
+        };
+        if let Some(max_edge) = patch.max_edge {
+            write_int(KEY_IMAGE_COMPRESS_MAX_EDGE, max_edge, &mut next.max_edge);
+        }
+        if let Some(quality) = patch.quality {
+            write_int(KEY_IMAGE_COMPRESS_QUALITY, quality, &mut next.quality);
+        }
+        if let Some(threshold_kb) = patch.threshold_kb {
+            write_int(
+                KEY_IMAGE_COMPRESS_THRESHOLD_KB,
+                threshold_kb,
+                &mut next.threshold_kb,
+            );
+        }
+        config.image_compress = next;
     })
 }
 

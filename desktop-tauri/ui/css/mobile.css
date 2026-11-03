@@ -905,6 +905,10 @@
     min-height: 26px;
   }
   .models-table tr:not(.tr-group) > td.cell-caps::before { flex: 0 0 auto; }
+  /* 图片模型的能力格在表里是「整叠居中」（见 page-gateway.css 的 .caps-image）；
+     卡片模式没有列对齐这回事，取消那对 auto 外边距 —— 让标签叠贴着「能力」
+     标签排，与四枚圆点在同一个位置。 */
+  .models-table tr:not(.tr-group) > td.cell-caps .caps-open.caps-image { margin-inline: 0; }
 }
 
 @media (max-width: 767.98px) {

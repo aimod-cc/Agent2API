@@ -286,7 +286,7 @@ pub async fn chat(State(state): State<ServerState>, headers: HeaderMap, body: By
 
     // 模型路由：对外名 → 上游名（默认值 / 映射别名 / 目录校验与 /v1/* 同源）
     let started_at = logging::now_ms();
-    let requested_model = match pipeline::resolve_model(&state, &mut upstream, access.scope.as_ref()) {
+    let requested_model = match super::request_prepare::resolve_model(&state, &mut upstream, access.scope.as_ref()).await {
         Ok(name) => name,
         Err(error) => {
             pipeline::record_early_failure(&state, started_at, &model, reasoning.as_deref().unwrap_or(""), &access.source, &error);
@@ -310,7 +310,8 @@ pub async fn chat(State(state): State<ServerState>, headers: HeaderMap, body: By
     let telemetry_id = telemetry.snapshot().id;
     // 进行中行：与真实请求同一时点。`is_test = true` —— 报表排除、请求日志标记
     // （与模型测试同一口径，见模块头）；下游模型名记用户点名的那个对外名
-    state.request_stats().record_started(
+    super::request_prepare::record_started(
+        state.request_stats(),
         &telemetry_id,
         started_at,
         &requested_model,
@@ -318,7 +319,7 @@ pub async fn chat(State(state): State<ServerState>, headers: HeaderMap, body: By
         reasoning.as_deref().unwrap_or(""),
         &access.source,
         true,
-    );
+    ).await;
     if let Some(token) = cancellation::register(&telemetry_id) {
         telemetry.set_cancel_token(token);
     }

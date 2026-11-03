@@ -4,6 +4,7 @@ pub enum ConfigFormat {
     Jsonc,
     Toml,
     JsonEnv,
+    Yaml,
 }
 
 impl ConfigFormat {
@@ -13,6 +14,7 @@ impl ConfigFormat {
             Self::Jsonc => "jsonc",
             Self::Toml => "toml",
             Self::JsonEnv => "json+env",
+            Self::Yaml => "yaml",
         }
     }
 }
@@ -122,6 +124,14 @@ pub const CLIENTS: &[ClientDef] = &[
         models: true, effort: true, default_model: true, toggle: false, env_key: false,
         needs_restart: true, note: "仅编辑原生 JSON 配置；存在优先级更高的 crushrc 时禁止写入。",
         docs: "https://github.com/charmbracelet/crush/tree/main/docs/config",
+    },
+    ClientDef {
+        id: "dsh", name: "DeepSeek Harness", vendor: "DeepSeek", hue: 220, letter: "DS",
+        icon: "dsh.svg", icon_full: true, format: ConfigFormat::Yaml, binaries: &["dsh"],
+        behavior: "providers", protocols: &["openai_chat", "responses", "anthropic"], writable: true, gateway: true,
+        models: true, effort: true, default_model: true, toggle: false, env_key: true,
+        needs_restart: false, note: "按用户设置 settings.yaml 的自定义提供商写入，密钥另存在同目录 .credentials.yaml；配置按请求实时读取，刷新已打开的页面即可生效。",
+        docs: "https://github.com/deepseek-ai/deepseek-harness",
     },
     ClientDef {
         id: "qoder", name: "Qoder CLI", vendor: "Alibaba", hue: 195, letter: "QD",

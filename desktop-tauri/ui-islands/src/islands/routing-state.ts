@@ -78,8 +78,8 @@ export function cloneProfile(): RouteProfile {
 }
 export function independentProfile(profile = cloneProfile()): RouteProfile {
   const next = structuredClone(profile)
-  next.providerScope = 'selected'
-  next.disabledProviders = next.disabledProviders.filter(id => next.providers.includes(id))
+  if (!next.providerScope) next.providerScope = 'all'
+  if (next.providerScope === 'selected') next.disabledProviders = next.disabledProviders.filter(id => next.providers.includes(id))
   return next
 }
 

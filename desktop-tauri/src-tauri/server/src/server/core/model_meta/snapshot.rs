@@ -148,15 +148,14 @@ fn snapshot() -> Arc<Snapshot> {
     if let Some(loaded) = lock.read().ok().and_then(|slot| slot.clone()) {
         return loaded;
     }
+    let loaded = Arc::new(load());
     let mut slot = match lock.write() {
         Ok(slot) => slot,
-        // 读到中毒锁（某个持锁线程 panic 过）：重新装载一份，不把整个功能挂掉
         Err(poisoned) => poisoned.into_inner(),
     };
     if let Some(loaded) = slot.clone() {
         return loaded;
     }
-    let loaded = Arc::new(load());
     *slot = Some(loaded.clone());
     loaded
 }
@@ -179,11 +178,13 @@ fn load() -> Snapshot {
 
 /// 用新索引整体替换内存快照（刷新成功后调用）。
 pub fn replace(snapshot: Snapshot) {
+    crate::server::core::providers::catalog::invalidate();
     let lock = SNAPSHOT.get_or_init(|| RwLock::new(None));
     match lock.write() {
         Ok(mut slot) => *slot = Some(Arc::new(snapshot)),
         Err(poisoned) => *poisoned.into_inner() = Some(Arc::new(snapshot)),
     }
+    crate::server::core::providers::catalog::invalidate();
 }
 
 /// 解析一份快照文本（三份形态共用，见模块头）。

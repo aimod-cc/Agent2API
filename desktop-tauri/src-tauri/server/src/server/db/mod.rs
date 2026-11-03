@@ -80,7 +80,10 @@
 
 pub mod backup;
 pub mod migrate;
+mod revisions;
 pub mod schema;
+
+pub(crate) use revisions::AccountChanges;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -118,6 +121,7 @@ struct DbInner {
     conn: Mutex<Connection>,
     /// 库文件路径（打开时确定，之后不变）
     file: PathBuf,
+    accounts: Arc<revisions::AccountRevisions>,
 }
 
 impl Db {
@@ -149,11 +153,13 @@ impl Db {
         let conn = Connection::open(path).map_err(|error| format!("打开数据库失败: {error}"))?;
         apply_pragmas(&conn)?;
         schema::migrate(&conn).map_err(|error| format!("建表/升级 schema 失败: {error}"))?;
-        install_cloud_sync_hook(&conn);
+        let accounts = Arc::new(revisions::AccountRevisions::default());
+        install_cloud_sync_hook(&conn, accounts.clone());
         Ok(Db {
             inner: Arc::new(DbInner {
                 conn: Mutex::new(conn),
                 file: path.to_path_buf(),
+                accounts,
             }),
         })
     }
@@ -207,6 +213,18 @@ impl Db {
             Ok(mut conn) => Some(f(&mut conn)),
             Err(_) => None,
         }
+    }
+
+    pub(crate) fn account_revision(&self) -> u64 {
+        self.inner.accounts.current()
+    }
+
+    pub(crate) fn account_changes(&self, since: Option<u64>) -> AccountChanges {
+        self.inner.accounts.since(since)
+    }
+
+    pub(crate) fn invalidate_accounts(&self) {
+        self.inner.accounts.invalidate();
     }
 
     /// 库文件路径（排障直读 / 启动日志展示）。
@@ -287,8 +305,12 @@ fn apply_pragmas(conn: &Connection) -> Result<(), String> {
 /// ── 注册失败不阻断启动 ──────────────────────────────────────
 /// 钩子只服务自动同步这一个可选功能。注册不上（旧版 SQLite 等）时最坏是
 /// 「自动同步不触发」，手动上传照样可用 —— 不该让整个网关起不来。
-fn install_cloud_sync_hook(conn: &Connection) {
-    let result = conn.update_hook(Some(|_action, _db: &str, table: &str, _rowid: i64| {
+/// 账号表同时记录行级失效信号；回调不读库，也不获取账号或快照的锁。
+fn install_cloud_sync_hook(conn: &Connection, accounts: Arc<revisions::AccountRevisions>) {
+    let result = conn.update_hook(Some(move |_action, _db: &str, table: &str, rowid: i64| {
+        if table == "accounts" {
+            accounts.changed(rowid);
+        }
         crate::server::core::cloud_sync::auto_sync::on_table_change(table);
     }));
     if let Err(error) = result {

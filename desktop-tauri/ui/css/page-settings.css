@@ -58,7 +58,9 @@
   padding: 0 10px;
   gap: 7px;
   border: 1px solid transparent;
-  border-radius: var(--r-sm);
+  /* 圆角交给组件库的 NavItem（30px 一档 = --radius-md 10），这里不再自己定：
+     原来写死 --r-sm(8) 会让设置页左栏比主侧栏圆一档，正是「侧边栏和按钮对不上」
+     那类不一致。阶梯见 ui-kit/styles/theme.css */
   background: transparent;
   /* 分类项是 <button>，components.css 里通用的 button 规则会给它带上
      --shadow-1 —— 与「平铺的导航列表」冲突，这里显式清掉（.nav-item 同样处理） */

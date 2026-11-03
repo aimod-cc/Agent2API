@@ -140,6 +140,7 @@ pub fn profile(def: &ClientDef, profile: &Profile) -> Result<(), String> {
         let levels: &[&str] = match def.id {
             "codex" => &["none", "minimal", "low", "medium", "high", "xhigh"],
             "claude-code" => &["low", "medium", "high", "xhigh", "max", "auto"],
+            "dsh" => &["off", "none", "minimal", "low", "medium", "high", "xhigh", "max"],
             _ => &["none", "minimal", "low", "medium", "high", "xhigh", "max"],
         };
         if !levels.contains(&profile.effort.as_str()) {

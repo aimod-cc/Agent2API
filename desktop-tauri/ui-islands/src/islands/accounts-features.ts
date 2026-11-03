@@ -167,6 +167,10 @@ const PROVIDER_FEATURES: Record<string, ProviderFeatures> = {
   //   桶级口径、没有时刻；两个地区都要带上。
   qoder: { usage: true, creditDetail: true, edition: true, identifier: ['userId'], expiry: ['expiresAt'], emailAsName: true },
   'qoder-intl': { usage: true, creditDetail: true, edition: true, identifier: ['userId'], expiry: ['expiresAt'], emailAsName: true },
+  // 千问办公两版：与 Qoder 同一套账号形态（余额 / 逐桶明细 / 版本徽章 /
+  // 以邮箱报名字）。插件已经申报了同一份，这里是旧插件版本的兜底。
+  qwenwork: { usage: true, creditDetail: true, edition: true, identifier: ['userId'], expiry: ['expiresAt'], emailAsName: true },
+  'qwenwork-intl': { usage: true, creditDetail: true, edition: true, identifier: ['userId'], expiry: ['expiresAt'], emailAsName: true },
   // Cline 两条键：同一家上游按计费通道拆成两个 provider，账号形态完全一样（见
   // providers::cline::models）。查表按 id 精确匹配，只登记一个会让另一家掉进兜底
   'cline-free': { usage: true, edition: false, identifier: ['account'], expiry: ['expiresAt'] },

@@ -381,6 +381,24 @@
    具体语义由悬停提示兜底（capabilityTip）。三态：
    支持 = 品牌淡底圆、明确不支持 = 灰实底圆、未声明 = 虚线圈。 */
 .caps-open.caps-badges { gap: 4px; flex-wrap: wrap; }
+
+/* 图片模型的能力格：两枚标签（图片生成 / 图片编辑）上下层叠、整叠居中。
+   与上面那排圆点是**互斥**的两种形态：四枚圆点问的是对话模型的能力
+   （工具 / 图片识别 / 视频 / 思考），图片模型身上它们全是「不支持」。
+   ── 为什么要 block 级 + max-content + auto 外边距 ──────────────
+   这一列的对齐默认是左（列设置里只有「选择」「操作」两列带 align）。要让这一格
+   的标签叠居中，改 text-align 是错的 —— 那是整列的事，会把对话模型的圆点也挪到
+   中间。flex 子项之外的块级盒子带定宽 + auto 左右外边距才会居中，所以这里
+   显式 width: max-content（宽度 = 最长那枚标签，悬停底只包住标签本身，
+   不会铺满整格）+ margin 的左右改 auto（覆盖 .caps-open 的 -4px 外扩）。 */
+.caps-open.caps-image {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: max-content;
+  margin: -3px auto;
+}
 .cap-dot {
   position: relative;
   display: inline-flex;
@@ -723,4 +741,39 @@
     border-right: 0;
     border-bottom: 1px solid var(--sidebar-border);
   }
+}
+
+/* ── 未挂载的模型映射（models-dangling.tsx）──────────────────────
+   指向的上游模型已不在任何模型行上（上游下线 / 承载它的那家当前没有行），
+   映射的 chip 因此无处渲染。它是一份「这批数据有问题」的提醒，刻意不做成
+   表格的一行：定高、自己滚，不参与上面表格的 flex:1 高度分配（底色与表格
+   分开，让人一眼看出它不是模型列表的一部分）。 */
+.models-dangling {
+  flex: 0 0 auto;
+  max-height: 26vh;
+  overflow: auto;
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.models-dangling .dg-head { display: flex; align-items: center; gap: 8px; }
+.models-dangling .dg-title { font-size: 12.5px; font-weight: 650; color: var(--text-2); }
+.models-dangling .dg-hint { margin: 4px 0 8px; font-size: 11.5px; line-height: 1.6; color: var(--text-3); }
+.models-dangling .dg-list { display: flex; flex-direction: column; gap: 3px; margin: 0; padding: 0; list-style: none; }
+.models-dangling .dg-item { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.models-dangling .dg-prov { flex: 0 0 auto; color: var(--text-3); }
+.models-dangling .dg-map { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-family: var(--font-mono); }
+.models-dangling .dg-map code[data-copy] { cursor: pointer; }
+.models-dangling .dg-arrow { color: var(--text-3); }
+.models-dangling .dg-state { flex: 0 0 auto; font-size: 11px; color: var(--text-3); }
+/* 「默认绑定」标注：形状照 alias chip 里那枚 .binding-default（同一个含义，同一种长相） */
+.models-dangling .dg-tag {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  background: var(--surface);
+  color: var(--text-3);
+  font-size: 10px;
+  font-weight: 500;
 }

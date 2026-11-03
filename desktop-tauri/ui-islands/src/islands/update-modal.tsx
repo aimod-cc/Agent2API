@@ -1,6 +1,9 @@
 import * as React from 'react'
 import { createRoot } from 'react-dom/client'
 import {
+  Alert,
+  AlertDescription,
+  AlertTitle,
   Button,
   Dialog,
   DialogBody,
@@ -9,7 +12,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@ui'
-import { handleExternalClick, markdownHtml, shared, type UpdateInfo } from './update-shared'
+import {
+  downloadAsset, handleExternalClick, isSelfUpdate, markdownHtml, missingAssetReasonFor,
+  openExternal, safeExternal, shared, type UpdateInfo,
+} from './update-shared'
 import { t } from '../i18n'
 import { HtmlContent } from '@ui'
 import { Empty } from '@ui'
@@ -61,6 +67,13 @@ let promptedUpdateVersion = ''
  *     后端的定时检查到点会再次发现它，没有这道闸就会隔一分钟弹一次；
  *   · 人已经在设置页时不弹 —— 软件更新面板就在眼前，再盖一层弹窗纯属打扰。
  *
+ * ── 这一版没有可下载的包时照弹，但按钮换掉 ──────────────────
+ * 早先只判 `hasUpdate === true`：没有资产也照弹「去更新」，点进去落到面板上
+ * 只会得到一句「没有可下载的安装包」—— 用户被指到一条死路。现在弹窗自己看
+ * `downloadAsset`（与面板同一口径）：没有包就不给「去更新」，改成把原因说清楚
+ * 并给「到 GitHub 发布页下载」。仍然弹，是因为「有新版本」这件事本身值得知道 ——
+ * 静默处理反而让人永远停在旧版本上。
+ *
  * 调用点与旧实现一致：check / syncFromCache / openAndDownload 结束时各一次（check 那条
  * 实际上永远被「人已在设置页」挡住，留着是为了与旧路径一一对应），另外作为契约方法供
  * app.js 的定时轮询转发。
@@ -100,11 +113,22 @@ function UpdateModal({ info, onGoUpdate, onClose }: UpdateModalProps) {
   const version = String(info.latestVersion || '')
   const notes = String(info.notes || '').trim()
   const html = notes ? markdownHtml(notes) : ''
+  // 「有没有本机的包」与面板同一口径（downloadAsset）：没有就不给「去更新」，
+  // 那个按钮此刻只会把人送到一句报错上
+  const canDownload = !!downloadAsset(info)?.url
+  const reason = canDownload ? '' : missingAssetReasonFor(info)
+  const pageUrl = safeExternal(info.pageUrl)
 
   /** 「跳过此次更新」：按版本号记进 localStorage（与旧 app.js 同一个键） */
   function handleSkip(): void {
     writeSkippedVersion(version)
     onClose()
+  }
+
+  /** 没有可下的包时那条出口：到发布页自己挑一份（外链一律交给系统浏览器） */
+  function handleOpenRelease(): void {
+    onClose()
+    void openExternal(pageUrl)
   }
 
   /**
@@ -135,6 +159,22 @@ function UpdateModal({ info, onGoUpdate, onClose }: UpdateModalProps) {
             {t('新版本 ')}<strong className='text-foreground'>{version}</strong>
             {t(' 已发布（当前 {current}），更新日志如下：', { current: info.currentVersion || t('未知') })}
           </p>
+          {/* 没有可下的包：先在这里交代原因，再谈更新日志 —— 否则用户读完日志
+              点「去更新」才发现无路可走。容器端额外给出宿主机那条命令：它的升级
+              本来就不走安装包，光说「没有包」等于没说 */}
+          {canDownload ? null : (
+            <Alert variant='warning'>
+              <AlertTitle>
+                {isSelfUpdate(info) ? t('这一版没有提供容器内更新包') : t('这一版没有提供本机安装包')}
+              </AlertTitle>
+              <AlertDescription>
+                {reason}
+                {isSelfUpdate(info)
+                  ? <div className='mt-1.5'>{t('在宿主机执行 docker compose pull && docker compose up -d 即可升级。')}</div>
+                  : null}
+              </AlertDescription>
+            </Alert>
+          )}
           {/* 正文限高 + 滚动（旧 .update-modal-notes 的 46vh），长日志不会把弹窗撑出一屏；
               overscroll-contain 拦住滚动链，滚到底不带动外层页面 */}
           <div className='max-h-[46vh] overflow-y-auto overscroll-contain pr-1.5' onClick={handleExternalClick}>
@@ -146,11 +186,19 @@ function UpdateModal({ info, onGoUpdate, onClose }: UpdateModalProps) {
           </div>
         </DialogBody>
         <DialogFooter>
-          {/* 旧 .modal-foot 的布局：跳过 | spacer | 取消 + 去更新 */}
+          {/* 旧 .modal-foot 的布局：跳过 | spacer | 取消 + 去更新。
+              没有可下载的包时「去更新」这条路不存在（见 handleGo 的说明）：
+              桌面端换成「到 GitHub 发布页下载」（pageUrl 正常都在，后端在没给
+              html_url 时会兜底拼一个 releases 页面地址）；容器端的升级不走安装包，
+              上面那条 compose 命令才是正路，这里就不给按钮了 */}
           <Button variant='outline' size='sm' onClick={handleSkip}>{t('跳过此次更新')}</Button>
           <div className='mr-auto' />
           <Button variant='outline' onClick={onClose}>{t('取消')}</Button>
-          <Button variant='default' onClick={handleGo}>{t('去更新')}</Button>
+          {canDownload
+            ? <Button variant='default' onClick={handleGo}>{t('去更新')}</Button>
+            : (!isSelfUpdate(info) && pageUrl)
+              ? <Button variant='default' onClick={handleOpenRelease}>{t('到 GitHub 发布页下载')}</Button>
+              : null}
         </DialogFooter>
       </DialogContent>
     </Dialog>

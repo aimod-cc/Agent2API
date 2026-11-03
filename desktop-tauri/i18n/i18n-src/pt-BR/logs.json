@@ -46,6 +46,7 @@
   "操作失败：{error}": "Falha na operação: {error}",
   "日志视图": "Visualização de logs",
   "日志详情": "Detalhes do log",
+  "日志详情视图": "",
   "显示 {groups} 组 · 原始记录 {entries} 条": "{groups} grupos · {entries} registros brutos",
   "暂停刷新": "Pausar atualização",
   "暂无日志": "Ainda não há logs",

@@ -51,7 +51,7 @@ mod pack_view;
 mod process;
 mod registry;
 mod rpc;
-mod rpc_cache;
+pub(crate) mod rpc_cache;
 pub mod schedules;
 pub mod settings;
 mod stream;

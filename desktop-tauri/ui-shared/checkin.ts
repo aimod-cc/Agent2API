@@ -251,7 +251,10 @@ export type RecordRow = {
   date?: string
   accountId?: string
   accountName?: string
+  /** 展示名（后端按 provider id 换过） */
   provider?: string
+  /** 提供商 id（筛选器的取值，历史记录里被移除的提供商也靠它还原） */
+  providerId?: string
   source?: string
   outcome?: string
   reason?: string

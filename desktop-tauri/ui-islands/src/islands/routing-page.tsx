@@ -1,73 +1,157 @@
 import * as React from 'react'
 import { createRoot } from 'react-dom/client'
-import { Badge, Button, Checkbox, Empty, Input, Label, SegmentedControl, Spinner } from '@ui'
+import { Badge, Button, Empty, SegmentedControl, Spinner, confirmDialog } from '@ui'
 import { t } from '../i18n'
 import { AccountSettingsDialog } from './accounts-settings-dialog'
 import { GroupSettingsDialog } from './accounts-group-settings'
-import { RoutingSettingsDialog } from './routing-settings'
-import { RoutingTracePage } from './routing-trace-page'
+import { AddRouteModelDialog, RoutingSettingsDialog } from './routing-settings'
 import { RoutingStickyDialog } from './routing-sticky'
-import { RoutingFlowCanvas } from './routing-flow-canvas'
-import { useRoutingFlow } from './routing-flow-state'
-import { useRoutingEditor } from './routing-editor-state'
-import { RoutingEditor } from './routing-editor'
-import { RoutingExecution } from './routing-execution'
-import { RoutingSelect } from './routing-select'
-import { selectedRequest } from './routing-flow-model'
+import { RoutingConfigPanel } from './routing-config-panel'
+import { RoutingExecTimeline } from './routing-exec-timeline'
+import { RoutingRequestList } from './routing-request-list'
+import { useRoutingReplay } from './routing-replay-state'
+import { draftDirty, useRoutingEditor } from './routing-editor-state'
 import { RouteIcon, stickyLabel, strategyLabel } from './routing-ui'
-import { host, type ReplayRow, type RoutingWorkspace } from './routing-types'
-import type { ConfigTarget, FlowSelection } from './routing-flow-types'
+import { isTraceRunning, requestKey } from './routing-trace-model'
+import { bridge, host, type ReplayRow, type RoutingWorkspace } from './routing-types'
+
+type ConfigTarget = { kind: 'model' | 'provider' | 'account'; id: string }
 
 let requestTrace: ((row?: ReplayRow | null) => void) | undefined
 let refreshWorkspace: (() => void) | undefined
+
+/**
+ * 路由页只有两个视图：
+ *
+ *   请求回放：左栏最近请求，右栏回放单条请求的候选、跳过原因、尝试与配置快照。
+ *   配置：左栏作用范围，中间有序名单，右栏「此刻队列」预演当前模型会走哪套配置。
+ *
+ * 原来的聚合画布已移除：它回答的是「流量去哪了」，不是「这次为什么是它」。
+ */
 export function RoutingPage() {
-  const [view, setView] = React.useState<'workbench' | 'requests'>('workbench')
-  const [initial, setInitial] = React.useState<ReplayRow | null>(null)
-  const flow = useRoutingFlow(view === 'workbench', initial)
-  const editor = useRoutingEditor(flow.refresh)
-  const [panel, setPanel] = React.useState<'execution' | 'config'>('execution')
-  const [target, setTarget] = React.useState<ConfigTarget>({ kind: 'model', id: '' })
-  const [focused, setFocused] = React.useState(false)
-  const [showSticky, setShowSticky] = React.useState(true)
-  const [modal, setModal] = React.useState<{ kind: 'sticky' } | { kind: 'account' | 'sort'; id: string } | { kind: 'protection'; workspace: RoutingWorkspace } | null>(null)
-  const request = selectedRequest(flow.selection)
-  const models = [...new Set([...(flow.workspace?.models || []), ...(editor.draft?.workspace.models || []), ...(flow.snapshot?.paths.map(path => path.model) || []), ...(flow.model ? [flow.model] : [])])].filter(Boolean)
-  const openConfig = (next: ConfigTarget, model = request?.model || flow.model) => {
-    setTarget(next); setPanel('config'); setView('workbench')
-    void editor.load(next.kind === 'model' && next.id ? next.id : model)
-  }
-  const select = (selection: FlowSelection) => { flow.setSelection(selection); setPanel('execution') }
-  const openRequest = (row: ReplayRow) => { setInitial({ ...row }); setView('workbench'); setPanel('execution'); setModal(null) }
+  const [mode, setMode] = React.useState<'replay' | 'config'>('replay')
+  const [selected, setSelected] = React.useState<ReplayRow | null>(null)
+  const [refreshToken, setRefreshToken] = React.useState(0)
+  const replay = useRoutingReplay(true)
+  const editor = useRoutingEditor(replay.refresh)
+  const [modal, setModal] = React.useState<
+    | { kind: 'sticky' }
+    | { kind: 'account' | 'sort'; id: string }
+    | { kind: 'protection'; workspace: RoutingWorkspace }
+    | { kind: 'model' }
+    | null
+  >(null)
+  const settings = mode === 'config' ? (editor.draft?.workspace.settings || replay.workspace?.settings) : replay.workspace?.settings
+
   React.useEffect(() => {
-    requestTrace = row => { if (row) openRequest(row); else setView('requests') }
-    refreshWorkspace = flow.refresh
+    if (!selected || !isTraceRunning(selected)) return
+    let alive = true
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await bridge().getRoutingTraceRequest({ id: selected.id, ts: selected.ts })
+        if (alive) setSelected(current => current && requestKey(current) === requestKey(next) ? next : current)
+      } catch { /* 下个周期再试 */ }
+    }, 2500)
+    return () => { alive = false; window.clearInterval(timer) }
+  }, [selected?.id, selected?.ts, selected && isTraceRunning(selected)])
+
+  const openRequest = (row: ReplayRow) => { setSelected(row); setMode('replay') }
+  const openConfig = (target: ConfigTarget, model?: string) => {
+    setMode('config')
+    if (editor.busy) return
+    const scope = target.kind === 'model' ? target.id : model || replay.model || ''
+    void editor.load(scope || '')
+  }
+  const refreshReplay = async () => {
+    replay.refresh()
+    setRefreshToken(value => value + 1)
+    if (!selected) return
+    try {
+      const next = await bridge().getRoutingTraceRequest({ id: selected.id, ts: selected.ts })
+      setSelected(next)
+    } catch { /* 列表下次刷新会带回新状态 */ }
+  }
+  const close = () => { setModal(null); replay.refresh() }
+  const reloadConfig = async () => {
+    if (editor.draft && draftDirty(editor.draft)
+      && !await confirmDialog(t('重新读取会丢弃当前范围的未保存草稿，其他范围的草稿保留。'), { title: t('重新读取配置'), confirmText: t('重新读取') })) return
+    void editor.load(editor.scope, true)
+  }
+  React.useEffect(() => {
+    requestTrace = row => {
+      if (!row) return
+      setSelected({ ...row })
+      setMode('replay')
+    }
+    refreshWorkspace = replay.refresh
     return () => { requestTrace = undefined; refreshWorkspace = undefined }
-  }, [flow.refresh])
-  const close = () => { setModal(null); flow.refresh() }
+  }, [replay.refresh])
+
   return <>
-    <div className='routing-workbench-modebar'><SegmentedControl aria-label={t('路由视图')} value={view} onValueChange={setView} options={[
-      { value: 'workbench', label: <><RouteIcon name='route' />{t('路由工作台')}</> },
-      { value: 'requests', label: <><RouteIcon name='requests' />{t('请求记录')}</> },
-    ]} /><div><Button variant='ghost' size='sm' onClick={() => setModal({ kind: 'sticky' })}><RouteIcon name='lock' />{t('会话粘滞')}</Button><Button variant='outline' size='sm' onClick={() => openConfig({ kind: 'model', id: flow.model })}><RouteIcon name='settings' />{t('路由设置')}{editor.dirtyCount ? <Badge variant='warning' shape='tag'>{editor.dirtyCount}</Badge> : null}</Button></div></div>
-    <div className='routing-unified-workbench' hidden={view !== 'workbench'}>
-      <div className='routing-workbench-toolbar'><Label>{t('请求模型')}<RoutingSelect label={t('请求模型')} value={flow.model || '__all'} options={[[ '__all', t('全部模型') ], ...models.map(model => [model, model] as [string, string])]} onChange={value => flow.selectModel(value === '__all' ? '' : value)} /></Label><Label>{t('已完成记录')}<RoutingSelect label={t('已完成请求时间范围')} value={String(flow.minutes)} options={[5, 10, 30, 60].map(minutes => [String(minutes), t('最近 {n} 分钟', { n: minutes })])} onChange={value => flow.setMinutes(Number(value))} /></Label><SegmentedControl aria-label={t('请求活动范围')} value={flow.scope} onValueChange={flow.setScope} options={[{ value: 'window', label: t('在途 + 近期') }, { value: 'running', label: t('仅在途') }]} /><Button variant='ghost' size='sm' disabled={flow.loading} onClick={flow.refresh}><RouteIcon name='refresh' />{t('刷新')}</Button><span className='routing-workbench-policy'>{flow.workspace ? `${strategyLabel(flow.workspace.settings.routingStrategy)} · ${t('会话粘滞')} ${stickyLabel(flow.workspace.settings.routingSticky)}` : ''}</span></div>
-      {flow.error ? <div className='routing-page-error' role='alert'><RouteIcon name='info' /><span>{flow.error}</span><Button variant='ghost' size='sm' onClick={flow.refresh}>{t('重试')}</Button></div> : null}
-      <div className='routing-workbench-layout'><div className='routing-workbench-main'><div className='routing-workbench-head'><b>{request ? t('请求执行回放') : t('实际请求路径')}</b><span>{flow.snapshot ? t('{paths} 条路径 · {sessions} 个会话', { paths: flow.snapshot.pathCount, sessions: flow.snapshot.sessions }) : ''}</span><Button variant='ghost' size='sm' onClick={() => { flow.setSelection(null); setFocused(false) }}>{t('全部路径')}</Button></div>
-        <div className='routing-workbench-filters'><Input placeholder={t('搜索客户端、模型或账号')} aria-label={t('搜索客户端、模型或账号')} value={flow.search} onChange={event => { flow.setSearch(event.currentTarget.value); flow.setSelection(null) }} /><Label><Checkbox checked={showSticky} onCheckedChange={on => setShowSticky(on === true)} />{t('粘滞标记')}</Label><Label><Checkbox checked={focused} onCheckedChange={on => setFocused(on === true)} />{t('仅看选中路径')}</Label></div>
-        {request ? <div className='routing-workbench-replay'><RouteIcon name='lock' size={13} /><code>{request.id}</code><span>{t('执行路径按当时快照保留')}</span><Button variant='link' size='sm' onClick={() => select(null)}>{t('返回全部流向')}</Button></div> : null}
-        {flow.snapshot?.truncated ? <p className='routing-workbench-notice'>{t('路径过多，画布仅展示前 300 条；统计覆盖完整窗口，请筛选模型缩小范围。')}</p> : null}
-        {flow.workspace ? <RoutingFlowCanvas snapshot={flow.snapshot} workspace={flow.workspace} selection={flow.selection} now={flow.now} focused={focused} sticky={showSticky} onSelect={select} onConfig={openConfig} /> : <div className='routing-workbench-empty'><Empty>{flow.loading ? <Spinner /> : t('正在读取路由…')}</Empty></div>}
-        <div className='routing-workbench-legend'><span><i className='live' />{t('流动：有请求在途')}</span><span><i className='selected' />{t('静止蓝线：选中历史路径')}</span><span><i />{t('灰线：历史流量')}</span><span><i className='failed' />{t('实际尝试失败')}</span></div><div className='routing-workbench-foot'>{t('未调用不画请求线；模型限流与当前配置分别展示。')}</div>
-      </div><aside className='routing-workbench-inspector'><div className='routing-inspector-switch'><SegmentedControl aria-label={t('右侧面板内容')} value={panel} onValueChange={value => { setPanel(value); if (value === 'config') void editor.load(request?.model || flow.model) }} options={[{ value: 'execution', label: request ? t('本次执行') : t('执行记录') }, { value: 'config', label: <>{t('当前配置')}{editor.dirtyCount ? <Badge variant='warning' shape='tag'>{editor.dirtyCount}</Badge> : null}</> }]} /></div>
-        <div className='routing-inspector-pane' hidden={panel !== 'execution'}><RoutingExecution active={view === 'workbench' && panel === 'execution'} selection={flow.selection} query={flow.query} paths={flow.snapshot?.paths || []} sticky={flow.sticky} now={flow.now} workspace={flow.workspace} onSelect={select} onConfig={model => openConfig({ kind: 'model', id: model }, model)} /></div>
-        <div className='routing-inspector-pane' hidden={panel !== 'config'}><RoutingEditor editor={editor} target={target} models={models} now={flow.now} request={request} onExecution={() => setPanel('execution')} onAccount={id => setModal({ kind: 'account', id })} onSort={id => setModal({ kind: 'sort', id })} onProtection={workspace => setModal({ kind: 'protection', workspace })} /></div>
-      </aside></div>
+    <div className='routing-page-bar'>
+      <SegmentedControl aria-label={t('路由模式')} value={mode} onValueChange={value => {
+        setMode(value as 'replay' | 'config')
+        if (value === 'config' && !editor.draft && !editor.busy) void editor.load(editor.scope || '')
+      }} options={[
+        { value: 'replay', label: <><RouteIcon name='requests' />{t('请求回放')}</> },
+        { value: 'config', label: <><RouteIcon name='route' />{t('配置')}{editor.dirtyCount ? <Badge variant='warning' shape='tag'>{editor.dirtyCount}</Badge> : null}</> },
+      ]} />
+      <span className='routing-page-policy'>{settings ? `${strategyLabel(settings.routingStrategy)} · ${t('粘滞 {mode}', { mode: stickyLabel(settings.routingSticky) })}` : ''}</span>
+      <div className='routing-page-actions'>
+        <Button variant='ghost' size='sm' onClick={() => setModal({ kind: 'sticky' })}>
+          <RouteIcon name='lock' />{t('会话粘滞')}{replay.sticky.length ? ` · ${replay.sticky.length}` : ''}
+        </Button>
+        {mode === 'replay'
+          ? <Button variant='ghost' size='sm' disabled={replay.loading} onClick={() => void refreshReplay()}><RouteIcon name='refresh' />{t('刷新')}</Button>
+          : <Button variant='ghost' size='sm' disabled={editor.loading || editor.busy} onClick={() => void reloadConfig()}><RouteIcon name='refresh' />{t('重新读取')}</Button>}
+      </div>
     </div>
-    <div className='routing-trace-view' hidden={view !== 'requests'}><RoutingTracePage active={view === 'requests'} onWorkbench={openRequest} onConfig={model => openConfig({ kind: 'model', id: model }, model)} /></div>
-    {modal?.kind === 'sticky' ? <RoutingStickyDialog model={flow.model} onClose={close} /> : null}
+
+    {replay.error && mode === 'replay' ? <div className='routing-page-error' role='alert'>
+      <RouteIcon name='info' /><span>{replay.error}</span><Button variant='ghost' size='sm' onClick={replay.refresh}>{t('重试')}</Button>
+    </div> : null}
+
+    {mode === 'replay' ? <div className='routing-replay-layout'>
+      <aside className='routing-request-rail'>
+        <RoutingRequestList active={mode === 'replay'} query={replay.query} workspace={replay.workspace}
+          selectedKey={selected ? requestKey(selected) : ''} refreshToken={refreshToken}
+          onOpenRequest={openRequest} onHistory={() => host().wbApp?.showPage('requests')}
+          onModel={replay.selectModel} onMinutes={replay.setMinutes} onScope={replay.setScope} onSearch={replay.setSearch} />
+      </aside>
+      <section className='routing-replay-main'>
+        <div className='routing-replay-head'>
+          <b><RouteIcon name='requests' />{t('请求执行')}</b>
+          <code>{selected?.id || '—'}</code>
+          <div className='right'>
+            <Button size='sm' disabled={!selected} onClick={() => selected && host().wbRequestDetail?.open(selected.id, selected)}>{t('完整请求详情')}</Button>
+          </div>
+        </div>
+        <div className='routing-replay-scroll'>
+          {selected
+            ? <RoutingExecTimeline row={selected} now={replay.now}
+              onDetail={row => host().wbRequestDetail?.open(row.id, row)}
+              onConfig={model => openConfig({ kind: 'model', id: model }, model)} />
+            : <Empty>{replay.loading ? <Spinner /> : t('选择左侧请求查看选路过程')}</Empty>}
+        </div>
+      </section>
+    </div> : <div className='routing-config-view'>
+      {editor.error && !editor.draft ? <div className='routing-page-error' role='alert'>
+        <RouteIcon name='info' /><span>{editor.error}</span><Button variant='ghost' size='sm' onClick={() => void editor.load(editor.scope, true)}>{t('重新读取')}</Button>
+      </div> : null}
+      <RoutingConfigPanel editor={editor} scope={editor.scope} now={replay.now}
+        onScope={scope => { if (!editor.busy) void editor.load(scope) }}
+        onAccount={id => setModal({ kind: 'account', id })}
+        onSort={provider => setModal({ kind: 'sort', id: provider })}
+        onAddModel={() => setModal({ kind: 'model' })}
+        onProtection={workspace => setModal({ kind: 'protection', workspace })} />
+    </div>}
+
+    {modal?.kind === 'sticky' ? <RoutingStickyDialog model={mode === 'config' ? editor.scope || replay.model : replay.model} onClose={close} /> : null}
     {modal?.kind === 'protection' ? <RoutingSettingsDialog protectionOnly workspace={modal.workspace} onClose={close} /> : null}
     {modal?.kind === 'sort' ? <GroupSettingsDialog provider={modal.id} onClose={close} /> : null}
-    {modal?.kind === 'account' ? <AccountSettingsDialog id={modal.id} initialAccount={flow.workspace?.accounts.find(account => account.id === modal.id)} onClose={close} /> : null}
+    {modal?.kind === 'account' ? <AccountSettingsDialog id={modal.id} initialAccount={editor.draft?.workspace.accounts.find(account => account.id === modal.id) || replay.workspace?.accounts.find(account => account.id === modal.id)} onClose={close} /> : null}
+    {modal?.kind === 'model' && editor.draft ? <AddRouteModelDialog workspace={editor.draft.workspace} onClose={() => setModal(null)}
+      onAdd={editor.create} /> : null}
   </>
 }
 

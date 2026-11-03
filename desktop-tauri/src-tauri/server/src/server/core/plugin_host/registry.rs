@@ -31,16 +31,20 @@ fn changed() -> &'static Notify {
 
 pub fn install(id: String, adapter: Arc<RpcAdapter>) {
     if crate::server::core::providers::availability::is_suspended(&id) { return; }
+    crate::server::core::providers::catalog::invalidate();
     table().lock().unwrap_or_else(|error| error.into_inner()).adapters.insert(id, adapter);
+    crate::server::core::providers::catalog::invalidate();
     changed().notify_waiters();
 }
 
 pub(super) fn stage_all(adapters: Vec<(String, Arc<RpcAdapter>)>) {
     let mut table = table().lock().unwrap_or_else(|error| error.into_inner());
+    crate::server::core::providers::catalog::invalidate();
     for (id, adapter) in adapters {
         if table.switching.contains(&id) { table.staged.insert(id, adapter); }
         else { table.adapters.insert(id, adapter); }
     }
+    crate::server::core::providers::catalog::invalidate();
 }
 
 pub(super) fn callback_adapter(id: &str) -> Option<Arc<dyn ProviderAdapter>> {
@@ -105,14 +109,18 @@ pub fn installed_ids() -> Vec<String> {
 }
 
 pub fn remove(id: &str) {
+    crate::server::core::providers::catalog::invalidate();
     table().lock().unwrap_or_else(|error| error.into_inner()).adapters.remove(id);
+    crate::server::core::providers::catalog::invalidate();
     super::rpc_cache::forget(id);
     super::schedules::forget(id);
     changed().notify_waiters();
 }
 
 pub fn clear() {
+    crate::server::core::providers::catalog::invalidate();
     table().lock().unwrap_or_else(|error| error.into_inner()).adapters.clear();
+    crate::server::core::providers::catalog::invalidate();
     super::schedules::clear_all();
     changed().notify_waiters();
 }
@@ -138,6 +146,7 @@ impl SwitchGuard {
 
     pub fn clear_adapters(&self) {
         let mut table = table().lock().unwrap_or_else(|error| error.into_inner());
+        crate::server::core::providers::catalog::invalidate();
         for id in &self.providers {
             table.staged.remove(id);
             match self.previous.get(id) {
@@ -145,6 +154,7 @@ impl SwitchGuard {
                 None => { table.adapters.remove(id); }
             }
         }
+        crate::server::core::providers::catalog::invalidate();
         drop(table);
         for id in &self.providers { super::schedules::forget(id); }
     }
@@ -163,6 +173,7 @@ impl Drop for SwitchGuard {
             }
         }
         self.pauses.clear();
+        crate::server::core::providers::catalog::invalidate();
         drop(table);
         changed().notify_waiters();
     }

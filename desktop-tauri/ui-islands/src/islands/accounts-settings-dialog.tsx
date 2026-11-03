@@ -3,7 +3,7 @@
 import * as React from 'react'
 import {
   Badge, BadgeDot, Button, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader,
-  DialogSection, DialogTitle, Input, NavList, NavItem, Sidebar, Switch,
+  DialogTitle, Input, NavList, NavItem, Sidebar, Switch,
   Field, FieldDescription, FieldLabel,
 } from '@ui'
 import '../styles/accounts-settings-dialog.css'
@@ -29,7 +29,7 @@ import { allAccounts, findAccount, syncBalancesSnapshot } from './accounts-data'
 import { refreshSavedAccounts, updateAccountConfirmed } from './accounts-update'
 import { draftOfProxy, ProxyForm, readProxyDraft, type ProxyDraft, type ProxyPayload } from './accounts-proxy-form'
 import {
-  AccountSettingsIcon, BalanceTokenField, CustomCredentialFields, ProviderSection,
+  AccountSettingsIcon, BalanceTokenField, CustomCredentialFields, ProviderSection, SettingGroup,
   type ProviderSettings,
 } from './accounts-settings-fields'
 
@@ -558,8 +558,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
                 <div className='acct-dlg-pane' inert={interactionBusy ? true : undefined}>
                   {pane === 'basic' ? (
                     <>
-                      <DialogSection className='acct-dlg-card'>
-                        <div className='acct-dlg-card-head'><h3>{t('账号信息')}</h3></div>
+                      <SettingGroup title={t('账号信息')}>
                         <Field className='acct-dlg-field'>
                           <FieldLabel htmlFor='account-name-input'>{t('备注名')}</FieldLabel>
                           <Input id='account-name-input' maxLength={100} placeholder={t('账号显示名称')}
@@ -572,9 +571,8 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
                           </div>
                           <Switch id='account-enabled' checked={enabled} onCheckedChange={setEnabled} />
                         </Field>
-                      </DialogSection>
-                      <DialogSection className='acct-dlg-card'>
-                        <div className='acct-dlg-card-head'><h3>{t('转发行为')}</h3></div>
+                      </SettingGroup>
+                      <SettingGroup title={t('转发行为')}>
                         <Field className='acct-dlg-toggle-field'>
                           <div><FieldLabel htmlFor='account-route-skip'>{t('失败后允许换号')}</FieldLabel>
                             <FieldDescription>{t('关闭后，该账号转发失败时返回本次错误，不再顺延其他账号。禁用、无凭证和限制器等保护仍生效。')}</FieldDescription>
@@ -588,11 +586,11 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
                           <Input id='account-conc-input' type='number' min={0} max={CONC_MAX} step={1}
                             value={concDraft} onChange={event => setConcDraft(event.currentTarget.value)} />
                         </Field>
-                        <p className='detail acct-dlg-concurrency-hint'>{concDefault > 0
-                          ? t('0 = 按本家默认 {default}', { default: concDefault }) : t('0 = 不限')}</p>
-                      </DialogSection>
+                      </SettingGroup>
+                      <p className='detail acct-dlg-hint'>{concDefault > 0
+                        ? t('0 = 按本家默认 {default}', { default: concDefault }) : t('0 = 不限')}</p>
                       {routeContext ? <div className='acct-dlg-route-context'>{routeContext}</div>
-                        : <p className='detail acct-dlg-quiet-note'><AccountSettingsIcon name='route' size={14} />
+                        : <p className='detail acct-dlg-group-note'><AccountSettingsIcon name='route' size={14} />
                           {t('在账号列表中拖动分组或行首把手，调整转发顺序。')}</p>}
                     </>
                   ) : null}
@@ -604,10 +602,9 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
                       value={apiKeyDraft} clearBusy={interactionBusy} onClear={() => void clearApiKey()}
                       onValue={next => { setApiKeyDraft(next); if (next.trim()) setNoAuthDraft(false) }}
                       onToggleNoAuth={next => { setNoAuthDraft(next); if (next) setApiKeyDraft('') }} /> : null}
-                    {supportsPlanChannel(target) ? <DialogSection className='acct-dlg-card acct-dlg-form-card'>
-                      <div className='acct-dlg-card-head'><h3>{t('使用套餐')}</h3></div>
+                    {supportsPlanChannel(target) ? <SettingGroup title={t('使用套餐')}>
                       <PlanChannelField plan={planChannel} hasJwt={account.canClaim === true} onChange={setPlanChannel} />
-                    </DialogSection> : null}
+                    </SettingGroup> : null}
                     {provider ? <div className='acct-dlg-related'>
                       <AccountSettingsIcon name='agent' size={18} />
                       <div><h3>{t('要修改连接地址或协议？')}</h3><p>{t('{count} 个账号共用提供商的连接配置。', { count: providerCount })}</p></div>
@@ -616,35 +613,32 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
                   </> : null}
 
                   {pane === 'query' && supportsUsage(target) ? <>
-                    <DialogSection className='acct-dlg-card acct-dlg-form-card'>
-                      <div className='acct-dlg-card-head'><h3>{t('自动查询余额')}</h3></div>
+                    <SettingGroup title={t('自动查询余额')}>
                       <UsageSettingsSection draft={usageDraft} onChange={setUsageDraft} />
-                    </DialogSection>
-                    {balanceSpec ? <DialogSection className='acct-dlg-card acct-dlg-form-card'>
-                      <div className='acct-dlg-card-head'><h3>{t('查询凭证')}</h3><Badge variant='secondary' shape='tag'>{balanceSpec.label}</Badge></div>
+                    </SettingGroup>
+                    {balanceSpec ? <SettingGroup title={t('查询凭证')} action={<Badge variant='secondary' shape='tag'>{balanceSpec.label}</Badge>}>
                       <BalanceQuerySection spec={balanceSpec} values={balanceQueryDraft} configured={balanceConfigured}
                         onValue={(key, next) => setBalanceQueryDraft(prev => ({ ...prev, [key]: next }))}
                         onClear={key => void clearBalanceQueryField(key)} clearBusy={interactionBusy} idPrefix='account-balance-query' />
-                      {balanceNeedsCredentials ? <p className='detail text-subtle'>{t('查询凭证还没配齐：填好后余额列才有读数，在此之前会显示「未配置」。')}</p> : null}
-                    </DialogSection> : null}
-                    <p className='detail acct-dlg-quiet-note'><AccountSettingsIcon name='info' size={14} />{t('余额读数也是限制器余额规则的数据来源。')}</p>
+                      {balanceNeedsCredentials ? <p className='detail acct-dlg-inline-note'>{t('查询凭证还没配齐：填好后余额列才有读数，在此之前会显示「未配置」。')}</p> : null}
+                    </SettingGroup> : null}
+                    <p className='detail acct-dlg-group-note'><AccountSettingsIcon name='info' size={14} />{t('余额读数也是限制器余额规则的数据来源。')}</p>
                   </> : null}
 
                   {pane === 'limiter' ? <>
                     <LimiterSection account={target} draft={limiterDraft} onChange={setLimiterDraft} allowBalance={supportsUsage(target)} />
-                    <p className='detail acct-dlg-quiet-note'><AccountSettingsIcon name='info' size={14} />
+                    <p className='detail acct-dlg-group-note'><AccountSettingsIcon name='info' size={14} />
                       {t('没有规则或全部停用时不限制；跳过后自动恢复，禁用后需手动启用。')}</p>
                   </> : null}
 
                   {pane === 'network' ? <>
-                    <DialogSection className='acct-dlg-card acct-dlg-network-card'>
-                      <div className='acct-dlg-card-head'><h3>{t('出网方式')}</h3></div>
+                    <SettingGroup title={t('出网方式')}>
                       <ProxyForm draft={proxyDraft} onChange={setProxyDraft} idPrefix='account-proxy' allowRotate={allowRotate} />
-                      {account.proxy?.error ? <p className='detail text-destructive'>
+                      {account.proxy?.error ? <p className='detail text-destructive acct-dlg-block'>
                         {t('当前代理不可用：{error}（转发时会回退直连）', { error: account.proxy.error })}
                       </p> : null}
-                    </DialogSection>
-                    <p className='detail acct-dlg-quiet-note'><AccountSettingsIcon name='shield' size={14} />{t('代理只作用于当前账号，不改变其他账号的出网方式。')}</p>
+                    </SettingGroup>
+                    <p className='detail acct-dlg-group-note'><AccountSettingsIcon name='shield' size={14} />{t('代理只作用于当前账号，不改变其他账号的出网方式。')}</p>
                   </> : null}
                   {pane === 'provider' && provider ? <ProviderSection provider={provider} count={providerCount}
                     name={providerName} protocol={providerProtocol} baseUrl={providerBaseUrl} emulation={providerEmulation}

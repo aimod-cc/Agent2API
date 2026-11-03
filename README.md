@@ -22,7 +22,7 @@ Agent2API is an **AI routing gateway with Agent client takeover**. It exposes a 
 
 ## ✨ Key Features
 
-- 🔌 **Unified model APIs** — OpenAI Chat / Responses / Images and Anthropic Messages, with a unified model catalog; Raccoon, Loomy, Antigravity and ModelScope supply image generation, while Raccoon, Loomy, Antigravity and ModelScope also support reference-image editing. Both are available as AI assistant tools
+- 🔌 **Unified model APIs** — OpenAI Chat / Responses / Images and Anthropic Messages, with a unified model catalog; Raccoon, Loomy, Antigravity, ModelScope, WorkBuddy and Doubao Work supply image generation, while Raccoon, Loomy, Antigravity, ModelScope and WorkBuddy also support reference-image editing. Both are available as AI assistant tools
 - 🧭 **AI routing** — model mapping, account priority, load balancing, session affinity and failover in one place
 - 🤖 **Agent client takeover** — manage multiple connection profiles for local clients, import existing settings, preview writes and switch between the gateway and custom services
 - 🧩 **Plugin extensions** — additional provider implementations are installed and updated separately, not bundled with the application; custom providers do not require them

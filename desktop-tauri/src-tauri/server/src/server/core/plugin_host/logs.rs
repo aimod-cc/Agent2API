@@ -57,14 +57,14 @@ pub(super) fn receive(store: &AccountStore, level: &str, message: &str, context:
         );
     }
     if let Some(account) = data.get("account").and_then(Value::as_str) {
-        if let Some(name) = store
-            .accounts_for_provider(data.get("provider").and_then(Value::as_str).unwrap_or(""))
-            .iter()
-            .find(|item| item.get("id").and_then(Value::as_str) == Some(account))
-            .and_then(|item| item.get("name"))
-            .and_then(Value::as_str)
-        {
-            data.insert("accountName".to_string(), json!(name));
+        if let Some(item) = store.route_account(account).filter(|item| {
+            item.get("provider").and_then(Value::as_str) == data.get("provider").and_then(Value::as_str)
+                && item.get("enabled").and_then(Value::as_bool) != Some(false)
+                && item.get("hasCredentials").and_then(Value::as_bool) == Some(true)
+        }) {
+            if let Some(name) = item.get("name").and_then(Value::as_str) {
+                data.insert("accountName".to_string(), json!(name));
+            }
         }
     }
     logging::log_event(

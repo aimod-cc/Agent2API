@@ -95,6 +95,8 @@ pub struct AccountStore {
 }
 
 struct Inner {
+    pub(super) cache: super::snapshot::SnapshotCache,
+    validation: Mutex<Option<crate::server::core::providers::catalog::ValidationCache>>,
     /// SQLite 句柄。`None` = 数据库打开失败（启动时已记日志）。
     ///
     /// ── 为什么不做「文件回退」─────────────────────────────────
@@ -143,7 +145,7 @@ impl AccountStore {
             None => crate::server::config::config_dir().join(crate::server::db::FILE_NAME),
         };
         Self {
-            inner: Arc::new(Inner { db, file_path, lock: Mutex::new(()) }),
+            inner: Arc::new(Inner { db, file_path, lock: Mutex::new(()), cache: Default::default(), validation: Mutex::new(None) }),
         }
     }
 
@@ -180,6 +182,18 @@ impl AccountStore {
     #[allow(dead_code)]
     pub fn exists(&self) -> bool {
         self.file().exists()
+    }
+
+    pub(super) fn snapshot_cache(&self) -> &super::snapshot::SnapshotCache {
+        &self.inner.cache
+    }
+
+    pub(crate) fn validation_cache(&self) -> &Mutex<Option<crate::server::core::providers::catalog::ValidationCache>> {
+        &self.inner.validation
+    }
+
+    pub(super) fn database(&self) -> Option<&Db> {
+        self.inner.db.as_ref()
     }
 
     /// 取锁；锁中毒（某次持锁 panic）不致命：直接接管内部数据继续用，
@@ -241,7 +255,7 @@ impl AccountStore {
             .map_err(|error| AccountStoreError::new(format!("账号数据库操作失败: {error}"), 500))
     }
 
-    /// 读全部账号（**语义要求整份数据**的路径用它，见 `sql::load_all`）。
+    /// 读全部账号（调用方需要在同一个账号写锁内继续修改时使用）。
     ///
     /// 库不可用时返回**空列表**而不是报错：这个函数的签名（`pub`，且被
     /// `load_locked` 直接透出）没有表达失败的位置，而它的消费方多是「读快照
@@ -252,15 +266,12 @@ impl AccountStore {
         let Some(db) = self.inner.db.as_ref() else {
             return AccountState::default();
         };
-        let accounts = db
-            .with(|conn| sql::load_all(conn))
-            .and_then(Result::ok)
-            .unwrap_or_default();
-        let priority_scope = db
-            .with(|conn| sql::load_priority_scope(conn))
-            .and_then(Result::ok)
-            .flatten();
-        AccountState { accounts, priority_scope }
+        let (rows, priority_scope) = db.with(|conn| {
+            (super::read_rows::all(conn), sql::load_priority_scope(conn))
+        }).unwrap_or_else(|| (Ok(Vec::new()), Ok(None)));
+        let accounts = super::read_rows::decode_many(rows.unwrap_or_default(), "读取全部账号")
+            .into_iter().map(|(_, record)| record).collect();
+        AccountState { accounts, priority_scope: priority_scope.ok().flatten() }
     }
 
     /// 写回全部账号（**按差异写**，见 `sql::save_state`）。
@@ -320,20 +331,20 @@ impl AccountStore {
     /// 于是「每次转发少解析 20 条记录的 JSON」是这条改造里收益最直接的一处。
     pub(crate) fn record_by_id(&self, _guard: &MutexGuard<'_, ()>, id: &str) -> Option<StoredAccount> {
         let db = self.inner.db.as_ref()?;
-        let result = db.with(|conn| sql::load_by_id(conn, id));
-        // 「这一行读不出来」与「没这条记录」在这里都退化成 None —— 本函数是
-        // 转发链路上的热路径（每个请求按 id 取会话），不能为一条坏记录把请求
-        // 打挂。但**不能完全静默**：读不出来通常是密钥不匹配，用户会看到
-        // 「账号突然用不了了」却找不到原因。原因已由 `sql::load_by_id` 写进
-        // 错误文案，这里按文案节流上报（同一句 10 分钟内只报一次）。
+        let result = db.with(|conn| super::read_rows::by_id(conn, id));
         match result {
-            Some(Ok(record)) => record,
+            Some(Ok(Some(raw))) => match super::read_rows::decode(raw) {
+                Ok((_, record)) => Some(record),
+                Err(error) => {
+                    sql::warn_load_failure("按 id 读取账号", &format!("账号 {id} 读不出来：{}", error.describe()));
+                    None
+                }
+            },
             Some(Err(error)) => {
                 sql::warn_load_failure("按 id 读取账号", &error.to_string());
                 None
             }
-            // 库没打开（`db.with` 返回 None）：不是「读不出来」，没有可报的原因
-            None => None,
+            _ => None,
         }
     }
 
@@ -351,9 +362,10 @@ impl AccountStore {
         let Some(db) = self.inner.db.as_ref() else {
             return Vec::new();
         };
-        db.with(|conn| sql::load_by_provider(conn, provider))
-            .and_then(Result::ok)
-            .unwrap_or_default()
+        let rows = db.with(|conn| super::read_rows::provider(conn, provider))
+            .and_then(Result::ok).unwrap_or_default();
+        super::read_rows::decode_many(rows, &format!("读取 {provider} 的账号"))
+            .into_iter().map(|(_, record)| record).collect()
     }
 
     // ─── 派生：当前账号 ──────────────────────────────────────
@@ -416,9 +428,13 @@ impl AccountStore {
     /// 这里必须读**全部**账号：队首是跨家的全局派生（`pick_current` 要在所有
     /// provider 里比优先级），收窄到某一家就没有意义了。
     pub fn current_account_id(&self) -> Option<String> {
-        let _guard = self.guard();
-        let state = self.load(&_guard);
-        Self::pick_current(&state.accounts).map(|record| record.id().to_string())
+        let snapshot = self.routing_snapshot();
+        snapshot.accounts.iter().filter(|account| {
+            account.get("enabled").and_then(Value::as_bool) != Some(false)
+                && account.get("hasCredentials").and_then(Value::as_bool) == Some(true)
+                && snapshot.forwarding_providers.contains(crate::server::core::routing::provider_of(account))
+        }).min_by_key(|account| route_order_key(account))
+            .and_then(|account| account.get("id")?.as_str().map(str::to_string))
     }
 
     /// workbuddy 默认登录态的凭证与会话（供 workbuddy 专属链路实时取用：
@@ -452,14 +468,11 @@ impl AccountStore {
     /// 返回 None 表示该 provider 在账号数据里没有可用账号（此时
     /// `auth::get_current_session_for` 会尝试该 provider 的环境变量旁路）。
     pub fn current_entry_for_provider(&self, provider: &str) -> Option<CurrentEntry> {
-        let _guard = self.guard();
-        let records = self.records_for_provider(&_guard, provider);
-        let mut candidates: Vec<StoredAccount> = records
-            .into_iter()
-            .filter(|item| item.enabled() && item.has_credentials())
-            .collect();
-        candidates.sort_by_key(StoredAccount::order_key);
-        let record = candidates.into_iter().next()?;
+        let ids = self.route_account_ids_for_provider(provider);
+        let record = self.read_record(ids.first()?)?;
+        if record.provider() != provider || !record.enabled() || !record.has_credentials() {
+            return None;
+        }
         Some(CurrentEntry {
             id: record.id().to_string(),
             session: self.session_from_record(&record),
@@ -473,8 +486,7 @@ impl AccountStore {
     /// 取不到返回 None，由调用方给出「这条账号不存在或不可用」的明确文案，
     /// 而不是悄悄回落到队首（那会变成「选了 A、用的是 B」的静默错误）。
     pub fn session_for_account(&self, account_id: &str) -> Option<CurrentEntry> {
-        let _guard = self.guard();
-        let record = self.record_by_id(&_guard, account_id)?;
+        let record = self.read_record(account_id)?;
         if !record.enabled() || !record.has_credentials() {
             return None;
         }
@@ -619,8 +631,7 @@ impl AccountStore {
     /// 桌面端账号的实时凭证路径已随实现搬到插件（见 `live_desktop_credentials`），
     /// 这里只剩记录里的存量值 —— 「有没有可用凭证」在全仓仍是一条判据。
     pub fn get_credentials_by_id(&self, id: &str) -> Option<CredentialsById> {
-        let _guard = self.guard();
-        let record = self.record_by_id(&_guard, id)?;
+        let record = self.read_record(id)?;
         let live = live_desktop_credentials(&record);
         let (access_token, refresh_token, expires_at) = match live {
             Some(credentials) => credentials,
@@ -661,8 +672,7 @@ impl AccountStore {
     /// 代理走 `resolve_account_proxy_rotating`：转发的每一次选路都从这里取出口，
     /// 轮询档因此天然是「一请求一出口」（见 `core::proxy_rotate` 的模块头）。
     pub fn get_session_by_id(&self, id: &str) -> Option<SessionById> {
-        let _guard = self.guard();
-        let record = self.record_by_id(&_guard, id)?;
+        let record = self.read_record(id)?;
         if !record.has_credentials() {
             return None;
         }
@@ -685,8 +695,7 @@ impl AccountStore {
     /// 返回 `Ok(None)` = 这条账号不是轮询档（调用方不该换出口）；
     /// `Err(原因)` = 是轮询档但一条候选都取不出来（原因原样报给明细）。
     pub fn next_rotate_proxy(&self, id: &str) -> Result<Option<ResolvedProxy>, String> {
-        let _guard = self.guard();
-        let Some(record) = self.record_by_id(&_guard, id) else {
+        let Some(record) = self.read_record(id) else {
             return Ok(None);
         };
         let config = record.proxy();
@@ -724,13 +733,21 @@ pub(crate) fn live_desktop_credentials(_record: &StoredAccount) -> Option<(Strin
 /// 全局队首与公开 `chatSupported` 只认真实插件 / 本体执行体的能力，
 /// 不把旧 MissingPlugin 占位或陌生 ID 当成可转发账号。自定义家走独立直连。
 pub(crate) fn forwards_requests(record: &StoredAccount) -> bool {
-    let provider = record.provider();
+    provider_forwards_requests(&record.provider())
+}
+
+pub(super) fn provider_forwards_requests(provider: &str) -> bool {
     if provider.starts_with(crate::server::core::custom_providers::ID_PREFIX) {
         return true;
     }
-    crate::server::core::providers::is_executable_provider(&provider)
-        && crate::server::core::providers::adapter::adapter_by_id(&provider)
+    crate::server::core::providers::is_executable_provider(provider)
+        && crate::server::core::providers::adapter::adapter_by_id(provider)
             .is_some_and(|adapter| adapter.supports_chat())
+}
+
+pub(super) fn route_order_key(account: &Value) -> (i64, i64) {
+    (account.get("priority").and_then(Value::as_i64).unwrap_or(super::priority::DEFAULT_PRIORITY),
+        account.get("addedAt").and_then(Value::as_i64).unwrap_or(0))
 }
 
 /// 把解析结果拆成 `(proxy, proxyError)`：失败时 proxy 为 null、

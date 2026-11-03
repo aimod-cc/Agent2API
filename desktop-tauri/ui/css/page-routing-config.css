@@ -1,0 +1,196 @@
+/* ─────────────────────────────────────────────────────────────
+   路由页 · 配置 + 此刻队列
+   左栏作用范围，中间有序名单，右栏只读预演。
+   ───────────────────────────────────────────────────────────── */
+
+.routing-config-view { display: flex; flex: 1; min-height: 0; flex-direction: column; }
+.routing-config-loading { display: flex; flex: 1; min-height: 160px; align-items: center; justify-content: center; }
+.routing-config-shell { flex: 1; min-height: 0; display: flex; overflow: hidden;
+  border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); }
+
+/* ── 左栏：作用范围 ── */
+.routing-config-rail { width: 220px; flex: none; display: flex; flex-direction: column; min-height: 0;
+  border-right: 1px solid var(--border); background: var(--surface-2); }
+.routing-config-rail-head { display: flex; align-items: center; gap: 6px; flex: none; padding: 11px 13px;
+  border-bottom: 1px solid var(--hairline); color: var(--text-3); font-size: 9px; letter-spacing: .03em; }
+.routing-config-rail-list { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 2px; padding: 8px; }
+.routing-config-rail-list > * { flex: none; }
+.routing-config-scope-item { display: flex; flex-direction: column; gap: 2px; width: 100%; height: auto; padding: 7px 9px;
+  text-align: left; white-space: normal; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--text-2); }
+.routing-config-scope-item:hover { background: var(--nav-hover); }
+.routing-config-scope-item.is-selected { background: var(--primary-soft); color: var(--primary-fg); }
+.routing-config-scope-item > .top { display: flex; align-items: center; gap: 5px; width: 100%; min-width: 0; }
+.routing-config-scope-item > .top > b { font-size: 10.5px; font-weight: 600; }
+.routing-config-scope-item > .top > code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.routing-config-scope-item > small { color: var(--text-3); font-size: 8.5px; }
+.routing-config-scope-item.is-selected > small { color: var(--primary-fg); opacity: .7; }
+.routing-config-rail-foot { flex: none; padding: 8px; border-top: 1px solid var(--hairline); }
+.routing-config-rail-foot > button { width: 100%; height: 28px; font-size: 9.5px; }
+.routing-config-rail-note { margin: 0; padding: 0 12px 11px; color: var(--text-3); font-size: 8.5px; line-height: 1.6; }
+
+/* ── 右栏骨架 ── */
+.routing-config-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.routing-config-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: none;
+  padding: 10px 16px; border-bottom: 1px solid var(--hairline); }
+.routing-config-head > b { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; font-weight: 600; }
+.routing-config-head > .sub { color: var(--text-3); font-size: 9px; }
+.routing-config-head > .right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.routing-config-preview { display: flex; align-items: center; gap: 6px; color: var(--text-3); font-size: 9px; }
+.routing-config-preview [data-slot='select-trigger'] { height: 28px; min-width: 176px; font-size: 10px; }
+
+.routing-config-rules { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; flex: none;
+  padding: 9px 16px; border-bottom: 1px solid var(--hairline); }
+.routing-config-rules > .field { display: flex; align-items: center; gap: 6px; }
+.routing-config-rules > .field > label { color: var(--text-3); font-size: 9px; font-weight: 400; white-space: nowrap; }
+.routing-config-rules > .field [data-slot='select-trigger'] { min-width: 116px; height: 28px; font-size: 10px; }
+.routing-config-rules > .right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+.routing-config-body { display: grid; grid-template-columns: minmax(0, 1fr) 300px; flex: 1; min-height: 0; overflow: hidden; }
+.routing-config-listcol { min-width: 0; min-height: 0; overflow: auto; padding: 12px 16px 16px; }
+.routing-config-note { margin: 0; color: var(--text-3); font-size: 9px; line-height: 1.7; }
+.routing-config-listhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 9px 0 8px; }
+.routing-config-listhead > b { font-size: 10.5px; font-weight: 600; }
+.routing-config-listhead > span { color: var(--text-3); font-size: 9px; }
+.routing-config-listhead > .right { margin-left: auto; display: flex; align-items: center; gap: 7px; }
+.routing-config-search { width: 170px; height: 28px; font-size: 10px; }
+
+/* ── 提供商 / 账号名单 ── */
+.routing-config-provider { margin-bottom: 8px; overflow: hidden;
+  border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); }
+.routing-config-provider.is-off { opacity: .62; }
+.routing-config-provider.is-parked { opacity: .8; }
+.routing-config-provider.is-empty { margin-bottom: 4px; opacity: .72; }
+.routing-config-provider.is-empty > header { padding-top: 5px; padding-bottom: 5px; }
+.routing-config-provider.is-empty .routing-grip { visibility: hidden; }
+.routing-config-provider.is-empty .routing-provider-mark { width: 20px; height: 20px; font-size: 8.5px; }
+.routing-config-provider.is-empty .routing-provider-name > b { font-size: 10px; font-weight: 550; }
+.routing-config-provider.is-empty .routing-provider-name > span { margin-top: 0; font-size: 8px; }
+.routing-config-provider.is-dragging { opacity: .45; }
+.routing-config-provider.drop-before { box-shadow: inset 0 2px 0 var(--primary); }
+.routing-config-provider.drop-after { box-shadow: inset 0 -2px 0 var(--primary); }
+.routing-config-provider > header { display: flex; align-items: center; gap: 7px; padding: 8px 10px; }
+.routing-config-provider:not(.is-empty) > header { cursor: pointer; }
+.routing-config-provider:not(.is-empty) > header:hover { background: var(--surface-2); }
+.routing-config-provider > header > .routing-provider-name { flex: 1; min-width: 0; }
+.routing-config-provider [data-slot='badge'] { font-size: 8.5px; padding: 1px 5px; }
+.routing-config-rank { width: 16px; flex: none; text-align: center; color: var(--text-3); font: 9px var(--font-mono); }
+.routing-config-provider .routing-provider-mark { width: 24px; height: 24px; font-size: 9.5px; }
+.routing-config-accounts { position: relative; border-top: 1px solid var(--hairline); padding: 3px 8px 6px 38px;
+  background: color-mix(in srgb, var(--surface-2) 45%, var(--surface)); }
+/* 账号行缩进并挂在一条竖线上，和上面的提供商分组拉开层次。 */
+.routing-config-accounts::before { content: ''; position: absolute; left: 26px; top: 0; bottom: 0; width: 1px; background: var(--hairline); }
+.routing-config-account { display: flex; align-items: center; gap: 7px; padding: 6px 8px; border-radius: var(--r-xs); }
+.routing-config-account + .routing-config-account { border-top: 1px solid var(--hairline); }
+.routing-config-account:hover { background: var(--surface-2); }
+.routing-config-account.is-excluded { opacity: .55; }
+.routing-config-account.is-dragging { opacity: .4; }
+.routing-config-account.drop-before { box-shadow: inset 0 1px 0 var(--primary); }
+.routing-config-account.drop-after { box-shadow: inset 0 -1px 0 var(--primary); }
+.routing-config-account-name { flex: 1; min-width: 0; }
+.routing-config-account-name > b { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 10px; font-weight: 550; }
+.routing-config-account-name > small { display: block; margin-top: 1px; color: var(--text-3); font-size: 8.5px; }
+.routing-config-state { flex: none; color: var(--text-3); font-size: 8.5px; }
+.routing-config-state.is-off { color: var(--text-3); opacity: .7; }
+.routing-config-lock { display: flex; align-items: center; gap: 8px; margin: 4px 6px; padding: 6px 8px;
+  border-radius: var(--r-xs); background: var(--warn-soft); color: var(--warn); font-size: 9px; line-height: 1.6; }
+.routing-config-lock > span { flex: 1; min-width: 0; }
+.routing-config-lock button { height: auto; padding: 0; font-size: 9px; }
+.routing-config-collapsed { margin: 0; padding: 0 10px 8px; color: var(--text-3); font-size: 8.5px; cursor: pointer; }
+.routing-config-collapsed:hover { color: var(--text-2); }
+
+/* 覆盖 page-routing.css 里为旧画布写的尺寸 */
+.routing-config-provider .routing-provider-name > b { font-size: 10.5px; font-weight: 600; }
+.routing-config-provider .routing-provider-name > span { margin-top: 1px; font-size: 8.5px; }
+.routing-config-account .routing-account-rank { width: 16px; font-size: 9px; }
+.routing-config-account .routing-account-avatar { width: 22px; height: 22px; border: 0; border-radius: var(--r-sm);
+  background: var(--surface-2); color: var(--text-2); font-size: 9px; }
+.routing-config-account .routing-grip { width: 18px; height: 24px; }
+.routing-config-account .routing-icon-button,
+.routing-config-provider > header .routing-icon-button { width: 24px; height: 24px; }
+
+/* ── 草稿栏（在配置主栏底部）── */
+.routing-config-draft { flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 7px 12px;
+  padding: 9px 16px; border-top: 1px solid var(--border); background: var(--surface); }
+.routing-config-draft > b { font-size: 10.5px; font-weight: 600; }
+.routing-config-draft.is-dirty { border-top-color: var(--warn-bd); }
+.routing-config-draft-list { display: flex; flex-wrap: wrap; gap: 2px 12px; color: var(--text-3); font-size: 9px; }
+.routing-config-draft > .right { margin-left: auto; display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.routing-config-savehint { color: var(--text-3); font-size: 9px; }
+.routing-config-error { color: var(--danger); font-size: 9.5px; }
+
+/* ── 新增模型独立配置弹窗 ── */
+.routing-model-picker { display: flex; flex-direction: column; gap: 2px; max-height: 260px; overflow: auto;
+  padding: 4px; border: 1px solid var(--border); border-radius: var(--r-md); }
+.routing-model-option { justify-content: flex-start; gap: 7px; height: 30px; padding: 0 8px; font-size: 10.5px; }
+.routing-model-option.is-selected { background: var(--primary-soft); color: var(--primary-fg); }
+.routing-model-option code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.routing-model-check { margin-left: auto; color: var(--primary-fg); }
+
+/* ── 右栏：此刻队列 ── */
+.routing-live-panel { min-width: 0; min-height: 0; overflow: auto; padding: 12px 14px; border-left: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface-2) 55%, var(--surface)); }
+.routing-live-head { display: flex; align-items: center; gap: 6px; }
+.routing-live-head > b { font-size: 10.5px; font-weight: 600; }
+.routing-live-badge { display: inline-flex; align-items: center; gap: 4px; color: var(--text-3); font-size: 8.5px; }
+.routing-live-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: 8.5px; }
+.routing-live-refresh { margin-left: auto; }
+.routing-live-banner { margin-top: 9px; padding: 8px 9px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface); }
+.routing-live-banner > b { display: block; color: var(--text); font-size: 9.5px; }
+.routing-live-banner > span { display: block; margin-top: 2px; color: var(--text-2); font-size: 8.5px; line-height: 1.5; }
+.routing-live-banner > button { margin-top: 6px; }
+.routing-live-loading { display: flex; align-items: center; justify-content: center; min-height: 100px; }
+.routing-live-error { margin: 10px 0 0; color: var(--danger); font-size: 9.5px; line-height: 1.6; }
+.routing-live-empty { padding: 16px 0; text-align: center; color: var(--text-3); font-size: 9px; }
+.routing-live-summary { padding: 10px 0; border-bottom: 1px solid var(--hairline); }
+.routing-live-eyebrow { color: var(--text-3); font-size: 8.5px; letter-spacing: .02em; }
+.routing-live-name { margin-top: 2px; font-size: 13px; font-weight: 650; letter-spacing: -.01em; }
+.routing-live-name.is-empty { color: var(--danger); font-size: 12px; font-weight: 600; }
+.routing-live-reason { margin: 3px 0 0; color: var(--text-3); font-size: 9px; line-height: 1.55; }
+.routing-live-counts { display: flex; flex-direction: column; gap: 2px; margin-top: 5px; color: var(--text-3); font-size: 8.5px; }
+.routing-live-subhead { display: flex; align-items: center; justify-content: space-between; margin: 10px 0 2px;
+  color: var(--text-3); font-size: 8.5px; }
+.routing-live-list { display: flex; flex-direction: column; }
+.routing-live-row { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 7px; padding: 6px 0;
+  border-top: 1px solid var(--hairline); }
+.routing-live-row:first-child { border-top: 0; }
+.routing-live-rank { padding-top: 1px; color: var(--text-3); font: 8.5px var(--font-mono); }
+.routing-live-main { min-width: 0; }
+.routing-live-title { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; font-size: 9.5px; }
+.routing-live-title > b { font-weight: 550; }
+.routing-live-row-reason { margin: 1px 0 0; color: var(--text-3); font-size: 8.5px; line-height: 1.5; }
+.routing-live-side { display: flex; flex-direction: column; gap: 1px; text-align: right; color: var(--text-3); font-size: 8px; white-space: nowrap; }
+.routing-live-reset { color: var(--warn); font-family: var(--font-mono); }
+.routing-live-foot { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--hairline); color: var(--text-3); font-size: 8px; line-height: 1.5; }
+.routing-live-foot > p { margin: 0; }
+.routing-live-foot > p + p { margin-top: 3px; }
+
+@media (max-width: 1280px) {
+  .routing-config-rail { width: 205px; }
+  .routing-config-body { grid-template-columns: minmax(0, 1fr) 280px; }
+  .routing-config-head > .sub { display: none; }
+}
+@media (max-width: 1180px) {
+  .routing-config-body { grid-template-columns: minmax(0, 1fr); }
+  .routing-live-panel { max-height: 420px; border-top: 1px solid var(--border); border-left: 0; }
+}
+@media (max-width: 1000px) {
+  .routing-config-rail { width: 190px; }
+  .routing-config-rules > .field > label { display: none; }
+  .routing-config-rules > .field [data-slot='select-trigger'] { min-width: 104px; }
+  .routing-config-search { width: 150px; }
+}
+@media (max-width: 767px) {
+  .routing-config-shell { flex-direction: column; }
+  .routing-config-rail { width: auto; max-height: 208px; border-right: 0; border-bottom: 1px solid var(--border); }
+  .routing-config-rail-list { flex-direction: row; overflow-x: auto; overflow-y: hidden; }
+  .routing-config-scope-item { min-width: 156px; }
+  .routing-config-rail-note { display: none; }
+  .routing-config-head > .right { width: 100%; margin-left: 0; }
+  .routing-config-draft { align-items: flex-start; }
+  .routing-config-draft > .right { width: 100%; margin-left: 0; justify-content: flex-end; }
+  .routing-config-body { display: flex; flex-direction: column; overflow: auto; }
+  .routing-config-listcol { overflow: visible; }
+  .routing-config-accounts { padding-left: 20px; }
+  .routing-config-accounts::before { left: 11px; }
+}

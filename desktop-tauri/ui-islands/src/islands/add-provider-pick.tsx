@@ -18,13 +18,14 @@
  */
 
 import * as React from 'react'
-import { Alert, DialogSection, InputGroup, InputGroupAddon, InputGroupInput, SegmentedControl, Button, Item } from '@ui'
+import { Alert, InputGroup, InputGroupAddon, InputGroupInput, SegmentedControl, Button, Item } from '@ui'
 
 import { isSuspendedProvider } from '../../../ui-shared/provider-availability'
 import { accountCountOf, shared } from './add-account-bridge'
 import { presetOfProvider, providerPresetIcon, providerSiteLabel } from './add-provider-metadata'
 import { WORKBUDDY_ENTRY_LABEL, WORKBUDDY_PROVIDER } from './add-account-configs'
-import { ADD_SEG_CLASS } from './add-provider-blocks'
+import { DIALOG_SEG_CLASS } from './dialog-segmented'
+import { AddGroup } from './add-account-kit'
 import { t } from '../i18n'
 import { Empty } from '@ui'
 
@@ -165,6 +166,7 @@ export const PROVIDER_ICONS: Record<string, string> = {
   'minimax-code': 'assets/providers/minimax-code.svg',
   'minimax-code-global': 'assets/providers/minimax-code.svg',
   qwenwork: 'assets/providers/qwenwork.svg',
+  'qwenwork-intl': 'assets/providers/qwenwork.svg',
   'qwenwork-enterprise': 'assets/providers/qwenwork.svg',
   'kimi-work': 'assets/providers/kimi-work.svg',
   opendesign: 'assets/providers/opendesign.svg',
@@ -242,7 +244,11 @@ function providerCards(accountType: AccountType): CardItem[] {
   const labelOf = (id: string, fallback: string): string => {
     if (id === 'minimax-code') return t('MiniMax Code 国内版')
     if (id === 'minimax-code-global') return t('MiniMax Code 国际版')
-    if (id === 'qwenwork') return t('QwenWork 千问办公')
+    // 千问办公两版已由「提供商增强」插件实现，名字与插件注册表的 meta 逐字一致
+    // （`千问办公 国内版` / `千问办公 国际版`）。这里仍然要覆盖一次：插件给的
+    // label 是中文源串，只有走 t() 才会被词典翻成其余五种语言。
+    if (id === 'qwenwork') return t('千问办公 国内版')
+    if (id === 'qwenwork-intl') return t('千问办公 国际版')
     if (id === 'qwenwork-enterprise') return t('QwenWork 千问办公企业版')
     return id === WORKBUDDY_PROVIDER ? WORKBUDDY_ENTRY_LABEL : t(shared().wbProviders?.labelOf?.(id) || fallback)
   }
@@ -403,14 +409,14 @@ export function PickStep({
 
   return (
     // 分段与列表同一块：两者是同一个问题的两面（「给什么形态的上游加账号」→
-    // 「给哪一家加」），分两块带边框会让人以为是两个独立步骤
-    <DialogSection>
-      <h3>{t('选择提供商')}</h3>
+    // 「给哪一家加」），分两块带边框会让人以为是两个独立步骤。
+    // 分组名走 AddGroup 的 label（挂在方框外面），框内第一行是分段 + 搜索。
+    <AddGroup label={t('选择提供商')}>
       {/* 分段与搜索同一行：左边选形态，右边是这一屏的过滤器 */}
       <div className='add-pick-row' style={importing ? { display: 'none' } : undefined}>
         <SegmentedControl
           aria-label={t('账号类型')}
-          className={ADD_SEG_CLASS}
+          className={DIALOG_SEG_CLASS}
           options={[
             // 默认落在「全部」：搜索一次跨全部分类，不必先猜自己该进哪一段
             { value: TYPE_ALL, label: typeLabelOf(TYPE_ALL), count: allHitCount },
@@ -509,6 +515,6 @@ export function PickStep({
             </Empty>
           ) : null}
       </div>
-    </DialogSection>
+    </AddGroup>
   )
 }

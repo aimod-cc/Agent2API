@@ -15,6 +15,7 @@ pub mod store;
 mod toml_editing;
 pub mod types;
 pub mod validate;
+mod yaml_editing;
 
 pub use registry::{find, ClientDef, ConfigFormat, CLIENTS};
 pub use types::{active_profile, Model, Profile};

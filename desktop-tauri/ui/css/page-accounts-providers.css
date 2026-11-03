@@ -418,10 +418,10 @@
    弹窗已整体移除（模型清单统一到「模型管理」页，编辑与删除搬进账号设置的
    「提供商」一段），相关规则随之删除。 */
 
-.compact-login-dialog [data-slot='dialog-header'] { padding: 19px 22px; padding-right: 46px; gap: 11px; flex-shrink: 0; }
-.compact-login-dialog [data-slot='dialog-title'] { font-size: 16px; }
-.compact-login-logo { width: 28px; height: 28px; object-fit: contain; flex: none; }
-.compact-login-dialog [data-slot='dialog-body'] { padding: 20px 22px; min-height: 0; }
+/* 头 / 正文 / 底栏的尺寸现在由 ui-islands/src/styles/add-account-dialog.css
+   统一接管（`.acct-add-form-dialog`）；这里留的是这一屏自己的排布。
+   `.compact-login-logo` 与 `.compact-login-footer` 两条随「头部图标改成统一的
+   mark、底栏改成弹窗统一底栏」一起删除 —— 别再把它们捡回来。 */
 .compact-account-login { display: flex; flex-direction: column; min-width: 0; }
 .compact-account-login[hidden] { display: none; }
 .compact-login-methods { width: 100%; }
@@ -449,8 +449,6 @@
 .compact-login-proxy-trigger > svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; color: var(--text-3); }
 .compact-login-proxy-trigger[data-panel-open] > svg { transform: rotate(90deg); }
 .compact-login-proxy-body { padding: 8px 0 0; }
-.compact-login-footer { padding: 15px 22px; background: var(--surface); flex-shrink: 0; }
-.compact-login-footer-content { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .compact-login-security { display: flex; align-items: center; gap: 5px; color: var(--text-3); font-size: 9px; }
 .compact-login-security svg,
 .compact-login-actions svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
@@ -459,7 +457,6 @@
 .compact-login-actions > button { min-height: 34px; }
 .compact-account-login > [data-slot='alert'] { margin-top: 14px; }
 @media (max-width: 560px) {
-  .compact-login-footer-content { flex-wrap: wrap; }
   .compact-login-security, .compact-login-actions { width: 100%; }
   .compact-login-actions > button:last-child { flex: 1; }
 }

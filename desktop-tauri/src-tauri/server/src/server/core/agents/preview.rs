@@ -191,6 +191,11 @@ fn redact(text: &str, path: &Path) -> Result<String, String> {
     }
     let format = if path.extension().is_some_and(|ext| ext == "toml") {
         super::ConfigFormat::Toml
+    } else if path
+        .extension()
+        .is_some_and(|ext| ext == "yaml" || ext == "yml")
+    {
+        super::ConfigFormat::Yaml
     } else {
         super::ConfigFormat::Jsonc
     };

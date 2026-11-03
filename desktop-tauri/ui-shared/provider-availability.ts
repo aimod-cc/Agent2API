@@ -8,7 +8,9 @@ export const SUSPENDED_PROVIDER_IDS: ReadonlySet<string> = new Set([
   'grok',
   'minimax-code',
   'minimax-code-global',
-  'qwenwork',
+  // 千问办公国际版：登录链路被上游挡住（只认它自己的回调地址），
+  // 添加不了账号，先从可见列表摘掉；国内版 (`qwenwork`) 不受影响。
+  'qwenwork-intl',
   'qwenwork-enterprise',
   'kimi-work',
   'opendesign',

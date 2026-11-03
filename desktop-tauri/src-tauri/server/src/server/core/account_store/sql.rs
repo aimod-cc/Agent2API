@@ -106,7 +106,7 @@ pub(crate) enum DecodeError {
 
 impl DecodeError {
     /// 给日志用的一句话原因（用户可见，要能照着做）
-    fn describe(self) -> &'static str {
+    pub(crate) fn describe(self) -> &'static str {
         match self {
             Self::Key => "账号加密密钥不可用或与库不匹配（account.key 缺失 / 被换过）",
             Self::Json => "记录内容不是合法 JSON",
@@ -138,7 +138,7 @@ fn decode_value(text: &str) -> Result<serde_json::Value, DecodeError> {
 /// 跳过坏行这件事本身不变（与旧文件读取路径的口径一致：那时也是
 /// `filter_map(from_value)` 逐条过滤，坏条目不拖垮整份数据）—— 变的是
 /// **跳过不再是静默的**：调用方拿到错误后按原因聚合上报（见 [`warn_undecodable`]）。
-fn decode_data(text: &str) -> Result<StoredAccount, DecodeError> {
+pub(crate) fn decode_data(text: &str) -> Result<StoredAccount, DecodeError> {
     let value = decode_value(text)?;
     StoredAccount::from_value(value).ok_or(DecodeError::Shape)
 }
@@ -175,7 +175,7 @@ fn throttled_warn(context: &str, subject: &str, text: &str) {
 /// 把一批「读不出来的行」按原因聚合成**一条**警告日志。
 ///
 /// ── 为什么要聚合而不是逐行打 ────────────────────────────────
-/// `load_all` 是列表快照的读法，界面每 20 秒轮询一次。密钥不匹配时全部行都
+/// 全量读取时，界面每 20 秒轮询一次。密钥不匹配时全部行都
 /// 读不出来，逐行打就是每次轮询几十条日志 —— 日志库会被这件事刷满，真正
 /// 有用的记录反而被埋掉。这里按原因计数，一轮只出一条。
 fn warn_undecodable(context: &str, errors: &[DecodeError]) {
@@ -235,27 +235,6 @@ fn encode_data(record: &StoredAccount) -> rusqlite::Result<String> {
                 .into(),
         )
     })
-}
-
-/// 全部账号，按物理顺序（见模块头「顺序」一节）。
-///
-/// 这是「确实需要整份数据」的路径才用的读法：列表快照、导出、启动迁移、
-/// 批量操作、`pick_current` 一类的全局派生。**单条增删改不该用它** ——
-/// 那些路径走 [`load_by_id`] / [`priorities_except`]。
-pub(crate) fn load_all(conn: &Connection) -> rusqlite::Result<Vec<StoredAccount>> {
-    let mut stmt = conn.prepare("SELECT data FROM accounts ORDER BY rowid")?;
-    let mut rows = stmt.query([])?;
-    let mut records = Vec::new();
-    let mut errors = Vec::new();
-    while let Some(row) = rows.next()? {
-        let text: String = row.get(0)?;
-        match decode_data(&text) {
-            Ok(record) => records.push(record),
-            Err(error) => errors.push(error),
-        }
-    }
-    warn_undecodable("读取全部账号", &errors);
-    Ok(records)
 }
 
 /// 按主键取一条（不存在返回 None）。单条读写路径的第一步。
@@ -367,7 +346,7 @@ pub(crate) fn priority_holder(
     // 读不出来就当「没有占位者」：这个函数只用来把 409 文案写得更好懂，
     // 不是冲突判定的依据（判定走 `priorities_*` 的纯数值列）。为一条文案
     // 把整个保存动作失败掉是本末倒置 —— 这里刻意吞掉错误，不报日志
-    // （`load_all` 那条路径会按原因统一上报，不在这里重复）。
+    // （全量账号读取会按原因统一上报，不在这里重复）。
     Ok(text
         .as_deref()
         .and_then(|text| decode_data(text).ok())
@@ -628,7 +607,7 @@ pub(crate) fn save_state(conn: &mut Connection, state: &AccountState) -> rusqlit
 
     // 删除：库里在、目标状态里没有的 —— 但**只删「读得出来」的行**。
     //
-    // `existing` 的 id 来自主键列（总能读到），而 `state.accounts` 来自 `load_all`，
+    // `existing` 的 id 来自主键列（总能读到），而 `state.accounts` 来自全量读取，
     // 那里解不开的行会被 `decode_data` 跳过。于是「密钥丢失 / 密钥不匹配 / 拷库没拷
     // `account.key`」这种场景下，全部密文行都解不开 → `state.accounts` 为**空** ——
     // 若仍按「库里在、内存里没有」删，任何一次 bulk 操作（`batch_update` /

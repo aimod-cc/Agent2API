@@ -33,6 +33,8 @@ export type SchedulePatch = {
 
 export type RecordFilters = {
   outcome?: string
+  /** 签到类型：manual / schedule / makeup */
+  kind?: string
   provider?: string
   keyword?: string
   start?: number

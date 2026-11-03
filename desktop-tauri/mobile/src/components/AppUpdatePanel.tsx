@@ -23,7 +23,7 @@ import { GithubAccessSettingsPanel } from './GithubAccessSettings'
 import { AppUpdateSettings } from './AppUpdateSettings'
 import { openExternal } from '../lib/community'
 import { t } from '../i18n'
-import { githubErrorMessage } from '../../../ui-shared/updates'
+import { githubErrorMessage, assetMissingReason } from '../../../ui-shared/updates'
 import { Card, Button } from '@ui'
 import { Switch as UiSwitch } from '@ui'
 
@@ -168,7 +168,11 @@ export function AppUpdatePanel() {
   const download = async () => {
     const url = info?.asset?.url
     if (!url) {
-      setError(t('这一版没有提供 Android 安装包'))
+      // 手机端要的包固定是 `.apk`（后端按后缀挑，见 pick_android_apk）——
+      // 原因与桌面端同一处口径，只是「本机要什么」这一项换成 apk
+      setError(t('这一版没有提供 Android 安装包：{reason}', {
+        reason: assetMissingReason(info?.assetProbe, { fallbackSuffix: '.apk' }, t),
+      }))
       return
     }
     setBusy(true)

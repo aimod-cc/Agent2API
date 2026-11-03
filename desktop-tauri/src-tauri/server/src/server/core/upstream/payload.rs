@@ -14,6 +14,10 @@
 //!      降级期（`core::degrade`）改用最小中性提示词。`passthrough` + 未降级时**一个字节都不动**（默认路径）。
 //!   ② **指纹脱敏层**（`core::sanitize`）：按请求开始时的配置快照决定是否
 //!      应用于当前提供商，再按词表顺序剥离 / 改写指纹。默认应用于全部提供商。
+//!   ③ **会话图片压缩层**（`core::upstream::image_compress`）：开关开启时把
+//!      内嵌 base64 大图缩到长边上限并重编码成 JPEG，带内容哈希缓存（多轮
+//!      重发同一张原图时复用）。**只在对话链路**生效 —— 生图 / 图片编辑在
+//!      本函数开头提前返回，走不到这一层。
 //!
 //! ①② 顺序不能反（与参考项目一致）：脱敏在后，于是网关提示词自己万一命中指纹
 //! 也会被清掉。⓪ 排在它们之前：先归一角色，让后面各层与各适配器看到统一形态
@@ -87,6 +91,13 @@ pub(super) struct ProviderContext<'a> {
     /// 原样透传的，不归一就会把 developer 原样发出去）。默认开，见
     /// `config::KEY_DEVELOPER_ROLE_COMPAT`。
     pub developer_role_compat: bool,
+    /// 本次请求的**会话图片压缩**设置快照（请求开始时按请求取一次）。
+    ///
+    /// `Copy` 值直接内嵌（不像 `sanitize` / `prompt` 那样传引用）：字段少、
+    /// 无堆分配，取值比借用来得省事。开启时 [`send_body`] 在对话链路上把
+    /// 内嵌 base64 大图压小（见 `upstream::image_compress` 模块头）；生图 /
+    /// 图片编辑在本函数开头已提前返回，天然不经过它。
+    pub image_compress: crate::server::config::ImageCompressSettings,
     /// 本次请求的**系统提示词决定**（模式 + 文本，请求开始时从配置快照取一次）。
     ///
     /// 与 `sanitize` 同一取舍：模式与文本在同一次请求内必须一致，
@@ -260,7 +271,43 @@ pub(super) async fn send_body<'a>(
     } else {
         after_prompt
     };
-    // ── ③ 原生（服务端执行）工具声明闸门 ──────────────────────────────
+    // ── ③ 会话图片压缩层（仅对话链路）─────────────────────────────────
+    // 把内嵌 base64 大图缩到长边上限并重编码（参数与开关见
+    // `config::ImageCompressSettings`），顺带以内容哈希缓存压缩结果 ——
+    // 多轮对话里客户端每轮重发同一张原图时直接命中，不再重复解码编码。
+    //
+    // 生图 / 图片编辑在函数开头（`ctx.images.is_some()`）就提前返回了，走不到
+    // 这里 —— 需求明确本功能只作用在对话场景。
+    //
+    // 纯 CPU 活（一张几 MB 的图可能几百毫秒），经 `blocking::in_place` 让出
+    // 当前 tokio worker（多线程运行时下 `block_in_place`；否则就地跑）。只在
+    // 真有候选图时才克隆请求体（`has_compressible` 早退，多数请求零拷贝）。
+    let body = if ctx.image_compress.enabled
+        && crate::server::core::upstream::image_compress::has_compressible(body.as_ref())
+    {
+        let settings = ctx.image_compress;
+        let mut owned = body.into_owned();
+        let stats = crate::server::core::blocking::in_place(|| {
+            crate::server::core::upstream::image_compress::compress_images_in_place(
+                &mut owned, &settings,
+            )
+        });
+        if stats.changed() {
+            logging::verbose(
+                "[Upstream]",
+                &format!(
+                    "会话图片压缩：{} 张 provider={provider_id} {}KB -> {}KB",
+                    stats.compressed,
+                    stats.bytes_before / 1024,
+                    stats.bytes_after / 1024,
+                ),
+            );
+        }
+        Cow::Owned(owned)
+    } else {
+        body
+    };
+    // ── ④ 原生（服务端执行）工具声明闸门 ──────────────────────────────
     // 内置家是各家官方客户端的后端：官方客户端只声明 `type:"function"` 的函数
     // 工具（联网搜索走客户端自己的链路），上游对原生工具类型的处理从「整轮 400」
     // （CatPaw）到「静默剔除」（Qoder / Trae）都有 —— 所以统一在这里降级：

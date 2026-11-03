@@ -34,8 +34,8 @@ export type AccountsStore = {
   /** 余额查询在途的账号（行上那颗「余额」按钮的去重闸） */
   usageInflight: ReadonlySet<string>
   /**
-   * 组头「可用合计」是否只累加**当前筛选 / 搜索后可见的行**。
-   * 默认关闭（= 按整组求和，见 accounts-panels 的 groupBalanceOf）；开关在
+   * 组头读数（可用合计 / 可用最低）是否只统计**当前筛选 / 搜索后可见的行**。
+   * 默认关闭（= 按整组统计，见 accounts-panels 的 groupBalanceOf）；开关在
    * 设置 → 显示 → 账号列表里。与 namesHidden 同属「怎么看这张表」的偏好。
    */
   groupTotalFiltered: boolean
@@ -54,7 +54,7 @@ const COLLAPSED_KEY = 'workbuddy-desktop-accounts-collapsed'
  *  这是「怎么看这张表」的偏好，与列宽同一档，存 localStorage 跨次启动保留 */
 const NAMES_HIDDEN_KEY = 'workbuddy-desktop-accounts-names-hidden'
 /**
- * 组头合计的口径开关：`'1'` = 只加当前筛选后的可见行，缺省 / 其它 = 整组求和。
+ * 组头读数的口径开关：`'1'` = 只统计当前筛选后的可见行，缺省 / 其它 = 整组统计。
  *
  * 这个键是账号页与设置页**共用的契约**：两边都经本文件的 `readGroupTotalFiltered` /
  * `setGroupTotalFiltered` 读写，不各自写一份字面量 —— 分开写的话，改键名时漏一处

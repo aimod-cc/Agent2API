@@ -22,7 +22,7 @@ O Agent2API é um **gateway de roteamento de IA com gerenciamento de clientes Ag
 
 ## ✨ Principais recursos
 
-- 🔌 **APIs de modelos unificadas** — OpenAI Chat / Responses / Images, Anthropic Messages e catálogo unificado; Raccoon, Loomy, Antigravity e ModelScope geram imagens, e Raccoon, Loomy, Antigravity e ModelScope também editam imagens de referência. Ambos os recursos estão disponíveis como ferramentas do assistente de IA
+- 🔌 **APIs de modelos unificadas** — OpenAI Chat / Responses / Images, Anthropic Messages e catálogo unificado; Raccoon, Loomy, Antigravity, ModelScope, WorkBuddy e Doubao Work geram imagens, e Raccoon, Loomy, Antigravity, ModelScope e WorkBuddy também editam imagens de referência. Ambos os recursos estão disponíveis como ferramentas do assistente de IA
 - 🧭 **Roteamento de IA** — modelos, prioridade de contas, balanceamento, afinidade de sessão e failover
 - 🤖 **Gerenciamento de clientes Agent** — vários perfis, importação de configurações, prévia de gravação e alternância de serviços
 - 🧩 **Extensões por plugins** — provedores adicionais instalados e atualizados separadamente; provedores personalizados dispensam plugins

@@ -172,21 +172,25 @@ function GroupMenu({ group, ids, collapsed }: { group: AccountGroup; ids: string
   )
 }
 
-/* ─── 组头「可用合计」────────────────────────── */
+/* ─── 组头读数（可用合计 / 可用最低）────────────── */
 
 /**
- * 组头「可用合计」的读数（`groupBalanceOf` 的产物）。
+ * 组头读数的中间产物（`groupBalanceOf` 的产物）。
  *
- * 各计数项分开记的理由在 tooltip：`counted` 是真正加进合计的账号数，其余几项
- * （没查 / 失败 / 只给比例）都是「为什么它没算进来」的答案 —— 一个合计数最怕的
- * 是「看着像全组的和，其实只加了三分之一」。
+ * 各计数项分开记的理由在 tooltip：`counted` 是真正给出读数的账号数，其余几项
+ * （没查 / 失败 / 没有可用读数）都是「为什么它没算进来」的答案 —— 一个组头数字
+ * 最怕的是「看着像全组的，其实只代表三分之一」。
+ *
+ * 两种口径分开表达：绝对数量（积分 / 额度 / 次）走 `sum`；百分比读数走
+ * `lowest` / `ratioWindows` —— 百分比不能相加，见 `groupBalanceOf` 的
+ * 「百分比不能相加」一节。
  */
 type GroupBalance = {
-  /** 能相加的账号数 */
+  /** 给出读数的账号数（绝对数量或百分比都算） */
   counted: number
   /** 参与统计的账号数（整组口径 = 组内全部；按筛选口径 = 可见的那些） */
   total: number
-  /** 合计；一个都加不起来时 null */
+  /** 绝对数量的合计；一个都加不起来时 null（百分比读数不用它） */
   sum: number | null
   /** 不限额度的账号数（>0 时合计记 ∞） */
   unlimited: number
@@ -194,18 +198,37 @@ type GroupBalance = {
   unit: string
   /** 整次查询失败的账号数（「未配置凭证」是中性状态，不算失败） */
   failed: number
-  /** 读到了、但没有可相加的绝对数的账号数（只给百分比 / 无额度桶） */
+  /** 读到了、但既没有绝对数也没有可用比例的账号数 */
   uncountable: number
   /** 还没查到（未查询 / 查询中）的账号数 */
   pending: number
   /** 半次失败（两台网关有一台没回话）：读数计入，但要点 ⚠ */
   partial: number
-  /** 求和口径：整组（默认）还是当前筛选后的可见行 —— tooltip 要照着说 */
+  /** 统计口径：整组（默认）还是当前筛选后的可见行 —— tooltip 要照着说 */
   scope: 'group' | 'filtered'
+  /** 读数是否可相加：绝对数量可加，百分比不可加 */
+  additive: boolean
+  /** 不可加时的最低读数（窗口名 + 百分比；label 为空 = 账号主读数） */
+  lowest: GroupRatioReading | null
+  /** 不可加时逐窗口的最低读数（tooltip 逐条列出；按首次出现的窗口顺序） */
+  ratioWindows: GroupRatioReading[]
+}
+
+/** 一条百分比读数：窗口名 + 剩余比例（0–100） */
+type GroupRatioReading = {
+  /** 窗口名（含模型组前缀，如 `Claude · 5 小时`）；空 = 账号主读数 */
+  label: string
+  /** 剩余百分比 */
+  percent: number
+}
+
+/** 百分比单位：这类读数是「某一档还剩百分之几」，不是可以相加的额度 */
+function isRatioUnit(unit: string): boolean {
+  return unit.trim() === '%'
 }
 
 /**
- * 组头合计：这一组账号的可用余额之和。
+ * 组头读数：这一组账号的可用余额之和（绝对数量）或组内最低剩余比例（百分比）。
  *
  * ── 两种口径（设置 → 显示 → 账号列表 的开关切）──────────────
  *   · **整组**（默认）：算这一组**全部**账号，不受筛选 / 搜索 / 分页影响。
@@ -220,23 +243,37 @@ type GroupBalance = {
  *
  * ── 为什么禁用账号也算 ────────────────────────────────────
  * 余额是**资产**不是流量：禁用只表示不参与转发，额度仍在账上。只算启用的话，
- * 合计会与旁边那行「启用 10 · 禁用 0」自相矛盾。
+ * 合计会与旁边那行「启用 10 · 禁用 0」自相矛盾。百分比口径同理：算哪些账号只由
+ * 设置里的「只统计当前筛选出来的账号」决定，这里不再另加一层启用 / 禁用过滤。
  *
  * ── 什么算「计入」──────────────────────────────────────────
- * 读到一个**能相加的绝对数**：`totalLeft`（WorkBuddy 的既有形状）或 `available`
- * （其余家）。下面三类都不计入，但理由分开记（tooltip 逐条说）：
+ * 读到一个**可用读数**：`totalLeft`（WorkBuddy 的既有形状）、`available`
+ * （其余家），或至少一条逐窗口百分比（Antigravity 刻意不写 `available`）。
+ * 下面三类都不计入，但理由分开记（tooltip 逐条说）：
  *   · 还没查询 / 查询中（`undefined` / `null`）；
  *   · 查询失败（`usageFailureOf` 的判据，与余额列同源）；
- *   · 读数里没有绝对数（Accio / Antigravity 只给百分比、ZCode 免费账号无额度桶）。
+ *   · 读数里既没有绝对数，也没有可用比例。
  * 单位不同的不相加：同一家理论上不会出现，真出现就按第一个计入的单位记账，
  * 其余算「没计入」—— 把两种单位加成一个数才是真正的谎。
+ *
+ * ── 百分比不能相加 ───────────────────────────────────────
+ * `available` 不都是「还剩多少积分」：OpenCode Go / SenseNova 给的是剩余百分比，
+ * Antigravity 只给 `windows[].remainingPercent`。百分比求和没有意义（94% + 2%
+ * 不是 96% 的额度，三家各 90% 更不该是 270%），所以这类组不求和，改取**组内
+ * 最低的剩余比例**：它回答的是「这一组最紧的那条线还剩多少」。有 `windows[]`
+ * 时逐窗口取最低（tooltip 全列出来），没有时退回账号主读数。
  */
 function groupBalanceOf(members: AccountRecord[], scope: 'group' | 'filtered' = 'group'): GroupBalance {
   const out: GroupBalance = {
     counted: 0, total: members.length, sum: null, unlimited: 0, unit: '',
     failed: 0, uncountable: 0, pending: 0, partial: 0, scope,
+    additive: true, lowest: null, ratioWindows: [],
   }
   let sum = 0
+  /** 这一组的读数形态：第一份有效读数决定，后面不一致的算「没计入」 */
+  let mode: 'additive' | 'ratio' | null = null
+  /** 逐窗口最低值：键是窗口名（含模型组前缀），值是这批账号里的最低剩余比例 */
+  const windowMin = new Map<string, GroupRatioReading>()
   for (const account of members) {
     const entry = usageEntryOf(account)
     if (entry === undefined || entry === null) { out.pending++; continue }
@@ -255,16 +292,46 @@ function groupBalanceOf(members: AccountRecord[], scope: 'group' | 'filtered' = 
     const raw = hasTotalLeft ? data.totalLeft : data.available
     // null / undefined 必须显式拦下：`Number(null)` 是 0，照直转会把「没读到」
     // 算成 0（与 accounts-domain 的 balanceBlockedOf 同一条纪律）
-    if (raw === null || raw === undefined || raw === '') { out.uncountable++; continue }
-    const value = Number(raw)
-    if (!Number.isFinite(value)) { out.uncountable++; continue }
-    const unit = String(data.unit || t('积分'))
+    const rawNumber = raw === null || raw === undefined || raw === ''
+      ? null
+      : Number(raw)
+    const rawValue = rawNumber !== null && Number.isFinite(rawNumber) ? rawNumber : null
+    const windows = usageWindows(entry).filter(row => row.percent !== null)
+    const unit = String(data.unit || t('积分')).trim()
+    // 读数形态：绝对数量可加；百分比 / 只有窗口比例的读数不可加。
+    // 「只有窗口」也算比例形态 —— Antigravity 的 available 是刻意不写的，
+    // 只看 available 会把整家都判成「没有绝对数」而漏掉它的逐窗口读数。
+    const entryMode: 'additive' | 'ratio' | null =
+      rawValue === null && windows.length === 0
+        ? null
+        : isRatioUnit(unit) || rawValue === null ? 'ratio' : 'additive'
+    if (entryMode === null) { out.uncountable++; continue }
+    if (mode === null) mode = entryMode
+    // 同一组里量纲必须一致：绝对值与百分比混在一组时不相加
+    if (mode !== entryMode) { out.uncountable++; continue }
+    if (entryMode === 'additive' && out.unit && unit !== out.unit) { out.uncountable++; continue }
     if (!out.unit) out.unit = unit
-    if (unit !== out.unit) { out.uncountable++; continue }
     out.counted++
-    sum += value
+    if (entryMode === 'additive') {
+      if (rawValue !== null) sum += rawValue
+      continue
+    }
+    if (windows.length) {
+      for (const row of windows) {
+        const percent = row.percent
+        if (percent === null) continue
+        const label = row.group ? `${row.group} · ${row.window}` : row.window
+        const prev = windowMin.get(label)
+        if (!prev || percent < prev.percent) windowMin.set(label, { label, percent })
+        if (!out.lowest || percent < out.lowest.percent) out.lowest = { label, percent }
+      }
+    } else if (rawValue !== null) {
+      if (!out.lowest || rawValue < out.lowest.percent) out.lowest = { label: '', percent: rawValue }
+    }
   }
-  if (out.counted) out.sum = Number(sum.toFixed(2))
+  out.additive = mode !== 'ratio'
+  out.ratioWindows = [...windowMin.values()]
+  if (out.additive && out.counted) out.sum = Number(sum.toFixed(2))
   return out
 }
 
@@ -278,49 +345,88 @@ function balanceAmountText(value: number): string {
   return api?.formatTokens ? api.formatTokens(value) : numberText(value)
 }
 
-/** 合计的悬停全文：先讲口径（整组 / 按筛选），再把没算进来的逐条交代 */
+/**
+ * 组头读数的悬停全文：先讲口径（求和 / 取最低，整组 / 按筛选），
+ * 再把逐窗口最低与没算进来的账号逐条交代。
+ */
 function groupBalanceTitle(balance: GroupBalance): string {
   const parts = [
-    balance.scope === 'filtered'
-      ? t('当前筛选下 {n} 个账号的可用余额之和（随筛选、搜索变化，不受分页影响）', { n: balance.total })
-      : t('本组 {n} 个账号的可用余额之和，按整组统计（不受筛选、搜索影响）', { n: balance.total }),
+    balance.additive
+      ? balance.scope === 'filtered'
+        ? t('当前筛选下 {n} 个账号的可用余额之和（随筛选、搜索变化，不受分页影响）', { n: balance.total })
+        : t('本组 {n} 个账号的可用余额之和，按整组统计（不受筛选、搜索影响）', { n: balance.total })
+      : balance.scope === 'filtered'
+        ? t('当前筛选下 {n} 个账号的百分比读数不能相加，取最低的剩余比例（随筛选、搜索变化，不受分页影响）', { n: balance.total })
+        : t('本组 {n} 个账号的百分比读数不能相加，取组内最低的剩余比例（按整组统计，不受筛选、搜索影响）', { n: balance.total }),
   ]
   parts.push(t('{n} 个已计入', { n: balance.counted }))
   if (balance.unlimited) parts.push(t('含 {n} 个不限额度账号，合计记为 ∞', { n: balance.unlimited }))
+  if (!balance.additive && balance.ratioWindows.length) {
+    parts.push(t('逐窗口最低：{list}', {
+      list: balance.ratioWindows.map(row => `${row.label} ${numberText(row.percent)}%`).join(' · '),
+    }))
+  }
   if (balance.pending) parts.push(t('{n} 个还没查到（未查询或正在查询）', { n: balance.pending }))
   if (balance.failed) parts.push(t('{n} 个查询失败', { n: balance.failed }))
-  if (balance.uncountable) parts.push(t('{n} 个读数没有绝对数（只给比例或无额度），未计入', { n: balance.uncountable }))
+  if (balance.uncountable) {
+    parts.push(balance.additive
+      ? t('{n} 个读数没有绝对数（只给比例或无额度），未计入', { n: balance.uncountable })
+      : t('{n} 个读数里没有可用比例，未计入', { n: balance.uncountable }))
+  }
   if (balance.partial) parts.push(t('{n} 个读数只读到一半（读数可信但不完整）', { n: balance.partial }))
   return parts.join('；')
 }
 
 /**
- * 组头上的合计徽标：`可用合计 1,347 · 计入 8/10 ⚠`。
+ * 组头上的读数徽标：`可用合计 1,347 · 计入 8/10 ⚠`；
+ * 百分比读数改为 `可用最低 每周 2% · 计入 2/2`（见 `groupBalanceOf` 的
+ * 「百分比不能相加」一节）。
  *
  * 语义色与行内 `.usage-sum` 对齐：绿 = 读到了，黄 = 读到了但有账号没算进来 /
- * 只读到一半，灰 = 一个都没读到（`—`）。`—` 不是 0 —— 「没读到」与「用光了」
- * 在这一列是两件事，与余额列同一条规矩。
+ * 只读到一半 / 最低比例已低于 20%（与行内窗口条的告警阈值一致），灰 = 一个都
+ * 没读到（`—`）。`—` 不是 0 —— 「没读到」与「用光了」在这一列是两件事，
+ * 与余额列同一条规矩。
  */
 function GroupBalanceBadge({ balance }: { balance: GroupBalance }) {
   const warned = balance.failed + balance.partial > 0
-  const empty = balance.sum === null && balance.unlimited === 0
-  // 有失败时黄色优先于灰色：一个都加不起来 + 有账号查询失败，读作「这次没读到」
+  const empty = balance.additive
+    ? balance.sum === null && balance.unlimited === 0
+    : balance.lowest === null && balance.unlimited === 0
+  // 百分比读数没有「合计」，只剩最低值：低于 20% 与行内窗口条同一档黄色，
+  // 免得组头把一条快见底的窗口涂成绿色
+  const low = !balance.additive && balance.lowest !== null && balance.lowest.percent < 20
+  // 有失败时黄色优先于灰色：一个都没读到 + 有账号查询失败，读作「这次没读到」
   // （⚠ 与黄字），不是「这家没有余额概念」那档中性灰
-  const tone = warned ? 'warn' : empty ? 'muted' : 'ok'
+  const tone = warned || low ? 'warn' : empty ? 'muted' : 'ok'
   const amount = balance.unlimited > 0
     ? '∞'
     : balance.sum === null ? '—' : balanceAmountText(balance.sum)
   // 单位只在不是「积分」时拼出来：绝大多数家的单位就是积分，写出来只是把组头撑长
-  const unit = balance.unit && balance.unit !== '积分' && balance.unit !== t('积分') ? usageUnitLabel(balance.unit, t) : ''
+  const unit = balance.additive && balance.unit && balance.unit !== '积分' && balance.unit !== t('积分')
+    ? usageUnitLabel(balance.unit, t)
+    : ''
   // 有 ∞ 时不报「计入 x/y」：那会让人以为 ∞ 也是加出来的
   const note = balance.unlimited === 0 && balance.counted < balance.total
     ? t('计入 {counted}/{total}', { counted: balance.counted, total: balance.total })
     : ''
   return (
     <span className={`grp-balance ${tone}`} title={groupBalanceTitle(balance)}>
-      <span className='k'>{t('可用合计')}</span>
-      <b className='v'>{amount}</b>
-      {unit ? <span className='u'>{unit}</span> : null}
+      <span className='k'>{balance.additive ? t('可用合计') : t('可用最低')}</span>
+      {balance.additive ? (
+        <>
+          <b className='v'>{amount}</b>
+          {unit ? <span className='u'>{unit}</span> : null}
+        </>
+      ) : balance.unlimited > 0 ? (
+        <b className='v'>∞</b>
+      ) : balance.lowest ? (
+        <>
+          {balance.lowest.label ? <span className='k'>{balance.lowest.label}</span> : null}
+          <b className='v'>{numberText(balance.lowest.percent)}%</b>
+        </>
+      ) : (
+        <b className='v'>—</b>
+      )}
       {note ? <span className='n'>{note}</span> : null}
       {warned ? <span className='warn-mark' aria-hidden>⚠</span> : null}
     </span>
@@ -331,8 +437,8 @@ function GroupBalanceBadge({ balance }: { balance: GroupBalance }) {
  * 分组带：一家的分隔横幅（`<tbody>` 的第一行，通栏一格）。
  *
  * 从左到右：拖动把手（整组顺位的唯一拖动起点）→ 顺位 → 家图标 + 家名 → 统计
- * （N 个账号 · 启用 x · 禁用 y · 限流 z）→ 可用合计 → 右侧折叠箭头与 ⋯ 菜单。
- * 统计读的永远是**整组**（「这一家有多少账号」不随筛选变）；合计的口径由设置里
+ * （N 个账号 · 启用 x · 禁用 y · 限流 z）→ 组头读数 → 右侧折叠箭头与 ⋯ 菜单。
+ * 统计读的永远是**整组**（「这一家有多少账号」不随筛选变）；读数的口径由设置里
  * 的开关决定（见 `groupBalanceOf`）：默认整组，打开后只算当前可见的行。
  *
  * 样式刻意保持中性（surface 底 + 一条 hairline）：一家一色会让整页像调色板，

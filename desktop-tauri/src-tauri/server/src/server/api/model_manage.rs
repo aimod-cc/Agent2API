@@ -206,10 +206,18 @@ pub async fn remove_mapping(State(state): State<ServerState>, body: Bytes) -> Re
     if alias.is_empty() || target.is_empty() {
         return errors::management_error(400, "缺少映射名或目标上游模型");
     }
-    if alias.eq_ignore_ascii_case(&target) {
+    let provider_opt = if provider.is_empty() { None } else { Some(provider.as_str()) };
+    // 自映射（默认绑定）正常**不能删** —— 它跟着模型行存在，要停用请关它的开关。
+    // 唯一的例外是**这条模型行已经不在了**（上游把模型下线、那家被移除或没有可用
+    // 账号）：这时开关没有落点，「关掉它」无从谈起，删除是唯一出路 —— 管理页的
+    // 「未挂载的模型映射」正是给这批条目留的入口。判据与视图里标记 `dangling`
+    // 的那一处同源（`catalog::host_row_exists`），免得出现「界面显示为未挂载、
+    // 点删除却被拒」的死锁。
+    if alias.eq_ignore_ascii_case(&target)
+        && catalog::host_row_exists(state.store(), provider_opt, &target)
+    {
         return errors::management_error(400, "原始 ID 的默认绑定不能删除，请关闭它的开关");
     }
-    let provider_opt = if provider.is_empty() { None } else { Some(provider.as_str()) };
     let removed = match model_rules::remove_mapping(&alias, &target, provider_opt) {
         Ok((_, removed)) => removed,
         Err(error) => return errors::management_error(error.status_code, error.message),

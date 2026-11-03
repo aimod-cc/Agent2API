@@ -37,11 +37,11 @@ export function ModelsFields({ client, draft, update, catalog, disabled, native 
     setRowKeys(current => current.filter((_, i) => i !== index))
     update({ models, ...(draft.model === draft.models[index].id ? { model: models[0]?.id || '', effort: '' } : {}) })
   }
-  const visibleCapabilities = client.id === 'zcode' || client.id === 'kimi-code' ? ['supportsImages'] : client.id === 'zed' ? ['supportsTools', 'supportsImages'] : client.id === 'crush' ? ['supportsImages', 'supportsReasoning'] : ['supportsTools', 'supportsImages', 'supportsReasoning']
+  const visibleCapabilities = client.id === 'zcode' || client.id === 'kimi-code' ? ['supportsImages'] : client.id === 'zed' ? ['supportsTools', 'supportsImages'] : ['crush', 'dsh'].includes(client.id) ? ['supportsImages', 'supportsReasoning'] : ['supportsTools', 'supportsImages', 'supportsReasoning']
   const selected = draft.models.find(model => model.id === draft.model)
   const legacyKimi = client.id === 'kimi-code' && /(?:^|[/\\])\.kimi[/\\]config\.toml$/.test(client.resolvedPath)
   const context = { workbuddy: 'maxInputTokens', zcode: 'properties.contextWindow', 'kimi-code': 'max_context_size', zed: 'max_tokens', cline: 'contextWindow', crush: 'context_window', opencode: 'limit.context' }[client.id] || 'contextWindow'
-  const output = { workbuddy: 'maxOutputTokens', zcode: 'optionSpecs.maxOutputTokens.max', 'kimi-code': 'max_output_size', zed: 'max_output_tokens', cline: 'maxTokens', crush: 'default_max_tokens', opencode: 'limit.output' }[client.id] || 'maxOutputTokens'
+  const output = { workbuddy: 'maxOutputTokens', zcode: 'optionSpecs.maxOutputTokens.max', 'kimi-code': 'max_output_size', zed: 'max_output_tokens', cline: 'maxTokens', crush: 'default_max_tokens', opencode: 'limit.output', dsh: 'maxTokens' }[client.id] || 'maxOutputTokens'
   return <section className='agent-models-fields flex min-w-0 shrink-0 flex-col gap-3'>
     <div className='flex flex-wrap items-center gap-2'><h3 className='text-sm font-semibold'>{t('模型列表')}</h3>
       <Badge variant='outline' shape='tag'>{draft.models.length}</Badge><span className='mr-auto' />
@@ -105,7 +105,7 @@ export function ModelsFields({ client, draft, update, catalog, disabled, native 
                 options={[{value:'inherit',label:t('未声明 / 保留')},{value:'on',label:t('支持')},{value:'off',label:t('不支持')}]}
                 onChange={value => change(index,{ [key]: value === 'inherit' ? null : value === 'on' })} /></Field>)}
           </div>
-          {client.supportsEffort && client.id !== 'cline' && (model.reasoningLevels.length > 0 || model.effort) && <Field><FieldLabel>{t('模型思考等级')}</FieldLabel>
+          {client.supportsEffort && !['cline', 'dsh'].includes(client.id) && (model.reasoningLevels.length > 0 || model.effort) && <Field><FieldLabel>{t('模型思考等级')}</FieldLabel>
             <AgentSelect label={t('模型思考等级')} value={model.effort} disabled={disabled} options={[{value:'',label:t('模型默认')},...[...new Set([...model.reasoningLevels,...(model.effort ? [model.effort] : [])])].map(value => ({value,label:value}))]} onChange={effort => change(index,{effort})} /></Field>}
         </CardContent>
       </CollapsibleContent>
@@ -117,7 +117,7 @@ export function ModelsFields({ client, draft, update, catalog, disabled, native 
     {client.supportsDefault && <Field><FieldLabel>{t('默认模型')}</FieldLabel>
       <AgentSelect label={t('默认模型')} value={draft.model} disabled={disabled} options={draft.models.filter(model => model.id).map(model => ({value:model.id,label:model.name || model.id}))} onChange={model => update({model, effort: ''})} />
       <p className='text-xs text-subtle'>{native ? t('确认写入后更新客户端默认模型；取消不会生效。') : client.configMode === 'single' ? t('保存方案不会切换客户端；应用后改变实际默认模型。') : t('保存方案不会切换客户端；选择“应用并设为默认”才改变实际默认模型。')}</p></Field>}
-    {['cline','crush'].includes(client.id) && selected && (selected.reasoningLevels.length > 0 || draft.effort) && <Field><FieldLabel>{t('默认模型思考等级')}<code className='ml-auto text-[10px] text-subtle'>{client.id === 'cline' ? 'settings.reasoning.effort' : 'models.large.reasoning_effort'}</code></FieldLabel>
+    {['cline','crush','dsh'].includes(client.id) && selected && (selected.reasoningLevels.length > 0 || draft.effort) && <Field><FieldLabel>{t('默认模型思考等级')}<code className='ml-auto text-[10px] text-subtle'>{client.id === 'cline' ? 'settings.reasoning.effort' : client.id === 'dsh' ? 'agent-default-model.reasoningEffort' : 'models.large.reasoning_effort'}</code></FieldLabel>
       <AgentSelect label={t('默认模型思考等级')} value={draft.effort} disabled={disabled} options={[{value:'',label:t('模型默认')},...[...new Set([...selected.reasoningLevels,...(draft.effort ? [draft.effort] : [])])].map(value => ({value,label:value}))]} onChange={effort => update({effort})} /></Field>}
   </section>
 }

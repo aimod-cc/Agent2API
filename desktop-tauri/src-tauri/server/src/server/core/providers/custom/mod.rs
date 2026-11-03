@@ -21,9 +21,10 @@ pub mod forward;
 pub mod sensenova_auth;
 
 pub(crate) fn catalog_providers(store: &AccountStore) -> Vec<(String, Vec<Value>)> {
+    let accounts = store.routing_snapshot();
     custom_providers::list().into_iter().filter_map(|provider| {
         let id = provider.get("id")?.as_str()?.to_string();
-        if store.accounts_for_provider(&id).is_empty() { return None; }
+        if !accounts.available_providers.contains(&id) { return None; }
         let models = custom_providers::public_models(&provider);
         (!models.is_empty()).then_some((id, models))
     }).collect()

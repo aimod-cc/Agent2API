@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 import {
-  Button, Checkbox, Input, Label, MultiSelect, RadioGroup, RadioGroupItem,
+  Button, Checkbox, Input, Label, MultiSelect, SegmentedControl,
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
   Field, FieldGroup, FieldLabel,
 } from '@ui'
@@ -12,6 +12,7 @@ import {
   type AccountRecord, type PoolItem,
 } from './accounts-shared'
 import { proxyPoolOptions } from './accounts-data'
+import { DIALOG_SEG_CLASS } from './dialog-segmented'
 import type { ClashProxySnapshot } from '../../../ui-shared/clash-proxy'
 
 /** 每条候选都会真实出网，一轮最多测 8 条。 */
@@ -256,30 +257,30 @@ export function ProxyForm({
   }
 
   return (
-    <div className='flex flex-col'>
+    <div className='acct-proxy-form flex flex-col'>
       {draft.mode === 'retired' ? <p className='mb-3 text-xs text-destructive'>{t('原代理来源已下线，请选择已保存的代理、自定义地址或直连')}</p> : null}
-      <RadioGroup value={draft.mode} onValueChange={value => set({ mode: value as ProxyDraft['mode'] })}
-        className='flex-row flex-wrap items-center gap-5' aria-label={t('代理方式')}>
-        <Label className='inline-flex cursor-pointer items-center gap-2 font-normal'>
-          <RadioGroupItem value='none' />{t('无代理（直连）')}
-        </Label>
-        <Label className='inline-flex cursor-pointer items-center gap-2 font-normal'>
-          <RadioGroupItem value='pool' />{t('已保存的代理')}
-        </Label>
-        {/* 轮询档只对 OpenCode Zen 出现（见 allowRotate 的说明） */}
-        {allowRotate ? (
-          <Label className='inline-flex cursor-pointer items-center gap-2 font-normal'
-            title={t('逐请求轮换出口（换 IP）：OpenCode Zen 免费档按 IP 限流，单个 IP 的额度用完会对它一律 429')}>
-            <RadioGroupItem value='rotate' />{t('轮询（换 IP）')}
-          </Label>
-        ) : null}
-        {draft.mode === 'clash' ? <Label className='inline-flex cursor-pointer items-center gap-2 font-normal'>
-          <RadioGroupItem value='clash' />Clash Verge
-        </Label> : null}
-        <Label className='inline-flex cursor-pointer items-center gap-2 font-normal'>
-          <RadioGroupItem value='custom' />{t('自定义')}
-        </Label>
-      </RadioGroup>
+      {/* 出网方式：档位一行。走组件库的分段控件（与添加账号弹窗同一档尺寸）——
+          这里原先拿 RadioGroup 拼了一套自己的观感，跟别处的分段对不上。 */}
+      <SegmentedControl<ProxyDraft['mode']>
+        aria-label={t('代理方式')}
+        className={DIALOG_SEG_CLASS}
+        value={draft.mode}
+        onValueChange={value => set({ mode: value })}
+        options={[
+          { value: 'none', label: t('无代理（直连）') },
+          { value: 'pool', label: t('已保存的代理') },
+          // 轮询档只对 OpenCode Zen 出现（见 allowRotate 的说明）
+          ...(allowRotate ? [{
+            value: 'rotate' as const,
+            label: t('轮询（换 IP）'),
+            title: t('逐请求轮换出口（换 IP）：OpenCode Zen 免费档按 IP 限流，单个 IP 的额度用完会对它一律 429'),
+          }] : []),
+          // Clash Verge 档已下线：只有现存配置还停在它上面时才补出这一项，
+          // 让用户能看见当前值、并有机会改成别的（补出来就没法切走了）
+          ...(draft.mode === 'clash' ? [{ value: 'clash' as const, label: 'Clash Verge' }] : []),
+          { value: 'custom', label: t('自定义') },
+        ]}
+      />
 
       {draft.mode === 'pool' ? (
         <div className='mt-3'>

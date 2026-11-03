@@ -34,6 +34,11 @@ type SegmentedControlOption<Value extends string> = {
    * 传 0 时整项按「空段」弱化，与账号页筛选的既有约定一致。
    */
   count?: number
+  /**
+   * 悬停提示（原生 title）。分段里没有第二行位置，说明性文字只能挂这儿 ——
+   * 比如账号设置里「轮询（换 IP）」为什么存在（免费档按 IP 限流，单 IP 用完一律 429）。
+   */
+  title?: string
   disabled?: boolean
 }
 
@@ -81,6 +86,7 @@ function SegmentedControl<Value extends string>({
           key={option.value}
           value={option.value}
           data-slot='segmented-item'
+          title={option.title}
           disabled={option.disabled}
           data-zero={option.count === 0 ? 'true' : undefined}
           className={cn(

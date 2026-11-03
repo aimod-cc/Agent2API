@@ -1,7 +1,7 @@
 //! 签到记录明细台账的路由（签到中心「签到记录」页的数据源）。
 //!
 //! ```text
-//!   GET    /api/checkin-records   查询（?limit=&offset=&outcome=&provider=&keyword=&start=&end=）
+//!   GET    /api/checkin-records   查询（?limit=&offset=&outcome=&kind=&provider=&keyword=&start=&end=）
 //!   DELETE /api/checkin-records   删除（带筛选 = 只删命中的；全清必须显式 all=1）
 //! ```
 //!
@@ -41,10 +41,11 @@ fn parse_usize(value: Option<&String>) -> Option<usize> {
     text.parse::<usize>().ok()
 }
 
-/// 查询串 → 筛选条件（ outcome / provider / keyword / start / end ）
+/// 查询串 → 筛选条件（ outcome / kind / provider / keyword / start / end ）
 fn query_of(params: &Params) -> checkin_records::Query {
     checkin_records::Query {
         outcome: params.get("outcome").cloned(),
+        kind: params.get("kind").cloned(),
         provider: params.get("provider").cloned(),
         keyword: params.get("keyword").cloned(),
         start: parse_query_ms(params.get("start")),

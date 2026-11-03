@@ -329,6 +329,64 @@ const QODER = qoderForm({ provider: 'qoder', label: t('中国版'), siteNote: 'q
 const QODER_INTL = qoderForm({ provider: 'qoder-intl', label: t('国际版'), siteNote: 'qoder.com' })
 
 /**
+ * 千问办公两版（国内版 `qwenwork` / 国际版 `qwenwork-intl`）。
+ *
+ * ── 登录链路 2026-11-03 换过一次（先读插件 `providers/qoder/authorize.rs`）──
+ * 旧实现照社区参考实现抄的是**设备码授权**，上游已经把这个入口关了：那个地址
+ * 对任何请求都回 400。现在走**授权码 + 本机回调**（官方 CLI / IDE 那条路）：
+ * 浏览器打开官方登录页，登录完成后跳回本插件在本机开的随机端口，账号随即自动
+ * 加入列表。国内版可用；国际版上游只认它自己注册的回调地址，授权码回不到本机，
+ * 所以界面上直接写明「暂时无法登录」，而不是给一个点了必然报错的按钮。
+ *
+ * **只有网页登录这一条**：千问办公没有个人访问令牌（PAT）接口，
+ * 后端 `Site::supports_pat` 为假，登录方式也只申报了网页登录 —— 界面上给一个
+ * 点了必然报错的入口比不给更糟，所以这里不配 `manualTitle` / `fields`
+ * （Qoder 那一份才有 PAT 段）。
+ */
+function qwenworkForm(spec: {
+  provider: string
+  label: string
+  siteNote: string
+  loginable: boolean
+}): ProviderConfig {
+  const { provider, label, siteNote, loginable } = spec
+  return {
+    provider,
+    label,
+    desktop: false,
+    // 站点写死在 provider 身份里（后端按 provider id 反查）
+    webLogin: {
+      noteHtml: loginable
+        ? t('在打开的页面里登录千问办公{label}（{site}）的账号，登录完成后会自动加入列表。两版的账号与凭证不通用。', { label, site: siteNote })
+        : t('千问办公{label}暂时无法登录：上游只接受它自己的官方回调地址，不论证码到本机。', { label }),
+      button: loginable ? t('打开千问办公网页登录') : t('暂时无法登录'),
+      busyText: t('等待千问办公登录完成…'),
+      edition: provider === 'qwenwork' ? 'cn' : 'global',
+      modes: [
+        { value: 'embedded', label: t('内嵌窗口（推荐）'), hint: t('内嵌窗口用全新环境，多账号互不影响；关窗即取消等待') },
+        { value: 'external', label: t('系统浏览器'), hint: t('系统浏览器打开（复用已登录账号）；完成后自动加入列表') },
+      ],
+    },
+    fields: [
+      { key: 'name', label: t('备注名'), optional: true, placeholder: t('可选，留空使用账号名或邮箱') },
+    ],
+  }
+}
+
+const QWENWORK = qwenworkForm({
+  provider: 'qwenwork',
+  label: t('国内版'),
+  siteNote: 'qwenwork.cn',
+  loginable: true,
+})
+const QWENWORK_INTL = qwenworkForm({
+  provider: 'qwenwork-intl',
+  label: t('国际版'),
+  siteNote: 'qwenwork.ai',
+  loginable: false,
+})
+
+/**
  * Cline 是两个提供商（Cline Free / Cline Pass）。
  *
  * 为什么不是一个配置带一个「额度池」下拉：上游模型带计费通道前缀
@@ -513,15 +571,11 @@ const CODEARTS: ProviderConfig = {
 }
 
 /**
- * Trae（字节 AI IDE 的 SOLO 通道）。
+ * Trae（国内账号，Agent / IDE 聊天通道按模型目录选择）。
  *
  * ── 为什么只有一张卡、没有「地区」下拉 ──────────────────────
- * AutoClaw / Accio / ZCode 的两地是**同一套协议换域名**，所以按地区参数化。
- * Trae 不是：国内 SOLO 走 `trae-api-cn.mchost.guru` 的 `llm_utils_chat`
- * （自定义信封 + 一套自己的 SSE 方言），国际版走 `chat_sessions` → `events`
- * 两步握手、另一个 Origin、流是累积式要还原增量 —— 那是**两套协议**而不是一个
- * 地区的两种拼法。把 `region` 做成这一家的字段，等于让"用哪套协议解释这个账号"
- * 变成账号属性（本仓反复拒绝的那类坑）。国际版将来接入时另立 provider id。
+ * 国内 Agent / IDE 共用 trae.cn 账号，历史 cn / solo 谱系继续保留。
+ * 国际版仍需独立 provider id 与目录，两地令牌不能混用；不将地区做成账号字段。
  *
  * ── 为什么回调必须落在本机 ────────────────────────────────
  * 上游对回调地址是**逐字正则校验**的（`^http://127.0.0.1:<port>/authorize$`），
@@ -535,7 +589,7 @@ const TRAE: ProviderConfig = {
   // 没有 auth.json 那种稳定可读的形态 —— 给了入口只会稳定失败。
   desktop: false,
   webLogin: {
-    noteHtml: t('打开 <b>Trae SOLO</b> 的官方授权页（<code>trae.cn</code>）并用你的 Trae 账号登录：授权完成后官方页面会跳回<b>本机</b>的一个临时端口；同机部署自动接收，Docker / 远程面板请按提示复制地址栏回调地址。'),
+    noteHtml: t('打开 <b>Trae</b> 的官方授权页（<code>trae.cn</code>）并用你的 Trae 账号登录：授权完成后官方页面会跳回<b>本机</b>的一个临时端口；同机部署自动接收，Docker / 远程面板请按提示复制地址栏回调地址。'),
     button: t('打开 Trae 授权页'),
     busyText: t('等待 Trae 授权完成…'),
     modes: [
@@ -1104,6 +1158,10 @@ export const BUILTIN_CONFIGS: ProviderConfig[] = [
   // 同一理由）：中国版在前，与存量账号的归属一致
   QODER,
   QODER_INTL,
+  // 千问办公两版紧随其后（同一套协议栈的另一家产品，两版相邻）：
+  // 国内版在前，与后端注册表 PROVIDERS 的排列一致
+  QWENWORK,
+  QWENWORK_INTL,
   // Cline 顺序即界面上「提供商」分段的顺序：免费池在前（无门槛，更常用）
   clineForm({ provider: 'cline-free', label: 'Cline Free', poolNote: t('（免费额度池，模型名带 cline-free/ 前缀）。') }),
   clineForm({ provider: 'cline-pass', label: 'Cline Pass', poolNote: t('（订阅池，模型名带 cline-pass/ 前缀，需要账号有对应订阅）。') }),
@@ -1116,7 +1174,7 @@ export const BUILTIN_CONFIGS: ProviderConfig[] = [
   // CodeArts（华为云 AI 代码助手）：一家一个 provider，没有地区/额度池之分
   // （region 写死 cn-north-4，与 token 签发地必须一致）。
   CODEARTS,
-  // Trae 只有 SOLO 那一家（没有地区分叉，理由见 TRAE 上方那段）
+  // Trae 当前登记国内账号；国际版接入时使用独立身份。
   TRAE,
   // Loomy（讯飞）：单一入口（手机验证码登录），排在末尾 —— 与后端注册表
   // PROVIDERS 的排列一致（新增的一家加在表尾）

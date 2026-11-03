@@ -2144,6 +2144,10 @@ pub fn shim_js() -> &'static str {
     // ── 排队等待（次数 / 单次秒数）──
     getQueue: function () { return call('GET', '/api/queue'); },
     saveQueue: function (patch) { return call('PUT', '/api/queue', patch); },
+    // ── 会话图片压缩（开关 + 长边 / 质量 / 阈值三项）──
+    // 与桌面桥（src/bridge.rs 的 getImageCompress / saveImageCompress）逐字同形。
+    getImageCompress: function () { return call('GET', '/api/image-compress'); },
+    saveImageCompress: function (patch) { return call('PUT', '/api/image-compress', patch); },
     // ── 验证码令牌池（ZCode 活动套餐通道的补货节奏）──
     getCaptchaPool: function () { return call('GET', '/api/zcode/captcha-pool'); },
     saveCaptchaPool: function (patch) { return call('PUT', '/api/zcode/captcha-pool', patch); },

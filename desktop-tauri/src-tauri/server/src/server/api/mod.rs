@@ -118,6 +118,8 @@ pub mod models;
 pub mod onboarding;
 pub mod panel;
 pub mod pipeline;
+mod live_progress;
+mod record_persist;
 // 提供商插件包的管理面（列表 / 安装 / 卸载 / 启停）：插件是用户安装的，
 // 这一组端点就是「装插件」的唯一入口，见该文件模块头
 pub mod plugins;
@@ -132,7 +134,12 @@ pub mod protocol;
 pub mod proxies;
 pub mod qoder_umid;
 pub mod queue_api;
+// 会话图片压缩设置（GET/PUT /api/image-compress）：开关 + 长边 / 质量 / 阈值三项，
+// 实施点在 `core::upstream::payload` 的 send_body（只作用在对话链路，生图不经过），
+// 见该文件模块头
+pub mod image_compress;
 pub mod retry_api;
+pub(crate) mod request_prepare;
 // 开发者角色兼容开关（GET/PUT /api/developer-role-compat）：与 /api/sanitize
 // 同形的单开关端点，转换实施点在 `core::upstream::payload` 的 send_body，
 // 见该文件模块头

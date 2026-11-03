@@ -344,8 +344,14 @@ pub(super) async fn execute(
         is_assistant,
     } = input;
     let client_model = pipeline::model_field_text(&payload);
-    let resolved = validate(&mut payload, operation)
-        .and_then(|()| resolve_model(state, &mut payload, scope.as_ref(), operation));
+    let state_copy = state.clone();
+    let scope_copy = scope.clone();
+    let (prepared, resolved) = crate::server::core::blocking::run(move || {
+        let resolved = validate(&mut payload, operation)
+            .and_then(|()| resolve_model(&state_copy, &mut payload, scope_copy.as_ref(), operation));
+        (payload, resolved)
+    }).await?;
+    payload = prepared;
     let model = match resolved {
         Ok(model) => model,
         Err(error) => {
@@ -369,7 +375,8 @@ pub(super) async fn execute(
     );
     let telemetry = Arc::new(RequestTelemetry::with_id());
     let id = telemetry.id();
-    state.request_stats().record_started(
+    super::request_prepare::record_started(
+        state.request_stats(),
         &id,
         started_at,
         &model,
@@ -377,7 +384,7 @@ pub(super) async fn execute(
         "",
         &source,
         is_assistant,
-    );
+    ).await;
     if let Some(token) = cancellation::register(&id) {
         telemetry.set_cancel_token(token);
     }

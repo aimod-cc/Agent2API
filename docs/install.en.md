@@ -185,9 +185,30 @@ Environment variables (all optional):
 | `AGENT2API_ALLOW_NO_KEY` | Set to `1` to serve `/v1` without any key — private networks only |
 | `AGENT2API_CAPTCHA_ENABLED` | Login-page human verification widget: `1` enabled (default), `0` disabled |
 | `AGENT2API_SELF_UPDATE` | In-container update entry: `1` enabled by default (the panel offers "Download and update"); set `0` to upgrade manually only |
+| `AGENT2API_IMAGE_CACHE_MB` | Upper bound of the in-memory download cache for generated images (MiB, default `128`, range 8–4096). Invalid or out-of-range values fall back to the default |
+| `AGENT2API_IMAGE_COMPRESS_CACHE_MB` | Upper bound of the in-memory cache for compressed session images (MiB, default `128`, range 8–4096, same rules) |
 | `WORKBUDDY_UPDATE_REPO` + `WORKBUDDY_UPDATE_API_BASE` | Advanced: point update checks/downloads at your own source. The first swaps the repository (defaults to the upstream `aimod-cc/Agent2API`; forks should override it), the second swaps the API root (default `https://api.github.com`, must return a GitHub-shaped release JSON). With a custom source set, the download allowlist additionally admits only **that source's own host** (scheme follows the source: an `http://` source also allows plaintext downloads — for local drills / internal mirrors only) |
 
 Build from source: clone the repo and run `docker compose up -d --build` (the image contains only the gateway and the panel, no Rust toolchain).
+
+### Memory usage
+
+The gateway in the image (Linux targets) ships with the jemalloc allocator built in. Over long uptimes and under concurrent multi-account forwarding it fragments far less than the system allocator, so RSS no longer creeps upward — the single most common way a small machine gets dragged down or OOM-killed.
+
+On small machines, cap the container's memory: when it goes over, the kernel kills the process and `restart: unless-stopped` brings it back, which shows up as one restart instead of taking the host (or other services on it) down.
+
+```bash
+# docker run
+docker run -d --name agent2api --restart unless-stopped --memory=1g \
+  -p 3065:3065 -v ./data:/data \
+  aimodcc/agent2api:latest
+```
+
+For compose, add `mem_limit: 1g` to the service (a commented example is in `docker-compose.yml`); on swarm or `docker compose --compatibility`, use `deploy.resources.limits.memory`. Treat 1g as a starting point and tune it to your concurrency.
+
+Both in-memory image caches can be shrunk with environment variables (128 MiB each by default): `AGENT2API_IMAGE_CACHE_MB` (download cache for generated images) and `AGENT2API_IMAGE_COMPRESS_CACHE_MB` (cache of compressed session images). Invalid or out-of-range values fall back to the default and never prevent startup.
+
+glibc allocator tuning such as `MALLOC_ARENA_MAX=2` only matters for builds **without** jemalloc (older images, a self-compiled server, desktop); this image no longer needs it.
 
 **Web panel capability notes** (these stem from having no local desktop client): web login (WorkBuddy / Qoder / Cline), SMS codes and pasted credentials work fully; web logins that need a callback on this machine (AutoClaw / CatPaw / Accio / CodeArts / Trae) and "import desktop login state" are unavailable — use pasted credentials instead. A desktop app with "expose the web management panel" turned on shows the same differences in a browser: one interface, one set of rules.
 

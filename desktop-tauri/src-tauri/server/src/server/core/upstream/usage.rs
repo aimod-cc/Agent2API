@@ -15,6 +15,8 @@
 //!            / cache_read_tokens / cache_read_input_tokens（Anthropic 风格）
 //!            / 驼峰的 cacheReadTokens / cachedInputTokens
 //!            / input_tokens_details.cached_tokens（Responses 系的新形态）
+//!   积分消耗：credit（WorkBuddy 的 `usage.credit`，可带小数）
+//!            / credits / credit_used / creditUsed / credit_cost 等常见别名
 //! 取到哪个算哪个：宁可少记一项，也不要因为字段名对不上而把整条记成 0。
 //!
 //! ── 为什么同一个含义的多个别名要「取第一个正数」而不是「取第一个存在」 ──
@@ -58,15 +60,20 @@ pub use attempt::{
 
 use crate::server::logging;
 
-/// 一次上报的用量（四种 token 计数，字段名对应存储契约）。
+/// 一次上报的用量（四种 token 计数 + 可选的积分消耗，字段名对应存储契约）。
 ///
-/// 只有四槽是因为存储契约只有四列（见模块头部「为什么不设 cache_write」那条）。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// 四类 token 是整数计数；`credit` 是**计费读数**（上游按请求计价的家才给，
+/// 例如 WorkBuddy 的 `usage.credit`），可以为小数，因此单独用 `Option<f64>`
+/// 表达 —— `None` = 这一家没上报，与「上报了 0」是两件事。
+///
+/// 只有这几槽是因为存储契约只有这几列（见模块头部「为什么不设 cache_write」那条）。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct UsageTokens {
     pub prompt: i64,
     pub completion: i64,
     pub total: i64,
     pub cache_read: i64,
+    pub credit: Option<f64>,
 }
 
 /// 「输入 token 数」的别名表（含驼峰形态）。**表序就是优先序**：多项都命中时按表序
@@ -109,6 +116,23 @@ const CACHE_READ_KEYS: &[&str] = &[
 /// `input_tokens_details` 是 Responses 系把 prompt 改叫 input 之后的同名容器。
 /// 两个容器都查：上游同时给两份、其中一份是废值的情况已经出现过（模块头部）。
 const CACHE_READ_CONTAINERS: &[&str] = &["prompt_tokens_details", "input_tokens_details"];
+/// 「积分消耗」的别名表（顺序即优先序）。
+///
+/// WorkBuddy 的 `usage.credit` 是已实测的一手形态；其余是兼容实现常见的
+/// 下划线 / 驼峰写法。与 token 的别名表同一条规矩：取**第一个正数**，
+/// 避免某个恒 0 的别名把真值挡在后面；一个别名都没有时才返回 None。
+const CREDIT_KEYS: &[&str] = &[
+    "credit",
+    "credits",
+    "credit_used",
+    "creditUsed",
+    "credits_used",
+    "creditsUsed",
+    "credit_cost",
+    "creditCost",
+    "credit_consumed",
+    "creditConsumed",
+];
 
 /// 从 usage 对象里提取 token 数（字段名兼容与「第一个正数」口径见模块头部）。
 ///
@@ -127,7 +151,8 @@ pub fn extract_usage(usage: &Value) -> Option<UsageTokens> {
         .find_map(|details| first_positive(details, CACHE_READ_KEYS))
         .or_else(|| first_positive(object, CACHE_READ_KEYS))
         .unwrap_or(0);
-    Some(UsageTokens { prompt, completion, total, cache_read })
+    let credit = first_amount(object, CREDIT_KEYS);
+    Some(UsageTokens { prompt, completion, total, cache_read, credit })
 }
 
 /// 按别名表依次取**第一个正数**（口径见模块头部）。
@@ -167,6 +192,38 @@ fn positive_field(value: Option<&Value>) -> Option<i64> {
         _ => None,
     };
     raw.filter(|number| *number > 0)
+}
+
+/// 按别名表取**第一个正数**；全是 0 时返回显式的 0（「上报了 0」）。
+///
+/// 与 [`first_positive`] 的差别只有两处，都是为了计费读数：
+///   - **不截断小数**（`0.06` 必须原样保留，不能变成 0）；
+///   - 0 不再是废值：所有别名都显式给 0 时，这条请求确实「零积分」，
+///     与「一个别名都没有」（None = 这一家不提供该读数）必须分开。
+///
+/// 负数仍然当废值丢掉（手改的库 / 上游溢出）：它既不能当「有值」，
+/// 也不能当「零消耗」。
+fn first_amount(object: &Map<String, Value>, keys: &[&str]) -> Option<f64> {
+    let mut zero = None;
+    for key in keys {
+        let Some(value) = amount_field(object.get(*key)) else { continue };
+        if value > 0.0 {
+            return Some(value);
+        }
+        zero = zero.or(Some(0.0));
+    }
+    zero
+}
+
+/// 取非负有限浮点数：认数字与「数字字符串」（与 [`positive_field`] 同一兼容面，
+/// 但不做 i64 截断）。
+fn amount_field(value: Option<&Value>) -> Option<f64> {
+    let raw = match value? {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    };
+    raw.filter(|number| number.is_finite() && *number >= 0.0)
 }
 
 /// 在途请求当前所处的**转发阶段**（请求日志状态列的第一个读数）。
@@ -281,6 +338,12 @@ pub struct TelemetrySnapshot {
     pub completion_tokens: i64,
     pub total_tokens: i64,
     pub cache_read_tokens: i64,
+    /// 上游按请求上报的**积分消耗**（WorkBuddy 的 `usage.credit`；`None` = 这一家
+    /// 不提供该读数，落库为 NULL，前端显示「—」而不是 0）。
+    ///
+    /// 与 token 四件套同一「最后一次上报覆盖」口径：一次请求可能有多轮尝试，
+    /// 终态记账只保留最后那次上游 `usage` 里的值（与 prompt / completion 同源）。
+    pub credit: Option<f64>,
     pub quota_channel: String,
     /// 上游首帧到达的**绝对时刻**（毫秒 Unix 时间戳；None = 全程没有帧到达，
     /// 例如转发前就失败 / 请求尚未开始下发）。
@@ -915,6 +978,7 @@ impl RequestTelemetry {
         guard.completion_tokens = tokens.completion;
         guard.total_tokens = tokens.total;
         guard.cache_read_tokens = tokens.cache_read;
+        guard.credit = tokens.credit;
     }
 
     /// 记一次「上游首帧已到达」。

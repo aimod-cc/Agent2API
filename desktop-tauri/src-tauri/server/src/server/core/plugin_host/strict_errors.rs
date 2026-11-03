@@ -188,7 +188,7 @@ pub(in crate::server::core::plugin_host) fn conversation(
     let class_status = class_status(&class);
     let code = if interruption(status, &code).is_some() {
         public_code(provider, &code)
-    } else if matches!(provider, "qwenwork" | "qwenwork-enterprise") && upstream.is_some()
+    } else if crate::server::core::providers::availability::is_qwenwork_family(provider) && upstream.is_some()
         && !codes::known(provider, &code) {
         if numeric_known_code(provider, upstream) { upstream.map(|value| value.to_string()).unwrap_or_else(|| UNKNOWN.into()) }
         else { UNKNOWN.into() }
@@ -214,7 +214,7 @@ pub(in crate::server::core::plugin_host) fn conversation(
 }
 
 fn numeric_known_code(provider: &str, upstream: Option<i64>) -> bool {
-    matches!(provider, "qwenwork" | "qwenwork-enterprise") && upstream.is_some_and(codes::qwen_number)
+    crate::server::core::providers::availability::is_qwenwork_family(provider) && upstream.is_some_and(codes::qwen_number)
 }
 
 fn class_status(class: &UpstreamErrorClass) -> u16 {
@@ -242,7 +242,7 @@ fn sanitize_class(provider: &str, status: u16, class: UpstreamErrorClass, code: 
     let stopped = if matches!(status, 499 | 504) { Some(status) }
         else if matches!(class_status(&class), 499 | 504) { Some(class_status(&class)) }
         else { interruption(status, code).or_else(|| interruption(class_status(&class), code)) };
-    let numeric_known = matches!(provider, "qwenwork" | "qwenwork-enterprise")
+    let numeric_known = crate::server::core::providers::availability::is_qwenwork_family(provider)
         && upstream.or(class_upstream).is_some_and(codes::qwen_number);
     let unknown = (!code.is_empty() && !codes::known(provider, code)
         || matches!(code, "runtime_upstream_error" | "runtime_invalid_error_metadata" | "builtin_upstream_error"

@@ -27,10 +27,10 @@ use serde_json::{json, Map, Value};
 use crate::server::{config, logging};
 
 pub use version::{
-    api_base, assert_downloadable, compare_versions, custom_api_base, desktop_shell,
-    installer_kind, is_prerelease_version, parse_version, pick_android_apk, pick_asset_by_name, pick_installer, safe_file_name,
-    server_bundle_name, set_desktop_shell, UpdateError, DEFAULT_REPO, GITHUB_API,
-    MAX_INSTALLER_BYTES, SOURCE_REPO,
+    api_base, asset_suffixes, assert_downloadable, compare_versions, custom_api_base, desktop_shell,
+    installer_kind, installer_suffixes, is_prerelease_version, parse_version, pick_android_apk,
+    pick_asset_by_name, pick_installer, safe_file_name, server_bundle_name, set_desktop_shell,
+    UpdateError, DEFAULT_REPO, GITHUB_API, MAX_INSTALLER_BYTES, SOURCE_REPO,
 };
 pub use integrity::download_plan;
 /// 「更新设置」弹窗的 GitHub 令牌接口（api::update 走这两条；加解密本体
@@ -283,6 +283,23 @@ impl UpdateManager {
                 _ => Value::Null,
             }
         };
+        // 「这一版有没有给本机的包」的诊断：release 那半边（资产总数 / 后缀清单 /
+        // 有没有被更新源挡掉）来自 check.rs 的 release_json；两个 expected* 是
+        // **本机事实**，在这里现补 —— 它们与服务端包无关地跟着平台走，不该混进
+        // 那份按仓库落库的 Release 快照（换台机器读缓存会读到别人的后缀）。
+        let probe = latest.as_ref().and_then(|value| value.get("assetProbe"));
+        let probe_field = |key: &str| -> Value {
+            probe.and_then(|value| value.get(key)).cloned().unwrap_or(Value::Null)
+        };
+        let asset_probe = json!({
+            "assetsTotal": probe_field("assetsTotal"),
+            "suffixes": probe_field("suffixes"),
+            "filteredBySource": probe_field("filteredBySource"),
+            // 桌面安装包要的后缀（容器 / headless 是空表）；容器内更新包要的完整文件名
+            // （非 Linux 是 null）—— 界面按 selfUpdate 二选一，两条消息各有各的说法
+            "expectedSuffixes": version::installer_suffixes(),
+            "expectedName": version::server_bundle_name(),
+        });
         json!({
             "forceUpdate": force_update,
             "currentVersion": if version.is_empty() { Value::Null } else { Value::String(version) },
@@ -321,6 +338,9 @@ impl UpdateManager {
             "selfUpdate": selfupdate::supported(),
             "serverAsset": server_asset.unwrap_or(Value::Null),
             "serverChecksumUrl": server_checksum.unwrap_or(Value::Null),
+            // 「有新版但没有可下载的包」的原因（界面拼在提示里，见 update-panel
+            // 与 update-modal 的 assetMissingReason）
+            "assetProbe": asset_probe,
             // 已应用、只差重启：界面据此把按钮换成「立即重启」，
             // 而不是再给一次注定 400 的「下载并更新」
             "pendingRestart": pending_restart,

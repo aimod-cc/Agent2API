@@ -9,8 +9,8 @@ export function imageApiSections(code: ReturnType<typeof apiExampleCode>): ApiSe
       id: 'image-generation', title: t('图片生成与共用参数'), path: 'POST /v1/images/generations',
       description: t('根据文字提示生成图片。请求使用 JSON，生成与编辑均只支持非流式响应。'),
       paragraphs: [
-        t('目前小浣熊、Loomy、Antigravity、ModelScope 已接入图片生成；Loomy、Antigravity 与 ModelScope 同时接入参考图编辑，小浣熊暂不支持编辑。需要当前提供商插件包含对应能力，并且账号、模型和 Key 授权可用。'),
-        t('小浣熊使用 raccoon-image；Loomy 使用目录中的 kind=image 模型；Antigravity 使用目录中的 gemini-*-image 模型；ModelScope 使用已确认支持的 Qwen-Image、Z-Image 或 Qwen-Image-Edit 型号。实际 model 值以当前 /v1/models 为准，不要直接复制官方 API 的默认模型名。'),
+        t('目前小浣熊、Loomy、Antigravity、ModelScope、WorkBuddy 已接入图片生成；Loomy、Antigravity、ModelScope 与 WorkBuddy 同时接入参考图编辑，小浣熊暂不支持编辑。需要当前提供商插件包含对应能力，并且账号、模型和 Key 授权可用。'),
+        t('小浣熊使用 raccoon-image；Loomy 使用目录中的 kind=image 模型；Antigravity 使用目录中的 gemini-*-image 模型；ModelScope 使用已确认支持的 Qwen-Image、Z-Image 或 Qwen-Image-Edit 型号；WorkBuddy 使用目录中带 text-to-image 或 image-to-image 标签的模型，例如 hunyuan-image-alpha 与 hunyuan-image-alpha-edit。实际 model 值以当前 /v1/models 为准，不要直接复制官方 API 的默认模型名。'),
         t('下表是网关接受的参数范围，不是所有提供商都支持的范围。生成与编辑共用这些字段，具体上游可能进一步拒绝数量、质量、风格、背景或尺寸。'),
       ],
       fields: [
@@ -33,6 +33,7 @@ export function imageApiSections(code: ReturnType<typeof apiExampleCode>): ApiSe
         t('ModelScope 不支持 style、mask 与 input_fidelity；quality 仅接受省略、auto 或 standard，background 仅接受省略、auto 或 opaque，moderation 仅接受省略或 auto。风格与修改目标请写入 prompt。'),
         t('Antigravity 支持宽高比 1:1、2:3、3:2、3:4、4:3、4:5、5:4、9:16、16:9、21:9，尺寸会映射到原生 1K / 2K / 4K 档。请求最长边 ≤1792 为 1K，1793–3072 为 2K，3073–4096 为 4K；超过 4096 会被该提供商拒绝。'),
         t('Antigravity 的 size=auto 生成使用 1:1、1K；参考图编辑使用 1K 且不强制正方形。模型版本可能有更严格的输出限制；宽高比需接近支持值，不能任意指定像素尺寸。'),
+        t('WorkBuddy 走官方图片接口：size 省略或设为 auto 时按 1024x1024 请求；该通道不接受 quality、style、background 与 moderation，请把风格与质量要求写进 prompt。参考图以 data URL 内联在 JSON 请求里发送（不是 multipart），模型 id 由上游目录下发，换版本时以 /v1/models 为准。'),
       ],
       warning: t('生图可能消耗账号额度。先使用 n=1 和较小尺寸确认能力，内容政策拒绝或结果不确定时不要自动重复提交。'),
       examples: [example(t('JSON 图片生成请求'), code.generation)],

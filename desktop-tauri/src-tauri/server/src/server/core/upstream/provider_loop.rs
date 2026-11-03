@@ -490,7 +490,7 @@ pub(super) async fn forward_with_providers(
     let provider_ids: Vec<&str> = candidates.iter().map(String::as_str).collect();
     // 映射扩池的提示：链比本名承载家长，说明追加了映射的提供商（选路顺序仍是
     // 原生优先）。用户看到请求落到映射家时，这里与发送侧的改写日志对得上。
-    let with_mapping = crate::server::core::model_rules::current()
+    let with_mapping = crate::server::core::model_rules::shared()
         .mappings_of(&model)
         .len() > 0;
     logging::verbose(
@@ -1301,8 +1301,9 @@ async fn attempt_queue(
                         // 「需要重新登录」上，用户明明已经重新登录、账号也能用，
                         // 界面却一直红着。
                         // CodeArts 的临时访问凭据仍可能有效，转发成功不代表刷新授权恢复。
-                        if service.store.needs_relogin(account_id) && adapter.provider_id() != "codearts" {
-                            service.store.set_needs_relogin(account_id, None);
+                        if adapter.provider_id() != "codearts" && target.account.as_ref()
+                            .is_some_and(|account| account.get("needsRelogin").and_then(Value::as_bool) == Some(true)) {
+                            crate::server::core::blocking::in_place(|| service.store.set_needs_relogin(account_id, None));
                             logging::log(
                                 "[Upstream]",
                                 &format!("账号 {account_id} 转发成功，已清除「需要重新登录」标记"),
@@ -1352,9 +1353,13 @@ async fn attempt_queue(
                     }
                     if let Some(account_id) = target.account_id.as_deref() {
                         if failure.policy.suspend_account {
-                            let _ = service.store.suspend_upstream_account(account_id, &failure.policy.reason);
+                            let _ = crate::server::core::blocking::in_place(|| {
+                                service.store.suspend_upstream_account(account_id, &failure.policy.reason)
+                            });
                         } else if let Some(until) = failure.policy.account_cooldown_until {
-                            let _ = service.store.cooldown_upstream_account(account_id, until, &failure.policy.reason);
+                            let _ = crate::server::core::blocking::in_place(|| {
+                                service.store.cooldown_upstream_account(account_id, until, &failure.policy.reason)
+                            });
                         }
                     }
                     if failure.stop || failure.policy.stop {
@@ -1510,11 +1515,11 @@ async fn attempt_queue(
                             // 只在该账号尚未被标记时写一次：401 会随每次请求重复
                             // 出现，每轮都写一遍等于把账号表当日志写。`set_needs_relogin`
                             // 本身是幂等的，这里的判据只是省掉重复的写盘。
-                            if !service.store.needs_relogin(&account_id) {
-                                service.store.set_needs_relogin(
+                            if !crate::server::core::blocking::in_place(|| service.store.needs_relogin(&account_id)) {
+                                crate::server::core::blocking::in_place(|| service.store.set_needs_relogin(
                                     &account_id,
                                     Some("上游拒绝了这个登录态（会话已失效）"),
-                                );
+                                ));
                                 logging::log(
                                     "[Upstream]",
                                     &format!(
@@ -1777,7 +1782,7 @@ async fn attempt_queue(
             &limit_model_label(&model, &wire_model),
             &session,
             provider_id,
-        );
+        ).await;
         logging::verbose(
             "[Upstream]",
             &format!(
@@ -2349,7 +2354,7 @@ async fn attempt_custom(
                     ),
                     &Value::Null,
                     &provider_id,
-                );
+                ).await;
                 logging::verbose(
                     "[Upstream]",
                     &format!("自定义转发完成: HTTP {status}（{}ms）", logging::now_ms() - started_at),
@@ -2362,7 +2367,10 @@ async fn attempt_custom(
                 // 与「动作 0 换提示词重试」同一记账形态，见 `note_attempt_retry`）。
                 if rotate_left > 0 && error.is_quota_limit() {
                     if let Some(account_id) = target.account_id.as_deref() {
-                        match service.store.next_rotate_proxy(account_id) {
+                        let store = service.store.clone();
+                        let account_id = account_id.to_string();
+                        let next = crate::server::core::blocking::run(move || store.next_rotate_proxy(&account_id)).await?;
+                        match next {
                             Ok(Some(next)) => {
                                 rotate_left -= 1;
                                 let reason = format!(
@@ -2549,7 +2557,7 @@ async fn attempt_stateful(
                 &limit_model_label(&model, wire_model),
                 &Value::Null,
                 provider_id,
-            );
+            ).await;
             logging::verbose(
                 "[Upstream]",
                 &format!("会话式转发完成（{}ms）", logging::now_ms() - started_at),
@@ -2659,7 +2667,7 @@ impl futures::Stream for SlotHoldingStream {
 ///
 /// 独立出来是因为成功路径在 401 刷新重试之后才到达，而那时 `target` 与
 /// `session` 都还在作用域里 —— 抽成函数让「成功到底清了什么」一眼可见。
-fn cap_cleared(
+async fn cap_cleared(
     service: &UpstreamService,
     target: &RouteTarget,
     model: &str,
@@ -2670,24 +2678,26 @@ fn cap_cleared(
     let Some(account_id) = target.account_id.as_deref() else {
         return;
     };
-    let had_limit = rotate::account_had_limit(service, account_id, model);
-    service.store.clear_rate_limit(account_id, model);
-    // 仅当之前确实处于限额状态才记一条，避免每次成功请求都刷日志
-    if had_limit {
-        let label = account_label(target.account.as_ref(), account_id, session);
-        rotate::report_limit_event(
-            "info",
-            &format!("账号「{label}」对模型 {model_label} 已恢复可用"),
-            None,
-            Some(&label),
-            model,
-            None,
-            0,
-            0,
-            None,
-            provider_id,
-        );
+    let store = service.store.clone();
+    let id = account_id.to_string();
+    let wire_model = model.to_string();
+    let cleared = crate::server::core::blocking::run(move || store.clear_rate_limit(&id, &wire_model)).await;
+    if !matches!(cleared, Ok(true)) {
+        return;
     }
+    let label = account_label(target.account.as_ref(), account_id, session);
+    rotate::report_limit_event(
+        "info",
+        &format!("账号「{label}」对模型 {model_label} 已恢复可用"),
+        None,
+        Some(&label),
+        model,
+        None,
+        0,
+        0,
+        None,
+        provider_id,
+    );
 }
 
 /// 上游请求体里的模型名（缺失/非字符串给空串，与改造前一致）

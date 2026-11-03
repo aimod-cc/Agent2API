@@ -27,6 +27,15 @@ export function blankProfile(client: AgentClient, gateway: string): AgentProfile
 
 export function cloneProfile(profile: AgentProfile): AgentProfile { return structuredClone(profile) }
 
+/**
+ * 主模型变化后同步 Claude Code 的四档映射：只动「还跟着主模型走」的档（留空，或正好等于
+ * 旧主模型），用户单独调过的档保持不动 —— 否则换个主模型就把分档配置一笔抹掉了。
+ */
+export function syncClaudeTiers(tiers: AgentProfile['claudeModels'], previous: string, next: string): AgentProfile['claudeModels'] {
+  const follow = (value: string) => !value || value === previous ? next : value
+  return { opus: follow(tiers.opus), sonnet: follow(tiers.sonnet), haiku: follow(tiers.haiku), subagent: follow(tiers.subagent) }
+}
+
 export function validateDraft(client: AgentClient, profile: AgentProfile): string {
   if (!profile.name.trim()) return t('请填写方案名称')
   if (!client.protocols.includes(profile.protocol)) return t('这个客户端不支持所选协议')

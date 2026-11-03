@@ -1,7 +1,7 @@
 use serde_json::Value;
 use std::{collections::HashSet, path::Path};
 
-use super::{crush, gemini, remove, string, Plan};
+use super::{crush, dsh, gemini, remove, string, Plan};
 use super::super::{files::{self, Change}, ClientDef, ConfigFormat, Profile};
 
 pub(super) fn plan(def: &ClientDef, path: &Path, profile: &Profile) -> Result<Plan, String> {
@@ -98,6 +98,7 @@ pub(super) fn plan(def: &ClientDef, path: &Path, profile: &Profile) -> Result<Pl
                 extra.push(models);
             }
         }
+        "dsh" => extra = dsh::delete(path, &mut value, profile)?,
         "gemini-cli" => {
             remove(&mut value, &["model", "name"]);
             if value.pointer("/security/auth/selectedType").and_then(Value::as_str) == Some("gemini-api-key") {

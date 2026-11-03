@@ -8,7 +8,7 @@
 .log-filters #req-provider { max-width: 168px; }
 .log-filters #req-model { max-width: 200px; }
 
-/* 十二列：时间 / 提供商·账号 / 重试 / 状态 / 模型 / 客户端 / API Key / 用时 / 速度 / 用量 / 错误 / 详情。
+/* 十三列：时间 / 提供商·账号 / 重试 / 状态 / 模型 / 客户端 / API Key / 用时 / 速度 / 积分 / 用量 / 错误 / 详情。
    时间、用时与速度定宽（等宽数字 + tabular-nums，竖着比对才齐），
    其余占弹性宽度（都是不定长内容，给固定宽度会互相挤）：
    模型 1.3fr（claude-sonnet-4-5 这类名字要放得下），
@@ -16,6 +16,7 @@
    状态 96px：进行中的行有两行（阶段徽章 + 阶段计时），而徽章最长是
    「等待响应」四个字（约 76px）—— 68px 那一版会把它压成省略号。
    客户端 110px：最长的一档是「GitHub Copilot」（约 90px），再留一点余量。
+   积分 72px：只放「0.06」这类两位小数读数（WorkBuddy 的 usage.credit）。
    详情列定宽（只有一个「详情」按钮或一个「-」）。
 
    --req-cols 是用户拖过的列宽（table-columns.js 写在 #req-list 上，靠继承
@@ -28,7 +29,7 @@
 .req-head {
   display: grid;
   grid-template-columns: var(--req-cols,
-    92px minmax(0, 1.1fr) 52px 96px minmax(0, 1.3fr) 110px 140px 96px 96px minmax(0, 1.6fr) minmax(0, 1.2fr) 60px);
+    92px minmax(0, 1.1fr) 52px 96px minmax(0, 1.3fr) 110px 140px 96px 96px 72px minmax(0, 1.6fr) minmax(0, 1.2fr) 60px);
   gap: 12px;
   align-items: center;
   padding: 10px 14px;
@@ -78,10 +79,11 @@
 .req-row:last-child { border-bottom: none; }
 .req-row:hover { background: var(--row-hover); }
 
-/* 表头里用时一格跟数值同侧对齐（用时是右对齐的数值列；速度默认居中，
-   见下面 .req-speed 的说明） */
+/* 表头里用时一格跟数值同侧对齐（用时是右对齐的数值列；速度与积分默认居中，
+   见下面 .req-speed / .req-credit 的说明） */
 .req-head .req-dur { text-align: right; }
 .req-head .req-speed { text-align: center; }
+.req-head .req-credit { text-align: center; }
 
 /* 失败行轻微着色，与事件日志 error 行同一手法（不干扰阅读的淡底） */
 .req-row.failed { background: color-mix(in srgb, var(--danger-soft) 45%, transparent); }
@@ -310,6 +312,24 @@
 }
 .req-row .req-speed.req-none { color: var(--text-3); }
 
+/* 积分：上游按请求上报的消耗（WorkBuddy 的 usage.credit），可带小数。
+   等宽 + tabular-nums，默认居中（与速度列同一取向：单个读数居中后与上下行同轴，
+   比贴边留一大块空白好读；这一列只有 72px，贴右时数字会贴着速度列）。
+   用户仍可在列设置里改回靠右 / 靠左，那时由 ta-* 类覆盖这里。
+   缺失显示「—」（.is-empty），与「上报了 0」区分。 */
+.req-row .req-credit {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.req-row .req-credit.is-empty { color: var(--text-3); }
+
 /* 用量两行：in / out / all 与 缓存读取 / 命中率。
    等宽 + tabular-nums，超出省略（完整读数在 title 里）。 */
 .req-row .req-usage {
@@ -366,6 +386,7 @@
   .req-head .req-api-key,
   .req-head .req-dur,
   .req-head .req-speed,
+  .req-head .req-credit,
   .req-head .req-usage,
   .req-head .req-error-cell { display: none; }
 
@@ -377,8 +398,10 @@
   /* 第二行：提供商 / 账号 + 用时（用时贴右） */
   .req-row .req-target { grid-row: 2; grid-column: 1 / 3; }
   .req-row .req-dur { grid-row: 2; grid-column: 3 / 5; }
-  /* 第三行：用量整行铺开（两行读数不再被列宽挤省略） */
-  .req-row .req-usage { grid-row: 3; grid-column: 1 / -1; }
+  /* 第三行：用量 + 积分（积分贴右，占最后一格；用量不再整行铺开，
+     但两行读数只需要约 250px，3/4 宽在默认窗口下仍然放得下） */
+  .req-row .req-usage { grid-row: 3; grid-column: 1 / 4; }
+  .req-row .req-credit { grid-row: 3; grid-column: 4 / 5; }
   /* 第四行：客户端（左，跨到详情按钮之前）+ 详情（贴右）。
      客户端不挤进第二行 —— 那一行右侧已经给了用时，96px 装不下「GitHub Copilot」 */
   .req-row .req-client { grid-row: 4; grid-column: 1 / 4; }

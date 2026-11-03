@@ -12,7 +12,7 @@ pub(super) fn credential_scope(value: &str) -> bool {
 }
 
 pub(super) fn known(provider: &str, code: &str) -> bool {
-    let qwen = matches!(provider, "qwenwork" | "qwenwork-enterprise");
+    let qwen = crate::server::core::providers::availability::is_qwenwork_family(provider);
     if qwen && code.parse::<i64>().ok().is_some_and(qwen_number) { return true; }
     if matches!(code, "400" | "401" | "402" | "403" | "404" | "408" | "409" | "413" | "429" | "499" | "500" | "502" | "503" | "504" | "556") { return true; }
     if matches!(code,

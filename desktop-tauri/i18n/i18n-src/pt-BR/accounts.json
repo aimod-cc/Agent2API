@@ -59,6 +59,7 @@
   "{n} 个请求正在使用该账号（含还在下发内容的流式请求）": "{n} requisições usando esta conta (incluindo requisições de streaming que ainda enviam conteúdo)",
   "{n} 个读数只读到一半（读数可信但不完整）": "{n} lidos apenas em parte (valor confiável, mas incompleto)",
   "{n} 个读数没有绝对数（只给比例或无额度），未计入": "{n} sem valor absoluto (apenas percentual ou sem cota), não contabilizados",
+  "{n} 个读数里没有可用比例，未计入": "{n} leituras não tinham porcentagem utilizável e não foram contadas",
   "{n} 个账号 · {e} 启用 · {l} 限流": "{n} contas · {e} ativas · {l} limitadas",
   "{n} 个账号 · 启用 {e}": "{n} contas · {e} ativas",
   "{n} 个还没查到（未查询或正在查询）": "{n} ainda não lidos (não consultados ou em andamento)",
@@ -286,6 +287,7 @@
   "可用 {value} {unit}": "Disponível {value} {unit}",
   "可用余额": "Saldo disponível",
   "可用合计": "Total disponível",
+  "可用最低": "Menor disponível",
   "可留空：新版请求头只认令牌；旧版会把用户 ID 放进 New-Api-User 头": "Pode ficar vazio: versões novas usam só o token; as antigas colocam o ID de usuário no cabeçalho New-Api-User",
   "可领取清单合并每日赠送与限时营销活动；按套餐去重，已领取的不重复提交。只有主动领取时才会进行人机验证。": "",
   "可领取的套餐": "Planos resgatáveis",
@@ -874,6 +876,7 @@
   "选择": "Selecionar",
   "选择所选账号作为模板（可选）": "Usar uma conta selecionada como modelo (opcional)",
   "选择要轮询的代理（可多选）": "Selecione os proxies para rotacionar (múltiplos)",
+  "逐窗口最低：{list}": "Menor por janela: {list}",
   "逐请求轮换出口（换 IP）：OpenCode Zen 免费档按 IP 限流，单个 IP 的额度用完会对它一律 429": "Troca a saída a cada requisição (mudando o IP): o nível gratuito do OpenCode Zen limita por IP — quando a cota de um IP acaba, as requisições vindas dele recebem 429",
   "通用额度／本地保护": "Cota geral / proteção local",
   "邮箱": "",
@@ -951,5 +954,7 @@
   "，只对 OpenCode Zen 这类上游有意义，别的家请关掉。": ", o que só faz sentido para upstreams como o OpenCode Zen; desligue esta opção para os outros.",
   "，已达到上限": ", limite atingido",
   "：到「网络代理」页的「订阅管理」里点「同步 Clash Verge」把出口导进池后即可选 —— 那样能集中测试、也能被多个账号共用。": ": acesse a página 「Proxy de rede」, abra 「Gerenciar assinaturas」 e clique em 「Sincronizar Clash Verge」 para importar as saídas para o pool; assim elas poderão ser selecionadas — desse jeito é possível testar de forma centralizada e compartilhar entre várias contas.",
-  "；": "; "
+  "；": "; ",
+  "本组 {n} 个账号的百分比读数不能相加，取组内最低的剩余比例（按整组统计，不受筛选、搜索影响）": "As leituras percentuais das {n} contas deste grupo não podem ser somadas; exibimos a menor porcentagem restante (grupo inteiro, sem influência de filtros ou busca)",
+  "当前筛选下 {n} 个账号的百分比读数不能相加，取最低的剩余比例（随筛选、搜索变化，不受分页影响）": "As leituras percentuais das {n} contas no filtro atual não podem ser somadas; exibimos a menor porcentagem restante (muda com filtros/busca, sem influência da paginação)"
 }

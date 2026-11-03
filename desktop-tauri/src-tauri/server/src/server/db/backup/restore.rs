@@ -81,6 +81,7 @@ pub(super) fn import(
     set_phase(RestorePhase::SafetyBackup);
     let suppression = cloud_sync::auto_sync::SuppressionGuard::new();
     let safety = db.with_mut(|main| {
+        db.invalidate_accounts();
         let safety = safety::create(main, config_dir)?;
         set_phase(RestorePhase::Replacing);
         if let Err(error) = replace(&temp.conn, main) {
@@ -88,13 +89,16 @@ pub(super) fn import(
             let rollback = Connection::open_with_flags(&safety, OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .map_err(|error| format!("打开安全备份失败: {error}"))
                 .and_then(|old| replace(&old, main));
+            db.invalidate_accounts();
             return match rollback {
                 Ok(()) => Err(format!("{error}；已自动还原替换前的数据，本机密钥未更换")),
                 Err(rollback_error) => Err(format!("{error}；自动还原失败: {rollback_error}。安全备份保存在 {}，本机密钥未更换", safety.display())),
             };
         }
+        db.invalidate_accounts();
         Ok(safety)
     }).ok_or("数据库连接不可用，恢复未执行")??;
+    db.invalidate_accounts();
     set_phase(RestorePhase::Reloading);
     config::reload();
     usage_records::reload_facts();

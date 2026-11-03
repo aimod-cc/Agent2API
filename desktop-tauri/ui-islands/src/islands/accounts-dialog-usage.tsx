@@ -110,7 +110,7 @@ export function UsageSettingsSection({
   const patch = (next: Partial<UsageDraft>): void => onChange({ ...draft, ...next })
   return (
     <>
-      <Field orientation='horizontal' className='field-row mt-2.5'>
+      <Field orientation='horizontal' className='field-row mt-2.5 acct-usage-toggle'>
         <FieldLabel className='inline-flex cursor-pointer items-center gap-2.5 font-normal'>
           <Switch checked={draft.enabled} onCheckedChange={next => patch({ enabled: next === true })}
             aria-label={t('自动查询余额')} />
@@ -118,7 +118,7 @@ export function UsageSettingsSection({
         </FieldLabel>
       </Field>
       {draft.enabled ? (
-        <FieldGroup orientation='horizontal' className='field-row mt-2.5'>
+        <FieldGroup orientation='horizontal' className='field-row mt-2.5 acct-usage-interval'>
           <Field className='contents'>
             <FieldLabel htmlFor={`${idPrefix}-interval`}>{t('查询间隔')}</FieldLabel>
             <Input id={`${idPrefix}-interval`} type='number' min={1} step={1}

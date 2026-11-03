@@ -388,8 +388,7 @@ impl AccountStore {
     /// 代理在锁内只做**解析**（读 Clash 快照，本地文件 IO；与
     /// `get_session_by_id` 同一口径），真正的网络动作都在锁外。
     pub fn custom_credential_by_id(&self, account_id: &str) -> Option<CustomCredential> {
-        let _guard = self.guard();
-        let record = self.record_by_id(&_guard, account_id)?;
+        let record = self.read_record(account_id)?;
         Some(credential_of_record(&record))
     }
 

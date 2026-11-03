@@ -616,9 +616,7 @@ pub async fn run_model_test(State(state): State<ServerState>, headers: HeaderMap
     // 「进行中」行：与真实请求同一处时点（解析成功、转发开始前）。
     // `is_test = true` 一路带下去 —— 报表排除它、请求日志标记它。
     // 测试来源与实际通过鉴权的 Key 身份一起记录。
-    state
-        .request_stats()
-        .record_started(&test_id, started_at, &model, &model, &reasoning, &access.source, true);
+    super::request_prepare::record_started(state.request_stats(), &test_id, started_at, &model, &model, &reasoning, &access.source, true).await;
     if let Some(token) = cancellation::register(&test_id) {
         telemetry.set_cancel_token(token);
     }

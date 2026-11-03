@@ -119,7 +119,9 @@
 
 /* ─── 组头的小图标按钮（＋ / 眼睛）───
    26px 见方、无边框、悬停才出底 —— 组头里已经有标题与计数，
-   再画两枚带框的按钮会把那一行压得太重。 */
+   再画两枚带框的按钮会把那一行压得太重。
+   圆角取 --r-sm（8）：26px 一档在组件库里就是这个值（icon-sm 与小按钮），
+   与左栏条目、分段控件的选项同一档，见 styles/theme.css 的阶梯说明 */
 .sc-icon-btn {
   display: grid;
   place-items: center;
@@ -127,7 +129,7 @@
   height: 26px;
   padding: 0;
   border: 0;
-  border-radius: var(--r-xs);
+  border-radius: var(--r-sm);
   background: transparent;
   box-shadow: none;
   color: var(--text-3);
@@ -148,7 +150,7 @@
   height: 24px;
   padding: 0 6px;
   border: 0;
-  border-radius: var(--r-xs);
+  border-radius: var(--r-sm);
   background: transparent;
   box-shadow: none;
   color: var(--text-3);

@@ -130,13 +130,16 @@ impl RequestStats {
         let vacuum = Arc::clone(&self.vacuum);
         std::thread::spawn(move || {
             let outcome = db.with(|conn| -> rusqlite::Result<()> {
+                db.invalidate_accounts();
                 conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
                 conn.execute_batch("VACUUM;")?;
                 // 尾部 checkpoint：把 VACUUM 写进 WAL 的那份整库并回主库并截零。
                 // 少了它，回收的空间只从主库搬到 `-wal`，总占用不降反升（#297）。
                 conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+                db.invalidate_accounts();
                 Ok(())
             });
+            db.invalidate_accounts();
             let ok = matches!(outcome, Some(Ok(())));
             // 先复位状态再打日志：日志要写同一个库（拿锁），若先打日志，
             // 状态会多卡一会儿；复位后的并发压缩请求与日志写入互不阻塞

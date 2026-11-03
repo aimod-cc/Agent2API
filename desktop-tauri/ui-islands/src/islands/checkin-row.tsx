@@ -24,7 +24,7 @@ export function ProviderLogo({ id, label }: { id: string; label: string }): Reac
   const icon = PROVIDER_ICONS[id] || `assets/providers/${slug}.png`
   const initial = (label || id || '·').trim().slice(0, 1).toUpperCase() || '·'
   return (
-    <Avatar className='size-[30px] rounded-[9px] bg-control' title={label} aria-hidden='true'>
+    <Avatar className='size-[30px] rounded-sm bg-control' title={label} aria-hidden='true'>
       <AvatarFallback className='font-bold'>{initial}</AvatarFallback>
       <AvatarImage keepMounted src={icon} alt='' loading='lazy' className='object-contain' />
     </Avatar>

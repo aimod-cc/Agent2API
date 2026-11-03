@@ -1,7 +1,7 @@
 import * as React from 'react'
 import {
   Alert, Badge, Button, Collapsible, CollapsibleContent, CollapsibleTrigger,
-  DialogSection, Field, FieldDescription, FieldLabel, Input,
+  Field, FieldDescription, FieldLabel, Input,
   InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput, Label,
   RadioGroup, RadioGroupItem, Select, SelectContent, SelectItem, SelectTrigger,
   SelectValue, Switch,
@@ -22,6 +22,27 @@ export function AccountSettingsIcon({ name, size = 16 }: { name: string; size?: 
     dangerouslySetInnerHTML={{ __html: shared().wbIcons?.icon?.(name, size) || '' }} />
 }
 
+/**
+ * 一组设置：分组名在方框外，框内的行以 1px 细线分隔（macOS 系统设置的分组列表）。
+ *
+ * 标题不塞进框里，是为了让「标题 → 框」的层级留在 DOM 上 —— 样式
+ * （`acct-dlg-group-label` + `acct-dlg-group`）与读屏顺序都跟着这个结构走。
+ * `action` 是分组名右侧的附加件（计数徽章、清除按钮），没有就不渲染。
+ */
+export function SettingGroup({ title, action, children }: {
+  title: React.ReactNode
+  action?: React.ReactNode
+  children: React.ReactNode
+}) {
+  return <section className='acct-dlg-group-wrap'>
+    <div className='acct-dlg-group-label'>
+      <span>{title}</span>
+      {action ? <span className='acct-dlg-label-action'>{action}</span> : null}
+    </div>
+    <div className='acct-dlg-group'>{children}</div>
+  </section>
+}
+
 export function BalanceTokenField({ configured, value, onChange, onClear, clearBusy }: {
   configured: boolean
   value: string
@@ -29,10 +50,8 @@ export function BalanceTokenField({ configured, value, onChange, onClear, clearB
   onClear: () => void
   clearBusy: boolean
 }) {
-  return <DialogSection className='acct-dlg-card'>
-    <div className='acct-dlg-card-head'><h3>{t('余额查询凭证')}</h3>
-      <Badge shape='tag' variant={configured ? 'success' : 'secondary'}>{configured ? t('已配置') : t('未配置')}</Badge>
-    </div>
+  return <SettingGroup title={t('余额查询凭证')}
+    action={<Badge shape='tag' variant={configured ? 'success' : 'secondary'}>{configured ? t('已配置') : t('未配置')}</Badge>}>
     <Field className='acct-dlg-field'>
       <div className='acct-dlg-field-head'><FieldLabel htmlFor='account-balance-token-input'>{t('余额查询凭证')}</FieldLabel>
         {configured ? <Button variant='ghost' size='xs' disabled={clearBusy} onClick={onClear}
@@ -43,7 +62,7 @@ export function BalanceTokenField({ configured, value, onChange, onClear, clearB
         value={value} onChange={event => onChange(event.currentTarget.value)} />
       <FieldDescription>{t('积分查询已复用转发用的登录凭证，这里通常留空即可。只有旧版本填过、或从旧代理导入过凭证时才有值')}</FieldDescription>
     </Field>
-  </DialogSection>
+  </SettingGroup>
 }
 
 export function CustomCredentialFields({ hasApiKey, noAuth, value, onValue, onToggleNoAuth, onClear, clearBusy }: {
@@ -57,13 +76,10 @@ export function CustomCredentialFields({ hasApiKey, noAuth, value, onValue, onTo
 }) {
   const [revealed, setRevealed] = React.useState(false)
   const pendingKey = Boolean(value.trim())
-  return <DialogSection className='acct-dlg-card acct-dlg-credential'>
-    <div className='acct-dlg-card-head'>
-      <h3><AccountSettingsIcon name='key' />{t('账号凭证')}</h3>
-      <Badge shape='tag' variant={noAuth || pendingKey ? 'secondary' : hasApiKey ? 'success' : 'warning'}>
-        {noAuth ? t('无需鉴权') : pendingKey ? t('新密钥待保存') : hasApiKey ? t('已配置') : t('未配置凭证')}
-      </Badge>
-    </div>
+  return <SettingGroup title={t('账号凭证')}
+    action={<Badge shape='tag' variant={noAuth || pendingKey ? 'secondary' : hasApiKey ? 'success' : 'warning'}>
+      {noAuth ? t('无需鉴权') : pendingKey ? t('新密钥待保存') : hasApiKey ? t('已配置') : t('未配置凭证')}
+    </Badge>}>
     <Field className='acct-dlg-field'>
       <FieldLabel>{t('鉴权方式')}</FieldLabel>
       <RadioGroup value={noAuth ? 'none' : 'key'} disabled={clearBusy} aria-label={t('鉴权方式')}
@@ -105,7 +121,7 @@ export function CustomCredentialFields({ hasApiKey, noAuth, value, onValue, onTo
           ? t('留空不修改，替换后点击「保存更改」生效。')
           : t('当前没有凭证，转发时会跳过此账号。请填写密钥或选择「无需鉴权」。')}</span>
     </div>
-  </DialogSection>
+  </SettingGroup>
 }
 
 /** 与后端 custom_providers::MAX_NAME_CHARS 一致。 */
@@ -143,8 +159,7 @@ export function ProviderSection({ provider, name, protocol, baseUrl, count, emul
         <p>{t('「{name}」名下 {count} 个账号共用；修改协议或地址可能中断正在进行的请求。', { name: provider.name || provider.id, count })}</p>
       </div>
     </Alert>
-    <DialogSection className='acct-dlg-card'>
-      <div className='acct-dlg-card-head'><h3>{t('连接参数')}</h3></div>
+    <SettingGroup title={t('连接参数')}>
       <div className='acct-dlg-field-grid'>
         <Field className='acct-dlg-field'>
           <FieldLabel htmlFor='account-provider-name'>{t('提供商名称')}</FieldLabel>
@@ -170,7 +185,8 @@ export function ProviderSection({ provider, name, protocol, baseUrl, count, emul
       <div className='acct-dlg-model-link'><span>{t('模型清单与映射在「模型管理」中维护。')}</span>
         <Button variant='link' size='xs' disabled={disabled} onClick={onModels}>{t('模型管理')}<AccountSettingsIcon name='caretRight' size={12} /></Button>
       </div>
-    </DialogSection>
+    </SettingGroup>
+    <div className='acct-dlg-group-label'>{t('高级兼容')}</div>
     <Collapsible open={advanced} onOpenChange={setAdvanced} className='acct-dlg-advanced'>
       <CollapsibleTrigger disabled={disabled} className='acct-dlg-advanced-trigger'>
         <AccountSettingsIcon name='sliders' /><span>{t('高级兼容')}</span>

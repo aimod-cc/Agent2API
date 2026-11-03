@@ -637,10 +637,14 @@ impl ModelRules {
 
 /// 当前生效的规则
 pub fn current() -> ModelRules {
-    ModelRules::from_raw(config::current().raw())
+    (*shared()).clone()
 }
 
-fn save(rules: &ModelRules) -> bool {
+pub(crate) fn shared() -> std::sync::Arc<ModelRules> {
+    config::model_rules_snapshot()
+}
+
+pub(crate) fn save(rules: &ModelRules) -> bool {
     config::update_raw_field(KEY_MODEL_RULES, rules.to_value())
 }
 
@@ -662,7 +666,7 @@ pub fn alias_valid(alias: &str) -> bool {
 /// `current()` 每次调用都要重新解析整份 modelRules，逐条调用会让一次
 /// `/v1/models` 把同一份配置解析几百遍。
 pub fn apply_capability_overrides(provider: &str, items: &mut [Value]) {
-    let rules = current();
+    let rules = shared();
     if rules.capabilities.is_empty() {
         return;
     }
@@ -698,7 +702,7 @@ pub fn apply_capability_overrides(provider: &str, items: &mut [Value]) {
 /// 消费方：管理页判「来源 = 手动」（`catalog::manage_entries`）、以及 AutoClaw
 /// 的模型路由解析（未知名字不静默回落，见 `autoclaw::models::resolve_model_route`）。
 pub fn is_custom(provider: &str, id: &str) -> bool {
-    current().custom.iter().any(|item| item.matches(provider, id))
+    shared().custom.iter().any(|item| item.matches(provider, id))
 }
 
 /// 某一家当前登记的自定义模型，转成**聚合层认的条目形态**。
@@ -717,7 +721,7 @@ pub fn is_custom(provider: &str, id: &str) -> bool {
 /// 数据源是 `model_rules::current()`（内存快照），条目通常只有几条，
 /// 现算一次的成本远低于维护一份会与配置失同步的缓存。
 pub fn custom_models_for(provider: &str) -> Vec<Value> {
-    current()
+    shared()
         .custom
         .iter()
         .filter(|item| item.provider.eq_ignore_ascii_case(provider))

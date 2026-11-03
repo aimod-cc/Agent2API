@@ -8,10 +8,10 @@ import { Icon } from '../components/Icon'
 import { PullIndicator, usePullToRefresh } from '../components/PullToRefresh'
 import { store } from '../state/store'
 import { providerLabel } from '../lib/providers'
-import { fetchManage, refreshModels, setModelEnabled, type ManageModel, type ManageMapping } from '../api/gateway'
+import { fetchManage, refreshModels, setModelEnabled, removeModelMapping, type ManageModel, type ManageMapping } from '../api/gateway'
 import { usePolling } from '../lib/usePolling'
 import { t } from '../i18n'
-import { Input, Card, Button } from '@ui'
+import { Input, Card, Button, confirmDialog } from '@ui'
 import { Switch as UiSwitch } from '@ui'
 import { Badge as UiBadge } from '@ui'
 import { Toggle as UiToggle } from '@ui'
@@ -87,6 +87,37 @@ export function ModelsPage() {
 
   const enabledCount = (models || []).filter(item => item.enabled).length
   const hiddenCount = (models || []).filter(item => item.visibility === 'hidden').length
+
+  /**
+   * 「未挂载的映射」：指向的上游模型已不在清单里（上游下线 / 承载它的那家当前
+   * 没有行），因此挂不到任何模型行上。与桌面端同一份判据（后端的 `dangling`），
+   * 手机端只做**提示 + 清理** —— 常规的映射编辑仍在桌面端「模型管理」里做。
+   */
+  const danglingMappings = useMemo(
+    () => mappings.filter(item => item.dangling === true)
+      .sort((a, b) => String(a.provider || '').localeCompare(String(b.provider || ''))
+        || String(a.alias || '').localeCompare(String(b.alias || ''))),
+    [mappings],
+  )
+
+  const removeDangling = async (item: ManageMapping) => {
+    if (busy) return
+    const alias = String(item.alias || '')
+    const target = String(item.target || '')
+    if (!await confirmDialog(t('确定删除映射「{alias} → {target}」？它指向的上游模型已不在清单里。', { alias, target }))) return
+    setBusy(`mapping:${alias}:${target}`)
+    try {
+      const view = await removeModelMapping({ alias, target, provider: item.provider })
+      revision.current++
+      setModels(view.models || [])
+      setMappings(view.mappings || [])
+      store.toast(t('映射已删除'))
+    } catch (failure) {
+      store.toast(failure instanceof Error ? failure.message : String(failure), 'err')
+    } finally {
+      setBusy('')
+    }
+  }
 
   const toggle = async (model: ManageModel, next: boolean) => {
     if (!model.id || !model.provider || busy) return
@@ -165,6 +196,47 @@ export function ModelsPage() {
           {item.message ? ` · ${t(item.message)}` : ''}
         </p>)}
       </Card></div> : null}
+
+      {/* 未挂载的映射：目标上游已不在清单里，别名调不通也挂不到行上。桌面端在
+          表格下方单列一块（models-dangling.tsx）；手机端只提示 + 清理。 */}
+      {danglingMappings.length ? (
+        <div className='m-section'>
+          <Card className='m-card m-card-pad'>
+            <div className='text-xs font-medium'>
+              {t('未挂载的模型映射')} · {danglingMappings.length}
+            </div>
+            <p className='mt-2 text-[11.5px] text-subtle' style={{ lineHeight: 1.65 }}>
+              {t('这些映射指向的上游模型已不在当前清单里，用对应别名发请求会失败。可以在这里删除，删掉后该对外名即可重新使用。')}
+            </p>
+            {danglingMappings.map(item => {
+              const key = `${item.provider || ''}:${item.alias || ''}:${item.target || ''}`
+              // 自映射（alias == target）= 模型自己的默认绑定：用户启停过它就会留下
+              // 这一条，模型下线后挂不到行上。显示成 `x → x` 只会让人困惑，只写一次。
+              const isDefault = item.isDefault === true
+                || String(item.alias || '').trim().toLowerCase() === String(item.target || '').trim().toLowerCase()
+              return (
+                <div key={key} style={{
+                  display: 'flex', alignItems: 'center', gap: 10, marginTop: 10,
+                  paddingTop: 10, borderTop: '1px solid var(--m-line)',
+                }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className='m-mono' style={{ fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {item.alias}{isDefault ? '' : ` → ${item.target}`}
+                    </div>
+                    <div style={{ fontSize: 10.5, color: 'var(--m-text-3)', marginTop: 3 }}>
+                      {providerLabel(item.provider)}
+                      {isDefault ? ` · ${t('默认绑定')}` : ''}
+                      {item.carried === false ? ` · ${t('目标已下线')}` : ` · ${t('未接入')}`}
+                    </div>
+                  </div>
+                  <Button size='sm' variant='ghost' className='text-destructive'
+                    onClick={() => void removeDangling(item)}>{t('删除')}</Button>
+                </div>
+              )
+            })}
+          </Card>
+        </div>
+      ) : null}
       {!models ? <SkeletonList rows={4} height={70} /> : null}
 
       {models && !groups.length ? (

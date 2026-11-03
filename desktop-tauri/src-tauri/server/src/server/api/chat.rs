@@ -125,7 +125,7 @@ pub async fn chat_completions(
     // 下游等级与下游模型名同一时机采集（payload 被就地改写前；改写只动 model，
     // 两边前后一致，见 client_reasoning_of 的说明）
     let client_reasoning = pipeline::client_reasoning_of(&payload);
-    let requested_model = match pipeline::resolve_model(&state, &mut payload, scope.as_ref()) {
+    let requested_model = match super::request_prepare::resolve_model(&state, &mut payload, scope.as_ref()).await {
         Ok(model) => model,
         Err(error) => {
             record_early_failure(
@@ -159,18 +159,16 @@ pub async fn chat_completions(
     // （record_early_failure）没有 id，不插。id 取 telemetry 里刚生成的那个
     // —— 它与调试报文、收尾记账用的是同一个。
     let telemetry_id = telemetry.snapshot().id;
-    state
-        .request_stats()
-        .record_started(
+    super::request_prepare::record_started(
+            state.request_stats(),
             &telemetry_id,
             started_at,
             &requested_model,
             &client_model,
             &client_reasoning,
             &request_source,
-            // 真实流量：不是模型测试（见 `RecordContext::is_test`）
             false,
-        );
+        ).await;
     // ── 手动终止的取消令牌（本次新增）────────────────────────────
     // 登记在进程级注册表里（键 = 上面这个 id），详情页的「终止请求」按它
     // 找到这条在途请求；转发链的每个等待点 select 它。注销见
@@ -444,6 +442,10 @@ fn anthropic_models_view(body: &Value) -> Value {
 /// 按「字符数 ÷ 3.5」估（中英混排的经验值，与 Anthropic 官方「约 3.5 字符
 /// 一个 token」的量级一致）。
 ///
+/// 估算系数与流式 `message_start` 的输入锚点**共用**同一个函数
+/// （`protocol::anthropic::estimate_tokens_for_text`）：客户端会拿这两个数字
+/// 互相印证，对不上反而引出新的疑问（见 issue #437）。
+///
 /// ── 为什么不直接 404 ────────────────────────────────────────
 /// Claude Code 在网关模式下会调它做上下文预算；404 会让它按「网关不支持」
 /// 处理（行为随版本变化，可能是降级也可能是报错）。给一个量级正确的估算，
@@ -460,8 +462,7 @@ pub async fn count_tokens(State(state): State<ServerState>, body: Bytes) -> Resp
         Ok(chat) => serde_json::to_string(&chat).unwrap_or_default(),
         Err(_) => serde_json::to_string(&payload).unwrap_or_default(),
     };
-    let characters = text.chars().count();
-    let tokens = ((characters as f64) / 3.5).ceil().max(1.0) as i64;
+    let tokens = crate::server::core::protocol::anthropic::estimate_tokens_for_text(&text);
     let _ = state;
     json_response(json!({
         "input_tokens": tokens,

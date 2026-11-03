@@ -3,8 +3,20 @@ use serde_json::{json, Value};
 
 use super::{entry_json, sql, RequestStats};
 
+/// 流向视图里的客户端身份：把面板内置 AI 助手的几个内部用途标识并成一个。
+///
+/// 内置助手的三个入口（对话 / 图片工具 / 标题总结）各自带着自己的用途标识入库
+/// （见 `api::model_access` 的常量），请求日志按用途分开显示是对的 —— 那边要看
+/// 「这次调用是生图还是总结标题」。但路由页回答的是「谁在发请求」：同一个助手
+/// 被拆成三个客户端节点，会让人误以为是三个不同的下游。这里在读取侧统一成一个
+/// 身份 `assistant`，存储与请求日志不变。
+///
+/// 写成内联表达式而不是单独的常量：`BASE` 是 `const &str`，字符串里插不进别的
+/// 常量（`concat!` 只吃字面量），拼起来反而更难读。
 const BASE: &str = "WITH flow AS (
-    SELECT row_id, id, ts, client, provider, account_id, account_name, status, error, attempts, route,
+    SELECT row_id, id, ts,
+      CASE WHEN client IN ('assistant', 'assistant_images', 'assistant_title') THEN 'assistant' ELSE client END AS client,
+      provider, account_id, account_name, status, error, attempts, route,
       COALESCE(NULLIF(client_model, ''), model, '') AS request_model,
       CASE WHEN json_valid(route) THEN COALESCE(json_extract(route, '$.sessionId'), json_extract(route, '$.stickyId'), '') ELSE '' END AS session_id,
       CASE WHEN json_valid(route) THEN COALESCE(json_extract(route, '$.sessionSource'), '') ELSE '' END AS session_source,

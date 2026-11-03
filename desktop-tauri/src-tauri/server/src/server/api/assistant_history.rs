@@ -56,7 +56,7 @@ async fn summarize(state: &ServerState, id: &str, access: ModelAccess) -> Result
     let mut body = json!({ "model": model, "stream": false, "max_tokens": 120,
         "messages": [{ "role": "system", "content": prompt }, { "role": "user", "content": json!(excerpts).to_string() }] });
     let started = logging::now_ms();
-    let requested = match pipeline::resolve_model(state, &mut body, access.scope.as_ref()) {
+    let requested = match super::request_prepare::resolve_model(state, &mut body, access.scope.as_ref()).await {
         Ok(requested) => requested,
         Err(error) => {
             pipeline::record_early_failure(state, started, &model, "", &access.source, &error);
@@ -65,7 +65,7 @@ async fn summarize(state: &ServerState, id: &str, access: ModelAccess) -> Result
     };
     let telemetry = Arc::new(RequestTelemetry::with_id());
     let request_id = telemetry.id();
-    state.request_stats().record_started(&request_id, started, &requested, &model, "", &access.source, true);
+    super::request_prepare::record_started(state.request_stats(), &request_id, started, &requested, &model, "", &access.source, true).await;
     if let Some(token) = crate::server::core::upstream::cancellation::register(&request_id) {
         telemetry.set_cancel_token(token);
     }

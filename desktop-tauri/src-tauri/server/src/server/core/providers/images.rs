@@ -49,6 +49,12 @@ pub enum ImageResponseKind {
     Openai,
     Gemini,
     ModelscopeAsync,
+    /// WorkBuddy：`{code, msg, data:{data:[…], usage:{credit}}}` 一层信封。
+    Workbuddy,
+    /// 豆包工作：出图是对话流里的一次 agent 任务（SSE 的 `gen_image_block`），
+    /// 带水印的预览与**无水印原图**都在流里（后者在 `rich_media_layout_block`），
+    /// 流里没给才去调官方去水印接口。见 `core/upstream/images.rs` 的 `doubao_body`。
+    Doubao,
 }
 
 #[derive(Deserialize)]

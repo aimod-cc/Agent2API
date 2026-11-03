@@ -123,10 +123,12 @@ impl AuthService {
 
     /// 会话读取的共用内核；`scope` 为 None 表示全局当前账号。
     async fn session_of(&self, scope: Option<&str>) -> Result<Option<Value>, WorkBuddyAuthError> {
-        let entry = match scope {
-            Some(provider) => self.store.current_entry_for_provider(provider),
-            None => self.store.get_current_entry(),
-        };
+        let store = self.store.clone();
+        let scope = scope.map(str::to_string);
+        let entry = super::blocking::run(move || match scope {
+            Some(provider) => store.current_entry_for_provider(&provider),
+            None => store.get_current_entry(),
+        }).await.map_err(|error| WorkBuddyAuthError::new(error.message))?;
         Ok(entry.map(|entry| entry.session))
     }
 

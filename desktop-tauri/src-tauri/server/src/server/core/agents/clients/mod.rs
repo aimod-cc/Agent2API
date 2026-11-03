@@ -3,6 +3,7 @@ mod cline;
 mod codex;
 mod crush;
 mod delete;
+mod dsh;
 mod edit;
 mod gemini;
 mod kimi;
@@ -39,6 +40,7 @@ pub fn read(def: &ClientDef, path: &Path, value: &Value) -> Result<Vec<Profile>,
         "kimi-code" => kimi::read(value),
         "zed" => zed::read(value),
         "crush" => crush::read_effective(path, value),
+        "dsh" => dsh::read(path, value),
         "qoder" | "cursor-cli" => readonly::read(def, value),
         _ => Err("没有经过验证的客户端适配器".into()),
     }
@@ -74,12 +76,13 @@ pub fn plan(
         "codex" => codex::write(&mut value, profile, &mut warnings)?,
         "gemini-cli" => extra = gemini::write(path, &mut value, profile, &mut warnings)?,
         "opencode" => opencode::write(&mut value, profile, operation)?,
-        "workbuddy" => workbuddy::write(&mut value, profile)?,
+        "workbuddy" => workbuddy::write(&mut value, profile, &mut warnings)?,
         "zcode" => zcode::write(&mut value, profile)?,
         "cline" => extra = cline::write(path, &mut value, profile)?,
         "kimi-code" => kimi::write(path, &mut value, profile, operation)?,
         "zed" => zed::write(&mut value, profile, operation, &mut warnings)?,
         "crush" => extra = crush::write(path, &mut value, profile, operation)?,
+        "dsh" => extra = dsh::write(path, &mut value, profile, operation, &mut warnings)?,
         _ => return Err("这个客户端当前仅支持读取".into()),
     }
     change.after = Some(if def.id == "workbuddy" && original.trim().is_empty() {
@@ -115,7 +118,7 @@ pub fn equivalent(def: &ClientDef, saved: &Profile, live: &Profile) -> bool {
     if def.behavior == "single" && saved.model != live.model {
         return false;
     }
-    if matches!(def.id, "zcode" | "opencode" | "kimi-code" | "zed" | "crush") {
+    if matches!(def.id, "zcode" | "opencode" | "kimi-code" | "zed" | "crush" | "dsh") {
         let target = native_id(saved);
         if !live.native.source_id.is_empty() && live.native.source_id != target {
             return false;

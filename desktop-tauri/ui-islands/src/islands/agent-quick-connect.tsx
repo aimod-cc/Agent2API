@@ -2,6 +2,7 @@ import * as React from 'react'
 import { Alert, Button, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Empty, Field, FieldLabel, Input, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@ui'
 import { t } from '../i18n'
 import { loadCatalog, type CatalogModel } from './agent-catalog'
+import { ClaudeModelFields } from './agent-fields'
 import { ModelsFields } from './agent-model-fields'
 import { protocolLabel, validateDraft } from './agent-model'
 import { fillQuickProfile, quickModels, quickProfile } from './agent-quick-model'
@@ -74,12 +75,14 @@ export function QuickConnectDialog({ client, onClose }: { client: AgentClient; o
           </Field>}
           <Field><FieldLabel>{t('模型')}</FieldLabel>
             <Select value={options.some(model => model.id === draft.model) ? draft.model : ''} disabled={busy || !options.length} onValueChange={value => {
-              setDraft(profile => fillQuickProfile(client,{ ...profile, model:String(value) },options,store.defaultModel))
+              setDraft(profile => fillQuickProfile(client,{ ...profile, model:String(value) },options,store.defaultModel,profile.model))
               setError(''); setPreview(null)
             }}><SelectTrigger><SelectValue>{options.find(model => model.id === draft.model)?.label || draft.model || t('请选择模型')}</SelectValue></SelectTrigger><SelectContent>
               {options.map(model => <SelectItem key={model.id} value={model.id}>{model.label}</SelectItem>)}
             </SelectContent></Select>
           </Field>
+          {client.id === 'claude-code' && <ClaudeModelFields draft={draft} update={update} catalog={options} disabled={busy}
+            note={t('Claude Code 的 Opus / Sonnet / Haiku / 子 Agent 四档默认都指向上面选的模型；要让某一档用别的模型，在这里单独改。')} />}
           {!options.length ? <Alert variant='warning'>{t('所选 Key 下没有可用的对话模型，请先启用模型或手动填写。')}</Alert> : null}
           {client.id === 'zed' ? <Alert variant='warning'>{t('Zed 的 API Key 仍需在客户端提供商设置中填写；本页不修改系统凭证。')}</Alert> : null}
           <Button variant='ghost' size='sm' className='self-start' disabled={busy} onClick={() => setAdvanced(value => !value)}>{advanced ? t('收起更多配置') : t('更多配置')}</Button>

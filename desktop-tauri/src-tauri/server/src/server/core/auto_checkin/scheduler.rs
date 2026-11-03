@@ -157,10 +157,12 @@ impl AutoCheckin {
             let due = times::retry_due_providers(&schedule, now, &today);
             if !due.is_empty() {
                 let reason = format!("补签（{}）", checkin_schedules::display_label(&schedule));
+                // 来源用 makeup 而不是 schedule：记录页的「定时补签」筛选靠它
+                // 与主轮区分（reason 前缀只用于兼容旧行，见 core::checkin_records）
                 self.fire_scoped(
                     &reason,
                     Some(&schedule.id),
-                    "schedule",
+                    "makeup",
                     Some(&due),
                     Some(times::DEFAULT_RETRY_TIME),
                 )

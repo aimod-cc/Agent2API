@@ -36,7 +36,7 @@ import { Capacitor, registerPlugin } from '@capacitor/core'
 import { ApiError, apiCall } from '../api/client'
 import { activeServerId, nativePlatform } from '../lib/servers'
 import { t } from '../i18n'
-import type { ForceUpdatePolicy } from '../../../ui-shared/updates'
+import type { AssetProbe, ForceUpdatePolicy } from '../../../ui-shared/updates'
 
 /** 构建期注入的本工程版本号 */
 declare const __APP_VERSION__: string
@@ -55,6 +55,8 @@ export type ApkUpdateInfo = {
   prerelease: boolean
   /** 这一版挂的 APK 资产；null = 该版本没提供 Android 包 */
   asset: { name?: string; size?: number; url?: string } | null
+  /** 这一版到底传了哪些文件 —— 没有 APK 时界面据此说明原因（见 assetMissingReason） */
+  assetProbe?: AssetProbe | null
 }
 
 type RawCheckResult = {
@@ -67,6 +69,7 @@ type RawCheckResult = {
   pageUrl?: string | null
   prerelease?: boolean
   androidAsset?: { name?: string; size?: number; url?: string } | null
+  assetProbe?: AssetProbe | null
   checked?: boolean
   channelChanged?: boolean
 }
@@ -99,6 +102,7 @@ export async function checkApkUpdate(): Promise<ApkUpdateInfo> {
     pageUrl: raw.pageUrl || '',
     prerelease: Boolean(raw.prerelease),
     asset,
+    assetProbe: raw.assetProbe ?? null,
   }
 }
 

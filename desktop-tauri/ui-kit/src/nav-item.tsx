@@ -32,7 +32,8 @@ function NavList({ className, render, children, ...props }: useRender.ComponentP
  * 用 Button 承接交互，集中维护导航选中态、图标与计数的布局。
  *
  * 形态取自侧边栏的 `.nav-item` 与模型管理页左栏的 `.pv`（两者本来就是同一形态）：
- * 行高由 padding 撑、圆角 --r-sm、左侧可选图标、右侧可选计数。
+ * 行高由 padding 撑、圆角 --r-md —— 条目是 30px 高，与同样 30px 高的普通按钮
+ * 取同一档，用户说的「侧栏和按钮圆角不一样」就是这两处（阶梯见 styles/theme.css）。
  *
  * 三种变体：
  *   · default  普通条目（可选中）
@@ -47,7 +48,7 @@ function NavList({ className, render, children, ...props }: useRender.ComponentP
 const navItemVariants = cva(
   [
     'relative flex h-auto w-full items-center justify-start gap-2.5 whitespace-normal text-left active:translate-y-0',
-    'border border-transparent rounded-sm',
+    'border border-transparent rounded-md',
     'shadow-none',
     'transition-[background-color,border-color,color] duration-150 ease-out',
     'outline-none focus-visible:shadow-focus',
@@ -61,8 +62,10 @@ const navItemVariants = cva(
           'cursor-pointer px-2.5 py-2',
           'text-[12.5px] font-medium text-sidebar-fg',
           'hover:bg-nav-hover hover:text-foreground',
-          // 选中态：底色 + 描边 + 字重三件套（与分段控件、导航项的选中态同一套观感）
-          'data-[active]:border-nav-selected-border data-[active]:bg-nav-selected-bg data-[active]:font-semibold data-[active]:text-nav-selected-fg',
+          // 选中态：主色实心块（底色 / 描边 / 文字色三个取值统一在
+          // styles/nav.css 与 theme.css 的 --ui-nav-selected-* 里，见那里的说明）。
+          // 字重只从 400 到 500：再加粗会让整行宽度跳一档。
+          'data-[active]:border-nav-selected-border data-[active]:bg-nav-selected-bg data-[active]:font-medium data-[active]:text-nav-selected-fg',
         ],
         add: [
           'cursor-pointer justify-center px-2 py-1.5',

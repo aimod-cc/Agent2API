@@ -14,15 +14,19 @@
       width 150ms cubic-bezier(.2, .8, .2, 1), height 150ms cubic-bezier(.2, .8, .2, 1);
   }
 
+  /* 同心（iOS 26 那条 concentric 规矩）：滑块嵌在容器里内缩 2px，
+     取下一档 —— --radius-md(10) − 2 = --radius-sm(8)，与容器 10 共用同一个圆心 */
   [data-slot='segmented-thumb'] {
-    border-radius: calc(var(--ui-radius) * .6);
+    border-radius: var(--radius-sm);
     background: var(--ui-primary-soft);
   }
 
+  /* 指示器与条目同宽同高（不内缩，见 lib/selection-indicator.ts），所以取同一档
+     圆角 —— 条目是 30px 高的导航项，档位为 --radius-md(10) */
   [data-slot='nav-list-indicator'] {
     z-index: -1;
     border: 1px solid var(--ui-selection-border, var(--ui-nav-selected-border));
-    border-radius: calc(var(--ui-radius) * .6);
+    border-radius: var(--radius-md);
     background: var(--ui-selection-bg, var(--ui-nav-selected-bg));
     box-shadow: var(--ui-selection-shadow, none);
   }

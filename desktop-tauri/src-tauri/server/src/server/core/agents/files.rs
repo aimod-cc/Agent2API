@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 
-use super::{json_edit, toml_editing, ConfigFormat};
+use super::{json_edit, toml_editing, yaml_editing, ConfigFormat};
 
 pub const MAX_CONFIG_SIZE: u64 = 8 * 1024 * 1024;
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -51,6 +51,7 @@ pub fn parse(format: ConfigFormat, text: &str) -> Result<Value, String> {
     match format {
         ConfigFormat::Toml => toml_editing::parse(text),
         ConfigFormat::Jsonc => json_edit::parse(text, true),
+        ConfigFormat::Yaml => yaml_editing::parse(text),
         _ => json_edit::parse(text, false),
     }
 }
@@ -59,6 +60,7 @@ pub fn render(format: ConfigFormat, original: &str, desired: &Value) -> Result<V
     let text = match format {
         ConfigFormat::Toml => toml_editing::render(original, desired)?,
         ConfigFormat::Jsonc => json_edit::render(original, desired, true)?,
+        ConfigFormat::Yaml => yaml_editing::render(original, desired)?,
         _ => json_edit::render(original, desired, false)?,
     };
     Ok(text.into_bytes())

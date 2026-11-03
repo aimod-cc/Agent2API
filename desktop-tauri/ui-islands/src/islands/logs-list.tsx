@@ -1,10 +1,11 @@
 import * as React from 'react'
-import { Button, Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@ui'
+import { Button, Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, SegmentedControl } from '@ui'
 import { t } from '../i18n'
 import {
   formatLogTime, groupTime, logCategory, logContext, logLevel, logRawText, logSource,
   logSummary, logText, shared, toast, type LogEntry, type LogGroup,
 } from './logs-model'
+import { DIALOG_SEG_CLASS } from './dialog-segmented'
 import { Empty } from '@ui'
 
 export function LogsList({ groups, empty, loading, listRef, onScroll, onDetail }: {
@@ -81,10 +82,17 @@ export function LogDetail({ group, onClose }: { group: LogGroup | null; onClose:
         <DialogBody>
           <DialogDescription>{logSummary(entry, t)}</DialogDescription>
           <div className='event-log-detail-meta'>{groupTime(group)} · {t('原始记录 {n} 条', { n: group.count })}</div>
-          <div className='event-log-detail-tabs'>
-            <Button variant={tab === 'detail' ? 'secondary' : 'ghost'} size='sm' onClick={() => setTab('detail')}>{t('事件详情')}</Button>
-            <Button variant={tab === 'raw' ? 'secondary' : 'ghost'} size='sm' onClick={() => setTab('raw')}>{t('原始记录')}</Button>
-          </div>
+          {/* 两档视图：走组件库的分段控件（弹窗档尺寸）—— 原来是两颗按钮切底色假装成分段 */}
+          <SegmentedControl<'detail' | 'raw'>
+            aria-label={t('日志详情视图')}
+            className={DIALOG_SEG_CLASS}
+            value={tab}
+            onValueChange={setTab}
+            options={[
+              { value: 'detail', label: t('事件详情') },
+              { value: 'raw', label: t('原始记录') },
+            ]}
+          />
           {tab === 'detail' ? <>
             <dl className='event-log-detail-grid'>{fields(entry).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
             {logText(entry, 'detail') ? <div className='event-log-detail-block'><h3>{t('详细信息')}</h3><pre>{logText(entry, 'detail')}</pre></div> : null}

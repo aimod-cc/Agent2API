@@ -681,7 +681,13 @@ fn allowed_hosts(provider: &str) -> Option<&'static [&'static str]> {
         // 导航一旦被白名单拦下，症状就是用户明明授权成功、网关永远等不到码，
         // 而日志里什么都看不出（与 CodeArts / Trae 的 loopback 回调同一情形）。
         // 授权页本身在 `lobsterai.youdao.com`，沿途还可能有微信登录的第三方主机。
-        "catpaw" | "qoder" | "qoder-intl" | "cline-free" | "cline-pass" | "autoclaw"
+        // 千问办公两版的授权页在 `qwenwork.cn` / `.ai`（它会 302 到站点自己的
+        // 标准登录页 `/biz/signin`，沿途主机不可穷举）；2026-11-03 起它还有一条
+        // **本机回环回调**（`http://127.0.0.1:<插件端口>/callback`，见插件
+        // `providers/qoder/authorize.rs`）—— 那条导航被拦下的症状同样是
+        // 「授权成功但永远收不到码」。与 Qoder 同组，必须是 None。
+        "catpaw" | "qoder" | "qoder-intl" | "qwenwork" | "qwenwork-intl" | "cline-free"
+        | "cline-pass" | "autoclaw"
         | "autoclaw-intl" | "accio" | "accio-cn" | "zcode" | "zcode-intl" | "codearts" | "trae"
         | "kuku" | "antigravity" | "officeace" | "orcaterm" | "atomcode" | "lobsterai" => None,
         // WorkBuddy 的两个地区共用这一张表（表里 `workbuddy.ai` 那一行就是国际站
@@ -793,6 +799,12 @@ fn normalize_provider(provider: &str) -> Result<&'static str, String> {
         // 壳侧只透传 provider id，地区由后端按 id 反查（与 ZCode 同款）。
         "qoder" => Ok("qoder"),
         "qoder-intl" => Ok("qoder-intl"),
+        // 千问办公两版：**与 Qoder 同一套设备授权协议**（授权地址由插件按站点
+        // 现拼、轮询设备令牌取凭据，见 `providers::qoder::oauth`），所以同样是
+        // 壳侧只透传 provider id、站点由插件按 id 反查。**这一条不能少** ——
+        // 少了两版的「网页登录」点下去就是「不支持网页登录的提供商：qwenwork」。
+        "qwenwork" => Ok("qwenwork"),
+        "qwenwork-intl" => Ok("qwenwork-intl"),
         "catpaw" => Ok("catpaw"),
         "cline-free" => Ok("cline-free"),
         "cline-pass" => Ok("cline-pass"),
@@ -1413,6 +1425,9 @@ pub async fn start(
         // 归属已经在 provider id 里 —— 与 ZCode 同款，不再读 edition 形参。
         "qoder" => "cn",
         "qoder-intl" => "intl",
+        // 千问办公两版同理（两张卡片、没有地区下拉）
+        "qwenwork" => "cn",
+        "qwenwork-intl" => "intl",
         // ZCode 的两个地区由 **provider 本身**决定（界面上是两张卡片，
         // 没有地区下拉，因此面板不会传 `edition`）。不看 `edition` 形参的
         // 后果只是标题里的「国内版/国际版」四个字，但既然信息已经在
@@ -1485,6 +1500,8 @@ pub async fn start(
         // Qoder 两家品牌名自带地区（两张卡片、无地区下拉），标题不拼后缀
         "qoder" => "Qoder 中国版",
         "qoder-intl" => "Qoder 国际版",
+        "qwenwork" => "千问办公 国内版",
+        "qwenwork-intl" => "千问办公 国际版",
         "cline-free" => "Cline Free",
         "cline-pass" => "Cline Pass",
         "catpaw" => "CatPaw",
@@ -1518,7 +1535,8 @@ pub async fn start(
     let title = if matches!(
         provider,
         "cline-free" | "cline-pass" | "zcode" | "zcode-intl" | "codearts" | "trae" | "qoder"
-        | "qoder-intl" | "antigravity" | "officeace" | "lobsterai" | "atomcode"
+        | "qoder-intl" | "qwenwork" | "qwenwork-intl" | "antigravity" | "officeace" | "lobsterai"
+        | "atomcode"
     ) {
         format!("登录 {provider_label} 账号")
     } else {

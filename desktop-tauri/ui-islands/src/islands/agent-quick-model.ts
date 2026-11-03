@@ -1,6 +1,6 @@
 import { t } from '../i18n'
 import type { CatalogModel } from './agent-catalog'
-import { blankProfile } from './agent-model'
+import { blankProfile, syncClaudeTiers } from './agent-model'
 import type { AgentClient, AgentGatewayKey, AgentModel, AgentProfile } from './agent-types'
 
 export function quickProfile(client: AgentClient, gateway: string): AgentProfile {
@@ -17,14 +17,15 @@ export function quickModels(catalog: CatalogModel[], key?: AgentGatewayKey): Cat
   return catalog.filter(model => includes(key?.allowedModels,model.id) && model.providers.some(provider => includes(key?.allowedProviders,provider)))
 }
 
-export function fillQuickProfile(client: AgentClient, profile: AgentProfile, catalog: CatalogModel[], preferred: string): AgentProfile {
+export function fillQuickProfile(client: AgentClient, profile: AgentProfile, catalog: CatalogModel[], preferred: string, previous = ''): AgentProfile {
   const known = catalog.find(model => model.id === profile.model)
   const selected = known || catalog.find(model => model.id === preferred) || catalog.find(model => model.supportsTools === true) || catalog[0]
   if (!selected) return profile
   const { label: _, provider: __, providers: ___, ...model } = selected
   const configured: AgentModel = { ...model, effort:'', reasoningLevels:client.supportsEffort ? model.reasoningLevels : [] }
   return { ...profile, model:selected.id, ...(client.supportsModels ? { models:[configured] } : {}),
-    ...(client.id === 'claude-code' ? { claudeModels:{ opus:selected.id, sonnet:selected.id, haiku:selected.id, subagent:selected.id } } : {}) }
+    ...(client.id === 'claude-code' ? { claudeModels: previous ? syncClaudeTiers(profile.claudeModels, previous, selected.id)
+      : { opus:selected.id, sonnet:selected.id, haiku:selected.id, subagent:selected.id } } : {}) }
 }
 
 export function quickBlockReason(client: AgentClient): string {

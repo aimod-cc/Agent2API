@@ -15,10 +15,10 @@ pub(crate) struct RequestRouting {
 
 impl RequestRouting {
     pub fn capture(model: &str, store: &crate::server::core::account_store::store::AccountStore) -> Self {
-        let guard = store.guard();
-        let accounts: Vec<Value> = store.load(&guard).accounts.iter()
-            .filter(|record| crate::server::core::account_store::store_view::account_visible(&record.provider()))
-            .map(|record| store.public_account(record)).collect();
+        let snapshot = store.routing_snapshot();
+        let accounts: Vec<Value> = snapshot.accounts.iter()
+            .filter(|account| crate::server::core::account_store::store_view::account_visible(routing::provider_of(account)))
+            .map(|account| account.as_ref().clone()).collect();
         let (profiles, base) = config::routing_snapshot();
         let settings = profiles.settings_for(model, base);
         let ordered = if let Some(profile) = profiles.model_profile(model) {

@@ -13,6 +13,12 @@ export function editableProfile(workspace: RoutingWorkspace): RouteProfile {
 export function draftDirty(draft: RoutingDraft) {
   return JSON.stringify(draft.mode === 'inherit' ? null : draft.profile) !== JSON.stringify(draft.baseline)
 }
+/**
+ * 路由配置草稿。按作用范围（'' = 全局）各存一份，切换范围不会丢掉没保存的改动。
+ *
+ * `load` 的第三个参数用于「新增模型独立配置」：直接以独立模式打开某个模型，
+ * 不必先打开它再看它继承全局。不传时按后端返回的 customized 决定。
+ */
 export function useRoutingEditor(onSaved: () => void) {
   const [scope, setScope] = React.useState('')
   const [drafts, setDrafts] = React.useState<Record<string, RoutingDraft>>({})
@@ -22,7 +28,7 @@ export function useRoutingEditor(onSaved: () => void) {
   const sequence = React.useRef(0)
   const refs = React.useRef({ drafts, scope, busy, loading })
   refs.current = { drafts, scope, busy, loading }
-  const load = React.useCallback(async (model: string, force = false) => {
+  const load = React.useCallback(async (model: string, force = false, mode?: 'inherit' | 'custom') => {
     if (refs.current.busy) return
     model = model.trim().toLowerCase()
     setScope(model)
@@ -34,7 +40,7 @@ export function useRoutingEditor(onSaved: () => void) {
       if (id !== sequence.current) return
       if (!workspace.revision) throw new Error(t('路由配置版本不可用，请更新网关后重试'))
       const profile = editableProfile(workspace)
-      const independent = !model || workspace.customized
+      const independent = mode === 'custom' ? true : mode === 'inherit' ? false : (!model || workspace.customized)
       setDrafts(current => ({ ...current, [model]: { workspace, mode: independent ? 'custom' : 'inherit', profile,
         baseline: independent ? clone(profile) : null, revision: workspace.revision! } }))
     } catch (failure) { if (id === sequence.current) setError(errorMessage(failure)) }
@@ -62,6 +68,40 @@ export function useRoutingEditor(onSaved: () => void) {
     } catch (failure) { setError(errorMessage(failure)) }
     finally { refs.current.busy = false; setBusy(false) }
   }
+  // 新增模型独立配置：立即落库，而不是只打开一份未保存草稿，避免用户以为已经创建。
+  const create = async (model: string): Promise<boolean> => {
+    const target = model.trim().toLowerCase()
+    if (!target || refs.current.busy) return false
+    refs.current.busy = true
+    setBusy(true); setError('')
+    try {
+      const workspace = await bridge().getRoutingWorkspace(target)
+      if (!workspace.revision) throw new Error(t('路由配置版本不可用，请更新网关后重试'))
+      const profile = editableProfile(workspace)
+      // 新独立配置沿用当前生效的参与方式；没有显式配置时默认全部自动参与。
+      if (!profile.providerScope) profile.providerScope = 'all'
+      if (profile.providerScope === 'selected') profile.disabledProviders = profile.disabledProviders.filter(id => profile.providers.includes(id))
+      profile.excludedAccounts = profile.excludedAccounts.filter(id => workspace.accounts.some(account => account.id === id))
+      for (const provider of workspace.providers) {
+        if (!profile.providers.includes(provider.id)) profile.providers.push(provider.id)
+        if (!profile.accountOrder[provider.id]) {
+          profile.accountOrder[provider.id] = workspace.accounts.filter(account => account.provider === provider.id)
+            .sort((left, right) => Number(left.priority) - Number(right.priority)).map(account => account.id)
+        }
+      }
+      const saved = await bridge().saveRoutingProfile({ model: target, profile, revision: workspace.revision })
+      if (!saved?.revision) throw new Error(t('保存响应不完整，请刷新当前配置确认结果'))
+      const nextProfile = editableProfile(saved)
+      setDrafts(current => ({ ...current, [target]: { workspace: saved, mode: 'custom', profile: nextProfile,
+        baseline: clone(nextProfile), revision: saved.revision! } }))
+      setScope(target)
+      adoptAccountSorting(saved.sorting)
+      notify(t('路由配置已保存，仅影响后续选路'))
+      onSaved()
+      return true
+    } catch (failure) { setError(errorMessage(failure)); return false }
+    finally { refs.current.busy = false; setBusy(false) }
+  }
   const discard = () => {
     const draft = drafts[scope]
     if (!draft || busy || loading) return
@@ -75,7 +115,7 @@ export function useRoutingEditor(onSaved: () => void) {
     window.addEventListener('beforeunload', listener)
     return () => { sequence.current++; window.removeEventListener('beforeunload', listener) }
   }, [])
-  return { scope, load, draft: drafts[scope], drafts, update, save, discard, loading, busy, error,
+  return { scope, load, create, draft: drafts[scope], drafts, update, save, discard, loading, busy, error,
     dirtyCount: Object.values(drafts).filter(draftDirty).length }
 }
 export type RoutingEditorState = ReturnType<typeof useRoutingEditor>

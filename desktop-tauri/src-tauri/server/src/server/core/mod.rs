@@ -74,6 +74,7 @@ pub mod assistant_images;
 pub mod auto_checkin;
 pub mod beijing;
 pub mod billing;
+pub(crate) mod blocking;
 pub mod capability;
 pub mod checkin_history;
 pub mod checkin_records;
@@ -125,6 +126,8 @@ pub mod sidebar_layout;
 // 的数据底座，见该模块头。纯读，不依赖 ServerState。
 pub mod system_info;
 pub mod task_state;
+/// Trae 历史模型 ID（`-solo` / `-solo-max`）的一次性清理：见模块头。
+pub(crate) mod trae_model_ids;
 pub mod update;
 pub mod upstream;
 pub mod usage_query;

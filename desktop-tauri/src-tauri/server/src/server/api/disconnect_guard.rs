@@ -81,7 +81,9 @@ impl Drop for DisconnectGuard {
         // handoff 之后（armed = false）这里**什么都不做** —— 流的生命周期
         // 比 handler 长，注销与收尾都归 `RecordingStream`。
         if self.armed {
-            self.stats.finalize_interrupted(&self.id, DISCONNECTED);
+            let stats = self.stats.clone();
+            let id = self.id.clone();
+            crate::server::core::blocking::in_place(move || stats.finalize_interrupted(&id, DISCONNECTED));
             cancellation::unregister(&self.id);
         }
     }

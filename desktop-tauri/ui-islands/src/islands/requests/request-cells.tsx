@@ -3,6 +3,7 @@ import { Badge, Button, HtmlContent, StatusDot } from '@ui'
 import { t } from '../../i18n'
 import { NameEyeButton } from '../accounts-panels'
 import { maskName } from '../accounts-store'
+import { numberText } from '../accounts-shared'
 import { apiKeyRequestLabel, clientRequestLabel } from './source-filters'
 
 export type RequestEntry = {
@@ -12,6 +13,9 @@ export type RequestEntry = {
   clientReasoning?: string; upstreamReasoning?: string
   durationMs?: number; firstResponseMs?: number | null
   promptTokens?: number; completionTokens?: number; totalTokens?: number; cacheReadTokens?: number
+  /** 上游按请求上报的积分消耗（后端 `credit`）；null / 缺键 = 这一家没上报，
+   *  与 0（确实零消耗）是两件事 —— 前者显示「—」 */
+  credit?: number | null
   attempts?: number; attemptDetails?: unknown[]; sensitiveHits?: unknown[]
   /** 模型测试发起的请求（后端 `is_test`；此前落盘的老行没有这个键） */
   isTest?: boolean
@@ -391,6 +395,29 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
       if (isRunning(entry)) return <span key={key} className={className} />
       const speed = isOk(entry) ? tokensPerSecond(entry) : ''
       return <span key={key} className={`${className}${speed ? '' : ' req-none'}`} title={SPEED_TIP}>{speed || '—'}</span>
+    }
+
+    case 'credit': {
+      // 进行中：积分要等上游最后一个 chunk 的 usage 才到，此刻没有读数可给
+      // （与「用量」列同一处置：留空比「-」更准确）。
+      if (isRunning(entry)) return <span key={key} className={className} />
+      // 失败请求不记录用量（后端 normalize 已把 credit 清成 None）：这里与
+      // 「用量」列用同一句说明，避免把「失败清零」误读成「这一家没上报」。
+      if (!isOk(entry)) {
+        return <span key={key} className={`${className} is-empty`} title={t('失败请求不记录用量')}>—</span>
+      }
+      const value = entry.credit
+      if (value === null || value === undefined || !Number.isFinite(Number(value))) {
+        return (
+          <span key={key} className={`${className} is-empty`} title={t('上游没有返回积分消耗')}>—</span>
+        )
+      }
+      return (
+        <span key={key} className={className}
+          title={t('本次请求消耗 {credit} 积分', { credit: numberText(value) })}>
+          {numberText(value)}
+        </span>
+      )
     }
 
     case 'usage': {

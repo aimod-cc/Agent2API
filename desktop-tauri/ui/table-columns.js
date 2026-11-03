@@ -142,6 +142,9 @@
         { key: 'apiKey', sel: '.req-api-key', track: '140px' },
         { key: 'dur', sel: '.req-dur', track: '96px' },
         { key: 'speed', sel: '.req-speed', track: '96px' },
+        // 积分消耗（WorkBuddy 的 usage.credit）：与 page-requests.css 的默认
+        // grid-template-columns 同步；数值右对齐，宽度只够放「0.06」这类读数。
+        { key: 'credit', sel: '.req-credit', track: '72px' },
         { key: 'usage', sel: '.req-usage', track: 'minmax(0, 1.6fr)' },
         { key: 'error', sel: '.req-error-cell', track: 'minmax(0, 1.2fr)' },
         { key: 'detail', sel: '.req-detail', track: '60px' },

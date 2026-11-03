@@ -178,6 +178,34 @@ windows = { version = "0.61", features = [
 # 且仅 Windows 目标编译，Linux / Docker 构建完全不受影响。
 windows-service = "0.8"
 
+# 全局内存分配器（Issue #420）：**仅 Linux 目标**换成 jemalloc。
+#
+# ── 为什么只在 Linux ────────────────────────────────────────
+# 受益的是长时间运行、多账号并发转发的部署形态（Docker 容器 / Linux 服务端），
+# 也就是 Issue 里说的小内存 VPS / NAS 场景。Windows 服务端与桌面端保持 Rust
+# 默认分配器不动 —— 它们的链接形态（桌面端只链本 crate 的**库**，不链下面那个
+# bin）本来也不会走到这个分配器。
+#
+# ── 为什么是 jemalloc 而不是 mimalloc ───────────────────────
+# 两者都能压住 glibc malloc 在长稳多线程下的碎片，但构建方式不同：
+# mimalloc 的 C 源码走 **cmake**，而本仓镜像的 arm64 交叉编译链路只配了 `cc`
+# （rusqlite / ring 靠它，见根目录 Dockerfile）；jemalloc 走的正是 `cc` + `make`
+# （tikv-jemalloc-sys 的 build.rs 用 cc::Build 找编译器），与现链路一致，
+# arm64 交叉编译不需要给 Dockerfile 添任何东西。
+#
+# ── 为什么不做成可选 feature ────────────────────────────────
+# 容器内「一键更新」下载的是同一个二进制包（agent2api-server-linux-<arch>.tar.gz，
+# 见 core/update/selfupdate.rs）。做成非默认 feature 的话，Dockerfile 与构建仓库
+# 两个地方都得记得传 `--features`，漏一处就会让更新后的容器**静默退回**默认
+# 分配器 —— 这种降级只表现为「内存又涨了」，排查成本极高。按目标自动生效则
+# 任何 `cargo build -p agent2api-server` 都一致，没有可漏配的地方。
+#
+# 落的代码只有 bin/agent2api-server.rs 里那两行 `#[global_allocator]`：桌面端
+# 与 headless 链接的都是本 crate 的库，库不引用这个符号，所以桌面端产物里这份
+# 依赖会被链接器扔掉（仅多花几秒编译）。
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemallocator = "0.7"
+
 [dev-dependencies]
 # 路由级测试用 `ServiceExt::oneshot` 直接打 Router（不占端口、不跑 serve），
 # 见 `server/http.rs` 的 CORS 用例。util 是 oneshot 所在的那个 feature。

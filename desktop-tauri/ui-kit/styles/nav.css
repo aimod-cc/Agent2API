@@ -1,0 +1,81 @@
+/* 分类侧栏（导航栏）的统一观感 —— 全站一套。
+ *
+ * 覆盖范围：主侧栏（desktop-shell 的 `Sidebar/NavList/NavItem`）、各页左栏
+ * （模型管理 / 设置 / 插件 / 更新 / 助手）、以及账号设置弹窗里的分组导航。
+ * 这些地方本来就都在用组件库的 `Sidebar + NavList + NavItem`，所以规则只需要
+ * 写一份 —— 别再往各页的样式表里抄第二份。
+ *
+ * ── 三条定的调子（来自账号设置那一版被选中的设计）──────────────
+ *   · 选中态是一块**主色实心**（滑块由 NavList 的指示器画，见 selection.css），
+ *     不是以前的浅色 tint + 描边 + 加粗；选中项的文字与图标都是白色。
+ *   · 行高收到 30px、圆角 --radius-md(10，同 30px 高的按钮)、字号 12.5px、
+ *     字重 400（选中只到 500，不加粗 —— 字重一变整行宽度会跳）。
+ *   · 分组名是 10.5px / 500 的小灰字，不再大写、不再加字距。
+ *
+ * ── 为什么这份样式不放进 @layer ────────────────────────────────
+ * 组件库的工具类都在 `@layer utilities` 里，而旧的 `ui/css/*.css`（主侧栏、
+ * 模型页左栏那几处）是未分层的普通 CSS、且加载在前。未分层恒压过分层，所以这里
+ * 也写成未分层；两级的 `.sidebar .nav-item` 那几条用 `[data-slot]` 两级选择器
+ * 对上（同权时本文件更晚，见 index.html 里 islands/ui.css 的顺序）。
+ *
+ * 行高用 min-height 而不是固定 height：agent 页左栏的条目是两行
+ * （名字 + 版本 + 状态），固定高度会把它压扁。
+ */
+
+[data-slot='nav-item'] {
+  min-height: 30px;
+  height: auto;
+  padding: 6px 8px;
+  gap: 9px;
+  font-size: 12.5px;
+  font-weight: 400;
+  /* 行高压到 1.25：正文 1.55 的行盒会让「文字 + 12px 内边距」超过 30px，
+     min-height 就永远只是个下限。两行条目（agent 页）照样撑得开。 */
+  line-height: 1.25;
+}
+/* 旧样式表里这两条是两级选择器，这里按同级覆盖 */
+[data-slot='sidebar'] [data-slot='nav-item'],
+[data-slot='nav-list'] [data-slot='nav-item'],
+.page[data-page='gateway'] .prov-rail [data-slot='nav-item'] {
+  min-height: 30px;
+  height: auto;
+  padding: 6px 8px;
+}
+/* 选中项的文字色在这里显式写一遍：组件库里那条是分层的工具类，
+   而旧样式表（page-agent 的 `.agent-client { color: var(--text) }` 等）是未分层的，
+   未分层恒压过分层 —— 不写这一条，agent 页左栏的选中项文字不会跟着变白。 */
+[data-slot='nav-item'][data-active] { font-weight: 500; color: var(--ui-nav-selected-fg); }
+
+/* 条目间距：1px（原来的 gap: 2px / 2.5px 加起来是一道可见的空隙） */
+[data-slot='nav-list'] { gap: 1px; }
+.rail-scroll { gap: 1px; }
+/* 条目与滑块的圆角都取 --radius-md（10，条目自身用的是组件库的 rounded-md，
+   滑块在 selection.css 里也指向同一档）：30px 高的条目与同样 30px 高的普通按钮
+   从此同一档圆角。26px 一档（小按钮、分段控件的选项）才是 --radius-sm(8) */
+
+/* 分组名：与账号设置里那一版逐字一致的小灰字 */
+[data-slot='sidebar-group-label'],
+.nav-group-label,
+.rail-label {
+  padding: 10px 8px 5px;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-3);
+}
+/* 模型页左栏原来在分组名右侧接一条细线（`.rail-label::after`）：统一成账号设置
+   里那版之后不再要它 —— 一整栏读起来是一块，分组名自己就分得开 */
+.rail-label::after { display: none; }
+
+/* 移动端与窄窗口保持触控尺寸：这套紧凑行高只在桌面宽度里生效
+   （mobile.css 另有 `.nav-item { min-height: 44px }`，那是触控目标的下限） */
+@media (max-width: 767px) {
+  [data-slot='nav-item'],
+  [data-slot='sidebar'] [data-slot='nav-item'],
+  [data-slot='nav-list'] [data-slot='nav-item'],
+  .page[data-page='gateway'] .prov-rail [data-slot='nav-item'] {
+    min-height: 44px;
+    padding: 8px 10px;
+  }
+}

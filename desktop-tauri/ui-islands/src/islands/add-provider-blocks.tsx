@@ -26,7 +26,6 @@ import {
   Alert,
   AlertDescription,
   Button,
-  DialogSection,
   Input,
   InputGroup,
   InputGroupAddon,
@@ -38,6 +37,7 @@ import {
   Textarea,
   Label, Field, FieldGroup, FieldLabel,
 } from '@ui'
+import { AddFoot, AddGroup } from './add-account-kit'
 
 import {
   ADD_METHODS,
@@ -77,15 +77,8 @@ import {
 import { readFileAsDataUrl } from '../../../ui-shared/file-read'
 import { accountFilePayload, accountExportEdition, isAccountExport } from './add-account-file'
 import { draftOfProxy, ProxyForm, readProxyDraft } from './accounts-proxy-form'
+import { DIALOG_SEG_CLASS } from './dialog-segmented'
 import { t } from '../i18n'
-
-/**
- * 弹窗里的分段比页面上大一号（旧 #add-modal .add-seg 的 28px 项高 / 12.5px 字号，
- * 那条规则挂在 #add-modal 这个 ID 作用域上，迁到岛后弹窗不再有这个 id）。
- * 用任意变体就地复刻，避免弹窗里的分段掉回页面档位。
- */
-export const ADD_SEG_CLASS =
-  'max-w-full flex-wrap [&_[data-slot=segmented-item]]:h-7 [&_[data-slot=segmented-item]]:px-3 [&_[data-slot=segmented-item]]:text-[12.5px]'
 
 /** 小浣熊手填段里那个「登录态文件在哪」的链接点了要显示的路径 */
 const RACCOON_AUTH_PATH = t(
@@ -145,10 +138,12 @@ function ManualSection({
   config,
   region,
   visible,
+  footerHost,
 }: {
   config: ProviderConfig
   region: string
   visible: boolean
+  footerHost: HTMLElement | null
 }): React.ReactElement {
   const prefix = config.provider
   const [busy, setBusy] = React.useState(false)
@@ -197,7 +192,8 @@ function ManualSection({
   }
 
   return (
-    <DialogSection
+    <AddGroup
+      label={manualTitleOf(config)}
       hidden={!visible}
       // 小浣熊那条「登录态文件」链接：旧实现是 document 上的委托，这里收在段落上
       onClick={event => {
@@ -207,7 +203,6 @@ function ManualSection({
         }
       }}
     >
-      <h3>{manualTitleOf(config)}</h3>
       <Note {...note} />
       {config.fields.map(field => {
         const id = fieldIdOf(config, field)
@@ -242,14 +237,14 @@ function ManualSection({
           </p>
         </div>
       ) : null}
-      <FieldGroup orientation='horizontal' className='field-row'>
+      {/* 忙态文案在按钮上；这一格只放链接给出的路径与提交失败以外的说明 */}
+      <AddFoot host={footerHost} active={visible}
+        note={<span className='detail' id={`${prefix}-add-hint`}>{hint}</span>}>
         <Button id={`${prefix}-add-button`} onClick={() => { void submit() }} disabled={busy}>
           {busy ? t('添加中…') : addButtonTextOf(config)}
         </Button>
-        {/* 引擎不碰这一格：忙态文案在按钮上，这一格只放链接给出的路径与提交失败以外的说明 */}
-        <span className='detail' id={`${prefix}-add-hint`}>{hint}</span>
-      </FieldGroup>
-    </DialogSection>
+      </AddFoot>
+    </AddGroup>
   )
 }
 
@@ -258,9 +253,11 @@ function ManualSection({
 function DesktopSection({
   config,
   visible,
+  footerHost,
 }: {
   config: ProviderConfig
   visible: boolean
+  footerHost: HTMLElement | null
 }): React.ReactElement | null {
   const prefix = config.provider
   const [busy, setBusy] = React.useState(false)
@@ -281,10 +278,9 @@ function DesktopSection({
   }
 
   return (
-    <DialogSection hidden={!visible}>
-      <h3>{t('从本机导入桌面端登录态')}</h3>
+    <AddGroup label={t('从本机导入桌面端登录态')} hidden={!visible}>
       <p>{config.desktopNote}</p>
-      <FieldGroup orientation='horizontal' className='field-row'>
+      <AddFoot host={footerHost} active={visible}>
         <Button
           id={`${prefix}-desktop-button`}
           title={config.desktopHint}
@@ -293,8 +289,8 @@ function DesktopSection({
         >
           {busy ? t('导入中…') : t('从本机导入桌面端登录态')}
         </Button>
-      </FieldGroup>
-    </DialogSection>
+      </AddFoot>
+    </AddGroup>
   )
 }
 
@@ -312,9 +308,11 @@ function DesktopSection({
 function GuestSection({
   config,
   visible,
+  footerHost,
 }: {
   config: ProviderConfig
   visible: boolean
+  footerHost: HTMLElement | null
 }): React.ReactElement | null {
   const guest = config.guestLogin
   const [busy, setBusy] = React.useState(false)
@@ -340,8 +338,7 @@ function GuestSection({
   }
 
   return (
-    <DialogSection hidden={!visible}>
-      <h3>{t('访客模式')}</h3>
+    <AddGroup label={t('访客模式')} hidden={!visible}>
       {guest.noteHtml ? <Note html={guest.noteHtml} /> : null}
       <div className='form-field'>
         <Label htmlFor={nameId}>{t('备注名')}</Label>
@@ -353,12 +350,12 @@ function GuestSection({
           {...draftProps(nameId)}
         />
       </div>
-      <FieldGroup orientation='horizontal' className='field-row'>
+      <AddFoot host={footerHost} active={visible}>
         <Button id={`${config.provider}-guest-button`} onClick={() => { void submit() }} disabled={busy}>
           {busy ? guest.busyText || t('正在添加…') : guest.button}
         </Button>
-      </FieldGroup>
-    </DialogSection>
+      </AddFoot>
+    </AddGroup>
   )
 }
 
@@ -382,9 +379,11 @@ function base64BodyOf(dataUrl: string): string {
 function FileImportSection({
   config,
   visible,
+  footerHost,
 }: {
   config: ProviderConfig
   visible: boolean
+  footerHost: HTMLElement | null
 }): React.ReactElement | null {
   const [busy, setBusy] = React.useState(false)
   // 选中文件名回显：KukuAI 的 Cookies 没有扩展名，按钮旁看不出选的是哪一份
@@ -452,8 +451,7 @@ function FileImportSection({
   }
 
   return (
-    <DialogSection hidden={!visible}>
-      <h3>{t('导入凭证文件')}</h3>
+    <AddGroup label={t('导入凭证文件')} hidden={!visible}>
       <Note text={spec.note} />
       <p className='detail'>{t('也支持本软件导出的单账号 JSON 文件，保留账号凭证与附加信息。')}</p>
       <Field orientation='horizontal' className='field-row'>
@@ -466,29 +464,28 @@ function FileImportSection({
           {...draftProps(nameId)}
         />
       </Field>
-      <FieldGroup orientation='horizontal' className='field-row'>
-        <Input
-          ref={fileInput}
-          type='file'
-          // 空串 = 选择器不过滤（KukuAI 的 Cookies 没有扩展名，无从按类型筛）
-          accept={spec.accept}
-          hidden
-          onChange={event => {
-            const file = event.target.files?.[0]
-            // 清空 value：同一份文件改内容后再选一次也要能触发 onChange
-            event.target.value = ''
-            if (file) {
-              setHint(file.name)
-              void importFile(file)
-            }
-          }}
-        />
+      <Input
+        ref={fileInput}
+        type='file'
+        // 空串 = 选择器不过滤（KukuAI 的 Cookies 没有扩展名，无从按类型筛）
+        accept={spec.accept}
+        hidden
+        onChange={event => {
+          const file = event.target.files?.[0]
+          // 清空 value：同一份文件改内容后再选一次也要能触发 onChange
+          event.target.value = ''
+          if (file) {
+            setHint(file.name)
+            void importFile(file)
+          }
+        }}
+      />
+      <AddFoot host={footerHost} active={visible} note={<span className='detail'>{hint}</span>}>
         <Button onClick={() => fileInput.current?.click()} disabled={busy}>
           {busy ? t('导入中…') : t('选择凭证文件导入')}
         </Button>
-        <span className='detail'>{hint}</span>
-      </FieldGroup>
-    </DialogSection>
+      </AddFoot>
+    </AddGroup>
   )
 }
 
@@ -500,12 +497,14 @@ function WebLoginSection({
   onModeChange,
   region,
   visible,
+  footerHost,
 }: {
   config: ProviderConfig
   mode: string
   onModeChange: (value: string) => void
   region: string
   visible: boolean
+  footerHost: HTMLElement | null
 }): React.ReactElement | null {
   const web = config.webLogin
   const prefix = config.provider
@@ -596,8 +595,7 @@ function WebLoginSection({
 
   if (!web) return null
   return (
-    <DialogSection hidden={!visible}>
-      <h3>{t('网页登录')}</h3>
+    <AddGroup label={t('网页登录')} hidden={!visible}>
       <Note html={web.noteHtml} />
       {web.modes?.length && !isWeb ? (
         <div className='flex flex-col gap-2.5 border-l-2 border-border pl-[11px]'>
@@ -625,7 +623,8 @@ function WebLoginSection({
           {proxyError ? <Alert variant='destructive'><AlertDescription>{proxyError}</AlertDescription></Alert> : null}
         </div>
       ) : null}
-      <FieldGroup orientation='horizontal' className='field-row'>
+      <AddFoot host={footerHost} active={visible}
+        note={<span className='detail' id={`${prefix}-web-hint`}>{loginView.hint}</span>}>
         <Button id={`${prefix}-web-button`} disabled={loginView.disabled || (isWeb && config.provider === 'doubaowork')} onClick={() => controllerRef.current?.start()}>
           {loginView.waiting && <Spinner />}{loginView.label}
         </Button>
@@ -637,9 +636,8 @@ function WebLoginSection({
         >
           {t('取消等待')}
         </Button>
-        <span className='detail' id={`${prefix}-web-hint`}>{loginView.hint}</span>
-      </FieldGroup>
-    </DialogSection>
+      </AddFoot>
+    </AddGroup>
   )
 }
 
@@ -658,9 +656,11 @@ function WebLoginSection({
 function SmsSection({
   config,
   visible,
+  footerHost,
 }: {
   config: ProviderConfig
   visible: boolean
+  footerHost: HTMLElement | null
 }): React.ReactElement | null {
   const sms = config.smsLogin
   const prefix = config.provider
@@ -676,8 +676,7 @@ function SmsSection({
 
   if (!sms) return null
   return (
-    <DialogSection hidden={!visible}>
-      <h3>{t('手机验证码登录')}</h3>
+    <AddGroup label={t('手机验证码登录')} hidden={!visible}>
       <Note
         html={sms.noteHtml}
         text={t('用 AutoClaw 账号绑定的手机号登录：点击「获取验证码」，收到短信后填入下方并登录。验证码由本机直接提交给官方接口，界面不显示 token。')}
@@ -733,13 +732,12 @@ function SmsSection({
           </div>
         </div>
 
-        <div className='sms-foot'>
+        <AddFoot host={footerHost} active={visible}
+          note={<span className='detail sms-hint' id={`${prefix}-sms-hint`} />}>
           <Button id={`${prefix}-sms-submit`}>{t('登录并添加')}</Button>
-          {/* 失败时引擎会给它挂 .err（见 setHint） */}
-          <span className='detail sms-hint' id={`${prefix}-sms-hint`} />
-        </div>
+        </AddFoot>
       </div>
-    </DialogSection>
+    </AddGroup>
   )
 }
 
@@ -750,11 +748,13 @@ function OauthSection({
   mode,
   onModeChange,
   visible,
+  footerHost,
 }: {
   config: ProviderConfig
   mode: string
   onModeChange: (value: string) => void
   visible: boolean
+  footerHost: HTMLElement | null
 }): React.ReactElement | null {
   const oauth = config.oauthLogin
   const prefix = config.provider
@@ -792,8 +792,7 @@ function OauthSection({
 
   if (!oauth) return null
   return (
-    <DialogSection hidden={!visible}>
-      <h3>{oauth.title || t('网页登录')}</h3>
+    <AddGroup label={oauth.title || t('网页登录')} hidden={!visible}>
       <Note html={oauth.noteHtml} />
       {oauth.modes?.length && !isWeb ? (
         <div className='flex flex-col gap-2.5 border-l-2 border-border pl-[11px]'>
@@ -806,23 +805,20 @@ function OauthSection({
           />
         </div>
       ) : null}
-      <FieldGroup orientation='horizontal' className='field-row'>
+      <AddFoot host={footerHost} active={visible}
+        note={<span className='detail' id={`${prefix}-oauth-hint`}>{hintOf()}</span>}>
         {/* 两个变体各一颗：上游是两个独立端点、两套账号体系，用下拉会让用户猜。
             点击处理**不在这里**：autoclaw-oauth.js 的 create() 会自己给这三颗绑
-            click（旧实现同一分工），这里再绑一次会让 start() 被调两遍 */}
+            click（旧实现同一分工），这里再绑一次会让 start() 被调两遍 —— 也正因如此
+            它们必须常驻在 DOM 里（见 add-account-kit 的 AddFoot 说明） */}
         <Button id={`${prefix}-oauth-zai`}>{t('使用 Zai 账号登录')}</Button>
         <Button id={`${prefix}-oauth-google`} variant='outline'>{t('使用 Google 账号登录')}</Button>
         {/* 取消按钮的显隐由 autoclaw-oauth.js 的 paintCancel 管（同样是 hidden 属性） */}
         <Button id={`${prefix}-oauth-cancel`} variant='outline' hidden>
           {t('取消')}
         </Button>
-      </FieldGroup>
-      <FieldGroup orientation='horizontal' className='field-row'>
-        <span className='detail' id={`${prefix}-oauth-hint`}>
-          {hintOf()}
-        </span>
-      </FieldGroup>
-    </DialogSection>
+      </AddFoot>
+    </AddGroup>
   )
 }
 
@@ -831,9 +827,11 @@ function OauthSection({
 export function ProviderBlock({
   config,
   active,
+  footerHost,
 }: {
   config: ProviderConfig
   active: boolean
+  footerHost: HTMLElement | null
 }): React.ReactElement {
   const initialRegion = config.regionOptions?.[0]?.value ?? ''
   const [region, setRegion] = React.useState(initialRegion)
@@ -856,47 +854,54 @@ export function ProviderBlock({
   return (
     <div className='add-provider-block' hidden={!active}>
       {config.regionOptions?.length ? (
-        <DialogSection>
-          <h3>{t('地区')}</h3>
+        <AddGroup label={t('地区')}>
           <SegmentedControl
             aria-label={t('{label} 账号地区', { label: config.label })}
-            className={ADD_SEG_CLASS}
+            className={DIALOG_SEG_CLASS}
             options={config.regionOptions}
             value={region}
             onValueChange={setRegion}
           />
-        </DialogSection>
+        </AddGroup>
       ) : null}
 
-      <DialogSection>
-        <h3>{t('添加方式')}</h3>
+      <AddGroup label={t('添加方式')}>
         <SegmentedControl
           aria-label={t('{label} 账号的添加方式', { label: config.label })}
-          className={ADD_SEG_CLASS}
+          className={DIALOG_SEG_CLASS}
           options={methodOptions}
           value={effective}
           onValueChange={value => setMethod(value as MethodId)}
         />
-      </DialogSection>
+      </AddGroup>
 
-      <GuestSection config={config} visible={effective === 'guest'} />
+      {/* 段落的 `visible` 要连「这一家是不是当前选中的提供商」一起算：段落自己的
+          hidden 只在块内生效，而主按钮是 portal 到弹窗底栏的 —— 出了块就没有祖先
+          帮忙挡着了。少了这一半，二十来家的底栏槽位会同时挤在底栏那一行里
+          （每列只剩一个字宽，提示文字变成竖排）。
+
+          注意不能改成「不选中就不传给段落 footerHost」：那会让按钮从原位搬到
+          底栏，节点一换，sms-login / autoclaw-oauth 在 create() 时绑的 click 就丢了。 */}
+      <GuestSection config={config} visible={active && effective === 'guest'} footerHost={footerHost} />
       <OauthSection
         config={config}
         mode={oauthMode}
         onModeChange={setOauthMode}
-        visible={effective === 'oauth'}
+        visible={active && effective === 'oauth'}
+        footerHost={footerHost}
       />
-      <SmsSection config={config} visible={effective === 'sms'} />
+      <SmsSection config={config} visible={active && effective === 'sms'} footerHost={footerHost} />
       <WebLoginSection
         config={config}
         mode={webMode}
         onModeChange={setWebMode}
         region={region}
-        visible={effective === 'web'}
+        visible={active && effective === 'web'}
+        footerHost={footerHost}
       />
-      <ManualSection config={config} region={region} visible={effective === 'manual'} />
-      <FileImportSection config={config} visible={effective === 'file'} />
-      <DesktopSection config={config} visible={effective === 'desktop'} />
+      <ManualSection config={config} region={region} visible={active && effective === 'manual'} footerHost={footerHost} />
+      <FileImportSection config={config} visible={active && effective === 'file'} footerHost={footerHost} />
+      <DesktopSection config={config} visible={active && effective === 'desktop'} footerHost={footerHost} />
     </div>
   )
 }
@@ -958,9 +963,11 @@ type WorkBuddyMethod = 'web' | 'file' | 'desktop'
 function WorkBuddyFileImportSection({
   edition,
   visible,
+  footerHost,
 }: {
   edition: Edition
   visible: boolean
+  footerHost: HTMLElement | null
 }): React.ReactElement {
   const [busy, setBusy] = React.useState(false)
   const [hint, setHint] = React.useState('')
@@ -1012,8 +1019,7 @@ function WorkBuddyFileImportSection({
   }
 
   return (
-    <DialogSection hidden={!visible}>
-      <h3>{t('导入凭证文件')}</h3>
+    <AddGroup label={t('导入凭证文件')} hidden={!visible}>
       <Note text={t('选择官方客户端的登录态凭证文件（workbuddy-desktop.info / workbuddy-desktop-ai.info）或 wb2api 导出的账号 JSON（嵌套 / 扁平形均可）。')} />
       <p className='detail'>{t('也支持本软件导出的单账号 JSON 文件，保留账号凭证与附加信息。')}</p>
       <p className='detail'>
@@ -1037,25 +1043,24 @@ function WorkBuddyFileImportSection({
           {...draftProps(WORKBUDDY_FILE_NAME_ID)}
         />
       </Field>
-      <FieldGroup orientation='horizontal' className='field-row'>
-        <Input
-          ref={fileInput}
-          type='file'
-          accept='.info,.json,application/json'
-          hidden
-          onChange={event => {
-            const file = event.target.files?.[0]
-            // 清空 value：同一份文件改内容后再选一次也要能触发 onChange
-            event.target.value = ''
-            if (file) void importParsed(file)
-          }}
-        />
+      <Input
+        ref={fileInput}
+        type='file'
+        accept='.info,.json,application/json'
+        hidden
+        onChange={event => {
+          const file = event.target.files?.[0]
+          // 清空 value：同一份文件改内容后再选一次也要能触发 onChange
+          event.target.value = ''
+          if (file) void importParsed(file)
+        }}
+      />
+      <AddFoot host={footerHost} active={visible} note={<span className='detail'>{hint}</span>}>
         <Button onClick={() => fileInput.current?.click()} disabled={busy}>
           {busy ? t('导入中…') : t('选择凭证文件导入')}
         </Button>
-        <span className='detail'>{hint}</span>
-      </FieldGroup>
-    </DialogSection>
+      </AddFoot>
+    </AddGroup>
   )
 }
 
@@ -1068,9 +1073,11 @@ function WorkBuddyFileImportSection({
 function WorkBuddyDesktopImportSection({
   edition,
   visible,
+  footerHost,
 }: {
   edition: Edition
   visible: boolean
+  footerHost: HTMLElement | null
 }): React.ReactElement {
   const [busy, setBusy] = React.useState(false)
 
@@ -1090,15 +1097,14 @@ function WorkBuddyDesktopImportSection({
   }
 
   return (
-    <DialogSection hidden={!visible}>
-      <h3>{t('从本机导入桌面端登录态')}</h3>
+    <AddGroup label={t('从本机导入桌面端登录态')} hidden={!visible}>
       <Note text={t('读本机官方客户端（Tencent WorkBuddy / WorkBuddy AI）当前登录的账号：自动定位其凭证目录里最新的登录态文件（需已在本机官方客户端登录）。导入后由网关自动续期，无需跟随 2 小时时效手动换令牌。')} />
-      <FieldGroup orientation='horizontal' className='field-row'>
+      <AddFoot host={footerHost} active={visible}>
         <Button onClick={() => void importFromDesktop()} disabled={busy}>
           {busy ? t('导入中…') : t('从本机导入桌面端登录态')}
         </Button>
-      </FieldGroup>
-    </DialogSection>
+      </AddFoot>
+    </AddGroup>
   )
 }
 
@@ -1123,7 +1129,7 @@ function workbuddyProviderId(edition: Edition): string {
  * 不是行内样式）。旧实现里这段 DOM 写在 index.html 里、交互在 add-account.js；
  * 迁到岛上后整块在这里，index.html 的那 47 行骨架随之删除。 */
 
-export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElement {
+export function WorkBuddyBlock({ active, footerHost }: { active: boolean; footerHost: HTMLElement | null }): React.ReactElement {
   // 三处偏好的初值来自模块级 loginPrefs：旧实现里它们住在静态 DOM 上，
   // 关掉弹窗再打开仍是上次的选择（resetAddStep 只复位提供商与步骤）
   const [edition, setEdition] = React.useState<Edition>(loginPrefs.edition)
@@ -1239,14 +1245,13 @@ export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElem
 
   return (
     <div className='add-provider-block' hidden={!active}>
-      <DialogSection>
-        <h3>{t('账号版本')}</h3>
+      <AddGroup label={t('账号版本')}>
         <p>
           {t('两版账号可同时保存，各自一份模型清单（国内版与国际版是两家提供商，可分别启用与映射）。')}
         </p>
         <SegmentedControl
           aria-label={t('账号版本')}
-          className={ADD_SEG_CLASS}
+          className={DIALOG_SEG_CLASS}
           options={[
             { value: 'cn', label: t('国内版（WorkBuddy）') },
             { value: 'intl', label: t('国际版（WorkBuddy AI）') },
@@ -1254,13 +1259,12 @@ export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElem
           value={edition}
           onValueChange={value => pickEdition(value as Edition)}
         />
-      </DialogSection>
+      </AddGroup>
 
-      <DialogSection>
-        <h3>{t('添加方式')}</h3>
+      <AddGroup label={t('添加方式')}>
         <SegmentedControl
           aria-label={t('{label} 账号的添加方式', { label: 'WorkBuddy' })}
-          className={ADD_SEG_CLASS}
+          className={DIALOG_SEG_CLASS}
           options={[
             { value: 'web', label: t('网页登录') },
             { value: 'file', label: t('导入凭证文件') },
@@ -1271,10 +1275,9 @@ export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElem
           value={effectiveMethod}
           onValueChange={value => setMethod(value as WorkBuddyMethod)}
         />
-      </DialogSection>
+      </AddGroup>
 
-      <DialogSection hidden={effectiveMethod !== 'web'}>
-        <h3>{t('网页登录')}</h3>
+      <AddGroup label={t('网页登录')} hidden={effectiveMethod !== 'web'}>
         <p>{t('完成登录后自动加入账号列表，昵称取自上游。')}</p>
         {/* 网页端没有「内嵌窗口 / 系统浏览器」之分（桥接层一律开新标签页），
             整行收起 —— 连带那个只在「内嵌窗口」下生效的 Google / GitHub 开关 */}
@@ -1284,7 +1287,7 @@ export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElem
               <span className='text-[12.5px] whitespace-nowrap text-subtle'>{t('打开方式')}</span>
               <SegmentedControl
                 aria-label={t('网页登录的打开方式')}
-                className={ADD_SEG_CLASS}
+                className={DIALOG_SEG_CLASS}
                 options={[
                   { value: 'embedded', label: t('内嵌窗口') },
                   { value: 'external', label: t('系统默认浏览器') },
@@ -1308,7 +1311,8 @@ export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElem
             <p>{t('系统浏览器可复用已有登录态（国际版推荐）；内嵌窗口更干净。')}</p>
           </>
         )}
-        <FieldGroup orientation='horizontal' className='field-row'>
+        <AddFoot host={footerHost} active={active && effectiveMethod === 'web'}
+          note={<span className='detail' id='web-login-hint'>{loginView.hint}</span>}>
           <Button id='web-login-button' disabled={loginView.disabled} onClick={() => controllerRef.current?.start()}>
             {loginView.waiting && <Spinner />}{loginView.label}
           </Button>
@@ -1320,12 +1324,11 @@ export function WorkBuddyBlock({ active }: { active: boolean }): React.ReactElem
           >
             {t('取消等待')}
           </Button>
-          <span className='detail' id='web-login-hint'>{loginView.hint}</span>
-        </FieldGroup>
-      </DialogSection>
+        </AddFoot>
+      </AddGroup>
 
-      <WorkBuddyFileImportSection edition={edition} visible={effectiveMethod === 'file'} />
-      <WorkBuddyDesktopImportSection edition={edition} visible={effectiveMethod === 'desktop'} />
+      <WorkBuddyFileImportSection edition={edition} visible={active && effectiveMethod === 'file'} footerHost={footerHost} />
+      <WorkBuddyDesktopImportSection edition={edition} visible={active && effectiveMethod === 'desktop'} footerHost={footerHost} />
     </div>
   )
 }

@@ -56,13 +56,15 @@
   --intl: var(--ui-intl);
   --intl-soft: var(--ui-intl-soft);
   --intl-bd: var(--ui-intl-bd);
-  --radius: var(--ui-radius);
-  --r-xs: calc(var(--ui-radius) * .5);
-  --r-sm: calc(var(--ui-radius) * .6);
-  --r-md: calc(var(--ui-radius) * .8);
-  --r-lg: var(--ui-radius);
-  --r-xl: calc(var(--ui-radius) * 1.4);
-  --r-pill: 999px;
+  /* 圆角：一律指向上面那份阶梯（theme.css 里有完整依据），
+     这里不再用乘系数算 —— 乘出来的 9.6 / 12.8 这种值就是「到处不一样」的来源 */
+  --radius: var(--radius-lg);
+  --r-xs: var(--radius-xs);
+  --r-sm: var(--radius-sm);
+  --r-md: var(--radius-md);
+  --r-lg: var(--radius-lg);
+  --r-xl: var(--radius-xl);
+  --r-pill: var(--radius-pill);
   --shadow-1: var(--ui-shadow-1);
   --shadow-2: var(--ui-shadow-2);
   --shadow-3: var(--ui-shadow-3);

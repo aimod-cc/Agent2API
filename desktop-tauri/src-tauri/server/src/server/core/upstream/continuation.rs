@@ -350,10 +350,13 @@ fn verdict_of(
 
 /// 多轮 usage 的合并（口径见模块头「代价」条）。
 ///
-/// 四项**全部求和**：续写的每一轮都是一次真实的上游往返，第 N 轮的 prompt 里装着
-/// 前 N-1 轮的全部内容（上游就是这么计费的），`cache_read` 同样按轮发生
-/// （每轮各自命中一次缓存）。求和后，请求日志与限流记账读到的才是「这条客户端
-/// 请求实际花了多少」。
+/// token 四项与积分消耗**全部求和**：续写的每一轮都是一次真实的上游往返，
+/// 第 N 轮的 prompt 里装着前 N-1 轮的全部内容（上游就是这么计费的），
+/// `cache_read` 同样按轮发生（每轮各自命中一次缓存），`credit` 也是逐轮扣的。
+/// 求和后，请求日志与限流记账读到的才是「这条客户端请求实际花了多少」。
+///
+/// `credit` 是 `Option`：只要有一轮上报了就算数（没上报的轮按 0 参与求和），
+/// 全部轮次都没上报才保持 None（= 这一家不提供该读数）。
 ///
 /// 与 `RequestTelemetry::report_usage` 的「最后一次为准」**不冲突**：那条服务的是
 /// 同一条上游流里补发的增量帧（后到的即最终值），这里服务的是**跨轮** ——
@@ -368,6 +371,10 @@ pub fn sum_tokens(rounds: &[usage::UsageTokens]) -> usage::UsageTokens {
         acc.completion += round.completion;
         acc.total += round.total;
         acc.cache_read += round.cache_read;
+        acc.credit = match (acc.credit, round.credit) {
+            (None, None) => None,
+            (left, right) => Some(left.unwrap_or(0.0) + right.unwrap_or(0.0)),
+        };
         acc
     })
 }
@@ -379,12 +386,18 @@ pub fn sum_tokens(rounds: &[usage::UsageTokens]) -> usage::UsageTokens {
 /// 这是跨轮求和后唯一诚实的写法：没有任何一轮的原始 usage 能代表总量。
 /// 只在真的续写过（≥2 轮）时才走这里，单轮响应一个字节都不动。
 pub fn usage_json(tokens: &usage::UsageTokens) -> Value {
-    json!({
+    let mut value = json!({
         "prompt_tokens": tokens.prompt,
         "completion_tokens": tokens.completion,
         "total_tokens": tokens.total,
         "prompt_tokens_details": { "cached_tokens": tokens.cache_read },
-    })
+    });
+    // 积分只在真有读数时写：拼出 `"credit": null` 会让下游误以为这一家
+    // 「报了一个没有值」，而缺键与 null 在 `extract_usage` 里本来就等价。
+    if let (Some(credit), Some(object)) = (tokens.credit, value.as_object_mut()) {
+        object.insert("credit".to_string(), json!(credit));
+    }
+    value
 }
 
 /// 从一份 chat 完成体里取 token 数（缺失 / 非对象都按全 0，与单轮口径一致）。
@@ -1316,14 +1329,15 @@ mod truncation_criteria {
         assert_eq!(9, round.completion, "同一轮里后到的 usage 是最终值");
 
         let rounds = [
-            usage::UsageTokens { prompt: 10, completion: 9, total: 19, cache_read: 4 },
-            usage::UsageTokens { prompt: 20, completion: 5, total: 25, cache_read: 0 },
+            usage::UsageTokens { prompt: 10, completion: 9, total: 19, cache_read: 4, credit: Some(0.25) },
+            usage::UsageTokens { prompt: 20, completion: 5, total: 25, cache_read: 0, credit: Some(0.5) },
         ];
         let merged = sum_tokens(&rounds);
         assert_eq!(30, merged.prompt, "每轮的 prompt 都含全部历史，真实成本按轮求和");
         assert_eq!(14, merged.completion);
         assert_eq!(44, merged.total);
         assert_eq!(4, merged.cache_read);
+        assert_eq!(Some(0.75), merged.credit, "积分也是逐轮扣的，跨轮按和计");
         let json = usage_json(&merged);
         assert_eq!(merged, usage::extract_usage(&json).unwrap(), "合并值必须能被提取侧读回来");
     }

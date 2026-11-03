@@ -180,6 +180,10 @@ pub fn count() -> usize {
 
 /// 落一条完整报文；同 id 覆盖，失败只打日志，不影响转发。
 pub fn record(entry: TrafficEntry) {
+    super::blocking::in_place(|| record_sync(entry));
+}
+
+fn record_sync(entry: TrafficEntry) {
     let Some(db) = db() else {
         // 库不可用：静默丢弃（与改造前「STORE 未初始化」同一处理）。
         // 这里连日志都不打 —— 每个请求都会走到这一步，刷屏反而掩盖真问题。

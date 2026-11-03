@@ -26,6 +26,7 @@ function outcomeView(outcome?: string): { label: string; tone: 'ok' | 'warn' | '
 function sourceLabel(source?: string): string {
   switch (source) {
     case 'schedule': return t('定时')
+    case 'makeup': return t('补签')
     case 'startup': return t('补签')
     case 'manual': return t('手动')
     case 'single': return t('单签')
@@ -37,6 +38,7 @@ function sourceLabel(source?: string): string {
 export function CheckinRecords({ providers }: { providers: { id: string; label: string }[] }) {
   const [range, setRange] = useState('all')
   const [outcome, setOutcome] = useState('all')
+  const [kind, setKind] = useState('all')
   const [provider, setProvider] = useState('all')
   const [keyword, setKeyword] = useState('')
   const [search, setSearch] = useState('')
@@ -56,11 +58,16 @@ export function CheckinRecords({ providers }: { providers: { id: string; label: 
     { value: 'all', label: t('全部结果') }, { value: 'success', label: t('成功领取') },
     { value: 'already', label: t('今日已领') }, { value: 'pending', label: t('未领取') }, { value: 'failed', label: t('失败') },
   ]
+  const kinds = [
+    { value: 'all', label: t('全部类型') }, { value: 'manual', label: t('手动签到') },
+    { value: 'schedule', label: t('定时签到') }, { value: 'makeup', label: t('定时补签') },
+  ]
   const providerOptions = [{ value: 'all', label: t('全部提供商') }, ...providers.map(item => ({ value: item.id, label: t(item.label) }))]
   const filters = useCallback(() => ({
     start: recordRangeStart(range), outcome: outcome === 'all' ? undefined : outcome,
+    kind: kind === 'all' ? undefined : kind,
     provider: provider === 'all' ? undefined : provider, keyword: search || undefined,
-  }), [range, outcome, provider, search])
+  }), [range, outcome, kind, provider, search])
 
   const load = useCallback(async () => {
     controller.current?.abort()
@@ -103,11 +110,12 @@ export function CheckinRecords({ providers }: { providers: { id: string; label: 
   }
 
   const total = page?.total || 0
-  const filtered = range !== 'all' || outcome !== 'all' || provider !== 'all' || Boolean(search)
+  const filtered = range !== 'all' || outcome !== 'all' || kind !== 'all' || provider !== 'all' || Boolean(search)
   const controls = [
     { value: range, options: ranges, label: t('时间范围'), setter: setRange },
     { value: outcome, options: outcomes, label: t('结果'), setter: setOutcome },
     { value: provider, options: providerOptions, label: t('提供商'), setter: setProvider },
+    { value: kind, options: kinds, label: t('签到类型'), setter: setKind },
   ]
 
   return (

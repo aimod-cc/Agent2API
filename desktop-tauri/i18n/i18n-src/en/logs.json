@@ -46,6 +46,7 @@
   "操作失败：{error}": "Operation failed: {error}",
   "日志视图": "Log view",
   "日志详情": "Log details",
+  "日志详情视图": "",
   "显示 {groups} 组 · 原始记录 {entries} 条": "{groups} groups · {entries} raw records",
   "暂停刷新": "Pause refresh",
   "暂无日志": "No logs",

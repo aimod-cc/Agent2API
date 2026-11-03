@@ -21,14 +21,15 @@ export function traceAttempts(row: ReplayRow): TraceAttempt[] {
   return [{ index: Math.max(0, (row.attempts || 1) - 1), provider: row.provider, accountId: row.accountId,
     account: row.accountName, model: row.upstreamModel, inferred: true }]
 }
-export function traceCandidates(row: ReplayRow, attempts = traceAttempts(row)): TraceCandidate[] {
-  const matches = (entry: RouteEntry) => attempts.some(attempt => attempt.accountId
-    ? attempt.accountId === entry.id : Boolean(attempt.account) && attempt.account === entry.name && attempt.provider === entry.provider)
+export function traceCandidates(row: ReplayRow): TraceCandidate[] {
   const blocked = Array.isArray(row.route?.blocked) ? row.route.blocked : []
   const ordered = Array.isArray(row.route?.ordered) ? row.route.ordered : []
   const seen = new Set<string>()
-  return [...ordered.map(entry => ({ ...entry, kind: 'available' as const })), ...blocked.filter(entry => entry.state !== 'tried').map(entry => ({ ...entry, kind: 'skipped' as const }))]
-    .filter(entry => { if (matches(entry) || seen.has(entry.id)) return false; seen.add(entry.id); return true })
+  // 候选队列要完整呈现当时的顺位；已尝试的账号仍留在这里（尝试明细单独记录），
+  // 否则单候选失败时会出现「1 个候选」但列表为空的自相矛盾。
+  return [...ordered.map(entry => ({ ...entry, kind: 'available' as const })),
+    ...blocked.filter(entry => entry.state !== 'tried').map(entry => ({ ...entry, kind: 'skipped' as const }))]
+    .filter(entry => { if (seen.has(entry.id)) return false; seen.add(entry.id); return true })
 }
 export function attemptState(row: ReplayRow, attempt: TraceAttempt): TraceState {
   const entries = traceAttempts(row)
@@ -57,10 +58,15 @@ export function attemptDuration(row: ReplayRow, attempt: TraceAttempt): string {
 export function relativeTime(row: ReplayRow, time?: number | null): string {
   return time != null ? formatDuration(Math.max(0, time - row.ts)) : t('未记录')
 }
+/** 上游错误常带整段 HTML，摘要只留可读文字；完整原文在请求详情里。 */
+export function errorText(value?: string | null, limit = 0): string {
+  const plain = (value || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
+  return limit > 0 && plain.length > limit ? `${plain.slice(0, limit)}…` : plain
+}
 export function requestSummary(row: ReplayRow): string {
   const switches = Math.max(0, (row.attempts || 1) - 1)
   if (isTraceRunning(row)) return t('请求仍在处理中，当前阶段：{phase}', { phase: tracePhase(row.phase) })
-  if (!isTraceSuccess(row)) return row.error || t('请求未成功完成')
+  if (!isTraceSuccess(row)) return errorText(row.error, 180) || t('请求未成功完成')
   if (switches) return t('经过 {n} 次切换后成功，最终承载：{account}', { n: switches, account: row.accountName || traceProvider(row.provider, row.providerLabel) })
   if (row.route?.stickyHit) return t('命中会话粘性，沿用原账号完成请求')
   return t('请求成功完成，未发生账号切换')

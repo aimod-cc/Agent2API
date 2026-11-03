@@ -842,6 +842,14 @@ const BRIDGE_JS: &str = r#"
     getQueue: () => call('GET', '/api/queue'),
     saveQueue: patch => call('PUT', '/api/queue', patch),
 
+    // ── 会话图片压缩（设置页「网关 → 图片压缩」）──
+    // 开关 + 长边 / 质量 / 阈值三项，存配置（/api/image-compress）。契约同
+    // saveQueue：PUT 允许部分字段，返回生效后的全量值。只作用在对话链路
+    // （生图 / 图片编辑走独立分支，不经过压缩）。与 web_shim.rs 的同名方法
+    // 逐字同形（漏一侧 = 设置页那一格读不到值）。
+    getImageCompress: () => call('GET', '/api/image-compress'),
+    saveImageCompress: patch => call('PUT', '/api/image-compress', patch),
+
     // ── 验证码令牌池（设置页「网关 → 验证码令牌池」）──
     // ZCode 活动套餐通道令牌池的补货节奏（目标 / 轮询间隔 / 单轮上限），
     // 存配置（/api/zcode/captcha-pool）。契约同 saveTimeouts。

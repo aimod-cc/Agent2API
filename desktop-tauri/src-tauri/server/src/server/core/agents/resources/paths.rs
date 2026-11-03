@@ -44,6 +44,11 @@ pub fn for_client(def: &ClientDef) -> ResourcePaths {
         }
         "cursor-cli" => ResourcePaths { prompt: None, skills: vec![home.join(".cursor/skills")], mcp: json_mcp(home.join(".cursor/mcp.json"), vec!["mcpServers"]),
             note: "支持用户级 Skill 与 MCP；Cursor 的全局规则未确认可安全修改的文件格式，暂不开放提示词写入。" },
+        "dsh" => {
+            let dsh_home = dir("DSH_HOME", home.join(".dsh"));
+            ResourcePaths { prompt: None, skills: vec![dsh_home.join("skills"), dir("DSH_AGENTS_HOME", home.join(".agents")).join("skills")],
+                mcp: None, note: "管理 DSH 的用户级 Skill（DSH_HOME/skills 与 ~/.agents/skills）；提示词按项目 AGENTS.md 读取，MCP 在 profile 的插件配置里，本页不写入。" }
+        }
         "kimi-code" => ResourcePaths { prompt: None, skills: vec![home.join(".kimi/skills"), home.join(".config/agents/skills")],
             mcp: json_mcp(dir("KIMI_SHARE_DIR", home.join(".kimi")).join("mcp.json"), vec!["mcpServers"]),
             note: "支持 Kimi 用户级 Skill 与 MCP；Skill 路径独立于 KIMI_SHARE_DIR，项目 AGENTS.md 不在此页修改。" },

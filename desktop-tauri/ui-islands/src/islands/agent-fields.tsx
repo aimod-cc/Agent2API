@@ -1,9 +1,9 @@
 import * as React from 'react'
-import { Field, FieldLabel, FieldDescription, Input, Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@ui'
+import { Button, Field, FieldLabel, FieldDescription, Input, Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@ui'
 import { t } from '../i18n'
 import type { AgentClient, AgentProfile } from './agent-types'
 import type { CatalogModel } from './agent-catalog'
-import { protocolLabel } from './agent-model'
+import { protocolLabel, syncClaudeTiers } from './agent-model'
 import { getAgentStore } from './agent-state'
 
 export function AgentSelect({ value, options, onChange, disabled, label }: {
@@ -25,6 +25,58 @@ export function TextField({ label, fieldKey, value, onChange, hint, type = 'text
       onChange={event => onChange(event.currentTarget.value)} disabled={disabled} placeholder={placeholder} />
     {hint && <FieldDescription>{hint}</FieldDescription>}
   </Field>
+}
+
+/**
+ * 网关模型下拉：列目录里的模型；当前值不在目录里时补一项，避免导入或手填的值被悄悄清掉。
+ *
+ * 「模型 ID 让用户敲」这件事只在读不到目录时才成立 —— 能选就不该让人手输。
+ */
+export function GatewayModelSelect({ label, value, catalog, onChange, disabled, allowEmpty, emptyLabel }: {
+  label: string; value: string; catalog: CatalogModel[]; onChange: (value: string) => void
+  disabled?: boolean; allowEmpty?: boolean; emptyLabel?: string
+}) {
+  const options = catalog.map(model => ({ value: model.id, label: model.label }))
+  if (value && !options.some(option => option.value === value)) options.unshift({ value, label: t('{id}（不在网关目录）', { id: value }) })
+  if (allowEmpty) options.unshift({ value: '', label: emptyLabel || t('不写入') })
+  return <AgentSelect label={label} value={value} options={options} disabled={disabled} onChange={onChange} />
+}
+
+/**
+ * Claude Code 的四档模型映射（Opus / Sonnet / Haiku / 子 Agent）。
+ *
+ * Claude Code 自己按档位挑模型（主模型、后台小任务、子代理各走一档），所以接网关时
+ * 不是「选一个模型」而是「每档指一个网关模型」—— 四档挤成一列全宽输入框既占地方又
+ * 要求用户背模型 ID，这里按两列排、每档给下拉，另配「一键设置」把主模型铺到四档。
+ */
+export function ClaudeModelFields({ draft, update, catalog, disabled, note }: {
+  draft: AgentProfile; update: (patch: Partial<AgentProfile>) => void; catalog: CatalogModel[]; disabled: boolean; note?: string
+}) {
+  const rows: Array<{ key: 'opus' | 'sonnet' | 'haiku' | 'subagent'; label: React.ReactNode; labelText: string; fieldKey: string }> = [
+    { key: 'opus', label: 'Opus', labelText: 'Opus', fieldKey: 'ANTHROPIC_DEFAULT_OPUS_MODEL' },
+    { key: 'sonnet', label: 'Sonnet', labelText: 'Sonnet', fieldKey: 'ANTHROPIC_DEFAULT_SONNET_MODEL' },
+    { key: 'haiku', label: 'Haiku', labelText: 'Haiku', fieldKey: 'ANTHROPIC_DEFAULT_HAIKU_MODEL' },
+    { key: 'subagent', label: t('子 Agent'), labelText: t('子 Agent'), fieldKey: 'CLAUDE_CODE_SUBAGENT_MODEL' },
+  ]
+  const pick = draft.kind === 'gateway' && catalog.length > 0
+  const fill = () => update({ claudeModels: { opus: draft.model, sonnet: draft.model, haiku: draft.model, subagent: draft.model } })
+  const setTier = (key: string, value: string) => update({ claudeModels: { ...draft.claudeModels, [key]: value } })
+  return <section className='agent-claude-models flex min-w-0 flex-col gap-3 rounded-md border border-border bg-surface-inset p-3'>
+    <div className='flex flex-wrap items-center gap-2'>
+      <h4 className='text-xs font-semibold'>{t('模型映射')}</h4><span className='mr-auto' />
+      <Button variant='outline' size='xs' disabled={disabled || !draft.model} onClick={fill}>{t('一键设置')}</Button>
+    </div>
+    <div className='grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2'>
+      {rows.map(row => <Field key={row.key}>
+        <FieldLabel>{row.label}<code className='ml-auto text-[10px] text-subtle'>{row.fieldKey}</code></FieldLabel>
+        {pick ? <GatewayModelSelect label={row.labelText} value={draft.claudeModels[row.key]} catalog={catalog} disabled={disabled} allowEmpty
+          emptyLabel={t('不写入')} onChange={value => setTier(row.key, value)} />
+          : <Input value={draft.claudeModels[row.key]} autoComplete='off' spellCheck={false} disabled={disabled} placeholder={t('留空表示不写入')} onChange={event => setTier(row.key, event.currentTarget.value)} />}
+      </Field>)}
+    </div>
+    <p className='text-xs leading-relaxed text-subtle'>{note || t('Claude Code 按 Opus / Sonnet / Haiku / 子 Agent 分档请求模型；这里把每档指向网关目录里的模型，留空表示不改写该档。')}</p>
+    {pick && rows.some(row => !draft.claudeModels[row.key]) && <p className='text-xs leading-relaxed text-warning'>{t('留空的分档会以 Claude Code 内置模型名请求网关；网关没有同名模型时该档会失败，建议点「一键设置」。')}</p>}
+  </section>
 }
 
 export function ConnectionFields({ client, draft, update, disabled }: {
@@ -63,7 +115,7 @@ export function ConnectionFields({ client, draft, update, disabled }: {
 }
 
 function urlField(id: string): string {
-  return { 'claude-code': 'env.ANTHROPIC_BASE_URL', codex: 'model_providers.<id>.base_url', 'gemini-cli': 'GOOGLE_GEMINI_BASE_URL', opencode: 'provider.<id>.options.baseURL', zcode: 'config.api.baseUrl', workbuddy: 'models[].url', cline: 'providers.<id>.settings.baseUrl', 'kimi-code': 'providers.<id>.base_url', crush: 'providers.<id>.base_url', zed: 'language_models.openai_compatible.<id>.api_url' }[id] || 'baseUrl'
+  return { 'claude-code': 'env.ANTHROPIC_BASE_URL', codex: 'model_providers.<id>.base_url', 'gemini-cli': 'GOOGLE_GEMINI_BASE_URL', opencode: 'provider.<id>.options.baseURL', zcode: 'config.api.baseUrl', workbuddy: 'models[].url', cline: 'providers.<id>.settings.baseUrl', 'kimi-code': 'providers.<id>.base_url', crush: 'providers.<id>.base_url', dsh: 'llm-pi-ai.providers.<id>.baseURL', zed: 'language_models.openai_compatible.<id>.api_url' }[id] || 'baseUrl'
 }
 
 export function SingleModelFields({ client, draft, update, catalog, disabled }: {
@@ -72,21 +124,24 @@ export function SingleModelFields({ client, draft, update, catalog, disabled }: 
   const selected = catalog.find(model => model.id === draft.model)
   const allowed = client.id === 'claude-code' ? ['low','medium','high','xhigh','max','auto'] : ['none','minimal','low','medium','high','xhigh']
   const levels = selected?.reasoningLevels.filter(level => allowed.includes(level)) || []
+  const pick = draft.kind === 'gateway' && catalog.length > 0
+  const modelKey = client.id === 'claude-code' ? 'model / ANTHROPIC_MODEL' : client.id === 'gemini-cli' ? 'model.name' : 'model'
+  // 改主模型时把仍跟随的档一起带过去；Claude Code 的四档通常就等于主模型。
+  const changeModel = (model: string) => update(client.id === 'claude-code'
+    ? { model, effort: '', claudeModels: syncClaudeTiers(draft.claudeModels, draft.model, model) }
+    : { model, effort: '' })
   return <>
-    {draft.kind === 'gateway' && catalog.length > 0 && <Field><FieldLabel>{t('从网关目录选择模型')}</FieldLabel>
-      <AgentSelect label={t('从网关目录选择模型')} value={draft.model} options={catalog.map(model => ({ value: model.id, label: model.label }))} disabled={disabled}
-        onChange={model => update({ model, effort: '' })} /></Field>}
-    <TextField label={t('模型 ID')} fieldKey={client.id === 'claude-code' ? 'model / ANTHROPIC_MODEL' : client.id === 'gemini-cli' ? 'model.name' : 'model'} value={draft.model} onChange={model => update({ model, effort: '' })} disabled={disabled}
-      hint={t('使用真实模型 ID，不要填写模型展示名。')} />
-    {client.id === 'claude-code' && <>
-      <TextField label={t('Opus 模型映射')} fieldKey='ANTHROPIC_DEFAULT_OPUS_MODEL' value={draft.claudeModels.opus} onChange={opus => update({ claudeModels: { ...draft.claudeModels, opus } })} disabled={disabled} />
-      <TextField label={t('Sonnet 模型映射')} fieldKey='ANTHROPIC_DEFAULT_SONNET_MODEL' value={draft.claudeModels.sonnet} onChange={sonnet => update({ claudeModels: { ...draft.claudeModels, sonnet } })} disabled={disabled} />
-      <TextField label={t('Haiku 模型映射')} fieldKey='ANTHROPIC_DEFAULT_HAIKU_MODEL' value={draft.claudeModels.haiku} onChange={haiku => update({ claudeModels: { ...draft.claudeModels, haiku } })} disabled={disabled} />
-      <TextField label={t('子 Agent 模型')} fieldKey='CLAUDE_CODE_SUBAGENT_MODEL' value={draft.claudeModels.subagent} onChange={subagent => update({ claudeModels: { ...draft.claudeModels, subagent } })} disabled={disabled} />
-    </>}
-    {client.supportsEffort && (levels.length > 0 || draft.effort) && <Field><FieldLabel>{t('思考等级')}<code className='ml-auto text-[10px]'>{client.id === 'codex' ? 'model_reasoning_effort' : 'CLAUDE_CODE_EFFORT_LEVEL'}</code></FieldLabel>
-      <AgentSelect label={t('思考等级')} value={draft.effort} disabled={disabled} onChange={effort => update({ effort })}
-        options={[{ value: '', label: t('模型默认') }, ...[...new Set([...levels, ...(draft.effort ? [draft.effort] : [])])].map(value => ({ value, label: value }))]} /></Field>}
+    <div className='grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2'>
+      <Field><FieldLabel>{pick ? t('从网关目录选择模型') : t('模型 ID')}<code className='ml-auto text-[10px] text-subtle'>{modelKey}</code></FieldLabel>
+        {pick ? <GatewayModelSelect label={t('从网关目录选择模型')} value={draft.model} catalog={catalog} disabled={disabled} onChange={changeModel} />
+          : <Input value={draft.model} autoComplete='off' spellCheck={false} disabled={disabled} onChange={event => changeModel(event.currentTarget.value)} />}
+        <FieldDescription>{t('使用真实模型 ID，不要填写模型展示名。')}</FieldDescription>
+      </Field>
+      {client.supportsEffort && (levels.length > 0 || draft.effort) && <Field><FieldLabel>{t('思考等级')}<code className='ml-auto text-[10px]'>{client.id === 'codex' ? 'model_reasoning_effort' : 'CLAUDE_CODE_EFFORT_LEVEL'}</code></FieldLabel>
+        <AgentSelect label={t('思考等级')} value={draft.effort} disabled={disabled} onChange={effort => update({ effort })}
+          options={[{ value: '', label: t('模型默认') }, ...[...new Set([...levels, ...(draft.effort ? [draft.effort] : [])])].map(value => ({ value, label: value }))]} /></Field>}
+    </div>
+    {client.id === 'claude-code' && <ClaudeModelFields draft={draft} update={update} catalog={catalog} disabled={disabled} />}
     {client.supportsEffort && levels.length === 0 && !draft.effort && <p className='text-xs text-subtle'>{t('模型未声明思考档位，保留客户端默认，不显示猜测选项。')}</p>}
   </>
 }

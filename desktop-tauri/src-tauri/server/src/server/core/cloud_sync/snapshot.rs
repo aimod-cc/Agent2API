@@ -296,8 +296,15 @@ pub(crate) fn apply(db: &Db, snapshot: &Snapshot) -> Result<Value, String> {
         ));
     }
 
-    db.with_mut(|conn| apply_conn(conn, snapshot))
-        .ok_or_else(|| "数据库连接不可用，无法应用同步快照".to_string())?
+    let applied = db.with_mut(|conn| {
+        db.invalidate_accounts();
+        let applied = apply_conn(conn, snapshot);
+        db.invalidate_accounts();
+        applied
+    })
+        .ok_or_else(|| "数据库连接不可用，无法应用同步快照".to_string())?;
+    db.invalidate_accounts();
+    applied
 }
 
 fn apply_conn(conn: &mut Connection, snapshot: &Snapshot) -> Result<Value, String> {

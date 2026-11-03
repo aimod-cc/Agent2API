@@ -1,0 +1,321 @@
+/* 添加账号弹窗（两步：选提供商 → 登录 / 填凭证）：macOS 设置面板式排版。
+ *
+ * 与原实现的分工：既有那一套 `.add-provider-* / .add-form / .add-field / .sms-* /
+ * .compact-login-*` 留在 ui/css/page-accounts-providers.css 里不动（它们是布局预算的
+ * 原始记录，别的页面也可能引用），这里只做**作用域覆盖**：
+ *
+ *   `.acct-add-dialog`      —— 第 1 步（选提供商，1100px）
+ *   `.acct-add-form-dialog` —— 第 2 步（登录 / 填凭证，540~620px）
+ *
+ * 为什么覆盖得了：本工程没有引入 Tailwind preflight，工具类都在 @layer 里，而这份
+ * 样式是未分层的普通 CSS —— 未分层恒压过分层，加上选择器都是「两级以上」，因此不需要
+ * !important。同一手法见 styles/accounts-settings-dialog.css。
+ *
+ * 这一版改的是排版节奏，不动任何 DOM id（登录引擎按 id 取节点，短信 / 网页登录 /
+ * OAuth 那几条链路的契约原样保留）：
+ *   · 分区名（选择提供商 / 添加方式 / 网页登录…）挪到方框外，框内各行以 1px 细线分隔；
+ *   · 主按钮从各段落里挪进弹窗底栏（`.acct-add-foot-host`，底栏为空时整条收起）；
+ *   · 间距收敛到 4 的倍数；字号四档（14 / 12.5 / 11.5 / 11）；强调色只剩主色。
+ */
+
+/* ── 外壳 ───────────────────────────────────────────────────── */
+
+.acct-add-dialog [data-slot='dialog-header'],
+.acct-add-form-dialog [data-slot='dialog-header'] { padding: 12px 44px 12px 16px; gap: 11px; border-color: var(--hairline); }
+.acct-add-dialog [data-slot='dialog-title'],
+.acct-add-form-dialog [data-slot='dialog-title'] { flex: none; font-size: 14px; font-weight: 600; letter-spacing: -.01em; }
+.acct-add-head-mark {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 600;
+}
+.acct-add-head-mark img { width: 18px; height: 18px; object-fit: contain; }
+
+.acct-add-dialog [data-slot='dialog-body'] { flex: 1; min-height: 0; padding: 0 22px 20px; gap: 0; overflow-y: auto; }
+.acct-add-form-dialog [data-slot='dialog-body'] { padding: 0 20px 18px; gap: 0; }
+
+/* ── 底栏：各段落的主按钮与说明都落在这里 ───────────────────── */
+
+.acct-add-form-dialog [data-slot='dialog-footer'] { padding: 11px 16px; background: var(--surface); border-color: var(--hairline); }
+/* 当前这一屏没有动作时整条收起（portal 卸载后宿主为空 → :has 判定） */
+.acct-add-form-dialog [data-slot='dialog-footer']:not(:has(.acct-add-foot-host > *)) { display: none; }
+/* 底栏宿主与挂载点都要能吃满宽度：宿主是 createElement 出来的节点，
+   挂在 .acct-add-foot-mount 里 —— 只写 width:100% 的话在 flex 父级里会退化成
+   「内容宽度」，说明行就贴到按钮旁边去了 */
+.acct-add-foot-mount { display: flex; flex: 1 1 auto; min-width: 0; }
+.acct-add-foot-host { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex: 1 1 auto; min-width: 0; }
+/* 每组段落一个槽位：不生效的那些 hidden（节点留着，引擎的 click 绑定才在） */
+.acct-add-foot-slot { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex: 1 1 auto; min-width: 0; }
+.acct-add-foot-note { min-width: 0; display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; line-height: 1.5; color: var(--text-3); }
+.acct-add-foot-note .detail, .acct-add-foot-note > span { font-size: 11.5px; line-height: 1.5; color: var(--text-3); }
+.acct-add-foot-note .err, .acct-add-foot-note .sms-hint.err { color: var(--danger); }
+.acct-add-foot-buttons { display: flex; align-items: center; gap: 8px; flex: none; }
+.acct-add-foot-buttons > button { min-height: 29px; }
+/* 兜底：没有底栏宿主时按钮回到原位（不该发生，但别让动作消失） */
+.acct-add-foot-inline { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+
+/* ── 分组：名称在框外，框内细线分行 ─────────────────────────── */
+
+.acct-add-dialog .add-group,
+.acct-add-form-dialog .add-group { display: block; margin-top: 15px; }
+.acct-add-dialog .add-group:first-child,
+.acct-add-form-dialog .add-group:first-child { margin-top: 8px; }
+.add-group-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 4px 5px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-3);
+}
+.add-group-label .label-action { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
+.add-group-box {
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  overflow: hidden;
+}
+.add-group-box > * { margin: 0; }
+.add-group-box > * + * { border-top: 1px solid var(--hairline); }
+/* 框内直接子级 = 一行：内边距与行高统一。
+   例外是**自带底色 / 描边 / 内边距的控件**：那圈 10/14 加到控件自己身上，会把它的底
+   撑成一个比控件大一圈的方框（分段控件看着就是「下面多出一块底色」，跟控件叠在一起），
+   下拉与输入框更会被撑得高得离谱。这类子级改用外边距占位 —— 位置一样，
+   控件自身一个像素都不用动。以后再往分组框里直接放控件，两个列表都要补上名字。
+
+   例外写在 :where() 里：它本身不带特异性，这条规则的权重仍是「一个类」——
+   下面那些更具体的行（.sms-form / .add-provider-grid / div.border-l-2）才压得住它。 */
+.add-group-box > *:where(:not([data-slot='segmented-control'], [data-slot='select-trigger'], [data-slot='input'], [data-slot='textarea'])) { padding: 10px 14px; }
+.add-group-box > [data-slot='segmented-control'],
+.add-group-box > [data-slot='select-trigger'],
+.add-group-box > [data-slot='input'],
+.add-group-box > [data-slot='textarea'] { margin: 10px 14px; }
+/* 说明行 / 提示行 */
+.add-group-box > p,
+.add-group-box > .detail { font-size: 11.5px; line-height: 1.55; color: var(--text-3); }
+
+/* 段内表单行：标签在上、控件占满整宽（长凭证横排会被压成一条缝）。
+   只认「行里真的有输入控件」的那些行（备注名 / 凭证 / 路径…）—— 打开方式那种行里
+   放的是分段控件与开关，本来就该并排一行；原先不分青红皂白一律 display:block，
+   结果开关被挤到第二行、开关与文字之间那 8px 间距（组件库的 gap-2）也跟着失效。 */
+.acct-add-form-dialog .add-group-box .field-row:has(input, textarea) { display: block; }
+.acct-add-form-dialog .add-group-box .field-row:has(input, textarea) > label,
+.acct-add-form-dialog .add-group-box .field-row:has(input, textarea) > [data-slot='field'] > [data-slot='field-label'] {
+  display: block;
+  width: auto;
+  margin-bottom: 6px;
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--text-2);
+  white-space: normal;
+  text-align: left;
+}
+.acct-add-form-dialog .add-group-box .field-row > input,
+.acct-add-form-dialog .add-group-box .field-row > textarea,
+.acct-add-form-dialog .add-group-box .field-row > [data-slot='input'],
+.acct-add-form-dialog .add-group-box .field-row > [data-slot='textarea'],
+.acct-add-form-dialog .add-group-box .field-row > [data-slot='input-group'] { width: 100%; }
+.acct-add-form-dialog .add-group-box .field-row + .field-row { margin-top: 8px; }
+/* 底部只放按钮 / 一句提示的那种行：让它们靠左紧凑排 */
+.acct-add-form-dialog .add-group-box .field-row:has(> button) { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+
+.acct-add-form-dialog [data-slot='input'],
+.acct-add-form-dialog [data-slot='textarea'],
+.acct-add-form-dialog [data-slot='input-group'],
+.acct-add-form-dialog [data-slot='select-trigger'] { font-size: 12.5px; }
+
+/* ── 第 1 步：分段 + 搜索 + 卡片网格 ────────────────────────── */
+
+.acct-add-dialog .add-pick-row { display: flex; align-items: center; gap: 12px; }
+.acct-add-dialog .add-provider-search { width: 240px; flex: none; margin-left: auto; }
+/* 选择提供商那一段：整块就是一个分组框，框内第一行是分段 + 搜索 */
+.acct-add-dialog .add-group-box > .add-pick-row { padding: 10px 14px; }
+.acct-add-dialog .add-provider-band {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 12px 4px 4px;
+  border-top: 1px solid var(--hairline);
+  font-size: 11px;
+  color: var(--text-3);
+}
+.acct-add-dialog .add-provider-grid > .add-provider-band:first-child { margin-top: 0; border-top: 0; padding-top: 10px; }
+.acct-add-dialog .add-provider-grid > .add-provider-band:not(:first-child) { margin-top: 6px; }
+.acct-add-dialog .add-provider-band-name { font-weight: 500; }
+/* 带子里的三处字号要显式写：它们各自带一条单类的旧规则，父级字号传不过去 */
+.acct-add-dialog .add-provider-band-name,
+.acct-add-dialog .add-provider-band-stat { font-size: 11px; }
+.acct-add-dialog .add-provider-band-only { opacity: 1; margin-left: auto; font-size: 11px; color: var(--text-3); }
+.acct-add-dialog .add-provider-band-only:hover { color: var(--primary-fg); background: transparent; }
+.acct-add-dialog .add-provider-grid {
+  /* 列表区高度定的是整个弹窗的高度（正文其余部分都是内容撑高）：整窗 608.7 → 669.7，
+     也就是这一档在 452 的基础上 +10%。改这里就得连着整窗尺寸一起看。 */
+  height: 513px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
+  gap: 8px;
+  align-content: start;
+  padding: 0 12px 10px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+.acct-add-dialog .add-provider-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 62px;
+  height: auto;
+  padding: 9px 11px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  text-align: left;
+}
+.acct-add-dialog .add-provider-card:hover { border-color: var(--primary); background: var(--primary-soft); }
+.acct-add-dialog .add-provider-card:focus-visible { box-shadow: var(--ring); }
+.acct-add-dialog .add-provider-card.is-new,
+.acct-add-dialog .add-provider-card.is-new:hover { border-style: dashed; background: transparent; }
+.acct-add-dialog .add-provider-logo {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  font-size: 12px;
+}
+.acct-add-dialog .add-provider-card.is-new .add-provider-logo { background: transparent; border: 1px dashed var(--control-border); color: var(--text-3); }
+.acct-add-dialog .add-provider-logo.has-icon img { width: 22px; height: 22px; }
+.acct-add-dialog .add-provider-info { gap: 2px; }
+.acct-add-dialog .add-provider-name { font-size: 12.5px; font-weight: 500; }
+.acct-add-dialog .add-provider-meta { font-size: 11px; line-height: 1.35; color: var(--text-3); }
+.acct-add-dialog .add-provider-go { font-size: 15px; color: var(--text-3); }
+.acct-add-dialog .add-provider-card:hover .add-provider-go { color: var(--primary-fg); }
+.acct-add-dialog .add-provider-empty { grid-column: 1 / -1; padding: 18px 14px; font-size: 12px; color: var(--text-3); }
+
+.acct-add-dialog [data-slot='segmented-control'],
+.acct-add-form-dialog .acct-add-dialog [data-slot='segmented-item'],
+.acct-add-form-dialog [data-slot='segmented-item'] { font-size: 12px; }
+
+/* ── 第 2 步：与内置家共用的表单段 ──────────────────────────── */
+
+/* 段落之间的间距交给分组自己的外边距（原先是 flex gap: 16px） */
+.acct-add-form-dialog .add-provider-block { display: block; gap: 0; }
+
+/* 自定义 / 动态提供商那套 .add-form + .add-field（右对齐标签列的表单网格）：
+   这里把外层分区让开，让 .add-form 自己当那个分组框 —— 列的划分保持不变
+   （SelectTrigger 带 col-start-2 row-start-1，改列数会把它挪到错的地方） */
+.acct-add-form-dialog [data-slot='dialog-section'] {
+  display: block;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  gap: 0;
+}
+.acct-add-form-dialog [data-slot='dialog-section'] > h3 { display: none; }
+.acct-add-form-dialog [data-slot='dialog-section'] > .add-panel-head {
+  display: block;
+  margin: 15px 4px 5px;
+}
+.acct-add-form-dialog [data-slot='dialog-section'] > .add-panel-head b,
+.acct-add-form-dialog [data-slot='dialog-section'] > .add-panel-head h3 {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-3);
+}
+.acct-add-form-dialog [data-slot='dialog-section'] > .add-panel-head > span { display: block; margin-top: 2px; font-size: 11.5px; line-height: 1.5; color: var(--text-3); }
+.acct-add-form-dialog .add-form {
+  display: block;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  overflow: hidden;
+  gap: 0;
+}
+.acct-add-form-dialog .add-field {
+  grid-template-columns: 84px minmax(0, 1fr);
+  align-items: center;
+  gap: 5px 12px;
+  padding: 11px 14px;
+}
+.acct-add-form-dialog .add-field + .add-field { border-top: 1px solid var(--hairline); }
+.acct-add-form-dialog .add-field > label { font-size: 11.5px; font-weight: 400; color: var(--text-2); }
+.acct-add-form-dialog .add-field > .hint { font-size: 11px; line-height: 1.5; color: var(--text-3); }
+.acct-add-form-dialog .add-form + .add-form { margin-top: 10px; }
+
+/* 手机验证码：三行收完（标签列 84px 与上面的表单网格同一条竖线）。
+   .sms-form 只是那两行的壳，行自己的内边距已经够了，别让分组框再叠一层 */
+.acct-add-form-dialog .add-group-box > .sms-form { padding: 0; }
+.acct-add-form-dialog .sms-form { display: block; padding: 0; }
+.acct-add-form-dialog .sms-field { grid-template-columns: 84px minmax(0, 1fr); gap: 12px; padding: 11px 14px; }
+.acct-add-form-dialog .sms-field + .sms-field { border-top: 1px solid var(--hairline); }
+.acct-add-form-dialog .sms-field > .lb { font-size: 11.5px; color: var(--text-2); }
+.acct-add-form-dialog .sms-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-left: 84px;
+  padding: 11px 14px 11px 0;
+  border-top: 1px solid var(--hairline);
+}
+
+/* 自定义提供商底栏那两格（脚本按 id 写入） */
+.acct-add-form-dialog .add-foot-hint { font-size: 11.5px; color: var(--text-3); }
+.acct-add-form-dialog .add-foot-hint.err { color: var(--danger); }
+.acct-add-form-dialog .add-foot-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+.acct-add-form-dialog .add-foot-actions > button { min-height: 29px; }
+
+/* ── DeepSeek 那一屏（自带的紧凑登录布局） ──────────────────── */
+
+.acct-add-form-dialog .compact-account-login { gap: 10px; }
+.acct-add-form-dialog .compact-login-methods [data-slot='segmented-item'] { min-height: 28px; border-radius: var(--radius-sm); font-size: 12px; }
+.acct-add-form-dialog .compact-login-description { margin-top: 0; }
+.acct-add-form-dialog .compact-login-description p { font-size: 11.5px; line-height: 1.6; }
+.acct-add-form-dialog .compact-login-field { margin-top: 0; gap: 6px; }
+.acct-add-form-dialog .compact-login-field [data-slot='label'] { font-size: 11.5px; font-weight: 400; }
+.acct-add-form-dialog .compact-login-field [data-slot='input-group'],
+.acct-add-form-dialog .compact-login-field > [data-slot='input'] { height: 28px; }
+.acct-add-form-dialog .compact-login-field [data-slot='input-group'] [data-slot='input-group-control'] { height: 26px; }
+.acct-add-form-dialog .compact-login-hint { font-size: 11.5px; line-height: 1.5; }
+.acct-add-form-dialog .compact-login-guide { margin-top: 0; border-radius: var(--radius-sm); font-size: 11.5px; line-height: 1.6; }
+.acct-add-form-dialog .compact-login-proxy { margin-top: 0; border-top: 1px solid var(--hairline); }
+.acct-add-form-dialog .compact-login-proxy-trigger { height: 30px; margin-top: 0; font-size: 11.5px; }
+.acct-add-form-dialog .compact-login-actions { flex: none; }
+.acct-add-form-dialog .compact-login-actions > button { min-height: 29px; }
+.acct-add-form-dialog .compact-login-security { font-size: 10.5px; }
+
+/* 段落里那些自绘的说明块（登录出网代理 / 打开方式）与提醒 */
+.acct-add-form-dialog .add-group-box > div.border-l-2 {
+  border-left: 0;
+  padding-left: 0;
+  gap: 6px;
+}
+.acct-add-form-dialog .add-group-box > div.border-l-2 > span { font-size: 11.5px; color: var(--text-2); }
+
+/* 窄窗口：正文两侧收窄、选提供商那一屏的搜索框换行、表单标签列变窄 */
+@media (max-width: 900px) {
+  .acct-add-dialog [data-slot='dialog-body'] { padding-left: 16px; padding-right: 16px; }
+  .acct-add-dialog .add-pick-row { flex-wrap: wrap; }
+  .acct-add-dialog .add-provider-search { width: 100%; margin-left: 0; }
+  .acct-add-dialog .add-provider-grid { height: 418px; }
+  .acct-add-form-dialog .add-field,
+  .acct-add-form-dialog .sms-field { grid-template-columns: 76px minmax(0, 1fr); }
+  .acct-add-form-dialog .sms-foot { margin-left: 76px; }
+}
+@media (max-width: 560px) {
+  .acct-add-form-dialog .add-field,
+  .acct-add-form-dialog .sms-field { grid-template-columns: 1fr; gap: 6px; }
+  .acct-add-form-dialog .add-field > label { justify-content: flex-start; }
+  .acct-add-form-dialog .sms-foot { margin-left: 0; }
+  .acct-add-foot-host { flex-wrap: wrap; }
+}

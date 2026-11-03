@@ -2,8 +2,7 @@ import * as React from 'react'
 import {
   Badge, Button, Checkbox, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader,
   DialogSection, DialogTitle, Empty, Field, FieldContent, FieldDescription, FieldLabel,
-  Input, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-  SegmentedControl, Switch, confirmDialog,
+  Input, Label, SegmentedControl, Switch, cn, confirmDialog,
 } from '@ui'
 import { t } from '../i18n'
 import { cloneProfile, independentProfile, loadWorkspace, saveProfile } from './routing-state'
@@ -178,7 +177,9 @@ export function AddRouteModelDialog({ workspace, onAdd, onClose }: { workspace: 
   const [selected, setSelected] = React.useState('')
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState('')
-  const choices = workspace.models.filter(model => !workspace.configuredModels.some(known => known.toLowerCase() === model.toLowerCase()) && model.toLowerCase().includes(search.toLowerCase()))
+  const query = search.trim().toLowerCase()
+  const choices = workspace.models.filter(model => !workspace.configuredModels.some(known => known.toLowerCase() === model.toLowerCase())
+    && (!query || model.toLowerCase().includes(query)))
   const save = async () => {
     setBusy(true)
     try { if (await onAdd(selected)) onClose() }
@@ -188,12 +189,18 @@ export function AddRouteModelDialog({ workspace, onAdd, onClose }: { workspace: 
   return <Dialog open onOpenChange={open => { if (!open && !busy) onClose() }}><DialogContent>
     <DialogHeader><DialogTitle>{t('新增模型独立路由')}</DialogTitle></DialogHeader><DialogBody>
       <p className='text-xs text-muted-foreground'>{t('从现有模型中创建独立配置，自动列出提供它的全部提供商；之后的修改只跟随这个模型。')}</p>
-      <Input placeholder={t('搜索模型')} value={search} onChange={event => setSearch(event.currentTarget.value)} />
-      <Select value={selected} onValueChange={value => setSelected(String(value))}>
-        <SelectTrigger className='w-full'><SelectValue>{selected || t('选择模型')}</SelectValue></SelectTrigger>
-        <SelectContent>{choices.map(model => <SelectItem key={model} value={model}>{model}</SelectItem>)}</SelectContent>
-      </Select>
-      {!choices.length ? <Empty>{t('没有可添加的模型')}</Empty> : null}
+      {/* 搜索框 + 可选列表：边打字边缩小范围，点一行即选中，不再多一层下拉框。 */}
+      <Input placeholder={t('搜索模型')} aria-label={t('搜索模型')} value={search}
+        onChange={event => { setSearch(event.currentTarget.value); setSelected('') }} />
+      <div className='routing-model-picker'>
+        {choices.length ? choices.map(model => <Button key={model} variant='ghost' className={cn('routing-model-option', selected === model && 'is-selected')}
+          aria-pressed={selected === model} title={model} onClick={() => setSelected(model)}>
+          <RouteIcon name='gateway' size={13} />
+          <code>{model}</code>
+          {selected === model ? <span className='routing-model-check' aria-hidden='true'>✓</span> : null}
+        </Button>) : <Empty>{query ? t('没有匹配的模型') : t('没有可添加的模型')}</Empty>}
+      </div>
+      <p className='text-xs text-muted-foreground'>{t('共 {n} 个可添加的模型', { n: choices.length })}</p>
       {error ? <p role='alert' className='text-xs text-destructive'>{error}</p> : null}
     </DialogBody><DialogFooter><Button variant='outline' disabled={busy} onClick={onClose}>{t('取消')}</Button><Button disabled={busy || !selected} onClick={() => void save()}>{busy ? t('保存中…') : t('创建独立配置')}</Button></DialogFooter>
   </DialogContent></Dialog>

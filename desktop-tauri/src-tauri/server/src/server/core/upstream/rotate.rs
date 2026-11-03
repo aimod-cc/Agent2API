@@ -66,21 +66,24 @@ pub(super) async fn session_for(
     account_id: Option<&str>,
 ) -> Result<Value, GatewayError> {
     if let Some(id) = account_id {
-        let unavailable = || GatewayError::with_status(
-            401, "指定账号不存在、无可用凭证或不属于当前提供商；未回退到其他账号",
-        );
-        if service.store.account_provider_of(id).as_deref() != Some(provider) {
-            return Err(unavailable());
-        }
-        // 读取会话后复核归属，防止两次读盘之间账号迁移；显式 id 绝不落回默认登录态。
-        let mut entry = service.store.get_session_by_id(id)
-            .filter(|_| service.store.account_provider_of(id).as_deref() == Some(provider))
-            .ok_or_else(unavailable)?;
-        // 账号主键只随转发会话传递，不改管理接口的会话形态。
-        if let Some(session) = entry.session.as_object_mut() {
-            session.insert("id".to_string(), Value::String(entry.id));
-        }
-        return Ok(entry.session);
+        let service = service.clone();
+        let id = id.to_string();
+        let provider = provider.to_string();
+        return crate::server::core::blocking::run(move || {
+            let unavailable = || GatewayError::with_status(
+                401, "指定账号不存在、无可用凭证或不属于当前提供商；未回退到其他账号",
+            );
+            if service.store.account_provider_of(&id).as_deref() != Some(provider.as_str()) {
+                return Err(unavailable());
+            }
+            let mut entry = service.store.get_session_by_id(&id)
+                .filter(|_| service.store.account_provider_of(&id).as_deref() == Some(provider.as_str()))
+                .ok_or_else(unavailable)?;
+            if let Some(session) = entry.session.as_object_mut() {
+                session.insert("id".to_string(), Value::String(entry.id));
+            }
+            Ok(entry.session)
+        }).await?;
     }
     let session = service
         .auth
@@ -138,6 +141,29 @@ pub(super) async fn select_target_account(
     conv_key: &str,
     request_routing: &super::route_context::RequestRouting,
 ) -> Result<RouteTarget, GatewayError> {
+    let service = service.clone();
+    let providers: Vec<String> = providers.iter().map(|id| id.to_string()).collect();
+    let model = keys.request_model().to_string();
+    let tried_ids = tried_ids.to_vec();
+    let pinned = pinned.map(str::to_string);
+    let conv_key = conv_key.to_string();
+    let request_routing = request_routing.clone();
+    crate::server::core::blocking::run(move || {
+        let providers: Vec<&str> = providers.iter().map(String::as_str).collect();
+        select_target_account_sync(&service, &providers, &routing::CooldownKeys::new(&model),
+            &tried_ids, pinned.as_deref(), &conv_key, &request_routing)
+    }).await?
+}
+
+fn select_target_account_sync(
+    service: &UpstreamService,
+    providers: &[&str],
+    keys: &routing::CooldownKeys<'_>,
+    tried_ids: &[String],
+    pinned: Option<&str>,
+    conv_key: &str,
+    request_routing: &super::route_context::RequestRouting,
+) -> Result<RouteTarget, GatewayError> {
     let accounts = scoped_accounts(service, providers, keys.request_model(), pinned, Some(request_routing));
     if accounts.is_empty() && accounts_in_providers(service, providers, pinned).iter().any(|account| {
         account.get("upstreamCooldownUntil").and_then(Value::as_i64).is_some_and(|until| until > logging::now_ms())
@@ -185,42 +211,84 @@ pub(super) async fn select_target_account(
     let ttl = routing::sticky_ttl_ms(settings.sticky);
     let snap = service.route.snapshot_for_model(conv_key, keys.request_model(), now, ttl);
     // 轮转游标只在「本请求的第一次选路」前进：429 顺延的后续选路沿用同一
-    // 起点往后走，否则一条请求会连跳好几位。粘性命中的轮次不前进 —— 会话
-    // 一直粘着同一个账号时，轮转的「下一棒」留给新会话。
+    // 起点往后走，否则一条请求会连跳好几位。
     //
-    // 家内轮询（`Provider`）的取用条件与 `Rotate` 逐字相同（第一次选路 +
-    // 没钉账号 + 没粘住）——「一次请求只消耗一格环位」对两种轮转是同一个口径；
-    // 差别只在它取的是**每家各一个**起始位（见 `rotate_take_per_provider`）。
-    let may_rotate = tried_ids.is_empty() && pinned.is_none() && snap.sticky_hit.is_none();
-    let cursor = if may_rotate && settings.strategy == config::RouteStrategy::Rotate {
-        Some(service.route.rotate_take(keys.request_model()))
+    // ── 「粘性命中」不等于「这次真的用它」（2026-11-03 修）─────────
+    // 粘性表里有绑定，不代表绑定的账号此刻能用：它可能正在限流冷却、被限制器
+    // 拦下、达到并发上限，或者不在本轮的路由范围里。那些情况下 `plan_route`
+    // 会把它挡在可用清单之外，请求本来就轮不到它 —— 此时若仍按「有命中」跳过
+    // 轮换，游标永远不动，同一会话的所有请求都会从队列第 1 位重新开始，高峰期
+    // 正好把队首账号压满。
+    //
+    // 所以：有命中时先按「不轮换」排一份（不消耗位次），只有命中项真的排到
+    // 第 1 位才沿用；否则照常推进轮换、重新排一份。没有命中时就是原来的路径
+    // （先取位次再排，只排一次）。命中项「可用但被垫底 / 退避 / 熔断推后」也
+    // 算没排到第 1 位 —— 那一次请求本来就会落到别的账号上，按轮换摊开比全部
+    // 压回队首合理。
+    //
+    // 家内轮询（`Provider`）的取用条件与 `Rotate` 逐字相同 ——「一次请求只
+    // 消耗一格环位」对两种轮转是同一个口径；差别只在它取的是**每家各一个**
+    // 起始位（见 `rotate_take_per_provider`）。
+    let may_rotate = tried_ids.is_empty() && pinned.is_none();
+    let wants_rotation = may_rotate && settings.strategy != config::RouteStrategy::Order;
+    let take_rotation = || match settings.strategy {
+        config::RouteStrategy::Rotate => (
+            Some(service.route.rotate_take(keys.request_model())),
+            None,
+        ),
+        // 游标只传「哪几家」用来定键名（`provider_sizes`），各家的**人数不参与
+        // 取模** —— 取模发生在 `plan_route` 内部、用的是过滤（禁用 / 冷却 /
+        // 并发满 / 无凭证）之后的实际成员数。推进与环绕必须用同一把尺子：
+        // 2026-10-14 之前这里按未过滤人数取模，两个模数一旦不等，家内就会出现
+        // 「同一个账号连续被选中两次」的不均匀。
+        config::RouteStrategy::Provider => (
+            None,
+            Some(service.route.rotate_take_per_provider(
+                keys.request_model(),
+                &routing::provider_sizes(&candidates),
+            )),
+        ),
+        config::RouteStrategy::Order => (None, None),
+    };
+    let (mut cursor, mut provider_cursors) = if wants_rotation && snap.sticky_hit.is_none() {
+        take_rotation()
     } else {
-        None
+        (None, None)
     };
-    // 游标只传「哪几家」用来定键名（`provider_sizes`），各家的**人数不参与
-    // 取模** —— 取模发生在 `plan_route` 内部、用的是过滤（禁用 / 冷却 / 并发满 /
-    // 无凭证）之后的实际成员数。推进与环绕必须用同一把尺子：2026-10-14 之前
-    // 这里按未过滤人数取模，两个模数一旦不等，家内就会出现「同一个账号连续
-    // 被选中两次」的不均匀。
-    let provider_cursors = if may_rotate && settings.strategy == config::RouteStrategy::Provider {
-        Some(service.route.rotate_take_per_provider(
-            keys.request_model(),
-            &routing::provider_sizes(&candidates),
-        ))
-    } else {
-        None
-    };
-    let meta = routing::PlanMeta {
-        strategy: settings.strategy,
-        sunk: &snap.sunk,
-        resting: &snap.resting,
-        open: &snap.open,
-        limiter_blocked: &balance_blocked_ids,
-        cursor,
-        provider_cursors: provider_cursors.as_ref(),
-        sticky_account: snap.sticky_hit.as_deref(),
-    };
-    let plan = routing::plan_route(&accounts, keys, &counts, tried_ids, now, &meta);
+    let mut plan = routing::plan_route(
+        &accounts, keys, &counts, tried_ids, now,
+        &routing::PlanMeta {
+            strategy: settings.strategy,
+            sunk: &snap.sunk,
+            resting: &snap.resting,
+            open: &snap.open,
+            limiter_blocked: &balance_blocked_ids,
+            cursor,
+            provider_cursors: provider_cursors.as_ref(),
+            sticky_account: snap.sticky_hit.as_deref(),
+        },
+    );
+    // 粘性命中项没有排到第 1 位：这一次请求用不上它，照常消耗一格环位重排。
+    let sticky_first = snap
+        .sticky_hit
+        .as_deref()
+        .is_some_and(|hit| plan.ordered.first().is_some_and(|entry| entry.id == hit));
+    if wants_rotation && snap.sticky_hit.is_some() && !sticky_first {
+        (cursor, provider_cursors) = take_rotation();
+        plan = routing::plan_route(
+            &accounts, keys, &counts, tried_ids, now,
+            &routing::PlanMeta {
+                strategy: settings.strategy,
+                sunk: &snap.sunk,
+                resting: &snap.resting,
+                open: &snap.open,
+                limiter_blocked: &balance_blocked_ids,
+                cursor,
+                provider_cursors: provider_cursors.as_ref(),
+                sticky_account: snap.sticky_hit.as_deref(),
+            },
+        );
+    }
     let mut decision = decision_json(&plan, &settings, now);
     decision["scope"] = Value::String(request_routing.scope.clone());
     decision["configSnapshot"] = request_routing.json();
@@ -373,9 +441,8 @@ pub(super) use crate::server::core::routing::CooldownKeys;
 /// `pinned` 非空时再收窄成**那一个账号**（模型测试，见
 /// [`select_target_account`] 对该参数的说明）。
 ///
-/// 为什么在公开快照上过滤而不是用 `store.accounts_for_provider`：后者按
-/// 「启用且有凭证」过滤掉了禁用账号，而本模块的第三级选路（全禁用 → 503）
-/// 必须**看见**禁用账号才能给出准确文案。两者口径不同、各有用途。
+/// 账号集合按提供商和指定账号收窄；保留禁用记录，以便准确报告全部禁用。
+/// 字段来自账号库的轻量快照，不构造管理界面的完整列表。
 ///
 /// 收窄只做「过滤」，不报错也不回退：钉住的账号不在这几家（账号被删了、
 /// 或认错了家）时得到的是空池 —— 上游那条路径会照常给出「这些家都没有账号」
@@ -397,14 +464,15 @@ pub(super) fn accounts_in_providers(
     providers: &[&str],
     pinned: Option<&str>,
 ) -> Vec<Value> {
-    let snapshot = service.store.list_visible_accounts();
-    routing::accounts_of(&snapshot)
-        .into_iter()
+    let snapshot = service.store.routing_snapshot();
+    snapshot.accounts.iter()
+        .filter(|account| crate::server::core::account_store::store_view::account_visible(provider_of(account)))
         .filter(|account| providers.contains(&provider_of(account)))
         .filter(|account| match pinned {
             Some(id) => routing::account_id(account) == Some(id),
             None => true,
         })
+        .map(|account| account.as_ref().clone())
         .collect()
 }
 
@@ -506,14 +574,14 @@ pub(super) fn mark_account_limited(
     } else {
         errors::parse_quota_reset_at(message)
     };
-    let entry = service.store.mark_rate_limited(
+    let entry = crate::server::core::blocking::in_place(|| service.store.mark_rate_limited(
         account_id,
         model,
         status as i64,
         upstream_code,
         if parsed > 0 { Some(parsed as f64) } else { None },
         message,
-    );
+    ));
     match entry {
         Some(entry) => {
             let reset = entry.get("resetAt").and_then(Value::as_f64).unwrap_or(0.0);
@@ -528,11 +596,7 @@ pub(super) fn mark_account_limited(
 ///
 /// `model` 是上游真名（见 `mark_account_limited` 的说明），与写入侧同一个键。
 pub(super) fn account_limit_reset_at(service: &UpstreamService, account_id: &str, model: &str) -> i64 {
-    let snapshot = service.store.list_accounts();
-    let accounts = routing::accounts_of(&snapshot);
-    accounts
-        .iter()
-        .find(|account| routing::account_id(account) == Some(account_id))
+    service.store.route_account(account_id)
         .map(|account| {
             account
                 .get("rateLimits")
@@ -557,10 +621,8 @@ pub(super) fn account_limit_reset_at(service: &UpstreamService, account_id: &str
 /// 「最早」= 第一个可能恢复、值得再试的时刻。取最晚会让客户端多睡一段
 /// 本不必睡的时间（账号是逐个恢复的，不是同时）。
 ///
-/// ── 为什么读记录而不读内存 ──────────────────────────────────
-/// 与 `account_limit_reset_at` 同源（都从账号记录现读）：限额是**落盘事实**
-/// （重启后仍在），内存里那份不进这里 —— 两处口径一致才不会出现「日志说
-/// 10 分钟后恢复、实际记录里是明天零点」的分歧。
+/// ── 限额来自账号库的增量快照 ─────────────────────────────────
+/// 写入即使快照失效，下次判定读取已提交的新记录；不混用路由运行期退避表。
 ///
 /// `providers` 是本次请求的候选家；冷却键按 [`routing::CooldownKeys`] 解析
 /// （与写入侧同一个键）。**启用中的账号全都算**，包括本轮已经撞过的那几个 ——
@@ -664,8 +726,7 @@ pub(super) fn connection_counts(service: &UpstreamService) -> HashMap<String, us
 }
 
 pub(super) fn allows_route_skip(service: &UpstreamService, account_id: &str) -> bool {
-    let accounts = routing::accounts_of(&service.store.list_accounts());
-    !accounts.iter().find(|account| routing::account_id(account) == Some(account_id))
+    !service.store.route_account(account_id)
         .is_some_and(|account| account.get("allowRouteSkip") == Some(&Value::Bool(false)))
 }
 
@@ -794,25 +855,6 @@ fn filter_limiter_blocked(
         .cloned()
         .collect();
     (candidates, blocked_ids)
-}
-
-/// 该账号对该模型此前是否处于限额状态（用于「已恢复可用」日志的去噪）。
-///
-/// `model` 是上游真名（见 `mark_account_limited` 的说明）：读的键必须与写入
-/// 侧同一个，否则「清掉一条不存在的记录」会被误判成「恢复可用」而多打一行日志
-/// （或者反过来，真正的恢复不写日志）。
-pub(super) fn account_had_limit(service: &UpstreamService, account_id: &str, model: &str) -> bool {
-    let snapshot = service.store.list_accounts();
-    routing::accounts_of(&snapshot)
-        .iter()
-        .find(|account| routing::account_id(account) == Some(account_id))
-        .map(|account| {
-            account
-                .get("rateLimits")
-                .and_then(|limits| limits.get(model))
-                .is_some()
-        })
-        .unwrap_or(false)
 }
 
 /// 429 限额事件上报到运行日志（对照 Node 的 reportLimitEvent）。

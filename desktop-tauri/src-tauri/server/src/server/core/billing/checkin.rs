@@ -288,7 +288,7 @@ pub fn resolve_checkin_targets(
 ///   - **Qoder**：活动（campaign）领取链路，中国版直领；国际版要先带设备
 ///     风控身份重新拉活动列表（`providers::qoder::checkin` + `qoder::risk`）；
 ///     （`providers::qoder::checkin::claim_daily_checkin`）；
-///   - **Trae**：SOLO 的 `checkin_credits` 领取（实现已搬到插件）；
+///   - **Trae**：Trae 的 `checkin_credits` 领取（实现已搬到插件）；
 ///   - **CodeArts**：当日 ops 福利（实现已搬到插件，走插件分支）。
 ///
 /// `manual` 现在只剩「用户在面板上点出来的」这一个语义（单账号 `single` /

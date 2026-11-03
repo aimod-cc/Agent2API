@@ -296,8 +296,12 @@ export function ModelCell({ columns, model, selection, togglePick, setTestTarget
    * 支持（品牌淡底）/ 明确不支持（灰实底）/ 未声明（虚线圈）。语义全靠悬停提示
    * （`capabilityTip` 会写明「上游未声明时下游按不支持处理」这类事实），
    * 图标只负责「扫一眼知道有几项是亮的」。
+   *
+   * 图片模型走另一支（[`imageCapsCell`]）：那四枚圆点问的是**对话**模型的能力，
+   * 放在图片模型上是四枚「不支持」，读起来像「这个模型什么都不会」。
    */
   function capsCell(model: ManageModel) {
+    if (model.kind === 'image') return imageCapsCell(model)
     const caps = capabilitiesOf(model)
     const overrides = normalizeOverrides(model.capOverrides)
     return (
@@ -317,6 +321,41 @@ export function ModelCell({ columns, model, selection, togglePick, setTestTarget
             </span>
           )
         })}
+      </Button>
+    )
+  }
+
+  /**
+   * 图片模型的能力格：两枚标签（图片生成 / 图片编辑）上下层叠、整叠居中。
+   *
+   * ── 判据用能力位，不用 `kind` ──────────────────────────────
+   * 「图片生成」只在 `supports_image_generation` 为真时出现：只有参考图编辑的
+   * 型号（如 ModelScope 的 Qwen-Image-Edit）不该挂生成标签 —— 改造前那两枚标签
+   * 在模型 ID 后面，`kind === 'image'` 就挂「图片生成」，这类型号被多挂了一枚。
+   * 两个能力位都没表态时退回「图片生成」（与改造前一致），不让这一格变成空白按钮。
+   *
+   * ── 为什么两枚是竖排 ────────────────────────────────────────
+   * 「能力」列只有 11.5% 宽，横排两枚标签会把这一列顶宽（列表头与数值都跟着让位）；
+   * 竖排的宽度就是最长那枚标签，列宽不用改。层叠与居中在 CSS（`.caps-open.caps-image`）。
+   */
+  function imageCapsCell(model: ManageModel) {
+    const tags: Array<{ key: string; label: string; title: string }> = []
+    if (model.supports_image_generation) {
+      tags.push({ key: 'generate', label: t('图片生成'), title: 'POST /v1/images/generations' })
+    }
+    if (model.supports_image_editing) {
+      tags.push({ key: 'edit', label: t('图片编辑'), title: 'POST /v1/images/edits' })
+    }
+    if (!tags.length) {
+      tags.push({ key: 'generate', label: t('图片生成'), title: 'POST /v1/images/generations' })
+    }
+    return (
+      <Button size='default' variant='ghost' type='button' className='caps-open caps-image'
+        title={t('这个模型的图片能力（图片生成 / 图片编辑）—— 点击修改')}
+        onClick={() => openCapability(model.provider || '', model.id)}>
+        {tags.map(tag => (
+          <span key={tag.key} className='binding-default' title={tag.title}>{tag.label}</span>
+        ))}
       </Button>
     )
   }
@@ -368,8 +407,6 @@ export function ModelCell({ columns, model, selection, togglePick, setTestTarget
                 点名字更省事，也少一个悬停才显形的控件 */}
             <div className='mid'>
               <span className='t' data-copy={model.id} title={t('点击复制：{name}', { name: model.id })}>{model.id}</span>
-              {model.kind === 'image' ? <span className='binding-default' title='POST /v1/images/generations'>{t('图片生成')}</span> : null}
-              {model.supports_image_editing ? <span className='binding-default' title='POST /v1/images/edits'>{t('图片编辑')}</span> : null}
               {model.upstreamStatus === 'undeployed' ? (
                 <Badge variant='warning' shape='tag'
                   title={t('上游目录列出了这个模型，但推理端尚未识别；保留在清单中，后续探测成功后自动清除标记')}>

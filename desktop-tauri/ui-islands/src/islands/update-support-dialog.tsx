@@ -42,7 +42,7 @@ export function SupportDialog({ open, onClose }: { open: boolean; onClose: () =>
         </DialogHeader>
         <DialogBody>
           <DialogDescription className='support-intro'>
-            {t('如果 Agent2API 帮到了你，欢迎请作者喝杯咖啡。')}
+            {t('Agent2API 一直在更新，是因为有人在背后持续投入。如果它帮到了你，欢迎请作者喝杯咖啡。')}
           </DialogDescription>
           {narrow ? (
             <SegmentedControl

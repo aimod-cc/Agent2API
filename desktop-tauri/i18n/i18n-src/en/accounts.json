@@ -59,6 +59,7 @@
   "{n} 个请求正在使用该账号（含还在下发内容的流式请求）": "{n} requests are using this account (including streaming requests still sending content)",
   "{n} 个读数只读到一半（读数可信但不完整）": "{n} only partially read (readable but incomplete)",
   "{n} 个读数没有绝对数（只给比例或无额度），未计入": "{n} have no absolute figure (percentage only or no quota), not counted",
+  "{n} 个读数里没有可用比例，未计入": "{n} readings had no usable percentage and were not counted",
   "{n} 个账号 · {e} 启用 · {l} 限流": "{n} accounts · {e} enabled · {l} rate limited",
   "{n} 个账号 · 启用 {e}": "{n} accounts · {e} enabled",
   "{n} 个还没查到（未查询或正在查询）": "{n} not read yet (not queried or in progress)",
@@ -286,6 +287,7 @@
   "可用 {value} {unit}": "{value} {unit} available",
   "可用余额": "Available balance",
   "可用合计": "Total available",
+  "可用最低": "Lowest available",
   "可留空：新版请求头只认令牌；旧版会把用户 ID 放进 New-Api-User 头": "Optional: newer builds only use the token; older ones put the user ID in the New-Api-User header",
   "可领取清单合并每日赠送与限时营销活动；按套餐去重，已领取的不重复提交。只有主动领取时才会进行人机验证。": "",
   "可领取的套餐": "Claimable plans",
@@ -874,6 +876,7 @@
   "选择": "Select",
   "选择所选账号作为模板（可选）": "Choose a selected account as a template (optional)",
   "选择要轮询的代理（可多选）": "Select proxies to rotate (multiple)",
+  "逐窗口最低：{list}": "Lowest per window: {list}",
   "逐请求轮换出口（换 IP）：OpenCode Zen 免费档按 IP 限流，单个 IP 的额度用完会对它一律 429": "Rotates the exit per request (changing the IP): the OpenCode Zen free tier limits by IP — once an IP runs out of quota, requests from it all get 429",
   "通用额度／本地保护": "General quota / local protection",
   "邮箱": "",
@@ -951,5 +954,7 @@
   "，只对 OpenCode Zen 这类上游有意义，别的家请关掉。": ", so it only matters for upstreams like OpenCode Zen — turn it off for other providers.",
   "，已达到上限": ", limit reached",
   "：到「网络代理」页的「订阅管理」里点「同步 Clash Verge」把出口导进池后即可选 —— 那样能集中测试、也能被多个账号共用。": ": on the Network proxy page, open \"Manage subscriptions\" and click \"Sync Clash Verge\" to import exits into the pool and then select them — that centralizes testing and lets several accounts share them.",
-  "；": "; "
+  "；": "; ",
+  "本组 {n} 个账号的百分比读数不能相加，取组内最低的剩余比例（按整组统计，不受筛选、搜索影响）": "Percentage readings for the {n} accounts in this group cannot be added; this shows the lowest remaining percentage (whole group, unaffected by filters or search)",
+  "当前筛选下 {n} 个账号的百分比读数不能相加，取最低的剩余比例（随筛选、搜索变化，不受分页影响）": "Percentage readings for the {n} accounts under the current filter cannot be added; this shows the lowest remaining percentage (changes with filters/search, unaffected by paging)"
 }

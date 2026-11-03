@@ -7,6 +7,8 @@
 @import './theme.css';
 @import './primitives.css';
 @import './selection.css';
+/* 分类侧栏的统一观感：刻意放在所有 @layer 之外（未分层恒压过分层与旧的页面样式表） */
+@import './nav.css';
 
 @layer base {
   *, ::before, ::after { box-sizing: border-box; }

@@ -160,3 +160,26 @@ pub fn remove(id: &str) -> bool {
 pub fn clear() -> usize {
     database().and_then(|db| db.with(|conn| conn.execute("DELETE FROM assistant_sessions", []).unwrap_or(0))).unwrap_or(0)
 }
+
+/// 启动期后缀迁移：把历史会话上记录的模型名改成原始 ID。
+/// 只改显示/续聊用的名字，不碰消息正文；返回被改动的行数。
+pub fn migrate_model_ids(mapping: &HashMap<String, String>) -> usize {
+    let Some(db) = database() else { return 0 };
+    let mut changed = 0;
+    for (old, new) in mapping {
+        if old.eq_ignore_ascii_case(new) {
+            continue;
+        }
+        let updated = db
+            .with(|conn| {
+                conn.execute(
+                    "UPDATE assistant_sessions SET model = ?1 WHERE model = ?2 COLLATE NOCASE",
+                    params![new, old],
+                )
+            })
+            .and_then(Result::ok)
+            .unwrap_or(0);
+        changed += updated;
+    }
+    changed
+}

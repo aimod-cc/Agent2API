@@ -229,6 +229,8 @@ export type Store = {
     limit: number
     offset: number
     outcome: string
+    /** 签到类型：'' = 全部，manual / schedule / makeup */
+    kind: string
     provider: string
     keyword: string
     /** 时间下界（毫秒；undefined = 不限） */
@@ -261,7 +263,7 @@ export const store: Store = {
   recordsLoading: false,
   recordsQuery: {
     limit: typeof recordsPageSize === 'number' ? recordsPageSize : DEFAULT_PAGE_SIZE,
-    offset: 0, outcome: '', provider: '', keyword: '',
+    offset: 0, outcome: '', kind: '', provider: '', keyword: '',
   },
   onboarding: new Map(),
   growth: new Map(),
@@ -322,6 +324,7 @@ export async function loadRecords(): Promise<void> {
       limit: query.limit,
       offset: query.offset,
       outcome: query.outcome || undefined,
+      kind: query.kind || undefined,
       provider: query.provider || undefined,
       keyword: query.keyword || undefined,
       start: query.start,
@@ -564,6 +567,7 @@ export async function clearRecords(all: boolean): Promise<void> {
         ? { all: '1' }
         : {
           outcome: query.outcome || undefined,
+          kind: query.kind || undefined,
           provider: query.provider || undefined,
           keyword: query.keyword || undefined,
         })

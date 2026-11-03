@@ -84,7 +84,7 @@ pub fn read(value: &Value) -> Result<Vec<Profile>, String> {
     Ok(profiles)
 }
 
-pub fn write(value: &mut Value, profile: &Profile) -> Result<(), String> {
+pub fn write(value: &mut Value, profile: &Profile, warnings: &mut Vec<String>) -> Result<(), String> {
     let original = entries(value)?.clone();
     let imported = profile.native.entry.as_array().cloned().unwrap_or_default();
     let mut result = original.clone();
@@ -100,8 +100,8 @@ pub fn write(value: &mut Value, profile: &Profile) -> Result<(), String> {
             && known.is_none()
             && old.and_then(|v| v.get("vendor")).and_then(Value::as_str) != Some("Agent2API")
         {
-            return Err(format!(
-                "模型 {} 已存在且不属于这个方案，请先导入或使用其他 ID",
+            warnings.push(format!(
+                "模型 ID {} 已存在，确认后将用当前配置覆盖该条目；如需保留，请返回编辑并改用其他模型 ID。",
                 model.id
             ));
         }

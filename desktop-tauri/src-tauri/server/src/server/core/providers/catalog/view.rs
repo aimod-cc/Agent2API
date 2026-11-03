@@ -40,7 +40,7 @@ fn advertised_names(
 /// 先在各提供商内判断绑定，再按对外名去重；不能先合并上游 ID 再拼别名，
 /// 否则某家关闭的映射会借另一家的同名上游重新出现在列表中。
 fn public_builtin_items(active: &[(String, Vec<Value>)]) -> Vec<(String, Value)> {
-    let rules = model_rules::current();
+    let rules = model_rules::shared();
     let mut claimed = std::collections::HashMap::<String, usize>::new();
     let mut result: Vec<(String, Value)> = Vec::new();
     for (provider, manifest) in active {
@@ -78,7 +78,15 @@ fn public_builtin_items(active: &[(String, Vec<Value>)]) -> Vec<(String, Value)>
 }
 
 pub fn models_response(store: &AccountStore, scope: Option<&KeyScope>) -> Value {
-    let active: Vec<_> = active_manifests(store).into_iter()
+    models_response_with_active(store, scope, active_manifests(store))
+}
+
+pub(super) fn models_response_with_active(
+    store: &AccountStore,
+    scope: Option<&KeyScope>,
+    active: Vec<(String, Vec<Value>)>,
+) -> Value {
+    let active: Vec<_> = active.into_iter()
         .filter(|(provider, _)| key_scope::allows_provider(scope, provider))
         .collect();
     let (source, refreshed_at) = aggregate_source(&active);
@@ -98,21 +106,15 @@ pub fn models_response(store: &AccountStore, scope: Option<&KeyScope>) -> Value 
 ///
 /// 插件与本体 runtime ID 同样算可用，不能仅因它们没有旧枚举身份而跳过校验。
 pub fn has_available_providers(store: &AccountStore) -> bool {
-    if !active_manifests(store).is_empty() {
-        return true;
-    }
-    super::super::executable_provider_ids()
-        .into_iter()
-        .any(|id| !store.accounts_for_provider(&id).is_empty())
+    super::validation_snapshot(store).available
 }
 
 pub fn advertised_model_ids(store: &AccountStore) -> Vec<String> {
-    models_response(store, None).get("data").and_then(Value::as_array)
-        .map(|items| items.iter().map(model_id).collect()).unwrap_or_default()
+    super::validation_snapshot(store).models.clone()
 }
 
 pub fn advertised_manifest_contains(store: &AccountStore, model: &str) -> bool {
-    advertised_model_ids(store).iter().any(|id| id.eq_ignore_ascii_case(model))
+    super::validation_snapshot(store).models.iter().any(|id| id.eq_ignore_ascii_case(model))
 }
 
 pub fn suggest_advertised(store: &AccountStore, model: &str, limit: usize) -> Vec<String> {
@@ -197,8 +199,7 @@ fn push_managed_model(
     let source = if item.get("_manualModel").and_then(Value::as_bool) == Some(true) {
         "manual"
     } else { source };
-    // 覆盖键列表从**本次快照**里查（不调 model_rules::current() —— 那会
-    // 每行重新解析一遍配置，几百行的清单就是几百次解析）
+    // 覆盖键列表从本次规则快照里查，不逐行重新获取配置。
     let cap_overrides: Vec<String> = rules
         .capabilities
         .iter()
@@ -263,8 +264,30 @@ fn push_managed_model(
 ///   · `capOverrides`：被用户覆盖的键（管理页据此给「已改」标记；
 ///     空数组 = 全部继承清单原值）。
 /// 清单原值已由 `manifest_for_provider` 应用过覆盖，所以这里读到的就是生效值。
+/// 某个 `(provider, target)` 还能不能在管理页上落到一行模型行。
+///
+/// 判据与 [`manage_view`] 把映射标成 `dangling` 的那条路径**同源**：行的来源是
+/// [`managed_manifests`]（有可用账号的家），带 `provider` 的映射只挂在自己那家、
+/// 旧版全局条目（provider 缺失）挂到任何承载 target 的家。
+///
+/// ── 用途：自映射（默认绑定）能不能删 ─────────────────────────
+/// `POST /api/models/mappings/remove` 用它判断一条 `alias == target` 的默认绑定
+/// 能不能删。默认绑定跟着模型行走，正常只能关、不能删；但**模型行已经不在了**
+/// （上游把模型下线、那家被移除或没有可用账号）时，它的开关没有落点，删除是唯一
+/// 出路 —— 管理页的「未挂载的模型映射」正是给这批条目留的入口（见 [`manage_view`]
+/// 末尾的 dangling 分支）。这里与视图共用同一份「有没有行」的判据，免得出现
+/// 「界面显示为未挂载、点删除却被后端拒掉」的死锁。
+pub(crate) fn host_row_exists(store: &AccountStore, provider: Option<&str>, target: &str) -> bool {
+    managed_manifests(store)
+        .into_iter()
+        .any(|(owner, manifest)| {
+            provider.map_or(true, |provider| owner.eq_ignore_ascii_case(provider))
+                && manifest.iter().any(|item| model_id(item).eq_ignore_ascii_case(target))
+        })
+}
+
 pub fn manage_view(store: &AccountStore) -> Value {
-    let rules = model_rules::current();
+    let rules = model_rules::shared();
     let mut models = Vec::new();
     let mut mappings = Vec::new();
     let mut providers = Vec::new();
@@ -276,7 +299,12 @@ pub fn manage_view(store: &AccountStore) -> Value {
     // 是「清单的可视检查」，同 id 画出两行会连带下面那条默认映射也重复一条。
     // 这一层独立于源头：不管哪家目录出了脏数据，这里只认第一次出现的那条。
     let mut claimed: HashSet<(String, String)> = HashSet::new();
+    // 本视图里**真正出现了的家**（= 有可用账号的家）。悬空映射的归属家不在这份名单里
+    // 时就不列它 —— 页面上根本没有这一家（左栏也不会有它），把它名下的映射列出来
+    // 只会多出一批用户在这儿无从下手的条目（要管那家得先去账号页把它加回来）。
+    let mut managed_providers = HashSet::new();
     for (provider, mut manifest) in managed_manifests(store) {
+        managed_providers.insert(provider.to_lowercase());
         manifest.sort_by_key(|item| !rules.default_enabled(&provider, &model_id(item)));
         let (remote, refreshed_at) = refresh_meta_for_provider(&provider);
         let source = if remote { "remote" } else { "builtin" };
@@ -298,6 +326,14 @@ pub fn manage_view(store: &AccountStore) -> Value {
     }
     for (index, mapping) in rules.mappings.iter().enumerate() {
         if attached.contains(&index) { continue; }
+        // 归属的家不在本视图里就跳过（见 `managed_providers` 的说明）。旧版全局
+        // 条目（provider 缺失）不属于任何一家，不受这条约束 —— 它是「对所有家生效」
+        // 的遗留形态，没有「哪一家没出现」这回事。
+        if let Some(provider) = mapping.provider.as_deref() {
+            if !managed_providers.contains(&provider.to_lowercase()) {
+                continue;
+            }
+        }
         let carried = match mapping.provider.as_deref() {
             Some(provider) => entry_id_in_manifest(&manifest_for_provider(provider), &mapping.target).is_some(),
             None => !super::providers_for_model(&mapping.target).is_empty(),

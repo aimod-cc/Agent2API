@@ -8,75 +8,8 @@
 }
 .routing-page-error { display: flex; align-items: center; gap: 8px; flex: none; padding: 9px 12px; border: 1px solid var(--danger-bd); background: var(--danger-soft); color: var(--danger); border-radius: var(--r-sm); }
 .routing-page-error > span:nth-child(2) { flex: 1; }
-.routing-workspace { position: relative; display: flex; min-height: 0; flex: 1; border: 1px solid var(--border); border-radius: var(--r-xl); background: var(--surface); overflow: hidden; box-shadow: var(--shadow-1); }
-.routing-model-edge { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
-.routing-model-edge path { fill: none; stroke: var(--border-strong); stroke-width: 1.8; opacity: .8; }
-.routing-model-rail { width: 226px; flex: none; display: flex; flex-direction: column; border-right: 1px solid var(--hairline); background: var(--rail-bg); padding: 16px 10px 10px; min-height: 0; }
-.routing-model-head { display: flex; align-items: center; justify-content: space-between; padding: 0 8px 12px; font-weight: 600; font-size: 12px; color: var(--text-2); }
-.routing-model-item { display: flex; align-items: center; gap: 9px; text-align: left; justify-content: flex-start; height: auto; min-height: 64px; padding: 10px; border-radius: var(--r-md); border: 1px solid transparent; width: 100%; color: var(--text-2); }
-.routing-model-item:hover { background: var(--nav-hover); }
-.routing-model-item.is-selected { border-color: var(--primary-bd); background: var(--primary-soft); color: var(--primary-fg); }
-.routing-model-mark { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; flex: none; border-radius: var(--r-sm); background: var(--surface); border: 1px solid var(--hairline); }
-.routing-model-item > span:nth-child(2) { min-width: 0; flex: 1; }
-.routing-model-item b { display: block; font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.routing-model-item em { display: block; font-size: 10.5px; color: var(--text-3); font-style: normal; font-weight: 400; margin-top: 4px; }
-.routing-model-dot { width: 6px; height: 6px; border-radius: var(--r-pill); background: var(--primary); flex: none; }
-.routing-model-divider { display: flex; align-items: center; justify-content: space-between; padding: 20px 10px 8px; color: var(--text-3); font-size: 10.5px; }
-.routing-model-list { flex: 1; min-height: 60px; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; }
-.routing-add-model { margin: 8px 0; justify-content: flex-start; color: var(--text-3); padding: 10px; border: 1px dashed var(--border-strong); }
-.routing-model-help { display: flex; gap: 7px; padding: 12px 8px 6px; color: var(--text-3); font-size: 10.5px; border-top: 1px solid var(--hairline); }
-.routing-map-area { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
-.routing-map-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 12px 18px; border-bottom: 1px solid var(--hairline); flex: none; flex-wrap: wrap; }
-.routing-map-head > div { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.routing-map-title { flex: 1; }
-.routing-map-actions { margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
-.routing-map-actions > button { display: inline-flex; flex-direction: row; align-items: center; gap: 6px; white-space: nowrap; }
-.routing-map-head b { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.routing-save-state { display: flex; gap: 5px; align-items: center; color: var(--text-3); font-size: 11px; }
-.routing-canvas-viewport { display: flex; flex: 1; min-height: 0; overflow-x: auto; overflow-y: hidden; background-color: var(--surface); background-image: radial-gradient(var(--hairline) 0.6px, transparent 0.6px); background-size: 20px 20px; }
-.routing-canvas { position: relative; display: grid; grid-template-columns: 264px minmax(510px, 1fr); grid-template-rows: minmax(0, 1fr); column-gap: 105px; flex: 1; min-width: 930px; min-height: 0; padding: 24px 30px 30px; align-items: stretch; overflow: hidden; }
-.routing-edges { position: absolute; inset: 0; pointer-events: none; z-index: 0; overflow: visible; }
-.routing-edge { fill: none; stroke: var(--border-strong); stroke-width: 1.7; transition: stroke 150ms, opacity 150ms; }
-.routing-edge.is-off { stroke-dasharray: 5 5; opacity: .55; }
-.routing-edge.is-running, .routing-model-edge path.is-running { stroke: var(--primary); stroke-dasharray: 5 4; animation: routing-flow 1.3s linear infinite; }
-@keyframes routing-flow { to { stroke-dashoffset: -18; } }
-.routing-gateway-column, .routing-provider-column { position: relative; z-index: 1; min-width: 0; min-height: 0; }
-.routing-provider-column { display: flex; flex-direction: column; }
-.routing-provider-column > .routing-column-head { flex: none; }
-.routing-provider-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior-y: contain; scrollbar-gutter: stable; padding: 2px 6px 6px 2px; }
-.routing-column-label { display: flex; align-items: center; gap: 6px; color: var(--text-3); font-size: 11px; font-weight: 600; }
-.routing-gateway-column > .routing-column-label { padding: 0 3px; margin-bottom: 18px; }
-.routing-gateway-node { background: var(--surface); border: 1px solid var(--primary-bd); border-radius: var(--r-xl); padding: 18px; box-shadow: var(--shadow-2); margin-top: 74px; }
-.routing-gateway-title { display: flex; align-items: center; gap: 10px; }
-.routing-gateway-title h3 { font-size: 15px; font-weight: 650; }
-.routing-gateway-title span:not(.ico):not(.routing-gateway-icon) { font-size: 10.5px; color: var(--text-3); }
-.routing-gateway-icon { display: flex; align-items: center; justify-content: center; width: 42px; height: 42px; border: 1px solid var(--primary-bd); border-radius: var(--r-md); background: var(--primary-soft); color: var(--primary-fg); }
-.routing-running { display: flex; align-items: baseline; gap: 8px; padding: 22px 0 15px; }
-.routing-running strong { font-size: 40px; font-weight: 650; line-height: 1; letter-spacing: -1.5px; font-variant-numeric: tabular-nums; }
-.routing-running > span { font-size: 11px; color: var(--text-3); }
-.routing-running > [data-slot="badge"] { margin-left: auto; align-self: center; }
-.routing-gateway-url { display: flex; align-items: center; min-width: 0; background: var(--surface-inset); padding: 3px 3px 3px 8px; border-radius: var(--r-sm); border: 1px solid var(--hairline); }
-.routing-gateway-url code { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; color: var(--text-2); }
-.routing-gateway-stats { display: grid; gap: 9px; padding: 15px 0; }
-.routing-gateway-stats > div { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 11px; color: var(--text-3); }
-.routing-gateway-stats b { color: var(--text-2); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.routing-gateway-policy { display: flex; flex-wrap: wrap; gap: 6px; padding: 11px 0 16px; border-top: 1px solid var(--hairline); }
-.routing-gateway-shortcuts { display: flex; justify-content: space-between; margin-top: 9px; gap: 5px; }
-.routing-scope-note { display: flex; gap: 7px; align-items: start; font-size: 10.5px; color: var(--text-3); padding: 15px 8px; }
-.routing-column-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 18px; min-height: 30px; flex-wrap: wrap; }
-.routing-column-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; min-width: 0; }
-.routing-column-actions > button { flex: none; white-space: nowrap; }
-.routing-account-search { max-width: 215px; height: 30px; font-size: 11.5px; }
-.routing-provider-card { border: 1px solid var(--border-strong); border-radius: var(--r-lg); background: var(--surface); overflow: hidden; margin-bottom: 16px; box-shadow: var(--shadow-2); transition: border-color 150ms, box-shadow 150ms; }
-.routing-provider-card.is-selected, .routing-provider-card:focus-within { border-color: color-mix(in srgb, var(--primary) 65%, var(--surface)); box-shadow: 0 0 0 1px var(--primary-bd), var(--shadow-2); }
-.routing-provider-card.is-disabled { border-style: dashed; }
-.routing-provider-card > header { display: flex; align-items: center; gap: 8px; padding: 11px 10px; background: var(--surface); transition: background-color 150ms; }
-.routing-provider-card.is-selected > header, .routing-provider-card:focus-within > header { background: color-mix(in srgb, var(--surface) 92%, var(--primary)); }
-.routing-provider-card[data-open] > header { border-bottom: 1px solid var(--hairline); }
-.routing-provider-toggle { display: flex; align-items: center; flex: 1; min-width: 0; height: auto; justify-content: flex-start; gap: 8px; padding: 0; text-align: left; white-space: normal; color: var(--text-2); }
-.routing-provider-toggle:hover { background: transparent; }
-.routing-provider-toggle > .ico { margin-left: auto; color: var(--text-3); transform: rotate(-90deg); }
-.routing-provider-toggle[aria-expanded="true"] > .ico { transform: none; }
+
+/* 配置页与旧弹窗共用的基础件 */
 .routing-provider-mark { width: 28px; height: 28px; object-fit: contain; flex: none; border-radius: var(--r-sm); }
 .routing-letter { display: flex; justify-content: center; align-items: center; border: 1px solid var(--hairline); background: var(--surface-3); color: var(--text-2); font-size: 13px; font-weight: 650; }
 .routing-provider-name { flex: 1; min-width: 0; }
@@ -87,29 +20,10 @@
 .routing-grip:active { cursor: grabbing; }
 .routing-grip:disabled { cursor: default; }
 .routing-grip.is-locked, .routing-grip.is-locked:active { cursor: not-allowed; opacity: .45; }
-.routing-account-list { padding: 4px 6px; }
-.routing-account-row { display: flex; align-items: center; gap: 6px; min-height: 61px; border-radius: var(--r-sm); padding: 6px 4px; position: relative; }
-.routing-account-row + .routing-account-row { border-top: 1px solid var(--hairline); }
-.routing-account-row.is-picked { background: var(--primary-soft); }
-.routing-account-row.is-muted { opacity: .65; }
 .routing-account-rank { font-size: 10px; color: var(--text-3); width: 16px; text-align: center; flex: none; font-variant-numeric: tabular-nums; }
 .routing-account-avatar { width: 27px; height: 27px; display: flex; align-items: center; justify-content: center; border-radius: var(--r-sm); border: 1px solid var(--hairline); background: var(--surface-2); color: var(--text-2); flex: none; font-size: 12px; font-weight: 600; }
-.routing-account-name { flex: 1; min-width: 70px; }
-.routing-account-name > b { display: block; font-size: 11.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.routing-account-name > span { display: block; margin-top: 3px; color: var(--text-3); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 270px; }
-.routing-account-concurrency { color: var(--text-2); font-size: 11px; font-family: var(--font-mono); white-space: nowrap; margin-left: 5px; }
-.routing-account-concurrency em { color: var(--text-3); font-style: normal; font-size: 10px; }
-.routing-empty-accounts { padding: 10px; color: var(--text-3); display: flex; align-items: center; justify-content: space-between; font-size: 11px; }
-.routing-add-provider { width: 100%; padding: 14px; border: 1px dashed var(--border-strong); height: auto; color: var(--text-3); background: var(--surface); }
-.routing-provider-card.drop-before, .routing-account-row.drop-before { box-shadow: 0 -3px 0 var(--primary); }
-.routing-provider-card.drop-after, .routing-account-row.drop-after { box-shadow: 0 3px 0 var(--primary); }
-.routing-provider-card.is-dragging, .routing-account-row.is-dragging { opacity: .5; }
-.routing-map-foot { display: flex; align-items: center; gap: 16px; border-top: 1px solid var(--hairline); padding: 5px 12px; font-size: 10px; color: var(--text-3); flex: none; flex-wrap: wrap; }
-.routing-map-foot > span { display: flex; align-items: center; gap: 5px; }
-.routing-map-foot > span:nth-child(2) { margin-left: auto; }
-.routing-map-foot > div { display: flex; align-items: center; }
-.routing-loading { display: flex; justify-content: center; align-items: center; flex: 1; }
 
+/* 请求日志里的单条回放弹窗 */
 .routing-replay-dialog { width: min(1120px, calc(100vw - 48px)); height: min(750px, calc(100vh - 48px)); }
 .routing-replay-body { display: flex; flex-direction: row; gap: 0; padding: 0; overflow: hidden; min-height: 0; flex: 1; }
 .routing-replay-sidebar { display: flex; flex-direction: column; min-height: 0; width: 288px; border-right: 1px solid var(--hairline); background: var(--rail-bg); flex: none; }
@@ -119,7 +33,7 @@
 .routing-replay-row b { font-weight: 600; font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; }
 .routing-replay-row > span { font-size: 10.5px; font-weight: 400; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .routing-replay-row.is-selected { background: var(--primary-soft); border-color: var(--primary-bd); }
-.routing-replay-main { flex: 1; overflow-y: auto; padding: 20px; min-width: 0; }
+.routing-replay-body > .routing-replay-main { flex: 1; overflow-y: auto; padding: 20px; min-width: 0; }
 .routing-replay-detail { display: flex; flex-direction: column; gap: 15px; }
 .routing-replay-detail-title { display: flex; align-items: center; gap: 10px; }
 .routing-replay-detail-title h3 { font-size: 15px; font-weight: 650; overflow-wrap: anywhere; }
@@ -147,6 +61,8 @@
 .routing-replay-attempts p { color: var(--text-3); margin-top: 4px; overflow-wrap: anywhere; }
 .routing-replay-facts.is-compact { gap: 8px; }
 .routing-replay-facts.is-compact .routing-replay-queue > li { padding: 6px 8px; }
+
+/* 会话粘滞弹窗 */
 .routing-sticky-list { display: flex; flex-direction: column; }
 .routing-sticky-row { display: flex; align-items: center; gap: 12px; padding: 13px 0; border-bottom: 1px solid var(--hairline); }
 .routing-sticky-mark { display: flex; align-items: center; justify-content: center; background: var(--primary-soft); color: var(--primary-fg); width: 36px; height: 36px; border-radius: var(--r-md); flex: none; }
@@ -158,33 +74,10 @@
 .routing-sticky-time b { font-size: 12px; color: var(--text-2); font-family: var(--font-mono); font-weight: 500; }
 .routing-sticky-time span { display: block; margin-top: 3px; font-size: 10px; color: var(--text-3); }
 
-@media (min-width: 768px) and (max-width: 1200px) {
-  .routing-model-rail { width: 190px; }
-  .routing-map-foot > span:nth-child(2) { display: none; }
-}
 @media (max-width: 767px) {
   .page.active[data-page="routing"] { gap: 10px; padding-bottom: 10px; }
-  .routing-map-actions > button { font-size: 11px; }
-  .routing-workspace { flex-direction: column; border-radius: var(--r-lg); }
-  .routing-model-rail { width: auto; min-height: 0; padding: 8px; flex-direction: row; border-right: 0; border-bottom: 1px solid var(--hairline); align-items: center; gap: 6px; overflow-x: auto; }
-  .routing-model-edge { display: none; }
-  .routing-model-head, .routing-model-divider, .routing-model-help { display: none; }
-  .routing-model-list { flex-direction: row; min-height: 0; overflow: visible; flex: none; gap: 6px; }
-  .routing-model-item { min-height: 44px; width: 174px; padding: 6px; flex: none; }
-  .routing-model-item em { display: none; }
-  .routing-add-model { flex: none; margin: 0; height: 42px; }
-  .routing-map-head { padding: 8px 10px; }
-  .routing-map-head b { font-size: 11px; max-width: 160px; }
-  .routing-map-head > div { gap: 5px; }
-  .routing-map-foot > span { display: none; }
-  .routing-map-foot > div { margin-left: auto; }
-  .routing-canvas { min-width: 850px; grid-template-columns: 240px minmax(480px,1fr); gap: 80px; padding: 18px; }
   .routing-replay-sidebar { width: 205px; }
-  .routing-replay-main { padding: 12px; }
+  .routing-replay-body > .routing-replay-main { padding: 12px; }
   .routing-sticky-mark { display: none; }
   .routing-sticky-row { gap: 8px; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .routing-edge, .routing-provider-card, .routing-provider-card > header { transition: none; }
-  .routing-edge.is-running, .routing-model-edge path.is-running { animation: none; }
 }

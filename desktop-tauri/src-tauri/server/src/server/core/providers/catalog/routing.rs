@@ -69,7 +69,7 @@ pub fn providers_for_model(model: &str) -> Vec<String> {
     if model.is_empty() {
         return Vec::new();
     }
-    let rules = model_rules::current();
+    let rules = model_rules::shared();
     let manifests: Vec<_> = all_provider_ids().into_iter()
         .map(|provider| {
             let manifest = manifest_for_provider(&provider);
@@ -114,7 +114,7 @@ pub fn providers_for_model(model: &str) -> Vec<String> {
 
 /// 只返回有开启绑定的提供商，不把关闭的 ID 回落给默认提供商。
 pub fn forwarding_providers(model: &str) -> Vec<String> {
-    let rules = model_rules::current();
+    let rules = model_rules::shared();
     let mut result: Vec<_> = all_provider_ids().into_iter().filter(|provider| {
         builtin_target(&rules, provider, &manifest_for_provider(provider), model).is_some()
     }).collect();
@@ -122,18 +122,25 @@ pub fn forwarding_providers(model: &str) -> Vec<String> {
     result
 }
 
+/// 「这个名字是不是被关掉了」—— 只在广告里没有它时用来区分「承载家全被关闭」
+/// 与「根本没有这个名字」两种 404 文案（`pipeline::resolve_model` 与
+/// `provider_loop::forward_with_providers` 各判一次）。
+///
+/// ── 判据为什么只剩 `providers_for_model`（两条别名兜底已删）──────
+/// 曾经这里还兜着两条「只要**存在**同名的映射条目就算被关闭」：内建家的
+/// `has_alias(model)` 与自定义家 mappings 的 alias 扫描。它们在「上游把某个
+/// 模型下线、映射的目标已经不在任何清单里」时会**误命中** —— 别名确实还在
+/// 配置里，但它指向的上游已经没了，既调不通，也不该报「已在网关中关闭」：
+/// 那句文案会把用户引去模型管理页找一个**已经不在列表里**的开关。
+/// 它本来想覆盖的「别名在、目标也仍在清单里、只是开关关了」已经被
+/// [`providers_for_model`] 覆盖 —— 那个函数**不过滤 `enabled`**（见它的注释），
+/// 只要有承载者就非空，所以这两条兜底整条删掉也不会漏判；剩下的悬空别名
+/// 据此归入「模型不存在」，与它实际的处境一致。
 pub fn model_blocked_everywhere(model: &str) -> bool {
     if !forwarding_providers(model).is_empty() {
         return false;
     }
     !providers_for_model(model).is_empty()
-        || model_rules::current().has_alias(model)
-        || custom_providers::list().iter().any(|provider| {
-            provider.get("mappings").and_then(Value::as_array).is_some_and(|mappings| {
-                mappings.iter().any(|mapping| mapping.get("alias").and_then(Value::as_str)
-                    .is_some_and(|alias| alias.eq_ignore_ascii_case(model)))
-            })
-        })
 }
 
 pub fn wire_target_for_provider(model: &str, provider_id: &str, _account: Option<&Value>) -> WireTarget {
@@ -142,13 +149,13 @@ pub fn wire_target_for_provider(model: &str, provider_id: &str, _account: Option
     let resolved = if custom_providers::is_custom_provider_id(provider_id) {
         None
     } else {
-        builtin_target(&model_rules::current(), provider_id, &manifest_for_provider(provider_id), requested)
+        builtin_target(&model_rules::shared(), provider_id, &manifest_for_provider(provider_id), requested)
     };
     resolved.unwrap_or_else(|| WireTarget { model: requested.to_string(), reasoning: None })
 }
 
 pub fn default_model_catalog() -> Vec<Value> {
-    let rules = model_rules::current();
+    let rules = model_rules::shared();
     let mut result = Vec::new();
     for provider in all_provider_ids().into_iter().filter(|provider| {
         adapter_by_id(provider).is_some_and(|adapter| adapter.supports_default_model())

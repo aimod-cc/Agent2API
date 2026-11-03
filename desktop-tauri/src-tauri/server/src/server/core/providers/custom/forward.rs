@@ -147,7 +147,11 @@ pub(crate) async fn forward(
     }
     // 凭证（内部形态：含 apiKey 明文与已解析代理）。取不到说明账号在两次
     // 读盘之间被删了 —— 报一条明确的错，与「顺延」语义同等可操作。
-    let credential = store.custom_credential_by_id(account_id).ok_or_else(|| {
+    let credential_store = store.clone();
+    let credential_id = account_id.to_string();
+    let credential = crate::server::core::blocking::run(move || {
+        credential_store.custom_credential_by_id(&credential_id)
+    }).await?.ok_or_else(|| {
         GatewayError::with_status(503, format!("自定义账号不存在或已被删除: {account_id}"))
     })?;
     // baseUrl：账号覆盖项优先（缺省回落到提供商的配置）。两层都拦过空值，

@@ -1,9 +1,10 @@
 /** 未在内置表单登记的运行时 provider：动态方法、纯文本说明与旧插件兼容入口。 */
 import * as React from 'react'
 import {
-  Alert, AlertDescription, AlertTitle, Button, DialogSection, Input, Label, SegmentedControl,
+  Alert, AlertDescription, AlertTitle, Button, Input, Label, SegmentedControl,
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Spinner, Textarea,
 } from '@ui'
+import { AddFoot, AddGroup } from './add-account-kit'
 import { t } from '../i18n'
 import { MAX_NAME_LENGTH } from './add-account-configs'
 import {
@@ -122,8 +123,14 @@ function apiProxySelection(proxy: ReturnType<typeof readProxyDraft>): unknown {
 }
 
 export function DynamicProviderBlock({
-  provider, label, active, version,
-}: { provider: string; label: string; active: boolean; version: number }): React.ReactElement {
+  provider, label, active, version, footerHost,
+}: {
+  provider: string
+  label: string
+  active: boolean
+  version: number
+  footerHost: HTMLElement | null
+}): React.ReactElement {
   const prefix = `${React.useId()}-dynamic-login`
   const [methodsState, setMethodsState] = React.useState<MethodsState>({
     phase: 'loading', methods: [], instructions: '', reason: '',
@@ -456,8 +463,7 @@ export function DynamicProviderBlock({
   const commonFields = method && method.type !== 'unsupported' && !legacyBrowser
 
   return <div className='add-provider-block' hidden={!active}>
-    <DialogSection>
-      <h3>{t('账号登录方式')}</h3>
+    <AddGroup label={t('账号登录方式')}>
       {methodsState.phase === 'loading' ? <p role='status'><Spinner /> {t('正在读取插件登录方式…')}</p>
         : methodsState.reason ? <Alert variant={methodsState.phase === 'error' ? 'destructive' : 'warning'}>
           <AlertTitle>{methodsState.phase === 'error' ? t('无法读取登录方式') : t('登录方式说明')}</AlertTitle>
@@ -479,11 +485,12 @@ export function DynamicProviderBlock({
           </SelectItem>)}</SelectContent>
         </Select>
       ) : null}
-      {methodAvailable ? <Button variant='outline' size='sm' className='self-start'
+      {/* 读不出来时也要给重试入口：两种状态互斥，合成一颗（原来拆成里外各一颗） */}
+      {methodsState.phase !== 'loading' ? <Button variant='outline' size='sm' className='self-start'
         disabled={locked} onClick={() => setReload(value => value + 1)}>
         {t('重新读取登录方式')}
       </Button> : null}
-    </DialogSection>
+    </AddGroup>
 
     {instructions || progress.userCode ? <Alert>
       <AlertTitle>{t('登录指引 / 设备码授权')}</AlertTitle>
@@ -493,8 +500,7 @@ export function DynamicProviderBlock({
       </AlertDescription>
     </Alert> : null}
 
-    {method && methodsState.phase !== 'loading' ? <DialogSection>
-      <h3>{methodLabel(method)}</h3>
+    {method && methodsState.phase !== 'loading' ? <AddGroup label={methodLabel(method)}>
       {method.type === 'oauth' && !method.localOnly ? <p>{t('填写账号登录所需信息并发起授权；等待、取消与失败原因由共享登录桥处理，设备码和操作指引会显示在上方。')}</p> : null}
       {method.type === 'api' ? <p>{t('API 方法提交给插件的账号规范化入口；不会用该密钥发起 OAuth 登录。')}</p> : null}
       {method.localOnly ? <Alert variant='warning'>
@@ -565,15 +571,17 @@ export function DynamicProviderBlock({
           options={[{ value: 'external', label: t('系统浏览器') }, { value: 'embedded', label: t('内嵌窗口') }]}
           onValueChange={setMode} />
       </> : null}
-      {method.type === 'oauth' ? <div className='flex flex-wrap items-center gap-2'>
+      {method.type === 'oauth' ? <AddFoot host={footerHost} active={active}
+        note={<span id={`${prefix}-hint`} className='detail whitespace-pre-wrap break-words'>{loginView.hint}</span>}>
         <Button id={`${prefix}-start`} disabled={locked || Boolean(method.reason)} onClick={startOauth}>
           {loginView.waiting ? <Spinner /> : null}{loginView.label}
         </Button>
         <Button id={`${prefix}-cancel`} variant='outline' hidden={!loginView.waiting}
           onClick={cancelOauth}>{t('取消等待')}</Button>
-        <span id={`${prefix}-hint`} className='detail whitespace-pre-wrap break-words'>{loginView.hint}</span>
-      </div> : method.type !== 'unsupported' ? <Button className='self-start' disabled={locked || Boolean(method.reason)}
-        onClick={() => void submit()}>{saving ? <Spinner /> : null}{saving ? t('添加中…') : t('添加账号')}</Button> : null}
+      </AddFoot> : method.type !== 'unsupported' ? <AddFoot host={footerHost} active={active}>
+        <Button disabled={locked || Boolean(method.reason)}
+          onClick={() => void submit()}>{saving ? <Spinner /> : null}{saving ? t('添加中…') : t('添加账号')}</Button>
+      </AddFoot> : null}
       {manualWaiting ? <div className='flex flex-col gap-2'>
         <Label htmlFor={`${prefix}-callback`}>{callbackType === 'code'
           ? t('授权码或令牌（原样提交）') : t('完整回调地址（原样提交）')}</Label>
@@ -595,9 +603,7 @@ export function DynamicProviderBlock({
       {error ? <Alert variant='destructive'><AlertTitle>{t('添加失败')}</AlertTitle>
         <AlertDescription className='whitespace-pre-wrap break-words'>{error}</AlertDescription>
       </Alert> : null}
-    </DialogSection> : null}
-    {!methodAvailable && methodsState.phase !== 'loading' ? <Button variant='outline' size='sm' className='self-start'
-      disabled={locked} onClick={() => setReload(value => value + 1)}>{t('重新读取登录方式')}</Button> : null}
+    </AddGroup> : null}
     {error && !methodAvailable ? <Alert variant='destructive'><AlertDescription>{error}</AlertDescription></Alert> : null}
   </div>
 }

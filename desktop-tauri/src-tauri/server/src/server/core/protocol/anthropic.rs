@@ -555,8 +555,7 @@ fn anthropic_effort(body: &Value) -> Option<String> {
     );
     let explicit = explicit.trim().to_lowercase();
     if !explicit.is_empty() {
-        // Anthropic 的 "max" 对应本项目的 "xhigh"（各家的最高档命名不一）
-        return Some(if explicit == "max" { "xhigh".to_string() } else { explicit });
+        return Some(explicit);
     }
     // thinking.enabled 但没给档位：按 budget 反推一个
     if thinking_type == "enabled" || thinking_type == "adaptive" {
@@ -581,8 +580,10 @@ fn effort_from_budget(budget: i64) -> &'static str {
         "medium"
     } else if budget <= 10240 {
         "high"
-    } else {
+    } else if budget <= 32768 {
         "xhigh"
+    } else {
+        "max"
     }
 }
 
@@ -696,6 +697,25 @@ pub fn usage_to_anthropic(usage: Option<&Value>) -> Value {
     })
 }
 
+/// 输入 token 估算：字符数 ÷ 3.5（中英混排的经验值，与 Anthropic 官方
+/// 「约 3.5 字符一个 token」同量级）。空文本给 1。
+///
+/// 与 `/v1/messages/count_tokens`（`api::chat::count_tokens`）**共用这一个口径**：
+/// 客户端会拿两个数字互相印证，对不上反而引出新的疑问。要「不估算」的调用方
+/// 请传 `None` / 先判空，而不是靠这个函数返回 0。
+pub fn estimate_tokens_for_text(text: &str) -> i64 {
+    let characters = text.chars().count();
+    ((characters as f64) / 3.5).ceil().max(1.0) as i64
+}
+
+/// 按请求体估算输入 token（对象走 JSON 文本，见 [`json_text`]）。
+///
+/// Anthropic 原始体与翻译后的 chat 体都能喂：两者都是对象、字符数量级一致，
+/// 差一个 `model` 字段的值不影响估算用途。
+pub fn estimate_tokens_for_body(body: &Value) -> i64 {
+    estimate_tokens_for_text(&json_text(body))
+}
+
 // ─── 流式：Chat SSE → Anthropic SSE ─────────────────────────
 
 /// Chat 的 SSE 字节流 → Anthropic 的 SSE 字节流（状态机）。
@@ -726,10 +746,19 @@ pub struct AnthropicStream {
     has_tool: bool,
     stop_reason: Option<String>,
     usage: Option<Value>,
+    /// 下游请求体的输入 token 估算（`estimate_tokens_for_body`）。
+    ///
+    /// 只在 `message_start` 用得上：上游 usage 要等流末尾那帧才到，而客户端
+    /// （Claude Code / Anthropic SDK）在发出 content block 的那一刻就把
+    /// `message_start` 的 usage 快照走了，等不到 `message_delta`。开头填 0
+    /// 会让它退回本地估算并逐轮累加（issue #437：面板 2.6M / 1M 虚高 50 倍）。
+    input_estimate: Option<i64>,
 }
 
 impl AnthropicStream {
-    pub fn new(model: &str) -> Self {
+    /// `input_estimate`：`message_start` 用的输入估算，`None` 表示调用方没有
+    /// 请求体可估（保持 0，与修复前一致）。取真实 usage 时始终以流末尾那帧为准。
+    pub fn new(model: &str, input_estimate: Option<i64>) -> Self {
         Self {
             buffer: SseLineBuffer::new(),
             message_id: random_id("msg"),
@@ -747,6 +776,7 @@ impl AnthropicStream {
             has_tool: false,
             stop_reason: None,
             usage: None,
+            input_estimate,
         }
     }
 
@@ -1002,6 +1032,17 @@ impl AnthropicStream {
         self.started = true;
         let mut usage = usage_to_anthropic(self.usage.as_ref());
         usage["output_tokens"] = json!(0);
+        // 上游 usage 通常整条流都不来（要等末尾那帧），而客户端把
+        // `message_start` 的 usage 当作本轮输入的事实快照 —— 填 0 会让它退回
+        // 本地估算并逐轮累加（issue #437）。用调用方给的估算顶上；真值到达时
+        // 由 `message_delta` 校正。上游这次提前带了真实 usage 就保留真值，
+        // 估算不覆盖它。缓存字段此刻本就不存在，也不在这里补 —— 估算值写进
+        // `cache_read_input_tokens` 会把请求统计的缓存命中率抬虚。
+        if self.usage.is_none() {
+            if let Some(estimate) = self.input_estimate {
+                usage["input_tokens"] = json!(estimate);
+            }
+        }
         vec![self.event(
             "message_start",
             json!({

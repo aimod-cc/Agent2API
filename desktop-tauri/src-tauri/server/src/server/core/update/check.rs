@@ -365,6 +365,22 @@ fn release_json(payload: &Value, repository: &str) -> Value {
             )
         });
     let assets = assets.as_ref();
+    // 「有新版本但没有可下载的包」时界面要能说出**为什么**：把「这一版到底传了
+    // 哪些文件」记下来。取的是**过滤前**的清单 —— 过滤后为空时仍要说得清
+    // 「发布页上其实有 .dmg / .deb，只是没有你这台的」；过滤这件事本身在
+    // `filteredBySource` 里单独表达（它是「我们的访问方式把文件挡掉了」，
+    // 与「上游压根没传」的处置办法完全不同）。
+    let raw_assets: &[Value] = payload
+        .get("assets")
+        .and_then(Value::as_array)
+        .map(|list| list.as_slice())
+        .unwrap_or(&[]);
+    let kept = assets.and_then(Value::as_array).map(Vec::len).unwrap_or(0);
+    let asset_probe = json!({
+        "assetsTotal": raw_assets.len(),
+        "suffixes": version::asset_suffixes(raw_assets),
+        "filteredBySource": kept < raw_assets.len(),
+    });
     let bundle = server_bundle_name();
     let bundle_asset = bundle
         .as_deref()
@@ -381,6 +397,10 @@ fn release_json(payload: &Value, repository: &str) -> Value {
         "prerelease": payload.get("prerelease").and_then(Value::as_bool) == Some(true)
             || version::is_prerelease_version(&tag),
         "asset": pick_installer(assets),
+        // 这一版上传过哪些文件（后缀清单 / 总数 / 有没有被更新源挡掉）——
+        // 「asset 为空」时界面据此说明原因，见 [`asset_probe`] 的注释与
+        // `build_check_result` 里补 expected* 的那一段
+        "assetProbe": asset_probe,
         // 手机端（APK）的安装包。与 `asset` 并列而不是二选一：网关可能同时被
         // 电脑和手机访问，两边各自挑自己那份，谁都不该把对方的那条藏起来。
         "androidAsset": pick_android_apk(assets),

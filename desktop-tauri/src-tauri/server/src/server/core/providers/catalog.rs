@@ -5,7 +5,10 @@
 //! 清单来源在本文件，绑定解析在 routing.rs，对外与管理视图在 view.rs。
 
 mod routing;
+mod snapshot;
 mod view;
+
+pub(crate) use snapshot::{config_changed, generation, invalidate, validation_snapshot, ValidationCache};
 
 use serde_json::Value;
 
@@ -25,6 +28,9 @@ pub use view::{
     advertised_manifest_contains, advertised_model_ids, has_available_providers, manage_view,
     models_by_provider, models_response, session_models, suggest_advertised,
 };
+/// 「这条映射在管理页上还有没有模型行可挂」——删除自映射时的放行判据（见函数说明）。
+/// 只服务写侧一个调用点，不进对外的 `pub use`。
+pub(crate) use view::host_row_exists;
 
 pub(crate) fn upstream_manifests() -> Vec<(String, Vec<Value>)> {
     all_provider_ids().into_iter().map(|provider| {
@@ -86,14 +92,15 @@ fn all_provider_ids() -> Vec<String> {
 }
 
 pub fn provider_available(store: &AccountStore, provider: &str) -> bool {
-    !store.accounts_for_provider(provider).is_empty()
+    store.routing_snapshot().available_providers.contains(provider)
 }
 
 /// 管理视图需要完整清单；对外视图在此基础上再应用每条绑定的开关。
 pub(crate) fn managed_manifests(store: &AccountStore) -> Vec<(String, Vec<Value>)> {
+    let accounts = store.routing_snapshot();
     all_provider_ids()
         .into_iter()
-        .filter(|provider| provider_available(store, provider))
+        .filter(|provider| accounts.available_providers.contains(provider))
         .map(|provider| {
             let manifest = manifest_for_provider(&provider);
             (provider, manifest)

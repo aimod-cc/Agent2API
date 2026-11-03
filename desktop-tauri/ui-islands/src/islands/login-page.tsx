@@ -74,7 +74,7 @@ function LoginPage() {
           viewBox='0 0 24 24'
           role='img'
           aria-label='Agent2API'
-          className='size-[52px] rounded-[12px] shadow-[0_6px_18px_rgba(0,122,255,0.35)]'
+          className='size-[52px] rounded-lg shadow-[0_6px_18px_rgba(0,122,255,0.35)]'
         >
           <rect width='24' height='24' rx='5.4' fill='#007AFF' />
           <g fill='none' stroke='#fff' strokeWidth='2.2' strokeLinecap='round' strokeLinejoin='round'>

@@ -31,6 +31,7 @@ import {
 import {
   CATEGORIES,
   CAPTCHA_POOL_FIELDS,
+  IMAGE_COMPRESS_FIELDS,
   modelsDevStateText,
   NOTES,
   PROMPT_MODES,
@@ -69,6 +70,7 @@ import {
   panelLogout,
   refreshDebug,
   refreshDeveloperRoleCompat,
+  refreshImageCompress,
   refreshClineHeaders,
   refreshZcodeVersion,
   refreshCors,
@@ -99,6 +101,8 @@ import {
   saveCors,
   saveCaptchaPoolField,
   saveDebug,
+  saveImageCompressEnabled,
+  saveImageCompressField,
   saveModelsDev,
   savePromptFile,
   savePromptMode,
@@ -1248,6 +1252,43 @@ function GatewayPane({ snap, panels }: { snap: SettingsSnapshot; panels: Set<str
             ))}
           </div>
           <div className='hint retention-note'>{NOTES.queue}</div>
+        </CardContent>
+      </Card>
+
+      <Card render={<section />} className='panel'>
+        <PanelHead
+          title={t('图片压缩')}
+          tip={TIPS.imageCompress}
+          badge={snap.imageCompress.status === 'unavailable'
+            ? <StatusBadge tone='bad'>{t('不可用')}</StatusBadge>
+            : <StatusBadge tone={snap.imageCompress.enabled ? 'ok' : 'idle'}>
+                {snap.imageCompress.enabled ? t('已开启') : t('已关闭')}
+              </StatusBadge>}
+          actions={<RefreshButton id='btn-image-compress-refresh' onClick={() => void refreshImageCompress()} />}
+        />
+        <CardContent className='panel-body'>
+          <div className='settings-switches'>
+            <SwitchRow
+              id='settings-image-compress'
+              label={t('转发前压缩对话里内嵌的大图（只改发给上游的副本，生图与图片编辑不受影响）')}
+              checked={snap.imageCompress.enabled}
+              // 读到后端值之前不许切（与 developerRoleCompat 同一取舍）
+              disabled={snap.imageCompress.status !== 'ready' || snap.busy === 'imageCompress'}
+              onCheckedChange={next => void saveImageCompressEnabled(next)}
+            />
+          </div>
+          <div className='retention-list'>
+            {IMAGE_COMPRESS_FIELDS.map(field => (
+              <NumberRow
+                key={field.key}
+                field={field}
+                value={snap.imageCompress.values?.[field.key] ?? null}
+                disabled={snap.busy === 'imageCompress'}
+                onCommit={raw => saveImageCompressField(field, raw)}
+              />
+            ))}
+          </div>
+          <div className='hint retention-note'>{NOTES.imageCompress}</div>
         </CardContent>
       </Card>
 

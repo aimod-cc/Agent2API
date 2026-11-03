@@ -2,7 +2,8 @@ import * as React from 'react'
 import { createRoot } from 'react-dom/client'
 import { Badge, Button, Progress , Card, CardHeader, CardContent } from '@ui'
 import {
-  errorMessage, handleExternalClick, markdownHtml, safeExternal, shared, toast,
+  downloadAsset, errorMessage, handleExternalClick, isSelfUpdate, markdownHtml,
+  missingAssetReasonFor, safeExternal, shared, toast,
   type DownloadTask, type UpdateInfo,
 } from './update-shared'
 import { showUpdateModal } from './update-modal'
@@ -178,23 +179,9 @@ function installerKindOf(info: UpdateInfo | null): InstallerKind {
 }
 
 /**
- * 容器内更新（Linux headless / Docker）与桌面安装包是**两条不同的路**，全文件
- * 按这一个判定分流：桌面端 selfUpdate 恒为 false，下面每个分支都原样走回旧行为。
- *
- *   · 桌面：后端给 `asset`（NSIS / dmg / deb / AppImage 安装器）→ 下载 → 由壳
- *     启动安装程序（见 run_installer）；
- *   · 容器：后端给 `serverAsset`（服务端更新包）→ 下载 → 服务端自己原地替换
- *     二进制与 ui 目录 → 重启进程（容器 restart 策略拉起）。
+ * 本次要下载的资产与「容器还是桌面」的分流都在 update-shared.ts
+ * （isSelfUpdate / downloadAsset —— 弹窗也要用，只此一份）。
  */
-function isSelfUpdate(info: UpdateInfo | null | undefined): boolean {
-  return info?.selfUpdate === true
-}
-
-/** 本次要下载的资产：容器内更新取服务端包，桌面取安装器 */
-function downloadAsset(info: UpdateInfo | null | undefined): { url?: string; name?: string } | null {
-  if (!info) return null
-  return isSelfUpdate(info) ? (info.serverAsset ?? null) : (info.asset ?? null)
-}
 
 /** 「开始下载」时的提示：说明下载完会发生什么 */
 function downloadHint(info: UpdateInfo | null): string {
@@ -390,9 +377,22 @@ function renderCheckResult(): void {
     // 容器内更新：该版本没挂服务端更新包时（老 Release / 只发了桌面安装包），
     // 按钮不会出现 —— 把原因与手动命令说清楚，别让人对着没有按钮的面板猜
     if (isSelfUpdate(info) && !info.serverAsset) {
-      setState(t('发现新版本 {latest}（当前 {current}），但该版本没有提供容器内更新包；请在宿主机执行 docker compose pull && docker compose up -d 升级。{at}', {
+      setState(t('发现新版本 {latest}（当前 {current}），但该版本没有提供容器内更新包（{reason}）；请在宿主机执行 docker compose pull && docker compose up -d 升级。{at}', {
         latest: String(info.latestVersion || ''),
         current: String(info.currentVersion || ''),
+        reason: missingAssetReasonFor(info),
+        at,
+      }))
+      return
+    }
+    // 桌面端同理：这一版没挂本机的安装包（构建漏传 / 命名不对 / 被更新源挡掉）
+    // 时按钮同样不出现，必须在这里把原因与「怎么办」交代掉 —— 否则用户对着
+    // 「发现新版本」四个字无从下手，而发布页上其实有得下
+    if (!downloadAsset(info)?.url) {
+      setState(t('发现新版本 {latest}（当前 {current}），但这一版没有提供本机安装包（{reason}）；可到 GitHub 发布页手动下载。{at}', {
+        latest: String(info.latestVersion || ''),
+        current: String(info.currentVersion || ''),
+        reason: missingAssetReasonFor(info),
         at,
       }))
       return
@@ -900,7 +900,12 @@ async function downloadOrCancel(): Promise<void> {
 
   const asset = downloadAsset(current.info)
   if (!asset?.url) {
-    toast(isSelfUpdate(current.info) ? t('这一版没有提供容器内更新包') : t('没有可下载的安装包'), 'err')
+    // 兜底提示（正常在面板上看不到这一步）：把**为什么**没有包一并说出来 ——
+    // 只丢一句「没有可下载的安装包」等于让人自己去猜是构建没传、还是被源挡了
+    const reason = missingAssetReasonFor(current.info)
+    toast(isSelfUpdate(current.info)
+      ? t('这一版没有提供容器内更新包：{reason}', { reason })
+      : t('没有可下载的安装包：{reason}', { reason }), 'err')
     return
   }
   // 按钮不可见就不该从这里发起下载（openAndDownload 的自动触发也走这条路）
@@ -1213,7 +1218,7 @@ function UpdatePanel() {
                 {t('个人开发并开源维护，免费使用，也不会收集你的账号数据。如果它帮到了你，欢迎到项目仓库点个 Star 支持一下。')}
               </span>
             ) : (
-              <span>{t('如果 Agent2API 帮到了你，欢迎请作者喝杯咖啡。')}</span>
+              <span>{t('Agent2API 一直在更新，是因为有人在背后持续投入。如果它帮到了你，欢迎请作者喝杯咖啡。')}</span>
             )}
           </div>
           <div className='update-author-actions'>

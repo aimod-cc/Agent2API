@@ -286,7 +286,20 @@ export type ManageModel = {
   refreshedAt?: unknown
 }
 
-export type ManageMapping = { alias?: string; target?: string; provider?: string; enabled?: boolean; isDefault?: boolean }
+export type ManageMapping = {
+  alias?: string
+  target?: string
+  provider?: string
+  enabled?: boolean
+  isDefault?: boolean
+  /**
+   * 这条映射**挂不到任何模型行**（目标上游不在清单里 = `dangling`，
+   * `carried: false` 时说明该上游已下线 / 改了 ID）。见桌面端
+   * `models-dangling.tsx` 的说明 —— 手机端只在模型页顶部提示 + 清理。
+   */
+  dangling?: boolean
+  carried?: boolean
+}
 export type ManageView = { models?: ManageModel[]; mappings?: ManageMapping[] }
 
 export function fetchManage(signal?: AbortSignal): Promise<ManageView> {
@@ -299,6 +312,18 @@ export function setModelEnabled(payload: {
   enabled: boolean
 }): Promise<ManageView> {
   return apiCall<ManageView>('/api/models/state', { method: 'POST', body: payload })
+}
+
+/**
+ * 删除一条映射（三元组定位）。手机端只用于清理「未挂载映射」——
+ * 常规的映射编辑仍在桌面端「模型管理」里做。
+ */
+export function removeModelMapping(payload: {
+  alias: string
+  target: string
+  provider?: string
+}): Promise<ManageView> {
+  return apiCall<ManageView>('/api/models/mappings/remove', { method: 'POST', body: payload })
 }
 
 export function refreshModels(): Promise<unknown> {

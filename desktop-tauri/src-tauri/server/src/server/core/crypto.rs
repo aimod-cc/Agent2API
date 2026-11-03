@@ -355,6 +355,9 @@ pub fn reset_cache(scope: SecretScope) {
     if let Ok(mut guard) = cache_for(scope).lock() {
         *guard = None;
     }
+    if matches!(scope, SecretScope::Accounts) {
+        crate::server::core::providers::catalog::invalidate();
+    }
 }
 
 /// 该域密钥文件的**路径**（不读、不生成）。云同步据此做备份 / 替换。

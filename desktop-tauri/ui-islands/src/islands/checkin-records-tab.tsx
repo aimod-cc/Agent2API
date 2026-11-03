@@ -33,6 +33,14 @@ const OUTCOME_OPTIONS = [
   { value: 'failed', label: '失败' },
 ]
 
+/** 签到类型三档（后端按 source 归组：手动 / 定时 / 定时补签） */
+const KIND_OPTIONS = [
+  { value: '', label: t('全部类型') },
+  { value: 'manual', label: t('手动签到') },
+  { value: 'schedule', label: t('定时签到') },
+  { value: 'makeup', label: t('定时补签') },
+]
+
 /** 时间档位 → 毫秒下界（含今天在内的 N 个自然日；all = 不限）。 */
 function rangeStart(value: string): number | null {
   const now = new Date()
@@ -131,6 +139,22 @@ export function RecordsTab(): React.ReactElement {
   const pageCount = Math.max(1, Math.ceil(total / pageSize))
   const page = Math.min(Math.floor(query.offset / pageSize) + 1, pageCount)
 
+  // 提供商选项：可用提供商来自签到中心的 providerOptions；当前页记录里出现
+  // 但已不在选项里的（历史账号 / 已移除的插件）补进来，免得筛选值显示成 id
+  const providerOptions = (() => {
+    const options = new Map<string, string>()
+    for (const option of store.center?.auto?.providerOptions ?? []) options.set(option.id, t(option.label))
+    for (const row of store.records) {
+      if (row.providerId && !options.has(row.providerId)) {
+        options.set(row.providerId, row.provider || row.providerId)
+      }
+    }
+    return [
+      { value: '', label: t('全部提供商') },
+      ...[...options].map(([value, label]) => ({ value, label })),
+    ]
+  })()
+
   const apply = (next: Partial<typeof query>) => {
     const current = store.recordsQuery
     const changed = Object.entries(next).some(([key, value]) => current[key as keyof typeof current] !== value)
@@ -188,6 +212,26 @@ export function RecordsTab(): React.ReactElement {
             onValueChange={changeRange}
             aria-label="时间范围"
           />
+          <Select value={query.provider} onValueChange={value => apply({ provider: String(value ?? '') })}>
+            <SelectTrigger aria-label={t('提供商')}>
+              <SelectValue>
+                {providerOptions.find(option => option.value === query.provider)?.label || t('全部提供商')}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {providerOptions.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+            </SelectContent>
+          </Select>
+          <Select value={query.kind} onValueChange={value => apply({ kind: String(value ?? '') })}>
+            <SelectTrigger aria-label={t('签到类型')}>
+              <SelectValue>
+                {KIND_OPTIONS.find(option => option.value === query.kind)?.label || t('全部类型')}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {KIND_OPTIONS.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+            </SelectContent>
+          </Select>
           <Select value={query.outcome} onValueChange={value => apply({ outcome: String(value ?? '') })}>
             <SelectTrigger aria-label='签到结果'>
               <SelectValue>{OUTCOME_OPTIONS.find(option => option.value === query.outcome)?.label || '全部结果'}</SelectValue>

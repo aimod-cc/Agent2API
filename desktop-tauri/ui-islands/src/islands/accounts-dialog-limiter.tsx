@@ -50,18 +50,18 @@ export function LimiterSection({ account, draft, onChange, allowBalance = true }
   const current = account ? groupsOf(account, limitersOf(account)) : []
 
   return <div className='space-y-3'>
-    <div className='flex flex-wrap items-center gap-2'>
+    <div className='acct-limiter-toolbar flex flex-wrap items-center gap-2'>
       <Button variant='outline' onClick={addGroup}>{t('＋ 添加限制')}</Button>
       {account && allowBalance ? <Button variant='ghost' disabled={loading} onClick={() => void refresh()}>
         {loading ? t('查询中…') : t('刷新套餐与额度')}
       </Button> : null}
     </div>
-    <p className='detail'>{t('每组共用一个触发动作；第二条条件起可选择「与／或」。与优先于或，下面会显示明确分组。各条件组独立生效。')}</p>
-    {!draft.length ? <p className='detail'>{t('还没有条件组：账号照常参与转发，不设置额度保护。')}</p> : null}
+    <p className='detail acct-limiter-lead'>{t('每组共用一个触发动作；第二条条件起可选择「与／或」。与优先于或，下面会显示明确分组。各条件组独立生效。')}</p>
+    {!draft.length ? <p className='detail acct-limiter-lead'>{t('还没有条件组：账号照常参与转发，不设置额度保护。')}</p> : null}
     {draft.map((group, index) => {
       const state = JSON.stringify(group) === JSON.stringify(current[index]) ? live[index] : undefined
-      return <div key={index} className='rounded-lg border border-hairline p-3 space-y-2'>
-        <div className='flex flex-wrap items-center gap-2'>
+      return <div key={index} className='acct-limiter-group rounded-lg border border-hairline p-3 space-y-2'>
+        <div className='acct-limiter-head flex flex-wrap items-center gap-2'>
           <Switch checked={group.enabled} onCheckedChange={enabled => updateGroup(index, { enabled })} aria-label={t('启用该规则')} />
           <span className='text-[13px] font-medium'>{t('条件组 {n}', { n: index + 1 })}</span>
           {state ? <Badge shape='tag' variant={!group.enabled ? 'secondary' : state.hit ? 'warning' : 'success'}>
@@ -70,7 +70,7 @@ export function LimiterSection({ account, draft, onChange, allowBalance = true }
           <div className='flex-1' />
           <Button variant='ghost' size='sm' onClick={() => onChange(draft.filter((_, i) => i !== index))}>{t('删除组')}</Button>
         </div>
-        {group.conditions.map((condition, ci) => <div key={ci} className='flex flex-wrap items-center gap-2 rounded-md bg-control p-2'>
+        {group.conditions.map((condition, ci) => <div key={ci} className='acct-limiter-condition flex flex-wrap items-center gap-2 rounded-md bg-control p-2'>
           {ci > 0 ? <Select value={condition.join} onValueChange={join => updateGroup(index, {
             conditions: group.conditions.map((c, i) => i === ci ? { ...c, join: join as LimiterCondition['join'] } : c),
           })}>
@@ -87,7 +87,7 @@ export function LimiterSection({ account, draft, onChange, allowBalance = true }
           })}>{t('删除')}</Button>
         </div>)}
         <Button variant='ghost' size='sm' onClick={() => setEditor({ group: index, condition: -1, value: newCondition() })}>{t('＋ 添加条件')}</Button>
-        <FieldGroup orientation='horizontal' className='field-row'>
+        <FieldGroup orientation='horizontal' className='field-row acct-limiter-actions'>
           <Label>{t('触发动作')}</Label>
           <Select value={group.action} onValueChange={action => updateGroup(index, { action: action as LimiterGroup['action'] })}>
             <SelectTrigger className='min-w-[190px]' aria-label={t('触发动作')}><SelectValue>{group.action === 'disable' ? t('禁用整个账号（手动恢复）') : t('跳过（自动恢复）')}</SelectValue></SelectTrigger>
@@ -98,7 +98,7 @@ export function LimiterSection({ account, draft, onChange, allowBalance = true }
             <SelectContent><SelectItem value='models'>{t('命中条件的模型')}</SelectItem><SelectItem value='account'>{t('整个账号')}</SelectItem></SelectContent>
           </Select> : null}
         </FieldGroup>
-        <p className='detail break-words'>{expressionText(group.conditions, account)}</p>
+        <p className='detail break-words acct-limiter-expression'>{expressionText(group.conditions, account)}</p>
       </div>
     })}
     {!account ? <p className='detail'>{t('跨账号批量配置仅支持通用条件；套餐实例不能直接复制到其他账号。')}</p> : null}

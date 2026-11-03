@@ -60,7 +60,7 @@ export type RoutingWorkspace = {
   providers: Array<{ id: string; label: string; accountCount: number; custom: boolean; available: boolean }>
   accounts: AccountRecord[]
   sorting: AccountSorting
-  queue: { strategy: string; sticky: string; pickedId: string; ordered: RouteEntry[]; blocked: RouteEntry[] }
+  queue: { strategy: string; sticky: string; pickedId: string; ordered: RouteEntry[]; blocked: RouteEntry[]; lastRequestModel?: string }
   settings: RouteSettings
   globalSettings?: RouteSettings
   revision?: string

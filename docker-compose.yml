@@ -21,6 +21,16 @@ services:
     image: agent2api:local
     container_name: agent2api
     restart: unless-stopped
+    # 可选：给容器设内存上限。超限时内核杀掉进程，再由上面的 restart 策略拉起 ——
+    # 表现为「重启一次」，而不是把宿主机（或同机其它服务）拖垮。小内存机器
+    # （512M~1G 的 VPS / NAS）建议开，按实际并发量从 1g 起调。
+    #   普通 `docker compose` 用 mem_limit：
+    # mem_limit: 1g
+    #   swarm / `docker compose --compatibility` 用 deploy 的形式：
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 1g
     ports:
       - "3065:3065"
     environment:
@@ -37,6 +47,10 @@ services:
       # 容器内更新入口（面板「设置 → 软件更新」一键下载并替换）：镜像里默认 1 开启，
       # 置 0 关闭。注意它替换的是容器里的文件，compose 里的镜像标签不变 —— 见 README「升级」。
       AGENT2API_SELF_UPDATE: ${AGENT2API_SELF_UPDATE:-1}
+      # 可选：两处常驻内存图片缓存的上限（MiB），默认各 128。小内存机器可调小；
+      # 写坏 / 越界会回落默认值，不会让服务起不来（详见 install 文档）。
+      # AGENT2API_IMAGE_CACHE_MB: "64"
+      # AGENT2API_IMAGE_COMPRESS_CACHE_MB: "64"
     volumes:
       # 全部状态（SQLite 库、配置、日志）都在这一个卷里
       - ./data:/data

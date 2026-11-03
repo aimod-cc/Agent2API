@@ -202,9 +202,30 @@ services:
 | `AGENT2API_ALLOW_NO_KEY` | 置 `1` 关闭 fail-closed（未配 Key 也放行 `/v1`，仅限纯内网） |
 | `AGENT2API_CAPTCHA_ENABLED` | 登录页人机验证：默认 `1` 开启，`0` 关闭 |
 | `AGENT2API_SELF_UPDATE` | 容器内的更新入口：默认 `1` 开启（面板可「下载并更新」）；置 `0` 关闭，只走手动升级 |
+| `AGENT2API_IMAGE_CACHE_MB` | 生成图片的内存下载缓存上限（MiB，默认 `128`，范围 8~4096）。写坏 / 越界回落默认值 |
+| `AGENT2API_IMAGE_COMPRESS_CACHE_MB` | 会话图片压缩结果的内存缓存上限（MiB，默认 `128`，范围 8~4096，口径同上） |
 | `WORKBUDDY_UPDATE_REPO` + `WORKBUDDY_UPDATE_API_BASE` | 进阶：把「检查更新 / 下载更新」换成自建源。前者换仓库（默认跟上游 `aimod-cc/Agent2API`，fork 后可改），后者换 API 根（默认 `https://api.github.com`，需返回与 GitHub 同形的 release JSON）。配了自建源后，下载白名单只额外放行**该源自己的域名**（按源的 scheme：配 `http://` 就允许明文下载，仅建议本地演练/内网镜像用）|
 
 从源码构建：克隆本仓库后 `docker compose up -d --build`（镜像里只有网关与面板，不含 Rust 工具链）。
+
+### 内存占用
+
+镜像里的网关（Linux 目标）已内置 jemalloc 内存分配器。长时间运行、多账号并发转发时，它比系统自带的分配器更不容易产生内存碎片、RSS 也不容易缓慢增长 —— 这正是小内存机器最常被拖垮或 OOM 的一环。
+
+小内存机器建议给容器设一个内存上限：超限时内核杀掉进程，再由 `restart: unless-stopped` 拉起，表现为「重启一次」，而不是把宿主机（或同机其它服务）拖垮。
+
+```bash
+# docker run
+docker run -d --name agent2api --restart unless-stopped --memory=1g \
+  -p 3065:3065 -v ./data:/data \
+  aimodcc/agent2api:latest
+```
+
+compose 用户在服务里加一行 `mem_limit: 1g`（`docker-compose.yml` 里已附注释示例）；swarm 或 `docker compose --compatibility` 用 `deploy.resources.limits.memory`。1g 只是起点，按实际并发量调。
+
+两处常驻内存的图片缓存上限都能用环境变量调小（默认各 `128` MiB）：`AGENT2API_IMAGE_CACHE_MB`（生成图片的下载缓存）、`AGENT2API_IMAGE_COMPRESS_CACHE_MB`（会话图片压缩结果缓存）。写坏或越界会回落默认值，不会让服务起不来。
+
+`MALLOC_ARENA_MAX=2` 这类 glibc 分配器调优，只对**没有内置 jemalloc 的形态**有意义（旧版镜像、自行编译的服务端、桌面端）；本镜像已不需要设它。
 
 **网页面板的功能差异**（源于「没有本机桌面客户端」）：网页登录（WorkBuddy / Qoder / Cline）、手机验证码、粘贴凭证完全可用；需要本机回调的网页登录（AutoClaw / CatPaw / Accio / CodeArts / Trae）与「导入本机登录态」不可用，请改用粘贴凭证。桌面端开着「同时开放网页管理面板」时，用浏览器访问该面板也是这一套差异 —— 同一份界面、同一套判定。
 

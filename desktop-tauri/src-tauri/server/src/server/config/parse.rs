@@ -474,6 +474,48 @@ pub(super) fn captcha_pool_from(map: &Map<String, Value>) -> CaptchaPoolSettings
 
 // ─── 历史路由优先级（providerRoute，只读，供账号迁移）───────────
 
+// ─── 会话图片压缩的解析（开关 + 长边 / 质量 / 阈值三项）──────────────
+
+/// 由原始 JSON 解析会话图片压缩设置（缺字段各自用默认值；越界回落默认）。
+///
+/// 开关：**只有字面 `false` 才算关**，键缺失 / 写成别的值（`"on"` / `1`）都按开
+/// —— 与 `debug_mode` 那条相反。语义是「默认开启、能一键关」：老配置里没有这个
+/// 键时一启动即开启（见 `KEY_IMAGE_COMPRESS_ENABLED` 的取舍说明）。
+///
+/// 三项参数：范围校验在写侧（`api::image_compress`）是 400 报错，在这里是回落默认
+/// —— 手改库写进一个越界值时，宁可回到 2048 / 80 / 512（OmniProxy 的默认值），
+/// 也不要让压缩层拿到一个必然坏事的值（例如质量为 0 会把图压成一片糊）。
+pub(super) fn image_compress_from(map: &Map<String, Value>) -> ImageCompressSettings {
+    let defaults = ImageCompressSettings::default();
+    ImageCompressSettings {
+        enabled: map
+            .get(KEY_IMAGE_COMPRESS_ENABLED)
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        max_edge: bounded_int_field(
+            map,
+            KEY_IMAGE_COMPRESS_MAX_EDGE,
+            defaults.max_edge,
+            IMAGE_COMPRESS_MIN_MAX_EDGE,
+            IMAGE_COMPRESS_MAX_MAX_EDGE,
+        ),
+        quality: bounded_int_field(
+            map,
+            KEY_IMAGE_COMPRESS_QUALITY,
+            defaults.quality,
+            IMAGE_COMPRESS_MIN_QUALITY,
+            IMAGE_COMPRESS_MAX_QUALITY,
+        ),
+        threshold_kb: bounded_int_field(
+            map,
+            KEY_IMAGE_COMPRESS_THRESHOLD_KB,
+            defaults.threshold_kb,
+            IMAGE_COMPRESS_MIN_THRESHOLD_KB,
+            IMAGE_COMPRESS_MAX_THRESHOLD_KB,
+        ),
+    }
+}
+
 // ─── 账号路由的解析（策略 / 粘性 / 退避 / 垫底 / 熔断）──────────────
 
 /// 由原始 JSON 解析路由设置（缺字段各自用默认值；非法取值回落默认）。
