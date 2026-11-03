@@ -628,6 +628,7 @@ pub fn panel_router(state: ServerState) -> Router {
         // 各家 provider 的转发与账号实现都在用户安装的插件里。这些管理接口
         // **全部挂 protected**：装插件等于允许本机跑任意代码，与备份导入同级敏感。
         // 安装的 Bytes 提取器读取最终扩展：局部有限上限后写覆盖外层 32 MiB。
+        .route("/api/maintenance-policy", get(api::maintenance::get).put(api::maintenance::put))
         .route("/api/plugins", get(api::plugins::list))
         .route("/api/plugins/settings", get(api::plugins::settings).patch(api::plugins::save_settings))
         .route("/api/plugins/progress", get(api::plugins::progress))

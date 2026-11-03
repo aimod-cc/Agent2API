@@ -430,6 +430,8 @@ const BRIDGE_JS: &str = r#"
     // 面板的桥）：只加一边时，另一形态下的页面会报「桥接方法缺失」——
     // 标题栏那一族方法有同样的教训，见 zcode-claim 那段的说明。
     // 写操作返回最新代理列表；测试失败以 success:false 表达。
+    getMaintenancePolicy: () => call('GET', '/api/maintenance-policy'),
+    saveMaintenancePolicy: payload => call('PUT', '/api/maintenance-policy', payload),
     getProxyPool: () => call('GET', '/api/proxies/pool'),
     createProxyPoolItem: payload => call('POST', '/api/proxies/pool', payload || {}),
     updateProxyPoolItem: payload => call('POST', '/api/proxies/pool/update', payload || {}),

@@ -1,6 +1,7 @@
 /** 网络代理页：手动 HTTP / SOCKS5 地址与 Clash Verge 同步端点。 */
 
 import * as React from 'react'
+import { MaintenancePolicy } from './maintenance-policy'
 import { createRoot } from 'react-dom/client'
 import {
   Badge, Button, Card, CardHeader, Checkbox, InputGroup, InputGroupAddon,
@@ -141,6 +142,7 @@ function ProxiesPage() {
   }
 
   return <>
+    <MaintenancePolicy items={rows} />
     <Card render={<section />} className='panel'>
       <CardHeader className='panel-head'>
         <h2>{t('代理列表')}</h2><Badge variant='secondary' shape='tag'>{rows.length}</Badge>
