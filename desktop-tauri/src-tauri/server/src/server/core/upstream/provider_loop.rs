@@ -100,6 +100,7 @@ use crate::server::logging;
 use super::payload::{send_body, ProviderContext, SendBody};
 use super::request::{read_upstream_error, send_chat_request, TransportRequest};
 use super::usage::LogPhase;
+use super::usage::RequestTelemetry;
 use super::{
     account_display, account_label, cancellation, connections::ConnectionGuard, describe_proxy,
     format_reset_text, refusal, reset_hint, rotate, ForwardOutcome, InFlightGuard, RouteTarget,
@@ -193,6 +194,7 @@ fn take_switch(switches_left: &mut usize, total: usize) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn defer_to_next_account(
     service: &UpstreamService,
+    telemetry: &RequestTelemetry,
     provider_ids: &[&str],
     cooldown_keys: &rotate::CooldownKeys<'_>,
     tried_ids: &mut Vec<String>,
@@ -205,6 +207,7 @@ fn defer_to_next_account(
     switches_left: &mut usize,
     switch_total: usize,
     pinned: Option<&str>,
+    cross_provider_only: bool,
 ) -> bool {
     if let Some(account_id) = target.account_id.clone() {
         if !tried_ids.contains(&account_id) {
@@ -214,9 +217,32 @@ fn defer_to_next_account(
     let Some(next) =
         rotate::pick_next_account(service, provider_ids, cooldown_keys, tried_ids, pinned)
     else {
+        note_deferral_notice(
+            telemetry,
+            if tried_ids
+                .last()
+                .is_some_and(|last| !rotate::allows_route_skip(service, last))
+            {
+                "未换号（该账号已关闭失败换号）"
+            } else {
+                "未换号（无可用候选账号）"
+            },
+        );
         return false;
     };
+    // ── 体积拒绝只允许跨家顺延（issue #6）────────────────────────
+    // 字节墙是**每家自己的**（CatPaw 1 MiB、CodeArts 约 6 MiB、Loomy 的 APIG
+    // 约 12 MB）：同一份体在同一家的另一个账号上必然再撞一次，但换一家可能
+    // 直接过。所以这条判据收在这里 —— 挑出候选之后才判，判据只有一份。
+    if cross_provider_only && !payload_bound_blocks_switch(rotate::provider_of(&next), provider_id) {
+        note_deferral_notice(
+            telemetry,
+            "未换号（请求体超过这一家的入口上限，同家换号无效）",
+        );
+        return false;
+    }
     if !take_switch(switches_left, switch_total) {
+        note_deferral_notice(telemetry, "未换号（换号预算已耗尽）");
         return false;
     }
     let next_home = {
@@ -250,6 +276,14 @@ fn defer_to_next_account(
     true
 }
 
+/// 顺延判定收尾但**没有换号**时，把「为什么停在这里」写进本轮尝试明细的 `notice`。
+///
+/// 三档原因共用同一出口（原样返回本次错误），但排障时用户要能分清「明确禁止换号 /
+/// 队列里没有候选 / 换号预算耗尽」；尝试明细的 `notice` 不参与转发判定，只补可观测性。
+fn note_deferral_notice(telemetry: &RequestTelemetry, tag: &str) {
+    telemetry.note_attempt_notice(tag);
+}
+
 /// 瞬时 HTTP 状态码：适配器没声明专属重试时，按全局重试设置原样重发再看一眼。
 ///
 /// 只收 408（请求超时）与 5xx（网关 / 服务器错误）—— 都是上游或链路自己的
@@ -279,6 +313,41 @@ const PAYLOAD_SIZE_REJECTION_STATUSES: &[u16] = &[413];
 /// 与 [`PAYLOAD_SIZE_REJECTION_STATUSES`] 分成两个常量而不是合一：
 /// 一个是「字节」，一个是「名字」，出处与措辞不同，将来各自的排除面也可能变。
 const DETERMINISTIC_NOT_FOUND_STATUSES: &[u16] = &[404];
+
+/// 这一类的失败**在同一家换账号也没有意义**：结论由「这份请求体」决定，与是
+/// 哪个账号无关。
+///
+/// ── 为什么 413 在这里（而 404 不在）──────────────────────────
+/// 404 是「这个账号 / 这一家的套餐里没有这个模型」—— 换一个账号确实可能命中
+/// （见 [`DETERMINISTIC_NOT_FOUND_STATUSES`] 的说明），所以它照旧换号。
+/// 413 是「这份字节超过了入口的上限」：同一家的墙按字节量，同一份 body 换哪个
+/// 账号都一样大。issue #6 的形状正是如此 —— CatPaw 的 openresty 卡在 1 MiB，
+/// 会话式路径拿到的又是默认 Fatal，于是它会**把这一家的每个候选账号都撞一遍
+/// 同样的 413**，客户端白等 N 个往返，最后拿到的还是「HTTP 413: <html>…」。
+///
+/// ── 但**换一家**必须留着（这条改动第一版写错过）────────────────
+/// 字节墙是**每家自己的**：CatPaw 1 MiB、CodeArts 约 6 MiB、Loomy 的 APIG
+/// 约 12 MB。同一份 900 KB 的会话在 CatPaw 上 413、在别家可能 200 —— 这正是
+/// `aaa9d11` 那次修复里实测到的事实（同一份会话在 codearts 上是 200）。
+/// 所以判据按**家**收窄：同一家不再换号，换到另一家照常放行。
+const PAYLOAD_BOUND_STATUSES: &[u16] = &[413];
+
+/// 这次失败是否属于「**同一家**换号也白换」的确定性体积拒绝。
+fn payload_bound_failure(class: &UpstreamErrorClass) -> bool {
+    matches!(
+        class,
+        UpstreamErrorClass::Fatal { status, .. } if PAYLOAD_BOUND_STATUSES.contains(status)
+    )
+}
+
+/// 换到 `next` 还有没有意义：体积拒绝只在**同家**无意义，跨家仍可能成功。
+///
+/// 与 [`payload_bound_failure`] 分开是因为判据不同：前者问「这份失败是什么」，
+/// 这里问「换成这个账号还有没有救」。两条都在，别只留一条 —— 只留前者会掐掉
+/// 跨家回退（第一版就是这么错的），只留后者则同家白撞照旧。
+fn payload_bound_blocks_switch(next_provider: &str, current_provider: &str) -> bool {
+    next_provider == current_provider
+}
 
 /// 轮询出网档（`core::proxy_rotate`）在 429 时**原地换出口**的次数上限。
 ///
@@ -331,6 +400,42 @@ fn transport_retry_advice(error: &super::request::UpstreamRequestError, remainin
         delay_ms: config::retry_settings().delay_ms(),
         reason: error.reason.clone(),
     })
+}
+
+/// 上游 `Retry-After` 头 → 绝对恢复时刻（毫秒）；两种合法形态都认：
+/// delay-seconds（整数秒）与 HTTP-date（RFC 2822）。无法识别返回 None（调用方落默认冷却）。
+fn retry_after_reset_at(retry_after: Option<&str>, now_ms: i64) -> Option<i64> {
+    let text = retry_after?.trim();
+    if let Ok(seconds) = text.parse::<i64>() {
+        return (seconds > 0)
+            .then(|| now_ms.saturating_add(seconds.saturating_mul(1000)));
+    }
+    chrono::DateTime::parse_from_rfc2822(text)
+        .ok()
+        .map(|date| date.timestamp_millis())
+        .filter(|reset_at| *reset_at > now_ms)
+}
+
+/// 空响应体的 429 兜底：HTTP 状态码足以证明是限流，但插件分类器拿不到文案证据
+/// 时可能把它降级成 Fatal —— 那样既不冷却也不换号。这里只把「429 + 空文案 +
+/// 无证据分类」按短期限流归类，其余形态一律原样保留。
+fn empty_body_429_class(
+    class: UpstreamErrorClass,
+    status: u16,
+    body_message: &str,
+    upstream_code: Option<i64>,
+    retry_after: Option<&str>,
+    now_ms: i64,
+) -> UpstreamErrorClass {
+    if status == 429 && body_message.is_empty() && matches!(class, UpstreamErrorClass::Fatal { .. }) {
+        return UpstreamErrorClass::QuotaLimited {
+            reset_at: retry_after_reset_at(retry_after, now_ms),
+            message: "上游返回 429: 请求频率受限，请稍后重试".to_string(),
+            upstream_code,
+            status,
+        };
+    }
+    class
 }
 
 /// 兜底退避建议：**非限额**的上游错误，在换账号之前先在同一账号上重发。
@@ -758,6 +863,7 @@ async fn attempt_queue(
                             // （`take_switch` 已写过那行终端日志），本次错误原样
                             // 返回：与「没有下一个可用账号」同一个出口。
                             if !take_switch(&mut switches_left, switch_total) {
+                                note_deferral_notice(ctx.telemetry, "未换号（换号预算已耗尽）");
                                 return Err(error);
                             }
                             logging::console_line(
@@ -772,7 +878,20 @@ async fn attempt_queue(
                             );
                             continue 'accounts;
                         }
-                        None => return Err(error),
+                        None => {
+                            note_deferral_notice(
+                                ctx.telemetry,
+                                if tried_ids
+                                    .last()
+                                    .is_some_and(|last| !rotate::allows_route_skip(service, last))
+                                {
+                                    "未换号（该账号已关闭失败换号）"
+                                } else {
+                                    "未换号（无可用候选账号）"
+                                },
+                            );
+                            return Err(error);
+                        }
                     }
                 }
             }
@@ -846,6 +965,12 @@ async fn attempt_queue(
                     // 拆散取值 —— 拆散后「漏带一个字段」编译期与运行期都不报错
                     // （本分支此前就把 `reset_at` 写成死 `None`，见那个函数的说明）。
                     let class = adapter.classify_conversation_error(&error);
+                    // ── 体积拒绝：同家不换号，跨家仍放行（issue #6）──────
+                    // 会话式路径没有「原地重发」这一步，它的兜底就是顺延；
+                    // 同一家的字节墙与账号无关（换过去只会把同一份体再撞一次），
+                    // 但**别家**的墙不一样宽 —— 所以先挑下一个候选，只在它还是
+                    // 同一家时才收手（见 `payload_bound_blocks_switch`）。
+                    let payload_bound = payload_bound_failure(&class);
                     // Scoped runtime 的原生 loader 已拥有单次 token 恢复；宿主不再消费
                     // refresh，也不把 Fatal/权限/WAF/取消/超时改成账号顺延。
                     if strict_runtime && !matches!(&class, UpstreamErrorClass::QuotaLimited { .. }) {
@@ -880,10 +1005,23 @@ async fn attempt_queue(
                         ctx.pinned_account,
                     ) {
                         Some(next) => {
+                            if payload_bound
+                                && payload_bound_blocks_switch(
+                                    rotate::provider_of(&next),
+                                    provider_id,
+                                )
+                            {
+                                note_deferral_notice(
+                                    ctx.telemetry,
+                                    "未换号（请求体超过这一家的入口上限，同家换号无效）",
+                                );
+                                return Err(error);
+                            }
                             // 换号额度用尽 → 队列里即使还有人也不再顺延
                             // （`take_switch` 已写过那行终端日志），本次错误原样
                             // 返回：与「没有下一个可用账号」同一个出口。
                             if !take_switch(&mut switches_left, switch_total) {
+                                note_deferral_notice(ctx.telemetry, "未换号（换号预算已耗尽）");
                                 return Err(error);
                             }
                             // 顺延这件事本身由请求日志的尝试链回答（本轮明细已经
@@ -900,7 +1038,20 @@ async fn attempt_queue(
                             );
                             continue 'accounts;
                         }
-                        None => return Err(error),
+                        None => {
+                            note_deferral_notice(
+                                ctx.telemetry,
+                                if tried_ids
+                                    .last()
+                                    .is_some_and(|last| !rotate::allows_route_skip(service, last))
+                                {
+                                    "未换号（该账号已关闭失败换号）"
+                                } else {
+                                    "未换号（无可用候选账号）"
+                                },
+                            );
+                            return Err(error);
+                        }
                     }
                 }
             }
@@ -1112,6 +1263,7 @@ async fn attempt_queue(
                     }
                     if defer_to_next_account(
                         service,
+                        ctx.telemetry,
                         provider_ids,
                         &cooldown_keys,
                         &mut tried_ids,
@@ -1124,6 +1276,7 @@ async fn attempt_queue(
                         &mut switches_left,
                         switch_total,
                         ctx.pinned_account,
+                        false,
                     ) {
                         continue 'accounts;
                     }
@@ -1299,6 +1452,14 @@ async fn attempt_queue(
                     // 一样按动作 1 / 动作 3 换号顺延：直接换下一个账号继续试，
                     // 换满或没有更多账号时错误才原样返回客户端。
                     let named_switch = direct_switch_status(i64::from(failure.error.status_code));
+                    // ── 体积拒绝：同家不换号，跨家仍放行（issue #6）──────
+                    // 与有状态路径同一条判据。原地重发那一档已经由
+                    // `fallback_retry_advice` 挡住，这里补的是「同家换号」那一档：
+                    // 别家的字节墙更宽，跨家回退必须留着（见
+                    // `payload_bound_blocks_switch` 的说明）。判定放在
+                    // `defer_to_next_account` 挑出候选之后 —— 只有真挑到
+                    // 「同一家的另一个账号」时才收手。
+                    let payload_bound = payload_bound_failure(&failure.class);
                     // ── 动作 0：内容策略拦截 → 换中性提示词，同账号立即重试一次 ──
                     // 上游按逐字精确匹配审核，命中即整单拦截；这是**误报**而不是
                     // 账号问题（余额健康、未限流、session 未死），所以既不罚账号
@@ -1500,6 +1661,10 @@ async fn attempt_queue(
                             let from_label =
                                 account_label(target.account.as_ref(), &account_id, &session);
                             if !rotate::allows_route_skip(service, &account_id) {
+                                note_deferral_notice(
+                                    ctx.telemetry,
+                                    "未换号（该账号已关闭失败换号）",
+                                );
                                 rotate::report_limit_event(
                                     "warn",
                                     &format!("账号「{from_label}」对模型 {limit_label} 已限额，已关闭失败换号"),
@@ -1567,6 +1732,10 @@ async fn attempt_queue(
                                     continue 'accounts;
                                 }
                                 None => {
+                                    note_deferral_notice(
+                                        ctx.telemetry,
+                                        "未换号（无可用候选账号）",
+                                    );
                                     // 所有候选都在冷却 / 禁用里 —— 把**最早的恢复时刻**
                                     // 带进文案：客户端（Claude Code / Codex 等会读这条
                                     // 文案的）才能做合法的退避等待，而不是立刻重试再撞
@@ -1670,6 +1839,7 @@ async fn attempt_queue(
                     // 失败」共用同一条路，判据不该有两份。
                     if defer_to_next_account(
                         service,
+                        ctx.telemetry,
                         provider_ids,
                         &cooldown_keys,
                         &mut tried_ids,
@@ -1682,6 +1852,7 @@ async fn attempt_queue(
                         &mut switches_left,
                         switch_total,
                         ctx.pinned_account,
+                        payload_bound,
                     ) {
                         continue 'accounts;
                     }
@@ -2859,6 +3030,13 @@ async fn send_with_retry(
             return Ok(super::images::ImageResponse::Live(response));
         }
         let status = response.status().as_u16();
+        // Retry-After 要在读 body **之前**取（`read_upstream_error` 会吃掉响应）：
+        // 空响应体的 429 没有可解析文案，但上游可能用这个头给出精确冷却时长。
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         // 错误响应体的读取同样受「非流式响应超时」管（对应 OmniProxy
         // readBodyWithStallGuard 的用法之一）：上游接了错误响应却迟迟不吐完
         // 出错体时，不能让「读错误」把请求挂住 —— 读不出来就当上游没给细节，
@@ -2874,7 +3052,26 @@ async fn send_with_retry(
             }
         };
         let body = detail.to_value();
-        let class = adapter.classify_error_async(status, &body).await;
+        let mut class = adapter.classify_error_async(status, &body).await;
+        class = empty_body_429_class(
+            class,
+            status,
+            &detail.message,
+            detail.code,
+            retry_after.as_deref(),
+            logging::now_ms(),
+        );
+        // 分类器没给出恢复时刻时，优先相信上游的 Retry-After（秒数或 HTTP 日期）；
+        // 都没有时 mark_account_limited 自己会落 10 分钟兜底冷却。
+        if let UpstreamErrorClass::QuotaLimited { reset_at: slot, .. } = &mut class {
+            if slot.is_none() {
+                if let Some(reset_at) =
+                    retry_after_reset_at(retry_after.as_deref(), logging::now_ms())
+                {
+                    *slot = Some(reset_at);
+                }
+            }
+        }
         let decision = adapter
             .retry_decision_async(status, &body, budget.used(), budget.total)
             .await;
@@ -2937,9 +3134,13 @@ async fn send_with_retry(
         );
         // 文案由适配器给出（含 provider 提示），编排层原样组装成网关错误
         let error = match &class {
-            UpstreamErrorClass::QuotaLimited { status, message, upstream_code, .. } => {
-                GatewayError::with_status(*status as i32, message.clone())
-                    .with_optional_code(*upstream_code)
+            UpstreamErrorClass::QuotaLimited { status, message, upstream_code, reset_at, .. } => {
+                let error = GatewayError::with_status(*status as i32, message.clone())
+                    .with_optional_code(*upstream_code);
+                match (*reset_at).map(|reset_at| (reset_at - logging::now_ms()) / 1000) {
+                    Some(seconds) if seconds > 0 => error.with_retry_after_seconds(seconds as u64),
+                    _ => error,
+                }
             }
             // 内容拦截与 Fatal 的客户端形态相同（状态码 + 上游原文 + 上游码）：
             // 区别只在**编排动作**（前者不罚账号、先换提示词补救），不在文案。
@@ -3043,5 +3244,96 @@ mod local_failure {
         let error = super::quota_refusal_error("内容拒答".to_string(), now + 90_000, false);
         assert_eq!(502, error.status_code);
         assert_eq!(None, error.retry_after_secs, "内容型不该带 Retry-After");
+    }
+
+    #[test]
+    fn retry_after_seconds_become_an_absolute_reset_moment() {
+        let now = 1_700_000_000_000i64;
+        // delay-seconds：30 秒后的绝对毫秒时刻
+        assert_eq!(
+            super::retry_after_reset_at(Some("30"), now),
+            Some(now + 30_000),
+            "整数字段应解释为相对秒数"
+        );
+        // 0 / 负数不作为恢复时刻 —— 让调用方落默认冷却
+        assert_eq!(super::retry_after_reset_at(Some("0"), now), None);
+        assert_eq!(super::retry_after_reset_at(Some("-5"), now), None);
+        // 畸形值不 panic，只返回 None
+        assert_eq!(super::retry_after_reset_at(Some("later"), now), None);
+        // HTTP-date（RFC 2822）同样被接受
+        assert_eq!(
+            super::retry_after_reset_at(Some("Wed, 01 Jan 2031 00:00:30 GMT"), now),
+            Some(1_924_992_030_000),
+        );
+        // 缺失头返回 None
+        assert_eq!(super::retry_after_reset_at(None, now), None);
+    }
+
+    #[test]
+    fn a_past_rfc2822_date_is_not_a_future_reset() {
+        let now = 1_700_000_000_000i64;
+        // 2000 年的日期远早于 now —— 不能把它当冷却恢复时刻
+        assert_eq!(
+            super::retry_after_reset_at(Some("Sat, 01 Jan 2000 00:00:00 GMT"), now),
+            None,
+        );
+    }
+
+    #[test]
+    fn an_empty_body_429_is_treated_as_short_quota_cooldown() {
+        use super::UpstreamErrorClass;
+
+        let now = 1_700_000_000_000i64;
+        let fatal = UpstreamErrorClass::Fatal {
+            status: 429,
+            message: String::new(),
+            upstream_code: None,
+        };
+        // 不带 Retry-After：reset_at 为 None，由 mark_account_limited 落默认冷却
+        let class = super::empty_body_429_class(fatal.clone(), 429, "", None, None, now);
+        assert!(
+            matches!(class, UpstreamErrorClass::QuotaLimited { status: 429, reset_at: None, .. }),
+            "空 body 429 必须归类为限额，才能触发冷却与换号，得到 {class:?}"
+        );
+        // 带 Retry-After：恢复时刻优先取上游给的秒数
+        let class = super::empty_body_429_class(fatal, 429, "", None, Some("30"), now);
+        match class {
+            UpstreamErrorClass::QuotaLimited { reset_at: Some(reset_at), status, .. } => {
+                assert_eq!(status, 429);
+                assert_eq!(reset_at, now + 30_000);
+            }
+            other => panic!("带 Retry-After 的空 429 应有精确恢复时刻，得到 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_body_429_does_not_overwrite_an_evidence_backed_class() {
+        use super::UpstreamErrorClass;
+
+        let now = 1_700_000_000_000i64;
+        // 插件已经给出有证据的限额分类：即使 body 为空也不能降级兜底折腾它
+        let quota = UpstreamErrorClass::QuotaLimited {
+            reset_at: Some(now + 3600_000),
+            message: "上游返回 429: quota exceeded".to_string(),
+            upstream_code: Some(429),
+            status: 429,
+        };
+        let class = super::empty_body_429_class(quota.clone(), 429, "", Some(429), None, now);
+        assert!(matches!(class, UpstreamErrorClass::QuotaLimited { .. }), "{class:?}");
+        // 失败但携带正文的 429 不是「空 body」，保持原来分类，不改写成限额
+        let fatal_with_text = UpstreamErrorClass::Fatal {
+            status: 429,
+            message: "上游返回 429: not rate limited after all".to_string(),
+            upstream_code: None,
+        };
+        let class = super::empty_body_429_class(
+            fatal_with_text.clone(),
+            429,
+            "not rate limited after all",
+            None,
+            None,
+            now,
+        );
+        assert!(matches!(class, UpstreamErrorClass::Fatal { status: 429, .. }), "{class:?}");
     }
 }

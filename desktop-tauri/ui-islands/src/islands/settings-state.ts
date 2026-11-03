@@ -265,6 +265,16 @@ export type StorageState = {
   dailyDays: number | null
   downstreamRaw: number | null
   upstreamRaw: number | null
+  /**
+   * 库内空闲页占用的字节数（压缩一次能还给文件系统多少）。
+   *
+   * `auto_vacuum=0` 下删除行只把页标成空闲，库文件**不会**缩小 —— 用户会看到
+   * 「库里没多少数据、文件却有几个 GB」。这是实测「C 盘爆满」最容易被误读成
+   * 「程序偷偷占盘」的那一项，所以单独露出来，而不是只给一个总占用。
+   */
+  reclaimableBytes: number
+  /** 空闲页占比（0..1，后端保留三位小数）。0 = 没有可回收空洞。 */
+  freePageRatio: number
 }
 
 /** 导入失败明细（只列前 3 条，more 表示还有更多） */
@@ -456,6 +466,8 @@ const INITIAL: SettingsSnapshot = {
     dailyDays: null,
     downstreamRaw: null,
     upstreamRaw: null,
+    reclaimableBytes: 0,
+    freePageRatio: 0,
   },
   captcha: { available: true, desktop: false, web: false, localPanel: false },
   account: { status: 'loading', registered: false, username: '', password: null },
@@ -2562,7 +2574,8 @@ function finiteOrNull(value: unknown): number | null {
 
 /**
  * 渲染概况。形状是后端的**单库语义**：
- * `{ configDir, database: { file, bytes, available, accounts, logs, requests, dailyDays, downstreamRaw, upstreamRaw } }`。
+ * `{ configDir, database: { file, bytes, reclaimableBytes, freePageRatio, available,
+ *   accounts, logs, requests, dailyDays, downstreamRaw, upstreamRaw } }`。
  * 后端起不来（网络 / 桥失败）与库打不开是两件事，但对这一页的结论相同：读不到存储概况就
  * 展示「不可用」而不是一排看着正常的 0。
  */
@@ -2588,6 +2601,10 @@ export function renderStorage(data?: unknown): void {
       dailyDays: finiteOrNull(record.dailyDays),
       downstreamRaw: finiteOrNull(record.downstreamRaw),
       upstreamRaw: finiteOrNull(record.upstreamRaw ?? record.debug),
+      // 空洞读数：老后端没有这两个字段时回落 0（= 不显示「可回收」），
+      // 而不是让视图去猜一个 undefined。
+      reclaimableBytes: finiteOrNull(record.reclaimableBytes) ?? 0,
+      freePageRatio: finiteOrNull(record.freePageRatio) ?? 0,
     },
   })
 }

@@ -90,6 +90,7 @@ async fn find_asset(id: &str) -> Result<update::PackAsset, String> {
         protocol: agent2api_provider_protocol::PROTOCOL_VERSION,
         repo: update::FALLBACK_REPO.to_string(),
         tag_template: if id == "agent2api-web-providers" { "web-v{version}" } else { "v{version}" }.to_string(),
+        alt_tag_templates: Vec::new(),
         asset_template: "{id}-{version}-{target}.zip".to_string(),
         homepage: String::new(),
         require_signed: true,

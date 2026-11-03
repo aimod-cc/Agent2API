@@ -443,6 +443,13 @@ pub(crate) fn safety_backup(snapshot: &Snapshot, config_dir: &std::path::Path) -
         let _ = std::fs::remove_file(&tmp);
         format!("保存安全备份失败: {error}")
     })?;
+    // 与整库恢复的 pre-restore-* 同一套保留上限：自动同步会在每次下载前写一份，
+    // 不清理的话磁盘占用随下载次数线性增长。留 2 份足够覆盖「这次也错了」。
+    crate::server::db::backup::retention::prune_backups(
+        &dir,
+        crate::server::db::backup::retention::BackupKind::CloudSync,
+        2,
+    );
     Ok(name)
 }
 

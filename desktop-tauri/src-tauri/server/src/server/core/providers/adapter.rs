@@ -634,6 +634,12 @@ pub trait ProviderAdapter: Send + Sync {
         !(200..300).contains(&status)
     }
 
+    /// [`Self::is_error_response`] 的异步形态。
+    ///
+    /// ── 为什么这一位需要异步 ────────────────────────────────────
+    /// 插件家的判据在子进程里（协议方法 `is_error_response`），而 trait 的
+    /// 同步签名没法 await 一次 RPC；转发循环本身就在 async 上下文里，所以
+    /// 把这一位做成异步钩子，默认转调同步版。内置家逐字不变。
     fn is_error_response_async<'a>(
         &'a self,
         status: u16,

@@ -80,6 +80,7 @@
   "余额优先": "",
   "作为 system 消息注入给助手": "Injetado no assistente como mensagem system",
   "作者尚未提供插件介绍。": "O autor ainda não forneceu uma descrição do plugin.",
+  "作者：{author}": "",
   "例如：家里、公司": "ex.: Casa, Escritório",
   "侧边栏布局模块未加载（ui/sidebar-layout.js 应在 app.js 之前引入）。": "O módulo de layout da barra lateral não foi carregado (ui/sidebar-layout.js deve vir antes de app.js).",
   "侧边栏没有显示任何菜单。到「设置 → 显示 → 侧边栏菜单」里打开需要的项。": "Nenhum menu aparece na barra lateral. Ative os que precisar em Configurações → Exibição → Menus da barra lateral.",

@@ -83,6 +83,17 @@ pub fn list_item(model: &Value, provider_id: &str) -> Value {
     if let Some(value) = model.get("maxInputTokens").filter(|value| !value.is_null()) {
         item.insert("max_input_tokens".to_string(), value.clone());
     }
+    // 入口的**请求体字节上限**（CatPaw 的 openresty 卡在 1 MiB，见 issue #6）。
+    //
+    // 为什么单独一个键：`max_input_tokens` 按 token 记，而限制是字节 —— 同一个
+    // 窗口在中文（3 字节/字）与代码（约 4 字节/token）下差好几倍。把字节墙也
+    // 声明出来，客户端（以及看清单排障的人）才能理解「为什么窗口没满却 413」。
+    //
+    // 只有会给这个键的家才透出（目前只有 CatPaw）；其余家清单里没有 ⇒ 不出现，
+    // 与 `max_output_tokens` 等键的「缺失即不声明」同一口径。
+    if let Some(value) = model.get("maxRequestBytes").filter(|value| !value.is_null()) {
+        item.insert("max_request_bytes".to_string(), value.clone());
+    }
     // 两个模态位先取成局部量：下面的 `input_modalities` 必须与它们**同源**
     // —— 同一批生效值（含用户覆盖）、同一套真值判定，两处声明才不会漂移
     let images = model.get("supportsImages").map(js_truthy).unwrap_or(false)
@@ -170,6 +181,37 @@ fn normalize_model_id(value: &str) -> String {
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// `maxRequestBytes` 必须真的**到达下游**（issue #6）。
+    ///
+    /// 这条用例的存在是因为 `list_item` 是逐键白名单重建 —— 2026-11 加这个键时
+    /// 插件侧写了、宿主侧漏了，键只活在插件里，`/v1/models` 上一个字节都看不到。
+    /// 白名单的形状决定了「加了字段却忘了映射」不会报错，只会静默丢失。
+    #[test]
+    fn the_entry_body_limit_reaches_the_public_model_list() {
+        let item = list_item(
+            &json!({"id": "glm-5.3-flash", "maxInputTokens": 204800, "maxRequestBytes": 1048576}),
+            "catpaw",
+        );
+        assert_eq!(Some(204_800), item.get("max_input_tokens").and_then(Value::as_i64));
+        assert_eq!(
+            Some(1_048_576),
+            item.get("max_request_bytes").and_then(Value::as_i64),
+            "字节墙必须出现在 /v1/models 条目里，否则下游只会按 token 窗口估算"
+        );
+        // 反面对照：没声明这个键的家不该凭空多出一项
+        let plain = list_item(&json!({"id": "kimi-k3"}), "catpaw");
+        assert!(
+            plain.get("max_request_bytes").is_none(),
+            "没有字节限制的家不该被这个键污染"
+        );
+    }
 }
 
 /// 经典 Levenshtein 距离（模型 id 都很短，O(nm) 足够）

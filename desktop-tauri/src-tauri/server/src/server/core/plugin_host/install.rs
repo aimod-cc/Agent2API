@@ -68,10 +68,17 @@ pub use super::pack_view::{list_packs, resolve_ui_file, PackProviderSummary, Pac
 /// `official-2026`：2026-10 生成，私钥只存在发布方与插件仓库的 GitHub
 /// Actions secret（`AGENT2API_PLUGIN_KEY`）里，CI 打包后自动签名。
 /// 轮换时把新公钥加进来、等插件包全部重签后再删旧的。
-pub const OFFICIAL_PUBKEYS: &[(&str, &str)] = &[(
-    "official-2026",
-    "7cdac378ff9bf23b72ae1b686f19859b3c802c26eed13c699f7df39f027352d6",
-)];
+pub const OFFICIAL_PUBKEYS: &[(&str, &str)] = &[
+    (
+        "official-2026",
+        "7cdac378ff9bf23b72ae1b686f19859b3c802c26eed13c699f7df39f027352d6",
+    ),
+    // SsuJojo 私人插件源（Agent2Providers fork）的签名公钥。
+    (
+        "ssujojo-2026",
+        "1ef33e85fbecbe0a35ea7d040f68e9f315e67cac264d51187034398938e50847",
+    ),
+];
 
 /// 验签结果。
 ///

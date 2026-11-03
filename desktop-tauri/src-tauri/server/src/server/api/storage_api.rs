@@ -80,6 +80,12 @@ pub async fn get_storage(State(state): State<ServerState>) -> Response {
         "database": {
             "file": db_file.to_string_lossy(),
             "bytes": if available { request_stats.db_bytes() } else { 0 },
+            // 空洞读数（`stats()` 的 reclaimableBytes / freePageRatio）：
+            // `auto_vacuum=0` 时 DELETE 只把页标成空闲，文件不会缩小。
+            // 设置页据此给出「可回收 X MB」与「压缩」建议，而不是让用户
+            // 看到一个解释不了的 2.5GB —— 这是实测里「C 盘爆满」的直接来源。
+            "reclaimableBytes": stats.get("reclaimableBytes").cloned().unwrap_or(json!(0)),
+            "freePageRatio": stats.get("freePageRatio").cloned().unwrap_or(json!(0.0)),
             // 条数只在库可用时才可信（不可用时各 store 都回落 0，与「真的没有
             // 数据」在数字上无法区分）—— 这个布尔让界面能说「不可用」而不是
             // 显示一排看着正常的 0

@@ -740,9 +740,11 @@ impl RequestStats {
     /// 而 `storage_api` 会同时给出 `available: false`，界面据此显示「—」
     /// 而不是一排看着正常的 0（0 与「真的没有数据」在数字上无法区分）。
     pub fn stats(&self) -> Value {
-        let loaded = {
+        // 条数与空闲页在**同一次持锁**里读：`free_space` 收 `guard` 而不是自己
+        // 再取一次（那把 `Mutex` 不可重入），两者因此出自同一份库快照。
+        let (loaded, free_space) = {
             let guard = self.guard();
-            self.with_conn(&guard, |conn| {
+            let loaded = self.with_conn(&guard, |conn| {
                 let total = sql::count_all(conn)?;
                 let days = daily::count_daily(conn)?;
                 let first = sql::min_ts(conn)?;
@@ -750,16 +752,29 @@ impl RequestStats {
                 let downstream_raw = sql::count_raw(conn)?;
                 let upstream_raw = sql::count_upstream_raw(conn)?;
                 Ok((total, days, first, last, downstream_raw, upstream_raw))
-            })
+            });
+            (loaded, self.free_space(&guard))
         };
         let (total, daily_days, first_ts, last_ts, downstream_raw, upstream_raw) =
             loaded.unwrap_or((0, 0, None, None, 0, 0));
         let file = self.file().to_string_lossy().to_string();
+        // 空闲页读数（见 `free_space` 的说明）：`auto_vacuum=0` 下删除行只把页
+        // 标成空闲，文件不会缩小。界面据此能把「库 2.5GB、其中 1.3GB 是空洞」
+        // 说明白，而不是让用户以为程序在偷偷占盘。
+        let (free_pages, total_pages, reclaimable) = free_space.unwrap_or((0, 0, 0));
         json!({
             "total": total,
             "dailyDays": daily_days,
             "downstreamRaw": downstream_raw,
             "upstreamRaw": upstream_raw,
+            // 空闲页：reclaimableBytes 是「压缩一次能还给文件系统多少」，
+            // freePageRatio 是占比（0..1，保留三位小数）。
+            "reclaimableBytes": reclaimable,
+            "freePageRatio": if total_pages == 0 {
+                0.0
+            } else {
+                ((free_pages as f64 / total_pages as f64) * 1000.0).round() / 1000.0
+            },
             "file": file,
             // 与 file 同值：明细与聚合同居一个库。保留这个字段是为了不破坏
             // 既有读取方（`file` 的语义已经说明它指库文件），但**不要再把两者

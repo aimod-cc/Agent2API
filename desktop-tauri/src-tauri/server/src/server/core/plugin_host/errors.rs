@@ -59,3 +59,29 @@ pub(super) fn operation_failure(method: &str, detail: &str) -> String {
     };
     format!("{operation}失败：{detail}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 插件把 413 装进 `provider_http:` 信封时，宿主必须还原出 413。
+    ///
+    /// issue #6 的修法两截：插件侧带状态码过线、宿主侧按 413 停在同家不再换号。
+    /// 只做后者时**永远不会触发** —— 旧插件走 `into_message`，宿主看到的是 502，
+    /// 于是队列里每个账号照旧白撞一遍。这条用例钉住「信封 → 状态码」这一截。
+    #[test]
+    fn a_body_limit_envelope_keeps_its_413_on_this_side() {
+        let envelope = proto::WireError::with_code(
+            "CatPaw 入口按请求体字节数限流：本次约 2000000 字节，超过约 1 MiB 上限",
+            r#"provider_http:{"status":413}"#,
+        );
+        let failure = control_error(&envelope).expect("provider_http 信封必须被解出来");
+        assert_eq!(413, failure.status_code, "状态码丢了，宿主的体积判据就失效");
+        assert!(
+            !failure.is_quota_limit(),
+            "413 是体积问题，不能落进限额记账（那会给账号挂冷却）"
+        );
+        // 反面对照：没有信封的错误仍是「未分类」，不能凭空造出一个 413。
+        assert!(control_error(&proto::WireError::with_code("上游失败", "internal")).is_none());
+    }
+}

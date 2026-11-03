@@ -18,12 +18,13 @@ function PluginProgress({ operation }: { operation?: PluginOperation }) {
   </>
 }
 
-function Head({ name, version, icon }: { name: string; version?: string | null; icon?: string | null }) {
+function Head({ name, version, icon, author }: { name: string; version?: string | null; icon?: string | null; author?: string | null }) {
   return <div className='m-ck-toolbar'>
     <span className='m-logo'>{icon ? <img src={icon} alt='' /> : name.slice(0, 1)}</span>
     <div className='m-ck-grow'>
       <div className='m-ck-title'>{t(name)}</div>
       <div className='m-ck-note'>{version ? `v${version}` : t('暂未发布')}</div>
+      {author ? <div className='m-ck-note'>{t('作者：{author}', { author })}</div> : null}
     </div>
   </div>
 }
@@ -37,7 +38,7 @@ export function StorePluginCard({ item, target, busy, operation, onInstall }: {
 }) {
   const asset = item.platforms?.find(platform => platform.target === target)
   return <Card render={<article />} className='m-card m-card-pad'>
-    <Head name={item.name || item.id} version={item.version} icon={item.icon} />
+    <Head name={item.name || item.id} version={item.version} icon={item.icon} author={item.author || item.publisher} />
     <p className='m-ck-note'>{t(item.description)}</p>
     {item.official ? <Badge tone='brand'>{t('官方')}</Badge> : null}
     {item.reason ? <p className={item.error ? 'm-ck-error' : 'm-ck-note'}>{pluginErrorMessage(item.reason)}</p> : null}
@@ -63,7 +64,7 @@ export function PluginCard({ pack, target, busy, update, operation, onEnabled, o
   const required = pack.updateRequired === true
   const locked = busy || operation?.active === true
   return <Card render={<article />} className='m-card m-card-pad'>
-    <Head name={pack.name || pack.id} version={pack.version} icon={pack.icon} />
+    <Head name={pack.name || pack.id} version={pack.version} icon={pack.icon} author={pack.author || pack.publisher} />
     <div className='m-ck-actions'>
       <Badge tone={pack.enabled ? 'ok' : 'mute'}>{pack.enabled ? t('已启用') : t('已停用')}</Badge>
       <Badge tone={pack.signed ? 'ok' : 'warn'}>{pack.signed ? t('已签名') : t('未签名')}</Badge>

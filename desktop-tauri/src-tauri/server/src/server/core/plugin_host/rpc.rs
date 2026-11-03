@@ -417,24 +417,43 @@ impl ProviderAdapter for RpcAdapter {
         })
     }
 
+    /// 上游响应是否「其实是错误」（HTTP 200 但正文是业务失败；非 2xx 一律是错误）。
+    ///
+    /// ── 为什么这一位必须问插件 ──────────────────────────────────
+    /// 这条判据是 provider 知识：ZCode 的活动套餐通道用 HTTP 200 +
+    /// `application/json` 返回 `{"code":1005,"msg":"exceed quota limit"}`，
+    /// 智谱清言用 200 + `-1001 剩余积分不足`。网关自己只看得到状态码与头，
+    /// 不知道哪家的 2xx 其实是失败。默认实现（`!(200..300).contains`）在
+    /// 这里会把它们当成功，直接交给 SSE 翻译层 —— 结果是 `output` 为空的
+    /// 一次「成功」响应，账号也不会进冷却。
+    ///
+    /// ── 插件问不到时为什么 2xx 回落为成功 ────────────────────────
+    /// 非 2xx 在进入这条判据之前已经按错误处理（HTTP 状态码本身即证据，插件
+    /// 对状态码的「不是错误」答复不能覆盖，否则未覆写的家会把 429 当正常流透传）；
+    /// 2xx 时 RPC 失败说明插件挂了，保持成功至少与内置家同一口径，不会因为一次
+    /// 控制面超时把所有 2xx 响应都当成错误而误罚账号。
     fn is_error_response_async<'a>(
         &'a self,
         status: u16,
         headers: &'a HeaderMap,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, GatewayError>> + Send + 'a>> {
         Box::pin(async move {
+            // 非 2xx 一律按错误处理：插件对 HTTP 状态码的「不是错误」回答不能
+            // 覆盖这个事实（SDK 默认 `is_error_response` 返回 false，未覆写的家
+            // 会把 429 当正常流透传，错误永远进不了分类 / 冷却 / 换号）。
             if !(200..300).contains(&status) {
                 return Ok(true);
             }
+            let default = false;
             let mut params = self.base();
             params.insert("status".into(), Value::from(status));
             params.insert("headers".into(), headers_json(headers));
+            // 2xx 时插件可以把它「升级」成错误（HTTP 200 + JSON 业务失败）；
+            // 控制面问不到则保持成功，一次 RPC 超时不该把所有 2xx 都误罚。
             let value = self.control(
                 proto::methods::gateway::IS_ERROR_RESPONSE, Value::Object(params),
-            ).await?;
-            value.as_bool().ok_or_else(|| GatewayError::with_status(
-                502, "插件返回的响应类型判定不是布尔值",
-            ))
+            ).await;
+            Ok(value.ok().and_then(|value| value.as_bool()).unwrap_or(default))
         })
     }
 
@@ -468,6 +487,7 @@ impl ProviderAdapter for RpcAdapter {
             match serde_json::from_value::<proto::ErrorClass>(value) {
                 Ok(class) => {
                     let class = upstream_error_class(class);
+                    let class = autoclaw_quota_fallback(self.id, status, class, error_body);
                     if strict::applies(self.id) {
                         strict::sdk_class(self.id, status, class, error_body)
                     } else { class }
@@ -1427,6 +1447,176 @@ fn upstream_error_class(class: proto::ErrorClass) -> UpstreamErrorClass {
             UpstreamErrorClass::Fatal { status, message, upstream_code }
         }
     }
+}
+
+/// AutoClaw 系「免费额度用完」的网关侧兜底分类。
+///
+/// ── 为什么在网关侧补一刀 ────────────────────────────────────
+/// 上游把「GLM-5.3 免费额度已用完」包成 403 + `code 810000`，插件侧的
+/// `classify` 只按状态码走：403 不在 401 / 429 / 内容拦截那几张表里，
+/// 落进 `Fatal` 原样透传 ⇒ 账号不冷却、不换号，客户端每轮都撞同一面墙。
+/// 这份知识不该依赖插件更新才能生效 —— 它是「403+810000 就是额度耗尽」
+/// 这一条纯判据，留在网关侧做兜底覆盖最稳。
+///
+/// ── 判据 ────────────────────────────────────────────────────
+/// 只认 AutoClaw 两地（`autoclaw` / `autoclaw-intl`），且状态码必须是
+/// **402 / 403 / 406** 之一。其它家的 403、其它状态码一律不动 ——
+/// 判据收得窄，误伤的代价（把一次真实计费墙/上游故障当成限流去冷却）
+/// 远高于漏判（下一轮还会再判一次）。
+///
+/// 分两条：
+///   1. 有正文证据：业务码 810000 或正文含「免费额度已用完」→ 按天重置，
+///      冷却到下一个北京零点；
+///   2. **空响应体的 402**：生产库实测 AutoClaw 额度耗尽会以 402 + 空正文
+///      出现（issue #6），拿不到任何文案证据。恢复时刻不猜，交给上层按
+///      `Retry-After` 或默认短期冷却。
+///
+/// ── 为什么 406 不在空体兜底里（审查结论）─────────────────────
+/// 406 空响应体在 AutoClaw 上是**上游预校验拒收的统一形态**，实测过三个
+/// 独立成因：`max_tokens` 取小值、system 首句命中指纹、请求形态风控
+/// （见插件侧 `autoclaw/mod.rs` 的「四道上游闸」与 `prompt.rs` 的
+/// `UPSTREAM_406_HINT`，以及本插件 classify 在空体 406 时追加的那句提示）。
+/// 把它一律当额度耗尽会有两个用户可见的坏结果：
+///   - 一次提示词闸门拒收 → 冷却一个**健康**账号并换号，而同一份 body 换
+///     谁的账号都会被拒，等于空转一个冷却窗口、还少一个可用账号；
+///   - 把插件拼好的「该改什么」提示换成「请求额度受限」，用户失去唯一线索。
+/// 因此 406 保持插件给的 `Fatal` 原样透传；只有 402（Payment Required）这种
+/// 语义上就是「额度/计费受限」的状态码才走空体兜底。
+///
+/// ── reset_at ────────────────────────────────────────────────
+/// 上游不给恢复时刻；免费额度按天重置（上游的日口径都是北京时间零点），
+/// 取下一个北京零点，与 CodeArts 福利日池的冷却口径同一来源。
+/// 空体兜底那一条是例外（见上）：没有「按天」的依据，不做跨天猜测。
+pub(super) fn autoclaw_quota_fallback(
+    provider_id: &str,
+    status: u16,
+    class: UpstreamErrorClass,
+    error_body: &Value,
+) -> UpstreamErrorClass {
+    use crate::server::core::account_store::is_autoclaw_family;
+
+    if matches!(class, UpstreamErrorClass::QuotaLimited { .. }) {
+        return class;
+    }
+    // 状态码先收窄：402 / 406 是本次新增，403 是原有判据。
+    // 这一步放在最前面，保证「任何 provider 的其它状态码」都原样返回。
+    if !matches!(status, 402 | 403 | 406) || !is_autoclaw_family(provider_id) {
+        return class;
+    }
+    let code = error_body.get("code").and_then(Value::as_i64);
+    let message = error_body.get("message").and_then(Value::as_str).unwrap_or("");
+    // ① 有正文证据：业务码 / 文案。
+    if code == Some(810000) || message.contains("免费额度已用完") {
+        let now_ms = crate::server::logging::now_ms();
+        return UpstreamErrorClass::QuotaLimited {
+            reset_at: Some(next_beijing_midnight_ms(now_ms)),
+            message: class_message(&class, status, message),
+            upstream_code: code,
+            status,
+        };
+    }
+    // ② 空响应体的 402（issue #6）。406 不在这里 —— 理由见上面的
+    // 「为什么 406 不在空体兜底里」。
+    //
+    // 判据必须核验「体确实是空的」，而不是只看顶层 `message` 缺省：
+    // 上游也可能返回 `{"error":{"type":"insufficient_quota"}}` 这类
+    // 没有 `message` / `code` 顶层键的**有内容**正文 —— 那种形态说明
+    // 上游给了结构化说明，应当保持原本的 Fatal 透传，而不是猜成限流。
+    if status == 402
+        && matches!(class, UpstreamErrorClass::Fatal { .. })
+        && is_blank_error_body(error_body)
+    {
+        return UpstreamErrorClass::QuotaLimited {
+            reset_at: None,
+            // 空体兜底不沿用 `class_message`：那时 Fatal 的文案只是插件对空正文
+            // 的占位（「上游返回 402: 上游错误」），对用户没有任何信息量。
+            message: format!("上游返回 {status}: 请求额度受限（上游未返回详情），按限流冷却"),
+            // 正文没给业务码时保留分类器已有的那个（插件可能从状态行/头部
+            // 解析出过），不要因为走了兜底分支就丢掉。
+            upstream_code: match &class {
+                UpstreamErrorClass::Fatal { upstream_code, .. } => *upstream_code,
+                _ => None,
+            },
+            status,
+        };
+    }
+    class
+}
+
+/// 错误正文是否是「空白」（没有任何可用信息）。
+///
+/// `UpstreamErrorDetail::to_value()` 对空响应体固定产出
+/// `{"code":null,"message":""}`，所以最常见的形态是「键在、值为空」；
+/// 但插件也可能把一段非 JSON 文本原样塞进 `message`，或有上游返回
+/// `{"error":{...}}` 这类结构。判据因此是**逐值检查**：只含
+/// null / 空串 / 占位词（见 [`is_placeholder_message`]）/ 空对象 / 空数组
+/// 时才算空 —— 出现任何非空内容就判为「有正文」，退回原分类。
+fn is_blank_error_body(body: &Value) -> bool {
+    fn blank(value: &Value) -> bool {
+        match value {
+            Value::Null => true,
+            Value::String(text) => is_placeholder_message(text),
+            Value::Array(items) => items.iter().all(blank),
+            Value::Object(map) => map.values().all(blank),
+            Value::Bool(_) | Value::Number(_) => false,
+        }
+    }
+    match body {
+        // 非对象（数组 / 字符串 / 数字）不是错误正文的常规形态；
+        // 只有「什么都读不到」才算空。
+        Value::Object(map) => map.values().all(blank),
+        other => blank(other),
+    }
+}
+
+/// 这段文本是不是「什么都没有」的占位文案。
+///
+/// ── 为什么需要它（审查反馈：两条投递路径结论不一致）─────────────
+/// 同一份空响应体会从两条路进来：
+///   - 状态码路径（`finish_stream` 的 `status >= 400`）拿到的是**解出来的
+///     原始字节**，空体 → 空串；
+///   - `StreamEvent::Done(Err(provider_http:…))` 路径拿到的是插件渲染过的
+///     `WireError.message`，即 `autoclaw::classify` 对空正文的占位
+///     「上游返回 402: 上游错误」。
+/// 只判空串会让第二条路径永远不触发兜底。占位词的形状是固定的
+/// （`format!("上游返回 {status}: {raw}")` + 上游没给文案时的「上游错误」），
+/// 因此按形状识别：`上游错误` 或 `上游返回 <数字>: 上游错误` 都算空。
+/// 占位之后若还跟着插件提示（406 的 `UPSTREAM_406_HINT`）则**不算空** ——
+/// 那说明上游形态已被识别，应当保留提示、走原分类。
+fn is_placeholder_message(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() || text == "上游错误" {
+        return true;
+    }
+    let Some(rest) = text.strip_prefix("上游返回 ") else {
+        return false;
+    };
+    let Some((status, raw)) = rest.split_once(": ") else {
+        return false;
+    };
+    !status.is_empty()
+        && status.chars().all(|c| c.is_ascii_digit())
+        && raw.trim() == "上游错误"
+}
+
+/// 从分类结果里取出已有文案（Fatal/其它档的 message 已含 `上游返回 {status}:`）。
+fn class_message(class: &UpstreamErrorClass, status: u16, raw: &str) -> String {
+    match class {
+        UpstreamErrorClass::Fatal { message, .. }
+        | UpstreamErrorClass::ContentBlocked { message, .. } if !message.is_empty() => message.clone(),
+        _ => format!("上游返回 {status}: {raw}"),
+    }
+}
+
+/// `now` 之后最近的北京时间（UTC+8）零点（毫秒时间戳）。
+///
+/// 算法与 `degrade::next_midnight_cst_ms` 一致：平移 +8h 取整天边界再加一天。
+fn next_beijing_midnight_ms(now_ms: i64) -> i64 {
+    const CST_OFFSET_MS: i64 = 8 * 3600 * 1000;
+    const DAY_MS: i64 = 86_400_000;
+    let shifted = now_ms + CST_OFFSET_MS;
+    let start_of_today = shifted.div_euclid(DAY_MS) * DAY_MS;
+    start_of_today + DAY_MS - CST_OFFSET_MS
 }
 
 impl RpcAdapter {

@@ -46,6 +46,13 @@ ManifestDPIAwareness PerMonitorV2
 !include "FileAssociation.nsh"
 !include "Win\COM.nsh"
 !include "Win\Propkey.nsh"
+; Tauri 新版 utils.nsh 的 CheckIfAppIsRunning 用 RestartManager_* 宏做
+; 「应用正在运行」检测（替代旧的 FindWindow + taskkill 路径），但**没有**
+; 自己 include 这个头文件 —— 少了这一行，makensis 会报
+; `macro named "RestartManager_StartSession" not found` 并中止打包。
+; 本模板是官方模板的固定快照，官方模板更新时不会自动跟随，
+; 因此必须在这里显式补上（NSIS 3.x 自带 Include\Win\RestartManager.nsh）。
+!include "Win\RestartManager.nsh"
 !include "StrFunc.nsh"
 ${StrCase}
 ${StrLoc}
