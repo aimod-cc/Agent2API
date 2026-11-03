@@ -1,8 +1,8 @@
 import * as React from 'react'
 import { Button, Empty, Input, SegmentedControl, Spinner, StatusDot, cn } from '@ui'
 import { t } from '../i18n'
-import { bridge, errorMessage, host, type ReplayRow, type RoutingWorkspace } from './routing-types'
-import type { FlowDetails, FlowQuery } from './routing-flow-types'
+import { bridge, errorMessage, host, type ReplayRow } from './routing-types'
+import type { FlowDetails, FlowModels, FlowQuery } from './routing-flow-types'
 import { clientLabel } from './routing-flow-model'
 import { isTraceRunning, isTraceSuccess, requestKey, requestModel, tracePhase, traceProvider } from './routing-trace-model'
 import { formatDuration } from './routing-ui'
@@ -11,7 +11,6 @@ import { RoutingSelect } from './routing-select'
 type Props = {
   active: boolean
   query: { model?: string; minutes: number; scope: 'window' | 'running'; search?: string }
-  workspace: RoutingWorkspace | null
   selectedKey?: string
   refreshToken: number
   onOpenRequest(row: ReplayRow): void
@@ -23,7 +22,7 @@ type Props = {
 }
 
 /** 请求回放左栏：最近请求列表 + 模型 / 时间 / 范围 / 搜索。 */
-export function RoutingRequestList({ active, query, workspace, selectedKey, refreshToken, onOpenRequest, onHistory,
+export function RoutingRequestList({ active, query, selectedKey, refreshToken, onOpenRequest, onHistory,
   onModel, onMinutes, onScope, onSearch }: Props) {
   const [entries, setEntries] = React.useState<ReplayRow[]>([])
   const [matched, setMatched] = React.useState(0)
@@ -32,10 +31,29 @@ export function RoutingRequestList({ active, query, workspace, selectedKey, refr
   const [error, setError] = React.useState('')
   const queryKey = JSON.stringify(query)
   const sequence = React.useRef(0)
-  const models = workspace?.models || []
+  const [models, setModels] = React.useState<string[]>([])
   const tableQuery: FlowQuery = { ...query, detail: 'requests', offset, limit: 30 }
+  // 模型候选只看时间窗与活动范围，与列表同一口径：窗口内没请求过的模型不列出。
+  const modelWindow = `${query.minutes}:${query.scope}`
 
   React.useEffect(() => { setOffset(0); setEntries([]); setError('') }, [queryKey])
+
+  React.useEffect(() => {
+    if (!active) return
+    let alive = true
+    const load = async () => {
+      try {
+        const next = await bridge().getRoutingFlow({ minutes: query.minutes, scope: query.scope, detail: 'models' }) as unknown as FlowModels
+        if (!alive || next.available === false) return
+        setModels(next.models || [])
+      } catch { /* 候选清单失败不影响列表，保留上一次结果 */ }
+    }
+    void load()
+    const timer = window.setInterval(() => {
+      if (!document.hidden && host().wbApp?.currentPage === 'routing') void load()
+    }, 5000)
+    return () => { alive = false; window.clearInterval(timer) }
+  }, [active, modelWindow, refreshToken])
 
   React.useEffect(() => {
     if (!active) return
@@ -91,7 +109,9 @@ export function RoutingRequestList({ active, query, workspace, selectedKey, refr
     <div className='routing-request-tools'>
       <div className='routing-request-filters'>
         <RoutingSelect label={t('请求模型')} value={query.model || '__all'}
-          options={[['__all', t('全部模型')], ...models.map(model => [model, model] as [string, string])]}
+          options={[['__all', models.length ? t('全部模型') : t('全部模型（窗口内没有请求）')],
+            ...(query.model && !models.includes(query.model) ? [[query.model, `${query.model} · ${t('窗口内无请求')}`]] as Array<[string, string]> : []),
+            ...models.map(model => [model, model] as [string, string])]}
           onChange={value => onModel(value === '__all' ? '' : value)} />
         <RoutingSelect label={t('已完成请求时间范围')} value={String(query.minutes)}
           options={[5, 10, 30, 60].map(minutes => [String(minutes), t('最近 {n} 分钟', { n: minutes })])}

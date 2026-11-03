@@ -36,6 +36,8 @@
   font-size: 12px; font-weight: 600; }
 .routing-config-head > .sub { color: var(--text-3); font-size: 9px; }
 .routing-config-head > .right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.routing-config-delete { color: var(--danger); border-color: var(--danger-bd); }
+.routing-config-delete:hover { background: var(--danger-soft); }
 .routing-config-preview { display: flex; align-items: center; gap: 6px; color: var(--text-3); font-size: 9px; }
 .routing-config-preview [data-slot='select-trigger'] { height: 28px; min-width: 176px; font-size: 10px; }
 

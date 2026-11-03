@@ -10,7 +10,7 @@ export type FlowQuery = {
   provider?: string
   account?: string
   activity?: 'all' | 'running' | 'idle'
-  detail?: 'sessions' | 'requests'
+  detail?: 'sessions' | 'requests' | 'models'
   offset?: number
   limit?: number
 }
@@ -57,6 +57,8 @@ export type FlowDetails = {
   unknownRequests?: number
   now: number
 }
+/** `detail=models`：当前时间窗内真的发过请求的模型（筛选下拉用）。 */
+export type FlowModels = { available: boolean; models: string[]; now: number }
 export type FlowSelection =
   | { kind: 'client' | 'model' | 'provider' | 'account'; id: string }
   | { kind: 'path'; id: string }

@@ -26,7 +26,7 @@ pub async fn get_flow(State(state): State<ServerState>, Query(params): Query<Has
         return errors::management_error(400, "未知的请求活动范围");
     }
     let detail = text("detail");
-    if !["", "requests", "sessions"].contains(&detail.as_str()) { return errors::management_error(400, "未知的流向详情类型"); }
+    if !["", "requests", "sessions", "models"].contains(&detail.as_str()) { return errors::management_error(400, "未知的流向详情类型"); }
     let stats = state.request_stats();
     match tokio::task::spawn_blocking(move || stats.routing_flow(&query, (!detail.is_empty()).then_some(detail.as_str()))).await {
         Ok(value) => ok_json(value),

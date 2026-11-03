@@ -68,6 +68,26 @@ export function useRoutingEditor(onSaved: () => void) {
     } catch (failure) { setError(errorMessage(failure)) }
     finally { refs.current.busy = false; setBusy(false) }
   }
+  // 删除模型独立配置：直接落库回继承全局，不再让用户先切「继承」再保存。
+  const remove = async (): Promise<boolean> => {
+    const target = scope
+    const draft = refs.current.drafts[target]
+    if (!target || !draft || refs.current.busy || refs.current.loading) return false
+    refs.current.busy = true
+    setBusy(true); setError('')
+    try {
+      const workspace = await bridge().saveRoutingProfile({ model: target, profile: null, revision: draft.revision })
+      if (!workspace?.revision) throw new Error(t('保存响应不完整，请刷新当前配置确认结果'))
+      const profile = editableProfile(workspace)
+      setDrafts(current => ({ ...current, [target]: { workspace, mode: 'inherit', profile,
+        baseline: null, revision: workspace.revision! } }))
+      adoptAccountSorting(workspace.sorting)
+      notify(t('已删除独立配置，改为跟随全局'))
+      onSaved()
+      return true
+    } catch (failure) { setError(errorMessage(failure)); return false }
+    finally { refs.current.busy = false; setBusy(false) }
+  }
   // 新增模型独立配置：立即落库，而不是只打开一份未保存草稿，避免用户以为已经创建。
   const create = async (model: string): Promise<boolean> => {
     const target = model.trim().toLowerCase()
@@ -115,7 +135,7 @@ export function useRoutingEditor(onSaved: () => void) {
     window.addEventListener('beforeunload', listener)
     return () => { sequence.current++; window.removeEventListener('beforeunload', listener) }
   }, [])
-  return { scope, load, create, draft: drafts[scope], drafts, update, save, discard, loading, busy, error,
+  return { scope, load, create, remove, draft: drafts[scope], drafts, update, save, discard, loading, busy, error,
     dirtyCount: Object.values(drafts).filter(draftDirty).length }
 }
 export type RoutingEditorState = ReturnType<typeof useRoutingEditor>

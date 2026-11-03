@@ -78,6 +78,18 @@ impl RequestStats {
                     let entries = ids.into_iter().map(|id| value_at(conn, id)).collect::<rusqlite::Result<Vec<_>>>()?;
                     return Ok(json!({ "available": true, "entries": entries, "matched": matched, "now": now }));
                 }
+                // 筛选下拉的模型候选：只列**当前时间窗内真的发过请求**的模型，
+                // 与请求列表同一套时间/在途口径。这里刻意不带模型条件 ——
+                // 否则选中一个模型后下拉里就只剩它自己。按请求数降序，常用的排前面。
+                if detail == Some("models") {
+                    let model_free = params![now, since, "", query.running_only, query.search, query.path,
+                        query.session, crate::server::logging::process_started_at(), query.client.is_some(), query.client.as_deref().unwrap_or(""), query.provider, query.account, query.session_search];
+                    let mut statement = conn.prepare(&format!("{BASE} SELECT request_model, COUNT(*) AS n FROM selected \
+                        WHERE request_model <> '' GROUP BY request_model ORDER BY n DESC, request_model ASC LIMIT 300"))?;
+                    let models = statement.query_map(model_free, |row| row.get::<_, String>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    return Ok(json!({ "available": true, "models": models, "now": now }));
+                }
                 if detail == Some("sessions") {
                     let activity = match query.activity.as_str() {
                         "running" => " HAVING EXISTS (SELECT 1 FROM flow f WHERE f.session_id = selected.session_id AND f.request_model = selected.request_model COLLATE NOCASE AND f.running = 1)",

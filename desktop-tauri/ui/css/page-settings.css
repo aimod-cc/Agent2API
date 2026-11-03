@@ -28,12 +28,13 @@
 }
 
 /* ─── 左栏：分类导航 ───
-   观感对齐主侧栏的 .nav-item，但不能直接复用那个类名：
-   app.js 的 showPage 会遍历所有 .nav-item 并按 data-page 重置 active，
-   设置页的分类项会被顺手清掉选中态（点分类后一切页就跳回「通用」）。 */
+   尺寸、hover 与选中态全部由组件库的 NavList / NavItem 统一提供
+   （ui-kit/styles/nav.css 与 theme.css 的 --ui-nav-selected-*）：选中项与主侧栏
+   一样是主色实心滑块。这里只保留本页的排版（宽度、纵向排列、滚动），不要再往
+   下面抄颜色 / 字号 / 行高，否则会像旧版那样只改一半、与主侧栏对不上。
+   不能直接复用 `.nav-item` 类名：app.js 的 showPage 会遍历所有 .nav-item 并按
+   data-page 重置 active，设置页的分类项会被顺手清掉选中态。 */
 .settings-nav {
-  --ui-selection-bg: var(--primary-soft);
-  --ui-selection-border: transparent;
   flex: 0 0 auto;
   width: 140px;
   display: flex;
@@ -43,33 +44,6 @@
   /* 分类多到装不下时自己可滚：此时出现第二条滚动条是正确的，
      但内容装得下时不会有任何滚动条 */
   overflow-y: auto;
-}
-
-.settings-nav-item {
-  position: relative;
-  display: flex;
-  align-items: center;
-  /* 纯文字项要左对齐：通用 button 是 justify-content:center，
-     不覆盖的话三个分类会各自居中，看着不像一排导航 */
-  justify-content: flex-start;
-  width: 100%;
-  /* 与主侧栏一致的紧凑行高；NavItem 默认按内边距撑高，这里固定为 30px。 */
-  height: 30px;
-  padding: 0 10px;
-  gap: 7px;
-  border: 1px solid transparent;
-  /* 圆角交给组件库的 NavItem（30px 一档 = --radius-md 10），这里不再自己定：
-     原来写死 --r-sm(8) 会让设置页左栏比主侧栏圆一档，正是「侧边栏和按钮对不上」
-     那类不一致。阶梯见 ui-kit/styles/theme.css */
-  background: transparent;
-  /* 分类项是 <button>，components.css 里通用的 button 规则会给它带上
-     --shadow-1 —— 与「平铺的导航列表」冲突，这里显式清掉（.nav-item 同样处理） */
-  box-shadow: none;
-  color: var(--text-2);
-  font-size: 12.5px;
-  font-weight: 500;
-  text-align: left;
-  transition: background .15s ease, color .15s ease;
 }
 
 /* 分类图标槽：尺寸与主侧栏一致，间距由导航项的 gap 给出。 */
@@ -83,25 +57,6 @@
 }
 
 .settings-nav-item .ico svg { display: block; }
-
-/* hover：一层极淡的中性叠加底（与主侧栏同款表达式，浅色叠灰、深色叠白）。
-   带 :not(:disabled) 是为了压过 components.css 里通用的 button:hover ——
-   那个选择器特异性更高，否则会盖掉叠加底并给导航项描边。 */
-.settings-nav-item:hover:not(:disabled) {
-  background: var(--nav-hover);
-  border-color: transparent;
-  color: var(--text);
-}
-
-/* 选中态：品牌浅底 + 主题色字，与主侧栏选中项同一口径。
-   一并声明 .active:hover，让悬停选中项时仍保持选中态。 */
-.settings-nav-item.active,
-.settings-nav-item.active:hover {
-  background: transparent;
-  border-color: transparent;
-  color: var(--primary-fg);
-  font-weight: 600;
-}
 
 /* ─── 右栏：分类内容 ───
    唯一的滚动容器；面板自带 margin-bottom 14px，这里只补回原来

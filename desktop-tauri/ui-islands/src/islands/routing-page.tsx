@@ -113,7 +113,7 @@ export function RoutingPage() {
 
     {mode === 'replay' ? <div className='routing-replay-layout'>
       <aside className='routing-request-rail'>
-        <RoutingRequestList active={mode === 'replay'} query={replay.query} workspace={replay.workspace}
+        <RoutingRequestList active={mode === 'replay'} query={replay.query}
           selectedKey={selected ? requestKey(selected) : ''} refreshToken={refreshToken}
           onOpenRequest={openRequest} onHistory={() => host().wbApp?.showPage('requests')}
           onModel={replay.selectModel} onMinutes={replay.setMinutes} onScope={replay.setScope} onSearch={replay.setSearch} />

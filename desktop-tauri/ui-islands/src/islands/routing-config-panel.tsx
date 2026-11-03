@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { Badge, Button, Checkbox, Empty, Input, Label, SegmentedControl, Spinner, cn } from '@ui'
+import { Badge, Button, Checkbox, Empty, Input, Label, Spinner, cn, confirmDialog } from '@ui'
 import { t } from '../i18n'
 import { displayNameOf, providerOf } from './accounts-domain'
 import { activeGroupSortRules, groupSortSummary, manualOrderBlockedMessage } from './accounts-group-settings'
@@ -153,6 +153,13 @@ export function RoutingConfigPanel({ editor, scope, now, onScope, onAccount, onS
       return next
     })
   }
+  const removeIndependent = async () => {
+    if (!scope || disabled) return
+    if (!await confirmDialog(t('删除后这个模型会重新跟随全局配置，已保存的独立设置和当前未保存修改都会被移除。'), {
+      title: t('删除独立配置'), confirmText: t('删除'), destructive: true,
+    })) return
+    await editor.remove()
+  }
   const participants = workspace.accounts.filter(account => {
     const provider = providerOf(account)
     return account.enabled !== false && (profile.providerScope === 'all' || profile.providers.includes(provider))
@@ -216,9 +223,10 @@ export function RoutingConfigPanel({ editor, scope, now, onScope, onAccount, onS
       <header className='routing-config-head'>
         <b title={scopeLabel}>{scopeLabel}</b>
         {scope ? null : <Badge shape='tag' variant='secondary'>{t('全局')}</Badge>}
-        {scope ? <SegmentedControl aria-label={t('配置来源')} value={draft.mode} disabled={disabled}
-          options={[{ value: 'inherit', label: t('继承全局') }, { value: 'custom', label: t('独立配置') }]}
-          onValueChange={mode => editor.update(current => ({ ...current, mode: mode as 'inherit' | 'custom' }))} />
+        {scope ? (workspace.customized
+          ? <Button variant='outline' size='sm' className='routing-config-delete' disabled={disabled}
+            onClick={() => void removeIndependent()}>{t('删除独立配置')}</Button>
+          : <Badge shape='tag' variant='secondary'>{t('继承全局')}</Badge>)
           : <span className='sub'>{t('修改后影响继承全局的模型')}</span>}
         <div className='right'>
           {scope ? <span className='sub'>{t('正在预览 {model}', { model: scope })}</span>
