@@ -487,6 +487,7 @@ impl ProviderAdapter for RpcAdapter {
             match serde_json::from_value::<proto::ErrorClass>(value) {
                 Ok(class) => {
                     let class = upstream_error_class(class);
+                    let class = autoclaw_quota_fallback(self.id, status, class, error_body);
                     if strict::applies(self.id) {
                         strict::sdk_class(self.id, status, class, error_body)
                     } else { class }
@@ -1446,6 +1447,70 @@ fn upstream_error_class(class: proto::ErrorClass) -> UpstreamErrorClass {
             UpstreamErrorClass::Fatal { status, message, upstream_code }
         }
     }
+}
+
+/// AutoClaw 系「免费额度用完」的网关侧兜底分类。
+///
+/// ── 为什么在网关侧补一刀 ────────────────────────────────────
+/// 上游把「GLM-5.3 免费额度已用完」包成 403 + `code 810000`，插件侧的
+/// `classify` 只按状态码走：403 不在 401 / 429 / 内容拦截那几张表里，
+/// 落进 `Fatal` 原样透传 ⇒ 账号不冷却、不换号，客户端每轮都撞同一面墙。
+/// 这份知识不该依赖插件更新才能生效 —— 它是「403+810000 就是额度耗尽」
+/// 这一条纯判据，留在网关侧做兜底覆盖最稳。
+///
+/// ── 判据 ────────────────────────────────────────────────────
+/// 只认 AutoClaw 两地（`autoclaw` / `autoclaw-intl`）+ HTTP 403 +
+/// 业务码 810000（或正文含「免费额度已用完」）。其它家的 403 不动。
+///
+/// ── reset_at ────────────────────────────────────────────────
+/// 上游不给恢复时刻；免费额度按天重置（上游的日口径都是北京时间零点），
+    /// 取下一个北京零点，与 CodeArts 福利日池的冷却口径同一来源。
+pub(super) fn autoclaw_quota_fallback(
+    provider_id: &str,
+    status: u16,
+    class: UpstreamErrorClass,
+    error_body: &Value,
+) -> UpstreamErrorClass {
+    use crate::server::core::account_store::is_autoclaw_family;
+
+    if status != 403 || matches!(class, UpstreamErrorClass::QuotaLimited { .. }) {
+        return class;
+    }
+    if !is_autoclaw_family(provider_id) {
+        return class;
+    }
+    let code = error_body.get("code").and_then(Value::as_i64);
+    let message = error_body.get("message").and_then(Value::as_str).unwrap_or("");
+    if code != Some(810000) && !message.contains("免费额度已用完") {
+        return class;
+    }
+    let now_ms = crate::server::logging::now_ms();
+    UpstreamErrorClass::QuotaLimited {
+        reset_at: Some(next_beijing_midnight_ms(now_ms)),
+        message: class_message(&class, status, message),
+        upstream_code: code,
+        status,
+    }
+}
+
+/// 从分类结果里取出已有文案（Fatal/其它档的 message 已含 `上游返回 {status}:`）。
+fn class_message(class: &UpstreamErrorClass, status: u16, raw: &str) -> String {
+    match class {
+        UpstreamErrorClass::Fatal { message, .. }
+        | UpstreamErrorClass::ContentBlocked { message, .. } if !message.is_empty() => message.clone(),
+        _ => format!("上游返回 {status}: {raw}"),
+    }
+}
+
+/// `now` 之后最近的北京时间（UTC+8）零点（毫秒时间戳）。
+///
+/// 算法与 `degrade::next_midnight_cst_ms` 一致：平移 +8h 取整天边界再加一天。
+fn next_beijing_midnight_ms(now_ms: i64) -> i64 {
+    const CST_OFFSET_MS: i64 = 8 * 3600 * 1000;
+    const DAY_MS: i64 = 86_400_000;
+    let shifted = now_ms + CST_OFFSET_MS;
+    let start_of_today = shifted.div_euclid(DAY_MS) * DAY_MS;
+    start_of_today + DAY_MS - CST_OFFSET_MS
 }
 
 impl RpcAdapter {

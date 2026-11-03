@@ -174,6 +174,58 @@ async fn host_starts_and_lists_providers() {
     host.shutdown().await;
 }
 
+// ── AutoClaw「免费额度用完」403 的网关侧兜底分类 ─────────────────────────
+//
+// 上游把「GLM-5.3 免费额度已用完」包成 403 + code 810000，插件 classify 落
+// Fatal 原样透传 ⇒ 账号不冷却、不换号（生产库里 403 连续 75 次无冷却）。
+// 网关侧兜底把它升成 QuotaLimited 并冷却到下一个北京零点 —— 这里直接钉
+// 分类函数，不依赖插件二进制。
+
+/// 403 + 810000 → QuotaLimited，恢复时刻落在下一个北京零点。
+#[test]
+fn autoclaw_free_quota_403_is_classified_as_quota_limited() {
+    use chrono::Timelike;
+
+    let body = serde_json::json!({
+        "code": 810000,
+        "message": "GLM-5.3 免费额度已用完,开通连续包月会员继续使用",
+    });
+    let fatal = UpstreamErrorClass::Fatal {
+        status: 403,
+        message: "上游返回 403: GLM-5.3 免费额度已用完,开通连续包月会员继续使用".into(),
+        upstream_code: Some(810000),
+    };
+    let class = super::rpc::autoclaw_quota_fallback("autoclaw", 403, fatal, &body);
+    let UpstreamErrorClass::QuotaLimited { reset_at: Some(reset), status, upstream_code, .. } = &class else {
+        panic!("403+810000 应当被兜底成 QuotaLimited，实际 {class:?}");
+    };
+    assert_eq!(*status, 403);
+    assert_eq!(*upstream_code, Some(810000));
+    // 恢复时刻必须是北京零点：与 degrade 的 UTC+8 零点同一口径（按天重置）。
+    let at = crate::server::core::beijing::date_time_of_ms(*reset).expect("合法时间戳");
+    assert!(
+        at.hour() == 0 && at.minute() == 0 && at.second() == 0,
+        "恢复时刻必须是北京零点，实际 {}",
+        at.format("%Y-%m-%d %H:%M:%S")
+    );
+}
+
+/// 对照组：其它 403（如 pay-view 810001）不受兜底影响，仍是 Fatal。
+#[test]
+fn other_autoclaw_403_stays_fatal() {
+    let body = serde_json::json!({ "code": 810001, "message": "pay-view" });
+    let fatal = UpstreamErrorClass::Fatal {
+        status: 403,
+        message: "上游返回 403: pay-view".into(),
+        upstream_code: Some(810001),
+    };
+    let class = super::rpc::autoclaw_quota_fallback("autoclaw", 403, fatal, &body);
+    assert!(
+        matches!(class, UpstreamErrorClass::Fatal { .. }),
+        "非 810000 的 403 不该被兜底，实际 {class:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn build_chat_request_goes_through_rpc() {
     let Some((host, providers)) = boot().await else {
