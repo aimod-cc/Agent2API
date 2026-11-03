@@ -205,7 +205,12 @@ async fn read_custom_index_result() -> Option<Vec<IndexEntry>> {
     if !response.status.is_success() {
         return None;
     }
-    parse_index(response.value, false, Some(CUSTOM_INDEX_URL)).await.ok()
+    let index_url = CUSTOM_INDEX_URL
+        .rsplit_once('/')
+        .map(|(base, _)| format!("{base}/"));
+    parse_index(response.value, false, index_url.as_deref())
+        .await
+        .ok()
 }
 
 pub async fn read_index_result() -> Result<Vec<IndexEntry>, String> {
@@ -328,9 +333,35 @@ fn valid_repo(repo: &str) -> bool {
 
 fn release_version(release: &Value, template: &str) -> Option<String> {
     let tag = text(release, "tag_name");
-    let (prefix, suffix) = template.split_once("{version}")?;
-    let version = tag.strip_prefix(prefix)?.strip_suffix(suffix)?;
-    compare_versions(version, version)?;
+    let version_at = template.find("{version}")?;
+    let Some(run_at) = template.find("{run}") else {
+        let prefix = &template[..version_at];
+        let suffix = &template[version_at + "{version}".len()..];
+        let version = tag.strip_prefix(prefix)?.strip_suffix(suffix)?;
+        return compare_versions(version, version).map(|_| version.to_string());
+    };
+    let (prefix, middle, tail, run_first) = if run_at < version_at {
+        let middle = &template[run_at + "{run}".len()..version_at];
+        let tail = &template[version_at + "{version}".len()..];
+        (&template[..run_at], middle, tail, true)
+    } else {
+        let middle = &template[version_at + "{version}".len()..run_at];
+        let tail = &template[run_at + "{run}".len()..];
+        (&template[..version_at], middle, tail, false)
+    };
+    let rest = tag.strip_prefix(prefix)?.strip_suffix(tail)?;
+    let (left, right) = rest.split_once(middle)?;
+    let (version, run) = if run_first {
+        (right, left)
+    } else {
+        (left, right)
+    };
+    if compare_versions(version, version).is_none() {
+        return None;
+    }
+    if run.is_empty() || !run.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
     Some(version.to_string())
 }
 
@@ -718,5 +749,28 @@ mod tests {
         let asset = pick_asset(&release, "agent2api-providers", "x86_64-unknown-linux-gnu")
             .expect("应当挑到 Linux 包");
         assert_eq!(asset.version, "1.2.3");
+    }
+
+    #[test]
+    fn parses_fork_run_tag_template() {
+        let release = json!({
+            "tag_name": "v0.2.1-fork.17",
+            "assets": [
+                { "name": "ssujojo-providers-0.2.1-x86_64-pc-windows-msvc.zip",
+                  "browser_download_url": "https://example.com/a.zip", "size": 100 }
+            ]
+        });
+        let detail = PluginDetail {
+            protocol: 1,
+            repo: "SsuJojo/Agent2Providers".to_string(),
+            tag_template: "v{version}-fork.{run}".to_string(),
+            asset_template: "{id}-{version}-{target}.zip".to_string(),
+            homepage: String::new(),
+            require_signed: true,
+        };
+        let assets = pick_release_assets(&release, "ssujojo-providers", Some(&detail))
+            .expect("应当解析 fork run tag");
+        assert_eq!(assets.version, "0.2.1");
+        assert_eq!(assets.platforms.len(), 1);
     }
 }
