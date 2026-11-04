@@ -119,8 +119,12 @@ const CACHE_READ_CONTAINERS: &[&str] = &["prompt_tokens_details", "input_tokens_
 /// 「积分消耗」的别名表（顺序即优先序）。
 ///
 /// WorkBuddy 的 `usage.credit` 是已实测的一手形态；其余是兼容实现常见的
-/// 下划线 / 驼峰写法。与 token 的别名表同一条规矩：取**第一个正数**，
-/// 避免某个恒 0 的别名把真值挡在后面；一个别名都没有时才返回 None。
+/// 下划线 / 驼峰写法。`points_*` 一组来自 Loomy 生图的 `points_consumed`
+/// （同样是实测形态），也一并认，好让「上游把积分叫 points」的家不需要再改表。
+/// 末尾的 `cost` 来自 Cline 的 `usage.cost`：它是**美元成本**而不是积分，
+/// 按「积分列就是计费读数」的产品口径与积分共用一列（排在最后，同时存在时
+/// 仍优先取 credit）。与 token 的别名表同一条规矩：取**第一个正数**，避免
+/// 某个恒 0 的别名把真值挡在后面；一个别名都没有时才返回 None。
 const CREDIT_KEYS: &[&str] = &[
     "credit",
     "credits",
@@ -132,6 +136,11 @@ const CREDIT_KEYS: &[&str] = &[
     "creditCost",
     "credit_consumed",
     "creditConsumed",
+    "points_consumed",
+    "pointsConsumed",
+    "points_used",
+    "pointsUsed",
+    "cost",
 ];
 
 /// 从 usage 对象里提取 token 数（字段名兼容与「第一个正数」口径见模块头部）。
@@ -153,6 +162,15 @@ pub fn extract_usage(usage: &Value) -> Option<UsageTokens> {
         .unwrap_or(0);
     let credit = first_amount(object, CREDIT_KEYS);
     Some(UsageTokens { prompt, completion, total, cache_read, credit })
+}
+
+/// 从一个 JSON 对象里按积分别名取读数。
+///
+/// 给「本次消耗直接挂在响应顶层、不在 `usage` 里」的家用：Loomy 生图的
+/// `points_consumed` 就是这种形态（`{created, data:[…], points_consumed}`）。
+/// 与 [`extract_usage`] 共用同一张 [`CREDIT_KEYS`] 别名表，所以别名一改两边同时生效。
+pub fn credit_from_object(object: &Map<String, Value>) -> Option<f64> {
+    first_amount(object, CREDIT_KEYS)
 }
 
 /// 按别名表依次取**第一个正数**（口径见模块头部）。

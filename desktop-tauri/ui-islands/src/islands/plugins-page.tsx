@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { mountOnPage } from '../island-lazy'
 import { createRoot } from 'react-dom/client'
 import {
   Badge, Button, Card, CardFooter, CardHeader, Collapsible, CollapsibleContent,
@@ -302,8 +303,7 @@ function mount(): void {
   createRoot(section).render(<PluginsPage />)
 }
 
-if (document.querySelector(PAGE_SELECTOR)) mount()
-else document.addEventListener('DOMContentLoaded', mount, { once: true })
+mountOnPage('plugins', PAGE_SELECTOR, mount)
 
 declare global {
   interface Window { wbPluginsPage?: { load(): Promise<void> } }

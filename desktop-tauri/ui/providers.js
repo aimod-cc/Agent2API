@@ -231,10 +231,15 @@
     }
   }
 
-  // 加载期拉一次自定义提供商目录：账号表 / 筛选器首屏就要显示 custom id 的
-  // 展示名，等用户打开某个面板再拉就晚了。失败静默（console.warn），下一次
-  // refreshCustom（添加 / 删除后）或重启会再试。
-  void fetchCustomProviders();
+  // 自定义提供商目录只用于把 custom id 换成展示名，不影响首屏骨架。等首屏
+  // 画完再拉（与 app.js 的 afterFirstPaint 同一取向）：启动时少一发请求，
+  // 失败静默（console.warn），下一次 refreshCustom（添加 / 删除后）或重启会再试。
+  const startCustomCatalog = () => { void fetchCustomProviders(); };
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(startCustomCatalog, 0)));
+  } else {
+    setTimeout(startCustomCatalog, 120);
+  }
 
   window.wbProviders = {
     all,

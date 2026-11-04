@@ -42,15 +42,27 @@ fn method_mkcol() -> Method {
     Method::from_bytes(b"MKCOL").expect("MKCOL 是合法 HTTP 方法")
 }
 
-fn client() -> Result<reqwest::Client, String> {
-    client_with_policy(reqwest::redirect::Policy::limited(10))
+/// ── 自定义 User-Agent ───────────────────────────────────────
+/// 少数 WebDAV 服务（如中国科技云数据胶囊）把凭据绑到「应用类型」上，并按
+/// User-Agent 校验它；UA 不含该应用名就拒绝。`user_agent` 为空 = 不覆盖。
+fn client(user_agent: &str) -> Result<reqwest::Client, String> {
+    client_with_policy(reqwest::redirect::Policy::limited(10), user_agent)
 }
 
-fn client_with_policy(policy: reqwest::redirect::Policy) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+fn client_with_policy(
+    policy: reqwest::redirect::Policy,
+    user_agent: &str,
+) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
-        .redirect(policy)
-        // 不设总超时（.timeout），按请求逐个设：PROPFIND 30 秒、传输 300 秒
+        .redirect(policy);
+    // 只在用户填了才覆盖：空串会被当成「不发 UA」，反而不如默认值
+    let user_agent = user_agent.trim();
+    if !user_agent.is_empty() {
+        builder = builder.user_agent(user_agent.to_string());
+    }
+    // 不设总超时（.timeout），按请求逐个设：PROPFIND 30 秒、传输 300 秒
+    builder
         .build()
         .map_err(|error| format!("创建 HTTP 客户端失败: {}", redact_detail(&error.to_string())))
 }
@@ -212,10 +224,14 @@ fn transport_error(op: &str, url: &str, error: &reqwest::Error) -> String {
 /// 用 PROPFIND 而不是 HEAD：很多 WebDAV 服务对目录的 HEAD 返回 405，而
 /// PROPFIND 是 WebDAV 的「你好，这里有东西吗」，能同时验证「地址对」与
 /// 「这是 WebDAV 而不是普通静态站点」。
-pub(crate) async fn test_connection(base_url: &str, auth: &WebDavAuth) -> Result<(), String> {
+pub(crate) async fn test_connection(
+    base_url: &str,
+    auth: &WebDavAuth,
+    user_agent: &str,
+) -> Result<(), String> {
     let url = parse_base_url(base_url)?;
     let response = apply_auth(
-        client()?
+        client(user_agent)?
             .request(method_propfind(), url)
             .header("Depth", "0")
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS)),
@@ -241,11 +257,12 @@ pub(crate) async fn ensure_remote_directories(
     base_url: &str,
     segments: &[String],
     auth: &WebDavAuth,
+    user_agent: &str,
 ) -> Result<(), String> {
     if segments.is_empty() {
         return Ok(());
     }
-    let http = client()?;
+    let http = client(user_agent)?;
     for depth in 1..=segments.len() {
         let url = build_remote_url(base_url, &segments[..depth])?;
         let dir_url = if url.ends_with('/') { url } else { format!("{url}/") };
@@ -302,9 +319,10 @@ pub(crate) async fn put_bytes(
     auth: &WebDavAuth,
     bytes: Vec<u8>,
     content_type: &str,
+    user_agent: &str,
 ) -> Result<(), String> {
     let response = apply_auth(
-        client()?
+        client(user_agent)?
             .put(url)
             .header("Content-Type", content_type)
             .body(bytes)
@@ -328,16 +346,17 @@ pub(crate) async fn get_bytes(
     url: &str,
     auth: &WebDavAuth,
     max_bytes: usize,
+    user_agent: &str,
 ) -> Result<Option<Vec<u8>>, String> {
-    download::get_bytes(url, auth, max_bytes).await
+    download::get_bytes(url, auth, max_bytes, user_agent).await
 }
 
 /// 删除一个文件（当前只在「上传失败后清理半截数据」之外使用；保留给将来的
 /// 「清空远端」按钮）。404 视为成功。
 #[allow(dead_code)]
-pub(crate) async fn delete(url: &str, auth: &WebDavAuth) -> Result<(), String> {
+pub(crate) async fn delete(url: &str, auth: &WebDavAuth, user_agent: &str) -> Result<(), String> {
     let response = apply_auth(
-        client()?
+        client(user_agent)?
             .delete(url)
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS)),
         auth,

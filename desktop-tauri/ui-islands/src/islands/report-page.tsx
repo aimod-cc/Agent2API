@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { mountOnPage } from '../island-lazy'
 import { createRoot } from 'react-dom/client'
 import { Badge, Empty, SegmentedControl, type SegmentedControlOption, Card, CardHeader, CardContent, CardFooter } from '@ui'
 import {
@@ -763,11 +764,8 @@ function mount(): void {
   createRoot(section).render(<ReportPage />)
 }
 
-// 脚本排在页面骨架之后（index.html 里 islands/ui.js 在各 section 之后），正常直接挂；
-// 万一将来被挪到前面，退化成等 DOM 解析完再挂。
-if (document.querySelector(PAGE_SELECTOR)) mount()
-else document.addEventListener('DOMContentLoaded', mount, { once: true })
+// 首次切到本页时才挂载（见 island-lazy）：隐藏页不在首屏渲染，也不拉数据。
+mountOnPage('overview', PAGE_SELECTOR, mount)
 
-// 自动刷新：启动时自读一次配置（失败就按兜底值跑），随后由组件的定时器接管。
-// 不依赖「定时任务」页推 —— 用户完全可能一次都没进过那一页。
-void syncAutoRefresh()
+// 自动刷新的间隔配置不在模块求值时读：页面第一次被切到时 loadPanel 会自己兜一次
+// （见 loadPanel 里的 syncAutoRefresh），没打开过报表页就不该发这个请求。

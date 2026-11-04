@@ -19,7 +19,8 @@ type SessionRefs = {
 
 export function titleFrom(messages: ChatMessage[]): string {
   const first = messages.find(message => message.role === 'user')
-  const text = first?.content.trim().replace(/\s+/g, ' ') || ''
+  const content = first?.content.trim().replace(/\s+/g, ' ') || ''
+  const text = content || first?.files?.[0]?.name || ''
   return text.length > 40 ? `${text.slice(0, 40)}…` : text
 }
 

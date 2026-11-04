@@ -46,6 +46,8 @@ const PATHS: Record<string, string> = {
   task: '<circle cx="12" cy="12" r="8.4"/><path d="M12 7.4V12l3.2 2"/>',
   agent:
     '<rect x="4" y="7.4" width="16" height="12" rx="3.4"/><path d="M12 3.4v4M8.6 12.6v1.6M15.4 12.6v1.6"/>',
+  tools:
+    '<path d="M14.6 3.2a5 5 0 0 0-4.1 8L3.9 17.8a2.2 2.2 0 0 0 3.1 3.1l6.6-6.6a5 5 0 1 0 1-11.1z"/><path d="m13.2 6.2 4.6 4.6"/>',
   wallet:
     '<rect x="3.4" y="6" width="17.2" height="13" rx="3.2"/><path d="M3.4 10h17.2M16.6 14.6h1.6"/>',
   shield:

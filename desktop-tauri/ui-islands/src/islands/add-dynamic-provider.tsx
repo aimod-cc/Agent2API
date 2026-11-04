@@ -49,7 +49,8 @@ function legacyMethods(provider: RuntimeProviderRecord | undefined): MethodsStat
     const kind = textOf(raw.kind)
     const method: Method = {
       id: `legacy:${index}`, type: 'unsupported', prompts: [], localOnly: false,
-      manualCallback: false, callbackInput: 'url', label: textOf(raw.label) || textOf(raw.button) || kind,
+      manualCallback: false, callbackInput: 'url', embeddedOnly: false,
+      label: textOf(raw.label) || textOf(raw.button) || kind,
       instructions: textOf(raw.hint) || textOf(raw.placeholder),
     }
     if (kind === 'browser') {
@@ -82,7 +83,7 @@ function legacyMethods(provider: RuntimeProviderRecord | undefined): MethodsStat
   if (!methods.some(method => method.type === 'manual')) {
     methods.push({
       id: 'manual:compat', type: 'manual', label: t('手动凭证 JSON（兼容入口）'),
-      prompts: [], localOnly: false, manualCallback: false, callbackInput: 'url', instructions: '',
+      prompts: [], localOnly: false, manualCallback: false, callbackInput: 'url', embeddedOnly: false, instructions: '',
     })
   }
   return {
@@ -135,7 +136,6 @@ export function DynamicProviderBlock({
   const [methodsState, setMethodsState] = React.useState<MethodsState>({
     phase: 'loading', methods: [], instructions: '', reason: '',
   })
-  const [reload, setReload] = React.useState(0)
   const [selected, setSelected] = React.useState('')
   const [values, setValues] = React.useState<Record<string, Record<string, string>>>({})
   const [credentialJson, setCredentialJson] = React.useState('')
@@ -161,7 +161,6 @@ export function DynamicProviderBlock({
   const savingRef = React.useRef(false)
   const requestingRef = React.useRef(false)
   const loadedRef = React.useRef(false)
-  const lastReload = React.useRef(reload)
   const method = methodsState.methods.find(item => item.id === selected) || methodsState.methods[0]
   const methodAvailable = method && methodsState.phase !== 'loading' && method.type !== 'unsupported'
   const selectedRef = React.useRef(method?.id)
@@ -192,6 +191,9 @@ export function DynamicProviderBlock({
   React.useEffect(() => {
     clearCallback(true)
     if (!active) {
+      // 关掉弹窗即作废这次读取；下次打开会重新问插件要登录方式
+      //（原来的「重新读取登录方式」按钮已移除，靠这里保证每次打开都是新清单）。
+      loadedRef.current = false
       setCallbackError('')
       progressRef.current = {}
       setProgress({})
@@ -203,7 +205,7 @@ export function DynamicProviderBlock({
 
   React.useEffect(() => {
     if (!active || savingRef.current || requestingRef.current || loginView.waiting) return
-    if (lastReload.current === reload && loadedRef.current && runtimeProviderOf(provider)) return
+    if (loadedRef.current && runtimeProviderOf(provider)) return
     let current = true
     const previousSelection = selectedRef.current
     const previousInputs = snapshot.current.inputs
@@ -221,7 +223,6 @@ export function DynamicProviderBlock({
     }
     requestingRef.current = true
     loadedRef.current = false
-    lastReload.current = reload
     setMethodsState(previous => ({ ...previous, phase: 'loading', reason: '' }))
     void (async () => {
       try {
@@ -239,7 +240,7 @@ export function DynamicProviderBlock({
     })()
     return () => { current = false; requestingRef.current = false }
     // 等待状态由共享引擎掌管，不以等待态重建方法或重新发起登录。
-  }, [provider, active, version, reload])
+  }, [provider, active, version])
 
   React.useEffect(() => {
     alive.current = true
@@ -257,8 +258,10 @@ export function DynamicProviderBlock({
           progressRef.current = {}
           setProgress({})
           const inputs = readInputs(current.method, current.inputs)
+          // 插件申报 embeddedOnly 时一律走内嵌窗口（不信任残留的 mode 状态）。
+          const mode = current.method.embeddedOnly ? 'embedded' : current.mode
           // 旧 browser 声明没有索引，只走已存在的默认网页登录入口。
-          return startLogin(provider, undefined, current.mode, undefined,
+          return startLogin(provider, undefined, mode, undefined,
             current.method.methodIndex === undefined ? undefined : {
               methodIndex: current.method.methodIndex, inputs, proxy: readProxyDraft(current.proxyDraft),
             })
@@ -485,11 +488,6 @@ export function DynamicProviderBlock({
           </SelectItem>)}</SelectContent>
         </Select>
       ) : null}
-      {/* 读不出来时也要给重试入口：两种状态互斥，合成一颗（原来拆成里外各一颗） */}
-      {methodsState.phase !== 'loading' ? <Button variant='outline' size='sm' className='self-start'
-        disabled={locked} onClick={() => setReload(value => value + 1)}>
-        {t('重新读取登录方式')}
-      </Button> : null}
     </AddGroup>
 
     {instructions || progress.userCode ? <Alert>
@@ -501,7 +499,7 @@ export function DynamicProviderBlock({
     </Alert> : null}
 
     {method && methodsState.phase !== 'loading' ? <AddGroup label={methodLabel(method)}>
-      {method.type === 'oauth' && !method.localOnly ? <p>{t('填写账号登录所需信息并发起授权；等待、取消与失败原因由共享登录桥处理，设备码和操作指引会显示在上方。')}</p> : null}
+      {method.type === 'oauth' && !method.localOnly ? <p>{t('填写信息后发起授权，进度与失败原因会显示在这里。')}</p> : null}
       {method.type === 'api' ? <p>{t('API 方法提交给插件的账号规范化入口；不会用该密钥发起 OAuth 登录。')}</p> : null}
       {method.localOnly ? <Alert variant='warning'>
         <AlertTitle>{t('需要网关本机环境')}</AlertTitle>
@@ -564,8 +562,8 @@ export function DynamicProviderBlock({
       </> : null}
       {legacyBrowser ? <p>{t('旧版浏览器登录暂不接收备注名和登录代理，请添加后在账号设置中调整。')}</p> : null}
       {method.type === 'oauth' && !legacyBrowser && !method.prompts.some(prompt => prompt.key === 'name')
-        ? <p>{t('此 OAuth 方法未声明备注名字段，账号名由插件获取；添加后可在账号设置中修改。')}</p> : null}
-      {method.type === 'oauth' && !method.localOnly && shared().workbuddyDesktop?.platform !== 'web' ? <>
+        ? <p>{t('账号名由插件自动获取，添加后可修改。')}</p> : null}
+      {method.type === 'oauth' && !method.localOnly && !method.embeddedOnly && shared().workbuddyDesktop?.platform !== 'web' ? <>
         <Label>{t('打开方式')}</Label>
         <SegmentedControl aria-label={t('网页登录的打开方式')} value={mode} disabled={locked}
           options={[{ value: 'external', label: t('系统浏览器') }, { value: 'embedded', label: t('内嵌窗口') }]}

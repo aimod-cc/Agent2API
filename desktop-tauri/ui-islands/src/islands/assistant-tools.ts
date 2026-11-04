@@ -28,6 +28,12 @@ import { ASSISTANT_ACCOUNT_TOOLS } from './assistant-account-tools'
 import { createBalanceTool } from '../../../ui-shared/assistant-read-balance'
 import { ASSISTANT_IMAGE_TOOLS, ASSISTANT_IMAGE_META } from './assistant-image-tools'
 import type { ImageAsset, ImageToolContext } from '../../../ui-shared/assistant-image-tools'
+import {
+  accountImportMeta,
+  createAccountImportTool,
+  createAttachmentReadTool,
+} from '../../../ui-shared/assistant-account-import-tools'
+import { callJson } from './assistant-api'
 import { checkToolSignal, runToolBatch } from '../../../ui-shared/assistant-tool-execution'
 import { safeText } from '../../../ui-shared/assistant-read-data'
 
@@ -59,6 +65,8 @@ export type AssistantTool = {
   params: Record<string, unknown>
   /** 改动类 / 消耗类：渲染确认卡（只读工具不实现） */
   plan?: (args: Record<string, unknown>) => ToolPlan
+  /** 参数在工具卡里展开显示时的遮蔽形态（凭证原文不长期显示） */
+  redactArgs?: (args: Record<string, unknown>) => Record<string, unknown>
   run: (args: Record<string, unknown>, context?: ImageToolContext) => Promise<ToolResult>
 }
 
@@ -724,9 +732,18 @@ const testModel: AssistantTool = {
   },
 }
 
+/** 附件读取与账号文件导入：定义在 `ui-shared`，桌面端只注入管理请求与刷新。 */
+const readAttachment = createAttachmentReadTool(t)
+const importAccount = createAccountImportTool({
+  post: (path, body, signal) => callJson('POST', path, body, signal),
+  refresh: refreshApp,
+}, t)
+const ACCOUNT_IMPORT_META = accountImportMeta(t)
+
 /** 全部工具（顺序 = 设置页清单顺序：只读在前，改动在后，高危最后） */
 export const ASSISTANT_TOOLS: AssistantTool[] = [
   ...ASSISTANT_READ_TOOLS,
+  readAttachment,
   listModels,
   listAccountBalance,
   setModelEnabled,
@@ -735,6 +752,7 @@ export const ASSISTANT_TOOLS: AssistantTool[] = [
   testModel,
   ...ASSISTANT_IMAGE_TOOLS,
   ...ASSISTANT_ACCOUNT_TOOLS,
+  importAccount,
 ]
 
 export function toolById(id: string): AssistantTool | undefined {
@@ -764,6 +782,7 @@ export const TOOL_META: Array<{ id: string; label: string; desc: string; tag?: '
   { id: 'set_provider_order', label: t('调整提供商顺位'), desc: t('改某一家的整组顺位（先试哪一家）。') },
   { id: 'set_account_order', label: t('调整账号优先级'), desc: t('改账号在全局队列里的名次，决定主备与切换顺序。') },
   { id: 'set_account_enabled', label: t('启用 / 禁用账号'), desc: t('禁用会把账号移出转发队列，线路可能因此断供。'), tag: 'danger' },
+  ...ACCOUNT_IMPORT_META,
 ]
 
 export { errorText }

@@ -130,6 +130,11 @@ export function UsageWindowsCell({ entry, rows, updatedAt, creditDetail, childre
   const planName = typeof subscription.planName === 'string' ? subscription.planName.trim() : ''
   const groups = groupWindows(rows)
   const grouped = rows.some(row => row.group)
+  // 无分组、读数较长或没有比例的窗口（Kiro 的「剩 x / y 积分」、AStudio 的
+  // 两个余额）按紧凑行排：标签在左、读数在右。不这样排的话，未分组的窗口会
+  // 走「统计格」样式（标签在上一行、读数 15px 在下一行），单列时整格被一个
+  // 大数字占满，多列时又像两张并排的卡片 —— 与 Antigravity 那种小行读数不一致。
+  const compact = !grouped && (rows.length === 1 || rows.some(row => row.percent === null || row.view.length > 10))
   const warnings = usageWarningsOf(data)
   const supplementary = supplementaryReadings(data, rows)
   const low = rows.some(row => !row.unlimited && row.percent !== null && row.percent < 20)
@@ -149,7 +154,7 @@ export function UsageWindowsCell({ entry, rows, updatedAt, creditDetail, childre
             <BadgeDot /><span>{status}</span>
           </span>
         </span>
-        <span className={`usage-window-grid${grouped ? ' grouped' : ' ungrouped'}`}
+        <span className={`usage-window-grid${grouped ? ' grouped' : ' ungrouped'}${compact ? ' compact' : ''}`}
           style={{ '--quota-columns': Math.min(3, groups.length) } as React.CSSProperties}>
           {groups.map(group => (
             <span className='usage-window-group' key={group.id}>

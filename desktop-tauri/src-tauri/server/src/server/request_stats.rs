@@ -97,6 +97,7 @@ pub fn request_date_bounds(start: NaiveDate, end: NaiveDate) -> Option<(i64, i64
 }
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use chrono::NaiveDate;
@@ -151,6 +152,16 @@ const MAX_FILTER_OPTIONS: usize = 200;
 /// `record_started` 上（每次有新请求开始时顺手扫一遍），不需要定时器。
 const RUNNING_STALE_MS: i64 = 60 * 60 * 1000;
 
+/// 记账热路径上的保留期 / 容量裁剪节拍。
+///
+/// 原先**每条请求**（开始 + 收尾各一次）都要 `COUNT(*)` 整张明细表来判断
+/// 是否超过条数上限，再顺带数一次 `request_raw` —— 每条请求两轮全表计数，
+/// 明细上百万行时这部分会明显吃掉转发收尾的时间。改成每 128 次记账或每
+/// 60 秒做一次：上限最多被突破 127 行，下一次裁剪抹平；低流量时按时间兜底，
+/// 不会出现「没有新请求就永远不清理」。
+const MAINTENANCE_EVERY: u64 = 128;
+const MAINTENANCE_INTERVAL_MS: i64 = 60_000;
+
 /// 进程重启后遗留的进行中行按 `ts` 判定：早于本次启动时刻的全是孤儿。
 /// 以进程启动时间做阈值而不是固定时长，能覆盖长请求在重启时仍在途的场景。
 fn stale_cutoff() -> i64 {
@@ -204,6 +215,10 @@ pub struct RequestStats {
     /// 各自独立；OmniProxy 用模块级 let 变量是因为它的 router 是文件级单例，
     /// 两边语义等价，这里选与本项目结构一致的挂法。
     vacuum: Arc<VacuumStatus>,
+    /// 自上次保留期裁剪以来记了多少次账（开始 + 收尾各算一次）。
+    maintenance_writes: AtomicU64,
+    /// 上次做保留期裁剪的毫秒时间戳；低流量时用它兜底。
+    last_maintenance_ms: AtomicI64,
 }
 
 impl RequestStats {
@@ -241,6 +256,8 @@ impl RequestStats {
             get_retention: Arc::new(get_retention),
             inner: Mutex::new(()),
             vacuum: Arc::new(VacuumStatus::new()),
+            maintenance_writes: AtomicU64::new(0),
+            last_maintenance_ms: AtomicI64::new(0),
         }
     }
 
@@ -251,6 +268,25 @@ impl RequestStats {
         match self.inner.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// 这一次记账要不要顺带做保留期 / 容量裁剪。
+    ///
+    /// 计数与时间都取原子读，不必进数据库锁；返回值只影响「是否多跑几条
+    /// DELETE/COUNT」，并发下偶尔多跑一次没有副作用。
+    fn should_maintain(&self) -> bool {
+        let writes = self.maintenance_writes.fetch_add(1, Ordering::Relaxed) + 1;
+        let now = now_ms();
+        let last = self.last_maintenance_ms.load(Ordering::Relaxed);
+        if writes == 1
+            || writes % MAINTENANCE_EVERY == 0
+            || now.saturating_sub(last) >= MAINTENANCE_INTERVAL_MS
+        {
+            self.last_maintenance_ms.store(now, Ordering::Relaxed);
+            true
+        } else {
+            false
         }
     }
 
@@ -359,6 +395,7 @@ impl RequestStats {
     pub fn record(&self, entry: NewRequestEntry) {
         let record = entry.normalize();
         let bounds = self.retention_bounds();
+        let maintain = self.should_maintain();
         let guard = self.guard();
         let _ = self.with_conn_mut(&guard, |conn| {
             let tx = conn.transaction()?;
@@ -370,9 +407,12 @@ impl RequestStats {
             if updated == 0 {
                 sql::insert_request(&tx, &record)?;
             }
-            // 长期运行也必须同时遵守保留天数与数量上限。
-            sql::delete_expired_requests(&tx, bounds.requests_ms)?;
-            retention::trim_requests(&tx, bounds.request_count)?;
+            // 长期运行也必须同时遵守保留天数与数量上限。按批做，见
+            // `MAINTENANCE_EVERY` 的说明 —— 每条请求一次全表 COUNT 太贵。
+            if maintain {
+                sql::delete_expired_requests(&tx, bounds.requests_ms)?;
+                retention::trim_requests(&tx, bounds.request_count)?;
+            }
             // 聚合：**读-改-写当天那一行**（为什么不是增量的 UPDATE：见 `sql.rs` 模块头）
             //
             // 模型测试的行**不折进聚合**（见 `RequestEntry::is_test`）：明细照记
@@ -396,12 +436,16 @@ impl RequestStats {
             // 模式不再写新正文」时也照样会裁（只要还有请求在跑）—— 这正是想要
             // 的：旧正文不会因为不再产生新行而永久占着空间。
             //
+            // 与上面的保留期裁剪同一节拍（`maintain`）：正文条数没有「按天」
+            // 语义，晚 127 条再裁不会影响任何展示。
             // 两步都**忽略失败**：正文是排障辅助，它这边出任何问题都不该让整条
             // 记账回滚（回滚的代价是这条请求的明细与日报一起没了）。失败的现场
             // 只留在控制台（由 `with_conn_mut` 那层打）。
-            if let Ok(raw_rows) = sql::count_raw(&tx) {
-                if raw_rows > MAX_RAW_ROWS {
-                    let _ = sql::trim_raw_rows(&tx, raw_rows - MAX_RAW_ROWS);
+            if maintain {
+                if let Ok(raw_rows) = sql::count_raw(&tx) {
+                    if raw_rows > MAX_RAW_ROWS {
+                        let _ = sql::trim_raw_rows(&tx, raw_rows - MAX_RAW_ROWS);
+                    }
                 }
             }
             tx.commit()
@@ -453,6 +497,7 @@ impl RequestStats {
             return;
         }
         let bounds = self.retention_bounds();
+        let maintain = self.should_maintain();
         let guard = self.guard();
         let _ = self.with_conn_mut(&guard, |conn| {
             let tx = conn.transaction()?;
@@ -469,8 +514,10 @@ impl RequestStats {
             // 陈旧清理与插入同事务：僵尸行的判定时点与本次开始时点一致，
             // 中断也只影响「这次有没有清成」，不会留下半删状态
             lifecycle::finish_stale(&tx, stale_cutoff(), now_ms())?;
-            sql::delete_expired_requests(&tx, bounds.requests_ms)?;
-            retention::trim_requests(&tx, bounds.request_count)?;
+            if maintain {
+                sql::delete_expired_requests(&tx, bounds.requests_ms)?;
+                retention::trim_requests(&tx, bounds.request_count)?;
+            }
             tx.commit()
         });
     }
@@ -655,9 +702,8 @@ impl RequestStats {
         let loaded = {
             let guard = self.guard();
             self.with_conn(&guard, |conn| {
-                let total = sql::count_all(conn)?;
-                let matched = sql::count_matching(conn, &plan)?;
-                let running = sql::count_running(conn, &plan)?;
+                // 三个计数共用一次扫描（见 `sql::counts` 的说明）。
+                let (total, matched, running) = sql::counts(conn, &plan)?;
                 let entries = sql::select_page_desc(conn, &plan, filter.offset, limit)?;
                 Ok((total, matched, running, entries))
             })
@@ -731,6 +777,9 @@ impl RequestStats {
             daily::delete_daily_before(&tx, &bounds.daily_key)?;
             tx.commit()
         });
+        // 显式裁剪（启动 / 改保留期）之后重置节拍：下一次记账从新的一批开始。
+        self.maintenance_writes.store(0, Ordering::Relaxed);
+        self.last_maintenance_ms.store(now_ms(), Ordering::Relaxed);
     }
 
     /// 见 `file_path` 的说明）。`firstTs` / `lastTs` 取明细 `ts` 的最小 / 最大值，

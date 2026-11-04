@@ -58,7 +58,7 @@ const LOCALES = ['en', 'zh-Hant', 'ja', 'ko', 'pt-BR']
  * 调整顺序会改变某些跨界键的归属，非必要不要动。
  */
 const DOMAIN_ORDER = [
-  'common', 'login', 'accounts', 'account-settings', 'add-account', 'models', 'routing', 'agent', 'settings', 'assistant', 'update',
+  'common', 'login', 'accounts', 'account-settings', 'add-account', 'models', 'routing', 'agent', 'tools', 'settings', 'assistant', 'update',
   'keys', 'proxies', 'docs', 'report', 'checkin', 'tasks', 'logs', 'requests',
   'tables', 'port',
 ]
@@ -77,6 +77,8 @@ const DOMAIN_RULES = [
   { domain: 'routing', prefixes: ['routing-'] },
   // 「Agent」页：本机 AI 客户端的配置接管（客户端清单 / 配置编辑 / 写入预览）
   { domain: 'agent', files: ['AgentPage.tsx'], prefixes: ['agent-'] },
+  // 「工具服务」页：网络搜索 / 视觉分析（服务列表 / 详情 / 上游配置 / 本机接入）
+  { domain: 'tools', files: ['ToolsPage.tsx'], prefixes: ['tools-'] },
   // 「设置 → 版本信息」面板（桌面端 system-info-pane.tsx 与手机端
   // SystemInfoSheet.tsx 共用同一批文案：版本 / 环境 / 路径 / 开关）。
   // 归 settings 域 —— 它读的就是设置页的分类之一，文案与设置页其它面板同类。

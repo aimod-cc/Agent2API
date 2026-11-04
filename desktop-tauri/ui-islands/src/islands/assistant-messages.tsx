@@ -22,9 +22,11 @@ import {
   BoltIcon,
   CheckIcon,
   ChevronIcon,
+  FileIcon,
   LayersIcon,
 } from './assistant-icons'
 import { Spinner } from '@ui'
+import { formatFileSize, type AssistantTextFile } from '../../../ui-shared/assistant-files'
 import { AssistantImageResults } from '../../../ui-shared/assistant-image-results'
 import type { ImageAsset } from '../../../ui-shared/assistant-image-tools'
 import { loadAssistantImage } from './assistant-image-api'
@@ -46,7 +48,7 @@ export type ToolCardItem = {
 }
 
 export type UiMessage =
-  | { kind: 'user'; id?: string; text: string; images?: string[] }
+  | { kind: 'user'; id?: string; text: string; images?: string[]; files?: AssistantTextFile[] }
   | { kind: 'bot'; id?: string; model?: string; text: string; streaming?: boolean }
   | ToolCardItem
   | { kind: 'notice'; text: string; bad?: boolean }
@@ -82,7 +84,7 @@ function timeLabel(): string {
 
 /* ─── 用户消息 ─────────────────────────────────────────────── */
 
-function UserMessage({ text, images, children }: { text: string; images?: string[]; children?: React.ReactNode }) {
+function UserMessage({ text, images, files, children }: { text: string; images?: string[]; files?: AssistantTextFile[]; children?: React.ReactNode }) {
   return (
     <div className='asst-msg user'>
       <div className='flex min-w-0 flex-col items-end'>
@@ -91,6 +93,17 @@ function UserMessage({ text, images, children }: { text: string; images?: string
           <div className='asst-msg-atts'>
             {images.map((url, index) => (
               <img key={index} className='asst-msg-shot' src={url} alt={t('图片 {n}', { n: index + 1 })} />
+            ))}
+          </div>
+        ) : null}
+        {files?.length ? (
+          <div className='asst-msg-files'>
+            {files.map((file, index) => (
+              <span className='asst-msg-file' key={`${file.name}-${index}`} title={file.name}>
+                <FileIcon size={13} />
+                <span className='asst-msg-file-name'>{file.name}</span>
+                <span className='asst-msg-file-size'>{formatFileSize(file.size)}</span>
+              </span>
             ))}
           </div>
         ) : null}
@@ -156,7 +169,8 @@ function ToolCard({ item, onConfirm }: { item: ToolCardItem; onConfirm: (run: bo
   const tool = toolById(item.call.name)
   const label = tool?.label || item.call.name
   const args = parseToolArguments(item.call.arguments)
-  const argsText = Object.keys(args).length ? JSON.stringify(args, null, 2) : ''
+  const displayArgs = tool?.redactArgs ? tool.redactArgs(args) : args
+  const argsText = Object.keys(displayArgs).length ? JSON.stringify(displayArgs, null, 2) : ''
   const [open, setOpen] = React.useState(false)
   const state = toolStateText(item)
   const expandable = item.state !== 'confirm' && Boolean(argsText || item.detail || item.error)
@@ -262,7 +276,7 @@ export function MessageList({ messages, onConfirm, model, actions }: {
     <>
       {messages.map((message, index) => {
         if (message.kind === 'user') {
-          return <UserMessage key={message.id || index} text={message.text} images={message.images}>
+          return <UserMessage key={message.id || index} text={message.text} images={message.images} files={message.files}>
             {message.id ? <AssistantMessageActions text={message.text} t={t} disabled={actions.disabled}
               onEdit={text => actions.onEdit(message.id!, text)} onDelete={() => actions.onDelete(message.id!)} /> : null}
           </UserMessage>

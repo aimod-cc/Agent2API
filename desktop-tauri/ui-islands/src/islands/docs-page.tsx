@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { mountOnPage } from '../island-lazy'
 import { createRoot } from 'react-dom/client'
 import { Button, Card, CardHeader, CardFooter } from '@ui'
 import { apiEndpoints } from '../../../ui-shared/docs-api-endpoints'
@@ -83,5 +84,4 @@ function mount(): void {
   createRoot(section).render(<DocsPage />)
 }
 
-if (document.querySelector(PAGE_SELECTOR)) mount()
-else document.addEventListener('DOMContentLoaded', mount, { once: true })
+mountOnPage('docs', PAGE_SELECTOR, mount)

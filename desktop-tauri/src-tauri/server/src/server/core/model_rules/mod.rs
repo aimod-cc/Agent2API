@@ -650,13 +650,39 @@ pub(crate) fn save(rules: &ModelRules) -> bool {
 
 use bindings::set_membership;
 
-/// alias 允许的字符：字母 / 数字 / `- _ . / :`
+/// **上游模型 id / 自生成别名**的字符集口径：字母 / 数字 / `- _ . / :`。
+///
+/// 只用在两处 —— 手动登记的上游模型 id（`api::model_manage` 的 `/api/models/custom`）
+/// 与 Cline 的默认映射种子（`cline.rs`，种子名由模型 id 拼出来）。
+/// **对外映射名不走它**：那是用户给下游点名用的名字，上游不校验，见
+/// [`alias_name_valid`]。
 pub fn alias_valid(alias: &str) -> bool {
     !alias.is_empty()
         && alias.len() <= 128
         && alias
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':'))
+}
+
+/// **新建对外映射名**能不能落盘。
+///
+/// ── 为什么不再限制字符集 ──────────────────────────────────────
+/// 对外名是给下游点名用的名字，上游根本不看它；而各家官方的模型名并不保证是
+/// ASCII —— 千问办公的 `高级` / `标准` 就是中文，且那正是它的**上游模型 id**
+/// （见 Agent2Providers 的 `qwenwork` 兜底清单 / 远程目录解析）。既然这种名字
+/// 本来就会作为自映射绑定躺在配置里，新建别名时再按「只准字母数字」拦一道，
+/// 就成了同一份数据两套标准：中文名能用、却不许你再起一个中文名。
+///
+/// 保留的是**「没法当模型名用」**那一档：空、超长、带空白或控制字符。空值会让
+/// 下游点名点不到；空白 / 控制字符会做出「看上去一模一样、请求却对不上」的名字
+/// （千问办公的远程目录也刻意把展示名里的空白抹掉再当 id）。长度按**字符**数
+/// 计（128 个中文与 128 个字母一视同仁），不是字节数。
+///
+/// 调用方负责先 `trim`（API 层的 `text_field` 已经做过）。
+pub fn alias_name_valid(alias: &str) -> bool {
+    !alias.is_empty()
+        && alias.chars().count() <= 128
+        && !alias.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 /// 把该家的能力覆盖写进整份清单（内置家清单出口的统一调用点，见

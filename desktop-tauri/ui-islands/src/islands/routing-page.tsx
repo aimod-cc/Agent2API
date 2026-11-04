@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { mountOnPage } from '../island-lazy'
 import { createRoot } from 'react-dom/client'
 import { Badge, Button, Empty, SegmentedControl, Spinner, confirmDialog } from '@ui'
 import { t } from '../i18n'
@@ -47,6 +48,7 @@ export function RoutingPage() {
     if (!selected || !isTraceRunning(selected)) return
     let alive = true
     const timer = window.setInterval(async () => {
+      if (document.hidden || host().wbApp?.currentPage !== 'routing') return
       try {
         const next = await bridge().getRoutingTraceRequest({ id: selected.id, ts: selected.ts })
         if (alive) setSelected(current => current && requestKey(current) === requestKey(next) ? next : current)
@@ -167,5 +169,4 @@ window.wbRoutingPanel = {
   async load() { refreshWorkspace?.() },
   async openReplay(row) { host().wbRequestDetail?.close?.(); host().wbApp?.showPage('routing'); requestTrace?.(row) },
 }
-if (document.querySelector(selector)) mount()
-else document.addEventListener('DOMContentLoaded', mount, { once: true })
+mountOnPage('routing', selector, mount)

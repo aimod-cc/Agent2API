@@ -107,7 +107,12 @@ function apkBundle(): Plugin {
       const i18nSrc = path.join(source, 'i18n')
       const i18nOut = path.join(root, 'i18n')
       if (fs.existsSync(i18nSrc)) {
-        fs.cpSync(i18nSrc, i18nOut, { recursive: true })
+        // combined/ 只服务桌面主面板（登录页与手机端仍按域取）；APK 里用不到，
+        // 不打进去，避免多出五份约 700 KB 的合并词典。
+        fs.cpSync(i18nSrc, i18nOut, {
+          recursive: true,
+          filter: src => path.basename(src) !== 'combined',
+        })
       }
       for (const name of ['i18n.js', 'aliyun-captcha.js']) {
         fs.copyFileSync(path.join(source, name), path.join(root, name))

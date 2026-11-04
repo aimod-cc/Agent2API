@@ -17,6 +17,9 @@ import { fileURLToPath } from 'node:url'
  * 供独立 typecheck 与样式解析（globals.css 里 tailwindcss / tw-animate-css /
  * shadcn 三个 @import 要能从它自己的位置解析到）。构建时靠 dedupe 把 React
  * 收敛到本工程这一份 —— 两份 React 会让两套调度器互不认识。
+ *
+ * 登录页不是这个入口的一部分：它由 `vite.login.config.ts` 单独产出
+ * `ui/islands/login.js`（见该文件模块头），避免登录页下载整份主面板脚本。
  */
 export default defineConfig({
   plugins: [react(), tailwindcss()],

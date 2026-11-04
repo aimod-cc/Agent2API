@@ -420,6 +420,41 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/agents/{id}/resources", get(api::agent_resources::get))
         .route("/api/agents/{id}/resources/preview", post(api::agent_resources::preview))
         .route("/api/agents/{id}/resources/apply", post(api::agent_resources::apply))
+        // ── 工具服务（「工具服务」页的管理面）──
+        // 上游提供商密钥、服务开关与超时、本机接入都要管理员权限，全部挂
+        // protected。运行时端点（/skill、/mcp、/api/web-search）在网关面，
+        // 见 `gateway_router` 的说明。
+        .route("/api/tools/servers", get(api::tools::get_servers))
+        .route("/api/tools/servers/{id}", axum::routing::patch(api::tools::patch_server))
+        .route("/api/tools/providers", get(api::tools::get_providers))
+        .route("/api/tools/api-keys", get(api::tools::list_api_keys))
+        .route(
+            "/api/tools/provider-selection",
+            get(api::tools::get_selection).put(api::tools::put_selection),
+        )
+        .route(
+            "/api/tools/providers/{provider}",
+            axum::routing::put(api::tools::put_provider),
+        )
+        .route(
+            "/api/tools/providers/{provider}/key",
+            axum::routing::delete(api::tools::delete_provider_key),
+        )
+        .route("/api/tools/providers/{provider}/test", post(api::tools::test_provider))
+        .route(
+            "/api/tools/vision/config",
+            get(api::tools::get_vision_config)
+                .put(api::tools::put_vision_config)
+                .delete(api::tools::delete_vision_config),
+        )
+        .route("/api/tools/vision/config/test", post(api::tools::test_vision))
+        .route("/api/tools/install-targets", get(api::tools::install_targets))
+        .route("/api/tools/install-info", get(api::tools::install_info))
+        .route("/api/tools/install-skill", post(api::tools::install_skill))
+        .route("/api/tools/install-mcp", post(api::tools::install_mcp))
+        .route("/api/tools/uninstall-skill", post(api::tools::uninstall_skill))
+        .route("/api/tools/uninstall-mcp", post(api::tools::uninstall_mcp))
+        .route("/api/tools/mcp-bridge/vision.js", get(api::tools::vision_bridge_script))
         // ── 侧边栏布局（菜单的分组 / 顺序 / 显隐）──
         // 挂 protected：布局是用户配置，且写操作会改两端共用的那一份。
         // 桌面壳的管理请求由壳自动带 Key，网页端走面板会话，两端都不受影响。
@@ -500,6 +535,16 @@ pub fn panel_router(state: ServerState) -> Router {
         .route(
             "/api/session/login/loomy/sms/verify",
             post(api::session::login_loomy_sms_verify),
+        )
+        // Tabbit 国内站的手机号验证码登录（同样两段、同样 protected）。
+        // 国际站不支持短信登录，插件只开了国内站的 `login.sms-*` 动作。
+        .route(
+            "/api/session/login/tabbit/sms/send",
+            post(api::session::login_tabbit_sms_send),
+        )
+        .route(
+            "/api/session/login/tabbit/sms/verify",
+            post(api::session::login_tabbit_sms_verify),
         )
         // AutoClaw OAuth 网页登录（**国际版**的官方主方式）。两段都挂 protected
         // —— 它们要带验证码参数去打上游、并往任务表里登记一次登录，与 sms/*
@@ -869,6 +914,10 @@ pub fn panel_router(state: ServerState) -> Router {
         // 方法不匹配的兜底：Node 版没有 405 概念，一律落到 404 分支，
         // 所以这里把 405 也转成同样的 Not found 文案，保持行为一致
         .method_not_allowed_fallback(method_not_allowed)
+        // 文本响应统一 gzip：面板的 islands 产物与首屏 /api/session 都是大块文本，
+        // 不压会让远程打开面板等上几十秒（见 compression 模块头）。只挂管理面 ——
+        // 网关面的 /v1/* 是 SSE 流，不能在这里压。
+        .layer(middleware::from_fn(super::compression::gzip))
         // CORS 与 body 限制必须在最外层：404 与错误响应也要带 CORS 头
         .layer(middleware::from_fn(cors))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_SIZE))
@@ -901,6 +950,14 @@ pub fn gateway_router(state: ServerState) -> Router {
     let open = Router::new()
         .route("/v1/models", get(api::chat::list_models))
         .route("/v1/images/files/{id}", get(api::images::download))
+        // 工具服务的元数据与 REST 端点：GET 是免鉴权的服务说明；POST 由 handler
+        // 自己校验网关 Key（与 /skill、/mcp 同一口径），所以放在不挂统一中间件的
+        // 这一组 —— 放进 guarded 反而会被 `require_api_key` 的「/api/ 需面板会话
+        // 或不受限 Key」判据挡住（工具服务不承载模型请求，Key 的模型白名单无关）。
+        .route("/api/web-search", get(api::tool_runtime::api_metadata))
+        .route("/api/web-search/search", post(api::tool_runtime::api_search))
+        .route("/api/web-search/fetch", post(api::tool_runtime::api_fetch))
+        .route("/skill/web-search", get(api::tool_runtime::skill_metadata))
         .with_state(state.clone());
     // 三条协议入口 + Anthropic 的 token 计数端点：都查 API Key。
     // 与 chat/completions 完全同构：都走同一套转发链路，差异只在出入口的
@@ -916,6 +973,19 @@ pub fn gateway_router(state: ServerState) -> Router {
         .route("/v1/messages/count_tokens", post(api::chat::count_tokens))
         .route("/v1/images/generations", post(api::images::generations))
         .route("/v1/images/edits", post(api::images::edits))
+        // 工具服务的既有协议入口：/skill 与 /mcp 不在 /v1 也不在 /api 下，
+        // `require_api_key` 对它们不做任何判定（见该中间件的分支），所以鉴权
+        // 必须由 handler 自己做 —— 这正是 `api::tool_runtime` 的做法。
+        .route("/skill/web-search/search", post(api::tool_runtime::skill_search))
+        .route("/skill/web-search/fetch", post(api::tool_runtime::skill_fetch))
+        .route(
+            "/mcp/web-search",
+            post(api::tool_runtime::mcp_web_search).get(api::tool_runtime::mcp_unsupported),
+        )
+        .route(
+            "/mcp/vision",
+            post(api::tool_runtime::mcp_vision).get(api::tool_runtime::mcp_unsupported),
+        )
         .layer(middleware::from_fn(require_api_key))
         .with_state(state);
     health.merge(open.merge(guarded))

@@ -123,9 +123,11 @@ pub async fn add_mapping(State(state): State<ServerState>, body: Bytes) -> Respo
     let alias = text_field(&object, "alias");
     let target = text_field(&object, "target");
     let provider = text_field(&object, "provider");
-    if !model_rules::alias_valid(&alias) {
-        return errors::management_error(400, "映射名只能包含字母、数字与 - _ . / :，且不超过 128 个字符");
-    }
+    // 别名的合法性**不在这里**校验：这条接口同时承担「新建一条对外别名」与
+    // 「切开关 / 改思考等级」两种语义，后者的别名只是定位键、可能本就是上游的
+    // 非 ASCII id（千问办公的 `高级` / `标准`）。判据放在 `model_rules::add_mapping`
+    // 里按「这条别名是不是新建的」区分，新建时用的是 `alias_name_valid`
+    // （不限字符集，见那里的注释）。
     if target.is_empty() {
         return errors::management_error(400, "缺少目标上游模型");
     }

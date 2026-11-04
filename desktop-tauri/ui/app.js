@@ -29,6 +29,20 @@ function toast(message, type = 'ok') {
   window.wbShell?.toast(message, type);
 }
 
+/**
+ * 首屏画完再做的小事：双 rAF 之后落到下一轮宏任务，确保第一次绘制已经发生。
+ * 页面岛、插件页菜单、更新徽标这些「晚半秒也没关系」的同步都走这里；
+ * 当前页自己的数据仍由 showPage 立即拉。
+ */
+function afterFirstPaint(task) {
+  const run = () => window.setTimeout(task, 0);
+  if (typeof window.requestAnimationFrame === 'function') {
+    window.requestAnimationFrame(() => window.requestAnimationFrame(run));
+  } else {
+    window.setTimeout(run, 80);
+  }
+}
+
 function formatTime(value) {
   if (!value) return '';
   const date = new Date(value);
@@ -125,7 +139,7 @@ function applyZoom(percent) {
 // ─── 页面导航 ────────────────────────────────
 
 const PAGE_KEY = 'workbuddy-desktop-page';
-const PAGES = ['assistant', 'overview', 'accounts', 'checkin', 'routing', 'gateway', 'agent', 'proxies', 'keys', 'docs', 'logs', 'tasks', 'requests', 'plugins', 'settings'];
+const PAGES = ['assistant', 'overview', 'accounts', 'checkin', 'routing', 'gateway', 'agent', 'tools', 'proxies', 'keys', 'docs', 'logs', 'tasks', 'requests', 'plugins', 'settings'];
 /** 页签中文名：顶栏面包屑用。overview 的用户可见名是「报表」、gateway 的是「模型管理」
  *  （内部标识保持不变：localStorage 记忆、showPage 与 CSS 的 [data-page] 选择器都依赖它）
  *
@@ -138,6 +152,7 @@ const PAGE_LABELS = {
   routing: wbI18n.t('路由'),
   gateway: wbI18n.t('模型管理'),
   agent: wbI18n.t('Agent 配置'),
+  tools: wbI18n.t('工具服务'),
   proxies: wbI18n.t('网络代理'),
   keys: wbI18n.t('网关 Key'),
   docs: wbI18n.t('文档'),
@@ -509,6 +524,10 @@ function showPage(name, { persist = true } = {}) {
   // 切页后由组件库外壳收起移动侧边栏。
   window.wbShell?.closeNavigation();
   if (persist) localStorage.setItem(PAGE_KEY, page);
+  // 页面岛按需挂载：模块在 ui.js 里已经加载，但 React root 要等这一页第一次
+  // 被切到才创建（见 ui-islands/src/island-lazy.ts）。必须排在下面那些
+  // `wbXxxPanel.load()` 之前 —— 先挂上，再让面板自己拉当前页的数据。
+  window.dispatchEvent(new CustomEvent('wb:page', { detail: page }));
   // 列的设置面板常驻 body（.panel 是 overflow:hidden，留在原处会被裁掉，
   // 见 table-col-settings.js），不随宿主页面的 display:none 一起消失 ——
   // 不收起的话，切页之后它会孤零零地浮在新页面上。它自己不认识「页面」，
@@ -577,6 +596,9 @@ function showPage(name, { persist = true } = {}) {
   if (page === 'accounts') {
     void window.wbAccountsView?.refreshList?.();
     void window.wbAccountsView?.syncConnections?.();
+    // 余额快照只在账号页可见时拉：隐藏页 / 启动首屏若不在账号页，不该为它多打一发。
+    // 20 秒轮询里也按同一个判据（见文件末尾的 setInterval）。
+    void window.wbAccountsView?.syncBalancesSnapshot?.();
     // 代理列的下拉读的是与「网络代理」页共用的那份池缓存：那一页的写操作会就地
     // 更新它，但池也可能在应用外被改过（另一个窗口 / 手工改库），切回来时重读一次
     void window.wbAccountsView?.refreshProxyPool?.();
@@ -632,7 +654,13 @@ function renderTopbarStatus() {
     settings: () => [gateway(true), ...(enabled ? [chip(wbI18n.t("{n} 个账号启用", { n: enabled }))] : [])],
     overview: () => [gateway(), available ? chip(wbI18n.t("{n} 个账号可用", { n: available }), "ok") : chip(session.loggedIn ? wbI18n.t("已登录") : wbI18n.t("未登录"), session.loggedIn ? "ok" : "warn")],
   };
-  window.wbShell?.status(views[currentPage]?.() || views.overview(), stateError ? wbI18n.t("加载失败：{error}", { error: stateError }) : "");
+  const items = views[currentPage]?.() || views.overview();
+  // 启动期的历史统计整理在后台跑（见后端 start_background_maintenance）：
+  // 顶栏挂一条轻提示，下一次 20 秒轮询读到 running=false 时自然消失。
+  if (state?.maintenance?.running) {
+    items.push(chip(wbI18n.t('历史数据整理中'), 'warn', true));
+  }
+  window.wbShell?.status(items, stateError ? wbI18n.t("加载失败：{error}", { error: stateError }) : "");
 }
 
 // ─── 日志未读徽标（只提示 error） ─────────────
@@ -1291,7 +1319,7 @@ refresh();
  * 首次落库（库里还是空的）也在这条路径里完成 —— `syncFromServer` 会把
  * 本机缓存上行，老用户调好的布局无感迁移进库。
  */
-void window.wbSidebarLayout?.syncFromServer?.();
+afterFirstPaint(() => { void window.wbSidebarLayout?.syncFromServer?.(); });
 
 /** 首屏问一次后端状态：此时 state 还没回来，侧栏两条状态各自显示
  * 「正在检查…」，拿到结果后立刻变成真值（端口冲突会直接给出失败原因）。
@@ -1318,23 +1346,18 @@ function restorePortPanel() {
  * 面板的 load() 同样只读缓存，所以这里这一下不会和它重复请求。
  */
 document.addEventListener('DOMContentLoaded', () => {
-  void window.wbUpdatePanel?.syncFromCache?.();
   // 数据结构升级：这次更新把数据存储换成了单个 SQLite 库，启动时后端只探测
   // 「还有没有旧文件没搬进库」，有待迁移就直接导入（**不弹窗** —— 升级没有
-  // 选项也不能取消，弹窗只是多余的一道坎）。同样放 DOMContentLoaded：
-  // 面板脚本排在 app.js 之后。
-  // 它**不是**更新检查那种「有新版本就提示」的可选动作 —— 没升级时账号是空的，
-  // 所以过程与结果都要 toast 报出来，不能让用户面对一个「账号怎么空了」的疑问。
+  // 选项也不能取消，弹窗只是多余的一道坎）。它关系到账号是否为空，保持尽早跑。
   void window.wbUpgradePanel?.check?.();
-  // 启动即读一次后端的余额结果快照（每账号自动查询的最新结论，重启也在），
-  // 只靠下面那条 20 秒轮询的话，用户启动后第一眼看到的是账号页一片「未查询」，
-  // 要等最久一整轮才变出余额 —— 那正是「定时查询好像没生效、必须手动点」的来源。
-  // 放在 DOMContentLoaded：islands（wbAccountsView 的注册处，见 index.html 的
-  // 加载顺序）是同步脚本，此刻已经就位。
-  void window.wbAccountsView?.syncBalancesSnapshot?.();
-  // 插件申报的页面 → 侧边栏动态菜单。放这里而不是模块顶部：首帧侧边栏先按
-  // 内置页画出来（不闪空白），拿到清单后再补上插件页（多一次重画）。
-  void refreshPluginPages();
+  // 以下三项都不影响当前页首帧：更新徽标读的是后端缓存，插件页菜单晚半秒出现
+  // 也不会挡住操作，侧边栏布局是跨设备同步。统一等首屏画完再做。
+  afterFirstPaint(() => {
+    void window.wbUpdatePanel?.syncFromCache?.();
+    // 插件申报的页面 → 侧边栏动态菜单。首帧侧边栏先按内置页画出来（不闪空白），
+    // 拿到清单后再补上插件页（多一次重画）。
+    void refreshPluginPages();
+  });
 }, { once: true });
 
 // 窗口重新可见时立刻补读一次余额快照：20 秒轮询在页面隐藏期间整体跳过
@@ -1343,13 +1366,18 @@ document.addEventListener('DOMContentLoaded', () => {
 // 快照时间戳没变时 syncBalancesSnapshot 自己会早退，重复触发没有代价。
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
-  if (currentPage === 'accounts') void window.wbAccountsView?.refreshList?.();
-  void window.wbAccountsView?.syncBalancesSnapshot?.();
+  if (currentPage === 'accounts') {
+    void window.wbAccountsView?.refreshList?.();
+    void window.wbAccountsView?.syncBalancesSnapshot?.();
+  }
   if (api.platform !== 'web') {
     const frame = pluginPageHost()?.querySelector('iframe');
     if (frame) void pushPanelToken(frame.contentWindow);
   }
 });
+
+// 慢轮询计数器：侧边栏布局这类低频同步每 3 轮（60 秒）做一次
+let slowPollTick = 0;
 
 // 定时轮询：限额标记（429 + 恢复时间）与账号状态变化自动刷新；窗口隐藏时暂停
 setInterval(() => {
@@ -1363,14 +1391,13 @@ setInterval(() => {
   void syncLogsBadge();
   // 请求日志的未读失败同理：人不在请求日志页时也要有人推进角标
   void syncRequestsBadge();
-  // 余额快照也跟着这一轮读一次：后端的每账号自动查询在跑，
-  // 界面得跟上它（否则用户不点按钮就永远停在启动那次的旧余额上）。
-  // 快照时间戳没变时它自己会早退，不会造成无谓的重绘。
-  void window.wbAccountsView?.syncBalancesSnapshot?.();
-  // 侧边栏布局也跟着对一次库：另一端（WebUI 与客户端是两个 origin，
-  // localStorage 不通）刚改过布局时，这一端最迟在这一轮跟上。
+  // 余额快照只在账号页可见时读：后端的每账号自动查询在跑，人不在账号页时
+  // 没必要每 20 秒取一次；切回账号页时 showPage 会立刻补一次。
+  if (currentPage === 'accounts') void window.wbAccountsView?.syncBalancesSnapshot?.();
+  // 侧边栏布局是跨设备同步，变化频率远低于 20 秒；每 3 轮（60 秒）对一次库。
   // 内容没变时 `syncFromServer` 自己早退，不会重画（重画会打断正在拖动的项）。
-  void window.wbSidebarLayout?.syncFromServer?.();
+  slowPollTick = (slowPollTick + 1) % 3;
+  if (slowPollTick === 0) void window.wbSidebarLayout?.syncFromServer?.();
   // 插件页缓存着管理凭证，桌面会话提前续期后要把新值递进去。
   if (api.platform !== 'web') {
     const frame = pluginPageHost()?.querySelector('iframe');

@@ -138,6 +138,10 @@ export const PROVIDER_ICONS: Record<string, string> = {
   // 归一成 256×256 入库 —— 与 officeace 同一处置）
   chatglm: 'assets/providers/chatglm.png',
   'deepseek-web': 'assets/providers/deepseek.png',
+  // Tabbit 浏览器：取自国内站 `web.tabbit.com/favicon.ico`（实际是 160×160 PNG），
+  // 两站共用这一张（同一产品形象）。
+  tabbit: 'assets/providers/tabbit.png',
+  'tabbit-intl': 'assets/providers/tabbit.png',
   // ModelScope（魔搭）：取自官网 favicon（`https://modelscope.cn/favicon.ico`，
   // 内含 128×128 的一帧，归一成 256×256 入库 —— 与站点标签页上显示的是同一形象；
   // 国内 / 国际版共用这一张，同 AutoClaw / MonkeyCode 的形态）
@@ -159,6 +163,9 @@ export const PROVIDER_ICONS: Record<string, string> = {
   doubaowork: 'assets/providers/doubaowork.png',
   cursor: 'assets/providers/cursor.svg',
   kiro: 'assets/providers/kiro.svg',
+  // AStudio（科大讯飞 Astron Studio）：取自客户端图标资源（紫底白 N + 星芒，
+  // 与系统里显示的应用图标同一形象；原始 32×32 归一成 256×256 入库）
+  astudio: 'assets/providers/astudio.png',
   devin: 'assets/providers/devin.svg',
   factory: 'assets/providers/factory.svg',
   zed: 'assets/providers/zed.svg',

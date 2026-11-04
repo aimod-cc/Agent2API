@@ -11,6 +11,7 @@
  * ## 图标清单
  * - `PlusIcon`：左下角「添加图片」的加号
  * - `ImageIcon`：附件缩略图缺省占位、图片能力提示
+ * - `FileIcon`：JSON / .info 文本附件的文件图标
  * - `ShieldIcon`：权限模式「变更前确认」
  * - `BoltIcon`：权限模式「完全访问」
  * - `SendIcon`：发送（向上的箭头，与截图同形）
@@ -35,6 +36,17 @@ export function ImageIcon({ size = 15, className }: IconProps) {
         <rect x='3.5' y='4.5' width='17' height='15' rx='2.6' />
         <circle cx='8.7' cy='9.4' r='1.5' fill='currentColor' stroke='none' />
         <path d='M5.2 17.2l4.7-4.7a1.7 1.7 0 0 1 2.4 0l1.5 1.5 2.1-2.1a1.7 1.7 0 0 1 2.4 0l1.8 1.8' />
+      </g>
+    </svg>
+  )
+}
+
+export function FileIcon({ size = 15, className }: IconProps) {
+  return (
+    <svg viewBox='0 0 24 24' width={size} height={size} className={className} aria-hidden='true'>
+      <g fill='none' stroke='currentColor' strokeWidth='1.7' strokeLinecap='round' strokeLinejoin='round'>
+        <path d='M6.2 3.5h7.1l4.5 4.5v12.5H6.2z' />
+        <path d='M13.3 3.7v4.4h4.4M9 12h6M9 15.3h6' />
       </g>
     </svg>
   )

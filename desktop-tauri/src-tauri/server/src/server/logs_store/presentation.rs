@@ -86,11 +86,13 @@ fn string_field<'a>(data: &'a Map<String, Value>, key: &str) -> Option<&'a str> 
 
 // 旧插件把 verbose 写成了 info；只识别已知的过程消息，不降低警告和错误。
 pub fn prepare(mut entry: LogEntry) -> LogEntry {
-    let mut data = entry
-        .data
-        .take()
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
+    // `entry.data` 已经在本条记录里独占，直接取走 map 即可；原先用
+    // `as_object().cloned()` 会把每条日志的 data 整份深拷贝一次，日志页
+    // 一次要过几万条时这是纯白花的内存与时间。
+    let mut data = match entry.data.take() {
+        Some(Value::Object(map)) => map,
+        _ => Map::new(),
+    };
     let (tags, text) = split_tags(&entry.message);
     let plugin = tags.contains(&"Plugin") || string_field(&data, "source") == Some("plugin");
     let category = tags.iter().rev().find_map(|tag| category_for_tag(tag));
@@ -159,45 +161,130 @@ fn group_key(entry: &LogEntry) -> Option<String> {
     if string_field(data, "source") == Some("plugin") && account.is_none() {
         return None;
     }
-    let context: Map<String, Value> = data
-        .iter()
-        .filter(|(key, _)| {
-            !matches!(
-                key.as_str(),
-                "callId" | "durationMs" | "accountName" | "providerLabel"
-            )
-        })
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
-    Some(json!([entry.level, entry.category, entry.message, context]).to_string())
+    // 原先这里会先把 context 整份克隆成新 Map，再 `json!` 序列化；每条日志
+    // 多一次深拷贝。分组键只是用来比较相等，不需要拥有数据 —— 直接用引用
+    // 序列化，省掉这次克隆。
+    let key = (
+        entry.level.as_str(),
+        entry.category.as_str(),
+        entry.message.as_str(),
+        ContextField(data),
+    );
+    serde_json::to_string(&key).ok()
 }
 
-pub fn groups(entries: Vec<LogEntry>, aggregate: bool) -> Vec<LogGroup> {
+/// `data` 里除几个随请求变化 / 仅用于展示的键之外的全部字段。
+struct ContextField<'a>(&'a Map<String, Value>);
+
+impl serde::Serialize for ContextField<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        for (key, value) in self.0 {
+            if matches!(
+                key.as_str(),
+                "callId" | "durationMs" | "accountName" | "providerLabel"
+            ) {
+                continue;
+            }
+            map.serialize_entry(key, value)?;
+        }
+        map.end()
+    }
+}
+
+/// 按页折叠并返回 `(分组总数, 当前页分组)`。
+///
+/// 与「先构造全部分组、再 skip/take」的区别在**只为当前页保留完整条目**：
+/// 日志页一次要过几万条记录，而一页只有几十组；全量构造会把每条日志的
+/// data / entry 都克隆一遍（每组至少两份），翻页时白花的内存和 CPU 远大于
+/// 分页本身。分组总数仍按全量算（分页器需要它），但页外组只留
+/// first/last/count 这几个标量。
+pub fn groups_paged(
+    entries: Vec<LogEntry>,
+    aggregate: bool,
+    offset: usize,
+    limit: usize,
+) -> (usize, Vec<LogGroup>) {
     const WINDOW_MS: i64 = 30_000;
-    let mut groups: Vec<LogGroup> = Vec::new();
+
+    if !aggregate {
+        let grouped = entries.len();
+        let groups = entries
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|entry| LogGroup {
+                id: entry.id,
+                first_ts: entry.ts,
+                last_ts: entry.ts,
+                count: 1,
+                entries: vec![entry.clone()],
+                entry,
+            })
+            .collect();
+        return (grouped, groups);
+    }
+
+    struct State {
+        first_ts: i64,
+        /// 分组内**最新**一条的 ts（本轮按 id 倒序遍历，第一条就是最新的）。
+        /// 窗口判断始终拿它比，与原先 `groups` 的行为逐字一致。
+        last_ts: i64,
+        count: usize,
+        /// 落在当前页时，指向 `page` 里的下标；页外组为 None。
+        page_index: Option<usize>,
+    }
+
+    let mut states: Vec<State> = Vec::new();
     let mut recent: HashMap<String, usize> = HashMap::new();
+    let mut page: Vec<LogGroup> = Vec::new();
+
     for entry in entries {
-        let key = aggregate.then(|| group_key(&entry)).flatten();
+        let key = group_key(&entry);
         if let Some(index) = key.as_ref().and_then(|key| recent.get(key)).copied() {
-            let group = &mut groups[index];
-            if entry.ts <= group.last_ts && group.last_ts.saturating_sub(entry.ts) <= WINDOW_MS {
-                group.first_ts = group.first_ts.min(entry.ts);
-                group.count += 1;
-                group.entries.push(entry);
+            let state = &mut states[index];
+            if entry.ts <= state.last_ts && state.last_ts.saturating_sub(entry.ts) <= WINDOW_MS {
+                state.first_ts = state.first_ts.min(entry.ts);
+                state.count += 1;
+                if let Some(page_index) = state.page_index {
+                    let group = &mut page[page_index];
+                    group.first_ts = group.first_ts.min(entry.ts);
+                    group.count += 1;
+                    group.entries.push(entry);
+                }
                 continue;
             }
         }
+        let index = states.len();
         if let Some(key) = key {
-            recent.insert(key, groups.len());
+            recent.insert(key, index);
         }
-        groups.push(LogGroup {
-            id: entry.id,
-            first_ts: entry.ts,
-            last_ts: entry.ts,
+        let in_page = index >= offset && index < offset + limit;
+        let entry_id = entry.id;
+        let entry_ts = entry.ts;
+        let page_index = if in_page {
+            page.push(LogGroup {
+                id: entry_id,
+                first_ts: entry_ts,
+                last_ts: entry_ts,
+                count: 1,
+                entry: entry.clone(),
+                entries: vec![entry],
+            });
+            Some(page.len() - 1)
+        } else {
+            None
+        };
+        states.push(State {
+            first_ts: entry_ts,
+            last_ts: entry_ts,
             count: 1,
-            entry: entry.clone(),
-            entries: vec![entry],
+            page_index,
         });
     }
-    groups
+    (states.len(), page)
 }

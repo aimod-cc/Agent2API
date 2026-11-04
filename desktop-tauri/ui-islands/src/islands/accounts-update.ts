@@ -71,6 +71,11 @@ export function accountPatchConfirmed(account: AccountRecord, patch: Record<stri
     }
     if (key === 'balanceToken') return account.hasBalanceToken === (value !== null && value !== '')
     if (key === 'apiKey') return account.hasApiKey === (value !== null && value !== '')
+    // 账号级上游地址覆盖项：null / 空串 = 清除（公开形态里就不再出现这个键）
+    if (key === 'baseUrl') {
+      const text = typeof value === 'string' ? value.trim().replace(/\/+$/, '') : ''
+      return text ? String(account.baseUrl || '').replace(/\/+$/, '') === text : !account.baseUrl
+    }
     if (key === 'balanceQuery') {
       const query = objectOf(value)
       const current = objectOf(account.balanceQuery)

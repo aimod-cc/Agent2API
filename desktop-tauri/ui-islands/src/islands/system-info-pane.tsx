@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { mountOnPage } from '../island-lazy'
 import { createRoot } from 'react-dom/client'
 import { Badge, Button, Switch , Card, CardHeader, CardContent } from '@ui'
 import {
@@ -561,8 +562,7 @@ function mountPanel(): void {
   paneRoot.render(<SystemInfoPanel />)
 }
 
-if (document.querySelector(PANE_SELECTOR)) mountPanel()
-else document.addEventListener('DOMContentLoaded', mountPanel, { once: true })
+mountOnPage('settings', PANE_SELECTOR, mountPanel)
 
 /* ─── 对外契约 ─────────────────────────────── */
 

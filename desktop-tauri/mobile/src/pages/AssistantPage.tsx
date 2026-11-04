@@ -19,10 +19,11 @@ import { toolsPayload, toolById } from '../lib/assistantTools'
 import { ellipsisMiddle } from '../lib/format'
 import { t } from '../i18n'
 import { imageContext, type ImageAsset } from '../../../ui-shared/assistant-image-tools'
+import { assistantFileContext, formatFileSize, type AssistantTextFile } from '../../../ui-shared/assistant-files'
 import { AssistantImageResults } from '../../../ui-shared/assistant-image-results'
 import { loadAssistantImage } from '../api/assistant-images'
 import { saveMobileAssistantImage } from '../lib/assistant-image-save'
-import { readMobileImages } from '../lib/assistant-attachments'
+import { readMobileAttachments } from '../lib/assistant-attachments'
 import { serverIdentity } from '../lib/servers'
 import { AssistantMessageActions } from '../../../ui-shared/assistant-message-actions'
 import { AssistantTitleSettings } from '../../../ui-shared/assistant-title-settings'
@@ -72,7 +73,8 @@ export function AssistantPage() {
   const [bubbles, setBubbles] = useState<Bubble[]>([])
   const [draft, setDraft] = useState('')
   const [attachments, setAttachments] = useState<string[]>([])
-  const [readingImages, setReadingImages] = useState(false)
+  const [textFiles, setTextFiles] = useState<AssistantTextFile[]>([])
+  const [readingAttachments, setReadingAttachments] = useState(false)
   const [busy, setBusy] = useState(false)
   const [historyBusy, setHistoryBusy] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
@@ -177,7 +179,7 @@ export function AssistantPage() {
   /** 发一条消息（`text` 为空时取输入框） */
   const send = async (text?: string) => {
     const content = (text ?? draft).trim()
-    if ((!content && !attachments.length) || busy || readingImages || checkingModelRef.current) return
+    if ((!content && !attachments.length && !textFiles.length) || busy || readingAttachments || checkingModelRef.current) return
     if (!effectiveModel) {
       setPickerOpen(true)
       return
@@ -219,16 +221,22 @@ export function AssistantPage() {
       if (serverIdentity() === identity) setCheckingModel(false)
     }
     const attached = [...attachments]
+    const attachedFiles = [...textFiles]
     const userId = crypto.randomUUID()
     const replyId = crypto.randomUUID()
-    const history: ChatMessage[] = [...historyRef.current, { id: userId, role: 'user', content, images: attached }]
+    const history: ChatMessage[] = [...historyRef.current, {
+      id: userId, role: 'user', content,
+      ...(attached.length ? { images: attached } : {}),
+      ...(attachedFiles.length ? { files: attachedFiles } : {}),
+    }]
     setBubbles(prev => [
       ...prev,
-      { id: userId, messageIds: [userId], role: 'user', text: content, attachments: attached },
+      { id: userId, messageIds: [userId], role: 'user', text: content, attachments: attached, files: attachedFiles },
       { id: replyId, messageIds: [replyId], model: requestModel, role: 'assistant', text: '', streaming: true, tools: [] },
     ])
     setDraft('')
     setAttachments([])
+    setTextFiles([])
     setBusy(true)
 
     const controller = new AbortController()
@@ -315,7 +323,7 @@ export function AssistantPage() {
             }
             if (controller.signal.aborted || !mountedRef.current || serverIdentity() !== identity) throw new DOMException('Aborted', 'AbortError')
             if (tool.id === 'generate_images' || tool.id === 'edit_images') await persist(session, messages, requestModel, identity)
-            const outcome = await tool.run(args, { session, images: imageContext(messages), confirmed: true, signal: controller.signal, apiKey: requestKey.key, apiKeyName: requestKey.name })
+            const outcome = await tool.run(args, { session, images: imageContext(messages), files: assistantFileContext(messages), confirmed: true, signal: controller.signal, apiKey: requestKey.key, apiKeyName: requestKey.name })
             if (serverIdentity() !== identity || sessionRef.current !== session) break
             result = outcome.text
             resultImages = outcome.images
@@ -382,16 +390,19 @@ export function AssistantPage() {
     }
   }
 
-  const addImages = async (files: FileList | File[]) => {
-    if (readingImages || busy || checkingModelRef.current) return
+  const addAttachments = async (files: FileList | File[]) => {
+    if (readingAttachments || busy || checkingModelRef.current) return
     const session = sessionRef.current
-    setReadingImages(true)
+    setReadingAttachments(true)
     try {
-      const images = await readMobileImages(files, attachments.length)
-      if (sessionRef.current === session) setAttachments(current => [...current, ...images])
+      const result = await readMobileAttachments(files, { images: attachments.length, files: textFiles.length })
+      if (sessionRef.current === session) {
+        setAttachments(current => [...current, ...result.images])
+        setTextFiles(current => [...current, ...result.files])
+      }
     } catch (failure) {
       store.toast(failure instanceof Error ? failure.message : String(failure), 'err')
-    } finally { setReadingImages(false) }
+    } finally { setReadingAttachments(false) }
   }
 
   const stop = () => {
@@ -403,6 +414,7 @@ export function AssistantPage() {
     setBubbles([])
     setDraft('')
     setAttachments([])
+    setTextFiles([])
     historyRef.current = []
     titleRef.current = ''
     setTitle('')
@@ -418,6 +430,7 @@ export function AssistantPage() {
     setModel(detail.model || '')
     setBubbles(replayBubbles(detail.messages, detail.model))
     setAttachments([])
+    setTextFiles([])
     setDraft('')
     setHistoryOpen(false)
   }
@@ -545,6 +558,12 @@ export function AssistantPage() {
                 <div className='flex max-w-[82%] min-w-0 flex-col items-end'>
                 <div style={{ ...bubbleStyle(true), maxWidth: '100%', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
                   {bubble.attachments?.map((url, index) => <img key={index} src={url} alt={t('图片 {n}', { n: index + 1 })} style={{ maxWidth: '100%', maxHeight: 160, borderRadius: 8, marginBottom: 6 }} />)}
+                  {bubble.files?.length ? <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 6 }}>
+                    {bubble.files.map((file, index) => <span key={`${file.name}-${index}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, maxWidth: '100%', padding: '3px 7px', borderRadius: 6, border: '1px solid var(--m-line-strong)', background: 'var(--m-surface-2)', fontSize: 11.5, color: 'var(--m-text-2)' }}>
+                      <span style={{ maxWidth: 170, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--m-text)' }}>{file.name}</span>
+                      <span style={{ color: 'var(--m-text-3)', flex: 'none' }}>{formatFileSize(file.size)}</span>
+                    </span>)}
+                  </div> : null}
                   {bubble.text}
                 </div>
                 <AssistantMessageActions text={bubble.text} t={t} disabled={busy || checkingModel || historyBusy}
@@ -660,9 +679,20 @@ export function AssistantPage() {
             <img src={url} alt={t('图片 {n}', { n: index + 1 })} style={{ height: 50, maxWidth: 70, objectFit: 'cover', borderRadius: 6 }} />
           </Button>)}
         </div> : null}
-        <input ref={fileRef} type='file' hidden multiple accept='image/png,image/jpeg,image/webp' onChange={event => {
+        {textFiles.length ? <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, paddingBottom: 8 }}>
+          {textFiles.map((file, index) => <Button key={`${file.name}-${index}`} variant='ghost' disabled={checkingModel}
+            onClick={() => setTextFiles(current => current.filter((_, i) => i !== index))}
+            aria-label={t('移除文件「{name}」', { name: file.name })}
+            style={{ display: 'flex', alignItems: 'center', gap: 5, height: 30, padding: '0 8px', borderRadius: 8, border: '1px solid var(--m-line-strong)', background: 'var(--m-surface-2)', fontSize: 11.5, color: 'var(--m-text-2)' }}>
+            <span style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--m-text)' }}>{file.name}</span>
+            <span style={{ color: 'var(--m-text-3)', flex: 'none' }}>{formatFileSize(file.size)}</span>
+            <span style={{ color: 'var(--m-text-3)', flex: 'none' }}>✕</span>
+          </Button>)}
+        </div> : null}
+        {textFiles.length ? <div style={{ paddingBottom: 8, fontSize: 10.5, color: 'var(--m-warn)', lineHeight: 1.5 }}>{t('JSON 文件会以文本发送给当前对话模型，其中的凭证也会保存在这条会话里。')}</div> : null}
+        <input ref={fileRef} type='file' hidden multiple accept='image/png,image/jpeg,image/webp,.json,.info,application/json' onChange={event => {
           const files = event.currentTarget.files
-          if (files) void addImages(files)
+          if (files) void addAttachments(files)
           event.currentTarget.value = ''
         }} />
         <div
@@ -676,7 +706,7 @@ export function AssistantPage() {
             border: '1px solid var(--m-line-strong)',
           }}
         >
-          <Button variant='ghost' size='icon-touch' aria-label={t('添加图片')} disabled={busy || readingImages || checkingModel} onClick={() => fileRef.current?.click()}><Icon name='plus' /></Button>
+          <Button variant='ghost' size='icon-touch' aria-label={t('添加图片或文件')} disabled={busy || readingAttachments || checkingModel} onClick={() => fileRef.current?.click()}><Icon name='plus' /></Button>
           <Textarea
             ref={inputRef}
             disabled={checkingModel}
@@ -684,7 +714,7 @@ export function AssistantPage() {
             onChange={event => setDraft(event.target.value)}
             onPaste={event => {
               const files = Array.from(event.clipboardData.files)
-              if (files.length) { event.preventDefault(); void addImages(files) }
+              if (files.length) { event.preventDefault(); void addAttachments(files) }
             }}
             onKeyDown={event => {
               // 回车发送、Shift+回车换行（与桌面端同一手感）；输入法组合中的回车
@@ -714,7 +744,7 @@ export function AssistantPage() {
           <Button size='default' variant='ghost'
             type='button'
             aria-label={busy ? t('停止') : t('发送')}
-            disabled={readingImages || checkingModel || (!busy && (!modelsReady || !currentOption || (!draft.trim() && !attachments.length)))}
+            disabled={readingAttachments || checkingModel || (!busy && (!modelsReady || !currentOption || (!draft.trim() && !attachments.length && !textFiles.length)))}
             onClick={() => (busy ? stop() : void send())}
             style={{
               width: 34,
@@ -726,7 +756,7 @@ export function AssistantPage() {
               display: 'grid',
               placeItems: 'center',
               flex: 'none',
-              opacity: busy || draft.trim() || attachments.length ? 1 : 0.45,
+              opacity: busy || draft.trim() || attachments.length || textFiles.length ? 1 : 0.45,
             }}
           >
             {busy ? (

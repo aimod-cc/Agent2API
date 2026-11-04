@@ -161,6 +161,15 @@ async fn collect_body(
                 if let Some(usage) = payload.get("usage") {
                     telemetry.report_usage(usage);
                 }
+                // 有的家把本次消耗的积分 / 点数**直接放在响应顶层**（不在 usage 里）：
+                // Loomy 生图的 `points_consumed` 就是实测形态。按 credit 单键补报一次，
+                // 让它进报表的积分列而不是被当成 token。
+                if let Some(credit) = payload
+                    .as_object()
+                    .and_then(|object| super::usage::credit_from_object(object))
+                {
+                    telemetry.report_usage(&json!({ "credit": credit }));
+                }
                 return Ok(payload);
             }
             return Err(failure_from(&payload, status));

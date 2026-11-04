@@ -163,6 +163,10 @@ async function main() {
   let hantGenerated = 0
   let hantManual = 0
   for (const locale of OUTPUT_LOCALES) {
+    // 主面板走合并词典（一个文件装下该语言的全部域）：原来 head 里要写 22 个
+    // <script>，现在只剩 1 个。逐域文件仍然保留 —— 手机端按 manifest 增量取、
+    // 登录页只取 login/accounts 两个域，都还依赖它们。
+    const combined = []
     for (const domain of produced) {
       const manual = values.get(`${locale}/${domain}`) || {}
       const entries = []
@@ -179,6 +183,12 @@ async function main() {
         if (typeof value === 'string' && value) entries.push([key, value])
       }
       outputs.push({ file: path.join(OUT_DIR, locale, `${domain}.js`), content: dictFileContent(locale, domain, entries) })
+      combined.push(...entries)
+    }
+    // 单域构建（--domain=）不碰合并词典：它手里只有这一个域，写出去会
+    // 把主面板的整份词典截成残本。改完单个域后请跑一次完整构建。
+    if (!ONLY_DOMAIN) {
+      outputs.push({ file: path.join(OUT_DIR, 'combined', `${locale}.js`), content: dictFileContent(locale, 'combined', combined) })
     }
   }
 

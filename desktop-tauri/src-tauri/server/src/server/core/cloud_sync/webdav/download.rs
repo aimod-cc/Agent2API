@@ -39,8 +39,9 @@ pub(super) async fn get_bytes(
     url: &str,
     auth: &WebDavAuth,
     max_bytes: usize,
+    user_agent: &str,
 ) -> Result<Option<Vec<u8>>, String> {
-    let http = client_with_policy(reqwest::redirect::Policy::none())?;
+    let http = client_with_policy(reqwest::redirect::Policy::none(), user_agent)?;
     let mut current = parse_base_url(url)?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(TRANSFER_TIMEOUT_SECS);
     let mut urls = vec![current.clone()];

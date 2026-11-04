@@ -127,12 +127,14 @@ export function CustomCredentialFields({ hasApiKey, noAuth, value, onValue, onTo
 /** 与后端 custom_providers::MAX_NAME_CHARS 一致。 */
 const MAX_PROVIDER_NAME_CHARS = 64
 
-export function ProviderSection({ provider, name, protocol, baseUrl, count, emulation,
-  onName, onProtocol, onBaseUrl, onEmulation, onRemove, onModels, disabled }: {
+export function ProviderSection({ provider, name, protocol, baseUrl, accountBaseUrl, count, emulation,
+  onName, onProtocol, onBaseUrl, onEmulation, onRemove, onModels, onClearAccountBaseUrl, disabled }: {
   provider: ProviderSettings
   name: string
   protocol: string
   baseUrl: string
+  /** 当前账号自己存的地址覆盖项（空串 = 跟随提供商）；转发时它优先于上面的 Base URL */
+  accountBaseUrl: string
   count: number
   emulation: string
   onName: (next: string) => void
@@ -141,6 +143,7 @@ export function ProviderSection({ provider, name, protocol, baseUrl, count, emul
   onEmulation: (next: string) => void
   onRemove: () => void
   onModels: () => void
+  onClearAccountBaseUrl: () => void
   disabled: boolean
 }) {
   const [advanced, setAdvanced] = React.useState(emulation === 'opencode')
@@ -151,7 +154,12 @@ export function ProviderSection({ provider, name, protocol, baseUrl, count, emul
   ]
   const current = protocols.find(option => option.value === protocol)?.label || protocol
   const suffix = protocol === 'anthropic' ? '/v1/messages' : protocol === 'responses' ? '/responses' : '/chat/completions'
-  const endpoint = baseUrl.trim() ? `${baseUrl.trim().replace(/\/+$/, '')}${suffix}` : ''
+  // 请求端点按**这个账号实际会用的地址**算：账号上的覆盖项优先于提供商的 Base URL。
+  // 早先版本新建提供商时会把地址抄进首个账号，改提供商地址不生效就是它挡的
+  // （issue #455）—— 预览必须如实反映这一点，否则界面显示的和实际发出的又是两个值。
+  const override = accountBaseUrl.trim()
+  const effectiveBase = override || baseUrl.trim()
+  const endpoint = effectiveBase ? `${effectiveBase.replace(/\/+$/, '')}${suffix}` : ''
   return <>
     <Alert variant='warning' className='acct-dlg-scope-notice' role='note'>
       <AccountSettingsIcon name='accounts' />
@@ -174,11 +182,19 @@ export function ProviderSection({ provider, name, protocol, baseUrl, count, emul
           </Select>
         </Field>
         <Field className='acct-dlg-field acct-dlg-field-full'>
-          <FieldLabel htmlFor='account-provider-baseurl'>Base URL</FieldLabel>
+          <div className='acct-dlg-field-head'>
+            <FieldLabel htmlFor='account-provider-baseurl'>Base URL</FieldLabel>
+            {override ? <Button variant='ghost' size='xs' disabled={disabled}
+              className='acct-dlg-clear' onClick={onClearAccountBaseUrl}>{t('改回跟随提供商')}</Button> : null}
+          </div>
           <Input id='account-provider-baseurl' className='mono' disabled={disabled} spellCheck={false}
             placeholder={t('OpenAI 兼容填到 /v1；Anthropic 填根地址')}
             value={baseUrl} onChange={event => onBaseUrl(event.currentTarget.value)} />
           <FieldDescription>{t('填写接口基址，无需追加 {path}。', { path: suffix })}</FieldDescription>
+          {override ? <div className='acct-dlg-inline-note warning'>
+            <AccountSettingsIcon name='info' size={14} />
+            <span>{t('这个账号单独存了一份地址：{url}，转发时优先用它。上面改的是提供商共用地址，不会覆盖它。', { url: override })}</span>
+          </div> : null}
         </Field>
       </div>
       {endpoint ? <div className='acct-dlg-endpoint'><span>{t('请求端点')}</span><code>{endpoint}</code></div> : null}

@@ -23,6 +23,11 @@ export type Method = {
   prompts: Prompt[]
   localOnly: boolean
   manualCallback: boolean
+  /**
+   * 插件要求这条 OAuth 流程只在应用内嵌窗口打开（例如登录页跑在本机回环
+   * 地址上的 AStudio）。为真时界面不提供「系统浏览器」选项。
+   */
+  embeddedOnly: boolean
   callbackInput: CallbackInput
   instructions: string
   reason?: string
@@ -120,13 +125,15 @@ export function parseMethods(value: unknown, provider = ''): MethodsState {
       throw new Error(t('插件返回了无效的登录字段，请更新插件或联系作者'))
     }
     if ((raw.manualCallback !== undefined && typeof raw.manualCallback !== 'boolean')
-      || (raw.localOnly !== undefined && typeof raw.localOnly !== 'boolean')) {
+      || (raw.localOnly !== undefined && typeof raw.localOnly !== 'boolean')
+      || (raw.embeddedOnly !== undefined && typeof raw.embeddedOnly !== 'boolean')) {
       throw new Error(t('插件返回了无效的登录方式，请更新插件或联系作者'))
     }
     const callbackInput = parseCallbackInput(raw.callbackInput)
     const manualCallback = raw.manualCallback === true
+    const embeddedOnly = raw.embeddedOnly === true
     if ((callbackInput === 'code' && !manualCallback)
-      || (raw.type === 'api' && (raw.localOnly === true || manualCallback))) {
+      || (raw.type === 'api' && (raw.localOnly === true || manualCallback || embeddedOnly))) {
       throw new Error(t('插件返回了无效的登录方式，请更新插件或联系作者'))
     }
     const callbackContractMissing = provider === 'copilot-subscription' && index === 1
@@ -134,7 +141,7 @@ export function parseMethods(value: unknown, provider = ''): MethodsState {
     return {
       id: `method:${index}`, methodIndex: index, type: raw.type,
       label: t(textOf(raw.label) || (raw.type === 'oauth' ? t('OAuth 登录') : t('API 凭证'))),
-      prompts, localOnly: raw.localOnly === true, manualCallback, callbackInput,
+      prompts, localOnly: raw.localOnly === true, manualCallback, callbackInput, embeddedOnly,
       instructions: loginText(raw.instructions),
       reason: callbackContractMissing
         ? t('此 Copilot 手动令牌方式未声明回调输入契约，暂不发起；请改用设备码登录或只读本机引用。')

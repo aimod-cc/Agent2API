@@ -69,7 +69,6 @@ function DynamicForm({ provider, label, source, onAdded }: {
 }) {
   const prefix = `mobile-add-${provider}`
   const [methods, setMethods] = useState<MethodsState>({ phase: 'loading', methods: [], instructions: '', reason: '' })
-  const [reload, setReload] = useState(0)
   const [selected, setSelected] = useState('')
   const [values, setValues] = useState<Record<string, Record<string, string>>>({})
   const [name, setName] = useState('')
@@ -142,7 +141,7 @@ function DynamicForm({ provider, label, source, onAdded }: {
         : dynamicLoginError(failure) })
     })
     return () => controller.abort()
-  }, [provider, source, reload])
+  }, [provider, source])
 
   useEffect(() => {
     if (!flow) return
@@ -325,7 +324,6 @@ function DynamicForm({ provider, label, source, onAdded }: {
     {methods.phase === 'loading' ? <p><Spinner /> {t('正在读取插件登录方式…')}</p> : null}
     {methods.reason ? <Alert variant={methods.phase === 'error' ? 'destructive' : 'warning'}>
       <AlertDescription>{methods.reason}</AlertDescription></Alert> : null}
-    <Button variant='outline' size='sm' disabled={locked} onClick={() => setReload(value => value + 1)}>{t('重新读取登录方式')}</Button>
     {method ? <>
       <Select value={method.id} disabled={locked} onValueChange={value => {
         setSelected(value || ''); setValues({}); setPassword(''); clearCallback(); setError('')
@@ -357,7 +355,7 @@ function DynamicForm({ provider, label, source, onAdded }: {
       })}
       {method.type === 'api' && !hasNamePrompt ? <Label className='flex flex-col items-start gap-1.5'>{t('备注名')}
         <Input value={name} maxLength={100} disabled={locked} onChange={event => setName(event.currentTarget.value)} placeholder={t('可选，留空使用账号昵称')} />
-      </Label> : method.type === 'oauth' && !hasNamePrompt ? <p className='text-xs text-subtle'>{t('此 OAuth 方法未声明备注名字段，账号名由插件获取；添加后可在账号设置中修改。')}</p> : null}
+      </Label> : method.type === 'oauth' && !hasNamePrompt ? <p className='text-xs text-subtle'>{t('账号名由插件自动获取，添加后可修改。')}</p> : null}
       <Label>{t('账号 / 登录出网代理')}</Label>
       <Select value={proxyMode} disabled={locked} onValueChange={value => setProxyMode(value || 'direct')}>
         <SelectTrigger className='w-full'><SelectValue>{proxyMode === 'custom' ? t('自定义') : t('无代理（直连）')}</SelectValue></SelectTrigger>

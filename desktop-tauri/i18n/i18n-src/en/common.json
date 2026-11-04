@@ -123,6 +123,7 @@
   "刷新插件仓库": "",
   "加入插件 beta 版": "Join plugin beta releases",
   "加载中": "Loading",
+  "历史数据整理中": "Organizing history data",
   "加载助手设置失败：{message}": "Failed to load assistant settings: {message}",
   "加载失败：{error}": "Load failed: {error}",
   "加载更早的记录": "Load older records",

@@ -338,21 +338,41 @@ pub(super) fn count_matching(
     Ok(count.max(0) as usize)
 }
 
-/// 命中筛选条件的**进行中**行数（`QueryResult.running`）。
+/// 列表页一次要的三个计数（总条数 / 命中条数 / 其中进行中）—— **一次扫描**。
 ///
-/// 一条 COUNT：在筛选计划上追加 `status = 0` —— 与列表共用同一份 WHERE，
-/// 「这批筛选里还有几条没跑完」才是列表页徽标要的口径。
-pub(super) fn count_running(
+/// 原先三条独立 `COUNT(*)`：每条都在自己的 WHERE 上扫一遍表，而列表页每秒
+/// 轮询一次，明细上百万行时等于每秒三遍全表。这里把三个计数写成同一个
+/// `SELECT` 里的 `COUNT(*)` 与两个 `SUM(CASE ...)`，扫描次数从三降到一。
+///
+/// 每个 `CASE` 都要各自一组绑定参数（SQLite 不保证跨表达式复用），所以绑定
+/// 值按「命中」与「命中且 status=0」各复制一份。
+pub(super) fn counts(
     conn: &Connection,
     plan: &FilterPlan,
-) -> rusqlite::Result<usize> {
-    let sql = if plan.where_sql.is_empty() {
-        "SELECT COUNT(*) FROM requests WHERE status = 0".to_string()
-    } else {
-        format!("SELECT COUNT(*) FROM requests{} AND status = 0", plan.where_sql)
-    };
-    let count: i64 = conn.query_row(&sql, params_from_iter(plan.binds.iter()), |row| row.get(0))?;
-    Ok(count.max(0) as usize)
+) -> rusqlite::Result<(usize, usize, usize)> {
+    let filter = plan
+        .where_sql
+        .strip_prefix(" WHERE ")
+        .unwrap_or("1");
+    let sql = format!(
+        "SELECT COUNT(*), \
+         COALESCE(SUM(CASE WHEN ({filter}) THEN 1 ELSE 0 END), 0), \
+         COALESCE(SUM(CASE WHEN ({filter}) AND status = 0 THEN 1 ELSE 0 END), 0) \
+         FROM requests"
+    );
+    let mut binds = Vec::with_capacity(plan.binds.len() * 2);
+    binds.extend(plan.binds.iter().cloned());
+    binds.extend(plan.binds.iter().cloned());
+    let (total, matched, running): (i64, i64, i64) = conn.query_row(
+        &sql,
+        params_from_iter(binds.iter()),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    Ok((
+        total.max(0) as usize,
+        matched.max(0) as usize,
+        running.max(0) as usize,
+    ))
 }
 
 /// 筛选下拉的候选清单：明细里出现过的模型名与 provider id（各按出现次数降序）。

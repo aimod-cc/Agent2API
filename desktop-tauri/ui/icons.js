@@ -39,6 +39,11 @@
       + '<path d="M9 3v5M15 3v5"/>'
       + '<path d="M6.5 8h11v3.5a5.5 5.5 0 0 1-11 0V8Z"/>'
       + '<path d="M12 17v4"/></g>',
+    // 工具服务：扳手（「给客户端装上一件工具」的通用意象）。与 agent / proxies
+    // 同一套描边约定（17px 下填充块会糊成一团）。
+    tools: '<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
+      + '<path d="M14.6 3.2a5 5 0 0 0-4.1 8L3.9 17.8a2.2 2.2 0 0 0 3.1 3.1l6.6-6.6a5 5 0 1 0 1-11.1Z"/>'
+      + '<path d="m13.2 6.2 4.6 4.6"/></g>',
     // 日志：文档 + 文本行
     logs: '<path d="M6 2h8l4 4v16H6V2Zm2 2v16h8V7h-3V4H8Zm2 6h6v2h-6v-2Zm0 4h6v2h-6v-2Z"/>',
     // 请求日志：列表（点 + 行），与 OmniProxy 的请求日志入口同一意象

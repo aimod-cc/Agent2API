@@ -1212,20 +1212,60 @@ fn emit_login_progress(app: &AppHandle, flow: &str, started: &Value, instruction
 struct DynamicNavigation {
     hosts: Vec<String>,
     callbacks: Vec<url::Url>,
+    /// 插件申报的**本机登录页**（`127.0.0.1:<port>` 这类）。
+    ///
+    /// ── 为什么需要单独一列 ──────────────────────────────────
+    /// 网关原先只允许「HTTPS 授权页」与「授权地址里登记的回环回调」两种
+    /// 地址。有些插件（AStudio）的登录页本身就是回环 HTTP 页面（要跑极验
+    /// 滑块），既不是 HTTPS 也不是回调；不单独放行的话点「登录」直接报
+    /// 「登录链接不是允许的 HTTPS 站点或合法本机回调地址」。
+    /// 只接受**带显式端口的回环主机**，且必须由插件在 `allowedHosts` 里
+    /// 明确申报，不放宽任何非回环地址。
+    loopback_pages: Vec<(String, u16)>,
+}
+
+/// `127.0.0.1:1234` / `localhost:1234` / `[::1]:1234` → (host, port)。
+fn loopback_page(value: &str) -> Option<(String, u16)> {
+    let text = value.trim().to_ascii_lowercase();
+    for host in ["127.0.0.1", "localhost", "[::1]"] {
+        if let Some(rest) = text.strip_prefix(host) {
+            if let Some(port) = rest.strip_prefix(':') {
+                if let Ok(port) = port.parse::<u16>() {
+                    if port > 0 {
+                        return Some((host.to_string(), port));
+                    }
+                }
+            }
+            return None;
+        }
+    }
+    None
 }
 
 impl DynamicNavigation {
     fn new(auth: &url::Url, started: &Value) -> Result<Self, String> {
-        let hosts = match started.get("allowedHosts") {
+        let raw = match started.get("allowedHosts") {
             None | Some(Value::Null) => Vec::new(),
             Some(Value::Array(items)) => items.iter().map(|value| {
-                let host = value.as_str().ok_or("登录域名白名单格式无效")?
-                    .trim().trim_start_matches("*.").trim_end_matches('.').to_ascii_lowercase();
-                if host.is_empty() { return Err("登录域名白名单含有空主机".to_string()); }
-                Ok(host)
+                value.as_str().ok_or("登录域名白名单格式无效".to_string())
+                    .map(|text| text.trim().to_string())
             }).collect::<Result<Vec<_>, String>>()?,
             Some(_) => return Err("登录域名白名单格式无效".into()),
         };
+        let mut hosts = Vec::new();
+        let mut loopback_pages = Vec::new();
+        for item in raw {
+            if let Some(page) = loopback_page(&item) {
+                loopback_pages.push(page);
+                continue;
+            }
+            let host = item
+                .trim_start_matches("*.")
+                .trim_end_matches('.')
+                .to_ascii_lowercase();
+            if host.is_empty() { return Err("登录域名白名单含有空主机".to_string()); }
+            hosts.push(host);
+        }
         let mut callbacks = Vec::new();
         let mut capture = |key: &str, value: &str| {
             if matches!(key, "redirect_uri" | "redirect" | "redirect_url" | "callback_url"
@@ -1242,13 +1282,21 @@ impl DynamicNavigation {
         if let Some((_, query)) = auth.fragment().and_then(|fragment| fragment.split_once('?')) {
             for (key, value) in url::form_urlencoded::parse(query.as_bytes()) { capture(&key, &value); }
         }
-        Ok(Self { hosts, callbacks })
+        Ok(Self { hosts, callbacks, loopback_pages })
     }
 
     fn is_callback(&self, url: &url::Url) -> bool {
         if matches!(url.scheme(), "file" | "javascript" | "data" | "about" | "blob") { return false; }
         if matches!(url.scheme(), "https" | "http") && !self.allows(url) { return false; }
         self.matches_callback(url)
+    }
+
+    fn matches_loopback_page(&self, url: &url::Url) -> bool {
+        let Some(host) = url.host_str() else { return false; };
+        let Some(port) = url.port_or_known_default() else { return false; };
+        self.loopback_pages.iter().any(|(page_host, page_port)| {
+            host.eq_ignore_ascii_case(page_host) && port == *page_port
+        })
     }
 
     fn matches_callback(&self, url: &url::Url) -> bool {
@@ -1265,9 +1313,11 @@ impl DynamicNavigation {
             "https" => self.hosts.is_empty() || self.hosts.iter().any(|item| {
                 host.eq_ignore_ascii_case(item) || host.to_ascii_lowercase().ends_with(&format!(".{item}"))
             }),
-            // HTTP 只用于授权地址实际登记的回环 callback；仅白名单写 localhost 不够。
+            // HTTP 只用于授权地址实际登记的回环 callback，或插件明确申报的
+            // 本机登录页；仅白名单写 localhost 不够。
             "http" => matches!(host, "localhost" | "127.0.0.1" | "[::1]")
-                && self.matches_callback(url) && (self.hosts.is_empty() || self.hosts.iter().any(|item| {
+                && (self.matches_callback(url) || self.matches_loopback_page(url))
+                && (self.hosts.is_empty() || self.hosts.iter().any(|item| {
                     host.eq_ignore_ascii_case(item) || host.to_ascii_lowercase().ends_with(&format!(".{item}"))
                 })),
             _ => false,

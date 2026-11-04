@@ -90,6 +90,9 @@ pub async fn get_session(State(state): State<ServerState>) -> Response {
         // 路由不到的模型名去调（改造前这里只读 workbuddy 单家，另三家在界面上不可见）。
         // 每条另带 provider / providerLabel，供网关页按家分组。
         "models": crate::server::core::providers::catalog::session_models(state.store()),
+        // 启动期的历史统计整理是否还在后台跑（模型维度回填 / 来源维度回填 /
+        // 保留期裁剪）。界面可据此显示一条轻提示；它不影响账号与转发。
+        "maintenance": { "running": state.startup_maintenance_running() },
         // 指纹脱敏开关（与 GET /api/sanitize 同一个键、同一个值）
         config::KEY_SANITIZE_FINGERPRINTS: snapshot.sanitize_fingerprints(),
         // 插件申报的**账号行渲染参数**（`{provider: AccountFeatures}`）。
@@ -148,6 +151,12 @@ struct LoginMethodMetadata {
     manual_callback: bool,
     #[serde(default)]
     callback_input: LoginCallbackInput,
+    /// 插件要求这条 OAuth 流程只在应用内嵌窗口打开（不提供系统浏览器选项）。
+    ///
+    /// 用于登录页跑在本机回环地址上的插件（AStudio）：交给系统浏览器只会让
+    /// 用户多做一个没有意义的选择。只对 oauth 方式有效。
+    #[serde(default)]
+    embedded_only: bool,
 }
 
 #[derive(Clone, Copy, Default, serde::Deserialize, serde::Serialize)]
@@ -289,6 +298,9 @@ async fn read_login_methods(
         }
         if method.local_only && matches!(method.kind, LoginMethodType::Api) {
             return Err(GatewayError::with_status(502, "本机登录不能进入复制 API 凭证路线"));
+        }
+        if method.embedded_only && matches!(method.kind, LoginMethodType::Api) {
+            return Err(GatewayError::with_status(502, "API 凭证方式不能要求内嵌窗口"));
         }
     }
     metadata.instructions = metadata.instructions.map(|text| login_text(&text));
@@ -1016,6 +1028,10 @@ fn autoclaw_adapter(
 /// 放弃，存在服务端只会多一份要清理的状态）。回给前端让它随下一次请求带回。
 pub async fn login_sms_send(State(state): State<ServerState>, body: Bytes) -> Response {
     let payload = parse_body(&body).unwrap_or(Value::Null);
+    // 兼容旧缓存前端：它把 `provider: tabbit` 发到 AutoClaw 的端点。
+    if payload.get("provider").and_then(Value::as_str) == Some("tabbit") {
+        return tabbit_sms_send_inner(&state, &payload).await;
+    }
     let phone = payload.get("phone").and_then(Value::as_str).unwrap_or("");
     let region = match autoclaw_region_of(&payload) {
         Ok(region) => region,
@@ -1042,6 +1058,10 @@ pub async fn login_sms_send(State(state): State<ServerState>, body: Bytes) -> Re
 /// 落盘、命名、去重、优先级分配全部复用插件那条落库通路。
 pub async fn login_sms_verify(State(state): State<ServerState>, body: Bytes) -> Response {
     let payload = parse_body(&body).unwrap_or(Value::Null);
+    // 兼容旧缓存前端：它把 `provider: tabbit` 发到 AutoClaw 的端点。
+    if payload.get("provider").and_then(Value::as_str) == Some("tabbit") {
+        return tabbit_sms_verify_inner(&state, &payload).await;
+    }
     let phone = payload.get("phone").and_then(Value::as_str).unwrap_or("");
     let code = payload.get("code").and_then(Value::as_str).unwrap_or("");
     let device_id = payload.get("deviceId").and_then(Value::as_str);
@@ -1187,6 +1207,128 @@ pub async fn login_loomy_sms_verify(State(state): State<ServerState>, body: Byte
                 .and_then(Value::as_str)
                 .unwrap_or("Loomy 账号");
             logging::log("[Login]", &format!("✅ Loomy 登录成功: {label}"));
+            let list = state.store().list_visible_accounts();
+            let account = list
+                .get("accounts")
+                .and_then(Value::as_array)
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .find(|item| item.get("id").and_then(Value::as_str) == Some(&account_id))
+                })
+                .cloned()
+                .unwrap_or(account.public);
+            ok_json(json!({ "account": account, "list": list }))
+        }
+        Err(error) => management_error(error.status_code, error.message),
+    }
+}
+
+// ─── Tabbit 国内站手机号验证码登录（两段）───────────────────
+
+/// 发送短信验证码（**Tabbit 国内站专用**）。
+///
+/// body `{phone}` → `{uuid}`。uuid 是这次登录的会话标识：上游把刚发的码
+/// 绑在它上面，登录时必须带同一个；网关不保存这个中间态，回给前端随
+/// 下一次请求带回即可。
+pub async fn login_tabbit_sms_send(State(state): State<ServerState>, body: Bytes) -> Response {
+    let payload = parse_body(&body).unwrap_or(Value::Null);
+    tabbit_sms_send_inner(&state, &payload).await
+}
+
+/// 实际发码逻辑；也供旧版 `/api/session/login/sms/send` 按 `provider` 分派
+/// （旧缓存的前端会把 `provider: tabbit` 发到 AutoClaw 的端点）。
+async fn tabbit_sms_send_inner(state: &ServerState, payload: &Value) -> Response {
+    let phone = payload.get("phone").and_then(Value::as_str).unwrap_or("");
+    let Some(adapter) =
+        crate::server::core::providers::adapter::adapter_by_id("tabbit")
+    else {
+        return management_error(503, "Tabbit 的提供商插件没有安装，无法发送验证码");
+    };
+    match adapter
+        .admin_action(
+            state.store(),
+            "",
+            "login.sms-send",
+            &json!({ "phone": phone }),
+        )
+        .await
+    {
+        Ok(result) => ok_json(result),
+        Err(error) => management_error(error.status_code, error.message),
+    }
+}
+
+/// 用手机号 + 验证码登录并**直接落成账号**（**Tabbit 国内站专用**）。
+///
+/// body `{phone, code, uuid, name?}` → `{account, list}`，响应形状与
+/// `POST /api/accounts` 一致；落盘、命名、去重复用插件的落库通路。
+pub async fn login_tabbit_sms_verify(State(state): State<ServerState>, body: Bytes) -> Response {
+    let payload = parse_body(&body).unwrap_or(Value::Null);
+    tabbit_sms_verify_inner(&state, &payload).await
+}
+
+/// 实际换登录态逻辑；也供旧版 `/api/session/login/sms/verify` 按 `provider`
+/// 分派（旧缓存前端把 `provider: tabbit` 发到 AutoClaw 端点时仍能登录）。
+async fn tabbit_sms_verify_inner(state: &ServerState, payload: &Value) -> Response {
+    let phone = payload.get("phone").and_then(Value::as_str).unwrap_or("");
+    let code = payload.get("code").and_then(Value::as_str).unwrap_or("");
+    // 新版前端传 `uuid`；旧缓存前端（AutoClaw 档案）把同一个中间态叫
+    // `deviceId`，两个都认，避免旧页面必须强刷才能登录。
+    let uuid = payload
+        .get("uuid")
+        .or_else(|| payload.get("deviceId"))
+        .and_then(Value::as_str);
+    let Some(adapter) =
+        crate::server::core::providers::adapter::adapter_by_id("tabbit")
+    else {
+        return management_error(503, "Tabbit 的提供商插件没有安装，无法登录");
+    };
+    let mut account = match adapter
+        .admin_action(
+            state.store(),
+            "",
+            "login.sms-verify",
+            &json!({
+                "phone": phone,
+                "code": code,
+                "uuid": uuid,
+                "name": payload.get("name"),
+            }),
+        )
+        .await
+    {
+        Ok(value) => {
+            match serde_json::from_value::<agent2api_provider_protocol::NormalizedAccount>(value) {
+                Ok(account) => account,
+                Err(error) => {
+                    return management_error(502, format!("插件返回的登录结果无法解析：{error}"))
+                }
+            }
+        }
+        Err(error) => return management_error(error.status_code, error.message),
+    };
+    if let Some(name) = payload
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Some(public) = account.public.as_object_mut() {
+            public.insert(
+                "name".to_string(),
+                Value::String(name.chars().take(100).collect()),
+            );
+        }
+    }
+    match adapter.persist_login_account(&account) {
+        Ok(account_id) => {
+            let label = account
+                .public
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("Tabbit 账号");
+            logging::log("[Login]", &format!("✅ Tabbit 登录成功: {label}"));
             let list = state.store().list_visible_accounts();
             let account = list
                 .get("accounts")

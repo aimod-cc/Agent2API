@@ -90,7 +90,15 @@ pub async fn create_custom_provider(State(state): State<ServerState>, body: Byte
         .and_then(Value::as_str)
         .map(str::to_string);
     let store = state.store();
-    let upsert = match store.add_custom_account(&provider_id, &payload, name.as_deref()) {
+    // 首个账号**不抄提供商的 baseUrl**：账号记录上的 `baseUrl` 是**覆盖项**，
+    // 转发时优先于提供商的值（见 `custom_accounts` 的模块头）。这里连同一次
+    // 请求里把提供商地址抄一份到账号上，会让「以后改提供商地址」被账号里的旧值
+    // 挡住 —— 界面显示新地址、实际请求打旧地址，且账号层那份界面上看不到也
+    // 改不掉（issue #455 就是这个形状）。账号不写这个键 = 始终跟随提供商。
+    let mut account_payload = payload.as_object().cloned().unwrap_or_default();
+    account_payload.remove("baseUrl");
+    let account_payload = Value::Object(account_payload);
+    let upsert = match store.add_custom_account(&provider_id, &account_payload, name.as_deref()) {
         Ok(upsert) => upsert,
         Err(error) => {
             // 回滚提供商（此刻名下没有账号，级联删除计数为 0）；回滚本身
@@ -130,7 +138,14 @@ pub async fn create_custom_provider(State(state): State<ServerState>, body: Byte
 /// 响应只带更新后的提供商本身，不带账号 —— 改提供商不影响任何账号记录
 /// （账号的 `baseUrl` 是覆盖项，缺省时**转发阶段**才回落到提供商的值，
 /// 不需要在保存时同步）。
-pub async fn update_custom_provider(State(_state): State<ServerState>, body: Bytes) -> Response {
+///
+/// **唯一的例外是改 Base URL**：早先版本新建提供商时会把当时的地址抄进首个
+/// 账号（历史行为，见 `create_custom_provider` 的说明），于是账号里那份旧值
+/// 会一直压过提供商的新值 —— 界面显示 `/v1/responses`、实际请求打
+/// `/responses`（issue #455）。这里在地址真的变化时，把名下**等于旧地址**的
+/// 账号覆盖项清掉，让它们回到「跟随提供商」。值逐字相等才清：导入来的账号
+/// 可能刻意指到另一个地址，那是有意的覆盖项。
+pub async fn update_custom_provider(State(state): State<ServerState>, body: Bytes) -> Response {
     let object = match body_object(&body) {
         Ok(object) => object,
         Err(response) => return response,
@@ -154,6 +169,39 @@ pub async fn update_custom_provider(State(_state): State<ServerState>, body: Byt
         Err(message) if before.is_none() => return errors::management_error(404, message),
         Err(message) => return errors::management_error(400, message),
     };
+    // 地址改了 → 清掉账号里那份「旧地址」的覆盖项（见函数头的说明）。
+    // 清理失败不回滚提供商（地址本身已经存好了），只记一条日志：残留的
+    // 旧覆盖项还能从账号设置里「改回跟随提供商」手动清。
+    let before_base = before
+        .as_ref()
+        .and_then(|item| item.get("baseUrl"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim_end_matches('/')
+        .to_string();
+    let after_base = updated
+        .get("baseUrl")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim_end_matches('/')
+        .to_string();
+    if !before_base.is_empty() && before_base != after_base {
+        match state.store().clear_custom_base_url_overrides(&id, &before_base) {
+            Ok(names) if !names.is_empty() => logging::log(
+                "[CustomProvider]",
+                &format!(
+                    "🔗 已把 {} 个账号的旧地址覆盖项改回「跟随提供商」: {}",
+                    names.len(),
+                    names.join("、")
+                ),
+            ),
+            Ok(_) => {}
+            Err(error) => logging::log(
+                "[CustomProvider]",
+                &format!("⚠️ 清理账号旧地址覆盖项失败（可手动「改回跟随提供商」）: {}", error.message),
+            ),
+        }
+    }
     let changes = describe_changes(before.as_ref(), &updated);
     let label = updated
         .get("name")

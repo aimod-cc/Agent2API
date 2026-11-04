@@ -38,11 +38,24 @@ pub(crate) struct S3Credentials {
     pub bucket: String,
     /// 自定义端点；空 = AWS 官方
     pub endpoint: String,
+    /// 自定义 User-Agent；空 = 用 reqwest 默认。**不参与签名**，可以安全覆盖
+    pub user_agent: String,
 }
 
-fn client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+/// ── 为什么要能自定义 User-Agent ──────────────────────────────
+/// 少数 S3 兼容服务（如中国科技云数据胶囊）把凭据绑到「应用类型」上，并在
+/// 服务端按 User-Agent 校验它；UA 不含该应用名就直接 401/403。此时唯一的
+/// 出路是让客户端把 UA 伪装成那个应用（如 `rclone/v1.67.0`）。UA 不在 SigV4
+/// 的签名范围内（见模块头「签名只覆盖需要的头」），所以覆盖它不影响签名。
+fn client(credentials: &S3Credentials) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+    // 只在用户填了才覆盖：空串会被当成「不发 UA」，反而不如 reqwest 的默认值
+    let user_agent = credentials.user_agent.trim();
+    if !user_agent.is_empty() {
+        builder = builder.user_agent(user_agent.to_string());
+    }
+    builder
         .build()
         .map_err(|error| format!("创建 HTTP 客户端失败: {error}"))
 }
@@ -267,7 +280,7 @@ fn status_error(op: &str, status: StatusCode, url: &str) -> String {
     let safe_url = redact_url(url);
     let mut message = format!("S3 {op} 失败: {status} ({safe_url})");
     if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
-        message.push_str("。请检查 Access Key ID / Secret Access Key，以及该密钥是否有这个桶的读写权限。");
+        message.push_str("。请检查 Access Key ID / Secret Access Key，以及该密钥是否有这个桶的读写权限。若确认无误仍被拒，部分服务（如中国科技云数据胶囊）会按 User-Agent 校验密钥绑定的客户端类型，可在下方填写「自定义 User-Agent」（如 rclone/v1.67.0）。");
     } else if status == StatusCode::NOT_FOUND {
         message.push_str("。请检查存储桶名称、区域（Region）与端点（Endpoint）。");
     } else if status == StatusCode::BAD_REQUEST {
@@ -280,7 +293,7 @@ fn status_error(op: &str, status: StatusCode, url: &str) -> String {
 pub(crate) async fn test_connection(credentials: &S3Credentials) -> Result<(), String> {
     let url = bucket_url(credentials);
     let headers = signed_headers("HEAD", &url, b"", None, credentials)?;
-    let mut builder = client()?.head(&url).timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+    let mut builder = client(credentials)?.head(&url).timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS));
     for (name, value) in headers {
         builder = builder.header(name, value);
     }
@@ -303,7 +316,7 @@ pub(crate) async fn put_object(
 ) -> Result<(), String> {
     let url = object_url(credentials, key);
     let headers = signed_headers("PUT", &url, &bytes, Some(content_type), credentials)?;
-    let mut builder = client()?
+    let mut builder = client(credentials)?
         .put(&url)
         .body(bytes)
         .timeout(Duration::from_secs(TRANSFER_TIMEOUT_SECS));
@@ -330,7 +343,7 @@ pub(crate) async fn get_object(
 
     let url = object_url(credentials, key);
     let headers = signed_headers("GET", &url, b"", None, credentials)?;
-    let mut builder = client()?
+    let mut builder = client(credentials)?
         .get(&url)
         .timeout(Duration::from_secs(TRANSFER_TIMEOUT_SECS));
     for (name, value) in headers {
@@ -379,6 +392,7 @@ mod tests {
             region: "us-east-1".to_string(),
             bucket: "examplebucket".to_string(),
             endpoint: String::new(),
+            user_agent: String::new(),
         }
     }
 

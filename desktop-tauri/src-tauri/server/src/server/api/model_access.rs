@@ -16,6 +16,12 @@ pub const ENV_KEY_ID: &str = "env";
 pub fn is_model_endpoint(path: &str) -> bool {
     matches!(path, "/api/models/test" | "/api/model-access/models" | "/api/assistant/chat" | "/api/assistant/images/generations" | "/api/assistant/images/edits")
         || path.strip_prefix("/api/assistant/sessions/").is_some_and(|tail| tail.ends_with("/title"))
+        // 工具服务不承载模型请求，Key 的「可用提供商 / 可用模型」白名单对它没有
+        // 意义；不放行的话，受限 Key 会在中间件层被挡成 403，连技能与 MCP 也
+        // 用不了（见 `http::require_api_key` 的受限 Key 分支）。
+        || path.starts_with("/api/web-search")
+        || path.starts_with("/skill/")
+        || path.starts_with("/mcp/")
 }
 
 pub struct ModelAccess {

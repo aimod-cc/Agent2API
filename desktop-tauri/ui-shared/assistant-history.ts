@@ -1,4 +1,5 @@
 import { imageAssets, type ImageAsset } from './assistant-image-tools'
+import { assistantFiles, type AssistantTextFile } from './assistant-files'
 import type { ToolCall } from './assistant-stream'
 
 export type ToolOutcome = {
@@ -9,7 +10,7 @@ export type ToolOutcome = {
 }
 
 export type ChatMessage = { id?: string } & (
-  | { role: 'user'; content: string; images?: string[] }
+  | { role: 'user'; content: string; images?: string[]; files?: AssistantTextFile[] }
   | { role: 'assistant'; content: string; model?: string; toolCalls?: ToolCall[] }
   | { role: 'tool'; toolCallId: string; content: string; images?: ImageAsset[]; outcome?: ToolOutcome }
 )
@@ -32,7 +33,8 @@ export function parseAssistantMessages(raw: unknown): ChatMessage[] {
         return typeof url === 'string' && url ? [url] : []
       }) : Array.isArray(row.images) ? row.images.filter((url): url is string => typeof url === 'string' && Boolean(url)) : []
       const content = parts.length ? parts.filter(part => part?.type === 'text').map(part => text(part.text)).join('\n') : text(row.content)
-      return [{ id, role: 'user', content, ...(images.length ? { images } : {}) }]
+      const files = assistantFiles(row.files)
+      return [{ id, role: 'user', content, ...(images.length ? { images } : {}), ...(files.length ? { files } : {}) }]
     }
     if (row.role === 'assistant') {
       const calls = Array.isArray(row.toolCalls) ? row.toolCalls : Array.isArray(row.tool_calls) ? row.tool_calls : []
@@ -68,6 +70,7 @@ export function removeAssistantMessage(messages: ChatMessage[], id: string): Cha
 
 export function assistantTitle(messages: ChatMessage[]): string {
   const first = messages.find(message => message.role === 'user')
-  const text = first?.content.trim().replace(/\s+/g, ' ') || ''
+  const content = first?.content.trim().replace(/\s+/g, ' ') || ''
+  const text = content || first?.files?.[0]?.name || ''
   return text.length > 40 ? `${text.slice(0, 40)}…` : text
 }

@@ -14,6 +14,7 @@
 import { shared } from './add-account-bridge'
 import { DOUBAOWORK } from './add-doubaowork-config'
 import { DEEPSEEK_WEB } from './add-provider-deepseek'
+import { TABBIT, TABBIT_INTL } from './add-provider-tabbit'
 import { t } from '../i18n'
 
 /* ─── 类型 ───────────────────────────────── */
@@ -1209,6 +1210,9 @@ export const BUILTIN_CONFIGS: ProviderConfig[] = [
   LOBSTERAI,
   DOUBAOWORK,
   DEEPSEEK_WEB,
+  // Tabbit 浏览器（国内站 / 国际站）：两站账号不通用，成对相邻排列。
+  TABBIT,
+  TABBIT_INTL,
 ]
 
 /** WorkBuddy 的块 id（结构特殊，单独一个组件） */

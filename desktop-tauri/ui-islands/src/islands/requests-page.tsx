@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { mountOnPage } from '../island-lazy'
 import { flushSync } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import {
@@ -728,8 +729,7 @@ function mount(): void {
   createRoot(section).render(<RequestsPage />)
 }
 
-if (document.querySelector(PAGE_SELECTOR)) mount()
-else document.addEventListener('DOMContentLoaded', mount, { once: true })
+mountOnPage('requests', PAGE_SELECTOR, mount)
 
 declare global {
   interface Window {

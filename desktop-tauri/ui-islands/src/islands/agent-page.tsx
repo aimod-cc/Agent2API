@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { mountOnPage } from '../island-lazy'
 import { Alert, Badge, Button, Card, Empty, InputGroup, InputGroupAddon, InputGroupInput, NavItem, NavList, SegmentedControl, Sidebar, StatusDot, cn } from '@ui'
 import { t } from '../i18n'
 import { counts, getAgentStore, loadPanel, selectClient, selectedClient, setFilter, setQuery, subscribeAgentStore, visibleClients } from './agent-state'
@@ -109,7 +110,6 @@ function mount(): void {
   mounted = true; section.replaceChildren()
   void import('react-dom/client').then(({createRoot})=>createRoot(section).render(<AgentPage/>))
 }
-if (document.querySelector(PAGE_SELECTOR)) mount()
-else document.addEventListener('DOMContentLoaded',mount,{once:true})
+mountOnPage('agent', PAGE_SELECTOR, mount)
 declare global { interface Window { wbAgentPanel?:{load:(silent?:boolean)=>Promise<void>} } }
 window.wbAgentPanel = {load:loadPanel}

@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { mountOnPage } from '../island-lazy'
 import { createRoot } from 'react-dom/client'
 import { Badge, Button, Input, Switch , Label, Card, CardHeader, CardContent, CardFooter } from '@ui'
 import { t } from '../i18n'
@@ -662,10 +663,8 @@ function mount() {
   createRoot(section).render(<TasksPanel />)
 }
 
-// 脚本排在页面骨架之后（index.html 里 islands/ui.js 在各 section 之后），正常直接挂；
-// 万一将来被挪到前面，退化成等 DOM 解析完再挂。
-if (document.querySelector(PAGE_SELECTOR)) mount()
-else document.addEventListener('DOMContentLoaded', mount, { once: true })
+// 首次切到本页时才挂载（见 island-lazy）：隐藏页不在首屏渲染，也不拉数据。
+mountOnPage('tasks', PAGE_SELECTOR, mount)
 
 declare global {
   interface Window {

@@ -71,6 +71,15 @@
         phoneRe: /^1[3-9]\d{9}$/,
         sentHint: wbI18n.t('验证码已发送。收到后填入下方并点「登录并添加」'),
       },
+      // Tabbit 国内站：发码时上游返回 `{uuid}`，登录必须带同一个 uuid。
+      // 国际站没有短信登录（上游灰度 403），因此这条只挂在 `tabbit` 上。
+      tabbit: {
+        send: '/api/session/login/tabbit/sms/send',
+        verify: '/api/session/login/tabbit/sms/verify',
+        ticketKey: 'uuid',
+        phoneRe: /^1[2-9]\d{9}$/,
+        sentHint: wbI18n.t('验证码已发送。收到后填入下方并点「登录并添加」'),
+      },
       // KukuAI：百度通行证的发码要在官方页面里点（风控签名只有页面能生成），
       // 因此发码/登录都由**壳开的登录窗口**代做 —— send/verify 两个路径只是
       // 为了触发桥接层（endsWith('/send') / '/verify' 判定），桥里按 provider
@@ -85,7 +94,16 @@
         sentHint: wbI18n.t('验证码已发送，请查看手机短信。填入下方并点「登录并添加」即完成登录'),
       },
     };
-    const profile = SMS_PROFILES[prefix] || SMS_PROFILES.autoclaw;
+    // 未登记的家按 provider id 推导端点，**不要退回 AutoClaw**：
+    // 退回会把 Tabbit 的请求发到 AutoClaw 的短信端点，上游直接回
+    // 「未知的登录地区」，看起来像 Tabbit 登录坏了（2026-11 实际踩过）。
+    const profile = SMS_PROFILES[prefix] || {
+      send: `/api/session/login/${prefix}/sms/send`,
+      verify: `/api/session/login/${prefix}/sms/verify`,
+      ticketKey: prefix === 'tabbit' ? 'uuid' : 'deviceId',
+      phoneRe: /^1[2-9]\d{9}$/,
+      sentHint: wbI18n.t('验证码已发送。收到后填入下方并点「登录并添加」'),
+    };
     const PHONE_RE = profile.phoneRe;
 
     /** 最近一次发码的中间态（deviceId / msgid，发码成功后才写入，见下） */

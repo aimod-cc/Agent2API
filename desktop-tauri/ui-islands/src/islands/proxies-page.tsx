@@ -1,6 +1,7 @@
 /** 网络代理页：手动 HTTP / SOCKS5 地址与 Clash Verge 同步端点。 */
 
 import * as React from 'react'
+import { mountOnPage } from '../island-lazy'
 import { createRoot } from 'react-dom/client'
 import {
   Badge, Button, Card, CardHeader, Checkbox, InputGroup, InputGroupAddon,
@@ -251,5 +252,4 @@ function mount(): void {
   createRoot(section).render(<ProxiesPage />)
   if (wb().wbApp?.currentPage === 'proxies') { enteredPage(); void loadPanel() }
 }
-if (document.querySelector(PAGE_SELECTOR)) mount()
-else document.addEventListener('DOMContentLoaded', mount, { once: true })
+mountOnPage('proxies', PAGE_SELECTOR, mount)

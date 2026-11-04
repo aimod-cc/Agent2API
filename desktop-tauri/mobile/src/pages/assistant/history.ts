@@ -1,5 +1,6 @@
 import type { ChatMessage } from '../../../../ui-shared/assistant-history'
 import type { ImageAsset } from '../../../../ui-shared/assistant-image-tools'
+import type { AssistantTextFile } from '../../../../ui-shared/assistant-files'
 import { toolById } from '../../lib/assistantTools'
 
 export type Bubble = {
@@ -12,6 +13,7 @@ export type Bubble = {
   error?: string
   tools?: string[]
   attachments?: string[]
+  files?: AssistantTextFile[]
   images?: ImageAsset[]
 }
 
@@ -19,7 +21,7 @@ export function replayBubbles(messages: ChatMessage[], model: string | null): Bu
   const bubbles: Bubble[] = []
   for (const message of messages) {
     if (message.role === 'user') {
-      bubbles.push({ id: message.id!, messageIds: [message.id!], role: 'user', text: message.content, attachments: message.images })
+      bubbles.push({ id: message.id!, messageIds: [message.id!], role: 'user', text: message.content, attachments: message.images, files: message.files })
       continue
     }
     if (message.role === 'tool') {

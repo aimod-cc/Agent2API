@@ -16,9 +16,8 @@ pub const BUILTIN_SUBSCRIPTION_IDS: [&str; 5] = [
 /// 错误走严格投影（`plugin_host/strict_errors.rs`）、目录刷新要求同一次往返
 /// 里带回真实远程快照（`plugin_host/rpc.rs`）。名单里的家可能正在跑，也可能
 /// 停用 —— 「有没有执行体」看 [`is_suspended`]。
-const SCOPED_RUNTIME_IDS: [&str; 14] = [
+const SCOPED_RUNTIME_IDS: [&str; 13] = [
     "cursor",
-    "kiro",
     "devin",
     "factory",
     "zed",
@@ -54,9 +53,15 @@ const SCOPED_RUNTIME_IDS: [&str; 14] = [
 ///
 /// `qwenwork-enterprise`（企业旗舰版）同样停用：插件要另立 provider
 /// （企业自己的域名）。
-const SUSPENDED_IDS: [&str; 18] = [
+///
+/// ── Kiro 为什么在 2026-11 移出这两份名单 ─────────────────────
+/// 它已由「提供商增强」插件实现（Rust，见 Agent2Providers 的 `kiro`）。
+/// 留在 [`SUSPENDED_IDS`] 里会让 `is_executable_provider` 恒为假，症状与
+/// 千问办公国内版完全一样：插件装了、账号也加得上，但界面上看不到这家。
+/// 同时从 [`SCOPED_RUNTIME_IDS`] 移出：Kiro 的凭证、错误码与目录快照都由
+/// 插件自己定义，不再需要网关的严格投影与「同一次往返必带远程快照」约束。
+const SUSPENDED_IDS: [&str; 17] = [
     "cursor",
-    "kiro",
     "devin",
     "factory",
     "zed",

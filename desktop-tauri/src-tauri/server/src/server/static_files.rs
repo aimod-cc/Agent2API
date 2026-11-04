@@ -13,9 +13,11 @@
 //!   · 注入的桥接脚本只在 index.html 上发生，其它原样透出。
 //!
 //! ── 缓存 ────────────────────────────────────────────────────
-//! 一律 `no-store`：面板是小流量场景，协商缓存的复杂度不值得 ——
-//! 资源换了名字（部署新 ui/）后浏览器立刻拿到新版，不会出现
-//! 「发新版后页面引用了旧 js」的中间态。
+//! 文件带 ETag（程序版本 + 修改时间 + 大小），`Cache-Control` 为 `no-cache`：
+//! 浏览器可以存下来，但每次使用前必须回源校验。文件没变时回 304、不传正文；
+//! 部署新 `ui/` 后 mtime 变化、ETag 随之变化，浏览器立刻拿到新版 —— 既不会
+//! 出现「发新版后页面引用了旧 js」，也不必每次打开都重下几 MB。
+//! 压缩由 `compression` 中间件统一处理，这里只声明 `Vary: Accept-Encoding`。
 
 use std::path::PathBuf;
 
@@ -24,6 +26,11 @@ use axum::http::{header, Request, Response, StatusCode};
 use axum::response::Response as AxumResponse;
 
 use crate::server::errors;
+
+/// 可以缓存，但每次使用前都要回源校验（详见模块头的「缓存」段）。
+const CACHE_CONTROL: &str = "no-cache";
+/// 同一路径的正文随客户端是否接受 gzip 而不同，缓存必须按这个头分桶。
+const VARY: &str = "Accept-Encoding";
 
 /// 判定路径是否属于「接口保留前缀」：静态服务绝不碰它们，
 /// 未注册的接口路径继续走原来的 404 文案（Node 版行为）。
@@ -43,10 +50,15 @@ pub async fn serve(request: Request<Body>, ui_dir: PathBuf) -> AxumResponse {
     if is_api_path(&path) {
         return not_found(request).await;
     }
-    match resolve_file(&ui_dir, &path) {
-        Some(file_path) => read_response(&file_path).await,
-        None => not_found(request).await,
-    }
+    let if_none_match = request
+        .headers()
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let Some(file_path) = resolve_file(&ui_dir, &path) else {
+        return not_found(request).await;
+    };
+    read_response(&file_path, if_none_match.as_deref()).await
 }
 
 /// 把 URL 路径解析到 `ui/` 内的具体文件（`None` = 不存在 / 非法）。
@@ -95,7 +107,24 @@ fn resolve_file(ui_dir: &PathBuf, url_path: &str) -> Option<PathBuf> {
 
 /// 读文件并组装响应；读失败（权限等）按 404 处理（不区分 404/403，
 /// 面板资源缺失的唯一正确动作就是「当它不存在」）。
-async fn read_response(file_path: &PathBuf) -> AxumResponse {
+///
+/// ETag 命中时直接回 304，不读文件正文 —— 这是「第二次打开面板不再重下
+/// 几 MB 资源」的关键路径。
+async fn read_response(file_path: &PathBuf, if_none_match: Option<&str>) -> AxumResponse {
+    let metadata = match tokio::fs::metadata(file_path).await {
+        Ok(metadata) => metadata,
+        Err(_) => return errors::not_found_response("GET", "static"),
+    };
+    let etag = etag_of(&metadata);
+    if if_none_match.is_some_and(|value| etag_matches(value, &etag)) {
+        return Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(header::ETAG, &etag)
+            .header(header::CACHE_CONTROL, CACHE_CONTROL)
+            .header(header::VARY, VARY)
+            .body(Body::empty())
+            .unwrap_or_else(|_| errors::not_found_response("GET", "static"));
+    }
     let bytes = match tokio::fs::read(file_path).await {
         Ok(bytes) => bytes,
         Err(_) => {
@@ -115,9 +144,45 @@ async fn read_response(file_path: &PathBuf) -> AxumResponse {
     let response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, mime)
-        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::CACHE_CONTROL, CACHE_CONTROL)
+        .header(header::ETAG, &etag)
+        .header(header::VARY, VARY)
+        .header(header::CONTENT_LENGTH, body.len())
         .body(Body::from(body));
     response.unwrap_or_else(|_| errors::not_found_response("GET", "static"))
+}
+
+/// 文件版本标识：程序版本 + 修改时间 + 长度。
+///
+/// 不含文件内容哈希是刻意的：静态资源最大 2 MB 级，每次请求都算一遍哈希
+/// 反而比直接读文件便宜不了多少；而 `ui/` 是随版本整体替换的，mtime 与长度
+/// 足以区分新旧。加上程序版本是为了覆盖 `index.html` 的桥接注入脚本 ——
+/// 那个脚本编在二进制里，升级后即使 html 文件没动，正文也可能变。
+fn etag_of(metadata: &std::fs::Metadata) -> String {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "W/\"{}-{:x}-{:x}\"",
+        env!("CARGO_PKG_VERSION"),
+        metadata.len(),
+        modified
+    )
+}
+
+/// `If-None-Match` 的匹配：支持 `*`、列表与弱校验前缀（`W/`）。
+///
+/// 两边都按弱比较（去掉 `W/`）处理：同一份文件的 gzip 与未压缩正文共用
+/// 这个 ETag，弱校验正是「语义相同、字节可能不同」的表达。
+fn etag_matches(header: &str, etag: &str) -> bool {
+    let target = etag.strip_prefix("W/").unwrap_or(etag);
+    header.split(',').any(|item| {
+        let item = item.trim();
+        item == "*" || item.strip_prefix("W/").unwrap_or(item).trim() == target
+    })
 }
 
 /// 把网页端桥接注入 index.html：`<head>` 开标签后插一段内联脚本，

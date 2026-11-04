@@ -11,7 +11,7 @@ import { t } from '../i18n'
 import {
   allAccounts, bump, findAccount, getStore, isPicked, patch,
 } from './accounts-store'
-import { proxyPoolSnapshot, refreshProxyPool } from './proxy-pool-cache'
+import { invalidateProxyPoolCache, proxyPoolSnapshot, refreshProxyPool } from './proxy-pool-cache'
 import { installListRefresh, refreshList } from './accounts-refresh'
 import { syncAccountSorting } from './accounts-sort'
 import { confirmBatchResult, refreshSavedAccounts, updateAccountConfirmed } from './accounts-update'
@@ -477,6 +477,8 @@ export function installAccountsApi(): void {
     /** 「添加账号」弹窗打开时可用：按 providers 摘要重建选项并复位到 WorkBuddy */
     syncAddProvider: () => shared().wbAccountAddForms?.syncAddProvider?.(),
     
-    invalidate: () => { void refreshProxyPool() },
+    // 只失效缓存，不立刻出网：refresh() 每次轮询都会调这里，而代理池只有
+    // 账号页真正用得到。切到账号页时 showPage 会调 refreshProxyPool() 强制重读。
+    invalidate: () => { invalidateProxyPoolCache() },
   }
 }

@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { mountOnPage } from '../island-lazy'
 import { createRoot } from 'react-dom/client'
 import { SegmentedControl, Spinner , Button } from '@ui'
 import {
@@ -77,6 +78,8 @@ function CheckinPage(): React.ReactElement {
   // 自动签到执行中短轮询：那是唯一「后台会自己变」的场景（与旧实现同一取舍）
   React.useEffect(() => {
     const timer = window.setInterval(() => {
+      const page = (window as unknown as { wbApp?: { currentPage?: string } }).wbApp?.currentPage
+      if (document.hidden || page !== 'checkin') return
       if (store.center?.auto?.running || activeTab === 'schedule' && store.center?.auto?.enabled) void loadCenter()
     }, 3000)
     return () => window.clearInterval(timer)
@@ -179,8 +182,7 @@ function mount(): void {
   createRoot(section).render(<CheckinPage />)
 }
 
-if (document.querySelector(PAGE_SELECTOR)) mount()
-else document.addEventListener('DOMContentLoaded', mount, { once: true })
+mountOnPage('checkin', PAGE_SELECTOR, mount)
 
 declare global {
   interface Window {

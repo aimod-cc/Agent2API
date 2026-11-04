@@ -269,6 +269,40 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
   }
 
   /**
+   * 清除这个账号单独保存的上游地址，改回跟随提供商的 Base URL
+   * （与清除 API Key 同一形制：立即落库的独立撤销动作）。
+   *
+   * 早先版本新建提供商时会把当时的地址抄进首个账号，而账号上的地址优先于
+   * 提供商 —— 于是改提供商地址后请求仍打旧地址，界面上还看不到那份旧值
+   * （issue #455）。这个按钮是存量账号的修复入口；新建的提供商不再产生
+   * 这种覆盖项，改提供商地址时后端也会顺手清掉等于旧地址的那份。
+   */
+  async function clearAccountBaseUrl(): Promise<void> {
+    if (interactionBusy || actionLock.current) return
+    const nextBase = providerBaseUrl.trim()
+    if (!await askConfirmation(t('改回跟随提供商？'),
+      t('这个账号将改用提供商当前保存的 Base URL：{url}。确认后立即生效，不受底部保存按钮控制。',
+        { url: nextBase || '—' }), t('改回跟随'))) return
+    actionLock.current = true
+    setBusy(true)
+    try {
+      const saved = await updateAccountConfirmed(id, { baseUrl: null })
+      setAccount(saved)
+      toast(t('✅ 已改回跟随提供商的 Base URL'))
+      try {
+        await refreshSavedAccounts()
+      } catch (error) {
+        toast(t('账号已保存，但列表刷新失败：{error}', { error: errorMessage(error) }), 'err')
+      }
+    } catch (error) {
+      toast(t('操作失败：{message}', { message: errorMessage(error) }), 'err')
+    } finally {
+      actionLock.current = false
+      setBusy(false)
+    }
+  }
+
+  /**
    * 清除一个已配置的余额查询凭证字段（自定义家：NewAPI 的访问令牌 / 商汤的
    * 密码 / 智谱的控制台令牌）。
    *
@@ -641,8 +675,10 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
                     <p className='detail acct-dlg-group-note'><AccountSettingsIcon name='shield' size={14} />{t('代理只作用于当前账号，不改变其他账号的出网方式。')}</p>
                   </> : null}
                   {pane === 'provider' && provider ? <ProviderSection provider={provider} count={providerCount}
-                    name={providerName} protocol={providerProtocol} baseUrl={providerBaseUrl} emulation={providerEmulation}
-                    onName={setProviderName} onProtocol={setProviderProtocol} onBaseUrl={setProviderBaseUrl} onEmulation={setProviderEmulation}
+                    name={providerName} protocol={providerProtocol} baseUrl={providerBaseUrl}
+                    accountBaseUrl={target.baseUrl || ''} emulation={providerEmulation}
+                    onName={setProviderName} onProtocol={setProviderProtocol} onBaseUrl={setProviderBaseUrl}
+                    onEmulation={setProviderEmulation} onClearAccountBaseUrl={() => void clearAccountBaseUrl()}
                     disabled={interactionBusy} onRemove={() => void removeProvider()} onModels={() => void openModels()} /> : null}
                 </div>
               </div>

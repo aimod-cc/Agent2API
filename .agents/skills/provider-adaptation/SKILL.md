@@ -159,7 +159,7 @@ CatPaw 与 AutoClaw 都曾把「上游没有目录接口」写进注释，后来
 
 `ui/providers.js` **不用改** —— 它从 `/api/session` 的 `accounts.providers`（后端注册表摘要）自动派生。
 
-改完前端要重新构建岛：`npm run ui:islands`（产物 `ui/islands/ui.js` 要提交）。
+改完前端要重新构建岛：`npm run ui:islands`（产物 `ui/islands/ui.js`、`ui/islands/login.js` 都要提交）。
 
 ## 4. i18n 与文档
 
@@ -297,7 +297,7 @@ node scripts/probe-provider.mjs \
 - **两个地区拆家时，`PROVIDERS` 里要相邻排列。** 中间隔着别家会让「找国际版」变成一次扫描。
 - **`implemented_kinds()` 与 `PROVIDERS` 是两个口径。** 前者是「适配器接线了没有」，后者是「注册了没有」。占位实现不该进前者。
 - **签到清单的默认全选是个陷阱。** 加一家进 `CHECKIN_PROVIDERS` 会让存量用户第二天零点就多发一轮请求。想默认开启就升版本号；不想默认开启就别进 `PROVIDERS_ADDED_IN`。
-- **改完前端要重新构建岛并提交产物。** `ui/islands/ui.js` 是检入仓库的，只改 tsx 不构建等于没改。
+- **改完前端要重新构建岛并提交产物。** `ui/islands/ui.js` 与 `ui/islands/login.js` 都是检入仓库的，只改 tsx 不构建等于没改。
 
 ## 9. 参考实现
 

@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { mountOnPage } from '../island-lazy'
 import { createRoot } from 'react-dom/client'
 import {
   Badge, Button, InputGroup, InputGroupAddon, InputGroupInput,
@@ -382,8 +383,7 @@ function mount(): void {
   section.replaceChildren()
   createRoot(section).render(<LogsPanel />)
 }
-if (document.querySelector('.page[data-page="logs"]')) mount()
-else document.addEventListener('DOMContentLoaded', mount, { once: true })
+mountOnPage('logs', '.page[data-page="logs"]', mount)
 
 declare global {
   interface Window {

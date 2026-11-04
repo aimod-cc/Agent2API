@@ -1,7 +1,17 @@
+import type { AssistantTextFile } from './assistant-files'
 import type { Translate } from './assistant-read-types'
 
 export type ImageAsset = { id: string; url: string; mime: string; width: number; height: number }
-export type ImageToolContext = { session: string; images: string[]; confirmed: boolean; apiKey?: string; apiKeyName?: string; signal?: AbortSignal }
+export type ImageToolContext = {
+  session: string
+  images: string[]
+  /** 最近一条带附件的用户消息里的 JSON / .info 文件（账号导入工具用） */
+  files?: AssistantTextFile[]
+  confirmed: boolean
+  apiKey?: string
+  apiKeyName?: string
+  signal?: AbortSignal
+}
 export type ImageToolResult = { text: string; summary: string; images: ImageAsset[] }
 export type ImageToolApi = (path: string, body: unknown, signal?: AbortSignal, apiKey?: string) => Promise<unknown>
 

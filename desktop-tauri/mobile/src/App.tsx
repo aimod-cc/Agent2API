@@ -18,6 +18,7 @@ import { LogsPage } from './pages/LogsPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { DocsPage } from './pages/DocsPage'
 import { AgentPage } from './pages/AgentPage'
+import { ToolsPage } from './pages/ToolsPage'
 import { ServersPage } from './pages/ServersPage'
 import { CheckinPage } from './pages/CheckinPage'
 import { PluginsPage } from './pages/PluginsPage'
@@ -54,6 +55,7 @@ const SCREENS: Record<ScreenId, ScreenDef> = {
   settings: { title: t('设置'), component: SettingsPage },
   docs: { title: t('接口文档'), component: DocsPage },
   agent: { title: t('Agent 配置'), component: AgentPage },
+  tools: { title: t('工具服务'), component: ToolsPage },
   servers: { title: t('服务器'), component: ServersPage },
   checkin: { title: t('签到中心'), component: CheckinPage },
   plugins: { title: t('网关插件'), component: PluginsPage },

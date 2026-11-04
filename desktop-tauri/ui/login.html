@@ -30,11 +30,12 @@
       }
       document.documentElement.lang = locale;
       if (locale === 'zh-Hans') return; // 简体无词典：查不到即显示简体原文
-      document.write('<script src="i18n/manifest.js"><\/script>');
-      var domains = window.__WB_I18N_DOMAINS || [];
-      for (var d = 0; d < domains.length; d++) {
-        document.write('<script src="i18n/' + locale + '/' + domains[d] + '.js"><\/script>');
-      }
+      // 登录页只用到 login（标题 / 卡片文案 / 验证状态）与 accounts（「账号」）
+      // 两个域。标记告诉 i18n.js「词典已注入」，否则它会按 manifest 把主面板
+      // 二十多份词典（约 700 KB）再拉一遍 —— 登录页的首屏就白等一截。
+      window.__WB_I18N_INJECTED = true;
+      document.write('<script src="i18n/' + locale + '/login.js"><\/script>');
+      document.write('<script src="i18n/' + locale + '/accounts.js"><\/script>');
     })();
   </script>
   <!-- 组件库产物（ui-kit + Tailwind，由 ui-islands 构建）：与主面板同一份。
@@ -70,16 +71,16 @@
     #submit { margin-top: 20px; }
   </style>
   <!-- 多语言运行时（词典已在上面 head 的引导脚本里同步注入）：排在所有 css 之后，
-       且早于 body 末尾的 islands/ui.js 与 panel-captcha.js。 -->
+       且早于 body 末尾的 islands/login.js 与 panel-captcha.js。 -->
   <script src="i18n.js"></script>
 </head>
 <body>
-  <!-- 整页界面由 React 岛渲染（ui-islands/src/islands/login-page.tsx，随 islands/ui.js
-       一起加载；岛直接渲染卡片本身，不在这里写静态骨架）。
+  <!-- 整页界面由 React 岛渲染（ui-islands/src/islands/login-page.tsx，由
+       islands/login.js 单独打包；岛直接渲染卡片本身，不在这里写静态骨架）。
        这个 <script> 必须排在 #login-app 之后、且不能加 defer/async：下面那段登录脚本
        要同步拿到岛渲染出来的 #username / #password / #submit / #error / #mode-tip。 -->
   <div id="login-app"></div>
-  <script src="islands/ui.js"></script>
+  <script src="islands/login.js"></script>
 
   <!-- 机器人校验组件（自定义元素定义，协议见 server::altcha 与文件头注释）。
        必须排在下面那段内联脚本之前：脚本挂在元素上的 verified/expired 监听、

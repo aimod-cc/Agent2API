@@ -158,12 +158,12 @@
   const current = locale()
   document.documentElement.lang = current
 
-  // 各域词典注入：head 引导脚本只写 manifest.js（域清单）—— 它在 document.write
-  // 之后同步读不到 __WB_I18N_DOMAINS（manifest 要等引导脚本块结束才执行），所以
-  // 各域文件挪到这里补写。本脚本静态排在 manifest.js 之后执行，此刻清单已就位；
-  // 且页面仍在解析期，写出的 <script> 会插在本脚本之后、所有业务脚本之前。
-  // 简体没有词典目录（查不到即显示键本身），跳过。
-  if (current !== 'zh-Hans' && document.readyState === 'loading') {
+  // 各域词典注入：手机端 head 只写 manifest.js（域清单），各域文件挪到这里补写
+  // —— 本脚本静态排在 manifest.js 之后执行，此刻清单已就位；页面仍在解析期，
+  // 写出的 <script> 会插在本脚本之后、所有业务脚本之前。
+  // 主面板与登录页已经由 head 引导脚本自己注入（合并词典 / 登录页的两个域），
+  // 用 __WB_I18N_INJECTED 标记跳过这里；简体没有词典目录，也跳过。
+  if (!window.__WB_I18N_INJECTED && current !== 'zh-Hans' && document.readyState === 'loading') {
     const domains = window.__WB_I18N_DOMAINS || []
     for (const domain of domains) {
       document.write('<script src="i18n/' + current + '/' + domain + '.js"><\/script>')

@@ -259,7 +259,7 @@ export function MappingDialog({ context, onClose }: { context: MappingContext; o
               ? <p className='text-xs text-subtle'>{t('默认档位：{level}', { level: reasoningInfo.defaultLevel })}</p> : null}
           </div>
           <p className='text-xs leading-[1.65] text-subtle'>
-            {t('对外名支持字母、数字与 ')}<code>- _ . / :</code>{t('。同一提供商内，同名绑定最多启用一条；已有启用绑定时不能新增，启用备用绑定会自动关闭其他同名绑定。不同提供商可各启用一条同名绑定，用于主备切换。')}
+            {t('对外名可以是中文、字母、数字与 ')}<code>- _ . / :</code>{t(' 这类符号，但不能含空格或换行，且不超过 128 个字符。同一提供商内，同名绑定最多启用一条；已有启用绑定时不能新增，启用备用绑定会自动关闭其他同名绑定。不同提供商可各启用一条同名绑定，用于主备切换。')}
           </p>
           {/* 状态行：高度固定，出现错误时弹窗不跳高 */}
           <div className='min-h-[18px] text-xs text-subtle' role='status'>{duplicateError || status}</div>

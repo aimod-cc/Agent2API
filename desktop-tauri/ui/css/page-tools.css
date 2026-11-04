@@ -1,0 +1,77 @@
+/* 工具服务页：API 文档正文（wbMarkdown 渲染出的 HTML）的排版。
+   页面本体用 React 岛 + Tailwind 组件，这份 CSS 只补 HtmlContent 里那些
+   没有类名的 Markdown 元素（标题 / 段落 / 列表 / 代码块）—— 与「更新日志」
+   的 .markdown-guide 同一套观感，不另起一套字号体系。 */
+
+.tool-api-doc {
+  font-size: 12.5px;
+  line-height: 1.75;
+  color: var(--text-2);
+}
+
+.tool-api-doc > :first-child { margin-top: 0; }
+.tool-api-doc > :last-child { margin-bottom: 0; }
+
+.tool-api-doc h1 {
+  margin: 4px 0 12px;
+  font-size: 17px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.tool-api-doc h2 {
+  margin: 22px 0 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.tool-api-doc h3 {
+  margin: 16px 0 8px;
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.tool-api-doc p { margin: 8px 0; }
+.tool-api-doc ul,
+.tool-api-doc ol { margin: 8px 0; padding-left: 20px; }
+.tool-api-doc li { margin: 3px 0; }
+.tool-api-doc li::marker { color: var(--text-3); }
+
+.tool-api-doc code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 11.5px;
+  color: var(--text);
+}
+
+.tool-api-doc pre {
+  margin: 10px 0;
+  padding: 12px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.tool-api-doc pre code {
+  padding: 0;
+  background: transparent;
+  font-size: inherit;
+}
+
+.tool-api-doc blockquote {
+  margin: 10px 0;
+  padding: 2px 0 2px 12px;
+  border-left: 3px solid var(--border-strong);
+  color: var(--text-3);
+}
+
+.tool-api-doc a { color: var(--primary); text-decoration: underline; }

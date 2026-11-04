@@ -24,6 +24,19 @@ pub fn capabilities(def: &ClientDef) -> Value {
     json!({ "prompt": paths.prompt.is_some(), "skills": !paths.skills.is_empty(), "mcp": paths.mcp.is_some(), "note": paths.note })
 }
 
+/// 该客户端可安装 Skill 的根目录（按配置文件里的优先级排列）。
+///
+/// 工具服务的「本机接入」要用它把 Skill 包写进客户端；与「Agent 配置」页的
+/// Skill 资源面板同一份事实（都来自 `paths::for_client`），不另抄一份。
+pub fn skill_roots(def: &ClientDef) -> Vec<std::path::PathBuf> {
+    paths::for_client(def).skills
+}
+
+/// 该客户端 MCP 配置文件的路径（不支持 MCP 的客户端返回 None）。
+pub fn mcp_config_path(def: &ClientDef) -> Option<std::path::PathBuf> {
+    paths::for_client(def).mcp.as_ref().map(|(path, _, _)| path.clone())
+}
+
 pub fn snapshot(def: &ClientDef, kind: &str) -> Result<Value, String> {
     let paths = paths::for_client(def);
     match kind {

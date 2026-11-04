@@ -24,6 +24,7 @@ import type { ChatMessage } from '../../../ui-shared/assistant-history'
 import { parseAssistantMessages, assistantTitle } from '../../../ui-shared/assistant-history'
 export type { ChatMessage } from '../../../ui-shared/assistant-history'
 import { readAssistantStream, type ChatEvent, type ToolCall } from '../../../ui-shared/assistant-stream'
+import { userContentWithFiles } from '../../../ui-shared/assistant-files'
 import { t } from '../i18n'
 import { serverIdentity, apiBase } from '../lib/servers'
 import { readModelApiKeySelection, rememberModelApiKeySelection } from '../../../ui-shared/model-api-key-memory'
@@ -149,9 +150,10 @@ function wireMessage(message: ChatMessage): Record<string, unknown> {
     return wire
   }
   const images = (message.images || []).filter((image): image is string => typeof image === 'string')
-  if (!images.length) return { role: 'user', content: message.content }
+  const text = userContentWithFiles(message.content, message.files || [])
+  if (!images.length) return { role: 'user', content: text }
   return { role: 'user', content: [
-    { type: 'text', text: message.content },
+    { type: 'text', text },
     ...images.map(url => ({ type: 'image_url', image_url: { url } })),
   ] }
 }

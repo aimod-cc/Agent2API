@@ -1,6 +1,6 @@
 {
   "name": "agent2api",
-  "version": "3.4.0",
+  "version": "3.4.1",
   "description": "Agent2API - AI 路由网关与 Agent 客户端接管：统一模型接口、账号路由、网关密钥与请求报表，提供商能力通过独立插件扩展",
   "type": "module",
   "private": true,

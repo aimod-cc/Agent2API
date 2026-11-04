@@ -12,8 +12,12 @@
  * 首次提交必须同步（flushSync）：脚本是紧随本岛之后的经典脚本，求值时就要拿到
  * 这些节点（`widget.addEventListener` 拿到 null 会直接抛错，整段脚本作废、点登录
  * 毫无反应）；而 createRoot().render() 默认交给调度器异步提交，同步脚本会跑在提交
- * 之前、拿到空 DOM。代价是本页的 `<script src="islands/ui.js">` 必须排在 #login-app
- * 之后，且不能加 defer/async —— 加了顺序就散了。
+ * 之前、拿到空 DOM。代价是本页的 `<script src="islands/login.js">` 必须排在
+ * #login-app 之后，且不能加 defer/async —— 加了顺序就散了。
+ *
+ * 这个岛**不在主面板的 island 注册表里**：它单独构建成 ui/islands/login.js
+ * （入口 src/login-entry.tsx，见 vite.login.config.ts），否则登录页为了显示
+ * 一张卡片也要下载整份 2.3 MB 的 islands/ui.js。
  *
  * 视觉上不再自己硬编码一套深色变量：颜色一律走组件库令牌（ui.css 的 --ui-*，
  * 跟随 `<html data-theme="dark">`），布局尺寸用 Tailwind 工具类还原原样式。
@@ -119,8 +123,9 @@ function LoginPage() {
 }
 
 /**
- * 挂载。主面板里没有 #login-app（岛随同一个 bundle 一起加载），直接跳过 ——
- * 这是预期行为，不是漏挂。
+ * 挂载。本文件由独立的 login.js 引入，正常只在登录页执行；保留 #login-app
+ * 存在性判断是为了防止将来有人把 login.js 误引到其它页面 —— 那种情况下
+ * 静默跳过即可，不该报错。
  */
 function mount(): void {
   const host = document.getElementById(HOST_ID)

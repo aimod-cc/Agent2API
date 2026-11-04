@@ -392,6 +392,22 @@ export function CloudSyncPanel() {
                         onChange={event => patch({ webdavPassword: event.target.value })}
                       />
                     </div>
+                    <div className='retention-row'>
+                      <Label htmlFor='cloud-webdav-ua'>{t('自定义 User-Agent')}</Label>
+                      <Input
+                        id='cloud-webdav-ua'
+                        value={form.webdavUserAgent}
+                        disabled={disabled}
+                        autoComplete='off'
+                        placeholder={t('留空使用默认')}
+                        onChange={event => patch({ webdavUserAgent: event.target.value })}
+                      />
+                      <div className='hint'>
+                        {t(
+                          '可选。部分服务（如中国科技云数据胶囊）会按 User-Agent 校验凭据绑定的客户端类型，此时填写包含该类型名的字符串（例如 rclone/v1.67.0）。留空则维持默认。'
+                        )}
+                      </div>
+                    </div>
                     {webdavPreset?.hint ? <div className='hint'>{webdavPreset.hint}</div> : null}
                   </>
                 ) : (
@@ -470,6 +486,22 @@ export function CloudSyncPanel() {
                         placeholder={t('留空使用 AWS 官方地址')}
                         onChange={event => patch({ s3Endpoint: event.target.value })}
                       />
+                    </div>
+                    <div className='retention-row'>
+                      <Label htmlFor='cloud-s3-ua'>{t('自定义 User-Agent')}</Label>
+                      <Input
+                        id='cloud-s3-ua'
+                        value={form.s3UserAgent}
+                        disabled={disabled}
+                        autoComplete='off'
+                        placeholder={t('留空使用默认')}
+                        onChange={event => patch({ s3UserAgent: event.target.value })}
+                      />
+                      <div className='hint'>
+                        {t(
+                          '可选。部分服务（如中国科技云数据胶囊）会按 User-Agent 校验凭据绑定的客户端类型，此时填写包含该类型名的字符串（例如 rclone/v1.67.0）。留空则维持默认。'
+                        )}
+                      </div>
                     </div>
                     {s3Preset.hint ? <div className='hint'>{s3Preset.hint}</div> : null}
                   </>

@@ -41,6 +41,8 @@
 use serde_json::{json, Value};
 
 use crate::server::core::account_store::AccountStore;
+use crate::server::core::providers::adapter::ProviderAdapter;
+use crate::server::errors::GatewayError;
 use crate::server::logging;
 
 /// 逐条结果的状态取值（**字符串本身就是给前端与日志看的契约**）
@@ -84,6 +86,39 @@ pub const STATUS_FAILED: &str = "failed";
 /// 只回 `id` / `provider` / 状态 / 文案，绝不回 token 内容。`GatewayError` 的
 /// 文案本来也由我们构造（不含凭证），与 `/api/accounts/refresh` 报给前端的是
 /// 同一份口径。
+/// 调一次刷新并**核对凭证是否真的推进**（issue #407）。
+///
+/// 适配器返回 Ok 只代表「这次调用没报错」：它可能什么都没刷到（上游原样回了
+/// 旧值、插件自己吞了失败），而账号记录一个字节没动。这里在刷新前后各取一次
+/// 指纹（`expiresAt` / `updatedAt`），两者都没推进就转成错误 —— 于是自动维护
+/// 记 ❌、手动刷新回非 2xx，静默失效第一次发生就会暴露。
+///
+/// `expiresAt` 或 `updatedAt` **任一**推进都算成功：有些家刷新后只换 token
+/// 不延长有效期（反过来也有），单看一个字段会误判。账号读不到时放行 ——
+/// 那是「记录不存在」的问题，由刷新本身报错，不该在这里编一个。
+pub async fn refresh_checked(
+    store: &AccountStore,
+    adapter: &dyn ProviderAdapter,
+    id: &str,
+) -> Result<String, GatewayError> {
+    let before = store.credential_stamp(id);
+    let token = adapter.refresh_access_token(store, id).await?;
+    let after = store.credential_stamp(id);
+    if let (Some((expires_before, updated_before)), Some((expires_after, updated_after))) =
+        (before, after)
+    {
+        if expires_after <= expires_before && updated_after <= updated_before {
+            return Err(GatewayError::with_status(
+                502,
+                format!(
+                    "账号 {id} 的凭证刷新未产生变化（适配器报成功但凭据未更新），请重新登录该账号"
+                ),
+            ));
+        }
+    }
+    Ok(token)
+}
+
 pub async fn refresh_expiring_accounts(store: &AccountStore) -> Vec<Value> {
     let snapshot = store.list_accounts();
     let accounts: Vec<Value> = snapshot
@@ -175,7 +210,7 @@ pub async fn refresh_expiring_accounts(store: &AccountStore) -> Vec<Value> {
         // 逐个 await（不并发）：刷新是低频维护动作、单个账号要打一次上游，
         // 串行既避开风控也保证日志顺序稳定；失败被 match 收敛成一条结果，
         // 不会中断循环（见模块头的失败隔离）。
-        slots[index] = Some(match adapter.refresh_access_token(store, &id).await {
+        slots[index] = Some(match refresh_checked(store, adapter.as_ref(), &id).await {
             Ok(_) => {
                 // 成功也打一条：用户在日志页能看到「网关自动刷新了谁的凭证」，
                 // 否则「token 怎么自己变新了」是个无法追溯的问题

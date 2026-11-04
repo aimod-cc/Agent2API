@@ -400,11 +400,20 @@ pub fn shim_js() -> &'static str {
     if (hosts != null && (!Array.isArray(hosts) || hosts.some(function (host) {
       return typeof host !== 'string' || !host.trim().replace(/^\*\./, '').replace(/\.$/, '');
     }))) throw new Error('登录域名白名单格式无效');
-    var permittedHost = !Array.isArray(hosts) || hosts.length === 0 || hosts.some(function (host) {
-      if (typeof host !== 'string') return false;
-      var allowed = host.trim().toLowerCase().replace(/^\*\./, '').replace(/\.$/, '');
-      return allowed && (parsed.hostname.toLowerCase() === allowed
-        || parsed.hostname.toLowerCase().endsWith('.' + allowed));
+    var regularHosts = [];
+    var loopbackPages = [];
+    (Array.isArray(hosts) ? hosts : []).forEach(function (host) {
+      if (typeof host !== 'string') return;
+      var text = host.trim().toLowerCase();
+      // 插件申报的本机登录页（明确带端口，只认回环主机）
+      var page = /^(127\.0\.0\.1|localhost|\[::1\]):(\d+)$/.exec(text);
+      if (page) { loopbackPages.push({ host: page[1], port: page[2] }); return; }
+      var allowed = text.replace(/^\*\./, '').replace(/\.$/, '');
+      if (allowed) regularHosts.push(allowed);
+    });
+    var permittedHost = !Array.isArray(hosts) || regularHosts.length === 0 || regularHosts.some(function (allowed) {
+      return parsed.hostname.toLowerCase() === allowed
+        || parsed.hostname.toLowerCase().endsWith('.' + allowed);
     });
     var callbackHttp = parsed.protocol === 'http:'
       && ['localhost', '127.0.0.1', '[::1]'].indexOf(parsed.hostname) >= 0
@@ -412,7 +421,11 @@ pub fn shim_js() -> &'static str {
         return target.protocol === parsed.protocol && target.hostname === parsed.hostname
           && target.port === parsed.port && target.pathname === parsed.pathname;
       });
-    if (!permittedHost || (parsed.protocol !== 'https:' && !callbackHttp)) {
+    var loopbackPage = parsed.protocol === 'http:'
+      && loopbackPages.some(function (page) {
+        return parsed.hostname.toLowerCase() === page.host && (parsed.port || '80') === page.port;
+      });
+    if (!permittedHost || (parsed.protocol !== 'https:' && !callbackHttp && !loopbackPage)) {
       throw new Error('登录链接不是允许的 HTTPS 站点或合法本机回调地址');
     }
     return value; // 校验不重写原文，保留授权地址中的编码、顺序与签名。

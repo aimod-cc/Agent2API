@@ -45,6 +45,8 @@ const ICONS: Record<string, string> = {
   orcaterm: 'assets/providers/orcaterm.png',
   chatglm: 'assets/providers/chatglm.png',
   'deepseek-web': 'assets/providers/deepseek.png',
+  tabbit: 'assets/providers/tabbit.png',
+  'tabbit-intl': 'assets/providers/tabbit.png',
   modelscope: 'assets/providers/modelscope.png',
   'modelscope-intl': 'assets/providers/modelscope.png',
   atomcode: 'assets/providers/atomcode.png',
@@ -52,6 +54,7 @@ const ICONS: Record<string, string> = {
   doubaowork: 'assets/providers/doubaowork.png',
   cursor: 'assets/providers/cursor.svg',
   kiro: 'assets/providers/kiro.svg',
+  astudio: 'assets/providers/astudio.png',
   devin: 'assets/providers/devin.svg',
   factory: 'assets/providers/factory.svg',
   zed: 'assets/providers/zed.svg',
@@ -73,6 +76,7 @@ const ICONS: Record<string, string> = {
 
 /** 后端没给 label 时的兜底展示名（认不出的 id 原样显示） */
 const LABELS: Record<string, string> = {
+  astudio: 'AStudio',
   workbuddy: 'WorkBuddy 国内版',
   'workbuddy-intl': 'WorkBuddy 国际版',
   raccoon: '小浣熊',
@@ -100,6 +104,8 @@ const LABELS: Record<string, string> = {
   officeace: 'OfficeAce 果办',
   orcaterm: 'OrcaTerm',
   chatglm: '智谱清言',
+  tabbit: 'Tabbit 国内版',
+  'tabbit-intl': 'Tabbit 国际版',
   modelscope: 'ModelScope 国内版',
   'modelscope-intl': 'ModelScope 国际版',
   atomcode: 'AtomCode',

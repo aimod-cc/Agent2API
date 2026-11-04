@@ -128,6 +128,21 @@ pub fn add_mapping(
         let effective =
             enabled.unwrap_or_else(|| existing.as_ref().map_or(true, |mapping| mapping.enabled));
         let creating = !alias.eq_ignore_ascii_case(target) && existing.is_none();
+        // 对外别名的名字只在**这一条别名是新建的**时候检查（`creating`）。
+        //
+        // 两个要点，缺一个都会踩坑：
+        //   · **不在编辑时检查**：自映射绑定（alias == target）的「别名」就是上游
+        //     模型 id，而上游 id 不保证是 ASCII —— 千问办公的 `高级` / `标准` 就是
+        //     中文 id。那些行切开关 / 改思考等级走的也是这条接口，此时别名只是
+        //     定位键，再拦就成了「模型页的开关点不动」。
+        //   · **新建也不再限字符集**：判据见 `alias_name_valid`（中文可以，
+        //     空 / 超长 / 带空白与控制字符不行）。
+        if creating && !super::alias_name_valid(alias) {
+            return Err(GatewayError::with_status(
+                400,
+                "映射名不能为空、不能含空格或换行，且不超过 128 个字符",
+            ));
+        }
         for owner in &owners {
             if (creating || enabled == Some(true))
                 && catalog.target(rules, owner, target).is_none()

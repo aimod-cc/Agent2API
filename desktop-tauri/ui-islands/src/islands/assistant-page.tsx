@@ -29,6 +29,7 @@
  */
 
 import * as React from 'react'
+import { mountOnPage } from '../island-lazy'
 import { createRoot } from 'react-dom/client'
 import { t } from '../i18n'
 import {
@@ -66,6 +67,7 @@ import { useAssistantMessageOperations } from './assistant-message-operations'
 import { AssistantTitleSettings } from '../../../ui-shared/assistant-title-settings'
 import { replayMessages } from './assistant-replay'
 import { imageContext, type ImageAsset } from '../../../ui-shared/assistant-image-tools'
+import { assistantFileContext, type AssistantTextFile } from '../../../ui-shared/assistant-files'
 import { useModelApiKeys } from '../../../ui-shared/use-model-api-keys'
 import { ModelApiKeyField } from '../../../ui-shared/model-api-key-field'
 import { modelApiKeyAllows, modelApiKeyLabel, type ModelApiKey } from '../../../ui-shared/model-api-key'
@@ -110,7 +112,7 @@ function AssistantPage() {
   const loadedRef = React.useRef(false)
   /** 当前会话 id（`uiRef` 那串消息归属哪一条；新建时换一个） */
   const activeIdRef = React.useRef<string>('')
-  const { images, setImages, addFiles, reading: readingImages } = useAssistantAttachments(activeIdRef)
+  const { images, setImages, files, setFiles, addFiles, reading: readingAttachments } = useAssistantAttachments(activeIdRef)
   /** 会话标题（用户没改过就一直取第一条用户消息，见 `titleFrom`） */
   const titleRef = React.useRef<string>('')
   const { sessions, setSessions, persist, summarize, remove: removeSavedSession, clear: clearSavedSessions } = useAssistantSessions({
@@ -213,8 +215,9 @@ function AssistantPage() {
       if (tool.id === 'generate_images' || tool.id === 'edit_images') await persistRef.current(true, collected)
       if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError')
       const references = imageContext([...wireRef.current, ...collected.map(item => ({ role: 'tool', images: item.images }))])
+      const attachmentFiles = assistantFileContext(wireRef.current)
       const key = requestKeyRef.current
-      const result = await tool.run(args, { session, images: references, confirmed: true, signal: controller.signal, apiKey: key?.key, apiKeyName: key?.name })
+      const result = await tool.run(args, { session, images: references, files: attachmentFiles, confirmed: true, signal: controller.signal, apiKey: key?.key, apiKeyName: key?.name })
       if (activeIdRef.current !== session) throw new DOMException('Aborted', 'AbortError')
       return result
     } finally {
@@ -472,9 +475,9 @@ function AssistantPage() {
   }, [pump, syncUI])
 
   /** 发送前校验当前模型，校验失败不追加历史也不清空草稿。 */
-  const send = React.useCallback(async (text: string, attached: string[]) => {
+  const send = React.useCallback(async (text: string, attached: string[], textFiles: AssistantTextFile[]) => {
     const value = text.trim()
-    if ((!value && attached.length === 0) || busy || awaiting || readingImages || sendingRef.current || historyBusyRef.current) return
+    if ((!value && attached.length === 0 && textFiles.length === 0) || busy || awaiting || readingAttachments || sendingRef.current || historyBusyRef.current) return
     const current = configRef.current
     if (!current?.model) {
       toast(current
@@ -516,10 +519,19 @@ function AssistantPage() {
       roundRef.current = 0
       stoppedRef.current = false
       const messageId = newSessionId()
-      uiRef.current.push({ kind: 'user', id: messageId, text: value, ...(attached.length ? { images: attached } : {}) })
-      wireRef.current.push({ role: 'user', id: messageId, content: value, ...(attached.length ? { images: attached } : {}) })
+      uiRef.current.push({
+        kind: 'user', id: messageId, text: value,
+        ...(attached.length ? { images: attached } : {}),
+        ...(textFiles.length ? { files: textFiles } : {}),
+      })
+      wireRef.current.push({
+        role: 'user', id: messageId, content: value,
+        ...(attached.length ? { images: attached } : {}),
+        ...(textFiles.length ? { files: textFiles } : {}),
+      })
       setDraft('')
       setImages([])
+      setFiles([])
       syncUI()
       await loop()
       await persistRef.current()
@@ -536,7 +548,7 @@ function AssistantPage() {
         setBusy(false)
       }
     }
-  }, [awaiting, busy, readingImages, loop, syncUI, refreshModels, configRef, keyState.refresh])
+  }, [awaiting, busy, readingAttachments, loop, syncUI, refreshModels, configRef, keyState.refresh, setFiles])
 
   const stop = React.useCallback(() => {
     if (checkingModelRef.current) {
@@ -565,8 +577,9 @@ function AssistantPage() {
     setAwaiting(false)
     setBusy(false)
     setImages([])
+    setFiles([])
     syncUI()
-  }, [syncUI, setImages])
+  }, [syncUI, setImages, setFiles])
 
   const newChat = React.useCallback(() => {
     if (historyBusyRef.current || sendingRef.current) return
@@ -596,6 +609,9 @@ function AssistantPage() {
       activeIdRef.current = detail.id
       titleRef.current = detail.title
       setActiveId(detail.id)
+      setImages([])
+      setFiles([])
+      setDraft('')
       suspendedRef.current = null
       setAwaiting(false)
       setBusy(false)
@@ -687,6 +703,7 @@ function AssistantPage() {
       setActiveId(detail.id)
       setSessions(previous => [detail, ...previous])
       setImages([])
+      setFiles([])
       setDraft('')
       syncUI()
       setSidebarOpen(false)
@@ -712,7 +729,7 @@ function AssistantPage() {
         <div className='asst-scroll' ref={scrollRef}>
           {empty ? (
             <AssistantEmpty noTools={config !== null && enabledCount === 0} failed={loadingFailed} status={status}
-              onSend={text => { void send(text, []) }} />
+              onSend={text => { void send(text, [], []) }} />
           ) : (
             <div className='asst-flow'>
               <MessageList messages={ui} model={currentModel || ''} actions={{ ...messageActions, disabled: busy || awaiting || historyBusy }} onConfirm={run => void resolveConfirm(run)} />
@@ -724,8 +741,10 @@ function AssistantPage() {
           draft={draft}
           onDraftChange={setDraft}
           images={images}
+          files={files}
           onAddFiles={addFiles}
           onRemoveImage={index => setImages(prev => prev.filter((_, i) => i !== index))}
+          onRemoveFile={index => setFiles(prev => prev.filter((_, i) => i !== index))}
           modelSupportsImages={modelSupportsImages}
           imageToolsEnabled={toolEnabled.edit_images === true}
           modelAvailable={modelsReady && Boolean(currentOption) && keyState.ready && Boolean(selectedKey)}
@@ -740,9 +759,9 @@ function AssistantPage() {
           onPickReasoning={pickReasoning}
           mode={mode}
           onModeChange={pickMode}
-          busy={busy || readingImages}
+          busy={busy || readingAttachments}
           awaiting={awaiting || historyBusy}
-          onSend={() => void send(draft, images)}
+          onSend={() => void send(draft, images, files)}
           onStop={stop}
         />
       </div>
@@ -784,12 +803,11 @@ function mount(): void {
   section.replaceChildren()
   root = createRoot(section)
   root.render(<AssistantPage />)
+  // 首轮对话少一次往返：只在用户第一次打开助手页时预热网关地址。
+  void gatewayBase().catch(() => {})
 }
 
-if (document.querySelector(PAGE_SELECTOR)) mount()
-else document.addEventListener('DOMContentLoaded', mount, { once: true })
+mountOnPage('assistant', PAGE_SELECTOR, mount)
 
-// 让 gatewayBase 的预热随岛加载一起发生（首轮对话少一次往返）
-void gatewayBase().catch(() => {})
 
 export { DEFAULT_SYSTEM_PROMPT }

@@ -55,6 +55,10 @@ pub(crate) struct WebDavConfig {
     /// `enc1:` 信封（见模块头）。空串 = 未设置
     #[serde(default)]
     pub password: String,
+    /// 自定义 User-Agent。空串 = 用默认。部分服务（如中国科技云数据胶囊）
+    /// 按 User-Agent 校验客户端类型，要求它包含凭据绑定的应用名
+    #[serde(default)]
+    pub user_agent: String,
 }
 
 /// S3 兼容存储设置
@@ -73,6 +77,10 @@ pub(crate) struct S3Config {
     /// 自定义端点（`minio.example.com:9000`）；空 = AWS 官方
     #[serde(default)]
     pub endpoint: String,
+    /// 自定义 User-Agent。空串 = 用默认。部分服务（如中国科技云数据胶囊）
+    /// 按 User-Agent 校验客户端类型，要求它包含凭据绑定的应用名
+    #[serde(default)]
+    pub user_agent: String,
 }
 
 /// 同步状态（服务端维护，界面只读）
@@ -167,10 +175,12 @@ impl CloudSyncSettings {
         }
         self.webdav.base_url = self.webdav.base_url.trim().to_string();
         self.webdav.username = self.webdav.username.trim().to_string();
+        self.webdav.user_agent = self.webdav.user_agent.trim().to_string();
         self.s3.region = self.s3.region.trim().to_string();
         self.s3.bucket = self.s3.bucket.trim().to_string();
         self.s3.access_key_id = self.s3.access_key_id.trim().to_string();
         self.s3.endpoint = self.s3.endpoint.trim().to_string();
+        self.s3.user_agent = self.s3.user_agent.trim().to_string();
         self.remote_root = self.remote_root.trim().to_string();
         self.profile = self.profile.trim().to_string();
         if self.remote_root.is_empty() {
@@ -236,6 +246,7 @@ impl CloudSyncSettings {
                 "baseUrl": self.webdav.base_url,
                 "username": self.webdav.username,
                 "hasPassword": !self.webdav.password.is_empty(),
+                "userAgent": self.webdav.user_agent,
             },
             "s3": {
                 "region": self.s3.region,
@@ -243,6 +254,7 @@ impl CloudSyncSettings {
                 "accessKeyId": self.s3.access_key_id,
                 "endpoint": self.s3.endpoint,
                 "hasSecretKey": !self.s3.secret_access_key.is_empty(),
+                "userAgent": self.s3.user_agent,
             },
             "hasSyncPassword": !self.sync_password.is_empty(),
             "enabled": self.enabled,
@@ -364,11 +376,13 @@ pub(crate) struct SaveInput {
     pub webdav_base_url: String,
     pub webdav_username: String,
     pub webdav_password: String,
+    pub webdav_user_agent: String,
     pub s3_region: String,
     pub s3_bucket: String,
     pub s3_access_key_id: String,
     pub s3_secret_access_key: String,
     pub s3_endpoint: String,
+    pub s3_user_agent: String,
     pub sync_password: String,
     pub enabled: bool,
     pub auto_sync: bool,
@@ -382,6 +396,7 @@ pub(crate) fn apply_save(input: SaveInput) -> Result<CloudSyncSettings, String> 
     settings.provider = input.provider;
     settings.webdav.base_url = input.webdav_base_url;
     settings.webdav.username = input.webdav_username;
+    settings.webdav.user_agent = input.webdav_user_agent;
     // 空串 = 沿用旧值；非空 = 换新（加密后落库）
     if !input.webdav_password.is_empty() {
         settings.webdav.password = crypto::seal(
@@ -399,6 +414,7 @@ pub(crate) fn apply_save(input: SaveInput) -> Result<CloudSyncSettings, String> 
         )?;
     }
     settings.s3.endpoint = input.s3_endpoint;
+    settings.s3.user_agent = input.s3_user_agent;
     if !input.sync_password.is_empty() {
         if input.sync_password.chars().count() < MIN_PASSWORD_LEN {
             return Err(format!("同步密码至少需要 {MIN_PASSWORD_LEN} 位"));

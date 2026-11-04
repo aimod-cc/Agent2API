@@ -8,8 +8,9 @@
  * 手机端早先只发 messages、不带 tools，于是模型拿到的是一个没有身份设定的
  * 通用对话 —— 用户问「各账号余额」，它答成了银行账户余额。
  *
- * 原有九只操作/查询工具和共享的六只诊断工具都走**网关的管理 API**（手机端本来就
- * 在用那些接口），不经过桌面壳的桥。
+ * 原有九只操作/查询工具、共享的六只诊断工具、图片工具，以及附件读取 / 账号
+ * 文件导入工具都走**网关的管理 API**（手机端本来就在用那些接口），不经过桌面
+ * 壳的桥。
  *
  * ── 与桌面端的差异 ────────────────────────────────────────────
  *   · 执行层从 `window.workbuddyDesktop` 换成 `api/gateway` 的 HTTP 调用；
@@ -34,6 +35,10 @@ import { createBalanceTool } from '../../../ui-shared/assistant-read-balance'
 import { t } from '../i18n'
 import { ASSISTANT_READ_TOOLS } from './assistant-read-tools'
 import { ASSISTANT_IMAGE_TOOLS } from './assistant-image-tools'
+import {
+  createAccountImportTool,
+  createAttachmentReadTool,
+} from '../../../ui-shared/assistant-account-import-tools'
 import type { ImageAsset, ImageToolContext } from '../../../ui-shared/assistant-image-tools'
 import { checkToolSignal, providerGroups, runToolBatch } from '../../../ui-shared/assistant-tool-execution'
 import { safeText } from '../../../ui-shared/assistant-read-data'
@@ -48,6 +53,7 @@ export type AssistantTool = {
   desc: string
   params: Record<string, unknown>
   plan?: (args: Record<string, unknown>) => { lead: string; table?: { head: string[]; rows: string[][] }; note?: string }
+  redactArgs?: (args: Record<string, unknown>) => Record<string, unknown>
   run: (args: Record<string, unknown>, context?: ImageToolContext) => Promise<ToolResult>
 }
 
@@ -522,9 +528,16 @@ const setAccountEnabledTool: AssistantTool = {
   },
 }
 
+/** 附件读取与账号文件导入：与桌面端共用同一份定义，注入手机端的 HTTP 调用。 */
+const readAttachment = createAttachmentReadTool(t)
+const importAccount = createAccountImportTool({
+  post: (path, body, signal) => apiCall(path, { method: 'POST', body, signal }),
+}, t)
+
 /** 全部工具（顺序 = 设置页清单顺序：只读在前，改动在后，高危最后） */
 export const ASSISTANT_TOOLS: AssistantTool[] = [
   ...ASSISTANT_READ_TOOLS,
+  readAttachment,
   listModels,
   listAccountBalance,
   setModelEnabledTool,
@@ -535,6 +548,7 @@ export const ASSISTANT_TOOLS: AssistantTool[] = [
   setProviderOrder,
   setAccountOrder,
   setAccountEnabledTool,
+  importAccount,
 ]
 
 export function toolById(id: string): AssistantTool | undefined {

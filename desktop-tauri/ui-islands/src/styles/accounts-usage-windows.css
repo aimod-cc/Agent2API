@@ -125,6 +125,19 @@
 .usage-window-grid.ungrouped .usage-window-label { display: block; margin-bottom: 3px; }
 .usage-window-grid.ungrouped .usage-window-value { font-size: 15px; }
 
+/* 紧凑行：无分组且读数是长文本 / 没有比例（Kiro、AStudio）。
+   标签与读数回到同一行、读数不放大 —— 单列时不会被一个大数字占满，
+   多列时也不会像两张并排的统计卡片（参照 Antigravity 的小行读数）。 */
+.usage-window-grid.compact { display: block; }
+.usage-window-grid.compact .usage-window-group + .usage-window-group {
+  border-left: none;
+  border-top: 1px solid var(--hairline);
+}
+.usage-window-grid.compact .usage-window-item + .usage-window-item { margin-top: 6px; }
+.usage-window-grid.compact .usage-window-line { display: flex; }
+.usage-window-grid.compact .usage-window-label { display: inline; margin-bottom: 0; }
+.usage-window-grid.compact .usage-window-value { font-size: 11.5px; }
+
 .usage-window-foot {
   display: flex;
   align-items: center;

@@ -5,7 +5,7 @@ import { t } from '../i18n'
 export function replayMessages(messages: ChatMessage[], model: string | null): UiMessage[] {
   const results = new Map(messages.filter(message => message.role === 'tool').map(message => [message.toolCallId, message]))
   return messages.flatMap((message): UiMessage[] => {
-    if (message.role === 'user') return [{ kind: 'user', id: message.id, text: message.content, images: message.images }]
+    if (message.role === 'user') return [{ kind: 'user', id: message.id, text: message.content, images: message.images, files: message.files }]
     if (message.role === 'tool') return []
     const items: UiMessage[] = message.content || message.toolCalls?.length
       ? [{ kind: 'bot', id: message.id, model: message.model || model || '', text: message.content }] : []

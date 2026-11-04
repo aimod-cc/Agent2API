@@ -258,6 +258,9 @@ fn default_entries() -> Vec<SanitizeRule> {
             roles: Vec::new(),
         });
     }
+    // 身份句与 DSH 提示词指纹：上游按「连续文本」逐字匹配（不是语义审核），
+    // 所以每条都只做**最小改写**，够让指纹失配即可，原文其余部分逐字保留 ——
+    // 客户端自带的项目规范、工具说明不能因为清洗提示词而失真。
     for (id, name, pattern, replacement) in [
         (
             "agent-identity",
@@ -270,6 +273,12 @@ fn default_entries() -> Vec<SanitizeRule> {
             "DeepSeek Harness GUI",
             r"(?i)You are interacting with the user through the DeepSeek[ \t]+Harness[ \t]+Web[ \t]+GUI whose URL the runtime context names\.",
             "You are interacting with the user through the DeepSeek Harness Web GUI whose URL is named in the runtime context.",
+        ),
+        (
+            "dsh-file-reference",
+            "DeepSeek Harness file reference",
+            r"(?i)Tokens prefixed with @ are paths the user explicitly referenced\.",
+            "Tokens prefixed with @ are paths that the user explicitly referenced.",
         ),
         (
             "dsh-brand",

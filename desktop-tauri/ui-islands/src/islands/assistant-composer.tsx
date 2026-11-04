@@ -26,6 +26,7 @@ import {
   BoltIcon,
   CheckIcon,
   ChevronIcon,
+  FileIcon,
   ImageIcon,
   LayersIcon,
   MiniChevronIcon,
@@ -37,6 +38,7 @@ import {
   StopIcon,
 } from './assistant-icons'
 import { Empty } from '@ui'
+import { formatFileSize, type AssistantTextFile } from '../../../ui-shared/assistant-files'
 
 /** 思考等级候选（与后端 `model_rules::REASONING_LEVELS` 逐字一致，弱 → 强）。
  *  **只在这一处写死**，加档位时与后端一起改（见 assistant-page 的旧注释）。 */
@@ -62,8 +64,10 @@ type Props = {
   draft: string
   onDraftChange: (value: string) => void
   images: string[]
+  files: AssistantTextFile[]
   onAddFiles: (files: FileList | File[]) => void
   onRemoveImage: (index: number) => void
+  onRemoveFile: (index: number) => void
   /** 当前模型是否收图（未声明 = 不收）。附件不全时发送前给提示。 */
   modelSupportsImages: boolean
   imageToolsEnabled: boolean
@@ -87,7 +91,7 @@ type Props = {
 
 export function AssistantComposer(props: Props) {
   const {
-    draft, onDraftChange, images, onAddFiles, onRemoveImage,
+    draft, onDraftChange, images, files, onAddFiles, onRemoveImage, onRemoveFile,
     modelSupportsImages, imageToolsEnabled, modelAvailable, modelsReady, modelsLoading, modelWarning, onRefreshModels,
     models, model, onPickModel,
     reasoning, onPickReasoning, mode, onModeChange,
@@ -103,7 +107,7 @@ export function AssistantComposer(props: Props) {
   const [keyword, setKeyword] = React.useState('')
 
   const disabled = busy || awaiting
-  const canSend = !disabled && modelAvailable && (Boolean(draft.trim()) || images.length > 0)
+  const canSend = !disabled && modelAvailable && (Boolean(draft.trim()) || images.length > 0 || files.length > 0)
   const selected = selectedModel(models, model)
   const displayModel = model || t('选择模型…')
   const displayLevel = model && modelsReady && !modelAvailable ? t('不可用') : levelLabel(reasoning)
@@ -136,7 +140,7 @@ export function AssistantComposer(props: Props) {
     for (let i = 0; i < items.length; i += 1) {
       if (items[i].kind !== 'file') continue
       const file = items[i].getAsFile()
-      if (file && file.type.startsWith('image/')) files.push(file)
+      if (file) files.push(file)
     }
     if (files.length) {
       event.preventDefault()
@@ -180,6 +184,20 @@ export function AssistantComposer(props: Props) {
           </div>
         )}
 
+        {files.length > 0 && (
+          <div className='asst-files'>
+            {files.map((file, index) => (
+              <div className='asst-file' key={`${file.name}-${index}`} title={file.name}>
+                <FileIcon size={15} />
+                <span className='asst-file-name'>{file.name}</span>
+                <span className='asst-file-size'>{formatFileSize(file.size)}</span>
+                <Button size='icon-2xs' variant='ghost' type='button' className='asst-file-x rounded-full' title={t('移除')} aria-label={t('移除')}
+                  onClick={() => onRemoveFile(index)}>✕</Button>
+              </div>
+            ))}
+          </div>
+        )}
+
         <Textarea
           className='min-h-[26px] max-h-[168px] resize-none rounded-none border-0 bg-transparent px-1 py-[3px] font-sans text-[13px] leading-[1.7] shadow-none focus:border-0 focus:shadow-none'
           ref={taRef}
@@ -188,7 +206,7 @@ export function AssistantComposer(props: Props) {
           disabled={disabled}
           placeholder={disabled
             ? t('等这一轮跑完…')
-            : t('发消息或做任务…（Enter 发送，Shift+Enter 换行，可粘贴图片）')}
+            : t('发消息或做任务…（Enter 发送，Shift+Enter 换行，可粘贴图片或 JSON 文件）')}
           onChange={event => onDraftChange(event.currentTarget.value)}
           onPaste={onPaste}
           onKeyDown={event => {
@@ -206,12 +224,19 @@ export function AssistantComposer(props: Props) {
           </div>
         )}
 
+        {files.length > 0 && (
+          <div className='asst-composer-warn'>
+            <FileIcon size={13} />
+            {t('JSON 文件会以文本发送给当前对话模型，其中的凭证也会保存在这条会话里。')}
+          </div>
+        )}
+
         <div className='asst-bar'>
-          {/* 左：添加图片 + 权限模式 */}
+          {/* 左：添加图片 / JSON 文件 + 权限模式 */}
           <Input
             ref={fileRef}
             type='file'
-            accept='image/*'
+            accept='image/*,.json,.info,application/json'
             multiple
             hidden
             onChange={event => {
@@ -219,8 +244,8 @@ export function AssistantComposer(props: Props) {
               event.currentTarget.value = ''
             }}
           />
-          <Button size='icon-sm' variant='outline' type='button' className='asst-round rounded-full' title={t('添加图片（也可粘贴或拖入）')}
-            aria-label={t('添加图片')} onClick={() => fileRef.current?.click()}>
+          <Button size='icon-sm' variant='outline' type='button' className='asst-round rounded-full' title={t('添加图片或 JSON 文件（也可粘贴或拖入）')}
+            aria-label={t('添加图片或文件')} onClick={() => fileRef.current?.click()}>
             <PlusIcon size={17} />
           </Button>
 

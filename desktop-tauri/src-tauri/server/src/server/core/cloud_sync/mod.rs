@@ -127,6 +127,7 @@ pub(crate) async fn test_connection(input: settings::SaveInput) -> Result<Value,
     probe.provider = input.provider;
     probe.webdav.base_url = input.webdav_base_url;
     probe.webdav.username = input.webdav_username;
+    probe.webdav.user_agent = input.webdav_user_agent;
     if !input.webdav_password.is_empty() {
         probe.webdav.password = crypto::seal(
             input.webdav_password.as_bytes(),
@@ -143,6 +144,7 @@ pub(crate) async fn test_connection(input: settings::SaveInput) -> Result<Value,
         )?;
     }
     probe.s3.endpoint = input.s3_endpoint;
+    probe.s3.user_agent = input.s3_user_agent;
     probe.remote_root = input.remote_root;
     probe.profile = input.profile;
     probe.normalize();

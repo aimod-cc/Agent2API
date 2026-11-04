@@ -41,6 +41,13 @@
 
   async function check() {
     if (running || stopped) return;
+    // 令牌池只服务账号页的「套餐」列：人不在账号页时既不需要读状态，也不需要
+    // 每 15 秒打一发管理接口。留在定时器上保持节拍，切回账号页时由 wb:page
+    // 事件立即催一次。
+    if ((window.wbApp?.currentPage || '') !== 'accounts') {
+      schedule(IDLE_POLL_MS);
+      return;
+    }
     running = true;
     try {
       const value = await readStats();
@@ -107,6 +114,10 @@
   }
 
   window.wbZcodeCaptchaPool = { start, stop, verify, refresh: readStats, status: () => ({ ...status }), stats: () => stats };
+  // 切到账号页时立刻补一次：页面首次打开或从别的页切回来都走这一条。
+  window.addEventListener('wb:page', event => {
+    if (event.detail === 'accounts' && !stopped) schedule(0);
+  });
   window.addEventListener('pagehide', stop);
   window.addEventListener('pageshow', start);
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });

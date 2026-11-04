@@ -59,14 +59,13 @@
         }
       }
       document.documentElement.lang = locale;
-      // 简体没有词典目录（查不到即显示简体原文），不必注入；其余语言注入 manifest + 各域文件。
-      // locale 已过白名单校验，拼进 src 安全；某域文件缺失时该 <script> 404，静默无害。
+      // 简体没有词典目录（查不到即显示简体原文），不必注入；其余语言注入
+      // **合并词典**（构建产物 i18n/combined/<locale>.js）：原来 22 个域文件
+      // 要写 22 个 <script>，现在只剩 1 个。标记告诉 i18n.js「词典已注入」，
+      // 不要再按 manifest 循环一遍。
       if (locale === 'zh-Hans') return;
-      document.write('<script src="i18n/manifest.js"><\/script>');
-      var domains = window.__WB_I18N_DOMAINS || [];
-      for (var d = 0; d < domains.length; d++) {
-        document.write('<script src="i18n/' + locale + '/' + domains[d] + '.js"><\/script>');
-      }
+      window.__WB_I18N_INJECTED = true;
+      document.write('<script src="i18n/combined/' + locale + '.js"><\/script>');
     })();
   </script>
   <link rel="stylesheet" href="css/tokens.css">
@@ -83,6 +82,8 @@
   <link rel="stylesheet" href="css/page-routing-config.css">
   <link rel="stylesheet" href="css/page-gateway.css">
   <link rel="stylesheet" href="css/page-agent.css">
+  <!-- 工具服务页：只补 API 文档正文（wbMarkdown 产出的 HTML）排版 -->
+  <link rel="stylesheet" href="css/page-tools.css">
   <link rel="stylesheet" href="css/page-logs.css">
   <link rel="stylesheet" href="css/page-tasks.css">
   <link rel="stylesheet" href="css/page-requests.css">
@@ -122,7 +123,7 @@
   <script src="app.js"></script>
   <script src="clipboard.js"></script>
   <script src="web-login.js"></script>
-  <script src="sms-login.js"></script>
+  <script src="sms-login.js?v=tabbit-sms"></script>
   <script src="aliyun-captcha.js"></script>
   <script src="autoclaw-oauth.js"></script>
   <script src="zcode-claim.js"></script>
