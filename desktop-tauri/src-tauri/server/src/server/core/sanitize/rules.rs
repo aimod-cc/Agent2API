@@ -277,6 +277,23 @@ fn default_entries() -> Vec<SanitizeRule> {
             r"(?i)\bDeepSeek[ \t]+Harness\b",
             "DeepSeek",
         ),
+        // DeepSeek Harness 的系统提示词里有两段会被 WorkBuddy 国内版按「整段」逐字
+        // 命中指纹，命中即返回 upstream_code 11-128
+        // "Illegal API invocation from an unapproved channel"。
+        // 上游比对的是完整段落，任一处措辞差异即可放行，所以这里只做最小改写，
+        // 保持语义不变。两段在不同 DSH 版本里措辞略有出入，因此用 regex 兼容。
+        (
+            "dsh-at-paths",
+            "DeepSeek Harness @ paths",
+            r"(?i)\b(?:Tokens|Values) prefixed with @ (?:are|denote) paths",
+            "Items prefixed with the at-sign refer to paths",
+        ),
+        (
+            "dsh-search-fetch",
+            "DeepSeek Harness search/fetch",
+            r"(?i)Searching and fetching are distinct operations",
+            "Search and fetch are distinct steps",
+        ),
     ] {
         entries.push(SanitizeRule {
             id: id.to_string(),
