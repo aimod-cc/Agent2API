@@ -653,6 +653,12 @@ pub fn record_entry(context: &RecordContext, fallback_error: Option<String>) {
     entry.completion_tokens = snapshot.completion_tokens;
     entry.total_tokens = snapshot.total_tokens;
     entry.cache_read_tokens = snapshot.cache_read_tokens;
+    // 积分消耗：遥测已经从上游 `usage` 里解析出来了（WorkBuddy 的 `credit`、
+    // Loomy 的 `points_consumed`，见 `core::upstream::usage::CREDIT_KEYS`），
+    // 但这里不拷就等于「解析到了没落库」—— 界面会一直显示「上游没有返回积分
+    // 消耗」，而报文里明明有（实测 WorkBuddy `usage.credit=0.58` 同时刻 token
+    // 记对了、credit 是 NULL）。别删这一行。
+    entry.credit = snapshot.credit;
     // Token 限制器的增量记账（先取快照再 record：entry 的字段已被 move）。
     // 请求收尾立刻把本次消耗加进当前窗口，选路的 Token 跳过判定不必等下一轮
     // 10 秒刷新。account_id 为空 = 没走到任何账号（转发前就失败的路径），
