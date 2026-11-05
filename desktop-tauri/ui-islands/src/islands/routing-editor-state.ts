@@ -2,6 +2,8 @@ import * as React from 'react'
 import { t } from '../i18n'
 import { bridge, errorMessage, host, notify, type RouteProfile, type RoutingWorkspace } from './routing-types'
 import { adoptAccountSorting } from './accounts-sort'
+import type { AccountRecord, AccountSorting } from './accounts-shared'
+import { canSyncSortingRevision, syncRoutingSorting } from './routing-sorting-state'
 
 export type RoutingDraft = { mode: 'inherit' | 'custom'; profile: RouteProfile; baseline: RouteProfile | null; revision: string; workspace: RoutingWorkspace }
 const clone = (value: RouteProfile) => structuredClone(value)
@@ -50,6 +52,36 @@ export function useRoutingEditor(onSaved: () => void) {
     if (refs.current.busy || refs.current.loading) return
     setDrafts(current => current[scope] ? { ...current, [scope]: mutate(current[scope]) } : current)
   }
+  const syncAccounts = React.useCallback((accounts: AccountRecord[], updatedAt?: number) => {
+    setDrafts(current => Object.fromEntries(Object.entries(current).map(([model, draft]) => [model,
+      updatedAt != null && updatedAt < draft.workspace.updatedAt ? draft : { ...draft, workspace: { ...draft.workspace, accounts } },
+    ])))
+  }, [])
+  const syncSorting = React.useCallback((sorting: AccountSorting) => {
+    if (!sorting?.rules || !sorting.accountOrder) return
+    setDrafts(current => Object.fromEntries(Object.entries(current).map(([model, draft]) => [model,
+      model ? syncRoutingSorting(draft, sorting) : draft,
+    ])))
+  }, [])
+  const syncWorkspace = React.useCallback((workspace: RoutingWorkspace, convertedGlobalAccounts = false) => {
+    setDrafts(current => {
+      const model = workspace.model?.toLowerCase() || '', draft = current[model]
+      if (!draft) return current
+      const dirty = draftDirty(draft), profile = editableProfile(workspace)
+      if (!model && convertedGlobalAccounts) return { ...current, [model]: { ...draft, workspace,
+        profile: dirty ? { ...draft.profile, providerScope: 'all', disabledProviders: [], excludedAccounts: [] } : profile,
+        baseline: clone(profile), revision: workspace.revision || draft.revision } }
+      if ((workspace.updatedAt || 0) < (draft.workspace.updatedAt || 0)) return current
+      const synced = syncRoutingSorting(draft, workspace.sorting)
+      const refreshOrder = workspace.sorting.updatedAt >= draft.workspace.sorting.updatedAt
+        && canSyncSortingRevision(draft.workspace, workspace)
+      return { ...current, [model]: { ...synced, revision: refreshOrder ? workspace.revision || draft.revision : draft.revision,
+        workspace: { ...synced.workspace, accounts: workspace.accounts,
+          ...(refreshOrder ? { profile: workspace.profile, inheritedProfile: workspace.inheritedProfile, revision: workspace.revision } : {}),
+          accountStates: workspace.accountStates, metrics: workspace.metrics, queue: workspace.queue, updatedAt: workspace.updatedAt,
+          globalAccountControl: workspace.globalAccountControl, legacyGlobalParticipation: workspace.legacyGlobalParticipation } } }
+    })
+  }, [])
   const save = async () => {
     const draft = refs.current.drafts[scope]
     if (!draft || refs.current.busy || refs.current.loading || !draftDirty(draft)) return
@@ -143,7 +175,7 @@ export function useRoutingEditor(onSaved: () => void) {
     window.addEventListener('beforeunload', listener)
     return () => { sequence.current++; window.removeEventListener('beforeunload', listener) }
   }, [])
-  return { scope, load, create, remove, draft: drafts[scope], drafts, update, save, discard, loading, busy, error,
+  return { scope, load, create, remove, draft: drafts[scope], drafts, update, syncAccounts, syncSorting, syncWorkspace, save, discard, loading, busy, error,
     dirtyCount: Object.values(drafts).filter(draftDirty).length }
 }
 export type RoutingEditorState = ReturnType<typeof useRoutingEditor>

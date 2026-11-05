@@ -86,7 +86,10 @@ export async function saveGroupSortRules(provider: string, rules: GroupSortRule[
   }
   patch({ sortBusy: true })
   try {
-    adoptAccountSorting(await api.saveAccountSorting({ provider, rules }))
+    const sorting = await api.saveAccountSorting({ provider, rules })
+    if (!sorting?.rules || !sorting.accountOrder || !Array.isArray(sorting.providerOrder)) throw new Error(t('保存响应不完整，请刷新当前配置确认结果'))
+    adoptAccountSorting(sorting)
+    window.dispatchEvent(new CustomEvent('wb:account-sorting', { detail: sorting }))
     try { await shared().wbApp?.refresh?.() }
     catch (error) { toast(t('排序已保存，但列表刷新失败：{message}', { message: errorMessage(error) }), 'err') }
   } catch (error) {

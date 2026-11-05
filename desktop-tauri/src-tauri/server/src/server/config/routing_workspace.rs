@@ -1,3 +1,5 @@
+pub(crate) mod global_accounts;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -31,6 +33,10 @@ pub fn save_workspace(
         return Err("路由配置已在其他位置修改，请刷新当前配置后重试；草稿未丢失".to_string());
     }
     let mut profiles: RoutingProfiles = (*next.routing_profiles).clone();
+    if model.is_empty() && (profiles.global.as_ref().is_some_and(global_accounts::has_restrictions)
+        || profile.as_ref().is_some_and(global_accounts::has_restrictions)) {
+        return Err("全局默认已改为账号启停，请先转换旧版全局参与设置；模型独立路由仍可设置参与名单".into());
+    }
     if !model.is_empty() && profile.is_some() && !profiles.models.contains_key(model) && profiles.models.len() >= super::routing_profiles::MAX_ROUTING_MODELS {
         return Err("模型独立配置数量已达上限".to_string());
     }

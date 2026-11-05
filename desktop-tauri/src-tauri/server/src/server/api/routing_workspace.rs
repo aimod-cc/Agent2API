@@ -33,8 +33,10 @@ pub async fn get_workspace(State(state): State<ServerState>, Query(params): Quer
 fn workspace_json(state: &ServerState, model: Option<String>) -> Value {
     let store = state.store();
     let guard = store.guard();
-    let account_snapshot = store.snapshot(&store.load(&guard), crate::server::core::account_store::store_view::Visibility::UserFacing);
+    let account_state = store.load(&guard);
+    let account_snapshot = store.snapshot(&account_state, crate::server::core::account_store::store_view::Visibility::UserFacing);
     let (profiles, base_settings) = config::routing_snapshot();
+    let legacy_global_participation = config::routing_workspace::global_accounts::legacy_snapshot(profiles.global.as_ref(), &account_state.accounts);
     drop(guard);
     let accounts = routing::accounts_of(&account_snapshot);
     let all_providers = available_providers(&accounts);
@@ -79,6 +81,8 @@ fn workspace_json(state: &ServerState, model: Option<String>) -> Value {
         "model": model,
         "customized": profiles.model_profile(model_name).is_some(),
         "globalCustomized": profiles.global.is_some(),
+        "globalAccountControl": true,
+        "legacyGlobalParticipation": legacy_global_participation,
         "configuredModels": profiles.models.keys().collect::<Vec<_>>(),
         "models": models,
         "profile": effective,
@@ -104,6 +108,16 @@ pub async fn put_profile(State(state): State<ServerState>, body: Bytes) -> Respo
         Err(error) => return errors::management_error(400, error.message),
     };
     let Some(object) = payload.as_object() else { return errors::management_error(400, "请求体必须是 JSON 对象") };
+    if let Some(value) = object.get("migrateGlobalAccounts") {
+        if object.len() != 1 { return errors::management_error(400, "转换全局账号状态不能与其他配置修改一起提交"); }
+        let Some(expected) = value.as_str().filter(|value| value.len() == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit())) else {
+            return errors::management_error(400, "转换确认已失效，请重新读取当前配置");
+        };
+        if let Err(error) = config::routing_workspace::global_accounts::migrate(&state.store(), expected) {
+            return errors::management_error(409, error);
+        }
+        return ok_json(workspace_json(&state, None));
+    }
     let model = match object.get("model") {
         None | Some(Value::Null) => String::new(),
         Some(Value::String(model)) => model.clone(),

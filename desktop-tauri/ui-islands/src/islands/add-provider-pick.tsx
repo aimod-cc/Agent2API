@@ -20,7 +20,7 @@
 import * as React from 'react'
 import { Alert, InputGroup, InputGroupAddon, InputGroupInput, SegmentedControl, Button, Item } from '@ui'
 
-import { isSuspendedProvider } from '../../../ui-shared/provider-availability'
+import { isAddAccountProviderHidden } from '../../../ui-shared/provider-availability'
 import { accountCountOf, shared } from './add-account-bridge'
 import { presetOfProvider, providerPresetIcon, providerSiteLabel } from './add-provider-metadata'
 import { WORKBUDDY_ENTRY_LABEL, WORKBUDDY_PROVIDER } from './add-account-configs'
@@ -239,7 +239,7 @@ function providerCards(accountType: AccountType): CardItem[] {
   // providerSummaries、models-page 的左栏），不经过这里，所以存量 cline-pass
   // 账号仍照常成组显示。
   const list = (providers?.all?.() || [])
-    .filter(item => !isSuspendedProvider(String(item?.id || '')))
+    .filter(item => !isAddAccountProviderHidden(String(item?.id || '')))
     .filter(item => (item.category === 'web') === (accountType === TYPE_WEB))
     .filter(item => accountType === TYPE_WEB || !HIDDEN_AGENT_PROVIDERS.has(String(item?.id || '')))
   // WorkBuddy 这张卡与它的弹窗标题用**中性品牌名**（不带地区）而不是注册名：

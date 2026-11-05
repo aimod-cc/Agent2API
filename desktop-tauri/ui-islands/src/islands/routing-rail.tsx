@@ -35,7 +35,7 @@ export function RoutingRail({ editor, groups, workspace, onModel, onGroup, onAdd
       {showGlobal ? <><SidebarGroupLabel>{t('默认规则')}</SidebarGroupLabel>
         <NavItem className='routing-config-scope-item' active={!groups.selected && !editor.scope} disabled={disabled}
           trailing={dirtyDot(Boolean(editor.drafts[''] && draftDirty(editor.drafts[''])))} onClick={() => onModel('')}>
-          <b>{t('全局默认')}</b><small>{t('供继承全局的模型使用')}</small>
+          <b>{t('全局默认')}</b><small>{t('账号启停与默认规则')}</small>
         </NavItem></> : null}
       {shownModels.length ? <SidebarGroupLabel>{t('模型路由')}</SidebarGroupLabel> : null}
       {shownModels.map(model => <NavItem key={model} className='routing-config-scope-item' active={!groups.selected && model.toLowerCase() === editor.scope.toLowerCase()}

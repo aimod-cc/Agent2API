@@ -4,19 +4,20 @@ import { t } from '../i18n'
 import { RouteIcon } from './routing-ui'
 import { bridge, errorMessage, type RoutingWorkspace } from './routing-types'
 
-type ModelFilterResult = { source: RoutingWorkspace; model: string; providers: string[]; error: string }
+type ModelFilterResult = { source: string[]; model: string; providers: string[]; error: string }
 
 // 筛选结果独立于路由草稿，不能用模型工作区替换正在编辑的配置。
 export function useRoutingModelFilter(workspace: RoutingWorkspace | undefined, scope: string) {
   const [selected, setSelected] = React.useState('')
   const [result, setResult] = React.useState<ModelFilterResult | null>(null)
   const [attempt, retry] = React.useReducer(value => value + 1, 0)
-  const model = scope || workspace?.models.find(model => model.toLowerCase() === selected.toLowerCase()) || ''
+  const models = workspace?.models
+  const model = scope || models?.find(model => model.toLowerCase() === selected.toLowerCase()) || ''
   const local = !model || workspace?.model?.toLowerCase() === model.toLowerCase()
-  const current = result?.source === workspace && result?.model === model ? result : null
+  const current = result?.source === models && result?.model === model ? result : null
 
   React.useEffect(() => {
-    if (!workspace || local) return
+    if (!models || local) return
     let alive = true
     setResult(null)
     const load = async () => {
@@ -25,14 +26,14 @@ export function useRoutingModelFilter(workspace: RoutingWorkspace | undefined, s
         if (next?.model?.toLowerCase() !== model.toLowerCase() || !Array.isArray(next.providers)) {
           throw new Error(t('路由接口返回了不完整的数据'))
         }
-        if (alive) setResult({ source: workspace, model, providers: next.providers.filter(provider => provider.available).map(provider => provider.id), error: '' })
+        if (alive) setResult({ source: models, model, providers: next.providers.filter(provider => provider.available).map(provider => provider.id), error: '' })
       } catch (failure) {
-        if (alive) setResult({ source: workspace, model, providers: [], error: errorMessage(failure) })
+        if (alive) setResult({ source: models, model, providers: [], error: errorMessage(failure) })
       }
     }
     void load()
     return () => { alive = false }
-  }, [workspace, model, local, attempt])
+  }, [models, model, local, attempt])
 
   const providers = !model ? null : new Set(local
     ? workspace?.providers.filter(provider => provider.available).map(provider => provider.id)

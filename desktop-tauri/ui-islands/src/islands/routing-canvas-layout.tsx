@@ -5,7 +5,7 @@ import { RouteIcon } from './routing-ui'
 
 type Edge = { id: string; d: string; x: number; y: number }
 
-/** 连线只表达草稿中的参与关系，不把当前请求流量混入配置。 */
+/** 连线表达账号启用或路由参与关系，不把当前请求流量混入配置。 */
 function RoutingCanvasEdges({ root }: { root: React.RefObject<HTMLDivElement | null> }) {
   const [drawing, setDrawing] = React.useState<{ width: number; height: number; x: number; y: number; edges: Edge[] } | null>(null)
   React.useEffect(() => {
@@ -57,8 +57,8 @@ function RoutingCanvasEdges({ root }: { root: React.RefObject<HTMLDivElement | n
   </svg>
 }
 
-export function RoutingCanvasLayout({ title, children, groups, note }: {
-  title: string; children: React.ReactNode; groups: React.ReactNode; note: string
+export function RoutingCanvasLayout({ title, children, groups, note, globalAccounts = false }: {
+  title: string; children: React.ReactNode; groups: React.ReactNode; note: string; globalAccounts?: boolean
 }) {
   const root = React.useRef<HTMLDivElement>(null)
   return <div className='routing-canvas' ref={root}>
@@ -69,7 +69,8 @@ export function RoutingCanvasLayout({ title, children, groups, note }: {
       <p className='routing-canvas-note'><RouteIcon name='info' size={13} /><span>{note}</span></p>
     </section>
     {groups}
-    <div className='routing-canvas-legend'><span><i />{t('连线表示参与本路由')}</span><span>{t('保存后才会影响真实请求')}</span></div>
+    <div className='routing-canvas-legend'><span><i />{globalAccounts ? t('连线表示账号组中有已启用账号') : t('连线表示参与本路由')}</span>
+      <span>{globalAccounts ? t('账号启停立即生效；路由配置保存后生效') : t('保存后才会影响真实请求')}</span></div>
   </div>
 }
 

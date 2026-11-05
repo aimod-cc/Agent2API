@@ -1,5 +1,5 @@
 import { t } from '../i18n'
-import type { AccountRecord, AccountSorting } from './accounts-shared'
+import type { AccountRecord, AccountSorting, BatchAccountsPayload, BatchAccountsResult } from './accounts-shared'
 
 export type RouteOrderChange = { kind: 'provider' } | { kind: 'account'; provider: string }
 
@@ -65,6 +65,8 @@ export type RoutingWorkspace = {
   model: string | null
   customized: boolean
   globalCustomized: boolean
+  globalAccountControl?: boolean
+  legacyGlobalParticipation?: { revision: string; accounts: Array<{ id: string; name: string; provider: string; providerLabel: string }> } | null
   configuredModels: string[]
   models: string[]
   profile: RouteProfile
@@ -167,7 +169,8 @@ export type RoutingBridge = {
   previewRouting(payload: RoutePreviewInput): Promise<RoutePreview>
   getRoutingWorkspace(model?: string): Promise<RoutingWorkspace>
   getRoutingFlow(query: import('./routing-flow-types').FlowQuery): Promise<import('./routing-flow-types').FlowSnapshot & import('./routing-flow-types').FlowDetails>
-  saveRoutingProfile(payload: { model: string | null; profile: RouteProfile | null; orderChange?: RouteOrderChange; revision?: string }): Promise<RoutingWorkspace>
+  saveRoutingProfile(payload: { model: string | null; profile: RouteProfile | null; orderChange?: RouteOrderChange; revision?: string } | { migrateGlobalAccounts: string }): Promise<RoutingWorkspace>
+  batchAccounts(payload: BatchAccountsPayload): Promise<BatchAccountsResult | null | undefined>
   setRoutingConfig(patch: Partial<RouteSettings>): Promise<RouteSettings>
   getRoutingReplays(query: { model?: string; offset: number; limit: number; status?: string }): Promise<{ entries: ReplayRow[]; matched: number; available?: boolean }>
   getRoutingTrace(query: { model?: string; offset: number; limit: number; status?: string; search?: string; startDate?: string; endDate?: string }): Promise<{ entries: ReplayRow[]; matched: number; available?: boolean }>

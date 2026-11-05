@@ -90,6 +90,11 @@
 .routing-config-shell .routing-grip:active { cursor: grabbing; }
 .routing-config-shell .routing-grip:disabled { cursor: default; opacity: .25; }
 .routing-more { flex: none; color: var(--text-3); }
+.routing-settings-button { flex: none; color: var(--text-2); }
+.routing-consumption-order { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 0 12px 8px; color: var(--text-3); font-size: 11px; }
+.routing-consumption-order > button { height: auto; min-height: 24px; min-width: 0; justify-content: flex-start; padding: 3px 6px; color: var(--text-2); font-size: 11px; white-space: normal; text-align: left; }
+.routing-credit-sort { min-width: 0; max-width: 100%; }
+.routing-credit-sort [data-slot='select-trigger'] { width: 100%; height: 26px; font-size: 11px; }
 .routing-config-accounts { border-top: 1px solid var(--hairline); padding: 4px 6px 6px; }
 .routing-config-account { position: relative; display: flex; align-items: center; gap: 7px; min-height: 48px; padding: 7px 2px; border-radius: var(--r-sm); }
 .routing-config-account + .routing-config-account { border-top: 1px solid var(--hairline); }
@@ -100,6 +105,8 @@
 .routing-config-account-name { flex: 1; min-width: 0; }
 .routing-config-account-name b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 550; }
 .routing-config-account-name small { display: block; margin-top: 3px; color: var(--text-3); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.routing-config-account-name .routing-credit-expiry { color: var(--text-2); }
+.routing-config-account-name .routing-credit-expiry[data-soon] { color: var(--warn); }
 .routing-config-account [data-slot='badge'] { font-size: 10.5px; padding-inline: 5px; }
 .routing-config-account .routing-more { opacity: .45; }
 .routing-config-account:hover .routing-more, .routing-config-account:focus-within .routing-more { opacity: 1; }

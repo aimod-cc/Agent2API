@@ -1,9 +1,10 @@
 import * as React from 'react'
-import { Button, Checkbox, Popover, PopoverContent, PopoverTrigger, cn } from '@ui'
+import { Button, Checkbox, Popover, PopoverContent, PopoverTrigger, Switch, cn } from '@ui'
 import { t } from '../i18n'
 import { PROVIDER_ICONS } from './add-provider-pick'
-import { displayNameOf } from './accounts-domain'
-import type { AccountRecord } from './accounts-shared'
+import { displayNameOf, providerOf } from './accounts-domain'
+import type { AccountRecord, AccountSorting } from './accounts-shared'
+import { RoutingCreditExpiry } from './routing-account-order'
 import { RouteIcon, RouteStateBadge } from './routing-ui'
 
 export type RoutingAction = { label: string; icon?: string; disabled?: boolean; destructive?: boolean; onClick(): void }
@@ -36,10 +37,11 @@ export function routingOrderKey(event: React.KeyboardEvent, move: (direction: nu
 }
 
 export function RoutingAccountRow({ id, account, rank, joined, state, stateText, note, locked, orderLocked, orderHint, first, last,
-  picked, dragging, drop, onDrag, onMove, onToggle, onAccount }: {
+  picked, dragging, drop, globalAccounts = false, sorting, now, settingsDisabled = false, onDrag, onMove, onToggle, onAccount }: {
   id: string; account?: AccountRecord; rank: number; joined: boolean; state: string; stateText?: string; note: string
   locked: boolean; orderLocked: boolean; orderHint?: string; first: boolean; last: boolean
-  picked?: boolean; dragging?: boolean; drop?: 'before' | 'after'
+  picked?: boolean; dragging?: boolean; drop?: 'before' | 'after'; globalAccounts?: boolean
+  sorting?: AccountSorting | null; now?: number; settingsDisabled?: boolean
   onDrag(event: React.PointerEvent): void; onMove(direction: number): void; onToggle(): void; onAccount?: () => void
 }) {
   const name = account ? displayNameOf(account) : t('账号已移除')
@@ -50,14 +52,19 @@ export function RoutingAccountRow({ id, account, rank, joined, state, stateText,
       onPointerDown={onDrag} onKeyDown={event => routingOrderKey(event, onMove)}><RouteIcon name='gripVertical' size={14} /></Button>
     <span className='routing-account-rank'>{joined ? rank : '—'}</span>
     <span className='routing-account-avatar' aria-hidden='true'>{name.slice(0, 1).toUpperCase()}</span>
-    <span className='routing-config-account-name'><b title={name}>{name}</b>{note ? <small title={note}>{note}</small> : null}</span>
+    <span className='routing-config-account-name'><b title={name}>{name}</b>{note ? <small title={note}>{note}</small> : null}
+      {account && now != null ? <RoutingCreditExpiry id={id} provider={providerOf(account)} sorting={sorting} now={now} /> : null}
+    </span>
     <RouteStateBadge state={state}>{stateText}</RouteStateBadge>
-    <Checkbox checked={joined} disabled={locked || (!account && !joined)} onCheckedChange={onToggle}
-      aria-label={t('{account} 参与本路由', { account: name })} title={joined ? t('移出本路由') : t('加入路由')} />
+    {globalAccounts ? <Switch checked={joined} disabled={locked || !account} onCheckedChange={onToggle}
+      aria-label={t('启用账号 {account}', { account: name })} title={joined ? t('禁用账号') : t('启用账号')} />
+      : <Checkbox checked={joined} disabled={locked || (!account && !joined)} onCheckedChange={onToggle}
+        aria-label={t('{account} 参与本路由', { account: name })} title={joined ? t('移出本路由') : t('加入路由')} />}
+    {onAccount ? <Button variant='ghost' size='icon-sm' className='routing-settings-button' disabled={settingsDisabled}
+      title={t('账号设置')} aria-label={t('{account} · 账号设置', { account: name })} onClick={onAccount}><RouteIcon name='settings' size={14} /></Button> : null}
     <RoutingActions label={t('账号操作')} actions={[
       { label: t('提高优先级'), icon: 'arrowUp', disabled: orderLocked || !joined || first, onClick: () => onMove(-1) },
       { label: t('降低优先级'), icon: 'arrowDown', disabled: orderLocked || !joined || last, onClick: () => onMove(1) },
-      ...(onAccount ? [{ label: t('账号设置'), icon: 'settings', onClick: onAccount }] : []),
     ]} />
   </div>
 }

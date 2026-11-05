@@ -17,13 +17,13 @@ import {
   loginText, methodLabel, parseCallbackInput, parseMethods, promptEnabled, promptValue, readInputs,
   type CallbackInput, type MethodsState,
 } from '../../../ui-islands/src/islands/add-account-dynamic-fields'
-import { isSuspendedProvider } from '../../../ui-shared/provider-availability'
+import { isAddAccountProviderHidden } from '../../../ui-shared/provider-availability'
 import { t } from '../i18n'
 
 export function DynamicProviderSheet({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
   const { session, sessionError } = useStore()
   const providers = sessionError ? [] : (session?.accounts?.providers || [])
-    .filter(item => Boolean(item.id) && !isSuspendedProvider(item.id || ''))
+    .filter(item => Boolean(item.id) && !isAddAccountProviderHidden(item.id || ''))
   const [selected, setSelected] = useState('')
   const [search, setSearch] = useState('')
   const keyword = search.trim().toLowerCase()

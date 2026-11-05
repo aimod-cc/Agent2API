@@ -25,7 +25,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue, cn,
 } from '@ui'
 import { t } from '../i18n'
-import { shared } from './accounts-shared'
+import { shared, type AccountRecord, type AccountSorting } from './accounts-shared'
 import {
   creditExpiryOf, providerOf, supportsCreditExpiry, type GroupSortRule,
 } from './accounts-domain'
@@ -204,7 +204,9 @@ function GroupSettingSection({ title, hint, children }: {
  * 弹窗主体。`provider` 由 AccountsDialogs 从 store 的 dialog 状态传入；
  * 关闭时走 `closeDialog()`（列表页与弹窗共用同一个状态位）。
  */
-export function GroupSettingsDialog({ provider, onClose }: { provider: string; onClose: () => void }) {
+export function GroupSettingsDialog({ provider, onClose, accounts, sorting, routeContext }: {
+  provider: string; onClose: () => void; accounts?: AccountRecord[]; sorting?: AccountSorting | null; routeContext?: React.ReactNode
+}) {
   // 订阅 store：规则一改就要重画（本弹窗是 store 的读者，不只是写者）
   React.useSyncExternalStore(subscribe, () => getStore().version)
   const rules = groupSortRules(provider)
@@ -220,12 +222,12 @@ export function GroupSettingsDialog({ provider, onClose }: { provider: string; o
   // 这一项要从「暂无数据」翻成可用，弹窗开着时也得跟着变
   const version = getStore().version
   const creditHasData = React.useMemo(
-    () => allAccounts()
+    () => (accounts || allAccounts())
       .filter(account => providerOf(account) === provider)
-      .some(account => getStore().sorting
-        ? getStore().sorting?.creditExpiresAt[account.id] != null
+      .some(account => sorting || getStore().sorting
+        ? (sorting || getStore().sorting)?.creditExpiresAt[account.id] != null
         : creditExpiryOf(usageEntryOf(account)) !== null),
-    [provider, version],
+    [provider, version, accounts, sorting],
   )
   const creditState: 'ready' | 'no-data' | 'unsupported' =
     !creditSupported ? 'unsupported' : creditHasData ? 'ready' : 'no-data'
@@ -267,6 +269,7 @@ export function GroupSettingsDialog({ provider, onClose }: { provider: string; o
         </DialogHeader>
 
         <DialogBody>
+          {routeContext}
           <GroupSettingSection title={t('消耗顺序')} hint={t('按优先级从上到下比较，勾选的项才参与')}>
             {rules.map((rule, index) => (
               <RuleRow

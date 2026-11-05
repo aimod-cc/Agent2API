@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { Button, Collapsible, CollapsibleContent, CollapsibleTrigger, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Empty, InputGroup, InputGroupAddon, InputGroupInput, Label, confirmDialog } from '@ui'
 import { t } from '../i18n'
-import type { AccountRecord } from './accounts-shared'
+import type { AccountRecord, AccountSorting } from './accounts-shared'
 import { displayNameOf } from './accounts-domain'
 import { RoutingDragOverlay, reorderRoute, useRoutingDrag, type RoutingDrop } from './routing-drag'
 import { RoutingGroupDialog, RoutingMemberAccounts, RoutingMemberDialog } from './routing-group-dialogs'
@@ -14,9 +14,9 @@ import { routingAccountSections, routingCollapsedSections, useRoutingExpansion }
 import { IconButton, RouteIcon } from './routing-ui'
 import { notify, type RouteGroup, type RouteMember } from './routing-types'
 
-export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, onAccount }: {
-  editor: RouteGroupEditor; accounts: AccountRecord[]; reserved: string[]; baseUrl: string
-  onAccount(id: string): void
+export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, sorting, now, onAccount, onSort }: {
+  editor: RouteGroupEditor; accounts: AccountRecord[]; reserved: string[]; baseUrl: string; sorting?: AccountSorting | null; now: number
+  onAccount(id: string): void; onSort(provider: string): void
 }) {
   const [dialog, setDialog] = React.useState<'edit' | 'add' | 'example' | null>(null)
   const [accountMember, setAccountMember] = React.useState<string | null>(null)
@@ -73,7 +73,7 @@ export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, onAccou
     onOpen={open => setOpened(current => ({ ...current, [member.id]: open }))} onJoin={on => editMember(member.id, next => { next.included = on })}
     onMove={direction => move(member.id, direction)} onAccounts={() => setAccountMember(member.id)} onMoveAccount={(id, direction) => moveAccount(member, id, direction)}
     onToggleAccount={id => editMember(member.id, next => { next.accounts = next.accounts.includes(id) ? next.accounts.filter(key => key !== id) : [...next.accounts, id] })}
-    onAccount={onAccount} />
+    onAccount={onAccount} sorting={sorting} now={now} onSort={() => onSort(member.provider)} />
   const selectedAccountMember = group.members.find(member => member.id === accountMember)
   const members = <section className='routing-groups-column'>
     <div className='routing-column-head'><RouteIcon name='plugins' size={14} /><b>{t('成员模型')}</b><span>{t('{n} 项参与', { n: active.length })}</span>

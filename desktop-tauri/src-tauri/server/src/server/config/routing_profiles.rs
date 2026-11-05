@@ -195,6 +195,11 @@ pub fn save_routing_profile(model: &str, profile: Option<RoutingProfile>) -> Res
         let mut next = (*config.routing_profiles).clone();
         if next.group_for_model(&model).is_some() { result = Err("此模型 ID 已被自定义路由组占用".into()); return; }
         if model.is_empty() {
+            if next.global.as_ref().is_some_and(super::routing_workspace::global_accounts::has_restrictions)
+                || profile.as_ref().is_some_and(super::routing_workspace::global_accounts::has_restrictions) {
+                result = Err("全局默认已改为账号启停，请先转换旧版全局参与设置；模型独立路由仍可设置参与名单".into());
+                return;
+            }
             next.global = profile;
         } else if let Some(profile) = profile {
             if next.models.len() >= MAX_ROUTING_MODELS && !next.models.contains_key(&model) {

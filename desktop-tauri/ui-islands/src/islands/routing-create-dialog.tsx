@@ -74,11 +74,9 @@ export function RoutingCreateDialog({ workspace, choices, accounts, reserved, gr
         </RadioGroup>
         <p className='routing-config-note'>{t('共 {n} 个可添加的模型', { n: availableModels.length })}{selected ? ` · ${selectedModel}` : ''}</p>
       </> : <>
-        <p className='routing-config-note'>{t('把不同提供商、不同模型组合成一个入口。客户端使用对外模型 ID 发起请求。')}</p>
         <RoutingGroupForm value={fields} onChange={setFields} disabled={locked} />
         <p className='routing-config-note'>{t('可以跨提供商、跨模型多选。同一提供商也可以加入不同模型。')}</p>
         <RoutingModelPicker choices={memberChoices} selected={selectedMembers} onChange={setSelectedMembers} disabled={locked} />
-        <p className='routing-config-note'>{t('仅列出真实目录中的对话模型，不自动更改模型映射。')}</p>
       </>}
       {error || type === 'model' && modelError ? <p className='routing-config-error' role='alert'>{error || modelError}</p> : null}
     </DialogBody>

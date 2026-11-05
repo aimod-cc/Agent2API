@@ -4,6 +4,9 @@ import { createRoot } from 'react-dom/client'
 import { Badge, Button, Empty, SegmentedControl, Spinner, confirmDialog } from '@ui'
 import { t } from '../i18n'
 import { AccountSettingsDialog } from './accounts-settings-dialog'
+import type { AccountSorting } from './accounts-shared'
+import { getStore, subscribe } from './accounts-store'
+import { adoptAccountSorting } from './accounts-sort'
 import { GroupSettingsDialog } from './accounts-group-settings'
 import { RoutingSettingsDialog } from './routing-settings'
 import { RoutingStickyDialog } from './routing-sticky'
@@ -11,6 +14,7 @@ import { RoutingConfigPanel } from './routing-config-panel'
 import { RoutingGroupPanel } from './routing-group-panel'
 import { RoutingCreateDialog } from './routing-create-dialog'
 import { useRouteGroups } from './routing-group-state'
+import { useRoutingAccounts } from './routing-accounts'
 import { RoutingRail } from './routing-rail'
 import { RoutingExecTimeline } from './routing-exec-timeline'
 import { RoutingRequestList } from './routing-request-list'
@@ -18,7 +22,7 @@ import { useRoutingReplay } from './routing-replay-state'
 import { draftDirty, useRoutingEditor } from './routing-editor-state'
 import { RouteIcon, stickyLabel, strategyLabel } from './routing-ui'
 import { isTraceRunning, requestKey } from './routing-trace-model'
-import { bridge, host, type ReplayRow, type RoutingWorkspace } from './routing-types'
+import { bridge, errorMessage, host, type ReplayRow, type RoutingWorkspace } from './routing-types'
 
 let requestTrace: ((row?: ReplayRow | null) => void) | undefined
 let refreshWorkspace: (() => void) | undefined
@@ -27,9 +31,18 @@ export function RoutingPage() {
   const [mode, setMode] = React.useState<'config' | 'replay'>('config')
   const [selected, setSelected] = React.useState<ReplayRow | null>(null)
   const [refreshToken, setRefreshToken] = React.useState(0)
-  const replay = useRoutingReplay(true)
-  const editor = useRoutingEditor(replay.refresh)
-  const groups = useRouteGroups(replay.refresh, () => { void editor.load('') })
+  const sortingState = React.useSyncExternalStore(subscribe, getStore)
+  const [sortingSyncBusy, setSortingSyncBusy] = React.useState(false)
+  const [sortingError, setSortingError] = React.useState('')
+  const sortSequence = React.useRef(0)
+  const replay = useRoutingReplay(true, mode === 'config' ? '' : undefined)
+  const refreshRouting = React.useCallback(() => { replay.invalidateWorkspace(); replay.refresh() }, [replay.invalidateWorkspace, replay.refresh])
+  const editor = useRoutingEditor(refreshRouting)
+  const groups = useRouteGroups(refreshRouting, () => { void editor.load('') })
+  const accountControl = useRoutingAccounts(editor, replay.suspendWorkspace, replay.resumeWorkspace)
+  const pageEditor = { ...editor, busy: editor.busy || accountControl.busy || sortingState.sortBusy || sortingSyncBusy }
+  const busyRef = React.useRef(pageEditor.busy)
+  busyRef.current = pageEditor.busy
   const dirtyCount = editor.dirtyCount + groups.dirtyCount
   const [modal, setModal] = React.useState<
     | { kind: 'sticky' }
@@ -39,12 +52,49 @@ export function RoutingPage() {
     | null
   >(null)
   const workspace = editor.draft?.workspace || replay.workspace
+  const sortSnapshot = replay.workspace?.sorting && (!workspace?.sorting || replay.workspace.sorting.updatedAt > workspace.sorting.updatedAt)
+    ? replay.workspace.sorting : workspace?.sorting
+  const sorting = sortingState.sorting && (!sortSnapshot || sortingState.sorting.updatedAt > sortSnapshot.updatedAt) ? sortingState.sorting : sortSnapshot
   const profile = editor.draft?.mode === 'inherit' ? workspace?.inheritedProfile : editor.draft?.profile
   const strategy = groups.draft?.group.strategy || profile?.strategy || workspace?.globalSettings?.routingStrategy || workspace?.settings.routingStrategy
   const sticky = groups.draft?.group.sticky || profile?.sticky || workspace?.globalSettings?.routingSticky || workspace?.settings.routingSticky
   const scopeModel = groups.draft?.group.model || editor.scope
 
   React.useEffect(() => { void editor.load('') }, [editor.load])
+  React.useEffect(() => { if (sortSnapshot) adoptAccountSorting(sortSnapshot) }, [sortSnapshot])
+  React.useEffect(() => {
+    if (!replay.workspace || accountControl.busy || editor.busy || sortingState.sortBusy || sortingSyncBusy) return
+    editor.syncAccounts(replay.workspace.accounts, replay.workspace.updatedAt)
+    editor.syncWorkspace(replay.workspace)
+    editor.syncSorting(replay.workspace.sorting)
+  }, [replay.workspace, accountControl.busy, editor.busy, sortingState.sortBusy, sortingSyncBusy, editor.syncAccounts, editor.syncWorkspace, editor.syncSorting])
+  const reloadSorting = React.useCallback(async () => {
+    const id = ++sortSequence.current
+    busyRef.current = true
+    replay.invalidateWorkspace()
+    setSortingSyncBusy(true); setSortingError('')
+    try {
+      const next = await bridge().getRoutingWorkspace()
+      if (id !== sortSequence.current) return
+      editor.syncAccounts(next.accounts, next.updatedAt)
+      editor.syncWorkspace(next)
+      editor.syncSorting(next.sorting)
+      adoptAccountSorting(next.sorting)
+    } catch (failure) {
+      if (id === sortSequence.current) setSortingError(t('消耗规则已保存，但路由列表刷新失败：{error}', { error: errorMessage(failure) }))
+    } finally {
+      if (id === sortSequence.current) { setSortingSyncBusy(false); refreshRouting() }
+    }
+  }, [editor.syncAccounts, editor.syncWorkspace, editor.syncSorting, replay.invalidateWorkspace, refreshRouting])
+  React.useEffect(() => {
+    const changed = (event: Event) => {
+      const next = (event as CustomEvent<AccountSorting>).detail
+      if (!next?.rules || !next.accountOrder) return
+      void reloadSorting()
+    }
+    window.addEventListener('wb:account-sorting', changed)
+    return () => { sortSequence.current++; window.removeEventListener('wb:account-sorting', changed) }
+  }, [reloadSorting])
   React.useEffect(() => {
     if (mode !== 'replay' || !selected || !isTraceRunning(selected)) return
     let alive = true
@@ -63,7 +113,7 @@ export function RoutingPage() {
 
   const openRequest = (row: ReplayRow) => { setSelected(row); setMode('replay') }
   const openScope = (model: string) => {
-    if (editor.busy || groups.busy) return
+    if (busyRef.current || groups.busy) return
     const group = Object.values(groups.drafts).find(draft => draft.group.model.toLowerCase() === model.toLowerCase())
     groups.select(group?.group.id || '')
     if (!group) void editor.load(model)
@@ -78,7 +128,7 @@ export function RoutingPage() {
       setSelected(current => current && requestKey(current) === requestKey(next) ? next : current)
     } catch { /* 列表下次刷新会带回新状态 */ }
   }
-  const close = () => { setModal(null); replay.refresh() }
+  const close = () => { setModal(null); refreshRouting() }
   const reloadConfig = async () => {
     replay.refresh()
     if (groups.selected) { await groups.reload(); return }
@@ -95,9 +145,17 @@ export function RoutingPage() {
   const groupModels = Object.values(groups.drafts).map(draft => draft.group.model)
   const reserved = [...(workspace?.models || []), ...(workspace?.configuredModels || []), ...Object.keys(editor.drafts),
     ...(groups.data?.catalog || []).map(choice => choice.model), ...groupModels]
-  const rail = <RoutingRail editor={editor} groups={groups} workspace={workspace} onModel={openScope} onGroup={id => groups.select(id)}
+  const rail = <RoutingRail editor={pageEditor} groups={groups} workspace={workspace} onModel={openScope} onGroup={id => { if (!busyRef.current) groups.select(id) }}
     onAdd={() => setModal({ kind: 'create' })} />
-  const accountSettings = (id: string) => setModal({ kind: 'account', id })
+  const accountSettings = (id: string) => {
+    if (busyRef.current) return
+    setModal({ kind: 'account', id })
+  }
+  const groupSettings = (id: string) => {
+    if (busyRef.current || groups.busy) return
+    if (sorting) adoptAccountSorting(sorting)
+    setModal({ kind: 'sort', id })
+  }
 
   return <>
     <div className='routing-page-bar'>
@@ -113,7 +171,7 @@ export function RoutingPage() {
         <Button variant='ghost' size='sm' onClick={() => setModal({ kind: 'sticky' })}><RouteIcon name='lock' />{t('会话粘滞')}</Button>
         {mode === 'replay'
           ? <Button variant='ghost' size='sm' disabled={replay.loading} onClick={() => void refreshReplay()}><RouteIcon name='refresh' />{t('刷新')}</Button>
-          : <Button variant='ghost' size='sm' disabled={editor.loading || editor.busy || groups.loading || groups.busy} onClick={() => void reloadConfig()}><RouteIcon name='refresh' />{t('重新读取')}</Button>}
+          : <Button variant='ghost' size='sm' disabled={editor.loading || pageEditor.busy || groups.loading || groups.busy} onClick={() => void reloadConfig()}><RouteIcon name='refresh' />{t('重新读取')}</Button>}
       </div>
     </div>
 
@@ -125,13 +183,15 @@ export function RoutingPage() {
       {editor.error && !editor.draft ? <div className='routing-page-error' role='alert'>
         <RouteIcon name='info' /><span>{editor.error}</span><Button variant='ghost' size='sm' onClick={() => void editor.load(editor.scope, true)}>{t('重新读取')}</Button>
       </div> : null}
+      {sortingError ? <div className='routing-page-error' role='alert'><RouteIcon name='info' /><span>{sortingError}</span>
+        <Button variant='ghost' size='sm' disabled={sortingSyncBusy} onClick={() => void reloadSorting()}>{t('重试')}</Button></div> : null}
       <div className='routing-config-shell'>
         {rail}
         {groups.selected ? <RoutingGroupPanel key={groups.selected} editor={groups} accounts={replay.workspace?.accounts || workspace?.accounts || []}
           reserved={reserved} baseUrl={host().wbPortPanel?.gatewayBase() || `http://127.0.0.1:${workspace?.gateway.port || 3065}`}
-          onAccount={accountSettings} /> :
-          <RoutingConfigPanel key={editor.scope} editor={editor} scope={editor.scope} now={replay.now} onScope={openScope}
-            onAccount={accountSettings} onSort={provider => setModal({ kind: 'sort', id: provider })}
+          onAccount={accountSettings} sorting={sorting} now={replay.now} onSort={groupSettings} /> :
+          <RoutingConfigPanel key={editor.scope} editor={pageEditor} scope={editor.scope} now={replay.now} accountControl={accountControl} onScope={openScope}
+            onAccount={accountSettings} onSort={groupSettings}
             onProtection={workspace => setModal({ kind: 'protection', workspace })} />}
       </div>
     </div> : <div className='routing-replay-layout'>
@@ -148,13 +208,17 @@ export function RoutingPage() {
 
     {modal?.kind === 'create' && workspace && groups.data ? <RoutingCreateDialog workspace={workspace} choices={groups.data.catalog}
       accounts={replay.workspace?.accounts || workspace.accounts} reserved={reserved} groupModels={groupModels}
-      disabled={editor.busy || editor.loading || groups.busy || groups.loading} modelError={editor.error} onClose={() => setModal(null)}
+      disabled={pageEditor.busy || editor.loading || groups.busy || groups.loading} modelError={editor.error} onClose={() => setModal(null)}
       onCreateModel={async model => { const created = await editor.create(model); if (created) groups.select(''); return created }}
       onCreateGroup={groups.create} /> : null}
     {modal?.kind === 'sticky' ? <RoutingStickyDialog model={mode === 'config' ? scopeModel : replay.model} onClose={close} /> : null}
     {modal?.kind === 'protection' ? <RoutingSettingsDialog protectionOnly workspace={modal.workspace} onClose={close} /> : null}
-    {modal?.kind === 'sort' ? <GroupSettingsDialog provider={modal.id} onClose={close} /> : null}
-    {modal?.kind === 'account' ? <AccountSettingsDialog id={modal.id} initialAccount={replay.workspace?.accounts.find(account => account.id === modal.id) || workspace?.accounts.find(account => account.id === modal.id)} onClose={close} /> : null}
+    {modal?.kind === 'sort' ? <GroupSettingsDialog key={modal.id} provider={modal.id} onClose={close}
+      accounts={workspace?.accounts} sorting={sorting}
+      routeContext={groups.selected || editor.scope && editor.draft?.mode !== 'inherit'
+        ? <p className='routing-config-note'>{t('这里调整的是账号组的全局消耗规则；当前独立路由的账号顺序保持不变。')}</p> : undefined} /> : null}
+    {modal?.kind === 'account' ? <AccountSettingsDialog key={modal.id} id={modal.id} initialAccount={replay.workspace?.accounts.find(account => account.id === modal.id) || workspace?.accounts.find(account => account.id === modal.id)} onClose={close}
+      routeContext={<p className='routing-config-note'>{t('账号设置与所有路由共用，不改变当前路由的参与名单。')}</p>} /> : null}
   </>
 }
 
