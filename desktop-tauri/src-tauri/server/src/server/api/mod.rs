@@ -151,6 +151,10 @@ pub(crate) mod request_prepare;
 // 同形的单开关端点，转换实施点在 `core::upstream::payload` 的 send_body，
 // 见该文件模块头
 pub mod role_compat;
+// 第三方模型回答完自动折叠过程开关（GET/PUT /api/reasoning-collapse）：与
+// /api/developer-role-compat 同形的单开关端点，实施点在
+// `core::protocol::responses` 的 Responses 事件重建层，见该文件模块头
+pub mod reasoning_collapse;
 pub mod routing_api;
 pub mod routing_flow;
 pub mod routing_groups;

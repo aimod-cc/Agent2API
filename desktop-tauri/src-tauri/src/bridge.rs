@@ -698,6 +698,14 @@ const BRIDGE_JS: &str = r#"
     saveDeveloperRoleCompat: enabled =>
       call('PUT', '/api/developer-role-compat', { developerRoleCompat: enabled === true }),
 
+    // ── 第三方模型回答完自动折叠过程开关 ──
+    // 与 getDeveloperRoleCompat / saveDeveloperRoleCompat 同形：GET 读、PUT 写，
+    // 响应体就是新状态。与 web_shim.rs 的同名方法逐字同形（漏一侧的症状见
+    // getCors 那段）。
+    getReasoningCollapse: () => call('GET', '/api/reasoning-collapse'),
+    saveReasoningCollapse: enabled =>
+      call('PUT', '/api/reasoning-collapse', { thirdPartyReasoningCollapse: enabled === true }),
+
     // ── Cline 伪装头 ──
     // 与 getSanitize / saveSanitize 同形：GET 读（overrides + effective），
     // PUT 整体替换覆盖表（空值 = 不发该头，删行 = 回落默认值）。

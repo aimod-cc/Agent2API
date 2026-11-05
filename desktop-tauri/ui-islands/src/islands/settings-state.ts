@@ -92,6 +92,7 @@ export type BusyScope =
   | 'debug'
   | 'sanitize'
   | 'developerRoleCompat'
+  | 'reasoningCollapse'
   | 'clineHeaders'
   | 'zcodeVersion'
   | 'cors'
@@ -160,6 +161,9 @@ export type DebugState = {
 
 /** 开发者角色兼容开关 */
 export type DeveloperRoleCompatState = { status: LoadStatus; on: boolean }
+
+/** 第三方模型回答完自动折叠过程开关 */
+export type ReasoningCollapseState = { status: LoadStatus; on: boolean }
 
 /**
  * 会话图片压缩：一个开关 + 三项参数。`values` 为 null（loading / unavailable）
@@ -306,6 +310,7 @@ export type SettingsSnapshot = {
   debug: DebugState
   sanitize: SanitizeState
   developerRoleCompat: DeveloperRoleCompatState
+  reasoningCollapse: ReasoningCollapseState
   clineHeaders: ClineHeadersState
   zcodeVersion: ZcodeVersionState
   cors: CorsState
@@ -444,6 +449,7 @@ const INITIAL: SettingsSnapshot = {
   debug: { status: 'loading', on: false, count: null, limit: null },
   sanitize: INITIAL_SANITIZE,
   developerRoleCompat: { status: 'loading', on: false },
+  reasoningCollapse: { status: 'loading', on: false },
   clineHeaders: { status: 'loading', defaults: {}, overrides: {}, effective: {} },
   zcodeVersion: { status: 'loading', version: '', envOverride: '' },
   cors: { status: 'loading', on: false },
@@ -1868,6 +1874,43 @@ export async function saveDeveloperRoleCompat(next: boolean): Promise<void> {
   }
 }
 
+/* ─── 第三方模型回答完自动折叠过程（给 Responses 助手消息补阶段标记）── */
+
+export function renderReasoningCollapse(data?: unknown): void {
+  if (data === undefined) return
+  if (!data || typeof data !== 'object') {
+    publish({ reasoningCollapse: { status: 'unavailable', on: false } })
+    return
+  }
+  const record = data as Record<string, unknown>
+  publish({ reasoningCollapse: { status: 'ready', on: record.thirdPartyReasoningCollapse === true } })
+}
+
+async function loadReasoningCollapse(): Promise<void> {
+  try {
+    renderReasoningCollapse(await shared().workbuddyDesktop?.getReasoningCollapse())
+  } catch (error) {
+    console.warn('读取第三方模型回答完自动折叠过程设置失败:', errorMessage(error))
+    renderReasoningCollapse(null)
+  }
+}
+
+export async function saveReasoningCollapse(next: boolean): Promise<void> {
+  if (busyScope) { repaint(); return }
+  beginBusy('reasoningCollapse')
+  publish({ reasoningCollapse: { status: 'ready', on: next } })
+  try {
+    const saved = await shared().workbuddyDesktop?.saveReasoningCollapse(next)
+    renderReasoningCollapse(saved)
+    toast(next ? t('✅ 第三方模型回答完自动折叠过程已开启') : t('已关闭第三方模型回答完自动折叠过程'))
+  } catch (error) {
+    toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
+    await loadReasoningCollapse() // 回滚到后端的真实值
+  } finally {
+    endBusy()
+  }
+}
+
 /* ─── Cline 伪装头（转发头的逐键覆盖）── */
 
 /** 非字符串值一律丢弃（后端只会给字符串，这里是给「形状不对的响应」兜底） */
@@ -2723,6 +2766,7 @@ export async function load(): Promise<void> {
     loadDebug(),
     loadSanitize(),
     loadDeveloperRoleCompat(),
+    loadReasoningCollapse(),
     loadClineHeaders(),
     loadZcodeVersion(),
     loadCors(),
@@ -2790,6 +2834,11 @@ export async function refreshSanitize(): Promise<void> {
 export async function refreshDeveloperRoleCompat(): Promise<void> {
   await loadDeveloperRoleCompat()
   toast(t('开发者角色兼容设置已刷新'))
+}
+
+export async function refreshReasoningCollapse(): Promise<void> {
+  await loadReasoningCollapse()
+  toast(t('第三方模型回答完自动折叠过程设置已刷新'))
 }
 
 export async function refreshCors(): Promise<void> {

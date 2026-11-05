@@ -270,6 +270,7 @@ function toPlainText(info: SystemInfo): string {
     [t('指纹脱敏'), onOff(features.sanitizeFingerprints)],
     [t('跨域访问'), onOff(features.cors)],
     [t('开发者角色兼容'), onOff(features.developerRoleCompat)],
+    [t('第三方模型回答完自动折叠过程'), onOff(features.thirdPartyReasoningCollapse)],
     [t('保活换行丢弃'), onOff(features.keepaliveStrip)],
     [t('自动续写'), onOff(features.autoContinue)],
     [t('models.dev 元数据'), onOff(features.modelsDev)],
@@ -449,6 +450,7 @@ function SystemInfoPanel() {
         [t('指纹脱敏'), onOff(features.sanitizeFingerprints)],
         [t('跨域访问'), onOff(features.cors)],
         [t('开发者角色兼容'), onOff(features.developerRoleCompat)],
+        [t('第三方模型回答完自动折叠过程'), onOff(features.thirdPartyReasoningCollapse)],
         [t('保活换行丢弃'), onOff(features.keepaliveStrip)],
         [t('自动续写'), features.autoContinue
           ? t('开（最多 {n} 轮）', { n: text(features.autoContinueMaxRounds) })

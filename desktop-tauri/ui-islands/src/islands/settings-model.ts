@@ -229,6 +229,7 @@ export type SystemInfo = {
     sanitizeFingerprints?: boolean | null
     cors?: boolean | null
     developerRoleCompat?: boolean | null
+    thirdPartyReasoningCollapse?: boolean | null
     keepaliveStrip?: boolean | null
     autoContinue?: boolean | null
     autoContinueMaxRounds?: number | null
@@ -349,6 +350,8 @@ export type SettingsBridge = {
   saveSanitize(patch: boolean | SanitizePatch): Promise<unknown>
   getDeveloperRoleCompat(): Promise<unknown>
   saveDeveloperRoleCompat(enabled: boolean): Promise<unknown>
+  getReasoningCollapse(): Promise<unknown>
+  saveReasoningCollapse(enabled: boolean): Promise<unknown>
   getClineHeaders(): Promise<unknown>
   saveClineHeaders(overrides: Record<string, string>): Promise<unknown>
   getZcodeVersion(): Promise<unknown>
@@ -879,6 +882,7 @@ export const TIPS = {
   routing: t('转发一个请求时按什么顺序挑账号：①「路由策略」决定排队规则 —— 顺序优先是排第 1 的接走所有请求、直到它不能答（限流 / 故障 / 额度尽）才轮到下一位；负载均衡是每条请求换下一位，把负载摊到各个账号上。②「会话粘性」让同一会话（相同的模型 + 相同的开头消息）尽量跟住同一个账号 —— 多轮对话的上下文缓存能复用、少换号少浪费；自动档粘 5 分钟、会话内档粘 6 小时、每轮与关闭都不粘。账号的排队位次（账号表的第一列）在所有策略下都是地基，策略在它之上再排。此外路由还有三层自愈保护：转发失败的账号退避休息一会儿（15 分钟起步翻倍、封顶 1 小时）、被 429 的账号垫底排到队尾 30 分钟、余额不足 / Token 周期用量到顶的账号由限制器拦下 —— 前两层可以在下面按需开关，限制器由账号的「限制器」设置管。'),
   sanitize: t('指纹脱敏会在转发前按词表顺序改写请求消息中的文本，包括对话内容、思考内容和工具调用参数。默认词表包含客户端模板句与计费表头的精确替换、正则删除规则，可以新增、编辑、删除、启停和调整顺序；替换内容留空表示删除匹配内容。默认应用全部提供商，也可指定多家。改动只作用于发给上游的副本，响应内容不变。编辑后点击「保存设置」，下一次请求生效；清空词表表示不做任何指纹改写，恢复默认只重置词表。'),
   developerRoleCompat: t('OpenAI 新版 API 用 developer 角色取代 system 承载指令，新版 OpenAI SDK 与部分客户端发的对话里会出现 role 为 developer 的消息；不少 OpenAI 兼容上游（尤其是自定义提供商的透传路径）不认识这个角色，收到就报 400。开启本项后，网关在每次转发前把 developer 角色的消息改写为 system —— 两类角色在 OpenAI 语义上等价（OpenAI 自己的迁移指南也是这么映射的），改写不影响对话内容与语义；对本来就只认 system 的各家内置上游同样无害。默认开启；关掉后 developer 消息会原样发往上游，不认识它的上游会报「角色不存在」一类的错误。'),
+  reasoningCollapse: t('Codex 桌面端在收到带 phase: "final_answer" 的助手消息时，才会把这一轮的推理、命令与过程消息收进可折叠的「已处理 X 分钟」；官方模型逐条给出 final_answer / commentary，第三方模型通常不带这个字段，整轮过程就一直展开。开启本项后，网关在重建 Responses 响应时给助手消息补阶段标记：本轮没有工具调用的最后一条消息补 final_answer，之前的正文与过程消息补 commentary。只对经本网关的 Codex 来源 /v1/responses 请求生效，改的是下发给客户端的响应字节；个别上游或客户端不认识这个字段时关掉即可。默认关闭。'),
   imageCompress: t('对话里内嵌的 base64 大图（截图、照片）既撑大请求体，也拉高按像素折算的上游计费。开启后，网关在转发前把超过阈值的图等比缩到长边上限、重新存成 JPEG —— 只改发给上游的副本，请求日志里保存的仍是你发来的原图。同一张原图在多轮对话里重复出现时复用上一次的压缩结果，不会每轮重算。http 链接图片、GIF 动图、SVG 一律不动；压完反而更大的图也保留原图。只作用在对话场景，生图与图片编辑不受影响。默认开启；不想要的话把开关关掉即可。'),
   clineHeaders: t('Cline 上游按请求头判定「调用方是不是 Cline 自家产品」：X-CLIENT-TYPE: cline-sdk 是硬门槛（缺了它免费池模型一律 403），版本号与平台标识让请求更贴近官方客户端的形态。这里列出的是网关默认会发的头：改某一行的值 = 覆盖默认值（也可以新增默认清单之外的自定义头）；把值清空保存 = 这个头不发送；在界面删掉被改过的行 = 回落默认值。改完点「保存」，下一个 Cline 请求立即生效。不懂某一行的含义就不要动它 —— 伪装头的价值在「与官方客户端逐字一致」。'),
   cors: t('网关面（/v1/*）默认不应答浏览器跨源请求：页面直连会被预检拦下，只报「无法连接 API」。注意来源是 * —— 未配「网关 Key」时任何网页都能借本机网关打上游，故默认关闭；只给自己用的话，让页面与网关同源（本地反代 /v1）更稳妥。面板接口（/api/*）不受影响。'),
@@ -902,6 +906,7 @@ export const NOTES = {
   retryCodes: t('命中这些上游状态码的失败不在同一账号重发，直接换下一个账号继续试（换号占用「切换账号重试次数」，换满仍失败才把错误原样返回给客户端）。输入 100–599 的状态码后回车添加，点 × 或退格删除；默认 402（积分不足）。清空全部表示任何错误都照常重试。'),
   sanitize: t('默认开启并应用全部提供商。编辑词表或应用范围后点击「保存设置」，下一次请求立即生效，不用重启。命中明细仍记进请求日志的「敏」标签。'),
   developerRoleCompat: t('默认开启。只改 role 字段本身，消息内容与顺序都不动；本项只改发给上游的副本，客户端看到的响应内容不变。'),
+  reasoningCollapse: t('默认关闭。开启后下一次 Codex 请求立即生效，不用重启；只对 Codex 来源的 /v1/responses 请求补阶段标记，其它客户端与 /v1/chat/completions 不受影响。'),
   imageCompress: t('默认开启。只改发给上游的副本，客户端看到的响应与原图都不变；请求日志里保存的是客户端发来的原图，不是压缩后的版本。只作用在对话链路，生图 / 图片编辑不经过这里。改完对下一个请求立即生效，不用重启。'),
   clineHeaders: t('值与默认值相同的行不占覆盖（存的是「改过的键」，不是全量配置）；值留空保存表示这个头不发送，删除改过的行表示回落默认值。改完立即生效，不用重启。'),
   zcodeVersion: t('留空 = 用插件内置的默认版本号（每期活动由插件跟随官方更新）。只有遇到「官方客户端里能看到活动、这里探测为空」时才需要填：那种情况几乎都是上游抬高了版本门槛，而版本落后的表现是一份空列表而不是报错。按官方客户端当前版本填（形如 3.16.2），保存后回到套餐明细刷新一次即刻生效。环境变量 ZCODE_APP_VERSION 若已设置，优先级高于这里。'),
@@ -943,6 +948,9 @@ export const STATES = {
   roleCompatUnavailable: t('未能读取开发者角色兼容设置，请稍后重试'),
   roleCompatOn: t('正在归一角色：developer 角色消息转发前改写为 system。'),
   roleCompatOff: t('未开启，developer 角色消息会原样发往上游，不认识该角色的上游会报错（400）。'),
+  reasoningCollapseUnavailable: t('未能读取第三方模型回答完自动折叠过程设置，请稍后重试'),
+  reasoningCollapseOn: t('正在补阶段标记：Codex 桌面端会把这一轮的推理与命令过程折叠起来。'),
+  reasoningCollapseOff: t('未开启，第三方模型的推理与命令过程会一直展开。'),
   corsUnavailable: t('未能读取网关跨域访问设置，请稍后重试'),
   corsOn: t('正在应答跨源请求：浏览器跨域请求可直连 /v1/*。'),
   corsOff: t('未开启，浏览器跨域无法直连网关。'),

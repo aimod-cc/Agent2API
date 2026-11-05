@@ -41,6 +41,7 @@ use crate::server::core::upstream::cancellation;
 use crate::server::core::upstream::continuation::{self, Continuation};
 use crate::server::core::upstream::usage::RequestTelemetry;
 use crate::server::core::upstream::{ForwardOutcome, ForwardRequest};
+use crate::server::config;
 use crate::server::errors::GatewayError;
 use crate::server::logging;
 use crate::server::ServerState;
@@ -153,6 +154,10 @@ pub async fn responses_endpoint(
     let started_at = logging::now_ms();
     // 请求来源客户端（UA 识别，见 `core::client`）：早失败路径与收尾记账共用
     let source = pipeline::request_source(&headers, key_identity);
+    // 阶段标记只给 Codex 桌面端折叠用：非 Codex 来源不补，避免把扩展字段发给
+    // 不认识它的客户端（判据与请求日志的「客户端」列同一份实现）。
+    let reasoning_collapse = source.client == crate::server::core::client::CLIENT_CODEX
+        && config::third_party_reasoning_collapse();
     let path = "/v1/responses";
     let raw = match parse_object(&state, started_at, path, &body, &source) {
         Ok(value) => value,
@@ -280,7 +285,8 @@ pub async fn responses_endpoint(
             // 状态码进记账上下文（明细里记的必须是客户端实际看到的那个码）
             let context = RecordContext { status: i64::from(status.as_u16()), ..context };
             if stream {
-                let mut machine = responses::ResponsesStream::new(&model, &request);
+                let mut machine =
+                    responses::ResponsesStream::new(&model, &request, reasoning_collapse);
                 let transformed = pipeline::transformed_stream(
                     source,
                     context,
@@ -295,7 +301,7 @@ pub async fn responses_endpoint(
             let mut collector = responses::ResponsesCollector::new();
             collect_stream(source, &mut |chunk| collector.push(chunk)).await;
             collector.finish();
-            let body = collector.into_response(&model, &request);
+            let body = collector.into_response(&model, &request, reasoning_collapse);
             // 响应正文在记账前定稿（完整 JSON 文本；序列化失败或调试模式
             // 关着给 None，见 `capture_raw_json`）
             let context = RecordContext {
@@ -310,7 +316,12 @@ pub async fn responses_endpoint(
         Ok(ForwardOutcome::Completion { body: chat }) => {
             // 上游走了聚合路径（本不该发生：我们恒要流式，但 CatPaw 等
             // 有状态适配器可能直接给 Completion）。照样翻译，不丢请求。
-            let response = responses::responses_from_chat(&chat, &requested_model, &original);
+            let response = responses::responses_from_chat(
+                &chat,
+                &requested_model,
+                &original,
+                reasoning_collapse,
+            );
             let context = RecordContext {
                 raw_response: pipeline::capture_raw_json(&response),
                 ..context

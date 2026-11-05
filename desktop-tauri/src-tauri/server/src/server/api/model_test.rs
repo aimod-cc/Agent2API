@@ -386,7 +386,7 @@ fn translate_completion(
         },
         TestProtocol::Responses => {
             let response_body =
-                responses::responses_from_chat(&chat_completion, model, protocol_request);
+                responses::responses_from_chat(&chat_completion, model, protocol_request, false);
             let raw_response = pipeline::capture_raw_json(&response_body);
             if response_body.get("status").and_then(Value::as_str) == Some("failed") {
                 let message = response_body
