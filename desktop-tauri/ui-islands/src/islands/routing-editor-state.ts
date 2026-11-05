@@ -28,6 +28,7 @@ export function useRoutingEditor(onSaved: () => void) {
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState('')
   const sequence = React.useRef(0)
+  const refreshSequence = React.useRef(0)
   const refs = React.useRef({ drafts, scope, busy, loading })
   refs.current = { drafts, scope, busy, loading }
   const load = React.useCallback(async (model: string, force = false, mode?: 'inherit' | 'custom') => {
@@ -52,6 +53,26 @@ export function useRoutingEditor(onSaved: () => void) {
     if (refs.current.busy || refs.current.loading) return
     setDrafts(current => current[scope] ? { ...current, [scope]: mutate(current[scope]) } : current)
   }
+  // 对齐 performance 分支：轮询只换 workspace 快照，draft.profile 是用户
+  // 未保存的草稿，不能被轮询冲掉，在途连线与账号在途数靠它跟上实际流量
+  const refresh = React.useCallback(async (model?: string) => {
+    if (refs.current.busy || refs.current.loading) return
+    const target = (model ?? refs.current.scope).trim().toLowerCase()
+    const id = ++refreshSequence.current
+    try {
+      const workspace = await bridge().getRoutingWorkspace(target || undefined)
+      if (id !== refreshSequence.current) return
+      if (!workspace?.revision) return
+      // 等待期间切走了作用域：这一拍的数据属于旧作用域，直接丢弃
+      if (refs.current.scope !== target) return
+      setDrafts(current => {
+        const draft = current[target]
+        // 没有草稿时不动：初次加载走 load，这里不抢先建一份没有 baseline 的草稿
+        if (!draft) return current
+        return { ...current, [target]: { ...draft, workspace } }
+      })
+    } catch { /* 轮询失败静默跳过：下一拍再试，不打断用户 */ }
+  }, [])
   const syncAccounts = React.useCallback((accounts: AccountRecord[], updatedAt?: number) => {
     setDrafts(current => Object.fromEntries(Object.entries(current).map(([model, draft]) => [model,
       updatedAt != null && updatedAt < draft.workspace.updatedAt ? draft : { ...draft, workspace: { ...draft.workspace, accounts } },
@@ -175,7 +196,7 @@ export function useRoutingEditor(onSaved: () => void) {
     window.addEventListener('beforeunload', listener)
     return () => { sequence.current++; window.removeEventListener('beforeunload', listener) }
   }, [])
-  return { scope, load, create, remove, draft: drafts[scope], drafts, update, syncAccounts, syncSorting, syncWorkspace, save, discard, loading, busy, error,
+  return { scope, load, refresh, create, remove, draft: drafts[scope], drafts, update, syncAccounts, syncSorting, syncWorkspace, save, discard, loading, busy, error,
     dirtyCount: Object.values(drafts).filter(draftDirty).length }
 }
 export type RoutingEditorState = ReturnType<typeof useRoutingEditor>

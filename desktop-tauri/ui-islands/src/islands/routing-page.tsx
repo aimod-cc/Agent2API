@@ -62,6 +62,18 @@ export function RoutingPage() {
 
   React.useEffect(() => { void editor.load('') }, [editor.load])
   React.useEffect(() => { if (sortSnapshot) adoptAccountSorting(sortSnapshot) }, [sortSnapshot])
+  // 配置视图定时刷新：画布在途连线与账号在途数靠它跟上实际流量。
+  //
+  // 刷新走 editor.refresh（只换 workspace 快照），不碰 profile —— 用户没保存的
+  // 草稿不会被轮询冲掉。页面不可见、不是路由页、有弹窗或正在保存时都跳过。
+  React.useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (document.hidden || host().wbApp?.currentPage !== 'routing') return
+      if (mode !== 'config' || editor.busy || editor.loading || modal || accountControl.busy || sortingSyncBusy) return
+      void editor.refresh()
+    }, 3000)
+    return () => window.clearInterval(timer)
+  }, [mode, editor.busy, editor.loading, editor.refresh, modal, accountControl.busy, sortingSyncBusy])
   React.useEffect(() => {
     if (!replay.workspace || accountControl.busy || editor.busy || sortingState.sortBusy || sortingSyncBusy) return
     editor.syncAccounts(replay.workspace.accounts, replay.workspace.updatedAt)
@@ -188,6 +200,7 @@ export function RoutingPage() {
       <div className='routing-config-shell'>
         {rail}
         {groups.selected ? <RoutingGroupPanel key={groups.selected} editor={groups} accounts={replay.workspace?.accounts || workspace?.accounts || []}
+          accountRunning={replay.workspace?.metrics.accountRunning || workspace?.metrics.accountRunning}
           reserved={reserved} baseUrl={host().wbPortPanel?.gatewayBase() || `http://127.0.0.1:${workspace?.gateway.port || 3065}`}
           onAccount={accountSettings} sorting={sorting} now={replay.now} onSort={groupSettings} /> :
           <RoutingConfigPanel key={editor.scope} editor={pageEditor} scope={editor.scope} now={replay.now} accountControl={accountControl} onScope={openScope}
