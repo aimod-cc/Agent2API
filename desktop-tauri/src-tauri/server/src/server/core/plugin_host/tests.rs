@@ -250,6 +250,83 @@ async fn classify_error_goes_through_rpc() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn is_error_response_goes_through_rpc() {
+    let Some((host, providers)) = boot().await else {
+        eprintln!("跳过：插件二进制不存在");
+        return;
+    };
+    let demo = providers.iter().find(|p| p.id.0 == "demo").expect("demo 存在");
+    let adapter = RpcAdapter::new(
+        "demo".into(),
+        crate::server::core::providers::ProviderKind::WorkBuddy,
+        host.clone(),
+        demo.clone(),
+    );
+
+    // 普通 200 + SSE 是成功流，不能因为走了 RPC 就被误判成错误。
+    let mut sse = axum::http::HeaderMap::new();
+    sse.insert(
+        axum::http::header::CONTENT_TYPE,
+        "text/event-stream".parse().expect("合法头值"),
+    );
+    assert!(
+        !adapter.is_error_response_async(200, &sse).await.expect("RPC 判定失败"),
+        "200 + text/event-stream 应当判成功"
+    );
+
+    // 非 2xx 无论插件怎么答都应当是错误（默认口径不能被 RPC 覆盖掉）。
+    assert!(
+        adapter.is_error_response_async(429, &sse).await.expect("RPC 判定失败"),
+        "429 应当判错误"
+    );
+
+    host.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_200_json_is_an_error_response() {
+    let Some((host, providers)) = boot().await else {
+        eprintln!("跳过：插件二进制不存在");
+        return;
+    };
+    // 用 chatglm：插件侧对「200 + application/json」有明确判据（与 zcode
+    // 同一口径）。这条测试钉的是网关有没有把这一位问出去 —— 没接 RPC 时
+    // 默认实现会把它当成功，正好复现 testwhy0out 的 0 输出。
+    let chatglm = providers
+        .iter()
+        .find(|p| p.id.0 == "chatglm")
+        .expect("chatglm 存在");
+    let adapter = RpcAdapter::new(
+        "chatglm".into(),
+        crate::server::core::providers::ProviderKind::WorkBuddy,
+        host.clone(),
+        chatglm.clone(),
+    );
+
+    let mut json = axum::http::HeaderMap::new();
+    json.insert(
+        axum::http::header::CONTENT_TYPE,
+        "application/json; charset=utf-8".parse().expect("合法头值"),
+    );
+    assert!(
+        adapter.is_error_response_async(200, &json).await.expect("RPC 判定失败"),
+        "200 + application/json 必须判成错误，否则业务错误会被当成空回答"
+    );
+
+    let mut sse = axum::http::HeaderMap::new();
+    sse.insert(
+        axum::http::header::CONTENT_TYPE,
+        "text/event-stream".parse().expect("合法头值"),
+    );
+    assert!(
+        !adapter.is_error_response_async(200, &sse).await.expect("RPC 判定失败"),
+        "200 + text/event-stream 仍然应当判成功"
+    );
+
+    host.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn reasoning_patch_goes_through_rpc() {
     let Some((host, providers)) = boot().await else {
         eprintln!("跳过：插件二进制不存在");
