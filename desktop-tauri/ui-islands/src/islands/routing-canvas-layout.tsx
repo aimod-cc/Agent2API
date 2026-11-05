@@ -5,8 +5,8 @@ import { RouteIcon } from './routing-ui'
 
 type Edge = { id: string; d: string; x: number; y: number }
 
-/** 连线表达账号启用或路由参与关系，不把当前请求流量混入配置。 */
-function RoutingCanvasEdges({ root }: { root: React.RefObject<HTMLDivElement | null> }) {
+/** 连线表达账号启用或路由参与关系，节点有在途请求时对应连线加高亮。 */
+function RoutingCanvasEdges({ root, running }: { root: React.RefObject<HTMLDivElement | null>; running?: Record<string, number> }) {
   const [drawing, setDrawing] = React.useState<{ width: number; height: number; x: number; y: number; edges: Edge[] } | null>(null)
   React.useEffect(() => {
     const canvas = root.current
@@ -52,17 +52,18 @@ function RoutingCanvasEdges({ root }: { root: React.RefObject<HTMLDivElement | n
     return () => { resize.disconnect(); mutation.disconnect(); sourceMutation.disconnect(); cancelAnimationFrame(frame); canvas.removeEventListener('scroll', schedule, true); window.removeEventListener('resize', schedule) }
   }, [root])
   return <svg className='routing-canvas-edges' viewBox={drawing ? `0 0 ${drawing.width} ${drawing.height}` : undefined} aria-hidden='true'>
-    {drawing?.edges.map(edge => <g key={edge.id}><path d={edge.d} /><circle cx={edge.x} cy={edge.y} r={3} /></g>)}
+    {drawing?.edges.map(edge => <g key={edge.id} className={(running?.[edge.id] || 0) > 0 ? 'is-live' : undefined}>
+      <path d={edge.d} /><circle cx={edge.x} cy={edge.y} r={3} /></g>)}
     {drawing?.edges.length ? <circle className='routing-canvas-origin' cx={drawing.x} cy={drawing.y} r={4} /> : null}
   </svg>
 }
 
-export function RoutingCanvasLayout({ title, children, groups, note, globalAccounts = false }: {
-  title: string; children: React.ReactNode; groups: React.ReactNode; note: string; globalAccounts?: boolean
+export function RoutingCanvasLayout({ title, children, groups, note, globalAccounts = false, running }: {
+  title: string; children: React.ReactNode; groups: React.ReactNode; note: string; globalAccounts?: boolean; running?: Record<string, number>
 }) {
   const root = React.useRef<HTMLDivElement>(null)
   return <div className='routing-canvas' ref={root}>
-    <RoutingCanvasEdges root={root} />
+    <RoutingCanvasEdges root={root} running={running} />
     <section className='routing-config-column'>
       <div className='routing-column-head'><RouteIcon name='route' size={14} /><b>{t('路由配置')}</b><span>{title}</span></div>
       {children}
@@ -70,7 +71,8 @@ export function RoutingCanvasLayout({ title, children, groups, note, globalAccou
     </section>
     {groups}
     <div className='routing-canvas-legend'><span><i />{globalAccounts ? t('连线表示账号组中有已启用账号') : t('连线表示参与本路由')}</span>
-      <span>{globalAccounts ? t('账号启停立即生效；路由配置保存后生效') : t('保存后才会影响真实请求')}</span></div>
+      <span>{globalAccounts ? t('账号启停立即生效；路由配置保存后生效') : t('保存后才会影响真实请求')}</span>
+      <span>{t('连线高亮表示对应节点有在途请求')}</span></div>
   </div>
 }
 

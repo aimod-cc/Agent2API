@@ -46,6 +46,11 @@ export function RoutingConfigPanel({ editor, scope, now, accountControl, onScope
     <Empty>{editor.loading ? <Spinner /> : editor.error || t('选择作用范围后配置路由')}</Empty>
   </div>
   const workspace = draft.workspace
+  const providerRunning: Record<string, number> = {}
+  for (const account of workspace.accounts) {
+    const count = workspace.metrics.accountRunning?.[account.id] || 0
+    if (count > 0) providerRunning[providerOf(account)] = (providerRunning[providerOf(account)] || 0) + count
+  }
   const inherited = draft.mode === 'inherit'
   const profile = inherited ? workspace.inheritedProfile || draft.profile : draft.profile
   const locked = disabled || inherited || globalBlocked
@@ -166,7 +171,7 @@ export function RoutingConfigPanel({ editor, scope, now, accountControl, onScope
     </div>
   </section>
   return <>
-    <RoutingCanvasLayout title={scope ? t('模型路由') : t('全局默认')} groups={groups} globalAccounts={globalAccounts}
+    <RoutingCanvasLayout title={scope ? t('模型路由') : t('全局默认')} groups={groups} globalAccounts={globalAccounts} running={providerRunning}
       note={scope ? t('仅影响此路由的后续请求') : t('账号启停与账号页同步，立即影响所有路由；策略与排序需保存。')}>
       <div className='routing-config-card' data-route-source>
         <div className='routing-config-card-scroll'>

@@ -188,6 +188,7 @@ export function RoutingPage() {
       <div className='routing-config-shell'>
         {rail}
         {groups.selected ? <RoutingGroupPanel key={groups.selected} editor={groups} accounts={replay.workspace?.accounts || workspace?.accounts || []}
+          accountRunning={replay.workspace?.metrics.accountRunning || workspace?.metrics.accountRunning}
           reserved={reserved} baseUrl={host().wbPortPanel?.gatewayBase() || `http://127.0.0.1:${workspace?.gateway.port || 3065}`}
           onAccount={accountSettings} sorting={sorting} now={replay.now} onSort={groupSettings} /> :
           <RoutingConfigPanel key={editor.scope} editor={pageEditor} scope={editor.scope} now={replay.now} accountControl={accountControl} onScope={openScope}

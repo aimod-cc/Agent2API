@@ -14,8 +14,9 @@ import { routingAccountSections, routingCollapsedSections, useRoutingExpansion }
 import { IconButton, RouteIcon } from './routing-ui'
 import { notify, type RouteGroup, type RouteMember } from './routing-types'
 
-export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, sorting, now, onAccount, onSort }: {
+export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, sorting, now, accountRunning, onAccount, onSort }: {
   editor: RouteGroupEditor; accounts: AccountRecord[]; reserved: string[]; baseUrl: string; sorting?: AccountSorting | null; now: number
+  accountRunning?: Record<string, number>
   onAccount(id: string): void; onSort(provider: string): void
 }) {
   const [dialog, setDialog] = React.useState<'edit' | 'add' | 'example' | null>(null)
@@ -37,6 +38,11 @@ export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, sorting
   const drag = useRoutingDrag(!locked && !query, `${group?.id || ''}:${search}`, drop)
   if (!group || !editor.draft) return <Empty>{t('选择路由入口')}</Empty>
   const active = group.members.filter(member => member.included)
+  const memberRunning: Record<string, number> = {}
+  for (const member of group.members) {
+    const count = member.accounts.reduce((sum, id) => sum + (accountRunning?.[id] || 0), 0)
+    if (count > 0) memberRunning[member.id] = count
+  }
   const sections = routingAccountSections(group.members, accounts, member => member.provider, member => member.included)
   const orderingPeers = (id: string) => (Object.values(sections).find(members => members.some(member => member.id === id)) || []).filter(member => member.included)
   const dirty = groupDirty(editor.draft)
@@ -104,7 +110,8 @@ export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, sorting
     </div>
   </section>
   return <>
-    <RoutingCanvasLayout title={t('自定义路由组')} groups={members} note={t('只影响这个路由成员，不改变账号启用状态，也不影响其他模型。新增账号需要手动加入。')}>
+    <RoutingCanvasLayout title={t('自定义路由组')} groups={members} note={t('只影响这个路由成员，不改变账号启用状态，也不影响其他模型。新增账号需要手动加入。')}
+      running={memberRunning}>
       <div className='routing-config-card' data-route-source>
         <div className='routing-config-card-scroll'>
           <header className='routing-config-head'><div><span className='routing-config-eyebrow'>{t('跨模型组合')}</span><h2>{group.name}</h2></div>
