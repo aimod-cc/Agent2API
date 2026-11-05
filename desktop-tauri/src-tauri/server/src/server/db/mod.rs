@@ -283,12 +283,18 @@ pub fn stored_schema_version(path: &Path) -> Option<i64> {
 ///     仍共用同一个库），而进程内那把连接锁管不到另一个进程。桌面壳读设置
 ///     的那条短命连接同样设了 5 秒，两处口径一致。连接级设置，不写进库文件，
 ///     每次打开都要设。
+///   - `auto_vacuum=INCREMENTAL`：新库开户时启用增量回收，删除大报文后
+///     可按小批释放空闲页，避免主库文件只增不减
+///   - `wal_autocheckpoint=10000`：把默认的约 4 MiB 检查点阈值提高到约 40 MiB，
+///     避免高频请求下每次批量写入都触发 WAL 回写，群晖等低速盘上这是主要停顿源
 fn apply_pragmas(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
-        "PRAGMA journal_mode=WAL;
+        "PRAGMA auto_vacuum=INCREMENTAL;
+         PRAGMA journal_mode=WAL;
          PRAGMA synchronous=NORMAL;
          PRAGMA foreign_keys=ON;
-         PRAGMA busy_timeout=5000;",
+         PRAGMA busy_timeout=5000;
+         PRAGMA wal_autocheckpoint=10000;",
     )
     .map_err(|error| format!("设置数据库 PRAGMA 失败: {error}"))
 }

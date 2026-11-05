@@ -34,6 +34,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
@@ -48,6 +49,25 @@ use crate::server::logging;
 const LEGACY_SNAPSHOT_KEY: &str = "usageQuerySnapshot";
 
 static DB: OnceLock<Option<Db>> = OnceLock::new();
+
+/// 同类余额查询失败的最小重复日志间隔：避免低内存 NAS 上多个账号每分钟
+/// 同时失败时，把同一错误反复写入 SQLite
+const FAILURE_LOG_INTERVAL_SECS: u64 = 15 * 60;
+
+static FAILURE_LOGS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+
+pub(crate) fn failure_log_due(key: String) -> bool {
+    let logs = FAILURE_LOGS.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut logs) = logs.lock() else { return false };
+    let now = Instant::now();
+    match logs.get(&key) {
+        Some(last) if now.duration_since(*last).as_secs() < FAILURE_LOG_INTERVAL_SECS => false,
+        _ => {
+            logs.insert(key, now);
+            true
+        }
+    }
+}
 
 /// 余额事实：选路跳过判定读的**内存副本**（账号 id → 最近一次成功读数）。
 #[derive(Clone, Copy, Debug)]

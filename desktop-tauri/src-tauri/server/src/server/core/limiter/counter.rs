@@ -232,17 +232,43 @@ fn refresh_inner(accounts: &[serde_json::Value], replace: bool) {
 pub fn note(id: &str, request_id: &str, model: &str, channel: &str, tokens: i64, ts: i64) {
     if id.is_empty() { return; }
     let Some(db) = DB.get().and_then(Option::as_ref) else { return };
-    // 额度台账独立于请求日志；关联 id 用于收尾幂等，清理日志不回退消耗。
     let inserted = db.with_mut(|conn| -> rusqlite::Result<Option<i64>> {
-        let changed = conn.execute(
-            "INSERT OR IGNORE INTO account_limiter_events \
-             (id, account_id, model, channel, ts, tokens, requests) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
-            params![if request_id.is_empty() { format!("{id}:{ts}:{model}") } else { request_id.to_string() },
-                id, model, channel, ts, tokens.max(0)]
-        )?;
-        Ok((changed == 1).then(|| conn.last_insert_rowid()))
+        insert_event(conn, id, request_id, model, channel, tokens, ts)
     }).and_then(Result::ok).flatten();
     let Some(row_id) = inserted else { return };
+    update_facts(id, model, channel, tokens, ts, row_id);
+}
+
+/// 在调用方已经持有的事务里插入限额事件
+pub(crate) fn insert_event(
+    conn: &rusqlite::Connection,
+    id: &str,
+    request_id: &str,
+    model: &str,
+    channel: &str,
+    tokens: i64,
+    ts: i64,
+) -> rusqlite::Result<Option<i64>> {
+    if id.is_empty() { return Ok(None); }
+    // 额度台账独立于请求日志；关联 id 用于收尾幂等，清理日志不回退消耗。
+    let changed = conn.execute(
+        "INSERT OR IGNORE INTO account_limiter_events \
+         (id, account_id, model, channel, ts, tokens, requests) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
+        params![if request_id.is_empty() { format!("{id}:{ts}:{model}") } else { request_id.to_string() },
+            id, model, channel, ts, tokens.max(0)]
+    )?;
+    Ok((changed == 1).then(|| conn.last_insert_rowid()))
+}
+
+/// 事务提交后同步内存限额事实
+pub(crate) fn update_facts(
+    id: &str,
+    model: &str,
+    channel: &str,
+    tokens: i64,
+    ts: i64,
+    row_id: i64,
+) {
     if let Ok(mut facts) = slot().lock() {
         let now = logging::now_ms();
         for ((account, _), count) in facts.iter_mut() {

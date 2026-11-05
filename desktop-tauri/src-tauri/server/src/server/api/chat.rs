@@ -114,9 +114,15 @@ pub async fn chat_completions(
         .map(|items| items.len())
         .unwrap_or(0);
     let user_agent = pipeline::user_agent_of(&headers);
+    let body_len = body.len();
+    let dedupe_key = pipeline::sha256_hex(&body);
+    let raw_request = pipeline::capture_raw_body(&body);
 
     // ③ 调试落盘：保存最近一次入站请求体，供重放分析（覆盖写）
     write_debug_files(&body, method, path, &user_agent);
+    // 原始字节已全部转成后续步骤所需的值，解析后的 payload 已持有正文，
+    // 此时释放 Bytes 可把百 MB 级请求的峰值内存降下一份
+    drop(body);
 
     // ④ 模型路由走公共管道（默认模型回落 / 别名映射 / 目录校验，
     //    与另外两条协议入口逐条同源）。下游原始请求名在改写前取一次：
@@ -146,14 +152,13 @@ pub async fn chat_completions(
         &format!(
             "← {method} {path} model={} stream={stream} msgs={message_count} bytes={} ua={user_agent}",
             if requested_model.is_empty() { "(未指定)" } else { &requested_model },
-            body.len(),
+            body_len,
         ),
     );
 
     // ⑤ 转发：请求体原样交给转发层（内容处理在每家 provider 发送前按作用范围
     // 逐家判定，见 `core::upstream::payload` 的 `send_body`）；去重键取**客户端
     // 原始请求体**的哈希，与「某一家是否被处理」无关。
-    let dedupe_key = pipeline::sha256_hex(&body);
     let telemetry = Arc::new(RequestTelemetry::with_id());
     // 「进行中」行：模型解析已成功、转发即将开始 —— 先插一条 status=0 的明细，
     // 让请求日志在响应还没跑完时就能看到这条请求（收尾时由 `record` 的 UPDATE
@@ -192,10 +197,9 @@ pub async fn chat_completions(
         telemetry_id,
         started_at,
     ));
-    // 下游原始请求体在此刻抄一份（request_raw 表的请求侧，见 `capture_raw_body`）：
-    // body 还是客户端发来的原值；送进转发层后 payload 会被就地改写（默认模型注入）。
-    // **仅调试模式开启时采集** —— 关着时这里是零开销的 None（预览对话没有正文）
-    let raw_request = pipeline::capture_raw_body(&body);
+    // 下游原始请求体已在解析后、释放 Bytes 前按原样抄入 raw_request
+    // （request_raw 表的请求侧，见 `capture_raw_body`），转发层的就地改写
+    // 不会影响这份快照，调试关闭时它是零开销的 None
     // 自动续写的上下文（开关 `autoContinue` **默认关**）。关着时这里连一份 clone
     // 都不做 —— `plan()` 先问开关，再决定要不要复制请求体/请求头/白名单。
     // 判据、多轮拼接与用量合并口径都在 `core::upstream::continuation`。

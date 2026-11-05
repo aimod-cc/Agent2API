@@ -176,6 +176,18 @@ impl UpdateManager {
         let key = self.check_key_for(current_version);
         let interval = config::scheduled_settings().update_check.interval * 60_000;
         let started = logging::now_ms();
+        // 自动检查在最近一次成功后的保留周期内直接复用结果：后台辅助动作
+        // 不应反复读写任务状态并追加重复错误日志
+        // 失败后的普通退避由 `task_state::claim` 负责；这里只快速复用成功结果，
+        // 不提前吞掉需要进入退避的新一轮检查
+        if !manual {
+            if let Some(state) = task_state::read(&key).ok().filter(|state| {
+                state.last_success_at > 0
+                    && started - state.last_success_at < interval
+            }) {
+                return Ok(self.checked_result(current_version, &state));
+            }
+        }
         // 手动检查仍受失败冷却约束（ManualBackoff::Respect）：这里的冷却记的是
         // GitHub 配额桶的恢复时刻，提前打只会再吃一次 403。换令牌 / 换线路那条
         // 口子走 clear_check_cooldown（见上）。

@@ -160,6 +160,9 @@ pub async fn responses_endpoint(
     };
     // 协议翻译前识别，保留原始文本块边界。
     let compact_client = compact_routing::client_for_request(&source.behavior_client, &raw, RequestFormat::Responses);
+    let body_len = body.len();
+    let dedupe_key = pipeline::sha256_hex(&body);
+    let raw_request = pipeline::capture_raw_body(&body);
     // 原始请求体留一份：回程要用它回显请求侧字段（instructions / tools / …），
     // 而下面会把 payload 改写成 Chat 形态
     let original = raw.clone();
@@ -203,10 +206,13 @@ pub async fn responses_endpoint(
         &format!(
             "← POST {path} model={} stream={stream} bytes={} ua={user_agent}",
             if requested_model.is_empty() { "(未指定)" } else { &requested_model },
-            body.len(),
+            body_len,
         ),
     );
     pipeline::write_debug_files(&body, "POST", path, &user_agent);
+    // 原始字节已转成去重键、调试正文与回显所需的值；解析后的协议体已持有
+    // 内容，这里释放 Bytes，避免大请求在转换与转发期间保留两份完整正文
+    drop(body);
 
     // 上游恒走流式（理由见模块头）
     // scope 的**提供商**那一半进转发层（选路时按承载家过滤）；
@@ -247,7 +253,7 @@ pub async fn responses_endpoint(
         chat_body,
         &headers,
         stream,
-        pipeline::sha256_hex(&body),
+        dedupe_key,
         scope,
         telemetry.clone(),
     )
@@ -264,7 +270,7 @@ pub async fn responses_endpoint(
         // 下游原始请求体：客户端发来的那一份（协议翻译前）——仅调试模式
         // 开启时采集（`capture_raw_body`）。响应侧非流式在聚合完成后补，
         // 流式由 RecordingStream 在流结束时定稿
-        raw_request: pipeline::capture_raw_body(&body),
+        raw_request,
         raw_response: None,
         // 真实流量：不是模型测试（见 `RecordContext::is_test`）
         is_test: false,
@@ -358,6 +364,9 @@ pub async fn messages_endpoint(
         Ok(value) => value,
         Err(response) => return response,
     };
+    let body_len = body.len();
+    let dedupe_key = pipeline::sha256_hex(&body);
+    let raw_request = pipeline::capture_raw_body(&body);
     let stream = raw.get("stream").and_then(Value::as_bool).unwrap_or(false);
 
     let compact_client = compact_routing::client_for_request(&source.behavior_client, &raw, RequestFormat::Anthropic);
@@ -387,10 +396,12 @@ pub async fn messages_endpoint(
         &format!(
             "← POST {path} model={} stream={stream} bytes={} ua={user_agent}",
             if requested_model.is_empty() { "(未指定)" } else { &requested_model },
-            body.len(),
+            body_len,
         ),
     );
     pipeline::write_debug_files(&body, "POST", path, &user_agent);
+    // 与 responses_endpoint 同一处理：释放原始字节，避免大请求保留两份正文
+    drop(body);
 
     // scope 的**提供商**那一半进转发层（选路时按承载家过滤）；
     // 模型那一半已在上面判过（分工见 forward_chat 的说明）。
@@ -434,7 +445,7 @@ pub async fn messages_endpoint(
         chat_body,
         &headers,
         stream,
-        pipeline::sha256_hex(&body),
+        dedupe_key,
         scope,
         telemetry.clone(),
     )
@@ -451,7 +462,7 @@ pub async fn messages_endpoint(
         // 下游原始请求体：客户端发来的那一份（协议翻译前）——仅调试模式
         // 开启时采集（`capture_raw_body`）。响应侧非流式在聚合完成后补，
         // 流式由 RecordingStream 在流结束时定稿
-        raw_request: pipeline::capture_raw_body(&body),
+        raw_request,
         raw_response: None,
         // 真实流量：不是模型测试（见 `RecordContext::is_test`）
         is_test: false,

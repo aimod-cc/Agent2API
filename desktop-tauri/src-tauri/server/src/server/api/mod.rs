@@ -126,7 +126,6 @@ pub mod onboarding;
 pub mod panel;
 pub mod pipeline;
 mod live_progress;
-mod record_persist;
 // 提供商插件包的管理面（列表 / 安装 / 卸载 / 启停）：插件是用户安装的，
 // 这一组端点就是「装插件」的唯一入口，见该文件模块头
 pub mod plugins;

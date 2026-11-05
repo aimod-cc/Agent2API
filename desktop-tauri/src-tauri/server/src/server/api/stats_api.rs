@@ -524,6 +524,12 @@ pub async fn put_retention(State(state): State<ServerState>, body: Bytes) -> Res
                 logging::console_line("[Logs]", &format!("按保留设置清理了 {removed} 条日志"));
             }
         }
+        // 调试报文最多 100 条，并跟随请求日志条数；用户改小请求日志上限时
+        // 立即把上游调试报文一并收敛，不必等下一次请求写入
+        let removed = crate::server::core::debug_traffic::prune();
+        if removed > 0 {
+            logging::console_line("[Debug]", &format!("按保留设置清理了 {removed} 条调试报文"));
+        }
     }
 
     let settings = config::retention_settings();

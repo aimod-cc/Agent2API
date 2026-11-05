@@ -222,3 +222,38 @@ pub fn save_routing_profile(model: &str, profile: Option<RoutingProfile>) -> Res
     if !saved { return Err("路由配置落盘失败，本次修改仅在当前进程生效".to_string()); }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_shape, RoutingProfile, RoutingProviderScope};
+    use std::collections::BTreeMap;
+
+    fn selected_profile() -> RoutingProfile {
+        RoutingProfile {
+            provider_scope: Some(RoutingProviderScope::Selected),
+            providers: vec!["provider".to_string()],
+            disabled_providers: vec![],
+            account_order: BTreeMap::from([(
+                "provider".to_string(),
+                vec!["account".to_string()],
+            )]),
+            excluded_accounts: vec![],
+            strategy: None,
+            sticky: None,
+        }
+    }
+
+    #[test]
+    fn selected_scope_accepts_a_provider_kept_but_disabled() {
+        let mut profile = selected_profile();
+        profile.disabled_providers.push("provider".to_string());
+        assert!(validate_shape(&profile).is_ok());
+    }
+
+    #[test]
+    fn selected_scope_still_rejects_an_unknown_disabled_provider() {
+        let mut profile = selected_profile();
+        profile.disabled_providers.push("missing".to_string());
+        assert!(validate_shape(&profile).is_err());
+    }
+}

@@ -1273,14 +1273,9 @@ async fn attempt_queue(
                     && adapter.system_proxy_when_unset(),
             };
             // ── 调试模式：抓一份即将发出去的原始报文 ──────────────────
-            // 位置在 `build_chat_request` 之后（URL / 头 / body 都已定稿）。
-            // 每次尝试前刷新一次（退避重试与 401 刷新重试都会走到这里），
-            // 于是留下的是**最终生效**的那一次往返。开关关着时 `capture`
-            // 为 None，这一段完全不执行（零开销）。
+            // capture 由真正的发送函数在每次网络出口定稿后刷新，
+            // 那里同时覆盖退避重发与备用入口，不在这里重复解析请求体
             let capture = ctx.telemetry.capture();
-            if let Some(capture) = capture.as_deref() {
-                capture.reset_request(&transport.url, provider_id, &transport.headers, &plan.body);
-            }
             match send_with_retry(
                 adapter,
                 &transport,
@@ -2889,9 +2884,7 @@ async fn send_with_retry(
         telemetry.note_phase(LogPhase::Waiting);
         if let Some(capture) = capture {
             let actual = network.transport();
-            if let Ok(body) = serde_json::from_str::<Value>(&actual.payload) {
-                capture.reset_request(&actual.url, adapter.provider_id(), &actual.headers, &body);
-            }
+            capture.reset_request(&actual.url, adapter.provider_id(), &actual.headers, &actual.payload);
         }
         let response = match send_or_cancel(&mut network, telemetry).await {
             Ok(response) => {

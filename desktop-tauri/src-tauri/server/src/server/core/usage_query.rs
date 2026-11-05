@@ -178,9 +178,17 @@ async fn query_usage_for(store: &AccountStore, account: &Value) -> Value {
     let not_configured = row.get("code").and_then(Value::as_str)
         == Some(crate::server::core::providers::adapter::USAGE_NOT_CONFIGURED_CODE)
         || matches!(error, Some("没有可用凭证"));
-    let level = if error.is_none() || not_configured { "debug" } else { "warn" };
     let summary = if error.is_none() { "余额查询完成" } else if not_configured { "余额查询未配置" } else { "余额查询失败" };
-    logging::log_event(level, "account", summary, Some(json!({
+    let log_key = format!(
+        "{}|{}|{}|{}",
+        provider,
+        summary,
+        error.unwrap_or(""),
+        row.get("code").and_then(Value::as_str).unwrap_or(""),
+    );
+    if error.is_none() || crate::server::core::usage_records::failure_log_due(log_key) {
+        let level = if error.is_none() || not_configured { "debug" } else { "warn" };
+        logging::log_event(level, "account", summary, Some(json!({
         "provider": provider,
         "providerLabel": crate::server::core::providers::label_of(provider),
         "account": id,
@@ -191,7 +199,8 @@ async fn query_usage_for(store: &AccountStore, account: &Value) -> Value {
         "detail": error,
         "code": row.get("code"),
         "durationMs": started.elapsed().as_millis() as u64,
-    })));
+        })));
+    }
     row
 }
 

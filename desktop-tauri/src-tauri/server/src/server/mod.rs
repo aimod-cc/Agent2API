@@ -362,6 +362,7 @@ impl ServerState {
         // 结果 —— 老用户升级后第一次启动拿到的就是他真正的旧配置，
         // 下面日志裁剪天数与旧文件候选目录才不会用错值。
         let snapshot = config::init(db.clone());
+        api::pipeline::cleanup_debug_files_if_disabled();
         core::task_state::install(db.clone());
         // 每账号的余额查询记录（余额不足跳过 / 自动禁用的底座）：装库句柄时
         // 顺带做旧 kv 快照的一次性迁移与内存事实表的装载（见 usage_records 模块头）。
@@ -537,6 +538,9 @@ impl ServerState {
         // 请求进来才清理，界面打开时看到的就已经是「已中断」的终态
         core::billing::keepalive::install_stats(request_stats.clone());
         request_stats.sweep_stale_running();
+        // 启动时同步收敛旧版 debug 模式留下的正文容量，避免低配置设备
+        // 在第一条请求到来前仍背着超限的下游正文
+        request_stats.prune();
         // ── 僵尸行的主动周期清扫（每 5 分钟一次）─────────────────────
         // 清扫的判定（1 小时阈值）此前只在「下一条请求进来」时顺带跑：
         // 夜间 / 空闲时段没人发请求，卡死的行会一直挂到第二天早上。

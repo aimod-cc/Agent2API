@@ -97,6 +97,6 @@ fn debug_json() -> Value {
     json!({
         config::KEY_DEBUG_MODE: config::current().debug_mode(),
         "count": debug_traffic::count(),
-        "limit": debug_traffic::MAX_ENTRIES,
+        "limit": debug_traffic::max_entries(),
     })
 }
