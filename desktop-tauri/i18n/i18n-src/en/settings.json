@@ -1017,5 +1017,15 @@
   "，替换前的数据已备份为 {name}": ", the pre-replace data was backed up as {name}",
   "，自定义提供商新增 {added} 个、更新 {updated} 个": ", custom providers: {added} added, {updated} updated",
   "；开关关闭时词表不执行": "; rules do not run while masking is disabled",
-  "；网页管理面板已一并开放（浏览器打开同一地址）": "; the web admin panel is also open (open the same address in a browser)"
+  "；网页管理面板已一并开放（浏览器打开同一地址）": "; the web admin panel is also open (open the same address in a browser)",
+  "第三方模型回答完自动折叠过程": "Collapse third-party model work after the answer",
+  "Codex 桌面端在收到带 phase: \"final_answer\" 的助手消息时，才会把这一轮的推理、命令与过程消息收进可折叠的「已处理 X 分钟」；官方模型逐条给出 final_answer / commentary，第三方模型通常不带这个字段，整轮过程就一直展开。开启本项后，网关在重建 Responses 响应时给助手消息补阶段标记：本轮没有工具调用的最后一条消息补 final_answer，之前的正文与过程消息补 commentary。只对经本网关的 Codex 来源 /v1/responses 请求生效，改的是下发给客户端的响应字节；个别上游或客户端不认识这个字段时关掉即可。默认关闭。": "Codex Desktop only collapses this turn's reasoning, commands, and process messages into a collapsible \"Worked for X minutes\" when it receives an assistant message with phase: \"final_answer\"; official models emit final_answer / commentary per message, while third-party models usually omit the field and the whole turn stays expanded. When enabled, the gateway adds phase markers while rebuilding the Responses response: the last message of a turn with no tool call gets final_answer, and earlier text and process messages get commentary. It only applies to Codex-origin /v1/responses requests through this gateway and changes the response bytes sent to the client; turn it off if an upstream or client does not recognize the field. Off by default.",
+  "给 Codex 的响应补阶段标记，回答完后像官方模型一样把推理与命令过程折叠起来": "Add phase markers to Codex responses so reasoning and commands collapse after the answer, like official models",
+  "✅ 第三方模型回答完自动折叠过程已开启": "✅ Collapse third-party model work after the answer enabled",
+  "已关闭第三方模型回答完自动折叠过程": "Collapse third-party model work after the answer disabled",
+  "第三方模型回答完自动折叠过程设置已刷新": "Third-party reasoning collapse setting refreshed",
+  "未能读取第三方模型回答完自动折叠过程设置，请稍后重试": "Could not read the third-party reasoning collapse setting, please try again later",
+  "正在补阶段标记：Codex 桌面端会把这一轮的推理与命令过程折叠起来。": "Adding phase markers: Codex Desktop will collapse this turn's reasoning and commands.",
+  "未开启，第三方模型的推理与命令过程会一直展开。": "Off: third-party models' reasoning and commands stay expanded.",
+  "默认关闭。开启后下一次 Codex 请求立即生效，不用重启；只对 Codex 来源的 /v1/responses 请求补阶段标记，其它客户端与 /v1/chat/completions 不受影响。": "Off by default. Enabling takes effect on the next Codex request without a restart; phase markers are only added to Codex-origin /v1/responses requests, other clients and /v1/chat/completions are unaffected."
 }

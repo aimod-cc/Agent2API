@@ -126,7 +126,6 @@ pub mod onboarding;
 pub mod panel;
 pub mod pipeline;
 mod live_progress;
-mod record_persist;
 // 提供商插件包的管理面（列表 / 安装 / 卸载 / 启停）：插件是用户安装的，
 // 这一组端点就是「装插件」的唯一入口，见该文件模块头
 pub mod plugins;
@@ -151,6 +150,10 @@ pub(crate) mod request_prepare;
 // 同形的单开关端点，转换实施点在 `core::upstream::payload` 的 send_body，
 // 见该文件模块头
 pub mod role_compat;
+// 第三方模型回答完自动折叠过程开关（GET/PUT /api/reasoning-collapse）：与
+// /api/developer-role-compat 同形的单开关端点，实施点在
+// `core::protocol::responses` 的 Responses 事件重建层，见该文件模块头
+pub mod reasoning_collapse;
 pub mod routing_api;
 pub mod routing_flow;
 pub mod routing_groups;

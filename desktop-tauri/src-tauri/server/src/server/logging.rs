@@ -106,7 +106,7 @@ fn store() -> Option<&'static LogStore> {
 /// 是否开启 verbose（默认关闭，与 Node 版一致）
 pub fn is_verbose() -> bool {
     *VERBOSE.get().unwrap_or(&false)
-        || crate::server::config::with_raw(|raw| raw.get("debugMode").and_then(Value::as_bool) == Some(true)).unwrap_or(false)
+        || crate::server::config::debug_mode_enabled()
 }
 
 /// 当前毫秒 Unix 时间戳（对应 Node 版 `Date.now()`）。
@@ -274,13 +274,15 @@ pub fn log_with_level(tag: &str, text: &str, level: &str) {
     }));
 }
 
-/// 调试日志：只有开关打开时才入库（对应 Node 版 verbose()）。
-/// 控制台始终输出，方便排障时用普通启动也能看到细节。
+/// 调试日志：只有开关打开时才输出并入库（对应 Node 版 verbose()）。
+///
+/// 调试关闭时不写控制台，Docker 前台形态的 stderr 会被容器落到宿主机磁盘，
+/// 而转发链路的 verbose 调用点会随请求量持续产生输出
 pub fn verbose(tag: &str, text: &str) {
-    console_line(tag, text);
     if !is_verbose() {
         return;
     }
+    console_line(tag, text);
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return;

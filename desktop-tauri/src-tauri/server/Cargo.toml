@@ -67,7 +67,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 # agent2api-provider-protocol = { path = "../Agent2Providers/crates/provider-protocol" }
 # ```
 # 不要改这一行 —— 那会让干净 clone 的构建依赖某个人的磁盘布局。
-agent2api-provider-protocol = { git = "https://github.com/ProvidersPlugin/Agent2Providers", tag = "v3.4.0" }
+agent2api-provider-protocol = { git = "https://github.com/ProvidersPlugin/Agent2Providers", tag = "v3.4.2" }
 # Qoder 国际版签到的 UMID 组件安装（providers/qoder/risk.rs）：官方 qodercli
 # npm 包是 .tgz（gzip + tar），解出内嵌的 runtime-info 二进制。flate2 已在
 # 依赖树里（image 拉的），声明出来直接复用；tar 解析手写（几十行，见 risk.rs）

@@ -323,6 +323,7 @@ async fn a_real_413_response_is_sent_once_and_handed_back() {
         mock_upstream(413, "application/json; charset=utf-8", APIG_TOO_LARGE_BODY).await;
     let mut budget = RetryBudget::new(3);
     let capture = crate::server::core::debug_traffic::TrafficCapture::begin("payload-too-large");
+    let telemetry = Arc::new(RequestTelemetry::new());
     // 适配器只提供「怎么判上游错误」这一半；413 的处置在**编排层**
     // （`transport::RetryBudget` + `fallback_retry_advice`），因此随便挑一个
     // 内置家即可。原先这里用 ZCode 的实例，它随实现搬到插件了 —— 换成本家
@@ -332,8 +333,10 @@ async fn a_real_413_response_is_sent_once_and_handed_back() {
         &transport,
         &mut budget,
         Some(&capture),
-        &RequestTelemetry::new(),
+        &telemetry,
         false,
+        None,
+        None,
     )
     .await;
     task.abort();

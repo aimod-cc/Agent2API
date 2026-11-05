@@ -8,7 +8,7 @@
 //!
 //! ── `size` 列 ────────────────────────────────────────────
 //! 保存完整报文落库后的文本字节合计，不含 SQLite 页与行开销。
-//! 留存只按条数裁剪，不按该字段删除大报文。
+//! 留存同时按条数与该字段的合计值裁剪，避免大报文堆到近 1 GiB。
 //!
 //! ── 排序键：`ts DESC, rowid DESC` ────────────────────────────
 //! 「最新」按 **ts** 判（`idx_debug_traffic_ts` 正为此存在），同 ts 时用 `rowid`
@@ -29,7 +29,7 @@
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, Connection};
 
-use super::{TrafficEntry, MAX_ENTRIES};
+use super::{max_entries, TrafficEntry, MAX_TOTAL_BYTES};
 
 /// 全部列（所有 SELECT 都按这个顺序取，[`decode_row`] 依赖它；
 /// 不写 `SELECT *` 是为了「加列时读侧要显式跟上」这件事在 diff 里可见）
@@ -202,15 +202,42 @@ pub(super) fn select_one(conn: &Connection, id: &str) -> rusqlite::Result<Option
     }
 }
 
-/// 只按留存条数淘汰旧记录，不因单条报文过大删除它。
-pub(super) fn enforce_limits(conn: &Connection) -> rusqlite::Result<()> {
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM debug_traffic", [], |row| row.get(0))?;
-    if count > MAX_ENTRIES as i64 {
-        conn.execute(
+/// 按留存条数与正文合计字节双重上限淘汰旧记录，返回是否真的删除了行
+pub(super) fn enforce_limits(conn: &Connection) -> rusqlite::Result<bool> {
+    let (count, bytes): (i64, i64) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM debug_traffic",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let mut removed = false;
+    if bytes > MAX_TOTAL_BYTES {
+        // 按实际累计大小删除最旧记录：先算出总超出的字节，再按最新记录
+        // 从后向前累计，保留不超过上限的最长尾部集合
+        removed = conn.execute(
+            "DELETE FROM debug_traffic WHERE id NOT IN (\
+               SELECT id FROM (\
+                 SELECT id, SUM(size) OVER (\
+                   ORDER BY ts DESC, rowid DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\
+                 ) AS cumulative FROM debug_traffic\
+               ) WHERE cumulative <= ?1\
+             )",
+            params![MAX_TOTAL_BYTES],
+        )? > 0;
+    }
+    let limit = max_entries() as i64;
+    if count > limit {
+        removed |= conn.execute(
             "DELETE FROM debug_traffic WHERE id NOT IN \
              (SELECT id FROM debug_traffic ORDER BY ts DESC, rowid DESC LIMIT ?1)",
-            params![MAX_ENTRIES as i64],
-        )?;
+            params![limit],
+        )? > 0;
     }
-    Ok(())
+    Ok(removed)
+}
+
+/// 新库启用增量回收时释放少量空闲页
+///
+/// 必须在事务提交后调用，SQLite 不允许在事务内执行回收
+pub(super) fn incremental_vacuum(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("PRAGMA incremental_vacuum(1024);")
 }

@@ -1991,6 +1991,14 @@ pub fn shim_js() -> &'static str {
       return call('PUT', '/api/developer-role-compat', { developerRoleCompat: enabled === true });
     },
 
+    // ── 第三方模型回答完自动折叠过程 ──
+    // 与桌面桥（src/bridge.rs 的 getReasoningCollapse / saveReasoningCollapse）
+    // 同一映射：两边接口名与签名必须一致，界面代码零改动地跑在两边
+    getReasoningCollapse: function () { return call('GET', '/api/reasoning-collapse'); },
+    saveReasoningCollapse: function (enabled) {
+      return call('PUT', '/api/reasoning-collapse', { thirdPartyReasoningCollapse: enabled === true });
+    },
+
     // ── Cline 伪装头（转发头逐键覆盖）──
     // 与桌面桥（src/bridge.rs 的 getClineHeaders / saveClineHeaders）同一映射。
     // 这两个方法曾经漏在网页桥里：设置页调用 `getClineHeaders` 抛

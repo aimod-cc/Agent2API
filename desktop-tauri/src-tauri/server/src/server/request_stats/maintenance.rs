@@ -46,7 +46,9 @@ impl RequestStats {
             } else {
                 sql::delete_matching(&tx, &plan)?
             };
+            let total = sql::count_all(&tx)?;
             tx.commit()?;
+            self.cached_total.store(total as i64, Ordering::Relaxed);
             Ok(ClearResult {
                 deleted,
                 raw: raw.requests,

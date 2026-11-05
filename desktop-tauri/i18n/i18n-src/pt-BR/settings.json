@@ -1019,5 +1019,15 @@
   "，替换前的数据已备份为 {name}": ", os dados pré-substituição foram backupados como {name}",
   "，自定义提供商新增 {added} 个、更新 {updated} 个": ", provedores personalizados: {added} adicionados, {updated} atualizados",
   "；开关关闭时词表不执行": "; as regras não são executadas quando o mascaramento está desativado",
-  "；网页管理面板已一并开放（浏览器打开同一地址）": "; o painel de administração web também está aberto (acesse pelo mesmo endereço no navegador)"
+  "；网页管理面板已一并开放（浏览器打开同一地址）": "; o painel de administração web também está aberto (acesse pelo mesmo endereço no navegador)",
+  "第三方模型回答完自动折叠过程": "Recolher automaticamente o trabalho de modelos de terceiros após a resposta",
+  "Codex 桌面端在收到带 phase: \"final_answer\" 的助手消息时，才会把这一轮的推理、命令与过程消息收进可折叠的「已处理 X 分钟」；官方模型逐条给出 final_answer / commentary，第三方模型通常不带这个字段，整轮过程就一直展开。开启本项后，网关在重建 Responses 响应时给助手消息补阶段标记：本轮没有工具调用的最后一条消息补 final_answer，之前的正文与过程消息补 commentary。只对经本网关的 Codex 来源 /v1/responses 请求生效，改的是下发给客户端的响应字节；个别上游或客户端不认识这个字段时关掉即可。默认关闭。": "O Codex Desktop só recolhe o raciocínio, os comandos e as mensagens de processo deste turno em um “Trabalhou por X minutos” recolhível quando recebe uma mensagem do assistente com phase: \"final_answer\"; modelos oficiais emitem final_answer / commentary por mensagem, enquanto modelos de terceiros normalmente omitem o campo e o turno inteiro fica expandido. Quando ativado, o gateway adiciona marcadores de fase ao reconstruir a resposta Responses: a última mensagem de um turno sem chamada de ferramenta recebe final_answer, e o texto e as mensagens de processo anteriores recebem commentary. Só vale para requisições /v1/responses com origem Codex através deste gateway e altera os bytes da resposta enviada ao cliente; desative se algum upstream ou cliente não reconhecer o campo. Desativado por padrão.",
+  "给 Codex 的响应补阶段标记，回答完后像官方模型一样把推理与命令过程折叠起来": "Adicionar marcadores de fase às respostas do Codex para recolher o raciocínio e os comandos após a resposta, como nos modelos oficiais",
+  "✅ 第三方模型回答完自动折叠过程已开启": "✅ Recolhimento automático do trabalho de modelos de terceiros após a resposta ativado",
+  "已关闭第三方模型回答完自动折叠过程": "Recolhimento automático do trabalho de modelos de terceiros após a resposta desativado",
+  "第三方模型回答完自动折叠过程设置已刷新": "Configuração de recolhimento do trabalho de modelos de terceiros atualizada",
+  "未能读取第三方模型回答完自动折叠过程设置，请稍后重试": "Não foi possível ler a configuração de recolhimento do trabalho de modelos de terceiros; tente novamente mais tarde",
+  "正在补阶段标记：Codex 桌面端会把这一轮的推理与命令过程折叠起来。": "Adicionando marcadores de fase: o Codex Desktop recolherá o raciocínio e os comandos deste turno.",
+  "未开启，第三方模型的推理与命令过程会一直展开。": "Desativado: o raciocínio e os comandos de modelos de terceiros permanecem expandidos.",
+  "默认关闭。开启后下一次 Codex 请求立即生效，不用重启；只对 Codex 来源的 /v1/responses 请求补阶段标记，其它客户端与 /v1/chat/completions 不受影响。": "Desativado por padrão. Ao ativar, vale já na próxima requisição do Codex, sem reiniciar; os marcadores de fase são adicionados apenas a requisições /v1/responses com origem Codex, e outros clientes e /v1/chat/completions não são afetados."
 }

@@ -10,9 +10,9 @@
 //! 下游侧（客户端发来的请求体 + 网关下发的响应体）由 `request_raw` 表采
 //! （`api::pipeline::capture_raw_body` / `capture_raw_json`），与本表**同一个
 //! 开关**：调试模式开启时两处都采、关闭时两处都不采（预览对话因此默认没有
-//! 正文可看 —— 对齐 OmniProxy 的口径）。另有一份与本开关无关的覆盖式落盘
+//! 正文可看 —— 对齐 OmniProxy 的口径）。另有一份同样受开关控制的覆盖式落盘
 //! （`write_debug_files` → `{config_dir}/debug/last-request.json`），那是
-//! 「最近一次入站请求体」的快照，三者互不重叠。
+//! 「最近一次入站请求体」的快照，关闭调试时会被清理
 //!
 //! ── 为什么单独一张表，不塞进 requests 的行里 ──────────────────
 //! 一次 SSE 响应动辄数百 KB，塞进请求明细会让那张表迅速膨胀、拖慢每一页的
@@ -26,8 +26,8 @@
 //! 不脱敏等于把各家账号的 token 抄在磁盘上。响应头里的 `set-cookie` 同理。
 //!
 //! ── 留存控制 ──────────────────────────────────────────────
-//! 请求体与响应体完整保存，不按单条大小截断；仅超过 [`MAX_ENTRIES`] 时淘汰最旧记录。
-//! 未完成的流按实际收到的字节保存；人为中止不会伪造未收到的内容。
+//! 请求体与响应体在单条上限内完整保存，超过 [`MAX_BODY_BYTES`] 的正文只保留
+//! 状态与头部，按 [`MAX_ENTRIES`] 与 [`MAX_TOTAL_BYTES`] 双重上限淘汰最旧记录
 //!
 //! ── `Db` 是进程级状态（本模块的两处特殊之处之一）────────────
 //! 与 `AccountStore` / `LogStore` / `RequestStats` 不同，本模块没有「注入式句柄」
@@ -64,23 +64,38 @@ use crate::server::logging;
 
 mod sql;
 
-/// 表里保留的最大条数。超过后**精确删到上限**（每次只删超出那几条）。
-///
-/// 取 500：与事件日志的上限同量级，够看「最近这批请求发生了什么」；
-/// 调试模式是**临时排障**用的，不是长期归档 —— 真要长期留，用户该用导出，
-/// 而不是指望这里无限增长。
+/// 调试报文最多保留 100 条，请求日志条数低于 100 时跟随请求日志上限。
 ///
 /// ── 为什么不再「丢最旧的一半」───────────────────────────────
 /// 旧实现的注释写明「丢一半」是为了省下每次超限都整文件重写的代价
 /// （一次重写换掉一半的量，比逐条删便宜）。进数据库后这条理由**消失了**：
 /// 淘汰是一条 DELETE，它的成本与删多少行无关（旧实现里正是「删多少」决定了
 /// 要重写多少字节）。
-/// 精确删到上限的好处是可预期的容量：用户看到 `count()` 就到 500 为止，
-/// 不会出现「刚过 500 就掉到 250」那种一半的跳变。
-/// 代价是超限后每次 `record` 都会发一条 DELETE，但那次删除通常只影响
-/// **一两行**（`record` 每次只加一条，除非有人手工往库里塞了一大批）——
-/// 而且只在超限时才发（见 [`record`] 的先判后删）。
-pub const MAX_ENTRIES: usize = 500;
+/// 精确删到上限的好处是可预期的容量：用户看到 `count()` 就到上限为止，
+/// 不会出现「刚过上限就掉到一半」那种跳变。总数还会再受
+/// [`MAX_TOTAL_BYTES`] 约束，避免大正文合计接近 1 GiB。
+pub const MAX_ENTRIES: usize = 100;
+
+/// 调试报文当前生效的条数上限
+///
+/// 调试报文是请求日志的附属排障数据，不能超过请求日志自身的保留条数；
+/// 请求日志上限高于 100 时仍固定为 100，低于 100 时跟随请求日志上限
+pub fn max_entries() -> usize {
+    crate::server::config::retention_settings()
+        .request_count
+        .clamp(1, MAX_ENTRIES as i64) as usize
+}
+
+/// 调试报文正文的合计上限：默认 128 MiB。
+///
+/// 群晖等低内存设备上，历史 500 条平均 1.8 MiB 的报文会占近 1 GiB，
+/// 查询与淘汰时会同时放大 SQLite 页缓存与进程内存，因此条数上限之外
+/// 还必须限制合计正文字节
+pub const MAX_TOTAL_BYTES: i64 = 128 * 1024 * 1024;
+
+/// 单条请求体或响应体超过该值时不再写调试报文，避免几十 MB 级请求
+/// 被完整复制到 SQLite 并长期占用内存
+pub const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 /// 凭据类请求头：命中即替换成 `[redacted]`（大小写不敏感）。
 ///
@@ -126,25 +141,39 @@ fn db() -> Option<&'static Db> {
 
 /// 初始化存储（启动时调用一次；`OnceLock` 天然幂等 —— 重复调用只有第一次生效）。
 ///
-/// ── 它现在还需要做什么（相比改造前少了一大半）───────────────
-/// 改造前它做三件事：设目录、清空内存、把旧文件载入内存并裁一遍（超限还要
-/// 回写文件）。进数据库后后两件都不需要了：
-///   - **没有「载入」**：库就是全集，读取是一次查询（改造前必须先把文件读进
-///     内存才能 `get` / `count`，那是文件时代的补偿机制）；
-///   - **没有「启动裁剪」**：超限的行由 [`record`] 的留存条数守着，而启动时
-///     库里最多就是上次退出时的状态（那时已经合规）；即便有人手工往库里塞了
-///     超限数据，下一次 `record` 也会收敛它。
-/// 所以它只剩「把 `Db` 装上」这一件事 —— 但**仍然必要且必须被调用**：没装
-/// 就相当于本模块没启用，[`record`] 会静默丢弃、[`get`] 一律 `None`。
+/// ── 为什么启动时要裁剪 ────────────────────────────────────────
+/// 旧版本只按条数限制，存量库可能已经积累近 1 GiB 报文；启动时先按新上限
+/// 收敛一次，后续查询与逐条淘汰才不会长期背着历史峰值
+///
+/// 装载 `Db` **仍然必要且必须被调用**：没装就相当于本模块没启用，
+/// [`record`] 会静默丢弃、[`get`] 一律 `None`
 /// 无返回值、不报错：调试数据不值得让网关起不来（模块头的取向）。
 ///
 /// 无论调试开关是否打开都要初始化（`ServerState::bootstrap` 的注释）：开关是
 /// **逐请求**判定的（改完设置下一个请求就生效），存储没就绪会让开启后的第一批
 /// 请求无处可落。
-pub fn init(db: Option<Db>) {
+pub fn init(installed_db: Option<Db>) {
     // 重复调用只让第一次生效（`set` 失败即已初始化）。与改造前一致：
     // 那时是覆盖目录 + 重新载入，现在库自己就是真相，覆盖没有意义。
-    let _ = DB.set(db);
+    let installed = installed_db.is_some();
+    let _ = DB.set(installed_db);
+    // 旧库可能已经累积了大量报文，启动时立即按条数与总字节上限收敛，
+    // 避免后续每次查询都背着历史峰值工作
+    if installed {
+        let Some(db) = db() else { return };
+        match db.with_mut(|conn| -> rusqlite::Result<()> {
+            let tx = conn.transaction()?;
+            let removed = sql::enforce_limits(&tx)?;
+            tx.commit()?;
+            if removed {
+                sql::incremental_vacuum(conn)?;
+            }
+            Ok(())
+        }) {
+            Some(Ok(())) | None => {}
+            Some(Err(error)) => eprintln!("[Debug] 启动时清理调试报文失败: {error}"),
+        }
+    }
 }
 
 /// 报文数据所在的文件（**就是库文件**；设置页概况用）。
@@ -178,9 +207,48 @@ pub fn count() -> usize {
     }
 }
 
+/// 按当前条数与正文合计上限清理旧调试报文
+pub fn prune() -> usize {
+    let Some(db) = db() else { return 0 };
+    match db.with_mut(|conn| -> rusqlite::Result<usize> {
+        let tx = conn.transaction()?;
+        let (before, _) = sql::count_and_bytes(&tx)?;
+        let removed = sql::enforce_limits(&tx)?;
+        tx.commit()?;
+        let (after, _) = sql::count_and_bytes(conn)?;
+        if removed {
+            sql::incremental_vacuum(conn)?;
+        }
+        Ok(before.saturating_sub(after))
+    }) {
+        Some(Ok(removed)) => removed,
+        Some(Err(error)) => {
+            eprintln!("[Debug] 调试报文裁剪失败: {error}");
+            0
+        }
+        None => 0,
+    }
+}
+
 /// 落一条完整报文；同 id 覆盖，失败只打日志，不影响转发。
+///
+/// 超过 [`MAX_BODY_BYTES`] 的正文直接跳过：此时完整内容已大到足以拖慢
+/// 序列化、SQLite 页缓存与备份，调试记录保留状态码与头即可
 pub fn record(entry: TrafficEntry) {
+    let request_size = entry.request_body.to_string().len();
+    let response_size = entry.response_body.as_deref().map(str::len).unwrap_or(0);
+    if payload_exceeds_limit(request_size, response_size) {
+        eprintln!(
+            "[Debug] 报文超过单条上限，已跳过正文保存: id={} request={} response={}",
+            entry.id, request_size, response_size,
+        );
+        return;
+    }
     super::blocking::in_place(|| record_sync(entry));
+}
+
+fn payload_exceeds_limit(request_size: usize, response_size: usize) -> bool {
+    request_size > MAX_BODY_BYTES || response_size > MAX_BODY_BYTES
 }
 
 fn record_sync(entry: TrafficEntry) {
@@ -191,7 +259,13 @@ fn record_sync(entry: TrafficEntry) {
     };
     // 失败只打控制台：**不能**用 logging::log / verbose —— 它们要写同一个库，
     // 而此刻我们正握着那把锁（见模块头的死锁约束）。
-    match db.with_mut(|conn| sql::upsert_entry(conn, &entry)) {
+    match db.with_mut(|conn| -> rusqlite::Result<()> {
+        let tx = conn.transaction()?;
+        sql::upsert_entry(&tx, &entry)?;
+        sql::enforce_limits(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }) {
         Some(Ok(())) => {}
         Some(Err(error)) => {
             eprintln!("[Debug] 调试报文写入数据库失败: {error}");
@@ -199,11 +273,6 @@ fn record_sync(entry: TrafficEntry) {
         }
         // 连接中毒（`Db` 的取向：不拿半截数据当真相）
         None => return,
-    }
-    // 写入后只清理超过留存条数的旧记录。
-    match db.with(|conn| sql::enforce_limits(conn)) {
-        Some(Ok(())) | None => {}
-        Some(Err(error)) => eprintln!("[Debug] 调试报文裁剪失败: {error}"),
     }
 }
 
@@ -323,6 +392,8 @@ struct CaptureState {
     sent: bool,
     /// 已落库（保证只写一次）
     done: bool,
+    /// 响应体已超过采集上限，后续分片不再累积
+    body_overflow: bool,
 }
 
 impl TrafficCapture {
@@ -331,10 +402,11 @@ impl TrafficCapture {
     pub fn begin(id: &str) -> Self {
         Self {
             state: std::sync::Mutex::new(CaptureState {
-                entry: blank_entry(id, "", "", &[], &Value::Null),
+                entry: blank_entry(id, "", "", &[], None),
                 body: Vec::new(),
                 sent: false,
                 done: false,
+                body_overflow: false,
             }),
         }
     }
@@ -349,11 +421,21 @@ impl TrafficCapture {
         url: &str,
         provider: &str,
         headers: &[(String, String)],
-        body: &Value,
+        body: &str,
     ) {
+        if body.len() > MAX_BODY_BYTES {
+            let mut guard = self.lock();
+            guard.entry = blank_entry(&guard.entry.id.clone(), url, provider, headers, None);
+            guard.body.clear();
+            guard.body_overflow = true;
+            guard.sent = true;
+            return;
+        }
+        let body = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
         let mut guard = self.lock();
-        guard.entry = blank_entry(&guard.entry.id.clone(), url, provider, headers, body);
+        guard.entry = blank_entry(&guard.entry.id.clone(), url, provider, headers, Some(&body));
         guard.body.clear();
+        guard.body_overflow = false;
         // 走到这里说明请求体已构造、即将发出 —— 这条报文有内容可落
         guard.sent = true;
         // done 不重置：本条请求只写一行，重试不产生新条目
@@ -367,6 +449,7 @@ impl TrafficCapture {
         let mut guard = self.lock();
         guard.entry.status = Some(status);
         guard.body.clear();
+        guard.body_overflow = false;
         let pairs = headers
             .iter()
             .map(|(name, value)| (name.as_str(), value.to_str().unwrap_or("[binary]")));
@@ -374,7 +457,16 @@ impl TrafficCapture {
     }
 
     pub fn push(&self, chunk: &[u8]) {
-        self.lock().body.extend_from_slice(chunk);
+        let mut guard = self.lock();
+        if guard.body_overflow {
+            return;
+        }
+        if guard.body.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {
+            guard.body.clear();
+            guard.body_overflow = true;
+            return;
+        }
+        guard.body.extend_from_slice(chunk);
     }
 
     #[cfg(test)]
@@ -395,7 +487,11 @@ impl TrafficCapture {
         if !guard.sent {
             return;
         }
-        let body = std::mem::take(&mut guard.body);
+        let body = if guard.body_overflow {
+            Vec::new()
+        } else {
+            std::mem::take(&mut guard.body)
+        };
         if !body.is_empty() {
             // 字符可能横跨网络分片，完整累积后再解码。
             guard.entry.response_body = Some(match String::from_utf8(body) {
@@ -403,7 +499,7 @@ impl TrafficCapture {
                 Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
             });
         }
-        let entry = std::mem::replace(&mut guard.entry, blank_entry("", "", "", &[], &Value::Null));
+        let entry = std::mem::replace(&mut guard.entry, blank_entry("", "", "", &[], None));
         drop(guard);
         record(entry);
     }
@@ -421,13 +517,84 @@ impl Drop for TrafficCapture {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{MAX_BODY_BYTES, MAX_ENTRIES, MAX_TOTAL_BYTES, TrafficEntry};
+    use crate::server::db::test_temp::TempDb;
+
+    fn entry(id: &str, ts: i64, size: usize) -> TrafficEntry {
+        TrafficEntry {
+            id: id.to_string(),
+            ts,
+            url: "https://example.test/v1/chat/completions".to_string(),
+            provider: "test".to_string(),
+            request_headers: serde_json::json!({}),
+            request_body: serde_json::json!({"payload": "x".repeat(size)}),
+            status: Some(200),
+            response_headers: None,
+            response_body: None,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn total_byte_limit_keeps_newest_rows() {
+        let (db, _guard) = TempDb::open("debug-limit");
+        let pragmas = db
+            .with(|conn| {
+                let auto_vacuum = conn
+                    .pragma_query_value(None, "auto_vacuum", |row| row.get::<_, i64>(0))
+                    .ok()?;
+                let wal_autocheckpoint = conn
+                    .pragma_query_value(None, "wal_autocheckpoint", |row| row.get::<_, i64>(0))
+                    .ok()?;
+                Some((auto_vacuum, wal_autocheckpoint))
+            })
+            .flatten();
+        assert_eq!(pragmas, Some((2, 10000)));
+        let _ = db.with_mut(|conn| {
+            for (index, size) in [1usize, 2, 3].into_iter().enumerate() {
+                super::sql::upsert_entry(conn, &entry(&format!("e{index}"), index as i64, size))?;
+            }
+            conn.execute(
+                "UPDATE debug_traffic SET size = 100000000 WHERE id IN ('e0', 'e1', 'e2')",
+                [],
+            )?;
+            super::sql::enforce_limits(conn)
+        });
+        let rows = db.with(|conn| {
+            conn.query_row("SELECT COUNT(*), COALESCE(SUM(size),0) FROM debug_traffic", [], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })
+        });
+        let (count, bytes) = rows.and_then(Result::ok).unwrap_or((0, 0));
+        assert!(count <= 2);
+        assert!(bytes <= MAX_TOTAL_BYTES);
+        assert!(MAX_BODY_BYTES > 0 && MAX_TOTAL_BYTES > 0);
+    }
+
+    #[test]
+    fn oversized_body_is_not_recorded() {
+        let entry = entry("oversized", 4, MAX_BODY_BYTES);
+        let request_size = entry.request_body.to_string().len();
+        assert!(super::payload_exceeds_limit(request_size, 0));
+    }
+
+    #[test]
+    fn entry_limit_never_exceeds_one_hundred() {
+        let request_limit = crate::server::config::retention_settings().request_count;
+        assert_eq!(super::max_entries(), request_limit.clamp(1, 100) as usize);
+        assert_eq!(MAX_ENTRIES, 100);
+    }
+}
+
 /// 一条空白记录的构造（`begin` / `reset_request` 共用）
 fn blank_entry(
     id: &str,
     url: &str,
     provider: &str,
     headers: &[(String, String)],
-    body: &Value,
+    body: Option<&Value>,
 ) -> TrafficEntry {
     let pairs = headers
         .iter()
@@ -438,7 +605,7 @@ fn blank_entry(
         url: url.to_string(),
         provider: provider.to_string(),
         request_headers: redact_headers(pairs),
-        request_body: body.clone(),
+        request_body: body.cloned().unwrap_or(Value::Null),
         status: None,
         response_headers: None,
         response_body: None,
@@ -454,7 +621,7 @@ fn blank_entry(
 /// 开关改完下一个请求就生效，不必重启。转发热路径上多一次读锁是可接受的
 /// —— 与「每次重试判定都读重试设置」同一取向（见 `config::RetrySettings`）。
 pub fn enabled() -> bool {
-    crate::server::config::current().debug_mode()
+    crate::server::config::debug_mode_enabled()
 }
 
 /// 迁移项用：把一批旧文件条目写进 `debug_traffic` 表（**一个事务**，含导入后的裁剪）。
@@ -490,8 +657,11 @@ pub(crate) fn import_legacy(
             skipped += 1;
         }
     }
-    sql::enforce_limits(&tx)?;
+    let removed = sql::enforce_limits(&tx)?;
     tx.commit()?;
+    if removed {
+        sql::incremental_vacuum(conn)?;
+    }
     Ok((imported, skipped))
 }
 

@@ -206,7 +206,7 @@ pub fn record_activity(
         entry.status = result.as_ref().err().map(|error| i64::from(error.http_status().as_u16())).unwrap_or(502);
         entry.error = Some(result.as_ref().err().map(|error| error.message.clone()).unwrap_or_else(|| "日活模型保活未成功，详情见签到记录".to_string()));
     }
-    stats.record(entry);
+    stats.record(entry, None);
 }
 
 /// 对外状态（签到中心快照的 `keepalive` 段与保存响应共用这一份）：

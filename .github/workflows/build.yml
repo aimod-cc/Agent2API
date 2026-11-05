@@ -29,7 +29,7 @@ name: build
 # 「需要签名密钥、只能在打包机上出」的那一半。
 #
 # ── 触发方式 ──────────────────────────────────────────────────
-#   本文件只做派发，实际构建见本文件下半部分「2026-10：编译搬到独立构建账号」。
+#   本文件只做手动派发，实际构建见本文件下半部分「2026-10：编译搬到独立构建账号」。
 #   镜像构建（原 docker.yml）也已整体搬到构建仓库，源码仓库不再保留那份。
 #
 # ── action 版本为什么都钉在大版本 v7（本次升级）─────────────────
@@ -122,9 +122,6 @@ name: build
 # `scripts/release.sh` 挂到构建仓库（脚本里的 `BUILD_REPO` 已指向那里）。
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       version:
@@ -142,13 +139,8 @@ jobs:
           INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            REF="$GITHUB_REF_NAME"
-            VERSION="${REF#v}"
-          else
-            VERSION="$INPUT_VERSION"
-            REF="v$VERSION"
-          fi
+          VERSION="$INPUT_VERSION"
+          REF="v$VERSION"
           # 换行或引号会往下面的 JSON 里注入字段
           [[ "$VERSION" =~ ^[0-9][0-9A-Za-z.+-]*$ ]] || { echo "版本号不合法: $VERSION" >&2; exit 1; }
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"

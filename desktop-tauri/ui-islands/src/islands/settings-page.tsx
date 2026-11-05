@@ -71,6 +71,7 @@ import {
   panelLogout,
   refreshDebug,
   refreshDeveloperRoleCompat,
+  refreshReasoningCollapse,
   refreshImageCompress,
   refreshClineHeaders,
   refreshZcodeVersion,
@@ -114,6 +115,7 @@ import {
   saveRetentionField,
   saveRetryField,
   saveDeveloperRoleCompat,
+  saveReasoningCollapse,
   saveTimeoutField,
   saveToggle,
   selectCategory,
@@ -1384,6 +1386,41 @@ function GatewayPane({ snap, panels }: { snap: SettingsSnapshot; panels: Set<str
                 : snap.developerRoleCompat.on ? STATES.roleCompatOn : STATES.roleCompatOff}
           </div>
           <div className='hint retention-note'>{NOTES.developerRoleCompat}</div>
+        </CardContent>
+      </Card>
+
+      <Card render={<section />} className='panel'>
+        <PanelHead
+          title={t('第三方模型回答完自动折叠过程')}
+          tip={TIPS.reasoningCollapse}
+          badge={snap.reasoningCollapse.status === 'ready'
+            ? <StatusBadge tone='ok'>{t('已生效')}</StatusBadge>
+            : snap.reasoningCollapse.status === 'unavailable'
+              ? <StatusBadge tone='bad'>{t('不可用')}</StatusBadge>
+              : <StatusBadge tone='idle'>{t('检测中…')}</StatusBadge>}
+          actions={
+            <RefreshButton id='btn-reasoning-collapse-refresh' onClick={() => void refreshReasoningCollapse()} />
+          }
+        />
+        <CardContent className='panel-body'>
+          <div className='settings-switches'>
+            <SwitchRow
+              id='settings-reasoning-collapse'
+              label={t('给 Codex 的响应补阶段标记，回答完后像官方模型一样把推理与命令过程折叠起来')}
+              checked={snap.reasoningCollapse.on}
+              // 读到后端值之前不许切（与 developerRoleCompat 同一取舍）
+              disabled={snap.reasoningCollapse.status !== 'ready' || snap.busy === 'reasoningCollapse'}
+              onCheckedChange={next => void saveReasoningCollapse(next)}
+            />
+          </div>
+          <div className='settings-state'>
+            {snap.reasoningCollapse.status === 'loading'
+              ? STATES.appLoading
+              : snap.reasoningCollapse.status === 'unavailable'
+                ? STATES.reasoningCollapseUnavailable
+                : snap.reasoningCollapse.on ? STATES.reasoningCollapseOn : STATES.reasoningCollapseOff}
+          </div>
+          <div className='hint retention-note'>{NOTES.reasoningCollapse}</div>
         </CardContent>
       </Card>
 

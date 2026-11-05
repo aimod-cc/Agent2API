@@ -19,6 +19,9 @@ name: frontend-artifacts
 # 本工作流的 Linux 上分别验证：两边都产出 LF，且与入库内容一致（入库的 blob
 # 也是 LF；仓库没有 .gitattributes，Linux 侧 autocrlf 为 false，不会来回转换）。
 #
+# ── 触发方式 ──────────────────────────────────────────────────
+# 仅允许在 Actions 页面手动触发，不响应分支推送和拉取请求
+#
 # ── 差异提示 ──────────────────────────────────────────────────
 # 失败时输出差异文件清单与内容摘要。最常见的原因按频率排：
 #   1. 改了 `ui-islands/src/**` 却没跑 `npm run build`；
@@ -26,10 +29,6 @@ name: frontend-artifacts
 #   3. 用了与 lock 文件不同的依赖版本（先 `npm ci` 再构建）。
 
 on:
-  push:
-    branches: [main, beta]
-  pull_request:
-    branches: [main, beta]
   workflow_dispatch:
 
 permissions:

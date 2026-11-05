@@ -10,7 +10,7 @@ pub use presentation::{category_for_tag, LogGroup, LogView};
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::{Duration as ChronoDuration, Local, TimeZone};
@@ -61,13 +61,6 @@ pub const CATEGORIES: [(&str, &str); 11] = [
 const MAX_MESSAGE_LENGTH: usize = 1000;
 const MAX_DATA_KEYS: usize = 24;
 
-/// 写入多少条才做一次保留期 / 容量裁剪。
-///
-/// 原先每写一条日志都要做两次 `COUNT(*)` + 两次 DELETE 来判断是否超限；
-/// 日志页空闲时也会持续写心跳类日志，这几次全表扫描没有意义。按批裁剪把
-/// 写入路径压成「一条 INSERT」，最多让容量超出 63 条（下一次裁剪抹平）。
-const MAINTENANCE_EVERY: u64 = 64;
-
 /// 日志内容版本：任何会改变查询/统计结果的写入（追加、裁剪、清空）都 +1。
 ///
 /// 缓存只服务「同一次读取反复发生」的场景（日志页 1 秒轮询、统计与列表
@@ -86,15 +79,11 @@ fn cache_epoch() -> u64 {
     CACHE_EPOCH.load(Ordering::Relaxed)
 }
 
-fn should_trim_now() -> bool {
-    let count = APPENDS_SINCE_TRIM.fetch_add(1, Ordering::Relaxed) + 1;
-    if count >= MAINTENANCE_EVERY {
-        APPENDS_SINCE_TRIM.store(0, Ordering::Relaxed);
-        true
-    } else {
-        false
-    }
-}
+
+/// 日志保留期维护间隔：插入日志不必每次都重算全表计数
+const MAINTENANCE_INTERVAL_MS: i64 = 60 * 1000;
+/// 两次维护之间允许写入的日志条数
+const MAINTENANCE_WRITE_INTERVAL: u64 = 128;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LogEntry {
@@ -225,6 +214,8 @@ pub struct LogStore {
     /// 全局统计（级别 / 分类条数）。日志页与导航角标都读它；没有新日志时
     /// 直接复用，避免每秒重扫整表。
     stats_cache: Mutex<Option<(u64, Stats)>>,
+    last_maintenance_ms: AtomicI64,
+    writes_since_maintenance: AtomicU64,
 }
 
 struct CachedQuery {
@@ -249,6 +240,8 @@ impl LogStore {
             inner: Mutex::new(()),
             query_cache: Mutex::new(VecDeque::new()),
             stats_cache: Mutex::new(None),
+            last_maintenance_ms: AtomicI64::new(0),
+            writes_since_maintenance: AtomicU64::new(0),
         }
     }
 
@@ -309,24 +302,48 @@ impl LogStore {
             .max(cutoff_ms(DEBUG_RETENTION_DAYS))
     }
 
+    /// 判断本次写入是否要顺带执行保留期与容量维护
+    fn maintenance_due(&self) -> bool {
+        let now = crate::server::logging::now_ms();
+        let last = self.last_maintenance_ms.load(Ordering::Relaxed);
+        let writes = self.writes_since_maintenance.fetch_add(1, Ordering::Relaxed) + 1;
+        if last != 0
+            && now.saturating_sub(last) < MAINTENANCE_INTERVAL_MS
+            && writes < MAINTENANCE_WRITE_INTERVAL
+        {
+            return false;
+        }
+        if self
+            .last_maintenance_ms
+            .compare_exchange(last, now, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            self.writes_since_maintenance.store(0, Ordering::Relaxed);
+            return true;
+        }
+        false
+    }
+
     pub fn prune(&self) -> usize {
         let guard = self.guard();
         let cutoff = self.retention_cutoff_ms();
         let debug_cutoff = self.debug_cutoff_ms();
-        let removed = self
-            .with_conn_mut(&guard, |conn| {
-                let tx = conn.transaction()?;
-                let removed = sql::delete_expired(&tx, cutoff, None)?
-                    + sql::delete_expired_debug(&tx, debug_cutoff, None)?
-                    + sql::trim_to_capacity(&tx, retention_capacity())?;
-                tx.commit()?;
-                Ok(removed)
-            })
-            .unwrap_or(0);
+        let removed = self.with_conn_mut(&guard, |conn| {
+            let tx = conn.transaction()?;
+            let removed = sql::delete_expired(&tx, cutoff, None)?
+                + sql::delete_expired_debug(&tx, debug_cutoff, None)?
+                + sql::trim_to_capacity(&tx, retention_capacity())?;
+            tx.commit()?;
+            Ok(removed)
+        })
+        .unwrap_or(0);
         // 显式裁剪（启动 / 改保留期 / 手动清空）之后重置批次计数：下一次写入
-        // 不必再从头攒 64 条才检查一次。即便这次没有删行，保留期上限本身可能
+        // 不必再从头攒 128 条才检查一次。即便这次没有删行，保留期上限本身可能
         // 已经变了（`Stats.max` 读的是配置），缓存也要失效。
         APPENDS_SINCE_TRIM.store(0, Ordering::Relaxed);
+        self.last_maintenance_ms
+            .store(crate::server::logging::now_ms(), Ordering::Relaxed);
+        self.writes_since_maintenance.store(0, Ordering::Relaxed);
         bump_cache_epoch();
         removed
     }
@@ -337,14 +354,11 @@ impl LogStore {
             return None;
         }
         let guard = self.guard();
-        let cutoff = self.retention_cutoff_ms();
-        let debug_cutoff = self.debug_cutoff_ms();
+        let maintenance_due = self.maintenance_due();
         let ts = entry.ts.unwrap_or_else(crate::server::logging::now_ms);
         let level = normalize_level(entry.level);
         let category = normalize_category(entry.category);
         let data = normalize_data(entry.data);
-        // 保留期 / 容量裁剪按批做，见 `MAINTENANCE_EVERY` 的说明。
-        let trim_now = should_trim_now();
         let result = self.with_conn_mut(&guard, |conn| {
             let tx = conn.transaction()?;
             let id = sql::allocate_next_id(&tx)?;
@@ -357,10 +371,12 @@ impl LogStore {
                 data,
             });
             sql::insert(&tx, &record)?;
-            if trim_now {
+            if maintenance_due {
+                let cutoff = self.retention_cutoff_ms();
+                let debug_cutoff = self.debug_cutoff_ms();
+                let capacity = retention_capacity();
                 sql::delete_expired(&tx, cutoff, Some(id))?;
                 sql::delete_expired_debug(&tx, debug_cutoff, Some(id))?;
-                let capacity = retention_capacity();
                 sql::trim_level_capacity(&tx, &record.level, capacity)?;
                 sql::trim_total_capacity(&tx, capacity)?;
             }

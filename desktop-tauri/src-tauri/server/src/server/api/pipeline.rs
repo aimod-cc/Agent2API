@@ -36,7 +36,7 @@ use crate::server::core::upstream::usage::{self, RequestTelemetry, TelemetrySnap
 use crate::server::errors::GatewayError;
 use crate::server::logging;
 use crate::server::request_stats::{
-    AttemptDetail, NewRequestEntry, RequestStats, RetryEvent, RunningProgress, SensitiveHit,
+    AttemptDetail, NewRequestEntry, RequestStats, RetryEvent, SensitiveHit,
 };
 use crate::server::ServerState;
 
@@ -48,6 +48,8 @@ use raw::RawCapture;
 const DEBUG_DIR: &str = "debug";
 const DEBUG_REQUEST_FILE: &str = "last-request.json";
 const DEBUG_META_FILE: &str = "last-request.meta.txt";
+/// 调试快照文件的开关状态：0 = 未判定、1 = 当前开启、2 = 当前关闭
+static DEBUG_SNAPSHOT_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// 非调试请求的错误摘要上限；调试请求保留完整错误。
 const ERROR_SUMMARY_CHARS: usize = 200;
@@ -495,32 +497,22 @@ pub fn live_row_sink(
     id: String,
     started_at: i64,
 ) -> impl Fn(&TelemetrySnapshot) + Send + Sync {
+    let live = super::live_progress::sink(stats.clone(), id.clone());
     move |snapshot| {
-        stats.update_running(
-            &id,
-            &RunningProgress {
-                provider: snapshot.provider.clone().unwrap_or_default(),
-                account_id: snapshot.account_id.clone(),
-                account_name: snapshot.account_name.clone(),
-                upstream_model: snapshot.upstream_model.clone(),
-                upstream_reasoning: snapshot.upstream_reasoning.clone(),
-                // 与收尾同口径：一次都没发出去（0）按 1 次算，理由见
-                // `TelemetrySnapshot::attempts` 的说明
-                attempts: snapshot.attempts.max(1),
-                first_response_ms: snapshot.first_response_at.map(|at| (at - started_at).max(0)),
-                // 阶段与阶段起点：起点为 None 只可能是「还停在初始阶段（连接中）、
-                // 一次都没切换过」——那个阶段的起点就是**请求开始时刻**（下面这个
-                // started_at，与插入在途行时写进 phase_started_at 的值同源），
-                // 所以用 started_at 兜底。不兜的话这一列会写进 NULL，
-                // 而状态列的第二行按它算「连接中已持续多久」会算出个负数或
-                // 干脆没有 —— 两种都不该出现在「已受理但还没发出去」的请求上
-                phase: snapshot.phase.as_str().to_string(),
-                phase_started_at: snapshot.phase_started_at.or(Some(started_at)),
-                attempt_details: stored_attempt_details(&snapshot.attempts_detail),
-                route: snapshot.route.clone(),
-                sensitive_hits: stored_sensitive_hits(&snapshot.sensitive_hits),
-            },
-        );
+        live(crate::server::request_stats::RunningProgress {
+            provider: snapshot.provider.clone().unwrap_or_default(),
+            account_id: snapshot.account_id.clone(),
+            account_name: snapshot.account_name.clone(),
+            upstream_model: snapshot.upstream_model.clone(),
+            upstream_reasoning: snapshot.upstream_reasoning.clone(),
+            attempts: snapshot.attempts.max(1),
+            first_response_ms: snapshot.first_response_at.map(|at| (at - started_at).max(0)),
+            phase: snapshot.phase.as_str().to_string(),
+            phase_started_at: snapshot.phase_started_at.or(Some(started_at)),
+            attempt_details: stored_attempt_details(&snapshot.attempts_detail),
+            route: snapshot.route.clone(),
+            sensitive_hits: stored_sensitive_hits(&snapshot.sensitive_hits),
+        });
     }
 }
 
@@ -662,11 +654,15 @@ pub fn record_entry(context: &RecordContext, fallback_error: Option<String>) {
     let limited_model = if entry.upstream_model.is_empty() { entry.model.clone() } else { entry.upstream_model.clone() };
     let limited_request = entry.id.clone();
     let sent = snapshot.attempts > 0;
-    context.stats.record(entry);
-    if sent {
-        limiter::counter::note(&limited_account, &limited_request, &limited_model,
-            &snapshot.quota_channel, limited_tokens, context.started_at);
-    }
+    let limiter_event = sent.then_some((
+        limited_account.as_str(),
+        limited_request.as_str(),
+        limited_model.as_str(),
+        snapshot.quota_channel.as_str(),
+        limited_tokens,
+        context.started_at,
+    ));
+    context.stats.record(entry, limiter_event);
     if !limited_account.is_empty() {
         limiter::note_request_tokens(&limited_account, limited_tokens, finished_at);
     }
@@ -1009,19 +1005,46 @@ pub fn error_response(
 /// 调试落盘：原始 body + 一行 meta（覆盖写；**失败不影响请求**）。
 ///
 /// 与 Node 版一致：目录不存在时创建，任何 IO 失败都静默吞掉 ——
-/// 调试落盘是排障辅助，不能因为它失败就让用户的请求失败。
+/// 调试落盘是排障辅助，不能因为它失败就让用户的请求失败，超过 8 MiB 的
+/// 请求只写元数据，避免每次请求都把百 MB 级正文复制到群晖磁盘
 pub fn write_debug_files(body: &[u8], method: &str, path: &str, user_agent: &str) {
     let dir = config::config_dir().join(DEBUG_DIR);
+    use std::sync::atomic::Ordering;
+    if !crate::server::core::debug_traffic::enabled() {
+        if DEBUG_SNAPSHOT_STATE.swap(2, Ordering::Relaxed) != 2 {
+            cleanup_debug_files();
+        }
+        return;
+    }
+    DEBUG_SNAPSHOT_STATE.store(1, Ordering::Relaxed);
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let _ = std::fs::write(dir.join(DEBUG_REQUEST_FILE), body);
+    if body.len() <= crate::server::core::debug_traffic::MAX_BODY_BYTES {
+        let _ = std::fs::write(dir.join(DEBUG_REQUEST_FILE), body);
+    } else {
+        let _ = std::fs::remove_file(dir.join(DEBUG_REQUEST_FILE));
+    }
     let meta = format!(
         "{} {method} {path} {}B ua={user_agent}",
         iso_timestamp(),
         body.len(),
     );
     let _ = std::fs::write(dir.join(DEBUG_META_FILE), meta);
+}
+
+/// 调试关闭时清理历史快照，避免关闭后仍长期占着上次的大请求正文
+pub fn cleanup_debug_files_if_disabled() {
+    if !crate::server::core::debug_traffic::enabled() {
+        cleanup_debug_files();
+        DEBUG_SNAPSHOT_STATE.store(2, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn cleanup_debug_files() {
+    let dir = config::config_dir().join(DEBUG_DIR);
+    let _ = std::fs::remove_file(dir.join(DEBUG_REQUEST_FILE));
+    let _ = std::fs::remove_file(dir.join(DEBUG_META_FILE));
 }
 
 /// ISO-8601 UTC 时间戳（对应 Node 的 `new Date().toISOString()`）
@@ -1236,6 +1259,10 @@ mod tests {
             limit: Some(5),
             model: None,
             provider: None,
+            client: None,
+            api_key: None,
+            production_only: false,
+            completed_only: false,
             status: None,
             start: None,
             end: None,

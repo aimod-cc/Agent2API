@@ -1,0 +1,219 @@
+name: performance-build
+
+# 个人 fork 的 Windows 资产、GHCR 容器镜像与草稿 Release 构建
+#
+# 只保留 Windows 桌面端、Windows 服务端和 linux/amd64 容器镜像
+# 工作流只允许在 Actions 页面手动触发，不响应标签推送
+# Release 固定按应用版本创建为草稿，由人工确认后再正式发布
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows 桌面端
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: 安装 Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop-tauri/package-lock.json
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 依赖
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-tauri/src-tauri -> ../../target
+
+      - name: 安装桌面端依赖
+        run: npm --prefix desktop-tauri ci
+
+      - name: 构建 Windows 安装包
+        run: npm --prefix desktop-tauri run build
+
+      - name: 上传 Windows 安装包
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-nsis
+          path: target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+  windows-server:
+    name: Windows 服务端
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 依赖
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-tauri/src-tauri -> ../../target
+
+      - name: 构建服务端
+        working-directory: desktop-tauri/src-tauri
+        run: cargo build --release -p agent2api-server --bin agent2api-server
+
+      - name: 打包服务端
+        shell: pwsh
+        run: |
+          $name = "agent2api-server-windows-amd64"
+          $stage = "stage/$name"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          Copy-Item "target/release/agent2api-server.exe" "$stage/"
+          Copy-Item -Recurse "desktop-tauri/ui" "$stage/ui"
+          Copy-Item "packaging/windows/install-service.ps1" "$stage/"
+
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path "$stage/*" -DestinationPath "dist/$name.zip" -Force
+
+          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii "dist/$name.zip.sha256"
+
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - name: 上传 Windows 服务端包
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-server-amd64
+          path: dist/*
+          if-no-files-found: error
+
+  docker:
+    name: GHCR linux/amd64 镜像
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 安装 Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 生成镜像标签
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/a2api
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          tags: |
+            type=raw,value=latest
+
+      - name: 构建并推送镜像
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    name: 创建草稿 Release
+    needs:
+      - windows
+      - windows-server
+      - docker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 下载 Windows 桌面端资产
+        uses: actions/download-artifact@v7
+        with:
+          name: windows-nsis
+          path: dist
+
+      - name: 下载 Windows 服务端资产
+        uses: actions/download-artifact@v7
+        with:
+          name: windows-server-amd64
+          path: dist
+
+      - name: 校验 Release 附件
+        id: release
+        run: |
+          set -euo pipefail
+          cd dist
+          desktop_count="$(find . -maxdepth 1 -type f -name '*.exe' | wc -l)"
+          zip_count="$(find . -maxdepth 1 -type f -name '*.zip' | wc -l)"
+          checksum_count="$(find . -maxdepth 1 -type f -name '*.sha256' | wc -l)"
+          if [[ "$desktop_count" -ne 1 || "$zip_count" -ne 1 || "$checksum_count" -ne 1 ]]; then
+            echo "::error::Release 附件应为桌面端、服务端包和校验文件各一个"
+            find . -maxdepth 1 -type f -printf '%f\n' | sort
+            exit 1
+          fi
+          for checksum in *.sha256; do
+            sha256sum --check "$checksum" --status
+          done
+          cd ..
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' desktop-tauri/src-tauri/server/Cargo.toml | head -1)"
+          desktop_version="$(jq -r .version desktop-tauri/package.json)"
+          app_version="$(jq -r .version package.json)"
+          tauri_version="$(jq -r .version desktop-tauri/src-tauri/tauri.conf.json)"
+          desktop_rust_version="$(sed -n 's/^version = "\(.*\)"/\1/p' desktop-tauri/src-tauri/Cargo.toml | head -1)"
+          mobile_version="$(jq -r .version desktop-tauri/mobile/package.json)"
+          if [[ -z "$version" || "$desktop_version" != "$version" || "$app_version" != "$version" || "$tauri_version" != "$version" || "$desktop_rust_version" != "$version" || "$mobile_version" != "$version" ]]; then
+            echo "::error::应用版本号不一致，服务端=$version 桌面端=$desktop_version 根目录=$app_version Tauri=$tauri_version 桌面端Rust=$desktop_rust_version 手机端=$mobile_version"
+            exit 1
+          fi
+          provider_protocol_tag="$(sed -n '/agent2api-provider-protocol =/s/.*tag = "v\([^"]*\)".*/\1/p' desktop-tauri/src-tauri/server/Cargo.toml | head -1)"
+          if [[ "$provider_protocol_tag" != "$version" ]]; then
+            echo "::error::提供商协议库版本与网关不一致，网关=$version 协议库=$provider_protocol_tag"
+            exit 1
+          fi
+          printf '%s\n' \
+            "Agent2API $version 草稿 Release" \
+            "" \
+            "本 Release 仅包含 Windows 桌面端与 Windows 服务端资产。" \
+            "" \
+            "- Windows 桌面端：windows-nsis" \
+            "- Windows 服务端：windows-server-amd64" \
+            "- 容器镜像：ghcr.io/${{ github.repository_owner }}/a2api:latest（linux/amd64）" \
+            "" \
+            "请在确认 Windows 附件与容器镜像后，再手动将本 Release 正式发布。" > notes
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: 创建或更新草稿 Release
+        uses: ncipollo/release-action@v1.21.0
+        with:
+          allowUpdates: true
+          replacesArtifacts: true
+          artifacts: "dist/*"
+          bodyFile: notes
+          draft: true
+          tag: "v${{ steps.release.outputs.version }}"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          updateOnlyUnreleased: true

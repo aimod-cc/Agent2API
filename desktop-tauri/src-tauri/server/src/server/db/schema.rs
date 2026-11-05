@@ -491,7 +491,7 @@ CREATE TABLE IF NOT EXISTS request_daily (
 -- 而头部哪怕没有也应该是 `'{}'`（前端按对象读）。
 -- 为什么体用 TEXT 而不用 BLOB：里面是 SSE 文本 / JSON 文本，存 TEXT 才能在
 -- `sqlite3` 命令行里直接看（排障场景这是主要用法）。
--- truncated 保留历史报文的截断标记；新采集的正文不截断。
+-- truncated 保留历史报文的截断标记；新采集的正文受单条与合计字节上限约束。
 -- size 是完整报文落库后的文本字节合计，不含 SQLite 页与行开销。
 -- 索引只有 ts：调试报文按时间倒序翻页是唯一的批量读法，其余都按主键 id 取。
 CREATE TABLE IF NOT EXISTS debug_traffic (

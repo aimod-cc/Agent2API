@@ -709,6 +709,16 @@ pub fn panel_router(state: ServerState) -> Router {
             "/api/developer-role-compat",
             get(api::role_compat::get_role_compat).put(api::role_compat::put_role_compat),
         )
+        // ── 第三方模型回答完自动折叠过程开关 ──
+        // 与 /api/developer-role-compat 同形的单开关端点（GET 读 / PUT 写），
+        // 挂 protected：它决定下发给客户端的 Responses 事件里要不要补阶段标记
+        // （改的是协议字节，敏感度与角色归一同一级）。实施点见
+        // `core::protocol::responses` 的 Responses 事件重建层。
+        .route(
+            "/api/reasoning-collapse",
+            get(api::reasoning_collapse::get_reasoning_collapse)
+                .put(api::reasoning_collapse::put_reasoning_collapse),
+        )
         // ── Cline 伪装头的逐键覆盖 ──
         // 与 /api/sanitize 同形（GET 读 / PUT 写，响应体就是新状态），挂
         // protected：头集合决定出站请求「长得像不像官方客户端」，敏感度同级。

@@ -18,11 +18,9 @@ name: warm-cache
 # 因为早期一条进了 main 作用域而每次都命中的现成例子。
 #
 # ── 触发方式 ──────────────────────────────────────────────────
-#   · push 到 main：代码变了，缓存随之更新
-#   · 每周一 UTC 19:00（北京周二 03:00）：兜底 —— GitHub 会清理
-#     7 天未访问的缓存，main 不常推时靠它保活
-#   · 手动 workflow_dispatch：⚠️ 必须在 Actions 页面选 main 分支
-#     触发 —— 缓存的作用域跟触发分支走，选了别的分支等于白跑
+#   仅允许手动 workflow_dispatch，不响应分支推送和定时任务
+#   ⚠️ 必须在 Actions 页面选 main 分支触发 —— 缓存的作用域跟触发分支走
+#   选了别的分支等于白跑
 #
 # ── job 名为什么必须与 build.yml 一致（macos / windows）───────
 # rust-cache 生成的缓存 key 里包含 job id（观察到的形如
@@ -49,10 +47,6 @@ name: warm-cache
 # 推送体验 —— 因此并发取消旧预热，避免排队。
 
 on:
-  push:
-    branches: [main]
-  schedule:
-    - cron: '0 19 * * 1'
   workflow_dispatch:
 
 concurrency:
