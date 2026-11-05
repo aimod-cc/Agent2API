@@ -44,6 +44,18 @@
 
 改动位置：`desktop-tauri/ui-islands/src/islands/routing-canvas-layout.tsx`、`routing-config-panel.tsx`、`routing-group-panel.tsx`、`routing-page.tsx`，`desktop-tauri/ui/css/page-routing-config.css`，`desktop-tauri/i18n/i18n-src/*/routing.json` 与对应词典产物。
 
+### 画布自动刷新跟进（2026-11-05）
+
+参考 performance 分支的画布刷新方案跟进落地，对齐其三秒轮询与「刷新路由」按钮口径：
+
+- 路由配置编辑器新增 `refresh`：只换当前作用范围的 workspace 快照，不碰用户未保存的草稿；等待期间切走作用域的响应丢弃，轮询失败静默跳过
+- 路由页配置视图恢复三秒轮询，页面不可见、不是路由页、有弹窗或正在保存时跳过；全局与模型独立范围的画布在途连线、账号在途数由此跟上实际流量
+- 路由指标的服务端模型匹配口径对齐 `trace` 模块与 performance 分支：同时匹配客户端模型名、网关模型名与上游真名，修复客户端使用带后缀别名时模型独立范围在途连线不高亮的问题，并补齐三个回归测试
+
+手动刷新沿用页面顶部的「重新读取」：有在途时点击即在途高亮亮起，在途结束后点击即移除高亮。
+
+改动位置：`desktop-tauri/ui-islands/src/islands/routing-editor-state.ts`、`routing-page.tsx`，`desktop-tauri/src-tauri/server/src/server/request_stats/routing.rs`。
+
 ## 构建流程
 
 个人 fork 使用 `.github/workflows/fork-build.yml`（显示名 `performance-build`）手动构建：
@@ -62,6 +74,7 @@
 - 多语言词典构建与缺失键体检：通过
 - frontend-artifacts 运行 `42021734220`：云端重建全部前端产物并逐字节同源校验，通过
 - performance-build 运行 `42022820095`：Windows 桌面端、Windows 服务端与 `linux/amd64` 镜像全部成功；首次尝试仅「创建草稿 Release」失败，报错 `Tried to update "v3.4.2" which is neither a draft or prerelease (updateOnlyUnreleased is on)`，与已发布的 v3.4.2 Release 冲突；重跑后全部成功
+- 画布自动刷新跟进：前端岛类型检查与主面板、登录页构建通过；服务端路由回归测试 `14 passed; 0 failed`（含 3 个新增的模型匹配用例）
 - 本轮新增改动仅涉及前端、样式与多语言词典，未触及服务端代码
 
 ## 后续同步官方更新
