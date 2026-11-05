@@ -83,7 +83,11 @@ Stop-Service Agent2API
 .\install-service.ps1 -Uninstall
 ```
 
-**Atualização**: extraia a versão nova e rode `install-service.ps1` de novo (ele para o serviço, sobrescreve programa e UI e inicia outra vez; dados e configuração ficam intactos).
+**Atualização com um clique**: instalações padrão como serviço Windows oferecem essa opção em Configurações → Atualizações. Após confirmar, o pacote Windows x64 é baixado e validado independentemente pelo hash oficial. Um processo temporário para o serviço, aguarda a liberação dos arquivos, faz backup, substitui e reinicia. A página é recarregada após confirmar a nova versão; contas, configurações e dados são preservados.
+
+**Instalações antigas / atualização manual**: extraia o pacote novo em outra pasta e execute `install-service.ps1` uma vez como administrador. Caminhos de instalação e dados, portas, variáveis e conta de serviço são preservados por padrão. Somente opções explícitas, como a porta, substituem os valores existentes; migração de diretórios é separada. Depois disso, use o painel para atualizar.
+
+Somente SYSTEM e administradores podem gravar os arquivos do programa. A pasta de trabalho é `<pasta de instalação>\.service-update`; nenhum serviço permanente é adicionado. Use `AGENT2API_WINDOWS_UPDATE=0` no ambiente do serviço para desativar a opção. Contas personalizadas, links de diretório, caminhos de rede e ambientes gerenciados por jobs externos continuam com atualização manual, sem elevação automática. Falhas na substituição restauram os arquivos antigos; falhas na inicialização preservam logs e backups sem reverter o banco de dados.
 
 > **Duas armadilhas específicas do Windows que o script já resolve**:
 > o diretório de trabalho de um processo de serviço é `C:\Windows\system32`, não a pasta do exe — o diretório da UI é localizado a partir do caminho do exe, então nada muda; o diretório de dados é gravado explicitamente na entrada de registro do serviço como `AGENT2API_PROXY_HOME` (sem isso os dados cairiam em `C:\Windows\system32\config\systemprofile` do LocalSystem, onde ninguém acharia).
@@ -114,7 +118,11 @@ journalctl -u agent2api -f
 
 Início no boot, reinício automático após travamento (`Restart=always`) e desligamento gracioso no SIGTERM (espera as requisições em andamento, então conexões SSE longas não são cortadas) já vêm configurados. Depois de editar `/etc/agent2api/agent2api.env`, rode `systemctl restart agent2api`.
 
-> **Não ative `AGENT2API_SELF_UPDATE` em máquina física**: aquele é o mecanismo de dentro do contêiner (troca arquivos, encerra e deixa a política de restart do contêiner subir de novo). Em máquina física os arquivos do programa pertencem ao root e a conta do serviço não pode substituí-los; a unidade já o define como `0` explicitamente. Atualize com `install.sh --upgrade`.
+> **Atualização systemd com um clique**: instalações padrão incluem um programa de atualização restrito. Após confirmar no painel, ele baixa, valida independentemente o checksum oficial, faz backup e substitui os arquivos, reinicia e confirma o novo serviço. Contas e configurações são preservadas; o gateway continua sem privilégios e os arquivos do programa permanecem protegidos pelo root.
+>
+> Em instalações antigas, baixe um novo pacote do servidor que inclua esse recurso e execute `sudo bash install.sh --upgrade` uma vez na pasta extraída para instalar o componente. Contas de serviço ou caminhos personalizados não são sobrescritos; mantenha seu procedimento de implantação. Use `AGENT2API_SYSTEMD_UPDATE=0` para desativar a opção no painel, ou desative `agent2api-updater.socket` para desativar o componente. `AGENT2API_SELF_UPDATE` continua exclusivo do Docker.
+>
+> O componente usa um socket local, sem abrir portas de rede. Por padrão, valida o repositório de releases pelo índice oficial. Para fixar um repositório ou configurar um proxy para a validação independente, configure `AGENT2API_UPDATER_REPO=owner/repo` ou `HTTPS_PROXY` em `/etc/agent2api/updater.env`. Falhas na substituição restauram os arquivos antigos. Se a nova inicialização não for confirmada, os arquivos de recuperação ficam em `/opt/agent2api/.before-update-*` e a falha é informada; o banco de dados nunca é revertido automaticamente.
 
 ### Depois de instalar
 
@@ -145,7 +153,7 @@ Tanto o administrador quanto a chave de gateway podem ser predefinidos por vari�
 | `AGENT2API_LOG_FILE` | Caminho do arquivo de log; padrão `{diretório de dados}/logs/server.log` |
 | `AGENT2API_VERBOSE` | `1` ativa o log de debug |
 
-No Linux coloque-as em `/etc/agent2api/agent2api.env`; no Windows edite a chave de registro do serviço `HKLM\SYSTEM\CurrentControlSet\Services\Agent2API\Environment` (o `install-service.ps1` já grava o básico ali; rodar o script de novo sobrescreve).
+No Linux coloque-as em `/etc/agent2api/agent2api.env`; no Windows edite a chave de registro do serviço `HKLM\SYSTEM\CurrentControlSet\Services\Agent2API\Environment` (o `install-service.ps1` grava as configurações básicas e, nas execuções seguintes, preserva as existentes, alterando apenas as opções informadas explicitamente como parâmetros).
 
 > **Contas não podem ser predefinidas**: elas exigem leitura de QR code / código por SMS / credenciais coladas, o que é decidido pelos protocolos do upstream — não há como contornar. Para implantação em massa, copie um **diretório de dados** já configurado (o banco SQLite e o `account.key` ficam lado a lado) e as contas vão junto.
 

@@ -3,6 +3,7 @@ import { flushSync } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import { AppFrame, Badge, BadgeDot, Button, Empty, NavList, NavItem, PageHeader, SegmentedControl, Sheet, SheetClose, SheetContent, Sidebar, SidebarContent, SidebarFooter, SidebarGroupLabel, SidebarHeader, Toaster, toastManager, useMediaQuery } from '@ui'
 import { t } from './i18n'
+import { CheckinVerificationNotice } from './islands/checkin-verification-notice'
 
 type Menu = { key: string; label: string; icon: string }
 type Group = { label: string; items: Menu[] }
@@ -118,6 +119,7 @@ function Frame() {
         <section className={`page${page.startsWith('plugin:') ? ' active' : ''}`} data-page='__plugin__' id='plugin-page-host' />
       </div></div>
     </main>
+    <CheckinVerificationNotice />
   </AppFrame>
 }
 

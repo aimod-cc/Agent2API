@@ -2,17 +2,37 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, WebviewWindow};
+use tokio::time::Instant;
 
 const TOKEN_SCRIPT: &str = r#"(() => {
   if (location.origin !== 'https://chat.deepseek.com') return null;
   try {
     const raw = localStorage.getItem('userToken');
     if (!raw || raw.length > 32768) return null;
-    const token = JSON.parse(raw).value;
-    return typeof token === 'string' && token.length > 0 && token.length <= 16384
-      && !/[\r\n]/.test(token) ? token : null;
+    let stored;
+    try { stored = JSON.parse(raw); } catch (_) { stored = raw; }
+    const value = typeof stored === 'string' ? stored : stored && stored.value;
+    if (typeof value !== 'string' || /[\r\n]/.test(value)) return null;
+    const token = value.trim();
+    if (!token || token === 'null' || token === 'undefined' || token.length > 16384) return null;
+    return { accessToken: token, userAgent: navigator.userAgent };
   } catch (_) { return null; }
 })()"#;
+
+#[derive(Default)]
+pub struct CredentialCapture {
+    candidate: Option<(String, Instant)>,
+}
+
+impl CredentialCapture {
+    fn stable(&mut self, token: &str) -> bool {
+        if let Some((previous, since)) = &self.candidate {
+            if previous == token { return since.elapsed() >= Duration::from_secs(4); }
+        }
+        self.candidate = Some((token.to_string(), Instant::now()));
+        false
+    }
+}
 
 pub fn allowed(url: &url::Url) -> bool {
     url.scheme() == "https"
@@ -72,10 +92,7 @@ pub async fn start(app: &AppHandle, options: &Value) -> Result<Value, String> {
     result
 }
 
-pub async fn credentials(window: &WebviewWindow) -> Result<Option<String>, String> {
-    if !window.url().ok().is_some_and(|url| allowed(&url) && url.host_str() == Some("chat.deepseek.com")) {
-        return Ok(None);
-    }
+async fn read_login_state(window: &WebviewWindow) -> Result<Value, String> {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
     window.eval_with_callback(TOKEN_SCRIPT, move |result| {
         let _ = sender.try_send(result);
@@ -83,10 +100,27 @@ pub async fn credentials(window: &WebviewWindow) -> Result<Option<String>, Strin
     let result = tokio::time::timeout(Duration::from_secs(5), receiver.recv()).await
         .map_err(|_| "读取 DeepSeek 网页登录态超时")?
         .ok_or("DeepSeek 网页登录态读取已结束")?;
-    let value: Value = serde_json::from_str(&result).map_err(|_| "DeepSeek 网页登录态格式无效")?;
-    let Some(token) = value.as_str().filter(|token| !token.is_empty() && token.len() <= 16384 && !token.contains(['\r', '\n'])) else {
+    serde_json::from_str(&result).map_err(|_| "DeepSeek 网页登录态格式无效".into())
+}
+
+pub async fn credentials(window: &WebviewWindow, capture: &mut CredentialCapture) -> Result<Option<String>, String> {
+    if !window.url().ok().is_some_and(|url| allowed(&url) && url.host_str() == Some("chat.deepseek.com")) {
+        capture.candidate = None;
+        return Ok(None);
+    }
+    let value = match read_login_state(window).await {
+        Ok(value) => value,
+        Err(error) => { capture.candidate = None; return Err(error); }
+    };
+    let Some(token) = value["accessToken"].as_str().filter(|token| !token.is_empty() && token.len() <= 16384 && !token.contains(['\r', '\n'])) else {
+        capture.candidate = None;
         return Ok(None);
     };
+    let user_agent = value["userAgent"].as_str().filter(|agent| {
+        !agent.is_empty() && agent.len() <= 2048 && agent.bytes().all(|byte| (32..=126).contains(&byte))
+    }).ok_or("DeepSeek 网页浏览器标识无效")?;
+    // 网页可能在登录后的设备校验中更换令牌；连续稳定后才读取最新 Cookie 并交回。
+    if !capture.stable(token) { return Ok(None); }
     let owned = window.clone();
     let cookies = tokio::time::timeout(Duration::from_secs(10), tokio::task::spawn_blocking(move || owned.cookies()))
         .await.map_err(|_| "读取 DeepSeek Cookie 超时")?
@@ -112,5 +146,11 @@ pub async fn credentials(window: &WebviewWindow) -> Result<Option<String>, Strin
     if cookie.len() > 32768 {
         return Err("DeepSeek 网页 Cookie 过大".into());
     }
-    Ok(Some(json!({ "accessToken": token, "cookie": cookie }).to_string()))
+    let current = read_login_state(window).await;
+    match current {
+        Ok(current) if current == value => {}
+        Ok(_) => { capture.candidate = None; return Ok(None); }
+        Err(error) => { capture.candidate = None; return Err(error); }
+    }
+    Ok(Some(json!({ "accessToken": token, "cookie": cookie, "userAgent": user_agent }).to_string()))
 }

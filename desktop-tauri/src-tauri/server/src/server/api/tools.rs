@@ -67,7 +67,7 @@ fn with_port(host: &str, port: u16) -> String {
 
 /* ─── 服务 × 协议 ─────────────────────────────────────────── */
 
-/// GET /api/tools/servers?protocol=skill|mcp|api
+/// GET /api/tools/servers?protocol=skill|mcp
 pub async fn get_servers(Query(query): Query<HashMap<String, String>>) -> Response {
     let protocol = query.get("protocol").map(String::as_str);
     if let Some(protocol) = protocol {
@@ -92,7 +92,7 @@ pub async fn patch_server(Path(id): Path<String>, body: Bytes) -> Response {
     };
     let protocol = text_field(object, "protocol");
     if !tool_services::is_protocol(protocol) {
-        return errors::management_error(400, "protocol 必须是 skill / mcp / api 之一");
+        return errors::management_error(400, "protocol 必须是 skill / mcp 之一");
     }
     if !tool_services::service_protocols(&id).contains(&protocol) {
         return errors::management_error(400, format!("服务 {id} 不支持 {protocol} 协议"));
@@ -129,8 +129,8 @@ pub async fn patch_server(Path(id): Path<String>, body: Bytes) -> Response {
 
 /* ─── 搜索提供商 ───────────────────────────────────────────── */
 
-pub async fn get_providers() -> Response {
-    ok_json(tool_services::list_providers())
+pub async fn get_providers(State(state): State<ServerState>) -> Response {
+    ok_json(tool_services::list_providers(state.store()).await)
 }
 
 pub async fn get_selection() -> Response {
@@ -159,8 +159,8 @@ pub async fn put_selection(body: Bytes) -> Response {
     }
 }
 
-/// PUT /api/tools/providers/{provider} `{api_key?, enabled?}`
-pub async fn put_provider(Path(provider): Path<String>, body: Bytes) -> Response {
+/// PUT /api/tools/providers/{provider} `{api_key?, account_id?, enabled?}`
+pub async fn put_provider(State(state): State<ServerState>, Path(provider): Path<String>, body: Bytes) -> Response {
     if !tool_services::is_search_provider(&provider) {
         return errors::management_error(400, "未知的搜索提供商");
     }
@@ -181,7 +181,13 @@ pub async fn put_provider(Path(provider): Path<String>, body: Bytes) -> Response
         Some(Value::Bool(value)) => Some(*value),
         Some(_) => return errors::management_error(400, "enabled 必须是布尔值"),
     };
-    match tool_services::update_provider(&provider, api_key, enabled) {
+    let account_id = match object.get("account_id") {
+        None => None,
+        Some(Value::Null) => Some(""),
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(_) => return errors::management_error(400, "account_id 必须是字符串或 null"),
+    };
+    match tool_services::update_provider(state.store(), &provider, api_key, enabled, account_id) {
         Ok(value) => ok_json(value),
         Err(error) => errors::management_error(400, error),
     }
@@ -197,11 +203,11 @@ pub async fn delete_provider_key(Path(provider): Path<String>) -> Response {
     ok_json(json!({ "success": true }))
 }
 
-pub async fn test_provider(Path(provider): Path<String>) -> Response {
+pub async fn test_provider(State(state): State<ServerState>, Path(provider): Path<String>) -> Response {
     if !tool_services::is_search_provider(&provider) {
         return errors::management_error(400, "未知的搜索提供商");
     }
-    ok_json(tool_services::test_provider(&provider).await)
+    ok_json(tool_services::test_provider(state.store(), &provider).await)
 }
 
 /* ─── 视觉分析 ─────────────────────────────────────────────── */

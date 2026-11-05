@@ -68,7 +68,7 @@ export function SourceStatsPanel({ kind, rows, summary, onInspect }: {
         <h2>{isKey ? t('API Key 统计') : t('客户端统计')}</h2>
         <span className='tip-q' data-tip={isKey
           ? t('按访问网关的 API Key 统计生产请求，不包含助手对话和模型测试。停用、删除 Key 不会删除历史用量；密钥值不会进入报表。历史没有记录身份的请求单列，不能追溯到某把 Key。')
-          : t('按请求 User-Agent 识别的客户端类型统计，不代表设备或用户数。“其它”表示有 User-Agent 但未匹配已知类型；“未记录客户端”表示旧数据或请求未带 User-Agent。')} />
+          : t('按每条请求的软件标识和识别规则统计，不依赖 API Key，也不代表设备或用户数。待确认的软件统一计入“其它”；规则修改不重新归类历史请求。')} />
         <div className='head-actions'>
           <SegmentedControl options={sortOptions} value={sort} onValueChange={value => { setSort(value); paging.goto(1) }}
             aria-label={t('统计排序')} />

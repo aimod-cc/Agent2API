@@ -13,10 +13,11 @@ import {
   DialogTitle,
 } from '@ui'
 import {
-  downloadAsset, handleExternalClick, isSelfUpdate, markdownHtml, missingAssetReasonFor,
-  openExternal, safeExternal, shared, type UpdateInfo,
+  downloadAsset, handleExternalClick, isSelfUpdate, isManualUpdate, manualUpdateReason, markdownHtml, missingAssetReasonFor,
+  openExternal, safeExternal, shared, serviceUpdateTask, type UpdateInfo,
 } from './update-shared'
 import { t } from '../i18n'
+import { serviceTaskActive } from './update-systemd'
 import { HtmlContent } from '@ui'
 import { Empty } from '@ui'
 
@@ -87,7 +88,7 @@ export function showUpdateModal(
   if (!info || info.hasUpdate !== true) return
   // 更新已应用到容器里、只差重启（容器内更新）：此刻弹「去更新」是条死路 ——
   // 面板上的那颗按钮已经换成「立即重启」，重启入口在那里
-  if (info.pendingRestart === true) return
+  if (info.pendingRestart === true || serviceTaskActive(serviceUpdateTask(info))) return
   const latest = String(info.latestVersion || '').trim()
   if (!latest) return
   if (shared().wbApp?.currentPage === 'settings') return
@@ -116,7 +117,8 @@ function UpdateModal({ info, onGoUpdate, onClose }: UpdateModalProps) {
   // 「有没有本机的包」与面板同一口径（downloadAsset）：没有就不给「去更新」，
   // 那个按钮此刻只会把人送到一句报错上
   const canDownload = !!downloadAsset(info)?.url
-  const reason = canDownload ? '' : missingAssetReasonFor(info)
+  const manual = isManualUpdate(info)
+  const reason = manual ? manualUpdateReason(info) : canDownload ? '' : missingAssetReasonFor(info)
   const pageUrl = safeExternal(info.pageUrl)
 
   /** 「跳过此次更新」：按版本号记进 localStorage（与旧 app.js 同一个键） */
@@ -162,10 +164,10 @@ function UpdateModal({ info, onGoUpdate, onClose }: UpdateModalProps) {
           {/* 没有可下的包：先在这里交代原因，再谈更新日志 —— 否则用户读完日志
               点「去更新」才发现无路可走。容器端额外给出宿主机那条命令：它的升级
               本来就不走安装包，光说「没有包」等于没说 */}
-          {canDownload ? null : (
+          {canDownload && !manual ? null : (
             <Alert variant='warning'>
               <AlertTitle>
-                {isSelfUpdate(info) ? t('这一版没有提供容器内更新包') : t('这一版没有提供本机安装包')}
+                {manual ? t('当前需要手动升级') : t('未找到适用的更新包')}
               </AlertTitle>
               <AlertDescription>
                 {reason}
@@ -195,7 +197,7 @@ function UpdateModal({ info, onGoUpdate, onClose }: UpdateModalProps) {
           <div className='mr-auto' />
           <Button variant='outline' onClick={onClose}>{t('取消')}</Button>
           {canDownload
-            ? <Button variant='default' onClick={handleGo}>{t('去更新')}</Button>
+            ? <Button variant='default' onClick={handleGo}>{manual ? t('下载服务端包') : t('去更新')}</Button>
             : (!isSelfUpdate(info) && pageUrl)
               ? <Button variant='default' onClick={handleOpenRelease}>{t('到 GitHub 发布页下载')}</Button>
               : null}

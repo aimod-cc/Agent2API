@@ -2,7 +2,17 @@
 
 mod check;
 mod download;
+pub mod capabilities;
+pub mod systemd;
+pub mod windows_service;
+mod service_task;
+#[cfg(any(target_os = "linux", windows))]
+#[path = "systemd/trust.rs"]
+mod service_trust;
 pub(crate) mod source;
+mod source_state;
+mod selection;
+mod probe;
 mod integrity;
 // 更新源索引：从索引仓库的 `app.json` 读「构建产物放在哪个仓库」。
 // 与插件商店共用信任根仓库、两个文件（见模块头）。
@@ -62,6 +72,8 @@ struct Task {
     path: Option<String>,
     received: u64,
     total: u64,
+    selecting: bool,
+    source: Option<String>,
 }
 
 impl Task {
@@ -81,6 +93,8 @@ impl Task {
         );
         map.insert("received".to_string(), Value::from(self.received));
         map.insert("total".to_string(), Value::from(self.total));
+        map.insert("selecting".to_string(), Value::Bool(self.selecting));
+        map.insert("source".to_string(), json!(self.source));
         // percent：总量未知时为 0；已知时向上取整到 100 封顶
         // （Node: `task.total > 0 ? Math.min(100, Math.round(received/total*100)) : 0`）
         let percent = if self.total > 0 {
@@ -118,6 +132,7 @@ struct Inner {
     ///
     /// 挡「同一版重复安装」：新版本已就位、只差重启时不再重复替换文件。
     pending_restart: bool,
+    service_update_active: bool,
 }
 
 /// 更新管理器句柄：内部一把锁 + Clone（与 auto_checkin / models 同构）。
@@ -150,6 +165,7 @@ impl UpdateManager {
                 app_index,
                 download_dir: directory.join("updates"),
                 pending_restart: false,
+                service_update_active: false,
             })),
         }
     }
@@ -300,7 +316,15 @@ impl UpdateManager {
             "expectedSuffixes": version::installer_suffixes(),
             "expectedName": version::server_bundle_name(),
         });
+        let capability = capabilities::current();
+        let systemd_task = (capability.deployment == "systemd").then(systemd::status).flatten();
+        let service_task = if capability.deployment == "windows-service" {
+            windows_service::status()
+        } else { systemd_task.clone() };
         json!({
+            "updateCapability": capability,
+            "serviceTask": service_task,
+            "systemdTask": systemd_task,
             "forceUpdate": force_update,
             "currentVersion": if version.is_empty() { Value::Null } else { Value::String(version) },
             "latestVersion": if latest_tag.is_empty() { Value::Null } else { Value::String(latest_tag.to_string()) },

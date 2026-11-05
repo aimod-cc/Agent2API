@@ -60,6 +60,7 @@ fn merge_clients(existing: &[ClientAccum], incoming: &[ClientAccum]) -> Vec<Clie
     let mut merged = existing.to_vec();
     for item in incoming {
         if let Some(row) = merged.iter_mut().find(|row| row.client == item.client) {
+            if !item.label.is_empty() && item.usage.last_used_at >= row.usage.last_used_at { row.label = item.label.clone(); }
             row.usage = merge_usage(&row.usage, &item.usage);
         } else {
             merged.push(item.clone());

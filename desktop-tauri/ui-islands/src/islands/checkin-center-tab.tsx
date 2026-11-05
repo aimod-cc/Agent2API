@@ -14,6 +14,10 @@ import { CheckinUmid } from './checkin-umid'
 import { claimOnboarding, onboardingOf, queryOnboarding } from './checkin-onboarding'
 import { t } from '../i18n'
 import { growthTaskCompleted, growthTaskRunnable } from '../../../ui-shared/checkin'
+import {
+  accountCheckinStatus, checkinActionLabel, checkinPlanProgress, checkinStatusLabel, checkinStatusTone,
+  type AccountCheckinStatus,
+} from '../../../ui-shared/checkin-result'
 
 /**
  * 「签到中心」标签页：总览卡 + 每日签到 + 新手福利 + 活动套餐 + 成长任务。
@@ -196,12 +200,23 @@ function OutOfScopeNote({ items }: { items: { label: string; reason: string; cou
 
 /* ─── 每日签到 ─────────────────────────────── */
 
-/** 分组徽标：无账号 / 已签 / 部分 / 待签 */
+function StatusBadge({ status }: { status: AccountCheckinStatus }): React.ReactElement {
+  const variants = { ok: 'success', warn: 'warning', bad: 'destructive', mute: 'outline', brand: 'brand' } as const
+  return <Badge variant={variants[checkinStatusTone(status)]} shape='tag'>{t(checkinStatusLabel(status))}</Badge>
+}
+
+/** 同类未完成状态明确显示；混合状态仍保留“部分 / 待签”汇总。 */
 function GroupBadge({ group }: { group: ProviderGroup }): React.ReactElement {
   if (!group.totalCount) return <Badge variant="outline" shape="tag">无账号</Badge>
-  if (group.doneCount >= group.totalCount) return <Badge variant="success" shape="tag">已签</Badge>
+  if (group.doneCount >= group.totalCount) return <StatusBadge status='done' />
+  const states = group.accounts.map(accountCheckinStatus)
+  if (states.includes('confirming')) return <StatusBadge status='confirming' />
+  if (states.includes('failed')) return <StatusBadge status='failed' />
+  if (states.includes('captcha')) return <StatusBadge status='captcha' />
+  if (states.every(status => status === 'inactive')) return <StatusBadge status='inactive' />
+  if (states.every(status => status === 'ineligible')) return <StatusBadge status='ineligible' />
   if (group.doneCount > 0) return <Badge variant="warning" shape="tag">部分</Badge>
-  return <Badge variant="brand" shape="tag">待签</Badge>
+  return <StatusBadge status='pending' />
 }
 
 /** 账号明细表（展开区） */
@@ -236,6 +251,8 @@ function AccountRow({ account, modes, dailyActivity, manualPlans }: {
   manualPlans: boolean
 }): React.ReactElement {
   const busy = (mode: string) => store.signing.has(`${account.id}:${mode}`)
+  const status = accountCheckinStatus(account)
+  const daily = account.dailyCheckin
   return (
     <TableRow>
       <TableCell>
@@ -247,13 +264,13 @@ function AccountRow({ account, modes, dailyActivity, manualPlans }: {
         {account.available ? null : <Badge variant="outline" shape="tag">凭据不可用</Badge>}
       </TableCell>
       <TableCell>
-        {account.checkedInToday
-          ? <Badge variant="success" shape="tag">已签</Badge>
-          : <Badge variant="brand" shape="tag">待签</Badge>}
-        {account.dailyCheckin && account.dailyCheckin.totalCount > 0
+        <StatusBadge status={status} />
+        {checkinPlanProgress(daily) && daily
           ? <span className="ck-sub"> · {t('已领 {done} / {total} 份套餐', {
-            done: account.dailyCheckin.completedCount, total: account.dailyCheckin.totalCount,
+            done: daily.completedCount, total: daily.totalCount,
           })}</span> : null}
+        {daily?.message && status !== 'done'
+          ? <div className='ck-sub max-w-[420px] whitespace-normal break-words'>{t(daily.message)}</div> : null}
       </TableCell>
       <TableCell className="ck-sub">{formatTime(account.checkinAt)}</TableCell>
       <TableCell className="ck-right">
@@ -284,7 +301,8 @@ function AccountRow({ account, modes, dailyActivity, manualPlans }: {
                   }
                 }}
               >
-                {manualPlans ? t('套餐明细') : busy('checkin') ? '签到中…' : account.checkedInToday ? '重签' : '签到'}
+                {manualPlans ? t('套餐明细') : busy('checkin')
+                  ? t(daily?.queryOnly ? '查询中…' : '签到中…') : t(checkinActionLabel(account))}
               </Button>
             )}
         </span>

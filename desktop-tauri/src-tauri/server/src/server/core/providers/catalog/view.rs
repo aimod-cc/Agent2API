@@ -96,6 +96,7 @@ pub(super) fn models_response_with_active(
         .collect();
     let builtin_count = data.len();
     super::super::custom::append_models_response(store, scope, &mut data);
+    crate::server::core::routing_groups::append_public(store, scope, &mut data);
     let source = if data.len() > builtin_count { "aggregate" } else { source };
     list_response_from(data, source, refreshed_at)
 }
@@ -147,6 +148,15 @@ pub fn models_by_provider(store: &AccountStore) -> Value {
         let mut names: Vec<_> = items.iter().map(model_id).collect();
         names.sort_by_key(|name| name.to_lowercase());
         map.insert(provider, json!(names));
+    }
+    for group in crate::server::config::routing_profiles().groups.values() {
+        for member in group.members.iter().filter(|member| member.included) {
+            if let Some(names) = map.get_mut(&member.provider).and_then(Value::as_array_mut) {
+                if !names.iter().any(|name| name.as_str().is_some_and(|name| name.eq_ignore_ascii_case(&group.model))) {
+                    names.push(group.model.clone().into());
+                }
+            }
+        }
     }
     Value::Object(map)
 }

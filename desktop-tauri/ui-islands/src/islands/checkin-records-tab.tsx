@@ -30,6 +30,7 @@ const OUTCOME_OPTIONS = [
   { value: 'success', label: '成功领取' },
   { value: 'already', label: '今日已领' },
   { value: 'pending', label: t('未领取') },
+  { value: 'captcha', label: t('需要人工验证') },
   { value: 'failed', label: '失败' },
 ]
 

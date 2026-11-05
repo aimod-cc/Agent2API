@@ -108,6 +108,7 @@ pub(crate) async fn forward(
     provider_id: &str,
     account_id: &str,
     body: &Value,
+    route_model: Option<&str>,
     proxy: Option<ResolvedProxy>,
     stream: bool,
     telemetry: &Arc<RequestTelemetry>,
@@ -188,6 +189,7 @@ pub(crate) async fn forward(
             &base_url,
             &quirks,
             body,
+            route_model,
             proxy,
             stream,
             telemetry,
@@ -236,7 +238,7 @@ pub(crate) async fn forward(
         .unwrap_or("")
         .trim()
         .to_string();
-    let (mut outbound, rewrite) = rewrite_body(body, provider_id, &requested);
+    let (mut outbound, rewrite) = rewrite_for_route(body, provider_id, &requested, route_model);
     // 客户端形态伪装（OpenCode 免费档）：补桩工具。未开启时不碰请求体。
     // 放在 `rewrite_body` 之后、序列化之前 —— 会话种子取自**改写后**的体，
     // 与最终发出去的字节同源（模型名换了不影响 messages，两种取法等价，
@@ -480,6 +482,7 @@ async fn forward_translated(
     base_url: &str,
     quirks: &ProviderQuirks,
     body: &Value,
+    route_model: Option<&str>,
     proxy: Option<ResolvedProxy>,
     stream: bool,
     telemetry: &Arc<RequestTelemetry>,
@@ -496,7 +499,7 @@ async fn forward_translated(
         .unwrap_or("")
         .trim()
         .to_string();
-    let (mut outbound_chat, rewrite) = rewrite_body(body, provider_id, &requested);
+    let (mut outbound_chat, rewrite) = rewrite_for_route(body, provider_id, &requested, route_model);
     // 客户端形态伪装：与 chat 分支同一时机（改写后、翻译前）—— 桩工具要由
     // 转换器一起翻成上游协议的形态（anthropic 的 tools 数组）；Go 面不改请求体
     quirks.apply_emulation_to_body(&mut outbound_chat, base_url);
@@ -802,6 +805,14 @@ impl futures::Stream for ProtocolTranslateStream {
 ///
 /// `rewrite` 是 SSE/聚合的 model 回写参数：请求带了 model 才给 ——
 /// 客户端没点名模型时（上游用自家默认）没有「回写成什么」的答案。
+fn rewrite_for_route(body: &Value, provider_id: &str, requested: &str, route_model: Option<&str>) -> (Value, Option<ModelRewrite>) {
+    if let Some(client_model) = route_model {
+        // 组内模型已由请求快照选定，不再经同名映射改写。
+        return (body.clone(), Some(ModelRewrite { requested: client_model.to_string() }));
+    }
+    rewrite_body(body, provider_id, requested)
+}
+
 fn rewrite_body(body: &Value, provider_id: &str, requested: &str) -> (Value, Option<ModelRewrite>) {
     let mut outbound = body.clone();
     if requested.is_empty() {

@@ -165,6 +165,13 @@ fn select_target_account_sync(
     request_routing: &super::route_context::RequestRouting,
 ) -> Result<RouteTarget, GatewayError> {
     let accounts = scoped_accounts(service, providers, keys.request_model(), pinned, Some(request_routing));
+    if accounts.is_empty() && request_routing.group.is_some() {
+        let reasons: Vec<_> = request_routing.group_projection.blocked.iter().take(3)
+            .filter_map(|entry| entry.get("reason").and_then(Value::as_str)).collect();
+        return Err(GatewayError::with_status(503, format!("此路由组没有可用成员，未回退全局或默认提供商{}", if reasons.is_empty() {
+            String::new()
+        } else { format!("：{}", reasons.join("；")) })).with_code("route_empty"));
+    }
     if accounts.is_empty() && accounts_in_providers(service, providers, pinned).iter().any(|account| {
         account.get("upstreamCooldownUntil").and_then(Value::as_i64).is_some_and(|until| until > logging::now_ms())
     }) {
@@ -202,7 +209,7 @@ fn select_target_account_sync(
 
     // 在途计数快照取一次（锁是纳秒级的内存操作，见 connections.rs）：
     // 第一级与第二级共用同一份，两级看到的「谁在忙」是同一时刻的事实。
-    let counts = connection_counts(service);
+    let counts = request_connection_counts(service, tried_ids, request_routing.group.is_some());
     let now = logging::now_ms();
     // ── 策略与运行期状态快照（route_state.rs 的那份内存，读不改写）────
     // 粘性查找在这里顺手续了最近使用时刻 —— 「auto 档 5 分钟没往来就放手」
@@ -272,7 +279,7 @@ fn select_target_account_sync(
     let sticky_first = snap
         .sticky_hit
         .as_deref()
-        .is_some_and(|hit| plan.ordered.first().is_some_and(|entry| entry.id == hit));
+        .is_some_and(|hit| plan.ordered.first().is_some_and(|entry| crate::server::core::routing_groups::attempt_key(&entry.account) == hit));
     if wants_rotation && snap.sticky_hit.is_some() && !sticky_first {
         (cursor, provider_cursors) = take_rotation();
         plan = routing::plan_route(
@@ -292,6 +299,10 @@ fn select_target_account_sync(
     let mut decision = decision_json(&plan, &settings, now);
     decision["scope"] = Value::String(request_routing.scope.clone());
     decision["configSnapshot"] = request_routing.json();
+    if let Some(blocked) = decision.get_mut("blocked").and_then(Value::as_array_mut) {
+        blocked.extend(request_routing.group_projection.blocked.iter().take(12usize.saturating_sub(blocked.len())).cloned());
+    }
+    decision["blockedTotal"] = (plan.blocked.len() + request_routing.group_projection.blocked.len()).into();
     if !conv_key.is_empty() {
         decision["sessionId"] = Value::String(super::route_sticky::entry_id(conv_key, keys.request_model()));
         if ttl > 0 { decision["stickyId"] = decision["sessionId"].clone(); }
@@ -358,7 +369,7 @@ fn select_target_account_sync(
         let Some(id) = routing::account_id(account) else {
             continue;
         };
-        if tried_ids.iter().any(|tried| tried == id) {
+        if tried_ids.iter().any(|tried| tried == &crate::server::core::routing_groups::attempt_key(account)) {
             continue;
         }
         // 已达并发上限的账号不进「正常兜底」候选 —— 它们是 ② 的原料
@@ -535,6 +546,7 @@ pub(super) fn with_proxy_notice(
     let decision = decision.map(|mut decision| {
         if let Some(object) = decision.as_object_mut() {
             object.insert("picked".to_string(), Value::String(account_id.clone()));
+            object.insert("pickedCandidate".to_string(), crate::server::core::routing_groups::attempt_key(&account).into());
         }
         decision
     });
@@ -689,7 +701,7 @@ fn squeeze_by_headroom(
         let Some(id) = routing::account_id(account) else {
             continue;
         };
-        if tried_ids.iter().any(|tried| tried == id) {
+        if tried_ids.iter().any(|tried| tried == &crate::server::core::routing_groups::attempt_key(account)) {
             continue;
         }
         let count = counts.get(id).copied().unwrap_or(0) as i64;
@@ -725,8 +737,19 @@ pub(super) fn connection_counts(service: &UpstreamService) -> HashMap<String, us
     service.connections().snapshot().into_iter().collect()
 }
 
+fn request_connection_counts(service: &UpstreamService, tried: &[String], group: bool) -> HashMap<String, usize> {
+    let mut counts = connection_counts(service);
+    // 顺延时当前请求还持有前一轮连接；同账号的另一模型不能被这一个槽位挡住。
+    if group {
+        if let Some(id) = tried.last().map(|key| crate::server::core::routing_groups::account_key(key)) {
+            if let Some(count) = counts.get_mut(id) { *count = count.saturating_sub(1); }
+        }
+    }
+    counts
+}
+
 pub(super) fn allows_route_skip(service: &UpstreamService, account_id: &str) -> bool {
-    !service.store.route_account(account_id)
+    !service.store.route_account(crate::server::core::routing_groups::account_key(account_id))
         .is_some_and(|account| account.get("allowRouteSkip") == Some(&Value::Bool(false)))
 }
 
@@ -756,7 +779,7 @@ pub(super) fn pick_next_account(
     // 换号顺延与第一级选路同一份候选剔除：被限制器拦下的账号不会在 429 之后
     // 被当作「下一个」重新塞进来
     let (candidates, balance_blocked_ids) = filter_limiter_blocked(&accounts, keys, pinned);
-    let counts = connection_counts(service);
+    let counts = request_connection_counts(service, tried_ids, request_routing.group.is_some());
     let now = logging::now_ms();
     let settings = request_routing.settings;
     // 顺延不走粘性（粘住的是「答对了的账号」，刚失败的那个不该被粘回来）；
@@ -792,6 +815,9 @@ fn decision_json(
             "id": entry.id,
             "name": entry.name,
             "provider": entry.provider,
+            "candidateId": crate::server::core::routing_groups::attempt_key(&entry.account),
+            "memberId": entry.account.get("routingMemberId"),
+            "model": entry.account.get("routingModel"),
             "state": entry.state,
             "reason": entry.reason,
         })
@@ -840,7 +866,7 @@ fn filter_limiter_blocked(
         .filter(|account| crate::server::core::limiter::evaluate::blocked(
             account, &keys.for_account(account), &facts, &counts, now,
         ))
-        .filter_map(|account| routing::account_id(account).map(str::to_string))
+        .map(crate::server::core::routing_groups::attempt_key)
         .collect();
     if blocked_ids.is_empty() {
         return (accounts.to_vec(), blocked_ids);
@@ -848,9 +874,7 @@ fn filter_limiter_blocked(
     let candidates = accounts
         .iter()
         .filter(|account| {
-            routing::account_id(account)
-                .map(|id| !blocked_ids.contains(id))
-                .unwrap_or(true)
+            !blocked_ids.contains(&crate::server::core::routing_groups::attempt_key(account))
         })
         .cloned()
         .collect();

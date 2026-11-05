@@ -1452,6 +1452,9 @@ pub fn shim_js() -> &'static str {
     startLogin: function (edition, mode, provider, socialRestore, options) {
       var target = String(provider || 'workbuddy').trim();
       var dynamic = hasMethodIndex(options);
+      if (target === 'monkeycode' || target === 'monkeycode-intl') {
+        return Promise.reject(new Error('MonkeyCode 自动网页登录仅限桌面端；浏览器面板请登录对应官网后粘贴 session。'));
+      }
       // 只有旧小浣熊入口才改 redirect/预检；动态方法不能被 provider 特判覆盖。
       if (!dynamic && target === 'raccoon') {
         var problem = raccoonCallbackOriginProblem();
@@ -1582,6 +1585,9 @@ pub fn shim_js() -> &'static str {
     // 每轮都读到「没有这个方法」→ 安静退让 → 池子永远是空的，活动套餐通道
     // 整条不可用（Issue #163）。铸造本身仍发生在**浏览器**里（阿里云 SDK 跑在
     // 页面上），所以 headless 只要有人开着面板页就能维持池子 —— 与桌面端一致。
+    zcodeClaimVerification: function (payload) {
+      return call('POST', '/api/zcode/claim-verification', payload);
+    },
     zcodeCaptchaStats: function () {
       return call('GET', '/api/zcode/captcha');
     },
@@ -1618,6 +1624,11 @@ pub fn shim_js() -> &'static str {
     // 也进结果，多出一批「缺少登录态」的噪音行），点名账号同样不生效。
     refreshModels: function (payload) { return call('POST', '/api/models/refresh', payload || {}); },
     getModelManage: function () { return call('GET', '/api/models/manage'); },
+    getClientIdentification: function () { return call('GET', '/api/client-identification'); },
+    saveClientIdentification: function (payload) { return call('PUT', '/api/client-identification', payload); },
+    previewClientIdentification: function (payload) { return call('POST', '/api/client-identification/preview', payload); },
+    getCompactRoutes: function () { return call('GET', '/api/models/compact-routes'); },
+    saveCompactRoutes: function (payload) { return call('PUT', '/api/models/compact-routes', payload); },
     setModelState: function (payload) { return call('POST', '/api/models/state', payload); },
     // 第 4 / 第 5 个参数（思考等级 / 映射开关）都按「有没有传」决定是否进请求体：
     // 后端按「请求体里有没有这个键」区分三态，undefined 的键不会进 JSON
@@ -1701,6 +1712,9 @@ pub fn shim_js() -> &'static str {
     getRoutingConfig: function () { return call('GET', '/api/routing'); },
     getRoutingWorkspace: function (model) { return call('GET', '/api/routing/workspace' + toQuery({ model: model })); },
     saveRoutingProfile: function (payload) { return call('PUT', '/api/routing/profile', payload || {}); },
+    getRoutingGroups: function () { return call('GET', '/api/routing/groups'); },
+    saveRoutingGroup: function (payload) { return call('PUT', '/api/routing/groups', payload); },
+    previewRouting: function (payload) { return call('POST', '/api/routing/preview', payload); },
     getRoutingSticky: function (model) { return call('GET', '/api/routing/sticky' + toQuery({ model: model })); },
     clearRoutingSticky: function (payload) { return call('POST', '/api/routing/sticky/clear', payload || {}); },
     getRoutingReplays: function (query) { return call('GET', '/api/routing/replays' + toQuery(query)); },
@@ -1790,7 +1804,7 @@ pub fn shim_js() -> &'static str {
       return call('POST', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/growth/travel', {});
     },
 
-    // ── 手机验证码登录（AutoClaw 国内版 / Loomy）──
+    // ── 手机验证码登录（AutoClaw 国内版 / Loomy / Tabbit 国内版）──
     // 与桌面 `bridge.rs` 的同名方法**必须成对存在**（理由见下面 ZCode 那段的
     // 说明）：界面只知道「手机号 + 中间态」，走哪个端点由两份桥各自决定。
     //
@@ -1806,27 +1820,48 @@ pub fn shim_js() -> &'static str {
       var provider = isObject && input.provider ? String(input.provider) : '';
       var path = provider === 'loomy'
         ? '/api/session/login/loomy/sms/send'
-        : '/api/session/login/sms/send';
+        : provider === 'tabbit'
+          ? '/api/session/login/tabbit/sms/send'
+          : '/api/session/login/sms/send';
       return call('POST', path, {
         phone: phone,
         provider: provider || undefined,
+        // 与桌面桥同名同义：声明「认识发码前的滑块验证状态」，网关据此回
+        // 200 + `{status:"captcha"}` 而不是 409；uuid 用于过完验证重发时
+        // 沿用同一轮登录（见 api::session::login_tabbit_sms_send 的说明）。
+        supportsCaptcha: isObject && input.supportsCaptcha ? true : undefined,
+        uuid: isObject && input.uuid ? String(input.uuid) : undefined,
       });
+    },
+    // 打开上游给的人机验证页。网页面板没有壳命令可用，直接开新标签：
+    // 这一下由用户点按钮触发，不会被弹窗拦截。不用 `noopener` 参数 ——
+    // 它会让 window.open 返回 null，看起来像「被拦截」；改成打开后清 opener。
+    openVerifyPage: function (url) {
+      var opened = window.open(String(url || ''), '_blank');
+      // 被拦截时 reject 而不是返回 false：界面据此把地址显示出来让人手动访问，
+      // 而不是以为验证页已经开了、干等一个不会出现的窗口。
+      if (!opened) return Promise.reject(new Error('浏览器拦截了弹窗'));
+      try { opened.opener = null; } catch (error) { /* 跨域时改不了，忽略 */ }
+      return Promise.resolve(true);
     },
     verifySmsLogin: function (payload) {
       payload = payload || {};
       var provider = payload.provider ? String(payload.provider) : '';
       var path = provider === 'loomy'
         ? '/api/session/login/loomy/sms/verify'
-        : '/api/session/login/sms/verify';
+        : provider === 'tabbit'
+          ? '/api/session/login/tabbit/sms/verify'
+          : '/api/session/login/sms/verify';
       var body = {
         phone: String(payload.phone || ''),
         code: String(payload.code || ''),
       };
-      // deviceId（AutoClaw）/ msgid（Loomy）：两个中间态都按「有值才带」整形
-      // —— 空串会被后端当成一个真值带上去。字段名由界面按各自链路给（见
-      // ui/sms-login.js 的 SMS_PROFILES），这里只透传，不替它做归一。
+      // deviceId（AutoClaw）/ msgid（Loomy）/ uuid（Tabbit）按「有值才带」整形。
+      // 字段名由界面按各自链路给（见 ui/sms-login.js 的 SMS_PROFILES），
+      // 发码返回的中间态必须原样回传，不能丢掉，也不替它做归一。
       if (payload.deviceId) body.deviceId = String(payload.deviceId);
       if (payload.msgid) body.msgid = String(payload.msgid);
+      if (payload.uuid) body.uuid = String(payload.uuid);
       if (payload.name) body.name = String(payload.name);
       if (provider) body.provider = provider;
       return call('POST', path, body);
@@ -1936,6 +1971,8 @@ pub fn shim_js() -> &'static str {
     // 拉起，同一个容器、可写层保留）。未开 AGENT2API_SELF_UPDATE 的部署由
     // 后端 400 拒绝；面板按 check 返回的 selfUpdate 字段决定是否显示这些入口。
     installUpdate: function () { return call('POST', '/api/update/install', {}); },
+    startSystemdUpdate: function (payload) { return call('POST', '/api/update/systemd', payload); },
+    startWindowsServiceUpdate: function (payload) { return call('POST', '/api/update/windows-service', payload); },
     restartService: function () { return call('POST', '/api/update/restart', {}); },
 
     // ── 出站指纹脱敏 ──
@@ -2067,15 +2104,19 @@ pub fn shim_js() -> &'static str {
     //   · 宿主中转（cookie 往返不通）：令牌在 localStorage，必须放进
     //     `x-panel-token`（自定义头被剥时还有标准的 Authorization 兜底）；
     //   · 未注册管理员的部署：用户输入的网关 Key 是唯一凭证。
-    directCredentials: function () {
-      var headers = {};
-      var access = storedPanelToken('access');
-      if (access) {
-        headers['x-panel-token'] = access;
-        headers['Authorization'] = 'Bearer ' + access;
+    // 每次取凭证前复用普通请求的提前续期；refresh=true 只用于明确的面板 401。
+    // 只重读 localStorage 不会续期，拿回的仍是同一把失效令牌。
+    directCredentials: async function (refresh) {
+      if (refresh) {
+        if (!(await tryRefresh())) {
+          clearPanelAuth();
+          window.location.href = '/login';
+          return new Promise(function () {});
+        }
+      } else {
+        await ensureFreshSession();
       }
-      if (apiKey) headers['x-api-key'] = apiKey;
-      return Promise.resolve(headers);
+      return authHeaders({});
     },
 
     // ── 机器人校验开关（登录 / 注册的 ALTCHA proof-of-work，分两端）──

@@ -10,7 +10,7 @@
 //!   · `POST /api/web-search/search|fetch`
 //!
 //! 鉴权复用网关 Key（`Authorization: Bearer <key>` 或 `x-api-key`），与模型调用
-//! 同一把钥匙；工具服务不区分 Key 的提供商 / 模型白名单 —— 它不承载模型请求。
+//! 同一把钥匙；账号型搜索遵守 Key 的提供商白名单，独立搜索 API 不按模型过滤。
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -19,6 +19,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
 
 use crate::server::api::model_access;
+use crate::server::core::key_scope::KeyScope;
 use crate::server::core::tool_services::{self, McpRequestContext, McpServerKind, SearchErrorCode};
 use crate::server::http::parse_body;
 use crate::server::ServerState;
@@ -105,7 +106,7 @@ pub async fn skill_metadata(State(state): State<ServerState>, headers: HeaderMap
     )
 }
 
-async fn skill_operation(body: Bytes, operation: &str) -> Response {
+async fn skill_operation(state: &ServerState, scope: Option<&KeyScope>, body: Bytes, operation: &str) -> Response {
     if !tool_services::is_enabled(tool_services::WEB_SEARCH_SERVICE_ID, "skill") {
         return skill_disabled();
     }
@@ -124,7 +125,7 @@ async fn skill_operation(body: Bytes, operation: &str) -> Response {
         Err(error) => return search_error_response(&error),
     };
     let outcome = if operation == "search" {
-        tool_services::run_search(items)
+        tool_services::run_search(state.store(), scope, items)
             .await
             .map(|run| (run.payload, run.successful))
     } else {
@@ -142,25 +143,25 @@ async fn skill_operation(body: Bytes, operation: &str) -> Response {
 }
 
 /// POST /skill/web-search/search
-pub async fn skill_search(headers: HeaderMap, body: Bytes) -> Response {
-    if !authorized(&headers) {
+pub async fn skill_search(State(state): State<ServerState>, headers: HeaderMap, body: Bytes) -> Response {
+    let Ok(access) = model_access::authenticate(&headers, "tool") else {
         return json_response(
             StatusCode::UNAUTHORIZED,
             json!({ "error": { "code": "unauthorized", "message": "Missing or invalid API key. Pass it as \"Authorization: Bearer <Agent2API API Key>\"." } }),
         );
-    }
-    skill_operation(body, "search").await
+    };
+    skill_operation(&state, access.scope.as_ref(), body, "search").await
 }
 
 /// POST /skill/web-search/fetch
-pub async fn skill_fetch(headers: HeaderMap, body: Bytes) -> Response {
+pub async fn skill_fetch(State(state): State<ServerState>, headers: HeaderMap, body: Bytes) -> Response {
     if !authorized(&headers) {
         return json_response(
             StatusCode::UNAUTHORIZED,
             json!({ "error": { "code": "unauthorized", "message": "Missing or invalid API key. Pass it as \"Authorization: Bearer <Agent2API API Key>\"." } }),
         );
     }
-    skill_operation(body, "fetch").await
+    skill_operation(&state, None, body, "fetch").await
 }
 
 /* ─── REST API 端点 ────────────────────────────────────────── */
@@ -185,7 +186,7 @@ pub async fn api_metadata(State(state): State<ServerState>, headers: HeaderMap) 
     )
 }
 
-async fn api_operation(body: Bytes, operation: &str) -> Response {
+async fn api_operation(state: &ServerState, scope: Option<&KeyScope>, body: Bytes, operation: &str) -> Response {
     if !tool_services::is_enabled(tool_services::WEB_SEARCH_SERVICE_ID, "api") {
         return api_disabled();
     }
@@ -204,7 +205,7 @@ async fn api_operation(body: Bytes, operation: &str) -> Response {
         Err(error) => return search_error_response(&error),
     };
     let outcome = if operation == "search" {
-        tool_services::run_search(items)
+        tool_services::run_search(state.store(), scope, items)
             .await
             .map(|run| (run.payload, run.successful))
     } else {
@@ -222,36 +223,36 @@ async fn api_operation(body: Bytes, operation: &str) -> Response {
 }
 
 /// POST /api/web-search/search
-pub async fn api_search(headers: HeaderMap, body: Bytes) -> Response {
-    if !authorized(&headers) {
+pub async fn api_search(State(state): State<ServerState>, headers: HeaderMap, body: Bytes) -> Response {
+    let Ok(access) = model_access::authenticate(&headers, "tool") else {
         return json_response(
             StatusCode::UNAUTHORIZED,
             json!({ "error": { "code": "unauthorized", "message": "Missing or invalid API key. Pass it as \"Authorization: Bearer <Agent2API API Key>\"." } }),
         );
-    }
-    api_operation(body, "search").await
+    };
+    api_operation(&state, access.scope.as_ref(), body, "search").await
 }
 
 /// POST /api/web-search/fetch
-pub async fn api_fetch(headers: HeaderMap, body: Bytes) -> Response {
+pub async fn api_fetch(State(state): State<ServerState>, headers: HeaderMap, body: Bytes) -> Response {
     if !authorized(&headers) {
         return json_response(
             StatusCode::UNAUTHORIZED,
             json!({ "error": { "code": "unauthorized", "message": "Missing or invalid API key. Pass it as \"Authorization: Bearer <Agent2API API Key>\"." } }),
         );
     }
-    api_operation(body, "fetch").await
+    api_operation(&state, None, body, "fetch").await
 }
 
 /* ─── MCP 端点 ─────────────────────────────────────────────── */
 
 async fn mcp_post(state: &ServerState, headers: HeaderMap, body: Bytes, kind: McpServerKind) -> Response {
-    if !authorized(&headers) {
+    let Ok(access) = model_access::authenticate(&headers, "tool") else {
         return json_response(
             StatusCode::UNAUTHORIZED,
             json!({ "jsonrpc": "2.0", "id": Value::Null, "error": { "code": -32600, "message": "Unauthorized" } }),
         );
-    }
+    };
     let protocol = "mcp";
     let service = match kind {
         McpServerKind::WebSearch => tool_services::WEB_SEARCH_SERVICE_ID,
@@ -272,7 +273,7 @@ async fn mcp_post(state: &ServerState, headers: HeaderMap, body: Bytes, kind: Mc
             )
         }
     };
-    let context = McpRequestContext { base_url: base_url(&headers, &state) };
+    let context = McpRequestContext { base_url: base_url(&headers, &state), store: state.store().clone(), scope: access.scope };
     match tool_services::mcp_dispatch(&payload, kind, &context).await {
         Some(response) => json_response(StatusCode::OK, response),
         None => StatusCode::ACCEPTED.into_response(),

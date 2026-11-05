@@ -102,7 +102,7 @@ export async function checkApkUpdate(): Promise<ApkUpdateInfo> {
     pageUrl: raw.pageUrl || '',
     prerelease: Boolean(raw.prerelease),
     asset,
-    assetProbe: raw.assetProbe ?? null,
+    assetProbe: raw.assetProbe ? { ...raw.assetProbe, expectedSuffixes: ['.apk'], expectedName: null } : null,
   }
 }
 
@@ -161,6 +161,8 @@ export async function autoCheckIntervalMs(): Promise<number> {
 type PluginListenerHandle = { remove: () => Promise<void> }
 
 type ApkUpdaterPlugin = {
+  sourceSelectionSupported(): Promise<{ supported: boolean }>
+  selectSources(options: { urls: string[]; sha256?: string; scope: string }): Promise<{ urls: string[]; selected: string; elapsedMs: number; cached: boolean }>
   download(options: { url: string; sha256?: string; size?: number }): Promise<{ path: string; size: number }>
   cancel(): Promise<void>
   canInstall(): Promise<{ allowed: boolean }>
@@ -191,15 +193,35 @@ export type DownloadProgress = {
   total: number
   /** 0–100；总长度未知时为 -1 */
   percent: number
+  phase?: 'selecting' | 'downloading'
+  source?: string
 }
 
 let downloadCanceled = false
-const successfulDownloads = new Map<string, { url: string; until: number }>()
+let downloadTask: Promise<{ path: string; size: number }> | null = null
+let nativeSelection: Promise<boolean> | null = null
+
+function sourceSelectionSupported(api: ApkUpdaterPlugin): Promise<boolean> {
+  nativeSelection ??= api.sourceSelectionSupported().then(value => value.supported === true).catch(() => false)
+  return nativeSelection
+}
 
 type DownloadPlan = { urls: string[]; sha256?: string | null; size?: number; mode?: 'auto' | 'official' | 'accelerated' }
 
 /** APK 字节由手机下载；网关只提供候选源和经过官方 API 确认的校验值。 */
 export async function downloadApk(
+  url: string,
+  onProgress?: (progress: DownloadProgress) => void,
+): Promise<{ path: string; size: number }> {
+  if (downloadTask) throw new Error('下载或探测正在进行')
+  downloadCanceled = false
+  const task = runApkDownload(url, onProgress)
+  downloadTask = task
+  try { return await task }
+  finally { if (downloadTask === task) downloadTask = null }
+}
+
+async function runApkDownload(
   url: string,
   onProgress?: (progress: DownloadProgress) => void,
 ): Promise<{ path: string; size: number }> {
@@ -214,7 +236,6 @@ export async function downloadApk(
   }
   if (!url) throw new Error('缺少下载地址')
 
-  downloadCanceled = false
   let plan: DownloadPlan
   try {
     plan = await apiCall<DownloadPlan>('/api/update/download-plan', { method: 'POST', body: { url } })
@@ -223,29 +244,35 @@ export async function downloadApk(
     plan = { urls: [url] }
   }
   if (!plan.urls?.length) throw new Error('没有可用的下载源')
-  const key = `${activeServerId() || 'local'}:${plan.mode || 'official'}:${JSON.stringify([...plan.urls].sort())}`
-  const remembered = successfulDownloads.get(key)
+  if (downloadCanceled) throw new Error('已取消下载')
   const candidates = [...plan.urls]
-  if (plan.mode === 'auto' && remembered && remembered.until > Date.now()) {
-    candidates.sort((left, right) => Number(right === remembered.url) - Number(left === remembered.url))
+  const hasNativeSelection = await sourceSelectionSupported(api)
+  if (plan.mode === 'auto' && candidates.length > 1 && hasNativeSelection) {
+    if (downloadCanceled) throw new Error('已取消下载')
+    onProgress?.({ received: 0, total: 0, percent: -1, phase: 'selecting' })
+    const selected = await api.selectSources({ urls: candidates, sha256: plan.sha256 || undefined, scope: activeServerId() || 'local' })
+    if (downloadCanceled) throw new Error('已取消下载')
+    const valid = selected.urls.filter(candidate => candidates.includes(candidate))
+    candidates.splice(0, candidates.length, ...new Set([...valid, ...candidates]))
   }
   let handle: PluginListenerHandle | null = null
+  let currentSource = ''
   if (onProgress) {
-    handle = await api.addListener('downloadProgress', data => onProgress(data))
+    handle = await api.addListener('downloadProgress', data => onProgress({ ...data, phase: 'downloading', source: currentSource }))
   }
   try {
     let lastError: unknown = new Error('没有可用的下载源')
     for (const candidate of candidates) {
       if (downloadCanceled) throw new Error('已取消下载')
       try {
+        currentSource = new URL(candidate).host
+        onProgress?.({ received: 0, total: plan.size || 0, percent: -1, phase: 'downloading', source: currentSource })
         const result = await api.download({ url: candidate, sha256: plan.sha256 || undefined, size: plan.size })
-        if (!remembered || remembered.until <= Date.now() || remembered.url !== candidate) {
-          successfulDownloads.set(key, { url: candidate, until: Date.now() + 10 * 60_000 })
-        }
         return result
       } catch (error) {
         if (downloadCanceled) throw new Error('已取消下载')
-        if (error instanceof Error && /HTTP (403|429)\b/.test(error.message)) throw error
+        const message = error instanceof Error ? error.message : String(error)
+        if (/限流|HTTP 429\b/.test(message) || (!hasNativeSelection && /HTTP 403\b/.test(message))) throw error
         lastError = error
       }
     }
@@ -257,7 +284,9 @@ export async function downloadApk(
 
 export async function cancelDownload(): Promise<void> {
   downloadCanceled = true
+  const task = downloadTask
   await plugin()?.cancel()
+  await task?.catch(() => undefined)
 }
 
 /** 是否已获「安装未知来源应用」授权 */

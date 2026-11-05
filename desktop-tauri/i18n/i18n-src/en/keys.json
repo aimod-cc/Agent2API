@@ -42,6 +42,8 @@
   "显示": "Shown",
   "未启用鉴权": "Auth not enabled",
   "未命名": "Untitled",
+  "未提供客户端标识": "No client identifier provided",
+  "未知客户端": "Unknown client",
   "模型调用使用所选 Key 的权限，日志记录 Key 名称，不保存密钥值。": "Model calls use the selected key's permissions. Logs record its name, never the secret value.",
   "模型：{names}": "Models: {names}",
   "正在读取 API Key…": "Loading API keys…",

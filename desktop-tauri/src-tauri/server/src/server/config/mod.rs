@@ -67,10 +67,13 @@ use crate::server::db::Db;
 
 mod account_sort;
 mod assistant_config;
+pub(crate) mod compact_routes;
+pub(crate) mod client_identification;
 mod github_access;
 mod mutations;
 pub(crate) use mutations::try_update_raw_field;
 pub(crate) mod parse;
+pub(crate) mod routing_groups;
 mod routing_profiles;
 pub(crate) mod routing_workspace;
 mod sanitize_config;
@@ -91,6 +94,7 @@ pub use sanitize_config::{
     set_sanitize_settings, SanitizePatch, SanitizeSettings, KEY_SANITIZE_PROVIDERS,
     KEY_SANITIZE_RULES, MAX_SANITIZE_PROVIDERS,
 };
+pub use routing_groups::{RoutingGroup, RoutingMember};
 pub use routing_profiles::{
     normalize_model as normalize_routing_model, routing_profiles, routing_snapshot, save_routing_profile,
     settings_for_model as routing_settings_for_model,
@@ -163,6 +167,8 @@ pub struct RuntimeConfig {
     /// 请求就生效，不重启进程），解析一次存下来最省事。
     routing: RoutingSettings,
     routing_profiles: std::sync::Arc<RoutingProfiles>,
+    compact_routes: std::sync::Arc<compact_routes::CompactRoutesSnapshot>,
+    client_identification: std::sync::Arc<client_identification::ClientIdentificationSnapshot>,
     account_sort: std::sync::Arc<AccountSortSettings>,
     model_rules: std::sync::Arc<crate::server::core::model_rules::ModelRules>,
     /// 事件日志的保存目录（原始配置值；None = 未设置，用配置目录）。
@@ -578,6 +584,8 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
         image_compress,
         routing,
         routing_profiles: routing_profiles::from_raw(&raw),
+        compact_routes: compact_routes::from_raw(&raw),
+        client_identification: client_identification::from_raw(&raw),
         account_sort: account_sort::from_raw(&raw),
         model_rules: std::sync::Arc::new(crate::server::core::model_rules::ModelRules::from_raw(&raw)),
         log_dir: string_field(&raw, KEY_LOG_DIR),
@@ -1448,6 +1456,12 @@ pub(crate) fn update_raw_field_with(key: &str, mutate: impl FnOnce(&mut Value)) 
         }
         if key == routing_profiles::KEY_ROUTING_PROFILES {
             config.routing_profiles = routing_profiles::from_raw(&config.raw);
+        }
+        if key == compact_routes::KEY_COMPACT_ROUTES {
+            config.compact_routes = compact_routes::from_raw(&config.raw);
+        }
+        if key == client_identification::KEY_CLIENT_IDENTIFICATION {
+            config.client_identification = client_identification::from_raw(&config.raw);
         }
         if key == account_sort::KEY_ACCOUNT_SORT {
             config.account_sort = account_sort::from_raw(&config.raw);

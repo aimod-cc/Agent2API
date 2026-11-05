@@ -96,7 +96,9 @@ impl StickySessions {
         entries.into_iter().map(|entry| json!({
             "id": entry.id,
             "keyPreview": format!("{}…", &entry.id[..12]),
-            "accountId": entry.account_id,
+            "accountId": crate::server::core::routing_groups::account_key(&entry.account_id),
+            "candidateId": entry.account_id,
+            "memberId": crate::server::core::routing_groups::member_key(&entry.account_id),
             "model": entry.model,
             "source": entry.source,
             "createdAt": entry.created_at,

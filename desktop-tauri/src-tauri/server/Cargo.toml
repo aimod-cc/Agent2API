@@ -160,6 +160,10 @@ ed25519-dalek = { version = "2", default-features = false, features = ["fast", "
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [
     "Win32_Security_Cryptography",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+    "Win32_System_JobObjects",
     # KukuAI 会话换发（providers/kuku/engine.rs）：LoadLibrary 引擎 DLL +
     # 枚举注册表卸载项定位客户端安装目录
     "Win32_System_LibraryLoader",
@@ -205,6 +209,8 @@ windows-service = "0.8"
 # 依赖会被链接器扔掉（仅多花几秒编译）。
 [target.'cfg(target_os = "linux")'.dependencies]
 tikv-jemallocator = "0.7"
+# systemd 升级通道的对端身份与进程级文件锁，不开放通用提权入口。
+libc = "0.2"
 
 [dev-dependencies]
 # 路由级测试用 `ServiceExt::oneshot` 直接打 Router（不占端口、不跑 serve），

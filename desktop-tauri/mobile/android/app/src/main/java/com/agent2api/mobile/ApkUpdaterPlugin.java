@@ -3,8 +3,10 @@ package com.agent2api.mobile;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
+import android.os.SystemClock;
 import android.provider.Settings;
 import androidx.core.content.FileProvider;
+import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
@@ -14,8 +16,11 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
-import java.net.URL;
 import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -47,7 +52,9 @@ public class ApkUpdaterPlugin extends Plugin {
 
     /** 下载中的取消标志（`download` 与 `cancel` 之间共享） */
     private final AtomicBoolean cancelled = new AtomicBoolean(false);
-    private volatile HttpURLConnection activeConnection;
+    private final AtomicBoolean operationActive = new AtomicBoolean(false);
+    private final Set<HttpURLConnection> connections = ConcurrentHashMap.newKeySet();
+    private final ApkSourceSelector selector = new ApkSourceSelector();
     private static final long MAX_BYTES = 600L * 1024 * 1024;
 
     /** 目标文件：应用缓存目录下的固定名，重下时覆盖 */
@@ -62,6 +69,48 @@ public class ApkUpdaterPlugin extends Plugin {
 
     private File partialFile() {
         return new File(targetFile().getParentFile(), "agent2api-update.apk.part");
+    }
+
+    @PluginMethod
+    public void sourceSelectionSupported(PluginCall call) {
+        JSObject result = new JSObject();
+        result.put("supported", true);
+        call.resolve(result);
+    }
+
+    @PluginMethod
+    public void selectSources(PluginCall call) {
+        JSArray values = call.getArray("urls");
+        String hash = call.getString("sha256", "");
+        String scope = call.getString("scope", "");
+        if (values == null || values.length() == 0 || values.length() > 7) {
+            call.reject("下载源数量无效");
+            return;
+        }
+        if (hash == null || (!hash.isEmpty() && !hash.matches("[0-9a-fA-F]{64}"))) {
+            call.reject("官方校验值格式无效");
+            return;
+        }
+        List<String> urls = new ArrayList<>();
+        for (int index = 0; index < values.length(); index++) {
+            String value = values.optString(index, "");
+            if (value.isEmpty() || value.length() > 8192) { call.reject("下载源地址无效"); return; }
+            urls.add(value);
+        }
+        if (!operationActive.compareAndSet(false, true)) { call.reject("下载或探测正在进行"); return; }
+        cancelled.set(false);
+        final String expectedHash = hash;
+        executor.execute(() -> {
+            JSObject result = null;
+            String failure = null;
+            try {
+                result = selector.select(getContext(), urls, expectedHash, scope, cancelled);
+            } catch (Exception error) {
+                failure = cancelled.get() ? "已取消下载" : error.getMessage();
+            } finally { operationActive.set(false); }
+            if (result != null) call.resolve(result);
+            else call.reject(failure == null ? "探测下载源失败" : failure);
+        });
     }
 
     /**
@@ -86,12 +135,15 @@ public class ApkUpdaterPlugin extends Plugin {
         }
         final String hash = expectedHash;
         final long expectedSize = call.getData().optLong("size", 0);
+        if (!operationActive.compareAndSet(false, true)) { call.reject("下载或探测正在进行"); return; }
         cancelled.set(false);
 
         executor.execute(() -> {
             FileOutputStream output = null;
             InputStream input = null;
             HttpURLConnection connection = null;
+            JSObject result = null;
+            String failure = null;
             try {
                 File file = partialFile();
                 if (file.exists() && !file.delete()) throw new Exception("无法清理上次下载的临时文件");
@@ -99,8 +151,11 @@ public class ApkUpdaterPlugin extends Plugin {
                 if (old.exists() && !old.delete()) throw new Exception("无法清理上次下载的安装包");
                 if (cancelled.get()) throw new Exception("已取消下载");
 
-                connection = openFollowingRedirects(url, hash);
+                connection = ApkUpdateConnection.open(url, hash, SystemClock.elapsedRealtime() + 12_000, false, cancelled, connections);
                 int status = connection.getResponseCode();
+                if (ApkUpdateConnection.rateLimited(connection, url)) {
+                    throw new Exception("下载源限流中，请稍后重试");
+                }
                 if (status != HttpURLConnection.HTTP_OK) {
                     throw new Exception("服务器返回 HTTP " + status);
                 }
@@ -150,79 +205,23 @@ public class ApkUpdaterPlugin extends Plugin {
                 File target = targetFile();
                 if (!file.renameTo(target)) throw new Exception("无法保存校验后的安装包");
                 emitProgress(received, total);
-                JSObject result = new JSObject();
+                result = new JSObject();
                 result.put("path", target.getAbsolutePath());
                 result.put("size", received);
-                call.resolve(result);
             } catch (Exception error) {
-                partialFile().delete();
-                call.reject(cancelled.get() ? "已取消下载" : "下载失败：" + error.getMessage());
+                selector.forget(url);
+                failure = cancelled.get() ? "已取消下载" : "下载失败：" + error.getMessage();
             } finally {
                 try { if (input != null) input.close(); } catch (Exception ignored) { }
                 try { if (output != null) output.close(); } catch (Exception ignored) { }
-                if (connection != null) connection.disconnect();
-                activeConnection = null;
+                ApkUpdateConnection.close(connection, connections);
                 partialFile().delete();
+                operationActive.set(false);
             }
+            if (failure != null) call.reject(failure);
+            else if (result != null) call.resolve(result);
+            else call.reject("下载失败");
         });
-    }
-
-    /** 下载候选源逐跳校验域名，只有官方校验值存在时才接受第三方源。 */
-    private boolean isGithubAsset(URL url) {
-        String host = url.getHost().toLowerCase(java.util.Locale.ROOT);
-        return "https".equals(url.getProtocol()) && (url.getPort() == -1 || url.getPort() == 443)
-            && (host.endsWith(".githubusercontent.com")
-                || ((host.equals("github.com") || host.equals("www.github.com"))
-                    && url.getPath().contains("/releases/download/")));
-    }
-
-    private HttpURLConnection openFollowingRedirects(String startUrl, String hash) throws Exception {
-        URL origin = new URL(startUrl);
-        if (!"https".equals(origin.getProtocol()) || origin.getUserInfo() != null) {
-            throw new Exception("安装包下载必须使用无凭证的 HTTPS 地址");
-        }
-        if (!isGithubAsset(origin) && hash.isEmpty()) {
-            throw new Exception("加速下载缺少 GitHub 官方校验值");
-        }
-        String current = startUrl;
-        for (int hop = 0; hop < 5; hop++) {
-            if (cancelled.get()) throw new Exception("已取消下载");
-            URL target = new URL(current);
-            boolean sameOrigin = target.getHost().equalsIgnoreCase(origin.getHost())
-                && target.getPort() == origin.getPort();
-            if (!"https".equals(target.getProtocol()) || target.getUserInfo() != null
-                || (!sameOrigin && !isGithubAsset(target))) {
-                throw new Exception("下载源重定向到未允许的地址");
-            }
-            HttpURLConnection connection = (HttpURLConnection) target.openConnection();
-            activeConnection = connection;
-            connection.setRequestMethod("GET");
-            connection.setConnectTimeout(8_000);
-            connection.setReadTimeout(hop == 0 ? 8_000 : 30_000);
-            connection.setInstanceFollowRedirects(false);
-            // GitHub 对没有 User-Agent 的请求直接 403
-            connection.setRequestProperty("User-Agent", "agent2api-mobile");
-            connection.setRequestProperty("Accept", "application/octet-stream");
-
-            int status = connection.getResponseCode();
-            if (status == HttpURLConnection.HTTP_MOVED_PERM
-                || status == HttpURLConnection.HTTP_MOVED_TEMP
-                || status == HttpURLConnection.HTTP_SEE_OTHER
-                || status == 307
-                || status == 308) {
-                String location = connection.getHeaderField("Location");
-                connection.disconnect();
-                if (location == null || location.isEmpty()) {
-                    throw new Exception("重定向缺少 Location");
-                }
-                // 相对地址按当前 URL 解析（GitHub 目前给绝对地址，但别假定）
-                current = new URL(new URL(current), location).toString();
-                continue;
-            }
-            connection.setReadTimeout(30_000);
-            return connection;
-        }
-        throw new Exception("重定向次数过多");
     }
 
     private void emitProgress(long received, long total) {
@@ -237,8 +236,8 @@ public class ApkUpdaterPlugin extends Plugin {
     @PluginMethod
     public void cancel(PluginCall call) {
         cancelled.set(true);
-        HttpURLConnection connection = activeConnection;
-        if (connection != null) connection.disconnect();
+        selector.cancel();
+        for (HttpURLConnection connection : connections) ApkUpdateConnection.close(connection, connections);
         call.resolve();
     }
 
@@ -315,8 +314,8 @@ public class ApkUpdaterPlugin extends Plugin {
     @Override
     protected void handleOnDestroy() {
         cancelled.set(true);
-        HttpURLConnection connection = activeConnection;
-        if (connection != null) connection.disconnect();
+        selector.cancel();
+        for (HttpURLConnection connection : connections) ApkUpdateConnection.close(connection, connections);
         executor.shutdownNow();
         super.handleOnDestroy();
     }

@@ -54,9 +54,14 @@ pub struct RoutingProfiles {
     pub global: Option<RoutingProfile>,
     #[serde(default)]
     pub models: BTreeMap<String, RoutingProfile>,
+    #[serde(default)]
+    pub groups: BTreeMap<String, super::RoutingGroup>,
 }
 
 impl RoutingProfiles {
+    pub fn group_for_model(&self, model: &str) -> Option<&super::RoutingGroup> {
+        self.groups.values().find(|group| group.model.eq_ignore_ascii_case(model.trim()))
+    }
     pub fn model_profile(&self, model: &str) -> Option<&RoutingProfile> {
         self.models.get(&model.trim().to_ascii_lowercase())
     }
@@ -70,6 +75,7 @@ impl RoutingProfiles {
             if let Some(strategy) = &profile.strategy { settings.strategy = super::RouteStrategy::from_id(strategy); }
             if let Some(sticky) = &profile.sticky { settings.sticky = super::StickyMode::from_id(sticky); }
         }
+        if let Some(group) = self.group_for_model(model) { return group.settings(settings); }
         settings
     }
 
@@ -97,6 +103,7 @@ pub(crate) fn from_raw(raw: &Map<String, Value>) -> Arc<RoutingProfiles> {
             }
         }
     }
+    profiles.groups = super::routing_groups::from_value(object.get("groups"));
     Arc::new(profiles)
 }
 
@@ -186,6 +193,7 @@ pub fn save_routing_profile(model: &str, profile: Option<RoutingProfile>) -> Res
     let mut result = Ok(());
     let saved = super::update(|config: &mut RuntimeConfig| {
         let mut next = (*config.routing_profiles).clone();
+        if next.group_for_model(&model).is_some() { result = Err("此模型 ID 已被自定义路由组占用".into()); return; }
         if model.is_empty() {
             next.global = profile;
         } else if let Some(profile) = profile {

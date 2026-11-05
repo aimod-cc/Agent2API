@@ -11,6 +11,7 @@ import {
 } from './settings-model'
 import { t } from '../i18n'
 import { openExternal } from './update-shared'
+import { updateUnavailableReason } from '../../../ui-shared/updates'
 
 /**
  * 设置页「版本信息」面板（React 岛）。
@@ -66,6 +67,13 @@ const INSTALLER_LABEL: Record<string, string> = {
   dmg: 'macOS 安装包（dmg）',
   deb: t('Linux 安装包（deb）'),
   appimage: 'AppImage',
+  server: t('服务端压缩包'),
+}
+
+function updateSupportLabel(deployment: NonNullable<SystemInfo['deployment']>): string {
+  const capability = deployment.updateCapability
+  if (!capability) return onOff(deployment.selfUpdate)
+  return capability.installSupported ? onOff(true) : `${onOff(false)} · ${updateUnavailableReason(capability, t)}`
 }
 
 /** 当前界面形态（前端补充，后端不知道用户在哪个窗口里） */
@@ -245,7 +253,7 @@ function toPlainText(info: SystemInfo): string {
     [t('日志文件'), text(deployment.logFile)],
     [t('程序路径'), text(deployment.exePath)],
     [t('安装包形态'), INSTALLER_LABEL[String(deployment.installerKind)] || text(deployment.installerKind)],
-    [t('容器内更新'), onOff(deployment.selfUpdate)],
+    [t('面板自动安装'), updateSupportLabel(deployment)],
   ])
   section(t('安全'), [
     [t('管理员已注册'), onOff(security.adminRegistered)],
@@ -418,7 +426,7 @@ function SystemInfoPanel() {
         [t('日志文件'), <span className='sysinfo-mono'>{text(deployment.logFile)}</span>],
         [t('程序路径'), <span className='sysinfo-mono'>{text(deployment.exePath)}</span>],
         [t('安装包形态'), INSTALLER_LABEL[String(deployment.installerKind)] || text(deployment.installerKind)],
-        [t('容器内更新'), onOff(deployment.selfUpdate)],
+        [t('面板自动安装'), updateSupportLabel(deployment)],
       ],
     },
     {

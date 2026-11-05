@@ -40,6 +40,22 @@ pub(super) fn apply(record: &mut StoredAccount, value: &Value) -> Result<(), Str
     {
         return Err("每日签到状态的领取数量或来源状态不一致".to_string());
     }
+    if let Some(status) = value.get("status") {
+        let status = status.as_str().filter(|status| matches!(*status,
+            "claimed" | "done" | "confirming" | "inactive" | "ineligible" | "captcha" | "failed"))
+            .ok_or_else(|| "每日签到状态类型无效".to_string())?;
+        if completed != matches!(status, "claimed" | "done") {
+            return Err("每日签到状态与完成标记不一致".to_string());
+        }
+    }
+    if value.get("message").is_some_and(|message| !message.is_string()
+        || message.as_str().is_some_and(|message| message.chars().count() > 2000))
+        || value.get("queryOnly").is_some_and(|query| !query.is_boolean())
+        || value.get("retryAt").is_some_and(|retry| !retry.is_null()
+            && !retry.as_i64().is_some_and(|retry| retry > 0 && beijing::date_key_of_ms(retry).is_some()))
+    {
+        return Err("每日签到状态的说明或查询时间无效".to_string());
+    }
     if completed && at >= record.checkin_at() {
         record.set_checkin_at(at);
     }

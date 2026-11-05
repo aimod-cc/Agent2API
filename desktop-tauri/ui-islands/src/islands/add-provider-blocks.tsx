@@ -625,7 +625,7 @@ function WebLoginSection({
       ) : null}
       <AddFoot host={footerHost} active={visible}
         note={<span className='detail' id={`${prefix}-web-hint`}>{loginView.hint}</span>}>
-        <Button id={`${prefix}-web-button`} disabled={loginView.disabled || (isWeb && config.provider === 'doubaowork')} onClick={() => controllerRef.current?.start()}>
+        <Button id={`${prefix}-web-button`} disabled={loginView.disabled || (isWeb && (web.desktopOnly || config.provider === 'doubaowork'))} onClick={() => controllerRef.current?.start()}>
           {loginView.waiting && <Spinner />}{loginView.label}
         </Button>
         <Button

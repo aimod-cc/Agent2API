@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
-
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -8,9 +5,7 @@ use crate::server::config::{self, GithubAccessMode};
 use crate::server::core::task_state;
 use crate::server::logging;
 
-use super::token;
-
-const PREFERENCE_MS: i64 = 10 * 60_000;
+use super::{source_state, token};
 
 #[derive(Clone, Copy)]
 pub enum GithubSettings {
@@ -90,24 +85,19 @@ pub struct Candidate {
     pub url: String,
     pub original: String,
     pub source: Source,
-    key: String,
+    pub(super) id: String,
+    pub(super) key: String,
+    pub(super) context: String,
+    pub(super) mode: GithubAccessMode,
     mirror_origin: Option<url::Url>,
 }
 
-struct Preference {
-    source: Source,
-    until: i64,
-}
-
-fn preferences() -> &'static Mutex<HashMap<String, Preference>> {
-    static MEMORY: OnceLock<Mutex<HashMap<String, Preference>>> = OnceLock::new();
-    MEMORY.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 pub fn clear_preferences() {
-    if let Ok(mut memory) = preferences().lock() {
-        memory.clear();
-    }
+    source_state::clear();
+}
+
+pub fn status() -> serde_json::Value {
+    json!(source_state::snapshot())
 }
 
 pub fn is_official_api(value: &str) -> bool {
@@ -139,57 +129,80 @@ pub fn is_resource(value: &str) -> bool {
     }
 }
 
-fn preference_key(value: &str) -> String {
-    let settings = config::github_access();
-    let host = url::Url::parse(value)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_string))
-        .unwrap_or_default();
-    let proxy = config::update_proxy();
-    let identity = serde_json::to_vec(&(host, settings, proxy)).unwrap_or_default();
-    format!("{:x}", Sha256::digest(identity))
+pub fn candidates(value: &str, allow_mirror: bool) -> Vec<Candidate> {
+    let mut candidates = configured_candidates(value, allow_mirror);
+    if candidates[0].mode == GithubAccessMode::Auto {
+        source_state::sort(&mut candidates);
+    }
+    candidates
 }
 
-pub fn candidates(value: &str, allow_mirror: bool) -> Vec<Candidate> {
+pub(super) fn configured_candidates(value: &str, allow_mirror: bool) -> Vec<Candidate> {
     let settings = config::github_access();
-    let key = preference_key(value);
+    let context = source_state::context_key_for(&settings);
+    let key = source_state::request_key(value, &context);
     let official = Candidate {
         url: value.to_string(),
         original: value.to_string(),
         source: Source::Official,
+        id: "official".to_string(),
         key: key.clone(),
+        context: context.clone(),
+        mode: settings.mode,
         mirror_origin: None,
     };
     if !allow_mirror || settings.mode == GithubAccessMode::Official || !is_resource(value) {
         return vec![official];
     }
-    let mirror = Candidate {
-        url: format!("{}{value}", settings.mirror_url),
-        original: value.to_string(),
-        source: Source::Mirror,
-        key: key.clone(),
-        mirror_origin: url::Url::parse(&settings.mirror_url).ok(),
-    };
-    let remembered = preferences().lock().ok().and_then(|memory| {
-        memory
-            .get(&key)
-            .filter(|item| item.until > logging::now_ms())
-            .map(|item| item.source)
-    });
-    let mirror_first = settings.mode == GithubAccessMode::Accelerated
-        || (settings.mode == GithubAccessMode::Auto && remembered == Some(Source::Mirror));
-    if mirror_first {
-        vec![mirror, official]
-    } else {
-        vec![official, mirror]
+    let mut candidates = vec![official];
+    for mirror in &settings.mirrors {
+        if !mirror.enabled || (is_official_api(value) && !mirror.supports_api) {
+            continue;
+        }
+        candidates.push(Candidate {
+            url: format!("{}{value}", mirror.url),
+            original: value.to_string(),
+            source: Source::Mirror,
+            id: mirror.url.clone(),
+            key: key.clone(),
+            context: context.clone(),
+            mode: settings.mode,
+            mirror_origin: url::Url::parse(&mirror.url).ok(),
+        });
     }
+    if settings.mode == GithubAccessMode::Accelerated {
+        candidates.sort_by_key(|candidate| {
+            if candidate.id == settings.mirror_url { 0 }
+            else if candidate.source == Source::Mirror { 1 }
+            else { 2 }
+        });
+    }
+    candidates
+}
+
+pub fn ensure_available(candidates: &[Candidate], headers: &[(String, String)]) -> Result<(), String> {
+    for candidate in candidates {
+        if let Some(message) = candidate.cooling_message(headers) {
+            return Err(message);
+        }
+    }
+    Ok(())
+}
+
+pub async fn download_candidates(
+    value: &str,
+    allow_mirror: bool,
+    headers: &[(String, String)],
+) -> Result<Vec<Candidate>, String> {
+    super::probe::rank(value, allow_mirror, headers).await
 }
 
 impl Candidate {
-    pub fn label(&self) -> &'static str {
+    pub fn label(&self) -> String {
         match self.source {
-            Source::Official => "官方源",
-            Source::Mirror => "加速源",
+            Source::Official => "官方源".to_string(),
+            Source::Mirror => self.mirror_origin.as_ref()
+                .and_then(|url| url.host_str()).unwrap_or("加速源").to_string(),
         }
     }
 
@@ -226,37 +239,15 @@ impl Candidate {
     }
 
     pub fn remember(&self) {
-        if self.source == Source::Official {
-            return;
-        }
-        let now = logging::now_ms();
-        if let Ok(mut memory) = preferences().lock() {
-            memory.retain(|_, item| item.until > now);
-            if memory
-                .get(&self.key)
-                .is_some_and(|item| item.source == self.source)
-            {
-                return;
-            }
-            memory.insert(
-                self.key.clone(),
-                Preference {
-                    source: self.source,
-                    until: now + PREFERENCE_MS,
-                },
-            );
-        }
+        source_state::record(self, "ok", None, true);
     }
 
     pub fn forget(&self) {
-        if let Ok(mut memory) = preferences().lock() {
-            if memory
-                .get(&self.key)
-                .is_some_and(|item| item.source == self.source)
-            {
-                memory.remove(&self.key);
-            }
-        }
+        source_state::record(self, "failed", None, false);
+    }
+
+    pub(crate) fn observe(&self, state: &str, elapsed_ms: u64, selected: bool) {
+        source_state::record(self, state, Some(elapsed_ms), selected);
     }
 
     fn rate_key(&self, headers: &[(String, String)]) -> Option<String> {
@@ -291,7 +282,21 @@ impl Candidate {
         (until > logging::now_ms()).then(|| GithubSettings::Update.rate_limit_message(until))
     }
 
+    pub fn is_rate_limited(&self, response: &reqwest::Response) -> bool {
+        response.status().as_u16() == 429
+            || (response.status().as_u16() == 403 && (
+                self.source == Source::Official
+                    || response.headers().contains_key("retry-after")
+                    || response.headers().get("x-ratelimit-remaining").is_some_and(|value| value == "0")
+                    || response.headers().get("content-type").and_then(|value| value.to_str().ok())
+                        .is_some_and(|value| value.contains("json"))
+            ))
+    }
+
     pub fn record_rate_limit(&self, headers: &[(String, String)], response: &reqwest::Response) {
+        if response.status().as_u16() == 403 && !self.is_rate_limited(response) {
+            return;
+        }
         let Some(key) = self.rate_key(headers) else {
             return;
         };
@@ -336,5 +341,13 @@ pub fn retry_deadline(headers: &reqwest::header::HeaderMap, status: u16) -> i64 
 }
 
 pub fn should_switch(candidate: &Candidate, status: reqwest::StatusCode) -> bool {
-    status.is_server_error() || (candidate.source == Source::Mirror && status.as_u16() == 404)
+    status.is_server_error()
+        || (candidate.source == Source::Mirror && matches!(status.as_u16(), 400 | 404 | 405 | 416))
+}
+
+pub(super) fn failed_state(message: &str) -> &'static str {
+    if message.contains("限流") { "rateLimited" }
+    else if message.contains("超时") { "timeout" }
+    else if message.contains("格式") || message.contains("JSON") || message.contains("内容") { "invalid" }
+    else { "failed" }
 }

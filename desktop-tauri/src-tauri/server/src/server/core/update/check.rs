@@ -337,9 +337,8 @@ fn release_json(payload: &Value, repository: &str) -> Value {
     let name = text("name");
     let page_url = text("html_url");
     let published_at = text("published_at");
-    // 容器内更新的两件套：本机架构的更新包 + 它的 `.sha256` 伴随文件。
-    // 包名先算一次（`server_bundle_name()` 在非 Linux 是 None，两个字段
-    // 于是都为空 —— 桌面端根本用不到这条链路）。
+    // 服务端包与可选校验文件：Linux 用于自动更新，Windows 用于手动升级。
+    // 桌面安装器与服务端包并列返回，由部署能力决定页面入口。
     let assets = payload
         .get("assets")
         .and_then(Value::as_array)

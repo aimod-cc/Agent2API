@@ -1,3 +1,5 @@
+import type { ClientEvidence } from './client-identification'
+
 export type ModelApiKey = {
   id: string
   name: string
@@ -42,6 +44,8 @@ export function modelApiKeyAllows(key: ModelApiKey, model: string, provider?: st
 
 export type RequestIdentity = {
   client?: string
+  clientLabel?: string
+  clientEvidence?: ClientEvidence
   isTest?: boolean
   apiKeyId?: string
   apiKeyName?: string
@@ -51,14 +55,16 @@ export type RequestIdentity = {
 type Translate = (text: string) => string
 
 export function requestClientLabel(entry: RequestIdentity, t: Translate): string {
+  if (entry.clientEvidence?.method === 'missing') return t('未提供客户端标识')
+  if (entry.client === 'other' && entry.clientEvidence?.candidate) return `${entry.clientEvidence.candidate} · ${t('待确认')}`
   switch (entry.client) {
     case 'model_test': return t('模型测试')
     case 'assistant': return t('AI 助手')
     case 'assistant_images': return t('助手图片工具')
     case 'assistant_title': return t('助手标题总结')
     case 'checkin_keepalive': return t('日活保活')
-    case 'other': return t('其它')
-    default: return entry.client || (entry.isTest ? t('模型测试') : t('未记录客户端'))
+    case 'other': return entry.clientEvidence ? t('未知客户端') : t('其它')
+    default: return entry.clientLabel || entry.clientEvidence?.clientName || entry.client || (entry.isTest ? t('模型测试') : t('未记录客户端'))
   }
 }
 

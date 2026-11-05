@@ -152,6 +152,8 @@ import { CloudSyncPanel } from './settings-cloud-sync'
 import { DbRestoreDialog } from './settings-db-restore'
 import { DatabaseBackupDialogs, DatabaseBackupPanel } from './settings-database-backup'
 import { SanitizePanel } from './settings-sanitize'
+import { ClientIdentificationPanel } from '../../../ui-shared/client-identification-panel'
+import { clientIdentificationApi } from './settings-client-identification'
 // 侧边栏菜单面板（设置 → 显示）：显隐 / 顺序 / 分组。布局模型在
 // ui/sidebar-layout.js（经典脚本，主侧边栏渲染与这里共用同一份），见该文件的模块头
 import { SidebarPane } from './sidebar-pane'
@@ -2437,6 +2439,7 @@ function SettingsPage() {
           <DisplayPane />
         </div>
         <div className={paneClass('gateway')} data-cat='gateway'>
+          <ClientIdentificationPanel api={clientIdentificationApi} t={t} active={snap.category === 'gateway'} />
           <GatewayPane snap={snap} panels={adminPanels} />
         </div>
         <div className={paneClass('retry')} data-cat='retry'>

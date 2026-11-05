@@ -186,6 +186,8 @@ export function fetchStatsSummary(range: StatsRange, signal?: AbortSignal, optio
 export type AttemptDetail = { provider?: string; status?: number; error?: string }
 
 export type RequestRow = {
+  clientLabel?: string
+  clientEvidence?: import('../../../ui-shared/client-identification').ClientEvidence
   ts?: number
   id?: string
   model?: string

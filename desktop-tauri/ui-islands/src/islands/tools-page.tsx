@@ -13,7 +13,7 @@ import {
   isDesktopShell, patchServer, type InstallTarget, type ToolProtocol, type ToolService,
 } from './tools-data'
 
-type Tab = 'all' | ToolProtocol
+type Tab = 'all' | 'skill' | 'mcp'
 
 function protocolBadge(protocol: ToolProtocol) {
   const variant = protocol === 'skill' ? 'brand' : protocol === 'mcp' ? 'info' : 'outline'
@@ -36,8 +36,11 @@ export function ToolsPage() {
     setLoading(true); setError('')
     try {
       const rows = await fetchServices()
-      setServices(rows)
-      if (desktop) void loadTargets(rows)
+      // API 是固定对外的接口，不再作为「工具服务」页的协议条目展示；
+      // 说明在「文档」页，运行时路由不受影响。
+      const visibleRows = rows.filter(row => row.protocol !== 'api')
+      setServices(visibleRows)
+      if (desktop) void loadTargets(visibleRows)
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure))
     } finally {
@@ -90,7 +93,6 @@ export function ToolsPage() {
             { value: 'all', label: t('全部') },
             { value: 'skill', label: 'Skill' },
             { value: 'mcp', label: 'MCP' },
-            { value: 'api', label: 'API' },
           ]} aria-label={t('接入协议')} />
           <Button size='sm' variant='ghost' className='ml-auto' disabled={loading} onClick={() => void load()}>{loading ? <Spinner /> : null}{t('刷新')}</Button>
         </div>
@@ -133,14 +135,14 @@ export function ToolsPage() {
                     <TableCell><code className='whitespace-nowrap text-[11.5px]'>{service.endpoint}</code></TableCell>
                     <TableCell><Button size='sm' variant='ghost' onClick={() => setDetail(service)}>{t('详情')}</Button></TableCell>
                     {desktop ? <TableCell>
-                      {service.protocol === 'api' ? <span className='text-subtle'>-</span> : <div className='flex flex-wrap gap-1.5'>
+                      <div className='flex flex-wrap gap-1.5'>
                         <Button size='sm' variant='outline' disabled={!service.enabled || toggling === service.key}
                           onClick={() => setInstall({ service, mode: service.protocol === 'mcp' ? 'mcp' : 'skill' })}>
                           {installed > 0 ? t('更新') : t('安装')}
                         </Button>
                         <Button size='sm' variant='ghost' disabled={!installed} onClick={() => setUninstall({ service, mode: service.protocol === 'mcp' ? 'mcp' : 'skill' })}>{t('卸载')}</Button>
                         {installed > 0 ? <span className='self-center text-[11px] text-subtle' title={t('已接入 {count} 个目标', { count: installed })}>{installed}</span> : null}
-                      </div>}
+                      </div>
                     </TableCell> : null}
                   </TableRow>
                 })}

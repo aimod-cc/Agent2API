@@ -586,7 +586,7 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
-  padding: 8px 8px 10px;
+  padding: 8px 0 10px 8px;
   border-right: 1px solid var(--sidebar-border);
   /* 比全局侧栏浅一档（--rail-bg，见 tokens.css）：它是面板内的一段内嵌导航，
      用侧栏同款底色会被读成侧栏的延伸，和右边的模型表也不成一块 */
@@ -608,6 +608,10 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+@media (min-width: 768px) {
+  .prov-rail > .rail-scroll { padding-right: 8px; }
+  .prov-rail > .rail-foot { margin-right: 8px; }
 }
 /* 栏底的动作区：与条目区隔一条发丝线，说明下面是「动作」不是「选项」
    （里面的「＋ 新建」是 NavItem 的 add 变体，宽度组件自带 w-full） */

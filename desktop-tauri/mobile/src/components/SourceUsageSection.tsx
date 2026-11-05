@@ -41,7 +41,7 @@ export function SourceUsageSection({ summary, apiKeys = false }: { summary: Stat
     }).then(setDetail).catch(failure => { if (!controller.signal.aborted) setError(String(failure)) })
     return () => controller.abort()
   }, [target, summary.startDate, summary.endDate])
-  const query = (row: StatsDimension): Record<string, string> => apiKeys ? { apiKey: row.filterValue || 'unknown' } : { client: row.id || '' }
+  const query = (row: StatsDimension): Record<string, string> => apiKeys ? { apiKey: row.filterValue || 'unknown' } : { client: row.id || '', clientLabel: row.label || '' }
   return (
     <div className='m-section'>
       <div className='flex flex-wrap justify-between items-center gap-2 mb-2'>
@@ -85,7 +85,7 @@ export function SourceUsageSection({ summary, apiKeys = false }: { summary: Stat
                   {detail.apiKeyDetail?.[section]?.length ? detail.apiKeyDetail[section]?.map((row, index) => (
                     <Button key={row.id || row.model || index} variant='ghost' className='w-full justify-between my-1' onClick={() => {
                       openMobileRequestLogs(summary, { apiKey: target?.filterValue || 'unknown',
-                        ...(section === 'clients' ? { client: row.id || '' } : { model: row.model || '' }) })
+                        ...(section === 'clients' ? { client: row.id || '', clientLabel: row.label || '' } : { model: row.model || '' }) })
                       setTarget(null)
                     }}><span className='truncate'>{section === 'clients' ? reportSourceName(row, false) : row.label || row.model}</span>
                       <span>{formatTokens(row.totalTokens || 0)} · {formatInt(row.requests || 0)}</span></Button>

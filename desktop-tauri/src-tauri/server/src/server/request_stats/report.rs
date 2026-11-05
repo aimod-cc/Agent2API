@@ -602,6 +602,9 @@ pub(super) fn entry_json(entry: &RequestEntry) -> Value {
         return Value::Object(serde_json::Map::new());
     };
     if let Some(object) = value.as_object_mut() {
+        object.insert("clientLabel".into(), json!(crate::server::core::client::display_name(
+            &entry.source.client, entry.source.recorded_client_name(),
+        )));
         object.insert(
             "providerLabel".to_string(),
             Value::String(provider_label(&entry.provider)),

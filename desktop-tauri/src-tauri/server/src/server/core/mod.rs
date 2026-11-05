@@ -81,6 +81,7 @@ pub mod checkin_records;
 pub mod checkin_schedules;
 pub mod clash;
 pub mod client;
+pub(crate) mod compact_routing;
 // 云同步（设置页「数据 → 云同步」）：WebDAV / S3 兼容存储上的业务数据快照。
 // 范围、密钥封装与自动同步的触发口径见该模块头
 pub mod cloud_sync;
@@ -114,6 +115,7 @@ pub mod proxy_rotate;
 pub mod proxy_settings;
 pub mod proxies;
 pub mod routing;
+pub(crate) mod routing_groups;
 pub mod routing_order;
 pub mod routing_scope;
 pub mod sanitize;

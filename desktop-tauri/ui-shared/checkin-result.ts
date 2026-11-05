@@ -1,4 +1,55 @@
-import type { CheckinResultRow } from './checkin'
+import type { CheckinAccount, CheckinResultRow, DailyCheckinState } from './checkin'
+
+export type AccountCheckinStatus = 'done' | 'pending' | 'confirming' | 'inactive' | 'ineligible' | 'captcha' | 'failed'
+
+/** 新插件的当日状态优先；旧插件仍按 checkedInToday 展示。 */
+export function accountCheckinStatus(account: CheckinAccount): AccountCheckinStatus {
+  if (account.checkedInToday) return 'done'
+  switch (account.dailyCheckin?.status) {
+    case 'confirming': return 'confirming'
+    case 'inactive': return 'inactive'
+    case 'ineligible': return 'ineligible'
+    case 'captcha': return 'captcha'
+    case 'failed': return 'failed'
+    default: return 'pending'
+  }
+}
+
+export function checkinStatusLabel(status: AccountCheckinStatus): string {
+  switch (status) {
+    case 'done': return '已签'
+    case 'confirming': return '待确认'
+    case 'inactive': return '暂无活动'
+    case 'ineligible': return '不适用'
+    case 'captcha': return '需人工处理'
+    case 'failed': return '失败'
+    default: return '待签'
+  }
+}
+
+export function checkinStatusTone(status: AccountCheckinStatus): 'ok' | 'warn' | 'bad' | 'mute' | 'brand' {
+  switch (status) {
+    case 'done': return 'ok'
+    case 'confirming':
+    case 'captcha': return 'warn'
+    case 'inactive':
+    case 'ineligible': return 'mute'
+    case 'failed': return 'bad'
+    default: return 'brand'
+  }
+}
+
+export function checkinActionLabel(account: CheckinAccount): string {
+  if (account.dailyCheckin?.queryOnly) return '查询结果'
+  const status = accountCheckinStatus(account)
+  if (status === 'inactive' || status === 'ineligible') return '重新查询'
+  return account.checkedInToday ? '重签' : '签到'
+}
+
+/** 套餐旧状态未声明 status；新的普通签到状态不套用“份套餐”的单位。 */
+export function checkinPlanProgress(state?: DailyCheckinState | null): boolean {
+  return Boolean(state && (state.kind === 'plans' || state.status === undefined) && state.totalCount > 0)
+}
 
 export function claimCompleted(claim: CheckinResultRow['claim']): boolean {
   if (!claim || claim.error?.trim()) return false

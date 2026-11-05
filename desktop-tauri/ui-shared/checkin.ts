@@ -1,9 +1,16 @@
+export type DailyCheckinStatus = 'claimed' | 'done' | 'confirming' | 'inactive' | 'ineligible' | 'captcha' | 'failed'
+
 export type DailyCheckinState = {
   at: number
   completed: boolean
   completedCount: number
   totalCount: number
   sourcesComplete: boolean
+  kind?: 'plans'
+  status?: DailyCheckinStatus
+  message?: string
+  retryAt?: number | null
+  queryOnly?: boolean
 }
 
 export type CheckinAccount = {

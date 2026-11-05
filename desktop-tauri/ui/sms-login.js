@@ -12,6 +12,10 @@
    KukuAI 是**第三条形态**：发码必须发生在官方页面里（风控签名只有页面能生成），
    于是由壳开登录窗口自动填号发码、收码后自动登录（见 src-tauri/src/login.rs
    的 kuku_sms_script）—— 本弹窗只负责收手机号、收验证码，窗口在幕后配合。
+   Tabbit 国内站是**第四条**：发码可能先被风控拦下要滑块验证，上游给一个
+   verifyUrl 要人在页面里滑完，**然后重新发一次码**才成功（官方网页版也是
+   这样，见插件 login.rs 的 challenge_of）。这里不替用户解题、也不猜上游的
+   回传字段，只负责把验证页打开、把按钮换成「已完成验证，继续发送」。
    国际版的手机验证码入口已从添加账号弹窗移除（它只有 Zai / Google 网页登录），
    因此这个引擎服务的几家都在大陆号段内：规则仍按家给（Loomy 只收 `1[3-9]`，
    见 create 里的 SMS_PROFILES），没有地区分叉。
@@ -73,11 +77,14 @@
       },
       // Tabbit 国内站：发码时上游返回 `{uuid}`，登录必须带同一个 uuid。
       // 国际站没有短信登录（上游灰度 403），因此这条只挂在 `tabbit` 上。
+      // captchaPage：发码可能先被风控拦下要滑块验证，要开验证页并等用户回来
+      // 点第二次（见文件头与 send() 里的 resuming）。
       tabbit: {
         send: '/api/session/login/tabbit/sms/send',
         verify: '/api/session/login/tabbit/sms/verify',
         ticketKey: 'uuid',
         phoneRe: /^1[2-9]\d{9}$/,
+        captchaPage: true,
         sentHint: wbI18n.t('验证码已发送。收到后填入下方并点「登录并添加」'),
       },
       // KukuAI：百度通行证的发码要在官方页面里点（风控签名只有页面能生成），
@@ -110,6 +117,15 @@
     let ticket = '';
     /** 发码与登录共用一把锁：两个按钮都打上游，不能并点 */
     let busy = false;
+    /**
+     * 滑块验证这一轮的状态（只有 profile.captchaPage 的家用得到）。
+     *
+     * captchaTicket：被风控拦下时上游给的 uuid —— 过完验证重发必须沿用它，
+     *                否则上游会当成另一次会话，刚通过的验证结论对不上。
+     * captchaPending：验证页已经打开、正等用户回来点「继续发送」。
+     */
+    let captchaTicket = '';
+    let captchaPending = false;
 
     /**
      * 写提示行。
@@ -272,18 +288,90 @@
       cooldownTimer = window.setInterval(paint, 1000);
     }
 
+    /**
+     * 打开上游给的验证页（Tabbit 滑块）。
+     *
+     * 桌面走桥接（最终是壳的 `open_release_page` → 系统浏览器），网页面板走
+     * 桥接里的 window.open；两条路都由「用户点了一下按钮」触发，不会被拦。
+     * 返回 rejected 时由调用方把地址显示出来让用户手动访问 —— 打不开不等于
+     * 这条路断了，别在这里把整次登录判死。
+     */
+    const openVerifyPage = url => {
+      if (!url) return Promise.reject(new Error(wbI18n.t('上游没有给出验证页面地址')));
+      const bridge = window.workbuddyDesktop;
+      if (typeof bridge?.openVerifyPage === 'function') {
+        const opened = bridge.openVerifyPage(url);
+        return Promise.resolve(opened);
+      }
+      const opened = window.open(url, '_blank');
+      if (!opened) return Promise.reject(new Error(wbI18n.t('浏览器拦截了弹窗')));
+      try { opened.opener = null; } catch { /* 跨域时改不了，忽略 */ }
+      return Promise.resolve();
+    };
+
+    /**
+     * 接住「需要先过滑块」这一次发码：开验证页，把按钮换成「继续发送」。
+     *
+     * ── 为什么不自动重发 ────────────────────────────────────────
+     * 上游不知道我们这边的验证页什么时候滑完（官方页面的回调只用来关弹窗，
+     * 见文件头），轮询重发等于反复打风控接口、还可能把验证记录顶掉。让用户
+     * 滑完自己点一下，是唯一不需要猜测上游协议的接法。
+     */
+    async function holdForCaptcha(data) {
+      const url = String(data?.captcha?.verifyUrl || '');
+      captchaTicket = String(data?.uuid || '');
+      if (captchaTicket) ticket = captchaTicket;
+      captchaPending = true;
+      // 这一步不打冷却：按钮等下就要给用户点，冷却会让人以为「还得等 60 秒」
+      window.clearInterval(cooldownTimer);
+      cooldownTimer = 0;
+      cooldownLeft = 0;
+      const button = $(`${prefix}-sms-send`);
+      if (!url) {
+        // 上游说要验证却没给地址（或被拒收）：保留 pending，用户再点一次就是
+        // 重新发码，可能拿到一个新的 requestCode。
+        if (button) { button.disabled = false; button.textContent = wbI18n.t('获取验证码'); }
+        setHint(wbI18n.t('上游要求人机验证，但没有给出验证页面地址，请稍后重试'), true);
+        return;
+      }
+      const message = String(data?.captcha?.message || wbI18n.t('需要进行人机验证'));
+      if (button) { button.disabled = false; button.textContent = wbI18n.t('已完成验证，继续发送'); }
+      setHint(wbI18n.t('{message}：请在打开的页面完成滑块，完成后回到这里点「已完成验证，继续发送」', { message }));
+      try {
+        await openVerifyPage(url);
+      } catch {
+        setHint(wbI18n.t('{message}：请手动打开验证页面 {url}，完成后回到这里点「已完成验证，继续发送」', { message, url }), true);
+      }
+    }
+
     async function send() {
-      if (busy || cooldownLeft > 0) return;
+      if (busy) return;
+      // 用户在验证页滑完回来点的还是这一颗按钮：这一次不是「重发」，是完成
+      // 同一次发码，因此跳过冷却判据。
+      const resuming = captchaPending;
+      if (!resuming && cooldownLeft > 0) return;
       const phone = phoneOf();
       if (!PHONE_RE.test(phone)) { window.wbApp.toast(wbI18n.t('请填写 11 位大陆手机号'), 'err'); return; }
       const button = $(`${prefix}-sms-send`);
       busy = true;
+      captchaPending = false;
       if (button) { button.disabled = true; button.textContent = wbI18n.t('发送中…'); }
       setHint('');
       try {
         // provider 照带：后端按它分派（AutoClaw 两地区 / Loomy 各一条链路），
-        // 未知值会得到明确拒绝而不是静默发到别的站点去
-        const data = await request(profile.send, { phone, provider: prefix });
+        // 未知值会得到明确拒绝而不是静默发到别的站点去。
+        // supportsCaptcha：告诉网关「认识发码前的滑块状态」，它才会用
+        // 200 + status:captcha 回我们，而不是回一句错误。
+        const sendPayload = { phone, provider: prefix, supportsCaptcha: true };
+        if (captchaTicket) sendPayload.uuid = captchaTicket;
+        const data = await request(profile.send, sendPayload);
+        // ── 发码前的滑块验证（目前只有 Tabbit 国内站）──────────────────
+        // 上游这一轮没有发短信，只是要求先验证；不能往下走「已发送」。
+        if (profile.captchaPage && data?.status === 'captcha') {
+          await holdForCaptcha(data);
+          return;
+        }
+        captchaTicket = '';
         // ── 中间态为什么要留住 ─────────────────────────────────────
         // 上游把「刚发的这个码」绑在发码时的 device_id（AutoClaw）/ msgid
         // （Loomy）上，登录必须带同一个。存在这个闭包里而不是每次现取，也不
@@ -342,6 +430,21 @@
         if (button) { button.disabled = false; button.textContent = wbI18n.t('登录并添加'); }
       }
     }
+
+    /**
+     * 改手机号 = 换了一轮登录：上一轮的风控会话与「已过验证」都作废。
+     * 不清理的话，新号会带着旧号那次验证的中间态去发码/登录 —— 上游那边
+     * 是两次不同的会话，只会得到一个对不上的结果。
+     */
+    phoneInput()?.addEventListener('input', () => {
+      if (!captchaPending && !captchaTicket) return;
+      captchaPending = false;
+      captchaTicket = '';
+      ticket = '';
+      // 冷却期间按钮由倒计时接管，别在这里抢它的文案与禁用态
+      if (cooldownLeft <= 0) resetSendButton();
+      setHint('');
+    });
 
     $(`${prefix}-sms-send`)?.addEventListener('click', send);
     $(`${prefix}-sms-submit`)?.addEventListener('click', submit);

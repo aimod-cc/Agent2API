@@ -33,6 +33,8 @@ pub enum McpServerKind {
 pub struct McpRequestContext {
     /// 网关基址（视觉分析内部调用用）
     pub base_url: String,
+    pub store: crate::server::core::account_store::AccountStore,
+    pub scope: Option<crate::server::core::key_scope::KeyScope>,
 }
 
 pub struct McpSpec {
@@ -187,7 +189,7 @@ async fn call_tool(
                 .map_err(|error| ToolCallError::InvalidParams(error.message))?;
             let started = logging::now_ms();
             let outcome = if operation == "search" {
-                super::run_search(items.clone())
+                super::run_search(&ctx.store, ctx.scope.as_ref(), items.clone())
                     .await
                     .map(|run| (run.payload, run.successful))
             } else {

@@ -23,6 +23,8 @@ export type RequestEntry = {
   /** 来源客户端（后端 `client`：入口按下游 User-Agent 分类的结果；
    *  空串 / 缺键 = 没有记录 —— 旧行、模型测试、请求未带 UA 的行） */
   client?: string
+  clientLabel?: string
+  clientEvidence?: import('../../../../ui-shared/client-identification').ClientEvidence
   apiKeyId?: string; apiKeyName?: string; apiKeySource?: string
 }
 
@@ -345,25 +347,9 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
     }
 
     case 'client': {
-      // 后端存的是**归类结果**（Codex / ZCode / Claude Code / …，见 core::client），
-      // 空串 = 没有记录（旧行、模型测试、请求未带 UA）。产品名是标识符不翻译，
-      // 只有兜底类 `other` 翻成「其它」；空值给占位符而不是空格子。
-      const value = String(entry.client ?? '').trim()
-      if (!value && !entry.isTest) {
-        return (
-          <span key={key} className={`${className} is-empty`}
-            title={t('这条明细没有记录来源客户端（旧数据、模型测试，或请求未带 User-Agent）')}>—</span>
-        )
-      }
       const label = clientRequestLabel(entry)
-      return (
-        <span key={key} className={className}
-          title={value === 'other'
-            ? t('识别到 User-Agent，但不属于已知的客户端类型：{ua}', { ua: value })
-            : t('来源客户端：{client}', { client: label })}>
-          {label}
-        </span>
-      )
+      return <span key={key} className={className}
+        title={entry.clientEvidence?.userAgent || t('来源客户端：{client}', { client: label })}>{label}</span>
     }
 
     case 'apiKey': {
@@ -455,11 +441,10 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
 
     case 'detail': {
       const id = entry.id ? String(entry.id) : ''
-      // 只有带 id 的行才有入口（旧数据与「转发前就失败」的请求都没有报文可看）
-      if (!id) return <span key={key} className={`req-none ${base} ta-${align}`}>-</span>
+      if (!id && !entry.clientEvidence) return <span key={key} className={`req-none ${base} ta-${align}`}>-</span>
       return (
         <span key={key} className={className}>
-          <Button size='sm' variant='outline' className='req-detail-btn' title={t('查看该请求的上游原始报文')}
+          <Button size='sm' variant='outline' className='req-detail-btn' title={t('请求详情')}
             onClick={() => { void shared().wbRequestDetail?.open?.(id, entry) }}>{t('详情')}</Button>
         </span>
       )

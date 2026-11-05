@@ -39,15 +39,29 @@ pub struct RequestSource {
     pub client: String,
     #[serde(flatten)]
     pub api_key: ApiKeyIdentity,
+    #[serde(rename = "clientEvidence", default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<crate::server::core::client::ClientEvidence>,
+    /// 请求行为只使用原来的严格识别，显示规则不能改变模型选择。
+    #[serde(skip)]
+    pub behavior_client: String,
 }
 
 impl RequestSource {
     pub fn is_internal(&self) -> bool {
-        matches!(self.client.as_str(), "model_test" | "assistant" | "assistant_images" | "assistant_title" | "checkin_keepalive")
+        self.evidence.is_none() && matches!(self.client.as_str(), "model_test" | "assistant" | "assistant_images" | "assistant_title" | "checkin_keepalive")
+    }
+
+    pub fn evidence_json(&self) -> String {
+        self.evidence.as_ref().map(|evidence| evidence.encoded()).unwrap_or_else(|| "{}".into())
+    }
+
+    pub fn recorded_client_name(&self) -> &str {
+        self.evidence.as_ref().map(|evidence| evidence.client_name.as_str()).unwrap_or("")
     }
 
     pub(super) fn normalized(mut self) -> Self {
         self.client = self.client.trim().to_string();
+        self.evidence = self.evidence.map(|evidence| evidence.normalized());
         self.api_key.id = self.api_key.id.trim().to_string();
         self.api_key.name = self.api_key.name.trim().to_string();
         self
@@ -92,6 +106,8 @@ impl UsageAccum {
 pub(super) struct ClientAccum {
     #[serde(default)]
     pub client: String,
+    #[serde(default)]
+    pub label: String,
     #[serde(flatten)]
     pub usage: UsageAccum,
 }

@@ -37,10 +37,19 @@ export type ToolService = {
 export type ProviderRow = {
   provider: string
   display_name: string
+  auth_type?: 'api_key' | 'account'
+  supports_search?: boolean
+  supports_fetch?: boolean
+  available?: boolean
   configured: boolean
   key_hint: string | null
   enabled: boolean
   updated_at: number | null
+  account_id?: string
+  account_name?: string
+  accounts?: Array<{ id: string; name: string; enabled: boolean }>
+  max_query_chars?: number | null
+  unavailable_reason?: string | null
 }
 
 export type ProviderSelection = { search_providers: string[]; fetch_provider: string }
@@ -110,7 +119,7 @@ export const SERVICE_NAME: Record<string, string> = {
 }
 
 export const SERVICE_DESC: Record<string, string> = {
-  'web-search': t('聚合 Tavily、Querit、Firecrawl、Ollama Web Search，提供批量网页搜索与网页抓取能力。'),
+  'web-search': t('聚合标准搜索服务及已有 WorkBuddy、Kiro 账号的搜索能力；网页抓取仍使用标准服务。'),
   vision: t('把图片与提示词交给后台配置的视觉模型分析，并把模型回复返回给调用方的大模型。'),
 }
 
@@ -152,14 +161,17 @@ export const fetchServices = async (protocol?: ToolProtocol): Promise<ToolServic
 export const patchServer = (id: string, body: Record<string, unknown>): Promise<ToolService> =>
   callJson<ToolService>('PATCH', `/api/tools/servers/${encodeURIComponent(id)}`, body)
 
-export const fetchProviders = (): Promise<ProviderRow[]> => callJson('GET', '/api/tools/providers')
+export const fetchProviders = async (): Promise<ProviderRow[]> => {
+  const providers = await callJson<ProviderRow[]>('GET', '/api/tools/providers')
+  return providers.map(provider => ({ ...provider, display_name: t(provider.display_name) }))
+}
 
 export const fetchSelection = (): Promise<ProviderSelection> => callJson('GET', '/api/tools/provider-selection')
 
 export const saveSelection = (value: ProviderSelection): Promise<ProviderSelection> =>
   callJson('PUT', '/api/tools/provider-selection', value)
 
-export const saveProvider = (provider: string, body: { api_key?: string; enabled?: boolean }) =>
+export const saveProvider = (provider: string, body: { api_key?: string; account_id?: string | null; enabled?: boolean }) =>
   callJson('PUT', `/api/tools/providers/${encodeURIComponent(provider)}`, body)
 
 export const clearProviderKey = (provider: string) =>

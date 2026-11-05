@@ -32,6 +32,7 @@ mod gateway;
 mod legacy_install;
 mod login;
 mod login_profile;
+mod monkeycode_login;
 mod panel_session;
 mod settings;
 mod startup;

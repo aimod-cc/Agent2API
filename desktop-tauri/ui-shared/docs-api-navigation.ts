@@ -24,12 +24,14 @@ export function documentationGroups(sections: ApiSection[], packs: PluginProvide
     id: section.id, title: section.title, group: '', description: section.description, path: section.path,
     searchText: [section.path || '', ...(section.paragraphs || []), section.warning || '', ...(section.points || []),
       ...(section.fields?.flatMap(field => [field.name, field.type, field.description]) || []),
-      ...(section.examples?.flatMap(example => [example.label, example.code]) || [])],
+      ...(section.examples?.flatMap(example => [example.label, example.code]) || []),
+      section.markdown || ''],
   }))]
   const definitions = [
     { id: 'guide', title: t('接入指南'), ids: ['addresses', 'start', 'models'] },
     { id: 'chat', title: t('对话协议'), ids: ['chat', 'tools', 'responses', 'messages'] },
     { id: 'images', title: t('图片生成与编辑'), ids: ['image-generation', 'image-editing', 'image-results', 'image-sdk'] },
+    { id: 'tools', title: t('工具服务'), ids: ['tools-api'] },
     { id: 'troubleshooting', title: t('排错与限制'), ids: ['errors'] },
   ]
   const groups = definitions.map(definition => ({

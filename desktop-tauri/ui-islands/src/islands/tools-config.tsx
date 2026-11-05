@@ -19,18 +19,19 @@ import {
 
 /** 稳定错误码 → 界面文案（代码是后端口径，文案是中文键，便于扫描进词典） */
 const TEST_FAILURE_TEXT: Record<string, string> = {
-  invalid_provider_key: t('API Key 无效或无权限'),
+  invalid_provider_key: t('密钥或账号登录态无效'),
   rate_limited: t('触发上游限流'),
   timed_out: t('上游请求超时'),
   no_results: t('上游没有返回结果'),
   provider_unavailable: t('提供商暂不可用或配置有误'),
-  configuration: t('提供商尚未配置密钥'),
+  configuration: t('搜索来源配置不完整'),
+  permission_denied: t('当前网关 Key 无权使用所选账号搜索来源'),
   invalid_input: t('请求参数无效'),
 }
 
 function testFailureText(result: ProviderTestResult): string {
   const text = result.code ? TEST_FAILURE_TEXT[result.code] : ''
-  return text || result.error || t('连接测试失败')
+  return result.error ? t(result.error) : text || t('连接测试失败')
 }
 
 export function WebSearchConfig() {
@@ -58,7 +59,7 @@ export function WebSearchConfig() {
       setProviders(providersResult || [])
       setSelection(selectionResult)
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure))
+      setError(t(failure instanceof Error ? failure.message : String(failure)))
     } finally {
       if (!silent) setLoading(false)
     }
@@ -67,9 +68,10 @@ export function WebSearchConfig() {
   React.useEffect(() => { void load() }, [load])
 
   const options = providers.map(provider => ({ value: provider.provider, label: provider.display_name }))
+  const fetchOptions = providers.filter(provider => provider.supports_fetch !== false)
+    .map(provider => ({ value: provider.provider, label: provider.display_name }))
   const selected = new Set(selection.search_providers)
-  // 选择列表只是「允许用哪几家」；运行时只跑已启用且已配置密钥的那些。
-  // 未启用的不参与搜索，界面上要把「会跳过谁」说清楚，不能让人以为服务坏了。
+  // 选择范围和可用状态分开：密钥或账号配置失效时，明确显示会跳过哪些来源。
   const readySelected = providers.filter(provider => selected.has(provider.provider) && provider.enabled && provider.configured)
   const missing = providers.filter(provider => selected.has(provider.provider) && !(provider.enabled && provider.configured))
   const aggregateReady = readySelected.length > 0
@@ -84,7 +86,7 @@ export function WebSearchConfig() {
       setSelection(next)
       setNotice(t('能力提供商配置已保存'))
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure))
+      setError(t(failure instanceof Error ? failure.message : String(failure)))
     } finally {
       setSaving(false)
     }
@@ -96,7 +98,7 @@ export function WebSearchConfig() {
       await saveProvider(provider.provider, { enabled })
       await load(true)
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure))
+      setError(t(failure instanceof Error ? failure.message : String(failure)))
     }
   }
 
@@ -110,7 +112,7 @@ export function WebSearchConfig() {
         setError(testFailureText(result))
       }
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure))
+      setError(t(failure instanceof Error ? failure.message : String(failure)))
     } finally {
       setTesting('')
     }
@@ -123,7 +125,7 @@ export function WebSearchConfig() {
       setNotice(t('密钥已清除'))
       await load(true)
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure))
+      setError(t(failure instanceof Error ? failure.message : String(failure)))
     }
   }
 
@@ -147,8 +149,8 @@ export function WebSearchConfig() {
         <Field>
           <FieldLabel>{t('批量网页抓取提供商')}</FieldLabel>
           <Select value={selection.fetch_provider} onValueChange={value => { if (typeof value === 'string') setSelection(current => ({ ...current, fetch_provider: value })) }}>
-            <SelectTrigger className='w-full'><SelectValue>{options.find(option => option.value === selection.fetch_provider)?.label || selection.fetch_provider}</SelectValue></SelectTrigger>
-            <SelectContent>{options.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
+            <SelectTrigger className='w-full'><SelectValue>{fetchOptions.find(option => option.value === selection.fetch_provider)?.label || selection.fetch_provider}</SelectValue></SelectTrigger>
+            <SelectContent>{fetchOptions.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
           </Select>
           <FieldDescription>{t('仅支持单选，默认为 Tavily。')}</FieldDescription>
         </Field>
@@ -158,14 +160,15 @@ export function WebSearchConfig() {
       {aggregateReady
         ? <Alert variant='success'>{missing.length
           ? t('批量网页搜索可用：将使用 {ready}，未配置的 {missing} 会自动跳过。', { ready: readyNames, missing: missingNames })
-          : t('批量网页搜索可用：所选提供商均已启用并配置密钥。')}</Alert>
-        : <Alert variant='warning'>{t('批量网页搜索不可用：所选提供商均未启用或未配置密钥。')}</Alert>}
+          : t('批量网页搜索可用：所选来源均已启用并配置完成。')}</Alert>
+        : <Alert variant='warning'>{t('批量网页搜索不可用：请启用来源并配置密钥或绑定可用账号。')}</Alert>}
+      <p className='text-xs text-subtle'>{t('已有账号搜索只支持搜索，不支持网页抓取；请求会使用绑定账号的额度与出网设置。')}</p>
 
       <div className='grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4'>
         {providers.map(provider => <div key={provider.provider} className='flex flex-col gap-2 rounded-md border border-border p-3'>
           <div className='flex items-center gap-2'>
             <span className='font-semibold'>{provider.display_name}</span>
-            <Switch className='ml-auto' checked={provider.enabled} onCheckedChange={checked => void toggle(provider, checked === true)} aria-label={t('启用')} />
+            <Switch className='ml-auto' checked={provider.enabled} disabled={provider.available === false && !provider.enabled} onCheckedChange={checked => void toggle(provider, checked === true)} aria-label={t('启用')} />
           </div>
           <div className='flex flex-wrap gap-1.5 text-[11px]'>
             <span className={provider.configured ? 'text-success' : 'text-subtle'}>{provider.configured ? t('已配置') : t('未配置')}</span>
@@ -173,7 +176,12 @@ export function WebSearchConfig() {
             <span className={provider.enabled ? 'text-primary' : 'text-subtle'}>{provider.enabled ? t('已启用') : t('已停用')}</span>
           </div>
           <div className='text-[11.5px] text-subtle'>
-            <div>{t('密钥提示')}: <span className='text-foreground'>{provider.key_hint || '-'}</span></div>
+            {provider.auth_type === 'account' ? <>
+              <div>{t('已有账号')} · {t('仅搜索')}</div>
+              <div>{t('搜索账号')}: <span className='text-foreground'>{provider.account_name || t('未选择账号')}</span></div>
+              {provider.max_query_chars ? <div>{t('每条搜索词最多 {count} 字', { count: provider.max_query_chars })}</div> : null}
+              {provider.unavailable_reason ? <div className='mt-1 text-warning'>{t(provider.unavailable_reason)}</div> : null}
+            </> : <div>{t('密钥提示')}: <span className='text-foreground'>{provider.key_hint || '-'}</span></div>}
             <div>{t('更新时间')}: {formatTime(provider.updated_at)}</div>
           </div>
           <div className='mt-auto flex flex-wrap gap-1.5'>
@@ -181,10 +189,10 @@ export function WebSearchConfig() {
             <Button size='sm' variant='outline' disabled={!provider.configured || testing === provider.provider} onClick={() => void test(provider)}>
               {testing === provider.provider ? <Spinner /> : null}{t('测试连接')}
             </Button>
-            <Button size='sm' variant='ghost' disabled={!provider.configured} onClick={() => {
+            {provider.auth_type !== 'account' ? <Button size='sm' variant='ghost' disabled={!provider.configured} onClick={() => {
               void confirmDialog(t('确定清除提供商 {name} 的 API Key？清除后该提供商将不可用，直到重新保存新密钥。', { name: provider.display_name }), { destructive: true })
                 .then(ok => { if (ok) void clearKey(provider) })
-            }}>{t('清除密钥')}</Button>
+            }}>{t('清除密钥')}</Button> : null}
           </div>
         </div>)}
         {!providers.length && <Empty>{t('没有可配置的提供商')}</Empty>}
@@ -196,6 +204,11 @@ export function WebSearchConfig() {
 
 function ProviderDialog({ provider, onClose, onSaved }: { provider: ProviderRow; onClose: () => void; onSaved: () => void }) {
   const [apiKey, setApiKey] = React.useState('')
+  const [accountId, setAccountId] = React.useState(provider.account_id || '')
+  const isAccount = provider.auth_type === 'account'
+  const accounts = (provider.accounts || []).filter(account => account.enabled)
+  const accountLabel = accounts.find(account => account.id === accountId)?.name
+    || (accountId ? t('已绑定账号不可用，请重新选择') : t('未选择账号'))
   const [enabled, setEnabled] = React.useState(provider.enabled)
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState('')
@@ -203,10 +216,12 @@ function ProviderDialog({ provider, onClose, onSaved }: { provider: ProviderRow;
   const save = async () => {
     setBusy(true); setError('')
     try {
-      await saveProvider(provider.provider, { api_key: apiKey.trim() || undefined, enabled })
+      await saveProvider(provider.provider, isAccount
+        ? { account_id: accountId || null, enabled }
+        : { api_key: apiKey.trim() || undefined, enabled })
       onSaved()
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure))
+      setError(t(failure instanceof Error ? failure.message : String(failure)))
     } finally {
       setBusy(false)
     }
@@ -216,11 +231,24 @@ function ProviderDialog({ provider, onClose, onSaved }: { provider: ProviderRow;
     <DialogContent className='max-w-lg'>
       <DialogHeader><DialogTitle>{t('编辑提供商 {name}', { name: provider.display_name })}</DialogTitle></DialogHeader>
       <DialogBody className='flex flex-col gap-3'>
-        <Field>
+        {isAccount ? <Field>
+          <FieldLabel>{t('搜索账号')}</FieldLabel>
+          <Select value={accountId || '__none__'} onValueChange={value => { if (typeof value === 'string') setAccountId(value === '__none__' ? '' : value) }}>
+            <SelectTrigger className='w-full'><SelectValue>{accountLabel}</SelectValue></SelectTrigger>
+            <SelectContent>
+              <SelectItem value='__none__'>{t('未选择账号')}</SelectItem>
+              {accountId && !accounts.some(account => account.id === accountId) ? <SelectItem value={accountId} disabled>{accountLabel}</SelectItem> : null}
+              {accounts.map(account => <SelectItem key={account.id} value={account.id}>{account.name}</SelectItem>)}
+            </SelectContent>
+          </Select>
+          <FieldDescription>{t('复用「账号」页的登录态，不需要额外填写搜索密钥。账号停用或删除后不会自动换号。')}</FieldDescription>
+          {!accounts.length ? <Alert variant='warning'>{t('没有可绑定的启用账号，请先到「账号」页添加或启用。')}</Alert> : null}
+          {provider.available === false && provider.unavailable_reason ? <Alert variant='warning'>{t(provider.unavailable_reason)}</Alert> : null}
+        </Field> : <Field>
           <FieldLabel>{t('API Key')}</FieldLabel>
           <Input type='password' autoComplete='new-password' value={apiKey} placeholder={t('输入新密钥；留空保持不变')} onChange={event => setApiKey(event.currentTarget.value)} />
           <FieldDescription>{t('空白的 API Key 不会覆盖已保存的密钥。')}</FieldDescription>
-        </Field>
+        </Field>}
         {PROVIDER_KEY_PAGES[provider.provider] ? <div>
           <Button variant='link' size='sm' className='h-auto px-0' onClick={() => void openExternal(PROVIDER_KEY_PAGES[provider.provider])}>
             {t('获取 API Key')}
@@ -228,7 +256,7 @@ function ProviderDialog({ provider, onClose, onSaved }: { provider: ProviderRow;
         </div> : null}
         <div className='flex items-center gap-2'>
           <span className='text-sm'>{t('启用')}</span>
-          <Switch checked={enabled} onCheckedChange={checked => setEnabled(checked === true)} aria-label={t('启用')} />
+          <Switch checked={enabled} disabled={isAccount && provider.available === false && !enabled} onCheckedChange={checked => setEnabled(checked === true)} aria-label={t('启用')} />
         </div>
         {error && <Alert variant='destructive'>{error}</Alert>}
       </DialogBody>
@@ -282,7 +310,7 @@ export function VisionConfigPanel() {
       setReasoning(stored?.reasoning || '')
       setKeyId(stored?.api_key_id && visionResult.keys.some(key => key.id === stored.api_key_id) ? stored.api_key_id : (visionResult.keys[0]?.id || ''))
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure))
+      setError(t(failure instanceof Error ? failure.message : String(failure)))
     } finally {
       if (!silent) setLoading(false)
     }
@@ -305,7 +333,7 @@ export function VisionConfigPanel() {
       setNotice(t('视觉服务配置已保存'))
       await load(true)
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure))
+      setError(t(failure instanceof Error ? failure.message : String(failure)))
     } finally {
       setSaving(false)
     }
@@ -318,7 +346,7 @@ export function VisionConfigPanel() {
       if (result.success) setNotice(t('视觉链路连通：耗时 {duration}ms', { duration: result.duration_ms ?? 0 }))
       else setError(result.error || t('视觉链路测试失败'))
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure))
+      setError(t(failure instanceof Error ? failure.message : String(failure)))
     } finally {
       setTesting(false)
     }
@@ -331,7 +359,7 @@ export function VisionConfigPanel() {
       setConfig(null); setProvider(''); setModel(''); setReasoning('')
       setNotice(t('视觉服务配置已清除'))
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure))
+      setError(t(failure instanceof Error ? failure.message : String(failure)))
     }
   }
 

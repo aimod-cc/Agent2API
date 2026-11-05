@@ -11,6 +11,9 @@ import { CheckinBenefits } from './CheckinBenefits'
 import { CheckinUmid } from './CheckinUmid'
 import { CheckinPlansSheet } from './CheckinPlansSheet'
 import { t } from '../../i18n'
+import {
+  accountCheckinStatus, checkinActionLabel, checkinPlanProgress, checkinStatusLabel, checkinStatusTone,
+} from '../../../../ui-shared/checkin-result'
 
 export function CheckinDaily({ center, busy, action, onRecords, onChange }: {
   center: CheckinCenter
@@ -95,13 +98,15 @@ export function CheckinDaily({ center, busy, action, onRecords, onChange }: {
                     <div className='m-ck-note'>{account.checkinAt ? formatStamp(account.checkinAt) : t('还没签到过')}
                       {account.streakDays > 0 ? t(' · 连登 {n} 天', { n: account.streakDays }) : ''}</div>
                   </div>
-                  <Badge tone={!account.available ? 'bad' : account.checkedInToday ? 'ok' : 'warn'}>
-                    {!account.available ? t('凭证不可用') : account.checkedInToday ? t('今日已签') : t('待签')}
+                  <Badge tone={!account.available ? 'bad' : checkinStatusTone(accountCheckinStatus(account))}>
+                    {!account.available ? t('凭证不可用') : t(checkinStatusLabel(accountCheckinStatus(account)))}
                   </Badge>
-                  {account.dailyCheckin && account.dailyCheckin.totalCount > 0 ? <span className='m-ck-note'>
+                  {checkinPlanProgress(account.dailyCheckin) && account.dailyCheckin ? <span className='m-ck-note'>
                     {t('已领 {done} / {total} 份套餐', { done: account.dailyCheckin.completedCount, total: account.dailyCheckin.totalCount })}
                   </span> : null}
                 </div>
+                {account.dailyCheckin?.message && !account.checkedInToday
+                  ? <p className='m-ck-note'>{t(account.dailyCheckin.message)}</p> : null}
                 <div className='m-ck-actions'>
                   {modesOf(group).map(mode => (
                     <Button key={mode} variant='outline' size='sm'
@@ -111,7 +116,8 @@ export function CheckinDaily({ center, busy, action, onRecords, onChange }: {
                         else void sign(account.id, mode)
                       }}>
                       {group.manualPlans && mode === 'checkin' ? t('套餐明细')
-                        : busy === account.id ? t('执行中…') : checkinModeLabel(mode)}
+                        : busy === account.id ? t(account.dailyCheckin?.queryOnly ? '查询中…' : '执行中…')
+                          : mode === 'checkin' ? t(checkinActionLabel(account)) : checkinModeLabel(mode)}
                     </Button>
                   ))}
                 </div>

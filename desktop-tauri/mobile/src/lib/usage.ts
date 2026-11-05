@@ -16,6 +16,7 @@ import { t, locale } from '../i18n'
 import { creditStatisticsWalletsOf, recordReadingsOf, snapshotReadingsOf, usageAggregateOf, usageNumberOrNull, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
 import { formatStamp } from './format'
 import { mergeUsageQueryRow, usageQueryFailureStatus } from '../../../ui-shared/usage-query-state'
+import { creditExpirySummaryOf, creditExpiryText, creditExpiryUnitOf, expiringCreditsOf } from '../../../ui-shared/credit-expiry'
 
 export type UsageView = {
   kind: 'ok' | 'warn' | 'bad' | 'muted'
@@ -25,6 +26,7 @@ export type UsageView = {
   detail: string
   failureStatus?: string
   failureDetail?: string
+  expiry?: ReturnType<typeof creditExpiryText>
 }
 
 /**
@@ -65,7 +67,7 @@ function partialErrors(usage: Record<string, unknown>): string[] {
 }
 
 /** 单行余额读数：把快照里的 `usage` / `error` 翻成一行文本 + 完整说明 */
-export function usageText(row?: UsageRow): UsageView {
+export function usageText(row?: UsageRow, now = Date.now()): UsageView {
   // ① 还没查过（快照里没有这一行）
   if (row === undefined) {
     return { kind: 'muted', text: t('未查询'), detail: t('尚未查询该账号的余额') }
@@ -77,13 +79,14 @@ export function usageText(row?: UsageRow): UsageView {
       return { kind: 'muted', text: t('未配置'), detail: t(row.error) }
     }
     const status = usageQueryFailureStatus(row, t, formatStamp)
-    const previous = row.lastUsage ? usageText({ usage: row.lastUsage }) : null
+    const previous = row.lastUsage ? usageText({ usage: row.lastUsage }, now) : null
     return {
       kind: 'bad',
       text: previous?.text || t('查询失败'),
       detail: [status?.detail || t(row.error), previous?.detail].filter(Boolean).join(' · '),
       failureStatus: previous ? status?.text : undefined,
       failureDetail: previous ? status?.detail : undefined,
+      expiry: previous?.expiry,
     }
   }
 
@@ -96,6 +99,7 @@ export function usageText(row?: UsageRow): UsageView {
   if (data.error) return { kind: 'bad', text: t('查询失败'), detail: t(String(data.error)) }
   const errors = partialErrors(data)
   const aggregate = usageAggregateOf(data, t)
+  const expiry = creditExpiryText(creditExpirySummaryOf(expiringCreditsOf(data, now), now), t, compact, creditExpiryUnitOf(data))
   const readings = [
     ...(aggregate ? [`${aggregate.label} ${aggregate.unlimited ? t('不限') : compact(aggregate.remaining)}${aggregate.unit && !aggregate.unlimited ? ` ${aggregate.unit}` : ''}`] : []),
     ...usageSupplementReadingsOf(data, t, compact),
@@ -106,7 +110,8 @@ export function usageText(row?: UsageRow): UsageView {
   const withErrors = (view: UsageView): UsageView => ({
     kind: errors.length ? 'warn' : view.kind,
     text: view.text,
-    detail: [...new Set([view.detail, ...readings, ...errors].filter(Boolean))].join(' · '),
+    detail: [...new Set([view.detail, ...readings, expiry.detail, ...errors].filter(Boolean))].join(' · '),
+    expiry: expiry.badge ? expiry : undefined,
   })
 
   if (Array.isArray(data.windows) && data.windows.length) {

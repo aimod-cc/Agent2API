@@ -51,6 +51,7 @@ static DB: OnceLock<Option<Db>> = OnceLock::new();
 pub const OUTCOME_SUCCESS: &str = "success";
 pub const OUTCOME_ALREADY: &str = "already";
 pub const OUTCOME_PENDING: &str = "pending";
+pub const OUTCOME_CAPTCHA: &str = "captcha";
 pub const OUTCOME_FAILED: &str = "failed";
 
 pub fn install(db: Option<Db>) {
@@ -84,6 +85,7 @@ fn kept_active_of(row: &Value) -> bool {
 /// outcome 判定（只此一份，见模块头）：
 ///   - 行的 `error` 非空 → **failed**（执行出错：网络 / 凭证 / 未接入）；
 ///   - claim 判「今日已完成」→ success（真领到）或 already（上游说已领过）；
+///   - 领取需要人机验证 → **captcha**（不是暂无活动，也不表示已完成）；
 ///   - claim 判「中性未领取」→ **pending**（此刻没有可领的活动，等窗口）；
 ///   - 国际版每日活跃「活动未开启但活跃上报成功（或网页会话建成）」→
 ///     **already** —— 活动没开是上游运营态（谁也领不到），而活跃链路已把
@@ -110,6 +112,8 @@ pub fn record_row(row: &Value, provider: &str, source: &str, reason: &str) {
         (outcome, None)
     } else if activity_report_ok(row) || web_conversation_ok(row) {
         (OUTCOME_ALREADY, None)
+    } else if claim.get("outcome").and_then(Value::as_str) == Some("captcha") {
+        (OUTCOME_CAPTCHA, None)
     } else if claim_pending(&claim) {
         (OUTCOME_PENDING, None)
     } else {
@@ -184,6 +188,8 @@ pub fn record_activity(row: &Value, provider: &str, mode: &str) {
         (outcome, None, true)
     } else if report_ok {
         (OUTCOME_ALREADY, None, true)
+    } else if claim.get("outcome").and_then(Value::as_str) == Some("captcha") {
+        (OUTCOME_CAPTCHA, None, false)
     } else if claim_pending(&claim) {
         (OUTCOME_PENDING, None, false)
     } else {

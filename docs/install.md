@@ -85,8 +85,11 @@ Stop-Service Agent2API
 .\install-service.ps1 -Uninstall
 ```
 
-**升级**：解压新版本包，重跑一次 `install-service.ps1` 即可（脚本会先停服务、
-覆盖程序与界面、再启动；数据与配置不动）。
+**一键更新**：标准 Windows 服务安装可在「设置 → 更新」点击「一键更新」。确认后自动下载 Windows x64 服务端包，独立校验官方摘要，由临时升级进程停止服务、等待文件占用释放、备份替换并重新启动。确认新版服务运行后页面自动刷新；账号、配置和数据不删除。
+
+**旧安装接入 / 手动升级**：把新版服务端包解压到新的目录，以管理员身份运行一次 `install-service.ps1`。脚本默认保留已登记的安装目录、数据目录、端口、环境配置和服务账号；只有显式传入的端口等选项才覆盖原值，目录迁移需单独进行。此次接入完成后可使用面板一键更新。
+
+程序目录仅系统和管理员可写，升级工作目录为 `<安装目录>\.service-update`，不新增常驻服务。`AGENT2API_WINDOWS_UPDATE=0` 可在服务环境变量中关闭入口。自定义服务账号、目录链接、网络路径及受外部进程组托管的部署保留手动升级，不自动提权。替换失败会恢复旧文件；新版启动未确认时保留升级日志与备份，不自动回退数据库。
 
 > **两个 Windows 特有的坑，脚本已经处理好了**：
 > 服务进程的工作目录是 `C:\Windows\system32` 而不是 exe 所在目录 —— 界面目录靠
@@ -124,9 +127,11 @@ journalctl -u agent2api -f
 再退出，SSE 长连接不会被打断）都已配好。配置改 `/etc/agent2api/agent2api.env`
 后 `systemctl restart agent2api` 生效。
 
-> **裸机不要开 `AGENT2API_SELF_UPDATE`**：那是容器内的方案（换文件后退出，靠
-> 容器 restart 策略拉起）。裸机上程序文件属 root、服务账号无权替换，单元里已
-> 显式设成 `0`。升级走 `install.sh --upgrade`。
+> **systemd 一键更新**：标准安装已包含受限升级程序，面板点击「一键更新」并确认后，会下载、独立核验官方校验值、备份替换、重启并确认新版服务。账号与配置保留，网关继续以普通账号运行，程序目录仍由 root 保护。
+>
+> 旧安装先下载包含本功能的新版服务端包，在新包目录执行一次 `sudo bash install.sh --upgrade`，补装升级组件后即可使用。自定义服务账号或安装路径不会被脚本强行改写，继续使用原部署方式升级。`AGENT2API_SYSTEMD_UPDATE=0` 可关闭面板入口；停用 `agent2api-updater.socket` 可停用升级组件。`AGENT2API_SELF_UPDATE` 仍为 Docker 专用，不要在裸机开启。
+>
+> 更新组件通过本机 socket 工作，不开放网络端口。默认从官方索引核验发布仓库；需固定仓库或为独立校验配置代理时，管理员可在 `/etc/agent2api/updater.env` 设置 `AGENT2API_UPDATER_REPO=owner/repo` 或 `HTTPS_PROXY`。替换失败会还原；新版启动未确认成功时保留 `/opt/agent2api/.before-update-*` 恢复文件并报告失败，不自动回退数据库。
 
 ### 装完之后
 
@@ -160,7 +165,7 @@ http://<服务器IP>:3065/
 
 Linux 写在 `/etc/agent2api/agent2api.env`；Windows 改服务注册表的
 `HKLM\SYSTEM\CurrentControlSet\Services\Agent2API\Environment`（`install-service.ps1`
-已经写好基础项，重跑脚本会覆盖）。
+已经写好基础项，重跑时保留已有配置，只按显式参数修改对应项）。
 
 > **账号无法预置**：账号需要扫码 / 验证码 / 粘贴凭证，这一步由上游协议决定，
 > 绕不过去。批量部署可以把已经配好的**数据目录整个拷过去**（SQLite 库 +

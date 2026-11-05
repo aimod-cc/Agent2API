@@ -79,7 +79,7 @@ pub(super) const REQUEST_COLUMNS: &str = "id, ts, model, account_id, account_nam
      first_response_ms, attempts, error, prompt_tokens, completion_tokens, total_tokens, \
      cache_read_tokens, provider, client_model, upstream_model, attempt_details, sensitive_hits, \
      client_reasoning, upstream_reasoning, phase, phase_started_at, is_test, route, client, \
-     api_key_id, api_key_name, api_key_source, credit";
+     api_key_id, api_key_name, api_key_source, credit, client_evidence";
 
 /// 报表窄列查询的列顺序 —— **与 `db::schema` 的 `idx_requests_summary` 列序一致**
 /// （索引是 `ts, is_test` 前缀 + 这里的后 5 列），改任一侧都要回来对一眼。
@@ -165,6 +165,9 @@ pub(super) fn decode_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reques
                 name: row.get(27)?,
                 source: row.get(28)?,
             },
+            evidence: serde_json::from_str::<crate::server::core::client::ClientEvidence>(&row.get::<_, String>(30)?).ok()
+                .filter(|evidence| !evidence.method.is_empty()),
+            behavior_client: String::new(),
         },
         // 末列是 schema v23 加的（积分消耗）；旧行 / 没上报的行是 NULL ——
         // 读成 None，与「上报了 0」分开（前端前者显示「—」）。
@@ -451,7 +454,16 @@ fn select_distinct_ordered(
 }
 
 pub(super) fn source_filter_options(conn: &Connection, max: usize) -> rusqlite::Result<Value> {
-    let clients = select_distinct_ordered(conn, "client", max)?;
+    let mut client_stmt = conn.prepare(
+        "SELECT grouped.client, CASE WHEN json_valid(r.client_evidence) \
+         THEN COALESCE(json_extract(r.client_evidence, '$.clientName'), '') ELSE '' END \
+         FROM (SELECT client, MAX(row_id) AS latest, COUNT(*) AS n FROM requests \
+         GROUP BY client ORDER BY n DESC, client LIMIT ?1) grouped \
+         JOIN requests r ON r.row_id = grouped.latest ORDER BY grouped.n DESC, grouped.client",
+    )?;
+    let clients = client_stmt.query_map(params![max as i64], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?.collect::<rusqlite::Result<Vec<_>>>()?;
     let mut stmt = conn.prepare(
         "SELECT api_key_id, api_key_source, \
          (SELECT r.api_key_name FROM requests r WHERE r.api_key_id = requests.api_key_id \
@@ -465,8 +477,8 @@ pub(super) fn source_filter_options(conn: &Connection, max: usize) -> rusqlite::
         };
         Ok(serde_json::json!({ "value": identity.filter_value(), "label": super::source_report::key_label(&identity) }))
     })?.collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut clients: Vec<Value> = clients.into_iter().map(|client| serde_json::json!({
-        "value": client, "label": super::source_report::client_label(&client),
+    let mut clients: Vec<Value> = clients.into_iter().filter(|(client, _)| !client.is_empty()).map(|(client, label)| serde_json::json!({
+        "value": client, "label": if label.is_empty() { super::source_report::client_label(&client).to_string() } else { label },
     })).collect();
     clients.push(serde_json::json!({ "value": "", "label": "未记录客户端" }));
     Ok(serde_json::json!({ "clients": clients, "apiKeys": keys }))
@@ -702,10 +714,10 @@ pub(super) fn insert_started_request(
     // 进行中行也应带上 —— 等收尾再补会让列表里「客户端」列在转发期间空一格
     conn.execute(
         "INSERT INTO requests (id, ts, model, client_model, client_reasoning, status, \
-         phase, phase_started_at, is_test, client, api_key_id, api_key_name, api_key_source) \
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, 'connecting', ?2, ?6, ?7, ?8, ?9, ?10)",
+         phase, phase_started_at, is_test, client, api_key_id, api_key_name, api_key_source, client_evidence) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, 'connecting', ?2, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![id, ts, model, client_model, client_reasoning, is_test as i64,
-            source.client, source.api_key.id, source.api_key.name, source.api_key.source],
+            source.client, source.api_key.id, source.api_key.name, source.api_key.source, source.evidence_json()],
     )?;
     Ok(true)
 }
@@ -838,7 +850,7 @@ pub(super) fn update_running_request(
          client_model = ?16, upstream_model = ?17, attempt_details = ?18, sensitive_hits = ?19, \
          client_reasoning = ?20, upstream_reasoning = ?21, phase = '', phase_started_at = NULL, \
          is_test = ?22, route = ?23, client = ?24, \
-         api_key_id = ?25, api_key_name = ?26, api_key_source = ?27, credit = ?28 \
+         api_key_id = ?25, api_key_name = ?26, api_key_source = ?27, credit = ?28, client_evidence = ?29 \
          WHERE id = ?1 AND status = 0",
         params![
             entry.id,
@@ -873,6 +885,7 @@ pub(super) fn update_running_request(
             entry.source.api_key.name,
             entry.source.api_key.source,
             entry.credit,
+            entry.source.evidence_json(),
         ],
     )
 }
@@ -899,9 +912,9 @@ pub(super) fn insert_request(conn: &Connection, entry: &RequestEntry) -> rusqlit
          first_response_ms, attempts, error, prompt_tokens, completion_tokens, total_tokens, \
          cache_read_tokens, provider, client_model, upstream_model, attempt_details, \
          sensitive_hits, client_reasoning, upstream_reasoning, is_test, route, client, \
-         api_key_id, api_key_name, api_key_source, credit) \
+         api_key_id, api_key_name, api_key_source, credit, client_evidence) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-         ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
+         ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
         params![
             entry.id,
             entry.ts,
@@ -931,6 +944,7 @@ pub(super) fn insert_request(conn: &Connection, entry: &RequestEntry) -> rusqlit
             entry.source.api_key.name,
             entry.source.api_key.source,
             entry.credit,
+            entry.source.evidence_json(),
         ],
     )?;
     Ok(())

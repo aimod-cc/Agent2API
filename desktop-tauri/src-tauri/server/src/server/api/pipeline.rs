@@ -182,6 +182,11 @@ fn resolve_model_for(
     scope: Option<&KeyScope>,
     image_generation: bool,
 ) -> Result<String, GatewayError> {
+    if let Some(object) = payload.as_object_mut() {
+        object.remove(crate::server::core::compact_routing::ROUTE_FIELD);
+        object.remove("_wb_route_group_id");
+        object.remove("_wb_route_continue");
+    }
     let requested = model_field_text(payload);
     // 客户端是否**点名**了模型：默认值注入后这个事实就丢了，先记下来
     let client_named = !requested.is_empty();
@@ -194,7 +199,7 @@ fn resolve_model_for(
         // 白名单收窄：不限制时 `allowed` 恒真，等价于原逻辑（零行为差异）
         let allowed = |name: &str| key_scope::allows_model(scope, name);
         let models = default_model_catalog();
-        let fallback = if default_model_usable(default_model) && allowed(default_model) {
+        let fallback = if (config::routing_profiles().group_for_model(default_model).is_some() || default_model_usable(default_model)) && allowed(default_model) {
             Some(default_model.to_string())
         } else {
             models
@@ -238,6 +243,19 @@ fn resolve_model_for(
         }
     }
     let requested_model = model_field_text(payload);
+    // 空路由也是已登记入口；权限照常检查，具体不可用原因交给组内选路报告。
+    if let Some(group) = config::routing_profiles().group_for_model(&requested_model) {
+        if !key_scope::allows_model(scope, &requested_model) {
+            return Err(GatewayError::with_status(404, "此路由组不在网关 Key 的可用模型列表里").with_code("model_not_found"));
+        }
+        if image_generation { return Err(GatewayError::bad_request("对话路由组不能用于图片生成")); }
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("model".into(), group.model.clone().into());
+            object.insert("_wb_route_group_id".into(), group.id.clone().into());
+        }
+        config::remember_request_model(&group.model);
+        return Ok(group.model.clone());
+    }
     // 按提供商区分启停后，404 判定是「路由全链（原生 + 映射）都不可用」
     if !requested_model.is_empty() && model_blocked_everywhere(&requested_model) {
         return Err(GatewayError::with_status(404, format!(
@@ -352,11 +370,20 @@ pub fn request_source(
     headers: &axum::http::HeaderMap,
     identity: Option<axum::extract::Extension<crate::server::request_stats::ApiKeyIdentity>>,
 ) -> crate::server::request_stats::RequestSource {
+    let behavior_client = crate::server::core::client::classify(
+        headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok()).unwrap_or(""),
+    );
+    let snapshot = crate::server::config::client_identification::current();
+    let defaults = crate::server::core::client::ClientSettings::default();
+    let (client, evidence) = crate::server::core::client::identify(
+        crate::server::core::client::ClientEvidence::capture(headers),
+        snapshot.settings.as_ref().unwrap_or(&defaults),
+    );
     crate::server::request_stats::RequestSource {
-        client: crate::server::core::client::classify(
-            headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok()).unwrap_or(""),
-        ),
+        client,
         api_key: identity.map(|axum::extract::Extension(identity)| identity).unwrap_or_default(),
+        evidence: Some(evidence),
+        behavior_client,
     }
 }
 
@@ -403,9 +430,7 @@ pub struct RecordContext {
     /// 同形，唯一的分野就是「谁发起的」—— 存档时要能把它标出来（报表排除、
     /// 请求日志标记）。
     pub is_test: bool,
-    /// **请求来源客户端**（入口由 `core::client::classify` 从下游 UA 判出，
-    /// 见 `request_stats::RequestEntry::client`）。空串 = 没采集到 UA
-    /// （模型测试、请求体解析都失败的早失败路径）。
+    /// 入口采集的统计分类、识别依据与已鉴权的 Key 身份。
     pub source: crate::server::request_stats::RequestSource,
 }
 
@@ -509,6 +534,8 @@ fn stored_attempt_details(list: &[usage::AttemptDetail]) -> Vec<AttemptDetail> {
             provider: item.provider.clone(),
             account: item.account.clone(),
             account_id: item.account_id.clone(),
+            candidate_id: item.candidate_id.clone(),
+            member_id: item.member_id.clone(),
             model: item.model.clone(),
             reasoning: item.reasoning.clone(),
             reason: item.reason.clone(),

@@ -37,6 +37,7 @@ export const OUTCOME_VIEW: Record<string, { label: string; variant: 'success' | 
   success: { label: '成功领取', variant: 'success' },
   already: { label: '今日已领', variant: 'brand' },
   pending: { label: '未领取', variant: 'warning' },
+  captcha: { label: '需要人工验证', variant: 'warning' },
   failed: { label: '失败', variant: 'destructive' },
 }
 

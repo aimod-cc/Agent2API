@@ -68,7 +68,7 @@ const CORS_METHODS: &str = "GET, POST, PUT, PATCH, OPTIONS, DELETE";
 /// `require_api_key` 判；且 `Allow-Origin: *` 下浏览器不会替跨源请求带 cookie，
 /// 凭证只能显式放进请求头 —— 这正是手机端要的形态。
 const CORS_HEADERS: &str =
-    "Content-Type, Authorization, x-api-key, x-panel-token, x-panel-refresh, x-panel-auth-mode";
+    "Content-Type, Authorization, x-api-key, x-panel-token, x-panel-refresh, x-panel-auth-mode, x-agent2api-client, x-title, x-client-type, x-cerebras-3rd-party-integration";
 
 /// 组装完整路由（面板 + 网关**同端口**：默认形态与桌面壳）。
 ///
@@ -313,6 +313,8 @@ pub fn panel_router(state: ServerState) -> Router {
         )
         .route("/api/routing/queue", get(api::routing_api::get_routing_queue))
         .route("/api/routing/workspace", get(api::routing_workspace::get_workspace))
+        .route("/api/routing/groups", get(api::routing_groups::get_groups).put(api::routing_groups::put_group))
+        .route("/api/routing/preview", post(api::routing_groups::preview))
         .route("/api/routing/profile", axum::routing::put(api::routing_workspace::put_profile))
         .route("/api/routing/sticky", get(api::routing_workspace::get_sticky))
         .route("/api/routing/sticky/clear", post(api::routing_workspace::clear_sticky))
@@ -576,6 +578,7 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/models/refresh", post(api::models::refresh_models))
         // 模型管理（启停 / 隐藏 / 映射）与网关 Key 列表：都是写配置的管理接口，挂 protected
         .route("/api/models/manage", get(api::model_manage::get_manage))
+        .route("/api/models/compact-routes", get(api::compact_routes::get_routes).put(api::compact_routes::put_routes))
         .route("/api/models/state", post(api::model_manage::set_state))
         .route("/api/models/mappings", post(api::model_manage::add_mapping))
         .route("/api/models/mappings/remove", post(api::model_manage::remove_mapping))
@@ -750,6 +753,8 @@ pub fn panel_router(state: ServerState) -> Router {
         // 字节）：开关 + 长边 / 质量 / 阈值三项一起挂在同一条端点上。挂 protected
         // 的理由与 /api/sanitize 相同 —— 它改写的是发给上游的请求体（本功能只作用
         // 在对话链路，生图 / 图片编辑走独立分支、不经过压缩）。
+        .route("/api/client-identification", get(api::client_identification::get_settings).put(api::client_identification::put_settings))
+        .route("/api/client-identification/preview", post(api::client_identification::preview_settings))
         .route(
             "/api/image-compress",
             get(api::image_compress::get_image_compress)
@@ -770,6 +775,11 @@ pub fn panel_router(state: ServerState) -> Router {
         .route(
             "/api/zcode/captcha",
             get(api::zcode_captcha::get_captcha).post(api::zcode_captcha::push_captcha),
+        )
+        // 领取专用验证任务：不入模型令牌池，面板独占处理并回传当次结果。
+        .route(
+            "/api/zcode/claim-verification",
+            post(api::zcode_claim_verification::verification),
         )
         // 令牌池的补货节奏设置（目标 / 轮询间隔 / 单轮上限）：与上面那条的
         // 分工见 `api::zcode_captcha_pool` 的模块头。stats 响应会把这三项
@@ -1196,74 +1206,12 @@ async fn require_api_key(mut request: Request, next: Next) -> Response {
             // Key 也能操作管理接口（桌面壳 / 脚本自动化的通道）
             return next.run(request).await;
         }
-        // 诊断：面板认证分支的 401 此前是静默的 —— 「登录成功却被弹回登录
-        // 页」时这一行是唯一现场：两路凭证（cookie / 请求头）各自看到了什么，
-        // 一眼定位是令牌没送到还是没存上。
-        // 除了「本家那把在不在」，还要看**这一趟到底带回来了哪几把 cookie**：
-        // 中转把多条 Set-Cookie 合并/丢一条时，浏览器回带的常常是探针或上一轮的
-        // 会话 —— "cookie=有"这三种情况在旧文案里长得一模一样，分不出"没送到"
-        // 与"送到但不是这把"。只列名字，值不写（见 `access::cookie_names`）。
-        let names = crate::server::access::cookie_names(request.headers());
-        let seen_headers: Vec<&str> = ["x-panel-token", "x-panel-refresh", "authorization"]
-            .into_iter()
-            .filter(|name| request.headers().contains_key(*name))
-            .collect();
-        // 指纹按**候选顺序**逐个列（最多两把）：同名 cookie 重复上行 + 头里还躺着
-        // 旧令牌时，"哪一把被试过"就是这一行要回答的问题 —— 只打第一把会把
-        // 「cookie 短路」这种故障伪装成「什么都没带」。
-        let fingerprints = crate::server::access::access_fingerprints(request.headers());
-        let credential_summary = format!(
-            "试过的凭证指纹={} 带回来的 cookie={} 凭证头={}",
-            if fingerprints.is_empty() {
-                "无".to_string()
-            } else {
-                fingerprints.join(",")
-            },
-            if names.is_empty() { "无".to_string() } else { names.join("|") },
-            if seen_headers.is_empty() { "无".to_string() } else { seen_headers.join("+") },
-        );
-        // ── 级别分三档，而不是「有没有带凭证」两档 ──────────────
-        // 三种 401 在请求上长得一样，含义完全不同：
-        //   · **什么都没带** —— 正常未登录。主界面首屏一次并发十几条 `/api/*`
-        //     （各页面岛挂载即加载），浏览器第一次打开面板就会把它们全撞出来。
-        //   · **带了凭证 + refresh 还活着** —— access 到期的**设计内中间态**。
-        //     access 寿命就是 `ACCESS_TTL`（2 小时），到点后第一条请求必然 401，
-        //     客户端随即拿 refresh 换新令牌并重试原请求，用户无感。面板里频率
-        //     最高的轮询（验证码令牌池，2.5 秒一轮）永远是第一个撞上的，于是
-        //     旧口径下每 2 小时准时刷一条 error、侧栏未读错误徽标 +1 —— 一条
-        //     正常流程被记成了故障（用户侧的实际反馈就是「挂着一晚上全是红字」）。
-        //   · **带了凭证 + 整条链已失效** —— 僵尸 cookie / 重放 / Key 配错。
-        //     这才是要报的：前两者都走 verbose（控制台仍然打印，日志页不当错误收）。
-        //
-        // 判据直接用 `access::has_live_refresh` —— 它本来就在 `errors::
-        // panel_login_required_response` 里决定「要不要清 cookie」，两处必须
-        // 同一个口径：会清 cookie 的现场才配 error。这里算一次、传下去复用，
-        // 避免同一请求对 refresh 表加两次锁。
+        // 日志只描述本次请求：未携带续期凭证，不代表客户端不能另行续期。
+        // 与响应的 cookie 处理复用同一次读数，不改变鉴权和清除规则。
         let live_refresh = crate::server::access::has_live_refresh(request.headers());
-        let presents = crate::server::access::presents_credentials(request.headers());
-        if !presents {
-            logging::verbose(
-                "[Security]",
-                &format!("面板未登录: {} {path}（{credential_summary}）", request.method()),
-            );
-        } else if live_refresh {
-            // 不写 ❌：这条不是错误，是续期流程的第一步
-            logging::verbose(
-                "[Security]",
-                &format!(
-                    "面板会话已过期（refresh 仍有效，等客户端续期）: {} {path}（{credential_summary}）",
-                    request.method()
-                ),
-            );
-        } else {
-            logging::log(
-                "[Security]",
-                &format!(
-                    "❌ 面板会话无效: {} {path}（{credential_summary}）",
-                    request.method()
-                ),
-            );
-        }
+        crate::server::access::diagnostics::log_rejection(
+            request.headers(), request.method(), &path, live_refresh,
+        );
         return errors::panel_login_required_response_with_refresh_state(live_refresh);
     }
     // ── 未注册闸门（headless 专属，桌面壳不开启）────────────────

@@ -2,7 +2,7 @@ import * as React from 'react'
 import {
   Badge, Button, Checkbox, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader,
   DialogSection, DialogTitle, Empty, Field, FieldContent, FieldDescription, FieldLabel,
-  Input, Label, SegmentedControl, Switch, cn, confirmDialog,
+  Input, Label, SegmentedControl, Switch, confirmDialog,
 } from '@ui'
 import { t } from '../i18n'
 import { cloneProfile, independentProfile, loadWorkspace, saveProfile } from './routing-state'
@@ -93,18 +93,12 @@ export function ProviderRoutingDialog({ provider, workspace, onSort, onClose }: 
   }))
   const save = async () => { setBusy(true); if (await saveProfile(draft)) onClose(); setBusy(false) }
   const remove = async () => {
-    if (!await confirmDialog(automatic ? t('自动参与模式下将明确停用此提供商，之后新增账号也不会自动恢复；不会删除提供商或账号。')
-      : t('只从当前路由视图移除，不删除提供商或账号，也不改变其他模型的独立配置。'), {
-      title: automatic ? t('停用路由提供商') : t('移除路由提供商'), confirmText: automatic ? t('停用') : t('移除'),
+    if (!await confirmDialog(t('只从当前路由移出，保留模型和账号配置；不会改变其他路由。'), {
+      title: t('移出本路由'), confirmText: t('移出'),
     })) return
     const next = structuredClone(draft)
-    if (automatic) {
-      next.disabledProviders = [...new Set([...next.disabledProviders, provider])]
-    } else {
-      next.providers = next.providers.filter(id => id !== provider)
-      next.disabledProviders = next.disabledProviders.filter(id => id !== provider)
-      delete next.accountOrder[provider]
-    }
+    if (!next.providers.includes(provider)) next.providers.push(provider)
+    next.disabledProviders = [...new Set([...next.disabledProviders, provider])]
     setBusy(true)
     if (await saveProfile(next)) onClose()
     setBusy(false)
@@ -122,10 +116,11 @@ export function ProviderRoutingDialog({ provider, workspace, onSort, onClose }: 
             : t('与账号页共用：{rules}。积分到期等规则直接影响网关实际选路。', { rules: groupSortSummary(workspace.sorting.rules[provider] || []) || t('仅按手动顺序') })}</p>
         </DialogSection>
         {workspace.providers.find(item => item.id === provider)?.available === false ? <p className='text-xs text-warning'>{t('此提供商当前没有可用的模型绑定，配置已保留；在模型管理中恢复绑定后会自动回来。')}</p> : null}
-        <Field orientation='horizontal'><FieldContent><FieldLabel htmlFor='routing-provider-enabled'>{t('参与当前视图转发')}</FieldLabel><FieldDescription>{t('停用后保留卡片与账号；自动参与不会重新启用明确停用的提供商。')}</FieldDescription></FieldContent>
-          <Switch id='routing-provider-enabled' checked={enabled} disabled={busy} onCheckedChange={on => setDraft(current => ({ ...current,
-            disabledProviders: on ? current.disabledProviders.filter(id => id !== provider) : [...current.disabledProviders.filter(id => id !== provider), provider],
-          }))} /></Field>
+        <Field orientation='horizontal'><FieldContent><FieldLabel>{t('参与本路由')}</FieldLabel><FieldDescription>{t('这里只决定是否参与本路由，不改变账号启用状态。')}</FieldDescription></FieldContent>
+          <Button variant='outline' disabled={busy} onClick={() => setDraft(current => ({ ...current,
+            providers: [...new Set([...current.providers, provider])],
+            disabledProviders: enabled ? [...new Set([...current.disabledProviders, provider])] : current.disabledProviders.filter(id => id !== provider),
+          }))}>{enabled ? t('移出本路由') : t('加入路由')}</Button></Field>
         <DialogSection><h3 className='text-sm font-semibold'>{t('参与路由的账号')}</h3>
           {!accounts.length ? <Empty>{t('该提供商没有账号，请先到账号页添加。')}</Empty> : accounts.map(account => <div key={account.id} className='flex items-center gap-3 border-b border-hairline py-2 last:border-0'>
             <Checkbox checked={!draft.excludedAccounts.includes(account.id)} disabled={busy} aria-label={displayNameOf(account)} onCheckedChange={on => toggleAccount(account.id, on === true)} />
@@ -137,7 +132,7 @@ export function ProviderRoutingDialog({ provider, workspace, onSort, onClose }: 
           <Button variant='outline' onClick={() => { onClose(); host().wbApp?.showPage('settings'); host().wbSettingsPanel?.showCategory('gateway') }}>{t('系统提示词')}</Button>
           <Button variant='outline' onClick={() => { onClose(); host().wbApp?.showPage('settings'); host().wbSettingsPanel?.showCategory('security') }}>{t('指纹脱敏')}</Button></div>
       </DialogBody>
-      <DialogFooter><Button variant='ghost' className='mr-auto text-destructive' disabled={busy || (automatic && !enabled)} onClick={() => void remove()}>{automatic ? t('停用此提供商') : t('从当前视图移除')}</Button><Button variant='outline' disabled={busy} onClick={onClose}>{t('取消')}</Button><Button disabled={busy} onClick={() => void save()}>{busy ? t('保存中…') : t('保存')}</Button></DialogFooter>
+      <DialogFooter><Button variant='ghost' className='mr-auto text-destructive' disabled={busy || (automatic && !enabled)} onClick={() => void remove()}>{t('移出本路由')}</Button><Button variant='outline' disabled={busy} onClick={onClose}>{t('取消')}</Button><Button disabled={busy} onClick={() => void save()}>{busy ? t('保存中…') : t('保存')}</Button></DialogFooter>
     </DialogContent>
   </Dialog>
 }
@@ -169,39 +164,5 @@ export function AddRouteProviderDialog({ workspace, onClose }: { workspace: Rout
         <span className='flex-1'>{provider.label}</span><Badge shape='tag' variant='secondary'>{t('{n} 个账号', { n: provider.accountCount })}</Badge>
       </Label>) : <Empty>{automatic ? t('没有需要恢复的提供商') : t('所有可用提供商都已在当前路由中')}</Empty>}
     </DialogBody><DialogFooter><Button variant='outline' disabled={busy} onClick={onClose}>{t('取消')}</Button><Button disabled={busy || !picked.length} onClick={() => void save()}>{automatic ? t('恢复') : t('添加')}</Button></DialogFooter>
-  </DialogContent></Dialog>
-}
-
-export function AddRouteModelDialog({ workspace, onAdd, onClose }: { workspace: RoutingWorkspace; onAdd(model: string): Promise<boolean>; onClose(): void }) {
-  const [search, setSearch] = React.useState('')
-  const [selected, setSelected] = React.useState('')
-  const [busy, setBusy] = React.useState(false)
-  const [error, setError] = React.useState('')
-  const query = search.trim().toLowerCase()
-  const choices = workspace.models.filter(model => !workspace.configuredModels.some(known => known.toLowerCase() === model.toLowerCase())
-    && (!query || model.toLowerCase().includes(query)))
-  const save = async () => {
-    setBusy(true)
-    try { if (await onAdd(selected)) onClose() }
-    catch (error) { setError(errorMessage(error)) }
-    finally { setBusy(false) }
-  }
-  return <Dialog open onOpenChange={open => { if (!open && !busy) onClose() }}><DialogContent>
-    <DialogHeader><DialogTitle>{t('新增模型独立路由')}</DialogTitle></DialogHeader><DialogBody>
-      <p className='text-xs text-muted-foreground'>{t('从现有模型中创建独立配置，自动列出提供它的全部提供商；之后的修改只跟随这个模型。')}</p>
-      {/* 搜索框 + 可选列表：边打字边缩小范围，点一行即选中，不再多一层下拉框。 */}
-      <Input placeholder={t('搜索模型')} aria-label={t('搜索模型')} value={search}
-        onChange={event => { setSearch(event.currentTarget.value); setSelected('') }} />
-      <div className='routing-model-picker'>
-        {choices.length ? choices.map(model => <Button key={model} variant='ghost' className={cn('routing-model-option', selected === model && 'is-selected')}
-          aria-pressed={selected === model} title={model} onClick={() => setSelected(model)}>
-          <RouteIcon name='gateway' size={13} />
-          <code>{model}</code>
-          {selected === model ? <span className='routing-model-check' aria-hidden='true'>✓</span> : null}
-        </Button>) : <Empty>{query ? t('没有匹配的模型') : t('没有可添加的模型')}</Empty>}
-      </div>
-      <p className='text-xs text-muted-foreground'>{t('共 {n} 个可添加的模型', { n: choices.length })}</p>
-      {error ? <p role='alert' className='text-xs text-destructive'>{error}</p> : null}
-    </DialogBody><DialogFooter><Button variant='outline' disabled={busy} onClick={onClose}>{t('取消')}</Button><Button disabled={busy || !selected} onClick={() => void save()}>{busy ? t('保存中…') : t('创建独立配置')}</Button></DialogFooter>
   </DialogContent></Dialog>
 }

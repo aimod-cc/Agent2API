@@ -83,7 +83,7 @@
   "将删除 {count} 条请求记录，并清理上游调试报文 {upstream} 条、下游正文 {downstream} 条。": "Exclui {count} registros de requisições e limpa {upstream} payloads de depuração do upstream e {downstream} corpos do downstream.",
   "尝试 {n} ·": "Tentativa {n} ·",
   "尝试明细": "Detalhes das tentativas",
-  "尝试次数": "",
+  "尝试次数": "Tentativas",
   "尝试链": "",
   "工具结果": "Resultado da ferramenta",
   "工具结果 · {id}": "Resultado da ferramenta · {id}",

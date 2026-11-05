@@ -28,8 +28,8 @@ export function traceCandidates(row: ReplayRow): TraceCandidate[] {
   // 候选队列要完整呈现当时的顺位；已尝试的账号仍留在这里（尝试明细单独记录），
   // 否则单候选失败时会出现「1 个候选」但列表为空的自相矛盾。
   return [...ordered.map(entry => ({ ...entry, kind: 'available' as const })),
-    ...blocked.filter(entry => entry.state !== 'tried').map(entry => ({ ...entry, kind: 'skipped' as const }))]
-    .filter(entry => { if (seen.has(entry.id)) return false; seen.add(entry.id); return true })
+    ...blocked.map(entry => ({ ...entry, kind: entry.state === 'tried' ? 'available' as const : 'skipped' as const }))]
+    .filter(entry => { const key = entry.candidateId || `${entry.memberId || ''}:${entry.id}`; if (seen.has(key)) return false; seen.add(key); return true })
 }
 export function attemptState(row: ReplayRow, attempt: TraceAttempt): TraceState {
   const entries = traceAttempts(row)

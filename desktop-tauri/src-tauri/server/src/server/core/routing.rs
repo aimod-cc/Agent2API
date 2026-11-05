@@ -138,6 +138,7 @@ impl<'a> CooldownKeys<'a> {
 
     /// 某条账号记录的冷却键：按它所属的家解析（每条账号记录只属于一家）。
     pub fn for_account(&self, account: &Value) -> String {
+        if let Some(model) = super::routing_groups::candidate_model(account) { return model.to_string(); }
         self.for_provider(provider_of(account))
     }
 }
@@ -582,7 +583,7 @@ fn base_order(candidates: &[Value], strategy: RouteStrategy, meta: &PlanMeta<'_>
 fn provider_order(sorted: Vec<Value>, meta: &PlanMeta<'_>) -> Vec<Value> {
     let mut groups: Vec<(String, Vec<Value>)> = Vec::new();
     for account in sorted {
-        let provider = provider_of(&account).to_string();
+        let provider = super::routing_groups::family_key(&account).to_string();
         match groups.iter_mut().find(|(name, _)| *name == provider) {
             Some((_, members)) => members.push(account),
             None => groups.push((provider, vec![account])),
@@ -620,7 +621,7 @@ fn provider_order(sorted: Vec<Value>, meta: &PlanMeta<'_>) -> Vec<Value> {
 pub fn provider_sizes(accounts: &[Value]) -> Vec<(String, usize)> {
     let mut sizes: Vec<(String, usize)> = Vec::new();
     for account in accounts {
-        let provider = provider_of(account).to_string();
+        let provider = super::routing_groups::family_key(account).to_string();
         match sizes.iter_mut().find(|(name, _)| *name == provider) {
             Some((_, count)) => *count += 1,
             None => sizes.push((provider, 1)),
@@ -657,7 +658,8 @@ pub fn plan_route(
             reason,
             reset_at: rate_limit_reset_at(account, keys, now),
         };
-        if excluded.iter().any(|tried| tried == &id) {
+        let candidate_id = super::routing_groups::attempt_key(account);
+        if excluded.iter().any(|tried| tried == &candidate_id) {
             blocked.push(entry("tried", "本轮已试过，不再回试".to_string()));
             continue;
         }
@@ -665,7 +667,7 @@ pub fn plan_route(
             blocked.push(entry("disabled", "已禁用，不参与转发".to_string()));
             continue;
         }
-        if meta.limiter_blocked.contains(&id) {
+        if meta.limiter_blocked.contains(&candidate_id) {
             blocked.push(entry(
                 "limiter",
                 "被限制器拦下（余额不足或 Token 周期用量到顶），自动恢复后回来".to_string(),
@@ -724,7 +726,7 @@ pub fn plan_route(
     if let Some(hit) = meta.sticky_account {
         if let Some(index) = arranged
             .iter()
-            .position(|account| account_id(account) == Some(hit))
+            .position(|account| super::routing_groups::attempt_key(account) == hit)
         {
             let hit_account = arranged.remove(index);
             arranged.insert(0, hit_account);
@@ -756,7 +758,7 @@ pub fn plan_route(
         let mut seen: Vec<String> = Vec::new();
         let mut flags = Vec::with_capacity(arranged.len());
         for account in &arranged {
-            let provider = provider_of(account).to_string();
+            let provider = super::routing_groups::family_key(account).to_string();
             flags.push(seen.iter().all(|name| *name == provider));
             if !seen.iter().any(|name| *name == provider) {
                 seen.push(provider);
@@ -771,7 +773,7 @@ pub fn plan_route(
         .map(|(index, account)| {
             let id = account_id(&account).unwrap_or("").to_string();
             let position = index + 1;
-            let mut reason = if sticky_hit && Some(id.as_str()) == meta.sticky_account {
+            let mut reason = if sticky_hit && Some(super::routing_groups::attempt_key(&account).as_str()) == meta.sticky_account {
                 // 「继续用它」只在它**真的**排在队首时才说（置顶之后还有三层
                 // 稳定修饰，粘住的账号若正在垫底 / 休息 / 熔断，会被推回队尾）。
                 // 不说这一句会让原因句与事实冲突 —— 界面写着「本轮继续用它」，

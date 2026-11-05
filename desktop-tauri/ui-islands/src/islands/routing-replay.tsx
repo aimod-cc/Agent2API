@@ -7,6 +7,7 @@ import { t } from '../i18n'
 import { bridge, errorMessage, host, type ReplayRow, type RouteDecision } from './routing-types'
 import { formatDuration, RouteIcon, RouteStateBadge, stickyLabel, strategyLabel, timeText } from './routing-ui'
 import { ReplayStickyBinding } from './routing-replay-sticky'
+import { requestClientLabel } from '../../../ui-shared/model-api-key'
 
 export function RouteReplayFacts({ route, accountId, accountName, compact = false }: {
   route: RouteDecision
@@ -41,7 +42,7 @@ function ReplayDetail({ row, onDetails }: { row: ReplayRow; onDetails(): void })
   const success = row.status >= 200 && row.status < 300 && !row.error
   return <div className='routing-replay-detail'>
     <div className='routing-replay-detail-title'><h3>{row.clientModel || row.model}</h3><Badge variant={row.status === 0 ? 'info' : success ? 'success' : 'destructive'} shape='tag'>{row.status === 0 ? t('进行中') : success ? t('成功') : t('失败')}</Badge></div>
-    <div className='routing-replay-metadata'><span>{timeText(row.ts)}</span><span>{formatDuration(row.durationMs)}</span><span>{row.client || t('来源未记录')}</span><code>{row.id}</code></div>
+    <div className='routing-replay-metadata'><span>{timeText(row.ts)}</span><span>{formatDuration(row.durationMs)}</span><span>{requestClientLabel(row, t)}</span><code>{row.id}</code></div>
     {row.error ? <p className='routing-replay-error'>{row.error}</p> : null}
     <ReplayStickyBinding row={row} />
     {row.route ? <RouteReplayFacts route={row.route} accountId={row.accountId} accountName={row.accountName} /> : <Empty>{t('这条请求没有保存路由决策')}</Empty>}

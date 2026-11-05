@@ -79,6 +79,9 @@ pub fn add_mapping(
 ) -> Result<ModelRules> {
     let catalog = Catalog::current();
     mutate(|rules| {
+        if config::routing_profiles().group_for_model(alias).is_some() {
+            return Err(conflict("该对外模型 ID 已被自定义路由组占用"));
+        }
         let target = provider
             .map(|owner| catalog.stored_target(rules, owner, alias, target))
             .unwrap_or_else(|| target.to_string());
@@ -193,6 +196,9 @@ pub fn add_mapping(
 pub fn add_custom(provider: &str, id: &str) -> Result<ModelRules> {
     let catalog = Catalog::current();
     mutate(|rules| {
+        if config::routing_profiles().group_for_model(id).is_some() {
+            return Err(conflict("该模型 ID 已被自定义路由组占用"));
+        }
         if catalog.native_exists(provider, id)
             || rules.custom.iter().any(|model| model.matches(provider, id))
         {

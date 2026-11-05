@@ -746,7 +746,14 @@ impl RequestStats {
                 Ok((models, providers, sources))
             })
         };
-        let (models, providers, sources) = loaded.unwrap_or((Vec::new(), Vec::new(), json!({})));
+        let (models, providers, mut sources) = loaded.unwrap_or((Vec::new(), Vec::new(), json!({})));
+        if let Some(clients) = sources["clients"].as_array_mut() {
+            for client in clients {
+                client["label"] = json!(crate::server::core::client::display_name(
+                    client["value"].as_str().unwrap_or(""), client["label"].as_str().unwrap_or(""),
+                ));
+            }
+        }
         let providers: Vec<Value> = providers
             .into_iter()
             .map(|id| json!({ "id": id, "label": provider_label(&id) }))

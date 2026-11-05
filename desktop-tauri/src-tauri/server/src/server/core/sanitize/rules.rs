@@ -281,6 +281,18 @@ fn default_entries() -> Vec<SanitizeRule> {
             "Tokens prefixed with @ are paths that the user explicitly referenced.",
         ),
         (
+            "dsh-file-reference-values",
+            "DeepSeek Harness file reference (Values)",
+            r"(?i)Values prefixed with @",
+            "Values beginning with @",
+        ),
+        (
+            "dsh-search-fetch",
+            "DeepSeek Harness search/fetch",
+            r"(?i)Searching and fetching are distinct operations",
+            "Searching and fetching are separate operations",
+        ),
+        (
             "dsh-brand",
             "DeepSeek Harness",
             r"(?i)\bDeepSeek[ \t]+Harness\b",

@@ -74,6 +74,8 @@ pub(super) struct ProviderContext<'a> {
     /// —— 那是适配器的事）。各 provider 的实际发送体由 [`send_body`] 决定。
     pub body: &'a Value,
     pub routing: super::route_context::RequestRouting,
+    /// 网关确认并改写的压缩请求；入站伪造标记已在模型解析时剥离。
+    pub compact_routed: bool,
     /// 客户端是否要流式（决定成功后的形态：SSE 透传 or 聚合）
     pub stream: bool,
     pub images: Option<crate::server::core::providers::images::ImageOperation>,
@@ -349,13 +351,14 @@ pub(super) async fn send_body<'a>(
     }
     // 一次解析出两个属性：该家要收的名字 + 跟着那条映射走的思考等级
     // （同源，见模块头「思考等级绑定为什么也在这一步」）
-    let wire = crate::server::core::providers::catalog::wire_target_for_provider(
-        &requested,
-        provider_id,
-        account,
-    );
+    let direct = account.and_then(crate::server::core::routing_groups::candidate_model);
+    let wire = direct.map(|model| crate::server::core::providers::catalog::WireTarget { model: model.to_string(), reasoning: None })
+        .unwrap_or_else(|| crate::server::core::providers::catalog::wire_target_for_provider(&requested, provider_id, account));
     ctx.telemetry.note_upstream_model(&wire.model);
     rewrite_model(&mut body, &requested, &wire.model, provider_id);
+    if ctx.compact_routed {
+        crate::server::core::compact_routing::parameters::cap_output(&mut body, provider_id, &wire.model);
+    }
     let injected = apply_reasoning(
         &mut body,
         provider_id,

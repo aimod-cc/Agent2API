@@ -19,6 +19,7 @@ import {
 import { accountName, activeLimits, formatExpiry, formatRelative, formatStamp, isRateLimited } from '../lib/format'
 import { expiryOf, hasExpiry, isLongLivedCredential, supportsUsage } from '../lib/providerFacts'
 import { mergeUsageRow, usageIndex, usageText } from '../lib/usage'
+import { useDisplayClock } from '../../../ui-shared/use-display-clock'
 import { credentialExpiryRowsOf, credentialExpiryText } from '../../../ui-shared/credential-expiry'
 import { upstreamCooldownOf, upstreamSuspendedReasonOf } from '../../../ui-shared/account-upstream-state'
 import { providerLabel } from '../lib/providers'
@@ -43,6 +44,7 @@ export function AccountSheet({
   onClose: () => void
   onChanged: () => void
 }) {
+  const now = useDisplayClock()
   const [busy, setBusy] = useState('')
   /** 快照里这一行的余额结论；undefined = 还没查过 */
   const [usageRow, setUsageRow] = useState<UsageRow | undefined>(undefined)
@@ -162,7 +164,7 @@ export function AccountSheet({
   const suspendedReason = upstreamSuspendedReasonOf(account)
   const expiresAt = account ? expiryOf(account) : 0
   const credentialRows = account ? credentialExpiryRowsOf(account, expiresAt) : []
-  const usageView = usageText(usageRow)
+  const usageView = usageText(usageRow, now)
   const usageColor =
     usageView.kind === 'bad'
       ? 'var(--m-danger)'
@@ -302,6 +304,12 @@ export function AccountSheet({
                     style={{ color: usageView.failureStatus ? 'var(--m-text)' : usageColor }}>
                     {canQueryUsage ? usageView.text : t('未接入查询')}
                   </div>
+                  {canQueryUsage && usageView.expiry ? (
+                    <div className='text-xs text-warning mt-1 whitespace-normal leading-snug'>
+                      <div>{usageView.expiry.summary}</div>
+                      {usageView.expiry.today ? <div>{usageView.expiry.today}</div> : null}
+                    </div>
+                  ) : null}
                   {canQueryUsage && usageView.failureStatus ? (
                     <div className='text-xs text-destructive mt-1 whitespace-normal leading-snug' title={usageView.failureDetail}>
                       {usageView.failureStatus}

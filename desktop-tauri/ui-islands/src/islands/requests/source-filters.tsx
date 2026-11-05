@@ -36,7 +36,7 @@ export function SourceLogFilters({ filters, clients, apiKeys, onChange }: {
 }) {
   const clientOptions = React.useMemo(() => [
     { value: ALL_CLIENTS, label: t('全部客户端') },
-    ...clients.map(item => ({ value: clientFilterValue(item.value), label: requestClientLabel({ client: item.value }, t) })),
+    ...clients.map(item => ({ value: clientFilterValue(item.value), label: requestClientLabel({ client: item.value, clientLabel: item.label }, t) })),
   ], [clients])
   const keyOptions = React.useMemo(() => [{ value: '', label: t('全部 API Key') },
     ...apiKeys.map(item => ({ ...item, label: t(item.label) })),

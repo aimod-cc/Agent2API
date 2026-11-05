@@ -1,6 +1,9 @@
 import * as React from 'react'
 import { createRoot } from 'react-dom/client'
 import { requestApiKeyLabel, requestClientLabel } from '../../../ui-shared/model-api-key'
+import { ClientIdentificationDetail } from '../../../ui-shared/client-identification-detail'
+import type { ClientEvidence } from '../../../ui-shared/client-identification'
+import { clientIdentificationApi } from './settings-client-identification'
 import {
   Badge, BadgeDot, Button, Dialog, DialogBody, DialogContent, DialogFooter,
   DialogHeader, DialogTitle, SegmentedControl, StatusDot, Table, TableBody,
@@ -132,6 +135,8 @@ type RequestRow = {
   /** 模型测试发起的请求（后端 `is_test` 透传到列表行；老行没有这个键） */
   isTest?: boolean
   client?: string
+  clientLabel?: string
+  clientEvidence?: ClientEvidence
   apiKeyId?: string
   apiKeyName?: string
   apiKeySource?: string
@@ -518,7 +523,7 @@ export function RequestDetailPane({ row }: { row: RequestRow | null }) {
         </Field>
         <Field label={t('重试次数')}>{String(Number(row.attempts) || 1)}</Field>
         <Field label='API Key'>{requestApiKeyLabel(row, t)}</Field>
-        <Field label={t('来源客户端')}>{requestClientLabel(row, t)}</Field>
+        <Field label={t('来源客户端')}><ClientIdentificationDetail entry={row} api={clientIdentificationApi} t={t} /></Field>
         <Field label={t('模型')}><ModelCell row={row} /></Field>
         <Field label={t('提供商')}>
           {providerName(row) || '—'}
@@ -640,8 +645,8 @@ function RequestDetail({ id, row, token, onClose }: RequestDetailProps) {
   // 打开即并行拉两个数据源（旧实现的 open() 同样是打头就发两条）
   React.useEffect(() => {
     aliveRef.current = true
-    void loadRaw()
-    void loadDebug()
+    if (id) { void loadRaw(); void loadDebug() }
+    else { setRaw('gone'); setDebug('gone') }
     return () => { aliveRef.current = false }
     // 只在挂载时拉一次：本岛是「打开时建、关闭即卸」，id 不会中途变
   }, [])
@@ -782,7 +787,7 @@ function closeDetail() {
  */
 function openDetail(id: unknown, row?: unknown) {
   const key = String(id ?? '').trim()
-  if (!key) return
+  if (!key && !isPlainObject(row)) return
   unmountDetail() // 重复打开先拆掉上一份（旧实现同样是 close() 打头）
   const token = ++seq
   host = document.createElement('div')

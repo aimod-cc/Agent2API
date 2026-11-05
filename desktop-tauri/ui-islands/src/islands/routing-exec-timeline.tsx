@@ -1,180 +1,93 @@
 import * as React from 'react'
-import { Button, SegmentedControl, StatusDot, cn } from '@ui'
+import { Button, Collapsible, CollapsibleContent, CollapsibleTrigger, StatusDot } from '@ui'
 import { t } from '../i18n'
-import { clientLabel } from './routing-flow-model'
-import { RoutingStateText } from './routing-state-text'
+import { requestClientLabel } from '../../../ui-shared/model-api-key'
+import { RoutingReplayCandidates } from './routing-replay-candidates'
+import { RoutingReplayAttempt } from './routing-replay-attempt'
 import { RouteIcon, formatDuration, stickyLabel, strategyLabel } from './routing-ui'
-import {
-  attemptDuration, attemptLabel, attemptState, errorText, isTraceRunning, isTraceSuccess, requestKey, requestModel,
-  requestSummary, traceAttempts, traceCandidates, tracePhase, traceProvider,
-} from './routing-trace-model'
+import { isTraceRunning, isTraceSuccess, requestModel, requestSummary, traceAttempts, traceCandidates, tracePhase, traceProvider } from './routing-trace-model'
 import type { ReplayRow } from './routing-types'
 
-/**
- * 单条请求的回放：结果 → 请求进入 → 作用范围 → 候选队列 → 尝试记录 → 结果 → 配置快照。
- *
- * 候选顺序、跳过原因、尝试明细全部来自请求当时保存的快照，不用当前队列重算。
- */
+/** 回放只读请求当时保存的事实，不以当前配置重算历史。 */
 export function RoutingExecTimeline({ row, now, onDetail, onConfig }: {
-  row: ReplayRow
-  now: number
-  onDetail(row: ReplayRow): void
-  onConfig(model: string): void
+  row: ReplayRow; now: number; onDetail(row: ReplayRow): void; onConfig(model: string): void
 }) {
-  const [filter, setFilter] = React.useState<'all' | 'available' | 'skipped'>('all')
-  React.useEffect(() => setFilter('all'), [requestKey(row)])
-
   const attempts = traceAttempts(row)
   const candidates = traceCandidates(row)
-  const running = isTraceRunning(row)
-  const success = isTraceSuccess(row)
+  const running = isTraceRunning(row), success = isTraceSuccess(row)
   const snapshot = row.route?.configSnapshot
   const strategy = snapshot?.strategy || row.route?.strategy
   const sticky = snapshot?.sticky || row.route?.sticky
-  const account = row.accountName || traceProvider(row.provider, row.providerLabel)
-  const status = running ? tracePhase(row.phase) : success ? String(row.status) : t('失败')
+  const provider = traceProvider(row.provider, row.providerLabel)
+  const account = row.accountName ? `${provider} · ${row.accountName}` : provider
+  const hasAccount = Boolean(row.accountName || row.accountId || row.provider)
+  const status = running ? tracePhase(row.phase) : success ? String(row.status) : row.status ? `${row.status} · ${t('失败')}` : t('失败')
   const tone = running || success ? 'success' : 'destructive'
-  const availableCount = candidates.filter(candidate => candidate.kind === 'available').length
-  const skippedCount = candidates.filter(candidate => candidate.kind === 'skipped').length
-  const shown = candidates.filter(candidate => filter === 'all' || candidate.kind === filter)
+  const attemptCount = row.attempts ?? (row.attemptDetails ? row.attemptDetails.length : undefined)
+  const blocked = row.route?.blockedTotal ?? (row.route?.blocked ? candidates.filter(candidate => candidate.kind === 'skipped').length : undefined)
+  const duration = running ? Math.max(0, now - row.ts) : row.durationMs
+  const scope = snapshot?.scope ?? row.route?.scope
+  const scopeText = snapshot?.groupId ? `${t('自定义路由组')} · ${snapshot.groupName || scope}`
+    : scope != null ? scope ? t('模型独立配置') : t('继承全局') : t('路由快照未记录')
+  const session = row.route?.sessionId || row.route?.stickyId
+  const source = row.route?.sessionSource === 'content-hash' ? t('内容哈希（推断）') : row.route?.sessionSource || t('未记录')
 
   return <div className='routing-exec'>
     <header className='routing-exec-result'>
-      <div className='routing-exec-overline'>{t('请求结论')}</div>
-      <h2>{running ? t('正在由 {account} 处理', { account }) : success ? t('最终由 {account} 承接', { account }) : t('请求失败')}</h2>
-      <p title={row.error || undefined}>{requestSummary(row)}</p>
-      <div className='routing-exec-meta'>
-        <span className='routing-state-text'><StatusDot variant={tone} />{status}</span>
-        <span>{running ? t('进行中') : formatDuration(row.durationMs)}</span>
-        <span>{requestModel(row)}</span>
-        <span>{clientLabel(row.client || '')}</span>
+      <div className='routing-exec-heading'>
+        <div className='routing-exec-overline'><StatusDot variant={tone} pulse={running} />{status}
+          {row.route?.stickyHit ? <span>{t('粘滞命中')}</span> : null}</div>
+        <h2>{running ? hasAccount ? t('正在由 {account} 处理', { account }) : tracePhase(row.phase)
+          : success ? t('最终由 {account} 承接', { account }) : t('请求失败')}</h2>
+        <div className='routing-exec-meta'><code>{requestModel(row)}</code><span>{requestClientLabel(row, t)}</span>
+          <time>{new Date(row.ts).toLocaleTimeString()}</time><code className='routing-exec-id' title={row.id}>{row.id}</code></div>
+        {!success ? <p className={running ? 'routing-exec-summary' : 'routing-exec-error'}>{requestSummary(row)}</p> : null}
       </div>
-    </header>
-
-    <section className='routing-exec-section'>
-      <div className='routing-exec-section-head'><span>{t('请求进入')}</span></div>
-      <div className='routing-exec-kv'>
-        <span>{new Date(row.ts).toLocaleString()}</span>
-        <span>{row.clientModel && row.model && row.clientModel !== row.model
-          ? t('客户端模型 {client} → 实际模型 {model}', { client: row.clientModel, model: row.model })
-          : requestModel(row)}</span>
-      </div>
-      {row.route?.sessionId || row.route?.stickyId ? <div className='routing-exec-kv'>
-        <span>{t('会话标识 {id} · 来源 {source}', {
-          id: (row.route.sessionId || row.route.stickyId || '').slice(0, 12),
-          source: row.route.sessionSource === 'content-hash' ? t('内容哈希（推断）') : row.route.sessionSource || t('未记录'),
-        })}</span>
-      </div> : null}
-    </section>
-
-    <section className='routing-exec-section'>
-      <div className='routing-exec-section-head'>
-        <span>{t('作用范围')}</span>
-        {strategy ? <span className='routing-exec-chip'>{strategyLabel(strategy)}</span> : null}
-        {sticky ? <span className='routing-exec-chip'>{t('粘滞 {mode}', { mode: stickyLabel(sticky) })}</span> : null}
-        <span className='routing-exec-chip'>{snapshot?.scope ? t('模型独立配置') : t('继承全局')}</span>
-      </div>
-      <div className='routing-exec-kv'>
-        <span>{t('{n} 个候选', { n: row.route?.orderedTotal ?? availableCount })}</span>
-        <span>{t('{n} 个跳过', { n: row.route?.blockedTotal ?? skippedCount })}</span>
-        {snapshot?.providerCount != null ? <span>{t('{providers} 个提供商 / {accounts} 个账号', { providers: snapshot.providerCount, accounts: snapshot.accountCount ?? 0 })}</span> : null}
-      </div>
-    </section>
-
-    <section className='routing-exec-section'>
-      <div className='routing-exec-section-head'>
-        <span>{t('候选队列')}</span><span className='routing-exec-note'>{t('按请求开始时的顺位')}</span>
-        <SegmentedControl className='routing-exec-filter' aria-label={t('候选筛选')} value={filter}
-          onValueChange={value => setFilter(value as 'all' | 'available' | 'skipped')} options={[
-            { value: 'all', label: t('全部') },
-            { value: 'available', label: t('候选 {n}', { n: availableCount }) },
-            { value: 'skipped', label: t('跳过 {n}', { n: skippedCount }) },
-          ]} />
-      </div>
-      {shown.length ? <div className='routing-exec-list'>{shown.map((candidate, index) => {
-        const picked = candidate.id === row.accountId
-        const tried = attempts.find(attempt => attempt.accountId
-          ? attempt.accountId === candidate.id
-          : Boolean(attempt.account) && attempt.account === candidate.name && attempt.provider === candidate.provider)
-        const triedState = tried ? attemptState(row, tried) : null
-        return <div className={cn('routing-exec-row', picked && 'is-picked')} key={`${candidate.id}:${index}`}>
-          <span className='routing-exec-rank'>{candidate.kind === 'skipped' ? '–' : index + 1}</span>
-          <div className='routing-exec-row-main'>
-            <div className='routing-exec-row-title'>
-              <b>{candidate.name || candidate.id}</b>
-              {picked && success ? <span className='routing-exec-final'><RouteIcon name='check' size={11} />{t('最终承载')}</span>
-                : triedState === 'failed' || (picked && !success && !running)
-                  ? <RoutingStateText state='tried'>{t('已尝试 · 失败')}</RoutingStateText>
-                  : triedState === 'running' || (picked && running)
-                    ? <RoutingStateText state='usable'>{t('尝试中')}</RoutingStateText>
-                    : triedState === 'success' ? <RoutingStateText state='usable'>{t('上游已响应')}</RoutingStateText>
-                      : candidate.kind === 'skipped' ? <RoutingStateText state={candidate.state} />
-                        : <RoutingStateText state='usable' />}
-            </div>
-            <p>{candidate.reason || (candidate.kind === 'skipped' ? t('当时被候选过滤规则跳过') : '')}</p>
-          </div>
-          <div className='routing-exec-row-side'>
-            <span>{traceProvider(candidate.provider, candidate.providerLabel)}</span>
-            {candidate.resetAt ? <span>{new Date(candidate.resetAt).toLocaleTimeString()}</span> : null}
-          </div>
-        </div>
-      })}</div> : <p className='routing-exec-note'>{t('没有匹配的候选')}</p>}
-    </section>
-
-    <section className='routing-exec-section'>
-      <div className='routing-exec-section-head'><span>{t('尝试记录')}</span><span className='routing-exec-note'>{t('{n} 次', { n: attempts.length })}</span></div>
-      {attempts.length ? <div className='routing-exec-list'>{attempts.map(attempt => {
-        const state = attemptState(row, attempt)
-        const failed = state === 'failed'
-        return <div className={cn('routing-exec-row', failed && 'is-failed')} key={attempt.index}>
-          <span className='routing-exec-rank'>{attempt.index + 1}</span>
-          <div className='routing-exec-row-main'>
-            <div className='routing-exec-row-title'>
-              <b>{attempt.account || attempt.accountName || attempt.accountId || t('账号未记录')}</b>
-              {attempt.status != null ? <span className='routing-exec-chip'>{attempt.status}</span> : null}
-              <span className='routing-exec-note'>{attemptLabel(row, attempt)}</span>
-            </div>
-            <p title={attempt.error || attempt.notice || undefined}>{errorText(attempt.error || attempt.notice, 180) || t('上游请求已发出')}</p>
-            {attempt.retries?.length ? <div className='routing-exec-retries'>
-              <b>{t('同账号内部重试')}</b>
-              {attempt.retries.map((retry, index) => <p key={index}>{retry.status ?? '—'} · {retry.reason || t('未知原因')} · {t('退避 {time}', { time: formatDuration(retry.delayMs) })}</p>)}
-            </div> : null}
-          </div>
-          <div className='routing-exec-row-side'>
-            <span>{attemptDuration(row, attempt)}</span>
-            {attempt.model ? <span>{attempt.model}</span> : null}
-          </div>
-        </div>
-      })}</div> : <p className='routing-exec-note'>{t('没有保存调用明细')}</p>}
-    </section>
-
-    <section className='routing-exec-section'>
-      <div className='routing-exec-section-head'><span>{t('结果')}</span><span className='routing-state-text'><StatusDot variant={tone} />{status}</span></div>
-      <div className='routing-exec-result-line'>
-        <b>{running ? t('进行中') : formatDuration(row.durationMs)}</b>
-        <span>{running ? t('阶段 {phase} · 已进行 {time}', { phase: tracePhase(row.phase), time: formatDuration(now - row.ts) })
-          : `${t('首帧 {time}', { time: formatDuration(row.firstResponseMs) })}${row.totalTokens != null ? ` · ${t('输出 {n} tokens', { n: row.totalTokens.toLocaleString() })}` : ''}`}</span>
-      </div>
-    </section>
-
-    <section className='routing-exec-section'>
-      <div className='routing-exec-section-head'><span>{t('请求当时的配置')}</span></div>
-      <div className='routing-exec-kv'>
-        <span>{strategy ? strategyLabel(strategy) : t('路由快照未记录')}</span>
-        {sticky ? <span>{t('会话粘滞 {mode}', { mode: stickyLabel(sticky) })}</span> : null}
-        <span>{snapshot?.scope ? t('模型独立配置') : t('继承全局')}</span>
-      </div>
-      {snapshot ? <p className='routing-exec-note'>{new Date(snapshot.capturedAt).toLocaleString()}{snapshot.providerCount != null
-        ? ` · ${t('{providers} 个提供商 / {accounts} 个账号', { providers: snapshot.providerCount, accounts: snapshot.accountCount ?? 0 })}` : ''}</p> : null}
-      <div className='routing-exec-actions'>
-        <Button variant='outline' size='sm' onClick={() => onConfig(row.model || row.clientModel || '')}>{t('按此范围查看配置')}</Button>
-        {row.error ? <Button variant='ghost' size='sm' onClick={() => onDetail(row)}>{t('查看上游错误')}</Button> : null}
-      </div>
-    </section>
-
-    <div className='routing-exec-foot'>
-      <span>{t('时间相对请求开始；历史只读，修改当前配置不会改变这条记录。')}</span>
       <Button variant='outline' size='sm' onClick={() => onDetail(row)}>{t('完整请求详情')}</Button>
+    </header>
+    <div className='routing-exec-scroll'>
+      <div className='routing-exec-metrics'>
+        <div><b>{formatDuration(duration)}</b><span>{running ? t('已用时') : t('总耗时')}</span></div>
+        <div><b>{formatDuration(row.firstResponseMs)}</b><span>{t('首帧')}</span></div>
+        <div><b>{attemptCount ?? '—'}</b><span>{t('尝试次数')}</span></div>
+        <div><b>{blocked ?? '—'}</b><span>{t('跳过候选')}</span></div>
+      </div>
+      <section className='routing-exec-section'>
+        <div className='routing-exec-section-head'><h3>{t('执行路径')}</h3><span>{t('执行路径按当时快照保留')}</span></div>
+        <ol className='routing-timeline'>
+          <li className='routing-timeline-step is-entry'><span className='routing-timeline-mark' aria-hidden='true'><StatusDot variant='muted' /></span>
+            <div className='routing-timeline-body'><div className='routing-timeline-title'><b>{t('请求进入')}</b><time>{new Date(row.ts).toLocaleString()}</time></div>
+              <p>{row.upstreamModel && requestModel(row) !== row.upstreamModel
+                ? t('客户端模型 {client} → 实际模型 {model}', { client: requestModel(row), model: row.upstreamModel }) : requestModel(row)}</p>
+              {session ? <p className='routing-exec-note' title={session}>{t('会话标识 {id} · 来源 {source}', { id: session.slice(0, 12), source })}</p> : null}
+            </div>
+          </li>
+          {attempts.map(attempt => <RoutingReplayAttempt key={attempt.index} row={row} attempt={attempt} />)}
+        </ol>
+        {!attempts.length ? <p className='routing-exec-note'>{t('没有保存调用明细')}</p> : null}
+        {row.completionTokens != null || row.totalTokens != null ? <p className='routing-exec-token-summary'>
+          {row.completionTokens != null ? t('输出 {n} tokens', { n: row.completionTokens.toLocaleString() })
+            : t('总计 {n} tokens', { n: row.totalTokens!.toLocaleString() })}
+        </p> : null}
+      </section>
+      <RoutingReplayCandidates row={row} />
+      <section className='routing-exec-section routing-exec-snapshot'>
+        <div className='routing-exec-section-head'><h3>{t('请求当时的配置')}</h3>
+          <Button variant='link' size='sm' onClick={() => onConfig(scope ?? (row.clientModel || row.model || ''))}>{t('按此范围查看配置')}</Button></div>
+        <div className='routing-exec-kv'>
+          <span>{strategy ? snapshot?.groupId && strategy === 'provider' ? t('成员内轮询') : strategyLabel(strategy) : t('路由快照未记录')}</span>
+          {sticky ? <span>{t('会话粘滞 {mode}', { mode: stickyLabel(sticky) })}</span> : null}<span>{scopeText}</span>
+          {snapshot?.providerCount != null ? <span>{t('{providers} 个提供商 / {accounts} 个账号', { providers: snapshot.providerCount, accounts: snapshot.accountCount ?? 0 })}</span> : null}
+        </div>
+        {snapshot ? <p className='routing-exec-note'>{new Date(snapshot.capturedAt).toLocaleString()}</p> : null}
+        {snapshot?.members?.length ? <Collapsible className='routing-snapshot-members'>
+          <CollapsibleTrigger className='routing-detail-toggle'><RouteIcon name='chevronDown' size={12} />{t('成员模型')} · {snapshot.members.length}</CollapsibleTrigger>
+          <CollapsibleContent>{snapshot.members.map(member => <div key={member.id} className='routing-snapshot-member'><code>{member.model}</code>
+            <span>{traceProvider(member.provider)} · {member.included ? t('参与本路由') : t('未参与本路由')} · {t('{n} 个账号', { n: member.accountCount })}</span></div>)}</CollapsibleContent>
+        </Collapsible> : null}
+        {row.error ? <Button variant='link' size='sm' onClick={() => onDetail(row)}>{t('查看上游错误')}</Button> : null}
+      </section>
+      <p className='routing-exec-foot'>{t('时间相对请求开始；历史只读，修改当前配置不会改变这条记录。')}</p>
     </div>
   </div>
 }

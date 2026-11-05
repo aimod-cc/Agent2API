@@ -57,6 +57,7 @@ fn workspace_json(state: &ServerState, model: Option<String>) -> Value {
         "available": eligible.contains(id),
     })).collect();
     let mut models = providers::catalog::advertised_model_ids(&state.store());
+    models.retain(|model| profiles.group_for_model(model).is_none());
     for model in profiles.models.keys() {
         if !models.iter().any(|known| known.eq_ignore_ascii_case(model)) { models.push(model.clone()); }
     }
@@ -112,6 +113,9 @@ pub async fn put_profile(State(state): State<ServerState>, body: Bytes) -> Respo
         Ok(model) => model,
         Err(error) => return errors::management_error(400, error),
     };
+    if config::routing_profiles().group_for_model(&model).is_some() {
+        return errors::management_error(400, "此入口是自定义路由组，请在路由组中修改，不能覆盖为模型独立配置");
+    }
     let Some(raw) = object.get("profile") else { return errors::management_error(400, "缺少 profile（恢复继承请传 null）") };
     let mut profile = if raw.is_null() { None } else {
         let profile: config::RoutingProfile = match serde_json::from_value(raw.clone()) {

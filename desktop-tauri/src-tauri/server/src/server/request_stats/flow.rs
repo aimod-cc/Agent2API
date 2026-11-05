@@ -17,6 +17,7 @@ const BASE: &str = "WITH flow AS (
     SELECT row_id, id, ts,
       CASE WHEN client IN ('assistant', 'assistant_images', 'assistant_title') THEN 'assistant' ELSE client END AS client,
       provider, account_id, account_name, status, error, attempts, route,
+      CASE WHEN json_valid(client_evidence) THEN COALESCE(json_extract(client_evidence, '$.clientName'), '') ELSE '' END AS client_name,
       COALESCE(NULLIF(client_model, ''), model, '') AS request_model,
       CASE WHEN json_valid(route) THEN COALESCE(json_extract(route, '$.sessionId'), json_extract(route, '$.stickyId'), '') ELSE '' END AS session_id,
       CASE WHEN json_valid(route) THEN COALESCE(json_extract(route, '$.sessionSource'), '') ELSE '' END AS session_source,
@@ -27,7 +28,7 @@ const BASE: &str = "WITH flow AS (
       AND ((status = 0 AND error IS NULL) OR (?4 = 0 AND ts + MAX(duration_ms, 0) >= ?2))
   ), selected AS (
     SELECT * FROM flow WHERE (?3 = '' OR request_model = ?3 COLLATE NOCASE)
-      AND (?5 = '' OR instr(lower(client || ' ' || request_model || ' ' || provider || ' ' || account_name || ' ' || id || ' ' || session_id), lower(?5)) > 0)
+      AND (?5 = '' OR instr(lower(client || ' ' || client_name || ' ' || request_model || ' ' || provider || ' ' || account_name || ' ' || id || ' ' || session_id), lower(?5)) > 0)
       AND (?6 = '' OR json_array(client, request_model, provider, account_id, CASE WHEN account_id = '' THEN account_name ELSE '' END) = ?6)
       AND (?7 = '' OR session_id = ?7)
       AND (?9 = 0 OR client = ?10)
@@ -123,7 +124,7 @@ impl RequestStats {
                 let mut statement = conn.prepare(&format!("{BASE} SELECT json_array({group}), client, request_model, provider, account_id,
                     MAX(account_name), COUNT(*), SUM(running), SUM(status >= 200 AND status < 300 AND error IS NULL),
                     SUM((status <> 0 OR error IS NOT NULL) AND (status < 200 OR status >= 300 OR error IS NOT NULL)), COUNT(DISTINCT NULLIF(session_id, '')),
-                    SUM(CASE WHEN json_valid(route) THEN json_extract(route, '$.stickyHit') = 1 ELSE 0 END), SUM(attempts > 1), MAX(last_seen)
+                    SUM(CASE WHEN json_valid(route) THEN json_extract(route, '$.stickyHit') = 1 ELSE 0 END), SUM(attempts > 1), MAX(last_seen), MAX(client_name)
                     FROM selected GROUP BY {group} ORDER BY SUM(running) DESC, COUNT(*) DESC, MAX(last_seen) DESC LIMIT 300"))?;
                 let paths = statement.query_map(parameters, |row| Ok(json!({
                     "id": row.get::<_, String>(0)?, "client": row.get::<_, String>(1)?, "model": row.get::<_, String>(2)?,
@@ -131,11 +132,20 @@ impl RequestStats {
                     "requests": row.get::<_, i64>(6)?, "running": row.get::<_, i64>(7)?, "successful": row.get::<_, i64>(8)?,
                     "failed": row.get::<_, i64>(9)?, "sessions": row.get::<_, i64>(10)?, "stickyHits": row.get::<_, Option<i64>>(11)?.unwrap_or(0),
                     "switched": row.get::<_, i64>(12)?, "lastSeen": row.get::<_, i64>(13)?,
+                    "clientLabel": row.get::<_, String>(14)?,
                 })))?.collect::<rusqlite::Result<Vec<_>>>()?;
                 Ok(json!({ "available": true, "paths": paths, "pathCount": matched, "truncated": matched > 300,
                     "requests": requests, "running": running, "sessions": sessions, "unknownRequests": unknown, "now": now, "since": since }))
             })
         };
-        loaded.unwrap_or_else(|| json!({ "available": false, "paths": [], "entries": [], "matched": 0, "now": now }))
+        let mut result = loaded.unwrap_or_else(|| json!({ "available": false, "paths": [], "entries": [], "matched": 0, "now": now }));
+        if let Some(paths) = result["paths"].as_array_mut() {
+            for path in paths {
+                path["clientLabel"] = json!(crate::server::core::client::display_name(
+                    path["client"].as_str().unwrap_or(""), path["clientLabel"].as_str().unwrap_or(""),
+                ));
+            }
+        }
+        result
     }
 }

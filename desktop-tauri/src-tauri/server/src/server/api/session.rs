@@ -1228,9 +1228,15 @@ pub async fn login_loomy_sms_verify(State(state): State<ServerState>, body: Byte
 
 /// 发送短信验证码（**Tabbit 国内站专用**）。
 ///
-/// body `{phone}` → `{uuid}`。uuid 是这次登录的会话标识：上游把刚发的码
-/// 绑在它上面，登录时必须带同一个；网关不保存这个中间态，回给前端随
-/// 下一次请求带回即可。
+/// body `{phone, uuid?, supportsCaptcha?}` → `{uuid}`。uuid 是这次登录的会话
+/// 标识：上游把刚发的码绑在它上面，登录时必须带同一个；网关不保存这个中间态，
+/// 回给前端随下一次请求带回即可。
+///
+/// ── 第二种成功形态：`{status:"captcha", captcha:{requestCode, verifyUrl}}` ──
+/// 风控判定人机可疑时上游不会发码，而是给一个滑块验证页。用户在那边手动完成
+/// 后**重新发一次码**才成功（官方网页版同样如此，见插件的 `challenge_of`）。
+/// 声明了 `supportsCaptcha` 的界面会拿到这个 200 + 状态，自己去开验证页并
+/// 引导用户再点一次；没声明的（旧缓存前端）收到 409 与一句可读提示。
 pub async fn login_tabbit_sms_send(State(state): State<ServerState>, body: Bytes) -> Response {
     let payload = parse_body(&body).unwrap_or(Value::Null);
     tabbit_sms_send_inner(&state, &payload).await
@@ -1240,6 +1246,14 @@ pub async fn login_tabbit_sms_send(State(state): State<ServerState>, body: Bytes
 /// （旧缓存的前端会把 `provider: tabbit` 发到 AutoClaw 的端点）。
 async fn tabbit_sms_send_inner(state: &ServerState, payload: &Value) -> Response {
     let phone = payload.get("phone").and_then(Value::as_str).unwrap_or("");
+    // 过完滑块重发时要沿用同一个 uuid（同一轮登录），前端会带回来。
+    let uuid = payload.get("uuid").and_then(Value::as_str);
+    // 新界面声明自己认识「发码前要先过滑块」这种结果；不声明的一律按错误回，
+    // 免得旧缓存前端把它当成「已发送」而让用户等一条不会来的短信。
+    let supports_captcha = payload
+        .get("supportsCaptcha")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let Some(adapter) =
         crate::server::core::providers::adapter::adapter_by_id("tabbit")
     else {
@@ -1250,11 +1264,21 @@ async fn tabbit_sms_send_inner(state: &ServerState, payload: &Value) -> Response
             state.store(),
             "",
             "login.sms-send",
-            &json!({ "phone": phone }),
+            &json!({ "phone": phone, "uuid": uuid }),
         )
         .await
     {
-        Ok(result) => ok_json(result),
+        Ok(result) => {
+            let needs_captcha =
+                result.get("status").and_then(Value::as_str) == Some("captcha");
+            if needs_captcha && !supports_captcha {
+                return management_error(
+                    409,
+                    "发送验证码前需要先完成滑块验证。请刷新页面后再试，或改用「填写凭证」粘贴 Cookie",
+                );
+            }
+            ok_json(result)
+        }
         Err(error) => management_error(error.status_code, error.message),
     }
 }

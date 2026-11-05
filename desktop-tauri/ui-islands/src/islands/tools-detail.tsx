@@ -1,11 +1,10 @@
 import * as React from 'react'
 import {
   Alert, Badge, Button, Card, CardContent, CardHeader, CardTitle, Field, FieldLabel, Input,
-  SegmentedControl, Spinner, Switch, HtmlContent,
+  SegmentedControl, Spinner, Switch,
 } from '@ui'
 import { t } from '../i18n'
 import { toast } from './assistant-state'
-import { buildWebSearchApiDoc } from '../../../ui-shared/tools-api-doc'
 import { WebSearchConfig, VisionConfigPanel } from './tools-config'
 import {
   PROTOCOL_DESC, PROTOCOL_LABELS, SERVICE_DESC, SERVICE_NAME, fetchInstallInfo, patchServer,
@@ -82,24 +81,6 @@ function McpConnectCard({ info, protocol }: { info: InstallInfo; protocol: ToolP
   </Card>
 }
 
-function ApiDocCard({ baseUrl }: { baseUrl: string }) {
-  const locale = window.wbI18n?.locale?.() || 'zh-Hans'
-  const markdown = buildWebSearchApiDoc(locale, baseUrl)
-  const api = (window as unknown as { wbMarkdown?: { render?: (text: string) => string } }).wbMarkdown
-  const html = api?.render?.(markdown) || ''
-  return <Card>
-    <CardHeader>
-      <CardTitle>{t('API 接口文档')}</CardTitle>
-      <Button size='sm' variant='outline' className='ml-auto' onClick={() => void copyText(markdown).then(ok => toast(ok ? t('已复制') : t('复制失败，请手动选择后复制'), ok ? 'ok' : 'err'))}>{t('复制文档')}</Button>
-    </CardHeader>
-    <CardContent>
-      <p className='mb-3 text-[11.5px] text-subtle'>{t('点击「复制文档」可复制整份 Markdown 文档，直接发给对接方即可。')}</p>
-      {html ? <HtmlContent className='tool-api-doc max-h-[520px] overflow-auto rounded-md border border-border p-4 text-sm leading-relaxed' html={html} />
-        : <pre className='max-h-[520px] overflow-auto whitespace-pre-wrap rounded-md border border-border p-4 text-xs'>{markdown}</pre>}
-    </CardContent>
-  </Card>
-}
-
 export function ToolDetail({ service, onBack, onChanged }: { service: ToolService; onBack: () => void; onChanged: () => void }) {
   const [info, setInfo] = React.useState<InstallInfo | null>(null)
   const [loading, setLoading] = React.useState(true)
@@ -154,7 +135,6 @@ export function ToolDetail({ service, onBack, onChanged }: { service: ToolServic
   }
 
   const capabilities = CAPABILITY_DESCRIPTIONS[service.id] || []
-  const baseUrl = info?.base_url || window.location.origin
 
   return <div className='flex flex-col gap-4'>
     <Button variant='ghost' size='sm' className='self-start' onClick={onBack}>← {t('返回列表')}</Button>
@@ -186,7 +166,7 @@ export function ToolDetail({ service, onBack, onChanged }: { service: ToolServic
             {savingTimeout ? <Spinner /> : null}{t('保存')}
           </Button>
         </div>
-        <p className='text-[11.5px] text-subtle'>{t('服务端强制单次工具执行的超时上限（同一服务的 Skill / MCP / API 共用）。安装 MCP 时会按此值写入客户端配置；修改后需在客户端重新「更新」配置并重进会话才会生效。')}</p>
+        <p className='text-[11.5px] text-subtle'>{t('服务端强制单次工具执行的超时上限（同一服务的 Skill / MCP 共用）。安装 MCP 时会按此值写入客户端配置；修改后需在客户端重新「更新」配置并重进会话才会生效。')}</p>
         {!enabled && <Alert variant='warning'>{t('该协议已停用，已接入的客户端会收到服务停用错误。')}</Alert>}
         {error && <Alert variant='destructive' className='whitespace-pre-wrap'>{error}</Alert>}
       </CardContent>
@@ -194,8 +174,7 @@ export function ToolDetail({ service, onBack, onChanged }: { service: ToolServic
 
     {loading ? <div className='flex items-center gap-2 text-sm text-subtle'><Spinner />{t('正在加载工具服务配置…')}</div>
       : service.protocol === 'mcp' && info ? <McpConnectCard info={info} protocol={service.protocol} />
-        : service.protocol === 'api' ? <ApiDocCard baseUrl={baseUrl} />
-          : service.protocol === 'skill' ? <Alert>{t('该协议通过 Agent2API 面板安装到本机客户端目录。')}</Alert> : null}
+        : service.protocol === 'skill' ? <Alert>{t('该协议通过 Agent2API 面板安装到本机客户端目录。')}</Alert> : null}
 
     <div className='flex items-center gap-2'>
       <SegmentedControl value={tab} onValueChange={value => { if (value === 'config' || value === 'capabilities') setTab(value) }} options={[

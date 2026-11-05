@@ -956,5 +956,21 @@
   "：到「网络代理」页的「订阅管理」里点「同步 Clash Verge」把出口导进池后即可选 —— 那样能集中测试、也能被多个账号共用。": ": acesse a página 「Proxy de rede」, abra 「Gerenciar assinaturas」 e clique em 「Sincronizar Clash Verge」 para importar as saídas para o pool; assim elas poderão ser selecionadas — desse jeito é possível testar de forma centralizada e compartilhar entre várias contas.",
   "；": "; ",
   "本组 {n} 个账号的百分比读数不能相加，取组内最低的剩余比例（按整组统计，不受筛选、搜索影响）": "As leituras percentuais das {n} contas deste grupo não podem ser somadas; exibimos a menor porcentagem restante (grupo inteiro, sem influência de filtros ou busca)",
-  "当前筛选下 {n} 个账号的百分比读数不能相加，取最低的剩余比例（随筛选、搜索变化，不受分页影响）": "As leituras percentuais das {n} contas no filtro atual não podem ser somadas; exibimos a menor porcentagem restante (muda com filtros/busca, sem influência da paginação)"
+  "当前筛选下 {n} 个账号的百分比读数不能相加，取最低的剩余比例（随筛选、搜索变化，不受分页影响）": "As leituras percentuais das {n} contas no filtro atual não podem ser somadas; exibimos a menor porcentagem restante (muda com filtros/busca, sem influência da paginação)",
+  "不足 {n}": "Menos de {n}",
+  "{count} 份单位未知": "{count} pacotes com unidade desconhecida",
+  "{count} 份仅提供比例": "{count} pacotes com apenas leituras percentuais",
+  "{unit}余量未知（{count} 份）": "Saldo em {unit} desconhecido ({count} pacotes)",
+  "{amount}，另 {count} 份余量未知": "{amount}, mais {count} pacotes com saldo desconhecido",
+  "7 天内到期 {amount}（{count} 份）": "Expira em até 7 dias: {amount} ({count} pacotes)",
+  "今天到期 {amount}（{count} 份）": "Expira hoje: {amount} ({count} pacotes)",
+  "7天 {count}份": "{count} pac. em 7d",
+  "7天 {n}": "{n} em 7d",
+  "即将到期 {count} 份": "{count} pacotes expiram em breve",
+  "即将过期 {n}": "{n} expira em breve",
+  "不到 1 分钟到期": "Expira em menos de 1 min",
+  "{minutes} 分钟后到期": "Expira em {minutes} min",
+  "{hours} 小时后到期": "Expira em {hours} h",
+  "明天到期": "Expira amanhã",
+  "{days} 天后到期": "Expira em {days} dias"
 }

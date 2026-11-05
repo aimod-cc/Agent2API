@@ -715,6 +715,9 @@ fn host_allowed(url: &url::Url, provider: &str, social_restore: bool) -> bool {
     if provider == "doubaowork" {
         return url.as_str() == "about:blank" || crate::doubaowork_login::allowed(url);
     }
+    if let Some(region) = crate::server::core::providers::monkeycode::Region::from_provider_id(provider) {
+        return url.as_str() == "about:blank" || crate::monkeycode_login::allowed(url, region);
+    }
     match url.scheme() {
         "about" | "data" => true,
         "https" | "http" => {
@@ -786,6 +789,9 @@ fn is_login_callback(url: &url::Url, provider: &str) -> bool {
 /// 与 Qoder 的设备授权同形；手工填凭证与导入桌面端登录态都不经过这里
 /// （那两条走 `POST /api/accounts`）。
 fn normalize_provider(provider: &str) -> Result<&'static str, String> {
+    if let Some(region) = crate::server::core::providers::monkeycode::Region::from_provider_id(provider.trim()) {
+        return Ok(region.provider_id());
+    }
     match provider.trim() {
         "" | "workbuddy" => Ok("workbuddy"),
         // WorkBuddy 国际版（2026-10 拆家后是独立 provider）：面板那块
@@ -1439,6 +1445,9 @@ pub async fn start(
     if provider == "doubaowork" {
         return crate::doubaowork_login::start(app, &mode).await;
     }
+    if let Some(region) = crate::server::core::providers::monkeycode::Region::from_provider_id(provider) {
+        return crate::monkeycode_login::start(app, region, &mode).await;
+    }
 
     // 小浣熊：授权地址由**后端适配器**生成（静态地址 + 本地生成的 state），
     // 所以请求体里只带 provider，不带 edition（那是 workbuddy 的端点维度）。
@@ -2064,7 +2073,10 @@ async fn run_embedded_with_proxy(
     // 密集重试只会延长风控窗口。
     let mut kuku_retry_block_until: Option<tokio::time::Instant> = None;
     let mut doubaowork_submitted = false;
+    let monkeycode_region = crate::server::core::providers::monkeycode::Region::from_provider_id(provider);
+    let mut monkeycode_submitted = false;
     let mut deepseek_submitted = false;
+    let mut deepseek_capture = crate::deepseek_login::CredentialCapture::default();
 
     // 导航拦截与弹窗拦截**共用同一个标志**：两种入口收到的可能是同一个回调
     // （页面先改 location、再被 WebView2 派生出一条弹窗请求），分开各一个标志
@@ -2165,6 +2177,13 @@ async fn run_embedded_with_proxy(
         // 同属一个 WebView2 数据目录、共享 Cookie 存储，弹窗里登录成功后
         // 等待循环照样能从 Cookie 读到 BDUSS）。
         .on_new_window(move |url, _features| {
+            if let Some(region) = monkeycode_region {
+                return if crate::monkeycode_login::allowed(&url, region) {
+                    tauri::webview::NewWindowResponse::Allow
+                } else {
+                    tauri::webview::NewWindowResponse::Deny
+                };
+            }
             if provider == "deepseek-web" && crate::deepseek_login::allowed(&url) {
                 return tauri::webview::NewWindowResponse::Allow;
             }
@@ -2299,7 +2318,7 @@ async fn run_embedded_with_proxy(
         // 初版那套「读窗口 cookie 找 ot_session」已删除：那条 Cookie 在
         // SPA 内扫码登录时根本不会被写出（见模块头的实测对照）。
         if provider == "deepseek-web" && !deepseek_submitted {
-            match crate::deepseek_login::credentials(&window).await {
+            match crate::deepseek_login::credentials(&window, &mut deepseek_capture).await {
                 Ok(Some(credentials)) if login_is_current(app, login_state) => {
                     deepseek_submitted = true;
                     submit_callback(login_state, &credentials).await;
@@ -2308,6 +2327,16 @@ async fn run_embedded_with_proxy(
                 Err(error) => {
                     eprintln!("[login] {error}");
                 }
+            }
+        }
+        if let Some(region) = monkeycode_region.filter(|_| !monkeycode_submitted) {
+            match crate::monkeycode_login::credentials(&window, region).await {
+                Ok(Some(credentials)) if login_is_current(app, login_state) => {
+                    monkeycode_submitted = true;
+                    submit_callback(login_state, &credentials).await;
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!("[login] {error}"),
             }
         }
         if provider == "doubaowork" && !doubaowork_submitted {

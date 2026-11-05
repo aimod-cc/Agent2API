@@ -17,6 +17,7 @@ export type FlowQuery = {
 export type FlowPath = {
   id: string
   client: string
+  clientLabel?: string
   model: string
   provider: string
   accountId: string

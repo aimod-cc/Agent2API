@@ -183,6 +183,9 @@ pub(crate) fn queue_json(state: &ServerState, model: Option<String>) -> Value {
 }
 
 pub(crate) fn queue_for_accounts(state: &ServerState, model: Option<String>, accounts: &[Value]) -> Value {
+    if let Some(group) = model.as_deref().and_then(|model| config::routing_profiles().group_for_model(model).cloned()) {
+        return super::routing_groups::group_queue(state, group);
+    }
     let snapshot = config::current();
     // 候选收窄：点名了模型 → 只留「清单里有它的家」（与转发同一张家清单，
     // `route_for_forward`）；没点名 → 全部账号。与 session.rs 的 ★ 推算同一取材。

@@ -84,6 +84,7 @@ dependencies = [
  "hmac",
  "image",
  "jsonc-parser",
+ "libc",
  "md-5",
  "num-bigint",
  "p256",

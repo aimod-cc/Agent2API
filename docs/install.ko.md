@@ -83,7 +83,11 @@ Stop-Service Agent2API
 .\install-service.ps1 -Uninstall
 ```
 
-**업그레이드**: 새 버전의 압축을 풀고 `install-service.ps1` 를 다시 실행하면 됩니다(서비스 중지 → 프로그램과 UI 덮어쓰기 → 재시작. 데이터와 설정은 그대로입니다).
+**원클릭 업데이트**: 표준 Windows 서비스는 설정 → 업데이트에서 원클릭 업데이트를 제공합니다. 확인 후 Windows x64 서버 패키지를 다운로드하고 공식 해시를 독립적으로 검증합니다. 임시 업데이트 프로세스가 서비스를 중지하고 파일 점유가 풀릴 때까지 기다린 후 백업·교체·재시작합니다. 새 버전 실행 확인 후 페이지가 새로 고쳐지며 계정, 설정 및 데이터는 유지됩니다.
+
+**이전 설치 연결 / 수동 업그레이드**: 새 패키지를 새로운 폴더에 풀고 관리자 권한으로 `install-service.ps1`을 한 번 실행하세요. 등록된 설치·데이터 경로, 포트, 환경 설정 및 서비스 계정을 기본적으로 보존합니다. 포트처럼 명시한 옵션만 변경하며 디렉터리 이전은 별도로 진행합니다. 이후에는 패널에서 업데이트할 수 있습니다.
+
+프로그램은 SYSTEM과 관리자만 쓸 수 있으며 작업 폴더는 `<설치 폴더>\.service-update`입니다. 상주 서비스는 추가하지 않습니다. 서비스 환경의 `AGENT2API_WINDOWS_UPDATE=0`으로 기능을 끌 수 있습니다. 사용자 지정 계정, 디렉터리 링크, 네트워크 경로 및 외부 작업 그룹 관리 환경은 자동 권한 상승 없이 수동으로 업그레이드합니다. 교체 실패 시 이전 파일을 복원하고 새 버전 시작 실패 시 로그와 백업을 남기며 데이터베이스를 자동으로 되돌리지 않습니다.
 
 > **Windows 특유의 함정 두 가지는 스크립트가 이미 처리합니다**:
 > 서비스 프로세스의 작업 디렉터리는 exe 가 있는 폴더가 아니라 `C:\Windows\system32` 입니다 —— UI 디렉터리는 exe 경로로 찾으므로 영향이 없습니다. 데이터 디렉터리는 서비스 레지스트리의 `AGENT2API_PROXY_HOME` 에 명시적으로 기록합니다(설정하지 않으면 LocalSystem 의 `C:\Windows\system32\config\systemprofile` 아래로 떨어져 찾기 어렵습니다).
@@ -114,7 +118,11 @@ journalctl -u agent2api -f
 
 부팅 시 자동 시작, 크래시 후 자동 재시작(`Restart=always`), SIGTERM 우아한 종료(처리 중인 요청을 기다린 뒤 끝나므로 SSE 장기 연결이 끊기지 않습니다)가 모두 설정되어 있습니다. `/etc/agent2api/agent2api.env` 를 수정했다면 `systemctl restart agent2api` 로 반영합니다.
 
-> **베어메탈에서는 `AGENT2API_SELF_UPDATE` 를 켜지 마세요**: 그건 컨테이너 안의 방식입니다(파일을 바꾸고 종료한 뒤 컨테이너 restart 정책이 되살림). 베어메탈에서는 프로그램 파일 소유자가 root 이고 서비스 계정에는 교체 권한이 없어 유닛에서 명시적으로 `0` 으로 설정해 두었습니다. 업그레이드는 `install.sh --upgrade` 로 하세요.
+> **systemd 원클릭 업데이트**: 표준 설치에는 제한된 업데이트 프로그램이 포함됩니다. 패널에서 업데이트를 확인하면 다운로드, 공식 체크섬 독립 검증, 백업 및 교체, 재시작과 새 서비스 확인까지 수행합니다. 계정과 설정은 유지되며 게이트웨이는 일반 계정으로 실행되고 프로그램 파일은 root 소유로 보호됩니다.
+>
+> 이전 설치는 이 기능을 포함한 새 서버 패키지를 받아 해당 폴더에서 `sudo bash install.sh --upgrade`를 한 번 실행해 구성 요소를 설치하세요. 사용자 지정 서비스 계정이나 경로는 덮어쓰지 않으므로 기존 배포 절차를 사용하세요. `AGENT2API_SYSTEMD_UPDATE=0`으로 패널 기능을 끄거나 `agent2api-updater.socket`을 비활성화해 업데이트 구성 요소를 끌 수 있습니다. `AGENT2API_SELF_UPDATE`는 여전히 Docker 전용입니다.
+>
+> 업데이트 프로그램은 로컬 socket을 사용하며 네트워크 포트를 열지 않습니다. 기본적으로 공식 인덱스로 릴리스 저장소를 검증합니다. 관리자는 `/etc/agent2api/updater.env`에 `AGENT2API_UPDATER_REPO=owner/repo` 또는 `HTTPS_PROXY`를 설정해 저장소를 고정하거나 독립 검증용 프록시를 지정할 수 있습니다. 교체 실패 시 이전 파일을 복구합니다. 새 서비스 시작을 확인하지 못하면 `/opt/agent2api/.before-update-*`에 복구 파일을 남기고 실패를 알리며 데이터베이스를 자동으로 되돌리지 않습니다.
 
 ### 설치 후
 
@@ -145,7 +153,7 @@ http://<서버IP>:3065/
 | `AGENT2API_LOG_FILE` | 로그 파일 경로, 기본 `{데이터 디렉터리}/logs/server.log` |
 | `AGENT2API_VERBOSE` | `1`이면 debug 로그 활성화 |
 
-Linux 에서는 `/etc/agent2api/agent2api.env` 에, Windows 에서는 서비스 레지스트리 키 `HKLM\SYSTEM\CurrentControlSet\Services\Agent2API\Environment` 에 적습니다(`install-service.ps1` 이 기본 항목을 이미 써 두었고, 스크립트를 다시 실행하면 덮어씁니다).
+Linux 에서는 `/etc/agent2api/agent2api.env` 에, Windows 에서는 서비스 레지스트리 키 `HKLM\SYSTEM\CurrentControlSet\Services\Agent2API\Environment` 에 적습니다(`install-service.ps1` 이 기본 항목을 기록하며, 다시 실행할 때는 기존 설정을 유지하고 매개변수로 명시한 항목만 변경합니다).
 
 > **계정은 미리 설정할 수 없습니다**: 계정에는 QR 스캔 / SMS 코드 / 자격 증명 붙여넣기가 필요하고 이는 업스트림 프로토콜이 정하는 부분이라 우회할 수 없습니다. 대량 배포에서는 이미 설정한 **데이터 디렉터리를 통째로 복사**하세요(SQLite 데이터베이스와 `account.key` 가 같은 디렉터리에 있어 계정도 함께 옮겨집니다).
 

@@ -297,6 +297,12 @@ pub(super) struct RouteTarget {
     pub decision: Option<Value>,
 }
 
+impl RouteTarget {
+    pub(super) fn attempt_key(&self) -> Option<String> {
+        self.account.as_ref().map(crate::server::core::routing_groups::attempt_key).or_else(|| self.account_id.clone())
+    }
+}
+
 impl UpstreamService {
     pub fn new(store: AccountStore, auth: AuthService) -> Self {
         Self {
@@ -392,9 +398,12 @@ impl UpstreamService {
         }
         let route_model = request.body.get("model").and_then(Value::as_str).unwrap_or("").to_string();
         let route_store = self.store.clone();
+        let route_body = request.body.clone();
+        let route_scope = request.allowed_providers.clone();
+        let ignore_route = request.ignore_model_gate;
         let routing = crate::server::core::blocking::run(move || {
-            route_context::RequestRouting::capture(&route_model, &route_store)
-        }).await?;
+            route_context::RequestRouting::capture_request(&route_model, &route_store, &route_body, route_scope.as_ref(), ignore_route)
+        }).await??;
         let mut slot = self.begin_slot(&request.dedupe_key, cancel.as_ref()).await;
         // 账号级活跃连接计数：**本请求**的凭证，随选路改绑到实际使用的账号。
         // 建在这里（而不是选路处）是因为它必须活到响应体发完 —— 流式路径由
@@ -403,6 +412,11 @@ impl UpstreamService {
         let mut connections = ConnectionGuard::new(self.connections.clone());
         // 对话统一向上游请求流式；Images 保留独立的请求形态。
         let mut upstream_body = request.body.clone();
+        let compact_route = super::compact_routing::take_route(&mut upstream_body);
+        if let Some(object) = upstream_body.as_object_mut() {
+            object.remove("_wb_route_group_id");
+            object.remove("_wb_route_continue");
+        }
         if images.is_none() {
             if let Some(object) = upstream_body.as_object_mut() {
                 object.insert("stream".to_string(), Value::Bool(true));
@@ -449,6 +463,7 @@ impl UpstreamService {
         let context = payload::ProviderContext {
             body: &upstream_body,
             routing,
+            compact_routed: compact_route.is_some(),
             stream: request.stream,
             images,
             client_headers: &request.client_headers,

@@ -203,6 +203,7 @@ fn run_service() -> Result<(), String> {
     status_handle
         .set_service_status(status(ServiceState::Running, 0, Duration::default()))
         .map_err(|error| format!("上报 Running 失败：{error}"))?;
+    agent2api_server::server::core::update::windows_service::notify_ready();
 
     // 等网关收尾（收到 STOP 后走优雅停机）
     let outcome = worker

@@ -42,7 +42,7 @@ pub fn github_headers() -> Vec<(String, String)> {
 ///
 /// 对应 Node 版 resolveEgressCandidates —— Clash 配置不可读时只有一个候选，
 /// 行为与纯直连一致（这里不吞掉整条链路：探测失败只在 verbose 里留痕）。
-fn resolve_egress_candidates() -> Result<Vec<(String, Option<ResolvedProxy>)>, String> {
+pub(super) fn resolve_egress_candidates() -> Result<Vec<(String, Option<ResolvedProxy>)>, String> {
     // 设置里指定了更新出口：只用它（理由见模块头「候选顺序」）
     if let Some(configured) = config::update_proxy() {
         match resolve_account_proxy(Some(&configured)) {
@@ -89,6 +89,16 @@ fn resolve_egress_candidates() -> Result<Vec<(String, Option<ResolvedProxy>)>, S
     Ok(candidates)
 }
 
+pub(super) fn egress_identity() -> Value {
+    match resolve_egress_candidates() {
+        Ok(candidates) => json!(candidates.into_iter().map(|(_, proxy)| proxy.map(|proxy| {
+            json!([proxy.source, proxy.protocol, proxy.host, proxy.port, proxy.username, proxy.password])
+        })).collect::<Vec<_>>()),
+        Err(message) => json!({ "error": message }),
+    }
+}
+
+#[derive(Clone)]
 pub struct JsonResponse {
     pub value: Value,
     pub status: reqwest::StatusCode,
@@ -100,64 +110,9 @@ pub async fn fetch_json(
     url: &str,
     headers: &[(String, String)],
     timeout_ms: u64,
-    validate: impl Fn(&Value) -> bool,
+    validate: impl Fn(&Value) -> bool + Sync,
 ) -> Result<JsonResponse, UpdateError> {
-    let candidates = source::candidates(url, true);
-    let mut last_error = UpdateError::new("没有可用的 GitHub 源");
-    for candidate in &candidates {
-        if let Some(message) = candidate.cooling_message(headers) {
-            return Err(UpdateError::new(message));
-        }
-        let response = match fetch_candidate(candidate, headers, Some(timeout_ms)).await {
-            Ok(response) => response,
-            Err(error) => {
-                candidate.forget();
-                last_error = UpdateError::new(error);
-                continue;
-            }
-        };
-        let status = response.status();
-        let response_headers = response.headers().clone();
-        let official = candidate.source == Source::Official && source::is_resource(url);
-        if source::should_switch(candidate, status) {
-            candidate.forget();
-            last_error = UpdateError::new(format!(
-                "{}返回 HTTP {}",
-                candidate.label(),
-                status.as_u16()
-            ));
-            continue;
-        }
-        if !status.is_success() {
-            return Ok(JsonResponse {
-                value: Value::Null,
-                status,
-                headers: response_headers,
-                official,
-            });
-        }
-        match response.json::<Value>().await {
-            Ok(value) if validate(&value) => {
-                candidate.remember();
-                return Ok(JsonResponse {
-                    value,
-                    status,
-                    headers: response_headers,
-                    official,
-                });
-            }
-            Ok(_) => {
-                candidate.forget();
-                last_error = UpdateError::new(format!("{}返回的数据格式无效", candidate.label()));
-            }
-            Err(error) => {
-                candidate.forget();
-                last_error =
-                    UpdateError::new(format!("{}返回的 JSON 无效：{error}", candidate.label()));
-            }
-        }
-    }
-    Err(last_error)
+    super::selection::fetch_json(url, headers, timeout_ms, &validate).await
 }
 
 pub async fn fetch_official(
@@ -176,22 +131,34 @@ async fn fetch_github(
     timeout_ms: Option<u64>,
     allow_mirror: bool,
 ) -> Result<reqwest::Response, String> {
-    let candidates = source::candidates(url, allow_mirror);
+    let mut candidates = source::candidates(url, allow_mirror);
+    source::ensure_available(&candidates, headers)?;
+    if allow_mirror && candidates.len() > 1 && config::github_access().mode == config::GithubAccessMode::Auto {
+        candidates = super::probe::rank(url, true, headers).await?;
+    }
     let mut last_error = String::new();
     for (index, candidate) in candidates.iter().enumerate() {
         if let Some(message) = candidate.cooling_message(headers) {
             return Err(message);
         }
+        let started = std::time::Instant::now();
         let response = match fetch_candidate(candidate, headers, timeout_ms).await {
             Ok(response) => response,
             Err(error) => {
-                candidate.forget();
+                candidate.observe(source::failed_state(&error), started.elapsed().as_millis() as u64, false);
                 last_error = error;
                 continue;
             }
         };
-        if source::should_switch(candidate, response.status()) && index + 1 < candidates.len() {
-            candidate.forget();
+        if candidate.is_rate_limited(&response) {
+            candidate.observe("rateLimited", started.elapsed().as_millis() as u64, false);
+            return Ok(response);
+        }
+        if (source::should_switch(candidate, response.status())
+            || (candidate.source == Source::Mirror && response.status().as_u16() == 403))
+            && index + 1 < candidates.len()
+        {
+            candidate.observe("failed", started.elapsed().as_millis() as u64, false);
             last_error = format!(
                 "{}返回 HTTP {}",
                 candidate.label(),
@@ -200,7 +167,7 @@ async fn fetch_github(
             continue;
         }
         if response.status().is_success() {
-            candidate.remember();
+            candidate.observe("ok", started.elapsed().as_millis() as u64, allow_mirror);
         }
         return Ok(response);
     }
@@ -322,6 +289,9 @@ async fn fetch_via_candidates(
             builder = builder.timeout(Duration::from_millis(timeout_ms));
         }
         for (name, value) in headers {
+            if name.eq_ignore_ascii_case("authorization") {
+                continue;
+            }
             builder = builder.header(name.as_str(), value.as_str());
         }
         match builder.send().await {

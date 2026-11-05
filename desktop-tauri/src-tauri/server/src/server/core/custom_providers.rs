@@ -866,6 +866,12 @@ pub fn set_models(id: &str, models: Value, mappings: Value) -> Result<Value, Gat
         let stored = items.iter_mut().find(|item| item.get("id").and_then(Value::as_str) == Some(id))
             .ok_or_else(|| GatewayError::with_status(404, format!("自定义提供商不存在: {id}")))?;
         let previous = stored.as_object().map(item_of).unwrap_or(Value::Null);
+        let groups = config::routing_profiles();
+        if models.iter().filter_map(|item| item.get("id").and_then(Value::as_str))
+            .chain(mappings.iter().filter_map(|item| item.get("alias").and_then(Value::as_str)))
+            .any(|model| groups.group_for_model(model).is_some()) {
+            return Err(GatewayError::with_status(409, "模型或映射的对外 ID 已被自定义路由组占用"));
+        }
         bindings::validate_change(&previous, &models, &mappings)?;
         let map = stored.as_object_mut().ok_or_else(|| GatewayError::bad_request("自定义提供商记录损坏"))?;
         map.insert("models".to_string(), Value::Array(models.clone()));

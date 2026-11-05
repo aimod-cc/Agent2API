@@ -211,6 +211,7 @@ export type SystemInfo = {
     exePath?: string | null
     installerKind?: string | null
     selfUpdate?: boolean | null
+    updateCapability?: import('../../../ui-shared/updates').UpdateCapability
   }
   security?: {
     adminRegistered?: boolean | null

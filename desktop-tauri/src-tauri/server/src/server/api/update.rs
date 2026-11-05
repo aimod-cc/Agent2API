@@ -14,6 +14,7 @@
 //!   POST /api/update/channels              部分更新关注通道 { stable?, beta? }
 //!
 //! ── 容器内更新（Linux headless / Docker 专有）───────────────
+//!   POST /api/update/systemd               systemd 一键下载、校验、安装并重启 { version }
 //!   POST /api/update/install               校验并应用已下载的更新包（替换二进制与 ui）
 //!   POST /api/update/restart               重启进程（容器由 restart 策略拉起）
 //! 两条都要求 `AGENT2API_SELF_UPDATE=1`，否则 400；机制见 `core::update::selfupdate`。
@@ -104,6 +105,32 @@ async fn dispatch(
         };
     }
 
+    if method == Method::POST && full_path == "/api/update/systemd" {
+        let payload = match parse_body(body) {
+            Ok(value) => value,
+            Err(error) => return management_error(400, error.message),
+        };
+        let version = payload.get("version").and_then(Value::as_str).unwrap_or("");
+        return match state.update().start_systemd_update(version) {
+            Ok(data) => ok_json(data),
+            Err(error) => update_error(error),
+        };
+    }
+
+    if method == Method::POST && full_path == "/api/update/windows-service" {
+        let payload = match parse_body(body) {
+            Ok(value) => value,
+            Err(error) => return management_error(400, error.message),
+        };
+        let version = payload.get("version").and_then(Value::as_str).unwrap_or("").to_string();
+        let updater = state.update().clone();
+        return match tokio::task::spawn_blocking(move || updater.start_windows_service_update(&version)).await {
+            Ok(Ok(data)) => ok_json(data),
+            Ok(Err(error)) => update_error(error),
+            Err(error) => update_error(UpdateError::new(format!("Windows 更新任务启动失败：{error}"))),
+        };
+    }
+
     if method == Method::GET && full_path == "/api/update/status" {
         // 最近一次「检查更新」的结果（定时任务与壳命令写入，前端 60 秒轮询
         // 读这里亮侧栏徽标，自己不再打 GitHub —— 匿名限额 60 次/小时）。
@@ -112,7 +139,9 @@ async fn dispatch(
     }
 
     if method == Method::GET && full_path == "/api/update/github" {
-        return ok_json(json!(config::github_access()));
+        let mut value = json!(config::github_access());
+        value["observations"] = crate::server::core::update::source::status();
+        return ok_json(value);
     }
 
     if method == Method::POST && full_path == "/api/update/github" {
@@ -128,11 +157,11 @@ async fn dispatch(
             Ok((settings, saved, changed)) => {
                 if changed {
                     state.update().reset_source_preference();
-                    crate::server::core::plugin_host::update::clear_cooldown();
                     crate::server::core::plugin_host::catalog::schedule_now();
                 }
                 let mut value = json!(settings);
                 value["saved"] = json!(saved);
+                value["observations"] = crate::server::core::update::source::status();
                 ok_json(value)
             }
             Err(message) => GatewayError::bad_request(message).into_response(),

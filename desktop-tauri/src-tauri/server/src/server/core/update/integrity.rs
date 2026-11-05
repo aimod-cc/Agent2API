@@ -102,11 +102,13 @@ pub async fn trusted_digest(value: &str) -> Option<(String, u64)> {
 pub async fn download_plan(value: &str) -> Result<Value, UpdateError> {
     assert_downloadable(value)?;
     let digest = trusted_digest(value).await;
-    let candidates = source::candidates(value, digest.is_some());
+    let candidates = source::configured_candidates(value, digest.is_some());
     Ok(json!({
         "urls": candidates.iter().map(|candidate| &candidate.url).collect::<Vec<_>>(),
         "sha256": digest.as_ref().map(|(hash, _)| hash),
         "size": digest.as_ref().map(|(_, size)| *size).unwrap_or(0),
         "mode": config::github_access().mode,
+        "probeOnDevice": true,
+        "mirrorAllowed": digest.is_some(),
     }))
 }

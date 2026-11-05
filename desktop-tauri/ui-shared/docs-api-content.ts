@@ -1,6 +1,7 @@
 import { t } from '../ui-kit/src/i18n'
 import { apiExampleCode, type ApiExample } from './docs-api-examples'
 import { imageApiSections } from './docs-api-images'
+import { toolApiSections } from './docs-api-tools'
 
 export type ApiField = { name: string; type: string; description: string }
 export type ApiSection = {
@@ -13,6 +14,8 @@ export type ApiSection = {
   points?: string[]
   warning?: string
   examples?: ApiExample[]
+  /** 整份 Markdown 文档（工具服务 API 这类长文用它，不走五语词典） */
+  markdown?: string
 }
 
 export function apiReferenceSections(origin: string): ApiSection[] {
@@ -133,6 +136,7 @@ export function apiReferenceSections(origin: string): ApiSection[] {
         example(t('估算输入 Token 数量'), code.countTokens), example(t('Token 估算响应'), code.countResponse, 'json')],
     },
     ...imageApiSections(code),
+    ...toolApiSections(origin),
     {
       id: 'errors', title: t('错误、限额与兼容边界'),
       description: t('结合 HTTP 状态、错误内容与请求日志判断问题；不要盲目重试收费请求。'),

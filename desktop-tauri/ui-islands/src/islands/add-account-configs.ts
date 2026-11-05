@@ -14,6 +14,7 @@
 import { shared } from './add-account-bridge'
 import { DOUBAOWORK } from './add-doubaowork-config'
 import { DEEPSEEK_WEB } from './add-provider-deepseek'
+import { MONKEYCODE, MONKEYCODE_INTL } from './add-provider-monkeycode'
 import { TABBIT, TABBIT_INTL } from './add-provider-tabbit'
 import { t } from '../i18n'
 
@@ -57,6 +58,8 @@ export type WebLoginConfig = {
   modes?: MethodMode[]
   /** 网页端那一条提示（缺省用通用的「将在新标签页中打开」） */
   webHint?: string
+  /** Cookie 捕获需要桌面窗口，网页面板不可发起。 */
+  desktopOnly?: boolean
   /** 这一家的网页登录只在某个地区可用（当前没有家用它，结构上保留） */
   region?: string
   /** 写死的变体选择器（传给壳侧 start_login 的第一个参数） */
@@ -706,63 +709,6 @@ const KUKU: ProviderConfig = {
     note: t('选择 KukuAI 客户端的 Cookies 文件（%APPDATA%\\baidugenflowpro\\Network\\Cookies）：它是**二进制** SQLite 数据库（无扩展名，不是 JSON）。导入时读的是你选中文件的副本、不和运行中的客户端抢占用，因此**无需先关闭客户端**。导入后凭证直接落在网关、可独立转发。'),
   },
 }
-
-/**
- * MonkeyCode（长亭科技）两个站点：国内版 `monkeycode-ai.com` / 国际版
- * `monkeycode-ai.net`。
- *
- * ── 为什么两个站点 = 两家 provider ─────────────────────────
- * 与 AutoClaw / Qoder / ZCode 同一思路：两站是同一套协议、同一个 session
- * cookie 名、同一套任务流，只有站点不同；地区是 **provider 身份**而不是账号
- * 属性（后端 `monkeycode::Region` 是「provider id → 站点」的唯一映射）。
- * 拆家后两站各自有独立的账号与启停、界面上各占一个分组 —— 因此两块用同一个
- * 工厂生成（表单相同、站点提示不同，照 `qoderForm` 的写法）。
- *
- * ── 粘贴 session、没有续期 ─────────────────────────────────
- * 粘贴浏览器里 `monkeycode_ai_session` cookie 的值（整段 Cookie 直接粘也行，
- * 网关会自己剥出值）。本家的密码登录要图形验证码、OAuth 要短信验证，两条都
- * 不适合网关代跑，粘贴 session 是唯一可靠的入口。上游**没有 refresh 接口**：
- * session 是约 30 天的硬限制，过期只能重新登录网页再粘贴（与 CatPaw /
- * KukuAI 同一处境，所以不渲染「刷新 Token」那一类控件）。
- *
- * ── imageId 为什么可以留空 ─────────────────────────────────
- * `imageId`（任务镜像 id）是发起对话的必需字段，但它不在登录响应里 —— 表单
- * 允许留空，由网关在添加时从该账号**已有任务**里 best-effort 自动发现（老
- * 用户一般能拿到）；新账号一个任务都没有、发现不到时**不阻断添加**，之后
- * 手动补即可。
- *
- * ── 没有「导入桌面端登录态」────────────────────────────────
- * 登录态就是浏览器 cookie，没有客户端 `auth.json` 那种稳定可读的文件形态
- * （与 Accio / ZCode 同一处境），给了入口只会稳定失败。
- */
-function monkeycodeForm(spec: { provider: string; label: string; siteNote: string }): ProviderConfig {
-  const { provider, label, siteNote } = spec
-  return {
-    provider,
-    label,
-    // 登录态是浏览器 cookie、没有可读的落盘文件（理由见上方注释）
-    desktop: false,
-    manualTitle: t('粘贴 session cookie'),
-    manualNoteHtml: t('粘贴网页登录态 cookie <code>monkeycode_ai_session</code> 的值（在浏览器里复制整段 Cookie 直接粘贴也行，网关会自己剥出值）。<br>{siteNote}<br>MonkeyCode <b>没有续期接口</b>：session 有效期约 30 天（硬限制），过期后重新登录网页、再粘贴一次即可。', { siteNote }),
-    fields: [
-      { key: 'session', label: 'session', rows: 3, placeholder: t('monkeycode_ai_session 的值（也可直接粘贴整段 Cookie）') },
-      { key: 'imageId', label: t('任务镜像 id'), optional: true, placeholder: t('可选：发起对话必需，留空则由网关从该账号已有任务里自动发现，发现不到时之后手动补') },
-      { key: 'name', label: t('备注名'), optional: true, placeholder: t('可选，留空则用上游返回的账号名或账号 id') },
-    ],
-  }
-}
-
-const MONKEYCODE = monkeycodeForm({
-  provider: 'monkeycode',
-  label: t('MonkeyCode'),
-  siteNote: t('这里填国内站（monkeycode-ai.com）的账号：请粘贴国内站的 session。国际站（monkeycode-ai.net）是另一家 provider、另一套账号，两边的凭证不通用。'),
-})
-
-const MONKEYCODE_INTL = monkeycodeForm({
-  provider: 'monkeycode-intl',
-  label: t('MonkeyCode 国际版'),
-  siteNote: t('这里填国际站（monkeycode-ai.net）的账号：请粘贴国际站的 session。国内站（monkeycode-ai.com）是另一家 provider、另一套账号，两边的凭证不通用。'),
-})
 
 /**
  * Command Code（`api.commandcode.ai`）：一家一个 provider，没有地区之分

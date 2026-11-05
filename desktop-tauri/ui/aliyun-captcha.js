@@ -240,7 +240,7 @@
     requireCurrent(flow);
     onPhase(flow, 'verifying');
     armTimeout(flow, VERIFY_TIMEOUT_MS, t('验证码校验超时，请重试'));
-    // 只有调用方的明确用户操作才进入本流程；后台不调用任何 SDK 验证方法。
+    // 手动操作或已启用的定时领取可请求当次验证；模型令牌池不在后台主动验证。
     if (flow.protocol === 'v3' && typeof flow.instance?.startTracelessVerification === 'function') flow.instance.startTracelessVerification();
     else if (typeof flow.instance?.show === 'function') flow.instance.show();
     else throw new CaptchaError(t('验证码组件不可用，请重试'));

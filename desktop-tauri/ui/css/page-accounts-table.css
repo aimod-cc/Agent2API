@@ -528,6 +528,7 @@ body.queue-dragging * { cursor: grabbing; }
 .grp-balance .u { color: var(--text-3); }
 /* 「计入 8/10」比合计淡一档：它是脚注，不是第二个读数 */
 .grp-balance .n { color: var(--text-3); }
+.grp-balance .n.soon { color: var(--warn); }
 .grp-balance.warn .v { color: var(--warn); }
 .grp-balance.muted .v { color: var(--text-3); font-weight: 600; }
 .grp-balance .warn-mark { color: var(--warn); font-size: 10px; }
@@ -919,6 +920,45 @@ body.queue-dragging * { cursor: grabbing; }
 .usage-pop-view.warn { color: var(--warn); }
 .usage-pop-view.bad { color: var(--danger); }
 .usage-pop-view.muted { color: var(--text-3); font-weight: 500; }
+
+.usage-toggle:has(.usage-toggle-soon) { padding-right: 18px; gap: 4px; }
+.usage-toggle:has(.usage-toggle-soon) .val { padding: 0 2px; text-align: left; }
+.usage-toggle-soon,
+.usage-pop-soon-tag {
+  flex: 0 1 auto;
+  min-width: 0;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.usage-toggle-soon { max-width: 55%; overflow: hidden; text-overflow: ellipsis; }
+.usage-toggle.usage-pool-line:has(.usage-pool-soon) { height: auto; }
+.usage-pool-soon { display: block; margin-top: 3px; color: var(--warn); font-size: 10.5px; }
+.usage-pop-soon {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 2px 0 4px;
+  padding: 6px 8px;
+  border-radius: var(--r-xs);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-bd);
+  color: var(--warn);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+.usage-pop-row:has(.usage-pop-soon-tag) .usage-pop-line { flex-wrap: wrap; gap: 4px 6px; }
+.usage-pop-row:has(.usage-pop-soon-tag) .usage-pop-name { min-width: 0; max-width: 100%; }
 
 /* 剩余细线：与余额格里那套 `.usage-meter-track` 同源同形（3px、hairline 轨道、
    语义色条体），弹层里只是上下留白宽一点。画的是**剩余**比例；超额走红 ——

@@ -201,7 +201,7 @@ pub fn record_activity(
     entry.upstream_model = model.to_string();
     entry.duration_ms = logging::now_ms() - started_at;
     entry.is_test = true;
-    entry.source = RequestSource { client: "checkin_keepalive".to_string(), api_key: identity };
+    entry.source = RequestSource { client: "checkin_keepalive".to_string(), api_key: identity, ..Default::default() };
     if !success {
         entry.status = result.as_ref().err().map(|error| i64::from(error.http_status().as_u16())).unwrap_or(502);
         entry.error = Some(result.as_ref().err().map(|error| error.message.clone()).unwrap_or_else(|| "日活模型保活未成功，详情见签到记录".to_string()));

@@ -351,6 +351,9 @@ pub fn installer_suffix() -> &'static str {
 /// 安装器由它决定）。取值与 [`installer_suffix`] 一致，Linux 上跟着
 /// [`running_as_appimage`] 走 —— 界面据此说「交给系统安装器」还是「替换文件」。
 pub fn installer_kind() -> &'static str {
+    if !desktop_shell() {
+        return "server";
+    }
     if cfg!(target_os = "macos") {
         "dmg"
     } else if cfg!(target_os = "windows") {
@@ -395,10 +398,10 @@ fn desktop_shell_suffixes() -> &'static [&'static str] {
 /// Linux 上按运行期形态分叉：桌面壳给 deb / AppImage，容器 / headless 给**空表**
 /// —— 那时升级走 [`server_bundle_name`] 那份服务端包，与安装包后缀无关。
 pub fn installer_suffixes() -> Vec<String> {
+    if !desktop_shell() {
+        return Vec::new();
+    }
     if cfg!(target_os = "linux") {
-        if !desktop_shell() {
-            return Vec::new();
-        }
         desktop_shell_suffixes()
             .iter()
             .map(|suffix| format!(".{}", suffix.to_lowercase()))
@@ -558,9 +561,12 @@ pub fn pick_installer(assets: Option<&Value>) -> Option<Value> {
 /// CI 打包（.github/workflows/build.yml 的 linux-server job）、这里挑选资产、
 /// 面板下载后按 `safe_file_name` 落到下载目录，三处逐字一致；改名要一起改。
 ///
-/// 非 Linux 目标返回 None：桌面端（Windows / macOS）的更新走安装包，
-/// 不存在「容器内替换」这条路径。
+/// 本机服务端包名；Windows 的 zip 仅供手动升级，Linux 的 tar.gz 也用于自动更新。
+/// 桌面端仍使用独立的平台安装器，不取这份载荷。
 pub fn server_bundle_name() -> Option<String> {
+    if cfg!(target_os = "windows") && std::env::consts::ARCH == "x86_64" {
+        return Some("agent2api-server-windows-amd64.zip".to_string());
+    }
     if !cfg!(target_os = "linux") {
         return None;
     }

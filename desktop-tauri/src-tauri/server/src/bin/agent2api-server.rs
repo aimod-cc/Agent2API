@@ -81,6 +81,13 @@ struct Running {
 }
 
 fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("--systemd-updater") {
+        return ExitCode::from(agent2api_server::server::core::update::systemd::run_helper() as u8);
+    }
+    if std::env::args().nth(1).as_deref() == Some("--windows-updater") {
+        let id = std::env::args().nth(2).unwrap_or_default();
+        return ExitCode::from(agent2api_server::server::core::update::windows_service::run_helper(&id) as u8);
+    }
     // Windows 服务形态判定放在**参数解析之前**：服务进程没有控制台，
     // 配置写错（端口非法之类）时 eprintln 会全部丢掉，而「配置错导致起不来」
     // 恰恰是最需要看日志的情形。所以先把文件通道打开，再做任何可能报错的事。
@@ -193,6 +200,7 @@ fn start_gateway(launch: &Launch) -> Result<Running, String> {
     }));
 
     let shutdown_tx = start(&state).map_err(|conflict| format!("网关启动失败：{}", conflict.message))?;
+    agent2api_server::server::core::update::systemd::notify_ready();
 
     logging::log(
         "[Server]",

@@ -87,8 +87,11 @@ Stop-Service Agent2API
 .\install-service.ps1 -Uninstall
 ```
 
-**升級**：解壓新版本包，重跑一次 `install-service.ps1` 即可（腳本會先停服務、
-覆蓋程式與介面、再啟動；資料與設定不動）。
+**一鍵更新**：標準 Windows 服務安裝可在「設定 → 更新」點擊「一鍵更新」。確認後自動下載 Windows x64 伺服器套件，獨立驗證官方摘要，由臨時升級程序停止服務、等待檔案占用釋放、備份替換並重新啟動。確認新版服務執行後頁面自動重新整理；帳號、設定和資料不刪除。
+
+**舊安裝接入 / 手動升級**：把新版伺服器套件解壓縮到新的目錄，以管理員身分執行一次 `install-service.ps1`。腳本預設保留已登記的安裝目錄、資料目錄、連接埠、環境設定和服務帳號；只有明確傳入的連接埠等選項才覆蓋原值，目錄遷移需單獨進行。此次接入完成後可使用面板一鍵更新。
+
+程式目錄僅系統和管理員可寫，升級工作目錄為 `<安裝目錄>\.service-update`，不新增常駐服務。`AGENT2API_WINDOWS_UPDATE=0` 可在服務環境變數中關閉入口。自訂服務帳號、目錄連結、網路路徑及受外部處理程序群組託管的部署保留手動升級，不自動提升權限。替換失敗會恢復舊檔案；新版啟動未確認時保留升級日誌與備份，不自動回退資料庫。
 
 > **兩個 Windows 特有的坑，腳本已經處理好了**：
 > 服務行程的工作目錄是 `C:\Windows\system32` 而不是 exe 所在目錄 —— 介面目錄靠
@@ -126,9 +129,11 @@ journalctl -u agent2api -f
 再結束，SSE 長連線不會被打斷）都已配好。設定改 `/etc/agent2api/agent2api.env`
 後 `systemctl restart agent2api` 生效。
 
-> **裸機不要開 `AGENT2API_SELF_UPDATE`**：那是容器內的方案（換檔案後結束，靠
-> 容器 restart 策略拉起）。裸機上程式檔案屬 root、服務帳號無權替換，單元裡已
-> 明確設成 `0`。升級走 `install.sh --upgrade`。
+> **systemd 一鍵更新**：標準安裝已包含受限升級程式，在面板點擊「一鍵更新」並確認後，會下載、獨立驗證官方校驗值、備份替換、重新啟動並確認新版服務。帳號與設定保留，閘道繼續以一般帳號執行，程式目錄仍由 root 保護。
+>
+> 舊安裝先下載包含本功能的新版伺服器套件，在新套件目錄執行一次 `sudo bash install.sh --upgrade`，補裝升級元件後即可使用。自訂服務帳號或安裝路徑不會被腳本強制改寫，繼續使用原部署方式升級。`AGENT2API_SYSTEMD_UPDATE=0` 可關閉面板入口；停用 `agent2api-updater.socket` 可停用升級元件。`AGENT2API_SELF_UPDATE` 仍為 Docker 專用，不要在裸機開啟。
+>
+> 更新元件透過本機 socket 運作，不開放網路連接埠。預設從官方索引驗證發布倉庫；需固定倉庫或為獨立驗證設定代理時，管理員可在 `/etc/agent2api/updater.env` 設定 `AGENT2API_UPDATER_REPO=owner/repo` 或 `HTTPS_PROXY`。替換失敗會還原；新版啟動未確認成功時保留 `/opt/agent2api/.before-update-*` 恢復檔案並報告失敗，不自動回退資料庫。
 
 ### 裝完之後
 
@@ -162,7 +167,7 @@ http://<伺服器IP>:3065/
 
 Linux 寫在 `/etc/agent2api/agent2api.env`；Windows 改服務登錄檔的
 `HKLM\SYSTEM\CurrentControlSet\Services\Agent2API\Environment`（`install-service.ps1`
-已經寫好基礎項，重跑腳本會覆蓋）。
+已經寫好基礎項，重跑時保留既有設定，只依明確傳入的參數修改對應項目）。
 
 > **帳號無法預置**：帳號需要掃碼 / 驗證碼 / 貼上憑證，這一步由上游協定決定，
 > 繞不過去。批量部署可以把已經配好的**資料目錄整個拷過去**（SQLite 庫 +

@@ -52,6 +52,8 @@ import {
   tokenRulesOf, tokenWindowInfo, zcodePlanStateLabel,
 } from './accounts-domain'
 import { CreditDetailButton, creditRowsOf } from './accounts-credit-detail'
+import { creditExpirySummaryOf, creditExpiryText, creditExpiryUnitOf, expiringCreditsOf, type CreditExpirySummary, type ExpiringCredit } from '../../../ui-shared/credit-expiry'
+import { useDisplayClock } from '../../../ui-shared/use-display-clock'
 import { UsageWindowsCell, usageWindows } from './accounts-usage-windows'
 import { accountReloginText } from './accounts-authorization'
 import { credentialExpiryRowsOf, credentialExpiryText, type CredentialExpiryRow } from '../../../ui-shared/credential-expiry'
@@ -212,6 +214,7 @@ type GroupBalance = {
   lowest: GroupRatioReading | null
   /** 不可加时逐窗口的最低读数（tooltip 逐条列出；按首次出现的窗口顺序） */
   ratioWindows: GroupRatioReading[]
+  expiring: CreditExpirySummary
 }
 
 /** 一条百分比读数：窗口名 + 剩余比例（0–100） */
@@ -263,12 +266,13 @@ function isRatioUnit(unit: string): boolean {
  * 最低的剩余比例**：它回答的是「这一组最紧的那条线还剩多少」。有 `windows[]`
  * 时逐窗口取最低（tooltip 全列出来），没有时退回账号主读数。
  */
-function groupBalanceOf(members: AccountRecord[], scope: 'group' | 'filtered' = 'group'): GroupBalance {
+function groupBalanceOf(members: AccountRecord[], scope: 'group' | 'filtered' = 'group', now = Date.now()): GroupBalance {
   const out: GroupBalance = {
     counted: 0, total: members.length, sum: null, unlimited: 0, unit: '',
     failed: 0, uncountable: 0, pending: 0, partial: 0, scope,
-    additive: true, lowest: null, ratioWindows: [],
+    additive: true, lowest: null, ratioWindows: [], expiring: creditExpirySummaryOf([], now),
   }
+  const expiring: ExpiringCredit[] = []
   let sum = 0
   /** 这一组的读数形态：第一份有效读数决定，后面不一致的算「没计入」 */
   let mode: 'additive' | 'ratio' | null = null
@@ -286,6 +290,7 @@ function groupBalanceOf(members: AccountRecord[], scope: 'group' | 'filtered' = 
     if (typeof entry !== 'object' || Array.isArray(entry)) { out.uncountable++; continue }
     const data = entry as Record<string, unknown>
     if (data.statisticsError || usageWarningsOf(data).length > 0) out.partial++
+    if (supportsCreditDetail(account)) expiring.push(...expiringCreditsOf(entry, now))
     // 不限额度：这组根本花不完，合计只能是 ∞（`totalLeft` 形状里它是布尔位）
     if (data.unlimited === true) { out.unlimited++; continue }
     const hasTotalLeft = Object.prototype.hasOwnProperty.call(data, 'totalLeft')
@@ -331,6 +336,7 @@ function groupBalanceOf(members: AccountRecord[], scope: 'group' | 'filtered' = 
   }
   out.additive = mode !== 'ratio'
   out.ratioWindows = [...windowMin.values()]
+  out.expiring = creditExpirySummaryOf(expiring, now)
   if (out.additive && out.counted) out.sum = Number(sum.toFixed(2))
   return out
 }
@@ -374,6 +380,8 @@ function groupBalanceTitle(balance: GroupBalance): string {
       : t('{n} 个读数里没有可用比例，未计入', { n: balance.uncountable }))
   }
   if (balance.partial) parts.push(t('{n} 个读数只读到一半（读数可信但不完整）', { n: balance.partial }))
+  const expiryText = creditExpiryText(balance.expiring, t, balanceAmountText, balance.unit === t('积分') ? '积分' : balance.unit)
+  if (expiryText.detail) parts.push(expiryText.detail)
   return parts.join('；')
 }
 
@@ -388,6 +396,7 @@ function groupBalanceTitle(balance: GroupBalance): string {
  * 与余额列同一条规矩。
  */
 function GroupBalanceBadge({ balance }: { balance: GroupBalance }) {
+  const expiryText = creditExpiryText(balance.expiring, t, balanceAmountText, balance.unit === t('积分') ? '积分' : balance.unit)
   const warned = balance.failed + balance.partial > 0
   const empty = balance.additive
     ? balance.sum === null && balance.unlimited === 0
@@ -428,6 +437,7 @@ function GroupBalanceBadge({ balance }: { balance: GroupBalance }) {
         <b className='v'>—</b>
       )}
       {note ? <span className='n'>{note}</span> : null}
+      {expiryText.group ? <span className='n soon' title={expiryText.detail}>{expiryText.group}</span> : null}
       {warned ? <span className='warn-mark' aria-hidden>⚠</span> : null}
     </span>
   )
@@ -449,6 +459,7 @@ export function GroupBandRow({ group, collapsed, colSpan }: {
   collapsed: boolean
   colSpan: number
 }) {
+  const now = useDisplayClock()
   const icon = PROVIDER_ICONS[group.provider]
   // 合计口径：默认整组（`members`），设置里打开「按筛选」后改用可见行（`accounts`）。
   // 分页不参与 —— 见 groupBalanceOf 的说明。
@@ -459,7 +470,7 @@ export function GroupBandRow({ group, collapsed, colSpan }: {
   // 筛出唯一一行时，合计正是用户要的那个数（100），不能因为「可见只剩一行」就藏掉。
   const worthSumming = group.members.length > 1 && members.length > 0
   const balance = worthSumming && members.some(supportsUsage)
-    ? groupBalanceOf(members, filtered ? 'filtered' : 'group')
+    ? groupBalanceOf(members, filtered ? 'filtered' : 'group', now)
     : null
   /**
    * 整条分组带可点折叠。
@@ -1292,6 +1303,7 @@ export function UsageCell({ account }: { account: AccountRecord }) {
 }
 
 function UsageReadingCell({ account, entry }: { account: AccountRecord; entry: UsageEntry }) {
+  const now = useDisplayClock()
   if (!supportsUsage(account)) {
     // 访客账号与「这家没有余额概念」是两件不同的事，文案要分开：前者是
     // 「这条账号本来就没有积分」，后者是「这一家没有查询能力」。写成同一句
@@ -1303,7 +1315,11 @@ function UsageReadingCell({ account, entry }: { account: AccountRecord; entry: U
           : t('该提供商尚未接入余额查询')}>—</span>
     )
   }
-  const summary = usageSummary(entry)
+  const rawSummary = usageSummary(entry)
+  const creditRows = supportsCreditDetail(account) && !usageFailureOf(entry) ? creditRowsOf(entry, now) : []
+  const expiring = creditExpirySummaryOf(creditRows.flatMap(row => row.expiry ? [row.expiry] : []), now)
+  const expiryText = creditExpiryText(expiring, t, numberText, creditExpiryUnitOf(entry))
+  const summary = expiryText.detail ? { ...rawSummary, title: [rawSummary.title, expiryText.detail].filter(Boolean).join(' · ') } : rawSummary
   // 限制器的跳过徽章：与后端选路过滤同一判据（balanceBlockedOf / tokenBlockedOf），
   // 让「为什么这个账号不接请求」在界面上有处可看。禁用档不标 —— 那一档
   // 状态列的「已禁用」开关就是答案；跳过档账号仍是启用的，不标就看不出。
@@ -1330,15 +1346,12 @@ function UsageReadingCell({ account, entry }: { account: AccountRecord; entry: U
       {t('待生效 {n} 份', { n: pending.length })}
     </Badge>
   ) : null
-  // 积分明细入口（`creditDetail` 能力位：WorkBuddy 两家、Trae 等多家后端出
-  // `credits[]` 的家）。同一档「读数可用」的判据：查询失败 / 未配置时连读数本身
-  // 都没有，挂一个点开是空框的入口更糟。
-  // 空数组同样不挂 —— 后端不写 `credits` 键就是「这家这次没有逐份读数」
-  // （企业账号、上游没给包），界面不去证明一个空清单。
-  const creditRows = summary.kind === 'ok' || summary.kind === 'warn' ? creditRowsOf(entry) : []
-  const creditDetail = supportsCreditDetail(account) && creditRows.length
+  // 明细可能有到期时间但没有总余额；保留这类入口，失败和未配置时不挂空明细。
+  const creditDetail = creditRows.length
     ? {
       rows: creditRows,
+      now,
+      expiryUnit: creditExpiryUnitOf(entry),
       subscriptionLine: creditSubscriptionOf(entry),
       aggregate: usageAggregateOf(entry, t),
       kind: summary.kind,
@@ -1412,6 +1425,7 @@ function UsageReadingCell({ account, entry }: { account: AccountRecord; entry: U
       {creditDetail ? (
         <CreditDetailButton variant='pool' {...creditDetail}>
           <UsageFlatRowView row={poolRow} />
+          {expiryText.badge ? <span className='usage-pool-soon'>{expiryText.badge}</span> : null}
         </CreditDetailButton>
       ) : (
         <UsageFlatRowView row={poolRow} />

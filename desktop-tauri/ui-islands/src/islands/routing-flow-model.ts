@@ -29,7 +29,7 @@ export const requestModelId = (row: ReplayRow) => row.clientModel || row.model |
 export const selectedRequest = (selection: FlowSelection) => selection?.kind === 'request' ? selection.row : selection?.kind === 'session' ? selection.session.latest : null
 export function pathForRequest(row: ReplayRow): FlowPath {
   return { id: JSON.stringify([row.client || '', requestModelId(row), row.provider || '', row.accountId || '', row.accountId ? '' : row.accountName || '']),
-    client: row.client || '', model: requestModelId(row), provider: row.provider || '', accountId: row.accountId || '', accountName: row.accountName || '',
+    client: row.client || '', clientLabel: row.clientLabel, model: requestModelId(row), provider: row.provider || '', accountId: row.accountId || '', accountName: row.accountName || '',
     requests: 1, running: Number(isTraceRunning(row)), successful: Number(isTraceSuccess(row)), failed: Number(!isTraceRunning(row) && !isTraceSuccess(row)),
     sessions: Number(Boolean(sessionId(row))), stickyHits: Number(Boolean(row.route?.stickyHit)), switched: Number((row.attempts || 1) > 1), lastSeen: row.ts }
 }

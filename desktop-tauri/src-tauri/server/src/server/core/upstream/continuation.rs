@@ -997,8 +997,16 @@ async fn forward_round_with(
     client_headers: &HeaderMap,
     telemetry: &Arc<usage::RequestTelemetry>,
     allowed_providers: Option<KeyScope>,
-    body: Value,
+    mut body: Value,
 ) -> Result<ForwardOutcome, crate::server::errors::GatewayError> {
+    if body.get("_wb_route_group_id").and_then(Value::as_str).is_some() {
+        let snapshot = telemetry.snapshot();
+        let candidate = snapshot.route.as_ref().and_then(|route| route.get("pickedCandidate")).and_then(Value::as_str).unwrap_or("");
+        if candidate.is_empty() || snapshot.account_id.is_empty() || snapshot.upstream_model.is_empty() {
+            return Err(crate::server::errors::GatewayError::with_status(503, "路由组自动续写缺少原模型与账号，已停止续写"));
+        }
+        body["_wb_route_continue"] = json!({ "candidateId": candidate, "accountId": snapshot.account_id, "model": snapshot.upstream_model });
+    }
     service
         .forward(ForwardRequest {
             body,

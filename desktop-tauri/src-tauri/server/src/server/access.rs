@@ -41,6 +41,7 @@ use axum::http::HeaderMap;
 use crate::server::db::Db;
 use crate::server::logging;
 
+pub(crate) mod diagnostics;
 pub mod local_session;
 
 /// 会话 cookie 名：**一枚装两段**（`agent2api-panel=<access>.<refresh>`）。

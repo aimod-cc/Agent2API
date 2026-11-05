@@ -1,8 +1,8 @@
 import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Button, Empty, EmptyDescription, EmptyTitle, InputGroup, InputGroupAddon, InputGroupButton,
+import { Button, Empty, EmptyDescription, EmptyTitle, HtmlContent, InputGroup, InputGroupAddon, InputGroupButton,
   InputGroupInput, NavItem, NavList, SidebarGroupLabel } from '@ui'
 import { t } from '../ui-kit/src/i18n'
-import { apiReferenceSections } from './docs-api-content'
+import { apiReferenceSections, type ApiSection } from './docs-api-content'
 import { ApiReference } from './docs-api-reference'
 import { documentationGroups, documentationMatches, type DocumentationEntry } from './docs-api-navigation'
 import { ProviderDocsTable } from './provider-docs-view'
@@ -14,6 +14,24 @@ type DocumentationBrowserProps = {
   addresses: ReactNode
   notice?: ReactNode
   onCopy: (text: string, label: string) => void | Promise<void>
+}
+
+/** 整份 Markdown 文档（工具服务 API）。正文不走五语词典，复制按钮与示例同一套。 */
+function MarkdownArticle({ section, onCopy }: { section: ApiSection; onCopy: DocumentationBrowserProps['onCopy'] }) {
+  const markdown = section.markdown || ''
+  const html = (window as unknown as { wbMarkdown?: { render?: (text: string) => string } }).wbMarkdown?.render?.(markdown) || ''
+  return <div className='docs-reference'>
+    {section.paragraphs?.length ? <div className='docs-prose'>
+      {section.paragraphs.map(text => <p key={text}>{text}</p>)}
+    </div> : null}
+    <div className='docs-block'>
+      <div className='mb-3 flex justify-end'>
+        <Button variant='outline' size='sm' onClick={() => void onCopy(markdown, t('工具服务 API 文档'))}>{t('复制文档')}</Button>
+      </div>
+      {html ? <HtmlContent className='tool-api-doc' html={html} />
+        : <pre className='tool-api-doc max-h-[640px] overflow-auto whitespace-pre-wrap rounded-md border border-border p-4 text-xs'>{markdown}</pre>}
+    </div>
+  </div>
 }
 
 export function DocumentationBrowser({ origin, packs, addresses, notice, onCopy }: DocumentationBrowserProps) {
@@ -149,7 +167,9 @@ export function DocumentationBrowser({ origin, packs, addresses, notice, onCopy 
           </header>
           {/* 地址节点由 port-panel 更新，切换章节时必须保留，不能随正文卸载。 */}
           <div hidden={active.id !== 'addresses'}>{addresses}</div>
-          {section ? <ApiReference key={section.id} section={section} onCopy={onCopy} /> : null}
+          {section?.markdown
+            ? <MarkdownArticle section={section} onCopy={onCopy} />
+            : section ? <ApiReference key={section.id} section={section} onCopy={onCopy} /> : null}
           {active.id === 'providers' ? <ProviderDocsTable packs={packs} /> : null}
           <nav className='docs-pagination' aria-label={t('章节导航')}>
             <div>{previous ? pageLink(previous, 'previous') : null}</div>

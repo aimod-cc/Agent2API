@@ -258,7 +258,7 @@ export function AppUpdatePanel() {
                 : phase === 'available'
                   ? t('发现新版本 {version}', { version: info?.latestVersion || '' })
                   : phase === 'downloading'
-                    ? t('正在下载…')
+                    ? progress?.phase === 'selecting' ? t('正在选择下载通道…') : t('正在下载…')
                     : phase === 'downloaded'
                       ? t('已下载，待安装')
                       : phase === 'checking'
@@ -280,6 +280,10 @@ export function AppUpdatePanel() {
                         ? t('版本 {version} · 按 GitHub 访问设置下载安装包', { version: APP_VERSION })
                         : t('版本 {version} · 更新包需从 Release 页面获取', { version: APP_VERSION })}
             </div>
+
+            {phase === 'downloading' && progress?.source ? <div className='m-t2'>
+              {t('当前下载通道：{source}', { source: progress.source })}
+            </div> : null}
 
             {/* 进度条：总长度未知（percent = null）时不画，只显示已下载量 */}
             {phase === 'downloading' ? (

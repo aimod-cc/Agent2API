@@ -18,8 +18,8 @@
  */
 
 import type * as React from 'react'
-import type { AssetProbe, UpdateChannels, ForceUpdatePolicy } from '../../../ui-shared/updates'
-import { assetMissingReason, githubErrorMessage } from '../../../ui-shared/updates'
+import type { AssetProbe, UpdateChannels, ForceUpdatePolicy, UpdateCapability, ServiceUpdateTask } from '../../../ui-shared/updates'
+import { assetMissingReason, githubErrorMessage, updateUnavailableReason } from '../../../ui-shared/updates'
 export type { UpdateChannels, AssetProbe } from '../../../ui-shared/updates'
 // 代理池的共享类型与值前缀与账号页共用一份 —— 两处下拉的值域必须一致
 // （`pool:<id>`），各写一份迟早会漂移。accounts-shared 是纯类型 + 常量的
@@ -33,6 +33,9 @@ import { t } from '../i18n'
 /** 更新检查结果（checkUpdate 的壳命令返回 / getUpdateStatus 的缓存）。字段按可选收：
  *  后端在「仓库暂无发布版本」「版本号无法解析」等情形下会给 null */
 export type UpdateInfo = {
+  updateCapability?: UpdateCapability
+  systemdTask?: ServiceUpdateTask | null
+  serviceTask?: ServiceUpdateTask | null
   forceUpdate?: ForceUpdatePolicy | null
   currentVersion?: string | null
   latestVersion?: string | null
@@ -95,13 +98,33 @@ export type UpdateInfo = {
  *     二进制与 ui 目录 → 重启进程（容器 restart 策略拉起）。
  */
 export function isSelfUpdate(info: UpdateInfo | null | undefined): boolean {
-  return info?.selfUpdate === true
+  return info?.updateCapability ? info.updateCapability.mode === 'docker' : info?.selfUpdate === true
 }
 
-/** 本次要下载的资产：容器内更新取服务端包，桌面取安装器 */
+export function isServiceUpdate(info: UpdateInfo | null | undefined): boolean {
+  return info?.updateCapability?.mode === 'systemd' || info?.updateCapability?.mode === 'windows-service'
+}
+
+export function serviceUpdateTask(info: UpdateInfo | null | undefined): ServiceUpdateTask | null {
+  return info?.serviceTask ?? info?.systemdTask ?? null
+}
+
+export function isManualUpdate(info: UpdateInfo | null | undefined): boolean {
+  return info?.updateCapability?.installSupported === false
+}
+
+export function manualUpdateReason(info: UpdateInfo | null | undefined): string {
+  if (!info?.updateCapability) return ''
+  const reason = updateUnavailableReason(info.updateCapability, t)
+  return info.updateCapability.deployment === 'docker'
+    ? `${reason} ${t('在宿主机执行 docker compose pull && docker compose up -d 即可升级。')}` : reason
+}
+
+/** 包类型不随自动安装开关变化，手动升级同样指向正确的服务端包。 */
 export function downloadAsset(info: UpdateInfo | null | undefined): { url?: string; name?: string } | null {
   if (!info) return null
-  return isSelfUpdate(info) ? (info.serverAsset ?? null) : (info.asset ?? null)
+  const server = info.updateCapability?.packageKind === 'server' || isSelfUpdate(info)
+  return server ? (info.serverAsset ?? null) : (info.asset ?? null)
 }
 
 /** installerKind → 该平台安装包的后缀。只在后端没给 assetProbe 时兜底用
@@ -121,6 +144,7 @@ function installerSuffixOf(info: UpdateInfo | null | undefined): string {
 export function missingAssetReasonFor(info: UpdateInfo | null | undefined): string {
   return assetMissingReason(info?.assetProbe, {
     selfUpdate: isSelfUpdate(info),
+    serverPackage: info?.updateCapability?.packageKind === 'server',
     fallbackSuffix: installerSuffixOf(info),
   }, t)
 }
@@ -136,6 +160,8 @@ export type DownloadTask = {
   received?: number
   total?: number
   percent?: number
+  selecting?: boolean
+  source?: string | null
 }
 
 export type UpdateProxyChoice = {
@@ -156,11 +182,8 @@ export type UpdateTokenStatus = {
   saved?: boolean
 }
 
-export type GithubAccessSettings = {
-  mode: 'auto' | 'official' | 'accelerated'
-  mirrorUrl: string
-  saved?: boolean
-}
+import type { GithubAccessSettings, GithubAccessPatch } from '../../../ui-shared/github-access'
+export type { GithubAccessSettings } from '../../../ui-shared/github-access'
 
 /** 「软件更新」这一族用到的壳侧接口（见 bridge.rs 的「软件更新」一节） */
 export type UpdateBridge = {
@@ -176,7 +199,7 @@ export type UpdateBridge = {
     saved?: boolean
   } | null | undefined>
   getGithubAccess(): Promise<GithubAccessSettings | null | undefined>
-  setGithubAccess(payload: Partial<Pick<GithubAccessSettings, 'mode' | 'mirrorUrl'>>): Promise<GithubAccessSettings | null | undefined>
+  setGithubAccess(payload: GithubAccessPatch): Promise<GithubAccessSettings | null | undefined>
   /** GitHub 令牌状态（filled / origin，永不回显本体） */
   getUpdateToken(): Promise<UpdateTokenStatus | null | undefined>
   /** 保存 / 清除 GitHub 令牌（token 传 null = 清除） */
@@ -220,6 +243,8 @@ export type UpdateBridge = {
     needRestart?: boolean
     uiUpdated?: boolean
   } | null | undefined>
+  startSystemdUpdate?(payload: { version: string }): Promise<ServiceUpdateTask>
+  startWindowsServiceUpdate?(payload: { version: string }): Promise<ServiceUpdateTask>
   /** 请求重启进程（容器由 restart 策略拉起，页面随后自动刷新） */
   restartService?(): Promise<{ restarting?: boolean } | null | undefined>
   /** 打开外链的唯一出口（只放行 http(s)，见 commands.rs） */
@@ -235,6 +260,7 @@ export type UpdateBridge = {
  * 仍在 update-panel.tsx 里 declare。
  */
 export type SharedWindow = {
+  wbConfirm?: { ask(options: { title: string; text: string; okText: string; cancelText: string; bodyClass?: string }): Promise<boolean> }
   workbuddyDesktop?: UpdateBridge
   wbApp?: {
     toast?: (message: string, kind?: 'err' | 'ok') => void

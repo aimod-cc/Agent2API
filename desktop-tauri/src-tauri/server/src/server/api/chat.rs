@@ -50,6 +50,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
 
 use crate::server::config;
+use crate::server::core::compact_routing::{self, RequestFormat};
 use crate::server::core::upstream::cancellation;
 use crate::server::core::upstream::continuation::{self, Continuation};
 use crate::server::core::upstream::usage::RequestTelemetry;
@@ -125,7 +126,8 @@ pub async fn chat_completions(
     // 下游等级与下游模型名同一时机采集（payload 被就地改写前；改写只动 model，
     // 两边前后一致，见 client_reasoning_of 的说明）
     let client_reasoning = pipeline::client_reasoning_of(&payload);
-    let requested_model = match super::request_prepare::resolve_model(&state, &mut payload, scope.as_ref()).await {
+    let compact_client = compact_routing::client_for_request(&request_source.behavior_client, &payload, RequestFormat::Chat);
+    let requested_model = match super::request_prepare::resolve_client_model(&state, &mut payload, scope.as_ref(), compact_client).await {
         Ok(model) => model,
         Err(error) => {
             record_early_failure(

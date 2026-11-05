@@ -7,10 +7,18 @@ export function RouteIcon({ name, size = 16 }: { name: string; size?: number }) 
   const html = host().wbIcons?.icon(name, size)
   if (html) return <span className='ico inline-flex shrink-0 items-center justify-center leading-none [&>svg]:block'
     style={{ width: size, height: size }} aria-hidden='true' dangerouslySetInnerHTML={{ __html: html }} />
-  const path = name === 'plus' ? 'M12 5v14M5 12h14'
-    : name === 'copy' ? 'M9 5V3h12v14h-3M3 7h12v14H3z'
-      : name === 'lock' ? 'M5 10h14v11H5zM8 10V6a4 4 0 0 1 8 0v4' : ''
-  return path ? <svg width={size} height={size} viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='1.8' strokeLinecap='round' strokeLinejoin='round' aria-hidden='true'><path d={path} /></svg> : null
+  const paths: Record<string, string> = {
+    plus: 'M12 5v14M5 12h14',
+    copy: 'M9 5V3h12v14h-3M3 7h12v14H3z',
+    lock: 'M5 10h14v11H5zM8 10V6a4 4 0 0 1 8 0v4',
+    more: 'M4 12h.01M12 12h.01M20 12h.01',
+    search: 'M21 21l-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0',
+    check: 'M5 12l4 4L19 6',
+    chevronLeft: 'm15 5-7 7 7 7',
+    chevronRight: 'm9 5 7 7-7 7',
+  }
+  const path = paths[name]
+  return path ? <svg width={size} height={size} viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth={name === 'more' ? 3.5 : 1.8} strokeLinecap='round' strokeLinejoin='round' aria-hidden='true'><path d={path} /></svg> : null
 }
 export function IconButton({ name, title, className, ...props }: {
   name: string; title: string
@@ -22,7 +30,7 @@ export function RouteStateBadge({ state, children }: { state: string; children?:
   const label = state === 'usable' ? t('可用') : state === 'cooldown' ? t('冷却中')
     : state === 'concurrency' ? t('并发已满') : state === 'disabled' ? t('已禁用')
       : state === 'no-credentials' ? t('无凭证') : state === 'limiter' ? t('限制器跳过')
-        : state === 'excluded' ? t('未参与') : state === 'tried' ? t('已尝试') : t('未就绪')
+        : state === 'excluded' ? t('未参与') : state === 'tried' ? t('已尝试') : state === 'enabled' ? t('已启用') : state === 'missing' ? t('账号已移除') : t('未就绪')
   return <Badge shape='tag' variant={state === 'usable' ? 'success'
     : state === 'no-credentials' ? 'destructive'
       : state === 'cooldown' || state === 'concurrency' || state === 'limiter' ? 'warning' : 'secondary'}>

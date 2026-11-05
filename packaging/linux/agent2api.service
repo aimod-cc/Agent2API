@@ -30,10 +30,8 @@ Environment=AGENT2API_PROXY_HOME=/var/lib/agent2api
 Environment=AGENT2API_UI_DIR=/opt/agent2api/ui
 EnvironmentFile=/etc/agent2api/agent2api.env
 
-# 裸机部署**强制关闭**容器内自更新，所以这条刻意放在 EnvironmentFile 之后
-# （要的就是覆盖用户配置）：那个实现是「替换文件后退出进程，等外部把它们
-# 拉起来」，而它替换的 /opt 下文件属 root、服务账号无权写 —— 打开也只会在
-# 「写文件」那一步失败。升级请走 install.sh --upgrade。
+# 关闭直接改写文件的容器更新方式；systemd 通过独立受限升级程序更新。
+# install.sh 会配置本机 socket 与 50-updater.conf，主服务始终没有程序目录写权限。
 Environment=AGENT2API_SELF_UPDATE=0
 
 ExecStart=/opt/agent2api/agent2api-server

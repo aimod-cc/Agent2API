@@ -13,6 +13,8 @@ import { t } from '../i18n'
 import { MetricGrid, MetricCard } from '@ui'
 import { DateRangeFilter } from '../components/DateRangeFilter'
 import { requestApiKeyLabel, requestClientLabel } from '../../../ui-shared/model-api-key'
+import { ClientIdentificationDetail } from '../../../ui-shared/client-identification-detail'
+import { clientIdentificationApi } from '../api/client-identification'
 import { dateRangeQuery, readCustomRange, saveCustomRange, validCustomRange, type CustomDates, type DateRange } from '../../../ui-shared/date-range'
 
 /**
@@ -156,7 +158,7 @@ export function RequestsPage() {
       <div className='m-body'>
       {Object.keys(sourceQuery).length ? <div className='m-section text-xs text-muted-foreground'>
         {requestQuery.startDate && requestQuery.endDate ? `${requestQuery.startDate} ～ ${requestQuery.endDate}` : t('全部')}
-        {sourceQuery.client !== undefined ? ` · ${requestClientLabel({ client: sourceQuery.client }, t)}` : ''}
+        {sourceQuery.client !== undefined ? ` · ${requestClientLabel({ client: sourceQuery.client, clientLabel: sourceQuery.clientLabel || rows.find(row => row.client === sourceQuery.client)?.clientLabel }, t)}` : ''}
         {sourceQuery.apiKey ? ` · ${t('API Key')} ${sourceQuery.apiKey}` : ''}
         <Button variant='ghost' size='sm' onClick={() => store.push('requests')}>{t('清除筛选')}</Button>
       </div> : null}
@@ -364,6 +366,9 @@ function RequestSheet({ row, onClose }: { row: RequestRow | null; onClose: () =>
                 </MetricCard>
               </MetricGrid>
 
+              <div className='rounded-lg border border-hairline p-3'>
+                <ClientIdentificationDetail key={row.id || row.ts} entry={row} api={clientIdentificationApi} t={t} />
+              </div>
               <div className='m-rows'>
                 <div className='m-row'><span className='m-k'>{t('客户端')}</span><span className='m-v'>{requestClientLabel(row, t)}</span></div>
                 <div className='m-row'><span className='m-k'>{t('API Key')}</span><span className='m-v'>{requestKeyName(row)}</span></div>

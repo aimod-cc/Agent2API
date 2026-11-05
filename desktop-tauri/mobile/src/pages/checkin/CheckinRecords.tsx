@@ -18,6 +18,7 @@ function outcomeView(outcome?: string): { label: string; tone: 'ok' | 'warn' | '
     case 'success': return { label: t('成功领取'), tone: 'ok' }
     case 'already': return { label: t('今日已领'), tone: 'brand' }
     case 'pending': return { label: t('未领取'), tone: 'warn' }
+    case 'captcha': return { label: t('需要人工验证'), tone: 'warn' }
     case 'failed': return { label: t('失败'), tone: 'bad' }
     default: return { label: outcome || '—', tone: 'mute' }
   }
@@ -56,7 +57,8 @@ export function CheckinRecords({ providers }: { providers: { id: string; label: 
   ]
   const outcomes = [
     { value: 'all', label: t('全部结果') }, { value: 'success', label: t('成功领取') },
-    { value: 'already', label: t('今日已领') }, { value: 'pending', label: t('未领取') }, { value: 'failed', label: t('失败') },
+    { value: 'already', label: t('今日已领') }, { value: 'pending', label: t('未领取') },
+    { value: 'captcha', label: t('需要人工验证') }, { value: 'failed', label: t('失败') },
   ]
   const kinds = [
     { value: 'all', label: t('全部类型') }, { value: 'manual', label: t('手动签到') },

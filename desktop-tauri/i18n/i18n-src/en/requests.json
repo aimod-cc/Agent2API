@@ -83,7 +83,7 @@
   "将删除 {count} 条请求记录，并清理上游调试报文 {upstream} 条、下游正文 {downstream} 条。": "Deletes {count} request records and clears {upstream} upstream debug payloads and {downstream} downstream bodies.",
   "尝试 {n} ·": "Attempt {n} ·",
   "尝试明细": "Attempt details",
-  "尝试次数": "",
+  "尝试次数": "Attempts",
   "尝试链": "",
   "工具结果": "Tool result",
   "工具结果 · {id}": "Tool result · {id}",

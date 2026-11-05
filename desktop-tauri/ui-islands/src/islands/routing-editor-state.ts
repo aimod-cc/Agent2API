@@ -78,9 +78,14 @@ export function useRoutingEditor(onSaved: () => void) {
     try {
       const workspace = await bridge().saveRoutingProfile({ model: target, profile: null, revision: draft.revision })
       if (!workspace?.revision) throw new Error(t('保存响应不完整，请刷新当前配置确认结果'))
-      const profile = editableProfile(workspace)
-      setDrafts(current => ({ ...current, [target]: { workspace, mode: 'inherit', profile,
-        baseline: null, revision: workspace.revision! } }))
+      setDrafts(current => {
+        const next = { ...current }
+        delete next[target]
+        for (const [model, cached] of Object.entries(next)) {
+          next[model] = { ...cached, workspace: { ...cached.workspace, configuredModels: workspace.configuredModels } }
+        }
+        return next
+      })
       adoptAccountSorting(workspace.sorting)
       notify(t('已删除独立配置，改为跟随全局'))
       onSaved()
@@ -91,7 +96,7 @@ export function useRoutingEditor(onSaved: () => void) {
   // 新增模型独立配置：立即落库，而不是只打开一份未保存草稿，避免用户以为已经创建。
   const create = async (model: string): Promise<boolean> => {
     const target = model.trim().toLowerCase()
-    if (!target || refs.current.busy) return false
+    if (!target || refs.current.busy || refs.current.loading) return false
     refs.current.busy = true
     setBusy(true); setError('')
     try {
@@ -103,7 +108,10 @@ export function useRoutingEditor(onSaved: () => void) {
       if (profile.providerScope === 'selected') profile.disabledProviders = profile.disabledProviders.filter(id => profile.providers.includes(id))
       profile.excludedAccounts = profile.excludedAccounts.filter(id => workspace.accounts.some(account => account.id === id))
       for (const provider of workspace.providers) {
-        if (!profile.providers.includes(provider.id)) profile.providers.push(provider.id)
+        if (!profile.providers.includes(provider.id)) {
+          profile.providers.push(provider.id)
+          if (profile.providerScope === 'selected') profile.disabledProviders.push(provider.id)
+        }
         if (!profile.accountOrder[provider.id]) {
           profile.accountOrder[provider.id] = workspace.accounts.filter(account => account.provider === provider.id)
             .sort((left, right) => Number(left.priority) - Number(right.priority)).map(account => account.id)

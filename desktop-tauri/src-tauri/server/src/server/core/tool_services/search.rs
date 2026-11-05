@@ -15,7 +15,9 @@ use super::normalize::{
     dedupe_strings, deduplicate_sources, normalize_fetch_urls, web_source_dedup_key,
     SourceDraft, FETCH_NOTICE, MAX_BATCH_ITEMS, MAX_GLOBAL_SOURCES, SEARCH_NOTICE,
 };
-use super::providers;
+use super::{account_search, providers};
+use crate::server::core::account_store::AccountStore;
+use crate::server::core::key_scope::{self, KeyScope};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchErrorCode {
@@ -26,6 +28,7 @@ pub enum SearchErrorCode {
     ProviderUnavailable,
     Configuration,
     InvalidInput,
+    PermissionDenied,
 }
 
 impl SearchErrorCode {
@@ -38,12 +41,14 @@ impl SearchErrorCode {
             Self::ProviderUnavailable => "provider_unavailable",
             Self::Configuration => "configuration",
             Self::InvalidInput => "invalid_input",
+            Self::PermissionDenied => "permission_denied",
         }
     }
 
     pub fn http_status(self) -> u16 {
         match self {
             Self::InvalidInput => 400,
+            Self::PermissionDenied => 403,
             Self::RateLimited => 429,
             Self::Configuration => 503,
             Self::TimedOut => 504,
@@ -139,26 +144,18 @@ struct QueryOutcome {
     warnings: Vec<String>,
 }
 
-async fn search_one_query(query: String, providers_to_use: Vec<String>, keys: Vec<Option<String>>) -> QueryOutcome {
-    let timeout = super::timeout_seconds(super::WEB_SEARCH_SERVICE_ID);
-    let calls = providers_to_use.iter().cloned().zip(keys).map(|(provider, key)| {
-        let query = query.clone();
-        async move {
-            let Some(key) = key else {
-                return (
-                    provider,
-                    Err(SearchError::new(
-                        SearchErrorCode::ProviderUnavailable,
-                        "The provider key is unavailable",
-                    )),
-                );
-            };
-            let outcome = providers::search(&provider, &key, &query, timeout).await;
-            (provider, outcome)
-        }
+async fn search_one_query(
+    store: &AccountStore,
+    query: String,
+    sources_to_use: &[account_search::SearchSource],
+    timeout: u64,
+    skipped: &[String],
+) -> QueryOutcome {
+    let calls = sources_to_use.iter().map(|source| async {
+        (source.provider(), source.search(store, &query, timeout).await)
     });
     let outcomes = futures::future::join_all(calls).await;
-    let mut warnings = Vec::new();
+    let mut warnings = skipped.to_vec();
     let mut sources = Vec::new();
     let mut first_error: Option<SearchError> = None;
     let mut all_failed = true;
@@ -169,7 +166,7 @@ async fn search_one_query(query: String, providers_to_use: Vec<String>, keys: Ve
                 sources.extend(items);
             }
             Err(error) => {
-                warnings.push(format!("{}: {}", providers::display_name(&provider), error.message));
+                warnings.push(format!("{}: {}", super::provider_display_name(provider), error.message));
                 if first_error.is_none() {
                     first_error = Some(error);
                 }
@@ -204,42 +201,43 @@ pub struct SearchRun {
 }
 
 /// 执行一次批量搜索
-pub async fn run_search(queries: Vec<String>) -> Result<SearchRun, SearchError> {
+pub async fn run_search(store: &AccountStore, scope: Option<&KeyScope>, queries: Vec<String>) -> Result<SearchRun, SearchError> {
     let queries: Vec<String> = queries.into_iter().map(|query| query.trim().to_string()).collect();
     if queries.iter().any(String::is_empty) {
         return Err(SearchError::new(SearchErrorCode::InvalidInput, "Query strings must not be empty"));
     }
     let queries = dedupe_strings(queries);
 
-    let selected = super::load().selection.search;
-    let ready = super::ready_providers();
-    // 选择列表保留用户的全部勾选，但运行时只跑「已启用且已配置密钥」的那些。
-    // 没启用 / 没密钥的提供商自动跳过 —— 它们在界面上本来就是灰的，不该让一次
-    // 搜索因为「还在选择列表里」而整个失败。
-    let active: Vec<String> = selected
-        .iter()
-        .filter(|provider| ready.contains(&provider.as_str()))
-        .cloned()
-        .collect();
-    if active.is_empty() {
-        let missing = super::missing_selected_providers();
+    let config = super::load();
+    let timeout = config.timeouts.get(super::WEB_SEARCH_SERVICE_ID).copied().unwrap_or(30)
+        .clamp(super::TIMEOUT_MIN_SECONDS, super::TIMEOUT_MAX_SECONDS);
+    let mut sources = Vec::new();
+    let mut skipped = Vec::new();
+    let mut denied = false;
+    // 一批请求只取一次配置与能力快照。账号引用失效时不改选其他账号。
+    for provider in &config.selection.search {
+        let entry = config.providers.get(provider).cloned().unwrap_or_default();
+        if !entry.enabled { continue; }
+        if super::is_account_provider(provider) && !key_scope::allows_provider(scope, provider) {
+            denied = true;
+            skipped.push(format!("{}: 当前网关 Key 未获准使用该提供商", super::provider_display_name(provider)));
+            continue;
+        }
+        match account_search::prepare(store, provider, &entry).await {
+            Ok(source) => sources.push(source),
+            Err(error) => skipped.push(format!("{}: {}", super::provider_display_name(provider), error.message)),
+        }
+    }
+    if sources.is_empty() {
         return Err(SearchError::new(
-            SearchErrorCode::Configuration,
-            format!(
-                "No selected search provider is enabled and configured (missing: {})",
-                if missing.is_empty() { "unknown".to_string() } else { missing.join(", ") }
-            ),
+            if denied { SearchErrorCode::PermissionDenied } else { SearchErrorCode::Configuration },
+            if skipped.is_empty() { "没有已启用并配置好的搜索来源".into() } else { skipped.join("；") },
         ));
     }
-
-    let keys: Vec<Option<String>> = active.iter().map(|provider| super::provider_key(provider)).collect();
+    let active: Vec<String> = sources.iter().map(|source| source.provider().to_string()).collect();
     let outcomes = futures::future::join_all(
-        queries
-            .iter()
-            .cloned()
-            .map(|query| search_one_query(query, active.clone(), keys.clone())),
-    )
-    .await;
+        queries.iter().cloned().map(|query| search_one_query(store, query, &sources, timeout, &skipped)),
+    ).await;
 
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut next_number = 1usize;
@@ -320,7 +318,7 @@ pub struct FetchRun {
 /// 执行一次批量抓取
 pub async fn run_fetch(urls: Vec<String>) -> Result<FetchRun, SearchError> {
     let provider = super::load().selection.fetch;
-    if !super::ready_providers().contains(&provider.as_str()) {
+    if !super::is_fetch_provider(&provider) || !super::ready_providers().contains(&provider.as_str()) {
         return Err(SearchError::new(
             SearchErrorCode::Configuration,
             format!(

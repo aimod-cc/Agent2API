@@ -246,6 +246,7 @@ const BRIDGE_JS: &str = r#"
     // 这两条服务**转发** —— 活动套餐的推理端点每条请求都要一个当次铸的令牌，而
     // 转发在后台发生，令牌只能由界面静默铸造后推进池子（唯一调用方是
     // ui/zcode-captcha-pool.js）。响应形状见 `api::zcode_captcha`。
+    zcodeClaimVerification: payload => call('POST', '/api/zcode/claim-verification', payload),
     zcodeCaptchaStats: () => call('GET', '/api/zcode/captcha'),
     pushZcodeCaptchaTokens: tokens =>
       call('POST', '/api/zcode/captcha', { tokens: Array.isArray(tokens) ? tokens : [] }),
@@ -297,6 +298,11 @@ const BRIDGE_JS: &str = r#"
     // 直接塞 `reasoning: reasoning || ''` 会把「不改」也变成「清空」，
     // 那是一次静默的数据丢失。
     getModelManage: () => call('GET', '/api/models/manage'),
+    getClientIdentification: () => call('GET', '/api/client-identification'),
+    saveClientIdentification: payload => call('PUT', '/api/client-identification', payload),
+    previewClientIdentification: payload => call('POST', '/api/client-identification/preview', payload),
+    getCompactRoutes: () => call('GET', '/api/models/compact-routes'),
+    saveCompactRoutes: payload => call('PUT', '/api/models/compact-routes', payload),
     setModelState: payload => call('POST', '/api/models/state', payload),
     addModelMapping: (alias, target, provider, reasoning, enabled, create) => call('POST', '/api/models/mappings', {
       alias, target, provider,
@@ -362,6 +368,9 @@ const BRIDGE_JS: &str = r#"
     getRoutingConfig: () => call('GET', '/api/routing'),
     getRoutingWorkspace: model => call('GET', '/api/routing/workspace' + toQuery({ model })),
     saveRoutingProfile: payload => call('PUT', '/api/routing/profile', payload || {}),
+    getRoutingGroups: () => call('GET', '/api/routing/groups'),
+    saveRoutingGroup: payload => call('PUT', '/api/routing/groups', payload),
+    previewRouting: payload => call('POST', '/api/routing/preview', payload),
     getRoutingSticky: model => call('GET', '/api/routing/sticky' + toQuery({ model })),
     clearRoutingSticky: payload => call('POST', '/api/routing/sticky/clear', payload || {}),
     getRoutingReplays: query => call('GET', '/api/routing/replays' + toQuery(query)),
@@ -495,7 +504,7 @@ const BRIDGE_JS: &str = r#"
     runGrowthTravel: id =>
       call('POST', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/growth/travel', {}),
 
-    // ── 手机验证码登录（AutoClaw 两地区 / Loomy）──
+    // ── 手机验证码登录（AutoClaw 两地区 / Loomy / Tabbit 国内版）──
     // 与网页登录那条链（开窗口、等回调）不同：上游没有授权页，就是「发码 →
     // 用码换 token」两次同步调用，所以走管理 API 而不是 start_login。
     //
@@ -522,9 +531,8 @@ const BRIDGE_JS: &str = r#"
       const isObject = input && typeof input === 'object';
       const phone = String((isObject ? input.phone : input) || '');
       const provider = isObject && input.provider ? String(input.provider) : '';
-      // Loomy 是**另一条链路**（自己的签名算法与站点，中间态叫 msgid 而不是
-      // deviceId），端点在服务端就是分开挂的；其余（AutoClaw 两地区）沿用既有
-      // 端点，`provider` 原样带上去由后端判地区。
+      // Loomy / Tabbit 国内版各用自己的短信端点，中间态分别叫 msgid / uuid；
+      // AutoClaw 沿用既有端点，`provider` 原样带上去由后端判地区。
       //
       // KukuAI 又是**第三条链**：百度通行证没有可直连的发码 API（发码要页面上
       // 的风控签名，见 `login::kuku_sms_script`），所以发码由**壳开登录窗口替用户
@@ -535,12 +543,24 @@ const BRIDGE_JS: &str = r#"
       }
       const path = provider === 'loomy'
         ? '/api/session/login/loomy/sms/send'
-        : '/api/session/login/sms/send';
+        : provider === 'tabbit'
+          ? '/api/session/login/tabbit/sms/send'
+          : '/api/session/login/sms/send';
       return call('POST', path, {
         phone,
         ...(provider ? { provider } : {}),
+        // Tabbit 国内站可能在发码前要求滑块验证。声明这一点后，网关会用
+        // 200 + `{status:"captcha", captcha:{verifyUrl}}` 回这种状态（界面据此
+        // 开验证页），而不是回 409 错误；不声明的旧界面拿到的是一句可读提示。
+        // uuid 在「过完验证重发」时要沿用同一轮登录（上游把码绑在它上面）。
+        ...(isObject && input.supportsCaptcha ? { supportsCaptcha: true } : {}),
+        ...(isObject && input.uuid ? { uuid: String(input.uuid) } : {}),
       });
     },
+    // 打开上游给的人机验证页（目前只有 Tabbit 国内站会在发码前要滑块）。
+    // 复用 `open_release_page`：它只放行 http(s)，且 Windows 走 ShellExecuteW
+    // —— URL 里的 `&`（verifyUrl 就带）不会被当成命令分隔符。
+    openVerifyPage: url => invoke('open_release_page', { url: String(url || '') }),
     verifySmsLogin: payload => {
       const provider = (payload && payload.provider) ? String(payload.provider) : '';
       // KukuAI：验证码由壳写入登录窗口（`login_kuku_sms_verify`），
@@ -551,14 +571,17 @@ const BRIDGE_JS: &str = r#"
       }
       const path = provider === 'loomy'
         ? '/api/session/login/loomy/sms/verify'
-        : '/api/session/login/sms/verify';
+        : provider === 'tabbit'
+          ? '/api/session/login/tabbit/sms/verify'
+          : '/api/session/login/sms/verify';
       return call('POST', path, {
         phone: String((payload && payload.phone) || ''),
         code: String((payload && payload.code) || ''),
-        // deviceId（AutoClaw）/ msgid（Loomy）/ name 可选：空串会被后端当成一个
-        // 真值带上去，因此按「有值才带」整形（与其它命令的省略语义一致）
+        // deviceId（AutoClaw）/ msgid（Loomy）/ uuid（Tabbit）/ name 可选：
+        // 按「有值才带」整形；发码返回的中间态必须原样回传，不能丢掉。
         ...((payload && payload.deviceId) ? { deviceId: String(payload.deviceId) } : {}),
         ...((payload && payload.msgid) ? { msgid: String(payload.msgid) } : {}),
+        ...((payload && payload.uuid) ? { uuid: String(payload.uuid) } : {}),
         ...((payload && payload.name) ? { name: String(payload.name) } : {}),
         ...(provider ? { provider } : {}),
       });

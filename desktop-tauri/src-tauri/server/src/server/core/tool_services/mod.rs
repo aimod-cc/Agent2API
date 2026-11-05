@@ -2,11 +2,14 @@
 //!
 //! ── 这是什么 ────────────────────────────────────────────────
 //! 在「Agent 配置」（本机客户端接管）与「网络代理」之间新增的一层：对外提供
-//! 两种可选能力，客户端可以按三种协议接入 ——
+//! 两种可选能力，客户端可以按两种可管理协议接入 ——
 //!   · Skill：打包成 Agent Skill，由面板一次性安装到本机各客户端的 skills 目录；
-//!   · MCP：Streamable HTTP 远程服务，在客户端 MCP 配置里填地址即可；
-//!   · API：REST 接口，任何能发 HTTP 的脚本直接调用（仅网络搜索）。
-//! 三种协议共享同一份上游配置，开关与执行超时按「服务 × 协议」各自独立。
+//!   · MCP：Streamable HTTP 远程服务，在客户端 MCP 配置里填地址即可。
+//! 两种协议共享同一份上游配置，开关与执行超时按「服务 × 协议」各自独立。
+//!
+//! 网络搜索另有一个固定的 REST 接口（`/api/web-search/*`）：它是接口而不是
+//! 可管理协议，不进服务清单、不单独开关，说明写在「文档」页，运行时见
+//! `api::tool_runtime`。
 //!
 //! ── 配置存在哪 ──────────────────────────────────────────────
 //! 整份配置存在网关配置的 `toolServices` 键下（kv 表一行），形状见
@@ -24,6 +27,7 @@
 //! 打本进程网关的 `/v1/chat/completions`，协议转换、重试、故障转移与请求日志
 //! 全部复用网关管线（与 OmniProxy 的视觉服务同一做法）。
 
+mod account_search;
 mod bridge;
 mod install;
 mod mcp;
@@ -39,7 +43,7 @@ pub use install::{
     InstallOutcome,
 };
 pub use mcp::{dispatch as mcp_dispatch, McpRequestContext, McpServerKind, McpSpec};
-pub use providers::test_provider;
+pub use account_search::test_provider;
 pub use search::{batch_items, run_fetch, run_search, SearchError, SearchErrorCode};
 pub use skill_package::{
     build_skill_files, is_skill_variant, recommended_skill_variant, skill_variants, SkillFile,
@@ -57,6 +61,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::server::config;
+use crate::server::core::account_store::AccountStore;
 use crate::server::core::crypto::{self, SecretScope};
 
 /// 配置在网关配置里的键名（kv 表一行）
@@ -67,11 +72,17 @@ pub const SERVICE_IDS: [&str; 2] = [WEB_SEARCH_SERVICE_ID, VISION_SERVICE_ID];
 pub const WEB_SEARCH_SERVICE_ID: &str = "web-search";
 pub const VISION_SERVICE_ID: &str = "vision";
 
-/// 接入协议（顺序即界面展示顺序）
-pub const PROTOCOLS: [&str; 3] = ["skill", "mcp", "api"];
+/// 接入协议（顺序即界面展示顺序）。
+///
+/// API 不在这里：它是固定的对外工具接口（`/api/web-search/*`），不参与
+/// 「工具服务」页的协议开关，只在「文档」页说明；运行时仍由
+/// [`endpoint`] 与 `tool_runtime` 提供。
+pub const PROTOCOLS: [&str; 2] = ["skill", "mcp"];
 
-/// 四家固定搜索提供商（顺序即界面顺序）
-pub const SEARCH_PROVIDERS: [&str; 4] = ["tavily", "querit", "firecrawl", "ollama"];
+/// 密钥型来源同时支持搜索与抓取；账号型来源只支持搜索，默认不选中。
+pub const API_KEY_PROVIDERS: [&str; 4] = ["tavily", "querit", "firecrawl", "ollama"];
+pub const ACCOUNT_PROVIDERS: [&str; 3] = ["workbuddy", "workbuddy-intl", "kiro"];
+pub const SEARCH_PROVIDERS: [&str; 7] = ["tavily", "querit", "firecrawl", "ollama", "workbuddy", "workbuddy-intl", "kiro"];
 
 /// 服务固定元数据（文案由前端按 id 映射，后端只回数据）
 pub const WEB_SEARCH_PACKAGE: &str = WEB_SEARCH_SKILL_NAME;
@@ -89,7 +100,10 @@ pub const TIMEOUT_MIN_SECONDS: u64 = 5;
 pub const TIMEOUT_MAX_SECONDS: u64 = 600;
 pub const DEFAULT_TIMEOUTS: [(&str, u64); 2] = [(WEB_SEARCH_SERVICE_ID, 30), (VISION_SERVICE_ID, 60)];
 
-/// 端点路径（写死：改动会影响已接入的客户端）
+/// 端点路径（写死：改动会影响已接入的客户端）。
+///
+/// `"api"` 不进 [`PROTOCOLS`]，但这里保留映射：REST 工具接口是固定入口，
+/// 由 `tool_runtime` 直接使用，不是可管理的「服务 × 协议」。
 pub fn endpoint(service: &str, protocol: &str) -> &'static str {
     match (service, protocol) {
         (WEB_SEARCH_SERVICE_ID, "skill") => "/skill/web-search",
@@ -149,13 +163,15 @@ pub struct ProviderConfig {
     /// `enc1:` 信封；空串 = 未配置
     pub encrypted_key: String,
     pub key_hint: String,
+    /// 账号型来源只保存账号引用，凭证仍由账号库与插件管理。
+    pub account_id: String,
     pub enabled: bool,
     pub updated_at: i64,
 }
 
 impl Default for ProviderConfig {
     fn default() -> Self {
-        Self { encrypted_key: String::new(), key_hint: String::new(), enabled: false, updated_at: 0 }
+        Self { encrypted_key: String::new(), key_hint: String::new(), account_id: String::new(), enabled: false, updated_at: 0 }
     }
 }
 
@@ -168,7 +184,7 @@ pub struct Selection {
 
 impl Default for Selection {
     fn default() -> Self {
-        Self { search: SEARCH_PROVIDERS.iter().map(|item| item.to_string()).collect(), fetch: "tavily".into() }
+        Self { search: API_KEY_PROVIDERS.iter().map(|item| item.to_string()).collect(), fetch: "tavily".into() }
     }
 }
 
@@ -207,7 +223,7 @@ impl ToolConfig {
         if self.selection.search.is_empty() {
             self.selection.search = Selection::default().search;
         }
-        if !is_search_provider(&self.selection.fetch) {
+        if !is_fetch_provider(&self.selection.fetch) {
             self.selection.fetch = "tavily".into();
         }
         self
@@ -253,6 +269,11 @@ fn update(mutate: impl FnOnce(&mut ToolConfig)) -> Result<ToolConfig, String> {
 pub fn is_enabled(service: &str, protocol: &str) -> bool {
     if endpoint(service, protocol).is_empty() {
         return false;
+    }
+    // API 是固定的对外工具接口，不再是「工具服务」页里可开关的协议；
+    // 保留 endpoint 与运行时路由，旧配置里的 api 开关一律不再生效。
+    if protocol == "api" {
+        return true;
     }
     load()
         .enabled
@@ -335,12 +356,23 @@ pub fn is_search_provider(value: &str) -> bool {
     SEARCH_PROVIDERS.contains(&value)
 }
 
+pub fn is_account_provider(value: &str) -> bool {
+    ACCOUNT_PROVIDERS.contains(&value)
+}
+
+pub fn is_fetch_provider(value: &str) -> bool {
+    API_KEY_PROVIDERS.contains(&value)
+}
+
 pub fn provider_display_name(provider: &str) -> &'static str {
     match provider {
         "tavily" => "Tavily",
         "querit" => "Querit",
         "firecrawl" => "Firecrawl",
         "ollama" => "Ollama Web Search",
+        "workbuddy" => "WorkBuddy 国内版",
+        "workbuddy-intl" => "WorkBuddy 国际版",
+        "kiro" => "Kiro",
         _ => "",
     }
 }
@@ -354,19 +386,28 @@ pub fn key_hint(value: &str) -> String {
     format!("{head}••••{tail}")
 }
 
-pub fn list_providers() -> Value {
+pub async fn list_providers(store: &AccountStore) -> Value {
     let config_value = load();
-    let rows = SEARCH_PROVIDERS.iter().map(|provider| {
+    let mut rows: Vec<Value> = API_KEY_PROVIDERS.iter().map(|provider| {
         let entry = config_value.providers.get(*provider).cloned().unwrap_or_default();
         json!({
             "provider": provider,
             "display_name": provider_display_name(provider),
+            "auth_type": "api_key",
+            "supports_search": true,
+            "supports_fetch": true,
+            "available": true,
             "configured": !entry.encrypted_key.is_empty(),
             "key_hint": if entry.key_hint.is_empty() { Value::Null } else { json!(entry.key_hint) },
             "enabled": entry.enabled,
             "updated_at": if entry.updated_at > 0 { json!(entry.updated_at) } else { Value::Null },
         })
-    }).collect::<Vec<_>>();
+    }).collect();
+    let account_rows = futures::future::join_all(ACCOUNT_PROVIDERS.iter().map(|provider| {
+        let entry = config_value.providers.get(*provider).cloned().unwrap_or_default();
+        account_search::provider_row(store, provider, entry)
+    })).await;
+    rows.extend(account_rows);
     Value::Array(rows)
 }
 
@@ -379,12 +420,34 @@ pub fn provider_selection() -> Value {
 }
 
 pub fn update_provider(
+    store: &AccountStore,
     provider: &str,
     api_key: Option<&str>,
     enabled: Option<bool>,
+    account_id: Option<&str>,
 ) -> Result<Value, String> {
     if !is_search_provider(provider) {
         return Err("未知的搜索提供商".into());
+    }
+    if is_account_provider(provider) {
+        if api_key.is_some_and(|key| !key.trim().is_empty()) {
+            return Err("该搜索来源使用已有账号，不接受 API Key".into());
+        }
+        let account_id = account_id.map(str::trim);
+        if let Some(id) = account_id.filter(|id| !id.is_empty()) {
+            account_search::validate_account(store, provider, id).map_err(|error| error.message)?;
+        }
+        let config_value = update(|config_value| {
+            let entry = config_value.providers.entry(provider.to_string()).or_default();
+            if let Some(id) = account_id { entry.account_id = id.to_string(); }
+            if let Some(enabled) = enabled { entry.enabled = enabled; }
+            entry.updated_at = crate::server::logging::now_ms();
+        })?;
+        let entry = config_value.providers.get(provider).cloned().unwrap_or_default();
+        return Ok(json!({ "success": true, "provider": provider, "account_id": entry.account_id }));
+    }
+    if account_id.is_some() {
+        return Err("该搜索来源使用 API Key，不接受账号绑定".into());
     }
     let api_key = api_key.map(str::trim).filter(|value| !value.is_empty());
     let encrypted = match api_key {
@@ -416,7 +479,7 @@ pub fn update_provider(
 }
 
 pub fn clear_provider_key(provider: &str) -> bool {
-    if !is_search_provider(provider) {
+    if !API_KEY_PROVIDERS.contains(&provider) {
         return false;
     }
     update(|config_value| {
@@ -430,7 +493,10 @@ pub fn clear_provider_key(provider: &str) -> bool {
 
 /// 读取某家当前配置（含解密后的密钥；仅服务端内部使用，禁止出现在日志/响应中）
 pub fn provider_key(provider: &str) -> Option<String> {
-    let entry = load().providers.get(provider)?.clone();
+    decrypt_provider_key(load().providers.get(provider)?)
+}
+
+fn decrypt_provider_key(entry: &ProviderConfig) -> Option<String> {
     if entry.encrypted_key.is_empty() {
         return None;
     }
@@ -493,8 +559,8 @@ pub fn update_selection(
         next_search = Some(seen);
     }
     if let Some(provider) = fetch.as_deref() {
-        if !is_search_provider(provider) {
-            return Err("抓取提供商无效".into());
+        if !is_fetch_provider(provider) {
+            return Err("该提供商不支持网页抓取".into());
         }
     }
     update(|config_value| {

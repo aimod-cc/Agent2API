@@ -34,6 +34,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use serde_json::{json, Value};
 
+use crate::server::core::compact_routing::{self, RequestFormat};
 use crate::server::core::key_scope::KeyScope;
 use crate::server::core::protocol::{anthropic, responses};
 use crate::server::core::upstream::cancellation;
@@ -157,6 +158,8 @@ pub async fn responses_endpoint(
         Ok(value) => value,
         Err(response) => return response,
     };
+    // 协议翻译前识别，保留原始文本块边界。
+    let compact_client = compact_routing::client_for_request(&source.behavior_client, &raw, RequestFormat::Responses);
     // 原始请求体留一份：回程要用它回显请求侧字段（instructions / tools / …），
     // 而下面会把 payload 改写成 Chat 形态
     let original = raw.clone();
@@ -187,7 +190,7 @@ pub async fn responses_endpoint(
 
     // 模型解析走公共管道（默认模型回落 / 别名映射 / 目录校验）。
     // 第三参是这把 Key 的可用模型白名单（None = 不限制），同 /v1/chat/completions
-    let requested_model = match super::request_prepare::resolve_model(&state, &mut chat_body, scope.as_ref()).await {
+    let requested_model = match super::request_prepare::resolve_client_model(&state, &mut chat_body, scope.as_ref(), compact_client).await {
         Ok(model) => model,
         Err(error) => {
             record_early_failure(&state, started_at, &pipeline::model_field_text(&raw), &client_reasoning, &source, &error);
@@ -357,6 +360,7 @@ pub async fn messages_endpoint(
     };
     let stream = raw.get("stream").and_then(Value::as_bool).unwrap_or(false);
 
+    let compact_client = compact_routing::client_for_request(&source.behavior_client, &raw, RequestFormat::Anthropic);
     // 协议翻译
     let mut chat_body = match anthropic::chat_from_anthropic(&raw) {
         Ok(body) => body,
@@ -370,7 +374,7 @@ pub async fn messages_endpoint(
     // 下游等级从**翻译后的 chat 体**读：Anthropic 的 thinking/output_config →
     // reasoning_effort 是网关自己的映射（anthropic_effort），比通用并集链更准
     let client_reasoning = pipeline::client_reasoning_of(&chat_body);
-    let requested_model = match super::request_prepare::resolve_model(&state, &mut chat_body, scope.as_ref()).await {
+    let requested_model = match super::request_prepare::resolve_client_model(&state, &mut chat_body, scope.as_ref(), compact_client).await {
         Ok(model) => model,
         Err(error) => {
             record_early_failure(&state, started_at, &pipeline::model_field_text(&raw), &client_reasoning, &source, &error);

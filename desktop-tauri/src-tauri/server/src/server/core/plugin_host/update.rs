@@ -490,7 +490,8 @@ pub async fn download(
             .map(|(id, _)| id.to_string())
     });
     let mut last_error = "没有可用的插件下载源".to_string();
-    for candidate in source::candidates(&asset.url, pack_id.is_some()) {
+    for candidate in source::download_candidates(&asset.url, pack_id.is_some(), &headers).await? {
+        let started = std::time::Instant::now();
         let response = match fetch_candidate(&candidate, &headers, None).await {
             Ok(response) => response,
             Err(error) => {
@@ -499,18 +500,27 @@ pub async fn download(
                 continue;
             }
         };
-        if !response.status().is_success() {
+        if candidate.is_rate_limited(&response) {
+            candidate.observe("rateLimited", started.elapsed().as_millis() as u64, false);
+            return Err(source::GithubSettings::Plugin.rate_limit_message(
+                source::retry_deadline(response.headers(), response.status().as_u16()),
+            ));
+        }
+        if response.status().as_u16() != 200 {
             last_error = format!(
                 "下载插件包失败：{}返回 HTTP {}",
                 candidate.label(),
                 response.status().as_u16()
             );
-            if source::should_switch(&candidate, response.status()) {
+            if source::should_switch(&candidate, response.status())
+                || candidate.source == source::Source::Mirror
+            {
                 candidate.forget();
                 continue;
             }
             return Err(last_error);
         }
+        candidate.observe("ok", started.elapsed().as_millis() as u64, false);
         match read_download(response, asset, &mut progress).await {
             Ok(buffer) => {
                 if asset.require_signed || candidate.source == source::Source::Mirror {

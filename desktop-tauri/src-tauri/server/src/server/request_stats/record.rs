@@ -252,18 +252,7 @@ pub struct RequestEntry {
     /// `row.get(n)` 的序号。
     #[serde(rename = "isTest", default)]
     pub is_test: bool,
-    /// **请求来源客户端**（由入口从下游 `User-Agent` 识别的类型，schema v12
-    /// 加的列；旧行 `default` 读成空串 = 没有记录）。
-    ///
-    /// 取值是 `core::client::classify` 的输出：`Codex` / `ZCode` /
-    /// `Claude Code` / `deepseek-harness` / `GitHub Copilot` / `CherryStudio` /
-    /// `other`，无 UA 时为空串。存的是**归类结果**而不是原始 UA：UA 带版本号，
-    /// 逐条存会把明细撑大且没法直接读；「是哪家客户端」这一维只需要归类。
-    ///
-    /// 取值本身就是展示值（产品名不翻译），前端只把 `other` 显示成「其它」、
-    /// 空串显示成占位符。请求日志的「客户端」列读它。
-    ///
-    /// 与 `phase` 同一位置纪律：新加的列排在结构体末尾。
+    /// 请求发生时的统计分类与识别依据；旧行没有依据，不重新猜测来源。
     #[serde(flatten)]
     pub source: RequestSource,
 }
@@ -304,6 +293,10 @@ pub struct AttemptDetail {
     pub account: String,
     #[serde(rename = "accountId", default)]
     pub account_id: String,
+    #[serde(rename = "candidateId", default)]
+    pub candidate_id: String,
+    #[serde(rename = "memberId", default)]
+    pub member_id: String,
     #[serde(default)]
     pub model: String,
     #[serde(default)]
@@ -580,6 +573,8 @@ impl NewRequestEntry {
                     // 「看起来不同的名字」）；空串语义 = 该轮没有账号记录
                     account: item.account.trim().to_string(),
                     account_id: item.account_id.trim().to_string(),
+                    candidate_id: item.candidate_id,
+                    member_id: item.member_id,
                     model: item.model.trim().to_string(),
                     reasoning: item.reasoning.trim().to_string(),
                     reason: item.reason,
@@ -625,9 +620,7 @@ impl NewRequestEntry {
             // 来源标记原样透传（不做任何推导）：它是调用方（入口 handler）
             // 才知道的事实，存储层只负责把它带进库里
             is_test: self.is_test,
-            // 客户端同理原样透传（trim 的理由与 provider 相同）：入口已经过
-            // `core::client::classify`，存储层不再重新归类 —— 存储层不认识
-            // UA 规则，两处各判一遍迟早会漂
+            // 分类在入口定稿，收尾时不因设置变动重新归类。
             source: self.source.normalized(),
         }
     }
