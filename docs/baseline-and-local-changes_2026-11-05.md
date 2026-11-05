@@ -56,6 +56,10 @@
 
 改动位置：`desktop-tauri/ui-islands/src/islands/routing-editor-state.ts`、`routing-page.tsx`，`desktop-tauri/src-tauri/server/src/server/request_stats/routing.rs`。
 
+### 画布拖拽落点提示修复（2026-11-05）
+
+- 参与列表顶部补 6px 留白，容纳首卡上沿外 5px 的 `drop-before` 落点横条；此前滚动容器顶部内边距只有 1px，整组拖到第一位时蓝色横条被 `overflow` 裁剪，其他位置不受影响
+
 ## 构建流程
 
 个人 fork 使用 `.github/workflows/fork-build.yml`（显示名 `performance-build`）手动构建：
