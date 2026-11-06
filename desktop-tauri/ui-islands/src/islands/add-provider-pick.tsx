@@ -183,6 +183,9 @@ export const PROVIDER_ICONS: Record<string, string> = {
   'chatgpt-subscription': 'assets/providers/openai.png',
   'copilot-subscription': 'assets/providers/copilot.svg',
   'gemini-subscription': 'assets/providers/gemini-cli.svg',
+  // 插件家（`quwork`）没有内置枚举，图标与内置家走同一张表：图取自客户端
+  // 安装目录 `QuWork.exe` 的 256×256 图标资源。
+  quwork: 'assets/providers/quwork.png',
 }
 
 /**
