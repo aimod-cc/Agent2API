@@ -11,9 +11,11 @@ import {
   accountRequest, addedLabelOf, afterAdd, describeError, isMethodsUnavailable,
   normalizeLoginResult, postAccount, runtimeProviderOf, shared, startLogin, toast,
   type LoginProgress, type LoginResult, type RuntimeProviderRecord,
+  type AccountRecord,
   type WebLoginController, type WebLoginView,
 } from './add-account-bridge'
 import { draftOfProxy, ProxyForm, readProxyDraft } from './accounts-proxy-form'
+import { SmsLoginBlock } from './add-sms-provider'
 
 import {
   loginText, methodLabel, parseCallbackInput, parseMethods, promptEnabled, promptValue, readInputs,
@@ -140,6 +142,10 @@ export function DynamicProviderBlock({
   const [values, setValues] = React.useState<Record<string, Record<string, string>>>({})
   const [credentialJson, setCredentialJson] = React.useState('')
   const [name, setName] = React.useState('')
+  // 短信登录的手机号与备注名单独存：它不参与 prompts 那套 `values[method.id]`，
+  // 也不经过 login.start，混在一起会让「换方式」时互相清空。
+  const [smsPhone, setSmsPhone] = React.useState('')
+  const [smsName, setSmsName] = React.useState('')
   const [proxyDraft, setProxyDraft] = React.useState(() => draftOfProxy(undefined))
   const [mode, setMode] = React.useState<'external' | 'embedded'>('external')
   const [saving, setSaving] = React.useState(false)
@@ -498,7 +504,33 @@ export function DynamicProviderBlock({
       </AlertDescription>
     </Alert> : null}
 
-    {method && methodsState.phase !== 'loading' ? <AddGroup label={methodLabel(method)}>
+    {method && methodsState.phase !== 'loading' && method.type === 'sms' ? <AddGroup label={methodLabel(method)}>
+      <SmsLoginBlock
+        provider={provider}
+        methodLabel={methodLabel(method)}
+        instructions={method.instructions}
+        disabled={saving}
+        prefix={prefix}
+        phone={smsPhone}
+        name={smsName}
+        onPhone={setSmsPhone}
+        onName={setSmsName}
+        onAdded={async account => {
+          // 短信登录是同步落库的：网关已经写完账号（并回 `{account, list}`），
+          // 这里只做与其它方式一致的收尾 —— 重置表单、刷新列表、提示、关弹窗。
+          // 不走 `finish()`：它要一个 `LoginResult`，而短信这条路没有 session /
+          // warning 那些字段，硬造一个只会给后来人留陷阱。
+          const nickname = addedLabelOf(account as AccountRecord | null)
+          setValues({})
+          setSmsPhone('')
+          setSmsName('')
+          setError('')
+          await afterAdd(nickname, label)
+        }}
+      />
+    </AddGroup> : null}
+
+    {method && methodsState.phase !== 'loading' && method.type !== 'sms' ? <AddGroup label={methodLabel(method)}>
       {method.type === 'oauth' && !method.localOnly ? <p>{t('填写信息后发起授权，进度与失败原因会显示在这里。')}</p> : null}
       {method.type === 'api' ? <p>{t('API 方法提交给插件的账号规范化入口；不会用该密钥发起 OAuth 登录。')}</p> : null}
       {method.localOnly ? <Alert variant='warning'>
