@@ -1,23 +1,4 @@
-//! DeepSeek Harness（`dsh`）的适配。
-//!
-//! 模型提供商写在用户设置 `~/.dsh/settings.yaml` 的 `llm-pi-ai.providers.<路由>` 下；密钥不在
-//! 这里 —— DSH 的设置只存凭据引用（`apiKeyEnv` 是环境变量名），值放在同目录的
-//! `.credentials.yaml` 的 `refs` 下，因此接入要同时改两个文件。两处都是 DSH 运行时按需读取的
-//! 用户层，改完不需要重启，刷新已打开的页面即可看到新提供商。
-//!
-//! 字段与取值依据是 DSH 0.1.2-rc.1 的 `@deepseek-ai/dsh-llm-pi-ai`（已装在本机，直接读的类型
-//! 定义）与 `dsh-credentials-local`：
-//!
-//! - 自定义路由必须自己给出 `api` / `baseURL` / `models`，可用的 `api` 只有
-//!   `openai-completions`、`openai-responses`、`anthropic-messages`；
-//! - 模型档只认 `id` / `name` / `contextWindow` / `maxTokens` / `input[]` / `reasoningEfforts`，
-//!   `input` 的取值只有 `text` 与 `image`；思考档位只有
-//!   `off` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max`；
-//! - 无法服务的字段会让 DSH 在写入时拒绝**整段** `llm-pi-ai` 命名空间，所以这里只写它认的字段，
-//!   网关目录里对不上的思考档位直接丢掉，不猜；
-//! - `.credentials.yaml` 必须是 `version: 1` 且顶层只有 `version` / `refs` / `records`，
-//!   否则 DSH 自己会拒绝启动，本页也就拒绝改写；
-//! - 官方设置页派生的凭据名是 `<路由转大写、非字母数字转下划线>_API_KEY`，这里沿用同一口径。
+//! DSH 模型与认证：旧版用户设置和新版 Cordis profile 共用模型字段，密钥独立存储。
 
 use super::super::{
     files::{self, Change},
@@ -85,16 +66,28 @@ fn credential_ref(route: &str) -> String {
     format!("{}_API_KEY", name.trim_matches('_'))
 }
 
-/// 凭据文件跟 DSH 自己的解析口径走：`$DSH_HOME/.credentials.yaml`，没设变量时就在设置文件旁边。
-pub fn credential_path(path: &Path) -> PathBuf {
-    match std::env::var_os("DSH_HOME").filter(|value| !value.is_empty()) {
-        Some(home) => PathBuf::from(home).join(".credentials.yaml"),
-        None => path.with_file_name(".credentials.yaml"),
+/// 新版 profile 的密钥仍属于 DSH home，不放进 profile 目录。
+pub fn credential_path(path: &Path) -> Result<PathBuf, String> {
+    if super::super::dsh_paths::is_patch(path) {
+        let composition = super::super::dsh_patch::Composition::load(path)?;
+        if !composition.entries.contains_key("credentials") { return Err("所选 DSH 配置没有独立凭据存储，不能写入密钥".into()); }
+        let config = composition.config("credentials")?;
+        if let Some(custom) = config.get("path").and_then(Value::as_str) {
+            let file = PathBuf::from(custom);
+            if !file.is_absolute() { return Err("DSH 自定义密钥路径不是绝对路径，不能安全写入".into()); }
+            return Ok(file);
+        }
+        if let Some(custom) = config.get("dshHome").and_then(Value::as_str) {
+            let home = PathBuf::from(custom);
+            if !home.is_absolute() { return Err("DSH 自定义密钥目录不是绝对路径，不能安全写入".into()); }
+            return Ok(home.join(".credentials.yaml"));
+        }
     }
+    Ok(super::super::dsh_paths::home_for(path).join(".credentials.yaml"))
 }
 
 fn references(path: &Path) -> Result<Map<String, Value>, String> {
-    let file = credential_path(path);
+    let file = credential_path(path)?;
     let Some(bytes) = files::read(&file)? else {
         return Ok(Map::new());
     };
@@ -344,11 +337,17 @@ pub fn write(
         .trim()
         .to_string();
     let mut pending = None;
+    let credential_scope = super::super::dsh_paths::profile_name(path);
     match validate::credential(profile)?.as_deref() {
         Some(key) if !key.is_empty() => {
             // 导入来的条目沿用它自己的引用名，本页新写的用派生名，便于断开时清理。
             let reference = if profile.auth_mode == "preserve" && !existing_ref.is_empty() {
+                if let Some(current) = references(path)?.get(&existing_ref).and_then(Value::as_str) {
+                    if current != key { return Err("此 DSH 密钥引用可能由其他配置共用；修改密钥时请选择 API Key 认证方式".into()); }
+                }
                 existing_ref.clone()
+            } else if super::super::dsh_paths::is_patch(path) {
+                credential_ref(&format!("agent2api-{credential_scope}-{route}"))
             } else {
                 credential_ref(&route)
             };
@@ -385,14 +384,14 @@ pub fn write(
     if let Some((reference, key)) = pending {
         extra.push(credential_change(path, &reference, Some(&key))?);
         warnings.push(
-            "同时修改 settings.yaml 与 .credentials.yaml（密钥只以引用名出现在设置里）。".into(),
+            "同时修改模型配置与独立密钥文件；密钥只以引用名出现在模型设置中。".into(),
         );
     }
     Ok(extra)
 }
 
 fn credential_change(path: &Path, reference: &str, key: Option<&str>) -> Result<Change, String> {
-    let file = credential_path(path);
+    let file = credential_path(path)?;
     let mut change = Change::load(file)?;
     let original = files::text(change.before.as_deref())?;
     let mut store = if original.trim().is_empty() {
@@ -403,7 +402,7 @@ fn credential_change(path: &Path, reference: &str, key: Option<&str>) -> Result<
     if store.as_object().is_some_and(Map::is_empty) {
         store = json!({ "version": 1 });
     }
-    supported(&store, &change.path)?;
+    supported(&store, &change.path, !super::super::dsh_paths::is_patch(path))?;
     if store.get("refs").is_none_or(Value::is_null) {
         set(&mut store, &["refs"], json!({}))?;
     }
@@ -415,9 +414,8 @@ fn credential_change(path: &Path, reference: &str, key: Option<&str>) -> Result<
     Ok(change)
 }
 
-/// DSH 对凭据文件的形状是硬要求：缺 `version`（旧扁平布局）或出现未知顶层字段时它自己会拒绝
-/// 启动，这里跟着拒绝，避免把它写坏。
-fn supported(store: &Value, path: &Path) -> Result<(), String> {
+/// 旧版拒绝未知顶层字段；新版只忽略它们，编辑时原样保留。
+fn supported(store: &Value, path: &Path, strict: bool) -> Result<(), String> {
     match store.get("version").and_then(Value::as_u64) {
         Some(1) => {}
         Some(version) => {
@@ -434,7 +432,7 @@ fn supported(store: &Value, path: &Path) -> Result<(), String> {
         }
     }
     for key in store.as_object().map(Map::keys).into_iter().flatten() {
-        if !matches!(key.as_str(), "version" | "refs" | "records") {
+        if strict && !matches!(key.as_str(), "version" | "refs" | "records") {
             return Err(format!(
                 "{} 含有未知顶层字段 {key}，DSH 自身也会拒绝读取，请先处理",
                 path.display()
@@ -444,7 +442,7 @@ fn supported(store: &Value, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn delete(path: &Path, value: &mut Value, profile: &Profile) -> Result<Vec<Change>, String> {
+pub fn delete(_path: &Path, value: &mut Value, profile: &Profile) -> Result<Vec<Change>, String> {
     let route = route_of(&profile.native.source_id, profile);
     remove(value, &[NAMESPACE, "providers", &route]);
     let selected = value
@@ -456,10 +454,5 @@ pub fn delete(path: &Path, value: &mut Value, profile: &Profile) -> Result<Vec<C
         // 默认模型指向被删的提供商时 DSH 会解析不出模型；移除这段让它回到自带默认。
         remove(value, &[DEFAULT_MODEL]);
     }
-    let mut extra = Vec::new();
-    let file = credential_path(path);
-    if Change::load(file.clone())?.before.is_some() {
-        extra.push(credential_change(path, &credential_ref(&route), None)?);
-    }
-    Ok(extra)
+    Ok(Vec::new())
 }

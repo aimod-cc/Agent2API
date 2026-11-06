@@ -62,7 +62,7 @@ export function AgentResourcesPanel({ clientId, kind, capabilities, request, t, 
       const server = mcp?.servers.find(item => item.name === value)
       setName(server?.name || '')
       setRevision(mcp?.revision || 'absent')
-      const template = clientId === 'opencode' ? { type: 'local', command: [''] } : { command: '', args: [] }
+      const template = clientId === 'opencode' ? { type: 'local', command: [''] } : clientId === 'dsh' ? { transport: 'stdio', command: '', args: [], toolCallTimeoutMs: 60000, failOnStartupError: false } : { command: '', args: [] }
       setDraft(JSON.stringify(server?.config || template, null, 2))
     }
     setEditorOpen(true)
@@ -147,12 +147,13 @@ export function AgentResourcesPanel({ clientId, kind, capabilities, request, t, 
     </> : null}
     {mcp ? <>
       <code className='break-all text-xs'>{mcp.path}</code>
+      {clientId === 'dsh' && <p className='text-xs text-muted-foreground'>{t('动态表达式、独立作用域或全局覆盖的 MCP 为只读，请在 DSH 中编辑。')}</p>}
       {!mcp.servers.length ? <Empty>{t('这个客户端还没有 MCP')}</Empty> : <ul className='m-0 flex list-none flex-col gap-2 p-0'>
         {mcp.servers.map(item => <Card key={item.name} render={<li />} className='flex items-start gap-3 p-3'>
           <div className='min-w-0 flex-1'><p className='truncate text-sm font-medium'>{item.name}</p>{item.endpoint ? <code className='mt-1 block break-all text-xs text-muted-foreground'>{item.endpoint}</code> : null}</div>
           <div className='flex shrink-0 items-center gap-1.5'>
-            <Button size='sm' variant='outline' disabled={busy} onClick={() => void pick(item.name)}>{t('编辑')}</Button>
-            <Button size='sm' variant='destructive' disabled={busy} onClick={() => void prepare({ kind, name: item.name, revision: mcp.revision, delete: true }, item.name, true)}>{t('删除')}</Button>
+            <Button size='sm' variant='outline' disabled={busy || item.editable === false} onClick={() => void pick(item.name)}>{t('编辑')}</Button>
+            <Button size='sm' variant='destructive' disabled={busy || item.deletable === false} onClick={() => void prepare({ kind, name: item.name, revision: mcp.revision, delete: true }, item.name, true)}>{t('删除')}</Button>
           </div>
         </Card>)}
       </ul>}

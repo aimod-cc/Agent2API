@@ -53,6 +53,8 @@ export type AgentClient = {
   configPath: string
   resolvedPath: string
   pathOverride: string
+  configTargets?: Array<{ path: string; label: string; profile: string; version: string; layout: 'legacy' | 'profile' }>
+  configLayout?: 'legacy' | 'profile' | ''
   format: string
   configMode: 'single' | 'providers' | 'models' | 'readonly'
   protocol: string

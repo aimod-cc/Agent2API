@@ -35,11 +35,12 @@ function TargetList({ targets, selected, onToggle }: { targets: InstallTarget[];
   if (!targets.length) return <Empty>{t('当前没有可用的安装目标')}</Empty>
   return <div className='flex max-h-[320px] flex-col gap-1 overflow-auto rounded-md border border-border p-2'>
     {targets.map(target => <label key={target.key} className='flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-nav-hover'>
-      <Checkbox checked={selected.includes(target.key)} onCheckedChange={() => onToggle(target.key)} />
+      <Checkbox checked={selected.includes(target.key)} disabled={target.supported === false} onCheckedChange={() => onToggle(target.key)} />
       <span className='min-w-0 flex-1'>
         <span className='font-medium'>{target.label}</span>
         <span className='ml-2 text-xs text-subtle'>{targetLabel(target)}</span>
         <span className='block truncate text-[11px] text-subtle' title={target.path}>{target.path}</span>
+        {target.note && <span className='block text-xs text-warning'>{t(target.note)}</span>}
       </span>
     </label>)}
   </div>
@@ -74,7 +75,7 @@ export function ToolInstallDialog({ service, mode, onClose, onDone }: {
         if (!alive) return
         setTargets(targetsResult.targets || [])
         setKeys(keysResult.keys || [])
-        setSelected((targetsResult.targets || []).filter(target => target.detected).map(target => target.key))
+        setSelected((targetsResult.targets || []).filter(target => target.detected && target.supported !== false).map(target => target.key))
         setKeyId(keysResult.keys?.[0]?.id || '')
       })
       .catch(failure => { if (alive) setError(failure instanceof Error ? failure.message : String(failure)) })
@@ -83,8 +84,9 @@ export function ToolInstallDialog({ service, mode, onClose, onDone }: {
   }, [service.id, mode])
 
   const toggle = (key: string) => setSelected(current => current.includes(key) ? current.filter(item => item !== key) : [...current, key])
-  const allSelected = targets.length > 0 && targets.every(target => selected.includes(target.key))
-  const toggleAll = () => setSelected(allSelected ? [] : targets.map(target => target.key))
+  const availableTargets = targets.filter(target => target.supported !== false)
+  const allSelected = availableTargets.length > 0 && availableTargets.every(target => selected.includes(target.key))
+  const toggleAll = () => setSelected(allSelected ? [] : availableTargets.map(target => target.key))
 
   const submit = async () => {
     if (!selected.length) { setError(t('请至少选择一个目标')); return }
@@ -131,6 +133,7 @@ export function ToolInstallDialog({ service, mode, onClose, onDone }: {
             <Button variant='ghost' size='sm' className='ml-auto' onClick={toggleAll}>{allSelected ? t('取消全选') : t('全选')}</Button>
           </div>
           <TargetList targets={targets} selected={selected} onToggle={toggle} />
+          {mode === 'mcp' && selected.includes('dsh') && <Alert>{t('DSH 使用 Agent 页当前选择的配置目标。写入后请在 DSH 中确认工具是否出现，必要时重启对应客户端。')}</Alert>}
           {mode === 'skill' && <Field>
             <FieldLabel>{t('运行时')}</FieldLabel>
             <SegmentedControl value={variant} onValueChange={value => { if (typeof value === 'string') setVariant(value) }} aria-label={t('运行时')} options={[

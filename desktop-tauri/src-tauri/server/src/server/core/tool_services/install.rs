@@ -188,10 +188,20 @@ pub fn mcp_targets(service: &str) -> Vec<Value> {
     let name = server_name(service);
     let mut rows = Vec::new();
     for def in agents::CLIENTS {
+        if def.id == "dsh" && resources::mcp_config_path(def).is_none() {
+            let detection = agents::paths::detect(def);
+            rows.push(json!({ "key": def.id, "label": def.name, "path": detection.path,
+                "detected": detection.detected, "installed": false, "supported": false,
+                "note": detection.note.unwrap_or_else(|| "请先在 Agent 页选择 DSH 配置目标并启动一次客户端。".into()) }));
+            continue;
+        }
         let Some(path) = resources::mcp_config_path(def) else {
             continue;
         };
-        let installed = resources::snapshot(def, "mcp")
+        let snapshot = resources::snapshot(def, "mcp");
+        let supported = def.id != "dsh" || snapshot.is_ok();
+        let note = if def.id == "dsh" { snapshot.as_ref().err().cloned() } else { None };
+        let installed = snapshot
             .ok()
             .and_then(|snapshot| {
                 snapshot
@@ -206,7 +216,8 @@ pub fn mcp_targets(service: &str) -> Vec<Value> {
             "path": path.display().to_string(),
             "detected": crate::server::core::agents::paths::detect(def).detected,
             "installed": installed,
-            "supported": true,
+            "supported": supported,
+            "note": note,
         }));
     }
     rows
@@ -233,6 +244,7 @@ fn timeout_entry(def: &agents::ClientDef, timeout: u64) -> Value {
         "zcode" => json!({ "timeoutMs": millis }),
         "claude-code" => json!({ "timeout": millis }),
         "codex" => json!({ "tool_timeout_sec": timeout }),
+        "dsh" => json!({ "toolCallTimeoutMs": millis }),
         _ => Value::Null,
     }
 }
@@ -386,9 +398,15 @@ pub fn install_mcp(
             outcomes.push(InstallOutcome::failed(client_id, def.name, "该客户端不支持 MCP 配置写入"));
             continue;
         }
-        let config = if let Some(bridge) = &image_bridge {
+        let mut config = if let Some(bridge) = &image_bridge {
             merge_entry(super::image_bridge::entry(def, &url, api_key, bridge), timeout_entry(def, timeout))
         } else { mcp_entry(def, service, &url, api_key, bridge.as_deref(), timeout) };
+        if def.id == "dsh" {
+            config["serverName"] = json!(name);
+            config["transport"] = json!(if mode == "bridge" { "stdio" } else { "streamable-http" });
+            config["failOnStartupError"] = json!(false);
+            if let Some(object) = config.as_object_mut() { object.remove("type"); }
+        }
         match write_mcp_entry(def, name, config) {
             Ok(path) => outcomes.push(InstallOutcome::ok(client_id, def.name, path)),
             Err(error) => outcomes.push(InstallOutcome::failed(client_id, def.name, error)),

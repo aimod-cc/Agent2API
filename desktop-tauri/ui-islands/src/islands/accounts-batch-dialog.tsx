@@ -10,13 +10,15 @@ import {
 import { t } from '../i18n'
 import {
   ACCOUNT_CONCURRENCY_MAX as CONC_MAX, errorMessage, esc, shared, toast,
-  type AccountRecord, type BatchAccountsPayload, type BatchLimiterMode, type LimiterGroup,
+  type AccountRecord, type BatchAccountsPayload, type BatchAccountsResult, type BatchLimiterMode, type LimiterGroup,
 } from './accounts-shared'
 import {
   displayNameOf, providerFeatures, providerOf, supportsProxyRotate, supportsUsage,
 } from './accounts-domain'
 import { allAccounts, findAccount, syncBalancesSnapshot } from './accounts-data'
 import { confirmBatchResult, refreshSavedAccounts } from './accounts-update'
+import { tokenRefreshSkipReason } from './accounts-authorization'
+import { refreshAccountTokens, type BatchTokenRefreshProgress } from './accounts-batch-refresh'
 import { limiterDraftOf, LimiterSection } from './accounts-dialog-limiter'
 import { readUsageDraft, UsageSettingsSection, usageDraftOf, type UsageDraft } from './accounts-dialog-usage'
 import { draftOfProxy, ProxyForm, readProxyDraft, type ProxyDraft } from './accounts-proxy-form'
@@ -24,6 +26,7 @@ import { draftOfProxy, ProxyForm, readProxyDraft, type ProxyDraft } from './acco
 const BATCH_ACTIONS = [
   { value: 'enable', label: () => t('启用') },
   { value: 'disable', label: () => t('禁用') },
+  { value: 'refresh', label: () => t('刷新 Token') },
   { value: 'proxy', label: () => t('修改代理') },
   { value: 'concurrency', label: () => t('设置并发上限') },
   { value: 'usageQuery', label: () => t('查询设置') },
@@ -54,12 +57,15 @@ export function BatchDialog({ ids, action, onClose }: { ids: string[]; action: s
   const [sourceId, setSourceId] = React.useState('')
   const [busy, setBusy] = React.useState(false)
   const [result, setResult] = React.useState<React.ReactNode>('')
+  const [refreshProgress, setRefreshProgress] = React.useState<BatchTokenRefreshProgress | null>(null)
   const running = React.useRef(false)
   const accounts = ids.map(id => findAccount(id)).filter((account): account is AccountRecord => account !== null)
   const usageAccounts = accounts.filter(supportsUsage)
   const editingRules = current === 'limiters' && (limiterMode === 'append' || limiterMode === 'replace')
   const needsBalance = editingRules && limiterDraft.some(group => group.conditions.some(condition => condition.metric !== 'tokens' && condition.metric !== 'requests'))
-  const targets = current === 'usageQuery' || needsBalance ? usageAccounts : accounts
+  const targets = current === 'refresh'
+    ? accounts.filter(account => !tokenRefreshSkipReason(account))
+    : current === 'usageQuery' || needsBalance ? usageAccounts : accounts
   const skippedAccounts = accounts.filter(account => !targets.includes(account))
   const copyOptions = current === 'usageQuery' ? usageAccounts : accounts
   const source = copyOptions.find(account => account.id === sourceId)
@@ -162,19 +168,30 @@ export function BatchDialog({ ids, action, onClose }: { ids: string[]; action: s
     running.current = true
     setBusy(true)
     setResult('')
+    setRefreshProgress(null)
     try {
       if (!(await confirmOperation())) return
-      const bridge = shared().workbuddyDesktop
-      if (!bridge?.batchAccounts) throw new Error(t('批量操作接口不可用，请重新打开页面'))
-      const data = confirmBatchResult(await bridge.batchAccounts(payload), payload)
+      let data: BatchAccountsResult
+      if (current === 'refresh') {
+        data = await refreshAccountTokens(ids, setRefreshProgress)
+      } else {
+        const bridge = shared().workbuddyDesktop
+        if (!bridge?.batchAccounts) throw new Error(t('批量操作接口不可用，请重新打开页面'))
+        data = confirmBatchResult(await bridge.batchAccounts(payload), payload)
+      }
       const accepted = data.ok || []
-      const changed = current === 'remove' ? (data.removed || []).length : accepted.filter(item => item.changes?.length).length
+      const changed = current === 'remove' ? (data.removed || []).length
+        : current === 'refresh' ? accepted.length : accepted.filter(item => item.changes?.length).length
       const unchanged = current === 'remove' ? 0 : accepted.length - changed
       const failed = data.failed || []
       const skipped = data.skipped || []
-      const summary = t('{verb}完成：成功 {ok} 个，未变更 {unchanged} 个，跳过 {skip} 个，失败 {fail} 个', {
-        verb, ok: changed, unchanged, skip: skipped.length, fail: failed.length,
-      })
+      const summary = current === 'refresh'
+        ? t('刷新 Token 完成：成功 {ok} 个，跳过 {skip} 个，失败 {fail} 个', {
+          ok: changed, skip: skipped.length, fail: failed.length,
+        })
+        : t('{verb}完成：成功 {ok} 个，未变更 {unchanged} 个，跳过 {skip} 个，失败 {fail} 个', {
+          verb, ok: changed, unchanged, skip: skipped.length, fail: failed.length,
+        })
       toast(summary, failed.length ? 'err' : 'ok')
       if (failed.length || skipped.length) {
         setResult(<div role='status' className='space-y-2'>
@@ -201,6 +218,7 @@ export function BatchDialog({ ids, action, onClose }: { ids: string[]; action: s
     } finally {
       running.current = false
       setBusy(false)
+      setRefreshProgress(null)
     }
   }
 
@@ -213,10 +231,16 @@ export function BatchDialog({ ids, action, onClose }: { ids: string[]; action: s
             <DialogSection>
               <h3>{t('将作用于以下账号')}</h3>
               <p className='max-h-[84px] overflow-y-auto'>{targets.map(labelOf).join(t('、')) || t('没有适用于本次操作的账号')}</p>
-              {skippedAccounts.length ? <p>{t('以下 {count} 个账号不支持余额查询，本次会跳过：{names}', {
-                count: skippedAccounts.length, names: skippedAccounts.map(labelOf).join(t('、')),
-              })}</p> : null}
-              {current !== 'remove' ? <p>{t('只修改本次选择的设置，不影响备注、凭证、转发顺序或其他设置。')}</p> : null}
+              {skippedAccounts.length ? <p className='max-h-[84px] overflow-y-auto'>{current === 'refresh'
+                ? <>{t('跳过 {count} 个：', { count: skippedAccounts.length })}
+                  {skippedAccounts.map(account => `${labelOf(account)}（${tokenRefreshSkipReason(account)}）`).join(t('；'))}
+                </>
+                : t('以下 {count} 个账号不支持余额查询，本次会跳过：{names}', {
+                  count: skippedAccounts.length, names: skippedAccounts.map(labelOf).join(t('、')),
+                })}</p> : null}
+              {current === 'refresh'
+                ? <p>{t('逐个刷新所选账号的 Token，未到期也会尝试刷新；不改变启用状态、代理或转发顺序。')}</p>
+                : current !== 'remove' ? <p>{t('只修改本次选择的设置，不影响备注、凭证、转发顺序或其他设置。')}</p> : null}
             </DialogSection>
             <DialogSection>
               <h3>{t('操作')}</h3>
@@ -283,6 +307,9 @@ export function BatchDialog({ ids, action, onClose }: { ids: string[]; action: s
               </p> : null}
             </DialogSection>
           </FieldSet>
+          {refreshProgress ? <p role='status' className='detail'>
+            {t('刷新 Token：已处理 {completed}/{total} 个，当前账号：{name}', refreshProgress)}
+          </p> : null}
           <div className='detail min-h-[18px]'>{result}</div>
         </DialogBody>
         <DialogFooter>

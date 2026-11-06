@@ -1,5 +1,6 @@
 //! 客户端用户级提示词、Skill 与 MCP：路径在服务端确定，写入必须匹配读到的文件版本。
 
+mod dsh;
 mod mcp;
 mod paths;
 mod skills;
@@ -46,6 +47,7 @@ pub fn snapshot(def: &ClientDef, kind: &str) -> Result<Value, String> {
             Ok(json!({ "path": path, "exists": bytes.is_some(), "content": files::text(bytes.as_deref())?, "revision": revision(bytes.as_deref()) }))
         }
         "skills" => skills::list(&paths),
+        "mcp" if def.id == "dsh" => dsh::read(&dsh::config_path(def)?),
         "mcp" => mcp::read(&paths),
         _ => Err("客户端资源类型无效".into()),
     }
@@ -59,6 +61,7 @@ pub fn skill(def: &ClientDef, id: &str) -> Result<Value, String> {
 }
 
 fn plan(def: &ClientDef, payload: &Value) -> Result<Plan, String> {
+    if def.id == "dsh" && payload.get("kind").and_then(Value::as_str) == Some("mcp") { return dsh::plan(def, payload); }
     let paths = paths::for_client(def);
     let field = |key| payload.get(key).and_then(Value::as_str).unwrap_or("");
     let kind = field("kind");

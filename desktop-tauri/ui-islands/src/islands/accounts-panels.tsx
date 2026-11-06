@@ -55,7 +55,7 @@ import { CreditDetailButton, creditRowsOf } from './accounts-credit-detail'
 import { creditExpirySummaryOf, creditExpiryText, creditExpiryUnitOf, expiringCreditsOf, type CreditExpirySummary, type ExpiringCredit } from '../../../ui-shared/credit-expiry'
 import { useDisplayClock } from '../../../ui-shared/use-display-clock'
 import { UsageWindowsCell, usageWindows } from './accounts-usage-windows'
-import { accountReloginText } from './accounts-authorization'
+import { accountReloginText, supportsTokenRefresh } from './accounts-authorization'
 import { credentialExpiryRowsOf, credentialExpiryText, type CredentialExpiryRow } from '../../../ui-shared/credential-expiry'
 import { creditStatisticsWalletsOf, isSnapshotWallet, snapshotReadingsOf, usageAggregateOf, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
 import { LimitDetailButton, limitRowsOf } from './accounts-limit-detail'
@@ -526,7 +526,7 @@ export function GroupBandRow({ group, collapsed, colSpan }: {
             aria-label={t('分组设置')}
             onClick={() => openGroupDialog(group.provider)}
             dangerouslySetInnerHTML={{ __html: iconHtml('settings', 14) }} />
-          <GroupMenu group={group} ids={group.accounts.map(account => account.id)} collapsed={collapsed} />
+          <GroupMenu group={group} ids={group.members.map(account => account.id)} collapsed={collapsed} />
         </div>
       </TableCell>
     </TableRow>
@@ -1762,7 +1762,7 @@ export function MoreMenu({ account, atFront }: { account: AccountRecord; atFront
             onClick={() => { setOpen(false); openSettingsDialog(account.id) }}>
             {t('并发上限：{value}', { value: maxConcurrent > 0 ? maxConcurrent : t('不限') })}
           </Button>
-          {account.desktop !== true && (account.canRefresh === true || account.hasRefreshToken === true) ? (
+          {supportsTokenRefresh(account) ? (
             <Button variant='ghost' size='sm' className={itemClass} disabled={account.needsRelogin === true}
               title={account.needsRelogin ? accountReloginText(account) : undefined}
               onClick={() => { setOpen(false); shared().wbApp?.runAccountAction?.('refresh', account.id) }}>

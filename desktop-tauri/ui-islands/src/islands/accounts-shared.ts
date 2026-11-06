@@ -177,6 +177,7 @@ export type AccountRecord = {
   zcodePlan?: string
   hasAccessToken?: boolean
   accessTokenExpiresAt?: number | null
+  canRefresh?: boolean
   hasRefreshToken?: boolean
   refreshTokenLongLived?: boolean
   refreshExpiresAt?: number | null
@@ -378,7 +379,7 @@ export type AccountsBridge = {
     error?: string
   } | null | undefined>
   switchAccount(id: string): Promise<{ changed?: boolean } | null | undefined>
-  refreshAccountToken(id: string): Promise<unknown>
+  refreshAccountToken(id: string): Promise<{ refreshedId?: string; list?: AccountsSnapshot } | null | undefined>
   removeAccount(id: string): Promise<unknown>
   /** 套餐池模型请求的验证状态与库存；读取不发起验证码。 */
   zcodeCaptchaStats?(): Promise<{

@@ -4,6 +4,7 @@ mod codex;
 mod crush;
 mod delete;
 mod dsh;
+mod dsh_config;
 mod edit;
 mod gemini;
 mod kimi;
@@ -62,6 +63,9 @@ pub fn plan(
     let detection = super::paths::detect(def);
     if detection.unsupported {
         return Err(detection.note.unwrap_or_else(|| def.note.into()));
+    }
+    if def.id == "dsh" && super::dsh_paths::is_patch(path) {
+        return dsh_config::plan(path, profile, operation);
     }
     let mut change = Change::load(path.to_path_buf())?;
     let original = files::text(change.before.as_deref())?;
@@ -190,7 +194,10 @@ pub fn equivalent(def: &ClientDef, saved: &Profile, live: &Profile) -> bool {
 
 pub use edit::{preserve_selection, remove_models, sync_cached_config};
 
+pub fn read_dsh(path: &Path) -> Result<Vec<Profile>, String> { dsh_config::read(path) }
+
 pub fn delete_plan(def: &ClientDef, path: &Path, profile: &Profile) -> Result<Plan, String> {
+    if def.id == "dsh" && super::dsh_paths::is_patch(path) { return dsh_config::plan(path, profile, "native-delete"); }
     delete::plan(def, path, profile)
 }
 

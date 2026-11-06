@@ -83,6 +83,8 @@ export type InstallTarget = {
   path: string
   detected: boolean
   installed: boolean
+  supported?: boolean
+  note?: string
 }
 
 export type InstallOutcome = {

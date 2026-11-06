@@ -103,8 +103,10 @@ fn fingerprint(plan: &Plan) -> Result<String, String> {
 pub fn plan_view(plan: &Plan) -> Result<Value, String> {
     let mut files = Vec::new();
     for change in &plan.changes {
-        let before = if plan.profile.kind == "resource" { files::text(change.before.as_deref())? } else { redact(&files::text(change.before.as_deref())?, &change.path)? };
-        let after = if plan.profile.kind == "resource" { files::text(change.after.as_deref())? } else { redact(&files::text(change.after.as_deref())?, &change.path)? };
+        if change.unchanged() { continue; }
+        let resource = plan.profile.kind == "resource" && !super::dsh_paths::is_patch(&change.path);
+        let before = if resource { files::text(change.before.as_deref())? } else { redact(&files::text(change.before.as_deref())?, &change.path)? };
+        let after = if resource { files::text(change.after.as_deref())? } else { redact(&files::text(change.after.as_deref())?, &change.path)? };
         let diff = line_diff(&before, &after);
         files.push(json!({
             "path": change.path.display().to_string(), "before": before, "text": after,
@@ -120,7 +122,7 @@ pub fn plan_view(plan: &Plan) -> Result<Value, String> {
     }))
 }
 
-fn secret_name(key: &str) -> bool {
+pub(super) fn secret_name(key: &str) -> bool {
     let normalized = key.replace(['_', '-'], "").to_ascii_lowercase();
     (matches!(normalized.as_str(), "headers" | "customheaders")
         || [
@@ -189,6 +191,7 @@ fn redact(text: &str, path: &Path) -> Result<String, String> {
             })
             .into_owned());
     }
+    if super::dsh_paths::is_patch(path) { return super::dsh_document::redact(text); }
     let format = if path.extension().is_some_and(|ext| ext == "toml") {
         super::ConfigFormat::Toml
     } else if path

@@ -1,4 +1,5 @@
 {
+  "DSH 使用 Agent 页当前选择的配置目标。写入后请在 DSH 中确认工具是否出现，必要时重启对应客户端。": "DSH uses the configuration target selected on the Agent page. After writing, check that the tools appear in DSH and restart the corresponding client if needed.",
   "API Key 无效或无权限": "The API Key is invalid or unauthorized",
   "API 接口文档": "API documentation",
   "Key 明文只会写入所选客户端的本机配置文件。": "The plaintext Key is only written into the local configuration files of the selected clients.",

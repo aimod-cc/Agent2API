@@ -58,7 +58,7 @@ pub fn preserve_selection(def: &ClientDef, value: &mut Value, old: &Profile) -> 
 
 pub fn remove_models(def: &ClientDef, plan: &mut Plan, old: &Profile, wanted: &HashSet<&str>) -> Result<(), String> {
     let removed = old.models.iter().map(|model| model.id.as_str()).filter(|id| !wanted.contains(id)).collect::<HashSet<_>>();
-    if removed.is_empty() { return Ok(()); }
+    if removed.is_empty() || def.id == "dsh" { return Ok(()); }
     let id = old.native.source_id.as_str();
     for change in &mut plan.changes {
         let original = files::text(change.after.as_deref())?;

@@ -66,7 +66,7 @@ pub fn request_plan(def: &ClientDef, path: &Path, payload: &Value, port: u16) ->
     let model_ids: std::collections::HashSet<_> = profile.models.iter().map(|model| model.id.as_str()).collect();
     clients::remove_models(def, &mut plan, &old, &model_ids)?;
     for change in &mut plan.changes {
-        if change.path != path { continue; }
+        if change.path != path || def.id == "dsh" { continue; }
         let original = files::text(change.before.as_deref())?;
         let after = files::text(change.after.as_deref())?;
         let mut value = files::parse(def.format, &after)?;
