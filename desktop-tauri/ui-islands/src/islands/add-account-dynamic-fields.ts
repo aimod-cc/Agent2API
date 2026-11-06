@@ -17,7 +17,12 @@ export type CallbackInput = 'url' | 'code'
 
 export type Method = {
   id: string
-  type: 'oauth' | 'api' | 'manual' | 'desktop' | 'guest' | 'unsupported'
+  /**
+   * `sms`：手机号 + 验证码。两个请求都打 `/api/session/login/phone/{send,verify}`，
+   * provider 由界面带上 —— 网关不认识具体是哪一家，只负责分派给插件。
+   * 与 `oauth` / `api` 并列，因为它既不是开窗口（oauth）也不是贴凭证（api）。
+   */
+  type: 'oauth' | 'api' | 'sms' | 'manual' | 'desktop' | 'guest' | 'unsupported'
   label: string
   methodIndex?: number
   prompts: Prompt[]
@@ -113,7 +118,8 @@ export function parseMethods(value: unknown, provider = ''): MethodsState {
     const raw = objectOf(value)
     const index = raw?.methodIndex
     if (!raw || typeof index !== 'number' || !Number.isSafeInteger(index) || index < 0
-      || indexes.has(index) || (raw.type !== 'oauth' && raw.type !== 'api') || !Array.isArray(raw.prompts)) {
+      || indexes.has(index) || (raw.type !== 'oauth' && raw.type !== 'api' && raw.type !== 'sms')
+      || !Array.isArray(raw.prompts)) {
       throw new Error(t('插件返回了无效的登录方式，请更新插件或联系作者'))
     }
     indexes.add(index)
@@ -133,14 +139,19 @@ export function parseMethods(value: unknown, provider = ''): MethodsState {
     const manualCallback = raw.manualCallback === true
     const embeddedOnly = raw.embeddedOnly === true
     if ((callbackInput === 'code' && !manualCallback)
-      || (raw.type === 'api' && (raw.localOnly === true || manualCallback || embeddedOnly))) {
+      || (raw.type === 'api' && (raw.localOnly === true || manualCallback || embeddedOnly))
+      // 短信方式没有窗口也没有回调：声明了这两样说明插件把契约理解错了，
+      // 与其渲染出一个「点开会失败」的入口，不如在解析阶段就拒绝。
+      || (raw.type === 'sms' && (raw.localOnly === true || manualCallback || embeddedOnly))) {
       throw new Error(t('插件返回了无效的登录方式，请更新插件或联系作者'))
     }
     const callbackContractMissing = provider === 'copilot-subscription' && index === 1
       && (!manualCallback || callbackInput !== 'code')
     return {
       id: `method:${index}`, methodIndex: index, type: raw.type,
-      label: t(textOf(raw.label) || (raw.type === 'oauth' ? t('OAuth 登录') : t('API 凭证'))),
+      label: t(textOf(raw.label) || (raw.type === 'oauth'
+        ? t('OAuth 登录')
+        : raw.type === 'sms' ? t('手机验证码登录') : t('API 凭证'))),
       prompts, localOnly: raw.localOnly === true, manualCallback, callbackInput, embeddedOnly,
       instructions: loginText(raw.instructions),
       reason: callbackContractMissing

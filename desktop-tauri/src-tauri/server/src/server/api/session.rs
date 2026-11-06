@@ -165,7 +165,19 @@ enum LoginCallbackInput { #[default] Url, Code }
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
-enum LoginMethodType { Oauth, Api }
+enum LoginMethodType {
+    Oauth,
+    Api,
+    /// 手机号 + 验证码：前端渲染「手机号 → 获取验证码 → 填码 → 登录」四步，
+    /// 两个请求都打 `/api/session/login/phone/{send,verify}`，`provider` 由前端带上。
+    ///
+    /// ── 为什么现在才加 ──────────────────────────────────────────
+    /// AutoClaw / Loomy / Tabbit 那个年代短信登录是**网关写死**的（一家一对端点、
+    /// 前端一家一个表单），插件根本没法申报；`auth.methods` 里自然也没有这一档。
+    /// 一旦有第四家需要短信登录，那条路就只能继续抄代码。这一档让「谁是短信登录」
+    /// 变成插件申报的事实，网关只提供一条通用通道。
+    Sms,
+}
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct LoginPromptMetadata {
@@ -1136,6 +1148,167 @@ pub async fn login_sms_verify(State(state): State<ServerState>, body: Bytes) -> 
 /// 上游把「发的这个码」绑在发码响应的 msgid 上，登录必须带同一个 ——
 /// 但网关不替用户保存这个中间态（一次登录可以跨多次 HTTP 请求、也可以被
 /// 放弃，存在服务端只会多一份要清理的状态）。
+// ─── 通用手机号验证码登录（按插件申报的 sms 方法分派）────────
+
+/// 发送短信验证码（**通用**：任何在 `auth.methods` 里申报 `sms` 的插件家）。
+///
+/// body `{provider, phone, name?}` → 插件 `login.sms-send` 的返回值原样透出。
+///
+/// ── 与 AutoClaw / Loomy / Tabbit 那三对端点的关系 ────────────
+/// 那三对是历史包袱：一家一对写死的端点，加一家就得再抄一遍（`login.loomy.*`
+/// / `login.tabbit.*` / AutoClaw 直接吃 `/sms/send`）。这里按 `provider` 分派，
+/// 插件只需 `admin_action` 实现 `login.sms-send` / `login.sms-verify` 两条动作，
+/// 网关零改动即可接新家。
+///
+/// 三家旧端点**保留不动**：老版本前端缓存里写死了那几个 URL，删掉会让它们的
+/// 登录按钮静默失效；新前端一律走这一条。
+pub async fn login_sms_send_for(State(state): State<ServerState>, body: Bytes) -> Response {
+    let payload = parse_body(&body).unwrap_or(Value::Null);
+    let provider = payload
+        .get("provider")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if provider.is_empty() {
+        return management_error(400, "缺少 provider：通用短信登录必须指明是哪一家");
+    }
+    // 旧前端缓存：把 AutoClaw / Tabbit 发到这条通用端点时转给它们的专用实现，
+    // 免得「后端升了、前端还是旧缓存」的那次会话登不上去。
+    if provider == "tabbit" || provider == "tabbit-intl" {
+        return tabbit_sms_send_inner(&state, &payload).await;
+    }
+    if provider == "autoclaw" || provider == "autoclaw-intl" {
+        return login_sms_send(State(state), Bytes::from(serde_json::to_vec(&payload).unwrap_or_default()))
+            .await;
+    }
+    let phone = payload.get("phone").and_then(Value::as_str).unwrap_or("");
+    if phone.trim().is_empty() {
+        return management_error(400, "请填写手机号");
+    }
+    let Some(adapter) = crate::server::core::providers::adapter::adapter_by_id(provider) else {
+        return management_error(
+            400,
+            format!("「{provider}」的提供商插件没有安装，无法发送验证码"),
+        );
+    };
+    // 发码时还没登录，`account` 传空串；插件这条动作不读账号库。
+    let mut params = json!({ "phone": phone });
+    if let Some(name) = payload.get("name").and_then(Value::as_str) {
+        params["name"] = json!(name);
+    }
+    match adapter.admin_action(state.store(), "", "login.sms-send", &params).await {
+        Ok(result) => ok_json(result),
+        Err(error) => management_error(error.status_code, error.message),
+    }
+}
+
+/// 手机号 + 验证码登录并**直接落成账号**（**通用**，按 `provider` 分派）。
+///
+/// body `{provider, phone, code, name?, ...}` → `{account, list}`，与
+/// `POST /api/accounts` **逐字一致**：登录只是另一种拿到凭证的方式，落盘、
+/// 命名、去重、优先级分配全部复用 `persist_login_account`。
+///
+/// 除 `phone` / `code` / `name` 外，其余字段（如 Tabbit 的 `uuid`、QuWork 的
+/// `deviceIdentifier`）**原样透传**给插件 —— 各家发码时返回的中间态键名不同，
+/// 网关不认识也不该认识。
+pub async fn login_sms_verify_for(State(state): State<ServerState>, body: Bytes) -> Response {
+    let payload = parse_body(&body).unwrap_or(Value::Null);
+    let provider = payload
+        .get("provider")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if provider.is_empty() {
+        return management_error(400, "缺少 provider：通用短信登录必须指明是哪一家");
+    }
+    if provider == "tabbit" || provider == "tabbit-intl" {
+        return tabbit_sms_verify_inner(&state, &payload).await;
+    }
+    if provider == "autoclaw" || provider == "autoclaw-intl" {
+        return login_sms_verify(
+            State(state),
+            Bytes::from(serde_json::to_vec(&payload).unwrap_or_default()),
+        )
+        .await;
+    }
+    let phone = payload.get("phone").and_then(Value::as_str).unwrap_or("");
+    let code = payload.get("code").and_then(Value::as_str).unwrap_or("");
+    if phone.trim().is_empty() || code.trim().is_empty() {
+        return management_error(400, "请填写手机号与验证码");
+    }
+    let Some(adapter) = crate::server::core::providers::adapter::adapter_by_id(provider) else {
+        return management_error(400, format!("「{provider}」的提供商插件没有安装，无法登录"));
+    };
+    // 除 name 外的中间态字段（uuid / deviceIdentifier / msgid …）原样给插件。
+    let mut params = payload.clone();
+    if let Some(object) = params.as_object_mut() {
+        object.remove("provider");
+        object.remove("proxy");
+    }
+    let mut account = match adapter
+        .admin_action(state.store(), "", "login.sms-verify", &params)
+        .await
+    {
+        Ok(value) => match serde_json::from_value::<agent2api_provider_protocol::NormalizedAccount>(value)
+        {
+            Ok(account) => account,
+            Err(error) => {
+                return management_error(502, format!("插件返回的登录结果无法解析：{error}"))
+            }
+        },
+        Err(error) => return management_error(error.status_code, error.message),
+    };
+    if let Some(name) = payload
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Some(public) = account.public.as_object_mut() {
+            public.insert(
+                "name".to_string(),
+                Value::String(name.chars().take(100).collect()),
+            );
+        }
+    }
+    finish_sms_login(&state, adapter.as_ref(), account, provider)
+}
+
+/// 通用短信登录的收尾：落库 → 回 `{account, list}`（与 `POST /api/accounts` 同形）。
+///
+/// 三家旧端点各自抄过一遍这段，抽出来只为一件事：新接的家不会因为「忘了给
+/// 账号补 name」或「回的 list 与其他端点不同形」而在前端表现不一致。
+fn finish_sms_login(
+    state: &ServerState,
+    adapter: &dyn crate::server::core::providers::adapter::ProviderAdapter,
+    account: agent2api_provider_protocol::NormalizedAccount,
+    provider: &str,
+) -> Response {
+    match adapter.persist_login_account(&account) {
+        Ok(account_id) => {
+            let label = account
+                .public
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("账号");
+            logging::log("[Login]", &format!("✅ {provider} 登录成功: {label}"));
+            let list = state.store().list_visible_accounts();
+            let account = list
+                .get("accounts")
+                .and_then(Value::as_array)
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .find(|item| item.get("id").and_then(Value::as_str) == Some(&account_id))
+                })
+                .cloned()
+                .unwrap_or(account.public);
+            ok_json(json!({ "account": account, "list": list }))
+        }
+        Err(error) => management_error(error.status_code, error.message),
+    }
+}
+
 pub async fn login_loomy_sms_send(State(state): State<ServerState>, body: Bytes) -> Response {
     let payload = parse_body(&body).unwrap_or(Value::Null);
     let phone = payload.get("phone").and_then(Value::as_str).unwrap_or("");

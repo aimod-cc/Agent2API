@@ -527,6 +527,17 @@ pub fn panel_router(state: ServerState) -> Router {
             "/api/session/login/sms/verify",
             post(api::session::login_sms_verify),
         )
+        // 通用手机号验证码登录：按 body 里的 `provider` 分派到插件的
+        // `login.sms-send` / `login.sms-verify`，网关不认识具体是哪一家。
+        // 上面那三对（AutoClaw / Loomy / Tabbit）保留给旧缓存前端，新前端走这两条。
+        .route(
+            "/api/session/login/phone/send",
+            post(api::session::login_sms_send_for),
+        )
+        .route(
+            "/api/session/login/phone/verify",
+            post(api::session::login_sms_verify_for),
+        )
         // Loomy 的手机号验证码登录（同样两段、同样 protected：都写账号库）。
         // 与上面那对分开挂是刻意的：两条链路的签名 / 站点 / 错误码完全不同，
         // 合成一个端点会需要在 handler 里按 provider 分叉。
