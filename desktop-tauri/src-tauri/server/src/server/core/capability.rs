@@ -103,11 +103,15 @@ pub fn apply_overrides(item: &mut Value, overrides: &Map<String, Value>) {
     }
 }
 
-/// 条目的生效能力：六个键齐全，**未声明给 null**。
-///
-/// 与 `list_item` 的输出刻意不同：那里布尔缺键回落 `false`（下游需求如此），
-/// 而管理页要区分「不支持」与「不知道」—— 否则用户编辑时会把「未声明」当成
-/// 「不支持」照抄。两边读的是同一批键，但兜底语义各按自己的消费方给。
+pub fn images_for_channel(provider: &str, item: &Value) -> Option<bool> {
+    let user = item.pointer("/capSources/supportsImages").and_then(Value::as_str) == Some("user")
+        || item.pointer("/capabilities/supportsImages").and_then(Value::as_bool).is_some();
+    // CodeArts 的福利目录固定填 false，缺字段的 agent 目录也会补 false；它们不是拒图证据。
+    if provider == "codearts" && !user && item.get("supportsImages").and_then(Value::as_bool) == Some(false) { return None; }
+    item.get("supportsImages").and_then(Value::as_bool)
+}
+
+/// 条目的生效能力：六个键齐全，未声明给 null，管理页不能把未知当成不支持。
 pub fn effective(item: &Value) -> Value {
     let mut result = Map::new();
     for key in KEYS {

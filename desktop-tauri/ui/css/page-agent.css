@@ -509,6 +509,52 @@
   width: min(900px, calc(100vw - 48px));
   max-height: calc(100dvh - 48px);
 }
+/* 一键接入：里面是「左选、右已选」的双栏工作台，比编辑方案弹窗要宽；
+   外框圆角放大一档（--r-lg 14px），是这一版整体观感的一部分。 */
+.agent-config-dialog.agent-quick-dialog[data-slot='dialog-content'] {
+  width: min(1040px, calc(100vw - 48px));
+  border-radius: var(--r-lg);
+}
+/* 这一版弹窗底栏不再铺灰：整窗只有「弹窗底 / 信息块 / 卡片」三层底色，
+   底栏再压一层灰就多出第四层，按钮区会显得比内容还重。按钮本身仍是常规层级。 */
+.agent-config-dialog.agent-quick-dialog > [data-slot='dialog-footer'] { background: transparent; }
+/* 标题下带一行说明：这一版把「选择要接入的模型…」从正文第一段提到副标题位置，
+   正文因此只剩三块信息（接入信息 / 模型列表 / 交底），层级不再和控件抢。 */
+.agent-quick-head { flex-direction: column; align-items: flex-start; gap: 3px; }
+.agent-quick-head [data-slot='dialog-description'] { font-size: 11.5px; line-height: 1.6; color: var(--text-3); }
+/* ─── 接入信息：一行一个字段（端点 / 写入文件 / 网关 Key）─── */
+.agent-quick-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: var(--r-md);
+  background: var(--surface-inset);
+}
+.agent-quick-info-row { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 9px 14px; }
+.agent-quick-info-row + .agent-quick-info-row { border-top: 1px solid var(--hairline); }
+.agent-quick-info-key { flex: none; width: 62px; font-size: 11.5px; color: var(--text-3); }
+.agent-quick-info-value { flex: 1; min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
+.agent-quick-info-value.is-muted { color: var(--text-2); }
+.agent-quick-info-select { width: 220px; flex: none; }
+.agent-quick-info-hint { min-width: 0; font-size: 11.5px; color: var(--text-3); overflow-wrap: anywhere; }
+/* ─── 双栏工作台：左栏候选、右栏已选；两栏各自滚动，翻目录时右边不动 ─── */
+.agent-models-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+.agent-models-col { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.agent-models-col-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.agent-models-col-head h4 { margin: 0; font-size: 12.5px; font-weight: 650; }
+.agent-models-col-note { min-width: 0; font-size: 11.5px; color: var(--text-3); overflow-wrap: anywhere; }
+/* 双栏下左栏只有半宽：已选计数由右栏标题的「已选模型 n」承担，
+   左栏工具条再放一份会把「全选 / 清空」挤到第二行。 */
+.agent-models-split .agent-model-picker-count { display: none; }
+.agent-models-split .agent-model-picker-list,
+.agent-models-split .agent-model-list { max-height: 360px; }
+.agent-models-split .agent-model-list { overflow-y: auto; overscroll-behavior: contain; padding-right: 2px; }
 .agent-config-dialog > [data-slot='dialog-header'],
 .agent-config-dialog > [data-slot='dialog-footer'] { flex: 0 0 auto; }
 .agent-config-dialog > [data-slot='dialog-body'] {
@@ -524,6 +570,38 @@
 .agent-config-dialog [data-slot='field-label'] { flex-wrap: wrap; }
 .agent-config-dialog [data-slot='field-label'] code { min-width: 0; overflow-wrap: anywhere; }
 .agent-model-list > .agent-model-card { flex: 0 0 auto; }
+/* ─── 候选列表：每项一行（名称左、模型 ID 右），工具条并成一行；不描边，靠底色 ─── */
+.agent-model-picker { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.agent-model-picker-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-width: 0; }
+.agent-model-picker-search { flex: 1 1 200px; min-width: 0; }
+.agent-model-picker-count { font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.agent-model-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-content: start;
+  min-width: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+.agent-model-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 7px 10px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: background-color .12s ease-out;
+}
+.agent-model-picker-row:hover { background: var(--nav-hover); }
+.agent-model-picker-row[data-checked] { background: var(--primary-soft); }
+.agent-model-picker-name { flex: 1; min-width: 0; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-model-picker-id { flex: none; max-width: 46%; font-size: 10.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-model-select-popover { width: min(600px, max(var(--anchor-width), 260px)); max-width: calc(100vw - 40px); display: flex; flex-direction: column; gap: 8px; padding: 10px; }
+.agent-model-select-options { display: flex; flex-direction: column; gap: 2px; max-height: 250px; overflow-y: auto; overscroll-behavior: contain; }
 .agent-preview-file { min-width: 0; }
 .agent-line-sign { width: 16px; flex: none; user-select: none; }
 .agent-line.is-removed { background: var(--danger-soft); }
@@ -534,7 +612,14 @@
   .agent-toolbar { flex-wrap: wrap; }
   .agent-config-dialog[data-slot='dialog-content'] { width: calc(100vw - 24px); max-height: calc(100dvh - 24px); }
   .agent-config-footer { flex-wrap: wrap; }
+  .agent-quick-info-row { flex-wrap: wrap; }
+  .agent-quick-info-select { width: 100%; }
   .agent-detail { padding: 12px; }
+}
+
+/* ─── 窄窗口：双栏退回上下两段；分栏靠的是宽度，不够宽时并排只会两边都读不清 ─── */
+@media (max-width: 900px) {
+  .agent-models-split { grid-template-columns: minmax(0, 1fr); gap: 16px; }
 }
 
 /* ─── 窄窗口：左栏收窄、表单标签折到上一行 ─── */

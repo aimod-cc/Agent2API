@@ -7,7 +7,8 @@ import { useStore } from '../state/store'
 import { fetchStatsSummary, type StatsRange, type StatsSummary } from '../api/gateway'
 import { formatCompact, formatInt, formatPercent, formatTokens } from '../lib/format'
 import { providerLabel } from '../lib/providers'
-import { usePolling } from '../lib/usePolling'
+import { PageAutoRefresh, usePageAutoRefresh } from '../components/PageAutoRefresh'
+import { usePageRefreshTimer } from '../../../ui-shared/page-auto-refresh-timer'
 import { t } from '../i18n'
 import { Button, Card } from '@ui'
 import { SourceUsageSection } from '../components/SourceUsageSection'
@@ -31,6 +32,7 @@ const CUSTOM_RANGE_KEY = 'agent2api-mobile-report-custom-range'
 
 export function ReportPage() {
   const { session } = useStore()
+  const auto = usePageAutoRefresh('reportAutoRefresh')
   const [range, setRange] = useState<StatsRange>('today')
   const [dates, setDates] = useState<CustomDates>(() => readCustomRange(CUSTOM_RANGE_KEY))
   const [data, setData] = useState<StatsSummary | null>(null)
@@ -39,10 +41,12 @@ export function ReportPage() {
   const current = useRef({ range, dates })
   current.current = { range, dates }
   const seqRef = useRef(0)
+  const loadingRef = useRef(0)
 
   const load = useCallback(async () => {
     const { range: requested, dates: selected } = current.current
     const seq = ++seqRef.current
+    loadingRef.current += 1
     try {
       const next = await fetchStatsSummary(requested, undefined, requested === 'custom'
         ? { startDate: selected.start, endDate: selected.end } : undefined)
@@ -52,6 +56,7 @@ export function ReportPage() {
     } catch (failure) {
       if (seq === seqRef.current) setError(failure instanceof Error ? failure.message : String(failure))
     } finally {
+      loadingRef.current -= 1
       if (seq === seqRef.current) setFirstLoad(false)
     }
   }, [])
@@ -62,7 +67,9 @@ export function ReportPage() {
     void load()
     return () => { ++seqRef.current }
   }, [range, dates, load])
-  usePolling(load, 60_000)
+  usePageRefreshTimer(async () => {
+    if (loadingRef.current === 0) await load()
+  }, auto.enabled, auto.ms)
 
   const pull = usePullToRefresh({ onRefresh: load })
 
@@ -95,6 +102,7 @@ export function ReportPage() {
         }
       />
 
+      <PageAutoRefresh settings={auto} onRefresh={load} />
       <DateRangeFilter range={range} dates={dates} onRangeChange={setRange} label={t('报表时间范围')}
         onDatesChange={next => { setDates(next); saveCustomRange(CUSTOM_RANGE_KEY, next) }} />
 

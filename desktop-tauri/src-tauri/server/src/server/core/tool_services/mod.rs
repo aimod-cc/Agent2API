@@ -29,7 +29,13 @@
 
 mod account_search;
 mod bridge;
+mod image_bridge;
+pub use image_bridge::ImageBridgeOptions;
+pub const IMAGE_BRIDGE_SCRIPT: &str = image_bridge::SCRIPT;
 mod install;
+pub(crate) mod image_config;
+pub(crate) mod image_jobs;
+mod image_mcp;
 mod mcp;
 mod normalize;
 mod providers;
@@ -68,9 +74,11 @@ use crate::server::core::crypto::{self, SecretScope};
 pub const KEY_TOOL_SERVICES: &str = "toolServices";
 
 /// 固定服务 id（顺序即界面展示顺序）
-pub const SERVICE_IDS: [&str; 2] = [WEB_SEARCH_SERVICE_ID, VISION_SERVICE_ID];
+pub const SERVICE_IDS: [&str; 3] = [WEB_SEARCH_SERVICE_ID, VISION_SERVICE_ID, IMAGE_GENERATION_SERVICE_ID];
 pub const WEB_SEARCH_SERVICE_ID: &str = "web-search";
 pub const VISION_SERVICE_ID: &str = "vision";
+pub const IMAGE_GENERATION_SERVICE_ID: &str = "image-generation";
+pub const IMAGE_GENERATION_VERSION: &str = "1.0.0";
 
 /// 接入协议（顺序即界面展示顺序）。
 ///
@@ -98,7 +106,9 @@ pub const CAPABILITY_COUNTS: [(&str, u32); 2] = [
 /// 工具执行超时（秒）：同一服务各协议共用；服务端强制上限，装 MCP 时写进客户端
 pub const TIMEOUT_MIN_SECONDS: u64 = 5;
 pub const TIMEOUT_MAX_SECONDS: u64 = 600;
-pub const DEFAULT_TIMEOUTS: [(&str, u64); 2] = [(WEB_SEARCH_SERVICE_ID, 30), (VISION_SERVICE_ID, 60)];
+pub const DEFAULT_TIMEOUTS: [(&str, u64); 3] = [
+    (WEB_SEARCH_SERVICE_ID, 30), (VISION_SERVICE_ID, 60), (IMAGE_GENERATION_SERVICE_ID, 300),
+];
 
 /// 端点路径（写死：改动会影响已接入的客户端）。
 ///
@@ -110,6 +120,7 @@ pub fn endpoint(service: &str, protocol: &str) -> &'static str {
         (WEB_SEARCH_SERVICE_ID, "mcp") => "/mcp/web-search",
         (WEB_SEARCH_SERVICE_ID, "api") => "/api/web-search",
         (VISION_SERVICE_ID, "mcp") => "/mcp/vision",
+        (IMAGE_GENERATION_SERVICE_ID, "mcp") => "/mcp/image-generation",
         _ => "",
     }
 }
@@ -132,6 +143,9 @@ pub fn service_protocols(service: &str) -> Vec<&'static str> {
 }
 
 pub fn capability_count(service: &str) -> u32 {
+    if service == IMAGE_GENERATION_SERVICE_ID {
+        return if image_config::load().is_some_and(|config| config.editing.is_some()) { 3 } else { 2 };
+    }
     CAPABILITY_COUNTS
         .iter()
         .find(|(id, _)| *id == service)
@@ -143,6 +157,7 @@ pub fn package_name(service: &str) -> &'static str {
     match service {
         WEB_SEARCH_SERVICE_ID => WEB_SEARCH_PACKAGE,
         VISION_SERVICE_ID => VISION_PACKAGE,
+        IMAGE_GENERATION_SERVICE_ID => "agent2api-image-generation",
         _ => "",
     }
 }
@@ -151,6 +166,7 @@ pub fn version(service: &str) -> &'static str {
     match service {
         WEB_SEARCH_SERVICE_ID => WEB_SEARCH_VERSION,
         VISION_SERVICE_ID => VISION_VERSION,
+        IMAGE_GENERATION_SERVICE_ID => IMAGE_GENERATION_VERSION,
         _ => "",
     }
 }
@@ -199,6 +215,8 @@ pub struct ToolConfig {
     pub providers: BTreeMap<String, ProviderConfig>,
     pub selection: Selection,
     pub vision: Option<VisionConfig>,
+    #[serde(default, deserialize_with = "image_config::deserialize_stored")]
+    pub image_generation: Option<image_config::ImageConfig>,
 }
 
 impl ToolConfig {
@@ -207,7 +225,7 @@ impl ToolConfig {
         for service in SERVICE_IDS {
             let entry = self.enabled.entry(service.to_string()).or_default();
             for protocol in service_protocols(service) {
-                entry.entry(protocol.to_string()).or_insert(true);
+                entry.entry(protocol.to_string()).or_insert(service != IMAGE_GENERATION_SERVICE_ID);
             }
             let fallback = DEFAULT_TIMEOUTS
                 .iter()
@@ -280,7 +298,7 @@ pub fn is_enabled(service: &str, protocol: &str) -> bool {
         .get(service)
         .and_then(|entry| entry.get(protocol))
         .copied()
-        .unwrap_or(true)
+        .unwrap_or(service != IMAGE_GENERATION_SERVICE_ID)
 }
 
 pub fn set_enabled(service: &str, protocol: &str, enabled: bool) -> Result<Value, String> {

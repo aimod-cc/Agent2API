@@ -66,11 +66,16 @@ pub fn read(value: &Value) -> Result<Vec<Profile>, String> {
             Value::Array(model_rules.iter().filter(mine).cloned().collect());
         profile.native.manual_model_entries =
             Value::Array(manual_rules.iter().filter(mine).cloned().collect());
-        let ids = rule
+        let mut ids = rule
             .pointer("/config/personalModelIds")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        for item in model_rules.iter().chain(&manual_rules).filter(|item| string(item, "providerId") == id) {
+            if let Some(model) = item.get("modelId").filter(|model| model.is_string()) {
+                if !ids.contains(model) { ids.push(model.clone()); }
+            }
+        }
         for model_id in ids.iter().filter_map(Value::as_str) {
             let mut config = json!({});
             for item in model_rules.iter().chain(&manual_rules).filter(|rule| {
@@ -79,6 +84,9 @@ pub fn read(value: &Value) -> Result<Vec<Profile>, String> {
             }) {
                 config = merge(Some(&config), item.get("config").unwrap_or(&Value::Null));
             }
+            let reasoning_levels = config.pointer("/optionSpecs/reasoningLevel/values")
+                .and_then(Value::as_array).map(|values| values.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>())
+                .unwrap_or_default();
             profile.models.push(Model {
                 id: model_id.into(),
                 name: model_id.into(),
@@ -91,6 +99,11 @@ pub fn read(value: &Value) -> Result<Vec<Profile>, String> {
                 supports_images: config
                     .pointer("/properties/inputFormat/supportsImage")
                     .and_then(Value::as_bool),
+                supports_video: config.pointer("/properties/inputFormat/supportsVideo").and_then(Value::as_bool),
+                supports_tools: config.pointer("/properties/supportsToolCall").and_then(Value::as_bool),
+                supports_reasoning: (!reasoning_levels.is_empty()).then(|| reasoning_levels.iter()
+                    .any(|level| !matches!(level.as_str(), "disabled" | "none" | "off"))),
+                reasoning_levels,
                 ..Default::default()
             });
         }
@@ -194,71 +207,5 @@ pub fn write(value: &mut Value, profile: &Profile) -> Result<(), String> {
         order.push(json!(id));
     }
     set(value, &["config", "providerOrder"], json!(order))?;
-    for (key, imported) in [
-        ("providerModelRules", &profile.native.model_entries),
-        (
-            "manualProviderModelRules",
-            &profile.native.manual_model_entries,
-        ),
-    ] {
-        let mut rules = value
-            .get("config")
-            .and_then(|v| v.get("modelConfigRules"))
-            .and_then(|v| v.get(key))
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        if let Some(imported) = imported.as_array() {
-            for entry in imported {
-                let model_id = string(entry, "modelId");
-                if let Some(index) = rules.iter().position(|r| {
-                    r.get("providerId").and_then(Value::as_str) == Some(&id)
-                        && r.get("modelId").and_then(Value::as_str) == Some(&model_id)
-                }) {
-                    rules[index] = native_entry(Some(&rules[index]), entry)?;
-                } else {
-                    rules.push(entry.clone());
-                }
-            }
-        }
-        if key == "manualProviderModelRules" {
-            for model in &profile.models {
-                let index = rules.iter().position(|r| {
-                    r.get("providerId").and_then(Value::as_str) == Some(&id)
-                        && r.get("modelId").and_then(Value::as_str) == Some(&model.id)
-                });
-                let mut entry = index.map(|index| rules[index].clone()).unwrap_or_else(
-                    || json!({ "providerId": id, "modelId": model.id, "config": {} }),
-                );
-                if let Some(v) = model.context_window {
-                    set(
-                        &mut entry,
-                        &["config", "properties", "contextWindow"],
-                        json!(v),
-                    )?;
-                }
-                if let Some(v) = model.max_output_tokens {
-                    set(
-                        &mut entry,
-                        &["config", "optionSpecs", "maxOutputTokens", "max"],
-                        json!(v),
-                    )?;
-                }
-                if let Some(v) = model.supports_images {
-                    set(
-                        &mut entry,
-                        &["config", "properties", "inputFormat", "supportsImage"],
-                        json!(v),
-                    )?;
-                }
-                if let Some(index) = index {
-                    rules[index] = entry;
-                } else {
-                    rules.push(entry);
-                }
-            }
-        }
-        set(value, &["config", "modelConfigRules", key], json!(rules))?;
-    }
-    Ok(())
+    super::zcode_models::write(value, profile, &id)
 }

@@ -217,7 +217,9 @@ pub async fn stats_summary(State(state): State<ServerState>, Query(params): Quer
 /// 收尾后由终态记账覆盖。status 过滤也认 `running` 值（只看进行中）。
 pub async fn stats_requests(State(state): State<ServerState>, Query(params): Query<Params>) -> Response {
     let filter = match checked_filter(&params) { Ok(value) => value, Err(response) => return response };
-    ok_json(state.request_stats().query_requests(&filter))
+    let mut value = state.request_stats().query_requests(&filter);
+    crate::server::core::billing::keepalive::normalize_request_display(state.store(), &mut value);
+    ok_json(value)
 }
 
 /// 从查询串解析筛选条件 —— GET / DELETE / clear-preview 三条路由共用同一份

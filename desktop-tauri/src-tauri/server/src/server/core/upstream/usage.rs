@@ -28,15 +28,7 @@
 //! 对 prompt/completion/total 同一口径：`total_tokens: 0` 是废值，
 //! 该回落到 prompt + completion，而不是把总量记成 0。
 //!
-//! ── 为什么这里**不设** cache_write / cache_creation 槽位 ────────────
-//! `usage.cache_read` 唯一的落点是请求日志的 `cache_read_tokens` 列
-//! （`db/schema.rs:354`），而它进的是**命中率**的分子
-//! （`request_stats::report::safe_rate` = hit / input，`aggregate.rs:216` 的日聚合
-//! 也叫 `cache_hit_tokens`）。「写入缓存」与「命中缓存」是两笔不同的计费，
-//! 折进同一列会把命中率抬高（`protocol::anthropic_outbound.rs:801` 那种
-//! `cache_read + cache_creation` 的合并是给 Anthropic 出站报文的 `cached_tokens`
-//! 字段用的，语义本来就是「prompt 里被缓存处理的总量」，与这里的命中率不同物）。
-//! 真要分列，得先给存储契约加列 —— 那不是「口径对齐」的改动面，别顺手塞进本文件。
+//! 「写入缓存」不计入命中率；协议层单独回传这项，不改变请求日志的存储契约。
 //!
 //! ── 为什么回调语义是「每次都上报、由读取侧覆盖」────────────────
 //! usage 通常只在流的最后一个 chunk 出现（也有实现会在中途补发增量帧），
@@ -53,6 +45,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use serde_json::{Map, Value};
 
 mod attempt;
+mod vision;
 pub use attempt::{
     AttemptDetail, RetryEvent, MAX_ATTEMPT_DETAILS, MAX_ATTEMPT_ERROR_CHARS,
     MAX_ATTEMPT_ACCOUNT_CHARS, MAX_ATTEMPT_RETRY_REASON_CHARS, MAX_ATTEMPT_NOTICE_CHARS,
@@ -76,46 +69,6 @@ pub struct UsageTokens {
     pub credit: Option<f64>,
 }
 
-/// 「输入 token 数」的别名表（含驼峰形态）。**表序就是优先序**：多项都命中时按表序
-/// 取第一个**正数**（见 [`first_positive`]），不是求和、也不是取末位。
-const PROMPT_KEYS: &[&str] = &["prompt_tokens", "input_tokens", "promptTokens", "inputTokens"];
-/// 「输出 token 数」的别名表。
-const COMPLETION_KEYS: &[&str] = &[
-    "completion_tokens",
-    "output_tokens",
-    "completionTokens",
-    "outputTokens",
-];
-/// 「总量」的别名表；全缺（或全为废值 0）时由 prompt + completion 补。
-const TOTAL_KEYS: &[&str] = &["total_tokens", "totalTokens"];
-/// 「缓存命中 token 数」的**顶层**别名表。
-///
-/// `cache_read_input_tokens` 是 Anthropic 系的写法（本仓的入站/出站两侧都在读它，
-/// 见 `protocol::anthropic.rs` 与 `protocol::responses_outbound.rs`）；驼峰两项是
-/// Command Code 一族上游的原样形态（`protocol::commandcode_outbound.rs` 归一前读的
-/// 就是这一族键）；`cached_*` 是部分兼容实现把它当顶层字段直接给的做法。
-///
-/// **表序就是优先序**（与 [`PROMPT_KEYS`] 同一条规矩）：`cached_tokens` 排在最前，
-/// 因为它是 OpenAI 标准形态；排它的理由不是「更权威」而是「更常见」，多项都为正数时
-/// 按表序取第一项。真正要挡的是**这一族里某一项恒为 0 时的短路**：取第一个**正数**
-/// 而不是第一个「存在的」，否则嵌套容器里那个恒 0 的 `cached_tokens` 会把顶层真有
-/// 值的 `cache_read_input_tokens` 挡掉（0 在前端不是缺值，是「这家的缓存没生效」的
-/// 读数，比少记一项更难查）。
-const CACHE_READ_KEYS: &[&str] = &[
-    "cached_tokens",
-    "cached_input_tokens",
-    "cache_read_tokens",
-    "cache_read_input_tokens",
-    "cacheReadTokens",
-    "cacheReadInputTokens",
-    "cachedInputTokens",
-];
-/// 「缓存命中 token 数」的**嵌套容器**（容器里再找 [`CACHE_READ_KEYS`]）。
-///
-/// `prompt_tokens_details` 是 OpenAI 标准（里面放 `cached_tokens`）；
-/// `input_tokens_details` 是 Responses 系把 prompt 改叫 input 之后的同名容器。
-/// 两个容器都查：上游同时给两份、其中一份是废值的情况已经出现过（模块头部）。
-const CACHE_READ_CONTAINERS: &[&str] = &["prompt_tokens_details", "input_tokens_details"];
 /// 「积分消耗」的别名表（顺序即优先序）。
 ///
 /// WorkBuddy 的 `usage.credit` 是已实测的一手形态；其余是兼容实现常见的
@@ -149,19 +102,14 @@ const CREDIT_KEYS: &[&str] = &[
 /// 对象内单个字段缺失**或为非正数**按「这项没说话」处理，交给别名表的下一项；
 /// 全部落空才按 0 算。`total` 的兜底是 prompt + completion。
 pub fn extract_usage(usage: &Value) -> Option<UsageTokens> {
-    let object = usage.as_object()?;
-    let prompt = first_positive(object, PROMPT_KEYS).unwrap_or(0);
-    let completion = first_positive(object, COMPLETION_KEYS).unwrap_or(0);
-    let total = first_positive(object, TOTAL_KEYS).unwrap_or(prompt + completion);
-    // 嵌套容器先查（标准写法优先），再查顶层别名；两边都只认正数。
-    let cache_read = CACHE_READ_CONTAINERS
-        .iter()
-        .filter_map(|container| object.get(*container).and_then(Value::as_object))
-        .find_map(|details| first_positive(details, CACHE_READ_KEYS))
-        .or_else(|| first_positive(object, CACHE_READ_KEYS))
-        .unwrap_or(0);
-    let credit = first_amount(object, CREDIT_KEYS);
-    Some(UsageTokens { prompt, completion, total, cache_read, credit })
+    let tokens = crate::server::core::protocol::usage::TokenUsage::from_chat(usage)?;
+    Some(UsageTokens {
+        prompt: tokens.prompt.unwrap_or(0),
+        completion: tokens.completion.unwrap_or(0),
+        total: tokens.total_tokens(),
+        cache_read: tokens.cache_read.unwrap_or(0),
+        credit: usage.as_object().and_then(|object| first_amount(object, CREDIT_KEYS)),
+    })
 }
 
 /// 从一个 JSON 对象里按积分别名取读数。
@@ -173,48 +121,9 @@ pub fn credit_from_object(object: &Map<String, Value>) -> Option<f64> {
     first_amount(object, CREDIT_KEYS)
 }
 
-/// 按别名表依次取**第一个正数**（口径见模块头部）。
-fn first_positive(object: &Map<String, Value>, keys: &[&str]) -> Option<i64> {
-    keys.iter().find_map(|key| positive_field(object.get(*key)))
-}
-
-/// 取数值字段，**只认正数**。
-///
-/// 三种上游形态都要认：
-///   - 整数（`as_i64`）；
-///   - `1.0` 这类浮点形态（`as_i64` 对它失败，所以补一次 f64 转换再截断；
-///     上游不同实现给整数/浮点都有先例）；
-///   - **字符串**数字（`"34"`，部分兼容实现把 usage 里的数当文本吐出；
-///     走 f64 解析所以 `"12.0"` 也认）。
-///
-/// 0 与负数一律返回 None（= 「这一项没说话」，交给别名表的下一项）：
-///   - 0 是上游最常给的废值，按「有值」用掉就会把真值挡在后面那个别名上
-///     （模块头部那条嵌套 `cached_tokens` 恒 0 就是这一条）；
-///   - 负数多半是手改的库或上游溢出。这个值会进日聚合的**加数**
-///     （`request_stats::aggregate` 的 `cache_hit_tokens += …`），一条负值能把
-///     整天的读数压低，而读侧的 `report::safe_rate` 只挡比率、挡不住聚合和。
-///     夹成 0 同样能防住压低，但那会让这条负值继续扮演「有值」而埋掉后面的真值，
-///     所以按 None 处理。
-///
-/// 非数值（bool / null / 数组 / 解析不出的字符串）同样 None，交给别名表兜底。
-fn positive_field(value: Option<&Value>) -> Option<i64> {
-    let raw = match value? {
-        Value::Number(number) => number
-            .as_i64()
-            .or_else(|| number.as_f64().map(|number| number as i64)),
-        Value::String(text) => text
-            .trim()
-            .parse::<f64>()
-            .ok()
-            .map(|number| number as i64),
-        _ => None,
-    };
-    raw.filter(|number| *number > 0)
-}
-
 /// 按别名表取**第一个正数**；全是 0 时返回显式的 0（「上报了 0」）。
 ///
-/// 与 [`first_positive`] 的差别只有两处，都是为了计费读数：
+/// 积分读数与 token 计数不同：
 ///   - **不截断小数**（`0.06` 必须原样保留，不能变成 0）；
 ///   - 0 不再是废值：所有别名都显式给 0 时，这条请求确实「零积分」，
 ///     与「一个别名都没有」（None = 这一家不提供该读数）必须分开。
@@ -233,8 +142,7 @@ fn first_amount(object: &Map<String, Value>, keys: &[&str]) -> Option<f64> {
     zero
 }
 
-/// 取非负有限浮点数：认数字与「数字字符串」（与 [`positive_field`] 同一兼容面，
-/// 但不做 i64 截断）。
+/// 取非负有限浮点数：认数字与「数字字符串」，不截断小数。
 fn amount_field(value: Option<&Value>) -> Option<f64> {
     let raw = match value? {
         Value::Number(number) => number.as_f64(),
@@ -439,6 +347,7 @@ pub struct TelemetrySnapshot {
     /// 落库时序列化成 JSON 文本，必须有上界。
     pub attempts_detail: Vec<AttemptDetail>,
     pub route: Option<Value>,
+    pub(crate) vision_calls: Vec<super::vision_compat::VisionCall>,
     route_revision: u64,
 }
 
@@ -572,6 +481,8 @@ struct LiveWrite {
 /// 只能靠一个双方都能拿到的句柄传话。槽位只在一条请求内共享，不存在争用。
 pub struct RequestTelemetry {
     inner: Mutex<TelemetrySnapshot>,
+    vision_enabled: std::sync::atomic::AtomicBool,
+    vision_continuation: Mutex<Option<Arc<super::vision_compat::VisionContinuation>>>,
     /// 调试模式的原始报文采集器（`core::debug_traffic`；None = 未开启调试模式）。
     ///
     /// 挂在这里而不是层层传参：流式路径的采集发生在 `ForwardStream::poll_next`
@@ -602,6 +513,8 @@ impl RequestTelemetry {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(TelemetrySnapshot::default()),
+            vision_enabled: std::sync::atomic::AtomicBool::new(false),
+            vision_continuation: Mutex::new(None),
             capture: Mutex::new(None),
             live: Mutex::new(LiveWrite::default()),
             cancel: Mutex::new(None),

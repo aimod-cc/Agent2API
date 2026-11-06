@@ -45,7 +45,7 @@ pub struct GatewayError {
     /// [`GatewayError::with_retry_after_seconds`]）：给不出时刻就不给头，
     /// 让客户端按自己的退避来 —— 编一个等待时长比不给更坏。
     pub retry_after_secs: Option<u64>,
-    /// 仅新增 scoped runtime 的内部分类凭证；不序列化，也不替换上游业务 code。
+    /// 会话错误在异步边界确定的分类；仅供内部使用，不序列化，也不替换上游业务 code。
     pub(crate) conversation_class: Option<crate::server::core::providers::adapter::UpstreamErrorClass>,
 }
 

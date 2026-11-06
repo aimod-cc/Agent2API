@@ -9,23 +9,22 @@ import {
 import { SERVER_PAGE_SIZES, TableFooter, readPageSize, writePageSize, type PageSizeChoice } from './table-shell'
 import { t } from '../i18n'
 import {
-  autoConfig, DEFAULT_AUTO, errorMessage, LEVEL_OPTIONS, logCategory, logGroups, persistFilters,
+  errorMessage, LEVEL_OPTIONS, logCategory, logGroups, persistFilters,
   queryFor, RANGE_OPTIONS, readFilters, shared, toast, VIEW_OPTIONS,
-  type AutoConfig, type Filters, type IntervalTask, type LoadOptions, type LogGroup, type LogPage, type LogStats,
+  type Filters, type IntervalTask, type LoadOptions, type LogGroup, type LogPage, type LogStats,
 } from './logs-model'
 import { LogDetail, LogsList } from './logs-list'
 import { DateRangeFields } from './date-range-fields'
+import { PageAutoRefresh, pageRefreshStore, usePageAutoRefresh } from './page-auto-refresh'
 
 type PanelHandle = {
   load(options?: LoadOptions): Promise<void>
   render(data?: LogPage | null): void
   showCategory(category: string): Promise<void>
-  applyAutoConfig(config: AutoConfig): void
 }
 let handle: PanelHandle | null = null
 let pendingCategory: string | null = null
 let lastStatsValue: LogStats = null
-let automatic = DEFAULT_AUTO
 
 function applyStats(stats: LogStats): void {
   lastStatsValue = stats
@@ -33,8 +32,7 @@ function applyStats(stats: LogStats): void {
 }
 
 function applyAutoRefresh(task: IntervalTask | null): void {
-  automatic = autoConfig(task)
-  handle?.applyAutoConfig(automatic)
+  pageRefreshStore.apply('logsAutoRefresh', task)
 }
 
 function LogsPanel() {
@@ -43,7 +41,7 @@ function LogsPanel() {
   const [filters, setFilters] = React.useState<Filters>(readFilters)
   const [page, setPage] = React.useState(1)
   const [size, setSize] = React.useState(() => Number(readPageSize('logs', SERVER_PAGE_SIZES)))
-  const [auto, setAuto] = React.useState(automatic)
+  const auto = usePageAutoRefresh('logsAutoRefresh')
   const [paused, setPaused] = React.useState(false)
   const [reading, setReading] = React.useState(false)
   const [pending, setPending] = React.useState(0)
@@ -58,25 +56,13 @@ function LogsPanel() {
   const seqRef = React.useRef(0)
   const pollingRef = React.useRef(false)
   const busyRef = React.useRef(false)
-  const autoSyncedRef = React.useRef(false)
+  const loadingRef = React.useRef(0)
   const restoredRef = React.useRef(false)
   const touchedRef = React.useRef(false)
   const keywordTimerRef = React.useRef<number | undefined>(undefined)
   const scrollRef = React.useRef<number | null>(null)
 
-  const syncAuto = React.useCallback(async () => {
-    if (autoSyncedRef.current) return
-    try {
-      const result = await shared().workbuddyDesktop?.getScheduledTasks()
-      if (Array.isArray(result?.tasks)) {
-        autoSyncedRef.current = true
-        applyAutoRefresh(result.tasks.find(task => task.id === 'logsAutoRefresh') || null)
-      }
-    } catch { /* 下次切回页面时再读取，当前会话沿用已知刷新间隔。 */ }
-  }, [])
-
   const loadPanel = React.useCallback(async (options: LoadOptions = {}): Promise<void> => {
-    void syncAuto()
     if (!restoredRef.current && shared().wbFilterMemory) {
       restoredRef.current = true
       if (!touchedRef.current) {
@@ -93,11 +79,14 @@ function LogsPanel() {
     }
     if (options.latest) {
       state.paused = false
+      state.detail = null
+      setDetail(null)
       setPaused(false)
       setReading(false)
       if (listRef.current) listRef.current.scrollTop = 0
     }
     const seq = ++seqRef.current
+    loadingRef.current += 1
     const selectedPage = state.page
     const selectedSize = state.size
     const selectedFilters = state.filters
@@ -123,7 +112,7 @@ function LogsPanel() {
         return
       }
       const nowReading = current.current.paused || current.current.detail !== null || (listRef.current?.scrollTop || 0) > 20
-      if (options.silent && !locked && nowReading && snapshotRef.current !== undefined) {
+      if (options.silent && !options.manual && !locked && nowReading && snapshotRef.current !== undefined) {
         const changed = await api.getLogs(queryFor(current.current.filters, { sinceId: snapshotRef.current, limit: 1 }))
         if (seq === seqRef.current) setPending(Number(changed?.matched) || 0)
         return
@@ -148,12 +137,13 @@ function LogsPanel() {
     } catch (failure) {
       if (seq === seqRef.current) setError(errorMessage(failure))
     } finally {
+      loadingRef.current -= 1
       if (seq === seqRef.current) setLoading(false)
     }
-  }, [syncAuto])
+  }, [])
 
   const poll = React.useCallback(async () => {
-    if (pollingRef.current || busyRef.current || keywordTimerRef.current !== undefined) return
+    if (pollingRef.current || loadingRef.current > 0 || busyRef.current || keywordTimerRef.current !== undefined) return
     pollingRef.current = true
     try {
       const state = current.current
@@ -210,7 +200,6 @@ function LogsPanel() {
         changeFilters({ category, view: 'important' })
         shared().wbApp?.showPage?.('logs', { persist: true })
       },
-      applyAutoConfig: config => { autoSyncedRef.current = true; setAuto(config) },
     }
     if (pendingCategory !== null) {
       const category = pendingCategory
@@ -230,7 +219,7 @@ function LogsPanel() {
       if (!document.hidden && shared().wbApp?.currentPage === 'logs') void poll()
     }, auto.ms)
     return () => window.clearInterval(timer)
-  }, [auto, poll])
+  }, [auto.enabled, auto.ms, poll])
 
   React.useLayoutEffect(() => {
     if (scrollRef.current === null) return
@@ -308,15 +297,16 @@ function LogsPanel() {
 
   return (
     <Card render={<section />} className='panel' id='logs-panel-events'>
+      <PageAutoRefresh id='logsAutoRefresh' settings={auto} onRefresh={() => loadPanel({ silent: true, manual: true })} disabled={busy !== null || loading} />
       <CardHeader className='panel-head'>
         <h2>{t('系统事件')}</h2><Badge id='logs-badge' variant='outline' data-tone=''>{loaded ? badgeText : '—'}</Badge>
         <div className='head-actions'>
-          <Button variant='ghost' disabled={busy !== null} onClick={() => {
+          <Button variant='ghost' aria-pressed={paused} disabled={busy !== null} onClick={() => {
             const next = !current.current.paused
             current.current.paused = next
             setPaused(next)
             if (!next && !reading && page === 1 && !detail) void loadPanel({ latest: true })
-          }}>{paused ? t('恢复刷新') : t('暂停刷新')}</Button>
+          }}>{paused ? t('结束阅读') : t('阅读模式')}</Button>
           <Button id='btn-logs-export' variant='outline' disabled={busy !== null || loading || Boolean(error)} onClick={() => void exportLogs()}>
             {busy === 'export' ? t('导出中…') : t('导出当前筛选')}</Button>
           <Button id='btn-logs-clear' variant='destructive' disabled={busy !== null || loading || Boolean(error) || !matched} onClick={() => void clearLogs()}>
@@ -354,7 +344,7 @@ function LogsPanel() {
         </div>
         {filters.view === 'debug' && !data.debugEnabled ? <div className='event-log-note'>{t('调试采集未开启，仅显示已保留的记录。可在设置中开启调试模式。')}</div> : null}
         {error ? <div className='event-log-error' role='status'>{error}<Button variant='ghost' size='xs' onClick={() => void loadPanel()}>{t('重试')}</Button></div> : null}
-        {pending > 0 || (held && !paused) ? <div className='event-log-new' role='status'>
+        {pending > 0 || held ? <div className='event-log-new' role='status'>
           <span>{pending ? t('有 {n} 条新日志', { n: pending }) : t('阅读模式，列表保持不动')}</span>
           <Button variant='outline' size='sm' disabled={loading} onClick={() => void loadPanel({ latest: true })}>{t('查看最新')}</Button>
         </div> : null}

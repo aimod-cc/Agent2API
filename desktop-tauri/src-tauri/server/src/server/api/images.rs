@@ -41,7 +41,7 @@ pub(super) fn parameter_supported(field: &str) -> bool {
     )
 }
 
-fn validate(
+pub(super) fn validate(
     payload: &mut Value,
     operation: image_models::ImageOperation,
 ) -> Result<(), GatewayError> {
@@ -332,9 +332,20 @@ pub(super) struct ImageExecution {
 
 pub(super) async fn execute(
     state: &ServerState,
-    mut payload: Value,
+    payload: Value,
     input: ImageExecution,
 ) -> Result<Value, GatewayError> {
+    execute_with_telemetry(state, payload, input, Arc::new(RequestTelemetry::with_id()), None).await
+}
+
+pub(super) async fn execute_with_telemetry(
+    state: &ServerState,
+    mut payload: Value,
+    input: ImageExecution,
+    telemetry: Arc<RequestTelemetry>,
+    timeout: Option<std::time::Duration>,
+) -> Result<Value, GatewayError> {
+    let deadline = timeout.map(|budget| tokio::time::Instant::now() + budget);
     let ImageExecution {
         operation,
         headers,
@@ -373,7 +384,6 @@ pub(super) async fn execute(
         operation.path(),
         &pipeline::user_agent_of(&headers),
     );
-    let telemetry = Arc::new(RequestTelemetry::with_id());
     let id = telemetry.id();
     super::request_prepare::record_started(
         state.request_stats(),
@@ -410,20 +420,31 @@ pub(super) async fn execute(
         ignore_model_gate: false,
         proxy_override: None,
     };
-    let result = match operation {
-        image_models::ImageOperation::Generate => state.upstream().generate_images(request).await,
-        image_models::ImageOperation::Edit => state.upstream().edit_images(request).await,
-    };
-    let outcome = match result {
-        Ok(ForwardOutcome::Completion { body }) => {
-            super::image_output::normalize(state, &payload, body, &headers, &telemetry).await
+    let work = async {
+        let result = match operation {
+            image_models::ImageOperation::Generate => state.upstream().generate_images(request).await,
+            image_models::ImageOperation::Edit => state.upstream().edit_images(request).await,
+        };
+        match result {
+            Ok(ForwardOutcome::Completion { body }) => {
+                super::image_output::normalize(state, &payload, body, &headers, &telemetry).await
+            }
+            Ok(ForwardOutcome::Stream { .. }) => Err(GatewayError::with_status(
+                502, "插件错误地把图片响应当作对话流",
+            )),
+            Err(error) => Err(error),
         }
-        Ok(ForwardOutcome::Stream { .. }) => Err(GatewayError::with_status(
-            502,
-            "插件错误地把图片响应当作对话流",
-        )),
-        Err(error) => Err(error),
     };
+    let outcome = if let Some(deadline) = deadline {
+        match tokio::time::timeout_at(deadline, work).await {
+            Ok(result) => result,
+            Err(_) => {
+                if let Some(token) = telemetry.cancel_token() { token.cancel(); }
+                Err(GatewayError::with_status(504, "图片任务超时，上游可能已消耗额度，未重新提交")
+                    .with_code("image_result_uncertain"))
+            }
+        }
+    } else { work.await };
     let (status, raw_response, error) = match &outcome {
         Ok(body) => (200, pipeline::capture_raw_json(body), None),
         Err(error) => (

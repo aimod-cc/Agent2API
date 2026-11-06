@@ -89,6 +89,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "mul
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 # 只读 Clash Verge 配置，不管理或运行代理内核。
 serde_yaml = "0.9"
+# DSH 的 Cordis 配置含序列、注释和 !!js 标签，编辑时保留未触及的语法树。
+yaml-edit = { version = "=0.3.6", default-features = false }
 sha2 = "0.10"
 # Loomy 账号（CAccount）请求签名的 HMAC-SHA1（复刻客户端指纹，不是安全边界，
 # 见 providers/loomy/sign.rs）。与 sha2/md-5/hmac 同属 RustCrypto digest 0.10

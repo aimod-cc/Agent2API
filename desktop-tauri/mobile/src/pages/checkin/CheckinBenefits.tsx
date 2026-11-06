@@ -9,7 +9,13 @@ import type { CheckinAction } from '../CheckinPage'
 import { CheckinGrowth } from './CheckinGrowth'
 import { CheckinPlansSheet } from './CheckinPlansSheet'
 import { store } from '../../state/store'
-import { t } from '../../i18n'
+import { t, locale } from '../../i18n'
+import { CampaignRewards } from '../../../../ui-shared/checkin-campaign-rewards'
+import { OfficeaceSubscription } from '../../../../ui-shared/checkin-officeace-subscription'
+import { activateOfficeaceSubscription, claimCampaignReward, getCampaignRewards, getOfficeaceSubscription, redeemCampaignBenefit } from '../../api/checkin'
+
+const campaignApi = { query: getCampaignRewards, claim: claimCampaignReward, redeem: redeemCampaignBenefit }
+const subscriptionApi = { query: getOfficeaceSubscription, activate: activateOfficeaceSubscription }
 
 export function CheckinBenefits({ center, section, busy, action, onChange }: {
   center: CheckinCenter; section: CheckinSection; busy: string; action: CheckinAction; onChange: () => void
@@ -22,14 +28,23 @@ export function CheckinBenefits({ center, section, busy, action, onChange }: {
         {center.extras?.onboarding?.length ? <div className='m-section'>
           <SectionHead title={t('新手福利')} />
           <Card className='m-card'>
-            {center.extras.onboarding.map(row => <OnboardingRow key={row.id} row={row} busy={busy} action={action} />)}
+            {center.extras.onboarding.map(row => <OnboardingRow key={row.id} row={row} busy={busy} action={action}
+              active={section === 'onboarding'} onChange={onChange} />)}
           </Card>
         </div> : <Empty text={t('没有支持新手福利的账号')} />}
       </div>
       <div hidden={section !== 'plans'}>
-        {center.extras?.plans?.length ? <div className='m-section'>
+        {(center.extras?.plans?.length ?? 0) + (center.extras?.campaigns?.length ?? 0) > 0 ? <div className='m-section'>
           <SectionHead title={t('活动福利')} />
+          <p className='m-ck-note'>{t('限时活动与体验套餐 · 查询后逐项领取 · 不影响每日签到')}</p>
           <Card className='m-card'>
+            {center.extras.campaigns?.map(row => <div className='m-card-pad m-ck-account' key={row.id}>
+              <div className='m-ck-toolbar mb-3'>
+                <ProviderLogo id={row.provider} />
+                <div className='m-ck-title m-ck-grow'>{row.name || row.id}</div>
+              </div>
+              <CampaignRewards entry={row} api={campaignApi} t={t} locale={locale()} formatTime={formatStamp} onChange={onChange} />
+            </div>)}
             {center.extras.plans.map(row => {
               const claimed = claimedPlansToday(row.claimPlans)
               return <div className='m-card-pad m-ck-account' key={row.id}>
@@ -44,7 +59,7 @@ export function CheckinBenefits({ center, section, busy, action, onChange }: {
               </div>
             })}
           </Card>
-        </div> : <Empty text={t('没有可领套餐的账号（ZCode 未添加）。')} />}
+        </div> : <Empty text={t('没有支持活动福利的账号，请添加账号并更新提供商插件。')} />}
       </div>
       <div hidden={section !== 'growth'}>
         {center.extras?.growth?.length ? <div className='m-section'>
@@ -71,7 +86,9 @@ function settledResult(row: OnboardingEntry): OnboardingResult | null {
   }
 }
 
-function OnboardingRow({ row, busy, action }: { row: OnboardingEntry; busy: string; action: CheckinAction }) {
+function OnboardingRow({ row, busy, action, active, onChange }: {
+  row: OnboardingEntry; busy: string; action: CheckinAction; active: boolean; onChange: () => void
+}) {
   const [data, setData] = useState<OnboardingResult | null>(() => settledResult(row))
   const [error, setError] = useState('')
   const settled = data ? data.settled === true : Boolean(row.settled)
@@ -125,6 +142,10 @@ function OnboardingRow({ row, busy, action }: { row: OnboardingEntry; busy: stri
         <Badge tone={task.done ? 'ok' : task.blocked ? 'mute' : 'warn'}>{task.done ? t('已领取') : task.blocked ? t('未解锁') : t('待领取')}</Badge>
       </div>)}
       {!data && !settled ? <p className='m-ck-note'>{t('点击查询后查看任务，领取操作由网关执行')}</p> : null}
+      {row.provider === 'officeace' ? <div className='mt-3 border-t border-border pt-3'>
+        <OfficeaceSubscription accountId={row.id} api={subscriptionApi} t={t} active={active}
+          disabled={Boolean(busy)} onChange={() => { onChange(); void store.refresh(true) }} />
+      </div> : null}
     </div>
   )
 }

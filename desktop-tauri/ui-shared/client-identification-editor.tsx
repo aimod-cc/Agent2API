@@ -62,8 +62,13 @@ export function ClientRuleEditor({ api, view: initialView, rule, evidence, onClo
     <DialogContent className='w-[min(640px,calc(100vw-24px))]'>
       <DialogHeader><DialogTitle>{rule ? t('编辑识别规则') : t('设置识别规则')}</DialogTitle></DialogHeader>
       <DialogBody>
-        <p className='text-xs text-muted-foreground'>{t('规则忽略大小写，只影响新请求的日志与统计，不改变模型选择或权限。')}</p>
-        <div className='flex items-center justify-between gap-3'><Label>{t('启用规则')}</Label><Switch checked={draft.enabled} disabled={Boolean(busy)} onCheckedChange={enabled => update({ enabled })} aria-label={t('启用规则')} /></div>
+        <p className='max-w-[62ch] text-[12px] leading-[1.7] text-muted-foreground'>{t('规则忽略大小写，只影响新请求的日志与统计，不改变模型选择或权限。')}</p>
+        {/* 与面板同一套行形态：底色分层而不是描边，开关在左、状态右对齐 */}
+        <div className='flex items-center gap-3 rounded-lg bg-surface-inset px-4 py-3'>
+          <Switch checked={draft.enabled} disabled={Boolean(busy)} onCheckedChange={enabled => update({ enabled })} aria-label={t('启用规则')} />
+          <span className='text-[13px]'>{t('启用规则')}</span>
+          <span className='ml-auto text-[12px] text-muted-foreground'>{draft.enabled ? t('已启用') : t('已停用')}</span>
+        </div>
         <Label>{t('识别依据')}</Label>
         <Select value={draft.header} disabled={Boolean(busy)} onValueChange={value => update({ header: String(value), matchType: value === 'user-agent' ? 'product' : 'exact' })}>
           <SelectTrigger aria-label={t('识别依据')}><SelectValue>{draft.header}</SelectValue></SelectTrigger>
@@ -94,7 +99,7 @@ export function ClientRuleEditor({ api, view: initialView, rule, evidence, onClo
           catch (failure) { if (alive.current) setError(failure instanceof Error ? failure.message : String(failure)) }
           finally { if (alive.current) setBusy(null) }
         }}>{t('保留草稿并读取最新设置')}</Button></Alert> : null}
-        {preview ? <div className='space-y-2 rounded-lg border border-hairline p-3 text-xs'>
+        {preview ? <div className='flex flex-col gap-2 rounded-lg bg-surface-inset p-3 text-[12px] leading-[1.7]'>
           <p>{t('最近 {window} 条请求中，{scanned} 条有识别依据，{matched} 条符合条件，{applied} 条会采用本规则。', { window: preview.window, scanned: preview.scanned, matched: preview.matched, applied: preview.applied })}</p>
           {preview.sample ? <p>{t('当前样本结果：{name}', { name: preview.sample.clientLabel || preview.sample.evidence.candidate || t('未知客户端') })}
             {!preview.sample.ruleApplied ? ` · ${t('未采用本规则，请检查开关、来源声明或规则顺序')}` : ''}</p> : null}
@@ -107,7 +112,7 @@ export function ClientRuleEditor({ api, view: initialView, rule, evidence, onClo
         </div> : null}
       </DialogBody>
       <DialogFooter>
-        <Button variant='outline' disabled={Boolean(busy)} onClick={onClose}>{t('取消')}</Button>
+        <Button variant='ghost' disabled={Boolean(busy)} onClick={onClose}>{t('取消')}</Button>
         <Button variant='outline' disabled={Boolean(busy)} onClick={() => void execute('preview')}>{busy === 'preview' ? t('预览中…') : t('预览匹配')}</Button>
         <Button disabled={Boolean(busy) || !preview} onClick={() => void execute('save')}>{busy === 'save' ? t('保存中…') : t('保存规则')}</Button>
       </DialogFooter>

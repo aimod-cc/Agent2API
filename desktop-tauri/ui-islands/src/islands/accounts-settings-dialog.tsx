@@ -669,7 +669,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
                     <SettingGroup title={t('出网方式')}>
                       <ProxyForm draft={proxyDraft} onChange={setProxyDraft} idPrefix='account-proxy' allowRotate={allowRotate} />
                       {account.proxy?.error ? <p className='detail text-destructive acct-dlg-block'>
-                        {t('当前代理不可用：{error}（转发时会回退直连）', { error: account.proxy.error })}
+                        {t('当前代理不可用：{error}（不会自动改为直连）', { error: account.proxy.error })}
                       </p> : null}
                     </SettingGroup>
                     <p className='detail acct-dlg-group-note'><AccountSettingsIcon name='shield' size={14} />{t('代理只作用于当前账号，不改变其他账号的出网方式。')}</p>

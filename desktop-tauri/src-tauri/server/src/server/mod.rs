@@ -364,6 +364,7 @@ impl ServerState {
         let snapshot = config::init(db.clone());
         api::pipeline::cleanup_debug_files_if_disabled();
         core::task_state::install(db.clone());
+        core::maintenance::storage::install(db.clone());
         // 每账号的余额查询记录（余额不足跳过 / 自动禁用的底座）：装库句柄时
         // 顺带做旧 kv 快照的一次性迁移与内存事实表的装载（见 usage_records 模块头）。
         core::usage_records::install(db.clone());
@@ -395,13 +396,8 @@ impl ServerState {
         // 它不参与启动预热，位置只要求早于任何一次 `/api/proxies/pool*` 请求。
         core::proxy_pool::install(db.clone());
         core::proxy_settings::install(db.clone());
-        // 云同步（设置页「数据 → 云同步」）：设置与状态落在 kv 的保留键
-        // `cloudSync`，装库句柄即可。自动同步的工作线程在下面 spawn ——
-        // 必须先装句柄再起线程，否则第一轮读设置会拿到默认值。
+        // 先装云同步设置；自动同步须等账号迁移完成后启动，不能上传半份启动状态。
         core::cloud_sync::install(db.clone());
-        if let Some(db) = db.clone() {
-            core::cloud_sync::auto_sync::spawn_worker(db);
-        }
         // 模型清单的持久化缓存：把**同一个 `Db`** 传进去（与配置 / 日志库 /
         // 账号库同一形态）。各家的远程清单在进程重启后由它读回，不再回落到
         // 内置清单（见 `core::providers::catalog_cache` 的模块头）。
@@ -859,6 +855,11 @@ impl ServerState {
     pub fn refresh_upgrade_pending(&self) -> bool {
         let pending = self.db.is_some() && db::migrate::has_pending(&self.config_dir);
         self.upgrade_pending.store(pending, Ordering::Relaxed);
+        if !pending {
+            if let Some(db) = self.db().cloned() {
+                core::cloud_sync::auto_sync::spawn_worker(db);
+            }
+        }
         pending
     }
 
@@ -899,6 +900,9 @@ impl ServerState {
                 "⏳ 待迁移旧数据尚未导入，历史统计整理跳过（升级完成后补做）",
             );
             return;
+        }
+        if let Some(db) = self.db().cloned() {
+            core::cloud_sync::auto_sync::spawn_worker(db);
         }
         // swap 保证重复调用（桌面壳重启后端时 start 可能被再次调用）只跑一轮。
         if self.startup_maintenance.swap(true, Ordering::SeqCst) {

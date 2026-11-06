@@ -68,6 +68,7 @@
   "确定清空当前筛选出的 <strong>{count}</strong> 条日志？清空后无法恢复。": "Tem certeza de que deseja limpar os <strong>{count}</strong> logs filtrados? Isso não pode ser desfeito.",
   "系统事件": "Eventos do sistema",
   "级别": "Nível",
+  "结束阅读": "Encerrar leitura",
   "脱敏": "Mascaramento",
   "自动刷新": "Atualização automática",
   "自动刷新已关闭": "Atualização automática desativada",
@@ -86,6 +87,7 @@
   "重要事件": "Eventos importantes",
   "错误": "Erro",
   "错误 {n}": "Erros {n}",
+  "阅读模式": "Modo de leitura",
   "阅读模式，列表保持不动": "Modo de leitura: lista fixa",
   "附加数据": "Dados adicionais"
 }

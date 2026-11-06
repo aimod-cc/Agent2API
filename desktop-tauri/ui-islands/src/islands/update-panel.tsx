@@ -350,6 +350,8 @@ function acceptServiceProgress(progress: ServiceProgress): void {
 }
 
 function renderCheckResult(): void {
+  // 检查中的进度提示不能被启动或定时读取的旧缓存覆盖。
+  if (snapshot.checking) return
   const { info, checkedAt, checkError } = snapshot
   if (!info) {
     // 没有可保留的旧读数：只剩「这次为什么没查成」
@@ -789,7 +791,7 @@ async function waitForServiceThenReload(): Promise<void> {
 
 /** 检查更新：用户主动发起的一次请求（受后端最短间隔与失败冷却约束） */
 async function check(): Promise<UpdateInfo | null> {
-  if (busy) return null
+  if (busy || snapshot.phase === 'restarting') return null
   busy = true
   publish({ checking: true })
   setBadge(t('检查中'), 'warn')
@@ -806,7 +808,6 @@ async function check(): Promise<UpdateInfo | null> {
     failedOnCheckedAt = -1
     rememberCurrentVersion(result)
     if (result?.sourceRepository) applySourceRepository(result.sourceRepository)
-    renderCheckResult()
   } catch (error) {
     result = null
     // 失败：**保留**上一次成功的结果（版本号 / 更新日志仍然有效，只是不新鲜），
@@ -817,13 +818,13 @@ async function check(): Promise<UpdateInfo | null> {
     // 情况下面板上没有可保留的旧读数，下次任何成功都能直接清掉提示
     failedOnCheckedAt = snapshot.checkedAt
     publish({ checkError: errorMessage(error) })
-    renderCheckResult()
     // 「当前版本」同样不跟着清空（它是本机事实）：已经显示着就留着；还没有值
     // （本次会话没成功检查过）时去本机缓存补一个 —— 冷却期里也不该连版本号都没有
     void refreshCurrentVersion()
   } finally {
     busy = false
     publish({ checking: false })
+    renderCheckResult()
   }
   // 左侧导航的提示：只有确实有新版本才亮，失败与「已是最新」都静默。
   // 失败（result 为 null）时**不转发** —— 那会把上一次成功检查点亮的「新」抹掉，

@@ -144,7 +144,9 @@ pub async fn refresh(
                 continue;
             }
         };
+        let started = std::time::Instant::now();
         let outcome = adapter.refresh_models(store, requested, manual).await;
+        item["durationMs"] = json!(started.elapsed().as_millis().min(i64::MAX as u128) as i64);
         if outcome.refreshed {
             item["status"] = json!("refreshed");
             item["count"] = json!(outcome.count);
@@ -184,6 +186,9 @@ pub async fn refresh(
             "providerLabel": label,
             "refreshedAt": catalog::refresh_meta_for_provider(&id).1,
         });
+        if adapter.refresh_uses_account() && !requested.is_empty() {
+            item["accountId"] = json!(requested);
+        }
         if !adapter.supports_model_refresh() {
             item["status"] = json!("skipped");
             item["fixed"] = json!(true);
@@ -236,7 +241,9 @@ pub async fn refresh(
                 }
             }
         };
+        let started = std::time::Instant::now();
         let outcome = adapter.refresh_models(store, &account_id, manual).await;
+        item["durationMs"] = json!(started.elapsed().as_millis().min(i64::MAX as u128) as i64);
         item["status"] = json!(if outcome.refreshed {
             "refreshed"
         } else if outcome.message.is_some() {

@@ -1,4 +1,8 @@
 {
+  "启用（禁用后，使用此代理的账号请求将失败；仍可测试）": "Enabled (disabling blocks requests from accounts using this proxy; testing remains available)",
+  "有 <strong>{n}</strong> 个账号正在使用它（{names}）—— 删除后需重新设置这些账号的代理，不会自动直连。": "<strong>{n}</strong> accounts use this proxy ({names}). After deletion, reconfigure their proxies; they will not connect directly automatically.",
+  "其中 <strong>{n}</strong> 条正被账号使用 —— 删除后需重新设置相关账号的代理，不会自动直连。": "<strong>{n}</strong> selected proxies are in use. After deletion, reconfigure the affected accounts; they will not connect directly automatically.",
+  "有 {n} 个账号正在使用它，删除后需重新设置这些账号的代理，不会自动直连。": "{n} accounts use this proxy. After deletion, reconfigure their proxies; they will not connect directly automatically.",
   "支持手动地址与 Clash Verge 端点同步，不接管代理服务的安装与运行。": "Supports manually entered addresses and Clash Verge endpoint sync; proxy service installation and execution are not managed here.",
   "添加手动 HTTP / SOCKS5 地址，或同步 Clash Verge 的端点，供账号与服务线路使用。": "Add a manual HTTP / SOCKS5 address or sync Clash Verge endpoints for use by accounts and service routes.",
   "手动代理与 Clash Verge 同步仍然保留": "Manual proxies and Clash Verge sync remain available",

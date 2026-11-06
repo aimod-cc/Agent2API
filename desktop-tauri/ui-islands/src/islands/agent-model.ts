@@ -18,7 +18,7 @@ export function blankProfile(client: AgentClient, gateway: string): AgentProfile
     id: `p-${crypto.randomUUID()}`, name: '', kind: client.supportsGateway ? 'gateway' : 'relay', protocol,
     baseUrl: client.supportsGateway ? protocol === 'anthropic' ? gateway : `${gateway}/v1` : '',
     model: '', provider: '', effort: '', enabled: true, default: false, note: '',
-    models: client.supportsModels ? [blankModel()] : [],
+    models: [],
     claudeModels: { opus: '', sonnet: '', haiku: '', subagent: '' },
     authMode: client.id === 'zed' ? 'preserve' : client.supportsGateway ? 'gateway' : 'key',
     apiKey: '', envKey: '', gatewayKeyId: '',
@@ -48,6 +48,7 @@ export function validateDraft(client: AgentClient, profile: AgentProfile): strin
   if (profile.authMode === 'env' && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(profile.envKey)) return t('请填写有效的环境变量名')
   if (client.supportsModels) {
     if (!profile.models.length) return t('请至少添加一个模型')
+    if (profile.models.length > 200) return t('最多选择 {n} 个模型', { n: 200 })
     const ids = new Set<string>()
     for (const model of profile.models) {
       if (!model.id.trim() || ids.has(model.id.trim())) return t('模型 ID 不能为空或重复')

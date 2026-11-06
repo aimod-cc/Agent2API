@@ -492,6 +492,10 @@ pub fn spawn_catalog_refresh(state: &ServerState) {
     }
     let store = state.store().clone();
     crate::spawn_task(async move {
-        crate::server::core::providers::adapter::refresh_implemented(&store).await;
+        let mut request = crate::server::core::maintenance::Request::full(crate::server::core::maintenance::MODEL, false);
+        request.source = "passive";
+        if let Err(error) = crate::server::core::maintenance::execute(&store, request).await {
+            crate::server::logging::verbose("[Maintenance]", &error);
+        }
     });
 }

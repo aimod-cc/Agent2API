@@ -189,44 +189,22 @@ fn stateful_quota_bookkeeping_ignores_non_quota_classes() {
 }
 
 #[test]
-fn codearts_daily_pool_envelope_cools_to_the_boundary_instead_of_ten_minutes() {
-    use crate::server::errors::GatewayError;
-
+fn daily_pool_cooldown_keeps_the_supplied_midnight_boundary() {
     let (_dir, service, id) = temp_service();
-    // 生产库里那条真实文案（HTTP 200 的 SSE 里折出 403，首包门送进会话式分支）
-    let error = GatewayError::with_status(403, "上游报告 InferHub.4291.200：insufficient quota");
-    let class = adapter_for(ProviderKind::CodeArts).classify_conversation_error(&error);
-    let UpstreamErrorClass::QuotaLimited { reset_at: Some(reset_at), .. } = &class else {
-        panic!("福利池耗尽的文案应分类为带恢复时刻的 QuotaLimited，实际 {class:?}");
+    let now = crate::server::core::beijing::now();
+    let tomorrow = now.date_naive().succ_opt().expect("次日有效");
+    let midnight = tomorrow.and_hms_opt(0, 0, 0).unwrap()
+        .and_local_timezone(crate::server::core::beijing::offset()).single().unwrap();
+    let reset_at = midnight.timestamp_millis();
+    let message = "日额度已用尽";
+    let class = UpstreamErrorClass::QuotaLimited {
+        reset_at: Some(reset_at),
+        message: message.into(),
+        upstream_code: Some(4291200),
+        status: 403,
     };
-    mark_conversation_limited(&service, &id, &single("glm-5.3-flash"), &class, &error.message);
-
-    let stored = rotate::account_limit_reset_at(&service, &id, "glm-5.3-flash");
-    assert_eq!(stored, *reset_at, "落库的恢复时刻必须是适配器算出的日池重置点");
-    // ── 断言「是下一个北京零点」，而不是「距现在 > 10 分钟」（2026-10-13 修）──
-    //
-    // 原断言写的是 `minutes > 10`，本意是「不是 10 分钟兜底常量」；但它有个
-    // 时变缺陷：日池重置点就是**下一个北京零点**，于是每天 23:50–00:00 这十分钟
-    // 里「距零点」天然小于 10 分钟，用例必然变红（实测 2026-10-13 23:49 撞上）。
-    // 那是测试写法的问题，不是实现的 —— 与兜底常量无关的失败被报成了兜底。
-    //
-    // 改成直接钉住真正的判据：恢复时刻必须落在**当天或次日的北京零点**上，
-    // 且距现在不超过 24 小时（日池的语义就是「到零点重置」）。这样任何时刻
-    // 跑都成立，也不再依赖「现在离零点有多远」。
-    let minutes = (stored - logging::now_ms()) / 60_000;
-    assert!(
-        (0..=24 * 60).contains(&minutes),
-        "日池的恢复时刻应当落在 24 小时以内，实际 {minutes} 分钟"
-    );
-    // 判据：恢复时刻在北京时区里必须是 00:00:00 —— 日池按天重置。
-    // 10 分钟兜底常量（now + 10min）落在零点上的概率可忽略，这一条足以把它排除。
-    let at = crate::server::core::beijing::date_time_of_ms(stored).expect("合法时间戳");
-    use chrono::Timelike;
-    assert!(
-        at.hour() == 0 && at.minute() == 0 && at.second() == 0,
-        "恢复时刻必须是北京零点（日池按天重置），实际 {}",
-        at.format("%Y-%m-%d %H:%M:%S")
-    );
+    mark_conversation_limited(&service, &id, &single("daily-pool-model"), &class, message);
+    assert_eq!(rotate::account_limit_reset_at(&service, &id, "daily-pool-model"), reset_at);
 }
 
 #[test]

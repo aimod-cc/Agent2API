@@ -152,12 +152,8 @@ fn text_field(body: &Value, key: &str, limit: usize) -> String {
 
 /// 组装标准 Chat Completions 下游请求体。
 ///
-/// ── 思考等级怎么带（「跟随映射」与「本次覆盖」在这里合流）─────────
-/// 不填 `reasoning` 时**一个等级字段都不写进 body**：映射上绑定的等级由转发层
-/// 按映射注入（`model_rules::reasoning` 的既有语义）；填了则写进
-/// `reasoning_effort` —— 那是「客户端自己指定的档位」，按既有口径**优先于映射**
-/// （映射不覆盖客户端显式指定的等级）。于是界面上那几个选项各自对应一条明确的
-/// 路径，网关侧一行特判都不需要。
+/// 思考等级留空时不写字段；填入时模拟客户端指定 `reasoning_effort`。
+/// 与真实请求一致，模型管理中已生效的等级绑定仍优先覆盖该值。
 fn build_chat_body(
     model: &str,
     prompt: &str,
@@ -713,6 +709,7 @@ async fn run_forward(
     proxy_override: Option<Option<ResolvedProxy>>,
     test_scope: KeyScope,
 ) -> TestOutcome {
+    let deadline = tokio::time::Instant::now() + TEST_TIMEOUT;
     let forward = state.upstream().forward(ForwardRequest {
         body: request_body,
         stream,
@@ -739,7 +736,7 @@ async fn run_forward(
     });
     // 总预算套在整段转发之外（含流式聚合）：测试是一次弹窗等待，必须有上界，
     // 否则一个卡住的上游会让弹窗一直转圈（见 TEST_TIMEOUT）
-    match tokio::time::timeout(TEST_TIMEOUT, forward).await {
+    match tokio::time::timeout_at(deadline, forward).await {
         Err(_elapsed) => TestOutcome {
             status: 504,
             error: Some(format!("测试超时（{} 秒内没拿到完整回答）", TEST_TIMEOUT.as_secs())),
@@ -763,8 +760,8 @@ async fn run_forward(
             // 的是 `BoxStream`（`Pin<Box<dyn Stream>>`）—— `boxed()` 这一步就是
             // 把这个 Unpin 的盒子换成 `'static` 的 Pin 盒子，元素类型不变
             use futures::StreamExt;
-            match tokio::time::timeout(
-                TEST_TIMEOUT,
+            match tokio::time::timeout_at(
+                deadline,
                 aggregate_frame_stream(source.boxed(), telemetry.clone(), FramePolicy::default()),
             )
             .await

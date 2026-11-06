@@ -1,0 +1,171 @@
+/* ─────────────────────────────────────────────
+   自动维护页（凭证维护 / 模型目录更新）
+
+   版面：一屏三段，只有中间那段滚。
+     .maintenance-page（整屏 flex 列，自己不滚）
+       ├─ .maintenance-heading            页头（标题 + 刷新记录 / 维护设置）
+       ├─ .maintenance-summary            概览条：两类维护各一行（约 90px）
+       └─ .maintenance-records            执行记录：吃掉剩余高度
+            ├─ .maintenance-toolbar       标题与筛选同一行
+            ├─ .maintenance-scroll        记录表自己滚，表头常驻
+            └─ .maintenance-foot          条数 / 保留说明 / 翻页
+
+   为什么要把概览压成两行：原来一个任务一张卡（标题 + 元信息 + 大字读数 + 说明 + 底栏），
+   两张并排就吃掉首屏一半高度，记录只剩三四行可见 —— 而这一页真正的内容是记录。
+
+   颜色、圆角、字号一律取组件库与 tokens 的语义变量，深浅主题共用同一组声明；
+   本文件只负责摆放。手机端（≤700px）在文件末尾：概览改堆叠、记录表改卡片。
+   ───────────────────────────────────────────── */
+
+.maintenance-page {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+  /* 正常窗口下这一层不滚（滚动发生在 .maintenance-scroll 里）；
+     窗口极矮时由它兜底，配合记录卡的 min-height，表格不会被压成一条缝 */
+  overflow-y: auto;
+  padding: var(--pad);
+  color: var(--text);
+}
+
+.maintenance-page > * { flex-shrink: 0; }
+
+/* ── 页头 ── */
+.maintenance-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.maintenance-heading h2 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -.01em; }
+.maintenance-heading p { margin: 4px 0 0; color: var(--text-3); font-size: 12px; line-height: 1.6; }
+.maintenance-heading-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+/* ── 概览条 ── */
+.maintenance-summary { flex: none; }
+
+.maintenance-summary-table { min-width: 1060px; }
+.maintenance-summary-table td { padding: 10px 12px; }
+.maintenance-summary-table td:first-child { padding-left: 16px; }
+.maintenance-summary-table tbody tr:last-child > td { border-bottom: 0; }
+
+/* 表头不上色、不加粗：这两行本身自带名称，不需要再来一层列表头 */
+.maintenance-summary-name { font-size: 13px; font-weight: 500; white-space: nowrap; }
+.maintenance-summary-line { color: var(--text-3); font-size: 11.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.maintenance-summary-actions { white-space: nowrap; text-align: right; }
+.maintenance-summary-actions > * + * { margin-left: 6px; }
+
+/* 窄屏的堆叠形态（手机）：一行放不下六列，硬挤会把任务名压成竖条 */
+.maintenance-summary-block { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; }
+.maintenance-summary-block-head { display: flex; align-items: center; gap: 10px; }
+.maintenance-summary-block-head .maintenance-summary-name { flex: 1 1 auto; min-width: 0; }
+.maintenance-summary-block-actions { display: flex; justify-content: flex-end; gap: 6px; }
+
+.maintenance-divided { border-top: 1px solid var(--hairline); }
+
+/* ── 状态与汇总（维护页三处共用，见 maintenance-shared.tsx） ── */
+.maintenance-status { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); font-size: 12px; white-space: nowrap; }
+
+.maintenance-counts { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; color: var(--text-3); font-size: 12px; white-space: nowrap; }
+.maintenance-counts b { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
+.maintenance-counts-bad b { color: var(--danger); }
+.maintenance-counts-sep { opacity: .4; }
+.maintenance-sep { opacity: .45; padding: 0 5px; }
+.maintenance-cooldown { display: inline-block; margin-left: 8px; color: var(--warn); }
+.maintenance-num { font-variant-numeric: tabular-nums; }
+.maintenance-push { margin-left: auto; }
+
+/* ── 执行记录卡 ── */
+.maintenance-records { display: flex; flex: 1; min-height: 360px; flex-direction: column; }
+
+.maintenance-toolbar {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.maintenance-toolbar-title { flex: none; font-size: 13px; font-weight: 500; }
+/* 说明只在够宽时出现：窄窗口下筛选器优先 */
+.maintenance-toolbar-sub { flex: none; color: var(--text-3); font-size: 11.5px; }
+.maintenance-search { margin-left: auto; width: 100%; max-width: 240px; }
+.maintenance-toolbar > [data-slot='segmented-control'] { max-width: 100%; overflow-x: auto; }
+
+.maintenance-scroll { min-height: 0; flex: 1; }
+.maintenance-history-table { min-width: 900px; }
+.maintenance-history-table th:first-child, .maintenance-history-table td:first-child { padding-left: 16px; }
+.maintenance-history-table th:last-child, .maintenance-history-table td:last-child { padding-right: 16px; }
+/* 表头回到列表口径：11px 常规字重，不上字距 */
+.maintenance-history-table th { font-size: 11px; font-weight: 400; letter-spacing: 0; }
+.maintenance-history-table tbody tr:last-child > td { border-bottom: 0; }
+.maintenance-retry-label { display: block; margin-top: 2px; color: var(--text-3); font-size: 11px; }
+
+.maintenance-foot {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 16px;
+  border-top: 1px solid var(--hairline);
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+.maintenance-foot-spinner { color: var(--text-3); }
+
+/* ── 逐项明细弹窗 ── */
+.maintenance-detail-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; overflow-x: auto; }
+.maintenance-detail-scroll { min-height: 0; flex: 1; }
+.maintenance-detail-table { min-width: 760px; }
+.maintenance-detail-table th { font-size: 11px; font-weight: 400; letter-spacing: 0; }
+.maintenance-detail-table tbody tr:last-child > td { border-bottom: 0; }
+/* 原因列要能读完整：窄了换行，不横向撑破表格 */
+.maintenance-detail-table .maintenance-reason { max-width: 340px; min-width: 160px; white-space: normal; overflow-wrap: anywhere; line-height: 1.6; }
+
+.maintenance-metadata { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-top: 12px; border-top: 1px solid var(--hairline); color: var(--text-3); font-size: 12px; }
+.maintenance-detail-footer { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: var(--text-3); font-size: 11.5px; }
+
+.maintenance-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 24px; margin: 0; }
+.maintenance-facts dt { color: var(--text-3); font-size: 11.5px; }
+.maintenance-facts dd { margin: 2px 0 0; font-size: 12.5px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+
+/* ── 维护设置弹窗：一张分组表，行间只用发丝线 ── */
+.maintenance-setting-group { overflow: hidden; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface-2); }
+.maintenance-setting { padding: 14px 16px; }
+.maintenance-setting-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.maintenance-setting h3 { margin: 0; font-size: 13px; font-weight: 500; }
+.maintenance-setting-heading p { margin: 2px 0 0; color: var(--text-3); font-size: 11.5px; line-height: 1.6; }
+
+.maintenance-muted { margin: 0; color: var(--text-3); font-size: 11.5px; line-height: 1.65; }
+
+/* ── 手机端（≤700px）：与组件的 compact 判定同一阈值 ── */
+@media (max-width: 700px) {
+  .maintenance-page { gap: 10px; padding: 0; }
+  .maintenance-heading h2 { display: none; }
+  .maintenance-heading p { margin-top: 0; }
+  .maintenance-heading-actions { width: 100%; justify-content: flex-end; }
+  .maintenance-summary-block { padding: 12px 14px; }
+  .maintenance-toolbar { padding: 10px 12px; gap: 8px; }
+  .maintenance-toolbar-sub { display: none; }
+  .maintenance-toolbar > [data-slot='segmented-control'] { width: 100%; justify-content: center; }
+  .maintenance-search { max-width: none; }
+  .maintenance-records { min-height: 0; }
+  .maintenance-history-cards { display: flex; flex: 1; min-height: 0; flex-direction: column; overflow-y: auto; }
+  .maintenance-run-card { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--hairline); }
+  .maintenance-run-card-heading { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; }
+  .maintenance-run-card-heading strong { font-weight: 500; }
+  .maintenance-run-card > .maintenance-muted { font-size: 11.5px; }
+  .maintenance-foot { padding: 9px 12px; }
+  .maintenance-facts { grid-template-columns: 1fr; }
+}
+
+@media (min-width: 701px) {
+  .maintenance-history-cards { display: none; }
+}
+
+/* 页脚说明与工具条副标题只在够宽时出现：窄窗口下把位置让给筛选器与翻页。
+   1100px 是按「视口减侧栏」倒推的 —— 再窄下去这两行会和控件抢同一行。 */
+@media (max-width: 1099px) {
+  .maintenance-foot-note { display: none; }
+  .maintenance-toolbar-sub { display: none; }
+}

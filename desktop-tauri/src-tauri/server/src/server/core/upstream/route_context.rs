@@ -11,6 +11,10 @@ pub(crate) struct RequestRouting {
     pub group: Option<config::RoutingGroup>,
     pub group_projection: GroupProjection,
     positions: HashMap<String, usize>,
+    account_id: Option<String>,
+    require_account: bool,
+    pub strict_vision: bool,
+    vision_model: Option<String>,
 }
 
 impl RequestRouting {
@@ -30,18 +34,30 @@ impl RequestRouting {
         };
         Self { settings: profiles.settings_for(model, base), profile: profiles.effective(model).cloned(),
             scope: profiles.scope(model).to_string(), captured_at: crate::server::logging::now_ms(), group: None,
+            account_id: None, require_account: false, strict_vision: false, vision_model: None,
             group_projection: Default::default(), positions: ordered.iter().enumerate().filter_map(|(index, account)|
                 routing::account_id(account).map(|id| (id.to_string(), index))).collect() }
     }
 
     pub fn capture_request(model: &str, store: &crate::server::core::account_store::store::AccountStore,
         body: &Value, scope: Option<&crate::server::core::key_scope::KeyScope>, ignore: bool) -> Result<Self, crate::server::errors::GatewayError> {
+        Self::capture_request_with_vision(model, store, body, scope, ignore, None)
+    }
+
+    pub(super) fn capture_request_with_vision(model: &str, store: &crate::server::core::account_store::store::AccountStore,
+        body: &Value, scope: Option<&crate::server::core::key_scope::KeyScope>, ignore: bool,
+        vision: Option<&config::vision_compat::VisionSettings>) -> Result<Self, crate::server::errors::GatewayError> {
         let (profiles, base) = config::routing_snapshot();
         if !ignore && body.get("_wb_route_group_id").and_then(Value::as_str).is_some_and(|id|
             !profiles.group_for_model(model).is_some_and(|group| group.id == id)) {
             return Err(crate::server::errors::GatewayError::with_status(409, "路由组已删除或入口已变更，请重新发起请求；未回退其他路由"));
         }
         let mut routing = Self::capture_with(model, store, &profiles, base);
+        routing.account_id = scope.and_then(|scope| scope.account_id()).map(str::to_string);
+        routing.require_account = scope.is_some_and(|scope| scope.requires_account());
+        if let Some(id) = &routing.account_id {
+            routing.positions.retain(|account, _| account == id);
+        }
         if !ignore {
             if let Some(group) = profiles.group_for_model(model).cloned() {
                 if !crate::server::core::key_scope::allows_model(scope, &group.model) {
@@ -49,7 +65,7 @@ impl RequestRouting {
                 }
                 let snapshot = store.routing_snapshot();
                 let accounts: Vec<_> = snapshot.accounts.iter().map(|account| account.as_ref().clone()).collect();
-                routing.group_projection = routing_groups::project(&group, &accounts, &RequestNeeds::from_body(body), scope);
+                routing.group_projection = routing_groups::project_with_vision(&group, &accounts, &RequestNeeds::from_body(body), scope, vision);
                 if let Some(continuation) = body.get("_wb_route_continue") {
                     routing.group_projection.accounts.retain(|account| {
                         continuation.get("candidateId").and_then(Value::as_str) == Some(routing_groups::attempt_key(account).as_str())
@@ -77,7 +93,17 @@ impl RequestRouting {
         ordered
     }
 
+    pub fn requires_account(&self) -> bool {
+        self.require_account
+    }
+
+    pub fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
+
     pub fn accounts(&self, accounts: Vec<Value>) -> Vec<Value> {
+        let accounts: Vec<_> = accounts.into_iter().filter(|account| self.account_id.as_deref()
+            .is_none_or(|id| routing::account_id(account) == Some(id))).collect();
         if self.group.is_some() {
             return self.group_projection.accounts.iter().filter_map(|candidate| {
                 let mut current = accounts.iter().find(|account| routing::account_id(account) == routing::account_id(candidate)
@@ -90,9 +116,62 @@ impl RequestRouting {
             .is_some_and(|id| self.positions.contains_key(id))).collect();
         accounts.sort_by_key(|account| routing::account_id(account).and_then(|id| self.positions.get(id)).copied().unwrap_or(usize::MAX));
         for (index, account) in accounts.iter_mut().enumerate() {
-            if let Some(object) = account.as_object_mut() { object.insert("routingPriority".to_string(), index.into()); }
+            if let Some(object) = account.as_object_mut() {
+                object.insert("routingPriority".to_string(), index.into());
+                if let Some(model) = &self.vision_model { object.insert("routingModel".into(), model.clone().into()); }
+            }
         }
         accounts
+    }
+
+    pub(super) fn for_vision_target(&self, store: &crate::server::core::account_store::AccountStore,
+        provider: &str, model: &str, request_model: &str, scope: Option<&crate::server::core::key_scope::KeyScope>,
+        pinned: Option<&str>, candidate: Option<&str>, needs: Option<&RequestNeeds>) -> Result<Self, crate::server::errors::GatewayError> {
+        use crate::server::errors::GatewayError;
+        let mut next = self.clone();
+        if let Some(current_group) = &self.group {
+            let profiles = config::routing_profiles();
+            if profiles.group_for_model(&current_group.model).is_none_or(|group| group.id != current_group.id) {
+                return Err(GatewayError::with_status(409, "原路由组已删除或入口已变更，图片兼容已停止"));
+            }
+        }
+        next.strict_vision = true;
+        next.vision_model = Some(model.to_string());
+        if let Some(group) = &self.group {
+            if let Some(needs) = needs {
+                let snapshot = store.routing_snapshot();
+                let accounts: Vec<_> = snapshot.accounts.iter().map(|account| account.as_ref().clone()).collect();
+                next.group_projection = routing_groups::project(group, &accounts, needs, scope);
+            }
+            next.group_projection.accounts.retain(|account| routing::provider_of(account) == provider
+                && routing_groups::candidate_model(account).is_some_and(|value| value.eq_ignore_ascii_case(model))
+                && pinned.is_none_or(|id| routing::account_id(account) == Some(id))
+                && candidate.is_none_or(|id| routing_groups::attempt_key(account) == id));
+            if next.group_projection.accounts.is_empty() {
+                return Err(GatewayError::with_status(403, "视觉目标不在当前路由组的参与成员内；未跳到组外")
+                    .with_code("vision_target_outside_route"));
+            }
+        } else {
+            let destination = Self::capture_request(request_model, store, &json!({}), scope, false)?;
+            if destination.group.is_some() || !self.providers(vec![provider.to_string()]).contains(&provider.to_string())
+                || !destination.providers(vec![provider.to_string()]).contains(&provider.to_string()) {
+                return Err(GatewayError::with_status(403, "视觉目标不在本次请求与目标模型的路由参与范围内")
+                    .with_code("vision_target_outside_route"));
+            }
+            next.positions.retain(|id, _| destination.positions.contains_key(id) && pinned.is_none_or(|pinned| pinned == id));
+            if next.positions.is_empty() {
+                return Err(GatewayError::with_status(503, "当前权限和路由范围内没有参与图片处理的账号")
+                    .with_code("vision_target_unavailable"));
+            }
+        }
+        Ok(next)
+    }
+
+    pub(super) fn cache_identity(&self) -> String {
+        let mut accounts: Vec<_> = self.positions.iter().map(|(id, position)| (id, position)).collect();
+        accounts.sort_by_key(|(id, _)| *id);
+        json!({ "scope": self.scope, "accounts": accounts, "group": self.group,
+            "account": self.account_id, "requireAccount": self.require_account }).to_string()
     }
 
     pub fn json(&self) -> Value {

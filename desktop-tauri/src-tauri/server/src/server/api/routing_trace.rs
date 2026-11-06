@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use axum::extract::{Query, State};
 use axum::response::Response;
 
+use crate::server::core::billing::keepalive;
 use crate::server::http::ok_json;
 use crate::server::{errors, ServerState};
 
@@ -21,7 +22,10 @@ pub async fn get_trace(State(state): State<ServerState>, Query(params): Query<Ha
     };
     let stats = state.request_stats();
     match tokio::task::spawn_blocking(move || stats.routing_trace(model.as_deref(), offset, limit, &status, &search, bounds)).await {
-        Ok(value) => ok_json(value),
+        Ok(mut value) => {
+            keepalive::normalize_request_display(state.store(), &mut value);
+            ok_json(value)
+        }
         Err(error) => errors::management_error(500, format!("读取请求跟踪失败: {error}")),
     }
 }
@@ -32,7 +36,10 @@ pub async fn get_trace_request(State(state): State<ServerState>, Query(params): 
     if id.is_empty() || id.len() > 256 { return errors::management_error(400, "请求 ID 不能为空且不能超过 256 字符") }
     let stats = state.request_stats();
     match tokio::task::spawn_blocking(move || stats.routing_trace_request(&id, ts)).await {
-        Ok(Some(value)) => ok_json(value),
+        Ok(Some(mut value)) => {
+            keepalive::normalize_request_display(state.store(), &mut value);
+            ok_json(value)
+        }
         Ok(None) => errors::management_error(404, "请求记录已删除或超过留存范围"),
         Err(error) => errors::management_error(500, format!("读取请求详情失败: {error}")),
     }

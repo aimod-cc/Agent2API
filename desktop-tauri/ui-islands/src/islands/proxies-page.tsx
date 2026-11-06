@@ -6,7 +6,7 @@ import { createRoot } from 'react-dom/client'
 import {
   Badge, Button, Card, CardHeader, Checkbox, InputGroup, InputGroupAddon,
   InputGroupInput, ResponsiveSheet, SegmentedControl, Select, SelectContent,
-  SelectItem, SelectTrigger, SelectValue, Switch, Table, TableBody, TableCell,
+  SelectItem, SelectTrigger, SelectValue, Spinner, StatusDot, Switch, Table, TableBody, TableCell,
   TableHead, TableHeader, TableRow, cn,
 } from '@ui'
 import { poolItemAddress } from './accounts-shared'
@@ -84,27 +84,49 @@ function ProxiesPage() {
           aria-label={t('勾选「{name}」', { name: item.name || t('未命名') })}
           onCheckedChange={next => togglePick(item.id, next)} />
       case 'name':
-        return <div className='flex min-w-0 flex-col gap-1'><b>{item.name || t('未命名')}</b>
-          <span className='flex items-center gap-2 text-[10px] text-subtle'>
-            <Badge variant='outline' shape='tag' className='font-mono text-[10px]'>{(item.resolved?.protocol || item.protocol || 'http').toUpperCase()}</Badge>
-            {item.source === 'clash' ? <Badge variant='secondary' shape='tag' className='text-[10px]'>Clash Verge</Badge> : null}
-            {item.enabled === false ? t('已禁用') : null}
-          </span></div>
+        /* 名称一行、说明一行：说明不套彩色标签，只用一档灰字 ——
+           标签盒子一多，整张表就从「列表」变成「仪表盘」 */
+        return <div className='flex min-w-0 flex-col gap-0.5'>
+          <span className='truncate text-[12.5px] font-medium' title={item.name || t('未命名')}>{item.name || t('未命名')}</span>
+          <span className='flex min-w-0 items-center gap-1.5 text-[10.5px] text-muted-foreground'>
+            <span className='shrink-0 font-mono'>{(item.resolved?.protocol || item.protocol || 'http').toUpperCase()}</span>
+            <span className='opacity-45' aria-hidden='true'>·</span>
+            {item.source === 'clash'
+              ? <span className='truncate' title={t('只读：在 Clash Verge 里改')}>Clash Verge</span>
+              : <span className='truncate'>{t('手动添加')}</span>}
+            {item.enabled === false ? <>
+              <span className='opacity-45' aria-hidden='true'>·</span>
+              <span className='shrink-0'>{t('已禁用')}</span>
+            </> : null}
+          </span>
+        </div>
       case 'addr': {
         const address = poolItemAddress(item)
+        /* 协议前缀压淡、主机端口保持正常色：一列地址扫起来先认端口。
+           另：原写法用的 text-text-2 从未定义过（等于没上色），换成真令牌 text-subtle。
+           只有真拆出前缀时才上灰色，'http://' 这种只有前缀的残缺值原样显示 */
+        const scheme = /^[a-z0-9]+:\/\//i.exec(address)?.[0] ?? ''
+        const rest = scheme && address.length > scheme.length ? address.slice(scheme.length) : address
         return <div className='flex min-w-0 items-center gap-1'>
-          <span className='min-w-0 flex-1 break-all font-mono text-xs leading-[1.5] text-text-2'
-            title={item.resolveError || address}>{address || t('地址不完整')}</span>
-          {address ? <Button variant='ghost' size='icon-xs' className='copy-btn shrink-0' data-copy={address} title={t('复制地址')}>⧉</Button> : null}
+          <span className='min-w-0 flex-1 truncate font-mono text-xs leading-[1.5] text-subtle'
+            title={item.resolveError || address}>
+            {rest !== address ? <span className='text-muted-foreground'>{scheme}</span> : null}
+            {rest || t('地址不完整')}
+          </span>
+          {address ? <Button variant='ghost' size='icon-xs' className='copy-btn shrink-0' data-copy={address}
+            title={t('复制地址')} aria-label={t('复制地址')}><CopyIcon /></Button> : null}
         </div>
       }
       case 'usage': {
         const services = proxyServiceLabels(item, t)
-        return <div className='flex flex-col gap-0.5 text-xs text-subtle'>
-          {item.usedBy?.length ? <span title={item.usedBy.map(entry => entry.name || entry.id).join(t('、'))}>
-            {t('{n} 个账号在用', { n: item.usedBy.length })}</span> : null}
-          {services.map(service => <span key={service}>{service}</span>)}
-          {!item.usedBy?.length && !services.length ? t('暂未使用') : null}
+        const usedBy = item.usedBy || []
+        const accountLine = usedBy.length ? t('{n} 个账号在用', { n: usedBy.length }) : ''
+        return <div className='flex min-w-0 flex-col gap-0.5'>
+          {accountLine ? <span className='truncate text-[11.5px] text-subtle'
+            title={usedBy.map(entry => entry.name || entry.id).join(t('、'))}>{accountLine}</span> : null}
+          {services.length ? <span className='truncate text-[10.5px] text-muted-foreground'
+            title={services.join(t('、'))}>{services.join(' · ')}</span> : null}
+          {!accountLine && !services.length ? <span className='text-[11.5px] text-muted-foreground'>{t('暂未使用')}</span> : null}
         </div>
       }
       case 'state':
@@ -116,26 +138,43 @@ function ProxiesPage() {
           aria-label={t('启用「{name}」', { name: item.name || t('未命名') })}
           onCheckedChange={next => void toggleItem(item, next)} />
       case 'test': {
-        if (snapshot.testing === item.id) return <span className='text-subtle'>{t('测试中…')}</span>
+        if (snapshot.testing === item.id) return <span className='flex items-center gap-1.5 text-[11.5px] text-muted-foreground'><Spinner />{t('测试中…')}</span>
         const last = item.lastTest
-        if (!last?.at) return <span className='text-subtle'>{t('未检测')}</span>
-        return <div className='flex min-w-0 flex-col gap-0.5 text-xs leading-[1.5]'>
-          <span className={last.success ? 'text-success' : 'text-destructive'}>
-            {last.success ? t('✅ 连接成功') : t('❌ 连接失败')}　{durationText(last.durationMs)}
+        if (!last?.at) return <span className='flex items-center gap-1.5 text-[11.5px] text-muted-foreground'>
+          <StatusDot variant='muted' />{t('未检测')}</span>
+        /* 颜色只落在状态点上、文字是常规色：结果一眼能扫，整列却不吵。
+           时间在前、出口 IP 或失败原因在后 —— 时间永远不会被长文案挤掉 */
+        return <div className='flex min-w-0 flex-col gap-0.5'>
+          <span className='flex items-baseline gap-1.5'>
+            <StatusDot variant={last.success ? 'success' : 'destructive'} className='translate-y-[-1px]' />
+            <span className='text-[12px]'>{last.success ? t('可用') : t('失败')}</span>
+            <span className='font-mono text-[10.5px] text-muted-foreground'>{durationText(last.durationMs)}</span>
           </span>
-          <span className='truncate text-[10px] text-subtle' title={last.error || undefined}>
-            {last.success ? last.ip || '' : last.error || t('连接失败')}
+          <span className='flex min-w-0 items-baseline gap-1 text-[10.5px]'>
+            <span className='shrink-0 font-mono text-muted-foreground'>{formatTime(last.at)}</span>
+            <span className='opacity-45' aria-hidden='true'>·</span>
+            <span className={cn('truncate font-mono', last.success ? 'text-muted-foreground' : 'text-destructive')}
+              title={last.success ? last.ip || undefined : last.error || t('连接失败')}>
+              {last.success ? last.ip || '' : last.error || t('连接失败')}
+            </span>
           </span>
-          <span className='text-[10px] text-subtle'>{formatTime(last.at)}</span>
         </div>
       }
       case 'act':
+        /* 「测试」压在最右边：整列右对齐，于是它永远贴着表格右缘 ——
+           次要操作（只读提示 / 编辑 / 删除）留在它左边，安静但不消失 */
         return <div className='row-actions'>
-          <Button size='sm' variant='ghost' disabled={locked} onClick={() => void testItem(item)}>{t('测试')}</Button>
-          {item.source === 'clash' ? <span className='text-[10px] text-subtle' title={t('名字与端口在 Clash Verge 里改；启用可在本页关闭')}>{t('只读：在 Clash Verge 里改')}</span> : <>
-            <Button size='sm' variant='ghost' disabled={locked} onClick={() => setModal({ item })}>{t('编辑')}</Button>
-            <Button size='sm' variant='ghost' className='text-destructive' disabled={locked} onClick={() => void removeItem(item)}>{t('删除')}</Button>
-          </>}
+          {item.source === 'clash'
+            ? <span className='self-center text-[10.5px] text-muted-foreground'
+              title={t('名字与端口在 Clash Verge 里改；启用可在本页关闭')}>{t('只读')}</span>
+            : <>
+              <Button size='icon-xs' variant='ghost' disabled={locked} title={t('编辑')} aria-label={t('编辑')}
+                onClick={() => setModal({ item })}><EditIcon /></Button>
+              <Button size='icon-xs' variant='ghost' disabled={locked} title={t('删除')} aria-label={t('删除')}
+                className='text-muted-foreground hover:text-destructive'
+                onClick={() => void removeItem(item)}><TrashIcon /></Button>
+            </>}
+          <Button size='sm' variant='outline' disabled={locked} onClick={() => void testItem(item)}>{t('测试')}</Button>
         </div>
       default: return null
     }
@@ -147,11 +186,13 @@ function ProxiesPage() {
         <h2>{t('代理列表')}</h2><Badge variant='secondary' shape='tag'>{rows.length}</Badge>
         <span className='panel-sub'>{ready ? t('已启用 {n} 个', { n: rows.filter(item => item.enabled !== false).length }) : t('加载中…')}</span>
         <div className='head-actions'>
+          {/* 主次分明：只有「新增代理」是实心主操作，其余按重要性由浅到深排开
+              （同步是第二条常用动作，保留描边；测试设置与刷新是轻动作，走 ghost） */}
           <Button disabled={locked} onClick={() => setModal({ item: null })}>{t('＋ 新增代理')}</Button>
           <Button variant='ghost' className='hidden max-[767px]:inline-flex' onClick={() => setFilterOpen(true)}>{t('筛选')}</Button>
           <Button variant='outline' disabled={locked} onClick={() => void syncClash()}>{snapshot.syncing ? t('同步中…') : t('同步 Clash Verge')}</Button>
-          <Button variant='outline' disabled={locked} onClick={() => setSettingsOpen(true)}>{t('测试设置')}</Button>
-          <Button variant='outline' disabled={snapshot.loading || locked} onClick={() => void loadPanel()}>{snapshot.loading ? t('刷新中…') : t('刷新')}</Button>
+          <Button variant='ghost' disabled={locked} onClick={() => setSettingsOpen(true)}>{t('测试设置')}</Button>
+          <Button variant='ghost' disabled={snapshot.loading || locked} onClick={() => void loadPanel()}>{snapshot.loading ? t('刷新中…') : t('刷新')}</Button>
         </div>
       </CardHeader>
       {selectedCount ? <div className='batch-bar active'>
@@ -226,6 +267,31 @@ function statusOptions(rows: ProxyPoolItem[]): Array<{ value: string; label: str
 
 function SearchIcon() {
   return <svg width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='2' strokeLinecap='round' aria-hidden='true'><circle cx='11' cy='11' r='8' /><path d='m21 21-4.3-4.3' /></svg>
+}
+
+/* 行内图标：线条、14px、只吃 currentColor —— 与上方搜索图标同一口径。
+   原来是文字符号（行内 ⧉）与纯文字按钮，换成图形后三颗按钮的宽度与
+   对齐都稳定了，也不再依赖系统字体里有没有那个符号。 */
+function CopyIcon() {
+  return <svg viewBox='0 0 24 24' className='size-3.5' fill='none' stroke='currentColor' strokeWidth='1.5' strokeLinecap='round' strokeLinejoin='round' aria-hidden='true'>
+    <path d='M9 9V6.5A1.5 1.5 0 0 1 10.5 5h7A1.5 1.5 0 0 1 19 6.5v7a1.5 1.5 0 0 1-1.5 1.5H15' />
+    <path d='M5.5 9h7A1.5 1.5 0 0 1 14 10.5v7A1.5 1.5 0 0 1 12.5 19h-7A1.5 1.5 0 0 1 4 17.5v-7A1.5 1.5 0 0 1 5.5 9Z' />
+  </svg>
+}
+
+function EditIcon() {
+  return <svg viewBox='0 0 24 24' className='size-3.5' fill='none' stroke='currentColor' strokeWidth='1.5' strokeLinecap='round' strokeLinejoin='round' aria-hidden='true'>
+    <path d='M4.5 19.5h3l9-9a2.1 2.1 0 0 0-3-3l-9 9v3Z' />
+    <path d='m14.5 6.5 3 3' />
+  </svg>
+}
+
+function TrashIcon() {
+  return <svg viewBox='0 0 24 24' className='size-3.5' fill='none' stroke='currentColor' strokeWidth='1.5' strokeLinecap='round' strokeLinejoin='round' aria-hidden='true'>
+    <path d='M5 7h14' />
+    <path d='M9 7V5.5A1.5 1.5 0 0 1 10.5 4h3A1.5 1.5 0 0 1 15 5.5V7' />
+    <path d='M7 7l.8 11a1.5 1.5 0 0 0 1.5 1.4h5.4A1.5 1.5 0 0 0 16.2 18L17 7' />
+  </svg>
 }
 
 declare global {

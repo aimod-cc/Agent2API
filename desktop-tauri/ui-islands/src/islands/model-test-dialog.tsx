@@ -439,7 +439,7 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
     defaultClosed
       ? t('该行当前未启用：测试照常按本名直发（「先测通、再决定要不要启用」正是这颗按钮的用法），但本行的思考等级绑定不参与本次，生产路由也要等绑定打开后才会放行')
       : boundLevel
-        ? t('映射上绑定的思考等级是 {level}，「跟随映射」按它注入', { level: boundLevel })
+        ? t('映射已绑定思考等级 {level}，可用时会优先覆盖本次指定的等级', { level: boundLevel })
         : t('映射上未绑定思考等级，「跟随映射」等于这次不注入'),
   ].filter(Boolean).join(t('；')) + t('。')
 
@@ -448,8 +448,7 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
   const proxyItems: Array<{ value: string; label: string; disabled?: boolean }> = [
     { value: '', label: t('跟随账号配置') },
     { value: PROXY_DIRECT, label: t('直连（不使用代理）') },
-    // 已禁用的池条目置灰：测试会走它解析（失败即回退直连），选它测出来的
-    // 结论不是用户想要的那个 —— 与账号页代理列同一口径
+    // 已禁用的池条目置灰：它不能代表一次可用的代理出口。
     ...(pool ?? []).map(item => ({
       value: `${POOL_VALUE_PREFIX}${item.id}`,
       label: poolItemLabel(item),

@@ -42,6 +42,7 @@ use crate::server::core::billing::WorkbuddyActivity;
 use crate::server::logging;
 
 mod summary;
+mod workbuddy;
 pub(crate) use summary::failure_of;
 
 /// 签到路径上的错误。对应 Node 版抛出的 AccountStoreError：
@@ -190,21 +191,6 @@ fn is_available(account: &Value) -> bool {
         .unwrap_or(true)
 }
 
-/// 这条会话是不是企业版账号（`account.enterpriseId` 非空）。
-///
-/// 企业版没有个人成长 / 补偿体系：上游对签到、活动补偿这类个人计费端点
-/// 固定回 400 code 10001（参考实现 workbuddy2api-panel 的 A/B 实测，
-/// 2026-10-07）。活动补偿那一步据此直接跳过，省一次注定失败的请求 ——
-/// 判据只此一份，与 `AuthService`「enterpriseId 为 null 就不显示企业标记」
-/// 同一口径（空串按个人版处理）。
-fn is_enterprise_session(session: &Value) -> bool {
-    session
-        .get("account")
-        .and_then(|account| account.get("enterpriseId"))
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.is_empty())
-}
-
 /// 账号列表快照（`store.listAccounts().accounts`）
 fn accounts_of(store: &AccountStore) -> Vec<Value> {
     store
@@ -331,7 +317,13 @@ pub async fn checkin_for(
                     .checkin_claim_with_options(store, &id, manual)
                     .await
                     .map_err(|error| error.message);
-                return claim_result(id, name, &display, true, claim);
+                let mut row = claim_result(id.clone(), name, &display, true, claim);
+                if provider_id == crate::server::core::providers::DEFAULT_PROVIDER_ID {
+                    if let Some(entry) = store.get_session_by_id(&id) {
+                        workbuddy::attach_growth(store, &id, &entry.session, &display, &mut row).await;
+                    }
+                }
+                return row;
             }
         }
     }
@@ -401,139 +393,7 @@ pub async fn checkin_for(
         // 现在落到这里的未知家明确报「未接入」，新增一家时忘了加分支会立刻暴露
         // （WorkBuddy 国际版拆家后是独立 id，走上面的 workbuddy-intl 分支）。
         _ if provider_id == crate::server::core::providers::DEFAULT_PROVIDER_ID => {
-            let Some(entry) = store.get_session_by_id(&id) else {
-                return json!({
-                    "id": id,
-                    "name": name,
-                    "claim": Value::Null,
-                    "error": "没有可用凭证",
-                });
-            };
-            let claim = billing
-                .claim_daily_checkin(Some(&entry.session))
-                .await
-                .map_err(|error| error.message);
-            let mut row = claim_result(id.clone(), name, &display, false, claim);
-            // ── 每日活跃上报：点亮成长中心连登 / 活跃地图 ──────────────
-            // 签到（`daily-checkin`）只推进**签到活动**自己的连签，成长中心的
-            // 连登与热力图只认 `/v2/report` 的一条 `chat_request_send` 事件
-            // （2026-10-19 实测：签到后签到连签 14→15，而 `growth/streak`
-            // 的 days 与当日热力格一格未动；补发一条上报后 0→1 / 0→2）。
-            // 见 `growth::daily_activity` 的模块头。
-            //
-            // 结果落在行的 `growth` 键上，**刻意不叫 `activity`**：那个键是
-            // 国际版日活链路的读数，`day_completed` / 台账会把它当成「今天
-            // 已完成」—— 对国内版，上报只点亮地图，不等于积分领到了，
-            // 混用会让签到失败的账号被记成已签。
-            //
-            // 企业版没有个人成长体系（`/activity/growth/*` 一律 403），
-            // 与下面两条一次性奖励同一门控；上报对它零收益（上游仍回 200）。
-            if !is_enterprise_session(&entry.session) {
-                // ── 每日活跃上报：点亮成长中心连登 / 活跃地图 ──────────────
-                // 实现（`/v2/report` 的事件形状、按天幂等记忆、竞态读数过滤）
-                // 全在**插件**里（`workbuddy::admin` 的 `growth.daily`）。
-                // 网关这边只剩「把读数落库 + 记日志」——`mark_streak_days`
-                // 动的是网关的账号库，插件写不到。
-                let growth_row = match crate::server::core::providers::adapter::adapter_by_id(
-                    provider_id,
-                ) {
-                    Some(adapter) => {
-                        match adapter
-                            .admin_action(store, &id, "growth.daily", &Value::Null)
-                            .await
-                        {
-                            Ok(row) => {
-                                let days = row.get("streakDays").and_then(Value::as_i64);
-                                if let Some(days) = days {
-                                    if !store.mark_streak_days(&id, days) {
-                                        logging::verbose(
-                                            "[Accounts]",
-                                            &format!("账号 {id} 的连登天数未能落盘"),
-                                        );
-                                    }
-                                }
-                                let sent =
-                                    row.get("reported").and_then(Value::as_bool).unwrap_or(false);
-                                if sent {
-                                    logging::verbose(
-                                        "[Accounts]",
-                                        &format!(
-                                            "账号 {display}: 每日活跃已上报{}",
-                                            days.map(|days| format!("（连登 {days} 天）"))
-                                                .unwrap_or_default()
-                                        ),
-                                    );
-                                }
-                                row
-                            }
-                            // 附加收益失败：只记日志，绝不影响签到结果
-                            Err(error) => {
-                                logging::verbose(
-                                    "[Accounts]",
-                                    &format!("账号 {display} 每日活跃上报失败: {}", error.message),
-                                );
-                                json!({
-                                    "reported": false,
-                                    "streakDays": Value::Null,
-                                    "error": error.message,
-                                })
-                            }
-                        }
-                    }
-                    None => json!({
-                        "reported": false,
-                        "streakDays": Value::Null,
-                        "error": "没有可用的 WorkBuddy 适配器（未安装插件？）",
-                    }),
-                };
-                if let Some(object) = row.as_object_mut() {
-                    object.insert("growth".to_string(), growth_row);
-                }
-            }
-            // ── 一次性运营奖励：挂在签到末尾顺带领 ────────────────
-            // 新手礼包与活动补偿（如 2026-10 的 DeepSeek 故障补偿 500 积分）
-            // 都没有自己的入口，官方口径是去「用量管理 / 个人中心」手动点领取
-            // —— 网关替账号走这两下（参考实现 workbuddy2api-hub 的连登管家把
-            // 两条一起挂在签到后，同一口径）。每号一次，已领 / 无可领取静默
-            // 跳过，不影响签到结果本身；真的到账才出声（日志 + 行内读数）。
-            // 企业版没有个人成长 / 补偿体系（上游固定回 400 code 10001），
-            // 直接不发这两条。
-            if !is_enterprise_session(&entry.session) {
-                let mut rewards: Vec<Value> = Vec::new();
-                for reward in [
-                    billing.claim_gift(&entry.session).await,
-                    billing.claim_compensation(&entry.session).await,
-                ] {
-                    match reward {
-                        Ok(reward) => {
-                            let credited = reward.get("success").and_then(Value::as_bool)
-                                == Some(true)
-                                && reward.get("credit").and_then(Value::as_i64).unwrap_or(0) > 0;
-                            if credited {
-                                let message =
-                                    reward.get("msg").and_then(Value::as_str).unwrap_or("");
-                                logging::log(
-                                    "[Accounts]",
-                                    &format!("账号 {display}: {message}"),
-                                );
-                            }
-                            rewards.push(reward);
-                        }
-                        Err(error) => {
-                            logging::verbose(
-                                "[Accounts]",
-                                &format!("账号 {display} 运营奖励未领取: {}", error.message),
-                            );
-                        }
-                    }
-                }
-                if !rewards.is_empty() {
-                    if let Some(object) = row.as_object_mut() {
-                        object.insert("rewards".to_string(), Value::Array(rewards));
-                    }
-                }
-            }
-            row
+            workbuddy::checkin(store, billing, id, name, &display).await
         }
         // AtomCode 的「签到」（领取免费 CodingPlan）已随实现搬到插件，
         // 走上面那条插件分支（`plugin_checkin_capability`）。

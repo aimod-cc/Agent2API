@@ -32,7 +32,7 @@ export function MorePage() {
         { id: 'checkin', label: t('签到中心'), icon: 'checkin' },
         { id: 'models', label: t('模型管理'), icon: 'model' },
         { id: 'agent', label: t('Agent 配置'), icon: 'agent' },
-        { id: 'tools', label: t('工具服务'), icon: 'tools' },
+        { id: 'tools', label: t('MCP & Skills'), icon: 'tools' },
         { id: 'proxies', label: t('网络代理'), icon: 'proxy' },
         { id: 'keys', label: t('网关 Key'), icon: 'key' },
         { id: 'docs', label: t('接口文档'), icon: 'doc' },
@@ -43,7 +43,7 @@ export function MorePage() {
       entries: [
         { id: 'requests', label: t('请求日志'), icon: 'request', badge: limited ? String(limited) : undefined },
         { id: 'logs', label: t('运行日志'), icon: 'log' },
-        { id: 'tasks', label: t('定时任务'), icon: 'task' },
+        { id: 'tasks', label: t('自动维护'), icon: 'task' },
       ],
     },
     {

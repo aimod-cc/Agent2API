@@ -5,7 +5,7 @@ import { applyProfile, confirm, errorMessage, requestPreview, saveProfiles, toas
 import { cloneProfile, defaultOperation, profileSignature, validateDraft } from './agent-model'
 import { ConnectionFields, SingleModelFields, TextField } from './agent-fields'
 import { ModelsFields } from './agent-model-fields'
-import { loadCatalog, type CatalogModel } from './agent-catalog'
+import { refreshCatalogModels, useAgentCatalog, type CatalogModel } from './agent-catalog'
 import { WritePreview } from './agent-preview'
 import type { AgentClient, AgentPreview, AgentProfile } from './agent-types'
 
@@ -15,8 +15,8 @@ export function ProfileDialog({ client, profile, creating, native = false, onClo
   const [saving, setSaving] = React.useState(false)
   const [preview, setPreview] = React.useState<AgentPreview | null>(null)
   const [previewing, setPreviewing] = React.useState(false)
-  const [catalog, setCatalog] = React.useState<CatalogModel[]>([])
-  const [catalogError, setCatalogError] = React.useState('')
+  const { catalog, loading: catalogLoading, error: catalogError, retry: retryCatalog } = useAgentCatalog(
+    draft.kind === 'gateway' && draft.authMode === 'gateway' ? draft.gatewayKeyId : undefined)
   const initial = React.useRef(profileSignature(profile))
   const nativeRevision = React.useRef(client.nativeRevision)
   const previewClient = native ? { ...client, nativeRevision:nativeRevision.current } : client
@@ -24,12 +24,18 @@ export function ProfileDialog({ client, profile, creating, native = false, onClo
   const dirty = profileSignature(draft) !== initial.current
   const operation = native ? 'native-edit' : defaultOperation(client)
   const validationClient = native && !profile.enabled ? { ...client, supportsDefault:false } : client
+  const previousCatalog = React.useRef<CatalogModel[]>([])
   const [confirming, setConfirming] = React.useState(false)
   React.useEffect(() => {
-    let alive = true
-    void loadCatalog().then(models => { if (alive) setCatalog(models) }).catch(error => { if (alive) setCatalogError(errorMessage(error)) })
-    return () => { alive = false; previewGeneration.current += 1 }
-  }, [])
+    if (catalogLoading || catalogError) return
+    const previous = previousCatalog.current
+    previousCatalog.current = catalog
+    if (!previous.length || draft.kind !== 'gateway' || !client.supportsModels) return
+    previewGeneration.current += 1
+    setPreview(null); setConfirming(false); setPreviewing(false)
+    setDraft(profile => ({ ...profile, models: refreshCatalogModels(client, profile.models, previous, catalog) }))
+  }, [catalogLoading, catalogError, catalog, client.id, client.supportsModels, draft.kind])
+  React.useEffect(() => () => { previewGeneration.current += 1 }, [])
   const update = (values: Partial<AgentProfile>) => {
     previewGeneration.current += 1
     setDraft(current => ({ ...current, ...values })); setPreview(null); setConfirming(false); setPreviewing(false); setError('')
@@ -80,9 +86,11 @@ export function ProfileDialog({ client, profile, creating, native = false, onClo
           <h3 className='text-sm font-semibold'>{t('连接配置')}</h3>
           <TextField label={t('方案名称')} fieldKey='' value={draft.name} onChange={name => update({name})} disabled={saving || previewing || (native && ['claude-code','gemini-cli','kimi-code','zed','cline','workbuddy'].includes(client.id))} />
           <ConnectionFields client={client} draft={draft} update={update} disabled={saving || previewing} />
-          {catalogError && draft.kind === 'gateway' && <Alert variant='warning'>{t('模型目录读取失败，可手动填写真实模型 ID。')} {catalogError}</Alert>}
+          {draft.kind === 'gateway' && catalogLoading && <p className='text-xs text-subtle'>{t('正在读取网关模型并填入配置…')}</p>}
+          {catalogError && draft.kind === 'gateway' && <Alert variant='warning'>{t('模型目录读取失败，可手动填写真实模型 ID。')} {catalogError}
+            <Button variant='outline' size='sm' onClick={retryCatalog} disabled={saving || previewing}>{t('重试')}</Button></Alert>}
         </section>
-        {client.supportsModels ? <ModelsFields client={validationClient} draft={draft} update={update} catalog={catalog} disabled={saving || previewing} native={native} />
+        {client.supportsModels ? <ModelsFields client={validationClient} draft={draft} update={update} catalog={catalog} disabled={saving || previewing || draft.kind === 'gateway' && catalogLoading} native={native} />
           : <section className='flex min-w-0 flex-col gap-4 border-t border-hairline pt-4'><h3 className='text-sm font-semibold'>{t('模型配置')}</h3>
             <SingleModelFields client={validationClient} draft={draft} update={update} catalog={catalog} disabled={saving || previewing} /></section>}
         {(client.supportsToggle || !native) && <section className='flex min-w-0 flex-col gap-4 border-t border-hairline pt-4'>

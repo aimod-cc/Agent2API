@@ -60,6 +60,7 @@ pub mod native_tool;
 pub mod responses;
 pub mod responses_outbound;
 pub mod tool_plan;
+pub mod usage;
 
 use std::borrow::Cow;
 

@@ -441,7 +441,7 @@ function FileImportSection({
         if (remark) payload.name = remark
         const data = (await postAccount(payload)) as { account?: AccountRecord } | null
         setHint('')
-        await afterAdd(addedLabelOf(data?.account), config.label)
+        await afterAdd(addedLabelOf(data?.account), config.label, data)
       } catch (error) {
         // 文件本身的问题（缺字段 / 密文解不开 / 凭证无效）后端都给 400 + 带文件名的
         // 原因，原样透出即可
@@ -1222,20 +1222,8 @@ export function WorkBuddyBlock({ active, footerHost }: { active: boolean; footer
     loginPrefs.loginMode = mode
   }
 
-  /**
-   * 「恢复 Google / GitHub 入口」的可用条件：**国际版 + 内嵌窗口**。
-   * 系统浏览器模式下页面跑在用户自己的浏览器里，我们没有注入能力；国内版登录页
-   * 根本没有这两个入口（它用微信 / 手机号 / 邮箱 / SSO），壳侧也会忽略这个值。
-   * 不满足时置灰，避免给出一个「选了不生效」的假选项。
-   */
-  const intl = edition === 'intl'
-  const embedded = loginMode === 'embedded'
-  const socialUsable = intl && embedded
-  const socialTitle = socialUsable
-    ? t('国际版登录页默认只显示邮箱登录，勾选后恢复 Google / GitHub / X 入口')
-    : !intl
-      ? t('国内版登录页没有 Google / GitHub 入口（它用微信 / 手机号 / 邮箱登录）')
-      : t('只有「内嵌窗口」能恢复第三方入口：系统浏览器里我们无法改动登录页')
+  // 第三方入口只在国际版的内嵌窗口里有效；切换模式时保留之前的开关偏好。
+  const socialUsable = edition === 'intl' && loginMode === 'embedded'
 
   // 分段选项随平台变化：网页托管面板没有本机官方客户端，「导入桌面端登录态」
   // 整项收起（与 desktopImportAvailable 的 platform 判断同一口径）。当前选中项
@@ -1283,7 +1271,7 @@ export function WorkBuddyBlock({ active, footerHost }: { active: boolean; footer
             整行收起 —— 连带那个只在「内嵌窗口」下生效的 Google / GitHub 开关 */}
         {webPanel ? null : (
           <>
-            <FieldGroup orientation='horizontal' className='field-row'>
+            <FieldGroup orientation='horizontal' className='add-login-setting-row'>
               <span className='text-[12.5px] whitespace-nowrap text-subtle'>{t('打开方式')}</span>
               <SegmentedControl
                 aria-label={t('网页登录的打开方式')}
@@ -1295,19 +1283,19 @@ export function WorkBuddyBlock({ active, footerHost }: { active: boolean; footer
                 value={loginMode}
                 onValueChange={pickLoginMode}
               />
-              <Label className='flex items-center gap-2' title={socialTitle}>
+            </FieldGroup>
+            {socialUsable ? (
+              <Label className='add-login-setting-row' title={t('国际版登录页默认只显示邮箱登录，勾选后恢复 Google / GitHub / X 入口')}>
+                <span className='text-[12.5px] text-subtle'>{t('恢复 Google / GitHub 入口')}</span>
                 <Switch
                   checked={socialRestore}
-                  disabled={!socialUsable}
                   onCheckedChange={next => {
-                    // 勾选本身只影响发起登录时传给壳侧的值，不需要重建界面
                     setSocialRestore(next)
                     loginPrefs.socialRestore = next
                   }}
                 />
-                <span className='text-[12.5px] text-subtle'>{t('恢复 Google / GitHub 入口')}</span>
               </Label>
-            </FieldGroup>
+            ) : null}
             <p>{t('系统浏览器可复用已有登录态（国际版推荐）；内嵌窗口更干净。')}</p>
           </>
         )}

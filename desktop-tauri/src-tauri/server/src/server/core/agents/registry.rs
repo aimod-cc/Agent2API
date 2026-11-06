@@ -130,7 +130,7 @@ pub const CLIENTS: &[ClientDef] = &[
         icon: "dsh.svg", icon_full: true, format: ConfigFormat::Yaml, binaries: &["dsh"],
         behavior: "providers", protocols: &["openai_chat", "responses", "anthropic"], writable: true, gateway: true,
         models: true, effort: true, default_model: true, toggle: false, env_key: true,
-        needs_restart: false, note: "按用户设置 settings.yaml 的自定义提供商写入，密钥另存在同目录 .credentials.yaml；配置按请求实时读取，刷新已打开的页面即可生效。",
+        needs_restart: false, note: "旧版使用 settings.yaml；0.1.7 起使用所选运行方式的 cordis.patch.yml。密钥独立保存，写入校验不代表 DSH 已加载。",
         docs: "https://github.com/deepseek-ai/deepseek-harness",
     },
     ClientDef {

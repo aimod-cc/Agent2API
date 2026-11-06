@@ -35,6 +35,7 @@ import { apiCall } from '../api/client'
 import { useModelApiKeys } from '../../../ui-shared/use-model-api-keys'
 import { ModelApiKeyField } from '../../../ui-shared/model-api-key-field'
 import { modelApiKeyAllows, modelApiKeyLabel, type ModelApiKey } from '../../../ui-shared/model-api-key'
+import { MobileAssistantWorkspace } from './assistant-workspace'
 
 /**
  * AI 助手（手机端）。
@@ -70,6 +71,10 @@ const QUICK_ASKS: QuickAsk[] = [
 ]
 
 export function AssistantPage() {
+  return <MobileAssistantWorkspace><BuiltinAssistantPage /></MobileAssistantWorkspace>
+}
+
+function BuiltinAssistantPage() {
   const [bubbles, setBubbles] = useState<Bubble[]>([])
   const [draft, setDraft] = useState('')
   const [attachments, setAttachments] = useState<string[]>([])
@@ -476,16 +481,10 @@ export function AssistantPage() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      {/*
-        页头必须自己吃下安全区：其他一级页用 `.m-head`，那里带了
-        `calc(var(--m-safe-t) + …)`；这一页是手写的紧凑头（对话页要省纵向空间），
-        漏了 safe-t 就会被刘海 / 状态栏压住。离线时顶部那条通知自己占安全区，
-        这里再让一次会多出一段空白 —— 与 `.m-app[data-offline] .m-head` 同口径。
-      */}
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div
         className='m-assistant-head'
-        style={{ display: 'flex', alignItems: 'center', gap: 9, flex: 'none' }}
+        style={{ display: 'flex', alignItems: 'center', gap: 9, flex: 'none', paddingTop: 8 }}
       >
         <Button variant='ghost' size='icon-sm' aria-label={t('历史对话')} onClick={() => setHistoryOpen(true)}><Icon name='log' /></Button>
         <div style={{ flex: 1, minWidth: 0 }}>

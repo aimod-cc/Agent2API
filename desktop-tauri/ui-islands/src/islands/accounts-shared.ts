@@ -26,7 +26,7 @@ export type ProxyConfig = {
   /** 旧版平铺形状里的 source；新版在 config.source 下，两处都读 */
   source?: string
   label?: string
-  /** 解析失败的原因：转发时回退直连，界面上整格标红 */
+  /** 解析失败的原因，界面上整格标红 */
   error?: string
   /**
    * 轮询档（`source === 'rotate'`，只对 OpenCode Zen 开放）的展示读数：
@@ -177,6 +177,7 @@ export type AccountRecord = {
   zcodePlan?: string
   hasAccessToken?: boolean
   accessTokenExpiresAt?: number | null
+  canRefresh?: boolean
   hasRefreshToken?: boolean
   refreshTokenLongLived?: boolean
   refreshExpiresAt?: number | null
@@ -378,7 +379,7 @@ export type AccountsBridge = {
     error?: string
   } | null | undefined>
   switchAccount(id: string): Promise<{ changed?: boolean } | null | undefined>
-  refreshAccountToken(id: string): Promise<unknown>
+  refreshAccountToken(id: string): Promise<{ refreshedId?: string; list?: AccountsSnapshot } | null | undefined>
   removeAccount(id: string): Promise<unknown>
   /** 套餐池模型请求的验证状态与库存；读取不发起验证码。 */
   zcodeCaptchaStats?(): Promise<{

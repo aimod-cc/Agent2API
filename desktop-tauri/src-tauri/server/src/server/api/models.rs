@@ -25,38 +25,12 @@
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::response::Response;
-use serde_json::{json, Value};
+use serde_json::Value;
 
-use crate::server::core::providers::adapter::refresh_implemented_forced;
 use crate::server::core::providers::catalog;
 use crate::server::http::ok_json;
 use crate::server::logging;
 use crate::server::ServerState;
-
-/// 逐家结果的**汇总**：`{results, refreshed, skipped, failed}`。
-///
-/// 形状与 `credential_maintenance::refresh_expiring_report` 一致（汇总 + 逐条），
-/// 界面既能一句话给结论，也能展开看每家为什么。三个数是 `(成功, 跳过, 失败)`，
-/// 与日志行共用同一份统计（避免「日志说成功 2、响应说成功 3」这种对不上）。
-/// 状态字符串是**前后端契约**，取值与语义见 `refresh_implemented_forced`。
-fn summary_of(results: &[Value]) -> (Value, (usize, usize, usize)) {
-    let count = |status: &str| {
-        results
-            .iter()
-            .filter(|item| item.get("status").and_then(Value::as_str) == Some(status))
-            .count()
-    };
-    let (refreshed, skipped, failed) = (count("refreshed"), count("skipped"), count("failed"));
-    (
-        json!({
-            "results": results,
-            "refreshed": refreshed,
-            "skipped": skipped,
-            "failed": failed,
-        }),
-        (refreshed, skipped, failed),
-    )
-}
 
 /// 解析可选的 `accounts` 点名表（`{providerId: accountId}`，见下）。
 ///
@@ -132,9 +106,16 @@ pub async fn refresh_models(State(state): State<ServerState>, body: Bytes) -> Re
     let store = state.store();
     let accounts = parse_accounts(&body);
     let providers = parse_providers(&body);
-    let results = refresh_implemented_forced(store, &accounts, providers.as_deref()).await;
-    // 汇总算一次：响应里那份与日志里的三个数同源（见 `summary_of`）
-    let (mut payload, (refreshed, skipped, failed)) = summary_of(&results);
+    let mut request = crate::server::core::maintenance::Request::full(crate::server::core::maintenance::MODEL, true);
+    request.accounts = accounts;
+    request.providers = providers;
+    request.metadata = false;
+    let detail = match crate::server::core::maintenance::execute(store, request).await {
+        Ok(detail) => detail,
+        Err(error) => return crate::server::api::maintenance::error_response(400, error),
+    };
+    let mut payload = crate::server::core::maintenance::types::report(&detail);
+    let (refreshed, skipped, failed) = (detail.run.refreshed, detail.run.skipped, detail.run.failed);
     // 一行汇总进日志库：用户在日志页能看到「点了刷新、结果如何」
     // （逐家的细节在各适配器自己的日志里，这里只记总数）。
     // 级别跟结果走：全成功是正常操作，别让「失败 0 个」的文案把它抬成 error

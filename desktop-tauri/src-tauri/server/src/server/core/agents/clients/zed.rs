@@ -51,6 +51,7 @@ pub fn read(value: &Value) -> Result<Vec<Profile>, String> {
                             supports_images: entry
                                 .pointer("/capabilities/images")
                                 .and_then(Value::as_bool),
+                            supports_video: None,
                             supports_reasoning: entry.get("reasoning_effort").map(|_| true),
                             effort: string(entry, "reasoning_effort"),
                             reasoning_levels: entry

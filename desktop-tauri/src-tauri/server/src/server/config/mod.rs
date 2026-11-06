@@ -69,6 +69,7 @@ mod account_sort;
 mod assistant_config;
 pub(crate) mod compact_routes;
 pub(crate) mod client_identification;
+pub(crate) mod vision_compat;
 mod github_access;
 mod mutations;
 pub(crate) use mutations::try_update_raw_field;
@@ -169,6 +170,7 @@ pub struct RuntimeConfig {
     routing_profiles: std::sync::Arc<RoutingProfiles>,
     compact_routes: std::sync::Arc<compact_routes::CompactRoutesSnapshot>,
     client_identification: std::sync::Arc<client_identification::ClientIdentificationSnapshot>,
+    vision_compat: std::sync::Arc<vision_compat::VisionSnapshot>,
     account_sort: std::sync::Arc<AccountSortSettings>,
     model_rules: std::sync::Arc<crate::server::core::model_rules::ModelRules>,
     /// 事件日志的保存目录（原始配置值；None = 未设置，用配置目录）。
@@ -597,6 +599,7 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
         routing_profiles: routing_profiles::from_raw(&raw),
         compact_routes: compact_routes::from_raw(&raw),
         client_identification: client_identification::from_raw(&raw),
+        vision_compat: vision_compat::from_raw(&raw),
         account_sort: account_sort::from_raw(&raw),
         model_rules: std::sync::Arc::new(crate::server::core::model_rules::ModelRules::from_raw(&raw)),
         log_dir: string_field(&raw, KEY_LOG_DIR),
@@ -1506,6 +1509,9 @@ pub(crate) fn update_raw_field_with(key: &str, mutate: impl FnOnce(&mut Value)) 
         }
         if key == client_identification::KEY_CLIENT_IDENTIFICATION {
             config.client_identification = client_identification::from_raw(&config.raw);
+        }
+        if key == vision_compat::KEY_VISION_COMPAT {
+            config.vision_compat = vision_compat::from_raw(&config.raw);
         }
         if key == account_sort::KEY_ACCOUNT_SORT {
             config.account_sort = account_sort::from_raw(&config.raw);

@@ -1,6 +1,52 @@
 import * as React from 'react'
-import { Button, Empty, HtmlContent, Spinner } from '@ui'
+import { Button, Empty, HtmlContent, Spinner, Switch } from '@ui'
 import { t } from '../i18n'
+import { NOTES } from './settings-model'
+import { loadDebug, saveDebug, useSettings } from './settings-state'
+
+export function RequestDebugSwitch() {
+  const { debug, busy } = useSettings()
+  const [loading, setLoading] = React.useState(true)
+  const alive = React.useRef(false)
+  const loadingRef = React.useRef(false)
+
+  const refresh = React.useCallback(async () => {
+    if (loadingRef.current) return
+    loadingRef.current = true
+    setLoading(true)
+    try { await loadDebug() }
+    finally {
+      loadingRef.current = false
+      if (alive.current) setLoading(false)
+    }
+  }, [])
+
+  React.useEffect(() => {
+    alive.current = true
+    void refresh()
+    return () => { alive.current = false }
+  }, [refresh])
+
+  const saving = busy === 'debug'
+  const unavailable = !loading && debug.status === 'unavailable'
+  return (
+    <div className='ml-auto flex min-h-[30px] flex-wrap items-center justify-end gap-2'>
+      <label className='inline-flex items-center gap-2 whitespace-nowrap text-[12px] text-subtle' title={NOTES.debug}>
+        <span>{t('调试模式')}</span>
+        <Switch checked={debug.on} disabled={loading || debug.status !== 'ready' || busy !== null}
+          aria-label={t('调试模式')} aria-busy={loading || saving}
+          onCheckedChange={next => void saveDebug(next)} />
+      </label>
+      {loading || saving ? <Spinner className='size-3.5 text-muted-foreground'
+        aria-label={loading ? t('正在读取…') : t('保存中…')} /> : null}
+      {unavailable ? <>
+        <span className='text-[11.5px] text-destructive' role='status'
+          title={t('未能读取调试模式设置，请稍后重试')}>{t('读取失败')}</span>
+        <Button variant='ghost' size='xs' disabled={busy !== null} onClick={() => void refresh()}>{t('重试')}</Button>
+      </> : null}
+    </div>
+  )
+}
 
 export type RawBody = Record<string, unknown>
 export type DebugTraffic = Record<string, unknown>

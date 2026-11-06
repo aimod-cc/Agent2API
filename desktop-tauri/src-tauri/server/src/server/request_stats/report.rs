@@ -14,12 +14,13 @@
 //!   - `cacheTrend24h` 走**明细**：要精确到本地整点，按天的聚合行给不出这种
 //!     精度；也只取近 24 小时的窄列（`sql::select_summary_rows`）。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use chrono::{Datelike, Duration as ChronoDuration, NaiveDate};
 use serde_json::{json, Value};
 
-use super::clock::{date_key, hour_floor, hour_key, ms_to_local, now_ms};
+use super::clock::{date_key, now_ms};
+pub(super) use super::cache_report::{cache_trend_24h, SummaryRow};
 use super::record::{AccountAccum, DailyEntry, ModelAccum, ProviderAccum, RequestEntry};
 
 /// 未知 provider 的展示名（`id` 为空串的那一组：旧版本写出的明细、
@@ -35,25 +36,6 @@ pub(super) const UNKNOWN_ACCOUNT_LABEL: &str = "未知账号";
 
 /// 热力图固定返回的天数（与 range 解耦）
 pub(super) const HEATMAP_DAYS: i64 = 365;
-
-/// 报表要读的**明细窄列**（`sql::SUMMARY_COLUMNS` 的结构形态）。
-///
-/// 为什么要有这个独立类型（不复用 `RequestEntry`）：报表对明细的消费只有
-/// 「按整点归桶 + 按模型累计」两件事，用到的字段就是这 6 个。带上完整
-/// `RequestEntry` 意味着读取侧要按 25 列去取行（`route` / `attempt_details`
-/// 都在里面），而这份数据一个字段都用不上 —— 类型窄一分，读取那一侧就没法
-/// 「顺手多取几列」（见 `sql::select_summary_rows` 与 `db::schema` 的 v15 段）。
-#[derive(Clone, Debug)]
-pub(super) struct SummaryRow {
-    pub ts: i64,
-    pub model: String,
-    /// 上游实际发出的模型名（空串 = 一次都没发出去），统计键的回落见
-    /// [`model_stat_key`]
-    pub upstream_model: String,
-    pub total_tokens: i64,
-    pub cache_read_tokens: i64,
-    pub prompt_tokens: i64,
-}
 
 /// 四档缓存命中率窗口：**JSON 键名 + 窗口毫秒**。
 ///
@@ -297,7 +279,7 @@ pub(super) fn push_model_accum(list: &mut Vec<ModelAccum>, model: &str, tokens: 
 ///
 /// ── 为什么接两个 &str 而不是 &RequestEntry ───────────────────
 /// 同一口径现在要服务两种行：完整的 `RequestEntry`（按天重算）与报表的窄行
-/// [`SummaryRow`]（近 24 小时趋势，只读 6 列，见 `sql::select_summary_rows`）。
+/// [`SummaryRow`]（近 24 小时趋势，只读用量与结果窄列）。
 /// 若签名收 `&RequestEntry`，窄行那一侧就只能自己再写一遍 `if upstream 空就
 /// 回落` —— 那正是这个函数要防的「同一口径两处维护」。取字段而不是取整行，
 /// 两种调用方都能直接用。
@@ -676,14 +658,19 @@ pub(super) fn daily_trend(daily: &BTreeMap<String, DailyEntry>, start: &str, end
         let (tokens, requests) = day.map(|item| (item.tokens, item.requests)).unwrap_or((0, 0));
         let models = day.map(|item| super::source_report::all_model_rows(&item.model_tokens)).unwrap_or_default();
         let (clients, api_keys) = day.map(super::source_report::source_breakdown).unwrap_or_default();
-        out.push(json!({
-            "date": key,
-            "tokens": tokens,
-            "requests": requests,
-            "models": models,
-            "clients": clients,
-            "apiKeys": api_keys,
-        }));
+        let mut point = day.map(|item| super::source_report::usage_json(&super::source_report::day_usage(item)))
+            .unwrap_or_else(|| super::source_report::usage_json(&super::source::UsageAccum::default()));
+        if let Some(object) = point.as_object_mut() {
+            object.extend(json!({
+                "date": key,
+                "tokens": tokens,
+                "requests": requests,
+                "models": models,
+                "clients": clients,
+                "apiKeys": api_keys,
+            }).as_object().cloned().unwrap_or_default());
+        }
+        out.push(point);
         cursor += ChronoDuration::days(1);
     }
     out
@@ -746,74 +733,6 @@ pub(super) fn cache_rates(totals: &[(i64, i64)]) -> Value {
         );
     }
     Value::Object(out)
-}
-
-/// 近 24 个**本地整点**的命中率与用量趋势（无数据的整点补零）。
-///
-/// 按本地时区切整点：先把时间戳还原成 `DateTime<Local>` 再取 `%H`，
-/// 于是「14 点」就是用户时钟上的 14 点，不是 UTC 的 14 点。
-///
-/// 每个整点同时给出 `totalTokens`：前端那一张图要画**两条线**
-/// （命中率 + 总 Token），两段数据必须同源同桶 —— 分成两次请求会让两条线
-/// 在「这一小时算不算」上出现分歧，看起来像其中一条错位了一格。
-///
-/// 每个整点还带 `models`（`[{model, label, tokens, requests}]`，按 tokens 降序）：
-/// 折线图的悬停读数要给出「这一小时总用量是多少、分别花在哪些模型上」。
-/// 模型统计键走 [`model_stat_key`]（与日报折算同一口径），于是同一小时里
-/// 「各模型之和」必然等于该小时的 `totalTokens`（当份数据之内）。
-///
-/// 入参是**报表窄行**（[`SummaryRow`]，只 6 列）而不是完整明细：本函数是改造后
-/// 唯一还要逐条读明细的地方，而它需要的字段全在窄行的列集里（见
-/// `sql::select_summary_rows`）。窗口外（`ts` 早于 23 个整点前）的行照旧跳过 ——
-/// 调用方给的可能是整个 `request_stats::SUMMARY_WINDOW_MS` 窗口，两者在边界上
-/// 不完全重合（本地时区的整点切法与「now 往前推 N 小时」差几十分钟）。
-pub(super) fn cache_trend_24h(entries: &[SummaryRow], now: i64) -> Vec<Value> {
-    /// 单个整点的桶：三项总量 + 按模型的累计（模型数是个位到十位级，
-    /// 线性查找即可 —— 与 `push_model_accum` 同一取舍）
-    #[derive(Default)]
-    struct HourBucket {
-        hit: i64,
-        input: i64,
-        total: i64,
-        models: Vec<ModelAccum>,
-    }
-
-    let start = hour_floor(ms_to_local(now)) - ChronoDuration::hours(23);
-    let start_ms = start.timestamp_millis();
-
-    // 先把窗口内的条目按整点键归桶，再按 24 个整点取值 ——
-    // 逐个整点扫一遍明细是 24×N，这样只需一次遍历
-    let mut buckets: HashMap<String, HourBucket> = HashMap::new();
-    for item in entries {
-        if item.ts < start_ms || item.ts > now {
-            continue;
-        }
-        let slot = buckets.entry(hour_key(ms_to_local(item.ts))).or_default();
-        slot.hit += item.cache_read_tokens;
-        slot.input += item.prompt_tokens;
-        slot.total += item.total_tokens;
-        push_model_accum(
-            &mut slot.models,
-            model_stat_key(&item.model, &item.upstream_model),
-            item.total_tokens,
-            1,
-        );
-    }
-
-    let mut out = Vec::with_capacity(24);
-    for step in 0..24 {
-        let key = hour_key(start + ChronoDuration::hours(step));
-        let slot = buckets.remove(&key).unwrap_or_default();
-        out.push(json!({
-            "hour": key,
-            "hitTokens": slot.hit,
-            "inputTokens": slot.input,
-            "totalTokens": slot.total,
-            "rate": safe_rate(slot.hit, slot.input),
-            "models": model_breakdown_json(&slot.models),
-        }));
-    }
-    out
 }
 
 /// 命中率：`hit / input`，分母为 0（或无命中）时返回 0.0。

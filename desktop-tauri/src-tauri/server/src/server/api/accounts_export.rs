@@ -45,7 +45,7 @@ pub async fn account_files(state: &ServerState, body: &Bytes) -> Response {
     }
 }
 
-pub fn import_account_file(
+pub async fn import_account_file(
     state: &ServerState,
     provider: &str,
     payload: &Value,
@@ -105,14 +105,13 @@ pub fn import_account_file(
         .and_then(|ids| ids.first())
         .and_then(Value::as_str)
         .unwrap_or(id);
-    let record = state
-        .store()
-        .plugin_account(imported_id)
-        .map(|record| record["public"].clone())
-        .unwrap_or(Value::Null);
-    Some(ok_json(json!({
-        "account": record,
+    let mut response = json!({
         "created": result.get("added").and_then(Value::as_u64).unwrap_or(0) > 0,
-        "list": state.store().list_visible_accounts(),
-    })))
+    });
+    super::account_import_setup::complete(state, &[imported_id.to_string()], &mut response).await;
+    response["account"] = state.store().plugin_account(imported_id)
+        .and_then(|record| record.get("public").cloned())
+        .unwrap_or(Value::Null);
+    response["list"] = state.store().list_visible_accounts();
+    Some(ok_json(response))
 }

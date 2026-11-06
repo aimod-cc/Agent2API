@@ -36,10 +36,11 @@ export function ToolsPage() {
     setLoading(true); setError('')
     try {
       const rows = await fetchServices()
-      // API 是固定对外的接口，不再作为「工具服务」页的协议条目展示；
+      // API 是固定对外的接口，不再作为「MCP & Skills」页的协议条目展示；
       // 说明在「文档」页，运行时路由不受影响。
       const visibleRows = rows.filter(row => row.protocol !== 'api')
       setServices(visibleRows)
+      setDetail(current => current ? visibleRows.find(row => row.key === current.key) || current : null)
       if (desktop) void loadTargets(visibleRows)
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure))
@@ -83,8 +84,8 @@ export function ToolsPage() {
   return <div className='flex flex-col gap-3'>
     <Card>
       <CardHeader>
-        <CardTitle>{t('工具服务')}</CardTitle>
-        <p className='ml-3 text-xs text-subtle'>{t('管理可供客户端安装和运行的工具服务，并配置上游提供商与能力。')}</p>
+        <CardTitle>{t('MCP & Skills')}</CardTitle>
+        <p className='ml-3 text-xs text-subtle'>{t('将搜索、视觉等能力通过 MCP 或 Skills 接入客户端。')}</p>
         {desktop ? <Button size='sm' variant='outline' className='ml-auto' onClick={() => (window as unknown as { wbApp?: { showPage?: (page: string) => void } }).wbApp?.showPage?.('agent')}>{t('客户端环境')}</Button> : null}
       </CardHeader>
       <CardContent className='flex flex-col gap-3'>

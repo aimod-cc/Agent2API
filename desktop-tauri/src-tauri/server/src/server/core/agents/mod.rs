@@ -2,13 +2,21 @@
 
 pub mod apply;
 mod backups;
+pub mod catalog;
 mod clients;
 pub mod discover;
+mod dsh_installation;
+pub mod dsh_paths;
+mod dsh_patch;
+mod dsh_document;
+#[cfg(windows)]
+mod dsh_windows;
 pub mod files;
 mod json_edit;
 pub mod native;
 pub mod paths;
 pub mod preview;
+pub mod quick_connect;
 pub mod registry;
 pub mod resources;
 pub mod store;
@@ -84,7 +92,7 @@ fn client_view(def: &ClientDef, gateway: &str) -> Value {
             view
         })
         .collect::<Vec<_>>();
-    json!({
+    let mut view = json!({
         "id": def.id, "name": def.name, "vendor": def.vendor,
         "hue": def.hue, "letter": def.letter,
         "icon": format!("assets/agents/{}", def.icon), "iconFull": def.icon_full,
@@ -113,7 +121,10 @@ fn client_view(def: &ClientDef, gateway: &str) -> Value {
         "storeError": saved.err(), "revision": revision,
         "viaGateway": live.iter().any(|p| p.enabled && is_gateway(&p.base_url, gateway)),
         "activeId": active_profile(&live).map(|p| &p.id), "applied": applied,
-    })
+    });
+    view["configTargets"] = json!(detection.config_targets);
+    view["configLayout"] = json!(if def.id == "dsh" { if dsh_paths::is_patch(&detection.path) { "profile" } else { "legacy" } } else { "" });
+    view
 }
 
 pub fn is_gateway(base: &str, gateway: &str) -> bool {

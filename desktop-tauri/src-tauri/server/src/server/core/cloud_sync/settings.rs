@@ -17,7 +17,7 @@
 //! 密钥以可被任何拿到存储权限的人解开的形式上云；而本项目所有账号凭证都是
 //! 用那把密钥加密的，泄露它的后果与直接泄露全部账号相同。
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -43,6 +43,12 @@ pub(crate) const DEFAULT_PROFILE: &str = "default";
 /// 同步密码最短长度。8 位是底线：它派生出加密账号密钥的对称密钥，
 /// 太短会让「云盘泄露 + 弱密码」变成可离线爆破的组合。
 pub(crate) const MIN_PASSWORD_LEN: usize = 8;
+pub(crate) const DEFAULT_AUTO_SYNC_INTERVAL_MINUTES: u32 = 5;
+pub(crate) const MAX_AUTO_SYNC_INTERVAL_MINUTES: u32 = 1_440;
+
+fn default_auto_sync_interval_minutes() -> u32 {
+    DEFAULT_AUTO_SYNC_INTERVAL_MINUTES
+}
 
 /// WebDAV 设置（界面上那一组输入框）
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -96,9 +102,19 @@ pub(crate) struct SyncStatus {
     /// 上次成功的快照 id
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_snapshot_id: Option<String>,
-    /// 上次上传时本地快照的哈希（自动同步用它判断「内容没变」）
+    /// 上次成功同步的业务指纹，与文件完整性校验分开。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_local_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_upload_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attempt_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<i64>,
+    #[serde(default)]
+    pub consecutive_failures: u32,
     /// 上次上传时账号密钥的指纹（本机密钥换了就必须重传）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_key_fingerprint: Option<String>,
@@ -131,6 +147,8 @@ pub(crate) struct CloudSyncSettings {
     /// 本地数据变化后自动上传
     #[serde(default)]
     pub auto_sync: bool,
+    #[serde(default = "default_auto_sync_interval_minutes")]
+    pub auto_sync_interval_minutes: u32,
     #[serde(default = "default_remote_root")]
     pub remote_root: String,
     #[serde(default = "default_profile")]
@@ -160,6 +178,7 @@ impl Default for CloudSyncSettings {
             sync_password: String::new(),
             enabled: false,
             auto_sync: false,
+            auto_sync_interval_minutes: DEFAULT_AUTO_SYNC_INTERVAL_MINUTES,
             remote_root: default_remote_root(),
             profile: default_profile(),
             status: SyncStatus::default(),
@@ -189,6 +208,34 @@ impl CloudSyncSettings {
         if self.profile.is_empty() {
             self.profile = default_profile();
         }
+        if !(1..=MAX_AUTO_SYNC_INTERVAL_MINUTES).contains(&self.auto_sync_interval_minutes) {
+            self.auto_sync_interval_minutes = DEFAULT_AUTO_SYNC_INTERVAL_MINUTES;
+        }
+        if self.status.last_upload_at.is_none() && self.status.last_action.as_deref() == Some("upload") {
+            self.status.last_upload_at = self.status.last_sync_at;
+        }
+    }
+
+    pub(crate) fn target_id(&self) -> String {
+        let remote = if self.provider == PROVIDER_S3 {
+            json!([self.s3.endpoint, self.s3.region, self.s3.bucket,
+                self.s3.access_key_id, self.s3.secret_access_key])
+        } else {
+            json!([self.webdav.base_url.trim_end_matches('/'), self.webdav.username, self.webdav.password])
+        };
+        super::sha256_hex(json!([
+            self.provider, remote,
+            manifest::remote_dir_segments(&self.remote_root, &self.profile).ok(),
+            self.sync_password,
+        ]).to_string().as_bytes())
+    }
+
+    pub(crate) fn auto_sync_due_at(&self) -> i64 {
+        let previous = self.status.last_upload_at.unwrap_or(0)
+            .max(self.status.last_attempt_at.unwrap_or(0));
+        let interval = i64::from(self.auto_sync_interval_minutes) * 60_000;
+        let next = if previous > 0 { previous.saturating_add(interval) } else { 0 };
+        next.max(self.status.retry_at.unwrap_or(0))
     }
 
     /// 保存前的校验：只校验**当前服务商**的必填项。
@@ -259,6 +306,7 @@ impl CloudSyncSettings {
             "hasSyncPassword": !self.sync_password.is_empty(),
             "enabled": self.enabled,
             "autoSync": self.auto_sync,
+            "autoSyncIntervalMinutes": self.auto_sync_interval_minutes,
             "remoteRoot": self.remote_root,
             "profile": self.profile,
             "status": self.status,
@@ -300,6 +348,7 @@ impl CloudSyncSettings {
 // ─── 进程级库句柄 ─────────────────────────────────────────────
 
 static DB: OnceLock<Option<Db>> = OnceLock::new();
+static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 
 /// 装库句柄（`bootstrap` 里调用一次，与其它 kv 状态模块同形）
 pub(crate) fn install(db: Option<Db>) {
@@ -356,13 +405,28 @@ pub(crate) fn save(settings: &CloudSyncSettings) -> Result<(), String> {
 
 /// 只更新状态字段（成功后 / 失败后调用）。读-改-写整份。
 pub(crate) fn update_status(patch: impl FnOnce(&mut SyncStatus)) {
-    let mut settings = load();
-    patch(&mut settings.status);
-    if let Err(error) = save(&settings) {
-        // 状态写不进去不该让同步本身报错（与 cc-switch 的 best-effort 同义），
-        // 但必须留痕：下一次打开设置看不到「上次同步时间」时要知道原因。
+    let result = {
+        let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut settings = load();
+        patch(&mut settings.status);
+        save(&settings)
+    };
+    if let Err(error) = result {
         crate::server::logging::log("[CloudSync]", &format!("⚠️ 同步状态写入失败: {error}"));
     }
+}
+
+pub(crate) fn update_status_for(
+    target: &CloudSyncSettings,
+    patch: impl FnOnce(&mut SyncStatus),
+) -> Result<(), String> {
+    let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut settings = load();
+    if settings.target_id() != target.target_id() {
+        return Ok(());
+    }
+    patch(&mut settings.status);
+    save(&settings)
 }
 
 /// 保存请求：界面传来的形态 → 落库形态。
@@ -386,13 +450,22 @@ pub(crate) struct SaveInput {
     pub sync_password: String,
     pub enabled: bool,
     pub auto_sync: bool,
+    pub auto_sync_interval_minutes: Option<u32>,
     pub remote_root: String,
     pub profile: String,
 }
 
 /// 应用一次保存请求，返回落库后的设置。
 pub(crate) fn apply_save(input: SaveInput) -> Result<CloudSyncSettings, String> {
+    let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut settings = load();
+    let previous_target = settings.target_id();
+    if let Some(minutes) = input.auto_sync_interval_minutes {
+        if !(1..=MAX_AUTO_SYNC_INTERVAL_MINUTES).contains(&minutes) {
+            return Err("最小自动上传间隔必须是 1–1440 分钟的整数".to_string());
+        }
+        settings.auto_sync_interval_minutes = minutes;
+    }
     settings.provider = input.provider;
     settings.webdav.base_url = input.webdav_base_url;
     settings.webdav.username = input.webdav_username;
@@ -428,7 +501,12 @@ pub(crate) fn apply_save(input: SaveInput) -> Result<CloudSyncSettings, String> 
     settings.profile = input.profile;
     settings.normalize();
     settings.validate()?;
+    if settings.target_id() != previous_target {
+        settings.status = SyncStatus::default();
+    }
     save(&settings)?;
+    drop(_guard);
+    super::auto_sync::notify_change();
     Ok(settings)
 }
 
@@ -464,7 +542,7 @@ mod tests {
                 base_url: "https://dav.example.com/dav".to_string(),
                 username: "u".to_string(),
                 password: "x".to_string(),
-                user_agent: String::new(),
+                ..WebDavConfig::default()
             },
             ..CloudSyncSettings::default()
         };
@@ -481,7 +559,7 @@ mod tests {
                 base_url: "https://dav.example.com/dav".to_string(),
                 username: "u".to_string(),
                 password: "x".to_string(),
-                user_agent: String::new(),
+                ..WebDavConfig::default()
             },
             ..CloudSyncSettings::default()
         };

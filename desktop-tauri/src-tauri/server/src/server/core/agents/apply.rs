@@ -29,6 +29,7 @@ pub fn apply(
     }
     let plan = clients::plan(def, path, profile, operation, port)?;
     preview::verify(&plan, def.id, token)?;
+    for change in &plan.changes { change.check()?; }
     let changes: Vec<_> = plan
         .changes
         .iter()
@@ -101,6 +102,7 @@ pub fn apply_resource(def: &ClientDef, path: &Path, plan: &clients::Plan) -> Res
 }
 
 fn write_plan(def: &ClientDef, path: &Path, plan: &clients::Plan) -> Result<(), String> {
+    for change in &plan.changes { change.check()?; }
     let changes = plan.changes.iter().filter(|change| !change.unchanged()).cloned().collect::<Vec<_>>();
     if changes.is_empty() { return Ok(()); }
     for change in &changes { change.check()?; }

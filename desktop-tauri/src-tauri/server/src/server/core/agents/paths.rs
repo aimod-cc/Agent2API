@@ -47,7 +47,7 @@ pub fn save_override(def: &ClientDef, raw: &str) -> Result<(), String> {
                 .file_name()
                 .is_some_and(|name| name == "provider_config.json"),
             "crush" => path.file_name().is_some_and(|name| name == "crush.json"),
-            "dsh" => path.file_name().is_some_and(|name| name == "settings.yaml"),
+            "dsh" => super::dsh_paths::validate_path(&path),
             "cursor-cli" => path
                 .file_name()
                 .is_some_and(|name| name == "cli-config.json"),
@@ -175,6 +175,8 @@ pub struct Detection {
     pub version: String,
     pub unsupported: bool,
     pub note: Option<String>,
+    pub config_targets: Vec<super::dsh_paths::ConfigTarget>,
+    pub resource_path: Option<PathBuf>,
 }
 
 pub fn detect(def: &ClientDef) -> Detection {
@@ -183,6 +185,18 @@ pub fn detect(def: &ClientDef) -> Detection {
     let override_path = preferences
         .ok()
         .and_then(|mut preferences| preferences.paths.remove(def.id));
+    if def.id == "dsh" {
+        let binary = find_binary(def);
+        let found = super::dsh_paths::detect(binary.as_deref(), override_path.as_deref().map(Path::new));
+        let mut evidence = Vec::new();
+        if found.path.is_file() { evidence.push(format!("发现配置文件: {}", found.path.display())); }
+        if let Some(binary) = binary { evidence.push(format!("发现客户端程序: {}", binary.display())); }
+        if !found.source.as_os_str().is_empty() { evidence.push(format!("版本信息来源: {}", found.source.display())); }
+        if override_path.is_some() { evidence.push("使用手动指定的配置路径".into()); }
+        let note = preference_error.or(found.error);
+        return Detection { path: found.path, detected: found.detected, version: found.version,
+            unsupported: note.is_some(), note, evidence, config_targets: found.targets, resource_path: found.resource_path };
+    }
     let paths = candidates(def);
     let path = override_path
         .as_ref()
@@ -246,10 +260,12 @@ pub fn detect(def: &ClientDef) -> Detection {
         version,
         unsupported,
         note,
+        config_targets: Vec::new(),
+        resource_path: None,
     }
 }
 
-fn find_binary(def: &ClientDef) -> Option<PathBuf> {
+pub(super) fn find_binary(def: &ClientDef) -> Option<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let mut dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
     let home = home();

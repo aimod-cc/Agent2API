@@ -1,6 +1,6 @@
 //! 客户端配置管理：草稿保存不写客户端；应用与恢复必须持有准确预览的确认令牌。
 
-use axum::{body::Bytes, extract::State, response::Response};
+use axum::{body::Bytes, extract::{Query, State}, response::Response};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
@@ -40,6 +40,17 @@ fn response(result: Result<Value, String>) -> Response {
 
 pub async fn list_agents(State(state): State<ServerState>) -> Response {
     ok_json(agents::snapshot(state.port))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelQuery {
+    gateway_key_id: Option<String>,
+}
+
+pub async fn list_models(State(state): State<ServerState>, Query(query): Query<ModelQuery>) -> Response {
+    response(agents::catalog::models(state.store(), query.gateway_key_id.as_deref())
+        .map(|models| json!({ "models": models })))
 }
 
 pub async fn save_profiles(State(state): State<ServerState>, body: Bytes) -> Response {
@@ -155,11 +166,12 @@ pub async fn preview_profile(State(state): State<ServerState>, body: Bytes) -> R
         if action == "restore" || action == "disconnect" {
             return agents::apply::restore_preview(def, &path, action == "disconnect");
         }
-        let operation = if action == "quick-connect" {
-            if def.default_model { "default".into() } else { "apply".into() }
-        } else { operation(def, &payload)? };
         let profile = selected_profile(def, &payload, true)?;
-        agents::preview::create(def, &path, &profile, &operation, state.port)
+        agents::catalog::validate_profile(state.store(), &profile)?;
+        if action == "quick-connect" {
+            return agents::quick_connect::create_preview(def, &path, &profile, state.port);
+        }
+        agents::preview::create(def, &path, &profile, &operation(def, &payload)?, state.port)
     })())
 }
 
@@ -173,10 +185,12 @@ pub async fn apply_profile(State(state): State<ServerState>, body: Bytes) -> Res
             agents::native::apply(def, &path, &payload, state.port)?
         } else {
             let profile = selected_profile(def, &payload, action == "quick-connect")?;
-            let operation = if action == "quick-connect" {
-                if def.default_model { "default".into() } else { "apply".into() }
-            } else { operation(def, &payload)? };
-            agents::apply::apply(def, &path, &profile, &operation, text(&payload, "token"), state.port)?
+            agents::catalog::validate_profile(state.store(), &profile)?;
+            if action == "quick-connect" {
+                agents::quick_connect::apply(def, &path, &profile, text(&payload, "token"), state.port)?
+            } else {
+                agents::apply::apply(def, &path, &profile, &operation(def, &payload)?, text(&payload, "token"), state.port)?
+            }
         };
         let mut snapshot = agents::snapshot(state.port);
         if let Some(object) = snapshot.as_object_mut() {

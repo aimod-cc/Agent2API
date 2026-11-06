@@ -145,7 +145,7 @@ pub use workbuddy::{
 mod reasoning;
 
 pub use reasoning::{
-    effort_rank as reasoning_rank, is_thinking_off as reasoning_is_off,
+    clear_reasoning_controls, effort_rank as reasoning_rank, is_thinking_off as reasoning_is_off,
     normalize as normalize_reasoning, read_client_level, REASONING_LEVELS,
 };
 

@@ -2,6 +2,7 @@ import * as React from 'react'
 import { createRoot } from 'react-dom/client'
 import { requestApiKeyLabel, requestClientLabel } from '../../../ui-shared/model-api-key'
 import { ClientIdentificationDetail } from '../../../ui-shared/client-identification-detail'
+import { VisionRequestDetail, visionDetail } from '../../../ui-shared/request-vision-detail'
 import type { ClientEvidence } from '../../../ui-shared/client-identification'
 import { clientIdentificationApi } from './settings-client-identification'
 import {
@@ -12,7 +13,7 @@ import {
 import { t } from '../i18n'
 import { HtmlContent } from '@ui'
 import {
-  PreviewPane, RawPane, RequestEmpty as Empty, hasDebugTraffic,
+  PreviewPane, RawPane, RequestDebugSwitch, RequestEmpty as Empty, hasDebugTraffic,
   type RawState, type DebugState, type DebugTraffic,
 } from './request-raw-panes'
 import { RouteReplayFacts } from './routing-replay'
@@ -525,6 +526,7 @@ export function RequestDetailPane({ row }: { row: RequestRow | null }) {
         <Field label='API Key'>{requestApiKeyLabel(row, t)}</Field>
         <Field label={t('来源客户端')}><ClientIdentificationDetail entry={row} api={clientIdentificationApi} t={t} /></Field>
         <Field label={t('模型')}><ModelCell row={row} /></Field>
+        {visionDetail(row.route) ? <Field label={t('图片兼容')}><VisionRequestDetail route={row.route} t={t} /></Field> : null}
         <Field label={t('提供商')}>
           {providerName(row) || '—'}
           {account ? <span className='text-[11.5px] text-muted-foreground'>{t('（账号：{account}）', { account })}</span> : null}
@@ -636,8 +638,8 @@ function RequestDetail({ id, row, token, onClose }: RequestDetailProps) {
     } catch (error) {
       if (isStale()) return
       setDebug('gone')
-      // 调试模式没开是最常见的原因（后端 404 的文案已说明），底栏 hint 提一句
-      setHint(t('在设置 → 通用里开启「调试模式」后，新发生的请求才会保存报文'))
+      // 开关只影响之后的新请求，当前记录缺失的正文无法补录。
+      setHint(t('开启调试模式后仅记录新请求，历史对话无法补录；关闭不会删除已有记录。'))
       console.warn('读取调试报文失败（原始报文标签隐藏）:', errorMessage(error))
     }
   }
@@ -723,8 +725,11 @@ function RequestDetail({ id, row, token, onClose }: RequestDetailProps) {
           <DialogTitle>{t('请求详情')}</DialogTitle>
         </DialogHeader>
         <DialogBody ref={bodyRef} className='gap-3'>
-          <SegmentedControl options={tabOptions} value={active} onValueChange={switchTab}
-            aria-label={t('详情内容')} className='self-start' />
+          <div className='flex flex-wrap items-center gap-2'>
+            <SegmentedControl options={tabOptions} value={active} onValueChange={switchTab}
+              aria-label={t('详情内容')} className='self-start' />
+            <RequestDebugSwitch />
+          </div>
           {/* 四个 pane 常驻（用 hidden 切显示，不卸载）：切换标签时 pane 的 DOM 与展开态
               原样保留，滚动位置由上面的 layout effect 还原。pane 不标 role="tabpanel" ——
               分段控件是 radiogroup 语义（不是 tablist），孤立的 tabpanel 是残缺结构 */}

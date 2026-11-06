@@ -1,4 +1,8 @@
 {
+  "启用（禁用后，使用此代理的账号请求将失败；仍可测试）": "Ativar (desativar bloqueia solicitações das contas que usam este proxy; os testes continuam disponíveis)",
+  "有 <strong>{n}</strong> 个账号正在使用它（{names}）—— 删除后需重新设置这些账号的代理，不会自动直连。": "<strong>{n}</strong> contas usam este proxy ({names}). Após a exclusão, reconfigure os proxies dessas contas; não haverá conexão direta automática.",
+  "其中 <strong>{n}</strong> 条正被账号使用 —— 删除后需重新设置相关账号的代理，不会自动直连。": "<strong>{n}</strong> proxies selecionados estão em uso. Após a exclusão, reconfigure as contas afetadas; não haverá conexão direta automática.",
+  "有 {n} 个账号正在使用它，删除后需重新设置这些账号的代理，不会自动直连。": "{n} contas usam este proxy. Após a exclusão, reconfigure os proxies dessas contas; não haverá conexão direta automática.",
   "支持手动地址与 Clash Verge 端点同步，不接管代理服务的安装与运行。": "Suporta endereços inseridos manualmente e sincronização de endpoints do Clash Verge; não gerencia a instalação nem a execução do serviço de proxy.",
   "添加手动 HTTP / SOCKS5 地址，或同步 Clash Verge 的端点，供账号与服务线路使用。": "Adicione um endereço HTTP / SOCKS5 manualmente ou sincronize os endpoints do Clash Verge para usar com contas e rotas de serviço.",
   "手动代理与 Clash Verge 同步仍然保留": "Proxies manuais e sincronização do Clash Verge continuam disponíveis",

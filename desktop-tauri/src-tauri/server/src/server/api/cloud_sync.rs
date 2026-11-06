@@ -48,6 +48,7 @@ pub async fn put_settings(State(_state): State<ServerState>, body: Bytes) -> Res
         Ok(input) => input,
         Err(message) => return errors::management_error(400, message),
     };
+    let _guard = cloud_sync::sync_lock().lock().await;
     match cloud_sync::save_settings(input) {
         Ok(data) => ok_json(data),
         Err(message) => errors::management_error(400, message),
@@ -181,6 +182,12 @@ fn parse_save_input(payload: &Value) -> Result<settings::SaveInput, String> {
             .and_then(Value::as_bool)
             .unwrap_or(false)
     };
+    let auto_sync_interval_minutes = object.get("autoSyncIntervalMinutes")
+        .map(|value| value.as_u64()
+            .filter(|minutes| (1..=u64::from(settings::MAX_AUTO_SYNC_INTERVAL_MINUTES)).contains(minutes))
+            .map(|minutes| minutes as u32)
+            .ok_or_else(|| "最小自动上传间隔必须是 1–1440 分钟的整数".to_string()))
+        .transpose()?;
     Ok(settings::SaveInput {
         provider: {
             let provider = text("provider");
@@ -203,6 +210,7 @@ fn parse_save_input(payload: &Value) -> Result<settings::SaveInput, String> {
         sync_password: text("syncPassword"),
         enabled: flag("enabled"),
         auto_sync: flag("autoSync"),
+        auto_sync_interval_minutes,
         remote_root: text("remoteRoot"),
         profile: text("profile"),
     })

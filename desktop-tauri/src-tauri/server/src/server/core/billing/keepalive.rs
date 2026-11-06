@@ -22,6 +22,7 @@
 use serde_json::{Value, json};
 
 use crate::server::config;
+use crate::server::core::account_store::AccountStore;
 use crate::server::logging;
 
 /// config.json 里承载保活模型链的键
@@ -175,10 +176,46 @@ pub fn install_stats(stats: std::sync::Arc<crate::server::request_stats::Request
     let _ = REQUEST_STATS.set(stats);
 }
 
+pub(crate) fn account_name(store: &AccountStore, account_id: &str) -> String {
+    store.route_account(account_id)
+        .filter(|account| account.get("provider").and_then(Value::as_str) == Some("workbuddy-intl"))
+        .and_then(|account| account.get("displayName").and_then(Value::as_str)
+            .map(str::trim).filter(|name| !name.is_empty()).map(str::to_string))
+        .unwrap_or_else(|| account_id.to_string())
+}
+
+pub(crate) fn normalize_request_display(store: &AccountStore, value: &mut Value) {
+    if let Some(entries) = value.get_mut("entries").and_then(Value::as_array_mut) {
+        for entry in entries {
+            normalize_request_display(store, entry);
+        }
+        return;
+    }
+    if value.get("client").and_then(Value::as_str) != Some("checkin_keepalive")
+        || value.get("provider").and_then(Value::as_str) != Some("workbuddy-intl") {
+        return;
+    }
+    let Some(entry) = value.as_object_mut() else { return };
+    // 旧保活行的 clientModel 是备选清单，不是某次调用；只沿用已记录的实际模型。
+    let model = ["upstreamModel", "model"].into_iter().find_map(|key| {
+        entry.get(key).and_then(Value::as_str).map(str::trim).filter(|model| !model.is_empty())
+    }).unwrap_or("").to_string();
+    for key in ["model", "clientModel", "upstreamModel"] {
+        entry.insert(key.to_string(), json!(model));
+    }
+    if entry.get("accountName").and_then(Value::as_str).is_none_or(|name| name.trim().is_empty()) {
+        let id = entry.get("accountId").and_then(Value::as_str).unwrap_or("").trim();
+        if !id.is_empty() {
+            let name = account_name(store, id);
+            entry.insert("accountName".to_string(), json!(name));
+        }
+    }
+}
+
 pub fn record_activity(
     account_id: &str,
+    account_name: &str,
     started_at: i64,
-    payload: &Value,
     result: &Result<Value, crate::server::errors::GatewayError>,
     identity: crate::server::request_stats::ApiKeyIdentity,
 ) {
@@ -186,7 +223,9 @@ pub fn record_activity(
     let Some(stats) = REQUEST_STATS.get() else { return };
     let body = result.as_ref().ok();
     let model = body.and_then(|value| value.pointer("/activity/pokeModel")).and_then(Value::as_str)
-        .or_else(|| body.and_then(|value| value.pointer("/activity/webConversation/model")).and_then(Value::as_str)).unwrap_or("");
+        .map(str::trim).filter(|model| !model.is_empty())
+        .or_else(|| body.and_then(|value| value.pointer("/activity/webConversation/model")).and_then(Value::as_str)
+            .map(str::trim).filter(|model| !model.is_empty())).unwrap_or("");
     let success = result.as_ref().ok().is_some_and(|value| {
         value.pointer("/activity/pokeSucceeded").and_then(Value::as_bool) == Some(true)
             || value.pointer("/activity/webConversation/succeeded").and_then(Value::as_bool) == Some(true)
@@ -195,9 +234,9 @@ pub fn record_activity(
     entry.ts = Some(started_at);
     entry.id = format!("keepalive-{account_id}-{started_at}");
     entry.account_id = account_id.to_string();
+    entry.account_name = if account_name.trim().is_empty() { account_id } else { account_name.trim() }.to_string();
     entry.provider = Some("workbuddy-intl".to_string());
-    entry.client_model = payload.get("models").and_then(Value::as_array)
-        .map(|models| models.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("、")).unwrap_or_default();
+    entry.client_model = model.to_string();
     entry.upstream_model = model.to_string();
     entry.duration_ms = logging::now_ms() - started_at;
     entry.is_test = true;

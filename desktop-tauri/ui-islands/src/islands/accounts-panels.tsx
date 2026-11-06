@@ -55,7 +55,7 @@ import { CreditDetailButton, creditRowsOf } from './accounts-credit-detail'
 import { creditExpirySummaryOf, creditExpiryText, creditExpiryUnitOf, expiringCreditsOf, type CreditExpirySummary, type ExpiringCredit } from '../../../ui-shared/credit-expiry'
 import { useDisplayClock } from '../../../ui-shared/use-display-clock'
 import { UsageWindowsCell, usageWindows } from './accounts-usage-windows'
-import { accountReloginText } from './accounts-authorization'
+import { accountReloginText, supportsTokenRefresh } from './accounts-authorization'
 import { credentialExpiryRowsOf, credentialExpiryText, type CredentialExpiryRow } from '../../../ui-shared/credential-expiry'
 import { creditStatisticsWalletsOf, isSnapshotWallet, snapshotReadingsOf, usageAggregateOf, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
 import { LimitDetailButton, limitRowsOf } from './accounts-limit-detail'
@@ -526,7 +526,7 @@ export function GroupBandRow({ group, collapsed, colSpan }: {
             aria-label={t('分组设置')}
             onClick={() => openGroupDialog(group.provider)}
             dangerouslySetInnerHTML={{ __html: iconHtml('settings', 14) }} />
-          <GroupMenu group={group} ids={group.accounts.map(account => account.id)} collapsed={collapsed} />
+          <GroupMenu group={group} ids={group.members.map(account => account.id)} collapsed={collapsed} />
         </div>
       </TableCell>
     </TableRow>
@@ -1619,8 +1619,8 @@ export function ProxyCell({ account }: { account: AccountRecord }) {
     // 地址是后端解析出来的实时值（见 poolItemLabel）。同一格里多条目同名时
     // 地址是唯一能分辨它们的读数，不能只写名字。
     //
-    // 禁用项**置灰不可选**：选它只会「保存成功 → 解析失败 → 回退直连」，
-    // 用户看到的是「代理已禁用」这种事后解释。要改就去「网络代理」页启用它。
+    // 禁用项置灰不可选，避免保存后才因代理解析失败中断请求。
+    // 要启用请去「网络代理」页。
     // （当前值恰好是禁用项时照常显示 —— 触发器读的是这一项的 label，含「已禁用」）
     items.push({
       value: `${POOL_VALUE_PREFIX}${item.id}`,
@@ -1654,7 +1654,7 @@ export function ProxyCell({ account }: { account: AccountRecord }) {
   items.push({ value: PROXY_CUSTOM_EDIT, label: t('自定义代理…') })
 
   const title = broken
-    ? t('代理不可用：{error}（转发时会回退直连）；选「自定义代理…」去修改', { error: broken })
+    ? t('代理不可用：{error}（不会自动改为直连）；选「自定义代理…」去修改', { error: broken })
     : source === 'rotate'
       ? t('当前：{label}（每条请求换一个出口）；「自定义代理…」打开完整设置', { label })
       : source === 'clash'
@@ -1667,7 +1667,7 @@ export function ProxyCell({ account }: { account: AccountRecord }) {
   const selected = items.find(item => item.value === current)
 
   return (
-    <Select value={current} onValueChange={value => void applyProxyPick(account.id, String(value), current)}>
+    <Select value={current} onValueChange={value => void applyProxyPick(account.id, value, current)}>
       {/* 代理解析失败时整格标红：旧实现靠 `.cell-proxy.err .select-trigger` 那条 CSS，
           换成组件库的 Select 之后触发器没有 .select-trigger 这个类名（它走 data-slot），
           所以把描边色直接写在工具类上（见最终报告里变死的 CSS） */}
@@ -1762,7 +1762,7 @@ export function MoreMenu({ account, atFront }: { account: AccountRecord; atFront
             onClick={() => { setOpen(false); openSettingsDialog(account.id) }}>
             {t('并发上限：{value}', { value: maxConcurrent > 0 ? maxConcurrent : t('不限') })}
           </Button>
-          {account.desktop !== true && (account.canRefresh === true || account.hasRefreshToken === true) ? (
+          {supportsTokenRefresh(account) ? (
             <Button variant='ghost' size='sm' className={itemClass} disabled={account.needsRelogin === true}
               title={account.needsRelogin ? accountReloginText(account) : undefined}
               onClick={() => { setOpen(false); shared().wbApp?.runAccountAction?.('refresh', account.id) }}>

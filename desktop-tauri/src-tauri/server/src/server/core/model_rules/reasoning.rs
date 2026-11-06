@@ -57,7 +57,7 @@
 //!            「不接」，接一家要有一家的证据。
 //! ```
 //!
-//! ── 哪些情况**故意不注入**（每一类都有具体理由）───────────────
+//! ── 覆盖边界与不注入的情况 ────────────────────────────────────
 //!   1. **`off` / `none`（关闭思考）**：本项目没有安全的表达方式 ——
 //!      Qoder 的 `enable_thinking = false` 会让 Qwen3.8 系列行为异常
 //!      （思考混进正文，或需要推理时直接断连，见 `qoder::protocol` 模块头），
@@ -65,14 +65,10 @@
 //!      [`is_thinking_off`]），宁可不生效也不发一个会弄坏请求的字段。
 //!   2. **表外的自定义等级**：只有适配器确认上游声明了该值才注入；否则跳过。
 //!      通用正向档位的归一由各提供商负责，不能拿通用候选表当作上游能力表。
-//!   3. **客户端请求体里已经指定了思考档位**：那是用户的明确意图，绑定是
-//!      「没指定时的默认」，不覆盖它。判定由各家适配器做（它只认自己那个
-//!      resolver 读的键，不另抄一份键名）。这与 OmniProxy 的
-//!      `reasoning_override` 的**覆盖**语义有意不同：本项目在绑定之前就已经有
-//!      「客户端字段直达上游」的链路（CatPaw 的 `resolve_effort`、Qoder 的
-//!      `resolve_thinking` 都从请求体里读），覆盖会把客户端显式传的值换成一条
-//!      与本次请求无关的配置 —— 而用户给某一次请求指定档位，恰恰比映射上的
-//!      默认值更具体。
+//!   3. **客户端请求体里已经指定了思考档位**：映射绑定是强制覆盖，优先于客户端。
+//!      宿主先用移除客户端思考参数的副本询问适配器，兼容仍会让位于客户端的旧插件；
+//!      只有适配器确认支持并返回字段与取值后，才清理发送体中的冲突参数并写入绑定。
+//!      未绑定、上游不支持或插件调用失败时，客户端参数保持原样。
 //!   4. **本名直发**（该家原生承载请求名，`wire_target_for_provider` 的 ①）：
 //!      名字不是任何映射给的，此时**只认「名字不变的那条按家映射」**（target
 //!      与即将发出的名字相同）。于是：
@@ -91,11 +87,8 @@
 //!
 //! ── 下游等级的读取（`read_client_level`）────────────────────
 //! 它服务的是**请求日志显示**（下游模型名旁的 `(等级)`），不是转发决策 ——
-//! 转发时「客户端指定了什么」永远由各家适配器自己的 resolver 读（上面的
-//! 第 3 条），本函数只是把两家取值链的并集做成一个展示侧读取器。它**绝不能**
-//! 被拿来判断「客户端有没有指定」去做转发分支：两家的链有细节差异
-//! （CatPaw 的空串会让上游 400、Qoder 的取值链到第一个存在的键为止），
-//! 用并集做判断迟早与某家的真实行为分叉。
+//! 未覆盖时，客户端参数由各家适配器自己的 resolver 读取。本函数只负责展示，
+//! 不参与覆盖判断；适配器确认支持后才提交绑定。
 
 use serde_json::Value;
 
@@ -176,6 +169,30 @@ pub fn effort_rank(level: &str) -> Option<usize> {
     EFFORT_LEVELS
         .iter()
         .position(|known| trimmed.eq_ignore_ascii_case(known))
+}
+
+/// 仅清理请求级思考控制；消息里的思考内容、工具参数与输出格式必须保留。
+/// 适配器确认支持绑定之前，只能对用于翻译的副本调用。
+pub fn clear_reasoning_controls(body: &mut Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    for key in [
+        "reasoning_effort", "reasoningEffort", "effort", "reasoning", "thinking",
+        "enable_thinking", "thinking_budget", "chat_mode",
+    ] {
+        object.remove(key);
+    }
+    let empty_output_config = object
+        .get_mut("output_config")
+        .and_then(Value::as_object_mut)
+        .is_some_and(|config| {
+            config.remove("effort");
+            config.is_empty()
+        });
+    if empty_output_config {
+        object.remove("output_config");
+    }
 }
 
 /// 从**下游请求体**里读客户端显式指定的思考等级（请求日志「下游等级」的展示

@@ -3,9 +3,11 @@ import { Badge, Button } from '@ui'
 import { t } from '../i18n'
 import { ALL_CUSTOM, type ManageMapping } from './models-custom-source'
 import {
-  bindingKeyOf, currentProvider, esc, getSnapshot, mappings, providerLabelOf, runRowAction, same,
-  shared, subscribe, writeRemoveMapping,
+  accept, bindingKeyOf, currentProvider, errorMessage, esc, getSnapshot, mappings, providerLabelOf, runRowAction, same,
+  shared, subscribe, toast, writeRemoveMapping,
 } from './models-panel-state'
+
+const REMOVE_ALL_KEY = 'dangling:remove-all'
 
 /**
  * 「未挂载的模型映射」区块。
@@ -33,6 +35,9 @@ import {
  */
 export function DanglingMappings() {
   const state = React.useSyncExternalStore(subscribe, getSnapshot)
+  const confirming = React.useRef(false)
+  const [confirmingAll, setConfirmingAll] = React.useState(false)
+  const removingAll = state.pending.has(REMOVE_ALL_KEY)
   const provider = currentProvider()
   /** 两个聚合视图（内置「全部」/ 自定义「全部」）显示各自范围内的全部悬空条目 */
   const aggregate = provider === 'all' || provider === ALL_CUSTOM
@@ -53,6 +58,8 @@ export function DanglingMappings() {
   async function remove(item: ManageMapping): Promise<void> {
     const alias = String(item.alias)
     const target = String(item.target)
+    const key = bindingKeyOf(alias, target, item.provider || '')
+    if (confirming.current || getSnapshot().pending.has(REMOVE_ALL_KEY) || getSnapshot().pending.has(key)) return
     const ok = await shared().wbConfirm?.ask?.({
       title: t('删除未挂载的映射'),
       html: t('确定删除映射「<strong>{alias} → {target}</strong>」？它指向的上游模型已不在清单里。', {
@@ -61,12 +68,46 @@ export function DanglingMappings() {
       okText: t('删除'),
       okClass: 'danger',
     })
-    if (!ok) return
-    void runRowAction(
-      bindingKeyOf(alias, target, item.provider || ''),
-      () => writeRemoveMapping(item.provider || '', alias, target),
-      t('映射已删除'),
-    )
+    if (!ok || confirming.current || getSnapshot().pending.has(REMOVE_ALL_KEY)) return
+    void runRowAction(key, () => writeRemoveMapping(item.provider || '', alias, target), t('映射已删除'))
+  }
+
+  async function removeAll(): Promise<void> {
+    if (confirming.current || getSnapshot().pending.size) return
+    const selected = items.map(item => ({
+      provider: item.provider || '', alias: String(item.alias), target: String(item.target),
+    }))
+    confirming.current = true
+    setConfirmingAll(true)
+    try {
+      const ok = await shared().wbConfirm?.ask?.({
+        title: t('删除全部未挂载映射'),
+        html: t('确定删除此区域列出的全部 {n} 条未挂载映射？此操作不可撤销，不会删除正常挂载的映射或模型。', { n: selected.length }),
+        okText: t('全部删除'),
+        okClass: 'danger',
+      })
+      if (!ok || getSnapshot().pending.size) return
+      await runRowAction(REMOVE_ALL_KEY, async () => {
+        let removed = 0
+        let failed = 0
+        let firstError = ''
+        for (const item of selected) {
+          try {
+            accept(await writeRemoveMapping(item.provider, item.alias, item.target))
+            removed += 1
+          } catch (error) {
+            failed += 1
+            if (!firstError) firstError = errorMessage(error)
+          }
+        }
+        toast(failed
+          ? t('未挂载映射：已删除 {removed} 条，失败 {failed} 条。首个失败：{error}', { removed, failed, error: firstError })
+          : t('已删除 {n} 条未挂载映射', { n: removed }), failed ? 'err' : 'ok')
+      })
+    } finally {
+      confirming.current = false
+      setConfirmingAll(false)
+    }
   }
 
   return (
@@ -74,6 +115,10 @@ export function DanglingMappings() {
       <div className='dg-head'>
         <span className='dg-title'>{t('未挂载的模型映射')}</span>
         <Badge variant='warning' shape='tag'>{items.length}</Badge>
+        <Button variant='ghost' size='sm' className='ml-auto shrink-0 text-destructive'
+          disabled={confirmingAll || state.pending.size > 0}
+          title={t('删除全部未挂载映射')}
+          onClick={() => void removeAll()}>{removingAll ? t('删除中…') : t('全部删除')}</Button>
       </div>
       <p className='dg-hint'>
         {t('这些映射指向的上游模型已不在当前清单里，挂不到任何模型行上：它们不会出现在 /v1/models，用对应别名发请求也会失败。删除后该对外名即可重新使用。')}
@@ -87,7 +132,7 @@ export function DanglingMappings() {
           // 就会留下这一条；模型随后下线，它就挂不到行了。显示成 `x → x` 只会让人困惑，
           // 所以只写一次并挂一枚「默认绑定」标注。
           const isDefault = item.isDefault === true || same(alias, target)
-          const busy = state.pending.has(bindingKeyOf(alias, target, providerId))
+          const busy = confirmingAll || removingAll || state.pending.has(bindingKeyOf(alias, target, providerId))
           return (
             <li className='dg-item' key={`${providerId}\u0001${alias}\u0001${target}`}>
               <span className='dg-prov'>

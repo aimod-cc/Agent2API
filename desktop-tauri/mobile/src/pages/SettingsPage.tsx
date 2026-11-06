@@ -17,6 +17,8 @@ import { t } from '../i18n'
 import { Card, Button, Badge, BadgeDot, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, SheetContent, SheetHeader, SheetBody, SheetTitle } from '@ui'
 import { ClientIdentificationPanel } from '../../../ui-shared/client-identification-panel'
 import { clientIdentificationApi } from '../api/client-identification'
+import { VisionCompatibilityPanel } from '../../../ui-shared/settings-vision-panel'
+import { visionCompatApi } from '../api/vision-compat'
 
 /**
  * 设置。
@@ -37,6 +39,7 @@ export function SettingsPage() {
   const [community, setCommunity] = useState(false)
   const [systemInfo, setSystemInfo] = useState(false)
   const [clientIdentification, setClientIdentification] = useState(false)
+  const [visionCompatibility, setVisionCompatibility] = useState(false)
   const currentLocale = locale()
   const options = localeOptions()
 
@@ -154,6 +157,11 @@ export function SettingsPage() {
       <div className='m-section'>
         <SectionHead title={t('接入')} />
         <Card className='m-card'>
+          <Button size='default' variant='ghost' type='button' className='m-row h-auto min-h-[52px] w-full justify-start rounded-none border-0 px-3.5 py-3 text-left' onClick={() => setVisionCompatibility(true)}>
+            <span className='m-logo'><Icon name='model' /></span>
+            <div className='m-grow'><div className='m-t1'>{t('图片兼容')}</div><div className='m-t2'>{t('辅助识图或切换视觉模型，默认关闭')}</div></div>
+            <span className='m-chev'><Icon name='chev' /></span>
+          </Button>
           <Button size='default' variant='ghost' type='button' className='m-row h-auto min-h-[52px] w-full justify-start rounded-none border-0 px-3.5 py-3 text-left' onClick={() => setClientIdentification(true)}>
             <span className='m-logo'><Icon name='doc' /></span>
             <div className='m-grow'><div className='m-t1'>{t('客户端识别')}</div><div className='m-t2'>{t('内置识别、自定义规则与来源声明')}</div></div>
@@ -392,6 +400,11 @@ export function SettingsPage() {
         </Card>
       </div>
 
+      <Sheet open={visionCompatibility} onOpenChange={setVisionCompatibility}>
+        <SheetContent><SheetHeader><SheetTitle>{t('图片兼容')}</SheetTitle></SheetHeader><SheetBody>
+          {visionCompatibility ? <VisionCompatibilityPanel key={serverIdentity()} api={visionCompatApi} t={t} /> : null}
+        </SheetBody></SheetContent>
+      </Sheet>
       <Sheet open={clientIdentification} onOpenChange={setClientIdentification}>
         <SheetContent><SheetHeader><SheetTitle>{t('客户端识别')}</SheetTitle></SheetHeader><SheetBody>
           {clientIdentification ? <ClientIdentificationPanel key={serverIdentity()} api={clientIdentificationApi} t={t} /> : null}
