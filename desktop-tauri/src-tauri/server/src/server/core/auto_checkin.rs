@@ -260,7 +260,7 @@ pub fn providers_added_after(version: i64) -> Vec<String> {
         .collect()
 }
 
-/// 提供商的展示名（从注册表查，查不到就原样回显 id）。
+/// 提供商的展示名（签到语境的入口，直接委托 `providers::label_of`）。
 ///
 /// 这是**签到语境**的展示名（签到中心的分组、自动签到的提供商勾选共用这一份）。
 /// WorkBuddy 两个地区在注册表里就叫「WorkBuddy 国内版 / 国际版」（拆家后的
@@ -269,12 +269,16 @@ pub fn providers_added_after(version: i64) -> Vec<String> {
 /// 不在标签里堆字。Qoder 拆家（2026-10）后注册名就是「Qoder 中国版 /
 /// 国际版」，不再需要这里的覆盖。其余几家不需要后缀：小浣熊没有版本区分，
 /// AutoClaw 两地的签到链路都存在且同形 —— 展示名已带「国内版 / 国际版」。
-pub fn provider_label(id: &str) -> &str {
-    crate::server::core::providers::PROVIDERS
-        .iter()
-        .find(|meta| meta.id == id)
-        .map(|meta| meta.label)
-        .unwrap_or(id)
+///
+/// ── 为什么不再自己扫 `PROVIDERS` ────────────────────────────
+/// 插件架构下「有签到能力的家」不再只由内置枚举决定：签到的可签清单是
+/// `checkin_providers()`（常量表 + 运行期装入的插件家），而 `PROVIDERS`
+/// 里没有插件家的条目。原先这里直接扫 `PROVIDERS`，于是插件家一律回显裸
+/// provider id —— 签到中心的分组标题就成了 `quwork` 这种用户看不懂的串，
+/// 而同一页的账号、模型、报表早就通过 `label_of` 拿到了面板名。
+/// 改成委托 `label_of` 后，一处口径覆盖内置家、自定义家与插件家。
+pub fn provider_label(id: &str) -> String {
+    crate::server::core::providers::label_of(id)
 }
 
 /// 归一化配置里的提供商清单：只认 CHECKIN_PROVIDERS 里的 id（去重、保持顺序），
