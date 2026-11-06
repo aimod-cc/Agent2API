@@ -4,6 +4,8 @@
   const IDLE_MS = 30000;
   const clientId = window.crypto?.randomUUID?.() || `claim-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   let timer = 0;
+  let worker = null;
+  let nextPollAt = 0;
   let polling = false;
   let stopped = false;
   let active = null;
@@ -21,6 +23,28 @@
     if (!stopped) timer = window.setTimeout(() => void poll(), delay);
   }
 
+  /* 后台标签页的主线程定时会被浏览器节流到约一分钟一次，
+     Worker 的 interval 不受同一节流约束，用它保住五秒级心跳。 */
+  function due(delay) {
+    nextPollAt = Date.now() + delay;
+  }
+
+  function tick() {
+    if (stopped || polling || Date.now() < nextPollAt) return;
+    void poll();
+  }
+
+  function startTicker() {
+    if (worker || typeof Worker === 'undefined') return;
+    try {
+      worker = new Worker(URL.createObjectURL(new Blob(
+        ['setInterval(function(){postMessage(0)},3000);'],
+        { type: 'text/javascript' },
+      )));
+      worker.onmessage = () => tick();
+    } catch { /* Worker 不可用（如 CSP 禁止 blob）时只靠主线程定时 */ }
+  }
+
   function hasAccounts() {
     const accounts = window.wbApp?.getState?.()?.accounts?.accounts;
     return Array.isArray(accounts) && accounts.some(account => account.provider === 'zcode' || account.provider === 'zcode-intl');
@@ -29,8 +53,8 @@
   function canVerify() {
     if (Date.now() < pausedUntil) return false;
     if (!window.wbAliyunCaptcha?.requestToken || window.wbAliyunCaptcha.isBusy()) return false;
-    // 不打断手动操作中的弹层；桌面最小化仍可无感验证，浏览器后台页则让给前台。
-    if (window.workbuddyDesktop?.platform === 'web' && document.visibilityState !== 'visible') return false;
+    // 实测验证基本无感（无滑块弹窗），后台标签页也允许接任务；
+    // 个别轮次若真需要滑块，后台任务会超时失败，由后续轮次重试。
     return !document.querySelector('[data-slot="dialog-content"][data-open], [data-slot="alert-dialog-content"][data-open], [data-slot="sheet-content"][data-open]');
   }
 
@@ -38,6 +62,7 @@
     if (polling || stopped) return;
     const bridge = window.workbuddyDesktop;
     if (!bridge?.zcodeClaimVerification || !active && !hasAccounts()) {
+      due(IDLE_MS);
       schedule(IDLE_MS);
       return;
     }
@@ -61,6 +86,7 @@
       delay = IDLE_MS;
     } finally {
       polling = false;
+      due(delay);
       schedule(delay);
     }
   }
@@ -130,19 +156,22 @@
 
   function start() {
     stopped = false;
+    due(1000);
     schedule(1000);
+    startTicker();
   }
 
   function stop() {
     stopped = true;
     window.clearTimeout(timer);
     cancel();
+    if (worker) { worker.terminate(); worker = null; }
   }
 
   window.wbZcodeClaimVerification = { cancel, status: () => value };
   window.addEventListener('pagehide', stop);
   window.addEventListener('pageshow', start);
-  window.addEventListener('visibilitychange', () => { if (!stopped) schedule(0); });
+  window.addEventListener('visibilitychange', () => { if (!stopped) { due(0); schedule(0); } });
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
   else start();
 })();
