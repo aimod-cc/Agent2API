@@ -41,6 +41,9 @@ use tokio::sync::Notify;
 
 use crate::server::errors::GatewayError;
 
+#[cfg(test)]
+mod tests;
+
 /// 手动终止的统一文案（明细的 error 列 / 客户端的错误帧 / 终止接口的提示共用）。
 pub const MANUAL_TERMINATED: &str = "请求已被手动终止";
 
@@ -69,7 +72,7 @@ pub struct CancelToken {
 }
 
 impl CancelToken {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self { flag: AtomicBool::new(false), notify: Notify::new() }
     }
 

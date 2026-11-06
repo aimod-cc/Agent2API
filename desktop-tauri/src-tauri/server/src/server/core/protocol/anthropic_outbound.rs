@@ -745,7 +745,7 @@ impl ChatFromAnthropicStream {
     /// 判据用「字段在不在」而不是「值是否非零」：0 是合法上报值（缓存未命中
     /// 就是 0），拿它当「没报」会让我们永远回落到一个更早的旧值。
     fn absorb_usage(&mut self, usage: &Value) {
-        let take = |key: &str| usage.get(key).and_then(Value::as_i64);
+        let take = |key: &str| super::usage::token_count(usage.get(key));
         if let Some(value) = take("input_tokens") {
             self.input_tokens = value;
         }
@@ -791,15 +791,9 @@ impl ChatFromAnthropicStream {
             }
         });
         out.push(self.finish_frame(&finish_reason));
-        // chat 口径：input_tokens 含缓存部分（`usage_to_anthropic` 的反向
-        // 不等式 —— 那边是「减掉缓存」，这边加回来）。缓存另开一个具体字段：
-        // 请求统计的「缓存」列按 `prompt_tokens_details.cached_tokens` 取值
-        // （见 `upstream::usage::extract_usage`），不带它这一列在活动套餐通道
-        // 上恒显示 0 —— 与输入恒 0 是同一类「账目看着对、其实没采到」。
-        // `cache_creation` 也并进这一项：它同样落在 prompt_tokens 里，
-        // 不并会让「input = prompt - cached」两边对不上。
-        let cached = self.cache_read + self.cache_creation;
-        let prompt_tokens = self.input_tokens + cached;
+        // Chat 输入包含缓存读写；cached_tokens 只表示命中，写入必须单独保留。
+        let prompt_tokens = self.input_tokens
+            .saturating_add(self.cache_read).saturating_add(self.cache_creation);
         out.push(chat_frame(&json!({
             "id": self.id,
             "object": "chat.completion.chunk",
@@ -809,8 +803,9 @@ impl ChatFromAnthropicStream {
             "usage": {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": self.output_tokens,
-                "total_tokens": prompt_tokens + self.output_tokens,
-                "prompt_tokens_details": { "cached_tokens": cached },
+                "total_tokens": prompt_tokens.saturating_add(self.output_tokens),
+                "prompt_tokens_details": { "cached_tokens": self.cache_read },
+                "cache_creation_input_tokens": self.cache_creation,
             },
         })));
         out.push(bytes::Bytes::from_static(b"data: [DONE]\n\n"));

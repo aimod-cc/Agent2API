@@ -9,7 +9,7 @@ import { callJson, gatewayBase } from './assistant-state'
 import { t } from '../i18n'
 
 export type ToolProtocol = 'skill' | 'mcp' | 'api'
-export type ToolServiceId = 'web-search' | 'vision'
+export type ToolServiceId = 'web-search' | 'vision' | 'image-generation'
 
 export type SkillVariantInfo = {
   id: 'node' | 'python'
@@ -116,11 +116,13 @@ export const PROTOCOL_LABELS: Record<ToolProtocol, string> = { skill: 'Skill', m
 export const SERVICE_NAME: Record<string, string> = {
   'web-search': t('网络搜索'),
   vision: t('视觉分析'),
+  'image-generation': t('图片生成'),
 }
 
 export const SERVICE_DESC: Record<string, string> = {
   'web-search': t('聚合标准搜索服务及已有 WorkBuddy、Kiro 账号的搜索能力；网页抓取仍使用标准服务。'),
   vision: t('把图片与提示词交给后台配置的视觉模型分析，并把模型回复返回给调用方的大模型。'),
+  'image-generation': t('使用已有账号生成或编辑图片，支持任务查询与本机文件保存。'),
 }
 
 /** 接入协议说明（列表页与详情页共用同一份文案） */
@@ -202,7 +204,7 @@ export const fetchApiKeys = (): Promise<{ keys: ApiKeyOption[] }> => callJson('G
 export const installSkill = (body: { variant: string; api_key_id: string; clients: string[] }) =>
   callJson<{ results: InstallOutcome[] }>('POST', '/api/tools/install-skill', body)
 
-export const installMcp = (body: { service_id: string; mode: string; api_key_id: string; clients: string[] }) =>
+export const installMcp = (body: { service_id: string; mode: string; api_key_id: string; clients: string[]; output_directory?: string; reference_directories?: string[] }) =>
   callJson<{ results: InstallOutcome[] }>('POST', '/api/tools/install-mcp', body)
 
 export const uninstallSkill = (body: { service_id: string; clients: string[] }) =>

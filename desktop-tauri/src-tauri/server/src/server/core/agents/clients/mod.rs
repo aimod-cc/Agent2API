@@ -11,6 +11,7 @@ mod opencode;
 mod readonly;
 mod workbuddy;
 mod zcode;
+mod zcode_models;
 mod zed;
 
 use serde_json::{json, Value};
@@ -85,6 +86,14 @@ pub fn plan(
         "dsh" => extra = dsh::write(path, &mut value, profile, operation, &mut warnings)?,
         _ => return Err("这个客户端当前仅支持读取".into()),
     }
+    let unrepresented = profile.models.iter().any(|model| {
+        (model.supports_tools.is_some() && !matches!(def.id, "opencode" | "workbuddy" | "cline" | "zed" | "zcode"))
+            || (model.supports_video.is_some() && def.id != "zcode")
+            || (model.supports_reasoning.is_some() && !matches!(def.id, "opencode" | "workbuddy" | "cline" | "crush" | "dsh" | "zcode"))
+    });
+    if unrepresented {
+        warnings.push("模型能力来自网关目录；此客户端没有对应配置项的能力不会写入，其余字段按模型分别保存。".into());
+    }
     change.after = Some(if def.id == "workbuddy" && original.trim().is_empty() {
         serde_json::to_vec_pretty(&value).map_err(|e| format!("生成模型数组失败: {e}"))?
     } else {
@@ -143,13 +152,14 @@ pub fn equivalent(def: &ClientDef, saved: &Profile, live: &Profile) -> bool {
                             .max_output_tokens
                             .is_some_and(|value| Some(value) != current.max_output_tokens)
                         || (def.effort && def.id != "cline" && expected.effort != current.effort)
-                        || (matches!(def.id, "opencode" | "workbuddy" | "cline" | "zed")
+                        || (matches!(def.id, "opencode" | "workbuddy" | "cline" | "zed" | "zcode")
                             && expected
                                 .supports_tools
                                 .is_some_and(|value| Some(value) != current.supports_tools))
                         || expected
                             .supports_images
                             .is_some_and(|value| Some(value) != current.supports_images)
+                        || (def.id == "zcode" && expected.supports_video.is_some_and(|value| Some(value) != current.supports_video))
                         || (matches!(def.id, "opencode" | "workbuddy" | "cline" | "crush")
                             && expected
                                 .supports_reasoning

@@ -11,22 +11,29 @@
 //! 不额外引入托盘专用图片资源。
 
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager,
+    AppHandle, Emitter, Manager,
 };
 
 use crate::state::AppState;
 
 pub const TRAY_ID: &str = "main-tray";
 const MENU_SHOW: &str = "tray-show";
+const MENU_CHECK_UPDATE: &str = "tray-check-update";
 const MENU_QUIT: &str = "tray-quit";
 
 /// 创建托盘图标。应用启动时调用一次即可。
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
     let show_item = MenuItem::with_id(app, MENU_SHOW, "显示主窗口", true, None::<&str>)?;
+    let check_update_item =
+        MenuItem::with_id(app, MENU_CHECK_UPDATE, "检查更新", true, None::<&str>)?;
+    let separator = PredefinedMenuItem::separator(app)?;
     let quit_item = MenuItem::with_id(app, MENU_QUIT, "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+    let menu = Menu::with_items(
+        app,
+        &[&show_item, &check_update_item, &separator, &quit_item],
+    )?;
 
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         // 提示文字与窗口标题同一份（开发版带 "Dev" 标记，见 lib.rs 的 app_title）：
@@ -37,6 +44,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             MENU_SHOW => show_main_window(app),
+            MENU_CHECK_UPDATE => request_update_check(app),
             MENU_QUIT => request_exit(app),
             _ => {}
         })
@@ -73,6 +81,18 @@ pub fn show_main_window(app: &AppHandle) {
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
+}
+
+fn request_update_check(app: &AppHandle) {
+    app.state::<AppState>().window.request_update_check();
+    show_main_window(app);
+    let _ = app.emit_to(crate::MAIN_WINDOW_LABEL, "tray:check-update", ());
+}
+
+#[tauri::command]
+pub fn take_update_check_request(app: AppHandle, window: tauri::WebviewWindow) -> bool {
+    window.label() == crate::MAIN_WINDOW_LABEL
+        && app.state::<AppState>().window.take_update_check_request()
 }
 
 /// 真正退出应用。

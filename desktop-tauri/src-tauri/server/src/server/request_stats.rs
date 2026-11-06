@@ -79,6 +79,7 @@ mod record;
 // 模块内部各函数仍应是 `pub(super)`：只有 `request_stats.rs` 能调到它们，
 // 对外暴露面收敛在这一层。
 mod report;
+mod cache_report;
 mod routing;
 mod trace;
 mod flow;
@@ -89,6 +90,8 @@ mod source_report;
 mod source_backfill;
 mod lifecycle;
 mod sql;
+#[cfg(test)]
+mod tests;
 
 pub use source::{ApiKeyIdentity, RequestSource};
 pub fn request_date_bounds(start: NaiveDate, end: NaiveDate) -> Option<(i64, i64)> {

@@ -3,7 +3,8 @@ import { Button, Sheet, SheetBody, SheetContent, SheetFooter, SheetHeader, Sheet
 import { Badge } from '../../components/ui'
 import { fetchAccountUsage, fetchUsageSnapshot, type UsageRow } from '../../api/gateway'
 import { claimPlan, previewPlans, type CaptchaPhase, type ClaimResult, type Entitlement, type OwnedPlan, type PreviewResult } from '../../api/zcode'
-import { planClaimResultApplies, planClaimState, planQueryErrors } from '../../../../ui-shared/zcode-plans'
+import { planActivityEnded, planClaimResultApplies, planClaimState, planQueryErrors, unconfirmedPlanIds } from '../../../../ui-shared/zcode-plans'
+import { useDisplayClock } from '../../../../ui-shared/use-display-clock'
 import type { PlanEntry } from '../../api/checkin'
 import { claimedPlansToday } from '../../lib/checkin'
 import { formatCompact, formatStamp } from '../../lib/format'
@@ -33,6 +34,7 @@ export function CheckinPlansSheet({ entry, onClose, onChange }: {
   onChange: () => void
 }) {
   const { session } = useStore()
+  const now = useDisplayClock()
   const [preview, setPreview] = useState<PreviewResult | null>(null)
   const [usage, setUsage] = useState<UsageRow | null>(null)
   const [previewError, setPreviewError] = useState('')
@@ -52,15 +54,16 @@ export function CheckinPlansSheet({ entry, onClose, onChange }: {
   const account = session?.accounts?.accounts?.find(item => item.id === entry.id)
   const stored = account?.claimPlans as Record<string, unknown> | undefined
   const claimed = [...new Set([...claimedPlansToday(stored || entry.claimPlans), ...claimedNow])]
-  const activityPlans = preview?.plans || []
+  const plans = preview?.plans || []
+  const activityPlans = plans.filter(plan => !planActivityEnded(plan, now))
   const queryErrors = preview ? planQueryErrors(preview) : []
   const owned = Array.isArray(usage?.usage?.plans) ? [...usage.usage.plans as OwnedPlan[]] : []
-  for (const plan of activityPlans) {
+  for (const plan of plans) {
     const item = plan.ownedPlan
     if (item && !owned.some(plan => item.userPlanId
       ? plan.userPlanId === item.userPlanId : plan.planId === item.planId)) owned.push(item)
   }
-  const unconfirmed = claimed.filter(id => !owned.some(plan => plan.planId === id))
+  const unconfirmed = unconfirmedPlanIds(claimed, plans, owned, now)
 
   const loadPreview = useCallback(async () => {
     if (!mounted.current || serverIdentity() !== identity) return
@@ -116,6 +119,8 @@ export function CheckinPlansSheet({ entry, onClose, onChange }: {
 
   const claim = async (id: string) => {
     if (claimController.current || verifyingChannel || !mounted.current || serverIdentity() !== identity) return
+    const plan = activityPlans.find(item => item.planId === id)
+    if (!plan || planActivityEnded(plan)) return
     const controller = new AbortController()
     claimController.current = controller
     setClaiming(id)

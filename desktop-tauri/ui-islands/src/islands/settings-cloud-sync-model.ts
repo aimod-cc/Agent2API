@@ -8,6 +8,8 @@ export type SyncStatus = {
   lastKeyFingerprint?: string
   lastError?: string
   lastErrorSource?: string
+  retryAt?: number
+  lastUploadAt?: number
 }
 
 export type CloudSyncView = {
@@ -24,6 +26,7 @@ export type CloudSyncView = {
   hasSyncPassword: boolean
   enabled: boolean
   autoSync: boolean
+  autoSyncIntervalMinutes: number
   remoteRoot: string
   profile: string
   status: SyncStatus
@@ -65,6 +68,7 @@ export type Form = {
   syncPassword: string
   enabled: boolean
   autoSync: boolean
+  autoSyncIntervalMinutes: number
   remoteRoot: string
   profile: string
 }
@@ -151,7 +155,8 @@ export function emptyForm(): Form {
     provider: PROVIDER_WEBDAV,
     webdavBaseUrl: '', webdavUsername: '', webdavPassword: '', webdavUserAgent: '',
     s3Region: '', s3Bucket: '', s3AccessKeyId: '', s3SecretAccessKey: '', s3Endpoint: '', s3UserAgent: '',
-    syncPassword: '', enabled: false, autoSync: false, remoteRoot: 'agent2api-sync', profile: 'default',
+    syncPassword: '', enabled: false, autoSync: false, autoSyncIntervalMinutes: 5,
+    remoteRoot: 'agent2api-sync', profile: 'default',
   }
 }
 
@@ -172,6 +177,7 @@ export function formFromView(view: CloudSyncView): Form {
     syncPassword: '',
     enabled: view.enabled,
     autoSync: view.autoSync,
+    autoSyncIntervalMinutes: view.autoSyncIntervalMinutes || 5,
     remoteRoot: view.remoteRoot,
     profile: view.profile,
   }
@@ -193,6 +199,7 @@ export function payloadOf(form: Form): Record<string, unknown> {
     syncPassword: form.syncPassword,
     enabled: form.enabled,
     autoSync: form.autoSync,
+    autoSyncIntervalMinutes: form.autoSyncIntervalMinutes,
     remoteRoot: form.remoteRoot,
     profile: form.profile,
   }

@@ -83,15 +83,15 @@
     { key: 'routing', label: wbI18n.t('路由'), icon: 'route' },
     { key: 'gateway', label: wbI18n.t('模型管理'), icon: 'gateway' },
     { key: 'agent', label: wbI18n.t('Agent 配置'), icon: 'agent' },
-    // 工具服务：给客户端装上的可选能力（网络搜索 / 视觉分析），排在客户端
+    // MCP & Skills：给客户端装上的可选能力（网络搜索 / 视觉分析），排在客户端
     // 配置之后、出网代理之前 —— 前者是「接哪些客户端」，这一项是「接了能用什么」。
-    { key: 'tools', label: wbI18n.t('工具服务'), icon: 'tools' },
+    { key: 'tools', label: wbI18n.t('MCP & Skills'), icon: 'tools' },
     { key: 'proxies', label: wbI18n.t('网络代理'), icon: 'proxies' },
     { key: 'keys', label: wbI18n.t('网关 Key'), icon: 'key' },
     { key: 'docs', label: wbI18n.t('文档'), icon: 'logs' },
     { key: 'requests', label: wbI18n.t('请求日志'), icon: 'requests' },
     { key: 'logs', label: wbI18n.t('日志'), icon: 'logs' },
-    { key: 'tasks', label: wbI18n.t('定时任务'), icon: 'tasks' },
+    { key: 'tasks', label: wbI18n.t('自动维护'), icon: 'tasks' },
     // 提供商插件：各家 provider 的转发与账号实现都在插件包里，这一页是装插件的
     // 唯一入口。排在「设置」上面 —— 它是「让软件能用起来」的前置步骤，与设置同级
     // 但更靠前（没装插件时账号页与模型页都是空的）。

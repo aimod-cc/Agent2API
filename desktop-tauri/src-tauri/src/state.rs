@@ -61,6 +61,8 @@ pub struct WindowState {
     pub close_to_tray: AtomicBool,
     /// 轻量模式：关窗时销毁窗口（释放 WebView2 内存）而不是隐藏
     pub lightweight: AtomicBool,
+    /// 窗口重建期间保留托盘请求，页面就绪后只领取一次。
+    pending_update_check: AtomicBool,
 }
 
 impl WindowState {
@@ -87,6 +89,14 @@ impl WindowState {
 
     pub fn lightweight(&self) -> bool {
         self.lightweight.load(Ordering::SeqCst)
+    }
+
+    pub fn request_update_check(&self) {
+        self.pending_update_check.store(true, Ordering::SeqCst);
+    }
+
+    pub fn take_update_check_request(&self) -> bool {
+        self.pending_update_check.swap(false, Ordering::SeqCst)
     }
 }
 

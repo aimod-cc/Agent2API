@@ -37,6 +37,7 @@
 pub mod agents;
 pub mod agent_resources;
 pub mod accounts;
+mod account_import_setup;
 pub mod accounts_batch;
 mod accounts_export;
 mod accounts_sort;
@@ -47,6 +48,7 @@ pub mod accounts_usage;
 // 设置读写与流式对话转发。工具定义与执行都在前端，后端不认识任何工具，
 // 见该文件模块头
 pub mod assistant;
+pub mod assistant_coding;
 pub mod assistant_history;
 pub mod assistant_images;
 // 工具服务（「工具服务」页）：列表 / 开关 / 超时 / 上游提供商 / 视觉配置 /
@@ -54,6 +56,9 @@ pub mod assistant_images;
 // 编排在 `core::tool_services`，见那两个文件模块头
 pub mod tools;
 pub mod tool_runtime;
+pub mod tool_image_admin;
+pub mod tool_images;
+mod tool_image_results;
 mod image_input;
 // 整库备份 / 恢复（设置页「整库备份 / 恢复」，SQL 文本形态；核心在
 // `db::backup`，替换语义与账号 JSON 导入的 merge 是两条独立通道）
@@ -69,6 +74,7 @@ pub mod chat;
 // 签到中心的聚合快照（GET /api/checkin-center）：分组口径在后端唯一化，
 // 资格类状态由前端按需惰性查询，见该文件模块头
 pub mod checkin_center;
+pub mod campaign_rewards;
 // 云同步（设置页「数据 → 云同步」）：WebDAV / S3 兼容存储上的业务数据快照。
 // 范围与密钥封装见 `core::cloud_sync` 的模块头
 pub mod cloud_sync;
@@ -112,6 +118,7 @@ pub mod keys_api;
 /// 同形的单开关端点，独立成文件而不是塞进 config_api —— 理由见该模块头。
 pub mod keepalive;
 pub mod logs_api;
+pub mod maintenance;
 pub mod model_manage;
 pub(crate) mod model_access;
 // models.dev 模型元数据（开关 / 状态 / 立即刷新）：与「逐家上游目录」的
@@ -123,6 +130,7 @@ pub mod model_test;
 pub mod models;
 // Loomy 新手任务的查询 / 一键领取（签到后在界面弹窗），见该文件模块头
 pub mod onboarding;
+mod officeace_subscription;
 pub mod panel;
 pub mod pipeline;
 mod live_progress;
@@ -145,6 +153,8 @@ pub mod queue_api;
 // 实施点在 `core::upstream::payload` 的 send_body（只作用在对话链路，生图不经过），
 // 见该文件模块头
 pub mod image_compress;
+pub mod vision_compat;
+mod vision_compat_record;
 pub mod retry_api;
 pub(crate) mod request_prepare;
 // 开发者角色兼容开关（GET/PUT /api/developer-role-compat）：与 /api/sanitize

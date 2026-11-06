@@ -923,10 +923,8 @@ fn describe_balance_query_changes(
 /// 自定义账号的**内部凭证快照**（`custom_credential_by_id` /
 /// `first_custom_credential` 的返回值）。
 ///
-/// 与公开形态（`to_custom_public_account`）的字段差别只有两个：
-/// `apiKey`（明文，出网鉴权用）与代理的**已解析形态**（`ResolvedProxy`，
-/// 直接可交给 egress；解析失败按直连兜底 —— 公开形态里那是给用户看的
-/// 「解析失败」气泡，这里是转发可执行的出口）。
+/// 与公开形态相比，这里保留出网鉴权所需的 API Key、已解析出口及代理异常原因。
+/// 代理异常不能被查询与目录刷新误当成未配置代理。
 pub struct CustomCredential {
     /// 账号 id
     pub account_id: String,
@@ -939,8 +937,9 @@ pub struct CustomCredential {
     pub no_auth: bool,
     /// 账号上的 baseUrl **覆盖项**（None = 未覆盖，转发回落提供商的 baseUrl）
     pub base_url_override: Option<String>,
-    /// 出网代理（None = 未配置 / 解析失败 → 直连）
+    /// 出网代理（None = 未配置，异常原因单独保留）。
     pub proxy: Option<ResolvedProxy>,
+    pub proxy_error: Option<String>,
 }
 
 /// 一条记录 → 凭证快照（两个入口共用一份取数口径，不会各漂一份）
@@ -949,11 +948,11 @@ fn credential_of_record(record: &StoredAccount) -> CustomCredential {
     // 轮询档取下一个出口：凭证快照的消费方（余额查询、拉清单）都是**真实出网**，
     // 与转发同一条口径；展示那一路（公开形态）走 `describe_account_proxy`，
     // 它不动游标（见 `core::proxies` 的两个解析入口）。
-    let proxy = match resolve_account_proxy_rotating(Some(&record.proxy()), record.id()) {
-        Some(resolution) => resolution.resolved().cloned(),
-        // 无代理配置 → 直连（与「解析失败回退直连」在出网行为上等价，
-        // 区别只在日志：这里没有请求上下文可挂 notice，静默直连即可）
-        None => None,
+    let (proxy, proxy_error) = match resolve_account_proxy_rotating(Some(&record.proxy()), record.id()) {
+        Some(crate::server::core::proxies::ProxyResolution::Resolved(proxy))
+            if !proxy.host.trim().is_empty() && proxy.port.is_some_and(|port| port > 0) => (Some(proxy), None),
+        Some(_) => (None, Some("账号代理不可用，请检查账号设置；本次操作未改走直连".to_string())),
+        None => (None, None),
     };
     CustomCredential {
         account_id: record.id().to_string(),
@@ -970,5 +969,6 @@ fn credential_of_record(record: &StoredAccount) -> CustomCredential {
             .map(str::to_string)
             .filter(|text| !text.is_empty()),
         proxy,
+        proxy_error,
     }
 }

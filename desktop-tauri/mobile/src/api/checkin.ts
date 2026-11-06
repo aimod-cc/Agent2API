@@ -1,4 +1,6 @@
 import { apiCall } from './client'
+import type { OfficeaceSubscriptionResult, OfficeaceSubscriptionState } from '../../../ui-shared/checkin-officeace-types'
+import type { BenefitRedemptionResult, CampaignClaimResult, CampaignPreview } from '../../../ui-shared/checkin-campaign-types'
 import type {
   AutoState, CheckinCenter, CheckinResult, CheckinResultRow, KeepaliveState, OnboardingTask,
   RecordsPage, TravelRunResult, TravelState,
@@ -114,6 +116,26 @@ export type OnboardingResult = {
   failed?: number
   claimedPoints?: number
   message?: string
+}
+
+export function getCampaignRewards(id: string): Promise<CampaignPreview> {
+  return apiCall(`${accountPath(id)}/campaigns`)
+}
+
+export function claimCampaignReward(id: string, campaignId: string): Promise<CampaignClaimResult> {
+  return apiCall(`${accountPath(id)}/campaigns/claim`, { method: 'POST', body: { campaignId } })
+}
+
+export function redeemCampaignBenefit(id: string, code: string): Promise<BenefitRedemptionResult> {
+  return apiCall(`${accountPath(id)}/campaigns/redeem`, { method: 'POST', body: { code } })
+}
+
+export function getOfficeaceSubscription(id: string): Promise<OfficeaceSubscriptionState> {
+  return apiCall(`${accountPath(id)}/officeace-subscription`)
+}
+
+export function activateOfficeaceSubscription(id: string): Promise<OfficeaceSubscriptionResult> {
+  return apiCall(`${accountPath(id)}/officeace-subscription/activate`, { method: 'POST' })
 }
 
 export function getOnboarding(id: string, refresh = false): Promise<OnboardingResult> {

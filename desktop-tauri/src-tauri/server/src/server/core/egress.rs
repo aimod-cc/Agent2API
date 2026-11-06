@@ -47,6 +47,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::server::config::TimeoutSettings;
 use crate::server::core::proxies::ResolvedProxy;
@@ -92,9 +93,7 @@ struct CacheEntry {
 
 /// 出口 → Client 的缓存。
 ///
-/// 键是**不含凭证**的 `协议://主机:端口`（与 Node 的 dispatcher 键一致）：
-/// 把密码放进缓存键会让它在内存里多留一份，而且同主机不同密码本就不该共用一个池。
-/// 凭证通过 `reqwest::Proxy::basic_auth` 挂在客户端上，仍然生效。
+/// 同一代理地址可能通过不同认证信息选择不同出口；缓存必须区分认证指纹，不能串用连接。
 #[derive(Default)]
 struct ClientCache {
     entries: HashMap<String, CacheEntry>,
@@ -104,7 +103,7 @@ struct ClientCache {
 
 static CLIENTS: Mutex<Option<ClientCache>> = Mutex::new(None);
 
-/// 缓存键：`协议://主机:端口`（不含凭证，理由见 ClientCache 的注释）。
+/// 缓存键不保存明文认证信息。
 ///
 /// 直连（proxy 为 None）不在这里 —— 它走独立的 `DIRECT` 键，
 /// 保证「某个出口被淘汰」不会把直连的客户端也一起丢掉。
@@ -121,12 +120,15 @@ const DIRECT_KEY: &str = "__direct__";
 fn cache_key(proxy: Option<&ResolvedProxy>, timeouts: &TimeoutSettings) -> String {
     let egress = match proxy {
         None => DIRECT_KEY.to_string(),
-        Some(proxy) => format!(
-            "{}://{}:{}",
-            proxy.protocol,
-            proxy.host,
-            proxy.port.map(|port| port.to_string()).unwrap_or_else(|| "?".to_string())
-        ),
+        Some(proxy) => {
+            let mut fingerprint = Sha256::new();
+            fingerprint.update((proxy.username.len() as u64).to_be_bytes());
+            fingerprint.update(proxy.username.as_bytes());
+            fingerprint.update(proxy.password.as_bytes());
+            let fingerprint: String = fingerprint.finalize().iter().map(|byte| format!("{byte:02x}")).collect();
+            format!("{}://{}:{}|a{fingerprint}", proxy.protocol, proxy.host,
+                proxy.port.map(|port| port.to_string()).unwrap_or_else(|| "?".to_string()))
+        }
     };
     // 两项传输层超时进键：见上面的说明
     format!(
@@ -437,22 +439,20 @@ pub fn client_for(proxy: Option<&ResolvedProxy>) -> Arc<reqwest::Client> {
         }
     }
     // ② 未命中才构造（锁外，可能阻塞）
-    let client = Arc::new(build_client(proxy, &timeouts).unwrap_or_else(|error| {
+    let client = Arc::new(build_client(proxy, &timeouts).unwrap_or_else(|_error| {
         // 这条**保留在运行日志**（不像同类的「账号代理不可用」那样进请求日志）：
         // 它每个出口缓存条目最多触发一次 —— 构造失败的兜底 Client 也会被缓存
         // （见下面 ③），后续请求直接命中缓存、不再走到这里，所以条数**不随
         // 请求量增长**。判据与其它日志一致：看它的条数会不会跟着请求一起涨。
-        logging::log("[Upstream]", &format!("⚠️ {error}，本次回退直连"));
-        // 构造失败的兜底客户端：TLS 后端初始化都失败时没有别的退路，只能返回
-        // 一个「请求时才报错」的客户端（几乎不会失败）。这里显式 `.no_proxy()`：
-        // 本函数是**显式出口**（直连 / 指定代理），兜底也不能变成跟随系统代理
-        // —— `Client::new()` 的 auto_sys_proxy 默认开启（见 Cargo.toml 的
-        // `system-proxy` 说明），直接用它会让「直连」出口在极端路径上悄悄
-        // 走系统代理；二级兜底才是裸 Client::new()（两处 build 都失败）。
+        logging::log("[Upstream]", "账号出口连接无法创建，本次请求未改走直连");
+        let blocked = reqwest::Proxy::custom(|_: &url::Url| Some("http://127.0.0.1:0"));
         reqwest::Client::builder()
+            .use_rustls_tls()
             .no_proxy()
+            .proxy(blocked)
+            .timeout(Duration::from_secs(1))
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
+            .unwrap_or_default()
     }));
     // ③ 回填缓存（锁内只做插入与淘汰）
     let mut guard = lock_clients();

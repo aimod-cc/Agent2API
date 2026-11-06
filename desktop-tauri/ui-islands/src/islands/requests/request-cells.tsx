@@ -5,6 +5,7 @@ import { NameEyeButton } from '../accounts-panels'
 import { maskName } from '../accounts-store'
 import { numberText } from '../accounts-shared'
 import { apiKeyRequestLabel, clientRequestLabel } from './source-filters'
+import { visionDetail } from '../../../../ui-shared/request-vision-detail'
 
 export type RequestEntry = {
   id?: string; ts?: number; status?: number; error?: string | null
@@ -16,6 +17,7 @@ export type RequestEntry = {
   /** 上游按请求上报的积分消耗（后端 `credit`）；null / 缺键 = 这一家没上报，
    *  与 0（确实零消耗）是两件事 —— 前者显示「—」 */
   credit?: number | null
+  route?: unknown
   attempts?: number; attemptDetails?: unknown[]; sensitiveHits?: unknown[]
   /** 模型测试发起的请求（后端 `is_test`；此前落盘的老行没有这个键） */
   isTest?: boolean
@@ -389,7 +391,7 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
       if (isRunning(entry)) return <span key={key} className={className} />
       // 失败请求不记录用量（后端 normalize 已把 credit 清成 None）：这里与
       // 「用量」列用同一句说明，避免把「失败清零」误读成「这一家没上报」。
-      if (!isOk(entry)) {
+      if (!isOk(entry) && visionDetail(entry.route)?.mode !== 'assist_call') {
         return <span key={key} className={`${className} is-empty`} title={t('失败请求不记录用量')}>—</span>
       }
       const value = entry.credit
@@ -410,7 +412,7 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
       // 进行中：用量要等收尾才记账，此刻没有任何读数可给 —— 留空比「-」更准确
       if (isRunning(entry)) return <span key={key} className={className} />
       // 失败请求的 token 由后端一律清零，写「0」会让人以为真的消耗了这些量
-      if (!isOk(entry)) {
+      if (!isOk(entry) && visionDetail(entry.route)?.mode !== 'assist_call') {
         return (
           <span key={key} className={className} title={t('失败请求不记录用量')}>
             <span className='req-usage-line'>in: - / out: - / all: -</span>

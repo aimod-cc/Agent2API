@@ -87,7 +87,7 @@ const ZH: DocTexts = {
   notesTitle: '使用备注',
   notes: [
     '调用需要有效的网关 Key；使用已有账号搜索时，还必须获得该提供商的使用权限。无权使用的账号型来源会被跳过，其他可用来源仍可返回结果。',
-    '在「工具服务 → 网络搜索」中选择来源：标准服务填写 API Key；WorkBuddy 国内版、国际版和 Kiro 绑定「账号」页中对应的已启用账号，新来源默认关闭且不自动选中。',
+    '在「MCP & Skills → 网络搜索」中选择来源：标准服务填写 API Key；WorkBuddy 国内版、国际版和 Kiro 绑定「账号」页中对应的已启用账号，新来源默认关闭且不自动选中。',
     '账号型搜索消耗绑定账号的上游额度，并沿用该账号的出网设置；账号停用或删除后不会自动换号。连接检查也会发起一次真实搜索。',
     'Kiro 每条查询最多 200 个字符，WorkBuddy 最多 4000 个字符；超过某一来源的上限时，该来源返回参数错误，其他来源仍可继续。',
     '批量接口每次接受 1～10 条查询 / URL；同一账号的搜索会排队，排队时间计入执行超时。',
@@ -145,7 +145,7 @@ const EN: DocTexts = {
   notesTitle: 'Notes',
   notes: [
     'A valid gateway Key is required. Account-based search also requires permission to use the provider. Unauthorized account sources are skipped; other available sources can still return results.',
-    'Select sources under Tool services → Web Search: standard services use an API Key, while WorkBuddy China, WorkBuddy International and Kiro bind an enabled account from the Accounts page. New sources are disabled and unselected by default.',
+    'Select sources under MCP & Skills → Web Search: standard services use an API Key, while WorkBuddy China, WorkBuddy International and Kiro bind an enabled account from the Accounts page. New sources are disabled and unselected by default.',
     'Account-based searches consume the bound account’s upstream quota and use its outbound network settings. Disabled or deleted accounts are not replaced automatically. A connection check also makes one real search request.',
     'Each Kiro query is limited to 200 characters; WorkBuddy allows 4000. Exceeding a source’s limit produces an input error for that source while other sources may continue.',
     'Batch endpoints accept 1-10 queries / URLs per call. Searches using the same account are queued, and queueing counts toward the execution timeout.',

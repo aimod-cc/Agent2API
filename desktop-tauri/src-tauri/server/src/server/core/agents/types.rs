@@ -10,6 +10,7 @@ pub struct Model {
     pub max_output_tokens: Option<u64>,
     pub supports_tools: Option<bool>,
     pub supports_images: Option<bool>,
+    pub supports_video: Option<bool>,
     pub supports_reasoning: Option<bool>,
     pub reasoning_levels: Vec<String>,
     pub effort: String,

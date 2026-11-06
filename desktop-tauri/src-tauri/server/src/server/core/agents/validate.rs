@@ -2,6 +2,7 @@ use serde_json::Value;
 use std::collections::HashSet;
 
 use super::{ClientDef, Profile};
+use crate::server::core::key_scope::KeyScope;
 
 pub fn profile(def: &ClientDef, profile: &Profile) -> Result<(), String> {
     if profile.id.is_empty() || profile.id.len() > 200 || profile.id.chars().any(char::is_control) {
@@ -162,47 +163,14 @@ pub fn credential(profile: &Profile) -> Result<Option<String>, String> {
     match profile.auth_mode.as_str() {
         "key" => Ok(Some(profile.api_key.clone())),
         "gateway" => {
-            let snapshot = crate::server::config::current();
-            let active = snapshot.active_api_keys();
-            if active.is_empty() {
-                return Err("网关未配置可用 API Key，请先在「网关 Key」页创建并启用".into());
-            }
-            let entries = crate::server::core::api_keys::entries_from(&snapshot.raw());
-            let key = if profile.gateway_key_id == "env" {
-                crate::server::config::parse::env_api_key_value()
-            } else if profile.gateway_key_id.is_empty() {
-                active.first().cloned()
-            } else {
-                entries
-                    .iter()
-                    .find(|key| {
-                        key.is_usable() && key.id == profile.gateway_key_id && active.contains(&key.key)
-                    })
-                    .map(|key| key.key.clone())
-            };
-            let key = key.ok_or("所选网关 Key 已删除、停用或无法解密")?;
-            if let Some(entry) = entries.iter().find(|entry| entry.key == key) {
-                let mut wanted = if profile.models.is_empty() {
-                    vec![profile.model.as_str()]
-                } else {
-                    profile.models.iter().map(|m| m.id.as_str()).collect()
-                };
-                wanted.extend([
-                    profile.claude_models.opus.as_str(),
-                    profile.claude_models.sonnet.as_str(),
-                    profile.claude_models.haiku.as_str(),
-                    profile.claude_models.subagent.as_str(),
-                ]);
-                if !entry.allowed_models.is_empty()
-                    && wanted.iter().filter(|id| !id.is_empty()).any(|id| {
-                        !entry
-                            .allowed_models
-                            .iter()
-                            .any(|allowed| allowed.eq_ignore_ascii_case(id))
-                    })
-                {
-                    return Err("所选网关 Key 不允许使用方案中的全部模型".into());
-                }
+            let (key, scope) = gateway_credential(&profile.gateway_key_id)?;
+            let wanted = profile.models.iter().map(|model| model.id.as_str()).chain([
+                profile.model.as_str(), profile.claude_models.opus.as_str(),
+                profile.claude_models.sonnet.as_str(), profile.claude_models.haiku.as_str(),
+                profile.claude_models.subagent.as_str(),
+            ]);
+            if scope.as_ref().is_some_and(|scope| wanted.filter(|id| !id.is_empty()).any(|id| !scope.allows_model(id))) {
+                return Err("所选网关 Key 不允许使用方案中的全部模型".into());
             }
             Ok(Some(key))
         }
@@ -217,6 +185,29 @@ pub fn credential(profile: &Profile) -> Result<Option<String>, String> {
         "env" => Ok(None),
         _ => Err("认证方式无效".into()),
     }
+}
+
+pub fn gateway_credential(id: &str) -> Result<(String, Option<KeyScope>), String> {
+    let snapshot = crate::server::config::current();
+    let active = snapshot.active_api_keys();
+    if active.is_empty() {
+        return Err("网关未配置可用 API Key，请先在「网关 Key」页创建并启用".into());
+    }
+    let entries = crate::server::core::api_keys::entries_from(&snapshot.raw());
+    let key = if id == "env" {
+        crate::server::config::parse::env_api_key_value()
+    } else if id.is_empty() {
+        active.first().cloned()
+    } else {
+        entries.iter().find(|entry| entry.is_usable() && entry.id == id && active.contains(&entry.key))
+            .map(|entry| entry.key.clone())
+    }.filter(|key| active.contains(key)).ok_or("所选网关 Key 已删除、停用或无法解密")?;
+    let scope = if crate::server::config::parse::env_api_key_value().as_deref() == Some(key.as_str()) {
+        None
+    } else {
+        entries.iter().find(|entry| entry.is_usable() && entry.key == key).map(KeyScope::from_entry)
+    };
+    Ok((key, scope))
 }
 
 pub fn require_gateway_url(profile: &Profile, port: u16) -> Result<(), String> {

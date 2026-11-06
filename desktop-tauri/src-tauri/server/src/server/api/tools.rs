@@ -341,10 +341,15 @@ pub async fn install_info(State(state): State<ServerState>, headers: HeaderMap, 
         return errors::management_error(400, "未知的工具服务");
     }
     let base = base_url(&headers, &state);
-    let tools: Vec<&str> = if service == tool_services::WEB_SEARCH_SERVICE_ID {
-        vec!["web_search", "web_fetch"]
-    } else {
-        vec!["image_analyze"]
+    let tools: Vec<&str> = match service {
+        tool_services::WEB_SEARCH_SERVICE_ID => vec!["web_search", "web_fetch"],
+        tool_services::IMAGE_GENERATION_SERVICE_ID => {
+            let mut tools = vec!["generate_images"];
+            if tool_services::image_config::editing_available(state.store(), None) { tools.push("edit_images"); }
+            tools.push("get_image_result");
+            tools
+        }
+        _ => vec!["image_analyze"],
     };
     let mut value = json!({
         "base_url": base,
@@ -356,7 +361,11 @@ pub async fn install_info(State(state): State<ServerState>, headers: HeaderMap, 
             "server_name": tool_services::package_name(service),
             "url": format!("{}{}", base.trim_end_matches('/'), tool_services::endpoint(service, "mcp")),
             "tools": tools,
-            "bridge_url": if service == tool_services::VISION_SERVICE_ID { format!("{}/api/tools/mcp-bridge/vision.js", base.trim_end_matches('/')) } else { String::new() },
+            "bridge_url": match service {
+                tool_services::VISION_SERVICE_ID => format!("{}/api/tools/mcp-bridge/vision.js", base.trim_end_matches('/')),
+                tool_services::IMAGE_GENERATION_SERVICE_ID => format!("{}/api/tools/mcp-bridge/image-generation.cjs", base.trim_end_matches('/')),
+                _ => String::new(),
+            },
         },
     });
     if service == tool_services::WEB_SEARCH_SERVICE_ID {
@@ -439,8 +448,8 @@ pub async fn install_mcp(State(state): State<ServerState>, headers: HeaderMap, b
     if mode != "http" && mode != "bridge" {
         return errors::management_error(400, "接入方式必须是 http 或 bridge");
     }
-    if mode == "bridge" && service != tool_services::VISION_SERVICE_ID {
-        return errors::management_error(400, "只有视觉分析支持本地桥接");
+    if mode == "bridge" && !matches!(service, tool_services::VISION_SERVICE_ID | tool_services::IMAGE_GENERATION_SERVICE_ID) {
+        return errors::management_error(400, "该服务不支持本地桥接");
     }
     let key = match plain_key(text_field(object, "api_key_id")) {
         Ok(key) => key,
@@ -450,13 +459,23 @@ pub async fn install_mcp(State(state): State<ServerState>, headers: HeaderMap, b
     if clients.is_empty() {
         return errors::management_error(400, "请至少选择一个客户端");
     }
-    let outcomes = tool_services::install_mcp(
-        service,
-        mode,
-        &base_url(&headers, &state),
-        &key,
-        &clients,
-    );
+    let image_options = if service == tool_services::IMAGE_GENERATION_SERVICE_ID && mode == "bridge" {
+        let reference_directories = match object.get("reference_directories") {
+            None => Vec::new(),
+            Some(Value::Array(values)) if values.iter().all(Value::is_string) => values.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+            _ => return errors::management_error(400, "参考图目录必须是字符串数组"),
+        };
+        Some(tool_services::ImageBridgeOptions { output_directory: text_field(object, "output_directory").into(), reference_directories })
+    } else { None };
+    let base = base_url(&headers, &state);
+    let service = service.to_string();
+    let mode = mode.to_string();
+    let outcomes = match crate::server::core::blocking::run(move || tool_services::install_mcp(
+        &service, &mode, &base, &key, &clients, image_options.as_ref(),
+    )).await {
+        Ok(outcomes) => outcomes,
+        Err(error) => return errors::management_error(500, error.message),
+    };
     ok_json(outcomes_json(outcomes))
 }
 
@@ -494,6 +513,10 @@ pub async fn uninstall_mcp(body: Bytes) -> Response {
         return errors::management_error(400, "请至少选择一个客户端");
     }
     ok_json(outcomes_json(tool_services::uninstall_mcp(service, &clients)))
+}
+
+pub async fn image_bridge_script() -> Response {
+    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], tool_services::IMAGE_BRIDGE_SCRIPT).into_response()
 }
 
 /// GET /api/tools/mcp-bridge/vision.js —— 视觉本地桥接脚本（文本）

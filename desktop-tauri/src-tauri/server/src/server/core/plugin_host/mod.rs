@@ -30,6 +30,7 @@
 //!   - 写端只串行化帧写入，不持进程生命周期锁等待 IO；
 //!   - 已开始的帧独立写完，避免调用方取消破坏共享管道的 JSON 边界。
 
+pub(crate) mod account_egress;
 mod activity;
 mod bootstrap;
 mod callbacks;
@@ -198,6 +199,14 @@ pub fn account_features_of(provider: &str) -> Option<proto::AccountFeatures> {
 /// 某一家申报的签到能力（没申报 = `None`）。
 pub fn checkin_of(provider: &str) -> Option<proto::CheckinInfo> {
     provider_info(provider)?.checkin
+}
+
+/// 领取能力未归入新手福利或套餐时，作为独立的手动活动福利展示。
+pub fn has_campaign_rewards(provider: &str) -> bool {
+    provider_info(provider).is_some_and(|info| {
+        info.capabilities.claims
+            && info.checkin.is_some_and(|checkin| !checkin.onboarding && !checkin.plans)
+    })
 }
 
 /// 全部申报的签到能力（`provider id → 申报`）。

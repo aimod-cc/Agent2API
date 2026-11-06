@@ -254,6 +254,8 @@ export type ImportError = { id?: string; message?: string; customProvider?: bool
 /** 导入结果（壳命令 import_accounts） */
 export type ImportResult = {
   canceled?: boolean
+  importNotice?: string
+  warning?: string
   total?: number
   added?: number
   updated?: number
@@ -425,7 +427,7 @@ export type SettingsBridge = {
 export type SharedWindow = {
   workbuddyDesktop?: SettingsBridge
   wbApp?: {
-    toast?: (message: string, kind?: 'err' | 'ok') => void
+    toast?: (message: string, kind?: 'err' | 'ok' | 'warn') => void
     /** 账号被导入改动后让主界面重绘（账号列表、导航计数） */
     refresh?: () => Promise<void> | void
     /** 当前页标识：脚本加载时若已停在设置页，补一次 load() */
@@ -440,7 +442,7 @@ export type SharedWindow = {
   /** Token 计量单位的展示口径（units.js）：本页只负责拨开关，格式化在那边 */
   wbUnits?: { isChinese?: () => boolean; setChinese?: (on: boolean) => void }
   /** 软件更新面板的岛（update-panel.tsx）：切到设置页时让它自己刷新一次 */
-  wbUpdatePanel?: { load?: () => Promise<void> | void }
+  wbUpdatePanel?: { load?: () => Promise<void> | void; check?: () => Promise<unknown> }
   /** 版本信息面板的岛（system-info-pane.tsx）：同上 */
   wbSystemInfoPane?: { load?: () => Promise<void> | void }
   /** 内联图标集（icons.js）：左栏分类图标由它渲染（返回 SVG 串，注入用） */
@@ -457,7 +459,7 @@ export function errorMessage(error: unknown): string {
 }
 
 /** toast 的统一出口（运行期读 wbApp，不在模块顶层解构） */
-export function toast(message: string, kind?: 'err' | 'ok'): void {
+export function toast(message: string, kind?: 'err' | 'ok' | 'warn'): void {
   shared().wbApp?.toast?.(message, kind)
 }
 

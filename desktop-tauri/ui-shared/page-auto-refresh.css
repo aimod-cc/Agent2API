@@ -1,0 +1,55 @@
+.page-auto-refresh {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.page-auto-refresh-settings,
+.page-auto-refresh-label,
+.page-auto-refresh-interval {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+.page-auto-refresh-label {
+  color: var(--ui-foreground);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.page-auto-refresh-interval {
+  margin-left: 3px;
+  color: var(--ui-muted-foreground);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.page-auto-refresh-interval[data-disabled] { opacity: .55; }
+
+.page-auto-refresh input.page-auto-refresh-input {
+  width: 58px;
+  max-width: 58px;
+  min-width: 0;
+  height: 30px;
+  padding: 0 5px;
+  text-align: center;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.page-auto-refresh-button { flex: none; }
+.page-auto-refresh-error { color: var(--ui-destructive); font-size: 11px; }
+.page-auto-refresh-settings[aria-busy='true'] { cursor: progress; }
+
+.page-auto-refresh[data-touch] { width: 100%; gap: 8px 12px; }
+.page-auto-refresh[data-touch] input.page-auto-refresh-input { height: 36px; font-size: 16px; }
+
+@media (max-width: 767px) {
+  .page-auto-refresh input.page-auto-refresh-input { height: 36px; font-size: 16px; }
+}

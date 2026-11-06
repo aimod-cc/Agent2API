@@ -1740,6 +1740,7 @@ pub fn shim_js() -> &'static str {
     // 存在 —— 只加一边时另一形态下的页面会报「桥接方法缺失」。契约见
     // api::agents 的模块头：写操作都返回整份 {clients}，就地替换）
     getAgents: function () { return call('GET', '/api/agents'); },
+    getAgentModels: function (gatewayKeyId) { return call('GET', '/api/agents/models' + (gatewayKeyId == null ? '' : '?gatewayKeyId=' + encodeURIComponent(gatewayKeyId))); },
     saveAgentProfiles: function (payload) { return call('POST', '/api/agents/profiles', payload || {}); },
     applyAgentProfile: function (payload) { return call('POST', '/api/agents/apply', payload || {}); },
     previewAgentProfile: function (payload) { return call('POST', '/api/agents/preview', payload || {}); },
@@ -1773,6 +1774,21 @@ pub fn shim_js() -> &'static str {
     getBalancesSnapshot: function () { return call('GET', '/api/accounts/usage/snapshot'); },
     getAccountConnections: function () { return call('GET', '/api/accounts/connections'); },
     checkinAllAccounts: function (id) { return call('POST', '/api/accounts/checkin', id ? { id: id } : {}); },
+    getCampaignRewards: function (id) {
+      return call('GET', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/campaigns');
+    },
+    claimCampaignReward: function (id, campaignId) {
+      return call('POST', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/campaigns/claim', { campaignId: campaignId });
+    },
+    redeemCampaignBenefit: function (id, code) {
+      return call('POST', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/campaigns/redeem', { code: code });
+    },
+    getOfficeaceSubscription: function (id) {
+      return call('GET', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/officeace-subscription');
+    },
+    activateOfficeaceSubscription: function (id) {
+      return call('POST', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/officeace-subscription/activate', {});
+    },
     // ── Loomy 新手任务（查询 / 一键领取）──
     // 与桌面 `bridge.rs` 的同名方法成对维护：签到后界面查询任务状态、有未领取才
     // 弹窗领取（accounts-dialog-onboarding）。
@@ -1916,6 +1932,10 @@ pub fn shim_js() -> &'static str {
     },
 
     // ── 间隔型定时任务 ──
+    getMaintenance: function (query) { return call('GET', '/api/maintenance?' + new URLSearchParams(query || {}).toString()); },
+    getMaintenanceRecord: function (id) { return call('GET', '/api/maintenance/records/' + encodeURIComponent(id)); },
+    runMaintenance: function (id) { return call('POST', '/api/maintenance/run/' + encodeURIComponent(id), {}); },
+    retryMaintenance: function (id, itemId) { return call('POST', '/api/maintenance/records/' + encodeURIComponent(id) + '/retry', itemId == null ? {} : { itemId: itemId }); },
     getScheduledTasks: function () { return call('GET', '/api/scheduled-tasks'); },
     saveScheduledTask: function (id, patch) {
       return call('PATCH', '/api/scheduled-tasks/' + encodeURIComponent(String(id || '')), patch);

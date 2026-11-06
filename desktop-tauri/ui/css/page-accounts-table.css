@@ -1084,9 +1084,8 @@ body.queue-dragging * { cursor: grabbing; }
   line-height: 1.5;
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 /* ─── 操作列 ─── */

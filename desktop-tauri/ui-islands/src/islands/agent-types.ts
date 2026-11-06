@@ -7,6 +7,7 @@ export type AgentModel = {
   maxOutputTokens?: number | null
   supportsTools?: boolean | null
   supportsImages?: boolean | null
+  supportsVideo?: boolean | null
   supportsReasoning?: boolean | null
   reasoningLevels: string[]
   effort: string

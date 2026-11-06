@@ -12,6 +12,7 @@
  */
 
 import { isSuspendedProvider } from '../../../ui-shared/provider-availability'
+import { accountImportNotice } from '../../../ui-shared/account-import-result'
 import { t } from '../i18n'
 
 /* ─── window 上的共享桥（窄类型 + 转型读取）────────────── */
@@ -420,10 +421,12 @@ export function closeAddModals(): void {
 }
 
 /** 添加成功后统一收尾：关窗、刷新列表、提示 */
-export async function afterAdd(name: string, label: string): Promise<void> {
+export async function afterAdd(name: string, label: string, result?: unknown): Promise<void> {
   closeAddModals()
   await shared().wbApp?.refresh?.()
-  toast(t('✅ {label}账号已添加{name}', { label, name: name ? `：${name}` : '' }))
+  const added = t('✅ {label}账号已添加{name}', { label, name: name ? `：${name}` : '' })
+  const notice = accountImportNotice(result)
+  toast(notice ? `${added}\n${t(notice.text)}` : added, notice?.warning ? 'warn' : 'ok')
 }
 
 /* ─── 表单草稿（非受控输入的「关掉再打开还在」）──────────────

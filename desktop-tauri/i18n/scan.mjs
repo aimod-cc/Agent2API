@@ -69,6 +69,7 @@ const DOMAIN_ORDER = [
  */
 const DOMAIN_RULES = [
   { domain: 'common', files: ['index.html', 'm.html', 'desktop-shell.tsx', 'desktop-titlebar.tsx', 'desktop-tooltip.tsx', 'island-registry.ts', 'clipboard.js', 'filter-memory.js', 'app.js', 'confirm-dialog.tsx', 'input.tsx', 'input-control.tsx', 'segmented.tsx', 'index.tsx', 'markdown.js', 'icons.js', 'App.tsx', 'main.tsx', 'Shell.tsx', 'NavBar.tsx', 'Icon.tsx', 'ProviderLogo.tsx', 'ui.tsx', 'PullToRefresh.tsx', 'AppUpdatePanel.tsx', 'CommunitySheet.tsx', 'i18n.ts', 'client.ts', 'gateway.ts', 'format.ts', 'providers.ts', 'providerFacts.ts', 'usePolling.ts', 'pwa.ts', 'usePwa.ts', 'appUpdate.ts', 'community.ts', 'servers.ts', 'auth.ts', 'store.ts', 'routes.ts'] },
+  { domain: 'common', files: ['PageAutoRefresh.tsx'], prefixes: ['page-auto-refresh'] },
   { domain: 'login', files: ['login.html', 'login-page.tsx', 'panel-captcha.js'] },
   { domain: 'account-settings', files: ['accounts-settings-dialog.tsx', 'accounts-settings-fields.tsx'] },
   { domain: 'accounts', files: ['accounts-page.tsx', 'accounts-hidden-notice.tsx', 'HiddenAccountsNotice.tsx', 'accounts-refresh.ts', 'accounts-update.ts', 'AccountsPage.tsx', 'AccountSheet.tsx', 'AccountsFilterSheet.tsx', 'accounts-shared.ts', 'accounts-columns.ts', 'accounts-store.ts', 'accounts-panels.tsx', 'accounts-queue-drag.ts', 'accounts-dialogs.tsx', 'accounts-batch-dialog.tsx', 'accounts-zcode-plan.tsx', 'accounts-proxy-form.tsx', 'accounts-dialog-limiter.tsx', 'accounts-dialog-usage.tsx', 'accounts-credit-detail.tsx', 'credit-expiry.ts', 'credential-expiry.ts', 'usage-readings.ts', 'usage-query-state.ts', 'accounts-usage.ts', 'accounts-usage-cache.ts', 'accounts-limit-detail.tsx', 'accounts-data.ts', 'accounts-domain.ts', 'accounts-group-settings.tsx', 'usage.ts', 'zcode-plans-modal.tsx', 'balance-query.tsx'], prefixes: ['accounts-limiter-', 'accounts-usage-', 'accounts-export', 'accounts-authorization'] },
@@ -78,11 +79,11 @@ const DOMAIN_RULES = [
   // 「Agent」页：本机 AI 客户端的配置接管（客户端清单 / 配置编辑 / 写入预览）
   { domain: 'agent', files: ['AgentPage.tsx'], prefixes: ['agent-'] },
   // 「工具服务」页：网络搜索 / 视觉分析（服务列表 / 详情 / 上游配置 / 本机接入）
-  { domain: 'tools', files: ['ToolsPage.tsx'], prefixes: ['tools-'] },
+  { domain: 'tools', files: ['ToolsPage.tsx', 'ToolsImageGeneration.tsx'], prefixes: ['tools-'] },
   // 「设置 → 版本信息」面板（桌面端 system-info-pane.tsx 与手机端
   // SystemInfoSheet.tsx 共用同一批文案：版本 / 环境 / 路径 / 开关）。
   // 归 settings 域 —— 它读的就是设置页的分类之一，文案与设置页其它面板同类。
-  { domain: 'settings', files: ['units.js', 'SettingsPage.tsx', 'MorePage.tsx', 'PwaNotice.tsx', 'ServersPage.tsx', 'LoginPage.tsx', 'system-info-pane.tsx', 'SystemInfoSheet.tsx', 'sidebar-layout.js'], prefixes: ['settings-', 'sidebar-', 'client-identification'] },
+  { domain: 'settings', files: ['units.js', 'SettingsPage.tsx', 'MorePage.tsx', 'PwaNotice.tsx', 'ServersPage.tsx', 'LoginPage.tsx', 'system-info-pane.tsx', 'SystemInfoSheet.tsx', 'sidebar-layout.js', 'vision-compat.ts'], prefixes: ['settings-', 'sidebar-', 'client-identification'] },
   // AI 助手（侧边栏「智能」组的一级页 + 设置页「AI 助手」分类）：
   // 对话页、工具集、设置面板三块
   { domain: 'assistant', files: ['AssistantPage.tsx', 'AssistantHistory.tsx', 'AssistantModelPicker.tsx', 'assistant.ts', 'assistantTools.ts', 'MarkdownLite.tsx'], prefixes: ['assistant-'] },
@@ -90,11 +91,11 @@ const DOMAIN_RULES = [
   { domain: 'keys', files: ['keys-page.tsx', 'KeysPage.tsx', 'model-api-key.ts', 'model-api-key-field.tsx', 'model-api-key-memory.ts', 'use-model-api-keys.ts'] },
   { domain: 'proxies', files: ['ProxiesPage.tsx', 'proxies-page.tsx', 'proxies-columns.ts', 'proxies-state.ts', 'proxies-dialogs.tsx', 'proxy-editor-sheet.tsx', 'proxy-retirement-dialog.tsx', 'sponsor.ts'] },
   { domain: 'docs', files: ['docs-page.tsx', 'DocsPage.tsx', 'DocsProviderData.ts', 'provider-docs-view.tsx'], prefixes: ['docs-provider-', 'docs-api-'] },
-  { domain: 'report', files: ['report-page.tsx', 'report-charts.ts', 'ReportPage.tsx', 'HomePage.tsx', 'chart-data.ts', 'chart-labels.tsx', 'chart-tooltips.tsx', 'report-recharts.tsx', 'source-stats.tsx', 'api-key-detail.tsx', 'daily-trend-panel.tsx', 'SourceUsageSection.tsx', 'MobileReportTrend.tsx'] },
+  { domain: 'report', files: ['report-page.tsx', 'report-charts.ts', 'ReportPage.tsx', 'HomePage.tsx', 'chart-data.ts', 'chart-labels.tsx', 'chart-tooltips.tsx', 'report-recharts.tsx', 'source-stats.tsx', 'api-key-detail.tsx', 'daily-trend-panel.tsx', 'usage-donuts.tsx', 'activity-panel.tsx', 'cache-panels.tsx', 'overview-panel.tsx', 'rank-panel.tsx', 'usage-data.ts', 'compact-value.tsx', 'SourceUsageSection.tsx', 'MobileReportTrend.tsx'] },
   { domain: 'checkin', files: ['checkin.ts', 'zcode.ts', 'zcode-plans.ts', 'zcode-claim-verification.js', 'CheckinPage.tsx', 'ZcodeCaptchaPanel.tsx'], prefixes: ['checkin-', 'Checkin'] },
-  { domain: 'tasks', files: ['tasks-panel.tsx', 'TasksPage.tsx'] },
+  { domain: 'tasks', files: ['tasks-panel.tsx', 'TasksPage.tsx', 'maintenance.ts'], prefixes: ['maintenance-'] },
   { domain: 'logs', files: ['logs.ts', 'LogsPage.tsx'], prefixes: ['logs-'] },
-  { domain: 'requests', files: ['RequestsPage.tsx', 'requests-page.tsx', 'request-detail.tsx', 'request-raw-panes.tsx', 'request-hover.tsx', 'request-clear-modal.tsx', 'conversation-preview.js', 'source-filters.tsx', 'request-cells.tsx', 'request-phase.ts'] },
+  { domain: 'requests', files: ['RequestsPage.tsx', 'requests-page.tsx', 'request-detail.tsx', 'request-raw-panes.tsx', 'request-hover.tsx', 'request-clear-modal.tsx', 'conversation-preview.js', 'source-filters.tsx', 'request-cells.tsx', 'request-phase.ts', 'request-vision-detail.tsx'] },
   { domain: 'tables', files: ['table-columns.js', 'table-col-settings.tsx', 'table-shell.tsx'] },
   { domain: 'port', files: ['port-panel.tsx'] },
   // 提供商插件页（一级菜单）：整页文案都在这一个文件里，量不大（三十来条），
@@ -137,7 +138,7 @@ function islandSources() {
   walk(ISLANDS_SRC)
   if (fs.existsSync(SHARED_SRC)) {
     for (const entry of fs.readdirSync(SHARED_SRC, { withFileTypes: true })) {
-      if (entry.isFile() && (entry.name === 'logs.ts' || entry.name === 'credit-expiry.ts' || entry.name === 'credential-expiry.ts' || entry.name === 'usage-readings.ts' || entry.name === 'usage-query-state.ts' || entry.name === 'zcode-plans.ts' || entry.name === 'use-model-api-keys.ts' || entry.name === 'updates.ts' || entry.name === 'proxy-retirement-dialog.tsx' || /^(assistant-|agent-|docs-api-|model-api-key|client-identification).*\.tsx?$/.test(entry.name))) {
+      if (entry.isFile() && (entry.name === 'logs.ts' || entry.name === 'credit-expiry.ts' || entry.name === 'credential-expiry.ts' || entry.name === 'usage-readings.ts' || entry.name === 'usage-query-state.ts' || entry.name === 'zcode-plans.ts' || entry.name === 'use-model-api-keys.ts' || entry.name === 'updates.ts' || entry.name === 'proxy-retirement-dialog.tsx' || /^(assistant-|agent-|tools-|docs-api-|model-api-key|client-identification|settings-vision-|request-vision-|checkin-|page-auto-refresh|maintenance-).*\.tsx?$/.test(entry.name))) {
         out.push(path.join(SHARED_SRC, entry.name))
       }
     }

@@ -36,8 +36,8 @@
  * 假读数（后端 module 头那条纪律，前端这边是它的最后一站）。
  *
  * ── 时间显示分两级 ──────────────────────────────────────────
- * 行上一律 `MM-DD HH:mm`（弹层要一眼扫完，年份是噪音），完整时刻（含年）只在悬停
- * 的 title 里 —— 与 `pendingPlansTitle` 同一处置。已过期的包不给"到期倒计时"，
+ * 行上统一 `YYYY-MM-DD HH:mm`，保留年份以区分跨年度积分包；精确到秒的完整时刻
+ * 放在悬停的 title 里。已过期的包不给"到期倒计时"，
  * 直接标「已过期」并压成灰字：一个负数天数和一句「已过期」是同一件事，后者好读。
  *
  * ── 花不出去的收在末尾，且默认折叠 ──────────────────────────
@@ -106,12 +106,11 @@ function numberOrNull(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null
 }
 
-/** 毫秒时间戳 → `MM-DD HH:mm`（年份在悬停的完整时刻里；取不出来给空串） */
-function shortTime(value: number): string {
+function detailTime(value: number): string {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return ''
   const pad = (part: number): string => String(part).padStart(2, '0')
-  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
 /**
@@ -168,9 +167,9 @@ export function creditRowsOf(entry: UsageEntry, now = Date.now()): CreditRow[] {
       const value = amount === null ? '—' : `${amount > 0 ? '+' : ''}${numberText(amount)}`
       const view = unit && value !== '—' ? `${value} ${unitLabel(unit)}` : value
       const parts: string[] = []
-      if (at !== null && at > 0) parts.push(shortTime(at))
+      if (at !== null && at > 0) parts.push(detailTime(at))
       if (expireAt !== null && expireAt > 0) {
-        parts.push(expireAt <= now ? t('已过期') : t('{time} 到期', { time: shortTime(expireAt) }))
+        parts.push(expireAt <= now ? t('已过期') : t('{time} 到期', { time: detailTime(expireAt) }))
       }
       const remark = String(pack?.remark || '').trim()
       return {
@@ -248,18 +247,18 @@ export function creditRowsOf(entry: UsageEntry, now = Date.now()): CreditRow[] {
     // 缺了发放时刻就标成「领取」等于替上游编一个到手时间。
     const parts: string[] = []
     if (grantAt !== null && grantAt > 0) {
-      parts.push(t('{time} 领取', { time: shortTime(grantAt) }))
+      parts.push(t('{time} 领取', { time: detailTime(grantAt) }))
     } else if (startAt !== null && startAt > 0) {
-      parts.push(t('{time} 生效', { time: shortTime(startAt) }))
+      parts.push(t('{time} 生效', { time: detailTime(startAt) }))
     }
     if (daily) {
       // 日额度包的「到期」是今天 24 点（周期边界），不是这笔钱作废 ——
       // 照「到期」写会让人以为额度明天就没了（实际是重置回满）
       parts.push(t('每日重置'))
     } else if (rolling && resetAt !== null && resetAt > 0) {
-      parts.push(t('重置 {date}', { date: shortTime(resetAt) }))
+      parts.push(t('重置 {date}', { date: detailTime(resetAt) }))
     } else if (expireAt !== null && expireAt > 0) {
-      parts.push(expired ? t('已过期') : t('{time} 到期', { time: shortTime(expireAt) }))
+      parts.push(expired ? t('已过期') : t('{time} 到期', { time: detailTime(expireAt) }))
     }
     if (reason) parts.push(reason)
 

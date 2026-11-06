@@ -78,6 +78,12 @@ pub fn remove_models(def: &ClientDef, plan: &mut Plan, old: &Profile, wanted: &H
                     }
                 }
                 for key in ["providerModelRules", "manualProviderModelRules"] { retain_rules(&mut value, &["config", "modelConfigRules", key], id, Some(&removed)); }
+                if value.pointer("/config/defaultModelSelection/providerId").and_then(Value::as_str) == Some(id)
+                    && value.pointer("/config/defaultModelSelection/modelId").and_then(Value::as_str).is_some_and(|model| removed.contains(model))
+                {
+                    remove(&mut value, &["config", "defaultModelSelection"]);
+                    plan.warnings.push("移除的模型是 ZCode 的默认模型，已清除失效选择；请在客户端重新选择默认模型。".into());
+                }
             }
             "kimi-code" => {
                 let keys = value.get("models").and_then(Value::as_object).map(|models| models.iter()

@@ -26,7 +26,7 @@ export type ProxyConfig = {
   /** 旧版平铺形状里的 source；新版在 config.source 下，两处都读 */
   source?: string
   label?: string
-  /** 解析失败的原因：转发时回退直连，界面上整格标红 */
+  /** 解析失败的原因，界面上整格标红 */
   error?: string
   /**
    * 轮询档（`source === 'rotate'`，只对 OpenCode Zen 开放）的展示读数：

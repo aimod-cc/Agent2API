@@ -166,6 +166,7 @@ export const PROVIDER_ICONS: Record<string, string> = {
   // AStudio（科大讯飞 Astron Studio）：取自客户端图标资源（紫底白 N + 星芒，
   // 与系统里显示的应用图标同一形象；原始 32×32 归一成 256×256 入库）
   astudio: 'assets/providers/astudio.png',
+  quwork: 'assets/providers/quwork.png',
   devin: 'assets/providers/devin.svg',
   factory: 'assets/providers/factory.svg',
   zed: 'assets/providers/zed.svg',

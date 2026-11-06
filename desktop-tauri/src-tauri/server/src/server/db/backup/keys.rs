@@ -8,10 +8,11 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::server::core::crypto::{self, SecretScope};
 
-const SCOPES: [SecretScope; 3] = [
+const SCOPES: [SecretScope; 4] = [
     SecretScope::Accounts,
     SecretScope::UpdateToken,
     SecretScope::CloudSync,
+    SecretScope::CodingSessions,
 ];
 
 #[derive(Serialize, Deserialize)]
@@ -202,6 +203,9 @@ impl SecretTransform<'_> {
                     }
                 }
             }
+            "assistantCoding" => {
+                self.field(value, "accessToken", SecretScope::CodingSessions, "编程会话连接密钥", false)?;
+            }
             "cloudSync" => {
                 if !value.is_object() {
                     return Err("云同步设置格式异常".into());
@@ -289,6 +293,7 @@ fn transform(conn: &Connection, source: &BackupKeys, rewrite: bool) -> Result<us
         "apiKeys",
         "githubToken",
         "agentProfiles",
+        "assistantCoding",
         "cloudSync",
     ] {
         let text: Option<String> = conn

@@ -1,4 +1,7 @@
 {
+  "{error}（不会自动改为直连）": "{error} (sem mudar automaticamente para conexão direta)",
+  "代理不可用：{error}（不会自动改为直连）；选「自定义代理…」去修改": "Proxy indisponível: {error} (sem conexão direta automática); selecione \"Proxy personalizado…\" para corrigir",
+  "当前代理不可用：{error}（不会自动改为直连）": "Proxy atual indisponível: {error} (sem mudar automaticamente para conexão direta)",
   " · 今日 {used} / {quota}": " · Hoje {used} / {quota}",
   " · 当前 {n}": " · Atual {n}",
   " · 本周期 {used} / {quota}": " · Este período {used} / {quota}",

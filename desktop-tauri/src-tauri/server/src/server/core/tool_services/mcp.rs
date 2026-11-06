@@ -28,6 +28,7 @@ pub const INVALID_PARAMS: i64 = -32602;
 pub enum McpServerKind {
     WebSearch,
     Vision,
+    ImageGeneration,
 }
 
 pub struct McpRequestContext {
@@ -35,6 +36,9 @@ pub struct McpRequestContext {
     pub base_url: String,
     pub store: crate::server::core::account_store::AccountStore,
     pub scope: Option<crate::server::core::key_scope::KeyScope>,
+    pub state: crate::server::ServerState,
+    pub source: crate::server::request_stats::RequestSource,
+    pub owner: String,
 }
 
 pub struct McpSpec {
@@ -133,6 +137,7 @@ pub fn spec(kind: McpServerKind) -> McpSpec {
     match kind {
         McpServerKind::WebSearch => web_search_spec(),
         McpServerKind::Vision => vision_spec(),
+        McpServerKind::ImageGeneration => super::image_mcp::spec(false),
     }
 }
 
@@ -176,6 +181,7 @@ async fn call_tool(
     ctx: &McpRequestContext,
 ) -> Result<Value, ToolCallError> {
     match kind {
+        McpServerKind::ImageGeneration => Ok(super::image_mcp::call(name, args, ctx).await),
         McpServerKind::WebSearch => {
             let operation = if name == "web_search" {
                 "search"
@@ -253,11 +259,21 @@ async fn dispatch_one(
     if method.starts_with("notifications/") {
         return None;
     }
+    if kind == McpServerKind::ImageGeneration && message.get("id").is_some()
+        && !matches!(message.get("id"), Some(Value::String(_) | Value::Number(_))) {
+        return Some(rpc_error(Value::Null, INVALID_REQUEST, "A string or number request ID is required"));
+    }
     let id = message.get("id").cloned().unwrap_or(Value::Null);
     if id.is_null() {
         return None;
     }
-    let spec = spec(kind);
+    let spec = if kind == McpServerKind::ImageGeneration {
+        let store = ctx.store.clone();
+        let scope = ctx.scope.clone();
+        let editing = crate::server::core::blocking::run(move || super::image_config::editing_available(&store, scope.as_ref()))
+            .await.unwrap_or(false);
+        super::image_mcp::spec(editing)
+    } else { spec(kind) };
     let params = message.get("params").cloned().unwrap_or(Value::Null);
 
     match method {
@@ -272,8 +288,8 @@ async fn dispatch_one(
         }
         "server/discover" => Some(rpc_result(id, json!({
             "resultType": "complete",
-            "ttlMs": MCP_LIST_TTL_MS,
-            "cacheScope": "public",
+            "ttlMs": if kind == McpServerKind::ImageGeneration { 0 } else { MCP_LIST_TTL_MS },
+            "cacheScope": if kind == McpServerKind::ImageGeneration { "private" } else { "public" },
             "supportedVersions": [MCP_MODERN_VERSION, MCP_LEGACY_VERSIONS[0], MCP_LEGACY_VERSIONS[1], MCP_LEGACY_VERSIONS[2], MCP_LEGACY_VERSIONS[3]],
             "capabilities": { "tools": {} },
             "_meta": { "io.modelcontextprotocol/serverInfo": spec.server_info },
@@ -282,13 +298,14 @@ async fn dispatch_one(
         "ping" => Some(rpc_result(id, json!({}))),
         "tools/list" => Some(rpc_result(id, json!({
             "resultType": "complete",
-            "ttlMs": MCP_LIST_TTL_MS,
-            "cacheScope": "public",
+            "ttlMs": if kind == McpServerKind::ImageGeneration { 0 } else { MCP_LIST_TTL_MS },
+            "cacheScope": if kind == McpServerKind::ImageGeneration { "private" } else { "public" },
             "tools": spec.tools,
         }))),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-            if !spec.tools.iter().any(|tool| tool.get("name").and_then(Value::as_str) == Some(name)) {
+            if !spec.tools.iter().any(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+                && !(kind == McpServerKind::ImageGeneration && name == "edit_images") {
                 return Some(rpc_error(id, INVALID_PARAMS, format!("Unknown tool: {name}")));
             }
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));

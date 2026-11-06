@@ -9,9 +9,10 @@ import { apiCall } from '../api/client'
 import { store } from '../state/store'
 import { usePolling } from '../lib/usePolling'
 import { t } from '../i18n'
+import { ImageGenerationSection } from './ToolsImageGeneration'
 
 /**
- * 工具服务（手机端）。
+ * MCP & Skills（手机端）。
  *
  * ── 手机能做什么、不能做什么 ────────────────────────────────
  * 服务开关、上游提供商密钥、提供商选择与视觉模型配置全部是**网关侧**的数据，
@@ -22,7 +23,7 @@ import { t } from '../i18n'
 
 type ToolProtocol = 'skill' | 'mcp' | 'api'
 type ToolService = {
-  id: 'web-search' | 'vision'; protocol: ToolProtocol; key: string; enabled: boolean
+  id: 'web-search' | 'vision' | 'image-generation'; protocol: ToolProtocol; key: string; enabled: boolean
   capability_count: number; endpoint: string; version: string; timeout_seconds: number
 }
 type ProviderRow = {
@@ -41,7 +42,7 @@ type VisionKey = { id: string; name: string; key_prefix: string }
 type ManageModel = { id: string; provider: string; enabled: boolean; kind?: string }
 type ManageProvider = { provider: string; providerLabel?: string; count?: number }
 
-const SERVICE_NAME: Record<string, string> = { 'web-search': t('网络搜索'), vision: t('视觉分析') }
+const SERVICE_NAME: Record<string, string> = { 'web-search': t('网络搜索'), vision: t('视觉分析'), 'image-generation': t('图片生成') }
 const PROTOCOL_LABEL: Record<ToolProtocol, string> = { skill: 'Skill', mcp: 'MCP', api: 'API' }
 const REASONING = ['off', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
@@ -147,7 +148,7 @@ export function ToolsPage() {
 
   return <div className='m-page' ref={pull.bindRef}>
     <PullIndicator pull={pull.pull} refreshing={pull.refreshing} />
-    <PageIntro subtitle={t('网络搜索与视觉分析：网关侧配置，改完立即生效。本机客户端的安装在桌面端完成。')}
+    <PageIntro subtitle={t('搜索、视觉与生图共用网关配置。本机客户端的 MCP 安装在桌面端完成。')}
       actions={<IconButton name='refresh' label={t('刷新')} onClick={() => void load()} />} />
     {error ? <ErrorNote text={error} /> : null}
     {loading && !services.length ? <SkeletonList rows={4} height={90} /> : null}
@@ -156,7 +157,7 @@ export function ToolsPage() {
       <div className='m-section'>
         <Card className='m-card m-card-pad'>
           <div style={{ fontSize: 12.5, lineHeight: 1.6, color: 'var(--m-text-2)' }}>
-            {t('这里管理的是「客户端能用什么」：服务是否对外提供、上游提供商与密钥、视觉分析用哪个模型。')}
+            {t('将搜索、视觉等能力通过 MCP 或 Skills 接入客户端。')}
           </div>
         </Card>
       </div>
@@ -221,6 +222,8 @@ export function ToolsPage() {
           </div>
         </Card>)}
       </div>
+
+      <ImageGenerationSection onChanged={() => { void load() }} />
 
       <div className='m-section'>
         <div className='m-section-head'>

@@ -1619,8 +1619,8 @@ export function ProxyCell({ account }: { account: AccountRecord }) {
     // 地址是后端解析出来的实时值（见 poolItemLabel）。同一格里多条目同名时
     // 地址是唯一能分辨它们的读数，不能只写名字。
     //
-    // 禁用项**置灰不可选**：选它只会「保存成功 → 解析失败 → 回退直连」，
-    // 用户看到的是「代理已禁用」这种事后解释。要改就去「网络代理」页启用它。
+    // 禁用项置灰不可选，避免保存后才因代理解析失败中断请求。
+    // 要启用请去「网络代理」页。
     // （当前值恰好是禁用项时照常显示 —— 触发器读的是这一项的 label，含「已禁用」）
     items.push({
       value: `${POOL_VALUE_PREFIX}${item.id}`,
@@ -1654,7 +1654,7 @@ export function ProxyCell({ account }: { account: AccountRecord }) {
   items.push({ value: PROXY_CUSTOM_EDIT, label: t('自定义代理…') })
 
   const title = broken
-    ? t('代理不可用：{error}（转发时会回退直连）；选「自定义代理…」去修改', { error: broken })
+    ? t('代理不可用：{error}（不会自动改为直连）；选「自定义代理…」去修改', { error: broken })
     : source === 'rotate'
       ? t('当前：{label}（每条请求换一个出口）；「自定义代理…」打开完整设置', { label })
       : source === 'clash'
@@ -1667,7 +1667,7 @@ export function ProxyCell({ account }: { account: AccountRecord }) {
   const selected = items.find(item => item.value === current)
 
   return (
-    <Select value={current} onValueChange={value => void applyProxyPick(account.id, String(value), current)}>
+    <Select value={current} onValueChange={value => void applyProxyPick(account.id, value, current)}>
       {/* 代理解析失败时整格标红：旧实现靠 `.cell-proxy.err .select-trigger` 那条 CSS，
           换成组件库的 Select 之后触发器没有 .select-trigger 这个类名（它走 data-slot），
           所以把描边色直接写在工具类上（见最终报告里变死的 CSS） */}

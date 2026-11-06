@@ -10,15 +10,13 @@
 //!     （最后一种是 Cline 免费池的写法，见 `consume_line` 的说明）
 //!   - `delta.tool_calls` 按 `index` 合并（id/type 覆盖、function.name 与
 //!     function.arguments 追加）
-//!   - `usage` 取最后一次出现（上游在末尾 chunk 下发）
+//!   - `usage` 按字段保留最近一次上报，末帧缺项不清空先到的输入与缓存
 //!   - `finish_reason` 取最后一次非空
 //!   - 帧里的 `error` 字段 → 抛 502（上游把错误写在流里）
 //!   - id/created 缺失时给 `wb-agg-<毫秒>` / 当前秒兜底
 //!
 //! ── usage 旁路提取（请求统计）────────────────────────────────
-//! `consume_chunk` 里顺手把 `usage` 抄进 `usage::RequestTelemetry`。
-//! **不影响响应体**：决定下发 `usage` 字段的是 `self.usage`（本文件的
-//! 既有逻辑），旁路只写另一个结构体，两者互不干扰。
+//! 聚合后的规范 usage 同时用于客户端响应与请求统计，缓存字段识别口径共用。
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -244,14 +242,12 @@ impl CompletionAccumulator {
         let Some(object) = chunk.as_object() else {
             return Ok(());
         };
-        // ── usage 旁路提取（请求统计）──────────────────────────────
-        // 放在错误判定**之前**：上游把错误写在流里时也可能带上已消耗的
-        // usage（提示词已计费），旁路先抄一份不影响下面照常抛 502。
-        // 为什么这里的失败同样是「无副作用」的：只读 `chunk` 的一个成员，
-        // 不碰 `self.usage`（那才是决定响应体 usage 字段的那份），
-        // 所以返回值与不接钩子时完全一致。
-        if let Some(usage) = object.get("usage") {
-            telemetry.report_usage(usage);
+        // 错误帧也可能带已消耗的用量，必须先合并记账，再传播错误。
+        if let Some(usage) = object.get("usage").filter(|usage| usage.is_object()) {
+            crate::server::core::protocol::usage::merge_chat(&mut self.usage, usage);
+            if let Some(merged) = &self.usage {
+                telemetry.report_usage(merged);
+            }
         }
         if let Some(error) = object.get("error") {
             let message = error
@@ -276,12 +272,6 @@ impl CompletionAccumulator {
                 self.created = created.as_i64().or_else(|| created.as_f64().map(|value| value as i64)).unwrap_or(0);
             }
         }
-        if let Some(usage) = object.get("usage") {
-            if usage.is_object() {
-                self.usage = Some(usage.clone());
-            }
-        }
-
         let Some(choice) = object
             .get("choices")
             .and_then(Value::as_array)

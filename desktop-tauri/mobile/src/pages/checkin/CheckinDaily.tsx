@@ -141,7 +141,7 @@ export function CheckinDaily({ center, busy, action, onRecords, onChange }: {
 
       <CheckinBenefits center={center} section={section} busy={busy} action={action} onChange={onChange} />
       {plan ? <CheckinPlansSheet key={plan.id} entry={plan} onClose={() => setPlanId('')} onChange={onChange} /> : null}
-      {section === 'daily' && !groups.length && !center.extras?.onboarding?.length && !center.extras?.plans?.length && !center.extras?.growth?.length
+      {section === 'daily' && !groups.length && !center.extras?.onboarding?.length && !center.extras?.plans?.length && !center.extras?.growth?.length && !center.extras?.campaigns?.length
         ? <Empty text={t('安装插件并添加账号后，支持的签到与福利会自动显示')} /> : null}
     </>
   )

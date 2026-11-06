@@ -552,7 +552,7 @@ impl TurnAccumulator {
         };
         // usage 抄一份（旁路读取，不参与帧的构造）；用量采集的权威点仍在 `sse.rs`
         if let Some(usage_object) = value.get("usage").filter(|usage| usage.is_object()) {
-            self.usage = Some(usage_object.clone());
+            crate::server::core::protocol::usage::merge_chat(&mut self.usage, usage_object);
         }
         if value.get("error").is_some() {
             self.saw_error = true;
@@ -721,6 +721,7 @@ impl Continuation {
         let mut texts: Vec<String> = Vec::new();
         let mut reasonings: Vec<String> = Vec::new();
         let mut tokens: Vec<usage::UsageTokens> = Vec::new();
+        let mut cache_creation: Option<i64> = None;
         // 逐轮累加的工作体（第 3 轮的 messages 里要带第 1、2 轮各自的半截答案，
         // 而不是只带最后那一轮 —— 否则模型会把它自己写过的第一段忘掉）
         let mut working = self.base_body.clone();
@@ -749,6 +750,12 @@ impl Continuation {
             texts.push(parts.text.clone());
             reasonings.push(parts.reasoning.clone());
             tokens.push(tokens_of_completion(&body));
+            if let Some(count) = body.get("usage")
+                .and_then(crate::server::core::protocol::usage::TokenUsage::from_chat)
+                .and_then(|tokens| tokens.cache_creation)
+            {
+                cache_creation = Some(cache_creation.unwrap_or(0).saturating_add(count));
+            }
             if repeat || !looks_truncated(&verdict) || rounds >= self.max_rounds || self.telemetry.is_cancelled() {
                 break;
             }
@@ -775,9 +782,13 @@ impl Continuation {
         // 跨轮用量求和：先覆盖遥测（每轮各自的 report_usage 是「最后一次为准」，
         // 这里把「最后一次」改写成合并值），再写进客户端看到的那份体
         let merged = sum_tokens(&tokens);
-        self.telemetry.report_usage(&usage_json(&merged));
+        let mut merged_usage = usage_json(&merged);
+        if let Some(count) = cache_creation {
+            merged_usage["cache_creation_input_tokens"] = json!(count);
+        }
+        self.telemetry.report_usage(&merged_usage);
         if let Some(usage_object) = body.as_object_mut() {
-            usage_object.insert("usage".to_string(), usage_json(&merged));
+            usage_object.insert("usage".to_string(), merged_usage);
         }
         let Some(choice) = body
             .get_mut("choices")
@@ -999,7 +1010,7 @@ async fn forward_round_with(
     allowed_providers: Option<KeyScope>,
     mut body: Value,
 ) -> Result<ForwardOutcome, crate::server::errors::GatewayError> {
-    if body.get("_wb_route_group_id").and_then(Value::as_str).is_some() {
+    if telemetry.vision_continuation().is_none() && body.get("_wb_route_group_id").and_then(Value::as_str).is_some() {
         let snapshot = telemetry.snapshot();
         let candidate = snapshot.route.as_ref().and_then(|route| route.get("pickedCandidate")).and_then(Value::as_str).unwrap_or("");
         if candidate.is_empty() || snapshot.account_id.is_empty() || snapshot.upstream_model.is_empty() {

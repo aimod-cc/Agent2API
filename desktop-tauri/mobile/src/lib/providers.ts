@@ -55,6 +55,7 @@ const ICONS: Record<string, string> = {
   cursor: 'assets/providers/cursor.svg',
   kiro: 'assets/providers/kiro.svg',
   astudio: 'assets/providers/astudio.png',
+  quwork: 'assets/providers/quwork.png',
   devin: 'assets/providers/devin.svg',
   factory: 'assets/providers/factory.svg',
   zed: 'assets/providers/zed.svg',
@@ -77,6 +78,7 @@ const ICONS: Record<string, string> = {
 /** 后端没给 label 时的兜底展示名（认不出的 id 原样显示） */
 const LABELS: Record<string, string> = {
   astudio: 'AStudio',
+  quwork: 'QuWork',
   workbuddy: 'WorkBuddy 国内版',
   'workbuddy-intl': 'WorkBuddy 国际版',
   raccoon: '小浣熊',

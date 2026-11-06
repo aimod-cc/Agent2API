@@ -68,6 +68,7 @@
   "确定清空当前筛选出的 <strong>{count}</strong> 条日志？清空后无法恢复。": "Clear the <strong>{count}</strong> filtered log entries? This cannot be undone.",
   "系统事件": "System events",
   "级别": "Level",
+  "结束阅读": "End reading",
   "脱敏": "Redaction",
   "自动刷新": "Auto-refresh",
   "自动刷新已关闭": "Auto-refresh disabled",
@@ -86,6 +87,7 @@
   "重要事件": "Important events",
   "错误": "Error",
   "错误 {n}": "Errors {n}",
+  "阅读模式": "Reading mode",
   "阅读模式，列表保持不动": "Reading mode: list stays in place",
   "附加数据": "Additional data"
 }

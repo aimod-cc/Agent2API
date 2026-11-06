@@ -11,6 +11,8 @@ import {
 } from './checkin-types'
 import { CheckinRow, ProviderLogo } from './checkin-row'
 import { CheckinUmid } from './checkin-umid'
+import { CampaignRow } from './checkin-campaign-row'
+import { OfficeaceSubscriptionRow } from './checkin-officeace-row'
 import { claimOnboarding, onboardingOf, queryOnboarding } from './checkin-onboarding'
 import { t } from '../i18n'
 import { growthTaskCompleted, growthTaskRunnable } from '../../../ui-shared/checkin'
@@ -365,7 +367,11 @@ function OnboardingRow({ row }: { row: OnboardingEntry }): React.ReactElement {
             : status === 'error'
               ? <Badge variant="destructive" shape="tag">查询失败</Badge>
               : null}
-      note={status === 'error' && cache?.error ? `查询失败：${cache.error}` : undefined}
+      note={row.provider === 'officeace' || status === 'error' ? <>
+        {status === 'error' && cache.error ? <p>{t('查询失败：{error}', { error: cache.error })}</p> : null}
+        {row.provider === 'officeace' ? <OfficeaceSubscriptionRow accountId={row.id}
+          disabled={status === 'loading' || cache.claiming} /> : null}
+      </> : undefined}
       actions={<>
         <Button
           size="sm"
@@ -406,7 +412,7 @@ function OnboardingRow({ row }: { row: OnboardingEntry }): React.ReactElement {
   )
 }
 
-/* ─── 活动福利（ZCode 套餐）────────────────── */
+/* ─── 活动福利 ─────────────────────────────── */
 
 /**
  * 今天（北京时间）在本地台账里领过的套餐 id。
@@ -609,6 +615,7 @@ export function CenterTab({ center }: { center: CheckinCenter }): React.ReactEle
   const { daily, extras } = center
   const hasAnything = daily.providers.length > 0 || daily.outOfScope.length > 0
     || extras.onboarding.length > 0 || extras.plans.length > 0 || extras.growth.length > 0
+    || (extras.campaigns?.length ?? 0) > 0
   const section = store.centerSection
   const runningAll = store.runningAll || center.auto?.running === true
 
@@ -676,11 +683,14 @@ export function CenterTab({ center }: { center: CheckinCenter }): React.ReactEle
       {section === 'plans' ? <Card render={<section />} className="panel">
         <CardHeader className="panel-head">
           <h2>活动福利</h2>
-          <span className="panel-sub">限时体验套餐 · 领取需滑块验证码 · 逐份查看与领取</span>
+          <span className="panel-sub">{t('限时活动与体验套餐 · 查询后逐项领取 · 不影响每日签到')}</span>
         </CardHeader>
-        {extras.plans.length > 0
-          ? <div>{extras.plans.map(row => <PlanRow key={row.id} row={row} />)}</div>
-          : <Empty className="ck-empty">没有可领套餐的账号（ZCode 未添加）。</Empty>}
+        {extras.plans.length > 0 || (extras.campaigns?.length ?? 0) > 0
+          ? <div>
+            {(extras.campaigns ?? []).map(row => <CampaignRow key={row.id} row={row} />)}
+            {extras.plans.map(row => <PlanRow key={row.id} row={row} />)}
+          </div>
+          : <Empty className="ck-empty">{t('没有支持活动福利的账号，请添加账号并更新提供商插件。')}</Empty>}
       </Card> : null}
 
       {section === 'growth' ? <Card render={<section />} className="panel">

@@ -32,6 +32,9 @@ pub(crate) fn try_update_raw_field<T, E>(
     if key == super::client_identification::KEY_CLIENT_IDENTIFICATION {
         next.client_identification = super::client_identification::from_raw(&next.raw);
     }
+    if key == super::vision_compat::KEY_VISION_COMPAT {
+        next.vision_compat = super::vision_compat::from_raw(&next.raw);
+    }
     if !save_raw(&next.raw) {
         return Err(storage_error());
     }

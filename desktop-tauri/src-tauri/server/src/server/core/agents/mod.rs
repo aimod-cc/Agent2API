@@ -2,6 +2,7 @@
 
 pub mod apply;
 mod backups;
+pub mod catalog;
 mod clients;
 pub mod discover;
 pub mod files;
@@ -9,6 +10,7 @@ mod json_edit;
 pub mod native;
 pub mod paths;
 pub mod preview;
+pub mod quick_connect;
 pub mod registry;
 pub mod resources;
 pub mod store;

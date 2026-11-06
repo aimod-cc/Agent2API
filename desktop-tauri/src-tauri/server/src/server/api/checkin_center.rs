@@ -318,6 +318,15 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
         })
         .collect();
 
+    let campaign_rows: Vec<Value> = accounts.iter().filter(|account| {
+        crate::server::core::plugin_host::has_campaign_rewards(&account_text(account, "provider"))
+    }).map(|account| json!({
+        "id": account_text(account, "id"),
+        "name": account_display_name(account),
+        "provider": account_text(account, "provider"),
+        "available": account.get("available").and_then(Value::as_bool).unwrap_or(true),
+    })).collect();
+
     ok_json(json!({
         "daily": {
             "providers": provider_rows,
@@ -328,6 +337,7 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
         "extras": {
             "onboarding": onboarding_rows,
             "plans": plan_rows,
+            "campaigns": campaign_rows,
             "growth": growth_rows,
         },
         "auto": state.auto_checkin().state(),

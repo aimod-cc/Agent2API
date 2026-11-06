@@ -606,17 +606,11 @@ async fn sweep_due(store: &AccountStore) {
 /// 的每个 Token 周期一项 `{period, windowStart, used}`（内存事实表投影，零
 /// SQL；事实由心跳 10 秒刷新 + 请求收尾增量记账兜着）。
 ///
-/// 出口过滤的两条（与旧 kv 快照的 `prune_stale_failures` 同语义）：
-///   - 账号已删除的行不端出（界面上没有那一行，留着只会对不上）；
-///   - 失败行只在「这次尝试不早于账号记录的最后改动」时端出 —— 重新登录 /
-///     重导入 / 刷过 token 之后，「当时查不到」那条断言就不再成立。成功读数
-///     不受影响：「可用 5147 积分」是一次读数的事实，凭证换了也不会变假话。
+/// 出口不返回已删除账号和访客账号的行。
+/// 修改代理、凭证或账号资料不代表余额查询成功，失败记录不能因此隐藏；
+/// 只有后续成功的余额查询才能清除失败状态，历史读数和成功时间保持原样。
 ///
-/// ── 第三条：访客账号的行整条丢掉（2026-10）──────────────────
-/// 访客没有积分体系（见 `supports_usage` 的说明），它名下的记录**只可能**是
-/// 历史失败行。留着就会在余额列上留一格红字，而那是「这条账号不该有读数」，
-/// 不是「这次没查到」。升级前写进记录表的那些行因此在这里一并滤掉，不必等
-/// 一次专门的迁移。
+/// 访客没有积分体系（见 `supports_usage` 的说明），其历史失败记录也不返回。
 pub fn snapshot(store: &AccountStore) -> Value {
     let records = usage_records::load_all();
     let accounts = store.list_accounts();
@@ -635,13 +629,7 @@ pub fn snapshot(store: &AccountStore) -> Value {
         }
         at = at.max(record.last_attempt_at);
         let name = account.get("name").cloned().unwrap_or(Value::Null);
-        let changed = account
-            .get("updatedAt")
-            .and_then(Value::as_i64)
-            .unwrap_or(0)
-            .max(account.get("addedAt").and_then(Value::as_i64).unwrap_or(0));
-        let error = record.error.as_deref().filter(|_| record.last_attempt_at >= changed);
-        if let Some(error) = error {
+        if let Some(error) = record.error.as_deref() {
             rows.push(json!({
                 "id": id,
                 "name": name,

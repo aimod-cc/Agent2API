@@ -342,6 +342,7 @@ pub fn install_mcp(
     base_url: &str,
     api_key: &str,
     client_ids: &[String],
+    image_options: Option<&super::ImageBridgeOptions>,
 ) -> Vec<InstallOutcome> {
     let name = server_name(service);
     let url = format!(
@@ -349,7 +350,15 @@ pub fn install_mcp(
         base_url.trim_end_matches('/'),
         super::endpoint(service, "mcp")
     );
-    let timeout = super::timeout_seconds(service);
+    let timeout = if service == super::IMAGE_GENERATION_SERVICE_ID { 120 } else { super::timeout_seconds(service) };
+    let image_bridge = if service == super::IMAGE_GENERATION_SERVICE_ID && mode == "bridge" {
+        let options = image_options.ok_or_else(|| "请选择图片输出目录".to_string());
+        match options.and_then(super::image_bridge::prepare) {
+            Ok(prepared) => Some(prepared),
+            Err(error) => return client_ids.iter().map(|id| InstallOutcome::failed(id,
+                agents::find(id).map(|def| def.name).unwrap_or(id), error.clone())).collect(),
+        }
+    } else { None };
     let bridge = if service == super::VISION_SERVICE_ID && mode == "bridge" {
         match ensure_bridge_script() {
             Ok(path) => Some(path),
@@ -377,7 +386,9 @@ pub fn install_mcp(
             outcomes.push(InstallOutcome::failed(client_id, def.name, "该客户端不支持 MCP 配置写入"));
             continue;
         }
-        let config = mcp_entry(def, service, &url, api_key, bridge.as_deref(), timeout);
+        let config = if let Some(bridge) = &image_bridge {
+            merge_entry(super::image_bridge::entry(def, &url, api_key, bridge), timeout_entry(def, timeout))
+        } else { mcp_entry(def, service, &url, api_key, bridge.as_deref(), timeout) };
         match write_mcp_entry(def, name, config) {
             Ok(path) => outcomes.push(InstallOutcome::ok(client_id, def.name, path)),
             Err(error) => outcomes.push(InstallOutcome::failed(client_id, def.name, error)),

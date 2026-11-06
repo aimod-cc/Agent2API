@@ -1,4 +1,7 @@
 {
+  "{error}（不会自动改为直连）": "{error} (no automatic fallback to a direct connection)",
+  "代理不可用：{error}（不会自动改为直连）；选「自定义代理…」去修改": "Proxy unavailable: {error} (no automatic direct connection); choose \"Custom proxy…\" to fix it",
+  "当前代理不可用：{error}（不会自动改为直连）": "Current proxy unavailable: {error} (no automatic fallback to a direct connection)",
   " · 今日 {used} / {quota}": " · Today {used} / {quota}",
   " · 当前 {n}": " · Currently {n}",
   " · 本周期 {used} / {quota}": " · This period {used} / {quota}",

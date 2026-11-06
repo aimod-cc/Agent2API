@@ -151,6 +151,9 @@ pub async fn query_usage(store: &AccountStore, account_id: &str) -> Result<Value
     let credential = store
         .custom_credential_by_id(account_id)
         .ok_or_else(|| GatewayError::with_status(404, "账号不存在"))?;
+    if let Some(message) = &credential.proxy_error {
+        return Err(GatewayError::with_status(502, message.clone()).with_code("account_proxy_unavailable"));
+    }
     let Some(provider_id) = store.custom_account_provider(account_id) else {
         return Err(GatewayError::with_status(
             501,

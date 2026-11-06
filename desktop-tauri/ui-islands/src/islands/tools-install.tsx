@@ -2,12 +2,12 @@ import * as React from 'react'
 import {
   Alert, Button, Checkbox, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader,
   DialogTitle, Empty, Field, FieldDescription, FieldLabel, Select, SelectContent, SelectItem,
-  SelectTrigger, SelectValue, SegmentedControl, Spinner,
+  SelectTrigger, SelectValue, SegmentedControl, Spinner, Input, Textarea,
 } from '@ui'
 import { t } from '../i18n'
 import { toast } from './assistant-state'
 import {
-  fetchApiKeys, fetchInstallTargets, installMcp, installSkill, uninstallMcp, uninstallSkill,
+  fetchApiKeys, fetchInstallTargets, installMcp, installSkill, uninstallMcp, uninstallSkill, SERVICE_NAME,
   type ApiKeyOption, type InstallOutcome, type InstallTarget, type ToolService,
 } from './tools-data'
 
@@ -57,7 +57,10 @@ export function ToolInstallDialog({ service, mode, onClose, onDone }: {
   const [selected, setSelected] = React.useState<string[]>([])
   const [keyId, setKeyId] = React.useState('')
   const [variant, setVariant] = React.useState(service.recommended_variant === 'python' ? 'python' : 'node')
-  const [mcpMode, setMcpMode] = React.useState<'bridge' | 'http'>(service.id === 'vision' ? 'bridge' : 'http')
+  const imageService = service.id === 'image-generation'
+  const [mcpMode, setMcpMode] = React.useState<'bridge' | 'http'>(service.id === 'vision' || imageService ? 'bridge' : 'http')
+  const [outputDirectory, setOutputDirectory] = React.useState('')
+  const [referenceDirectories, setReferenceDirectories] = React.useState('')
   const [loading, setLoading] = React.useState(true)
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState('')
@@ -86,11 +89,14 @@ export function ToolInstallDialog({ service, mode, onClose, onDone }: {
   const submit = async () => {
     if (!selected.length) { setError(t('请至少选择一个目标')); return }
     if (!keyId) { setError(t('请先选择 API Key')); return }
+    if (imageService && mcpMode === 'bridge' && !outputDirectory.trim()) { setError(t('请选择图片输出目录')); return }
     setBusy(true); setError(''); setResults(null)
     try {
       const response = mode === 'skill'
         ? await installSkill({ variant, api_key_id: keyId, clients: selected })
-        : await installMcp({ service_id: service.id, mode: mcpMode, api_key_id: keyId, clients: selected })
+        : await installMcp({ service_id: service.id, mode: mcpMode, api_key_id: keyId, clients: selected,
+          ...(imageService && mcpMode === 'bridge' ? { output_directory: outputDirectory.trim(),
+            reference_directories: referenceDirectories.split('\n').map(value => value.trim()).filter(Boolean) } : {}) })
       const { ok, failed } = outcomesMessage(response.results || [])
       setResults(response.results || [])
       if (ok > 0) {
@@ -106,7 +112,7 @@ export function ToolInstallDialog({ service, mode, onClose, onDone }: {
     }
   }
 
-  const serviceLabel = service.id === 'vision' ? t('视觉分析') : t('网络搜索')
+  const serviceLabel = SERVICE_NAME[service.id] || service.id
   const title = mode === 'skill'
     ? t('安装 {name}', { name: serviceLabel })
     : t('{name} 接入客户端', { name: serviceLabel })
@@ -132,17 +138,37 @@ export function ToolInstallDialog({ service, mode, onClose, onDone }: {
             ]} />
             <FieldDescription>{t('Node.js 无需额外依赖，推荐使用；Python 需要本机有 python。')}</FieldDescription>
           </Field>}
-          {mode === 'mcp' && service.id === 'vision' && <Field>
+          {mode === 'mcp' && (service.id === 'vision' || imageService) && <Field>
             <FieldLabel>{t('接入方式')}</FieldLabel>
             <SegmentedControl value={mcpMode} onValueChange={value => { if (value === 'bridge' || value === 'http') setMcpMode(value) }} aria-label={t('接入方式')} options={[
               { value: 'bridge', label: t('本地桥接') }, { value: 'http', label: t('远程 HTTP') },
             ]} />
-            <FieldDescription>{mcpMode === 'bridge'
-              ? t('本地桥接会在本机运行一个 node 脚本，支持直接传本地图片路径，推荐在桌面端使用。')
-              : t('远程 HTTP 只接受图片 URL 或 data URI，不需要本机安装 node。')}</FieldDescription>
+            <FieldDescription>{imageService
+              ? t('本地桥接需要 Node.js 18 或更新版本，自动读取授权目录的参考图并保存生成结果；HTTP 接入只返回下载地址。')
+              : mcpMode === 'bridge'
+                ? t('本地桥接会在本机运行一个 node 脚本，支持直接传本地图片路径，推荐在桌面端使用。')
+                : t('远程 HTTP 只接受图片 URL 或 data URI，不需要本机安装 node。')}</FieldDescription>
           </Field>}
+          {imageService && mcpMode === 'bridge' ? <>
+            <Field>
+              <FieldLabel>{t('图片输出目录')}</FieldLabel>
+              <div className='flex gap-2'><Input value={outputDirectory} onChange={event => setOutputDirectory(event.currentTarget.value)} placeholder={t('选择已有目录，图片只会写入此目录及其子目录')} />
+                <Button variant='outline' onClick={() => {
+                  const bridge = (window as unknown as { workbuddyDesktop?: { pickFolder?: (initial?: string) => Promise<{ path?: string }> } }).workbuddyDesktop
+                  void bridge?.pickFolder?.(outputDirectory).then(result => { if (result.path) setOutputDirectory(result.path) })
+                    .catch(failure => setError(failure instanceof Error ? failure.message : String(failure)))
+                }}>{t('选择目录')}</Button></div>
+            </Field>
+            <Field>
+              <FieldLabel>{t('参考图允许读取的目录')}</FieldLabel>
+              <Textarea value={referenceDirectories} rows={3} onChange={event => setReferenceDirectories(event.currentTarget.value)} />
+              <FieldDescription>{t('可选，每行一个已有绝对目录。输出目录默认允许读取；其他位置的文件不会读取或上传。')}</FieldDescription>
+            </Field>
+            <Alert>{t('只保存新文件，不覆盖已有不同内容。目录权限写入客户端配置，更新配置时需要重新确认。')}</Alert>
+          </> : null}
           <KeyPicker keys={keys} value={keyId} onChange={setKeyId} />
-          {service.timeout_seconds ? <Alert>{t('将按服务的工具执行超时（{seconds} 秒）同步写入客户端配置。', { seconds: service.timeout_seconds })}</Alert> : null}
+          {imageService ? <Alert>{t('客户端调用超时设为 120 秒；后台生成超时由服务配置控制，未完成时通过任务编号查询。')}</Alert>
+            : service.timeout_seconds ? <Alert>{t('将按服务的工具执行超时（{seconds} 秒）同步写入客户端配置。', { seconds: service.timeout_seconds })}</Alert> : null}
           {results && <Alert variant='success'>{t('已完成 {count} 个目标', { count: results.filter(item => item.ok).length })}</Alert>}
           {error && <Alert variant='destructive' className='whitespace-pre-wrap'>{error}</Alert>}
         </>}
@@ -205,7 +231,7 @@ export function ToolUninstallDialog({ service, mode, onClose, onDone }: {
 
   return <Dialog open onOpenChange={(open, details) => { if (!open) { if (busy) details.cancel(); else onClose() } }}>
     <DialogContent className='max-w-xl'>
-      <DialogHeader><DialogTitle>{t('移除 {name} 配置', { name: service.id === 'vision' ? t('视觉分析') : t('网络搜索') })}</DialogTitle></DialogHeader>
+      <DialogHeader><DialogTitle>{t('移除 {name} 配置', { name: SERVICE_NAME[service.id] || service.id })}</DialogTitle></DialogHeader>
       <DialogBody className='flex flex-col gap-3'>
         <p className='text-xs text-subtle'>{t('选择要从中移除的客户端，未勾选的客户端保持不变。')}</p>
         {loading ? <div className='flex items-center gap-2 py-6 text-sm text-subtle'><Spinner />{t('正在加载安装目标…')}</div>

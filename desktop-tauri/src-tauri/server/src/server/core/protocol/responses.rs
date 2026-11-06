@@ -1173,63 +1173,8 @@ fn finish_failure(finish_reason: Option<&str>) -> Option<(&'static str, String)>
 }
 
 pub fn usage_to_responses(usage: Option<&Value>) -> Value {
-    let Some(usage) = usage.filter(|value| value.is_object()) else {
-        return Value::Null;
-    };
-    let number = |keys: &[&str]| -> i64 {
-        for key in keys {
-            if let Some(value) = usage.get(*key) {
-                if let Some(parsed) = value.as_i64() {
-                    return parsed;
-                }
-                if let Some(parsed) = value.as_f64().filter(|value| value.is_finite()) {
-                    return parsed as i64;
-                }
-            }
-        }
-        0
-    };
-    let input = number(&["prompt_tokens", "input_tokens"]);
-    let output = number(&["completion_tokens", "output_tokens"]);
-    let cached = number(&[
-        "prompt_tokens_details.cached_tokens",
-        "prompt_cache_hit_tokens",
-        "cache_read_input_tokens",
-    ]);
-    // 嵌套明细要单独取（上面的点号键取不到，这里补一次）
-    let cached = {
-        let nested = usage
-            .pointer("/prompt_tokens_details/cached_tokens")
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
-        if nested != 0 { nested } else { cached }
-    };
-    let reasoning = usage
-        .pointer("/completion_tokens_details/reasoning_tokens")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    let mut details = Map::new();
-    if cached != 0 {
-        details.insert("cached_tokens".to_string(), Value::from(cached));
-    }
-    let mut output_details = Map::new();
-    if reasoning != 0 {
-        output_details.insert("reasoning_tokens".to_string(), Value::from(reasoning));
-    }
-    let mut out = Map::new();
-    out.insert("input_tokens".to_string(), Value::from(input));
-    if !details.is_empty() {
-        out.insert("input_tokens_details".to_string(), Value::Object(details));
-    }
-    out.insert("output_tokens".to_string(), Value::from(output));
-    if !output_details.is_empty() {
-        out.insert("output_tokens_details".to_string(), Value::Object(output_details));
-    }
-    out.insert(
-        "total_tokens".to_string(),
-        Value::from(number(&["total_tokens"]).max(input + output)),
-    );
-    Value::Object(out)
+    usage.and_then(super::usage::TokenUsage::from_chat)
+        .map(|tokens| tokens.responses()).unwrap_or(Value::Null)
 }
 
 // ─── 流式：Chat SSE → Responses SSE ─────────────────────────
@@ -1475,7 +1420,7 @@ impl ResponsesStream {
             }
         }
         if let Some(usage) = chunk.get("usage").filter(|value| value.is_object()) {
-            self.usage = Some(usage.clone());
+            super::usage::merge_chat(&mut self.usage, usage);
         }
         let choice = chunk.pointer("/choices/0");
         if let Some(finish) = choice
@@ -2007,7 +1952,7 @@ impl ResponsesCollector {
             self.created = created;
         }
         if let Some(usage) = chunk.get("usage").filter(|value| value.is_object()) {
-            self.usage = Some(usage.clone());
+            super::usage::merge_chat(&mut self.usage, usage);
         }
         let choice = chunk.pointer("/choices/0");
         if let Some(finish) = choice

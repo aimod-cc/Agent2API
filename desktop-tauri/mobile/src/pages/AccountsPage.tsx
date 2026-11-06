@@ -53,7 +53,7 @@ export function AccountsPage() {
   const [filters, setFilters] = useState<AccountFilters>(DEFAULT_FILTERS)
   const [filterOpen, setFilterOpen] = useState(false)
   const [query, setQuery] = useState('')
-  const [openId, setOpenId] = useState<string | null>(null)
+  const [openId, setOpenId] = useState<string | null>(() => state.route.params?.id || null)
   const [adding, setAdding] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)

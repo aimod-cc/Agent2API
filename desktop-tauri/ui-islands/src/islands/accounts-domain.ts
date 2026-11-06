@@ -1301,12 +1301,12 @@ export function accountTags(account: AccountRecord): AccountTag[] {
         title: t('这条自定义账号既没有 API Key，也没有勾选「无需鉴权」：转发时会被跳过，该提供商下的模型也不会出现在模型列表里。去账号「设置」里补上 Key，或勾选「该上游无需鉴权」'),
       }
       : null,
-    // 代理配了解析不出来时明确标出：转发会回退直连，属于需要留意的情况
+    // 代理解析失败时明确标出，不能让用户以为仍在使用指定出口。
     account.proxy?.error
       ? {
         text: t('代理异常'),
         kind: 'bad' as const,
-        title: t('{error}（转发时会回退直连）', { error: account.proxy.error }),
+        title: t('{error}（不会自动改为直连）', { error: account.proxy.error }),
       }
       : null,
     // 走套餐池（Start Plan）通道时标出来：它不是默认值，而「这条请求到底花的

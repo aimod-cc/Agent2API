@@ -43,6 +43,10 @@ use crate::server::errors::GatewayError;
 use super::Host;
 use super::errors::strict;
 
+#[cfg(test)]
+#[path = "rpc_tests.rs"]
+mod tests;
+
 /// 一次 RPC 调用的超时。
 ///
 /// ── 为什么不用一个统一值 ────────────────────────────────────
@@ -237,7 +241,8 @@ impl RpcAdapter {
     }
 
     /// 调一次要出网的 RPC（超时更宽）。
-    async fn network(&self, method: &str, params: Value) -> Result<Value, GatewayError> {
+    async fn network(&self, method: &str, mut params: Value) -> Result<Value, GatewayError> {
+        super::account_egress::apply(&mut params);
         self.call(method, params, NETWORK_TIMEOUT).await
     }
 
@@ -646,7 +651,10 @@ impl ProviderAdapter for RpcAdapter {
     fn classify_conversation_error(&self, error: &GatewayError) -> UpstreamErrorClass {
         // 新增 scoped runtime 已在异步错误边界完成正式分类；不能重新按 HTTP 429 猜配额。
         if strict::applies(self.id) { return strict::cached_class(self.id, error); }
-        // 此钩子同步，不能再发分类 RPC；旧提供商保留既有 429/6004 的记账语义。
+        if let Some(class) = &error.conversation_class {
+            return class.clone();
+        }
+        // 此钩子同步，不能再发分类 RPC；未携带分类的旧错误保留 429/6004 的记账语义。
         if error.is_quota_limit() {
             let reset_at = crate::server::errors::parse_quota_reset_at(&error.message);
             UpstreamErrorClass::QuotaLimited {
@@ -744,7 +752,7 @@ impl ProviderAdapter for RpcAdapter {
     /// 短超时会把正常的慢请求掐断。
     fn admin_action<'a>(
         &'a self,
-        _store: &'a AccountStore,
+        store: &'a AccountStore,
         account_id: &'a str,
         action: &'a str,
         payload: &'a Value,
@@ -758,7 +766,8 @@ impl ProviderAdapter for RpcAdapter {
             let access = if activity {
                 let (models, identity) = crate::server::core::billing::keepalive::authorized_models()?;
                 activity_payload["models"] = serde_json::json!(models);
-                Some(identity)
+                let name = crate::server::core::billing::keepalive::account_name(store, account_id);
+                Some((identity, name))
             } else { None };
             let mut params = self.with_account(account_id);
             if let Some(object) = params.as_object_mut() {
@@ -778,8 +787,8 @@ impl ProviderAdapter for RpcAdapter {
                 }
                 error
             });
-            if let Some(identity) = access {
-                crate::server::core::billing::keepalive::record_activity(account_id, started_at, &activity_payload, &result, identity);
+            if let Some((identity, name)) = access {
+                crate::server::core::billing::keepalive::record_activity(account_id, &name, started_at, &result, identity);
             }
             result
         })
@@ -940,8 +949,10 @@ impl ProviderAdapter for RpcAdapter {
             params.insert("wire_model".into(), Value::String(wire_model.clone()));
 
             let strict = strict::applies(self.id);
+            let mut params = Value::Object(params);
+            super::account_egress::apply(&mut params);
             let call = host
-                .open_stream(proto::methods::gateway::CONVERSATION, Value::Object(params))
+                .open_stream(proto::methods::gateway::CONVERSATION, params)
                 .await
                 .map_err(|e| {
                     if strict { strict::fatal(self.id, 503, "runtime_transport_unavailable") }
@@ -1898,18 +1909,20 @@ async fn collect(
 /// 见 `upstream::provider_loop` 的 `OutboundFailure` 构造：状态码取分类里
 /// 那个（分类器可能把它改小，例如 402 → 429），文案原样用，上游码带上。
 fn conversation_error(status: u16, class: UpstreamErrorClass, body: &Value) -> GatewayError {
-    match class {
+    let mut error = match &class {
         UpstreamErrorClass::QuotaLimited { status, message, upstream_code, .. }
         | UpstreamErrorClass::ContentBlocked { status, message, upstream_code }
         | UpstreamErrorClass::Fatal { status, message, upstream_code } => {
-            let text = if message.is_empty() { describe_body(body) } else { message };
-            GatewayError::with_status(status as i32, text).with_optional_code(upstream_code)
+            let text = if message.is_empty() { describe_body(body) } else { message.clone() };
+            GatewayError::with_status(i32::from(*status), text).with_optional_code(*upstream_code)
         }
         UpstreamErrorClass::TokenExpired { message } => {
-            let text = if message.is_empty() { describe_body(body) } else { message };
-            GatewayError::with_status(status as i32, text)
+            let text = if message.is_empty() { describe_body(body) } else { message.clone() };
+            GatewayError::with_status(i32::from(status), text)
         }
-    }
+    };
+    error.conversation_class = Some(class);
+    error
 }
 
 /// 错误体没有可读文案时的兜底（与内置家的 `上游返回 {status}: …` 同形态）。

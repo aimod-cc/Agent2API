@@ -108,6 +108,8 @@ use super::{
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod retry_tests;
 
 /// 上游一次请求的失败（已分类 + 已构好给客户端的错误）。
 struct OutboundFailure {
@@ -428,7 +430,9 @@ pub(super) async fn forward_with_providers(
     // 的门禁会把被测对象挡在门外。候选直接取 Key 白名单（测试恒带
     // `provider_only`，就是被钉住的那一家）；发送侧的按家改写照常走生产语义，
     // 关闭的默认绑定解析不出目标、名字原样直发，见 `ForwardRequest` 的说明。
-    let candidates = if ctx.routing.group.is_some() {
+    let candidates = if let Some(provider) = &ctx.direct_provider {
+        vec![provider.clone()]
+    } else if ctx.routing.group.is_some() {
         if ctx.images.is_some() { return Err(GatewayError::bad_request("对话路由组不能用于图片生成")); }
         ctx.routing.providers(Vec::new())
     } else if ctx.ignore_model_gate {
@@ -519,7 +523,9 @@ pub(super) async fn forward_with_providers(
             if with_mapping { "，含映射" } else { "" },
         ),
     );
-    attempt_queue(service, &ctx, &provider_ids, slot, connections).await
+    crate::server::core::plugin_host::account_egress::scope(
+        attempt_queue(service, &ctx, &provider_ids, slot, connections),
+    ).await
 }
 
 /// 按网关 Key 的**可用提供商**白名单过滤候选链（R9，照抄 OmniProxy 的
@@ -691,13 +697,20 @@ async fn attempt_queue(
         if let Some(override_proxy) = ctx.proxy_override {
             target.proxy = override_proxy.clone();
             target.proxy_notice = None;
-        } else if crate::server::core::providers::is_scoped_runtime_provider(&target.provider)
-            && target.proxy_notice.is_some()
+        } else if target.proxy_notice.is_some()
         {
             return Err(GatewayError::with_status(400,
                 "指定账号的代理不可用；未回退直连、系统代理或其他账号")
                 .with_code("account_proxy_unavailable"));
         }
+        let direct = match ctx.proxy_override {
+            Some(proxy) => proxy.is_none(),
+            None => target.account.as_ref().and_then(|account| account.pointer("/proxy/source"))
+                .and_then(Value::as_str) == Some("direct"),
+        };
+        crate::server::core::plugin_host::account_egress::select(
+            &target.provider, target.account_id.as_deref().unwrap_or(""), target.proxy.as_ref(), direct,
+        );
         // 决策快照挂进 telemetry（最后一次为准：请求日志的「路由回放」显示
         // 的是最终承载那次选路的完整排序 —— 与 attempts 明细的换号链互补，
         // 那边回答「试了谁」，这边回答「当时为什么这么排」）。
@@ -709,6 +722,12 @@ async fn attempt_queue(
         // 于是「一个请求任意时刻只占一个账号」这条口径不需要每个分支各维护一次
         // （429 降级、401 刷新后换号、会话式失败顺延三条路径都经过这里）。
         connections.rebind(target.account_id.clone());
+        if let Some(model) = &ctx.direct_model {
+            if let Some(account) = target.account.as_mut() { account["routingModel"] = model.clone().into(); }
+        }
+        if let Some(outcome) = super::vision_compat::before_target(service, ctx, &target, slot, connections).await? {
+            return Ok(outcome);
+        }
         let attempt_key = target.attempt_key().unwrap_or_default();
         let selected_model = target.account.as_ref().and_then(crate::server::core::routing_groups::candidate_model)
             .map(str::to_string).unwrap_or_else(|| model.clone());
@@ -734,6 +753,7 @@ async fn attempt_queue(
                     return Ok(outcome);
                 },
                 Err(error) => {
+                    if super::vision_compat::handles_error(ctx, &error) { return Err(error); }
                     // 手动终止优先（与无状态路径同一判定与理由）：不把已受理的
                     // 终止当成「这一轮失败」去顺延下一个账号
                     if ctx.telemetry.is_cancelled() {
@@ -879,6 +899,7 @@ async fn attempt_queue(
                     return Ok(crate::server::core::plugin_host::hold_adapter(outcome, adapter_handle));
                 },
                 Err(error) => {
+                    if super::vision_compat::handles_error(ctx, &error) { return Err(error); }
                     // 手动终止优先（与无状态 / 自定义两条路径同一判定与理由）：
                     // 会话式这一轮已经结束，但用户要的是终止 —— 不把它当成
                     // 普通失败去顺延下一个账号（那会把终止拖成另一轮转发）
@@ -1380,6 +1401,10 @@ async fn attempt_queue(
                             Some(cancellation::MANUAL_TERMINATED),
                         );
                         return Err(cancellation::cancelled_error());
+                    }
+                    if super::vision_compat::handles_error(ctx, &failure.error) {
+                        ctx.telemetry.finish_last_attempt(Some(i64::from(failure.error.status_code)), Some(&failure.error.message));
+                        return Err(failure.error);
                     }
                     if let Some(account_id) = target.account_id.as_deref() {
                         if failure.policy.suspend_account {
@@ -2319,7 +2344,7 @@ async fn attempt_custom(
     // 「上游模型」列以**真名**为准：send_body 对自定义 id 是零改写（它记的
     // 是请求名），真名的解析与改写发生在 forward 内部 —— 这里按同源解析
     // 覆盖一次（note_upstream_model 是覆盖式，最后一次为准；空串被内部过滤）。
-    let wire_model = if ctx.routing.group.is_some() { send.wire_model.clone() } else { custom_forward::cooldown_model(&provider_id, &model_of(ctx.body)) };
+    let wire_model = if ctx.routing.group.is_some() || ctx.direct_model.is_some() { send.wire_model.clone() } else { custom_forward::cooldown_model(&provider_id, &model_of(ctx.body)) };
     ctx.telemetry.note_upstream_model(&wire_model);
     logging::verbose(
         "[Upstream]",
@@ -2356,7 +2381,8 @@ async fn attempt_custom(
             &provider_id,
             target.account_id.as_deref().unwrap_or(""),
             &send.body,
-            ctx.routing.group.as_ref().map(|group| group.model.as_str()),
+            ctx.direct_model.as_ref().map(|_| model_of(ctx.body)).as_deref()
+                .or_else(|| ctx.routing.group.as_ref().map(|group| group.model.as_str())),
             proxy.clone(),
             ctx.stream,
             ctx.telemetry,
@@ -2646,7 +2672,7 @@ async fn attempt_stateful(
 /// 账号级连接凭证（`connections`）走**同一条规则**：流式时一起挂到流上，
 /// 非流式时随本函数返回析构。两条凭证的生命周期因此完全一致，不需要各自
 /// 维护释放时机。
-fn attach_slot(
+pub(super) fn attach_slot(
     outcome: ForwardOutcome,
     slot: &mut Option<InFlightGuard>,
     connections: &mut ConnectionGuard,
@@ -3023,7 +3049,8 @@ async fn send_with_retry(
         let uncertain_image = images.is_some()
             && matches!(class, UpstreamErrorClass::Fatal { .. })
             && (status >= 500 || matches!(status, 408 | 409 | 425));
-        let stop = policy.stop || uncertain_image || matches!(&decision, RetryDecision::Stop { .. });
+        let vision_rejection = super::vision_compat::rejection_message(&detail.message) && telemetry.vision_enabled();
+        let stop = policy.stop || uncertain_image || vision_rejection || matches!(&decision, RetryDecision::Stop { .. });
         if let Some(reason) = network.after_status(status, &body,
             !stop && !policy.suspend_account && policy.account_cooldown_until.is_none()
                 && matches!(class, UpstreamErrorClass::Fatal { .. })).await {

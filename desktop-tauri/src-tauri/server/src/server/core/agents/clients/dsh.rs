@@ -199,6 +199,7 @@ fn read_models(value: Option<&Value>) -> Vec<Model> {
                     .get("input")
                     .and_then(Value::as_array)
                     .map(|list| list.iter().any(|value| value.as_str() == Some("image"))),
+                supports_video: None,
                 supports_reasoning: match efforts {
                     Some(Value::Bool(false)) => Some(false),
                     Some(Value::Object(map)) if !map.is_empty() => Some(true),

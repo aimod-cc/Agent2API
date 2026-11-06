@@ -112,6 +112,7 @@ function Frame() {
         <div className='crumb'><span>Agent2API</span><span className='sep'>/</span><span className='cur' id='crumb-page'>{label}</span></div>
         <div className='spacer' />
         <div className='topbar-actions' id='topbar-status' title={title}><TopbarStatus /></div>
+        <div id='page-refresh-actions' />
       </PageHeader>
       <div className='content'><div className='content-inner'>
         {['assistant', 'overview', 'accounts', 'checkin', 'routing', 'gateway', 'agent', 'tools', 'proxies', 'keys', 'docs', 'logs', 'tasks', 'requests', 'plugins', 'settings'].map(key =>

@@ -125,7 +125,7 @@ const BRIDGE_JS: &str = r#"
    * WebviewWindow 两种监听 target，对 Any 一律不投），订阅它们必须传
    * 当前窗口的 target —— 见 onWindowResize。
    */
-  const on = (event, callback, target) => {
+  const on = (event, callback, target, onReady) => {
     let unlisten = null;
     let disposed = false;
     invoke('plugin:event|listen', {
@@ -136,6 +136,7 @@ const BRIDGE_JS: &str = r#"
       .then(fn => {
         if (disposed && typeof fn === 'function') fn();
         else unlisten = fn;
+        if (!disposed) onReady?.();
       })
       .catch(error => console.warn('订阅事件失败:', event, error));
     return () => {
@@ -161,6 +162,7 @@ const BRIDGE_JS: &str = r#"
     // 模型调用仍由界面显式选择 Key，管理会话不能替代模型授权。
     directCredentials: () => invoke('direct_credentials'),
     saveAssistantImage: id => invoke('save_assistant_image', { id: String(id || '') }),
+    saveToolImage: id => invoke('save_tool_image', { id: String(id || '') }),
 
     // ── 会话 ──
     getState: () => call('GET', '/api/session'),
@@ -428,6 +430,7 @@ const BRIDGE_JS: &str = r#"
     //   · importAgentClient   从客户端现有文件里读回一套配置
     //   写操作都返回整份 `{clients}`（就地替换，页面不必再拉一次）。
     getAgents: () => call('GET', '/api/agents'),
+    getAgentModels: gatewayKeyId => call('GET', '/api/agents/models' + (gatewayKeyId == null ? '' : '?gatewayKeyId=' + encodeURIComponent(gatewayKeyId))),
     saveAgentProfiles: payload => call('POST', '/api/agents/profiles', payload || {}),
     applyAgentProfile: payload => call('POST', '/api/agents/apply', payload || {}),
     previewAgentProfile: payload => call('POST', '/api/agents/preview', payload || {}),
@@ -472,6 +475,16 @@ const BRIDGE_JS: &str = r#"
     // 账号页「连接数」列 2 秒轮询它 —— 后端是进程内计数，这条请求很轻。
     getAccountConnections: () => call('GET', '/api/accounts/connections'),
     checkinAllAccounts: id => call('POST', '/api/accounts/checkin', id ? { id } : {}),
+    getCampaignRewards: id =>
+      call('GET', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/campaigns'),
+    claimCampaignReward: (id, campaignId) =>
+      call('POST', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/campaigns/claim', { campaignId }),
+    redeemCampaignBenefit: (id, code) =>
+      call('POST', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/campaigns/redeem', { code }),
+    getOfficeaceSubscription: id =>
+      call('GET', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/officeace-subscription'),
+    activateOfficeaceSubscription: id =>
+      call('POST', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/officeace-subscription/activate', {}),
     // ── Loomy 新手任务（查询 / 一键领取）──
     // 签到完成后的配套动作：界面查询该账号的任务状态，有未领取的弹窗展示并领取
     // （见 ui-islands 的 accounts-dialog-onboarding）。与 `server/src/web_shim.rs`
@@ -638,6 +651,10 @@ const BRIDGE_JS: &str = r#"
     // ── 间隔型定时任务（凭证自动维护 / 定时查询积分 / 模型刷新 / 两个前端自动刷新）──
     // 改一条任务用 PATCH（后端同时受理 POST 作别名：CORS 允许方法里没有 PATCH，
     // 浏览器直连时预检会拦下它；走本桥的调用两种都能用，这里按规范用 PATCH）。
+    getMaintenance: query => call('GET', '/api/maintenance?' + new URLSearchParams(query || {}).toString()),
+    getMaintenanceRecord: id => call('GET', '/api/maintenance/records/' + encodeURIComponent(id)),
+    runMaintenance: id => call('POST', '/api/maintenance/run/' + encodeURIComponent(id), {}),
+    retryMaintenance: (id, itemId) => call('POST', '/api/maintenance/records/' + encodeURIComponent(id) + '/retry', itemId == null ? {} : { itemId }),
     getScheduledTasks: () => call('GET', '/api/scheduled-tasks'),
     saveScheduledTask: (id, patch) =>
       call('PATCH', '/api/scheduled-tasks/' + encodeURIComponent(String(id || '')), patch),
@@ -896,6 +913,12 @@ const BRIDGE_JS: &str = r#"
     // 状态以 getBackendStatus 为准 —— 它可能在界面订阅之前就发出去了。
     onBackendError: callback => on('backend:error', callback),
     onBackendReady: callback => on('backend:ready', callback),
+    // 先订阅再领取待办，避免窗口重建时丢失托盘点击。
+    onTrayUpdateCheck: callback => on('tray:check-update', callback, {
+      kind: 'WebviewWindow',
+      label: window.__TAURI_INTERNALS__.metadata.currentWebview.label,
+    }, callback),
+    takeTrayUpdateCheck: () => invoke('take_update_check_request'),
 
     // ── 本壳特有：后端就绪状态与端口冲突处置（界面可选使用） ──
     // 后端返回 { ready, phase, port, portFromEnv, failure }：failure 为 null 表示
