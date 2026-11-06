@@ -436,7 +436,13 @@ pub fn executable_provider_ids() -> Vec<String> {
 /// ── 回退顺序 ──────────────────────────────────────────────
 /// 1. `custom-` 前缀 → 先查 `custom_providers::label_of`（用户给的名字优先），
 ///    查不到（已被删除 / 手改数据塞进来的陌生 id）回显原 id；
-/// 2. 其余走注册表：登记的返回 `label`，未登记的原样回显。
+/// 2. 内置家走注册表：登记的返回 `label`；
+/// 3. 插件家（`ProviderKind` 枚举里没有的 runtime id）→ 先读**已安装包清单**的
+///    `providers[].label`，再退回**已握手加载**的执行体自报的名字 → 都没有才回显原 id。
+///
+/// 第 3 步的两级顺序不是冗余：清单在包没跑起来时也读得到（宿主崩溃 / 用户停用 /
+/// 网关刚启动握手未完成），执行体只在这家真的加载后才有。只查执行体会让「停用的
+/// 插件家」在界面上掉回一串英文 id —— 用户看不出那是什么。
 ///
 /// 回显成 id 而不是「未知」的理由不变：调用点手上的 id 来自真实数据（账号
 /// 记录、`owned_by`、日志），真出现未登记的 id 时，回显原文比一句笼统的
@@ -455,9 +461,13 @@ pub fn label_of(id: &str) -> String {
     match kind_from_id(id) {
         // 内置家优先读注册表：那是既有文案契约（插件接管后也不该改字）。
         Some(kind) => meta(kind).label.to_string(),
-        // runtime id 不靠占位 kind 取名：插件登记优先，最后回显原 ID。
-        None => crate::server::core::plugin_host::lookup(id)
-            .map(|adapter| adapter.label().to_string())
+        // runtime id 不靠占位 kind 取名：清单优先（停用/未握手也读得到），
+        // 再退回已加载执行体，最后回显原 ID。
+        None => crate::server::core::plugin_host::provider_label(id)
+            .or_else(|| {
+                crate::server::core::plugin_host::lookup(id)
+                    .map(|adapter| adapter.label().to_string())
+            })
             .unwrap_or_else(|| id.to_string()),
     }
 }
