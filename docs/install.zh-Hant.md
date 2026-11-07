@@ -173,6 +173,8 @@ Linux 寫在 `/etc/agent2api/agent2api.env`；Windows 改服務登錄檔的
 > 繞不過去。批量部署可以把已經配好的**資料目錄整個拷過去**（SQLite 庫 +
 > `account.key` 在同一個目錄裡），帳號隨之遷移。
 
+**Trae 回答完整性檢查（桌面端 / 伺服器端 / Docker）**：預設開啟。僅在排查相容性誤判時，才為閘道行程設定 `AGENT2API_TRAE_NO_REQUIRE_TERMINAL=1`（也接受 `true` / `yes` / `on`），再重新啟動閘道，讓外掛繼承新環境。關閉後可能再次把缺少上游結束訊號的半截回答視為成功；移除該變數並重新啟動即可恢復檢查。此開關需要包含此修復的「提供商增強」外掛。
+
 ## Docker
 
 映像標籤：`latest` 跟隨最新正式版，`beta` 跟隨最新 beta 預發布版；也可使用完整版本號（例如 `3.3.0-beta.3`）固定版本。要使用 beta，將下方命令或 Compose 設定中的 `aimodcc/agent2api:latest` 改為 `aimodcc/agent2api:beta`；更新時執行 `docker compose pull && docker compose up -d`。beta 發布不會改動 `latest`，手動開發建置只更新 `dev`。同一份映像也同步發布在 GitHub Container Registry：把映像名稱換成 `ghcr.io/aimod-cc/agent2api` 即可，標籤規則完全相同。

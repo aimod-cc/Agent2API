@@ -157,6 +157,8 @@ No Linux coloque-as em `/etc/agent2api/agent2api.env`; no Windows edite a chave 
 
 > **Contas não podem ser predefinidas**: elas exigem leitura de QR code / código por SMS / credenciais coladas, o que é decidido pelos protocolos do upstream — não há como contornar. Para implantação em massa, copie um **diretório de dados** já configurado (o banco SQLite e o `account.key` ficam lado a lado) e as contas vão junto.
 
+**Verificação de integridade da resposta do Trae (desktop / servidor / Docker)**: ativada por padrão. Somente ao investigar falsos positivos de compatibilidade, defina `AGENT2API_TRAE_NO_REQUIRE_TERMINAL=1` no ambiente do processo do gateway (`true`, `yes` e `on` também são aceitos) e reinicie o gateway para que o plugin herde o novo ambiente. Desativá-la pode voltar a aceitar respostas parciais sem o sinal de conclusão do upstream como bem-sucedidas; remova a variável e reinicie para restaurar a verificação. Essa opção exige o pacote de provedores que contém esta correção.
+
 ## Docker
 
 Tags da imagem: `latest` acompanha a versão estável mais recente, enquanto `beta` acompanha a pré-versão beta mais recente. Use uma versão completa, como `3.3.0-beta.3`, para fixá-la. Para usar beta, troque `aimodcc/agent2api:latest` por `aimodcc/agent2api:beta` no comando ou na configuração do Compose abaixo; atualize com `docker compose pull && docker compose up -d`. Versões beta não alteram `latest`, e builds manuais de desenvolvimento atualizam apenas `dev`. A mesma imagem também é publicada no GitHub Container Registry: troque o nome da imagem por `ghcr.io/aimod-cc/agent2api` (as regras de tag são idênticas).

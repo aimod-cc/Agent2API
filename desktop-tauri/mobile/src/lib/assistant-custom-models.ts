@@ -1,6 +1,7 @@
 import { apiCall } from '../api/client'
 import { t } from '../i18n'
 import type { ImageToolContext } from '../../../ui-shared/assistant-image-tools'
+import type { AssistantModelView } from '../../../ui-shared/assistant-read-models'
 import { checkToolSignal } from '../../../ui-shared/assistant-tool-execution'
 
 type Model = { id: string; enabled?: boolean; reasoning?: string; capabilities?: Record<string, unknown> }
@@ -29,10 +30,10 @@ async function providers(): Promise<Provider[]> {
   return data.providers
 }
 
-export async function readCustomModelView() {
+export async function readCustomModelView(): Promise<Required<AssistantModelView>> {
   const list = await providers()
-  const models: Array<Record<string, unknown>> = []
-  const mappings: Array<Record<string, unknown>> = []
+  const models: AssistantModelView['models'] = []
+  const mappings: AssistantModelView['mappings'] = []
   for (const provider of list) {
     const draft = draftOf(provider)
     for (const model of draft.models) {
@@ -44,7 +45,10 @@ export async function readCustomModelView() {
     for (const mapping of draft.mappings) mappings.push({ ...mapping, provider: provider.id,
       isDefault: false, dangling: !draft.models.some(model => same(model.id, mapping.target)) })
   }
-  return { models, mappings }
+  return {
+    models, mappings,
+    providers: list.map(provider => ({ provider: provider.id, providerLabel: provider.name || provider.id })),
+  }
 }
 
 async function update(id: string, mutate: (draft: Draft) => void, context?: ImageToolContext): Promise<void> {

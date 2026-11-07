@@ -157,6 +157,8 @@ On Linux put them in `/etc/agent2api/agent2api.env`; on Windows edit the service
 
 > **Accounts cannot be preset**: they need a QR scan / SMS code / pasted credentials, which the upstream protocols decide, so there is no way around it. For bulk deployment, copy a fully configured **data directory** over (the SQLite database and `account.key` live side by side), and the accounts move with it.
 
+**Trae response completeness check (desktop / server / Docker)**: enabled by default. Only when investigating compatibility false positives, set `AGENT2API_TRAE_NO_REQUIRE_TERMINAL=1` in the gateway process environment (`true`, `yes` and `on` are also accepted), then restart the gateway so the plugin inherits the new environment. Disabling it may once again accept partial replies without an upstream completion signal as successful; remove the variable and restart to restore the check. This switch requires the provider plugin package containing this fix.
+
 ## Docker
 
 Image tags: `latest` follows the latest stable release, while `beta` follows the latest beta prerelease. Use a full version such as `3.3.0-beta.3` to pin a version. To use beta, replace `aimodcc/agent2api:latest` with `aimodcc/agent2api:beta` in the command or Compose configuration below; update with `docker compose pull && docker compose up -d`. Beta releases never move `latest`, and manual development builds only update `dev`. The same image is also published to the GitHub Container Registry: replace the image name with `ghcr.io/aimod-cc/agent2api` (the tag rules are identical).

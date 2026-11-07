@@ -390,5 +390,8 @@
   "项目内读写允许修改当前项目；需要额外权限时，由你逐次审批，不会自动批准。": "Leitura e gravação no projeto permite alterar o projeto atual. Permissões adicionais exigem sua aprovação a cada vez e não são aprovadas automaticamente.",
   "项目目录": "Pasta do projeto",
   "首轮回答完成后自动总结；这会调用所选模型并消耗额度。": "Gera um título após a primeira resposta. Isso chama o modelo selecionado e consome cota.",
-  "默认行为": ""
+  "默认行为": "",
+  "按提供商名称查询模型、能力、来源与映射，支持自定义提供商。": "Consulta modelos, capacidades, fontes e mapeamentos pelo nome do provedor, incluindo provedores personalizados.",
+  "没有找到提供商「{name}」，请先不填 provider 查询，或用 keyword 搜索": "O provedor \"{name}\" não foi encontrado. Consulte primeiro sem provider ou pesquise com keyword",
+  "提供商「{name}」匹配到多家，请使用提供商 ID：{list}": "O provedor \"{name}\" corresponde a várias entradas. Use um ID de provedor: {list}"
 }
