@@ -171,6 +171,19 @@ function PluginsPage(): React.ReactElement {
     })
   }
 
+  async function cleanRuntime(): Promise<void> {
+    setScriptBusy(true)
+    try {
+      await api('POST', '/api/plugins/scripts/runtime/clean', {})
+      await load()
+      toast(t('Bun 运行时已清理，下次使用脚本插件时自动重新下载'), 'ok')
+    } catch (failure) {
+      toast(errorMessage(failure) || t('清理失败'), 'err')
+    } finally {
+      setScriptBusy(false)
+    }
+  }
+
   async function accept(result: PluginMutation): Promise<void> {
     setPayload(previous => previous ? { ...previous, ...result } : previous)
     await synchronize(result)
@@ -393,7 +406,8 @@ function PluginsPage(): React.ReactElement {
       </p>
     </div>
     <PluginSettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} onChanged={check} />
-    <PluginDiagnostics open={diagnosticsOpen} payload={payload} onClose={() => setDiagnosticsOpen(false)} />
+    <PluginDiagnostics open={diagnosticsOpen} payload={payload} onClose={() => setDiagnosticsOpen(false)}
+      onCleanRuntime={() => { void cleanRuntime() }} cleanRuntimeBusy={scriptBusy} />
     {settingsPack ? <PluginPackSettingsDialog key={settingsPack.id} pack={settingsPack}
       store={store.find(item => item.id === settingsPack.id)} update={updateOf(settingsPack.id)} operation={settingsOperation}
       disabled={locked || settingsOperation?.active === true} onClose={() => setSettingsPackId(null)}

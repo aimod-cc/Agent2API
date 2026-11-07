@@ -17,7 +17,7 @@ mod websocket;
 
 pub(crate) use login_ui::{decorate as decorate_login, remember as remember_login};
 pub(super) use websocket::{abort as abort_ws, open as open_ws, read as read_ws, send as send_ws};
-pub use operations::{change, install, operation};
+pub use operations::{change, clean_runtime, install, operation};
 pub(super) use protocol::{close as close_stream, open as open_stream, push as push_stream};
 pub(super) use runtime::{host, observe_concurrency, package_for_provider, registered_label};
 pub use runtime::{concurrency_default, known_provider, provider_state, snapshot, start};

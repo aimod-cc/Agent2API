@@ -42,10 +42,12 @@ export function PluginPageTools({ disabled, fileDisabled, scriptDisabled, script
   </Popover>
 }
 
-export function PluginDiagnostics({ open, payload, onClose }: {
+export function PluginDiagnostics({ open, payload, onClose, onCleanRuntime, cleanRuntimeBusy }: {
   open: boolean
   payload: PluginsPayload | null
   onClose: () => void
+  onCleanRuntime: () => void
+  cleanRuntimeBusy: boolean
 }) {
   return <Dialog open={open} onOpenChange={next => { if (!next) onClose() }}>
     <DialogContent className='text-foreground'>
@@ -57,7 +59,12 @@ export function PluginDiagnostics({ open, payload, onClose }: {
         {payload?.catalog.reason ? <div className='text-destructive'><GithubFailureText value={payload.catalog} t={t} /></div> : null}
         {payload?.host?.lastError ? <div className='break-words text-destructive'>{payload.host.lastError}</div> : null}
         {payload?.scripts ? <div className='flex flex-col gap-2 border-t border-hairline pt-3'>
-          <span>Bun {payload.scripts.runtime.version} · {payload.scripts.runtime.installed ? t('已下载') : t('按需下载')}</span>
+          <div className='flex flex-wrap items-center justify-between gap-2'>
+            <span>Bun {payload.scripts.runtime.version} · {payload.scripts.runtime.installed ? t('已下载') : t('按需下载')}</span>
+            {payload.scripts.runtime.installed ? <Button variant='outline' size='xs' disabled={cleanRuntimeBusy}
+              onClick={onCleanRuntime}>{cleanRuntimeBusy ? t('正在清理…') : t('清理运行时')}</Button> : null}
+          </div>
+          {payload.scripts.runtime.error ? <p className='m-0 text-destructive'>{payload.scripts.runtime.error}</p> : null}
           {payload.scripts.runtime.path ? <code className='break-all'>{payload.scripts.runtime.path}</code> : null}
           <p className='m-0'>{t('直接加载兼容的 Magpie / OpenCode v1 提供商包，多个插件共用一个 Bun 进程。')}</p>
           <p className='m-0'>{t('当前兼容无运行时 npm 依赖的提供商插件；不加载 Magpie 界面、Matrix 工具或 Pi 扩展。')}</p>

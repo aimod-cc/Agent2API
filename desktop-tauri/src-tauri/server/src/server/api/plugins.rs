@@ -59,6 +59,13 @@ pub async fn change_script(body: Bytes) -> Response {
     }
 }
 
+pub async fn clean_script_runtime() -> Response {
+    match plugin_host::script::clean_runtime() {
+        Ok(operation) => ok_json(operation),
+        Err(error) => management_error(400, error),
+    }
+}
+
 pub async fn settings() -> Response {
     ok_json(json!(plugin_host::settings::current()))
 }

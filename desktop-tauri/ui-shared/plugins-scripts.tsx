@@ -77,13 +77,18 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
 
   const stage = state.operation.stage === 'runtime' ? t('正在下载 Bun 运行时')
     : state.operation.stage === 'package' ? t('正在下载脚本插件')
+    : state.operation.stage === 'clean-runtime' ? t('正在清理 Bun 运行时')
     : state.operation.stage === 'waiting' ? t('等待脚本插件的在途请求和登录完成')
     : state.operation.stage === 'restoring' ? t('正在恢复原有脚本插件')
     : t('正在加载脚本插件')
   const failure = error || state.error || state.hostError || state.runtime.error || state.operation.error
 
   return <>
-    {failure ? <Alert variant='destructive' className='break-words'>{failure}</Alert> : null}
+    {failure ? <Alert variant='destructive' className='flex flex-wrap items-center justify-between gap-2 break-words'>
+      <span className='min-w-0 flex-1'>{failure}</span>
+      {state.runtime.installed ? <Button variant='outline' size='xs' disabled={locked}
+        onClick={() => { void act('/api/plugins/scripts/runtime/clean', {}) }}>{t('清理 Bun 运行时')}</Button> : null}
+    </Alert> : null}
     {state.operation.active ? <div className='space-y-2' aria-live='polite'>
       <div className='flex items-center justify-between gap-2 text-xs'><span>{stage}</span>
         {(state.operation.received || 0) > 0 ? <span className='tabular-nums text-muted-foreground'>{((state.operation.received || 0) / 1024 / 1024).toFixed(1)} MiB</span> : null}
