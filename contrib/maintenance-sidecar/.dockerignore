@@ -1,0 +1,9 @@
+*
+!Dockerfile
+!*.py
+!*.js
+!*.css
+!*.html
+!vendor-manifest.json
+!vendor/
+!vendor/**
