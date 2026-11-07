@@ -1,4 +1,5 @@
 import type { UpdateSettingsMode } from './updates'
+import type { GithubFailure } from './github-access'
 
 export type PackProvider = {
   id: string
@@ -42,7 +43,7 @@ export type ReleasePlatform = {
   current: boolean
 }
 
-export type StorePlugin = {
+export type StorePlugin = GithubFailure & {
   id: string
   name: string
   description: string
@@ -59,7 +60,7 @@ export type StorePlugin = {
   icon?: string | null
 }
 
-export type ReleaseState = {
+export type ReleaseState = GithubFailure & {
   available: boolean
   current: string
   plugins: StorePlugin[]
@@ -70,7 +71,7 @@ export type ReleaseState = {
   checkedAt?: number
 }
 
-export type PluginUpdate = {
+export type PluginUpdate = GithubFailure & {
   id: string
   available: boolean
   checked: boolean
@@ -120,7 +121,50 @@ export type PluginSettings = {
   saved?: boolean
 }
 
+export type ScriptPackage = {
+  id: string
+  name: string
+  version: string
+  source?: { kind: 'github'; repository: string; ref: string; commit: string; sha256: string }
+    | { kind: 'magpie'; file: string; integrity: string } | null
+  checkinAllowed?: boolean
+  enabled: boolean
+  installedAt: number
+  error?: string | null
+  running: boolean
+  providers: PackProvider[]
+}
+
+export type ScriptOperation = {
+  active: boolean
+  stage?: string
+  message?: string
+  received?: number
+  error?: string | null
+  updatedAt?: number
+}
+
+export type ScriptRecommendation = {
+  name: string
+  version: string
+  label: string
+  providers: string[]
+  source?: string
+  selector?: string
+}
+
+export type ScriptPluginsState = {
+  runtime: { version: string; installed: boolean; path?: string; error?: string | null }
+  packages: ScriptPackage[]
+  operation: ScriptOperation
+  error?: string | null
+  hostError?: string | null
+  recommended: ScriptRecommendation
+  recommendations?: ScriptRecommendation[]
+}
+
 export type PluginsPayload = {
+  scripts?: ScriptPluginsState
   packs: PackSummary[]
   host: HostState
   adminPanels?: string[]

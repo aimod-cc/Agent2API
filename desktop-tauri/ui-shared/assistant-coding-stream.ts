@@ -46,7 +46,6 @@ export async function followCodingSession(options: {
   consume: (event: Record<string, unknown>) => Promise<void> | void
   connection: (connected: boolean) => void
 }): Promise<void> {
-  let cursor = ''
   let attempt = 0
   while (!options.signal.aborted) {
     if (document.visibilityState === 'hidden') {
@@ -62,13 +61,11 @@ export async function followCodingSession(options: {
     try {
       connectTimer = setTimeout(abort, 15_000)
       const params = new URLSearchParams({ sessionId: options.id })
-      if (cursor) params.set('lastEventId', cursor)
       const response = await options.transport.stream(`${CODING_BASE}/events?${params}`, controller.signal)
       clearTimeout(connectTimer)
-      await readCodingEvents(response, controller.signal, async (event, id) => {
+      await readCodingEvents(response, controller.signal, async event => {
         if (event.type === 'connection-changed') { attempt = 0; options.connection(true) }
         await options.consume(event)
-        if (id) cursor = id
       })
     } catch {
       if (options.signal.aborted) return

@@ -313,6 +313,17 @@ pub async fn checkin_for(
     if crate::server::core::plugin_host::serves_provider(provider_id) {
         if let Some(adapter) = crate::server::core::providers::adapter::adapter_by_id(provider_id) {
             if adapter.plugin_checkin_capability() == Some(true) {
+                let daily = store.plugin_ledger(&id, "dailyCheckin");
+                if let Some(until) = crate::server::core::account_store::checkin_state::rolling_until(&daily)
+                    .filter(|until| *until > logging::now_ms())
+                {
+                    let outcome = daily.get("status").and_then(Value::as_str).unwrap_or("inactive");
+                    let outcome = if outcome == "claimed" { "done" } else { outcome };
+                    let claim = json!({ "success": false, "alreadyCompleted": outcome == "done",
+                        "outcome": outcome, "msg": daily.get("message"), "until": until,
+                        "cached": true, "dailyCheckin": daily });
+                    return claim_result(id.clone(), name, &display, true, Ok(claim));
+                }
                 let claim = adapter
                     .checkin_claim_with_options(store, &id, manual)
                     .await
@@ -633,7 +644,8 @@ pub(crate) async fn run_checkin_selected(
         if let Some(account_id) = row.get("id").and_then(Value::as_str) {
             // 判据是 [`day_completed`]（claim 说完成，或国际版活跃链路完成）——
             // 与台账的 outcome 判定同源；判据只此一份，别在这里再写一份。
-            if day_completed(&row) && !store.mark_checkin(account_id, logging::now_ms()) {
+            if day_completed(&row) && row.get("claim").and_then(|claim| claim.get("cached")).and_then(Value::as_bool) != Some(true)
+                && !store.mark_checkin(account_id, logging::now_ms()) {
                 logging::verbose(
                     "[Accounts]",
                     &format!("账号 {account_id} 的签到时间未能落盘（账号可能已被删除）"),

@@ -141,7 +141,13 @@ pub fn write(path: &Path, value: &mut Value, profile: &Profile) -> Result<Vec<Ch
         );
     }
     let imported = profile.native.entry.clone();
-    let mut entry = native_entry(value.get("providers").and_then(|v| v.get(id)), &imported)?;
+    let old_entry = value.get("providers").and_then(|v| v.get(id));
+    let changed_model = old_entry.and_then(|entry| entry.pointer("/settings/model")).and_then(Value::as_str) != Some(&profile.model)
+        || old_entry.and_then(|entry| entry.pointer("/settings/baseUrl")).and_then(Value::as_str) != Some(&profile.base_url);
+    let mut entry = native_entry(old_entry, &imported)?;
+    if changed_model {
+        for key in ["contextWindow", "maxTokens"] { remove(&mut entry, &["settings", key]); }
+    }
     set(&mut entry, &["settings", "provider"], json!(id))?;
     set(&mut entry, &["settings", "protocol"], json!("openai-chat"))?;
     set(
@@ -267,7 +273,9 @@ pub fn write(path: &Path, value: &mut Value, profile: &Profile) -> Result<Vec<Ch
             }
             set(&mut item, &["capabilities"], json!(caps))?;
         }
-        if !model.reasoning_levels.is_empty() {
+        if model.supports_reasoning == Some(false) {
+            remove(&mut item, &["reasoningOptions"]);
+        } else if !model.reasoning_levels.is_empty() {
             let mut options = item
                 .get("reasoningOptions")
                 .and_then(Value::as_array)

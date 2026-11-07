@@ -8,7 +8,8 @@ export type DailyCheckinState = {
   completedCount: number
   totalCount: number
   sourcesComplete: boolean
-  kind?: 'plans'
+  kind?: 'plans' | 'rolling'
+  until?: number | null
   status?: DailyCheckinStatus
   message?: string
   retryAt?: number | null

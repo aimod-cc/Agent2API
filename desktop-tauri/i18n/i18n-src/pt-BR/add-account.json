@@ -1,4 +1,10 @@
 {
+  "Cloudflare Account ID（32 位十六进制）": "ID da conta Cloudflare (32 caracteres hexadecimais)",
+  "由插件打开浏览器登录": "Entrar pelo navegador do plugin",
+  "插件会在网关电脑上启动独立浏览器并读取登录结果，不使用系统默认浏览器。": "O plugin abre um navegador separado na máquina do gateway e lê o resultado do login. Ele não usa o navegador padrão do sistema.",
+  "内嵌窗口登录": "Entrar na janela integrada",
+  "在应用内嵌窗口完成 WPS 登录，登录凭据仅交给原插件校验并保存到当前网关。": "Entre no WPS pela janela integrada do aplicativo. As credenciais são entregues apenas ao plugin original para validação e salvas neste gateway.",
+  "读取的是网关电脑上已登录的客户端，不是打开面板的电脑；也可改用粘贴凭据。": "Lê o cliente conectado na máquina do gateway, não no computador que exibe o painel. Também é possível colar as credenciais.",
   "导入 QuWork 本机登录态": "Importar login local do QuWork",
   "读取运行网关的电脑上已登录的 QuWork，只保存本机引用，不修改官方客户端文件；切换账号后需重新导入。": "Lê o QuWork conectado na máquina do gateway e salva apenas uma referência local, sem alterar arquivos oficiais. Importe novamente após trocar de conta.",
   "QuWork 凭证": "Credenciais QuWork",

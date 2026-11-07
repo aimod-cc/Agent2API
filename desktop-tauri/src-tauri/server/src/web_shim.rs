@@ -1467,7 +1467,7 @@ pub fn shim_js() -> &'static str {
         // 不压缩第四参 socialRestore；第五参对象保持原字段/原值（含 proxy:null）。
         if (options !== undefined) body.options = options;
         if (dynamic) {
-          body.mode = mode || 'embedded';
+          body.mode = 'external';
           body.socialRestore = socialRestore === true;
           // 兼容当前 API 的平铺读取；options 字段也完整保留给新端点。
           body.methodIndex = options.methodIndex;

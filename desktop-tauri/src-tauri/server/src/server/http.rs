@@ -687,6 +687,8 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/plugins", get(api::plugins::list))
         .route("/api/plugins/settings", get(api::plugins::settings).patch(api::plugins::save_settings))
         .route("/api/plugins/progress", get(api::plugins::progress))
+        .route("/api/plugins/scripts/install", post(api::plugins::install_script))
+        .route("/api/plugins/scripts/change", post(api::plugins::change_script))
         .route(
             "/api/plugins/install",
             post(api::plugins::install).route_layer(axum::extract::DefaultBodyLimit::max(

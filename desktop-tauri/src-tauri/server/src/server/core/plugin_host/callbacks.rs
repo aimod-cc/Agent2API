@@ -188,6 +188,11 @@ impl Host {
         let value = |key: &str| params.get(key).cloned().unwrap_or(serde_json::Value::Null);
 
         let authorization = match method.as_str() {
+            "script.http.open" | "script.http.read" | "script.http.close" | "script.protocol.request"
+            | "script.stream.open" | "script.stream.push" | "script.stream.close"
+            | "script.ws.open" | "script.ws.read" | "script.ws.send" | "script.ws.abort" | "script.proxy.resolve" => {
+                if self.options.script { Ok(()) } else { Err(proto::WireError::with_code("不是脚本插件宿主", CALLBACK_FORBIDDEN)) }
+            }
             proto::methods::plugin::STORE_GET => {
                 let provider = text("provider");
                 let account = text("account");
@@ -215,6 +220,18 @@ impl Host {
             return;
         }
         let outcome: Result<serde_json::Value, proto::WireError> = match method.as_str() {
+            "script.http.open" => super::script::open(&params).await,
+            "script.http.read" => super::script::read_http(&params).await,
+            "script.http.close" => { super::script::close_http(&params); Ok(serde_json::Value::Null) }
+            "script.ws.open" => super::script::open_ws(&params).await,
+            "script.ws.read" => super::script::read_ws(&params).await,
+            "script.ws.send" => super::script::send_ws(&params).await,
+            "script.ws.abort" => { super::script::abort_ws(&params); Ok(serde_json::Value::Null) }
+            "script.proxy.resolve" => super::script::resolve_proxy(&params),
+            "script.protocol.request" => super::script::convert_request(&params),
+            "script.stream.open" => super::script::open_stream(&params),
+            "script.stream.push" => super::script::push_stream(&params),
+            "script.stream.close" => { super::script::close_stream(&params); Ok(serde_json::Value::Null) }
             "transport.capabilities" => Ok(serde_json::json!({ "multipart": true })),
             proto::methods::plugin::STORE_GET => {
                 self.callbacks.store_get(text("provider"), text("account")).await

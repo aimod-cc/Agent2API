@@ -1,3 +1,5 @@
+import type { GithubFailure } from './github-access'
+
 export type ForceUpdatePolicy = { required: boolean; minimumVersion: string; targetVersion: string; message: string; source?: string }
 
 export type UpdateCapability = {
@@ -115,8 +117,30 @@ export function assetMissingReason(
     : t('这一版没有为当前平台提供安装包')
 }
 
+export function githubFailureMessage(value: GithubFailure, t: Translator, settings: 'update' | 'plugin', now = Date.now()): string {
+  if (!value.rateLimited && !value.rateLimits?.length) return githubErrorMessage(value.reason, t, settings)
+  const active = (value.rateLimits || []).filter(limit => limit.retryAt > now)
+  if (!active.length) return t('上次 GitHub 限流的等待时间已结束，可重新检查')
+  const first = active.reduce((left, right) => left.retryAt <= right.retryAt ? left : right)
+  const source = [...new Set(active.map(limit => limit.source === 'official' ? t('官方源') : limit.label))].join(' / ')
+  const params = { source, seconds: Math.ceil((first.retryAt - now) / 1000) }
+  const message = first.retrySource === 'fallback'
+    ? t('GitHub 源「{source}」限流，{seconds} 秒后可重试（上游未提供恢复时间）', params)
+    : t('GitHub 源「{source}」限流，请在 {seconds} 秒后重试', params)
+  return value.canRetry ? t('{message}；其他线路可重新检查', { message }) : message
+}
+
 export function githubErrorMessage(error: unknown, t: Translator, settings: 'update' | 'plugin'): string {
   const message = error instanceof Error ? error.message : String(error ?? '')
+  const sourceLimit = /^GitHub 源「(.+)」限流，(?:请在 )?(\d+) 秒后(?:重试|可重试)(（上游未提供恢复时间）)?(；其他线路可重新检查)?$/.exec(message)
+  if (sourceLimit) {
+    const params = { source: sourceLimit[1] === '官方源' ? t('官方源') : sourceLimit[1], seconds: sourceLimit[2] }
+    const text = sourceLimit[3]
+      ? t('GitHub 源「{source}」限流，{seconds} 秒后可重试（上游未提供恢复时间）', params)
+      : t('GitHub 源「{source}」限流，请在 {seconds} 秒后重试', params)
+    return sourceLimit[4] ? t('{message}；其他线路可重新检查', { message: text }) : text
+  }
+  if (message === '上次 GitHub 限流的等待时间已结束，可重新检查') return t('上次 GitHub 限流的等待时间已结束，可重新检查')
   if (message === 'GitHub 接口限流中，请在「更新设置」的「GitHub 令牌」中填写凭证，以提高请求限额。'
     || message === 'GitHub 接口限流中，请在「插件设置」的「GitHub 令牌」中填写凭证，以提高请求限额。') {
     return settings === 'plugin'

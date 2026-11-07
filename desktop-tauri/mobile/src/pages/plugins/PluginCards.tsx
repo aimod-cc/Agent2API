@@ -3,6 +3,7 @@ import { Badge } from '../../components/ui'
 import type { PackSummary, PluginOperation, PluginUpdate, StorePlugin } from '../../api/plugins'
 import { pluginErrorMessage } from '../../api/plugins'
 import { t } from '../../i18n'
+import { GithubFailureText } from '../../../../ui-shared/github-failure'
 
 function PluginProgress({ operation }: { operation?: PluginOperation }) {
   if (!operation) return null
@@ -43,7 +44,7 @@ export function StorePluginCard({ item, target, busy, operation, onInstall }: {
     <Head name={item.name || item.id} version={item.version} icon={item.icon} />
     <p className='m-ck-note'>{t(item.description)}</p>
     {item.official ? <Badge tone='brand'>{t('官方')}</Badge> : null}
-    {item.reason ? <p className={item.error ? 'm-ck-error' : 'm-ck-note'}>{pluginErrorMessage(item.reason)}</p> : null}
+    {item.reason ? <p className={item.error ? 'm-ck-error' : 'm-ck-note'}><GithubFailureText value={item} t={t} /></p> : null}
     <PluginProgress operation={operation} />
     {!operation?.active ? <div className='m-ck-actions'>
       <Button size='sm' disabled={busy || !asset || !item.version || item.error} onClick={onInstall}>{t('在网关下载并安装')}</Button>
@@ -79,14 +80,14 @@ export function PluginCard({ pack, target, busy, update, operation, onEnabled, o
       <p className='m-ck-note'>{pack.signed
         ? t('正在自动补齐官方插件，不受日常更新开关和通道限制。')
         : t('未签名包不会自动覆盖；点击「补齐插件」将安装官方签名包。')}</p>
-      {update?.reason ? <p className={update.error ? 'm-ck-error' : 'm-ck-note'}>{pluginErrorMessage(update.reason)}</p> : null}
+      {update?.reason ? <p className={update.error ? 'm-ck-error' : 'm-ck-note'}><GithubFailureText value={update} t={t} /></p> : null}
       {update?.retryAt && update.retryAt > Date.now() ? <p className='m-ck-note'>
         {t('下次自动重试：{time}', { time: new Date(update.retryAt).toLocaleString() })}
       </p> : null}
     </div> : null}
     {!pack.entryPresent ? <p className='m-ck-error'>{t('插件文件缺失，请重新安装插件包')}</p> : null}
     {pack.host?.lastError ? <p className='m-ck-error'>{pack.host.lastError}</p> : null}
-    {update?.reason && !required ? <p className={update.error ? 'm-ck-error' : 'm-ck-note'}>{pluginErrorMessage(update.reason)}</p> : null}
+    {update?.reason && !required ? <p className={update.error ? 'm-ck-error' : 'm-ck-note'}><GithubFailureText value={update} t={t} /></p> : null}
     <PluginProgress operation={operation} />
     <div className='m-ck-actions'>
       <Label className='m-ck-toolbar m-ck-note'>

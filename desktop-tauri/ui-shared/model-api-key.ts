@@ -59,7 +59,7 @@ export function requestClientLabel(entry: RequestIdentity, t: Translate): string
   if (entry.client === 'other' && entry.clientEvidence?.candidate) return `${entry.clientEvidence.candidate} · ${t('待确认')}`
   switch (entry.client) {
     case 'model_test': return t('模型测试')
-    case 'assistant': return t('AI 助手')
+    case 'assistant': return t('模型对话')
     case 'assistant_images': return t('助手图片工具')
     case 'assistant_title': return t('助手标题总结')
     case 'image-generation': return `${t('图片生成')} MCP`

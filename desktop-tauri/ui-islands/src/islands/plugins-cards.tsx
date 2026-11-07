@@ -1,29 +1,9 @@
-import * as React from 'react'
-import { Badge, Button, Progress, Switch, Label, Card as UiCard } from '@ui'
-import { errorMessage, formatSize, formatTime, platformLabel, pluginDescription, pluginName } from './plugins-shared'
+import { Badge, Button, Progress, Switch } from '@ui'
+import { errorMessage, formatSize, formatTime, pluginDescription, pluginName } from './plugins-shared'
 import type { HostState, PackSummary, PluginOperation, PluginUpdate, StorePlugin } from './plugins-types'
 import { t } from '../i18n'
-
-function Card({ children, installed }: { children: React.ReactNode; installed?: boolean }) {
-  return <UiCard render={<article />} className={'flex flex-col ' + (installed ? 'border-success/40' : '')}>{children}</UiCard>
-}
-
-function CardHead({ id, name, version, icon, children }: {
-  id: string; name: string; version?: string | null; icon?: string | null; children?: React.ReactNode
-}) {
-  const title = pluginName(id, name)
-  return <div className='flex gap-3 px-4 pt-4'>
-    <div className='grid size-11 shrink-0 place-items-center overflow-hidden rounded-xl bg-primary-soft text-[19px] font-bold text-primary-fg'>
-      {icon ? <img src={icon} alt='' className='size-full object-cover' /> : title.slice(0, 1)}
-    </div>
-    <div className='min-w-0 flex flex-1 flex-col gap-1.5'>
-      <h3 className='flex flex-wrap items-center gap-2 text-[14px] font-semibold leading-snug'>
-        {title}{version ? <span className='text-[11.5px] font-normal tabular-nums text-muted-foreground'>v{version}</span> : null}
-      </h3>
-      <div className='flex flex-wrap gap-1.5'>{children}</div>
-    </div>
-  </div>
-}
+import { GithubFailureText } from '../../../ui-shared/github-failure'
+import { PluginGetButton, PluginSettingsButton, PluginStoreCard } from '../../../ui-shared/plugins-store'
 
 export function OperationProgress({ operation }: { operation: PluginOperation }) {
   const stage = operation.stage === 'downloading' ? t('正在下载…')
@@ -32,8 +12,8 @@ export function OperationProgress({ operation }: { operation: PluginOperation })
     : operation.stage === 'loading' ? t('正在加载新插件…')
     : operation.stage === 'restoring' ? t('正在恢复旧版本插件…') : t('正在安装…')
   const download = operation.stage === 'downloading'
-  return <div className='px-4 pb-4 pt-3' aria-live='polite'>
-    <div className='mb-1.5 flex items-center justify-between gap-2 text-[11.5px]'>
+  return <div aria-live='polite'>
+    <div className='mb-1.5 flex flex-wrap items-center justify-between gap-2 text-[11.5px]'>
       <span className='text-subtle'>{operation.required ? `${t('正在补齐插件…')} · ${stage}` : stage}</span>
       <span className='tabular-nums text-muted-foreground'>
         {download ? (operation.total > 0
@@ -42,6 +22,46 @@ export function OperationProgress({ operation }: { operation: PluginOperation })
       </span>
     </div>
     <Progress value={download ? operation.percent : null} aria-label={stage} />
+  </div>
+}
+
+export function PluginUpdateDetails({ pack, update, operation, disabled, onUpdate, onNotes }: {
+  pack: PackSummary
+  update?: PluginUpdate
+  operation?: PluginOperation
+  disabled: boolean
+  onUpdate: () => void
+  onNotes: () => void
+}) {
+  const required = pack.updateRequired === true
+  return <div className='flex flex-col gap-3'>
+    {required ? <div className='text-[12px] leading-relaxed'>
+      <p className='m-0 font-medium text-destructive'>{t('当前网关要求插件版本不低于 v{version}，补齐前暂不加载。', { version: pack.requiredVersion || '' })}</p>
+      <p className='m-0 mt-1 text-subtle'>{pack.signed
+        ? t('正在自动补齐官方插件，不受日常更新开关和通道限制。')
+        : t('未签名包不会自动覆盖；点击「补齐插件」将安装官方签名包。')}</p>
+      {update?.retryAt && update.retryAt > Date.now() ? <p className='m-0 mt-1 text-subtle'>
+        {t('下次自动重试：{time}', { time: formatTime(update.retryAt) })}
+      </p> : null}
+    </div> : null}
+    <div className='flex flex-wrap items-center justify-between gap-3'>
+      <span className='text-[12px] text-muted-foreground'>
+        {update?.available ? t('可更新到 v{version}', { version: update.latest || '' })
+          : required || update?.error ? null : update?.checked ? errorMessage(update.reason) || t('已是最新') : t('尚未检查更新')}
+      </span>
+      <div className='flex flex-wrap items-center gap-2'>
+        {update?.latest ? <Button variant='outline' size='sm' onClick={onNotes}>{t('查看更新日志')}</Button> : null}
+        {required || update?.available ? <Button size='sm'
+          disabled={disabled || operation?.active || update?.repairing || (!required && update?.error)} onClick={onUpdate}>
+          {required ? update?.repairing ? t('正在补齐插件…') : t('补齐插件') : t('更新到 v{version}', { version: update?.latest || '' })}
+        </Button> : null}
+      </div>
+    </div>
+    {update?.reason && (update.error || required) ? <div className='text-[12px] text-destructive'><GithubFailureText value={update} t={t} /></div> : null}
+    {!pack.entryPresent ? <p className='m-0 text-[12px] text-destructive'>{t('插件包的可执行文件不在磁盘上（可能被手工删除或移动），请重新安装。')}</p> : null}
+    {operation?.error ? <p className='m-0 text-[12px] text-destructive'>{errorMessage(operation.error)}</p> : null}
+    {operation?.hostError ? <p className='m-0 text-[12px] text-warning'>{operation.hostError}</p> : null}
+    {operation?.active ? <OperationProgress operation={operation} /> : null}
   </div>
 }
 
@@ -55,28 +75,22 @@ export function StorePluginCard({ item, target, operation, disabled, onInstall, 
 }) {
   const platform = item.platforms.find(platform => platform.target === target)
   const installable = Boolean(item.version && platform && !item.error)
-  return <Card>
-    <CardHead id={item.id} name={item.name} version={item.version} icon={item.icon}>
-      {item.official ? <Badge variant='brand'>{t('官方')}</Badge> : null}
-      {item.prerelease ? <Badge variant='warning'>{t('beta 版')}</Badge> : null}
-      {!item.version ? <Badge variant='outline'>{t('暂未发布')}</Badge> : null}
-    </CardHead>
-    <p className='px-4 pt-2.5 text-[12px] leading-relaxed text-subtle'>
-      {pluginDescription(item.id, item.description)}
-    </p>
-    <div className='flex flex-wrap gap-3 px-4 pt-3 text-[11px] text-muted-foreground'>
-      <span>{platformLabel(target)}</span><span>{formatSize(platform?.size || 0) || t('当前平台暂无包')}</span>
-    </div>
-    {item.error ? <p className='px-4 pt-2 text-[12px] text-destructive'>{errorMessage(item.reason)}</p> : null}
-    {operation?.error ? <p className='px-4 pt-2 text-[12px] text-destructive'>{errorMessage(operation.error)}</p> : null}
-    {operation?.active ? <OperationProgress operation={operation} /> : <div className='mt-auto flex gap-2 px-4 pb-4 pt-3.5'>
-      <Button size='sm' disabled={disabled || !installable} onClick={onInstall}>{t('下载并安装')}</Button>
-      {item.version ? <Button variant='outline' size='sm' onClick={onNotes}>{t('查看更新日志')}</Button> : null}
-    </div>}
-  </Card>
+  return <PluginStoreCard t={t} name={pluginName(item.id, item.name)} description={pluginDescription(item.id, item.description)}
+    version={item.version} icon={item.icon} artwork={item.id === 'agent2api-web-providers' ? 'web' : 'providers'}
+    official={item.official} status='missing'
+    badges={<>{item.prerelease ? <Badge variant='warning' shape='tag'>{t('beta 版')}</Badge> : null}
+      {!item.version ? <Badge variant='outline' shape='tag'>{t('暂未发布')}</Badge> : null}</>}
+    actions={<PluginGetButton t={t} disabled={disabled || operation?.active === true || !installable} onClick={onInstall} />}
+    footerAction={item.version ? <Button variant='link' size='xs' onClick={onNotes}>{t('更新日志')}</Button> : null}
+    feedback={<>
+      {item.version && !platform ? <p className='m-0 text-[12px] text-warning'>{t('当前平台暂无包')}</p> : null}
+      {item.error ? <div className='text-[12px] text-destructive'><GithubFailureText value={item} t={t} /></div> : null}
+      {operation?.error ? <p className='m-0 text-[12px] text-destructive'>{errorMessage(operation.error)}</p> : null}
+      {operation?.active ? <OperationProgress operation={operation} /> : null}
+    </>} />
 }
 
-export function InstalledPluginCard({ pack, store, host, update, operation, disabled, onEnabled, onSettings, onRemove, onUpdate, onNotes }: {
+export function InstalledPluginCard({ pack, store, host, update, operation, disabled, onEnabled, onSettings }: {
   pack: PackSummary
   store?: StorePlugin
   host: HostState
@@ -85,71 +99,33 @@ export function InstalledPluginCard({ pack, store, host, update, operation, disa
   disabled: boolean
   onEnabled: (enabled: boolean) => void
   onSettings: () => void
-  onRemove: () => void
-  onUpdate: () => void
-  onNotes: () => void
 }) {
-  const required = pack.updateRequired === true
-  const blocked = update?.error === true && !required
   const packHost = pack.host === undefined ? host : pack.host
-  return <Card installed>
-    <CardHead id={pack.id} name={store?.name || pack.name} version={pack.version} icon={pack.icon || store?.icon}>
-      <Badge variant={pack.enabled ? 'default' : 'secondary'}>{pack.enabled ? t('已启用') : t('已停用')}</Badge>
-      <Badge variant={pack.signed ? 'success' : 'warning'}>{pack.signed ? t('已签名') : t('未签名')}</Badge>
-      {pack.version.includes('-') ? <Badge variant='warning'>{t('beta 版')}</Badge> : null}
-      {required ? <Badge variant='destructive'>{t('需要补齐插件')}</Badge>
-        : update?.available ? <Badge variant='brand'>{t('有更新')}</Badge> : null}
-      {!pack.entryPresent ? <Badge variant='destructive'>{t('文件缺失')}</Badge> : null}
-    </CardHead>
-    <p className='px-4 pt-2.5 text-[12px] leading-relaxed text-subtle'>
-      {pluginDescription(pack.id, store?.description || pack.description)}
-    </p>
-    <p className='px-4 pt-2 text-[11px] text-muted-foreground'>
-      {t('{count} 家提供商 · 安装于 {time}', { count: String(pack.providers.length), time: formatTime(pack.installedAt) })}
-    </p>
-    <div className='flex flex-wrap gap-3 px-4 pt-3 text-[11px] text-muted-foreground'>
-      <span>{packHost?.running ? t('运行中') : t('未运行')}</span>
-      <span>{t('已加载')} {t('{count} 家', { count: String(pack.providers.filter(provider => provider.loaded).length) })}</span>
-    </div>
-    {required ? <div className='mx-4 mt-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-[12px]' aria-live='polite'>
-      <p className='font-medium text-destructive'>{t('当前网关要求插件版本不低于 v{version}，补齐前暂不加载。', { version: pack.requiredVersion || '' })}</p>
-      <p className='mt-1 text-subtle'>{pack.signed
-        ? t('正在自动补齐官方插件，不受日常更新开关和通道限制。')
-        : t('未签名包不会自动覆盖；点击「补齐插件」将安装官方签名包。')}</p>
-      {update?.reason ? <p className={'mt-1 ' + (update.error ? 'text-destructive' : 'text-subtle')}>{errorMessage(update.reason)}</p> : null}
-      {update?.retryAt && update.retryAt > Date.now() ? <p className='mt-1 text-subtle'>
-        {t('下次自动重试：{time}', { time: formatTime(update.retryAt) })}
+  const running = pack.enabled && packHost?.running === true && pack.entryPresent && !pack.updateRequired
+  const name = pluginName(pack.id, store?.name || pack.name)
+  return <PluginStoreCard t={t} name={name} description={pluginDescription(pack.id, store?.description || pack.description)}
+    version={pack.version} icon={pack.icon || store?.icon} artwork={pack.id === 'agent2api-web-providers' ? 'web' : 'providers'}
+    official={store?.official} status={!pack.enabled ? 'disabled' : running ? 'running' : 'unavailable'}
+    providerCount={pack.providers.length} enabledCount={pack.providers.filter(provider => provider.enabled).length}
+    badges={<>
+      {pack.updateRequired ? <Badge variant='destructive' shape='tag'>{t('需要补齐插件')}</Badge>
+        : update?.available ? <Badge variant='brand' shape='tag'>{t('有更新')}{update.latest ? ` v${update.latest}` : ''}</Badge> : null}
+      {pack.version.includes('-') ? <Badge variant='warning' shape='tag'>{t('beta 版')}</Badge> : null}
+      {!pack.entryPresent ? <Badge variant='destructive' shape='tag'>{t('文件缺失')}</Badge> : null}
+    </>}
+    actions={<>
+      <PluginSettingsButton t={t} name={name} onClick={onSettings} />
+      <Switch checked={pack.enabled} disabled={disabled} aria-label={`${t('启用')} ${name}`} onCheckedChange={onEnabled} />
+    </>}
+    feedback={<>
+      {pack.updateRequired ? <p className='m-0 text-[12px] leading-relaxed text-destructive'>
+        {t('当前网关要求插件版本不低于 v{version}，补齐前暂不加载。', { version: pack.requiredVersion || '' })}
+        <Button variant='link' size='xs' onClick={onSettings}>{t('补齐插件')}</Button>
       </p> : null}
-    </div> : null}
-    {!pack.entryPresent ? <p className='px-4 pt-2 text-[12px] text-destructive'>
-      {t('插件包的可执行文件不在磁盘上（可能被手工删除或移动），请重新安装。')}
-    </p> : null}
-    {update?.available && !required ? <div className='mx-4 mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-hairline pt-3'>
-      <span className='text-[12px] font-medium text-primary-fg'>
-        {t('可更新到 v{version}', { version: update.latest || '' })}
-      </span>
-      <div className='flex items-center gap-2 text-[12px] text-subtle'>
-        {t('更新日志')}<Button variant='outline' size='xs' onClick={onNotes}>{t('查看')}</Button>
-      </div>
-    </div> : null}
-    {update?.error && !required ? <p className='px-4 pt-2 text-[12px] text-destructive'>{errorMessage(update.reason)}</p> : null}
-    {operation?.error ? <p className='px-4 pt-2 text-[12px] text-destructive'>{errorMessage(operation.error)}</p> : null}
-    {packHost?.lastError ? <p className='px-4 pt-2 text-[12px] text-destructive'>{packHost.lastError}</p> : null}
-    {operation?.hostError ? <p className='px-4 pt-2 text-[12px] text-warning'>{operation.hostError}</p> : null}
-    {operation?.active ? <OperationProgress operation={operation} /> : <div className='mt-auto flex flex-wrap items-center gap-2 px-4 pb-4 pt-3.5'>
-      <Label className='flex items-center gap-1.5 text-[12px] text-subtle'>
-        {t('启用')}<Switch checked={pack.enabled} disabled={disabled} onCheckedChange={value => onEnabled(value === true)} />
-      </Label>
-      <Button variant='outline' size='sm' onClick={onSettings} aria-haspopup='dialog'>{t('设置')}</Button>
-      <Button variant='outline' size='sm' disabled={disabled} onClick={onRemove}>{t('卸载')}</Button>
-      <span className='flex-1' />
-      {required ? <Button size='sm' disabled={disabled || update?.repairing === true} onClick={onUpdate}>
-        {update?.repairing ? t('正在补齐插件…') : t('补齐插件')}
-      </Button> : update?.available ? <Button size='sm' disabled={disabled || blocked} onClick={onUpdate}>
-        {t('更新到 v{version}', { version: update.latest || '' })}
-      </Button> : <span className={'text-[11px] ' + (update?.error ? 'text-destructive' : 'text-muted-foreground')}>
-        {update?.checked ? errorMessage(update.reason) || t('已是最新') : t('尚未检查更新')}
-      </span>}
-    </div>}
-  </Card>
+      {update?.error && !pack.updateRequired ? <div className='text-[12px] text-destructive'><GithubFailureText value={update} t={t} /></div> : null}
+      {operation?.error ? <p className='m-0 break-words text-[12px] text-destructive'>{errorMessage(operation.error)}</p> : null}
+      {packHost?.lastError ? <p className='m-0 break-words text-[12px] text-destructive'>{packHost.lastError}</p> : null}
+      {operation?.hostError ? <p className='m-0 break-words text-[12px] text-warning'>{operation.hostError}</p> : null}
+      {operation?.active ? <OperationProgress operation={operation} /> : null}
+    </>} />
 }

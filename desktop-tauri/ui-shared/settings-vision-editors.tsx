@@ -1,23 +1,17 @@
 /**
- * 视觉模型选择器与「模型单独配置」编辑弹窗。
+ * 图片兼容用到的两个选择器。
  *
  * 与旧版的区别（旧的 VisionTargetPicker：来源 + 搜索框 + 模型下拉 + 思考等级）：
  *   · 模型下拉并入了一层 —— 第一项是「沿用工具服务的视觉分析模型」，其余是具体模型，
  *     不再要求用户先理解「来源」这层概念；
- *   · 搜索框去掉（Base UI 的 Select 本来就能输入跳转），思考等级抽成独立的
- *     VisionReasoningSelect，放进面板的「更多设置」。
+ *   · 思考等级抽成独立的 VisionReasoningSelect，放在面板的「更多设置」里。
  *
  * 配置语义没变：选到具体模型 = 旧的「单独指定」+ 目标模型。
  */
 
-import * as React from 'react'
-import {
-  Alert, Button, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle,
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue, cn,
-} from '@ui'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue, cn } from '@ui'
 import type { Translate } from './assistant-read-types'
-import { FooterNote, Group, Row } from './settings-vision-rows'
-import { visionTargetKey, type VisionModel, type VisionOverride } from './settings-vision-types'
+import { visionTargetKey, type VisionModel } from './settings-vision-types'
 
 /**
  * 并入一层的视觉模型选择器。
@@ -59,7 +53,7 @@ export function VisionModelSelect({ models, value, onValueChange, t, includeShar
   </Select>
 }
 
-/** 思考等级：只影响识读那一步，默认跟随模型自身配置 */
+/** 思考等级：只影响读图那一步，默认跟随模型自身配置 */
 export function VisionReasoningSelect({ value, onValueChange, t, disabled, className }: {
   value: string
   onValueChange: (next: string) => void
@@ -78,49 +72,4 @@ export function VisionReasoningSelect({ value, onValueChange, t, disabled, class
     </SelectTrigger>
     <SelectContent>{levels.map(level => <SelectItem key={level.value} value={level.value}>{level.label}</SelectItem>)}</SelectContent>
   </Select>
-}
-
-/** 「模型单独配置」的编辑弹窗：保存时挡住重复的提供商 + 模型 */
-export function VisionOverrideEditor({ models, initial, onSave, onClose, t }: {
-  models: VisionModel[]; initial?: VisionOverride; onSave(value: VisionOverride): string | void; onClose(): void; t: Translate
-}) {
-  const [value, setValue] = React.useState(initial ? visionTargetKey(initial) : '')
-  const [mode, setMode] = React.useState<VisionOverride['mode']>(initial?.mode || 'assist')
-  const [error, setError] = React.useState('')
-  const selected = models.find(model => visionTargetKey(model) === value)
-  const choices = [
-    { value: 'assist', label: t('辅助识图 · 原模型回答') },
-    { value: 'reroute', label: t('切换视觉模型 · 视觉模型回答') },
-    { value: 'off', label: t('不做图片兼容') },
-  ]
-
-  return <Dialog open onOpenChange={open => { if (!open) onClose() }}><DialogContent>
-    <DialogHeader><DialogTitle>{initial ? t('修改模型单独配置') : t('添加模型单独配置')}</DialogTitle></DialogHeader>
-    <DialogBody className='gap-3'>
-      <p className='m-0 text-[12.5px] leading-relaxed text-muted-foreground'>{t('只覆盖指定提供商的指定模型，其余跟随全局。')}</p>
-      <Group>
-        <Row first label={t('提供商与模型')} control={
-          <VisionModelSelect models={models} value={value} onValueChange={setValue} t={t} anyModel />
-        } />
-        <Row label={t('处理方式')} description={t('沿用对应方式的视觉模型配置，不额外维护一份模型列表。')} control={
-          <Select value={mode} onValueChange={next => setMode(next as VisionOverride['mode'])}>
-            <SelectTrigger className='w-[260px]' aria-label={t('处理方式')}>
-              <SelectValue>{choices.find(choice => choice.value === mode)?.label}</SelectValue>
-            </SelectTrigger>
-            <SelectContent>{choices.map(choice => <SelectItem key={choice.value} value={choice.value}>{choice.label}</SelectItem>)}</SelectContent>
-          </Select>
-        } />
-      </Group>
-      <FooterNote>{selected
-        ? t('这条配置将对 {model} 生效。', { model: `${selected.providerLabel} · ${selected.name || selected.model}` })
-        : t('选好模型后这条配置才会生效。')}</FooterNote>
-      {error ? <Alert variant='destructive'>{error}</Alert> : null}
-    </DialogBody>
-    <DialogFooter>
-      <Button variant='outline' onClick={onClose}>{t('取消')}</Button>
-      <Button disabled={!selected} onClick={() => {
-        if (selected) setError(onSave({ provider: selected.provider, model: selected.model, mode }) || '')
-      }}>{initial ? t('保存修改') : t('添加配置')}</Button>
-    </DialogFooter>
-  </DialogContent></Dialog>
 }

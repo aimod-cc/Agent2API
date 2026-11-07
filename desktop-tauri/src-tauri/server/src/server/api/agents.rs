@@ -77,6 +77,7 @@ pub async fn save_profiles(State(state): State<ServerState>, body: Bytes) -> Res
                 .iter()
                 .find(|profile| profile.id == text(item, "id"));
             let mut profile = agents::store::from_request(item, old)?;
+            agents::model_config::normalize(def, &mut profile);
             if !ids.insert(profile.id.clone()) || profile.id.is_empty() {
                 return Err("方案 ID 不能为空或重复".into());
             }
@@ -144,14 +145,16 @@ fn selected_profile(
             let old = profiles
                 .iter()
                 .find(|profile| profile.id == text(value, "id"));
-            return agents::store::from_request(value, old);
+            let mut profile = agents::store::from_request(value, old)?;
+            agents::model_config::normalize(def, &mut profile);
+            return Ok(profile);
         }
     }
     let wanted = text(payload, "profileId");
-    profiles
-        .into_iter()
-        .find(|profile| profile.id == wanted)
-        .ok_or_else(|| "没有找到要应用的已保存方案".into())
+    let mut profile = profiles.into_iter().find(|profile| profile.id == wanted)
+        .ok_or_else(|| "没有找到要应用的已保存方案".to_string())?;
+    agents::model_config::normalize(def, &mut profile);
+    Ok(profile)
 }
 
 pub async fn preview_profile(State(state): State<ServerState>, body: Bytes) -> Response {

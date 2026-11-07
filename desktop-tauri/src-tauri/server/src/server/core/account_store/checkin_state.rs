@@ -8,14 +8,24 @@ const LEDGER_KEY: &str = "pluginLedger.dailyCheckin";
 
 pub(super) fn record_status(record: &StoredAccount) -> Option<&Value> {
     record.get(LEDGER_KEY).filter(|value| {
-        value.get("at").and_then(Value::as_i64)
+        (rolling_until(value).is_some() || value.get("at").and_then(Value::as_i64)
             .and_then(beijing::date_key_of_ms)
-            .is_some_and(|date| date == beijing::today_key())
+            .is_some_and(|date| date == beijing::today_key()))
             && value.get("completed").and_then(Value::as_bool).is_some()
     })
 }
 
+pub(crate) fn rolling_until(value: &Value) -> Option<i64> {
+    if value.get("kind").and_then(Value::as_str) != Some("rolling") { return None; }
+    value.get("until").and_then(Value::as_i64).filter(|at| *at > 0 && beijing::date_key_of_ms(*at).is_some())
+}
+
 pub(super) fn completed(record: &StoredAccount) -> bool {
+    if let Some(status) = record_status(record) {
+        if let Some(until) = rolling_until(status) {
+            return until > crate::server::logging::now_ms() && status.get("completed").and_then(Value::as_bool) == Some(true);
+        }
+    }
     record_status(record)
         .and_then(|value| value.get("completed"))
         .and_then(Value::as_bool)
@@ -32,6 +42,11 @@ pub(super) fn apply(record: &mut StoredAccount, value: &Value) -> Result<(), Str
         .ok_or_else(|| "每日签到状态缺少有效时间戳".to_string())?;
     let completed = value.get("completed").and_then(Value::as_bool)
         .ok_or_else(|| "每日签到状态缺少完成标记".to_string())?;
+    if value.get("kind").and_then(Value::as_str) == Some("rolling")
+        && !rolling_until(value).is_some_and(|until| until > at && until <= at + 7 * 86_400_000)
+    {
+        return Err("滚动签到状态缺少有效的下次领取时间".into());
+    }
     let count = value.get("completedCount").and_then(Value::as_u64);
     let total = value.get("totalCount").and_then(Value::as_u64);
     if count.zip(total).is_some_and(|(count, total)| count > total)

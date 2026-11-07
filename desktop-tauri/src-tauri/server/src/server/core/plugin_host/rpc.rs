@@ -82,6 +82,8 @@ pub struct HostOptions {
     /// 回调型网页登录的 `redirect_uri` 要指向网关自己的 loopback 地址，
     /// 而那是**宿主**才知道的事实（见 `HostEnv.loopback_port`）。
     pub loopback_port: u16,
+    pub script: bool,
+    pub init_payload: Value,
 }
 
 impl HostOptions {
@@ -98,6 +100,8 @@ impl HostOptions {
             debug_traffic: false,
             init_timeout: Duration::from_secs(60),
             loopback_port: 0,
+            script: false,
+            init_payload: Value::Null,
         }
     }
 }
@@ -243,7 +247,11 @@ impl RpcAdapter {
     /// 调一次要出网的 RPC（超时更宽）。
     async fn network(&self, method: &str, mut params: Value) -> Result<Value, GatewayError> {
         super::account_egress::apply(&mut params);
-        self.call(method, params, NETWORK_TIMEOUT).await
+        // 脚本签到可包含多步领取与对话任务，不能套用单次网络请求的两分钟预算。
+        let timeout = if self.host.options.script && method == proto::methods::gateway::CHECKIN_CLAIM {
+            Duration::from_secs(600)
+        } else { NETWORK_TIMEOUT };
+        self.call(method, params, timeout).await
     }
 
     async fn call(
@@ -854,6 +862,9 @@ impl ProviderAdapter for RpcAdapter {
             {
                 Ok(value) => match serde_json::from_value::<proto::RefreshOutcome>(value.clone()) {
                     Ok(outcome) => {
+                        if self.host.options.script {
+                            super::script::observe_concurrency(&self.host, self.id, &value);
+                        }
                         if !outcome.refreshed {
                             return ModelRefreshOutcome {
                                 refreshed: false,
@@ -863,7 +874,7 @@ impl ProviderAdapter for RpcAdapter {
                                 } else { outcome.message },
                             };
                         }
-                        let list = if crate::server::core::providers::is_scoped_runtime_provider(self.id) {
+                        let list = if self.host.options.script || crate::server::core::providers::is_scoped_runtime_provider(self.id) {
                             match serde_json::from_value::<proto::ModelList>(value) {
                                 Ok(list) if list.meta.remote && outcome.count == list.models.len() => list,
                                 _ => return ModelRefreshOutcome::failed("插件刷新缺少同次真实远程模型快照，已保留旧清单"),
@@ -881,7 +892,7 @@ impl ProviderAdapter for RpcAdapter {
                             Err(error) => return ModelRefreshOutcome::failed(error.message),
                         } };
                         let count = super::rpc_cache::set_remote(self.id, list);
-                        if count == 0 && !crate::server::core::providers::is_scoped_runtime_provider(self.id) {
+                        if count == 0 && !self.host.options.script && !crate::server::core::providers::is_scoped_runtime_provider(self.id) {
                             return ModelRefreshOutcome::failed("插件刷新后没有可用模型，已保留旧清单");
                         }
                         crate::server::core::providers::adapter::seed_hidden_visibility_defaults();
@@ -943,6 +954,11 @@ impl ProviderAdapter for RpcAdapter {
             // 「流式与非流式的正文不一样」，极难排查。
             params.insert("stream".into(), Value::Bool(true));
             params.insert("session".into(), Value::String(session_of(client_headers)));
+            if host.options.script {
+                if let Some(trace) = super::script::register_trace(telemetry) {
+                    params.insert("script_trace".into(), Value::String(trace));
+                }
+            }
             // 发送名与思考档位同 `build_chat_request_async`：body 里已经是
             // 网关改好的名字（模型改写发生在这之前）。
             let wire_model = body.get("model").and_then(Value::as_str).unwrap_or("").to_string();
@@ -1220,6 +1236,12 @@ impl ProviderAdapter for RpcAdapter {
             if value.is_null() {
                 return Ok(None);
             }
+            if self.host.options.script {
+                if let (Some(flow), Some(ui)) = (value.get("flow").and_then(Value::as_str), value.get("script_login")) {
+                    super::script::remember_login(self.id, flow, ui)
+                        .map_err(|message| GatewayError::with_status(502, message))?;
+                }
+            }
             let start: proto::LoginStart = serde_json::from_value(value).map_err(|_| {
                 GatewayError::with_status(502, "插件返回的登录启动信息无法解析")
             })?;
@@ -1405,6 +1427,9 @@ impl ProviderAdapter for RpcAdapter {
             params.insert("manual".into(), Value::Bool(manual));
             let value = self.network(proto::methods::gateway::CHECKIN_CLAIM, Value::Object(params)).await?;
             let retry_at = value.get("retryAt").cloned();
+            let checkin_until = self.host.options.script.then(|| value.get("until").and_then(Value::as_i64))
+                .flatten().filter(|until| *until > crate::server::logging::now_ms()
+                    && *until <= crate::server::logging::now_ms() + 7 * 86_400_000);
             let details = value.get("details").cloned();
             let report: proto::CheckinReport = serde_json::from_value(value).map_err(|e| {
                 if strict::applies(self.id) { strict::fatal(self.id, 502, "runtime_protocol_error") }
@@ -1436,6 +1461,24 @@ impl ProviderAdapter for RpcAdapter {
             });
             if let Some(retry_at) = retry_at {
                 claim["retryAt"] = retry_at;
+            }
+            if self.host.options.script {
+                let completed = matches!(report.outcome, proto::CheckinOutcome::Claimed | proto::CheckinOutcome::Done);
+                let now = crate::server::logging::now_ms();
+                let mut daily = serde_json::json!({
+                    "at": now, "completed": completed, "completedCount": u8::from(completed),
+                    "totalCount": 1, "sourcesComplete": true,
+                    "status": format!("{:?}", report.outcome).to_lowercase(), "message": message,
+                });
+                if let Some(until) = checkin_until {
+                    daily["kind"] = serde_json::json!("rolling");
+                    daily["until"] = serde_json::json!(until);
+                    claim["until"] = serde_json::json!(until);
+                }
+                claim["dailyCheckin"] = daily.clone();
+                if let Err(message) = store.plugin_set_ledger(account_id, "dailyCheckin", &daily) {
+                    crate::server::logging::verbose("[Checkin]", &message);
+                }
             }
             if !strict::applies(self.id) {
                 if let Some(details) = details {

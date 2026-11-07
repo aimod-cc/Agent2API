@@ -198,6 +198,7 @@ impl AccountStore {
             "provider": record.provider(),
             "secret": secret,
             "public": public,
+            "maxConcurrentConfigured": record.get("maxConcurrent").and_then(Value::as_u64).unwrap_or(0),
             "proxy": proxy,
         }))
     }

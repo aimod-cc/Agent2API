@@ -97,6 +97,7 @@ impl Host {
                 return Err(message.to_string());
             }
         }
+        if self.options.script { super::script::clear_transport(); }
         *self.inner.lock().await = None;
 
         let mut command = tokio::process::Command::new(&self.options.exe);
@@ -108,6 +109,16 @@ impl Host {
         #[cfg(windows)]
         command.creation_flags(0x0800_0000);
         if let Some(dir) = &self.options.cwd { command.current_dir(dir); }
+        if self.options.script {
+            for (key, _) in std::env::vars_os() {
+                let name = key.to_string_lossy().to_ascii_uppercase();
+                if name.contains("PROXY") || name.contains("TOKEN") || name.contains("SECRET") || name.contains("PASSWORD")
+                    || name.contains("API_KEY") || name == "NODE_OPTIONS" || name == "BUN_OPTIONS" || name == "AGENT2API_ACCOUNT_KEY" {
+                    command.env_remove(key);
+                }
+            }
+            command.env("BUN_CONFIG_NO_CLEAR_TERMINAL", "1").env("DO_NOT_TRACK", "1");
+        }
         let mut child = command.spawn().map_err(|error| {
             let message = process::redact(&format!("启动插件进程失败（{}）：{error}", self.executable()));
             self.note_failure(&message);
@@ -144,8 +155,12 @@ impl Host {
             target: self.options.target.clone(), proxy: self.options.proxy.clone(),
             debug_traffic: self.options.debug_traffic, loopback_port: self.options.loopback_port,
         };
+        let mut init = json!({ "env": env });
+        if let (Some(target), Some(extra)) = (init.as_object_mut(), self.options.init_payload.as_object()) {
+            target.extend(extra.clone());
+        }
         let result = tokio::time::timeout(self.options.init_timeout,
-            self.call(proto::methods::gateway::INIT, json!({ "env": env }), self.options.init_timeout)).await
+            self.call(proto::methods::gateway::INIT, init, self.options.init_timeout)).await
             .map_err(|_| "插件握手超时".to_string())
             .and_then(|result| result.map_err(|error| format!("插件握手失败：{error}")))
             .and_then(|value| serde_json::from_value::<Vec<proto::ProviderInfo>>(value)

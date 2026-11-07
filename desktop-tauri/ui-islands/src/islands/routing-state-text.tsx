@@ -1,6 +1,8 @@
 import * as React from 'react'
 import { StatusDot, cn } from '@ui'
 import { t } from '../i18n'
+import { isTraceCancelled, isTraceRunning, isTraceSuccess, requestStateLabel } from './routing-trace-model'
+import type { ReplayRow } from './routing-types'
 
 /** 选路状态的统一文案。与 RouteStateBadge 同口径，但这里只输出「点 + 文案」，不带彩色底。 */
 export function stateLabel(state?: string): string {
@@ -25,5 +27,13 @@ export function RoutingStateText({ state, children, title }: {
   const tone = stateTone(state)
   return <span className={cn('routing-state-text', tone === 'destructive' && 'is-danger')} title={title}>
     <StatusDot variant={tone} />{children ?? stateLabel(state)}
+  </span>
+}
+
+export function RoutingRequestState({ row }: { row: ReplayRow }) {
+  const state = isTraceRunning(row) ? 'running' : isTraceCancelled(row) ? 'cancelled' : isTraceSuccess(row) ? 'success' : 'failed'
+  return <span className='routing-request-state' data-state={state}>
+    <StatusDot variant={state === 'success' ? 'success' : state === 'failed' ? 'destructive' : 'muted'} />
+    <span>{requestStateLabel(row)}</span>
   </span>
 }

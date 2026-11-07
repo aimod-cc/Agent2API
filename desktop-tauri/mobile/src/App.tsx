@@ -44,7 +44,7 @@ const SCREENS: Record<ScreenId, ScreenDef> = {
   home: { title: t('首页'), component: HomePage, primary: true },
   report: { title: t('报表'), component: ReportPage, primary: true },
   accounts: { title: t('账号'), component: AccountsPage, primary: true },
-  assistant: { title: t('AI 助手'), component: AssistantPage, primary: true },
+  assistant: { title: t('对话'), component: AssistantPage, primary: true },
   more: { title: t('更多'), component: MorePage, primary: true },
   models: { title: t('模型管理'), component: ModelsPage },
   keys: { title: t('网关 Key'), component: KeysPage },

@@ -1,47 +1,44 @@
 import type { ReactNode } from 'react'
 
-export type AssistantEngine = 'assistant' | 'codex' | 'claude'
-export type CodingEngine = Exclude<AssistantEngine, 'assistant'>
+export type AssistantEngine = 'assistant' | 'codex'
+export type CodingEngine = 'codex'
 export type CodingTranslate = (key: string, params?: Record<string, string | number>) => string
-export type CodingConfig = { enabled: boolean; hubUrl: string; hasToken: boolean; revision: string }
-export type CodingConfigInput = { enabled: boolean; hubUrl: string; accessToken: string; clearToken?: boolean }
-export type CodingMachine = { id: string; name: string; platform: string; homeDirectory?: string; workspaceRoots?: string[] }
-export type CodingPermission = { id: string; tool: string; arguments: unknown; createdAt?: number; toolCallId?: string }
+export type CodingConfig = {
+  enabled: boolean
+  executable: string
+  codexHome: string
+  workspaceRoots: string[]
+  revision: string
+  runtime: 'local-codex'
+}
+export type CodingConfigInput = Pick<CodingConfig, 'enabled' | 'executable' | 'codexHome' | 'workspaceRoots'>
+export type CodingMachine = { id: string; name: string; platform: string; workspaceRoots: string[] }
+export type CodingStatus = { connected: boolean; authenticated: boolean; version: string; executable: string; codexHome: string; machines: CodingMachine[] }
+export type CodingPermission = { id: string; tool: string; arguments: unknown; createdAt?: number; submitted: boolean; canApprove: boolean }
 export type CodingSession = {
   id: string
   engine: CodingEngine
   title: string
   directory: string
-  machineId?: string
+  machineId: string
   active: boolean
   thinking: boolean
   updatedAt: number
   model?: string | null
   permissionMode?: string | null
-  controlledByTerminal: boolean
-  concurrentClients: boolean
   pendingCount: number
   permissions: CodingPermission[]
-  lifecycle?: string | null
+  lifecycle: string
+  accessible: boolean
+  connected: boolean
+  shared: boolean
+  terminalCount: number
+  terminalOpening: boolean
+  terminalError?: string | null
+  activeTurnId?: string | null
 }
-export type CodingMessage = {
-  id: string
-  seq: number | null
-  localId: string | null
-  createdAt: number
-  invokedAt?: number | null
-  deliveryState?: 'indeterminate'
-  content: unknown
-}
-export type CodingPage = {
-  messages: CodingMessage[]
-  page: {
-    epoch: number; reset: boolean; hasMore: boolean; direction: string
-    nextBeforeSeq: number | null; nextBeforeAt: number | null
-    nextAfterSeq: number | null; nextAfterAt: number | null
-    snapshotHeadSeq: number | null; snapshotHeadAt: number | null
-  }
-}
+export type CodingItem = { id: string; type: string; clientId?: string | null; [key: string]: unknown }
+export type CodingHistory = { items: CodingItem[] }
 export type CodingTransport = {
   json: <T>(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown, signal?: AbortSignal) => Promise<T>
   stream: (path: string, signal: AbortSignal) => Promise<Response>
@@ -55,7 +52,7 @@ export function codingPath(id: string, suffix = ''): string {
 }
 
 export function engineLabel(engine: AssistantEngine, t: CodingTranslate): string {
-  return engine === 'assistant' ? t('AI 助手') : engine === 'codex' ? 'Codex' : 'Claude Code'
+  return engine === 'assistant' ? t('模型对话') : 'Codex'
 }
 
 export function codingConnection(transport: CodingTransport, revision: string): CodingTransport {
@@ -72,6 +69,12 @@ export function codingMessageId(): string {
     return [...bytes].map(value => value.toString(16).padStart(2, '0')).join('')
   }
   return `message-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+}
+
+export function codingFailureIsDefinite(error: unknown): boolean {
+  const detail = asRecord(error)
+  const status = Number(detail?.status)
+  return status >= 400 && status < 500 && detail?.code !== 'coding_delivery_uncertain' && detail?.type !== 'coding_delivery_uncertain'
 }
 
 export function asRecord(value: unknown): Record<string, unknown> | null {

@@ -33,18 +33,17 @@ pub(super) async fn fetch_json(
     validate: &(impl Fn(&Value) -> bool + Sync),
 ) -> Result<JsonResponse, UpdateError> {
     let mut candidates = source::candidates(url, true);
-    source::ensure_available(&candidates, headers).map_err(UpdateError::new)?;
     let context = candidates[0].context.clone();
     let cache_key = format!("{:x}", Sha256::digest(serde_json::to_vec(&(url, headers, &context)).unwrap_or_default()));
     let gate = source_state::gate(&cache_key);
     let _guard = gate.lock().await;
-    source::ensure_available(&candidates, headers).map_err(UpdateError::new)?;
     if let Some(response) = recent().lock().ok().and_then(|cache| {
         cache.get(&cache_key).filter(|cached| logging::now_ms() - cached.at < COALESCE_MS)
             .filter(|cached| validate(&cached.response.value)).map(|cached| cached.response.clone())
     }) {
         return Ok(response);
     }
+    source::ensure_available(&candidates, headers)?;
     let automatic = candidates[0].mode == GithubAccessMode::Auto;
     if automatic { source_state::sort(&mut candidates); }
     let total = Duration::from_millis(timeout_ms.max(1));
@@ -69,19 +68,21 @@ async fn select(
     validate: &(impl Fn(&Value) -> bool + Sync),
 ) -> Result<JsonResponse, UpdateError> {
     let automatic = candidates[0].mode == GithubAccessMode::Auto;
-    let mut last_error = UpdateError::new("没有可用的 GitHub 源");
+    let mut failures = super::rate_limit::Failures::default();
     if !automatic || candidates.len() == 1 {
         let attempt_ms = (timeout_ms / candidates.len() as u64).max(1);
         for candidate in candidates {
-            source::ensure_available(candidates, headers).map_err(UpdateError::new)?;
+            if let Some(error) = candidate.cooling_error(headers) {
+                failures.push(error);
+                continue;
+            }
             match attempt(candidate, headers, attempt_ms, validate).await {
                 Ok(response) => { candidate.remember(); return Ok(response); }
                 Err(Failure::Terminal(response)) => return Ok(response),
-                Err(Failure::Retry(error)) if error.message.contains("限流") => return Err(error),
-                Err(Failure::Retry(error)) => last_error = error,
+                Err(Failure::Retry(error)) => failures.push(error),
             }
         }
-        return Err(last_error);
+        return Err(failures.error());
     }
     let selected = remembered_candidate(candidates);
     let mut remaining = candidates.to_vec();
@@ -90,13 +91,15 @@ async fn select(
         match attempt(&candidate, headers, (timeout_ms / 2).clamp(1, 12_000), validate).await {
             Ok(response) => { candidate.remember(); return Ok(response); }
             Err(Failure::Terminal(response)) => return Ok(response),
-            Err(Failure::Retry(error)) if error.message.contains("限流") => return Err(error),
-            Err(Failure::Retry(error)) => last_error = error,
+            Err(Failure::Retry(error)) => failures.push(error),
         }
     }
     let mut pending = FuturesUnordered::new();
     for candidate in &remaining {
-        if source_state::state(candidate).is_some_and(|value| value.state != "ok") { continue; }
+        if let Some(error) = candidate.cooling_error(headers) {
+            failures.push(error);
+            continue;
+        }
         pending.push(async move { (candidate, attempt(candidate, headers, timeout_ms.min(12_000), validate).await) });
     }
     while let Some((candidate, outcome)) = pending.next().await {
@@ -106,11 +109,10 @@ async fn select(
                 return Ok(response);
             }
             Err(Failure::Terminal(response)) => return Ok(response),
-            Err(Failure::Retry(error)) if error.message.contains("限流") => return Err(error),
-            Err(Failure::Retry(error)) => last_error = error,
+            Err(Failure::Retry(error)) => failures.push(error),
         }
     }
-    Err(last_error)
+    Err(failures.error())
 }
 
 fn remembered_candidate(candidates: &[Candidate]) -> Option<usize> {
@@ -130,19 +132,17 @@ async fn attempt(
     timeout_ms: u64,
     validate: &(impl Fn(&Value) -> bool + Sync),
 ) -> Result<JsonResponse, Failure> {
+    if let Some(error) = candidate.cooling_error(headers) {
+        return Err(Failure::Retry(error));
+    }
     let started = Instant::now();
     let observed_at = logging::now_ms();
     let result = tokio::time::timeout(Duration::from_millis(timeout_ms.max(1)), async {
         let response = client::fetch_candidate(candidate, headers, Some(timeout_ms)).await
-            .map_err(|message| Failure::Retry(UpdateError::new(message)))?;
+            .map_err(Failure::Retry)?;
         let status = response.status();
-        let response_headers = response.headers().clone();
         let official = candidate.source == Source::Official && source::is_resource(&candidate.original);
-        let empty = || JsonResponse { value: Value::Null, status, headers: response_headers.clone(), official };
-        if candidate.is_rate_limited(&response) {
-            candidate.observe("rateLimited", started.elapsed().as_millis() as u64, false);
-            return Err(Failure::Terminal(empty()));
-        }
+        let empty = || JsonResponse { value: Value::Null, status, official };
         if !status.is_success() {
             if candidate.source == Source::Official && !source::should_switch(candidate, status) {
                 candidate.observe("failed", started.elapsed().as_millis() as u64, false);
@@ -170,7 +170,7 @@ async fn attempt(
             return Err(Failure::Retry(UpdateError::new(format!("{}返回的数据格式无效", candidate.label()))));
         }
         candidate.observe("ok", started.elapsed().as_millis() as u64, false);
-        Ok(JsonResponse { value, status, headers: response_headers, official })
+        Ok(JsonResponse { value, status, official })
     }).await.unwrap_or_else(|_| Err(Failure::Retry(UpdateError::new("查询 GitHub 更新源超时"))));
     if let Err(Failure::Retry(error)) = &result {
         if source_state::state(candidate).is_none_or(|state| state.checked_at < observed_at || state.state == "ok") {

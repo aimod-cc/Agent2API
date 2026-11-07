@@ -1272,7 +1272,7 @@ impl DynamicNavigation {
             if host.is_empty() { return Err("登录域名白名单含有空主机".to_string()); }
             hosts.push(host);
         }
-        let mut callbacks = Vec::new();
+        let mut callbacks = crate::script_login::loopback_targets(started)?;
         let mut capture = |key: &str, value: &str| {
             if matches!(key, "redirect_uri" | "redirect" | "redirect_url" | "callback_url"
                 | "auth_callback_url" | "navigate_uri" | "return_url") {
@@ -1399,9 +1399,26 @@ async fn run_dynamic_login(
         .filter(|value| *value > 0).unwrap_or(2_000).clamp(1_000, 30_000));
     let deadline = tokio::time::Instant::now() + LOGIN_TIMEOUT;
     let mut last_hint = None;
+    let capture_cookie = crate::script_login::captures_wps(provider, mode, started);
+    let mut cookie_submitted = false;
     let result = loop {
         if !login_is_current(app, flow) { break Ok(json!({ "ok": false, "canceled": true })); }
         if tokio::time::Instant::now() >= deadline { break Err("登录等待超时（5 分钟），请重试".into()); }
+        if capture_cookie && !cookie_submitted {
+            if let Some(window) = &window {
+                match crate::script_login::wps_cookie(window).await {
+                    Ok(Some(cookie)) if login_is_current(app, flow) => {
+                        let payload = json!({ "state": flow, "callbackUrl": cookie });
+                        if gateway::call("POST", "/api/session/login/callback", Some(&payload)).await.is_err() {
+                            break Err("WPS 登录凭据提交失败，请重新发起登录".into());
+                        }
+                        cookie_submitted = true;
+                    }
+                    Ok(_) => {}
+                    Err(_) => break Err("读取 WPS 登录窗口失败，请重试或改用粘贴 Cookie".into()),
+                }
+            }
+        }
         match poll_once(flow).await {
             _ if !login_is_current(app, flow) => break Ok(json!({ "ok": false, "canceled": true })),
             PollOutcome::Pending(hint) => {
@@ -2397,7 +2414,7 @@ async fn submit_callback(login_state: &str, callback_url: &str) {
 /// 命令里直接调会与消息循环互相等待而**死锁**（tauri 文档的 Known issues，
 /// 现象正是「窗口停住、永不收尾」）。这里挪到 `spawn_blocking` 独立线程，
 /// 再包一层 3 秒超时兜底 —— 读不到就当失败，绝不卡死调用方。
-async fn read_window_cookies(
+pub(crate) async fn read_window_cookies(
     window: &tauri::WebviewWindow,
 ) -> Result<Vec<tauri::webview::Cookie<'static>>, String> {
     let window_owned = window.clone();

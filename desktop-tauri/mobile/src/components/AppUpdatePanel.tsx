@@ -23,6 +23,9 @@ import { GithubAccessSettingsPanel } from './GithubAccessSettings'
 import { AppUpdateSettings } from './AppUpdateSettings'
 import { openExternal } from '../lib/community'
 import { t } from '../i18n'
+import { apiCall } from '../api/client'
+import type { GithubFailure } from '../../../ui-shared/github-access'
+import { GithubFailureText } from '../../../ui-shared/github-failure'
 import { githubErrorMessage, assetMissingReason } from '../../../ui-shared/updates'
 import { Card, Button } from '@ui'
 import { Switch as UiSwitch } from '@ui'
@@ -61,6 +64,7 @@ export function AppUpdatePanel() {
   const [info, setInfo] = useState<ApkUpdateInfo | null>(null)
   const [progress, setProgress] = useState<DownloadProgress | null>(null)
   const [error, setError] = useState('')
+  const [githubFailure, setGithubFailure] = useState<GithubFailure | null>(null)
   const [busy, setBusy] = useState(false)
   const [auto, setAuto] = useState(autoCheckEnabled)
   const [settingsRevision, setSettingsRevision] = useState(0)
@@ -145,11 +149,13 @@ export function AppUpdatePanel() {
       setBusy(true)
       setPhase('checking')
     }
-    if (!silent) setError('')
+    if (!silent) { setError(''); setGithubFailure(null) }
     try {
       const result = await checkApkUpdate()
       if (revision !== channelRevision.current) return
       setInfo(result)
+      setGithubFailure(null)
+      setError('')
       // hasUpdate 为 null = 版本无法比较（上游 tag 不是 semver）；
       // 这时只要挂了 APK 就允许手动更新，而不是卡在「未知」上
       const canUpdate = result.hasUpdate === true || (result.hasUpdate === null && result.asset !== null)
@@ -158,6 +164,12 @@ export function AppUpdatePanel() {
       if (!silent && revision === channelRevision.current) {
         setError(githubErrorMessage(failure, t, 'update'))
         setPhase('idle')
+        try {
+          const status = await apiCall<GithubFailure & { lastError?: string | null }>('/api/update/status')
+          if (revision === channelRevision.current && status.rateLimited) {
+            setGithubFailure({ ...status, reason: status.lastError })
+          }
+        } catch { /* 保留本次错误，不额外发起上游查询。 */ }
       }
     } finally {
       checkInFlight.current = false
@@ -177,6 +189,7 @@ export function AppUpdatePanel() {
     }
     setBusy(true)
     setError('')
+    setGithubFailure(null)
     setProgress({ received: 0, total: 0, percent: -1 })
     setPhase('downloading')
     try {
@@ -194,6 +207,7 @@ export function AppUpdatePanel() {
   const install = async () => {
     setBusy(true)
     setError('')
+    setGithubFailure(null)
     try {
       // 先确认授权：没有的话跳到系统设置页，回来后用户再点一次安装
       if (!(await canInstallApk())) {
@@ -234,6 +248,22 @@ export function AppUpdatePanel() {
     setAuto(next)
     store.toast(next ? t('已开启自动检查') : t('已关闭自动检查'))
   }
+
+  useEffect(() => {
+    if (!githubFailure || !error) return
+    let alive = true
+    const refresh = async () => {
+      if (document.hidden || checkInFlight.current) return
+      try {
+        const status = await apiCall<GithubFailure & { lastError?: string | null }>('/api/update/status')
+        if (!alive || checkInFlight.current) return
+        setGithubFailure(status.rateLimited ? { ...status, reason: status.lastError } : null)
+        if (!status.rateLimited) setError(githubErrorMessage(status.lastError, t, 'update'))
+      } catch { /* 下一轮重新读取网关状态。 */ }
+    }
+    const timer = window.setInterval(() => void refresh(), 5000)
+    return () => { alive = false; window.clearInterval(timer) }
+  }, [Boolean(githubFailure), error])
 
   const percent = progress && progress.percent >= 0 ? progress.percent : null
   const sizeText = (bytes?: number) => {
@@ -300,7 +330,7 @@ export function AppUpdatePanel() {
 
             {error ? (
               <div style={{ marginTop: 6, fontSize: 11.5, color: 'var(--m-danger)', wordBreak: 'break-word' }}>
-                {error}
+                {githubFailure ? <GithubFailureText value={githubFailure} settings='update' t={t} /> : error}
               </div>
             ) : null}
           </div>

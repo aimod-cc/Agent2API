@@ -78,6 +78,9 @@ pub fn prepare(
         install::extract_zip(bytes, &staging)?;
         let manifest = install::read_manifest(&staging)?;
         install::validate_manifest(&manifest, proto::PROTOCOL_VERSION)?;
+        if manifest.id == super::script::HOST_ID || super::script::is_package(&manifest.id) {
+            return Err("该插件标识保留给脚本运行环境，不能安装为原生插件".to_string());
+        }
         if let Some(reason) = super::compatibility::version_error(&manifest.id, &manifest.version) {
             return Err(reason);
         }
@@ -167,6 +170,10 @@ impl PreparedPack {
     pub(super) fn install_pending(self) -> Result<InstalledTransaction, String> {
         let mut registry = PackRegistry::load();
         let previous_registry = registry.clone();
+        if let Some(provider) = self.manifest.providers.iter()
+            .find(|provider| super::script::package_for_provider(provider.id.as_str()).is_some()) {
+            return Err(format!("提供商 {} 已由脚本插件接管，请先停用对应脚本插件", provider.id));
+        }
         let record = self.record(&registry);
         let version_dir = install::plugins_dir()
             .join(&self.manifest.id)

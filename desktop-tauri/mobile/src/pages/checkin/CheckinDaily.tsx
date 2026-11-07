@@ -105,6 +105,9 @@ export function CheckinDaily({ center, busy, action, onRecords, onChange }: {
                     {t('已领 {done} / {total} 份套餐', { done: account.dailyCheckin.completedCount, total: account.dailyCheckin.totalCount })}
                   </span> : null}
                 </div>
+                {account.dailyCheckin?.kind === 'rolling' && account.dailyCheckin.until ? <p className='m-ck-note'>
+                  {t('下次检查：{time}', { time: formatStamp(account.dailyCheckin.until) })}
+                </p> : null}
                 {account.dailyCheckin?.message && !account.checkedInToday
                   ? <p className='m-ck-note'>{t(account.dailyCheckin.message)}</p> : null}
                 <div className='m-ck-actions'>

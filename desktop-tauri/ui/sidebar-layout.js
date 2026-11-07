@@ -69,7 +69,7 @@
    * `icon` 是 icons.js 里的键。
    */
   const MENUS = [
-    { key: 'assistant', label: wbI18n.t('AI 助手'), icon: 'spark' },
+    { key: 'assistant', label: wbI18n.t('对话'), icon: 'spark' },
     { key: 'overview', label: wbI18n.t('报表'), icon: 'overview' },
     { key: 'accounts', label: wbI18n.t('账号'), icon: 'accounts' },
     // 签到中心：**固定项**，与「账号」「模型管理」同级，不随插件装没装而消失。

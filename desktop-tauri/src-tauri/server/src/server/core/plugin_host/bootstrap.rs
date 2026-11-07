@@ -39,17 +39,21 @@ use super::{registry, GatewayCallbacks, Host};
 pub struct StoreCallbacks {
     store: AccountStore,
     // 只由网关安装清单赋予，不接受插件回调参数中的 provider/owner 作为范围。
-    allowed_providers: std::collections::HashSet<String>,
+    allowed_providers: std::sync::RwLock<std::collections::HashSet<String>>,
 }
 
 impl StoreCallbacks {
     /// 未绑定插件包的回调默认没有账号/设置权限；真实宿主由 for_providers 授权。
     pub fn new(store: AccountStore) -> Self {
-        Self { store, allowed_providers: std::collections::HashSet::new() }
+        Self { store, allowed_providers: std::sync::RwLock::new(std::collections::HashSet::new()) }
     }
 
-    fn for_providers(store: AccountStore, providers: Vec<String>) -> Self {
-        Self { store, allowed_providers: providers.into_iter().collect() }
+    pub(super) fn for_providers(store: AccountStore, providers: Vec<String>) -> Self {
+        Self { store, allowed_providers: std::sync::RwLock::new(providers.into_iter().collect()) }
+    }
+
+    pub(super) fn authorize_providers(&self, providers: Vec<String>) {
+        *self.allowed_providers.write().unwrap_or_else(|error| error.into_inner()) = providers.into_iter().collect();
     }
 
     fn check_provider(&self, provider: &str) -> Result<(), proto::WireError> {
@@ -90,7 +94,7 @@ impl GatewayCallbacks for StoreCallbacks {
     }
 
     fn provider_allowed(&self, provider: &str) -> bool {
-        self.allowed_providers.contains(provider)
+        self.allowed_providers.read().is_ok_and(|providers| providers.contains(provider))
     }
 
     fn store_get(
@@ -378,7 +382,10 @@ pub async fn start(store: AccountStore) -> Option<Arc<Host>> {
         }
         super::schedules::wake();
     }
-    first
+    if let Err(error) = super::script::start(store).await {
+        logging::log("[Plugin]", &format!("脚本插件启动失败：{error}"));
+    }
+    first.or_else(super::script::host)
 }
 
 pub(super) async fn start_pack(
@@ -514,6 +521,7 @@ pub async fn reload(store: AccountStore) -> Option<Arc<Host>> {
     ids.sort();
     ids.dedup();
     for id in ids {
+        if id == super::script::HOST_ID { continue; }
         let scope = super::switching::ChangeScope::between(&registry, &registry, &id, None);
         let Some(switch) = scope.begin() else {
             logging::log("[Plugin]", &format!("插件包「{id}」仍有任务，未执行重载"));
@@ -545,7 +553,7 @@ pub fn set_loopback_port(port: u16) {
 }
 
 /// 取网关监听端口（未写入时为 `0`，插件据此走「拿不到回调地址」分支）。
-fn loopback_port() -> u16 {
+pub(super) fn loopback_port() -> u16 {
     LOOPBACK_PORT.get().copied().unwrap_or(0)
 }
 

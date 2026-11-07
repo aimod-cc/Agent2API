@@ -1,23 +1,22 @@
-use std::collections::BTreeMap;
+use std::convert::Infallible;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::{Body, Bytes};
+use axum::body::Bytes;
 use axum::extract::{Extension, Path, Query, Request, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::header;
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::{sse::{Event, KeepAlive, Sse}, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use futures::StreamExt;
-use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::server::{access, errors, logging, ServerState};
-use crate::server::core::assistant_coding::{client, config, sessions, CodingError, Engine};
+use crate::server::core::assistant_coding::{client::{self, CodexClient}, config, permissions, sessions, terminal, CodingError, Engine};
 use crate::server::http::ok_json;
 
 pub fn routes(state: ServerState) -> Router<ServerState> {
@@ -30,6 +29,7 @@ pub fn routes(state: ServerState) -> Router<ServerState> {
         .route("/api/assistant/coding/sessions", get(list).post(spawn))
         .route("/api/assistant/coding/sessions/{id}", get(detail))
         .route("/api/assistant/coding/sessions/{id}/messages", get(messages).post(send))
+        .route("/api/assistant/coding/sessions/{id}/terminal", post(open_terminal))
         .route("/api/assistant/coding/sessions/{id}/actions/{action}", post(action))
         .route("/api/assistant/coding/sessions/{id}/permissions/{request_id}/{decision}", post(permission))
         .route("/api/assistant/coding/events", get(events))
@@ -37,162 +37,120 @@ pub fn routes(state: ServerState) -> Router<ServerState> {
 }
 
 async fn require_session(State(state): State<ServerState>, mut request: Request, next: Next) -> Response {
-    if !access::session_valid(request.headers()) {
-        return errors::panel_login_required_response(request.headers());
-    }
-    if request.method() != Method::GET && request.headers().get(header::CONTENT_TYPE)
+    if !access::session_valid(request.headers()) { return errors::panel_login_required_response(request.headers()); }
+    if request.method() != axum::http::Method::GET && request.headers().get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok()).is_none_or(|v| v.split(';').next().unwrap_or("").trim() != "application/json") {
         return fail(CodingError::new(415, "编程会话操作必须使用 JSON 请求"));
     }
     if !request.uri().path().ends_with("/config") {
         let current = match db(&state).and_then(config::load) { Ok(value) => value, Err(error) => return fail(error) };
         let revision = request.uri().query().and_then(|query| url::form_urlencoded::parse(query.as_bytes()).find(|(key, _)| key == "connection").map(|(_, value)| value.into_owned()));
-        if revision.as_deref() != Some(current.revision().as_str()) {
-            return fail(CodingError::new(409, "编程会话连接设置已变更，请刷新后再操作"));
-        }
-        let client = match hub(&state).await { Ok(value) => value, Err(error) => return fail(error) };
-        if client.config.revision() != current.revision() || !access::session_valid(request.headers()) {
-            return fail(CodingError::new(409, "编程会话连接或管理员会话已变更，请刷新后再操作"));
-        }
+        if revision.as_deref() != Some(current.revision().as_str()) { return fail(CodingError::new(409, "本机 Codex 设置已变更，请刷新后再操作")); }
+        let client = match db(&state) { Ok(db) => match client::connect(db).await { Ok(value) => value, Err(error) => return fail(error) }, Err(error) => return fail(error) };
+        if client.config.revision() != current.revision() || !access::session_valid(request.headers()) { return fail(CodingError::new(409, "本机 Codex 或管理员会话已变更，请刷新后再操作")); }
         request.extensions_mut().insert(client);
     }
     let method = request.method().clone();
-    let operation = request.uri().path().to_string();
-    let operation = if let Some((prefix, _)) = operation.split_once("/permissions/") {
-        format!("{prefix}/permissions/{}", operation.rsplit('/').next().unwrap_or("decision"))
-    } else { operation };
-    let is_action = method != Method::GET && !operation.ends_with("/directories");
-    if is_action { logging::log("[Coding]", &format!("管理员发起编程会话操作：{method} {operation}")); }
+    let path = request.uri().path().to_string();
+    let operation = if let Some((prefix, _)) = path.split_once("/permissions/") { format!("{prefix}/permissions/{}", path.rsplit('/').next().unwrap_or("decision")) } else { path };
+    let is_action = method != axum::http::Method::GET && !operation.ends_with("/directories");
+    if is_action { logging::log("[Codex]", &format!("管理员发起操作：{method} {operation}")); }
     let response = next.run(request).await;
-    if is_action { logging::log("[Coding]", &format!("编程会话操作响应：{method} {operation} HTTP {}", response.status().as_u16())); }
+    if is_action { logging::log("[Codex]", &format!("操作响应：{method} {operation} HTTP {}", response.status().as_u16())); }
     response
 }
 
 fn fail(error: CodingError) -> Response {
-    (StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY), axum::Json(json!({
-        "success": false, "error": { "code": error.code, "message": error.message }
+    (axum::http::StatusCode::from_u16(error.status).unwrap_or(axum::http::StatusCode::BAD_GATEWAY), axum::Json(json!({
+        "success": false, "error": { "code": error.code, "type": error.code, "message": error.message }
     }))).into_response()
 }
 fn respond(result: Result<Value, CodingError>) -> Response { match result { Ok(value) => ok_json(value), Err(error) => fail(error) } }
-fn db(state: &ServerState) -> Result<&crate::server::db::Db, CodingError> {
-    state.db().ok_or_else(|| CodingError::new(500, "数据库不可用"))
-}
-async fn hub(state: &ServerState) -> Result<Arc<client::HubClient>, CodingError> { client::connect(db(state)?).await }
+fn db(state: &ServerState) -> Result<&crate::server::db::Db, CodingError> { state.db().ok_or_else(|| CodingError::new(500, "数据库不可用")) }
 fn parse<T: serde::de::DeserializeOwned>(body: &Bytes) -> Result<T, CodingError> {
     if body.len() > 320 * 1024 { return Err(CodingError::new(413, "请求内容过大")); }
     serde_json::from_slice(body).map_err(|_| CodingError::new(400, "请求参数格式不正确"))
 }
+async fn durable(task: impl std::future::Future<Output = Result<Value, CodingError>> + Send + 'static) -> Response {
+    respond(tokio::spawn(task).await.unwrap_or_else(|_| Err(CodingError::uncertain("后台操作中断，请核对会话状态，不要重复提交"))))
+}
 
-async fn get_config(State(state): State<ServerState>) -> Response {
-    respond(db(&state).and_then(config::load).map(|c| json!({ "config": c.public() })))
-}
+async fn get_config(State(state): State<ServerState>) -> Response { respond(db(&state).and_then(config::load).map(|c| json!({ "config": c.public() }))) }
 async fn put_config(State(state): State<ServerState>, body: Bytes) -> Response {
-    respond((|| { let input = parse(&body)?; let config = config::save(db(&state)?, input)?; Ok(json!({ "config": config.public() })) })())
+    let input = match parse(&body) { Ok(input) => input, Err(error) => return fail(error) };
+    let db = match db(&state) { Ok(db) => db.clone(), Err(error) => return fail(error) };
+    durable(async move { client::save_config(&db, input).await.map(|c| json!({ "config": c.public() })) }).await
 }
-async fn status(Extension(client): Extension<Arc<client::HubClient>>) -> Response {
-    respond(async {
-        let health = client.health().await?;
-        let data = sessions::machines(&client).await?;
-        Ok(json!({ "connected": true, "protocolVersion": health["protocolVersion"], "machines": data["machines"] }))
-    }.await)
-}
-async fn machines(Extension(client): Extension<Arc<client::HubClient>>) -> Response {
-    respond(sessions::machines(&client).await)
-}
-async fn availability(Extension(client): Extension<Arc<client::HubClient>>, Path(id): Path<String>) -> Response {
-    respond(async {
-        sessions::validate_id(&id)?;
-        client.request(Method::GET, &["api", "machines", &id, "agent-availability"], &[], None).await
-    }.await)
+async fn status(Extension(client): Extension<Arc<CodexClient>>) -> Response { respond(sessions::status(&client).await) }
+async fn machines(Extension(client): Extension<Arc<CodexClient>>) -> Response { ok_json(json!({ "machines": [sessions::machine(&client)] })) }
+async fn availability(Extension(_client): Extension<Arc<CodexClient>>, Path(id): Path<String>) -> Response {
+    if id != "local" { return fail(CodingError::new(400, "只能使用当前 Agent2API 所在电脑")); }
+    ok_json(json!({ "agents": [{ "agent": "codex", "available": true }] }))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DirectoryInput { path: String }
-async fn directories(Extension(client): Extension<Arc<client::HubClient>>, Path(id): Path<String>, body: Bytes) -> Response {
-    respond(async {
-        sessions::validate_id(&id)?;
-        let input: DirectoryInput = parse(&body)?;
-        if input.path.len() > 4096 || input.path.chars().any(char::is_control) { return Err(CodingError::new(400, "目录路径无效")); }
-        client.request(Method::POST, &["api", "machines", &id, "list-directory"], &[], Some(&json!({ "path": input.path }))).await
-    }.await)
+async fn directories(Extension(client): Extension<Arc<CodexClient>>, Path(id): Path<String>, body: Bytes) -> Response {
+    if id != "local" { return fail(CodingError::new(400, "只能使用当前 Agent2API 所在电脑")); }
+    respond((|| { let input: DirectoryInput = parse(&body)?; sessions::directories(&client, &input.path) })())
 }
 #[derive(Deserialize)]
 struct ListQuery { engine: Engine }
-async fn list(Extension(client): Extension<Arc<client::HubClient>>, Query(query): Query<ListQuery>) -> Response {
-    respond(sessions::list(&client, query.engine).await)
+async fn list(Extension(client): Extension<Arc<CodexClient>>, Query(query): Query<ListQuery>) -> Response {
+    let _ = query.engine;
+    respond(sessions::list(&client).await)
 }
-async fn spawn(Extension(client): Extension<Arc<client::HubClient>>, body: Bytes) -> Response {
-    respond(async { sessions::spawn(&client, parse(&body)?).await }.await)
+async fn spawn(Extension(client): Extension<Arc<CodexClient>>, body: Bytes) -> Response {
+    let input = match parse(&body) { Ok(input) => input, Err(error) => return fail(error) };
+    durable(async move { sessions::spawn(&client, input).await }).await
 }
-async fn detail(Extension(client): Extension<Arc<client::HubClient>>, Path(id): Path<String>) -> Response {
-    respond(async { Ok(json!({ "session": sessions::detail(&client, &id).await? })) }.await)
+async fn detail(Extension(client): Extension<Arc<CodexClient>>, Path(id): Path<String>) -> Response { respond(sessions::detail(&client, &id).await.map(|s| json!({ "session": s }))) }
+async fn messages(Extension(client): Extension<Arc<CodexClient>>, Path(id): Path<String>) -> Response { respond(sessions::messages(&client, &id).await) }
+async fn send(Extension(client): Extension<Arc<CodexClient>>, Path(id): Path<String>, body: Bytes) -> Response {
+    let input = match parse(&body) { Ok(input) => input, Err(error) => return fail(error) };
+    durable(async move { sessions::send(&client, &id, input).await }).await
 }
-async fn messages(Extension(client): Extension<Arc<client::HubClient>>, Path(id): Path<String>, Query(query): Query<BTreeMap<String, String>>) -> Response {
-    respond(async {
-        sessions::detail(&client, &id).await?;
-        let allowed = ["limit", "beforeSeq", "beforeAt", "afterSeq", "afterAt", "untilSeq", "untilAt", "epoch"];
-        let mut fields = Vec::new();
-        for (key, value) in query {
-            if key == "connection" { continue; }
-            if !allowed.contains(&key.as_str()) || value.parse::<u64>().is_err() { return Err(CodingError::new(400, "消息分页参数无效")); }
-            if key == "limit" && !value.parse::<u64>().is_ok_and(|v| (1..=100).contains(&v)) { return Err(CodingError::new(400, "每次最多读取 100 条消息")); }
-            fields.push((key, value));
-        }
-        client.request(Method::GET, &["api", "sessions", &id, "messages"], &fields, None).await
-    }.await)
+async fn open_terminal(Extension(client): Extension<Arc<CodexClient>>, Path(id): Path<String>, body: Bytes) -> Response {
+    if let Err(error) = parse::<Value>(&body) { return fail(error); }
+    durable(async move { terminal::open(client, &id).await }).await
 }
-async fn send(Extension(client): Extension<Arc<client::HubClient>>, Path(id): Path<String>, body: Bytes) -> Response {
-    respond(async { sessions::send(&client, &id, parse(&body)?).await }.await)
+async fn action(Extension(client): Extension<Arc<CodexClient>>, Path((id, action)): Path<(String, String)>, body: Bytes) -> Response {
+    if let Err(error) = parse::<Value>(&body) { return fail(error); }
+    durable(async move { sessions::action(&client, &id, &action).await }).await
 }
-async fn action(Extension(client): Extension<Arc<client::HubClient>>, Path((id, action)): Path<(String, String)>, body: Bytes) -> Response {
-    respond(async { let _: Value = parse(&body)?; sessions::action(&client, &id, &action).await }.await)
-}
-async fn permission(Extension(client): Extension<Arc<client::HubClient>>, Path((id, request_id, decision)): Path<(String, String, String)>, body: Bytes) -> Response {
-    respond(async {
-        if !["approve", "deny"].contains(&decision.as_str()) { return Err(CodingError::new(400, "审批决定无效")); }
-        sessions::permission(&client, &id, &request_id, decision == "approve", parse(&body)?).await
-    }.await)
+async fn permission(Extension(client): Extension<Arc<CodexClient>>, Path((id, request_id, decision)): Path<(String, String, String)>, body: Bytes) -> Response {
+    if !["approve", "deny"].contains(&decision.as_str()) { return fail(CodingError::new(400, "审批决定无效")); }
+    let body: Value = match parse(&body) { Ok(body) => body, Err(error) => return fail(error) };
+    durable(async move { sessions::detail(&client, &id).await?; permissions::answer(&client, &id, &request_id, decision == "approve", &body).await }).await
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct EventsQuery { session_id: String, last_event_id: Option<String>, connection: String }
-async fn events(State(state): State<ServerState>, Extension(client): Extension<Arc<client::HubClient>>, headers: HeaderMap, Query(query): Query<EventsQuery>) -> Response {
-    let result: Result<Response, CodingError> = async {
-        if query.connection != client.config.revision() { return Err(CodingError::new(409, "编程会话连接设置已变更，请刷新后再操作")); }
-        sessions::detail(&client, &query.session_id).await?;
-        let mut fields = vec![("sessionId".into(), query.session_id), ("visibility".into(), "hidden".into())];
-        if let Some(id) = query.last_event_id {
-            if id.len() > 200 || id.chars().any(char::is_control) { return Err(CodingError::new(400, "事件游标无效")); }
-            fields.push(("lastEventId".into(), id));
-        }
-        let response = client.events(&fields).await?;
-        if !response.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|v| v.starts_with("text/event-stream")) {
-            return Err(CodingError::new(502, "HAPI 未返回实时事件流"));
-        }
-        let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(16);
-        tokio::spawn(async move {
-            let mut source = response.bytes_stream();
-            let mut check = tokio::time::interval(Duration::from_secs(15));
-            loop {
-                tokio::select! {
-                    _ = tx.closed() => break,
-                    _ = check.tick() => {
-                        let current = db(&state).and_then(config::load);
-                        if !access::session_valid(&headers) || !current.is_ok_and(|c| c.enabled && c.hub_url == client.config.hub_url && c.access_token == client.config.access_token) { break; }
-                    }
-                    chunk = source.next() => match chunk {
-                        Some(Ok(chunk)) => if tx.send(Ok(chunk)).await.is_err() { break; },
-                        Some(Err(_)) | None => break,
-                    }
+#[serde(rename_all = "camelCase")]
+struct EventsQuery { session_id: String }
+async fn events(Extension(client): Extension<Arc<CodexClient>>, headers: axum::http::HeaderMap, Query(query): Query<EventsQuery>) -> Response {
+    if let Err(error) = sessions::detail(&client, &query.session_id).await { return fail(error); }
+    let mut source = client.state.events.subscribe();
+    let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(16);
+    tokio::spawn(async move {
+        let event = Event::default().data(json!({ "type": "connection-changed", "data": { "status": "connected", "resume": "gap" } }).to_string());
+        if tx.send(Ok(event)).await.is_err() { return; }
+        let mut check = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            let value = tokio::select! {
+                _ = tx.closed() => break,
+                _ = check.tick() => {
+                    if !client.running.load(Ordering::Acquire) || !access::session_valid(&headers) || !config::load(&client.db).is_ok_and(|c| c.enabled && c == client.config) { break; }
+                    json!({ "type": "heartbeat" })
                 }
-            }
-        });
-        let mut response = Response::new(Body::from_stream(ReceiverStream::new(rx)));
-        response.headers_mut().insert(header::CONTENT_TYPE, "text/event-stream; charset=utf-8".parse().unwrap());
-        response.headers_mut().insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
-        response.headers_mut().insert("x-accel-buffering", "no".parse().unwrap());
-        Ok(response)
-    }.await;
-    result.unwrap_or_else(fail)
+                event = source.recv() => match event {
+                    Ok(event) if event.get("sessionId").and_then(Value::as_str) == Some(query.session_id.as_str()) => event,
+                    Ok(_) => continue,
+                    Err(broadcast::error::RecvError::Lagged(_)) => json!({ "type": "messages-invalidated", "sessionId": query.session_id }),
+                    Err(_) => break,
+                }
+            };
+            if tx.send(Ok(Event::default().data(value.to_string()))).await.is_err() { break; }
+        }
+    });
+    Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::new().interval(Duration::from_secs(20))).into_response()
 }

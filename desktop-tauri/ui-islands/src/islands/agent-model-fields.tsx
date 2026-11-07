@@ -3,10 +3,11 @@ import { Badge, Button, Card, CardContent, Collapsible, CollapsibleContent, Coll
 import { t } from '../i18n'
 import type { AgentClient, AgentModel, AgentProfile } from './agent-types'
 import { catalogModel, type CatalogModel } from './agent-catalog'
-import { AgentSelect, GatewayModelSelect, TextField } from './agent-fields'
-import { blankModel } from './agent-model'
+import { AgentSelect, ClaudeModelFields, GatewayModelSelect, TextField } from './agent-fields'
+import { blankModel, syncClaudeTiers } from './agent-model'
 import { AgentModelPicker, AGENT_MODEL_LIMIT, SearchableModelSelect } from './agent-model-picker'
 import { selectProfileModels } from './agent-quick-model'
+import { modelFields, modelFieldNote, modelLevels } from './agent-model-config'
 
 /**
  * 模型列表字段块。两种排布：
@@ -35,7 +36,8 @@ export function ModelsFields({ client, draft, update, catalog, disabled, native 
     const next = { ...model, ...patch }
     keys.current.set(next, rowKey(model))
     return next
-  }) })
+  }), ...((patch.effort !== undefined && ['claude-code', 'codex'].includes(client.id))
+    || (patch.supportsReasoning === false && draft.models[index]?.id === draft.model) ? { effort: '' } : {}) })
   const [query, setQuery] = React.useState('')
   const [pickerOpen, setPickerOpen] = React.useState(quick || !draft.models.some(model => model.id))
   const split = layout === 'split'
@@ -66,7 +68,9 @@ export function ModelsFields({ client, draft, update, catalog, disabled, native 
   }
   const selectedCatalog = [...catalog, ...draft.models.filter(model => model.id && !catalog.some(item => item.id === model.id))
     .map(model => ({ ...model, label: model.name || model.id }))]
-  const visibleCapabilities = client.id === 'zcode' ? ['supportsTools', 'supportsImages', 'supportsVideo'] : client.id === 'kimi-code' ? ['supportsImages'] : client.id === 'zed' ? ['supportsTools', 'supportsImages'] : ['crush', 'dsh'].includes(client.id) ? ['supportsImages', 'supportsReasoning'] : ['supportsTools', 'supportsImages', 'supportsReasoning']
+  const fields = modelFields(client, draft)
+  const visibleCapabilities = fields.filter(key => key.startsWith('supports'))
+  const fieldNote = modelFieldNote(client)
   const selected = draft.models.find(model => model.id === draft.model)
   const legacyKimi = client.id === 'kimi-code' && /(?:^|[/\\])\.kimi[/\\]config\.toml$/.test(client.resolvedPath)
   const context = { workbuddy: 'maxInputTokens', zcode: 'properties.contextWindow', 'kimi-code': 'max_context_size', zed: 'max_tokens', cline: 'contextWindow', crush: 'context_window', opencode: 'limit.context' }[client.id] || 'contextWindow'
@@ -89,6 +93,7 @@ export function ModelsFields({ client, draft, update, catalog, disabled, native 
   const card = (model: AgentModel, index: number) => {
     const open = isExpanded(model)
     const known = catalog.find(item => item.id === model.id)
+    const levels = modelLevels(client, model.reasoningLevels, draft.protocol)
     const options = catalog.filter(item => item.id === model.id || !draft.models.some(current => current.id === item.id))
     const name = model.name || model.id || t('模型 {n}', { n: index + 1 })
     const edit = (patch: Partial<AgentModel>) => {
@@ -118,7 +123,7 @@ export function ModelsFields({ client, draft, update, catalog, disabled, native 
             <span className='mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-[11.5px] font-normal'>
               {numberAbility(t('上下文'), model.contextWindow)}
               {!legacyKimi && numberAbility(t('输出上限'), model.maxOutputTokens)}
-              {['supportsTools', 'supportsImages', ...(client.id === 'zcode' ? ['supportsVideo'] : []), 'supportsReasoning']
+              {['supportsTools', 'supportsImages', ...(['zcode', 'opencode', 'kimi-code'].includes(client.id) ? ['supportsVideo'] : []), 'supportsReasoning']
                 .map(key => boolAbility(capLabel(key), model[key as keyof AgentModel]))}
             </span>
           </span>
@@ -151,19 +156,23 @@ export function ModelsFields({ client, draft, update, catalog, disabled, native 
               update({ models: draft.models.map((current, i) => i === index ? next : current), ...(draft.model === model.id ? { model: id } : {}) })
             }} disabled={disabled || sourceIds.current.has(model.id)} />
             {client.id !== 'zcode' && <TextField label={t('模型展示名')} fieldKey='name' value={model.name} onChange={name => edit({ name })} disabled={disabled} />}
-            <NumberField label={t('上下文窗口')} fieldKey={context} value={model.contextWindow} onChange={contextWindow => edit({ contextWindow })} disabled={disabled} />
-            {!legacyKimi && <NumberField label={t('最大输出 Token')} fieldKey={output} value={model.maxOutputTokens} onChange={maxOutputTokens => edit({ maxOutputTokens })} disabled={disabled} />}
+            {fields.includes('contextWindow') && <NumberField label={t('上下文窗口')} fieldKey={client.id === 'codex' ? 'context_window' : context} value={model.contextWindow} onChange={contextWindow => edit({ contextWindow })} disabled={disabled} />}
+            {fields.includes('maxOutputTokens') && <NumberField label={t('最大输出 Token')} fieldKey={output} value={model.maxOutputTokens} onChange={maxOutputTokens => edit({ maxOutputTokens })} disabled={disabled} />}
           </div>
           <div className='grid grid-cols-1 gap-3 sm:grid-cols-2'>
             {visibleCapabilities.map(key => <Field key={key}><FieldLabel>{capLabel(key)}</FieldLabel>
-              <AgentSelect label={capLabel(key)} disabled={disabled} value={model[key as keyof AgentModel] === true ? 'on' : model[key as keyof AgentModel] === false ? 'off' : 'inherit'}
-                options={[{ value: 'inherit', label: t('未声明 / 保留') }, { value: 'on', label: t('支持') }, { value: 'off', label: t('不支持') }]}
-                onChange={value => edit({ [key]: value === 'inherit' ? null : value === 'on' })} /></Field>)}
+              <AgentSelect label={capLabel(key)} disabled={disabled} value={model[key as keyof AgentModel] === true ? 'on' : model[key as keyof AgentModel] === false && client.id !== 'kimi-code' ? 'off' : 'inherit'}
+                options={[{ value: 'inherit', label: t('未声明 / 保留') }, { value: 'on', label: t('支持') }, ...(client.id === 'kimi-code' ? [] : [{ value: 'off', label: t('不支持') }])]}
+                onChange={value => {
+                  const patch: Partial<AgentModel> = { [key]: value === 'inherit' ? null : value === 'on' }
+                  if (key === 'supportsReasoning' && value === 'off') patch.effort = ''
+                  edit(patch)
+                }} /></Field>)}
           </div>
           {client.id === 'zcode' && model.supportsReasoning === true && !model.reasoningLevels.length && <p className='text-xs text-subtle'>{t('模型未声明思考档位，保留客户端默认，不显示猜测选项。')}</p>}
           {client.id === 'zcode' && model.reasoningLevels.length > 0 && <p className='text-xs text-subtle'>{t('模型思考等级')} · {model.reasoningLevels.join(' / ')}</p>}
-          {client.supportsEffort && !['cline', 'dsh'].includes(client.id) && (model.reasoningLevels.length > 0 || model.effort) && <Field><FieldLabel>{t('模型思考等级')}</FieldLabel>
-            <AgentSelect label={t('模型思考等级')} value={model.effort} disabled={disabled} options={[{ value: '', label: t('模型默认') }, ...[...new Set([...model.reasoningLevels, ...(model.effort ? [model.effort] : [])])].map(value => ({ value, label: value }))]} onChange={effort => edit({ effort })} /></Field>}
+          {client.supportsEffort && model.supportsReasoning !== false && !['cline', 'dsh'].includes(client.id) && !(client.id === 'kimi-code' && legacyKimi) && (levels.length > 0 || model.effort) && <Field><FieldLabel>{t('模型思考等级')}</FieldLabel>
+            <AgentSelect label={t('模型思考等级')} value={model.effort} disabled={disabled} options={[{ value: '', label: t('模型默认') }, ...[...new Set([...levels, ...(model.effort ? [model.effort] : [])])].map(value => ({ value, label: value }))]} onChange={effort => edit({ effort })} /></Field>}
         </CardContent>
       </CollapsibleContent>
     </Collapsible>
@@ -213,11 +222,13 @@ export function ModelsFields({ client, draft, update, catalog, disabled, native 
       {list}
     </>}
 
+    {fieldNote && <p className='text-xs leading-relaxed text-subtle'>{fieldNote}</p>}
+    {client.id === 'claude-code' && <ClaudeModelFields draft={draft} update={update} catalog={catalog} disabled={disabled} />}
     {client.supportsDefault && <Field><FieldLabel>{t('默认模型')}</FieldLabel>
-      <SearchableModelSelect label={t('默认模型')} value={draft.model} disabled={disabled} options={draft.models.filter(model => model.id).map(model => ({ value: model.id, label: model.name || model.id }))} onChange={model => update({ model, effort: '' })} />
+      <SearchableModelSelect label={t('默认模型')} value={draft.model} disabled={disabled} options={draft.models.filter(model => model.id).map(model => ({ value: model.id, label: model.name || model.id }))} onChange={model => update({ model, effort: '', ...(client.id === 'claude-code' ? { claudeModels: syncClaudeTiers(draft.claudeModels, draft.model, model) } : {}) })} />
       <p className='text-xs text-subtle'>{quick ? t('接入后使用此默认模型，其它已选模型仍可在客户端切换。') : native ? t('确认写入后更新客户端默认模型；取消不会生效。') : client.configMode === 'single' ? t('保存方案不会切换客户端；应用后改变实际默认模型。') : t('保存方案不会切换客户端；选择“应用并设为默认”才改变实际默认模型。')}</p></Field>}
-    {['cline', 'crush', 'dsh'].includes(client.id) && selected && (selected.reasoningLevels.length > 0 || draft.effort) && <Field><FieldLabel>{t('默认模型思考等级')}</FieldLabel>
-      <AgentSelect label={t('默认模型思考等级')} value={draft.effort} disabled={disabled} options={[{ value: '', label: t('模型默认') }, ...[...new Set([...selected.reasoningLevels, ...(draft.effort ? [draft.effort] : [])])].map(value => ({ value, label: value }))]} onChange={effort => update({ effort })} /></Field>}
+    {['cline', 'crush', 'dsh'].includes(client.id) && selected && selected.supportsReasoning !== false && (selected.reasoningLevels.length > 0 || draft.effort) && <Field><FieldLabel>{t('默认模型思考等级')}</FieldLabel>
+      <AgentSelect label={t('默认模型思考等级')} value={draft.effort} disabled={disabled} options={[{ value: '', label: t('模型默认') }, ...[...new Set([...modelLevels(client, selected.reasoningLevels), ...(draft.effort ? [draft.effort] : [])])].map(value => ({ value, label: value }))]} onChange={effort => update({ effort })} /></Field>}
   </section>
 }
 

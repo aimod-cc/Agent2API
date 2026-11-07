@@ -1,5 +1,4 @@
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
 use crate::server::config::{self, GithubAccessMode};
 use crate::server::core::task_state;
@@ -14,10 +13,6 @@ pub enum GithubSettings {
 }
 
 impl GithubSettings {
-    pub fn rate_limit_message(self, retry_at: i64) -> String {
-        self.message_for_token(retry_at, token::effective_token().is_some())
-    }
-
     fn message_for_token(self, retry_at: i64, filled: bool) -> String {
         if !filled {
             return match self {
@@ -38,18 +33,10 @@ impl GithubSettings {
         if !is_rate_limit_error(message) {
             return message.to_string();
         }
-        let filled = token::effective_token().is_some();
-        if filled && retry_at == 0 {
-            if let Some(seconds) = message
-                .split_once("请在 ")
-                .and_then(|(_, tail)| tail.split_once(" 秒后重试"))
-                .and_then(|(seconds, _)| seconds.parse::<i64>().ok())
-                .filter(|seconds| *seconds > 0)
-            {
-                return format!("GitHub 接口限流中，请在 {seconds} 秒后重试");
-            }
+        if retry_at <= logging::now_ms() {
+            return "上次 GitHub 限流的等待时间已结束，可重新检查".to_string();
         }
-        self.message_for_token(retry_at, filled)
+        self.message_for_token(retry_at, token::effective_token().is_some())
     }
 
     pub fn waiting_message(self, state: &task_state::TaskState) -> String {
@@ -62,9 +49,11 @@ impl GithubSettings {
     }
 }
 
-fn is_rate_limit_error(message: &str) -> bool {
+pub fn is_rate_limit_error(message: &str) -> bool {
     [
         "GitHub 接口限流中",
+        "GitHub 源「",
+        "上次 GitHub 限流",
         "GitHub 接口处于限流冷却期",
         "GitHub 接口访问受限",
         "查询插件更新失败：GitHub 返回 HTTP 403",
@@ -88,6 +77,8 @@ pub struct Candidate {
     pub(super) id: String,
     pub(super) key: String,
     pub(super) context: String,
+    pub(super) proxy: Option<serde_json::Value>,
+    pub(super) egress: String,
     pub(super) mode: GithubAccessMode,
     mirror_origin: Option<url::Url>,
 }
@@ -141,6 +132,8 @@ pub(super) fn configured_candidates(value: &str, allow_mirror: bool) -> Vec<Cand
     let settings = config::github_access();
     let context = source_state::context_key_for(&settings);
     let key = source_state::request_key(value, &context);
+    let proxy = config::update_proxy();
+    let egress = super::rate_limit::egress_key();
     let official = Candidate {
         url: value.to_string(),
         original: value.to_string(),
@@ -148,6 +141,8 @@ pub(super) fn configured_candidates(value: &str, allow_mirror: bool) -> Vec<Cand
         id: "official".to_string(),
         key: key.clone(),
         context: context.clone(),
+        proxy: proxy.clone(),
+        egress: egress.clone(),
         mode: settings.mode,
         mirror_origin: None,
     };
@@ -166,6 +161,8 @@ pub(super) fn configured_candidates(value: &str, allow_mirror: bool) -> Vec<Cand
             id: mirror.url.clone(),
             key: key.clone(),
             context: context.clone(),
+            proxy: proxy.clone(),
+            egress: egress.clone(),
             mode: settings.mode,
             mirror_origin: url::Url::parse(&mirror.url).ok(),
         });
@@ -180,20 +177,24 @@ pub(super) fn configured_candidates(value: &str, allow_mirror: bool) -> Vec<Cand
     candidates
 }
 
-pub fn ensure_available(candidates: &[Candidate], headers: &[(String, String)]) -> Result<(), String> {
+pub fn ensure_available(candidates: &[Candidate], headers: &[(String, String)]) -> Result<(), super::UpdateError> {
+    let mut limits = Vec::new();
+    let states = task_state::read_all().unwrap_or_default();
     for candidate in candidates {
-        if let Some(message) = candidate.cooling_message(headers) {
-            return Err(message);
+        match candidate.stored_limit(headers, &states).filter(|limit| limit.retry_at > logging::now_ms()) {
+            Some(limit) => limits.push(limit),
+            None => return Ok(()),
         }
     }
-    Ok(())
+    Err(if limits.is_empty() { super::UpdateError::new("没有可用的 GitHub 源") }
+        else { super::UpdateError::rate_limited(limits) })
 }
 
 pub async fn download_candidates(
     value: &str,
     allow_mirror: bool,
     headers: &[(String, String)],
-) -> Result<Vec<Candidate>, String> {
+) -> Result<Vec<Candidate>, super::UpdateError> {
     super::probe::rank(value, allow_mirror, headers).await
 }
 
@@ -250,94 +251,6 @@ impl Candidate {
         source_state::record(self, state, Some(elapsed_ms), selected);
     }
 
-    fn rate_key(&self, headers: &[(String, String)]) -> Option<String> {
-        if !is_official_api(&self.original) {
-            return None;
-        }
-        let auth = if self.source == Source::Official {
-            headers
-                .iter()
-                .find(|(key, _)| key.eq_ignore_ascii_case("authorization"))
-                .map(|(_, value)| value.as_str())
-                .unwrap_or("")
-        } else {
-            ""
-        };
-        let proxy = config::update_proxy();
-        let origin = if self.source == Source::Mirror {
-            self.mirror_origin
-                .as_ref()
-                .map(|url| url.as_str())
-                .unwrap_or("")
-        } else {
-            "https://api.github.com"
-        };
-        let bytes = serde_json::to_vec(&(origin, proxy, auth)).unwrap_or_default();
-        Some(format!("githubRate:{:x}", Sha256::digest(bytes)))
-    }
-
-    pub fn cooling_message(&self, headers: &[(String, String)]) -> Option<String> {
-        let state = task_state::read(&self.rate_key(headers)?).ok()?;
-        let until = state.value.as_ref()?.get("retryAt")?.as_i64()?;
-        (until > logging::now_ms()).then(|| GithubSettings::Update.rate_limit_message(until))
-    }
-
-    pub fn is_rate_limited(&self, response: &reqwest::Response) -> bool {
-        response.status().as_u16() == 429
-            || (response.status().as_u16() == 403 && (
-                self.source == Source::Official
-                    || response.headers().contains_key("retry-after")
-                    || response.headers().get("x-ratelimit-remaining").is_some_and(|value| value == "0")
-                    || response.headers().get("content-type").and_then(|value| value.to_str().ok())
-                        .is_some_and(|value| value.contains("json"))
-            ))
-    }
-
-    pub fn record_rate_limit(&self, headers: &[(String, String)], response: &reqwest::Response) {
-        if response.status().as_u16() == 403 && !self.is_rate_limited(response) {
-            return;
-        }
-        let Some(key) = self.rate_key(headers) else {
-            return;
-        };
-        let until = retry_deadline(response.headers(), response.status().as_u16());
-        if until > logging::now_ms() {
-            if let Err(error) = task_state::store_value(&key, json!({ "retryAt": until })) {
-                logging::verbose("[Update]", &error);
-            }
-        }
-    }
-}
-
-pub fn retry_deadline(headers: &reqwest::header::HeaderMap, status: u16) -> i64 {
-    let now = logging::now_ms();
-    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
-    let after = header("retry-after")
-        .and_then(|value| {
-            value
-                .parse::<i64>()
-                .ok()
-                .map(|seconds| now.saturating_add(seconds.max(0).saturating_mul(1000)))
-                .or_else(|| {
-                    chrono::DateTime::parse_from_rfc2822(value)
-                        .ok()
-                        .map(|date| date.timestamp_millis())
-                })
-        })
-        .unwrap_or(0);
-    let reset = if header("x-ratelimit-remaining") == Some("0") {
-        header("x-ratelimit-reset")
-            .and_then(|value| value.parse::<i64>().ok())
-            .map(|seconds| seconds.saturating_mul(1000).saturating_add(1000))
-            .unwrap_or(0)
-    } else {
-        0
-    };
-    after.max(reset).max(if status == 403 || status == 429 {
-        now + 60_000
-    } else {
-        0
-    })
 }
 
 pub fn should_switch(candidate: &Candidate, status: reqwest::StatusCode) -> bool {
@@ -345,7 +258,7 @@ pub fn should_switch(candidate: &Candidate, status: reqwest::StatusCode) -> bool
         || (candidate.source == Source::Mirror && matches!(status.as_u16(), 400 | 404 | 405 | 416))
 }
 
-pub(super) fn failed_state(message: &str) -> &'static str {
+pub(crate) fn failed_state(message: &str) -> &'static str {
     if message.contains("限流") { "rateLimited" }
     else if message.contains("超时") { "timeout" }
     else if message.contains("格式") || message.contains("JSON") || message.contains("内容") { "invalid" }

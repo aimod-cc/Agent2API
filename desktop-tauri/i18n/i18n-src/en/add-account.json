@@ -1,4 +1,10 @@
 {
+  "Cloudflare Account ID（32 位十六进制）": "Cloudflare Account ID (32 hex characters)",
+  "由插件打开浏览器登录": "Sign in using the plugin's browser",
+  "插件会在网关电脑上启动独立浏览器并读取登录结果，不使用系统默认浏览器。": "The plugin starts a separate browser on the gateway machine and reads the sign-in result. It does not use the system's default browser.",
+  "内嵌窗口登录": "Sign in in the embedded window",
+  "在应用内嵌窗口完成 WPS 登录，登录凭据仅交给原插件校验并保存到当前网关。": "Sign in to WPS in the app's embedded window. Credentials are passed only to the original plugin for verification and saved to this gateway.",
+  "读取的是网关电脑上已登录的客户端，不是打开面板的电脑；也可改用粘贴凭据。": "Reads the signed-in client on the gateway machine, not the computer displaying the panel. You can also paste credentials instead.",
   "导入 QuWork 本机登录态": "Import local QuWork sign-in",
   "读取运行网关的电脑上已登录的 QuWork，只保存本机引用，不修改官方客户端文件；切换账号后需重新导入。": "Reads QuWork signed in on the gateway machine and stores only a local reference without changing official files. Import again after switching accounts.",
   "QuWork 凭证": "QuWork credentials",

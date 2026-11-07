@@ -63,7 +63,7 @@ export function AssistantEmpty({ noTools, failed, status, onSend }: {
         <path fill='currentColor' d='M18.8 15l.85 2.35L22 18.2l-2.35.85L18.8 21.4l-.85-2.35L15.6 18.2l2.35-.85L18.8 15z' />
       </svg>
     </div>
-    <h3>{t('AI 助手')}</h3>
+    <h3>{t('模型对话')}</h3>
     <p>{t('用一句话让我查或改本机的模型转发配置。')}<br />{t('我会在动手前把改动列给你确认。')}</p>
     <div className='asst-suggests'>
       {[t('看看哪些模型在多家重复了'), t('测一下当前最快的模型通不通'), t('CodeArts 的账号余额还剩多少？'), t('把重复的模型加上家名前缀区分开')]

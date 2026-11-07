@@ -66,6 +66,7 @@ export type AgentClient = {
   version: string
   writable: boolean
   supportsModels: boolean
+  modelFields?: Array<keyof AgentModel>
   supportsEffort: boolean
   supportsDefault: boolean
   supportsToggle: boolean
@@ -75,6 +76,7 @@ export type AgentClient = {
   docsUrl: string
   needsRestart: boolean
   profiles: AgentProfile[]
+  quickProfiles?: AgentProfile[]
   live: AgentProfile[]
   readError: string | null
   storeError: string | null

@@ -329,6 +329,21 @@ pub fn resolved_client(
     host: &str,
     addresses: &[std::net::SocketAddr],
 ) -> Result<reqwest::Client, String> {
+    resolved_builder(proxy, system_proxy_when_unset, host, addresses)?
+        .build().map_err(|_| "无法创建出站连接".to_string())
+}
+
+pub fn websocket_client(proxy: Option<&ResolvedProxy>) -> Result<reqwest::Client, String> {
+    resolved_builder(proxy, false, "", &[])?.http1_only()
+        .build().map_err(|_| "无法创建 WebSocket 出站连接".to_string())
+}
+
+fn resolved_builder(
+    proxy: Option<&ResolvedProxy>,
+    system_proxy_when_unset: bool,
+    host: &str,
+    addresses: &[std::net::SocketAddr],
+) -> Result<reqwest::ClientBuilder, String> {
     let timeouts = crate::server::config::timeout_settings();
     let mut builder = base_builder(&timeouts)
         .redirect(reqwest::redirect::Policy::none());
@@ -343,7 +358,7 @@ pub fn resolved_client(
     } else if !system_proxy_when_unset {
         builder = builder.no_proxy();
     }
-    builder.build().map_err(|_| "无法创建出站连接".to_string())
+    Ok(builder)
 }
 
 pub fn client_for_github(proxy: Option<&ResolvedProxy>) -> Result<Arc<reqwest::Client>, String> {

@@ -91,15 +91,25 @@ pub const MAX_INSTALLER_BYTES: u64 = 600 * 1024 * 1024;
 pub struct UpdateError {
     pub message: String,
     pub status_code: i32,
+    pub rate_limits: Vec<super::rate_limit::RateLimit>,
 }
 
 impl UpdateError {
     pub fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into(), status_code: 502 }
+        Self { message: message.into(), status_code: 502, rate_limits: Vec::new() }
     }
 
     pub fn with_status(status_code: i32, message: impl Into<String>) -> Self {
-        Self { message: message.into(), status_code }
+        Self { message: message.into(), status_code, rate_limits: Vec::new() }
+    }
+
+    pub fn rate_limited(rate_limits: Vec<super::rate_limit::RateLimit>) -> Self {
+        Self { message: super::rate_limit::message(&rate_limits), status_code: 429, rate_limits }
+    }
+
+    pub fn retry_at(&self) -> i64 {
+        self.rate_limits.iter().filter(|limit| limit.retry_at > crate::server::logging::now_ms())
+            .map(|limit| limit.retry_at).min().unwrap_or(0)
     }
 
     /// 转成统一的网关错误。更新路由的失败 body 走 OpenAI 风格

@@ -12,9 +12,8 @@
 //!     重启都不再查，仍等到 10:20；
 //!   - **停机期间只补一次**：休眠 / 关机错过的那一轮在启动后跑一次，不补跑
 //!     期间的每一轮；
-//!   - **失败有冷却**：默认按连续失败次数延长等待（上限一天），更新检查只保留
-//!     上游要求的等待。冷却跨重启保留，手动触发是否越过由调用点选择
-//!     （见 [`ManualBackoff`]）。
+//!   - **失败有冷却**：普通任务按连续失败次数延长等待（上限一天）；更新查询
+//!     只保留自动排期，GitHub 限流由请求层按线路保存，不能让一条线路阻塞整轮。
 //!
 //! ── 硬约束：请求发出**之前**就记一笔尝试 ─────────────────────
 //! `claim` 在返回执行权之前就把 `lastAttemptAt` / `nextRunAt` 写进库。理由：
@@ -122,26 +121,16 @@ impl TaskState {
         self.describe_wait(true)
     }
 
-    pub(super) fn use_upstream_backoff(&mut self) -> bool {
-        if self.failure_backoff == FailureBackoff::UpstreamOnly {
-            return false;
-        }
+    pub(super) fn use_source_backoff(&mut self) -> bool {
+        let changed = self.failure_backoff != FailureBackoff::UpstreamOnly || self.retry_at != 0;
         self.failure_backoff = FailureBackoff::UpstreamOnly;
-        if self.last_error.is_some() {
-            // 旧错误摘要保留了任务退避叠加前的上游等待秒数，不能沿用混合后的 retry_at。
-            let upstream_retry_at = self.last_error.as_deref()
-                .and_then(|message| message.split_once("GitHub 接口限流中，请在 "))
-                .and_then(|(_, tail)| tail.split_once(" 秒后重试"))
-                .and_then(|(seconds, _)| seconds.parse::<i64>().ok())
-                .filter(|seconds| *seconds > 0)
-                .map(|seconds| self.last_run_at.saturating_add(seconds.saturating_mul(1000)))
-                .unwrap_or(0);
-            self.retry_at = self.retry_at.min(upstream_retry_at).max(0);
-            let scheduled_at = self.last_run_at.max(self.last_attempt_at)
-                .saturating_add(self.interval_ms.max(60_000));
-            self.next_run_at = self.next_run_at.min(scheduled_at.max(self.retry_at));
-        }
-        true
+        self.retry_at = 0;
+        let scheduled_at = self.last_run_at.max(self.last_attempt_at)
+            .saturating_add(self.interval_ms.max(0));
+        let next_run_at = self.next_run_at.min(scheduled_at);
+        let changed = changed || self.next_run_at != next_run_at;
+        self.next_run_at = next_run_at;
+        changed
     }
 
     fn describe_wait(&self, backoff_bypassed: bool) -> String {

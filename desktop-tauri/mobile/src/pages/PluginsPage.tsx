@@ -12,6 +12,9 @@ import { store, useStore } from '../state/store'
 import { PluginCard, StorePluginCard } from './plugins/PluginCards'
 import { PluginSettingsSheet } from './plugins/PluginSettingsSheet'
 import { t } from '../i18n'
+import { GithubFailureText } from '../../../ui-shared/github-failure'
+import { ScriptPluginsPanel } from '../../../ui-shared/plugins-scripts'
+import { apiCall } from '../api/client'
 import '../styles/checkin.css'
 
 export function PluginsPage() {
@@ -33,6 +36,7 @@ export function PluginsPage() {
       const next = JSON.stringify({
         packs: data.packs.map(pack => ({ id: pack.id, version: pack.version, enabled: pack.enabled, providers: pack.providers })),
         host: data.host,
+        scripts: data.scripts?.packages,
       })
       if (signature.current !== next) {
         signature.current = next
@@ -54,7 +58,7 @@ export function PluginsPage() {
     }
   }, [identity])
 
-  usePolling(load, payload?.operations?.some(operation => operation.active) ? 1500 : 10_000)
+  usePolling(load, payload?.operations?.some(operation => operation.active) || payload?.scripts?.operation.active ? 1500 : 10_000)
   const pull = usePullToRefresh({ onRefresh: load })
 
   async function run<T>(key: string, task: () => Promise<T>): Promise<T | undefined> {
@@ -132,7 +136,11 @@ export function PluginsPage() {
           onUpdate={() => void install(pack.id, true)} onRemove={() => setRemove(pack)} />)}
         {!packs.length ? <Card className='m-card'><Empty text={payload ? t('这台网关还没有安装插件') : t('正在读取插件列表…')} /></Card> : null}
       </div>
-      {payload?.catalog?.reason ? <div className='m-section'><p className='m-ck-note'>{pluginErrorMessage(payload.catalog.reason)}</p></div> : null}
+      {payload?.scripts ? <div className='m-section'><Card className='m-card m-card-pad'>
+        <ScriptPluginsPanel key={identity} state={payload.scripts} t={t} disabled={Boolean(busy)}
+          request={(path, body) => apiCall(path, { method: 'POST', body })} refresh={load} />
+      </Card></div> : null}
+      {payload?.catalog?.reason ? <div className='m-section'><p className='m-ck-note'><GithubFailureText value={payload.catalog} t={t} /></p></div> : null}
       {payload ? <div className='m-section'><Collapsible className='m-card m-card-pad'>
         <CollapsibleTrigger className='m-ck-title'>{t('诊断信息')}</CollapsibleTrigger><CollapsibleContent keepMounted>
         <p className='m-ck-note'>{t('插件目录')}：<span className='m-mono'>{payload.pluginsDir}</span></p>

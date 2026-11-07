@@ -43,7 +43,7 @@ impl RequestVision {
         let settings = snapshot.settings.as_ref().map_err(|error| GatewayError::new(error.clone()))?;
         if !settings.enabled { return Ok(None); }
         Ok(Some(Arc::new(Self { settings: settings.clone(), revision: snapshot.revision.clone(),
-            shared: settings.assist.shared_target.clone(), original_messages: body.get("messages").and_then(Value::as_array).map_or(0, Vec::len),
+            shared: config::shared_target(), original_messages: body.get("messages").and_then(Value::as_array).map_or(0, Vec::len),
             started: Instant::now(), triggered: AtomicBool::new(false) })))
     }
 

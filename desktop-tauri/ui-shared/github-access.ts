@@ -6,14 +6,36 @@ export type GithubMirror = {
   supportsApi: boolean
 }
 
+export type GithubRateLimit = {
+  source: string
+  label: string
+  resource: 'api' | 'index' | 'download'
+  retryAt: number
+  retrySource: 'retryAfter' | 'rateLimitReset' | 'fallback' | 'legacy'
+  observedAt: number
+}
+
+export type GithubFailure = {
+  reason?: string | null
+  rateLimited?: boolean
+  rateLimits?: GithubRateLimit[]
+  retryAt?: number
+  canRetry?: boolean
+  serverTime?: number
+}
+
 export type GithubSourceObservation = {
   source: string
   label: string
   resource: 'api' | 'index' | 'download'
-  state: 'ok' | 'failed' | 'timeout' | 'invalid' | 'unsupported' | 'rateLimited'
+  state: 'ok' | 'failed' | 'timeout' | 'invalid' | 'unsupported' | 'rateLimited' | 'stale'
   elapsedMs?: number | null
   checkedAt: number
   selected: boolean
+  validUntil?: number
+  retryAt?: number
+  retrySource?: GithubRateLimit['retrySource'] | ''
+  lastState?: string | null
 }
 
 export type GithubAccessSettings = {
@@ -21,6 +43,7 @@ export type GithubAccessSettings = {
   mirrorUrl: string
   mirrors?: GithubMirror[]
   observations?: GithubSourceObservation[]
+  serverTime?: number
   saved?: boolean
 }
 

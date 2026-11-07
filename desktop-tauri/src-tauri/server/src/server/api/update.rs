@@ -141,6 +141,7 @@ async fn dispatch(
     if method == Method::GET && full_path == "/api/update/github" {
         let mut value = json!(config::github_access());
         value["observations"] = crate::server::core::update::source::status();
+        value["serverTime"] = json!(logging::now_ms());
         return ok_json(value);
     }
 
@@ -162,6 +163,7 @@ async fn dispatch(
                 let mut value = json!(settings);
                 value["saved"] = json!(saved);
                 value["observations"] = crate::server::core::update::source::status();
+                value["serverTime"] = json!(logging::now_ms());
                 ok_json(value)
             }
             Err(message) => GatewayError::bad_request(message).into_response(),

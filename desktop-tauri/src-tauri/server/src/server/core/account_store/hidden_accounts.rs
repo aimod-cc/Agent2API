@@ -16,6 +16,13 @@ enum HiddenReason {
 }
 
 fn reason_of(provider: &str, registry: &PackRegistry) -> HiddenReason {
+    if let Some(state) = crate::server::core::plugin_host::script::provider_state(provider) {
+        return match state {
+            "pack_disabled" => HiddenReason::PackDisabled,
+            "provider_disabled" => HiddenReason::ProviderDisabled,
+            _ => HiddenReason::NotLoaded,
+        };
+    }
     let mut reason = HiddenReason::NotInstalled;
     for pack in &registry.packs {
         if !pack

@@ -8,6 +8,7 @@ use tokio::sync::Notify;
 
 use super::{settings, update};
 use crate::server::core::task_state::{self, Claim, ManualBackoff};
+use crate::server::core::update::{rate_limit, UpdateError};
 use crate::server::logging;
 
 fn key() -> String {
@@ -72,9 +73,9 @@ fn snapshot_for(channels: crate::server::config::UpdateChannels) -> Value {
     if let Some(items) = result["plugins"].as_array_mut() {
         for item in items {
             if item["error"] == true {
-                if let Some(reason) = item["reason"].as_str() {
-                    item["reason"] = json!(update::describe_error(reason, 0));
-                }
+                let repo = item["repository"].as_str().unwrap_or(update::FALLBACK_REPO);
+                let url = format!("https://api.github.com/repos/{repo}/releases");
+                rate_limit::decorate_cached(item, &url);
             }
         }
     }
@@ -84,25 +85,21 @@ fn snapshot_for(channels: crate::server::config::UpdateChannels) -> Value {
     result["checking"] = json!(state.running());
     result["stale"] = json!(stale);
     result["current"] = json!(super::host_target());
-    result["reason"] = json!(state.last_error.as_deref().map(|error| {
-        update::describe_error(error, state.retry_at)
-    }));
+    result["reason"] = json!(state.last_error);
+    if state.last_error.is_some() {
+        let url = format!("https://raw.githubusercontent.com/{}/main/index.json", update::INDEX_REPO);
+        rate_limit::decorate_cached(&mut result, &url);
+    }
     result["error"] = json!(state.last_error.is_some());
     result["available"] = json!(result["plugins"]
         .as_array()
         .is_some_and(|items| !items.is_empty()));
-    if let Some(error) = result["plugins"]
-        .as_array()
-        .and_then(|items| {
-            items
-                .iter()
-                .find(|item| item["error"] == true)
-                .and_then(|item| item["reason"].as_str())
-        })
-        .map(str::to_string)
-    {
+    let failure = result["plugins"].as_array().and_then(|items| items.iter().find(|item| item["error"] == true)).cloned();
+    if let Some(failure) = failure.filter(|_| !stale) {
         result["error"] = json!(true);
-        result["reason"] = json!(error);
+        for field in ["reason", "rateLimited", "rateLimits", "retryAt", "canRetry", "serverTime"] {
+            result[field] = failure.get(field).cloned().unwrap_or(Value::Null);
+        }
     }
     result
 }
@@ -116,14 +113,18 @@ pub async fn refresh(manual: bool) -> Result<Value, String> {
         &channel_key,
         interval,
         manual,
-        ManualBackoff::Respect,
-        60_000,
+        ManualBackoff::Bypass,
+        0,
     )? {
         Claim::Acquired(guard) => guard,
-        Claim::Deferred(state) => {
-            if state.last_success_at > 0 {
-                return Ok(snapshot());
+        Claim::Deferred(mut state) => {
+            let started = logging::now_ms();
+            while state.running() && logging::now_ms() - started < 75_000 {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                state = task_state::read(&channel_key)?;
             }
+            if state.running() { return Err(update::waiting_message(&state)); }
+            if state.last_run_at > 0 { return Ok(snapshot()); }
             return Err(update::waiting_message(&state));
         }
     };
@@ -137,17 +138,22 @@ pub async fn refresh(manual: bool) -> Result<Value, String> {
     match outcome {
         Ok(mut value) => {
             value["channels"] = json!(channels);
-            guard.finish(true, "插件检查完成".to_string(), Some(value), 0, interval)?;
+            let partial = value["plugins"].as_array().is_some_and(|items| items.iter().any(|item| item["error"] == true));
+            let summary = if partial { "插件列表已刷新，部分版本查询失败" } else { "插件检查完成" };
+            guard.finish(true, summary.to_string(), Some(value), 0, interval)?;
             Ok(snapshot())
         }
         Err(error) => {
-            guard.finish(false, error.clone(), None, 0, interval)?;
-            Err(error)
+            let mut value = task_state::read(&channel_key)?.value.filter(Value::is_object)
+                .unwrap_or_else(|| json!({ "plugins": [] }));
+            value["rateLimits"] = json!(error.rate_limits);
+            guard.finish(false, error.message.clone(), Some(value), 0, interval)?;
+            Err(error.message)
         }
     }
 }
 
-async fn fetch_catalog(channels: crate::server::config::UpdateChannels) -> Result<Value, String> {
+async fn fetch_catalog(channels: crate::server::config::UpdateChannels) -> Result<Value, UpdateError> {
     let entries = update::read_index_result().await?;
     let packs = super::list_packs();
     let cached = snapshot_for(channels);
@@ -179,6 +185,7 @@ async fn fetch_catalog(channels: crate::server::config::UpdateChannels) -> Resul
         let installed = packs.iter().find(|pack| pack.id == entry.id);
         let mut value = json!({
             "id": entry.id, "name": entry.name, "description": entry.description,
+            "repository": repo,
             "official": entry.official, "homepage": detail.as_ref().map(|detail| &detail.homepage),
             "protocol": detail.as_ref().map(|detail| detail.protocol), "icon": icon,
             "requireSigned": entry.require_signed || detail.as_ref().is_some_and(|detail| detail.require_signed),
@@ -233,9 +240,11 @@ async fn fetch_catalog(channels: crate::server::config::UpdateChannels) -> Resul
                     }
                 }
                 value["error"] = json!(true);
-                value["reason"] = json!(error);
+                value["reason"] = json!(error.message);
+                value["rateLimits"] = json!(error.rate_limits);
             }
         }
+        value["checkedAt"] = json!(logging::now_ms());
         plugins.push(value);
     }
     plugins.sort_by(|left, right| {
@@ -264,16 +273,19 @@ pub fn updates() -> Value {
         }) && platform.is_some();
         let error = entry.and_then(|item| item["error"].as_bool()).unwrap_or(false)
             || catalog["stale"] == true;
+        let failure = if catalog["stale"] == true { &catalog }
+            else { entry.filter(|item| item["error"] == true).unwrap_or(&catalog) };
         json!({
             "id": pack.id, "current": pack.version, "latest": version,
+            "rateLimited": failure["rateLimited"], "rateLimits": failure["rateLimits"],
+            "retryAt": failure["retryAt"], "canRetry": failure["canRetry"], "serverTime": failure["serverTime"],
             "available": available, "checked": catalog["checked"], "checkedAt": catalog["checkedAt"],
             "notes": entry.map(|entry| &entry["notes"]), "page": entry.map(|entry| &entry["page"]),
             "publishedAt": entry.map(|entry| &entry["publishedAt"]),
             "prerelease": entry.map(|entry| entry["prerelease"] == true).unwrap_or(false),
             "asset": platform, "error": error,
             "reason": if error {
-                entry.and_then(|entry| entry["reason"].as_str()).map(str::to_string)
-                    .or_else(|| catalog["reason"].as_str().map(str::to_string))
+                failure["reason"].as_str().map(str::to_string)
             } else if entry.is_none() && catalog["checked"] == true {
                 Some("插件不在当前索引中，请从原来源手动更新".to_string())
             } else if available { None }
@@ -283,7 +295,9 @@ pub fn updates() -> Value {
         })
     }).collect();
     json!({ "updates": updates, "checkedAt": catalog["checkedAt"],
-        "checking": catalog["checking"], "error": catalog["error"], "reason": catalog["reason"] })
+        "checking": catalog["checking"], "error": catalog["error"], "reason": catalog["reason"],
+        "rateLimited": catalog["rateLimited"], "rateLimits": catalog["rateLimits"],
+        "retryAt": catalog["retryAt"], "canRetry": catalog["canRetry"], "serverTime": catalog["serverTime"] })
 }
 
 async fn apply_automatic() {

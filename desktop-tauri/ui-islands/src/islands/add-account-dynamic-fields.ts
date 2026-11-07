@@ -28,6 +28,8 @@ export type Method = {
    * 地址上的 AStudio）。为真时界面不提供「系统浏览器」选项。
    */
   embeddedOnly: boolean
+  desktopOnly?: boolean
+  browserMode?: 'choice' | 'external' | 'plugin' | 'none'
   callbackInput: CallbackInput
   instructions: string
   reason?: string
@@ -126,7 +128,9 @@ export function parseMethods(value: unknown, provider = ''): MethodsState {
     }
     if ((raw.manualCallback !== undefined && typeof raw.manualCallback !== 'boolean')
       || (raw.localOnly !== undefined && typeof raw.localOnly !== 'boolean')
-      || (raw.embeddedOnly !== undefined && typeof raw.embeddedOnly !== 'boolean')) {
+      || (raw.embeddedOnly !== undefined && typeof raw.embeddedOnly !== 'boolean')
+      || (raw.desktopOnly !== undefined && typeof raw.desktopOnly !== 'boolean')
+      || (raw.browserMode !== undefined && !['choice', 'external', 'plugin', 'none'].includes(String(raw.browserMode)))) {
       throw new Error(t('插件返回了无效的登录方式，请更新插件或联系作者'))
     }
     const callbackInput = parseCallbackInput(raw.callbackInput)
@@ -142,6 +146,7 @@ export function parseMethods(value: unknown, provider = ''): MethodsState {
       id: `method:${index}`, methodIndex: index, type: raw.type,
       label: t(textOf(raw.label) || (raw.type === 'oauth' ? t('OAuth 登录') : t('API 凭证'))),
       prompts, localOnly: raw.localOnly === true, manualCallback, callbackInput, embeddedOnly,
+      desktopOnly: raw.desktopOnly === true, browserMode: raw.browserMode as Method['browserMode'],
       instructions: loginText(raw.instructions),
       reason: callbackContractMissing
         ? t('此 Copilot 手动令牌方式未声明回调输入契约，暂不发起；请改用设备码登录或只读本机引用。')

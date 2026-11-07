@@ -1,39 +1,114 @@
-use reqwest::Method;
+use std::sync::atomic::Ordering;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use super::{client::HubClient, session_view, CodingError, Engine};
+
+use super::{client::CodexClient, config, policy, projection, storage, string, CodingError, Engine};
 
 pub fn validate_id(id: &str) -> Result<(), CodingError> {
     if id.is_empty() || id.len() > 200 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)) || id == "." || id == ".." {
-        return Err(CodingError::new(400, "会话或电脑标识无效"));
+        return Err(CodingError::new(400, "会话标识无效"));
     }
     Ok(())
 }
 
-pub async fn detail(client: &HubClient, id: &str) -> Result<Value, CodingError> {
+pub async fn read_thread(client: &CodexClient, id: &str, history: bool) -> Result<Value, CodingError> {
     validate_id(id)?;
-    let data = client.request(Method::GET, &["api", "sessions", id], &[], None).await?;
-    let session = data.get("session").ok_or_else(|| CodingError::new(502, "HAPI 会话响应不完整"))?;
-    session_view(session).ok_or_else(|| CodingError::new(400, "这里只支持 Codex 和 Claude Code 会话"))
+    let data = client.rpc("thread/read", json!({ "threadId": id, "includeTurns": history })).await;
+    match data {
+        Ok(data) => data.get("thread").cloned().ok_or_else(|| CodingError::new(502, "Codex 会话响应不完整")),
+        Err(error) => {
+            let state = client.state.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(live) = state.threads.get(id).filter(|s| s.attached && !history) { return Ok(live.thread.clone()); }
+            Err(error)
+        }
+    }
 }
 
-pub async fn list(client: &HubClient, engine: Engine) -> Result<Value, CodingError> {
-    let data = client.request(Method::GET, &["api", "sessions"], &[("limit".into(), "500".into()), ("order".into(), "updatedAt".into())], None).await?;
-    let rows = data.get("sessions").and_then(Value::as_array).ok_or_else(|| CodingError::new(502, "HAPI 会话列表响应不完整"))?;
-    let sessions: Vec<Value> = rows.iter().filter_map(session_view)
-        .filter(|s| s.get("engine").and_then(Value::as_str) == Some(engine.as_str())).collect();
-    Ok(json!({ "sessions": sessions, "limited": rows.len() >= 500 }))
+pub async fn observe_loaded(client: &CodexClient) -> Result<(), CodingError> {
+    let mut loaded = Vec::new();
+    let mut cursor = Value::Null;
+    loop {
+        let page = client.rpc("thread/loaded/list", json!({ "cursor": cursor, "limit": 100 })).await?;
+        loaded.extend(page.get("data").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string));
+        cursor = page.get("nextCursor").cloned().unwrap_or(Value::Null);
+        if cursor.is_null() || loaded.len() >= 1000 { break; }
+    }
+    {
+        let mut state = client.state.inner.lock().unwrap_or_else(|e| e.into_inner());
+        for (id, thread) in &mut state.threads {
+            if !loaded.contains(id) { thread.attached = false; thread.turn = None; }
+        }
+    }
+    for id in loaded {
+        if client.state.inner.lock().unwrap_or_else(|e| e.into_inner()).threads.get(&id).is_some_and(|s| s.ending) { continue; }
+        let thread = match read_thread(client, &id, false).await {
+            Ok(thread) => thread,
+            Err(error) if error.code == "codex_rejected" => continue,
+            Err(error) => return Err(error),
+        };
+        if client.config.directory(string(&thread, "cwd")).is_err() || thread.get("parentThreadId").is_some_and(|p| !p.is_null()) { continue; }
+        let data = match client.rpc("thread/resume", json!({ "threadId": id, "excludeTurns": false })).await {
+            Ok(data) => data,
+            Err(error) if error.code == "codex_rejected" => continue,
+            Err(error) => return Err(error),
+        };
+        if let Some(thread) = data.get("thread") { projection::remember(client, thread, Some(&data), Some(true)); }
+    }
+    Ok(())
 }
 
-pub async fn machines(client: &HubClient) -> Result<Value, CodingError> {
-    let data = client.request(Method::GET, &["api", "machines"], &[], None).await?;
-    let rows = data.get("machines").and_then(Value::as_array).ok_or_else(|| CodingError::new(502, "HAPI 电脑列表响应不完整"))?;
-    let machines: Vec<Value> = rows.iter().filter(|m| m.get("active").and_then(Value::as_bool) == Some(true)).map(|m| json!({
-        "id": m.get("id"), "name": m.pointer("/metadata/displayName").or_else(|| m.pointer("/metadata/host")),
-        "platform": m.pointer("/metadata/platform"), "homeDirectory": m.pointer("/metadata/homeDir"),
-        "workspaceRoots": m.pointer("/metadata/workspaceRoots"),
-    })).collect();
-    Ok(json!({ "machines": machines }))
+pub async fn detail(client: &CodexClient, id: &str) -> Result<Value, CodingError> {
+    let thread = read_thread(client, id, false).await?;
+    client.config.directory(string(&thread, "cwd"))?;
+    let mut snapshot = client.state.snapshot(&thread, &client.config, client.running.load(Ordering::Acquire));
+    snapshot["connected"] = json!(client.connected.load(Ordering::Acquire));
+    Ok(snapshot)
+}
+
+pub async fn list(client: &CodexClient) -> Result<Value, CodingError> {
+    let mut threads = Vec::new();
+    let mut cursor = Value::Null;
+    let mut limited = false;
+    for _ in 0..5 {
+        let data = client.rpc("thread/list", json!({ "limit": 100, "cursor": cursor, "sortKey": "updated_at",
+            "modelProviders": [], "sourceKinds": ["cli", "vscode", "exec", "appServer", "unknown"] })).await?;
+        let rows = data.get("data").and_then(Value::as_array).ok_or_else(|| CodingError::new(502, "Codex 会话列表响应不完整"))?;
+        threads.extend(rows.iter().filter(|t| t.get("parentThreadId").is_none_or(Value::is_null) && client.config.directory(string(t, "cwd")).is_ok()).cloned());
+        cursor = data.get("nextCursor").cloned().unwrap_or(Value::Null);
+        limited = !cursor.is_null();
+        if !limited { break; }
+    }
+    {
+        let state = client.state.inner.lock().unwrap_or_else(|e| e.into_inner());
+        for (id, live) in &state.threads {
+            if live.attached && !threads.iter().any(|t| string(t, "id") == id) && client.config.directory(string(&live.thread, "cwd")).is_ok() { threads.push(live.thread.clone()); }
+        }
+    }
+    threads.sort_by_key(|t| std::cmp::Reverse(t.get("updatedAt").and_then(Value::as_i64).unwrap_or(0)));
+    let sessions: Vec<Value> = threads.iter().map(|thread| client.state.snapshot(thread, &client.config, client.running.load(Ordering::Acquire))).collect();
+    Ok(json!({ "sessions": sessions, "limited": limited }))
+}
+
+pub fn machine(client: &CodexClient) -> Value {
+    json!({ "id": "local", "name": std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "Agent2API".into()),
+        "platform": std::env::consts::OS, "workspaceRoots": client.config.workspace_roots, "local": true })
+}
+
+pub fn directories(client: &CodexClient, raw: &str) -> Result<Value, CodingError> {
+    let path = client.config.directory(raw)?;
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(&path).map_err(|_| CodingError::new(403, "无法读取项目目录"))? {
+        let Ok(entry) = entry else { continue; };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') { continue; }
+        if client.config.directory(&config::display_path(&entry.path())).is_ok() {
+            entries.push(json!({ "name": name, "type": "directory", "isGitRepo": entry.path().join(".git").exists() }));
+        }
+        if entries.len() >= 500 { break; }
+    }
+    entries.sort_by(|a, b| string(a, "name").cmp(string(b, "name")));
+    let parent = path.parent().and_then(|p| client.config.directory(&config::display_path(p)).ok()).map(|p| config::display_path(&p));
+    Ok(json!({ "entries": entries, "path": config::display_path(&path), "parent": parent }))
 }
 
 #[derive(Deserialize)]
@@ -42,76 +117,184 @@ pub struct SpawnInput {
     pub machine_id: String,
     pub engine: Engine,
     pub directory: String,
-    #[serde(default)]
-    pub model: String,
-    #[serde(default = "default_mode")]
-    pub permission_mode: String,
+    #[serde(default)] pub model: String,
+    #[serde(default = "default_mode")] pub permission_mode: String,
 }
 fn default_mode() -> String { "default".into() }
 
-pub async fn spawn(client: &HubClient, input: SpawnInput) -> Result<Value, CodingError> {
-    validate_id(&input.machine_id)?;
-    let directory = input.directory.trim();
-    if directory.is_empty() || directory.len() > 4096 || directory.chars().any(char::is_control) {
-        return Err(CodingError::new(400, "请选择有效的项目目录"));
-    }
-    let modes = match input.engine { Engine::Codex => &["default", "read-only"][..], Engine::Claude => &["default", "plan"][..] };
-    if !modes.contains(&input.permission_mode.as_str()) { return Err(CodingError::new(400, "不支持该权限模式")); }
+pub async fn spawn(client: &CodexClient, input: SpawnInput) -> Result<Value, CodingError> {
+    let _operation = client.operations.lock().await;
+    client.check_current().await?;
+    if input.machine_id != "local" || input.engine != Engine::Codex { return Err(CodingError::new(400, "这里只能运行本机 Codex")); }
+    let directory = policy::directory(client, &input.directory)?;
+    if !["default", "read-only"].contains(&input.permission_mode.as_str()) { return Err(CodingError::new(400, "不支持的权限模式")); }
     if input.model.len() > 200 || input.model.chars().any(char::is_control) { return Err(CodingError::new(400, "模型名称无效")); }
-    let mut body = json!({ "directory": directory, "agent": input.engine.as_str(), "permissionMode": input.permission_mode,
-        "startingMode": "remote", "sessionType": "simple" });
-    if !input.model.trim().is_empty() { body["model"] = json!(input.model.trim()); }
-    let data = client.request(Method::POST, &["api", "machines", &input.machine_id, "spawn"], &[], Some(&body)).await?;
-    let id = data.get("sessionId").and_then(Value::as_str).ok_or_else(|| CodingError::uncertain("HAPI 未返回新会话标识，请刷新列表确认，不要重复创建"))?;
-    Ok(json!({ "sessionId": id }))
+    let sandbox = policy::initial_sandbox(&directory, &input.permission_mode);
+    let mut params = json!({ "cwd": directory, "approvalPolicy": "on-request", "approvalsReviewer": "user",
+        "sandbox": if input.permission_mode == "read-only" { "read-only" } else { "workspace-write" }, "ephemeral": false,
+        "config": { "sandbox_workspace_write.writable_roots": [directory], "sandbox_workspace_write.network_access": false,
+            "sandbox_workspace_write.exclude_tmpdir_env_var": true, "sandbox_workspace_write.exclude_slash_tmp": true } });
+    if !input.model.trim().is_empty() { params["model"] = json!(input.model.trim()); }
+    let data = client.rpc("thread/start", params).await?;
+    let thread = data.get("thread").filter(|t| !string(t, "id").is_empty()).ok_or_else(|| CodingError::uncertain("Codex 未返回会话标识，请刷新列表后确认"))?;
+    projection::remember(client, thread, Some(&data), Some(true));
+    policy::store_sandbox(client, string(thread, "id"), &sandbox)?;
+    Ok(json!({ "sessionId": string(thread, "id") }))
 }
 
-pub async fn action(client: &HubClient, id: &str, action: &str) -> Result<Value, CodingError> {
-    let session = detail(client, id).await?;
-    if !["resume", "abort", "switch", "archive"].contains(&action) { return Err(CodingError::new(400, "不支持的会话操作")); }
-    let action = if action == "resume" && session.get("lifecycle").and_then(Value::as_str) == Some("archived") { "reopen" } else { action };
-    let data = client.request(Method::POST, &["api", "sessions", id, action], &[], Some(&json!({}))).await?;
-    Ok(json!({ "sessionId": data.get("sessionId").and_then(Value::as_str).unwrap_or(id) }))
+async fn resume(client: &CodexClient, id: &str, thread: &Value) -> Result<(), CodingError> {
+    {
+        let state = client.state.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if state.threads.get(id).is_some_and(|s| s.attached && !s.ending) { return Ok(()); }
+    }
+    let directory = policy::directory(client, string(thread, "cwd"))?;
+    if thread.pointer("/status/type").and_then(Value::as_str).is_some_and(|s| s != "notLoaded") {
+        let data = client.rpc("thread/resume", json!({ "threadId": id })).await?;
+        let thread = data.get("thread").ok_or_else(|| CodingError::new(502, "Codex 共享会话响应不完整"))?;
+        projection::remember(client, thread, Some(&data), Some(true));
+        return Ok(());
+    }
+    let sandbox = policy::saved_sandbox(client, id)?;
+    let mut params = json!({ "threadId": id, "cwd": directory, "approvalPolicy": "on-request", "approvalsReviewer": "user",
+        "sandbox": if string(&sandbox, "type") == "readOnly" { "read-only" } else { "workspace-write" } });
+    if string(&sandbox, "type") == "workspaceWrite" {
+        params["config"] = json!({ "sandbox_workspace_write.writable_roots": sandbox.get("writableRoots"),
+            "sandbox_workspace_write.network_access": false, "sandbox_workspace_write.exclude_tmpdir_env_var": true,
+            "sandbox_workspace_write.exclude_slash_tmp": true });
+    }
+    let data = client.rpc("thread/resume", params).await?;
+    let thread = data.get("thread").ok_or_else(|| CodingError::new(502, "Codex 恢复响应不完整"))?;
+    projection::remember(client, thread, Some(&data), Some(true));
+    policy::store_sandbox(client, id, &sandbox)
+}
+
+async fn interrupt(client: &CodexClient, id: &str, turn: &str) -> Result<(), CodingError> {
+    client.rpc("turn/interrupt", json!({ "threadId": id, "turnId": turn })).await?;
+    let stopped = async {
+        loop {
+            if !client.running.load(Ordering::Acquire) { return Ok(()); }
+            let finished = {
+                let state = client.state.inner.lock().unwrap_or_else(|e| e.into_inner());
+                state.threads.get(id).is_none_or(|s| s.completed_turns.contains(turn)
+                    || s.turn.as_deref() != Some(turn) && s.thread.pointer("/status/type").and_then(Value::as_str) != Some("active"))
+            };
+            if finished { return Ok(()); }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), stopped).await
+        .unwrap_or_else(|_| Err(CodingError::uncertain("停止请求已提交，但尚未确认任务结束；请刷新会话查看状态")))
+}
+
+pub async fn action(client: &CodexClient, id: &str, action: &str) -> Result<Value, CodingError> {
+    let _operation = client.operations.lock().await;
+    client.check_current().await?;
+    let thread = read_thread(client, id, false).await?;
+    client.config.directory(string(&thread, "cwd"))?;
+    match action {
+        "resume" => resume(client, id, &thread).await?,
+        "abort" | "archive" => {
+            let (attached, turn) = {
+                let state = client.state.inner.lock().unwrap_or_else(|e| e.into_inner());
+                if action == "archive" && state.threads.get(id).is_some_and(|s| s.terminals > 0 || s.terminal_pending > 0) {
+                    return Err(CodingError::new(409, "官方终端仍在使用这条会话。可先停止任务，关闭终端后再结束会话"));
+                }
+                state.threads.get(id).map(|s| (s.attached, s.turn.clone())).unwrap_or((false, None))
+            };
+            if !attached { return Err(CodingError::new(409, "此会话不由当前后台运行，不能停止其他 Codex 窗口")); }
+            if let Some(turn) = turn { interrupt(client, id, &turn).await?; }
+            else if client.state.inner.lock().unwrap_or_else(|e| e.into_inner()).threads.get(id)
+                .is_some_and(|s| s.thread.pointer("/status/type").and_then(Value::as_str) == Some("active")) {
+                return Err(CodingError::new(409, "当前任务标识尚未同步，请刷新后再停止"));
+            }
+            if action == "archive" {
+                client.rpc("thread/backgroundTerminals/clean", json!({ "threadId": id })).await?;
+                client.rpc("thread/unsubscribe", json!({ "threadId": id })).await?;
+                let mut state = client.state.inner.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(live) = state.threads.get_mut(id) {
+                    live.attached = false; live.ending = true; live.turn = None;
+                    live.thread["status"] = json!({ "type": "idle" });
+                }
+                state.permissions.retain(|_, p| p.thread_id != id);
+            }
+            client.state.changed(id);
+        }
+        _ => return Err(CodingError::new(400, "不支持的 Codex 会话操作")),
+    }
+    Ok(json!({ "sessionId": id }))
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SendInput { pub text: String, pub local_id: String }
-
-pub async fn send(client: &HubClient, id: &str, input: SendInput) -> Result<Value, CodingError> {
-    validate_id(&input.local_id)?;
-    if input.text.trim().is_empty() || input.text.len() > 256 * 1024 {
-        return Err(CodingError::new(400, "消息不能为空且不能超过 256 KB"));
-    }
-    let session = detail(client, id).await?;
-    if session.get("active").and_then(Value::as_bool) != Some(true) {
-        return Err(CodingError::new(409, "会话未运行，请先恢复会话"));
-    }
-    client.request(Method::POST, &["api", "sessions", id, "messages"], &[],
-        Some(&json!({ "text": input.text, "localId": input.local_id, "deliveryMode": "queue" }))).await?;
-    Ok(json!({ "accepted": true, "localId": input.local_id }))
+pub struct SendInput {
+    pub text: String,
+    pub local_id: String,
+    #[serde(default)] pub expected_turn_id: Option<String>,
 }
 
-pub async fn permission(client: &HubClient, id: &str, request_id: &str, approve: bool, body: Value) -> Result<Value, CodingError> {
-    if request_id.is_empty() || request_id.len() > 1024 || request_id.chars().any(char::is_control) {
-        return Err(CodingError::new(400, "审批标识无效"));
-    }
-    let session = detail(client, id).await?;
-    let request = session.get("permissions").and_then(Value::as_array)
-        .and_then(|rows| rows.iter().find(|v| v.get("id").and_then(Value::as_str) == Some(request_id)))
-        .ok_or_else(|| CodingError::new(409, "这条审批已处理或失效，请刷新会话"))?;
-    let answers = body.get("answers");
-    let question = matches!(request.get("tool").and_then(Value::as_str), Some("AskUserQuestion" | "ask_user_question" | "request_user_input"));
-    if approve && question && answers.and_then(Value::as_object).is_none_or(|v| v.is_empty()) {
-        return Err(CodingError::new(400, "请先回答问题"));
-    }
-    let mut payload = json!({ "decision": if approve { "approved" } else { "denied" } });
-    if approve {
-        if let Some(answers) = answers {
-            if !answers.is_object() || answers.to_string().len() > 64 * 1024 { return Err(CodingError::new(400, "回答格式无效或过长")); }
-            payload["answers"] = answers.clone();
+pub async fn send(client: &CodexClient, id: &str, input: SendInput) -> Result<Value, CodingError> {
+    let _operation = client.operations.lock().await;
+    client.check_current().await?;
+    validate_id(id)?; validate_id(&input.local_id)?;
+    if input.text.trim().is_empty() || input.text.len() > 256 * 1024 { return Err(CodingError::new(400, "消息不能为空且不能超过 256 KB")); }
+    let thread = read_thread(client, id, false).await?;
+    policy::directory(client, string(&thread, "cwd"))?;
+    if let Some(result) = storage::delivery(&client.db, &client.scope, id, &input.local_id, &input.text)? { return Ok(result); }
+    resume(client, id, &thread).await?;
+    {
+        let state = client.state.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let live = state.threads.get(id).filter(|l| l.attached && !l.ending).ok_or_else(|| CodingError::new(409, "Codex 会话未就绪，请刷新后再发送"))?;
+        if input.expected_turn_id.is_none() && live.busy() {
+            return Err(CodingError::new(409, "Codex 正在执行任务，请刷新后使用追加指令，或等待任务完成"));
+        }
+        if input.expected_turn_id.as_deref().is_some_and(|id| live.turn.as_deref() != Some(id)) {
+            return Err(CodingError::new(409, "当前任务已变化，未把指令追加给其他任务，请刷新会话"));
         }
     }
-    client.request(Method::POST, &["api", "sessions", id, "permissions", request_id, if approve { "approve" } else { "deny" }], &[], Some(&payload)).await?;
-    Ok(json!({ "accepted": true }))
+    if let Some(result) = storage::reserve(&client.db, &client.scope, id, &input.local_id, &input.text)? { return Ok(result); }
+    let mut params = json!({ "threadId": id, "clientUserMessageId": input.local_id,
+        "input": [{ "type": "text", "text": input.text, "text_elements": [] }] });
+    let method = if let Some(turn) = &input.expected_turn_id { params["expectedTurnId"] = json!(turn); "turn/steer" } else { "turn/start" };
+    let result = client.rpc(method, params).await;
+    match result {
+        Ok(data) => {
+            let turn = data.pointer("/turn/id").or_else(|| data.get("turnId")).and_then(Value::as_str).ok_or_else(|| CodingError::uncertain("Codex 未返回任务标识，请检查会话"))?;
+            {
+                let mut state = client.state.inner.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(live) = state.threads.get_mut(id) {
+                    if !live.completed_turns.contains(turn) { live.turn = Some(turn.into()); }
+                }
+            }
+            storage::settle(&client.db, &client.scope, id, &input.local_id, "accepted", Some(turn))?;
+            client.state.changed(id);
+            Ok(json!({ "accepted": true, "localId": input.local_id }))
+        }
+        Err(error) => {
+            let status = if error.code == "codex_rejected" { "rejected" } else { "uncertain" };
+            let _ = storage::settle(&client.db, &client.scope, id, &input.local_id, status, None);
+            Err(error)
+        }
+    }
+}
+
+pub async fn messages(client: &CodexClient, id: &str) -> Result<Value, CodingError> {
+    detail(client, id).await?;
+    let revision = client.state.inner.lock().unwrap_or_else(|e| e.into_inner()).revision;
+    let thread = match read_thread(client, id, true).await {
+        Ok(thread) => thread,
+        Err(error) => {
+            let state = client.state.inner.lock().unwrap_or_else(|e| e.into_inner());
+            state.threads.get(id).filter(|s| s.attached).map(|s| s.thread.clone()).ok_or(error)?
+        }
+    };
+    client.config.directory(string(&thread, "cwd"))?;
+    Ok(projection::history(client, &thread, revision))
+}
+
+pub async fn status(client: &CodexClient) -> Result<Value, CodingError> {
+    let account = client.rpc("account/read", json!({ "refreshToken": false })).await?;
+    let ready = account.get("requiresOpenaiAuth") == Some(&Value::Bool(false)) || account.get("account").is_some_and(|a| !a.is_null());
+    Ok(json!({ "connected": client.connected.load(Ordering::Acquire), "runtime": "local-codex", "version": client.version, "executable": client.executable.display,
+        "shared": true, "codexHome": config::display_path(&client.config.home()), "authenticated": ready,
+        "accountType": account.pointer("/account/type"), "machines": [machine(client)] }))
 }
