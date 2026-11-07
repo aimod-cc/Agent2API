@@ -1,8 +1,8 @@
 use rusqlite::{params, Connection};
 
-use super::clock::{date_key, day_of, now_ms};
+use super::clock::{date_key, day_of};
 use super::record::{DailyEntry, RequestEntry};
-use super::{daily, fold_into_daily, sql, RequestStats};
+use super::{daily, fold_into_daily, sql, RequestStats, RunningProgress};
 
 pub(super) fn add_to_daily(conn: &Connection, entry: &RequestEntry) -> rusqlite::Result<()> {
     if entry.is_test || entry.status == 0 { return Ok(()); }
@@ -41,13 +41,14 @@ pub(super) fn finish_stale(conn: &Connection, cutoff: i64, now: i64) -> rusqlite
 }
 
 impl RequestStats {
-    pub fn finalize_interrupted(&self, id: &str, error: &str) {
+    pub fn finalize_interrupted(&self, id: &str, error: &str, progress: &RunningProgress, finished_at: i64) {
         let id = id.trim();
         if id.is_empty() { return; }
         let bounds = self.retention_bounds();
         let guard = self.guard();
         let _ = self.with_conn_mut(&guard, |conn| {
             let tx = conn.transaction()?;
+            sql::update_running_progress(&tx, id, progress)?;
             let mut entries = {
                 let mut stmt = tx.prepare(&format!(
                     "SELECT {} FROM requests WHERE id = ?1 AND status = 0", sql::REQUEST_COLUMNS,
@@ -55,7 +56,7 @@ impl RequestStats {
                 let rows = stmt.query_map(params![id], sql::decode_request)?.collect::<rusqlite::Result<Vec<_>>>()?;
                 rows
             };
-            sql::finish_running_request(&tx, id, error, now_ms())?;
+            sql::finish_running_request(&tx, id, error, finished_at)?;
             for entry in &mut entries {
                 entry.status = 408;
                 entry.error = Some(error.to_string());

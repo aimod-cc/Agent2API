@@ -320,7 +320,7 @@ pub async fn chat(State(state): State<ServerState>, headers: HeaderMap, body: By
     if let Some(token) = cancellation::register(&telemetry_id) {
         telemetry.set_cancel_token(token);
     }
-    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry_id.clone());
+    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry.clone(), started_at);
 
     let outcome = state
         .upstream()

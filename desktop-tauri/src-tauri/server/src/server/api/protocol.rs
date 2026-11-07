@@ -207,6 +207,9 @@ pub async fn responses_endpoint(
         ),
     );
     pipeline::write_debug_files(&body, "POST", path, &user_agent);
+    let dedupe_key = pipeline::sha256_hex(&body);
+    let raw_request = pipeline::capture_raw_body(&body);
+    drop(body);
 
     // 上游恒走流式（理由见模块头）
     // scope 的**提供商**那一半进转发层（选路时按承载家过滤）；
@@ -241,13 +244,13 @@ pub async fn responses_endpoint(
     if let Some(token) = cancellation::register(&telemetry_id) {
         telemetry.set_cancel_token(token);
     }
-    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry_id.clone());
+    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry.clone(), started_at);
     let outcome = forward_chat(
         &state,
         chat_body,
         &headers,
         stream,
-        pipeline::sha256_hex(&body),
+        dedupe_key,
         scope,
         telemetry.clone(),
     )
@@ -264,7 +267,7 @@ pub async fn responses_endpoint(
         // 下游原始请求体：客户端发来的那一份（协议翻译前）——仅调试模式
         // 开启时采集（`capture_raw_body`）。响应侧非流式在聚合完成后补，
         // 流式由 RecordingStream 在流结束时定稿
-        raw_request: pipeline::capture_raw_body(&body),
+        raw_request,
         raw_response: None,
         // 真实流量：不是模型测试（见 `RecordContext::is_test`）
         is_test: false,
@@ -391,6 +394,9 @@ pub async fn messages_endpoint(
         ),
     );
     pipeline::write_debug_files(&body, "POST", path, &user_agent);
+    let dedupe_key = pipeline::sha256_hex(&body);
+    let raw_request = pipeline::capture_raw_body(&body);
+    drop(body);
 
     // scope 的**提供商**那一半进转发层（选路时按承载家过滤）；
     // 模型那一半已在上面判过（分工见 forward_chat 的说明）。
@@ -428,13 +434,13 @@ pub async fn messages_endpoint(
     if let Some(token) = cancellation::register(&telemetry_id) {
         telemetry.set_cancel_token(token);
     }
-    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry_id.clone());
+    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry.clone(), started_at);
     let outcome = forward_chat(
         &state,
         chat_body,
         &headers,
         stream,
-        pipeline::sha256_hex(&body),
+        dedupe_key,
         scope,
         telemetry.clone(),
     )
@@ -451,7 +457,7 @@ pub async fn messages_endpoint(
         // 下游原始请求体：客户端发来的那一份（协议翻译前）——仅调试模式
         // 开启时采集（`capture_raw_body`）。响应侧非流式在聚合完成后补，
         // 流式由 RecordingStream 在流结束时定稿
-        raw_request: pipeline::capture_raw_body(&body),
+        raw_request,
         raw_response: None,
         // 真实流量：不是模型测试（见 `RecordContext::is_test`）
         is_test: false,
