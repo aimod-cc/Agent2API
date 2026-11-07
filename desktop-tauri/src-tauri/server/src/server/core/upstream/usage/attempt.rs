@@ -75,8 +75,11 @@ impl TelemetrySnapshot {
 }
 
 impl RequestTelemetry {
-    pub fn set_route_decision(&self, decision: Value) {
+    pub fn set_route_decision(&self, mut decision: Value) {
         let mut guard = self.lock();
+        if let Some(vision) = guard.route.as_ref().and_then(|route| route.get("visionCompatibility")).cloned() {
+            if let Some(object) = decision.as_object_mut() { object.insert("visionCompatibility".into(), vision); }
+        }
         if guard.route.as_ref() == Some(&decision) { return; }
         guard.route = Some(decision);
         guard.route_revision = guard.route_revision.wrapping_add(1);

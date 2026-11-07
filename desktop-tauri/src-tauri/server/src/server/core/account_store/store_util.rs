@@ -161,7 +161,7 @@ pub(crate) fn max_concurrent_public(value: Option<&Value>) -> u64 {
 /// 公开形态出口的 `maxConcurrent`：在 [`max_concurrent_public`] 之上套上
 /// 「本家默认并发」的口径。
 ///
-/// 只有 CodeArts 一家有默认值：它**没有「不限」这个选项**，记录上的 0（含从未
+/// CodeArts **没有「不限」这个选项**，记录上的 0（含从未
 /// 设置过）由上游解释成「按默认并发」（准入闸 `SessionGate::limit_for` 读的是
 /// 同一个数），所以公开形态要报出 3 而不是 0 —— 否则选路读到的 0 等于不限，
 /// `routing::at_concurrency_limit` 不会在本家满员时跳过这个账号，请求照发、
@@ -180,8 +180,8 @@ pub(crate) fn max_concurrent_public(value: Option<&Value>) -> u64 {
 /// （所有家共用一条写入闸），闸门只认到 64，公开形态若报 999，选路会以为还有
 /// 935 个空位。
 ///
-/// 别家 0 就是 0（不限）—— 两家的差别只在这一个函数里，各家的公开形态
-/// 不必各写一遍。
+/// 脚本插件可申报自己的默认并发；只有账号未配置正数上限时采用，和宿主准入一致。
+/// 未申报默认值的其他提供商仍以 0 表示不限。
 /// CodeArts 的默认并发（上游对每账号只给 3 路会话；插件侧的准入闸读同一个数）。
 const CODEARTS_DEFAULT_SESSION_LIMIT: u32 = 3;
 /// CodeArts 的并发上限（准入闸只认到这个数；存储层放行 0–999，报原值会让选路
@@ -191,7 +191,8 @@ const CODEARTS_MAX_SESSION_LIMIT: u32 = 64;
 pub(crate) fn max_concurrent_public_for(provider: &str, value: Option<&Value>) -> u64 {
     let configured = max_concurrent_public(value);
     if provider != super::codearts_accounts::CODEARTS_PROVIDER_ID {
-        return configured;
+        return if configured > 0 { configured }
+            else { crate::server::core::plugin_host::script::concurrency_default(provider) };
     }
     if configured == 0 {
         u64::from(CODEARTS_DEFAULT_SESSION_LIMIT)

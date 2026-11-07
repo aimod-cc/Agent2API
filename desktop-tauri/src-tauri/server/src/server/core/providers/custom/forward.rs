@@ -244,6 +244,9 @@ pub(crate) async fn forward(
     // 与最终发出去的字节同源（模型名换了不影响 messages，两种取法等价，
     // 但同源更不容易在将来改坏）
     quirks.apply_emulation_to_body(&mut outbound, &base_url);
+    telemetry.note_upstream_reasoning(
+        model_rules::read_client_level(&outbound).filter(|level| !model_rules::reasoning_is_off(level)),
+    );
     let payload = serde_json::to_string(&outbound)
         .map_err(|error| GatewayError::with_status(500, format!("请求体序列化失败: {error}")))?;
     // ── 出站头（三段拼装，顺序不可换）────────────────────────────
@@ -503,6 +506,9 @@ async fn forward_translated(
     // 客户端形态伪装：与 chat 分支同一时机（改写后、翻译前）—— 桩工具要由
     // 转换器一起翻成上游协议的形态（anthropic 的 tools 数组）；Go 面不改请求体
     quirks.apply_emulation_to_body(&mut outbound_chat, base_url);
+    telemetry.note_upstream_reasoning(
+        model_rules::read_client_level(&outbound_chat).filter(|level| !model_rules::reasoning_is_off(level)),
+    );
     // 发给上游的真名 = 改写后的 model 字段（rewrite_body 的产物；请求没带
     // model 时是空串，与 chat 分支「没有回写答案」的口径一致）
     let wire_model = outbound_chat
@@ -798,10 +804,9 @@ impl futures::Stream for ProtocolTranslateStream {
 ///   - **模型名**：`custom_providers::wire_model_for` 一次解析出「上游真名 +
 ///     思考等级」（两者同源，见那个函数的说明）。真名与请求名忽略大小写相同
 ///     时**不复制**（零改写是常态）；不同才升级成副本；
-///   - **思考等级**：三个条件同时满足才注入 `reasoning_effort` —— 绑定非空、
-///     客户端没显式给 `reasoning_effort` / `reasoning`（用户显式意图优先）、
-///     等级不是关闭思考（`model_rules::reasoning_is_off`；本网关不向任何
-///     上游发「关闭思考」字段，判据与内置家共用）。
+///   - **思考等级**：绑定非空且不是关闭思考时，清理冲突的客户端思考参数，再
+///     强制写入 `reasoning_effort`；后续协议转换只读取覆盖后的等级。
+///     `off` / `none` 仍不注入关闭思考字段，与内置家共用判据。
 ///
 /// `rewrite` 是 SSE/聚合的 model 回写参数：请求带了 model 才给 ——
 /// 客户端没点名模型时（上游用自家默认）没有「回写成什么」的答案。
@@ -833,8 +838,6 @@ fn rewrite_body(body: &Value, provider_id: &str, requested: &str) -> (Value, Opt
         .map(str::trim)
         .filter(|text| !text.is_empty())
     {
-        let explicit =
-            outbound.get("reasoning_effort").is_some() || outbound.get("reasoning").is_some();
         if model_rules::reasoning_is_off(level) {
             logging::verbose(
                 "[CustomProvider]",
@@ -843,25 +846,20 @@ fn rewrite_body(body: &Value, provider_id: &str, requested: &str) -> (Value, Opt
                      （关闭思考），本网关不向任何上游发「关闭思考」字段，跳过注入"
                 ),
             );
-        } else if explicit {
-            logging::verbose(
-                "[CustomProvider]",
-                &format!(
-                    "provider={provider_id} 映射 {requested} 绑定的思考等级 {level} 未注入：\
-                     客户端已显式指定思考字段"
-                ),
-            );
-        } else if let Some(object) = outbound.as_object_mut() {
-            logging::verbose(
-                "[CustomProvider]",
-                &format!(
-                    "provider={provider_id} 映射 {requested} 注入思考等级 reasoning_effort={level}"
-                ),
-            );
-            object.insert(
-                "reasoning_effort".to_string(),
-                Value::String(level.to_string()),
-            );
+        } else {
+            model_rules::clear_reasoning_controls(&mut outbound);
+            if let Some(object) = outbound.as_object_mut() {
+                object.insert(
+                    "reasoning_effort".to_string(),
+                    Value::String(level.to_string()),
+                );
+                logging::verbose(
+                    "[CustomProvider]",
+                    &format!(
+                        "provider={provider_id} 映射 {requested} 覆盖思考等级 reasoning_effort={level}"
+                    ),
+                );
+            }
         }
     }
     (

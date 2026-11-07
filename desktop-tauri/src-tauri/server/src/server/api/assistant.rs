@@ -265,10 +265,7 @@ pub async fn chat(State(state): State<ServerState>, headers: HeaderMap, body: By
     }
     outbound_messages.extend(messages);
 
-    // 思考等级：本次请求点名的优先，没点名就用设置里存的（与模型同一套「本次
-    // 覆盖 > 默认值」语义）。写进 `reasoning_effort` —— 那是客户端显式指定的
-    // 形态，按既有口径**优先于映射上绑定的等级**（见 `model_rules::reasoning`
-    // 的模块头）；各家适配器再把它翻译成本家上游认识的档位字段。
+    // 本次请求未点名等级时使用助手设置；转发时仍受模型管理的思考等级覆盖约束。
     let reasoning = reasoning_from(&payload).or_else(|| config.reasoning.clone());
 
     let mut upstream = json!({
@@ -323,7 +320,7 @@ pub async fn chat(State(state): State<ServerState>, headers: HeaderMap, body: By
     if let Some(token) = cancellation::register(&telemetry_id) {
         telemetry.set_cancel_token(token);
     }
-    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry_id.clone());
+    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry.clone(), started_at);
 
     let outcome = state
         .upstream()

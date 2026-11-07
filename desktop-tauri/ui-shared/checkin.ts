@@ -1,3 +1,5 @@
+import type { CampaignEntry } from './checkin-campaign-types'
+
 export type DailyCheckinStatus = 'claimed' | 'done' | 'confirming' | 'inactive' | 'ineligible' | 'captcha' | 'failed'
 
 export type DailyCheckinState = {
@@ -6,7 +8,8 @@ export type DailyCheckinState = {
   completedCount: number
   totalCount: number
   sourcesComplete: boolean
-  kind?: 'plans'
+  kind?: 'plans' | 'rolling'
+  until?: number | null
   status?: DailyCheckinStatus
   message?: string
   retryAt?: number | null
@@ -280,6 +283,7 @@ export type CheckinCenter = {
   extras: {
     onboarding: OnboardingEntry[]
     plans: PlanEntry[]
+    campaigns?: CampaignEntry[]
     growth: GrowthEntry[]
   }
   auto: AutoState

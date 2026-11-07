@@ -64,7 +64,9 @@ pub fn read(value: &Value) -> Result<Vec<Profile>, String> {
                         .pointer("/modalities/input")
                         .and_then(Value::as_array)
                         .map(|a| a.iter().any(|v| v == "image"));
+                    model.supports_video = entry.pointer("/modalities/input").and_then(Value::as_array).map(|values| values.iter().any(|value| value == "video"));
                     model.supports_reasoning = entry.get("reasoning").and_then(Value::as_bool);
+                    let effort_key = if protocol == "anthropic" { "effort" } else { "reasoningEffort" };
                     if let Some(variants) = entry.get("variants").and_then(Value::as_object) {
                         model.reasoning_levels = variants
                             .values()
@@ -72,16 +74,16 @@ pub fn read(value: &Value) -> Result<Vec<Profile>, String> {
                                 variant.get("disabled").and_then(Value::as_bool) != Some(true)
                             })
                             .filter_map(|variant| {
-                                variant.get("reasoningEffort").and_then(Value::as_str)
+                                if protocol == "anthropic" && variant.pointer("/thinking/type").and_then(Value::as_str) == Some("disabled") {
+                                    Some("none")
+                                } else { variant.get(effort_key).and_then(Value::as_str) }
                             })
                             .map(str::to_string)
                             .collect();
                     }
-                    model.effort = entry
-                        .pointer("/options/reasoningEffort")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .into();
+                    model.effort = if protocol == "anthropic" && entry.pointer("/options/thinking/type").and_then(Value::as_str) == Some("disabled") {
+                        "none".into()
+                    } else { entry.get("options").and_then(|options| options.get(effort_key)).and_then(Value::as_str).unwrap_or("").into() };
                     if !model.effort.is_empty() && !model.reasoning_levels.contains(&model.effort) {
                         model.reasoning_levels.push(model.effort.clone());
                     }
@@ -107,6 +109,21 @@ pub fn read(value: &Value) -> Result<Vec<Profile>, String> {
         profiles.push(profile);
     }
     Ok(profiles)
+}
+
+fn write_effort(value: &mut Value, effort: &str, anthropic: bool) -> Result<(), String> {
+    if !anthropic { return set(value, &["reasoningEffort"], json!(effort)); }
+    remove(value, &["reasoningEffort"]);
+    if matches!(effort, "none" | "off" | "disabled") {
+        set(value, &["thinking"], json!({ "type": "disabled" }))?;
+        remove(value, &["effort"]);
+    } else {
+        if !matches!(value.pointer("/thinking/type").and_then(Value::as_str), Some("enabled" | "adaptive")) {
+            set(value, &["thinking"], json!({ "type": "adaptive" }))?;
+        }
+        set(value, &["effort"], json!(effort))?;
+    }
+    Ok(())
 }
 
 pub fn write(value: &mut Value, profile: &Profile, operation: &str) -> Result<(), String> {
@@ -160,33 +177,54 @@ pub fn write(value: &mut Value, profile: &Profile, operation: &str) -> Result<()
         if let Some(value) = model.supports_tools {
             set(&mut item, &["tool_call"], json!(value))?;
         }
-        if let Some(value) = model.supports_images {
-            set(
-                &mut item,
-                &["modalities", "input"],
-                if value {
-                    json!(["text", "image"])
-                } else {
-                    json!(["text"])
-                },
-            )?;
+        if model.supports_images.is_some() || model.supports_video.is_some() {
+            let mut input = item.pointer("/modalities/input").and_then(Value::as_array).cloned().unwrap_or_else(|| vec![json!("text")]);
+            for (name, flag) in [("image", model.supports_images), ("video", model.supports_video)] {
+                if let Some(flag) = flag { input.retain(|value| value != name); if flag { input.push(json!(name)); } }
+            }
+            set(&mut item, &["modalities", "input"], json!(input))?;
         }
         if let Some(value) = model.supports_reasoning {
             set(&mut item, &["reasoning"], json!(value))?;
         }
-        if model.effort.is_empty() || model.effort == "default" {
-            remove(&mut item, &["options", "reasoningEffort"]);
+        if !model.reasoning_levels.is_empty() && model.supports_reasoning != Some(false) {
+            for level in &model.reasoning_levels {
+                let mut variant = item.get("variants").and_then(|variants| variants.get(level)).cloned().unwrap_or_else(|| json!({}));
+                write_effort(&mut variant, level, profile.protocol == "anthropic")?;
+                remove(&mut variant, &["disabled"]);
+                set(&mut item, &["variants", level], variant)?;
+            }
+        }
+        if model.supports_reasoning == Some(false) {
+            if let Some(variants) = item.get_mut("variants").and_then(Value::as_object_mut) {
+                variants.retain(|_, variant| variant.get("reasoningEffort").is_none() && variant.get("effort").is_none() && variant.get("thinking").is_none());
+            }
+        }
+        if model.supports_reasoning == Some(false) || model.effort.is_empty() || model.effort == "default" {
+            let had_effort = item.pointer("/options/effort").is_some();
+            for key in ["reasoningEffort", "effort"] { remove(&mut item, &["options", key]); }
+            if had_effort || model.supports_reasoning == Some(false) { remove(&mut item, &["options", "thinking"]); }
         } else {
-            set(
-                &mut item,
-                &["options", "reasoningEffort"],
-                json!(model.effort),
-            )?;
+            let mut options = item.get("options").cloned().unwrap_or_else(|| json!({}));
+            write_effort(&mut options, &model.effort, profile.protocol == "anthropic")?;
+            set(&mut item, &["options"], options)?;
         }
         set(&mut entry, &["models", &model.id], item)?;
     }
     set(value, &["provider", &id], entry)?;
     if operation == "default" {
+        for key in ["disabled_providers"] {
+            if let Some(providers) = value.get_mut(key).and_then(Value::as_array_mut) { providers.retain(|provider| provider != &id); }
+        }
+        if let Some(providers) = value.get_mut("enabled_providers").and_then(Value::as_array_mut) {
+            if !providers.iter().any(|provider| provider == &id) { providers.push(json!(id)); }
+        }
+        if let Some(provider) = value.get_mut("provider").and_then(|providers| providers.get_mut(&id)) {
+            if let Some(blacklist) = provider.get_mut("blacklist").and_then(Value::as_array_mut) { blacklist.retain(|id| !profile.models.iter().any(|model| id == &model.id)); }
+            if let Some(whitelist) = provider.get_mut("whitelist").and_then(Value::as_array_mut) {
+                for model in &profile.models { if !whitelist.iter().any(|id| id == &model.id) { whitelist.push(json!(model.id)); } }
+            }
+        }
         set(value, &["model"], json!(format!("{id}/{}", profile.model)))?;
     }
     Ok(())

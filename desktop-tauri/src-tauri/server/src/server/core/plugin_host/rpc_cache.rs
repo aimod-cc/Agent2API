@@ -34,8 +34,13 @@ fn scope(provider: &str) -> String {
     format!("plugin:{provider}")
 }
 
+fn accepts_empty(provider: &str) -> bool {
+    crate::server::core::providers::is_scoped_runtime_provider(provider)
+        || super::script::known_provider(provider)
+}
+
 fn from_cached(provider: &str, cached: catalog_cache::CachedCatalog) -> Option<proto::ModelList> {
-    if crate::server::core::providers::is_scoped_runtime_provider(provider) && cached.models.len() == 1 {
+    if accepts_empty(provider) && cached.models.len() == 1 {
         let envelope = &cached.models[0];
         if envelope.get("id").and_then(Value::as_str) == Some(ENVELOPE_ID) {
             if envelope.get("version").and_then(Value::as_u64) != Some(ENVELOPE_VERSION)
@@ -76,7 +81,7 @@ fn valid_models(models: Vec<Value>, scoped: bool) -> Vec<Value> {
 }
 
 pub fn set_defaults(provider: &str, models: Vec<Value>) -> Option<(usize, i64)> {
-    let _write = crate::server::core::providers::is_scoped_runtime_provider(provider)
+    let _write = accepts_empty(provider)
         .then(|| write_gate().lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
     let restored = restore(provider);
     crate::server::core::providers::catalog::invalidate();
@@ -95,7 +100,7 @@ pub fn set_defaults(provider: &str, models: Vec<Value>) -> Option<(usize, i64)> 
 }
 
 pub fn set_remote(provider: &str, mut list: proto::ModelList) -> usize {
-    let scoped = crate::server::core::providers::is_scoped_runtime_provider(provider);
+    let scoped = accepts_empty(provider);
     let _write = scoped.then(|| write_gate().lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
     if scoped && !list.meta.remote {
         return 0; // 静态或失败目录不能在持久层被重新标成远程成功。

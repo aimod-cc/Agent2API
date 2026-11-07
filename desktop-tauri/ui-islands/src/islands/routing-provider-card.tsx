@@ -4,15 +4,16 @@ import { t } from '../i18n'
 import { displayNameOf, providerOf } from './accounts-domain'
 import { activeGroupSortRules, manualOrderBlockedMessage } from './accounts-group-settings'
 import { RoutingConsumptionOrder } from './routing-account-order'
+import type { RoutingCanvasActivity } from './routing-canvas-activity'
 import { accountFlowState } from './routing-flow-model'
 import { RoutingAccountRow, RoutingActions, RoutingProviderMark, routingOrderKey } from './routing-canvas-controls'
 import { formatDuration, RouteIcon } from './routing-ui'
 import type { useRoutingDrag } from './routing-drag'
 import type { RouteProfile, RoutingWorkspace } from './routing-types'
 
-export function RoutingProviderCard({ id, profile, workspace, scope, now, index, first, last, included, open, locked, busy, query, drag,
+export function RoutingProviderCard({ id, profile, workspace, scope, now, index, first, last, included, open, locked, busy, query, drag, activity,
   onOpen, onJoin, onMove, onMoveAccount, onToggleAccount, onAccount, onSort, onEnableGroup }: {
-  id: string; profile: RouteProfile; workspace: RoutingWorkspace; scope: string; now: number
+  id: string; profile: RouteProfile; workspace: RoutingWorkspace; scope: string; now: number; activity: RoutingCanvasActivity
   index: number; first: boolean; last: boolean; included: boolean; open: boolean; locked: boolean; busy: boolean; query: string
   drag: ReturnType<typeof useRoutingDrag>; onOpen(open: boolean): void; onJoin(on: boolean): void; onMove(direction: number): void
   onMoveAccount(id: string, direction: number): void; onToggleAccount(id: string): void; onAccount(id: string): void; onSort(): void
@@ -31,8 +32,10 @@ export function RoutingProviderCard({ id, profile, workspace, scope, now, index,
   const summary = globalAccounts ? t('{selected} / {total} 个账号启用', { selected: participants.length, total: accounts.length })
     : t('{selected} / {total} 个账号参与', { selected: participants.length, total: accounts.length })
   const bodyId = React.useId()
+  const running = accounts.some(account => (activity.accounts[account.id] || 0) > 0)
   return <Collapsible render={<section />} open={open} onOpenChange={onOpen} data-route-sort={included ? id : undefined}
-    data-route-node={included ? id : undefined} className={cn('routing-config-provider', !included && 'is-off',
+    data-route-node={id} data-route-connected={included ? '' : undefined} data-route-expanded={open ? '' : undefined}
+    data-route-running={running ? '' : undefined} className={cn('routing-config-provider', !included && 'is-off',
       drag.state?.id === id && 'is-dragging', drag.state?.target === id && (drag.state.after ? 'drop-after' : 'drop-before'))}>
     <header>
       <Button variant='ghost' size='icon-sm' className='routing-grip' disabled={orderLocked || !included}
@@ -75,7 +78,7 @@ export function RoutingProviderCard({ id, profile, workspace, scope, now, index,
             status.resetAt > now ? t('{time} 后恢复', { time: formatDuration(status.resetAt - now) }) : status.reason,
           ].filter(Boolean).join(' · ')
           return <RoutingAccountRow key={key} id={key} account={account} rank={accountIndex + 1} joined={active} globalAccounts={globalAccounts}
-            sorting={workspace.sorting} now={now} settingsDisabled={busy}
+            sorting={workspace.sorting} now={now} settingsDisabled={busy} running={(activity.accounts[key] || 0) > 0}
             state={account.enabled === false ? 'disabled' : account.hasCredentials === false ? 'no-credentials' : status.state}
             stateText={account.enabled !== false && account.hasCredentials !== false && status.state === 'partial' ? status.label : undefined}
             note={note} locked={locked || !globalAccounts && !included} orderLocked={orderLocked || sorted || !included} orderHint={sorted ? manualOrderBlockedMessage(rules) : undefined}

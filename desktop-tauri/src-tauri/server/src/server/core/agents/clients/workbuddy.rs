@@ -147,14 +147,16 @@ pub fn write(value: &mut Value, profile: &Profile, warnings: &mut Vec<String>) -
         if let Some(v) = model.supports_reasoning {
             set(&mut item, &["supportsReasoning"], json!(v))?;
         }
-        if !model.reasoning_levels.is_empty() {
+        if model.supports_reasoning == Some(false) {
+            super::remove(&mut item, &["reasoning", "supportedEfforts"]);
+        } else if !model.reasoning_levels.is_empty() {
             set(
                 &mut item,
                 &["reasoning", "supportedEfforts"],
                 json!(model.reasoning_levels),
             )?;
         }
-        if !model.effort.is_empty() && model.effort != "default" {
+        if model.supports_reasoning != Some(false) && !model.effort.is_empty() && model.effort != "default" {
             set(
                 &mut item,
                 &["reasoning", "defaultEffort"],

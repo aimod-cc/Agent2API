@@ -10,11 +10,7 @@ pub use matcher::{identify, rule_matches};
 
 pub const CLIENT_OTHER: &str = "other";
 
-/// Codex 的归类值（桌面端 / VS Code 插件 / TUI 三种形态归一类）。
-///
-/// 单独提成常量是因为它还有一个非展示用途：`/v1/responses` 只给 Codex 来源补
-/// `phase` 阶段标记（见 `api::protocol`），判据必须与请求日志的「客户端」列
-/// 同源，不能让两处各写一份字面量。
+/// Codex 的严格行为归类值；报表显示规则与来源声明不参与协议兼容判断。
 pub const CLIENT_CODEX: &str = "Codex";
 
 /// 行为判断保留原来的严格识别，不读取显示规则或调用方声明。

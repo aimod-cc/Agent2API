@@ -145,19 +145,19 @@ const PAGES = ['assistant', 'overview', 'accounts', 'checkin', 'routing', 'gatew
  *
  *  `checkin` 是**内置页**（见 index.html 的说明）：页面归网关，签到能力归插件。 */
 const PAGE_LABELS = {
-  assistant: wbI18n.t('AI 助手'),
+  assistant: wbI18n.t('对话'),
   overview: wbI18n.t('报表'),
   accounts: wbI18n.t('账号'),
   checkin: wbI18n.t('签到中心'),
   routing: wbI18n.t('路由'),
   gateway: wbI18n.t('模型管理'),
   agent: wbI18n.t('Agent 配置'),
-  tools: wbI18n.t('工具服务'),
+  tools: wbI18n.t('MCP & Skills'),
   proxies: wbI18n.t('网络代理'),
   keys: wbI18n.t('网关 Key'),
   docs: wbI18n.t('文档'),
   logs: wbI18n.t('日志'),
-  tasks: wbI18n.t('定时任务'),
+  tasks: wbI18n.t('自动维护'),
   requests: wbI18n.t('请求日志'),
   plugins: wbI18n.t('插件'),
   settings: wbI18n.t('设置'),
@@ -386,6 +386,7 @@ function showPluginPage(key, { persist = true } = {}) {
   if (crumb) crumb.textContent = page.label;
   window.wbShell?.closeNavigation();
   if (persist) localStorage.setItem(PAGE_KEY, key);
+  window.dispatchEvent(new CustomEvent('wb:page', { detail: key }));
   window.wbColSettings?.close?.();
   // 整块换掉：上一页的 iframe 连同它的定时器一起消失
   host.innerHTML = '';
@@ -496,7 +497,7 @@ function onPluginMessage(event) {
 }
 window.addEventListener('message', onPluginMessage);
 
-function showPage(name, { persist = true } = {}) {
+function showPage(name, { persist = true, checkUpdate = false } = {}) {
   // 插件页走单独一条路：它不是 `<section class="page" data-page>` 里的内置页，
   // 而是一个 iframe（页面由插件包提供、网关托管，见 adoptPluginPages）。
   if (typeof name === 'string' && name.startsWith(PLUGIN_PAGE_PREFIX) && pluginPages.has(name)) {
@@ -552,12 +553,12 @@ function showPage(name, { persist = true } = {}) {
     clearRequestsBadge();
     window.wbRequestsPanel?.load?.();
   }
-  // 定时任务页自持清单与编辑态，切进去时拉一次最新
+  // 自动维护自持执行记录与编辑态，切进去时拉一次最新。
   if (page === 'tasks') {
     window.wbTasksPanel?.load?.();
   }
   if (page === 'settings') {
-    window.wbSettingsPanel?.load?.();
+    void window.wbSettingsPanel?.load?.({ checkUpdate });
   }
   // 切到签到中心时重拉一次快照：用户可能刚在账号页加/删了账号，或者刚在
   // 「插件」页装完插件（签到能力正是从那儿来的）。页面岛自己也会在首次挂载时
@@ -650,7 +651,7 @@ function renderTopbarStatus() {
     docs: () => [gateway(), chip(port, "", true)],
     logs: () => mirror("logs-badge"),
     requests: () => mirror("req-badge"),
-    tasks: () => mirror("tasks-badge"),
+    tasks: () => [gateway(true)],
     settings: () => [gateway(true), ...(enabled ? [chip(wbI18n.t("{n} 个账号启用", { n: enabled }))] : [])],
     overview: () => [gateway(), available ? chip(wbI18n.t("{n} 个账号可用", { n: available }), "ok") : chip(session.loggedIn ? wbI18n.t("已登录") : wbI18n.t("未登录"), session.loggedIn ? "ok" : "warn")],
   };
@@ -1294,14 +1295,21 @@ function restoredPage() {
   return api.firstVisibleKey(layout) || saved;
 }
 const initialPage = restoredPage();
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', () => {
-    showPage(initialPage, { persist: false });
-    restorePortPanel();
-  }, { once: true });
-} else {
-  showPage(initialPage, { persist: false });
+async function restoreInitialPage() {
+  let checkUpdate = false;
+  // 先处理托盘意图，避免轻量模式重建时恢复旧更新页、顺带启动遗留安装包。
+  if (api.takeTrayUpdateCheck) {
+    try { checkUpdate = await api.takeTrayUpdateCheck(); }
+    catch (error) { console.warn('读取托盘更新请求失败:', error); }
+  }
+  showPage(checkUpdate ? 'settings' : initialPage, { persist: false, checkUpdate });
   restorePortPanel();
+  window.dispatchEvent(new Event('wb:app-ready'));
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => { void restoreInitialPage(); }, { once: true });
+} else {
+  void restoreInitialPage();
 }
 
 refresh();

@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { Badge, Button, Card, CardContent, CardHeader, Empty, SegmentedControl, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@ui'
+import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Empty, SegmentedControl, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@ui'
 import { formatInt, formatPercent, formatTokens, type StatsGroup, type StatsSummary } from '../report-charts'
 import { t } from '../../i18n'
 import { TableFooter, useClientPaging } from '../table-shell'
@@ -63,9 +63,10 @@ export function SourceStatsPanel({ kind, rows, summary, onInspect }: {
     { value: 'tokens', label: t('按 Token') }, { value: 'requests', label: t('按请求数') },
   ], [])
   return (
-    <Card render={<section />} className='panel report-source-panel'>
-      <CardHeader className='panel-head'>
-        <h2>{isKey ? t('API Key 统计') : t('客户端统计')}</h2>
+    <Card render={<section />} className='report-card report-source-panel'>
+      <CardHeader className='report-card-header'>
+        <CardTitle>{isKey ? t('API Key 统计') : t('客户端统计')}</CardTitle>
+        <span className='report-card-meta'>{t('{n} 项', { n: formatInt(rows.length) })}</span>
         <span className='tip-q' data-tip={isKey
           ? t('按访问网关的 API Key 统计生产请求，不包含助手对话和模型测试。停用、删除 Key 不会删除历史用量；密钥值不会进入报表。历史没有记录身份的请求单列，不能追溯到某把 Key。')
           : t('按每条请求的软件标识和识别规则统计，不依赖 API Key，也不代表设备或用户数。待确认的软件统一计入“其它”；规则修改不重新归类历史请求。')} />
@@ -74,7 +75,7 @@ export function SourceStatsPanel({ kind, rows, summary, onInspect }: {
             aria-label={t('统计排序')} />
         </div>
       </CardHeader>
-      <CardContent className='panel-body'>
+      <CardContent className='report-card-content report-source-content'>
         <div className='report-source-table-wrap'>
           <Table container={false} className='report-source-table'>
             <TableHeader><TableRow>

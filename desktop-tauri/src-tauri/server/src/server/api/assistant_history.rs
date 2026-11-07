@@ -69,7 +69,7 @@ async fn summarize(state: &ServerState, id: &str, access: ModelAccess) -> Result
     if let Some(token) = crate::server::core::upstream::cancellation::register(&request_id) {
         telemetry.set_cancel_token(token);
     }
-    let mut guard = DisconnectGuard::new(state.request_stats(), request_id);
+    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry.clone(), started);
     let outcome = state.upstream().forward_assistant(ForwardRequest {
         body, stream: false, dedupe_key: String::new(), client_headers: HeaderMap::new(), telemetry: telemetry.clone(),
         allowed_providers: access.scope, pinned_account: None, ignore_model_gate: false, proxy_override: None,

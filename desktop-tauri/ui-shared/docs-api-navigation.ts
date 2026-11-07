@@ -31,7 +31,7 @@ export function documentationGroups(sections: ApiSection[], packs: PluginProvide
     { id: 'guide', title: t('接入指南'), ids: ['addresses', 'start', 'models'] },
     { id: 'chat', title: t('对话协议'), ids: ['chat', 'tools', 'responses', 'messages'] },
     { id: 'images', title: t('图片生成与编辑'), ids: ['image-generation', 'image-editing', 'image-results', 'image-sdk'] },
-    { id: 'tools', title: t('工具服务'), ids: ['tools-api'] },
+    { id: 'tools', title: t('工具服务 API'), ids: ['tools-api'] },
     { id: 'troubleshooting', title: t('排错与限制'), ids: ['errors'] },
   ]
   const groups = definitions.map(definition => ({

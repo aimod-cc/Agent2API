@@ -5,16 +5,14 @@ import { dateRangeQuery, readCustomRange, saveCustomRange, type CustomDates } fr
 export * from '../../../ui-shared/logs'
 export type Filters = { view: LogView; level: string; category: string; keyword: string; range: string; aggregate: boolean; dates: CustomDates }
 export type IntervalTask = { id?: string; enabled?: boolean; interval?: number; unit?: string }
-export type AutoConfig = { enabled: boolean; ms: number }
 export type LogStats = { lastId?: number; total?: number } | null
-export type LoadOptions = { silent?: boolean; resetPage?: boolean; latest?: boolean }
+export type LoadOptions = { silent?: boolean; resetPage?: boolean; latest?: boolean; manual?: boolean }
 
 const FILTERS_KEY = 'workbuddy-desktop-logs-filters'
 const RANGE_KEY = 'workbuddy-desktop-logs-range'
 const CUSTOM_RANGE_KEY = 'workbuddy-desktop-logs-custom-range'
 const VIEW_KEY = 'workbuddy-desktop-logs-view'
 const AGGREGATE_KEY = 'workbuddy-desktop-logs-aggregate'
-export const DEFAULT_AUTO: AutoConfig = { enabled: true, ms: 1_000 }
 export const RANGE_OPTIONS = [
   { value: 'today', label: t('今天') }, { value: 'yesterday', label: t('昨天') }, { value: '7', label: t('7 天') },
   { value: '30', label: t('30 天') }, { value: 'month', label: t('本月') }, { value: 'all', label: t('全部') },
@@ -36,7 +34,6 @@ type Shared = {
     getLogStats(): Promise<LogStats>
     clearLogs(query: string): Promise<unknown>
     exportLogs(query?: string): Promise<{ canceled?: boolean; count?: number; file?: string } | null | undefined>
-    getScheduledTasks(): Promise<{ tasks?: IntervalTask[] } | null | undefined>
   }
   wbApp?: {
     toast?: (message: string, kind?: 'err' | 'ok') => void
@@ -84,12 +81,6 @@ export function persistFilters(filters: Filters): void {
     localStorage.setItem(RANGE_KEY, filters.range)
     localStorage.setItem(AGGREGATE_KEY, filters.aggregate ? '1' : '0')
   } catch { /* 存储不可用不影响当前会话。 */ }
-}
-
-export function autoConfig(task: IntervalTask | null | undefined): AutoConfig {
-  const interval = Number(task?.interval)
-  if (!task || !Number.isFinite(interval) || interval <= 0 || !['seconds', 'minutes'].includes(task.unit || '')) return DEFAULT_AUTO
-  return { enabled: task.enabled !== false, ms: interval * (task.unit === 'minutes' ? 60_000 : 1_000) }
 }
 
 export function queryFor(filters: Filters, extra: Partial<LogQuery> = {}): string {

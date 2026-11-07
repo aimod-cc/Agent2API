@@ -109,6 +109,11 @@ fn provider_active(provider: &str) -> bool {
 }
 
 pub fn project(group: &RoutingGroup, accounts: &[Value], needs: &RequestNeeds, scope: Option<&KeyScope>) -> GroupProjection {
+    project_with_vision(group, accounts, needs, scope, None)
+}
+
+pub fn project_with_vision(group: &RoutingGroup, accounts: &[Value], needs: &RequestNeeds, scope: Option<&KeyScope>,
+    vision: Option<&config::vision_compat::VisionSettings>) -> GroupProjection {
     let mut result = GroupProjection::default();
     let by_id: HashMap<_, _> = accounts.iter().filter_map(|account| routing::account_id(account).map(|id| (id, account))).collect();
     let manifests: HashMap<_, _> = group.members.iter().map(|member| member.provider.clone()).collect::<HashSet<_>>()
@@ -119,7 +124,13 @@ pub fn project(group: &RoutingGroup, accounts: &[Value], needs: &RequestNeeds, s
             else if !provider_active(&member.provider) { Some("提供商当前不可用".to_string()) }
             else if let Some(item) = &item {
                 if providers::images::model_is_image(item) { Some("生图模型不能用于对话路由".to_string()) }
-                else { needs.reason(item) }
+                else {
+                    let mut requirements = needs.clone();
+                    if vision.is_some_and(|settings| settings.mode_for(&member.provider, &member.model).is_some()) {
+                        requirements.images = false;
+                    }
+                    requirements.reason(item)
+                }
             } else { Some("模型已不在提供商目录中，配置保留但不参与转发".to_string()) };
         let actual = item.as_ref().map(model_id).unwrap_or_else(|| member.model.clone());
         if let Some(reason) = reason {

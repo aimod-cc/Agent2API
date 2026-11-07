@@ -71,6 +71,7 @@ pub(super) fn client_label(client: &str) -> &str {
         "assistant_images" => "助手图片工具",
         "assistant_title" => "助手标题总结",
         "checkin_keepalive" => "日活保活",
+        "image-generation" => "图片生成 MCP",
         _ => client,
     }
 }
@@ -85,7 +86,7 @@ pub(super) fn key_label(identity: &ApiKeyIdentity) -> String {
     }
 }
 
-fn usage_json(usage: &UsageAccum) -> Value {
+pub(super) fn usage_json(usage: &UsageAccum) -> Value {
     let details = usage.token_details_requests >= usage.requests
         && (usage.tokens == 0 || usage.token_details_requests > 0);
     json!({
@@ -199,13 +200,26 @@ fn model_rows(models: &[ModelAccum]) -> Vec<Value> {
 
 pub(super) fn source_breakdown(day: &DailyEntry) -> (Vec<Value>, Vec<Value>) {
     let (clients, keys) = day_sources(day);
-    let clients = build_clients(&clients).into_iter().map(|row| json!({
-        "id": row["id"], "label": row["label"], "tokens": row["totalTokens"], "requests": row["requests"],
-    })).collect();
-    let keys = build_keys(&keys).into_iter().map(|row| json!({
-        "id": row["filterValue"], "label": row["label"], "tokens": row["totalTokens"], "requests": row["requests"],
-    })).collect();
+    let clients = build_clients(&clients).into_iter().map(|mut row| {
+        row["tokens"] = row["totalTokens"].clone();
+        row
+    }).collect();
+    let keys = build_keys(&keys).into_iter().map(|mut row| {
+        row["id"] = row["filterValue"].clone();
+        row["tokens"] = row["totalTokens"].clone();
+        row
+    }).collect();
     (clients, keys)
+}
+
+pub(super) fn day_usage(day: &DailyEntry) -> UsageAccum {
+    let (clients, _) = day_sources(day);
+    let mut usage = UsageAccum::default();
+    for client in clients { usage.merge(&client.usage); }
+    usage.requests = day.requests;
+    usage.successful = day.successful;
+    usage.tokens = day.tokens;
+    usage
 }
 
 pub(super) fn all_model_rows(models: &[ModelAccum]) -> Vec<Value> {

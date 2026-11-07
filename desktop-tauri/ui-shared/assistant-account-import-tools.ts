@@ -24,6 +24,7 @@
  */
 
 import { assistantFileOf, jsonTopLevelKeys } from './assistant-files'
+import { accountImportNotice } from './account-import-result'
 import type { ImageToolContext } from './assistant-image-tools'
 import type { Translate } from './assistant-read-types'
 
@@ -279,9 +280,12 @@ export function createAccountImportTool(api: AccountImportApi, t: Translate): Ac
         const skipped = num(row.skipped) ?? 0
         const total = num(row.total) ?? accounts.length
         const errors = Array.isArray(row.errors) ? row.errors.slice(0, 5) : []
+        const notice = accountImportNotice(row)
         api.refresh?.()
         return {
-          text: JSON.stringify({ ok: failed === 0, total, added, updated, skipped, failed, errors }),
+          text: JSON.stringify({ ok: failed === 0, total, added, updated, skipped, failed, errors,
+            ...(notice ? { importNotice: notice.text, subscriptionWarning: notice.warning } : {}),
+          }),
           summary: t('批量导入：新增 {added}、更新 {updated}、失败 {failed}', {
             added: String(added), updated: String(updated), failed: String(failed),
           }),
@@ -323,6 +327,7 @@ export function createAccountImportTool(api: AccountImportApi, t: Translate): Ac
       const accountId = account ? str(account.id) : ''
       const accountName = account ? str(account.name) : ''
       const providerOut = account ? str(account.provider) || provider : provider
+      const notice = accountImportNotice(row)
       api.refresh?.()
       return {
         text: JSON.stringify({
@@ -330,6 +335,7 @@ export function createAccountImportTool(api: AccountImportApi, t: Translate): Ac
           provider: providerOut,
           created: row.created !== false,
           account: { id: accountId, name: accountName, provider: providerOut },
+          ...(notice ? { importNotice: notice.text, subscriptionWarning: notice.warning } : {}),
         }),
         summary: t('已导入账号「{name}」', {
           name: accountName || accountId || providerOut,

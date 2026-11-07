@@ -172,19 +172,22 @@ pub(super) fn summarize(
     // cacheTrend24h 走明细窄行（只有它还需要逐条数据）
     let rates = cache_rates(cache_totals);
     let cache_trend = cache_trend_24h(entries, now);
+    let mut usage = super::source::UsageAccum::default();
+    for (_, day) in daily.range(start_date.clone()..=end_date.clone()) {
+        usage.merge(&super::source_report::day_usage(day));
+    }
+    let mut overview = super::source_report::usage_json(&usage);
+    overview["successful"] = json!(totals.successful);
+    overview["tokens"] = json!(totals.tokens);
+    overview["activeDays"] = json!(totals.active_days);
+    overview["streak"] = json!(consecutive);
+    overview["topModel"] = top_model;
 
     json!({
         "range": range,
         "startDate": start_date,
         "endDate": end_date,
-        "overview": {
-            "requests": totals.requests,
-            "successful": totals.successful,
-            "tokens": totals.tokens,
-            "activeDays": totals.active_days,
-            "streak": consecutive,
-            "topModel": top_model,
-        },
+        "overview": overview,
         // 按 provider 维度的区间汇总（**新增字段，不改既有字段**）。
         // 前端按「存在则展示、缺失则隐藏」消费，所以旧前端拿到它只会忽略。
         // 恒为数组（无数据时是空数组而不是 null）：前端不必判两种空形态

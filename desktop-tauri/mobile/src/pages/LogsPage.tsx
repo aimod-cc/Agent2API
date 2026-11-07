@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button, Input, SegmentedControl, Sheet, SheetBody, SheetContent, SheetFooter, SheetHeader, SheetTitle, Switch , Label, Card } from '@ui'
-import { PageIntro, IconButton, Empty, ErrorNote, SkeletonList } from '../components/ui'
+import { PageAutoRefresh, usePageAutoRefresh } from '../components/PageAutoRefresh'
+import { usePageRefreshTimer } from '../../../ui-shared/page-auto-refresh-timer'
+import { PageIntro, Empty, ErrorNote, SkeletonList } from '../components/ui'
 import { store } from '../state/store'
 import { fetchLogs } from '../api/gateway'
 import { usePullToRefresh, PullIndicator } from '../components/PullToRefresh'
@@ -22,6 +24,7 @@ const VIEWS = [
 ]
 
 export function LogsPage() {
+  const auto = usePageAutoRefresh('logsAutoRefresh')
   const [view, setView] = useState<LogView>('important')
   const [range, setRange] = useState<DateRange>('all')
   const [dates, setDates] = useState<CustomDates>(() => readCustomRange(CUSTOM_RANGE_KEY))
@@ -32,6 +35,7 @@ export function LogsPage() {
   const [data, setData] = useState<LogPage | null>(null)
   const [page, setPage] = useState(1)
   const [paused, setPaused] = useState(false)
+  const [reading, setReading] = useState(false)
   const [pending, setPending] = useState(0)
   const [detail, setDetail] = useState<LogGroup | null>(null)
   const [error, setError] = useState('')
@@ -42,23 +46,28 @@ export function LogsPage() {
   const stateRef = useRef({ view, level, search, aggregate, page, paused, detail, range, dates })
   stateRef.current = { view, level, search, aggregate, page, paused, detail, range, dates }
   const pollingRef = useRef(false)
+  const loadingRef = useRef(0)
 
   useEffect(() => {
     const timer = window.setTimeout(() => setSearch(keyword.trim()), 300)
     return () => window.clearTimeout(timer)
   }, [keyword])
 
-  const load = useCallback(async (latest = false, silent = false) => {
+  const load = useCallback(async (latest = false, silent = false, manual = false) => {
     const state = stateRef.current
     if (latest) {
       state.page = 1
       setPage(1)
       snapshotRef.current = undefined
       setPaused(false)
+      setReading(false)
+      setDetail(null)
       state.paused = false
+      state.detail = null
       if (bodyRef.current) bodyRef.current.scrollTop = 0
     }
     const seq = ++seqRef.current
+    loadingRef.current += 1
     if (!silent) setLoading(true)
     try {
       const locked = !latest && (state.page > 1 || state.paused || state.detail !== null || (bodyRef.current?.scrollTop || 0) > 20)
@@ -72,16 +81,17 @@ export function LogsPage() {
       if (state.page > maxPage) {
         stateRef.current.page = maxPage
         setPage(maxPage)
-        await load(false, silent)
+        await load(false, silent, manual)
         return
       }
-      if (silent && !locked && (stateRef.current.paused || stateRef.current.detail !== null || (bodyRef.current?.scrollTop || 0) > 20)) return
+      if (silent && !manual && !locked && (stateRef.current.paused || stateRef.current.detail !== null || (bodyRef.current?.scrollTop || 0) > 20)) return
       setData(result)
       setError('')
       if (!locked || snapshotRef.current === undefined) { snapshotRef.current = result.lastId ?? 0; setPending(0) }
     } catch (failure) {
       if (seq === seqRef.current) setError(failure instanceof Error ? failure.message : String(failure))
     } finally {
+      loadingRef.current -= 1
       if (seq === seqRef.current) setLoading(false)
     }
   }, [])
@@ -96,31 +106,29 @@ export function LogsPage() {
     return () => { ++seqRef.current }
   }, [view, level, search, aggregate, range, dates, load])
 
-  useEffect(() => {
-    const timer = window.setInterval(async () => {
-      if (document.hidden || pollingRef.current) return
-      pollingRef.current = true
-      try {
-        const state = stateRef.current
-        const locked = state.page > 1 || state.paused || state.detail !== null || (bodyRef.current?.scrollTop || 0) > 20
-        if (locked && snapshotRef.current !== undefined) {
-          const sinceId = snapshotRef.current
-          const result = await fetchLogs({ view: state.view, level: state.view === 'debug' ? undefined : state.level,
-            keyword: state.search, ...dateRangeQuery(state.range, state.dates), sinceId, limit: 1 })
-          if (sinceId !== snapshotRef.current || state.view !== stateRef.current.view || state.search !== stateRef.current.search || state.level !== stateRef.current.level || state.aggregate !== stateRef.current.aggregate || state.range !== stateRef.current.range || state.dates !== stateRef.current.dates) return
-          if (result.lastId !== undefined && result.lastId < sinceId) await load(true)
-          else setPending(Number(result.matched) || 0)
-        } else await load(false, true)
-      } catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)) }
-      finally { pollingRef.current = false }
-    }, 30_000)
-    return () => window.clearInterval(timer)
-  }, [load])
+  usePageRefreshTimer(async () => {
+    if (pollingRef.current || loadingRef.current > 0) return
+    pollingRef.current = true
+    try {
+      const state = stateRef.current
+      const locked = state.page > 1 || state.paused || state.detail !== null || (bodyRef.current?.scrollTop || 0) > 20
+      if (locked && snapshotRef.current !== undefined) {
+        const sinceId = snapshotRef.current
+        const result = await fetchLogs({ view: state.view, level: state.view === 'debug' ? undefined : state.level,
+          keyword: state.search, ...dateRangeQuery(state.range, state.dates), sinceId, limit: 1 })
+        if (sinceId !== snapshotRef.current || state.view !== stateRef.current.view || state.search !== stateRef.current.search || state.level !== stateRef.current.level || state.aggregate !== stateRef.current.aggregate || state.range !== stateRef.current.range || state.dates !== stateRef.current.dates) return
+        if (result.lastId !== undefined && result.lastId < sinceId) await load(true)
+        else setPending(Number(result.matched) || 0)
+      } else await load(false, true)
+    } catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)) }
+    finally { pollingRef.current = false }
+  }, auto.enabled, auto.ms)
 
   const pull = usePullToRefresh({ onRefresh: () => load(true), scrollRef: bodyRef })
   const groups = logGroups(data)
   const totalGroups = Number(data?.grouped ?? data?.matched ?? groups.length) || 0
   const pageCount = Math.max(1, Math.ceil(totalGroups / LIMIT))
+  const held = paused || reading || page > 1 || detail !== null
   const nextPage = (target: number) => {
     stateRef.current.page = target
     setPage(target)
@@ -139,19 +147,20 @@ export function LogsPage() {
     <div className='m-page m-fixed' ref={pull.bindRef}>
       <PullIndicator pull={pull.pull} refreshing={pull.refreshing} />
       <div className='m-sticky'>
+        <PageAutoRefresh settings={auto} onRefresh={() => load(false, true, true)} disabled={loading} />
         <PageIntro subtitle={data ? t('显示 {groups} 组 · 原始记录 {entries} 条', { groups: totalGroups, entries: Number(data.matched) || 0 }) : undefined}
-          actions={<><IconButton name='pause' label={paused ? t('恢复刷新') : t('暂停刷新')} onClick={() => {
+          actions={<Button variant='ghost' size='sm' aria-pressed={paused} onClick={() => {
             const next = !stateRef.current.paused
             stateRef.current.paused = next
             setPaused(next)
             if (!next && page === 1 && !detail && (bodyRef.current?.scrollTop || 0) <= 20) void load(true)
-          }} /><IconButton name='refresh' label={t('查看最新')} onClick={() => void load(true)} /></>} />
+          }}>{paused ? t('结束阅读') : t('阅读模式')}</Button>} />
         <div className='m-section' style={{ marginTop: 0 }}>
           <SegmentedControl options={VIEWS} value={view} onValueChange={setView} aria-label={t('日志视图')} className='w-full' />
           <Input className='mt-2.5 w-full' type='search' value={keyword} onChange={event => setKeyword(event.currentTarget.value)}
             placeholder={t('搜索消息、提供商或账号…')} aria-label={t('搜索消息、提供商或账号')} />
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginTop: 10, fontSize: 11.5, color: 'var(--m-text-3)' }}>
-            <span>{paused ? t('已暂停刷新') : t('自动刷新')}</span>
+            <span>{held ? t('阅读模式，列表保持不动') : auto.enabled ? t('自动刷新') : t('自动刷新已关闭')}</span>
             <Label style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Switch checked={aggregate} onCheckedChange={setAggregate} aria-label={t('折叠重复日志')} />{t('折叠重复日志')}</Label>
           </div>
         </div>
@@ -162,10 +171,10 @@ export function LogsPage() {
             <UiToggle size='default' variant='outline' key={option.value} type='button' className='m-chip rounded-pill' pressed={level === option.value} onClick={() => setLevel(option.value)}>{option.label}</UiToggle>)}
         </div> : null}
       </div>
-      <div className='m-body' ref={bodyRef}>
+      <div className='m-body' ref={bodyRef} onScroll={() => setReading((bodyRef.current?.scrollTop || 0) > 20)}>
         {error ? <ErrorNote text={error} /> : null}
         {view === 'debug' && data && !data.debugEnabled ? <div className='m-section' style={{ fontSize: 11.5, color: 'var(--m-text-3)' }}>{t('调试采集未开启，仅显示已保留的记录。可在设置中开启调试模式。')}</div> : null}
-        {pending ? <div className='m-section'><Button variant='outline' className='w-full' onClick={() => void load(true)}>{t('有 {n} 条新日志', { n: pending })} · {t('查看最新')}</Button></div> : null}
+        {pending || held ? <div className='m-section'><Button variant='outline' className='w-full' disabled={loading} onClick={() => void load(true)}>{pending ? t('有 {n} 条新日志', { n: pending }) : t('阅读模式，列表保持不动')} · {t('查看最新')}</Button></div> : null}
         {!data && !error ? <SkeletonList rows={5} height={68} /> : null}
         {data && !groups.length ? <div className='m-section'><Card className='m-card'><Empty text={t('没有符合筛选条件的日志')} /></Card></div> : null}
         {groups.length ? <div className='m-section' style={{ marginTop: 0 }}><Card className='m-card'>

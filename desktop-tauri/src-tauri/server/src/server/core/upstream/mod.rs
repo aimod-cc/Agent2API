@@ -69,6 +69,8 @@ pub mod sse;
 pub mod stall;
 pub mod translate;
 pub mod usage;
+mod usage_normalize;
+pub(crate) mod vision_compat;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -272,6 +274,7 @@ pub enum ForwardOutcome {
 }
 
 /// 一次选路的结果（对应 Node 的 `{ accountId, account, proxy, proxyError }`）
+#[derive(Clone)]
 pub(super) struct RouteTarget {
     /// 本次要用的 provider id：全局队列里选出来的账号决定这一次发给哪家；
     /// 没有任何账号记录时是「候选集合里第一家」（回落到它的默认登录态）
@@ -371,7 +374,7 @@ impl UpstreamService {
         self.forward_request(request, Some(crate::server::core::providers::images::ImageOperation::Edit), false).await
     }
 
-    async fn forward_request(&self, request: ForwardRequest, images: Option<crate::server::core::providers::images::ImageOperation>, preserve_system_prompt: bool) -> Result<ForwardOutcome, GatewayError> {
+    async fn forward_request(&self, mut request: ForwardRequest, images: Option<crate::server::core::providers::images::ImageOperation>, preserve_system_prompt: bool) -> Result<ForwardOutcome, GatewayError> {
         if let Some(rule) = super::update::required_update() {
             return Err(GatewayError::with_status(426, rule["message"].as_str().unwrap_or("当前版本需要强制更新")).with_code("update_required"));
         }
@@ -396,14 +399,22 @@ impl UpstreamService {
         if cancel.as_ref().is_some_and(|token| token.is_cancelled()) {
             return Err(cancellation::cancelled_error());
         }
+        let resumed_vision = if images.is_none() { vision_compat::resume(&mut request)? } else { None };
         let route_model = request.body.get("model").and_then(Value::as_str).unwrap_or("").to_string();
         let route_store = self.store.clone();
         let route_body = request.body.clone();
         let route_scope = request.allowed_providers.clone();
         let ignore_route = request.ignore_model_gate;
-        let routing = crate::server::core::blocking::run(move || {
-            route_context::RequestRouting::capture_request(&route_model, &route_store, &route_body, route_scope.as_ref(), ignore_route)
-        }).await??;
+        let vision = if resumed_vision.is_none() && images.is_none() && !request.ignore_model_gate {
+            vision_compat::RequestVision::capture(&request.body)?
+        } else { None };
+        let route_vision = vision.clone();
+        let routing = if let Some(resumed) = &resumed_vision { resumed.routing.clone() } else {
+            crate::server::core::blocking::run(move || {
+                route_context::RequestRouting::capture_request_with_vision(&route_model, &route_store, &route_body, route_scope.as_ref(), ignore_route,
+                    route_vision.as_ref().map(|vision| &vision.settings))
+            }).await??
+        };
         let mut slot = self.begin_slot(&request.dedupe_key, cancel.as_ref()).await;
         // 账号级活跃连接计数：**本请求**的凭证，随选路改绑到实际使用的账号。
         // 建在这里（而不是选路处）是因为它必须活到响应体发完 —— 流式路径由
@@ -463,6 +474,9 @@ impl UpstreamService {
         let context = payload::ProviderContext {
             body: &upstream_body,
             routing,
+            vision,
+            direct_provider: resumed_vision.as_ref().map(|resumed| resumed.provider.clone()),
+            direct_model: resumed_vision.as_ref().map(|resumed| resumed.model.clone()),
             compact_routed: compact_route.is_some(),
             stream: request.stream,
             images,
@@ -479,7 +493,15 @@ impl UpstreamService {
             ignore_model_gate: request.ignore_model_gate,
             proxy_override: proxy_override.as_ref(),
         };
-        provider_loop::forward_with_providers(self, context, &mut slot, &mut connections).await
+        let outcome = vision_compat::forward(self, context, &mut slot, &mut connections).await?;
+        let outcome = if let Some(resumed) = resumed_vision {
+            vision_compat::rewrite(outcome, &resumed.requested, self, request.telemetry.clone())
+        } else { outcome };
+        Ok(if images.is_none() {
+            usage_normalize::normalize_outcome(outcome, request.telemetry.clone())
+        } else {
+            outcome
+        })
     }
 
     /// 等待同 body 的在途请求完成，然后占住槽位。

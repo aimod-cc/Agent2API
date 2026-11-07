@@ -414,6 +414,7 @@ pub fn panel_router(state: ServerState) -> Router {
         // api::proxies 的模块头 —— 通配段会与 404 兜底互相干扰）。
         // 方法与形状见 api::agents 的模块头。
         .route("/api/agents", get(api::agents::list_agents))
+        .route("/api/agents/models", get(api::agents::list_models))
         .route("/api/agents/profiles", post(api::agents::save_profiles))
         .route("/api/agents/apply", post(api::agents::apply_profile))
         .route("/api/agents/preview", post(api::agents::preview_profile))
@@ -450,6 +451,11 @@ pub fn panel_router(state: ServerState) -> Router {
                 .delete(api::tools::delete_vision_config),
         )
         .route("/api/tools/vision/config/test", post(api::tools::test_vision))
+        .route("/api/tools/image-generation/config", get(api::tool_image_admin::config)
+            .put(api::tool_image_admin::save).delete(api::tool_image_admin::clear))
+        .route("/api/tools/image-generation/jobs", get(api::tool_image_admin::jobs))
+        .route("/api/tools/image-generation/jobs/{id}", axum::routing::delete(api::tool_image_admin::delete))
+        .route("/api/tools/image-generation/files/{id}", get(api::tool_image_admin::download))
         .route("/api/tools/install-targets", get(api::tools::install_targets))
         .route("/api/tools/install-info", get(api::tools::install_info))
         .route("/api/tools/install-skill", post(api::tools::install_skill))
@@ -457,6 +463,7 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/tools/uninstall-skill", post(api::tools::uninstall_skill))
         .route("/api/tools/uninstall-mcp", post(api::tools::uninstall_mcp))
         .route("/api/tools/mcp-bridge/vision.js", get(api::tools::vision_bridge_script))
+        .route("/api/tools/mcp-bridge/image-generation.cjs", get(api::tools::image_bridge_script))
         // ── 侧边栏布局（菜单的分组 / 顺序 / 显隐）──
         // 挂 protected：布局是用户配置，且写操作会改两端共用的那一份。
         // 桌面壳的管理请求由壳自动带 Key，网页端走面板会话，两端都不受影响。
@@ -612,6 +619,7 @@ pub fn panel_router(state: ServerState) -> Router {
             get(api::assistant::get_config).put(api::assistant::put_config),
         )
         .route("/api/assistant/chat", post(api::assistant::chat))
+        .merge(api::assistant_coding::routes(state.clone()))
         .route("/api/assistant/images/generations", post(api::assistant_images::generations))
         .route("/api/assistant/images/edits", post(api::assistant_images::edits))
         .route("/api/assistant/images/files/{id}", get(api::assistant_images::download))
@@ -679,6 +687,8 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/plugins", get(api::plugins::list))
         .route("/api/plugins/settings", get(api::plugins::settings).patch(api::plugins::save_settings))
         .route("/api/plugins/progress", get(api::plugins::progress))
+        .route("/api/plugins/scripts/install", post(api::plugins::install_script))
+        .route("/api/plugins/scripts/change", post(api::plugins::change_script))
         .route(
             "/api/plugins/install",
             post(api::plugins::install).route_layer(axum::extract::DefaultBodyLimit::max(
@@ -763,6 +773,7 @@ pub fn panel_router(state: ServerState) -> Router {
         // 字节）：开关 + 长边 / 质量 / 阈值三项一起挂在同一条端点上。挂 protected
         // 的理由与 /api/sanitize 相同 —— 它改写的是发给上游的请求体（本功能只作用
         // 在对话链路，生图 / 图片编辑走独立分支、不经过压缩）。
+        .route("/api/vision-compatibility", get(api::vision_compat::get_settings).put(api::vision_compat::put_settings))
         .route("/api/client-identification", get(api::client_identification::get_settings).put(api::client_identification::put_settings))
         .route("/api/client-identification/preview", post(api::client_identification::preview_settings))
         .route(
@@ -883,6 +894,8 @@ pub fn panel_router(state: ServerState) -> Router {
         // 「已注册路径 + 未注册方法」变成 405 兜底，而这个前缀下希望统一给 404。
         // 单独登记尾斜杠形态：`/api/scheduled-tasks/` 在 `{*rest}` 里匹配不上
         // （通配要求至少一个非空段），不登记就会落到全局 404。
+        .route("/api/maintenance", get(api::maintenance::overview))
+        .route("/api/maintenance/{*rest}", any(api::maintenance::entry))
         .route("/api/scheduled-tasks", any(api::scheduled_tasks::entry))
         .route("/api/scheduled-tasks/", any(api::scheduled_tasks::entry))
         .route(
@@ -1006,6 +1019,9 @@ pub fn gateway_router(state: ServerState) -> Router {
             "/mcp/vision",
             post(api::tool_runtime::mcp_vision).get(api::tool_runtime::mcp_unsupported),
         )
+        .route("/mcp/image-generation", post(api::tool_runtime::mcp_image_generation)
+            .get(api::tool_runtime::mcp_unsupported).delete(api::tool_runtime::mcp_unsupported))
+        .route("/mcp/image-generation/files/{id}", get(api::tool_images::download))
         .layer(middleware::from_fn(require_api_key))
         .with_state(state);
     health.merge(open.merge(guarded))
@@ -1196,6 +1212,9 @@ async fn require_api_key(mut request: Request, next: Next) -> Response {
     }
     let model_access = api::model_access::authenticate(request.headers(), "").ok();
     let panel_session = crate::server::access::session_valid(request.headers());
+    if path.starts_with("/api/assistant/coding/") && !panel_session {
+        return errors::panel_login_required_response(request.headers());
+    }
     if !panel_session {
         if let Some(access) = &model_access {
             let restricted = access.scope.as_ref().is_some_and(|scope| scope.restricts_models() || scope.restricts_providers());

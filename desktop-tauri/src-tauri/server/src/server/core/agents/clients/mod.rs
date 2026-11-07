@@ -1,9 +1,13 @@
 mod claude;
+mod claude_models;
 mod cline;
 mod codex;
+mod codex_models;
 mod crush;
+mod crush_models;
 mod delete;
 mod dsh;
+mod dsh_config;
 mod edit;
 mod gemini;
 mod kimi;
@@ -11,6 +15,7 @@ mod opencode;
 mod readonly;
 mod workbuddy;
 mod zcode;
+mod zcode_models;
 mod zed;
 
 use serde_json::{json, Value};
@@ -31,13 +36,13 @@ pub struct Plan {
 pub fn read(def: &ClientDef, path: &Path, value: &Value) -> Result<Vec<Profile>, String> {
     match def.id {
         "claude-code" => claude::read(value),
-        "codex" => codex::read(value),
+        "codex" => codex::read(path, value),
         "gemini-cli" => gemini::read(path, value),
         "opencode" => opencode::read(value),
         "workbuddy" => workbuddy::read(value),
         "zcode" => zcode::read(value),
         "cline" => cline::read(path, value),
-        "kimi-code" => kimi::read(value),
+        "kimi-code" => kimi::read(path, value),
         "zed" => zed::read(value),
         "crush" => crush::read_effective(path, value),
         "dsh" => dsh::read(path, value),
@@ -62,6 +67,20 @@ pub fn plan(
     if detection.unsupported {
         return Err(detection.note.unwrap_or_else(|| def.note.into()));
     }
+    if def.id == "claude-code" && !profile.models.is_empty() {
+        let version = detection.version.split('.').take(3).map(|part| part.parse::<u32>().ok()).collect::<Option<Vec<_>>>();
+        if let Some(version) = version.filter(|version| version.len() == 3) {
+            if version.as_slice() < [2, 1, 242].as_slice() {
+                return Err("当前 Claude Code 版本不支持多模型菜单，请先升级到 2.1.242 或更新版本".into());
+            }
+            if profile.models.iter().any(|model| !model.effort.is_empty()) && version.as_slice() < [2, 1, 251].as_slice() {
+                return Err("当前 Claude Code 版本不支持逐模型思考设置，请先升级到 2.1.251 或更新版本".into());
+            }
+        }
+    }
+    if def.id == "dsh" && super::dsh_paths::is_patch(path) {
+        return dsh_config::plan(path, profile, operation);
+    }
     let mut change = Change::load(path.to_path_buf())?;
     let original = files::text(change.before.as_deref())?;
     let mut value = if def.id == "workbuddy" && original.trim().is_empty() {
@@ -73,17 +92,29 @@ pub fn plan(
     let mut extra = Vec::new();
     match def.id {
         "claude-code" => claude::write(&mut value, profile, &mut warnings)?,
-        "codex" => codex::write(&mut value, profile, &mut warnings)?,
+        "codex" => extra = codex::write(path, &mut value, profile, operation, &mut warnings)?,
         "gemini-cli" => extra = gemini::write(path, &mut value, profile, &mut warnings)?,
         "opencode" => opencode::write(&mut value, profile, operation)?,
         "workbuddy" => workbuddy::write(&mut value, profile, &mut warnings)?,
         "zcode" => zcode::write(&mut value, profile)?,
         "cline" => extra = cline::write(path, &mut value, profile)?,
-        "kimi-code" => kimi::write(path, &mut value, profile, operation)?,
+        "kimi-code" => kimi::write(path, &mut value, profile, operation, &mut warnings)?,
         "zed" => zed::write(&mut value, profile, operation, &mut warnings)?,
         "crush" => extra = crush::write(path, &mut value, profile, operation)?,
         "dsh" => extra = dsh::write(path, &mut value, profile, operation, &mut warnings)?,
         _ => return Err("这个客户端当前仅支持读取".into()),
+    }
+    let mut writable_fields = super::model_config::declared_fields(def, path);
+    if def.id == "kimi-code" && profile.protocol != "anthropic" {
+        if let Some(fields) = writable_fields.as_array_mut() { fields.retain(|field| field != "maxOutputTokens"); }
+    }
+    let unrepresented = profile.models.iter().any(|model| [
+        ("contextWindow", model.context_window.is_some()), ("maxOutputTokens", model.max_output_tokens.is_some()),
+        ("supportsTools", model.supports_tools.is_some()), ("supportsImages", model.supports_images.is_some()),
+        ("supportsVideo", model.supports_video.is_some()), ("supportsReasoning", model.supports_reasoning.is_some()),
+    ].iter().any(|(key, present)| *present && !writable_fields.as_array().is_some_and(|fields| fields.iter().any(|field| field == key))));
+    if unrepresented {
+        warnings.push("模型能力来自网关目录；此客户端没有对应配置项的能力不会写入，其余字段按模型分别保存。".into());
     }
     change.after = Some(if def.id == "workbuddy" && original.trim().is_empty() {
         serde_json::to_vec_pretty(&value).map_err(|e| format!("生成模型数组失败: {e}"))?
@@ -95,15 +126,24 @@ pub fn plan(
     for change in &changes {
         change.check()?;
     }
-    Ok(Plan {
+    let mut plan = Plan {
         changes,
         warnings,
         profile: profile.clone(),
         operation: operation.into(),
-    })
+    };
+    edit::sync_cached_config(def, path, &mut plan, profile)?;
+    Ok(plan)
 }
 
-pub fn equivalent(def: &ClientDef, saved: &Profile, live: &Profile) -> bool {
+pub fn equivalent(def: &ClientDef, path: &Path, saved: &Profile, live: &Profile) -> bool {
+    let fields = super::model_config::declared_fields(def, path);
+    let supports = |key: &str| fields.as_array().is_some_and(|fields| fields.iter().any(|field| field == key))
+        && !(def.id == "kimi-code" && key == "maxOutputTokens" && saved.protocol != "anthropic");
+    let capability_matches = |key: &str, expected: Option<bool>, current: Option<bool>| {
+        !supports(key) || expected.is_none() || (def.id == "kimi-code" && expected == Some(false)) || expected == current
+    };
+    let per_model_effort = saved.models.iter().any(|model| !model.effort.is_empty() && model.effort != "default");
     let base = |url: &str| {
         url.trim_end_matches('/')
             .trim_end_matches("/chat/completions")
@@ -136,24 +176,14 @@ pub fn equivalent(def: &ClientDef, saved: &Profile, live: &Profile) -> bool {
                     (!expected.name.is_empty()
                         && def.id != "zcode"
                         && expected.name != current.name)
-                        || expected
-                            .context_window
-                            .is_some_and(|value| Some(value) != current.context_window)
-                        || expected
-                            .max_output_tokens
-                            .is_some_and(|value| Some(value) != current.max_output_tokens)
-                        || (def.effort && def.id != "cline" && expected.effort != current.effort)
-                        || (matches!(def.id, "opencode" | "workbuddy" | "cline" | "zed")
-                            && expected
-                                .supports_tools
-                                .is_some_and(|value| Some(value) != current.supports_tools))
-                        || expected
-                            .supports_images
-                            .is_some_and(|value| Some(value) != current.supports_images)
-                        || (matches!(def.id, "opencode" | "workbuddy" | "cline" | "crush")
-                            && expected
-                                .supports_reasoning
-                                .is_some_and(|value| Some(value) != current.supports_reasoning))
+                        || (supports("contextWindow") && expected.context_window.is_some_and(|value| Some(value) != current.context_window))
+                        || (supports("maxOutputTokens") && expected.max_output_tokens.is_some_and(|value| Some(value) != current.max_output_tokens))
+                        || (def.effort && !matches!(def.id, "cline" | "dsh") && !(def.id == "kimi-code" && super::paths::kimi_legacy(path))
+                            && expected.effort != current.effort)
+                        || !capability_matches("supportsTools", expected.supports_tools, current.supports_tools)
+                        || !capability_matches("supportsImages", expected.supports_images, current.supports_images)
+                        || !capability_matches("supportsVideo", expected.supports_video, current.supports_video)
+                        || !capability_matches("supportsReasoning", expected.supports_reasoning, current.supports_reasoning)
                 })
         }) {
             return false;
@@ -161,10 +191,13 @@ pub fn equivalent(def: &ClientDef, saved: &Profile, live: &Profile) -> bool {
     } else if saved.model != live.model {
         return false;
     }
-    if def.id == "claude-code" && saved.claude_models != live.claude_models {
+    if def.id == "claude-code" && [(&saved.claude_models.opus, &live.claude_models.opus),
+        (&saved.claude_models.sonnet, &live.claude_models.sonnet), (&saved.claude_models.haiku, &live.claude_models.haiku),
+        (&saved.claude_models.subagent, &live.claude_models.subagent)].iter().any(|(saved, live)| !saved.is_empty() && saved != live) {
         return false;
     }
-    if !saved.effort.is_empty() && saved.effort != "default" && saved.effort != live.effort {
+    if !saved.effort.is_empty() && saved.effort != "default" && saved.effort != live.effort
+        && !(matches!(def.id, "claude-code" | "codex") && per_model_effort) {
         return false;
     }
     match super::validate::credential(saved) {
@@ -178,9 +211,12 @@ pub fn equivalent(def: &ClientDef, saved: &Profile, live: &Profile) -> bool {
     true
 }
 
-pub use edit::{preserve_selection, remove_models, sync_cached_config};
+pub use edit::{preserve_selection, remove_models};
+
+pub fn read_dsh(path: &Path) -> Result<Vec<Profile>, String> { dsh_config::read(path) }
 
 pub fn delete_plan(def: &ClientDef, path: &Path, profile: &Profile) -> Result<Plan, String> {
+    if def.id == "dsh" && super::dsh_paths::is_patch(path) { return dsh_config::plan(path, profile, "native-delete"); }
     delete::plan(def, path, profile)
 }
 

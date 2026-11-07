@@ -23,9 +23,14 @@ pub struct Observation {
     pub elapsed_ms: Option<u64>,
     pub checked_at: i64,
     pub selected: bool,
+    pub retry_at: i64,
+    pub retry_source: String,
+    pub last_state: Option<String>,
     #[serde(skip)]
     context: String,
     #[serde(skip)]
+    request_url: String,
+    #[serde(rename = "validUntil")]
     until: i64,
 }
 
@@ -116,7 +121,11 @@ pub fn record(candidate: &Candidate, state: &str, elapsed_ms: Option<u64>, selec
         elapsed_ms,
         checked_at: now,
         selected,
+        retry_at: 0,
+        retry_source: String::new(),
+        last_state: None,
         context: candidate.context.clone(),
+        request_url: candidate.original.clone(),
         until,
     });
     if memory.observations.len() > MAX_RECORDS {
@@ -149,12 +158,49 @@ pub fn sort(candidates: &mut [Candidate]) {
 pub fn snapshot() -> Vec<Observation> {
     let context = context_key();
     let now = logging::now_ms();
-    let Ok(memory) = memory().lock() else { return vec![]; };
+    let records: Vec<_> = match memory().lock() {
+        Ok(memory) => memory.observations.values()
+            .filter(|value| value.context == context && now - value.checked_at < 60 * 60_000)
+            .cloned().collect(),
+        Err(_) => return vec![],
+    };
+    let states = crate::server::core::task_state::read_all().unwrap_or_default();
+    let headers = super::client::github_headers();
     let mut latest = HashMap::new();
-    for value in memory.observations.values().filter(|value| value.context == context && now - value.checked_at < 60 * 60_000) {
+    for mut value in records {
+        let candidate = super::source::configured_candidates(&value.request_url, true)
+            .into_iter().find(|candidate| candidate.id == value.source);
+        let limited = candidate.as_ref().and_then(|candidate| candidate.stored_limit(&headers, &states));
+        if let Some(limit) = limited.filter(|limit| limit.retry_at > now) {
+            value.state = "rateLimited".to_string();
+            value.retry_at = limit.retry_at;
+            value.retry_source = limit.retry_source;
+            value.selected = false;
+        } else if value.until <= now || value.state == "rateLimited" {
+            value.last_state = Some(value.state.clone());
+            value.state = "stale".to_string();
+            value.selected = false;
+        }
         let key = (value.source.clone(), value.resource.clone());
         let entry = latest.entry(key).or_insert_with(|| value.clone());
-        if value.checked_at > entry.checked_at { *entry = value.clone(); }
+        if value.checked_at > entry.checked_at { *entry = value; }
+    }
+    let urls = [
+        "https://api.github.com/repos/Agent2plugin/Agent2plugin/releases",
+        "https://raw.githubusercontent.com/Agent2plugin/Agent2plugin/main/index.json",
+        "https://github.com/Agent2plugin/Agent2plugin/releases/download/current/package.zip",
+    ];
+    for url in urls {
+        for candidate in super::source::configured_candidates(url, true) {
+            let Some(limit) = candidate.stored_limit(&headers, &states).filter(|limit| limit.retry_at > now) else { continue; };
+            let key = (candidate.id.clone(), resource(url).to_string());
+            latest.entry(key).or_insert_with(|| Observation {
+                source: candidate.id.clone(), label: candidate.label(), resource: resource(url).to_string(),
+                state: "rateLimited".to_string(), elapsed_ms: None, checked_at: limit.observed_at,
+                selected: false, retry_at: limit.retry_at, retry_source: limit.retry_source, last_state: None,
+                context: context.clone(), request_url: url.to_string(), until: limit.retry_at,
+            });
+        }
     }
     let mut result: Vec<_> = latest.into_values().collect();
     result.sort_by(|left, right| right.checked_at.cmp(&left.checked_at));

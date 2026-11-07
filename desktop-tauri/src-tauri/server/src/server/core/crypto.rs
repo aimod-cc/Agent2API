@@ -102,6 +102,8 @@ pub enum SecretScope {
     /// 没改，却说密码错」。独立一把 `cloud-sync.key` 只属于这台机器、不参与
     /// 同步，这条死循环才不存在。
     CloudSync,
+    /// 编程会话后台凭据不参与账号云同步。
+    CodingSessions,
 }
 
 impl SecretScope {
@@ -114,6 +116,7 @@ impl SecretScope {
             SecretScope::UpdateToken => "update-token.key",
             SecretScope::Accounts => "account.key",
             SecretScope::CloudSync => "cloud-sync.key",
+            SecretScope::CodingSessions => "coding-sessions.key",
         }
     }
 
@@ -126,6 +129,7 @@ impl SecretScope {
             SecretScope::UpdateToken => "重存一次令牌即可自愈",
             SecretScope::Accounts => "重新保存一次账号即可自愈",
             SecretScope::CloudSync => "在「设置 → 数据 → 云同步」里重新输入同步密码即可自愈",
+            SecretScope::CodingSessions => "在 AI 助手的编程会话连接设置里重新输入密钥即可自愈",
         }
     }
 }
@@ -144,10 +148,13 @@ fn cache_for(scope: SecretScope) -> &'static std::sync::Mutex<Option<[u8; KEY_LE
         std::sync::OnceLock::new();
     static CLOUD_SYNC: std::sync::OnceLock<std::sync::Mutex<Option<[u8; KEY_LEN]>>> =
         std::sync::OnceLock::new();
+    static CODING_SESSIONS: std::sync::OnceLock<std::sync::Mutex<Option<[u8; KEY_LEN]>>> =
+        std::sync::OnceLock::new();
     match scope {
         SecretScope::UpdateToken => UPDATE_TOKEN.get_or_init(|| std::sync::Mutex::new(None)),
         SecretScope::Accounts => ACCOUNTS.get_or_init(|| std::sync::Mutex::new(None)),
         SecretScope::CloudSync => CLOUD_SYNC.get_or_init(|| std::sync::Mutex::new(None)),
+        SecretScope::CodingSessions => CODING_SESSIONS.get_or_init(|| std::sync::Mutex::new(None)),
     }
 }
 

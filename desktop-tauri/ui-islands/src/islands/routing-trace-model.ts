@@ -13,6 +13,10 @@ export const sameRequest = (left: ReplayRow, right: ReplayRow) => left.traceKey 
 export const requestModel = (row: ReplayRow) => row.clientModel || row.model || t('模型未记录')
 export const isTraceRunning = (row: ReplayRow) => row.status === 0 && row.error == null
 export const isTraceSuccess = (row: ReplayRow) => row.status >= 200 && row.status < 300 && row.error == null
+export const isTraceCancelled = (row: ReplayRow) => row.status === 499 || row.status === 408
+  && (row.error === '客户端在响应完成前断开连接' || row.error === '请求已被手动终止')
+export const requestStateLabel = (row: ReplayRow) => isTraceRunning(row) ? tracePhase(row.phase)
+  : isTraceCancelled(row) ? t('已取消') : isTraceSuccess(row) ? t('成功') : t('失败')
 export const traceProvider = (id?: string, label?: string) => label || (id ? host().wbProviders?.labelOf(id) || id : t('提供商未记录'))
 export function traceAttempts(row: ReplayRow): TraceAttempt[] {
   const entries = Array.isArray(row.attemptDetails) ? row.attemptDetails : []

@@ -32,6 +32,7 @@ mod gateway;
 mod legacy_install;
 mod login;
 mod login_profile;
+mod script_login;
 mod monkeycode_login;
 mod panel_session;
 mod settings;
@@ -300,6 +301,7 @@ pub fn run() {
             commands::export_accounts,
             account_export::export_account_files,
             assistant_image::save_assistant_image,
+            assistant_image::save_tool_image,
             commands::import_accounts,
             commands::export_database,
             commands::import_database,
@@ -307,6 +309,7 @@ pub fn run() {
             commands::cloud_sync_download,
             commands::cloud_sync_import_key,
             commands::check_update,
+            tray::take_update_check_request,
             commands::system_info,
             commands::download_update,
             commands::update_progress,

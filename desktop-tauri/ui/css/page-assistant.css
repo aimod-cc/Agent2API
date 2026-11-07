@@ -72,7 +72,6 @@
   font-size: 12.5px;
   cursor: pointer;
 }
-.asst-side-item:hover:not(:has([data-active])) { background: var(--nav-hover); color: var(--text); }
 .asst-side-item.active { background: var(--surface-2); color: var(--text); font-weight: 600; }
 .asst-side-item .title {
   flex: 1 1 auto;

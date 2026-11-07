@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use serde_json::{json, Map, Value};
 
 use super::{
-    chat_frame, content_parts, content_text, is_truthy, json_number_of, json_text, native_tool,
+    chat_frame, content_parts, content_text, is_truthy, json_text, native_tool,
     random_id, string_field, string_value, SseLineBuffer, FIELD_ENCRYPTED_CONTENT,
 };
 use super::responses::{image_url_of, tool_output_parts, ConvertError, ToolOutput};
@@ -853,35 +853,7 @@ fn tool_key(event: &Value, item: &Value) -> String {
 /// `input_tokens_details.cached_tokens`→`prompt_tokens_details.cached_tokens`、
 /// `output_tokens_details.reasoning_tokens`→`completion_tokens_details.reasoning_tokens`。
 fn chat_usage_from_responses(usage: &Value) -> Value {
-    let input = json_number_of(usage, &["input_tokens", "prompt_tokens"]);
-    let output = json_number_of(usage, &["output_tokens", "completion_tokens"]);
-    let cached = usage
-        .pointer("/input_tokens_details/cached_tokens")
-        .and_then(Value::as_i64)
-        .filter(|value| *value != 0)
-        .unwrap_or_else(|| json_number_of(usage, &["cache_read_input_tokens"]));
-    let reasoning = usage
-        .pointer("/output_tokens_details/reasoning_tokens")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    let mut out = Map::new();
-    out.insert("prompt_tokens".to_string(), Value::from(input));
-    if cached != 0 {
-        out.insert(
-            "prompt_tokens_details".to_string(),
-            json!({ "cached_tokens": cached }),
-        );
-    }
-    out.insert("completion_tokens".to_string(), Value::from(output));
-    if reasoning != 0 {
-        out.insert(
-            "completion_tokens_details".to_string(),
-            json!({ "reasoning_tokens": reasoning }),
-        );
-    }
-    out.insert(
-        "total_tokens".to_string(),
-        Value::from(json_number_of(usage, &["total_tokens"]).max(input + output)),
-    );
-    Value::Object(out)
+    let mut chat = usage.clone();
+    super::usage::normalize_chat(&mut chat);
+    chat
 }

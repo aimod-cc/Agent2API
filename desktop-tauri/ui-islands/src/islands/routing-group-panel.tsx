@@ -9,6 +9,7 @@ import { groupDirty, type RouteGroupEditor } from './routing-group-state'
 import { RoutingSelect } from './routing-select'
 import { RoutingActions } from './routing-canvas-controls'
 import { RoutingCanvasLayout, RoutingDraftFooter } from './routing-canvas-layout'
+import { useRoutingCanvasActivity } from './routing-canvas-activity'
 import { RoutingMemberCard } from './routing-member-card'
 import { routingAccountSections, routingCollapsedSections, useRoutingExpansion } from './routing-account-sections'
 import { IconButton, RouteIcon } from './routing-ui'
@@ -22,6 +23,7 @@ export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, sorting
   const [accountMember, setAccountMember] = React.useState<string | null>(null)
   const { setOpened, sectionOpen, setSectionOpen, search, setSearch, query, isOpen } = useRoutingExpansion()
   const group = editor.draft?.group
+  const activity = useRoutingCanvasActivity(Boolean(group && editor.draft?.baseline), editor.draft?.baseline?.model || '', group?.id)
   const locked = editor.busy || editor.loading
   const update = (mutate: (group: RouteGroup) => void) => editor.update(mutate)
   const drop = ({ kind, provider, id, target, after }: RoutingDrop) => update(next => {
@@ -69,7 +71,7 @@ export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, sorting
   const allOpen = expandable.length > 0 && expandable.every(member => isOpen(member.id))
   const renderMember = (member: RouteMember) => <RoutingMemberCard key={member.id} member={member} accounts={accounts} name={name(member)} label={label(member.provider)}
     index={active.indexOf(member)} first={orderingPeers(member.id)[0]?.id === member.id} last={orderingPeers(member.id).at(-1)?.id === member.id}
-    open={isOpen(member.id)} locked={locked} query={query} drag={drag}
+    open={isOpen(member.id)} locked={locked} query={query} drag={drag} activity={activity}
     onOpen={open => setOpened(current => ({ ...current, [member.id]: open }))} onJoin={on => editMember(member.id, next => { next.included = on })}
     onMove={direction => move(member.id, direction)} onAccounts={() => setAccountMember(member.id)} onMoveAccount={(id, direction) => moveAccount(member, id, direction)}
     onToggleAccount={id => editMember(member.id, next => { next.accounts = next.accounts.includes(id) ? next.accounts.filter(key => key !== id) : [...next.accounts, id] })}
@@ -105,7 +107,7 @@ export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, sorting
   </section>
   return <>
     <RoutingCanvasLayout title={t('自定义路由组')} groups={members} note={t('只影响这个路由成员，不改变账号启用状态，也不影响其他模型。新增账号需要手动加入。')}>
-      <div className='routing-config-card' data-route-source>
+      <div className='routing-config-card' data-route-source data-route-running={activity.running > 0 ? '' : undefined}>
         <div className='routing-config-card-scroll'>
           <header className='routing-config-head'><div><span className='routing-config-eyebrow'>{t('跨模型组合')}</span><h2>{group.name}</h2></div>
             <RoutingActions label={t('路由配置操作')} actions={[

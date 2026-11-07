@@ -1,6 +1,9 @@
 import * as React from 'react'
 import { Select as BaseSelect } from '@base-ui/react/select'
+import { createChangeEventDetails } from '@base-ui/react/internals/createBaseUIEventDetails'
+import { useRender } from '@base-ui/react/use-render'
 import { cn } from './lib/cn'
+import { useSelectBoundary } from './lib/select-boundary'
 
 /**
  * 下拉选择。
@@ -23,7 +26,62 @@ import { cn } from './lib/cn'
  *   </Select>
  */
 
-const Select = BaseSelect.Root
+const SelectContext = React.createContext<{
+  open: boolean
+  trigger: HTMLButtonElement | null
+  setTrigger: React.Dispatch<React.SetStateAction<HTMLButtonElement | null>>
+  closeOnAnchorHidden: () => void
+  closedOnAnchorHidden: boolean
+} | null>(null)
+
+function Select<Value, Multiple extends boolean | undefined = false>({
+  open: controlledOpen, defaultOpen = false, onOpenChange, children, ...props
+}: BaseSelect.Root.Props<Value, Multiple>) {
+  const [internalOpen, setInternalOpen] = React.useState(defaultOpen)
+  const [trigger, setTrigger] = React.useState<HTMLButtonElement | null>(null)
+  const [closedOnAnchorHidden, setClosedOnAnchorHidden] = React.useState(false)
+  const open = controlledOpen ?? internalOpen
+  React.useLayoutEffect(() => {
+    if (open) setClosedOnAnchorHidden(false)
+  }, [open])
+
+  const changeOpen = React.useCallback((next: boolean, details: BaseSelect.Root.ChangeEventDetails) => {
+    onOpenChange?.(next, details)
+    if (details.isCanceled) return
+    if (next) setClosedOnAnchorHidden(false)
+    setInternalOpen(next)
+  }, [onOpenChange])
+
+  const closeOnAnchorHidden = React.useCallback(() => {
+    if (!open || closedOnAnchorHidden) return
+    const details = createChangeEventDetails('none', undefined, trigger ?? undefined)
+    changeOpen(false, details)
+    if (!details.isCanceled) setClosedOnAnchorHidden(true)
+  }, [open, closedOnAnchorHidden, trigger, changeOpen])
+
+  const context = React.useMemo(() => ({
+    open, trigger, setTrigger, closeOnAnchorHidden, closedOnAnchorHidden,
+  }), [open, trigger, closeOnAnchorHidden, closedOnAnchorHidden])
+
+  return (
+    <SelectContext.Provider value={context}>
+      <BaseSelect.Root {...props} open={open} onOpenChange={changeOpen}>{children}</BaseSelect.Root>
+    </SelectContext.Provider>
+  )
+}
+
+function SelectPositionerElement({ anchorHidden, open, ...props }: React.ComponentProps<'div'> & {
+  anchorHidden: boolean
+  open: boolean
+}) {
+  const context = React.useContext(SelectContext)
+  const closeOnAnchorHidden = context?.closeOnAnchorHidden
+  React.useLayoutEffect(() => {
+    if (open && anchorHidden) closeOnAnchorHidden?.()
+  }, [open, anchorHidden, closeOnAnchorHidden])
+  return <div {...props} />
+}
+
 const SelectValue = BaseSelect.Value
 const SelectGroup = BaseSelect.Group
 /** 分组标题：shadcn 里叫 SelectLabel（Base UI 原语叫 GroupLabel） */
@@ -34,11 +92,15 @@ type SelectTriggerProps = Omit<React.ComponentProps<typeof BaseSelect.Trigger>, 
   className?: string
 }
 
-function SelectTrigger({ className, children, ...props }: SelectTriggerProps) {
-  return (
-    <BaseSelect.Trigger
-      data-slot='select-trigger'
-      className={cn(
+function SelectTrigger({ className, children, ref, ...props }: SelectTriggerProps) {
+  const context = React.useContext(SelectContext)
+  return useRender({
+    render: <BaseSelect.Trigger />,
+    ref: [ref ?? null, context?.setTrigger ?? null],
+    props: {
+      ...props,
+      'data-slot': 'select-trigger',
+      className: cn(
         'inline-flex h-[30px] min-w-0 cursor-pointer items-center justify-between gap-1.5 rounded-md border border-control-border bg-control px-2.5',
         // 选中值（SelectValue 渲染出的 span）是触发器的 flex 子项，默认
         // min-width:auto 不收缩：标签比触发器宽时会把边框撑破、文字溢出去
@@ -52,17 +114,17 @@ function SelectTrigger({ className, children, ...props }: SelectTriggerProps) {
         'focus-visible:border-primary focus-visible:shadow-focus focus-visible:outline-none',
         'data-disabled:cursor-not-allowed data-disabled:bg-control data-disabled:text-muted-foreground data-disabled:opacity-60',
         className
-      )}
-      {...props}
-    >
-      {children}
-      <BaseSelect.Icon className='flex flex-none text-muted-foreground transition-transform duration-[180ms] data-popup-open:rotate-180'>
-        <svg viewBox='0 0 10 6' className='size-2.5' aria-hidden='true'>
-          <path d='M1 1l4 4 4-4' stroke='currentColor' strokeWidth='1.4' fill='none' strokeLinecap='round' strokeLinejoin='round' />
-        </svg>
-      </BaseSelect.Icon>
-    </BaseSelect.Trigger>
-  )
+      ),
+      children: <>
+        {children}
+        <BaseSelect.Icon className='flex flex-none text-muted-foreground transition-transform duration-[180ms] data-popup-open:rotate-180'>
+          <svg viewBox='0 0 10 6' className='size-2.5' aria-hidden='true'>
+            <path d='M1 1l4 4 4-4' stroke='currentColor' strokeWidth='1.4' fill='none' strokeLinecap='round' strokeLinejoin='round' />
+          </svg>
+        </BaseSelect.Icon>
+      </>,
+    },
+  })
 }
 
 type SelectContentProps = Omit<React.ComponentProps<typeof BaseSelect.Popup>, 'className'> & {
@@ -71,7 +133,10 @@ type SelectContentProps = Omit<React.ComponentProps<typeof BaseSelect.Popup>, 'c
   sideOffset?: number
 }
 
-function SelectContent({ className, sideOffset = 4, children, ...props }: SelectContentProps) {
+function SelectContent({ className, sideOffset = 4, children, finalFocus, ...props }: SelectContentProps) {
+  const context = React.useContext(SelectContext)
+  const boundary = useSelectBoundary(context?.trigger ?? null, context?.open ?? false)
+
   return (
     <BaseSelect.Portal>
       {/* alignItemWithTrigger={false}：关闭 Base UI 默认的「选中项对齐触发器」定位。
@@ -82,17 +147,22 @@ function SelectContent({ className, sideOffset = 4, children, ...props }: Select
           关掉后回到标准锚定定位：贴着触发器下方弹出、空间不够向上翻转，
           弹层内部自行滚动到选中项。官方对默认模式的说明与关闭方式见
           base-ui.com/react/components/select 的 Positioning 一节。 */}
-      <BaseSelect.Positioner sideOffset={sideOffset} alignItemWithTrigger={false} className='z-[35]'>
+      <BaseSelect.Positioner sideOffset={sideOffset} alignItemWithTrigger={false}
+        collisionBoundary={boundary} className='z-[35] data-anchor-hidden:invisible data-anchor-hidden:pointer-events-none'
+        render={(positionerProps, state) => <SelectPositionerElement {...positionerProps}
+          anchorHidden={state.anchorHidden} open={state.open} />}>
         <BaseSelect.Popup
           data-slot='select-content'
           className={cn(
-            'max-h-[260px] min-w-[var(--anchor-width)] overflow-y-auto overscroll-contain rounded-lg border border-border-strong bg-raised p-[5px] shadow-3',
+            'max-h-[min(260px,var(--available-height))] min-w-[min(var(--anchor-width),var(--available-width))] max-w-[var(--available-width)] overflow-y-auto overscroll-contain rounded-lg border border-border-strong bg-raised p-[5px] shadow-3',
             'outline-none',
             // 只淡入不做位移/缩放：打开后要立刻量尺寸摆位置，transform 会污染坐标
             'data-open:animate-in data-open:fade-in-0',
             'data-closed:animate-out data-closed:fade-out-0',
             className
           )}
+          // 自动收起时不聚焦已滚出视野的触发器，避免滚动位置被浏览器拉回。
+          finalFocus={context?.closedOnAnchorHidden ? false : finalFocus}
           {...props}
         >
           {children}

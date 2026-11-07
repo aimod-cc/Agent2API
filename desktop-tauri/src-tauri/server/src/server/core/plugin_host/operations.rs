@@ -181,10 +181,8 @@ fn claim_operation(id: &str, policy: InstallPolicy) -> Result<task_state::RunGua
     if active(id) { return Err("这个插件正在下载或安装".to_string()); }
     match task_state::claim(
         &record_key(id), 60_000, true,
-        if policy.automatic() || matches!(policy, InstallPolicy::Required { .. }) {
-            ManualBackoff::Respect
-        } else { ManualBackoff::Bypass },
-        1000,
+        if policy.automatic() { ManualBackoff::Respect } else { ManualBackoff::Bypass },
+        0,
     )? {
         Claim::Acquired(guard) => Ok(guard),
         Claim::Deferred(state) => Err(state.waiting_message()),

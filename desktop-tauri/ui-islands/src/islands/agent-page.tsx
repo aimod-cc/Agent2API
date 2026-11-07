@@ -9,6 +9,7 @@ import { PathDialog } from './agent-path-dialog'
 import { ApplyDialog } from './agent-preview'
 import { QuickConnectDialog } from './agent-quick-connect'
 import { quickBlockReason } from './agent-quick-model'
+import { dshTargetLabel } from './agent-dsh'
 import type { AgentClient, AgentOperation } from './agent-types'
 import { AgentResourcesPanel } from '../../../ui-shared/agent-resources-panel'
 import type { ResourceKind } from '../../../ui-shared/agent-resources'
@@ -66,18 +67,20 @@ function ClientDetail({client}:{client:AgentClient}) {
   const [tab, setTab] = React.useState<string>('config')
   const [quickOpen, setQuickOpen] = React.useState(false)
   const quickReason = quickBlockReason(client)
+  const dshTarget = client.configTargets?.find(target => target.path === (client.pathOverride || client.configPath)) || client.configTargets?.[0]
   const busy = Boolean(store.busy)||store.loading
   return <>
     <div className='agent-dhead'><ClientAvatar client={client} size='lg'/><div className='agent-dtitle'><h3>{client.name}<Badge variant={client.writable?'success':'outline'}>{detectionLabel(client)}</Badge></h3>
-      <div className='agent-meta'><span>{client.vendor}</span>{client.version&&<span>{client.version}</span>}</div></div>
+      <div className='agent-meta'><span>{client.vendor}</span>{client.version ? <span>{client.version}</span> : client.id === 'dsh' ? <span>{t('版本未识别')}</span> : null}
+        {client.id === 'dsh' && dshTarget && <span>{dshTargetLabel(dshTarget.profile, dshTarget.label)}</span>}</div></div>
       <div className='agent-dhead-actions'><Button size='sm' disabled={busy || Boolean(quickReason)} title={quickReason || undefined} onClick={() => setQuickOpen(true)}>{t('一键接入')}</Button>
         <Button variant='outline' size='sm' disabled={busy} onClick={()=>void loadPanel()}>{store.loading?t('检测中…'):t('重新检测')}</Button>
-        <Button variant='ghost' size='sm' disabled={busy} onClick={()=>setPathOpen(true)}>{t('指定配置路径')}</Button></div></div>
+        <Button variant='ghost' size='sm' disabled={busy} onClick={()=>setPathOpen(true)}>{client.id === 'dsh' ? t('选择配置目标') : t('指定配置路径')}</Button></div></div>
     <SegmentedControl className='mt-3' value={tab} onValueChange={setTab} aria-label={t('客户端管理分类')} options={[
       { value: 'config', label: t('模型配置') }, { value: 'prompt', label: t('提示词') }, { value: 'skills', label: 'Skill' }, { value: 'mcp', label: 'MCP' },
     ]} />
     <p className='agent-machine-note'>{t('操作目标：网关所在机器')}{store.hostName?` · ${store.hostName}`:''}</p>
-    {tab !== 'config' ? <AgentResourcesPanel key={tab} clientId={client.id} kind={tab as ResourceKind} capabilities={client.resources}
+    {tab !== 'config' ? <AgentResourcesPanel key={`${tab}:${client.pathOverride}:${client.configPath}`} clientId={client.id} kind={tab as ResourceKind} capabilities={client.resources}
       request={callJson} t={t} notify={(text, bad) => toast(text, bad ? 'err' : 'ok')} /> : <>
     <code className='agent-resolved-path'>{client.resolvedPath}</code>
     {client.evidence.length>0&&<ul className='agent-evidence'>{client.evidence.map((evidence,index)=><li key={index}>{evidence}</li>)}</ul>}

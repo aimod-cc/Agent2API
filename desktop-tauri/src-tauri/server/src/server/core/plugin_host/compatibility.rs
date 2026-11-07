@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use super::install::{InstalledPack, PackRegistry};
 use super::{operations, update, PackSummary};
 use crate::server::core::task_state::{self, Claim, ManualBackoff};
-use crate::server::core::update::{compare_versions, CURRENT_VERSION};
+use crate::server::core::update::{compare_versions, UpdateError, CURRENT_VERSION};
 use crate::server::logging;
 
 pub(super) const RETRY_INTERVAL_MS: i64 = 5 * 60_000;
@@ -67,7 +67,7 @@ pub(super) fn update_for(pack: &PackSummary) -> Option<Value> {
             "未签名包不会被自动覆盖，请点击补齐插件或从文件安装符合最低版本要求的包".to_string()
         }
     });
-    Some(json!({
+    let mut result = json!({
         "id": pack.id, "current": pack.version, "latest": asset.as_ref().map(|asset| &asset.version),
         "required": true, "requiredVersion": pack.required_version,
         "repairing": state.running() || operations::active(&pack.id),
@@ -82,10 +82,13 @@ pub(super) fn update_for(pack: &PackSummary) -> Option<Value> {
             crate::server::core::update::is_prerelease_version(&asset.version)
         }),
         "reason": reason, "error": error.is_some(),
-    }))
+    });
+    let url = format!("https://api.github.com/repos/{}/releases", update::FALLBACK_REPO);
+    crate::server::core::update::rate_limit::decorate_cached(&mut result, &url);
+    Some(result)
 }
 
-async fn find_asset(id: &str) -> Result<update::PackAsset, String> {
+async fn find_asset(id: &str) -> Result<update::PackAsset, UpdateError> {
     let mut detail = update::PluginDetail {
         protocol: agent2api_provider_protocol::PROTOCOL_VERSION,
         repo: update::FALLBACK_REPO.to_string(),
@@ -98,7 +101,7 @@ async fn find_asset(id: &str) -> Result<update::PackAsset, String> {
         Ok(entries) => {
             if let Some(entry) = entries.into_iter().find(|entry| entry.id == id) {
                 if !entry.official {
-                    return Err(format!("插件「{id}」在当前索引中不是官方包，未自动替换"));
+                    return Err(UpdateError::new(format!("插件「{id}」在当前索引中不是官方包，未自动替换")));
                 }
                 if let Some(remote) = update::read_detail(&entry.manifest).await {
                     detail = remote;
@@ -110,7 +113,7 @@ async fn find_asset(id: &str) -> Result<update::PackAsset, String> {
         }
         Err(error) => logging::verbose("[Plugin]", &format!("插件索引读取失败，尝试内置官方配套源：{error}")),
     }
-    let minimum = minimum_version(id).ok_or_else(|| "这个插件不属于官方配套包".to_string())?;
+    let minimum = minimum_version(id).ok_or_else(|| UpdateError::new("这个插件不属于官方配套包"))?;
     update::required_release(&detail.repo, id, &detail, minimum, &super::host_target()).await
 }
 
@@ -124,12 +127,10 @@ async fn resolve(id: &str, manual: bool) -> Result<update::PackAsset, String> {
         }
     }
     let guard = match task_state::claim(
-        &key(id), RETRY_INTERVAL_MS, manual, ManualBackoff::Respect, 60_000,
+        &key(id), RETRY_INTERVAL_MS, manual, ManualBackoff::Bypass, 0,
     )? {
         Claim::Acquired(guard) => guard,
-        Claim::Deferred(state) => return Err(state.last_error.as_deref()
-            .map(|error| update::describe_error(error, state.retry_at))
-            .unwrap_or_else(|| update::waiting_message(&state))),
+        Claim::Deferred(state) => return Err(update::waiting_message(&state)),
     };
     match find_asset(id).await {
         Ok(asset) => {
@@ -140,8 +141,8 @@ async fn resolve(id: &str, manual: bool) -> Result<update::PackAsset, String> {
             Ok(asset)
         }
         Err(error) => {
-            guard.finish(false, error.clone(), None, 0, RETRY_INTERVAL_MS)?;
-            Err(error)
+            guard.finish(false, error.message.clone(), None, 0, RETRY_INTERVAL_MS)?;
+            Err(error.message)
         }
     }
 }
@@ -164,7 +165,7 @@ pub(super) async fn start(id: &str, manual: bool) -> Result<operations::Operatio
         return Err("这个插件正在下载或安装，请稍候".to_string());
     }
     let operation_state = task_state::read(&format!("pluginOperation:{id}"))?;
-    if operation_state.running() || operation_state.retry_at > logging::now_ms() {
+    if operation_state.running() || (!manual && operation_state.retry_at > logging::now_ms()) {
         return Err(operation_state.waiting_message());
     }
     let asset = resolve(id, manual).await?;

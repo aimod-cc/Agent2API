@@ -41,6 +41,7 @@ pub(super) fn owners_with(registry: &PackRegistry, prepared: Option<&InstalledPa
         };
         for provider in ids.into_iter().filter(|id| {
             !reserved(id) && !crate::server::core::providers::availability::is_suspended(id)
+                && super::script::package_for_provider(id).is_none()
         }) {
             owners.entry(provider).or_insert_with(|| pack.id.clone());
         }

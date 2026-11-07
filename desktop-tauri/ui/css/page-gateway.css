@@ -261,13 +261,22 @@
 .proxies-table .p-test { width: 23%; }
 .proxies-table .p-act { width: 150px; }
 .page[data-page="proxies"] .models-table th { font-size: 11px; }
-.page[data-page="proxies"] .models-table td { padding: 14px 12px; }
+/* 行高：原来上下各 14px 内边距，一行近 67px，一屏只看得到十来条出口。
+   收到 8px（与表头同一档）后行高约 46px —— 名称与最近检测仍是两行读数，
+   不靠压缩字号换密度。 */
+.page[data-page="proxies"] .models-table td { padding: 8px 12px; }
 .page[data-page="proxies"] .models-table th[data-col="pick"],
 .page[data-page="proxies"] .models-table th[data-col="state"] { text-align: center; }
 
 /* 禁用 / 已删除的行整体压淡，开关与操作列保持可点 */
 .models-table tr.off td { opacity: .5; }
 .models-table tr.off td.state, .models-table tr.off td.r { opacity: 1; }
+
+/* 代理页例外：禁用行不再整体压淡 —— 0.5 的透明度在深色主题下会把名称、
+   地址、检测读数一起糊掉（用户反馈的「禁用文字太暗」就是这里）。禁用这件
+   事改由名称行下的「已禁用」与关掉的开关共同表达，文字保持正常对比度；
+   模型管理页的行仍按上面两条压淡。 */
+.page[data-page="proxies"] .models-table tr.off td { opacity: 1; }
 
 /* 提供商分组行：表内的一条分组带。取 --surface-2，只比表体差一档 ——
    它仍是「表里的一行」，不该用卡内凹槽那档深色（那会把表切成几块）。 */

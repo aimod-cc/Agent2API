@@ -13,6 +13,7 @@ import { UpdateSettingsDialog } from './update-settings'
 import { QqGroupDialog } from './update-qq-group'
 import { SupportDialog } from './update-support-dialog'
 import { t } from '../i18n'
+import { GithubFailureText } from '../../../ui-shared/github-failure'
 import { HtmlContent } from '@ui'
 import { Empty } from '@ui'
 
@@ -350,6 +351,8 @@ function acceptServiceProgress(progress: ServiceProgress): void {
 }
 
 function renderCheckResult(): void {
+  // 检查中的进度提示不能被启动或定时读取的旧缓存覆盖。
+  if (snapshot.checking) return
   const { info, checkedAt, checkError } = snapshot
   if (!info) {
     // 没有可保留的旧读数：只剩「这次为什么没查成」
@@ -473,11 +476,9 @@ function applyStatus(info?: UpdateInfo | null): void {
     // 但「当前版本」可以取：这份缓存即使没成功检查过也带着后端自己的版本号，
     // 只用来填空 —— 壳的检查结果（运行时 package_info）比后端编译期版本更权威
     fillCurrentVersion(info)
-    // 从没成功过、但失败过：没有版本号与日志可留，只把原因标出来。
-    // 手上已有一次**更新**的手动失败（failedOnCheckedAt 非 -1）时不覆盖 ——
-    // 那条文案往往带着「还要等多少秒」，比后端记下的上一轮失败更有用
-    if (info?.lastError && failedOnCheckedAt === -1) {
-      publish({ checkError: describeBackendError(info.lastError) })
+    // 没有成功结果时，仍保留后端失败详情以显示实时恢复时间。
+    if (info?.lastError) {
+      publish({ info, checkError: describeBackendError(info.lastError) })
       if (snapshot.phase === 'idle') renderCheckResult()
     }
     return
@@ -551,23 +552,6 @@ function rememberCurrentVersion(info: UpdateInfo | null | undefined): void {
  */
 function fillCurrentVersion(info: UpdateInfo | null | undefined): void {
   if (!snapshot.currentVersion) rememberCurrentVersion(info)
-}
-
-/**
- * 当前版本还空着时，单独去后端缓存问一次。
- *
- * 用在哪：检查失败之后。失败时 `checkUpdate` 抛的是错误，没有结果对象可读，
- * 而 `/api/update/status` 是本机读库（不打网络、不受限流影响），它的
- * `currentVersion` 来自后端编译期版本 —— 后端还没成功检查过时也有值。
- * 已经显示着版本号就不再问：那一格不会因为一次失败而变。
- */
-async function refreshCurrentVersion(): Promise<void> {
-  if (snapshot.currentVersion) return
-  try {
-    fillCurrentVersion(await shared().workbuddyDesktop?.getUpdateStatus())
-  } catch {
-    /* 后端未就绪：保持空（显示「—」），下次进设置页还会再读 */
-  }
 }
 
 /* ─── 下载 ───────────────────────────────────── */
@@ -787,9 +771,9 @@ async function waitForServiceThenReload(): Promise<void> {
 
 /* ─── 面板流程（对外契约的实现）────────────────── */
 
-/** 检查更新：用户主动发起的一次请求（受后端最短间隔与失败冷却约束） */
+/** 检查更新：重叠请求共用结果，限流由后端按线路处理。 */
 async function check(): Promise<UpdateInfo | null> {
-  if (busy) return null
+  if (busy || snapshot.phase === 'restarting') return null
   busy = true
   publish({ checking: true })
   setBadge(t('检查中'), 'warn')
@@ -806,7 +790,6 @@ async function check(): Promise<UpdateInfo | null> {
     failedOnCheckedAt = -1
     rememberCurrentVersion(result)
     if (result?.sourceRepository) applySourceRepository(result.sourceRepository)
-    renderCheckResult()
   } catch (error) {
     result = null
     // 失败：**保留**上一次成功的结果（版本号 / 更新日志仍然有效，只是不新鲜），
@@ -817,13 +800,13 @@ async function check(): Promise<UpdateInfo | null> {
     // 情况下面板上没有可保留的旧读数，下次任何成功都能直接清掉提示
     failedOnCheckedAt = snapshot.checkedAt
     publish({ checkError: errorMessage(error) })
-    renderCheckResult()
     // 「当前版本」同样不跟着清空（它是本机事实）：已经显示着就留着；还没有值
     // （本次会话没成功检查过）时去本机缓存补一个 —— 冷却期里也不该连版本号都没有
-    void refreshCurrentVersion()
+    await syncFromCache()
   } finally {
     busy = false
     publish({ checking: false })
+    renderCheckResult()
   }
   // 左侧导航的提示：只有确实有新版本才亮，失败与「已是最新」都静默。
   // 失败（result 为 null）时**不转发** —— 那会把上一次成功检查点亮的「新」抹掉，
@@ -1162,6 +1145,13 @@ function UpdatePanel() {
   React.useEffect(() => () => { stopPolling() }, [])
   // 头部那句「GitHub Token 未填写」的首次读数（之后由 load 与弹窗关闭刷新）
   React.useEffect(() => { void refreshTokenHint() }, [])
+  React.useEffect(() => {
+    if (!snap.info?.rateLimited || !snap.checkError) return
+    const timer = window.setInterval(() => {
+      if (!document.hidden && !snapshot.checking) void syncFromCache()
+    }, 5000)
+    return () => window.clearInterval(timer)
+  }, [snap.info?.rateLimited, Boolean(snap.checkError)])
 
   // 作者主页与项目仓库都指向**源码仓库**：安装包放在借来的构建账号下，
   // 那个账号的主页没有代码也没有 issue，不能拿来当「关于作者」的落点
@@ -1254,7 +1244,9 @@ function UpdatePanel() {
         {/* 错误态用行内色（旧实现同样是 style.color）：.detail 是页面排版类，
             没有语义色工具类可换 */}
         <div className='detail' id='update-state' style={snap.stateError ? { color: 'var(--danger)' } : undefined}>
-          {snap.stateText}
+          {snap.phase === 'idle' && !snap.checking && snap.info?.rateLimited && snap.checkError
+            ? <GithubFailureText value={{ ...snap.info, reason: snap.info.lastError }} settings='update' t={t} />
+            : snap.stateText}
         </div>
 
         {/* 进度条：旧实现只在 0 < percent < 100 时露出，这里同样条件渲染 */}

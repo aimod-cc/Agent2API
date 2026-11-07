@@ -85,6 +85,25 @@ export function planClaimResultApplies(plan: PreviewPlan, result: ClaimResult | 
   return Number.isFinite(at) && at > 0 && at >= start
 }
 
+// claimEndsAt 是已领取套餐的到期时间，仅在活动缺少 endsAt 时兜底。
+export function planActivityEnded(plan: PreviewPlan, nowMs = Date.now()): boolean {
+  const activityEnd = Number(plan.endsAt)
+  const claimEnd = Number(plan.claimEndsAt)
+  const end = Number.isFinite(activityEnd) && activityEnd > 0 ? activityEnd : claimEnd
+  return Number.isFinite(end) && end > 0 && end * 1000 <= nowMs
+}
+
+export function unconfirmedPlanIds(
+  claimed: readonly string[],
+  plans: readonly PreviewPlan[],
+  owned: readonly OwnedPlan[],
+  nowMs = Date.now(),
+): string[] {
+  return claimed.filter(id => id
+    && plans.some(plan => String(plan.planId || '') === id && !planActivityEnded(plan, nowMs))
+    && !owned.some(plan => String(plan.planId || '') === id))
+}
+
 export function planQueryErrors(result: PreviewResult): string[] {
   return [result.previewError, result.marketingError, result.catalogError, result.ownershipError, result.ledgerError]
     .filter((error): error is string => Boolean(error))

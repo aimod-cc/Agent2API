@@ -22,7 +22,7 @@ const TABS: TabDef[] = [
   { id: 'home', label: t('首页'), icon: 'home' },
   { id: 'report', label: t('报表'), icon: 'chart' },
   { id: 'accounts', label: t('账号'), icon: 'users' },
-  { id: 'assistant', label: t('助手'), icon: 'spark' },
+  { id: 'assistant', label: t('对话'), icon: 'spark' },
   { id: 'more', label: t('更多'), icon: 'grid' },
 ]
 

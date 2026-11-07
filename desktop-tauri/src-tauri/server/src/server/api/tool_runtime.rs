@@ -257,6 +257,7 @@ async fn mcp_post(state: &ServerState, headers: HeaderMap, body: Bytes, kind: Mc
     let service = match kind {
         McpServerKind::WebSearch => tool_services::WEB_SEARCH_SERVICE_ID,
         McpServerKind::Vision => tool_services::VISION_SERVICE_ID,
+        McpServerKind::ImageGeneration => tool_services::IMAGE_GENERATION_SERVICE_ID,
     };
     if !tool_services::is_enabled(service, protocol) {
         return json_response(
@@ -273,11 +274,21 @@ async fn mcp_post(state: &ServerState, headers: HeaderMap, body: Bytes, kind: Mc
             )
         }
     };
-    let context = McpRequestContext { base_url: base_url(&headers, &state), store: state.store().clone(), scope: access.scope };
-    match tool_services::mcp_dispatch(&payload, kind, &context).await {
+    let owner = super::tool_images::owner(&headers);
+    let source = if kind == McpServerKind::ImageGeneration {
+        crate::server::request_stats::RequestSource { client: "image-generation".into(), ..access.source }
+    } else { access.source };
+    let context = McpRequestContext { base_url: base_url(&headers, state), store: state.store().clone(),
+        scope: access.scope, state: state.clone(), source, owner };
+    let response = match tool_services::mcp_dispatch(&payload, kind, &context).await {
         Some(response) => json_response(StatusCode::OK, response),
         None => StatusCode::ACCEPTED.into_response(),
-    }
+    };
+    if kind == McpServerKind::ImageGeneration {
+        let mut response = response;
+        response.headers_mut().insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("private, no-store"));
+        response
+    } else { response }
 }
 
 /// POST /mcp/web-search
@@ -288,6 +299,27 @@ pub async fn mcp_web_search(State(state): State<ServerState>, headers: HeaderMap
 /// POST /mcp/vision
 pub async fn mcp_vision(State(state): State<ServerState>, headers: HeaderMap, body: Bytes) -> Response {
     mcp_post(&state, headers, body, McpServerKind::Vision).await
+}
+
+pub async fn mcp_image_generation(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+) -> Response {
+    if let Err(error) = super::tool_images::validate_origin(&headers) {
+        return error.payload_response();
+    }
+    if model_access::authenticate(&headers, "image-generation").is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let body = match axum::body::to_bytes(request.into_body(), super::image_input::MAX_REQUEST_BYTES).await {
+        Ok(body) => body,
+        Err(_) => return crate::server::errors::GatewayError::with_status(413, "图片 MCP 请求不得超过 16 MiB").payload_response(),
+    };
+    if serde_json::from_slice::<Value>(&body).is_ok_and(|value| value.is_array()) {
+        return crate::server::errors::GatewayError::bad_request("图片 MCP 不接受批量提交，请逐个提交任务").payload_response();
+    }
+    mcp_post(&state, headers, body, McpServerKind::ImageGeneration).await
 }
 
 /// 非 POST 方法：按规范用 405 明确告知（本类服务不提供服务端主动推流）

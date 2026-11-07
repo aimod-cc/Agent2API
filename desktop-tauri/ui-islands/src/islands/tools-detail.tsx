@@ -6,6 +6,7 @@ import {
 import { t } from '../i18n'
 import { toast } from './assistant-state'
 import { WebSearchConfig, VisionConfigPanel } from './tools-config'
+import { ImageGenerationConfigPanel } from './tools-image-config'
 import {
   PROTOCOL_DESC, PROTOCOL_LABELS, SERVICE_DESC, SERVICE_NAME, fetchInstallInfo, patchServer,
   type InstallInfo, type ToolProtocol, type ToolService,
@@ -23,6 +24,18 @@ const CAPABILITY_DESCRIPTIONS: Record<string, { title: string; desc: string; par
       desc: t('批量抓取 1～10 个 URL，使用后台选中的单个抓取提供商。'),
       params: [{ name: 'urls', type: 'string[]', desc: t('要抓取并提取正文的网页 URL（1～10 个）'), required: true }],
     },
+  ],
+  'image-generation': [
+    { title: t('生成图片'), desc: t('按描述使用已配置的模型生图，默认一张，会消耗账号额度。'), params: [
+      { name: 'prompt', type: 'string', desc: t('完整的图片要求'), required: true },
+      { name: 'request_id', type: 'string', desc: t('本次提交的唯一编号，断线重试使用原编号'), required: true },
+    ] },
+    { title: t('编辑图片'), desc: t('按参考图修改，仅在配置了可用编辑模型时提供。'), params: [
+      { name: 'images', type: 'string[]', desc: t('参考图链接或已生成图片 ID；本地桥接还可传文件路径'), required: true },
+    ] },
+    { title: t('查询生成结果'), desc: t('查询原任务并取回图片，不再次生图或扣费。'), params: [
+      { name: 'job_id / request_id', type: 'string', desc: t('任务编号或原提交编号，至少提供一项'), required: true },
+    ] },
   ],
   vision: [
     {
@@ -100,7 +113,7 @@ export function ToolDetail({ service, onBack, onChanged }: { service: ToolServic
       .catch(failure => { if (alive) setError(failure instanceof Error ? failure.message : String(failure)) })
       .finally(() => { if (alive) setLoading(false) })
     return () => { alive = false }
-  }, [service.id])
+  }, [service.id, service.capability_count])
 
   React.useEffect(() => { setTimeoutDraft(service.timeout_seconds); setSavedTimeout(service.timeout_seconds) }, [service.timeout_seconds])
   React.useEffect(() => { setEnabled(service.enabled) }, [service.enabled])
@@ -134,7 +147,8 @@ export function ToolDetail({ service, onBack, onChanged }: { service: ToolServic
     }
   }
 
-  const capabilities = CAPABILITY_DESCRIPTIONS[service.id] || []
+  const capabilities = (CAPABILITY_DESCRIPTIONS[service.id] || [])
+    .filter(capability => service.id !== 'image-generation' || capability.title !== t('编辑图片') || info?.mcp.tools.includes('edit_images'))
 
   return <div className='flex flex-col gap-4'>
     <Button variant='ghost' size='sm' className='self-start' onClick={onBack}>← {t('返回列表')}</Button>
@@ -166,7 +180,9 @@ export function ToolDetail({ service, onBack, onChanged }: { service: ToolServic
             {savingTimeout ? <Spinner /> : null}{t('保存')}
           </Button>
         </div>
-        <p className='text-[11.5px] text-subtle'>{t('服务端强制单次工具执行的超时上限（同一服务的 Skill / MCP 共用）。安装 MCP 时会按此值写入客户端配置；修改后需在客户端重新「更新」配置并重进会话才会生效。')}</p>
+        <p className='text-[11.5px] text-subtle'>{service.id === 'image-generation'
+          ? t('这是后台生成任务的时间上限。单次 MCP 调用最多等待 20 秒，未完成时返回任务编号；查询不会重新生图。')
+          : t('服务端强制单次工具执行的超时上限（同一服务的 Skill / MCP 共用）。安装 MCP 时会按此值写入客户端配置；修改后需在客户端重新「更新」配置并重进会话才会生效。')}</p>
         {!enabled && <Alert variant='warning'>{t('该协议已停用，已接入的客户端会收到服务停用错误。')}</Alert>}
         {error && <Alert variant='destructive' className='whitespace-pre-wrap'>{error}</Alert>}
       </CardContent>
@@ -183,7 +199,8 @@ export function ToolDetail({ service, onBack, onChanged }: { service: ToolServic
     </div>
 
     {tab === 'config'
-      ? (service.id === 'vision' ? <VisionConfigPanel /> : <WebSearchConfig />)
+      ? (service.id === 'image-generation' ? <ImageGenerationConfigPanel onChanged={onChanged} />
+        : service.id === 'vision' ? <VisionConfigPanel /> : <WebSearchConfig />)
       : <Card>
         <CardHeader><CardTitle>{t('服务能力')}</CardTitle><span className='ml-auto text-xs text-subtle'>{t('共 {count} 项能力', { count: service.capability_count })}</span></CardHeader>
         <CardContent className='grid grid-cols-1 gap-3 md:grid-cols-2'>

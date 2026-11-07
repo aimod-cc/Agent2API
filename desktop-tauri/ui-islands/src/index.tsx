@@ -7,6 +7,7 @@ import './desktop-shell'
 import './desktop-tooltip'
 import './desktop-titlebar'
 import './island-registry'
+import './desktop-tray'
 
 declare global {
   interface Window {

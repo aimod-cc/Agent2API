@@ -14,7 +14,7 @@ pub(super) async fn rank(
     url: &str,
     allow_mirror: bool,
     headers: &[(String, String)],
-) -> Result<Vec<Candidate>, String> {
+) -> Result<Vec<Candidate>, super::UpdateError> {
     let mut candidates = source::candidates(url, allow_mirror);
     source::ensure_available(&candidates, headers)?;
     if candidates.len() < 2 || candidates[0].mode != GithubAccessMode::Auto {
@@ -27,19 +27,17 @@ pub(super) async fn rank(
     if source_state::remembered(&candidates) { return Ok(candidates); }
     let mut pending = FuturesUnordered::new();
     for candidate in &candidates {
-        if source_state::state(candidate).is_some_and(|value| value.state != "ok") { continue; }
+        if candidate.cooling_error(headers).is_some() { continue; }
         pending.push(async move { (candidate, sample(candidate, headers).await) });
     }
     let mut winner = None;
     while let Some((candidate, outcome)) = pending.next().await {
         match outcome {
             Ok(()) => {
-                source::ensure_available(&candidates, headers)?;
                 candidate.remember();
                 winner = Some(candidate.id.clone());
                 break;
             }
-            Err(error) if error.contains("限流") => return Err(error),
             Err(_) => {}
         }
     }
@@ -59,13 +57,9 @@ async fn sample(candidate: &Candidate, headers: &[(String, String)]) -> Result<(
     headers.push(("Range".to_string(), format!("bytes=0-{}", SAMPLE_BYTES - 1)));
     headers.push(("Accept-Encoding".to_string(), "identity".to_string()));
     let result = tokio::time::timeout(Duration::from_millis(PROBE_TIMEOUT_MS), async {
-        let response = client::fetch_candidate(candidate, &headers, Some(PROBE_TIMEOUT_MS)).await?;
+        let response = client::fetch_candidate(candidate, &headers, Some(PROBE_TIMEOUT_MS)).await
+            .map_err(|error| error.message)?;
         let status = response.status();
-        if candidate.is_rate_limited(&response) {
-            return Err(source::GithubSettings::Update.rate_limit_message(
-                source::retry_deadline(response.headers(), status.as_u16()),
-            ));
-        }
         if !matches!(status.as_u16(), 200 | 206) {
             return Err(format!("{}返回 HTTP {}", candidate.label(), status.as_u16()));
         }

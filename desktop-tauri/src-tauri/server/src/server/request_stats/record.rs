@@ -495,10 +495,7 @@ impl NewRequestEntry {
     ///
     /// 时间补全与数值夹取都集中在这里，于是 `record` 只处理「已合法」的数据。
     ///
-    /// **失败请求的 token 一律清零**（契约要求）：上游返回错误时 usage 通常是
-    /// 缺失的；万一某条错误响应带了半截 usage，清掉比记成「失败的请求也消耗了
-    /// token」更符合报表语义 —— 那些 token 不会被计费，留在趋势图里会让
-    /// 「失败暴增」看起来像「用量暴增」。
+    /// 普通失败沿用清零口径；辅助识图保留已报告的消耗，因为识读不完整不代表上游未计费。
     pub(super) fn normalize(self) -> RequestEntry {
         let ts = self.ts.unwrap_or_else(super::clock::now_ms);
         // 「失败」= 非 2xx **或**带了错误摘要（与 `RequestEntry::is_success` 同一
@@ -506,12 +503,15 @@ impl NewRequestEntry {
         // 错误帧只能靠 `error` 表达。空串摘要按没有错误算（下面 filter 同口径）。
         let failed = !(200..300).contains(&self.status)
             || self.error.as_deref().is_some_and(|text| !text.is_empty());
-        let token = |value: i64| if failed { 0 } else { value.max(0) };
+        // 辅助识图即使被截断或拒答也可能已计费，只保留其实际报告的读数。
+        let measured_vision = self.route.pointer("/visionCompatibility/mode").and_then(Value::as_str) == Some("assist_call");
+        let discard_usage = failed && !measured_vision;
+        let token = |value: i64| if discard_usage { 0 } else { value.max(0) };
         // 积分与 token 同一「失败清零」口径：失败的请求在日志里不展示用量
         // （`usageCell` 对失败行给「-」），留着半截积分读数会让这一列与
         // 「失败请求不记录用量」的既有说明自相矛盾。非有限值 / 负数只可能
         // 来自手改的库或上游溢出，按「没上报」处理而不是记成 0。
-        let credit = if failed {
+        let credit = if discard_usage {
             None
         } else {
             self.credit.filter(|value| value.is_finite() && *value >= 0.0)

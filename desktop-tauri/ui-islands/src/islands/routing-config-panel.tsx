@@ -7,6 +7,7 @@ import { RoutingModelFilter, useRoutingModelFilter } from './routing-model-filte
 import { RoutingSelect } from './routing-select'
 import { RoutingActions } from './routing-canvas-controls'
 import { RoutingCanvasLayout, RoutingDraftFooter } from './routing-canvas-layout'
+import { useRoutingCanvasActivity } from './routing-canvas-activity'
 import { RoutingProviderCard } from './routing-provider-card'
 import { routingAccountSections, routingCollapsedSections, useRoutingExpansion } from './routing-account-sections'
 import { RouteIcon, stickyLabel, strategyLabel } from './routing-ui'
@@ -28,6 +29,7 @@ export function RoutingConfigPanel({ editor, scope, now, accountControl, onScope
   const legacy = draft?.workspace.legacyGlobalParticipation
   const globalBlocked = globalAccounts && (!draft?.workspace.globalAccountControl || Boolean(legacy))
   const modelFilter = useRoutingModelFilter(draft?.workspace, scope)
+  const activity = useRoutingCanvasActivity(Boolean(draft), modelFilter.model)
   const disabled = editor.busy || editor.loading
   const mutate = React.useCallback((fn: (profile: RouteProfile, workspace: RoutingWorkspace) => void) => {
     editor.update(current => { const profile = structuredClone(current.profile); fn(profile, current.workspace); return { ...current, profile } })
@@ -118,7 +120,7 @@ export function RoutingConfigPanel({ editor, scope, now, accountControl, onScope
   }
   const renderProvider = (id: string) => <RoutingProviderCard key={id} id={id} profile={profile} workspace={workspace} scope={scope} now={now}
     index={participating.indexOf(id)} first={orderingPeers(id)[0] === id} last={orderingPeers(id).at(-1) === id}
-    included={included(id)} open={isOpen(id)} locked={locked} busy={editor.busy} query={query} drag={drag}
+    included={included(id)} open={isOpen(id)} locked={locked} busy={editor.busy} query={query} drag={drag} activity={activity}
     onOpen={open => setOpened(current => ({ ...current, [id]: open }))} onJoin={on => join(id, on)} onMove={direction => moveProvider(id, direction)}
     onMoveAccount={(key, direction) => moveAccount(id, key, direction)} onToggleAccount={key => {
       if (globalAccounts) {
@@ -168,7 +170,7 @@ export function RoutingConfigPanel({ editor, scope, now, accountControl, onScope
   return <>
     <RoutingCanvasLayout title={scope ? t('模型路由') : t('全局默认')} groups={groups} globalAccounts={globalAccounts}
       note={scope ? t('仅影响此路由的后续请求') : t('账号启停与账号页同步，立即影响所有路由；策略与排序需保存。')}>
-      <div className='routing-config-card' data-route-source>
+      <div className='routing-config-card' data-route-source data-route-running={activity.running > 0 ? '' : undefined}>
         <div className='routing-config-card-scroll'>
           <header className='routing-config-head'><div><span className='routing-config-eyebrow'>{inherited ? t('继承全局') : scope ? t('独立配置') : t('默认规则')}</span><h2>{scope || t('全局默认')}</h2></div>
             <RoutingActions label={t('路由配置操作')} actions={[

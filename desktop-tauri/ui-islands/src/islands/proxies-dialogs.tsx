@@ -208,7 +208,7 @@ export function ProxyModal({
           <div className='flex flex-row items-center gap-2.5'>
             <Switch checked={enabled} onCheckedChange={setEnabled} aria-label={t('启用这条代理')} />
             <span className='text-[12.5px]'>
-              {t('启用（禁用的条目不会被账号使用，被引用时账号回退直连；仍可测试）')}
+              {t('启用（禁用后，使用此代理的账号请求将失败；仍可测试）')}
             </span>
           </div>
 

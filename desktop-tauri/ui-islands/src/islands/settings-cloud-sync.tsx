@@ -553,8 +553,23 @@ export function CloudSyncPanel() {
                     onCheckedChange={checked => patch({ autoSync: checked })}
                   />
                   <div className='hint'>
-                    {t('本地账号、配置、签到与余额记录变化后自动上传（合并 1 秒内的连续改动，最长 10 秒传一次；内容没变时不发请求）。')}
+                    {t('仅在账号、配置、签到或余额等实质内容变化时上传；导出时间或查询时间单独变化不会触发上传。')}
                   </div>
+                </div>
+                <div className='retention-row'>
+                  <Label htmlFor='cloud-auto-sync-interval'>{t('最小自动上传间隔')}</Label>
+                  <Select value={String(form.autoSyncIntervalMinutes)} disabled={disabled || !form.autoSync || !form.enabled}
+                    onValueChange={value => { if (value !== null) patch({ autoSyncIntervalMinutes: Number(value) }) }}>
+                    <SelectTrigger id='cloud-auto-sync-interval' className='min-w-[220px]'>
+                      <SelectValue>{t('{minutes} 分钟', { minutes: form.autoSyncIntervalMinutes })}</SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      {[...new Set([5, 15, 30, 60, form.autoSyncIntervalMinutes])].sort((a, b) => a - b).map(minutes => (
+                        <SelectItem key={minutes} value={String(minutes)}>{t('{minutes} 分钟', { minutes })}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <div className='hint'>{t('默认 5 分钟。间隔内的变化合并为最新快照，到期后上传；手动上传不受限制。失败后会延长等待并自动重试。')}</div>
                 </div>
                 <div className='retention-row'>
                   <Label htmlFor='cloud-enabled'>{t('启用云同步')}</Label>
@@ -612,7 +627,8 @@ export function CloudSyncPanel() {
                   <br />
                   {status.lastError}
                   <br />
-                  {t('改动仍保存在本机，修复网络或凭据后下一次改动会自动重试，也可以手动点「上传到云端」。')}
+                  {t('改动仍保存在本机，系统会延长等待并自动重试；修复网络或凭据后，也可以手动点「上传到云端」。')}
+                  {status.retryAt ? <div>{t('下次自动重试：{time}', { time: formatTime(status.retryAt) })}</div> : null}
                 </Alert>
               ) : null}
 

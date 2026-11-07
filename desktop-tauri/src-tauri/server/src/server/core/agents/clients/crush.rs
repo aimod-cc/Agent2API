@@ -1,6 +1,6 @@
 use super::super::{
     files::{self, Change},
-    ConfigFormat, Model, Profile,
+    ConfigFormat, Profile,
 };
 use super::{merge, native_entry, native_id, set, string};
 use serde_json::{json, Value};
@@ -27,9 +27,9 @@ pub fn read(value: &Value) -> Result<Vec<Profile>, String> {
             }
             let provider_type = string(entry, "type");
             let protocol = match provider_type.as_str() {
-                "openai-compat" => "openai_chat",
-                "openai" => "responses",
-                "anthropic" => "anthropic",
+                "openai-compat" | "completions" => "openai_chat",
+                "openai" | "responses" => "responses",
+                "anthropic" | "messages" => "anthropic",
                 other => other,
             };
             let mut profile = Profile::new(id, &string(entry, "name"), protocol, &base);
@@ -39,29 +39,7 @@ pub fn read(value: &Value) -> Result<Vec<Profile>, String> {
             profile.native.entry = entry.clone();
             if let Some(models) = entry.get("models").and_then(Value::as_array) {
                 for entry in models {
-                    profile.models.push(Model {
-                        id: string(entry, "id"),
-                        name: string(entry, "name"),
-                        context_window: entry.get("context_window").and_then(Value::as_u64),
-                        max_output_tokens: entry.get("default_max_tokens").and_then(Value::as_u64),
-                        supports_images: entry
-                            .get("supports_attachments")
-                            .or_else(|| entry.get("supports_images"))
-                            .and_then(Value::as_bool),
-                        supports_reasoning: entry.get("can_reason").and_then(Value::as_bool),
-                        reasoning_levels: entry
-                            .get("reasoning_levels")
-                            .and_then(Value::as_array)
-                            .map(|v| {
-                                v.iter()
-                                    .filter_map(Value::as_str)
-                                    .map(str::to_string)
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
-                        effort: string(entry, "default_reasoning_effort"),
-                        ..Default::default()
-                    });
+                    profile.models.push(super::crush_models::read(entry));
                 }
             }
             profile.model = if profile.enabled {
@@ -131,18 +109,21 @@ pub fn write(
         value.get("providers").and_then(|v| v.get(&id)),
         &profile.native.entry,
     )?;
+    let modern = super::crush_models::modern(&provider) || value.get("providers").and_then(Value::as_object)
+        .is_some_and(|providers| providers.values().any(super::crush_models::modern));
     set(&mut provider, &["name"], json!(profile.name))?;
     set(
         &mut provider,
         &["type"],
-        json!(match profile.protocol.as_str() {
-            "anthropic" => "anthropic",
-            "responses" => "openai",
-            _ => "openai-compat",
+        json!(match (profile.protocol.as_str(), modern) {
+            ("anthropic", true) => "messages", ("responses", true) => "responses", (_, true) => "completions",
+            ("anthropic", false) => "anthropic", ("responses", false) => "openai", (_, false) => "openai-compat",
         }),
     )?;
     set(&mut provider, &["base_url"], json!(profile.base_url))?;
     super::apply_credential(&mut provider, &["api_key"], profile)?;
+    if operation == "default" { set(&mut provider, &["disable"], json!(false))?; }
+    if profile.auth_mode != "preserve" { super::remove(&mut provider, &["oauth"]); }
     let mut models = provider
         .get("models")
         .and_then(Value::as_array)
@@ -152,7 +133,9 @@ pub fn write(
         let index = models
             .iter()
             .position(|v| v.get("id").and_then(Value::as_str) == Some(&model.id));
-        let mut item = index.map(|i| models[i].clone()).unwrap_or_else(|| json!({ "cost_per_1m_in": 0, "cost_per_1m_out": 0, "cost_per_1m_in_cached": 0, "cost_per_1m_out_cached": 0 }));
+        let mut item = index.map(|i| models[i].clone()).unwrap_or_else(|| if modern {
+            json!({ "pricing": { "input": 0, "output": 0 } })
+        } else { json!({ "cost_per_1m_in": 0, "cost_per_1m_out": 0, "cost_per_1m_in_cached": 0, "cost_per_1m_out_cached": 0 }) });
         set(&mut item, &["id"], json!(model.id))?;
         set(
             &mut item,
@@ -169,28 +152,7 @@ pub fn write(
         if let Some(v) = model.max_output_tokens {
             set(&mut item, &["default_max_tokens"], json!(v))?;
         }
-        if let Some(v) = model.supports_images {
-            set(&mut item, &["supports_attachments"], json!(v))?;
-        }
-        if let Some(v) = model.supports_reasoning {
-            set(&mut item, &["can_reason"], json!(v))?;
-        }
-        if !model.reasoning_levels.is_empty() {
-            set(
-                &mut item,
-                &["reasoning_levels"],
-                json!(model.reasoning_levels),
-            )?;
-        }
-        if model.effort.is_empty() || model.effort == "default" {
-            super::remove(&mut item, &["default_reasoning_effort"]);
-        } else {
-            set(
-                &mut item,
-                &["default_reasoning_effort"],
-                json!(model.effort),
-            )?;
-        }
+        super::crush_models::write(&mut item, model, modern)?;
         if let Some(i) = index {
             models[i] = item;
         } else {
@@ -202,6 +164,11 @@ pub fn write(
     let mut extra = Vec::new();
     if operation == "default" {
         let select = |state: &mut Value| -> Result<(), String> {
+            let changed_model = state.pointer("/models/large/provider").and_then(Value::as_str) != Some(&id)
+                || state.pointer("/models/large/model").and_then(Value::as_str) != Some(&profile.model);
+            if changed_model {
+                for key in ["max_tokens", "think", "provider_options"] { super::remove(state, &["models", "large", key]); }
+            }
             set(state, &["models", "large", "provider"], json!(id))?;
             set(state, &["models", "large", "model"], json!(profile.model))?;
             if profile.effort.is_empty() || profile.effort == "default" {

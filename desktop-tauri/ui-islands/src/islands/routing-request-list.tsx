@@ -1,12 +1,12 @@
 import * as React from 'react'
-import { Button, Empty, InputGroup, InputGroupAddon, InputGroupInput, Spinner, StatusDot, Switch, cn } from '@ui'
+import { Button, Empty, InputGroup, InputGroupAddon, InputGroupInput, Spinner, Switch, cn } from '@ui'
 import { t } from '../i18n'
 import { bridge, errorMessage, host, type ReplayRow } from './routing-types'
 import type { FlowDetails, FlowModels, FlowQuery } from './routing-flow-types'
-import { requestClientLabel } from '../../../ui-shared/model-api-key'
-import { isTraceRunning, isTraceSuccess, requestKey, requestModel, tracePhase, traceProvider } from './routing-trace-model'
+import { requestKey, requestModel, requestStateLabel, traceProvider } from './routing-trace-model'
 import { formatDuration, RouteIcon } from './routing-ui'
 import { RoutingSelect } from './routing-select'
+import { RoutingRequestState } from './routing-state-text'
 
 type Props = {
   active: boolean
@@ -20,7 +20,6 @@ type Props = {
   onSearch(search: string): void
 }
 
-/** 请求回放左栏：最近请求列表 + 模型 / 时间 / 范围 / 搜索。 */
 export function RoutingRequestList({ active, query, selectedKey, refreshToken, onOpenRequest,
   onModel, onMinutes, onScope, onSearch }: Props) {
   const [entries, setEntries] = React.useState<ReplayRow[]>([])
@@ -92,21 +91,23 @@ export function RoutingRequestList({ active, query, selectedKey, refreshToken, o
   }, [entries, selectedKey])
 
   const renderRow = (row: ReplayRow) => {
-    const running = isTraceRunning(row), success = isTraceSuccess(row)
-    const status = running ? tracePhase(row.phase) : success ? String(row.status) : row.status ? `${row.status} · ${t('失败')}` : t('失败')
-    const note = (row.attempts || 1) > 1 ? t('切换 {n} 次', { n: (row.attempts || 1) - 1 }) : row.route?.stickyHit ? t('粘滞命中') : t('未切换')
-    return <Button key={requestKey(row)} variant='ghost' aria-pressed={selectedKey === requestKey(row)}
-      title={`${row.id} · ${note}`} className={cn('routing-request-item', selectedKey === requestKey(row) && 'is-selected')} onClick={() => onOpenRequest(row)}>
-      <span className='routing-request-dot'><StatusDot variant={running || success ? 'success' : 'destructive'} pulse={running} /></span>
-      <span className='routing-request-content'>
-        <span className='routing-request-line'><b className='routing-request-model' title={requestModel(row)}>{requestModel(row)}</b><time className='routing-request-time'>{new Date(row.ts).toLocaleTimeString()}</time></span>
-        <span className='routing-request-line'><span className='routing-request-meta'>{requestClientLabel(row, t)} · {row.accountName || traceProvider(row.provider, row.providerLabel)}</span>
-          <span className='routing-request-note'>{status}{!running ? ` · ${formatDuration(row.durationMs)}` : ''}</span></span>
+    const key = requestKey(row)
+    const selected = selectedKey === key
+    const clock = new Date(row.ts).toLocaleTimeString()
+    const status = requestStateLabel(row)
+    const account = [row.provider || row.providerLabel ? traceProvider(row.provider, row.providerLabel) : '', row.accountName || row.accountId].filter(Boolean).join(' · ')
+    return <Button key={key} variant='ghost' aria-pressed={selected}
+      aria-label={[clock, requestModel(row), status, account].filter(Boolean).join(' · ')}
+      title={[requestModel(row), status, account, formatDuration(row.durationMs)].filter(Boolean).join(' · ')}
+      className={cn('routing-request-item', selected && 'is-selected')} onClick={() => onOpenRequest(row)}>
+      <span className='routing-request-line'>
+        <span className='routing-request-model'>{requestModel(row)}</span>
+        <RoutingRequestState row={row} />
       </span>
+      <span className='routing-request-subline'><time>{clock}</time>{account ? ` · ${account}` : ''}</span>
     </Button>
   }
-  const running = entries.filter(isTraceRunning)
-  const completed = entries.filter(row => !isTraceRunning(row))
+
   return <>
     <div className='routing-request-head'><b>{t('最近请求')}</b><span>{matched}</span>{loading ? <Spinner /> : null}</div>
     <div className='routing-request-tools'>
@@ -125,8 +126,7 @@ export function RoutingRequestList({ active, query, selectedKey, refreshToken, o
       </div>
     </div>
     <div className='routing-request-list'>
-      {running.length ? <><div className='routing-request-section'>{t('正在处理')}<span>{running.length}</span></div>{running.map(renderRow)}</> : null}
-      {completed.length ? <><div className='routing-request-section'>{t('最近完成')}<span>{completed.length}</span></div>{completed.map(renderRow)}</> : null}
+      {entries.map(renderRow)}
       {loading && !entries.length ? <Empty><Spinner /></Empty> : null}
       {!loading && !entries.length ? <Empty>{t('没有匹配的请求')}</Empty> : null}
       {error ? <p className='routing-request-error' role='alert'>{error}</p> : null}

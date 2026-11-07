@@ -52,8 +52,8 @@
 //! 同时带着 `model` 与 `reasoning`）—— 这是「A 家的等级不会用到 B 家」的保证：
 //! 只要两处各解析一次映射，两处各自的候选选择规则迟早分叉。等级随后交给**承载
 //! 那家**的 `ProviderAdapter::reasoning_patch` 翻译（每家自己能收什么由它回答），
-//! 注入点不认识任何一家的字段名。哪些情况故意不注入（关闭思考、表外自定义值、
-//! 客户端已显式指定、这家翻译不了）见 `model_rules::reasoning` 的模块头。
+//! 注入点不判断各家的档位取值。绑定优先于客户端参数，只有适配器确认支持后才
+//! 清理冲突字段并提交覆盖；关闭思考或不支持的档位仍保持原请求。
 //!
 //! 处理算法本身不在这里：指纹改写在 `core::sanitize`，模型名判定在
 //! `core::providers::catalog`（本模块只决定「在什么时机、对哪一家、用哪一份」）。
@@ -69,11 +69,15 @@ use crate::server::logging;
 use super::usage::RequestTelemetry;
 
 /// 一次转发的只读输入（打包传入，避免多参数函数在两层循环里各自展开）。
+#[derive(Clone)]
 pub(super) struct ProviderContext<'a> {
     /// 客户端请求体（**原始**：已 stream:true；未做任何内容处理；未注入 system
     /// —— 那是适配器的事）。各 provider 的实际发送体由 [`send_body`] 决定。
     pub body: &'a Value,
     pub routing: super::route_context::RequestRouting,
+    pub vision: Option<Arc<super::vision_compat::RequestVision>>,
+    pub direct_provider: Option<String>,
+    pub direct_model: Option<String>,
     /// 网关确认并改写的压缩请求；入站伪造标记已在模型解析时剥离。
     pub compact_routed: bool,
     /// 客户端是否要流式（决定成功后的形态：SSE 透传 or 聚合）
@@ -351,7 +355,7 @@ pub(super) async fn send_body<'a>(
     }
     // 一次解析出两个属性：该家要收的名字 + 跟着那条映射走的思考等级
     // （同源，见模块头「思考等级绑定为什么也在这一步」）
-    let direct = account.and_then(crate::server::core::routing_groups::candidate_model);
+    let direct = ctx.direct_model.as_deref().or_else(|| account.and_then(crate::server::core::routing_groups::candidate_model));
     let wire = direct.map(|model| crate::server::core::providers::catalog::WireTarget { model: model.to_string(), reasoning: None })
         .unwrap_or_else(|| crate::server::core::providers::catalog::wire_target_for_provider(&requested, provider_id, account));
     ctx.telemetry.note_upstream_model(&wire.model);
@@ -367,12 +371,7 @@ pub(super) async fn send_body<'a>(
         wire.reasoning.as_deref(),
     )
     .await;
-    // 采集「实际随上游请求发出的思考等级」（请求日志模型列的 `(等级)`）。
-    // 注入值优先（映射绑定生效时的最终档位，CatPaw 已在 patch 内归并）；
-    // 没注入时问承载家的 `outbound_reasoning` —— 客户端显式指定的档位走这条
-    // （绑定让位，但字段原样在 body 里随请求上行）。两路都空 = 没有等级随行，
-    // 记 None（空串），显示层不给「没发的等级」预支一个值。
-    // 注入路径已经问过一次适配器，这里再查一次注册表是两次哈希查找，可忽略。
+    // 未注入时读取原有客户端参数；绑定成功时以覆盖后的等级为准。
     let upstream_reasoning = injected.or_else(|| outbound_reasoning_of(provider_id, &body));
     ctx.telemetry.note_upstream_reasoning(upstream_reasoning.clone());
     SendBody { body, wire_model: wire.model, wire_reasoning: upstream_reasoning }
@@ -493,13 +492,12 @@ fn rewrite_model(body: &mut Cow<'_, Value>, requested: &str, wire: &str, provide
 ///      所以根本不问适配器 —— 让每家自己判断会诱使某家实现成「发一个 false」，
 ///      而那正是本项目明令避免的。判据与理由在 `model_rules::reasoning`。
 ///
-/// 其余情形（表外自定义等级、客户端已指定、这家不接）由适配器返回 `Skip`
+/// 其余情形（表外自定义等级、这家不接）由适配器返回 `Skip`
 /// 并给出原因 —— 那些都是**各家自己的知识**，这里不替它判断。
 ///
 /// ── 日志与「不改写」的关系 ──────────────────────────────────
-/// 成功与跳过都记一行 verbose（`Skip` 的那一行尤其重要：用户绑了不生效时，
-/// 详细日志里能直接读到为什么）。`body` 只在 `Set` 分支才 `to_mut()` ——
-/// 跳过的路径零拷贝、零分配，与 `rewrite_model` 的取舍一致。
+/// 成功与跳过都记一行 verbose。适配器只读取清理后的副本；返回 `Set` 时提交
+/// 副本，返回 `Skip` 时原发送体不变。没有绑定时仍沿用零拷贝路径。
 ///
 /// ── 「注入」这个词的边界（读日志时别误解）─────────────────────
 /// 这一行说的是「**把值写进了发出去的请求体**」，不是「上游一定会照它执行」：
@@ -514,8 +512,8 @@ fn rewrite_model(body: &mut Cow<'_, Value>, requested: &str, wire: &str, provide
 /// 同名映射（对外名与上游 id 相同）时两者相同，用户仍能从这一行看出
 /// 「这条等级来自哪条映射」；不同名时它就是「这条映射做了什么改写」的完整记录。
 ///
-/// **不碰客户端自己传的思考字段**：覆盖与否是适配器的判断（它复用本家那个
-/// resolver 读的键名），这里只往它指定的 `field` 上写。
+/// **覆盖会清理客户端的冲突思考参数**，避免别名字段或预算让旧等级重新生效；
+/// 不清理消息中的思考内容，也不修改客户端原始请求。
 ///
 /// 返回值是**注入成功时的档位字符串**（`Set` 分支里写进 body 的那个值；
 /// `value` 不是字符串形态时给 None）：调用方拿它当「上游等级」采集的第一优先
@@ -552,14 +550,12 @@ async fn apply_reasoning(
     let Some(adapter) = crate::server::core::providers::adapter::adapter_by_id(provider_id) else {
         return None;
     };
-    // 走异步伴生方法：内置家直接转调同步实现（零成本），插件家走 RPC。
-    match adapter.reasoning_patch_async(level, wire_model, body.as_ref()).await {
+    // 旧插件会在客户端已指定时跳过绑定；翻译只看清理后的副本，失败不改发送体。
+    let mut patched_body = body.as_ref().clone();
+    crate::server::core::model_rules::clear_reasoning_controls(&mut patched_body);
+    match adapter.reasoning_patch_async(level, wire_model, &patched_body).await {
         crate::server::core::providers::adapter::ReasoningPatch::Set { field, value } => {
-            // 先取可变对象再打日志：请求体不是 JSON 对象时写不进去（正常路径不会
-            // 发生 —— chat 入口已校验过是对象），此时**不能**打「已注入」——
-            // 「日志里说的就是字节里有的」是这一整段可观测性的全部价值，
-            // 一句与字节不符的「已注入」比没有日志更坏。
-            let Some(object) = body.to_mut().as_object_mut() else {
+            let Some(object) = patched_body.as_object_mut() else {
                 logging::verbose(
                     "[Upstream]",
                     &format!(
@@ -580,6 +576,7 @@ async fn apply_reasoning(
             // 某家的开关 / 对象）交给调用方那侧的 outbound_reasoning 再读
             let injected = value.as_str().map(str::to_string);
             object.insert(field.to_string(), value);
+            *body = Cow::Owned(patched_body);
             injected
         }
         crate::server::core::providers::adapter::ReasoningPatch::Skip { reason } => {

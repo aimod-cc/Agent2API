@@ -299,7 +299,7 @@ export function ProxyForm({
               </SelectTrigger>
               <SelectContent>
                 {(pool ?? []).map(item => (
-                  // 已禁用的条目置灰不可选：选它保存后解析必然失败（转发回退直连），
+                  // 已禁用的条目置灰不可选：选它保存后解析必然失败，
                   // 用户只会看到「代理已禁用」。要启用请去「网络代理」页。
                   // 当前值恰好是禁用项时仍正常显示（触发器读的是同一份 label）
                   <SelectItem key={item.id} value={item.id} disabled={item.enabled === false}>

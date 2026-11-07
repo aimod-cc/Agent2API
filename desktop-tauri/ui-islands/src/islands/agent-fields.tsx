@@ -5,6 +5,7 @@ import type { AgentClient, AgentProfile } from './agent-types'
 import type { CatalogModel } from './agent-catalog'
 import { protocolLabel, syncClaudeTiers } from './agent-model'
 import { getAgentStore } from './agent-state'
+import { SearchableModelSelect } from './agent-model-picker'
 
 export function AgentSelect({ value, options, onChange, disabled, label }: {
   value: string; options: Array<{ value: string; label: string }>; onChange: (value: string) => void; disabled?: boolean; label: string
@@ -39,7 +40,7 @@ export function GatewayModelSelect({ label, value, catalog, onChange, disabled, 
   const options = catalog.map(model => ({ value: model.id, label: model.label }))
   if (value && !options.some(option => option.value === value)) options.unshift({ value, label: t('{id}（不在网关目录）', { id: value }) })
   if (allowEmpty) options.unshift({ value: '', label: emptyLabel || t('不写入') })
-  return <AgentSelect label={label} value={value} options={options} disabled={disabled} onChange={onChange} />
+  return <SearchableModelSelect label={label} value={value} options={options} disabled={disabled} onChange={onChange} />
 }
 
 /**

@@ -15,6 +15,7 @@ export type DynamicLoginStart = {
   callbackInput?: 'url' | 'code'
   localOnly?: boolean
   pollIntervalMs?: number
+  browserMode?: 'choice' | 'external' | 'plugin' | 'none'
 }
 
 export type DynamicLoginWait = {

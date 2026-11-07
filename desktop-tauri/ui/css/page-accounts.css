@@ -88,6 +88,10 @@
 
 .batch-bar.active { background: var(--primary-soft); border-bottom-color: var(--primary-bd); }
 
+/* 代理页的批量栏走安静态：这一带只在说「当前选了几条」，本身不是主操作，
+   品牌色底会把目光从表格上抢走（账号页保持上面那条品牌色底不变）。 */
+.page[data-page="proxies"] .batch-bar.active { background: var(--surface-inset); border-bottom-color: var(--hairline); }
+
 .batch-select-all { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; user-select: none; white-space: nowrap; }
 .batch-select-all input { width: 14px; height: 14px; margin: 0; accent-color: var(--primary); cursor: pointer; }
 .batch-select-all span { white-space: nowrap; }

@@ -121,7 +121,9 @@ export function usageText(row?: UsageRow, now = Date.now()): UsageView {
       const view = usageWindowView(window, t, compact)
       const reset = typeof window.resetsAt === 'number' && window.resetsAt > 0
         ? t('重置 {date}', { date: formatStamp(window.resetsAt) }) : ''
-      return [label, view, reset].filter(Boolean).join(' ')
+      const expires = typeof window.expiresAt === 'number' && window.expiresAt > 0 && window.expiresAt <= 8.64e15
+        ? t('到期 {date}', { date: formatStamp(window.expiresAt) }) : ''
+      return [label, view, reset, expires].filter(Boolean).join(' ')
     }).join(' · ')
     return withErrors({ kind: baseKind, text: t('分窗口额度'), detail })
   }

@@ -12,9 +12,8 @@
 //!     重启都不再查，仍等到 10:20；
 //!   - **停机期间只补一次**：休眠 / 关机错过的那一轮在启动后跑一次，不补跑
 //!     期间的每一轮；
-//!   - **失败有冷却**：连续失败按间隔指数退避（上限一天），并且**重启不清零**
-//!     —— 否则「重启即可绕过冷却」等于没有冷却。手动触发要不要越过它由调用点
-//!     逐处选（见 [`ManualBackoff`]）。
+//!   - **失败有冷却**：普通任务按连续失败次数延长等待（上限一天）；更新查询
+//!     只保留自动排期，GitHub 限流由请求层按线路保存，不能让一条线路阻塞整轮。
 //!
 //! ── 硬约束：请求发出**之前**就记一笔尝试 ─────────────────────
 //! `claim` 在返回执行权之前就把 `lastAttemptAt` / `nextRunAt` 写进库。理由：
@@ -74,6 +73,14 @@ const MAX_BACKOFF_MS: i64 = 24 * 60 * 60_000;
 static DB: OnceLock<Option<Db>> = OnceLock::new();
 static SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum FailureBackoff {
+    #[default]
+    Exponential,
+    UpstreamOnly,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TaskState {
@@ -86,6 +93,7 @@ pub struct TaskState {
     pub retry_at: i64,
     pub failures: u32,
     pub value: Option<Value>,
+    failure_backoff: FailureBackoff,
     interval_ms: i64,
     lease_until: i64,
     owner: String,
@@ -111,6 +119,18 @@ impl TaskState {
     /// 算法会把用户往「几小时后再试」引，而实际一秒后就能再点一次。
     pub fn waiting_message_bypassing(&self) -> String {
         self.describe_wait(true)
+    }
+
+    pub(super) fn use_source_backoff(&mut self) -> bool {
+        let changed = self.failure_backoff != FailureBackoff::UpstreamOnly || self.retry_at != 0;
+        self.failure_backoff = FailureBackoff::UpstreamOnly;
+        self.retry_at = 0;
+        let scheduled_at = self.last_run_at.max(self.last_attempt_at)
+            .saturating_add(self.interval_ms.max(0));
+        let next_run_at = self.next_run_at.min(scheduled_at);
+        let changed = changed || self.next_run_at != next_run_at;
+        self.next_run_at = next_run_at;
+        changed
     }
 
     fn describe_wait(&self, backoff_bypassed: bool) -> String {
@@ -348,9 +368,14 @@ impl RunGuard {
             } else {
                 state.last_error = Some(summary);
                 state.failures = state.failures.saturating_add(1);
-                let multiplier = 1_i64 << state.failures.saturating_sub(1).min(10);
-                let delay = interval_ms.max(60_000).saturating_mul(multiplier).min(MAX_BACKOFF_MS);
-                state.retry_at = retry_at.max(now.saturating_add(delay));
+                state.retry_at = match state.failure_backoff {
+                    FailureBackoff::UpstreamOnly => retry_at,
+                    FailureBackoff::Exponential => {
+                        let multiplier = 1_i64 << state.failures.saturating_sub(1).min(10);
+                        let delay = interval_ms.max(60_000).saturating_mul(multiplier).min(MAX_BACKOFF_MS);
+                        retry_at.max(now.saturating_add(delay))
+                    }
+                };
             }
             if let Some(value) = value {
                 state.value = Some(value);

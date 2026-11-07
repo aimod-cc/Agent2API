@@ -130,6 +130,7 @@ function DynamicForm({ provider, label, source, onAdded }: {
     void readDynamicMethods(provider, controller.signal).then(result => {
       if (controller.signal.aborted) return
       const parsed = parseMethods(result, provider)
+      parsed.methods = parsed.methods.filter(method => !method.desktopOnly)
       if (provider === 'deepseek-web') parsed.methods = parsed.methods.filter(method => method.type !== 'oauth')
       setMethods(parsed)
     }).catch(failure => {
@@ -243,7 +244,7 @@ function DynamicForm({ provider, label, source, onAdded }: {
       }
       const manual = started.manualCallback === true || method.manualCallback
       if ((started.provider && started.provider !== provider) || typeof rawUrl !== 'string'
-        || (!rawUrl && !(started.localOnly === true || method.localOnly || manual))) {
+        || (!rawUrl && !(started.localOnly === true || method.localOnly || manual || (started.pollIntervalMs || 0) > 0))) {
         await cancelDynamicLogin(state)
         throw new Error(t('登录授权地址无效，已取消本次等待。'))
       }

@@ -27,10 +27,10 @@ function saveUsageRow(row: UsageQueryRow): void {
   } : row.usage ?? undefined)
 }
 
-/** 查询中只改变显示状态，上次成功的余额和时间仍保存在查询记录中。 */
+/** 开始重试不代表查询成功，已有失败提示和历史读数必须保留。 */
 export function putUsage(id: string, entry: UsageEntry, at: number): void {
   if (entry === null || entry === undefined) {
-    usageMap.set(id, entry)
+    if (!usageFailureOf(usageMap.get(id))) usageMap.set(id, entry)
     return
   }
   const failure = usageFailureOf(entry)
@@ -58,14 +58,9 @@ export function putUsageRow(value: Record<string, unknown>, at: number): boolean
   return true
 }
 
-/** 凭证或账号资料变化后，旧失败不再成立；历史读数不随之作废。 */
 export function usageEntryOf(account: AccountRecord): UsageEntry {
   if (account.isGuest === true) return undefined
-  const entry = usageMap.get(account.id)
-  if (!usageFailureOf(entry)) return entry
-  const row = queryRows.get(account.id)
-  const changedAt = Math.max(Number(account.addedAt) || 0, Number(account.updatedAt) || 0)
-  return (row?.at || 0) >= changedAt ? entry : row?.lastUsage ?? undefined
+  return usageMap.get(account.id)
 }
 
 export function usageUpdatedAtOf(account: AccountRecord): number {

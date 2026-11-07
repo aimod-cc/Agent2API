@@ -18,7 +18,8 @@
      取下一档 —— --radius-md(10) − 2 = --radius-sm(8)，与容器 10 共用同一个圆心 */
   [data-slot='segmented-thumb'] {
     border-radius: var(--radius-sm);
-    background: var(--ui-primary-soft);
+    background: var(--ui-card);
+    box-shadow: var(--ui-shadow-1);
   }
 
   /* 指示器与条目同宽同高（不内缩，见 lib/selection-indicator.ts），所以取同一档

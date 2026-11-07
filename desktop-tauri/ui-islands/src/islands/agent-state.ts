@@ -125,7 +125,9 @@ export async function applyProfile(client: AgentClient, profile: AgentProfile, o
   const result = await mutation(client.id, () => call({ clientId: client.id, profileId: profile.id, operation, token: preview.token,
     ...(direct ? { profile, nativeRevision: client.nativeRevision } : {}) }))
   if (!result.applied?.verified) throw new Error(t('客户端配置写入后未通过校验'))
-  toast(result.applied.changed ? t('配置已应用并读回校验；请重开客户端或会话') : t('客户端配置已经一致，无需写入'))
+  toast(result.applied.changed ? client.id === 'dsh'
+    ? t('配置文件已写入并校验；尚未验证 DSH 是否加载，请在所选客户端新建会话确认。')
+    : t('配置已应用并读回校验；请重开客户端或会话') : t('客户端配置已经一致，无需写入'))
 }
 
 export async function restoreClient(client: AgentClient, operation: AgentOperation, preview: AgentPreview): Promise<void> {

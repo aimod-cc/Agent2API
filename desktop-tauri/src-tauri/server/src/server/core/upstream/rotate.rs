@@ -165,6 +165,15 @@ fn select_target_account_sync(
     request_routing: &super::route_context::RequestRouting,
 ) -> Result<RouteTarget, GatewayError> {
     let accounts = scoped_accounts(service, providers, keys.request_model(), pinned, Some(request_routing));
+    if accounts.is_empty() && request_routing.strict_vision {
+        return Err(GatewayError::with_status(503, "当前权限和路由范围内没有可用的图片处理账号；未回退默认登录态")
+            .with_code("vision_target_unavailable"));
+    }
+    if accounts.is_empty() && request_routing.requires_account() {
+        return Err(GatewayError::with_status(503,
+            "指定生图账号不可用、处于冷却或已退出当前路由；未切换其他账号")
+            .with_code("image_account_unavailable"));
+    }
     if accounts.is_empty() && request_routing.group.is_some() {
         let reasons: Vec<_> = request_routing.group_projection.blocked.iter().take(3)
             .filter_map(|entry| entry.get("reason").and_then(Value::as_str)).collect();
@@ -348,6 +357,15 @@ fn select_target_account_sync(
         ));
     }
 
+    if request_routing.strict_vision {
+        return Err(GatewayError::with_status(503, "图片处理候选账号受冷却、并发或额度限制；未强行发送或扩大路由范围")
+            .with_code("vision_target_unavailable"));
+    }
+    if request_routing.account_id().is_some() {
+        return Err(GatewayError::with_status(429,
+            "固定生图账号受冷却、并发或额度限制，或已无可用凭证；未自动换号")
+            .with_code("image_account_unavailable"));
+    }
     // ── 第二级兜底（并发感知）──────────────────────────────────
     // 启用中的账号都在限额冷却期内 / 已达并发上限时，仍挑一个试一次：
     //   ① 先在「启用 + 未尝试 + 未达并发上限」的账号里挑**恢复最早**的
@@ -413,6 +431,11 @@ fn select_target_account_sync(
                 ));
             }
         }
+    }
+    if request_routing.requires_account() {
+        return Err(GatewayError::with_status(503,
+            "当前生图账号均无可用凭证；未使用默认登录态或其他账号")
+            .with_code("image_account_unavailable"));
     }
     if pinned.is_some() {
         return Err(GatewayError::with_status(401,
@@ -495,7 +518,7 @@ fn scoped_accounts(
     request_routing: Option<&super::route_context::RequestRouting>,
 ) -> Vec<Value> {
     let accounts = accounts_in_providers(service, providers, pinned);
-    let accounts = if pinned.is_some() { accounts } else if let Some(request_routing) = request_routing {
+    let accounts = if pinned.is_some() && !request_routing.is_some_and(|routing| routing.strict_vision) { accounts } else if let Some(request_routing) = request_routing {
         request_routing.accounts(accounts)
     } else {
         crate::server::core::routing_scope::apply_accounts(&accounts, model)

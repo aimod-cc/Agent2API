@@ -156,6 +156,7 @@ import { DatabaseBackupDialogs, DatabaseBackupPanel } from './settings-database-
 import { SanitizePanel } from './settings-sanitize'
 import { ClientIdentificationPanel } from '../../../ui-shared/client-identification-panel'
 import { clientIdentificationApi } from './settings-client-identification'
+import { VisionCompatibilitySettings } from './settings-vision-compat'
 // 侧边栏菜单面板（设置 → 显示）：显隐 / 顺序 / 分组。布局模型在
 // ui/sidebar-layout.js（经典脚本，主侧边栏渲染与这里共用同一份），见该文件的模块头
 import { SidebarPane } from './sidebar-pane'
@@ -2476,6 +2477,7 @@ function SettingsPage() {
           <DisplayPane />
         </div>
         <div className={paneClass('gateway')} data-cat='gateway'>
+          <VisionCompatibilitySettings active={snap.category === 'gateway'} />
           <ClientIdentificationPanel api={clientIdentificationApi} t={t} active={snap.category === 'gateway'} />
           <GatewayPane snap={snap} panels={adminPanels} />
         </div>
@@ -2572,7 +2574,7 @@ declare global {
      * update-panel.tsx:972 的「去更新」showCategory('about')。
      */
     wbSettingsPanel?: {
-      load(): Promise<void>
+      load: typeof load
       /** 铺启动与托盘设置（旧实现叫 renderSettings，对外名字是 render） */
       render(data?: unknown): void
       renderRetention(data?: unknown): void

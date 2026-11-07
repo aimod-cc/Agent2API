@@ -664,8 +664,12 @@ fn table_row_counts(conn: &Connection, skip: &[&str]) -> Vec<Value> {
         "account_usage_records",
         "account_limiter_events",
         "checkin_records",
+        "maintenance_runs",
+        "maintenance_items",
         "assistant_sessions",
         "assistant_images",
+        "tool_image_jobs",
+        "tool_image_files",
     ];
     known
         .iter()

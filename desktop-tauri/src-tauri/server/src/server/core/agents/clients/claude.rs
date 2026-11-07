@@ -42,6 +42,10 @@ pub fn read(value: &Value) -> Result<Vec<Profile>, String> {
         haiku: string(&env, "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
         subagent: string(&env, "CLAUDE_CODE_SUBAGENT_MODEL"),
     };
+    profile.models = super::claude_models::read(value);
+    if !profile.model.is_empty() && !profile.models.iter().any(|model| model.id == profile.model) {
+        profile.models.push(super::super::Model { id: profile.model.clone(), name: profile.model.clone(), ..Default::default() });
+    }
     let mut settings = json!({ "env": {} });
     for key in MODEL_KEYS.iter().copied().chain([
         "ANTHROPIC_BASE_URL",
@@ -53,13 +57,13 @@ pub fn read(value: &Value) -> Result<Vec<Profile>, String> {
             set(&mut settings, &["env", key], item.clone())?;
         }
     }
-    for key in ["model", "effortLevel"] {
+    for key in ["model", "effortLevel", "modelPicker", "modelSettings"] {
         if let Some(item) = value.get(key) {
             set(&mut settings, &[key], item.clone())?;
         }
     }
     if settings.get("env").and_then(Value::as_object).is_some_and(|env| env.is_empty())
-        && settings.get("model").is_none() && settings.get("effortLevel").is_none()
+        && settings.get("model").is_none() && settings.get("effortLevel").is_none() && profile.models.is_empty()
     { return Ok(Vec::new()); }
     profile.native.settings = settings;
     Ok(vec![profile])
@@ -118,7 +122,8 @@ pub fn write(
         ),
     ] {
         if model.is_empty() {
-            remove(value, &["env", key]);
+            if key == "ANTHROPIC_MODEL" { remove(value, &["env", key]); }
+            continue;
         } else {
             set(value, &["env", key], json!(model))?;
         }
@@ -132,20 +137,31 @@ pub fn write(
     } else {
         set(value, &["model"], json!(profile.model))?;
     }
-    if profile.effort.is_empty() || profile.effort == "default" {
+    let per_model_effort = profile.models.iter().any(|model| !model.effort.is_empty() && model.effort != "default");
+    if per_model_effort || profile.effort.is_empty() || profile.effort == "default" {
         remove(value, &["env", "CLAUDE_CODE_EFFORT_LEVEL"]);
         remove(value, &["effortLevel"]);
+        if per_model_effort && !profile.effort.is_empty() {
+            warnings.push("已改用逐模型思考等级，不再写入覆盖全部模型的旧全局档位。".into());
+        }
     } else {
         set(
             value,
             &["env", "CLAUDE_CODE_EFFORT_LEVEL"],
             json!(profile.effort),
         )?;
-        if profile.effort == "auto" {
+        if matches!(profile.effort.as_str(), "auto" | "max") {
             remove(value, &["effortLevel"]);
         } else {
             set(value, &["effortLevel"], json!(profile.effort))?;
         }
+    }
+    super::claude_models::write(value, profile)?;
+    if !profile.models.is_empty() {
+        warnings.push("Claude Code 多模型菜单需要 2.1.242 或更新版本，逐模型思考设置需要 2.1.251 或更新版本；上下文和输入能力仍由客户端识别，不写入虚假的逐模型能力字段。".into());
+    }
+    if !profile.models.is_empty() && value.get("availableModels").is_some() {
+        warnings.push("Claude Code 已有模型允许名单，可能隐藏本次选择的模型；本次保留原有名单，不会放宽客户端限制。".into());
     }
     warnings.push("保留权限、Hooks、MCP 等设置；模型别名映射只修改填写的原生模型字段。".into());
     Ok(())

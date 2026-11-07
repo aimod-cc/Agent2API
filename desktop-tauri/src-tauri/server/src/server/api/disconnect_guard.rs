@@ -9,10 +9,9 @@
 //! 停在「进行中」（只能等 1 小时的僵尸清扫，期间列表里像一条永远在跑的请求）。
 //! 这正是用户实测到的「一排不终止的进行中」。
 //!
-//! 本守卫把「handler 被丢弃」变成**第三条收尾路径**：Drop 必然执行，就地按
-//! 「客户端在响应完成前断开连接」补一个 408 终态
-//! （`RequestStats::finalize_interrupted`，只 UPDATE 不 INSERT，没有进行中行
-//! 时什么都不做）。
+//! 本守卫把「handler 被丢弃」变成**第三条收尾路径**：Drop 读取最后的实时快照，
+//! 与 408 终态在同一事务内保存，不依赖限频队列是否已经写入。
+//! 没有进行中行时不新建记录，也不覆盖已经完成的请求。
 //!
 //! ── 三条出口（正常路径必须显式选一条）───────────────────────
 //!   - [`DisconnectGuard::complete`]：记账已经完成（非流式 / 转发失败）→
@@ -28,15 +27,14 @@
 //! handler 被取消是唯一可观察的信号，而 Drop 是它在 Rust 里的落点。
 //! 守卫本身是同步的（只写库），在 Drop 里跑没有 async 的禁忌。
 //!
-//! ── 为什么独立成文件 ────────────────────────────────────────
-//! `pipeline.rs` 已近 1000 行（模型解析 / 记账 / 响应构造 / 调试落盘四件事），
-//! 而本守卫与那四件事零耦合：它只认识「id + RequestStats + 取消令牌注册表」，
-//! 三个入口（chat / protocol ×2）各自创建一个实例，生命周期与 handler 绑定。
+//! 守卫与 handler 同寿命，实时快照只在异常收尾时读取；流式交接后不再记账。
 
 use std::sync::Arc;
 
-use crate::server::core::upstream::cancellation;
+use crate::server::core::upstream::{cancellation, usage::RequestTelemetry};
 use crate::server::request_stats::RequestStats;
+
+use super::pipeline;
 
 /// 客户端在**响应产生之前**放弃连接时的错误摘要（本守卫写入）。
 ///
@@ -50,14 +48,16 @@ pub struct DisconnectGuard {
     stats: Arc<RequestStats>,
     /// 本请求的关联 id（与进行中行、取消令牌注册表同一个键）
     id: String,
+    telemetry: Arc<RequestTelemetry>,
+    started_at: i64,
     /// 是否仍处于「转发还没产生响应」的阶段（armed）
     armed: bool,
 }
 
 impl DisconnectGuard {
     /// 在 `record_started` 之后创建（此刻进行中行已经在库里）。
-    pub fn new(stats: Arc<RequestStats>, id: String) -> Self {
-        Self { stats, id, armed: true }
+    pub fn new(stats: Arc<RequestStats>, telemetry: Arc<RequestTelemetry>, started_at: i64) -> Self {
+        Self { stats, id: telemetry.id(), telemetry, started_at, armed: true }
     }
 
     /// 记账已完成 —— 解除兜底并注销取消令牌（请求不再在途）。
@@ -81,9 +81,26 @@ impl Drop for DisconnectGuard {
         // handoff 之后（armed = false）这里**什么都不做** —— 流的生命周期
         // 比 handler 长，注销与收尾都归 `RecordingStream`。
         if self.armed {
-            let stats = self.stats.clone();
-            let id = self.id.clone();
-            crate::server::core::blocking::in_place(move || stats.finalize_interrupted(&id, DISCONNECTED));
+            let mut snapshot = self.telemetry.snapshot();
+            let error = snapshot.error.clone().unwrap_or_else(|| {
+                if self.telemetry.cancel_token().is_some_and(|token| token.is_cancelled()) {
+                    cancellation::MANUAL_TERMINATED.to_string()
+                } else {
+                    DISCONNECTED.to_string()
+                }
+            });
+            let error = if self.telemetry.capture().is_some() || crate::server::core::debug_traffic::enabled() {
+                error
+            } else {
+                pipeline::truncate_chars(&error, pipeline::ERROR_SUMMARY_CHARS)
+            };
+            let finished_at = crate::server::logging::now_ms();
+            snapshot.finish_trace(finished_at, Some(&error));
+            let progress = pipeline::running_progress(&snapshot, self.started_at);
+            // 必须与终态同事务保存，不能等限频队列再写回。
+            crate::server::core::blocking::in_place(|| {
+                self.stats.finalize_interrupted(&self.id, &error, &progress, finished_at);
+            });
             cancellation::unregister(&self.id);
         }
     }

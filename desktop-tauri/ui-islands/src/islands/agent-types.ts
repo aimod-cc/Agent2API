@@ -7,6 +7,7 @@ export type AgentModel = {
   maxOutputTokens?: number | null
   supportsTools?: boolean | null
   supportsImages?: boolean | null
+  supportsVideo?: boolean | null
   supportsReasoning?: boolean | null
   reasoningLevels: string[]
   effort: string
@@ -52,6 +53,8 @@ export type AgentClient = {
   configPath: string
   resolvedPath: string
   pathOverride: string
+  configTargets?: Array<{ path: string; label: string; profile: string; version: string; layout: 'legacy' | 'profile' }>
+  configLayout?: 'legacy' | 'profile' | ''
   format: string
   configMode: 'single' | 'providers' | 'models' | 'readonly'
   protocol: string
@@ -63,6 +66,7 @@ export type AgentClient = {
   version: string
   writable: boolean
   supportsModels: boolean
+  modelFields?: Array<keyof AgentModel>
   supportsEffort: boolean
   supportsDefault: boolean
   supportsToggle: boolean
@@ -72,6 +76,7 @@ export type AgentClient = {
   docsUrl: string
   needsRestart: boolean
   profiles: AgentProfile[]
+  quickProfiles?: AgentProfile[]
   live: AgentProfile[]
   readError: string | null
   storeError: string | null

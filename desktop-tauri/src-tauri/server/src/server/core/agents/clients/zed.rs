@@ -51,6 +51,7 @@ pub fn read(value: &Value) -> Result<Vec<Profile>, String> {
                             supports_images: entry
                                 .pointer("/capabilities/images")
                                 .and_then(Value::as_bool),
+                            supports_video: None,
                             supports_reasoning: entry.get("reasoning_effort").map(|_| true),
                             effort: string(entry, "reasoning_effort"),
                             reasoning_levels: entry
@@ -101,6 +102,10 @@ pub fn write(
         .unwrap_or_default();
     for model in &profile.models {
         let source_protocol = profile.native.settings.get("protocol").and_then(Value::as_str).unwrap_or(&profile.protocol);
+        if source_protocol != profile.protocol && models.iter().any(|value| value.get("name").and_then(Value::as_str) == Some(&model.id)
+            && (value.pointer("/capabilities/chat_completions").and_then(Value::as_bool) == Some(false)) == (profile.protocol == "responses")) {
+            return Err(format!("Zed 目标协议已有模型 {}，拒绝覆盖", model.id));
+        }
         let index = models.iter().position(|value| value.get("name").and_then(Value::as_str) == Some(&model.id)
             && (value.pointer("/capabilities/chat_completions").and_then(Value::as_bool) == Some(false)) == (source_protocol == "responses"));
         let mut item = index

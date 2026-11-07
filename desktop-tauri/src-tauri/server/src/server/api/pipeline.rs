@@ -27,17 +27,14 @@ use serde_json::Value;
 
 use crate::server::config;
 use crate::server::core::key_scope::{self, KeyScope};
-use crate::server::core::limiter;
 use crate::server::core::providers::catalog::{
     advertised_manifest_contains, default_model_catalog, default_model_usable,
     has_available_providers, model_blocked_everywhere, suggest_advertised,
 };
-use crate::server::core::upstream::usage::{self, RequestTelemetry, TelemetrySnapshot};
+use crate::server::core::upstream::usage::{RequestTelemetry, TelemetrySnapshot};
 use crate::server::errors::GatewayError;
 use crate::server::logging;
-use crate::server::request_stats::{
-    AttemptDetail, NewRequestEntry, RequestStats, RetryEvent, RunningProgress, SensitiveHit,
-};
+use crate::server::request_stats::{RequestStats, RunningProgress};
 use crate::server::ServerState;
 
 mod raw;
@@ -50,7 +47,7 @@ const DEBUG_REQUEST_FILE: &str = "last-request.json";
 const DEBUG_META_FILE: &str = "last-request.meta.txt";
 
 /// 非调试请求的错误摘要上限；调试请求保留完整错误。
-const ERROR_SUMMARY_CHARS: usize = 200;
+pub(super) const ERROR_SUMMARY_CHARS: usize = 200;
 
 /// 客户端中断 / 服务退出导致响应流被提前丢弃时的错误摘要。
 ///
@@ -473,230 +470,36 @@ pub fn record_early_failure(
     record_entry(&context, Some(error.message.clone()));
 }
 
-/// 在途回写的接线：把 telemetry 的每一次状态变化写进那条「进行中」行。
-///
-/// ── 它解决什么 ──────────────────────────────────────────────
-/// `record_started` 插的进行中行只有 id / ts / 模型名 —— 选路与发送体定稿都发生
-/// 在它之后，所以整段转发期间列表里那一行看不出「谁在承载、转发的是哪个模型、
-/// 已经试了几轮」。而这几样在请求真正发出去之前就已经确定，只是此前没有回写的
-/// 落点（`requests` 表上原本只有收尾与僵尸行清理两条写路径）。
-///
-/// ── 为什么是闭包而不是让 telemetry 直接持有 `Arc<RequestStats>` ──
-/// `core::upstream` 不认识 `request_stats`（依赖方向见 `core/mod.rs` 的约定），
-/// 而「快照 → 落库形态」的转换本来就在本模块（`record_entry` 收尾时做的是同一件
-/// 事，两份转换共用下面两个 `stored_*` 函数）。接线在这里，core 只负责在状态
-/// 变化时调一下。
-///
-/// `started_at` 由调用方带进来：首响在 telemetry 里存的是**绝对时刻**，而明细里
-/// 那一列是相对请求开始的毫秒数（口径见 `RequestEntry::first_response_ms`）——
-/// 减法只能在这里做，telemetry 不知道请求什么时候开始的。
+/// 状态变化只提交内存快照，后台每秒最多回写一次；终态不经过限频队列。
 pub fn live_row_sink(
     stats: Arc<RequestStats>,
     id: String,
     started_at: i64,
 ) -> impl Fn(&TelemetrySnapshot) + Send + Sync {
-    move |snapshot| {
-        stats.update_running(
-            &id,
-            &RunningProgress {
-                provider: snapshot.provider.clone().unwrap_or_default(),
-                account_id: snapshot.account_id.clone(),
-                account_name: snapshot.account_name.clone(),
-                upstream_model: snapshot.upstream_model.clone(),
-                upstream_reasoning: snapshot.upstream_reasoning.clone(),
-                // 与收尾同口径：一次都没发出去（0）按 1 次算，理由见
-                // `TelemetrySnapshot::attempts` 的说明
-                attempts: snapshot.attempts.max(1),
-                first_response_ms: snapshot.first_response_at.map(|at| (at - started_at).max(0)),
-                // 阶段与阶段起点：起点为 None 只可能是「还停在初始阶段（连接中）、
-                // 一次都没切换过」——那个阶段的起点就是**请求开始时刻**（下面这个
-                // started_at，与插入在途行时写进 phase_started_at 的值同源），
-                // 所以用 started_at 兜底。不兜的话这一列会写进 NULL，
-                // 而状态列的第二行按它算「连接中已持续多久」会算出个负数或
-                // 干脆没有 —— 两种都不该出现在「已受理但还没发出去」的请求上
-                phase: snapshot.phase.as_str().to_string(),
-                phase_started_at: snapshot.phase_started_at.or(Some(started_at)),
-                attempt_details: stored_attempt_details(&snapshot.attempts_detail),
-                route: snapshot.route.clone(),
-                sensitive_hits: stored_sensitive_hits(&snapshot.sensitive_hits),
-            },
-        );
+    let live = super::live_progress::sink(stats, id);
+    move |snapshot| live(running_progress(snapshot, started_at))
+}
+
+pub(super) fn running_progress(snapshot: &TelemetrySnapshot, started_at: i64) -> RunningProgress {
+    RunningProgress {
+        provider: snapshot.provider.clone().unwrap_or_default(),
+        account_id: snapshot.account_id.clone(),
+        account_name: snapshot.account_name.clone(),
+        upstream_model: snapshot.upstream_model.clone(),
+        upstream_reasoning: snapshot.upstream_reasoning.clone(),
+        attempts: snapshot.attempts.max(1),
+        first_response_ms: snapshot.first_response_at.map(|at| (at - started_at).max(0)),
+        phase: snapshot.phase.as_str().to_string(),
+        // 初始连接阶段没有单独时间戳，沿用请求开始时刻。
+        phase_started_at: snapshot.phase_started_at.or(Some(started_at)),
+        attempt_details: stored_attempt_details(&snapshot.attempts_detail),
+        route: snapshot.route.clone(),
+        sensitive_hits: stored_sensitive_hits(&snapshot.sensitive_hits),
     }
 }
 
-/// telemetry 的尝试明细 → 落库形态。
-///
-/// 收尾记账（`record_entry`）与在途回写共用这一份：两处各写一遍转换，迟早会因为
-/// 「只改了一处」让进行中行与收尾行显示成两种样子。
-fn stored_attempt_details(list: &[usage::AttemptDetail]) -> Vec<AttemptDetail> {
-    list.iter()
-        .map(|item| AttemptDetail {
-            provider: item.provider.clone(),
-            account: item.account.clone(),
-            account_id: item.account_id.clone(),
-            candidate_id: item.candidate_id.clone(),
-            member_id: item.member_id.clone(),
-            model: item.model.clone(),
-            reasoning: item.reasoning.clone(),
-            reason: item.reason.clone(),
-            sticky_hit: item.sticky_hit,
-            started_at: item.started_at,
-            response_at: item.response_at,
-            finished_at: item.finished_at,
-            status: item.status,
-            error: item.error.clone(),
-            retries: item
-                .retries
-                .iter()
-                .map(|retry| RetryEvent {
-                    reason: retry.reason.clone(),
-                    status: retry.status,
-                    delay_ms: retry.delay_ms,
-                })
-                .collect(),
-            notice: item.notice.clone(),
-            // 体字节数原样透传（None = 这一轮没发出去；采集侧的理由见 usage 的字段说明）
-            body_bytes: item.body_bytes,
-        })
-        .collect()
-}
-
-/// telemetry 的脱敏命中 → 落库形态（与 [`stored_attempt_details`] 同一理由）
-fn stored_sensitive_hits(list: &[usage::SensitiveHit]) -> Vec<SensitiveHit> {
-    list.iter()
-        .map(|hit| SensitiveHit {
-            word: hit.word.clone(),
-            count: hit.count,
-        })
-        .collect()
-}
-
-/// 记一条请求日志。
-///
-/// ── 记账为什么绝不能影响请求 ─────────────────────────────────
-/// `RequestStats::record` 本身不返回 `Result`：内部对写盘失败只打
-/// `[Stats] 统计写入失败`，锁中毒走 `poisoned.into_inner()` 继续用，
-/// 序列化失败跳过该条 —— 存储层已把「统计失败」全部收敛成「少记一条」，
-/// 没有任何 unwind 路径，所以这里不需要 `catch_unwind`。
-///
-/// ── 字段口径 ────────────────────────────────────────────────
-///   ts          请求**开始**时刻（不是记账时刻）：趋势图要按「用户什么时候
-///               发的请求」归日
-///   durationMs  收尾 - 开始（含排队、选路、上游等待、流下发）
-///   firstResponseMs  首帧到达 - 开始；全程没有帧到达时为 null
-///   attempts    旁路槽里累计的上游请求数；一次都没发出去时回落 1
-///   error       旁路槽里的原因优先（更接近根因），否则用调用方给的兜底文案
-pub fn record_entry(context: &RecordContext, fallback_error: Option<String>) {
-    let mut snapshot = context.telemetry.snapshot();
-    // 收尾时刻只取一次：明细里的 durationMs 与日志里打的那一个是同一个值
-    let finished_at = logging::now_ms();
-    let duration_ms = finished_at - context.started_at;
-    let first_response_ms = snapshot
-        .first_response_at
-        .map(|at| (at - context.started_at).max(0));
-    let error = snapshot.error.clone().or(fallback_error).map(|text| {
-        if context.raw_request.is_some() || context.raw_response.is_some()
-            || context.telemetry.capture().is_some() || crate::server::core::debug_traffic::enabled()
-        {
-            text
-        } else {
-            truncate_chars(&text, ERROR_SUMMARY_CHARS)
-        }
-    });
-    snapshot.finish_trace(finished_at, error.as_deref());
-    let attempts = snapshot.attempts.max(1);
-    let mut entry = NewRequestEntry::new(context.model.clone(), context.status);
-    entry.ts = Some(context.started_at);
-    // 关联 id：调试模式的原始报文按它取（见 `core::debug_traffic`）。
-    // 空串 = 该请求没生成 id（转发前就失败的路径），前端不显示详情入口。
-    // clone 而不是 move：snapshot.id 下面给 store_raw 复用（同一关联键）
-    entry.id = snapshot.id.clone();
-    entry.duration_ms = duration_ms;
-    entry.first_response_ms = first_response_ms;
-    entry.attempts = attempts;
-    // 存储契约里这两个字段是 String（不是 Option），空串就是「没有账号」的表示
-    entry.account_id = snapshot.account_id;
-    entry.account_name = snapshot.account_name;
-    entry.provider = snapshot.provider;
-    // 下游名 / 上游名分记：下游名是客户端原值（context 带入），上游名是
-    // 实际发出的名字（telemetry 采集，空串 = 一次都没发出去）。两者都空时
-    // 前端回落显示 model 一行 —— 旧数据没有这两个键，同一口径。
-    entry.client_model = context.client_model.clone();
-    entry.upstream_model = snapshot.upstream_model;
-    // 等级双端透传（与上面两行同源）：下游等级来自入口采集（context），
-    // 上游等级来自发送体定稿处的采集（telemetry 快照）
-    entry.client_reasoning = context.client_reasoning.clone();
-    entry.upstream_reasoning = snapshot.upstream_reasoning;
-    // 两个明细字段（本次改造）：都是「有采集才有值」的旁路数据，采集点在
-    // 转发链路上（`core::upstream::usage` 槽），这里只负责搬运。
-    //   · attemptDetails：每次上游尝试的（provider / 账号 / 状态码 / 错误摘要
-    //     / 本轮内部的退避重试 / 提示），请求日志「重试」列的弹层显示它；
-    //     转发前就失败的请求没有它（空表）。
-    //   · sensitiveHits：本次命中的敏感词与次数，同一列的紫色标签显示它。
-    // 存储层的两个类型与采集侧**各自定义、当前同形**（见 `RequestEntry` 的
-    // 注释），所以这里逐字段转一次 —— 不做 `From` impl 是为了让两处结构能
-    // 各自演化（把「转发期形态」与「落库形态」绑成一个类型，将来改一处
-    // 就得同时改另一处，而它们的变化理由本来不同）。
-    // 转换走 `stored_*` 两个函数：在途回写（`live_row_sink`）用的是同一份，
-    // 两处各写一遍迟早会让进行中行与收尾行显示成两种样子。
-    entry.attempt_details = stored_attempt_details(&snapshot.attempts_detail);
-    entry.sensitive_hits = stored_sensitive_hits(&snapshot.sensitive_hits);
-    // 选路决策快照：有采集才落（没走到选路的请求是 Null，前端不渲染那一段）
-    entry.route = snapshot.route.unwrap_or(Value::Null);
-    // 来源标记：入口带进来的事实，存储层据此排除报表聚合（见该字段的说明）
-    entry.is_test = context.is_test;
-    // 来源客户端：入口解析请求头判好的类型（`core::client::classify`），
-    // 存储层只搬运不重判 —— UA 规则只有一份
-    entry.source = context.source.clone();
-    entry.error = error;
-    entry.prompt_tokens = snapshot.prompt_tokens;
-    entry.completion_tokens = snapshot.completion_tokens;
-    entry.total_tokens = snapshot.total_tokens;
-    entry.cache_read_tokens = snapshot.cache_read_tokens;
-    // Token 限制器的增量记账（先取快照再 record：entry 的字段已被 move）。
-    // 请求收尾立刻把本次消耗加进当前窗口，选路的 Token 跳过判定不必等下一轮
-    // 10 秒刷新。account_id 为空 = 没走到任何账号（转发前就失败的路径），
-    // tokens ≤ 0 在记账函数里也会拦 —— 失败请求通常没有用量，加了也是零。
-    let limited_account = entry.account_id.clone();
-    let limited_tokens = entry.total_tokens;
-    let limited_model = if entry.upstream_model.is_empty() { entry.model.clone() } else { entry.upstream_model.clone() };
-    let limited_request = entry.id.clone();
-    let sent = snapshot.attempts > 0;
-    context.stats.record(entry);
-    if sent {
-        limiter::counter::note(&limited_account, &limited_request, &limited_model,
-            &snapshot.quota_channel, limited_tokens, context.started_at);
-    }
-    if !limited_account.is_empty() {
-        limiter::note_request_tokens(&limited_account, limited_tokens, finished_at);
-    }
-    // 原始正文落库（request_raw 表）：与明细同 id、同开始时刻。独立于 record
-    // 的一次写入（大字段不进记账热路径，理由见 `RequestStats::store_raw`）；
-    // 两侧的采集在入口已按调试模式 gate（见 `capture_raw_body` / `capture_raw_json`
-    // —— 这里的两侧通常都是 None，store_raw 提前返回不写行）；id 为空 / 两侧
-    // 全空也在 store_raw 内部拦下，失败只打控制台 —— 正文是排障辅助，
-    // 丢一侧不能影响已经收尾的请求
-    context.stats.store_raw(
-        &snapshot.id,
-        context.started_at,
-        context.raw_request.as_deref(),
-        context.raw_response.as_deref(),
-    );
-    logging::verbose(
-        "[Stats]",
-        &format!(
-            "记一条请求: model={} status={} {duration_ms}ms 首响={} attempts={attempts} tokens={}+{}（缓存 {}）",
-            if context.model.is_empty() { "(未指定)" } else { &context.model },
-            context.status,
-            first_response_ms
-                .map(|value| format!("{value}ms"))
-                .unwrap_or_else(|| "-".to_string()),
-            snapshot.prompt_tokens,
-            snapshot.completion_tokens,
-            snapshot.cache_read_tokens,
-        ),
-    );
-}
+pub use super::record_persist::record_entry;
+pub(super) use super::record_persist::{stored_attempt_details, stored_sensitive_hits};
 
 /// 按字符截断（超出部分用 `…` 收尾）。
 pub fn truncate_chars(text: &str, limit: usize) -> String {
@@ -1048,261 +851,4 @@ pub fn sha256_hex(body: &[u8]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    //! 收尾帧特征表。这三张表决定「客户端提前挂断」算不算一次成功收尾，
-    //! 而判错方向的代价是不对称的：漏认 ⇒ 成功请求被记成中断、连带被
-    //! 「失败清零」抹掉用量（生产上 1176 行就是这个形状）；多认 ⇒ 把真实
-    //! 中断洗成成功（报表再也看不出断流）。所以这一组用例两头都要钉住。
-
-    use super::{terminal, RecordContext, RecordingStream, TerminalFrames, TerminalScan};
-    use crate::server::request_stats::Retention;
-
-    /// 生产实测到的收尾帧写法（CodeArts 走字节透传，上游发什么就下发什么）：
-    /// 冒号后面**没有**那个空格。取自 `request_raw.response_body` 的真实尾巴。
-    const UNSPACED_DONE: &str = "data:[DONE]\n\n";
-    /// 我们自己重写的那一帧（`ReasoningCoalescer` 与各转换器的收尾）带空格。
-    const SPACED_DONE: &str = "data: [DONE]\n\n";
-    /// 改前的整张 Chat 表 —— 正对照用：同一份字节，旧表认不出的必须认不出。
-    const OLD_CHAT: TerminalFrames = &[b"data: [DONE]\n\n"];
-    /// 最后一帧的内容部分（带 finish_reason 与 usage，与生产同一形状）
-    const LAST_CHUNK: &str = r#"data: {"id":"c1","choices":[{"index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":71476}}"#;
-
-    /// 按某条入口的特征表喂完这些片段，返回「是否认出了收尾帧」。
-    fn seen_after(frames: TerminalFrames, chunks: &[&str]) -> bool {
-        let mut scan = TerminalScan::new(frames);
-        for chunk in chunks {
-            scan.push(chunk.as_bytes());
-        }
-        scan.seen
-    }
-
-    /// 最长特征的长度（匹配窗口的上界由它决定）。
-    fn longest(frames: TerminalFrames) -> usize {
-        frames.iter().map(|frame| frame.len()).max().unwrap_or(0)
-    }
-
-    /// 这次改动的本体：透传写法必须认得出来。最后一句是正对照 —— 同一份字节
-    /// 喂给改前那张表，必须**不**命中，否则那 1176 行假中断就不是这个原因。
-    #[test]
-    fn unspaced_done_counts_as_terminal() {
-        assert!(seen_after(terminal::CHAT, &[LAST_CHUNK, UNSPACED_DONE]));
-        let old_table_hits = seen_after(OLD_CHAT, &[LAST_CHUNK, UNSPACED_DONE]);
-        assert!(!old_table_hits, "旧表若能命中，那 1176 行就不是这个原因");
-    }
-
-    /// 带空格的写法不能因为加了新特征而漏掉 —— 那是改前唯一命中的形状，
-    /// 经 `ReasoningCoalescer` 的各家全靠左它。
-    #[test]
-    fn spaced_done_still_counts() {
-        assert!(seen_after(terminal::CHAT, &[LAST_CHUNK, SPACED_DONE]));
-        assert!(seen_after(OLD_CHAT, &[LAST_CHUNK, SPACED_DONE]), "旧表绿的不许变红");
-    }
-
-    /// CRLF 行尾（上游按 SSE 规范用 `\r\n` 时）两种空格写法都算收尾。
-    #[test]
-    fn crlf_line_endings_count() {
-        assert!(seen_after(terminal::CHAT, &["data: [DONE]\r\n\r\n"]));
-        assert!(seen_after(terminal::CHAT, &["data:[DONE]\r\n\r\n"]));
-    }
-
-    /// 收尾帧被 TCP 分片切开仍然要认出来 —— 跨 chunk 的窗口就是为它存在的；
-    /// 反过来，帧没吐完就断（只到 `data:[DON`）仍然**不**算收尾，那是真中断。
-    #[test]
-    fn only_a_whole_frame_counts_when_chunks_split() {
-        let split = &[LAST_CHUNK, "\n\ndata:[DON", "E]\n\n"];
-        assert!(seen_after(terminal::CHAT, split));
-        assert!(seen_after(terminal::CHAT, &["\n\ndata:[DON", "E]\n\n"]));
-        // 「只差一字节」的切法：窗口只留 longest-1，这种切法最容易暴露算错保留量
-        assert!(seen_after(terminal::CHAT, &["data:[DONE]", "\n"]));
-        let half_frame = seen_after(terminal::CHAT, &["data:[DON", "E]"]);
-        assert!(!half_frame, "半截帧不算收尾");
-    }
-
-    /// 精度边界：模型把 `data: [DONE]` 当**正文**吐出来时不算收尾。JSON 里的换行
-    /// 必须转义（字节上是反斜杠加 n），SSE 的 `data:` 字段也不允许内嵌裸换行，
-    /// 所以特征串要求的那个裸换行不会被正文命中。
-    #[test]
-    fn done_echoed_inside_content_is_not_a_terminal_frame() {
-        let echoed = "data: {\"content\":\"示例：data: [DONE]\\n\\n 就是结束标记\"}\n\n";
-        assert!(!seen_after(terminal::CHAT, &[echoed]));
-        let unspaced = "data: {\"content\":\"示例：data:[DONE] 就是结束标记\"}\n\n";
-        assert!(!seen_after(terminal::CHAT, &[unspaced]));
-        // 凑出了 `data:[DONE]` 但后面跟的不是换行 → 仍不算
-        let near_miss = &["data:[DONE", "\", \"x\":1}", "\n"];
-        assert!(!seen_after(terminal::CHAT, near_miss));
-    }
-
-    /// 匹配窗口必须有界：一次 SSE 响应动辄数百 KB，窗口跟着涨等于把整条响应
-    /// 复制进内存（改造前真出过这个形状的问题，所以窗口只留 longest-1 字节）。
-    #[test]
-    fn scan_window_stays_bounded() {
-        let chunk = "data: {\"content\":\"很长的一段回答内容\"}\n\n";
-        let mut scan = TerminalScan::new(terminal::CHAT);
-        for _ in 0..2000 {
-            scan.push(chunk.as_bytes());
-        }
-        let cap = longest(terminal::CHAT).saturating_sub(1);
-        assert!(scan.window.len() <= cap, "窗口留了 {} 字节，上限 {}", scan.window.len(), cap);
-    }
-
-    /// 另外两条入口的特征原样不动（帧名带协议前缀，不存在空格方言问题）。
-    /// 这条钉的是「本次改动只碰了 Chat」，而特征表是逐入口给出的 —— 传错一张
-    /// 表就等于给那条入口悄悄换了判据。
-    #[test]
-    fn other_entries_keep_their_own_frames() {
-        assert!(seen_after(terminal::RESPONSES, &["event: response.completed\n"]));
-        assert!(seen_after(terminal::RESPONSES, &["event: response.failed\n"]));
-        assert!(seen_after(terminal::ANTHROPIC, &["event: message_stop\n"]));
-        // DONE 是 Chat 方言：喂给另外两张表都不该命中
-        assert!(!seen_after(terminal::RESPONSES, &[UNSPACED_DONE, SPACED_DONE]));
-        assert!(!seen_after(terminal::ANTHROPIC, &[UNSPACED_DONE, SPACED_DONE]));
-    }
-
-    // ── 记账结果本身（匹配器之外还有两处代码）──────────────────
-    //
-    // 上面那组只证明「认得出收尾帧」。但红色与 0 token 来自**另外两处**：
-    // `Drop` 写进去的 `fallback_error`，加上 `NewRequestEntry::normalize` 的
-    // 「失败清零」。所以这里用一条真流 + 一个真统计库把结果读回来对质，
-    // 正反各一条：收尾帧之后挂断 ⇒ 绿且有用量；收尾帧之前挂断 ⇒ 仍然红。
-
-    use std::sync::Arc;
-
-    use axum::body::Bytes;
-    use futures::{Stream, StreamExt};
-    use serde_json::Value;
-
-    use crate::server::core::upstream::usage::RequestTelemetry;
-    use crate::server::db::Db;
-    use crate::server::request_stats::{RequestQuery, RequestStats};
-
-    /// 临时库的 RAII 守卫：**返回给调用点持有**（只在创建时删一次的写法会让
-    /// 用例失败或提前 return 时把目录留下，累积成几百个）。
-    struct TempDir(std::path::PathBuf);
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    /// 一个只属于本次用例的统计库（进程号 + 计数 + tag 三重去重）
-    fn temp_stats(tag: &str) -> (Arc<RequestStats>, TempDir) {
-        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let id = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let dir = std::env::temp_dir()
-            .join(format!("api-pipeline-{}-{}-{id}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&dir);
-        let db = Db::open(&dir.join("agent2api.db")).expect("临时库应当能建起来");
-        (Arc::new(RequestStats::with_db(Some(db), Retention::default)), TempDir(dir))
-    }
-
-    /// 建一条上下文：用量按生产实测的那份填（71476 / 56）
-    fn context_for(stats: Arc<RequestStats>) -> (RecordContext, Arc<RequestTelemetry>) {
-        let telemetry = Arc::new(RequestTelemetry::new());
-        telemetry.report_usage(&serde_json::json!({
-            "prompt_tokens": 71476, "completion_tokens": 56, "total_tokens": 71532
-        }));
-        let context = RecordContext {
-            stats,
-            telemetry: telemetry.clone(),
-            started_at: crate::server::logging::now_ms(),
-            model: "deepseek-v4.1-flash".to_string(),
-            client_model: "deepseek-v4.1-flash".to_string(),
-            client_reasoning: String::new(),
-            // 模拟真实流量：不是模型测试发起的（见 `RecordContext::is_test`）
-            is_test: false,
-            // 客户端不参与本用例的断言，给空串（无 UA 的形态）
-            source: Default::default(),
-            status: 200,
-            raw_request: None,
-            raw_response: None,
-        };
-        (context, telemetry)
-    }
-
-    /// 「内容帧 + 收尾帧 + **永远不再给 EOF**」——最后一帧之后上游还挂着，
-    /// 正是 Qoder 那类客户端的做法：读到收尾帧就地挂断，连接由**客户端**先关。
-    fn stream_ending_at(
-        frames: Vec<&'static [u8]>,
-    ) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> + Send + Unpin {
-        futures::stream::iter(frames.into_iter().map(|frame| Ok(Bytes::from_static(frame))))
-            .chain(futures::stream::pending::<Result<Bytes, std::io::Error>>())
-    }
-
-    /// 取回那条明细（本次用例的库里只有一条）
-    fn only_row(stats: &RequestStats) -> serde_json::Value {
-        let query = RequestQuery {
-            offset: 0,
-            limit: Some(5),
-            model: None,
-            provider: None,
-            status: None,
-            start: None,
-            end: None,
-        };
-        let page = stats.query_requests(&query);
-        let entries = page.get("entries").and_then(Value::as_array);
-        entries
-            .and_then(|list| list.first().cloned())
-            .unwrap_or_else(|| panic!("应当恰好落一条明细，实际读到 {page}"))
-    }
-
-    /// 走一遍「已下发这些帧、之后上游不再给 EOF」的流，然后在客户端的位置丢弃它，
-    /// 返回真正落库的那一行。三个用例只差在**帧**与**特征表**上，判据的差别才是真的。
-    async fn record_after_hangup(frames: &[&'static [u8]], terminals: TerminalFrames) -> Value {
-        let (stats, _dir) = temp_stats("row");
-        let (context, _telemetry) = context_for(stats.clone());
-        let mut stream = RecordingStream::with_terminals(
-            Box::new(stream_ending_at(frames.to_vec())),
-            context,
-            terminals,
-        );
-        // 把已知的几帧消费掉（第二帧起就可能命中收尾特征）
-        for _ in 0..frames.len() {
-            assert!(stream.next().await.is_some(), "这一帧应当能取到");
-        }
-        // 再 poll 一次：上游还挂着（`stream_ending_at` 后面接了 pending）
-        let still_pending =
-            futures::future::poll_fn(|cx| match std::pin::Pin::new(&mut stream).poll_next(cx) {
-                std::task::Poll::Ready(_) => std::task::Poll::Ready(false),
-                std::task::Poll::Pending => std::task::Poll::Ready(true),
-            })
-            .await;
-        assert!(still_pending, "客户端挂断前流必须还没有结束，否则走不到 Drop 那条分支");
-        drop(stream);
-        only_row(&stats)
-    }
-
-    /// 正例：透传的 `data:[DONE]`（冒号后没空格）已经下发，客户端随即挂断 ⇒
-    /// 行是绿的、用量必须留着。这就是生产那 1176 行的形状。
-    #[tokio::test]
-    async fn hangup_right_after_unspaced_done_records_success_with_usage() {
-        let row =
-            record_after_hangup(&[LAST_CHUNK.as_bytes(), UNSPACED_DONE.as_bytes()], terminal::CHAT).await;
-        assert_eq!(row["status"], Value::from(200), "状态码照原样：{row}");
-        assert!(row["error"].is_null(), "收尾帧之后挂断不该记成中断：{row}");
-        assert_eq!(row["promptTokens"], Value::from(71476), "用量不能被清零：{row}");
-        assert_eq!(row["completionTokens"], Value::from(56), "用量不能被清零：{row}");
-    }
-
-    /// 同一份字节、同一套丢弃动作，喂给**改前那张表** ⇒ 必须是红且 0 token。
-    /// 这条是上一条的正对照：没有它，「绿」可能只是因为这套脚手架根本不写库。
-    #[tokio::test]
-    async fn the_old_needle_would_have_recorded_the_same_stream_as_an_abort() {
-        let row = record_after_hangup(&[LAST_CHUNK.as_bytes(), UNSPACED_DONE.as_bytes()], OLD_CHAT).await;
-        let error = row["error"].as_str().unwrap_or("");
-        assert!(error.contains("未完整下发"), "旧表下这条必须仍是中断：{row}");
-        assert_eq!(row["promptTokens"], Value::from(0), "旧口径的失败清零：{row}");
-    }
-
-    /// 反面对照：客户端在收尾帧**之前**就挂断 ⇒ 仍然是中断、仍然是红。
-    /// 少了这条，正例就只是「什么都不报」的空跑 —— 任何把中断一律写成成功的改动
-    /// 都能同时过两条，只有成对出现才说明判据真的落在收尾帧上。
-    #[tokio::test]
-    async fn hangup_before_the_terminal_frame_stays_an_abort() {
-        let row = record_after_hangup(&[LAST_CHUNK.as_bytes()], terminal::CHAT).await;
-        let error = row["error"].as_str().unwrap_or("");
-        assert!(error.contains("未完整下发"), "真中断必须留摘要：{row}");
-        assert_eq!(row["promptTokens"], Value::from(0), "失败的行按契约清零：{row}");
-    }
-}
+mod tests;

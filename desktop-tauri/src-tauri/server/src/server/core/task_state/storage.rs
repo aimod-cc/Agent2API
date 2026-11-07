@@ -16,6 +16,7 @@ type States = HashMap<String, TaskState>;
 struct StoredStates {
     states: States,
     damaged: Option<Damage>,
+    migrated: bool,
 }
 
 struct Damage {
@@ -29,8 +30,8 @@ fn read_states(conn: &Connection) -> Result<StoredStates, String> {
         .optional()
         .map_err(|error| format!("读取任务状态失败: {error}"))?;
     let Some(text) = text else { return Ok(StoredStates::default()) };
-    match serde_json::from_str::<States>(&text) {
-        Ok(states) => Ok(StoredStates { states, damaged: None }),
+    let mut stored = match serde_json::from_str::<States>(&text) {
+        Ok(states) => StoredStates { states, ..StoredStates::default() },
         Err(error) => {
             let states = match serde_json::from_str::<serde_json::Map<String, Value>>(&text) {
                 Ok(entries) => entries
@@ -41,12 +42,20 @@ fn read_states(conn: &Connection) -> Result<StoredStates, String> {
                     .collect(),
                 Err(_) => States::new(),
             };
-            Ok(StoredStates {
-                states,
-                damaged: Some(Damage { raw: text, error: error.to_string() }),
-            })
+            StoredStates { states, damaged: Some(Damage { raw: text, error: error.to_string() }), migrated: false }
+        }
+    };
+    for (key, state) in &mut stored.states {
+        if source_managed(key) {
+            stored.migrated |= state.use_source_backoff();
         }
     }
+    Ok(stored)
+}
+
+fn source_managed(key: &str) -> bool {
+    ["updateCheck:", "pluginCatalog:", "pluginRequirement:", "pluginGithub:"]
+        .iter().any(|prefix| key.starts_with(prefix))
 }
 
 fn write_states(conn: &Connection, states: &States) -> Result<(), String> {
@@ -93,7 +102,7 @@ pub(super) fn read_all() -> Result<States, String> {
     let stored = db
         .with(read_states)
         .ok_or_else(|| "任务状态数据库不可用".to_string())??;
-    if stored.damaged.is_none() {
+    if stored.damaged.is_none() && !stored.migrated {
         return Ok(stored.states);
     }
     let (states, recovered) = db
@@ -104,7 +113,7 @@ pub(super) fn read_all() -> Result<States, String> {
             // 读锁交还后其他实例可能已修复或更新，必须在写事务内重新读取。
             let stored = read_states(&tx)?;
             let recovered = preserve_damage(&tx, &stored)?;
-            if recovered.is_some() {
+            if recovered.is_some() || stored.migrated {
                 write_states(&tx, &stored.states)?;
             }
             tx.commit().map_err(|error| format!("提交任务状态失败: {error}"))?;
@@ -127,6 +136,9 @@ pub(super) fn change(
             let mut stored = read_states(&tx)?;
             let recovered = preserve_damage(&tx, &stored)?;
             let state = stored.states.entry(key.to_string()).or_default();
+            if source_managed(key) {
+                state.use_source_backoff();
+            }
             mutate(state);
             let result = state.clone();
             write_states(&tx, &stored.states)?;

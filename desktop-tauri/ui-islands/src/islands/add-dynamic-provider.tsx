@@ -228,7 +228,9 @@ export function DynamicProviderBlock({
       try {
         if (!runtimeProviderOf(provider)) throw new Error(t('该提供商已不在运行时目录中，请返回列表重新选择'))
         const result = await accountRequest('GET', `/api/session/login/methods?provider=${encodeURIComponent(provider)}`)
-        accept(parseMethods(result, provider))
+        const parsed = parseMethods(result, provider)
+        if (shared().workbuddyDesktop?.platform === 'web') parsed.methods = parsed.methods.filter(method => !method.desktopOnly)
+        accept(parsed)
       } catch (failure) {
         if (!current) return
         accept(isMethodsUnavailable(failure) ? legacyMethods(runtimeProviderOf(provider)) : {
@@ -259,7 +261,7 @@ export function DynamicProviderBlock({
           setProgress({})
           const inputs = readInputs(current.method, current.inputs)
           // 插件申报 embeddedOnly 时一律走内嵌窗口（不信任残留的 mode 状态）。
-          const mode = current.method.embeddedOnly ? 'embedded' : current.mode
+          const mode = current.method.embeddedOnly ? 'embedded' : current.method.browserMode === 'external' ? 'external' : current.mode
           // 旧 browser 声明没有索引，只走已存在的默认网页登录入口。
           return startLogin(provider, undefined, mode, undefined,
             current.method.methodIndex === undefined ? undefined : {
@@ -563,7 +565,7 @@ export function DynamicProviderBlock({
       {legacyBrowser ? <p>{t('旧版浏览器登录暂不接收备注名和登录代理，请添加后在账号设置中调整。')}</p> : null}
       {method.type === 'oauth' && !legacyBrowser && !method.prompts.some(prompt => prompt.key === 'name')
         ? <p>{t('账号名由插件自动获取，添加后可修改。')}</p> : null}
-      {method.type === 'oauth' && !method.localOnly && !method.embeddedOnly && shared().workbuddyDesktop?.platform !== 'web' ? <>
+      {method.type === 'oauth' && !method.localOnly && !method.embeddedOnly && (!method.browserMode || method.browserMode === 'choice') && shared().workbuddyDesktop?.platform !== 'web' ? <>
         <Label>{t('打开方式')}</Label>
         <SegmentedControl aria-label={t('网页登录的打开方式')} value={mode} disabled={locked}
           options={[{ value: 'external', label: t('系统浏览器') }, { value: 'embedded', label: t('内嵌窗口') }]}
