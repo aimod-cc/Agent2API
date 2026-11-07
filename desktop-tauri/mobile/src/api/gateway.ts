@@ -280,6 +280,7 @@ export type ManageModel = {
   visibility?: string | null
   upstreamStatus?: 'undeployed' | null
   capabilities?: unknown
+  capSources?: unknown
   reasoningLevels?: unknown
   reasoningDefaultLevel?: unknown
   reasoningFixedLevel?: unknown
@@ -302,7 +303,11 @@ export type ManageMapping = {
   dangling?: boolean
   carried?: boolean
 }
-export type ManageView = { models?: ManageModel[]; mappings?: ManageMapping[] }
+export type ManageView = {
+  models?: ManageModel[]
+  mappings?: ManageMapping[]
+  providers?: Array<{ provider?: string; providerLabel?: string }>
+}
 
 export function fetchManage(signal?: AbortSignal): Promise<ManageView> {
   return apiCall<ManageView>('/api/models/manage', { signal })

@@ -36,6 +36,11 @@ import {
 import { callJson } from './assistant-api'
 import { checkToolSignal, runToolBatch } from '../../../ui-shared/assistant-tool-execution'
 import { safeText } from '../../../ui-shared/assistant-read-data'
+import {
+  createModelListTool, type AssistantModelRow as ModelRow, type AssistantMappingRow as MappingRow,
+  type AssistantModelView, type ModelProviderRow,
+} from '../../../ui-shared/assistant-read-models'
+import { CAPABILITY_KEYS } from '../../../ui-shared/model-capability'
 
 export type { ModelOption } from './assistant-models'
 
@@ -120,37 +125,7 @@ function errorText(error: unknown): string {
 
 /* ─── 数据形状（只声明用到的字段）── */
 
-type ModelRow = {
-  id?: unknown
-  name?: unknown
-  provider?: unknown
-  providerLabel?: unknown
-  enabled?: unknown
-  aliases?: unknown
-  kind?: unknown
-  supports_image_generation?: unknown
-  supports_image_editing?: unknown
-  /** 生效能力位（`/api/models/manage` 的 capabilities，见 core::providers::catalog::view） */
-  capabilities?: unknown
-}
-type MappingRow = {
-  alias?: unknown
-  target?: unknown
-  provider?: unknown
-  providerLabel?: unknown
-  enabled?: unknown
-  isDefault?: unknown
-  dangling?: unknown
-}
-
-/**
- * 一份与 `/api/models/manage` 同形的视图（内置家来自后端，自定义家由
- * `models-custom-source` 的 `buildView` 现造 —— 那层适配的取舍见其文件头）。
- */
-type ManageViewLike = {
-  models?: ModelRow[]
-  mappings?: MappingRow[]
-}
+type ManageViewLike = Partial<AssistantModelView>
 
 /** 自定义提供商目录里的一条记录（`providers.js` 的 `customList`） */
 type CustomProviderRecord = {
@@ -279,13 +254,14 @@ function customView(id: string): ManageViewLike | null {
  * 由模型管理页在前端适配。助手若只读那一条接口，回答「有哪些模型」时会漏掉
  * 用户自建的全部上游，且 `set_model_*` 系列拿不到自定义家的启用状态。
  */
-async function readModels(): Promise<{ models: ModelRow[]; mappings: MappingRow[] }> {
+async function readModels(): Promise<AssistantModelView> {
   const read = bridge().getModelManage
   if (!read) throw new Error(t('当前客户端缺少读取接口：{name}', { name: 'getModelManage' }))
   const data = await read() as ManageViewLike | undefined
   if (!Array.isArray(data?.models) || !Array.isArray(data?.mappings)) throw new Error(t('读取模型清单失败'))
   const models: ModelRow[] = data.models.slice()
   const mappings: MappingRow[] = data.mappings.slice()
+  const providers: ModelProviderRow[] = Array.isArray(data.providers) ? data.providers.slice() : []
   // 自定义家逐个适配后追加。目录缓存缺失（面板形态未注入 / 还没拉到）时
   // 只是少这一块 —— 内置家那部分照常可用，不因此整条工具失败。
   const known = new Set(models.map(row => `${str(row.provider)}\u0001${str(row.id)}`.toLowerCase()))
@@ -294,6 +270,7 @@ async function readModels(): Promise<{ models: ModelRow[]; mappings: MappingRow[
     if (!id) continue
     const view = customView(id)
     if (!view) continue
+    providers.push({ provider: id, providerLabel: str(record.name) || id })
     for (const row of view.models || []) {
       const key = `${id}\u0001${str(row.id)}`.toLowerCase()
       if (known.has(key)) continue
@@ -302,134 +279,12 @@ async function readModels(): Promise<{ models: ModelRow[]; mappings: MappingRow[
     }
     for (const mapping of view.mappings || []) mappings.push(mapping)
   }
-  return { models, mappings }
+  return { models, mappings, providers }
 }
 
-/** 模型行的可读标识（模型名一律带提供商，免得同名映射下说不清是哪一条） */
-function modelLabel(row: ModelRow): string {
-  const provider = str(row.providerLabel) || str(row.provider)
-  return provider ? `${provider} / ${str(row.id)}` : str(row.id)
-}
 /* ─── 模型工具与余额查询 ───────────────────────────────────── */
 
-/** 分页的默认页大小与上限（`list_models` 用；上限防一次把上下文打爆） */
-const PAGE_DEFAULT = 100
-const PAGE_MAX = 500
-
-/** 一页的元信息：总数 / 本页区间 / 是否还有下一页（模型与映射各一份） */
-type PageMeta = {
-  total: number
-  offset: number
-  limit: number
-  returned: number
-  hasMore: boolean
-  /** 下一页的 offset（`hasMore` 为 false 时不出现） */
-  nextOffset?: number
-}
-
-function paginate<T>(rows: T[], offset: number, limit: number): { items: T[]; meta: PageMeta } {
-  const start = Math.max(0, Math.min(offset, rows.length))
-  const items = rows.slice(start, start + limit)
-  const end = start + items.length
-  const hasMore = end < rows.length
-  return {
-    items,
-    meta: {
-      total: rows.length,
-      offset: start,
-      limit,
-      returned: items.length,
-      hasMore,
-      ...(hasMore ? { nextOffset: end } : {}),
-    },
-  }
-}
-
-/** 1 · 获取模型列表（只读，分页） */
-const listModels: AssistantTool = {
-  id: 'list_models',
-  label: t('获取模型列表'),
-  kind: 'read',
-  desc: '分页读取各提供商的模型清单（模型 ID、所属提供商、是否启用、已挂的映射名）以及映射表。**内置家（Agent）与自定义提供商都在结果里**：自定义家的 provider 以 custom- 开头，可用 providerLabel 读它的展示名。回答「有哪些模型」「哪些模型在多家重复」「某个名字挂在哪」这类问题之前先调用它。\n\n结果分页：模型与映射各自一页，响应里带 total / offset / limit / returned / hasMore / nextOffset。hasMore 为 true 时用 nextOffset 作为下一次的 offset 继续取，直到取完；不要只看第一页就下结论。',
-  params: {
-    type: 'object',
-    properties: {
-      provider: { type: 'string', description: '只看某一家（提供商 id，如 codearts / workbuddy / custom-xxxx）；不填 = 全部' },
-      keyword: { type: 'string', description: '按模型 ID 或映射名做子串过滤；不填 = 不过滤' },
-      enabledOnly: { type: 'boolean', description: 'true = 只看已启用的模型' },
-      section: {
-        type: 'string',
-        enum: ['models', 'mappings', 'both'],
-        description: '取哪一段：models = 只要模型行、mappings = 只要映射表、both = 两段都要（默认）。翻页时建议先按段取，免得重复传另一段',
-      },
-      offset: { type: 'number', description: '本页起点（从 0 开始）；翻页时传上一页的 nextOffset' },
-      limit: { type: 'number', description: `每页条数（默认 ${PAGE_DEFAULT}，最多 ${PAGE_MAX}）` },
-    },
-  },
-  run: async args => {
-    const provider = str(args.provider, 64).toLowerCase()
-    const keyword = str(args.keyword, 128).toLowerCase()
-    const enabledOnly = bool(args.enabledOnly) === true
-    const section = str(args.section, 16).toLowerCase() || 'both'
-    if (section !== 'models' && section !== 'mappings' && section !== 'both') {
-      throw new Error(t('section 只能是 models / mappings / both'))
-    }
-    const offset = Math.max(0, Math.round(num(args.offset) ?? 0))
-    const limit = Math.max(1, Math.min(PAGE_MAX, Math.round(num(args.limit) ?? PAGE_DEFAULT)))
-    const data = await readModels()
-    const payload: Record<string, unknown> = {}
-
-    if (section !== 'mappings') {
-      const rows = data.models.filter(row => {
-        if (provider && str(row.provider).toLowerCase() !== provider) return false
-        if (enabledOnly && row.enabled !== true) return false
-        if (keyword) {
-          const hay = [str(row.id), str(row.name), ...(Array.isArray(row.aliases) ? row.aliases.map(item => str(item)) : [])].join(' ').toLowerCase()
-          if (!hay.includes(keyword)) return false
-        }
-        return true
-      })
-      const page = paginate(rows.map(row => ({
-        provider: str(row.provider),
-        providerLabel: str(row.providerLabel) || str(row.provider),
-        id: str(row.id),
-        enabled: row.enabled === true,
-        kind: str(row.kind) || 'chat',
-        supports_image_generation: row.supports_image_generation === true,
-        supports_image_editing: row.supports_image_editing === true,
-        aliases: Array.isArray(row.aliases) ? row.aliases.map(item => str(item)) : [],
-      })), offset, limit)
-      payload.models = { ...page.meta, items: page.items }
-    }
-
-    if (section !== 'models') {
-      // 映射单列一段（含目标不在清单里的「未挂载」条目）：模型行上的 aliases 只
-      // 覆盖挂得上的那些，而「某个名字挂在哪」这类问题要的正是映射表本身。
-      const rows = data.mappings.filter(row => {
-        if (provider && str(row.provider).toLowerCase() !== provider) return false
-        if (enabledOnly && row.enabled !== true) return false
-        if (!keyword) return true
-        return [str(row.alias), str(row.target)].join(' ').toLowerCase().includes(keyword)
-      })
-      const page = paginate(rows.map(row => ({
-        provider: str(row.provider),
-        alias: str(row.alias),
-        target: str(row.target),
-        enabled: row.enabled === true,
-        isDefault: row.isDefault === true,
-        dangling: row.dangling === true,
-      })), offset, limit)
-      payload.mappings = { ...page.meta, items: page.items }
-    }
-
-    const modelsMeta = payload.models as PageMeta | undefined
-    const mappingsMeta = payload.mappings as PageMeta | undefined
-    const summary = modelsMeta
-      ? t('{n} 个模型', { n: modelsMeta.total })
-      : t('{n} 条映射', { n: mappingsMeta?.total ?? 0 })
-    return { text: JSON.stringify(payload), summary }
-  },
-}
+const listModels: AssistantTool = createModelListTool(readModels, t)
 
 const listAccountBalance: AssistantTool = createBalanceTool({
   accounts: async () => {
@@ -584,7 +439,6 @@ const setModelMapping: AssistantTool = {
 }
 
 /** 5 · 修改模型能力（改动） */
-const CAPABILITY_KEYS = ['maxInputTokens', 'maxOutputTokens', 'supportsToolCall', 'supportsImages', 'supportsVideo', 'supportsReasoning'] as const
 const CAPABILITY_LABELS: Record<string, string> = {
   maxInputTokens: t('上下文窗口'),
   maxOutputTokens: t('最大输出 Token'),
@@ -773,7 +627,7 @@ export function toolsPayload(enabled: Record<string, boolean>): Array<Record<str
 export const TOOL_META: Array<{ id: string; label: string; desc: string; tag?: 'danger' | 'cost' }> = [
   ...ASSISTANT_READ_META,
   ...ASSISTANT_IMAGE_META,
-  { id: 'list_models', label: t('获取模型列表'), desc: t('读各提供商的模型清单、映射名与启用状态。') },
+  { id: 'list_models', label: t('获取模型列表'), desc: t('按提供商名称查询模型、能力、来源与映射，支持自定义提供商。') },
   { id: 'list_account_balance', label: t('查询账号余额'), desc: t('读各账号的额度 / 剩余用量。') },
   { id: 'set_model_enabled', label: t('启用 / 禁用模型'), desc: t('开关模型的对外可用性，不改其它属性。') },
   { id: 'set_model_mapping', label: t('设置模型映射 ID'), desc: t('新增 / 删除映射名，支持批量加前缀与同名合并到多家。') },

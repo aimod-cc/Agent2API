@@ -171,6 +171,8 @@ Linux 写在 `/etc/agent2api/agent2api.env`；Windows 改服务注册表的
 > 绕不过去。批量部署可以把已经配好的**数据目录整个拷过去**（SQLite 库 +
 > `account.key` 在同一个目录里），账号随之迁移。
 
+**Trae 回答完整性检查（桌面端 / 服务端 / Docker）**：默认开启。只有排查兼容性误判时，才给网关进程设置 `AGENT2API_TRAE_NO_REQUIRE_TERMINAL=1`（也接受 `true` / `yes` / `on`），再重启网关让插件继承新环境。关闭后可能重新把缺少上游结束信号的半截回答当成成功；移除该变量并重启可恢复检查。此开关需要包含该修复的「提供商增强」插件。
+
 ## Docker
 
 镜像标签：`latest` 跟随最新正式版，`beta` 跟随最新 beta 预发布版；也可用完整版本号（例如 `3.3.0-beta.3`）固定版本。要使用 beta，把下方命令或 Compose 配置中的 `aimodcc/agent2api:latest` 改为 `aimodcc/agent2api:beta`；更新时运行 `docker compose pull && docker compose up -d`。beta 发布不会改动 `latest`，手动开发构建只更新 `dev`。同一份镜像也同步发布在 GitHub 容器镜像库：把镜像名换成 `ghcr.io/aimod-cc/agent2api` 即可，标签规则完全相同。

@@ -157,6 +157,8 @@ Linux 에서는 `/etc/agent2api/agent2api.env` 에, Windows 에서는 서비스 
 
 > **계정은 미리 설정할 수 없습니다**: 계정에는 QR 스캔 / SMS 코드 / 자격 증명 붙여넣기가 필요하고 이는 업스트림 프로토콜이 정하는 부분이라 우회할 수 없습니다. 대량 배포에서는 이미 설정한 **데이터 디렉터리를 통째로 복사**하세요(SQLite 데이터베이스와 `account.key` 가 같은 디렉터리에 있어 계정도 함께 옮겨집니다).
 
+**Trae 응답 완전성 검사(데스크톱 / 서버 / Docker)**: 기본적으로 켜져 있습니다. 호환성으로 인한 오탐을 조사할 때만 게이트웨이 프로세스 환경에 `AGENT2API_TRAE_NO_REQUIRE_TERMINAL=1`을 설정하고(`true` / `yes` / `on`도 허용), 게이트웨이를 재시작해 플러그인이 새 환경을 상속하게 하세요. 끄면 업스트림의 완료 신호가 없는 불완전한 응답을 다시 성공으로 처리할 수 있습니다. 변수를 제거하고 재시작하면 검사가 복원됩니다. 이 설정은 해당 수정이 포함된 제공자 플러그인이 필요합니다.
+
 ## Docker
 
 이미지 태그: `latest`는 최신 정식 버전을, `beta`는 최신 beta 사전 출시 버전을 따릅니다. `3.3.0-beta.3` 같은 전체 버전 번호로 버전을 고정할 수도 있습니다. beta를 사용하려면 아래 명령이나 Compose 설정의 `aimodcc/agent2api:latest`를 `aimodcc/agent2api:beta`로 바꾸고, 업데이트할 때 `docker compose pull && docker compose up -d`를 실행하세요. beta 출시 시 `latest`는 변경되지 않으며, 수동 개발 빌드는 `dev`만 업데이트합니다. 동일한 이미지가 GitHub Container Registry에도 게시됩니다. 이미지 이름을 `ghcr.io/aimod-cc/agent2api`로 바꾸면 됩니다(태그 규칙은 동일합니다).

@@ -390,5 +390,8 @@
   "项目内读写允许修改当前项目；需要额外权限时，由你逐次审批，不会自动批准。": "Project read/write allows changes within the current project. Additional permissions require your approval each time and are not approved automatically.",
   "项目目录": "Project folder",
   "首轮回答完成后自动总结；这会调用所选模型并消耗额度。": "Generate a title after the first reply completes. This calls the selected model and consumes quota.",
-  "默认行为": ""
+  "默认行为": "",
+  "按提供商名称查询模型、能力、来源与映射，支持自定义提供商。": "Query models, capabilities, sources, and mappings by provider name, including custom providers.",
+  "没有找到提供商「{name}」，请先不填 provider 查询，或用 keyword 搜索": "Provider \"{name}\" was not found. Query without provider first, or search with keyword",
+  "提供商「{name}」匹配到多家，请使用提供商 ID：{list}": "Provider \"{name}\" matches multiple entries. Use a provider ID: {list}"
 }

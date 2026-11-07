@@ -18,28 +18,16 @@
  */
 
 import { t } from '../i18n'
+import {
+  CAPABILITY_KEYS, isTokenKey, normalizeCapabilities, normalizeCapability,
+  type Capabilities, type CapabilityKey, type CapabilitySource,
+} from '../../../ui-shared/model-capability'
 
-/** 六个能力键（顺序 = 弹窗字段与能力徽章的展示顺序，与后端一致） */
-export const CAPABILITY_KEYS = [
-  'maxInputTokens',
-  'maxOutputTokens',
-  'supportsToolCall',
-  'supportsImages',
-  'supportsVideo',
-  'supportsReasoning',
-] as const
-
-export type CapabilityKey = (typeof CAPABILITY_KEYS)[number]
-
-/** 一份能力表：键 → 值（null / 缺失 = 未声明；键名以外的一律不认） */
-export type Capabilities = Partial<Record<CapabilityKey, number | boolean | null>>
-
-/** token 数值键（弹窗按数字输入呈现） */
-export const TOKEN_KEYS: readonly CapabilityKey[] = ['maxInputTokens', 'maxOutputTokens']
-/** 布尔能力键（弹窗按三态选择呈现） */
-export const BOOLEAN_KEYS: readonly CapabilityKey[] = [
-  'supportsToolCall', 'supportsImages', 'supportsVideo', 'supportsReasoning',
-]
+export {
+  BOOLEAN_KEYS, CAPABILITY_KEYS, MAX_TOKEN_VALUE, TOKEN_KEYS, capSourceOf,
+  isTokenKey, normalizeCapabilities, normalizeCapability, normalizeOverrides,
+  type Capabilities, type CapabilityKey, type CapabilitySource,
+} from '../../../ui-shared/model-capability'
 
 /** 弹窗字段与表格 tooltip 用的完整文案 */
 export const CAPABILITY_LABELS: Record<CapabilityKey, string> = {
@@ -57,46 +45,6 @@ export const CAPABILITY_SHORT: Partial<Record<CapabilityKey, string>> = {
   supportsImages: t('图片'),
   supportsVideo: t('视频'),
   supportsReasoning: t('思考'),
-}
-
-/** token 键的数值上限（与后端 `core::capability::MAX_TOKEN_VALUE` 同值） */
-export const MAX_TOKEN_VALUE = 100_000_000
-
-/** 该键是不是 token 数值键 */
-export function isTokenKey(key: CapabilityKey): boolean {
-  return TOKEN_KEYS.includes(key)
-}
-
-/**
- * 单值的归一（与后端 `capability::normalize_value` 同一口径）：
- * token 键收 1~1 亿的整数（浮点取整），布尔键收 bool；其余给 `null`
- * （= 未声明，调用方按「这一项没有值」处理）。
- */
-export function normalizeCapability(key: CapabilityKey, value: unknown): number | boolean | null {
-  if (isTokenKey(key)) {
-    const number = typeof value === 'number' ? value : Number(value)
-    if (!Number.isFinite(number) || number < 1 || number > MAX_TOKEN_VALUE) return null
-    return Math.trunc(number)
-  }
-  return typeof value === 'boolean' ? value : null
-}
-
-/** 把任意对象（后端响应 / 记录字段）归一成一份能力表（只留合法键与合法值） */
-export function normalizeCapabilities(raw: unknown): Capabilities {
-  const result: Capabilities = {}
-  if (!raw || typeof raw !== 'object') return result
-  const source = raw as Record<string, unknown>
-  for (const key of CAPABILITY_KEYS) {
-    const value = normalizeCapability(key, source[key])
-    if (value !== null) result[key] = value
-  }
-  return result
-}
-
-/** 覆盖键列表的归一（字符串数组 → 合法键集合；顺序按 CAPABILITY_KEYS） */
-export function normalizeOverrides(raw: unknown): CapabilityKey[] {
-  if (!Array.isArray(raw)) return []
-  return CAPABILITY_KEYS.filter(key => raw.some(item => item === key))
 }
 
 /**
@@ -193,27 +141,6 @@ export function capabilityTip(
   if (state === 'on') return t('{label}：支持{origin}{suffix}', { label, origin, suffix })
   if (state === 'off') return t('{label}：不支持{origin}{suffix}', { label, origin, suffix })
   return t('{label}：上游未声明（下游会按不支持处理）{suffix}', { label, suffix })
-}
-
-/**
- * 一个能力键的**来源**（后端在清单成型处标好，见 `core::model_meta`）。
- *
- *   `upstream` 上游清单自己声明的（这条转发通道的真实情况）
- *   `modelsdev` 上游没声明、由 models.dev 补的（社区库的数据）
- *   `user` 用户在「模型能力」里手工改的（永远最高）
- *
- * 空串 = 没有来源（未声明）。三档的可信度差着量级，所以界面上必须分开说 ——
- * 三个值长得一模一样、来源却不同，用户没法判断该不该信。
- */
-export type CapabilitySource = 'upstream' | 'modelsdev' | 'user'
-
-/** 读某个键的来源（后端没标 / 值不认识 → 空串） */
-export function capSourceOf(
-  model: { capSources?: unknown } | null | undefined,
-  key: CapabilityKey,
-): CapabilitySource | '' {
-  const raw = (model?.capSources as Record<string, unknown> | undefined)?.[key]
-  return raw === 'upstream' || raw === 'modelsdev' || raw === 'user' ? raw : ''
 }
 
 /** 来源短语（放在值后面；`upstream` 不给短语 —— 「继承上游」由调用方按场景措辞） */
