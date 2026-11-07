@@ -96,6 +96,18 @@ pub const STATUS_FAILED: &str = "failed";
 /// `expiresAt` 或 `updatedAt` **任一**推进都算成功：有些家刷新后只换 token
 /// 不延长有效期（反过来也有），单看一个字段会误判。账号读不到时放行 ——
 /// 那是「记录不存在」的问题，由刷新本身报错，不该在这里编一个。
+///
+/// ── 「没写回」不等于失败：先复查一次还临不临期 ────────────────
+/// 原判据（#407）把所有「指纹没推进」都记成失败，于是一类**正常**情形被打成
+/// 红字：上游在 access token **仍在有效期内**时，刷新接口会原样回同一份凭证
+/// （实测 AutoClaw 的 `/userapi/v1/refresh` 就是这样 —— 它给的是「一份能用的」，
+/// 不是「换一份新的」）。插件按设计「没变化就不落盘」，记录一个字节不动，
+/// 这里就报「适配器报成功但凭据未更新，请重新登录该账号」—— 用户点「刷新 token」
+/// 得到的是一句把人往重新登录带的话，而其实什么都不用做。
+///
+/// 因此没写回时**再问一次适配器**：凭证已经不在临期窗口里（`false`）就视为
+/// 「无需刷新」正常返回；只有「确实临期/已过期、却还是没换发」才是真故障
+/// （上游把这份登录态作废了），那时报错并提示重新登录才是对的。
 pub async fn refresh_checked(
     store: &AccountStore,
     adapter: &dyn ProviderAdapter,
@@ -108,6 +120,15 @@ pub async fn refresh_checked(
         (before, after)
     {
         if expires_after <= expires_before && updated_after <= updated_before {
+            // 复查必须在 `refresh_access_token` **之后**做：判断依据是刷新结果
+            // 落在记录上的现状，不是调用前的快照。
+            if !adapter.credentials_expiring_async(store, id).await {
+                logging::verbose(
+                    "[Accounts]",
+                    &format!("账号 {id} 的刷新未换发新凭证，但当前仍在有效期内 —— 视为无需刷新"),
+                );
+                return Ok(token);
+            }
             return Err(GatewayError::with_status(
                 502,
                 format!(
