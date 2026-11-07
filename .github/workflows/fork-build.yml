@@ -86,9 +86,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Compress-Archive -Path "$stage/*" -DestinationPath "dist/$name.zip" -Force
 
-          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
-          "$hash  $name.zip" | Out-File -Encoding ascii "dist/$name.zip.sha256"
-
           Get-ChildItem dist | Format-Table Name, Length
 
       - name: 上传 Windows 服务端包
@@ -169,15 +166,11 @@ jobs:
           cd dist
           desktop_count="$(find . -maxdepth 1 -type f -name '*.exe' | wc -l)"
           zip_count="$(find . -maxdepth 1 -type f -name '*.zip' | wc -l)"
-          checksum_count="$(find . -maxdepth 1 -type f -name '*.sha256' | wc -l)"
-          if [[ "$desktop_count" -ne 1 || "$zip_count" -ne 1 || "$checksum_count" -ne 1 ]]; then
-            echo "::error::Release 附件应为桌面端、服务端包和校验文件各一个"
+          if [[ "$desktop_count" -ne 1 || "$zip_count" -ne 1 ]]; then
+            echo "::error::Release 附件应为桌面端与服务端包各一个"
             find . -maxdepth 1 -type f -printf '%f\n' | sort
             exit 1
           fi
-          for checksum in *.sha256; do
-            sha256sum --check "$checksum" --status
-          done
           cd ..
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' desktop-tauri/src-tauri/server/Cargo.toml | head -1)"
           desktop_version="$(jq -r .version desktop-tauri/package.json)"
