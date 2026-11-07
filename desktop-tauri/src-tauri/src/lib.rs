@@ -209,6 +209,10 @@ fn create_main_window(app: &AppHandle, visible: bool) -> tauri::Result<tauri::We
     #[cfg(target_os = "macos")]
     let builder = WebviewWindowBuilder::new(app, MAIN_WINDOW_LABEL, WebviewUrl::App("index.html".into()))
         .decorations(true)
+        // 显式声明「只属于当前桌面」，防止任何路径把窗口设成所有 Space 可见
+        // （tao 的默认值本就是 false，这里写出来是为了固化行为：万一有代码/旧版
+        // 配置把 visible_on_all_workspaces 置真，重建窗口时也会被这里拉回默认）。
+        .visible_on_all_workspaces(false)
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
         // 圆点位置：x 是首颗圆点到窗口左边缘的距离（系统标准就是 20），
