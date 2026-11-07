@@ -183,7 +183,7 @@ export function RoutingConfigPanel({ editor, scope, now, accountControl, onScope
             <Button variant='outline' disabled={disabled} onClick={() => setLegacyDialog(legacy)}>{t('转换旧版设置')}</Button></div> : null}
           {inherited ? <div className='routing-inherited-note'><p>{t('没有独立配置的模型沿用全局路由。')}</p><Button variant='outline' disabled={disabled} onClick={() => void editor.create(scope)}>{t('创建独立配置')}</Button></div> : null}
           <div className='routing-config-rules'>
-            <div className='routing-rule-field routing-rule-wide'><Label>{t('路由策略')}</Label><RoutingSelect label={t('路由策略')} value={profile.strategy || '__inherit'} disabled={locked}
+            <div className={scope ? 'routing-rule-field routing-rule-wide' : 'routing-rule-field'}><Label>{t('路由策略')}</Label><RoutingSelect label={t('路由策略')} value={profile.strategy || '__inherit'} disabled={locked}
               options={[...(scope ? [['__inherit', t('继承全局：{value}', { value: strategyLabel(workspace.globalSettings?.routingStrategy) })] as [string, string]] : []),
                 ['order', t('顺序优先')], ['rotate', t('负载均衡')], ['provider', t('家内轮询')]]}
               onChange={value => mutate(next => { next.strategy = value === '__inherit' ? undefined : value })} /></div>
@@ -191,7 +191,7 @@ export function RoutingConfigPanel({ editor, scope, now, accountControl, onScope
               options={[...(scope ? [['__inherit', t('继承全局：{value}', { value: stickyLabel(workspace.globalSettings?.routingSticky) })] as [string, string]] : []),
                 ['auto', t('自动')], ['session', t('会话内')], ['turn', t('每轮')], ['off', t('关闭')]]}
               onChange={value => mutate(next => { next.sticky = value === '__inherit' ? undefined : value })} /></div>
-            {!globalAccounts ? <div className='routing-rule-field'><Label>{t('参与方式')}</Label><RoutingSelect label={t('参与方式')} value={profile.providerScope || 'all'} disabled={locked}
+            {!globalAccounts ? <div className={scope ? 'routing-rule-field' : 'routing-rule-field routing-rule-wide'}><Label>{t('参与方式')}</Label><RoutingSelect label={t('参与方式')} value={profile.providerScope || 'all'} disabled={locked}
               options={[['all', t('全部自动参与')], ['selected', t('仅加入的参与')]]} onChange={value => mutate(next => {
                 next.providerScope = value === 'all' ? 'all' : 'selected'; next.providers = allProviders; next.disabledProviders = excluded
               })} /></div> : null}
