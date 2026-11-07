@@ -85,6 +85,7 @@ pub const RESERVED_KV_KEYS: &[&str] = &[
     "agentProfiles",
     // 本机编程会话连接设置与加密凭据，不参与配置同步。
     "assistantCoding",
+    "assistantCodexLocal",
     "priorityScope",
     // 侧边栏布局（core::sidebar_layout）：整份「分组 / 顺序 / 显隐」JSON 一个键。
     // 从前只存浏览器 localStorage，而桌面壳与网页端是两个 origin、localStorage
@@ -340,7 +341,7 @@ pub fn is_reserved(key: &str) -> bool {
 /// 请求日志新增「积分」列读它。与 token 四列刻意不同：这一列**可空 REAL** ——
 /// `NULL` = 这一家没上报（旧行 / 不提供该读数），0 = 确实零消耗；用 0 兜底会
 /// 把「没读到」画成「花了 0 积分」，比缺一列更难排查。
-pub const SCHEMA_VERSION: i64 = 26;
+pub const SCHEMA_VERSION: i64 = 27;
 
 /// 版本 1 的全部表与索引：改造前所有 JSON / JSONL 文件的对应形态。
 ///
@@ -1077,6 +1078,7 @@ fn apply_version(
         24 => conn.execute_batch(include_str!("schema_client_identification.sql")),
         25 => conn.execute_batch(include_str!("schema_tool_images.sql")),
         26 => conn.execute_batch(include_str!("schema_maintenance.sql")),
+        27 => conn.execute_batch(include_str!("schema_coding.sql")),
         _ => Ok(()),
     }
 }

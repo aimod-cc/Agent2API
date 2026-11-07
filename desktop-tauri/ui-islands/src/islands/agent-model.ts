@@ -1,5 +1,6 @@
 import { t } from '../i18n'
 import type { AgentClient, AgentModel, AgentOperation, AgentProfile } from './agent-types'
+import { modelLevels } from './agent-model-config'
 
 export function protocolLabel(value: string): string {
   return { anthropic: 'Anthropic Messages', responses: 'OpenAI Responses', openai_chat: 'OpenAI Chat Completions', gemini: 'Gemini API', native: t('客户端原生配置') }[value] || value
@@ -46,13 +47,14 @@ export function validateDraft(client: AgentClient, profile: AgentProfile): strin
   }
   if (profile.authMode === 'key' && !profile.apiKey && !profile.hasApiKey) return t('请填写 API Key')
   if (profile.authMode === 'env' && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(profile.envKey)) return t('请填写有效的环境变量名')
-  if (client.supportsModels) {
+  if (client.supportsModels && !(['codex', 'claude-code'].includes(client.id) && inherited && !profile.models.length)) {
     if (!profile.models.length) return t('请至少添加一个模型')
     if (profile.models.length > 200) return t('最多选择 {n} 个模型', { n: 200 })
     const ids = new Set<string>()
     for (const model of profile.models) {
       if (!model.id.trim() || ids.has(model.id.trim())) return t('模型 ID 不能为空或重复')
       ids.add(model.id.trim())
+      if (model.effort && model.effort !== 'default' && !modelLevels(client, model.reasoningLevels, profile.protocol).includes(model.effort)) return t('模型或客户端不支持所选思考等级')
       if (['zed', 'kimi-code', 'crush'].includes(client.id) && !model.contextWindow) return t('这个客户端需要填写模型上下文窗口')
       if (client.id === 'crush' && (model.maxOutputTokens == null || model.supportsImages == null || model.supportsReasoning == null)) return t('Crush 需要明确填写输出上限、图片与思考能力')
       if ([model.contextWindow, model.maxOutputTokens].some(value => value != null && (!Number.isInteger(value) || value < 1 || value > 100_000_000))) return t('Token 上限必须是 1 到 1 亿之间的整数')

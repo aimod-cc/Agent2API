@@ -20,10 +20,13 @@ type UsageWindowReading = {
   window: string
   view: string
   percent: number | null
+  remaining: number | null
   percentText: string
   tone: 'ok' | 'warn' | 'muted'
   unlimited: boolean
   resetsAt: number | null
+  expiresAt: number | null
+  aside: boolean
 }
 
 type WindowGroup = { id: string; name: string; rows: UsageWindowReading[] }
@@ -55,6 +58,7 @@ export function usageWindows(entry: UsageEntry): UsageWindowReading[] {
     const onlyPercent = usageNumberOrNull(row.remaining) === null
       && usageNumberOrNull(row.limit) === null && !unlimited
     const resetsAt = usageNumberOrNull(row.resetsAt)
+    const expiresAt = usageNumberOrNull(row.expiresAt)
     readings.push({
       id: `${typeof row.key === 'string' ? row.key : [group, window].join('-')}-${index}`,
       group,
@@ -62,10 +66,13 @@ export function usageWindows(entry: UsageEntry): UsageWindowReading[] {
       window,
       view: usageWindowView(row, t, numberText),
       percent,
+      remaining: usageNumberOrNull(row.remaining),
       percentText: onlyPercent && percent !== null ? `${numberText(percent)}%` : '',
       tone: unlimited ? 'ok' : percent === null ? 'muted' : percent < 20 ? 'warn' : 'ok',
       unlimited,
       resetsAt: resetsAt !== null && resetsAt > 0 && resetsAt <= 8.64e15 ? resetsAt : null,
+      expiresAt: expiresAt !== null && expiresAt > 0 && expiresAt <= 8.64e15 ? expiresAt : null,
+      aside: row.aside === true,
     })
   }
   return readings
@@ -137,10 +144,12 @@ export function UsageWindowsCell({ entry, rows, updatedAt, creditDetail, childre
   const compact = !grouped && (rows.length === 1 || rows.some(row => row.percent === null || row.view.length > 10))
   const warnings = usageWarningsOf(data)
   const supplementary = supplementaryReadings(data, rows)
-  const low = rows.some(row => !row.unlimited && row.percent !== null && row.percent < 20)
-  const unknown = rows.some(row => !row.unlimited && row.percent === null) || warnings.length > 0
-  const status = low ? t('部分窗口偏低') : unknown ? t('部分读数未知') : t('额度充足')
-  const tone = low ? 'warn' : unknown ? 'muted' : 'ok'
+  const measured = rows.filter(row => !row.aside && !row.unlimited)
+  const low = measured.some(row => row.percent !== null ? row.percent < 20 : row.remaining !== null && row.remaining <= 0)
+  const unknown = measured.some(row => row.percent === null && row.remaining === null) || warnings.length > 0
+  const informational = measured.length === 0 && rows.every(row => !row.unlimited)
+  const status = informational ? t('额度详情') : low ? t('部分窗口偏低') : unknown ? t('部分读数未知') : t('额度充足')
+  const tone = low ? 'warn' : unknown || informational ? 'muted' : 'ok'
   const age = updatedAt ? usageAgeText(updatedAt, t, Date.now()) : ''
   const updateTitle = updatedAt ? t('上次成功查询：{time}', { time: formatTime(updatedAt) }) : ''
   const caption = rows.every(row => row.percentText || row.view === '—') ? t('剩余比例') : t('分窗口额度')
@@ -169,10 +178,10 @@ export function UsageWindowsCell({ entry, rows, updatedAt, creditDetail, childre
           </span>
           <Popover>
             <PopoverTrigger render={<Button type='button' size='xs' variant='ghost' className='usage-window-detail' />}>
-              {t('重置详情')}<span aria-hidden='true' className='usage-window-caret'>⌄</span>
+              {t('额度详情')}<span aria-hidden='true' className='usage-window-caret'>⌄</span>
             </PopoverTrigger>
             <PopoverContent align='end' sideOffset={6} className='usage-window-pop'>
-              <PopoverHeader><PopoverTitle>{t('窗口重置时间')}</PopoverTitle></PopoverHeader>
+              <PopoverHeader><PopoverTitle>{t('窗口额度与时间')}</PopoverTitle></PopoverHeader>
               <div className='usage-window-pop-body'>
                 {rows.map(row => (
                   <div className='usage-window-reset' key={row.id}>
@@ -181,8 +190,11 @@ export function UsageWindowsCell({ entry, rows, updatedAt, creditDetail, childre
                       <span className={`usage-window-reset-value ${row.tone}`}>{row.percentText || row.view}</span>
                     </div>
                     {row.resetsAt !== null
-                      ? <time dateTime={new Date(row.resetsAt).toISOString()}>{formatTime(row.resetsAt)}</time>
-                      : <span className='usage-window-reset-unknown'>{t('未返回重置时间')}</span>}
+                      ? <time dateTime={new Date(row.resetsAt).toISOString()}>{t('重置 {date}', { date: formatTime(row.resetsAt) })}</time>
+                      : row.expiresAt === null ? <span className='usage-window-reset-unknown'>{t('未返回重置时间')}</span> : null}
+                    {row.expiresAt !== null ? <time dateTime={new Date(row.expiresAt).toISOString()}>
+                      {t('到期 {date}', { date: formatTime(row.expiresAt) })}
+                    </time> : null}
                   </div>
                 ))}
                 {supplementary.length ? <div className='usage-window-supplementary'>

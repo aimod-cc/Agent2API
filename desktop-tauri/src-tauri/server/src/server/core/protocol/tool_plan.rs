@@ -12,14 +12,12 @@
 //! 只能把调用意图当正文吐出来（2026-09 那次「Codex 调不动工具」的根因）。
 //!
 //! ── 摊平与还原 ──────────────────────────────────────────────
-//! 子工具的名字按 `namespace + name` 直接拼接 —— 这是 Codex 自己的口径
-//! （它的 MCP 命名空间自带 `mcp__server__` 尾缀，拼出来正是 `mcp__server__status`
-//! 这个规范名）。同时把 `扁平名 → (namespace, 原名)` 记进 [`ToolPlan::namespaced`]，
-//! 回程据此把调用还原成带 `namespace` 字段的形态：Codex 的工具路由按
-//! `{name, namespace}` 精确查表，少了 `namespace` 会报 `unsupported call`。
+//! 子工具以 `namespace__name` 发送；超长、非法字符与名称冲突用稳定后缀区分。
+//! 同一 `(namespace, name)` 的重复声明合并，后出现的定义覆盖之前的定义，
+//! 位置保持不变。不同分组的同名工具不能合并。
 //!
-//! 还原时按 Codex 的同一条规则归一（名字已以 namespace 开头就原样用，否则补前缀），
-//! 这样「展平 → 还原」是幂等的，历史来回几轮也不会越拼越长。
+//! 声明、历史调用、tool_choice 和回程都使用同一份名称映射。回程恢复原名
+//! 与 `namespace` 字段，Codex 才能按自己的工具清单分派调用。
 //!
 //! ── defer_loading 怎么处理 ──────────────────────────────────
 //! Responses 的 namespace 子工具常带 `defer_loading: true`，语义是「先不给模型
@@ -27,8 +25,13 @@
 //! 于是这里**忽略 defer_loading、把定义全部下发**：能少占一点上下文固然好，
 //! 但工具根本拿不到就是彻底不可用 —— 两害相权取其轻。
 
+mod names;
+
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde_json::{json, Map, Value};
 
+use names::{ToolName, ToolNames};
 use super::{freeform, is_truthy, string_field, string_value};
 use crate::server::logging;
 
@@ -46,81 +49,128 @@ const NAMESPACE_TOOL: &str = "namespace";
 /// 一次请求的工具声明经过摊平后的结果。
 #[derive(Default)]
 pub struct ToolPlan {
-    /// 可直接交给 `tool_to_chat` 的扁平声明（namespace 子工具的名字已加前缀）
     pub declarations: Vec<Value>,
-    /// 扁平名 → (namespace, 原名)：回程还原 `namespace` 字段用
-    pub namespaced: std::collections::BTreeMap<String, (String, String)>,
-    /// 原本是 custom（自由文本）的**扁平名**：回程据此决定 item 类型
-    pub custom_names: std::collections::BTreeSet<String>,
+    names: ToolNames,
+    custom_names: BTreeSet<String>,
 }
 
 impl ToolPlan {
-    /// 这个名字是否原本是 custom 工具
     pub fn is_custom(&self, name: &str) -> bool {
         self.custom_names.contains(name)
     }
+
+    pub fn call_name(&self, item: &Value) -> Result<String, String> {
+        self.names.call_name(item)
+    }
 }
 
-/// 收集请求里的全部工具声明并摊平。
-///
-/// 三个来源合并：顶层 `tools`（标准形态）、`input[]` 里的 `additional_tools`
-/// 项（Codex Lite 形态），以及 namespace 展开出来的子工具。顶层排在前面，
-/// 它是请求级声明，语义上先于中途追加。
+struct Declaration {
+    tool: Value,
+    identity: Option<ToolName>,
+}
+
+#[derive(Default)]
+struct ToolDeclarations {
+    entries: Vec<Declaration>,
+    positions: BTreeMap<ToolName, usize>,
+}
+
+impl ToolDeclarations {
+    fn push(&mut self, tool: Value, namespace: &str) {
+        let kind = string_field(&tool, "type");
+        let callable = kind.is_empty()
+            || kind.eq_ignore_ascii_case("function")
+            || freeform::is_custom_tool(&tool);
+        let name = declaration_name(&tool);
+        let identity = (callable && !name.is_empty()).then(|| ToolName::new(namespace, name));
+        if let Some(identity) = &identity {
+            if let Some(index) = self.positions.get(identity) {
+                if let Some(existing) = self.entries.get_mut(*index) {
+                    existing.tool = tool;
+                    return;
+                }
+            }
+            self.positions.insert(identity.clone(), self.entries.len());
+        } else if self.entries.iter().any(|entry| entry.identity.is_none() && entry.tool == tool) {
+            return;
+        }
+        self.entries.push(Declaration { tool, identity });
+    }
+
+    fn finish(self, request: &Value) -> ToolPlan {
+        let identities = self.entries.iter().filter_map(|entry| entry.identity.clone()).collect();
+        let mut plan = ToolPlan { names: ToolNames::new(identities, request), ..ToolPlan::default() };
+        for mut entry in self.entries {
+            if let Some(identity) = entry.identity {
+                let wire = plan.names.wire_name(&identity);
+                set_declaration_name(&mut entry.tool, &wire);
+                if freeform::is_custom_tool(&entry.tool) {
+                    plan.custom_names.insert(wire);
+                }
+            }
+            plan.declarations.push(entry.tool);
+        }
+        plan
+    }
+}
+
+/// 顶层声明先于 input 中追加的声明，同一工具最后出现的定义生效。
 pub fn plan_tools(request: &Value) -> ToolPlan {
-    let mut plan = ToolPlan::default();
+    let mut declarations = ToolDeclarations::default();
     if let Some(tools) = request.get("tools").and_then(Value::as_array) {
         for tool in tools {
-            push_tool(&mut plan, tool);
+            push_tool(&mut declarations, tool);
         }
     }
-    let Some(items) = request.get("input").and_then(Value::as_array) else {
-        return plan;
-    };
-    for item in items {
-        if !string_field(item, "type").eq_ignore_ascii_case(ADDITIONAL_TOOLS_ITEM) {
-            continue;
-        }
-        // 规范形态是 `tools: [完整工具定义]`。但 Lite 路径在不同 Codex 版本里
-        // 出现过只给名字（`tool_names: [...]`）的变体 —— 那种形态没有可转换的
-        // 定义，只能留痕跳过，硬编一份假 schema 会让模型按错误参数调用
-        if let Some(tools) = item.get("tools").and_then(Value::as_array) {
-            for tool in tools {
-                push_tool(&mut plan, tool);
+    if let Some(input) = request.get("input") {
+        match input {
+            Value::Array(items) => {
+                for item in items {
+                    collect_additional_tools(&mut declarations, item);
+                }
             }
-        } else if let Some(names) = item.get("tool_names").and_then(Value::as_array) {
-            let listed: Vec<String> = names.iter().map(|name| string_value(name)).collect();
-            logging::log(
-                "[Responses]",
-                &format!(
-                    "⚠️ additional_tools 只给了工具名、没有定义，无法转发：{}",
-                    listed.join(", ")
-                ),
-            );
+            Value::Object(_) => collect_additional_tools(&mut declarations, input),
+            _ => {}
         }
     }
-    plan
+    declarations.finish(request)
 }
 
-/// 单个声明进计划：namespace 展开成子工具，其余原样收下。
-fn push_tool(plan: &mut ToolPlan, tool: &Value) {
-    if string_field(tool, "type").eq_ignore_ascii_case(NAMESPACE_TOOL) {
-        expand_namespace(plan, tool);
+fn collect_additional_tools(declarations: &mut ToolDeclarations, item: &Value) {
+    if !string_field(item, "type").eq_ignore_ascii_case(ADDITIONAL_TOOLS_ITEM) {
         return;
     }
-    record_custom(plan, tool);
-    plan.declarations.push(tool.clone());
+    if let Some(tools) = item.get("tools").and_then(Value::as_array) {
+        for tool in tools {
+            push_tool(declarations, tool);
+        }
+    } else if let Some(names) = item.get("tool_names").and_then(Value::as_array) {
+        let listed: Vec<String> = names.iter().map(string_value).collect();
+        logging::log(
+            "[Responses]",
+            &format!(
+                "⚠️ additional_tools 只给了工具名、没有定义，无法转发：{}",
+                listed.join(", ")
+            ),
+        );
+    }
 }
 
-/// namespace → 一组扁平子声明，名字加命名空间前缀。
-fn expand_namespace(plan: &mut ToolPlan, namespace: &Value) {
+fn push_tool(declarations: &mut ToolDeclarations, tool: &Value) {
+    if string_field(tool, "type").eq_ignore_ascii_case(NAMESPACE_TOOL) {
+        expand_namespace(declarations, tool);
+    } else {
+        declarations.push(tool.clone(), "");
+    }
+}
+
+fn expand_namespace(declarations: &mut ToolDeclarations, namespace: &Value) {
     let ns_name = string_field(namespace, "name");
     let ns_desc = string_field(namespace, "description");
     let Some(children) = namespace.get("tools").and_then(Value::as_array) else {
-        // 没有子工具的 namespace 是空壳（Codex 用它占位），没什么可转的
         return;
     };
     for child in children {
-        // 嵌套 namespace：规范里没定义这种形态，不猜，留痕跳过
         if string_field(child, "type").eq_ignore_ascii_case(NAMESPACE_TOOL) {
             logging::log(
                 "[Responses]",
@@ -128,81 +178,56 @@ fn expand_namespace(plan: &mut ToolPlan, namespace: &Value) {
             );
             continue;
         }
-        let child_name = string_field(child, "name");
-        if child_name.is_empty() {
+        if declaration_name(child).is_empty() {
             continue;
         }
-        // 名字拼接口径见模块头（与 Codex 的归一规则一致）
-        let flat = if ns_name.is_empty() {
-            child_name.clone()
-        } else {
-            format!("{ns_name}{child_name}")
-        };
         let mut decl = child.clone();
+        let nested = is_nested_function(&decl);
         if let Some(fields) = decl.as_object_mut() {
-            fields.insert("name".to_string(), Value::String(flat.clone()));
-            // 命名空间的描述折进子工具：模型只看到扁平名，不给分组说明就
-            // 无从知道这组工具是干什么的
+            fields.remove("defer_loading");
+        }
+        let fields = if nested {
+            decl.get_mut("function").and_then(Value::as_object_mut)
+        } else {
+            decl.as_object_mut()
+        };
+        if let Some(fields) = fields {
             if !ns_desc.is_empty() {
                 append_description(fields, &format!("\n\n[所属分组 `{ns_name}`] {ns_desc}"));
             }
-            // defer_loading 上游没有对应机制，去掉免得被当成未知字段
             fields.remove("defer_loading");
         }
-        record_custom(plan, &decl);
-        if !ns_name.is_empty() {
-            plan.namespaced
-                .insert(flat, (ns_name.clone(), child_name));
-        }
-        plan.declarations.push(decl);
+        declarations.push(decl, &ns_name);
     }
 }
 
-/// 记下这个声明是不是 custom（自由文本）工具
-fn record_custom(plan: &mut ToolPlan, tool: &Value) {
-    if !freeform::is_custom_tool(tool) {
-        return;
-    }
-    let name = string_field(tool, "name");
-    if !name.is_empty() {
-        plan.custom_names.insert(name);
+fn declaration_name(tool: &Value) -> String {
+    if is_nested_function(tool) {
+        tool.get("function").map(|function| string_field(function, "name")).unwrap_or_default()
+    } else {
+        string_field(tool, "name")
     }
 }
 
-/// 往 description 追加一段（没有 description 就新建）
-fn append_description(fields: &mut Map<String, Value>, extra: &str) {
-    let existing = string_field(&Value::Object(fields.clone()), "description");
-    let merged = format!("{existing}{extra}");
-    fields.insert("description".to_string(), Value::String(merged));
-}
-
-/// 工具调用里的名字还原成「展平名」。
-///
-/// 客户端回传的历史里，`function_call` 的 `name` 是**原名**、命名空间在
-/// `namespace` 字段里；而给上游的 Chat 消息必须是展平后的名字，否则模型看到的
-/// 工具名前后不一致。归一规则与 Codex 一致：已经带前缀就原样用（幂等）。
-pub fn flatten_call_name(item: &Value) -> String {
-    let name = string_field(item, "name");
-    let namespace = string_field(item, "namespace");
-    if namespace.is_empty() || name.is_empty() || name.starts_with(&namespace) {
-        return name;
-    }
-    format!("{namespace}{name}")
-}
-
-/// 工具调用项 → 带 `namespace` 字段的 Responses item。
-///
-/// `plan` 里有这个扁平名的映射时补上 `namespace`：Codex 按
-/// `{name, namespace}` 精确查表，缺了它直接报 `unsupported call`。
-pub fn restore_namespace(mut item: Value, flat_name: &str, plan: &ToolPlan) -> Value {
-    let Some((namespace, original)) = plan.namespaced.get(flat_name) else {
-        return item;
+fn set_declaration_name(tool: &mut Value, name: &str) {
+    let fields = if is_nested_function(tool) {
+        tool.get_mut("function").and_then(Value::as_object_mut)
+    } else {
+        tool.as_object_mut()
     };
-    if let Some(fields) = item.as_object_mut() {
-        fields.insert("namespace".to_string(), Value::String(namespace.clone()));
-        fields.insert("name".to_string(), Value::String(original.clone()));
+    if let Some(fields) = fields {
+        fields.insert("name".to_string(), Value::String(name.to_string()));
     }
-    item
+}
+
+fn append_description(fields: &mut Map<String, Value>, extra: &str) {
+    let existing = fields.get("description").map(string_value).unwrap_or_default();
+    fields.insert("description".to_string(), Value::String(format!("{existing}{extra}")));
+}
+
+/// 同时用于完整调用项和携带 name 的流式事件。
+pub fn restore_call(item: Value, flat_name: &str, plan: &ToolPlan) -> Value {
+    plan.names.restore(item, flat_name)
 }
 
 /// 工具声明在日志里的可读标签（`function:bash` / `web_search` / …）。

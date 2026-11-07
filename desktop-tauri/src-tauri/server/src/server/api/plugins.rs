@@ -23,7 +23,40 @@ pub async fn list() -> Response {
     result["catalog"] = plugin_host::catalog::snapshot();
     result["updates"] = plugin_host::catalog::updates()["updates"].clone();
     result["operations"] = plugin_host::operations::snapshot()["operations"].clone();
+    result["scripts"] = plugin_host::script::snapshot();
     ok_json(result)
+}
+
+pub async fn install_script(body: Bytes) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(payload) => payload,
+        Err(error) => return management_error(400, error.message),
+    };
+    let name = payload.get("source").filter(|value| value.is_string())
+        .unwrap_or(&payload["name"]).as_str().unwrap_or("").trim().to_string();
+    let version = payload["version"].as_str().unwrap_or("").trim().to_string();
+    let trusted = payload["trusted"].as_bool().unwrap_or(false);
+    let checkin_allowed = payload["checkinAllowed"].as_bool().unwrap_or(false);
+    let expected_id = payload["id"].as_str().map(str::to_string);
+    match plugin_host::script::install(name, version, trusted, checkin_allowed, expected_id) {
+        Ok(operation) => ok_json(json!({ "operation": operation })),
+        Err(error) => management_error(400, error),
+    }
+}
+
+pub async fn change_script(body: Bytes) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(payload) => payload,
+        Err(error) => return management_error(400, error.message),
+    };
+    let id = payload["id"].as_str().unwrap_or("").to_string();
+    let action = payload["action"].as_str().unwrap_or("").to_string();
+    let enabled = payload["enabled"].as_bool();
+    let provider = payload["provider"].as_str().map(str::to_string);
+    match plugin_host::script::change(id, action, enabled, provider) {
+        Ok(operation) => ok_json(json!({ "operation": operation })),
+        Err(error) => management_error(400, error),
+    }
 }
 
 pub async fn settings() -> Response {

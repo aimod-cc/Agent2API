@@ -2,21 +2,50 @@ import * as React from 'react'
 import { mountOnPage } from '../island-lazy'
 import { createRoot } from 'react-dom/client'
 import {
-  Badge, Button, Card, CardFooter, CardHeader, Collapsible, CollapsibleContent,
-  CollapsibleTrigger, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader,
-  DialogTitle, Input, Progress,
+  Alert, Button, Card, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader,
+  DialogTitle, Empty, EmptyDescription, EmptyTitle, Input, InputGroup, InputGroupAddon,
+  InputGroupInput, PageDescription, PageHeader, PageTitle, Progress, SegmentedControl,
 } from '@ui'
 import { InstalledPluginCard, StorePluginCard } from './plugins-cards'
 import { PluginNotesDialog, type PluginNotes } from './plugins-notes'
 import { PluginPackSettingsDialog } from './plugins-pack-settings'
 import { PluginSettingsDialog } from './plugins-settings'
-import { api, bridge, errorMessage, pluginName, readBase64, toast } from './plugins-shared'
+import { api, bridge, errorMessage, pluginDescription, pluginName, readBase64, toast } from './plugins-shared'
 import type { PackSummary, PluginMutation, PluginOperation, PluginUpdate, PluginsPayload, ReleaseState } from './plugins-types'
 import { t } from '../i18n'
+import { ScriptPluginsPanel } from '../../../ui-shared/plugins-scripts'
+import { matchesRecommendedPlugin, matchesScriptPlugin, scriptRecommendations } from '../../../ui-shared/plugins-script-display'
+import { PluginSectionHeading } from '../../../ui-shared/plugins-store'
+import { PluginDiagnostics, PluginPageTools } from './plugins-page-tools'
 
 const MIB = 1024 * 1024
 const LEGACY_MAX_PACK_BYTES = 24 * MIB
 const HARD_MAX_PACK_BYTES = 96 * MIB
+
+type SourceFilter = 'all' | 'agent2' | 'magpie'
+// 「可更新」是已安装插件的子集，计数不能与已安装相加。
+type StatusFilter = 'all' | 'updatable' | 'installed' | 'missing'
+
+type FilterItem = { installed: boolean; updatable: boolean }
+
+function matchesStatus(item: FilterItem, status: StatusFilter): boolean {
+  if (status === 'all') return true
+  if (status === 'updatable') return item.installed && item.updatable
+  return item.installed === (status === 'installed')
+}
+
+/** 一组带小标题的分段筛选。 */
+function FilterGroup<T extends string>({ label, options, value, onChange }: {
+  label: string
+  options: ReadonlyArray<{ value: T; label: string; count: number }>
+  value: T
+  onChange: (value: T) => void
+}) {
+  return <div className='flex flex-wrap items-center gap-2.5'>
+    <span className='text-[11.5px] text-muted-foreground'>{label}</span>
+    <SegmentedControl options={options} value={value} onValueChange={onChange} aria-label={label} />
+  </div>
+}
 
 function clampMaxPackBytes(value: unknown): number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
@@ -47,6 +76,13 @@ function PluginsPage(): React.ReactElement {
   const [settingsPackId, setSettingsPackId] = React.useState<string | null>(null)
   const [confirmRemove, setConfirmRemove] = React.useState<PackSummary | null>(null)
   const [notes, setNotes] = React.useState<PluginNotes | null>(null)
+  const [source, setSource] = React.useState<SourceFilter>('all')
+  const [status, setStatus] = React.useState<StatusFilter>('all')
+  const [search, setSearch] = React.useState('')
+  const [diagnosticsOpen, setDiagnosticsOpen] = React.useState(false)
+  const [scriptBusy, setScriptBusy] = React.useState(false)
+  const [scriptInstallRequest, setScriptInstallRequest] = React.useState(0)
+  const [bulk, setBulk] = React.useState<{ index: number; total: number } | null>(null)
   const fileRef = React.useRef<HTMLInputElement>(null)
   const seenOperations = React.useRef(new Set<string>())
   const previousSignature = React.useRef('')
@@ -69,6 +105,7 @@ function PluginsPage(): React.ReactElement {
         const signature = JSON.stringify({
           packs: next.packs.map(pack => ({ id: pack.id, version: pack.version, enabled: pack.enabled, providers: pack.providers })),
           running: next.host?.running,
+          scripts: next.scripts?.packages,
         })
         const changed = Boolean(previousSignature.current && previousSignature.current !== signature)
         previousSignature.current = signature
@@ -111,7 +148,7 @@ function PluginsPage(): React.ReactElement {
   }, [load])
 
   async function run(key: string, action: () => Promise<void>): Promise<void> {
-    if (busy) return
+    if (busy || scriptBusy) return
     setBusy(key)
     try { await action() }
     catch (error) { toast(error instanceof Error ? error.message : String(error), 'err') }
@@ -155,6 +192,53 @@ function PluginsPage(): React.ReactElement {
     })
   }
 
+  async function updateAll(ids: string[]): Promise<void> {
+    if (busy || scriptBusy || !ids.length) return
+    setBusy('updateAll')
+    setBulk({ index: 0, total: ids.length })
+    const failures: string[] = []
+    try {
+      for (const [index, id] of ids.entries()) {
+        if (!mounted.current) return
+        setBulk({ index: index + 1, total: ids.length })
+        try {
+          const result = await api<{ operation: PluginOperation }>('POST', '/api/plugins/update',
+            { id, target: payload?.target })
+          let operation = result.operation
+          const remember = () => setPayload(previous => previous ? {
+            ...previous, operations: [...(previous.operations || []).filter(item => item.id !== id), operation],
+          } : previous)
+          remember()
+          // 安装接口只启动后台任务，必须等任务结束后再计为完成。
+          while (operation.active && mounted.current) {
+            await new Promise(resolve => window.setTimeout(resolve, 1000))
+            if (!mounted.current) return
+            const progress = await api<{ operations: PluginOperation[] }>('GET', '/api/plugins/progress')
+            const next = progress.operations.find(item => item.id === id)
+            if (!next) throw new Error(t('无法读取插件更新进度，请刷新后查看结果。'))
+            operation = next
+            remember()
+          }
+          if (!mounted.current) return
+          if (!operation.done || operation.error || operation.hostError) {
+            throw new Error(operation.error || operation.hostError || t('插件更新未完成'))
+          }
+        } catch (cause) {
+          failures.push(`${pluginName(id, payload?.packs.find(pack => pack.id === id)?.name)}：${errorMessage(cause instanceof Error ? cause.message : cause)}`)
+        }
+        await load()
+      }
+      const done = ids.length - failures.length
+      if (failures.length) {
+        toast(t('已更新 {done} 个插件，{failed} 个失败：{error}', { done, failed: failures.length, error: failures.join('；') }), 'err')
+      } else {
+        toast(t('已更新 {count} 个插件', { count: done }), 'ok')
+      }
+    } finally {
+      if (mounted.current) { setBusy(''); setBulk(null); await load() }
+    }
+  }
+
   function pickFile(): void {
     if (fileRef.current) { fileRef.current.value = ''; fileRef.current.click() }
   }
@@ -179,98 +263,155 @@ function PluginsPage(): React.ReactElement {
   const operations = payload?.operations || []
   const active = operations.some(operation => operation.active)
   const target = payload?.target || ''
-  const locked = Boolean(busy)
+  const locked = Boolean(busy) || scriptBusy
   const settingsPack = packs.find(pack => pack.id === settingsPackId)
   const settingsOperation = operations.find(operation => operation.id === settingsPackId)
+
+  const updates = payload?.updates || []
+  const updateOf = (id: string) => updates.find(item => item.id === id)
+  const updatable = (id: string) => updateOf(id)?.available === true
+  const scripts = payload?.scripts
+  const scriptItems = scripts?.packages || []
+  const recommendations = scripts ? scriptRecommendations(scripts) : []
+  const missingScripts = recommendations.filter(item => !scriptItems.some(pack => pack.name === item.name))
+  const keyword = search.trim().toLocaleLowerCase()
+  const searchedPacks = packs.filter(pack => {
+    const entry = store.find(item => item.id === pack.id)
+    return !keyword || [pack.id, pluginName(pack.id, entry?.name || pack.name), pluginDescription(pack.id, entry?.description || pack.description),
+      ...pack.providers.map(provider => `${provider.id} ${t(provider.label)}`)].join(' ').toLocaleLowerCase().includes(keyword)
+  })
+  const searchedStore = storePlugins.filter(item => !keyword
+    || `${item.id} ${pluginName(item.id, item.name)} ${pluginDescription(item.id, item.description)}`.toLocaleLowerCase().includes(keyword))
+  const searchedScripts = scriptItems.filter(pack => matchesScriptPlugin(pack, recommendations, search, t))
+  const recommendedMatches = missingScripts.filter(item => matchesRecommendedPlugin(item, search, t))
+  const nativeItems: FilterItem[] = [
+    ...searchedPacks.map(pack => ({ installed: true, updatable: updatable(pack.id) })),
+    ...searchedStore.map(() => ({ installed: false, updatable: false })),
+  ]
+  const magpieItems: FilterItem[] = [
+    ...searchedScripts.map(() => ({ installed: true, updatable: false })),
+    ...recommendedMatches.map(() => ({ installed: false, updatable: false })),
+  ]
+  const itemsFor = (chosen: SourceFilter): FilterItem[] => chosen === 'agent2' ? nativeItems
+    : chosen === 'magpie' ? magpieItems : [...nativeItems, ...magpieItems]
+  const countMatching = (chosen: SourceFilter, next: StatusFilter) => itemsFor(chosen).filter(item => matchesStatus(item, next)).length
+  const showNative = source !== 'magpie'
+  const showScripts = source !== 'agent2' && status !== 'updatable'
+  const installedRows = searchedPacks.filter(pack => matchesStatus({ installed: true, updatable: updatable(pack.id) }, status))
+  const storeRows = searchedStore.filter(() => matchesStatus({ installed: false, updatable: false }, status))
+  const shownCount = countMatching(source, status)
+  const hasAny = packs.length + storePlugins.length + scriptItems.length + missingScripts.length > 0
+  const bulkIds = showNative ? installedRows.filter(pack => {
+    const update = updateOf(pack.id)
+    return update?.available && !update.error && !update.repairing && !operations.some(operation => operation.id === pack.id && operation.active)
+  }).map(pack => pack.id) : []
 
   React.useEffect(() => {
     if (settingsPackId && payload && !settingsPack) setSettingsPackId(null)
   }, [payload, settingsPack, settingsPackId])
 
   return <>
-    <Card className='panel'>
-      <CardHeader className='panel-head'>
-        <div>
-          <h2>{t('插件')}</h2>
-          <p className='muted'>{t('按需安装插件，为 AI 路由网关扩展提供商能力。插件独立于主程序更新，下载完成后自动校验并安装。')}</p>
+    <div className='mx-auto flex w-full max-w-[1180px] flex-col gap-6 pb-4 text-foreground'>
+      <PageHeader className='flex-wrap items-end gap-x-6 gap-y-3'>
+        <div className='min-w-0 flex-1'>
+          <PageTitle className='text-[26px] font-bold tracking-[-0.022em]'>{t('插件')}</PageTitle>
+          <PageDescription className='mt-1.5 max-w-[52em] leading-relaxed'>
+            {t('按需安装插件，为 AI 路由网关扩展提供商能力。插件独立于主程序更新，下载完成后自动校验并安装。')}
+          </PageDescription>
         </div>
-        <div className='flex flex-wrap items-center justify-end gap-2'>
-          <Badge variant={host?.running ? 'success' : 'outline'}>
-            {host?.running ? t('运行中') : packs.length ? t('未运行') : t('未安装')}
-          </Badge>
-          <Button variant='outline' size='sm' disabled={locked} onClick={() => void refreshStore()}>
-            {busy === 'refresh' ? t('刷新中…') : t('刷新')}
-          </Button>
-          <Button variant='outline' size='sm' disabled={locked} onClick={() => void check()}>
-            {busy === 'check' || catalog?.checking ? t('检查中…') : t('检查更新')}
-          </Button>
-          <Button variant='outline' size='sm' onClick={() => setSettingsOpen(true)}>{t('插件设置')}</Button>
-          <Button variant='outline' size='sm' disabled={locked || active} onClick={pickFile}>{t('从文件安装…')}</Button>
+        <div className='ml-auto flex items-center gap-2'>
+          <InputGroup className='w-[220px] rounded-pill border-hairline bg-surface-inset'>
+            <InputGroupInput type='search' value={search} placeholder={t('搜索插件')} aria-label={t('搜索插件')}
+              onChange={event => setSearch(event.currentTarget.value)} />
+            <InputGroupAddon>
+              <svg width='13' height='13' viewBox='0 0 16 16' fill='none' stroke='currentColor' strokeWidth='1.7'
+                strokeLinecap='round' strokeLinejoin='round' aria-hidden='true'>
+                <circle cx='6.8' cy='6.8' r='4.6' /><path d='M10.3 10.3 14 14' />
+              </svg>
+            </InputGroupAddon>
+          </InputGroup>
+          <PluginPageTools disabled={locked} fileDisabled={locked || active} scriptDisabled={locked || scripts?.operation.active === true}
+            scriptsAvailable={Boolean(scripts)} checking={busy === 'check' || catalog?.checking === true}
+            onRefresh={() => void refreshStore()} onCheck={() => void check()} onSettings={() => setSettingsOpen(true)}
+            onFile={pickFile} onScript={() => setScriptInstallRequest(value => value + 1)} onDiagnostics={() => setDiagnosticsOpen(true)} />
         </div>
-      </CardHeader>
-      <div className='p-4'>
-        <Input ref={fileRef} type='file' accept='.zip,application/zip' className='hidden' onChange={event => void onFile(event)} />
-        {error || syncError ? <p className='mb-3 text-[12px] text-destructive'>{error || syncError}</p> : null}
-        {busy === 'file' ? <div className='mb-3 flex flex-col gap-2'>
-          <span className='text-[12px] text-subtle'>{t('正在读取、校验并安装插件包…')}</span>
-          <Progress value={null} />
+      </PageHeader>
+      <Input ref={fileRef} type='file' accept='.zip,application/zip' className='hidden' onChange={event => void onFile(event)} />
+      {error || syncError ? <Alert variant='destructive' className='break-words'>{error || syncError}</Alert> : null}
+      {busy === 'file' ? <div className='flex flex-col gap-2' aria-live='polite'>
+        <span className='text-[12px] text-subtle'>{t('正在读取、校验并安装插件包…')}</span><Progress value={null} />
+      </div> : null}
+      <div className='flex flex-wrap items-center gap-x-7 gap-y-3'>
+        <FilterGroup label={t('来源')} value={source} onChange={setSource} options={[
+          { value: 'all', label: t('全部'), count: countMatching('all', status) },
+          { value: 'agent2', label: t('Agent2 社区'), count: countMatching('agent2', status) },
+          { value: 'magpie', label: t('Magpie 社区'), count: countMatching('magpie', status) },
+        ]} />
+        <FilterGroup label={t('状态')} value={status} onChange={setStatus} options={[
+          { value: 'all', label: t('全部'), count: countMatching(source, 'all') },
+          { value: 'updatable', label: t('可更新'), count: countMatching(source, 'updatable') },
+          { value: 'installed', label: t('已安装'), count: countMatching(source, 'installed') },
+          { value: 'missing', label: t('未安装'), count: countMatching(source, 'missing') },
+        ]} />
+        {bulk ? <span className='ml-auto text-[12px] text-subtle' aria-live='polite'>
+          {t('正在更新第 {index}／{total} 个…', { index: bulk.index, total: bulk.total })}
+        </span> : bulkIds.length ? <div className='ml-auto flex flex-wrap items-center gap-2.5'>
+          <span className='text-[12px] text-primary-fg'>{t('有 {count} 个插件可更新', { count: bulkIds.length })}</span>
+          <Button size='sm' disabled={locked || active || scripts?.operation.active === true} onClick={() => void updateAll(bulkIds)}>{t('全部更新')}</Button>
         </div> : null}
-        <div className='grid grid-cols-1 items-start gap-3.5 min-[900px]:grid-cols-2'>
-          {storePlugins.map(item => <StorePluginCard key={item.id} item={item} target={target}
+      </div>
+      {showNative && (installedRows.length > 0 || storeRows.length > 0) ? <section aria-label={t('Agent2 社区')}>
+        <PluginSectionHeading t={t} title={t('Agent2 社区')} count={installedRows.length + storeRows.length}
+          hint={t('原生插件包，来自项目插件仓库')} />
+        <div className='grid grid-cols-1 gap-3.5 min-[900px]:grid-cols-2'>
+          {installedRows.map(pack => {
+            const operation = operations.find(item => item.id === pack.id)
+            return <InstalledPluginCard key={pack.id} pack={pack} store={store.find(item => item.id === pack.id)}
+              host={host || null} update={updateOf(pack.id)} operation={operation} disabled={locked || operation?.active === true}
+              onEnabled={enabled => void mutation(`enable:${pack.id}`, '/api/plugins/enable', { id: pack.id, enabled })}
+              onSettings={() => setSettingsPackId(pack.id)} />
+          })}
+          {storeRows.map(item => <StorePluginCard key={item.id} item={item} target={target}
             operation={operations.find(operation => operation.id === item.id)} disabled={locked}
             onInstall={() => void start(item.id, false)}
             onNotes={() => setNotes({ name: pluginName(item.id, item.name), version: item.version || '',
               notes: item.notes, page: item.page, prerelease: item.prerelease })} />)}
-          {packs.map(pack => {
-            const update = payload?.updates?.find(item => item.id === pack.id)
-            const operation = operations.find(item => item.id === pack.id)
-            return <InstalledPluginCard key={pack.id} pack={pack} store={store.find(item => item.id === pack.id)}
-              host={host || null} update={update} operation={operation} disabled={locked || operation?.active === true}
-              onEnabled={enabled => void mutation(`enable:${pack.id}`, '/api/plugins/enable', { id: pack.id, enabled })}
-              onSettings={() => setSettingsPackId(pack.id)}
-              onRemove={() => setConfirmRemove(pack)} onUpdate={() => void start(pack.id, true)}
-              onNotes={() => setNotes({ name: pluginName(pack.id, pack.name), version: update?.latest || '',
-                notes: update?.notes, page: update?.page, prerelease: update?.prerelease })} />
-          })}
         </div>
-        {!storePlugins.length && !packs.length ? <div className='rounded-lg border border-border bg-surface px-4 py-5'>
-          <p className='text-[13px] font-medium'>{!payload || catalog?.checking
-            ? t('正在读取插件列表…') : t('暂无可安装的插件')}</p>
-          <p className='mt-2 text-[12px] text-subtle'>{errorMessage(catalog?.reason) || t('可以点击「刷新」读取插件仓库，或从本地 zip 安装插件。')}</p>
-        </div> : null}
-        {payload ? <Collapsible className='mt-3 rounded-md border border-hairline bg-surface-2'>
-          <CollapsibleTrigger render={<Button variant='ghost' />}
-            className='group/diagnostics flex h-auto w-full justify-start gap-2 rounded-md px-3 py-3 text-[12px] text-subtle'>
-            <svg viewBox='0 0 24 24' className='size-3.5 transition-transform duration-150 group-aria-expanded/diagnostics:rotate-90 motion-reduce:transition-none'
-              fill='none' stroke='currentColor' strokeWidth='1.8' strokeLinecap='round' strokeLinejoin='round' aria-hidden='true'>
-              <path d='m9 5 7 7-7 7' />
-            </svg>
-            {t('诊断信息')}
-          </CollapsibleTrigger>
-          <CollapsibleContent>
-            <div className='flex flex-col gap-1 px-3 pb-3 text-[12px] text-subtle'>
-              <span>{t('插件目录')} <code className='break-all'>{payload.pluginsDir}</code></span>
-              <span>{t('当前平台')} <code>{payload.target}</code></span>
-              <span>{t('协议版本')} {payload.protocol}</span>
-              {catalog?.reason ? <span className='text-destructive'>{errorMessage(catalog.reason)}</span> : null}
-              {host?.lastError ? <span className='text-destructive'>{host.lastError}</span> : null}
-            </div>
-          </CollapsibleContent>
-        </Collapsible> : null}
-      </div>
-      <CardFooter className='panel-foot'>{t('插件包与主程序分开安装、分开升级。卸载插件后账号数据仍然保留，重新装回即可继续使用；仅该包提供的转发与添加账号需要插件，本体订阅不受影响。')}</CardFooter>
-    </Card>
+      </section> : null}
+      {!payload || shownCount === 0 ? <Card><Empty>
+        <EmptyTitle>{!payload || (!hasAny && catalog?.checking) ? t('正在读取插件列表…')
+          : hasAny ? t('没有符合筛选条件的插件') : t('暂无可安装的插件')}</EmptyTitle>
+        <EmptyDescription>{hasAny ? t('换一组筛选条件，或把来源和状态都切回「全部」。')
+          : errorMessage(catalog?.reason) || t('可以点击「刷新」读取插件仓库，或从本地 zip 安装插件。')}</EmptyDescription>
+      </Empty></Card> : null}
+      {scripts ? <ScriptPluginsPanel state={scripts} t={t} disabled={Boolean(busy)} query={search}
+        galleryVisible={showScripts} showInstallAction={false} installRequest={scriptInstallRequest} onBusyChange={setScriptBusy}
+        showInstalled={status === 'all' || status === 'installed'} showRecommended={status === 'all' || status === 'missing'}
+        request={(path, body) => api('POST', path, body)} refresh={load} /> : null}
+      <p className='m-0 text-[11.5px] leading-relaxed text-muted-foreground'>
+        {t('插件独立安装与更新。卸载后账号数据仍会保留；脚本插件共用一个按需下载的运行时。')}
+      </p>
+    </div>
     <PluginSettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} onChanged={check} />
+    <PluginDiagnostics open={diagnosticsOpen} payload={payload} onClose={() => setDiagnosticsOpen(false)} />
     {settingsPack ? <PluginPackSettingsDialog key={settingsPack.id} pack={settingsPack}
-      name={store.find(item => item.id === settingsPack.id)?.name}
+      store={store.find(item => item.id === settingsPack.id)} update={updateOf(settingsPack.id)} operation={settingsOperation}
       disabled={locked || settingsOperation?.active === true} onClose={() => setSettingsPackId(null)}
       onEnabled={enabled => void mutation(`enable:${settingsPack.id}`, '/api/plugins/enable', { id: settingsPack.id, enabled })}
       onProvider={(provider, enabled) => void mutation(`provider:${provider.id}`, '/api/plugins/provider', {
         id: settingsPack.id, provider: provider.id, enabled,
-      })} /> : null}
+      })}
+      onUpdate={() => void start(settingsPack.id, true)}
+      onNotes={() => {
+        const update = updateOf(settingsPack.id)
+        setSettingsPackId(null)
+        setNotes({ name: pluginName(settingsPack.id, settingsPack.name), version: update?.latest || settingsPack.version,
+          notes: update?.notes, page: update?.page, prerelease: update?.prerelease })
+      }}
+      onRemove={() => { setConfirmRemove(settingsPack); setSettingsPackId(null) }} /> : null}
     <PluginNotesDialog value={notes} onClose={() => setNotes(null)} />
     <Dialog open={confirmRemove !== null} onOpenChange={next => { if (!next) setConfirmRemove(null) }}>
-      <DialogContent>
+      <DialogContent className='text-foreground'>
         <DialogHeader><DialogTitle>{t('卸载插件包')}</DialogTitle></DialogHeader>
         <DialogBody><p className='text-[13px]'>
           {t('确定卸载「{name}」吗？卸载后这个包里的提供商将无法转发，也无法添加账号。账号数据本身不会被删除，重新安装后可以继续使用。', {

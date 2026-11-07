@@ -17,6 +17,7 @@
  * 见该函数自己的说明。
  */
 
+import type { GithubFailure } from '../../../ui-shared/github-access'
 import type * as React from 'react'
 import type { AssetProbe, UpdateChannels, ForceUpdatePolicy, UpdateCapability, ServiceUpdateTask } from '../../../ui-shared/updates'
 import { assetMissingReason, githubErrorMessage, updateUnavailableReason } from '../../../ui-shared/updates'
@@ -32,7 +33,7 @@ import { t } from '../i18n'
 
 /** 更新检查结果（checkUpdate 的壳命令返回 / getUpdateStatus 的缓存）。字段按可选收：
  *  后端在「仓库暂无发布版本」「版本号无法解析」等情形下会给 null */
-export type UpdateInfo = {
+export type UpdateInfo = GithubFailure & {
   updateCapability?: UpdateCapability
   systemdTask?: ServiceUpdateTask | null
   serviceTask?: ServiceUpdateTask | null

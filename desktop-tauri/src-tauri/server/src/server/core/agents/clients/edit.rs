@@ -12,8 +12,8 @@ pub fn sync_cached_config(def: &ClientDef, path: &std::path::Path, plan: &mut Pl
     if cached.before.is_none() { return Ok(()); }
     let original = files::text(cached.before.as_deref())?;
     let mut value = files::parse(ConfigFormat::Json, &original)?;
-    let id = profile.native.source_id.as_str();
-    if value.get("providers").and_then(|providers| providers.get(id)).is_some() {
+    let id = super::native_id(profile);
+    if value.get("providers").and_then(|providers| providers.get(&id)).is_some() {
         super::crush::write(&data, &mut value, profile, "apply")?;
     }
     if profile.enabled {
@@ -35,7 +35,7 @@ pub fn preserve_selection(def: &ClientDef, value: &mut Value, old: &Profile) -> 
         let selected = string(&old.native.settings, "profile");
         let path = if selected.is_empty() { Vec::new() } else { vec!["profiles", selected.as_str()] };
         let original = old.native.settings.get("runtime").unwrap_or(&Value::Null);
-        for key in ["model_provider", "model", "model_reasoning_effort"] {
+        for key in ["model_provider", "model", "model_reasoning_effort", "model_catalog_json", "model_context_window", "model_auto_compact_token_limit"] {
             let mut field = path.clone(); field.push(key);
             if let Some(item) = original.get(key).filter(|item| !item.is_null()) { set(value, &field, item.clone())?; }
             else { remove(value, &field); }
@@ -58,7 +58,7 @@ pub fn preserve_selection(def: &ClientDef, value: &mut Value, old: &Profile) -> 
 
 pub fn remove_models(def: &ClientDef, plan: &mut Plan, old: &Profile, wanted: &HashSet<&str>) -> Result<(), String> {
     let removed = old.models.iter().map(|model| model.id.as_str()).filter(|id| !wanted.contains(id)).collect::<HashSet<_>>();
-    if removed.is_empty() || def.id == "dsh" { return Ok(()); }
+    if removed.is_empty() || matches!(def.id, "dsh" | "codex" | "claude-code") { return Ok(()); }
     let id = old.native.source_id.as_str();
     for change in &mut plan.changes {
         let original = files::text(change.after.as_deref())?;
@@ -89,7 +89,11 @@ pub fn remove_models(def: &ClientDef, plan: &mut Plan, old: &Profile, wanted: &H
                 let keys = value.get("models").and_then(Value::as_object).map(|models| models.iter()
                     .filter(|(_, model)| string(model, "provider") == id && removed.contains(string(model, "model").as_str()))
                     .map(|(key, _)| key.clone()).collect::<Vec<_>>()).unwrap_or_default();
-                for key in keys { remove(&mut value, &["models", &key]); }
+                for key in &keys { remove(&mut value, &["models", key]); }
+                if keys.iter().any(|key| value.pointer("/secondary_model/default_model").and_then(Value::as_str) == Some(key)) {
+                    return Err("移除的 Kimi 模型仍被子 Agent 默认配置使用，请先在客户端更换子 Agent 模型".into());
+                }
+                if let Some(pool) = value.pointer_mut("/secondary_model/models").and_then(Value::as_object_mut) { for key in keys { pool.remove(&key); } }
             }
             "zed" => {
                 if let Some(models) = at_mut(&mut value, &["language_models", "openai_compatible", id, "available_models"]).and_then(Value::as_array_mut) {
@@ -99,6 +103,9 @@ pub fn remove_models(def: &ClientDef, plan: &mut Plan, old: &Profile, wanted: &H
             }
             "crush" => {
                 if let Some(models) = at_mut(&mut value, &["providers", id, "models"]).and_then(Value::as_array_mut) { models.retain(|model| !removed.contains(string(model, "id").as_str())); }
+                if let Some(selected) = value.get_mut("models").and_then(Value::as_object_mut) {
+                    selected.retain(|_, model| string(model, "provider") != id || !removed.contains(string(model, "model").as_str()));
+                }
             }
             "cline" => {
                 if change.path.file_name().is_some_and(|file| file == "models.json") {

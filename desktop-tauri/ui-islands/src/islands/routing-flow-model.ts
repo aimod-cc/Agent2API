@@ -15,7 +15,7 @@ export const clientLabel = (client: string): string => {
   switch (client) {
     case '': return t('未识别客户端')
     case 'other': return t('其他客户端')
-    case 'assistant': return t('AI 助手')
+    case 'assistant': return t('模型对话')
     case 'assistant_images': return t('助手图片工具')
     case 'assistant_title': return t('助手标题总结')
     case 'model_test': return t('模型测试')

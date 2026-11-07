@@ -1,11 +1,25 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 pub mod client;
 pub mod config;
+pub mod executable;
+mod policy;
+pub mod process;
+mod process_guard;
+pub mod projection;
 pub mod sessions;
+pub mod state;
+pub mod storage;
+pub mod permissions;
+mod transport;
+mod terminal_gateway;
+mod terminal_policy;
+mod terminal_process;
+pub mod terminal;
+mod private_directory;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CodingError {
     pub status: u16,
     pub message: String,
@@ -28,37 +42,10 @@ impl From<String> for CodingError {
 
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum Engine { Codex, Claude }
+pub enum Engine { Codex }
 
-impl Engine {
-    pub fn as_str(self) -> &'static str {
-        match self { Self::Codex => "codex", Self::Claude => "claude" }
-    }
+pub fn string<'a>(value: &'a Value, key: &str) -> &'a str {
+    value.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-pub fn session_view(session: &Value) -> Option<Value> {
-    let metadata = session.get("metadata")?;
-    let engine = metadata.get("flavor").and_then(Value::as_str).unwrap_or("claude");
-    if !["codex", "claude"].contains(&engine) { return None; }
-    let title = metadata.get("name").and_then(Value::as_str).filter(|v| !v.is_empty())
-        .or_else(|| metadata.pointer("/summary/text").and_then(Value::as_str))
-        .or_else(|| metadata.get("promptTitle").and_then(Value::as_str)).unwrap_or("");
-    let requests = session.pointer("/agentState/requests").and_then(Value::as_object);
-    let permissions: Vec<Value> = requests.into_iter().flat_map(|items| items.iter()).map(|(id, item)| {
-        json!({ "id": id, "tool": item.get("tool"), "arguments": item.get("arguments"),
-            "createdAt": item.get("createdAt"), "toolCallId": item.get("toolCallId") })
-    }).collect();
-    Some(json!({
-        "id": session.get("id")?, "engine": engine, "title": title,
-        "directory": metadata.get("path"), "machineId": metadata.get("machineId"),
-        "active": session.get("active").and_then(Value::as_bool).unwrap_or(false),
-        "thinking": session.get("thinking").and_then(Value::as_bool).unwrap_or(false),
-        "updatedAt": session.get("updatedAt"), "model": session.get("model"),
-        "permissionMode": session.get("permissionMode"),
-        "controlledByTerminal": session.pointer("/agentState/controlledByUser").and_then(Value::as_bool).unwrap_or(false),
-        "concurrentClients": metadata.pointer("/capabilities/concurrentClients").and_then(Value::as_bool).unwrap_or(false),
-        "pendingCount": session.get("pendingRequestsCount").and_then(Value::as_u64).unwrap_or(permissions.len() as u64),
-        "permissions": permissions,
-        "lifecycle": metadata.get("lifecycleState"),
-    }))
-}
+pub fn now() -> i64 { crate::server::logging::now_ms() }

@@ -26,7 +26,7 @@ pub fn revision(profiles: &[Profile]) -> Option<String> {
 pub fn editable(def: &ClientDef, profile: &Profile) -> bool {
     def.writable && def.protocols.contains(&profile.protocol.as_str())
         && !(def.id == "cline" && profile.native.source_id != "openai-compatible")
-        && !(def.models && profile.native.entry.is_null())
+        && !(def.models && profile.native.entry.is_null() && !matches!(def.id, "claude-code" | "codex"))
 }
 
 pub fn request_plan(def: &ClientDef, path: &Path, payload: &Value, port: u16) -> Result<clients::Plan, String> {
@@ -48,6 +48,7 @@ pub fn request_plan(def: &ClientDef, path: &Path, payload: &Value, port: u16) ->
     }
     let value = payload.get("profile").ok_or("缺少要编辑的配置")?;
     let mut profile = store::from_request(value, Some(&old))?;
+    super::model_config::normalize(def, &mut profile);
     if profile.id != old.id {
         return Err("不能修改客户端配置的标识".into());
     }
@@ -62,7 +63,6 @@ pub fn request_plan(def: &ClientDef, path: &Path, payload: &Value, port: u16) ->
     if !old.enabled { definition.default_model = false; }
     let operation = if old.enabled && definition.default_model { "default" } else { "apply" };
     let mut plan = clients::plan(&definition, path, &profile, operation, port)?;
-    clients::sync_cached_config(def, path, &mut plan, &profile)?;
     let model_ids: std::collections::HashSet<_> = profile.models.iter().map(|model| model.id.as_str()).collect();
     clients::remove_models(def, &mut plan, &old, &model_ids)?;
     for change in &mut plan.changes {

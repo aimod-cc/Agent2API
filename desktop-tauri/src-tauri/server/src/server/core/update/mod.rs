@@ -10,6 +10,7 @@ mod service_task;
 #[path = "systemd/trust.rs"]
 mod service_trust;
 pub(crate) mod source;
+pub(crate) mod rate_limit;
 mod source_state;
 mod selection;
 mod probe;

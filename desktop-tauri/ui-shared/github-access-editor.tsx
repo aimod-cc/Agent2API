@@ -1,5 +1,6 @@
 import * as React from 'react'
 import { Alert, Button, Input, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch } from '../ui-kit/src'
+import { useGithubClock } from './github-failure'
 import {
   DEFAULT_GITHUB_MIRRORS, githubMirrors, githubSourceLabel,
   type GithubAccessPatch, type GithubAccessSettings, type GithubMirror, type GithubSourceObservation,
@@ -116,7 +117,7 @@ export function GithubAccessEditor({ load, persist, notify, t, mobile = false }:
       ) : null}
       <div className='rounded-md border border-border p-3'>
         <div className='font-medium text-foreground'>{t('官方源')}</div>
-        <SourceStatus source='official' observations={settings?.observations || []} t={t} />
+        <SourceStatus source='official' observations={settings?.observations || []} serverTime={settings?.serverTime} t={t} />
       </div>
       <div className='flex flex-col gap-2'>
         {mirrors.map(mirror => {
@@ -144,7 +145,7 @@ export function GithubAccessEditor({ load, persist, notify, t, mobile = false }:
                     onClick={() => void save({ mirrors: mirrors.filter(item => item.url !== mirror.url) })}>{t('移除')}</Button>
                 </div>
               ) : null}
-              <SourceStatus source={mirror.url} observations={settings?.observations || []} t={t} />
+              <SourceStatus source={mirror.url} observations={settings?.observations || []} serverTime={settings?.serverTime} t={t} />
             </div>
           )
         })}
@@ -162,7 +163,7 @@ export function GithubAccessEditor({ load, persist, notify, t, mobile = false }:
         disabled={disabled || mirrors.length + missingDefaults.length > 6}
         onClick={() => void save({ mirrors: [...mirrors, ...missingDefaults] })}>{t('补充内置备用源')}</Button> : null}
       <p className='text-xs text-subtle'>{t('最多保留 6 个 HTTPS 加速源；自定义源可关闭版本查询支持。')}</p>
-      <p className='text-xs text-subtle'>{t('显示的是当前网络下的响应耗时，不代表长期稳定性或完整下载速度。未探测的源会在实际更新时检查。')}</p>
+      <p className='text-xs text-subtle'>{t('状态来自最近一次实际请求，并非实时测速。过期后标为待重新检查；限流只暂停对应线路，其他线路仍可使用。')}</p>
       <p className='text-xs text-subtle'>{t('软件更新与插件共用此设置；GitHub 令牌仅发送给官方 API。镜像安装包需要官方校验值，镜像插件包需要官方签名。')}</p>
       {mobile ? <p className='text-xs text-subtle'>{t('以上状态来自网关；APK 下载会由手机按本机网络重新选择通道。')}</p> : null}
       {!modern && settings ? <p className='text-xs text-subtle'>{t('当前网关仍使用旧版单源设置，升级网关后可管理多个加速源。')}</p> : null}
@@ -171,20 +172,33 @@ export function GithubAccessEditor({ load, persist, notify, t, mobile = false }:
   )
 }
 
-function SourceStatus({ source, observations, t }: { source: string; observations: GithubSourceObservation[]; t: Translate }) {
+function SourceStatus({ source, observations, serverTime, t }: { source: string; observations: GithubSourceObservation[]; serverTime?: number; t: Translate }) {
+  const now = useGithubClock(serverTime)
   const items = observations.filter(item => item.source === source)
   if (!items.length) return <p className='mt-2 text-xs text-subtle'>{t('未探测')}</p>
-  const states = {
+  const states: Record<string, string> = {
     ok: t('可用'), failed: t('连接失败'), timeout: t('连接超时'), invalid: t('返回内容异常'),
-    unsupported: t('不支持此类请求'), rateLimited: t('限流冷却中'),
+    unsupported: t('不支持此类请求'), rateLimited: t('限流冷却中'), stale: t('待重新检查'),
   }
   const resources = { api: t('版本查询'), index: t('插件索引'), download: t('文件下载') }
   return <div className='mt-2 flex flex-col gap-1 text-xs text-subtle'>
-    {items.map(item => <div key={item.resource}>
-      <span>{resources[item.resource]} · {states[item.state] || t('连接失败')}</span>
-      {item.state === 'ok' && item.elapsedMs != null ? <span> · {t('{ms} 毫秒', { ms: item.elapsedMs })}</span> : null}
-      {item.selected ? <span> · {t('最近采用')}</span> : null}
-      <span> · {new Date(item.checkedAt).toLocaleTimeString()}</span>
-    </div>)}
+    {items.map(item => {
+      const cooling = Boolean(item.retryAt && item.retryAt > now)
+      const stale = !cooling && (item.state === 'stale' || item.state === 'rateLimited' || Boolean(item.validUntil && item.validUntil <= now))
+      const state = cooling ? 'rateLimited' : stale ? 'stale' : item.state
+      const previous = item.lastState || item.state
+      return <div key={item.resource}>
+        <span>{resources[item.resource]} · {states[state] || t('连接失败')}</span>
+        {cooling ? <>
+          <span> · {t('{seconds} 秒后可重试', { seconds: Math.ceil((item.retryAt! - now) / 1000) })}</span>
+          <span> · {item.retrySource === 'fallback' ? t('上游未提供恢复时间，按 GitHub 建议短暂等待')
+            : item.retrySource === 'legacy' ? t('沿用已记录的恢复时间') : t('按上游返回时间')}</span>
+        </> : null}
+        {stale && previous !== 'stale' ? <span> · {t('上次结果：{state}', { state: states[previous] || previous })}</span> : null}
+        {state === 'ok' && item.elapsedMs != null ? <span> · {t('{ms} 毫秒', { ms: item.elapsedMs })}</span> : null}
+        {item.selected && state === 'ok' ? <span> · {t('最近采用')}</span> : null}
+        {item.checkedAt > 0 ? <span> · {t('记录于 {time}', { time: new Date(item.checkedAt).toLocaleTimeString() })}</span> : null}
+      </div>
+    })}
   </div>
 }

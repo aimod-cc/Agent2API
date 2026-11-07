@@ -23,7 +23,8 @@ export function ProfileDialog({ client, profile, creating, native = false, onClo
   const previewGeneration = React.useRef(0)
   const dirty = profileSignature(draft) !== initial.current
   const operation = native ? 'native-edit' : defaultOperation(client)
-  const validationClient = native && !profile.enabled ? { ...client, supportsDefault:false } : client
+  const single = client.id === 'codex' && !draft.baseUrl && draft.authMode === 'preserve'
+  const validationClient = { ...client, supportsModels: client.supportsModels && !single, ...(native && !profile.enabled ? { supportsDefault: false } : {}) }
   const previousCatalog = React.useRef<CatalogModel[]>([])
   const [confirming, setConfirming] = React.useState(false)
   React.useEffect(() => {
@@ -90,7 +91,7 @@ export function ProfileDialog({ client, profile, creating, native = false, onClo
           {catalogError && draft.kind === 'gateway' && <Alert variant='warning'>{t('模型目录读取失败，可手动填写真实模型 ID。')} {catalogError}
             <Button variant='outline' size='sm' onClick={retryCatalog} disabled={saving || previewing}>{t('重试')}</Button></Alert>}
         </section>
-        {client.supportsModels ? <ModelsFields client={validationClient} draft={draft} update={update} catalog={catalog} disabled={saving || previewing || draft.kind === 'gateway' && catalogLoading} native={native} />
+        {validationClient.supportsModels ? <ModelsFields client={validationClient} draft={draft} update={update} catalog={catalog} disabled={saving || previewing || draft.kind === 'gateway' && catalogLoading} native={native} />
           : <section className='flex min-w-0 flex-col gap-4 border-t border-hairline pt-4'><h3 className='text-sm font-semibold'>{t('模型配置')}</h3>
             <SingleModelFields client={validationClient} draft={draft} update={update} catalog={catalog} disabled={saving || previewing} /></section>}
         {(client.supportsToggle || !native) && <section className='flex min-w-0 flex-col gap-4 border-t border-hairline pt-4'>

@@ -145,7 +145,7 @@ const PAGES = ['assistant', 'overview', 'accounts', 'checkin', 'routing', 'gatew
  *
  *  `checkin` 是**内置页**（见 index.html 的说明）：页面归网关，签到能力归插件。 */
 const PAGE_LABELS = {
-  assistant: wbI18n.t('AI 助手'),
+  assistant: wbI18n.t('对话'),
   overview: wbI18n.t('报表'),
   accounts: wbI18n.t('账号'),
   checkin: wbI18n.t('签到中心'),

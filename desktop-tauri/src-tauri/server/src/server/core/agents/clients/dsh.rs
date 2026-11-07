@@ -253,32 +253,23 @@ fn model_entry(model: &Model, existing: Option<&Value>) -> Result<Value, String>
     } else {
         remove(&mut entry, &["name"]);
     }
-    match model.context_window {
-        Some(value) => set(&mut entry, &["contextWindow"], json!(value))?,
-        None => remove(&mut entry, &["contextWindow"]),
-    }
-    match model.max_output_tokens {
-        Some(value) => set(&mut entry, &["maxTokens"], json!(value))?,
-        None => remove(&mut entry, &["maxTokens"]),
-    }
-    // 少报比多报安全：DSH 会因为多报的模态在会话中途被上游拒绝，而少报只是提前拒绝。
-    set(
-        &mut entry,
-        &["input"],
-        json!(if model.supports_images == Some(true) {
-            vec!["text", "image"]
-        } else {
-            vec!["text"]
-        }),
-    )?;
+    if let Some(value) = model.context_window { set(&mut entry, &["contextWindow"], json!(value))?; }
+    if let Some(value) = model.max_output_tokens { set(&mut entry, &["maxTokens"], json!(value))?; }
+    if let Some(images) = model.supports_images {
+        let mut input = entry.get("input").and_then(Value::as_array).cloned().unwrap_or_else(|| vec![json!("text")]);
+        input.retain(|value| value != "image");
+        if images { input.push(json!("image")); }
+        set(&mut entry, &["input"], json!(input))?;
+    } else if entry.get("input").is_none() { set(&mut entry, &["input"], json!(["text"]))?; }
     if model.supports_reasoning == Some(false) {
         set(&mut entry, &["reasoningEfforts"], json!(false))?;
     } else {
         let offered = efforts(&model.reasoning_levels);
-        if offered.is_empty() {
-            remove(&mut entry, &["reasoningEfforts"]);
-        } else {
-            set(&mut entry, &["reasoningEfforts"], Value::Object(offered))?;
+        if !offered.is_empty() {
+            let mut current = entry.get("reasoningEfforts").and_then(Value::as_object).cloned().unwrap_or_default();
+            current.retain(|level, _| offered.contains_key(level));
+            for (level, value) in offered { current.entry(level).or_insert(value); }
+            set(&mut entry, &["reasoningEfforts"], Value::Object(current))?;
         }
     }
     Ok(entry)

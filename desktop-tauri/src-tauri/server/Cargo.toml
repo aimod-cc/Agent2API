@@ -72,6 +72,8 @@ agent2api-provider-protocol = { git = "https://github.com/ProvidersPlugin/Agent2
 # npm 包是 .tgz（gzip + tar），解出内嵌的 runtime-info 二进制。flate2 已在
 # 依赖树里（image 拉的），声明出来直接复用；tar 解析手写（几十行，见 risk.rs）
 flate2 = "1"
+# npm 插件包使用 tar.gz；不执行安装脚本。
+tar = "0.4"
 url = "2"
 axum = { version = "0.8", features = ["multipart"] }
 # 出站请求：rustls（纯 Rust，不依赖系统 openssl）+ socks5 出网代理。
@@ -211,7 +213,8 @@ windows-service = "0.8"
 # 依赖会被链接器扔掉（仅多花几秒编译）。
 [target.'cfg(target_os = "linux")'.dependencies]
 tikv-jemallocator = "0.7"
-# systemd 升级通道的对端身份与进程级文件锁，不开放通用提权入口。
+# 子进程组回收，以及 Linux 服务升级的对端身份与进程级文件锁。
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]

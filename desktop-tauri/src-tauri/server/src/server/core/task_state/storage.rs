@@ -46,11 +46,16 @@ fn read_states(conn: &Connection) -> Result<StoredStates, String> {
         }
     };
     for (key, state) in &mut stored.states {
-        if key.starts_with("updateCheck:") {
-            stored.migrated |= state.use_upstream_backoff();
+        if source_managed(key) {
+            stored.migrated |= state.use_source_backoff();
         }
     }
     Ok(stored)
+}
+
+fn source_managed(key: &str) -> bool {
+    ["updateCheck:", "pluginCatalog:", "pluginRequirement:", "pluginGithub:"]
+        .iter().any(|prefix| key.starts_with(prefix))
 }
 
 fn write_states(conn: &Connection, states: &States) -> Result<(), String> {
@@ -131,8 +136,8 @@ pub(super) fn change(
             let mut stored = read_states(&tx)?;
             let recovered = preserve_damage(&tx, &stored)?;
             let state = stored.states.entry(key.to_string()).or_default();
-            if key.starts_with("updateCheck:") {
-                state.use_upstream_backoff();
+            if source_managed(key) {
+                state.use_source_backoff();
             }
             mutate(state);
             let result = state.clone();

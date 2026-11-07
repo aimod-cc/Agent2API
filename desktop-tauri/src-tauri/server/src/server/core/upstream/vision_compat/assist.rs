@@ -105,13 +105,9 @@ async fn describe(service: &UpstreamService, ctx: &ProviderContext<'_>, destinat
 pub(super) async fn run(service: &UpstreamService, ctx: &ProviderContext<'_>, original: &RouteTarget, vision: &RequestVision,
     detail: &mut Value) -> Result<(Value, targets::Destination), GatewayError> {
     let target = match vision.settings.assist.source {
-        ModelSource::Shared => {
-            if vision.shared != crate::server::config::vision_compat::shared_target() {
-                return Err(GatewayError::with_status(409, "共享视觉模型已变更，请重新确认并保存图片兼容设置；未把图片发送给新的模型")
-                    .with_code("vision_shared_target_changed"));
-            }
-            vision.shared.clone()
-        },
+        // 「沿用工具服务的视觉分析模型」按请求当时的配置取值：不再要求保存时的那一只
+        // 原样未变，因为已经没有人去确认那份变更了。
+        ModelSource::Shared => vision.shared.clone(),
         ModelSource::Custom => vision.settings.assist.target.clone(),
     }.ok_or_else(|| GatewayError::bad_request("未配置辅助识图模型；未改用其他模型或删除图片"))?;
     let needs = RequestNeeds { images: true, ..Default::default() };

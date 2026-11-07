@@ -20,17 +20,23 @@ pub(super) fn plan(def: &ClientDef, path: &Path, profile: &Profile) -> Result<Pl
             }
             remove(&mut value, &["model"]);
             remove(&mut value, &["effortLevel"]);
+            if let Some(options) = value.pointer_mut("/modelPicker/options").and_then(Value::as_array_mut) {
+                options.retain(|option| !profile.models.iter().any(|model| option.get("model").and_then(Value::as_str) == Some(&model.id)));
+                if options.is_empty() { remove(&mut value, &["modelPicker"]); }
+            }
+            for model in &profile.models { remove(&mut value, &["modelSettings", &model.id, "effortLevel"]); }
         }
         "codex" => {
+            if let Some(catalog) = super::codex_models::remove(path, id)? { extra.push(catalog); }
             remove(&mut value, &["model_providers", id]);
             let inherited = string(&value, "model_provider") == id || (id == "openai" && string(&value, "model_provider").is_empty());
             if let Some(profiles) = value.get_mut("profiles").and_then(Value::as_object_mut) {
                 for runtime in profiles.values_mut() {
                     let provider = string(runtime, "model_provider");
-                    if provider == id || (inherited && provider.is_empty()) { clear_runtime(runtime); }
+                    if provider == id || (inherited && provider.is_empty()) { clear_runtime(runtime, path)?; }
                 }
             }
-            if inherited { clear_runtime(&mut value); }
+            if inherited { clear_runtime(&mut value, path)?; }
         }
         "opencode" => {
             remove(&mut value, &["provider", id]);
@@ -44,6 +50,9 @@ pub(super) fn plan(def: &ClientDef, path: &Path, profile: &Profile) -> Result<Pl
             retain_models(&mut value, &ids);
         }
         "zcode" => {
+            if value.pointer("/config/defaultModelSelection/providerId").and_then(Value::as_str) == Some(id) {
+                remove(&mut value, &["config", "defaultModelSelection"]);
+            }
             retain_rules(&mut value, &["config", "providerConfigRules", "providerRules"], id, None);
             retain_strings(&mut value, &["config", "providerOrder"], |value| value != id);
             for key in ["providerModelRules", "manualProviderModelRules"] {
@@ -51,10 +60,17 @@ pub(super) fn plan(def: &ClientDef, path: &Path, profile: &Profile) -> Result<Pl
             }
         }
         "kimi-code" => {
+            let referenced = value.pointer("/secondary_model/default_model").and_then(Value::as_str)
+                .and_then(|key| value.get("models").and_then(|models| models.get(key)))
+                .is_some_and(|model| string(model, "provider") == id);
+            if referenced { return Err("此 Kimi 提供商仍被子 Agent 默认模型使用，请先在客户端更换".into()); }
             remove(&mut value, &["providers", id]);
             let removed = value.get("models").and_then(Value::as_object).map(|models| models.iter()
                 .filter(|(_, model)| string(model, "provider") == id).map(|(key, _)| key.clone()).collect::<Vec<_>>()).unwrap_or_default();
             for key in &removed { remove(&mut value, &["models", key]); }
+            if let Some(pool) = value.pointer_mut("/secondary_model/models").and_then(Value::as_object_mut) {
+                for key in &removed { pool.remove(key); }
+            }
             if removed.contains(&string(&value, "default_model")) { remove(&mut value, &["default_model"]); }
         }
         "zed" => {
@@ -125,8 +141,13 @@ pub(super) fn plan(def: &ClientDef, path: &Path, profile: &Profile) -> Result<Pl
     ] })
 }
 
-fn clear_runtime(value: &mut Value) {
+fn clear_runtime(value: &mut Value, path: &Path) -> Result<(), String> {
+    if value.get("model_catalog_json").and_then(Value::as_str)
+        .map(|name| super::codex_models::owned_reference(path, name)).transpose()?.unwrap_or(false) {
+        remove(value, &["model_catalog_json"]);
+    }
     for key in ["model_provider", "model", "model_reasoning_effort", "openai_base_url"] { remove(value, &[key]); }
+    Ok(())
 }
 
 fn delete_crush(value: &mut Value, id: &str) {

@@ -580,8 +580,8 @@ impl AccountStore {
                 // 是**同一份事实**。恒为数字键（0 = 不限），且**只在这里写一次**：
                 // 从前它是各家公开形态里各自的 `insert`，于是逐字段白名单那几家
                 // （monkeycode / antigravity / officeace）漏了它 —— 缺键被选路当成
-                // 0 = 不限，上限**静默失效**。CodeArts 的「0 = 按本家默认并发」口径
-                // 由 `max_concurrent_public_for` 一处承载，别家 0 就是不限。
+                // 0 = 不限，上限**静默失效**。CodeArts 与脚本插件的默认并发
+                // 由 `max_concurrent_public_for` 一处承载，未声明默认值的提供商仍为不限。
                 fields.insert(
                     "maxConcurrent".to_string(),
                     Value::from(max_concurrent_public_for(

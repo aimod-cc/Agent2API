@@ -1,17 +1,20 @@
 import * as React from 'react'
-import { Badge, Button, Card, CardHeader, Empty, Progress, SegmentedControl, Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from '@ui'
+import {
+  Badge, Button, Card, CardAction, CardFooter, CardHeader, CardTitle, Empty, Progress,
+  SegmentedControl, cn,
+} from '@ui'
 import {
   growthOf, loadCenter, patch, queryGrowth, runAllCheckin, runGrowth,
   runSchool, runTravelOnce, signSingle, store,
 } from './checkin-store'
 import {
-  CHECKIN_SECTION_OPTIONS, MODE_LABEL, MODE_TITLE, formatTime, modesOf,
+  CHECKIN_SECTION_OPTIONS, MODE_LABEL, MODE_TITLE, formatShort, formatTime, modesOf,
   type CheckinAccount, type CheckinCenter, type GrowthEntry, type OnboardingEntry,
-  type PlanEntry, type ProviderGroup,
+  type ProviderGroup,
 } from './checkin-types'
-import { CheckinRow, ProviderLogo } from './checkin-row'
+import { CheckinRow } from './checkin-row'
 import { CheckinUmid } from './checkin-umid'
-import { CampaignRow } from './checkin-campaign-row'
+import { PlansSection } from './checkin-plans-section'
 import { OfficeaceSubscriptionRow } from './checkin-officeace-row'
 import { claimOnboarding, onboardingOf, queryOnboarding } from './checkin-onboarding'
 import { t } from '../i18n'
@@ -183,21 +186,16 @@ function StatsGrid({ center }: { center: CheckinCenter }): React.ReactElement {
 }
 
 /**
- * 范围外账号的说明（**卡内的一行**，不是独立卡片）。
+ * 范围外账号的说明（**卡片的脚注**，不是独立卡片）。
  *
- * 旧实现就是把它挂在「每日签到」卡底部的 `ck-fold-note` 里：它是那张卡的
- * **脚注**（解释「为什么这些账号没出现在上面的列表里」），独立成卡会显得
- * 它们是另一类功能。这是我早先迁移时漏掉的一处。
+ * 它是「每日签到」那张卡的脚注：解释「为什么这些账号没出现在上面的列表里」，
+ * 所以跟着操作提示一起待在 `CardFooter` 里，不占行上的位置。
  */
 function OutOfScopeNote({ items }: { items: { label: string; reason: string; count: number }[] }): React.ReactElement {
   const list = items
     .map(item => `${item.label} ×${item.count}（${item.reason}）`)
     .join('；')
-  return (
-    <div className="ck-fold-note">
-      {t('不参与每日签到')}：{list}。
-    </div>
-  )
+  return <span>{t('不参与每日签到')}：{list}。</span>
 }
 
 /* ─── 每日签到 ─────────────────────────────── */
@@ -221,32 +219,77 @@ function GroupBadge({ group }: { group: ProviderGroup }): React.ReactElement {
   return <StatusBadge status='pending' />
 }
 
-/** 账号明细表（展开区） */
-function AccountTable({ group }: { group: ProviderGroup }): React.ReactElement {
+/* ─── 三个档位共用的状态筛选 ─────────────────── */
+
+type StatusFilter = 'all' | 'done' | 'pending'
+
+/**
+ * 一条筛选器的三个档位：全部 / 已完成 / 未完成。
+ *
+ * 三个档位的动作词不同（签到 / 领取 / 完成），筛选的**结构**是同一套 ——
+ * 所以只换标签、不换逻辑，计数徽标也在这里一起算。
+ */
+function filterOptions(labels: readonly [string, string, string], total: number, done: number) {
+  return [
+    { value: 'all' as const, label: t(labels[0]), count: total },
+    { value: 'done' as const, label: t(labels[1]), count: done },
+    { value: 'pending' as const, label: t(labels[2]), count: total - done },
+  ]
+}
+
+/** 按状态过滤一个列表（`doneOf` 由各档位自己给判据） */
+function byStatus<T>(rows: T[], filter: StatusFilter, doneOf: (row: T) => boolean): T[] {
+  if (filter === 'all') return rows
+  return rows.filter(row => filter === 'done' ? doneOf(row) : !doneOf(row))
+}
+
+/**
+ * 展开区里的一行明细（账号 / 任务 / 成长三处共用同一档字号与节奏）。
+ *
+ * 原来这里是张表格（账号 / 今日签到 / 上次签到时间 / 操作）—— 表头占一行、
+ * 列宽固定，在一段只有几行的展开区里比内容还显眼。现在改成「名 + 读数 + 操作」
+ * 的紧凑行，与活动福利那边的明细同一形态。
+ */
+function DetailLine({ children }: { children: React.ReactNode }): React.ReactElement {
+  return <div className='flex items-center gap-3 py-1.5 text-[12.5px]'>{children}</div>
+}
+
+/** 明细行的左侧「名 + 连登」；连登 0 = 还没读到过，不显示成「连登 0 天」 */
+function DetailName({ name, streakDays }: { name: string; streakDays: number }): React.ReactElement {
+  return (
+    <span className='min-w-0 flex-1 truncate'>
+      {name}
+      {streakDays > 0 ? <span className='text-muted-foreground'> · {t('连登 {days} 天', { days: streakDays })}</span> : null}
+    </span>
+  )
+}
+
+/** 任务行的对勾：已完成是绿底勾，未完成是一个空心点 */
+function TaskTick({ done }: { done: boolean }): React.ReactElement {
+  return (
+    <span className={cn('grid size-4 shrink-0 place-items-center rounded-full text-[10px]',
+      done ? 'bg-success-soft text-success' : 'bg-control text-muted-foreground')}>
+      {done ? '✓' : '·'}
+    </span>
+  )
+}
+
+/** 账号明细（展开区）；`accounts` 是筛选后的那一份，空了的行在调用方就被跳过 */
+function AccountList({ accounts, group }: { accounts: CheckinAccount[]; group: ProviderGroup }): React.ReactElement {
   const modes = modesOf(group)
   // 分档执行由插件申报：keepalive / claim / full 各一颗按钮 —— 领取才加积分、
   // 保活只维持活跃，分开是刻意的
   const dailyActivity = modes.some(mode => mode === 'keepalive' || mode === 'claim' || mode === 'full')
   return (
-    <Table container={false} className="ck-table">
-      <TableHeader>
-        <TableRow>
-          <TableHead>账号</TableHead>
-          <TableHead>今日签到</TableHead>
-          <TableHead>上次签到时间</TableHead>
-          <TableHead />
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {group.accounts.map(account => (
-          <AccountRow key={account.id} account={account} modes={modes} dailyActivity={dailyActivity} manualPlans={group.manualPlans === true} />
-        ))}
-      </TableBody>
-    </Table>
+    <div className='flex flex-col'>
+      {accounts.map(account => (
+        <AccountLine key={account.id} account={account} modes={modes} dailyActivity={dailyActivity} manualPlans={group.manualPlans === true} />
+      ))}
+    </div>
   )
 }
 
-function AccountRow({ account, modes, dailyActivity, manualPlans }: {
+function AccountLine({ account, modes, dailyActivity, manualPlans }: {
   account: CheckinAccount
   modes: string[]
   dailyActivity: boolean
@@ -255,78 +298,78 @@ function AccountRow({ account, modes, dailyActivity, manualPlans }: {
   const busy = (mode: string) => store.signing.has(`${account.id}:${mode}`)
   const status = accountCheckinStatus(account)
   const daily = account.dailyCheckin
+  const progress = checkinPlanProgress(daily) && daily
+    ? t('已领 {done} / {total} 份套餐', { done: daily.completedCount, total: daily.totalCount })
+    : ''
   return (
-    <TableRow>
-      <TableCell>
-        {account.name}
-        {/* 连登天数：0 = 还没读到过，不显示成「连登 0 天」 */}
-        {account.streakDays > 0
-          ? <span className="ck-sub"> · 连登 {account.streakDays} 天</span>
-          : null}
-        {account.available ? null : <Badge variant="outline" shape="tag">凭据不可用</Badge>}
-      </TableCell>
-      <TableCell>
-        <StatusBadge status={status} />
-        {checkinPlanProgress(daily) && daily
-          ? <span className="ck-sub"> · {t('已领 {done} / {total} 份套餐', {
-            done: daily.completedCount, total: daily.totalCount,
-          })}</span> : null}
-        {daily?.message && status !== 'done'
-          ? <div className='ck-sub max-w-[420px] whitespace-normal break-words'>{t(daily.message)}</div> : null}
-      </TableCell>
-      <TableCell className="ck-sub">{formatTime(account.checkinAt)}</TableCell>
-      <TableCell className="ck-right">
-        <span className="ck-inline">
-          {dailyActivity
-            ? modes.map(mode => (
-              <Button
-                key={mode}
-                size="sm"
-                variant="ghost"
-                disabled={busy(mode) || !account.available}
-                title={MODE_TITLE[mode]}
-                onClick={() => void signSingle(account.id, mode)}
-              >
-                {busy(mode) ? `${MODE_LABEL[mode] ?? mode}中…` : (MODE_LABEL[mode] ?? mode)}
-              </Button>
-            ))
-            : (
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={busy('checkin') || !account.available}
-                onClick={() => {
-                  if (manualPlans && window.wbZcodePlans?.open) {
-                    window.wbZcodePlans.open({ id: account.id, name: account.name })
-                  } else {
-                    void signSingle(account.id, 'checkin')
-                  }
-                }}
-              >
-                {manualPlans ? t('套餐明细') : busy('checkin')
-                  ? t(daily?.queryOnly ? '查询中…' : '签到中…') : t(checkinActionLabel(account))}
-              </Button>
-            )}
-        </span>
-      </TableCell>
-    </TableRow>
+    <DetailLine>
+      <DetailName name={account.name} streakDays={account.streakDays} />
+      {account.available ? null : <Badge variant='outline' shape='tag'>{t('凭据不可用')}</Badge>}
+      {/* 异常信息优先于进度读数：它是「为什么还没签上」的答案 */}
+      {daily?.message && status !== 'done' ? (
+        <span className='max-w-[320px] flex-1 truncate text-[11.5px] text-muted-foreground'
+          title={t(daily.message)}>{t(daily.message)}</span>
+      ) : progress ? (
+        <span className='shrink-0 text-[11.5px] text-muted-foreground'>{progress}</span>
+      ) : null}
+      {daily?.kind === 'rolling' && daily.until ? <span className='shrink-0 tabular-nums text-muted-foreground'>
+        {t('下次检查：{time}', { time: formatShort(daily.until) })}
+      </span> : null}
+      <span className='shrink-0 tabular-nums text-muted-foreground'>
+        {account.checkinAt ? t('上次 {time}', { time: formatShort(account.checkinAt) }) : t('从未签到')}
+      </span>
+      <StatusBadge status={status} />
+      <span className='flex shrink-0 items-center gap-0.5'>
+        {dailyActivity
+          ? modes.map(mode => (
+            <Button
+              key={mode}
+              size="xs"
+              variant="ghost"
+              disabled={busy(mode) || !account.available}
+              title={MODE_TITLE[mode]}
+              onClick={() => void signSingle(account.id, mode)}
+            >
+              {busy(mode) ? `${MODE_LABEL[mode] ?? mode}中…` : (MODE_LABEL[mode] ?? mode)}
+            </Button>
+          ))
+          : (
+            <Button
+              size="xs"
+              variant="ghost"
+              disabled={busy('checkin') || !account.available}
+              onClick={() => {
+                if (manualPlans && window.wbZcodePlans?.open) {
+                  window.wbZcodePlans.open({ id: account.id, name: account.name })
+                } else {
+                  void signSingle(account.id, 'checkin')
+                }
+              }}
+            >
+              {manualPlans ? t('套餐明细') : busy('checkin')
+                ? t(daily?.queryOnly ? '查询中…' : '签到中…') : t(checkinActionLabel(account))}
+            </Button>
+          )}
+      </span>
+    </DetailLine>
   )
 }
 
-function ProviderRow({ group }: { group: ProviderGroup }): React.ReactElement {
+function ProviderRow({ group, accounts }: { group: ProviderGroup; accounts: CheckinAccount[] }): React.ReactElement {
   const [expanded, setExpanded] = React.useState(false)
-  const hasAccounts = group.totalCount > 0
   return (
-    <CheckinRow provider={group.id} name={group.label} description={group.description}
-      note={group.uiHooks?.includes('umid_component') ? <CheckinUmid /> : undefined}
-      expandable={hasAccounts} expanded={expanded} onExpandedChange={setExpanded}
-      summary={<>
-        <span className="ck-row-count">
-          {hasAccounts ? `${group.totalCount} 账号 · ${group.doneCount} 已签` : '—'}
-        </span>
-        <GroupBadge group={group} />
-      </>}>
-      <AccountTable group={group} />
+    <CheckinRow provider={group.id} name={group.label}
+      // 读数说的是**这一家整体**（4 个账号 · 2 个已签）：筛选只改下面明细的条数，
+      // 摘要不跟着变 —— 否则「未签到」筛选下会读成「2 个账号 · 0 个已签」这种怪句子。
+      // 插件申报的那句说明是这一家的规则，挂在行下方的注释条里。
+      description={t('{total} 个账号 · {done} 个已签', { total: group.totalCount, done: group.doneCount })}
+      note={group.description || group.uiHooks?.includes('umid_component') ? <>
+        {group.description ? <p className='m-0'>{t(group.description)}</p> : null}
+        {group.uiHooks?.includes('umid_component') ? <CheckinUmid /> : null}
+      </> : undefined}
+      expandable expanded={expanded} onExpandedChange={setExpanded}
+      summary={<GroupBadge group={group} />}>
+      <AccountList accounts={accounts} group={group} />
     </CheckinRow>
   )
 }
@@ -391,22 +434,20 @@ function OnboardingRow({ row }: { row: OnboardingEntry }): React.ReactElement {
         </Button>
       </>}>
       {tasks.map(task => (
-        <div className="ck-task-line" key={task.key}>
-          <span className={task.done ? 'ck-task-tick done' : 'ck-task-tick'}>{task.done ? '✓' : '·'}</span>
-          <span className="ck-task-title">{task.title}</span>
-          <span className="ck-task-pts">+{task.points}</span>
-          <span className="ck-task-st">
-            {task.claiming
-              ? <Badge variant="warning" shape="tag">领取中</Badge>
-              : task.done
-                ? <Badge variant="success" shape="tag">已领取</Badge>
-                : task.blocked
-                  ? <Badge variant="outline" shape="tag">暂不可领</Badge>
-                  : task.error
-                    ? <Badge variant="destructive" shape="tag">{task.error}</Badge>
-                    : <Badge variant="brand" shape="tag">可领取</Badge>}
-          </span>
-        </div>
+        <DetailLine key={task.key}>
+          <TaskTick done={task.done} />
+          <span className='min-w-0 flex-1 truncate'>{task.title}</span>
+          <span className='shrink-0 tabular-nums text-muted-foreground'>+{task.points}</span>
+          {task.claiming
+            ? <Badge variant="warning" shape="tag">{t('领取中')}</Badge>
+            : task.done
+              ? <Badge variant="success" shape="tag">{t('已领取')}</Badge>
+              : task.blocked
+                ? <Badge variant="outline" shape="tag">{t('暂不可领')}</Badge>
+                : task.error
+                  ? <Badge variant="destructive" shape="tag">{task.error}</Badge>
+                  : <Badge variant="brand" shape="tag">{t('可领取')}</Badge>}
+        </DetailLine>
       ))}
     </CheckinRow>
   )
@@ -414,71 +455,8 @@ function OnboardingRow({ row }: { row: OnboardingEntry }): React.ReactElement {
 
 /* ─── 活动福利 ─────────────────────────────── */
 
-/**
- * 今天（北京时间）在本地台账里领过的套餐 id。
- *
- * 上游按北京判「今天」，所以日界也按北京算 —— 与宿主 `claimedPlanIdsToday`
- * 同一口径（跟本机时区走会在海外的部署上把「今天」判错）。
- */
-function claimedPlansToday(claimPlans: Record<string, number> | null | undefined): string[] {
-  if (!claimPlans || typeof claimPlans !== 'object') return []
-  const today = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10)
-  return Object.entries(claimPlans)
-    .filter(([, at]) => {
-      const stamp = Number(at)
-      if (!Number.isFinite(stamp) || stamp <= 0) return false
-      return new Date(stamp + 8 * 3600 * 1000).toISOString().slice(0, 10) === today
-    })
-    .map(([planId]) => planId)
-}
-
-/**
- * 活动福利的一行（ZCode 限时体验套餐）。
- *
- * 这一行只提供**入口**：套餐明细与逐份领取在宿主那个弹窗里（`wbZcodePlans`）。
- * 迁到客户端之后可以直接调它 —— 早先页面在 iframe 里拿不到那个岛，只能靠
- * postMessage 请宿主代开，宿主没响应时就退化成一句「去账号页操作」。
- */
-function PlanRow({ row }: { row: PlanEntry }): React.ReactElement {
-  const claimed = claimedPlansToday(row.claimPlans)
-  const hasClaimed = claimed.length > 0
-  const desc = hasClaimed
-    ? '点「套餐明细」看领到了哪几份、什么时候生效；活动期内每天可再领'
-    : row.claimAt
-      ? `上次领取 ${formatTime(row.claimAt)} · 领取需通过滑块验证码`
-      : '限时体验套餐（start-plan），活动期内每天一份 · 领取需滑块验证码'
-  return (
-    <div className="ck-welfare-row">
-      <ProviderLogo id={row.provider || 'zcode'} label="ZCode" />
-      <div className="ck-prov-info">
-        <div className="ck-prov-name">
-          {row.name || row.id}
-          {hasClaimed
-            ? (
-              <Badge
-                variant="success"
-                shape="tag"
-                title={`本地台账里今天（北京时间）领过的套餐：${claimed.join('、')}`}
-              >
-                今天已领 {claimed.length} 份
-              </Badge>
-            )
-            : <Badge variant="outline" shape="tag" title="本地台账里今天还没领过；活动期内每天发一份新套餐">今天未领</Badge>}
-        </div>
-        <div className="ck-prov-desc">{desc}</div>
-      </div>
-      <div className="ck-prov-right">
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => window.wbZcodePlans?.open?.({ id: row.id, name: row.name })}
-        >
-          {hasClaimed ? '套餐明细' : '去领取'}
-        </Button>
-      </div>
-    </div>
-  )
-}
+// 这一档整体搬到了 `checkin-plans-section.tsx` —— 它比另外三档多出「全部 / 未领取 /
+// 已领取」筛选，行也换成了「行上是摘要、明细收进展开区」，单独一个文件更清楚。
 
 /* ─── 成长任务（WorkBuddy 国内版）────────────── */
 
@@ -545,64 +523,60 @@ function GrowthRow({ row }: { row: GrowthEntry }): React.ReactElement {
           领取
         </Button>
       </>}>
-      <div className="ck-fold-note">
-        {cache.energy !== null && cache.energy !== undefined ? `能量 ${cache.energy}` : ''}
-        {cache.streak !== null && cache.streak !== undefined ? ` · 连登 ${cache.streak} 天` : ''}
-        {cache.energy === null && cache.streak === null ? '（能量 / 连登读数本次未取到）' : ''}
+      <div className='border-b border-hairline pb-1.5 text-[11.5px] text-muted-foreground'>
+        {cache.energy !== null && cache.energy !== undefined ? t('能量 {value}', { value: cache.energy }) : ''}
+        {cache.streak !== null && cache.streak !== undefined ? ` · ${t('连登 {days} 天', { days: cache.streak })}` : ''}
+        {cache.energy === null && cache.streak === null ? t('（能量 / 连登读数本次未取到）') : ''}
       </div>
       {tasks.map(task => {
         const result = cache.results.find(item => item.code === task.code)
         return (
-          <div className="ck-task-line" key={task.code}>
-            <span className={task.status === 'claimed' ? 'ck-task-tick done' : 'ck-task-tick'}>
-              {task.status === 'claimed' ? '✓' : '·'}
-            </span>
-            <span title={task.description || task.source || task.code}>
+          <DetailLine key={task.code}>
+            <TaskTick done={task.status === 'claimed'} />
+            <span className='min-w-0 flex-1 truncate' title={task.description || task.source || task.code}>
               {task.title || task.code}
               {task.target > 1 ? ` (${task.current}/${task.target})` : ''}
             </span>
-            {result ? <span className="ck-task-pts">{result.message}</span> : null}
-            <span className="ck-task-st">
-              {task.status === 'claimed'
-                ? <Badge variant="success" shape="tag">已领取</Badge>
-                : growthTaskRunnable(task, 'claim')
-                  ? <Badge variant="brand" shape="tag">可领取</Badge>
-                  : task.unforgeable
-                    ? <Badge variant="outline" shape="tag">需真实操作</Badge>
-                    : !task.supported
-                      ? <Badge variant="outline" shape="tag">不支持</Badge>
-                      : task.locked
-                        ? <Badge variant="outline" shape="tag">未解锁</Badge>
-                        : <Badge variant="warning" shape="tag">待完成</Badge>}
-            </span>
-          </div>
+            {result ? <span className='shrink-0 text-[11.5px] text-muted-foreground'>{result.message}</span> : null}
+            {task.status === 'claimed'
+              ? <Badge variant="success" shape="tag">{t('已领取')}</Badge>
+              : growthTaskRunnable(task, 'claim')
+                ? <Badge variant="brand" shape="tag">{t('可领取')}</Badge>
+                : task.unforgeable
+                  ? <Badge variant="outline" shape="tag">{t('需真实操作')}</Badge>
+                  : !task.supported
+                    ? <Badge variant="outline" shape="tag">{t('不支持')}</Badge>
+                    : task.locked
+                      ? <Badge variant="outline" shape="tag">{t('未解锁')}</Badge>
+                      : <Badge variant="warning" shape="tag">{t('待完成')}</Badge>}
+          </DetailLine>
         )
       })}
       {/* 开学季与猫猫旅行：各自一个动作按钮（不走任务树的逐条执行） */}
-      <div className="ck-grow-extra">
+      <div className='mt-1.5 flex flex-wrap items-center gap-2 border-t border-hairline pt-2'>
         <Button
-          size="sm"
+          size="xs"
           variant="outline"
           disabled={running}
           onClick={() => void runSchool(row.id, false)}
         >
-          {cache.runningSchool ? '执行中…' : '开学季任务'}
+          {cache.runningSchool ? t('执行中…') : t('开学季任务')}
         </Button>
         <Button
-          size="sm"
+          size="xs"
           variant="outline"
           disabled={running}
           onClick={() => void runSchool(row.id, true)}
         >
-          开学季 + 抽奖
+          {t('开学季 + 抽奖')}
         </Button>
         <Button
-          size="sm"
+          size="xs"
           variant="outline"
           disabled={running}
           onClick={() => void runTravelOnce(row.id)}
         >
-          猫猫旅行一趟
+          {t('猫猫旅行一趟')}
         </Button>
       </div>
     </CheckinRow>
@@ -618,6 +592,52 @@ export function CenterTab({ center }: { center: CheckinCenter }): React.ReactEle
     || (extras.campaigns?.length ?? 0) > 0
   const section = store.centerSection
   const runningAll = store.runningAll || center.auto?.running === true
+
+  // 三个档位各有一枚筛选，互不影响（切走档位会卸载卡片，回来时回到「全部」）
+  const [dutyFilter, setDutyFilter] = React.useState<StatusFilter>('all')
+  const [onboardingFilter, setOnboardingFilter] = React.useState<StatusFilter>('all')
+  const [growthFilter, setGrowthFilter] = React.useState<StatusFilter>('all')
+
+  // 新手福利：查过几个账号、其中还有几项待领（明细要打上游，没查过的算不出来）
+  let onboardingChecked = 0
+  let onboardingPending = 0
+  for (const row of extras.onboarding) {
+    const cache = store.onboarding.get(row.id)
+    if (cache?.status !== 'loaded') continue
+    onboardingChecked += 1
+    if (!cache.settled) onboardingPending += cache.tasks.filter(task => !task.done && !task.blocked).length
+  }
+
+  /* ── 三个档位的筛选（判据都在这里，行组件只负责画）── */
+
+  const dutyTotal = daily.providers.reduce((sum, group) => sum + group.totalCount, 0)
+  const dutyDone = daily.providers.reduce((sum, group) => sum + group.doneCount, 0)
+  const dutyRows = daily.providers
+    .map(group => ({
+      group,
+      accounts: byStatus(group.accounts, dutyFilter, account => accountCheckinStatus(account) === 'done'),
+    }))
+    .filter(entry => entry.accounts.length > 0)
+
+  /** 新手福利：查过、且手上没有还能领的 = 已领取；没查过算未领取 */
+  const onboardingDone = (row: OnboardingEntry) => {
+    const cache = store.onboarding.get(row.id)
+    if (cache?.status !== 'loaded') return false
+    if (cache.settled) return true
+    return !cache.tasks.some(task => !task.done && !task.blocked)
+  }
+  const onboardingRows = byStatus(extras.onboarding, onboardingFilter, onboardingDone)
+  const onboardingDoneCount = extras.onboarding.filter(onboardingDone).length
+
+  /** 成长任务：任务树查过、且手上没有还能完成的 = 已完成 */
+  const growthDone = (row: GrowthEntry) => {
+    const cache = growthOf(row.id)
+    if (cache?.status !== 'loaded' || cache.tasks.length === 0) return false
+    return cache.tasks.filter(task => growthTaskRunnable(task, 'full'))
+      .every(task => growthTaskCompleted(task))
+  }
+  const growthRows = byStatus(extras.growth, growthFilter, growthDone)
+  const growthDoneCount = extras.growth.filter(growthDone).length
 
   return (
     <div className="ck-main">
@@ -635,73 +655,136 @@ export function CenterTab({ center }: { center: CheckinCenter }): React.ReactEle
 
       {section === 'daily' && daily.providers.length > 0 ? (
         <Card render={<section />} className="panel">
-          <CardHeader className="panel-head">
-            <h2>每日签到</h2>
-            <span className="panel-sub">点击行展开账号明细 · 单账号签到不受范围限制</span>
-            <Button
-              size="sm"
-              variant="default"
-              className="ml-auto flex-none"
-              disabled={runningAll}
-              onClick={() => void runAllCheckin()}
-            >
-              {runningAll ? '签到中…' : '立即全部签到'}
-            </Button>
+          <CardHeader className="border-b-0 pb-1">
+            <CardTitle>{t('每日签到')}</CardTitle>
+            <span className="text-[11.5px] text-muted-foreground">
+              {daily.todayEligible > 0
+                ? t('{done} / {total} 个账号已签', { done: daily.todayDone, total: daily.todayEligible })
+                : t('今天没有需要签到的账号')}
+            </span>
+            <CardAction>
+              <Button
+                size="sm"
+                disabled={runningAll}
+                onClick={() => void runAllCheckin()}
+              >
+                {runningAll ? t('签到中…') : t('立即全部签到')}
+              </Button>
+              <SegmentedControl
+                aria-label={t('按签到状态筛选')}
+                options={filterOptions(['全部', '已签到', '未签到'], dutyTotal, dutyDone)}
+                value={dutyFilter}
+                onValueChange={setDutyFilter}
+              />
+            </CardAction>
           </CardHeader>
-          <div>
-            {daily.providers.map(group => <ProviderRow key={group.id} group={group} />)}
-            {/* 范围外账号是这张卡的**脚注**（见 OutOfScopeNote 的说明） */}
-            {daily.outOfScope.length > 0 ? <OutOfScopeNote items={daily.outOfScope} /> : null}
+          <div className="pb-1 pt-1">
+            {dutyRows.map(entry => (
+              <ProviderRow key={entry.group.id} group={entry.group} accounts={entry.accounts} />
+            ))}
+            {dutyRows.length === 0 ? (
+              <Empty className="py-6">
+                {dutyFilter === 'done'
+                  ? t('今天还没有账号签到，切到「全部」看看哪些还没签。')
+                  : t('今天的账号都签完了。')}
+              </Empty>
+            ) : null}
           </div>
+          {/* 操作提示与范围外账号都是这张卡的**脚注** */}
+          <CardFooter>
+            <span>{t('点击行展开账号明细 · 单账号签到不受范围限制')}</span>
+            {daily.outOfScope.length > 0 ? <OutOfScopeNote items={daily.outOfScope} /> : null}
+          </CardFooter>
         </Card>
       ) : null}
 
-      {section === 'onboarding' ? <Card render={<section />} className="panel">
-        <CardHeader className="panel-head">
-          <h2>新手福利</h2>
-          <span className="panel-sub">{t('一次性福利 · 已领取状态保存在网关，领完无需重复查询 · 点击行展开任务清单')}</span>
-          {extras.onboarding.length > 0 ? (
-            <Button
-              size="sm"
-              variant="outline"
-              className="ml-auto flex-none"
-              onClick={() => {
-                for (const row of extras.onboarding) {
-                  void queryOnboarding(row.id)
-                }
-              }}
-            >
-              全部查询
-            </Button>
-          ) : null}
-        </CardHeader>
-        {extras.onboarding.length > 0
-          ? <div>{extras.onboarding.map(row => <OnboardingRow key={row.id} row={row} />)}</div>
-          : <Empty className="ck-empty">没有支持新手福利的账号。</Empty>}
-      </Card> : null}
+      {section === 'onboarding' ? (
+        <Card render={<section />} className="panel">
+          <CardHeader className="border-b-0 pb-1">
+            <CardTitle>{t('新手福利')}</CardTitle>
+            <span className="text-[11.5px] text-muted-foreground">
+              {extras.onboarding.length > 0
+                ? t('已有结果 {checked} / 共 {total} 个账号 · {pending} 项待领', {
+                  checked: onboardingChecked,
+                  total: extras.onboarding.length,
+                  pending: onboardingPending,
+                })
+                : t('没有支持新手福利的账号')}
+            </span>
+            <CardAction>
+              {extras.onboarding.length > 0 ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    for (const row of extras.onboarding) {
+                      void queryOnboarding(row.id)
+                    }
+                  }}
+                >
+                  {t('全部查询')}
+                </Button>
+              ) : null}
+              <SegmentedControl
+                aria-label={t('按领取状态筛选')}
+                options={filterOptions(['全部', '已领取', '未领取'], extras.onboarding.length, onboardingDoneCount)}
+                value={onboardingFilter}
+                onValueChange={setOnboardingFilter}
+              />
+            </CardAction>
+          </CardHeader>
+          {onboardingRows.length > 0
+            ? <div className="pb-1 pt-1">{onboardingRows.map(row => <OnboardingRow key={row.id} row={row} />)}</div>
+            : <Empty className="py-6">
+              {extras.onboarding.length === 0
+                ? t('没有支持新手福利的账号。')
+                : onboardingFilter === 'done'
+                  ? t('还没有账号领完新手福利，切到「全部」看看待领的项。')
+                  : t('新手福利都领完了。')}
+            </Empty>}
+          <CardFooter>
+            {t('一次性福利 · 已领取状态保存在网关，领完无需重复查询 · 点击行展开任务清单')}
+          </CardFooter>
+        </Card>
+      ) : null}
 
-      {section === 'plans' ? <Card render={<section />} className="panel">
-        <CardHeader className="panel-head">
-          <h2>活动福利</h2>
-          <span className="panel-sub">{t('限时活动与体验套餐 · 查询后逐项领取 · 不影响每日签到')}</span>
-        </CardHeader>
-        {extras.plans.length > 0 || (extras.campaigns?.length ?? 0) > 0
-          ? <div>
-            {(extras.campaigns ?? []).map(row => <CampaignRow key={row.id} row={row} />)}
-            {extras.plans.map(row => <PlanRow key={row.id} row={row} />)}
-          </div>
-          : <Empty className="ck-empty">{t('没有支持活动福利的账号，请添加账号并更新提供商插件。')}</Empty>}
-      </Card> : null}
+      {/* 活动福利单独一个文件：它多出「全部 / 未领取 / 已领取」筛选 */}
+      {section === 'plans'
+        ? <PlansSection campaigns={extras.campaigns ?? []} plans={extras.plans} />
+        : null}
 
-      {section === 'growth' ? <Card render={<section />} className="panel">
-        <CardHeader className="panel-head">
-          <h2>成长任务</h2>
-          <span className="panel-sub">WorkBuddy 国内版 · 查询任务树后一键点亮 / 领奖 · 含开学季与猫猫旅行 · 点击行展开明细</span>
-        </CardHeader>
-        {extras.growth.length > 0
-          ? <div>{extras.growth.map(row => <GrowthRow key={row.id} row={row} />)}</div>
-          : <Empty className="ck-empty">没有支持成长任务的账号（需要 WorkBuddy 国内版）。</Empty>}
-      </Card> : null}
+      {section === 'growth' ? (
+        <Card render={<section />} className="panel">
+          <CardHeader className="border-b-0 pb-1">
+            <CardTitle>{t('成长任务')}</CardTitle>
+            <span className="text-[11.5px] text-muted-foreground">
+              {extras.growth.length > 0
+                ? t('WorkBuddy 国内版 · {n} 个账号', { n: extras.growth.length })
+                : t('没有支持成长任务的账号')}
+            </span>
+            <CardAction>
+              <SegmentedControl
+                aria-label={t('按完成状态筛选')}
+                options={filterOptions(['全部', '已完成', '未完成'], extras.growth.length, growthDoneCount)}
+                value={growthFilter}
+                onValueChange={setGrowthFilter}
+              />
+            </CardAction>
+          </CardHeader>
+          {growthRows.length > 0
+            ? <div className="pb-1 pt-1">{growthRows.map(row => <GrowthRow key={row.id} row={row} />)}</div>
+            : <Empty className="py-6">
+              {extras.growth.length === 0
+                ? t('没有支持成长任务的账号（需要 WorkBuddy 国内版）。')
+                : growthFilter === 'done'
+                  ? t('还没有账号完成全部任务，切到「全部」看看可完成的项。')
+                  : t('成长任务都完成了。')}
+            </Empty>}
+          <CardFooter>
+            {t('查询任务树后一键点亮 / 领奖 · 含开学季与猫猫旅行 · 点击行展开明细')}
+          </CardFooter>
+        </Card>
+      ) : null}
     </div>
   )
 }

@@ -89,21 +89,6 @@
   .ck-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-/* ── 行内三段文字（定时条目行在用）──
-   `.ck-row-*` 与 `.ck-prov-*` 是同一套形态的两个名字：前者给「可展开的行」
-   （每日签到 / 新手福利），后者给「开关 + 三段文字 + 右侧操作」（定时条目）。
-   行外壳 `.ck-row` / `.ck-row-main` 见文件末尾的页面骨架那一段。 */
-.ck-prov-info { flex: 1; min-width: 0; }
-.ck-prov-name {
-  font-weight: 600;
-  font-size: 13.5px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-.ck-prov-desc { font-size: 12px; color: var(--text-3); margin-top: 2px; }
-.ck-prov-right { display: flex; align-items: center; gap: 10px; flex: none; }
 /* 范围外账号的折叠说明（每日签到卡底部） */
 .ck-fold-note {
   padding: 9px 16px;
@@ -114,70 +99,11 @@
   line-height: 1.7;
 }
 
-/* ── 账号明细表（展开区里的小表，非整页大表）── */
-.ck-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12.5px;
-  background: var(--surface-inset);
-  border-radius: var(--r-xs);
-  overflow: hidden;
-}
-.ck-table th {
-  text-align: left;
-  font-weight: 500;
-  color: var(--text-3);
-  padding: 7px 12px;
-  border-bottom: 1px solid var(--border);
-  font-size: 11.5px;
-  white-space: nowrap;
-}
-.ck-table td {
-  padding: 7px 12px;
-  border-bottom: 1px solid var(--hairline);
-  font-variant-numeric: tabular-nums;
-}
-.ck-table tr:last-child td { border-bottom: 0; }
-
-/* ── 任务行（新手任务清单 / KukuAI 每日子任务共用）── */
-.ck-task-line { display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: 13px; }
-.ck-task-tick {
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  flex: none;
-  display: grid;
-  place-items: center;
-  font-size: 10px;
-}
-.ck-task-tick.done { background: var(--ok-soft); color: var(--ok); border: 1px solid var(--ok-bd); }
-.ck-task-tick.todo { border: 1.5px dashed var(--border-strong); color: transparent; }
-.ck-task-pts { font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
-.ck-task-st { margin-left: auto; }
-.ck-task-st .ck-task-btn { margin-left: 8px; }
-.ck-group-label { margin: 10px 0 4px; font-size: 12px; color: var(--text-3); }
-
-/* ── 活动福利行（CodeArts / ZCode）── */
-.ck-welfare-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--hairline);
-}
-.ck-welfare-row:last-child { border-bottom: 0; }
-
-/* 成长任务展开区底部的三个动作（开学季 / 抽奖 / 猫猫旅行）：
-   它们不属于任务树，所以不从 `ck-task-line` 拼，单独给一行 */
-.ck-grow-extra {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px dashed var(--hairline);
-}
+/* ── 任务行与活动福利行的样式已随改版移除 ──
+   新手福利 / 成长任务的任务清单、活动福利的行，现在都用组件库的行形态
+   （`.ck-` 前缀的这几组类没有了对应 DOM）：明细在 `checkin-center-tab.tsx`
+   的 `DetailLine` 里，活动福利在 `checkin-plans-section.tsx` 里。
+   这边只保留仍然在用的：说明条、设置行、模型链、排程与记录页的类。 */
 
 /* ── 自动签到设置卡 ── */
 .ck-set-line {
@@ -474,41 +400,10 @@ body.ck-chain-dragging { cursor: grabbing; user-select: none; }
   cursor: pointer;
 }
 
-/* ── 可展开的行 ── */
-.ck-row { border-bottom: 1px solid var(--hairline); }
-.ck-row:last-child { border-bottom: 0; }
-.ck-row-header { display: flex; align-items: center; }
-.ck-row.open > .ck-row-header { background: var(--row-hover); }
-.ck-row-main { flex: 1; min-width: 0; }
-.ck-row-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex: none;
-  padding-right: 16px;
-}
-.ck-row-info { flex: 1; min-width: 0; }
-.ck-row-name {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  font-size: 13.5px;
-  font-weight: 600;
-}
-.ck-row-desc { margin-top: 2px; font-size: 12px; color: var(--text-3); }
-.ck-row-right { display: flex; align-items: center; gap: 10px; flex: none; }
-.ck-row-count { font-size: 12.5px; color: var(--text-2); font-variant-numeric: tabular-nums; }
-.ck-row-detail { padding: 2px 16px 12px 58px; }
-
-/* 展开箭头：展开时转 90°（与账号页同一观感） */
-.ck-chev {
-  display: inline-flex;
-  flex: none;
-  color: var(--text-3);
-  transition: transform .15s;
-}
-.ck-chev.open { transform: rotate(90deg); }
+/* ── 可展开的行 ──
+   行外壳（`.ck-row` / `.ck-row-main` / `.ck-chev` 一族）已随改版移除：现在由
+   组件库的 Item 与 Tailwind 类在 `checkin-row.tsx` 里拼成，展开态与箭头旋转
+   都在组件内部（`.ck-fold-note` 仍给排程页的说明条用）。 */
 /* ── 设置行（标签 + 内容）── */
 .ck-sub { font-size: 11.5px; color: var(--text-3); }
 .ck-inline { display: inline-flex; align-items: center; gap: 2px; }
@@ -574,18 +469,8 @@ body.ck-chain-dragging { cursor: grabbing; user-select: none; }
 
 @media (max-width: 767px) {
   .ck-tabs { flex-wrap: wrap; gap: 8px; }
-  .ck-row-header { flex-wrap: wrap; }
-  .ck-row-actions { flex-wrap: wrap; justify-content: flex-end; width: 100%; padding: 0 16px 10px 58px; }
-  .ck-row-right { flex-direction: column; align-items: flex-end; gap: 4px; }
-  .ck-row-detail { padding-left: 16px; overflow-x: auto; }
-  .ck-task-line { flex-wrap: wrap; }
-  .ck-welfare-row { flex-wrap: wrap; }
 }
 
 @media (max-width: 420px) {
   .ck-stats { grid-template-columns: minmax(0, 1fr); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .ck-chev { transition: none; }
 }

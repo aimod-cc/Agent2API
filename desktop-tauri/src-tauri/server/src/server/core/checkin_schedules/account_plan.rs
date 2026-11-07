@@ -107,13 +107,19 @@ pub fn prepare(
         let Some(&(start, end)) = windows.get(provider) else {
             continue;
         };
+        if let Some(until) = account.get("dailyCheckin")
+            .and_then(crate::server::core::account_store::checkin_state::rolling_until)
+        {
+            let existing = plan.accounts.get(id);
+            let at = until.max(start);
+            let attempted_at = existing.filter(|existing| existing.provider == provider)
+                .and_then(|existing| existing.attempted_at).filter(|attempted| *attempted >= until);
+            plan.accounts.insert(id.to_string(), PlannedAccount { provider: provider.into(), at, attempted_at });
+            continue;
+        }
         let completed = (schedule.account_plan.date != date
             && times::main_fired(schedule, provider, &date))
-            || account
-                .get("checkinAt")
-                .and_then(Value::as_i64)
-                .and_then(beijing::date_key_of_ms)
-                .is_some_and(|key| key == date);
+            || crate::server::core::account_store::checkin_state::checked_in_today(account);
         if let Some(existing) = plan.accounts.get_mut(id) {
             if existing.provider == provider {
                 if completed && existing.attempted_at.is_none() {

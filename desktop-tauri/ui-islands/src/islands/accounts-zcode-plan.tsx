@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { Button, Field, FieldLabel, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@ui'
+import { Button, Field, FieldLabel, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, StatusDot, cn } from '@ui'
 import { t } from '../i18n'
 import { errorMessage, shared, type AccountsBridge } from './accounts-shared'
 import { zcodePlanLabel, ZCODE_PLAN_CODING, ZCODE_PLAN_START } from './accounts-domain'
@@ -81,13 +81,20 @@ export function ZcodeCaptchaStatus({ accountId, disabled = false, onBusy }: {
   }
 
   const busy = Boolean(phase)
+  const failed = Boolean(pool?.error || pool?.configError || mint?.state === 'error')
+  /**
+   * 这一块压成**一行**：一枚状态点 + 一句话 + 必要时的按钮。
+   *
+   * 「后台只读取状态，不会自动弹出验证码；验证结果一次性使用，短时间内过期」
+   * 那条规则挂在 title 上，需要时悬停可查 —— 它是通道的说明，不是当前状态，
+   * 不该跟状态抢同一行。
+   */
   return (
-    <div className='mt-2.5 space-y-2'>
-      <p className={`detail${pool?.error || pool?.configError || mint?.state === 'error' ? ' text-destructive' : ''}`}>
-        {poolStatus(pool, mint)}
-      </p>
-      <p className='detail'>{t('后台只读取状态，不会自动弹出验证码；验证结果一次性使用，短时间内过期。')}</p>
-      <div className='flex items-center gap-2'>
+    <div className='flex flex-wrap items-center gap-2'
+      title={t('后台只读取状态，不会自动弹出验证码；验证结果一次性使用，短时间内过期。')}>
+      <StatusDot variant={failed ? 'destructive' : pool?.required === false ? 'success' : 'warning'} />
+      <span className={cn('text-[12.5px]', failed && 'text-destructive')}>{poolStatus(pool, mint)}</span>
+      <div className='ml-auto flex flex-wrap items-center gap-2'>
         {pool?.required !== false && Number(pool?.startPlanAccounts) > 0 ? (
           <Button variant='outline' size='xs' disabled={disabled || busy || Boolean(pool?.error || pool?.configError) || !shared().wbZcodeCaptchaPool?.verify}
             onClick={() => void verify()}>{busy ? t('正在验证…') : t('开始验证')}</Button>

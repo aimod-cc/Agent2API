@@ -79,12 +79,12 @@ impl AutoCheckin {
             let Some(provider) = account_plan::take_due(id, &account, &date) else {
                 continue;
             };
-            let reason = format!(
-                "区间随机签到（{} · {}–{}）",
-                checkin_schedules::display_label(&current),
-                times::effective_time(&current, &provider),
-                times::effective_end(&current, &provider)
-            );
+            let reason = if planned.at > current.account_plan.windows.get(&provider).map(|window| window.1).unwrap_or(i64::MAX) {
+                format!("滚动窗口签到（{}）", checkin_schedules::display_label(&current))
+            } else {
+                format!("区间随机签到（{} · {}–{}）", checkin_schedules::display_label(&current),
+                    times::effective_time(&current, &provider), times::effective_end(&current, &provider))
+            };
             let selected = vec![account.clone()];
             super::write_state(json!({ "lastFiredDate": date }));
             match checkin::run_checkin_selected(

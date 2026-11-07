@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { t } from '../i18n'
 import type { AgentClient, AgentModel } from './agent-types'
+import { modelLevels } from './agent-model-config'
 
 export type CatalogModel = AgentModel & { label: string }
 type CatalogWindow = { workbuddyDesktop?: { getAgentModels?: (gatewayKeyId?: string) => Promise<{ models: AgentModel[] }> } }
@@ -22,7 +23,7 @@ export async function loadCatalog(gatewayKeyId?: string): Promise<CatalogModel[]
 
 export function catalogModel(client: AgentClient, model: CatalogModel): AgentModel {
   const { label: _, ...configured } = model
-  return { ...configured, effort: '', reasoningLevels: client.supportsEffort || client.id === 'zcode' ? [...configured.reasoningLevels] : [] }
+  return { ...configured, effort: '', reasoningLevels: client.supportsEffort || client.id === 'zcode' ? modelLevels(client, configured.reasoningLevels) : [] }
 }
 
 export function refreshCatalogModels(client: AgentClient, models: AgentModel[], previous: CatalogModel[], catalog: CatalogModel[]): AgentModel[] {

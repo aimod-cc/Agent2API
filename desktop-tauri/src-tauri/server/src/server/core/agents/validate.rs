@@ -87,7 +87,8 @@ pub fn profile(def: &ClientDef, profile: &Profile) -> Result<(), String> {
     if def.id == "zed" && !matches!(profile.auth_mode.as_str(), "preserve" | "none") {
         return Err("请在 Zed 中配置 API Key，本页不会写入系统凭证".into());
     }
-    if def.models {
+    let optional_catalog = matches!(def.id, "codex" | "claude-code") && profile.models.is_empty();
+    if def.models && !optional_catalog {
         if profile.models.is_empty() || profile.models.len() > 200 {
             return Err("请配置至少一个模型，最多 200 个".into());
         }
@@ -121,11 +122,12 @@ pub fn profile(def: &ClientDef, profile: &Profile) -> Result<(), String> {
                     "Crush 自定义模型需要填写输出上限、图片与思考能力，不能猜测这些必要字段".into(),
                 );
             }
+            let levels = super::model_config::levels(def.id, &model.reasoning_levels);
             if !model.effort.is_empty()
                 && model.effort != "default"
-                && !model.reasoning_levels.contains(&model.effort)
+                && (!model.reasoning_levels.contains(&model.effort) || !levels.contains(&model.effort))
             {
-                return Err(format!("模型 {} 未声明所选思考等级", model.id));
+                return Err(format!("模型 {} 或客户端不支持所选思考等级", model.id));
             }
         }
         if def.default_model && !profile.models.iter().any(|model| model.id == profile.model) {
@@ -139,13 +141,22 @@ pub fn profile(def: &ClientDef, profile: &Profile) -> Result<(), String> {
             return Err("这个客户端未开放思考等级编辑".into());
         }
         let levels: &[&str] = match def.id {
-            "codex" => &["none", "minimal", "low", "medium", "high", "xhigh"],
+            "codex" => &["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
             "claude-code" => &["low", "medium", "high", "xhigh", "max", "auto"],
             "dsh" => &["off", "none", "minimal", "low", "medium", "high", "xhigh", "max"],
             _ => &["none", "minimal", "low", "medium", "high", "xhigh", "max"],
         };
         if !levels.contains(&profile.effort.as_str()) {
             return Err("这个客户端不支持所选思考等级".into());
+        }
+        if matches!(def.id, "cline" | "crush" | "dsh" | "codex") {
+            if let Some(model) = profile.models.iter().find(|model| model.id == profile.model) {
+                let level = if def.id == "dsh" && profile.effort == "none" { "off" } else { &profile.effort };
+                if model.supports_reasoning == Some(false) || (!model.reasoning_levels.is_empty()
+                    && !super::model_config::levels(def.id, &model.reasoning_levels).iter().any(|value| value == level)) {
+                    return Err("默认模型不支持所选思考等级，请重新选择".into());
+                }
+            }
         }
     }
     Ok(())

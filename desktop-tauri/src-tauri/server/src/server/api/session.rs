@@ -157,6 +157,10 @@ struct LoginMethodMetadata {
     /// 用户多做一个没有意义的选择。只对 oauth 方式有效。
     #[serde(default)]
     embedded_only: bool,
+    #[serde(default)]
+    desktop_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    browser_mode: Option<String>,
 }
 
 #[derive(Clone, Copy, Default, serde::Deserialize, serde::Serialize)]
@@ -260,6 +264,11 @@ async fn read_login_methods(
         // JSON number 要能被网页端精确表示；索引保留插件原值，绝不按显示顺序编号。
         if method.method_index > 9_007_199_254_740_991 || !indices.insert(method.method_index) {
             return Err(GatewayError::with_status(502, "插件登录方式索引无效或重复"));
+        }
+        if method.desktop_only && (!method.embedded_only || !matches!(method.kind, LoginMethodType::Oauth))
+            || method.browser_mode.as_deref().is_some_and(|mode| !matches!(mode, "choice" | "external" | "plugin" | "none"))
+        {
+            return Err(GatewayError::with_status(502, "插件登录窗口契约无效"));
         }
         if matches!(method.callback_input, LoginCallbackInput::Code) && !method.manual_callback {
             return Err(GatewayError::with_status(502, "code 回调输入只能用于手动登录回调"));
@@ -477,7 +486,14 @@ pub async fn login_start(State(state): State<ServerState>, body: Bytes) -> Respo
             Ok(proxy) => proxy,
             Err(error) => return management_error(error.status_code, error.message),
         };
-        let mut options = json!({ "methodIndex": index, "inputs": inputs });
+        let mode = request.get("mode").and_then(Value::as_str).unwrap_or("external");
+        if !matches!(mode, "external" | "embedded" | "auto") {
+            return management_error(400, "登录打开方式无效");
+        }
+        if method.desktop_only && mode != "embedded" {
+            return management_error(400, "此登录方式需要桌面应用的内嵌窗口；浏览器或手机端请使用其他登录方式");
+        }
+        let mut options = json!({ "methodIndex": index, "inputs": inputs, "mode": mode });
         if let Some(selection) = &proxy {
             options["proxy"] = selection.resolved.clone();
         }
@@ -674,6 +690,7 @@ async fn start_plugin_web_login(
     let mut response = login_start_response(&start, &provider, edition, manual_callback, callback_input);
     if let Some(index) = method_index { response["methodIndex"] = json!(index); }
     if method_index.is_some() { response["localOnly"] = json!(local_only); }
+    crate::server::core::plugin_host::script::decorate_login(&provider, &start.flow, &mut response);
     // 所有返回字段均来自已校验的元数据与 LoginStart，不把 options / inputs 回显。
     ok_json(response)
 }

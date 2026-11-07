@@ -6,12 +6,9 @@
 //! [`crate::server::core::providers::adapter::ProviderAdapter`]；这个模块
 //! 提供 [`RpcAdapter`]（那个 trait 的远程实现）与 [`Host`]（进程生命周期）。
 //!
-//! ── 进程模型：每个插件包一个宿主 ──────────────────────────────
-//! 与 magpie 同款：一个包 = 一个进程 = 若干家 provider。理由：
-//!   - 21 份 tokio 运行时与连接池的代价在桌面端很明显（每份至少几 MB 常驻）；
-//!   - 跨 provider 的共享状态（HTTP 客户端、模型缓存）只存一份；
-//!   - 崩溃恢复的粒度足够 —— 一个 provider 的 panic 带走的是同包其它家，
-//!     但**不会**带走网关（那是插件架构的主要收益）。
+//! ── 进程模型 ──────────────────────────────────────────────
+//! 原生插件按包启动；Magpie / OpenCode 脚本插件共享按需下载的 Bun 宿主。
+//! 同宿主共享运行时和连接池，单个宿主退出不影响网关与其它宿主。
 //!
 //! ── 崩溃恢复 ────────────────────────────────────────────────
 //! 子进程死了 → 所有在途调用立刻失败（不是挂起）→ 网关按「上游不可用」
@@ -54,6 +51,7 @@ mod registry;
 mod rpc;
 pub(crate) mod rpc_cache;
 pub mod schedules;
+pub mod script;
 pub mod settings;
 mod stream;
 mod switching;
@@ -103,7 +101,7 @@ pub fn provider_label(id: &str) -> Option<String> {
             return Some(found.label.clone());
         }
     }
-    None
+    script::registered_label(id)
 }
 
 /// 插件目录的展示路径（界面显示「装到哪儿了」用）。

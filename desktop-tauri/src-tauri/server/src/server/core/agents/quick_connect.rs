@@ -8,15 +8,12 @@ pub fn plan(def: &ClientDef, path: &Path, profile: &Profile, port: u16) -> Resul
         return Err("一键接入只能修改本客户端的专用网关配置".into());
     }
     let operation = if def.default_model { "default" } else { "apply" };
-    let mut plan = clients::plan(def, path, profile, operation, port)?;
-    let target = clients::native_id(profile);
     let live = discover::read(def, path)?;
+    let gateway = format!("http://127.0.0.1:{port}");
+    super::quick_profiles::guard(def, &live, &gateway)?;
+    let mut plan = clients::plan(def, path, profile, operation, port)?;
     let wanted = profile.models.iter().map(|model| model.id.as_str()).collect::<HashSet<_>>();
-    // 只替换一键接入自己创建的提供商；不删除客户端的其它提供商或手工条目。
-    for old in live.iter().filter(|old| old.native.source_id == target && (def.id != "zed" || old.protocol == profile.protocol)) {
-        if !super::is_gateway(&old.base_url, &format!("http://127.0.0.1:{port}")) {
-            return Err("一键接入条目已被改为其他服务，请从客户端实际配置中编辑，避免覆盖".into());
-        }
+    for old in super::quick_profiles::profiles(def, &live, &gateway).iter().filter(|old| def.id != "zed" || old.protocol == profile.protocol) {
         clients::remove_models(def, &mut plan, old, &wanted)?;
     }
     for change in &plan.changes { change.check()?; }
