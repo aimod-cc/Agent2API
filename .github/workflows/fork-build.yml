@@ -199,6 +199,21 @@ jobs:
             "请在确认 Windows 附件与容器镜像后，再手动将本 Release 正式发布。" > notes
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      - name: 清理未发布的同 tag 草稿
+        id: tag_guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v${{ steps.release.outputs.version }}"
+          state="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || true)"
+          if [[ "$state" == "true" ]]; then
+            gh release delete "$TAG" --yes --cleanup-tag
+          elif [[ -n "$state" ]]; then
+            # 已发布的同 tag：加后缀区分，避免与正式发布冲突
+            echo "suffix=-r${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: 创建或更新草稿 Release
         uses: ncipollo/release-action@v1.21.0
         with:
@@ -207,6 +222,6 @@ jobs:
           artifacts: "dist/*"
           bodyFile: notes
           draft: true
-          tag: "v${{ steps.release.outputs.version }}"
+          tag: "v${{ steps.release.outputs.version }}${{ steps.tag_guard.outputs.suffix }}"
           token: ${{ secrets.GITHUB_TOKEN }}
           updateOnlyUnreleased: true
