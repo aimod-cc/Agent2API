@@ -41,13 +41,13 @@ const AlertDialogDescription = (props: AlertDialogPrimitive.Description.Props) =
 )
 
 function AlertDialogOverlay({ className, ...props }: AlertDialogPrimitive.Backdrop.Props) {
+  // 与 dialog 的遮罩同一口径：全屏模糊不做入场动画，避免高负载掉帧。
   return (
     <AlertDialogPrimitive.Backdrop
       data-slot='alert-dialog-overlay'
       className={cn(
         'fixed inset-0 isolate z-[38] bg-mask backdrop-blur-[3px]',
         'transition-opacity duration-150',
-        'data-open:animate-in data-open:fade-in-0',
         'data-closed:animate-out data-closed:fade-out-0 data-closed:fill-mode-forwards',
         className
       )}
