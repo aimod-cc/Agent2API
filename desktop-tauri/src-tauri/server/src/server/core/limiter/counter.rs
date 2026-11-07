@@ -229,17 +229,17 @@ fn refresh_inner(accounts: &[serde_json::Value], replace: bool) {
     }
 }
 
-pub fn note(id: &str, request_id: &str, model: &str, channel: &str, tokens: i64, ts: i64) {
-    if id.is_empty() { return; }
-    let Some(db) = DB.get().and_then(Option::as_ref) else { return };
-    let inserted = db.with_mut(|conn| -> rusqlite::Result<Option<i64>> {
+pub fn note(id: &str, request_id: &str, model: &str, channel: &str, tokens: i64, ts: i64) -> bool {
+    if id.is_empty() { return false; }
+    let Some(db) = DB.get().and_then(Option::as_ref) else { return false };
+    let inserted = db.with_mut(|conn| {
         insert_event(conn, id, request_id, model, channel, tokens, ts)
     }).and_then(Result::ok).flatten();
-    let Some(row_id) = inserted else { return };
+    let Some(row_id) = inserted else { return false };
     update_facts(id, model, channel, tokens, ts, row_id);
+    true
 }
 
-/// 在调用方已经持有的事务里插入限额事件
 pub(crate) fn insert_event(
     conn: &rusqlite::Connection,
     id: &str,
@@ -260,7 +260,7 @@ pub(crate) fn insert_event(
     Ok((changed == 1).then(|| conn.last_insert_rowid()))
 }
 
-/// 事务提交后同步内存限额事实
+/// 只能在事务提交且数据库连接锁释放后更新，刷新路径按事实锁、数据库锁的顺序取锁。
 pub(crate) fn update_facts(
     id: &str,
     model: &str,

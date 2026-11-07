@@ -1069,9 +1069,6 @@ pub fn cors_enabled() -> bool {
     false
 }
 
-/// 只取调试模式开关的轻量读取
-///
-/// 转发链每个请求都会判定一次，不能为此克隆整份 `raw`
 pub fn debug_mode_enabled() -> bool {
     if let Ok(guard) = CONFIG.read() {
         if let Some(config) = guard.as_ref() {

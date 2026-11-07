@@ -113,17 +113,9 @@ pub const KEY_SANITIZE_FINGERPRINTS: &str = "sanitizeBlacklistFingerprints";
 /// 转换实施点见 `core::upstream::payload`（send_body 的角色归一层）。
 pub const KEY_DEVELOPER_ROLE_COMPAT: &str = "developerRoleCompat";
 
-/// 第三方模型回答完自动折叠过程开关（config.json 键，设置页「网关 → 第三方模型回答完自动折叠过程」）。
-///
-/// 开启后，网关在重建 Responses 事件流时给助手消息补 `phase` 标记：本轮没有工具
-/// 调用的最后一条消息补 `final_answer`，之前的消息与工具调用之外的过程消息补
-/// `commentary`。Codex 桌面端只在收到 `phase: "final_answer"` 时，才把这一轮
-/// 的推理、命令与过程消息收进可折叠的「已处理 X 分钟」；第三方模型不带这个
-/// 字段，整轮过程因此一直展开。
-///
-/// **默认关闭**：它改的是下发给客户端的响应字节，且只对 Codex 来源的
-/// `/v1/responses` 请求生效（见 `api::protocol` 的来源判定）；个别上游或下游
-/// 不认识这个字段时，关掉即可回到原样。
+/// 第三方模型回答完自动折叠过程开关，默认关闭。
+/// 仅影响严格识别的 Codex Responses 请求；正常完成的非空回答才补最终阶段。
+/// 报表规则与来源声明不改变此开关的作用范围。
 pub const KEY_THIRD_PARTY_REASONING_COLLAPSE: &str = "thirdPartyReasoningCollapse";
 
 /// **Cline 转发头的逐键覆盖**（config.json 键）。

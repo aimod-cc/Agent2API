@@ -618,7 +618,7 @@ pub async fn run_model_test(State(state): State<ServerState>, headers: HeaderMap
     }
     // 断线兜底：handler 被取消（前端关掉结果弹窗 = abort 掉 fetch）时补 408 终态。
     // 正常路径必须显式 `complete()`，见下面两条出口
-    let mut guard = DisconnectGuard::new(state.request_stats(), test_id.clone());
+    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry.clone(), started_at);
     // 请求日志的下游请求原文记录按所选协议组装出的请求体（预览对话可直接还原气泡）；
     // 与真实流量同一道闸：仅调试模式开启时采集（见 `capture_raw_json`）
     let raw_request = pipeline::capture_raw_json(&protocol_request);

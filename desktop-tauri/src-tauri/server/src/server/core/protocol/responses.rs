@@ -26,7 +26,7 @@ use serde_json::{json, Map, Value};
 
 use super::{
     content_parts, content_text, event_frame, freeform, is_truthy, json_text, native_tool,
-    random_id, string_field, string_value, tool_plan, SseLineBuffer, TOOL_IMAGE_PLACEHOLDER,
+    random_id, responses_phase, string_field, string_value, tool_plan, SseLineBuffer, TOOL_IMAGE_PLACEHOLDER,
     FIELD_ENCRYPTED_CONTENT,
 };
 use crate::server::logging;
@@ -1025,14 +1025,8 @@ pub fn responses_from_chat(
         }));
     }
     let text = content_text(message.get("content").unwrap_or(&Value::Null));
-    let tool_calls = message.get("tool_calls").and_then(Value::as_array);
-    let incomplete = if finish == "length" {
-        Some("max_output_tokens")
-    } else if finish == "content_filter" {
-        Some("content_filter")
-    } else {
-        None
-    };
+    let tool_calls = message.get("tool_calls").and_then(Value::as_array).filter(|calls| !calls.is_empty());
+    let incomplete = responses_phase::incomplete_reason(Some(&finish));
     // 没有工具调用时始终给一条 message 项（哪怕文本为空）：
     // 客户端的 `output_text` 解析依赖它存在，缺失会被当成「响应损坏」
     if !text.is_empty() || tool_calls.is_none() {
@@ -1043,16 +1037,11 @@ pub fn responses_from_chat(
             "role": "assistant",
             "content": [{ "type": "output_text", "text": text, "annotations": [], "logprobs": [] }],
         });
-        // Codex 桌面端靠 phase 判定这一轮最后一条助手消息，截断收尾不补标记
-        if reasoning_collapse && incomplete.is_none() {
-            if let Some(map) = item.as_object_mut() {
-                map.insert(
-                    "phase".to_string(),
-                    Value::String(
-                        if tool_calls.is_none() { "final_answer" } else { "commentary" }.to_string(),
-                    ),
-                );
-            }
+        if reasoning_collapse {
+            responses_phase::apply(&mut item, responses_phase::message_phase(
+                Some(&finish), tool_calls.is_some(),
+                responses_phase::response_is_successful(chat) && responses_phase::response_is_successful(&message),
+            ));
         }
         output.push(item);
     }
@@ -1233,6 +1222,8 @@ pub struct ResponsesStream {
     next_index: i64,
     usage: Option<Value>,
     finish_reason: Option<String>,
+    saw_done: bool,
+    phase_eligible: bool,
     /// 已完成的 output 项（收尾时按 output_index 排序进 response.output）
     output_items: Vec<(i64, Value)>,
     /// 是否给助手消息补 `phase` 阶段标记（设置「第三方模型回答完自动折叠过程」）
@@ -1286,6 +1277,8 @@ impl ResponsesStream {
             next_index: 0,
             usage: None,
             finish_reason: None,
+            saw_done: false,
+            phase_eligible: true,
             output_items: Vec::new(),
             reasoning_collapse,
         }
@@ -1296,12 +1289,14 @@ impl ResponsesStream {
         let mut out = Vec::new();
         for payload in self.buffer.push(chunk) {
             match payload {
-                None => out.extend(self.finish()),
-                Some(data) => {
-                    if let Ok(value) = serde_json::from_str::<Value>(&data) {
-                        out.extend(self.consume(&value));
-                    }
+                None => {
+                    self.saw_done = true;
+                    out.extend(self.finish());
                 }
+                Some(data) => match serde_json::from_str::<Value>(&data) {
+                    Ok(value) => out.extend(self.consume(&value)),
+                    Err(_) => self.phase_eligible = false,
+                },
             }
         }
         out
@@ -1315,10 +1310,12 @@ impl ResponsesStream {
         // 先冲刷缓冲里残留的最后一帧
         let mut out = Vec::new();
         for payload in self.buffer.finish() {
-            if let Some(data) = payload {
-                if let Ok(value) = serde_json::from_str::<Value>(&data) {
-                    out.extend(self.consume(&value));
-                }
+            match payload {
+                None => self.saw_done = true,
+                Some(data) => match serde_json::from_str::<Value>(&data) {
+                    Ok(value) => out.extend(self.consume(&value)),
+                    Err(_) => self.phase_eligible = false,
+                },
             }
         }
         if self.finished {
@@ -1361,23 +1358,10 @@ impl ResponsesStream {
         if !self.text_open && self.tools.is_empty() {
             out.extend(self.open_text());
         }
-        let incomplete = match self.finish_reason.as_deref() {
-            Some("length") => Some("max_output_tokens"),
-            Some("content_filter") => Some("content_filter"),
-            _ => None,
-        };
-        // 截断收尾（输出预算用尽 / 内容过滤）不算真正回答完，不猜阶段 ——
-        // 与 Codex++ 对 `response.incomplete` 的处置一致（原样放行、不补标记），
-        // 否则半截答案会被客户端当成收尾折叠起来
-        let phase = if incomplete.is_some() {
-            None
-        } else if self.tools.is_empty() {
-            // 没有工具调用时，这条正文就是回答完的收尾消息
-            Some("final_answer")
-        } else {
-            // 有工具调用时本轮还会继续，已写出的正文属于过程说明
-            Some("commentary")
-        };
+        let incomplete = responses_phase::incomplete_reason(self.finish_reason.as_deref());
+        let phase = responses_phase::message_phase(
+            self.finish_reason.as_deref(), !self.tools.is_empty(), self.saw_done && self.phase_eligible,
+        );
         out.extend(self.close_text(phase));
         out.extend(self.close_tools());
         let output: Vec<Value> = {
@@ -1405,6 +1389,7 @@ impl ResponsesStream {
         if self.finished {
             return Vec::new();
         }
+        self.phase_eligible &= responses_phase::response_is_successful(chunk);
         let mut out = Vec::new();
         // 上游错误帧：转成 Responses 的 error + response.failed
         if let Some(error) = chunk.get("error").filter(|value| is_truthy(value)) {
@@ -1788,13 +1773,8 @@ impl ResponsesStream {
             "role": "assistant",
             "content": [part.clone()],
         });
-        // Codex 桌面端只在最后一条助手消息带 final_answer 时才折叠这一轮的过程
         if self.reasoning_collapse {
-            if let Some(map) = item.as_object_mut() {
-                if let Some(phase) = phase {
-                    map.insert("phase".to_string(), Value::String(phase.to_string()));
-                }
-            }
+            responses_phase::apply(&mut item, phase);
         }
         self.output_items.push((self.text_index, item.clone()));
         vec![
@@ -1936,6 +1916,8 @@ pub struct ResponsesCollector {
     tools: std::collections::BTreeMap<i64, ToolAccum>,
     usage: Option<Value>,
     finish_reason: Option<String>,
+    saw_done: bool,
+    phase_eligible: bool,
     id: String,
     created: i64,
 }
@@ -1949,6 +1931,8 @@ impl ResponsesCollector {
             tools: std::collections::BTreeMap::new(),
             usage: None,
             finish_reason: None,
+            saw_done: false,
+            phase_eligible: true,
             id: String::new(),
             created: logging::now_ms() / 1000,
         }
@@ -1956,25 +1940,28 @@ impl ResponsesCollector {
 
     pub fn push(&mut self, chunk: &[u8]) {
         for payload in self.buffer.push(chunk) {
-            if let Some(data) = payload {
-                if let Ok(value) = serde_json::from_str::<Value>(&data) {
-                    self.consume(&value);
-                }
-            }
+            self.consume_payload(payload);
         }
     }
 
     pub fn finish(&mut self) {
         for payload in self.buffer.finish() {
-            if let Some(data) = payload {
-                if let Ok(value) = serde_json::from_str::<Value>(&data) {
-                    self.consume(&value);
-                }
-            }
+            self.consume_payload(payload);
+        }
+    }
+
+    fn consume_payload(&mut self, payload: Option<String>) {
+        match payload {
+            None => self.saw_done = true,
+            Some(data) => match serde_json::from_str::<Value>(&data) {
+                Ok(value) => self.consume(&value),
+                Err(_) => self.phase_eligible = false,
+            },
         }
     }
 
     fn consume(&mut self, chunk: &Value) {
+        self.phase_eligible &= responses_phase::response_is_successful(chunk);
         if let Some(id) = chunk.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()) {
             if self.id.is_empty() {
                 self.id = id.to_string();
@@ -2035,11 +2022,7 @@ impl ResponsesCollector {
                 "summary": [{ "type": "summary_text", "text": self.reasoning }],
             }));
         }
-        let incomplete = match self.finish_reason.as_deref() {
-            Some("length") => Some("max_output_tokens"),
-            Some("content_filter") => Some("content_filter"),
-            _ => None,
-        };
+        let incomplete = responses_phase::incomplete_reason(self.finish_reason.as_deref());
         if !self.text.is_empty() || self.tools.is_empty() {
             let mut item = json!({
                 "type": "message",
@@ -2048,18 +2031,10 @@ impl ResponsesCollector {
                 "role": "assistant",
                 "content": [{ "type": "output_text", "text": self.text, "annotations": [], "logprobs": [] }],
             });
-            // 没有工具调用时，这条正文就是本轮最终回答；有工具调用时本轮还会继续；
-            // 截断收尾不补标记（与 Codex++ 对 incomplete 的处置一致）
-            if reasoning_collapse && incomplete.is_none() {
-                if let Some(map) = item.as_object_mut() {
-                    map.insert(
-                        "phase".to_string(),
-                        Value::String(
-                            if self.tools.is_empty() { "final_answer" } else { "commentary" }
-                                .to_string(),
-                        ),
-                    );
-                }
+            if reasoning_collapse {
+                responses_phase::apply(&mut item, responses_phase::message_phase(
+                    self.finish_reason.as_deref(), !self.tools.is_empty(), self.saw_done && self.phase_eligible,
+                ));
             }
             output.push(item);
         }

@@ -137,7 +137,7 @@ pub fn has_compressible(body: &Value) -> bool {
     })
 }
 
-/// 收集所有「内嵌 base64 图片」的位置，避免把所有原图同时复制到内存
+/// 只保留图片位置，避免同时复制全部原图。
 fn collect_targets(body: &Value) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let Some(messages) = body.get("messages").and_then(Value::as_array) else {

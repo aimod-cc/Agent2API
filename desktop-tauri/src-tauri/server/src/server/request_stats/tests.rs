@@ -43,10 +43,10 @@ fn ids(stats: &RequestStats, query: RequestQuery) -> Vec<String> {
 fn seed() -> (tempfile::TempDir, RequestStats, i64) {
     let (dir, stats) = temp_stats();
     let now = crate::server::logging::now_ms();
-    stats.record(entry("ok", now), None);
+    stats.record(entry("ok", now));
     let mut test = entry("test", now);
     test.is_test = true;
-    stats.record(test, None);
+    stats.record(test);
     stats.record_started(
         "running",
         now,
@@ -59,11 +59,11 @@ fn seed() -> (tempfile::TempDir, RequestStats, i64) {
     let mut failed = entry("failed", now);
     failed.error = Some("回答中途断开".into());
     failed.source = source("codex", "env");
-    stats.record(failed, None);
+    stats.record(failed);
     let mut unknown = entry("unknown", now);
     unknown.source = RequestSource::default();
     unknown.provider = Some("other-provider".into());
-    stats.record(unknown, None);
+    stats.record(unknown);
     (dir, stats, now)
 }
 
@@ -111,7 +111,7 @@ fn api_key_filters_distinguish_managed_environment_anonymous_and_unknown() {
     {
         let mut item = entry(key, now + i as i64);
         item.source = source("zcode", key);
-        stats.record(item, None);
+        stats.record(item);
     }
     for key in ["key:a", "key:b", "env", "none", "unknown"] {
         assert_eq!(
@@ -231,7 +231,7 @@ fn time_range_is_start_inclusive_and_end_exclusive() {
         ("inside", now - 1),
         ("end", now),
     ] {
-        stats.record(entry(id, ts), None);
+        stats.record(entry(id, ts));
     }
     assert_eq!(
         ids(
@@ -251,7 +251,7 @@ fn pagination_is_stable_for_equal_timestamps_and_preserves_counts() {
     let (_dir, stats) = temp_stats();
     let now = crate::server::logging::now_ms();
     for id in ["first", "second", "third"] {
-        stats.record(entry(id, now), None);
+        stats.record(entry(id, now));
     }
     assert_eq!(
         ids(
@@ -308,8 +308,8 @@ fn finishing_a_running_request_reuses_the_row_and_is_idempotent() {
     let started = stats.query_requests(&RequestQuery::default());
     assert_eq!(started["total"], 1);
     assert_eq!(started["running"], 1);
-    stats.record(item.clone(), None);
-    stats.record(item, None);
+    stats.record(item.clone());
+    stats.record(item);
     let page = stats.query_requests(&RequestQuery::default());
     assert_eq!(page["total"], 1);
     assert_eq!(page["running"], 0);
@@ -342,7 +342,7 @@ fn failed_rows_clear_usage_but_keep_failure_and_first_response() {
         item.cache_read_tokens = 4;
         item.credit = Some(1.5);
         item.first_response_ms = Some(12);
-        stats.record(item, None);
+        stats.record(item);
     }
     let page = stats.query_requests(&RequestQuery::default());
     for row in page["entries"].as_array().unwrap() {
@@ -369,3 +369,5 @@ fn missing_database_returns_the_same_empty_query_shape() {
         json!({"entries": [], "total": 0, "matched": 0, "running": 0})
     );
 }
+
+

@@ -31,6 +31,6 @@ pub(super) fn persist(context: &RecordContext) {
         entry.route = snapshot.route.unwrap_or_else(|| json!({}));
         entry.route["visionCompatibility"] = json!({ "mode": "assist_call", "parentId": context.telemetry.id(),
             "status": if call.status == 200 { "completed" } else { "failed" }, "durationMs": entry.duration_ms });
-        context.stats.record(entry, None);
+        context.stats.record(entry);
     }
 }

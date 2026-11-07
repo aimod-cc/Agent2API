@@ -27,17 +27,14 @@ use serde_json::Value;
 
 use crate::server::config;
 use crate::server::core::key_scope::{self, KeyScope};
-use crate::server::core::limiter;
 use crate::server::core::providers::catalog::{
     advertised_manifest_contains, default_model_catalog, default_model_usable,
     has_available_providers, model_blocked_everywhere, suggest_advertised,
 };
-use crate::server::core::upstream::usage::{self, RequestTelemetry, TelemetrySnapshot};
+use crate::server::core::upstream::usage::{RequestTelemetry, TelemetrySnapshot};
 use crate::server::errors::GatewayError;
 use crate::server::logging;
-use crate::server::request_stats::{
-    AttemptDetail, NewRequestEntry, RequestStats, RetryEvent, SensitiveHit,
-};
+use crate::server::request_stats::{RequestStats, RunningProgress};
 use crate::server::ServerState;
 
 mod raw;
@@ -48,11 +45,9 @@ use raw::RawCapture;
 const DEBUG_DIR: &str = "debug";
 const DEBUG_REQUEST_FILE: &str = "last-request.json";
 const DEBUG_META_FILE: &str = "last-request.meta.txt";
-/// 调试快照文件的开关状态：0 = 未判定、1 = 当前开启、2 = 当前关闭
-static DEBUG_SNAPSHOT_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// 非调试请求的错误摘要上限；调试请求保留完整错误。
-const ERROR_SUMMARY_CHARS: usize = 200;
+pub(super) const ERROR_SUMMARY_CHARS: usize = 200;
 
 /// 客户端中断 / 服务退出导致响应流被提前丢弃时的错误摘要。
 ///
@@ -475,226 +470,36 @@ pub fn record_early_failure(
     record_entry(&context, Some(error.message.clone()));
 }
 
-/// 在途回写的接线：把 telemetry 的每一次状态变化写进那条「进行中」行。
-///
-/// ── 它解决什么 ──────────────────────────────────────────────
-/// `record_started` 插的进行中行只有 id / ts / 模型名 —— 选路与发送体定稿都发生
-/// 在它之后，所以整段转发期间列表里那一行看不出「谁在承载、转发的是哪个模型、
-/// 已经试了几轮」。而这几样在请求真正发出去之前就已经确定，只是此前没有回写的
-/// 落点（`requests` 表上原本只有收尾与僵尸行清理两条写路径）。
-///
-/// ── 为什么是闭包而不是让 telemetry 直接持有 `Arc<RequestStats>` ──
-/// `core::upstream` 不认识 `request_stats`（依赖方向见 `core/mod.rs` 的约定），
-/// 而「快照 → 落库形态」的转换本来就在本模块（`record_entry` 收尾时做的是同一件
-/// 事，两份转换共用下面两个 `stored_*` 函数）。接线在这里，core 只负责在状态
-/// 变化时调一下。
-///
-/// `started_at` 由调用方带进来：首响在 telemetry 里存的是**绝对时刻**，而明细里
-/// 那一列是相对请求开始的毫秒数（口径见 `RequestEntry::first_response_ms`）——
-/// 减法只能在这里做，telemetry 不知道请求什么时候开始的。
+/// 状态变化只提交内存快照，后台每秒最多回写一次；终态不经过限频队列。
 pub fn live_row_sink(
     stats: Arc<RequestStats>,
     id: String,
     started_at: i64,
 ) -> impl Fn(&TelemetrySnapshot) + Send + Sync {
-    let live = super::live_progress::sink(stats.clone(), id.clone());
-    move |snapshot| {
-        live(crate::server::request_stats::RunningProgress {
-            provider: snapshot.provider.clone().unwrap_or_default(),
-            account_id: snapshot.account_id.clone(),
-            account_name: snapshot.account_name.clone(),
-            upstream_model: snapshot.upstream_model.clone(),
-            upstream_reasoning: snapshot.upstream_reasoning.clone(),
-            attempts: snapshot.attempts.max(1),
-            first_response_ms: snapshot.first_response_at.map(|at| (at - started_at).max(0)),
-            phase: snapshot.phase.as_str().to_string(),
-            phase_started_at: snapshot.phase_started_at.or(Some(started_at)),
-            attempt_details: stored_attempt_details(&snapshot.attempts_detail),
-            route: snapshot.route.clone(),
-            sensitive_hits: stored_sensitive_hits(&snapshot.sensitive_hits),
-        });
+    let live = super::live_progress::sink(stats, id);
+    move |snapshot| live(running_progress(snapshot, started_at))
+}
+
+pub(super) fn running_progress(snapshot: &TelemetrySnapshot, started_at: i64) -> RunningProgress {
+    RunningProgress {
+        provider: snapshot.provider.clone().unwrap_or_default(),
+        account_id: snapshot.account_id.clone(),
+        account_name: snapshot.account_name.clone(),
+        upstream_model: snapshot.upstream_model.clone(),
+        upstream_reasoning: snapshot.upstream_reasoning.clone(),
+        attempts: snapshot.attempts.max(1),
+        first_response_ms: snapshot.first_response_at.map(|at| (at - started_at).max(0)),
+        phase: snapshot.phase.as_str().to_string(),
+        // 初始连接阶段没有单独时间戳，沿用请求开始时刻。
+        phase_started_at: snapshot.phase_started_at.or(Some(started_at)),
+        attempt_details: stored_attempt_details(&snapshot.attempts_detail),
+        route: snapshot.route.clone(),
+        sensitive_hits: stored_sensitive_hits(&snapshot.sensitive_hits),
     }
 }
 
-/// telemetry 的尝试明细 → 落库形态。
-///
-/// 收尾记账（`record_entry`）与在途回写共用这一份：两处各写一遍转换，迟早会因为
-/// 「只改了一处」让进行中行与收尾行显示成两种样子。
-pub(super) fn stored_attempt_details(list: &[usage::AttemptDetail]) -> Vec<AttemptDetail> {
-    list.iter()
-        .map(|item| AttemptDetail {
-            provider: item.provider.clone(),
-            account: item.account.clone(),
-            account_id: item.account_id.clone(),
-            candidate_id: item.candidate_id.clone(),
-            member_id: item.member_id.clone(),
-            model: item.model.clone(),
-            reasoning: item.reasoning.clone(),
-            reason: item.reason.clone(),
-            sticky_hit: item.sticky_hit,
-            started_at: item.started_at,
-            response_at: item.response_at,
-            finished_at: item.finished_at,
-            status: item.status,
-            error: item.error.clone(),
-            retries: item
-                .retries
-                .iter()
-                .map(|retry| RetryEvent {
-                    reason: retry.reason.clone(),
-                    status: retry.status,
-                    delay_ms: retry.delay_ms,
-                })
-                .collect(),
-            notice: item.notice.clone(),
-            // 体字节数原样透传（None = 这一轮没发出去；采集侧的理由见 usage 的字段说明）
-            body_bytes: item.body_bytes,
-        })
-        .collect()
-}
-
-/// telemetry 的脱敏命中 → 落库形态（与 [`stored_attempt_details`] 同一理由）
-pub(super) fn stored_sensitive_hits(list: &[usage::SensitiveHit]) -> Vec<SensitiveHit> {
-    list.iter()
-        .map(|hit| SensitiveHit {
-            word: hit.word.clone(),
-            count: hit.count,
-        })
-        .collect()
-}
-
-/// 记一条请求日志。
-///
-/// ── 记账为什么绝不能影响请求 ─────────────────────────────────
-/// `RequestStats::record` 本身不返回 `Result`：内部对写盘失败只打
-/// `[Stats] 统计写入失败`，锁中毒走 `poisoned.into_inner()` 继续用，
-/// 序列化失败跳过该条 —— 存储层已把「统计失败」全部收敛成「少记一条」，
-/// 没有任何 unwind 路径，所以这里不需要 `catch_unwind`。
-///
-/// ── 字段口径 ────────────────────────────────────────────────
-///   ts          请求**开始**时刻（不是记账时刻）：趋势图要按「用户什么时候
-///               发的请求」归日
-///   durationMs  收尾 - 开始（含排队、选路、上游等待、流下发）
-///   firstResponseMs  首帧到达 - 开始；全程没有帧到达时为 null
-///   attempts    旁路槽里累计的上游请求数；一次都没发出去时回落 1
-///   error       旁路槽里的原因优先（更接近根因），否则用调用方给的兜底文案
-pub fn record_entry(context: &RecordContext, fallback_error: Option<String>) {
-    super::vision_compat_record::persist(context);
-    let mut snapshot = context.telemetry.snapshot();
-    // 收尾时刻只取一次：明细里的 durationMs 与日志里打的那一个是同一个值
-    let finished_at = logging::now_ms();
-    let duration_ms = finished_at - context.started_at;
-    let first_response_ms = snapshot
-        .first_response_at
-        .map(|at| (at - context.started_at).max(0));
-    let error = snapshot.error.clone().or(fallback_error).map(|text| {
-        if context.raw_request.is_some() || context.raw_response.is_some()
-            || context.telemetry.capture().is_some() || crate::server::core::debug_traffic::enabled()
-        {
-            text
-        } else {
-            truncate_chars(&text, ERROR_SUMMARY_CHARS)
-        }
-    });
-    snapshot.finish_trace(finished_at, error.as_deref());
-    let attempts = snapshot.attempts.max(1);
-    let mut entry = NewRequestEntry::new(context.model.clone(), context.status);
-    entry.ts = Some(context.started_at);
-    // 关联 id：调试模式的原始报文按它取（见 `core::debug_traffic`）。
-    // 空串 = 该请求没生成 id（转发前就失败的路径），前端不显示详情入口。
-    // clone 而不是 move：snapshot.id 下面给 store_raw 复用（同一关联键）
-    entry.id = snapshot.id.clone();
-    entry.duration_ms = duration_ms;
-    entry.first_response_ms = first_response_ms;
-    entry.attempts = attempts;
-    // 存储契约里这两个字段是 String（不是 Option），空串就是「没有账号」的表示
-    entry.account_id = snapshot.account_id;
-    entry.account_name = snapshot.account_name;
-    entry.provider = snapshot.provider;
-    // 下游名 / 上游名分记：下游名是客户端原值（context 带入），上游名是
-    // 实际发出的名字（telemetry 采集，空串 = 一次都没发出去）。两者都空时
-    // 前端回落显示 model 一行 —— 旧数据没有这两个键，同一口径。
-    entry.client_model = context.client_model.clone();
-    entry.upstream_model = snapshot.upstream_model;
-    // 等级双端透传（与上面两行同源）：下游等级来自入口采集（context），
-    // 上游等级来自发送体定稿处的采集（telemetry 快照）
-    entry.client_reasoning = context.client_reasoning.clone();
-    entry.upstream_reasoning = snapshot.upstream_reasoning;
-    // 两个明细字段（本次改造）：都是「有采集才有值」的旁路数据，采集点在
-    // 转发链路上（`core::upstream::usage` 槽），这里只负责搬运。
-    //   · attemptDetails：每次上游尝试的（provider / 账号 / 状态码 / 错误摘要
-    //     / 本轮内部的退避重试 / 提示），请求日志「重试」列的弹层显示它；
-    //     转发前就失败的请求没有它（空表）。
-    //   · sensitiveHits：本次命中的敏感词与次数，同一列的紫色标签显示它。
-    // 存储层的两个类型与采集侧**各自定义、当前同形**（见 `RequestEntry` 的
-    // 注释），所以这里逐字段转一次 —— 不做 `From` impl 是为了让两处结构能
-    // 各自演化（把「转发期形态」与「落库形态」绑成一个类型，将来改一处
-    // 就得同时改另一处，而它们的变化理由本来不同）。
-    // 转换走 `stored_*` 两个函数：在途回写（`live_row_sink`）用的是同一份，
-    // 两处各写一遍迟早会让进行中行与收尾行显示成两种样子。
-    entry.attempt_details = stored_attempt_details(&snapshot.attempts_detail);
-    entry.sensitive_hits = stored_sensitive_hits(&snapshot.sensitive_hits);
-    // 选路决策快照：有采集才落（没走到选路的请求是 Null，前端不渲染那一段）
-    entry.route = snapshot.route.unwrap_or(Value::Null);
-    // 来源标记：入口带进来的事实，存储层据此排除报表聚合（见该字段的说明）
-    entry.is_test = context.is_test;
-    // 来源客户端：入口解析请求头判好的类型（`core::client::classify`），
-    // 存储层只搬运不重判 —— UA 规则只有一份
-    entry.source = context.source.clone();
-    entry.error = error;
-    entry.prompt_tokens = snapshot.prompt_tokens;
-    entry.completion_tokens = snapshot.completion_tokens;
-    entry.total_tokens = snapshot.total_tokens;
-    entry.cache_read_tokens = snapshot.cache_read_tokens;
-    entry.credit = snapshot.credit;
-    // Token 限制器的增量记账（先取快照再 record：entry 的字段已被 move）。
-    // 请求收尾立刻把本次消耗加进当前窗口，选路的 Token 跳过判定不必等下一轮
-    // 10 秒刷新。account_id 为空 = 没走到任何账号（转发前就失败的路径），
-    // tokens ≤ 0 在记账函数里也会拦 —— 失败请求通常没有用量，加了也是零。
-    let limited_account = entry.account_id.clone();
-    let limited_tokens = entry.total_tokens;
-    let limited_model = if entry.upstream_model.is_empty() { entry.model.clone() } else { entry.upstream_model.clone() };
-    let limited_request = entry.id.clone();
-    let sent = snapshot.attempts > 0;
-    let limiter_event = sent.then_some((
-        limited_account.as_str(),
-        limited_request.as_str(),
-        limited_model.as_str(),
-        snapshot.quota_channel.as_str(),
-        limited_tokens,
-        context.started_at,
-    ));
-    context.stats.record(entry, limiter_event);
-    if !limited_account.is_empty() {
-        limiter::note_request_tokens(&limited_account, limited_tokens, finished_at);
-    }
-    // 原始正文落库（request_raw 表）：与明细同 id、同开始时刻。独立于 record
-    // 的一次写入（大字段不进记账热路径，理由见 `RequestStats::store_raw`）；
-    // 两侧的采集在入口已按调试模式 gate（见 `capture_raw_body` / `capture_raw_json`
-    // —— 这里的两侧通常都是 None，store_raw 提前返回不写行）；id 为空 / 两侧
-    // 全空也在 store_raw 内部拦下，失败只打控制台 —— 正文是排障辅助，
-    // 丢一侧不能影响已经收尾的请求
-    context.stats.store_raw(
-        &snapshot.id,
-        context.started_at,
-        context.raw_request.as_deref(),
-        context.raw_response.as_deref(),
-    );
-    logging::verbose(
-        "[Stats]",
-        &format!(
-            "记一条请求: model={} status={} {duration_ms}ms 首响={} attempts={attempts} tokens={}+{}（缓存 {}）",
-            if context.model.is_empty() { "(未指定)" } else { &context.model },
-            context.status,
-            first_response_ms
-                .map(|value| format!("{value}ms"))
-                .unwrap_or_else(|| "-".to_string()),
-            snapshot.prompt_tokens,
-            snapshot.completion_tokens,
-            snapshot.cache_read_tokens,
-        ),
-    );
-}
+pub use super::record_persist::record_entry;
+pub(super) use super::record_persist::{stored_attempt_details, stored_sensitive_hits};
 
 /// 按字符截断（超出部分用 `…` 收尾）。
 pub fn truncate_chars(text: &str, limit: usize) -> String {
@@ -1007,46 +812,19 @@ pub fn error_response(
 /// 调试落盘：原始 body + 一行 meta（覆盖写；**失败不影响请求**）。
 ///
 /// 与 Node 版一致：目录不存在时创建，任何 IO 失败都静默吞掉 ——
-/// 调试落盘是排障辅助，不能因为它失败就让用户的请求失败，超过 8 MiB 的
-/// 请求只写元数据，避免每次请求都把百 MB 级正文复制到群晖磁盘
+/// 调试落盘是排障辅助，不能因为它失败就让用户的请求失败。
 pub fn write_debug_files(body: &[u8], method: &str, path: &str, user_agent: &str) {
     let dir = config::config_dir().join(DEBUG_DIR);
-    use std::sync::atomic::Ordering;
-    if !crate::server::core::debug_traffic::enabled() {
-        if DEBUG_SNAPSHOT_STATE.swap(2, Ordering::Relaxed) != 2 {
-            cleanup_debug_files();
-        }
-        return;
-    }
-    DEBUG_SNAPSHOT_STATE.store(1, Ordering::Relaxed);
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    if body.len() <= crate::server::core::debug_traffic::MAX_BODY_BYTES {
-        let _ = std::fs::write(dir.join(DEBUG_REQUEST_FILE), body);
-    } else {
-        let _ = std::fs::remove_file(dir.join(DEBUG_REQUEST_FILE));
-    }
+    let _ = std::fs::write(dir.join(DEBUG_REQUEST_FILE), body);
     let meta = format!(
         "{} {method} {path} {}B ua={user_agent}",
         iso_timestamp(),
         body.len(),
     );
     let _ = std::fs::write(dir.join(DEBUG_META_FILE), meta);
-}
-
-/// 调试关闭时清理历史快照，避免关闭后仍长期占着上次的大请求正文
-pub fn cleanup_debug_files_if_disabled() {
-    if !crate::server::core::debug_traffic::enabled() {
-        cleanup_debug_files();
-        DEBUG_SNAPSHOT_STATE.store(2, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-fn cleanup_debug_files() {
-    let dir = config::config_dir().join(DEBUG_DIR);
-    let _ = std::fs::remove_file(dir.join(DEBUG_REQUEST_FILE));
-    let _ = std::fs::remove_file(dir.join(DEBUG_META_FILE));
 }
 
 /// ISO-8601 UTC 时间戳（对应 Node 的 `new Date().toISOString()`）

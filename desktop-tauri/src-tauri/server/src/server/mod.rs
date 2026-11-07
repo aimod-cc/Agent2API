@@ -362,7 +362,6 @@ impl ServerState {
         // 结果 —— 老用户升级后第一次启动拿到的就是他真正的旧配置，
         // 下面日志裁剪天数与旧文件候选目录才不会用错值。
         let snapshot = config::init(db.clone());
-        api::pipeline::cleanup_debug_files_if_disabled();
         core::task_state::install(db.clone());
         core::maintenance::storage::install(db.clone());
         // 每账号的余额查询记录（余额不足跳过 / 自动禁用的底座）：装库句柄时

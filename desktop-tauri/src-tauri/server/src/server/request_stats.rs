@@ -4,9 +4,9 @@
 //! ── 内部分层（拆开是为了每片都保持单一职责、单文件不过长）─────
 //! ```text
 //! server/
-//!   request_stats.rs     存储本体：记账（进行中行 → 在途回写 → 终态收尾）/
-//!                        查询 / 读取（本文件）
+//!   request_stats.rs     存储句柄、查询与读取
 //!   request_stats/
+//!     writer.rs   请求开始、在途回写、终态与限额记账
 //!     sql.rs      行级 SQL：明细的读写删裁 + 跨表共用的 FilterPlan（原始 SQL 唯一
 //!                 出现的地方之一；另一处是 daily.rs 与杂项子模块各自的语句）
 //!     daily.rs    行级 SQL：`request_daily` 聚合表的编解码与读-改-写
@@ -84,11 +84,13 @@ mod routing;
 mod trace;
 mod flow;
 pub use flow::FlowQuery;
-mod lifecycle;
 mod retention;
 mod source;
-mod source_backfill;
 mod source_report;
+mod source_backfill;
+mod lifecycle;
+mod writer;
+pub(crate) use writer::LimiterEvent;
 mod sql;
 #[cfg(test)]
 mod tests;
@@ -110,8 +112,8 @@ use crate::server::db::Db;
 use crate::server::logging;
 
 use clock::{date_key, now_ms, today};
-pub use retention::Retention;
 use retention::RetentionBounds;
+pub use retention::Retention;
 // 拆到子模块的三样，这里引回：record / usage_summary 的折算入口、
 // remap 的库操作体、报表装配（均为 `pub(super)`，见 aggregate.rs 的模块头）
 use aggregate::{fold_into_daily, remap_model_days, summarize};
@@ -119,8 +121,8 @@ use report::{entry_json, provider_label, CACHE_WINDOWS};
 
 // CompactStart 在此 re-export：api::stats_api 的 compact 路由按它分派响应。
 // VacuumStatus 只在本模块内（字段类型 / maintenance 的方法）可见。
-pub use maintenance::CompactStart;
 use maintenance::VacuumStatus;
+pub use maintenance::CompactStart;
 pub use record::{
     AttemptDetail, NewRequestEntry, RequestEntry, RequestQuery, RetryEvent,
     RunningProgress, SensitiveHit, DEFAULT_LIMIT, MAX_LIMIT, MAX_RAW_ROWS,
@@ -151,14 +153,19 @@ const MAX_FILTER_OPTIONS: usize = 200;
 /// 从转发开始到收尾最多几分钟（上游超时 + 重试链的全长），1 小时还停在
 /// status=0 的行只剩两种成因 —— 网关进程崩溃（桌面端常驻数周，崩溃行会
 /// 一直留着）与响应流任务泄漏。它们没有任何终态值（token 全 0、无状态码），
-/// 留在列表里只会伪装成「一条永远在跑的请求」，所以到点清掉。清理时机跟随
-/// 请求统计维护周期，不必每次有新请求开始时都扫一遍。
+/// 留在列表里只会伪装成「一条永远在跑的请求」，所以到点清掉。清理时机挂在
+/// `record_started` 上（每次有新请求开始时顺手扫一遍），不需要定时器。
 const RUNNING_STALE_MS: i64 = 60 * 60 * 1000;
 
-/// 请求统计维护间隔：保留期裁剪与正文淘汰不必在每条记账上重复执行
-const MAINTENANCE_INTERVAL_MS: i64 = 60 * 1000;
-/// 两次维护之间允许的记账次数，防止高频请求下长时间不执行维护
-const MAINTENANCE_WRITE_INTERVAL: u64 = 128;
+/// 记账热路径上的保留期 / 容量裁剪节拍。
+///
+/// 原先**每条请求**（开始 + 收尾各一次）都要 `COUNT(*)` 整张明细表来判断
+/// 是否超过条数上限，再顺带数一次 `request_raw` —— 每条请求两轮全表计数，
+/// 明细上百万行时这部分会明显吃掉转发收尾的时间。改成每 128 次记账或每
+/// 60 秒做一次：上限最多被突破 127 行，下一次裁剪抹平；低流量时按时间兜底，
+/// 不会出现「没有新请求就永远不清理」。
+const MAINTENANCE_EVERY: u64 = 128;
+const MAINTENANCE_INTERVAL_MS: i64 = 60_000;
 
 /// 进程重启后遗留的进行中行按 `ts` 判定：早于本次启动时刻的全是孤儿。
 /// 以进程启动时间做阈值而不是固定时长，能覆盖长请求在重启时仍在途的场景。
@@ -189,8 +196,6 @@ pub struct RequestStats {
     /// 字段本身不再被任何写路径改动（`relocate` 已随单库语义删除），用 `RwLock`
     /// 是为了让「读现值」这件事与改造前同形，改动面最小。
     file_path: RwLock<PathBuf>,
-    /// 请求总数缓存：首次读库后按终态记账 / 清理递减，避免每次分页都 COUNT 全表
-    cached_total: AtomicI64,
     /// 保留期取值回调。**每次裁剪时动态调用**，于是设置改完天数下一次记账 /
     /// `prune` 就用新值，不需要重启进程（这正是把保留期做成回调而非构造参数的原因）。
     /// 用 `Arc` 是因为 `RequestStats` 本身被放进 `ServerState`，回调要能独立持有。
@@ -207,10 +212,6 @@ pub struct RequestStats {
     /// **硬约束**：持这把锁期间绝不能再调 `logging::log` 一类的写日志函数 ——
     /// 日志要写同一个库，`std::sync::Mutex` 不可重入，会当场死锁。
     inner: Mutex<()>,
-    /// 最近一次请求统计维护时刻（毫秒 Unix 时间戳）
-    last_maintenance_ms: AtomicI64,
-    /// 距离上次维护的记账次数
-    writes_since_maintenance: AtomicU64,
     /// 数据库压缩（VACUUM）的运行状态。`Arc` 是因为完成回调在**另一个线程**
     /// 里执行，它要能独立更新这份状态（`RequestStats` 本体不必被线程持有）。
     ///
@@ -219,6 +220,10 @@ pub struct RequestStats {
     /// 各自独立；OmniProxy 用模块级 let 变量是因为它的 router 是文件级单例，
     /// 两边语义等价，这里选与本项目结构一致的挂法。
     vacuum: Arc<VacuumStatus>,
+    /// 自上次保留期裁剪以来记了多少次账（开始 + 收尾各算一次）。
+    maintenance_writes: AtomicU64,
+    /// 上次做保留期裁剪的毫秒时间戳；低流量时用它兜底。
+    last_maintenance_ms: AtomicI64,
 }
 
 impl RequestStats {
@@ -253,12 +258,11 @@ impl RequestStats {
         Self {
             db,
             file_path: RwLock::new(file_path),
-            cached_total: AtomicI64::new(-1),
             get_retention: Arc::new(get_retention),
             inner: Mutex::new(()),
-            last_maintenance_ms: AtomicI64::new(0),
-            writes_since_maintenance: AtomicU64::new(0),
             vacuum: Arc::new(VacuumStatus::new()),
+            maintenance_writes: AtomicU64::new(0),
+            last_maintenance_ms: AtomicI64::new(0),
         }
     }
 
@@ -272,21 +276,22 @@ impl RequestStats {
         }
     }
 
-    fn cached_total(&self, conn: &rusqlite::Connection) -> rusqlite::Result<usize> {
-        let cached = self.cached_total.load(Ordering::Relaxed);
-        if cached >= 0 {
-            return Ok(cached as usize);
-        }
-        let total = sql::count_all(conn)?;
-        self.cached_total.store(total as i64, Ordering::Relaxed);
-        Ok(total)
-    }
-
-    fn adjust_total(&self, delta: i64) {
-        let current = self.cached_total.load(Ordering::Relaxed);
-        if current >= 0 {
-            self.cached_total
-                .store(current.saturating_add(delta).max(0), Ordering::Relaxed);
+    /// 这一次记账要不要顺带做保留期 / 容量裁剪。
+    ///
+    /// 计数与时间都取原子读，不必进数据库锁；返回值只影响「是否多跑几条
+    /// DELETE/COUNT」，并发下偶尔多跑一次没有副作用。
+    fn should_maintain(&self) -> bool {
+        let writes = self.maintenance_writes.fetch_add(1, Ordering::Relaxed) + 1;
+        let now = now_ms();
+        let last = self.last_maintenance_ms.load(Ordering::Relaxed);
+        if writes == 1
+            || writes % MAINTENANCE_EVERY == 0
+            || now.saturating_sub(last) >= MAINTENANCE_INTERVAL_MS
+        {
+            self.last_maintenance_ms.store(now, Ordering::Relaxed);
+            true
+        } else {
+            false
         }
     }
 
@@ -364,267 +369,8 @@ impl RequestStats {
         RetentionBounds::of(self.retention())
     }
 
-    /// 判断本次记账是否要顺带执行保留期与正文淘汰
-    fn maintenance_due(&self) -> bool {
-        let now = logging::now_ms();
-        let last = self.last_maintenance_ms.load(Ordering::Relaxed);
-        let writes = self.writes_since_maintenance.fetch_add(1, Ordering::Relaxed) + 1;
-        if last != 0
-            && now.saturating_sub(last) < MAINTENANCE_INTERVAL_MS
-            && writes < MAINTENANCE_WRITE_INTERVAL
-        {
-            return false;
-        }
-        if self
-            .last_maintenance_ms
-            .compare_exchange(last, now, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
-        {
-            self.writes_since_maintenance.store(0, Ordering::Relaxed);
-            return true;
-        }
-        false
-    }
-
-    /// 记一条请求：插一条明细 + 更新当天聚合（**一个事务**）。
-    ///
-    /// ── 与旧「内存累加」的语义等价性 ────────────────────────────
-    /// 旧实现是「`insert_sorted` 进内存数组 + `guard.daily.entry(...).or_insert(...)`
-    /// 累加 + 按需落盘」；现在是「`INSERT` 一行 + 读出当天聚合行、`fold_into_daily`
-    /// 累加、整行 UPSERT」。三条性质逐一对应：
-    ///   - **累加口径**：`fold_into_daily` 一个字都没改，总量与三个维度仍由它
-    ///     一处推进（这是「各维之和 = 当天总量」的保证，见该函数的说明）；
-    ///   - **顺序**：`ORDER BY ts, row_id` 与旧的「按 ts 升序的数组」同序，
-    ///     同 ts 的条目按写入先后（`row_id` 递增）—— 与 `insert_sorted` 的
-    ///     「同毫秒先到的在前」逐位一致；
-    ///   - **可见性**：旧实现在同一次持锁里完成「进内存 + 落盘」，所以并发的
-    ///     读取方要么看到整条记录、要么完全看不到；这里对应事务的原子提交，
-    ///     提交前别的事务读不到这条明细，也不会读到「明细进了、聚合没进」的中间态
-    ///     （那是旧实现两次独立写盘时会留下的错位）。
-    ///
-    /// ── 「先 UPDATE 后 INSERT」（本次改造：进行中行的收尾）───────
-    /// 转发开始前 `record_started` 已经插了一条 status=0 的行；本方法是它的
-    /// **终态收尾**：先按 `id + status=0` UPDATE 补全全部终态字段（row_id 与
-    /// 「进行中」期间在页面上占的位置都保持不变），UPDATE 影响 0 行再 INSERT ——
-    /// 转发前就失败等没有 started 行的路径维持原有行为。为什么不用唯一索引 +
-    /// UPSERT：存量数据 id 可能重复、不能假设唯一，论证见
-    /// `sql::update_running_request`。两条路径都会走到下面的聚合折算 ——
-    /// 「进行中行不折算、终态统一折算一次」，日报口径与改造前等价。
-    ///
-    /// ── 库存不可用时不报错、不抛错 ──────────────────────────────
-    /// 记账在请求收尾路径上（`api::chat` 的 `record_entry`），它的失败**不能**
-    /// 影响已经转发成功的请求：丢一条统计只是报表少一个数。
-    ///
-    /// `limiter_event` 与明细在同一个事务里提交，避免请求收尾多一次磁盘事务
-    pub fn record(
-        &self,
-        entry: NewRequestEntry,
-        limiter_event: Option<(&str, &str, &str, &str, i64, i64)>,
-    ) {
-        let record = entry.normalize();
-        let maintenance_due = self.maintenance_due();
-        let guard = self.guard();
-        let limiter_row = self.with_conn_mut(&guard, |conn| {
-            let tx = conn.transaction()?;
-            if !record.id.is_empty() && sql::terminal_record_exists(&tx, &record.id)? {
-                tx.commit()?;
-                return Ok(None);
-            }
-            let running = !record.id.is_empty() && sql::running_record_exists(&tx, &record.id)?;
-            let inserted = !running;
-            // 先补全进行中行；没有进行中行（影响 0 行）才新插
-            let updated = sql::update_running_request(&tx, &record)?;
-            if updated == 0 {
-                sql::insert_request(&tx, &record)?;
-            }
-            // 长期运行也必须同时遵守保留天数与数量上限，但不必每条记账都扫全表
-            if maintenance_due {
-                let bounds = self.retention_bounds();
-                sql::delete_expired_requests(&tx, bounds.requests_ms)?;
-                retention::trim_requests(&tx, bounds.request_count)?;
-                daily::delete_daily_before(&tx, &bounds.daily_key)?;
-                // 周期维护可能删掉多行，重算一次缓存，避免逐行估算累计误差
-                let total = sql::count_all(&tx)?;
-                self.cached_total.store(total as i64, Ordering::Relaxed);
-            }
-            let limiter_row = limiter_event
-                .map(|(account, request, model, channel, tokens, ts)| {
-                    crate::server::core::limiter::counter::insert_event(
-                        &tx, account, request, model, channel, tokens, ts,
-                    )
-                })
-                .transpose()?
-                .flatten();
-            // 聚合：**读-改-写当天那一行**（为什么不是增量的 UPDATE：见 `sql.rs` 模块头）
-            //
-            // 模型测试的行**不折进聚合**（见 `RequestEntry::is_test`）：明细照记
-            // （请求日志要能看到它、要能对照），但报表回答的是「真实流量长什么样」，
-            // 把人工反复发起的样本混进总量与趋势里会把它读歪。判据只有这一处
-            // 与 `rebuild_day` 那处，两处必须同口径 —— 否则「重算过一天」会让
-            // 那天的数字与重算前对不上。
-            if !record.is_test {
-                lifecycle::add_to_daily(&tx, &record)?;
-            }
-            // request_raw 的**条数上限**（见 `record::MAX_RAW_ROWS`）：原始正文
-            // 是这张库里单行最大的字段（实测平均 168 KB），只限单条体积而不限
-            // 条数时会攒成整库最大的一块。判据是一次 `COUNT(*)`（主键索引上
-            // 零点几毫秒），未超限时到此为止 —— 那条带 `ORDER BY` 的 DELETE
-            // 不跑。
-            //
-            // 为什么挂在 `record` 而不是 `store_raw`：正文的写入是独立于记账的
-            // 一次写（大字段不进记账热路径），而清理需要一个事务。记账这条路径
-            // 每请求都走，顺手裁一次的成本比新开一个事务低。副作用是「关了调试
-            // 模式不再写新正文」时也照样会裁（只要还有请求在跑）—— 这正是想要
-            // 的：旧正文不会因为不再产生新行而永久占着空间。
-            //
-            // 与上面的保留期裁剪同一节拍（`maintain`）：正文条数没有「按天」
-            // 语义，晚 127 条再裁不会影响任何展示。
-            // 两步都**忽略失败**：正文是排障辅助，它这边出任何问题都不该让整条
-            // 记账回滚（回滚的代价是这条请求的明细与日报一起没了）。失败的现场
-            // 只留在控制台（由 `with_conn_mut` 那层打）。
-            // request_raw 的条数与正文合计都有上限：原始正文是这张库里单行
-            // 最大的字段，淘汰跟随周期维护执行，避免每条记账都重复计数
-            if maintenance_due {
-                let _ = sql::trim_raw_to_caps(&tx);
-            }
-            tx.commit()?;
-            if !maintenance_due && inserted {
-                // 周期维护没跑时只需推进新增行，不用重新扫描全表
-                self.adjust_total(1);
-            }
-            Ok(limiter_row)
-        });
-        if let (Some(Some(row_id)), Some((account, _, model, channel, tokens, ts))) =
-            (limiter_row, limiter_event)
-        {
-            crate::server::core::limiter::counter::update_facts(
-                account, model, channel, tokens, ts, row_id,
-            );
-        }
-    }
-
-    /// 记一条**进行中**的请求（status=0；转发开始前、模型解析成功后调用）。
-    ///
-    /// ── 为什么要有这一步 ────────────────────────────────────────
-    /// 改造前一条明细要等到转发收尾才落库：流式请求在**最后一个字节发完**时
-    /// 才记账（`RecordingStream` 的 settle），于是一条跑了半分钟的请求在这半
-    /// 分钟里对请求日志页完全不可见。进行中行把「这条请求开始了」提前到转发
-    /// 开始那一刻：列表页能看到它（status=0，前端显示为进行中），收尾时由
-    /// `record` 的 UPDATE 把终态字段补全 —— 一次请求仍然恰好一行。
-    ///
-    /// ── 生命周期（started → update → stale 清理）────────────────
-    ///   1. `record_started`：插 status=0 行（只有 id / ts / 模型名）；
-    ///   2. `record`：UPDATE 该行补全终态字段（UPDATE 影响 0 行则说明没有
-    ///      started 行 —— 转发前就失败的路径，走 INSERT，行为同改造前）；
-    ///   3. 若进程崩溃 / 流任务泄漏，行永远停在步骤 1 —— 请求统计维护周期
-    ///      会把「超过 [`RUNNING_STALE_MS`] 还在进行中」的行收尾（阈值见该
-    ///      常量的说明）。
-    ///
-    /// 进行中行**不进日报**（`fold_into_daily` 按 status=0 跳过）：它没有
-    /// 任何终态值，折算进聚合会让报表凭空多一次请求、而 token 是 0 ——
-    /// 等它收尾时终态行会正常折算，一次也不多、一次也不少。
-    ///
-    /// ── 幂等与降级 ──────────────────────────────────────────────
-    /// 同 id 已有进行中行时跳过（重复调用不产生第二行）；库不可用时静默跳过
-    /// —— 这一步的失败只是「列表里晚一点才看到这条请求」，与统计整体的
-    /// 「少记不影响请求」同一取向。
-    /// ── 来源标记（`is_test`，schema v7）───────────────────────────
-    /// 与 id / ts 同一时刻定稿：它是**入口**（`api::model_test`）才知道的事实，
-    /// 随进行中行一起写下来，于是「进行中」那一段的测试行也一眼可辨。
-    ///
-    /// `client`（来源客户端，schema v12）同理：入口解析请求头后就知道它是谁，
-    /// 随首发写入，进行中行的「客户端」列不必等收尾才显示。
-    pub fn record_started(
-        &self,
-        id: &str,
-        ts: i64,
-        model: &str,
-        client_model: &str,
-        client_reasoning: &str,
-        source: &RequestSource,
-        is_test: bool,
-    ) {
-        if id.is_empty() {
-            return;
-        }
-        let maintenance_due = self.maintenance_due();
-        let guard = self.guard();
-        let _ = self.with_conn_mut(&guard, |conn| {
-            let tx = conn.transaction()?;
-            let inserted = sql::insert_started_request(
-                &tx,
-                id,
-                ts,
-                model,
-                client_model,
-                client_reasoning,
-                source,
-                is_test,
-            )?;
-            // 陈旧清理与插入同事务：僵尸行的判定时点与本次开始时点一致，
-            // 中断也只影响「这次有没有清成」，不会留下半删状态
-            if maintenance_due {
-                let bounds = self.retention_bounds();
-                lifecycle::finish_stale(&tx, stale_cutoff(), now_ms())?;
-                sql::delete_expired_requests(&tx, bounds.requests_ms)?;
-                retention::trim_requests(&tx, bounds.request_count)?;
-                let total = sql::count_all(&tx)?;
-                self.cached_total.store(total as i64, Ordering::Relaxed);
-            } else if inserted {
-                self.adjust_total(1);
-            }
-            tx.commit()
-        });
-    }
-
-    /// 收尾上一次运行遗留的进行中行（启动时调一次）。
-    ///
-    /// `record_started` 里那次清理要等第一条请求进来才跑；启动时刻主动扫一遍，
-    /// 界面一打开就不会再看到「上一条卡死的请求」。判定与清理口径完全一致
-    /// （同 `stale_cutoff()` 与 `finish_stale_running`），不引入第二套规则。
-    pub fn sweep_stale_running(&self) {
-        let bounds = self.retention_bounds();
-        let guard = self.guard();
-        let _ = self.with_conn_mut(&guard, |conn| {
-            let tx = conn.transaction()?;
-            lifecycle::finish_stale(&tx, stale_cutoff(), now_ms())?;
-            daily::delete_daily_before(&tx, &bounds.daily_key)?;
-            tx.commit()
-        });
-    }
-
-    /// 回写一条「进行中」行的**在途**字段（转发期间每次状态真的变化时调一次）。
-    ///
-    /// ── 为什么需要它 ────────────────────────────────────────────
-    /// `record_started` 插的那行只有 id / ts / 模型名，而选路与发送体定稿都发生在
-    /// 它**之后** —— 于是整段转发期间列表里那一行的「提供商 / 账号 / 上游模型」
-    /// 都是空的（前端显示成「—」），而这几样其实在请求真正发出去之前就已经确定。
-    /// 改造前 `requests` 表上只有两条写路径：收尾（`record` 的 UPDATE）与僵尸行
-    /// 清理。本方法是第三条：**在途回写**，让进行中行从「只有模型名」变成
-    /// 「谁在承载、转发的是什么、已经试了几轮」。
-    ///
-    /// ── 谁调它、多久调一次 ──────────────────────────────────────
-    /// `api::pipeline::live_row_sink` 生成的钩子，由 `RequestTelemetry` 在**内容
-    /// 真的变了**时调用（同一份状态重复上报只写一次，见 `usage::LiveStamp`）——
-    /// 所以一次请求的写入次数是「状态变化次数」而不是「上报次数」（流式路径每
-    /// 收一帧都会 `note_first_frame`，靠指纹闸挡在库外）。接线在 api 层、telemetry
-    /// 只持有一个闭包：core 不认识存储层（依赖方向见 `core/mod.rs` 的约定）。
-    ///
-    /// ── 幂等与降级 ──────────────────────────────────────────────
-    /// 匹配 `id + status = 0`（与收尾同一条件）：收尾之后打空，在途回写晚到一步
-    /// 不会把终态覆盖回去；同一条请求写多少次都只是覆盖同一行的同几列。库不可用
-    /// 时静默跳过 —— 与 `record_started` 同一取向：少一次在途刷新不影响任何业务，
-    /// 界面退化成「进行中行只有模型名」的既有样子。
-    pub fn update_running(&self, id: &str, progress: &RunningProgress) {
-        if id.is_empty() {
-            return;
-        }
-        let guard = self.guard();
-        let _ = self.with_conn_mut(&guard, |conn| sql::update_running_progress(conn, id, progress));
-    }
-
     /// 仅调试模式开启时保存完整下游正文，读写与明细查询分离。
-    /// 按留存条数与正文合计字节淘汰旧正文，保存失败不影响请求记账。
+    /// 按留存条数淘汰旧正文，保存失败不影响请求记账。
     pub fn store_raw(&self, id: &str, ts: i64, request_body: Option<&str>, response_body: Option<&str>) {
         let id = id.trim();
         if id.is_empty() {
@@ -642,7 +388,6 @@ impl RequestStats {
         let _ = self.with_conn_mut(&guard, |conn| {
             let tx = conn.transaction()?;
             sql::upsert_raw(&tx, id, ts, request, response, size)?;
-            let _ = sql::trim_raw_to_caps(&tx);
             tx.commit()
         });
     }
@@ -758,15 +503,8 @@ impl RequestStats {
         let loaded = {
             let guard = self.guard();
             self.with_conn(&guard, |conn| {
-                let total = self.cached_total(conn)?;
-                // 无筛选时命中数就是总数，复用缓存，避免每次刷新重复全表 COUNT
-                let (matched, running) = if plan.is_empty() {
-                    let (_, _, running) = sql::counts(conn, &plan)?;
-                    (total, running)
-                } else {
-                    let (_, matched, running) = sql::counts(conn, &plan)?;
-                    (matched, running)
-                };
+                // 三个计数共用一次扫描（见 `sql::counts` 的说明）。
+                let (total, matched, running) = sql::counts(conn, &plan)?;
                 let entries = sql::select_page_desc(conn, &plan, filter.offset, limit)?;
                 Ok((total, matched, running, entries))
             })
@@ -827,7 +565,7 @@ impl RequestStats {
     /// 存储概况（排障与报表页脚用）
     ///
     /// `file` / `dailyFile` 都指向**库文件**（不再有明细文件与聚合文件之分，
-    /// 按当前保留期裁一遍超期数据（明细 + 按天聚合 + 下游正文）。
+    /// 按当前保留期裁一遍超期数据（明细 + 按天聚合）。
     ///
     /// 调用方是 `stats_api::put_retention`：设置页把保留天数改小后立即触发，
     /// 否则旧数据要等下一条请求记账才消失，界面会显示「设置是 7 天，
@@ -844,15 +582,11 @@ impl RequestStats {
             let tx = conn.transaction()?;
             sql::delete_expired_requests(&tx, bounds.requests_ms)?;
             retention::trim_requests(&tx, bounds.request_count)?;
-            let _ = sql::trim_raw_to_caps(&tx);
             daily::delete_daily_before(&tx, &bounds.daily_key)?;
-            let after = sql::count_all(&tx)?;
-            tx.commit()?;
-            self.cached_total.store(after as i64, Ordering::Relaxed);
-            Ok(())
+            tx.commit()
         });
         // 显式裁剪（启动 / 改保留期）之后重置节拍：下一次记账从新的一批开始。
-        self.writes_since_maintenance.store(0, Ordering::Relaxed);
+        self.maintenance_writes.store(0, Ordering::Relaxed);
         self.last_maintenance_ms.store(now_ms(), Ordering::Relaxed);
     }
 

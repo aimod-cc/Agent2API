@@ -120,8 +120,6 @@ pub async fn chat_completions(
 
     // ③ 调试落盘：保存最近一次入站请求体，供重放分析（覆盖写）
     write_debug_files(&body, method, path, &user_agent);
-    // 原始字节已全部转成后续步骤所需的值，解析后的 payload 已持有正文，
-    // 此时释放 Bytes 可把百 MB 级请求的峰值内存降下一份
     drop(body);
 
     // ④ 模型路由走公共管道（默认模型回落 / 别名映射 / 目录校验，
@@ -156,9 +154,7 @@ pub async fn chat_completions(
         ),
     );
 
-    // ⑤ 转发：请求体原样交给转发层（内容处理在每家 provider 发送前按作用范围
-    // 逐家判定，见 `core::upstream::payload` 的 `send_body`）；去重键取**客户端
-    // 原始请求体**的哈希，与「某一家是否被处理」无关。
+    // 原始请求的去重键已在模型改写前计算。
     let telemetry = Arc::new(RequestTelemetry::with_id());
     // 「进行中」行：模型解析已成功、转发即将开始 —— 先插一条 status=0 的明细，
     // 让请求日志在响应还没跑完时就能看到这条请求（收尾时由 `record` 的 UPDATE
@@ -187,7 +183,7 @@ pub async fn chat_completions(
     // 客户端在响应产生前断开时 axum 会直接取消 handler，收尾记账走不到 ——
     // 守卫的 Drop 补一条 408 终态（详见 `DisconnectGuard` 的说明）。
     // 正常路径必须显式调 `complete()` / `handoff()`，见下面的三个出口。
-    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry_id.clone());
+    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry.clone(), started_at);
     // 在途回写：选路一定就把「谁在承载」、发送体一定稿就把「上游真名」写进这条
     // 进行中行（连同尝试链、首响、脱敏命中）—— 列表页 1 秒轮询，于是这些读数在
     // 转发期间就能看到，不必等收尾。接线在这里、core 只持有闭包，理由见
@@ -197,9 +193,6 @@ pub async fn chat_completions(
         telemetry_id,
         started_at,
     ));
-    // 下游原始请求体已在解析后、释放 Bytes 前按原样抄入 raw_request
-    // （request_raw 表的请求侧，见 `capture_raw_body`），转发层的就地改写
-    // 不会影响这份快照，调试关闭时它是零开销的 None
     // 自动续写的上下文（开关 `autoContinue` **默认关**）。关着时这里连一份 clone
     // 都不做 —— `plan()` 先问开关，再决定要不要复制请求体/请求头/白名单。
     // 判据、多轮拼接与用量合并口径都在 `core::upstream::continuation`。

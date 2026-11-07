@@ -30,8 +30,6 @@ use super::source::{ApiKeyAccum, ClientAccum, RequestSource, SOURCE_STATS_VERSIO
 
 /// `request_raw` 的留存条数上限；正文完整保存，超限时淘汰最旧的记录。
 pub const MAX_RAW_ROWS: usize = 1000;
-/// `request_raw` 的正文合计上限，避免条数未满时塞入数 GiB 大正文
-pub const MAX_RAW_BYTES: i64 = 64 * 1024 * 1024;
 
 /// 查询分页的默认条数与上限。
 /// 两个常量都被 `RequestStats::query_requests`（路由 `/api/stats/requests`）

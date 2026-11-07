@@ -154,9 +154,8 @@ pub async fn responses_endpoint(
     let started_at = logging::now_ms();
     // 请求来源客户端（UA 识别，见 `core::client`）：早失败路径与收尾记账共用
     let source = pipeline::request_source(&headers, key_identity);
-    // 阶段标记只给 Codex 桌面端折叠用：非 Codex 来源不补，避免把扩展字段发给
-    // 不认识它的客户端（判据与请求日志的「客户端」列同一份实现）。
-    let reasoning_collapse = source.client == crate::server::core::client::CLIENT_CODEX
+    // 协议兼容只看严格客户端识别，不跟随报表规则或来源声明。
+    let reasoning_collapse = source.behavior_client == crate::server::core::client::CLIENT_CODEX
         && config::third_party_reasoning_collapse();
     let path = "/v1/responses";
     let raw = match parse_object(&state, started_at, path, &body, &source) {
@@ -165,9 +164,6 @@ pub async fn responses_endpoint(
     };
     // 协议翻译前识别，保留原始文本块边界。
     let compact_client = compact_routing::client_for_request(&source.behavior_client, &raw, RequestFormat::Responses);
-    let body_len = body.len();
-    let dedupe_key = pipeline::sha256_hex(&body);
-    let raw_request = pipeline::capture_raw_body(&body);
     // 原始请求体留一份：回程要用它回显请求侧字段（instructions / tools / …），
     // 而下面会把 payload 改写成 Chat 形态
     let original = raw.clone();
@@ -211,12 +207,12 @@ pub async fn responses_endpoint(
         &format!(
             "← POST {path} model={} stream={stream} bytes={} ua={user_agent}",
             if requested_model.is_empty() { "(未指定)" } else { &requested_model },
-            body_len,
+            body.len(),
         ),
     );
     pipeline::write_debug_files(&body, "POST", path, &user_agent);
-    // 原始字节已转成去重键、调试正文与回显所需的值；解析后的协议体已持有
-    // 内容，这里释放 Bytes，避免大请求在转换与转发期间保留两份完整正文
+    let dedupe_key = pipeline::sha256_hex(&body);
+    let raw_request = pipeline::capture_raw_body(&body);
     drop(body);
 
     // 上游恒走流式（理由见模块头）
@@ -252,7 +248,7 @@ pub async fn responses_endpoint(
     if let Some(token) = cancellation::register(&telemetry_id) {
         telemetry.set_cancel_token(token);
     }
-    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry_id.clone());
+    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry.clone(), started_at);
     let outcome = forward_chat(
         &state,
         chat_body,
@@ -305,9 +301,9 @@ pub async fn responses_endpoint(
             }
             // 下游要非流式：内部收流，聚合成本协议的 JSON
             let mut collector = responses::ResponsesCollector::new();
-            collect_stream(source, &mut |chunk| collector.push(chunk)).await;
+            let received = collect_stream(source, &mut |chunk| collector.push(chunk)).await;
             collector.finish();
-            let body = collector.into_response(&model, &request, reasoning_collapse);
+            let body = collector.into_response(&model, &request, reasoning_collapse && received);
             // 响应正文在记账前定稿（完整 JSON 文本；序列化失败或调试模式
             // 关着给 None，见 `capture_raw_json`）
             let context = RecordContext {
@@ -375,9 +371,6 @@ pub async fn messages_endpoint(
         Ok(value) => value,
         Err(response) => return response,
     };
-    let body_len = body.len();
-    let dedupe_key = pipeline::sha256_hex(&body);
-    let raw_request = pipeline::capture_raw_body(&body);
     let stream = raw.get("stream").and_then(Value::as_bool).unwrap_or(false);
 
     let compact_client = compact_routing::client_for_request(&source.behavior_client, &raw, RequestFormat::Anthropic);
@@ -407,11 +400,12 @@ pub async fn messages_endpoint(
         &format!(
             "← POST {path} model={} stream={stream} bytes={} ua={user_agent}",
             if requested_model.is_empty() { "(未指定)" } else { &requested_model },
-            body_len,
+            body.len(),
         ),
     );
     pipeline::write_debug_files(&body, "POST", path, &user_agent);
-    // 与 responses_endpoint 同一处理：释放原始字节，避免大请求保留两份正文
+    let dedupe_key = pipeline::sha256_hex(&body);
+    let raw_request = pipeline::capture_raw_body(&body);
     drop(body);
 
     // scope 的**提供商**那一半进转发层（选路时按承载家过滤）；
@@ -450,7 +444,7 @@ pub async fn messages_endpoint(
     if let Some(token) = cancellation::register(&telemetry_id) {
         telemetry.set_cancel_token(token);
     }
-    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry_id.clone());
+    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry.clone(), started_at);
     let outcome = forward_chat(
         &state,
         chat_body,
@@ -545,19 +539,19 @@ pub async fn messages_endpoint(
 async fn collect_stream(
     mut source: Box<dyn futures::Stream<Item = Result<Bytes, std::io::Error>> + Send + Unpin>,
     sink: &mut impl FnMut(&[u8]),
-) {
+) -> bool {
     use futures::StreamExt;
     while let Some(item) = source.next().await {
         match item {
             Ok(chunk) => sink(&chunk),
-            // 上游中断：已收的内容保留（聚合层会把已有的部分成形），
-            // 与流式路径「不丢用户已经看到的部分」同一取向
+            // 部分内容保留，但接收失败不能用于推断最终回答阶段。
             Err(error) => {
                 logging::verbose("[Model]", &format!("聚合时上游中断: {error}"));
-                break;
+                return false;
             }
         }
     }
+    true
 }
 
 /// Anthropic 形态的错误响应（`{type:"error", error:{type, message}}`）

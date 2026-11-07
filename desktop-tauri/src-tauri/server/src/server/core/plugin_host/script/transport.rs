@@ -124,7 +124,7 @@ pub async fn open(params: &Value) -> Result<Value, proto::WireError> {
             url.as_str(),
             params["provider"].as_str().unwrap_or(""),
             &sent_headers,
-            &sent_body,
+            &sent_body.to_string(),
         );
     }
     let id = params["id"]

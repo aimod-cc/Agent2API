@@ -3,7 +3,6 @@
 use rusqlite::{params, params_from_iter, Connection};
 
 use super::FilterPlan;
-use crate::server::request_stats::record::{MAX_RAW_BYTES, MAX_RAW_ROWS};
 
 #[derive(Clone, Copy, Default)]
 pub(in crate::server::request_stats) struct RawCounts {
@@ -89,15 +88,6 @@ pub(in crate::server::request_stats) fn count_raw(conn: &Connection) -> rusqlite
     count_table(conn, "request_raw", &FilterPlan::of(&super::super::RequestQuery::default()))
 }
 
-fn raw_stats(conn: &Connection) -> rusqlite::Result<(usize, i64)> {
-    let (count, bytes): (i64, i64) = conn.query_row(
-        "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM request_raw",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    Ok((count.max(0) as usize, bytes.max(0)))
-}
-
 pub(in crate::server::request_stats) fn count_upstream_raw(conn: &Connection) -> rusqlite::Result<usize> {
     count_table(conn, "debug_traffic", &FilterPlan::of(&super::super::RequestQuery::default()))
 }
@@ -116,34 +106,6 @@ pub(in crate::server::request_stats) fn trim_raw_rows(
     )
 }
 
-fn trim_raw_bytes(conn: &Connection, max: i64) -> rusqlite::Result<usize> {
-    conn.execute(
-        "DELETE FROM request_raw WHERE id NOT IN (\
-           SELECT id FROM (\
-             SELECT id, SUM(size) OVER (\
-               ORDER BY ts DESC, rowid DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\
-             ) AS cumulative FROM request_raw\
-           ) WHERE cumulative <= ?1\
-         )",
-        params![max],
-    )
-}
-
-/// 同时按条数与正文合计字节淘汰最旧的下游正文
-pub(in crate::server::request_stats) fn trim_raw_to_caps(
-    conn: &Connection,
-) -> rusqlite::Result<usize> {
-    let mut removed = 0;
-    let (_, bytes) = raw_stats(conn)?;
-    if bytes > MAX_RAW_BYTES {
-        removed += trim_raw_bytes(conn, MAX_RAW_BYTES)?;
-    }
-    let (count, _) = raw_stats(conn)?;
-    if count > MAX_RAW_ROWS {
-        removed += trim_raw_rows(conn, count - MAX_RAW_ROWS)?;
-    }
-    Ok(removed)
-}
 
 pub(in crate::server::request_stats) fn select_raw(
     conn: &Connection,
