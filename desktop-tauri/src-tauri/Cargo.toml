@@ -27,7 +27,16 @@ members = ["server"]
 
 [lib]
 name = "workbuddy_proxy_desktop_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# 只保留 rlib：仓库内没有任何动态库或静态库的消费者（桌面壳以 rlib 静态链接，
+# Tauri 桌面打包只需要 bin），而 windows-gnu 下 cdylib 会把全部符号导出，
+# 触发「export ordinal too large」链接失败，官方 CI 的 MSVC 工具链不受影响但产物同样无人使用
+crate-type = ["rlib"]
+
+[[bin]]
+# 与 tauri.conf.json 的 mainBinaryName 一致：本地 cargo 构建产物名与
+# Tauri CLI 打包改名后的名字相同，两种构建路径产出同一个 agent2api.exe
+name = "agent2api"
+path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
