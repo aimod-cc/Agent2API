@@ -19,7 +19,7 @@ use crate::server::core::models::model_id;
 use crate::server::core::providers::adapter::adapter_by_id;
 use crate::server::core::providers::{kind_from_id, kind_id, ProviderKind, PROVIDERS};
 
-pub(crate) use routing::entry_id_in_manifest;
+pub(crate) use routing::{builtin_target, entry_id_in_manifest};
 pub use routing::{
     default_model_catalog, default_model_usable, forwarding_providers, model_blocked_everywhere,
     providers_for_model, wire_target_for_provider, WireTarget,

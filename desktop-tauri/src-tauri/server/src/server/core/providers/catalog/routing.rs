@@ -29,7 +29,7 @@ pub(crate) fn entry_id_in_manifest(manifest: &[Value], requested: &str) -> Optio
         .map(model_id)
 }
 
-pub(super) fn builtin_target(
+pub(crate) fn builtin_target(
     rules: &model_rules::ModelRules,
     provider: &str,
     manifest: &[Value],

@@ -7,6 +7,7 @@
 
 import * as React from 'react'
 import { Button, MultiSelect } from '@ui'
+import { useOptionsWidth } from './dropdown-width'
 import type { Translate } from './assistant-read-types'
 import { Group, ListRow, Row, SwitchRow, Tip } from './settings-vision-rows'
 import { VisionModelSelect } from './settings-vision-editors'
@@ -42,6 +43,7 @@ function ModelListRow({ way, label, tip, value, options, disabled, onChange, t }
   onChange(next: VisionModelRef[]): void
   t: Translate
 }) {
+  const width = useOptionsWidth(options.map(option => option.label))
   const resolve = (key: string): VisionModelRef | null => {
     const parsed: unknown = JSON.parse(key)
     return Array.isArray(parsed) && parsed.length === 2 && parsed.every(item => typeof item === 'string')
@@ -49,7 +51,8 @@ function ModelListRow({ way, label, tip, value, options, disabled, onChange, t }
       : null
   }
   return <Row first label={label} tip={tip} className='items-center max-[767px]:flex-col max-[767px]:items-stretch max-[767px]:gap-2' control={
-    <MultiSelect className='w-[min(320px,100%)]' aria-label={t('{way}的适用模型', { way })}
+    <MultiSelect className='max-w-full' style={width ? { width: `${width}px` } : undefined}
+      aria-label={t('{way}的适用模型', { way })}
       value={value.map(visionTargetKey)} options={options} disabled={disabled}
       placeholder={t('选择一个或多个模型')} searchPlaceholder={t('搜索提供商或模型')}
       onValueChange={keys => onChange(keys.map(resolve).filter((item): item is VisionModelRef => item !== null))} />
@@ -74,7 +77,7 @@ export function VisionAssistCard({ value, models, reasoning, disabled, onChange,
         onChange={next => onChange({ models: next })} />
       <Row label={t('用哪只模型识图')} className='items-center max-[767px]:flex-col max-[767px]:items-stretch max-[767px]:gap-2' control={
         <VisionModelSelect models={models} t={t} includeShared disabled={disabled}
-          className='w-[min(320px,100%)]' ariaLabel={t('用哪只模型识图')}
+          ariaLabel={t('用哪只模型识图')}
           value={value.source === 'shared' ? 'shared' : (value.target ? visionTargetKey(value.target) : '')}
           onValueChange={next => {
             if (next === 'shared') { onChange({ source: 'shared' }); return }
@@ -122,7 +125,7 @@ export function VisionRerouteCard({ value, models, reasoning, maxTargets, disabl
         value={value.models} options={listChoices(models, t)} disabled={disabled} t={t}
         onChange={next => onChange({ models: next })} />
       <Row label={t('接管回答的模型')} className='items-center max-[767px]:flex-col max-[767px]:items-stretch max-[767px]:gap-2' control={
-        <div className='flex w-[min(320px,100%)] items-center gap-1'>
+        <div className='flex max-w-full items-center gap-1'>
           <VisionModelSelect models={models} t={t} disabled={disabled} className='min-w-0 flex-1'
             ariaLabel={t('接管回答的模型')} value={primary ? visionTargetKey(primary) : ''}
             onValueChange={next => {
@@ -144,7 +147,7 @@ export function VisionRerouteCard({ value, models, reasoning, maxTargets, disabl
             onClick={() => setTargets(value.targets.filter((_, i) => i !== index + 1))}>{t('移除')}</Button>
         </>} />)}
       <Row label={t('备选模型')} tip={t('首选不可用时再依次尝试；留空则停止并说明原因。')} className='items-center max-[767px]:flex-col max-[767px]:items-stretch max-[767px]:gap-2' control={
-        <div className='flex w-[min(320px,100%)] items-center gap-1'>
+        <div className='flex max-w-full items-center gap-1'>
           <VisionModelSelect models={models} t={t} disabled={disabled || value.targets.length >= maxTargets}
             className='min-w-0 flex-1' ariaLabel={t('备选模型')} value={candidate} onValueChange={setCandidate} />
           <Button variant='outline' size='xs' disabled={disabled || !canAdd} onClick={() => {
