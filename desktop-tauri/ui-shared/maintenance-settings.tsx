@@ -73,7 +73,12 @@ export function MaintenanceSettings({ tasks, api, retentionDays, maxRecords, onC
         unsaved.current.delete(task.id)
       }
       if (Number(days) !== retentionDays || Number(count) !== maxRecords) {
-        await api.saveStorage({ retentionDays: Number(days), maxRecords: Number(count) })
+        // 键名与 `/api/retention` 的校验键完全一致：别的名字会被后端当未知键
+        // 静默忽略，`updated` 为假时不落库，表现为「保存无效」
+        await api.saveStorage({
+          maintenanceRecordRetentionDays: Number(days),
+          maintenanceRecordMaxCount: Number(count),
+        })
       }
       onSaved()
       onClose()

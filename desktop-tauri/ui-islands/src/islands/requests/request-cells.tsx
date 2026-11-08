@@ -374,6 +374,11 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
     case 'client': {
       const label = clientRequestLabel(entry)
       const evidence = entry.clientEvidence
+      // 在途且还没选路（provider 空）时归属未定：显示 —，避免先闪真实标识、
+      // 选路后再翻转成归属客户端；供应商与归属在同一次回写里落库
+      if (isRunning(entry) && !entry.provider?.trim()) {
+        return <span key={key} className={className} title={t('归属在选路后确定：命中供应商规则用规则客户端，未命中用默认归属客户端，都没设置保留识别结果')}>—</span>
+      }
       // 归属被改写时悬停要交代来龙去脉：识别出的是谁、改写成了谁，UA 只作依据
       const rewritten = Boolean(evidence && entry.client
         && evidence.clientId.trim().toLowerCase() !== entry.client.trim().toLowerCase())
