@@ -157,11 +157,20 @@ impl RequestRouting {
             // 上游真实 id 存储，原始 id 的默认绑定可能被关而启用别名仍指向它，
             // 按原始 id 查参与范围会把这类目标误判成不可参与
             let reachable = crate::server::core::providers::catalog::provider_serves_model(provider, model);
-            if destination.group.is_some() || !self.providers(vec![provider.to_string()]).contains(&provider.to_string()) || !reachable {
+            // 目标供应商不再要求出现在原请求的路由参与范围里：辅助识图/改写的
+            // 目标模型常常不属于原模型的提供商集合，Key 的范围已在 resolve
+            // 入口单独校验，这里按可达性放行
+            if destination.group.is_some() || !reachable {
                 return Err(GatewayError::with_status(403, "视觉目标不在本次请求与目标模型的路由参与范围内")
                     .with_code("vision_target_outside_route"));
             }
-            next.positions.retain(|id, _| destination.positions.contains_key(id) && pinned.is_none_or(|pinned| pinned == id));
+            // 视觉调用的账号池与路由 profile 取自目标模型：辅助识图/改写的目标
+            // 模型常常不属于原模型的提供商集合，沿用原请求的 profile 过滤与账号
+            // 交集会让跨家目标必然 403/503；Key 的提供商与模型范围已在 resolve
+            // 入口单独校验
+            next.profile = destination.profile;
+            next.scope = destination.scope;
+            next.positions = destination.positions;
             if next.positions.is_empty() {
                 return Err(GatewayError::with_status(503, "当前权限和路由范围内没有参与图片处理的账号")
                     .with_code("vision_target_unavailable"));
