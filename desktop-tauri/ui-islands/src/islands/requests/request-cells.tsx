@@ -58,7 +58,7 @@ function VisionTag({ route }: { route: unknown }) {
     + (value.targetModel ? ` · ${[value.targetProvider, value.targetModel].filter(Boolean).join(' ')}` : '')
     + (Number(value.durationMs) ? ` · ${((Number(value.durationMs) || 0) / 1000).toFixed(1)}s` : '')
     + (value.error ? ` · ${value.error}` : '')
-  return <Badge shape='tag' className='ml-1' variant={value.status === 'failed' ? 'destructive' : 'outline'} title={title}>
+  return <Badge shape='tag' variant={value.status === 'failed' ? 'destructive' : 'outline'} title={title}>
     {modeLabel}
   </Badge>
 }
@@ -325,8 +325,10 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
         return (
           <span key={key} className={className}>
             {/* 徽章与阶段计时都由 wbRequestPhase 产出 HTML（详情弹窗读同一份，两处必须逐字一致） */}
-            <HtmlContent className='req-status-badge' html={phase.badgeHtml(entry)} render={<span />} />
-            <VisionTag route={entry.route} />
+            <span className='req-status-badge gap-x-1'>
+              <HtmlContent html={phase.badgeHtml(entry)} render={<span />} />
+              <VisionTag route={entry.route} />
+            </span>
             {elapsed ? <HtmlContent className='req-status-line' html={elapsed} render={<span />} /> : null}
           </span>
         )
@@ -338,7 +340,7 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
         ? t('HTTP {status}，但响应体阶段出错：见错误列', { status })
         : undefined
       return (
-        <span key={key} className={className}>
+        <span key={key} className={`${className} flex flex-wrap items-start gap-x-1`}>
           <Badge shape='tag' variant={ok ? 'success' : 'destructive'} title={title}>
             {status || t('失败')}
           </Badge>

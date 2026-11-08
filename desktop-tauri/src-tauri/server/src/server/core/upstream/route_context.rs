@@ -153,8 +153,11 @@ impl RequestRouting {
             }
         } else {
             let destination = Self::capture_request(request_model, store, &json!({}), scope, false)?;
-            if destination.group.is_some() || !self.providers(vec![provider.to_string()]).contains(&provider.to_string())
-                || !destination.providers(vec![provider.to_string()]).contains(&provider.to_string()) {
+            // 参与校验与保存校验同一判据（`provider_serves_model`）：视觉目标按
+            // 上游真实 id 存储，原始 id 的默认绑定可能被关而启用别名仍指向它，
+            // 按原始 id 查参与范围会把这类目标误判成不可参与
+            let reachable = crate::server::core::providers::catalog::provider_serves_model(provider, model);
+            if destination.group.is_some() || !self.providers(vec![provider.to_string()]).contains(&provider.to_string()) || !reachable {
                 return Err(GatewayError::with_status(403, "视觉目标不在本次请求与目标模型的路由参与范围内")
                     .with_code("vision_target_outside_route"));
             }
