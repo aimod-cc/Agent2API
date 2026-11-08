@@ -325,7 +325,7 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
         return (
           <span key={key} className={className}>
             {/* 徽章与阶段计时都由 wbRequestPhase 产出 HTML（详情弹窗读同一份，两处必须逐字一致） */}
-            <span className='req-status-badge gap-x-1'>
+            <span className='req-status-badge items-center gap-x-1'>
               <HtmlContent html={phase.badgeHtml(entry)} render={<span />} />
               <VisionTag route={entry.route} />
             </span>
@@ -340,7 +340,7 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
         ? t('HTTP {status}，但响应体阶段出错：见错误列', { status })
         : undefined
       return (
-        <span key={key} className={`${className} flex flex-wrap items-start gap-x-1`}>
+        <span key={key} className={`${className} flex flex-wrap items-center gap-x-1`}>
           <Badge shape='tag' variant={ok ? 'success' : 'destructive'} title={title}>
             {status || t('失败')}
           </Badge>

@@ -157,7 +157,10 @@ impl RequestRouting {
             // 上游真实 id 存储，原始 id 的默认绑定可能被关而启用别名仍指向它，
             // 按原始 id 查参与范围会把这类目标误判成不可参与
             let reachable = crate::server::core::providers::catalog::provider_serves_model(provider, model);
-            if destination.group.is_some() || !self.providers(vec![provider.to_string()]).contains(&provider.to_string()) || !reachable {
+            // 目标供应商不再要求出现在原请求的路由参与范围里：辅助识图/改写的
+            // 目标模型常常不属于原模型的提供商集合，Key 的范围已在 resolve
+            // 入口单独校验，这里按可达性放行
+            if destination.group.is_some() || !reachable {
                 return Err(GatewayError::with_status(403, "视觉目标不在本次请求与目标模型的路由参与范围内")
                     .with_code("vision_target_outside_route"));
             }
