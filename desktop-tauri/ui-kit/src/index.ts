@@ -99,6 +99,11 @@ export {
   type MultiSelectProps,
 } from './multi-select'
 export {
+  SearchSelect,
+  type SearchSelectOption,
+  type SearchSelectProps,
+} from './search-select'
+export {
   Popover,
   PopoverTrigger,
 

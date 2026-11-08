@@ -54,6 +54,8 @@ type MultiSelectProps<Value extends string = string> = {
   searchPlaceholder?: string
   disabled?: boolean
   className?: string
+  /** 触发器的内联样式（调用方用它注入按内容测得的宽度） */
+  style?: React.CSSProperties
   /** 触发器上的原生 id：给可见 `<label htmlFor>` 关联用（没有可见 label 时用 aria-label 也行） */
   id?: string
   /** 触发器的悬停提示 */
@@ -74,6 +76,7 @@ function MultiSelect<Value extends string = string>({
   searchPlaceholder = t('搜索…'),
   disabled = false,
   className,
+  style,
   id,
   title,
   ...props
@@ -107,6 +110,7 @@ function MultiSelect<Value extends string = string>({
         data-slot='multi-select-trigger'
         id={id}
         title={title}
+        style={style}
         aria-label={props['aria-label']}
         className={cn(
           'inline-flex h-[30px] min-w-0 cursor-pointer items-center justify-between gap-1.5 rounded-md border border-control-border bg-control px-2.5',
@@ -146,9 +150,10 @@ function MultiSelect<Value extends string = string>({
           <ComboboxPrimitive.Popup
             data-slot='multi-select-content'
             className={cn(
-              // 宽度跟随触发器（--anchor-width），但给一个下限：触发器常常很窄，
-              // 而选项文字（提供商全名 / 模型名）比触发器长得多
-              'flex max-h-[280px] w-[max(var(--anchor-width),220px)] flex-col overflow-hidden',
+              // 宽度按选项内容的最大长度自适应（w-max）：触发器常常很窄，而选项
+              // 文字（提供商全名 / 模型名）比触发器长得多，跟随触发器会截断长名，
+              // 所以只把触发器宽度当下限，再给可用宽度封顶
+              'flex max-h-[280px] w-max min-w-[max(var(--anchor-width),220px)] max-w-[var(--available-width)] flex-col overflow-hidden',
               'rounded-lg border border-border-strong bg-raised shadow-3 outline-none',
               'data-open:animate-in data-open:fade-in-0',
               'data-closed:animate-out data-closed:fade-out-0'
