@@ -2,6 +2,7 @@ import * as React from 'react'
 import { createRoot } from 'react-dom/client'
 import { mountOnPage } from '../island-lazy'
 import { t } from '../i18n'
+import { callJson } from './assistant-api'
 import { MaintenancePanel } from '../../../ui-shared/maintenance-panel'
 import type { MaintenanceApi, MaintenanceDetail, MaintenanceOverview, MaintenanceQuery, MaintenanceTask, MaintenanceTaskId } from '../../../ui-shared/maintenance-types'
 
@@ -33,6 +34,9 @@ const api: MaintenanceApi = {
   run: id => bridge().runMaintenance(id),
   retry: (id, itemId) => bridge().retryMaintenance(id, itemId),
   save: (id, patch) => bridge().saveScheduledTask(id, patch),
+  // 维护记录的保留策略没有专用桥方法，直接走管理 API 的部分更新：
+  // 只带这两个键，其余保留设置不受影响
+  saveStorage: patch => callJson('PUT', '/api/retention', patch),
 }
 
 function AutoMaintenancePage() {

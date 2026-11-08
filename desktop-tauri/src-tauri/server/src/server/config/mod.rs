@@ -1547,6 +1547,16 @@ pub fn set_retention(patch: RetentionPatch) -> bool {
             &mut next.request_count,
         );
         apply(KEY_DAILY_RETENTION_DAYS, patch.daily_days, &mut next.daily_days);
+        apply(
+            KEY_MAINTENANCE_RECORD_RETENTION_DAYS,
+            patch.maintenance_days,
+            &mut next.maintenance_days,
+        );
+        apply(
+            KEY_MAINTENANCE_RECORD_MAX_COUNT,
+            patch.maintenance_count,
+            &mut next.maintenance_count,
+        );
         config.retention = next;
     })
 }

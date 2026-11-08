@@ -16,12 +16,13 @@ pub async fn overview(
     let result = (|| -> Result<Value, String> {
         let records = maintenance::storage::list(&query)?;
         let latest = maintenance::storage::latest()?;
+        let retention = crate::server::config::retention_settings();
         Ok(json!({
             "tasks": [scheduled_tasks::task_by_id(maintenance::CREDENTIAL), scheduled_tasks::task_by_id(maintenance::MODEL)],
             "latest": latest,
             "records": records,
-            "retentionDays": maintenance::storage::RETENTION_DAYS,
-            "maxRecords": maintenance::storage::MAX_RECORDS,
+            "retentionDays": retention.maintenance_days,
+            "maxRecords": retention.maintenance_count,
         }))
     })();
     match result {
