@@ -78,6 +78,18 @@ fn persist(context: &RecordContext, fallback_error: Option<String>) {
     entry.route = snapshot.route.unwrap_or(serde_json::Value::Null);
     entry.is_test = context.is_test;
     entry.source = context.source.clone();
+    // 供应商归属改写：请求头识别的是真实客户端（依据保留在 evidence 里），
+    // 最终归属按路由供应商改写 —— 命中「供应商归属规则」用规则客户端，未命中
+    // 回落「默认归属客户端」，两者都没配置则保持识别结果不动。
+    {
+        let identification = crate::server::config::client_identification::current();
+        if let Ok(settings) = identification.settings.as_ref() {
+            if !settings.provider_rules.is_empty() || !settings.default_client_id.is_empty() {
+                entry.source.client = crate::server::core::client::attribution_client(
+                    &entry.source.client, entry.provider.as_deref().unwrap_or(""), settings);
+            }
+        }
+    }
     entry.error = error;
     entry.prompt_tokens = snapshot.prompt_tokens;
     entry.completion_tokens = snapshot.completion_tokens;

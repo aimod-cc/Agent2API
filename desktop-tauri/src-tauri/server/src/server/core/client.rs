@@ -4,7 +4,7 @@ pub mod catalog;
 mod evidence;
 mod matcher;
 
-pub use catalog::{ClientRule, ClientSettings};
+pub use catalog::{attribution_client, ClientRule, ClientSettings, ProviderRule};
 pub use evidence::ClientEvidence;
 pub use matcher::{identify, rule_matches};
 
