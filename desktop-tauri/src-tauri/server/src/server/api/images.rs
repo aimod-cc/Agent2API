@@ -398,11 +398,12 @@ pub(super) async fn execute_with_telemetry(
     if let Some(token) = cancellation::register(&id) {
         telemetry.set_cancel_token(token);
     }
-    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry.clone(), started_at);
+    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry.clone(), started_at, &source.client);
     telemetry.set_live_sink(pipeline::live_row_sink(
         state.request_stats(),
         id,
         started_at,
+        &source.client,
     ));
     let raw_request = pipeline::capture_raw_body(&raw);
     let request = ForwardRequest {

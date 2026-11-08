@@ -149,6 +149,7 @@ mod tests {
         );
         stats.update_running(id, &RunningProgress {
             provider: "trae".to_string(),
+            client: String::new(),
             account_id: account_id.to_string(),
             account_name: "mojie126".to_string(),
             upstream_model: model.to_string(),

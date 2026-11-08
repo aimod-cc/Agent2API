@@ -9,6 +9,7 @@ export const maintenanceApi: MaintenanceApi = {
   detail: id => apiCall(`/api/maintenance/records/${encodeURIComponent(id)}`),
   run: id => apiCall(`/api/maintenance/run/${encodeURIComponent(id)}`, { method: 'POST' }),
   retry: (id, itemId) => apiCall(`/api/maintenance/records/${encodeURIComponent(id)}/retry`, { method: 'POST', body: itemId == null ? {} : { itemId } }),
+  clear: () => apiCall('/api/maintenance/records/clear', { method: 'POST', body: {} }),
   save: (id, patch) => apiCall<MaintenanceTask>(`/api/scheduled-tasks/${encodeURIComponent(id)}`, { method: 'PATCH', body: patch }),
   saveStorage: patch => apiCall('/api/retention', { method: 'PUT', body: patch }),
 }

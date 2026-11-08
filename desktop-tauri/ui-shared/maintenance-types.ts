@@ -75,6 +75,8 @@ export type MaintenanceApi = {
   detail(id: string): Promise<MaintenanceDetail>
   run(taskId: MaintenanceTaskId): Promise<MaintenanceDetail>
   retry(id: string, itemId?: string): Promise<MaintenanceDetail>
+  /** 清空全部已结束的执行记录（运行中的记录不动），返回删除的条数 */
+  clear(): Promise<{ cleared: number }>
   save(taskId: MaintenanceTaskId, patch: { enabled: boolean; interval: number }): Promise<MaintenanceTask>
   /** 保存维护记录的保留策略（走 `/api/retention` 的部分更新，只带这两个键） */
   saveStorage(patch: { retentionDays: number; maxRecords: number }): Promise<unknown>

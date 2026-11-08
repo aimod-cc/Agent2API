@@ -949,6 +949,7 @@
   "自定义 User-Agent": "User-Agent personalizado",
   "自定义 · {name}": "Personalizado · {name}",
   "自定义头匹配规则": "Regras de cabeçalho personalizadas",
+  "按列表自上而下匹配，位于来源声明之后、内置规则之前；可用于给难认的标识钉规则。": "Correspondência de cima para baixo na ordem da lista, após as declarações de origem e antes das regras internas; use para fixar clientes difíceis de reconhecer.",
   "自定义客户端分类": "Categorias de clientes personalizadas",
   "自定义客户端数量已达上限": "Limite de clientes personalizados atingido",
   "自定义提供商 {id}": "Provedor personalizado {id}",

@@ -159,7 +159,6 @@ export function ClientIdentificationPanel({ api, t, active = true }: { api: Clie
       </span> : null}
       <div className='head-actions flex gap-2'>
         <Button variant='ghost' size='sm' disabled={busy} onClick={() => void load()}>{t('刷新')}</Button>
-        <Button size='sm' disabled={!view || busy || view.config.rules.length >= view.maxRules} onClick={() => setEditor({})}>{t('添加规则')}</Button>
       </div>
     </CardHeader>
     <CollapsibleContent keepMounted>
@@ -263,6 +262,11 @@ export function ClientIdentificationPanel({ api, t, active = true }: { api: Clie
                     <Button size='xs' variant='ghost' disabled={busy} onClick={() => setConfirmation({ revision: view.revision, title: t('删除识别规则'), message: t('删除后，新请求不再使用这条规则；历史记录保持不变。'), config: { ...view.config, rules: view.config.rules.filter(item => item.id !== rule.id) } })}>{t('删除')}</Button>
                   </div>
                 </div>)}
+              <div className='flex flex-wrap items-center justify-between gap-3 px-4 py-3'>
+                <p className='m-0 max-w-[64ch] text-[12px] leading-[1.7] text-muted-foreground'>{t('按列表自上而下匹配，位于来源声明之后、内置规则之前；可用于给难认的标识钉规则。')}</p>
+                <Button size='sm' variant='outline' disabled={!view || busy || view.config.rules.length >= view.maxRules}
+                  onClick={() => setEditor({})}>{t('添加规则')}</Button>
+              </div>
             </Section>
 
             <Section title={t('自定义客户端分类')} note={view.config.clients.length ? t('{n} 个', { n: view.config.clients.length }) : undefined}>

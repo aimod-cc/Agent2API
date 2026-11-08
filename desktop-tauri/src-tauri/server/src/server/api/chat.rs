@@ -183,7 +183,7 @@ pub async fn chat_completions(
     // 客户端在响应产生前断开时 axum 会直接取消 handler，收尾记账走不到 ——
     // 守卫的 Drop 补一条 408 终态（详见 `DisconnectGuard` 的说明）。
     // 正常路径必须显式调 `complete()` / `handoff()`，见下面的三个出口。
-    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry.clone(), started_at);
+    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry.clone(), started_at, &request_source.client);
     // 在途回写：选路一定就把「谁在承载」、发送体一定稿就把「上游真名」写进这条
     // 进行中行（连同尝试链、首响、脱敏命中）—— 列表页 1 秒轮询，于是这些读数在
     // 转发期间就能看到，不必等收尾。接线在这里、core 只持有闭包，理由见
@@ -192,6 +192,7 @@ pub async fn chat_completions(
         state.request_stats(),
         telemetry_id,
         started_at,
+        &request_source.client,
     ));
     // 自动续写的上下文（开关 `autoContinue` **默认关**）。关着时这里连一份 clone
     // 都不做 —— `plan()` 先问开关，再决定要不要复制请求体/请求头/白名单。

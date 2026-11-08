@@ -37,6 +37,10 @@ pub async fn entry(State(state): State<ServerState>, request: axum::extract::Req
     let rest = path.strip_prefix("/api/maintenance/").unwrap_or_default();
     let segments = rest.split('/').collect::<Vec<_>>();
     match (method.clone(), segments.as_slice()) {
+        (Method::POST, ["records", "clear"]) => match maintenance::storage::clear() {
+            Ok(cleared) => ok_json(json!({ "cleared": cleared })),
+            Err(error) => error_response(500, error),
+        },
         (Method::GET, ["records", id]) => match maintenance::storage::detail(id) {
             Ok(detail) => ok_json(json!(detail)),
             Err(error) => error_response(

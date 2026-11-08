@@ -663,6 +663,8 @@ pub(super) fn finish_running_request(
 ///     一次尝试失败，不该让列表里的行提前变成失败；
 ///   - `ts` / `model` / `client_model`：请求发起时就定稿了，在途没有新值；
 ///   - `duration_ms` / 四个 token 列：只有收尾才有值（用量在途中不显示）。
+///   - `client`：供应商定下后按归属规则改写（空串不覆盖，判据见
+///     `api::pipeline::running_progress`），在途与终态显示同一个归属客户端。
 ///
 /// 阶段两列**在这一份里的含义与别处不同**：它们是要写的（见 `phase` 字段的
 /// 说明），只是与 status/error 一样属于「在途」而不是终态。
@@ -675,7 +677,8 @@ pub(super) fn update_running_progress(
         "UPDATE requests SET provider = ?2, account_id = ?3, account_name = ?4, \
          upstream_model = ?5, upstream_reasoning = ?6, attempts = ?7, first_response_ms = ?8, \
          attempt_details = ?9, sensitive_hits = ?10, phase = ?11, phase_started_at = ?12, \
-         route = COALESCE(?13, route) WHERE id = ?1 AND status = 0",
+         route = COALESCE(?13, route), client = COALESCE(NULLIF(?14, ''), client) \
+         WHERE id = ?1 AND status = 0",
         params![
             id,
             progress.provider,
@@ -690,6 +693,7 @@ pub(super) fn update_running_progress(
             progress.phase,
             progress.phase_started_at,
             progress.route.as_ref().map(Value::to_string),
+            progress.client,
         ],
     )
 }
