@@ -6,20 +6,35 @@ import type { MaintenanceApi, MaintenanceTask, MaintenanceTaskId } from './maint
 
 type Draft = { enabled: boolean; interval: string }
 
+/** 维护记录保留策略的合法范围（与后端 `/api/retention` 的校验同一套数字） */
+const RETENTION_MIN_DAYS = 1
+const RETENTION_MAX_DAYS = 99_999
+const RETENTION_MIN_COUNT = 1
+const RETENTION_MAX_COUNT = 100_000
+
+/** 两个保留值在编辑期间只改本地文案，保存时才整体校验并提交 */
+type RetentionDraft = { days: string; count: string }
+
 /**
  * 维护设置。
  *
- * 两个任务收在一张分组表里（行之间只用发丝线），而不是两个带描边的小方块：
- * 开关与说明同一行、间隔输入贴在下面，一屏看完两项设置；底栏只有「取消 / 保存设置」。
+ * 两项任务与维护记录的保留策略收在一张分组表里（行之间只用发丝线），而不是
+ * 各自带描边的小方块：开关与说明同一行、间隔输入贴在下面，一屏看完；
+ * 底栏只有「取消 / 保存设置」。保留策略走 `/api/retention` 的部分更新，
+ * 与两项任务的逐项保存共用同一次「保存设置」。
  * 校验与保存流程与原实现完全一致：先整体校验间隔，再逐项提交，中途失败要提示「部分可能已保存」。
  */
-export function MaintenanceSettings({ tasks, api, onClose, onSaved }: {
+export function MaintenanceSettings({ tasks, api, retentionDays, maxRecords, onClose, onSaved }: {
   tasks: MaintenanceTask[]
   api: MaintenanceApi
+  /** 维护记录当前的保留天数与条数上限（来自概览接口） */
+  retentionDays: number
+  maxRecords: number
   onClose(): void
   onSaved(): void
 }) {
   const [drafts, setDrafts] = React.useState<Record<string, Draft>>(() => Object.fromEntries(tasks.map(task => [task.id, { enabled: task.enabled, interval: String(task.interval) }])))
+  const [retention, setRetention] = React.useState<RetentionDraft>(() => ({ days: String(retentionDays), count: String(maxRecords) }))
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState('')
   const saving = React.useRef(false)
@@ -35,6 +50,16 @@ export function MaintenanceSettings({ tasks, api, onClose, onSaved }: {
         return
       }
     }
+    const days = retention.days.trim()
+    const count = retention.count.trim()
+    if (!/^\d+$/.test(days) || Number(days) < RETENTION_MIN_DAYS || Number(days) > RETENTION_MAX_DAYS) {
+      setError(t('维护记录保留天数必须是 {min}–{max} 的整数', { min: RETENTION_MIN_DAYS, max: RETENTION_MAX_DAYS }))
+      return
+    }
+    if (!/^\d+$/.test(count) || Number(count) < RETENTION_MIN_COUNT || Number(count) > RETENTION_MAX_COUNT) {
+      setError(t('日志保留上限必须是 {min}–{max} 的整数', { min: RETENTION_MIN_COUNT, max: RETENTION_MAX_COUNT }))
+      return
+    }
     saving.current = true
     setBusy(true)
     setError('')
@@ -46,6 +71,9 @@ export function MaintenanceSettings({ tasks, api, onClose, onSaved }: {
         const result = await api.save(task.id, { enabled: draft.enabled, interval: Number(draft.interval) })
         if (result.saved === false) throw new Error(t('维护设置未能保存到数据库，请检查磁盘空间和权限'))
         unsaved.current.delete(task.id)
+      }
+      if (Number(days) !== retentionDays || Number(count) !== maxRecords) {
+        await api.saveStorage({ retentionDays: Number(days), maxRecords: Number(count) })
       }
       onSaved()
       onClose()
@@ -82,6 +110,28 @@ export function MaintenanceSettings({ tasks, api, onClose, onSaved }: {
                 <FieldDescription>{t('可填 {min}–{max}', { min: task.min, max: task.max })}</FieldDescription>
               </Field>
             </div>)}
+            <div className='maintenance-setting maintenance-divided'>
+              <div className='maintenance-setting-heading'>
+                <div>
+                  <h3>{t('维护记录')}</h3>
+                  <p>{t('执行结果的保留天数与条数上限，超出后清理最旧的记录；保存后立即按新值清理')}</p>
+                </div>
+              </div>
+              <div className='flex flex-wrap gap-3'>
+                <Field className='w-[220px]'>
+                  <FieldLabel>{t('维护记录保留天数')}</FieldLabel>
+                  <Input type='number' inputMode='numeric' min={RETENTION_MIN_DAYS} max={RETENTION_MAX_DAYS} step={1} disabled={busy}
+                    value={retention.days} onChange={event => setRetention(previous => ({ ...previous, days: event.target.value }))} />
+                  <FieldDescription>{t('可填 {min}–{max} 天', { min: RETENTION_MIN_DAYS, max: RETENTION_MAX_DAYS })}</FieldDescription>
+                </Field>
+                <Field className='w-[220px]'>
+                  <FieldLabel>{t('日志保留上限')}</FieldLabel>
+                  <Input type='number' inputMode='numeric' min={RETENTION_MIN_COUNT} max={RETENTION_MAX_COUNT} step={1} disabled={busy}
+                    value={retention.count} onChange={event => setRetention(previous => ({ ...previous, count: event.target.value }))} />
+                  <FieldDescription>{t('可填 {min}–{max} 条', { min: RETENTION_MIN_COUNT, max: RETENTION_MAX_COUNT })}</FieldDescription>
+                </Field>
+              </div>
+            </div>
           </div>
           <p className='maintenance-muted'>{t('关闭自动维护不影响手动执行，也不影响对话请求所需的按需续期。')}</p>
         </DialogBody>

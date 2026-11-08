@@ -76,6 +76,8 @@ export type MaintenanceApi = {
   run(taskId: MaintenanceTaskId): Promise<MaintenanceDetail>
   retry(id: string, itemId?: string): Promise<MaintenanceDetail>
   save(taskId: MaintenanceTaskId, patch: { enabled: boolean; interval: number }): Promise<MaintenanceTask>
+  /** 保存维护记录的保留策略（走 `/api/retention` 的部分更新，只带这两个键） */
+  saveStorage(patch: { retentionDays: number; maxRecords: number }): Promise<unknown>
 }
 
 export const MAINTENANCE_TASKS: readonly MaintenanceTaskId[] = ['credentialMaintenance', 'modelRefresh']
