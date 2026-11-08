@@ -1,0 +1,167 @@
+name: build
+
+# 构建桌面端安装包并挂到 GitHub Release 上。
+#
+# ── 为什么需要 CI 构建 ─────────────────────────────────────────
+# Tauri 的 macOS 产物（.app / .dmg）**只能在 macOS 上生成**，无法从 Windows
+# 交叉编译；Linux 产物（deb / AppImage）同理 —— 它们链接 webkit2gtk / gtk3，
+# 同样无法从 Windows 交叉。因此这两个平台的桌面端都交给 CI 的 runner 出。
+# 本仓库是公开仓库，标准 GitHub-hosted runner（含 macOS）对公开仓库免费且
+# 不计分钟数 —— macOS runner 是私有仓库里最贵的一档，公开仓库没有这个问题。
+#
+# ── 六个 job 的分工（名字相近，别看混）────────────────────────
+#   macos           → macOS 桌面端 dmg           → artifact: macos-universal
+#   windows         → Windows 桌面端 NSIS exe    → artifact: windows-nsis
+#   linux-desktop   → Linux 桌面端 deb+AppImage  → artifact: linux-desktop
+#   linux-server    → Linux **服务端**包（无 GUI）→ artifact: linux-server-{amd64,arm64}
+#   windows-server  → Windows **服务端**包（无 GUI）→ artifact: windows-server-amd64
+#   android         → Android APK（Capacitor）   → artifact: android-apk
+#   ios             → iOS IPA（Capacitor）       → artifact: ios-ipa
+#
+# 前三者是「桌面端安装包」（给用户装在自己机器上），中间两者是**服务器形态**：
+# 无图形界面、命令行安装、注册成系统服务（Linux systemd / Windows SCM）。
+# linux-server 的产物同时还是容器内一键更新的载荷。
+#
+# android / ios 是**手机端**：Capacitor 把 `desktop-tauri/mobile` 的界面打进
+# 安装包，与 PWA 形态共用同一份 UI 代码。它的 Web 形态（`ui/m/**`）不需要在
+# 这里构建 —— 那份产物**入库**，由 frontend-artifacts.yml 校验可复现，桌面端 /
+# 服务端 / Docker 的 `ui/` 静态目录直接带上它，发版流程一行都不用改。这里只补
+# 「需要签名密钥、只能在打包机上出」的那一半。
+#
+# ── 触发方式 ──────────────────────────────────────────────────
+#   本文件只做派发，实际构建见本文件下半部分「2026-10：编译搬到独立构建账号」。
+#   镜像构建（原 docker.yml）也已整体搬到构建仓库，源码仓库不再保留那份。
+#
+# ── action 版本为什么都钉在大版本 v7（本次升级）─────────────────
+# 原先用 checkout@v4 / setup-node@v4 / upload-artifact@v4，三者都跑在
+# Node.js 20 上，而 GitHub 已宣布 Node 20 弃用、runner 会强制它们跑在
+# Node 24（构建日志里那条 deprecation 注解就是这么来的）。
+# 各版本对 Node runtime 的支持（查各 action 的 action.yml 得到）：
+#   checkout       v4=node20  v5+=node24
+#   setup-node     v4=node20  v5+=node24
+#   upload-artifact v4=node20 v5=node20  v6+=node24
+# 所以三个都升到 v7 —— 直接取最新大版本，不停在 v5/v6 那种「刚够用但已落后」
+# 的中间版本上。v7 的 breaking change 与本文件的用法都不冲突：
+#   · checkout v6 把凭据挪到单独文件、v7 阻止 workflow_run 检出 fork PR
+#     —— 本工作流是 workflow_dispatch，不涉及；
+#   · setup-node v5 起会对有 packageManager 字段的项目**自动开启缓存**，
+#     本项目两个 package.json 都没有那个字段，行为不变（见下面显式 cache 说明）；
+#   · upload-artifact v7 新增的 archive:false 直传与 ESM 化都是增量能力，
+#     name + path 的用法逐字不变。
+#
+# ── npm 缓存（本次一并加上）───────────────────────────────────
+# 原先只缓存了 Rust 依赖，npm 每次都全量下载。setup-node 的 cache 选项
+# 需要显式指定 cache-dependency-path：本项目的依赖装在 desktop-tauri/ 下，
+# 而根 package.json 没有依赖，指错路径会让缓存 key 永远命中不了
+# （甚至因为找不到 lock 文件而直接报错）。
+#
+# ── 签名 ──────────────────────────────────────────────────────
+# 桌面端默认**不签名**（ad-hoc）。macOS 上未签名的应用 Gatekeeper 会拦下，
+# 用户需要在「系统设置 → 隐私与安全性」里手动放行一次。要消除这一步需要
+# Apple Developer 账号（$99/年）做 Developer ID 签名 + 公证，届时在仓库里配
+# APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY /
+# APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID 这几个 secret 即可，
+# tauri-action 与 tauri CLI 会自动完成签名与公证。
+#
+# APK 则**必须签名**（Android 不接受未签名的 release 包），密钥与密码不入库
+# （见 .gitignore），由下面 android job 从四个 secret 还原：
+#   ANDROID_KEYSTORE_BASE64   agent2api-release.jks 的 base64（单行）
+#   ANDROID_KEYSTORE_PASSWORD keystore.properties 的 storePassword
+#   ANDROID_KEY_ALIAS         keyAlias（当前是 agent2api）
+#   ANDROID_KEY_PASSWORD      keyPassword
+# ⚠️ 这四样换不得：换了密钥签名就不一致，已装的用户无法覆盖升级。原密钥
+# 除了打包机之外要另存一份，secret 只是它的第二份副本。
+# 生成 base64：base64 -w0 agent2api-release.jks（Windows 用
+# [Convert]::ToBase64String([IO.File]::ReadAllBytes('agent2api-release.jks'))）
+
+
+# ── 2026-10：编译搬到独立构建账号 ─────────────────────────────
+# 上面的 job 分工与签名说明仍然有效 —— 它们描述的是**构建仓库**里那份
+# 工作流（`Agent2Builder/agent2api-releases`）。本文件现在只做转发：
+#
+#   · 本仓库推 `v*` tag → 发一条 `repository_dispatch` → 构建仓库开跑
+#   · 七个平台 job（三套工具链 + Android/iOS 签名）不再占用本仓库的 Actions
+#
+# ── 为什么搬 ────────────────────────────────────────────────
+# 七个 job 里有两个 macOS、两个 Linux 容器、一个 Windows，还有 Android 与
+# iOS 的签名链路 —— 跑一次是实打实的重负载，而 tag 是发版动作、频率不可控。
+# 把「打一个版本标签」变成「自动兑换七台虚拟机」，最坏会被判定为 Actions
+# 滥用。构建仓库挂在专用账号下，额度与负载都落在那边。
+#
+# ── 密钥归属 ────────────────────────────────────────────────
+# 所有签名材料（Apple / Android / iOS）只存在**构建仓库**的 secrets 里，
+# 本仓库没有、也不需要。本仓库唯一要配的是 `BUILDER_DISPATCH_TOKEN` ——
+# 一个对构建仓库有 contents write 权限的 token，只用来派发事件。
+#
+# ── 产物去哪 ────────────────────────────────────────────────
+# 各平台安装包仍是 workflow artifact，落在**构建仓库**的 run 页面上。
+# 本仓库的 `scripts/release.sh` 挂 Release 的流程不变：从构建仓库的
+# artifact（或 Releases）取包，再挂到本仓库的 Release。
+
+# ── 2026-10：编译搬到独立构建账号 ─────────────────────────────
+# 上面的 job 分工与签名说明描述的是**构建仓库**里那份工作流
+# （`Agent2Builder/agent2api-releases` 的 `release.yml`）。本文件现在只做转发：
+#
+#   · 本仓库推 `v*` tag → 发一条 `repository_dispatch` → 构建仓库开跑
+#   · 七个平台 job（三套工具链 + Android/iOS 签名）不再占用本仓库的 Actions
+#
+# ── 为什么搬 ────────────────────────────────────────────────
+# 七个 job 里有两个 macOS、两个 Linux、一个 Windows，还有 Android 与 iOS
+# 的签名链路 —— 跑一次是实打实的重负载，而 tag 是发版动作、频率不可控。
+# 把「打一个版本标签」变成「自动兑换七台虚拟机」，最坏会被判定为 Actions
+# 滥用。构建仓库挂在专用账号下，额度与负载都落在那边。
+#
+# ── 密钥归属 ────────────────────────────────────────────────
+# 所有签名材料（插件包 / Android / iOS）与 Docker Hub 凭据只存在**构建
+# 仓库**的 secrets 里，本仓库没有、也不需要。本仓库唯一要配的是
+# `BUILDER_DISPATCH_TOKEN` —— 一个对构建仓库有 contents write 权限的 token，
+# 只用来派发事件。
+#
+# ── 产物去哪 ────────────────────────────────────────────────
+# 各平台安装包是**构建仓库** run 页面上的 workflow artifact；Release 由
+# `scripts/release.sh` 挂到构建仓库（脚本里的 `BUILD_REPO` 已指向那里）。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '要发布的版本号（不带 v 前缀；对应的 tag 必须已存在）'
+        required: true
+        type: string
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 解析版本号与 ref
+        id: meta
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            REF="$GITHUB_REF_NAME"
+            VERSION="${REF#v}"
+          else
+            VERSION="$INPUT_VERSION"
+            REF="v$VERSION"
+          fi
+          # 换行或引号会往下面的 JSON 里注入字段
+          [[ "$VERSION" =~ ^[0-9][0-9A-Za-z.+-]*$ ]] || { echo "版本号不合法: $VERSION" >&2; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "派发构建：版本 $VERSION（ref: $REF）"
+
+      - name: 派发到构建仓库
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.BUILDER_DISPATCH_TOKEN }}
+          repository: Agent2Builder/agent2api-releases
+          event-type: release
+          client-payload: '{"ref": "${{ steps.meta.outputs.ref }}", "version": "${{ steps.meta.outputs.version }}"}'
+
+      - name: 提示去哪看进度
+        run: echo "构建在 https://github.com/Agent2Builder/agent2api-releases/actions"
