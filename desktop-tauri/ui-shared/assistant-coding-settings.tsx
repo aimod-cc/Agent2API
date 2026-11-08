@@ -35,7 +35,7 @@ export function CodingSettings({ open, onOpenChange, config, transport, t, onSav
     finally { saving.current = false; setBusy(false) }
   }
   return <Dialog open={open} onOpenChange={value => { if (!busy) onOpenChange(value) }}>
-    <DialogContent className='max-w-xl'>
+    <DialogContent className='w-[min(760px,calc(100vw-48px))]'>
       <DialogHeader><DialogTitle>{t('本机 Codex 设置')}</DialogTitle><DialogDescription>{t('由 Agent2API 直接启动本机官方 Codex，无需 HAPI 或其他守护程序。')}</DialogDescription></DialogHeader>
       <DialogBody className='gap-4'>
         <Field orientation='horizontal'><FieldLabel htmlFor='coding-enabled'>{t('启用本机 Codex')}</FieldLabel><Switch id='coding-enabled' checked={enabled} onCheckedChange={setEnabled} disabled={busy} /></Field>
