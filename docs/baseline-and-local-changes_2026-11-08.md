@@ -121,6 +121,8 @@
 
 ## 可 PR 上游清单（2026-11-08 盘点）
 
+2026-11-08 晚已整理为上游 PR：A2API [aimod-cc/Agent2API#531](https://github.com/aimod-cc/Agent2API/pull/531)（base beta，fork 特有的工作流调整、本地构建脚本与改动记录文档已剥离）、A2P [ProvidersPlugin/Agent2Providers#42](https://github.com/ProvidersPlugin/Agent2Providers/pull/42)（base beta，dev-build 工作流与改动记录文档已剥离），待上游合并。
+
 已通过 PR 合入上游的改动（closed = 已在上游收口，无需重复提交）：
 
 - `#496` 长时间运行的内存与数据库开销问题（11-04 performance 谱系与 `b042ddfd`）
