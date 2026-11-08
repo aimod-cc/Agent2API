@@ -75,12 +75,19 @@ function CheckinPage(): React.ReactElement {
     if (!store.recordsLoaded) void loadRecords()
   }, [])
 
-  // 自动签到执行中短轮询：那是唯一「后台会自己变」的场景（与旧实现同一取舍）
+  // 自动签到执行中短轮询：那是唯一「后台会自己变」的场景（与旧实现同一取舍）。
+  // 执行期间记录页跟着滚动更新；执行收尾（running 翻转）再补最后一拍，
+  // 否则最后一批结果可能落在两次轮询之间，记录停在差几条的状态。
   React.useEffect(() => {
+    let running = store.center?.auto?.running === true
     const timer = window.setInterval(() => {
       const page = (window as unknown as { wbApp?: { currentPage?: string } }).wbApp?.currentPage
       if (document.hidden || page !== 'checkin') return
-      if (store.center?.auto?.running || activeTab === 'schedule' && store.center?.auto?.enabled) void loadCenter()
+      const now = store.center?.auto?.running === true
+      if (now || activeTab === 'schedule' && store.center?.auto?.enabled) void loadCenter()
+      if (now && activeTab === 'records') void loadRecords()
+      if (running && !now && activeTab === 'records') void loadRecords()
+      running = now
     }, 3000)
     return () => window.clearInterval(timer)
   }, [])
@@ -89,6 +96,8 @@ function CheckinPage(): React.ReactElement {
     const value = (TABS as readonly string[]).includes(next) ? next as Tab : 'center'
     activeTab = value
     setTab(value)
+    // 记录页每次进入都重拉：签到刚在别的标签页执行过的话，手里的数据已经旧了
+    if (value === 'records') void loadRecords()
   }
 
   // 总览卡点「累计签到记录」要切到记录页。走自定义事件而不是把 switchTab
