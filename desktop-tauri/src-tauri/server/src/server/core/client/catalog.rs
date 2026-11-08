@@ -76,8 +76,10 @@ pub struct ProviderRule {
     pub client_id: String,
 }
 
+/// 不加 deny_unknown_fields：配置经云同步在混合版本部署间流动，读到其他
+/// 版本新增的未知字段时按忽略处理，不让整个识别配置解析失败。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct ClientSettings {
     pub accept_declarations: bool,
     pub clients: Vec<CustomClient>,
@@ -206,5 +208,20 @@ mod tests {
         // 两者都没配置：保留请求头识别出的真实客户端
         let empty = ClientSettings::default();
         assert_eq!(attribution_client("codex", "zcode", &empty), "codex");
+    }
+
+    #[test]
+    fn deserialize_tolerates_unknown_fields() {
+        // 模拟云同步场景：配置在混合版本部署间流动，字段集合不一致时按未知字段忽略
+        let value = serde_json::json!({
+            "acceptDeclarations": true,
+            "clients": [],
+            "rules": [],
+            "futureField": "ignored"
+        });
+        let settings: ClientSettings = serde_json::from_value(value).expect("未知字段必须被忽略");
+        assert!(settings.accept_declarations);
+        assert!(settings.provider_rules.is_empty());
+        assert!(settings.default_client_id.is_empty());
     }
 }

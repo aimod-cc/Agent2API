@@ -166,7 +166,8 @@ fn validate_available(target: &VisionTarget) -> Result<(), GatewayError> {
     if capability::images_for_channel(&target.provider, &item) != Some(true) {
         return Err(GatewayError::bad_request("请选择已确认支持图片的视觉模型；能力未声明时请先在模型管理中确认"));
     }
-    if !catalog::forwarding_providers(&target.model).contains(&target.provider) {
+    // 目标存的是上游真实 id，可达性要承认「启用别名指向它」的路径
+    if !catalog::provider_serves_model(&target.provider, &target.model) {
         return Err(GatewayError::bad_request("所选视觉模型尚未启用，请先在模型管理中启用"));
     }
     Ok(())

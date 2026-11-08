@@ -22,7 +22,7 @@ use crate::server::core::providers::{kind_from_id, kind_id, ProviderKind, PROVID
 pub(crate) use routing::{builtin_target, entry_id_in_manifest};
 pub use routing::{
     default_model_catalog, default_model_usable, forwarding_providers, model_blocked_everywhere,
-    providers_for_model, wire_target_for_provider, WireTarget,
+    provider_serves_model, providers_for_model, wire_target_for_provider, WireTarget,
 };
 pub use view::{
     advertised_manifest_contains, advertised_model_ids, has_available_providers, manage_view,
