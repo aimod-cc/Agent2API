@@ -10,7 +10,8 @@
 //!   · `/api`、`/v1`、`/auth`、`/health` 前缀不进静态服务 —— 静态 fallback
 //!     只接「未注册路由」，但显式挡一道，避免将来某条管理路由改名后
 //!     意外落进静态分支；
-//!   · 注入的桥接脚本只在 index.html 上发生，其它原样透出。
+//!   · 注入只在 HTML 上发生，其它原样透出：`index.html` 拿桥接脚本 +
+//!     子路径前缀，`login.html` / `m.html` 拿子路径前缀（见 `panel_base_script`）。
 //!
 //! ── 缓存 ────────────────────────────────────────────────────
 //! 文件带 ETag（程序版本 + 修改时间 + 大小），`Cache-Control` 为 `no-cache`：
@@ -30,7 +31,8 @@ use crate::server::errors;
 /// 可以缓存，但每次使用前都要回源校验（详见模块头的「缓存」段）。
 const CACHE_CONTROL: &str = "no-cache";
 /// 同一路径的正文随客户端是否接受 gzip 而不同，缓存必须按这个头分桶。
-const VARY: &str = "Accept-Encoding";
+/// 注入的前缀也一样：同一份 `login.html` 在不同挂载点下正文不同。
+const VARY: &str = "Accept-Encoding, X-Forwarded-Prefix";
 
 /// 判定路径是否属于「接口保留前缀」：静态服务绝不碰它们，
 /// 未注册的接口路径继续走原来的 404 文案（Node 版行为）。
@@ -58,7 +60,10 @@ pub async fn serve(request: Request<Body>, ui_dir: PathBuf) -> AxumResponse {
     let Some(file_path) = resolve_file(&ui_dir, &path) else {
         return not_found(request).await;
     };
-    read_response(&file_path, if_none_match.as_deref()).await
+    // 面板可能被挂在宿主域名的子路径下（反代转发 `X-Forwarded-Prefix`）。
+    // 页面里那些以 `/` 开头的地址都得跟着挪，否则登录页拉的是宿主自己的接口。
+    let panel_base = crate::server::http::forwarded_prefix(&request);
+    read_response(&file_path, if_none_match.as_deref(), panel_base.as_deref()).await
 }
 
 /// 把 URL 路径解析到 `ui/` 内的具体文件（`None` = 不存在 / 非法）。
@@ -110,7 +115,11 @@ fn resolve_file(ui_dir: &PathBuf, url_path: &str) -> Option<PathBuf> {
 ///
 /// ETag 命中时直接回 304，不读文件正文 —— 这是「第二次打开面板不再重下
 /// 几 MB 资源」的关键路径。
-async fn read_response(file_path: &PathBuf, if_none_match: Option<&str>) -> AxumResponse {
+async fn read_response(
+    file_path: &PathBuf,
+    if_none_match: Option<&str>,
+    panel_base: Option<&str>,
+) -> AxumResponse {
     let metadata = match tokio::fs::metadata(file_path).await {
         Ok(metadata) => metadata,
         Err(_) => return errors::not_found_response("GET", "static"),
@@ -131,12 +140,20 @@ async fn read_response(file_path: &PathBuf, if_none_match: Option<&str>) -> Axum
             return errors::not_found_response("GET", "static");
         }
     };
+    let is_html = file_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("html"));
     let is_index = file_path
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name == "index.html");
     let body = if is_index {
-        inject_web_shim(&bytes)
+        inject_web_shim(&bytes, panel_base)
+    } else if is_html {
+        // 登录页与手机端入口不是 index.html，但它们同样会打 `/api/*`、跳 `/`，
+        // 子路径部署下必须同样知道自己的前缀，否则登录页拉的是宿主的接口。
+        inject_panel_base(&bytes, panel_base)
     } else {
         bytes
     };
@@ -188,16 +205,51 @@ fn etag_matches(header: &str, etag: &str) -> bool {
 /// 把网页端桥接注入 index.html：`<head>` 开标签后插一段内联脚本，
 /// 使 `window.workbuddyDesktop` 在所有界面脚本之前就绪
 /// （与桌面壳 bridge.rs 的「页面脚本执行前注入」同一时序保证）。
-fn inject_web_shim(html: &[u8]) -> Vec<u8> {
+fn inject_web_shim(html: &[u8], panel_base: Option<&str>) -> Vec<u8> {
+    let shim = format!("<script>{}</script>", crate::web_shim::shim_js());
+    inject_head(html, &format!("{}{}", panel_base_script(panel_base), shim))
+}
+
+/// 非 index 的页面（`login.html`、`m.html`）只需要知道自己的挂载前缀。
+fn inject_panel_base(html: &[u8], panel_base: Option<&str>) -> Vec<u8> {
+    inject_head(html, &panel_base_script(panel_base))
+}
+
+/// 把一段标签插到 `<head>` 开标签之后；没有 `<head>`（结构被改坏）就追加到末尾兜底。
+fn inject_head(html: &[u8], snippet: &str) -> Vec<u8> {
+    if snippet.is_empty() {
+        return html.to_vec();
+    }
     let Ok(text) = std::str::from_utf8(html) else {
         return html.to_vec();
     };
-    let shim = format!("<script>{}</script>", crate::web_shim::shim_js());
-    match text.replacen("<head>", &format!("<head>{shim}"), 1) {
+    match text.replacen("<head>", &format!("<head>{snippet}"), 1) {
         replaced if replaced != text => replaced.into_bytes(),
-        // 没有 <head>（结构被改坏）也别让面板整页失效：追加到末尾兜底
-        _ => format!("{text}<script>{}</script>", crate::web_shim::shim_js()).into_bytes(),
+        _ => format!("{text}{snippet}").into_bytes(),
     }
+}
+
+/// 子路径部署时，把挂载前缀告诉页面里的脚本。
+///
+/// 反代只把 `/panel/*` 转给本服务时，页面里写死的 `/api/panel/login`、`/?from=login`
+/// 会打到宿主自己的路径上：用户能看到登录页，却永远登不进去。这里把前缀注入进去，
+/// 并顺手把 `fetch` / `XMLHttpRequest` / `EventSource` 以 `/` 开头的地址补上前缀
+/// （`app.js`、`m/mobile.js` 是产物，不必逐个改）。
+///
+/// 没有前缀（直连、docker、反代到根路径）时**什么都不插**，页面字节与原来一致。
+/// `<a href>` 与 `location.href =` 这类顶层导航拦不住，由服务端 302 的 `Location`
+/// 前缀（见 `server::http::panel_boot_redirect`）和页面自己读
+/// `window.__A2A_PANEL_BASE__` 兜底。
+fn panel_base_script(panel_base: Option<&str>) -> String {
+    let Some(base) = panel_base else {
+        return String::new();
+    };
+    if base.is_empty() {
+        return String::new();
+    }
+    format!(
+        r#"<script>window.__A2A_PANEL_BASE__={base:?};(function(){{var P=window.__A2A_PANEL_BASE__;if(!P)return;function fix(u){{if(typeof u!=="string"||u.charAt(0)!=="/"||u.charAt(1)==="/")return u;if(u===P||u.indexOf(P+"/")===0)return u;return P+u;}}var f=window.fetch;if(f){{window.fetch=function(i,o){{if(typeof i==="string")i=fix(i);else if(i&&i.url){{var u=fix(i.url);if(u!==i.url)i=new Request(u,i);}}return f.call(this,i,o);}};}}var o=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){{var a=Array.prototype.slice.call(arguments);a[1]=fix(u);return o.apply(this,a);}};var E=window.EventSource;if(E){{window.EventSource=function(u,c){{return new E(fix(u),c);}};}}}})();</script>"#
+    )
 }
 
 /// 扩展名 → content-type（界面用到的固定集合，其余按二进制流处理）

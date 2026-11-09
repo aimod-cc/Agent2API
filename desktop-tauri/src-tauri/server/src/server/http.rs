@@ -1185,7 +1185,32 @@ fn panel_boot_redirect(request: &Request) -> Option<Response> {
     // 手机端带上 `next=/m`，登录页据此回到手机面板而不是桌面面板
     // （白名单校验在 login.html 的 postLoginTarget 里）。
     let location = if is_mobile { "/login?next=%2Fm" } else { "/login" };
+    // 子路径反代（`example.com/panel/*` → 本服务根）时，`/login` 是**宿主域名下**的
+    // 绝对路径，浏览器会被送到宿主自己的 `/login` —— 那里没有这张面板，在 iframe 或
+    // 嵌入式控制台里表现为「点去登录毫无反应」（302 目标落在宿主身上，宿主再兜回自己的
+    // 首页）。反代如果声明了 `X-Forwarded-Prefix`，把前缀补上即可；
+    // 没声明就维持原来的绝对根路径，直连部署的行为一点不变。
+    let location = match forwarded_prefix(request) {
+        Some(prefix) => format!("{prefix}{location}"),
+        None => location.to_string(),
+    };
     Some((StatusCode::FOUND, [(header::LOCATION, location)]).into_response())
+}
+
+/// 取反代声明的挂载前缀（标准请求头 `X-Forwarded-Prefix`），只接受干净的路径段。
+///
+/// 不拿 `Referer`、`Host` 这类值去猜：凡是要拼进 `Location` 的东西必须由反代自己声明，
+/// 否则就凭空多出一个开放跳转（把头里的值当成跳转目标）。
+pub(crate) fn forwarded_prefix(request: &Request) -> Option<String> {
+    let prefix = request.headers().get("x-forwarded-prefix")?.to_str().ok()?;
+    let prefix = prefix.trim().trim_end_matches('/');
+    if prefix.is_empty() || !prefix.starts_with('/') {
+        return None;
+    }
+    if prefix.contains("//") || prefix.contains("..") || prefix.contains('?') || prefix.contains('#') {
+        return None;
+    }
+    Some(prefix.to_string())
 }
 
 /// 写入三个 CORS 头 + 一个 Private Network Access 许可（值固定，不会失败；

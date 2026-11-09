@@ -198,10 +198,13 @@
       function postLoginTarget() {
         var next = '';
         try { next = new URLSearchParams(window.location.search).get('next') || ''; } catch (e) { /* 老浏览器 */ }
-        if (next === '/m') return '/m?from=login';
+        // 面板被反代挂在子路径下（`/panel/*` → 本服务根）时，服务端注入的
+        // `__A2A_PANEL_BASE__` 就是那个前缀；直连部署它是空串，行为不变。
+        var base = window.__A2A_PANEL_BASE__ || '';
+        if (next === '/m') return base + '/m?from=login';
         // 桌面壳内：回到应用自己的界面（tauri://localhost/index.html）
         if (desktop) return '/index.html';
-        return '/?from=login';
+        return base + '/?from=login';
       }
 
       // 已登录探测：桌面形态问壳（它会用存好的令牌真的打一次 /api/session，

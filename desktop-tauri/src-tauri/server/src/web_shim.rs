@@ -721,7 +721,7 @@ pub fn shim_js() -> &'static str {
         // 续期失败 = 会话链真的没了：清掉本地令牌再跳登录页，
         // 否则下次进来还带着死 token，永远是同一轮失败。
         clearPanelAuth();
-        window.location.href = '/login';
+        window.location.href = (window.__A2A_PANEL_BASE__ || '') + '/login';
         // 页面即将整页跳转，返回一个挂起的承诺占位
         return new Promise(function () {});
       }
@@ -1210,7 +1210,7 @@ pub fn shim_js() -> &'static str {
       var refreshed = await tryRefresh();
       if (refreshed) return fetchAuthed(path, buildInit, true);
       clearPanelAuth();
-      window.location.href = '/login';
+      window.location.href = (window.__A2A_PANEL_BASE__ || '') + '/login';
       return new Promise(function () {});
     }
     var key = await askForKey();
@@ -2151,7 +2151,7 @@ pub fn shim_js() -> &'static str {
       if (refresh) {
         if (!(await tryRefresh())) {
           clearPanelAuth();
-          window.location.href = '/login';
+          window.location.href = (window.__A2A_PANEL_BASE__ || '') + '/login';
           return new Promise(function () {});
         }
       } else {
