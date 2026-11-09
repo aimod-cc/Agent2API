@@ -479,5 +479,16 @@
   "：": ":",
   "：这里的模型不会出现在其他家，别名也只在这一家内生效。改名称 / 协议 / Base URL 在账号页该家账号的「设置」→ 提供商一栏；整家不要了，鼠标移到左栏这家上点 × 删除（连同名下账号）。": ": os modelos daqui não aparecem em outros provedores e os aliases só valem dentro deste. Para alterar nome / protocolo / Base URL, use “Configurações” → campo do provedor nas contas desta família, na página de contas; se não quiser mais o provedor inteiro, passe o mouse sobre ele na barra lateral esquerda e clique em × para excluir (junto com as contas dele).",
   "；其中 {keys} 由 models.dev 补齐": "; {keys} preenchido(s) pelo models.dev",
-  "；首个失败：{error}": "; primeira falha: {error}"
+  "；首个失败：{error}": "; primeira falha: {error}",
+  "搜索 models.dev…": "Pesquisando no models.dev…",
+  "没有找到匹配的 models.dev 模型": "Nenhum modelo correspondente foi encontrado no models.dev",
+  "搜索失败：{message}": "Falha na pesquisa: {message}",
+  "models.dev 身份": "Identidade no models.dev",
+  "搜索模型名称或 canonical ID": "Pesquisar nome do modelo ou canonical ID",
+  "搜索": "Pesquisar",
+  "已选择的 canonical ID（留空 = 未绑定）": "Canonical ID selecionado (deixe em branco para não vincular)",
+  "用于名称对齐的上游展示名": "Nome de exibição upstream usado para alinhar pelo nome",
+  "允许同一提供商的新模型 ID 按名称复用此映射": "Permitir que novos IDs do mesmo provedor reutilizem este mapeamento pelo nome",
+  "名称只在当前提供商内参与唯一候选匹配；精确 ID 绑定始终优先，出现同名冲突时不会自动补齐。": "Os nomes são comparados somente no provedor atual e apenas quando há um candidato único. Vínculos exatos por ID sempre têm prioridade; conflitos de mesmo nome não são preenchidos automaticamente.",
+  "✅ 已保存 {id} 的能力位与 models.dev 身份（{provider}）": "✅ Capacidades e identidade no models.dev salvas para {id} ({provider})"
 }

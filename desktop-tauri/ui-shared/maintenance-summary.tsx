@@ -1,5 +1,12 @@
-import { Button, Card, Spinner, Table, TableBody, TableCell, TableRow } from '@ui'
+import * as React from 'react'
+import {
+  Button, Card, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Spinner,
+  Table, TableBody, TableCell, TableRow, cn,
+} from '@ui'
 import { t } from '../ui-kit/src/i18n'
+import {
+  buildProxyPick, EMPTY_PROXY_SELECTION, fetchProxySelection, saveProxy, type ProxySelection,
+} from '../ui-islands/src/islands/update-shared'
 import { RunCounts, RunStatus } from './maintenance-shared'
 import { duration, maintenanceLabel, sourceLabel, stamp } from './maintenance-format'
 import type { MaintenanceRun, MaintenanceTask, MaintenanceTaskId } from './maintenance-types'
@@ -40,6 +47,38 @@ export function MaintenanceSummary({ tasks, latest, busy, compact, onRun, onShow
   onRun(id: MaintenanceTaskId): void
   onShowLatest(id: MaintenanceTaskId): void
 }) {
+  const [proxySelection, setProxySelection] = React.useState<ProxySelection>(EMPTY_PROXY_SELECTION)
+  const [proxyBusy, setProxyBusy] = React.useState(false)
+  const proxyPick = buildProxyPick(proxySelection)
+  React.useEffect(() => {
+    let alive = true
+    void fetchProxySelection().then(selection => { if (alive) setProxySelection(selection) })
+    return () => { alive = false }
+  }, [])
+  const chooseProxy = async (value: string) => {
+    if (proxyBusy) return
+    setProxyBusy(true)
+    try {
+      const result = await saveProxy(value)
+      if (result) setProxySelection(previous => ({ ...previous, proxyChoice: result.choice, proxyLoaded: true }))
+      const next = await fetchProxySelection()
+      setProxySelection(next)
+    } finally {
+      setProxyBusy(false)
+    }
+  }
+  const proxyPicker = (task: MaintenanceTask) => task.id !== 'modelRefresh' ? <span>—</span> : (
+    <Select value={proxyPick.current} disabled={proxyBusy} onValueChange={value => void chooseProxy(String(value))}>
+      <SelectTrigger className={cn('min-w-[140px]', proxyPick.broken && 'border-destructive-bd')}
+        title={proxyPick.title || t('更新出网代理')}
+        aria-label={t('更新出网代理')}>
+        <SelectValue className='min-w-0 truncate'>{proxyPick.selected?.label || t('直连')}</SelectValue>
+      </SelectTrigger>
+      <SelectContent>
+        {proxyPick.items.map(item => <SelectItem key={item.value} value={item.value} disabled={item.disabled}>{item.label}</SelectItem>)}
+      </SelectContent>
+    </Select>
+  )
   const rows: TaskRow[] = tasks.map(task => {
     const run = latest[task.id]
     const running = task.running || busy === task.id
@@ -65,6 +104,7 @@ export function MaintenanceSummary({ tasks, latest, busy, compact, onRun, onShow
         <p className='maintenance-summary-line'>{lastRun(row)}</p>
         {row.run ? <RunCounts run={row.run} /> : null}
         <p className='maintenance-summary-line'>{schedule(row)}{cooldown(row)}</p>
+        {row.task.id === 'modelRefresh' ? <div className='maintenance-summary-line'>{proxyPicker(row.task)}</div> : null}
         <div className='maintenance-summary-block-actions'>
           <Button size='sm' variant='ghost' disabled={!row.run} onClick={() => onShowLatest(row.task.id)}>{t('查看结果')}</Button>
           <Button size='sm' disabled={Boolean(busy) || row.task.running} onClick={() => onRun(row.task.id)}>
@@ -83,6 +123,7 @@ export function MaintenanceSummary({ tasks, latest, busy, compact, onRun, onShow
           <TableCell className='maintenance-summary-line'>{lastRun(row)}</TableCell>
           <TableCell>{row.run ? <RunCounts run={row.run} /> : null}</TableCell>
           <TableCell className='maintenance-summary-line'>{schedule(row)}{cooldown(row)}</TableCell>
+          <TableCell>{proxyPicker(row.task)}</TableCell>
           <TableCell className='maintenance-summary-actions'>
             <Button size='sm' variant='ghost' disabled={!row.run} onClick={() => onShowLatest(row.task.id)}>{t('查看结果')}</Button>
             <Button size='sm' disabled={Boolean(busy) || row.task.running} onClick={() => onRun(row.task.id)}>

@@ -105,16 +105,23 @@ function levelsOf(entry) {
 async function main() {
   const [api, models] = await Promise.all([getJson(API_URL), getJson(MODELS_URL)])
   const index = new Map()
+  const canonicalKeys = new Map()
+  const canonicalToKey = new Map()
   const collisions = []
 
   // ── 第一遍：canonical 条目的能力位与上下限 ──────────────────
   for (const [canonicalId, entry] of Object.entries(models ?? {})) {
     if (!isChatModel(entry)) continue
-    const key = keyOf(canonicalId)
-    if (!key) continue
+    const baseKey = keyOf(canonicalId)
+    if (!baseKey) continue
+    const collision = canonicalKeys.get(baseKey) ?? 0
+    canonicalKeys.set(baseKey, collision + 1)
+    const key = collision === 0 ? baseKey : `${baseKey}~${collision + 1}`
+    canonicalToKey.set(canonicalId.toLowerCase(), key)
     const input = modalitiesOf(entry)
     index.set(key, {
       canonical: canonicalId,
+      name: typeof entry.name === 'string' && entry.name.trim() ? entry.name.trim() : undefined,
       reasoning: entry.reasoning === true,
       toolCall: entry.tool_call === true,
       images: input.includes('image'),
@@ -133,23 +140,23 @@ async function main() {
       const canonical = typeof entry?.canonical_model_id === 'string' && entry.canonical_model_id
         ? entry.canonical_model_id
         : entry?.id
-      const key = keyOf(canonical)
-      if (!key) continue
+      const pickKey = String(canonical ?? '').toLowerCase()
+      if (!pickKey) continue
       const levels = levelsOf(entry)
       if (!levels) continue
       const isLab = labOf(canonical) === providerId
-      const previous = picked.get(key)
+      const previous = picked.get(pickKey)
       // 优先实验室自述的那条；两条都不是 lab 时按 provider 名序取第一条（稳定）。
       // lab 只声明 toggle、别的家声明了 effort 时**取那家的** —— 我们转发的是这些
       // 中转通道，它们能收命名档位时就有档位可绑（网关侧还会按家归一/回退）。
       if (previous?.isLab) continue
       if (previous && !isLab) continue
-      if (previous && isLab && !previous.isLab) collisions.push(key)
-      picked.set(key, { ...levels, isLab, providerId })
+      if (previous && isLab && !previous.isLab) collisions.push(pickKey)
+      picked.set(pickKey, { ...levels, isLab, providerId, canonical })
     }
   }
-  for (const [key, value] of picked) {
-    const record = index.get(key)
+  for (const value of picked.values()) {
+    const record = index.get(canonicalToKey.get(String(value.canonical).toLowerCase()))
     if (!record) continue // 档位有、canonical 条目没有（生图/下架等）：不收录
     record.levels = value.levels
   }
@@ -172,6 +179,7 @@ async function main() {
   console.log(`  条目 ${index.size}（canonical 收录 ${canonicalCount}）`)
   console.log(`  带命名档位 ${withLevels}`)
   console.log(`  lab 覆盖 provider 条目 ${collisions.length} 次（同一模型多家给档位）`)
+  console.log(`  canonical 归一化冲突 ${[...canonicalKeys.values()].filter((count) => count > 1).length} 个键`)
   console.log(`  体积 ${(bytes / 1024).toFixed(1)} KB`)
 }
 

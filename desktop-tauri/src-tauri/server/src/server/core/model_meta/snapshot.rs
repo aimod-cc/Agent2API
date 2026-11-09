@@ -53,6 +53,8 @@ pub const KV_KEY: &str = "modelsDevCatalog";
 pub struct Record {
     /// canonical id（`zhipuai/glm-5.3`）—— 日志与排障用，网关不据此路由
     pub canonical: String,
+    /// models.dev 展示名，只用于名称对齐候选，不参与路由
+    pub name: Option<String>,
     pub reasoning: Option<bool>,
     pub tool_call: Option<bool>,
     pub images: Option<bool>,
@@ -66,7 +68,10 @@ pub struct Record {
 
 /// 一份索引 + 它的来历。
 pub struct Snapshot {
-    models: HashMap<String, Record>,
+    models: Vec<Record>,
+    by_canonical: HashMap<String, usize>,
+    by_key: HashMap<String, Vec<usize>>,
+    by_name: HashMap<String, Vec<usize>>,
     /// 这份数据的生成时刻（models.dev 侧没有版本号，用抓取时刻代替）
     generated_at: i64,
     /// `builtin` / `cache` / `network`（管理页与日志据此说明数据新旧）
@@ -75,13 +80,99 @@ pub struct Snapshot {
 
 impl Snapshot {
     /// 组装一份索引（`refresh` 压缩完两份官方 JSON 后调用；`source` 传 `network`）。
-    pub fn new(models: HashMap<String, Record>, generated_at: i64, source: &'static str) -> Self {
-        Self { models, generated_at, source }
+    pub fn new(models: Vec<Record>, generated_at: i64, source: &'static str) -> Self {
+        let mut by_canonical = HashMap::with_capacity(models.len());
+        let mut by_key: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
+        for (index, record) in models.iter().enumerate() {
+            by_canonical
+                .entry(record.canonical.trim().to_ascii_lowercase())
+                .or_insert(index);
+            by_key
+                .entry(key_of(&record.canonical))
+                .or_default()
+                .push(index);
+            if let Some(name) = record.name.as_deref().and_then(normalize_name) {
+                by_name.entry(name).or_default().push(index);
+            }
+        }
+        Self {
+            models,
+            by_canonical,
+            by_key,
+            by_name,
+            generated_at,
+            source,
+        }
     }
 
     /// 收录的模型条数（刷新结果里的 `count`）。
     pub fn len(&self) -> usize {
         self.models.len()
+    }
+
+    /// 按 canonical 标识精确取一条记录。
+    pub fn by_canonical(&self, canonical: &str) -> Option<Record> {
+        let key = canonical.trim().to_ascii_lowercase();
+        self.by_canonical
+            .get(&key)
+            .map(|index| self.models[*index].clone())
+    }
+
+    /// 按归一化模型 ID 取唯一记录；多个候选时返回 `None`，由调用方标记歧义。
+    pub fn by_key_unique(&self, model: &str) -> Option<Record> {
+        let key = key_of(model.trim());
+        let indexes = self.by_key.get(&key)?;
+        (indexes.len() == 1).then(|| self.models[indexes[0]].clone())
+    }
+
+    /// 按归一化模型名取唯一记录；多个同名模型时返回 `None`。
+    pub fn by_name_unique(&self, name: &str) -> Option<Record> {
+        let Some(name) = normalize_name(name) else {
+            return None;
+        };
+        let indexes = self.by_name.get(&name)?;
+        (indexes.len() == 1).then(|| self.models[indexes[0]].clone())
+    }
+
+    /// 名称或 ID 的候选数量，仅用于管理页解释“为什么没有自动补齐”。
+    pub fn candidate_count(&self, model: &str, name: Option<&str>) -> usize {
+        let id_count = self.by_key.get(&key_of(model.trim())).map_or(0, Vec::len);
+        let name_count = name
+            .and_then(normalize_name)
+            .and_then(|name| self.by_name.get(&name))
+            .map_or(0, Vec::len);
+        id_count.max(name_count)
+    }
+
+    /// 搜索 canonical 标识和展示名，供手动绑定弹窗选择。
+    pub fn search(&self, query: &str, limit: usize) -> Vec<Value> {
+        let needle = query.trim().to_ascii_lowercase();
+        let mut rows = self
+            .models
+            .iter()
+            .filter(|record| {
+                needle.is_empty()
+                    || record.canonical.to_ascii_lowercase().contains(&needle)
+                    || record
+                        .name
+                        .as_deref()
+                        .is_some_and(|name| name.to_ascii_lowercase().contains(&needle))
+            })
+            .map(|record| {
+                serde_json::json!({
+                    "id": record.canonical,
+                    "name": record.name,
+                })
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            let left_id = left.get("id").and_then(Value::as_str).unwrap_or("");
+            let right_id = right.get("id").and_then(Value::as_str).unwrap_or("");
+            left_id.cmp(right_id)
+        });
+        rows.truncate(limit.min(100));
+        rows
     }
 }
 
@@ -118,12 +209,24 @@ pub fn key_of(id: &str) -> String {
 ///
 /// 热路径：每次清单成型对每个模型调用一次，索引在内存里，这里是一次哈希查找
 /// 加一次小记录克隆。
-pub fn lookup(model: &str) -> Option<Record> {
-    let key = key_of(model.trim());
-    if key.is_empty() {
-        return None;
-    }
-    snapshot().models.get(&key).cloned()
+pub fn by_canonical(canonical: &str) -> Option<Record> {
+    snapshot().by_canonical(canonical)
+}
+
+pub fn by_key_unique(model: &str) -> Option<Record> {
+    snapshot().by_key_unique(model)
+}
+
+pub fn by_name_unique(name: &str) -> Option<Record> {
+    snapshot().by_name_unique(name)
+}
+
+pub fn candidate_count(model: &str, name: Option<&str>) -> usize {
+    snapshot().candidate_count(model, name)
+}
+
+pub fn search(query: &str) -> Vec<Value> {
+    snapshot().search(query, 50)
 }
 
 /// 当前索引的状态（管理页与刷新结果展示；**不含**任何体积大的内容）。
@@ -170,8 +273,11 @@ fn load() -> Snapshot {
     match parse(EMBEDDED, "builtin") {
         Some(snapshot) => snapshot,
         None => {
-            logging::log("[Models]", "内嵌的 models.dev 快照解析失败（模型元数据将不可用，请重新构建）");
-            Snapshot { models: HashMap::new(), generated_at: 0, source: "builtin" }
+            logging::log(
+                "[Models]",
+                "内嵌的 models.dev 快照解析失败（模型元数据将不可用，请重新构建）",
+            );
+            Snapshot::new(Vec::new(), 0, "builtin")
         }
     }
 }
@@ -191,20 +297,26 @@ pub fn replace(snapshot: Snapshot) {
 pub fn parse(text: &str, source: &'static str) -> Option<Snapshot> {
     let root: Value = serde_json::from_str(text).ok()?;
     let object = root.get("models")?.as_object()?;
-    let mut models = HashMap::with_capacity(object.len());
+    let mut models = Vec::with_capacity(object.len());
     for (key, value) in object {
-        if let Some(record) = parse_record(value) {
-            models.insert(key.clone(), record);
+        let Some(mut record) = parse_record(value) else {
+            continue;
+        };
+        if record.canonical.trim().is_empty() {
+            record.canonical = key.clone();
+        }
+        if !record.canonical.trim().is_empty() {
+            models.push(record);
         }
     }
     if models.is_empty() {
         return None;
     }
-    Some(Snapshot {
+    Some(Snapshot::new(
         models,
-        generated_at: root.get("generatedAt").and_then(Value::as_i64).unwrap_or(0),
+        root.get("generatedAt").and_then(Value::as_i64).unwrap_or(0),
         source,
-    })
+    ))
 }
 
 /// 序列化成文件形态（刷新落库用；与 [`parse`] 严格互逆）。
@@ -214,14 +326,34 @@ pub fn parse(text: &str, source: &'static str) -> Option<Snapshot> {
 /// 遍历序会让每次刷新的键序都不一样，肉眼比对时全是噪音）。
 pub fn serialize(snapshot: &Snapshot) -> String {
     let mut models = serde_json::Map::new();
-    let mut keys: Vec<&String> = snapshot.models.keys().collect();
-    keys.sort();
-    for key in keys {
-        models.insert(key.clone(), record_value(&snapshot.models[key]));
+    let mut records = snapshot.models.iter().collect::<Vec<_>>();
+    records.sort_by(|left, right| left.canonical.cmp(&right.canonical));
+    let mut used: HashMap<String, usize> = HashMap::new();
+    for record in records {
+        let base = key_of(&record.canonical);
+        let base = if base.is_empty() {
+            "model".to_string()
+        } else {
+            base
+        };
+        let count = used.entry(base.clone()).or_default();
+        let key = if *count == 0 {
+            base
+        } else {
+            format!("{base}~{}", *count + 1)
+        };
+        *count += 1;
+        models.insert(key, record_value(record));
     }
     Value::Object(serde_json::Map::from_iter([
-        ("generatedAt".to_string(), Value::from(snapshot.generated_at)),
-        ("source".to_string(), Value::String(snapshot.source.to_string())),
+        (
+            "generatedAt".to_string(),
+            Value::from(snapshot.generated_at),
+        ),
+        (
+            "source".to_string(),
+            Value::String(snapshot.source.to_string()),
+        ),
         ("models".to_string(), Value::Object(models)),
     ]))
     .to_string()
@@ -229,7 +361,13 @@ pub fn serialize(snapshot: &Snapshot) -> String {
 
 fn record_value(record: &Record) -> Value {
     let mut object = serde_json::Map::new();
-    object.insert("canonical".to_string(), Value::String(record.canonical.clone()));
+    object.insert(
+        "canonical".to_string(),
+        Value::String(record.canonical.clone()),
+    );
+    if let Some(name) = &record.name {
+        object.insert("name".to_string(), Value::String(name.clone()));
+    }
     for (key, value) in [
         ("reasoning", record.reasoning),
         ("toolCall", record.tool_call),
@@ -256,12 +394,22 @@ fn record_value(record: &Record) -> Value {
 
 fn parse_record(value: &Value) -> Option<Record> {
     let object = value.as_object()?;
-    let canonical = object.get("canonical").and_then(Value::as_str).unwrap_or_default().to_string();
+    let canonical = object
+        .get("canonical")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     if canonical.is_empty() {
         return None;
     }
     Some(Record {
         canonical,
+        name: object
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string),
         reasoning: object.get("reasoning").and_then(Value::as_bool),
         tool_call: object.get("toolCall").and_then(Value::as_bool),
         images: object.get("images").and_then(Value::as_bool),
@@ -284,6 +432,16 @@ fn parse_record(value: &Value) -> Option<Record> {
     })
 }
 
+/// 名称归一：大小写、空白和常见连接符不参与比较。
+pub fn normalize_name(name: &str) -> Option<String> {
+    let normalized = name
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && !matches!(ch, '-' | '_' | '.' | '/' | '\\'))
+        .collect::<String>()
+        .to_ascii_lowercase();
+    (!normalized.is_empty()).then_some(normalized)
+}
+
 /// 读库里的刷新结果（库不可用 / 没写过 / 值坏了 → `None`，由调用方回落地板）。
 fn read_cache() -> Option<Snapshot> {
     let db = db()?;
@@ -303,12 +461,20 @@ pub fn write_cache(text: &str) {
     let Some(db) = db() else { return };
     let written = db.with(|conn| write_text(conn, text)).unwrap_or(false);
     if !written {
-        logging::verbose("[Models]", "models.dev 缓存写入失败：下次启动将回落到内嵌快照");
+        logging::verbose(
+            "[Models]",
+            "models.dev 缓存写入失败：下次启动将回落到内嵌快照",
+        );
     }
 }
 
 fn read_text(conn: &Connection) -> Option<String> {
-    conn.query_row("SELECT value FROM kv WHERE key = ?1", params![KV_KEY], |row| row.get(0)).ok()
+    conn.query_row(
+        "SELECT value FROM kv WHERE key = ?1",
+        params![KV_KEY],
+        |row| row.get(0),
+    )
+    .ok()
 }
 
 fn write_text(conn: &Connection, text: &str) -> bool {
@@ -318,4 +484,71 @@ fn write_text(conn: &Connection, text: &str) -> bool {
         params![KV_KEY, text],
     )
     .is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_indexes_names_and_keeps_collisions() {
+        let text = json!({
+            "generatedAt": 1,
+            "models": {
+                "gpt5": {
+                    "canonical": "openai/gpt-5",
+                    "name": "GPT 5",
+                    "reasoning": true
+                },
+                "gpt5~2": {
+                    "canonical": "other/gpt5",
+                    "name": "GPT 5",
+                    "reasoning": false
+                }
+            }
+        })
+        .to_string();
+        let snapshot = parse(&text, "builtin").expect("测试快照应能解析");
+        assert_eq!(snapshot.len(), 2);
+        assert!(snapshot.by_key_unique("gpt-5").is_none());
+        assert_eq!(snapshot.candidate_count("gpt-5", Some("GPT-5")), 2);
+        assert!(snapshot.by_canonical("openai/gpt-5").is_some());
+    }
+
+    #[test]
+    fn unique_name_matches_after_normalization() {
+        let text = json!({
+            "generatedAt": 1,
+            "models": {
+                "sonnet4": {
+                    "canonical": "anthropic/claude-sonnet-4",
+                    "name": "Claude Sonnet 4"
+                }
+            }
+        })
+        .to_string();
+        let snapshot = parse(&text, "builtin").expect("测试快照应能解析");
+        let record = snapshot
+            .by_name_unique("CLAUDE-SONNET 4")
+            .expect("名称应对齐");
+        assert_eq!(record.canonical, "anthropic/claude-sonnet-4");
+    }
+
+    #[test]
+    fn serialize_preserves_colliding_records() {
+        let text = json!({
+            "generatedAt": 1,
+            "models": {
+                "gpt5": { "canonical": "openai/gpt-5", "name": "GPT 5" },
+                "gpt5~2": { "canonical": "other/gpt5", "name": "Other GPT" }
+            }
+        })
+        .to_string();
+        let snapshot = parse(&text, "network").expect("测试快照应能解析");
+        let reparsed = parse(&serialize(&snapshot), "cache").expect("序列化结果应能重新解析");
+        assert_eq!(reparsed.len(), 2);
+        assert!(reparsed.by_canonical("openai/gpt-5").is_some());
+        assert!(reparsed.by_canonical("other/gpt5").is_some());
+    }
 }

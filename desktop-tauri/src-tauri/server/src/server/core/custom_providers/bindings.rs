@@ -255,15 +255,17 @@ pub fn public_models(provider: &Value) -> Vec<Value> {
         let Some((target, _)) = resolve(provider, &name) else {
             continue;
         };
+        let target_model = models
+            .iter()
+            .find(|model| model_id(model).eq_ignore_ascii_case(&target));
         let mut item = json!({ "id": name });
-        let capabilities = capability::normalize_object(
-            models
-                .iter()
-                .find(|model| model_id(model).eq_ignore_ascii_case(&target))
-                .and_then(|model| model.get("capabilities")),
-        );
+        if let Some(name) = target_model.and_then(|model| model.get("name")) {
+            item["name"] = name.clone();
+        }
+        let capabilities =
+            capability::normalize_object(target_model.and_then(|model| model.get("capabilities")));
         capability::apply_overrides(&mut item, &capabilities);
-        model_meta::apply(&mut item);
+        model_meta::apply(text(provider, "id"), &mut item, Some(&target));
         result.push(item);
     }
     result

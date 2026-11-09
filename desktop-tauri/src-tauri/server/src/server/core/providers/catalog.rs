@@ -57,7 +57,8 @@ pub(crate) fn manifest_for_provider(provider: &str) -> Vec<Value> {
         }
     }
     for item in models.iter_mut() {
-        model_meta::apply(item);
+        let id = model_id(item);
+        model_meta::apply(provider, item, Some(&id));
     }
     model_rules::apply_capability_overrides(provider, &mut models);
     models

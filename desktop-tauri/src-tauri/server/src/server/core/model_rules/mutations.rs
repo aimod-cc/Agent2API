@@ -4,7 +4,7 @@ use super::bindings::{
     active_conflict, enable_exclusive, normalize_name, put_binding, set_default, set_membership,
     Catalog,
 };
-use super::{CapabilityOverride, CustomModel, ModelRules, KEY_MODEL_RULES};
+use super::{CapabilityOverride, CustomModel, MetadataBindingUpdate, ModelRules, KEY_MODEL_RULES};
 use crate::server::config;
 use crate::server::errors::GatewayError;
 
@@ -320,6 +320,7 @@ pub fn set_capabilities(
     provider: &str,
     id: &str,
     patch: &Map<String, Value>,
+    binding: Option<&MetadataBindingUpdate>,
 ) -> Result<ModelRules> {
     mutate(|rules| {
         let index = rules
@@ -329,6 +330,14 @@ pub fn set_capabilities(
         let mut values = index
             .map(|index| rules.capabilities[index].values.clone())
             .unwrap_or_default();
+        let mut models_dev_id = index
+            .map(|index| rules.capabilities[index].models_dev_id.clone())
+            .unwrap_or_default();
+        let mut source_name = index
+            .map(|index| rules.capabilities[index].source_name.clone())
+            .unwrap_or_default();
+        let mut match_by_names =
+            index.is_some_and(|index| rules.capabilities[index].match_by_names);
         for (key, value) in patch {
             if value.is_null() {
                 values.remove(key);
@@ -337,16 +346,42 @@ pub fn set_capabilities(
                 values.insert(key.clone(), value);
             }
         }
+        if let Some(update) = binding {
+            if let Some(next) = &update.models_dev_id {
+                let next = next.trim();
+                if next.is_empty() {
+                    models_dev_id = None;
+                    source_name = None;
+                    match_by_names = false;
+                } else {
+                    models_dev_id = Some(next.to_string());
+                }
+            }
+            if let Some(next) = &update.source_name {
+                source_name = Some(next.trim().to_string()).filter(|name| !name.is_empty());
+            }
+            if let Some(next) = update.match_by_names {
+                match_by_names = next && models_dev_id.is_some();
+            }
+        }
         match index {
-            Some(index) if values.is_empty() => {
+            Some(index) if values.is_empty() && models_dev_id.is_none() => {
                 rules.capabilities.remove(index);
             }
-            Some(index) => rules.capabilities[index].values = values,
-            None if values.is_empty() => {}
+            Some(index) => {
+                rules.capabilities[index].values = values;
+                rules.capabilities[index].models_dev_id = models_dev_id;
+                rules.capabilities[index].source_name = source_name;
+                rules.capabilities[index].match_by_names = match_by_names;
+            }
+            None if values.is_empty() && models_dev_id.is_none() => {}
             None => rules.capabilities.push(CapabilityOverride {
                 provider: provider.to_string(),
                 id: id.to_string(),
                 values,
+                models_dev_id,
+                source_name,
+                match_by_names,
             }),
         }
         Ok(rules.clone())
