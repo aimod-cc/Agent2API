@@ -65,7 +65,11 @@ fn patch(
             ) {
                 *new.decor_mut() = old.decor().clone();
             }
-            table.insert(key, replacement);
+            if let Some(existing) = table.get_mut(key) {
+                *existing = replacement;
+            } else {
+                table.insert(key, replacement);
+            }
         }
     }
     Ok(())

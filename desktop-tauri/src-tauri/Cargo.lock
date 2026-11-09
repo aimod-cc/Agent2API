@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "agent2api-server"
-version = "3.4.2"
+version = "3.5.0-beta.1"
 dependencies = [
  "aead-stream",
  "aes",
@@ -7052,7 +7052,7 @@ dependencies = [
 
 [[package]]
 name = "workbuddy-proxy-desktop"
-version = "3.4.2"
+version = "3.5.0-beta.1"
 dependencies = [
  "aes",
  "aes-gcm",
