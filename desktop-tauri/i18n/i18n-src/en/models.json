@@ -479,5 +479,16 @@
   "：": ": ",
   "：这里的模型不会出现在其他家，别名也只在这一家内生效。改名称 / 协议 / Base URL 在账号页该家账号的「设置」→ 提供商一栏；整家不要了，鼠标移到左栏这家上点 × 删除（连同名下账号）。": ": the models here won't appear under other providers, and aliases take effect only within this provider. To change the name / protocol / Base URL, use the “Settings” → Provider section of this provider's account on the Accounts page; to remove the whole provider, hover over it in the left rail and click × to delete it (along with its accounts).",
   "；其中 {keys} 由 models.dev 补齐": "; {keys} filled in by models.dev",
-  "；首个失败：{error}": "; first failure: {error}"
+  "；首个失败：{error}": "; first failure: {error}",
+  "搜索 models.dev…": "Searching models.dev…",
+  "没有找到匹配的 models.dev 模型": "No matching models.dev models found",
+  "搜索失败：{message}": "Search failed: {message}",
+  "models.dev 身份": "models.dev identity",
+  "搜索模型名称或 canonical ID": "Search model name or canonical ID",
+  "搜索": "Search",
+  "已选择的 canonical ID（留空 = 未绑定）": "Selected canonical ID (leave blank for no binding)",
+  "用于名称对齐的上游展示名": "Upstream display name used for name alignment",
+  "允许同一提供商的新模型 ID 按名称复用此映射": "Allow new model IDs from the same provider to reuse this mapping by name",
+  "名称只在当前提供商内参与唯一候选匹配；精确 ID 绑定始终优先，出现同名冲突时不会自动补齐。": "Names are matched only within the current provider and only when the candidate is unique. Exact ID bindings always take priority, and same-name conflicts are not filled automatically.",
+  "✅ 已保存 {id} 的能力位与 models.dev 身份（{provider}）": "✅ Saved capabilities and models.dev identity for {id} ({provider})"
 }

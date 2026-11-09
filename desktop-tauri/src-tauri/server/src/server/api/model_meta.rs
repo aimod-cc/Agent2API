@@ -19,20 +19,17 @@
 //! 出现「开关显示已开、状态却是旧的」这种中间态。
 
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::Response;
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::server::config;
-use crate::server::core::model_meta;
+use crate::server::core::{maintenance, model_meta};
 use crate::server::errors;
 use crate::server::http::{ok_json, parse_body};
 use crate::server::logging;
 use crate::server::ServerState;
-
-/// 设置页「立即刷新」用的间隔（分钟）：这条链路只服务手动触发，不参与定时
-/// 排期（定时那一次走 `scheduled_tasks` 的「模型目录刷新」任务）。
-const MANUAL_INTERVAL_MINUTES: i64 = 1440;
 
 fn metadata_json() -> serde_json::Value {
     let mut payload = model_meta::status();
@@ -88,16 +85,34 @@ pub async fn put_metadata(State(_state): State<ServerState>, body: Bytes) -> Res
 /// `failed`），与 `/api/models/refresh` 同一口径 —— 「跑完了但这次没刷」是常态
 /// （未到间隔 / 已在设置里关闭），不是需要调用方解析错误体的异常。
 pub async fn refresh_metadata(State(_state): State<ServerState>) -> Response {
-    let row = model_meta::refresh(true, MANUAL_INTERVAL_MINUTES * 60_000).await;
-    let status = row.get("status").and_then(serde_json::Value::as_str).unwrap_or("");
+    // 手动刷新与自动轮次共用同一份持久化排期，必须使用当前任务间隔收尾，
+    // 否则一次手动刷新会把下一次自动刷新推迟到固定的一天后。
+    let row = model_meta::refresh(true, maintenance::interval(maintenance::MODEL)).await;
+    let status = row
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
     if status == "failed" {
         logging::log(
             "[Models]",
             &format!(
                 "models.dev 元数据刷新失败：{}",
-                row.get("message").and_then(serde_json::Value::as_str).unwrap_or("未知原因")
+                row.get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("未知原因")
             ),
         );
     }
     ok_json(json!({ "result": row, "status": metadata_json() }))
+}
+
+#[derive(Deserialize)]
+pub struct SearchQuery {
+    #[serde(default)]
+    query: String,
+}
+
+/// GET /api/models/metadata/search —— 手动绑定弹窗按 canonical 标识或名称搜索。
+pub async fn search_models(Query(query): Query<SearchQuery>) -> Response {
+    ok_json(json!({ "models": model_meta::search(&query.query) }))
 }

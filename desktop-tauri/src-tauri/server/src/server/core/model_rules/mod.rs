@@ -107,9 +107,14 @@ mod mutations;
 mod seeds;
 
 use seeds::seed_extra_aliases;
-pub use seeds::{migrate_qoder_default_enabled, migrate_workbuddy_default_enabled, seed_hidden_disabled, seed_qoder_defaults, QODER_DEFAULT_ENABLED};
+pub use seeds::{
+    migrate_qoder_default_enabled, migrate_workbuddy_default_enabled, seed_hidden_disabled,
+    seed_qoder_defaults, QODER_DEFAULT_ENABLED,
+};
 
-pub use mutations::{add_custom, add_mapping, remove_custom, remove_mapping, set_capabilities, set_state};
+pub use mutations::{
+    add_custom, add_mapping, remove_custom, remove_mapping, set_capabilities, set_state,
+};
 
 pub const KEY_MODEL_RULES: &str = "modelRules";
 
@@ -185,7 +190,10 @@ pub struct RuleEntry {
 
 impl RuleEntry {
     fn new(provider: Option<&str>, id: &str) -> Self {
-        Self { provider: provider.map(str::to_string), id: id.to_string() }
+        Self {
+            provider: provider.map(str::to_string),
+            id: id.to_string(),
+        }
     }
 
     fn to_value(&self) -> Value {
@@ -199,7 +207,10 @@ impl RuleEntry {
     /// None（全局条目）或与目标一致。
     fn matches(&self, provider: &str, id: &str) -> bool {
         self.id.eq_ignore_ascii_case(id)
-            && self.provider.as_deref().map_or(true, |p| p.eq_ignore_ascii_case(provider))
+            && self
+                .provider
+                .as_deref()
+                .map_or(true, |p| p.eq_ignore_ascii_case(provider))
     }
 }
 
@@ -245,6 +256,12 @@ pub struct CapabilityOverride {
     pub provider: String,
     pub id: String,
     pub values: Map<String, Value>,
+    /// 用户显式选择的 models.dev canonical 标识
+    pub models_dev_id: Option<String>,
+    /// 建立绑定时记录的上游展示名，只供同提供商名称对齐
+    pub source_name: Option<String>,
+    /// 未知模型 ID 是否可按记录名称复用此绑定
+    pub match_by_names: bool,
 }
 
 impl CapabilityOverride {
@@ -265,6 +282,15 @@ impl CapabilityOverride {
         object.insert("id".to_string(), Value::String(self.id.clone()));
         for (key, value) in &self.values {
             object.insert(key.clone(), value.clone());
+        }
+        if let Some(id) = &self.models_dev_id {
+            object.insert("modelsDevId".to_string(), Value::String(id.clone()));
+        }
+        if let Some(name) = &self.source_name {
+            object.insert("sourceName".to_string(), Value::String(name.clone()));
+        }
+        if self.match_by_names {
+            object.insert("matchByNames".to_string(), Value::Bool(true));
         }
         Value::Object(object)
     }
@@ -328,7 +354,11 @@ fn entries_from(value: Option<&Value>) -> Vec<RuleEntry> {
                     }
                     // 新形态：{provider, id}
                     Value::Object(object) => {
-                        let id = object.get("id").and_then(Value::as_str).map(str::trim).unwrap_or("");
+                        let id = object
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .unwrap_or("");
                         if id.is_empty() {
                             return None;
                         }
@@ -397,7 +427,11 @@ fn capabilities_from(value: Option<&Value>) -> Vec<CapabilityOverride> {
                 .iter()
                 .filter_map(|item| {
                     let object = item.as_object()?;
-                    let id = object.get("id").and_then(Value::as_str).map(str::trim).unwrap_or("");
+                    let id = object
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .unwrap_or("");
                     let provider = object
                         .get("provider")
                         .and_then(Value::as_str)
@@ -407,13 +441,32 @@ fn capabilities_from(value: Option<&Value>) -> Vec<CapabilityOverride> {
                         return None;
                     }
                     let values = crate::server::core::capability::normalize_object(Some(item));
-                    if values.is_empty() {
+                    let models_dev_id = object
+                        .get("modelsDevId")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_string);
+                    let source_name = object
+                        .get("sourceName")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_string);
+                    let match_by_names = object
+                        .get("matchByNames")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    if values.is_empty() && models_dev_id.is_none() {
                         return None;
                     }
                     Some(CapabilityOverride {
                         provider: provider.to_string(),
                         id: id.to_string(),
                         values,
+                        models_dev_id,
+                        source_name,
+                        match_by_names,
                     })
                 })
                 .collect()
@@ -498,7 +551,7 @@ impl ModelRules {
             // `hidden` 不再写出（机制已移除，见模块头）：整份替换落盘时，
             // 配置里残留的 hidden 名单就此消失 —— 一次性清理的实现方式。
             "mappings": self.mappings.iter().map(Mapping::to_value).collect::<Vec<_>>(),
-            // `custom` 必须在这里写出：本函数是**整份替换**（`save` → 
+            // `custom` 必须在这里写出：本函数是**整份替换**（`save` →
             // `config::update_raw_field`），漏掉哪个键，任何一次写规则
             // （启停 / 加映射 / 删映射 / 四个种子）都会把那个键的数据整份抹掉。
             "custom": self.custom.iter().map(CustomModel::to_value).collect::<Vec<_>>(),
@@ -523,15 +576,28 @@ impl ModelRules {
         let matches = |m: &&Mapping| {
             m.alias.eq_ignore_ascii_case(alias) && m.target.eq_ignore_ascii_case(target)
         };
-        self.mappings.iter().filter(matches)
-            .find(|m| m.provider.as_deref().is_some_and(|owner| owner.eq_ignore_ascii_case(provider)))
-            .or_else(|| self.mappings.iter().filter(matches).find(|m| m.provider.is_none()))
+        self.mappings
+            .iter()
+            .filter(matches)
+            .find(|m| {
+                m.provider
+                    .as_deref()
+                    .is_some_and(|owner| owner.eq_ignore_ascii_case(provider))
+            })
+            .or_else(|| {
+                self.mappings
+                    .iter()
+                    .filter(matches)
+                    .find(|m| m.provider.is_none())
+            })
     }
 
     /// disabled 只控制原始 ID 的默认绑定，不能连带关闭其他别名。
     pub fn default_enabled(&self, provider: &str, id: &str) -> bool {
         !self.is_disabled(provider, id)
-            && self.binding(provider, id, id).map_or(true, |mapping| mapping.enabled)
+            && self
+                .binding(provider, id, id)
+                .map_or(true, |mapping| mapping.enabled)
     }
 
     pub fn is_blocked(&self, provider: &str, id: &str) -> bool {
@@ -556,7 +622,9 @@ impl ModelRules {
 
     /// 该对外名是否已存在任何映射条目（种子防抢占判断用）。
     pub fn has_alias(&self, alias: &str) -> bool {
-        self.mappings.iter().any(|m| m.alias.eq_ignore_ascii_case(alias))
+        self.mappings
+            .iter()
+            .any(|m| m.alias.eq_ignore_ascii_case(alias))
     }
 
     /// 某条映射的对外名：target 归属 `provider`（None = 旧版全局条目）。
@@ -573,7 +641,11 @@ impl ModelRules {
         self.mappings
             .iter()
             .filter(|m| m.target.eq_ignore_ascii_case(target))
-            .filter(|m| m.provider.as_deref().map_or(true, |p| p.eq_ignore_ascii_case(provider)))
+            .filter(|m| {
+                m.provider
+                    .as_deref()
+                    .map_or(true, |p| p.eq_ignore_ascii_case(provider))
+            })
             .map(|m| m.alias.as_str())
             .collect()
     }
@@ -625,7 +697,11 @@ impl ModelRules {
     /// 那批标记对 Qoder 不构成「已种」的证据。
     fn is_seeded(&self, provider: &str, id: &str) -> bool {
         let key = format!("{provider}:{id}");
-        if self.seeded.iter().any(|item| item.eq_ignore_ascii_case(&key)) {
+        if self
+            .seeded
+            .iter()
+            .any(|item| item.eq_ignore_ascii_case(&key))
+        {
             return true;
         }
         if !matches!(provider, "workbuddy" | "raccoon") {
@@ -710,6 +786,9 @@ pub fn apply_capability_overrides(provider: &str, items: &mut [Value]) {
             .iter()
             .find(|entry| entry.matches(provider, id))
         {
+            if entry.values.is_empty() {
+                continue;
+            }
             crate::server::core::capability::apply_overrides(item, &entry.values);
             // 来源标记：被覆盖的键从此是**用户指定**的值，既不是上游给的也不是
             // models.dev 补的（管理页要把这三档分开显示，见 `core::model_meta`
@@ -723,12 +802,67 @@ pub fn apply_capability_overrides(provider: &str, items: &mut [Value]) {
     }
 }
 
+/// 用户为某条模型显式选择的 models.dev 身份。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MetadataBinding {
+    pub provider: String,
+    pub id: String,
+    pub models_dev_id: Option<String>,
+    pub source_name: Option<String>,
+    pub match_by_names: bool,
+}
+
+/// 一次写入中的元数据绑定补丁，未提供的字段保持原值。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MetadataBindingUpdate {
+    /// 空串 = 删除显式 models.dev 绑定
+    pub models_dev_id: Option<String>,
+    pub source_name: Option<String>,
+    pub match_by_names: Option<bool>,
+}
+
+/// 精确查询一条用户元数据绑定。
+pub fn metadata_binding(provider: &str, id: &str) -> Option<MetadataBinding> {
+    shared().capabilities.iter().find_map(|entry| {
+        entry.matches(provider, id).then(|| MetadataBinding {
+            provider: entry.provider.clone(),
+            id: entry.id.clone(),
+            models_dev_id: entry.models_dev_id.clone(),
+            source_name: entry.source_name.clone(),
+            match_by_names: entry.match_by_names,
+        })
+    })
+}
+
+/// 当前提供商启用了名称对齐的元数据绑定。
+pub fn metadata_bindings_for(provider: &str) -> Vec<MetadataBinding> {
+    shared()
+        .capabilities
+        .iter()
+        .filter(|entry| {
+            entry.provider.eq_ignore_ascii_case(provider)
+                && entry.models_dev_id.is_some()
+                && entry.match_by_names
+        })
+        .map(|entry| MetadataBinding {
+            provider: entry.provider.clone(),
+            id: entry.id.clone(),
+            models_dev_id: entry.models_dev_id.clone(),
+            source_name: entry.source_name.clone(),
+            match_by_names: entry.match_by_names,
+        })
+        .collect()
+}
+
 /// 该 `(provider, id)` 是否是用户手动登记的自定义模型。
 ///
 /// 消费方：管理页判「来源 = 手动」（`catalog::manage_entries`）、以及 AutoClaw
 /// 的模型路由解析（未知名字不静默回落，见 `autoclaw::models::resolve_model_route`）。
 pub fn is_custom(provider: &str, id: &str) -> bool {
-    shared().custom.iter().any(|item| item.matches(provider, id))
+    shared()
+        .custom
+        .iter()
+        .any(|item| item.matches(provider, id))
 }
 
 /// 某一家当前登记的自定义模型，转成**聚合层认的条目形态**。
@@ -760,4 +894,38 @@ pub fn custom_models_for(provider: &str) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn metadata_binding_roundtrips_without_capability_values() {
+        let raw = json!({
+            KEY_MODEL_RULES: {
+                "capabilities": [{
+                    "provider": "demo",
+                    "id": "sn-12345",
+                    "modelsDevId": "anthropic/claude-sonnet-4",
+                    "sourceName": "Claude Sonnet 4",
+                    "matchByNames": true
+                }]
+            }
+        });
+        let object = raw.as_object().expect("测试对象");
+        let rules = ModelRules::from_raw(object);
+        assert_eq!(rules.capabilities.len(), 1);
+        assert!(rules.capabilities[0].values.is_empty());
+        assert_eq!(
+            rules.capabilities[0].models_dev_id.as_deref(),
+            Some("anthropic/claude-sonnet-4")
+        );
+        assert!(rules.capabilities[0].match_by_names);
+        let saved = rules.to_value();
+        let item = &saved["capabilities"][0];
+        assert_eq!(item["modelsDevId"], "anthropic/claude-sonnet-4");
+        assert_eq!(item["matchByNames"], true);
+    }
 }

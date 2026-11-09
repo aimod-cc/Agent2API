@@ -87,6 +87,12 @@ export type SharedWindow = {
     setModelCapabilities(
       provider: string, id: string, patch: Record<string, number | boolean | null>,
     ): Promise<ManageView | null | undefined>
+    getModelMetadataBinding(provider: string, id: string): Promise<{ binding?: ModelsDevBinding | null } | null | undefined>
+    setModelMetadataBinding(
+      provider: string, id: string,
+      binding: { modelsDevId: string | null; sourceName?: string; matchByNames?: boolean },
+    ): Promise<{ binding?: ModelsDevBinding | null } | null | undefined>
+    searchModelsDev(query: string): Promise<{ models?: ModelsDevChoice[] } | null | undefined>
   }
   wbApp?: {
     toast?: (message: string, kind?: 'err' | 'ok') => void
@@ -836,6 +842,39 @@ export async function writeCapabilities(
   const api = shared().workbuddyDesktop
   if (!api) throw new Error(t('后端桥不可用'))
   return enqueueWrite(() => api.setModelCapabilities(provider, id, capabilities))
+}
+
+/** 手动选择的 models.dev 身份；`modelsDevId` 为空表示没有显式绑定。 */
+export type ModelsDevBinding = {
+  provider?: string
+  id?: string
+  modelsDevId?: string | null
+  sourceName?: string | null
+  matchByNames?: boolean
+}
+
+export type ModelsDevChoice = { id: string; name?: string | null }
+
+export async function readModelsDevBinding(provider: string, id: string): Promise<ModelsDevBinding | null> {
+  const response = await shared().workbuddyDesktop?.getModelMetadataBinding?.(provider, id)
+  return response?.binding || null
+}
+
+export async function writeModelsDevBinding(
+  provider: string, id: string, binding: ModelsDevBinding,
+): Promise<void> {
+  const api = shared().workbuddyDesktop
+  if (!api?.setModelMetadataBinding) throw new Error(t('后端桥不可用'))
+  await enqueueWrite(() => api.setModelMetadataBinding!(provider, id, {
+    modelsDevId: binding.modelsDevId || null,
+    sourceName: binding.sourceName || '',
+    matchByNames: binding.matchByNames === true,
+  }))
+}
+
+export async function searchModelsDev(query: string): Promise<ModelsDevChoice[]> {
+  const response = await shared().workbuddyDesktop?.searchModelsDev?.(query)
+  return Array.isArray(response?.models) ? response.models : []
 }
 
 /* ─── 行内操作 ───────────────────────────────── */

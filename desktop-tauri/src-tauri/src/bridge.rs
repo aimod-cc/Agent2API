@@ -321,6 +321,12 @@ const BRIDGE_JS: &str = r#"
     // 整表保存，见后端 handler 的说明）。`capabilities` 各键三态：不给 = 不改、
     // null = 恢复清单原值、给值 = 覆盖。
     setModelCapabilities: (provider, id, capabilities) => call('POST', '/api/models/capabilities', { provider, id, capabilities }),
+    // models.dev 手动身份绑定：精确 canonical 标识与“同提供商名称对齐”开关。
+    getModelMetadataBinding: (provider, id) =>
+      call('GET', `/api/models/metadata/binding?provider=${encodeURIComponent(provider)}&id=${encodeURIComponent(id)}`),
+    setModelMetadataBinding: (provider, id, binding) =>
+      call('POST', '/api/models/metadata/binding', { provider, id, ...(binding || {}) }),
+    searchModelsDev: query => call('GET', `/api/models/metadata/search?query=${encodeURIComponent(String(query || ''))}`),
     // 模型测试：以这一行的上游模型发一次**真实**请求（走生产转发链路、
     // 会消耗额度），候选被收窄到「这一家 × 指定的账号」，见后端
     // `api::model_test` 的模块头。

@@ -216,6 +216,7 @@ fn push_managed_model(
         .find(|entry| entry.matches(provider, &id))
         .map(|entry| capability::overridden_keys(&entry.values))
         .unwrap_or_default();
+    let metadata_binding = model_rules::metadata_binding(provider, &id);
     models.push(json!({
         "id": id, "name": item.get("name"), "credits": item.get("credits"),
         "isDefault": item.get("isDefault").and_then(Value::as_bool).unwrap_or(false),
@@ -234,6 +235,14 @@ fn push_managed_model(
         // 可信，而它们的可信度差着量级。缺失（没有这个键）= 那一项没有
         // 任何来源（未声明）。
         "capSources": item.get("capSources"),
+        "modelsDevId": item.get("modelsDevId"),
+        "modelsDevMatch": item.get("modelsDevMatch"),
+        "modelsDevCandidates": item.get("modelsDevCandidates"),
+        "modelsDevBinding": metadata_binding.map(|binding| json!({
+            "modelsDevId": binding.models_dev_id,
+            "sourceName": binding.source_name,
+            "matchByNames": binding.match_by_names,
+        })),
         // 模型**自己能配哪些思考档位**（出口键名，由 `core::model_meta`
         // 在清单成型处归一：这家自己声明的 > models.dev 的 effort 列表）。
         // 与上面 `mappings[].reasoning`（用户给某条映射**指定**的档位）

@@ -603,6 +603,11 @@ pub fn panel_router(state: ServerState) -> Router {
             get(api::model_meta::get_metadata).put(api::model_meta::put_metadata),
         )
         .route("/api/models/metadata/refresh", post(api::model_meta::refresh_metadata))
+        .route("/api/models/metadata/search", get(api::model_meta::search_models))
+        .route(
+            "/api/models/metadata/binding",
+            get(api::model_manage::get_metadata_binding).post(api::model_manage::set_metadata_binding),
+        )
         // 模型测试（模型管理页操作列的「测试」）：会**真打上游、消耗额度**，
         // 与 /v1/chat/completions 同一量级的接口，必须挂 protected。
         // 结论失败也返回 2xx（上游的错误放在响应体的 status / error 里，

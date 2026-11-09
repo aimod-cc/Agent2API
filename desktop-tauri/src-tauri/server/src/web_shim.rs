@@ -1650,6 +1650,17 @@ pub fn shim_js() -> &'static str {
     setModelCapabilities: function (provider, id, capabilities) {
       return call('POST', '/api/models/capabilities', { provider: provider, id: id, capabilities: capabilities });
     },
+    getModelMetadataBinding: function (provider, id) {
+      return call('GET', '/api/models/metadata/binding?provider=' + encodeURIComponent(provider)
+        + '&id=' + encodeURIComponent(id));
+    },
+    setModelMetadataBinding: function (provider, id, binding) {
+      return call('POST', '/api/models/metadata/binding',
+        Object.assign({ provider: provider, id: id }, binding || {}));
+    },
+    searchModelsDev: function (query) {
+      return call('GET', '/api/models/metadata/search?query=' + encodeURIComponent(String(query || '')));
+    },
     // 模型测试：真打上游、会消耗额度；payload 原样透传（与桌面 bridge 对齐），
     // 各键都可选（account_id / prompt / system_prompt / reasoning / stream / test_id）。
     // 结论失败也返回 2xx —— 上游的错误在返回值的 status / error 里

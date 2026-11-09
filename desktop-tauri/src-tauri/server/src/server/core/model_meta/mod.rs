@@ -15,6 +15,12 @@
 //! models.dev 只补「上游没声明」的键；上游声明过的键一律不动，用户覆盖层仍然
 //! 排最后（它在调用方之后执行）。理由见 `fill` 的模块头。
 //!
+//! ── 模型身份解析 ────────────────────────────────────────────
+//! 模型 ID 不保证可读，`sn-*`、`default-1.2` 这类名字不能靠 ID 形态猜语义。
+//! 因此先按「用户精确绑定 > 适配器 `modelsDevId` > canonical / 精确 ID >
+//! 同提供商名称对齐 > 全局唯一名称」解析身份，同名冲突或无候选时保持未声明；
+//! 名称只负责找到唯一候选，不参与路由，也不推翻上游已声明的能力。
+//!
 //! ── 数据从哪来（三层，见 `snapshot`）────────────────────────
 //!   `builtin`  仓库里检入的精简快照（`modelsdev.json`，由
 //!              `scripts/sync-modelsdev.mjs` 生成，构建时进二进制）——
@@ -47,7 +53,7 @@ mod snapshot;
 
 pub use fill::{apply, mark_user};
 pub use refresh::refresh;
-pub use snapshot::{install, status};
+pub use snapshot::{install, search, status};
 
 /// 排期键里的 scope（与各家 `modelRefresh:<provider>` 同一命名空间）。
 pub(crate) use refresh::SCHEDULE_SCOPE;
