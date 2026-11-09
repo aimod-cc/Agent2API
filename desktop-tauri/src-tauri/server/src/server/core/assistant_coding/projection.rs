@@ -21,7 +21,7 @@ pub fn remember(client: &CodexClient, thread: &Value, response: Option<&Value>, 
     }
     if newer_settings {
         if let Some(cwd) = live.settings.get("cwd") { live.thread["cwd"] = cwd.clone(); }
-    } else if let Some(response) = response { apply_settings(live, response); }
+    } else if let Some(response) = response { apply_settings(live, response); live.settings_revision = revision; }
     if let Some(turns) = thread.get("turns").and_then(Value::as_array) {
         for turn in turns {
             if string(turn, "status") != "inProgress" { live.completed_turns.insert(string(turn, "id").into()); }
@@ -38,12 +38,13 @@ pub fn remember(client: &CodexClient, thread: &Value, response: Option<&Value>, 
     client.state.changed(&id);
 }
 
-fn apply_settings(live: &mut super::state::LiveThread, value: &Value) {
+pub(super) fn apply_settings(live: &mut super::state::LiveThread, value: &Value) {
     if let Some(model) = value.get("model").and_then(Value::as_str) { live.model = Some(model.to_string()); }
     if live.settings.is_null() { live.settings = json!({}); }
     for key in ["model", "modelProvider", "cwd", "approvalPolicy", "approvalsReviewer", "sandboxPolicy", "activePermissionProfile", "effort", "reasoningEffort", "collaborationMode", "serviceTier", "summary", "personality"] {
         if let Some(value) = value.get(key) { live.settings[key] = value.clone(); }
     }
+    if let Some(effort) = value.get("effort").or_else(|| value.get("reasoningEffort")) { live.settings["effort"] = effort.clone(); }
     if let Some(sandbox) = value.get("sandboxPolicy").or_else(|| value.get("sandbox")) {
         live.sandbox = sandbox.clone(); live.settings["sandboxPolicy"] = sandbox.clone();
         live.permission_mode = match string(sandbox, "type") {
@@ -56,6 +57,13 @@ fn apply_settings(live: &mut super::state::LiveThread, value: &Value) {
 pub fn notification(client: &CodexClient, message: Value) {
     let method = string(&message, "method");
     let params = message.get("params").cloned().unwrap_or(Value::Null);
+    if method == "account/updated" || method == "account/rateLimits/updated" {
+        if let Ok(mut cache) = client.usage_cache.try_lock() { *cache = None; }
+        if method == "account/updated" {
+            if let Ok(mut cache) = client.catalog_cache.try_lock() { *cache = None; }
+        }
+        return;
+    }
     if method == "thread/started" {
         if let Some(thread) = params.get("thread") { remember(client, thread, None, Some(true)); }
         return;
@@ -83,6 +91,9 @@ pub fn notification(client: &CodexClient, message: Value) {
         }
         let live = state.threads.entry(id.clone()).or_default();
         if live.thread.is_null() { live.thread = json!({ "id": id, "cwd": "", "preview": "", "updatedAt": now() / 1000 }); }
+        let turn_id = params.get("turnId").and_then(Value::as_str)
+            .or_else(|| params.pointer("/turn/id").and_then(Value::as_str))
+            .or(live.turn.as_deref()).unwrap_or("").to_string();
         match method {
             "thread/status/changed" => {
                 let status = params.get("status").cloned().unwrap_or(Value::Null);
@@ -93,6 +104,12 @@ pub fn notification(client: &CodexClient, message: Value) {
             "thread/closed" | "thread/archived" | "thread/deleted" => {
                 live.attached = false; live.turn = None; live.thread["status"] = json!({ "type": "notLoaded" });
                 if method != "thread/closed" { live.ending = true; live.items.clear(); live.item_order.clear(); live.item_versions.clear(); }
+            }
+            "thread/tokenUsage/updated" => {
+                if let Some(usage) = params.get("tokenUsage").filter(|v| v.is_object()) {
+                    live.token_usage = usage.clone(); live.usage_revision = revision;
+                    live.usage_updated_at = Some(now()); live.usage_source = Some("live".into());
+                }
             }
             "thread/settings/updated" => {
                 if let Some(settings) = params.get("threadSettings") { apply_settings(live, settings); live.settings_revision = revision; }
@@ -113,14 +130,22 @@ pub fn notification(client: &CodexClient, message: Value) {
                     live.thread["status"] = json!({ "type": "idle" });
                 }
                 if let Some(error) = turn.get("error").filter(|e| !e.is_null()) {
-                    put_item(live, &format!("error:{}", string(turn, "id")), json!({ "type": "error", "id": format!("error:{}", string(turn, "id")), "message": error.get("message") }), revision);
+                    put_item(live, turn_id, &format!("error:{}", string(turn, "id")), json!({ "type": "error", "id": format!("error:{}", string(turn, "id")), "message": error.get("message") }), revision);
                 }
             }
             "item/started" | "item/completed" => {
                 if let Some(item) = params.get("item") {
                     let item_id = string(item, "id");
                     if !item_id.is_empty() {
-                        put_item(live, item_id, item.clone(), revision);
+                        let mut projected = item.clone();
+                        if string(item, "type") == "commandExecution" && item.get("aggregatedOutput").is_none_or(Value::is_null) {
+                            if let Some(previous) = live.items.get(&item_key(&turn_id, item_id)) {
+                                if let Some(output) = previous.get("aggregatedOutput") { projected["aggregatedOutput"] = output.clone(); }
+                                if let Some(truncated) = previous.get("outputTruncated") { projected["outputTruncated"] = truncated.clone(); }
+                            }
+                        }
+                        projected["streaming"] = json!(method == "item/started");
+                        put_item(live, &turn_id, item_id, projected, revision);
                         if string(item, "type") == "userMessage" {
                             if let Some(local_id) = item.get("clientId").and_then(Value::as_str) { consumed = Some((local_id.to_string(), string(&params, "turnId").to_string())); }
                         }
@@ -137,7 +162,8 @@ pub fn notification(client: &CodexClient, message: Value) {
                     _ => ("reasoning", "content"),
                 };
                 if !item_id.is_empty() {
-                    let mut item = live.items.get(item_id).cloned().unwrap_or_else(|| json!({ "id": item_id, "type": kind }));
+                    let mut item = live.items.get(&item_key(&turn_id, item_id)).cloned().unwrap_or_else(|| json!({ "id": item_id, "type": kind }));
+                    item["streaming"] = json!(true);
                     let delta = string(&params, "delta");
                     if field == "summary" || field == "content" {
                         let index = params.get(if field == "summary" { "summaryIndex" } else { "contentIndex" }).and_then(Value::as_u64).unwrap_or(0).min(100) as usize;
@@ -145,18 +171,34 @@ pub fn notification(client: &CodexClient, message: Value) {
                         let parts = item[field].as_array_mut().unwrap();
                         while parts.len() <= index { parts.push(json!("")); }
                         parts[index] = json!(bounded_append(parts[index].as_str().unwrap_or(""), delta));
-                    } else { item[field] = json!(bounded_append(string(&item, field), delta)); }
-                    put_item(live, item_id, item, revision);
+                    } else {
+                        let before = string(&item, field);
+                        if before.len().saturating_add(delta.len()) > 512 * 1024 { item["outputTruncated"] = json!(true); }
+                        item[field] = json!(bounded_append(string(&item, field), delta));
+                    }
+                    put_item(live, &turn_id, item_id, item, revision);
+                }
+            }
+            "item/fileChange/patchUpdated" | "item/mcpToolCall/progress" => {
+                let item_id = string(&params, "itemId");
+                if !item_id.is_empty() {
+                    let mut item = live.items.get(&item_key(&turn_id, item_id)).cloned().unwrap_or_else(|| json!({
+                        "id": item_id, "type": if method == "item/fileChange/patchUpdated" { "fileChange" } else { "mcpToolCall" },
+                    }));
+                    if method == "item/fileChange/patchUpdated" { item["changes"] = params.get("changes").cloned().unwrap_or(json!([])); }
+                    else { item["progressMessage"] = params.get("message").cloned().unwrap_or(Value::Null); }
+                    item["streaming"] = json!(true);
+                    put_item(live, &turn_id, item_id, item, revision);
                 }
             }
             "turn/plan/updated" => {
                 let item_id = format!("plan:{}", string(&params, "turnId"));
-                put_item(live, &item_id, json!({ "id": item_id, "type": "planUpdate", "plan": params.get("plan"), "explanation": params.get("explanation") }), revision);
+                put_item(live, &turn_id, &item_id, json!({ "id": item_id, "type": "planUpdate", "plan": params.get("plan"), "explanation": params.get("explanation") }), revision);
             }
             "error" => {
                 if params.get("willRetry").and_then(Value::as_bool) != Some(true) {
                     let item_id = format!("error:{}", string(&params, "turnId"));
-                    put_item(live, &item_id, json!({ "id": item_id, "type": "error", "message": params.pointer("/error/message") }), revision);
+                    put_item(live, &turn_id, &item_id, json!({ "id": item_id, "type": "error", "message": params.pointer("/error/message") }), revision);
                 }
             }
             _ => return,
@@ -176,10 +218,15 @@ pub fn notification(client: &CodexClient, message: Value) {
     if client.running.load(Ordering::Acquire) { client.state.changed(&id); }
 }
 
-fn put_item(live: &mut super::state::LiveThread, id: &str, item: Value, revision: u64) {
-    if !live.items.contains_key(id) { live.item_order.push(id.to_string()); }
-    live.items.insert(id.to_string(), item);
-    live.item_versions.insert(id.to_string(), revision);
+pub fn item_key(turn: &str, id: &str) -> String { format!("{turn}:{id}") }
+
+fn put_item(live: &mut super::state::LiveThread, turn: &str, id: &str, mut item: Value, revision: u64) {
+    if turn.is_empty() { return; }
+    let key = item_key(turn, id);
+    item["turnId"] = json!(turn);
+    if !live.items.contains_key(&key) { live.item_order.push(key.clone()); }
+    live.items.insert(key.clone(), item);
+    live.item_versions.insert(key, revision);
     while live.item_order.len() > 2000 {
         let old = live.item_order.remove(0); live.items.remove(&old); live.item_versions.remove(&old);
     }
@@ -197,29 +244,5 @@ fn bounded_append(before: &str, delta: &str) -> String {
 }
 
 pub fn history(client: &CodexClient, thread: &Value, before_revision: u64) -> Value {
-    let id = string(thread, "id");
-    let mut items = Vec::new();
-    if let Some(turns) = thread.get("turns").and_then(Value::as_array) {
-        for turn in turns {
-            if let Some(rows) = turn.get("items").and_then(Value::as_array) { items.extend(rows.iter().cloned()); }
-            if let Some(error) = turn.get("error").filter(|v| !v.is_null()) {
-                items.push(json!({ "id": format!("error:{}", string(turn, "id")), "type": "error", "message": error.get("message") }));
-            }
-        }
-    }
-    let mut indices = std::collections::HashMap::new();
-    for (index, item) in items.iter().enumerate() { indices.insert(string(item, "id").to_string(), index); }
-    let state = client.state.inner.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(live) = state.threads.get(id) {
-        for item_id in &live.item_order {
-            let Some(item) = live.items.get(item_id) else { continue; };
-            if let Some(index) = indices.get(item_id) {
-                if live.item_versions.get(item_id).is_some_and(|v| *v > before_revision)
-                    || live.turn.is_some() || item.get("clientId").is_some_and(|v| !v.is_null()) {
-                    items[*index] = item.clone();
-                }
-            } else { indices.insert(item_id.clone(), items.len()); items.push(item.clone()); }
-        }
-    }
-    json!({ "items": items })
+    super::history::snapshot(client, thread, before_revision)
 }

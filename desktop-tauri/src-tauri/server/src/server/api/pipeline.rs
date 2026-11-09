@@ -99,10 +99,20 @@ pub mod terminal {
         b"data:[DONE]\r\n",
     ];
     /// Responses：正常收尾 `response.completed`，失败收尾 `response.failed`
-    pub const RESPONSES: super::TerminalFrames =
-        &[b"event: response.completed\n", b"event: response.failed\n"];
-    /// Anthropic Messages：`message_stop`（成功与流内错误都以它收尾）
-    pub const ANTHROPIC: super::TerminalFrames = &[b"event: message_stop\n"];
+    pub const RESPONSES: super::TerminalFrames = &[
+        b"event: response.completed\n", b"event: response.completed\r\n",
+        b"event:response.completed\n", b"event:response.completed\r\n",
+        b"event: response.failed\n", b"event: response.failed\r\n",
+        b"event:response.failed\n", b"event:response.failed\r\n",
+        b"event: response.incomplete\n", b"event: response.incomplete\r\n",
+        b"event:response.incomplete\n", b"event:response.incomplete\r\n",
+        b"event: error\n", b"event: error\r\n", b"event:error\n", b"event:error\r\n",
+    ];
+    pub const ANTHROPIC: super::TerminalFrames = &[
+        b"event: message_stop\n", b"event: message_stop\r\n",
+        b"event:message_stop\n", b"event:message_stop\r\n",
+        b"event: error\n", b"event: error\r\n", b"event:error\n", b"event:error\r\n",
+    ];
 }
 
 // ─── 模型解析 ───────────────────────────────────────────────

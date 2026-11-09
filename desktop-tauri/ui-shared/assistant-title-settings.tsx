@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Alert, Button, Dialog, DialogContent, DialogHeader, DialogTitle, DialogBody, DialogFooter, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Textarea } from '@ui'
+import { Alert, Button, Dialog, DialogContent, DialogHeader, DialogTitle, DialogBody, DialogFooter, Label, Textarea } from '@ui'
+import { SearchableSelect } from './searchable-select'
 import { DEFAULT_TITLE_PROMPT } from './assistant-history'
 import type { Translate } from './assistant-read-types'
 
@@ -25,14 +26,14 @@ export function AssistantTitleSettings({ open, onOpenChange, model, prompt, mode
       <DialogHeader><DialogTitle>{t('标题总结设置')}</DialogTitle></DialogHeader>
       <DialogBody>
         <Label>{t('标题总结模型')}</Label>
-        <Select value={selected || '__follow__'} disabled={disabled || saving} onValueChange={value => setSelected(value === '__follow__' ? '' : String(value))}>
-          <SelectTrigger aria-label={t('标题总结模型')}><SelectValue>{selected || t('跟随对话模型')}</SelectValue></SelectTrigger>
-          <SelectContent>
-            <SelectItem value='__follow__'>{t('跟随对话模型')}</SelectItem>
-            {selected && !models.includes(selected) ? <SelectItem value={selected} disabled>{selected} · {t('不可用')}</SelectItem> : null}
-            {models.map(name => <SelectItem key={name} value={name}>{name}</SelectItem>)}
-          </SelectContent>
-        </Select>
+        <SearchableSelect value={selected || '__follow__'} disabled={disabled || saving}
+          onValueChange={value => setSelected(value === '__follow__' ? '' : value)}
+          aria-label={t('标题总结模型')} searchPlaceholder={t('搜索模型')}
+          displayValue={selected || t('跟随对话模型')} options={[
+            { value: '__follow__', label: t('跟随对话模型') },
+            ...(selected && !models.includes(selected) ? [{ value: selected, label: `${selected} · ${t('不可用')}`, disabled: true }] : []),
+            ...models.map(name => ({ value: name, label: name })),
+          ]} />
         <Label>{t('标题总结提示词')}</Label>
         <Textarea rows={7} value={draft} maxLength={8000} disabled={saving} onChange={event => setDraft(event.currentTarget.value)} />
         <p className='text-xs text-muted-foreground'>{t('首轮回答完成后自动总结；这会调用所选模型并消耗额度。')}</p>

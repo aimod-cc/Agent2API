@@ -167,6 +167,11 @@ export function SettingsPage() {
             <div className='m-grow'><div className='m-t1'>{t('客户端识别')}</div><div className='m-t2'>{t('内置识别、自定义规则与来源声明')}</div></div>
             <span className='m-chev'><Icon name='chev' /></span>
           </Button>
+          <Button size='default' variant='ghost' type='button' className='m-row h-auto min-h-[52px] w-full justify-start rounded-none border-0 px-3.5 py-3 text-left' onClick={() => store.push('provider-settings')}>
+            <span className='m-logo'><Icon name='settings' /></span>
+            <div className='m-grow'><div className='m-t1'>{t('提供商设置')}</div><div className='m-t2'>{t('按提供商查看和调整专属选项')}</div></div>
+            <span className='m-chev'><Icon name='chev' /></span>
+          </Button>
           <Button size='default' variant='ghost' type='button' className='m-row h-auto min-h-[52px] w-full justify-start rounded-none border-0 px-3.5 py-3 text-left' onClick={() => store.push('plugins')}>
             <span className='m-logo'><Icon name='plugin' /></span>
             <div className='m-grow'>

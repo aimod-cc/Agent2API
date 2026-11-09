@@ -123,7 +123,7 @@ export function accountOrder(provider: string, profile = current.workspace?.prof
 }
 export function accountOrderRules(provider: string): GroupSortRule[] {
   if (current.model && current.workspace?.customized) return []
-  return activeGroupSortRules(provider, current.workspace?.sorting?.rules[provider] || [])
+  return activeGroupSortRules(provider, current.workspace?.sorting?.rules[provider] || [], current.workspace?.sorting)
 }
 export function accountOrderLocked(provider: string): boolean {
   return accountOrderRules(provider).length > 0

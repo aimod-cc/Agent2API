@@ -62,6 +62,7 @@
 //! api/ 里的 handler 负责把 HTTP 输入转成 core 调用、再把结果转成响应。
 
 pub mod account_order;
+mod account_order_balance;
 pub mod account_store;
 // 本机 AI 客户端的接管注册表（「Agent」页）：客户端定义 + 配置读写
 pub mod agents;
@@ -75,6 +76,7 @@ pub mod assistant_images;
 pub mod auto_checkin;
 pub mod beijing;
 pub mod billing;
+pub mod branding;
 pub(crate) mod blocking;
 pub mod capability;
 pub mod checkin_history;
@@ -83,6 +85,8 @@ pub mod checkin_schedules;
 pub mod clash;
 pub mod client;
 pub(crate) mod compact_routing;
+// 客户端标题生成请求的识别与模型改写（配置在 `config::title_routes`）
+pub(crate) mod title_routing;
 // 云同步（设置页「数据 → 云同步」）：WebDAV / S3 兼容存储上的业务数据快照。
 // 范围、密钥封装与自动同步的触发口径见该模块头
 pub mod cloud_sync;
@@ -137,5 +141,6 @@ pub mod task_state;
 pub(crate) mod trae_model_ids;
 pub mod update;
 pub mod upstream;
+pub(crate) mod user_agent;
 pub mod usage_query;
 pub mod usage_records;

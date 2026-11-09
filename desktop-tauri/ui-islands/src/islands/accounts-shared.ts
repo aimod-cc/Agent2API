@@ -1,6 +1,9 @@
+import type { UsageQueryTask, UsageQueryStart } from '../../../ui-shared/usage-query-task'
 import { t } from '../i18n'
 import { type ProxyUsage } from '../../../ui-shared/proxy-usage'
 import type { BalanceQueryPublic } from './balance-query'
+import type { HiddenAccountProvider } from '../../../ui-shared/plugins'
+import type { UsageQuerySettings } from '../../../ui-shared/usage-query-settings'
 import type { LimiterGroup, LimiterSnapshot } from './accounts-limiter-types'
 import type { AccountSorting, AccountSortRule as GroupSortRule } from '../../../ui-shared/account-sorting'
 export type { AccountSorting, AccountSortRule as GroupSortRule } from '../../../ui-shared/account-sorting'
@@ -47,6 +50,7 @@ export type ProxyConfig = {
     port?: number
     username?: string
     password?: string
+    nonDirect?: boolean
   } | null
 }
 
@@ -103,7 +107,7 @@ export type BatchAccountsPayload = {
   ids: string[]
   proxy?: unknown
   maxConcurrent?: number
-  usageQuery?: { enabled: boolean; interval: number }
+  usageQuery?: UsageQuerySettings
   limiterGroups?: LimiterGroup[]
   limiters?: LimiterRule[]
   limiterMode?: BatchLimiterMode
@@ -151,6 +155,11 @@ export type AccountRecord = {
   nickname?: string
   /** 用户显式设置过备注名（后端在 update_account 真正改到 name 时打的标，见 apply_patch） */
   nameCustom?: boolean
+  /**
+   * 账号级自定义 User-Agent（空串 / 缺省 = 没设置，用该家自己的默认值）。
+   * 后端 `public_account` 对**所有家**统一注入，PATCH 时传空串即清除。
+   */
+  userAgent?: string
   email?: string
   priority?: number
   enabled?: boolean
@@ -225,9 +234,9 @@ export type AccountRecord = {
   /**
    * 每账号自动余额查询设置（后端公开形态恒为对象；**缺省 = 开启、1 分钟**，
    * 显式 `{enabled:false}` 才是关；见 accounts-domain 的 `usageQueryOf`）。
-   * `interval` 单位是秒（30 ~ 86400）。
+   * `interval` 单位是秒（30 ~ 86400）；`retries` 是首次失败后的额外尝试次数（默认 3）。
    */
-  usageQuery?: { enabled?: boolean; interval?: number }
+  usageQuery?: Partial<UsageQuerySettings>
   /**
    * 余额不足时的处理（**旧字段，限制器上线后只是兼容形态**：写入侧由后端在
    * 保存 `limiters` 时同步，读侧的有效规则见 `limiters`）。`threshold` 与余额列
@@ -253,20 +262,7 @@ export type AccountRecord = {
   [key: string]: unknown
 }
 
-export type HiddenAccountReason = 'not_installed' | 'pack_disabled' | 'provider_disabled' | 'not_loaded'
-
-export type HiddenAccountProvider = {
-  id: string
-  label: string
-  count: number
-  reason: HiddenAccountReason
-}
-
-export type HiddenAccountsSummary = {
-  total: number
-  byProvider: Record<string, number>
-  providers: HiddenAccountProvider[]
-}
+export type { HiddenAccountReason, HiddenAccountProvider, HiddenAccountsSummary } from '../../../ui-shared/plugins'
 
 /** `wbApp.getState()?.accounts` 的形状（providers 摘要 + 账号清单） */
 export type AccountsSnapshot = {
@@ -348,6 +344,8 @@ export type AccountsBridge = {
    */
   batchAccounts(payload: BatchAccountsPayload): Promise<BatchAccountsResult | null | undefined>
   getAllBalances(id?: string): Promise<{ results?: Array<Record<string, unknown>> } | null | undefined>
+  startBalanceQuery(id?: string, replace?: boolean): Promise<UsageQueryStart>
+  cancelBalanceQuery(id: string, requestId: string): Promise<{ cancelled: boolean }>
   /**
    * 用量快照（后端 `usage_query::snapshot`）：余额结论之外还带 Token 限制器的
    * 周期读数 —— `tokenAt` 是这批读数的计算时刻（与余额的 `at` 各走各的，前端
@@ -356,6 +354,7 @@ export type AccountsBridge = {
    */
   getBalancesSnapshot(): Promise<LimiterSnapshot & {
     at?: number
+    queries?: UsageQueryTask[]
     results?: Array<Record<string, unknown>>
     tokenAt?: number
     tokenUsage?: Record<string, unknown>
@@ -367,6 +366,7 @@ export type AccountsBridge = {
    *  结果会记进那条代理的「上次测试」，与代理页那颗按钮同一个动作 */
   testProxyPoolItem(id: string): Promise<{
     success?: boolean
+    status?: unknown
     ip?: string
     durationMs?: unknown
     error?: string
@@ -525,8 +525,8 @@ export type SharedWindow = {
   }
   /** CodeArts「领福利」流程（ui/codearts-welfare.js：只读探测 → 确认 → 领取 → 回读） */
   wbCodeArtsWelfare?: { start?: (account: AccountRecord | undefined) => Promise<unknown> }
-  /** 「添加账号」弹窗（归另一个代理，本页只调它的 open） */
-  wbAddAccountModal?: { open?: () => void; close?: () => void }
+  /** 添加账号弹窗，可直达指定提供商。 */
+  wbAddAccountModal?: { open?: () => void; openProvider?: (provider: string) => void; close?: () => void }
   /** 添加表单的步骤复位（打开弹窗后按 providers 摘要重画卡片） */
   wbAccountAddForms?: { syncAddProvider?: () => void }
 }

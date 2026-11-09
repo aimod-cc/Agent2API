@@ -17,6 +17,7 @@ use serde_json::Value;
 
 use crate::server::core::egress;
 use crate::server::core::proxies::ResolvedProxy;
+use crate::server::core::user_agent::AccountRequest;
 use crate::server::errors::GatewayError;
 
 /// token 临期刷新窗口：过期前 5 分钟视为需要刷新
@@ -115,7 +116,7 @@ pub async fn send_raw(
     if let Some(timeout) = timeout_ms {
         builder = builder.timeout(Duration::from_millis(timeout));
     }
-    let response = builder.send().await?;
+    let response = builder.with_account_user_agent().send().await?;
     let status = response.status().as_u16();
     let ok = response.status().is_success();
     let text = response.text().await?;

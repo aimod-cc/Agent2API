@@ -164,6 +164,10 @@ async fn add_plugin_account(
         // 新 runtime 的手动归一器只吃自身凭证/方法参数，不把网关代理配置混入
         // RAW 认证输入。旧插件仍收到原 payload，保留历史归一合同。
         let mut manual_payload = payload.clone();
+        // `userAgent` 是**账号属性**而不是该家的凭证：它由网关在创建后单独落库
+        // （见调用处），不能混进 account.normalize 的输入 —— 插件会把不认识的
+        // 键当成凭证字段校验，报出的错误与「UA 填错了」毫无关系。
+        if let Some(fields) = manual_payload.as_object_mut() { fields.remove("userAgent"); }
         if crate::server::core::providers::is_scoped_runtime_provider(provider) {
             if let Some(fields) = manual_payload.as_object_mut() {
                 if fields.get("methodIndex").is_some() {
@@ -214,8 +218,25 @@ async fn add_plugin_account(
     ) {
         Ok((record, proxy_saved)) => {
             let imported_id = record.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+            // 账号级自定义 User-Agent：与「账号设置」共用同一条 patch 入口
+            // （清除语义与校验只有一处，见 `apply_patch`）。值在 `add_account`
+            // 入口已经验过一遍，这里失败只可能是存储层故障 —— 如实报错，
+            // 不咽成「添加成功但 UA 没存上」。
+            let mut saved_account = record;
+            if let Some(user_agent) = payload.get("userAgent").filter(|_| !imported_id.is_empty()) {
+                match crate::server::core::client::catalog::normalize_user_agent_override(user_agent) {
+                    Ok(value) if !value.is_empty() => {
+                        match state.store().update_account(&imported_id, &json!({ "userAgent": value })) {
+                            Ok((account, _)) => saved_account = account,
+                            Err(error) => return store_error(error),
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => return store_error(error),
+                }
+            }
             let mut result = json!({
-                "account": record,
+                "account": saved_account,
                 "created": true,
                 "proxySaved": proxy_saved,
             });
@@ -326,6 +347,7 @@ pub async fn proxies_entry(State(state): State<ServerState>, request: axum::extr
     };
     match (method.as_str(), rest.as_str()) {
         ("GET", "") => super::proxies::list_proxies(&state).await,
+        ("GET", "system") => super::proxies::system_proxy().await,
         ("POST", "test") => super::proxies::test_proxy(&state, &body).await,
         ("GET", "pool") => super::proxies::pool_list(&state).await,
         ("POST", "pool") => super::proxies::pool_create(&state, &body).await,
@@ -399,6 +421,8 @@ pub async fn dispatch(
         ("POST", "refresh-expiring") => return refresh_expiring_accounts(&state).await,
         // 余额 / 积分查询（四家混查）实现在 `api::accounts_usage`（拆分见那里的模块头）。
         // `?id=` 是「手点某一行积分按钮」的单查形态，语义见 accounts_usage 的说明。
+        ("POST", "usage/start") => return super::accounts_usage::start_usage(&state, body),
+        ("POST", "usage/cancel") => return super::accounts_usage::cancel_usage(body),
         ("GET", "usage") => {
             return super::accounts_usage::accounts_usage(&state, query).await
         }
@@ -472,7 +496,7 @@ pub async fn dispatch(
         if let Some(id) = rest.strip_suffix("/officeace-subscription/activate") {
             let id = decode_segment(id);
             if !id.is_empty() {
-                return super::officeace_subscription::activate(&state, &id).await;
+                return super::officeace_subscription::activate(&state, &id, body).await;
             }
         }
         if let Some(id) = rest.strip_suffix("/campaigns/claim") {
@@ -619,6 +643,15 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
         .and_then(Value::as_str)
         .map(str::to_string);
     let import_name = name.as_deref();
+    // 新增账号随表单带来的自定义 User-Agent（可选）：**先校验再创建**。
+    // 若等落库之后再 patch，非法值会让用户看到「账号已添加，但 UA 没生效」的
+    // 半成功状态；而 UA 又是纯账号属性（不参与该家的账号规范化），拦在这里
+    // 不会误伤任何一家的凭证解析。空串 / null 都按「不设置」放行。
+    if let Some(value) = payload.get("userAgent") {
+        if let Err(error) = crate::server::core::client::catalog::normalize_user_agent_override(value) {
+            return store_error(error);
+        }
+    }
     if let Some(response) = super::accounts_export::import_account_file(state, provider, &payload, import_name).await {
         return response;
     }
@@ -1504,6 +1537,7 @@ pub async fn patch_account(state: &ServerState, id: &str, body: &Bytes) -> Respo
     match state.store().update_account(&id, &patch) {
         Ok((account, mut changes)) => {
             changes.extend(balance_changes);
+            crate::server::core::usage_query::refresh_configuration(state.store());
             // 改代理成功后对账：新引用的补监听器、旧引用失去的回收端口
             ok_json(json!({
                 "account": account,

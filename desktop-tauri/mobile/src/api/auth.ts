@@ -161,21 +161,15 @@ async function solve(challenge: Challenge, onProgress?: SolveProgress): Promise<
   throw new Error('未找到答案')
 }
 
-/**
- * 领题并求解，返回可直接放进登录请求体的 payload。
- *
- * 服务端关闭校验时领题回 400 —— 这时返回 `null`，调用方提交时不带 captcha 字段。
- */
+/** 旧网关只在领题接口明确返回「未启用」；网络失败不能当作关闭校验。 */
 export async function solveCaptcha(onProgress?: SolveProgress): Promise<string | null> {
-  let challenge: Challenge
-  try {
-    const response = await fetch(url('/api/panel/captcha'), { headers: { Accept: 'application/json' } })
-    if (!response.ok) return null
-    challenge = (await response.json()) as Challenge
-  } catch {
-    // 网关不可达：交给登录请求自己报错，不在这里把「验证失败」当结论
-    return null
+  const response = await fetch(url('/api/panel/captcha'), { headers: { Accept: 'application/json' }, cache: 'no-store' })
+  const payload = await response.json()
+  if (!response.ok) {
+    if (response.status === 400 && readError(payload?.error) === '机器人校验未启用') return null
+    throw new Error(readError(payload?.error) || '无法获取人机验证，请刷新后重试')
   }
+  const challenge = payload as Challenge
   const number = await solve(challenge, onProgress)
   // 服务端要的是 base64(JSON)（std 与 url-safe 都认，btoa 给的是 std）
   return btoa(

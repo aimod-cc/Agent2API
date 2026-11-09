@@ -26,6 +26,7 @@ use crate::server::core::account_store::store_util::{js_truthy, max_concurrent_p
 use crate::server::core::custom_providers;
 use crate::server::core::endpoints::{resolve_edition, EditionInfo};
 use crate::server::core::proxies::describe_account_proxy;
+use super::usage_settings::usage_query_public;
 
 /// 这条账号所属的家，此刻是否出现在管理界面上。
 ///
@@ -484,12 +485,20 @@ impl AccountStore {
         };
         match shaped {
             Value::Object(mut fields) => {
-                for key in ["upstreamCooldownUntil", "upstreamBlockedReason"] {
+                for key in ["rateLimits", "upstreamCooldownUntil", "upstreamBlockedReason"] {
                     if let Some(value) = record.get(key) { fields.insert(key.to_string(), value.clone()); }
                     else { fields.remove(key); }
                 }
                 if !record.has_plugin_secret() {
                     super::plugin_public::credential_fields(record, &mut fields);
+                }
+                if let Some(catalog) = record.get("pluginState").and_then(|state| state.get("host.catalog.v1")) {
+                    fields.insert("pluginModelPermissions".into(), json!({
+                        "known": catalog["value"]["meta"]["remote"] == true,
+                        "refreshedAt": catalog["value"]["meta"]["refreshed_at"],
+                        "models": catalog["value"]["models"].as_array().into_iter().flatten()
+                            .filter_map(|model| model["id"].as_str()).collect::<Vec<_>>(),
+                    }));
                 }
                 fields.insert(
                     "hasCredentials".to_string(),
@@ -612,9 +621,26 @@ impl AccountStore {
                 // 弹窗、徽章读的是**同一份事实**，不能各家形状一个口径。
                 // 恒为对象（未配置 = 各家缺省档的规范化形状，与写入侧
                 // `apply_patch` 的归一化一致），读侧不必判「键缺失」。
+                fields.insert("usageConfigKey".to_string(), Value::String(crate::server::core::usage_query::config::reading_key(record)));
                 fields.insert(
                     "usageQuery".to_string(),
                     usage_query_public(record.fields().get("usageQuery")),
+                );
+                // 账号级自定义 User-Agent（所有家通用）：恒为字符串，空串 = 没设置
+                // （用该家自己的默认 UA）。与上面几条同一理由 —— 账号设置弹窗要预填
+                // 现值，不能按 provider 各写一份读取；插件家的形状由插件给，顶层
+                // 这个键本来也不在它的 `account_view` 里。
+                fields.insert(
+                    "userAgent".to_string(),
+                    Value::String(
+                        record
+                            .fields()
+                            .get("userAgent")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .unwrap_or("")
+                            .to_string(),
+                    ),
                 );
                 fields.insert(
                     "lowBalance".to_string(),
@@ -820,33 +846,6 @@ fn balance_query_public(fields: &Map<String, Value>, scheme: &str) -> Value {
         "hasPassword": configured("password"),
         "hasToken": configured("token"),
     })
-}
-
-/// 记录上的 `usageQuery` → 公开形态的规范化形状（恒为对象）。
-///
-/// 读侧只做**容错展开**、不校验：合法性由写入侧（`apply_patch` 的
-/// `normalize_usage_query`）保证，这里负责把缺失 / 脏值收敛成缺省形状，让
-/// 调度与前端都按「恒定形状」读。缺省与 `usage_records::query_interval_of`
-/// 同一口径 —— **未配置 = 开启、1 分钟**（对齐全局任务时代「默认就在查」的
-/// 行为，升级后余额列不停更），只有显式 `{enabled:false}` 才是关。
-fn usage_query_public(value: Option<&Value>) -> Value {
-    use crate::server::core::usage_records::{
-        DEFAULT_QUERY_INTERVAL_SECONDS, MAX_QUERY_INTERVAL_SECONDS, MIN_QUERY_INTERVAL_SECONDS,
-    };
-    let Some(fields) = value.and_then(Value::as_object) else {
-        return json!({ "enabled": true, "interval": DEFAULT_QUERY_INTERVAL_SECONDS });
-    };
-    let enabled = fields.get("enabled").map(js_truthy).unwrap_or(true);
-    let interval = fields.get("interval").and_then(Value::as_i64).unwrap_or(0);
-    // 开着但间隔缺失 / 越界（脏值）→ 缺省间隔；关着则原样透出（0 = 未设过）
-    let interval = if enabled
-        && !(MIN_QUERY_INTERVAL_SECONDS..=MAX_QUERY_INTERVAL_SECONDS).contains(&interval)
-    {
-        DEFAULT_QUERY_INTERVAL_SECONDS
-    } else {
-        interval
-    };
-    json!({ "enabled": enabled, "interval": interval })
 }
 
 /// 记录上的 `lowBalance` → 公开形态的规范化形状。

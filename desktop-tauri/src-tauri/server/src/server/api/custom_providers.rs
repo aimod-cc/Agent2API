@@ -202,6 +202,7 @@ pub async fn update_custom_provider(State(state): State<ServerState>, body: Byte
             ),
         }
     }
+    crate::server::core::usage_query::refresh_configuration(state.store());
     let changes = describe_changes(before.as_ref(), &updated);
     let label = updated
         .get("name")

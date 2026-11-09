@@ -16,6 +16,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+#[path = "test_upstream.rs"]
+mod test_upstream;
+
 use super::*;
 use crate::server::core::providers::adapter::{ReasoningPatch, UpstreamErrorClass};
 use crate::server::core::providers::adapter::ProviderAdapter;
@@ -351,35 +354,30 @@ async fn missing_account_reports_not_found() {
 
 // ── 流式帧（head / chunk / credit / abort）──────────────────────
 
-/// 一个最小假上游：按请求体里的标记决定返回什么。
+/// 一个只接受本机请求的假上游。
 ///
 /// ── 为什么必须在测试里起一个真 HTTP 服务 ──────────────────────
 /// `demo` 的 `conversation` 是真的发请求（那正是要验的路径：插件自己出网、
 /// 自己推帧）。把它换成假实现就等于只测了网关自己的循环。
-async fn fake_upstream(body_marker: &'static str, payload: &'static str) -> (String, tokio::task::JoinHandle<()>) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("绑定回环端口");
-    let port = listener.local_addr().expect("本地地址").port();
-    let handle = tokio::spawn(async move {
-        loop {
-            let Ok((mut socket, _)) = listener.accept().await else { return };
-            let marker = body_marker;
-            let payload = payload;
-            tokio::spawn(async move {
-                // 读到请求头结束即可（body 的内容不影响假上游的判定）
-                let mut buf = vec![0u8; 16 * 1024];
-                let _ = socket.read(&mut buf).await;
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                    payload.len() + marker.len() * 0,
-                    payload
-                );
-                let _ = socket.write_all(response.as_bytes()).await;
-                let _ = socket.shutdown().await;
-            });
-        }
-    });
-    (format!("http://127.0.0.1:{port}"), handle)
+struct FakeUpstream(tokio::task::JoinHandle<()>);
+
+impl Drop for FakeUpstream {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn fake_upstream(payload: &'static str) -> (String, FakeUpstream) {
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(move |_body: axum::body::Bytes| async move {
+            ([("content-type", "text/event-stream")], payload)
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (url, FakeUpstream(task))
 }
 
 /// 建一个 demo 适配器。
@@ -415,7 +413,6 @@ fn upstream_headers(upstream: &str) -> axum::http::HeaderMap {
 #[ignore = "需要 AGENT2API_TEST_PLUGIN_EXE 指向含 demo 的插件二进制"]
 async fn conversation_streams_head_and_chunks() {
     let (upstream, _server) = fake_upstream(
-        "",
         "data: {\"choices\":[{\"delta\":{\"content\":\"你\"}}]}\n\ndata: [DONE]\n\n",
     )
     .await;
@@ -469,7 +466,6 @@ async fn conversation_streams_head_and_chunks() {
 #[ignore = "需要 AGENT2API_TEST_PLUGIN_EXE 指向含 demo 的插件二进制"]
 async fn conversation_non_stream_aggregates_on_the_gateway() {
     let (upstream, _server) = fake_upstream(
-        "",
         "data: {\"choices\":[{\"delta\":{\"content\":\"你\"},\"index\":0}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"好\"},\"index\":0}]}\n\ndata: [DONE]\n\n",
     )
     .await;
@@ -507,9 +503,8 @@ async fn conversation_non_stream_aggregates_on_the_gateway() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "需要 AGENT2API_TEST_PLUGIN_EXE 指向含 demo 的插件二进制"]
-async fn conversation_upstream_error_is_classified() {
+async fn conversation_http_200_body_is_forwarded_without_hanging() {
     let (upstream, _server) = fake_upstream(
-        "",
         "{\"error\":{\"message\":\"rate limited\",\"code\":429}}",
     )
     .await;
@@ -558,11 +553,9 @@ async fn conversation_upstream_error_is_classified() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "需要 AGENT2API_TEST_PLUGIN_EXE 指向含 demo 的插件二进制"]
 async fn dropping_the_stream_aborts_the_plugin_call() {
-    let (upstream, _server) = fake_upstream(
-        "",
-        "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\ndata: [DONE]\n\n",
-    )
-    .await;
+    use futures::StreamExt;
+
+    let mut upstream = test_upstream::PendingUpstream::start().await;
     let (_dir, host, adapter, telemetry) = demo_adapter().await;
     let (db, _guard) = crate::server::db::test_temp::TempDb::open("plugin-host-conv-drop");
     let store = crate::server::core::account_store::AccountStore::with_db(Some(db));
@@ -573,18 +566,30 @@ async fn dropping_the_stream_aborts_the_plugin_call() {
             &store,
             "acc-1",
             &body,
-            &upstream_headers(&upstream),
+            &upstream_headers(&upstream.url),
             None,
             true,
             &telemetry,
         )
         .await
         .expect("流式转发应当成功");
-    // 立刻丢弃（模拟客户端断开）：Drop 会清登记并给插件发 abort。
-    drop(outcome);
-    // 给 abort 一点时间落到插件那边；关键断言是「宿主仍然活着」——
-    // abort 路径上 panic 会让下一次调用失败。
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let ForwardOutcome::Stream { mut stream, .. } = outcome else {
+        panic!("应当返回未结束的流");
+    };
+    let first = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut text = String::new();
+        while !text.contains("started") {
+            let chunk = stream.next().await.expect("取消之前上游不能结束").unwrap();
+            text.push_str(&String::from_utf8_lossy(&chunk));
+        }
+        text
+    }).await.expect("应当收到首帧");
+    assert!(!first.contains("[DONE]"));
+    assert!(matches!(upstream.disconnected.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(10), &mut upstream.disconnected)
+        .await.expect("取消后插件必须关闭仍在等待的上游连接")
+        .expect("模拟上游应当报告连接释放");
     let still_alive = adapter
         .ensure_access_token(&store, "acc-1")
         .await

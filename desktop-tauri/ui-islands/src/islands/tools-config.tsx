@@ -6,6 +6,7 @@ import {
   confirmDialog,
 } from '@ui'
 import { t } from '../i18n'
+import { SearchableSelect } from '../../../ui-shared/searchable-select'
 import { callJson } from './assistant-state'
 import { openExternal } from './update-shared'
 import {
@@ -148,10 +149,9 @@ export function WebSearchConfig() {
         </Field>
         <Field>
           <FieldLabel>{t('批量网页抓取提供商')}</FieldLabel>
-          <Select value={selection.fetch_provider} onValueChange={value => { if (typeof value === 'string') setSelection(current => ({ ...current, fetch_provider: value })) }}>
-            <SelectTrigger className='w-full'><SelectValue>{fetchOptions.find(option => option.value === selection.fetch_provider)?.label || selection.fetch_provider}</SelectValue></SelectTrigger>
-            <SelectContent>{fetchOptions.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
-          </Select>
+          <SearchableSelect value={selection.fetch_provider} options={fetchOptions} className='w-full'
+            aria-label={t('批量网页抓取提供商')} searchPlaceholder={t('搜索提供商')}
+            onValueChange={fetch_provider => setSelection(current => ({ ...current, fetch_provider }))} />
           <FieldDescription>{t('仅支持单选，默认为 Tavily。')}</FieldDescription>
         </Field>
       </div>
@@ -233,14 +233,14 @@ function ProviderDialog({ provider, onClose, onSaved }: { provider: ProviderRow;
       <DialogBody className='flex flex-col gap-3'>
         {isAccount ? <Field>
           <FieldLabel>{t('搜索账号')}</FieldLabel>
-          <Select value={accountId || '__none__'} onValueChange={value => { if (typeof value === 'string') setAccountId(value === '__none__' ? '' : value) }}>
-            <SelectTrigger className='w-full'><SelectValue>{accountLabel}</SelectValue></SelectTrigger>
-            <SelectContent>
-              <SelectItem value='__none__'>{t('未选择账号')}</SelectItem>
-              {accountId && !accounts.some(account => account.id === accountId) ? <SelectItem value={accountId} disabled>{accountLabel}</SelectItem> : null}
-              {accounts.map(account => <SelectItem key={account.id} value={account.id}>{account.name}</SelectItem>)}
-            </SelectContent>
-          </Select>
+          <SearchableSelect value={accountId || '__none__'} className='w-full' displayValue={accountLabel}
+            aria-label={t('搜索账号')} searchPlaceholder={t('搜索账号…')}
+            onValueChange={value => setAccountId(value === '__none__' ? '' : value)} options={[
+              { value: '__none__', label: t('未选择账号') },
+              ...(accountId && !accounts.some(account => account.id === accountId)
+                ? [{ value: accountId, label: accountLabel, disabled: true }] : []),
+              ...accounts.map(account => ({ value: account.id, label: account.name })),
+            ]} />
           <FieldDescription>{t('复用「账号」页的登录态，不需要额外填写搜索密钥。账号停用或删除后不会自动换号。')}</FieldDescription>
           {!accounts.length ? <Alert variant='warning'>{t('没有可绑定的启用账号，请先到「账号」页添加或启用。')}</Alert> : null}
           {provider.available === false && provider.unavailable_reason ? <Alert variant='warning'>{t(provider.unavailable_reason)}</Alert> : null}
@@ -387,18 +387,17 @@ export function VisionConfigPanel() {
       <div className='grid grid-cols-1 gap-4 md:grid-cols-2'>
         <Field>
           <FieldLabel>{t('上游提供商')}</FieldLabel>
-          <Select value={provider} onValueChange={value => { if (typeof value === 'string') { setProvider(value); setModel('') } }}>
-            <SelectTrigger className='w-full'><SelectValue>{providerOptions.find(option => option.value === provider)?.label || t('请选择提供商')}</SelectValue></SelectTrigger>
-            <SelectContent>{providerOptions.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
-          </Select>
+          <SearchableSelect value={provider} options={providerOptions} className='w-full'
+            aria-label={t('上游提供商')} searchPlaceholder={t('搜索提供商')}
+            displayValue={providerOptions.find(option => option.value === provider)?.label || t('请选择提供商')}
+            onValueChange={value => { setProvider(value); setModel('') }} />
           <FieldDescription>{t('仅显示已启用且至少有一个可用模型的提供商。')}</FieldDescription>
         </Field>
         <Field>
           <FieldLabel>{t('上游模型')}</FieldLabel>
-          <Select value={model} onValueChange={value => { if (typeof value === 'string') setModel(value) }}>
-            <SelectTrigger className='w-full' disabled={!provider}><SelectValue>{model || (provider ? t('请选择模型') : t('请先选择提供商'))}</SelectValue></SelectTrigger>
-            <SelectContent>{modelOptions.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
-          </Select>
+          <SearchableSelect value={model} options={modelOptions} onValueChange={setModel} disabled={!provider}
+            className='w-full' aria-label={t('上游模型')} searchPlaceholder={t('搜索模型')}
+            displayValue={model || (provider ? t('请选择模型') : t('请先选择提供商'))} />
           <FieldDescription>{t('仅显示该提供商下已启用的模型。')}</FieldDescription>
         </Field>
         <Field>
@@ -414,13 +413,14 @@ export function VisionConfigPanel() {
         </Field>
         <Field>
           <FieldLabel>{t('内部调用 API Key')}</FieldLabel>
-          <Select value={keyId} onValueChange={value => { if (typeof value === 'string') setKeyId(value) }}>
-            <SelectTrigger className='w-full'><SelectValue>{keyOptions.find(option => option.value === keyId)?.label || t('请选择 API Key')}</SelectValue></SelectTrigger>
-            <SelectContent>
-              {savedKeyMissing ? <SelectItem value={config?.api_key_id || ''} disabled>{config?.api_key_name || config?.api_key_id}（{t('已失效')}）</SelectItem> : null}
-              {keyOptions.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
-            </SelectContent>
-          </Select>
+          <SearchableSelect value={keyId} onValueChange={setKeyId} className='w-full'
+            aria-label={t('内部调用 API Key')} placeholder={t('请选择 API Key')}
+            displayValue={keyOptions.find(option => option.value === keyId)?.label || t('请选择 API Key')}
+            options={[
+              ...(savedKeyMissing ? [{ value: config?.api_key_id || '',
+                label: `${config?.api_key_name || config?.api_key_id}（${t('已失效')}）`, disabled: true }] : []),
+              ...keyOptions,
+            ]} />
           <FieldDescription>{t('内部请求本站网关时使用的网关 Key；额度、限流与请求日志记在该 Key 上。')}</FieldDescription>
         </Field>
       </div>

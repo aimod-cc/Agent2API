@@ -70,33 +70,16 @@ async fn mock_upstream(
 //
 // 因此在改前的代码上第 1、4 条必红；第 2、3 条是「修复没有过头」的对照组。
 
-static TEMP_SEQ: AtomicUsize = AtomicUsize::new(0);
-
-/// 临时库目录，Drop 时删除。
-///
-/// 刻意不在建库前删了事：文件名带 pid，下一轮 pid 变了就永远删不到（曾在一台机器上
-/// 攒出几百份）。调用方按 `let (_dir, service, id) = temp_service();` 接 —— 局部变量
-/// 逆序析构，先关库再删目录。
-struct TempDbDir(std::path::PathBuf);
-
-impl Drop for TempDbDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 /// 一份临时库 + 挂在其上的 [`UpstreamService`] + 里面唯一那条账号的 id。
 ///
 /// 不发任何网络请求：记账与读回都只碰存储层，与转发选路用的是同一份读写口径。
-fn temp_service() -> (TempDbDir, UpstreamService, String) {
+fn temp_service() -> (tempfile::TempDir, UpstreamService, String) {
     use crate::server::core::account_store::AccountStore;
     use crate::server::core::auth::AuthService;
     use crate::server::db::Db;
 
-    let seq = TEMP_SEQ.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("pl-quota-{}-{seq}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let store = AccountStore::with_db(Some(Db::open(&dir.join("agent2api.db")).expect("临时库应当能建起来")));
+    let dir = tempfile::tempdir().expect("应当能创建临时数据库目录");
+    let store = AccountStore::with_db(Some(Db::open(&dir.path().join("agent2api.db")).expect("临时库应当能建起来")));
     let saved = store
         .add_account(
             &json!({"auth": {"accessToken": "at"}, "account": {"uid": "quota-1"}}),
@@ -106,7 +89,7 @@ fn temp_service() -> (TempDbDir, UpstreamService, String) {
         .expect("临时账号应当能建起来");
     let id = saved["id"].as_str().expect("公开形态应带 id").to_string();
     let service = UpstreamService::new(store.clone(), AuthService::for_store(store));
-    (TempDbDir(dir), service, id)
+    (dir, service, id)
 }
 
 /// 本家分类结果 → 记账名单（只取本次这一个键，绕开目录缓存的全局态）。

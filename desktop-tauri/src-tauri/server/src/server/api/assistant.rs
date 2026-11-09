@@ -344,6 +344,14 @@ pub async fn chat(State(state): State<ServerState>, headers: HeaderMap, body: By
         .await;
 
     match outcome {
+        Ok(ForwardOutcome::Native(response)) => {
+            let context = RecordContext {
+                stats: state.request_stats(), telemetry, started_at, model: requested_model,
+                client_model: model, client_reasoning: reasoning.unwrap_or_default(), status: i64::from(response.status),
+                raw_request: None, raw_response: None, is_test: true, source: access.source,
+            };
+            super::protocol::native_response::respond(response, context, &mut guard)
+        }
         Ok(ForwardOutcome::Stream { status, stream: source }) => {
             let status = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
             let context = RecordContext {

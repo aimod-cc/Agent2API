@@ -46,6 +46,10 @@ use serde_json::{Map, Value};
 use crate::server::db::schema;
 use crate::server::db::Db;
 
+#[cfg(test)]
+#[path = "sql_tests.rs"]
+mod tests;
+
 /// 配置迁移的完成标记键（`db::migrate::config` 的幂等闸门）。
 ///
 /// 与 `settings` 那种「目标键在不在」的闸门不同 —— 这里**必须**用标记：

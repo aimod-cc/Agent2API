@@ -1,8 +1,9 @@
 import * as React from 'react'
 import {
   Alert, Button, Card, CardContent, CardHeader, CardTitle, Field, FieldDescription, FieldLabel,
-  Input, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Spinner, Switch,
+  Input, Spinner, Switch,
 } from '@ui'
+import { SearchableSelect } from './searchable-select'
 import { t } from '../ui-kit/src/i18n'
 import { emptyImageTarget, type ImageConfigView, type ImageGenerationConfig, type ImageTarget, type ImageToolApi } from './tools-image-types'
 import { ToolImageHistory } from './tools-image-history'
@@ -19,34 +20,38 @@ function TargetFields({ target, view, editing, onChange, disabled }: {
   return <div className='grid grid-cols-1 gap-3 md:grid-cols-3'>
     <Field>
       <FieldLabel>{t('上游提供商')}</FieldLabel>
-      <Select value={target.provider} onValueChange={value => { if (typeof value === 'string') onChange({ provider: value, model: '', account_id: '' }) }}>
-        <SelectTrigger className='w-full' disabled={disabled}><SelectValue>{providers.find(([id]) => id === target.provider)?.[1] || target.provider || t('请选择提供商')}</SelectValue></SelectTrigger>
-        <SelectContent>
-          {target.provider && !providers.some(([id]) => id === target.provider) ? <SelectItem value={target.provider} disabled>{target.provider}（{t('已失效')}）</SelectItem> : null}
-          {providers.map(([id, label]) => <SelectItem key={id} value={id}>{label}</SelectItem>)}
-        </SelectContent>
-      </Select>
+      <SearchableSelect value={target.provider} disabled={disabled} className='w-full'
+        aria-label={t('上游提供商')} searchPlaceholder={t('搜索提供商')}
+        onValueChange={provider => onChange({ provider, model: '', account_id: '' })}
+        displayValue={providers.find(([id]) => id === target.provider)?.[1] || target.provider || t('请选择提供商')}
+        options={[
+          ...(target.provider && !providers.some(([id]) => id === target.provider)
+            ? [{ value: target.provider, label: `${target.provider}（${t('已失效')}）`, disabled: true }] : []),
+          ...providers.map(([value, label]) => ({ value, label })),
+        ]} />
     </Field>
     <Field>
       <FieldLabel>{editing ? t('编辑模型') : t('生图模型')}</FieldLabel>
-      <Select value={target.model} onValueChange={value => { if (typeof value === 'string') onChange({ ...target, model: value }) }}>
-        <SelectTrigger className='w-full' disabled={disabled || !target.provider}><SelectValue>{target.model || t('请选择模型')}</SelectValue></SelectTrigger>
-        <SelectContent>
-          {target.model && !models.some(model => model.id === target.model) ? <SelectItem value={target.model} disabled>{target.model}（{t('已失效')}）</SelectItem> : null}
-          {models.map(model => <SelectItem key={model.id} value={model.id}>{model.id}</SelectItem>)}
-        </SelectContent>
-      </Select>
+      <SearchableSelect value={target.model} disabled={disabled || !target.provider} className='w-full'
+        aria-label={editing ? t('编辑模型') : t('生图模型')} searchPlaceholder={t('搜索模型')}
+        onValueChange={model => onChange({ ...target, model })} displayValue={target.model || t('请选择模型')}
+        options={[
+          ...(target.model && !models.some(model => model.id === target.model)
+            ? [{ value: target.model, label: `${target.model}（${t('已失效')}）`, disabled: true }] : []),
+          ...models.map(model => ({ value: model.id, label: model.id })),
+        ]} />
     </Field>
     <Field>
       <FieldLabel>{t('生图账号')}</FieldLabel>
-      <Select value={target.account_id || '__auto__'} onValueChange={value => { if (typeof value === 'string') onChange({ ...target, account_id: value === '__auto__' ? '' : value }) }}>
-        <SelectTrigger className='w-full' disabled={disabled || !target.provider}><SelectValue>{accountLabel}</SelectValue></SelectTrigger>
-        <SelectContent>
-          <SelectItem value='__auto__'>{t('自动选择账号')}</SelectItem>
-          {target.account_id && !accounts.some(account => account.id === target.account_id) ? <SelectItem value={target.account_id} disabled>{accountLabel}</SelectItem> : null}
-          {accounts.map(account => <SelectItem key={account.id} value={account.id}>{account.name}</SelectItem>)}
-        </SelectContent>
-      </Select>
+      <SearchableSelect value={target.account_id || '__auto__'} disabled={disabled || !target.provider} className='w-full'
+        aria-label={t('生图账号')} searchPlaceholder={t('搜索账号…')} displayValue={accountLabel}
+        onValueChange={value => onChange({ ...target, account_id: value === '__auto__' ? '' : value })}
+        options={[
+          { value: '__auto__', label: t('自动选择账号') },
+          ...(target.account_id && !accounts.some(account => account.id === target.account_id)
+            ? [{ value: target.account_id, label: accountLabel, disabled: true }] : []),
+          ...accounts.map(account => ({ value: account.id, label: account.name })),
+        ]} />
     </Field>
   </div>
 }

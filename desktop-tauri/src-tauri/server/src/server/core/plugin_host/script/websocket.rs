@@ -272,6 +272,10 @@ pub fn abort(params: &Value) {
 
 pub fn clear() {
     if let Ok(mut items) = connections().lock() {
-        for (_, connection) in items.drain() { connection.cancel.cancel(); }
+        items.retain(|id, connection| {
+            if id.starts_with("wasm-") { return true; }
+            connection.cancel.cancel();
+            false
+        });
     }
 }

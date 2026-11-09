@@ -1,5 +1,6 @@
 import * as React from 'react'
-import { Card, CardContent, CardHeader, CardTitle, SegmentedControl, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@ui'
+import { Card, CardContent, CardHeader, CardTitle, SegmentedControl } from '@ui'
+import { SearchableSelect } from '../../../../ui-shared/searchable-select'
 import { DailyTrendChart } from './report-recharts'
 import { sourceName } from './source-stats'
 import { formatInt, formatPercent, formatTokens, SLICE_COLORS, type StatsDay, type StatsGroup, type StatsSummary } from '../report-charts'
@@ -75,10 +76,9 @@ export function ReportDailyTrend({ summary, loading }: { summary: StatsSummary |
     <CardContent className='report-card-content'>
       <div className='report-trend-filters'>
         <SegmentedControl options={DIMENSIONS} value={dimension} onValueChange={value => { setDimension(value as TrendDimension); setSelected('__all__') }} aria-label={t('趋势统计维度')} />
-        <Select value={selected} onValueChange={value => setSelected(String(value ?? '__all__'))}>
-          <SelectTrigger className='report-trend-select' aria-label={t('筛选统计项目')}><SelectValue>{options.find(option => option.value === selected)?.label || t('全部')}</SelectValue></SelectTrigger>
-          <SelectContent>{options.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
-        </Select>
+        <SearchableSelect value={selected} options={options} onValueChange={setSelected}
+          className='report-trend-select' aria-label={t('筛选统计项目')}
+          searchPlaceholder={dimension === 'models' ? t('搜索模型') : t('搜索…')} />
       </div>
       {summary ? <div className='report-chart-reading'>
         <div><strong><CompactValue value={total} /></strong><span>{metric === 'tokens' ? t('Token') : t('请求数')}</span></div>

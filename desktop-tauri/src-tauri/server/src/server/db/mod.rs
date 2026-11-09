@@ -322,16 +322,7 @@ fn install_cloud_sync_hook(conn: &Connection, accounts: Arc<revisions::AccountRe
     }
 }
 
-/// 测试专用：会**自己删文件**的临时库。
-///
-/// 为什么不是"打开前 `remove_file`"就完事：那只保证"不复用旧数据",不保证
-/// "不留垃圾"。文件名带进程 id,每轮 `cargo test` 都是一批新 pid —— Trae 一家
-/// 就这么在 `$TMPDIR` 里留下过 401 个文件、一百多 MB。所以清理必须挂在
-/// 拥有者的 `Drop` 上,调用点要把守卫**留在作用域里**(`let (store, _db) = …`),
-/// 而不是只拿那个 `Db`。
-///
-/// 测试中途 panic 也会走 drop(测试跑的是 unwind profile,`panic=abort`
-/// 只作用于生产构建),所以不需要显式 cleanup 调用。
+/// 测试专用临时库；守卫必须在所有数据库句柄释放之后销毁，Windows 才能清理文件。
 #[cfg(test)]
 pub(crate) mod test_temp {
     use std::path::{Path, PathBuf};
@@ -339,6 +330,7 @@ pub(crate) mod test_temp {
     use super::Db;
 
     pub struct TempDb {
+        _directory: tempfile::TempDir,
         path: PathBuf,
     }
 
@@ -350,25 +342,19 @@ pub(crate) mod test_temp {
                 .chars()
                 .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c.to_ascii_lowercase() } else { '-' })
                 .collect();
-            let path = std::env::temp_dir().join(format!("agent2api-test-{safe}-{}.db", std::process::id()));
-            let _ = std::fs::remove_file(&path);
+            let directory = tempfile::Builder::new()
+                .prefix(&format!("agent2api-test-{safe}-"))
+                .tempdir()
+                .expect("临时数据库目录应当可创建");
+            let path = directory.path().join("agent2api.db");
             let db = Db::open(&path)
                 .unwrap_or_else(|error| panic!("临时库打不开（{}）：{error}", path.display()));
-            (db, TempDb { path })
+            (db, TempDb { _directory: directory, path })
         }
 
         #[allow(dead_code)]
         pub fn path(&self) -> &Path {
             &self.path
-        }
-    }
-
-    impl Drop for TempDb {
-        fn drop(&mut self) {
-            // WAL / SHM 也要清:只删主文件会把它们留在原地。
-            for suffix in ["", "-wal", "-shm"] {
-                let _ = std::fs::remove_file(format!("{}{}", self.path.display(), suffix));
-            }
         }
     }
 }

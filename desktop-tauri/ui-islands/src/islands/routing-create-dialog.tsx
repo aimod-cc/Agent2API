@@ -4,13 +4,14 @@ import { t } from '../i18n'
 import type { AccountRecord } from './accounts-shared'
 import { createRouteMembers, newRouteId, routeGroupFieldsError, routeModelKey, RoutingGroupForm, type RoutingGroupFields } from './routing-group-form'
 import { RoutingModelPicker } from './routing-model-picker'
+import { sortRoutingModels } from './routing-model-order'
 import { RouteIcon } from './routing-ui'
 import { errorMessage, type RouteGroup, type RouteModelChoice, type RoutingWorkspace } from './routing-types'
 
 type RouteType = 'model' | 'group'
 
-export function RoutingCreateDialog({ workspace, choices, accounts, reserved, groupModels, modelError, disabled, onCreateModel, onCreateGroup, onClose }: {
-  workspace: RoutingWorkspace; choices: RouteModelChoice[]; accounts: AccountRecord[]; reserved: string[]; groupModels: string[]
+export function RoutingCreateDialog({ workspace, choices, accounts, lastUsed, reserved, groupModels, modelError, disabled, onCreateModel, onCreateGroup, onClose }: {
+  workspace: RoutingWorkspace; choices: RouteModelChoice[]; accounts: AccountRecord[]; lastUsed?: Record<string, number>; reserved: string[]; groupModels: string[]
   modelError?: string; disabled: boolean; onCreateModel(model: string): Promise<boolean>; onCreateGroup(group: RouteGroup): boolean; onClose(): void
 }) {
   const [type, setType] = React.useState<RouteType>('model')
@@ -20,13 +21,17 @@ export function RoutingCreateDialog({ workspace, choices, accounts, reserved, gr
   const [fields, setFields] = React.useState<RoutingGroupFields>({ name: '', model: '', description: '' })
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState('')
+  // 弹窗打开后保持排序快照，后台刷新不能移动正在选择的模型。
+  const [usageSnapshot] = React.useState(() => lastUsed || workspace.modelLastUsed)
+  const orderedModels = React.useMemo(() => sortRoutingModels(workspace.models, model => model, usageSnapshot), [workspace.models, usageSnapshot])
   const locked = disabled || busy
-  const groupIds = new Set(groupModels.map(model => model.toLowerCase()))
-  const configured = new Set(workspace.configuredModels.map(model => model.toLowerCase()))
-  const availableModels = workspace.models.filter(model => !configured.has(model.toLowerCase()) && !groupIds.has(model.toLowerCase()))
-  const models = availableModels.filter(model => model.toLowerCase().includes(search.trim().toLowerCase()))
-  const memberChoices = choices.filter(choice => !groupIds.has(choice.model.toLowerCase()))
-  const byKey = new Map(memberChoices.map(choice => [routeModelKey(choice), choice]))
+  const groupIds = React.useMemo(() => new Set(groupModels.map(model => model.toLowerCase())), [groupModels])
+  const configured = React.useMemo(() => new Set(workspace.configuredModels.map(model => model.toLowerCase())), [workspace.configuredModels])
+  const availableModels = React.useMemo(() => orderedModels.filter(model => !configured.has(model.toLowerCase()) && !groupIds.has(model.toLowerCase())), [orderedModels, configured, groupIds])
+  const query = search.trim().toLowerCase()
+  const models = React.useMemo(() => availableModels.filter(model => model.toLowerCase().includes(query)), [availableModels, query])
+  const memberChoices = React.useMemo(() => choices.filter(choice => !groupIds.has(choice.model.toLowerCase())), [choices, groupIds])
+  const byKey = React.useMemo(() => new Map(memberChoices.map(choice => [routeModelKey(choice), choice])), [memberChoices])
   const picked = selectedMembers.flatMap(key => { const choice = byKey.get(key); return choice ? [choice] : [] })
   const selected = availableModels.includes(selectedModel)
 
@@ -65,18 +70,22 @@ export function RoutingCreateDialog({ workspace, choices, accounts, reserved, gr
         <p className='routing-config-note'>{t('从现有模型中创建独立配置，自动列出提供它的全部提供商；之后的修改只跟随这个模型。')}</p>
         <Input value={search} disabled={locked} placeholder={t('搜索模型')} aria-label={t('搜索模型')}
           onChange={event => setSearch(event.currentTarget.value)} />
-        <RadioGroup className='routing-model-picker' value={selectedModel} disabled={locked} aria-label={t('模型独立路由')}
-          onValueChange={value => setSelectedModel(value)}>
-          {models.map(model => <Label key={model} className='routing-single-model' data-checked={selectedModel === model ? '' : undefined}>
-            <RadioGroupItem value={model} /><span title={model}>{model}</span>
-          </Label>)}
-          {!models.length ? <Empty>{search.trim() ? t('没有匹配的模型') : t('没有可添加的模型')}</Empty> : null}
-        </RadioGroup>
+        <div className='routing-create-models'>
+          <Button variant='ghost' className='routing-model-all' disabled={locked} aria-pressed={!search.trim()} title={t('显示全部')}
+            onClick={() => setSearch('')}>{t('全部')}</Button>
+          <RadioGroup className='routing-model-picker routing-create-model-list' value={selectedModel} disabled={locked} aria-label={t('模型独立路由')}
+            onValueChange={value => setSelectedModel(value)}>
+            {models.map(model => <Label key={model} className='routing-single-model' data-checked={selectedModel === model ? '' : undefined}>
+              <RadioGroupItem value={model} /><span title={model}>{model}</span>
+            </Label>)}
+            {!models.length ? <Empty>{search.trim() ? t('没有匹配的模型') : t('没有可添加的模型')}</Empty> : null}
+          </RadioGroup>
+        </div>
         <p className='routing-config-note'>{t('共 {n} 个可添加的模型', { n: availableModels.length })}{selected ? ` · ${selectedModel}` : ''}</p>
       </> : <>
         <RoutingGroupForm value={fields} onChange={setFields} disabled={locked} />
         <p className='routing-config-note'>{t('可以跨提供商、跨模型多选。同一提供商也可以加入不同模型。')}</p>
-        <RoutingModelPicker choices={memberChoices} selected={selectedMembers} onChange={setSelectedMembers} disabled={locked} />
+        <RoutingModelPicker choices={memberChoices} accounts={accounts} lastUsed={usageSnapshot} selected={selectedMembers} onChange={setSelectedMembers} disabled={locked} />
       </>}
       {error || type === 'model' && modelError ? <p className='routing-config-error' role='alert'>{error || modelError}</p> : null}
     </DialogBody>

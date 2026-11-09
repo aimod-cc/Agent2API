@@ -620,6 +620,22 @@ impl AccountStore {
                 }
             }
         }
+        // ── 账号级自定义 User-Agent ─────────────────────────────
+        // 用户在这个账号上填的「冒充值」，出站前由转发层统一覆盖适配器写好的
+        // UA（每家的默认 UA 都不同，覆盖点只能放在汇总处，见 `provider_loop`）。
+        // 与上面 ZCode / Antigravity 同一手法：键只在有值时出现，没设置的账号
+        // 连键都不会多，适配器看到的会话形状与历史逐字一致。
+        if let Some(object) = session.as_object_mut() {
+            let value = record
+                .fields()
+                .get("userAgent")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("");
+            if !value.is_empty() {
+                object.insert("userAgent".to_string(), Value::String(value.to_string()));
+            }
+        }
         // OfficeAce 的凭据注入已随实现搬到插件：插件从 `store.get` 直接读
         // secret（不经过会话形态），网关不再需要把它的网关 Basic 那一对
         // 摊进会话。
@@ -775,5 +791,6 @@ fn proxy_json(proxy: &crate::server::core::proxies::ResolvedProxy) -> Value {
         "username": proxy.username,
         "password": proxy.password,
         "label": proxy.label,
+        "nonDirect": proxy.non_direct,
     })
 }

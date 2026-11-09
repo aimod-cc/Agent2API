@@ -4,6 +4,8 @@ pub mod apply;
 mod backups;
 pub mod catalog;
 mod clients;
+pub mod configurations;
+pub mod configuration_actions;
 pub mod discover;
 mod dsh_installation;
 pub mod dsh_paths;
@@ -113,6 +115,7 @@ fn client_view(def: &ClientDef, gateway: &str) -> Value {
         "supportNote": detection.note.as_deref().unwrap_or(def.note),
         "docsUrl": def.docs, "needsRestart": def.needs_restart,
         "resources": resources::capabilities(def),
+        "configurations": configurations::list(def, &detection.path, &profiles, &live, writable).iter().map(configurations::Configuration::view).collect::<Vec<_>>(),
         "profiles": views, "live": live.iter().map(|profile| {
             let mut view = profile.view();
             view["editable"] = json!(writable && native::editable(def, profile));

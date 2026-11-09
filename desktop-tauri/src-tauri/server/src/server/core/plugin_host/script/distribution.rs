@@ -3,14 +3,21 @@ use serde_json::Value;
 use super::storage::{Package, PackageSource};
 
 const BASE: &str = "https://raw.githubusercontent.com/magpie-community/plugins/dist/";
+const INDEX_LIMIT: usize = 16 * 1024 * 1024;
 
-pub(super) async fn download(name: &str, selector: &str) -> Result<Package, String> {
-    super::operations::stage("package", "正在读取 Magpie 社区分发索引");
-    let bytes = super::download::github_bytes(&format!("{BASE}index.json"), 16 * 1024 * 1024).await?;
+/// 官方分发索引（`dist` 分支的 `index.json`）：下载与「检查更新」共用一份读法。
+pub(super) async fn index() -> Result<Value, String> {
+    let bytes = super::download::github_bytes(&format!("{BASE}index.json"), INDEX_LIMIT).await?;
     let index: Value = serde_json::from_slice(&bytes).map_err(|_| "Magpie 社区索引无法解析")?;
     if index["version"].as_u64() != Some(1) {
         return Err("Magpie 社区分发索引版本暂不兼容".into());
     }
+    Ok(index)
+}
+
+pub(super) async fn download(name: &str, selector: &str) -> Result<Package, String> {
+    super::operations::stage("package", "正在读取 Magpie 社区分发索引");
+    let index = index().await?;
     let package = index["packages"].get(name).ok_or("Magpie 社区分发源没有这个插件")?;
     let version = if selector.is_empty() || selector == "latest" {
         package["latest"].as_str().ok_or("Magpie 插件缺少最新版本")?

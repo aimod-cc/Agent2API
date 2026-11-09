@@ -36,7 +36,6 @@ use super::{
 };
 use super::anthropic::{parse_json_object, tool_result_parts, DEFAULT_MAX_TOKENS, ToolResultParts};
 use super::responses::ConvertError;
-use crate::server::core::model_rules;
 
 // ─── 请求：Chat → Anthropic ─────────────────────────────────
 
@@ -127,24 +126,24 @@ pub fn anthropic_request_from_chat(chat: &Value, model: &str) -> Result<Value, C
 
     // thinking 先判定：它决定 max_tokens 的下限，也决定 temperature/top_p
     // 能不能带（见模块头第二条规则）
-    let thinking = chat
-        .get("reasoning_effort")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .and_then(thinking_budget);
+    let adaptive = super::anthropic_thinking::supports_adaptive(model);
+    let effort = chat.get("reasoning_effort").and_then(Value::as_str).map(str::trim)
+        .filter(|level| !level.is_empty() && !crate::server::core::model_rules::reasoning_is_off(level));
+    let thinking = effort.and_then(thinking_budget);
     let mut max_tokens = ["max_tokens", "max_completion_tokens"]
         .iter()
         .find_map(|key| chat.get(*key).and_then(Value::as_i64).filter(|value| *value > 0))
         .unwrap_or(DEFAULT_MAX_TOKENS);
-    if let Some(budget) = thinking {
-        // Anthropic 要求 budget_tokens < max_tokens；不够就抬到 budget 之上
+    if let Some(budget) = thinking.filter(|_| !adaptive) {
         if max_tokens <= budget {
             max_tokens = budget + 1024;
         }
     }
     out.insert("max_tokens".to_string(), Value::from(max_tokens));
-    if thinking.is_some() {
+    if effort.is_some() && adaptive {
+        out.insert("thinking".to_string(), json!({ "type": "adaptive", "display": "summarized" }));
+        out.insert("output_config".to_string(), json!({ "effort": effort }));
+    } else if thinking.is_some() {
         if let Some(budget) = thinking {
             out.insert(
                 "thinking".to_string(),
@@ -199,7 +198,9 @@ pub fn anthropic_request_from_chat(chat: &Value, model: &str) -> Result<Value, C
             &dropped.describe(None, Some("目标上游按 anthropic 协议收，只认 anthropic 来源的原生声明")),
         );
     }
-    Ok(Value::Object(out))
+    let mut body = Value::Object(out);
+    super::anthropic_thinking::normalize(&mut body, model);
+    Ok(body)
 }
 
 /// 拆开的工具结果 → Anthropic 的 `tool_result.content`。
@@ -493,13 +494,7 @@ fn tool_choice_to_anthropic(choice: &Value) -> Value {
 /// 分档值与参考实现 `thinkingBudget` 对齐（它的 low/medium/high/max 四个
 /// 值原样落在这四档上）。
 fn thinking_budget(effort: &str) -> Option<i64> {
-    let rank = model_rules::reasoning_rank(effort)?;
-    Some(match rank {
-        0 | 1 => 1024,
-        2 => 4096,
-        3 => 10240,
-        _ => 32768,
-    })
+    super::anthropic_thinking::budget_for_effort(effort)
 }
 
 // ─── 响应：Anthropic SSE → Chat SSE（流式）────────────────────
@@ -534,6 +529,7 @@ pub struct ChatFromAnthropicStream {
     input_tokens: i64,
     cache_read: i64,
     cache_creation: i64,
+    cache_unknown: bool,
     output_tokens: i64,
     /// 已映射成 chat 口径的 finish_reason（`message_delta` 里给）
     finish_reason: Option<String>,
@@ -552,6 +548,7 @@ impl ChatFromAnthropicStream {
             input_tokens: 0,
             cache_read: 0,
             cache_creation: 0,
+            cache_unknown: false,
             output_tokens: 0,
             finish_reason: None,
         }
@@ -745,6 +742,7 @@ impl ChatFromAnthropicStream {
     /// 判据用「字段在不在」而不是「值是否非零」：0 是合法上报值（缓存未命中
     /// 就是 0），拿它当「没报」会让我们永远回落到一个更早的旧值。
     fn absorb_usage(&mut self, usage: &Value) {
+        self.cache_unknown |= usage.get("magpie_cache_unknown").and_then(Value::as_bool) == Some(true);
         let take = |key: &str| super::usage::token_count(usage.get(key));
         if let Some(value) = take("input_tokens") {
             self.input_tokens = value;
@@ -806,6 +804,7 @@ impl ChatFromAnthropicStream {
                 "total_tokens": prompt_tokens.saturating_add(self.output_tokens),
                 "prompt_tokens_details": { "cached_tokens": self.cache_read },
                 "cache_creation_input_tokens": self.cache_creation,
+                "magpie_cache_unknown": self.cache_unknown,
             },
         })));
         out.push(bytes::Bytes::from_static(b"data: [DONE]\n\n"));

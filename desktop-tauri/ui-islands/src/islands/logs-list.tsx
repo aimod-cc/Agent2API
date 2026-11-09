@@ -2,8 +2,8 @@ import * as React from 'react'
 import { Button, Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, SegmentedControl } from '@ui'
 import { t } from '../i18n'
 import {
-  formatLogTime, groupTime, logCategory, logContext, logLevel, logRawText, logSource,
-  logSummary, logText, shared, toast, type LogEntry, type LogGroup,
+  formatLogDuration, formatLogTime, groupTime, logAdvice, logCategory, logContext, logDetailText, logLevel, logNumber,
+  logPlugins, logRawText, logSource, logSteps, logSummary, logText, shared, toast, type LogEntry, type LogGroup,
 } from './logs-model'
 import { DIALOG_SEG_CLASS } from './dialog-segmented'
 import { Empty } from '@ui'
@@ -24,7 +24,9 @@ export function LogsList({ groups, empty, loading, listRef, onScroll, onDetail }
       </div>
       {groups.length ? groups.map(group => {
         const entry = group.entry
-        const context = logContext(entry)
+        const context = logContext(entry, t)
+        const summary = logSummary(entry, t)
+        const source = logSource(entry, t)
         return (
           <div className={`event-log-row ${entry.level || 'info'}`} key={group.id}>
             <time className='event-log-time' dateTime={entry.ts ? new Date(entry.ts).toISOString() : undefined} title={groupTime(group)}>
@@ -32,16 +34,16 @@ export function LogsList({ groups, empty, loading, listRef, onScroll, onDetail }
               {group.count > 1 ? <span>{formatLogTime(group.firstTs, true)}–{formatLogTime(group.lastTs, true)}</span> : null}
             </time>
             <span className={`event-log-level ${entry.level || 'info'}`}>{logLevel(entry.level, t)}</span>
-            <span className='event-log-source' title={logSource(entry, t)}>{logSource(entry, t)}</span>
+            <span className='event-log-source' title={source}>{source}</span>
             <div className='event-log-message'>
-              <span className='event-log-summary' title={logSummary(entry, t)}>{logSummary(entry, t)}</span>
+              <span className='event-log-summary' title={summary}>{summary}</span>
               {context ? <span className='event-log-context' title={context}>{context}</span> : null}
             </div>
             <span className={group.count > 1 ? 'event-log-count repeated' : 'event-log-count'} title={t('原始记录 {n} 条', { n: group.count })}>
               {group.count > 1 ? `×${group.count}` : '—'}
             </span>
             <Button variant='ghost' size='xs' onClick={() => onDetail(group)}
-              aria-label={t('查看日志详情：{message}', { message: logSummary(entry, t) })}>{t('详情')}</Button>
+              aria-label={t('查看日志详情：{message}', { message: summary })}>{t('详情')}</Button>
           </div>
         )
       }) : <Empty className='log-empty'>{empty}</Empty>}
@@ -53,10 +55,11 @@ function fields(entry: LogEntry): [string, string][] {
   return [
     [t('级别'), logLevel(entry.level, t)], [t('分类'), logCategory(entry.category, t)],
     [t('来源'), logSource(entry, t)], [t('提供商'), logText(entry, 'provider')],
+    [t('插件名称'), logText(entry, 'pluginName')], [t('插件编号'), logText(entry, 'pluginId')],
     [t('账号'), logText(entry, 'accountName') || logText(entry, 'account')],
-    [t('模型'), logText(entry, 'model')], [t('操作'), logText(entry, 'action')],
-    [t('关联标识'), logText(entry, 'callId')], [t('状态码'), logText(entry, 'status')],
-    [t('耗时'), logText(entry, 'durationMs') ? `${logText(entry, 'durationMs')} ms` : ''],
+    [t('模型'), logText(entry, 'model')],
+    [t('状态码'), logText(entry, 'status')],
+    [t('耗时'), formatLogDuration(logNumber(entry, 'durationMs'), t)],
   ].filter((pair): pair is [string, string] => Boolean(pair[1]))
 }
 
@@ -65,6 +68,10 @@ export function LogDetail({ group, onClose }: { group: LogGroup | null; onClose:
   React.useEffect(() => setTab('detail'), [group?.id])
   if (!group) return null
   const entry = group.entry
+  const advice = logAdvice(entry, t)
+  const detail = logDetailText(entry)
+  const steps = logSteps(entry, t)
+  const plugins = logPlugins(entry, t)
   const copy = async () => {
     const text = logRawText(group.entries)
     try {
@@ -94,10 +101,17 @@ export function LogDetail({ group, onClose }: { group: LogGroup | null; onClose:
             ]}
           />
           {tab === 'detail' ? <>
+            {advice ? <div className='event-log-advice'><h3>{t('处理建议')}</h3><p>{advice}</p></div> : null}
             <dl className='event-log-detail-grid'>{fields(entry).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
-            {logText(entry, 'detail') ? <div className='event-log-detail-block'><h3>{t('详细信息')}</h3><pre>{logText(entry, 'detail')}</pre></div> : null}
-            <div className='event-log-detail-block'><h3>{t('原始消息')}</h3><pre>{entry.message || '—'}</pre></div>
-            {entry.data ? <div className='event-log-detail-block'><h3>{t('附加数据')}</h3><pre>{JSON.stringify(entry.data, null, 2)}</pre></div> : null}
+            {plugins.length ? <div className='event-log-detail-block'><h3>{t('启动结果')}</h3>
+              <ul className='event-log-results'>{plugins.map(plugin => <li key={plugin.id}>
+                <span>{plugin.name}</span><span className={plugin.phase === 'ready' ? '' : 'event-log-warnings'}>{plugin.status}</span>
+              </li>)}</ul>
+            </div> : null}
+            {steps.length ? <div className='event-log-detail-block'><h3>{t('各阶段耗时')}</h3>
+              <dl className='event-log-detail-grid'>{steps.map((step, index) => <div key={index}><dt>{step.label}</dt><dd>{step.duration}</dd></div>)}</dl>
+            </div> : null}
+            {detail ? <div className='event-log-detail-block'><h3>{t('详细信息')}</h3><pre>{detail}</pre></div> : null}
             {group.count > 1 ? <div className='event-log-detail-block'><h3>{t('发生时间')}</h3>
               <div className='event-log-occurrences'>{group.entries.map((item, index) => <span key={item.id ?? index}>{formatLogTime(item.ts)}</span>)}</div>
             </div> : null}

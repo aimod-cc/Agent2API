@@ -7,6 +7,12 @@ pub(super) fn receive(store: &AccountStore, level: &str, message: &str, context:
     if message.trim().is_empty() {
         return;
     }
+    // 余额查询只由编排层在整轮重试结束后统一记录结果。
+    if context.get("action").and_then(Value::as_str)
+        == Some(agent2api_provider_protocol::methods::gateway::USAGE_QUERY)
+    {
+        return;
+    }
     logging::console_line("[Plugin]", message);
     let mut data = Map::new();
     data.insert("source".to_string(), json!("plugin"));

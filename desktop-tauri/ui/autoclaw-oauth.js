@@ -196,8 +196,10 @@
       // 取消按钮从发起那一刻就挂着（理由见 paintCancel 的说明）
       paintCancel(true);
       try {
+        const proxy = config.proxy?.();
+        config.onBusyChange?.(true);
         // ① 风控配置。`enabled: false` = 这一家没有这条登录方式（国内版就是这个值）
-        const captchaConfig = await bridge.getAutoclawOauthCaptchaConfig(prefix);
+        const captchaConfig = await bridge.getAutoclawOauthCaptchaConfig(prefix, proxy);
         if (!captchaConfig?.enabled) {
           throw new CaptchaError(wbI18n.t('这一家当前不支持网页登录，请改用填写凭证'));
         }
@@ -218,7 +220,7 @@
             sceneId: captchaConfig.sceneId,
           },
           async captchaVerifyParam => {
-            const answer = await bridge.startAutoclawOauth(prefix, vendor, captchaVerifyParam);
+            const answer = await bridge.startAutoclawOauth(prefix, vendor, captchaVerifyParam, proxy);
             const authUrl = String(answer?.authUrl || '').trim();
             if (!authUrl) {
               throw new CaptchaError(wbI18n.t('未能获取授权地址，请重试'));
@@ -274,6 +276,7 @@
         if (flow === flowGeneration) {
           activeState = '';
           busy = false;
+          config.onBusyChange?.(false);
           paintBusy(false, '');
           paintCancel(false);
           // 恢复空闲提示（不是清空）：那一行同时承担「打开方式是什么、会怎么打开」
@@ -321,6 +324,7 @@
         const wasWaiting = Boolean(activeState);
         activeState = '';
         busy = false;
+        config.onBusyChange?.(false);
         paintBusy(false, '');
         paintCancel(false);
         setHint(idleHint());

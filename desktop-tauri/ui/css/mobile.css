@@ -581,6 +581,26 @@
     min-width: 0;
   }
   .prov-rail .rail-empty { display: none; }
+  .prov-rail:has(> .models-provider-search) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
+    align-items: stretch;
+    overflow: hidden;
+  }
+  .prov-rail > .models-provider-search { grid-column: 1 / -1; padding: 0; }
+  .prov-rail:has(> .models-provider-search) > .rail-scroll {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    gap: 6px;
+    scrollbar-width: none;
+  }
+  .prov-rail:has(> .models-provider-search) > .rail-foot { display: flex; margin: 0; padding: 0; border: 0; }
+  .prov-rail .rail-scroll > .models-provider-empty { flex: 1 0 100%; max-width: none; }
 }
 
 @media (max-width: 767px) {

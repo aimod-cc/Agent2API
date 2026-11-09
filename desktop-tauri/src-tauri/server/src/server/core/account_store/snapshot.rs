@@ -149,7 +149,7 @@ fn route_account(account: &Value) -> Value {
         "id", "provider", "name", "nickname", "email", "userId", "uid", "account",
         "displayName", "priority", "addedAt", "enabled", "hasCredentials", "nameCustom",
         "needsRelogin", "allowRouteSkip", "maxConcurrent", "rateLimits", "limiterGroups",
-        "upstreamCooldownUntil", "zcodePlan", "pool", "quotaChannel",
+        "upstreamCooldownUntil", "zcodePlan", "pool", "quotaChannel", "pluginModelPermissions", "usageConfigKey",
     ] {
         if let Some(value) = account.get(key) { public.insert(key.to_string(), value.clone()); }
     }

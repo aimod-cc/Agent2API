@@ -5,13 +5,19 @@ use std::sync::{Arc, Mutex, OnceLock};
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::server::config::{self, AccountSortRule, AccountSortSettings, AddedSortDirection, CreditSortDirection};
-use super::{routing, usage_records::UsageRecord};
+use crate::server::config::{self, AccountSortRule, AccountSortSettings, AddedSortDirection, BalanceSortDirection, CreditSortDirection};
+use super::{account_order_balance::{self, AccountSortBalance, BalanceSortState}, routing, usage_records::UsageRecord};
 
-type CreditFacts = HashMap<String, Arc<Vec<i64>>>;
+struct UsageFacts {
+    credit_expiries: Vec<i64>,
+    balance: AccountSortBalance,
+    query_config: String,
+}
 
-fn credit_slot() -> &'static Mutex<CreditFacts> {
-    static FACTS: OnceLock<Mutex<CreditFacts>> = OnceLock::new();
+type AccountFacts = HashMap<String, Arc<UsageFacts>>;
+
+fn usage_slot() -> &'static Mutex<AccountFacts> {
+    static FACTS: OnceLock<Mutex<AccountFacts>> = OnceLock::new();
     FACTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -35,15 +41,19 @@ fn credit_expiries(usage: &Value) -> Vec<i64> {
     expiries
 }
 
-pub fn note_usage(id: &str, usage: &Value) {
-    if let Ok(mut facts) = credit_slot().lock() { facts.insert(id.to_string(), Arc::new(credit_expiries(usage))); }
+fn usage_facts(usage: &Value, query_config: &str) -> Arc<UsageFacts> {
+    Arc::new(UsageFacts { credit_expiries: credit_expiries(usage), balance: AccountSortBalance::from_usage(usage), query_config: query_config.to_string() })
+}
+
+pub fn note_usage(id: &str, usage: &Value, query_config: &str) {
+    if let Ok(mut facts) = usage_slot().lock() { facts.insert(id.to_string(), usage_facts(usage, query_config)); }
 }
 
 pub fn reload_usage(records: &HashMap<String, UsageRecord>) {
     let fresh = records.iter().filter_map(|(id, record)| {
-        record.usage.as_ref().map(|usage| (id.clone(), Arc::new(credit_expiries(usage))))
+        record.usage.as_ref().map(|usage| (id.clone(), usage_facts(usage, &record.query_config)))
     }).collect();
-    if let Ok(mut facts) = credit_slot().lock() { *facts = fresh; }
+    if let Ok(mut facts) = usage_slot().lock() { *facts = fresh; }
 }
 
 pub fn supports_credit_expiry(provider: &str) -> bool {
@@ -51,11 +61,30 @@ pub fn supports_credit_expiry(provider: &str) -> bool {
         .unwrap_or_else(|| matches!(provider, "workbuddy" | "workbuddy-intl" | "trae" | "officeace"))
 }
 
+pub fn rule_enabled(provider: &str, rule: &AccountSortRule) -> bool {
+    match rule {
+        AccountSortRule::Credit { on, .. } => *on && supports_credit_expiry(provider),
+        AccountSortRule::Balance { on, .. } => *on && super::usage_query::supports_usage_provider(provider),
+        AccountSortRule::Added { on, .. } => *on,
+    }
+}
+
 pub fn rules_for(provider: &str, settings: &AccountSortSettings) -> Vec<AccountSortRule> {
-    settings.get(provider).cloned().unwrap_or_else(|| vec![
+    let defaults = vec![
         AccountSortRule::Credit { on: supports_credit_expiry(provider), dir: CreditSortDirection::Soon },
+        AccountSortRule::Balance { on: false, dir: BalanceSortDirection::High },
         AccountSortRule::Added { on: false, dir: AddedSortDirection::New },
-    ])
+    ];
+    let Some(configured) = settings.get(provider) else { return defaults; };
+    let mut rules = configured.clone();
+    for mut rule in defaults {
+        if rules.iter().any(|current| current.key() == rule.key()) { continue; }
+        match &mut rule {
+            AccountSortRule::Credit { on, .. } | AccountSortRule::Balance { on, .. } | AccountSortRule::Added { on, .. } => *on = false,
+        }
+        rules.push(rule);
+    }
+    rules
 }
 
 pub fn manual_groups(accounts: &[Value]) -> Vec<(String, Vec<Value>)> {
@@ -96,6 +125,8 @@ pub struct AccountSorting {
     pub provider_order: Vec<String>,
     pub account_order: BTreeMap<String, Vec<String>>,
     pub credit_expires_at: BTreeMap<String, Option<i64>>,
+    pub balances: BTreeMap<String, AccountSortBalance>,
+    pub balance_sort_states: BTreeMap<String, BalanceSortState>,
 }
 
 pub fn sorting(accounts: &[Value], now: i64) -> AccountSorting {
@@ -104,17 +135,26 @@ pub fn sorting(accounts: &[Value], now: i64) -> AccountSorting {
         updated_at: now,
         configured: (*configured).clone(), rules: BTreeMap::new(), provider_order: Vec::new(),
         account_order: BTreeMap::new(), credit_expires_at: BTreeMap::new(),
+        balances: BTreeMap::new(), balance_sort_states: BTreeMap::new(),
     };
-    let facts = credit_slot().lock().map(|facts| facts.clone()).unwrap_or_default();
+    let facts = usage_slot().lock().map(|facts| facts.clone()).unwrap_or_default();
     for (provider, mut members) in manual_groups(accounts) {
         let credit_supported = supports_credit_expiry(&provider);
         let rules = rules_for(&provider, &configured);
         for account in &members {
             if let Some(id) = routing::account_id(account) {
-                let expiry = facts.get(id).and_then(|expiries| expiries.iter().find(|expiry| **expiry > now)).copied();
+                let fact = facts.get(id).filter(|fact| fact.query_config.is_empty()
+                    || account.get("usageConfigKey").and_then(Value::as_str).is_none_or(|key| key == fact.query_config));
+                let expiry = fact.and_then(|fact| fact.credit_expiries.iter().find(|expiry| **expiry > now)).copied();
                 result.credit_expires_at.insert(id.to_string(), expiry);
+                let balance = if account.get("isGuest") == Some(&Value::Bool(true)) { AccountSortBalance::default() }
+                    else { fact.map(|fact| fact.balance.clone()).unwrap_or_default() };
+                result.balances.insert(id.to_string(), balance);
             }
         }
+        let balance_state = account_order_balance::state(super::usage_query::supports_usage_provider(&provider),
+            members.iter().filter_map(|account| routing::account_id(account).and_then(|id| result.balances.get(id))));
+        result.balance_sort_states.insert(provider.clone(), balance_state);
         members.sort_by(|left, right| {
             for rule in &rules {
                 let order = match rule {
@@ -122,6 +162,11 @@ pub fn sorting(accounts: &[Value], now: i64) -> AccountSorting {
                         let expiry = |account: &Value| routing::account_id(account)
                             .and_then(|id| result.credit_expires_at.get(id)).copied().flatten();
                         compare_expiry(expiry(left), expiry(right), *dir)
+                    }
+                    AccountSortRule::Balance { on: true, dir } if balance_state == BalanceSortState::Ready => {
+                        let balance = |account: &Value| routing::account_id(account)
+                            .and_then(|id| result.balances.get(id)).and_then(AccountSortBalance::comparable);
+                        account_order_balance::compare(balance(left), balance(right), *dir)
                     }
                     AccountSortRule::Added { on: true, dir } => {
                         let added = |account: &Value| account.get("addedAt").and_then(number).unwrap_or(0.0);

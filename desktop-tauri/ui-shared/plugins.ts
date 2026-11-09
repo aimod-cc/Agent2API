@@ -1,11 +1,13 @@
 import type { UpdateSettingsMode } from './updates'
 import type { GithubFailure } from './github-access'
+import type { PluginLoadStatus, PluginStartupSnapshot } from './plugin-startup'
 
 export type PackProvider = {
   id: string
   label: string
   enabled: boolean
   loaded: boolean
+  overriddenBy?: string | null
 }
 
 export type PackSummary = {
@@ -25,11 +27,13 @@ export type PackSummary = {
   icon?: string | null
   providers: PackProvider[]
   host?: HostState
+  startup?: PluginLoadStatus | null
   providerCategory?: 'agent' | 'web'
 }
 
 export type HostState = {
   running: boolean
+  ready?: boolean
   providers: string[]
   crashes: number
   disabled: boolean
@@ -47,7 +51,6 @@ export type StorePlugin = GithubFailure & {
   id: string
   name: string
   description: string
-  official: boolean
   version: string | null
   page: string | null
   notes?: string | null
@@ -117,26 +120,52 @@ export type PluginSettings = {
   stable: boolean
   beta: boolean
   autoUpdate: boolean
-  autoInstallOfficial: boolean
   saved?: boolean
 }
 
-export type ScriptPackage = {
+export type ScriptProviderOption = {
+  key: string
+  label: string
+  description: string
+  default: boolean
+  confirm: string
+  labels?: Record<string, string>
+  descriptions?: Record<string, string>
+  confirms?: Record<string, string>
+}
+
+export type ScriptCatalogInfo = {
+  publisher?: import('./plugins-filters').ScriptPublisher
+  magpieOfficial?: boolean
+  magpieRecommended?: boolean
+  summary?: Record<string, string> | null
+  repository?: string | null
+  repositoryUrl?: string | null
+  stars?: number | null
+  starsAt?: number
+}
+
+export type ScriptPackage = ScriptCatalogInfo & {
   id: string
   name: string
+  settingsSchema?: { optionsExample?: Record<string, unknown>; providerOptions?: Record<string, ScriptProviderOption[]> }
+  displayName?: string
   version: string
+  icon?: string | null
   source?: { kind: 'github'; repository: string; ref: string; commit: string; sha256: string }
-    | { kind: 'magpie'; file: string; integrity: string } | null
-  checkinAllowed?: boolean
+    | { kind: 'magpie'; file: string; integrity: string } | { kind: 'local'; path: string } | null
   enabled: boolean
   installedAt: number
   error?: string | null
   running: boolean
+  startup?: PluginLoadStatus | null
   providers: PackProvider[]
 }
 
 export type ScriptOperation = {
   active: boolean
+  action?: string
+  target?: { id?: string | null; name?: string | null; source?: string | null; version?: string | null }
   stage?: string
   message?: string
   received?: number
@@ -144,13 +173,34 @@ export type ScriptOperation = {
   updatedAt?: number
 }
 
-export type ScriptRecommendation = {
+export type ScriptRecommendation = ScriptCatalogInfo & {
   name: string
   version: string
+  installable?: boolean
+  unavailableReason?: string | null
+  kind?: string
+  providerVerified?: boolean
+  icon?: string | null
   label: string
   providers: string[]
   source?: string
   selector?: string
+}
+
+/** 一个已安装脚本插件的「有没有新版本」（后台每 6 小时算一次，见后端的 updates 模块）。 */
+export type ScriptUpdate = {
+  id: string
+  /** 上游的最新版本；GitHub 来源的是提交短号 */
+  latest: string
+  available: boolean
+  /** 查不到时的原因；`available` 为假时才有意义（保守：查不到就不标记可更新） */
+  error?: string | null
+}
+
+export type ScriptUpdatesState = {
+  /** 上次检查的时刻（毫秒）；0 = 还没查过 */
+  checkedAt: number
+  updates: ScriptUpdate[]
 }
 
 export type ScriptPluginsState = {
@@ -159,11 +209,26 @@ export type ScriptPluginsState = {
   operation: ScriptOperation
   error?: string | null
   hostError?: string | null
-  recommended: ScriptRecommendation
+  recommended?: ScriptRecommendation | null
   recommendations?: ScriptRecommendation[]
+  catalog?: {
+    refreshing: boolean
+    completed: number
+    total: number
+    marketCheckedAt: number
+    githubCheckedAt: number
+    marketError?: string | null
+    githubError?: string | null
+    marketRetryAt?: number
+    githubRetryAt?: number
+    githubMissing?: number
+    topic: string
+  }
+  updates?: ScriptUpdatesState
 }
 
 export type PluginsPayload = {
+  startup?: PluginStartupSnapshot
   scripts?: ScriptPluginsState
   packs: PackSummary[]
   host: HostState
@@ -182,13 +247,15 @@ export type PluginMutation = Pick<PluginsPayload, 'packs' | 'host' | 'adminPanel
   hostError?: string | null
 }
 
-export type HiddenAccountReason = 'not_installed' | 'pack_disabled' | 'provider_disabled' | 'not_loaded'
+export type HiddenAccountReason = 'not_installed' | 'pack_disabled' | 'provider_disabled' | 'not_loaded' | 'loading' | 'load_failed' | 'load_timeout'
 
 export type HiddenAccountProvider = {
   id: string
   label: string
   count: number
   reason: HiddenAccountReason
+  packId?: string | null
+  startup?: PluginLoadStatus | null
 }
 
 export type HiddenAccountsSummary = {

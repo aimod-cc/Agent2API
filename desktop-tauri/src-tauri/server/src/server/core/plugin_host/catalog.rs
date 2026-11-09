@@ -71,13 +71,17 @@ fn snapshot_for(channels: crate::server::config::UpdateChannels) -> Value {
     }
     result["channels"] = json!(channels);
     if let Some(items) = result["plugins"].as_array_mut() {
-        for item in items {
+        for item in items.iter_mut() {
+            if let Some(object) = item.as_object_mut() {
+                object.remove("official");
+            }
             if item["error"] == true {
                 let repo = item["repository"].as_str().unwrap_or(update::FALLBACK_REPO);
                 let url = format!("https://api.github.com/repos/{repo}/releases");
                 rate_limit::decorate_cached(item, &url);
             }
         }
+        items.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
     }
     let stale = state.last_error.is_some() || invalidated;
     result["checked"] = json!(state.last_success_at > 0 && !invalidated);
@@ -186,7 +190,7 @@ async fn fetch_catalog(channels: crate::server::config::UpdateChannels) -> Resul
         let mut value = json!({
             "id": entry.id, "name": entry.name, "description": entry.description,
             "repository": repo,
-            "official": entry.official, "homepage": detail.as_ref().map(|detail| &detail.homepage),
+            "homepage": detail.as_ref().map(|detail| &detail.homepage),
             "protocol": detail.as_ref().map(|detail| detail.protocol), "icon": icon,
             "requireSigned": entry.require_signed || detail.as_ref().is_some_and(|detail| detail.require_signed),
             "version": Value::Null, "page": Value::Null, "notes": "", "prerelease": false,
@@ -202,11 +206,9 @@ async fn fetch_catalog(channels: crate::server::config::UpdateChannels) -> Resul
         .await
         {
             Ok(Some(release)) => {
-                let compatibility_error = if installed.is_none() {
-                    super::compatibility::version_error(&entry.id, &release.version)
-                } else {
-                    None
-                };
+                let compatibility_error = detail.as_ref().filter(|detail|
+                    detail.protocol != agent2api_provider_protocol::PROTOCOL_VERSION)
+                    .map(|detail| format!("插件要求协议 {}，当前网关支持 {}", detail.protocol, agent2api_provider_protocol::PROTOCOL_VERSION));
                 let require_signed = value["requireSigned"] == true || release.require_signed;
                 value["requireSigned"] = json!(require_signed);
                 value["version"] = json!(release.version);
@@ -215,7 +217,7 @@ async fn fetch_catalog(channels: crate::server::config::UpdateChannels) -> Resul
                 value["publishedAt"] = json!(release.published_at);
                 value["prerelease"] = json!(release.prerelease);
                 value["platforms"] = json!(release.platforms.into_iter().map(|(target, url, size)| {
-                    json!({ "current": target == current, "target": target, "url": url, "size": size, "requireSigned": require_signed })
+                    json!({ "current": target == current || target == super::wasm::manifest::TARGET, "target": target, "url": url, "size": size, "requireSigned": require_signed })
                 }).collect::<Vec<_>>());
                 if let Some(reason) = compatibility_error {
                     value["error"] = json!(true);
@@ -247,12 +249,7 @@ async fn fetch_catalog(channels: crate::server::config::UpdateChannels) -> Resul
         value["checkedAt"] = json!(logging::now_ms());
         plugins.push(value);
     }
-    plugins.sort_by(|left, right| {
-        right["official"]
-            .as_bool()
-            .cmp(&left["official"].as_bool())
-            .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
-    });
+    plugins.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
     Ok(json!({ "plugins": plugins }))
 }
 
@@ -260,13 +257,10 @@ pub fn updates() -> Value {
     let catalog = snapshot();
     let items = catalog["plugins"].as_array();
     let updates: Vec<Value> = super::list_packs().into_iter().map(|pack| {
-        if let Some(required) = super::compatibility::update_for(&pack) {
-            return required;
-        }
         let entry = items.and_then(|items| items.iter().find(|entry| entry["id"] == pack.id));
         let target = super::host_target();
         let platform = entry.and_then(|entry| entry["platforms"].as_array())
-            .and_then(|items| items.iter().find(|item| item["target"] == target));
+            .and_then(|items| items.iter().find(|item| item["target"] == target || item["target"] == super::wasm::manifest::TARGET));
         let version = entry.and_then(|item| item["version"].as_str());
         let available = version.is_some_and(|version| {
             crate::server::core::update::compare_versions(version, &pack.version) == Some(1)
@@ -302,7 +296,7 @@ pub fn updates() -> Value {
 
 async fn apply_automatic() {
     let settings = settings::current();
-    if !settings.auto_check || (!settings.auto_update && !settings.auto_install_official) {
+    if !settings.auto_check || !settings.auto_update {
         return;
     }
     let channels = settings.channels();
@@ -315,7 +309,7 @@ async fn apply_automatic() {
     };
     for entry in items {
         let settings = settings::current();
-        if !settings.auto_check || settings.channels() != channels {
+        if !settings.auto_check || !settings.auto_update || settings.channels() != channels {
             return;
         }
         let Some(id) = entry["id"].as_str() else {
@@ -323,7 +317,6 @@ async fn apply_automatic() {
         };
         if entry["error"] == true
             || super::operations::active(id)
-            || entry["official"] != true
             || entry["version"].as_str().is_none()
         {
             continue;
@@ -335,37 +328,26 @@ async fn apply_automatic() {
         }
         let packs = super::list_packs();
         let installed = packs.iter().find(|pack| pack.id == id);
-        let should_install = match installed {
-            Some(pack) => {
-                settings.auto_update
-                    && !pack.update_required
-                    && pack.enabled
-                    && pack.signed
-                    && entry["version"].as_str().is_some_and(|version| {
-                        crate::server::core::update::compare_versions(version, &pack.version)
-                            == Some(1)
-                    })
-            }
-            None => settings.auto_install_official,
-        };
-        if !should_install {
+        let should_update = installed.is_some_and(|pack| {
+            pack.enabled
+                && pack.signed
+                && entry["version"].as_str().is_some_and(|version| {
+                    crate::server::core::update::compare_versions(version, &pack.version) == Some(1)
+                })
+        });
+        if !should_update {
             continue;
         }
         let target = super::host_target();
         let Some(asset) = entry["platforms"]
             .as_array()
-            .and_then(|items| items.iter().find(|item| item["target"] == target))
+            .and_then(|items| items.iter().find(|item| item["target"] == target || item["target"] == super::wasm::manifest::TARGET))
         else {
             continue;
         };
         let version = entry["version"].as_str().unwrap_or("");
-        let action = if installed.is_some() {
-            "update"
-        } else {
-            "install"
-        };
         if let Err(error) =
-            super::operations::start_cached(id, action, &target, version, asset, true)
+            super::operations::start_cached(id, "update", &target, version, asset, true)
         {
             logging::verbose("[Plugin]", &format!("自动处理 {id}：{error}"));
             continue;
@@ -377,7 +359,6 @@ pub fn spawn() {
     crate::spawn_task(async move {
         reschedule(settings::current().interval * 60_000);
         loop {
-            super::compatibility::apply().await;
             let settings = settings::current();
             let state = task_state::read(&key()).unwrap_or_default();
             let network_enabled = settings.auto_check;

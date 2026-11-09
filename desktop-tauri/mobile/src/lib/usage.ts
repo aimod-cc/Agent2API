@@ -13,7 +13,7 @@
 
 import type { UsageRow, UsageSnapshot } from '../api/gateway'
 import { t, locale } from '../i18n'
-import { creditStatisticsWalletsOf, recordReadingsOf, snapshotReadingsOf, usageAggregateOf, usageNumberOrNull, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
+import { creditStatisticsWalletsOf, recordReadingsOf, snapshotReadingsOf, usageAggregateOf, usageEmptyStateOf, usageNumberOrNull, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
 import { formatStamp } from './format'
 import { mergeUsageQueryRow, usageQueryFailureStatus } from '../../../ui-shared/usage-query-state'
 import { creditExpirySummaryOf, creditExpiryText, creditExpiryUnitOf, expiringCreditsOf } from '../../../ui-shared/credit-expiry'
@@ -97,6 +97,8 @@ export function usageText(row?: UsageRow, now = Date.now()): UsageView {
 
   const data = usage as Record<string, unknown>
   if (data.error) return { kind: 'bad', text: t('查询失败'), detail: t(String(data.error)) }
+  const empty = usageEmptyStateOf(data, t)
+  if (empty) return { kind: 'muted', ...empty }
   const errors = partialErrors(data)
   const aggregate = usageAggregateOf(data, t)
   const expiry = creditExpiryText(creditExpirySummaryOf(expiringCreditsOf(data, now), now), t, compact, creditExpiryUnitOf(data))

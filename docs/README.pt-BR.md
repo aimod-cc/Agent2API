@@ -47,7 +47,11 @@ O Agent2API é um **gateway de roteamento de IA com gerenciamento de clientes Ag
 
 ## 💬 Comunidade e suporte
 
-- **Grupos do QQ**: grupos de chat do Agent2API — **os grupos 1 (`1127656296`) e 2 (`1130894674`) estão quase lotados, entre no grupo 3 (`1108276647`)**; pesquise o número no QQ para entrar.
+- **Grupos do QQ**: grupos de chat do Agent2API; pesquise o número do grupo no QQ para entrar.
+  - Grupo 1: `1127656296` (**Quase lotado — prefira o grupo 3 ou 4**)
+  - Grupo 2: `1130894674` (**Quase lotado — prefira o grupo 3 ou 4**)
+  - Grupo 3: `1108276647`
+  - Grupo 4: `1054072416`
 - **Grupo do Telegram**: <https://t.me/+9gM8YPvgRL02NGRl>
 - **💖 Doação**: se o Agent2API ajuda você, fique à vontade para [pagar um café ao autor](./SPONSOR.md); doações são voluntárias e não desbloqueiam nada.
 - **🤝 Patrocínio / negócios**: quer patrocinar o projeto ou divulgar seu produto aqui? Envie um e-mail para [541675139@qq.com](mailto:541675139@qq.com).

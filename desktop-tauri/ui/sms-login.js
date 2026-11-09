@@ -115,6 +115,8 @@
 
     /** 最近一次发码的中间态（deviceId / msgid，发码成功后才写入，见下） */
     let ticket = '';
+    let selectedProxy;
+    let proxySelected = false;
     /** 发码与登录共用一把锁：两个按钮都打上游，不能并点 */
     let busy = false;
     /**
@@ -353,7 +355,17 @@
       const phone = phoneOf();
       if (!PHONE_RE.test(phone)) { window.wbApp.toast(wbI18n.t('请填写 11 位大陆手机号'), 'err'); return; }
       const button = $(`${prefix}-sms-send`);
+      try {
+        if (!resuming || !proxySelected) {
+          selectedProxy = config.proxy?.();
+          proxySelected = true;
+        }
+      } catch (error) {
+        window.wbApp.toast(describeError(error), 'err');
+        return;
+      }
       busy = true;
+      config.onBusyChange?.(true);
       captchaPending = false;
       if (button) { button.disabled = true; button.textContent = wbI18n.t('发送中…'); }
       setHint('');
@@ -363,6 +375,7 @@
         // supportsCaptcha：告诉网关「认识发码前的滑块状态」，它才会用
         // 200 + status:captcha 回我们，而不是回一句错误。
         const sendPayload = { phone, provider: prefix, supportsCaptcha: true };
+        if (selectedProxy !== undefined) sendPayload.proxy = selectedProxy;
         if (captchaTicket) sendPayload.uuid = captchaTicket;
         const data = await request(profile.send, sendPayload);
         // ── 发码前的滑块验证（目前只有 Tabbit 国内站）──────────────────
@@ -395,6 +408,7 @@
         startCooldown();
       } finally {
         busy = false;
+        config.onBusyChange?.(prefix === 'kuku' && Boolean(ticket));
       }
     }
 
@@ -406,10 +420,13 @@
       if (!CODE_RE.test(code)) { window.wbApp.toast(wbI18n.t('请填写 6 位数字验证码'), 'err'); return; }
       const button = $(`${prefix}-sms-submit`);
       busy = true;
+      config.onBusyChange?.(true);
       if (button) { button.disabled = true; button.textContent = wbI18n.t('登录中…'); }
       setHint('');
       try {
         const payload = { phone, code, provider: prefix };
+        const proxy = prefix === 'kuku' && proxySelected ? selectedProxy : config.proxy?.();
+        if (proxy !== undefined) payload.proxy = proxy;
         // 中间态缺省时不传：后端会给出明确提示（Loomy 缺 msgid 时要求先发码），
         // 传空串反而会覆盖掉那层判定的语义
         if (ticket) payload[profile.ticketKey] = ticket;
@@ -427,6 +444,7 @@
         window.wbApp.toast(wbI18n.t('登录失败：{message}', { message: reason }), 'err');
       } finally {
         busy = false;
+        config.onBusyChange?.(false);
         if (button) { button.disabled = false; button.textContent = wbI18n.t('登录并添加'); }
       }
     }

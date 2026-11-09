@@ -10,6 +10,8 @@ use crate::server::core::{egress, proxies::{ResolvedProxy, ProxyResolution, reso
 
 struct Download {
     response: tokio::sync::Mutex<Option<reqwest::Response>>,
+    pending: Mutex<bytes::Bytes>,
+    chunk_limit: usize,
     touched: Mutex<std::time::Instant>,
     cancel: tokio_util::sync::CancellationToken,
     capture: Option<Arc<crate::server::core::debug_traffic::TrafficCapture>>,
@@ -37,7 +39,7 @@ impl Drop for Opening {
 }
 
 fn cancellation() -> proto::WireError {
-    error("脚本上游请求已取消")
+    proto::WireError::with_code("脚本上游请求已取消", proto::WireError::ABORTED)
 }
 
 pub fn resolve_proxy(params: &Value) -> Result<Value, proto::WireError> {
@@ -47,8 +49,7 @@ pub fn resolve_proxy(params: &Value) -> Result<Value, proto::WireError> {
         None => None,
     };
     Ok(match proxy {
-        Some(proxy) => json!({ "protocol": proxy.protocol, "host": proxy.host, "port": proxy.port,
-            "username": proxy.username, "password": proxy.password }),
+        Some(proxy) => crate::server::core::proxies::chain::wire_json(&proxy).map_err(error)?,
         None => Value::Null,
     })
 }
@@ -67,6 +68,15 @@ pub(super) fn proxy_for(url: &url::Url, params: &Value) -> Result<Option<Resolve
 }
 
 pub async fn open(params: &Value) -> Result<Value, proto::WireError> {
+    open_body(params, None).await
+}
+
+pub(in crate::server::core::plugin_host) enum RequestBody {
+    Bytes(bytes::Bytes),
+    Multipart(reqwest::multipart::Form),
+}
+
+pub(in crate::server::core::plugin_host) async fn open_body(params: &Value, body: Option<RequestBody>) -> Result<Value, proto::WireError> {
     let url = params["url"]
         .as_str()
         .ok_or_else(|| error("脚本请求缺少地址"))?;
@@ -83,12 +93,14 @@ pub async fn open(params: &Value) -> Result<Value, proto::WireError> {
     let method = reqwest::Method::from_bytes(params["method"].as_str().unwrap_or("GET").as_bytes())
         .map_err(|_| error("脚本请求方法无效"))?;
     let mut request = client.request(method, url.clone());
+    let multipart = matches!(body, Some(RequestBody::Multipart(_)));
     let mut sent_headers = Vec::new();
     if let Some(headers) = params["headers"].as_object() {
         if headers.len() > 128 {
             return Err(error("脚本请求头过多"));
         }
         for (key, value) in headers {
+            if multipart && key.eq_ignore_ascii_case("content-type") { continue; }
             if matches!(
                 key.to_ascii_lowercase().as_str(),
                 "host"
@@ -107,7 +119,9 @@ pub async fn open(params: &Value) -> Result<Value, proto::WireError> {
     }
     let capture = params["trace"].as_str().and_then(super::trace::find);
     let mut sent_body = Value::Null;
-    if let Some(body) = params["body"].as_str() {
+    if let Some(body) = body {
+        request = match body { RequestBody::Bytes(bytes) => request.body(bytes), RequestBody::Multipart(form) => request.multipart(form) };
+    } else if let Some(body) = params["body"].as_str() {
         if body.len() > 120 * 1024 * 1024 {
             return Err(error("脚本请求体过大"));
         }
@@ -134,6 +148,8 @@ pub async fn open(params: &Value) -> Result<Value, proto::WireError> {
         .to_string();
     let download = Arc::new(Download {
         response: tokio::sync::Mutex::new(None),
+        pending: Mutex::new(bytes::Bytes::new()),
+        chunk_limit: params["max_chunk"].as_u64().map(|size| size.clamp(1024, 256 * 1024) as usize).unwrap_or(usize::MAX),
         touched: Mutex::new(std::time::Instant::now()),
         cancel: tokio_util::sync::CancellationToken::new(),
         capture: capture.clone(),
@@ -167,7 +183,7 @@ pub async fn open(params: &Value) -> Result<Value, proto::WireError> {
         biased;
         _ = download.cancel.cancelled() => return Err(cancellation()),
         response = tokio::time::timeout(Duration::from_millis(timeout), request.send()) => response
-            .map_err(|_| error("脚本上游连接等待超时"))?.map_err(|failure| error(egress::describe_error_detail(&failure)))?,
+            .map_err(|_| proto::WireError::with_code("脚本上游连接等待超时", "timeout"))?.map_err(|failure| error(egress::describe_error_detail(&failure)))?,
     };
     if let Some(capture) = &capture {
         capture.attach_response(response.status().as_u16(), response.headers());
@@ -202,6 +218,15 @@ pub async fn read(params: &Value) -> Result<Value, proto::WireError> {
         *time = std::time::Instant::now();
     }
     let mut guard = download.response.lock().await;
+    if download.cancel.is_cancelled() { return Err(cancellation()); }
+    {
+        let mut pending = download.pending.lock().map_err(|_| error("网络分片不可用"))?;
+        if !pending.is_empty() {
+            let size = pending.len().min(download.chunk_limit);
+            let bytes = pending.split_to(size);
+            return Ok(json!({ "data": base64::engine::general_purpose::STANDARD.encode(bytes), "done": false }));
+        }
+    }
     let response = guard
         .as_mut()
         .ok_or_else(|| error("脚本上游响应头尚未就绪"))?;
@@ -210,13 +235,21 @@ pub async fn read(params: &Value) -> Result<Value, proto::WireError> {
         .clamp(1000, 1_800_000);
     let result = tokio::select! {
         biased;
-        _ = download.cancel.cancelled() => return Err(error("脚本上游请求已取消")),
+        _ = download.cancel.cancelled() => return Err(cancellation()),
         result = tokio::time::timeout(Duration::from_millis(wait), response.chunk()) => result,
     };
     match result {
-        Ok(Ok(Some(bytes))) => {
+        Ok(Ok(Some(mut bytes))) => {
             if let Some(capture) = &download.capture {
                 capture.push(&bytes);
+            }
+            if download.chunk_limit != usize::MAX && bytes.len() > 4 * 1024 * 1024 {
+                close(params);
+                return Err(error("上游单次网络分片过大"));
+            }
+            if bytes.len() > download.chunk_limit {
+                let rest = bytes.split_off(download.chunk_limit);
+                *download.pending.lock().map_err(|_| error("网络分片不可用"))? = rest;
             }
             Ok(
                 json!({ "data": base64::engine::general_purpose::STANDARD.encode(bytes), "done": false }),
@@ -232,7 +265,7 @@ pub async fn read(params: &Value) -> Result<Value, proto::WireError> {
         }
         Err(_) => {
             close(params);
-            Err(error("脚本上游响应空闲超时"))
+            Err(proto::WireError::with_code("脚本上游响应空闲超时", "timeout"))
         }
     }
 }
@@ -249,9 +282,11 @@ pub fn close(params: &Value) {
 
 pub fn clear() {
     if let Ok(mut items) = downloads().lock() {
-        for (_, item) in items.drain() {
+        items.retain(|id, item| {
+            if id.starts_with("wasm-") { return true; }
             item.cancel.cancel();
-        }
+            false
+        });
     }
     super::protocol::clear();
     super::websocket::clear();

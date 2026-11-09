@@ -25,7 +25,7 @@ export function RoutingProviderCard({ id, profile, workspace, scope, now, index,
   const globalAccounts = !scope
   const joined = (key: string) => globalAccounts ? accounts.find(account => account.id === key)?.enabled !== false : !profile.excludedAccounts.includes(key)
   const participants = order.filter(joined)
-  const rules = !scope || !workspace.customized ? activeGroupSortRules(id, workspace.sorting?.rules?.[id] || []) : []
+  const rules = !scope || !workspace.customized ? activeGroupSortRules(id, workspace.sorting?.rules?.[id] || [], workspace.sorting) : []
   const sorted = rules.length > 0
   const unavailable = workspace.providers.find(provider => provider.id === id)?.available === false
   const orderLocked = locked || Boolean(query)

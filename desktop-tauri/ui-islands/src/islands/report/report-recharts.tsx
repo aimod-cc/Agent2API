@@ -1,18 +1,19 @@
 import * as React from 'react'
 import { Empty } from '@ui'
 import {
-  Bar, CartesianGrid, Cell, ComposedChart, Line, LineChart, Pie, PieChart,
+  Bar, CartesianGrid, Cell, ComposedChart, LabelList, Line, LineChart, Pie, PieChart,
   ReferenceLine, ResponsiveContainer, Tooltip as RechartsTooltip, XAxis, YAxis,
 } from 'recharts'
 import { axisText, formatInt, formatPercent, formatTokens, formatUsagePercent, hourText, type DonutDatum, type DonutView, type StatsDay, type StatsHour } from '../report-charts'
 import { t } from '../../i18n'
 import { cacheTrendData, chartAxis, dailyModelLegend, dailyTrendData, dateTick } from './chart-data'
-import { renderDonutLabel } from './chart-labels'
+import { LINE_LABEL_GAP, renderDonutLabel, renderPointLabel } from './chart-labels'
+import { useWidth } from './use-width'
 import { CacheTooltip, DailyTooltip, DonutTooltip } from './chart-tooltips'
 import { CompactValue } from './compact-value'
 
 const tickStyle = { fill: 'var(--text-3)', fontSize: 11, fontFamily: 'var(--font-sans)' }
-const rateColor = 'var(--chart-cache)'
+const rateColor = 'var(--chart-cache-trend)'
 const tokenColor = 'var(--chart-tokens)'
 const gridColor = 'var(--hairline)'
 
@@ -61,14 +62,25 @@ export function UsageDonut({ view, ariaLabel, itemLabel }: { view: DonutView; ar
 }
 
 export function CacheTrendChart({ series, colors }: { series: StatsHour[]; colors: Map<string, string> }) {
-  const container = React.useRef<HTMLDivElement>(null)
+  const { ref: container, width } = useWidth()
   const rows = React.useMemo(() => cacheTrendData(series, colors), [series, colors])
-  const rateAxis = chartAxis(rows.reduce((peak, row) => Math.max(peak, row.rate), 0), 1)
-  const tokenAxis = chartAxis(rows.reduce((peak, row) => Math.max(peak, row.totalTokens), 0))
-  if (!rows.length) return <Empty>{t('暂无缓存趋势数据')}</Empty>
+  const rateAxis = chartAxis(rows.reduce((peak, row) => Math.max(peak, row.rate ?? 0), 0), 1)
+  const tokenAxis = chartAxis(rows.reduce((peak, row) => Math.max(peak, row.totalTokens ?? 0), 0))
+  // 两条折线共用抽稀步长：绘图区宽度扣掉左右纵轴的刻度带，再按每 46px 一个标签定步长。
+  // 停用的小时（used=false）不画点，但它们占着横轴的时间格，所以按整段小时数算间距。
+  const labels = React.useMemo(() => {
+    const used = rows.flatMap((row, index) => (row.used ? [index] : []))
+    const plot = Math.max(width - 130, 120)
+    return {
+      first: used[0] ?? -1,
+      last: used[used.length - 1] ?? -1,
+      stride: Math.max(1, Math.ceil(((rows.length - 1) * LINE_LABEL_GAP) / plot)),
+    }
+  }, [rows, width])
+  if (!rows.some(row => row.used)) return <div className='report-chart-empty'><Empty>{t('暂无缓存趋势数据')}</Empty></div>
   return <div className='report-chart-area' ref={container}>
     <ResponsiveContainer width='100%' height='100%' minWidth={0}>
-      <LineChart data={rows} margin={{ top: 16, right: 0, left: 0, bottom: 0 }} aria-label={t('近 24 小时缓存命中率与总 Token 趋势')}>
+      <LineChart data={rows} margin={{ top: 28, right: 0, left: 0, bottom: 0 }} aria-label={t('近 24 小时缓存命中率与总 Token 趋势')}>
         <CartesianGrid stroke={gridColor} vertical={false} />
         <XAxis dataKey='hour' tickFormatter={hourText} tick={tickStyle} tickLine={false} axisLine={false}
           minTickGap={32} interval='preserveStartEnd' height={32} tickMargin={12} />
@@ -80,10 +92,20 @@ export function CacheTrendChart({ series, colors }: { series: StatsHour[]; color
           tickLine={false} axisLine={false} width={68} tickMargin={8} />
         <RechartsTooltip cursor={{ stroke: 'var(--ui-border-strong)' }} isAnimationActive={false} filterNull={false}
           wrapperStyle={{ pointerEvents: 'none' }} content={props => <CacheTooltip {...props} container={container} />} />
-        <Line type='monotone' dataKey='rate' name={t('缓存命中率')} stroke={rateColor} strokeWidth={2.5}
-          dot={false} activeDot={{ r: 4, strokeWidth: 3, stroke: 'var(--ui-card)' }} isAnimationActive={false} />
+        <Line type='monotone' dataKey='rate' name={t('缓存命中率')} stroke={rateColor} strokeWidth={2}
+          connectNulls={false} dot={{ r: 2, fill: rateColor, strokeWidth: 0 }}
+          activeDot={{ r: 4, strokeWidth: 3, stroke: 'var(--ui-card)' }} isAnimationActive={false}>
+          <LabelList dataKey='rate' content={props => renderPointLabel(props, {
+            ...labels, fill: rateColor, place: 'below', flipUnder: rateAxis.max / 12, format: formatPercent,
+          })} />
+        </Line>
         <Line yAxisId='tokens' type='monotone' dataKey='totalTokens' name={t('总 Token')} stroke={tokenColor} strokeWidth={2}
-          strokeDasharray='5 3' dot={false} activeDot={{ r: 4, strokeWidth: 3, stroke: 'var(--ui-card)' }} isAnimationActive={false} />
+          connectNulls={false} dot={{ r: 2, fill: tokenColor, strokeWidth: 0 }}
+          activeDot={{ r: 4, strokeWidth: 3, stroke: 'var(--ui-card)' }} isAnimationActive={false}>
+          <LabelList dataKey='totalTokens' content={props => renderPointLabel(props, {
+            ...labels, fill: tokenColor, place: 'above', format: formatTokens,
+          })} />
+        </Line>
       </LineChart>
     </ResponsiveContainer>
   </div>

@@ -47,6 +47,8 @@ mod runtime;
 mod packages;
 mod pack_view;
 mod process;
+mod process_guard;
+pub(crate) mod provider_settings;
 mod registry;
 mod rpc;
 pub(crate) mod rpc_cache;
@@ -54,12 +56,16 @@ pub mod schedules;
 pub mod script;
 pub mod settings;
 mod stream;
+pub mod startup;
 mod switching;
 pub mod update;
+pub(crate) mod wasm;
+pub use wasm::owns as dynamic_login;
 
 #[cfg(test)]
 mod tests;
 
+pub(crate) use bootstrap::loopback_port as callback_port;
 pub use callbacks::GatewayCallbacks;
 pub use bootstrap::{
     reload as reload_host, set_loopback_port, spawn as spawn_bootstrap, start as bootstrap_host,
@@ -243,6 +249,7 @@ fn is_frame_too_large(error: &std::io::Error) -> bool {
 pub struct HostStatus {
     /// 子进程是否在跑。
     pub running: bool,
+    pub ready: bool,
     /// 已加载的 provider id 列表。
     pub providers: Vec<String>,
     /// 连续崩溃次数（> 0 说明这个包不稳）。
@@ -257,6 +264,7 @@ pub struct HostStatus {
 pub struct Host {
     /// 启动参数。
     options: HostOptions,
+    embedded: wasm::Embedded,
     activity: Arc<activity::Activity>,
     /// 当前代进程的写端；退出状态由 ProcessRun 独立持有。
     inner: Mutex<Option<Inner>>,
@@ -296,6 +304,7 @@ pub struct Host {
     last_error: StdMutex<Option<String>>,
     /// 已加载的 provider（`init` 之后填）。
     providers: StdMutex<Vec<proto::ProviderInfo>>,
+    provider_settings: StdMutex<std::collections::BTreeMap<String, provider_settings::Schema>>,
     /// 回调处理器（网关侧实现，见 [`GatewayCallbacks`]）。
     callbacks: Arc<dyn GatewayCallbacks>,
 }
@@ -362,6 +371,7 @@ impl Host {
     pub fn new(options: HostOptions, callbacks: Arc<dyn GatewayCallbacks>) -> Self {
         Self {
             options,
+            embedded: wasm::Embedded::default(),
             activity: Arc::new(activity::Activity::default()),
             inner: Mutex::new(None),
             lifecycle: StdMutex::new(()),
@@ -379,6 +389,7 @@ impl Host {
             running: AtomicBool::new(false),
             last_error: StdMutex::new(None),
             providers: StdMutex::new(Vec::new()),
+            provider_settings: StdMutex::new(std::collections::BTreeMap::new()),
             callbacks,
         }
     }
@@ -400,10 +411,12 @@ impl Host {
             // 这里用 try_lock 之外的方式判断「在跑」：`inner` 是 tokio Mutex，
             // 同步上下文不能 await。改用一个原子标志 —— 见 `running` 字段。
             running: self.running.load(Ordering::Acquire),
+            ready: self.ready(),
             providers,
             crashes: self.crashes.lock().map(|c| *c).unwrap_or(0),
             disabled: self.disabled.load(Ordering::Acquire),
-            last_error: self.last_error.lock().ok().and_then(|e| e.clone()),
+            last_error: if self.options.startup.as_ref().is_some_and(startup::Attempt::pending) { None }
+                else { self.last_error.lock().ok().and_then(|e| e.clone()) },
         }
     }
 
@@ -450,6 +463,11 @@ impl Host {
                 self.callbacks.log_context(level, message, frame.params.unwrap_or(serde_json::Value::Null));
             }
             Some("head") => self.deliver_head(frame),
+            Some("startup") if self.options.script => {
+                if let (Some(attempt), Some(params)) = (&self.options.startup, &frame.params) {
+                    if !self.ready() { attempt.progress(params); }
+                }
+            }
             Some("chunk") => self.deliver_chunk(frame),
             // `end` 等未来事件：旧网关忽略，不报错（向前兼容）
             _ => {}
@@ -539,6 +557,7 @@ impl Host {
         params: serde_json::Value,
         timeout: Duration,
     ) -> Result<serde_json::Value, proto::WireError> {
+        if self.options.wasm.is_some() { return self.call_wasm(method, params, timeout).await; }
         let lease = if matches!(method, proto::methods::gateway::INIT | proto::methods::gateway::SHUTDOWN | proto::methods::gateway::ABORT) {
             None
         } else {
@@ -598,7 +617,7 @@ impl Host {
                 }
                 Err(proto::WireError::with_code(
                     format!("插件调用超时（{method}）"),
-                    proto::WireError::INTERNAL,
+                    if method == proto::methods::gateway::INIT { "plugin_init_timeout" } else { proto::WireError::INTERNAL },
                 ))
             }
         }
@@ -634,6 +653,7 @@ impl Host {
         method: &str,
         params: serde_json::Value,
     ) -> Result<StreamCall, String> {
+        if self.options.wasm.is_some() { return self.open_wasm_stream(params).await; }
         let lease = self.activity.acquire().ok_or_else(|| "插件正在切换或已关闭".to_string())?;
         self.ensure().await?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -684,6 +704,7 @@ impl Host {
 
     /// 消费端结束不代表插件已完成；登记与租约由终态应答或进程退出释放。
     pub fn close_stream(&self, id: i64) -> bool {
+        if self.options.wasm.is_some() { return self.abort_wasm(id); }
         if let Ok(mut guard) = self.streams.lock() {
             if let Some(stream) = guard.get_mut(&id) {
                 stream.closed = true;
@@ -695,6 +716,7 @@ impl Host {
 
     /// 取消一条在途的流式调用。
     pub async fn abort(&self, id: i64) {
+        if self.options.wasm.is_some() { self.abort_wasm(id); return; }
         let _ = self.call_coded(
             proto::methods::gateway::ABORT,
             serde_json::json!({ "id": id }),
@@ -704,6 +726,7 @@ impl Host {
 
     /// 归还背压额度。
     pub async fn credit(&self, id: i64, n: usize) {
+        if self.options.wasm.is_some() { self.credit_wasm(id, n); return; }
         let frame = proto::Frame {
             id: self.next_id.fetch_add(1, Ordering::Relaxed),
             method: Some(proto::methods::gateway::CREDIT.to_string()),
@@ -724,7 +747,10 @@ impl HostStatus {
                 self.last_error.as_deref().unwrap_or("原因未知")
             );
         }
-        if self.running {
+        if self.running && !self.ready {
+            return "插件正在初始化，尚未就绪".to_string();
+        }
+        if self.ready {
             return format!("插件运行中，已加载 {} 家提供商", self.providers.len());
         }
         match &self.last_error {

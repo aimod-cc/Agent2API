@@ -26,11 +26,6 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
   Sheet,
   SheetBody,
   SheetContent,
@@ -42,6 +37,7 @@ import {
   cn,
   Label } from '@ui'
 import { t } from '../i18n'
+import { SearchableSelect } from '../../../ui-shared/searchable-select'
 import { ASSISTANT_TOOLS, TOOL_META } from './assistant-tools'
 import { DEFAULT_SYSTEM_PROMPT, type AssistantConfig, type PermissionMode } from './assistant-state'
 import { BoltIcon, CheckIcon, ShieldIcon, SlidersIcon } from './assistant-icons'
@@ -142,28 +138,13 @@ export function AssistantSettingsDrawer({
                 <Label>{t('模型')}</Label>
                 {/* 与聊天框里的模型列表同一份数据（父组件透传 names）：两处的
                     候选口径必须逐字一致，否则会出现「这里能选、聊天框选不到」。 */}
-                <Select
-                  value={currentModel ?? ''}
-                  disabled={!ready || busy || !modelsReady}
-                  onValueChange={value => {
-                    if (!config) return
-                    const name = String(value)
-                    if (!name) return
-                    onSave({ ...config, model: name }, t('对话模型已切换'))
-                  }}
-                >
-                  <SelectTrigger className='asst-select-trigger' aria-label={t('模型')}>
-                    <SelectValue>
-                      {modelLabel}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectContent>
-                    {models.length === 0 && <SelectItem value='none' disabled>{t('没有可用的模型')}</SelectItem>}
-                    {models.map(name => (
-                      <SelectItem key={name} value={name}>{name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <SearchableSelect value={currentModel ?? ''} disabled={!ready || busy || !modelsReady}
+                  className='asst-select-trigger' aria-label={t('模型')} searchPlaceholder={t('搜索模型')}
+                  displayValue={modelLabel} emptyHint={models.length ? t('没有匹配的模型') : t('没有可用的模型')}
+                  options={models.map(name => ({ value: name, label: name }))}
+                  onValueChange={name => {
+                    if (config && name) onSave({ ...config, model: name }, t('对话模型已切换'))
+                  }} />
               </div>
               {modelWarning && <p className='asst-hint bad' role='status'>{modelWarning}</p>}
 

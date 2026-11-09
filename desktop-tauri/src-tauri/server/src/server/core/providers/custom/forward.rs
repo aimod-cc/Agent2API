@@ -1,76 +1,14 @@
-//! 自定义提供商的 **Chat Completions 协议转发**（OpenAI 兼容透传，零转换）。
-//!
-//! ── 与内置家适配器的同与不同 ────────────────────────────────
-//! 形状与「有状态适配器的转发入口」（`ProviderAdapter::forward_conversation`）
-//! 同构：编排层（`provider_loop::attempt_custom`）完成选路、telemetry 记账，
-//! 本函数只负责「一次发送」—— 读配置与凭证 → 改写请求体 → 发出 → 把响应
-//! 包成 `ForwardOutcome`。它**不是** `ProviderAdapter` 的实现：自定义家不进
-//! `ProviderKind`（理由见 `mod.rs` 的模块头），分派发生在 `attempt_queue`
-//! 对 `is_custom_provider_id` 的显式分支上。
-//!
-//! slot / connections 作为参数进来（比编排概念的七参数签名多两个）：无状态
-//! 路径在编排层就地构造 `ForwardStream`，而本函数在 `providers::custom` 下、
-//! 离 `upstream` 模块树更远 —— 凭证的移交只能自己完成（`ForwardStream::new`
-//! 需要它们）。多带两个 `&mut` 换来「与无状态路径逐字同构的交接时序」：
-//! 流式时 `slot.take()` + `connections.handoff()` 移交给流，非流式时凭证留在
-//! 调用方栈帧、随函数返回自然析构（与无状态路径同一条生命周期规则）。
-//!
-//! ── 透传语义（本协议的全部卖点，也是全部约束）─────────────────
-//! 上游就是 OpenAI Chat Completions 形态，所以：
-//!   - 请求体：客户端的字节**原样**出去（send_body 已做过系统提示词/脱敏两层
-//!     处理），唯一的改写是 `model` 字段（映射 alias → 上游真名）与按需注入
-//!     `reasoning_effort`（思考等级绑定）—— 都是「客户端语义」的修正，不是
-//!     协议翻译。**唯一的例外**是记录显式开了 `clientEmulation`
-//!     （见 [`emulation`]：OpenCode Zen 的免费档要求请求体是「智能体形态」，
-//!     要补两个桩工具）—— 那是 opt-in 的形态伪装，默认一个字节都不动；
-//!   - 响应：上游永远以 `stream:true` 被请求（编排层入口已强制注入），流式
-//!     客户端拿 SSE 逐帧透传（reasoning 合并照走 `ForwardStream`），非流式
-//!     客户端拿聚合后的完整 JSON（照走 `aggregate_sse_completion`）—— 两者的
-//!     `model` 字段都改写回**客户端请求的名字**（参考 AutoClaw 的
-//!     `sse_model_rewrite`：上游回显的名字以网关为准）。
-//!   - usage 旁路提取在 `ForwardStream` / 聚合器内部完成（它们是 SSE 逐行
-//!     解析的唯一入口），本函数不需要再读一遍响应体。
-//!
-//! ── 鉴权头怎么发（三档，见 [`ProviderQuirks`] 的两条拼装说明）────
-//!   - 账号有 apiKey → 发 `Authorization: Bearer <key>`（或 anthropic 的
-//!     `x-api-key`）；
-//!   - 账号声明了无需鉴权（`noAuth`）→ **一个凭证头都不发**：空 Bearer 对
-//!     严格的上游等同凭证错误，与「这家不要凭证」的语义正好相反；
-//!   - 开了客户端伪装且没有 key → 用上游认的匿名凭证 `public`
-//!     （OpenCode 免费档：不填 Key 也能跑，这就是那条路）。
-//!
-//! ── 协议分派（三种协议的分派点）─────────────────────────────
-//!   - chat_completions：上游就是 chat 形态，**原样透传**（见「透传语义」）；
-//!   - responses / anthropic：上游说另一种协议，走**翻译链** —— chat 体先
-//!     过 [`rewrite_body`]（模型名 + 思考等级改写仍落在 chat 体上），再由
-//!     `protocol::responses_outbound` / `protocol::anthropic_outbound` 翻成
-//!     上游请求；上游的 SSE 事件流先过 [`ProtocolTranslateStream`] 折成标准
-//!     chat SSE，之后流式照进 `ForwardStream`（reasoning 合并 / usage 提取 /
-//!     model 回写三层不变），非流式照进聚合器。编排层零改动。
-//! 分派点就是 [`forward`] 里 `protocol` 的 match：上游恒以 `stream:true`
-//! 被请求的条策略对三种协议一体适用（翻译出的请求体上再覆写一次）。
-//!
-//! ── 错误分类（对齐 `UpstreamErrorClass` 的四档语义，让编排原样生效）──
-//! 本函数不返回 `UpstreamErrorClass`（那个类型的构造与整条链的接口都收在
-//! `providers::adapter`，自定义家不在那条链上），而是把分类结果**编码进
-//! `GatewayError` 的状态码**，让编排层的两个既有判据原样生效：
-//!   - 401 / 403 → 凭证错误（文案点明是 apiKey 的问题）。自定义账号没有可
-//!     刷新的凭证（key 是用户填的），所以**不映射成 TokenExpired**（那会触发
-//!     一次注定失败的刷新重试）—— 按普通失败落到编排层：记入 tried →
-//!     顺延下一个账号；
-//!   - 429 → 限额（`GatewayError::is_quota_limit` 的既有判据只认状态码 429）。
-//!     恢复时间按 `Retry-After` 头解析（秒数或 HTTP 日期），解析不出再从
-//!     错误文案里找（`errors::parse_quota_reset_at`）—— 解析结果以 UTC+8
-//!     文案形态并回 message，于是 `rotate::mark_account_limited` 不用改签名
-//!     也能把恢复时间读出来（那个函数内部再 parse 一次 message，两处同源）；
-//!   - 5xx / 其它 4xx → 透传上游状态码与摘要。5xx 的「可重试」由编排层的
-//!     「顺延下一个账号」承担（与有状态路径同一取向，不做原地退避）。
-//!
-//! ── 硬约束 ──────────────────────────────────────────────────
-//! 绝不 unwrap/expect（release 是 panic=abort）；serde 解析失败一律退化为
-//! 「按原样透传」或「报一条明确错误」，绝不 panic。
+//! 自定义上游的发送入口。相同协议交给原生分支，其他请求使用 Chat 转换链。
+//! 账号选路、重试与冷却由 provider_loop 持有；发送分支持有流式连接直至结束。
 
 use std::sync::Arc;
+
+use axum::http::HeaderMap;
+use crate::server::core::protocol::native::WireProtocol;
+
+mod native;
+mod translate;
+use translate::ProtocolTranslateStream;
 
 use serde_json::Value;
 
@@ -108,6 +46,8 @@ pub(crate) async fn forward(
     provider_id: &str,
     account_id: &str,
     body: &Value,
+    native_protocol: Option<WireProtocol>,
+    client_headers: &HeaderMap,
     route_model: Option<&str>,
     proxy: Option<ResolvedProxy>,
     stream: bool,
@@ -180,12 +120,22 @@ pub(crate) async fn forward(
     // 最终地址之后**再过一次读侧迁移（提供商层已在 `custom_providers::item_of`
     // 过了一遍，账号覆盖项只在这里能碰到）。
     let base_url = custom_providers::migrate_base_url(&base_url, quirks.emulate_opencode);
+    if let Some(native_protocol) = native_protocol {
+        if WireProtocol::from_provider(protocol) != Some(native_protocol) {
+            return Err(GatewayError::with_status(409, "提供商协议在转发前发生变化，请重试；未发送错误协议的请求"));
+        }
+        return native::forward(
+            native_protocol, provider_id, account_id, &credential.api_key, &credential.user_agent,
+            &base_url, &quirks, body, route_model, client_headers, proxy, stream, telemetry, slot, connections,
+        ).await;
+    }
     if let Some(kind) = kind {
         return forward_translated(
             kind,
             provider_id,
             account_id,
             &credential.api_key,
+            &credential.user_agent,
             &base_url,
             &quirks,
             body,
@@ -266,6 +216,11 @@ pub(crate) async fn forward(
     }
     quirks.apply_emulation_headers(&mut headers, api_key, &outbound, &base_url);
     quirks.apply_to(&mut headers);
+    // 账号级自定义 User-Agent 放在**最后**：伪装头与用户手写的静态头都可能
+    // 写了 UA（`quirks.headers` 里就有），而账号设置里填的值是用户对**这一条
+    // 账号**的最新意图，优先级最高。大小写不敏感地摘掉同名头再追加，避免留下
+    // 两个 `user-agent` 让上游取哪个变成实现细节。
+    apply_user_agent_override(&mut headers, &credential.user_agent);
 
     logging::verbose(
         "[CustomProvider]",
@@ -423,7 +378,6 @@ impl ProviderQuirks {
             }
         }
     }
-
     /// 伪装头与匿名凭证（只在 `clientEmulation: "opencode"` 时动手）。
     ///
     /// `api_key` 为空时用匿名凭证 `public` —— 这正是「不填 Key 也能用 OpenCode
@@ -470,6 +424,16 @@ impl ProviderQuirks {
     }
 }
 
+/// 账号级自定义 User-Agent 的落地：摘掉同名头（不区分大小写）再追加一条。
+///
+/// 位置固定在各协议的「头已拼完」之后 —— 伪装头（OpenCode 两个面）与用户
+/// 手写在提供商记录上的静态头都可能带 UA，而账号设置里填的值是用户对**这一条
+/// 账号**的最新意图，优先级最高。留两条同名头会让上游取哪个变成实现细节。
+/// 值在落库时已校验（无控制字符、能转成合法头值），这里不做二次兜底。
+fn apply_user_agent_override(headers: &mut Vec<(String, String)>, user_agent: &str) {
+    crate::server::core::user_agent::apply(headers, user_agent);
+}
+
 /// **翻译协议**（responses / anthropic）的一次转发。
 ///
 /// 与 chat 分支同构的「一次发送」，差异只有三处（都在 [`OutboundKind`] 上
@@ -482,6 +446,7 @@ async fn forward_translated(
     provider_id: &str,
     account_id: &str,
     api_key: &str,
+    user_agent: &str,
     base_url: &str,
     quirks: &ProviderQuirks,
     body: &Value,
@@ -544,6 +509,7 @@ async fn forward_translated(
             }
             quirks.apply_emulation_headers(&mut headers, api_key, &outbound_chat, base_url);
             quirks.apply_to(&mut headers);
+            apply_user_agent_override(&mut headers, user_agent);
             (url, headers, payload)
         }
         OutboundKind::Anthropic => {
@@ -592,9 +558,18 @@ async fn forward_translated(
             }
             quirks.apply_emulation_headers(&mut headers, api_key, &outbound_chat, base_url);
             quirks.apply_to(&mut headers);
+            apply_user_agent_override(&mut headers, user_agent);
             (url, headers, payload)
         }
     };
+    let level = match kind {
+        OutboundKind::Anthropic => crate::server::core::protocol::anthropic_thinking::effort(&payload),
+        OutboundKind::Responses => payload.pointer("/reasoning/effort").and_then(Value::as_str).map(str::to_string),
+    };
+    telemetry.note_upstream_reasoning(level);
+    if let Some(capture) = telemetry.capture() {
+        capture.reset_request(&url, provider_id, &headers, &payload);
+    }
     let payload = serde_json::to_string(&payload)
         .map_err(|error| GatewayError::with_status(500, format!("请求体序列化失败: {error}")))?;
 
@@ -665,136 +640,6 @@ async fn forward_translated(
         )
         .await?;
         Ok(ForwardOutcome::Completion { body: aggregated.body })
-    }
-}
-
-/// 上游协议 SSE 字节流 → 标准 chat SSE 字节流（responses / anthropic 共用壳）。
-///
-/// ── 为什么需要它 ────────────────────────────────────────────
-/// `ForwardStream` 与聚合器的输入都是**标准 chat SSE**（它们是 SSE 逐行
-/// 解析的唯一入口，usage 提取 / model 回写 / reasoning 合并都挂在那两层）。
-/// 翻译协议的上游吐的是自家协议的事件流，因此进入那两层之前先过一道
-/// 「字节 → chat 帧」的翻译 —— 本结构只做管道（上游字节 → 转换器 → 帧队列），
-/// 协议知识全在 `protocol::*_outbound` 的两个转换器里。
-///
-/// 上游断开时把 reqwest 错误描述成文案转成 `io::Error` 上抛：流式路径由
-/// `ForwardStream` 补「错误帧 + [DONE]」收尾，聚合路径转成 502 —— 与 chat
-/// 协议同一条错误语义。调试采集器在这里采**上游原始字节**（翻译前），
-/// 与 chat 路径「采上游原样吐出的东西」的语义一致。
-struct ProtocolTranslateStream {
-    /// 上游字节流。错误在构造时就描述成文案折进 `io::Error`（与
-    /// `ForwardStream::new` 同一手法）：空闲守卫的入参就是这个类型，
-    /// 两个消费层（ForwardStream / 聚合器）拿到的也是同一形态。
-    inner: futures::stream::BoxStream<'static, Result<bytes::Bytes, std::io::Error>>,
-    machine: TranslateMachine,
-    /// 已翻译待下发的帧（一个上游 chunk 可能产出多帧）
-    pending: std::collections::VecDeque<bytes::Bytes>,
-    /// 上游已结束（不再 poll 上游，把 pending 吐完即 None）
-    upstream_done: bool,
-    capture: Option<Arc<crate::server::core::debug_traffic::TrafficCapture>>,
-}
-
-/// 两个翻译状态机的分派壳（转换器接口同形，包一层枚举避免 dyn 分发）
-enum TranslateMachine {
-    Responses(responses_outbound::ChatFromResponsesStream),
-    Anthropic(anthropic_outbound::ChatFromAnthropicStream),
-}
-
-impl TranslateMachine {
-    fn push(&mut self, chunk: &[u8]) -> Vec<bytes::Bytes> {
-        match self {
-            Self::Responses(machine) => machine.push(chunk),
-            Self::Anthropic(machine) => machine.push(chunk),
-        }
-    }
-
-    fn finish(&mut self) -> Vec<bytes::Bytes> {
-        match self {
-            Self::Responses(machine) => machine.finish(),
-            Self::Anthropic(machine) => machine.finish(),
-        }
-    }
-}
-
-impl ProtocolTranslateStream {
-    fn new(
-        kind: OutboundKind,
-        model: &str,
-        response: reqwest::Response,
-        telemetry: &Arc<RequestTelemetry>,
-    ) -> Self {
-        use futures::StreamExt;
-        // 上游字节 → io::Error（描述成文案）→ 空闲守卫（设置页「请求超时」
-        // 的「流式响应空闲超时」，与 chat 路径同一份口径、同一个实现）
-        let described = response.bytes_stream().map(|item| {
-            item.map_err(|error| {
-                std::io::Error::other(crate::server::core::egress::describe_error_detail(&error))
-            })
-        });
-        let guarded = crate::server::core::upstream::stall::idle_guard(
-            Box::pin(described),
-            std::time::Duration::from_millis(
-                crate::server::config::timeout_settings().stream_idle_ms(),
-            ),
-        );
-        Self {
-            inner: guarded,
-            machine: match kind {
-                OutboundKind::Responses => TranslateMachine::Responses(
-                    responses_outbound::ChatFromResponsesStream::new(model),
-                ),
-                OutboundKind::Anthropic => TranslateMachine::Anthropic(
-                    anthropic_outbound::ChatFromAnthropicStream::new(model),
-                ),
-            },
-            pending: std::collections::VecDeque::new(),
-            upstream_done: false,
-            capture: telemetry.capture(),
-        }
-    }
-}
-
-impl futures::Stream for ProtocolTranslateStream {
-    type Item = Result<bytes::Bytes, std::io::Error>;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        use futures::StreamExt;
-        loop {
-            if let Some(frame) = self.pending.pop_front() {
-                return std::task::Poll::Ready(Some(Ok(frame)));
-            }
-            if self.upstream_done {
-                return std::task::Poll::Ready(None);
-            }
-            match self.inner.poll_next_unpin(cx) {
-                std::task::Poll::Pending => return std::task::Poll::Pending,
-                std::task::Poll::Ready(None) => {
-                    self.upstream_done = true;
-                    // 上游 EOF：转换器收尾（finish_reason / usage / [DONE]）
-                    for frame in self.machine.finish() {
-                        self.pending.push_back(frame);
-                    }
-                }
-                std::task::Poll::Ready(Some(Ok(bytes))) => {
-                    // 调试模式：采上游原始字节（在翻译之前，与 chat 路径同语义）
-                    if let Some(capture) = &self.capture {
-                        capture.push(&bytes);
-                    }
-                    for frame in self.machine.push(&bytes[..]) {
-                        self.pending.push_back(frame);
-                    }
-                }
-                std::task::Poll::Ready(Some(Err(error))) => {
-                    self.upstream_done = true;
-                    // 文案已在构造时描述好（见 inner 字段说明）：reqwest 错误的
-                    // 描述、空闲守卫的超时原文，原样上抛
-                    return std::task::Poll::Ready(Some(Err(error)));
-                }
-            }
-        }
     }
 }
 

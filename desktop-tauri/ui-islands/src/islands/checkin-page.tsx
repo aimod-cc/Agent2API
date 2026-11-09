@@ -1,16 +1,16 @@
 import * as React from 'react'
 import { mountOnPage } from '../island-lazy'
 import { createRoot } from 'react-dom/client'
-import { SegmentedControl, Spinner , Button } from '@ui'
+import { Badge, Button, SegmentedControl, Spinner } from '@ui'
 import {
-  loadCenter, loadRecords, store, subscribe,
+  loadCenter, loadRecords, patch, store, subscribe,
 } from './checkin-store'
-import { CenterTab } from './checkin-center-tab'
+import { CenterTab, CheckinStats } from './checkin-center-tab'
+import { CHECKIN_SECTION_OPTIONS, type CheckinSection } from './checkin-types'
 import { ScheduleTab } from './checkin-schedule-tab'
 import { MakeupTab } from './checkin-makeup-tab'
 import { t } from '../i18n'
 import { RecordsTab } from './checkin-records-tab'
-import { Badge } from '@ui'
 
 /**
  * Agent2API · 签到中心（页面岛）。
@@ -31,7 +31,7 @@ import { Badge } from '@ui'
  * 签到是产品的一个功能，不是某个插件的附属品。没装插件时页面显示空态，告诉
  * 用户去哪儿装，而不是让整个菜单项凭空不见（那会让人以为功能被砍了）。
  *
- * 四个标签页共用快照；定时签到与定时补签分别管理各自的设置。
+ * 每日签到、福利、成长任务、定时签到、定时补签和记录共用一条导航与聚合快照。
  * 保活模型链和猫猫旅行由插件申报决定是否显示。
  *
  * ── 数据流 ──────────────────────────────────────────────────
@@ -41,13 +41,14 @@ import { Badge } from '@ui'
 
 const TABS = ['center', 'schedule', 'makeup', 'records'] as const
 type Tab = typeof TABS[number]
+type CheckinView = CheckinSection | Exclude<Tab, 'center'>
 
 function tabOptions() {
   return [
-    { value: 'center', label: t('签到中心') },
-    { value: 'schedule', label: t('定时签到') },
-    { value: 'makeup', label: t('定时补签') },
-    { value: 'records', label: t('签到记录') },
+    ...CHECKIN_SECTION_OPTIONS.map(option => ({ ...option, label: t(option.label) })),
+    { value: 'schedule' as const, label: t('定时签到') },
+    { value: 'makeup' as const, label: t('定时补签') },
+    { value: 'records' as const, label: t('签到记录') },
   ]
 }
 
@@ -86,9 +87,12 @@ function CheckinPage(): React.ReactElement {
   }, [])
 
   const switchTab = (next: string) => {
-    const value = (TABS as readonly string[]).includes(next) ? next as Tab : 'center'
+    const section = CHECKIN_SECTION_OPTIONS.find(option => option.value === next)
+    const value: Tab = section ? 'center'
+      : (TABS as readonly string[]).includes(next) ? next as Tab : 'center'
     activeTab = value
     setTab(value)
+    if (section) patch({ centerSection: section.value })
   }
 
   // 总览卡点「累计签到记录」要切到记录页。走自定义事件而不是把 switchTab
@@ -105,21 +109,27 @@ function CheckinPage(): React.ReactElement {
 
   const center = store.center
   const error = store.loadError
+  const view: CheckinView = tab === 'center' ? store.centerSection : tab
 
   return (
     <div className={`ck-page${tab === 'records' ? ' ck-page-records' : ''}`}>
-      <div className="ck-tabs">
-        <SegmentedControl
-          options={tabOptions()}
-          value={tab}
-          onValueChange={switchTab}
-          aria-label="签到中心标签页"
-        />
-        <span className="ck-tabs-spacer" />
-        <AutoBadge />
-        <Button size='default' variant='ghost' type="button" className="ck-refresh" onClick={() => { void loadCenter(); void loadRecords() }}>
-          刷新
-        </Button>
+      {store.loaded && center ? <CheckinStats center={center} /> : null}
+      <div className="ck-task-row">
+        <div className="ck-task-nav">
+          <SegmentedControl
+            options={tabOptions()}
+            value={view}
+            onValueChange={switchTab}
+            aria-label={t('签到功能分类')}
+            className="shrink-0"
+          />
+        </div>
+        <div className="ck-task-actions">
+          <AutoBadge />
+          <Button size='default' variant='ghost' type="button" className="ck-refresh" onClick={() => { void loadCenter(); void loadRecords() }}>
+            刷新
+          </Button>
+        </div>
       </div>
 
       {error ? (

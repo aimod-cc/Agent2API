@@ -33,19 +33,14 @@ pub fn allowed(url: &url::Url, region: Region) -> bool {
     }
 }
 
-pub async fn start(app: &AppHandle, region: Region, mode: &str) -> Result<Value, String> {
+pub async fn start(app: &AppHandle, region: Region, mode: &str, proxy: Option<Value>) -> Result<Value, String> {
     if mode == "external" {
         return Err(
             "MonkeyCode 网页登录需要桌面内嵌窗口；系统浏览器登录后请使用「填写凭证」粘贴 session。"
                 .into(),
         );
     }
-    let started = crate::gateway::call(
-        "POST",
-        "/api/session/login/start",
-        Some(&json!({"provider": region.provider_id()})),
-    )
-    .await?;
+    let started = crate::login::start_provider_login(region.provider_id(), proxy).await?;
     let flow = started["state"]
         .as_str()
         .filter(|value| !value.is_empty())

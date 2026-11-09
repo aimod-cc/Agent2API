@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use super::storage::{Package, PackageSource};
 
 pub(super) enum InstallSource {
+    Local { path: std::path::PathBuf },
     Npm { name: String, version: String },
     Magpie { name: String, version: String },
     Github { repository: String, reference: String },
@@ -17,6 +18,12 @@ impl InstallSource {
     pub fn parse(input: &str, selector: &str) -> Result<Self, String> {
         let input = input.trim();
         let selector = selector.trim();
+        if let Some(path) = input.strip_prefix("file:") {
+            if !selector.is_empty() { return Err("本地插件不使用版本选择器".into()); }
+            let path = std::path::PathBuf::from(path);
+            if !path.is_absolute() { return Err("本地插件需要网关电脑上的绝对路径".into()); }
+            return Ok(Self::Local { path });
+        }
         if let Some(name) = input.strip_prefix("magpie:") {
             if !super::packages::package_name(name) || !valid_version(selector) {
                 return Err("Magpie 插件包名或版本无效".into());
@@ -75,6 +82,7 @@ impl InstallSource {
 
     pub async fn download(&self) -> Result<Package, String> {
         match self {
+            Self::Local { path } => super::local::package(path).await,
             Self::Npm { name, version } => super::packages::download(name, version).await,
             Self::Magpie { name, version } => super::distribution::download(name, version).await,
             Self::Github { repository, reference } => download(repository, reference).await,

@@ -1,3 +1,4 @@
+import { invalidateUsageTasks } from './accounts-usage-tasks'
 import {
   errorMessage, POOL_VALUE_PREFIX, shared, toast,
   type AccountRecord,
@@ -338,6 +339,7 @@ export type AccountsViewApi = {
   render(): void
   refreshList: typeof refreshList
   refreshCaches(validIds: Set<string>): void
+  invalidateUsageTasks(ids: string[]): void
   syncConnections(): Promise<boolean>
   /**
    * 强制重读「网络代理」页的代理池（切回本页时调）。
@@ -459,6 +461,7 @@ export function installAccountsApi(): void {
     render: () => { syncAccountSorting(); bump() },
     refreshList,
     refreshCaches,
+    invalidateUsageTasks,
     syncConnections,
     refreshProxyPool,
     applyBalances,

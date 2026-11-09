@@ -5,6 +5,7 @@ import { isTraceCancelled, isTraceRunning, isTraceSuccess, requestModel } from '
 import { execCarrier } from './routing-exec-model'
 import { RoutingRequestState } from './routing-state-text'
 import { RoutingExecDuration, RoutingExecCandidates } from './routing-exec-sections'
+import { RoutingExecRewrite } from './routing-exec-rewrite'
 import { RoutingExecSnapshot } from './routing-exec-snapshot'
 import type { ReplayRow } from './routing-types'
 
@@ -27,6 +28,8 @@ export function RoutingExecTimeline({ row, now, onDetail, onConfig }: {
         </div>
         <Button variant='outline' size='sm' onClick={() => onDetail(row)}>{t('完整详情')}</Button>
       </header>
+      {/* 模型改写排在承载之前：请求真实经过的顺序就是「先改写模型、再选账号」 */}
+      <RoutingExecRewrite row={row} />
       <section className='routing-exec-carrier' data-failed={failed ? '' : undefined}>
         <p className='routing-exec-label'>{carrier.label}</p>
         <p className='routing-exec-carrier-name'>{carrier.name}</p>

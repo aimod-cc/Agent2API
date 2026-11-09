@@ -6,6 +6,7 @@ use crate::server::core::plugin_host::{self, install::PackRegistry, switching::C
 use crate::server::errors::GatewayError;
 
 pub enum PackChange {
+    Reload,
     Uninstall,
     Enabled(bool),
     Provider { id: String, enabled: bool },
@@ -27,11 +28,24 @@ async fn apply(id: &str, change: PackChange) -> Result<Value, GatewayError> {
     let pack = after.packs.iter_mut().find(|pack| pack.id == id)
         .ok_or_else(|| GatewayError::with_status(404, "没有安装这个插件包"))?;
     match &change {
+        PackChange::Reload => {
+            if !pack.enabled { return Err(GatewayError::bad_request("插件已停用，请先启用后再重新加载")); }
+            if plugin_host::startup::status(id).is_some_and(|status| status.phase.pending()) {
+                return Err(GatewayError::with_status(409, "插件仍在加载，请等待当前启动完成"));
+            }
+            if plugin_host::startup::status(id).is_some_and(|status| status.phase == plugin_host::startup::Phase::Ready) {
+                return Ok(plugin_host::management_snapshot());
+            }
+        }
         PackChange::Uninstall => after.packs.retain(|pack| pack.id != id),
         PackChange::Enabled(enabled) => pack.enabled = *enabled,
         PackChange::Provider { id, enabled } => {
             if !pack.manifest_providers.iter().any(|provider| provider.id.as_str() == id) {
                 return Err(GatewayError::bad_request("这个插件包里没有指定的提供商"));
+            }
+            if let Some(owner) = plugin_host::ownership::overridden_by(&plugin_host::ownership::owners(&before), &pack.id, id) {
+                return Err(GatewayError::with_status(409,
+                    format!("该提供商已由插件 {owner} 接管，请到对应插件中管理")));
             }
             pack.providers.insert(id.clone(), *enabled);
         }
@@ -46,6 +60,7 @@ async fn apply(id: &str, change: PackChange) -> Result<Value, GatewayError> {
     }
     switch.clear_adapters();
     let outcome = match change {
+        PackChange::Reload => Ok(()),
         PackChange::Uninstall => {
             let id = id.to_string();
             tokio::task::spawn_blocking(move || plugin_host::uninstall(&id)).await

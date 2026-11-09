@@ -36,8 +36,11 @@ pub(super) fn select_all_asc(conn: &Connection) -> rusqlite::Result<Vec<LogEntry
     let mut stmt = conn.prepare(&format!("SELECT {COLUMNS} FROM logs ORDER BY id ASC"))?;
     let mut rows = stmt.query([])?;
     let mut entries = Vec::new();
+    let names = crate::server::core::plugin_host::startup::log_names();
     while let Some(row) = rows.next()? {
-        entries.push(decode_row(row)?);
+        let mut entry = decode_row(row)?;
+        super::plugin_events::enrich(&mut entry, &names);
+        entries.push(entry);
     }
     Ok(entries)
 }
@@ -187,8 +190,10 @@ pub(super) fn select_matching_desc(
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query(params_from_iter(plan.binds.iter()))?;
     let mut entries = Vec::new();
+    let names = crate::server::core::plugin_host::startup::log_names();
     while let Some(row) = rows.next()? {
-        let entry = decode_row(row)?;
+        let mut entry = decode_row(row)?;
+        super::plugin_events::enrich(&mut entry, &names);
         if plan.matches(&entry) {
             entries.push(entry);
         }

@@ -26,6 +26,8 @@ import { t } from '../i18n'
 // 链接本体在 sponsor.ts（唯一定义点），这里只取用。
 import { handleExternalClick } from './update-shared'
 import { PROXYLANE_URL } from './sponsor'
+import { ProxyBatchEditor, type ProxyBatchHandle } from '../../../ui-shared/proxy-batch-editor'
+import { proxyHost, type ProxyImportDraft, type ProxyImportReport } from '../../../ui-shared/proxy-import'
 
 /* ─── 新增 / 编辑弹窗 ───────────────────────── */
 
@@ -60,17 +62,42 @@ export function ProxyModal({
   const [username, setUsername] = React.useState(item?.username || '')
   const [password, setPassword] = React.useState(item?.password || '')
   const [enabled, setEnabled] = React.useState(item ? item.enabled : true)
+  const [nonDirect, setNonDirect] = React.useState(item?.nonDirect === true)
+  const [batchBusy, setBatchBusy] = React.useState(false)
+  const batch = React.useRef<ProxyBatchHandle>(null)
   const [useAuth, setUseAuth] = React.useState(Boolean(item?.username || item?.password))
   const [saving, setSaving] = React.useState(false)
   const [testing, setTesting] = React.useState(false)
   const [status, setStatus] = React.useState<React.ReactNode>(null)
+  const busy = saving || testing || batchBusy
+
+  React.useEffect(() => { setStatus(null) }, [name, protocol, host, port, username, password, useAuth, nonDirect])
+
+  async function saveBatch(items: ProxyImportDraft[]): Promise<ProxyImportReport> {
+    const data = await saveItem(null, { items })
+    if (!data?.imported) throw new Error(t('批量添加响应异常，请刷新代理列表确认后再试'))
+    return data.imported
+  }
+
+  async function testBatch(draft: ProxyImportDraft) {
+    const data = await wb().workbuddyDesktop?.testProxy?.({ proxy: { ...draft, source: 'custom' } })
+    if (!data) throw new Error(t('当前环境不支持代理测试（桥接方法缺失）'))
+    return data
+  }
 
   /** 表单 → 归一化后的提交对象；形状非法时返回一句面向用户的错误 */
   function draftPayload(): { payload: Record<string, unknown> } | { error: string } {
     const trimmed = name.trim()
     if (!trimmed) return { error: t('请填写代理名称') }
-    const hostText = host.trim()
-    if (!hostText) return { error: t('请填写代理主机地址') }
+    if (useAuth && ([...username.trim()].length > 200 || [...password].length > 200)) {
+      return { error: t('代理账号和密码不能超过 200 个字符') }
+    }
+    if (useAuth && protocol === 'socks5' && (new TextEncoder().encode(username.trim()).length > 255 || new TextEncoder().encode(password).length > 255)) {
+      return { error: t('SOCKS5 用户名和密码不能超过 255 字节') }
+    }
+    let hostText: string
+    try { hostText = proxyHost(host, t) }
+    catch (error) { return { error: errorMessage(error) } }
     const portNumber = Number(port)
     if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
       return { error: t('代理端口必须是 1-65535 的整数') }
@@ -85,13 +112,14 @@ export function ProxyModal({
         username: useAuth ? username.trim() : '',
         password: useAuth ? password : '',
         enabled,
+        nonDirect,
       },
     }
   }
 
   /** 用当前表单内容测一次（**未保存也能测**：先确认能通，再决定保存） */
   async function testDraft(): Promise<void> {
-    if (testing) return
+    if (busy) return
     const draft = draftPayload()
     if ('error' in draft) {
       setStatus(<span className='text-destructive'>❌ {draft.error}</span>)
@@ -105,6 +133,7 @@ export function ProxyModal({
       port: payload.port,
       username: payload.username,
       password: payload.password,
+      nonDirect: payload.nonDirect,
     }
     setTesting(true)
     setStatus(t('正在连接上游…'))
@@ -130,7 +159,7 @@ export function ProxyModal({
   }
 
   async function save(): Promise<void> {
-    if (saving) return
+    if (busy) return
     const draft = draftPayload()
     if ('error' in draft) {
       setStatus(<span className='text-destructive'>❌ {draft.error}</span>)
@@ -141,20 +170,26 @@ export function ProxyModal({
     try {
       await saveItem(item, draft.payload)
       toast(editing ? t('已保存「{name}」', { name: name.trim() }) : t('已新增「{name}」', { name: name.trim() }))
-      onClose()
+      if (editing || !batch.current?.hasDraft()) onClose()
+      else { setName(''); setHost(''); setPort(''); setUsername(''); setPassword(''); setStatus(null) }
     } catch (error) {
       setStatus(<span className='text-destructive'>❌ {errorMessage(error)}</span>)
-      setSaving(false)
-    }
+    } finally { setSaving(false) }
   }
 
   return (
-    <Dialog open onOpenChange={open => { if (!open && !saving) onClose() }}>
-      <DialogContent className='max-w-[560px]'>
+    <Dialog open onOpenChange={(open, details) => {
+      if (open) return
+      if (busy) { details.cancel(); return }
+      onClose()
+    }}>
+      <DialogContent className={editing ? 'max-w-[560px]' : 'w-[min(1120px,calc(100vw-48px))]'}>
         <DialogHeader>
           <DialogTitle>{editing ? t('编辑代理') : t('新增代理')}</DialogTitle>
         </DialogHeader>
-        <DialogBody className='flex flex-col gap-3.5'>
+        <DialogBody className={editing ? 'flex flex-col gap-3.5' : 'grid gap-6 lg:grid-cols-[minmax(300px,0.8fr)_minmax(0,1.2fr)]'}>
+          <div className='flex min-w-0 flex-col gap-3.5' inert={busy}>
+          {!editing ? <h3 className='text-sm font-semibold'>{t('单个添加')}</h3> : null}
           <div className='flex flex-col gap-1.5'>
             <Label htmlFor='proxy-name'>{t('名称')}</Label>
             <Input id='proxy-name' maxLength={60} autoComplete='off' spellCheck={false}
@@ -205,6 +240,11 @@ export function ProxyModal({
             </div>
           </div> : null}
 
+          <Label className='flex cursor-pointer items-center gap-2 text-xs font-normal'>
+            <Checkbox checked={nonDirect} onCheckedChange={setNonDirect} />{t('非直连代理')}
+          </Label>
+          <p className='text-xs leading-relaxed text-subtle'>{t('非直连会先经过网关所在设备的系统代理，再连接到此代理；系统代理不可用时不会改走直连。')}</p>
+
           <div className='flex flex-row items-center gap-2.5'>
             <Switch checked={enabled} onCheckedChange={setEnabled} aria-label={t('启用这条代理')} />
             <span className='text-[12.5px]'>
@@ -223,17 +263,26 @@ export function ProxyModal({
             <SponsorLink>{t('去获取')}</SponsorLink>
           </p>
 
-          <div className='min-h-[18px] text-xs text-subtle'>{status}</div>
+          <div className='min-h-[18px] text-xs text-subtle' role='status'>{status}</div>
+          {!editing ? <div className='mt-auto flex gap-2'>
+            <Button variant='outline' disabled={busy} onClick={() => void testDraft()}>{testing ? t('测试中…') : t('测试出口')}</Button>
+            <Button disabled={busy} onClick={() => void save()}>{saving ? t('保存中…') : t('添加单个')}</Button>
+          </div> : null}
+          </div>
+          {!editing ? <div className='min-w-0 border-t border-border pt-5 lg:border-t-0 lg:border-l lg:pt-0 lg:pl-6'>
+            <ProxyBatchEditor ref={batch} t={t} locked={saving || testing} onBusyChange={setBatchBusy}
+              save={saveBatch} test={testBatch} onNotice={(message, failed) => toast(message, failed ? 'err' : 'ok')} />
+          </div> : null}
         </DialogBody>
         <DialogFooter>
-          <Button variant='outline' disabled={testing || saving} onClick={() => void testDraft()}>
+          {editing ? <Button variant='outline' disabled={busy} onClick={() => void testDraft()}>
             {testing ? t('测试中…') : t('测试出口')}
-          </Button>
+          </Button> : null}
           <div className='mr-auto' />
-          <Button variant='outline' disabled={saving} onClick={onClose}>{t('取消')}</Button>
-          <Button variant='default' disabled={saving} onClick={() => void save()}>
+          <Button variant='outline' disabled={busy} onClick={onClose}>{editing ? t('取消') : t('关闭')}</Button>
+          {editing ? <Button variant='default' disabled={busy} onClick={() => void save()}>
             {saving ? t('保存中…') : t('保存')}
-          </Button>
+          </Button> : null}
         </DialogFooter>
       </DialogContent>
     </Dialog>

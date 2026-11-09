@@ -19,6 +19,7 @@ pub(super) struct ProcessRun {
     pub generation: u64,
     pub pid: Option<u32>,
     child: tokio::sync::Mutex<tokio::process::Child>,
+    guard: Mutex<Option<super::process_guard::ProcessGuard>>,
     expected_exit: Mutex<Option<Instant>>,
     pub failed: AtomicBool,
     pub retired: AtomicBool,
@@ -27,6 +28,14 @@ pub(super) struct ProcessRun {
     started: Instant,
     ended: Mutex<Option<Instant>>,
     diagnostic: Mutex<Diagnostic>,
+}
+
+impl Drop for ProcessRun {
+    fn drop(&mut self) {
+        if let Some(guard) = self.guard.get_mut().unwrap_or_else(|error| error.into_inner()).take() {
+            guard.kill();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -79,6 +88,7 @@ impl ProcessRun {
             generation,
             pid: child.id(),
             child: tokio::sync::Mutex::new(child),
+            guard: Mutex::new(None),
             expected_exit: Mutex::new(None),
             failed: AtomicBool::new(false),
             retired: AtomicBool::new(false),
@@ -88,6 +98,10 @@ impl ProcessRun {
             ended: Mutex::new(None),
             diagnostic: Mutex::new(Diagnostic::default()),
         }
+    }
+
+    pub fn protect(&self, guard: Option<super::process_guard::ProcessGuard>) {
+        *self.guard.lock().unwrap_or_else(|error| error.into_inner()) = guard;
     }
 
     pub fn expect_exit(&self) {
@@ -131,6 +145,9 @@ impl ProcessRun {
             if report.status.is_some() { return report; }
         }
         let report = reap(&mut child, grace).await;
+        if let Some(guard) = self.guard.lock().unwrap_or_else(|error| error.into_inner()).take() {
+            guard.kill();
+        }
         if let Ok(mut saved) = self.exit_report.lock() { *saved = Some(report.clone()); }
         report
     }

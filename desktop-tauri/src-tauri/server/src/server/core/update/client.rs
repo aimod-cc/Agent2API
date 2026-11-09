@@ -92,7 +92,7 @@ pub(super) fn resolve_egress_candidates() -> Result<Vec<(String, Option<Resolved
 pub(super) fn egress_identity() -> Value {
     match resolve_egress_candidates() {
         Ok(candidates) => json!(candidates.into_iter().map(|(_, proxy)| proxy.map(|proxy| {
-            json!([proxy.source, proxy.protocol, proxy.host, proxy.port, proxy.username, proxy.password])
+            json!([proxy.source, proxy.protocol, proxy.host, proxy.port, proxy.username, proxy.password, proxy.non_direct])
         })).collect::<Vec<_>>()),
         Err(message) => json!({ "error": message }),
     }

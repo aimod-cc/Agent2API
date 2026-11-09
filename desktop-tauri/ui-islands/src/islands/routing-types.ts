@@ -69,6 +69,7 @@ export type RoutingWorkspace = {
   legacyGlobalParticipation?: { revision: string; accounts: Array<{ id: string; name: string; provider: string; providerLabel: string }> } | null
   configuredModels: string[]
   models: string[]
+  modelLastUsed?: Record<string, number>
   profile: RouteProfile
   inheritedProfile?: RouteProfile
   providers: Array<{ id: string; label: string; accountCount: number; custom: boolean; available: boolean }>

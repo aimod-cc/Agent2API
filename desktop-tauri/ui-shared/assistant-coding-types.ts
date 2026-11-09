@@ -7,12 +7,13 @@ export type CodingConfig = {
   enabled: boolean
   executable: string
   codexHome: string
-  workspaceRoots: string[]
   revision: string
   runtime: 'local-codex'
 }
-export type CodingConfigInput = Pick<CodingConfig, 'enabled' | 'executable' | 'codexHome' | 'workspaceRoots'>
-export type CodingMachine = { id: string; name: string; platform: string; workspaceRoots: string[] }
+export type CodingConfigInput = Pick<CodingConfig, 'enabled' | 'executable' | 'codexHome'>
+export type CodingMachine = { id: string; name: string; platform: string }
+export type CodingProject = { id: string; name: string; directory: string; accessible: boolean; createdAt: number; legacy?: boolean }
+export type CodingDirectories = { path: string; parent: string | null; entries: { name: string; path: string }[]; locations: { name: string; path: string }[]; limited: boolean }
 export type CodingStatus = { connected: boolean; authenticated: boolean; version: string; executable: string; codexHome: string; machines: CodingMachine[] }
 export type CodingPermission = { id: string; tool: string; arguments: unknown; createdAt?: number; submitted: boolean; canApprove: boolean }
 export type CodingSession = {
@@ -20,6 +21,8 @@ export type CodingSession = {
   engine: CodingEngine
   title: string
   directory: string
+  projectId?: string | null
+  projectName?: string | null
   machineId: string
   active: boolean
   thinking: boolean
@@ -36,9 +39,40 @@ export type CodingSession = {
   terminalOpening: boolean
   terminalError?: string | null
   activeTurnId?: string | null
+  modelProvider?: string | null
+  reasoningEffort?: string | null
+  serviceTier?: string | null
+  settingsRevision: number
+  settingsKnown: boolean
+  tokenUsage?: CodingTokenUsage | null
+  usageUpdatedAt?: number | null
+  usageSource?: 'live' | 'history' | null
+  forkedFromId?: string | null
 }
-export type CodingItem = { id: string; type: string; clientId?: string | null; [key: string]: unknown }
-export type CodingHistory = { items: CodingItem[] }
+export type CodingTokenBreakdown = { totalTokens: number; inputTokens: number; cachedInputTokens: number; outputTokens: number; reasoningOutputTokens: number }
+export type CodingTokenUsage = { total: CodingTokenBreakdown; last: CodingTokenBreakdown; modelContextWindow: number | null }
+export type CodingModel = {
+  id: string; displayName: string; description: string; hidden: boolean; isDefault: boolean
+  reasoningEfforts: { reasoningEffort: string; description: string }[]
+  defaultReasoningEffort: string | null
+  serviceTiers: { id: string; name: string; description: string }[]
+  defaultServiceTier: string | null; supportsFast: boolean
+}
+export type CodingSettingsChange = { model?: string; reasoningEffort?: string; fastMode?: boolean }
+export type CodingRateLimitWindow = { usedPercent: number; windowDurationMins: number | null; resetsAt: number | null }
+export type CodingRateLimit = {
+  limitId: string | null; limitName: string | null; planType: string | null
+  primary: CodingRateLimitWindow | null; secondary: CodingRateLimitWindow | null
+  credits: { hasCredits: boolean; unlimited: boolean; balance: string | null } | null
+}
+export type CodingAccountUsage = {
+  available: boolean; reason?: 'account_type' | 'unavailable'; error?: string; stale?: boolean; updatedAt: number | null
+  data?: { rateLimits: CodingRateLimit; rateLimitsByLimitId: Record<string, CodingRateLimit> | null }
+}
+export type CodingItem = { id: string; type: string; turnId?: string; turnStatus?: string; streaming?: boolean; clientId?: string | null; [key: string]: unknown }
+export type CodingTurn = { id: string; status: string; canFork: boolean }
+export type CodingSubmission = { localId: string; state: string; turnId: string | null }
+export type CodingHistory = { items: CodingItem[]; turns: CodingTurn[]; submissions: CodingSubmission[] }
 export type CodingTransport = {
   json: <T>(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown, signal?: AbortSignal) => Promise<T>
   stream: (path: string, signal: AbortSignal) => Promise<Response>

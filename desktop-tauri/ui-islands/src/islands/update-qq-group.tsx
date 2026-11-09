@@ -14,11 +14,10 @@ import { t } from '../i18n'
 /**
  * 「加入交流群」弹窗（更新日志卡片页脚那颗按钮打开）。
  *
- * ── 布局：四张卡片，不是四行文字 ──────────────────────────
- * 平铺成「标签 | 值 | 操作」四行读起来像一张表格，也不告诉人哪个入口更该点。
- * 改成卡片：每张卡左边一枚品牌标（QQ / Telegram 官方造型，见
- * icons.js 那两枚）、右边主标题 + 副标题，整张卡可点。QQ 三张卡是「复制群号」
- * （群号本身就是要拿走的文本），另一张是「打开链接」（外链交给系统浏览器）。
+ * ── 布局：社区入口卡片 ────────────────────────────────────
+ * 每张卡左边一枚品牌标（QQ / Telegram 官方造型，见
+ * icons.js 那两枚）、右边主标题 + 副标题，整张卡可点。QQ 卡片用于「复制群号」
+ * （群号本身就是要拿走的文本），Telegram 卡片用于「打开链接」（外链交给系统浏览器）。
  *
  * 群 1、群 2 的「即将满员」放在卡片右上角而不是标题旁：它是这张卡的**状态**，
  * 挂在标题上会把标题挤成两截，扫视时也看不出这是「整张卡」的属性。
@@ -47,7 +46,6 @@ export function QqGroupDialog({ open, onClose }: { open: boolean; onClose: () =>
           <p className='qq-intro'>{t('遇到问题或有使用心得，欢迎到群里交流。')}</p>
 
           <div className='qq-cards'>
-            {/* 群 1、群 2 都提示优先加群 3，放在各卡片副标题旁。 */}
             {QQ_GROUPS.map((group, index) => (
               <Item render={<Button variant='outline' />} variant='outline'
                 key={group.no}
@@ -62,11 +60,11 @@ export function QqGroupDialog({ open, onClose }: { open: boolean; onClose: () =>
                 />
                 <span className='qq-card-body'>
                   <span className='qq-card-title'>
-                    {index === 0 ? t('QQ 群 1') : index === 1 ? t('QQ 群 2') : t('QQ 群 3')}
+                    {t('QQ 群 {n}', { n: index + 1 })}
                     <code>{group.no}</code>
                   </span>
                   <span className='qq-card-sub'>
-                    {group.nearlyFull ? t('即将满员，请优先加群 3') : t('点击复制群号')}
+                    {group.nearlyFull ? t('即将满员，请优先加3群、4群') : t('点击复制群号')}
                   </span>
                 </span>
                 {group.nearlyFull ? (

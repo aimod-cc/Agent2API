@@ -12,6 +12,7 @@ import {
 import { t } from '../i18n'
 import { openExternal } from './update-shared'
 import { updateUnavailableReason } from '../../../ui-shared/updates'
+import { ThirdPartyLicensesButton } from '../../../ui-shared/settings-third-party-licenses'
 
 /**
  * 设置页「版本信息」面板（React 岛）。
@@ -511,6 +512,7 @@ function SystemInfoPanel() {
             <Button variant='outline' size='xs' onClick={() => void openExternal(
               app.sourceUrl || 'https://github.com/aimod-cc/Agent2API',
             )}>{t('源代码')}</Button>
+            <ThirdPartyLicensesButton t={t} openExternal={openExternal} />
           </div>
           <p className='mt-1.5 text-[12px] text-subtle'>
             {t('本软件不提供任何担保，可按 AGPL-3.0 修改与分发；通过网络提供修改版服务时须向用户提供对应源码。')}

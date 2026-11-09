@@ -97,7 +97,7 @@
 .add-group-box > [data-slot='segmented-control'],
 .add-group-box > [data-slot='select-trigger'],
 .add-group-box > [data-slot='input'],
-.add-group-box > [data-slot='textarea'] { margin: 10px 14px; }
+.add-group-box > [data-slot='textarea'] { margin: 10px 14px; max-width: calc(100% - 28px); }
 /* 说明行 / 提示行 */
 .add-group-box > p,
 .add-group-box > .detail { font-size: 11.5px; line-height: 1.55; color: var(--text-3); }
@@ -186,6 +186,7 @@
   overflow-y: auto;
   scrollbar-gutter: stable;
 }
+.acct-add-dialog .add-provider-grid:has(> .add-provider-band) { padding-top: 0; }
 .acct-add-dialog .add-provider-card {
   display: flex;
   align-items: center;

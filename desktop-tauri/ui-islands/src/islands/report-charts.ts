@@ -245,7 +245,7 @@ export function rankTotalText(list: StatsGroup[]): string {
 
 /* ─── 板块三：用量环形图（模型 / 提供商）──── */
 
-export const SLICE_COLORS: readonly string[] = Array.from({ length: 9 }, (_, index) => `var(--report-slice-${index + 1})`)
+export const SLICE_COLORS: readonly string[] = Array.from({ length: 16 }, (_, index) => `var(--report-slice-${index + 1})`)
 export const TIP_DOT_FALLBACK = 'var(--chart-other)'
 
 export const DONUT_THRESHOLDS = [0.1, 0.5, 1, 2, 3, 5] as const

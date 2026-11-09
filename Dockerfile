@@ -58,15 +58,17 @@ ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
 RUN { echo '#!/bin/sh -e'; \
       echo 'cd /build/src-tauri'; \
       echo 'if [ "$TARGETARCH" = "arm64" ]; then'; \
-      echo '  cargo build --release -p agent2api-server --target aarch64-unknown-linux-gnu --target-dir /build/target'; \
+      echo '  cargo build --locked --release -p agent2api-server --target aarch64-unknown-linux-gnu --target-dir /build/target'; \
       echo '  cp /build/target/aarch64-unknown-linux-gnu/release/agent2api-server /build/agent2api-server'; \
       echo 'else'; \
-      echo '  cargo build --release -p agent2api-server --target-dir /build/target'; \
+      echo '  cargo build --locked --release -p agent2api-server --target-dir /build/target'; \
       echo '  cp /build/target/release/agent2api-server /build/agent2api-server'; \
       echo 'fi'; \
     } > /build/cargo-build.sh && chmod +x /build/cargo-build.sh
 
 COPY desktop-tauri/src-tauri/Cargo.toml desktop-tauri/src-tauri/Cargo.lock src-tauri/
+# 与桌面端共用 CPU 基线，配置变化也必须使依赖缓存失效。
+COPY desktop-tauri/src-tauri/.cargo/config.toml src-tauri/.cargo/config.toml
 COPY desktop-tauri/src-tauri/server/Cargo.toml src-tauri/server/
 RUN mkdir -p src-tauri/server/src/bin src-tauri/src \
     && echo "" > src-tauri/server/src/lib.rs \

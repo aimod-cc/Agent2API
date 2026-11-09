@@ -3,7 +3,10 @@ import { useEffect, useRef, useState } from 'react'
 import { Icon } from '../components/Icon'
 import { store, useStore } from '../state/store'
 import { authenticate, fetchPanelStatus, solveCaptcha } from '../api/auth'
-import { storeApiKey } from '../api/client'
+import { storeApiKey, url, type PanelStatus } from '../api/client'
+import { TurnstileWidget } from '../../../ui-shared/turnstile-widget'
+import { BrandLogo } from '../../../ui-shared/brand-logo'
+import { mobileBranding } from '../lib/branding'
 import { baseLabel, serverIdentity } from '../lib/servers'
 import { t } from '../i18n'
 import { Alert, AppFrame, Button, Field as UiField, FieldLabel, Input } from '@ui'
@@ -18,9 +21,9 @@ import { Alert, AppFrame, Button, Field as UiField, FieldLabel, Input } from '@u
  *
  * ── 人机验证在后端，不在这一页 ────────────────────────────────
  * 网关开了机器人校验时，`POST /api/panel/login` 与 `/api/panel/setup` **在
- * 服务端**校验一次性 ALTCHA 载荷（见 `server::api::panel::check_captcha`），
- * 没带或算错一律 400。任何客户端 —— 桌面网页、手机 APK、curl —— 都绕不过去。
- * 这一页做的事只是**替用户把题算出来**：进页面领题、后台求解、提交时带上。
+ * 服务端**校验一次性验证载荷（ALTCHA 或 Turnstile），
+ * 没带或验证失败一律拒绝。任何客户端 —— 桌面网页、手机 APK、curl —— 都绕不过去。
+ * 这一页按网关设置选择本地计算或 Cloudflare 组件，提交时带上验证令牌。
  *
  * 因此验证码求解状态必须显示出来。老版本把它做成一行小字，用户看到「登录」
  * 按钮灰着却不知道在等什么；这里做成一条带状态点的行，并且失败时给出重试。
@@ -33,6 +36,7 @@ import { Alert, AppFrame, Button, Field as UiField, FieldLabel, Input } from '@u
  */
 export function LoginPage({ mode, onDone }: { mode: 'login' | 'key'; onDone?: () => void }) {
   const { server, packaged } = useStore()
+  const branding = mobileBranding.useValue()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [apiKey, setApiKey] = useState('')
@@ -41,12 +45,15 @@ export function LoginPage({ mode, onDone }: { mode: 'login' | 'key'; onDone?: ()
   /** 该网关有没有管理员 —— 没有就是首次注册 */
   const [setup, setSetup] = useState(false)
   const [statusKnown, setStatusKnown] = useState(false)
+  const [captchaConfig, setCaptchaConfig] = useState<PanelStatus | null>(null)
+  const [turnstileReset, setTurnstileReset] = useState(0)
+  const expiry = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   /**
    * 人机验证状态。
    *   idle    还没开始（首帧）
    *   solving 正在领题 / 求解
    *   ready   已拿到可提交的载荷
-   *   off     网关没开校验（领题回 400）
+   *   off     网关明确关闭校验
    *   failed  求解失败（网络 / 组件问题），可点重试
    */
   const [captchaState, setCaptchaState] = useState<'idle' | 'solving' | 'ready' | 'off' | 'failed'>('idle')
@@ -57,50 +64,52 @@ export function LoginPage({ mode, onDone }: { mode: 'login' | 'key'; onDone?: ()
 
   const runCaptcha = async () => {
     const mine = ++generation.current
+    const identity = serverIdentity()
+    clearTimeout(expiry.current)
     setCaptchaState('solving')
     setCaptcha(null)
+    setCaptchaConfig(null)
     setProgress(0)
     try {
+      const status = await fetchPanelStatus()
+      if (generation.current !== mine || serverIdentity() !== identity) return
+      if (typeof status.registered !== 'boolean') throw new Error(t('无法读取登录验证设置，请刷新页面重试'))
+      setSetup(!status.registered)
+      setStatusKnown(true)
+      setCaptchaConfig(status)
+      if (status.captchaError) throw new Error(status.captchaError)
+      if (status.captchaEnabled === false) {
+        setCaptchaState('off')
+        return
+      }
+      if (status.captchaProvider === 'turnstile') {
+        setTurnstileReset(value => value + 1)
+        return
+      }
+      if (status.captchaProvider && status.captchaProvider !== 'altcha') throw new Error(t('无法读取登录验证设置，请刷新页面重试'))
       const payload = await solveCaptcha(ratio => {
         if (generation.current === mine) setProgress(ratio)
       })
-      if (generation.current !== mine) return
-      if (payload) {
-        setCaptcha(payload)
-        setCaptchaState('ready')
-      } else {
-        // 领题 400 = 网关没开校验；领题失败（网络）也按「不需要」继续 ——
-        // 真需要的话提交时服务端会回一句明确的原因
-        setCaptchaState('off')
-      }
-    } catch {
-      if (generation.current === mine) setCaptchaState('failed')
+      if (generation.current !== mine || serverIdentity() !== identity) return
+      setCaptcha(payload)
+      setCaptchaState(payload ? 'ready' : 'off')
+      if (payload) expiry.current = setTimeout(() => { void runCaptcha() }, 9.5 * 60 * 1000)
+    } catch (failure) {
+      if (generation.current !== mine || serverIdentity() !== identity) return
+      setCaptchaState('failed')
+      setError(failure instanceof Error ? failure.message : String(failure))
     }
   }
 
-  // 进页面就探测：有没有管理员、要不要人机验证
   useEffect(() => {
-    let alive = true
-    void (async () => {
-      try {
-        const status = await fetchPanelStatus()
-        if (!alive) return
-        setSetup(!status.registered)
-        setStatusKnown(true)
-      } catch {
-        if (!alive) return
-        setStatusKnown(true)
-      }
-      if (!alive) return
-      await runCaptcha()
-    })()
+    if (mode === 'key') return
+    void runCaptcha()
     return () => {
-      alive = false
       generation.current += 1
+      clearTimeout(expiry.current)
     }
-    // 只在挂载时跑一次
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [mode])
 
   const submit = async () => {
     const identity = serverIdentity()
@@ -118,9 +127,8 @@ export function LoginPage({ mode, onDone }: { mode: 'login' | 'key'; onDone?: ()
       setError(t('请填写账号与密码'))
       return
     }
-    // 验证还没算完就提交，服务端必然回 400 —— 先在这里拦一句，省一次往返
-    if (captchaState === 'solving') {
-      setError(t('人机验证还在计算，请稍候'))
+    if (!statusKnown || (captchaState !== 'ready' && captchaState !== 'off')) {
+      setError(t('请完成人机验证后重试'))
       return
     }
     setBusy(true)
@@ -148,7 +156,7 @@ export function LoginPage({ mode, onDone }: { mode: 'login' | 'key'; onDone?: ()
     busy ||
     (mode === 'key'
       ? !apiKey.trim()
-      : !statusKnown || !username.trim() || !password || captchaState === 'solving')
+      : !statusKnown || !username.trim() || !password || (captchaState !== 'ready' && captchaState !== 'off'))
 
   return (
     <AppFrame
@@ -169,26 +177,13 @@ export function LoginPage({ mode, onDone }: { mode: 'login' | 'key'; onDone?: ()
           padding: 'calc(var(--m-safe-t) + 40px) 26px 22px',
         }}
       >
-        <div
-          style={{
-            width: 48,
-            height: 48,
-            borderRadius: 14,
-            display: 'grid',
-            placeItems: 'center',
-            background: 'var(--m-primary)',
-            color: '#fff',
-            boxShadow: '0 10px 24px -12px var(--m-primary)',
-          }}
-        >
-          <Icon name='shield' style={{ width: 24, height: 24 }} />
-        </div>
-        <h1 style={{ margin: '16px 0 0', fontSize: 23, letterSpacing: '-0.02em' }}>
+        <BrandLogo branding={branding} size={48} className='rounded-lg' />
+        <h1 className='break-words' style={{ margin: '16px 0 0', fontSize: 23, letterSpacing: '-0.02em' }}>
           {mode === 'key'
             ? t('需要网关 API Key')
             : setup
               ? t('创建管理员账号')
-              : t('登录 Agent2API')}
+              : t('登录 {name}', { name: branding.displayName })}
         </h1>
         <p style={{ margin: '6px 0 0', fontSize: 12.5, lineHeight: 1.6, color: 'var(--m-text-3)' }}>
           {mode === 'key'
@@ -265,6 +260,9 @@ export function LoginPage({ mode, onDone }: { mode: 'login' | 'key'; onDone?: ()
             />
 
             <div className='flex flex-col gap-1.5'>
+              {captchaConfig?.captchaEnabled !== false && captchaConfig?.captchaProvider === 'turnstile' && !captchaConfig.captchaError ?
+                <TurnstileWidget url={url('/api/panel/turnstile')} t={t} resetKey={turnstileReset}
+                  onToken={setCaptcha} onState={value => setCaptchaState(value === 'verified' ? 'ready' : value === 'error' ? 'failed' : 'solving')} /> : <>
               <Verification className='w-full justify-start whitespace-normal text-left'
                 state={captchaState === 'ready' ? 'verified' : captchaState === 'solving' ? 'verifying' : captchaState === 'failed' ? 'error' : 'idle'}
                 disabled={captchaState !== 'failed'} onClick={() => void runCaptcha()}>
@@ -277,6 +275,7 @@ export function LoginPage({ mode, onDone }: { mode: 'login' | 'key'; onDone?: ()
                 <UiProgress value={Math.round(progress * 100)} aria-label={t('人机验证')} />
               ) : null}
               {captchaState === 'failed' ? <Button size='touch-sm' variant='outline' onClick={() => void runCaptcha()}>{t('重试')}</Button> : null}
+              </>}
             </div>
           </>
         )}

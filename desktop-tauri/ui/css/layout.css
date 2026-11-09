@@ -45,6 +45,13 @@
   overflow: hidden;
 }
 
+.page.active[data-page="plugins"] {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: 0;
+}
+
 .plugin-page-frame {
   display: block;
   flex: 1;

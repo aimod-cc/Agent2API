@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { Button, Checkbox, Popover, PopoverContent, PopoverTrigger, Switch, cn } from '@ui'
 import { t } from '../i18n'
-import { PROVIDER_ICONS } from './add-provider-pick'
+import { useProviderIcon } from './provider-icon'
 import { displayNameOf, providerOf } from './accounts-domain'
 import type { AccountRecord, AccountSorting } from './accounts-shared'
 import { RoutingCreditExpiry } from './routing-account-order'
@@ -25,7 +25,8 @@ export function RoutingActions({ label, actions, disabled }: { label: string; ac
 }
 
 export function RoutingProviderMark({ id, label }: { id: string; label: string }) {
-  return PROVIDER_ICONS[id] ? <img className='routing-provider-mark' src={PROVIDER_ICONS[id]} alt='' />
+  const { src, onError } = useProviderIcon(id)
+  return src ? <img className='routing-provider-mark' src={src} alt='' onError={onError} />
     : <span className='routing-provider-mark routing-letter'>{label.slice(0, 1).toUpperCase()}</span>
 }
 

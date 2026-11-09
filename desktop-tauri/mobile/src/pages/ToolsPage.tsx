@@ -9,6 +9,7 @@ import { apiCall } from '../api/client'
 import { store } from '../state/store'
 import { usePolling } from '../lib/usePolling'
 import { t } from '../i18n'
+import { SearchableSelect } from '../../../ui-shared/searchable-select'
 import { ImageGenerationSection } from './ToolsImageGeneration'
 
 /**
@@ -294,14 +295,14 @@ function ProviderDialog({ provider, onClose, onSaved }: { provider: ProviderRow;
       <DialogBody className='flex flex-col gap-3'>
         {isAccount ? <div>
           <div style={{ fontSize: 12.5, marginBottom: 6 }}>{t('搜索账号')}</div>
-          <Select value={accountId || '__none__'} onValueChange={value => { if (typeof value === 'string') setAccountId(value === '__none__' ? '' : value) }}>
-            <SelectTrigger className='w-full'><SelectValue>{accountLabel}</SelectValue></SelectTrigger>
-            <SelectContent>
-              <SelectItem value='__none__'>{t('未选择账号')}</SelectItem>
-              {accountId && !accounts.some(account => account.id === accountId) ? <SelectItem value={accountId} disabled>{accountLabel}</SelectItem> : null}
-              {accounts.map(account => <SelectItem key={account.id} value={account.id}>{account.name}</SelectItem>)}
-            </SelectContent>
-          </Select>
+          <SearchableSelect value={accountId || '__none__'} className='w-full' displayValue={accountLabel}
+            aria-label={t('搜索账号')} searchPlaceholder={t('搜索账号…')}
+            onValueChange={value => setAccountId(value === '__none__' ? '' : value)} options={[
+              { value: '__none__', label: t('未选择账号') },
+              ...(accountId && !accounts.some(account => account.id === accountId)
+                ? [{ value: accountId, label: accountLabel, disabled: true }] : []),
+              ...accounts.map(account => ({ value: account.id, label: account.name })),
+            ]} />
           <p style={{ fontSize: 11.5, color: 'var(--m-text-3)' }}>{t('复用「账号」页的登录态，不需要额外填写搜索密钥。账号停用或删除后不会自动换号。')}</p>
           {!accounts.length ? <ErrorNote text={t('没有可绑定的启用账号，请先到「账号」页添加或启用。')} /> : null}
           {provider.available === false && provider.unavailable_reason ? <ErrorNote text={t(provider.unavailable_reason)} /> : null}
@@ -347,10 +348,9 @@ function SelectionDialog({ providers, fetchProviders, value, onClose, onSaved }:
         </div>
         <div>
           <div style={{ fontSize: 12.5, marginBottom: 6 }}>{t('批量网页抓取提供商')}</div>
-          <Select value={draft.fetch_provider} onValueChange={next => { if (typeof next === 'string') setDraft(current => ({ ...current, fetch_provider: next })) }}>
-            <SelectTrigger className='w-full'><SelectValue>{fetchLabel}</SelectValue></SelectTrigger>
-            <SelectContent>{fetchProviders.map(item => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
-          </Select>
+          <SearchableSelect value={draft.fetch_provider} options={fetchProviders} className='w-full'
+            aria-label={t('批量网页抓取提供商')} searchPlaceholder={t('搜索提供商')} displayValue={fetchLabel}
+            onValueChange={fetch_provider => setDraft(current => ({ ...current, fetch_provider }))} />
           <p style={{ fontSize: 11.5, color: 'var(--m-text-3)' }}>{t('已有账号搜索只支持搜索，不支持网页抓取；请求会使用绑定账号的额度与出网设置。')}</p>
         </div>
       </DialogBody>
@@ -398,17 +398,16 @@ function VisionDialog({ config, keys, providers, models, onClose, onSaved }: {
       <DialogBody className='flex flex-col gap-3'>
         <div>
           <div style={{ fontSize: 12.5, marginBottom: 6 }}>{t('上游提供商')}</div>
-          <Select value={provider} onValueChange={next => { if (typeof next === 'string') { setProvider(next); setModel('') } }}>
-            <SelectTrigger className='w-full'><SelectValue>{providerOptions.find(item => item.value === provider)?.label || t('请选择提供商')}</SelectValue></SelectTrigger>
-            <SelectContent>{providerOptions.map(item => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
-          </Select>
+          <SearchableSelect value={provider} options={providerOptions} className='w-full'
+            aria-label={t('上游提供商')} searchPlaceholder={t('搜索提供商')}
+            displayValue={providerOptions.find(item => item.value === provider)?.label || t('请选择提供商')}
+            onValueChange={value => { setProvider(value); setModel('') }} />
         </div>
         <div>
           <div style={{ fontSize: 12.5, marginBottom: 6 }}>{t('上游模型')}</div>
-          <Select value={model} onValueChange={next => { if (typeof next === 'string') setModel(next) }}>
-            <SelectTrigger className='w-full' disabled={!provider}><SelectValue>{model || (provider ? t('请选择模型') : t('请先选择提供商'))}</SelectValue></SelectTrigger>
-            <SelectContent>{modelOptions.map(item => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
-          </Select>
+          <SearchableSelect value={model} options={modelOptions} onValueChange={setModel} disabled={!provider}
+            className='w-full' aria-label={t('上游模型')} searchPlaceholder={t('搜索模型')}
+            displayValue={model || (provider ? t('请选择模型') : t('请先选择提供商'))} />
         </div>
         <div>
           <div style={{ fontSize: 12.5, marginBottom: 6 }}>{t('思考等级')}</div>
@@ -419,10 +418,8 @@ function VisionDialog({ config, keys, providers, models, onClose, onSaved }: {
         </div>
         <div>
           <div style={{ fontSize: 12.5, marginBottom: 6 }}>{t('内部调用 API Key')}</div>
-          <Select value={keyId} onValueChange={next => { if (typeof next === 'string') setKeyId(next) }}>
-            <SelectTrigger className='w-full'><SelectValue>{keyLabel}</SelectValue></SelectTrigger>
-            <SelectContent>{keyOptions.map(item => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
-          </Select>
+          <SearchableSelect value={keyId} options={keyOptions} onValueChange={setKeyId} className='w-full'
+            aria-label={t('内部调用 API Key')} displayValue={keyLabel} />
         </div>
         {!providers.length ? <div style={{ fontSize: 11.5, color: 'var(--m-warn)' }}>{t('还没有可用的提供商，请先在桌面端添加账号并确认有已启用的模型。')}</div> : null}
       </DialogBody>

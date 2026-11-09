@@ -48,6 +48,7 @@ class GatewayWebSocket extends EventTarget {
     if (!context || context.closed) throw new Error("Plugin WebSocket requires an active request")
     context.signal.throwIfAborted()
     const headers = new Headers(options.headers)
+    if (context.userAgent) headers.set("user-agent", context.userAgent)
     for (const name of ["x-panel-token", "x-magpie-work-dir", "x-magpie-work-git", "x-magpie-fallback", "x-magpie-session", "x-magpie-subagent"]) headers.delete(name)
     this.#context = context
     this.#url = url.href

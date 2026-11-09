@@ -6,7 +6,7 @@ import { RoutingDragOverlay, reorderRoute, useRoutingDrag, type RoutingDrop } fr
 import { RoutingModelFilter, useRoutingModelFilter } from './routing-model-filter'
 import { RoutingSelect } from './routing-select'
 import { RoutingActions } from './routing-canvas-controls'
-import { RoutingCanvasLayout, RoutingDraftFooter } from './routing-canvas-layout'
+import { RoutingCanvasLayout, RoutingDraftFooter, RoutingRefreshError } from './routing-canvas-layout'
 import { useRoutingCanvasActivity } from './routing-canvas-activity'
 import { RoutingProviderCard } from './routing-provider-card'
 import { routingAccountSections, routingCollapsedSections, useRoutingExpansion } from './routing-account-sections'
@@ -17,11 +17,12 @@ import { host, type RouteProfile, type RoutingWorkspace } from './routing-types'
 
 export type RoutingConfigProps = {
   editor: RoutingEditorState; scope: string; now: number; accountControl: ReturnType<typeof useRoutingAccounts>
-  onScope(model: string): void; onAccount(id: string): void; onSort(provider: string): void; onProtection(workspace: RoutingWorkspace): void
+  onAccount(id: string): void; onSort(provider: string): void; onProtection(workspace: RoutingWorkspace): void
+  refreshToken: number; onWorkspace(workspace: RoutingWorkspace): void
 }
 
 /** 账号启停即时保存；独立路由的参与名单、策略与顺序保留草稿。 */
-export function RoutingConfigPanel({ editor, scope, now, accountControl, onScope, onAccount, onSort, onProtection }: RoutingConfigProps) {
+export function RoutingConfigPanel({ editor, scope, now, accountControl, refreshToken, onWorkspace, onAccount, onSort, onProtection }: RoutingConfigProps) {
   const { setOpened, sectionOpen, setSectionOpen, search, setSearch, query, isOpen } = useRoutingExpansion()
   const [legacyDialog, setLegacyDialog] = React.useState<RoutingWorkspace['legacyGlobalParticipation']>(null)
   const draft = editor.draft
@@ -29,7 +30,10 @@ export function RoutingConfigPanel({ editor, scope, now, accountControl, onScope
   const legacy = draft?.workspace.legacyGlobalParticipation
   const globalBlocked = globalAccounts && (!draft?.workspace.globalAccountControl || Boolean(legacy))
   const modelFilter = useRoutingModelFilter(draft?.workspace, scope)
-  const activity = useRoutingCanvasActivity(Boolean(draft), modelFilter.model)
+  const live = useRoutingCanvasActivity(Boolean(draft), modelFilter.model, {
+    workspaceModel: scope, paused: editor.busy || editor.loading, refreshToken, onWorkspace,
+  })
+  const { activity } = live
   const disabled = editor.busy || editor.loading
   const mutate = React.useCallback((fn: (profile: RouteProfile, workspace: RoutingWorkspace) => void) => {
     editor.update(current => { const profile = structuredClone(current.profile); fn(profile, current.workspace); return { ...current, profile } })
@@ -47,9 +51,9 @@ export function RoutingConfigPanel({ editor, scope, now, accountControl, onScope
   if (!draft) return <div className='routing-config-loading'>
     <Empty>{editor.loading ? <Spinner /> : editor.error || t('选择作用范围后配置路由')}</Empty>
   </div>
-  const workspace = draft.workspace
+  const workspace = live.workspace && live.workspace.updatedAt >= draft.workspace.updatedAt ? live.workspace : draft.workspace
   const inherited = draft.mode === 'inherit'
-  const profile = inherited ? workspace.inheritedProfile || draft.profile : draft.profile
+  const profile = inherited ? draft.workspace.inheritedProfile || draft.profile : draft.profile
   const locked = disabled || inherited || globalBlocked
   const dirty = draftDirty(draft)
   const label = (id: string) => workspace.providers.find(item => item.id === id)?.label || id
@@ -116,7 +120,7 @@ export function RoutingConfigPanel({ editor, scope, now, accountControl, onScope
     if (!await confirmDialog(t('删除后这个模型会重新跟随全局配置，已保存的独立设置和当前未保存修改都会被移除。'), {
       title: t('删除独立配置'), confirmText: t('删除'), destructive: true,
     })) return
-    if (await editor.remove()) onScope('')
+    await editor.remove()
   }
   const renderProvider = (id: string) => <RoutingProviderCard key={id} id={id} profile={profile} workspace={workspace} scope={scope} now={now}
     index={participating.indexOf(id)} first={orderingPeers(id)[0] === id} last={orderingPeers(id).at(-1) === id}
@@ -147,6 +151,7 @@ export function RoutingConfigPanel({ editor, scope, now, accountControl, onScope
     <InputGroup className='routing-config-search'><InputGroupInput value={search} placeholder={t('搜索提供商或账号')} aria-label={t('搜索提供商或账号')}
       onChange={event => setSearch(event.currentTarget.value)} /><InputGroupAddon><RouteIcon name='search' size={14} /></InputGroupAddon></InputGroup>
     <p className='routing-groups-hint'>{t('拖动把手或按 Alt + 方向键调整顺序，更多操作在右侧菜单。')}</p>
+    <RoutingRefreshError error={live.error} onRetry={live.refresh} />
     <div className='routing-config-listcol' data-route-scroll aria-busy={modelFilter.loading}>
       {modelFilter.loading ? <Empty><Spinner />{t('加载中…')}</Empty> : modelFilter.error ? <Empty>
         <p className='routing-config-error' role='alert'>{modelFilter.error}</p><Button variant='outline' size='sm' onClick={modelFilter.retry}>{t('重试')}</Button>
@@ -197,7 +202,7 @@ export function RoutingConfigPanel({ editor, scope, now, accountControl, onScope
               })} /></div> : null}
           </div>
           {!globalAccounts ? <p className='routing-config-note'>{profile.providerScope === 'all' ? t('新增提供商自动参与；移出本路由的不会自动加回。') : t('只有加入的提供商参与，新增提供商需要手动加入。')}</p> : null}
-          {!scope ? <RoutingModelFilter value={modelFilter.model} models={workspace.models} disabled={disabled} onChange={modelFilter.setModel} /> : null}
+          {!scope ? <RoutingModelFilter value={modelFilter.model} models={workspace.models} lastUsed={workspace.modelLastUsed} disabled={disabled} onChange={modelFilter.setModel} /> : null}
           <div className='routing-protection-summary'><RouteIcon name='shield' size={14} /><span>{t('全局保护设置')}</span>
             <Badge variant='ghost' shape='tag'>{[workspace.settings.routingFailoverBackoff && t('失败退避'), workspace.settings.routingSink && t('限流垫底'), workspace.settings.routingBreakerEnabled && t('熔断保护')].filter(Boolean).join(' · ') || t('关闭')}</Badge>
             <Button variant='link' size='sm' disabled={editor.busy} onClick={() => onProtection(workspace)}>{t('设置')}</Button>

@@ -19,13 +19,34 @@ export function normalizeOnboardingTasks(raw: unknown): OnboardingTask[] {
   })
 }
 
+export function currentOnboardingCache(
+  provider: string | undefined,
+  cache: OnboardingCache | undefined,
+  now = Date.now(),
+): OnboardingCache | undefined {
+  if (provider !== 'officeace' || !cache?.checkedAt || cache.status === 'loading' || cache.claiming) return cache
+  // 果办奖励按北京时间每日结算，不能把当天结果当作永久结清。
+  const day = (stamp: number) => Math.floor((stamp + 8 * 3_600_000) / 86_400_000)
+  return day(cache.checkedAt) === day(now) ? cache : undefined
+}
+
+export function onboardingSummary(cache: OnboardingCache) {
+  const checked = cache.status === 'loaded' || cache.settled || Boolean(cache.checkedAt)
+  const pending = checked && !cache.settled
+    ? cache.tasks.filter(task => !task.done && !task.blocked).length : 0
+  const claimed = checked && (cache.settled
+    || cache.tasks.length > 0 && cache.tasks.every(task => task.done))
+  return { checked, pending, claimed }
+}
+
 export function onboardingFromCenter(
   center: CheckinCenter,
   previous: Map<string, OnboardingCache>,
 ): Map<string, OnboardingCache> {
   const next = new Map<string, OnboardingCache>()
+  const now = Date.now()
   for (const row of center.extras.onboarding) {
-    const cached = previous.get(row.id)
+    const cached = currentOnboardingCache(row.provider, previous.get(row.id), now)
     if (cached?.status === 'loading' || cached?.claiming) {
       next.set(row.id, cached)
       continue
@@ -39,7 +60,7 @@ export function onboardingFromCenter(
         settled: true,
         settledAt: Number(row.settled.at) || undefined,
       })
-    } else if (cached && !cached.settled) {
+    } else if (cached && (!cached.settled || row.provider === 'officeace')) {
       next.set(row.id, cached)
     }
   }

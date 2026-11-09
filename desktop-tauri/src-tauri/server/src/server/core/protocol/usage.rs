@@ -27,6 +27,11 @@ pub struct TokenUsage {
     pub cache_read: Option<i64>,
     pub cache_creation: Option<i64>,
     pub reasoning: Option<i64>,
+    pub deferred_prompt: Option<i64>,
+    pub deferred_completion: Option<i64>,
+    pub deferred_cache_read: Option<i64>,
+    pub deferred_cache_write: Option<i64>,
+    pub cache_unknown: bool,
 }
 
 impl TokenUsage {
@@ -45,6 +50,11 @@ impl TokenUsage {
                 token_count(usage.pointer("/completion_tokens_details/reasoning_tokens")),
                 token_count(usage.pointer("/output_tokens_details/reasoning_tokens")),
             ]),
+            deferred_prompt: token_count(usage.pointer("/magpie_deferred/prompt_tokens")),
+            deferred_completion: token_count(usage.pointer("/magpie_deferred/completion_tokens")),
+            deferred_cache_read: token_count(usage.pointer("/magpie_deferred/cached_tokens")),
+            deferred_cache_write: token_count(usage.pointer("/magpie_deferred/cache_write_tokens")),
+            cache_unknown: usage.get("magpie_cache_unknown").and_then(Value::as_bool) == Some(true),
         })
     }
 
@@ -58,6 +68,11 @@ impl TokenUsage {
         self.cache_read = next.cache_read.or(self.cache_read);
         self.cache_creation = next.cache_creation.or(self.cache_creation);
         self.reasoning = next.reasoning.or(self.reasoning);
+        self.deferred_prompt = next.deferred_prompt.or(self.deferred_prompt);
+        self.deferred_completion = next.deferred_completion.or(self.deferred_completion);
+        self.deferred_cache_read = next.deferred_cache_read.or(self.deferred_cache_read);
+        self.deferred_cache_write = next.deferred_cache_write.or(self.deferred_cache_write);
+        self.cache_unknown |= next.cache_unknown;
     }
 
     pub fn total_tokens(&self) -> i64 {
@@ -78,6 +93,14 @@ impl TokenUsage {
         changed |= set_detail(object, "prompt_tokens_details", "cached_tokens", self.cache_read);
         changed |= set_count(object, "cache_creation_input_tokens", self.cache_creation);
         changed |= set_detail(object, "completion_tokens_details", "reasoning_tokens", self.reasoning);
+        for (key, count) in [("prompt_tokens", self.deferred_prompt), ("completion_tokens", self.deferred_completion),
+            ("cached_tokens", self.deferred_cache_read), ("cache_write_tokens", self.deferred_cache_write)] {
+            changed |= set_detail(object, "magpie_deferred", key, count);
+        }
+        if self.cache_unknown && object.get("magpie_cache_unknown") != Some(&Value::Bool(true)) {
+            object.insert("magpie_cache_unknown".into(), Value::Bool(true));
+            changed = true;
+        }
         changed
     }
 

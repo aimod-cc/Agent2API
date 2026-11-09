@@ -28,7 +28,8 @@ export type ClientSettings = { acceptDeclarations: boolean; clients: CustomClien
 export type ClientIdentificationView = {
   config: ClientSettings
   revision: string
-  builtins: { id: string; name: string; value: string; products: string[] }[]
+  /** `ua` 是该客户端一份代表性的 User-Agent（账号级自定义 UA 的预置项，见后端 catalog） */
+  builtins: { id: string; name: string; value: string; products: string[]; ua?: string }[]
   headers: string[]
   declarationHeader: string
   maxRules: number

@@ -6,6 +6,7 @@ use serde_json::Value;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum PackageSource {
+    Local { path: String },
     Magpie {
         file: String,
         integrity: String,
@@ -26,11 +27,13 @@ pub struct Package {
     pub name: String,
     pub version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub provider_icons: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<PackageSource>,
     pub directory: String,
     pub enabled: bool,
-    #[serde(default)]
-    pub checkin_allowed: bool,
     pub installed_at: i64,
     #[serde(default)]
     pub providers: Vec<String>,
@@ -39,6 +42,12 @@ pub struct Package {
     #[serde(default)]
     pub options: Value,
     #[serde(default)]
+    pub provider_options: Value,
+    #[serde(default)]
+    pub settings_schema: Value,
+    #[serde(default)]
+    pub provider_aliases: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
     pub error: Option<String>,
 }
 
@@ -46,6 +55,8 @@ pub struct Package {
 pub struct Registry {
     #[serde(default)]
     pub packages: Vec<Package>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub identities: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
 }
 
 pub fn read() -> Result<Registry, String> {
@@ -60,7 +71,9 @@ pub fn read() -> Result<Registry, String> {
 
 pub fn save(registry: &Registry) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(registry).map_err(|error| error.to_string())?;
-    atomic_write(&super::root().join("registry.json"), &bytes)
+    atomic_write(&super::root().join("registry.json"), &bytes)?;
+    super::super::startup::configure_scripts(registry);
+    Ok(())
 }
 
 pub fn directory(package: &Package) -> Result<PathBuf, String> {

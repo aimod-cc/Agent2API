@@ -10,6 +10,7 @@ import { apiCall } from './client'
 import type { ProxyUsage } from '../../../ui-shared/proxy-usage'
 import type { CheckinCenter } from '../../../ui-shared/checkin'
 import type { HiddenAccountsSummary } from '../../../ui-shared/plugins'
+import type { PluginStartupSnapshot } from '../../../ui-shared/plugin-startup'
 import type { AccountSorting } from '../../../ui-shared/account-sorting'
 import { logQueryString, type LogPage, type LogQuery } from '../../../ui-shared/logs'
 
@@ -19,7 +20,7 @@ export type { CheckinAccount, CheckinCenter, ProviderGroup as CheckinProviderRow
 
 /* ─── 会话 / 账号 ─────────────────────────────── */
 
-export type ProviderSummary = { id?: string; label?: string; count?: number; category?: 'agent' | 'web'; source?: 'builtin' | 'plugin' }
+export type ProviderSummary = { id?: string; label?: string; count?: number; category?: 'agent' | 'web'; source?: 'builtin' | 'plugin'; loginAvailable?: boolean }
 
 export type RateLimitInfo = {
   status?: number | string
@@ -62,6 +63,7 @@ export type Account = {
 }
 
 export type SessionPayload = {
+  pluginStartup?: PluginStartupSnapshot
   health?: {
     upstreamConfigured?: boolean
     upstreamBaseUrl?: string | null
@@ -78,6 +80,7 @@ export type SessionPayload = {
     sorting?: AccountSorting
   }
   accountFeatures?: Record<string, unknown>
+  providerIcons?: Record<string, string>
   lastRequestModel?: string | null
   routedAccountId?: string | null
   defaultModel?: string | null
@@ -306,7 +309,7 @@ export type ManageMapping = {
 export type ManageView = {
   models?: ManageModel[]
   mappings?: ManageMapping[]
-  providers?: Array<{ provider?: string; providerLabel?: string }>
+  providers?: Array<{ provider?: string; providerLabel?: string; settingsAvailable?: boolean }>
 }
 
 export function fetchManage(signal?: AbortSignal): Promise<ManageView> {
@@ -384,13 +387,14 @@ export type PoolItem = ProxyUsage & {
   port: number | null
   username: string
   password: string
+  nonDirect?: boolean
   resolved?: { protocol?: string; host?: string; port?: number | null; label?: string } | null
   resolveError?: string | null
   lastTest?: { at?: number; success?: boolean; ip?: string; error?: string; durationMs?: number } | null
 }
 
-export type PoolPayload = { items?: PoolItem[]; clash?: import('../../../ui-shared/clash-proxy').ClashProxySnapshot; changes?: number; syncError?: string | null }
-export type ProxyDraft = Pick<PoolItem, 'name' | 'protocol' | 'host' | 'port' | 'username' | 'password' | 'enabled'>
+export type PoolPayload = { items?: PoolItem[]; clash?: import('../../../ui-shared/clash-proxy').ClashProxySnapshot; changes?: number; syncError?: string | null; imported?: import('../../../ui-shared/proxy-import').ProxyImportReport }
+export type ProxyDraft = Pick<PoolItem, 'name' | 'protocol' | 'host' | 'port' | 'username' | 'password' | 'enabled' | 'nonDirect'>
 export type ProxyTestResult = PoolPayload & {
   success?: boolean
   error?: string
@@ -412,6 +416,10 @@ export function saveProxyItem(draft: ProxyDraft, id?: string): Promise<PoolPaylo
   return apiCall<PoolPayload>(id ? '/api/proxies/pool/update' : '/api/proxies/pool', {
     method: 'POST', body: { ...draft, source: 'manual', ...(id ? { id } : {}) },
   })
+}
+
+export function importProxyItems(items: import('../../../ui-shared/proxy-import').ProxyImportDraft[]): Promise<PoolPayload> {
+  return apiCall<PoolPayload>('/api/proxies/pool', { method: 'POST', body: { items } })
 }
 
 export function removeProxyItem(id: string): Promise<PoolPayload> {
@@ -517,6 +525,7 @@ export function restoreAgentClient(clientId: string, token: string): Promise<unk
 export type UsageRow = import('../../../ui-shared/usage-query-state').UsageQueryRow
 
 export type UsageSnapshot = {
+  queries?: import('../../../ui-shared/usage-query-task').UsageQueryTask[]
   sorting?: AccountSorting
   /** 全部行里最新的结论时刻 */
   at?: number

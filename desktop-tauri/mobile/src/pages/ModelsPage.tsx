@@ -34,6 +34,7 @@ type Filter = 'all' | 'enabled' | 'hidden'
 export function ModelsPage() {
   const [models, setModels] = useState<ManageModel[] | null>(null)
   const [mappings, setMappings] = useState<ManageMapping[]>([])
+  const [settingsProviders, setSettingsProviders] = useState<string[]>([])
   const [error, setError] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
   const [query, setQuery] = useState('')
@@ -49,6 +50,7 @@ export function ModelsPage() {
       if (current !== revision.current) return
       setModels(view.models || [])
       setMappings(view.mappings || [])
+      setSettingsProviders((view.providers || []).filter(item => item.settingsAvailable && item.provider).map(item => item.provider!))
       setError('')
     } catch (failure) {
       if (current !== revision.current) return
@@ -111,6 +113,7 @@ export function ModelsPage() {
       revision.current++
       setModels(view.models || [])
       setMappings(view.mappings || [])
+      setSettingsProviders((view.providers || []).filter(item => item.settingsAvailable && item.provider).map(item => item.provider!))
       store.toast(t('映射已删除'))
     } catch (failure) {
       store.toast(failure instanceof Error ? failure.message : String(failure), 'err')
@@ -132,6 +135,7 @@ export function ModelsPage() {
       revision.current++
       setModels(view.models || [])
       setMappings(view.mappings || [])
+      setSettingsProviders((view.providers || []).filter(item => item.settingsAvailable && item.provider).map(item => item.provider!))
       store.toast(next ? (conflicts.length ? t('已启用 {name}，其他同名绑定已自动关闭', { name: model.id })
         : t('已启用 {name}', { name: model.id })) : t('已禁用 {name}', { name: model.id }))
     } catch (failure) {
@@ -251,6 +255,7 @@ export function ModelsPage() {
         const isCollapsed = collapsed.has(group.provider)
         return (
           <div key={group.provider} className='m-section' style={{ marginTop: 12 }}>
+            <div className='flex items-center gap-2 pb-2'>
             <Button size='default' variant='ghost'
               type='button'
               onClick={() => {
@@ -263,8 +268,9 @@ export function ModelsPage() {
                 display: 'flex',
                 alignItems: 'center',
                 gap: 9,
-                width: '100%',
-                padding: '0 3px 8px',
+                flex: 1,
+                minWidth: 0,
+                padding: '0 3px',
                 background: 'none',
                 border: 0,
                 textAlign: 'left',
@@ -284,6 +290,9 @@ export function ModelsPage() {
                 }}
               />
             </Button>
+            {settingsProviders.includes(group.provider) ? <Button type='button' size='sm' variant='ghost' className='shrink-0'
+              onClick={() => store.push('provider-settings', { id: group.provider })}>{t('提供商设置')}</Button> : null}
+            </div>
             {isCollapsed ? null : (
               <Card className='m-card'>
                 {group.list.map(model => {

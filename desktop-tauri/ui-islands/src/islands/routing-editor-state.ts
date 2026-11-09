@@ -79,6 +79,7 @@ export function useRoutingEditor(onSaved: () => void) {
         workspace: { ...synced.workspace, accounts: workspace.accounts,
           ...(refreshOrder ? { profile: workspace.profile, inheritedProfile: workspace.inheritedProfile, revision: workspace.revision } : {}),
           accountStates: workspace.accountStates, metrics: workspace.metrics, queue: workspace.queue, updatedAt: workspace.updatedAt,
+          modelLastUsed: workspace.modelLastUsed,
           globalAccountControl: workspace.globalAccountControl, legacyGlobalParticipation: workspace.legacyGlobalParticipation } } }
     })
   }, [])
@@ -121,9 +122,10 @@ export function useRoutingEditor(onSaved: () => void) {
       adoptAccountSorting(workspace.sorting)
       notify(t('已删除独立配置，改为跟随全局'))
       onSaved()
-      return true
     } catch (failure) { setError(errorMessage(failure)); return false }
     finally { refs.current.busy = false; setBusy(false) }
+    await load('')
+    return true
   }
   // 新增模型独立配置：立即落库，而不是只打开一份未保存草稿，避免用户以为已经创建。
   const create = async (model: string): Promise<boolean> => {

@@ -18,6 +18,7 @@ export const QQ_GROUPS: readonly QqGroup[] = [
   { no: '1127656296', nearlyFull: true },
   { no: '1130894674', nearlyFull: true },
   { no: '1108276647', nearlyFull: false },
+  { no: '1054072416', nearlyFull: false },
 ]
 
 export type CommunityLink = { id: 'telegram'; url: string }

@@ -429,7 +429,7 @@ pub(super) async fn execute_with_telemetry(
             Ok(ForwardOutcome::Completion { body }) => {
                 super::image_output::normalize(state, &payload, body, &headers, &telemetry).await
             }
-            Ok(ForwardOutcome::Stream { .. }) => Err(GatewayError::with_status(
+            Ok(ForwardOutcome::Stream { .. } | ForwardOutcome::Native(_)) => Err(GatewayError::with_status(
                 502, "插件错误地把图片响应当作对话流",
             )),
             Err(error) => Err(error),

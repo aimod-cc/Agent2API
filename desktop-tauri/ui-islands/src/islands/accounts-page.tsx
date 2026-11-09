@@ -5,15 +5,15 @@ import { mountOnPage } from '../island-lazy'
 import { flushSync } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import { t } from '../i18n'
-import { Button, Checkbox, Input, ResponsiveSheet, SegmentedControl, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, cn, Card, Label, Empty, Table, TableBody, TableRow, TableCell } from '@ui'
+import { Button, Checkbox, Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList, ComboboxTrigger, ComboboxValue, Input, ResponsiveSheet, SegmentedControl, cn, Card, Label, Empty, Table, TableBody, TableRow, TableCell } from '@ui'
 import { TableFooter, useClientPaging } from './table-shell'
 import { shared, toast, type AccountRecord, type ColSettingsHandle } from './accounts-shared'
 import { isDesktopAccount, isEnabled, providerOf, supportsUsage } from './accounts-domain'
 import { ACCOUNT_COLUMNS, bindColumnGrips, columnWidths, tableMinWidth } from './accounts-columns'
 import {
-  allAccounts, bump, clearFilter, clearLimits, clearSelection, ensureProxyPoolOptions,
+  allAccounts, bump, clearFilter, clearLimits, ensureProxyPoolOptions,
   filterActive, getStore, groupSortRules, groupView, hiddenAccounts, installAccountsApi, normalizeProviderFilter, openBatchDialog,
-  providerSummaryList, queryAllUsage, refreshList, reorderQueue, rowContext, seats, segmentCounts,
+  providerSummaryList, queryAllUsage, cancelAllUsage, refreshList, reorderQueue, rowContext, seats, segmentCounts,
   setAllGroupsCollapsed, setAllPicked, setProviderFilter, setSearchFilter, setSegmentFilter,
   snapshot, startConnectionsPolling, subscribe, subscribeProxyPool, syncGroupTotalPreference,
   tokenUsageOf, togglePick, usageEntryOf, GROUP_TOTAL_FILTERED_KEY,
@@ -24,7 +24,8 @@ import {
 } from './accounts-panels'
 import { bindQueueDrag, type QueueDrop } from './accounts-queue-drag'
 import { AccountsDialogs } from './accounts-dialogs'
-import { HiddenAccountsNotice } from './accounts-hidden-notice'
+import { HiddenAccountsDrawer, HiddenAccountsEmptyNote, HiddenAccountsEntry } from './accounts-hidden-notice'
+import { getPluginStartup, hiddenWithStartup, subscribePluginStartup } from '../../../ui-shared/plugin-startup'
 import { activeGroupSortRules, manualOrderBlockedMessage } from './accounts-group-settings'
 import { Badge, Spinner } from '@ui'
 import { Alert } from '@ui'
@@ -96,7 +97,10 @@ function AccountsPage() {
 
   const loaded = Boolean(snapshot())
   const all = allAccounts()
-  const hidden = hiddenAccounts()
+  React.useSyncExternalStore(subscribePluginStartup, getPluginStartup)
+  const hidden = hiddenWithStartup(hiddenAccounts())
+  /** 「未显示的账号」明细抽屉：平时关着，工具栏那枚入口打开它 */
+  const [hiddenOpen, setHiddenOpen] = React.useState(false)
   // groups = 要渲染的（当前筛选下一条都看不见的组不留空壳）；allGroups = 全部组，
   // 拼队列与「折叠 / 展开全部」都用它
   const { groups, allGroups } = groupView(usageEntryOf, tokenUsageOf)
@@ -188,10 +192,10 @@ function AccountsPage() {
           align: column.align,
           legacyAlign: column.legacyAlign,
         })),
-        // 挂载点是批量栏右侧的操作组（「批量操作 / 取消选择」那两颗）：齿轮插在最前，
-        // 正好落在「批量操作」左边（列设置是「怎么看这张表」，与旁边那些「对数据做什么」
-        // 的操作按钮不是一类，排头更顺）
-        mount: () => document.querySelector('#batch-bar .batch-actions'),
+        // 挂载点是批量栏右侧操作组里的一个空宿主：齿轮插在宿主内的最前，于是这一行
+        // 从左到右是「未显示账号 · 折叠 · 列设置 · 批量操作（勾选后）」。前三颗都是
+        // 「这张表怎么看」，齿轮排在其中；批量操作只在勾了账号时出现，排在最后
+        mount: () => document.querySelector('#accounts-col-host'),
         onChange: requestRender,
       }) || null
       if (colHandle) forceTick()
@@ -384,19 +388,27 @@ function AccountsPage() {
               不用切页就能看到。取值与计数都以 store 为准（受控） */}
           <div className='group' data-provider-group='1'>
             <span className='label'>{t('提供商')}</span>
-            <Select value={store.filter.provider} onValueChange={value => setProviderFilter(String(value))}>
-
-              <SelectTrigger className='max-w-none min-w-0 w-full min-[768px]:max-w-[200px] min-[768px]:min-w-[130px] min-[768px]:w-auto' aria-label={t('按提供商筛选账号')}>
-                <SelectValue>
+            <Combobox items={providerOptions}
+              value={providerOptions.find(item => item.value === store.filter.provider) ?? providerOptions[0]}
+              onValueChange={item => { if (item) setProviderFilter(item.value) }}
+              isItemEqualToValue={(item, selected) => item.value === selected.value} autoHighlight>
+              <ComboboxTrigger className='max-w-none min-w-0 w-full min-[768px]:max-w-[200px] min-[768px]:min-w-[130px] min-[768px]:w-auto' aria-label={t('按提供商筛选账号')}>
+                <ComboboxValue>
                   {providerOptions.find(item => item.value === store.filter.provider)?.label || t('全部')}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                {providerOptions.map(item => (
-                  <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+                </ComboboxValue>
+              </ComboboxTrigger>
+              <ComboboxContent>
+                <div className='shrink-0 border-b border-hairline p-2'>
+                  <ComboboxInput placeholder={t('搜索提供商…')} aria-label={t('搜索提供商')} />
+                </div>
+                <ComboboxEmpty>{t('没有匹配的选项')}</ComboboxEmpty>
+                <ComboboxList>
+                  {(item: (typeof providerOptions)[number]) => (
+                    <ComboboxItem key={item.value} value={item}>{item.label}</ComboboxItem>
+                  )}
+                </ComboboxList>
+              </ComboboxContent>
+            </Combobox>
           </div>
           <div className='divider' data-provider-divider='1' />
 
@@ -443,15 +455,6 @@ function AccountsPage() {
               onClick={() => void refreshList({ feedback: true })}>
               {store.listBusy ? t('刷新中…') : t('刷新')}
             </Button>
-            {/* 折叠是「只看某几家」的入口：一家几十条时，收起不关心的那些比筛选更顺手。
-                「全部」就是全部 —— 作用对象是全部组，不按当前筛选收窄（见 store 里
-                setAllGroupsCollapsed 的说明） */}
-            <Button id='btn-fold-groups' variant='outline'
-              disabled={!allGroups.length}
-              title={allCollapsed ? t('展开全部分组') : t('折叠全部分组（只留组头）')}
-              onClick={() => setAllGroupsCollapsed(allGroups.map(group => group.provider), !allCollapsed)}>
-              {allCollapsed ? t('展开') : t('折叠')}
-            </Button>
             {/* 「添加账号」的打开逻辑归 add-account.js（它按同一个 id 绑了监听），这里再挂
                 一次 onClick 是**冗余保险**：万一那个脚本的绑定因加载顺序没接上，按钮仍可用
                 （openModal / resetAddStep 都是幂等的，重复调用无副作用） */}
@@ -461,9 +464,10 @@ function AccountsPage() {
                 shared().wbAccountAddForms?.syncAddProvider?.()
               }}>{t('添加账号')}</Button>
             <Button id='btn-query-usage' variant='outline'
-              disabled={store.usageBusy || !all.some(supportsUsage)}
+              disabled={store.usageStarting.has('*') || !all.some(supportsUsage)}
               title={t('查询全部账号的余额（含已禁用账号 —— 禁用只表示不参与转发）')}
-              onClick={() => void queryAllUsage()}>{store.usageBusy ? t('查询中…') : t('查询余额')}</Button>
+              onClick={() => void queryAllUsage()}>{store.usageStarting.has('*') ? t('启动中…') : store.usageBusy ? t('重新查询') : t('查询余额')}</Button>
+            {store.usageBusy ? <Button variant='outline' onClick={() => void cancelAllUsage()}>{t('取消查询')}</Button> : null}
           </div>
         </div>
 
@@ -473,10 +477,6 @@ function AccountsPage() {
               ? t('刷新账号列表失败，当前仍显示上一次成功读取的数据：{message}', { message: store.listError })
               : t('账号列表加载失败，请点击「刷新」重试：{message}', { message: store.listError })}
           </Alert>
-        ) : null}
-
-        {loaded && all.length > 0 && hidden.total > 0 ? (
-          <HiddenAccountsNotice hidden={hidden} compact />
         ) : null}
 
 
@@ -515,12 +515,29 @@ function AccountsPage() {
             </span>
           ) : null}
           <div className='batch-actions'>
-            {/* 「列设置」按钮由 wbColSettings.register 插进这个容器的最前面（命令式，
+            {/* 这一组只管「这张表怎么看」：哪些账号还没显示、分组要不要收起来、显示哪几列。
+                它们与右边那颗「批量操作」（对选中的账号动手）不是一类，所以排在前面 ——
+                批量操作平时不出现，勾了账号才冒出来，扫一眼就知道右边那颗是「现在要做事了」 */}
+            <HiddenAccountsEntry hidden={hidden} onOpen={() => setHiddenOpen(true)} />
+            {/* 折叠是「只看某几家」的入口：一家几十条时，收起不关心的那些比筛选更顺手。
+                「全部」就是全部 —— 作用对象是全部组，不按当前筛选收窄（见 store 里
+                setAllGroupsCollapsed 的说明） */}
+            <Button id='btn-fold-groups' variant='outline'
+              disabled={!allGroups.length}
+              title={allCollapsed ? t('展开全部分组') : t('折叠全部分组（只留组头）')}
+              onClick={() => setAllGroupsCollapsed(allGroups.map(group => group.provider), !allCollapsed)}>
+              {allCollapsed ? t('展开') : t('折叠')}
+            </Button>
+            {/* 「列设置」按钮由 wbColSettings.register 插进这个宿主的最前面（命令式，
                 插入位置由那边决定，本岛只留容器） */}
-            <Button id='btn-batch-open' variant='outline' disabled={!active}
-              onClick={() => openBatchDialog([...store.selected], 'enable')}>{t('批量操作')}</Button>
-            <Button id='btn-batch-clear' variant='outline' disabled={!active}
-              onClick={() => clearSelection()}>{t('取消选择')}</Button>
+            <span className='batch-col-host' id='accounts-col-host' />
+            {/* 批量操作只在**勾了账号**时出现：没勾选时它是一颗永远点不动的灰按钮，占着位置
+                还让人以为少了什么。清空选择也不必再给一颗「取消选择」—— 同一行左边那颗
+                「全选当前筛选结果」的勾就能取消全选，而逐行取消是行上的勾，都不缺入口 */}
+            {active ? (
+              <Button id='btn-batch-open' variant='default'
+                onClick={() => openBatchDialog([...store.selected], 'enable')}>{t('批量操作')}</Button>
+            ) : null}
           </div>
         </div>
 
@@ -533,7 +550,7 @@ function AccountsPage() {
             </Empty>
           ) : !all.length ? (
             hidden.total > 0
-              ? <HiddenAccountsNotice hidden={hidden} />
+              ? <HiddenAccountsEmptyNote hidden={hidden} onOpen={() => setHiddenOpen(true)} />
               : <Empty className='empty'>{t('暂无账号，请点击右上角「添加账号」')}</Empty>
           ) : !shown.length ? (
             <Empty className='empty'>
@@ -596,6 +613,7 @@ function AccountsPage() {
         />
       </Card>
       <AccountsDialogs />
+      <HiddenAccountsDrawer hidden={hidden} open={hiddenOpen} onOpenChange={setHiddenOpen} />
     </>
   )
 }

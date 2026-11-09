@@ -45,6 +45,7 @@ use crate::server::ServerState;
 /// GET /api/session —— 首屏状态（管理面鉴权见 http.rs）
 pub async fn get_session(State(state): State<ServerState>) -> Response {
     let snapshot = config::current();
+    let plugin_startup = crate::server::core::plugin_host::startup::snapshot();
     // 可见账号与路由页预演共用同一份快照，插件未就绪的账号不参与。
     let accounts = state.store().list_visible_accounts();
     let routed = super::routing_api::queue_for_accounts(
@@ -105,6 +106,8 @@ pub async fn get_session(State(state): State<ServerState>) -> Response {
         //
         // 没申报的家不在表里 —— 界面走自己的兜底表，旧插件照常工作。
         "accountFeatures": account_features(),
+        "providerIcons": crate::server::core::plugin_host::script::provider_icons(),
+        "pluginStartup": plugin_startup,
     }))
 }
 
@@ -146,11 +149,16 @@ struct LoginMethodMetadata {
     #[serde(default)]
     prompts: Vec<LoginPromptMetadata>,
     #[serde(default)]
+    dynamic_prompts: bool,
+    #[serde(default)]
     local_only: bool,
     #[serde(default)]
     manual_callback: bool,
     #[serde(default)]
     callback_input: LoginCallbackInput,
+    /// 回调的成功与错误都由插件先校验归属，旧插件保持网关的错误收尾。
+    #[serde(default)]
+    validates_callback: bool,
     /// 插件要求这条 OAuth 流程只在应用内嵌窗口打开（不提供系统浏览器选项）。
     ///
     /// 用于登录页跑在本机回环地址上的插件（AStudio）：交给系统浏览器只会让
@@ -209,6 +217,8 @@ struct LoginPromptOption {
     label: String,
 }
 
+mod login_proxy;
+
 struct SelectedLogin {
     /// methods 校验与 login.start 共用同一实例，不在二者之间重新解析 owner。
     adapter: std::sync::Arc<dyn crate::server::core::providers::adapter::ProviderAdapter>,
@@ -217,6 +227,7 @@ struct SelectedLogin {
     local_only: bool,
     manual_callback: bool,
     callback_input: LoginCallbackInput,
+    validates_callback: bool,
     instructions: Option<String>,
 }
 
@@ -243,6 +254,7 @@ fn legacy_selected(
         local_only: false,
         manual_callback: false,
         callback_input: LoginCallbackInput::Url,
+        validates_callback: false,
         instructions: None,
     })
 }
@@ -250,12 +262,16 @@ fn legacy_selected(
 async fn read_login_methods(
     state: &ServerState,
     adapter: &dyn crate::server::core::providers::adapter::ProviderAdapter,
+    locale: Option<&str>,
 ) -> Result<Option<LoginMethodsMetadata>, crate::server::errors::GatewayError> {
     use crate::server::core::login::login_text;
     use crate::server::errors::GatewayError;
-    let Some(value) = adapter.login_methods_metadata(state.store()).await? else {
-        return Ok(None);
-    };
+    let metadata = if crate::server::core::plugin_host::dynamic_login(adapter.provider_id()) {
+        adapter.admin_action(state.store(), "", "auth.methods", &json!({
+            "locale": locale.filter(|value| matches!(*value, "en" | "ja" | "ko" | "pt-BR" | "zh-Hant")).unwrap_or("zh-CN"),
+        })).await.map(Some)?
+    } else { adapter.login_methods_metadata(state.store()).await? };
+    let Some(value) = metadata else { return Ok(None); };
     let value = if value.is_array() { json!({ "methods": value }) } else { value };
     let mut metadata: LoginMethodsMetadata = serde_json::from_value(value)
         .map_err(|_| GatewayError::with_status(502, "插件返回的登录方式元数据无法解析"))?;
@@ -327,7 +343,7 @@ pub async fn login_methods(
     let Some(adapter) = crate::server::core::providers::adapter::adapter_by_id(provider) else {
         return management_error(400, format!("未知的提供商：{provider}"));
     };
-    match read_login_methods(&state, adapter.as_ref()).await {
+    match read_login_methods(&state, adapter.as_ref(), params.get("locale").map(String::as_str)).await {
         Ok(Some(metadata)) => match serde_json::to_value(metadata) {
             Ok(value) => ok_json(value),
             Err(_) => management_error(502, "登录方式元数据无法序列化"),
@@ -346,6 +362,16 @@ fn checked_login_inputs(
     let Some(object) = inputs.as_object_mut() else {
         return Err(GatewayError::bad_request("inputs 必须是字符串字段对象"));
     };
+    if method.dynamic_prompts {
+        if object.len() > 64 || object.iter().any(|(key, value)| key.is_empty() || key.len() > 64
+            || !key.bytes().enumerate().all(|(index, ch)| ch.is_ascii_alphabetic()
+                || index > 0 && (ch.is_ascii_digit() || matches!(ch, b'_' | b'-')))
+            || matches!(key.as_str(), "__proto__" | "prototype" | "constructor" | "signal")
+            || value.as_str().is_none_or(|text| text.len() > 262_144 || text.contains('\0'))) {
+            return Err(GatewayError::bad_request("inputs 包含无效字段"));
+        }
+        return Ok(inputs);
+    }
     if object.iter().any(|(key, value)| !value.is_string() || !method.prompts.iter().any(|prompt| &prompt.key == key)) {
         return Err(GatewayError::bad_request("inputs 包含未申报的字段或非字符串值"));
     }
@@ -384,6 +410,9 @@ fn checked_login_proxy(
     use crate::server::core::proxies::{normalize_account_proxy, resolve_account_proxy, ResolvedProxy};
     use crate::server::errors::GatewayError;
     let Some(value) = value else { return Ok(None) };
+    if !value.is_null() && !value.is_object() {
+        return Err(GatewayError::bad_request("登录代理配置必须是对象或 null"));
+    }
     // null（现有表单）及显式 direct 都记为直连，不能与「没有选择」混淆。
     let direct = value.get("source").and_then(Value::as_str)
         .is_some_and(|source| source.trim().eq_ignore_ascii_case("direct"));
@@ -470,7 +499,7 @@ pub async fn login_start(State(state): State<ServerState>, body: Bytes) -> Respo
         let Some(adapter) = crate::server::core::providers::adapter::adapter_by_id(provider) else {
             return management_error(400, format!("未知的提供商：{provider}"));
         };
-        let metadata = match read_login_methods(&state, adapter.as_ref()).await {
+        let metadata = match read_login_methods(&state, adapter.as_ref(), None).await {
             Ok(Some(metadata)) => metadata,
             Ok(None) => return management_error(501, "该提供商尚未申报动态登录方式，请使用既有登录入口"),
             Err(error) => return management_error(error.status_code, error.message),
@@ -507,6 +536,7 @@ pub async fn login_start(State(state): State<ServerState>, body: Bytes) -> Respo
             local_only: method.local_only,
             manual_callback: method.manual_callback,
             callback_input: method.callback_input,
+            validates_callback: method.validates_callback,
             instructions: (!instructions.is_empty()).then_some(instructions),
         };
         return start_plugin_web_login(state, provider.to_string(), Some(selected)).await;
@@ -625,11 +655,12 @@ async fn start_plugin_web_login(
             }
             SelectedLogin {
                 adapter, proxy: None, options: json!({}), local_only: false,
-                manual_callback: false, callback_input: LoginCallbackInput::Url, instructions: None,
+                manual_callback: false, callback_input: LoginCallbackInput::Url,
+                validates_callback: false, instructions: None,
             }
         }
     };
-    let SelectedLogin { adapter, proxy, options, local_only, manual_callback, callback_input, instructions } = selected;
+    let SelectedLogin { adapter, proxy, options, local_only, manual_callback, callback_input, validates_callback, instructions } = selected;
     let label = adapter.label();
     let method_index = options.get("methodIndex").and_then(Value::as_u64);
     let mut start = match adapter.build_login_flow_with_options(options).await {
@@ -657,6 +688,8 @@ async fn start_plugin_web_login(
     handle.update(|task| {
         task.state = Some(start.flow.clone());
         task.auth_url = Some(start.url.clone());
+        task.allowed_hosts = start.allowed_hosts.clone();
+        task.validates_callback = validates_callback;
         task.instructions = Some(start.instructions.clone());
         task.method_index = method_index;
         task.polling = start.poll_interval_ms > 0;
@@ -841,13 +874,16 @@ pub async fn login_callback(State(state): State<ServerState>, body: Bytes) -> Re
     if callback_url.trim().is_empty() {
         return management_error(400, "缺少 callbackUrl（登录回调地址）");
     }
-    // 标准错误在旧 AutoClaw 特判前统一落定，不把敏感描述送进插件/页面。
-    if let Some(error) = url::Url::parse(&callback_url).ok().and_then(|url| {
-        url.query_pairs().find(|(key, value)| key == "error" && !value.trim().is_empty())
-            .map(|(_, error)| error.into_owned())
-    }) {
-        let error = state.login().reject_login_callback(&task_state, &error).await;
-        return management_error(error.status_code, error.message);
+    let validates_callback = state.login().tasks().get(&task_state)
+        .is_some_and(|task| task.snapshot().validates_callback);
+    if !validates_callback {
+        if let Some(error) = url::Url::parse(&callback_url).ok().and_then(|url| {
+            url.query_pairs().find(|(key, value)| key == "error" && !value.trim().is_empty())
+                .map(|(_, error)| error.into_owned())
+        }) {
+            let error = state.login().reject_login_callback(&task_state, &error).await;
+            return management_error(error.status_code, error.message);
+        }
     }
     // ── AutoClaw 的网页登录是**轮询型**（回调落在插件自己的登记端口）──
     // `submit_login_callback` 那条路只服务「网关等回调」的回调型家（它会把
@@ -902,6 +938,9 @@ pub async fn login_callback(State(state): State<ServerState>, body: Bytes) -> Re
         }
         Ok(crate::server::core::login::LoginCallbackSubmission::Accepted) => {
             ok_json(json!({ "accepted": true, "continue": true }))
+        }
+        Ok(crate::server::core::login::LoginCallbackSubmission::Retry(message)) => {
+            ok_json(json!({ "accepted": false, "retryable": true, "hint": message }))
         }
         Ok(crate::server::core::login::LoginCallbackSubmission::ContinueTo(next_url)) => {
             ok_json(json!({ "continue": true, "nextUrl": next_url }))
@@ -963,6 +1002,9 @@ pub async fn login_remote_callback(
         }
         Ok(crate::server::core::login::LoginCallbackSubmission::Accepted) => {
             oauth_callback_page(200, "回调已接收，登录仍在处理中，请返回面板等待。")
+        }
+        Ok(crate::server::core::login::LoginCallbackSubmission::Retry(message)) => {
+            oauth_callback_page(400, &message)
         }
         Ok(crate::server::core::login::LoginCallbackSubmission::ContinueTo(_)) => {
             oauth_callback_page(400, "登录回调仍需继续，请重新发起网页登录。")
@@ -1059,8 +1101,12 @@ pub async fn login_sms_send(State(state): State<ServerState>, body: Bytes) -> Re
         Err(response) => return response,
     };
     // 发码不需要账号（还没登录），`account` 传空串；插件那条动作不读账号库。
+    let (action, _) = match login_proxy::action_payload(&payload, json!({ "phone": phone })) {
+        Ok(value) => value,
+        Err(error) => return management_error(error.status_code, error.message),
+    };
     match adapter
-        .admin_action(state.store(), "", "login.sms-send", &json!({ "phone": phone }))
+        .admin_action(state.store(), "", "login.sms-send", &action)
         .await
     {
         Ok(result) => ok_json(result),
@@ -1091,13 +1137,13 @@ pub async fn login_sms_verify(State(state): State<ServerState>, body: Bytes) -> 
         Ok(adapter) => adapter,
         Err(response) => return response,
     };
+    let (action, proxy) = match login_proxy::action_payload(&payload,
+        json!({ "phone": phone, "code": code, "deviceId": device_id, "name": name })) {
+        Ok(value) => value,
+        Err(error) => return management_error(error.status_code, error.message),
+    };
     let account = match adapter
-        .admin_action(
-            state.store(),
-            "",
-            "login.sms-verify",
-            &json!({ "phone": phone, "code": code, "deviceId": device_id, "name": name }),
-        )
+        .admin_action(state.store(), "", "login.sms-verify", &action)
         .await
     {
         Ok(value) => match serde_json::from_value::<agent2api_provider_protocol::NormalizedAccount>(value)
@@ -1109,7 +1155,7 @@ pub async fn login_sms_verify(State(state): State<ServerState>, body: Bytes) -> 
         },
         Err(error) => return management_error(error.status_code, error.message),
     };
-    match adapter.persist_login_account(&account) {
+    match adapter.persist_login_account_with_proxy(&account, proxy.as_ref().map(|selection| &selection.config)) {
         Ok(account_id) => {
             let label = account
                 .public
@@ -1131,7 +1177,7 @@ pub async fn login_sms_verify(State(state): State<ServerState>, body: Bytes) -> 
                 })
                 .cloned()
                 .unwrap_or(account.public);
-            ok_json(json!({ "account": account, "list": list }))
+            ok_json(json!({ "account": account, "list": list, "proxySaved": proxy.is_some() }))
         }
         Err(error) => management_error(error.status_code, error.message),
     }
@@ -1161,8 +1207,12 @@ pub async fn login_loomy_sms_send(State(state): State<ServerState>, body: Bytes)
     };
     // 发码不需要账号（还没登录），`account` 传空串；`store` 也只是占位
     // （插件的这条动作不读账号库）。
+    let (action, _) = match login_proxy::action_payload(&payload, json!({ "phone": phone })) {
+        Ok(value) => value,
+        Err(error) => return management_error(error.status_code, error.message),
+    };
     match adapter
-        .admin_action(state.store(), "", "login.sms-send", &json!({ "phone": phone }))
+        .admin_action(state.store(), "", "login.sms-send", &action)
         .await
     {
         Ok(result) => ok_json(result),
@@ -1185,13 +1235,13 @@ pub async fn login_loomy_sms_verify(State(state): State<ServerState>, body: Byte
     else {
         return management_error(400, "Loomy 的提供商插件没有安装，无法登录");
     };
+    let (action, proxy) = match login_proxy::action_payload(&payload,
+        json!({ "phone": phone, "code": code, "msgid": msgid })) {
+        Ok(value) => value,
+        Err(error) => return management_error(error.status_code, error.message),
+    };
     let mut account = match adapter
-        .admin_action(
-            state.store(),
-            "",
-            "login.sms-verify",
-            &json!({ "phone": phone, "code": code, "msgid": msgid }),
-        )
+        .admin_action(state.store(), "", "login.sms-verify", &action)
         .await
     {
         Ok(value) => match serde_json::from_value::<agent2api_provider_protocol::NormalizedAccount>(value)
@@ -1216,7 +1266,7 @@ pub async fn login_loomy_sms_verify(State(state): State<ServerState>, body: Byte
             );
         }
     }
-    match adapter.persist_login_account(&account) {
+    match adapter.persist_login_account_with_proxy(&account, proxy.as_ref().map(|selection| &selection.config)) {
         Ok(account_id) => {
             let label = account
                 .public
@@ -1235,7 +1285,7 @@ pub async fn login_loomy_sms_verify(State(state): State<ServerState>, body: Byte
                 })
                 .cloned()
                 .unwrap_or(account.public);
-            ok_json(json!({ "account": account, "list": list }))
+            ok_json(json!({ "account": account, "list": list, "proxySaved": proxy.is_some() }))
         }
         Err(error) => management_error(error.status_code, error.message),
     }
@@ -1276,13 +1326,12 @@ async fn tabbit_sms_send_inner(state: &ServerState, payload: &Value) -> Response
     else {
         return management_error(503, "Tabbit 的提供商插件没有安装，无法发送验证码");
     };
+    let (action, _) = match login_proxy::action_payload(payload, json!({ "phone": phone, "uuid": uuid })) {
+        Ok(value) => value,
+        Err(error) => return management_error(error.status_code, error.message),
+    };
     match adapter
-        .admin_action(
-            state.store(),
-            "",
-            "login.sms-send",
-            &json!({ "phone": phone, "uuid": uuid }),
-        )
+        .admin_action(state.store(), "", "login.sms-send", &action)
         .await
     {
         Ok(result) => {
@@ -1325,18 +1374,14 @@ async fn tabbit_sms_verify_inner(state: &ServerState, payload: &Value) -> Respon
     else {
         return management_error(503, "Tabbit 的提供商插件没有安装，无法登录");
     };
+    let (action, proxy) = match login_proxy::action_payload(payload, json!({
+        "phone": phone, "code": code, "uuid": uuid, "name": payload.get("name"),
+    })) {
+        Ok(value) => value,
+        Err(error) => return management_error(error.status_code, error.message),
+    };
     let mut account = match adapter
-        .admin_action(
-            state.store(),
-            "",
-            "login.sms-verify",
-            &json!({
-                "phone": phone,
-                "code": code,
-                "uuid": uuid,
-                "name": payload.get("name"),
-            }),
-        )
+        .admin_action(state.store(), "", "login.sms-verify", &action)
         .await
     {
         Ok(value) => {
@@ -1362,7 +1407,7 @@ async fn tabbit_sms_verify_inner(state: &ServerState, payload: &Value) -> Respon
             );
         }
     }
-    match adapter.persist_login_account(&account) {
+    match adapter.persist_login_account_with_proxy(&account, proxy.as_ref().map(|selection| &selection.config)) {
         Ok(account_id) => {
             let label = account
                 .public
@@ -1381,7 +1426,7 @@ async fn tabbit_sms_verify_inner(state: &ServerState, payload: &Value) -> Respon
                 })
                 .cloned()
                 .unwrap_or(account.public);
-            ok_json(json!({ "account": account, "list": list }))
+            ok_json(json!({ "account": account, "list": list, "proxySaved": proxy.is_some() }))
         }
         Err(error) => management_error(error.status_code, error.message),
     }
@@ -1523,8 +1568,12 @@ pub async fn login_oauth_captcha_config(State(state): State<ServerState>, body: 
         Ok(adapter) => adapter,
         Err(response) => return response,
     };
+    let (action, _) = match login_proxy::action_payload(&payload, Value::Null) {
+        Ok(value) => value,
+        Err(error) => return management_error(error.status_code, error.message),
+    };
     match adapter
-        .admin_action(state.store(), "", "login.oauth-config", &Value::Null)
+        .admin_action(state.store(), "", "login.oauth-config", &action)
         .await
     {
         Ok(config) => ok_json(config),
@@ -1574,13 +1623,13 @@ pub async fn login_oauth_start(State(state): State<ServerState>, body: Bytes) ->
             ),
         );
     }
+    let (action, proxy) = match login_proxy::action_payload(&payload,
+        json!({ "vendor": vendor, "captchaVerifyParam": captcha })) {
+        Ok(value) => value,
+        Err(error) => return management_error(error.status_code, error.message),
+    };
     let started = match adapter
-        .admin_action(
-            state.store(),
-            "",
-            "login.oauth-start",
-            &json!({ "vendor": vendor, "captchaVerifyParam": captcha }),
-        )
+        .admin_action(state.store(), "", "login.oauth-start", &action)
         .await
     {
         Ok(value) => value,
@@ -1600,7 +1649,7 @@ pub async fn login_oauth_start(State(state): State<ServerState>, body: Bytes) ->
         return management_error(502, "插件没有返回授权地址或登录流程 id，请重试");
     }
     // 网关侧任务：`/wait` 按 state 查它，`pollIntervalMs > 0` 时起后台轮询。
-    let handle = state.login().new_handle_for_adapter("", adapter.clone(), None);
+    let handle = state.login().new_handle_for_adapter("", adapter.clone(), proxy);
     let interval = started
         .get("pollIntervalMs")
         .and_then(Value::as_u64)
@@ -1797,6 +1846,7 @@ fn login_callback_page(
     match result {
         Ok(LoginCallbackSubmission::Completed(_)) => oauth_callback_page(200, "登录成功，已返回网关，可以关闭此页面。"),
         Ok(LoginCallbackSubmission::Accepted) => oauth_callback_page(200, "回调已接收，登录仍在处理中，请返回面板等待。"),
+        Ok(LoginCallbackSubmission::Retry(message)) => oauth_callback_page(400, &message),
         Ok(LoginCallbackSubmission::ContinueTo(_)) => oauth_callback_page(400, "登录回调仍需继续，请重新发起网页登录。"),
         Err(error) => oauth_callback_page(error.status_code, &format!("登录失败：{}", error.message)),
     }

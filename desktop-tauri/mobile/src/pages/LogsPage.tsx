@@ -8,8 +8,8 @@ import { fetchLogs } from '../api/gateway'
 import { usePullToRefresh, PullIndicator } from '../components/PullToRefresh'
 import { t } from '../i18n'
 import {
-  formatLogTime, groupTime, logContext, logGroups, logLevel, logRawText, logSource, logSummary,
-  type LogGroup, type LogPage, type LogView,
+  formatLogTime, groupTime, logAdvice, logContext, logDetailText, logGroups, logLevel, logPlugins, logRawText,
+  logSource, logSteps, logSummary, logViewNote, type LogGroup, type LogPage, type LogView,
 } from '../../../ui-shared/logs'
 import { Toggle as UiToggle } from '@ui'
 import { DateRangeFilter } from '../components/DateRangeFilter'
@@ -38,6 +38,8 @@ export function LogsPage() {
   const [reading, setReading] = useState(false)
   const [pending, setPending] = useState(0)
   const [detail, setDetail] = useState<LogGroup | null>(null)
+  const [detailTab, setDetailTab] = useState<'detail' | 'raw'>('detail')
+  useEffect(() => setDetailTab('detail'), [detail?.id])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const bodyRef = useRef<HTMLDivElement | null>(null)
@@ -158,7 +160,7 @@ export function LogsPage() {
         <div className='m-section' style={{ marginTop: 0 }}>
           <SegmentedControl options={VIEWS} value={view} onValueChange={setView} aria-label={t('日志视图')} className='w-full' />
           <Input className='mt-2.5 w-full' type='search' value={keyword} onChange={event => setKeyword(event.currentTarget.value)}
-            placeholder={t('搜索消息、提供商或账号…')} aria-label={t('搜索消息、提供商或账号')} />
+            placeholder={t('搜索插件、消息、提供商或账号…')} aria-label={t('搜索插件、消息、提供商或账号')} />
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginTop: 10, fontSize: 11.5, color: 'var(--m-text-3)' }}>
             <span>{held ? t('阅读模式，列表保持不动') : auto.enabled ? t('自动刷新') : t('自动刷新已关闭')}</span>
             <Label style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Switch checked={aggregate} onCheckedChange={setAggregate} aria-label={t('折叠重复日志')} />{t('折叠重复日志')}</Label>
@@ -167,12 +169,13 @@ export function LogsPage() {
         <DateRangeFilter range={range} dates={dates} onRangeChange={setRange} label={t('事件日志时间范围')}
           onDatesChange={next => { setDates(next); saveCustomRange(CUSTOM_RANGE_KEY, next) }} />
         {view !== 'debug' ? <div className='m-chips' style={{ padding: '0 16px 10px' }}>
-          {[{ value: '', label: t('全部级别') }, { value: 'warn', label: t('warn 及以上') }, { value: 'error', label: t('仅 error') }].map(option =>
+          {[{ value: '', label: t('全部级别') }, { value: 'warn', label: t('警告及以上') }, { value: 'error', label: t('仅错误') }].map(option =>
             <UiToggle size='default' variant='outline' key={option.value} type='button' className='m-chip rounded-pill' pressed={level === option.value} onClick={() => setLevel(option.value)}>{option.label}</UiToggle>)}
         </div> : null}
       </div>
       <div className='m-body' ref={bodyRef} onScroll={() => setReading((bodyRef.current?.scrollTop || 0) > 20)}>
         {error ? <ErrorNote text={error} /> : null}
+        <div className='m-section' style={{ fontSize: 11.5, color: 'var(--m-text-3)', lineHeight: 1.6 }}>{logViewNote(view, t)}</div>
         {view === 'debug' && data && !data.debugEnabled ? <div className='m-section' style={{ fontSize: 11.5, color: 'var(--m-text-3)' }}>{t('调试采集未开启，仅显示已保留的记录。可在设置中开启调试模式。')}</div> : null}
         {pending || held ? <div className='m-section'><Button variant='outline' className='w-full' disabled={loading} onClick={() => void load(true)}>{pending ? t('有 {n} 条新日志', { n: pending }) : t('阅读模式，列表保持不动')} · {t('查看最新')}</Button></div> : null}
         {!data && !error ? <SkeletonList rows={5} height={68} /> : null}
@@ -186,7 +189,7 @@ export function LogsPage() {
               <Button variant='ghost' size='xs' onClick={() => { stateRef.current.detail = group; setDetail(group) }}>{t('详情')}</Button>
             </div>
             <div style={{ color: 'var(--m-text)', lineHeight: 1.55, fontSize: 12.5, marginTop: 3 }}>{logSummary(group.entry, t)}</div>
-            {logContext(group.entry) ? <div style={{ color: 'var(--m-text-3)', fontSize: 11, lineHeight: 1.5, marginTop: 3, overflowWrap: 'anywhere' }}>{logContext(group.entry)}</div> : null}
+            {logContext(group.entry, t) ? <div style={{ color: 'var(--m-text-3)', fontSize: 11, lineHeight: 1.5, marginTop: 3, overflowWrap: 'anywhere' }}>{logContext(group.entry, t)}</div> : null}
             <div style={{ color: 'var(--m-text-3)', fontSize: 10.5, marginTop: 6, fontVariantNumeric: 'tabular-nums' }}>{groupTime(group)}</div>
           </div>)}
         </Card></div> : null}
@@ -202,9 +205,29 @@ export function LogsPage() {
           {detail ? <>
             <div style={{ fontSize: 13, color: 'var(--m-text)', lineHeight: 1.6 }}>{logSummary(detail.entry, t)}</div>
             <div style={{ fontSize: 11, color: 'var(--m-text-3)' }}>{groupTime(detail)} · {t('原始记录 {n} 条', { n: detail.count })}</div>
-            <div style={{ fontSize: 11.5, color: 'var(--m-text-2)', overflowWrap: 'anywhere' }}>{logContext(detail.entry)}</div>
-            <h3 style={{ fontSize: 12 }}>{t('原始记录')}</h3>
-            {detail.entries.map((entry, index) => <div key={entry.id ?? index}>
+            <div style={{ fontSize: 11.5, color: 'var(--m-text-2)', overflowWrap: 'anywhere' }}>{logContext(detail.entry, t)}</div>
+            <SegmentedControl options={[{ value: 'detail' as const, label: t('事件详情') }, { value: 'raw' as const, label: t('原始记录') }]}
+              value={detailTab} onValueChange={setDetailTab} aria-label={t('日志详情视图')} />
+            {detailTab === 'detail' ? <>
+              <div style={{ fontSize: 12 }}>{t('来源')}：{logSource(detail.entry, t)}</div>
+              {logAdvice(detail.entry, t) ? <div style={{ fontSize: 12, lineHeight: 1.6, padding: 12, background: 'var(--m-surface)', borderRadius: 10 }}>
+                <strong>{t('处理建议')}</strong><p style={{ margin: '6px 0 0' }}>{logAdvice(detail.entry, t)}</p>
+              </div> : null}
+              {logPlugins(detail.entry, t).length ? <section><h3 style={{ fontSize: 12 }}>{t('启动结果')}</h3>
+                {logPlugins(detail.entry, t).map(plugin => <div key={plugin.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '6px 0', fontSize: 12 }}>
+                  <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{plugin.name}</span>
+                  <span style={{ flexShrink: 0, color: plugin.phase === 'ready' ? 'var(--m-text-3)' : 'var(--m-warn)' }}>{plugin.status}</span>
+                </div>)}
+              </section> : null}
+              {logSteps(detail.entry, t).length ? <section><h3 style={{ fontSize: 12 }}>{t('各阶段耗时')}</h3>
+                {logSteps(detail.entry, t).map((step, index) => <div key={index} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '5px 0', fontSize: 12 }}>
+                  <span>{step.label}</span><span>{step.duration}</span>
+                </div>)}
+              </section> : null}
+              {logDetailText(detail.entry) ? <section><h3 style={{ fontSize: 12 }}>{t('详细信息')}</h3>
+                <pre style={{ fontSize: 11, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', lineHeight: 1.6 }}>{logDetailText(detail.entry)}</pre>
+              </section> : null}
+            </> : detail.entries.map((entry, index) => <div key={entry.id ?? index}>
               <div style={{ fontSize: 10.5, color: 'var(--m-text-3)', marginBottom: 5 }}>{formatLogTime(entry.ts)}</div>
               <pre style={{ fontFamily: 'var(--font-mono)', fontSize: 11, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', lineHeight: 1.6, padding: 10, margin: 0, borderRadius: 10, background: 'var(--m-surface)' }}>{JSON.stringify(entry, null, 2)}</pre>
             </div>)}

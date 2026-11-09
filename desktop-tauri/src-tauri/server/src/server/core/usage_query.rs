@@ -1,37 +1,6 @@
-//! 余额 / 积分查询的编排层：目标集合解析、跨账号并发、结果落记录表，以及
-//! 「每账号各自到期」的心跳调度（全局「定时查询积分」任务已退役）。
-//!
-//! ── 查询的三条入口共用同一份编排 ─────────────────────────────
-//!   - 手动批量（工具栏「查询余额」→ `query_all(store, None)`）；
-//!   - 手动单查（账号行的「余额」按钮 → `query_all(store, Some(id))`）；
-//!   - 自动查询（`spawn_sweeper` 的心跳循环，每轮只查「配置了自动查询且到期」
-//!     的账号）。
-//! 三条路径查询完都**写记录表**（`core::usage_records`）：手动查询因此天然
-//! 顺延该账号的下一轮自动排期（到期 = 上次尝试 + 间隔，排期没有独立状态），
-//! 余额不足的跳过 / 禁用判定也拿到的都是最新读数。
-//!
-//! ── 每账号到期判定（没有独立排期状态）────────────────────────
-//! 到期 = `记录.last_attempt_at + 账号配置的间隔 <= now`，是「记录 + 配置」的
-//! 纯函数：重启不重置节奏（记录在库里）、手动查询天然顺延（写记录即推进
-//! last_attempt）、账号删除即失效（记录被孤儿清理扫掉）。失败**不退避**：
-//! 失败行照常写记录（上次尝试时间被推进），下一轮仍按配置间隔来 —— 与
-//! OmniProxy 的调度同口径。
-//!
-//! ── 余额不足的两档处理（与 OmniProxy 同构）───────────────────
-//!   - skip（软跳过）：不改任何状态，转发选路按 `usage_records::balance_facts`
-//!     的内存事实实时剔除（见 `upstream::rotate`），余额回升自动恢复参与；
-//!   - disable（硬禁用）：查询成功落记录后由 `enforce_low_balance_disable`
-//!     判定，低于阈值就把账号 `enabled` 置 false —— 不自动恢复，需手动启用；
-//!     自动查询**继续**跑（禁用只表示不参与转发，余额保持新鲜供用户判断）。
-//! 判定口径与余额列同一数字（`usage_records::extract_remaining`）。
-//!
-//! ── 限制器（余额 / Token 规则列表）与 Token 周期消耗 ─────────
-//! 「余额不足处理」已升级为每账号的**限制器规则列表**（`core::limiter`，
-//! 账号记录的 `limiters` 键）：余额规则沿用上面两档的语义与判定（判定函数
-//! 已改读有效规则），Token 规则另带重置周期。Token 侧的心跳职责在本循环：
-//! 每轮先**全量刷新窗口事实**（`limiter::refresh_token_facts`，窗口对齐自然
-//! 时间，翻页即归零），再做 **Token 自动禁用判定**（`enforce_token_disable`，
-//! disable 档命中即禁用、不自动恢复）；skip 档由选路过滤读同一份事实表拦截。
+//! 手动、批量与自动余额查询共用按账号隔离的任务。每条完成后立即落库；
+//! 配置变化、取消和替换使旧任务失效，结果提交与限制器判定使用同一份有效配置。
+//! 单次上游超时之外，整轮查询还有独立的总时限，重试不能越过该时限。
 
 use std::time::Duration;
 
@@ -43,6 +12,10 @@ use crate::server::core::usage_records;
 
 use crate::server::logging;
 
+pub(crate) mod config;
+pub mod jobs;
+mod run;
+
 /// 余额查询失败的原因：区分「没有凭证」（Node 的早退分支，少 name 键）与
 /// 「请求失败」（带 name 键）。第二个字段是给前端的**机器可识别标记**（当前
 /// 只有「未配置查询凭证」用，见 `adapter::USAGE_NOT_CONFIGURED_CODE`）：前端据此
@@ -50,7 +23,7 @@ use crate::server::logging;
 enum UsageFailure {
     /// 账号没有可用凭证 —— Node 里那个 `return { id, usage:null, error }`
     NoCredentials,
-    Request(String, Option<String>),
+    Request(String, Option<String>, i32),
 }
 
 /// 目标集合解析失败。
@@ -153,12 +126,24 @@ async fn query_usage_for(store: &AccountStore, account: &Value) -> Value {
             .get("balanceQuery")
             .and_then(|query| query.get("scheme"))
             .is_some();
+    let retry_limit = usage_records::query_retries_of(account.get("usageQuery"));
+    let mut retries = 0;
     let outcome = if has_credentials {
         let provider_id = account
             .get("provider")
             .and_then(Value::as_str)
             .unwrap_or(crate::server::core::providers::DEFAULT_PROVIDER_ID);
-        query_usage_inner(store, provider_id, &id).await
+        let mut outcome = query_usage_inner(store, provider_id, &id).await;
+        while retries < retry_limit && matches!(&outcome,
+            Err(UsageFailure::Request(_, code, status))
+                if matches!(*status, 408 | 429 | 500..=599)
+                    && !matches!(code.as_deref(), Some("usage_not_configured" | "account_proxy_unavailable" | "refresh_token_expired"))
+        ) {
+            tokio::time::sleep(Duration::from_secs(1 << retries.min(2))).await;
+            retries += 1;
+            outcome = query_usage_inner(store, provider_id, &id).await;
+        }
+        outcome
     } else {
         Err(UsageFailure::NoCredentials)
     };
@@ -168,7 +153,7 @@ async fn query_usage_for(store: &AccountStore, account: &Value) -> Value {
         Err(UsageFailure::NoCredentials) => {
             json!({ "id": id, "usage": Value::Null, "error": "没有可用凭证" })
         }
-        Err(UsageFailure::Request(message, code)) => {
+        Err(UsageFailure::Request(message, code, _)) => {
             json!({ "id": id, "name": name, "usage": Value::Null, "error": message, "code": code })
         }
     };
@@ -190,6 +175,8 @@ async fn query_usage_for(store: &AccountStore, account: &Value) -> Value {
         "outcome": if error.is_none() { "success" } else { "failed" },
         "detail": error,
         "code": row.get("code"),
+        "retries": retries,
+        "retryLimit": retry_limit,
         "durationMs": started.elapsed().as_millis() as u64,
     })));
     row
@@ -225,7 +212,7 @@ async fn query_usage_inner(
         // 401 刷新重试那一步 —— 有的话反而会把「凭证不对」变成两条错误
         return crate::server::core::providers::custom::balance::query_usage(store, id)
             .await
-            .map_err(|error| UsageFailure::Request(error.message, error.code));
+            .map_err(|error| UsageFailure::Request(error.message, error.code, error.status_code));
     }
     // 注册表里没有的 id（前端比后端新、或手改过的账号文件）：明确报「未知的
     // 提供商」，不猜成任何一家（与全仓的 provider 口径一致）。
@@ -238,6 +225,7 @@ async fn query_usage_inner(
         return Err(UsageFailure::Request(
             format!("未知的提供商 {provider_id}，无法查询余额"),
             None,
+            501,
         ));
     };
     match adapter.query_usage(store, id).await {
@@ -245,7 +233,7 @@ async fn query_usage_inner(
         Err(error) => {
             // 不支持刷新的家直接返回原错误（CatPaw：重试必然失败，见上）
             if error.status_code != 401 || !adapter.supports_refresh() || store.needs_relogin(id) {
-                return Err(UsageFailure::Request(error.message, error.code));
+                return Err(UsageFailure::Request(error.message, error.code, error.status_code));
             }
             if let Err(refresh_error) = adapter.refresh_access_token(store, id).await {
                 // 刷新失败时**原始错误不能丢**：401 的两种含义（token 临期 /
@@ -259,12 +247,13 @@ async fn query_usage_inner(
                         error.message, refresh_error.message
                     ),
                     error.code,
+                    refresh_error.status_code,
                 ));
             }
             adapter
                 .query_usage(store, id)
                 .await
-                .map_err(|retry| UsageFailure::Request(retry.message, retry.code))
+                .map_err(|retry| UsageFailure::Request(retry.message, retry.code, retry.status_code))
         }
     }
 }
@@ -319,135 +308,26 @@ pub(crate) fn supports_usage_provider(provider_id: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 逐账号并发查询余额 / 积分汇总
-/// （`{ results: [{id,name,usage,error,code?}], skipped }`）。
-///
-/// 目标集合是**全部可用账号**（`resolve_batch_targets(provider = None)`，
-/// 不看启用状态，见那里的说明），逐账号按 `provider` 分流到
-/// `ProviderAdapter::query_usage`。手动批量与手动单查走这里，自动查询的
-/// 心跳循环复用同一套单账号编排（`query_usage_for`）—— 三条入口的结果
-/// 都**落记录表**（见模块头），余额不足的跳过 / 禁用判定因此拿到的一直是
-/// 最新读数，手动查询也天然顺延该账号的下一轮自动排期。
-///
-/// **并发**是关键：Node 版用 `Promise.all`，20 个账号串行会让前端转圈 20 次
-/// 往返。这里用 `join_all` 在同一个任务里并发轮询（每个 future 都是网络等待，
-/// 天然交错），且**结果顺序与 targets 一致** —— 与 `Promise.all` 语义相同。
-/// **超时由各适配器自己设**（15~20 秒）；这里不叠加第二层超时 —— 那会让
-/// 「上游慢」与「网关掐断」在日志里无法区分。
-///
-/// ── `id`：显式指定时只查这一个 ──────────────────────────────
-/// **用户手点某一行账号的「积分」按钮**问的是「这个账号现在还剩多少」。
-/// 账号被禁用只说明它不参与转发，与其余额能不能查没有关系 —— 按启用状态把
-/// 这次查询挡掉，界面只会得到一句「未返回余额数据」，用户看不出是「禁用了」
-/// 还是「上游挂了」。所以指定 id 时按 `resolve_batch_targets` 的单查分支走
-/// （那条分支只认 id，不做范围与可用性过滤），也不过滤 `supports_usage`：
-/// 能力过滤是给批量路径避免一整片 501 的，单查应当如实报「这家不支持」。
-/// 批量路径现在同样不看启用状态（见 `resolve_batch_targets`），两条路径的
-/// 唯一差别就是「查一个」还是「查全部可用」。
-///
-/// 未知 id 由 `resolve_batch_targets` 报 404「账号不存在」。
+pub fn refresh_configuration(store: &AccountStore) { jobs::reconcile(store); }
+
+pub fn start_queries(store: &AccountStore, id: Option<&str>, replace: bool) -> Result<Value, TargetError> {
+    let single = id.filter(|value| !value.is_empty());
+    let (targets, skipped) = resolve_batch_targets(store, None, single)?;
+    let targets: Vec<_> = targets.iter().filter(|account| single.is_some() || supports_usage(account)).collect();
+    let queries: Vec<Value> = targets.iter().filter_map(|account| run::start(store, account, replace).map(|job| job.state())).collect();
+    if queries.len() != targets.len() {
+        return Err(TargetError { message: "部分余额查询未能启动，请检查账号与数据库状态".to_string(), status_code: 503 });
+    }
+    Ok(json!({ "queries": queries, "skipped": skipped }))
+}
+
 pub async fn query_all(store: &AccountStore, id: Option<&str>) -> Result<Value, TargetError> {
     let single = id.filter(|value| !value.is_empty());
-    // `provider = None`：跨四家取目标（签到那条仍按 provider 过滤）
     let (targets, skipped) = resolve_batch_targets(store, None, single)?;
-    let queried: Vec<&Value> = targets
-        .iter()
-        .filter(|account| single.is_some() || supports_usage(account))
-        .collect();
-    let futures: Vec<_> = queried
-        .iter()
-        .map(|account| query_usage_for(store, account))
-        .collect();
-    let mut results = futures::future::join_all(futures).await;
-    // 每行结论落记录表 + 跑「余额不足自动禁用」钩子：手动与自动两条路径在
-    // 这里汇合（见模块头）。账号对象与结果行按构造顺序一一对齐
-    // （`queried` 与 `results` 同源同序），配置就在手上，不必回读账号列表。
-    for (account, row) in queried.iter().zip(results.iter_mut()) {
-        write_row_record(row);
-        enforce_low_balance_disable(store, account, row);
-        if let Some(id) = account.get("id").and_then(Value::as_str) {
-            let record = usage_records::load(id);
-            row["at"] = json!(record.last_attempt_at);
-            row["lastSuccessAt"] = json!(record.last_success_at);
-            if row.get("error").and_then(Value::as_str).is_some() {
-                row["lastUsage"] = json!(record.usage);
-            }
-        }
-    }
+    let queries: Vec<_> = targets.iter().filter(|account| single.is_some() || supports_usage(account))
+        .filter_map(|account| run::start(store, account, false)).map(jobs::wait).collect();
+    let results = futures::future::join_all(queries).await;
     Ok(json!({ "results": results, "skipped": skipped }))
-}
-
-// ─── 记录表写入与「余额不足自动禁用」钩子 ────────────────────
-
-/// 一行查询结果 → 记录表（`core::usage_records`）。读不出 id 的行看不懂，跳过。
-fn write_row_record(row: &Value) {
-    let Some(id) = row
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-    else {
-        return;
-    };
-    let outcome = usage_records::UsageOutcome {
-        usage: row.get("usage").filter(|usage| !usage.is_null()).cloned(),
-        error: row.get("error").and_then(Value::as_str).map(str::to_string),
-        code: row.get("code").and_then(Value::as_str).map(str::to_string),
-    };
-    usage_records::write_result(id, &outcome);
-}
-
-/// 「余额不足自动禁用」钩子：查询**成功**落记录后判定（失败行不动 —— 读数
-/// 还是上次成功的旧值，拿它执行禁用是把旧结论又跑一遍，等下一次成功再说）。
-///
-/// 命中条件（三条全要）：
-///   1. 账号配置了 `lowBalance.mode == "disable"`（`off` / `skip` 两档不归它管）；
-///   2. 本次读数判得出数字且**严格小于**阈值（等于仍可用，与选路跳过同口径）；
-///   3. 账号当前是启用状态（幂等：已禁用的账号不再执行、不再重复打日志）。
-///
-/// 禁用走 `update_account` 既有写路径（与手动禁用同一入口，「已禁用」的变更
-/// 日志照常出现），再补一条说明原因的日志 —— 「为什么被禁」必须可复看。
-/// **不自动恢复**：余额回升后需手动启用；自动查询继续跑（禁用只表示不参与
-/// 转发），余额列保持新鲜，用户看着读数决定何时恢复。
-fn enforce_low_balance_disable(store: &AccountStore, account: &Value, row: &Value) {
-    if account.get("limiterGroups").is_some() {
-        limiter::enforce_disable(store, std::slice::from_ref(account));
-        return;
-    }
-    if matches!(account.get("enabled"), Some(Value::Bool(false))) {
-        return;
-    }
-    let Some(id) = account.get("id").and_then(Value::as_str) else {
-        return;
-    };
-    let Some(threshold) = usage_records::low_balance_disable_threshold(account) else {
-        return;
-    };
-    let Some(usage) = row.get("usage").filter(|usage| !usage.is_null()) else {
-        return;
-    };
-    let (remaining, _unlimited) = usage_records::extract_remaining(usage);
-    let Some(remaining) = remaining else { return };
-    if remaining >= threshold {
-        return;
-    }
-    let display = account
-        .get("name")
-        .and_then(Value::as_str)
-        .filter(|name| !name.is_empty())
-        .unwrap_or(id);
-    match store.update_account(id, &json!({ "enabled": false })) {
-        Ok(_) => logging::log_with_level(
-            "[Usage]",
-            &format!(
-                "账号「{display}」余额 {remaining} 低于阈值 {threshold}，已自动禁用（余额回升后请手动启用，自动查询继续）"
-            ),
-            "warn",
-        ),
-        Err(error) => logging::verbose(
-            "[Usage]",
-            &format!("账号 {id} 余额不足自动禁用失败：{}", error.message),
-        ),
-    }
 }
 
 // ─── Token 限制器的自动禁用钩子 ──────────────────────────────
@@ -572,20 +452,8 @@ async fn sweep_due(store: &AccountStore) {
     if due.is_empty() {
         return;
     }
-    // 先占位再发请求（`usage_records` 模块头的硬约束：被杀不留「没跑过」状态）
     for (account, _) in &due {
-        if let Some(id) = account.get("id").and_then(Value::as_str) {
-            usage_records::mark_attempt(id);
-        }
-    }
-    let futures: Vec<_> = due
-        .iter()
-        .map(|(account, _)| query_usage_for(store, account))
-        .collect();
-    let results = futures::future::join_all(futures).await;
-    for ((account, _), row) in due.iter().zip(results.into_iter()) {
-        write_row_record(&row);
-        enforce_low_balance_disable(store, account, &row);
+        run::start(store, account, false);
     }
 }
 
@@ -612,6 +480,7 @@ async fn sweep_due(store: &AccountStore) {
 ///
 /// 访客没有积分体系（见 `supports_usage` 的说明），其历史失败记录也不返回。
 pub fn snapshot(store: &AccountStore) -> Value {
+    let queries = jobs::states(store);
     let records = usage_records::load_all();
     let accounts = store.list_accounts();
     let list = accounts.get("accounts").and_then(Value::as_array);
@@ -639,6 +508,8 @@ pub fn snapshot(store: &AccountStore) -> Value {
                 "at": record.last_attempt_at,
                 "lastUsage": record.usage,
                 "lastSuccessAt": record.last_success_at,
+                "requestId": record.query_request_id,
+                "stale": !record.query_config.is_empty() && account.get("usageConfigKey").and_then(Value::as_str) != Some(record.query_config.as_str()),
             }));
         } else if let Some(usage) = record.usage.as_ref() {
             rows.push(json!({
@@ -648,6 +519,8 @@ pub fn snapshot(store: &AccountStore) -> Value {
                 "error": Value::Null,
                 "at": record.last_attempt_at,
                 "lastSuccessAt": record.last_success_at,
+                "requestId": record.query_request_id,
+                "stale": !record.query_config.is_empty() && account.get("usageConfigKey").and_then(Value::as_str) != Some(record.query_config.as_str()),
             }));
         }
     }
@@ -684,6 +557,7 @@ pub fn snapshot(store: &AccountStore) -> Value {
         )).cloned().collect();
     json!({
         "at": at,
+        "queries": queries,
         "results": rows,
         "skipped": 0,
         "tokenAt": now,

@@ -75,10 +75,23 @@ impl TelemetrySnapshot {
 }
 
 impl RequestTelemetry {
+    /// 写入这次请求的选路快照。
+    ///
+    /// 有些键**不属于选路**，但同住这份快照：图片兼容（`visionCompatibility`）
+    /// 与特殊请求路由的改写记录（`compactRoute` / `titleRoute`）。它们在选路
+    /// 之前就已确定，而选路会在每轮重试时整份覆盖 —— 不在这里搬过去，
+    /// 回放页就只剩最后一次的选路结果，看不到「这条请求被改写过模型」。
+    const PRESERVED: &'static [&'static str] = &["visionCompatibility", "compactRoute", "titleRoute"];
+
     pub fn set_route_decision(&self, mut decision: Value) {
         let mut guard = self.lock();
-        if let Some(vision) = guard.route.as_ref().and_then(|route| route.get("visionCompatibility")).cloned() {
-            if let Some(object) = decision.as_object_mut() { object.insert("visionCompatibility".into(), vision); }
+        let carried: Vec<(&'static str, Value)> = Self::PRESERVED.iter()
+            .filter_map(|key| guard.route.as_ref().and_then(|route| route.get(*key)).map(|value| (*key, value.clone())))
+            .collect();
+        if !carried.is_empty() {
+            if let Some(object) = decision.as_object_mut() {
+                for (key, value) in carried { object.insert(key.into(), value); }
+            }
         }
         if guard.route.as_ref() == Some(&decision) { return; }
         guard.route = Some(decision);

@@ -191,7 +191,7 @@ impl RouteState {
     ///
     /// **端点无关**：同一套标识在不同协议端点上语义相同，按路径收窄反而会在
     /// 客户端换端点时丢掉同一个会话（上游的内容哈希同样是端点无关的）。
-    fn explicit_conversation_id(headers: &HeaderMap, body: &serde_json::Value) -> Option<String> {
+    pub(crate) fn explicit_conversation_id(headers: &HeaderMap, body: &serde_json::Value) -> Option<String> {
         // ① AxonHub 的**会话级**头。⚠️ 别换成 `AH-Trace-Id`：那个的粒度是
         // 「单条用户消息 + 它触发的所有请求」（AxonHub 的层级是 Thread → Trace
         // → Request），一个客户端每轮都会给它一个新值，拿它当会话键会让粘性

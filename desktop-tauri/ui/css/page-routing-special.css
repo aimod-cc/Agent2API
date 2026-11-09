@@ -1,0 +1,56 @@
+/* 路由页 · 特殊请求路由相关的页面样式。
+ *
+ * 2026-11 改版后三块配置面板（压缩上下文 / 图片兼容 / 标题生成）换成了组件库 + Tailwind
+ * 那一套（规则列表见 ui-islands/src/styles/routing-special.css），原来那段
+ * 「触发 → 改写 → 目标」的方框样式已经没人用，随改版删掉。这里只剩两处：
+ *   · 左栏里特殊路由条目的图标与文字排布；
+ *   · 请求回放里的「模型改写」块。
+ * 取值走 theme.css 的令牌；未分层，保证页面骨架压得住组件库工具类。 */
+
+.routing-rail-special { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.routing-rail-special .ico { color: var(--text-3); }
+.routing-config-scope-item[data-active] .routing-rail-special .ico { color: inherit; }
+
+/* ── 请求回放：模型改写块 ─────────────────────────────── */
+
+.routing-exec-rewrite {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 22px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface-2);
+}
+.routing-exec-rewrite[data-kind='compact'] { border-color: var(--primary-bd); }
+.routing-exec-rewrite[data-kind='vision'] { border-color: var(--warn-bd); }
+.routing-exec-rewrite-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.routing-exec-rewrite-head > b { font-size: 13px; font-weight: 600; }
+.routing-exec-rewrite-head > span { color: var(--text-3); font-size: 11.5px; }
+.routing-exec-rewrite-flow { display: flex; align-items: stretch; gap: 8px; }
+.routing-exec-rewrite-node {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+}
+.routing-exec-rewrite-node > span { color: var(--text-3); font-size: 10.5px; }
+.routing-exec-rewrite-node > b { font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere; }
+.routing-exec-rewrite-node.is-accent { border-color: var(--primary-bd); background: var(--primary-soft); }
+.routing-exec-rewrite-node.is-accent > b { color: var(--primary-fg); }
+.routing-exec-rewrite-arrow { display: flex; flex: none; align-items: center; color: var(--text-3); }
+
+@container routing-detail (max-width: 560px) {
+  .routing-exec-rewrite-flow { flex-direction: column; }
+  .routing-exec-rewrite-arrow { justify-content: center; transform: rotate(90deg); }
+}
+@media (max-width: 767px) {
+  .routing-exec-rewrite-flow { flex-direction: column; }
+  .routing-exec-rewrite-arrow { justify-content: center; transform: rotate(90deg); }
+}

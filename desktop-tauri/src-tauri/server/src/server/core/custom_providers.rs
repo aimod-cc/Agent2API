@@ -1006,7 +1006,9 @@ pub async fn fetch_upstream_models(
             builder.header("Authorization", format!("Bearer {api_key}"))
         };
     }
-    let response = builder.send().await.map_err(|error| {
+    let response = crate::server::core::user_agent::AccountRequest::with_user_agent(
+        builder, &credential.user_agent,
+    ).send().await.map_err(|error| {
         format!("上游请求失败: {}", egress::describe_error_detail(&error))
     })?;
     let status = response.status().as_u16();

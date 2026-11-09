@@ -10,6 +10,9 @@ const REFRESH_EXPIRY_KEYS: &[&str] = &[
 ];
 
 pub(super) fn credential_fields(record: &StoredAccount, public: &mut Map<String, Value>) {
+    if record.get("pluginIdentityContract").and_then(Value::as_u64) == Some(1) {
+        return;
+    }
     let secret = record.get("pluginSecret").and_then(Value::as_object);
     // Copilot 的 auth.refresh 保存 GitHub Token，不是 OAuth Refresh Token。
     let refresh_keys: &[&str] = if record.provider() == "copilot-subscription" {
@@ -81,7 +84,7 @@ fn token_present(record: &StoredAccount, public: &Map<String, Value>, keys: &[&s
 
 pub(super) fn is_private_field(key: &str) -> bool {
     matches!(key,
-        "pluginSecret" | "pluginPublic" | "pluginIdentity" | "accessToken" | "refreshToken"
+        "pluginSecret" | "pluginPublic" | "pluginIdentity" | "pluginIdentityContract" | "pluginState" | "accessToken" | "refreshToken"
         | "access_token" | "refresh_token" | "apiKey" | "api_key" | "password"
         | "balanceToken" | "workbuddyWebSession" | "access_key_id" | "secret_access_key" | "security_token" | "oauth_context"
     )

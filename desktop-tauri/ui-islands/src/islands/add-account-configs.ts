@@ -109,17 +109,6 @@ export type ProviderConfig = {
    */
   guestLogin?: { noteHtml: string; button: string; busyText?: string; namePlaceholder?: string }
   regionOptions?: RegionOption[]
-  /**
-   * 这一家的登录 / 添加链路要不要显示「登录出网代理」选择器。
-   *
-   * ── 为什么需要这个开关（而不是全开）──────────────────────────
-   * 只有上游在常见网络里**必须经代理才可达**的家才需要它 —— 今天只有
-   * Antigravity（Google）。其余家直连就能到，多一个代理框只会让用户以为
-   * 「不选代理就用不了」。开关打开后：网页登录把代理放进 `options.proxy`
-   * 交给网关的 `login.start`，粘贴凭据把代理放进 `POST /api/accounts` 的
-   * `proxy` 字段（两条路都由插件在自己的出网链路上使用）。
-   */
-  loginProxy?: boolean
   /** false = 这一家没有「从本机导入桌面端登录态」这一条来源 */
   desktop?: boolean
   desktopNote?: string
@@ -780,9 +769,6 @@ const ANTIGRAVITY: ProviderConfig = {
   provider: 'antigravity',
   label: t('Antigravity'),
   desktop: false,
-  // 上游是 Google：多数网络里只有经代理才可达。无头服务器上没有系统代理，
-  // 「登录 / 换证出网线路」只能由用户在这里选（见 `loginProxy` 的说明）。
-  loginProxy: true,
   // 网页登录：Google 账号授权页 + loopback 回调。回调落在网关自己的端口，
   // 所以两种打开方式都可用（会复用系统浏览器里已登录的 Google 账号）。
   webLogin: {

@@ -134,7 +134,7 @@ export function VisionRerouteCard({ value, models, reasoning, maxTargets, disabl
         </div>
       } />
       <SwitchRow label={t('优先使用当前路由内的视觉模型')} disabled={disabled}
-        tip={t('保持当前路由范围，不跳到其他路由组。')}
+        tip={t('先尝试当前路由内的视觉模型，不可用时再按顺序尝试指定模型；指定模型可跨路由池。')}
         checked={value.preferCurrentRoute} onCheckedChange={preferCurrentRoute => onChange({ preferCurrentRoute })} />
       {backups.map((target, index) => <ListRow key={visionTargetKey(target)} index={index} title={visionModelLabel(models, target, t)}
         actions={<>

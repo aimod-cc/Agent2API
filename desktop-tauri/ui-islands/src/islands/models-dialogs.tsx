@@ -13,6 +13,7 @@ import {
   type CustomModelContext, type MappingContext,
 } from './models-panel-state'
 import { t } from '../i18n'
+import { SearchableSelect } from '../../../ui-shared/searchable-select'
 
 /* ─── 映射弹窗 ───────────────────────────────── */
 
@@ -354,17 +355,10 @@ export function CustomModelDialog({ initial, onClose }: { initial: CustomModelCo
         <DialogBody>
           <div className='flex flex-col gap-1.5'>
             <Label htmlFor='custom-model-provider'>{t('提供商')}</Label>
-            <Select value={providerValue} disabled={initial.locked}
-              onValueChange={next => setProvider(String(next))}>
-              <SelectTrigger id='custom-model-provider' className='w-full'>
-                <SelectValue>{providerLabel}</SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                {choices.map(item => (
-                  <SelectItem key={item.id} value={item.id}>{item.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <SearchableSelect value={providerValue} disabled={initial.locked} onValueChange={setProvider}
+              id='custom-model-provider' className='w-full' displayValue={providerLabel}
+              aria-label={t('提供商')} searchPlaceholder={t('搜索提供商')}
+              options={choices.map(item => ({ value: item.id, label: item.label }))} />
           </div>
           <div className='flex flex-col gap-1.5'>
             <Label htmlFor='custom-model-id'>{t('上游模型 ID')}</Label>

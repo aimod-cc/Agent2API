@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Badge, Button, Spinner } from '@ui'
+import { Badge, Button, Checkbox, Spinner } from '@ui'
 import type { OfficeaceSubscriptionApi, OfficeaceSubscriptionState, OfficeaceSubscriptionStatus } from './checkin-officeace-types'
 
 type Translate = (key: string, params?: Record<string, string | number>) => string
@@ -52,7 +52,9 @@ export function OfficeaceSubscription({ accountId, api, t, active = true, disabl
   const [busy, setBusy] = useState<'query' | 'activate' | ''>('')
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
+  const [consent, setConsent] = useState(false)
   const lock = useRef(false)
+  const pollCount = useRef(0)
   const generation = useRef(0)
 
   useEffect(() => {
@@ -60,6 +62,8 @@ export function OfficeaceSubscription({ accountId, api, t, active = true, disabl
     setError('')
     setMessage('')
     setBusy('')
+    setConsent(false)
+    pollCount.current = 0
     lock.current = false
     const current = ++generation.current
     return () => { if (generation.current === current) generation.current += 1 }
@@ -77,6 +81,7 @@ export function OfficeaceSubscription({ accountId, api, t, active = true, disabl
       if (generation.current !== current) return
       if (!result || !STATES.has(result.status)) throw new Error(t('后端未返回有效的套餐状态'))
       setData(result)
+      if (result.status === 'active') onChange?.()
     } catch (cause) {
       if (generation.current !== current) return
       setData(null)
@@ -90,33 +95,49 @@ export function OfficeaceSubscription({ accountId, api, t, active = true, disabl
     if (active && !data && !error) void query()
   }, [active, accountId])
 
+  useEffect(() => {
+    if (!active || disabled || busy || error || data?.status !== 'pending' || pollCount.current >= 6) return
+    const timer = window.setTimeout(() => {
+      pollCount.current += 1
+      void query()
+    }, 5000)
+    return () => window.clearTimeout(timer)
+  }, [active, disabled, busy, error, data, accountId])
+
   const activate = async () => {
-    if (lock.current || disabled || data?.status !== 'inactive' || data.canActivate !== true) return
+    if (lock.current || disabled || !consent || data?.status !== 'inactive' || data.canActivate !== true) return
     lock.current = true
     const current = generation.current
     setBusy('activate')
     setError('')
     setMessage('')
+    pollCount.current = 0
     try {
-      const result = await api.activate(accountId)
+      const result = await api.activate(accountId, consent)
       if (generation.current !== current) return
       if (!result || !['activated', 'already_active', 'skipped', 'pending'].includes(result.status)) {
         throw new Error(t('后端未返回有效的套餐状态'))
       }
       if (result.status === 'activated' || result.status === 'already_active') {
-        setData({ status: 'active', canActivate: false, checkedAt: result.checkedAt })
-        setMessage(result.status === 'activated' ? t('免费套餐已开通并确认生效') : t('套餐已开通，无需重复操作'))
+        setData({ ...result, status: 'active', canActivate: false })
+        setMessage(result.message || (result.status === 'activated' ? t('免费套餐已开通并确认生效') : t('套餐已开通，无需重复操作')))
       } else {
-        setData({ status: result.status === 'pending' ? 'pending' : 'unknown', canActivate: false })
-        setMessage(result.status === 'pending'
+        setData({ ...result, status: result.status === 'pending' ? 'pending' : 'unknown', canActivate: false })
+        setMessage(result.message || (result.status === 'pending'
           ? t('开通请求仍在处理或结果待确认，请稍后查询，不要重复提交')
-          : result.message || t('未执行开通，请查询套餐状态查看原因'))
+          : t('未执行开通，请查询套餐状态查看原因')))
       }
       onChange?.()
     } catch (cause) {
       if (generation.current !== current) return
-      setData({ status: 'pending', canActivate: false })
+      setData({ status: 'unknown', canActivate: false })
       setError(cause instanceof Error ? cause.message : String(cause))
+      try {
+        const latest = await api.query(accountId)
+        if (generation.current === current && latest && STATES.has(latest.status)) setData(latest)
+      } catch {
+        if (generation.current === current) setMessage(t('开通未得到确认，请重新查询套餐状态；不会自动重试开通'))
+      }
     } finally {
       if (generation.current === current) { lock.current = false; setBusy('') }
     }
@@ -133,16 +154,28 @@ export function OfficeaceSubscription({ accountId, api, t, active = true, disabl
         <Button size='sm' variant='outline' disabled={Boolean(busy) || disabled} onClick={() => void query()}>
           {busy === 'query' ? <Spinner /> : null}{busy === 'query' ? t('查询中…') : t('查询套餐')}
         </Button>
-        <Button size='sm' disabled={Boolean(busy) || disabled || status !== 'inactive' || data?.canActivate !== true}
+        <Button size='sm' disabled={Boolean(busy) || disabled || !consent || status !== 'inactive' || data?.canActivate !== true}
           onClick={() => void activate()}>
           {busy === 'activate' ? <Spinner /> : null}
           {busy === 'activate' ? t('开通中…') : status === 'active' ? t('已开通') : t('开通免费套餐')}
         </Button>
       </div>
     </div>
-    <p className='text-xs text-muted-foreground break-words'>{description(status, t)}</p>
-    <p className='text-xs text-muted-foreground'>{t('与新人积分独立，不购买付费套餐、不自动续费')}</p>
+    <p className='text-xs text-muted-foreground break-words'>{data?.message ? t(data.message) : description(status, t)}</p>
+    <p className='text-xs text-muted-foreground'>{t('仅开通官方报价为 0 元的个人体验套餐，固定关闭自动续费；奖励另行领取')}</p>
+    {status === 'inactive' && data?.canActivate ? <div className='space-y-1.5'>
+      <label className='flex items-start gap-2 text-xs text-muted-foreground'>
+        <Checkbox className='mt-0.5' checked={consent} onCheckedChange={checked => setConsent(checked === true)} disabled={Boolean(busy) || disabled} />
+        <span>{t('我已阅读并同意以下服务声明，仅授权开通零元体验套餐，不自动续费')}</span>
+      </label>
+      <div className='flex flex-wrap gap-3 pl-5 text-xs'>
+        <a className='text-primary underline underline-offset-2' href='https://www.huaweicloud.com/declaration/officeace.html' target='_blank' rel='noreferrer'>{t('果办服务声明')}</a>
+        <a className='text-primary underline underline-offset-2' href='https://www.huaweicloud.com/declaration/agentarts.html' target='_blank' rel='noreferrer'>{t('AgentArts 服务声明')}</a>
+      </div>
+    </div> : null}
+    {data?.autoRenew === false ? <Badge variant='success' shape='tag'>{t('已确认不自动续费')}</Badge> : null}
+    {data?.autoRenew === true ? <p role='alert' className='text-sm text-destructive'>{t('官方显示自动续费已开启，请到官方客户端检查')}</p> : null}
     {error ? <p role='alert' className='text-sm text-destructive break-words'>{error}</p> : null}
-    {message ? <p role='status' className='text-sm text-foreground break-words'>{message}</p> : null}
+    {message && message !== data?.message ? <p role='status' className='text-sm text-foreground break-words'>{t(message)}</p> : null}
   </div>
 }

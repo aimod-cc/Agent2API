@@ -21,6 +21,7 @@ const PATHS: Record<string, string> = {
   chev: '<path d="M9.5 5.5 16 12l-6.5 6.5"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   search: '<circle cx="11" cy="11" r="6.2"/><path d="m16 16 4.2 4.2"/>',
+  zoomIn: '<circle cx="11" cy="11" r="6.2"/><path d="m16 16 4.2 4.2M11 8v6M8 11h6"/>',
   close: '<path d="m6 6 12 12M18 6 6 18"/>',
   check: '<path d="m4.5 12.5 5 5 10-11"/>',
   copy:

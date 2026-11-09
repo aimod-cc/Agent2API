@@ -53,6 +53,10 @@ pub fn request_plan(def: &ClientDef, path: &Path, payload: &Value, port: u16) ->
         return Err("不能修改客户端配置的标识".into());
     }
     profile.updated_at = old.updated_at;
+    edit_plan(def, path, &old, &profile, port)
+}
+
+pub(super) fn edit_plan(def: &ClientDef, path: &Path, old: &Profile, profile: &Profile, port: u16) -> Result<clients::Plan, String> {
     if def.id == "zed" && profile.protocol != old.protocol {
         let duplicates = old.native.entry.get("available_models").and_then(Value::as_array).is_some_and(|models| models.iter().any(|model|
             (model.pointer("/capabilities/chat_completions").and_then(Value::as_bool) == Some(false)) == (profile.protocol == "responses")
@@ -62,18 +66,18 @@ pub fn request_plan(def: &ClientDef, path: &Path, payload: &Value, port: u16) ->
     let mut definition = *def;
     if !old.enabled { definition.default_model = false; }
     let operation = if old.enabled && definition.default_model { "default" } else { "apply" };
-    let mut plan = clients::plan(&definition, path, &profile, operation, port)?;
+    let mut plan = clients::plan(&definition, path, profile, operation, port)?;
     let model_ids: std::collections::HashSet<_> = profile.models.iter().map(|model| model.id.as_str()).collect();
-    clients::remove_models(def, &mut plan, &old, &model_ids)?;
+    clients::remove_models(def, &mut plan, old, &model_ids)?;
     for change in &mut plan.changes {
         if change.path != path || def.id == "dsh" { continue; }
         let original = files::text(change.before.as_deref())?;
         let after = files::text(change.after.as_deref())?;
         let mut value = files::parse(def.format, &after)?;
-        clients::preserve_selection(def, &mut value, &old)?;
+        clients::preserve_selection(def, &mut value, old)?;
         change.after = Some(files::render(def.format, &original, &value)?);
     }
-    plan.operation = action.into();
+    plan.operation = "native-edit".into();
     plan.warnings.push("直接修改所选客户端配置；保留其它条目、未知字段与认证，写入前自动备份。".into());
     for change in &plan.changes { change.check()?; }
     Ok(plan)

@@ -8,6 +8,10 @@ use crate::server::{db::Db, logging};
 
 use super::types::*;
 
+#[cfg(test)]
+#[path = "counter_tests.rs"]
+mod tests;
+
 static DB: OnceLock<Option<Db>> = OnceLock::new();
 
 #[derive(Clone, Debug, Default)]

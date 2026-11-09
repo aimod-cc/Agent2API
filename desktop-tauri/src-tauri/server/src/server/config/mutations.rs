@@ -7,6 +7,8 @@ pub(crate) fn try_update_raw_field<T, E>(
     mutate: impl FnOnce(&mut Value) -> Result<T, E>,
     storage_error: impl FnOnce() -> E,
 ) -> Result<T, E> {
+    let _usage_guard = (key == crate::server::core::custom_providers::KEY_CUSTOM_PROVIDERS)
+        .then(crate::server::core::usage_query::config::lock);
     let _guard = CONFIG_UPDATE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());

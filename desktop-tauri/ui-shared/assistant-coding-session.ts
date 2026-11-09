@@ -1,17 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { codingPath, type CodingHistory, type CodingItem, type CodingSession, type CodingTransport } from './assistant-coding-types'
+import { codingPath, type CodingHistory, type CodingItem, type CodingSession, type CodingSubmission, type CodingTransport, type CodingTurn } from './assistant-coding-types'
 import { followCodingSession } from './assistant-coding-stream'
 
 export function useCodingSession(transport: CodingTransport, id: string, enabled: boolean) {
   const [session, setSession] = useState<CodingSession | null>(null)
   const [items, setItems] = useState<CodingItem[]>([])
+  const [turns, setTurns] = useState<CodingTurn[]>([])
+  const [submissions, setSubmissions] = useState<CodingSubmission[]>([])
   const [loading, setLoading] = useState(false)
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState('')
   const refreshRef = useRef<() => Promise<void>>(async () => {})
 
   useEffect(() => {
-    setSession(null); setItems([]); setError(''); setConnected(false); setLoading(false)
+    setSession(null); setItems([]); setTurns([]); setSubmissions([]); setError(''); setConnected(false); setLoading(false)
     refreshRef.current = async () => {}
     if (!id || !enabled) return
     const controller = new AbortController()
@@ -33,7 +35,7 @@ export function useCodingSession(transport: CodingTransport, id: string, enabled
         transport.json<CodingHistory>('GET', codingPath(id, '/messages'), undefined, signal),
       ]).then(([detail, history]) => {
         if (signal.aborted) return
-        setSession(detail.session); setItems(history.items); setError('')
+        setSession(detail.session); setItems(history.items); setTurns(history.turns || []); setSubmissions(history.submissions || []); setError('')
       }).finally(() => {
         syncing = null
         if (queued) schedule()
@@ -56,5 +58,5 @@ export function useCodingSession(transport: CodingTransport, id: string, enabled
     return () => { controller.abort(); clearTimeout(timer); document.removeEventListener('visibilitychange', foreground) }
   }, [transport, id, enabled])
 
-  return { session, items, loading, connected, error, refresh: useCallback(() => refreshRef.current(), []) }
+  return { session, items, turns, submissions, loading, connected, error, refresh: useCallback(() => refreshRef.current(), []) }
 }

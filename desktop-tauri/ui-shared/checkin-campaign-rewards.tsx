@@ -37,10 +37,13 @@ function currentStatus(campaign: CampaignReward, now = Date.now()): CampaignStat
     ? 'inactive' : campaign.status
 }
 
+export function claimableCampaigns(data: CampaignPreview | null, now = Date.now()): CampaignReward[] {
+  return data?.campaigns.filter(campaign => currentStatus(campaign, now) === 'claimable') ?? []
+}
+
 /** 这条活动「现在能不能领」—— 桌面端用它算行上的摘要 */
 export function claimableCount(data: CampaignPreview | null, now = Date.now()): number {
-  if (!data) return 0
-  return data.campaigns.filter(campaign => currentStatus(campaign, now) === 'claimable').length
+  return claimableCampaigns(data, now).length
 }
 
 /** 这条活动里今天领到过的条数 */
@@ -98,7 +101,7 @@ export function useCampaignRewards({ entry, api, t, onChange }: {
   }
 
   const claim = async (campaign: CampaignReward) => {
-    if (lock.current || currentStatus(campaign) !== 'claimable') return
+    if (lock.current || !entry.available || currentStatus(campaign) !== 'claimable') return
     lock.current = true
     setBusy(campaign.campaignId)
     setError('')
@@ -109,7 +112,10 @@ export function useCampaignRewards({ entry, api, t, onChange }: {
       setMessage(outcomeMessage(result.outcome, t))
       setData(previous => previous ? { ...previous, campaigns: previous.campaigns.map(row => {
         if (row.campaignId !== campaign.campaignId) return row
-        return result.campaign || { ...row, status: 'inactive' }
+        const status = result.outcome === 'claimed' || result.outcome === 'already_claimed' ? 'claimed'
+          : result.outcome === 'confirming' || result.outcome === 'failed' ? 'confirming'
+            : result.outcome === 'ineligible' ? 'ineligible' : 'inactive'
+        return result.campaign || { ...row, status }
       }) } : previous)
       onChange?.()
     } catch (error) {

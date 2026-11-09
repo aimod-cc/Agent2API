@@ -11,6 +11,7 @@ pub struct SourceFacts {
     pub remaining: Option<f64>,
     pub unlimited: bool,
     pub unit: String,
+    pub query_config: String,
 }
 
 pub type Facts = HashMap<String, SourceFacts>;
@@ -31,23 +32,34 @@ pub fn parse(usage: &Value) -> SourceFacts {
     let unit = usage.get("unit").and_then(Value::as_str).unwrap_or_else(|| {
         if usage.get("totalLeft").is_some() { "积分" } else { "" }
     }).trim().to_string();
-    SourceFacts { sources, remaining, unlimited, unit }
+    SourceFacts { sources, remaining, unlimited, unit, query_config: String::new() }
 }
 
-pub fn note(id: &str, usage: &Value) {
-    if let Ok(mut facts) = slot().lock() { facts.insert(id.to_string(), parse(usage)); }
+pub fn note(id: &str, usage: &Value, query_config: &str) {
+    let mut value = parse(usage);
+    value.query_config = query_config.to_string();
+    if let Ok(mut facts) = slot().lock() { facts.insert(id.to_string(), value); }
+}
+
+pub fn current_for(account: &Value, facts: &SourceFacts) -> bool {
+    facts.query_config.is_empty() || account.get("usageConfigKey").and_then(Value::as_str)
+        .is_none_or(|key| key == facts.query_config)
 }
 
 pub fn reload() {
     let fresh = crate::server::core::usage_records::load_all().into_iter()
-        .filter_map(|(id, row)| row.usage.as_ref().map(|usage| (id, parse(usage)))).collect();
+        .filter_map(|(id, row)| row.usage.as_ref().map(|usage| {
+            let mut facts = parse(usage);
+            facts.query_config = row.query_config.clone();
+            (id, facts)
+        })).collect();
     if let Ok(mut facts) = slot().lock() { *facts = fresh; }
 }
 
 pub fn rows_for(account: &Value, facts: &Facts) -> Value {
     let id = account.get("id").and_then(Value::as_str).unwrap_or("");
     let provider = crate::server::core::routing::provider_of(account);
-    let record = facts.get(id);
+    let record = facts.get(id).filter(|facts| current_for(account, facts));
     let sources = record.map(|facts| facts.sources.as_slice()).unwrap_or_default();
     let mut rows = json_of(&sources).as_array().cloned().unwrap_or_default();
     let has_balance = crate::server::core::usage_query::supports_usage_provider(provider);

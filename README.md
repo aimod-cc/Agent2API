@@ -47,7 +47,11 @@ Agent2API is an **AI routing gateway with Agent client takeover**. It exposes a 
 
 ## 💬 Community & Support
 
-- **QQ groups**: Agent2API chat groups — **group 1 (`1127656296`) and group 2 (`1130894674`) are almost full, please join group 3 (`1108276647`)**; search the number in QQ to join.
+- **QQ groups**: Agent2API chat groups; search the group number in QQ to join.
+  - Group 1: `1127656296` (**Almost full — please join group 3 or 4 first**)
+  - Group 2: `1130894674` (**Almost full — please join group 3 or 4 first**)
+  - Group 3: `1108276647`
+  - Group 4: `1054072416`
 - **Telegram group**: <https://t.me/+9gM8YPvgRL02NGRl>
 - **💖 Donate**: if Agent2API helps you, you are welcome to [buy the author a coffee](./docs/SPONSOR.md); donations are voluntary and unlock nothing.
 - **🤝 Sponsorship / business**: want to sponsor the project, or feature your product here? Email [541675139@qq.com](mailto:541675139@qq.com).

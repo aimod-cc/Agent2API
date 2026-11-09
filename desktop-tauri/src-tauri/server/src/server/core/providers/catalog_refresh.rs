@@ -198,7 +198,9 @@ pub async fn refresh(
         }
         // 需要账号时只从该 provider 的启用凭证账号里选；点名错误不回落队首。
         // 不读 secret，也不把空账号发给 builtin / 插件执行体。
-        let account_id = if adapter.refresh_uses_account() {
+        let account_id = if crate::server::core::plugin_host::wasm::catalog::enabled(&id) && requested.is_empty() {
+            String::new()
+        } else if adapter.refresh_uses_account() {
             let available = store.accounts_for_provider(&id);
             let selected = available.iter().filter_map(|account| account.get("id").and_then(Value::as_str))
                 .find(|account_id| requested.is_empty() || *account_id == requested);

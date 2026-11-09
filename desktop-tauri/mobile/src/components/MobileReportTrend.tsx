@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
-import { Card, Empty, SegmentedControl, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@ui'
+import { Card, Empty, SegmentedControl } from '@ui'
+import { SearchableSelect } from '../../../ui-shared/searchable-select'
 import type { StatsSummary } from '../api/gateway'
 import { formatInt, formatTokens } from '../lib/format'
 import { reportSourceName } from './SourceUsageSection'
@@ -34,10 +35,9 @@ export function MobileReportTrend({ summary }: { summary: StatsSummary }) {
       }} options={[{ value: 'models', label: t('模型') }, { value: 'clients', label: t('客户端') }, { value: 'apiKeys', label: t('API Key') }]} />
       <SegmentedControl value={metric} aria-label={t('趋势统计指标')} onValueChange={value => setMetric(value as typeof metric)}
         options={[{ value: 'tokens', label: t('Token 用量') }, { value: 'requests', label: t('请求数') }]} />
-      <Select value={selected} onValueChange={value => setSelected(String(value))}>
-        <SelectTrigger className='w-full'><SelectValue>{displayedOptions.find(row => row.value === selected)?.label || t('全部')}</SelectValue></SelectTrigger>
-        <SelectContent>{displayedOptions.map(row => <SelectItem value={row.value} key={row.value}>{row.label}</SelectItem>)}</SelectContent>
-      </Select>
+      <SearchableSelect value={selected} options={displayedOptions} onValueChange={setSelected}
+        className='w-full' aria-label={t('筛选统计项目')}
+        searchPlaceholder={dimension === 'models' ? t('搜索模型') : t('搜索…')} />
     </div>
     {!trend.length ? <Empty>{t('暂无趋势数据')}</Empty> : (
       <><svg viewBox={`0 0 ${width} ${height}`} width='100%' height={height} role='img'

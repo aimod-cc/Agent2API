@@ -9,7 +9,7 @@ import { api, toast } from './plugins-shared'
 import type { PluginSettings } from './plugins-types'
 import { t } from '../i18n'
 
-type PaneId = 'check' | 'channel' | 'install' | 'network' | 'token'
+type PaneId = 'check' | 'channel' | 'automatic' | 'network' | 'token'
 
 export function PluginSettingsDialog({ open, onClose, onChanged }: {
   open: boolean
@@ -22,7 +22,7 @@ export function PluginSettingsDialog({ open, onClose, onChanged }: {
   const [pane, setPane] = React.useState<PaneId>('check')
   const contentRef = React.useRef<HTMLDivElement>(null)
   const panes: Array<[PaneId, string]> = [
-    ['check', t('检查计划')], ['channel', t('更新通道')], ['install', t('自动安装')],
+    ['check', t('检查计划')], ['channel', t('更新通道')], ['automatic', t('自动更新插件')],
     ['network', t('网络')], ['token', t('GitHub 令牌')],
   ]
   const modes = [
@@ -93,7 +93,7 @@ export function PluginSettingsDialog({ open, onClose, onChanged }: {
             {pane === 'check' ? <div>
               <div className='settings-dlg-pane-head'>
                 <h3>{t('检查计划')}</h3>
-                <p>{t('默认跟随软件的自动检查和间隔。关闭后暂停日常自动更新和下载，但仍会补齐已安装官方插件的最低版本。')}</p>
+                <p>{t('默认跟随软件的自动检查和间隔。关闭自动检查后暂停插件自动更新；手动检查、安装和更新不受影响。')}</p>
               </div>
               <div className='settings-dlg-fields'>
                 <Select value={settings?.checkMode || 'follow'} disabled={busy || !settings}
@@ -129,7 +129,7 @@ export function PluginSettingsDialog({ open, onClose, onChanged }: {
             {pane === 'channel' ? <div>
               <div className='settings-dlg-pane-head'>
                 <h3>{t('更新通道')}</h3>
-                <p>{t('默认跟随软件的正式版和 beta 关注选择；单独设置只影响日常更新，最低版本补齐按当前软件版本选择配套包。')}</p>
+                <p>{t('默认跟随软件的正式版和 beta 关注选择；单独设置只影响插件。始终按版本号选择更新，不会降级。')}</p>
               </div>
               <div className='settings-dlg-fields'>
                 <Select value={settings?.channelMode || 'follow'} disabled={busy || !settings}
@@ -153,8 +153,8 @@ export function PluginSettingsDialog({ open, onClose, onChanged }: {
                 </> : <p className='text-[12px] text-subtle'>{settings ? t('当前关注：{channels}', { channels: channelLabel }) : t('读取中')}</p>}
               </div>
             </div> : null}
-            {pane === 'install' ? <div>
-              <div className='settings-dlg-pane-head'><h3>{t('自动安装')}</h3></div>
+            {pane === 'automatic' ? <div>
+              <div className='settings-dlg-pane-head'><h3>{t('自动更新插件')}</h3></div>
               <div className='settings-dlg-fields'>
                 <div>
                   <div className='flex items-center justify-between gap-2'>
@@ -163,23 +163,11 @@ export function PluginSettingsDialog({ open, onClose, onChanged }: {
                       onCheckedChange={value => void save({ autoUpdate: value === true })} aria-label={t('自动更新插件')} />
                   </div>
                   <p className='mt-1.5 text-[12px] text-subtle'>
-                    {t('检测到更新后自动下载、校验并安装已启用的官方签名插件。关闭此项不影响最低版本补齐；未签名或第三方插件仍需手动更新。')}
-                  </p>
-                </div>
-                <div className='h-px bg-hairline' />
-                <div>
-                  <div className='flex items-center justify-between gap-2'>
-                    <div className='text-[13px] font-semibold text-foreground'>{t('自动下载官方插件')}</div>
-                    <Switch checked={settings?.autoInstallOfficial === true} disabled={busy || !settings}
-                      onCheckedChange={value => void save({ autoInstallOfficial: value === true })}
-                      aria-label={t('自动下载官方插件')} />
-                  </div>
-                  <p className='mt-1.5 text-[12px] text-subtle'>
-                    {t('发现未安装的官方插件时自动下载并安装，仅接受当前平台且通过官方签名校验的包；开启期间卸载的官方插件也会重新安装。')}
+                    {t('仅自动更新已安装、已启用且通过可信签名校验的社区插件。新插件需手动安装，卸载后不会自动重新安装；未签名插件需手动更新。')}
                   </p>
                 </div>
                 <p className='text-[12px] text-subtle'>
-                  {t('默认跟随软件的自动检查和间隔。关闭后暂停日常自动更新和下载，但仍会补齐已安装官方插件的最低版本。')}
+                  {t('默认跟随软件的自动检查和间隔。关闭自动检查后暂停插件自动更新；手动检查、安装和更新不受影响。')}
                 </p>
               </div>
             </div> : null}

@@ -104,10 +104,10 @@ const CREDIT_KEYS: &[&str] = &[
 pub fn extract_usage(usage: &Value) -> Option<UsageTokens> {
     let tokens = crate::server::core::protocol::usage::TokenUsage::from_chat(usage)?;
     Some(UsageTokens {
-        prompt: tokens.prompt.unwrap_or(0),
-        completion: tokens.completion.unwrap_or(0),
-        total: tokens.total_tokens(),
-        cache_read: tokens.cache_read.unwrap_or(0),
+        prompt: tokens.prompt.unwrap_or(0).saturating_add(tokens.deferred_prompt.unwrap_or(0)),
+        completion: tokens.completion.unwrap_or(0).saturating_add(tokens.deferred_completion.unwrap_or(0)),
+        total: tokens.total_tokens().saturating_add(tokens.deferred_prompt.unwrap_or(0)).saturating_add(tokens.deferred_completion.unwrap_or(0)),
+        cache_read: tokens.cache_read.unwrap_or(0).saturating_add(tokens.deferred_cache_read.unwrap_or(0)),
         credit: usage.as_object().and_then(|object| first_amount(object, CREDIT_KEYS)),
     })
 }

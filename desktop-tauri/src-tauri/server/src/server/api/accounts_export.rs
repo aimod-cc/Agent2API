@@ -51,6 +51,7 @@ pub async fn import_account_file(
     payload: &Value,
     name: Option<&str>,
 ) -> Option<Response> {
+    let selected_proxy = payload.get("proxy");
     let file = payload
         .get("authFileContent")
         .and_then(Value::as_str)
@@ -74,6 +75,9 @@ pub async fn import_account_file(
         return Some(management_error(400, "账号导出文件缺少 id"));
     }
     let mut account = payload.clone();
+    if let Some(proxy) = selected_proxy {
+        account["proxy"] = proxy.clone();
+    }
     if let Some(name) = name.filter(|name| !name.trim().is_empty()) {
         account["name"] = Value::String(name.trim().to_string());
         account["nameCustom"] = Value::Bool(true);

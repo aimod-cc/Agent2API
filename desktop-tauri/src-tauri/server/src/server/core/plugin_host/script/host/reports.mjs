@@ -2,7 +2,8 @@ import { safeMessage } from "./diagnostics.mjs"
 
 const number = value => typeof value === "number" && Number.isFinite(value) ? value : null
 export function timestamp(value) {
-  const time = typeof value === "string" ? Date.parse(value) : number(value)
+  const raw = typeof value === "string" ? Date.parse(value) : number(value)
+  const time = typeof value === "number" && raw > 0 && raw < 1e11 ? raw * 1000 : raw
   return Number.isFinite(time) && time > 0 && time <= 8.64e15 ? time : null
 }
 const text = value => typeof value === "string" ? safeMessage(value).slice(0, 2000) : ""
@@ -15,7 +16,11 @@ export function usageReport(value) {
     const percent = used ?? (amount !== null && limit !== null && limit > 0 ? amount / limit * 100 : null)
     return { key: `script-${index}`, label: text(row.name) || "Allowance", window: text(row.name) || "Allowance", group: text(row.group),
       remainingPercent: percent === null ? null : Math.max(0, Math.min(100, 100 - percent)),
-      remaining, limit, unit: text(row.unit), resetsAt: timestamp(row.resetsAt), unlimited: row.unlimited === true,
+      remaining, limit, unit: text(row.unit), resetsAt: timestamp(row.resetsAt) || (number(row.resetSecs) > 0 ? Date.now() + row.resetSecs * 1000 : null), unlimited: row.unlimited === true,
+      resetSecs: number(row.resetSecs), span: number(row.span), model: text(row.model),
+      models: Array.isArray(row.models) ? row.models.filter(value => typeof value === "string") : [],
+      notModels: Array.isArray(row.notModels) ? row.notModels.filter(value => typeof value === "string") : [],
+      balance, used: percent,
       aside: row.aside === true, expiresAt: timestamp(row.runsOutAt), expiresAmount: number(row.runsOut),
       ...(text(row.display) ? { view: text(row.display) } : {}),
     }
@@ -25,8 +30,12 @@ export function usageReport(value) {
     throw Object.assign(new Error(text(value.error) || "登录已过期，请重新登录"), { signIn: value.signIn })
   }
   const balanceView = value.balance == null ? null : text(String(value.balance))
-  return { success: true, windows, subscription: value.plan ? { planName: text(value.plan), expiresAt: timestamp(value.until) } : null,
-    available: number(value.balance), availableView: balanceView, balanceView, warnings: value.error ? [text(value.error)] : [] }
+  const empty = value.empty === true && !hasReadings && !value.error
+  return { success: true, windows, user: text(value.user), signIn: text(value.signIn),
+    resets: value.resets && typeof value.resets === "object" ? value.resets : null,
+    subscription: value.plan ? { planName: text(value.plan), expiresAt: timestamp(value.until), renew: text(value.renew) } : null,
+    available: number(value.balance), availableView: balanceView, balanceView, warnings: value.error ? [text(value.error)] : [],
+    ...(empty ? { empty: true, emptyText: text(value.emptyText) } : {}) }
 }
 
 export function checkinReport(value) {

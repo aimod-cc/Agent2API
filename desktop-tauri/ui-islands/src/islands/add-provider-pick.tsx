@@ -21,8 +21,10 @@ import * as React from 'react'
 import { Alert, InputGroup, InputGroupAddon, InputGroupInput, SegmentedControl, Button, Item } from '@ui'
 
 import { isAddAccountProviderHidden } from '../../../ui-shared/provider-availability'
+import { groupAntigravityCards } from '../../../ui-shared/antigravity-login'
 import { accountCountOf, shared } from './add-account-bridge'
 import { presetOfProvider, providerPresetIcon, providerSiteLabel } from './add-provider-metadata'
+import { useProviderIcon } from './provider-icon'
 import { WORKBUDDY_ENTRY_LABEL, WORKBUDDY_PROVIDER } from './add-account-configs'
 import { DIALOG_SEG_CLASS } from './dialog-segmented'
 import { AddGroup } from './add-account-kit'
@@ -84,109 +86,6 @@ function typeLabelOf(type: AccountType): string {
 }
 
 /**
- * 内置家的真实图标：`id → assets/providers/<file>.png`，图取自各客户端安装目录
- * 内嵌的图标（与系统里显示的为同一张；AutoClaw / WorkBuddy 各自两地、Cline 两种
- * 账号、Accio / ZCode 两地共用一张 —— 它们本来就是同一个客户端）。
- * 自定义家与没收录图标的家回落到首字母徽章。
- * 导出共用：账号页的分组带（accounts-panels 的 GroupBandRow）、模型管理页
- * （models-page）与签到中心的提供商行（checkin-page）用同一份映射，别处不要照抄。
- */
-export const PROVIDER_ICONS: Record<string, string> = {
-  workbuddy: 'assets/providers/workbuddy.png',
-  'workbuddy-intl': 'assets/providers/workbuddy.png',
-  raccoon: 'assets/providers/raccoon.png',
-  catpaw: 'assets/providers/catpaw.png',
-  autoclaw: 'assets/providers/autoclaw.png',
-  'autoclaw-intl': 'assets/providers/autoclaw.png',
-  qoder: 'assets/providers/qoder.png',
-  'qoder-intl': 'assets/providers/qoder.png',
-  'cline-free': 'assets/providers/cline.png',
-  'cline-pass': 'assets/providers/cline.png',
-  accio: 'assets/providers/accio.png',
-  'accio-cn': 'assets/providers/accio.png',
-  zcode: 'assets/providers/zcode.png',
-  'zcode-intl': 'assets/providers/zcode.png',
-  codearts: 'assets/providers/codearts.png',
-  trae: 'assets/providers/trae.png',
-  // Loomy：取自安装包 `resources/app.asar` 的 Windows 图标集
-  // （`build/icons/favicon-228.png`，与系统里显示的应用图标为同一张；
-  // 绿色圆底上的品牌形象）
-  loomy: 'assets/providers/loomy.png',
-  // KukuAI：取自客户端 `GenFlowPro.exe` 的 RT_ICON 资源（256×256 那张，
-  // 与系统里显示的应用图标为同一张）
-  kuku: 'assets/providers/kuku.png',
-  // MonkeyCode：取自客户端 asar 内嵌的应用图标（`electron/icon.png`，与系统里
-  // 显示的应用图标为同一张；国内 / 国际版共用这一张，同 AutoClaw 的形态）
-  monkeycode: 'assets/providers/monkeycode.png',
-  'monkeycode-intl': 'assets/providers/monkeycode.png',
-  // Command Code / Antigravity：这两家没有可解的本地安装包，图取自官方资产 ——
-  // Command Code 用官网 `apple-touch-icon.png`（黑底 + 白结的应用图标形态；官方
-  // brand 页那种「白描边框 + 满幅黑底」的变体在 13px 徽章里会糊），Antigravity
-  // 用官方 press 页的「Icon - Full Color」（antigravity.google/press）
-  commandcode: 'assets/providers/commandcode.png',
-  antigravity: 'assets/providers/antigravity.png',
-  // OfficeAce（华为云果办）：取自官网产品页的产品图标
-  // （`res-static.hc-cdn.cn/.../OfficeAce/新图标.png`，176×176 RGBA，
-  // 归一成 256×256 入库 —— 与系统里显示的应用图标为同一形象）
-  officeace: 'assets/providers/officeace.png',
-  // OrcaTerm（腾讯云遨驰终端桌面客户端）：取自官方 PWA 图标
-  // （`cloudcache.tencent-cloud.com/qcloud/orcaterm/pwa/icon/orcaterm_192x192.png`，
-  // 与客户端 / 官网显示的应用图标为同一形象）
-  orcaterm: 'assets/providers/orcaterm.png',
-// 智谱清言：取自客户端安装包 `resources/app.asar` 内的应用图标
-  // （`assets/icon.png`，512×512，与系统里显示的应用图标为同一形象；
-  // 归一成 256×256 入库 —— 与 officeace 同一处置）
-  chatglm: 'assets/providers/chatglm.png',
-  'deepseek-web': 'assets/providers/deepseek.png',
-  // Tabbit 浏览器：取自国内站 `web.tabbit.com/favicon.ico`（实际是 160×160 PNG），
-  // 两站共用这一张（同一产品形象）。
-  tabbit: 'assets/providers/tabbit.png',
-  'tabbit-intl': 'assets/providers/tabbit.png',
-  // ModelScope（魔搭）：取自官网 favicon（`https://modelscope.cn/favicon.ico`，
-  // 内含 128×128 的一帧，归一成 256×256 入库 —— 与站点标签页上显示的是同一形象；
-  // 国内 / 国际版共用这一张，同 AutoClaw / MonkeyCode 的形态）
-  modelscope: 'assets/providers/modelscope.png',
-  'modelscope-intl': 'assets/providers/modelscope.png',
-  // AtomCode（AtomGit / GitCode）：取自官网首页的产品图标
-  // （`https://cdn-news.gitcode.com/news/atomcode-icon1.png`，524×524 RGBA，
-  // 归一成 256×256 入库 —— 与官网首页 / 客户端显示的应用图标为同一形象）。
-  // ⚠️ 官网的 `<link rel="icon">` 指向的是 GitCode **平台**的 favicon
-  // （`cdn-static.gitcode.host/static/images/logo-favicon.png`），不是本产品的形象，
-  // 所以没有采用它。
-  atomcode: 'assets/providers/atomcode.png',
-  // LobsterAI（网易有道「有道龙虾」）：取自官方开源仓库的应用图标
-  // （`build/icons/png/256x256.png`，原尺寸直接入库 —— 红底白龙虾，与官网
-  // `lobsterai.youdao.com/icon-192.png`、README 的 `public/logo.png` 同一形象，
-  // 也就是系统里显示的客户端图标）。⚠️ 早前用的是 sibling 仓库
-  // cpa-jethub-plugins 里那枚 24×24 通用小怪物 SVG，与产品实际形象不符，已换掉。
-  lobsterai: 'assets/providers/lobsterai.png',
-  doubaowork: 'assets/providers/doubaowork.png',
-  cursor: 'assets/providers/cursor.svg',
-  kiro: 'assets/providers/kiro.svg',
-  // AStudio（科大讯飞 Astron Studio）：取自客户端图标资源（紫底白 N + 星芒，
-  // 与系统里显示的应用图标同一形象；原始 32×32 归一成 256×256 入库）
-  astudio: 'assets/providers/astudio.png',
-  quwork: 'assets/providers/quwork.png',
-  devin: 'assets/providers/devin.svg',
-  factory: 'assets/providers/factory.svg',
-  zed: 'assets/providers/zed.svg',
-  grok: 'assets/providers/grok.svg',
-  'minimax-code': 'assets/providers/minimax-code.svg',
-  'minimax-code-global': 'assets/providers/minimax-code.svg',
-  qwenwork: 'assets/providers/qwenwork.svg',
-  'qwenwork-intl': 'assets/providers/qwenwork.svg',
-  'qwenwork-enterprise': 'assets/providers/qwenwork.svg',
-  'kimi-work': 'assets/providers/kimi-work.svg',
-  opendesign: 'assets/providers/opendesign.svg',
-  'nous-portal': 'assets/providers/nous-portal.svg',
-  'claude-subscription': 'assets/providers/anthropic.png',
-  'codex-subscription': 'assets/providers/openai.png',
-  'chatgpt-subscription': 'assets/providers/openai.png',
-  'copilot-subscription': 'assets/providers/copilot.svg',
-  'gemini-subscription': 'assets/providers/gemini-cli.svg',
-}
-
-/**
  * Agent 段**不露出添加入口**的内置家（精确匹配 provider id）。目前只有
  * `cline-pass`：
  *   ① 它支持 API Key 形态（与 OAuth token 走同一个 Bearer 头），添加入口已迁到
@@ -240,7 +139,7 @@ function providerCards(accountType: AccountType): CardItem[] {
   // providerSummaries、models-page 的左栏），不经过这里，所以存量 cline-pass
   // 账号仍照常成组显示。
   const list = (providers?.all?.() || [])
-    .filter(item => !isAddAccountProviderHidden(String(item?.id || '')))
+    .filter(item => !isAddAccountProviderHidden(String(item?.id || '')) && item.loginAvailable !== false)
     .filter(item => (item.category === 'web') === (accountType === TYPE_WEB))
     .filter(item => accountType === TYPE_WEB || !HIDDEN_AGENT_PROVIDERS.has(String(item?.id || '')))
   // WorkBuddy 这张卡与它的弹窗标题用**中性品牌名**（不带地区）而不是注册名：
@@ -284,7 +183,7 @@ function providerCards(accountType: AccountType): CardItem[] {
   // 拆家后它是独立 provider，但**添加入口**仍然是同一个块 —— 与 AutoClaw /
   // Accio / ZCode 那三家（各自一块、没有地区分段）的形态不同，这是刻意的：
   // WorkBuddy 两地的登录页与凭证形态完全一致，合成一块对用户更省事。
-  const visible = cards.filter(item => item.id !== 'workbuddy-intl')
+  const visible = groupAntigravityCards(cards.filter(item => item.id !== 'workbuddy-intl'))
   // 展示顺序微调：AutoClaw 与 Qoder 的两个版本都要挨着（两列网格里同处一行）
   // 且**国内版在前** —— 摘要给的是注册表顺序，Qoder 国际版注册在 Qoder 后面
   // 本就相邻（拆家后无需再挪）；AutoClaw 国际版排在 Cline 之后，仍要前移。
@@ -296,13 +195,14 @@ function providerCards(accountType: AccountType): CardItem[] {
 
 /** 卡片图标：收录过的家出真实图标（预置家问预置目录要），其余用首字母徽章 */
 function Logo({ item }: { item: CardItem }): React.ReactElement {
-  const icon = item.id.startsWith(PRESET_CARD_PREFIX)
+  const fallback = item.id.startsWith(PRESET_CARD_PREFIX)
     ? shared().wbPresetProviders?.iconOf?.(item.id.slice(PRESET_CARD_PREFIX.length)) || ''
-    : item.icon || PROVIDER_ICONS[item.id]
+    : item.icon
+  const { src: icon, onError } = useProviderIcon(item.id, fallback)
   if (icon) {
     return (
       <span className='add-provider-logo has-icon'>
-        <img src={icon} alt='' loading='lazy' />
+        <img src={icon} alt='' loading='lazy' onError={onError} />
       </span>
     )
   }
@@ -407,8 +307,9 @@ export function PickStep({
   const hit = shownGroups.flatMap(group => group.items)
   // 四个分类合起来命中多少家：「全部」那一档的计数徽标就是它（没搜索时即总家数）。
   // 徽标不只是装饰 —— 在「API 模板」段搜 Cline 时它显示 1，等于替「全部」喊了一声
-  const allHitCount = GROUPED_TYPES
-    .reduce((sum, type) => sum + providerCards(type).filter(hitOf).length, 0)
+  const hitCounts = new Map<AccountType, number>(GROUPED_TYPES
+    .map(type => [type, providerCards(type).filter(hitOf).length]))
+  const allHitCount = [...hitCounts.values()].reduce((sum, count) => sum + count, 0)
   // 当前分段里一家没有、别的分类里有：这正是「全部」段要解决的那件事，
   // 所以给一条提示把人送过去，而不是指望他自己想到去点「全部」。
   // 此分支下当前分段命中为 0，所以全量命中数就是「其它分类」的命中数
@@ -429,10 +330,10 @@ export function PickStep({
             // 默认落在「全部」：搜索一次跨全部分类，不必先猜自己该进哪一段
             { value: TYPE_ALL, label: typeLabelOf(TYPE_ALL), count: allHitCount },
             // Agent 段只在内置家真的存在时出现（判据见 hasAgentCards）
-            ...(hasAgentCards ? [{ value: TYPE_PROXY, label: typeLabelOf(TYPE_PROXY) }] : []),
-            ...(hasWebCards ? [{ value: TYPE_WEB, label: typeLabelOf(TYPE_WEB) }] : []),
-            { value: TYPE_PRESET, label: typeLabelOf(TYPE_PRESET) },
-            { value: TYPE_CUSTOM, label: typeLabelOf(TYPE_CUSTOM) },
+            ...(hasAgentCards ? [{ value: TYPE_PROXY, label: typeLabelOf(TYPE_PROXY), count: hitCounts.get(TYPE_PROXY) }] : []),
+            ...(hasWebCards ? [{ value: TYPE_WEB, label: typeLabelOf(TYPE_WEB), count: hitCounts.get(TYPE_WEB) }] : []),
+            { value: TYPE_PRESET, label: typeLabelOf(TYPE_PRESET), count: hitCounts.get(TYPE_PRESET) },
+            { value: TYPE_CUSTOM, label: typeLabelOf(TYPE_CUSTOM), count: hitCounts.get(TYPE_CUSTOM) },
             // 「导入」分段暂时收起（见 IMPORT_SEGMENT_ENABLED）：整段不生成
             ...(IMPORT_SEGMENT_ENABLED ? [{ value: TYPE_IMPORT, label: typeLabelOf(TYPE_IMPORT) }] : []),
           ]}

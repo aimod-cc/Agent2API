@@ -24,6 +24,8 @@ node_modules
 desktop-tauri/src-tauri/*
 !desktop-tauri/src-tauri/Cargo.toml
 !desktop-tauri/src-tauri/Cargo.lock
+!desktop-tauri/src-tauri/.cargo
+!desktop-tauri/src-tauri/.cargo/config.toml
 !desktop-tauri/src-tauri/server
 desktop-tauri/package.json
 desktop-tauri/package-lock.json

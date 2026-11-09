@@ -45,6 +45,8 @@ pub(super) fn stage_all(adapters: Vec<(String, Arc<RpcAdapter>)>) {
         else { table.adapters.insert(id, adapter); }
     }
     crate::server::core::providers::catalog::invalidate();
+    drop(table);
+    changed().notify_waiters();
 }
 
 pub(super) fn callback_adapter(id: &str) -> Option<Arc<dyn ProviderAdapter>> {
@@ -114,10 +116,12 @@ pub fn remove(id: &str) {
     crate::server::core::providers::catalog::invalidate();
     super::rpc_cache::forget(id);
     super::schedules::forget(id);
+    super::wasm::forget(id);
     changed().notify_waiters();
 }
 
 pub fn clear() {
+    for id in installed_ids() { super::wasm::forget(&id); }
     crate::server::core::providers::catalog::invalidate();
     table().lock().unwrap_or_else(|error| error.into_inner()).adapters.clear();
     crate::server::core::providers::catalog::invalidate();
@@ -156,7 +160,10 @@ impl SwitchGuard {
         }
         crate::server::core::providers::catalog::invalidate();
         drop(table);
-        for id in &self.providers { super::schedules::forget(id); }
+        for id in &self.providers {
+            super::schedules::forget(id);
+            super::wasm::tasks::forget(id);
+        }
     }
 }
 

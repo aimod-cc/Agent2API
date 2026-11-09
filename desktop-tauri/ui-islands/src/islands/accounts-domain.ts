@@ -39,6 +39,7 @@ import { t } from '../i18n'
 import { limiterHit } from './accounts-limiter-model'
 import { accountReloginText } from './accounts-authorization'
 import { upstreamCooldownOf, upstreamSuspendedReasonOf } from '../../../ui-shared/account-upstream-state'
+import { accountSortBalanceOf, balanceSortStateOf, comparableBalance } from '../../../ui-shared/account-sorting'
 
 // 能力表与插件申报的读取在 accounts-features.ts（那边的模块头说明了查询顺序）。
 // 这里转出去，是因为域层的既有调用点（`providerFeatures` 被 app.js / report.js /
@@ -260,19 +261,10 @@ export function supportsUsage(account: AccountRecord | null | undefined): boolea
   return providerFeatures(provider).usage
 }
 
-/* ─── 每账号的余额查询设置（账号设置弹窗「查询设置」段共用）─── */
-
-/** 自动查询间隔的边界（秒）—— 与后端 `usage_records` 的常量同一对数值 */
-export const USAGE_QUERY_MIN_SECONDS = 30
-export const USAGE_QUERY_MAX_SECONDS = 86_400
-
-/**
- * 缺省口径（记录上没有 usageQuery 字段时）—— 与后端
- * `usage_records::DEFAULT_QUERY_INTERVAL_SECONDS` 同值：自动查询**开启**、
- * 1 分钟。缺省必须对齐全局任务时代「默认就在查」的行为，否则升级后所有人的
- * 余额列会静默停更。
- */
-export const DEFAULT_USAGE_INTERVAL_SECONDS = 60
+export {
+  DEFAULT_USAGE_INTERVAL_SECONDS, DEFAULT_USAGE_RETRIES, USAGE_QUERY_MAX_RETRIES,
+  USAGE_QUERY_MAX_SECONDS, USAGE_QUERY_MIN_SECONDS, usageQueryOf,
+} from '../../../ui-shared/usage-query-settings'
 
 /* ─── 限制器（余额 / Token 规则列表）─────────────────────────
  *
@@ -308,25 +300,6 @@ export function defaultLimiters(provider: string | undefined | null): LimiterRul
   if (declared && (provider !== 'codearts' || declared.every(rule => rule.type === 'balance'))) return declared.slice()
   if (provider === 'cline-free') return []
   return [{ type: 'balance', action: 'skip', threshold: DEFAULT_LOW_BALANCE_THRESHOLD, enabled: true }]
-}
-
-/**
- * 自动余额查询设置的规范化读取。缺省（字段缺失）= 开启、1 分钟；显式
- * `{enabled:false}` 才是关；开着但间隔缺失 / 越界按缺省间隔跑（脏值不把
- * 自动查询停掉）。调用方拿到的一定是完整形状，不必判「键缺失」。
- */
-export function usageQueryOf(account: AccountRecord | null | undefined): {
-  enabled: boolean
-  interval: number
-} {
-  const config = account?.usageQuery
-  if (!config || typeof config !== 'object') {
-    return { enabled: true, interval: DEFAULT_USAGE_INTERVAL_SECONDS }
-  }
-  const enabled = config.enabled === undefined ? true : config.enabled === true
-  const interval = Number(config.interval) || 0
-  const valid = interval >= USAGE_QUERY_MIN_SECONDS && interval <= USAGE_QUERY_MAX_SECONDS
-  return { enabled, interval: enabled && !valid ? DEFAULT_USAGE_INTERVAL_SECONDS : interval }
 }
 
 /** 一条限制规则是否完整可用（容错读取的过滤判据；与后端解析同一套口径） */
@@ -429,6 +402,7 @@ export function balanceBlockedOf(
   account: AccountRecord | null | undefined,
   entry: UsageEntry,
 ): boolean {
+  if (entry && typeof entry === 'object' && entry.stale) return false
   if (Array.isArray(account?.limiterGroups)) return limiterHit(account, 'balance')
   const rules = limitersOf(account).filter(rule =>
     rule.type === 'balance' && rule.action === 'skip' && rule.enabled !== false && rule.threshold > 0)
@@ -1042,8 +1016,7 @@ export function positionMap(all: AccountRecord[] | null | undefined, sorting?: A
  * 组内排序规则的一项。**按数组顺序比较**（第一项相同才看第二项），
  * 与设置弹窗里从上到下的优先级是同一个东西。
  *
- * 只登记「可比较的字段」这两项：`manual` 不是一条规则，它是所有规则都相等时的
- * 兜底（保持拖出来的顺序），所以不在这里出现。
+ * 手动顺序不在规则数组中，它是所有启用规则都相同时的兜底。
  */
 export type { GroupSortRule } from './accounts-shared'
 
@@ -1051,6 +1024,7 @@ export type { GroupSortRule } from './accounts-shared'
 export function defaultGroupSortRules(provider: string): GroupSortRule[] {
   return [
     { key: 'credit', on: supportsCreditExpiry(provider), dir: 'soon' },
+    { key: 'balance', on: false, dir: 'high' },
     { key: 'added', on: false, dir: 'new' },
   ]
 }
@@ -1095,14 +1069,20 @@ export function sortGroupMembers(
   if (!active.length) return members.slice()
   const indexed = members.map((account, index) => ({ account, index }))
   const expiry = new Map<string, number | null>()
+  const balances = new Map(members.map(account => [account.id, accountSortBalanceOf(usageOf?.(account))]))
+  const balanceReady = balanceSortStateOf([...balances.values()]) === 'ready'
   for (const { account } of indexed) {
     expiry.set(account.id, creditExpiryOf(usageOf?.(account), now))
   }
   indexed.sort((left, right) => {
     for (const rule of active) {
-      const diff = rule.key === 'added'
-        ? compareAdded(rule.dir, left.account, right.account)
-        : compareExpiry(rule.dir, expiry.get(left.account.id) ?? null, expiry.get(right.account.id) ?? null)
+      let diff = 0
+      if (rule.key === 'added') diff = compareAdded(rule.dir, left.account, right.account)
+      else if (rule.key === 'credit') diff = compareExpiry(rule.dir, expiry.get(left.account.id) ?? null, expiry.get(right.account.id) ?? null)
+      else if (rule.key === 'balance' && balanceReady) {
+        diff = compareExpiry(rule.dir === 'high' ? 'late' : 'soon',
+          comparableBalance(balances.get(left.account.id)), comparableBalance(balances.get(right.account.id)))
+      }
       if (diff !== 0) return diff
     }
     return left.index - right.index

@@ -2,6 +2,8 @@
 //! 规则在配置读取 / 保存时编译，同一次请求的词表与提供商范围使用同一份快照。
 
 mod rules;
+mod native;
+pub use native::sanitize_native_body;
 
 pub use rules::{
     default_rules, MatchType, RuleSet, SanitizeRole, SanitizeRule, MAX_NAME_CHARS,

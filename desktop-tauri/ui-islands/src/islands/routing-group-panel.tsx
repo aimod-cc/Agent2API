@@ -8,22 +8,28 @@ import { RoutingGroupDialog, RoutingMemberAccounts, RoutingMemberDialog } from '
 import { groupDirty, type RouteGroupEditor } from './routing-group-state'
 import { RoutingSelect } from './routing-select'
 import { RoutingActions } from './routing-canvas-controls'
-import { RoutingCanvasLayout, RoutingDraftFooter } from './routing-canvas-layout'
+import { RoutingCanvasLayout, RoutingDraftFooter, RoutingRefreshError } from './routing-canvas-layout'
 import { useRoutingCanvasActivity } from './routing-canvas-activity'
 import { RoutingMemberCard } from './routing-member-card'
 import { routingAccountSections, routingCollapsedSections, useRoutingExpansion } from './routing-account-sections'
 import { IconButton, RouteIcon } from './routing-ui'
-import { notify, type RouteGroup, type RouteMember } from './routing-types'
+import { notify, type RouteGroup, type RouteMember, type RoutingWorkspace } from './routing-types'
 
-export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, sorting, now, onAccount, onSort }: {
-  editor: RouteGroupEditor; accounts: AccountRecord[]; reserved: string[]; baseUrl: string; sorting?: AccountSorting | null; now: number
+export function RoutingGroupPanel({ editor, accounts, lastUsed, reserved, baseUrl, sorting, now, refreshToken, paused, onWorkspace, onAccount, onSort }: {
+  editor: RouteGroupEditor; accounts: AccountRecord[]; lastUsed?: Record<string, number>; reserved: string[]; baseUrl: string; sorting?: AccountSorting | null; now: number
+  refreshToken: number; paused: boolean; onWorkspace(workspace: RoutingWorkspace): void
   onAccount(id: string): void; onSort(provider: string): void
 }) {
   const [dialog, setDialog] = React.useState<'edit' | 'add' | 'example' | null>(null)
   const [accountMember, setAccountMember] = React.useState<string | null>(null)
   const { setOpened, sectionOpen, setSectionOpen, search, setSearch, query, isOpen } = useRoutingExpansion()
   const group = editor.draft?.group
-  const activity = useRoutingCanvasActivity(Boolean(group && editor.draft?.baseline), editor.draft?.baseline?.model || '', group?.id)
+  const live = useRoutingCanvasActivity(Boolean(group), editor.draft?.baseline?.model || group?.model || '', {
+    groupId: group?.id, workspaceModel: '', paused: paused || editor.busy || editor.loading, refreshToken, onWorkspace,
+  })
+  const { activity } = live
+  accounts = live.workspace?.accounts || accounts
+  if (live.workspace && (!sorting || live.workspace.sorting.updatedAt >= sorting.updatedAt)) sorting = live.workspace.sorting
   const locked = editor.busy || editor.loading
   const update = (mutate: (group: RouteGroup) => void) => editor.update(mutate)
   const drop = ({ kind, provider, id, target, after }: RoutingDrop) => update(next => {
@@ -90,6 +96,7 @@ export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, sorting
     <InputGroup className='routing-config-search'><InputGroupInput value={search} onChange={event => setSearch(event.currentTarget.value)}
       placeholder={t('搜索提供商或模型')} aria-label={t('搜索提供商或模型')} /><InputGroupAddon><RouteIcon name='search' size={14} /></InputGroupAddon></InputGroup>
     <p className='routing-groups-hint'>{t('拖动把手或按 Alt + 方向键调整顺序，更多操作在右侧菜单。')}</p>
+    <RoutingRefreshError error={live.error} onRetry={live.refresh} />
     <div className='routing-config-listcol' data-route-scroll>
       <div className='routing-config-participants' data-route-list>{visible.map(renderMember)}</div>
       {!active.length ? <Empty><b>{t('还没有参与模型')}</b><span>{t('可以保存空路由，但请求会明确失败，不会回退全局。')}</span></Empty> : null}
@@ -134,7 +141,7 @@ export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, sorting
     <RoutingDragOverlay state={drag.state} />
     {dialog === 'edit' ? <RoutingGroupDialog group={group} reserved={reserved} onSave={group => update(next => Object.assign(next, group))} onClose={() => setDialog(null)} /> : null}
     {dialog === 'add' ? <RoutingMemberDialog choices={(editor.data?.catalog || []).filter(choice => choice.model.toLowerCase() !== group.model.toLowerCase()
-      && !Object.values(editor.drafts).some(draft => draft.group.model.toLowerCase() === choice.model.toLowerCase()))} members={group.members} accounts={accounts} onAdd={members => update(next => { next.members.push(...members) })} onClose={() => setDialog(null)} /> : null}
+      && !Object.values(editor.drafts).some(draft => draft.group.model.toLowerCase() === choice.model.toLowerCase()))} members={group.members} accounts={accounts} lastUsed={lastUsed} onAdd={members => update(next => { next.members.push(...members) })} onClose={() => setDialog(null)} /> : null}
     {selectedAccountMember ? <RoutingMemberAccounts member={selectedAccountMember} accounts={accounts} onSave={ids => editMember(selectedAccountMember.id, member => { member.accounts = ids })} onClose={() => setAccountMember(null)} /> : null}
     {dialog === 'example' ? <Dialog open onOpenChange={open => { if (!open) setDialog(null) }}><DialogContent>
       <DialogHeader><DialogTitle>{t('调用示例')}</DialogTitle></DialogHeader><DialogBody><p className='text-sm text-muted-foreground'>{t('保存路由后，在客户端填写此模型 ID。密钥使用你自己的网关 Key。')}</p><pre className='routing-group-code'>{snippet}</pre></DialogBody>

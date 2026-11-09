@@ -140,6 +140,7 @@ pub(super) fn status() -> Option<HostStatus> {
     providers.dedup();
     Some(HostStatus {
         running: statuses.iter().any(|status| status.running),
+        ready: statuses.iter().any(|status| status.ready),
         providers,
         crashes: statuses.iter().map(|status| status.crashes).max().unwrap_or(0),
         disabled: statuses.iter().all(|status| status.disabled),

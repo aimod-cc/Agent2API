@@ -38,6 +38,8 @@ pub struct CodexClient {
     next_id: AtomicU64,
     pub operations: Arc<AsyncMutex<()>>,
     pub terminal_gateway: OnceLock<TerminalGateway>,
+    pub catalog_cache: AsyncMutex<Option<(i64, Value)>>,
+    pub usage_cache: AsyncMutex<Option<(i64, Value)>>,
 }
 
 pub fn allow_start() -> u64 {
@@ -101,7 +103,7 @@ async fn connect_inner(db: &Db) -> Result<Arc<CodexClient>, CodingError> {
     let mut slot = runtime().lock().await;
     if STOPPING.load(Ordering::Acquire) || SERVER_ID.load(Ordering::Acquire) != server_id { return Err(CodingError::new(503, "后台正在关闭或重启")); }
     let config = config::load(db)?;
-    if !config.enabled { return Err(CodingError::new(409, "本机 Codex 尚未启用，请先设置允许使用的项目目录")); }
+    if !config.enabled { return Err(CodingError::new(409, "本机 Codex 尚未启用，请先在本机设置中启用")); }
     if let Some(client) = slot.as_ref() {
         if client.config == config && client.server_id == server_id && client.running.load(Ordering::Acquire) { return Ok(client.clone()); }
         client.stop().await;
@@ -127,7 +129,7 @@ async fn connect_inner(db: &Db) -> Result<Arc<CodexClient>, CodingError> {
         version, executable, endpoint, connection_token, state: SessionState::new(), running: AtomicBool::new(true),
         connected: AtomicBool::new(false), connection_epoch: AtomicU64::new(0), process,
         writer: AsyncMutex::new(None), pending: Mutex::new(HashMap::new()), next_id: AtomicU64::new(1), operations: Arc::new(AsyncMutex::new(())),
-        terminal_gateway: OnceLock::new(),
+        terminal_gateway: OnceLock::new(), catalog_cache: AsyncMutex::new(None), usage_cache: AsyncMutex::new(None),
     });
     process::supervise(client.clone());
     if STOPPING.load(Ordering::Acquire) || SERVER_ID.load(Ordering::Acquire) != server_id {
@@ -153,6 +155,14 @@ async fn connect_inner(db: &Db) -> Result<Arc<CodexClient>, CodingError> {
 }
 
 impl CodexClient {
+    pub fn projects(&self) -> Result<Vec<super::projects::CodingProject>, CodingError> {
+        super::projects::load(&self.db, &self.scope)
+    }
+
+    pub fn directory(&self, raw: &str) -> Result<std::path::PathBuf, CodingError> {
+        super::projects::directory(&self.projects()?, raw)
+    }
+
     pub async fn check_current(&self) -> Result<(), CodingError> {
         let config = config::load(&self.db)?;
         if !config.enabled || config.revision() != self.config.revision() || !self.running.load(Ordering::Acquire)
@@ -216,6 +226,8 @@ impl CodexClient {
             state.permissions.clear(); state.revision += 1;
             for thread in state.threads.values_mut() {
                 thread.items.clear(); thread.item_versions.clear(); thread.item_order.clear();
+                thread.usage_source = thread.usage_source.as_ref().map(|_| "history".into());
+                thread.metadata_checked_at = 0;
             }
         }
         for (_, sender) in self.pending.lock().unwrap_or_else(|e| e.into_inner()).drain() {

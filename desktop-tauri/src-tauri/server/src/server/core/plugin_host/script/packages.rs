@@ -120,11 +120,13 @@ pub(super) async fn store_archive(
         } else {
             std::fs::rename(temporary.path(), &destination).map_err(|error| error.to_string())?;
         }
+        let icon = super::icons::manifest(&destination);
         Ok(Package {
-            id, name, version, source, directory, enabled: true, checkin_allowed: false,
+            id, name, version, icon, provider_icons: Default::default(), source, directory, enabled: true,
             installed_at: crate::server::logging::now_ms(),
             providers: Vec::new(), disabled_providers: Vec::new(),
-            options: serde_json::json!({}), error: None,
+            options: serde_json::json!({}), provider_options: serde_json::json!({}),
+            settings_schema: serde_json::json!({}), provider_aliases: Default::default(), error: None,
         })
     })
     .await
@@ -246,23 +248,13 @@ fn validate_manifest(
     if expected.is_some_and(|(wanted_name, wanted_version)| name != wanted_name || version != wanted_version) {
         return Err("脚本插件清单与请求的版本信息不一致".into());
     }
-    if ["dependencies", "optionalDependencies"].iter().any(|key| {
-        package[*key]
-            .as_object()
-            .is_some_and(|items| !items.is_empty())
-    }) {
-        return Err(
-            "当前兼容层仅加载无运行时 npm 依赖的提供商插件；不会执行安装脚本或自动安装依赖".into(),
-        );
-    }
-    let entry = package["main"].as_str().unwrap_or("index.js");
-    let entry = entry.strip_prefix("./").unwrap_or(entry);
-    if entry.contains([':', '\\'])
-        || Path::new(entry)
-            .components()
-            .any(|part| !matches!(part, Component::Normal(_)))
-        || !directory.join(entry).is_file()
-    {
+    let valid_entry = super::dependencies::entries(&package).into_iter().any(|entry| {
+        let entry = entry.strip_prefix("./").unwrap_or(&entry);
+        !entry.contains([':', '\\'])
+            && Path::new(entry).components().all(|part| matches!(part, Component::Normal(_)))
+            && directory.join(entry).is_file()
+    });
+    if !valid_entry {
         return Err("脚本插件缺少有效的 OpenCode v1 入口".into());
     }
     Ok((name.to_string(), version.to_string()))

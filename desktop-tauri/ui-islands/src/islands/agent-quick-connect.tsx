@@ -1,5 +1,6 @@
 import * as React from 'react'
-import { Alert, Badge, Button, Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, Empty, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@ui'
+import { Alert, Badge, Button, Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, Empty } from '@ui'
+import { SearchableSelect } from '../../../ui-shared/searchable-select'
 import { t } from '../i18n'
 import { refreshCatalogModels, useAgentCatalog, type CatalogModel } from './agent-catalog'
 import { SingleModelFields } from './agent-fields'
@@ -68,11 +69,11 @@ export function QuickConnectDialog({ client, onClose }: { client: AgentClient; o
             </div>
             {client.id !== 'zed' && <div className='agent-quick-info-row'>
               <span className='agent-quick-info-key'>{t('网关 Key')}</span>
-              <Select value={draft.gatewayKeyId} disabled={busy || !store.gatewayKeys.length} onValueChange={value => {
-                if (typeof value === 'string') update({ gatewayKeyId: value })
-              }}><SelectTrigger className='agent-quick-info-select' aria-label={t('网关 Key')}><SelectValue>{selectedKey ? selectedKey.name || selectedKey.id : t('选择网关 Key')}</SelectValue></SelectTrigger><SelectContent>
-                {store.gatewayKeys.map(key => <SelectItem key={key.id} value={key.id}>{key.name || key.id}</SelectItem>)}
-              </SelectContent></Select>
+              <SearchableSelect value={draft.gatewayKeyId} disabled={busy || !store.gatewayKeys.length}
+                onValueChange={gatewayKeyId => update({ gatewayKeyId })}
+                className='agent-quick-info-select' aria-label={t('网关 Key')}
+                displayValue={selectedKey ? selectedKey.name || selectedKey.id : t('选择网关 Key')}
+                options={store.gatewayKeys.map(key => ({ value: key.id, label: key.name || key.id }))} />
               <span className='agent-quick-info-hint'>{t('换 Key 后会按新 Key 的授权重新核对已选模型')}</span>
             </div>}
           </section>

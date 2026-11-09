@@ -4,22 +4,25 @@ import { scope } from "./fetch.mjs"
 const gates = new Map()
 
 function pump(key, gate) {
-  while (gate.waiters.length) {
-    const next = gate.waiters[0]
-    if (next.signal.aborted) { gate.waiters.shift(); next.cancel(); continue }
-    if (next.limit > 0 && gate.active >= next.limit) break
-    gate.waiters.shift()
+  for (let index = 0; index < gate.waiters.length;) {
+    const next = gate.waiters[index]
+    if (next.signal.aborted) { gate.waiters.splice(index, 1); next.cancel(); continue }
+    const active = gate.accounts.get(next.account) || 0
+    if (next.limit > 0 && active >= next.limit || !active && next.accounts > 0 && gate.accounts.size >= next.accounts) { index++; continue }
+    gate.waiters.splice(index, 1)
     next.signal.removeEventListener("abort", next.cancel)
-    gate.active++
+    gate.accounts.set(next.account, active + 1)
     let released = false
     next.resolve(() => {
       if (released) return
       released = true
-      gate.active--
+      const count = (gate.accounts.get(next.account) || 1) - 1
+      if (count) gate.accounts.set(next.account, count)
+      else gate.accounts.delete(next.account)
       pump(key, gate)
     })
   }
-  if (!gate.active && !gate.waiters.length) gates.delete(key)
+  if (!gate.accounts.size && !gate.waiters.length) gates.delete(key)
 }
 
 export async function acquire(provider) {
@@ -28,11 +31,11 @@ export async function acquire(provider) {
   context.signal.throwIfAborted()
   const configured = context.maxConcurrent
   const limit = Number.isSafeInteger(configured) && configured > 0 ? configured : provider.concurrencyDefault
-  const key = provider.id + "\n" + context.account
-  const gate = gates.get(key) ?? { active: 0, waiters: [] }
+  const key = provider.id
+  const gate = gates.get(key) ?? { accounts: new Map(), waiters: [] }
   gates.set(key, gate)
   return new Promise((resolve, reject) => {
-    const waiter = { limit, signal: context.signal, resolve, cancel: null }
+    const waiter = { limit, accounts: provider.maxAccounts || 0, account: context.account, signal: context.signal, resolve, cancel: null }
     waiter.cancel = () => {
       const index = gate.waiters.indexOf(waiter)
       if (index >= 0) gate.waiters.splice(index, 1)

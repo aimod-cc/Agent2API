@@ -31,7 +31,7 @@ pub(super) async fn complete(state: &ServerState, ids: &[String], result: &mut V
                 let payload = json!({});
                 match tokio::time::timeout_at(
                     deadline,
-                    adapter.admin_action(state.store(), id, "subscription.ensure", &payload),
+                    adapter.admin_action(state.store(), id, "subscription.preview", &payload),
                 ).await {
                     Ok(Ok(value)) => public_report(&value),
                     Ok(Err(error)) if error.status_code == 501 => json!({
@@ -83,8 +83,14 @@ fn succeeded(report: &Value) -> bool {
 
 fn public_report(value: &Value) -> Value {
     match (value.get("status").and_then(Value::as_str), value.get("message").and_then(Value::as_str)) {
-        (Some(status @ ("activated" | "already_active" | "skipped" | "pending")), Some(message)) if !message.trim().is_empty() => {
-            json!({ "status": status, "message": message })
+        (Some("active"), _) => json!({ "status": "already_active", "message": "套餐已开通，无需重复操作" }),
+        (Some("inactive"), _) => json!({
+            "status": "skipped",
+            "message": "尚未开通体验套餐，请到签到中心确认服务协议后开通；导入账号不会自动下单",
+        }),
+        (Some("pending"), Some(message)) => json!({ "status": "pending", "message": message }),
+        (Some("expired" | "frozen" | "unknown" | "credentials_missing" | "credentials_expired" | "permission_denied" | "unsupported"), Some(message)) => {
+            json!({ "status": "skipped", "message": message })
         }
         _ => json!({ "status": "failed", "message": "提供商插件未返回有效的套餐检查结果，暂不能确认开通状态" }),
     }

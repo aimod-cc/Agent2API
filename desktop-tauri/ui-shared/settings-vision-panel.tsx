@@ -165,6 +165,9 @@ export function VisionCompatibilityPanel({ api, t, active = true }: { api: Visio
       </CardAction>
     </CardHeader>
     <CardContent className='flex flex-col gap-4'>
+      <p className='m-0 max-w-[760px] text-[11.5px] leading-relaxed text-muted-foreground'>
+        {t('规则全局生效，不受原路由池限制；指定模型按自己的路由选账号，网关 Key 权限仍然生效。')}
+      </p>
       {view.legacyExpanded ? <p className='m-0 max-w-[760px] text-[11.5px] leading-relaxed text-muted-foreground'>
         {t('原来的「全局方式 + 模型单独配置」已按相同意思自动填成下面的模型名单，可以照用也可以重新调整；改动一处之后就会按新形式存下来。')}
       </p> : null}

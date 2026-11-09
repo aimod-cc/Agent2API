@@ -52,7 +52,7 @@ impl AutoCheckin {
                                 "label": provider_label(id),
                                 "time": times::effective_time(schedule, id),
                                 "timeEnd": times::effective_end(schedule, id),
-                                "builtin": times::provider_time(id),
+                                "builtin": times::declared_time(id),
                                 "firedToday": !pending.iter().any(|item| item == id),
                             }).as_object().cloned().unwrap_or_default());
                         }
@@ -154,7 +154,7 @@ impl AutoCheckin {
                     "id": id,
                     "label": provider_label(id),
                     // 内置专属时刻（None = 跟随条目时刻），界面在复选框旁标注
-                    "builtinTime": times::provider_time(id),
+                    "builtinTime": times::declared_time(id),
                 })
             }).collect::<Vec<_>>(),
             // 缺省补签时刻：界面「补签时刻」输入框的 placeholder 用

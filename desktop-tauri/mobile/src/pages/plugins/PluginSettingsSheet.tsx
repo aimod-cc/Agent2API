@@ -45,10 +45,6 @@ export function PluginSettingsSheet({ onClose, onChanged }: { onClose: () => voi
     } finally { setBusy(false) }
   }
 
-  const options: Array<{ key: 'autoUpdate' | 'autoInstallOfficial'; label: string; note: string }> = [
-    { key: 'autoUpdate', label: t('自动更新插件'), note: t('检测到更新后自动下载、校验并安装已启用的官方签名插件。关闭此项不影响最低版本补齐；未签名或第三方插件仍需手动更新。') },
-    { key: 'autoInstallOfficial', label: t('自动下载官方插件'), note: t('开启期间卸载的官方插件也会重新安装。') },
-  ]
   const saveInterval = () => {
     const interval = Number(draft)
     if (!Number.isInteger(interval) || interval < 1 || interval > 1440) {
@@ -90,7 +86,7 @@ export function PluginSettingsSheet({ onClose, onChanged }: { onClose: () => voi
           <Button variant='outline' disabled={busy || !settings.autoCheck || Number(draft) === settings.interval} onClick={saveInterval}>{t('保存')}</Button>
         </> : <p className='m-ck-note'>{settings ? settings.autoCheck ? t('当前：自动检查开启，每 {n} 分钟', { n: settings.interval })
           : t('当前：自动检查关闭') : t('读取中')}</p>}
-        <p className='m-ck-note'>{t('默认跟随软件的自动检查和间隔。关闭后暂停日常自动更新和下载，但仍会补齐已安装官方插件的最低版本。')}</p>
+        <p className='m-ck-note'>{t('默认跟随软件的自动检查和间隔。关闭自动检查后暂停插件自动更新；手动检查、安装和更新不受影响。')}</p>
         <div className='m-ck-title'>{t('更新通道')}</div>
         <Select value={settings?.channelMode || 'follow'} disabled={busy || !settings}
           onValueChange={value => void save({ channelMode: value as PluginSettings['channelMode'] })}>
@@ -111,15 +107,15 @@ export function PluginSettingsSheet({ onClose, onChanged }: { onClose: () => voi
               onCheckedChange={value => void save({ beta: value === true })} />
           </div>
         </> : <p className='m-ck-note'>{settings ? t('当前关注：{channels}', { channels: channelLabel }) : t('读取中')}</p>}
-        <p className='m-ck-note'>{t('默认跟随软件的正式版和 beta 关注选择；单独设置只影响日常更新，最低版本补齐按当前软件版本选择配套包。')}</p>
-        {options.map(option => <div key={option.key}>
+        <p className='m-ck-note'>{t('默认跟随软件的正式版和 beta 关注选择；单独设置只影响插件。始终按版本号选择更新，不会降级。')}</p>
+        <div>
           <div className='m-ck-toolbar'>
-            <span className='m-ck-title m-ck-grow'>{option.label}</span>
-            <Switch checked={settings?.[option.key] === true} disabled={busy || !settings} aria-label={option.label}
-              onCheckedChange={value => void save({ [option.key]: value === true })} />
+            <span className='m-ck-title m-ck-grow'>{t('自动更新插件')}</span>
+            <Switch checked={settings?.autoUpdate === true} disabled={busy || !settings} aria-label={t('自动更新插件')}
+              onCheckedChange={value => void save({ autoUpdate: value === true })} />
           </div>
-          <p className='m-ck-note'>{option.note}</p>
-        </div>)}
+          <p className='m-ck-note'>{t('仅自动更新已安装、已启用且通过可信签名校验的社区插件。新插件需手动安装，卸载后不会自动重新安装；未签名插件需手动更新。')}</p>
+        </div>
         {error ? <p className='m-ck-error'>{error}</p> : null}
         <GithubAccessSettingsPanel />
       </SheetBody>

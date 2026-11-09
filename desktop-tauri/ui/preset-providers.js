@@ -281,9 +281,82 @@
     },
     {
       key: 'sensenova', name: '商汤日日新', icon: 'sensenova.png',
-      protocol: P.openai, baseUrl: 'https://api.sensenova.cn/compatible-mode/v1',
+      protocol: P.openai, baseUrl: 'https://token.sensenova.cn/v1',
       hint: wbI18n.t('商汤日日新的 OpenAI 兼容端点；余额查询走控制台账号密码（见下方「余额查询」一段）'),
       balance: { scheme: 'sensenova' },
+    },
+
+    // 按量 / 套餐、国内 / 国际凭证不能混用。
+    {
+      key: 'moonshot-cn', name: wbI18n.t('Kimi / Moonshot 国内版'), icon: 'kimi.svg',
+      protocol: P.openai, baseUrl: 'https://api.moonshot.cn/v1',
+      hint: wbI18n.t('Kimi / Moonshot 国内站 API Key，使用 moonshot.cn 按量接口；不是 Kimi Code 会员入口'),
+    },
+    {
+      key: 'moonshot', name: wbI18n.t('Kimi / Moonshot 国际版'), icon: 'kimi.svg',
+      protocol: P.openai, baseUrl: 'https://api.moonshot.ai/v1',
+      hint: wbI18n.t('Kimi / Moonshot 国际站 API Key，使用 moonshot.ai 按量接口；不是 Kimi Code 会员入口'),
+    },
+    {
+      key: 'stepfun-cn', name: wbI18n.t('StepFun 国内版（按量）'), icon: 'stepfun-color.svg',
+      protocol: P.openai, baseUrl: 'https://api.stepfun.com/v1',
+      hint: wbI18n.t('StepFun 国内站按量 API；请使用按量 API Key，不要填 Step Plan 套餐 Key'),
+    },
+    {
+      key: 'stepfun', name: wbI18n.t('StepFun 国际版（按量）'), icon: 'stepfun-color.svg',
+      protocol: P.openai, baseUrl: 'https://api.stepfun.ai/v1',
+      hint: wbI18n.t('StepFun 国际站按量 API；请使用按量 API Key，不要填 Step Plan 套餐 Key'),
+    },
+    {
+      key: 'longcat', name: 'LongCat', icon: 'longcat.svg',
+      protocol: P.openai, baseUrl: 'https://api.longcat.chat/openai/v1',
+      hint: wbI18n.t('LongCat 的 OpenAI 兼容端点，使用 LongCat 平台的 API Key'),
+    },
+    {
+      key: 'tencent-tokenhub-cn', name: wbI18n.t('腾讯 TokenHub 国内版（按量）'), icon: 'tencentcloud-color.svg',
+      protocol: P.openai, baseUrl: 'https://tokenhub.tencentmaas.com/v1',
+      hint: wbI18n.t('腾讯 TokenHub 国内站按量 API；使用 TokenHub API Key，不是 Token Plan 套餐或 WorkBuddy 凭证'),
+    },
+    {
+      key: 'tencent-tokenhub', name: wbI18n.t('腾讯 TokenHub 国际版（按量）'), icon: 'tencentcloud-color.svg',
+      protocol: P.openai, baseUrl: 'https://tokenhub-intl.tencentmaas.com/v1',
+      hint: wbI18n.t('腾讯 TokenHub 国际站按量 API；使用 TokenHub API Key，不是 Token Plan 套餐或 WorkBuddy 凭证'),
+    },
+    {
+      key: 'xai', name: 'xAI', icon: 'xai.svg',
+      protocol: P.openai, baseUrl: 'https://api.x.ai/v1',
+      hint: wbI18n.t('xAI 的 OpenAI 兼容端点，使用 xAI 控制台的 API Key；不是 Grok 网页订阅'),
+    },
+    {
+      key: 'mistral', name: 'Mistral', icon: 'mistral-color.svg',
+      protocol: P.openai, baseUrl: 'https://api.mistral.ai/v1',
+      hint: wbI18n.t('Mistral 的 OpenAI 兼容端点，使用 Mistral 控制台的 API Key'),
+    },
+    {
+      key: 'groq', name: 'Groq', icon: 'groq.svg',
+      protocol: P.openai, baseUrl: 'https://api.groq.com/openai/v1',
+      hint: wbI18n.t('Groq 的 OpenAI 兼容端点，使用 GroqCloud 的 API Key'),
+    },
+    {
+      key: 'nous', name: 'Nous Portal', icon: 'nous-portal.svg',
+      protocol: P.openai, baseUrl: 'https://inference-api.nousresearch.com/v1',
+      hint: wbI18n.t('Nous Portal 的按量 API，使用 Portal 的 API Key；不是旧的订阅登录方式'),
+    },
+    {
+      key: 'aihubmix', name: 'AiHubMix', icon: 'aihubmix-color.svg',
+      protocol: P.openai, baseUrl: 'https://aihubmix.com/v1',
+      hint: wbI18n.t('AiHubMix 的 OpenAI 兼容端点，使用 AiHubMix 的 API Key；模型 ID 以平台清单为准'),
+    },
+    {
+      key: 'lmstudio', name: wbI18n.t('LM Studio（本地）'), icon: 'lmstudio.svg',
+      protocol: P.openai, baseUrl: 'http://localhost:1234/v1',
+      hint: wbI18n.t('先在网关所在机器启动 LM Studio 服务；localhost 指向网关所在机器，远程或容器部署请改为网关可访问的地址。默认无需鉴权；启用认证后请取消「该上游无需鉴权」并填写真实 API Key'),
+      account: { noAuth: true },
+    },
+    {
+      key: 'xiaomi', name: wbI18n.t('小米 MiMo（按量）'), icon: 'xiaomi-tokenplan.png',
+      protocol: P.openai, baseUrl: 'https://api.xiaomimimo.com/v1',
+      hint: wbI18n.t('小米 MiMo 按量 API；使用按量 API Key，不要混用 Token Plan 套餐 Key'),
     },
   ];
 

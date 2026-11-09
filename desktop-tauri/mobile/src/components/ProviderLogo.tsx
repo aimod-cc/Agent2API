@@ -1,6 +1,12 @@
-import { useState } from 'react'
+import { useSyncExternalStore } from 'react'
 import { Icon } from './Icon'
 import { providerIcon, providerLabel } from '../lib/providers'
+import { cachedProviderIconPath } from '../../../ui-shared/provider-icons'
+import { useImageFallback } from '../../../ui-shared/use-image-fallback'
+import { resolveUrl } from '../api/client'
+import { store } from '../state/store'
+
+const subscribe = (listener: () => void) => store.subscribe(listener)
 
 /**
  * 提供商图标块：有图用图，没图用首字。
@@ -16,13 +22,16 @@ export function ProviderLogo({
   label?: string
   size?: 'default' | 'lg'
 }) {
-  const icon = providerIcon(id)
-  const [failedIcon, setFailedIcon] = useState('')
+  const cachedIcon = useSyncExternalStore(subscribe, () => {
+    const path = cachedProviderIconPath(store.get().session?.providerIcons, id || '')
+    return path ? resolveUrl(path) : ''
+  })
+  const { src: icon, onError } = useImageFallback(cachedIcon, providerIcon(id))
   const text = providerLabel(id, label)
   return (
     <span className={size === 'lg' ? 'm-logo m-lg' : 'm-logo'}>
-      {icon && failedIcon !== icon ? (
-        <img src={icon} alt='' loading='lazy' onError={() => setFailedIcon(icon)} />
+      {icon ? (
+        <img src={icon} alt='' loading='lazy' onError={onError} />
       ) : (
         <span style={{ fontSize: size === 'lg' ? 16 : 14, fontWeight: 600 }}>{text.slice(0, 1)}</span>
       )}

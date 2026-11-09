@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use crate::server::config::vision_compat::{self as config, Mode, UnknownCapability, VisionSettings, VisionTarget};
+use crate::server::config::vision_compat::{self as config, Mode, UnknownCapability, VisionRule, VisionSettings, VisionTarget};
 use crate::server::errors::GatewayError;
 use super::{connections::ConnectionGuard, payload::ProviderContext, usage::TelemetrySnapshot, ForwardOutcome, InFlightGuard, RouteTarget, UpstreamService};
 
@@ -41,7 +41,7 @@ impl RequestVision {
         if !content::has_images(body) { return Ok(None); }
         let snapshot = config::current();
         let settings = snapshot.settings.as_ref().map_err(|error| GatewayError::new(error.clone()))?;
-        if !settings.enabled { return Ok(None); }
+        if !settings.enabled || !(settings.uses(Mode::Assist) || settings.uses(Mode::Reroute)) { return Ok(None); }
         Ok(Some(Arc::new(Self { settings: settings.clone(), revision: snapshot.revision.clone(),
             shared: config::shared_target(), original_messages: body.get("messages").and_then(Value::as_array).map_or(0, Vec::len),
             started: Instant::now(), triggered: AtomicBool::new(false) })))
@@ -66,15 +66,20 @@ pub(super) fn rejection_message(text: &str) -> bool { stream::rejection_text(tex
 pub(super) async fn before_target(service: &UpstreamService, ctx: &ProviderContext<'_>, target: &RouteTarget,
     slot: &mut Option<InFlightGuard>, connections: &mut ConnectionGuard) -> Result<Option<ForwardOutcome>, GatewayError> {
     let Some(vision) = &ctx.vision else { return Ok(None); };
+    if ctx.native.is_some_and(|native| native.protocol == crate::server::core::protocol::native::WireProtocol::Anthropic || native.requires_native())
+        && super::native_payload::eligible(ctx, &target.provider)?
+    { return Ok(None); }
     if vision.triggered.load(Ordering::Acquire) { return Ok(None); }
     let model = targets::actual_model(ctx, target);
-    let mode = vision.settings.mode_for(&target.provider, &model);
-    ctx.telemetry.set_vision_enabled(mode.is_some());
-    let Some(mode) = mode else { return Ok(None); };
+    // 按模型查出命中的那条规则：后面读到的视觉模型、备选、复用开关全都取这条规则的，
+    // 而不是两块设置的 —— 同一种方式可以有多条规则，各自的目标可以不同。
+    let rule = vision.settings.rule_for(&target.provider, &model);
+    ctx.telemetry.set_vision_enabled(rule.is_some());
+    let Some(rule) = rule else { return Ok(None); };
     match targets::supports_images(&target.provider, &model) {
         Some(true) => Ok(None),
         None if vision.settings.unknown_capability == UnknownCapability::TryOriginal => Ok(None),
-        _ => recover(service, ctx, target, mode, "capability", slot, connections).await.map(Some),
+        _ => recover(service, ctx, target, &rule, "capability", slot, connections).await.map(Some),
     }
 }
 
@@ -87,7 +92,10 @@ pub(super) async fn forward(service: &UpstreamService, ctx: ProviderContext<'_>,
     let mut provisional_slot = None;
     let result = super::provider_loop::forward_with_providers(service, ctx.clone(), &mut provisional_slot, connections).await;
     let result = match result {
-        Ok(outcome) if ctx.telemetry.vision_enabled() && ctx.vision.as_ref().is_some_and(|vision| !vision.triggered.load(Ordering::Acquire)) => {
+        Ok(outcome) if ctx.telemetry.vision_enabled() && ctx.vision.as_ref().is_some_and(|vision| !vision.triggered.load(Ordering::Acquire))
+            && !matches!(&outcome, ForwardOutcome::Native(response)
+                if response.protocol == crate::server::core::protocol::native::WireProtocol::Anthropic)
+            && !ctx.native.is_some_and(|native| native.requires_native()) => {
             stream::hold(outcome, ctx.telemetry).await
         }
         other => other,
@@ -96,13 +104,16 @@ pub(super) async fn forward(service: &UpstreamService, ctx: ProviderContext<'_>,
         Ok(outcome) => return Ok(super::provider_loop::attach_slot(outcome, slot, connections)),
         Err(error) => error,
     };
-    if !handles_error(&ctx, &error) || ctx.telemetry.is_cancelled() { return Err(error); }
+    if !handles_error(&ctx, &error) || ctx.telemetry.is_cancelled()
+        || ctx.native.is_some_and(|native| native.requires_native()
+            || native.protocol == crate::server::core::protocol::native::WireProtocol::Anthropic && error.native_response.is_some())
+    { return Err(error); }
     let Some(target) = targets::from_snapshot(&ctx) else { return Err(error); };
     let model = targets::actual_model(&ctx, &target);
-    let Some(mode) = ctx.vision.as_ref().and_then(|vision| vision.settings.mode_for(&target.provider, &model)) else { return Err(error); };
+    let Some(rule) = ctx.vision.as_ref().and_then(|vision| vision.settings.rule_for(&target.provider, &model)) else { return Err(error); };
     ctx.telemetry.finish_last_attempt(Some(i64::from(error.status_code)), Some(&error.message));
     ctx.telemetry.prepare_vision_retry();
-    let outcome = recover(service, &ctx, &target, mode, "rejection", slot, connections).await?;
+    let outcome = recover(service, &ctx, &target, &rule, "rejection", slot, connections).await?;
     Ok(super::provider_loop::attach_slot(outcome, slot, connections))
 }
 
@@ -111,15 +122,15 @@ enum Prepared {
     Rerouted(ForwardOutcome),
 }
 
-async fn recover(service: &UpstreamService, ctx: &ProviderContext<'_>, original: &RouteTarget, mode: Mode, trigger: &str,
-    slot: &mut Option<InFlightGuard>, connections: &mut ConnectionGuard) -> Result<ForwardOutcome, GatewayError> {
+async fn recover(service: &UpstreamService, ctx: &ProviderContext<'_>, original: &RouteTarget, rule: &VisionRule,
+    trigger: &str, slot: &mut Option<InFlightGuard>, connections: &mut ConnectionGuard) -> Result<ForwardOutcome, GatewayError> {
     let vision = ctx.vision.as_ref().ok_or_else(|| GatewayError::new("图片兼容上下文不存在"))?;
     if vision.triggered.swap(true, Ordering::AcqRel) {
         return Err(GatewayError::bad_request("本次图片兼容已经执行，未递归调用或改用其他处理方式").with_code("vision_recursion_blocked"));
     }
     let started = Instant::now();
     connections.rebind(None);
-    let mut detail = json!({ "mode": mode.as_str(), "trigger": trigger, "status": "processing",
+    let mut detail = json!({ "mode": rule.mode.as_str(), "trigger": trigger, "status": "processing",
         "sourceProvider": original.provider, "sourceModel": targets::actual_model(ctx, original),
         "targetProvider": "", "targetModel": "", "durationMs": 0, "cachedImages": 0, "imageCount": 0,
         "promptTokens": 0, "completionTokens": 0, "totalTokens": 0, "calls": [] });
@@ -127,10 +138,10 @@ async fn recover(service: &UpstreamService, ctx: &ProviderContext<'_>, original:
     let budget = vision.remaining(ctx.stream);
     let result = {
         let work = async {
-            match mode {
-                Mode::Assist => assist::run(service, ctx, original, vision, &mut detail).await
+            match rule.mode {
+                Mode::Assist => assist::run(service, ctx, original, vision, rule, &mut detail).await
                     .map(|(body, destination)| Prepared::Assist { body, destination }),
-                Mode::Reroute => reroute(service, ctx, original, vision, &mut detail, slot, connections).await.map(Prepared::Rerouted),
+                Mode::Reroute => reroute(service, ctx, original, vision, rule, &mut detail, slot, connections).await.map(Prepared::Rerouted),
             }
         };
         if budget.is_zero() {
@@ -187,11 +198,13 @@ async fn dispatch(service: &UpstreamService, ctx: &ProviderContext<'_>, destinat
     slot: &mut Option<InFlightGuard>, connections: &mut ConnectionGuard) -> Result<ForwardOutcome, GatewayError> {
     let mut next = ctx.clone();
     next.body = body;
+    next.native = None;
     next.routing = destination.routing.clone();
     next.vision = None;
     next.direct_provider = Some(destination.target.provider.clone());
     next.direct_model = Some(destination.target.model.clone());
     next.compact_routed = if preserve_prompt { false } else { ctx.compact_routed };
+    next.title_routed = if preserve_prompt { false } else { ctx.title_routed };
     next.telemetry = telemetry;
     next.stream = stream;
     next.preserve_system_prompt = preserve_prompt;
@@ -204,12 +217,12 @@ async fn dispatch(service: &UpstreamService, ctx: &ProviderContext<'_>, destinat
     Ok(super::provider_loop::attach_slot(outcome, slot, connections))
 }
 
-async fn reroute(service: &UpstreamService, ctx: &ProviderContext<'_>, original: &RouteTarget, vision: &RequestVision,
-    detail: &mut Value, slot: &mut Option<InFlightGuard>, connections: &mut ConnectionGuard) -> Result<ForwardOutcome, GatewayError> {
-    let (destinations, errors) = targets::reroute_targets(service, ctx, &vision.settings, original);
+async fn reroute(service: &UpstreamService, ctx: &ProviderContext<'_>, original: &RouteTarget, _vision: &RequestVision,
+    rule: &VisionRule, detail: &mut Value, slot: &mut Option<InFlightGuard>, connections: &mut ConnectionGuard) -> Result<ForwardOutcome, GatewayError> {
+    let (destinations, errors) = targets::reroute_targets(service, ctx, rule, original);
     detail["imageCount"] = content::collect(ctx.body)?.len().into();
     if destinations.is_empty() {
-        return Err(GatewayError::with_status(503, format!("当前权限和路由范围内没有可用的视觉模型；未跳到组外或改用辅助识图{}",
+        return Err(GatewayError::with_status(503, format!("当前路由及指定目标中没有符合权限和路由配置的可用视觉模型；未改用辅助识图{}",
             errors.first().map(|error| format!("：{error}")).unwrap_or_default())).with_code("vision_target_unavailable"));
     }
     let mut last_error = None;

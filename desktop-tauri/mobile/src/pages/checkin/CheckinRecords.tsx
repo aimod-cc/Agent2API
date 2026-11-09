@@ -10,6 +10,7 @@ import { formatStamp } from '../../lib/format'
 import { serverIdentity } from '../../lib/servers'
 import { store } from '../../state/store'
 import { t } from '../../i18n'
+import { SearchableSelect } from '../../../../ui-shared/searchable-select'
 
 const PAGE_SIZE = 30
 
@@ -116,7 +117,7 @@ export function CheckinRecords({ providers }: { providers: { id: string; label: 
   const controls = [
     { value: range, options: ranges, label: t('时间范围'), setter: setRange },
     { value: outcome, options: outcomes, label: t('结果'), setter: setOutcome },
-    { value: provider, options: providerOptions, label: t('提供商'), setter: setProvider },
+    { value: provider, options: providerOptions, label: t('提供商'), setter: setProvider, searchable: true },
     { value: kind, options: kinds, label: t('签到类型'), setter: setKind },
   ]
 
@@ -126,13 +127,17 @@ export function CheckinRecords({ providers }: { providers: { id: string; label: 
         <SectionHead title={t('签到记录')} />
         <Card className='m-card m-card-pad'>
           <div className='m-ck-filters'>
-            {controls.map(control => <Select key={control.label} value={control.value} disabled={clearing}
-              onValueChange={value => change(control.setter, value)}>
-              <SelectTrigger className='h-10 text-sm' aria-label={control.label}>
-                <SelectValue>{control.options.find(item => item.value === control.value)?.label || control.value}</SelectValue>
-              </SelectTrigger>
-              <SelectContent>{control.options.map(item => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
-            </Select>)}
+            {controls.map(control => control.searchable
+              ? <SearchableSelect key={control.label} value={control.value} options={control.options} disabled={clearing}
+                onValueChange={value => change(control.setter, value)} className='h-10 text-sm'
+                aria-label={control.label} searchPlaceholder={t('搜索提供商')} />
+              : <Select key={control.label} value={control.value} disabled={clearing}
+                onValueChange={value => change(control.setter, value)}>
+                <SelectTrigger className='h-10 text-sm' aria-label={control.label}>
+                  <SelectValue>{control.options.find(item => item.value === control.value)?.label || control.value}</SelectValue>
+                </SelectTrigger>
+                <SelectContent>{control.options.map(item => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
+              </Select>)}
           </div>
           <form className='m-ck-toolbar' onSubmit={event => { event.preventDefault(); setSearch(keyword.trim()); setOffset(0) }}>
             <Input type='search' className='text-base' value={keyword} placeholder={t('搜索账号 / 说明')} disabled={clearing}

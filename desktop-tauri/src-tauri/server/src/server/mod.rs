@@ -147,8 +147,12 @@ pub mod errors;
 pub mod http;
 pub mod logging;
 pub mod logs_store;
+mod panel_captcha;
 pub mod request_stats;
 mod static_files;
+
+#[cfg(test)]
+mod native_gateway_tests;
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -532,6 +536,7 @@ impl ServerState {
         // 启动即收尾上次运行遗留的进行中行（详情见方法注释）：不等到第一条
         // 请求进来才清理，界面打开时看到的就已经是「已中断」的终态
         core::billing::keepalive::install_stats(request_stats.clone());
+        core::plugin_host::script::install_stats(request_stats.clone());
         request_stats.sweep_stale_running();
         // ── 僵尸行的主动周期清扫（每 5 分钟一次）─────────────────────
         // 清扫的判定（1 小时阈值）此前只在「下一条请求进来」时顺带跑：

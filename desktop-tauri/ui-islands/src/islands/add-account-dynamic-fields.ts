@@ -1,5 +1,7 @@
 /** 桌面与移动端共用的动态登录元数据解析；只消费网关投影，不执行 provider。 */
 import { t } from '../i18n'
+import { pluginLoginText } from './add-account-login-text'
+export { mergeLoginInstructions, pluginBrowserInstructions } from './add-account-login-text'
 
 export type Prompt = {
   key: string
@@ -21,6 +23,7 @@ export type Method = {
   label: string
   methodIndex?: number
   prompts: Prompt[]
+  dynamicPrompts?: boolean
   localOnly: boolean
   manualCallback: boolean
   /**
@@ -50,7 +53,7 @@ const objectOf = (value: unknown): Record<string, unknown> | undefined =>
 /** 元数据与进度共用翻译；设备码只作为模板参数，不改动授权内容。 */
 export function loginText(value: unknown): string {
   const text = textOf(value)
-  const translated = t(text)
+  const translated = pluginLoginText(text)
   if (translated !== text) return translated
   return text.split('\n').map(line => {
     const deviceCode = /^在 GitHub 输入设备码 (.+)，核对账号与授权权限。设备码过期后需要重新发起登录。$/.exec(line)
@@ -59,11 +62,11 @@ export function loginText(value: unknown): string {
     if (project) return project[1]
       ? t('Google Cloud Project ID（必填，Standard / Enterprise 资格由上游判定）；默认候选来自 {variable}，请明确确认', { variable: project[1] })
       : t('Google Cloud Project ID（必填，Standard / Enterprise 资格由上游判定）')
-    return t(line)
+    return pluginLoginText(line)
   }).join('\n')
 }
 
-function parsePrompt(value: unknown): Prompt {
+export function parsePrompt(value: unknown): Prompt {
   const prompt = objectOf(value)
   const key = textOf(prompt?.key)
   if (!prompt || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(key) || UNSAFE_KEYS.has(key)
@@ -79,7 +82,7 @@ function parsePrompt(value: unknown): Prompt {
       if (!option || !value || options.some(item => item.value === value)) {
         throw new Error(t('插件登录选择字段包含无效或重复的选项'))
       }
-      options.push({ value, label: t(textOf(option.label) || value) })
+      options.push({ value, label: loginText(textOf(option.label) || value) })
     }
   }
   const condition = objectOf(prompt.when)
@@ -142,11 +145,14 @@ export function parseMethods(value: unknown, provider = ''): MethodsState {
     }
     const callbackContractMissing = provider === 'copilot-subscription' && index === 1
       && (!manualCallback || callbackInput !== 'code')
+    let browserMode = raw.browserMode as Method['browserMode']
+    if (raw.type === 'oauth' && !embeddedOnly && ['intern-inkstone', 'mclaw'].includes(provider)
+      && (!browserMode || browserMode === 'choice')) browserMode = 'plugin'
     return {
       id: `method:${index}`, methodIndex: index, type: raw.type,
-      label: t(textOf(raw.label) || (raw.type === 'oauth' ? t('OAuth 登录') : t('API 凭证'))),
-      prompts, localOnly: raw.localOnly === true, manualCallback, callbackInput, embeddedOnly,
-      desktopOnly: raw.desktopOnly === true, browserMode: raw.browserMode as Method['browserMode'],
+      label: loginText(textOf(raw.label) || (raw.type === 'oauth' ? t('OAuth 登录') : t('API 凭证'))),
+      prompts, dynamicPrompts: raw.dynamicPrompts === true, localOnly: raw.localOnly === true, manualCallback, callbackInput, embeddedOnly,
+      desktopOnly: raw.desktopOnly === true, browserMode,
       instructions: loginText(raw.instructions),
       reason: callbackContractMissing
         ? t('此 Copilot 手动令牌方式未声明回调输入契约，暂不发起；请改用设备码登录或只读本机引用。')
@@ -161,6 +167,7 @@ export function parseMethods(value: unknown, provider = ''): MethodsState {
 }
 
 export function methodLabel(method: Method): string {
+  if (method.localOnly && method.browserMode === 'none') return method.label
   if (method.localOnly) return t('{label}（只读本机）', { label: method.label })
   return method.type === 'oauth' ? t('{label}（OAuth）', { label: method.label })
     : method.type === 'api' ? t('{label}（API）', { label: method.label }) : method.label

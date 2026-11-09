@@ -134,8 +134,23 @@ pub(super) fn import(
     Ok(result)
 }
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_REPLACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn fail_next_replace() {
+    FAIL_REPLACE.with(|flag| flag.set(true));
+}
+
 fn replace(source: &Connection, target: &mut Connection) -> Result<(), String> {
     let backup =
         Backup::new(source, target).map_err(|error| format!("初始化数据库替换失败: {error}"))?;
-    complete_backup(&backup, "恢复主数据库")
+    complete_backup(&backup, "恢复主数据库")?;
+    #[cfg(test)]
+    if FAIL_REPLACE.with(|flag| flag.replace(false)) {
+        return Err("测试注入：数据库替换后中断".into());
+    }
+    Ok(())
 }

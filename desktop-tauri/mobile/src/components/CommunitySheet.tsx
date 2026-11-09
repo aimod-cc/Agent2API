@@ -8,7 +8,7 @@ import { t } from '../i18n'
  * 「社区与支持」面板（设置页底部那一行点开）。
  *
  * ── 为什么是抽屉而不是二级页 ──────────────────────────────────
- * 里面只有四张卡（三个 QQ 群 + Telegram），没有需要记住的状态、
+ * 里面只有社区入口卡片（QQ 群 + Telegram），没有需要记住的状态、
  * 也没有下一步。做成二级页会多一层返回栏、多一条浏览器历史，用户点完就退。
  *
  * ── QQ 卡片是「复制群号」，另一张是「打开链接」───────────────
@@ -58,14 +58,14 @@ export function CommunitySheet({
               </span>
               <div className='m-grow'>
                 <div className='m-t1' style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  {index === 0 ? t('QQ 群 1') : index === 1 ? t('QQ 群 2') : t('QQ 群 3')}
+                  {t('QQ 群 {n}', { n: index + 1 })}
                   <span className='m-mono' style={{ fontSize: 11.5, color: 'var(--m-text-3)' }}>
                     {group.no}
                   </span>
                 </div>
-                <div className='m-t2'>
+                <div className='m-t2 whitespace-normal'>
                   {group.nearlyFull
-                    ? t('即将满员，请优先加群 3')
+                    ? t('即将满员，请优先加3群、4群')
                     : t('点击复制群号')}
                 </div>
               </div>

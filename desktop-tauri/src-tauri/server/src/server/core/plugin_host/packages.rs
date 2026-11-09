@@ -81,9 +81,7 @@ pub fn prepare(
         if manifest.id == super::script::HOST_ID || super::script::is_package(&manifest.id) {
             return Err("该插件标识保留给脚本运行环境，不能安装为原生插件".to_string());
         }
-        if let Some(reason) = super::compatibility::version_error(&manifest.id, &manifest.version) {
-            return Err(reason);
-        }
+        super::compatibility::validate(&staging, &manifest)?;
         if manifest.id.is_empty()
             || !manifest
                 .id
@@ -107,11 +105,9 @@ pub fn prepare(
         {
             return Err("下载包的 id 或版本与所选发行版不一致，已拒绝安装".to_string());
         }
+        let wasm = super::wasm::manifest::read(&staging, &manifest)?;
         let target = super::host_target();
-        let entry = manifest
-            .entry
-            .get(&target)
-            .cloned()
+        let entry = install::entry_for_target(&manifest, &target)
             .ok_or_else(|| format!("插件包没有为当前平台（{target}）提供入口"))?;
         if !staging.join(&entry).is_file() {
             return Err(format!("包里的入口二进制不存在：{entry}"));
@@ -121,9 +117,9 @@ pub fn prepare(
             return Err(format!("签名校验失败：{}", problem.unwrap_or_default()));
         }
         if require_signed && signature != SignatureState::Verified {
-            return Err("自动安装只接受通过官方签名校验的插件包，请手动安装未签名包".to_string());
+            return Err("此下载方式只接受通过可信签名校验的插件包；未签名包请从原来源下载后手动安装".to_string());
         }
-        ensure_entry_executable(&staging.join(&entry))?;
+        if wasm.is_none() { ensure_entry_executable(&staging.join(&entry))?; }
         Ok(PreparedPack {
             staging: staging.clone(),
             manifest,
@@ -147,6 +143,8 @@ impl PreparedPack {
             let id = provider.id.0.clone();
             let enabled = previous.and_then(|pack| pack.providers.get(&id)).copied()
                 .or_else(|| super::ownership::migrated_enabled(registry, &self.manifest.id, &id))
+                .or_else(|| super::wasm::manifest::is_wasm(&self.manifest).then(|| registry.packs.iter()
+                    .find_map(|pack| pack.providers.get(&id).copied())).flatten())
                 .unwrap_or(provider.default_enabled);
             (id, enabled)
         }).collect();
@@ -169,6 +167,13 @@ impl PreparedPack {
 
     pub(super) fn install_pending(self) -> Result<InstalledTransaction, String> {
         let mut registry = PackRegistry::load();
+        if super::wasm::manifest::is_wasm(&self.manifest) {
+            if let Some(other) = registry.packs.iter().find(|pack| pack.id != self.manifest.id
+                && pack.entry.ends_with(".wasm") && pack.manifest_providers.iter()
+                    .any(|provider| self.manifest.providers.iter().any(|item| item.id == provider.id))) {
+                return Err(format!("该提供商已由独立插件「{}」接管，请先卸载对应插件", other.id));
+            }
+        }
         let previous_registry = registry.clone();
         if let Some(provider) = self.manifest.providers.iter()
             .find(|provider| super::script::package_for_provider(provider.id.as_str()).is_some()) {

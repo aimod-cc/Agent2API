@@ -11,28 +11,24 @@ import { PluginNotesDialog, type PluginNotes } from './plugins-notes'
 import { PluginPackSettingsDialog } from './plugins-pack-settings'
 import { PluginSettingsDialog } from './plugins-settings'
 import { api, bridge, errorMessage, pluginDescription, pluginName, readBase64, toast } from './plugins-shared'
-import type { PackSummary, PluginMutation, PluginOperation, PluginUpdate, PluginsPayload, ReleaseState } from './plugins-types'
+import type { PackSummary, PluginMutation, PluginOperation, PluginUpdate, PluginsPayload, ReleaseState, ScriptPackage } from './plugins-types'
 import { t } from '../i18n'
 import { ScriptPluginsPanel } from '../../../ui-shared/plugins-scripts'
-import { matchesRecommendedPlugin, matchesScriptPlugin, scriptRecommendations } from '../../../ui-shared/plugins-script-display'
+import { matchesPluginStatus, matchesScriptPublisher, type PluginFilterItem, type PluginStatusFilter, type ScriptPublisherFilter } from '../../../ui-shared/plugins-filters'
+import { isRecommendationInstalled, matchesRecommendedPlugin, matchesScriptPlugin, reinstallRequest, scriptPluginName, scriptRecommendations, scriptUpdate } from '../../../ui-shared/plugins-script-display'
 import { PluginSectionHeading } from '../../../ui-shared/plugins-store'
+import { PluginTasks } from '../../../ui-shared/plugin-tasks'
 import { PluginDiagnostics, PluginPageTools } from './plugins-page-tools'
+import { useGatewayBase } from './port-panel'
+import { PluginStartupDialog, subscribePluginDiagnostics, takePluginDiagnostics } from '../../../ui-shared/plugin-startup-view'
+import { refreshPluginStartup } from '../../../ui-shared/plugin-startup'
+import { openExternal } from './update-shared'
 
 const MIB = 1024 * 1024
 const LEGACY_MAX_PACK_BYTES = 24 * MIB
 const HARD_MAX_PACK_BYTES = 96 * MIB
 
 type SourceFilter = 'all' | 'agent2' | 'magpie'
-// 「可更新」是已安装插件的子集，计数不能与已安装相加。
-type StatusFilter = 'all' | 'updatable' | 'installed' | 'missing'
-
-type FilterItem = { installed: boolean; updatable: boolean }
-
-function matchesStatus(item: FilterItem, status: StatusFilter): boolean {
-  if (status === 'all') return true
-  if (status === 'updatable') return item.installed && item.updatable
-  return item.installed === (status === 'installed')
-}
 
 /** 一组带小标题的分段筛选。 */
 function FilterGroup<T extends string>({ label, options, value, onChange }: {
@@ -67,6 +63,7 @@ async function readPackBase64(file: File, maxPackBytes: number): Promise<string>
 }
 
 function PluginsPage(): React.ReactElement {
+  const gatewayBase = useGatewayBase()
   const [payload, setPayload] = React.useState<PluginsPayload | null>(null)
   const [maxPackBytes, setMaxPackBytes] = React.useState(LEGACY_MAX_PACK_BYTES)
   const [error, setError] = React.useState('')
@@ -77,13 +74,21 @@ function PluginsPage(): React.ReactElement {
   const [confirmRemove, setConfirmRemove] = React.useState<PackSummary | null>(null)
   const [notes, setNotes] = React.useState<PluginNotes | null>(null)
   const [source, setSource] = React.useState<SourceFilter>('all')
-  const [status, setStatus] = React.useState<StatusFilter>('all')
+  const [status, setStatus] = React.useState<PluginStatusFilter>('all')
+  const [scriptPublisher, setScriptPublisher] = React.useState<ScriptPublisherFilter>('all')
   const [search, setSearch] = React.useState('')
   const [diagnosticsOpen, setDiagnosticsOpen] = React.useState(false)
+  const [startupId, setStartupId] = React.useState<string | null>(null)
+  React.useEffect(() => {
+    const open = () => { const id = takePluginDiagnostics(); if (id) setStartupId(id) }
+    open()
+    return subscribePluginDiagnostics(open)
+  }, [])
   const [scriptBusy, setScriptBusy] = React.useState(false)
   const [scriptInstallRequest, setScriptInstallRequest] = React.useState(0)
   const [bulk, setBulk] = React.useState<{ index: number; total: number } | null>(null)
   const fileRef = React.useRef<HTMLInputElement>(null)
+  const listRef = React.useRef<HTMLDivElement>(null)
   const seenOperations = React.useRef(new Set<string>())
   const previousSignature = React.useRef('')
   const mounted = React.useRef(true)
@@ -105,7 +110,9 @@ function PluginsPage(): React.ReactElement {
         const signature = JSON.stringify({
           packs: next.packs.map(pack => ({ id: pack.id, version: pack.version, enabled: pack.enabled, providers: pack.providers })),
           running: next.host?.running,
-          scripts: next.scripts?.packages,
+          scripts: next.scripts?.packages.map(pack => ({
+            id: pack.id, version: pack.version, enabled: pack.enabled, running: pack.running, providers: pack.providers, error: pack.error,
+          })),
         })
         const changed = Boolean(previousSignature.current && previousSignature.current !== signature)
         previousSignature.current = signature
@@ -157,7 +164,11 @@ function PluginsPage(): React.ReactElement {
 
   async function check(): Promise<void> {
     await run('check', async () => {
-      const result = await api<{ updates: PluginUpdate[]; error: boolean; reason?: string }>('GET', '/api/plugins/update')
+      // 本体插件（发布包）与 Magpie 侧脚本插件各有各的检查链路，一起问，别只查一半。
+      const [result] = await Promise.all([
+        api<{ updates: PluginUpdate[]; error: boolean; reason?: string }>('GET', '/api/plugins/update'),
+        api('GET', '/api/plugins/scripts/check').catch(() => undefined),
+      ])
       await load()
       if (result.error) toast(result.reason || t('检查更新失败'), 'err')
     })
@@ -192,15 +203,16 @@ function PluginsPage(): React.ReactElement {
     })
   }
 
-  async function updateAll(ids: string[]): Promise<void> {
-    if (busy || scriptBusy || !ids.length) return
+  async function updateAll(ids: string[], scriptPacks: ScriptPackage[] = []): Promise<void> {
+    if (busy || scriptBusy || (!ids.length && !scriptPacks.length)) return
     setBusy('updateAll')
-    setBulk({ index: 0, total: ids.length })
+    const total = ids.length + scriptPacks.length
+    setBulk({ index: 0, total })
     const failures: string[] = []
     try {
       for (const [index, id] of ids.entries()) {
         if (!mounted.current) return
-        setBulk({ index: index + 1, total: ids.length })
+        setBulk({ index: index + 1, total })
         try {
           const result = await api<{ operation: PluginOperation }>('POST', '/api/plugins/update',
             { id, target: payload?.target })
@@ -228,7 +240,30 @@ function PluginsPage(): React.ReactElement {
         }
         await load()
       }
-      const done = ids.length - failures.length
+      // ── Magpie 侧的脚本插件 ──────────────────────────────
+      // 与本体插件不同：脚本宿主同一时间只允许一个任务（后端会拒第二个），所以
+      // 这里一个个提交、等上一个结束再下一个；`trusted` 直接给真 —— 更新的是**同一
+      // 来源、同一个包**（后端还会校验包 id 不许变），用户已经为它确认过一次信任。
+      for (const [offset, pack] of scriptPacks.entries()) {
+        if (!mounted.current) return
+        setBulk({ index: ids.length + offset + 1, total })
+        try {
+          await api('POST', '/api/plugins/scripts/install', { ...reinstallRequest(pack), trusted: true })
+          while (mounted.current) {
+            await new Promise(resolve => window.setTimeout(resolve, 1000))
+            if (!mounted.current) return
+            const progress = await api<PluginsPayload>('GET', '/api/plugins')
+            const operation = progress.scripts?.operation
+            if (operation?.active === true) continue
+            if (operation?.error) throw new Error(operation.error)
+            break
+          }
+        } catch (cause) {
+          failures.push(`${scriptPluginName(pack, recommendations, t)}：${errorMessage(cause instanceof Error ? cause.message : cause)}`)
+        }
+        await load()
+      }
+      const done = total - failures.length
       if (failures.length) {
         toast(t('已更新 {done} 个插件，{failed} 个失败：{error}', { done, failed: failures.length, error: failures.join('；') }), 'err')
       } else {
@@ -273,7 +308,7 @@ function PluginsPage(): React.ReactElement {
   const scripts = payload?.scripts
   const scriptItems = scripts?.packages || []
   const recommendations = scripts ? scriptRecommendations(scripts) : []
-  const missingScripts = recommendations.filter(item => !scriptItems.some(pack => pack.name === item.name))
+  const missingScripts = recommendations.filter(item => !isRecommendationInstalled(item, scriptItems))
   const keyword = search.trim().toLocaleLowerCase()
   const searchedPacks = packs.filter(pack => {
     const entry = store.find(item => item.id === pack.id)
@@ -284,34 +319,52 @@ function PluginsPage(): React.ReactElement {
     || `${item.id} ${pluginName(item.id, item.name)} ${pluginDescription(item.id, item.description)}`.toLocaleLowerCase().includes(keyword))
   const searchedScripts = scriptItems.filter(pack => matchesScriptPlugin(pack, recommendations, search, t))
   const recommendedMatches = missingScripts.filter(item => matchesRecommendedPlugin(item, search, t))
-  const nativeItems: FilterItem[] = [
+  const filteredScripts = searchedScripts.filter(pack => matchesScriptPublisher(pack, scriptPublisher))
+  const filteredRecommendations = recommendedMatches.filter(item => matchesScriptPublisher(item, scriptPublisher))
+  const nativeItems: PluginFilterItem[] = [
     ...searchedPacks.map(pack => ({ installed: true, updatable: updatable(pack.id) })),
     ...searchedStore.map(() => ({ installed: false, updatable: false })),
   ]
-  const magpieItems: FilterItem[] = [
-    ...searchedScripts.map(() => ({ installed: true, updatable: false })),
-    ...recommendedMatches.map(() => ({ installed: false, updatable: false })),
+  const magpieItems: PluginFilterItem[] = [
+    ...filteredScripts.map(pack => ({ installed: true, updatable: scriptUpdate(scripts, pack.id) !== undefined })),
+    ...filteredRecommendations.map(() => ({ installed: false, updatable: false })),
   ]
-  const itemsFor = (chosen: SourceFilter): FilterItem[] => chosen === 'agent2' ? nativeItems
+  const itemsFor = (chosen: SourceFilter): PluginFilterItem[] => chosen === 'agent2' ? nativeItems
     : chosen === 'magpie' ? magpieItems : [...nativeItems, ...magpieItems]
-  const countMatching = (chosen: SourceFilter, next: StatusFilter) => itemsFor(chosen).filter(item => matchesStatus(item, next)).length
+  const countMatching = (chosen: SourceFilter, next: PluginStatusFilter) => itemsFor(chosen).filter(item => matchesPluginStatus(item, next)).length
   const showNative = source !== 'magpie'
-  const showScripts = source !== 'agent2' && status !== 'updatable'
-  const installedRows = searchedPacks.filter(pack => matchesStatus({ installed: true, updatable: updatable(pack.id) }, status))
-  const storeRows = searchedStore.filter(() => matchesStatus({ installed: false, updatable: false }, status))
+  const showScripts = source !== 'agent2'
+  const installedRows = searchedPacks.filter(pack => matchesPluginStatus({ installed: true, updatable: updatable(pack.id) }, status))
+  const storeRows = searchedStore.filter(() => matchesPluginStatus({ installed: false, updatable: false }, status))
+  const scriptRows = filteredScripts.filter(pack => matchesPluginStatus({ installed: true, updatable: scriptUpdate(scripts, pack.id) !== undefined }, status))
   const shownCount = countMatching(source, status)
   const hasAny = packs.length + storePlugins.length + scriptItems.length + missingScripts.length > 0
+  const filtersActive = source !== 'all' || status !== 'all' || scriptPublisher !== 'all' || keyword.length > 0
+  const scriptGalleryVisible = Boolean(scripts && showScripts)
+
+  function clearFilters(): void {
+    setSource('all'); setStatus('all'); setScriptPublisher('all'); setSearch('')
+  }
   const bulkIds = showNative ? installedRows.filter(pack => {
     const update = updateOf(pack.id)
     return update?.available && !update.error && !update.repairing && !operations.some(operation => operation.id === pack.id && operation.active)
   }).map(pack => pack.id) : []
+  // Magpie 侧的更新同一批走：脚本插件一次只能有一个任务，所以分开逐个提交（见 updateAll）。
+  const bulkScripts = showScripts && scripts?.operation.active !== true
+    ? scriptRows.filter(pack => scriptUpdate(scripts, pack.id) !== undefined) : []
+  const pendingUpdates = bulkIds.length + bulkScripts.length
+
+  React.useEffect(() => {
+    if (listRef.current) listRef.current.scrollTop = 0
+  }, [source, status, scriptPublisher, search])
 
   React.useEffect(() => {
     if (settingsPackId && payload && !settingsPack) setSettingsPackId(null)
   }, [payload, settingsPack, settingsPackId])
 
   return <>
-    <div className='mx-auto flex w-full max-w-[1180px] flex-col gap-6 pb-4 text-foreground'>
+    <div className='mx-auto flex min-h-0 w-full max-w-[1180px] flex-1 flex-col gap-6 overflow-hidden text-foreground'>
+      <div className='flex shrink-0 flex-col gap-6'>
       <PageHeader className='flex-wrap items-end gap-x-6 gap-y-3'>
         <div className='min-w-0 flex-1'>
           <PageTitle className='text-[26px] font-bold tracking-[-0.022em]'>{t('插件')}</PageTitle>
@@ -336,6 +389,7 @@ function PluginsPage(): React.ReactElement {
             onFile={pickFile} onScript={() => setScriptInstallRequest(value => value + 1)} onDiagnostics={() => setDiagnosticsOpen(true)} />
         </div>
       </PageHeader>
+      <PluginTasks request={api} t={t} />
       <Input ref={fileRef} type='file' accept='.zip,application/zip' className='hidden' onChange={event => void onFile(event)} />
       {error || syncError ? <Alert variant='destructive' className='break-words'>{error || syncError}</Alert> : null}
       {busy === 'file' ? <div className='flex flex-col gap-2' aria-live='polite'>
@@ -344,8 +398,8 @@ function PluginsPage(): React.ReactElement {
       <div className='flex flex-wrap items-center gap-x-7 gap-y-3'>
         <FilterGroup label={t('来源')} value={source} onChange={setSource} options={[
           { value: 'all', label: t('全部'), count: countMatching('all', status) },
-          { value: 'agent2', label: t('Agent2 社区'), count: countMatching('agent2', status) },
-          { value: 'magpie', label: t('Magpie 社区'), count: countMatching('magpie', status) },
+          { value: 'agent2', label: t('Agent2API 社区'), count: countMatching('agent2', status) },
+          { value: 'magpie', label: t('Magpie 插件'), count: countMatching('magpie', status) },
         ]} />
         <FilterGroup label={t('状态')} value={status} onChange={setStatus} options={[
           { value: 'all', label: t('全部'), count: countMatching(source, 'all') },
@@ -355,13 +409,15 @@ function PluginsPage(): React.ReactElement {
         ]} />
         {bulk ? <span className='ml-auto text-[12px] text-subtle' aria-live='polite'>
           {t('正在更新第 {index}／{total} 个…', { index: bulk.index, total: bulk.total })}
-        </span> : bulkIds.length ? <div className='ml-auto flex flex-wrap items-center gap-2.5'>
-          <span className='text-[12px] text-primary-fg'>{t('有 {count} 个插件可更新', { count: bulkIds.length })}</span>
-          <Button size='sm' disabled={locked || active || scripts?.operation.active === true} onClick={() => void updateAll(bulkIds)}>{t('全部更新')}</Button>
+        </span> : pendingUpdates ? <div className='ml-auto flex flex-wrap items-center gap-2.5'>
+          <span className='text-[12px] text-primary-fg'>{t('有 {count} 个插件可更新', { count: pendingUpdates })}</span>
+          <Button size='sm' disabled={locked || active || scripts?.operation.active === true} onClick={() => void updateAll(bulkIds, bulkScripts)}>{t('全部更新')}</Button>
         </div> : null}
       </div>
-      {showNative && (installedRows.length > 0 || storeRows.length > 0) ? <section aria-label={t('Agent2 社区')}>
-        <PluginSectionHeading t={t} title={t('Agent2 社区')} count={installedRows.length + storeRows.length}
+      </div>
+      <div ref={listRef} className='flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto overscroll-contain pb-5 pr-2 [overflow-anchor:none] [scrollbar-gutter:stable]'>
+      {showNative && (installedRows.length > 0 || storeRows.length > 0) ? <section className='shrink-0' aria-label={t('Agent2API 社区')}>
+        <PluginSectionHeading t={t} title={t('Agent2API 社区')} count={installedRows.length + storeRows.length}
           hint={t('原生插件包，来自项目插件仓库')} />
         <div className='grid grid-cols-1 gap-3.5 min-[900px]:grid-cols-2'>
           {installedRows.map(pack => {
@@ -378,22 +434,36 @@ function PluginsPage(): React.ReactElement {
               notes: item.notes, page: item.page, prerelease: item.prerelease })} />)}
         </div>
       </section> : null}
-      {!payload || shownCount === 0 ? <Card><Empty>
+      {!payload || (shownCount === 0 && !scripts?.operation.active && !scriptGalleryVisible) ? <Card className='shrink-0'><Empty>
         <EmptyTitle>{!payload || (!hasAny && catalog?.checking) ? t('正在读取插件列表…')
           : hasAny ? t('没有符合筛选条件的插件') : t('暂无可安装的插件')}</EmptyTitle>
         <EmptyDescription>{hasAny ? t('换一组筛选条件，或把来源和状态都切回「全部」。')
           : errorMessage(catalog?.reason) || t('可以点击「刷新」读取插件仓库，或从本地 zip 安装插件。')}</EmptyDescription>
+        {payload && hasAny && filtersActive ? <Button variant='outline' size='sm' className='mt-2'
+          onClick={clearFilters}>{t('清除筛选')}</Button> : null}
       </Empty></Card> : null}
-      {scripts ? <ScriptPluginsPanel state={scripts} t={t} disabled={Boolean(busy)} query={search}
+      {scripts ? <div className='shrink-0'><ScriptPluginsPanel state={scripts} t={t} disabled={Boolean(busy)} query={search}
+        resolveIcon={path => `${gatewayBase.replace(/\/+$/, '')}${path}`} onOpenExternal={openExternal}
         galleryVisible={showScripts} showInstallAction={false} installRequest={scriptInstallRequest} onBusyChange={setScriptBusy}
-        showInstalled={status === 'all' || status === 'installed'} showRecommended={status === 'all' || status === 'missing'}
-        request={(path, body) => api('POST', path, body)} refresh={load} /> : null}
-      <p className='m-0 text-[11.5px] leading-relaxed text-muted-foreground'>
+        status={status} publisher={scriptPublisher} onPublisherChange={setScriptPublisher} onClearFilters={clearFilters}
+        request={(path, body) => api('POST', path, body)} refresh={load} /></div> : null}
+      <p className='m-0 shrink-0 text-[11.5px] leading-relaxed text-muted-foreground'>
         {t('插件独立安装与更新。卸载后账号数据仍会保留；脚本插件共用一个按需下载的运行时。')}
       </p>
+      </div>
     </div>
     <PluginSettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} onChanged={check} />
     <PluginDiagnostics open={diagnosticsOpen} payload={payload} onClose={() => setDiagnosticsOpen(false)} />
+    {startupId ? <PluginStartupDialog id={startupId}
+      name={packs.find(pack => pack.id === startupId)?.name || payload?.scripts?.packages.find(pack => pack.id === startupId)?.name || startupId}
+      status={packs.find(pack => pack.id === startupId)?.startup || payload?.scripts?.packages.find(pack => pack.id === startupId)?.startup}
+      script={startupId.startsWith('script-')} t={t} onClose={() => setStartupId(null)}
+      retry={async () => {
+        if (startupId.startsWith('script-')) await api('POST', '/api/plugins/scripts/change', { id: startupId, action: 'reload' })
+        else await api('POST', '/api/plugins/reload', { id: startupId })
+        refreshPluginStartup()
+        await load()
+      }} /> : null}
     {settingsPack ? <PluginPackSettingsDialog key={settingsPack.id} pack={settingsPack}
       store={store.find(item => item.id === settingsPack.id)} update={updateOf(settingsPack.id)} operation={settingsOperation}
       disabled={locked || settingsOperation?.active === true} onClose={() => setSettingsPackId(null)}

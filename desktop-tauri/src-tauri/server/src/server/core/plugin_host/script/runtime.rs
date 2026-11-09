@@ -33,7 +33,8 @@ pub fn registered_label(provider: &str) -> Option<String> {
 pub fn known_provider(provider: &str) -> bool {
     super::catalog::label(provider).is_some()
         || super::storage::read().ok().is_some_and(|registry| {
-            registry
+            registry.identities.values().any(|aliases| aliases.values().any(|id| id == provider))
+                || registry
                 .packages
                 .iter()
                 .any(|package| package.providers.iter().any(|id| id == provider))
@@ -86,57 +87,102 @@ pub fn observe_concurrency(host: &Host, provider: &str, value: &Value) {
     }
 }
 
+pub fn provider_icons() -> Value {
+    let mut icons = serde_json::Map::new();
+    if let Ok(mut registry) = super::storage::read() {
+        let owners = owners().lock().map(|owners| owners.clone()).unwrap_or_default();
+        registry.packages.sort_by_key(|package| !package.enabled);
+        for package in &registry.packages {
+            for id in &package.providers {
+                if owners.get(id).is_some_and(|owner| owner != &package.id) { continue; }
+                if let Some(icon) = super::icons::provider(package, id) {
+                    icons.entry(id.clone()).or_insert(Value::String(icon));
+                }
+            }
+        }
+    }
+    Value::Object(icons)
+}
+
 pub fn snapshot() -> Value {
     let registry = super::storage::read();
+    let names = super::icons::names();
     let current = host().map(|host| host.status());
     let items: Vec<Value> = registry.as_ref().map(|registry| registry.packages.iter().map(|package| {
+        let metadata = super::catalog::package_metadata(package);
         json!({
             "id": package.id, "name": package.name, "version": package.version,
-            "source": package.source, "checkinAllowed": package.checkin_allowed,
-            "enabled": package.enabled, "installedAt": package.installed_at, "error": package.error,
+            "displayName": super::catalog::package_name(package, &names),
+            "icon": super::icons::installed(package),
+            "publisher": metadata["publisher"], "magpieOfficial": metadata["magpieOfficial"],
+            "magpieRecommended": metadata["magpieRecommended"], "summary": metadata["summary"],
+            "repository": metadata["repository"], "repositoryUrl": metadata["repositoryUrl"],
+            "stars": metadata["stars"], "starsAt": metadata["starsAt"],
+            "source": package.source, "checkinAllowed": true,
+            "settingsSchema": package.settings_schema,
+            "enabled": package.enabled, "installedAt": package.installed_at,
+            "startup": plugin_host::startup::status(&package.id),
+            "error": plugin_host::startup::status(&package.id).filter(|status| status.phase.failed()).and_then(|status| status.error),
             "providers": package.providers.iter().map(|id| json!({
                 "id": id, "label": provider_label(id),
                 "enabled": !package.disabled_providers.contains(id),
-                "loaded": package.enabled && plugin_host::serves_provider(id) && package_for_provider(id).as_deref() == Some(package.id.as_str()),
+                "loaded": package.enabled && plugin_host::startup::provider(id).is_some_and(|state| state.available)
+                    && package_for_provider(id).as_deref() == Some(package.id.as_str()),
             })).collect::<Vec<_>>(),
-            "running": package.enabled && current.as_ref().is_some_and(|state| state.running),
+            "running": package.enabled && plugin_host::startup::status(&package.id)
+                .is_some_and(|status| status.phase == plugin_host::startup::Phase::Ready),
         })
     }).collect()).unwrap_or_default();
+    let mut recommendations = super::catalog::recommendations();
+    for item in recommendations.as_array_mut().into_iter().flatten() {
+        item["icon"] = json!(super::icons::recommended(item));
+    }
     json!({
         "runtime": super::bun::snapshot(), "packages": items, "operation": super::operations::operation(),
         "error": registry.err(), "hostError": current.and_then(|state| state.last_error),
-        "recommendations": super::catalog::recommendations(),
-        "recommended": { "name": super::MINIMAX_PACKAGE, "version": super::MINIMAX_VERSION,
-            "label": "MiniMax Code 国内／国际", "providers": ["minimax-code", "minimax-code-global"] },
+        "recommended": recommendations[0], "recommendations": recommendations,
+        "updates": super::updates::snapshot(), "catalog": super::catalog::status(),
     })
 }
 
 pub fn provider_label(id: &str) -> String {
-    super::catalog::label(id).map(str::to_string).unwrap_or_else(|| {
-        plugin_host::lookup(id).map(|adapter| adapter.label().to_string()).unwrap_or_else(|| id.to_string())
-    })
+    plugin_host::lookup(id).map(|adapter| adapter.label().to_string())
+        .or_else(|| super::catalog::label(id).map(str::to_string))
+        .unwrap_or_else(|| id.to_string())
+}
+
+pub(in crate::server::core::plugin_host) fn package_names(registry: &Registry) -> std::collections::BTreeMap<String, String> {
+    let names = super::icons::names();
+    registry.packages.iter().map(|package| (package.id.clone(), super::catalog::package_name(package, &names))).collect()
 }
 
 pub async fn start(store: AccountStore) -> Result<(), String> {
+    super::catalog::spawn();
+    super::icons::spawn();
+    super::updates::spawn();
     let mut registry = super::storage::read()?;
-    if registry.packages.iter().all(|package| !package.enabled) {
-        return Ok(());
-    }
-    let executable = super::bun::ensure().await?;
-    if let Err(error) = start_registry(&store, &mut registry, executable).await {
+    plugin_host::startup::configure_scripts(&registry);
+    let ids: Vec<_> = registry.packages.iter().filter(|package| package.enabled).map(|package| package.id.clone()).collect();
+    if ids.is_empty() { return Ok(()); }
+    let loading = plugin_host::startup::begin(ids, plugin_host::startup::Phase::Runtime);
+    let executable = match super::bun::ensure().await {
+        Ok(executable) => executable,
+        Err(error) => { loading.fail(&error); return Err(error); }
+    };
+    let result = prepare_tracked(&store, &mut registry, executable, loading).await
+        .and_then(|prepared| activate(&registry, prepared));
+    if let Err(error) = result {
         let _ = plugin_host::runtime::shutdown_packs(&[super::HOST_ID.to_string()]).await;
         super::transport::clear();
-        for package in registry
-            .packages
-            .iter_mut()
-            .filter(|package| package.enabled)
-        {
+        for package in registry.packages.iter_mut().filter(|package| package.enabled) {
             package.error = Some(error.clone());
         }
         super::storage::save(&registry)?;
         return Err(error);
     }
-    super::storage::save(&registry)
+    super::storage::save(&registry)?;
+    super::icons::wake(false);
+    Ok(())
 }
 
 pub async fn start_registry(
@@ -149,6 +195,7 @@ pub async fn start_registry(
 }
 
 pub struct PreparedRuntime {
+    loading: plugin_host::startup::LoadGuard,
     host: Option<Arc<Host>>,
     callbacks: Option<Arc<StoreCallbacks>>,
     infos: Vec<proto::ProviderInfo>,
@@ -160,6 +207,28 @@ pub async fn prepare(
     registry: &mut Registry,
     executable: std::path::PathBuf,
 ) -> Result<PreparedRuntime, String> {
+    plugin_host::startup::configure_scripts(registry);
+    let ids = registry.packages.iter().filter(|package| package.enabled).map(|package| package.id.clone()).collect();
+    let loading = plugin_host::startup::begin(ids, plugin_host::startup::Phase::Starting);
+    prepare_tracked(store, registry, executable, loading).await
+}
+
+async fn prepare_tracked(
+    store: &AccountStore, registry: &mut Registry, executable: std::path::PathBuf,
+    loading: plugin_host::startup::LoadGuard,
+) -> Result<PreparedRuntime, String> {
+    match prepare_inner(store, registry, executable, &loading.attempt).await {
+        Ok((host, callbacks, infos, owners)) => Ok(PreparedRuntime { loading, host, callbacks, infos, owners }),
+        Err(error) => { loading.fail(&error); Err(error) }
+    }
+}
+
+type PreparedParts = (Option<Arc<Host>>, Option<Arc<StoreCallbacks>>, Vec<proto::ProviderInfo>, HashMap<String, String>);
+
+async fn prepare_inner(
+    store: &AccountStore, registry: &mut Registry, executable: std::path::PathBuf,
+    attempt: &plugin_host::startup::Attempt,
+) -> Result<PreparedParts, String> {
     let enabled: Vec<Package> = registry
         .packages
         .iter()
@@ -167,21 +236,53 @@ pub async fn prepare(
         .cloned()
         .collect();
     if enabled.is_empty() {
-        return Ok(PreparedRuntime {
-            host: None,
-            callbacks: None,
-            infos: Vec::new(),
-            owners: HashMap::new(),
-        });
+        return Ok((None, None, Vec::new(), HashMap::new()));
     }
     let mut entries = Vec::new();
+    let names = super::icons::names();
     for package in &enabled {
+        let directory = match super::storage::directory(package) {
+            Ok(directory) => directory,
+            Err(error) => { attempt.package_failed(&package.id, &error); return Err(error); }
+        };
         entries.push(
-            json!({ "id": package.id, "directory": super::storage::directory(package)?,
-            "options": package.options, "providers": package.providers, "checkinAllowed": package.checkin_allowed }),
+            json!({ "id": package.id, "directory": directory,
+            "displayName": super::catalog::package_name(package, &names),
+            "options": package.options, "providers": package.providers,
+            "providerOptions": package.provider_options, "aliases": package.provider_aliases }),
         );
     }
     let script = super::storage::host_files()?;
+    let native_registry = plugin_host::PackRegistry::load();
+    let native_owners = plugin_host::ownership::owners(&native_registry);
+    let mut reserved: std::collections::HashSet<String> = native_owners.keys().cloned().collect();
+    reserved.extend(crate::server::core::providers::availability::BUILTIN_SUBSCRIPTION_IDS.iter().map(|id| id.to_string()));
+    reserved.extend(crate::server::core::providers::PROVIDERS.iter().map(|meta| meta.id.to_string()));
+    for package in &native_registry.packs {
+        reserved.extend(plugin_host::ownership::declared_ids(package));
+    }
+    for info in plugin_host::runtime::provider_infos() {
+        if plugin_host::runtime::host_for_provider(info.id.as_str()).is_some_and(|owner| !owner.options.script) {
+            reserved.insert(info.id.0);
+        }
+    }
+    let mut claimed = std::collections::BTreeMap::new();
+    for package in &registry.packages {
+        for id in &package.providers {
+            claimed.entry(id.clone()).or_insert_with(|| package.id.clone());
+            if !crate::server::core::providers::availability::is_suspended(id)
+                && !crate::server::core::providers::availability::BUILTIN_SUBSCRIPTION_IDS.contains(&id.as_str())
+                && !native_owners.contains_key(id)
+                && !plugin_host::runtime::host_for_provider(id).is_some_and(|owner| !owner.options.script)
+            {
+                reserved.remove(id);
+            }
+        }
+    }
+    for (package, aliases) in &registry.identities {
+        for id in aliases.values() { claimed.entry(id.clone()).or_insert_with(|| package.clone()); }
+    }
+    let catalog_path = super::model_catalog::prepare().await;
     let options = HostOptions {
         args: vec![
             "run".into(),
@@ -191,13 +292,15 @@ pub async fn prepare(
         cwd: script.parent().map(std::path::Path::to_path_buf),
         data_dir: super::root().display().to_string(),
         init_timeout: Duration::from_secs(60),
+        startup: Some(attempt.clone()),
         loopback_port: plugin_host::bootstrap::loopback_port(),
         script: true,
-        init_payload: json!({ "packages": entries }),
+        init_payload: json!({ "packages": entries, "reserved": reserved, "claimed": claimed, "catalogPath": catalog_path }),
         ..HostOptions::new(executable)
     };
     let callbacks = Arc::new(StoreCallbacks::new(store.clone()));
     let host = Arc::new(Host::new(options, callbacks.clone()));
+    attempt.attach(&host);
     plugin_host::runtime::install_pack(
         super::HOST_ID,
         plugin_host::ProviderCategory::Agent,
@@ -209,7 +312,6 @@ pub async fn prepare(
         .await
         .map_err(|error| error.message)?;
     let list = discovered.as_array().ok_or("脚本宿主没有返回插件清单")?;
-    let native_owners = plugin_host::ownership::owners(&plugin_host::PackRegistry::load());
     let mut next_owners = HashMap::new();
     for package in registry
         .packages
@@ -221,7 +323,8 @@ pub async fn prepare(
             .find(|item| item["id"].as_str() == Some(package.id.as_str()))
             .ok_or("脚本宿主遗漏已启用的插件")?;
         package.error = found["error"].as_str().map(str::to_string);
-        if package.error.is_some() {
+        if let Some(error) = &package.error {
+            attempt.package_failed(&package.id, error);
             continue;
         }
         let providers = found["providers"]
@@ -235,10 +338,9 @@ pub async fn prepare(
                 || !id
                     .bytes()
                     .all(|ch| ch.is_ascii_alphanumeric() || b"-_.".contains(&ch))
+                || reserved.contains(id)
                 || crate::server::core::providers::availability::is_suspended(id)
-                || crate::server::core::providers::availability::BUILTIN_SUBSCRIPTION_IDS
-                    .contains(&id)
-                || native_owners.contains_key(id)
+                || claimed.get(id).is_some_and(|owner| owner != &package.id)
                 || id.starts_with("custom-")
                 || plugin_host::runtime::host_for_provider(id)
                     .is_some_and(|owner| !Arc::ptr_eq(&owner, &host))
@@ -246,13 +348,33 @@ pub async fn prepare(
                     .insert(id.to_string(), package.id.clone())
                     .is_some()
             {
-                return Err(format!("脚本插件提供商 {id} 与现有身份冲突或尚未开放"));
+                let error = format!("脚本插件提供商 {id} 与现有身份冲突或尚未开放");
+                attempt.package_failed(&package.id, &error);
+                return Err(error);
             }
             ids.push(id.to_string());
         }
         if ids.is_empty() {
             return Err("插件没有可兼容的提供商入口".into());
         }
+        let aliases: std::collections::BTreeMap<String, String> = serde_json::from_value(found["aliases"].clone())
+            .map_err(|_| "脚本插件提供商别名无效")?;
+        let aliases_unique: std::collections::HashSet<_> = aliases.values().collect();
+        if aliases.len() != ids.len() || aliases_unique.len() != ids.len()
+            || aliases.values().any(|id| !ids.contains(id))
+            || aliases.keys().any(|id| id.is_empty() || id.len() > 128
+                || !id.bytes().all(|ch| ch.is_ascii_alphanumeric() || b"-_.".contains(&ch)))
+        {
+            return Err("脚本插件提供商别名与清单不一致".into());
+        }
+        package.icon = found["icon"].as_str().and_then(super::icons::declaration);
+        package.settings_schema = found["settings"].clone();
+        package.provider_aliases = aliases.clone();
+        registry.identities.insert(package.id.clone(), aliases);
+        package.provider_icons = found["providerIcons"].as_object().into_iter().flatten()
+            .filter(|(id, _)| ids.contains(id))
+            .filter_map(|(id, value)| value.as_str().and_then(super::icons::declaration).map(|icon| (id.clone(), icon)))
+            .take(32).collect();
         package.providers = ids;
     }
     let mut declared: Vec<String> = infos.iter().map(|info| info.id.0.clone()).collect();
@@ -265,16 +387,13 @@ pub async fn prepare(
     if !host.ready() {
         return Err("脚本宿主在完成加载前已退出".into());
     }
-    Ok(PreparedRuntime {
-        host: Some(host),
-        callbacks: Some(callbacks),
-        infos,
-        owners: next_owners,
-    })
+    plugin_host::startup::configure_scripts(registry);
+    Ok((Some(host), Some(callbacks), infos, next_owners))
 }
 
 pub fn activate(registry: &Registry, prepared: PreparedRuntime) -> Result<(), String> {
     let PreparedRuntime {
+        loading,
         host,
         callbacks,
         infos,
@@ -282,10 +401,13 @@ pub fn activate(registry: &Registry, prepared: PreparedRuntime) -> Result<(), St
     } = prepared;
     let Some(host) = host else {
         clear_owners();
+        loading.finish();
         return Ok(());
     };
     if !host.ready() {
-        return Err("脚本宿主在完成加载前已退出".into());
+        let error = "脚本宿主在完成加载前已退出";
+        loading.fail(error);
+        return Err(error.into());
     }
     let active_ids: Vec<String> = registry
         .packages
@@ -309,8 +431,8 @@ pub fn activate(registry: &Registry, prepared: PreparedRuntime) -> Result<(), St
         if !active_ids.contains(&id) {
             continue;
         }
-        if let Some(label) = super::catalog::label(&id) {
-            info.label = label.into();
+        if info.label.trim().is_empty() || info.label == id {
+            if let Some(label) = super::catalog::label(&id) { info.label = label.into(); }
         }
         plugin_host::rpc_cache::set_defaults(&id, info.default_models.clone());
         let kind = crate::server::core::providers::kind_from_id(&id)
@@ -328,6 +450,7 @@ pub fn activate(registry: &Registry, prepared: PreparedRuntime) -> Result<(), St
     crate::server::core::providers::adapter::restore_cached_catalogs();
     crate::server::core::checkin_schedules::extend_plugin_providers_once();
     plugin_host::schedules::wake();
+    loading.finish();
     Ok(())
 }
 

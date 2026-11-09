@@ -3,8 +3,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-mod required;
-pub(super) use required::required_release;
 pub(crate) use super::packages::MAX_PACK_BYTES;
 
 use crate::server::core::update::client::{
@@ -36,7 +34,6 @@ pub struct IndexEntry {
     pub id: String,
     pub name: String,
     pub description: String,
-    pub official: bool,
     pub require_signed: bool,
     pub manifest: String,
     pub icon: String,
@@ -66,13 +63,13 @@ pub struct ReleaseAssets {
 
 impl ReleaseAssets {
     pub fn asset(&self, id: &str, target: &str) -> Option<PackAsset> {
-        let (_, url, size) = self
+        let (platform, url, size) = self
             .platforms
             .iter()
-            .find(|(platform, _, _)| platform == target)?;
+            .find(|(platform, _, _)| platform == target || platform == super::wasm::manifest::TARGET)?;
         Some(PackAsset {
             version: self.version.clone(),
-            name: asset_name(id, &self.version, target),
+            name: asset_name(id, &self.version, platform),
             url: url.clone(),
             size: *size,
             page: self.page.clone(),
@@ -93,12 +90,7 @@ pub(super) fn waiting_message(state: &crate::server::core::task_state::TaskState
     source::GithubSettings::Plugin.waiting_message(state)
 }
 
-pub(super) fn describe_error(message: &str, retry_at: i64) -> String {
-    source::GithubSettings::Plugin.describe_error(message, retry_at)
-}
-
 pub fn clear_cooldown() {
-    super::compatibility::clear_cooldown();
     super::catalog::clear_cooldown();
 }
 
@@ -140,7 +132,6 @@ pub async fn read_index_result() -> Result<Vec<IndexEntry>, UpdateError> {
                 name: if name.is_empty() { id.clone() } else { name },
                 id,
                 description: text(item, "description"),
-                official: item.get("official").and_then(Value::as_bool) == Some(true),
                 require_signed,
                 manifest: text(item, "manifest"),
                 icon: text(item, "icon"),
@@ -361,7 +352,7 @@ pub(super) async fn release_for_channels(
             && !assets
                 .platforms
                 .iter()
-                .any(|(target, _, _)| *target == super::host_target())
+                .any(|(target, _, _)| *target == super::host_target() || target == super::wasm::manifest::TARGET)
         {
             continue;
         }
@@ -488,7 +479,7 @@ pub async fn download(
                     .and_then(|result| result);
                     if let Err(error) = prepared {
                         candidate.forget();
-                        last_error = format!("加速下载的插件未通过官方签名校验：{error}");
+                        last_error = format!("加速下载的插件未通过可信签名校验：{error}");
                         continue;
                     }
                 }

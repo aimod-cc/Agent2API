@@ -51,6 +51,7 @@ use serde_json::{json, Value};
 
 use crate::server::config;
 use crate::server::core::compact_routing::{self, RequestFormat};
+use crate::server::core::title_routing;
 use crate::server::core::upstream::cancellation;
 use crate::server::core::upstream::continuation::{self, Continuation};
 use crate::server::core::upstream::usage::RequestTelemetry;
@@ -131,7 +132,14 @@ pub async fn chat_completions(
     // 两边前后一致，见 client_reasoning_of 的说明）
     let client_reasoning = pipeline::client_reasoning_of(&payload);
     let compact_client = compact_routing::client_for_request(&request_source.behavior_client, &payload, RequestFormat::Chat);
-    let requested_model = match super::request_prepare::resolve_client_model(&state, &mut payload, scope.as_ref(), compact_client).await {
+    // 标题请求只在不命中压缩时判：两者都是「把这条请求换成便宜模型」，同时命中会互相覆盖。
+    let special = if compact_client.is_some() {
+        super::request_prepare::SpecialRoute::compact(compact_client)
+    } else {
+        super::request_prepare::SpecialRoute::title(title_routing::client_for_request(
+            &request_source.behavior_client, &headers, &payload, false))
+    };
+    let requested_model = match super::request_prepare::resolve_client_model(&state, &mut payload, scope.as_ref(), special).await {
         Ok(model) => model,
         Err(error) => {
             record_early_failure(
@@ -227,6 +235,14 @@ pub async fn chat_completions(
     let stats = state.request_stats();
 
     match outcome {
+        Ok(ForwardOutcome::Native(response)) => {
+            let context = RecordContext {
+                stats, telemetry, started_at, model: requested_model.clone(), client_model,
+                client_reasoning, status: i64::from(response.status), raw_request, raw_response: None,
+                is_test: false, source: request_source,
+            };
+            super::protocol::native_response::respond(response, context, &mut guard)
+        }
         Ok(ForwardOutcome::Stream { status, stream: source }) => {
             // 流式：记账**不能**在这里做 —— 这里只是「响应头已就绪」，
             // 内容还在下发。包装一层，由流自己在跑完/被丢弃时记账

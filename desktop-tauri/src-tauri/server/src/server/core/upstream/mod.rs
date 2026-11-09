@@ -58,8 +58,12 @@ mod http_dns;
 mod network_fallback;
 pub mod refusal;
 pub mod request;
+pub mod native;
+mod native_payload;
 mod payload;
 mod provider_loop;
+mod plugin_forward;
+mod retry_after;
 mod rotate;
 mod route_state;
 mod route_context;
@@ -262,6 +266,11 @@ pub struct ForwardRequest {
     pub proxy_override: Option<Option<ResolvedProxy>>,
 }
 
+pub(crate) fn plugin_session_id(headers: &HeaderMap, body: &Value) -> String {
+    route_state::RouteState::explicit_conversation_id(headers, body)
+        .filter(|value| value.len() <= 1024 && !value.contains('\0')).unwrap_or_default()
+}
+
 /// 转发结果：要么是可直接下发的流，要么是聚合好的 JSON
 pub enum ForwardOutcome {
     /// 流式：上游状态码 + SSE 帧流（已经过 reasoning 合并）
@@ -271,6 +280,8 @@ pub enum ForwardOutcome {
     },
     /// 非流式：聚合后的完整 JSON
     Completion { body: Value },
+    /// 已与客户端协议一致的原生响应，不再进入 Chat 转换链。
+    Native(native::NativeResponse),
 }
 
 /// 一次选路的结果（对应 Node 的 `{ accountId, account, proxy, proxyError }`）
@@ -359,22 +370,27 @@ impl UpstreamService {
     ///     一个卡住的前序请求被无限期挂住。
     ///   - **槽位一直占到大半个响应结束**（流式请求也一样，见 InFlightGuard）。
     pub async fn forward(&self, request: ForwardRequest) -> Result<ForwardOutcome, GatewayError> {
-        self.forward_request(request, None, false).await
+        self.forward_request(request, None, false, None).await
+    }
+
+    pub async fn forward_native(&self, request: ForwardRequest, native: crate::server::core::protocol::native::NativeRequest) -> Result<ForwardOutcome, GatewayError> {
+        self.forward_request(request, None, false, Some(native)).await
     }
 
     pub async fn forward_assistant(&self, request: ForwardRequest) -> Result<ForwardOutcome, GatewayError> {
-        self.forward_request(request, None, true).await
+        self.forward_request(request, None, true, None).await
     }
 
     pub async fn generate_images(&self, request: ForwardRequest) -> Result<ForwardOutcome, GatewayError> {
-        self.forward_request(request, Some(crate::server::core::providers::images::ImageOperation::Generate), false).await
+        self.forward_request(request, Some(crate::server::core::providers::images::ImageOperation::Generate), false, None).await
     }
 
     pub async fn edit_images(&self, request: ForwardRequest) -> Result<ForwardOutcome, GatewayError> {
-        self.forward_request(request, Some(crate::server::core::providers::images::ImageOperation::Edit), false).await
+        self.forward_request(request, Some(crate::server::core::providers::images::ImageOperation::Edit), false, None).await
     }
 
-    async fn forward_request(&self, mut request: ForwardRequest, images: Option<crate::server::core::providers::images::ImageOperation>, preserve_system_prompt: bool) -> Result<ForwardOutcome, GatewayError> {
+    async fn forward_request(&self, mut request: ForwardRequest, images: Option<crate::server::core::providers::images::ImageOperation>, preserve_system_prompt: bool,
+        native: Option<crate::server::core::protocol::native::NativeRequest>) -> Result<ForwardOutcome, GatewayError> {
         if let Some(rule) = super::update::required_update() {
             return Err(GatewayError::with_status(426, rule["message"].as_str().unwrap_or("当前版本需要强制更新")).with_code("update_required"));
         }
@@ -424,6 +440,16 @@ impl UpstreamService {
         // 对话统一向上游请求流式；Images 保留独立的请求形态。
         let mut upstream_body = request.body.clone();
         let compact_route = super::compact_routing::take_route(&mut upstream_body);
+        // 标题路由的痕迹同样在发送前摘掉；它与压缩互斥（一条请求最多命中一层）。
+        let title_route = super::title_routing::take_route(&mut upstream_body);
+        // 改写记录要进请求日志的 route 快照，回放页据此回答「这次到底改没改写」。
+        // 放在选路之前写：即使后面全失败，这条事实仍然成立。
+        if let Some(record) = compact_route.clone().or_else(|| title_route.clone()) {
+            let key = if compact_route.is_some() { "compactRoute" } else { "titleRoute" };
+            let mut decision = request.telemetry.route_decision().unwrap_or_else(|| json!({}));
+            if let Some(object) = decision.as_object_mut() { object.insert(key.into(), record); }
+            request.telemetry.set_route_decision(decision);
+        }
         if let Some(object) = upstream_body.as_object_mut() {
             object.remove("_wb_route_group_id");
             object.remove("_wb_route_continue");
@@ -473,11 +499,13 @@ impl UpstreamService {
         let proxy_override = request.proxy_override;
         let context = payload::ProviderContext {
             body: &upstream_body,
+            native: native.as_ref(),
             routing,
             vision,
             direct_provider: resumed_vision.as_ref().map(|resumed| resumed.provider.clone()),
             direct_model: resumed_vision.as_ref().map(|resumed| resumed.model.clone()),
             compact_routed: compact_route.is_some(),
+            title_routed: title_route.is_some(),
             stream: request.stream,
             images,
             client_headers: &request.client_headers,

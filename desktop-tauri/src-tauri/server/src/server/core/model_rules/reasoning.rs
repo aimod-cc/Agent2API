@@ -193,6 +193,18 @@ pub fn clear_reasoning_controls(body: &mut Value) {
     if empty_output_config {
         object.remove("output_config");
     }
+    let empty_extra_body = object
+        .get_mut("extra_body")
+        .and_then(Value::as_object_mut)
+        .is_some_and(|extra| {
+            for key in ["reasoning_effort", "reasoningEffort", "reasoning", "thinking", "enable_thinking", "thinking_budget"] {
+                extra.remove(key);
+            }
+            extra.is_empty()
+        });
+    if empty_extra_body {
+        object.remove("extra_body");
+    }
 }
 
 /// 从**下游请求体**里读客户端显式指定的思考等级（请求日志「下游等级」的展示

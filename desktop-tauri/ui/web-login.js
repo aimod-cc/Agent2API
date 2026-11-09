@@ -91,7 +91,7 @@
       const texts = config.texts ? config.texts() : { button: '', hint: '' };
       const waiting = starting || (loginActive && loginProvider === config.provider);
       const progress = loginActive && loginProvider === config.provider
-        ? [loginInstructions, loginHint].filter(Boolean).join('\n') : '';
+        ? [...new Set([loginInstructions, loginHint].flatMap(text => text.split(/\r?\n/)).map(line => line.trim()).filter(Boolean))].join('\n') : '';
       publish({
         label: waiting ? (config.busyText || wbI18n.t('等待登录完成…')) : (texts.button || ''),
         hint: loginActive && loginProvider !== config.provider

@@ -361,6 +361,7 @@ pub fn spawn(store: AccountStore) {
                 _ = tokio::time::sleep(Duration::from_millis(TICK_MS)) => {},
                 _ = schedules::changed() => {},
             }
+            if plugin_host::wasm::has_capability(PROVIDER, "tasks.v1") { continue; }
             let now = beijing::now();
             let Some(plan_time) = due_time(now) else {
                 continue;

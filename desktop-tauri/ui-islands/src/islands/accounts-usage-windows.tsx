@@ -13,11 +13,12 @@ import {
 } from '../../../ui-shared/usage-readings'
 import '../styles/accounts-usage-windows.css'
 
-type UsageWindowReading = {
+export type UsageWindowReading = {
   id: string
   group: string
   label: string
   window: string
+  windowCode: string
   view: string
   percent: number | null
   remaining: number | null
@@ -50,6 +51,7 @@ export function usageWindows(entry: UsageEntry): UsageWindowReading[] {
     const row = value as Record<string, unknown>
     const label = usageWindowLabel(row.label, t)
     const group = typeof row.group === 'string' ? row.group.trim() : ''
+    const windowCode = typeof row.window === 'string' ? row.window.trim().toLowerCase() : ''
     const window = windowLabel(typeof row.window === 'string' ? row.window : '') || label
     if (!group && !window) continue
     const read = usageNumberOrNull(row.remainingPercent)
@@ -64,6 +66,7 @@ export function usageWindows(entry: UsageEntry): UsageWindowReading[] {
       group,
       label: label || [group, window].filter(Boolean).join(' · '),
       window,
+      windowCode,
       view: usageWindowView(row, t, numberText),
       percent,
       remaining: usageNumberOrNull(row.remaining),

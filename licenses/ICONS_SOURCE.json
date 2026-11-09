@@ -387,6 +387,225 @@
       ],
       "presentation": "original paths and palette",
       "fallback": null
+    },
+    {
+      "brand": "Kimi / Moonshot",
+      "presetKeys": [
+        "moonshot-cn",
+        "moonshot"
+      ],
+      "desktopFile": "desktop-tauri/ui/assets/providers/kimi.svg",
+      "source": "Acankao/magpie/internal/gui/assets/icons/kimi.svg",
+      "sourceRevision": "50265256ba56ac164a680da0689e1c6d90dac471",
+      "licenseNotices": [
+        "magpie",
+        "lobeIcons"
+      ],
+      "sourceSha256": "ed08131b46acf70e6e2144eceb775e74098b58ea65fa21eaee04be7b05cfe63b",
+      "outputSha256": "8b433dc9b76865db0d45afd6c1ed40aad67222241b7fab0fb88e0ea68976d5f8",
+      "unchangedPathSha256": "d0f62b661c08ea23f6b5659205d665509f92dce9d9cf9ff95a7173a7a12be7d6",
+      "originalViewBox": "0 0 24 24",
+      "viewBox": "0 0 24 24",
+      "intrinsicSize": [
+        256,
+        256
+      ],
+      "presentation": "original paths; fixed white foreground on black background",
+      "fallback": null
+    },
+    {
+      "brand": "StepFun",
+      "presetKeys": [
+        "stepfun-cn",
+        "stepfun"
+      ],
+      "desktopFile": "desktop-tauri/ui/assets/providers/stepfun-color.svg",
+      "source": "Acankao/magpie/internal/gui/assets/icons/stepfun-color.svg",
+      "sourceRevision": "50265256ba56ac164a680da0689e1c6d90dac471",
+      "licenseNotices": [
+        "magpie",
+        "lobeIcons"
+      ],
+      "sourceSha256": "f55afc0e6004c8854f76bd5bbcc0fce9fc0ed9316691d54fb02d088c24fab40d",
+      "outputSha256": "2aa46c09742c014770c71979d8fe6f83cd6e7e95ea3bebfb02ed78a7268bd3d4",
+      "unchangedPathSha256": "24f798a8b90d6be6461bb96dabb621ce9c46406e751b51eca55048ae257ff20a",
+      "originalViewBox": "0 0 24 24",
+      "viewBox": "0 0 24 24",
+      "intrinsicSize": [
+        256,
+        256
+      ],
+      "presentation": "original paths and palette",
+      "fallback": null
+    },
+    {
+      "brand": "LongCat",
+      "presetKeys": [
+        "longcat"
+      ],
+      "desktopFile": "desktop-tauri/ui/assets/providers/longcat.svg",
+      "source": "Acankao/magpie/internal/gui/assets/icons/longcat.svg",
+      "sourceRevision": "50265256ba56ac164a680da0689e1c6d90dac471",
+      "licenseNotices": [
+        "magpie",
+        "lobeIcons"
+      ],
+      "sourceSha256": "4f1ff7194ad6752ea48773b73c48b5de4de9d8d6ee265b7d31df8053e519182d",
+      "outputSha256": "0f39a852ef89d2e29ffdcdd7615b6db41b8fbd6ca7d890e60cf325f6280a57a1",
+      "unchangedPathSha256": "bed938f7a0f8701a0cde368c2b22b748f21675c10d54a6fe10d9f6f2facac822",
+      "originalViewBox": "0 0 24 24",
+      "viewBox": "0 0 24 24",
+      "intrinsicSize": [
+        256,
+        256
+      ],
+      "presentation": "original paths; fixed white foreground on black background",
+      "fallback": null
+    },
+    {
+      "brand": "Tencent TokenHub",
+      "presetKeys": [
+        "tencent-tokenhub-cn",
+        "tencent-tokenhub"
+      ],
+      "desktopFile": "desktop-tauri/ui/assets/providers/tencentcloud-color.svg",
+      "source": "Acankao/magpie/internal/gui/assets/icons/tencentcloud-color.svg",
+      "sourceRevision": "50265256ba56ac164a680da0689e1c6d90dac471",
+      "licenseNotices": [
+        "magpie",
+        "lobeIcons"
+      ],
+      "sourceSha256": "f860dae064a3afd24970efd2bc5892f39438526bf52c3a9748f61fc05c1cfd58",
+      "outputSha256": "d5970ba2b18cbe145048aae1ba4cb7df282097f74cdabfbef8d9ce0abdcd02b7",
+      "unchangedPathSha256": "a9d5ba7d90fcd50e7641e07ea9e911cb1a4e4b2f472cb327bad59f8f6e33686f",
+      "originalViewBox": "0 0 24 24",
+      "viewBox": "0 0 24 24",
+      "intrinsicSize": [
+        256,
+        256
+      ],
+      "presentation": "original paths and palette",
+      "fallback": null
+    },
+    {
+      "brand": "xAI",
+      "presetKeys": [
+        "xai"
+      ],
+      "desktopFile": "desktop-tauri/ui/assets/providers/xai.svg",
+      "source": "Acankao/magpie/internal/gui/assets/icons/xai.svg",
+      "sourceRevision": "50265256ba56ac164a680da0689e1c6d90dac471",
+      "licenseNotices": [
+        "magpie",
+        "lobeIcons"
+      ],
+      "sourceSha256": "89eb7de9f0d02a41cfecd9109e253d7fd3529e27467dee4254faa67f3ac21451",
+      "outputSha256": "1ec99721278d67b647cc825c0c1f4c7537c1d8c50518f72f6acbf952722f5fa4",
+      "unchangedPathSha256": "87ae7fb842f7b61b028a686ea7d4b6ae659058a5859c2959b96a9f773c38fd5f",
+      "originalViewBox": "0 0 24 24",
+      "viewBox": "0 0 24 24",
+      "intrinsicSize": [
+        256,
+        256
+      ],
+      "presentation": "original paths; fixed white foreground on black background; xAI title",
+      "fallback": null
+    },
+    {
+      "brand": "Mistral",
+      "presetKeys": [
+        "mistral"
+      ],
+      "desktopFile": "desktop-tauri/ui/assets/providers/mistral-color.svg",
+      "source": "Acankao/magpie/internal/gui/assets/icons/mistral-color.svg",
+      "sourceRevision": "50265256ba56ac164a680da0689e1c6d90dac471",
+      "licenseNotices": [
+        "magpie",
+        "lobeIcons"
+      ],
+      "sourceSha256": "722f74b289d95486b43662fe24fa883b333701296f618406cd0ed502299170b6",
+      "outputSha256": "33feb5a0b22fa241007c5c10e239f2756f6200efba48c5c11fcf34f4291cb782",
+      "unchangedPathSha256": "b4bb093f8448d8d1c76f2ad67eeeeb56742060846a53815bc9d55a19c7712f26",
+      "originalViewBox": "0 0 24 24",
+      "viewBox": "0 0 24 24",
+      "intrinsicSize": [
+        256,
+        256
+      ],
+      "presentation": "original paths and palette",
+      "fallback": null
+    },
+    {
+      "brand": "Groq",
+      "presetKeys": [
+        "groq"
+      ],
+      "desktopFile": "desktop-tauri/ui/assets/providers/groq.svg",
+      "source": "Acankao/magpie/internal/gui/assets/icons/groq.svg",
+      "sourceRevision": "50265256ba56ac164a680da0689e1c6d90dac471",
+      "licenseNotices": [
+        "magpie",
+        "lobeIcons"
+      ],
+      "sourceSha256": "078d5cf6e7a54905040c15ddacf5ea33c13042fe7739e820cedc2096e4406651",
+      "outputSha256": "2b1aa2357032ddb198ed148a52d73f238df065a1caff015d3084719cdf72ea6e",
+      "unchangedPathSha256": "681167e8be1574cffa4703445f37bf17c562d20c65b3bcdd61fad4f5b637f04d",
+      "originalViewBox": "0 0 24 24",
+      "viewBox": "0 0 24 24",
+      "intrinsicSize": [
+        256,
+        256
+      ],
+      "presentation": "original paths; fixed white foreground on black background",
+      "fallback": null
+    },
+    {
+      "brand": "AiHubMix",
+      "presetKeys": [
+        "aihubmix"
+      ],
+      "desktopFile": "desktop-tauri/ui/assets/providers/aihubmix-color.svg",
+      "source": "Acankao/magpie/internal/gui/assets/icons/aihubmix-color.svg",
+      "sourceRevision": "50265256ba56ac164a680da0689e1c6d90dac471",
+      "licenseNotices": [
+        "magpie",
+        "lobeIcons"
+      ],
+      "sourceSha256": "e0ba11dd4b14fce9df434604cb081749b8f3347392d263d7d6f291b81f113f7f",
+      "outputSha256": "a860cb8eee8b7772b1c94533d42fa62b40c5131e883097f1f7cdf87a4d68a0ce",
+      "unchangedPathSha256": "60dba6473f30d0ce89072c0b498440d153c003f2f05cde7ec51d2361a1a17395",
+      "originalViewBox": "0 0 24 24",
+      "viewBox": "0 0 24 24",
+      "intrinsicSize": [
+        256,
+        256
+      ],
+      "presentation": "original paths and palette",
+      "fallback": null
+    },
+    {
+      "brand": "LM Studio",
+      "presetKeys": [
+        "lmstudio"
+      ],
+      "desktopFile": "desktop-tauri/ui/assets/providers/lmstudio.svg",
+      "source": "Acankao/magpie/internal/gui/assets/icons/lmstudio.svg",
+      "sourceRevision": "50265256ba56ac164a680da0689e1c6d90dac471",
+      "licenseNotices": [
+        "magpie",
+        "lobeIcons"
+      ],
+      "sourceSha256": "4a575e8382b52ce742ac5d21d361a7d2a08cea7c12390ee1bbb755ef7d3cc25b",
+      "outputSha256": "9156f778c4861012157b7856eb5abafd8602ca7beed32577d02092b5c5c9f579",
+      "unchangedPathSha256": "2f8a1aa879754f3c09eda6d07e23c390e87645e1435df2b904e23660fb6dc06e",
+      "originalViewBox": "0 0 24 24",
+      "viewBox": "0 0 24 24",
+      "intrinsicSize": [
+        256,
+        256
+      ],
+      "presentation": "original paths; fixed white foreground on black background",
+      "fallback": null
     }
   ],
   "reusedExistingAssets": [
@@ -403,6 +622,20 @@
         "chatgpt-subscription"
       ],
       "desktopFile": "desktop-tauri/ui/assets/providers/openai.png",
+      "change": "mapping only; existing PNG untouched; no new license asserted"
+    },
+    {
+      "presetKeys": [
+        "nous"
+      ],
+      "desktopFile": "desktop-tauri/ui/assets/providers/nous-portal.svg",
+      "change": "mapping only; existing SVG and its asset record unchanged"
+    },
+    {
+      "presetKeys": [
+        "xiaomi"
+      ],
+      "desktopFile": "desktop-tauri/ui/assets/providers/xiaomi-tokenplan.png",
       "change": "mapping only; existing PNG untouched; no new license asserted"
     }
   ]

@@ -27,7 +27,6 @@ pub struct PluginSettings {
     pub stable: bool,
     pub beta: bool,
     pub auto_update: bool,
-    pub auto_install_official: bool,
 }
 
 impl Default for PluginSettings {
@@ -40,7 +39,6 @@ impl Default for PluginSettings {
             stable: true,
             beta: false,
             auto_update: true,
-            auto_install_official: true,
         }
     }
 }
@@ -111,7 +109,6 @@ pub fn notify_changed(before: PluginSettings) {
         if channel_changed
             || (!before.auto_check && next.auto_check)
             || (!before.auto_update && next.auto_update)
-            || (!before.auto_install_official && next.auto_install_official)
         {
             super::catalog::schedule_now();
         } else {
@@ -184,7 +181,6 @@ pub fn configure(patch: &Value) -> Result<Value, String> {
                     "stable" => &mut next.stable,
                     "beta" => &mut next.beta,
                     "autoUpdate" => &mut next.auto_update,
-                    "autoInstallOfficial" => &mut next.auto_install_official,
                     _ => return Err(format!("未知的插件设置：{key}")),
                 };
                 *field = value

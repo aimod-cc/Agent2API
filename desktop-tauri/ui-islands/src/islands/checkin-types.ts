@@ -78,5 +78,7 @@ declare global {
       readonly currentPage?: string
     }
     wbZcodePlans?: { open(options: { id: string; name?: string }): void }
+    /** 提供商目录（providers.js）：把 provider id 翻成展示名 */
+    wbProviders?: { labelOf?: (id: string) => string }
   }
 }

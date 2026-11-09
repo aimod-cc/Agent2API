@@ -21,7 +21,7 @@ export function syncRoutingSorting(draft: RoutingDraft, sorting: AccountSorting)
     for (const [provider, order] of Object.entries(sorting.accountOrder)) {
       if (!profile.providers.includes(provider) || !baseline.providers.includes(provider)) continue
       const rules = rulesOf(sorting, provider)
-      const automatic = activeGroupSortRules(provider, rules).length > 0
+      const automatic = activeGroupSortRules(provider, rules, sorting).length > 0
       const rulesChanged = before && !same(rulesOf(before, provider), rules)
       if (automatic || rulesChanged || same(profile.accountOrder[provider], baseline.accountOrder[provider])) {
         profile.accountOrder[provider] = [...order]
@@ -44,6 +44,7 @@ export function canSyncSortingRevision(before: RoutingWorkspace, next: RoutingWo
   return Object.entries(next.profile.accountOrder).every(([provider, order]) => {
     if (same(before.profile.accountOrder[provider], order)) return true
     const prior = before.sorting.rules[provider] || [], current = next.sorting.rules[provider] || []
-    return activeGroupSortRules(provider, prior).length > 0 || activeGroupSortRules(provider, current).length > 0 || !same(prior, current)
+    return activeGroupSortRules(provider, prior, before.sorting).length > 0
+      || activeGroupSortRules(provider, current, next.sorting).length > 0 || !same(prior, current)
   }) && Object.keys(before.profile.accountOrder).every(provider => provider in next.profile.accountOrder)
 }

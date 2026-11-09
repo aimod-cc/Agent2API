@@ -9,14 +9,20 @@ import { t } from '../i18n'
 import { MAX_NAME_LENGTH } from './add-account-configs'
 import {
   accountRequest, addedLabelOf, afterAdd, describeError, isMethodsUnavailable,
-  normalizeLoginResult, postAccount, runtimeProviderOf, shared, startLogin, toast,
+  normalizeLoginResult, postAccount, runtimeProviderOf, saveAccountProxySelection, shared, startLogin, toast,
   type LoginProgress, type LoginResult, type RuntimeProviderRecord,
   type WebLoginController, type WebLoginView,
 } from './add-account-bridge'
-import { draftOfProxy, ProxyForm, readProxyDraft } from './accounts-proxy-form'
+import { draftOfProxy, readProxyDraft } from './accounts-proxy-form'
+import { AccountProxySection } from './add-account-proxy'
+import { UserAgentInput, useUserAgentPresets, userAgentEditable, applyUserAgentAfterCreate, createdAccountIdOf } from './add-account-user-agent'
+import { openExternal } from './update-shared'
+import { PluginLoginInteraction } from '../../../ui-shared/plugin-login-interaction'
+import { SearchableSelect } from '../../../ui-shared/searchable-select'
+import { usePluginPrompts } from './add-account-plugin-prompts'
 
 import {
-  loginText, methodLabel, parseCallbackInput, parseMethods, promptEnabled, promptValue, readInputs,
+  loginText, mergeLoginInstructions, methodLabel, parseCallbackInput, parseMethods, pluginBrowserInstructions, promptEnabled, promptValue, readInputs,
   type Method, type MethodsState,
 } from './add-account-dynamic-fields'
 
@@ -119,18 +125,15 @@ function credentialPayload(text: string): Record<string, unknown> {
   return record
 }
 
-function apiProxySelection(proxy: ReturnType<typeof readProxyDraft>): unknown {
-  return proxy ?? { source: 'direct' }
-}
-
 export function DynamicProviderBlock({
-  provider, label, active, version, footerHost,
+  provider, label, active, version, footerHost, hideMethodPicker = false,
 }: {
   provider: string
   label: string
   active: boolean
   version: number
   footerHost: HTMLElement | null
+  hideMethodPicker?: boolean
 }): React.ReactElement {
   const prefix = `${React.useId()}-dynamic-login`
   const [methodsState, setMethodsState] = React.useState<MethodsState>({
@@ -140,7 +143,17 @@ export function DynamicProviderBlock({
   const [values, setValues] = React.useState<Record<string, Record<string, string>>>({})
   const [credentialJson, setCredentialJson] = React.useState('')
   const [name, setName] = React.useState('')
+  // 账号级自定义 User-Agent（可选）：只对走 POST /api/accounts 的方式生效
+  // （api / manual / desktop / guest）；OAuth 那条由共享登录桥建号，建好后
+  // 到「账号设置」里改 —— 这里不给一个提交了却不生效的输入框。
+  const [userAgent, setUserAgent] = React.useState('')
+  const userAgentRef = React.useRef(userAgent)
+  userAgentRef.current = userAgent
+  const uaPresets = useUserAgentPresets()
+  // 会话式家由插件自己拼出站头，网关覆盖不到 —— 不显示输入框
+  const uaEditable = userAgentEditable(provider)
   const [proxyDraft, setProxyDraft] = React.useState(() => draftOfProxy(undefined))
+  const [readingSystemProxy, setReadingSystemProxy] = React.useState(false)
   const [mode, setMode] = React.useState<'external' | 'embedded'>('external')
   const [saving, setSaving] = React.useState(false)
   const [error, setError] = React.useState('')
@@ -149,6 +162,7 @@ export function DynamicProviderBlock({
   const [callbackBusy, setCallbackBusy] = React.useState(false)
   const [callbackError, setCallbackError] = React.useState('')
   const [callbackNotice, setCallbackNotice] = React.useState('')
+  const [nextAuthUrl, setNextAuthUrl] = React.useState('')
   const callbackInputRef = React.useRef<HTMLInputElement>(null)
   const callbackRequest = React.useRef(false)
   const callbackGeneration = React.useRef(0)
@@ -161,12 +175,16 @@ export function DynamicProviderBlock({
   const savingRef = React.useRef(false)
   const requestingRef = React.useRef(false)
   const loadedRef = React.useRef(false)
-  const method = methodsState.methods.find(item => item.id === selected) || methodsState.methods[0]
+  const declaredMethod = methodsState.methods.find(item => item.id === selected) || methodsState.methods[0]
+  const inputs = (declaredMethod && values[declaredMethod.id]) || {}
+  const resolvedPrompts = usePluginPrompts(provider, declaredMethod, inputs, active && !loginView.waiting,
+    (path, body) => accountRequest('POST', path, body))
+  const method = resolvedPrompts.method
   const methodAvailable = method && methodsState.phase !== 'loading' && method.type !== 'unsupported'
   const selectedRef = React.useRef(method?.id)
   selectedRef.current = method?.id
-  const inputs = (method && values[method.id]) || {}
-  const locked = saving || loginView.disabled
+  const locked = saving || loginView.disabled || readingSystemProxy
+  const submitLocked = locked || resolvedPrompts.pending || Boolean(resolvedPrompts.error)
   const legacyBrowser = method?.type === 'oauth' && method.methodIndex === undefined
   const snapshot = React.useRef({ method, inputs, mode, proxyDraft })
   snapshot.current = { method, inputs, mode, proxyDraft }
@@ -186,6 +204,7 @@ export function DynamicProviderBlock({
     setCallbackBusy(false)
     if (!preserveError) setCallbackError('')
     setCallbackNotice('')
+    setNextAuthUrl('')
   }
 
   React.useEffect(() => {
@@ -227,7 +246,8 @@ export function DynamicProviderBlock({
     void (async () => {
       try {
         if (!runtimeProviderOf(provider)) throw new Error(t('该提供商已不在运行时目录中，请返回列表重新选择'))
-        const result = await accountRequest('GET', `/api/session/login/methods?provider=${encodeURIComponent(provider)}`)
+        const locale = window.wbI18n?.locale() || 'zh-CN'
+        const result = await accountRequest('GET', `/api/session/login/methods?provider=${encodeURIComponent(provider)}&locale=${encodeURIComponent(locale)}`)
         const parsed = parseMethods(result, provider)
         if (shared().workbuddyDesktop?.platform === 'web') parsed.methods = parsed.methods.filter(method => !method.desktopOnly)
         accept(parsed)
@@ -263,14 +283,21 @@ export function DynamicProviderBlock({
           // 插件申报 embeddedOnly 时一律走内嵌窗口（不信任残留的 mode 状态）。
           const mode = current.method.embeddedOnly ? 'embedded' : current.method.browserMode === 'external' ? 'external' : current.mode
           // 旧 browser 声明没有索引，只走已存在的默认网页登录入口。
-          return startLogin(provider, undefined, mode, undefined,
-            current.method.methodIndex === undefined ? undefined : {
-              methodIndex: current.method.methodIndex, inputs, proxy: readProxyDraft(current.proxyDraft),
+          try {
+            return await startLogin(provider, undefined, mode, undefined, {
+              ...(current.method.methodIndex === undefined ? {} : { methodIndex: current.method.methodIndex, inputs }),
+              proxy: readProxyDraft(current.proxyDraft),
             })
+          } catch (failure) {
+            if (alive.current) setError(loginText(describeError(failure)))
+            throw failure
+          }
         },
         onSuccess: async raw => {
           const result = raw as LoginResult
           if (!result?.ok || result.canceled) throw new Error(t('登录桥未确认账号添加完成'))
+          // OAuth 建号也走共享登录桥，UA 同样只能建好后补写
+          await applyUserAgentAfterCreate(createdAccountIdOf(result), provider, userAgentRef.current)
           await finish(result)
         },
       }) ?? null
@@ -339,6 +366,7 @@ export function DynamicProviderBlock({
     setProgress({})
     setValues({})
     setCredentialJson('')
+    setUserAgent('')
     setProxyDraft(draftOfProxy(undefined))
     setError('')
     const nickname = textOf(result.session?.nickname)
@@ -347,7 +375,7 @@ export function DynamicProviderBlock({
   }
 
   async function submit(): Promise<void> {
-    if (!method || locked || savingRef.current || requestingRef.current || methodsState.phase === 'loading') return
+    if (!method || submitLocked || savingRef.current || requestingRef.current || methodsState.phase === 'loading') return
     try {
       if (!runtimeProviderOf(provider)) throw new Error(t('该提供商已不在运行时目录中，请返回列表重新选择'))
       if (method.reason) throw new Error(method.reason)
@@ -358,6 +386,7 @@ export function DynamicProviderBlock({
       }
       const remark = method.prompts.some(prompt => prompt.key === 'name') ? fields.name : name.trim()
       const payload: Record<string, unknown> = { provider, proxy, ...(remark ? { name: remark } : {}) }
+      if (userAgent.trim()) payload.userAgent = userAgent.trim()
       if (method.type === 'api') {
         payload.methodIndex = method.methodIndex
         payload.inputs = fields
@@ -374,18 +403,7 @@ export function DynamicProviderBlock({
       setSaving(true)
       setError('')
       // API 方法必须进入 account.normalize，不能把 Key/Token 交给 OAuth start。
-      const result = normalizeLoginResult(await postAccount(payload))
-      if (method.type === 'api' && result.proxySaved !== true) {
-        const id = result.account?.id
-        let proxyWarning = t('旧网关未确认代理同次保存，已使用兼容接口保存；请在账号设置中确认代理选择。')
-        try {
-          if (!id) throw new Error(t('账号已添加，但未返回账号 ID，无法保存登录代理选择。'))
-          await accountRequest('PATCH', `/api/accounts/${encodeURIComponent(id)}`, { proxy: apiProxySelection(proxy) })
-        } catch {
-          proxyWarning = t('账号已添加，但代理选择未确认保存；请在账号设置中重新检查。')
-        }
-        result.warning = [result.warning, proxyWarning].filter(Boolean).join('\n')
-      }
+      const result = await saveAccountProxySelection(normalizeLoginResult(await postAccount(payload)), proxy)
       await finish(result)
     } catch (failure) {
       if (alive.current) setError(describeError(failure))
@@ -406,11 +424,11 @@ export function DynamicProviderBlock({
   }
 
   function startOauth(): void {
-    if (locked || !method || requestingRef.current || methodsState.phase === 'loading') return
+    if (submitLocked || !method || requestingRef.current || methodsState.phase === 'loading') return
     try {
       if (!runtimeProviderOf(provider)) throw new Error(t('该提供商已不在运行时目录中，请返回列表重新选择'))
       readInputs(method, inputs)
-      if (!legacyBrowser) readProxyDraft(proxyDraft)
+      readProxyDraft(proxyDraft)
       if (!controllerRef.current) throw new Error(t('共享登录桥不可用，请重新打开面板'))
       controllerRef.current.start()
     } catch (failure) { setError(describeError(failure)) }
@@ -449,6 +467,20 @@ export function DynamicProviderBlock({
       const reply = objectOf(await bridge.submitLoginCallback(flow.state, raw))
       if (!isCurrent()) return
       if (reply?.success === false || reply?.ok === false || reply?.error) throw new Error()
+      if (reply?.retryable === true) {
+        clearCallback()
+        setCallbackError(loginText(reply.hint) || t('回调未被接受，请重新复制本次登录的完整回调地址'))
+        return
+      }
+      const nextUrl = textOf(reply?.nextUrl)
+      if (nextUrl) {
+        const parsed = new URL(nextUrl)
+        if (parsed.protocol !== 'https:' || parsed.username || parsed.password || /[\u0000-\u0020\u007f]/.test(nextUrl)) throw new Error()
+        clearCallback()
+        setNextAuthUrl(nextUrl)
+        setCallbackNotice(t('还需继续授权，请打开下一步授权页，完成后回填新的完整回调地址。'))
+        return
+      }
       clearCallback()
       setCallbackNotice(t('回调已提交，仍需等待网关确认账号登录完成。'))
       // accepted / Pending / accountId 都不触发 finish；终态只由现有 start/wait 链收尾。
@@ -462,36 +494,43 @@ export function DynamicProviderBlock({
     }
   }
 
-  const instructionLines = [methodsState.instructions, method?.instructions,
-    progress.instructions, progress.hint].filter((line): line is string => Boolean(line))
-  const instructions = [...new Set(instructionLines)].join('\n')
-  const commonFields = method && method.type !== 'unsupported' && !legacyBrowser
+  const instructions = mergeLoginInstructions(methodsState.instructions, method?.instructions,
+    method?.browserMode === 'plugin' ? pluginBrowserInstructions(provider) : '',
+    loginText(progress.instructions), loginText(progress.hint), loginText(loginView.hint))
+  const commonFields = method && method.type !== 'unsupported'
 
   return <div className='add-provider-block' hidden={!active}>
-    <AddGroup label={t('账号登录方式')}>
+    <AddGroup label={t('添加方式')} hidden={hideMethodPicker && methodsState.phase === 'ready' && !methodsState.reason}>
       {methodsState.phase === 'loading' ? <p role='status'><Spinner /> {t('正在读取插件登录方式…')}</p>
         : methodsState.reason ? <Alert variant={methodsState.phase === 'error' ? 'destructive' : 'warning'}>
           <AlertTitle>{methodsState.phase === 'error' ? t('无法读取登录方式') : t('登录方式说明')}</AlertTitle>
           <AlertDescription className='whitespace-pre-wrap break-words'>{methodsState.reason}</AlertDescription>
         </Alert> : null}
-      {method && methodsState.phase !== 'loading' ? (
+      {!hideMethodPicker && method && methodsState.phase !== 'loading' ? (
         methodsState.methods.length <= 3 ? <SegmentedControl
           aria-label={t('{label} 账号的添加方式', { label })} disabled={locked}
           className='max-w-full flex-wrap [&_[data-slot=segmented-item]]:h-7'
           value={method.id} options={methodsState.methods.map(item => ({ value: item.id, label: methodLabel(item) }))}
           onValueChange={selectMethod}
-        /> : <Select value={method.id} disabled={locked}
-          onValueChange={value => { if (value !== null) selectMethod(value) }}>
-          <SelectTrigger className='w-full' aria-label={t('账号登录方式')}>
-            <SelectValue>{methodLabel(method)}</SelectValue>
-          </SelectTrigger>
-          <SelectContent>{methodsState.methods.map(item => <SelectItem key={item.id} value={item.id}>
-            {methodLabel(item)}
-          </SelectItem>)}</SelectContent>
-        </Select>
+        /> : <div className='min-w-0'>
+          <Select value={method.id} disabled={locked}
+            onValueChange={value => { if (value !== null) selectMethod(value) }}>
+            <SelectTrigger className='w-full max-w-full' aria-label={t('账号登录方式')} title={methodLabel(method)}>
+              <SelectValue>{methodLabel(method)}</SelectValue>
+            </SelectTrigger>
+            <SelectContent className='w-[min(var(--anchor-width),var(--available-width))]'>
+              {methodsState.methods.map(item => <SelectItem key={item.id} value={item.id}
+                className='[&>:first-child]:whitespace-normal [&>:first-child]:break-words'>
+                {methodLabel(item)}
+              </SelectItem>)}
+            </SelectContent>
+          </Select>
+        </div>
       ) : null}
     </AddGroup>
 
+    {progress.active && progress.state ? <PluginLoginInteraction key={progress.state} flow={progress.state} t={t}
+      request={async <T,>(method: string, path: string, body?: unknown) => await accountRequest(method, path, body) as T} /> : null}
     {instructions || progress.userCode ? <Alert>
       <AlertTitle>{t('登录指引 / 设备码授权')}</AlertTitle>
       <AlertDescription className='whitespace-pre-wrap break-words'>
@@ -512,6 +551,7 @@ export function DynamicProviderBlock({
           ? t('此方式需要原样提交授权码或令牌；输入会隐藏，不会当作 URL 或 API 凭证解析。提交后仍需等待网关确认。')
           : t('此方式需要完整回调地址；请原样粘贴，不拆分参数或重建地址。提交后仍需等待网关确认。')}</AlertDescription>
       </Alert> : null}
+      {resolvedPrompts.error ? <Alert variant='destructive'><AlertDescription>{resolvedPrompts.error}</AlertDescription></Alert> : null}
       {method.reason ? <Alert variant='warning'><AlertDescription>{method.reason}</AlertDescription></Alert> : null}
       {method.prompts.map((prompt, index) => {
         if (!promptEnabled(prompt, method, inputs)) return null
@@ -519,19 +559,16 @@ export function DynamicProviderBlock({
         const current = promptValue(prompt, inputs)
         return <div key={`${method.id}:${prompt.key}`} className='flex flex-col gap-1.5'>
           <Label htmlFor={id}>{prompt.label}{prompt.optional ? t('（可选）') : t('（必填）')}</Label>
-          {prompt.type === 'select' ? <Select value={current} disabled={locked || !prompt.options.length}
+          {prompt.type === 'select' ? <SearchableSelect value={current} disabled={locked || !prompt.options.length}
             onValueChange={value => setValues(previous => ({
-              ...previous, [method.id]: { ...previous[method.id], [prompt.key]: value ?? '' },
-            }))}>
-            <SelectTrigger id={id} className='w-full'>
-              <SelectValue>{prompt.options.find(option => option.value === current)?.label
-                || prompt.placeholder || t('请选择')}</SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              {prompt.optional ? <SelectItem value=''>{t('不填写（可选）')}</SelectItem> : null}
-              {prompt.options.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
-            </SelectContent>
-          </Select> : <Input id={id} type={prompt.secret ? 'password' : 'text'} disabled={locked}
+              ...previous, [method.id]: { ...previous[method.id], [prompt.key]: value },
+            }))}
+            id={id} className='w-full' searchable={prompt.options.length > 8}
+            displayValue={prompt.options.find(option => option.value === current)?.label || prompt.placeholder || t('请选择')}
+            options={[
+              ...(prompt.optional ? [{ value: '', label: t('不填写（可选）') }] : []),
+              ...prompt.options,
+            ]} /> : <Input id={id} type={prompt.secret ? 'password' : 'text'} disabled={locked}
             autoComplete={prompt.secret ? 'new-password' : 'off'} spellCheck={false}
             placeholder={prompt.placeholder} value={current} onChange={event => {
               const value = event.currentTarget.value
@@ -556,13 +593,12 @@ export function DynamicProviderBlock({
           <Input id={`${prefix}-name`} maxLength={MAX_NAME_LENGTH} placeholder={t('可选，留空使用账号昵称')}
             value={name} disabled={locked} onChange={event => setName(event.currentTarget.value)} />
         </div> : null}
-        <div inert={locked} className='flex min-w-0 flex-col gap-2'>
-          <Label>{t('账号 / 登录出网代理')}</Label>
-          <ProxyForm draft={proxyDraft} onChange={setProxyDraft} idPrefix={`${prefix}-proxy`} />
-        </div>
-        {method.type === 'api' ? <p>{t('新网关确认代理同次保存后不再重复提交；旧网关使用兼容保存并提示核查，失败不会撤销已添加的账号。')}</p> : null}
+        {uaEditable ? <div className='flex flex-col gap-1.5'>
+          <Label htmlFor={`${prefix}-user-agent`}>{t('User-Agent（可选）')}</Label>
+          <UserAgentInput id={`${prefix}-user-agent`} value={userAgent} onChange={setUserAgent}
+            presets={uaPresets} disabled={locked} />
+        </div> : null}
       </> : null}
-      {legacyBrowser ? <p>{t('旧版浏览器登录暂不接收备注名和登录代理，请添加后在账号设置中调整。')}</p> : null}
       {method.type === 'oauth' && !legacyBrowser && !method.prompts.some(prompt => prompt.key === 'name')
         ? <p>{t('账号名由插件自动获取，添加后可修改。')}</p> : null}
       {method.type === 'oauth' && !method.localOnly && !method.embeddedOnly && (!method.browserMode || method.browserMode === 'choice') && shared().workbuddyDesktop?.platform !== 'web' ? <>
@@ -571,23 +607,26 @@ export function DynamicProviderBlock({
           options={[{ value: 'external', label: t('系统浏览器') }, { value: 'embedded', label: t('内嵌窗口') }]}
           onValueChange={setMode} />
       </> : null}
-      {method.type === 'oauth' ? <AddFoot host={footerHost} active={active}
-        note={<span id={`${prefix}-hint`} className='detail whitespace-pre-wrap break-words'>{loginView.hint}</span>}>
-        <Button id={`${prefix}-start`} disabled={locked || Boolean(method.reason)} onClick={startOauth}>
+      {method.type === 'oauth' ? <AddFoot host={footerHost} active={active}>
+        <Button id={`${prefix}-start`} disabled={submitLocked || Boolean(method.reason)} onClick={startOauth}>
           {loginView.waiting ? <Spinner /> : null}{loginView.label}
         </Button>
         <Button id={`${prefix}-cancel`} variant='outline' hidden={!loginView.waiting}
           onClick={cancelOauth}>{t('取消等待')}</Button>
       </AddFoot> : method.type !== 'unsupported' ? <AddFoot host={footerHost} active={active}>
-        <Button disabled={locked || Boolean(method.reason)}
+        <Button disabled={submitLocked || Boolean(method.reason)}
           onClick={() => void submit()}>{saving ? <Spinner /> : null}{saving ? t('添加中…') : t('添加账号')}</Button>
       </AddFoot> : null}
       {manualWaiting ? <div className='flex flex-col gap-2'>
+        {nextAuthUrl ? <Button variant='outline' className='self-start' disabled={callbackBusy}
+          onClick={() => {
+            if (progressRef.current.active && progressRef.current.provider === provider) void openExternal(nextAuthUrl)
+          }}>{t('打开下一步授权页')}</Button> : null}
         <Label htmlFor={`${prefix}-callback`}>{callbackType === 'code'
           ? t('授权码或令牌（原样提交）') : t('完整回调地址（原样提交）')}</Label>
         <Input key={`${progress.state}:${callbackType}`} id={`${prefix}-callback`} ref={callbackInputRef}
-          type={callbackType === 'code' ? 'password' : 'text'} defaultValue=''
-          autoComplete={callbackType === 'code' ? 'new-password' : 'off'} spellCheck={false} autoCapitalize='none'
+          type='password' defaultValue=''
+          autoComplete='new-password' spellCheck={false} autoCapitalize='none'
           disabled={callbackBusy} placeholder={callbackType === 'code'
             ? t('授权码或令牌（原样提交）') : t('完整回调地址（原样提交）')}
           onChange={event => {
@@ -605,5 +644,7 @@ export function DynamicProviderBlock({
       </Alert> : null}
     </AddGroup> : null}
     {error && !methodAvailable ? <Alert variant='destructive'><AlertDescription>{error}</AlertDescription></Alert> : null}
+    {methodAvailable ? <AccountProxySection draft={proxyDraft} onChange={setProxyDraft}
+      idPrefix={`${prefix}-proxy`} disabled={locked} onSystemImportBusy={setReadingSystemProxy} /> : null}
   </div>
 }

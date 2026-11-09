@@ -46,6 +46,9 @@ import {
 import { balanceSpecOf, type BalanceFieldKey } from './balance-query'
 import { DuplicateProviderDialog } from './add-provider-duplicate-dialog'
 import { presetOfProvider, sameProviderEndpoint } from './add-provider-metadata'
+import { useAddAccountProxy, useAccountAddBusy } from './add-account-proxy'
+import { UserAgentInput, useUserAgentPresets } from './add-account-user-agent'
+import type { ProxyPayload } from './accounts-proxy-form'
 import { t } from '../i18n'
 
 /** 展示名长度上限（与后端 custom_providers::MAX_NAME_CHARS 一致，前端先挡一次） */
@@ -74,6 +77,25 @@ const NOAUTH_ID = 'custom-noauth-check'
 const EXISTING_APIKEY_ID = 'custom-existing-apikey-input'
 const EXISTING_NOAUTH_ID = 'custom-existing-noauth-check'
 const EXISTING_NAME_ID = 'custom-existing-name-input'
+/**
+ * 账号级自定义 User-Agent 的输入框 id（两张表单各一个）。
+ *
+ * 与其它字段同一手法：提交动作在 `CustomFootActions`（另一个组件）里，按 DOM id
+ * 现读 —— 但它是**受控**的（预置下拉要往里写值），所以值另存一份模块级草稿，
+ * 读侧用 `readField` 对非原生 input 会回落到草稿（与「无需鉴权」勾选框同款）。
+ */
+const UA_CREATE_ID = 'custom-user-agent-input'
+const UA_EXISTING_ID = 'custom-existing-user-agent-input'
+
+/** 受控 UA 的值：模块级草稿（跨组件共享，与 noAuth 的草稿同一手法） */
+const uaDraft: Record<string, string> = { [UA_CREATE_ID]: '', [UA_EXISTING_ID]: '' }
+function writeUaDraft(id: string, value: string): void {
+  uaDraft[id] = value
+  setDraftValue(id, value)
+}
+function readUaDraft(id: string): string {
+  return (uaDraft[id] || '').trim()
+}
 
 export const CREATE_BUTTON_ID = 'custom-create-button'
 export const EXISTING_BUTTON_ID = 'custom-existing-button'
@@ -265,6 +287,10 @@ export function CustomProviderBlock({
   /** 两张表单各有一枚「该上游无需鉴权」，初值都从草稿读（关掉再打开还在） */
   const [noAuth, setNoAuth] = React.useState(() => readNoAuthDraft(NOAUTH_ID))
   const [existingNoAuth, setExistingNoAuth] = React.useState(() => readNoAuthDraft(EXISTING_NOAUTH_ID))
+  // 账号级自定义 User-Agent：受控（预置下拉要写值），提交时按草稿读
+  const [createUa, setCreateUa] = React.useState(() => uaDraft[UA_CREATE_ID] || '')
+  const [existingUa, setExistingUa] = React.useState(() => uaDraft[UA_EXISTING_ID] || '')
+  const uaPresets = useUserAgentPresets()
 
   const list = React.useMemo(() => customList(), [version])
   const pickedProvider = list.find(item => item.id === providerHint)
@@ -403,6 +429,13 @@ export function CustomProviderBlock({
           />
           {/* 余额查询：只有预置卡带方案的家才出现（新建时方案随记录写入） */}
           <BalanceFields scheme={createScheme} prefix={BALANCE_CREATE_PREFIX} />
+          <div className='add-field'>
+            <Label htmlFor={UA_CREATE_ID}>{t('User-Agent（可选）')}</Label>
+            <UserAgentInput id={UA_CREATE_ID} value={createUa}
+              onChange={value => { setCreateUa(value); writeUaDraft(UA_CREATE_ID, value) }}
+              presets={uaPresets} className='col-start-2 row-start-1' />
+            <span className='hint'>{t('留空使用默认的 User-Agent；可从预置里选一个内置客户端，也可以直接填写。')}</span>
+          </div>
         </div>
       </DialogSection>
 
@@ -461,6 +494,13 @@ export function CustomProviderBlock({
             />
             <span className='hint'>{t('留空则用提供商名称')}</span>
           </div>
+          <div className='add-field'>
+            <Label htmlFor={UA_EXISTING_ID}>{t('User-Agent（可选）')}</Label>
+            <UserAgentInput id={UA_EXISTING_ID} value={existingUa}
+              onChange={value => { setExistingUa(value); writeUaDraft(UA_EXISTING_ID, value) }}
+              presets={uaPresets} className='col-start-2 row-start-1' />
+            <span className='hint'>{t('留空使用默认的 User-Agent；可从预置里选一个内置客户端，也可以直接填写。')}</span>
+          </div>
         </div>
       </DialogSection>
     </>
@@ -476,6 +516,7 @@ type FootContext = {
   setBusy: (value: boolean) => void
   setHint: (message: string) => void
   setDuplicates: (providers: CustomProviderRecord[]) => void
+  readProxy: () => ProxyPayload
 }
 
 /** 失败提示同时写 toast 与底部条（toast 几秒后就没了） */
@@ -532,13 +573,18 @@ async function submitCreate(context: FootContext, allowDuplicate = false, target
     // 两个凭证字段互斥（后端也这么归一）：勾了无需鉴权就不带 apiKey 上去
     if (noAuth) payload.noAuth = true
     else if (apiKey) payload.apiKey = apiKey
+    // 账号级自定义 UA（空串 = 不设置，用该家默认）
+    const userAgent = readUaDraft(UA_CREATE_ID)
+    if (userAgent) payload.userAgent = userAgent
     context.setHint('')
     try {
+      payload.proxy = context.readProxy()
       const data = (await shared().wbProviders?.customRequest?.(
         'POST', target ? '/api/accounts' : '/api/custom-providers', payload,
       )) as { provider?: { name?: string }; account?: { name?: string }; created?: boolean } | null
       clearFields([NAME_ID, BASEURL_ID, APIKEY_ID])
       clearBalanceFields(scheme, BALANCE_CREATE_PREFIX)
+      writeUaDraft(UA_CREATE_ID, '')
       // 勾选框与草稿一起复位（下次进来是干净的默认态，不被上一家预勾影响）
       writeNoAuthDraft(NOAUTH_ID, false)
       const message = target
@@ -577,15 +623,19 @@ async function submitExisting(context: FootContext): Promise<void> {
     if (noAuth) payload.noAuth = true
     else if (apiKey) payload.apiKey = apiKey
     if (name) payload.name = name
+    const userAgent = readUaDraft(UA_EXISTING_ID)
+    if (userAgent) payload.userAgent = userAgent
     const balanceQuery = readBalanceQuery(scheme, BALANCE_EXISTING_PREFIX)
     if (balanceQuery) payload.balanceQuery = balanceQuery
     context.setHint('')
     try {
+      payload.proxy = context.readProxy()
       const data = (await shared().wbProviders?.customRequest?.(
         'POST', '/api/accounts', payload,
       )) as { account?: { name?: string }; created?: boolean } | null
       clearFields([EXISTING_APIKEY_ID, EXISTING_NAME_ID])
       clearBalanceFields(scheme, BALANCE_EXISTING_PREFIX)
+      writeUaDraft(UA_EXISTING_ID, '')
       writeNoAuthDraft(EXISTING_NOAUTH_ID, false)
       const label = data?.account?.name
         || customList().find(item => item.id === providerId)?.name
@@ -625,10 +675,11 @@ export function CustomFootActions({
   presetKey: string
   providerId: string
 }): React.ReactElement {
-  const [busy, setBusy] = React.useState(false)
+  const [busy, setBusy] = useAccountAddBusy()
+  const proxy = useAddAccountProxy()
   const [hint, setHint] = React.useState('')
   const [duplicates, setDuplicates] = React.useState<CustomProviderRecord[]>([])
-  const context: FootContext = { presetKey, providerId, setBusy, setHint, setDuplicates }
+  const context: FootContext = { presetKey, providerId, setBusy, setHint, setDuplicates, readProxy: proxy.read }
 
   return (
     <>

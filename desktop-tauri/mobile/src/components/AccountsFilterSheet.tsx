@@ -1,7 +1,5 @@
-import { Sheet, SheetContent, SheetHeader, SheetBody, SheetFooter, SheetTitle , Button } from '@ui'
+import { Sheet, SheetContent, SheetHeader, SheetBody, SheetFooter, SheetTitle, Button, MultiSelect } from '@ui'
 import { Icon } from './Icon'
-import { ProviderLogo } from './ProviderLogo'
-import { providerLabel } from '../lib/providers'
 import { t } from '../i18n'
 import { Toggle as UiToggle } from '@ui'
 
@@ -75,13 +73,6 @@ export function AccountsFilterSheet({
 }) {
   const patch = (next: Partial<AccountFilters>) => onChange({ ...filters, ...next })
 
-  const toggleProvider = (id: string) => {
-    const picked = filters.providers.includes(id)
-      ? filters.providers.filter(item => item !== id)
-      : [...filters.providers, id]
-    patch({ providers: picked })
-  }
-
   return (
     <Sheet open={open} onOpenChange={next => { if (!next) onClose() }}>
       <SheetContent side='right'>
@@ -130,19 +121,10 @@ export function AccountsFilterSheet({
 
           {providers.length > 1 ? (
             <Section title={t('提供商')}>
-              {providers.map(item => (
-                <UiToggle size='default' variant='outline'
-                  key={item.id}
-                  type='button'
-                  className='m-chip rounded-pill'
-                  pressed={filters.providers.includes(item.id)}
-                  onClick={() => toggleProvider(item.id)}
-                  style={{ gap: 6 }}
-                >
-                  <ProviderLogo id={item.id} label={item.label} />
-                  {item.label}
-                </UiToggle>
-              ))}
+              <MultiSelect value={filters.providers} onValueChange={providers => patch({ providers })}
+                options={providers.map(item => ({ value: item.id, label: item.label }))}
+                className='h-10 w-full text-sm' placeholder={t('全部提供商')}
+                searchPlaceholder={t('搜索提供商')} aria-label={t('提供商')} />
             </Section>
           ) : null}
 

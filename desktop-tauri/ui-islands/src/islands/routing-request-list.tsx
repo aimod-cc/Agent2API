@@ -114,7 +114,7 @@ export function RoutingRequestList({ active, query, selectedKey, refreshToken, o
       <InputGroup><InputGroupInput placeholder={t('搜索请求、模型或账号')} aria-label={t('搜索请求、模型或账号')}
         value={query.search || ''} onChange={event => onSearch(event.currentTarget.value)} /><InputGroupAddon><RouteIcon name='search' size={14} /></InputGroupAddon></InputGroup>
       <div className='routing-request-filters'>
-        <RoutingSelect label={t('请求模型')} value={query.model || '__all'}
+        <RoutingSelect label={t('请求模型')} value={query.model || '__all'} searchPlaceholder={t('搜索模型')}
           options={[['__all', models.length ? t('全部模型') : t('全部模型（窗口内没有请求）')],
             ...(query.model && !models.includes(query.model) ? [[query.model, `${query.model} · ${t('窗口内无请求')}`]] as Array<[string, string]> : []),
             ...models.map(model => [model, model] as [string, string])]}

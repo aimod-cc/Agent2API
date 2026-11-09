@@ -7,6 +7,7 @@ use serde::Deserialize;
 pub struct ChatPolicy {
     pub repair_native_tools: bool,
     pub stable_conversation: bool,
+    pub respect_model_cooldown: bool,
     pub network: Option<NetworkPolicy>,
 }
 

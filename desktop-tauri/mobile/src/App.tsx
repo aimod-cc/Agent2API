@@ -16,6 +16,7 @@ import { TasksPage } from './pages/TasksPage'
 import { RequestsPage } from './pages/RequestsPage'
 import { LogsPage } from './pages/LogsPage'
 import { SettingsPage } from './pages/SettingsPage'
+import { ProviderSettingsPage } from './pages/provider-settings-page'
 import { DocsPage } from './pages/DocsPage'
 import { AgentPage } from './pages/AgentPage'
 import { ToolsPage } from './pages/ToolsPage'
@@ -26,6 +27,10 @@ import type { ScreenId } from './lib/routes'
 import { NavBar } from './components/NavBar'
 import { t } from './i18n'
 import { RequiredUpdateGate } from './components/RequiredUpdateGate'
+import { mobileBranding } from './lib/branding'
+import { serverIdentity } from './lib/servers'
+import { applyDocumentBranding, useBrandingRefresh } from '../../ui-shared/branding'
+import { usePluginStartup } from './lib/usePluginStartup'
 
 /**
  * 路由表。
@@ -53,6 +58,7 @@ const SCREENS: Record<ScreenId, ScreenDef> = {
   requests: { title: t('请求日志'), component: RequestsPage },
   logs: { title: t('运行日志'), component: LogsPage },
   settings: { title: t('设置'), component: SettingsPage },
+  'provider-settings': { title: t('提供商设置'), component: ProviderSettingsPage },
   docs: { title: t('接口文档'), component: DocsPage },
   agent: { title: t('Agent 配置'), component: AgentPage },
   tools: { title: t('MCP & Skills'), component: ToolsPage },
@@ -75,6 +81,9 @@ export function App() {
    * 这里自然放行。
    */
   const needsServer = state.packaged && !state.server
+  const branding = mobileBranding.useValue()
+  useBrandingRefresh(mobileBranding, serverIdentity(), !needsServer)
+  usePluginStartup(!needsServer && !state.authLost, serverIdentity())
 
   useEffect(() => {
     bootstrapTheme()
@@ -139,9 +148,8 @@ export function App() {
   }, [])
 
   useEffect(() => {
-    // 页面标题跟着当前页走（PWA 里影响任务切换器的显示）
-    document.title = needsServer ? `${t('服务器')} · Agent2API` : `${def.title} · Agent2API`
-  }, [def.title, needsServer])
+    applyDocumentBranding(branding, `${needsServer ? t('服务器') : def.title} · ${branding.displayName}`)
+  }, [branding, def.title, needsServer])
 
   if (needsServer) {
     return (

@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::{client::CodexClient, config, policy, projection, storage, string, CodingError, Engine};
+use super::{client::CodexClient, config, policy, projection, projects, storage, string, CodingError, Engine};
 
 pub fn validate_id(id: &str) -> Result<(), CodingError> {
     if id.is_empty() || id.len() > 200 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)) || id == "." || id == ".." {
@@ -46,7 +46,7 @@ pub async fn observe_loaded(client: &CodexClient) -> Result<(), CodingError> {
             Err(error) if error.code == "codex_rejected" => continue,
             Err(error) => return Err(error),
         };
-        if client.config.directory(string(&thread, "cwd")).is_err() || thread.get("parentThreadId").is_some_and(|p| !p.is_null()) { continue; }
+        if client.directory(string(&thread, "cwd")).is_err() || thread.get("parentThreadId").is_some_and(|p| !p.is_null()) { continue; }
         let data = match client.rpc("thread/resume", json!({ "threadId": id, "excludeTurns": false })).await {
             Ok(data) => data,
             Err(error) if error.code == "codex_rejected" => continue,
@@ -59,8 +59,9 @@ pub async fn observe_loaded(client: &CodexClient) -> Result<(), CodingError> {
 
 pub async fn detail(client: &CodexClient, id: &str) -> Result<Value, CodingError> {
     let thread = read_thread(client, id, false).await?;
-    client.config.directory(string(&thread, "cwd"))?;
-    let mut snapshot = client.state.snapshot(&thread, &client.config, client.running.load(Ordering::Acquire));
+    client.directory(string(&thread, "cwd"))?;
+    super::metadata::refresh(client, &thread).await;
+    let mut snapshot = client.state.snapshot(&thread, &client.projects()?, client.running.load(Ordering::Acquire));
     snapshot["connected"] = json!(client.connected.load(Ordering::Acquire));
     Ok(snapshot)
 }
@@ -69,11 +70,12 @@ pub async fn list(client: &CodexClient) -> Result<Value, CodingError> {
     let mut threads = Vec::new();
     let mut cursor = Value::Null;
     let mut limited = false;
+    let allowed = client.projects()?;
     for _ in 0..5 {
         let data = client.rpc("thread/list", json!({ "limit": 100, "cursor": cursor, "sortKey": "updated_at",
             "modelProviders": [], "sourceKinds": ["cli", "vscode", "exec", "appServer", "unknown"] })).await?;
         let rows = data.get("data").and_then(Value::as_array).ok_or_else(|| CodingError::new(502, "Codex 会话列表响应不完整"))?;
-        threads.extend(rows.iter().filter(|t| t.get("parentThreadId").is_none_or(Value::is_null) && client.config.directory(string(t, "cwd")).is_ok()).cloned());
+        threads.extend(rows.iter().filter(|t| t.get("parentThreadId").is_none_or(Value::is_null) && projects::directory(&allowed, string(t, "cwd")).is_ok()).cloned());
         cursor = data.get("nextCursor").cloned().unwrap_or(Value::Null);
         limited = !cursor.is_null();
         if !limited { break; }
@@ -81,34 +83,19 @@ pub async fn list(client: &CodexClient) -> Result<Value, CodingError> {
     {
         let state = client.state.inner.lock().unwrap_or_else(|e| e.into_inner());
         for (id, live) in &state.threads {
-            if live.attached && !threads.iter().any(|t| string(t, "id") == id) && client.config.directory(string(&live.thread, "cwd")).is_ok() { threads.push(live.thread.clone()); }
+            if live.attached && !threads.iter().any(|t| string(t, "id") == id) && projects::directory(&allowed, string(&live.thread, "cwd")).is_ok() { threads.push(live.thread.clone()); }
         }
     }
     threads.sort_by_key(|t| std::cmp::Reverse(t.get("updatedAt").and_then(Value::as_i64).unwrap_or(0)));
-    let sessions: Vec<Value> = threads.iter().map(|thread| client.state.snapshot(thread, &client.config, client.running.load(Ordering::Acquire))).collect();
-    Ok(json!({ "sessions": sessions, "limited": limited }))
+    let directories = threads.iter().map(|thread| string(thread, "cwd").to_string()).collect::<Vec<_>>();
+    let projects = projects::include_history(&client.db, &client.scope, &directories)?;
+    let sessions: Vec<Value> = threads.iter().map(|thread| client.state.snapshot(thread, &projects, client.running.load(Ordering::Acquire))).collect();
+    Ok(json!({ "sessions": sessions, "projects": projects::public(&projects), "limited": limited }))
 }
 
-pub fn machine(client: &CodexClient) -> Value {
+pub fn machine(_client: &CodexClient) -> Value {
     json!({ "id": "local", "name": std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "Agent2API".into()),
-        "platform": std::env::consts::OS, "workspaceRoots": client.config.workspace_roots, "local": true })
-}
-
-pub fn directories(client: &CodexClient, raw: &str) -> Result<Value, CodingError> {
-    let path = client.config.directory(raw)?;
-    let mut entries = Vec::new();
-    for entry in std::fs::read_dir(&path).map_err(|_| CodingError::new(403, "无法读取项目目录"))? {
-        let Ok(entry) = entry else { continue; };
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') { continue; }
-        if client.config.directory(&config::display_path(&entry.path())).is_ok() {
-            entries.push(json!({ "name": name, "type": "directory", "isGitRepo": entry.path().join(".git").exists() }));
-        }
-        if entries.len() >= 500 { break; }
-    }
-    entries.sort_by(|a, b| string(a, "name").cmp(string(b, "name")));
-    let parent = path.parent().and_then(|p| client.config.directory(&config::display_path(p)).ok()).map(|p| config::display_path(&p));
-    Ok(json!({ "entries": entries, "path": config::display_path(&path), "parent": parent }))
+        "platform": std::env::consts::OS, "local": true })
 }
 
 #[derive(Deserialize)]
@@ -116,7 +103,7 @@ pub fn directories(client: &CodexClient, raw: &str) -> Result<Value, CodingError
 pub struct SpawnInput {
     pub machine_id: String,
     pub engine: Engine,
-    pub directory: String,
+    pub project_id: String,
     #[serde(default)] pub model: String,
     #[serde(default = "default_mode")] pub permission_mode: String,
 }
@@ -126,7 +113,9 @@ pub async fn spawn(client: &CodexClient, input: SpawnInput) -> Result<Value, Cod
     let _operation = client.operations.lock().await;
     client.check_current().await?;
     if input.machine_id != "local" || input.engine != Engine::Codex { return Err(CodingError::new(400, "这里只能运行本机 Codex")); }
-    let directory = policy::directory(client, &input.directory)?;
+    let projects = client.projects()?;
+    let project = projects.iter().find(|project| project.id == input.project_id).ok_or_else(|| CodingError::new(404, "项目不存在，请先新建或选择一个项目"))?;
+    let directory = policy::directory(client, &project.directory)?;
     if !["default", "read-only"].contains(&input.permission_mode.as_str()) { return Err(CodingError::new(400, "不支持的权限模式")); }
     if input.model.len() > 200 || input.model.chars().any(char::is_control) { return Err(CodingError::new(400, "模型名称无效")); }
     let sandbox = policy::initial_sandbox(&directory, &input.permission_mode);
@@ -155,13 +144,20 @@ async fn resume(client: &CodexClient, id: &str, thread: &Value) -> Result<(), Co
         return Ok(());
     }
     let sandbox = policy::saved_sandbox(client, id)?;
+    super::metadata::refresh(client, thread).await;
+    let settings = client.state.inner.lock().unwrap_or_else(|e| e.into_inner()).threads.get(id)
+        .map(|s| s.settings.clone()).unwrap_or_else(|| json!({}));
     let mut params = json!({ "threadId": id, "cwd": directory, "approvalPolicy": "on-request", "approvalsReviewer": "user",
-        "sandbox": if string(&sandbox, "type") == "readOnly" { "read-only" } else { "workspace-write" } });
+        "sandbox": if string(&sandbox, "type") == "readOnly" { "read-only" } else { "workspace-write" }, "config": {} });
     if string(&sandbox, "type") == "workspaceWrite" {
         params["config"] = json!({ "sandbox_workspace_write.writable_roots": sandbox.get("writableRoots"),
             "sandbox_workspace_write.network_access": false, "sandbox_workspace_write.exclude_tmpdir_env_var": true,
             "sandbox_workspace_write.exclude_slash_tmp": true });
     }
+    for key in ["model", "modelProvider", "serviceTier"] {
+        if let Some(value) = settings.get(key) { params[key] = value.clone(); }
+    }
+    if let Some(effort) = settings.get("effort").filter(|v| v.is_string()) { params["config"]["model_reasoning_effort"] = effort.clone(); }
     let data = client.rpc("thread/resume", params).await?;
     let thread = data.get("thread").ok_or_else(|| CodingError::new(502, "Codex 恢复响应不完整"))?;
     projection::remember(client, thread, Some(&data), Some(true));
@@ -190,7 +186,7 @@ pub async fn action(client: &CodexClient, id: &str, action: &str) -> Result<Valu
     let _operation = client.operations.lock().await;
     client.check_current().await?;
     let thread = read_thread(client, id, false).await?;
-    client.config.directory(string(&thread, "cwd"))?;
+    client.directory(string(&thread, "cwd"))?;
     match action {
         "resume" => resume(client, id, &thread).await?,
         "abort" | "archive" => {
@@ -287,8 +283,11 @@ pub async fn messages(client: &CodexClient, id: &str) -> Result<Value, CodingErr
             state.threads.get(id).filter(|s| s.attached).map(|s| s.thread.clone()).ok_or(error)?
         }
     };
-    client.config.directory(string(&thread, "cwd"))?;
-    Ok(projection::history(client, &thread, revision))
+    client.directory(string(&thread, "cwd"))?;
+    let mut history = projection::history(client, &thread, revision);
+    storage::reconcile(&client.db, &client.scope, id, &mut history)?;
+    history["submissions"] = json!(storage::submissions(&client.db, &client.scope, id)?);
+    Ok(history)
 }
 
 pub async fn status(client: &CodexClient) -> Result<Value, CodingError> {

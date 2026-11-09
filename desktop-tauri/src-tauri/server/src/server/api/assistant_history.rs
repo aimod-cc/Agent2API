@@ -79,7 +79,7 @@ async fn summarize(state: &ServerState, id: &str, access: ModelAccess) -> Result
     guard.complete();
     let body = match outcome {
         Ok(ForwardOutcome::Completion { body }) => { pipeline::record_entry(&context, None); body }
-        Ok(ForwardOutcome::Stream { .. }) => {
+        Ok(ForwardOutcome::Stream { .. } | ForwardOutcome::Native(_)) => {
             context.status = 502;
             pipeline::record_entry(&context, Some("标题总结返回了意外的流式响应".into()));
             return Err(errors::GatewayError::with_status(502, "标题总结响应无效"));

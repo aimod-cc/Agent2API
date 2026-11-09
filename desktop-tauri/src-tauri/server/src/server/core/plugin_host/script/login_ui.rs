@@ -12,6 +12,8 @@ struct LoginUi {
     callback_input: String,
     cookie_capture: Option<String>,
     #[serde(default)]
+    capture_callback: Option<bool>,
+    #[serde(default)]
     loopback_targets: Vec<String>,
 }
 
@@ -61,5 +63,6 @@ pub(crate) fn decorate(provider: &str, flow: &str, response: &mut Value) {
     response["manualCallback"] = json!(entry.ui.manual_callback);
     response["callbackInput"] = json!(entry.ui.callback_input);
     response["cookieCapture"] = json!(entry.ui.cookie_capture);
+    if let Some(capture) = entry.ui.capture_callback { response["captureCallback"] = json!(capture); }
     response["loopbackTargets"] = json!(entry.ui.loopback_targets);
 }

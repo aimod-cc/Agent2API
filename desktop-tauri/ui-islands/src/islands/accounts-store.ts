@@ -1,4 +1,4 @@
-
+import type { UsageQueryTask } from '../../../ui-shared/usage-query-task'
 
 import {
   shared, type AccountRecord, type AccountsSnapshot, type AccountSorting,
@@ -33,6 +33,8 @@ export type AccountsStore = {
   usageBusy: boolean
   /** 余额查询在途的账号（行上那颗「余额」按钮的去重闸） */
   usageInflight: ReadonlySet<string>
+  usageTasks: ReadonlyMap<string, UsageQueryTask>
+  usageStarting: ReadonlySet<string>
   /**
    * 组头读数（可用合计 / 可用最低）是否只统计**当前筛选 / 搜索后可见的行**。
    * 默认关闭（= 按整组统计，见 accounts-panels 的 groupBalanceOf）；开关在
@@ -79,11 +81,12 @@ function loadGroupSort(): Record<string, GroupSortRule[]> {
         const entry = item as Record<string, unknown>
         if (entry.key === 'credit') {
           rules.push({ key: 'credit', on: entry.on !== false, dir: entry.dir === 'late' ? 'late' : 'soon' })
+        } else if (entry.key === 'balance') {
+          rules.push({ key: 'balance', on: entry.on !== false, dir: entry.dir === 'low' ? 'low' : 'high' })
         } else if (entry.key === 'added') {
           rules.push({ key: 'added', on: entry.on !== false, dir: entry.dir === 'old' ? 'old' : 'new' })
         }
       }
-      // 两条规则都没了的记录不入表：那是「回到默认」而不是「一条规则都不参与」
       if (rules.length) out[provider] = rules
     }
     return out
@@ -164,6 +167,8 @@ let store: AccountsStore = {
   namesHidden: loadNamesHidden(),
   usageBusy: false,
   usageInflight: new Set<string>(),
+  usageTasks: new Map(),
+  usageStarting: new Set(),
   groupTotalFiltered: loadGroupTotalFiltered(),
   groupSort: loadGroupSort(),
   sorting: null,
@@ -217,12 +222,15 @@ export function hiddenAccounts(): HiddenAccountsSummary {
   for (const item of Array.isArray(hidden?.providers) ? hidden.providers : []) {
     if (!item || typeof item.id !== 'string' || !item.id) continue
     const reason = item.reason === 'not_installed' || item.reason === 'pack_disabled'
-      || item.reason === 'provider_disabled' ? item.reason : 'not_loaded'
+      || item.reason === 'provider_disabled' || item.reason === 'loading' || item.reason === 'load_failed'
+      || item.reason === 'load_timeout' ? item.reason : 'not_loaded'
     details.set(item.id, {
       id: item.id,
       label: typeof item.label === 'string' && item.label ? item.label : item.id,
       count: Number(item.count) || 0,
       reason,
+      packId: item.packId,
+      startup: item.startup,
     })
   }
   const providers = Object.entries(byProvider).map(([id, count]): HiddenAccountProvider => {
@@ -232,6 +240,8 @@ export function hiddenAccounts(): HiddenAccountsSummary {
       count,
       label: detail?.label || shared().wbProviders?.labelOf?.(id) || id,
       reason: detail?.reason || 'not_loaded',
+      packId: detail?.packId,
+      startup: detail?.startup,
     }
   }).sort((a, b) => b.count - a.count)
   const total = Number(hidden?.total)

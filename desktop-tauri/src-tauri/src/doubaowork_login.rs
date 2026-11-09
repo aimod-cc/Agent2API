@@ -17,16 +17,11 @@ pub fn allowed(url: &url::Url) -> bool {
         })
 }
 
-pub async fn start(app: &AppHandle, mode: &str) -> Result<Value, String> {
+pub async fn start(app: &AppHandle, mode: &str, proxy: Option<Value>) -> Result<Value, String> {
     if mode == "external" {
         return Err("豆包工作网页登录只支持内嵌窗口；系统浏览器登录后请粘贴完整 Cookie。".into());
     }
-    let started = crate::gateway::call(
-        "POST",
-        "/api/session/login/start",
-        Some(&json!({"provider":"doubaowork"})),
-    )
-    .await?;
+    let started = crate::login::start_provider_login("doubaowork", proxy).await?;
     let flow = started["state"]
         .as_str()
         .ok_or("后端未返回登录状态")?

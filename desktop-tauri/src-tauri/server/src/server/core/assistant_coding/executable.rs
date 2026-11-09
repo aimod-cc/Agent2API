@@ -74,7 +74,7 @@ impl Executable {
     pub fn command(&self, config: &CodingConfig) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(&self.program);
         command.args(&self.args).env("CODEX_HOME", config.home()).kill_on_drop(true);
-        if let Some(directory) = config.workspace_roots.first() { command.current_dir(directory); }
+        command.current_dir(config::user_home());
         #[cfg(windows)]
         command.creation_flags(0x0800_0000);
         #[cfg(unix)]

@@ -39,6 +39,7 @@ pub struct PackSummary {
     /// 包声明的 provider（id / 展示名 / 是否启用）。
     pub providers: Vec<PackProviderSummary>,
     pub host: Option<serde_json::Value>,
+    pub startup: Option<super::startup::LoadStatus>,
     pub provider_category: super::ProviderCategory,
     /// 入口二进制是否存在于磁盘（false = 包被外部删了 / 移动了）。
     pub entry_present: bool,
@@ -94,6 +95,8 @@ pub struct PackProviderSummary {
     pub enabled: bool,
     /// 这一家此刻是否真的装进了运行时注册表（宿主在跑且握手成功）。
     pub loaded: bool,
+    /// 接管优先级来自安装记录，接管包停用或加载失败时仍保留。
+    pub overridden_by: Option<String>,
 }
 
 /// 图标文件体积上限（2MB）。
@@ -226,12 +229,13 @@ fn ui_entry_ok(entry: &str) -> bool {
 /// 显示一行「清单损坏，请重新安装」。整表读失败才返回空 —— 那是「没装过」。
 pub fn list_packs() -> Vec<PackSummary> {
     let registry = PackRegistry::load();
+    let owners = super::ownership::owners(&registry);
     registry
         .packs
         .iter()
         .map(|pack| {
             let dir = plugins_dir().join(&pack.id).join(&pack.version);
-            let compatibility_error = super::compatibility::version_error(&pack.id, &pack.version);
+            let compatibility_error = super::compatibility::installed_error(pack);
             let update_required = compatibility_error.is_some();
             let manifest = read_manifest(&dir).ok();
             let name = manifest
@@ -254,10 +258,12 @@ pub fn list_packs() -> Vec<PackSummary> {
                 .map(|item| {
                     let id = item.id.0.clone();
                     let enabled = pack.providers.get(&id).copied().unwrap_or(true);
+                    let overridden_by = super::ownership::overridden_by(&owners, &pack.id, &id);
                     PackProviderSummary {
-                        loaded: pack.enabled && enabled && super::serves_provider(&id)
-                            && super::provider_pack(&id).as_deref() == Some(pack.id.as_str()),
+                        loaded: pack.enabled && enabled && overridden_by.is_none()
+                            && super::startup::provider(&id).is_some_and(|state| state.available && state.pack_id == pack.id),
                         enabled,
+                        overridden_by,
                         label: item.label,
                         id,
                     }
@@ -268,7 +274,7 @@ pub fn list_packs() -> Vec<PackSummary> {
                 name,
                 description,
                 version: pack.version.clone(),
-                required_version: super::compatibility::minimum_version(&pack.id).map(str::to_string),
+                required_version: None,
                 update_required,
                 compatibility_error,
                 enabled: pack.enabled,
@@ -278,11 +284,12 @@ pub fn list_packs() -> Vec<PackSummary> {
                 host: super::host_for_pack(&pack.id).map(|host| {
                     let status = host.status();
                     serde_json::json!({
-                        "running": status.running, "providers": status.providers,
+                        "running": status.running, "ready": status.ready, "providers": status.providers,
                         "crashes": status.crashes, "disabled": status.disabled,
                         "lastError": status.last_error,
                     })
                 }),
+                startup: super::startup::status(&pack.id),
                 provider_category: super::ownership::category(&dir),
                 entry_present: dir.join(&pack.entry).exists(),
                 protocol,
@@ -319,7 +326,7 @@ pub fn resolve_ui_file(pack_id: &str, rest: &str) -> Option<PathBuf> {
         .packs
         .iter()
         .find(|item| item.id == pack_id && item.enabled)?;
-    if super::compatibility::version_error(&pack.id, &pack.version).is_some() {
+    if super::compatibility::installed_error(pack).is_some() {
         return None;
     }
     let root = plugins_dir().join(&pack.id).join(&pack.version).join("ui");

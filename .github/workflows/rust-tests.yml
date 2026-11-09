@@ -1,0 +1,120 @@
+name: rust-tests
+
+on:
+  push:
+    branches: [main, beta]
+    paths:
+      - 'desktop-tauri/src-tauri/**'
+      - 'scripts/cargo-test.mjs'
+      - '.github/workflows/rust-tests.yml'
+      - 'package.json'
+  pull_request:
+    branches: [main, beta]
+    paths:
+      - 'desktop-tauri/src-tauri/**'
+      - 'scripts/cargo-test.mjs'
+      - '.github/workflows/rust-tests.yml'
+      - 'package.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-tests-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  server:
+    name: 服务端与插件联调 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-tauri/src-tauri -> ../../target
+          cache-on-failure: true
+      - name: 普通测试
+        run: node scripts/cargo-test.mjs
+      - name: 读取锁定的插件协议版本
+        id: plugin
+        shell: python
+        run: |
+          import os, tomllib
+          with open('desktop-tauri/src-tauri/Cargo.lock', 'rb') as stream:
+              lock = tomllib.load(stream)
+          package = next(p for p in lock['package'] if p['name'] == 'agent2api-provider-protocol')
+          revision = package['source'].rsplit('#', 1)[1]
+          if len(revision) != 40 or any(c not in '0123456789abcdef' for c in revision):
+              raise ValueError('插件协议未锁定到完整提交')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'revision={revision}\n')
+      - uses: actions/checkout@v7
+        with:
+          repository: ProvidersPlugin/Agent2Providers
+          ref: ${{ steps.plugin.outputs.revision }}
+          path: .test-provider
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .test-provider -> target
+          key: demo-plugin
+      - name: 构建仅含 demo 的测试插件
+        working-directory: .test-provider
+        run: cargo build --locked -p agent2api-providers --bin agent2api-providers --no-default-features --features demo
+      - name: 插件联调
+        shell: bash
+        run: |
+          suffix=''
+          if [[ "$RUNNER_OS" == 'Windows' ]]; then suffix='.exe'; fi
+          export AGENT2API_TEST_PLUGIN_EXE="$GITHUB_WORKSPACE/.test-provider/target/debug/agent2api-providers$suffix"
+          node scripts/cargo-test.mjs --plugins
+
+  coverage:
+    name: 服务端覆盖率报告
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/beta')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.9.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-tauri/src-tauri -> ../../target
+          key: coverage
+      - name: 生成覆盖率
+        run: |
+          node -e "require('node:fs').mkdirSync('target/coverage', { recursive: true })"
+          node scripts/cargo-test.mjs --coverage --lcov --output-path ../../target/coverage/lcov.info
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rust-coverage
+          path: target/coverage/lcov.info
+          if-no-files-found: error
+          retention-days: 14

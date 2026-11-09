@@ -14,12 +14,17 @@ use std::path::PathBuf;
 
 /// 配置目录：默认 `{用户主目录}/.agent2api`，可被环境变量整体覆盖。
 pub fn config_dir() -> PathBuf {
+    #[cfg(test)]
+    return crate::test_support::config_dir();
+
+    #[cfg(not(test))]
     env_path("AGENT2API_PROXY_HOME")
         .or_else(|| env_path("WORKBUDDY_PROXY_HOME")) // 旧名兼容读
         .unwrap_or_else(default_config_dir)
 }
 
 /// 读环境变量里的目录覆盖：未设置 / 全空白一律当未设置
+#[cfg(not(test))]
 fn env_path(name: &str) -> Option<PathBuf> {
     let custom = std::env::var(name).ok()?;
     let trimmed = custom.trim();
@@ -31,6 +36,7 @@ fn env_path(name: &str) -> Option<PathBuf> {
 }
 
 /// 默认配置目录：`{用户主目录}/.agent2api`
+#[cfg(not(test))]
 fn default_config_dir() -> PathBuf {
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))

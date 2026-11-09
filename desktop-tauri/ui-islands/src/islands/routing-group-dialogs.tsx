@@ -29,8 +29,8 @@ export function RoutingGroupDialog({ group, reserved, onSave, onClose }: {
   </DialogContent></Dialog>
 }
 
-export function RoutingMemberDialog({ choices, members, accounts, onAdd, onClose }: {
-  choices: RouteModelChoice[]; members: RouteMember[]; accounts: AccountRecord[]; onAdd(members: RouteMember[]): void; onClose(): void
+export function RoutingMemberDialog({ choices, members, accounts, lastUsed, onAdd, onClose }: {
+  choices: RouteModelChoice[]; members: RouteMember[]; accounts: AccountRecord[]; lastUsed?: Record<string, number>; onAdd(members: RouteMember[]): void; onClose(): void
 }) {
   const [selected, setSelected] = React.useState<string[]>([])
   const options = choices.filter(choice => !members.some(member => member.provider === choice.provider && member.model.toLowerCase() === choice.model.toLowerCase()))
@@ -45,7 +45,7 @@ export function RoutingMemberDialog({ choices, members, accounts, onAdd, onClose
   return <Dialog open onOpenChange={open => { if (!open) onClose() }}><DialogContent className='routing-create-dialog'>
     <DialogHeader><DialogTitle>{t('添加参与模型')}</DialogTitle></DialogHeader><DialogBody>
       <p className='routing-config-note'>{t('可以跨提供商、跨模型多选。同一提供商也可以加入不同模型。')}</p>
-      <RoutingModelPicker choices={options} selected={selected} onChange={setSelected} limit={limit} />
+      <RoutingModelPicker choices={options} accounts={accounts} lastUsed={lastUsed} selected={selected} onChange={setSelected} limit={limit} />
       <p className='routing-config-note'>{t('仅列出真实目录中的对话模型，不自动更改模型映射。')}</p>
     </DialogBody><DialogFooter><Button variant='outline' onClick={onClose}>{t('取消')}</Button><Button disabled={!picked.length || picked.length > limit} onClick={add}>{t('添加')} · {picked.length}</Button></DialogFooter>
   </DialogContent></Dialog>

@@ -35,6 +35,17 @@ function object(value: unknown): UsageObject | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as UsageObject : null
 }
 
+export function usageEmptyStateOf(value: unknown, t: Translate): { text: string; detail: string } | null {
+  const usage = object(value)
+  if (usage?.empty !== true || usage.error) return null
+  const reason = usage.emptyText === '暂无可用积分信息' ? t('暂无可用积分信息')
+    : typeof usage.emptyText === 'string' ? t(usage.emptyText.trim()) : ''
+  return {
+    text: t('暂无额度信息'),
+    detail: [reason, t('查询已成功，但上游未提供额度数据，不代表余额为零。')].filter(Boolean).join(' · '),
+  }
+}
+
 export function usageNumberOrNull(value: unknown): number | null {
   if (typeof value !== 'number' && typeof value !== 'string') return null
   if (typeof value === 'string' && !value.trim()) return null

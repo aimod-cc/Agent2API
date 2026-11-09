@@ -75,6 +75,7 @@ fn workspace_json(state: &ServerState, model: Option<String>) -> Value {
         Some((id.to_string(), json!({ "model": keys.for_account(account), "resetAt": reset_at,
             "limitedModels": account.get("rateLimits").and_then(Value::as_object).map(|limits| limits.values().filter(|limit| limit.get("resetAt").and_then(Value::as_i64).unwrap_or(0) > now).count()).unwrap_or(0) })))
     }).collect();
+    let model_last_used = state.request_stats().model_last_used();
     let mut metrics = state.request_stats().routing_metrics(model.as_deref());
     metrics["accountConnections"] = json!(state.upstream().connections().snapshot().into_iter().collect::<HashMap<_, _>>());
     json!({
@@ -85,6 +86,7 @@ fn workspace_json(state: &ServerState, model: Option<String>) -> Value {
         "legacyGlobalParticipation": legacy_global_participation,
         "configuredModels": profiles.models.keys().collect::<Vec<_>>(),
         "models": models,
+        "modelLastUsed": model_last_used.as_ref(),
         "profile": effective,
         "inheritedProfile": inherited_profile,
         "providers": provider_rows,
@@ -107,6 +109,13 @@ pub async fn put_profile(State(state): State<ServerState>, body: Bytes) -> Respo
         Ok(value) => value,
         Err(error) => return errors::management_error(400, error.message),
     };
+    match tokio::task::spawn_blocking(move || put_profile_blocking(state, payload)).await {
+        Ok(response) => response,
+        Err(error) => errors::management_error(500, format!("保存路由配置失败: {error}")),
+    }
+}
+
+fn put_profile_blocking(state: ServerState, payload: Value) -> Response {
     let Some(object) = payload.as_object() else { return errors::management_error(400, "请求体必须是 JSON 对象") };
     if let Some(value) = object.get("migrateGlobalAccounts") {
         if object.len() != 1 { return errors::management_error(400, "转换全局账号状态不能与其他配置修改一起提交"); }

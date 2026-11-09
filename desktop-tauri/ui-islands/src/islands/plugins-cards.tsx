@@ -4,6 +4,8 @@ import type { HostState, PackSummary, PluginOperation, PluginUpdate, StorePlugin
 import { t } from '../i18n'
 import { GithubFailureText } from '../../../ui-shared/github-failure'
 import { PluginGetButton, PluginSettingsButton, PluginStoreCard } from '../../../ui-shared/plugins-store'
+import { requestPluginDiagnostics, usePluginLoadStatus } from '../../../ui-shared/plugin-startup-view'
+import { pluginFailed } from '../../../ui-shared/plugin-startup'
 
 export function OperationProgress({ operation }: { operation: PluginOperation }) {
   const stage = operation.stage === 'downloading' ? t('正在下载…')
@@ -36,10 +38,8 @@ export function PluginUpdateDetails({ pack, update, operation, disabled, onUpdat
   const required = pack.updateRequired === true
   return <div className='flex flex-col gap-3'>
     {required ? <div className='text-[12px] leading-relaxed'>
-      <p className='m-0 font-medium text-destructive'>{t('当前网关要求插件版本不低于 v{version}，补齐前暂不加载。', { version: pack.requiredVersion || '' })}</p>
-      <p className='m-0 mt-1 text-subtle'>{pack.signed
-        ? t('正在自动补齐官方插件，不受日常更新开关和通道限制。')
-        : t('未签名包不会自动覆盖；点击「补齐插件」将安装官方签名包。')}</p>
+      <p className='m-0 font-medium text-destructive'>{pack.compatibilityError || t('插件与当前网关的公共接口不兼容，暂未加载。')}</p>
+      <p className='m-0 mt-1 text-subtle'>{t('请根据不兼容原因更新插件或网关；不会要求两者版本号一致。')}</p>
       {update?.retryAt && update.retryAt > Date.now() ? <p className='m-0 mt-1 text-subtle'>
         {t('下次自动重试：{time}', { time: formatTime(update.retryAt) })}
       </p> : null}
@@ -51,9 +51,9 @@ export function PluginUpdateDetails({ pack, update, operation, disabled, onUpdat
       </span>
       <div className='flex flex-wrap items-center gap-2'>
         {update?.latest ? <Button variant='outline' size='sm' onClick={onNotes}>{t('查看更新日志')}</Button> : null}
-        {required || update?.available ? <Button size='sm'
-          disabled={disabled || operation?.active || update?.repairing || (!required && update?.error)} onClick={onUpdate}>
-          {required ? update?.repairing ? t('正在补齐插件…') : t('补齐插件') : t('更新到 v{version}', { version: update?.latest || '' })}
+        {update?.available ? <Button size='sm'
+          disabled={disabled || operation?.active || update.error} onClick={onUpdate}>
+          {t('更新到 v{version}', { version: update.latest || '' })}
         </Button> : null}
       </div>
     </div>
@@ -73,11 +73,11 @@ export function StorePluginCard({ item, target, operation, disabled, onInstall, 
   onInstall: () => void
   onNotes: () => void
 }) {
-  const platform = item.platforms.find(platform => platform.target === target)
+  const platform = item.platforms.find(platform => platform.target === target || platform.target === 'wasm32-unknown-unknown')
   const installable = Boolean(item.version && platform && !item.error)
   return <PluginStoreCard t={t} name={pluginName(item.id, item.name)} description={pluginDescription(item.id, item.description)}
     version={item.version} icon={item.icon} artwork={item.id === 'agent2api-web-providers' ? 'web' : 'providers'}
-    official={item.official} status='missing'
+    status='missing'
     badges={<>{item.prerelease ? <Badge variant='warning' shape='tag'>{t('beta 版')}</Badge> : null}
       {!item.version ? <Badge variant='outline' shape='tag'>{t('暂未发布')}</Badge> : null}</>}
     actions={<PluginGetButton t={t} disabled={disabled || operation?.active === true || !installable} onClick={onInstall} />}
@@ -100,15 +100,17 @@ export function InstalledPluginCard({ pack, store, host, update, operation, disa
   onEnabled: (enabled: boolean) => void
   onSettings: () => void
 }) {
+  const startup = usePluginLoadStatus(pack.id, pack.startup)
   const packHost = pack.host === undefined ? host : pack.host
   const running = pack.enabled && packHost?.running === true && pack.entryPresent && !pack.updateRequired
   const name = pluginName(pack.id, store?.name || pack.name)
   return <PluginStoreCard t={t} name={name} description={pluginDescription(pack.id, store?.description || pack.description)}
     version={pack.version} icon={pack.icon || store?.icon} artwork={pack.id === 'agent2api-web-providers' ? 'web' : 'providers'}
-    official={store?.official} status={!pack.enabled ? 'disabled' : running ? 'running' : 'unavailable'}
-    providerCount={pack.providers.length} enabledCount={pack.providers.filter(provider => provider.enabled).length}
+    status={!pack.enabled ? 'disabled' : running ? 'running' : 'unavailable'} startup={startup}
+    footerAction={<Button variant='link' size='xs' onClick={() => requestPluginDiagnostics(pack.id)}>{t('加载诊断')}</Button>}
+    providerCount={pack.providers.length} enabledCount={pack.providers.filter(provider => provider.enabled && !provider.overriddenBy).length}
     badges={<>
-      {pack.updateRequired ? <Badge variant='destructive' shape='tag'>{t('需要补齐插件')}</Badge>
+      {pack.updateRequired ? <Badge variant='destructive' shape='tag'>{t('接口不兼容')}</Badge>
         : update?.available ? <Badge variant='brand' shape='tag'>{t('有更新')}{update.latest ? ` v${update.latest}` : ''}</Badge> : null}
       {pack.version.includes('-') ? <Badge variant='warning' shape='tag'>{t('beta 版')}</Badge> : null}
       {!pack.entryPresent ? <Badge variant='destructive' shape='tag'>{t('文件缺失')}</Badge> : null}
@@ -119,12 +121,12 @@ export function InstalledPluginCard({ pack, store, host, update, operation, disa
     </>}
     feedback={<>
       {pack.updateRequired ? <p className='m-0 text-[12px] leading-relaxed text-destructive'>
-        {t('当前网关要求插件版本不低于 v{version}，补齐前暂不加载。', { version: pack.requiredVersion || '' })}
-        <Button variant='link' size='xs' onClick={onSettings}>{t('补齐插件')}</Button>
+        {pack.compatibilityError || t('插件与当前网关的公共接口不兼容，暂未加载。')}
+        <Button variant='link' size='xs' onClick={onSettings}>{t('查看详情')}</Button>
       </p> : null}
       {update?.error && !pack.updateRequired ? <div className='text-[12px] text-destructive'><GithubFailureText value={update} t={t} /></div> : null}
       {operation?.error ? <p className='m-0 break-words text-[12px] text-destructive'>{errorMessage(operation.error)}</p> : null}
-      {packHost?.lastError ? <p className='m-0 break-words text-[12px] text-destructive'>{packHost.lastError}</p> : null}
+      {(startup ? pluginFailed(startup) && startup.error : packHost?.lastError) ? <p className='m-0 break-words text-[12px] text-destructive'>{startup?.error || packHost?.lastError}</p> : null}
       {operation?.hostError ? <p className='m-0 break-words text-[12px] text-warning'>{operation.hostError}</p> : null}
       {operation?.active ? <OperationProgress operation={operation} /> : null}
     </>} />

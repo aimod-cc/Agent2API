@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::server::db::Db;
-use super::CodingError;
+use super::{projects, CodingError};
 
 pub const KV_KEY: &str = "assistantCodexLocal";
 
@@ -27,18 +27,16 @@ pub struct ConfigInput {
     pub executable: String,
     #[serde(default)]
     pub codex_home: String,
-    #[serde(default)]
-    pub workspace_roots: Vec<String>,
 }
 
 impl CodingConfig {
     pub fn public(&self) -> Value {
         json!({ "enabled": self.enabled, "executable": self.executable, "codexHome": self.codex_home,
-            "workspaceRoots": self.workspace_roots, "revision": self.revision(), "runtime": "local-codex" })
+            "revision": self.revision(), "runtime": "local-codex" })
     }
 
     pub fn revision(&self) -> String {
-        format!("{:x}", Sha256::digest(serde_json::to_vec(self).unwrap_or_default()))
+        format!("{:x}", Sha256::digest(serde_json::to_vec(&json!({ "enabled": self.enabled, "executable": self.executable, "codexHome": self.codex_home })).unwrap_or_default()))
     }
 
     pub fn home(&self) -> PathBuf {
@@ -53,14 +51,6 @@ impl CodingConfig {
         let text = canonical.to_string_lossy();
         let text = if cfg!(windows) { text.to_lowercase() } else { text.into_owned() };
         format!("{:x}", Sha256::digest(text.as_bytes()))
-    }
-
-    pub fn directory(&self, raw: &str) -> Result<PathBuf, CodingError> {
-        let path = canonical_directory(raw)?;
-        if !self.workspace_roots.iter().any(|root| std::fs::canonicalize(root).is_ok_and(|root| path.starts_with(root))) {
-            return Err(CodingError::new(403, "项目目录不在允许范围内，请先在本机 Codex 设置里添加目录"));
-        }
-        Ok(path)
     }
 }
 
@@ -96,23 +86,26 @@ pub fn display_path(path: &Path) -> String {
 }
 
 pub fn load(db: &Db) -> Result<CodingConfig, CodingError> {
-    let text: Option<String> = db.with(|conn| conn.query_row("SELECT value FROM kv WHERE key=?1", [KV_KEY], |row| row.get(0)).optional())
-        .ok_or_else(|| CodingError::new(500, "数据库不可用"))?.map_err(|_| CodingError::new(500, "读取本机 Codex 设置失败"))?;
-    match text {
-        Some(text) => serde_json::from_str(&text).map_err(|_| CodingError::new(500, "本机 Codex 设置已损坏，未覆盖原数据")),
-        None => Ok(CodingConfig::default()),
-    }
+    db.with_mut(|conn| {
+        let tx = conn.transaction().map_err(|_| CodingError::new(500, "读取本机 Codex 设置失败"))?;
+        let text: Option<String> = tx.query_row("SELECT value FROM kv WHERE key=?1", [KV_KEY], |row| row.get(0)).optional()
+            .map_err(|_| CodingError::new(500, "读取本机 Codex 设置失败"))?;
+        let mut config: CodingConfig = match text {
+            Some(text) => serde_json::from_str(&text).map_err(|_| CodingError::new(500, "本机 Codex 设置已损坏，未覆盖原数据"))?,
+            None => CodingConfig::default(),
+        };
+        if !config.workspace_roots.is_empty() {
+            projects::migrate_legacy(&tx, &config)?;
+            config.workspace_roots.clear();
+            let text = serde_json::to_string(&config).map_err(|_| CodingError::new(500, "保存本机 Codex 设置失败"))?;
+            tx.execute("UPDATE kv SET value=?2 WHERE key=?1", params![KV_KEY, text]).map_err(|_| CodingError::new(500, "保存本机 Codex 设置失败"))?;
+        }
+        tx.commit().map_err(|_| CodingError::new(500, "读取本机 Codex 设置失败"))?;
+        Ok(config)
+    }).ok_or_else(|| CodingError::new(500, "数据库不可用"))?
 }
 
 pub fn prepare(input: ConfigInput) -> Result<CodingConfig, CodingError> {
-    if input.workspace_roots.len() > 32 { return Err(CodingError::new(400, "最多配置 32 个项目根目录")); }
-    let mut roots = Vec::new();
-    for raw in input.workspace_roots {
-        if raw.trim().is_empty() { continue; }
-        let path = display_path(&canonical_directory(&raw)?);
-        if !roots.contains(&path) { roots.push(path); }
-    }
-    if input.enabled && roots.is_empty() { return Err(CodingError::new(400, "启用前请至少选择一个允许使用的项目目录")); }
     let executable = if input.executable.trim().is_empty() { String::new() }
         else {
             let path = absolute_path(&input.executable)?;
@@ -121,7 +114,7 @@ pub fn prepare(input: ConfigInput) -> Result<CodingConfig, CodingError> {
         };
     let codex_home = if input.codex_home.trim().is_empty() { String::new() }
         else { display_path(&canonical_directory(&input.codex_home)?) };
-    let config = CodingConfig { enabled: input.enabled, executable, codex_home, workspace_roots: roots };
+    let config = CodingConfig { enabled: input.enabled, executable, codex_home, workspace_roots: Vec::new() };
     if config.enabled { super::executable::resolve(&config)?; }
     Ok(config)
 }

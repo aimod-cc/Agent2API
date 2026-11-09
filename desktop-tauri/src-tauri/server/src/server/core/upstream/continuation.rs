@@ -952,6 +952,9 @@ impl Continuation {
                             current = next;
                             continue;
                         }
+                        Ok(ForwardOutcome::Native(_)) => {
+                            logging::verbose("Continuation", "续写轮协议与 Chat 链路不一致，停止续写");
+                        }
                         Ok(ForwardOutcome::Completion { .. }) => {
                             logging::verbose("Continuation", "续写轮回的是非流式体，停止续写");
                         }

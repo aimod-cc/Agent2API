@@ -47,6 +47,7 @@ pub struct GatewayError {
     pub retry_after_secs: Option<u64>,
     /// 会话错误在异步边界确定的分类；仅供内部使用，不序列化，也不替换上游业务 code。
     pub(crate) conversation_class: Option<crate::server::core::providers::adapter::UpstreamErrorClass>,
+    pub(crate) native_response: Option<(crate::server::core::protocol::native::WireProtocol, Value, axum::http::HeaderMap)>,
 }
 
 impl GatewayError {
@@ -59,6 +60,7 @@ impl GatewayError {
             code: None,
             retry_after_secs: None,
             conversation_class: None,
+            native_response: None,
         }
     }
 
@@ -71,6 +73,7 @@ impl GatewayError {
             code: None,
             retry_after_secs: None,
             conversation_class: None,
+            native_response: None,
         }
     }
 
@@ -167,8 +170,12 @@ impl GatewayError {
                         .unwrap_or(0)
                 }
                 Some(_) => 0,
-                // 旧提供商没有内部分类凭证，原有文案解析与显示口径保持不变。
-                None => parse_quota_reset_at(&self.message),
+                // 没有内部分类时仍优先使用结构化等待时间，不从文案反推。
+                None => {
+                    let now = crate::server::logging::now_ms();
+                    self.retry_after_secs.and_then(|seconds| reset_from_retry(seconds, now))
+                        .unwrap_or_else(|| parse_quota_reset_at(&self.message))
+                }
             };
             if reset_at > 0 {
                 error.insert("reset_at".to_string(), Value::from(reset_at));

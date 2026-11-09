@@ -3,22 +3,30 @@ import { Badge, Button, Dialog, DialogBody, DialogContent, DialogDescription, Di
   DialogHeader, DialogSection, DialogTitle, Input, Label, Switch } from '@ui'
 import type { ScriptPackage, ScriptRecommendation } from './plugins'
 import { PluginArtwork, type PluginTranslate } from './plugins-store'
-import { scriptPluginDescription, scriptPluginName } from './plugins-script-display'
+import { scriptPluginDescription, scriptPluginName, scriptSourceLabel } from './plugins-script-display'
+import { PluginStartupDetails, requestPluginDiagnostics, usePluginLoadStatus } from './plugin-startup-view'
+import { pluginFailed, pluginPhaseLabel } from './plugin-startup'
+import { ScriptPluginOptions } from './plugins-script-options'
+import { ScriptRepository, type PluginOpenExternal } from './plugins-script-catalog'
 
 export function ScriptPluginSettings({ pack, recommended, disabled, error, onClose, onEnabled, onProvider,
-  onCheckin, onReinstall, onRemove, t }: {
+  onReinstall, onRemove, icon, t, request, refresh, onOpenExternal }: {
   pack: ScriptPackage
+  icon?: string | null
   recommended: ScriptRecommendation[]
   disabled: boolean
   error?: string
   onClose: () => void
   onEnabled: (enabled: boolean) => void
   onProvider: (id: string, enabled: boolean) => void
-  onCheckin: (enabled: boolean) => void
   onReinstall: () => void
   onRemove: () => void
   t: PluginTranslate
+  request: (path: string, body: Record<string, unknown>) => Promise<unknown>
+  refresh: () => Promise<void>
+  onOpenExternal?: PluginOpenExternal
 }) {
+  const startup = usePluginLoadStatus(pack.id, pack.startup)
   const [search, setSearch] = React.useState('')
   const prefix = React.useId()
   const keyword = search.trim().toLocaleLowerCase()
@@ -28,21 +36,27 @@ export function ScriptPluginSettings({ pack, recommended, disabled, error, onClo
   return <Dialog open onOpenChange={open => { if (!open) onClose() }}>
     <DialogContent className='w-[min(560px,calc(100vw-48px))] text-foreground'>
       <DialogHeader className='gap-3'>
-        <PluginArtwork kind={pack.providers.some(provider => provider.id === 'minimax-code') ? 'minimax' : 'script'} />
+        <PluginArtwork src={icon} />
         <div className='min-w-0 flex-1'>
           <DialogTitle className='m-0 break-words'>{name}</DialogTitle>
-          <div className='mt-1 text-[11.5px] text-muted-foreground'>v{pack.version} · {t('社区插件')}</div>
+          <div className='mt-1 text-[11.5px] text-muted-foreground'>v{pack.version} · {scriptSourceLabel(pack, t)}</div>
         </div>
       </DialogHeader>
       <DialogBody className='min-h-0 gap-4'>
         <DialogDescription className='text-[12.5px] leading-relaxed text-subtle'>
           {scriptPluginDescription(pack, recommended, t)}
         </DialogDescription>
+        <ScriptRepository item={pack} onOpenExternal={onOpenExternal} t={t} />
         <DialogSection>
           <Label htmlFor={`${prefix}-enabled`} className='justify-between text-[12.5px] text-foreground'>
             {t('启用')}<Switch id={`${prefix}-enabled`} checked={pack.enabled} disabled={disabled} onCheckedChange={onEnabled} />
           </Label>
           <p className='m-0'>{t('更新或启停会等待共享宿主内的请求结束；账号数据始终由网关统一保存。')}</p>
+        </DialogSection>
+        <DialogSection>
+          <h3 className='m-0'>{t('加载状态')}</h3>
+          <PluginStartupDetails id={pack.id} status={startup} t={t} />
+          <Button variant='link' size='sm' onClick={() => { onClose(); requestPluginDiagnostics(pack.id) }}>{t('加载诊断')}</Button>
         </DialogSection>
         <DialogSection>
           <h3 className='m-0'>{t('版本')}</h3>
@@ -73,7 +87,7 @@ export function ScriptPluginSettings({ pack, recommended, disabled, error, onClo
             {providers.map(provider => <div key={provider.id} className='flex items-center justify-between gap-3 border-t border-hairline py-2 first:border-t-0'>
               <Label htmlFor={`${prefix}-${provider.id}`} className='min-w-0 flex-1 flex-wrap text-[12.5px] text-foreground'>
                 <span className='break-words'>{t(provider.label)}</span>
-                {provider.enabled && !provider.loaded ? <Badge variant='secondary' shape='tag'>{t('未加载')}</Badge> : null}
+                {provider.enabled && !provider.loaded ? <Badge variant='secondary' shape='tag'>{pluginPhaseLabel(startup, t)}</Badge> : null}
               </Label>
               <Switch id={`${prefix}-${provider.id}`} checked={provider.enabled} disabled={disabled || !pack.enabled}
                 onCheckedChange={enabled => onProvider(provider.id, enabled)} />
@@ -81,14 +95,8 @@ export function ScriptPluginSettings({ pack, recommended, disabled, error, onClo
             {!providers.length ? <p className='m-0 py-3 text-center'>{t('没有匹配「{keyword}」的提供商', { keyword: search.trim() })}</p> : null}
           </div>
         </DialogSection>
-        <DialogSection>
-          <Label htmlFor={`${prefix}-checkin`} className='justify-between text-[12.5px] text-foreground'>
-            {t('允许签到及附带任务')}
-            <Switch id={`${prefix}-checkin`} checked={pack.checkinAllowed === true} disabled={disabled} onCheckedChange={onCheckin} />
-          </Label>
-          <p className='m-0'>{t('脚本签到可能包含额外任务并消耗额度。WPS 灵犀还可能发送对话、创建及解散群聊；授权后会接入现有自动签到计划。')}</p>
-        </DialogSection>
-        {error || pack.error ? <p role='alert' className='m-0 break-words text-[12px] text-destructive'>{error || pack.error}</p> : null}
+        <ScriptPluginOptions pack={pack} disabled={disabled} request={request} refresh={refresh} t={t} />
+        {error || (startup ? pluginFailed(startup) && startup.error : pack.error) ? <p role='alert' className='m-0 break-words text-[12px] text-destructive'>{error || startup?.error || pack.error}</p> : null}
       </DialogBody>
       <DialogFooter>
         <Button variant='destructive' size='sm' className='mr-auto' disabled={disabled} onClick={onRemove}>{t('卸载插件')}</Button>

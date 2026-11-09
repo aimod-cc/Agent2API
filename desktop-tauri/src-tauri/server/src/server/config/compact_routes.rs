@@ -22,11 +22,15 @@ pub struct CompactRoute {
     pub enabled: bool,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CompactRoutes {
     pub enabled: bool,
     pub rules: Vec<CompactRoute>,
+}
+
+impl Default for CompactRoutes {
+    fn default() -> Self { Self { enabled: true, rules: Vec::new() } }
 }
 
 #[derive(Clone, Debug)]

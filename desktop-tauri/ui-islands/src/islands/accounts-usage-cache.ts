@@ -1,3 +1,4 @@
+import { getStore } from './accounts-store'
 import { t } from '../i18n'
 import { formatTime, type AccountRecord, type UsageEntry } from './accounts-shared'
 import { mergeUsageQueryRow, usageQueryFailureStatus, USAGE_NOT_CONFIGURED_CODE, type UsageQueryRow } from '../../../ui-shared/usage-query-state'
@@ -8,6 +9,12 @@ const usageMap = new Map<string, UsageEntry>()
 const queryRows = new Map<string, UsageQueryRow>()
 
 export const usageEntries = (): ReadonlyMap<string, UsageEntry> => usageMap
+export const usageRowOf = (id: string): UsageQueryRow | undefined => queryRows.get(id)
+
+export function markUsageStale(id: string): void {
+  const row = queryRows.get(id)
+  if (row) saveUsageRow({ ...row, stale: true })
+}
 
 export function usageFailureOf(entry: UsageEntry): { message: string; notConfigured: boolean } | null {
   if (entry === undefined || entry === null) return null
@@ -23,16 +30,14 @@ function object(value: unknown): Record<string, unknown> | null {
 function saveUsageRow(row: UsageQueryRow): void {
   queryRows.set(row.id!, row)
   usageMap.set(row.id!, row.error ? {
-    error: row.error, code: row.code, lastUsage: row.lastUsage, lastSuccessAt: row.lastSuccessAt,
-  } : row.usage ?? undefined)
+    error: row.error, code: row.code, lastUsage: row.lastUsage,
+    lastSuccessAt: row.lastSuccessAt, stale: row.stale, requestId: row.requestId,
+  } : row.usage ? { ...row.usage, stale: row.stale } : undefined)
 }
 
 /** 开始重试不代表查询成功，已有失败提示和历史读数必须保留。 */
 export function putUsage(id: string, entry: UsageEntry, at: number): void {
-  if (entry === null || entry === undefined) {
-    if (!usageFailureOf(usageMap.get(id))) usageMap.set(id, entry)
-    return
-  }
+  if (entry === null || entry === undefined) return
   const failure = usageFailureOf(entry)
   const row: UsageQueryRow = failure ? {
     id, error: failure.message, code: failure.notConfigured ? NOT_CONFIGURED_CODE : null, at,
@@ -43,18 +48,24 @@ export function putUsage(id: string, entry: UsageEntry, at: number): void {
 export function putUsageRow(value: Record<string, unknown>, at: number): boolean {
   const id = String(value.id || '')
   if (!id) return false
+  const task = getStore().usageTasks.get(id)
+  if (task && value.requestId === task.requestId && task.status === 'config_changed') return false
   const row: UsageQueryRow = {
     id,
     usage: object(value.usage),
     error: value.error ? String(value.error) : value.usage ? null : t('余额响应为空'),
     code: typeof value.code === 'string' || typeof value.code === 'number' ? value.code : null,
     at: Number(value.at) || at,
+    stale: value.stale === true,
+    requestId: typeof value.requestId === 'string' ? value.requestId : undefined,
   }
   if (Object.prototype.hasOwnProperty.call(value, 'lastSuccessAt')) row.lastSuccessAt = Number(value.lastSuccessAt) || 0
   if (Object.prototype.hasOwnProperty.call(value, 'lastUsage')) row.lastUsage = object(value.lastUsage)
   const previous = queryRows.get(id)
   if (previous && Number(previous.at) > Number(row.at)) return false
-  saveUsageRow(mergeUsageQueryRow(row, previous))
+  const settled = mergeUsageQueryRow(row, previous)
+  if (previous && JSON.stringify(previous) === JSON.stringify(settled)) return false
+  saveUsageRow(settled)
   return true
 }
 

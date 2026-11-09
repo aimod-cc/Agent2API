@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@ui'
+import { SearchableSelect } from '../../../../ui-shared/searchable-select'
 import { type CustomDates } from '../../../../ui-shared/date-range'
 export { DateRangeFields as LogDateFilters } from '../date-range-fields'
 import { t } from '../../i18n'
@@ -47,13 +47,10 @@ export function SourceLogFilters({ filters, clients, apiKeys, onChange }: {
     <>
       {(['client', 'apiKey'] as const).map(key => {
         const list = options(key === 'client' ? clientOptions : keyOptions, filters[key])
-        return <Select value={filters[key]} key={key} onValueChange={value => onChange({ [key]: String(value ?? '') })}>
-          <SelectTrigger id={`req-${key}`} className='min-w-[120px] max-w-[200px]'
-            aria-label={key === 'client' ? t('按客户端筛选') : t('按 API Key 筛选')}>
-            <SelectValue>{list.find(item => item.value === filters[key])?.label}</SelectValue>
-          </SelectTrigger>
-          <SelectContent>{list.map(item => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
-        </Select>
+        return <SearchableSelect value={filters[key]} key={key} options={list}
+          onValueChange={value => onChange({ [key]: value })}
+          id={`req-${key}`} className='min-w-[120px] max-w-[200px]'
+          aria-label={key === 'client' ? t('按客户端筛选') : t('按 API Key 筛选')} />
       })}
     </>
   )

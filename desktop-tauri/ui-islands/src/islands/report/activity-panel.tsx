@@ -1,22 +1,8 @@
 import * as React from 'react'
 import { Card, CardContent, CardHeader, CardTitle, Empty } from '@ui'
 import { formatInt, formatTokens, heatmapView, heatLegendItems, heatThresholdsOf, type StatsSummary } from '../report-charts'
+import { useWidth } from './use-width'
 import { t } from '../../i18n'
-
-function useWidth() {
-  const ref = React.useRef<HTMLDivElement>(null)
-  const [width, setWidth] = React.useState(680)
-  React.useLayoutEffect(() => {
-    const element = ref.current
-    if (!element) return
-    const update = () => { if (element.clientWidth) setWidth(element.clientWidth) }
-    update()
-    const observer = new ResizeObserver(update)
-    observer.observe(element)
-    return () => observer.disconnect()
-  }, [])
-  return { ref, width }
-}
 
 export function ActivityPanel({ summary, loading }: { summary: StatsSummary | null; loading: React.ReactNode }) {
   const { ref, width } = useWidth()

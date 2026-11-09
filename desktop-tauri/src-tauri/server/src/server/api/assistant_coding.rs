@@ -16,18 +16,23 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::server::{access, errors, logging, ServerState};
-use crate::server::core::assistant_coding::{client::{self, CodexClient}, config, permissions, sessions, terminal, CodingError, Engine};
+use crate::server::core::assistant_coding::{client::{self, CodexClient}, config, fork, permissions, preferences, project_directories, projects, sessions, terminal, usage, CodingError, Engine};
 use crate::server::http::ok_json;
 
 pub fn routes(state: ServerState) -> Router<ServerState> {
     Router::new()
         .route("/api/assistant/coding/config", get(get_config).put(put_config))
         .route("/api/assistant/coding/status", get(status))
+        .route("/api/assistant/coding/models", get(models))
+        .route("/api/assistant/coding/usage", get(account_usage))
         .route("/api/assistant/coding/machines", get(machines))
         .route("/api/assistant/coding/machines/{id}/availability", get(availability))
-        .route("/api/assistant/coding/machines/{id}/directories", post(directories))
+        .route("/api/assistant/coding/projects", get(list_projects).post(create_project))
+        .route("/api/assistant/coding/projects/directories", post(project_directories))
         .route("/api/assistant/coding/sessions", get(list).post(spawn))
         .route("/api/assistant/coding/sessions/{id}", get(detail))
+        .route("/api/assistant/coding/sessions/{id}/settings", axum::routing::put(settings))
+        .route("/api/assistant/coding/sessions/{id}/fork", post(fork_session))
         .route("/api/assistant/coding/sessions/{id}/messages", get(messages).post(send))
         .route("/api/assistant/coding/sessions/{id}/terminal", post(open_terminal))
         .route("/api/assistant/coding/sessions/{id}/actions/{action}", post(action))
@@ -46,9 +51,11 @@ async fn require_session(State(state): State<ServerState>, mut request: Request,
         let current = match db(&state).and_then(config::load) { Ok(value) => value, Err(error) => return fail(error) };
         let revision = request.uri().query().and_then(|query| url::form_urlencoded::parse(query.as_bytes()).find(|(key, _)| key == "connection").map(|(_, value)| value.into_owned()));
         if revision.as_deref() != Some(current.revision().as_str()) { return fail(CodingError::new(409, "本机 Codex 设置已变更，请刷新后再操作")); }
-        let client = match db(&state) { Ok(db) => match client::connect(db).await { Ok(value) => value, Err(error) => return fail(error) }, Err(error) => return fail(error) };
-        if client.config.revision() != current.revision() || !access::session_valid(request.headers()) { return fail(CodingError::new(409, "本机 Codex 或管理员会话已变更，请刷新后再操作")); }
-        request.extensions_mut().insert(client);
+        if !request.uri().path().starts_with("/api/assistant/coding/projects") {
+            let client = match db(&state) { Ok(db) => match client::connect(db).await { Ok(value) => value, Err(error) => return fail(error) }, Err(error) => return fail(error) };
+            if client.config.revision() != current.revision() || !access::session_valid(request.headers()) { return fail(CodingError::new(409, "本机 Codex 或管理员会话已变更，请刷新后再操作")); }
+            request.extensions_mut().insert(client);
+        }
     }
     let method = request.method().clone();
     let path = request.uri().path().to_string();
@@ -82,17 +89,37 @@ async fn put_config(State(state): State<ServerState>, body: Bytes) -> Response {
     durable(async move { client::save_config(&db, input).await.map(|c| json!({ "config": c.public() })) }).await
 }
 async fn status(Extension(client): Extension<Arc<CodexClient>>) -> Response { respond(sessions::status(&client).await) }
+async fn models(Extension(client): Extension<Arc<CodexClient>>) -> Response { respond(preferences::models(&client).await) }
+async fn account_usage(Extension(client): Extension<Arc<CodexClient>>) -> Response { respond(usage::account(&client).await) }
+async fn settings(Extension(client): Extension<Arc<CodexClient>>, Path(id): Path<String>, body: Bytes) -> Response {
+    let input = match parse(&body) { Ok(input) => input, Err(error) => return fail(error) };
+    durable(async move { preferences::update(&client, &id, input).await }).await
+}
+async fn fork_session(Extension(client): Extension<Arc<CodexClient>>, Path(id): Path<String>, body: Bytes) -> Response {
+    let input = match parse(&body) { Ok(input) => input, Err(error) => return fail(error) };
+    durable(async move { fork::create(&client, &id, input).await }).await
+}
 async fn machines(Extension(client): Extension<Arc<CodexClient>>) -> Response { ok_json(json!({ "machines": [sessions::machine(&client)] })) }
 async fn availability(Extension(_client): Extension<Arc<CodexClient>>, Path(id): Path<String>) -> Response {
     if id != "local" { return fail(CodingError::new(400, "只能使用当前 Agent2API 所在电脑")); }
     ok_json(json!({ "agents": [{ "agent": "codex", "available": true }] }))
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DirectoryInput { path: String }
-async fn directories(Extension(client): Extension<Arc<CodexClient>>, Path(id): Path<String>, body: Bytes) -> Response {
-    if id != "local" { return fail(CodingError::new(400, "只能使用当前 Agent2API 所在电脑")); }
-    respond((|| { let input: DirectoryInput = parse(&body)?; sessions::directories(&client, &input.path) })())
+async fn list_projects(State(state): State<ServerState>) -> Response {
+    respond((|| { let db = db(&state)?; let config = config::load(db)?;
+        Ok(json!({ "projects": projects::public(&projects::load(db, &config.scope())?) })) })())
+}
+async fn create_project(State(state): State<ServerState>, body: Bytes) -> Response {
+    let input = match parse::<projects::ProjectInput>(&body) { Ok(input) => input, Err(error) => return fail(error) };
+    let db = match db(&state) { Ok(db) => db.clone(), Err(error) => return fail(error) };
+    durable(async move {
+        tokio::task::spawn_blocking(move || { let config = config::load(&db)?; projects::create(&db, &config, input) }).await
+            .map_err(|_| CodingError::new(500, "创建项目的后台操作中断"))?
+    }).await
+}
+async fn project_directories(body: Bytes) -> Response {
+    let input = match parse::<project_directories::DirectoryInput>(&body) { Ok(input) => input, Err(error) => return fail(error) };
+    respond(tokio::task::spawn_blocking(move || project_directories::browse(input)).await
+        .unwrap_or_else(|_| Err(CodingError::new(500, "读取文件夹的后台操作中断"))))
 }
 #[derive(Deserialize)]
 struct ListQuery { engine: Engine }

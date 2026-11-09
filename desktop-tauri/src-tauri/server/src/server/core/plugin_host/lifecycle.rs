@@ -27,6 +27,7 @@ impl Host {
     pub async fn shutdown(&self) {
         self.activity.retire();
         let _serial = self.starting.lock().await;
+        if self.options.wasm.is_some() { self.shutdown_wasm().await; return; }
         let scoped = self.scoped_runtime_package();
         let run = {
             let _state = self.lifecycle.lock().unwrap_or_else(|error| error.into_inner());
@@ -81,6 +82,8 @@ impl Host {
             }
         }
 
+        if let Some(attempt) = &self.options.startup { attempt.phase(super::startup::Phase::Starting); }
+        if self.options.wasm.is_some() { return self.start_wasm().await; }
         if let Some(old) = self.current_run() {
             {
                 let _state = self.lifecycle.lock().unwrap_or_else(|error| error.into_inner());
@@ -108,6 +111,8 @@ impl Host {
             .kill_on_drop(true);
         #[cfg(windows)]
         command.creation_flags(0x0800_0000);
+        #[cfg(unix)]
+        if self.options.script { command.process_group(0); }
         if let Some(dir) = &self.options.cwd { command.current_dir(dir); }
         if self.options.script {
             for (key, _) in std::env::vars_os() {
@@ -117,16 +122,29 @@ impl Host {
                     command.env_remove(key);
                 }
             }
-            command.env("BUN_CONFIG_NO_CLEAR_TERMINAL", "1").env("DO_NOT_TRACK", "1");
+            command.env("BUN_CONFIG_NO_CLEAR_TERMINAL", "1").env("DO_NOT_TRACK", "1")
+                .env("AGY_BRIDGE_STATE_FILE", std::path::Path::new(&self.options.data_dir)
+                    .join("local-agents").join("agy-cli").join("sessions.json"));
         }
         let mut child = command.spawn().map_err(|error| {
             let message = process::redact(&format!("启动插件进程失败（{}）：{error}", self.executable()));
             self.note_failure(&message);
             message
         })?;
+        let guard = if self.options.script {
+            match super::process_guard::ProcessGuard::new(&child) {
+                Ok(guard) => Some(guard),
+                Err(message) => {
+                    let _ = process::reap(&mut child, Duration::ZERO).await;
+                    self.note_failure(&message);
+                    return Err(message);
+                }
+            }
+        } else { None };
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
         let (Some(stdin), Some(stdout)) = (stdin, stdout) else {
+            if let Some(guard) = guard { guard.kill(); }
             let _ = process::reap(&mut child, Duration::ZERO).await;
             let message = "插件进程没有完整的 stdin/stdout 管道";
             self.note_failure(message);
@@ -135,6 +153,7 @@ impl Host {
         let stderr = child.stderr.take();
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let run = Arc::new(ProcessRun::new(generation, child));
+        run.protect(guard);
         *self.inner.lock().await = Some(Inner {
             stdin: Arc::new(Mutex::new(stdin)), run: run.clone(),
         });
@@ -159,24 +178,36 @@ impl Host {
         if let (Some(target), Some(extra)) = (init.as_object_mut(), self.options.init_payload.as_object()) {
             target.extend(extra.clone());
         }
-        let result = tokio::time::timeout(self.options.init_timeout,
-            self.call(proto::methods::gateway::INIT, init, self.options.init_timeout)).await
+        if let Some(attempt) = &self.options.startup {
+            attempt.waiting(super::startup::Phase::Loading, self.options.init_timeout.as_secs());
+        }
+        let handshake = tokio::time::timeout(self.options.init_timeout,
+            self.call_coded(proto::methods::gateway::INIT, init, self.options.init_timeout)).await;
+        let timed_out = handshake.as_ref().map_or(true, |result| result.as_ref().err()
+            .is_some_and(|error| error.code.as_deref() == Some("plugin_init_timeout")));
+        let result = handshake
             .map_err(|_| "插件握手超时".to_string())
-            .and_then(|result| result.map_err(|error| format!("插件握手失败：{error}")))
-            .and_then(|value| serde_json::from_value::<Vec<proto::ProviderInfo>>(value)
-                .map_err(|error| format!("插件返回的 provider 列表无法解析：{error}")));
+            .and_then(|result| result.map_err(|error| format!("插件握手失败：{}", error.message)))
+            .and_then(|value| {
+                let settings = super::provider_settings::parse(self, &value)?;
+                let providers = serde_json::from_value::<Vec<proto::ProviderInfo>>(value)
+                    .map_err(|error| format!("插件返回的 provider 列表无法解析：{error}"))?;
+                Ok((providers, settings))
+            });
         match result {
-            Ok(providers) => {
+            Ok((providers, settings)) => {
                 let _state = self.lifecycle.lock().unwrap_or_else(|error| error.into_inner());
                 if !self.is_current_run(&run) || run.failed.load(Ordering::Acquire)
                     || !self.running.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire) {
                     return Err(self.failure_message());
                 }
                 if let Ok(mut current) = self.providers.lock() { *current = providers.clone(); }
+                if let Ok(mut current) = self.provider_settings.lock() { *current = settings; }
                 if let Ok(mut crashes) = self.crashes.lock() { *crashes = 0; }
                 if let Ok(mut retry) = self.retry_after.lock() { *retry = None; }
                 let previous = self.last_error.lock().ok().and_then(|mut last| last.take());
                 self.ready.store(true, Ordering::Release);
+                if let Some(attempt) = &self.options.startup { attempt.runtime_ready(); }
                 if previous.is_some() {
                     let mut data = run.event_data("plugin.recovered", self.executable(), None);
                     data["previousError"] = json!(previous);
@@ -186,6 +217,9 @@ impl Host {
                 Ok(providers)
             }
             Err(message) => {
+                if timed_out {
+                    if let Some(attempt) = &self.options.startup { attempt.fail(&message, true); }
+                }
                 self.mark_run_failure(&run, &message);
                 let _ = run.reap(Duration::ZERO).await;
                 Err(run.failure().unwrap_or_else(|| self.failure_message()))
@@ -244,7 +278,7 @@ impl Host {
             .unwrap_or_else(|| "插件进程不可用".to_string())
     }
 
-    fn note_failure(&self, message: &str) {
+    pub(super) fn note_failure(&self, message: &str) {
         let _state = self.lifecycle.lock().unwrap_or_else(|error| error.into_inner());
         let message = process::redact(message);
         let crashes = self.note_failure_state(&message);
@@ -255,6 +289,7 @@ impl Host {
     }
 
     fn note_failure_state(&self, message: &str) -> u32 {
+        if let Some(attempt) = &self.options.startup { attempt.fail(message, false); }
         if let Ok(mut last) = self.last_error.lock() { *last = Some(message.to_string()); }
         let crashes = self.crashes.lock().map(|mut count| { *count = count.saturating_add(1); *count }).unwrap_or(1);
         let seconds = (1u64 << crashes.saturating_sub(1).min(6)).min(60);

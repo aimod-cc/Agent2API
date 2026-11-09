@@ -238,8 +238,11 @@ export type Store = {
   }
   /** 新手福利的任务缓存：账号 id → 缓存（切标签页不丢） */
   onboarding: Map<string, OnboardingCache>
+  onboardingBatch: string[] | null
+  plansBatch: 'query' | 'claim' | null
   /** 成长任务的缓存：账号 id → 缓存 */
   growth: Map<string, GrowthCache>
+  growthBatch: { mode: 'full' | 'claim'; accountIds: string[] } | null
 }
 
 const recordsPageSize = readPageSize('checkin-records', SERVER_PAGE_SIZES)
@@ -266,7 +269,10 @@ export const store: Store = {
     offset: 0, outcome: '', kind: '', provider: '', keyword: '',
   },
   onboarding: new Map(),
+  onboardingBatch: null,
+  plansBatch: null,
   growth: new Map(),
+  growthBatch: null,
 }
 
 const listeners = new Set<() => void>()
@@ -624,7 +630,7 @@ function normalizeGrowthTask(raw: unknown): GrowthTask | null {
 /** 查询一个账号的成长任务盘点（只读，打一次上游） */
 export async function queryGrowth(id: string): Promise<void> {
   const current = growthOf(id)
-  if (current.status === 'loading' || current.running) return
+  if (current.status === 'loading' || current.running || current.runningSchool) return
   patchGrowth(id, { status: 'loading', error: '' })
   try {
     const data = await bridge().getGrowthStatus?.(id)
@@ -657,7 +663,7 @@ export async function queryGrowth(id: string): Promise<void> {
  */
 export async function runGrowth(id: string, mode: 'full' | 'claim'): Promise<void> {
   const current = growthOf(id)
-  if (current.running) return
+  if (current.status !== 'loaded' || current.running || current.runningSchool) return
   const targets = current.tasks.filter(task => growthTaskRunnable(task, mode))
   if (targets.length === 0) {
     toast('没有需要执行的任务')
@@ -684,6 +690,31 @@ export async function runGrowth(id: string, mode: 'full' | 'claim'): Promise<voi
   patchGrowth(id, { running: false })
   toast(failed > 0 ? `执行完成，${failed} 项失败` : '✅ 执行完成', failed > 0 ? 'err' : 'ok')
   await queryGrowth(id)
+}
+
+export async function runGrowthBatch(accountIds: string[], mode: 'full' | 'claim'): Promise<void> {
+  if (store.growthBatch) return
+  const ids = [...new Set(accountIds)].filter(id => {
+    const cache = growthOf(id)
+    return cache.status !== 'loading' && !cache.running && !cache.runningSchool
+  })
+  if (ids.length === 0) return
+  patch({ growthBatch: { mode, accountIds: ids } })
+  try {
+    for (const id of ids) {
+      await queryGrowth(id)
+      const cache = growthOf(id)
+      if (cache.status !== 'loaded' || cache.error) {
+        toast(t('查询失败：{error}', { error: cache.error || id }), 'err')
+        continue
+      }
+      await runGrowth(id, mode)
+    }
+  } catch (error) {
+    toast(t('成长任务执行失败：{error}', { error: errorMessage(error) }), 'err')
+  } finally {
+    patch({ growthBatch: null })
+  }
 }
 
 /** 开学季任务 + 抽奖 */

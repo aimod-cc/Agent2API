@@ -244,54 +244,96 @@
   white-space: normal;
 }
 
-/* 隐藏账号提示既用于空态，也用于仍有可见账号的列表。 */
-.acct-hidden-note {
+/* ── 「未显示的账号」─────────────────────────────────────────
+   平时只是批量栏里一枚低饱和入口，挨着「列设置」放（原先是常驻的黄色横幅：主动
+   卸载 / 停用也被天天提醒，还把列表整体推下去）。明细搬进右侧抽屉，按原因筛选。
+   只有「插件未加载」在入口上带告警色计数 —— 那才是需要用户处理的一档。 */
+
+/* 入口：与「列设置 / 批量操作」同一行同一档（尺寸由 .batch-actions button 统一给），
+   这里只补一个图标与徽章之间的间距 */
+.acct-hidden-entry { gap: 6px; }
+
+/* 列设置齿轮的宿主：本岛在宿主**前**放「未显示账号」入口，齿轮插进宿主内，
+   于是这一行读作「未显示账号 · 列设置 · 批量操作 · 取消选择」 */
+.batch-col-host { display: flex; }
+
+/* 抽屉：贴右侧，宽度由组件上的工具类给（见 accounts-hidden-notice.tsx） */
+.acct-hidden-body { gap: 12px; padding: 12px 16px 16px; }
+
+/* 抽屉开头那句总账：几家、几个账号、为什么看不见 */
+.acct-hidden-lead {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--text-2);
+}
+
+/* 逐家一行：头像 + 家名/原因 + 一颗动作按钮 */
+.acct-hidden-rows {
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  overflow: hidden;
+}
+.acct-hidden-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+}
+.acct-hidden-row + .acct-hidden-row { border-top: 1px solid var(--hairline); }
+.acct-hidden-avatar {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 600;
+}
+.acct-hidden-info { min-width: 0; flex: 1 1 auto; }
+.acct-hidden-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text);
+}
+.acct-hidden-detail {
+  margin: 2px 0 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+.acct-hidden-none {
+  margin: 0;
+  padding: 20px 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-3);
+}
+.acct-hidden-foot {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+
+/* 空态（一条账号都看不见时）：一句说明 + 一颗「查看」 */
+.acct-hidden-empty {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
-  max-width: 600px;
-  margin: 0 auto;
-}
-.acct-hidden-main { min-width: 0; }
-.acct-hidden-title {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text);
-}
-.acct-hidden-list {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 6px 14px;
-  margin: 10px 0;
-  padding: 0;
-  list-style: none;
-  font-size: 12px;
-  line-height: 1.9;
+  gap: 10px;
+  font-size: 12.5px;
   color: var(--text-2);
 }
-.acct-hidden-list li { display: flex; align-items: center; gap: 6px; }
-.acct-hidden-foot {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.7;
-  color: var(--text-3);
-}
-.acct-hidden-banner {
-  display: flex;
-  flex: none;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px 16px;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--warn-bd);
-  background: var(--warn-soft);
-}
-.acct-hidden-banner .acct-hidden-main { flex: 1 1 280px; }
-.acct-hidden-banner .acct-hidden-list { justify-content: flex-start; margin: 6px 0; }
-.acct-hidden-banner .acct-hidden-foot { color: var(--text-2); }
+.acct-hidden-empty > span { display: inline-flex; align-items: center; gap: 6px; }
 .acct-load-error {
   margin: 0;
 }

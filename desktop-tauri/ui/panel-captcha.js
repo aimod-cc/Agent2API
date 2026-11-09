@@ -17,11 +17,9 @@
  *
  * ── 与登录页内联脚本的契约（login.html，两边改动要同步）──────────
  *   · 标记是 `<panel-captcha id="captcha">`，由登录岛（login-page.tsx）渲染；
- *   · `verified` 事件的 `detail.payload` = base64(JSON)，提交时放进 body.captcha；
- *   · `expired` 事件 = 当前答案作废（题目到期 / reset / 重新领题）；
- *   · `reset()` 方法：作废答案并重新领题求解（提交失败后由脚本调用）；
- *   · 校验开关关闭时服务端领题回 400，登录页自己把本元素隐藏。
- * 组件只认这三个接口，登录页那侧不必知道求解细节。
+ *   · `configure()` 接收服务端公布的开关和校验方式，不根据网络失败推断关闭；
+ *   · `verified` 事件的 `detail.payload` 随提交放进 body.captcha；
+ *   · `expired` 事件使当前答案作废；`reset()` 在提交失败后重新验证。
  */
 (function () {
   'use strict'
@@ -117,14 +115,14 @@
       /** 求解代次：reset / 重连会 +1，旧的一轮跑完直接丢弃结果 */
       this.generation = 0
       this.timer = null
-      this.onClick = () => { void this.start() }
+      this.config = null
+      this.onClick = () => { if (this.config?.captchaProvider !== 'turnstile') void this.start() }
     }
 
     connectedCallback() {
       this.setAttribute('state', this.state)
       this.addEventListener('click', this.onClick)
-      // 页面一加载就领题求解（与迁移前的 widget 同观感：进来就是「验证中…」）
-      void this.start()
+      if (this.config) void this.start()
     }
 
     disconnectedCallback() {
@@ -133,10 +131,34 @@
       this.generation += 1
     }
 
-    /** 作废当前答案并重新领题求解（登录页在提交失败后调用） */
-    reset() {
+    configure(config) {
+      clearTimeout(this.timer)
+      this.generation += 1
       this.dropPayload()
-      void this.start()
+      this.config = config
+      this.setState('idle')
+      this.dispatchEvent(new CustomEvent('configuration', { detail: config }))
+      if (config.captchaEnabled !== false && config.captchaProvider !== 'turnstile' && !config.captchaError) void this.start()
+    }
+
+    reset() {
+      clearTimeout(this.timer)
+      this.generation += 1
+      this.dropPayload()
+      this.setState('idle')
+      if (this.config?.captchaProvider === 'turnstile') {
+        this.dispatchEvent(new CustomEvent('reset'))
+      } else {
+        void this.start()
+      }
+    }
+
+    acceptToken(token) {
+      if (this.config?.captchaProvider !== 'turnstile') return
+      if (!token) { this.dropPayload(); return }
+      this.payload = token
+      this.setState('verified')
+      this.dispatchEvent(new CustomEvent('verified', { detail: { payload: token } }))
     }
 
     dropPayload() {
@@ -147,14 +169,26 @@
 
     /** 领一道题并求解；结果通过 `verified` 事件交给登录页 */
     async start() {
-      if (this.state === 'verifying') return
+      if (!this.config || this.config.captchaEnabled === false || this.config.captchaProvider === 'turnstile'
+        || this.state === 'verifying' || this.state === 'verified') return
       var generation = ++this.generation
       this.setState('verifying')
       var challenge
       try {
-        var response = await fetch(CHALLENGE_URL)
-        if (!response.ok) throw new Error('领题失败（HTTP ' + response.status + '）')
+        var endpoint = (this.config.gatewayBase || '') + CHALLENGE_URL
+        var response = await fetch(endpoint, { cache: 'no-store' })
         challenge = await response.json()
+        if (!response.ok) {
+          if (response.status === 400 && challenge?.error === '机器人校验未启用') {
+            if (generation !== this.generation) return
+            this.dropPayload()
+            this.config = { ...this.config, captchaEnabled: false }
+            this.setState('idle')
+            this.dispatchEvent(new CustomEvent('disabled'))
+            return
+          }
+          throw new Error('领题失败（HTTP ' + response.status + '）')
+        }
       } catch (error) {
         if (generation === this.generation) this.fail(error)
         return

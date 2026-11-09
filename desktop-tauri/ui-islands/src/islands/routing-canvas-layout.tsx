@@ -4,9 +4,16 @@ import { t } from '../i18n'
 import { RouteIcon } from './routing-ui'
 import { RoutingCanvasEdges } from './routing-canvas-edges'
 
-export function RoutingConfigShell({ children }: { children: React.ReactNode }) {
+/**
+ * 配置画布的外壳。
+ *
+ * `plain` = 特殊请求路由那一版：去掉点阵底、把画布压到 --rail-bg。
+ * 理由：点阵是账号路由画布的语言（连线、流转），特殊路由那边只有一份规则列表；
+ * 而规则卡片是纯白无描边的，画布必须比它暗一档才看得出卡片边界。
+ */
+export function RoutingConfigShell({ plain = false, children }: { plain?: boolean; children: React.ReactNode }) {
   const root = React.useRef<HTMLDivElement>(null)
-  return <div className='routing-config-shell' ref={root}>
+  return <div className={cn('routing-config-shell', plain && 'is-plain')} ref={root}>
     <RoutingCanvasEdges root={root} />
     {children}
   </div>
@@ -26,6 +33,13 @@ export function RoutingCanvasLayout({ title, children, groups, note, globalAccou
       <span><svg width={22} height={8} aria-hidden='true'><path d='M 0 4 H 22' /></svg>{t('流动：有请求在途')}</span>
       <span>{globalAccounts ? t('账号启停立即生效；路由配置保存后生效') : t('保存后才会影响真实请求')}</span></div>
   </div>
+}
+
+export function RoutingRefreshError({ error, onRetry }: { error: string; onRetry(): void }) {
+  return error ? <div className='routing-page-error' role='alert'>
+    <RouteIcon name='info' /><span>{t('实时状态暂未更新，当前显示上次读取的结果：{error}', { error })}</span>
+    <Button variant='ghost' size='sm' onClick={onRetry}>{t('重试')}</Button>
+  </div> : null
 }
 
 export function RoutingDraftFooter({ dirty, inherited, busy, disabled, error, onDiscard, onSave }: {

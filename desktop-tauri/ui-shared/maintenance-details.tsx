@@ -1,10 +1,11 @@
 import * as React from 'react'
 import {
   Alert, Button, Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter,
-  DialogHeader, DialogTitle, Empty, Pager, Select, SelectContent, SelectItem, SelectTrigger,
-  SelectValue, SegmentedControl, Spinner, Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+  DialogHeader, DialogTitle, Empty, Pager,
+  SegmentedControl, Spinner, Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@ui'
 import { t } from '../ui-kit/src/i18n'
+import { SearchableSelect } from './searchable-select'
 import { ItemStatus } from './maintenance-shared'
 import {
   duration, hasFailures, itemChange, itemMessage, maintenanceLabel, maintenanceMessage, sourceLabel, stamp,
@@ -101,15 +102,9 @@ export function MaintenanceDetailDialog({ detail, loading, error, busy, onReload
                 { value: 'skipped', label: t('跳过'), count: statusCount('skipped') },
               ]}
             />
-            <Select value={provider} onValueChange={value => { setProvider(value ?? ''); setPage(1) }}>
-              <SelectTrigger aria-label={t('提供商')} className='min-w-[150px]'>
-                <SelectValue>{provider ? providers.find(([id]) => id === provider)?.[1] ?? provider : t('全部提供商')}</SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value=''>{t('全部提供商')}</SelectItem>
-                {providers.map(([id, label]) => <SelectItem key={id} value={id}>{label}</SelectItem>)}
-              </SelectContent>
-            </Select>
+            <SearchableSelect value={provider} onValueChange={value => { setProvider(value); setPage(1) }}
+              aria-label={t('提供商')} className='min-w-[150px] max-w-[260px]' searchPlaceholder={t('搜索提供商')}
+              options={[{ value: '', label: t('全部提供商') }, ...providers.map(([value, label]) => ({ value, label }))]} />
           </div>
           {/* 表格区吃掉剩余高度：行少时留白而不是缩窗，行多时在这里滚 */}
           <Table containerClassName='maintenance-detail-scroll min-h-0 flex-1' className='maintenance-detail-table'>

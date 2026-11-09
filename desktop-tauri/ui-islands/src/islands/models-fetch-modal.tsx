@@ -11,12 +11,8 @@ import {
   InputGroup,
   InputGroupAddon,
   InputGroupInput,
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
 } from '@ui'
+import { SearchableSelect } from '../../../ui-shared/searchable-select'
 import { t } from '../i18n'
 import { ModelsFetchError } from './models-fetch-error'
 import { ModelsFetchTable, type RefreshItem, type Row } from './models-fetch-table'
@@ -581,18 +577,10 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
     }
     const current = list.find(account => String(account.id) === selected)
     return (
-      <Select value={selected} onValueChange={next => rememberSource(pid, String(next))}>
-        <SelectTrigger className='w-full' title={t('用哪个账号去拉这家的模型清单')}
-          aria-label={t('模型来源')}>
-          {/* 展示文案显式给出：不依赖 value 自动显示（值是 id，而这一格要的是账号名） */}
-          <SelectValue>{current ? accountLabel(current) : '—'}</SelectValue>
-        </SelectTrigger>
-        <SelectContent>
-          {list.map(account => (
-            <SelectItem key={String(account.id)} value={String(account.id)}>{accountLabel(account)}</SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+      <SearchableSelect value={selected} onValueChange={value => rememberSource(pid, value)}
+        className='w-full' title={t('用哪个账号去拉这家的模型清单')} aria-label={t('模型来源')}
+        searchPlaceholder={t('搜索账号…')} displayValue={current ? accountLabel(current) : '—'}
+        options={list.map(account => ({ value: String(account.id), label: accountLabel(account) }))} />
     )
   }
 

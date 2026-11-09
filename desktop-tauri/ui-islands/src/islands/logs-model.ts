@@ -24,8 +24,8 @@ export const VIEW_OPTIONS = [
   { value: 'debug' as LogView, label: t('调试详情') },
 ]
 export const LEVEL_OPTIONS = [
-  { value: '', label: t('全部级别') }, { value: 'info', label: t('info 及以上') },
-  { value: 'warn', label: t('warn 及以上') }, { value: 'error', label: t('仅 error') },
+  { value: '', label: t('全部级别') }, { value: 'info', label: t('信息及以上') },
+  { value: 'warn', label: t('警告及以上') }, { value: 'error', label: t('仅错误') },
 ]
 
 type Shared = {

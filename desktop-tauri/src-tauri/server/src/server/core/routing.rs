@@ -189,6 +189,9 @@ pub fn account_usability(account: &Value, keys: &CooldownKeys<'_>, now: i64) -> 
     if is_rate_limited(account, keys, now) {
         return AccountUsability { usable: false, reason: Some("rate-limited") };
     }
+    if super::plugin_host::wasm::catalog::route_allowed(account, &keys.for_account(account)) == Some(false) {
+        return AccountUsability { usable: false, reason: Some("account-model-unavailable") };
+    }
     AccountUsability { usable: true, reason: None }
 }
 
@@ -693,6 +696,10 @@ pub fn plan_route(
                     counts.get(&id).copied().unwrap_or(0)
                 ),
             ));
+            continue;
+        }
+        if super::plugin_host::wasm::catalog::route_allowed(account, &keys.for_account(account)) == Some(false) {
+            blocked.push(entry("model-permission", "当前账号没有该模型的使用权限".into()));
             continue;
         }
         if matches!(account.get("hasCredentials"), Some(Value::Bool(false))) {

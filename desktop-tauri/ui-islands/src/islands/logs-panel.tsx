@@ -9,7 +9,7 @@ import {
 import { SERVER_PAGE_SIZES, TableFooter, readPageSize, writePageSize, type PageSizeChoice } from './table-shell'
 import { t } from '../i18n'
 import {
-  errorMessage, LEVEL_OPTIONS, logCategory, logGroups, persistFilters,
+  errorMessage, LEVEL_OPTIONS, logCategory, logGroups, logViewNote, persistFilters,
   queryFor, RANGE_OPTIONS, readFilters, shared, toast, VIEW_OPTIONS,
   type Filters, type IntervalTask, type LoadOptions, type LogGroup, type LogPage, type LogStats,
 } from './logs-model'
@@ -332,8 +332,8 @@ function LogsPanel() {
             <SelectContent><SelectItem value=''>{t('全部分类')}</SelectItem>{Object.keys(data.categories || {}).map(category =>
               <SelectItem key={category} value={category}>{logCategory(category, t)}</SelectItem>)}</SelectContent>
           </Select>
-          <InputGroup className='w-auto flex-auto'><InputGroupInput type='search' placeholder={t('搜索消息、提供商或账号…')}
-            aria-label={t('搜索消息、提供商或账号')} autoComplete='off' value={filters.keyword}
+          <InputGroup className='w-auto flex-auto'><InputGroupInput type='search' placeholder={t('搜索插件、消息、提供商或账号…')}
+            aria-label={t('搜索插件、消息、提供商或账号')} autoComplete='off' value={filters.keyword}
             onChange={event => changeFilters({ keyword: event.currentTarget.value }, true)} /><InputGroupAddon aria-hidden='true'>⌕</InputGroupAddon></InputGroup>
         </div>
         <div className='event-log-overview'>
@@ -342,6 +342,7 @@ function LogsPanel() {
           <span className='event-log-warnings'>{t('警告 {n}', { n: counts.warn || 0 })}</span>
           {filters.view !== 'important' ? <span>{t('调试 {n}', { n: counts.debug || 0 })}</span> : null}
         </div>
+        <div className='event-log-note'>{logViewNote(filters.view, t)}</div>
         {filters.view === 'debug' && !data.debugEnabled ? <div className='event-log-note'>{t('调试采集未开启，仅显示已保留的记录。可在设置中开启调试模式。')}</div> : null}
         {error ? <div className='event-log-error' role='status'>{error}<Button variant='ghost' size='xs' onClick={() => void loadPanel()}>{t('重试')}</Button></div> : null}
         {pending > 0 || held ? <div className='event-log-new' role='status'>

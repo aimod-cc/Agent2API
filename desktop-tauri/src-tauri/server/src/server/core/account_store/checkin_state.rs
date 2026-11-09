@@ -43,7 +43,7 @@ pub(super) fn apply(record: &mut StoredAccount, value: &Value) -> Result<(), Str
     let completed = value.get("completed").and_then(Value::as_bool)
         .ok_or_else(|| "每日签到状态缺少完成标记".to_string())?;
     if value.get("kind").and_then(Value::as_str) == Some("rolling")
-        && !rolling_until(value).is_some_and(|until| until > at && until <= at + 7 * 86_400_000)
+        && !rolling_until(value).is_some_and(|until| until > at && until <= at + 366 * 86_400_000)
     {
         return Err("滚动签到状态缺少有效的下次领取时间".into());
     }

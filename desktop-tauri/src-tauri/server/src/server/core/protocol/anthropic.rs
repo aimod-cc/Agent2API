@@ -12,12 +12,8 @@
 //!      成对出现，所以回程要保证配对（见 `normalize_tool_pairing`）。
 //!
 //! ── 思考（thinking）怎么映射 ────────────────────────────────
-//! Anthropic 侧是 `thinking` 内容块 + `signature`（签名，用于多轮校验）；
-//! Chat 侧是 `reasoning_content` 字符串。Chat 没有签名这个概念，所以：
-//!   - 回程（Anthropic → Chat）：thinking 块折进 `reasoning_content`，
-//!     signature **丢弃**（Chat 侧无处安放，且下游上游都不校验它）；
-//!   - 去程（Chat → Anthropic）：`reasoning_content` 折成 thinking 块，
-//!     不带 signature（Anthropic 的签名只在它自己的多轮里需要）。
+//! 本模块只服务跨协议转换：Chat 的 reasoning_content 不能表达 Anthropic 签名。
+//! 两端都是 Anthropic 时由原生转发路径保留完整内容块、签名与事件，不经过本模块重建。
 //!
 //! `thinking.type:"enabled"` 时 Anthropic 要求 `budget_tokens < max_tokens`，
 //! 所以去程会把 max_tokens 抬高到 budget 之上（参考实现同款处理）。

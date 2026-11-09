@@ -37,6 +37,7 @@ fn scope(provider: &str) -> String {
 fn accepts_empty(provider: &str) -> bool {
     crate::server::core::providers::is_scoped_runtime_provider(provider)
         || super::script::known_provider(provider)
+        || super::wasm::catalog::enabled(provider)
 }
 
 fn from_cached(provider: &str, cached: catalog_cache::CachedCatalog) -> Option<proto::ModelList> {
@@ -136,6 +137,7 @@ pub fn set_remote(provider: &str, mut list: proto::ModelList) -> usize {
 }
 
 pub fn snapshot(provider: &str) -> Option<proto::ModelList> {
+    if super::wasm::catalog::enabled(provider) { return super::wasm::catalog::aggregate(provider); }
     let map = table().lock().ok()?;
     let entry = map.get(provider)?;
     entry.remote.clone().or_else(|| {
@@ -151,6 +153,7 @@ pub fn models_for(provider: &str) -> Option<Vec<Value>> {
 }
 
 pub fn meta(provider: &str) -> proto::CatalogMeta {
+    if super::wasm::catalog::enabled(provider) { return super::wasm::catalog::aggregate(provider).map(|list| list.meta).unwrap_or_default(); }
     let Ok(map) = table().lock() else { return proto::CatalogMeta::default() };
     map.get(provider).and_then(|entry| entry.remote.as_ref())
         .map(|list| list.meta.clone()).unwrap_or_default()

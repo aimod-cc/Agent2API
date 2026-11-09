@@ -62,6 +62,10 @@
 
 use rusqlite::Connection;
 
+#[cfg(test)]
+#[path = "schema_tests.rs"]
+mod tests;
+
 /// `kv` 表里**不属于网关配置**的固定键名（模块头「两类键名绝不能相撞」讲的
 /// 就是它与配置顶层键的关系）。
 ///
@@ -93,6 +97,8 @@ pub const RESERVED_KV_KEYS: &[&str] = &[
     // 属于「其它零散状态」：配置写入绝不能动它（否则用户改一次 API Key
     // 侧边栏就退回默认布局）。
     "sidebarLayout",
+    // 品牌图片与名称独立保存，避免每次转发克隆整份图片；整库备份仍会保留。
+    "panelBranding",
     // 事件日志的下一个 id 水位（logs_store::sql）
     "logsNextId",
     // 整份桌面设置 JSON（壳侧 settings）—— 一个键而不是拆成三个：
@@ -341,7 +347,7 @@ pub fn is_reserved(key: &str) -> bool {
 /// 请求日志新增「积分」列读它。与 token 四列刻意不同：这一列**可空 REAL** ——
 /// `NULL` = 这一家没上报（旧行 / 不提供该读数），0 = 确实零消耗；用 0 兜底会
 /// 把「没读到」画成「花了 0 积分」，比缺一列更难排查。
-pub const SCHEMA_VERSION: i64 = 27;
+pub const SCHEMA_VERSION: i64 = 29;
 
 /// 版本 1 的全部表与索引：改造前所有 JSON / JSONL 文件的对应形态。
 ///
@@ -1079,6 +1085,8 @@ fn apply_version(
         25 => conn.execute_batch(include_str!("schema_tool_images.sql")),
         26 => conn.execute_batch(include_str!("schema_maintenance.sql")),
         27 => conn.execute_batch(include_str!("schema_coding.sql")),
+        28 => conn.execute_batch(include_str!("schema_model_recency.sql")),
+        29 => conn.execute_batch(include_str!("schema_usage_query.sql")),
         _ => Ok(()),
     }
 }

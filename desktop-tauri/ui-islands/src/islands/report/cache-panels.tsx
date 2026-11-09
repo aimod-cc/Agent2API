@@ -45,7 +45,7 @@ export function CacheTrendPanel({ summary, loading, colors }: { summary: StatsSu
           <span><i className='report-rate-swatch' />{t('缓存命中率')} · {t('左轴')}</span>
           <span><i className='report-token-swatch' />{t('总 Token')} · {t('右轴')}</span>
         </div>
-        <span>{t('无请求的整点按 0% 计，但不写读数')}</span>
+        <span>{t('悬停查看完整读数与分项')}</span>
       </div>
     </CardContent>
   </Card>

@@ -8,11 +8,12 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::server::core::crypto::{self, SecretScope};
 
-const SCOPES: [SecretScope; 4] = [
+const SCOPES: [SecretScope; 5] = [
     SecretScope::Accounts,
     SecretScope::UpdateToken,
     SecretScope::CloudSync,
     SecretScope::CodingSessions,
+    SecretScope::PanelCaptcha,
 ];
 
 #[derive(Serialize, Deserialize)]
@@ -203,6 +204,9 @@ impl SecretTransform<'_> {
                     }
                 }
             }
+            "panelCaptcha" => {
+                self.field(value, "secretKey", SecretScope::PanelCaptcha, "Turnstile 服务端密钥", false)?;
+            }
             "assistantCoding" => {
                 self.field(value, "accessToken", SecretScope::CodingSessions, "编程会话连接密钥", false)?;
             }
@@ -294,6 +298,7 @@ fn transform(conn: &Connection, source: &BackupKeys, rewrite: bool) -> Result<us
         "githubToken",
         "agentProfiles",
         "assistantCoding",
+        "panelCaptcha",
         "cloudSync",
     ] {
         let text: Option<String> = conn

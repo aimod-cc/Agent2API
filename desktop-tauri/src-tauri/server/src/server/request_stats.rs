@@ -80,6 +80,7 @@ mod record;
 // 对外暴露面收敛在这一层。
 mod report;
 mod cache_report;
+mod model_recency;
 mod routing;
 mod trace;
 mod flow;
@@ -224,6 +225,7 @@ pub struct RequestStats {
     maintenance_writes: AtomicU64,
     /// 上次做保留期裁剪的毫秒时间戳；低流量时用它兜底。
     last_maintenance_ms: AtomicI64,
+    model_recency: Arc<model_recency::ModelRecency>,
 }
 
 impl RequestStats {
@@ -263,6 +265,7 @@ impl RequestStats {
             vacuum: Arc::new(VacuumStatus::new()),
             maintenance_writes: AtomicU64::new(0),
             last_maintenance_ms: AtomicI64::new(0),
+            model_recency: Arc::new(model_recency::ModelRecency::default()),
         }
     }
 

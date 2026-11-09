@@ -70,6 +70,10 @@ fn view(state: &ServerState) -> Result<Value, GatewayError> {
     let legacy = settings.is_legacy();
     let mut settings = settings.clone();
     expand_legacy(&mut settings, &choices);
+    // 两块设置折成规则列表（旧配置到这里就换成新形状）；再把规则投影回两块，
+    // 手机端与旧界面按两块读写，投影让它们继续看到真实配置。
+    settings.fold_blocks();
+    settings.project_blocks();
     Ok(json!({
         "config": settings, "revision": snapshot.revision,
         "models": choices, "sharedTarget": shared_target(),
@@ -123,17 +127,28 @@ pub async fn put_settings(State(state): State<ServerState>, body: Bytes) -> Resp
         Err(error) => return response(Err(error)),
     };
     match tokio::task::spawn_blocking(move || {
-        vision_compat::validate(&payload.config).map_err(GatewayError::bad_request)?;
-        if payload.config.enabled {
-            if payload.config.uses(Mode::Assist) {
-                let target = match payload.config.assist.source {
-                    ModelSource::Shared => shared_target(),
-                    ModelSource::Custom => payload.config.assist.target.clone(),
-                }.ok_or_else(|| GatewayError::bad_request("请先配置辅助识图的视觉模型"))?;
-                validate_available(&target)?;
-            }
-            if payload.config.uses(Mode::Reroute) && payload.config.reroute.fallback == Fallback::Designated {
-                for target in &payload.config.reroute.targets { validate_available(target)?; }
+        // 校验按「折成规则之后」的那一份来（手机端发的只有两块设置）；
+        // 但保存仍交原始载荷给 config::save —— 「同一种方式已有多条规则」那条
+        // 拦截要在它那边判，它才拿得到保存前的旧配置。
+        let mut normalized = payload.config.clone();
+        normalized.fold_blocks();
+        vision_compat::validate(&normalized).map_err(GatewayError::bad_request)?;
+        if normalized.enabled {
+            for rule in normalized.rules.iter().filter(|rule| rule.enabled && !rule.models.is_empty()) {
+                match rule.mode {
+                    Mode::Assist => {
+                        let target = match rule.source {
+                            ModelSource::Shared => shared_target(),
+                            ModelSource::Custom => rule.target.clone(),
+                        }.ok_or_else(|| GatewayError::bad_request("请先配置辅助识图的视觉模型"))?;
+                        validate_available(&target)?;
+                    }
+                    Mode::Reroute => {
+                        if rule.fallback == Fallback::Designated {
+                            for target in &rule.targets { validate_available(target)?; }
+                        }
+                    }
+                }
             }
         }
         vision_compat::save(payload.config, &payload.revision)?;

@@ -164,7 +164,7 @@ export function GithubAccessEditor({ load, persist, notify, t, mobile = false }:
         onClick={() => void save({ mirrors: [...mirrors, ...missingDefaults] })}>{t('补充内置备用源')}</Button> : null}
       <p className='text-xs text-subtle'>{t('最多保留 6 个 HTTPS 加速源；自定义源可关闭版本查询支持。')}</p>
       <p className='text-xs text-subtle'>{t('状态来自最近一次实际请求，并非实时测速。过期后标为待重新检查；限流只暂停对应线路，其他线路仍可使用。')}</p>
-      <p className='text-xs text-subtle'>{t('软件更新与插件共用此设置；GitHub 令牌仅发送给官方 API。镜像安装包需要官方校验值，镜像插件包需要官方签名。')}</p>
+      <p className='text-xs text-subtle'>{t('软件更新与插件共用此设置；GitHub 令牌仅发送给官方 API。镜像安装包需要官方校验值，镜像插件包需要可信签名。')}</p>
       {mobile ? <p className='text-xs text-subtle'>{t('以上状态来自网关；APK 下载会由手机按本机网络重新选择通道。')}</p> : null}
       {!modern && settings ? <p className='text-xs text-subtle'>{t('当前网关仍使用旧版单源设置，升级网关后可管理多个加速源。')}</p> : null}
       {error ? <Alert variant='destructive' role='alert' className='text-xs'>{error}</Alert> : null}

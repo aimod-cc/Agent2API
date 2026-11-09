@@ -56,6 +56,10 @@ use base64::Engine as _;
 
 use crate::server::logging;
 
+#[cfg(test)]
+#[path = "crypto_tests.rs"]
+mod tests;
+
 /// 密文信封的版本前缀（换算法时靠它识别旧格式，比如将来改用平台密钥库）
 const ENVELOPE_PREFIX: &str = "enc1:";
 
@@ -104,6 +108,8 @@ pub enum SecretScope {
     CloudSync,
     /// 编程会话后台凭据不参与账号云同步。
     CodingSessions,
+    /// 登录校验凭据与部署域名绑定，不参与账号云同步。
+    PanelCaptcha,
 }
 
 impl SecretScope {
@@ -117,6 +123,7 @@ impl SecretScope {
             SecretScope::Accounts => "account.key",
             SecretScope::CloudSync => "cloud-sync.key",
             SecretScope::CodingSessions => "coding-sessions.key",
+            SecretScope::PanelCaptcha => "panel-captcha.key",
         }
     }
 
@@ -130,6 +137,7 @@ impl SecretScope {
             SecretScope::Accounts => "重新保存一次账号即可自愈",
             SecretScope::CloudSync => "在「设置 → 数据 → 云同步」里重新输入同步密码即可自愈",
             SecretScope::CodingSessions => "在 AI 助手的编程会话连接设置里重新输入密钥即可自愈",
+            SecretScope::PanelCaptcha => "在机器人校验设置中重新保存 Turnstile 服务端密钥即可恢复",
         }
     }
 }
@@ -141,6 +149,7 @@ impl SecretScope {
 /// 为什么每个域一个 `OnceLock`：缓存必须**按域隔离**（串钥匙的后果见模块头），
 /// 又要是「进程内一次性初始化」的静态量。两个独立静态变量比一张 `HashMap`
 /// 更省：域是编译期已知的枚举，没有动态增删的场景。
+#[cfg(not(test))]
 fn cache_for(scope: SecretScope) -> &'static std::sync::Mutex<Option<[u8; KEY_LEN]>> {
     static UPDATE_TOKEN: std::sync::OnceLock<std::sync::Mutex<Option<[u8; KEY_LEN]>>> =
         std::sync::OnceLock::new();
@@ -150,11 +159,28 @@ fn cache_for(scope: SecretScope) -> &'static std::sync::Mutex<Option<[u8; KEY_LE
         std::sync::OnceLock::new();
     static CODING_SESSIONS: std::sync::OnceLock<std::sync::Mutex<Option<[u8; KEY_LEN]>>> =
         std::sync::OnceLock::new();
+    static PANEL_CAPTCHA: std::sync::OnceLock<std::sync::Mutex<Option<[u8; KEY_LEN]>>> =
+        std::sync::OnceLock::new();
     match scope {
         SecretScope::UpdateToken => UPDATE_TOKEN.get_or_init(|| std::sync::Mutex::new(None)),
         SecretScope::Accounts => ACCOUNTS.get_or_init(|| std::sync::Mutex::new(None)),
         SecretScope::CloudSync => CLOUD_SYNC.get_or_init(|| std::sync::Mutex::new(None)),
         SecretScope::CodingSessions => CODING_SESSIONS.get_or_init(|| std::sync::Mutex::new(None)),
+        SecretScope::PanelCaptcha => PANEL_CAPTCHA.get_or_init(|| std::sync::Mutex::new(None)),
+    }
+}
+
+fn with_key_cache<T>(
+    scope: SecretScope,
+    use_key: impl FnOnce(&mut Option<[u8; KEY_LEN]>) -> T,
+) -> Result<T, String> {
+    #[cfg(test)]
+    return Ok(crate::test_support::with_key(scope.key_file(), use_key));
+
+    #[cfg(not(test))]
+    {
+        let mut guard = cache_for(scope).lock().map_err(|_| "密钥锁中毒".to_string())?;
+        Ok(use_key(&mut guard))
     }
 }
 
@@ -165,16 +191,14 @@ fn cache_for(scope: SecretScope) -> &'static std::sync::Mutex<Option<[u8; KEY_LE
 /// 下次保存还能重试；同时首次并发的两个保存要串行（各自生成不同的密钥、互相
 /// 覆盖文件，先存的那份密文就再也解不开了）。
 pub(crate) fn secret_key(scope: SecretScope) -> Result<[u8; KEY_LEN], String> {
-    let cell = cache_for(scope);
-    let Ok(mut guard) = cell.lock() else {
-        return Err("密钥锁中毒".to_string());
-    };
-    if let Some(key) = *guard {
-        return Ok(key);
-    }
-    let key = resolve_key(scope)?;
-    *guard = Some(key);
-    Ok(key)
+    with_key_cache(scope, |slot| {
+        if let Some(key) = *slot {
+            return Ok(key);
+        }
+        let key = resolve_key(scope)?;
+        *slot = Some(key);
+        Ok(key)
+    })?
 }
 
 /// 定出这个域当前该用哪把密钥：环境变量兜底（只有账号域有）优先于密钥文件。
@@ -196,6 +220,10 @@ fn env_key(scope: SecretScope) -> Option<[u8; KEY_LEN]> {
     let SecretScope::Accounts = scope else {
         return None;
     };
+    #[cfg(test)]
+    if !crate::test_support::is_isolated() {
+        return None;
+    }
     let Some(raw) = std::env::var(ACCOUNT_KEY_ENV).ok() else {
         return None;
     };
@@ -294,10 +322,8 @@ fn create_key_file(path: &std::path::Path) -> Result<[u8; KEY_LEN], String> {
 /// 会代表一把**不是**当下加解密实际在用的钥匙，比对结果就成了误导。
 fn existing_key(scope: SecretScope) -> Option<[u8; KEY_LEN]> {
     // 1) 进程内已解析过：它就是本进程 seal/open 正在用的钥匙，优先级最高
-    if let Ok(guard) = cache_for(scope).lock() {
-        if let Some(key) = *guard {
-            return Some(key);
-        }
+    if let Some(key) = with_key_cache(scope, |slot| *slot).ok().flatten() {
+        return Some(key);
     }
     // 2) 环境变量兜底（只有账号域认，见模块头）；与 resolve_key 同一优先级
     if let Some(key) = env_key(scope) {
@@ -359,9 +385,7 @@ pub fn fingerprint_of(bytes: &[u8]) -> String {
 /// `Accounts` 之外的域不会被替换，重置它们只是多一次读文件，但**不做**：调用方
 /// 只该传真的换过密钥的那个域，保留「重置 = 我确实换了文件」的语义。
 pub fn reset_cache(scope: SecretScope) {
-    if let Ok(mut guard) = cache_for(scope).lock() {
-        *guard = None;
-    }
+    let _ = with_key_cache(scope, |slot| *slot = None);
     if matches!(scope, SecretScope::Accounts) {
         crate::server::core::providers::catalog::invalidate();
     }
@@ -381,11 +405,9 @@ pub fn existing_key_bytes(scope: SecretScope) -> Option<[u8; KEY_LEN]> {
 }
 
 pub(crate) fn backup_key(scope: SecretScope) -> Result<Option<[u8; KEY_LEN]>, String> {
-    let guard = cache_for(scope).lock().map_err(|_| "密钥锁不可用".to_string())?;
-    if let Some(key) = *guard {
+    if let Some(key) = with_key_cache(scope, |slot| *slot).map_err(|_| "密钥锁不可用".to_string())? {
         return Ok(Some(key));
     }
-    drop(guard);
     if let Some(key) = env_key(scope) {
         return Ok(Some(key));
     }

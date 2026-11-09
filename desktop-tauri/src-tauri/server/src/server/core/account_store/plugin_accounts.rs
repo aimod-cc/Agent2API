@@ -50,7 +50,10 @@ const SKELETON_KEYS: &[&str] = &[
     "needsReloginReason",
     "nameCustom",
     "pluginIdentity",
+    "pluginIdentityContract",
+    "pluginState",
     "usageQuery",
+    "userAgent",
 ];
 
 /// 把一条**内置家**记录的凭证字段摊成插件认的 secret 形态。
@@ -96,7 +99,7 @@ fn secret_of(record: &StoredAccount) -> Value {
         _ => flatten_builtin_secret(record),
     };
     let key = crate::server::core::providers::zcode::PLAN_FIELD;
-    if super::is_zcode_family(&record.provider()) {
+    if super::is_zcode_family(&record.provider()) && record.get("pluginIdentityContract").and_then(Value::as_u64) != Some(1) {
         if let Some(plan) = record.get(key).and_then(Value::as_str)
             .and_then(crate::server::core::providers::zcode::normalize_plan) {
             if let Some(fields) = secret.as_object_mut() { fields.insert(key.to_string(), Value::String(plan.to_string())); }
@@ -176,16 +179,10 @@ impl AccountStore {
                 Some(ProxyResolution::Resolved(proxy)) if proxy.port.is_none() => {
                     serde_json::json!({ "state": "failed", "message": "代理端口必须是 1-65535 的整数" })
                 }
-                Some(ProxyResolution::Resolved(proxy)) => serde_json::json!({
-                    "state": "resolved",
-                    "proxy": agent2api_provider_protocol::WireProxy {
-                        protocol: proxy.protocol,
-                        host: proxy.host,
-                        port: proxy.port,
-                        username: proxy.username,
-                        password: proxy.password,
-                    },
-                }),
+                Some(ProxyResolution::Resolved(proxy)) => match crate::server::core::proxies::chain::wire_json(&proxy) {
+                    Ok(proxy) => serde_json::json!({ "state": "resolved", "proxy": proxy }),
+                    Err(message) => serde_json::json!({ "state": "failed", "message": message }),
+                },
                 Some(ProxyResolution::Failed(message)) => serde_json::json!({
                     "state": "failed",
                     "message": message,
@@ -196,6 +193,7 @@ impl AccountStore {
         Some(serde_json::json!({
             "id": record.id(),
             "provider": record.provider(),
+            "identity": record.get("pluginIdentity").cloned().unwrap_or_else(|| Value::String(record.id().to_string())),
             "secret": secret,
             "public": public,
             "maxConcurrentConfigured": record.get("maxConcurrent").and_then(Value::as_u64).unwrap_or(0),
@@ -304,6 +302,12 @@ impl AccountStore {
             record.set(SECRET_KEY, secret.clone());
             if let Some(public) = public.filter(|value| value.is_object()) {
                 record.set(PUBLIC_KEY, public.clone());
+                if record.get("pluginIdentityContract").and_then(Value::as_u64) == Some(1)
+                    || crate::server::core::plugin_host::script::known_provider(&record.provider()) {
+                    for key in ["needsRelogin", "needsReloginReason"] {
+                        if let Some(value) = public.get(key) { record.set(key, value.clone()); }
+                    }
+                }
             }
             // 镜像（只对顶层已存在的键）：卸载插件后内置实现仍拿得到新令牌
             for key in MIRROR_KEYS {
@@ -321,7 +325,7 @@ impl AccountStore {
                 record.set(PUBLIC_KEY, Value::Object(public));
             }
             // 授权状态与当前凭据一并条件写入，不能让旧刷新失败覆盖重新登录的新凭据。
-            if record.provider() == "codearts" {
+            if record.provider() == "codearts" && record.get("pluginIdentityContract").and_then(Value::as_u64) != Some(1) {
                 if secret.get("needsRelogin").and_then(Value::as_bool) == Some(true) {
                     record.set("needsRelogin", Value::Bool(true));
                     record.set(
@@ -471,7 +475,8 @@ impl AccountStore {
             }
             let is_new = current.is_none();
             let mut record = if let Some(mut record) = current {
-                let zcode_plan = super::is_zcode_family(&record.provider()).then(|| record.zcode_plan());
+                let zcode_plan = (record.get("pluginIdentityContract").and_then(Value::as_u64) != Some(1)
+                    && super::is_zcode_family(&record.provider())).then(|| record.zcode_plan());
                 record.set_provider(provider);
                 // 原插件调用保留历史来源；本体接管或首次缺来源时记当前执行来源。
                 if source == "builtin" || record.get("source").is_none() {
@@ -514,6 +519,7 @@ impl AccountStore {
             super::plugin_identity::mirror_identity(&mut record, provider);
             // RAW secret 原样保留；旧凭证镜像契约不变，代理配置只写账号顶层。
             if let Some(proxy) = proxy { record.set_proxy(proxy.clone()); }
+            record.set("usageCredentialRevision", serde_json::json!(record.get("usageCredentialRevision").and_then(Value::as_u64).unwrap_or(0).saturating_add(1)));
             record.set_updated_at(logging::now_ms());
             if is_new {
                 crate::server::core::account_store::sql::put(&tx, &record)?;
@@ -559,7 +565,8 @@ impl AccountStore {
         // 身份、启用状态与队列元数据归网关，不能被插件展示字段覆盖。
         public.insert("id".to_string(), Value::String(record.id().to_string()));
         public.insert("provider".to_string(), Value::String(record.provider()));
-        if let Some(region) = crate::server::core::providers::qoder::endpoints::Region::from_provider_id(&record.provider()) {
+        if let Some(region) = crate::server::core::providers::qoder::endpoints::Region::from_provider_id(&record.provider())
+            .filter(|_| record.get("pluginIdentityContract").and_then(Value::as_u64) != Some(1)) {
             public.insert("edition".to_string(), Value::String(region.edition().to_string()));
             public.insert("editionLabel".to_string(), Value::String(region.label().to_string()));
         }

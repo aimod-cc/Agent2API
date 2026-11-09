@@ -88,6 +88,16 @@ export {
   SelectSeparator,
 } from './select'
 export {
+  Combobox,
+  ComboboxTrigger,
+  ComboboxValue,
+  ComboboxContent,
+  ComboboxInput,
+  ComboboxList,
+  ComboboxItem,
+  ComboboxEmpty,
+} from './combobox'
+export {
   SegmentedControl,
   type SegmentedControlOption,
   type SegmentedControlProps,

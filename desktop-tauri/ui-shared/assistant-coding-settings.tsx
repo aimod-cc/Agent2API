@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Alert, Button, Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, Field, FieldDescription, FieldLabel, Input, Switch, Textarea } from '@ui'
+import { Alert, Button, Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, Field, FieldDescription, FieldLabel, Input, Switch } from '@ui'
 import { CODING_BASE, codingConnection, type CodingConfig, type CodingStatus, type CodingTranslate, type CodingTransport } from './assistant-coding-types'
 
 export function CodingSettings({ open, onOpenChange, config, transport, t, onSaved }: {
@@ -8,7 +8,6 @@ export function CodingSettings({ open, onOpenChange, config, transport, t, onSav
 }) {
   const [executable, setExecutable] = useState('')
   const [home, setHome] = useState('')
-  const [roots, setRoots] = useState('')
   const [enabled, setEnabled] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -17,7 +16,7 @@ export function CodingSettings({ open, onOpenChange, config, transport, t, onSav
   useEffect(() => {
     if (!open) return
     setExecutable(config?.executable || ''); setHome(config?.codexHome || '')
-    setRoots(config?.workspaceRoots.join('\n') || ''); setEnabled(config?.enabled ?? false)
+    setEnabled(config?.enabled ?? false)
     setError(''); setStatus(null)
   }, [open])
   const save = async (check: boolean) => {
@@ -25,7 +24,7 @@ export function CodingSettings({ open, onOpenChange, config, transport, t, onSav
     saving.current = true; setBusy(true); setError(''); setStatus(null)
     try {
       const result = await transport.json<{ config: CodingConfig }>('PUT', `${CODING_BASE}/config`, {
-        enabled, executable: executable.trim(), codexHome: home.trim(), workspaceRoots: roots.split(/\r?\n/).map(root => root.trim()).filter(Boolean),
+        enabled, executable: executable.trim(), codexHome: home.trim(),
       })
       onSaved(result.config)
       if (check && enabled) {
@@ -36,12 +35,9 @@ export function CodingSettings({ open, onOpenChange, config, transport, t, onSav
   }
   return <Dialog open={open} onOpenChange={value => { if (!busy) onOpenChange(value) }}>
     <DialogContent className='max-w-xl'>
-      <DialogHeader><DialogTitle>{t('本机 Codex 设置')}</DialogTitle><DialogDescription>{t('由 Agent2API 直接启动本机官方 Codex，无需 HAPI 或其他守护程序。')}</DialogDescription></DialogHeader>
+      <DialogHeader className='flex-col items-start'><DialogTitle>{t('本机 Codex 设置')}</DialogTitle><DialogDescription>{t('由 Agent2API 直接启动本机官方 Codex，无需 HAPI 或其他守护程序。')}</DialogDescription></DialogHeader>
       <DialogBody className='gap-4'>
         <Field orientation='horizontal'><FieldLabel htmlFor='coding-enabled'>{t('启用本机 Codex')}</FieldLabel><Switch id='coding-enabled' checked={enabled} onCheckedChange={setEnabled} disabled={busy} /></Field>
-        <Field><FieldLabel htmlFor='coding-roots'>{t('允许使用的项目目录')}</FieldLabel>
-          <Textarea id='coding-roots' value={roots} onChange={e => setRoots(e.target.value)} disabled={busy} rows={3} placeholder={'D:\\Code\n/Users/me/projects'} />
-          <FieldDescription>{t('每行一个已存在的绝对路径；只列出和打开这些目录内的会话，避免开放整块磁盘。')}</FieldDescription></Field>
         <Field><FieldLabel htmlFor='coding-executable'>{t('Codex 程序路径（可选）')}</FieldLabel>
           <Input id='coding-executable' value={executable} onChange={e => setExecutable(e.target.value)} disabled={busy} placeholder={t('留空自动查找已安装的 Codex')} />
           <FieldDescription>{t('Windows 可填写 codex.exe 或官方 npm 安装的 codex.cmd；不要填写启动参数。')}</FieldDescription></Field>

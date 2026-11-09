@@ -37,6 +37,7 @@ async function migrateLocalSorting(): Promise<boolean> {
     if (!Array.isArray(rules) || Object.prototype.hasOwnProperty.call(configured, provider)) continue
     const valid = rules.filter(rule => rule && typeof rule.on === 'boolean'
       && (rule.key === 'credit' && (rule.dir === 'soon' || rule.dir === 'late')
+        || rule.key === 'balance' && (rule.dir === 'high' || rule.dir === 'low')
         || rule.key === 'added' && (rule.dir === 'new' || rule.dir === 'old')))
     if (valid.length !== rules.length) continue
     if (!getStore().sorting?.rules[provider]) {
@@ -84,9 +85,15 @@ export async function saveGroupSortRules(provider: string, rules: GroupSortRule[
     toast(t('账号排序接口不可用，请确认网关与界面已更新'), 'err')
     return
   }
+  const supported = getStore().sorting?.balanceSortStates !== undefined
+  if (!supported && rules?.some(rule => rule.key === 'balance' && rule.on)) {
+    toast(t('当前网关不支持余额排序，请先更新网关'), 'err')
+    return
+  }
+  const compatible = supported ? rules : rules?.filter(rule => rule.key !== 'balance') ?? null
   patch({ sortBusy: true })
   try {
-    const sorting = await api.saveAccountSorting({ provider, rules })
+    const sorting = await api.saveAccountSorting({ provider, rules: compatible })
     if (!sorting?.rules || !sorting.accountOrder || !Array.isArray(sorting.providerOrder)) throw new Error(t('保存响应不完整，请刷新当前配置确认结果'))
     adoptAccountSorting(sorting)
     window.dispatchEvent(new CustomEvent('wb:account-sorting', { detail: sorting }))

@@ -81,7 +81,13 @@
     if (!isCustomProviderId(id)) throw new Error(wbI18n.t('不是自定义提供商'));
     const body = { id, name, protocol, baseUrl };
     if (typeof clientEmulation === 'string') body.clientEmulation = clientEmulation;
+    const before = await findProvider(id);
     await providers.customRequest('POST', '/api/custom-providers/update', body);
+    if (before && (before.baseUrl !== baseUrl || before.protocol !== protocol)) {
+      const accounts = wbApp.getState?.()?.accounts?.accounts || [];
+      window.wbAccountsView?.invalidateUsageTasks?.(accounts.filter(account => account.provider === id
+        && (!account.baseUrl || account.baseUrl === before.baseUrl)).map(account => account.id));
+    }
     await refreshAfterChange();
   }
 

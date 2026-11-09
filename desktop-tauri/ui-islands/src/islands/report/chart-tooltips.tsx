@@ -112,10 +112,12 @@ export function CacheTooltip(props: ChartTooltipProps) {
   const end = `${String(Number(row.hour.slice(11, 13)) + 1).padStart(2, '0')}:00`
   return <ChartTooltip {...props}>
     <div className='report-tooltip-title'>{hourText(row.hour)} — {end}<span>{dayLabel(row.hour.slice(0, 10))}</span></div>
-    <div className='report-tooltip-cache-rate'><span>{t('命中率')} <strong>{row.inputTokens ? formatPercent(row.rate) : '—'}</strong></span>
-      <span>{t('读取 {hit} ÷ 输入 {input}', { hit: formatInt(row.hitTokens), input: formatInt(row.inputTokens) })}</span></div>
-    <TokenSummary row={row.usage} cache={false} />
-    <Breakdown rows={row.models} total={row.totalTokens} label={t('模型分布')} />
+    {row.used ? <>
+      <div className='report-tooltip-cache-rate'><span>{t('命中率')} <strong>{formatPercent(row.rate)}</strong></span>
+        <span>{t('读取 {hit} ÷ 输入 {input}', { hit: formatInt(row.hitTokens), input: formatInt(row.inputTokens) })}</span></div>
+      <TokenSummary row={row.usage} cache={false} />
+      <Breakdown rows={row.models} total={row.totalTokens ?? 0} label={t('模型分布')} />
+    </> : <p className='report-tooltip-note'>{t('无数据')}</p>}
   </ChartTooltip>
 }
 

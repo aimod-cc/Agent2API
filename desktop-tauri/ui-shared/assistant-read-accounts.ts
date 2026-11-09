@@ -58,7 +58,8 @@ function proxySummary(value: unknown, t: Translate) {
 export function usageSummary(value: unknown, t: Translate) {
   const usage = object(value)
   return {
-    ...fields(usage, ['totalLeft', 'planLeft', 'bonusLeft', 'available', 'availableView', 'unit', 'unlimited']),
+    ...fields(usage, ['totalLeft', 'planLeft', 'bonusLeft', 'available', 'availableView', 'unit', 'unlimited', 'empty']),
+    emptyText: diagnosticText(usage.emptyText, t),
     statisticsError: diagnosticText(usage.statisticsError, t),
     benefitError: diagnosticText(usage.benefitError, t),
     wallets: page(rows(usage.wallets).map(wallet => fields(wallet, [
@@ -151,7 +152,7 @@ export function accountReadTools(api: AssistantReadApi, t: Translate): Assistant
             currentAccount: snapshot.currentAccountId === id,
             connections: number(counts[id]) ?? 0,
             proxy: proxySummary(account.proxy, t),
-            usageQuery: fields(account.usageQuery, ['enabled', 'interval']),
+            usageQuery: fields(account.usageQuery, ['enabled', 'interval', 'retries']),
             lowBalance: fields(account.lowBalance, ['mode', 'threshold']),
           }
           payload.balance = usageRow ? {

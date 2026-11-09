@@ -50,6 +50,7 @@ export function setQuery(query: string): void { patch({ query }) }
 
 function accept(payload: AgentPayload): void {
   if (!payload || !Array.isArray(payload.clients)) throw new Error(t('客户端列表响应无效'))
+  if (payload.clients.some(client => !Array.isArray(client.configurations))) throw new Error(t('配置列表格式不匹配，请重启网关后刷新页面'))
   patch({ clients: payload.clients, gateway: payload.gateway.baseUrl, defaultModel: payload.gateway.defaultModel || '', requiresKey: payload.gateway.requiresKey,
     gatewayKeys: payload.gateway.keys || [], detectedAt: payload.detectedAt, hostName: payload.host?.name || '', error: '',
     selected: payload.clients.some(client => client.id === state.selected) ? state.selected : (payload.clients.find(client => client.detected)?.id || payload.clients[0]?.id || '') })
@@ -96,6 +97,20 @@ export async function saveProfiles(client: AgentClient, profiles: AgentProfile[]
   await mutation(client.id, () => call({ clientId: client.id, profiles, revision: client.revision }))
 }
 
+export async function saveConfiguration(client: AgentClient, profile: AgentProfile, creating: boolean): Promise<void> {
+  const call = host().workbuddyDesktop?.saveAgentProfiles
+  if (!call) throw new Error(t('当前环境不支持保存'))
+  await mutation(client.id, () => call({ clientId: client.id, action: 'config-save', profile,
+    profileId: creating ? '' : profile.id, liveId: profile.liveId || '', revision: client.revision, nativeRevision: client.nativeRevision, configPath: client.configPath }))
+}
+
+export async function removeConfiguration(client: AgentClient, profile: AgentProfile): Promise<void> {
+  const call = host().workbuddyDesktop?.saveAgentProfiles
+  if (!call) throw new Error(t('当前环境不支持保存'))
+  await mutation(client.id, () => call({ clientId: client.id, action: 'config-remove', profileId: profile.id,
+    liveId: profile.liveId || '', revision: client.revision, nativeRevision: client.nativeRevision, configPath: client.configPath }))
+}
+
 export async function savePath(client: AgentClient, configPath: string): Promise<void> {
   const call = host().workbuddyDesktop?.saveAgentProfiles
   if (!call) throw new Error(t('当前环境不支持保存'))
@@ -115,16 +130,19 @@ export async function requestPreview(client: AgentClient, profile: AgentProfile 
   const call = host().workbuddyDesktop?.previewAgentProfile
   if (!call) throw new Error(t('当前环境不支持预览'))
   return call({ clientId: client.id, profileId: profile?.id || '', ...(profile ? { profile } : {}), operation,
-    ...(operation.startsWith('native-') ? { nativeRevision: client.nativeRevision } : {}) })
+    ...(operation.startsWith('native-') || operation.startsWith('config-') ? { nativeRevision: client.nativeRevision } : {}),
+    ...(operation.startsWith('config-') ? { revision: client.revision, liveId: profile?.liveId || '', configPath: client.configPath } : {}) })
 }
 
 export async function applyProfile(client: AgentClient, profile: AgentProfile, operation: AgentOperation, preview: AgentPreview): Promise<void> {
   const call = host().workbuddyDesktop?.applyAgentProfile
   if (!call) throw new Error(t('当前环境不支持应用'))
-  const direct = operation.startsWith('native-') || operation === 'quick-connect'
+  const direct = operation.startsWith('native-') || operation.startsWith('config-') || operation === 'quick-connect'
   const result = await mutation(client.id, () => call({ clientId: client.id, profileId: profile.id, operation, token: preview.token,
-    ...(direct ? { profile, nativeRevision: client.nativeRevision } : {}) }))
+    ...(direct ? { profile, nativeRevision: client.nativeRevision } : {}),
+    ...(operation.startsWith('config-') ? { revision: client.revision, liveId: profile.liveId || '', configPath: client.configPath } : {}) }))
   if (!result.applied?.verified) throw new Error(t('客户端配置写入后未通过校验'))
+  if (operation === 'config-delete') { toast(t('配置已删除，客户端文件已同步更新')); return }
   toast(result.applied.changed ? client.id === 'dsh'
     ? t('配置文件已写入并校验；尚未验证 DSH 是否加载，请在所选客户端新建会话确认。')
     : t('配置已应用并读回校验；请重开客户端或会话') : t('客户端配置已经一致，无需写入'))

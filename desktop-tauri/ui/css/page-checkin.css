@@ -1,20 +1,12 @@
 /* ─────────────────────────────────────────────
    签到中心页（page-checkin.css）
 
-   页内四个标签页：签到中心、定时签到、定时补签、签到记录。
+   页内功能共用一条分段导航。
    定时签到与定时补签的页面布局在 page-checkin-schedule.css 中维护。
    页面骨架类名全部以 .ck- 前缀自持；控件（Badge / Button / Checkbox / Input /
    Progress / SegmentedControl / Select / Spinner / Switch / Pager）来自组件库，
    不在这里画。
    ───────────────────────────────────────────── */
-
-/* ── Tab 条：左档位 + 右总开关徽标 ── */
-.ck-tabs {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 14px;
-}
 
 /* ── 总览卡条 ── */
 .ck-stats {
@@ -288,6 +280,24 @@ body.ck-chain-dragging { cursor: grabbing; user-select: none; }
 .ck-range-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ck-mini-warn { margin-top: 6px; font-size: 11.5px; color: var(--warn); }
 
+/* 签到中心：整页固定高度，只有右栏列表内部滚动（与记录页同一取向） */
+.page.active[data-page="checkin"]:has(.ck-center) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: var(--pad);
+}
+.ck-page > .ck-center { flex: 1; min-height: 0; }
+/* 页面容器撑满剩余高度，统计与导航固定，列表内部滚动。 */
+.ck-page:has(> .ck-center) {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.ck-page:has(> .ck-center) > .ck-task-row,
+.ck-page:has(> .ck-center) > .ck-page-error { flex: none; }
+
 /* ── 签到记录：明细表 ── */
 .page.active[data-page="checkin"]:has(.ck-page-records) {
   display: flex;
@@ -304,7 +314,8 @@ body.ck-chain-dragging { cursor: grabbing; user-select: none; }
   min-height: 0;
   min-width: 0;
 }
-.ck-page-records > .ck-tabs,
+.ck-page-records > .ck-task-row,
+.ck-page-records > .ck-page-error,
 .ck-records-panel > .panel-head,
 .ck-records-panel > .ck-filters,
 .ck-records-panel > .ck-fold-note,
@@ -329,6 +340,209 @@ body.ck-chain-dragging { cursor: grabbing; user-select: none; }
 .ck-record-source { font-variant-numeric: tabular-nums; }
 .ck-record-reason { margin-left: 6px; color: var(--text-3); font-size: 11.5px; }
 .ck-record-detail-fail { color: var(--danger); }
+
+/* ── 总览指标：紧凑横条（原四张大卡，占掉近三分之一屏高）── */
+.ck-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  margin-bottom: 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--hairline);
+  overflow: hidden;
+  flex: none;
+}
+.ck-metric {
+  display: flex;
+  align-items: baseline;
+  align-content: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+  padding: 12px 16px;
+  border: 0;
+  border-radius: 0;
+  background: var(--surface);
+  color: inherit;
+  text-align: left;
+  font: inherit;
+}
+.ck-metric-link { cursor: pointer; transition: background-color .14s ease; }
+.ck-metric-link:hover { background: var(--row-hover); }
+.ck-metric-link:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.ck-metric-label { font-size: 11px; color: var(--text-2); }
+.ck-metric-value {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.25;
+  font-variant-numeric: tabular-nums;
+}
+.ck-metric-value small {
+  margin-left: 2px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-3);
+}
+.ck-metric-foot {
+  flex-basis: 100%;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+/* ── 功能导航：任务、排程与记录共用一行 ── */
+.ck-task-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  margin-bottom: 12px;
+  flex: none;
+}
+.ck-task-nav {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.ck-task-actions { display: flex; align-items: center; gap: 10px; flex: none; }
+
+/* ── 三层骨架：任务 → 提供商（左栏）→ 账号（右栏）──
+   整页不滚动：只有右栏的账号列表滚（`.ck-task-scroll`）。 */
+.ck-center {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.ck-split {
+  display: grid;
+  grid-template-columns: 238px minmax(0, 1fr);
+  gap: 16px;
+  flex: 1;
+  min-height: 0;
+  align-items: stretch;
+}
+
+/* ── 提供商分类栏 ── */
+.ck-provider-rail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding-right: 14px;
+  border-right: 1px solid var(--border);
+}
+.ck-provider-rail-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 8px 8px;
+}
+.ck-provider-rail-head h3 { font-size: 12.5px; font-weight: 600; }
+.ck-provider-rail-head span { font-size: 10.5px; color: var(--text-3); }
+.ck-provider-nav { flex: 1; overflow-y: auto; min-height: 0; }
+.ck-provider-nav [data-slot='nav-item'] { padding: 6px 8px; font-size: 12px; }
+.ck-provider-all-icon {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  background: var(--control);
+  color: var(--text-2);
+}
+.ck-provider-count {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.ck-provider-count.pending { color: var(--warn); font-weight: 600; }
+.ck-provider-nav [data-slot='nav-item'][data-active] .ck-provider-count { color: inherit; }
+.ck-provider-note {
+  margin: 10px 8px 0;
+  font-size: 10.5px;
+  line-height: 1.55;
+  color: var(--text-3);
+}
+
+/* ── 右栏卡片：标题与脚注固定，只有中间的账号列表滚 ── */
+.ck-task-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  margin-bottom: 0;
+}
+.ck-task-head { flex: none; }
+.ck-task-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px 0;
+}
+.ck-task-foot { flex: none; }
+.ck-provider-note-row {
+  flex: none;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--surface-2);
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+.ck-provider-note-row p { margin: 0; }
+
+/* 每日签到的账号列表：左栏选「全部」时按家分组 */
+.ck-account-list { display: flex; flex-direction: column; }
+.ck-account-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--surface-2);
+  font-size: 11.5px;
+}
+.ck-account-group > span:first-of-type { font-weight: 550; }
+.ck-account-list [data-slot='item'],
+.ck-account-list > .flex { padding: 0 14px; }
+.ck-account-list > div:not(.ck-account-group) { border-bottom: 1px solid var(--hairline); }
+.ck-account-list > div:not(.ck-account-group):last-child { border-bottom: 0; }
+.ck-account-list > div:not(.ck-account-group):hover { background: var(--row-hover); }
+.ck-list-empty {
+  padding: 24px 16px;
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+.ck-plans-embedded { display: flex; flex-direction: column; }
+
+/* 窄窗口：左栏收窄，指标两列 */
+@media (max-width: 1180px) {
+  .ck-split { grid-template-columns: 200px minmax(0, 1fr); }
+  .ck-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ck-metric { padding: 8px 12px; }
+}
+
+/* 手机 / 极窄：左栏改成横向滚动条，不占纵向空间 */
+@media (max-width: 767px) {
+  .ck-split { display: flex; flex-direction: column; }
+  .ck-provider-rail {
+    flex: none;
+    padding: 0 0 8px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .ck-provider-nav { flex: none; flex-direction: row; overflow-x: auto; overflow-y: hidden; }
+  .ck-provider-nav [data-slot='nav-item'] { width: auto; flex: none; }
+  .ck-provider-note { display: none; }
+}
 
 /* ── 空态 / 加载态（整页级与卡内共用）── */
 .ck-empty {
@@ -373,7 +587,6 @@ body.ck-chain-dragging { cursor: grabbing; user-select: none; }
 .ck-main > .panel { margin-bottom: 0; }
 .ck-main > .panel + .panel { margin-top: 14px; }
 
-.ck-tabs-spacer { flex: 1; }
 /* 顶栏刷新：与其它页顶栏的文字按钮同一档（不高过 SegmentedControl 的 24px 太多） */
 .ck-refresh {
   padding: 0 8px;
@@ -466,10 +679,6 @@ body.ck-chain-dragging { cursor: grabbing; user-select: none; }
 /* ── 任务行（新手福利明细）── */
 .ck-task-title { flex: 1; min-width: 0; }
 .ck-task-pts { font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
-
-@media (max-width: 767px) {
-  .ck-tabs { flex-wrap: wrap; gap: 8px; }
-}
 
 @media (max-width: 420px) {
   .ck-stats { grid-template-columns: minmax(0, 1fr); }

@@ -108,9 +108,19 @@ pub fn save_client(
     profiles: &[Profile],
     expected: &str,
 ) -> Result<(), String> {
+    save_client_with(db, client, profiles, expected, || Ok(()))
+}
+
+pub fn save_client_with<T>(
+    db: Option<&Db>,
+    client: &str,
+    profiles: &[Profile],
+    expected: &str,
+    apply: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
     let db = db.ok_or("数据库不可用，无法保存方案")?;
     let encoded: Vec<Value> = profiles.iter().map(encode).collect::<Result<_, _>>()?;
-    db.with_mut(|connection| -> Result<(), String> {
+    let result = db.with_mut(|connection| -> Result<T, String> {
         let transaction = connection.transaction().map_err(|e| format!("开启方案事务失败: {e}"))?;
         let text: Option<String> = transaction.query_row("SELECT value FROM kv WHERE key = ?1", [KEY], |row| row.get(0))
             .optional().map_err(|e| format!("读取方案失败: {e}"))?;
@@ -125,10 +135,12 @@ pub fn save_client(
         let text = serde_json::to_string(&all).map_err(|e| format!("生成方案失败: {e}"))?;
         transaction.execute("INSERT INTO kv(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", rusqlite::params![KEY, text])
             .map_err(|e| format!("保存方案失败: {e}"))?;
-        transaction.commit().map_err(|e| format!("提交方案失败: {e}"))
+        let result = apply()?;
+        transaction.commit().map_err(|e| format!("配置列表保存失败: {e}；如已写入客户端，请重新检测，原文件备份仍保留"))?;
+        Ok(result)
     }).ok_or("数据库锁不可用")??;
     crate::server::core::cloud_sync::auto_sync::notify_change();
-    Ok(())
+    Ok(result)
 }
 
 pub fn from_request(value: &Value, old: Option<&Profile>) -> Result<Profile, String> {

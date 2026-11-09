@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
-use super::{config::CodingConfig, now, string};
+use super::{config, now, projects::{self, CodingProject}, string};
 
 #[derive(Clone)]
 pub struct Permission {
@@ -29,6 +29,11 @@ pub struct LiveThread {
     pub permission_mode: String,
     pub sandbox: Value,
     pub settings: Value,
+    pub token_usage: Value,
+    pub usage_revision: u64,
+    pub usage_updated_at: Option<i64>,
+    pub usage_source: Option<String>,
+    pub metadata_checked_at: i64,
     pub terminals: usize,
     pub terminal_pending: usize,
     pub terminal_error: Option<String>,
@@ -75,7 +80,7 @@ impl SessionState {
         for id in ids { self.changed(&id); }
     }
 
-    pub fn snapshot(&self, thread: &Value, config: &CodingConfig, running: bool) -> Value {
+    pub fn snapshot(&self, thread: &Value, projects: &[CodingProject], running: bool) -> Value {
         let id = string(thread, "id");
         let state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let live = state.threads.get(id);
@@ -96,18 +101,28 @@ impl SessionState {
         let title = thread.get("name").and_then(Value::as_str).filter(|v| !v.is_empty())
             .unwrap_or_else(|| string(thread, "preview"));
         let active = running && live.is_some_and(|l| l.attached && !l.ending);
+        let directory = config::canonical_directory(string(thread, "cwd")).ok();
+        let project = directory.as_deref().and_then(|path| projects::find(projects, path));
         json!({ "id": id, "engine": "codex", "title": title.chars().take(160).collect::<String>(),
             "directory": string(thread, "cwd"), "machineId": "local", "active": active,
+            "projectId": project.map(|project| &project.id), "projectName": project.map(|project| projects::name(&project.directory)),
             "thinking": running && live.is_some_and(|l| l.turn.is_some() || l.thread.pointer("/status/type").and_then(Value::as_str) == Some("active")),
             "updatedAt": thread.get("updatedAt").and_then(Value::as_i64).unwrap_or(now() / 1000) * 1000,
             "model": live.and_then(|l| l.model.as_ref()), "permissionMode": live.map(|l| l.permission_mode.as_str()).filter(|m| !m.is_empty()),
+            "modelProvider": live.and_then(|l| l.settings.get("modelProvider")).or_else(|| thread.get("modelProvider")),
+            "reasoningEffort": live.and_then(|l| l.settings.get("effort")),
+            "serviceTier": live.and_then(|l| l.settings.get("serviceTier")),
+            "settingsRevision": live.map(|l| l.settings_revision).unwrap_or(0),
+            "settingsKnown": live.is_some_and(|l| l.settings.get("model").is_some()),
+            "tokenUsage": live.map(|l| &l.token_usage), "usageUpdatedAt": live.and_then(|l| l.usage_updated_at),
+            "usageSource": live.and_then(|l| l.usage_source.as_ref()), "forkedFromId": thread.get("forkedFromId"),
             "pendingCount": permissions.len(), "permissions": permissions,
             "terminalCount": live.map(|s| s.terminals).unwrap_or(0),
             "terminalOpening": live.is_some_and(|s| s.terminal_pending > 0),
             "terminalError": live.and_then(|s| s.terminal_error.as_ref()),
             "shared": true, "activeTurnId": live.and_then(|s| s.turn.as_ref()),
             "lifecycle": if active { "running" } else { "inactive" },
-            "accessible": config.directory(string(thread, "cwd")).is_ok(),
+            "accessible": project.is_some(),
         })
     }
 }

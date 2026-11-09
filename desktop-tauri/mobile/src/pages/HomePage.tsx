@@ -19,6 +19,8 @@ import { providerLabel } from '../lib/providers'
 import { usePolling } from '../lib/usePolling'
 import { t } from '../i18n'
 import { Card, Button } from '@ui'
+import { BrandLogo } from '../../../ui-shared/brand-logo'
+import { mobileBranding } from '../lib/branding'
 
 /**
  * 首页。
@@ -29,6 +31,7 @@ import { Card, Button } from '@ui'
  */
 export function HomePage() {
   const state = useStore()
+  const branding = mobileBranding.useValue()
   const session = state.session
   const accounts = session?.accounts?.accounts || []
   const enabled = accounts.filter(item => item.enabled).length
@@ -81,6 +84,9 @@ export function HomePage() {
   return (
     <div className='m-page' ref={pull.bindRef}>
       <PullIndicator pull={pull.pull} refreshing={pull.refreshing} />
+      <div className='flex min-w-0 items-center gap-2 px-[18px] pt-4 text-xs text-muted-foreground'>
+        <BrandLogo branding={branding} size={22} /><span className='truncate'>{branding.displayName}</span>
+      </div>
       <PageHead
         title={t('网关运行中')}
         subtitle={t('{n} 个账号启用 · {m} 个限流中', { n: enabled, m: limited })}

@@ -63,6 +63,14 @@ impl Fallback {
         &self.current
     }
 
+    pub fn prepare_attempt(&mut self) {
+        for (name, value) in &mut self.current.headers {
+            if name.eq_ignore_ascii_case("x-stainless-retry-count") {
+                *value = self.attempts.to_string();
+            }
+        }
+    }
+
     pub async fn send(&mut self) -> Result<reqwest::Response, UpstreamRequestError> {
         self.attempts += 1;
         if self.policy.is_none() {

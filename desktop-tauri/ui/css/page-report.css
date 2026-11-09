@@ -1,15 +1,23 @@
 :root {
-  --report-slice-1: #367bf5;
-  --report-slice-2: #69a9dc;
-  --report-slice-3: #76b8b0;
-  --report-slice-4: #8999ba;
-  --report-slice-5: #b6add0;
-  --report-slice-6: #94adb9;
-  --report-slice-7: #c3c6a5;
-  --report-slice-8: #bea6a5;
-  --report-slice-9: #a2bab2;
+  --report-slice-1: #f73b00;
+  --report-slice-2: #f7bb07;
+  --report-slice-3: #4aaa4d;
+  --report-slice-4: #1872cb;
+  --report-slice-5: #3444a3;
+  --report-slice-6: #13c2c2;
+  --report-slice-7: #722ed1;
+  --report-slice-8: #eb2f96;
+  --report-slice-9: #a0d911;
+  --report-slice-10: #34d399;
+  --report-slice-11: #d946ef;
+  --report-slice-12: #ff85c0;
+  --report-slice-13: #b37feb;
+  --report-slice-14: #9d174d;
+  --report-slice-15: #ffa39e;
+  --report-slice-16: #69b1ff;
   --chart-other: #d3d5db;
-  --chart-tokens: var(--ui-primary);
+  --chart-tokens: #faad14;
+  --chart-cache-trend: #1677ff;
   --chart-cache: #729d96;
   --report-average: #a7adb8;
   --hm-0: var(--ui-surface-2);
@@ -20,32 +28,18 @@
 }
 
 :root[data-theme='dark'] {
-  --report-slice-1: #5493ff;
-  --report-slice-2: #6caddc;
-  --report-slice-3: #79b7af;
-  --report-slice-4: #8b9eba;
-  --report-slice-5: #b8afd0;
-  --report-slice-6: #92aebb;
-  --report-slice-7: #babea0;
-  --report-slice-8: #bfa5a5;
-  --report-slice-9: #9ab6aa;
   --chart-other: #54565f;
+  --chart-tokens: #d89614;
+  --chart-cache-trend: #1668dc;
   --chart-cache: #84b4ab;
   --report-average: #727985;
 }
 
 @media (prefers-color-scheme: dark) {
   :root[data-theme='system'] {
-    --report-slice-1: #5493ff;
-    --report-slice-2: #6caddc;
-    --report-slice-3: #79b7af;
-    --report-slice-4: #8b9eba;
-    --report-slice-5: #b8afd0;
-    --report-slice-6: #92aebb;
-    --report-slice-7: #babea0;
-    --report-slice-8: #bfa5a5;
-    --report-slice-9: #9ab6aa;
     --chart-other: #54565f;
+    --chart-tokens: #d89614;
+    --chart-cache-trend: #1668dc;
     --chart-cache: #84b4ab;
     --report-average: #727985;
   }
@@ -178,6 +172,9 @@
 .report-chart-empty { display: grid; place-items: center; min-height: 216px; }
 .report-chart-area .recharts-surface { font-family: var(--font-sans); }
 .report-chart-area .recharts-cartesian-axis-tick-value { font-variant-numeric: tabular-nums; }
+/* 折线点上的读数：填充色由代码按所属折线给，这里只管字与「挖空」用的描边
+   （描边取卡片底色，标签压到折线上时把线挖开，密集处也读得清） */
+.report-line-label { font-size: 11px; font-variant-numeric: tabular-nums; paint-order: stroke; stroke: var(--ui-card); stroke-width: 3px; stroke-linejoin: round; }
 .report-chart-area .recharts-wrapper:focus-visible, .donut-wrap .recharts-wrapper:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .report-chart-footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; margin-top: 8px; color: var(--text-3); font-size: 11px; line-height: 16px; }
 .report-model-legend { display: flex; flex-wrap: wrap; gap: 6px 12px; max-width: 100%; }
@@ -191,8 +188,8 @@
 .report-cache-inline-stats strong { font-size: 20px; line-height: 28px; font-weight: 500; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .report-cache-legend, .report-cache-legend > span { display: inline-flex; align-items: center; gap: 8px; }
 .report-cache-legend { gap: 20px; flex-wrap: wrap; }
-.report-rate-swatch { width: 12px; height: 0; border-top: 2px solid var(--chart-cache); }
-.report-token-swatch { width: 12px; height: 0; border-top: 2px dashed var(--chart-tokens); }
+.report-rate-swatch { width: 12px; height: 0; border-top: 2px solid var(--chart-cache-trend); }
+.report-token-swatch { width: 12px; height: 0; border-top: 2px solid var(--chart-tokens); }
 .report-source-panel { min-width: 0; }
 .report-source-content { padding-top: 0; }
 .report-source-table-wrap { overflow-x: auto; max-height: 400px; }
@@ -227,7 +224,7 @@
 .report-tooltip-requests strong { color: var(--text-2); font-weight: 500; }
 .report-tooltip-cache-rate { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 2px 12px; margin-bottom: 4px; color: var(--text-3); font-size: 11px; font-variant-numeric: tabular-nums; }
 .report-tooltip-cache-rate > span:first-child { white-space: nowrap; }
-.report-tooltip-cache-rate strong { color: var(--chart-cache); font-size: 14px; line-height: 20px; font-weight: 500; }
+.report-tooltip-cache-rate strong { color: var(--chart-cache-trend); font-size: 14px; line-height: 20px; font-weight: 500; }
 .report-tooltip-breakdown { margin-top: 6px; padding-top: 4px; border-top: 1px solid var(--hairline); }
 .report-tooltip-section-title, .report-tooltip-model { display: grid; grid-template-columns: minmax(0, 1fr) minmax(106px, max-content) 38px; gap: 8px; align-items: baseline; font-size: 11px; }
 .report-tooltip-section-title { margin-bottom: 2px; color: var(--text-3); line-height: 20px; }

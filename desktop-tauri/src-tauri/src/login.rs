@@ -281,16 +281,11 @@ fn kuku_sms_script(phone: &str) -> String {
 /// 发起命令一等到完成，前端就永远等不到 verify 那一步了。因此这里
 /// **spawn 后台等待循环**（复用 `run_embedded`：等 `/wait` Done / 失败 / 超时
 /// 后自行关窗），命令本身立刻返回。
-pub async fn start_kuku_sms(app: &AppHandle, phone: &str) -> Result<serde_json::Value, String> {
+pub async fn start_kuku_sms(app: &AppHandle, phone: &str, proxy: Option<Value>) -> Result<serde_json::Value, String> {
     if current_login(app).is_some() {
         return Err("已有登录流程在进行，请先完成当前登录或等待超时".to_string());
     }
-    let started = gateway::call(
-        "POST",
-        "/api/session/login/start",
-        Some(&json!({ "provider": "kuku" })),
-    )
-    .await?;
+    let started = start_provider_login("kuku", proxy).await?;
     let login_state = started
         .get("state")
         .and_then(serde_json::Value::as_str)
@@ -1083,7 +1078,8 @@ pub async fn start_with_options(
     social_restore: bool,
     options: Option<Value>,
 ) -> Result<Value, String> {
-    let dynamic = options.as_ref().is_some_and(|value| value.get("methodIndex").is_some());
+    let dynamic = options.as_ref().is_some_and(|value| value.get("methodIndex").is_some())
+        || crate::server::core::plugin_host::dynamic_login(&provider);
     if provider.trim() == "deepseek-web" {
         if current_login(app).is_some() {
             return Err("已有登录流程在进行，请先完成当前登录或等待超时".into());
@@ -1102,8 +1098,8 @@ pub async fn start_with_options(
         let proxy = options.as_ref().and_then(|value| value.get("proxy")).cloned();
         return start(app, edition, mode, provider, social_restore, proxy).await;
     }
-    let options = options.unwrap_or(Value::Null);
-    if options.get("methodIndex").and_then(Value::as_u64)
+    let options = options.unwrap_or_else(|| json!({}));
+    if options.get("methodIndex").is_some() && options.get("methodIndex").and_then(Value::as_u64)
         .filter(|index| *index <= 9_007_199_254_740_991).is_none()
     {
         return Err("登录方式索引必须是非负安全整数".into());
@@ -1288,6 +1284,9 @@ impl DynamicNavigation {
         if let Some((_, query)) = auth.fragment().and_then(|fragment| fragment.split_once('?')) {
             for (key, value) in url::form_urlencoded::parse(query.as_bytes()) { capture(&key, &value); }
         }
+        if started.get("captureCallback").and_then(Value::as_bool) == Some(false) {
+            callbacks.clear();
+        }
         Ok(Self { hosts, callbacks, loopback_pages })
     }
 
@@ -1440,6 +1439,12 @@ async fn run_dynamic_login(
     result
 }
 
+pub(crate) async fn start_provider_login(provider: &str, proxy: Option<Value>) -> Result<Value, String> {
+    let mut request = json!({ "provider": provider });
+    if let Some(proxy) = proxy { request["proxy"] = proxy; }
+    gateway::call("POST", "/api/session/login/start", Some(&request)).await
+}
+
 /// 发起一次登录。阻塞到登录完成、失败、取消或超时。
 ///
 /// `provider` 缺省（空串）按 workbuddy 处理 —— 老版本界面不会传它，
@@ -1460,32 +1465,32 @@ pub async fn start(
     }
     let provider = normalize_provider(&provider)?;
     if provider == "doubaowork" {
-        return crate::doubaowork_login::start(app, &mode).await;
+        return crate::doubaowork_login::start(app, &mode, proxy).await;
     }
     if let Some(region) = crate::server::core::providers::monkeycode::Region::from_provider_id(provider) {
-        return crate::monkeycode_login::start(app, region, &mode).await;
+        return crate::monkeycode_login::start(app, region, &mode, proxy).await;
     }
 
     // 小浣熊：授权地址由**后端适配器**生成（静态地址 + 本地生成的 state），
     // 所以请求体里只带 provider，不带 edition（那是 workbuddy 的端点维度）。
     if provider == "raccoon" {
-        return start_raccoon(app).await;
+        return start_raccoon(app, proxy).await;
     }
     // KukuAI：百度通行证官方登录页（适配器生成授权地址），登录成功后由壳侧
     // 读 Cookie 存储交回网关（见 `submit_kuku_login`）。
     if provider == "kuku" {
-        return start_kuku(app, &mode).await;
+        return start_kuku(app, &mode, proxy).await;
     }
     // OrcaTerm：官方 OAuth 授权页（适配器给的地址，自动跳微信二维码），回调
     // `orcaterm://oauth_callback?session_id=…` 由窗口拦下交回网关换令牌
     // （见 `start_orcaterm`）。
     if provider == "orcaterm" {
-        return start_orcaterm(app, &mode).await;
+        return start_orcaterm(app, &mode, proxy).await;
     }
     // CatPaw：授权地址要问一次上游 `login-config`，且 token 由上游**推**到本网关
     // 的 loopback 回调上（见 core::login::catpaw）。同样没有 edition 维度。
     if provider == "catpaw" {
-        return start_catpaw(app, &mode).await;
+        return start_catpaw(app, &mode, proxy).await;
     }
 
     // Qoder 的设备授权两站同构（见 core::login::qoder），`cn` 原样透传给后端 ——
@@ -1649,13 +1654,8 @@ pub async fn start(
 ///
 /// 只给内嵌窗口一种方式，理由见模块头（系统浏览器模式下自定义协议深链
 /// 需要系统注册 `office-raccoon://`，那是官方客户端装的，装了才有）。
-async fn start_raccoon(app: &AppHandle) -> Result<serde_json::Value, String> {
-    let started = gateway::call(
-        "POST",
-        "/api/session/login/start",
-        Some(&json!({ "provider": "raccoon" })),
-    )
-    .await?;
+async fn start_raccoon(app: &AppHandle, proxy: Option<Value>) -> Result<serde_json::Value, String> {
+    let started = start_provider_login("raccoon", proxy).await?;
     let login_state = started
         .get("state")
         .and_then(serde_json::Value::as_str)
@@ -1709,7 +1709,7 @@ async fn start_raccoon(app: &AppHandle) -> Result<serde_json::Value, String> {
 ///
 /// 前端已不提供网页登录入口（短信流程的隐藏窗口覆盖了同一页面），此函数
 /// 作为防御性保留（`start` 命令仍可能被老版本调用）。
-async fn start_kuku(app: &AppHandle, mode: &str) -> Result<serde_json::Value, String> {
+async fn start_kuku(app: &AppHandle, mode: &str, proxy: Option<Value>) -> Result<serde_json::Value, String> {
     // 登录态由壳侧读登录窗口的 Cookie 存储交回（见 `submit_kuku_login`）——
     // 系统浏览器里壳读不到，登录完成网关等不到 Cookie。因此 external 模式
     // 直接拒绝，不静默退回内嵌（用户点了 external 却弹出内嵌窗口，是
@@ -1721,12 +1721,7 @@ async fn start_kuku(app: &AppHandle, mode: &str) -> Result<serde_json::Value, St
                 .to_string(),
         );
     }
-    let started = gateway::call(
-        "POST",
-        "/api/session/login/start",
-        Some(&json!({ "provider": "kuku" })),
-    )
-    .await?;
+    let started = start_provider_login("kuku", proxy).await?;
     let login_state = started
         .get("state")
         .and_then(serde_json::Value::as_str)
@@ -1779,7 +1774,7 @@ async fn start_kuku(app: &AppHandle, mode: &str) -> Result<serde_json::Value, St
 /// `orcaterm://oauth_callback`，必须由**我们自己的窗口**拦下，因此只支持
 /// 内嵌窗口：系统浏览器里那一跳会被交给系统处理（装了官方 OrcaTerm 客户端
 /// 时被它接走，没装则是一个错误页），网关永远等不到 `session_id`。
-async fn start_orcaterm(app: &AppHandle, mode: &str) -> Result<serde_json::Value, String> {
+async fn start_orcaterm(app: &AppHandle, mode: &str, proxy: Option<Value>) -> Result<serde_json::Value, String> {
     if mode == "external" {
         return Err(
             "OrcaTerm 的回调是自定义协议（orcaterm://oauth_callback），只能由内嵌窗口接住；\
@@ -1787,12 +1782,7 @@ async fn start_orcaterm(app: &AppHandle, mode: &str) -> Result<serde_json::Value
                 .to_string(),
         );
     }
-    let started = gateway::call(
-        "POST",
-        "/api/session/login/start",
-        Some(&json!({ "provider": "orcaterm" })),
-    )
-    .await?;
+    let started = start_provider_login("orcaterm", proxy).await?;
     let login_state = started
         .get("state")
         .and_then(serde_json::Value::as_str)
@@ -1855,13 +1845,9 @@ async fn start_orcaterm(app: &AppHandle, mode: &str) -> Result<serde_json::Value
 async fn start_catpaw(
     app: &AppHandle,
     mode: &str,
+    proxy: Option<Value>,
 ) -> Result<serde_json::Value, String> {
-    let started = gateway::call(
-        "POST",
-        "/api/session/login/start",
-        Some(&json!({ "provider": "catpaw" })),
-    )
-    .await?;
+    let started = start_provider_login("catpaw", proxy).await?;
     let login_state = started
         .get("state")
         .and_then(serde_json::Value::as_str)

@@ -1,5 +1,5 @@
 /**
- * 账号设置弹窗的「查询设置」段：**每账号**的自动余额查询间隔。
+ * 账号设置弹窗的「查询设置」段：每账号的自动余额查询间隔与失败重试。
  *
  * 独立成文件的原因：accounts-dialogs.tsx 已超过单文件行数约定，这一段是完整
  * 的功能块（状态草稿 + 校验 + 渲染），放进去只会继续膨胀。
@@ -31,7 +31,10 @@ import {
 } from '@ui'
 import { t } from '../i18n'
 import { type AccountRecord } from './accounts-shared'
-import { usageQueryOf, USAGE_QUERY_MAX_SECONDS, USAGE_QUERY_MIN_SECONDS } from './accounts-domain'
+import {
+  usageQueryOf, USAGE_QUERY_MAX_SECONDS, USAGE_QUERY_MIN_SECONDS, USAGE_QUERY_MAX_RETRIES, USAGE_QUERY_MAX_TIMEOUT, USAGE_QUERY_DEFAULT_TIMEOUT,
+  type UsageQuerySettings,
+} from '../../../ui-shared/usage-query-settings'
 
 /** 间隔输入的单位（界面辅助；落库统一换算成秒） */
 type IntervalUnit = 'seconds' | 'minutes' | 'hours'
@@ -43,6 +46,8 @@ export type UsageDraft = {
   enabled: boolean
   intervalInput: string
   unit: IntervalUnit
+  retriesInput: string
+  timeoutInput?: string
 }
 
 /** 把秒数拆成「数字 + 最大可整除的单位」（900 秒 → 15 分钟）；0 → 5 分钟缺省 */
@@ -55,48 +60,52 @@ function splitInterval(seconds: number): { value: string; unit: IntervalUnit } {
 
 /** 账号现有配置 → 草稿（读侧缺省：开启、1 分钟 —— 见 accounts-domain） */
 export function usageDraftOf(account: AccountRecord | null | undefined): UsageDraft {
-  const { enabled, interval } = usageQueryOf(account)
+  const { enabled, interval, retries, timeoutSeconds } = usageQueryOf(account)
   // 关着的时候间隔输入给个 5 分钟的落点值：重新拨开时不用面对空输入框
   const intervalDraft = splitInterval(enabled ? interval : 0)
   return {
     enabled,
     intervalInput: intervalDraft.value,
     unit: intervalDraft.unit,
+    retriesInput: String(retries),
+    timeoutInput: String(timeoutSeconds || USAGE_QUERY_DEFAULT_TIMEOUT),
   }
 }
 
 export type UsageChanges =
   | { error: string }
-  | { patch: { usageQuery?: { enabled: boolean; interval: number } } }
+  | { patch: { usageQuery?: UsageQuerySettings } }
 
 /** 草稿转成完整查询配置；批量设置不与某一条账号的现值比较。 */
 export function readUsageDraft(draft: UsageDraft):
   | { error: string }
-  | { value: { enabled: boolean; interval: number } } {
-  if (!draft.enabled) return { value: { enabled: false, interval: 0 } }
+  | { value: UsageQuerySettings } {
+  const retries = Number(draft.retriesInput)
+  if (!draft.retriesInput.trim() || !Number.isInteger(retries) || retries < 0 || retries > USAGE_QUERY_MAX_RETRIES) {
+    return { error: t('失败重试次数必须是 0~{max} 的整数', { max: USAGE_QUERY_MAX_RETRIES }) }
+  }
+  const timeoutSeconds = Number(draft.timeoutInput ?? USAGE_QUERY_DEFAULT_TIMEOUT)
+  if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 15 || timeoutSeconds > USAGE_QUERY_MAX_TIMEOUT) {
+    return { error: t('整轮查询时限必须是 15~180 秒的整数') }
+  }
+  if (!draft.enabled) return { value: { enabled: false, interval: 0, retries, timeoutSeconds } }
   const input = Number(draft.intervalInput)
   const seconds = Math.round(input * UNIT_MS[draft.unit])
   if (!Number.isFinite(input) || input <= 0) return { error: t('请填写查询间隔') }
   if (seconds < USAGE_QUERY_MIN_SECONDS || seconds > USAGE_QUERY_MAX_SECONDS) {
     return { error: t('查询间隔必须是 {min} 秒 ~ 24 小时', { min: USAGE_QUERY_MIN_SECONDS }) }
   }
-  return { value: { enabled: true, interval: seconds } }
+  return { value: { enabled: true, interval: seconds, retries, timeoutSeconds } }
 }
 
 /** 相同配置不提交，非法间隔先于保存返回错误。 */
 export function readUsageChanges(account: AccountRecord, draft: UsageDraft): UsageChanges | null {
   const result = readUsageDraft(draft)
   if ('error' in result) return result
-  const seconds = result.value.interval
-  const patch: { usageQuery?: { enabled: boolean; interval: number } } = {}
+  const { enabled, interval, retries, timeoutSeconds } = result.value
   const current = usageQueryOf(account)
-  // 间隔输入框只在开启时渲染：关闭状态下的 intervalInput 是挂载时的旧值，
-  // 不拿它当改动（否则未配置过的账号保存一次就会凭空写进一份缺省间隔）
-  if (draft.enabled !== current.enabled || (draft.enabled && seconds !== current.interval)) {
-    patch.usageQuery = { enabled: draft.enabled, interval: draft.enabled ? seconds : current.interval }
-  }
-  if (!patch.usageQuery) return null
-  return { patch }
+  if (enabled === current.enabled && (!enabled || interval === current.interval) && retries === current.retries && timeoutSeconds === current.timeoutSeconds) return null
+  return { patch: { usageQuery: { enabled, interval: enabled ? interval : current.interval, retries, timeoutSeconds } } }
 }
 
 /** 「查询设置」段（受控组件：草稿在弹窗手里，保存时由 readUsageChanges 汇总） */
@@ -138,6 +147,22 @@ export function UsageSettingsSection({
           <span className='detail'>{t('30 秒 ~ 24 小时；手动查询会顺延下一轮')}</span>
         </FieldGroup>
       ) : null}
+      <Field orientation='horizontal' className='field-row mt-2.5 acct-usage-interval'>
+        <FieldLabel htmlFor={`${idPrefix}-timeout`}>{t('整轮查询时限')}</FieldLabel>
+        <Input id={`${idPrefix}-timeout`} type='number' min={15} max={USAGE_QUERY_MAX_TIMEOUT} step={1}
+          className='max-w-[110px]' value={draft.timeoutInput ?? String(USAGE_QUERY_DEFAULT_TIMEOUT)}
+          onChange={event => patch({ timeoutInput: event.currentTarget.value })} />
+        <span className='detail'>{t('秒；默认 60 秒，包含重试等待，多步骤查询可适当延长。')}</span>
+      </Field>
+      <Field orientation='horizontal' className='field-row mt-2.5 acct-usage-interval'>
+        <FieldLabel htmlFor={`${idPrefix}-retries`}>{t('失败重试次数')}</FieldLabel>
+        <Input id={`${idPrefix}-retries`} type='number' min={0} max={USAGE_QUERY_MAX_RETRIES} step={1}
+          className='max-w-[110px]' value={draft.retriesInput} aria-describedby={`${idPrefix}-retries-hint`}
+          onChange={event => patch({ retriesInput: event.currentTarget.value })} />
+        <span id={`${idPrefix}-retries-hint`} className='detail'>
+          {t('只重试临时故障；次数与整轮时间上限任一用尽即停止，凭证错误不重试。')}
+        </span>
+      </Field>
     </>
   )
 }

@@ -326,6 +326,7 @@ pub fn manage_view(store: &AccountStore) -> Value {
             "count": count,
             "source": if count == 0 { "none" } else { source },
             "refreshedAt": refreshed_at,
+            "settingsAvailable": crate::server::core::plugin_host::provider_settings::available(&provider),
         }));
         for item in manifest.iter().cloned() {
             push_managed_model(

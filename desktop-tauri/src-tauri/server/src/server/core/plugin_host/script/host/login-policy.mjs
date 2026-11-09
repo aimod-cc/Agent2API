@@ -1,3 +1,6 @@
+import { AGY_INSTRUCTIONS, isLocalProvider } from "./local-provider.mjs"
+import { applies } from "./login-prompts.mjs"
+
 const WPS_SITE = "https://lingxi.wps.cn/"
 const LOCAL_CLIENT_HINT = "读取的是网关电脑上已登录的客户端，不是打开面板的电脑；也可改用粘贴凭据。"
 
@@ -30,6 +33,10 @@ export function loginMethods(provider) {
         },
       })
     }
+  } else if (["intern-inkstone", "mclaw"].includes(provider.id)) {
+    // 这两家的登录与续期依赖插件自己的浏览器环境，不能替换成宿主开页。
+    for (const method of methods) if (method.type === "oauth" && !method.embeddedOnly
+      && (!method.browserMode || method.browserMode === "choice")) method.browserMode = "plugin"
   } else if (provider.id === "agnes-code") {
     for (const method of methods) if (method.type === "oauth") {
       method.localOnly = true
@@ -38,6 +45,14 @@ export function loginMethods(provider) {
     }
   }
   for (const method of methods) {
+    if (isLocalProvider(provider) && method.type === "oauth") {
+      method.label = "Google 授权（ACP）"
+      method.browserMode = "external"
+      method.instructions = AGY_INSTRUCTIONS
+    }
+    if (provider.id === "deepaicode" && method.type === "oauth") {
+      method.instructions = "浏览器显示登录完成后，网关还需联网获取账号凭据。若浏览器或 Magpie 使用系统代理，请先在下方点击「填入系统代理」；选择直连不会跟随系统代理。"
+    }
     if (method.type === "api" && (method.keyless || provider.id === "deepaicode" && method.prompts?.some(prompt => prompt.key === "dir"))) {
       method.instructions = LOCAL_CLIENT_HINT
     }
@@ -47,9 +62,16 @@ export function loginMethods(provider) {
 
 export function promptOptional(provider, method, prompt) {
   if (typeof prompt.optional === "boolean") return prompt.optional
-  if (prompt.required === true) return false
+  if (typeof prompt.required === "boolean") return !prompt.required
   if (provider.id === "deepaicode" && method.prompts?.some(item => item.key === "dir")) return true
   if (provider.id === "cloudflare-workers-ai" && prompt.key === "accountId") return false
+  if (typeof prompt.validate === "function") {
+    try {
+      const result = prompt.validate("")
+      if (result && typeof result.then === "function") { void result.catch(() => {}); return false }
+      return !result
+    } catch { return false }
+  }
   return /^(username|tenant)$/i.test(prompt.key)
 }
 
@@ -61,10 +83,7 @@ export function promptSecret(prompt) {
 
 export async function validateInputs(method, inputs) {
   for (const prompt of method.prompts ?? []) {
-    if (prompt.condition) {
-      const equal = (inputs[prompt.condition.key] ?? "") === prompt.condition.value
-      if (prompt.condition.op === "eq" ? !equal : equal) continue
-    }
+    if (!applies(prompt, inputs)) continue
     if (typeof prompt.validate !== "function") continue
     const error = await prompt.validate(inputs[prompt.key] ?? "")
     if (typeof error === "string" && error) throw new Error(error)
@@ -105,7 +124,7 @@ export function authorizationPolicy(provider, method, authorization) {
   return {
     targets,
     ui: {
-      browserMode: method.browserMode || "choice",
+      browserMode: authorization.opened === true ? "plugin" : method.browserMode || "choice",
       manualCallback: !method.cookieCapture && (authorization.method === "code" || targets.length > 0),
       callbackInput: authorization.method === "code" && !method.cookieCapture ? "code" : "url",
       cookieCapture: method.cookieCapture || null,

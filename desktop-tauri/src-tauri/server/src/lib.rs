@@ -29,6 +29,9 @@ pub mod port_conflict;
 pub mod server;
 pub mod web_shim;
 
+#[cfg(test)]
+mod test_support;
+
 use std::future::Future;
 use std::sync::OnceLock;
 

@@ -33,6 +33,15 @@ export type RuntimeProviderRecord = {
   count?: number
   category?: 'agent' | 'web'
   source?: 'builtin' | 'plugin'
+  dynamicLogin?: boolean
+  loginAvailable?: boolean
+  /**
+   * 这家出站请求的 User-Agent 能否按账号改写（后端 `providers::summary_json`）。
+   * false = 会话式家（CatPaw / Qoder / Trae 等），每一步请求由插件自己拼头，
+   * 网关覆盖不到 —— 添加账号与账号设置里都不显示 UA 输入框。
+   * 缺省（旧后端）按 true 处理。
+   */
+  userAgentOverridable?: boolean
   meta?: Record<string, unknown>
   login_methods?: unknown[]
   loginMethods?: unknown[]
@@ -174,7 +183,12 @@ export type SharedWindow = {
   }
   /** 手机验证码引擎（sms-login.js）：只调 create，交互全在引擎里 */
   wbSmsLogin?: {
-    create(config: { provider: string; onSuccess: (data?: unknown) => unknown }): unknown
+    create(config: {
+      provider: string
+      proxy?: () => unknown
+      onBusyChange?: (busy: boolean) => void
+      onSuccess: (data?: unknown) => unknown
+    }): unknown
   }
   /** AutoClaw 国际版 OAuth 引擎（autoclaw-oauth.js）：create / cancel（模块级遍历） */
   wbAutoclawOauth?: {
@@ -182,6 +196,8 @@ export type SharedWindow = {
       provider: string
       mode: () => string
       hint: () => string
+      proxy?: () => unknown
+      onBusyChange?: (busy: boolean) => void
       cancelId?: string
       onSuccess: (result?: unknown) => unknown
     }): OauthController | null | undefined
@@ -192,7 +208,7 @@ export type SharedWindow = {
     remove?: (providerId: string) => Promise<boolean>
   }
   /** 本弹窗的命令式外壳（本文件所在子系统提供，跨模块调用走它） */
-  wbAddAccountModal?: { open?: () => void; close?: () => void }
+  wbAddAccountModal?: { open?: () => void; openProvider?: (provider: string) => void; close?: () => void }
   /** 各家表单块的注册表（本子系统提供；account-panel / 模型管理页要调它的两个入口） */
   wbAccountAddForms?: {
     syncAddProvider?: () => void
@@ -361,6 +377,19 @@ export function normalizeLoginResult(value: unknown): LoginResult {
   }
 }
 
+export async function saveAccountProxySelection(result: LoginResult, proxy: unknown): Promise<LoginResult> {
+  if (result.canceled || result.proxySaved === true) return result
+  const id = result.account?.id || result.session?.accountUid || result.session?.accountId
+  let warning = t('旧网关未确认代理同次保存，已使用兼容接口保存；请在账号设置中确认代理选择。')
+  try {
+    if (typeof id !== 'string' || !id) throw new Error('Missing account ID')
+    await accountRequest('PATCH', `/api/accounts/${encodeURIComponent(id)}`, { proxy: proxy ?? { source: 'direct' } })
+  } catch {
+    warning = t('账号已添加，但代理选择未确认保存；请在账号设置中重新检查。')
+  }
+  return { ...result, warning: [result.warning, warning].filter(Boolean).join('\n') }
+}
+
 /**
  * provider-first 的岛内入口；现有 window bridge 保持 edition/mode/provider 的旧顺序。
  * 新 options 只能在第 5 个参数，不能顶掉第 4 个 socialRestore。
@@ -397,7 +426,9 @@ export async function startLogin(
         throw new Error(t('登录桥返回了空会话，无法确认账号已添加'))
       }
     }
-    return normalized
+    return options && Object.hasOwn(options, 'proxy') && !normalized.canceled
+      ? await saveAccountProxySelection(normalized, options.proxy)
+      : normalized
   } catch (failure) {
     const record = resultRecord(failure)
     if (record?.canceled === true) return { ok: false, canceled: true, silent: record.silent === true }

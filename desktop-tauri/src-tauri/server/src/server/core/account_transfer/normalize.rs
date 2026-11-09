@@ -193,6 +193,20 @@ pub(super) fn normalize_imported(
         normalize_custom_known_fields(&mut record, item, before)?;
     }
 
+    // ── 账号级自定义 User-Agent：出现才覆盖，且必须过同一道校验 ──
+    // 这个值会原样成为出站请求头，而导入文件是**用户可手改的**（与账号设置里
+    // 那条输入框同一风险面），所以不能只靠「添加账号」入口的校验。空串 / null
+    // 已被上面的「视为未提供」规则跳过，于是本机旧值不会被洗掉。
+    if let Some(value) = record.get("userAgent") {
+        let normalized = crate::server::core::client::catalog::normalize_user_agent_override(value)
+            .map_err(|error| error.message)?;
+        if normalized.is_empty() {
+            record.remove("userAgent");
+        } else {
+            record.insert("userAgent".to_string(), Value::String(normalized));
+        }
+    }
+
     // provider 已在上面落位：这里不再重复写入
     Ok(record)
 }

@@ -34,11 +34,13 @@ pub(crate) fn desktop(fields: &Map<String, Value>) -> bool {
 }
 
 pub(crate) fn reference(provider: &str, fields: &Map<String, Value>) -> bool {
+    if fields.get("pluginIdentityContract").and_then(Value::as_u64) == Some(1) { return desktop(fields); }
     // KukuAI 和 OrcaTerm 的桌面端导入保存凭证快照，来源徽章不构成另一条身份。
     desktop(fields) && !matches!(kind_from_id(provider), Some(ProviderKind::Kuku | ProviderKind::OrcaTerm))
 }
 
 pub(crate) fn guest(provider: &str, fields: &Map<String, Value>) -> bool {
+    if fields.get("pluginIdentityContract").and_then(Value::as_u64) == Some(1) { return false; }
     if kind_from_id(provider) != Some(ProviderKind::Chatglm) { return false; }
     let flag = fields.get("pluginSecret").and_then(|value| value.get("isGuest")).and_then(Value::as_bool)
         .or_else(|| fields.get("isGuest").and_then(Value::as_bool))
@@ -60,6 +62,9 @@ fn office_base(fields: &Map<String, Value>) -> String {
 }
 
 pub(crate) fn stable(provider: &str, fields: &Map<String, Value>) -> Option<String> {
+    if fields.get("pluginIdentityContract").and_then(Value::as_u64) == Some(1) {
+        return fields.get("pluginIdentity").and_then(field_text);
+    }
     if guest(provider, fields) { return None; }
     match kind_from_id(provider) {
         Some(ProviderKind::WorkBuddy | ProviderKind::WorkBuddyIntl) => text(fields, &["uid"]),
@@ -116,6 +121,9 @@ pub(crate) fn credential(provider: &str, fields: &Map<String, Value>) -> Option<
 }
 
 pub(crate) fn conflicts(provider: &str, left: &Map<String, Value>, right: &Map<String, Value>) -> bool {
+    if [left, right].iter().any(|fields| fields.get("pluginIdentityContract").and_then(Value::as_u64) == Some(1)) {
+        return matches!((left.get("pluginIdentity"), right.get("pluginIdentity")), (Some(a), Some(b)) if a != b);
+    }
     let differs = |keys: &[&str]| match (text(left, keys), text(right, keys)) {
         (Some(left), Some(right)) => left != right,
         _ => false,

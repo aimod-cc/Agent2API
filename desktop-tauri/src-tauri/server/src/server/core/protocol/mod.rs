@@ -1,28 +1,6 @@
-//! 协议转换：把下游的 **Responses**（`/v1/responses`）与 **Anthropic Messages**
-//! （`/v1/messages`）翻译成网关内部统一的 **Chat Completions**，再把回程翻译回去。
-//!
-//! ── 为什么以 Chat 为枢纽，而不是在每个适配器里各写一套 ────────
-//! 本项目各内置上游**在适配器 / 翻译层边界上最终都归一为 OpenAI Chat 协议**：
-//! 有状态家（会话型上游）在插件侧的 `conversation` 里被翻译成 OpenAI chunk
-//! 下发；无状态但响应异形的家（NDJSON、Gemini v1internal SSE 等）由
-//! `upstream::translate` 的翻译层折回 chat SSE —— 插件在 `chat` 回复里申报
-//! `UpstreamKind`，网关据此选翻译器。也就是说，「上游说 Chat」这件事在边界上
-//! **已经成立**。
-//!
-//! 于是协议转换只有两个可能的位置：
-//!   ① 在每家适配器里各写一遍（每家 × 2 协议）；
-//!   ② 在网关出入口写一次（2 套转换），让适配器完全不知情。
-//! ② 明显更优：适配器不必知道下游说的是什么协议（它本来就只认 Chat），
-//! 新增一家上游时也不用再补一套转换。本模块就是②的落点。
-//!
-//! ── 与参考实现（OmniProxy）的结构差异 ────────────────────────
-//! OmniProxy 以 **Responses 为枢纽**（Chat ↔ Responses ↔ Anthropic），
-//! 因为它上游同时存在三种协议、且要支持「下游 Responses → 上游 Anthropic」
-//! 这类直连。本项目在枢纽边界上**只见 Chat 这一种**（异构上游都在进入枢纽前
-//! 折回 chat），所以枢纽选 Chat：
-//! 每组转换都只走一跳，少一次中转，也少一处「中转丢字段」的风险。
-//! 转换规则本身（消息/工具/思考档位/usage 字段映射）大量参考了 OmniProxy
-//! 的 `gatewayProtocol*.ts`，并按本项目的口径收敛。
+//! 跨协议转换使用 Chat Completions 作为中间形态。
+//! 同协议请求另存原生体并绕过转换，签名、扩展字段与原生事件不经过 Chat 重建。
+//! 内置与插件适配器仍消费 Chat；自定义上游在发送时按实际协议选择原生或转换路径。
 //!
 //! ── 文件分工 ────────────────────────────────────────────────
 //!   mod.rs               本文件：共享原语（取值/转义/随机 id/SSE 编解码/行缓冲）
@@ -50,12 +28,14 @@
 
 pub mod anthropic;
 pub mod anthropic_outbound;
+pub mod anthropic_thinking;
 pub mod antigravity_signature_cache;
 pub mod antigravity_stream;
 pub mod chatglm_stream;
 pub mod ai_sdk_ndjson;
 pub mod freeform;
 pub mod history;
+pub mod native;
 pub mod native_tool;
 pub mod responses;
 pub mod responses_outbound;

@@ -6,6 +6,9 @@
   "private": true,
   "scripts": {
     "prepare": "git config core.hooksPath .githooks || exit 0",
+    "test:rust": "node scripts/cargo-test.mjs",
+    "test:rust:plugins": "node scripts/cargo-test.mjs --plugins",
+    "test:rust:coverage": "node scripts/cargo-test.mjs --coverage",
     "build:icon": "node build/make-icon.mjs",
     "tauri:install": "npm --prefix desktop-tauri install",
     "tauri:dev": "npm --prefix desktop-tauri run dev",

@@ -20,6 +20,47 @@ pub fn save_sandbox(db: &Db, scope: &str, thread: &str, sandbox: &Value) -> Resu
     Ok(())
 }
 
+pub fn reconcile(db: &Db, scope: &str, thread: &str, history: &mut Value) -> Result<(), CodingError> {
+    let submissions = db.with(|conn| {
+        let mut statement = conn.prepare("SELECT local_id,content_hash,state,turn_id FROM coding_submissions WHERE scope=?1 AND thread_id=?2 ORDER BY updated_at ASC")?;
+        let rows = statement.query_map(params![scope, thread], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?)))?;
+        rows.collect::<Result<Vec<_>, rusqlite::Error>>()
+    }).ok_or_else(|| CodingError::new(500, "数据库不可用"))?
+        .map_err(|_| CodingError::new(500, "读取 Codex 消息状态失败"))?;
+    let Some(items) = history.get_mut("items").and_then(Value::as_array_mut) else { return Ok(()); };
+    let mut matched = std::collections::HashSet::new();
+    for (local_id, hash, state, turn) in submissions {
+        if state == "rejected" { continue; }
+        let position = items.iter().enumerate().find(|(index, item)| !matched.contains(index)
+            && super::string(item, "type") == "userMessage" && super::string(item, "clientId") == local_id).map(|(index, _)| index)
+            .or_else(|| items.iter().enumerate().find(|(index, item)| {
+                if state != "consumed" || matched.contains(index) || super::string(item, "type") != "userMessage" || !super::string(item, "clientId").is_empty()
+                    || turn.as_deref() != Some(super::string(item, "turnId")) || !matches!(super::string(item, "turnStatus"), "completed" | "interrupted" | "failed") { return false; }
+                let Some(parts) = item.get("content").and_then(Value::as_array) else { return false; };
+                if parts.len() != 1 || super::string(&parts[0], "type") != "text" { return false; }
+                format!("{:x}", Sha256::digest(super::string(&parts[0], "text").as_bytes())) == hash
+            }).map(|(index, _)| index));
+        if let Some(index) = position {
+            matched.insert(index);
+            items[index]["clientId"] = json!(local_id);
+            if state != "consumed" { settle(db, scope, thread, &local_id, "consumed", Some(super::string(&items[index], "turnId")))?; }
+        }
+    }
+    Ok(())
+}
+
+pub fn submissions(db: &Db, scope: &str, thread: &str) -> Result<Vec<Value>, CodingError> {
+    db.with(|conn| {
+        let mut statement = conn.prepare("SELECT local_id,state,turn_id FROM coding_submissions WHERE scope=?1 AND thread_id=?2 ORDER BY updated_at DESC LIMIT 100")?;
+        let rows = statement.query_map(params![scope, thread], |row| Ok(json!({
+            "localId": row.get::<_, String>(0)?, "state": row.get::<_, String>(1)?, "turnId": row.get::<_, Option<String>>(2)?,
+        })))?;
+        rows.collect::<Result<Vec<_>, rusqlite::Error>>()
+    }).ok_or_else(|| CodingError::new(500, "数据库不可用"))?
+        .map_err(|_| CodingError::new(500, "读取 Codex 消息状态失败"))
+}
+
 fn existing_delivery(old_hash: &str, state: &str, local_id: &str, text: &str) -> Result<Value, CodingError> {
     let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
     if old_hash != hash { return Err(CodingError::new(409, "消息标识已被其他内容使用，未重复发送")); }

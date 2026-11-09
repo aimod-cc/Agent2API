@@ -19,8 +19,8 @@
 //! ── 请求发出**之前**就记一笔尝试 ─────────────────────────────
 //! 心跳路径在发出查询前先 `mark_attempt`（与 `core::task_state` 的 claim 同一
 //! 硬约束）：「请求途中被杀」不会留下「没跑过」的状态，下一轮仍按间隔来，
-//! 不会因崩溃循环把上游打成高频。代价是「失败的那一次也占用了本轮排期」，
-//! 而这正是要的（失败不退避、照常按间隔重试的用户决策）。
+//! 不会因崩溃循环把上游打成高频。同一轮的额外重试不会写入失败结果，耗尽
+//! 重试次数后才记录本轮失败，下一轮照常按间隔安排。
 //!
 //! ── 双实例共用同一个库 ──────────────────────────────────────
 //! 桌面壳允许开发版与正式版并存。本模块没有跨进程占位（余额查询是只读的，
@@ -77,6 +77,8 @@ pub struct UsageRecord {
     /// 最近一次成功 / 尝试的时刻（毫秒；0 = 从未）。
     pub last_success_at: i64,
     pub last_attempt_at: i64,
+    pub query_config: String,
+    pub query_request_id: String,
 }
 
 /// 一次查询的**结果**（成功带 usage，失败带 error；两者都不给 = 行为未定义，
@@ -109,11 +111,13 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageRecord> {
         unlimited: row.get::<_, i64>("unlimited").unwrap_or(0) != 0,
         last_success_at: row.get("last_success_at").unwrap_or(0),
         last_attempt_at: row.get("last_attempt_at").unwrap_or(0),
+        query_config: row.get("query_config").unwrap_or_default(),
+        query_request_id: row.get("query_request_id").unwrap_or_default(),
     })
 }
 
 const RECORD_COLUMNS: &str =
-    "usage, error, code, remaining, unlimited, last_success_at, last_attempt_at";
+    "usage, error, code, remaining, unlimited, last_success_at, last_attempt_at, query_config, query_request_id";
 
 /// 某账号的最近一条记录（没有 = 全缺省：从未查过）。
 pub fn load(account_id: &str) -> UsageRecord {
@@ -125,6 +129,8 @@ pub fn load(account_id: &str) -> UsageRecord {
         unlimited: false,
         last_success_at: 0,
         last_attempt_at: 0,
+        query_config: String::new(),
+        query_request_id: String::new(),
     };
     let Some(db) = database() else { return fallback };
     db.with(|conn| {
@@ -195,12 +201,9 @@ pub fn mark_attempt(account_id: &str) {
 /// 写入一次查询的结果（成功覆写数值，失败只写原因 —— 见模块头的取舍）。
 /// 内存事实表同步更新：成功且有数字 → 刷新；成功但判不出（unlimited / 形状不认）
 /// → 摘除（不能让一个过期的旧数字把账号永久挡在选路之外）。
-pub fn write_result(account_id: &str, outcome: &UsageOutcome) {
-    if let Some(usage) = &outcome.usage {
-        crate::server::core::limiter::sources::note(account_id, usage);
-    }
+pub fn write_result(account_id: &str, outcome: &UsageOutcome, query_config: &str, request_id: &str) -> bool {
     let now = logging::now_ms();
-    let Some(db) = database() else { return };
+    let Some(db) = database() else { return false };
     // 闭包返回 `(是否成功, 成功时提出的数字)`：失败分支只写原因、保留旧数值
     // （SQL 里就不碰 usage / remaining / last_success 三列），事实表按它更新。
     // `with_mut` 本身再包一层 Option（锁中毒 = None），match 前先 flatten。
@@ -212,8 +215,8 @@ pub fn write_result(account_id: &str, outcome: &UsageOutcome) {
                 conn.execute(
                     "INSERT INTO account_usage_records
                        (account_id, usage, error, code, remaining, unlimited,
-                        last_success_at, last_attempt_at, updated_at)
-                     VALUES (?1, ?2, NULL, NULL, ?3, ?4, ?5, ?5, ?5)
+                        last_success_at, last_attempt_at, updated_at, query_config, query_request_id)
+                     VALUES (?1, ?2, NULL, NULL, ?3, ?4, ?5, ?5, ?5, ?6, ?7)
                      ON CONFLICT(account_id) DO UPDATE SET
                        usage = excluded.usage,
                        error = NULL,
@@ -222,8 +225,10 @@ pub fn write_result(account_id: &str, outcome: &UsageOutcome) {
                        unlimited = excluded.unlimited,
                        last_success_at = excluded.last_success_at,
                        last_attempt_at = excluded.last_attempt_at,
-                       updated_at = excluded.updated_at",
-                    params![account_id, usage_text, remaining, unlimited as i64, now],
+                       updated_at = excluded.updated_at,
+                       query_config = excluded.query_config,
+                       query_request_id = excluded.query_request_id",
+                    params![account_id, usage_text, remaining, unlimited as i64, now, query_config, request_id],
                 )
                 .ok()?;
                 Some((true, remaining))
@@ -232,14 +237,15 @@ pub fn write_result(account_id: &str, outcome: &UsageOutcome) {
                 let error = outcome.error.clone().unwrap_or_else(|| "查询失败".to_string());
                 conn.execute(
                     "INSERT INTO account_usage_records
-                       (account_id, error, code, last_attempt_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?4)
+                       (account_id, error, code, last_attempt_at, updated_at, query_request_id)
+                     VALUES (?1, ?2, ?3, ?4, ?4, ?5)
                      ON CONFLICT(account_id) DO UPDATE SET
                        error = excluded.error,
                        code = excluded.code,
                        last_attempt_at = excluded.last_attempt_at,
-                       updated_at = excluded.updated_at",
-                    params![account_id, error, outcome.code, now],
+                       updated_at = excluded.updated_at,
+                       query_request_id = excluded.query_request_id",
+                    params![account_id, error, outcome.code, now, request_id],
                 )
                 .ok()?;
                 Some((false, None))
@@ -249,7 +255,8 @@ pub fn write_result(account_id: &str, outcome: &UsageOutcome) {
     .flatten();
     if matches!(written, Some((true, _))) {
         if let Some(usage) = &outcome.usage {
-            crate::server::core::account_order::note_usage(account_id, usage);
+            crate::server::core::limiter::sources::note(account_id, usage, query_config);
+            crate::server::core::account_order::note_usage(account_id, usage, query_config);
         }
     }
     match written {
@@ -268,6 +275,7 @@ pub fn write_result(account_id: &str, outcome: &UsageOutcome) {
         // 失败（或库不可用）→ 事实保持不动（上次成功的数字继续生效，见模块头）
         _ => {}
     }
+    written.is_some()
 }
 
 /// 清掉「账号已被删除」的孤儿行（心跳循环每轮顺手一次，一条 SQL）。
@@ -327,6 +335,15 @@ pub const MAX_QUERY_INTERVAL_SECONDS: i64 = 86_400;
 /// 大多数家沿用跳过（阈值 1）—— 全局任务时代没有这个概念，它是最温和的
 /// 兜底；唯独 Cline 免费池缺省**不处理**，原因见那边的文档。
 pub const DEFAULT_QUERY_INTERVAL_SECONDS: i64 = 60;
+pub const DEFAULT_QUERY_RETRIES: u64 = 3;
+pub const MAX_QUERY_RETRIES: u64 = 10;
+pub const DEFAULT_QUERY_TIMEOUT_SECONDS: u64 = 60;
+pub const MAX_QUERY_TIMEOUT_SECONDS: u64 = 180;
+
+pub fn query_timeout_of(config: Option<&Value>) -> u64 {
+    config.and_then(|value| value.get("timeoutSeconds")).and_then(Value::as_u64)
+        .filter(|value| (15..=MAX_QUERY_TIMEOUT_SECONDS).contains(value)).unwrap_or(DEFAULT_QUERY_TIMEOUT_SECONDS)
+}
 pub const DEFAULT_LOW_BALANCE_THRESHOLD: f64 = 1.0;
 
 /// Cline 免费池的 provider id（从注册表推导，与 `account_store::CLINE_FREE_PROVIDER_ID`
@@ -404,6 +421,13 @@ pub fn query_interval_of(account: &Value) -> Option<i64> {
         }
         _ => Some(DEFAULT_QUERY_INTERVAL_SECONDS),
     }
+}
+
+pub fn query_retries_of(config: Option<&Value>) -> u64 {
+    config.and_then(|value| value.get("retries"))
+        .and_then(Value::as_u64)
+        .filter(|value| *value <= MAX_QUERY_RETRIES)
+        .unwrap_or(DEFAULT_QUERY_RETRIES)
 }
 
 /// 「余额不足自动禁用」档的阈值。判定读**限制器的有效规则**（`core::limiter`）：

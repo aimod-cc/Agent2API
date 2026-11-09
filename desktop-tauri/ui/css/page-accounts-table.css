@@ -436,10 +436,7 @@ body.queue-dragging * { cursor: grabbing; }
    与图标已经说清楚了。分组带只负责两件事：说清这是谁、以及可拖（顺位）。
 
    ── 整条可点折叠（2026-10）────────────────────────────────
-   带宽里的家名、统计、合计、空白处都能点：收起一家是高频动作，要求用户瞄准
-   右侧那颗小箭头是没必要的。按钮与拖动把手各自保留原动作（见 GroupBandRow 的
-   onClick 排除名单）。箭头在悬停整条时提亮 —— 它是键盘 / 读屏的真正入口，
-   鼠标用户则由整条承载。 */
+   带宽里的家名、统计、合计、空白处都能点；按钮与拖动把手各自保留原动作。 */
 .acct-group .grp-band > td {
   padding: 0;
   background: var(--surface-2);
@@ -458,7 +455,6 @@ body.queue-dragging * { cursor: grabbing; }
 /* 控件与把手在自己的地盘上换回各自的光标：一眼就能分出「这几处是控件」 */
 .grp-band .grp-iconbtn { cursor: pointer; }
 .grp-band .queue-grip { cursor: grab; }
-.grp-band:hover .grp-iconbtn.grp-fold { background: var(--nav-hover); color: var(--text); }
 
 /* 组顺位：与 .order-rank 同色同一档字号 —— 组的先后与组内先后是同一类读数。
    title 里说清「拖动可改」，格子本身不放控件。 */
@@ -555,9 +551,6 @@ body.queue-dragging * { cursor: grabbing; }
 
 .grp-iconbtn:hover { background: var(--nav-hover); color: var(--text); }
 .grp-iconbtn svg { display: block; transition: transform .16s ease; }
-
-/* 折叠态：箭头转成「指向右」，与展开态共用一个图标（少一枚图标，状态靠旋转表达） */
-.acct-group.collapsed .grp-fold svg { transform: rotate(-90deg); }
 
 /* 折叠时分组带的下边框仍然留着：它同时是与下一段的分隔线 */
 

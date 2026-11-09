@@ -131,7 +131,14 @@ impl AccountStore {
             if !value.is_object() {
                 return Err(AccountStoreError::bad_request("批量查询设置必须是 JSON 对象"));
             }
-            allowed.insert("usageQuery".to_string(), Self::normalize_usage_query(value)?);
+            let mut next = Self::normalize_usage_query(value)?;
+            if value.get("retries").is_none() {
+                if let Some(fields) = next.as_object_mut() { fields.remove("retries"); }
+            }
+            if value.get("timeoutSeconds").is_none() {
+                if let Some(fields) = next.as_object_mut() { fields.remove("timeoutSeconds"); }
+            }
+            allowed.insert("usageQuery".to_string(), next);
         }
         let limiter_mode = patch_object
             .get("limiterMode")
@@ -278,6 +285,11 @@ impl AccountStore {
                 }
                 tx.commit()
             })?;
+        }
+        if allowed.contains_key("proxy") || allowed.contains_key("usageQuery") {
+            for record in &dirty {
+                crate::server::core::usage_query::jobs::invalidate_changed(record.id(), &crate::server::core::usage_query::config::fingerprint(record));
+            }
         }
         // 写库完成后再动注册表（放锁，见 `disabled_catpaw` 的说明）
         drop(_guard);

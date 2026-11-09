@@ -3,7 +3,7 @@ use std::sync::Arc;
 use futures::StreamExt;
 use serde_json::{json, Value};
 
-use crate::server::config::vision_compat::ModelSource;
+use crate::server::config::vision_compat::{ModelSource, VisionRule};
 use crate::server::core::routing_groups::RequestNeeds;
 use crate::server::errors::GatewayError;
 use crate::server::logging;
@@ -79,6 +79,7 @@ async fn describe(service: &UpstreamService, ctx: &ProviderContext<'_>, destinat
     isolated.client_headers = &headers;
     let outcome = super::dispatch(service, &isolated, destination, &body, telemetry, false, true, &mut slot, &mut connections).await?;
     let body = match outcome {
+        ForwardOutcome::Native(_) => return Err(GatewayError::with_status(502, "辅助识图收到意外的原生协议响应")),
         ForwardOutcome::Completion { body } => body,
         ForwardOutcome::Stream { stream, .. } => super::super::aggregate::aggregate_frame_stream(
             stream.boxed(), telemetry.clone(), Default::default()).await?.body,
@@ -103,12 +104,12 @@ async fn describe(service: &UpstreamService, ctx: &ProviderContext<'_>, destinat
 }
 
 pub(super) async fn run(service: &UpstreamService, ctx: &ProviderContext<'_>, original: &RouteTarget, vision: &RequestVision,
-    detail: &mut Value) -> Result<(Value, targets::Destination), GatewayError> {
-    let target = match vision.settings.assist.source {
+    rule: &VisionRule, detail: &mut Value) -> Result<(Value, targets::Destination), GatewayError> {
+    let target = match rule.source {
         // 「沿用工具服务的视觉分析模型」按请求当时的配置取值：不再要求保存时的那一只
         // 原样未变，因为已经没有人去确认那份变更了。
         ModelSource::Shared => vision.shared.clone(),
-        ModelSource::Custom => vision.settings.assist.target.clone(),
+        ModelSource::Custom => rule.target.clone(),
     }.ok_or_else(|| GatewayError::bad_request("未配置辅助识图模型；未改用其他模型或删除图片"))?;
     let needs = RequestNeeds { images: true, ..Default::default() };
     let destination = targets::resolve(service, ctx, target.clone(), &target.model, &needs)?;
@@ -135,7 +136,7 @@ pub(super) async fn run(service: &UpstreamService, ctx: &ProviderContext<'_>, or
         if ctx.telemetry.is_cancelled() { return Err(super::super::cancellation::cancelled_error()); }
         let key = cache::key(&[&request_fingerprint, &vision.revision, &target.provider, &target.model,
             &target.reasoning, &image.reference, image.detail.as_deref().unwrap_or("")]);
-        if vision.settings.assist.reuse_results {
+        if rule.reuse_results {
             if let Some(text) = cache::get(&key) {
                 detail["cachedImages"] = (detail["cachedImages"].as_u64().unwrap_or(0) + 1).into();
                 descriptions.push(text);
@@ -157,7 +158,7 @@ pub(super) async fn run(service: &UpstreamService, ctx: &ProviderContext<'_>, or
         ctx.telemetry.note_vision(detail.clone());
         let text = result.map_err(|error| GatewayError::with_status(error.status_code,
             format!("辅助识图失败：{}；未删除图片或切换处理方式", error.message)).with_code("vision_assist_failed"))?;
-        if vision.settings.assist.reuse_results { cache::put(key, text.clone()); }
+        if rule.reuse_results { cache::put(key, text.clone()); }
         descriptions.push(text);
     }
     let mut body = content::replace(ctx.body, &images, &descriptions)?;

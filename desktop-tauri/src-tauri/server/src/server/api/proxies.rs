@@ -33,6 +33,16 @@ pub async fn list_proxies(state: &ServerState) -> Response {
     }))
 }
 
+pub async fn system_proxy() -> Response {
+    let mut response = match tokio::task::spawn_blocking(crate::server::core::proxies::system::snapshot).await {
+        Ok(Ok(value)) => ok_json(value),
+        Ok(Err(message)) => management_error(400, message),
+        Err(_) => management_error(500, "读取系统代理失败"),
+    };
+    response.headers_mut().insert("cache-control", axum::http::HeaderValue::from_static("no-store"));
+    response
+}
+
 pub async fn test_proxy(state: &ServerState, body: &Bytes) -> Response {
     let payload = match parse_body(body) {
         Ok(value) => value,
@@ -133,6 +143,16 @@ pub async fn pool_create(state: &ServerState, body: &Bytes) -> Response {
         Ok(value) => value,
         Err(_) => return management_error(400, "请求内容不是有效 JSON"),
     };
+    if payload.get("items").is_some() {
+        return match proxy_pool::create_batch(&payload) {
+            Ok(report) => {
+                let mut data = pool_payload(state);
+                data["imported"] = report;
+                ok_json(data)
+            }
+            Err(message) => management_error(400, message),
+        };
+    }
     match proxy_pool::create(&payload) {
         Ok(_) => ok_json(pool_payload(state)),
         Err(message) => management_error(400, message),

@@ -103,6 +103,7 @@ pub fn verify_signature(
     manifest: &proto::PackManifest,
     target: &str,
 ) -> (SignatureState, Option<String>) {
+    let target = if super::wasm::manifest::is_wasm(manifest) { super::wasm::manifest::TARGET } else { target };
     let Some(signature) = manifest.signature.as_ref() else {
         return (SignatureState::Unsigned, None);
     };
@@ -148,7 +149,19 @@ pub fn verify_signature(
             Some("读不到入口二进制，无法验签".to_string()),
         );
     };
-    let payload = proto::signing_payload(manifest, target, &binary_hash, &collect_ui_files(dir));
+    let mut payload = proto::signing_payload(manifest, target, &binary_hash, &collect_ui_files(dir));
+    if super::wasm::manifest::is_wasm(manifest) {
+        let Some(hash) = sha256_file(&dir.join("wasm.json")) else {
+            return (SignatureState::Invalid, Some("Wasm 权限清单不可读".into()));
+        };
+        payload.push_str(&format!("wasm={hash}\n"));
+    }
+    if dir.join("host.json").exists() {
+        let Some(hash) = sha256_file(&dir.join("host.json")) else {
+            return (SignatureState::Invalid, Some("插件公共接口清单不可读".into()));
+        };
+        payload.push_str(&format!("host={hash}\n"));
+    }
     let Ok(signature_bytes) = base64::engine::general_purpose::STANDARD.decode(signature.value.trim())
     else {
         return (SignatureState::Invalid, Some("签名不是合法的 base64".to_string()));
@@ -332,7 +345,9 @@ impl PackRegistry {
             serde_json::to_string_pretty(self).map_err(|e| format!("序列化失败: {e}"))?;
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, text).map_err(|e| format!("写临时文件失败: {e}"))?;
-        std::fs::rename(&tmp, &path).map_err(|e| format!("替换注册表失败: {e}"))
+        std::fs::rename(&tmp, &path).map_err(|e| format!("替换注册表失败: {e}"))?;
+        super::startup::configure_packs(self);
+        Ok(())
     }
 
     /// 找一个已启用的包。
@@ -399,6 +414,8 @@ pub fn validate_manifest(manifest: &proto::PackManifest, host_protocol: u32) -> 
 
 /// 为当前目标挑一个入口。
 pub fn entry_for_target(manifest: &proto::PackManifest, target: &str) -> Option<String> {
+    // Wasm 在所有平台使用同一入口和签名目标。
+    if let Some(entry) = manifest.entry.get(super::wasm::manifest::TARGET) { return Some(entry.clone()); }
     // 先精确匹配，再按「架构-系统」宽松匹配（不同打包工具的三元组写法不一致）
     if let Some(entry) = manifest.entry.get(target) {
         return Some(entry.clone());

@@ -13,6 +13,9 @@ export type UsageQueryRow = {
   lastSuccessAt?: number
   /** 仅失败时携带的历史读数，不代表本次查询成功。 */
   lastUsage?: Record<string, unknown> | null
+  requestId?: string
+  stale?: boolean
+  queryStatus?: import('./usage-query-task').UsageQueryStatus
 }
 
 function reading(value: unknown): Record<string, unknown> | null {

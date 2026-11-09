@@ -42,6 +42,7 @@ use url::Url;
 
 use crate::server::core::egress;
 use crate::server::core::proxies::ResolvedProxy;
+use crate::server::core::user_agent::AccountRequest;
 use crate::server::logging;
 
 /// 控制台（平台）域：授权、换码、余额接口的**同一站点**
@@ -164,6 +165,7 @@ pub(super) async fn login(
         .header("Referer", format!("{PLATFORM_BASE}/login"))
         .timeout(std::time::Duration::from_millis(STEP_TIMEOUT_MS))
         .json(&body)
+        .with_account_user_agent()
         .send()
         .await
         .map_err(|error| format!("商汤登录接口请求失败：{}", egress::describe_error_detail(&error)))?;
@@ -212,6 +214,7 @@ pub(super) async fn login(
         .header("User-Agent", USER_AGENT)
         .timeout(std::time::Duration::from_millis(STEP_TIMEOUT_MS))
         .body(form)
+        .with_account_user_agent()
         .send()
         .await
         .map_err(|error| format!("商汤换码请求失败：{}", egress::describe_error_detail(&error)))?;
@@ -278,6 +281,7 @@ async fn follow(
             request = request.header("Cookie", cookie);
         }
         let response = request
+            .with_account_user_agent()
             .send()
             .await
             .map_err(|error| format!("商汤登录跳转请求失败：{}", egress::describe_error_detail(&error)))?;

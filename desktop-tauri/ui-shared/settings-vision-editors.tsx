@@ -12,6 +12,7 @@
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue, cn } from '@ui'
 import type { Translate } from './assistant-read-types'
 import { visionTargetKey, type VisionModel } from './settings-vision-types'
+import { SearchableSelect } from './searchable-select'
 
 /**
  * 并入一层的视觉模型选择器。
@@ -39,18 +40,16 @@ export function VisionModelSelect({ models, value, onValueChange, t, includeShar
     : selected ? `${selected.providerLabel} · ${selected.name || selected.model}`
       : value ? t('当前不可用') : t('请选择模型')
 
-  return <Select value={value} disabled={disabled} onValueChange={next => onValueChange(String(next ?? ''))}>
-    <SelectTrigger className={cn('w-[260px]', className)} aria-label={ariaLabel || t('视觉模型')}>
-      <SelectValue>{label}</SelectValue>
-    </SelectTrigger>
-    <SelectContent>
-      {includeShared ? <SelectItem value='shared'>{t('沿用工具服务的视觉分析模型')}</SelectItem> : null}
-      {value && value !== 'shared' && !selected ? <SelectItem value={value} disabled>{label}</SelectItem> : null}
-      {eligible.map(model => <SelectItem key={visionTargetKey(model)} value={visionTargetKey(model)}>
-        {model.providerLabel} · {model.name || model.model}
-      </SelectItem>)}
-    </SelectContent>
-  </Select>
+  return <SearchableSelect value={value} disabled={disabled} onValueChange={onValueChange}
+    className={cn('w-[260px]', className)} aria-label={ariaLabel || t('视觉模型')}
+    displayValue={label} searchPlaceholder={t('搜索模型')}
+    options={[
+      ...(includeShared ? [{ value: 'shared', label: t('沿用工具服务的视觉分析模型') }] : []),
+      ...(value && value !== 'shared' && !selected ? [{ value, label, disabled: true }] : []),
+      ...eligible.map(model => ({ value: visionTargetKey(model),
+        label: `${model.providerLabel} · ${model.name || model.model}`, searchText: model.model,
+      })),
+    ]} />
 }
 
 /** 思考等级：只影响读图那一步，默认跟随模型自身配置 */

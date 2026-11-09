@@ -4,6 +4,10 @@ use aead_stream::{DecryptorBE32, EncryptorBE32, Nonce, StreamBE32};
 use aes_gcm::{Aes256Gcm, KeyInit};
 use zeroize::{Zeroize, Zeroizing};
 
+#[cfg(test)]
+#[path = "stream_tests.rs"]
+mod tests;
+
 pub(super) const CHUNK_BYTES: usize = 1024 * 1024;
 const TAG_BYTES: usize = 16;
 

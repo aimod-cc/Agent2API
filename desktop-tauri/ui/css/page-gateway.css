@@ -608,6 +608,9 @@
 }
 
 .page[data-page="gateway"] .prov-rail [data-slot='nav-item'] { padding-top: 6px; padding-bottom: 6px; }
+.models-provider-search { flex: none; min-width: 0; padding: 0 8px 8px 0; }
+.models-provider-search input[type='search']::-webkit-search-cancel-button { -webkit-appearance: none; }
+.models-provider-empty { padding: 12px 8px; overflow-wrap: anywhere; }
 
 /* 条目区： aside 里唯一滚动的块（家数多了自己滚） */
 .rail-scroll {
@@ -619,6 +622,8 @@
   gap: 2px;
 }
 @media (min-width: 768px) {
+  .page[data-page="gateway"] .prov-rail { gap: 0; }
+  .page[data-page="gateway"] .rail-scroll > .rail-label:first-of-type { margin-top: 0; padding-top: 0; }
   .prov-rail > .rail-scroll { padding-right: 8px; }
   .prov-rail > .rail-foot { margin-right: 8px; }
 }
@@ -679,6 +684,10 @@
 .pv-ico.img,
 :root[data-theme='light'] .pv-ico.img { background: var(--control-bg); color: initial; padding: 2px; }
 .pv-ico.img img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.prov-rail [data-slot='nav-item'][data-active] .pv-ico:not(.img) {
+  background: transparent;
+  color: inherit;
+}
 /* 面板头标题上的那枚：大一档（它是这页的「页签」） */
 .mm-title .pv-ico { width: 26px; height: 26px; border-radius: 8px; font-size: 12px; }
 .mm-title .pv-ico svg { width: 14px; height: 14px; }

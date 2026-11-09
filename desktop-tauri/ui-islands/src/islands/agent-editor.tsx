@@ -1,67 +1,68 @@
 import * as React from 'react'
-import { Alert, Badge, Button, Card, CardContent, CardHeader, CardTitle, Empty } from '@ui'
+import { Alert, Button, Empty, StatusDot, cn } from '@ui'
 import { t } from '../i18n'
-import { confirm, errorMessage, getAgentStore, importFromClient, saveProfiles, subscribeAgentStore, toast } from './agent-state'
-import { blankProfile, defaultOperation, kindLabel, protocolLabel } from './agent-model'
+import { confirm, errorMessage, getAgentStore, removeConfiguration, subscribeAgentStore, toast } from './agent-state'
+import { kindLabel, protocolLabel } from './agent-model'
 import { ProfileDialog } from './agent-profile-dialog'
 import { ApplyDialog } from './agent-preview'
+import { AgentActions, AgentIcon } from './agent-actions'
 import type { AgentClient, AgentOperation, AgentProfile } from './agent-types'
 
 export function ProfileEditor({ client }: { client: AgentClient }) {
-  const store = React.useSyncExternalStore(subscribeAgentStore,getAgentStore,getAgentStore)
-  const [editor,setEditor] = React.useState<{ profile: AgentProfile; creating: boolean; native?: boolean } | null>(null)
-  const [applying,setApplying] = React.useState<{ profile: AgentProfile; operation: AgentOperation } | null>(null)
-  const disabled = Boolean(store.busy) || store.loading
+  const store = React.useSyncExternalStore(subscribeAgentStore, getAgentStore, getAgentStore)
+  const [editor, setEditor] = React.useState<AgentProfile | null>(null)
+  const [applying, setApplying] = React.useState<{ profile: AgentProfile; operation: AgentOperation } | null>(null)
+  const disabled = Boolean(store.busy) || store.loading || Boolean(client.storeError)
+  const profiles = client.configurations
   const remove = async (profile: AgentProfile) => {
-    if (!await confirm(t('删除已保存方案？'),t('只删除 Agent2API 中的方案，不修改客户端当前配置。'),t('删除方案'))) return
-    try { await saveProfiles(client,client.profiles.filter(item => item.id !== profile.id)); toast(t('已删除保存方案，客户端配置未改动')) }
-    catch (error) { toast(errorMessage(error),'err') }
+    if (profile.liveId) { setApplying({ profile, operation: 'config-delete' }); return }
+    if (!await confirm(t('删除配置？'), t('此配置未在客户端中使用，删除不会改变当前使用的配置。'), t('删除'))) return
+    try { await removeConfiguration(client, profile); toast(t('配置已删除')) }
+    catch (error) { toast(errorMessage(error), 'err') }
   }
   return <>
-    <Card className='agent-card'>
-      <CardHeader className='agent-card-head'><CardTitle>{t('客户端实际配置')}</CardTitle><span className='mr-auto' />
-        <Button variant='ghost' size='sm' disabled={disabled || Boolean(client.readError) || !client.live.length} onClick={() => void importFromClient(client)}>{t('从客户端导入')}</Button></CardHeader>
-      <CardContent className='agent-profiles'>
-        {client.readError && <Alert variant='destructive'>{client.readError}</Alert>}
-        {!client.readError && !client.live.length && <Empty>{t('未读取到可识别的客户端配置')}</Empty>}
-        {client.live.map(profile => <ProfileRow key={profile.id} profile={profile} live client={client}>
-          <Button variant='ghost' size='xs' disabled={disabled || !profile.editable} onClick={() => setEditor({ profile, creating:false, native:true })}>{t('编辑')}</Button>
-          <Button variant='ghost' size='xs' disabled={disabled || !profile.deletable} onClick={() => setApplying({ profile, operation:'native-delete' })}>{t('删除')}</Button>
-        </ProfileRow>)}
-        {client.live.length > 0 && <p className='text-xs leading-relaxed text-subtle'>{t('此处来自磁盘文件，不代表正在运行的旧会话已经重载。')}</p>}
-      </CardContent>
-    </Card>
-    <Card className='agent-card'>
-      <CardHeader className='agent-card-head'><CardTitle>{t('已保存方案')}</CardTitle><span className='mr-auto' />
-        <Button variant='outline' size='sm' disabled={disabled || !client.writable || Boolean(client.storeError)} onClick={() => setEditor({profile:blankProfile(client,store.gateway),creating:true})}>＋ {t('新建配置')}</Button></CardHeader>
-      <CardContent className='agent-profiles'>
-        {client.storeError && <Alert variant='destructive'>{client.storeError}</Alert>}
-        {!client.profiles.length && <Empty>{t('新建方案或导入当前配置；保存后再决定是否应用。')}</Empty>}
-        {client.profiles.map(profile => <ProfileRow key={profile.id} profile={profile} client={client}>
-          <Button variant='ghost' size='xs' disabled={disabled || !client.writable} onClick={() => setEditor({profile,creating:false})}>{t('编辑')}</Button>
-          <Button variant='ghost' size='xs' disabled={disabled} onClick={() => void remove(profile)}>{t('删除')}</Button>
-          <Button variant='outline' size='xs' disabled={disabled || !client.writable || Boolean(profile.validationError)} onClick={() => setApplying({profile,operation:defaultOperation(client)})}>{client.configMode === 'single' ? t('使用此配置') : t('应用')}</Button>
-          {client.configMode !== 'single' && client.supportsDefault && <Button variant='ghost' size='xs' disabled={disabled || !client.writable || Boolean(profile.validationError)} onClick={() => setApplying({profile,operation:'default'})}>{t('应用并设为默认')}</Button>}
-        </ProfileRow>)}
-      </CardContent>
-    </Card>
-    {editor && <ProfileDialog key={`${client.id}-${editor.profile.id}`} client={client} profile={editor.profile} creating={editor.creating} native={editor.native} onClose={() => setEditor(null)} />}
+    <div className='agent-configurations' aria-label={t('配置列表')}>
+      {client.readError && <Alert variant='destructive'>{client.readError}</Alert>}
+      {client.storeError && <Alert variant='destructive'>{client.storeError}</Alert>}
+      {!client.readError && !client.storeError && !profiles.length && <Empty className='agent-configuration-empty'>
+        <span className='text-sm font-medium'>{t('还没有配置')}</span>
+        <p>{client.writable ? t('点击右上角「新增配置」，添加网关或其他服务') : t('未读取到可识别的客户端配置')}</p>
+      </Empty>}
+      {profiles.map(profile => {
+        const active = profile.status === 'active' || profile.status === 'enabled'
+        const status = profile.status === 'active' ? t('使用中') : profile.status === 'enabled' ? t('已启用')
+          : profile.status === 'disabled' ? t('已停用') : ''
+        const name = profile.name || profile.id
+        const duplicateName = profiles.some(other => other !== profile && (other.name || other.id) === name)
+        const models = profile.models.length ? profile.models.map(model => model.id) : profile.model ? [profile.model] : []
+        const actionLabel = profile.status === 'disabled' ? t('启用') : client.supportsDefault ? t('使用此配置') : t('添加到客户端')
+        return <div key={`${profile.liveId || 'saved'}:${profile.id}`} className={cn('agent-configuration-row', active && 'is-current')}>
+          <span className='agent-configuration-mark' aria-hidden='true'>{profile.kind === 'gateway' ? 'A2' : name.slice(0, 2).toUpperCase()}</span>
+          <div className='agent-configuration-main'>
+            <div className='agent-configuration-title'><span title={name}>{name}</span>
+              {duplicateName && <code>{profile.sourceId || profile.id}</code>}</div>
+            <div className='agent-configuration-meta'><span className='agent-configuration-url' title={profile.baseUrl}>{profile.baseUrl || t('客户端默认地址')}</span>
+              <span>{kindLabel(profile.kind)}</span><span>{protocolLabel(profile.protocol)}</span></div>
+            {models.length > 0 && <p className='agent-configuration-models' title={models.join(' · ')}>{models.slice(0, 3).join(' · ')}{models.length > 3 ? ` · +${models.length - 3}` : ''}</p>}
+            {profile.note && <p className='agent-configuration-note'>{profile.note}</p>}
+            {profile.validationError && <p className='agent-configuration-error'>{t('请补全配置后使用')} · {profile.validationError}</p>}
+          </div>
+          <div className='agent-configuration-actions'>
+            {status && <span className={cn('agent-configuration-status', active && 'is-current')} title={active ? t('状态来自配置文件，已打开的会话可能需要重新加载') : undefined}>
+              <StatusDot variant={active ? 'success' : 'muted'} />{status}</span>}
+            {!active && profile.editable && <Button variant='outline' size='sm' disabled={disabled || Boolean(profile.validationError)}
+              onClick={() => setApplying({ profile, operation: 'config-use' })}>{actionLabel}</Button>}
+            {profile.editable && <Button variant='ghost' size='icon-sm' disabled={disabled} title={t('编辑')} aria-label={t('编辑：{name}', { name })}
+              onClick={() => setEditor(profile)}><AgentIcon name='edit' /></Button>}
+            {profile.deletable && <AgentActions label={t('配置操作')} disabled={disabled || Boolean(client.readError)} actions={[
+              ...(client.supportsToggle && profile.status === 'enabled' ? [{ label: t('停用'), onClick: () => setApplying({ profile, operation: 'config-disable' }) }] : []),
+              { label: t('删除'), destructive: true, onClick: () => void remove(profile) },
+            ]} />}
+          </div>
+        </div>
+      })}
+    </div>
+    {editor && <ProfileDialog key={`${client.id}:${editor.id}`} client={client} profile={editor} creating={false} onClose={() => setEditor(null)} />}
     {applying && <ApplyDialog client={client} profile={applying.profile} operation={applying.operation} onClose={() => setApplying(null)} />}
   </>
-}
-
-function ProfileRow({ client,profile,live = false,children }: { client: AgentClient; profile: AgentProfile; live?: boolean; children?: React.ReactNode }) {
-  const status = live ? client.supportsToggle ? profile.enabled ? t('已启用') : t('已停用') : profile.enabled ? t('当前默认') : t('已配置') : profile.inFile ? t('与客户端一致') : t('已保存，未应用')
-  return <div className='agent-profile agent-profile-v2'>
-    <div className='agent-profile-main'>
-      <div className='agent-profile-name'><span>{profile.name || profile.id}</span><Badge variant={live && profile.enabled || profile.inFile ? 'success' : 'outline'} className='agent-tag'>{status}</Badge>
-        <Badge variant='outline' className='agent-tag'>{kindLabel(profile.kind)}</Badge></div>
-      <div className='agent-profile-sub'><code className='break-all'>{profile.baseUrl || t('客户端默认地址')}</code><span>{protocolLabel(profile.protocol)}</span></div>
-      {profile.models.length > 0 ? <div className='agent-profile-models'>{profile.models.map(model => <span key={model.id} className='text-xs font-mono'>{model.id}</span>)}</div>
-        : profile.model ? <code className='text-xs'>{profile.model}</code> : null}
-      {profile.note && <p className='agent-profile-note'>{profile.note}</p>}
-      {profile.validationError && <p className='text-xs text-destructive'>{t('需要重新编辑：')} {profile.validationError}</p>}
-    </div>
-    {children && <div className='agent-profile-act flex-wrap'>{children}</div>}
-  </div>
 }

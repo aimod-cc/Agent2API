@@ -198,38 +198,37 @@ pub async fn query_usage(store: &AccountStore, account_id: &str) -> Result<Value
         .custom_balance_query_by_id(account_id)
         .unwrap_or_else(empty_query);
     let proxy = credential.proxy.as_ref();
-    let label = label.as_str();
-    // 错误与日志文案一律用**提供商的展示名**（用户在界面上看到的那一个），
-    // 而不是方案名 —— 同一种方案的两个人可能有完全不同的名字
-    let what = |kind: &str| format!("{label} {kind}");
-
-    let mut report = match scheme {
-        Scheme::Sub2api => {
-            let key = require_api_key(&credential, scheme, label)?;
-            let url = build_url(&base_url, Api::Usage)?;
-            let payload = get_json(&url, &bearer(&key), proxy, &what("余额")).await?;
-            parse::parse_sub2api(&payload).ok_or_else(|| invalid_response(label))
-        }
-        Scheme::DeepSeek => {
-            let key = require_api_key(&credential, scheme, label)?;
-            // DeepSeek 的余额接口在站点根下一级（不是 `/v1` 那条推理前缀）
-            let url = build_url(&base_url, Api::DeepSeekBalance)?;
-            let payload = get_json(&url, &bearer(&key), proxy, &what("余额")).await?;
-            parse::parse_deepseek(&payload).ok_or_else(|| invalid_response(label))
-        }
-        Scheme::Opencode => {
-            let key = require_api_key(&credential, scheme, label)?;
-            let url = build_url(&base_url, Api::Usage)?;
-            let payload = get_json(&url, &bearer(&key), proxy, &what("用量")).await?;
-            parse::parse_opencode(&payload).ok_or_else(|| invalid_response(label))
-        }
-        Scheme::NewApi => query_new_api(&base_url, &query, proxy, label).await,
-        Scheme::Zhipu => query_zhipu(&query, proxy, label).await,
-        Scheme::ZhipuZai => query_zhipu_zai(&credential, proxy, label).await,
-        Scheme::Sensenova => query_sensenova(store, &credential, &query, proxy, label).await,
-    }?;
-    report["quotaSources"] = Value::Array(super::quota::sources(&provider_id, scheme, &report));
-    Ok(report)
+    crate::server::core::user_agent::scope(&credential.user_agent, async {
+        let label = label.as_str();
+        // 错误与日志文案一律用提供商的展示名，不用余额方案名。
+        let what = |kind: &str| format!("{label} {kind}");
+        let mut report = match scheme {
+            Scheme::Sub2api => {
+                let key = require_api_key(&credential, scheme, label)?;
+                let url = build_url(&base_url, Api::Usage)?;
+                let payload = get_json(&url, &bearer(&key), proxy, &what("余额")).await?;
+                parse::parse_sub2api(&payload).ok_or_else(|| invalid_response(label))
+            }
+            Scheme::DeepSeek => {
+                let key = require_api_key(&credential, scheme, label)?;
+                let url = build_url(&base_url, Api::DeepSeekBalance)?;
+                let payload = get_json(&url, &bearer(&key), proxy, &what("余额")).await?;
+                parse::parse_deepseek(&payload).ok_or_else(|| invalid_response(label))
+            }
+            Scheme::Opencode => {
+                let key = require_api_key(&credential, scheme, label)?;
+                let url = build_url(&base_url, Api::Usage)?;
+                let payload = get_json(&url, &bearer(&key), proxy, &what("用量")).await?;
+                parse::parse_opencode(&payload).ok_or_else(|| invalid_response(label))
+            }
+            Scheme::NewApi => query_new_api(&base_url, &query, proxy, label).await,
+            Scheme::Zhipu => query_zhipu(&query, proxy, label).await,
+            Scheme::ZhipuZai => query_zhipu_zai(&credential, proxy, label).await,
+            Scheme::Sensenova => query_sensenova(store, &credential, &query, proxy, label).await,
+        }?;
+        report["quotaSources"] = Value::Array(super::quota::sources(&provider_id, scheme, &report));
+        Ok(report)
+    }).await
 }
 
 /// NewAPI：账户余额（`/api/user/self`）+ 显示口径（`/api/status`）。
@@ -542,13 +541,7 @@ async fn get_json(
             )
         })?;
     if !response.ok {
-        // 401 / 403 原样透出（「令牌不对 / 没权限」与「上游挂了」是两件事），
-        // 其余按 502 收敛 —— 与各家余额实现的错误分类同一取向
-        let status = if matches!(response.status, 401 | 403) {
-            response.status as i32
-        } else {
-            502
-        };
+        let status = if (400..500).contains(&response.status) { response.status as i32 } else { 502 };
         let detail = describe_payload_error(&response.payload);
         return Err(GatewayError::with_status(
             status,

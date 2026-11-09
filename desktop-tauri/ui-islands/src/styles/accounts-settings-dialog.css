@@ -158,9 +158,10 @@
 
 .acct-settings-dialog [data-slot='input'],
 .acct-settings-dialog [data-slot='input-group'],
+.acct-settings-dialog [data-slot='combobox-trigger'],
 .acct-settings-dialog [data-slot='select-trigger'] { height: 28px; min-width: 0; font-size: 12.5px; }
 .acct-settings-dialog [data-slot='input-group-control'] { height: 26px; min-width: 0; }
-.acct-dlg-field [data-slot='select-trigger'] { width: 100%; }
+.acct-dlg-field > [data-slot='select-trigger'] { width: 100%; }
 
 .acct-dlg-clear { height: 20px; padding: 0; color: var(--text-3); font-size: 11px; font-weight: 400; }
 .acct-dlg-clear:hover { color: var(--danger); background: transparent; }

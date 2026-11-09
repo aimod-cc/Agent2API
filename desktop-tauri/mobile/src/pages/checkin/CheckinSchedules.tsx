@@ -151,8 +151,10 @@ function ScheduleEditor({ entry, options, busy, action, onClose }: {
   const [retryTime, setRetryTime] = useState(entry?.retryTime ?? '00:10')
   const [retryGap, setRetryGap] = useState(String(entry?.retryGapMinutes ?? 10))
   const [retryLimit, setRetryLimit] = useState(String(entry?.retryLimit ?? 3))
+  const [providerSearch, setProviderSearch] = useState('')
   const unavailable = providers.filter(id => !options.some(item => item.id === id))
   const available = [...options, ...unavailable.map(id => ({ id, label: id }))]
+  const visibleProviders = available.filter(option => `${option.id} ${t(option.label)}`.toLowerCase().includes(providerSearch.trim().toLowerCase()))
 
   const submit = async () => {
     if (!validCheckinRange(time, timeEnd) || !providers.length) {
@@ -236,12 +238,16 @@ function ScheduleEditor({ entry, options, busy, action, onClose }: {
             </Label>
           </div>
           <div className='m-ck-title'>{t('签到范围')}</div>
-          {available.map(option => <Label className='m-ck-toolbar' key={option.id}>
+          <Input type='search' value={providerSearch} disabled={Boolean(busy)}
+            placeholder={t('搜索提供商')} aria-label={t('搜索提供商')}
+            onChange={event => setProviderSearch(event.currentTarget.value)} />
+          {visibleProviders.map(option => <Label className='m-ck-toolbar' key={option.id}>
             <Checkbox checked={providers.includes(option.id)} disabled={Boolean(busy)} onCheckedChange={checked => {
               setProviders(list => checked ? [...new Set([...list, option.id])] : list.filter(id => id !== option.id))
             }} />
             <span className='m-ck-grow m-ck-note'>{t(option.label)}{unavailable.includes(option.id) ? t('（插件未就绪，保留原配置）') : ''}</span>
           </Label>)}
+          {!visibleProviders.length ? <p className='m-ck-note'>{t('没有匹配的选项')}</p> : null}
         </SheetBody>
         <SheetFooter>
           <Button variant='outline' disabled={Boolean(busy)} onClick={onClose}>{t('取消')}</Button>

@@ -37,6 +37,23 @@ pub async fn api_request(request: ApiRequest) -> Result<Value, String> {
     }
 }
 
+#[tauri::command]
+pub async fn sync_branding_title(app: AppHandle) -> Result<(), String> {
+    let branding = gateway::call("GET", "/api/panel/branding", None).await?;
+    let name = branding.get("displayName").and_then(Value::as_str).unwrap_or("Agent2API");
+    let title = if name == "Agent2API" {
+        crate::app_title().to_string()
+    } else if cfg!(debug_assertions) {
+        format!("[Dev] {name}")
+    } else {
+        name.to_string()
+    };
+    if let Some(window) = app.get_webview_window(crate::MAIN_WINDOW_LABEL) {
+        window.set_title(&title).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 /// 取原始文本（导出日志用）
 #[tauri::command]
 pub async fn api_request_text(method: String, path: String) -> Result<String, String> {
@@ -345,7 +362,7 @@ pub async fn panel_session_clear() -> Result<Value, String> {
 pub async fn change_lan_access(app: AppHandle, enabled: bool, panel: bool) -> Result<Value, String> {
     crate::startup::wait().await?;
     if enabled && !crate::server::access::admin_registered() {
-        return Err("尚未注册面板管理员：请先完成注册再开启局域网访问".to_string());
+        return Err("尚未注册面板管理员：请先完成注册再开启网络访问".to_string());
     }
     // 面板托管只在局域网开启时有意义；关闭时一并归位
     let panel = enabled && panel;
@@ -356,7 +373,7 @@ pub async fn change_lan_access(app: AppHandle, enabled: bool, panel: bool) -> Re
             .map_err(|message| format!("自动创建网关 Key 失败: {message}"))?;
         crate::server::logging::log(
             "[Config]",
-            &format!("✅ 已自动创建网关 Key「{}」（局域网访问开启流程）", entry.name),
+            &format!("✅ 已自动创建网关 Key「{}」（网络访问开启流程）", entry.name),
         );
         created_key = Some(entry.public_json());
     }
@@ -478,8 +495,9 @@ pub async fn start_autoclaw_oauth_login(
 pub async fn login_kuku_sms_send(
     app: AppHandle,
     phone: String,
+    options: Option<Value>,
 ) -> Result<Value, String> {
-    login::start_kuku_sms(&app, &phone).await
+    login::start_kuku_sms(&app, &phone, options.and_then(|value| value.get("proxy").cloned())).await
 }
 
 /// KukuAI 手机验证码登录 · 收码：把用户收到的验证码写入登录窗口，等登录完成。

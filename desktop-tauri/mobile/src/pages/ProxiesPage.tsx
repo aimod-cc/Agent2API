@@ -137,6 +137,7 @@ export function ProxiesPage() {
       <Card className='m-card m-card-pad'>
         <div className='flex items-center gap-3'><GlyphLogo name='globe' /><div className='min-w-0 flex-1'>
           <strong className='text-sm'>{item.name || t('未命名')}</strong>
+          {item.nonDirect ? <p className='mt-1 text-[10px] text-subtle'>{t('非直连')} · {t('先经过系统代理，再连接到此代理')}</p> : null}
           {item.source === 'clash' ? <p className='mt-1 text-[10px] text-subtle'>Clash Verge · {t('只读：在 Clash Verge 里改')}</p> : null}
           <div className='mt-1 flex items-center gap-1.5'>
             <span className='break-all font-mono text-[11px] text-subtle'>{addressOf(item)}</span>

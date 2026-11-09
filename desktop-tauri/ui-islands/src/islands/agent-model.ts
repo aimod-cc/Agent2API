@@ -38,7 +38,7 @@ export function syncClaudeTiers(tiers: AgentProfile['claudeModels'], previous: s
 }
 
 export function validateDraft(client: AgentClient, profile: AgentProfile): string {
-  if (!profile.name.trim()) return t('请填写方案名称')
+  if (!profile.name.trim()) return t('请填写配置名称')
   if (!client.protocols.includes(profile.protocol)) return t('这个客户端不支持所选协议')
   const inherited = !profile.baseUrl && profile.authMode === 'preserve' && Boolean(profile.sourceId)
   if (!inherited) {

@@ -62,6 +62,14 @@ pub async fn save_profiles(State(state): State<ServerState>, body: Bytes) -> Res
             agents::paths::save_override(def, text(&payload, "configPath"))?;
             return Ok(agents::snapshot(state.port));
         }
+        if text(&payload, "action") == "config-save" {
+            agents::configuration_actions::save(def, &payload, state.db(), state.port)?;
+            return Ok(agents::snapshot(state.port));
+        }
+        if text(&payload, "action") == "config-remove" {
+            agents::configuration_actions::remove_saved(def, &payload, state.db(), state.port)?;
+            return Ok(agents::snapshot(state.port));
+        }
         let current = agents::store::load_client(def.id)?;
         let items = payload
             .get("profiles")
@@ -163,6 +171,9 @@ pub async fn preview_profile(State(state): State<ServerState>, body: Bytes) -> R
         let def = definition(&payload)?;
         let path = agents::paths::detect(def).path;
         let action = text(&payload, "operation");
+        if action.starts_with("config-") {
+            return agents::configuration_actions::create_preview(def, &payload, state.store(), state.port);
+        }
         if action == "native-edit" || action == "native-delete" {
             return agents::native::create_preview(def, &path, &payload, state.port);
         }
@@ -184,7 +195,9 @@ pub async fn apply_profile(State(state): State<ServerState>, body: Bytes) -> Res
         let def = definition(&payload)?;
         let path = agents::paths::detect(def).path;
         let action = text(&payload, "operation");
-        let applied = if action == "native-edit" || action == "native-delete" {
+        let applied = if action.starts_with("config-") {
+            agents::configuration_actions::apply(def, &payload, state.store(), state.db(), state.port)?
+        } else if action == "native-edit" || action == "native-delete" {
             agents::native::apply(def, &path, &payload, state.port)?
         } else {
             let profile = selected_profile(def, &payload, action == "quick-connect")?;

@@ -146,12 +146,12 @@ pub async fn ensure_ready(app: &AppHandle) -> Result<(), StartupFailure> {
     if lan.lan_access {
         server::access::set_panel_gate(true);
         if !server::config::current().active_api_keys().is_empty() {
-            server::logging::log("[Security]", "局域网访问已开启：API Key 认证已启用");
+            server::logging::log("[Security]", "网络访问已开启：API Key 认证已启用");
         } else {
             server::access::set_v1_fail_closed(true);
             server::logging::log(
                 "[Security]",
-                "⚠️  局域网访问已开启但尚未配置 API Key：/v1/* 暂时拒绝服务，请在「网关 Key」页创建第一把",
+                "⚠️  网络访问已开启但尚未配置 API Key：/v1/* 暂时拒绝服务，请在「网关 Key」页创建第一把",
             );
         }
         // 网页管理面板（可选）：设了 ui_dir 网关就在本端口托管 ui/ 静态目录
@@ -162,7 +162,7 @@ pub async fn ensure_ready(app: &AppHandle) -> Result<(), StartupFailure> {
                 Some(dir) => state.set_ui_dir(dir),
                 None => server::logging::log(
                     "[Server]",
-                    "⚠️  网页面板资源缺失：局域网面板无法托管（重装本程序可恢复），API 转发不受影响",
+                    "⚠️  网页面板资源缺失：网页管理面板无法托管（重装本程序可恢复），API 转发不受影响",
                 ),
             }
         }
@@ -205,7 +205,7 @@ pub async fn ensure_ready(app: &AppHandle) -> Result<(), StartupFailure> {
     let deadline = std::time::Instant::now() + STARTUP_TIMEOUT;
     while std::time::Instant::now() < deadline {
         if is_ready(port).await {
-            let scope = if lan.lan_access { "，局域网访问已开启" } else { "" };
+            let scope = if lan.lan_access { "，网络访问已开启" } else { "" };
             server::logging::log("[Server]", &format!("服务已就绪（127.0.0.1:{port}{scope}）"));
             crate::panel_session::ensure_local_access().map_err(StartupFailure::other)?;
             // 起来了就清掉上一次的失败记录：那条记录描述的是「之前起不来」，

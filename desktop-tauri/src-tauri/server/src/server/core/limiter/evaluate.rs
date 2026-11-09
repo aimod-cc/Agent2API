@@ -2,6 +2,10 @@ use serde_json::Value;
 
 use super::{counter, groups, sources, types::*};
 
+#[cfg(test)]
+#[path = "evaluate_tests.rs"]
+mod tests;
+
 pub fn compare(value: f64, condition: &Condition) -> bool {
     match condition.comparison {
         Comparison::Lt => value < condition.threshold,
@@ -12,7 +16,7 @@ pub fn compare(value: f64, condition: &Condition) -> bool {
 
 pub fn read(account: &Value, condition: &Condition, facts: &sources::Facts, counts: &counter::Facts, now: i64) -> Reading {
     let id = account.get("id").and_then(Value::as_str).unwrap_or("");
-    let record = facts.get(id);
+    let record = facts.get(id).filter(|facts| sources::current_for(account, facts));
     let source = record.and_then(|record| record.sources.iter().find(|source| source.id == condition.source_id));
     let metadata = source.or(condition.source.as_ref());
     let mut reading = Reading::default();

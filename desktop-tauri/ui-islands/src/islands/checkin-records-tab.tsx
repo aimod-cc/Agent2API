@@ -15,6 +15,7 @@ import {
 } from './checkin-records-columns'
 import { SERVER_PAGE_SIZES, TableFooter, writePageSize, type PageSizeChoice } from './table-shell'
 import { t } from '../i18n'
+import { SearchableSelect } from '../../../ui-shared/searchable-select'
 
 /** 签到记录采用服务端分页；筛选变化时回到第一页。 */
 const RANGES = [
@@ -213,16 +214,10 @@ export function RecordsTab(): React.ReactElement {
             onValueChange={changeRange}
             aria-label="时间范围"
           />
-          <Select value={query.provider} onValueChange={value => apply({ provider: String(value ?? '') })}>
-            <SelectTrigger aria-label={t('提供商')}>
-              <SelectValue>
-                {providerOptions.find(option => option.value === query.provider)?.label || t('全部提供商')}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              {providerOptions.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
-            </SelectContent>
-          </Select>
+          <SearchableSelect value={query.provider} options={providerOptions}
+            onValueChange={provider => apply({ provider })} aria-label={t('提供商')}
+            className='max-w-[240px]' searchPlaceholder={t('搜索提供商')}
+            displayValue={providerOptions.find(option => option.value === query.provider)?.label || t('全部提供商')} />
           <Select value={query.kind} onValueChange={value => apply({ kind: String(value ?? '') })}>
             <SelectTrigger aria-label={t('签到类型')}>
               <SelectValue>

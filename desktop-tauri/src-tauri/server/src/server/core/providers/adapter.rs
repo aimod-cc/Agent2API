@@ -130,6 +130,8 @@ pub use super::retry::RetryDecision;
 use std::sync::Arc;
 
 use crate::server::core::account_store::AccountStore;
+use crate::server::core::proxies::ResolvedProxy;
+use crate::server::core::upstream::{ForwardOutcome, usage::RequestTelemetry};
 use crate::server::errors::GatewayError;
 
 use super::ProviderKind;
@@ -512,6 +514,20 @@ pub trait ProviderAdapter: Send + Sync {
 
     fn supports_image_editing(&self) -> bool {
         false
+    }
+
+    fn forwards_images(&self) -> bool { false }
+
+    fn forward_images<'a>(
+        &'a self,
+        _account_id: &'a str,
+        _body: &'a Value,
+        _client_headers: &'a HeaderMap,
+        _proxy: Option<ResolvedProxy>,
+        _operation: super::images::ImageOperation,
+        _telemetry: &'a Arc<RequestTelemetry>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ForwardOutcome, GatewayError>> + Send + 'a>> {
+        Box::pin(async { Err(GatewayError::with_status(501, "提供商尚未实现标准图片通道")) })
     }
 
     fn build_image_request_async<'a>(
@@ -1068,6 +1084,15 @@ pub trait ProviderAdapter: Send + Sync {
         false
     }
 
+    /// 私有响应由插件归一；这不意味着上游一定有持久会话。
+    fn forwards_response(&self) -> bool {
+        self.is_stateful()
+    }
+
+    fn supports_account_user_agent(&self) -> bool {
+        !self.forwards_response()
+    }
+
     /// **会话式转发入口**（模块头扩展 6 的配套；架构文档 §4.2.1）。
     ///
     /// 只有有状态 provider 覆写它（`is_stateful` 为 true 的家，见各自 `mod.rs`）。
@@ -1274,6 +1299,18 @@ pub trait ProviderAdapter: Send + Sync {
         ))
     }
 
+    /// 登录凭证与账号代理必须同次保存；执行体未实现时不能静默丢弃代理。
+    fn persist_login_account_with_proxy(
+        &self,
+        account: &agent2api_provider_protocol::NormalizedAccount,
+        proxy: Option<&Value>,
+    ) -> Result<String, GatewayError> {
+        if proxy.is_some() {
+            return Err(GatewayError::with_status(501, "该提供商尚不支持同时保存登录账号与代理，请更新提供商"));
+        }
+        self.persist_login_account(account)
+    }
+
     /// 用回调里的一次性 `code` 换取凭证并**存入账号库**，成功返回账号 id
     /// （模块头扩展 7）。
     ///
@@ -1321,6 +1358,21 @@ pub trait ProviderAdapter: Send + Sync {
         >,
     > {
         Box::pin(async { Ok(None) })
+    }
+
+    /// 扩展回调结果保留下一步授权与重新填写语义，旧适配器无需改动。
+    fn login_callback_result_async<'a>(
+        &'a self,
+        store: &'a AccountStore,
+        callback: agent2api_provider_protocol::LoginCallback,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<
+            Output = Result<Option<crate::server::core::login::LoginCallbackResult>, GatewayError>,
+        > + Send + 'a>,
+    > {
+        Box::pin(async move {
+            self.login_callback_poll_async(store, callback).await.map(|poll| poll.map(Into::into))
+        })
     }
 
     /// 取消插件侧登录流程（释放监听端口及暂存凭证），不删除已落库账号。
@@ -1912,6 +1964,12 @@ impl ProviderAdapter for BuiltinAdapter {
     fn is_stateful(&self) -> bool {
         adapter_for(self.0).is_stateful()
     }
+    fn forwards_response(&self) -> bool {
+        adapter_for(self.0).forwards_response()
+    }
+    fn supports_account_user_agent(&self) -> bool {
+        adapter_for(self.0).supports_account_user_agent()
+    }
 
     fn forward_conversation<'a>(
         &'a self,
@@ -2003,6 +2061,18 @@ impl ProviderAdapter for BuiltinAdapter {
         adapter_for(self.0).login_callback_poll_async(store, callback)
     }
 
+    fn login_callback_result_async<'a>(
+        &'a self,
+        store: &'a AccountStore,
+        callback: agent2api_provider_protocol::LoginCallback,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<
+            Output = Result<Option<crate::server::core::login::LoginCallbackResult>, GatewayError>,
+        > + Send + 'a>,
+    > {
+        adapter_for(self.0).login_callback_result_async(store, callback)
+    }
+
     fn login_cancel_async<'a>(
         &'a self,
         flow: &'a str,
@@ -2032,6 +2102,14 @@ impl ProviderAdapter for BuiltinAdapter {
     ) -> Result<String, GatewayError> {
         // 内置家的登录都在自己的 `start_*_login` 里落库，走不到这里
         adapter_for(self.0).persist_login_account(account)
+    }
+
+    fn persist_login_account_with_proxy(
+        &self,
+        account: &agent2api_provider_protocol::NormalizedAccount,
+        proxy: Option<&Value>,
+    ) -> Result<String, GatewayError> {
+        adapter_for(self.0).persist_login_account_with_proxy(account, proxy)
     }
 
     fn normalize_account<'a>(

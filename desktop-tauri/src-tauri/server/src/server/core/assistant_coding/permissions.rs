@@ -11,7 +11,7 @@ pub async fn register(client: &CodexClient, message: Value) {
     let active = {
         let state = client.state.inner.lock().unwrap_or_else(|e| e.into_inner());
         state.threads.get(&thread_id).is_some_and(|s| s.attached && !s.ending
-            && client.config.directory(string(&s.thread, "cwd")).is_ok())
+            && client.directory(string(&s.thread, "cwd")).is_ok())
     };
     if !supported || thread_id.is_empty() || !active {
         return;
@@ -25,7 +25,7 @@ pub async fn register(client: &CodexClient, message: Value) {
     if method == "item/fileChange/requestApproval" {
         let state = client.state.inner.lock().unwrap_or_else(|e| e.into_inner());
         let item_id = string(&arguments, "itemId");
-        if let Some(item) = state.threads.get(&thread_id).and_then(|s| s.items.get(item_id)) {
+        if let Some(item) = state.threads.get(&thread_id).and_then(|s| s.items.get(&super::projection::item_key(string(&arguments, "turnId"), item_id))) {
             if let Some(changes) = item.get("changes") { arguments["changes"] = changes.clone(); }
         }
     }
@@ -148,7 +148,7 @@ fn validate_permission_path(client: &CodexClient, raw: &str) -> Result<(), Codin
     }
     let canonical = std::fs::canonicalize(existing).map_err(|_| CodingError::new(403, "无法读取扩展权限的路径"))?;
     let directory = if canonical.is_dir() { canonical.as_path() } else { canonical.parent().ok_or_else(|| CodingError::new(403, "扩展权限的路径无效"))? };
-    client.config.directory(&super::config::display_path(directory))?;
+    client.directory(&super::config::display_path(directory))?;
     Ok(())
 }
 

@@ -25,6 +25,9 @@ pub(super) fn rejection_text(text: &str) -> bool {
 }
 
 fn frame_error(frame: &Value) -> Option<GatewayError> {
+    if frame.get("type").and_then(Value::as_str) == Some("response.failed") {
+        if let Some(response) = frame.get("response") { return frame_error(response); }
+    }
     if let Some(code) = frame.get("error_code").and_then(Value::as_str) {
         if matches!(code.trim().to_ascii_lowercase().as_str(), "" | "0" | "0000" | "success") && frame.get("error").is_none() { return None; }
     }
@@ -38,6 +41,14 @@ fn frame_error(frame: &Value) -> Option<GatewayError> {
 }
 
 fn has_output(frame: &Value) -> bool {
+    if matches!(frame.get("type").and_then(Value::as_str), Some(
+        "content_block_start" | "content_block_delta" | "response.output_item.added"
+        | "response.output_text.delta" | "response.function_call_arguments.delta" | "response.reasoning_summary_text.delta"
+        | "response.completed" | "response.incomplete" | "message_stop"
+    )) { return true; }
+    if frame.get("content").and_then(Value::as_array).is_some_and(|items| !items.is_empty())
+        || frame.get("output").and_then(Value::as_array).is_some_and(|items| !items.is_empty())
+    { return true; }
     frame.get("choices").and_then(Value::as_array).into_iter().flatten().any(|choice| {
         let delta = choice.get("delta").or_else(|| choice.get("message")).unwrap_or(choice);
         ["content", "reasoning_content", "reasoning", "tool_calls", "function_call", "text"].iter().any(|key|
@@ -50,14 +61,30 @@ fn has_output(frame: &Value) -> bool {
 
 // 只读到首个正文、思考或工具调用；之后不能补救，避免重复回答或重复执行工具。
 pub(super) async fn hold(outcome: ForwardOutcome, telemetry: &Arc<RequestTelemetry>) -> Result<ForwardOutcome, GatewayError> {
-    let ForwardOutcome::Stream { status, mut stream } = outcome else {
-        if let ForwardOutcome::Completion { body } = &outcome {
-            if !has_output(body) {
-                if let Some(error) = frame_error(body) { return Err(error); }
+    let (status, stream, native) = match outcome {
+        ForwardOutcome::Stream { status, stream } => (status, stream, None),
+        ForwardOutcome::Native(response) => {
+            let super::super::native::NativeResponse { protocol, status, headers, body } = response;
+            match body {
+                super::super::native::NativeBody::Stream(stream) => (status, stream, Some((protocol, headers))),
+                super::super::native::NativeBody::Json(body) => {
+                    if !has_output(&body) {
+                        if let Some(error) = frame_error(&body) { return Err(error); }
+                    }
+                    return Ok(ForwardOutcome::Native(super::super::native::NativeResponse {
+                        protocol, status, headers, body: super::super::native::NativeBody::Json(body),
+                    }));
+                }
             }
         }
-        return Ok(outcome);
+        ForwardOutcome::Completion { body } => {
+            if !has_output(&body) {
+                if let Some(error) = frame_error(&body) { return Err(error); }
+            }
+            return Ok(ForwardOutcome::Completion { body });
+        }
     };
+    let mut stream = stream;
     let mut chunks = Vec::<Bytes>::new();
     let mut pending = Vec::new();
     let mut held = 0usize;
@@ -95,12 +122,24 @@ pub(super) async fn hold(outcome: ForwardOutcome, telemetry: &Arc<RequestTelemet
         }
         if consumed > 0 { pending.drain(..consumed); }
     }
-    Ok(ForwardOutcome::Stream { status, stream: Box::new(futures::stream::iter(chunks.into_iter().map(Ok)).chain(stream)) })
+    let stream = Box::new(futures::stream::iter(chunks.into_iter().map(Ok)).chain(stream));
+    Ok(match native {
+        Some((protocol, headers)) => ForwardOutcome::Native(super::super::native::NativeResponse {
+            protocol, status, headers, body: super::super::native::NativeBody::Stream(stream),
+        }),
+        None => ForwardOutcome::Stream { status, stream },
+    })
 }
 
 pub(in crate::server::core::upstream) fn rewrite(outcome: ForwardOutcome, requested: &str, service: &super::super::UpstreamService,
     telemetry: Arc<RequestTelemetry>) -> ForwardOutcome {
     match outcome {
+        ForwardOutcome::Native(mut response) => {
+            if let super::super::native::NativeBody::Json(body) = &mut response.body {
+                crate::server::core::protocol::native::rewrite_response_model(response.protocol, body, requested);
+            }
+            ForwardOutcome::Native(response)
+        }
         ForwardOutcome::Completion { mut body } => {
             if body.is_object() { body["model"] = requested.into(); }
             ForwardOutcome::Completion { body }

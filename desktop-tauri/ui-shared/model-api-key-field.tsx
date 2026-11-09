@@ -1,4 +1,5 @@
-import { Alert, Button, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@ui'
+import { Alert, Button, Label } from '@ui'
+import { SearchableSelect } from './searchable-select'
 import { modelApiKeyLabel, type ModelApiKey } from './model-api-key'
 
 type Props = {
@@ -28,15 +29,9 @@ export function ModelApiKeyField({ keys, value, ready, loading, error, disabled,
         <Label htmlFor={id}>API Key</Label>
         <Button variant='ghost' size='xs' className='ml-auto' disabled={disabled || loading} onClick={onRefresh}>{t('刷新')}</Button>
       </div>
-      <Select value={selected?.id ?? ''} disabled={disabled || !ready || !keys.length}
-        onValueChange={next => { if (typeof next === 'string' && next) onChange(next) }}>
-        <SelectTrigger id={id} className='w-full'>
-          <SelectValue>{label}</SelectValue>
-        </SelectTrigger>
-        <SelectContent>
-          {keys.map(key => <SelectItem key={key.id} value={key.id}>{modelApiKeyLabel(key)}</SelectItem>)}
-        </SelectContent>
-      </Select>
+      <SearchableSelect value={selected?.id ?? ''} disabled={disabled || !ready || !keys.length}
+        onValueChange={next => { if (next) onChange(next) }} id={id} className='w-full' displayValue={label}
+        options={keys.map(key => ({ value: key.id, label: modelApiKeyLabel(key) }))} />
       <p className='text-xs leading-[1.6] text-subtle'>{t('模型调用使用所选 Key 的权限，日志记录 Key 名称，不保存密钥值。')}</p>
       {rememberSelection ? <p className='text-xs leading-[1.6] text-subtle'>{t('自动记住本次选择，下次打开继续使用；Key 被停用或删除后需重新选择。')}</p> : null}
       {warning ? <Alert variant='warning' role='status'>{warning}</Alert> : null}

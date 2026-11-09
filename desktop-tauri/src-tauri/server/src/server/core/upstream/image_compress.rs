@@ -40,6 +40,9 @@
 //! 2. **动图**：png / jpeg 本就没有多帧；WebP 可能是动图，检出 `ANIM` 块即
 //!    整张跳过（不改写动图），与 OmniProxy 一致。
 
+mod native;
+pub use native::compress_native_images;
+
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::{Mutex, OnceLock};

@@ -179,7 +179,14 @@ impl Host {
             return;
         }
         let _lease = lease;
-        let Some(method) = frame.method.clone() else { return };
+        let Some(mut method) = frame.method.clone() else { return };
+        if self.options.script {
+            method = match method.as_str() {
+                "store.ledger.get" => proto::methods::plugin::STORE_LEDGER_GET.to_string(),
+                "store.ledger.put" => proto::methods::plugin::STORE_LEDGER_PUT.to_string(),
+                _ => method,
+            };
+        }
         let id = frame.id;
         let params = frame.params.unwrap_or(serde_json::Value::Null);
         let text = |key: &str| {
@@ -190,8 +197,14 @@ impl Host {
         let authorization = match method.as_str() {
             "script.http.open" | "script.http.read" | "script.http.close" | "script.protocol.request"
             | "script.stream.open" | "script.stream.push" | "script.stream.close"
-            | "script.ws.open" | "script.ws.read" | "script.ws.send" | "script.ws.abort" | "script.proxy.resolve" => {
-                if self.options.script { Ok(()) } else { Err(proto::WireError::with_code("不是脚本插件宿主", CALLBACK_FORBIDDEN)) }
+            | "script.ws.open" | "script.ws.read" | "script.ws.send" | "script.ws.abort" | "script.proxy.resolve" | "script.signature" => {
+                if self.options.script && !params.get("id").and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| id.starts_with("wasm-")) { Ok(()) }
+                else { Err(proto::WireError::with_code("脚本资源不属于当前宿主", CALLBACK_FORBIDDEN)) }
+            }
+            "script.usage" => {
+                if !self.options.script { Err(proto::WireError::with_code("不是脚本宿主", CALLBACK_FORBIDDEN)) }
+                else { self.authorize_callback_account(&text("account"), Some(&text("provider"))) }
             }
             proto::methods::plugin::STORE_GET => {
                 let provider = text("provider");
@@ -202,9 +215,15 @@ impl Host {
                 })
             }
             proto::methods::plugin::STORE_LIST
-            | proto::methods::plugin::SETTINGS_GET
-            | proto::methods::plugin::SETTINGS_SET => {
+            | proto::methods::plugin::SETTINGS_GET => {
                 self.authorize_callback_provider(&text("provider"))
+            }
+            proto::methods::plugin::SETTINGS_SET => {
+                self.authorize_callback_provider(&text("provider")).and_then(|()| {
+                    if super::provider_settings::user_owned(self, &text("provider"), &text("key")) {
+                        Err(proto::WireError::with_code("用户设置只能由管理界面修改，插件不能覆盖", CALLBACK_FORBIDDEN))
+                    } else { Ok(()) }
+                })
             }
             proto::methods::plugin::STORE_UPDATE
             | proto::methods::plugin::STORE_MARK_LIMITED
@@ -220,6 +239,7 @@ impl Host {
             return;
         }
         let outcome: Result<serde_json::Value, proto::WireError> = match method.as_str() {
+            "script.usage" => super::script::record_usage(&params),
             "script.http.open" => super::script::open(&params).await,
             "script.http.read" => super::script::read_http(&params).await,
             "script.http.close" => { super::script::close_http(&params); Ok(serde_json::Value::Null) }
@@ -228,6 +248,8 @@ impl Host {
             "script.ws.send" => super::script::send_ws(&params).await,
             "script.ws.abort" => { super::script::abort_ws(&params); Ok(serde_json::Value::Null) }
             "script.proxy.resolve" => super::script::resolve_proxy(&params),
+            "script.signature" => Ok(crate::server::core::protocol::antigravity_signature_cache::lookup_call(&text("session"), &text("call"))
+                .map(serde_json::Value::String).unwrap_or(serde_json::Value::Null)),
             "script.protocol.request" => super::script::convert_request(&params),
             "script.stream.open" => super::script::open_stream(&params),
             "script.stream.push" => super::script::push_stream(&params),

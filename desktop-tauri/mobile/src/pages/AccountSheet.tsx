@@ -1,3 +1,4 @@
+import { useAccountUsage } from '../hooks/useAccountUsage'
 import { useEffect, useState } from 'react'
 import { Sheet, SheetContent, SheetHeader, SheetBody, SheetFooter, SheetTitle , Input, Button } from '@ui'
 import { Icon } from '../components/Icon'
@@ -7,18 +8,15 @@ import { store } from '../state/store'
 import {
   clearAccountRateLimits,
   deleteAccount,
-  fetchAccountUsage,
-  fetchUsageSnapshot,
   promoteAccount,
   refreshAccount,
   renameAccount,
   setAccountEnabled,
   type Account,
-  type UsageRow,
 } from '../api/gateway'
 import { accountName, activeLimits, formatExpiry, formatRelative, formatStamp, isRateLimited } from '../lib/format'
 import { expiryOf, hasExpiry, isLongLivedCredential, supportsUsage } from '../lib/providerFacts'
-import { mergeUsageRow, usageIndex, usageText } from '../lib/usage'
+import { usageText } from '../lib/usage'
 import { useDisplayClock } from '../../../ui-shared/use-display-clock'
 import { credentialExpiryRowsOf, credentialExpiryText } from '../../../ui-shared/credential-expiry'
 import { upstreamCooldownOf, upstreamSuspendedReasonOf } from '../../../ui-shared/account-upstream-state'
@@ -46,32 +44,20 @@ export function AccountSheet({
 }) {
   const now = useDisplayClock()
   const [busy, setBusy] = useState('')
-  /** 快照里这一行的余额结论；undefined = 还没查过 */
-  const [usageRow, setUsageRow] = useState<UsageRow | undefined>(undefined)
   const [editingName, setEditingName] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
   const open = Boolean(account)
   const accountId = account?.id || ''
   const identity = serverIdentity()
+  const usage = useAccountUsage(accountId, Boolean(account && supportsUsage(account)))
+  const usageRow = usage.row
+  useEffect(() => {
+    if (usageRow?.code === 'refresh_token_expired') onChanged()
+  }, [accountId, usageRow?.code, usageRow?.requestId])
 
-  // 换账号（或关掉抽屉）时重置：编辑态不能带到下一个账号上。
-  // 余额走快照而不是逐个查询 —— 快照只读记录表，不触发上游，打开抽屉不会变慢。
   useEffect(() => {
     setEditingName(false)
     setNameDraft('')
-    setUsageRow(undefined)
-    if (!accountId || !account || !supportsUsage(account)) return
-    let cancelled = false
-    fetchUsageSnapshot()
-      .then(snapshot => {
-        if (!cancelled) setUsageRow(usageIndex(snapshot).get(accountId))
-      })
-      .catch(() => {
-        /* 余额快照读不到是常态：保持「未查询」，不打扰用户 */
-      })
-    return () => {
-      cancelled = true
-    }
   }, [accountId])
 
   const run = async (kind: string, task: () => Promise<unknown>, success: string): Promise<boolean> => {
@@ -97,30 +83,6 @@ export function AccountSheet({
     // 删除不可恢复：手机上用两次确认（第一次进二次确认态）
     if (!await confirmDialog(t('确定删除账号「{name}」？这个操作不可恢复。', { name }))) return
     if (await run('delete', () => deleteAccount(account.id), t('已删除账号'))) onClose()
-  }
-
-  /** 手动查这一个账号：会真的打上游，可能慢，所以单独走 busy='usage' */
-  const queryUsage = async () => {
-    if (!account || !supportsUsage(account) || serverIdentity() !== identity) return
-    setBusy('usage')
-    try {
-      const payload = await fetchAccountUsage(account.id)
-      if (serverIdentity() !== identity) return
-      const row = payload.results?.find(item => item.id === account.id)
-      if (row?.code === 'refresh_token_expired') onChanged()
-      setUsageRow(previous => mergeUsageRow(row || { id: account.id, error: t('未返回余额数据') }, previous))
-      const view = row ? usageText(row) : null
-      store.toast(!view ? t('未返回余额数据') : view.kind === 'bad' ? view.detail : t('余额已更新'),
-        !view || view.kind === 'bad' ? 'err' : view.kind === 'warn' ? 'warn' : 'ok')
-    } catch (error) {
-      if (serverIdentity() === identity) {
-        const message = error instanceof Error ? error.message : String(error)
-        setUsageRow(previous => mergeUsageRow({ id: account.id, error: message }, previous))
-        store.toast(message, 'err')
-      }
-    } finally {
-      if (serverIdentity() === identity) setBusy('')
-    }
   }
 
   const saveName = async () => {
@@ -447,12 +409,15 @@ export function AccountSheet({
           {canQueryUsage ? <Button size='touch' variant='outline'
             type='button'
             className='m-btn m-ghost w-full'
-            disabled={Boolean(busy) || !account}
-            onClick={() => void queryUsage()}
+            disabled={usage.starting || Boolean(busy) || !account}
+            onClick={() => void usage.query()}
           >
             <Icon name='wallet' />
-            {busy === 'usage' ? t('查询中…') : t('查询余额')}
+            {usage.starting ? t('启动中…') : usage.task?.status === 'running' ? t('重新查询') : t('查询余额')}
           </Button> : null}
+          {usage.status ? <p className='text-xs text-subtle' role='status'>{usage.status}</p> : null}
+          {usageRow?.stale ? <p className='text-xs text-subtle'>{t('历史余额，尚未按新配置验证')}</p> : null}
+          {usage.task?.status === 'running' ? <Button variant='outline' onClick={() => void usage.cancel()}>{t('取消查询')}</Button> : null}
           {canRefresh ? <Button size='touch' variant='default'
             type='button'
             className='m-btn w-full'

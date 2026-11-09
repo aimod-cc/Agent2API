@@ -69,6 +69,7 @@ pub mod auto_checkin;
 // 独立成文件而不是塞进 config_api —— 理由见该模块头。
 pub mod auto_continue;
 pub mod billing;
+pub mod branding;
 pub mod captcha;
 pub mod chat;
 // 签到中心的聚合快照（GET /api/checkin-center）：分组口径在后端唯一化，
@@ -87,6 +88,8 @@ pub mod checkin_schedules;
 pub mod cline_headers;
 pub mod codearts_welfare;
 pub mod compact_routes;
+// 路由页「标题生成」的配置接口（GET/PUT /api/models/title-routes）
+pub mod title_routes;
 pub mod client_identification;
 pub mod config_api;
 // WorkBuddy 成长任务（查询 / 执行 / 开学季 / 猫猫旅行）：从参考项目
@@ -138,6 +141,11 @@ mod record_persist;
 // 提供商插件包的管理面（列表 / 安装 / 卸载 / 启停）：插件是用户安装的，
 // 这一组端点就是「装插件」的唯一入口，见该文件模块头
 pub mod plugins;
+pub mod plugin_tasks;
+pub mod plugin_login;
+pub mod plugin_helpers;
+pub mod plugin_icons;
+pub mod plugin_provider_settings;
 // 插件 UI 资源的托管（`/plugins/{pack}/ui/*`）：插件包可以带页面，由网关
 // 出静态资源、客户端 iframe 嵌入。不挂 protected —— 见该文件模块头
 pub mod plugin_ui;
@@ -187,8 +195,7 @@ pub mod zcode_captcha;
 pub mod zcode_captcha_pool;
 pub mod zcode_claim;
 pub mod zcode_claim_verification;
-// ZCode 客户端版本号（设置页可改）：上游按它决定活动套餐下不下发，
-// 落后时的症状是**静默空列表**，见该文件模块头
+// 旧版客户端的设置地址兼容入口。
 pub mod zcode_version;
 // 设置页「版本信息」：环境 / 版本 / 路径 / 开关状态的一次性读数
 // （`GET /api/system-info`，见该文件模块头）

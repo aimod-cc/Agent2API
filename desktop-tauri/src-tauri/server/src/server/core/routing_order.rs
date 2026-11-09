@@ -8,10 +8,8 @@ use super::{account_order, routing};
 pub fn global_queue(accounts: &[Value], profile: &RoutingProfile, account_provider: Option<&str>) -> Result<Vec<String>, String> {
     let sorting = account_order::sorting(accounts, crate::server::logging::now_ms());
     if let Some(provider) = account_provider {
-        let automatic = sorting.rules.get(provider).into_iter().flatten().any(|rule| match rule {
-            crate::server::config::AccountSortRule::Credit { on, .. } => *on && account_order::supports_credit_expiry(provider),
-            crate::server::config::AccountSortRule::Added { on, .. } => *on,
-        });
+        let automatic = sorting.rules.get(provider).into_iter().flatten()
+            .any(|rule| account_order::rule_enabled(provider, rule));
         if automatic { return Err("该提供商已启用自动消耗排序，请先关闭排序规则再手动调整账号顺序".to_string()); }
     }
     let mut groups = account_order::manual_groups(accounts);

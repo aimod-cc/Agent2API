@@ -68,6 +68,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 # ```
 # 不要改这一行 —— 那会让干净 clone 的构建依赖某个人的磁盘布局。
 agent2api-provider-protocol = { git = "https://github.com/ProvidersPlugin/Agent2Providers", tag = "v3.4.0" }
+# LTS 安全补丁；不链接 WASI，不向插件暴露文件、进程或环境变量。
+wasmtime = { version = "36.0.19", default-features = false, features = ["async", "cranelift", "runtime", "std"] }
 # Qoder 国际版签到的 UMID 组件安装（providers/qoder/risk.rs）：官方 qodercli
 # npm 包是 .tgz（gzip + tar），解出内嵌的 runtime-info 二进制。flate2 已在
 # 依赖树里（image 拉的），声明出来直接复用；tar 解析手写（几十行，见 risk.rs）
@@ -83,6 +85,8 @@ axum = { version = "0.8", features = ["multipart"] }
 # 指定代理）都显式关掉了自动探测（见 `egress::build_client`），转发链路的
 # 「直连就是直连」语义不受影响。
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "rustls-tls", "socks", "system-proxy"] }
+# 与 reqwest 共用系统代理解析器；仅在用户主动读取时导入 HTTPS 出口。
+hyper-util = { version = "0.1.20", features = ["client-proxy", "client-proxy-system"] }
 # MonkeyCode 会话转发的 WebSocket 任务流（providers/monkeycode/stream.rs）：
 # 上游是 `wss://…/api/v1/users/tasks/stream`，TLS 走 rustls —— 与 reqwest 的
 # `rustls-tls` 同一条栈（rustls + tokio-rustls 各一份；根证书同为 webpki-roots

@@ -39,6 +39,9 @@ export type AgentProfile = {
   editable?: boolean
   deletable?: boolean
   updatedAt?: number
+  liveId?: string | null
+  savedIds?: string[]
+  status?: 'active' | 'enabled' | 'disabled' | 'available' | 'inactive'
 }
 
 export type AgentClient = {
@@ -75,6 +78,7 @@ export type AgentClient = {
   supportNote: string
   docsUrl: string
   needsRestart: boolean
+  configurations: AgentProfile[]
   profiles: AgentProfile[]
   quickProfiles?: AgentProfile[]
   live: AgentProfile[]
@@ -113,3 +117,4 @@ export type AgentPayload = {
   imported?: { count: number }
 }
 export type AgentOperation = 'apply' | 'default' | 'restore' | 'disconnect' | 'native-edit' | 'native-delete' | 'quick-connect'
+  | 'config-use' | 'config-disable' | 'config-edit' | 'config-delete'

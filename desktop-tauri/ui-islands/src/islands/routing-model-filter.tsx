@@ -2,6 +2,7 @@ import * as React from 'react'
 import { Button, Empty, InputGroup, InputGroupAddon, InputGroupInput, Label, Popover, PopoverContent, PopoverTrigger } from '@ui'
 import { t } from '../i18n'
 import { RouteIcon } from './routing-ui'
+import { sortRoutingModels } from './routing-model-order'
 import { bridge, errorMessage, type RoutingWorkspace } from './routing-types'
 
 type ModelFilterResult = { source: string[]; model: string; providers: string[]; error: string }
@@ -42,14 +43,17 @@ export function useRoutingModelFilter(workspace: RoutingWorkspace | undefined, s
     retry: () => { setResult(null); retry() } }
 }
 
-export function RoutingModelFilter({ value, models, disabled, onChange }: {
-  value: string; models: string[]; disabled: boolean; onChange(model: string): void
+export function RoutingModelFilter({ value, models, lastUsed, disabled, onChange }: {
+  value: string; models: string[]; lastUsed?: Record<string, number>; disabled: boolean; onChange(model: string): void
 }) {
   const [open, setOpen] = React.useState(false)
   const [search, setSearch] = React.useState('')
+  const [openedModels, setOpenedModels] = React.useState<string[]>([])
+  const orderedModels = React.useMemo(() => sortRoutingModels(models, model => model, lastUsed), [models, lastUsed])
   const id = React.useId()
   const query = search.trim().toLowerCase()
-  const matches = models.filter(model => model.toLowerCase().includes(query))
+  const matches = React.useMemo(() => (open ? openedModels : orderedModels)
+    .filter(model => model.toLowerCase().includes(query)), [open, openedModels, orderedModels, query])
   const text = value || t('全部')
   const choose = (model: string) => { onChange(model); setOpen(false) }
   const option = (model: string, label: string) => <Button key={model} variant='ghost' className='routing-model-filter-option'
@@ -59,7 +63,14 @@ export function RoutingModelFilter({ value, models, disabled, onChange }: {
 
   return <div className='routing-model-filter'>
     <Label htmlFor={id}>{t('筛选模型')}</Label>
-    <Popover open={open} onOpenChange={open => { setOpen(open); if (open) setSearch('') }}>
+    <Popover open={open} onOpenChange={open => {
+      if (open) {
+        setSearch('')
+        // 展开期间固定顺序，后台刷新不能挪动用户正准备点击的选项。
+        setOpenedModels(orderedModels)
+      }
+      setOpen(open)
+    }}>
       <PopoverTrigger id={id} render={<Button variant='outline' disabled={disabled} />} className='routing-model-filter-trigger'
         aria-label={t('筛选模型')} title={text}>
         <span>{text}</span><RouteIcon name='chevronDown' size={13} />

@@ -130,6 +130,8 @@ fn provider_documentation(
     info: Option<&proto::ProviderInfo>,
     notes: Option<&ProviderNotes>,
 ) -> ProviderDocumentation {
+    let unverified = plugin_host::host_for_provider(&provider.id)
+        .is_some_and(|host| host.options.wasm.as_ref().is_some_and(|options| !options.manifest.verified));
     let runtime: BTreeMap<&str, bool> = info
         .map(runtime_capabilities)
         .map(|values| values.into_iter().collect())
@@ -147,6 +149,8 @@ fn provider_documentation(
         let status = if declared
             .is_some_and(|cell| matches!(cell.status, CapabilityStatus::ImplementedUnverified))
         {
+            CapabilityStatus::ImplementedUnverified
+        } else if unverified && runtime.get(key) == Some(&true) {
             CapabilityStatus::ImplementedUnverified
         } else if runtime.get(key) == Some(&true) {
             CapabilityStatus::Supported

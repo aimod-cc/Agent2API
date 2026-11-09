@@ -74,12 +74,14 @@ pub(super) struct ProviderContext<'a> {
     /// 客户端请求体（**原始**：已 stream:true；未做任何内容处理；未注入 system
     /// —— 那是适配器的事）。各 provider 的实际发送体由 [`send_body`] 决定。
     pub body: &'a Value,
+    pub native: Option<&'a crate::server::core::protocol::native::NativeRequest>,
     pub routing: super::route_context::RequestRouting,
     pub vision: Option<Arc<super::vision_compat::RequestVision>>,
     pub direct_provider: Option<String>,
     pub direct_model: Option<String>,
     /// 网关确认并改写的压缩请求；入站伪造标记已在模型解析时剥离。
     pub compact_routed: bool,
+    pub title_routed: bool,
     /// 客户端是否要流式（决定成功后的形态：SSE 透传 or 聚合）
     pub stream: bool,
     pub images: Option<crate::server::core::providers::images::ImageOperation>,

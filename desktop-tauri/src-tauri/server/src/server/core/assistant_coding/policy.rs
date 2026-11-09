@@ -16,7 +16,7 @@ pub fn saved_sandbox(client: &CodexClient, id: &str) -> Result<Value, CodingErro
             let roots = sandbox.get("writableRoots").and_then(Value::as_array)
                 .ok_or_else(|| CodingError::new(409, "会话权限记录不完整，未恢复任务"))?;
             for root in roots {
-                client.config.directory(root.as_str().unwrap_or(""))?;
+                client.directory(root.as_str().unwrap_or(""))?;
             }
         }
         _ => return Err(CodingError::new(409, "此会话的权限模式暂不支持，未恢复任务")),
@@ -34,5 +34,5 @@ pub fn store_sandbox(client: &CodexClient, id: &str, sandbox: &Value) -> Result<
 }
 
 pub fn directory(client: &CodexClient, raw: &str) -> Result<String, CodingError> {
-    client.config.directory(raw).map(|path| config::display_path(&path))
+    client.directory(raw).map(|path| config::display_path(&path))
 }

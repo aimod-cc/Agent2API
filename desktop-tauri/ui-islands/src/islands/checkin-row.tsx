@@ -4,29 +4,17 @@ import {
   CollapsibleTrigger, Item, ItemActions, cn,
 } from '@ui'
 
-import { PROVIDER_ICONS } from './add-provider-pick'
+import { useProviderIcon } from './provider-icon'
 import { t } from '../i18n'
 
-const ICON_FALLBACK: Record<string, string> = {
-  'workbuddy-intl': 'workbuddy',
-  'autoclaw-intl': 'autoclaw',
-  'qoder-intl': 'qoder',
-  'zcode-intl': 'zcode',
-  'monkeycode-intl': 'monkeycode',
-  'modelscope-intl': 'modelscope',
-  'cline-pass': 'cline',
-  'cline-free': 'cline',
-  'accio-cn': 'accio',
-}
-
 export function ProviderLogo({ id, label }: { id: string; label: string }): React.ReactElement {
-  const slug = ICON_FALLBACK[id] ?? id
-  const icon = PROVIDER_ICONS[id] || `assets/providers/${slug}.png`
+  const { src: icon, onError } = useProviderIcon(id)
   const initial = (label || id || '·').trim().slice(0, 1).toUpperCase() || '·'
   return (
     <Avatar className='size-6 rounded-[7px] bg-control' title={label} aria-hidden='true'>
       <AvatarFallback className='text-[10px] font-bold'>{initial}</AvatarFallback>
-      <AvatarImage keepMounted src={icon} alt='' loading='lazy' className='object-contain' />
+      <AvatarImage keepMounted src={icon || undefined} alt='' loading='lazy' className='object-contain'
+        onLoadingStatusChange={status => { if (status === 'error') onError() }} />
     </Avatar>
   )
 }

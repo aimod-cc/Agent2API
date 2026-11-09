@@ -18,6 +18,7 @@ export type ProxyPoolItem = ProxyUsage & {
   port: number | null
   username: string
   password: string
+  nonDirect?: boolean
   createdAt: number
   updatedAt: number
   lastTest: {
@@ -37,6 +38,7 @@ export type ProxyPoolPayload = {
   clash?: ClashProxySnapshot
   changes?: number
   syncError?: string | null
+  imported?: import('../../../ui-shared/proxy-import').ProxyImportReport
 }
 
 export type ProxyTestResult = {

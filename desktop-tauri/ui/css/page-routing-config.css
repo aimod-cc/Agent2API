@@ -209,32 +209,40 @@
 .routing-group-form label { font-size: 13px; }
 .routing-group-code { max-height: 300px; overflow: auto; padding: 16px; border-radius: var(--r-sm); background: var(--surface-2); font: 12px/1.6 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 
-.routing-create-dialog { width: min(880px, calc(100vw - 40px)); }
-.routing-create-dialog [data-slot='dialog-body'] { gap: 12px; }
+.routing-create-dialog { width: min(880px, calc(100vw - 40px)); height: min(720px, calc(100dvh - 48px)); }
+.routing-create-dialog > [data-slot='dialog-header'], .routing-create-dialog > [data-slot='dialog-footer'] { flex: none; }
+.routing-create-dialog [data-slot='dialog-body'] { flex: 1; min-height: 0; gap: 12px; }
+.routing-create-dialog [data-slot='dialog-body'] > * { flex-shrink: 0; }
+.routing-create-models { display: flex; flex: 1; flex-direction: column; min-height: 160px; overflow: hidden; border: 1px solid var(--border); border-radius: var(--r-md); }
+.routing-model-all { flex: none; justify-content: flex-start; min-height: 38px; padding: 9px 18px; border-bottom: 1px solid var(--hairline); border-radius: 0; font-size: 12.5px; }
+.routing-model-all[aria-pressed='true'] { background: var(--primary-soft); color: var(--primary-fg); }
+.routing-create-model-list { flex: 1; min-height: 0; max-height: none; border: 0; border-radius: 0; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .routing-create-dialog .routing-group-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; }
 .routing-create-dialog .routing-group-form label { font-size: 12px; }
-.routing-single-model { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 10px 12px; border: 1px solid transparent; border-radius: var(--r-sm); cursor: pointer; }
+.routing-single-model { display: flex; flex: none; align-items: center; gap: 10px; min-height: 40px; padding: 10px 12px; border: 1px solid transparent; border-radius: var(--r-sm); cursor: pointer; }
 .routing-single-model:hover { background: var(--surface-2); }
 .routing-single-model[data-checked] { border-color: var(--primary-bd); background: var(--primary-soft); color: var(--primary-fg); }
 .routing-single-model > span:last-child { min-width: 0; overflow-wrap: anywhere; font-size: 12.5px; font-weight: 500; }
-.routing-model-selection { min-width: 0; }
+.routing-model-selection { display: flex; flex-direction: column; min-width: 0; gap: 0; }
+.routing-create-dialog .routing-model-selection { flex: 1; min-height: 220px; }
+.routing-create-dialog .routing-model-columns { flex: 1; min-height: 160px; height: auto; }
 .routing-model-columns { display: grid; grid-template-columns: 220px minmax(0, 1fr); height: clamp(240px, 34vh, 360px); overflow: hidden; border: 1px solid var(--border); border-radius: var(--r-md); }
 .routing-model-providers, .routing-model-choices { display: flex; flex-direction: column; gap: 10px; min-width: 0; min-height: 0; padding: 10px; }
 .routing-model-providers { background: var(--rail-bg); border-right: 1px solid var(--hairline); }
 .routing-model-providers > input, .routing-model-choices > input { flex: none; font-size: 12px; }
-.routing-model-provider-list { flex: 1; overflow-y: auto; --ui-selection-bg: var(--primary-soft); --ui-selection-border: transparent; }
+.routing-model-provider-list { flex: 1; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; --ui-selection-bg: var(--primary-soft); --ui-selection-border: transparent; }
 .routing-model-provider-list > [data-slot='nav-item'] { flex: none; min-width: 0; padding: 9px 7px; font-size: 12px; }
+.routing-model-provider-list > .routing-model-provider-all { position: sticky; top: 0; z-index: 2; background: var(--rail-bg); }
+.routing-model-provider-list > .routing-model-provider-all[data-active] { background: var(--primary-soft); color: var(--primary-fg); }
 .routing-model-provider-list .routing-provider-mark { width: 22px; height: 22px; }
-.routing-model-provider-list [data-slot='badge'] { font-size: 10px; }
-.routing-model-choices-head { display: flex; align-items: center; gap: 8px; color: var(--text-3); font-size: 11px; }
+.routing-model-choices-head { display: flex; flex: none; align-items: center; gap: 8px; color: var(--text-3); font-size: 11px; }
 .routing-model-choices-head > b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); font-size: 12.5px; font-weight: 600; }
-.routing-model-choice-list { display: flex; flex: 1; min-height: 0; flex-direction: column; gap: 6px; overflow-y: auto; }
-.routing-model-choice-list .routing-group-picker-row { flex: none; padding: 10px; cursor: pointer; }
+.routing-model-choice-list { display: flex; flex: 1; min-height: 0; flex-direction: column; gap: 4px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.routing-model-choice-list .routing-group-picker-row { flex: none; min-height: 38px; padding: 8px 10px; border-color: transparent; cursor: pointer; }
+.routing-model-choice-list .routing-group-picker-row:hover { background: var(--surface-2); }
 .routing-model-choice-list .routing-group-picker-row[data-checked] { background: var(--primary-soft); border-color: var(--primary-bd); }
-.routing-model-choice-list .routing-group-picker-row b { font-size: 12.5px; overflow-wrap: anywhere; }
-.routing-model-choice-list .routing-group-picker-row small { margin-top: 3px; font-size: 11px; }
-.routing-model-choice-list [data-slot='badge'] { font-size: 10.5px; white-space: normal; }
-.routing-model-selection-summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 6px; color: var(--text-3); font-size: 11.5px; }
+.routing-group-model-id { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 12.5px; font-weight: 500; }
+.routing-model-selection-summary { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 10px; padding-top: 6px; color: var(--text-3); font-size: 11.5px; }
 
 @container routing (max-width: 1120px) {
   .routing-config-shell { grid-template-columns: 186px minmax(0, 1fr); gap: 16px; }
@@ -256,7 +264,6 @@
   .routing-model-providers, .routing-model-choices { padding: 7px; }
   .routing-model-provider-list .routing-provider-mark { display: none; }
   .routing-model-choice-list .routing-group-picker-row { gap: 7px; padding: 8px; }
-  .routing-model-choice-list .routing-group-picker-row > [data-slot='badge'] { display: none; }
   .routing-config-shell { display: flex; flex-direction: column; gap: 12px; overflow: auto; }
   .routing-config-rail { flex: none; max-height: 300px; }
   .routing-canvas { display: flex; flex: none; flex-direction: column; gap: 18px; overflow: visible; }

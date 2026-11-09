@@ -751,6 +751,11 @@ async fn run_forward(
             reasoning_text: String::new(),
             raw_response: None,
         },
+        Ok(Ok(ForwardOutcome::Native(_))) => TestOutcome {
+            status: 502,
+            error: Some("模型检查收到意外的原生协议响应".to_string()),
+            reply: String::new(), reasoning_text: String::new(), raw_response: None,
+        },
         Ok(Ok(ForwardOutcome::Completion { body })) => {
             translate_completion(protocol, model, protocol_request, 200, body)
         }

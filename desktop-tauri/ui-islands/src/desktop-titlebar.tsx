@@ -2,6 +2,8 @@ import * as React from 'react'
 import { createRoot } from 'react-dom/client'
 import { WindowControl, WindowTitleBar } from '@ui'
 import { t } from './i18n'
+import { desktopBranding } from './branding'
+import { BrandLogo } from '../../ui-shared/brand-logo'
 
 type WindowBridge = {
   platform?: string
@@ -24,6 +26,7 @@ function WindowIcon({ action, maximized = false }: { action: 'minimize' | 'maxim
 }
 
 function TitleBar({ api }: { api: WindowBridge }) {
+  const branding = desktopBranding.useValue()
   const [maximized, setMaximized] = React.useState(false)
   const sync = React.useCallback(async () => {
     try { if (api.windowIsMaximized) setMaximized(await api.windowIsMaximized()) } catch { /* 窗口销毁期间不更新图标。 */ }
@@ -34,11 +37,11 @@ function TitleBar({ api }: { api: WindowBridge }) {
     return typeof dispose === 'function' ? dispose as () => void : undefined
   }, [api, sync])
   const isMac = api.platform === 'macos'
-  const title = api.title || t('Agent2API · 多提供商本地网关')
-  const icon = (window as unknown as { wbIcons?: { icon(name: string, size: number): string } }).wbIcons?.icon('brand', 16) || ''
+  const title = branding.displayName === 'Agent2API' ? api.title || t('Agent2API · 多提供商本地网关')
+    : `${api.title?.startsWith('[Dev]') ? '[Dev] ' : ''}${branding.displayName}`
   return <WindowTitleBar className={isMac ? 'titlebar is-macos pl-[84px] pr-3.5' : 'titlebar'}>
     <div className='titlebar-brand pointer-events-none flex min-w-0 items-center gap-2 text-[12.5px] font-semibold [&_*]:pointer-events-none'>
-      <span className='flex shrink-0 items-center [&>svg]:block' dangerouslySetInnerHTML={{ __html: icon }} /><span className='txt truncate'>{title}</span>
+      <BrandLogo branding={branding} size={16} /><span className='txt truncate'>{title}</span>
     </div>
     {!isMac && <div className='ml-auto flex h-full shrink-0'>
       <WindowControl action='minimize' title={t('最小化')} aria-label={t('最小化')} onClick={() => { void api.windowMinimize?.().catch(() => {}) }}><WindowIcon action='minimize' /></WindowControl>

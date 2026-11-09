@@ -45,7 +45,7 @@ use crate::server::core::account_store::state::{mark_name_custom, StoredAccount}
 use crate::server::core::account_store::store_view::Visibility;
 use crate::server::core::account_store::store::{AccountStore, AccountStoreError};
 use crate::server::core::account_store::store_util::{
-    js_string, js_truthy, number_or, object_or_empty, optional_text, pick_token, token_tail_of,
+    js_string, number_or, object_or_empty, optional_text, pick_token, token_tail_of,
     truncate_chars, value_or, value_or_nullish,
 };
 use crate::server::core::account_store::MAX_TOKEN_LENGTH;
@@ -683,6 +683,9 @@ impl AccountStore {
         // 原地更新（物理位置不动）：旧实现在下标上改字段，数组顺序本来就不变 ——
         // 界面上的行序是按优先级排的，不该因为一次「改备注名」而跳动
         self.with_conn(&_guard, |conn| sql::update_in_place(conn, &record))?;
+        if patch.contains_key("proxy") || patch.contains_key("userAgent") || patch.contains_key("usageQuery") {
+            crate::server::core::usage_query::jobs::invalidate_changed(id, &crate::server::core::usage_query::config::fingerprint(&record));
+        }
         logging::log(
             "[Accounts]",
             &format!("✏️  账号已更新: {name}（{}）", changes.join("，")),
@@ -854,14 +857,38 @@ impl AccountStore {
             }
         }
 
+        if let Some(value) = patch.get("userAgent") {
+            // 账号级自定义 User-Agent：空串 / null = 清除（回到该家自己的默认值）。
+            //
+            // 为什么存在账号记录里而不是放在 provider 上：同一家的不同账号可能
+            // 需要不同的身份（一个用官方 CLI 的 UA、另一个用别的客户端），而
+            // 「用哪个 UA」是这组凭证的事实，跟着账号走才对。
+            //
+            // 校验口径：1 KiB 上限、无控制字符（含 CR/LF）—— 这个值会原样成为
+            // 出站请求头，含换行就是一次请求头注入。
+            let next = crate::server::core::client::catalog::normalize_user_agent_override(value)?;
+            let current = record.get("userAgent").and_then(Value::as_str).unwrap_or("").to_string();
+            if next != current {
+                if next.is_empty() {
+                    record.remove("userAgent");
+                    changes.push("User-Agent → 默认".to_string());
+                } else {
+                    record.set("userAgent", Value::String(next.clone()));
+                    changes.push(format!("User-Agent → {next}"));
+                }
+            }
+        }
+
         if let Some(value) = patch.get("usageQuery") {
-            // 每账号自动余额查询（enabled + interval 秒）：界面的设置段每次保存
-            // 都整块发回，与 name / proxy 同一形态。归一化后恒存显式对象
-            // （关闭 = {enabled:false, interval:0}），读侧（公开形态 / 调度）
-            // 不必判「键缺失」。边界常量与读取侧同源（usage_records），
-            // 否则「接口拒绝 29 秒而手改记录接受它」。
-            let next = Self::normalize_usage_query(value)?;
+            let mut next = Self::normalize_usage_query(value)?;
             let current = Self::normalize_usage_query_lenient(record.get("usageQuery"));
+            // 旧客户端只更新开关和间隔时，保留该账号已保存的重试次数。
+            if value.is_object() && value.get("retries").is_none() {
+                next["retries"] = current["retries"].clone();
+            }
+            if value.is_object() && value.get("timeoutSeconds").is_none() {
+                next["timeoutSeconds"] = current["timeoutSeconds"].clone();
+            }
             if next != current {
                 record.set("usageQuery", next.clone());
                 changes.push(Self::describe_usage_query(&next));
@@ -941,51 +968,6 @@ impl AccountStore {
         json!({ "mode": mode, "threshold": rule.threshold })
     }
 
-    /// `usageQuery` 的写入侧归一化（校验即权威：读侧只做容错展开，见 store_view）。
-    ///
-    /// 整块对象更新：`enabled` 按真值判定；`interval` 必须是整数秒，开启时必须在
-    /// `MIN~MAX_QUERY_INTERVAL_SECONDS` 内（关闭时放行任意整数 / 缺失，存 0）——
-    /// 用户先关开关保存，不会因为残留的旧间隔被 400 挡住。非对象（null / 脏值）
-    /// 一律视为「恢复缺省」= 开启、1 分钟（与读侧 `query_interval_of` 的缺省
-    /// 同一口径）；显式关闭必须是 `{enabled:false}` 对象。
-    pub(crate) fn normalize_usage_query(value: &Value) -> Result<Value, AccountStoreError> {
-        const MIN: i64 = crate::server::core::usage_records::MIN_QUERY_INTERVAL_SECONDS;
-        const MAX: i64 = crate::server::core::usage_records::MAX_QUERY_INTERVAL_SECONDS;
-        const DEFAULT: i64 = crate::server::core::usage_records::DEFAULT_QUERY_INTERVAL_SECONDS;
-        let Some(fields) = value.as_object() else {
-            return Ok(json!({ "enabled": true, "interval": DEFAULT }));
-        };
-        let enabled = fields.get("enabled").map(js_truthy).unwrap_or(false);
-        let interval = match fields.get("interval") {
-            None | Some(Value::Null) => 0,
-            Some(raw) => raw.as_i64().ok_or_else(|| {
-                AccountStoreError::bad_request("查询间隔必须是整数（单位：秒）")
-            })?,
-        };
-        if interval != 0 && !(MIN..=MAX).contains(&interval) {
-            return Err(AccountStoreError::bad_request(format!(
-                "查询间隔必须是 {MIN}~{MAX} 秒"
-            )));
-        }
-        if enabled && interval == 0 {
-            return Err(AccountStoreError::bad_request(format!(
-                "开启自动查询需要填写 {MIN}~{MAX} 秒的间隔"
-            )));
-        }
-        Ok(json!({ "enabled": enabled, "interval": interval }))
-    }
-
-    /// `usageQuery` 的比较基准：已存的值过一遍同一套归一化（容错版 —— 存量数据
-    /// 由写入侧保证合法，这里不报错）。**记录上没有这个键 = 缺省开启、1 分钟**：
-    /// 比较基准与读侧缺省一致，用户对着缺省值保存一次设置不会凭空多出一条
-    /// 「已开启」的变更日志，也不会把缺省配置物化进每条账号记录。
-    fn normalize_usage_query_lenient(value: Option<&Value>) -> Value {
-        const DEFAULT: i64 = crate::server::core::usage_records::DEFAULT_QUERY_INTERVAL_SECONDS;
-        Self::normalize_usage_query(value.unwrap_or(&Value::Null)).unwrap_or_else(|_| {
-            json!({ "enabled": true, "interval": DEFAULT })
-        })
-    }
-
     /// `lowBalance` 的写入侧归一化：mode 三选一；非 off 档要求阈值有限且 > 0；
     /// off 档阈值归零。非对象（null / 脏值）一律视为「恢复缺省」= 按 provider
     /// 区分的缺省档（与读侧 `balance_blocked` 的缺省同一口径，见
@@ -1025,23 +1007,6 @@ impl AccountStore {
     fn normalize_low_balance_lenient(value: Option<&Value>, provider: &str) -> Value {
         Self::normalize_low_balance(value.unwrap_or(&Value::Null), provider)
             .unwrap_or_else(|_| Self::low_balance_default(provider))
-    }
-
-    /// 变更提示文案：`每 90 分钟` 这类人能读的间隔。
-    pub(crate) fn describe_usage_query(next: &Value) -> String {
-        let enabled = next.get("enabled").and_then(Value::as_bool).unwrap_or(false);
-        if !enabled {
-            return "自动查询余额 → 关闭".to_string();
-        }
-        let seconds = next.get("interval").and_then(Value::as_i64).unwrap_or(0);
-        let span = if seconds > 0 && seconds % 3600 == 0 {
-            format!("{} 小时", seconds / 3600)
-        } else if seconds > 0 && seconds % 60 == 0 {
-            format!("{} 分钟", seconds / 60)
-        } else {
-            format!("{seconds} 秒")
-        };
-        format!("自动查询余额 → 开启（每 {span}）")
     }
 
     /// 变更提示文案：低于阈值跳过 / 禁用。f64 的 Display 打整数不带小数点

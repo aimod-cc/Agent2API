@@ -1,0 +1,80 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>html,body{margin:0;padding:0;background:transparent}body{min-height:65px}#widget{width:100%;min-height:65px}</style>
+</head>
+<body>
+<div id="widget"></div>
+<script>
+(() => {
+  'use strict';
+  const channel = new URLSearchParams(location.search).get('channel');
+  let port = null;
+  let widgetId = null;
+  let started = false;
+  const send = (state, extra = {}) => { if (port) port.postMessage({ state, ...extra }); };
+  const resize = () => send('size', { height: Math.max(65, document.body.scrollHeight) });
+  new ResizeObserver(resize).observe(document.body);
+  window.addEventListener('message', event => {
+    if (started || event.source !== parent || event.data?.type !== 'agent2api-turnstile-connect'
+      || !channel || event.data.channel !== channel || !event.ports[0]) return;
+    started = true;
+    port = event.ports[0];
+    void start(event.data);
+  });
+  async function start(options) {
+    send('verifying');
+    resize();
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15000);
+      let data;
+      try {
+        const response = await fetch('/api/panel/status', { cache: 'no-store', signal: controller.signal });
+        if (!response.ok) throw new Error('status');
+        const payload = await response.json();
+        data = payload.data;
+      } finally { clearTimeout(timer); }
+      if (!data || !data.captchaEnabled || data.captchaProvider !== 'turnstile'
+        || !data.turnstileSiteKey || data.captchaError) throw new Error('configuration');
+      await new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        const timer = setTimeout(() => reject(new Error('script')), 20000);
+        script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+        script.async = true;
+        script.onload = () => { clearTimeout(timer); resolve(); };
+        script.onerror = () => { clearTimeout(timer); reject(new Error('script')); };
+        document.head.appendChild(script);
+      });
+      if (!window.turnstile) throw new Error('script');
+      widgetId = window.turnstile.render('#widget', {
+        sitekey: data.turnstileSiteKey,
+        action: 'agent2api_panel',
+        theme: ['dark', 'light'].includes(options.theme) ? options.theme : 'auto',
+        language: ['en', 'zh-CN', 'zh-TW', 'ja', 'ko', 'pt-BR'].includes(options.language) ? options.language : 'auto',
+        size: 'flexible',
+        'response-field': false,
+        retry: 'never',
+        'refresh-expired': 'auto',
+        callback: token => send('verified', { token }),
+        'expired-callback': () => send('verifying'),
+        'timeout-callback': () => send('error', { reason: 'timeout' }),
+        'error-callback': code => { send('error', { reason: 'challenge', code: String(code).slice(0, 32) }); return true; },
+        'unsupported-callback': () => send('error', { reason: 'unsupported' }),
+        'before-interactive-callback': resize,
+        'after-interactive-callback': resize,
+      });
+    } catch (error) {
+      send('error', { reason: error instanceof Error ? error.message : 'status' });
+    }
+  }
+  window.addEventListener('pagehide', () => {
+    if (widgetId !== null && window.turnstile) window.turnstile.remove(widgetId);
+    if (port) port.close();
+  });
+})();
+</script>
+</body>
+</html>

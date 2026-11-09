@@ -104,12 +104,15 @@ pub fn panel_router(state: ServerState) -> Router {
         // 凭证（setup / login），要么凭证本身就是它们的主张（refresh 带
         // refresh cookie、logout 撤自己的会话），挂 public 由端点自理。
         .route("/api/panel/status", get(api::panel::panel_status))
+        .route("/api/panel/branding", get(api::branding::get))
+        .route("/api/panel/branding/logo", get(api::branding::logo))
         .route("/api/panel/setup", post(api::panel::panel_setup))
         .route("/api/panel/refresh", post(api::panel::panel_refresh))
         .route("/api/panel/logout", post(api::panel::panel_logout))
         // ALTCHA 领题：与 status / setup 同为「认证边界」端点 —— 领题时
         // 用户还没有任何凭证（开关关闭时回 400，前端跳过校验）
         .route("/api/panel/captcha", get(api::panel::captcha_challenge))
+        .route("/api/panel/turnstile", get(super::panel_captcha::widget))
         // 会话传输探测（登录页连打两发）：同为 public —— 探测在登录之前，
         // 只种/读一枚 60 秒寿命的探针 cookie，不建立会话、不校验值
         // （见 api::panel::cookie_probe）
@@ -123,6 +126,7 @@ pub fn panel_router(state: ServerState) -> Router {
         // 浏览器把授权码以 GET 查询串带回当前面板。调用方是上游授权页，不能
         // 携带管理 API Key，因此由一次性任务 state 保护。参数形状不看 provider
         // —— 网关只转发查询串，解释权在插件。
+        .route("/api/session/login/wasm-callback", get(api::plugin_login::callback))
         .route(
             "/api/session/login/remote-callback",
             get(api::session::login_remote_callback),
@@ -201,7 +205,9 @@ pub fn panel_router(state: ServerState) -> Router {
         // 挂在 `{pack}` 路由之前：`runtime` 不能被当成包 id（它不含 `/ui/`，
         // 两条路由实际不会冲突，但顺序上先声明更不容易在将来被误改）。
         // 不挂 protected 的理由与上面那条逐字相同。
-        .route("/plugins/runtime/{*rest}", get(api::plugin_theme::serve));
+        .route("/plugins/runtime/{*rest}", get(api::plugin_theme::serve))
+        // 仅按内容摘要提供已缓存图片；公开读取不触发下载，也不接受磁盘路径。
+        .route("/plugins/script-icons/{file}", get(api::plugin_icons::serve));
 
     // 需鉴权：Node 版对这些路径都调用了 checkApiKey
     let protected = Router::new()
@@ -478,6 +484,7 @@ pub fn panel_router(state: ServerState) -> Router {
         // pool 各条都是固定路径（id 走 body / query，不用 {id} 段 ——
         // 理由见 api::proxies 的模块头），方法判定在 proxies_entry 里。
         .route("/api/proxies", any(api::accounts::proxies_entry))
+        .route("/api/proxies/system", any(api::accounts::proxies_entry))
         .route("/api/proxies/test", any(api::accounts::proxies_entry))
         .route("/api/proxies/pool", any(api::accounts::proxies_entry))
         .route("/api/proxies/pool/update", any(api::accounts::proxies_entry))
@@ -516,6 +523,7 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/session/login/methods", get(api::session::login_methods))
         .route("/api/session/login/start", post(api::session::login_start))
         .route("/api/session/login/wait", get(api::session::login_wait))
+        .route("/api/session/login/interaction", get(api::plugin_login::get).post(api::plugin_login::submit))
         .route("/api/session/login/cancel", post(api::session::login_cancel))
           // 网页登录的回调入口：壳侧登录窗口或远程网页面板把回调地址原样
           // POST 到这里（Tauri 不能像 Electron 那样在会话里注册协议处理器，
@@ -586,6 +594,7 @@ pub fn panel_router(state: ServerState) -> Router {
         // 模型管理（启停 / 隐藏 / 映射）与网关 Key 列表：都是写配置的管理接口，挂 protected
         .route("/api/models/manage", get(api::model_manage::get_manage))
         .route("/api/models/compact-routes", get(api::compact_routes::get_routes).put(api::compact_routes::put_routes))
+        .route("/api/models/title-routes", get(api::title_routes::get_routes).put(api::title_routes::put_routes))
         .route("/api/models/state", post(api::model_manage::set_state))
         .route("/api/models/mappings", post(api::model_manage::add_mapping))
         .route("/api/models/mappings/remove", post(api::model_manage::remove_mapping))
@@ -676,6 +685,7 @@ pub fn panel_router(state: ServerState) -> Router {
             "/api/custom-providers/fetch-models",
             post(api::custom_providers::fetch_custom_models),
         )
+        .route("/api/provider-settings", get(api::plugin_provider_settings::list).patch(api::plugin_provider_settings::configure))
         .route("/api/model-access/models", get(api::model_access::models))
         .route("/api/model-access/keys", get(api::model_access::list_keys))
         .route("/api/keys", get(api::keys_api::list_keys).post(api::keys_api::create_key))
@@ -685,10 +695,19 @@ pub fn panel_router(state: ServerState) -> Router {
         // **全部挂 protected**：装插件等于允许本机跑任意代码，与备份导入同级敏感。
         // 安装的 Bytes 提取器读取最终扩展：局部有限上限后写覆盖外层 32 MiB。
         .route("/api/plugins", get(api::plugins::list))
+        .route("/api/plugins/startup", get(api::plugins::startup))
+        .route("/api/plugins/tasks", get(api::plugin_tasks::list).patch(api::plugin_tasks::configure))
+        .route("/api/plugins/tasks/run", post(api::plugin_tasks::run))
+        .route("/api/plugins/helpers", get(api::plugin_helpers::list).patch(api::plugin_helpers::configure))
         .route("/api/plugins/settings", get(api::plugins::settings).patch(api::plugins::save_settings))
+        .route("/api/plugins/provider-settings", get(api::plugin_provider_settings::list).patch(api::plugin_provider_settings::configure))
         .route("/api/plugins/progress", get(api::plugins::progress))
         .route("/api/plugins/scripts/install", post(api::plugins::install_script))
         .route("/api/plugins/scripts/change", post(api::plugins::change_script))
+        .route("/api/plugins/scripts/settings", post(api::plugins::script_settings))
+        .route("/api/plugins/scripts/prompts", post(api::plugins::script_prompts))
+        .route("/api/plugins/scripts/check", get(api::plugins::check_script_updates))
+        .route("/api/plugins/scripts/catalog/refresh", post(api::plugins::refresh_script_catalog))
         .route(
             "/api/plugins/install",
             post(api::plugins::install).route_layer(axum::extract::DefaultBodyLimit::max(
@@ -696,6 +715,7 @@ pub fn panel_router(state: ServerState) -> Router {
             )),
         )
         .route("/api/plugins/uninstall", post(api::plugins::uninstall))
+        .route("/api/plugins/reload", post(api::plugins::reload))
         .route("/api/plugins/enable", post(api::plugins::set_enabled))
         .route("/api/plugins/provider", post(api::plugins::set_provider))
         // 应用内更新：查插件仓库的最新版 / 一键升级。同样挂 protected ——
@@ -781,6 +801,11 @@ pub fn panel_router(state: ServerState) -> Router {
             get(api::image_compress::get_image_compress)
                 .put(api::image_compress::put_image_compress),
         )
+        .route(
+            "/api/branding",
+            get(api::branding::get).put(api::branding::put)
+                .layer(axum::extract::DefaultBodyLimit::max(3 * 1024 * 1024)),
+        )
         // ── 机器人校验开关 ──
         // 与 /api/debug 同形的单开关端点（GET 读 / PUT 写），挂 protected：
         // 它决定登录 / 注册是否要求 ALTCHA proof-of-work，敏感度同级。
@@ -810,10 +835,7 @@ pub fn panel_router(state: ServerState) -> Router {
             get(api::zcode_captcha_pool::get_captcha_pool)
                 .put(api::zcode_captcha_pool::put_captcha_pool),
         )
-        // ── ZCode 客户端版本号（设置页可改）──
-        // 上游按这个版本号决定活动套餐下不下发，而**落后时的症状是静默
-        // 空列表**（不是报错）—— 所以给用户一格自己能改的值，见
-        // `api::zcode_version` 的模块头。挂 protected：它改变出站请求形态。
+        // 兼容旧设置页；所有校验与保存均转入通用插件设置通道。
         .route(
             "/api/zcode/version",
             get(api::zcode_version::get_version).put(api::zcode_version::put_version),
@@ -1474,8 +1496,14 @@ mod cors_tests {
     ///
     /// 两种状态写在同一个用例里：开关是进程级全局状态，拆成两个 `#[tokio::test]`
     /// 会被并行执行互相干扰（一个置 true、另一个正在断言 false）。
-    #[tokio::test]
-    async fn gateway_cors_follows_switch() {
+    #[test]
+    fn gateway_cors_follows_switch() {
+        crate::test_support::isolated(concat!(module_path!(), "::gateway_cors_follows_switch"), || {
+            crate::test_support::runtime().block_on(gateway_cors_cases());
+        });
+    }
+
+    async fn gateway_cors_cases() {
         // ── 关闭（默认）：行为与修复前逐字一致 ──
         crate::server::config::set_cors_enabled(false);
         let router = probe_router();

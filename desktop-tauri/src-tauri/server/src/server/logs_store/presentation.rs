@@ -24,7 +24,9 @@ impl LogView {
 
     pub fn matches(self, entry: &LogEntry) -> bool {
         match self {
-            Self::Important => entry.level != "debug",
+            Self::Important => matches!(entry.level.as_str(), "warn" | "error")
+                || entry.level != "debug" && entry.data.as_ref()
+                    .and_then(|data| data.get("routine")).and_then(Value::as_bool) != Some(true),
             Self::Debug => entry.level == "debug",
             Self::All => true,
         }
@@ -105,6 +107,7 @@ pub fn prepare(mut entry: LogEntry) -> LogEntry {
     }
     if plugin {
         data.entry("source").or_insert_with(|| json!("plugin"));
+        super::plugin_events::prepare(text, &mut data);
     }
     if let Some(tag) = tags.iter().rev().find(|tag| **tag != "Plugin") {
         data.entry("component").or_insert_with(|| json!(tag));
@@ -151,6 +154,7 @@ pub fn prepare(mut entry: LogEntry) -> LogEntry {
 
 // 未携带账号上下文的记录不能确认属于同一操作，保守地逐条保留。
 fn group_key(entry: &LogEntry) -> Option<String> {
+    if let Some(key) = super::plugin_events::group_key(entry) { return Some(key); }
     let data = entry.data.as_ref()?.as_object()?;
     let account = string_field(data, "account")
         .or_else(|| string_field(data, "accountId"))

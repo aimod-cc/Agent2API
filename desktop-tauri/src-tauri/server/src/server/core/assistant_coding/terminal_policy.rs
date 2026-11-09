@@ -52,18 +52,17 @@ pub async fn before(client: &CodexClient, session: &TerminalSession, request: &m
         let existing = if method != "thread/start" {
             let id = string(params, "threadId");
             let thread = sessions::read_thread(client, id, false).await?;
-            client.config.directory(string(&thread, "cwd"))?;
+            client.directory(string(&thread, "cwd"))?;
             if !thread.get("parentThreadId").is_none_or(Value::is_null) { return Err(CodingError::new(409, "请在原会话中查看子任务，不能单独接管子任务")); }
             Some(thread)
         } else { None };
         let directory = params.get("cwd").and_then(Value::as_str)
-            .or_else(|| existing.as_ref().map(|thread| string(thread, "cwd")))
-            .or_else(|| client.config.workspace_roots.first().map(String::as_str)).unwrap_or("");
-        client.config.directory(directory)?;
+            .or_else(|| existing.as_ref().map(|thread| string(thread, "cwd"))).unwrap_or("");
+        client.directory(directory)?;
     } else if let Some(id) = params.get("threadId").and_then(Value::as_str) {
         if id != session.thread_id { return Err(CodingError::new(403, "终端请求不属于当前共享会话")); }
     }
-    if let Some(cwd) = params.get("cwd").and_then(Value::as_str) { client.config.directory(cwd)?; }
+    if let Some(cwd) = params.get("cwd").and_then(Value::as_str) { client.directory(cwd)?; }
     if method == "thread/resume" {
         let id = string(params, "threadId").to_string();
         let loaded = client.state.inner.lock().unwrap_or_else(|e| e.into_inner()).threads.get(&id).is_some_and(|s| s.attached);
@@ -99,7 +98,7 @@ pub async fn after(client: &CodexClient, session: &mut TerminalSession, request:
         let thread = result.get("thread").ok_or_else(|| CodingError::uncertain("Codex 未返回终端会话标识，请在列表中核对"))?;
         let id = string(thread, "id");
         sessions::validate_id(id)?;
-        client.config.directory(string(thread, "cwd"))?;
+        client.directory(string(thread, "cwd"))?;
         let known = client.state.inner.lock().unwrap_or_else(|e| e.into_inner()).threads.get(id).is_some_and(|s| s.attached);
         if !known { projection::remember(client, thread, Some(result), Some(true)); }
         let observed = client.rpc("thread/resume", json!({ "threadId": id })).await?;
@@ -140,7 +139,7 @@ pub fn detached(client: &CodexClient, session: &TerminalSession) {
 pub fn filter(client: &CodexClient, mut message: Value) -> Value {
     if let Some(rows) = message.pointer_mut("/result/data").and_then(Value::as_array_mut) {
         if rows.first().is_some_and(|row| row.get("cwd").is_some() && row.get("id").is_some()) {
-            rows.retain(|thread| client.config.directory(string(thread, "cwd")).is_ok());
+            rows.retain(|thread| client.directory(string(thread, "cwd")).is_ok());
         }
     }
     message
@@ -149,5 +148,5 @@ pub fn filter(client: &CodexClient, mut message: Value) -> Value {
 pub fn display_directory(client: &CodexClient, id: &str) -> Result<String, CodingError> {
     let state = client.state.inner.lock().unwrap_or_else(|e| e.into_inner());
     let thread = state.threads.get(id).ok_or_else(|| CodingError::new(404, "共享会话不存在"))?;
-    client.config.directory(string(&thread.thread, "cwd")).map(|p| config::display_path(&p))
+    client.directory(string(&thread.thread, "cwd")).map(|p| config::display_path(&p))
 }

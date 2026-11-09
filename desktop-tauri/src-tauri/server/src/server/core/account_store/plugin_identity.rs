@@ -19,9 +19,10 @@ pub(super) fn incoming(provider: &str, identity: &str, secret: &Value, public: &
     fields.insert("pluginPublic".to_string(), public.clone());
     fields.insert("desktop".to_string(), Value::Bool(desktop));
     let mut record = StoredAccount::from_map(fields);
-    if (kind_from_id(provider).is_none() || super::is_cline_family(provider)) && !identity.trim().is_empty() {
+    if (kind_from_id(provider).is_none() || super::is_cline_family(provider) || native_identity(provider)) && !identity.trim().is_empty() {
         record.set(IDENTITY_KEY, Value::String(identity.to_string()));
     }
+    if native_identity(provider) { record.set("pluginIdentityContract", Value::from(1)); }
     mirror_identity(&mut record, provider);
     record
 }
@@ -93,7 +94,7 @@ pub(super) fn mirror_identity(record: &mut StoredAccount, provider: &str) {
     }
     // WorkBuddy 系：插件没给 edition 时按 provider 补一次。判据是「这家有没有
     // 地区概念」，不看插件是否实现——缺 edition 会让国际版账号被反查成国内版。
-    if !has_text_value(record, "edition") {
+    if !has_text_value(record, "edition") && record.get("pluginIdentityContract").and_then(Value::as_u64) != Some(1) {
         if let Some(region) = crate::server::core::providers::workbuddy::Region::from_provider_id(provider) {
             record.set("edition", Value::String(region.edition().id.to_string()));
         }
@@ -112,13 +113,19 @@ fn has_text_value(record: &StoredAccount, key: &str) -> bool {
 
 const IDENTITY_KEY: &str = "pluginIdentity";
 
+fn native_identity(provider: &str) -> bool {
+    crate::server::core::plugin_host::wasm::has_capability(provider, "accounts.identity.v1")
+}
+
 fn trusted_identity(provider: &str, identity: &str, fields: &Map<String, Value>) -> bool {
+    if native_identity(provider) { return !identity.trim().is_empty() && identity.len() <= 512; }
     !identity.trim().is_empty() && !account_identity::guest(provider, fields)
         && (kind_from_id(provider).is_none() || account_identity::stable(provider, fields).is_some())
 }
 
 pub(super) fn remember_identity(record: &mut StoredAccount, provider: &str, identity: &str) {
     if trusted_identity(provider, identity, record.fields()) {
+        if native_identity(provider) { record.set("pluginIdentityContract", Value::from(1)); }
         record.set(IDENTITY_KEY, Value::String(identity.to_string()));
     } else {
         record.remove(IDENTITY_KEY);
@@ -181,6 +188,7 @@ impl AccountStore {
         identity: &str,
         account: &StoredAccount,
     ) -> Result<(String, Option<StoredAccount>), String> {
+        if native_identity(provider) { return self.plugin_contract_upsert(guard, provider, identity, account); }
         if let Some(region) = crate::server::core::providers::qoder::endpoints::Region::from_provider_id(provider) {
             let secret = account.get("pluginSecret").unwrap_or(&Value::Null);
             return self.qoder_account_for_upsert(guard, region, identity, secret);

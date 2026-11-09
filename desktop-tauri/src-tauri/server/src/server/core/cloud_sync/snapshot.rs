@@ -66,6 +66,8 @@ const EXCLUDED_CONFIG_KEYS: &[&str] = &[
     "kernelDir",
     // 另一把密钥（update-token.key）加密，带过去解不开
     "githubToken",
+    // 登录校验绑定本机域名及独立密钥，不随账号同步切换。
+    crate::server::config::captcha::KEY_PANEL_CAPTCHA,
     // 代理内核的下载出网线路：绑本机网络环境
     "kernelProxy",
     crate::server::config::KEY_INSTALLED_UPDATE_VERSION,
@@ -543,5 +545,6 @@ mod tests {
         };
         let (db, _guard) = crate::server::db::test_temp::TempDb::open("cloud-sync-newer-schema");
         assert!(apply(&db, &snapshot, None).is_err());
+        drop(db);
     }
 }

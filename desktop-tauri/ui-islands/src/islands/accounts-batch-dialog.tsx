@@ -51,7 +51,7 @@ export function BatchDialog({ ids, action, onClose }: { ids: string[]; action: s
   const [proxyDraft, setProxyDraft] = React.useState<ProxyDraft>(() => draftOfProxy(null))
   const [concDraft, setConcDraft] = React.useState('')
   // 混选时没有共同的间隔；不预填，避免直接执行就覆盖整组配置。
-  const [usageDraft, setUsageDraft] = React.useState<UsageDraft>({ enabled: true, intervalInput: '', unit: 'minutes' })
+  const [usageDraft, setUsageDraft] = React.useState<UsageDraft>(() => ({ ...usageDraftOf(null), intervalInput: '' }))
   const [limiterMode, setLimiterMode] = React.useState<BatchLimiterMode>('append')
   const [limiterDraft, setLimiterDraft] = React.useState<LimiterGroup[]>([])
   const [sourceId, setSourceId] = React.useState('')
@@ -296,7 +296,7 @@ export function BatchDialog({ ids, action, onClose }: { ids: string[]; action: s
                 </Field>
                 {current === 'usageQuery' ? <>
                   <UsageSettingsSection draft={usageDraft} onChange={setUsageDraft} idPrefix='batch-usage' />
-                  <p className='detail mt-2.5'>{t('统一设置自动查询的开关和间隔；不会复制或覆盖余额查询凭证。')}</p>
+                  <p className='detail mt-2.5'>{t('统一设置自动查询的开关、间隔和失败重试次数；不会复制或覆盖余额查询凭证。')}</p>
                 </> : <LimiterSection draft={limiterDraft} onChange={setLimiterDraft} allowBalance={usageAccounts.length > 0} />}
               </div> : null}
               {current === 'usageQuery' && !usageDraft.enabled ? <p className='detail mt-2.5'>

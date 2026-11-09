@@ -149,12 +149,12 @@ pub fn start_cached(
     platform: &Value,
     automatic: bool,
 ) -> Result<Operation, String> {
-    if target != super::host_target() {
+    if target != super::host_target() && target != super::wasm::manifest::TARGET {
         return Err("只能安装当前网关平台的插件包".to_string());
     }
     let asset = update::PackAsset {
         version: version.to_string(),
-        name: update::asset_name(id, version, target),
+        name: update::asset_name(id, version, platform["target"].as_str().unwrap_or(target)),
         url: platform["url"].as_str().unwrap_or("").to_string(),
         size: platform["size"].as_u64().unwrap_or(0),
         page: String::new(),
@@ -166,15 +166,6 @@ pub fn start_cached(
         InstallPolicy::Manual
     };
     start_asset(id, action, asset, policy)
-}
-
-pub(super) fn start_required(
-    id: &str,
-    mut asset: update::PackAsset,
-    automatic: bool,
-) -> Result<Operation, String> {
-    asset.require_signed = true;
-    start_asset(id, "repair", asset, InstallPolicy::Required { automatic })
 }
 
 fn claim_operation(id: &str, policy: InstallPolicy) -> Result<task_state::RunGuard, String> {
@@ -193,7 +184,7 @@ fn finish_operation(
     id: &str,
     result: Result<&Value, &String>,
     guard: task_state::RunGuard,
-    policy: InstallPolicy,
+    _policy: InstallPolicy,
 ) {
     let success = result.is_ok_and(|result| result["hostError"].is_null());
     let mut value = Value::Null;
@@ -212,10 +203,7 @@ fn finish_operation(
     let message = value["error"].as_str().or_else(|| value["hostError"].as_str())
         .unwrap_or("插件安装完成").to_string();
     if !success { logging::log("[Plugin]", &message); }
-    let interval = if matches!(policy, InstallPolicy::Required { .. }) {
-        super::compatibility::RETRY_INTERVAL_MS
-    } else { 60_000 };
-    let _ = guard.finish(success, message, Some(value), 0, interval);
+    let _ = guard.finish(success, message, Some(value), 0, 60_000);
 }
 
 fn start_asset(
@@ -233,9 +221,8 @@ fn start_asset(
         stage: "downloading".to_string(),
         active: true,
         version: asset.version.clone(),
-        required: matches!(policy, InstallPolicy::Required { .. }),
-        required_version: matches!(policy, InstallPolicy::Required { .. })
-            .then(|| crate::server::core::update::CURRENT_VERSION.to_string()),
+        required: false,
+        required_version: None,
         updated_at: logging::now_ms(),
         ..Default::default()
     };
@@ -288,14 +275,11 @@ async fn run(
 }
 
 pub async fn start(id: &str, action: &str, target: &str) -> Result<Operation, String> {
-    if target != super::host_target() {
+    if target != super::host_target() && target != super::wasm::manifest::TARGET {
         return Err("只能安装当前网关平台的插件包".to_string());
     }
     let packs = super::list_packs();
     let pack = packs.iter().find(|pack| pack.id == id);
-    if pack.is_some_and(|pack| pack.update_required) {
-        return super::compatibility::start(id, true).await;
-    }
     if action == "update" && pack.is_none() {
         return Err("还没有安装这个插件包".to_string());
     }
@@ -327,7 +311,7 @@ pub async fn start(id: &str, action: &str, target: &str) -> Result<Operation, St
     }
     let platform = entry["platforms"]
         .as_array()
-        .and_then(|items| items.iter().find(|item| item["target"] == target))
+        .and_then(|items| items.iter().find(|item| item["target"] == target || item["target"] == super::wasm::manifest::TARGET))
         .ok_or_else(|| "当前平台暂无安装包".to_string())?;
     start_cached(id, action, target, version, platform, false)
 }

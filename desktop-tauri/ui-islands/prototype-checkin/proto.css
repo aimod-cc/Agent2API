@@ -1,0 +1,47 @@
+/* 预览外壳骨架：只做「左侧主导航 + 顶栏 + 内容区」，页面内部样式全走 ui/css。 */
+html, body, #root { height: 100%; }
+body { overflow: hidden; }
+
+.proto-app { display: flex; height: 100vh; background: var(--bg); color: var(--text); }
+.proto-app-side {
+  width: 216px; flex: none; display: flex; flex-direction: column; gap: 14px;
+  padding: 12px 10px; border-right: 1px solid var(--border); background: var(--surface);
+}
+.proto-brand { display: flex; align-items: center; gap: 9px; padding: 4px 6px 10px; }
+.proto-brand img { width: 30px; height: 30px; border-radius: 8px; }
+.proto-brand div { display: flex; flex-direction: column; line-height: 1.25; }
+.proto-brand strong { font-size: 14px; }
+.proto-brand span { font-size: 10.5px; color: var(--text-3); }
+.proto-app-nav { flex: 1; min-height: 0; overflow: auto; }
+.proto-nav-group { margin-top: 12px; }
+.proto-nav-group:first-child { margin-top: 0; }
+.proto-nav-label { padding: 0 10px 5px; font-size: 10.5px; color: var(--text-3); }
+.proto-app-item {
+  display: flex; align-items: center; gap: 9px; height: 30px; padding: 0 10px;
+  border-radius: var(--r-md); font-size: 12.5px; color: var(--text-2);
+}
+.proto-app-item.active { background: var(--primary); color: #fff; font-weight: 500; }
+.proto-app-dot { width: 13px; height: 13px; flex: none; border-radius: 4px; background: currentColor; opacity: .35; }
+.proto-app-item.active .proto-app-dot { opacity: .85; }
+.proto-app-item > span:nth-child(2) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proto-side-foot {
+  display: flex; align-items: center; gap: 8px; padding: 9px 10px;
+  border: 1px solid var(--border); border-radius: var(--r-md);
+}
+.proto-side-foot div { display: flex; flex-direction: column; line-height: 1.3; }
+.proto-side-foot strong { font-size: 11.5px; font-weight: 500; }
+.proto-side-foot span:not(.proto-status-dot) { font-size: 10px; color: var(--text-3); }
+.proto-status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px var(--success-soft); }
+
+.proto-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.proto-topbar {
+  height: var(--topbar-h); flex: none; display: flex; align-items: center; gap: 12px;
+  padding: 0 20px; border-bottom: 1px solid var(--border);
+}
+.proto-crumb { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-3); }
+.proto-crumb b { font-weight: 400; }
+.proto-crumb strong { color: var(--text); font-weight: 500; }
+.proto-top-actions { margin-left: auto; display: flex; gap: 8px; }
+/* 内容区撑满：`.ck-page` 要拿到剩余高度，页面才能「只有列表滚」 */
+.proto-content { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 16px 20px 20px; }
+.proto-content > .ck-page { flex: 1; min-height: 0; }

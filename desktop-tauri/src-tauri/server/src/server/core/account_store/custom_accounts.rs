@@ -167,6 +167,17 @@ impl AccountStore {
             None => None,
         };
 
+        let proxy = object.get("proxy").map(|value| {
+            crate::server::core::proxies::normalize_account_proxy(value)
+                .map(|config| config.unwrap_or_else(|| serde_json::json!({ "source": "direct" })))
+                .map_err(|error| AccountStoreError::new(error.message, error.status_code))
+        }).transpose()?;
+        if proxy.as_ref().is_some_and(crate::server::core::proxies::is_rotate_config)
+            && !custom_providers::is_opencode_zen_account(provider_id, base_url_override.as_deref())
+        {
+            return Err(AccountStoreError::bad_request("轮询出网只对 OpenCode Zen 账号开放，请选择一条代理"));
+        }
+
         let _guard = self.guard();
         let existing = self.with_conn(&_guard, |conn| identity::existing(conn, provider_id, &api_key))?;
         let id = match existing.as_ref() {
@@ -243,6 +254,7 @@ impl AccountStore {
         fields.insert("name".to_string(), Value::String(record_name.clone()));
         mark_name_custom(&mut fields, explicit, existing.as_ref());
         fields.insert("apiKey".to_string(), Value::String(api_key.clone()));
+        if let Some(proxy) = proxy { fields.insert("proxy".to_string(), proxy); }
         // 「无需鉴权」标记：真时才落键，假时**摘掉**键 —— 与模型条目的
         // capabilities 同一取向（「空表不落键」），老记录读回再写不会凭空多出
         // 一个 `"noAuth": false`。
@@ -262,6 +274,18 @@ impl AccountStore {
                 if object.contains_key("baseUrl") {
                     fields.remove("baseUrl");
                 }
+            }
+        }
+        // 账号级自定义 User-Agent（可选）：显式传了才改，空串 / null = 清除。
+        // 与「账号设置」那条 patch 共用同一个归一器（控制字符 / 长度 / 头值
+        // 合法性只有一处定义）；custom 路径在同一个事务前写进记录，不额外再
+        // 走一次 update_account。
+        if let Some(value) = object.get("userAgent") {
+            let next = crate::server::core::client::catalog::normalize_user_agent_override(value)?;
+            if next.is_empty() {
+                fields.remove("userAgent");
+            } else {
+                fields.insert("userAgent".to_string(), Value::String(next));
             }
         }
         // 余额查询配置（`balanceQuery`，可选）：预置卡带来的余额方案要的那份
@@ -940,6 +964,8 @@ pub struct CustomCredential {
     /// 出网代理（None = 未配置，异常原因单独保留）。
     pub proxy: Option<ResolvedProxy>,
     pub proxy_error: Option<String>,
+    /// 账号级自定义 User-Agent（空串 = 未设置，用默认头；见 `forward` 的覆盖点）
+    pub user_agent: String,
 }
 
 /// 一条记录 → 凭证快照（两个入口共用一份取数口径，不会各漂一份）
@@ -970,5 +996,11 @@ fn credential_of_record(record: &StoredAccount) -> CustomCredential {
             .filter(|text| !text.is_empty()),
         proxy,
         proxy_error,
+        user_agent: fields
+            .get("userAgent")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string(),
     }
 }

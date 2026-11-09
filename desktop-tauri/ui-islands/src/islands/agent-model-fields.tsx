@@ -23,7 +23,7 @@ export function ModelsFields({ client, draft, update, catalog, disabled, native 
   native?: boolean; quick?: boolean; layout?: 'stack' | 'split'
 }) {
   const imported = Boolean(draft.sourceId)
-  const sourceIds = React.useRef(new Set(imported ? draft.models.map(model => model.id) : []))
+  const sourceIds = React.useRef(new Set(native ? draft.models.map(model => model.id) : []))
   const [expanded, setExpanded] = React.useState<AgentModel | null>(null)
   const keys = React.useRef(new WeakMap<AgentModel, string>())
   const rowKey = (model: AgentModel) => {
@@ -79,14 +79,14 @@ export function ModelsFields({ client, draft, update, catalog, disabled, native 
   const readyCount = draft.models.filter(model => model.id).length
 
   const picker = <AgentModelPicker catalog={selectedCatalog} selected={draft.models.map(model => model.id).filter(Boolean)} onChange={select}
-    disabled={disabled} locked={native ? [] : [...sourceIds.current]} limit={AGENT_MODEL_LIMIT - draft.models.filter(model => !model.id).length} />
+    disabled={disabled} locked={[]} limit={AGENT_MODEL_LIMIT - draft.models.filter(model => !model.id).length} />
   const queryField = draft.models.length > 3 || query !== '' ? <InputGroup>
     <InputGroupInput type='search' aria-label={t('搜索已选模型')} placeholder={t('搜索已选模型')} value={query} autoComplete='off' disabled={disabled}
       onChange={event => { setQuery(event.currentTarget.value); setExpanded(null) }} />
     <InputGroupAddon aria-hidden='true'>⌕</InputGroupAddon>
   </InputGroup> : null
   const notes = <>
-    {imported && !native && <p className='text-xs leading-relaxed text-subtle'>{t('导入模型及客户端未知字段会保留；本页删除方案不会删除客户端条目。')}</p>}
+    {imported && !native && <p className='text-xs leading-relaxed text-subtle'>{t('修改后点击「使用此配置」才会更新客户端。')}</p>}
     {native && <p className='text-xs leading-relaxed text-subtle'>{t('移除模型会写入客户端配置；其它条目和未知字段保留，确认前可查看差异。')}</p>}
   </>
 
@@ -133,7 +133,7 @@ export function ModelsFields({ client, draft, update, catalog, disabled, native 
         </CollapsibleTrigger>
         <Button variant='ghost' size='xs' className='shrink-0 text-subtle hover:text-destructive' title={t('移除模型：{name}', { name: model.name || model.id || index + 1 })}
           aria-label={t('移除模型：{name}', { name: model.name || model.id || index + 1 })}
-          disabled={disabled || !native && sourceIds.current.has(model.id)} onClick={() => remove(index)}>{t('移除')}</Button>
+          disabled={disabled} onClick={() => remove(index)}>{t('移除')}</Button>
       </div>
       <CollapsibleContent>
         <CardContent className='flex flex-col gap-3 border-t border-hairline p-3.5'>
@@ -226,7 +226,7 @@ export function ModelsFields({ client, draft, update, catalog, disabled, native 
     {client.id === 'claude-code' && <ClaudeModelFields draft={draft} update={update} catalog={catalog} disabled={disabled} />}
     {client.supportsDefault && <Field><FieldLabel>{t('默认模型')}</FieldLabel>
       <SearchableModelSelect label={t('默认模型')} value={draft.model} disabled={disabled} options={draft.models.filter(model => model.id).map(model => ({ value: model.id, label: model.name || model.id }))} onChange={model => update({ model, effort: '', ...(client.id === 'claude-code' ? { claudeModels: syncClaudeTiers(draft.claudeModels, draft.model, model) } : {}) })} />
-      <p className='text-xs text-subtle'>{quick ? t('接入后使用此默认模型，其它已选模型仍可在客户端切换。') : native ? t('确认写入后更新客户端默认模型；取消不会生效。') : client.configMode === 'single' ? t('保存方案不会切换客户端；应用后改变实际默认模型。') : t('保存方案不会切换客户端；选择“应用并设为默认”才改变实际默认模型。')}</p></Field>}
+      <p className='text-xs text-subtle'>{quick ? t('接入后使用此默认模型，其它已选模型仍可在客户端切换。') : native ? t('确认写入后更新客户端默认模型；取消不会生效。') : t('使用此配置时设为默认，其他模型仍可在客户端选择。')}</p></Field>}
     {['cline', 'crush', 'dsh'].includes(client.id) && selected && selected.supportsReasoning !== false && (selected.reasoningLevels.length > 0 || draft.effort) && <Field><FieldLabel>{t('默认模型思考等级')}</FieldLabel>
       <AgentSelect label={t('默认模型思考等级')} value={draft.effort} disabled={disabled} options={[{ value: '', label: t('模型默认') }, ...[...new Set([...modelLevels(client, selected.reasoningLevels), ...(draft.effort ? [draft.effort] : [])])].map(value => ({ value, label: value }))]} onChange={effort => update({ effort })} /></Field>}
   </section>

@@ -3,6 +3,8 @@ import { flushSync } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import { AppFrame, Badge, BadgeDot, Button, Empty, NavList, NavItem, PageHeader, SegmentedControl, Sheet, SheetClose, SheetContent, Sidebar, SidebarContent, SidebarFooter, SidebarGroupLabel, SidebarHeader, Toaster, toastManager, useMediaQuery } from '@ui'
 import { t } from './i18n'
+import { useDesktopBranding } from './branding'
+import { BrandLogo } from '../../ui-shared/brand-logo'
 import { CheckinVerificationNotice } from './islands/checkin-verification-notice'
 
 type Menu = { key: string; label: string; icon: string }
@@ -72,6 +74,7 @@ function TopbarStatus() {
 
 function Frame() {
   React.useSyncExternalStore(listener => { listeners.add(listener); return () => listeners.delete(listener) }, () => revision)
+  const branding = useDesktopBranding()
   const [open, setOpen] = React.useState(false)
   const narrow = useMediaQuery('(max-width: 767px)')
   React.useEffect(() => {
@@ -86,8 +89,8 @@ function Frame() {
   }, [])
   const sidebar = <Sidebar className='sidebar'>
     <SidebarHeader className='brand'>
-      <div className='brand-logo'><Icon name='brand' size={32} /></div>
-      <div className='brand-text'><h1>Agent2API</h1></div>
+      <div className='brand-logo'><BrandLogo branding={branding} size={32} /></div>
+      <div className='brand-text min-w-0'><h1 className='truncate' title={branding.displayName}>{branding.displayName}</h1></div>
     </SidebarHeader>
     <NavList render={<SidebarContent />} className='nav' id='nav' aria-label={t('主导航')} onClick={event => {
       const item = (event.target as Element).closest<HTMLElement>('.nav-item[data-page]')
@@ -109,7 +112,7 @@ function Frame() {
     <main className='main'>
       <PageHeader className='topbar'>
         <Button variant='ghost' size='icon' className='mobile-menu-btn' aria-label={t('切换菜单')} onClick={() => setOpen(!open)}>☰</Button>
-        <div className='crumb'><span>Agent2API</span><span className='sep'>/</span><span className='cur' id='crumb-page'>{label}</span></div>
+        <div className='crumb min-w-0'><span className='max-w-[200px] truncate' title={branding.displayName}>{branding.displayName}</span><span className='sep'>/</span><span className='cur' id='crumb-page'>{label}</span></div>
         <div className='spacer' />
         <div className='topbar-actions' id='topbar-status' title={title}><TopbarStatus /></div>
         <div id='page-refresh-actions' />

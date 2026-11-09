@@ -134,8 +134,8 @@ export function getOfficeaceSubscription(id: string): Promise<OfficeaceSubscript
   return apiCall(`${accountPath(id)}/officeace-subscription`)
 }
 
-export function activateOfficeaceSubscription(id: string): Promise<OfficeaceSubscriptionResult> {
-  return apiCall(`${accountPath(id)}/officeace-subscription/activate`, { method: 'POST' })
+export function activateOfficeaceSubscription(id: string, confirmAgreements: boolean): Promise<OfficeaceSubscriptionResult> {
+  return apiCall(`${accountPath(id)}/officeace-subscription/activate`, { method: 'POST', body: { confirmAgreements } })
 }
 
 export function getOnboarding(id: string, refresh = false): Promise<OnboardingResult> {

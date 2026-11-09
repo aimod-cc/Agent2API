@@ -13,7 +13,7 @@ export type DailyTrendRow = {
   [key: `slot${number}`]: number
 }
 export type CacheTrendRow = {
-  hour: string; rate: number; totalTokens: number; hitTokens: number; inputTokens: number
+  hour: string; rate: number | null; totalTokens: number | null; hitTokens: number; inputTokens: number
   used: boolean; models: ModelSlice[]; usage: StatsUsage
 }
 export type ModelLegendRow = { name: string; fill: string }
@@ -73,10 +73,10 @@ export function cacheTrendData(series: StatsHour[], colors: Map<string, string>)
   return series.map(hour => {
     const hitTokens = amount(hour.hitTokens)
     const inputTokens = amount(hour.inputTokens)
+    const used = inputTokens > 0
     return {
-      hour: String(hour.hour || ''), rate: amount(hour.rate),
-      totalTokens: amount(hour.totalTokens), hitTokens, inputTokens,
-      used: amount(hour.requests) > 0 || inputTokens + hitTokens > 0,
+      hour: String(hour.hour || ''), rate: used ? amount(hour.rate) : null,
+      totalTokens: used ? amount(hour.totalTokens) : null, hitTokens, inputTokens, used,
       models: modelSlices(hour.models, colors),
       usage: {
         ...hour, promptTokens: inputTokens, cacheReadTokens: hitTokens,

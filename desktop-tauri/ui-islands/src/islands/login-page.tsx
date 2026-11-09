@@ -28,7 +28,11 @@ import * as React from 'react'
 import { flushSync } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import { Button, Card, Input, Label, Verification } from '@ui'
+import { TurnstileWidget } from '../../../ui-shared/turnstile-widget'
+import type { PanelCaptchaStatus } from '../../../ui-shared/panel-captcha'
 import { t } from '../i18n'
+import { useDesktopBranding } from '../branding'
+import { BrandLogo } from '../../../ui-shared/brand-logo'
 
 /** 挂载点 id：login.html 里唯一的岛容器 */
 const HOST_ID = 'login-app'
@@ -40,26 +44,47 @@ const HOST_ID = 'login-app'
  *
  * 用 createElement 而不是 JSX 标签：TS 的 IntrinsicElements 里没有这个标签，而为一个
  * 自家自定义元素去扩全局 JSX 命名空间会波及其他岛（也可能与并行迁移的文件撞车）。
- * 元素只认 id：领题端点、文案、事件都在组件内部，这里不传任何属性。
+ * 元素接收登录脚本下发的校验配置；Turnstile 在网关域名下的隔离页面运行。
  */
-type CaptchaElement = HTMLElement & { state?: 'idle' | 'verifying' | 'verified' | 'error'; start?(): Promise<void> }
+type CaptchaConfig = PanelCaptchaStatus & { gatewayBase?: string }
+type CaptchaElement = HTMLElement & {
+  state?: 'idle' | 'verifying' | 'verified' | 'error'
+  config?: CaptchaConfig
+  start?(): Promise<void>
+  acceptToken?(token: string | null): void
+  setState?(state: string): void
+}
 
 function CaptchaControl() {
   const [state, setState] = React.useState<'idle' | 'verifying' | 'verified' | 'error'>('idle')
+  const [config, setConfig] = React.useState<CaptchaConfig | null>(null)
+  const [resetKey, setResetKey] = React.useState(0)
   const ref = React.useRef<CaptchaElement | null>(null)
   React.useEffect(() => {
     const element = ref.current
     if (!element) return
     const sync = () => setState(element.getAttribute('state') as typeof state || 'idle')
+    const configure = () => setConfig(element.config || null)
+    const reset = () => setResetKey(value => value + 1)
     const observer = new MutationObserver(sync)
     observer.observe(element, { attributes: true, attributeFilter: ['state'] })
+    element.addEventListener('configuration', configure)
+    element.addEventListener('reset', reset)
     sync()
-    return () => observer.disconnect()
+    configure()
+    return () => {
+      observer.disconnect()
+      element.removeEventListener('configuration', configure)
+      element.removeEventListener('reset', reset)
+    }
   }, [])
   return React.createElement('panel-captcha', { id: 'captcha', ref },
-    <Verification state={state} className='mx-auto mt-5' onClick={() => { void ref.current?.start?.() }}>
-      {state === 'verifying' ? t('验证中…') : state === 'verified' ? t('验证成功') : state === 'error' ? t('验证失败，请重试') : t('我不是机器人')}
-    </Verification>,
+    config?.captchaProvider === 'turnstile' && config.captchaEnabled !== false
+      ? <div className='mt-5 w-full'><TurnstileWidget url={`${config.gatewayBase || ''}/api/panel/turnstile`} t={t} resetKey={resetKey}
+          onToken={token => ref.current?.acceptToken?.(token)} onState={value => ref.current?.setState?.(value)} /></div>
+      : <Verification state={state} className='mx-auto mt-5' onClick={() => { void ref.current?.start?.() }}>
+          {state === 'verifying' ? t('验证中…') : state === 'verified' ? t('验证成功') : state === 'error' ? t('验证失败，请重试') : t('我不是机器人')}
+        </Verification>,
   )
 }
 
@@ -69,30 +94,21 @@ function CaptchaControl() {
  * 五个 id 一个都不能少（见文件头）。#mode-tip 与 #error 渲染成空节点：文案由底部
  * 脚本填，这里只提供位置与占位高度（min-h-5 让错误行出现前后布局不跳）。
  */
+function LoginBrand() {
+  const branding = useDesktopBranding(t('登录'))
+  return <div className='mb-[26px] flex min-w-0 flex-col items-center gap-3 text-center'>
+    <BrandLogo branding={branding} size={52} className='rounded-lg' />
+    <div className='min-w-0 max-w-full'>
+      <h1 className='m-0 break-words text-[21px] font-bold tracking-[0.2px]'>{branding.displayName}</h1>
+      <div className='text-[12.5px] text-muted-foreground'>{t('OpenAI 兼容网关 · 管理面板')}</div>
+    </div>
+  </div>
+}
+
 function LoginPage() {
   return (
     <Card className='w-[min(400px,100%)] p-[36px_34px_30px] shadow-3'>
-      {/* 品牌标与桌面端 / 面板侧栏同一造型（icons.js 的 brand 项），底色是品牌色常量而非主题令牌 */}
-      <div className='mb-[26px] flex flex-col items-center gap-3 text-center'>
-        <svg
-          viewBox='0 0 24 24'
-          role='img'
-          aria-label='Agent2API'
-          className='size-[52px] rounded-lg shadow-[0_6px_18px_rgba(0,122,255,0.35)]'
-        >
-          <rect width='24' height='24' rx='5.4' fill='#007AFF' />
-          <g fill='none' stroke='#fff' strokeWidth='2.2' strokeLinecap='round' strokeLinejoin='round'>
-            <path d='M5.23 9.24h10.71' />
-            <path d='M15.94 6.72 18.77 9.24 15.94 11.76' />
-            <path d='M18.77 14.76H8.06' />
-            <path d='M8.06 12.24 5.23 14.76 8.06 17.28' />
-          </g>
-        </svg>
-        <div>
-          <h1 className='m-0 text-[21px] font-bold tracking-[0.2px]'>Agent2API</h1>
-          <div className='text-[12.5px] text-muted-foreground'>{t('OpenAI 兼容网关 · 管理面板')}</div>
-        </div>
-      </div>
+      <LoginBrand />
 
       <div id='mode-tip' className='mb-[18px] text-center text-[13px] text-muted-foreground' />
 

@@ -13,7 +13,7 @@ Depois de instalar, qualquer forma é gerenciada pelo **painel no navegador** (c
 - [Servidor (Windows / Linux, sem interface)](#servidor-windows--linux-sem-interface)
 - [Docker](#docker)
 - [Verificação e conexão do cliente](#verificação-e-conexão-do-cliente)
-- [Acesso pela rede local](#acesso-pela-rede-local)
+- [Acesso pela rede](#acesso-pela-rede)
 - [Celular](#celular)
 
 ## Qual forma escolher
@@ -50,7 +50,7 @@ Fechar a janela apenas minimiza para a bandeja, e o gateway continua encaminhand
 >
 > **Notas do desktop Linux**: a bandeja depende de `libayatana-appindicator3` (a maioria dos ambientes traz; instale `libayatana-appindicator3-1` e reabra se o ícone não aparecer). Um AppImage precisa do bit de execução antes da primeira execução (`chmod +x`; o app o define automaticamente ao escolher "Abrir instalador"). Atualizações: o deb passa pelo instalador do sistema (ele pede sua senha uma vez), enquanto o AppImage é atualizado substituindo o arquivo.
 >
-> **Diferenças do desktop**: o "importar o estado de login desta máquina" do AutoClaw e do ChatGLM (智谱清言) só existe no Windows (ele lê texto cifrado do DPAPI, então essa seção fica oculta no macOS / Linux); os demais (Raccoon / CatPaw / Cline) leem arquivos em texto puro sob `HOME` e funcionam nas três plataformas. Bandeja, início automático, acesso pela rede local e hospedagem do painel web também funcionam no macOS / Linux.
+> **Diferenças do desktop**: o "importar o estado de login desta máquina" do AutoClaw e do ChatGLM (智谱清言) só existe no Windows (ele lê texto cifrado do DPAPI, então essa seção fica oculta no macOS / Linux); os demais (Raccoon / CatPaw / Cline) leem arquivos em texto puro sob `HOME` e funcionam nas três plataformas. Bandeja, início automático, acesso pela rede e hospedagem do painel web também funcionam no macOS / Linux.
 
 ## Servidor (Windows / Linux, sem interface)
 
@@ -258,11 +258,13 @@ print(resp.choices[0].message.content)
 
 **Páginas no navegador** (uma interface web própria, …) que chamam este endpoint com `fetch` esbarram no preflight cross-origin — o gateway **não** responde CORS por padrão, então o preflight cai na verificação de API key e recebe 401. Duas saídas: ① ative "Segurança → Acesso cross-origin do gateway" nas Configurações (origem `*`; com `*` qualquer página pode acionar o seu gateway, então configure também uma "Gateway Key"); ② coloque a página na mesma origem — sirva-a de um pequeno servidor estático local que faz proxy reverso de `/v1` para `127.0.0.1:3065`.
 
-## Acesso pela rede local
+<a id="acesso-pela-rede-local"></a>
 
-Por padrão o gateway escuta apenas `127.0.0.1`. Ao ativar "Configurações → Geral → Acesso pela rede local" ele passa a escutar todos os adaptadores e os dispositivos da rede só precisam apontar o endereço da API para o IP desta máquina (a interface mostra o endereço completo). Por segurança, é obrigatório registrar um administrador do painel antes de ativar: a API de gerenciamento passa a exigir sessão de administrador ou uma Gateway Key e, sem chave ativa, a API de encaminhamento também recusa (o fluxo cria uma chave "padrão" automaticamente). O painel web pode ser exposto à rede local opcionalmente (fechado por padrão). As mudanças valem após reiniciar.
+## Acesso pela rede
 
-Os instaladores de desktop (Windows / macOS) já incluem a pasta `ui/` do painel web: ao ativar também a opção de expor o painel de gerenciamento à rede local, dispositivos da rede podem abrir o mesmo endereço no navegador e ver a interface de gerenciamento — a mesma interface da versão Docker. **A janela do desktop em si nunca passa pelo login web** (não existe página de login no app): ela se autentica com a primeira Gateway Key desta máquina, então ligar esse interruptor não pede login no app. A página de login web só aparece quando um navegador abre o painel.
+O aplicativo desktop escuta apenas em `127.0.0.1` por padrão. Em "Configurações → Gateway → Acesso pela rede", ative "Permitir que outros dispositivos acessem o gateway" para escutar em todas as interfaces IPv4 (`0.0.0.0`). **Isso não restringe o acesso à rede local nem expõe o gateway automaticamente à internet**. O alcance real depende de rotas, encaminhamento de portas e firewall. A interface exibe separadamente os endereços da API e do painel web desta máquina. Use um endereço alcançável pelo dispositivo que vai se conectar; o endereço exibido não garante acesso pela internet. É necessário registrar um administrador do painel antes. A API de gerenciamento exige uma sessão de administrador ou chave do gateway; chamadas à API exigem uma chave ativa, criada automaticamente como padrão se necessário. O painel web fica desativado por padrão. Alterar qualquer uma das opções exige reiniciar o aplicativo.
+
+Os pacotes desktop incluem os recursos `ui/` do painel web. Ao ativar "Também expor o painel de gerenciamento web", dispositivos que alcançam o gateway podem abrir o painel no navegador e entrar. O alcance de acesso é o mesmo do gateway. Desativar essa opção apenas interrompe o fornecimento da interface web; o encaminhamento da API e o gerenciamento desktop local continuam disponíveis. **A janela desktop usa uma sessão local independente e não exige um login web adicional**. O acesso pelo navegador exige uma conta de administrador.
 
 ## Celular
 
@@ -278,10 +280,10 @@ As três rodam o mesmo código de interface. A diferença é quem serve a págin
 
 ### Pré-requisitos (por forma)
 
-**Desktop (Windows / macOS / Linux)**: as duas opções precisam estar ligadas; uma sem a outra não funciona.
+**Desktop (Windows / macOS / Linux)**: ative primeiro o acesso pela rede. Navegador / PWA também exige o painel web.
 
-1. "Configurações → Geral → Acesso pela rede local" — permite que dispositivos da rede acessem o gateway. O fluxo de ativação pede o registro de um administrador do painel e cria automaticamente uma chave chamada "padrão".
-2. "Configurações → Geral → Acesso pela rede local → também expor o painel de gerenciamento web" — serve a pasta estática `ui/`. **Necessária para a forma navegador / PWA** (`/m` é servido pelo gateway, então retorna 404 enquanto esta opção estiver desligada). **O APK / IPA não precisam dela** (a interface está no pacote), mas ainda precisam da opção 1 — sem ela o gateway escuta apenas em `127.0.0.1` e o celular não alcança.
+1. "Configurações → Gateway → Acesso pela rede → Permitir que outros dispositivos acessem o gateway" — permite conexões de outros dispositivos, conforme as configurações de rede e firewall. Registre um administrador do painel antes; uma chave padrão será criada automaticamente se não houver nenhuma chave do gateway ativa.
+2. "Configurações → Gateway → Acesso pela rede → também expor o painel de gerenciamento web" — serve a pasta estática `ui/`. **Necessária para a forma navegador / PWA** (`/m` é servido pelo gateway, então retorna 404 enquanto esta opção estiver desligada). **O APK / IPA não precisam dela** (a interface está no pacote), mas ainda precisam da opção 1 — sem ela o gateway escuta apenas em `127.0.0.1` e o celular não alcança.
 
 Ambas exigem reinício para valer.
 
@@ -300,7 +302,7 @@ A primeira visita redireciona para a página de login; entre com o administrador
 Na primeira execução aparece uma tela "Servidores". São três passos:
 
 1. Toque em "Adicionar" e informe o `IP ou domínio:porta` do gateway (por exemplo `192.168.1.23:3065`). O protocolo pode ser `http://` ou `https://` (http é assumido se omitido); sem porta, http usa 3065 e https usa a 443 padrão;
-2. Toque em "Conectar e salvar" — ele testa o gateway antes, então endereço errado ou gateway sem acesso pela rede local são reportados ali mesmo;
+2. Toque em "Conectar e salvar" — ele testa o gateway antes, então endereço errado ou gateway sem acesso pela rede são reportados ali mesmo;
 3. Aparece a página de login. Informe a conta de administrador e a senha deste gateway (se ainda não houver administrador, vira "Criar conta de administrador").
 
 **Vários servidores**: toque em "Adicionar" de novo. Cada servidor guarda o próprio login — trocar não exige entrar de novo, e voltar também não. O ponto de entrada é "Configurações → Servidores"; toque em uma linha para trocar. **A página de login também tem "Trocar de servidor"**, então depois de sair da conta (ou ser desconectado) você não precisa entrar de novo só para chegar a essa lista.

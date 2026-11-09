@@ -16,6 +16,7 @@ import {
   type PageSizeChoice,
 } from './table-shell'
 import { t } from '../i18n'
+import { SearchableSelect } from '../../../ui-shared/searchable-select'
 import { DATE_RANGES, dateRangeQuery, readCustomRange, saveCustomRange, validCustomRange } from '../../../ui-shared/date-range'
 import { Empty } from '@ui'
 import { ALL_CLIENTS, clientFilterValue, LogDateFilters, SourceLogFilters, sourceParams,
@@ -603,36 +604,15 @@ function RequestsPage() {
               ))}
             </SelectContent>
           </Select>
-          <Select value={filters.provider}
-            onValueChange={next => onSelectChange({ provider: String(next ?? '') })}>
-            <SelectTrigger id='req-provider' className='min-w-[120px]'
-              title={t('按提供商筛选（只列日志里出现过的）')} aria-label={t('按提供商筛选')}>
-              <SelectValue>
-                {filters.provider
-                  ? (providerSelectOptions.find(item => item.value === filters.provider)?.label || filters.provider)
-                  : ALL_PROVIDER_LABEL}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value=''>{ALL_PROVIDER_LABEL}</SelectItem>
-              {providerSelectOptions.map(option => (
-                <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Select value={filters.model}
-            onValueChange={next => onSelectChange({ model: String(next ?? '') })}>
-            <SelectTrigger id='req-model' className='min-w-[120px]'
-              title={t('按模型筛选（只列日志里出现过的；精确匹配模型名）')} aria-label={t('按模型筛选')}>
-              <SelectValue>{filters.model || ALL_MODEL_LABEL}</SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value=''>{ALL_MODEL_LABEL}</SelectItem>
-              {modelSelectOptions.map(value => (
-                <SelectItem key={value} value={value}>{value}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <SearchableSelect value={filters.provider} onValueChange={provider => onSelectChange({ provider })}
+            id='req-provider' className='min-w-[120px] max-w-[240px]'
+            title={t('按提供商筛选（只列日志里出现过的）')} aria-label={t('按提供商筛选')}
+            searchPlaceholder={t('搜索提供商')} options={[{ value: '', label: ALL_PROVIDER_LABEL }, ...providerSelectOptions]} />
+          <SearchableSelect value={filters.model} onValueChange={model => onSelectChange({ model })}
+            id='req-model' className='min-w-[120px] max-w-[240px]'
+            title={t('按模型筛选（只列日志里出现过的；精确匹配模型名）')} aria-label={t('按模型筛选')}
+            searchPlaceholder={t('搜索模型')}
+            options={[{ value: '', label: ALL_MODEL_LABEL }, ...modelSelectOptions.map(value => ({ value, label: value }))]} />
           <SourceLogFilters filters={filters} clients={clientOptions} apiKeys={apiKeyOptions} onChange={onSelectChange} />
           {}
           <Toggle id='btn-req-running' variant='outline' size='default' pressed={runningOnly}

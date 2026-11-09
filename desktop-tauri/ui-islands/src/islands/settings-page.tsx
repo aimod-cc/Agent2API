@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { mountOnPage } from '../island-lazy'
 import { providerPromptRows } from './settings-prompt-rows'
+import { SearchableSelect } from '../../../ui-shared/searchable-select'
 import { flushSync } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import {
@@ -60,7 +61,6 @@ import {
   addProviderPrompt,
   addRetryCode,
   applyUnits,
-  cancelLanRegister,
   clearDegrade,
   closePasswordDialog,
   dropLastRetryCode,
@@ -74,7 +74,6 @@ import {
   refreshReasoningCollapse,
   refreshImageCompress,
   refreshClineHeaders,
-  refreshZcodeVersion,
   refreshCors,
   refreshCaptchaPool,
   refreshModelsDev,
@@ -94,12 +93,9 @@ import {
   renderSanitize,
   renderSettings,
   renderStorage,
-  resolveLanConfirm,
   resolveRetentionConfirm,
   restoreCategory,
-  saveCaptcha,
   saveClineHeaders,
-  saveZcodeVersion,
   saveCors,
   saveCaptchaPoolField,
   saveDebug,
@@ -120,15 +116,10 @@ import {
   saveToggle,
   selectCategory,
   showCategory,
-  submitLanRegister,
   submitPasswordChange,
-  toggleLan,
-  toggleLanPanel,
   useSettings,
   type ClineHeadersState,
   type DebugState,
-  type LanConfirm,
-  type LanRegister,
   type LoadStatus,
   type NumericState,
   type PromptState,
@@ -151,12 +142,15 @@ import {
 // 云同步面板（设置 → 数据）：独立成文件、自带一份数据流（/api/cloud-sync），
 // 与设置页的快照 store 没有交集，见该文件的模块头
 import { CloudSyncPanel } from './settings-cloud-sync'
+import { CaptchaSettingsPanel } from './settings-captcha'
+import { BrandingSettingsPanel } from './settings-branding'
+import { NetworkAccessDialog, NetworkAccessPanel } from './settings-network-access'
 import { DbRestoreDialog } from './settings-db-restore'
 import { DatabaseBackupDialogs, DatabaseBackupPanel } from './settings-database-backup'
 import { SanitizePanel } from './settings-sanitize'
 import { ClientIdentificationPanel } from '../../../ui-shared/client-identification-panel'
+import { ProviderSettingsPane } from './settings-providers'
 import { clientIdentificationApi } from './settings-client-identification'
-import { VisionCompatibilitySettings } from './settings-vision-compat'
 // 侧边栏菜单面板（设置 → 显示）：显隐 / 顺序 / 分组。布局模型在
 // ui/sidebar-layout.js（经典脚本，主侧边栏渲染与这里共用同一份），见该文件的模块头
 import { SidebarPane } from './sidebar-pane'
@@ -351,15 +345,6 @@ function RefreshButton({ id, onClick }: { id: string; onClick: () => void }) {
 
 /* ─── 通用分类 ─────────────────────────────── */
 
-/** 「局域网访问」面板的状态行：开着时给出局域网设备该填的 API 地址 */
-function lanStateText(snap: SettingsSnapshot): string {
-  const { lanAccess, lanPanel, lanIp, port } = snap.app
-  if (!lanAccess) return t('未开启：网关只监听 127.0.0.1，仅本机可以访问。')
-  const base = `http://${lanIp || t('<本机IP>')}${port ? `:${port}` : ''}`
-  const panel = lanPanel ? t('；网页管理面板已一并开放（浏览器打开同一地址）') : ''
-  return t('已开启：其他设备把 API 地址指向 {url}{panel}。', { url: `${base}/v1`, panel })
-}
-
 function GeneralPane({ snap }: { snap: SettingsSnapshot }) {
   const app = snap.app
   // 轻量模式只挂在「关闭到托盘」上（关闭即退出时没有窗口可轻量），
@@ -374,6 +359,8 @@ function GeneralPane({ snap }: { snap: SettingsSnapshot }) {
 
   return (
     <>
+      <BrandingSettingsPanel disabled={snap.busy !== null} />
+
       <Card render={<section />} className='panel'>
         <PanelHead
           title={t('启动与托盘')}
@@ -415,33 +402,6 @@ function GeneralPane({ snap }: { snap: SettingsSnapshot }) {
           <div className='settings-state'>{appState}</div>
         </CardContent>
       </Card>
-
-      {!snap.panelLogin && (
-        <Card render={<section />} className='panel'>
-          <PanelHead title={t('局域网访问')} tip={TIPS.lan} />
-          <CardContent className='panel-body'>
-            <div className='settings-switches'>
-              {/* 开 / 关都不直接落盘：走确认框（→ 需要时注册管理员 → 写设置并重启），
-                  流程与文案在 settings-state 的 toggleLan / resolveLanConfirm */}
-              <SwitchRow
-                id='settings-lan-access'
-                label={t('允许局域网内的设备访问网关')}
-                checked={snap.app.lanAccess}
-                disabled={snap.busy === 'lan'}
-                onCheckedChange={toggleLan}
-              />
-              <SwitchRow
-                id='settings-lan-panel'
-                label={t('同时开放网页管理面板')}
-                checked={snap.app.lanPanel}
-                disabled={snap.busy === 'lan' || !snap.app.lanAccess}
-                onCheckedChange={toggleLanPanel}
-              />
-            </div>
-            <div className='settings-state'>{lanStateText(snap)}</div>
-          </CardContent>
-        </Card>
-      )}
 
       <Card render={<section />} className='panel'>
         <PanelHead title={t('计量单位')} tip={TIPS.units} />
@@ -1016,36 +976,12 @@ function ProviderPromptRows({ prompt, locked, busy }: {
       <div className='retention-row'>
         <Label htmlFor='settings-prompt-provider-add'>{t('添加提供商')}</Label>
         <span className='prompt-input'>
-          {/* 组件的 Select 不支持占位（必须有一个 value），所以第一个选项就是
-              「选择要配置的提供商」这个动作本身；选完立刻重置回它。
-              `next` 可能是 null（Base UI 在「清空 / 取消选择」时回调的就是它，
-              见 @base-ui 的 `onValueChange` 类型）：照 `String(next)` 走会把它
-              变成字符串 "null"，而后端会如实回一句「未知的提供商 id：null」——
-              一次「没选」不该变成一次失败的保存。 */}
-          <Select
-            value={pending}
-            onValueChange={next => {
-              setPending('')
-              const id = next == null ? '' : String(next)
-              if (id) void addProviderPrompt(id)
-            }}
-          >
-            <SelectTrigger
-              id='settings-prompt-provider-add'
-              className='w-[240px]'
-              disabled={locked || busy || candidates.length === 0}
-              aria-label={t('添加要单独配置的提供商')}
-            >
-              <SelectValue>
-                {pending ? labelOf(pending) : (candidates.length ? t('添加提供商…') : t('全部已配置'))}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              {candidates.map(item => (
-                <SelectItem key={item.id} value={item.id}>{item.label}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <SearchableSelect value={pending} disabled={locked || busy || candidates.length === 0}
+            id='settings-prompt-provider-add' className='w-[240px]'
+            aria-label={t('添加要单独配置的提供商')} searchPlaceholder={t('搜索提供商')}
+            displayValue={pending ? labelOf(pending) : (candidates.length ? t('添加提供商…') : t('全部已配置'))}
+            options={candidates.map(item => ({ value: item.id, label: item.label }))}
+            onValueChange={id => { setPending(''); if (id) void addProviderPrompt(id) }} />
         </span>
         <div className='hint'>{NOTES.promptProviders}</div>
       </div>
@@ -1429,11 +1365,6 @@ function GatewayPane({ snap, panels }: { snap: SettingsSnapshot; panels: Set<str
           放在「网关」分类下是历史位置，语义上它属于插件面板。 */}
       {panels.has('upstream_headers') ? <ClineHeadersPanel snap={snap} /> : null}
 
-      {/* ZCode 客户端版本号：上游按它决定活动套餐下不下发。与上面那块不同，
-          这一格**不依赖插件申报** —— 它是网关自己的配置（见
-          api::zcode_version 的模块头），插件没装也要能改。 */}
-      <ZcodeVersionPanel snap={snap} />
-
       <PromptPanel snap={snap} />
 
       <Card render={<section />} className='panel'>
@@ -1620,84 +1551,6 @@ function ClineHeadersPanel({ snap }: { snap: SettingsSnapshot }) {
   )
 }
 
-/**
- * ZCode 客户端版本号（上游按它决定活动套餐下不下发）。
- *
- * ── 为什么需要用户自己填 ────────────────────────────────────
- * 活动套餐的探测接口只在 `app_version` 达到当期门槛时才返回套餐列表；
- * 版本落后时上游回的是一份**空列表**（`code: 0`，不是错误）。于是症状是
- * 「活动明明在，界面上一片空白」—— 看起来像上游没这活动，实际是客户端
- * 被判太旧（2026-10 实测：3.16.0 及以下全空，3.16.1 起才有 1024 礼包）。
- *
- * 插件里那份默认值是编译期常量，每期活动都要跟着改、跟着发版。这一格是
- * 那条链的旁路：用户在这里填一个更新的版本号即可，不必等我们发版。
- */
-function ZcodeVersionPanel({ snap }: { snap: SettingsSnapshot }) {
-  const state = snap.zcodeVersion
-  const [draft, setDraft] = React.useState(state.version)
-  React.useEffect(() => { setDraft(state.version) }, [state.version])
-
-  const busy = snap.busy === 'zcodeVersion'
-  const ready = state.status === 'ready'
-  const dirty = ready && draft.trim() !== state.version
-  // 环境变量优先级最高（见后端模块头）：它压着时界面上的值不生效，
-  // 必须说出来，否则用户会对着一个「改了没反应」的输入框反复重试。
-  const envShadowed = state.envOverride !== ''
-
-  return (
-    <CollapsiblePanel
-      title={t('ZCode 客户端版本号')}
-      tip={TIPS.zcodeVersion}
-      badge={state.status === 'ready'
-        ? <StatusBadge tone={envShadowed ? 'idle' : 'ok'}>
-          {envShadowed ? t('被环境变量覆盖') : t('已生效')}
-        </StatusBadge>
-        : state.status === 'unavailable'
-          ? <StatusBadge tone='bad'>{t('不可用')}</StatusBadge>
-          : <StatusBadge tone='idle'>{t('检测中…')}</StatusBadge>}
-      actions={<RefreshButton id='btn-zcode-version-refresh' onClick={() => void refreshZcodeVersion()} />}
-    >
-      <CardContent className='panel-body'>
-        <div className='retention-list'>
-          <div className='flex items-center gap-2'>
-            <Input
-              id='settings-zcode-version'
-              className='w-[190px] shrink-0 font-mono text-[13px]'
-              value={draft}
-              disabled={busy || !ready}
-              placeholder='3.16.2'
-              onChange={event => setDraft(event.target.value)}
-            />
-            <div className='flex-1' />
-            <Button
-              variant='ghost'
-              disabled={busy || !ready || draft === ''}
-              onClick={() => void saveZcodeVersion('')}
-            >
-              {t('清空（用内置默认值）')}
-            </Button>
-            <Button disabled={busy || !ready || !dirty} onClick={() => void saveZcodeVersion(draft)}>
-              {t('保存')}
-            </Button>
-          </div>
-        </div>
-        <div className='settings-state'>
-          {state.status === 'loading'
-            ? STATES.appLoading
-            : state.status === 'unavailable'
-              ? t('未能读取 ZCode 版本号设置，请稍后重试')
-              : envShadowed
-                ? t('环境变量 ZCODE_APP_VERSION={value} 正在生效，上面填的值暂不生效', { value: state.envOverride })
-                : draft.trim()
-                  ? t('探测与领取时会用 {version} 作为客户端版本号', { version: draft.trim() })
-                  : t('未设置，使用插件内置的默认版本号')}
-        </div>
-        <div className='hint retention-note'>{NOTES.zcodeVersion}</div>
-      </CardContent>
-    </CollapsiblePanel>
-  )
-}
-
 /* ─── 安全分类 ─────────────────────────────── */
 function SecurityPane({ snap }: { snap: SettingsSnapshot }) {
   // 「退出登录」成功后整页跳回登录页，那时组件已不在；只有失败才需要把按钮解禁
@@ -1804,10 +1657,6 @@ function storageBadge(state: StorageState): React.ReactNode {
  */
 function AccountPane({ snap }: { snap: SettingsSnapshot }) {
   const account = snap.account
-  const captcha = snap.captcha
-  const switchDisabled = !captcha.available || snap.busy === 'captcha'
-  // 本进程是哪一端：用于给两张开关加「正在使用」标记
-  const here = captcha.localPanel ? 'desktop' : 'web'
 
   return (
     <>
@@ -1841,7 +1690,7 @@ function AccountPane({ snap }: { snap: SettingsSnapshot }) {
               ? t('未能读取账户信息，请稍后重试')
               : account.registered
                 ? t('当前管理员：{name}', { name: account.username || '—' })
-                : t('尚未注册管理员：管理接口不需要登录。开启「允许局域网访问」时会引导注册，也可以从登录页注册。')}
+                : t('尚未注册管理员。开启「网关 → 网络访问 → 允许其他设备访问网关」时会引导注册，也可以从登录页注册。')}
           </div>
           {account.registered ? (
             <div className='hint'>
@@ -1851,38 +1700,7 @@ function AccountPane({ snap }: { snap: SettingsSnapshot }) {
         </CardContent>
       </Card>
 
-      <Card render={<section />} className='panel'>
-        <PanelHead
-          title={t('机器人校验')}
-          tip={TIPS.captchaSides}
-          badge={!captcha.available
-            ? <StatusBadge tone='bad'>{t('不可用')}</StatusBadge>
-            : null}
-        />
-        <CardContent className='panel-body'>
-          <div className='settings-switches'>
-            <SwitchRow
-              id='settings-captcha-desktop'
-              label={here === 'desktop'
-                ? t('桌面端：登录 / 注册需要 ALTCHA 人机验证（当前正在使用）')
-                : t('桌面端：登录 / 注册需要 ALTCHA 人机验证')}
-              checked={captcha.desktop}
-              disabled={switchDisabled}
-              onCheckedChange={next => void saveCaptcha('desktop', next)}
-            />
-            <SwitchRow
-              id='settings-captcha-web'
-              label={here === 'web'
-                ? t('网页端：登录 / 注册需要 ALTCHA 人机验证（当前正在使用）')
-                : t('网页端：登录 / 注册需要 ALTCHA 人机验证')}
-              checked={captcha.web}
-              disabled={switchDisabled}
-              onCheckedChange={next => void saveCaptcha('web', next)}
-            />
-          </div>
-          <div className='hint'>{NOTES.captcha}</div>
-        </CardContent>
-      </Card>
+      <CaptchaSettingsPanel disabled={snap.busy !== null} />
 
       <Card render={<section />} className='panel'>
         <PanelHead title={t('重置管理员')} />
@@ -2124,52 +1942,6 @@ function RetentionConfirmDialog({ confirm }: { confirm: { head: string } | null 
   )
 }
 
-/* ─── 局域网访问的确认 / 注册弹窗 ─────────────── */
-
-/** 三种确认（开启 / 关闭 / 面板子开关）各自的标题、正文与确认键文案 */
-const LAN_CONFIRM_COPY: Record<
-  NonNullable<LanConfirm>['mode'],
-  { title: string; body: (panel: boolean) => React.ReactNode; label: string }
-> = {
-  enable: {
-    title: t('开启局域网访问'),
-    body: () => (
-      <>
-        {t('为了安全，开启前需要先注册一个')}<b>{t('面板管理员账号')}</b>{t('（已注册过会跳过这一步，直接生效）。')}<br />
-        {t('开启后网关将监听所有网卡，同一局域网内的设备即可把 API 地址指向本机 IP 一起使用；管理接口从此要求管理员会话或网关 Key，转发接口在没有一把启用的 Key 时也会拒绝服务（届时会自动创建一把名为「默认」的 Key）。')}<br />
-        <strong>{t('保存后应用将重启以生效。')}</strong>{t('确定继续？')}
-      </>
-    ),
-    label: t('继续'),
-  },
-  disable: {
-    title: t('关闭局域网访问'),
-    body: () => (
-      <>
-        {t('关闭后网关回到只监听 127.0.0.1，局域网内的设备将无法继续访问；已配置的网关 Key 与账号都不受影响。')}<br />
-        <strong>{t('保存后应用将重启以生效。')}</strong>{t('确定继续？')}
-      </>
-    ),
-    label: t('关闭并重启'),
-  },
-  panel: {
-    title: t('变更网页管理面板'),
-    body: panel =>
-      panel ? (
-        <>
-          {t('开放后，局域网内其他设备的浏览器打开本机 IP 即可进入管理面板（需管理员账号登录）。')}<br />
-          <strong>{t('保存后应用将重启以生效。')}</strong>{t('确定继续？')}
-        </>
-      ) : (
-        <>
-          {t('关闭后，管理界面不再从局域网提供，只有本机的桌面程序可以管理；已开启的 API 转发不受影响。')}<br />
-          <strong>{t('保存后应用将重启以生效。')}</strong>{t('确定继续？')}
-        </>
-      ),
-    label: t('保存并重启'),
-  },
-}
-
 /**
  * 「修改密码」弹窗：当前密码 + 新密码 + 确认新密码。
  *
@@ -2265,96 +2037,6 @@ function PasswordDialog({ password }: { password: { busy: boolean; error: string
             {busy ? t('正在修改…') : t('修改密码')}
           </Button>
         </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-/**
- * 局域网访问的两段式弹窗（骨架照 RetentionConfirmDialog）：
- *   · 确认段（`confirm` 非空）：开 / 关 / 面板子开关各自的后果与「需重启」；
- *   · 注册段（`register` 非空）：确认开启但还没有管理员时接着出现的表单 ——
- *     就是确认文案里说的「注册管理员账号」那一步，注册成功由流程层直接继续
- *     开启（`submitLanRegister`），用户不需要再点一次确认。
- * 取消 / 右上角 ✕ / 点遮罩 / Esc 都算「不继续」：开关保持原状（受控组件自动弹回）。
- * 注册段焦点落在取消键：表单里有未提交的输入，敲回车该走提交而不是关闭。
- */
-function LanDialog({ confirm, register }: { confirm: LanConfirm; register: LanRegister }) {
-  const cancelRef = React.useRef<HTMLButtonElement | null>(null)
-  const nameRef = React.useRef<HTMLInputElement | null>(null)
-  const passwordRef = React.useRef<HTMLInputElement | null>(null)
-
-  const open = confirm !== null || register !== null
-  const close = () => {
-    if (register !== null) cancelLanRegister()
-    else resolveLanConfirm(false)
-  }
-  const submitRegister = () => {
-    submitLanRegister(nameRef.current?.value ?? '', passwordRef.current?.value ?? '')
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={next => { if (!next) close() }}>
-      <DialogContent className='w-[min(480px,calc(100vw-48px))]' initialFocus={cancelRef}>
-        {register !== null ? (
-          <>
-            <DialogHeader>
-              <DialogTitle>{t('注册管理员账号')}</DialogTitle>
-            </DialogHeader>
-            <DialogBody>
-              <div>
-                {t('局域网开放后，管理接口要求登录。请设置管理员账号与密码，注册完成会直接继续开启流程。')}
-              </div>
-              {/* 允许浏览器自带的账号密码记忆：autoComplete 与登录页同款 */}
-              <form
-                onSubmit={event => { event.preventDefault(); if (!register.busy) submitRegister() }}
-              >
-                <Label htmlFor='lan-admin-name' className='mt-3.5 mb-[5px] block text-[12.5px]'>{t('账号')}</Label>
-                {/* 提交时壳侧按 ref 读值（submitLanRegister），ref 必须真的挂上 */}
-                <Input ref={nameRef} id='lan-admin-name' autoComplete='username' placeholder={t('管理员账号')} disabled={register.busy} />
-                <Label htmlFor='lan-admin-password' className='mt-3.5 mb-[5px] block text-[12.5px]'>{t('密码')}</Label>
-                <Input
-                  ref={passwordRef}
-                  id='lan-admin-password'
-                  type='password'
-                  autoComplete='new-password'
-                  placeholder={t('至少 8 位')}
-                  disabled={register.busy}
-                />
-              </form>
-              <div className='mt-3 min-h-5 text-[13px] whitespace-pre-wrap text-destructive'>
-                {register.error}
-              </div>
-            </DialogBody>
-            <DialogFooter>
-              <div className='mr-auto' />
-              <Button ref={cancelRef} variant='outline' onClick={cancelLanRegister} disabled={register.busy}>
-                {t('取消')}
-              </Button>
-              <Button onClick={submitRegister} disabled={register.busy}>
-                {register.busy ? t('正在注册…') : t('注册并开启')}
-              </Button>
-            </DialogFooter>
-          </>
-        ) : (
-          <>
-            <DialogHeader>
-              <DialogTitle>{confirm ? LAN_CONFIRM_COPY[confirm.mode].title : ''}</DialogTitle>
-            </DialogHeader>
-            <DialogBody>
-              <div>{confirm ? LAN_CONFIRM_COPY[confirm.mode].body(confirm.panel) : null}</div>
-            </DialogBody>
-            <DialogFooter>
-              <div className='mr-auto' />
-              <Button ref={cancelRef} variant='outline' onClick={() => resolveLanConfirm(false)}>
-                {t('取消')}
-              </Button>
-              <Button onClick={() => resolveLanConfirm(true)}>
-                {confirm ? LAN_CONFIRM_COPY[confirm.mode].label : t('继续')}
-              </Button>
-            </DialogFooter>
-          </>
-        )}
       </DialogContent>
     </Dialog>
   )
@@ -2477,9 +2159,14 @@ function SettingsPage() {
           <DisplayPane />
         </div>
         <div className={paneClass('gateway')} data-cat='gateway'>
-          <VisionCompatibilitySettings active={snap.category === 'gateway'} />
+          <NetworkAccessPanel snap={snap} />
+          {/* 图片兼容已搬到「路由 → 特殊请求路由 → 图片兼容」：它与账号路由是同一层
+              （都在模型解析时改写请求），留在设置页会让「改哪只模型」散落在两处。 */}
           <ClientIdentificationPanel api={clientIdentificationApi} t={t} active={snap.category === 'gateway'} />
           <GatewayPane snap={snap} panels={adminPanels} />
+        </div>
+        <div className={paneClass('providers')} data-cat='providers'>
+          <ProviderSettingsPane active={snap.category === 'providers'} onOpenDetail={() => setMobileDetail(true)} />
         </div>
         <div className={paneClass('retry')} data-cat='retry'>
           <RetryPane snap={snap} />
@@ -2523,7 +2210,7 @@ function SettingsPage() {
       {/* 恢复进度弹窗：**不可关闭**，直到恢复收口（见该文件的说明） */}
       <DbRestoreDialog />
       <PasswordDialog password={snap.account.password} />
-      <LanDialog confirm={snap.lanConfirm} register={snap.lanRegister} />
+      <NetworkAccessDialog confirm={snap.lanConfirm} register={snap.lanRegister} />
     </div>
   )
 }

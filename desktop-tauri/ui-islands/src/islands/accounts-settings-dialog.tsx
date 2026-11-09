@@ -28,6 +28,7 @@ import { limiterDraftOf, LimiterSection, readLimiterChanges } from './accounts-d
 import { allAccounts, findAccount, syncBalancesSnapshot } from './accounts-data'
 import { refreshSavedAccounts, updateAccountConfirmed } from './accounts-update'
 import { draftOfProxy, ProxyForm, readProxyDraft, type ProxyDraft, type ProxyPayload } from './accounts-proxy-form'
+import { UserAgentInput, useUserAgentPresets, userAgentEditable } from './add-account-user-agent'
 import {
   AccountSettingsIcon, BalanceTokenField, CustomCredentialFields, ProviderSection, SettingGroup,
   type ProviderSettings,
@@ -55,6 +56,11 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
   const [enabled, setEnabled] = React.useState(account?.enabled !== false)
   const [allowRouteSkip, setAllowRouteSkip] = React.useState(account?.allowRouteSkip !== false)
   const [name, setName] = React.useState(account?.name || '')
+  /** 账号级自定义 User-Agent 草稿（空串 = 用该家自己的默认值） */
+  const [userAgent, setUserAgent] = React.useState(account?.userAgent || '')
+  const uaPresets = useUserAgentPresets()
+  // 会话式家由插件自己拼出站头，网关覆盖不到 —— 整段不渲染
+  const uaEditable = userAgentEditable(providerOf(account || { id }))
   const [proxyDraft, setProxyDraft] = React.useState<ProxyDraft>(() => draftOfProxy(account?.proxy))
   const [balanceToken, setBalanceToken] = React.useState('')
   // ZCode 的「使用哪个套餐」草稿（非 ZCode 账号恒为空串，那一段也不渲染）
@@ -89,14 +95,14 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
   const paneScroll = React.useRef<HTMLDivElement | null>(null)
   const panePositions = React.useRef<Partial<Record<PaneId, number>>>({})
   const initial = React.useRef({
-    enabled, allowRouteSkip, name, proxyDraft, planChannel, usageDraft,
+    enabled, allowRouteSkip, name, userAgent, proxyDraft, planChannel, usageDraft,
     balanceQueryDraft, limiterDraft, concDraft, noAuthDraft,
   })
   const credentialLabel = providerOf(account).startsWith('custom-') ? t('凭证设置') : t('凭证与套餐')
   const paneInfo: Record<PaneId, { title: string; description: string; icon: string }> = {
     basic: { title: t('基本信息'), description: t('设置账号名称、启用状态与转发行为。'), icon: 'sliders' },
     credential: { title: credentialLabel, description: t('管理当前账号的凭证与可用套餐。'), icon: 'key' },
-    query: { title: t('查询设置'), description: t('配置余额查询凭证与自动刷新间隔。'), icon: 'refresh' },
+    query: { title: t('查询设置'), description: t('配置余额查询凭证、自动刷新间隔与失败重试。'), icon: 'refresh' },
     limiter: { title: t('限制器'), description: t('用明确的规则保护当前账号的额度。'), icon: 'shield' },
     network: { title: t('网络'), description: t('设置当前账号访问上游的出网方式。'), icon: 'proxies' },
     provider: { title: t('连接设置'), description: t('统一管理提供商的协议、地址与兼容选项。'), icon: 'agent' },
@@ -175,7 +181,8 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
   const same = (left: unknown, right: unknown): boolean => JSON.stringify(left) === JSON.stringify(right)
   const dirtyPanes: Record<PaneId, boolean> = {
     basic: enabled !== before.enabled || allowRouteSkip !== before.allowRouteSkip
-      || (name.trim() || before.name) !== before.name || concDraft !== before.concDraft,
+      || (name.trim() || before.name) !== before.name || userAgent.trim() !== before.userAgent
+      || concDraft !== before.concDraft,
     credential: Boolean(balanceToken.trim() || apiKeyDraft.trim())
       || noAuthDraft !== before.noAuthDraft || planChannel !== before.planChannel,
     query: !same(usageDraft, before.usageDraft) || !same(balanceQueryDraft, before.balanceQueryDraft),
@@ -449,8 +456,12 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
       // accounts-data 的 reorderQueue）。设置弹窗只改「账号自身」的属性，
       // 一次「改备注名」不该顺手把顺序也提交一遍
       const nextName = name.trim() || target.name
+      // 空串 = 清除自定义 UA（后端 `apply_patch` 把空串解释成「回到该家默认」）。
+      // 只在真的改了时带上，避免每次保存都多一条「User-Agent → 默认」的变更日志。
+      const nextUserAgent = userAgent.trim()
       const saved = await updateAccountConfirmed(id, {
         ...(nextName !== target.name ? { name: nextName } : {}),
+        ...(nextUserAgent !== (target.userAgent || '').trim() ? { userAgent: nextUserAgent } : {}),
         enabled,
         allowRouteSkip,
         proxy,
@@ -623,6 +634,16 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
                       </SettingGroup>
                       <p className='detail acct-dlg-hint'>{concDefault > 0
                         ? t('0 = 按本家默认 {default}', { default: concDefault }) : t('0 = 不限')}</p>
+                      {uaEditable ? <SettingGroup title={t('请求标识')}>
+                        <Field className='acct-dlg-field'>
+                          <FieldLabel htmlFor='account-user-agent'>User-Agent</FieldLabel>
+                          <UserAgentInput id='account-user-agent' value={userAgent}
+                            onChange={setUserAgent} presets={uaPresets} disabled={interactionBusy} />
+                          <FieldDescription>
+                            {t('用于当前账号的对话、余额查询、模型拉取、模型测试、签到及凭证刷新等上游请求。留空使用提供商默认值；可选预置或直接填写。')}
+                          </FieldDescription>
+                        </Field>
+                      </SettingGroup> : null}
                       {routeContext ? <div className='acct-dlg-route-context'>{routeContext}</div>
                         : <p className='detail acct-dlg-group-note'><AccountSettingsIcon name='route' size={14} />
                           {t('在账号列表中拖动分组或行首把手，调整转发顺序。')}</p>}
@@ -647,7 +668,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
                   </> : null}
 
                   {pane === 'query' && supportsUsage(target) ? <>
-                    <SettingGroup title={t('自动查询余额')}>
+                    <SettingGroup title={t('余额查询')}>
                       <UsageSettingsSection draft={usageDraft} onChange={setUsageDraft} />
                     </SettingGroup>
                     {balanceSpec ? <SettingGroup title={t('查询凭证')} action={<Badge variant='secondary' shape='tag'>{balanceSpec.label}</Badge>}>

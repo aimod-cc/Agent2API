@@ -15,7 +15,10 @@ import { RoutingGroupPanel } from './routing-group-panel'
 import { RoutingCreateDialog } from './routing-create-dialog'
 import { useRouteGroups } from './routing-group-state'
 import { useRoutingAccounts } from './routing-accounts'
-import { RoutingRail } from './routing-rail'
+import { RoutingRail, type SpecialKey } from './routing-rail'
+import { CompactSpecialPanel, TitleSpecialPanel, VisionSpecialPanel } from './routing-special-panels'
+import { RoutingSpecialHits } from './routing-special-hits'
+import { compactApi, titleApi, useSpecialEditor, visionApi } from './routing-special-state'
 import { RoutingConfigShell } from './routing-canvas-layout'
 import { RoutingExecTimeline } from './routing-exec-timeline'
 import { RoutingRequestList } from './routing-request-list'
@@ -30,13 +33,15 @@ let refreshWorkspace: (() => void) | undefined
 
 export function RoutingPage() {
   const [mode, setMode] = React.useState<'config' | 'replay'>('config')
+  // 选中的特殊路由（null = 走原来的账号路由配置视图）
+  const [specialKey, setSpecialKey] = React.useState<SpecialKey | null>(null)
   const [selected, setSelected] = React.useState<ReplayRow | null>(null)
   const [refreshToken, setRefreshToken] = React.useState(0)
   const sortingState = React.useSyncExternalStore(subscribe, getStore)
   const [sortingSyncBusy, setSortingSyncBusy] = React.useState(false)
   const [sortingError, setSortingError] = React.useState('')
   const sortSequence = React.useRef(0)
-  const replay = useRoutingReplay(true, mode === 'config' ? '' : undefined)
+  const replay = useRoutingReplay(true, mode === 'config' ? '' : undefined, mode === 'replay' || Boolean(specialKey))
   const refreshRouting = React.useCallback(() => { replay.invalidateWorkspace(); replay.refresh() }, [replay.invalidateWorkspace, replay.refresh])
   const editor = useRoutingEditor(refreshRouting)
   const groups = useRouteGroups(refreshRouting, () => { void editor.load('') })
@@ -44,7 +49,17 @@ export function RoutingPage() {
   const pageEditor = { ...editor, busy: editor.busy || accountControl.busy || sortingState.sortBusy || sortingSyncBusy }
   const busyRef = React.useRef(pageEditor.busy)
   busyRef.current = pageEditor.busy
-  const dirtyCount = editor.dirtyCount + groups.dirtyCount
+  // 特殊请求路由：三块各自持有草稿，但同一时刻只显示一块，所以只让当前那块拉数据。
+  const special = React.useMemo(() => ({
+    compact: compactApi(),
+    title: titleApi(),
+    vision: visionApi,
+  }), [])
+  const compactEditor = useSpecialEditor(special.compact, mode === 'config' && specialKey === 'compact')
+  const visionEditor = useSpecialEditor(special.vision, mode === 'config' && specialKey === 'vision')
+  const titleEditor = useSpecialEditor(special.title, mode === 'config' && specialKey === 'title')
+  const specialDirty = (compactEditor.dirty ? 1 : 0) + (visionEditor.dirty ? 1 : 0) + (titleEditor.dirty ? 1 : 0)
+  const dirtyCount = editor.dirtyCount + groups.dirtyCount + specialDirty
   const [modal, setModal] = React.useState<
     | { kind: 'sticky' }
     | { kind: 'account' | 'sort'; id: string }
@@ -53,6 +68,8 @@ export function RoutingPage() {
     | null
   >(null)
   const workspace = editor.draft?.workspace || replay.workspace
+  const usageWorkspace = replay.workspace && (!workspace || replay.workspace.updatedAt >= workspace.updatedAt) ? replay.workspace : workspace
+  const modelLastUsed = usageWorkspace?.modelLastUsed
   const sortSnapshot = replay.workspace?.sorting && (!workspace?.sorting || replay.workspace.sorting.updatedAt > workspace.sorting.updatedAt)
     ? replay.workspace.sorting : workspace?.sorting
   const sorting = sortingState.sorting && (!sortSnapshot || sortingState.sorting.updatedAt > sortSnapshot.updatedAt) ? sortingState.sorting : sortSnapshot
@@ -115,6 +132,8 @@ export function RoutingPage() {
   const openRequest = (row: ReplayRow) => { setSelected(row); setMode('replay') }
   const openScope = (model: string) => {
     if (busyRef.current || groups.busy) return
+    // 从特殊路由切回账号路由：左栏的选中态必须跟着走，否则会同时亮两项。
+    setSpecialKey(null)
     const group = Object.values(groups.drafts).find(draft => draft.group.model.toLowerCase() === model.toLowerCase())
     groups.select(group?.group.id || '')
     if (!group) void editor.load(model)
@@ -138,15 +157,17 @@ export function RoutingPage() {
     void editor.load(editor.scope, true)
   }
   React.useEffect(() => {
-    requestTrace = row => { if (row) setSelected({ ...row }); setMode('replay') }
+    requestTrace = row => { if (row) setSelected({ ...row }); setSpecialKey(null); setMode('replay') }
     refreshWorkspace = replay.refresh
     return () => { requestTrace = undefined; refreshWorkspace = undefined }
   }, [replay.refresh])
 
-  const groupModels = Object.values(groups.drafts).map(draft => draft.group.model)
+  const groupModels = React.useMemo(() => Object.values(groups.drafts).map(draft => draft.group.model), [groups.drafts])
   const reserved = [...(workspace?.models || []), ...(workspace?.configuredModels || []), ...Object.keys(editor.drafts),
     ...(groups.data?.catalog || []).map(choice => choice.model), ...groupModels]
+  // 特殊请求路由的编辑器已在上面创建，这里不再重复声明。
   const rail = <RoutingRail editor={pageEditor} groups={groups} workspace={workspace} onModel={openScope} onGroup={id => { if (!busyRef.current) groups.select(id) }}
+    special={specialKey} onSpecial={key => { if (!busyRef.current) setSpecialKey(key) }}
     onAdd={() => setModal({ kind: 'create' })} />
   const accountSettings = (id: string) => {
     if (busyRef.current) return
@@ -165,7 +186,8 @@ export function RoutingPage() {
         { value: 'replay', label: <><RouteIcon name='requests' />{t('请求回放')}</> },
       ]} />
       <span className='routing-page-policy'>{mode === 'config'
-        ? workspace ? `${groups.draft && strategy === 'provider' ? t('成员内轮询') : strategyLabel(strategy)} · ${t('粘滞 {mode}', { mode: stickyLabel(sticky) })}` : ''
+        ? specialKey ? t('特殊请求路由 · 只改写模型，不改选账号规则')
+          : workspace ? `${groups.draft && strategy === 'provider' ? t('成员内轮询') : strategyLabel(strategy)} · ${t('粘滞 {mode}', { mode: stickyLabel(sticky) })}` : ''
         : t('历史只读，不影响当前配置')}</span>
       <div className='routing-page-actions'>
         {mode === 'replay' ? <Button variant='ghost' size='sm' onClick={() => host().wbApp?.showPage('requests')}><RouteIcon name='requests' />{t('请求日志')}</Button> : null}
@@ -186,14 +208,23 @@ export function RoutingPage() {
       </div> : null}
       {sortingError ? <div className='routing-page-error' role='alert'><RouteIcon name='info' /><span>{sortingError}</span>
         <Button variant='ghost' size='sm' disabled={sortingSyncBusy} onClick={() => void reloadSorting()}>{t('重试')}</Button></div> : null}
-      <RoutingConfigShell>
+      {/* 特殊请求路由只有一份规则列表，用平底画布；账号路由那边保留点阵画布 */}
+      <RoutingConfigShell plain={Boolean(specialKey)}>
         {rail}
-        {groups.selected ? <RoutingGroupPanel key={groups.selected} editor={groups} accounts={replay.workspace?.accounts || workspace?.accounts || []}
-          reserved={reserved} baseUrl={host().wbPortPanel?.gatewayBase() || `http://127.0.0.1:${workspace?.gateway.port || 3065}`}
-          onAccount={accountSettings} sorting={sorting} now={replay.now} onSort={groupSettings} /> :
-          <RoutingConfigPanel key={editor.scope} editor={pageEditor} scope={editor.scope} now={replay.now} accountControl={accountControl} onScope={openScope}
-            onAccount={accountSettings} onSort={groupSettings}
-            onProtection={workspace => setModal({ kind: 'protection', workspace })} />}
+        {specialKey === 'compact' ? <CompactSpecialPanel editor={compactEditor} /> :
+          specialKey === 'vision' ? <VisionSpecialPanel editor={visionEditor} /> :
+            specialKey === 'title' ? <TitleSpecialPanel editor={titleEditor} /> :
+              groups.selected ? <RoutingGroupPanel key={groups.selected} editor={groups} accounts={replay.workspace?.accounts || workspace?.accounts || []}
+                reserved={reserved} baseUrl={host().wbPortPanel?.gatewayBase() || `http://127.0.0.1:${workspace?.gateway.port || 3065}`}
+                onAccount={accountSettings} sorting={sorting} now={replay.now} onSort={groupSettings} lastUsed={modelLastUsed}
+                refreshToken={replay.refreshToken} paused={pageEditor.busy} onWorkspace={replay.acceptWorkspace} /> :
+                <RoutingConfigPanel key={editor.scope} editor={pageEditor} scope={editor.scope} now={replay.now} accountControl={accountControl}
+                  refreshToken={replay.refreshToken} onWorkspace={replay.acceptWorkspace}
+                  onAccount={accountSettings} onSort={groupSettings}
+                  onProtection={workspace => setModal({ kind: 'protection', workspace })} />}
+        {/* 右栏：选中特殊路由时并排显示这条路由最近命中的请求（原型的「配置在左、记录在右」） */}
+        {specialKey ? <RoutingSpecialHits kind={specialKey} refreshToken={refreshToken}
+          onOpenReplay={() => setMode('replay')} /> : null}
       </RoutingConfigShell>
     </div> : <div className='routing-replay-layout'>
       <aside className='routing-request-rail'>
@@ -208,7 +239,7 @@ export function RoutingPage() {
     </div>}
 
     {modal?.kind === 'create' && workspace && groups.data ? <RoutingCreateDialog workspace={workspace} choices={groups.data.catalog}
-      accounts={replay.workspace?.accounts || workspace.accounts} reserved={reserved} groupModels={groupModels}
+      accounts={replay.workspace?.accounts || workspace.accounts} lastUsed={modelLastUsed} reserved={reserved} groupModels={groupModels}
       disabled={pageEditor.busy || editor.loading || groups.busy || groups.loading} modelError={editor.error} onClose={() => setModal(null)}
       onCreateModel={async model => { const created = await editor.create(model); if (created) groups.select(''); return created }}
       onCreateGroup={groups.create} /> : null}

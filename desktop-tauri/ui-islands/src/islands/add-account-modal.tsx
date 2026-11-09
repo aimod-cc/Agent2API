@@ -22,7 +22,7 @@
  * deviceId 会丢（用户回到同一家重填验证码即可，链路上的服务端行为不变）。
  *
  * ── 对外接口（调用点逐个 grep 确认过，见最终报告）────────────
- *   window.wbAddAccountModal  = { open, close }   —— 跨模块打开这张弹窗的唯一入口
+ *   window.wbAddAccountModal  = { open, openProvider, close } —— 跨模块打开弹窗或指定提供商
  *   window.wbAccountAddForms  = { syncAddProvider, openNewCustomForm }
  *     · syncAddProvider   账号页（account-panel.js）在「添加账号」按钮上同步调用
  *     · openNewCustomForm 模型管理页左栏的「＋ 新建自定义提供商」直达新建表单
@@ -34,7 +34,7 @@ import * as React from 'react'
 import { createRoot } from 'react-dom/client'
 import { Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@ui'
 
-import { shared, type CustomProviderRecord, type SharedWindow } from './add-account-bridge'
+import { runtimeProviderOf, shared, type CustomProviderRecord, type SharedWindow } from './add-account-bridge'
 import {
   BUILTIN_CONFIGS,
   CUSTOM_PROVIDER,
@@ -48,15 +48,20 @@ import {
   IMPORT_SEGMENT_ENABLED,
   NEW_PROVIDER_CARD_ID,
   PRESET_CARD_PREFIX,
-  PROVIDER_ICONS,
   PickStep,
   TYPE_ALL,
   TYPE_IMPORT,
   type AccountType,
 } from './add-provider-pick'
-import { ProviderBlock, WorkBuddyBlock } from './add-provider-blocks'
+import { ProviderBlock } from './add-provider-blocks'
+import { useProviderIcon } from './provider-icon'
+import { WorkBuddyBlock } from './add-workbuddy-provider'
+import { AddAccountProxyProvider, AddAccountProxySection } from './add-account-proxy'
 import { DynamicProviderBlock } from './add-dynamic-provider'
 import { DeepseekAccountBlock } from './add-provider-deepseek-block'
+import { AntigravityAccountBlock } from './add-antigravity'
+import { ANTIGRAVITY_ACP_PROVIDER, isAntigravityAccountProvider } from '../../../ui-shared/antigravity-login'
+import { getPluginStartup, subscribePluginStartup } from '../../../ui-shared/plugin-startup'
 import '../styles/add-account-dialog.css'
 import { t } from '../i18n'
 
@@ -65,8 +70,8 @@ import { t } from '../i18n'
  * （与第 1 步卡片同一份图标映射，别处不要照抄）。
  */
 function ProviderMark({ provider, label }: { provider: string; label: string }): React.ReactElement {
-  const icon = PROVIDER_ICONS[provider]
-  if (icon) return <span className='acct-add-head-mark'><img src={icon} alt='' /></span>
+  const { src: icon, onError } = useProviderIcon(provider)
+  if (icon) return <span className='acct-add-head-mark'><img src={icon} alt='' onError={onError} /></span>
   const initial = String(label || '?').trim().slice(0, 1).toUpperCase() || '?'
   return <span className='acct-add-head-mark' aria-hidden='true'>{initial}</span>
 }
@@ -75,6 +80,7 @@ type Step = 'pick' | 'form'
 
 type IslandState = {
   step: Step
+  direct: boolean
   accountType: AccountType
   search: string
   /** 当前选中哪一家的块（provider id / 'workbuddy' / 'custom'） */
@@ -95,6 +101,7 @@ type IslandState = {
  */
 const INITIAL: IslandState = {
   step: 'pick',
+  direct: false,
   accountType: TYPE_ALL,
   search: '',
   provider: WORKBUDDY_PROVIDER,
@@ -109,20 +116,39 @@ export type IslandHandle = {
   reset: () => void
   /** 直达「新建自定义提供商」表单（旧 openNewCustomForm） */
   openNewCustomForm: () => void
+  openProvider: (provider: string) => void
 }
 
 const customList = (): CustomProviderRecord[] => shared().wbProviders?.customList?.() || []
 
+function providerFormState(id: string, previous: IslandState, direct = false): IslandState {
+  const next: IslandState = { ...previous, step: 'form', direct, showToken: previous.showToken + 1,
+    provider: id, providerHint: '', presetKey: '' }
+  if (id === NEW_PROVIDER_CARD_ID) return { ...next, provider: CUSTOM_PROVIDER }
+  if (id.startsWith(PRESET_CARD_PREFIX)) {
+    return { ...next, provider: CUSTOM_PROVIDER, presetKey: id.slice(PRESET_CARD_PREFIX.length) }
+  }
+  if (id.startsWith('custom-') || customList().some(item => item.id === id)) {
+    return { ...next, provider: CUSTOM_PROVIDER, providerHint: id }
+  }
+  return next
+}
+
 function AddAccountModal({
   onClose,
   onReady,
+  initialProvider,
 }: {
   onClose: () => void
   onReady: (handle: IslandHandle | null) => void
+  initialProvider?: string
 }): React.ReactElement {
-  const [state, setState] = React.useState<IslandState>(INITIAL)
+  const [state, setState] = React.useState<IslandState>(() => initialProvider
+    ? providerFormState(initialProvider, INITIAL, true) : INITIAL)
   /** 摘要 / 自定义目录异步到位后的重画信号（值本身不参与渲染） */
   const [version, setVersion] = React.useState(0)
+  const startup = React.useSyncExternalStore(subscribePluginStartup, getPluginStartup)
+  const availabilityRevision = startup.value?.availabilityRevision
   /**
    * 表单层底栏的宿主节点：**在这里 createElement 出来**，而不是 ref + useState。
    * 后者首帧拿到的是 null，段落会先把按钮渲染在原位、下一帧再 portal 进底栏 ——
@@ -152,10 +178,16 @@ function AddAccountModal({
     setState({ ...INITIAL, step: 'form', provider: CUSTOM_PROVIDER })
   }, [reset])
 
+  const openProvider = React.useCallback((provider: string) => {
+    const id = provider.trim()
+    if (!id) return
+    setState(previous => providerFormState(id, previous, true))
+  }, [])
+
   React.useEffect(() => {
-    onReady({ reset, openNewCustomForm })
+    onReady({ reset, openNewCustomForm, openProvider })
     return () => onReady(null)
-  }, [onReady, reset, openNewCustomForm])
+  }, [onReady, reset, openNewCustomForm, openProvider])
 
   // 打开时以主进程真实状态复位按钮（旧 openModal 里那一次 refresh）：
   // 上次若在等待中被关窗，这里会重新可用
@@ -165,8 +197,15 @@ function AddAccountModal({
 
   // 自定义目录提前拉一次：第一次打开这一屏时下拉就有数据（旧实现加载期就拉）
   React.useEffect(() => {
-    void shared().wbProviders?.refreshCustom?.().then(bump)
-  }, [bump])
+    let active = true
+    void (async () => {
+      try { await shared().wbApp?.refresh?.() } catch {}
+      await shared().wbProviders?.load?.()
+      if (active) bump()
+    })()
+    void shared().wbProviders?.refreshCustom?.().then(() => { if (active) bump() })
+    return () => { active = false }
+  }, [bump, availabilityRevision])
 
   // 每次进入自定义块都重读目录（旧 onShow 里那次 refreshCustom）
   React.useEffect(() => {
@@ -174,10 +213,13 @@ function AddAccountModal({
     void shared().wbProviders?.refreshCustom?.().then(bump)
   }, [state.step, state.provider, state.showToken, bump])
 
-  const config = configOf(state.provider)
+  const dynamicLogin = runtimeProviderOf(state.provider)?.dynamicLogin === true
+  const config = dynamicLogin ? undefined : configOf(state.provider)
   const isCustom = state.provider === CUSTOM_PROVIDER
   const isDeepseek = state.provider === 'deepseek-web'
-  const hasBlock = state.provider === WORKBUDDY_PROVIDER || isCustom || isDeepseek || Boolean(config)
+  const isAntigravity = isAntigravityAccountProvider(state.provider)
+  const isWorkBuddy = state.provider === WORKBUDDY_PROVIDER || state.provider === 'workbuddy-intl'
+  const hasBlock = isAntigravity || !dynamicLogin && (isWorkBuddy || isCustom || isDeepseek || Boolean(config))
   const customMode: CustomMode = state.providerHint ? 'existing' : 'create'
   const customLabel = state.providerHint
     ? customList().find(item => item.id === state.providerHint)?.name || ''
@@ -188,7 +230,7 @@ function AddAccountModal({
   // 「国内版」而用户当场切到国际版就自相矛盾了（与第 1 步那张卡同一口径，名字
   // 见 add-account-configs 的 WORKBUDDY_ENTRY_LABEL）。别家用注册表名，
   // 注册名要过一遍词典（「AutoClaw 国内版」这类在非中文界面得翻）。
-  const providerLabel = state.provider === WORKBUDDY_PROVIDER
+  const providerLabel = isAntigravity ? 'Antigravity' : isWorkBuddy
     ? WORKBUDDY_ENTRY_LABEL
     : t(shared().wbProviders?.labelOf?.(state.provider) || state.provider)
   // 标题写在表单弹窗的头部：列表弹窗的标题始终是「添加账号」，不跟着步骤变
@@ -202,34 +244,95 @@ function AddAccountModal({
 
   /** 第 1 步点一张卡：三种特殊取值分别落到自定义块的哪种模式（见 pickProvider 的旧注释） */
   function pick(id: string): void {
-    if (!id) return
-    const entry = { step: 'form' as Step, showToken: state.showToken + 1 }
-    if (id === NEW_PROVIDER_CARD_ID) {
-      setState(prev => ({ ...prev, ...entry, provider: CUSTOM_PROVIDER, providerHint: '', presetKey: '' }))
-    } else if (id.startsWith(PRESET_CARD_PREFIX)) {
-      const presetKey = id.slice(PRESET_CARD_PREFIX.length)
-      setState(prev => ({
-        ...prev,
-        ...entry,
-        provider: CUSTOM_PROVIDER,
-        providerHint: '',
-        presetKey,
-      }))
-    } else if (customList().some(item => item.id === id)) {
-      setState(prev => ({ ...prev, ...entry, provider: CUSTOM_PROVIDER, providerHint: id, presetKey: '' }))
-    } else {
-      setState(prev => ({ ...prev, ...entry, provider: id, providerHint: '', presetKey: '' }))
-    }
+    if (id) setState(previous => providerFormState(id, previous))
   }
 
-  const backToPick = (): void => setState(prev => ({ ...prev, step: 'pick' }))
+  const backToPick = (): void => {
+    if (state.direct) onClose()
+    else setState(prev => ({ ...prev, step: 'pick' }))
+  }
   const importing = state.accountType === TYPE_IMPORT
 
+  const form = (
+    // 保留表单节点，避免返回列表后丢失短信验证码与登录引擎状态。
+    <Dialog open={state.step === 'form'} onOpenChange={next => { if (!next) backToPick() }}>
+      <AddAccountProxyProvider>
+        <DialogContent keepMounted overlayForceRender className={isDeepseek
+          ? 'compact-login-dialog acct-add-form-dialog w-[min(540px,calc(100vw-48px))]'
+          : 'acct-add-form-dialog w-[min(620px,calc(100vw-48px))]'}>
+          <DialogHeader>
+            <ProviderMark provider={state.provider} label={providerLabel} />
+            <DialogTitle>{heading}</DialogTitle>
+          </DialogHeader>
+          <DialogBody>
+            {/* 各家的块整块常驻、只切显隐：块内的登录引擎把状态放在自己的闭包里，
+                节点被卸载就等于把「刚发出去的验证码绑在哪个 deviceId 上」丢掉 */}
+            <WorkBuddyBlock key={state.direct && isWorkBuddy ? state.provider : WORKBUDDY_PROVIDER}
+              active={isWorkBuddy && !dynamicLogin} footerHost={formFootHost}
+              initialEdition={state.direct && isWorkBuddy ? state.provider === 'workbuddy-intl' ? 'intl' : 'cn' : undefined} />
+            {BUILTIN_CONFIGS.filter(item => item.provider !== 'deepseek-web' && item.provider !== 'antigravity'
+              && runtimeProviderOf(item.provider)?.dynamicLogin !== true).map(item => (
+              <ProviderBlock
+                key={item.provider}
+                config={item}
+                active={state.provider === item.provider}
+                footerHost={formFootHost}
+              />
+            ))}
+            <div
+              className='add-provider-block'
+              style={isCustom ? undefined : { display: 'none' }}
+            >
+              <CustomProviderBlock
+                mode={customMode}
+                providerHint={state.providerHint}
+                presetKey={state.presetKey}
+                showToken={state.showToken}
+                version={version}
+              />
+            </div>
+            {isAntigravity ? <AntigravityAccountBlock key={state.provider}
+              active={state.step === 'form'} version={version} footerHost={formFootHost}
+              initialAcp={state.provider === ANTIGRAVITY_ACP_PROVIDER} /> : null}
+            <DeepseekAccountBlock active={isDeepseek && state.step === 'form'}
+              footerHost={formFootHost} onClose={backToPick} />
+            {hasBlock ? null : (
+              <DynamicProviderBlock
+                key={state.provider}
+                provider={state.provider}
+                label={providerLabel}
+                active={state.step === 'form'}
+                version={version}
+                footerHost={formFootHost}
+              />
+            )}
+            {hasBlock && !isDeepseek && !isAntigravity ? <AddAccountProxySection idPrefix='add-account-proxy' /> : null}
+          </DialogBody>
+          {/* 这一层统一一条底栏：各家段落把主按钮与说明 portal 进来（见 add-account-kit
+              的 AddFoot），自定义块本来就把按钮渲染在这里。宿主为空时整条收起 ——
+              判据是样式表里的 `:has()`，不需要额外状态。 */}
+          <DialogFooter className='acct-add-foot'>
+            {isCustom ? (
+              <div className='acct-add-foot-host'>
+                <CustomFootActions mode={customMode} presetKey={state.presetKey} providerId={state.providerHint} />
+              </div>
+            ) : (
+              <div
+                className='acct-add-foot-mount'
+                ref={node => {
+                  if (node && formFootHost.parentElement !== node) node.append(formFootHost)
+                }}
+              />
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </AddAccountProxyProvider>
+    </Dialog>
+  )
+
+  if (state.direct) return form
+
   return (
-    // 第 1 步：选提供商。受控 open（恒为 true）：本岛是「打开时建、关闭即卸」，
-    // 关窗一律由 onClose 收口（Esc / 点遮罩 / ✕ 都由 Base UI 汇到 onOpenChange）。
-    //
-    // 第 2 步（表单层）写在 **DialogContent 的 children 里**（见下面那段 Dialog）。
     <Dialog open onOpenChange={next => { if (!next) onClose() }}>
       <DialogContent className='acct-add-dialog w-[min(1100px,calc(100vw-48px))]'>
         <DialogHeader>
@@ -244,104 +347,16 @@ function AddAccountModal({
             onPick={pick}
             version={version}
             importing={importing}
-            importPanel={
-              IMPORT_SEGMENT_ENABLED ? <ImportPanel segmentOn={importing} /> : undefined
-            }
+            importPanel={IMPORT_SEGMENT_ENABLED ? <ImportPanel segmentOn={importing} /> : undefined}
           />
         </DialogBody>
-        {/* 列表弹窗这条操作条只服务「留在第 1 步完成」的动作（导入段的「导入所选」）；
-            第 2 步的主按钮走下面那条，两条各归各的层级 */}
         {IMPORT_SEGMENT_ENABLED && importing ? (
           <DialogFooter>
             <ImportFootActions />
           </DialogFooter>
         ) : null}
-
-        {/* 第 2 步：选方式 + 填凭证。叠在列表弹窗之上的一层，宽度窄一档
-            （表单输入框横跨 800px 只是把字拉散；窄一档顺带强化层叠感）。
-
-            位置是这一层能不能「叠在上面」的关键，两条都要满足：
-              · React 父子关系 —— Base UI 据此认「嵌套弹窗」（见 useDialogRoot 的
-                parentStore），内层开着时外层的 Esc 与遮罩按压才不生效；
-              · 挂在**本 DialogContent 的 children** 里 —— 内层 Dialog 渲染在外层
-                Popup 的子树中，它自己的 Portal 才会落进外层 Portal 节点、排在 Popup
-                之后（Base UI 的嵌套弹窗就是靠这个先后来分层的）。写成与 DialogContent
-                平级时内层 Portal 会挂到 body 上，两层同为 z-30，谁在 DOM 里靠后谁在
-                上面 —— 于是表单层被压在提供商列表下面。
-
-            keepMounted：这一层收起时**不卸载** —— 里面的登录引擎把状态放在自己的闭包里
-            （短信那一步的 deviceId、发码冷却），节点一卸就等于把「刚发出去的验证码绑在
-            哪个 deviceId 上」丢掉，用户「发码 → 退回列表 → 再进来填码」会拿到作废的 id。
-            隐藏时 Base UI 会把内容标记为 inert，键盘与读屏不会跑进去。
-
-            overlayForceRender：这一层要有自己的遮罩（压暗下面的列表层 + 点空白处
-            退回列表，与旧实现 #add-form-modal 那层遮罩同义）。Base UI 对嵌套弹窗默认
-            不画子层遮罩，遮罩同时是「点空白处」的落点（useDialogRoot 的 outsidePress
-            认遮罩本身），所以这一档不能省。 */}
-        <Dialog open={state.step === 'form'} onOpenChange={next => { if (!next) backToPick() }}>
-          <DialogContent keepMounted overlayForceRender className={isDeepseek
-            ? 'compact-login-dialog acct-add-form-dialog w-[min(540px,calc(100vw-48px))]'
-            : 'acct-add-form-dialog w-[min(620px,calc(100vw-48px))]'}>
-            <DialogHeader>
-              <ProviderMark provider={state.provider} label={providerLabel} />
-              <DialogTitle>{heading}</DialogTitle>
-            </DialogHeader>
-            <DialogBody>
-              {/* 各家的块整块常驻、只切显隐：块内的登录引擎把状态放在自己的闭包里，
-                  节点被卸载就等于把「刚发出去的验证码绑在哪个 deviceId 上」丢掉 */}
-              <WorkBuddyBlock active={state.provider === WORKBUDDY_PROVIDER} footerHost={formFootHost} />
-              {BUILTIN_CONFIGS.filter(item => item.provider !== 'deepseek-web').map(item => (
-                <ProviderBlock
-                  key={item.provider}
-                  config={item}
-                  active={state.provider === item.provider}
-                  footerHost={formFootHost}
-                />
-              ))}
-              <div
-                className='add-provider-block'
-                style={isCustom ? undefined : { display: 'none' }}
-              >
-                <CustomProviderBlock
-                  mode={customMode}
-                  providerHint={state.providerHint}
-                  presetKey={state.presetKey}
-                  showToken={state.showToken}
-                  version={version}
-                />
-              </div>
-              <DeepseekAccountBlock active={isDeepseek && state.step === 'form'}
-                footerHost={formFootHost} onClose={backToPick} />
-              {hasBlock ? null : (
-                <DynamicProviderBlock
-                  key={state.provider}
-                  provider={state.provider}
-                  label={providerLabel}
-                  active={state.step === 'form'}
-                  version={version}
-                  footerHost={formFootHost}
-                />
-              )}
-            </DialogBody>
-            {/* 这一层统一一条底栏：各家段落把主按钮与说明 portal 进来（见 add-account-kit
-                的 AddFoot），自定义块本来就把按钮渲染在这里。宿主为空时整条收起 ——
-                判据是样式表里的 `:has()`，不需要额外状态。 */}
-            <DialogFooter className='acct-add-foot'>
-              {isCustom ? (
-                <div className='acct-add-foot-host'>
-                  <CustomFootActions mode={customMode} presetKey={state.presetKey} providerId={state.providerHint} />
-                </div>
-              ) : (
-                <div
-                  className='acct-add-foot-mount'
-                  ref={node => {
-                    if (node && formFootHost.parentElement !== node) node.append(formFootHost)
-                  }}
-                />
-              )}
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
+        {/* 表单必须位于列表的 DialogContent 内，才能保留嵌套弹窗的遮罩与焦点顺序。 */}
+        {form}
       </DialogContent>
     </Dialog>
   )
@@ -365,15 +380,17 @@ function unmountModal(): void {
     host = null
   }
   handle = null
+  pendingAction = null
 }
 
-function mountModal(): void {
+function mountModal(initialProvider?: string): void {
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
   root.render(
     <AddAccountModal
       onClose={closeModal}
+      initialProvider={initialProvider}
       onReady={next => {
         handle = next
         if (!next) return
@@ -410,6 +427,18 @@ function openModal(): void {
   mountModal()
 }
 
+function openProvider(provider: string): void {
+  const id = provider.trim()
+  if (!id) return
+  if (root) {
+    if (handle) handle.openProvider(id)
+    else pendingAction = () => handle?.openProvider(id)
+    return
+  }
+  pendingAction = null
+  mountModal(id)
+}
+
 /** 直达「新建自定义提供商」表单：打开弹窗、复位，再走「新建」那张卡的同一路径 */
 function openNewCustomForm(): void {
   if (root) {
@@ -429,7 +458,7 @@ for (const id of ['btn-add-account', 'btn-add-account-2']) {
 // 对外接口用「窄类型 + 转型」写回（SharedWindow 里已声明这两个属性），
 // 不用 declare global 往 Window 上加属性 —— 并行迁移时同名属性类型不一致会撞 TS2717。
 const bridgeWindow = window as unknown as SharedWindow
-bridgeWindow.wbAddAccountModal = { open: openModal, close: closeModal }
+bridgeWindow.wbAddAccountModal = { open: openModal, openProvider, close: closeModal }
 bridgeWindow.wbAccountAddForms = {
   /** 账号页的「添加账号」按钮：按 providers 摘要重建卡片并复位到 WorkBuddy */
   syncAddProvider: () => {

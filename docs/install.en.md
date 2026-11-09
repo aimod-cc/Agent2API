@@ -13,7 +13,7 @@ Every form is managed from the **browser panel** afterwards (accounts, gateway k
 - [Server (Windows / Linux, headless)](#server-windows--linux-headless)
 - [Docker](#docker)
 - [Verification and client setup](#verification-and-client-setup)
-- [LAN access](#lan-access)
+- [Network access](#network-access)
 - [Mobile](#mobile)
 
 ## Which form to pick
@@ -50,7 +50,7 @@ Closing the window minimizes to the tray by default and the gateway keeps forwar
 >
 > **Linux desktop notes**: the tray needs `libayatana-appindicator3` (most desktops ship it; install `libayatana-appindicator3-1` if the tray icon does not appear, then restart). An AppImage needs the executable bit before its first run (`chmod +x`; the app sets it automatically when you pick "Open installer"). Updates: deb goes through the system installer (it asks for your password once), while an AppImage is upgraded by replacing the file.
 >
-> **Desktop differences**: "import desktop login state" for AutoClaw and ChatGLM (智谱清言) is Windows-only (it reads Windows DPAPI ciphertext, so that section is hidden on macOS / Linux); the others (Raccoon / CatPaw / Cline) read plaintext files under `HOME` and work on all three platforms. Tray, launch-at-login, LAN access and web-panel hosting are supported on macOS / Linux too.
+> **Desktop differences**: "import desktop login state" for AutoClaw and ChatGLM (智谱清言) is Windows-only (it reads Windows DPAPI ciphertext, so that section is hidden on macOS / Linux); the others (Raccoon / CatPaw / Cline) read plaintext files under `HOME` and work on all three platforms. Tray, launch-at-login, network access and web-panel hosting are supported on macOS / Linux too.
 
 ## Server (Windows / Linux, headless)
 
@@ -258,11 +258,13 @@ print(resp.choices[0].message.content)
 
 **Pages running in a browser** (a self-built web UI, …) that call this endpoint with `fetch` hit a cross-origin preflight rejection — the gateway does **not** answer CORS by default, so the preflight lands on the API-key check and gets a 401. Two ways out: ① turn on "Security → Gateway CORS" in Settings (origin `*`; with `*` any web page could drive your local gateway, so set a "Gateway Key" too); ② make the page same-origin — serve it from a small local static server that reverse-proxies `/v1` to `127.0.0.1:3065`.
 
-## LAN access
+<a id="lan-access"></a>
 
-By default the gateway only listens on `127.0.0.1`. After turning on "Settings → General → LAN access" it listens on all adapters, and devices on the LAN just point their API base URL at this machine's IP (the UI shows the full address) to share the accounts. For safety, enabling it requires registering a panel administrator first: the management API then demands an admin session or a gateway key, and with no key enabled the forwarding API refuses service too (the enable flow adds a "default" key automatically). The web panel can optionally be exposed to the LAN as well (off by default). Changes take effect after a restart.
+## Network access
 
-The desktop installers (Windows / macOS) already ship the web panel's `ui/` folder: once you turn on "expose the web management panel to the LAN" as well, devices on the LAN can open the same address in a browser to get the management UI — the same interface as the Docker form. **The desktop window itself never goes through web login** (there is no login page in the app): it authenticates with this machine's first gateway key, so flipping that switch never asks you to sign in from the desktop app. The web login page only appears when a browser opens the panel.
+The desktop app listens only on `127.0.0.1` by default. Under "Settings → Gateway → Network access", enable "Allow other devices to access the gateway" to listen on all IPv4 interfaces (`0.0.0.0`). **This does not restrict access to the LAN or automatically expose the gateway to the internet**; actual reachability depends on routing, port forwarding, and firewall settings. The UI displays separate API and web management addresses for this machine. Use an address reachable from the connecting device; the displayed address does not guarantee public internet access. A panel administrator must be registered first. Management endpoints require an admin session or gateway key; API calls require an enabled gateway key, with a default key created automatically if needed. The web management panel is off by default. Either switch requires an app restart.
+
+Desktop packages include the web panel's `ui/` resources. Enabling "Also expose the web management panel" lets devices that can reach the gateway open the panel in a browser and sign in. Its access scope is the same as the gateway's. Disabling it only stops serving the web UI; API forwarding and local desktop management remain available. **The desktop window uses its own local session and does not require a separate web sign-in**; browser access requires an administrator account.
 
 ## Mobile
 
@@ -278,10 +280,10 @@ All three run the same UI code. The difference is who serves the page: the PWA i
 
 ### Prerequisites (by form)
 
-**Desktop (Windows / macOS / Linux)**: both switches, one without the other will not work.
+**Desktop (Windows / macOS / Linux)**: enable network access first. Browser / PWA use also requires the web management panel.
 
-1. "Settings → General → LAN access" — lets devices on the LAN reach the gateway. The enable flow asks you to register a panel administrator first and adds a key named "default" automatically.
-2. "Settings → General → LAN access → also expose the web management panel" — serves the `ui/` static folder. **Required for the browser / PWA form** (`/m` is served by the gateway, so it returns 404 while this switch is off). **The APK / IPA do not need it** (the UI is inside the package), but they still need switch 1 — otherwise the gateway only listens on `127.0.0.1` and the phone cannot reach it.
+1. "Settings → Gateway → Network access → Allow other devices to access the gateway" — lets other devices connect, subject to network and firewall settings. Register a panel administrator first; a default gateway key is created automatically if no enabled key exists.
+2. "Settings → Gateway → Network access → also expose the web management panel" — serves the `ui/` static folder. **Required for the browser / PWA form** (`/m` is served by the gateway, so it returns 404 while this switch is off). **The APK / IPA do not need it** (the UI is inside the package), but they still need switch 1 — otherwise the gateway only listens on `127.0.0.1` and the phone cannot reach it.
 
 Both require a restart to take effect.
 
@@ -300,7 +302,7 @@ The first visit redirects to the login page; sign in with the panel administrato
 On first launch you get a "Servers" screen. Three steps:
 
 1. Tap "Add" and enter the gateway's `IP or domain:port` (e.g. `192.168.1.23:3065`). The scheme may be `http://` or `https://` (http is assumed if omitted); without a port, http gets 3065 and https uses the standard 443;
-2. Tap "Connect & save" — it probes the gateway first, so a wrong address or a gateway without LAN access is reported right there;
+2. Tap "Connect & save" — it probes the gateway first, so a wrong address or a gateway without network access is reported right there;
 3. A login page appears. Enter this gateway's administrator account and password (if none exists yet, it becomes "Create admin account").
 
 **Multiple servers**: tap "Add" again. Each server keeps its own sign-in — switching over does not require signing in again, and neither does switching back. The entry point is "Settings → Servers"; tap a row to switch to it. **The login page also has a "Switch server" link**, so after signing out (or being signed out) you don't have to log in first just to reach that list.

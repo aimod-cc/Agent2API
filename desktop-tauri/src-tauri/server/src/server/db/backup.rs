@@ -31,6 +31,10 @@ mod sql_import;
 mod stream;
 mod temp;
 
+#[cfg(test)]
+#[path = "backup/tests.rs"]
+mod tests;
+
 pub use archive::{BACKUP_EXTENSION, MAX_BACKUP_BYTES};
 pub use temp::transfer_file;
 use temp::TempRestoreDb;

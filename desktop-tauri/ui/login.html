@@ -93,6 +93,7 @@
       var tip = $('mode-tip');
       var errorEl = $('error');
       var button = $('submit');
+      var t = function (key) { return window.wbI18n ? window.wbI18n.t(key) : key; };
       var isSetup = false;
 
       // ── 面板双令牌（agent2api.panelAuth，与 web_shim 的 PANEL_AUTH 段同键）──
@@ -133,6 +134,15 @@
         ? window.workbuddyDesktop
         : null;
 
+      var gatewayReady = desktop && typeof desktop.waitForBackend === 'function'
+        ? desktop.waitForBackend().then(function (state) {
+          if (!state || !Number.isInteger(state.port) || state.port < 1 || state.port > 65535) throw new Error('gateway');
+          return 'http://127.0.0.1:' + state.port;
+        }) : Promise.resolve('');
+      function panelFetch(path, options) {
+        return gatewayReady.then(function (base) { return fetch(base + path, options); });
+      }
+
       // fnOS docker 管理页这类宿主中转入口会把 Set-Cookie/Cookie 掐掉。
       // 服务端种**两枚**探针 cookie（`/api/panel/cookie-probe` 连打
       // 两发，第二发两枚都读得回 = roundtrip:true）。探测通过 → 纯 cookie
@@ -153,7 +163,7 @@
       // 对不上才算不通。两发都用 POST：与登录同动词，防中转按方法区别对待 Set-Cookie。
       var probeDone = desktop
         ? Promise.resolve()
-        : fetch('/api/panel/cookie-probe?step=1', { method: 'POST', cache: 'no-store' })
+        : panelFetch('/api/panel/cookie-probe?step=1', { method: 'POST', cache: 'no-store' })
         .then(function (resp) { return resp.json(); })
         .then(function (payload) {
           var data = payload && payload.data;
@@ -162,7 +172,7 @@
           // 少一枚就按不通处理：服务端只发两枚，缺一枚说明响应被动过（或页面
           // 是旧版缓存），这种环境下不敢把会话全押在 cookie 上
           if (!issued || !issuedB) return { roundtrip: false };
-          return fetch('/api/panel/cookie-probe?step=2'
+          return panelFetch('/api/panel/cookie-probe?step=2'
             + '&expect=' + encodeURIComponent(issued)
             + '&expect-b=' + encodeURIComponent(issuedB),
             { method: 'POST', cache: 'no-store' }).then(function (resp) { return resp.json(); });
@@ -210,15 +220,12 @@
           // Authorization 是标准头：连自定义请求头都剥的中转也会放它过去
           headers['Authorization'] = 'Bearer ' + token;
         }
-        fetch('/api/session', { headers: headers }).then(function (resp) {
+        panelFetch('/api/session', { headers: headers }).then(function (resp) {
           if (resp.ok) window.location.href = postLoginTarget();
         }).catch(function () { /* 未登录，留在本页 */ });
       })();
 
-      // ── 机器人校验（proof-of-work，协议见 server::altcha）──
-      // 页面加载即领题求解（组件自己干）→ 绿勾「验证成功」，verified 事件给出
-      // 随提交的 payload。payload 一次性（服务器用后即焚）：提交失败要 reset()
-      // 重新验证。网关关闭了校验时领题回 400，整个组件隐藏，提交不带 payload。
+      // 校验方式由状态接口给出；失败后换取新令牌，不能把领题失败当作关闭。
       var captchaPayload = null;
       var captchaRequired = true; // 探测完成前先按「需要验证」保守处理
       var widget = document.getElementById('captcha');
@@ -229,30 +236,57 @@
       widget.addEventListener('expired', function () {
         captchaPayload = null;
       });
-
-      // 探测开关：未启用时领题回 400，隐藏验证行（提交自然不带 payload）
-      fetch('/api/panel/captcha').then(function (resp) {
-        if (resp.ok) return;
+      widget.addEventListener('disabled', function () {
         captchaRequired = false;
+        captchaPayload = null;
         widget.style.display = 'none';
-      }).catch(function () { /* 网关不可达：组件自会显示失败 */ });
+      });
 
-      // 决定模式：没有任何管理员 → 注册；否则登录
-      fetch('/api/panel/status').then(function (resp) { return resp.json(); }).then(function (data) {
-        var registered = data && data.data && data.data.registered;
-        isSetup = !registered;
+      var statusKnown = false;
+      var statusReady = Promise.all([
+        panelFetch('/api/panel/status', { cache: 'no-store' }).then(function (response) {
+          if (!response.ok) throw new Error('status');
+          return response.json();
+        }),
+        gatewayReady,
+      ]).then(function (result) {
+        var data = result[0] && result[0].data;
+        if (!data || typeof data.registered !== 'boolean') throw new Error('status');
+        isSetup = !data.registered;
         tip.textContent = isSetup
           ? '首次使用：创建一个管理员账号，用于登录此面板'
           : '请输入管理员账号与密码';
-        $('submit').textContent = isSetup ? '创建账号并进入面板' : '登录';
+        button.textContent = isSetup ? '创建账号并进入面板' : '登录';
         if (isSetup) $('password').placeholder = '设置密码（至少 8 位）';
+        captchaRequired = data.captchaEnabled !== false;
+        widget.style.display = captchaRequired ? '' : 'none';
+        if (data.captchaError) {
+          errorEl.textContent = data.captchaError;
+          widget.setState('error');
+          return;
+        }
+        if (data.captchaProvider && data.captchaProvider !== 'altcha' && data.captchaProvider !== 'turnstile') throw new Error('provider');
+        widget.configure({
+          captchaEnabled: captchaRequired,
+          captchaProvider: data.captchaProvider || 'altcha',
+          turnstileSiteKey: data.turnstileSiteKey,
+          gatewayBase: result[1],
+        });
+        statusKnown = true;
       }).catch(function () {
-        tip.textContent = '无法连接网关，请确认服务已启动';
+        tip.textContent = t('无法读取登录验证设置，请刷新页面重试');
+        widget.setState('error');
       });
 
       async function doSubmit(username, password) {
-        await probeDone; // 极端情况：提交赶在探测回来前，等它定完模式再发
+        if (button.disabled) return;
         button.disabled = true;
+        await Promise.all([probeDone, statusReady]);
+        if (!statusKnown || (captchaRequired && !captchaPayload)) {
+          errorEl.textContent = !statusKnown ? t('无法读取登录验证设置，请刷新页面重试') : t('请完成人机验证后重试');
+          button.disabled = false;
+          return;
+        }
         errorEl.textContent = '';
         var body = { username: username, password: password };
         if (captchaPayload) body.captcha = captchaPayload;
@@ -261,7 +295,7 @@
         // query 剥不掉（登录请求能到服务器，query 就完整）
         var markerUrl = headerMode ? '?auth-mode=body' : '';
         if (headerMode) headers['x-panel-auth-mode'] = 'body';
-        fetch((isSetup ? '/api/panel/setup' : '/api/panel/login') + markerUrl, {
+        panelFetch((isSetup ? '/api/panel/setup' : '/api/panel/login') + markerUrl, {
           method: 'POST',
           headers: headers,
           body: JSON.stringify(body),
@@ -328,7 +362,7 @@
           return;
         }
         if (captchaRequired && !captchaPayload) {
-          errorEl.textContent = '请先勾选「我不是机器人」完成验证';
+          errorEl.textContent = t('请完成人机验证后重试');
           return;
         }
         doSubmit(username, password);

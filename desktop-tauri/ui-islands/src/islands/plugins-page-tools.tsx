@@ -59,6 +59,7 @@ export function PluginDiagnostics({ open, payload, onClose }: {
         {payload?.scripts ? <div className='flex flex-col gap-2 border-t border-hairline pt-3'>
           <span>Bun {payload.scripts.runtime.version} · {payload.scripts.runtime.installed ? t('已下载') : t('按需下载')}</span>
           {payload.scripts.runtime.path ? <code className='break-all'>{payload.scripts.runtime.path}</code> : null}
+          {payload.scripts.runtime.error ? <p className='m-0 whitespace-pre-wrap break-words text-destructive'>{payload.scripts.runtime.error}</p> : null}
           <p className='m-0'>{t('直接加载兼容的 Magpie / OpenCode v1 提供商包，多个插件共用一个 Bun 进程。')}</p>
           <p className='m-0'>{t('当前兼容无运行时 npm 依赖的提供商插件；不加载 Magpie 界面、Matrix 工具或 Pi 扩展。')}</p>
           <p className='m-0'>{t('登录支持自动完成的 OAuth／设备码和 API Key；要求手动回调的插件暂不支持。')}</p>

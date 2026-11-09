@@ -6,6 +6,8 @@ import { isPackaged, nativePlatform } from '../lib/servers'
 import { Badge, copyWithToast } from './ui'
 import { Icon } from './Icon'
 import { t } from '../i18n'
+import { openExternal } from '../lib/community'
+import { ThirdPartyLicensesButton } from '../../../ui-shared/settings-third-party-licenses'
 
 /**
  * 「版本信息」抽屉（手机端设置页底部那一行点开）。
@@ -233,6 +235,7 @@ export function SystemInfoSheet({ open, onClose }: { open: boolean; onClose: () 
               value={formLabel}
             />
           </Card>
+          <ThirdPartyLicensesButton t={t} openExternal={openExternal} mobile />
 
           {/* 网关：连的那台服务器的读数 */}
           <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--m-text-3)', padding: '14px 2px 6px' }}>

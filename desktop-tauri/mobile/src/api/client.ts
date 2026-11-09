@@ -21,6 +21,8 @@
  *   · 其余 401 → 兼容模式没配 Key：交给界面提示输入。
  */
 
+import type { PanelCaptchaStatus } from '../../../ui-shared/panel-captcha'
+
 import {
   activeServerId,
   apiBase,
@@ -327,7 +329,7 @@ export async function probe(base: string): Promise<{ ok: boolean; version?: stri
 }
 
 /** 面板登录状态（决定「登录」还是「创建管理员」） */
-export type PanelStatus = { registered?: boolean; captchaEnabled?: boolean }
+export type PanelStatus = PanelCaptchaStatus & { registered?: boolean }
 export async function panelStatus(): Promise<PanelStatus> {
   const response = await fetch(url('/api/panel/status'), { headers: { Accept: 'application/json' } })
   const payload = (await response.json().catch(() => null)) as { data?: PanelStatus } | null

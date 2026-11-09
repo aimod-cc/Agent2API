@@ -1,3 +1,4 @@
+import { invalidateUsageTasks } from './accounts-usage-tasks'
 import { t } from '../i18n'
 import {
   shared, type AccountRecord, type BatchAccountsPayload, type BatchAccountsResult,
@@ -92,9 +93,20 @@ export function accountPatchConfirmed(account: AccountRecord, patch: Record<stri
 export async function updateAccountConfirmed(id: string, patch: Record<string, unknown>): Promise<AccountRecord> {
   const bridge = shared().workbuddyDesktop
   if (!bridge?.updateAccount) throw new Error(t('账号更新接口不可用，请重新打开页面'))
-  const data = await bridge.updateAccount(id, patch)
-  const account = data?.account
   const previous = shared().wbApp?.getState?.()?.accounts?.accounts?.find(account => account.id === id)
+  const data = await bridge.updateAccount(id, patch)
+  const changed = data?.changes?.length
+  if (changed && ['proxy', 'baseUrl', 'balanceToken', 'apiKey', 'noAuth', 'balanceQuery', 'zcodePlan', 'userAgent'].some(key => {
+    if (!Object.prototype.hasOwnProperty.call(patch, key)) return false
+    if (key === 'balanceQuery' && previous) {
+      const query = objectOf(patch.balanceQuery)
+      const hasSecret = query && ['accessToken', 'password', 'token'].some(key => Object.prototype.hasOwnProperty.call(query, key))
+      return Boolean(hasSecret || !accountPatchConfirmed(previous, { balanceQuery: patch.balanceQuery }))
+    }
+    if (previous && !['balanceToken', 'apiKey'].includes(key)) return !accountPatchConfirmed(previous, { [key]: patch[key] })
+    return true
+  })) invalidateUsageTasks([id])
+  const account = data?.account
   if (!account || account.id !== id || (previous && account.provider !== previous.provider)
     || !accountPatchConfirmed(account, patch)) {
     throw new Error(t('账号更新结果未确认，请刷新后核对设置'))
@@ -147,6 +159,10 @@ export function confirmBatchResult(data: BatchAccountsResult | null | undefined,
       default: return true
     }
   })) throw new Error(t('批量操作结果未确认，请刷新后核对设置'))
+  if (payload.action === 'proxy' || payload.action === 'remove') {
+    const changed = payload.action === 'remove' ? data.removed || [] : (data.ok || []).filter(item => item.changes?.length)
+    invalidateUsageTasks(changed.map(item => item.id!).filter(Boolean))
+  }
   return data
 }
 

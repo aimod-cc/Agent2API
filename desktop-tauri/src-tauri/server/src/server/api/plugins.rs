@@ -14,6 +14,10 @@ const MAX_PACK_BASE64_BYTES: usize = (MAX_PACK_BYTES + 2) / 3 * 4;
 // 仅插件上传路由使用：96 MiB ZIP 的 base64 为 128 MiB，另留有限的 JSON 开销。
 pub(crate) const MAX_PACK_UPLOAD_BYTES: usize = MAX_PACK_BASE64_BYTES + 1024 * 1024;
 
+pub async fn startup() -> Response {
+    ok_json(plugin_host::startup::snapshot())
+}
+
 pub async fn list() -> Response {
     let mut result = plugin_host::management_snapshot();
     result["target"] = json!(plugin_host::host_target());
@@ -24,6 +28,7 @@ pub async fn list() -> Response {
     result["updates"] = plugin_host::catalog::updates()["updates"].clone();
     result["operations"] = plugin_host::operations::snapshot()["operations"].clone();
     result["scripts"] = plugin_host::script::snapshot();
+    result["startup"] = plugin_host::startup::snapshot();
     ok_json(result)
 }
 
@@ -36,10 +41,41 @@ pub async fn install_script(body: Bytes) -> Response {
         .unwrap_or(&payload["name"]).as_str().unwrap_or("").trim().to_string();
     let version = payload["version"].as_str().unwrap_or("").trim().to_string();
     let trusted = payload["trusted"].as_bool().unwrap_or(false);
-    let checkin_allowed = payload["checkinAllowed"].as_bool().unwrap_or(false);
     let expected_id = payload["id"].as_str().map(str::to_string);
-    match plugin_host::script::install(name, version, trusted, checkin_allowed, expected_id) {
+    match plugin_host::script::install(name, version, trusted, expected_id) {
         Ok(operation) => ok_json(json!({ "operation": operation })),
+        Err(error) => management_error(400, error),
+    }
+}
+
+pub async fn script_prompts(
+    axum::extract::State(state): axum::extract::State<crate::server::ServerState>,
+    body: Bytes,
+) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(payload) => payload,
+        Err(error) => return management_error(400, error.message),
+    };
+    let provider = payload["provider"].as_str().unwrap_or("");
+    if !plugin_host::script::known_provider(provider) {
+        return management_error(400, "未知的脚本提供商");
+    }
+    let Some(adapter) = crate::server::core::providers::adapter::adapter_by_id(provider) else {
+        return management_error(503, "脚本提供商尚未就绪");
+    };
+    match adapter.admin_action(state.store(), "", "auth.prompts", &payload).await {
+        Ok(value) => ok_json(value),
+        Err(error) => management_error(error.status_code, error.message),
+    }
+}
+
+pub async fn script_settings(body: Bytes) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(payload) => payload,
+        Err(error) => return management_error(400, error.message),
+    };
+    match plugin_host::script::configure(payload).await {
+        Ok(value) => ok_json(value),
         Err(error) => management_error(400, error),
     }
 }
@@ -57,6 +93,17 @@ pub async fn change_script(body: Bytes) -> Response {
         Ok(operation) => ok_json(json!({ "operation": operation })),
         Err(error) => management_error(400, error),
     }
+}
+
+/// 脚本插件的「检查更新」：立刻去问一遍上游（分发索引 / npm / GitHub），
+/// 返回刷新后的结果。与本体插件的 `GET /api/plugins/update` 同一分工 ——
+/// 界面点一次，后台算一轮，页面自己轮询。
+pub async fn refresh_script_catalog() -> Response {
+    ok_json(plugin_host::script::refresh_catalog())
+}
+
+pub async fn check_script_updates() -> Response {
+    ok_json(plugin_host::script::check_updates().await)
 }
 
 pub async fn settings() -> Response {
@@ -108,6 +155,16 @@ async fn change_pack(id: &str, change: plugin_host::operations::PackChange) -> R
         Ok(result) => ok_json(result),
         Err(error) => management_error(error.status_code, error.message),
     }
+}
+
+pub async fn reload(body: Bytes) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(payload) => payload,
+        Err(error) => return management_error(400, error.message),
+    };
+    let id = payload["id"].as_str().unwrap_or("").trim();
+    if id.is_empty() { return management_error(400, "缺少插件包 id"); }
+    change_pack(id, plugin_host::operations::PackChange::Reload).await
 }
 
 pub async fn uninstall(body: Bytes) -> Response {
@@ -198,6 +255,8 @@ async fn start_operation(body: Bytes, action: &str) -> Response {
 }
 
 pub async fn release() -> Response {
+    plugin_host::script::refresh_catalog();
+    plugin_host::script::icons::wake(true);
     match plugin_host::catalog::refresh(true).await {
         Ok(result) => ok_json(result),
         Err(error) => {

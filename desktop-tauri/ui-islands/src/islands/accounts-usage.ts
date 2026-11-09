@@ -2,18 +2,23 @@ import {
   errorMessage, shared, toast, type AccountRecord, type TokenReading,
 } from './accounts-shared'
 import { supportsCreditDetail, supportsUsage } from './accounts-domain'
-import { allAccounts, bump, findAccount, getStore, patch } from './accounts-store'
+import { allAccounts, bump, findAccount, getStore } from './accounts-store'
 import { adoptLimiterSnapshot } from './accounts-limiter-model'
 import { adoptAccountSorting, refreshAccountSorting } from './accounts-sort'
-import { NOT_CONFIGURED_CODE, putUsage, putUsageRow, usageEntries, usageEntryOf, usageFailureOf } from './accounts-usage-cache'
+import { putUsageRow, usageEntries, usageEntryOf, usageFailureOf } from './accounts-usage-cache'
+import { usageEmptyStateOf } from '../../../ui-shared/usage-readings'
+import { usageQueryDeadline } from '../../../ui-shared/usage-query-task'
+import { applyUsageTasks, installUsageTaskSync, startUsageTasks, usageTaskRevision, waitUsageTask } from './accounts-usage-tasks'
+export { cancelAllUsage, cancelUsageQuery, invalidateUsageTasks } from './accounts-usage-tasks'
 import { t } from '../i18n'
 
 export { NOT_CONFIGURED_CODE, pruneUsageCache, usageEntries, usageEntryOf, usageFailureOf, usageFailureStatusOf, usageUpdatedAtOf } from './accounts-usage-cache'
 
 const tokenUsageMap = new Map<string, TokenReading[]>()
 let lastTokenAt = 0
-let lastSnapshotAt = 0
 let shapeRepairStarted = false
+let snapshotPending: Promise<boolean> | undefined
+installUsageTaskSync(syncBalancesSnapshot)
 
 export function tokenUsageOf(account: AccountRecord | null | undefined): TokenReading[] {
   return account ? tokenUsageMap.get(account.id) || [] : []
@@ -68,7 +73,10 @@ export function applyBalances(
   const at = Number(balances?.at) || Date.now()
   let applied = 0
   for (const row of rows) {
-    if (row && putUsageRow(row, at)) applied++
+    if (row && putUsageRow(row, at)) {
+      applied++
+      if (row.code === 'refresh_token_expired') void shared().wbApp?.refresh?.()
+    }
   }
   if (applied) {
     bump()
@@ -90,17 +98,21 @@ async function repairStaleDetail(): Promise<void> {
   shapeRepairStarted = true
   for (const account of allAccounts().filter(detailMissing)) {
     try {
-      await queryUsageFor(account.id)
-    } catch (error) {
-      putUsage(account.id, t('查询失败：{message}', { message: errorMessage(error) }), Date.now())
-      bump()
-    }
+      await queryUsageFor(account.id, false)
+    } catch { /* 明细补查不覆盖已有的余额结论。 */ }
   }
 }
 
-export async function syncBalancesSnapshot(): Promise<boolean> {
+export function syncBalancesSnapshot(): Promise<boolean> {
+  if (!snapshotPending) snapshotPending = readBalancesSnapshot().finally(() => { snapshotPending = undefined })
+  return snapshotPending
+}
+
+async function readBalancesSnapshot(): Promise<boolean> {
   try {
-    const data = await shared().workbuddyDesktop?.getBalancesSnapshot?.()
+    const revision = usageTaskRevision()
+    const data = await usageQueryDeadline(Promise.resolve(shared().workbuddyDesktop?.getBalancesSnapshot?.()), 5000)
+    if (revision !== usageTaskRevision()) return false
     // Token 消耗独立于余额查询变化，不能被余额的时间戳早退挡住。
     const limiterApplied = adoptLimiterSnapshot(data)
     const sortingApplied = !getStore().sortBusy && adoptAccountSorting(data?.sorting)
@@ -109,10 +121,9 @@ export async function syncBalancesSnapshot(): Promise<boolean> {
       bump()
       shared().wbApp?.renderTopbarStatus?.()
     }
-    const at = Number(data?.at) || 0
-    if (!at || at === lastSnapshotAt) return tokenApplied
-    lastSnapshotAt = at
-    if (!applyBalances(data)) return tokenApplied
+    const applied = applyBalances(data)
+    applyUsageTasks(data?.queries)
+    if (!applied) return tokenApplied
     void repairStaleDetail()
     return true
   } catch {
@@ -121,114 +132,43 @@ export async function syncBalancesSnapshot(): Promise<boolean> {
   }
 }
 
-export async function queryUsageFor(id?: string | null): Promise<{ results?: Array<Record<string, unknown>> } | null | undefined> {
-  const data = await shared().workbuddyDesktop?.getAllBalances?.(id || undefined)
-  await refreshAccountSorting()
-  const rows = Array.isArray(data?.results) ? data.results : []
-  const at = Date.now()
-  const returned = new Set<string>()
-  for (const row of rows) {
-    if (!row?.id) continue
-    const rowId = String(row.id)
-    if (id && rowId !== id) continue
-    if (row.code === 'refresh_token_expired') void shared().wbApp?.refresh?.()
-    returned.add(rowId)
-    putUsageRow(row, at)
-  }
-  if (id) {
-    if (!returned.has(id)) putUsage(id, t('未返回余额数据'), at)
-    bump()
-    return data
-  }
-  for (const account of batchUsageTargets()) {
-    if (!returned.has(account.id)) putUsage(account.id, t('未返回余额数据'), at)
-  }
-  bump()
-  return data
+export async function queryUsageFor(id?: string | null, replace = true): Promise<{ results: Array<Record<string, unknown>> }> {
+  const started = await startUsageTasks(id || undefined, replace)
+  if (!started) return { results: [] }
+  const completed = await Promise.all(started.queries.map(waitUsageTask))
+  void refreshAccountSorting()
+  return { results: completed.filter((row): row is NonNullable<typeof row> => row !== null) }
 }
 
 export async function queryAllUsage(): Promise<void> {
-  if (getStore().usageBusy) return
-  const targets = batchUsageTargets()
-  if (!targets.length) { toast(t('暂无可查询余额的账号'), 'err'); return }
-  patch({ usageBusy: true })
-  targets.forEach(account => putUsage(account.id, null, Date.now()))
-  bump()
+  if (getStore().usageStarting.has('*')) return
+  if (!batchUsageTargets().length) { toast(t('暂无可查询余额的账号'), 'err'); return }
   try {
-    const rows = (await queryUsageFor(null))?.results || []
-    const ok = rows.filter(row => row.usage && !row.error).length
-    const skipped = rows.filter(row => row.code === NOT_CONFIGURED_CODE).length
-    const suffix = skipped ? t('（{n} 个未配置查询凭证）', { n: skipped }) : ''
-    const failed = rows.length - ok - skipped
-    toast(ok + skipped === rows.length
-      ? t('✅ 已更新 {n} 个账号的余额{suffix}', { n: ok, suffix })
-      : t('已更新 {ok}/{total} 个账号，{failed} 个失败', { ok, total: rows.length, failed }), failed ? 'err' : 'ok')
+    await startUsageTasks(undefined, true)
   } catch (error) {
-    const message = errorMessage(error)
-    targets.forEach(account => putUsage(account.id, t('查询失败：{message}', { message }), Date.now()))
-    bump()
-    toast(t('余额查询失败：{message}', { message }), 'err')
-  } finally {
-    patch({ usageBusy: false })
-  }
-}
-
-async function runUsageQuery(id: string): Promise<void> {
-  if (getStore().usageInflight.has(id)) return
-  const inflight = new Set(getStore().usageInflight)
-  inflight.add(id)
-  putUsage(id, null, Date.now())
-  patch({ usageInflight: inflight })
-  try {
-    await queryUsageFor(id)
-  } finally {
-    const next = new Set(getStore().usageInflight)
-    next.delete(id)
-    patch({ usageInflight: next })
+    toast(t('余额查询失败：{message}', { message: errorMessage(error) }), 'err')
   }
 }
 
 export async function queryUsageOnce(id: string): Promise<void> {
-  if (getStore().usageInflight.has(id)) return
   try {
-    await runUsageQuery(id)
-    const failure = usageFailureOf(usageEntries().get(id))
+    const result = await queryUsageFor(id)
+    if (!result.results.length) return
+    const entry = usageEntries().get(id)
+    const failure = usageFailureOf(entry)
+    const empty = usageEmptyStateOf(entry, t)
     if (failure?.notConfigured) toast(failure.message, 'ok')
     else if (failure) toast(t('余额查询失败：{message}', { message: failure.message }), 'err')
+    else if (empty) toast(empty.detail, 'ok')
     else toast(t('✅ 已更新余额'))
   } catch (error) {
-    putUsage(id, t('查询失败：{message}', { message: errorMessage(error) }), Date.now())
-    bump()
     toast(t('余额查询失败：{message}', { message: errorMessage(error) }), 'err')
   }
 }
 
 /** 签到或领取套餐后刷新余额，但不能用余额 toast 顶掉刚完成的动作结果。 */
 export async function refreshUsageAfterCheckin(id?: string): Promise<void> {
-  if (id) {
-    const account = findAccount(id)
-    if (!account || !supportsUsage(account) || account.needsRelogin) return
-    try {
-      await runUsageQuery(id)
-    } catch (error) {
-      putUsage(id, t('查询失败：{message}', { message: errorMessage(error) }), Date.now())
-      bump()
-    }
-    return
-  }
-  if (getStore().usageBusy) return
-  const targets = batchUsageTargets()
-  if (!targets.length) return
-  patch({ usageBusy: true })
-  targets.forEach(account => putUsage(account.id, null, Date.now()))
-  bump()
-  try {
-    await queryUsageFor(null)
-  } catch (error) {
-    const message = errorMessage(error)
-    targets.forEach(account => putUsage(account.id, t('查询失败：{message}', { message }), Date.now()))
-    bump()
-  } finally {
-    patch({ usageBusy: false })
-  }
+  const account = id ? findAccount(id) : null
+  if (id && (!account || !supportsUsage(account) || account.needsRelogin)) return
+  try { await startUsageTasks(id, false) } catch { /* 不覆盖签到结果，余额任务状态另行显示。 */ }
 }

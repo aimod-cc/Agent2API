@@ -27,13 +27,14 @@ import {
 import { t } from '../i18n'
 import { shared, type AccountRecord, type AccountSorting } from './accounts-shared'
 import {
-  creditExpiryOf, providerOf, supportsCreditExpiry, type GroupSortRule,
+  creditExpiryOf, providerFeatures, providerOf, supportsCreditExpiry, supportsUsage, type GroupSortRule,
 } from './accounts-domain'
 import {
   allAccounts, getStore, groupSortRules, hasCustomGroupSort, setGroupSortRules, subscribe,
   usageEntryOf,
 } from './accounts-data'
-import { PROVIDER_ICONS } from './add-provider-pick'
+import { useProviderIcon } from './provider-icon'
+import { accountSortBalanceOf, balanceSortStateOf, type BalanceSortState } from '../../../ui-shared/account-sorting'
 
 /**
  * 每条规则在界面上的名字与两档方向。
@@ -57,6 +58,16 @@ function ruleMeta(key: GroupSortRule['key']): {
       ],
     }
   }
+  if (key === 'balance') {
+    return {
+      name: t('可用余额'),
+      hint: t('按账号总可用余额比较，不重复累加积分明细'),
+      options: [
+        { value: 'high', label: t('余额大优先') },
+        { value: 'low', label: t('余额小优先') },
+      ],
+    }
+  }
   return {
     name: t('账号添加时间'),
     hint: t('所有提供商都有这个字段'),
@@ -67,17 +78,23 @@ function ruleMeta(key: GroupSortRule['key']): {
   }
 }
 
-export function activeGroupSortRules(provider: string, rules: GroupSortRule[]): GroupSortRule[] {
-  return rules.filter(rule => rule.on && (rule.key !== 'credit' || supportsCreditExpiry(provider)))
+export function supportsBalanceSort(provider: string, sorting?: AccountSorting | null): boolean {
+  const snapshot = sorting || getStore().sorting
+  if (snapshot?.balanceSortStates) return snapshot.balanceSortStates[provider] !== undefined
+    && snapshot.balanceSortStates[provider] !== 'unsupported'
+  if (snapshot) return false
+  return providerFeatures(provider).usage || allAccounts().some(account => providerOf(account) === provider && supportsUsage(account))
+}
+
+export function activeGroupSortRules(provider: string, rules: GroupSortRule[], sorting?: AccountSorting | null): GroupSortRule[] {
+  return rules.filter(rule => rule.on && (rule.key === 'credit' ? supportsCreditExpiry(provider)
+    : rule.key === 'balance' ? supportsBalanceSort(provider, sorting) : true))
 }
 
 export function manualOrderBlockedMessage(rules: GroupSortRule[]): string {
-  const credit = rules.some(rule => rule.on && rule.key === 'credit')
-  const added = rules.some(rule => rule.on && rule.key === 'added')
-  if (credit && added) return t('无法拖动：当前已按积分到期时间和账号添加时间自动排序。请先在「消耗顺序」中关闭这两项规则，再手动调整。')
-  if (credit) return t('无法拖动：当前已按积分到期时间自动排序。请先在「消耗顺序」中关闭该规则，再手动调整。')
-  if (added) return t('无法拖动：当前已按账号添加时间自动排序。请先在「消耗顺序」中关闭该规则，再手动调整。')
-  return t('自动消耗排序已启用，请先关闭规则再手动调整')
+  const names = rules.filter(rule => rule.on).map(rule => ruleMeta(rule.key).name)
+  return names.length ? t('无法拖动：已启用自动消耗规则（{rules}）。请先在「消耗顺序」中关闭这些规则，再手动调整。', { rules: names.join('、') })
+    : t('自动消耗排序已启用，请先关闭规则再手动调整')
 }
 
 /**
@@ -89,32 +106,40 @@ export function groupSortSummary(rules: GroupSortRule[]): string {
     .filter(rule => rule.on)
     .map(rule => {
       if (rule.key === 'credit') return rule.dir === 'soon' ? t('到期 近→远') : t('到期 远→近')
+      if (rule.key === 'balance') return rule.dir === 'high' ? t('余额大优先') : t('余额小优先')
       return rule.dir === 'new' ? t('添加 新→旧') : t('添加 旧→新')
     })
     .join(' · ')
 }
 
-/**
- * 一行规则：优先级号 / 勾选 / 名称与说明 / 方向 / 上下移。
- *
- * `state` 有三种，视觉与可操作性各不相同：
- *   · `ready`       —— 可用（可勾、可切方向）
- *   · `no-data`     —— 这一家的后端会产出到期，但**这一组此刻一条都没读到**
- *                      （没点过「查询余额」，或包都过期了）。仍然可勾 —— 用户先设
- *                      好规则、之后查到数据就自然生效；说明行写「暂无数据」。
- *   · `unsupported` —— 这一家的数据里根本没有到期字段。勾选框禁用、方向位换成
- *                      「不可用」，整行不压淡（压淡是「这次没勾」的语义）。
- */
+// 无读数时仍允许预设规则，之后查询成功会自动生效。
+type RuleState = 'ready' | 'no-data' | 'mixed-units' | 'unsupported' | 'upgrade'
+
+function ruleHint(rule: GroupSortRule, state: RuleState): string {
+  if (state === 'upgrade') return t('当前网关不支持余额排序，请先更新网关')
+  if (rule.key === 'balance') {
+    if (state === 'unsupported') return t('这一家没有可用余额查询')
+    if (state === 'mixed-units') return t('账号余额单位不一致，暂不按余额排序，继续比较其他规则')
+    if (state === 'no-data') return t('暂无可比较余额；查到同单位的数值后自动生效，比例与无限额度不参与')
+  }
+  if (state === 'unsupported') return t('这一家查不到积分到期时间')
+  if (state === 'no-data') return rule.on
+    ? t('暂无数据：先查询一次余额，之后会自动按到期排序')
+    : t('暂无数据：先查询一次余额，可按需启用到期排序')
+  return ruleMeta(rule.key).hint
+}
+
 function RuleRow({ rule, priority, isLast, state, busy, onChange }: {
   rule: GroupSortRule
   priority: number
   isLast: boolean
-  state: 'ready' | 'no-data' | 'unsupported'
+  state: RuleState
   busy: boolean
   onChange: (patch: Partial<GroupSortRule>) => void
 }) {
   const meta = ruleMeta(rule.key)
-  const blocked = state === 'unsupported'
+  const blocked = state === 'unsupported' || state === 'upgrade'
+  const hint = ruleHint(rule, state)
   const off = !blocked && !rule.on
   return (
     <div className={cn(
@@ -131,17 +156,9 @@ function RuleRow({ rule, priority, isLast, state, busy, onChange }: {
         <span className={cn('text-xs font-medium', blocked && 'text-subtle', off && 'text-subtle')}>
           {meta.name}
         </span>
-        <span className={cn(
-          'overflow-hidden text-ellipsis whitespace-nowrap text-[10.5px]',
-          blocked ? 'text-warning' : state === 'no-data' ? 'text-subtle' : 'text-subtle',
-        )} title={blocked ? t('这一家查不到积分到期时间') : undefined}>
-          {blocked
-            ? t('这一家查不到积分到期时间')
-            : state === 'no-data'
-              ? rule.on
-                ? t('暂无数据：先查询一次余额，之后会自动按到期排序')
-                : t('暂无数据：先查询一次余额，可按需启用到期排序')
-              : meta.hint}
+        <span className={cn('text-[10.5px] leading-relaxed',
+          blocked || state === 'mixed-units' ? 'text-warning' : 'text-subtle')} title={hint}>
+          {hint}
         </span>
       </span>
       {!blocked ? (
@@ -211,27 +228,32 @@ export function GroupSettingsDialog({ provider, onClose, accounts, sorting, rout
   React.useSyncExternalStore(subscribe, () => getStore().version)
   const rules = groupSortRules(provider)
   const label = shared().wbProviders?.labelOf?.(provider) || provider
-  const icon = PROVIDER_ICONS[provider]
+  const { src: icon, onError: onIconError } = useProviderIcon(provider)
   /**
    * 方案 A：静态能力名单（这一家的后端**会不会**产出逐份到期）。
    * 方案 B：运行时是否**真的**读到了 —— 名单里的家如果这一组所有账号都还没查到
    * 到期（没点过「查询余额」、或者都过期了），这一项不该假装可用。
    */
   const creditSupported = supportsCreditExpiry(provider)
-  // 依赖 store 的 version 而不是空数组：查完余额（usageEntryOf 有新读数）之后
-  // 这一项要从「暂无数据」翻成可用，弹窗开着时也得跟着变
   const version = getStore().version
+  const sortSnapshot = sorting || getStore().sorting
+  const members = (accounts || allAccounts()).filter(account => providerOf(account) === provider)
   const creditHasData = React.useMemo(
-    () => (accounts || allAccounts())
-      .filter(account => providerOf(account) === provider)
-      .some(account => sorting || getStore().sorting
-        ? (sorting || getStore().sorting)?.creditExpiresAt[account.id] != null
-        : creditExpiryOf(usageEntryOf(account)) !== null),
-    [provider, version, accounts, sorting],
+    () => members.some(account => sortSnapshot
+      ? sortSnapshot.creditExpiresAt[account.id] != null
+      : creditExpiryOf(usageEntryOf(account)) !== null),
+    [provider, version, accounts, sorting, sortSnapshot],
   )
-  const creditState: 'ready' | 'no-data' | 'unsupported' =
-    !creditSupported ? 'unsupported' : creditHasData ? 'ready' : 'no-data'
-  const summary = groupSortSummary(rules)
+  const creditState: RuleState = !creditSupported ? 'unsupported' : creditHasData ? 'ready' : 'no-data'
+  const balanceState: BalanceSortState = sortSnapshot?.balanceSortStates?.[provider]
+    || (supportsBalanceSort(provider, sortSnapshot)
+      ? balanceSortStateOf(members.map(account => accountSortBalanceOf(usageEntryOf(account)))) : 'unsupported')
+  const balanceRuleState: RuleState = sortSnapshot && !sortSnapshot.balanceSortStates ? 'upgrade'
+    : balanceState === 'mixedUnits' ? 'mixed-units' : balanceState === 'noData' ? 'no-data' : balanceState
+  const activeRules = activeGroupSortRules(provider, rules, sortSnapshot)
+  const summary = groupSortSummary(activeRules)
+  const balanceEnabled = activeRules.some(rule => rule.key === 'balance')
+  const manualLocked = activeRules.length > 0
   const customized = hasCustomGroupSort(provider)
   const busy = getStore().sortBusy
 
@@ -260,7 +282,7 @@ export function GroupSettingsDialog({ provider, onClose, accounts, sorting, rout
         <DialogHeader>
           <span className='inline-flex size-[26px] flex-none items-center justify-center'>
             {icon
-              ? <img src={icon} alt='' className='size-[26px] rounded-md object-contain' loading='lazy' />
+              ? <img src={icon} alt='' className='size-[26px] rounded-md object-contain' loading='lazy' onError={onIconError} />
               : <span className='inline-flex size-[26px] items-center justify-center rounded-md bg-surface-3 text-[13px] font-bold text-muted-foreground'>
                   {String(label || '?').trim().slice(0, 1).toUpperCase()}
                 </span>}
@@ -277,7 +299,7 @@ export function GroupSettingsDialog({ provider, onClose, accounts, sorting, rout
                 rule={rule}
                 priority={index + 1}
                 isLast={index === rules.length - 1}
-                state={rule.key === 'credit' ? creditState : 'ready'}
+                state={rule.key === 'credit' ? creditState : rule.key === 'balance' ? balanceRuleState : 'ready'}
                 busy={busy}
                 onChange={patch => changeRule(rule.key, patch)}
               />
@@ -299,17 +321,26 @@ export function GroupSettingsDialog({ provider, onClose, accounts, sorting, rout
               </span>
             </div>
             <p className='m-0 mt-2 rounded-xs bg-surface-inset px-2.5 py-2 text-[10.5px] leading-relaxed text-subtle'>
-              {t('当前规则：{rules}。自动排序生效时，组内拖动把手会锁定；关掉全部规则即回到手动顺序。', {
-                rules: summary || t('仅按手动顺序'),
-              })}
+              {t('当前规则：{rules}。', { rules: summary || t('仅按手动顺序') })}{' '}
+              {manualLocked ? t('已启用自动排序，组内拖动已锁定；关闭全部规则可恢复原手动顺序。') : t('当前可手动调整组内顺序。')}
             </p>
+            <p className='m-0 mt-1.5 px-2.5 text-[10.5px] leading-relaxed text-subtle'>
+              {t('上一条规则相同时才比较下一条；想优先按余额消耗，请把可用余额移到第一位。')}
+            </p>
+            {balanceEnabled ? <p className='m-0 mt-1.5 px-2.5 text-[10.5px] leading-relaxed text-subtle'>
+              {t('使用最近一次成功查询的总余额，随余额刷新调整；查询失败保留上次读数，不额外增加查询频率。')}{' '}
+              {t('只比较同一家、同单位的数值余额；未知、比例和无限额度不作为零余额，有明确余额的账号优先。')}
+            </p> : null}
             <p className='m-0 mt-1.5 px-2.5 text-[10.5px] leading-relaxed text-subtle'>
               {t('账号页与全局路由共用此消耗顺序，网关按最新余额数据选路，不需要保持页面打开。模型独立顺序会覆盖全局。')}
             </p>
             <p className='m-0 mt-1.5 px-2.5 text-[10.5px] leading-relaxed text-subtle'>
+              {t('严格按消耗顺序使用账号需选择「顺序优先」；轮询、会话粘性及账号保护仍按原设置生效。')}
+            </p>
+            <p className='m-0 mt-1.5 px-2.5 text-[10.5px] leading-relaxed text-subtle'>
               {creditSupported
-                ? t('本提供商默认启用最快到期优先，账号添加时间默认关闭；关闭全部规则可恢复手动顺序。')
-                : t('本提供商不支持积分到期排序，默认保持手动顺序；可按需启用账号添加时间排序。')}
+                ? t('默认仅开启最快到期优先；可用余额和账号添加时间默认关闭。')
+                : t('默认保持手动顺序，可按需开启支持的自动排序规则。')}
             </p>
           </GroupSettingSection>
 
@@ -330,7 +361,7 @@ export function GroupSettingsDialog({ provider, onClose, accounts, sorting, rout
         <DialogFooter>
           <Button variant='ghost' size='sm' disabled={!customized || busy}
             title={customized
-              ? creditSupported ? t('恢复默认：最快到期优先，账号添加时间关闭') : t('恢复默认：仅按手动顺序')
+              ? creditSupported ? t('恢复默认：仅开启最快到期优先') : t('恢复默认：仅按手动顺序')
               : t('当前已经是默认规则')}
             onClick={() => void setGroupSortRules(provider, null)}>
             {t('恢复默认')}

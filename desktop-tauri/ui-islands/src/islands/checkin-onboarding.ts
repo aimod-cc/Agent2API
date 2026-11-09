@@ -1,9 +1,10 @@
 import { t } from '../i18n'
 import { bridgeApi, errorMessage, loadCenter, patch, store, toast, type OnboardingCache } from './checkin-store'
-import { normalizeOnboardingTasks } from './checkin-onboarding-cache'
+import { currentOnboardingCache, normalizeOnboardingTasks } from './checkin-onboarding-cache'
 
 export function onboardingOf(id: string): OnboardingCache {
-  return store.onboarding.get(id) ?? {
+  const provider = store.center?.extras.onboarding.find(row => row.id === id)?.provider
+  return currentOnboardingCache(provider, store.onboarding.get(id)) ?? {
     status: 'idle', tasks: [], earned: 0, claiming: false, settled: false,
   }
 }
@@ -37,6 +38,27 @@ export async function queryOnboarding(id: string, refresh = false): Promise<void
   }
 }
 
+export function onboardingClaimable(id: string): boolean {
+  const cache = onboardingOf(id)
+  if (cache.status !== 'loaded' || cache.claiming || cache.settled) return false
+  const provider = store.center?.extras.onboarding.find(row => row.id === id)?.provider
+  return provider === 'officeace' || cache.tasks.some(task => !task.done && !task.blocked)
+}
+
+export async function claimOnboardingBatch(accountIds: string[]): Promise<void> {
+  if (store.onboardingBatch) return
+  const ids = [...new Set(accountIds)].filter(onboardingClaimable)
+  if (ids.length === 0) return
+  patch({ onboardingBatch: ids })
+  try {
+    for (const id of ids) {
+      if (onboardingClaimable(id)) await claimOnboarding(id)
+    }
+  } finally {
+    patch({ onboardingBatch: null })
+  }
+}
+
 export async function claimOnboarding(id: string): Promise<void> {
   const cached = onboardingOf(id)
   if (cached.status !== 'loaded' || cached.claiming || cached.settled) return
@@ -60,7 +82,7 @@ export async function claimOnboarding(id: string): Promise<void> {
       ? t('新手福利领取失败 {n} 项', { n: failed })
       : t('✅ 新手福利领取完成')), failed > 0 ? 'err' : 'ok')
   } catch (error) {
-    patchOnboarding(id, { claiming: false })
+    patchOnboarding(id, { claiming: false, status: 'error', error: errorMessage(error) })
     toast(t('领取失败：{error}', { error: errorMessage(error) }), 'err')
   }
 }

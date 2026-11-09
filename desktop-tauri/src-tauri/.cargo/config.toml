@@ -2,3 +2,11 @@
 # 目的：target 目录层级更浅、便于清理，也让源码目录保持干净。
 [build]
 target-dir = "../../target"
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64"]
+
+# SQLite 等 C/C++ 依赖不继承 Rust 的 target-cpu；仅约束 Linux x86_64 目标。
+[env]
+CFLAGS_x86_64_unknown_linux_gnu = { value = "-march=x86-64 -mtune=generic", force = true }
+CXXFLAGS_x86_64_unknown_linux_gnu = { value = "-march=x86-64 -mtune=generic", force = true }

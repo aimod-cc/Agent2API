@@ -1,27 +1,25 @@
 import { randomUUID } from "node:crypto"
 import { normalized } from "./accounts.mjs"
+import { refreshModels } from "./models.mjs"
+import { rpc } from "./wire.mjs"
 import { scope, cleanup, untilCancelled } from "./fetch.mjs"
 import { safeMessage } from "./diagnostics.mjs"
-import { loginMethods, promptOptional, promptSecret, validateInputs, authorizationPolicy, checkedCallback } from "./login-policy.mjs"
+import { loginNetwork } from "./login-network.mjs"
+import { loginMethods, validateInputs, authorizationPolicy, checkedCallback } from "./login-policy.mjs"
+import { promptView, keyPrompt } from "./login-prompts.mjs"
 
 const flows = new Map()
+const starting = new Set()
 
 export function methods(provider) {
   return {
     methods: loginMethods(provider).map(method => ({
       methodIndex: method.methodIndex, type: method.type, label: method.label || (method.type === "oauth" ? "OAuth 登录" : "API Key"),
       prompts: [
-        ...(method.type === "api" && method.keyless !== true && (!(method.prompts ?? []).length || typeof method.authorize !== "function") && !(method.prompts ?? []).some(prompt => prompt.key === "key")
-          ? [{ key: "key", type: "text", label: "API Key", placeholder: method.placeholder || "", optional: false, secret: true, options: [] }] : []),
-        ...(method.prompts ?? []).map(prompt => ({
-          key: prompt.key, type: prompt.type === "select" ? "select" : "text",
-          label: provider.id === "cloudflare-workers-ai" && prompt.key === "accountId" ? "Cloudflare Account ID（32 位十六进制）" : prompt.message || prompt.label || prompt.key,
-          placeholder: prompt.placeholder || "", optional: promptOptional(provider, method, prompt), secret: promptSecret(prompt),
-          options: (prompt.options ?? []).map(option => ({ value: option.value, label: option.label || option.value })),
-          ...(!promptSecret(prompt) && typeof prompt.default === "string" ? { default: prompt.default } : {}),
-          ...(prompt.condition ? { when: prompt.condition } : {}),
-        })),
+        ...[keyPrompt(method)].filter(Boolean),
+        ...(method.prompts ?? []).map(prompt => promptView(provider, method, prompt)),
       ],
+      dynamicPrompts: typeof method.ask === "function" || (method.prompts ?? []).some(prompt => typeof prompt.condition === "function"),
       localOnly: method.localOnly === true, manualCallback: method.manualCallback === true,
       callbackInput: method.callbackInput || "url", instructions: method.instructions || "",
       embeddedOnly: method.embeddedOnly === true, desktopOnly: method.desktopOnly === true,
@@ -33,6 +31,10 @@ export function methods(provider) {
 export async function start(provider, params) {
   for (const [id, flow] of flows) if (Date.now() - flow.started > 15 * 60_000) { flow.controller.abort(); flows.delete(id) }
   if (flows.size >= 32) throw new Error("Too many pending sign-ins")
+  if (provider.hooks.auth?.single === true && (starting.has(provider.id)
+    || [...flows.values()].some(flow => flow.provider === provider.id && !flow.result))) {
+    throw new Error("此提供商已有登录任务，请先完成或取消。")
+  }
   const payload = params.payload ?? {}
   const index = payload.methodIndex ?? 0
   const method = loginMethods(provider).find(method => method.methodIndex === index)
@@ -41,31 +43,36 @@ export async function start(provider, params) {
   const controller = new AbortController()
   const parent = scope.getStore()
   parent.inputSecrets = Object.values(payload.inputs ?? {}).filter(value => typeof value === "string" && value)
-  const context = { ...parent, provider: provider.id, account: "", signal: controller.signal, resources: new Set(), sockets: new Set(), proxy: payload.proxy ?? params.proxy ?? null }
+  const context = { ...parent, provider: provider.id, account: "", signal: controller.signal, resources: new Set(), sockets: new Set(),
+    localCleanups: new Set(), proxy: payload.proxy ?? params.proxy ?? null }
   const abort = () => controller.abort(parent.signal.reason)
   parent.signal.addEventListener("abort", abort, { once: true })
   let authorization, url, policy
+  if (provider.hooks.auth?.single === true) starting.add(provider.id)
   try {
     authorization = await scope.run(context, async () => {
       await validateInputs(method, payload.inputs ?? {})
-      return untilCancelled(method.authorize(method.prompts?.length ? payload.inputs ?? {} : undefined, { signal: controller.signal }), controller.signal)
+      return untilCancelled(method.authorize(method.prompts?.length || typeof method.ask === "function" ? payload.inputs ?? {} : undefined, { signal: controller.signal }), controller.signal)
     })
     if (authorization?.type === "failed") throw new Error(authorization.error || "Sign-in could not be started")
     if (typeof authorization?.callback !== "function" || !["auto", "code"].includes(authorization.method)) throw new Error("插件没有返回可兼容的登录回调")
     url = authorization.opened === true || method.localOnly || method.browserMode === "none" ? "" : authorization.url || ""
     if (url && (typeof url !== "string" || !["http:", "https:"].includes(new URL(url).protocol))) throw new Error("Plugin returned an invalid sign-in URL")
     policy = authorizationPolicy(provider, method, authorization)
+    context.loginNetwork = loginNetwork(provider, authorization)
     parent.signal.throwIfAborted()
     controller.signal.throwIfAborted()
   } catch (error) { controller.abort(); await cleanup(context); throw error }
-  finally { parent.signal.removeEventListener("abort", abort) }
+  finally { starting.delete(provider.id); parent.signal.removeEventListener("abort", abort) }
   const id = randomUUID()
-  const flow = { provider: provider.id, controller, context, authorization, policy, started: Date.now(), result: null, running: false, relaying: false, name: payload.name }
+  const instructions = [...new Set([method.instructions, authorization.instructions]
+    .filter(value => typeof value === "string" && value.trim()).map(value => value.trim()))].join("\n")
+  const flow = { provider: provider.id, single: provider.hooks.auth?.single === true, controller, context, authorization, policy, instructions, started: Date.now(), result: null, running: false, relaying: false, name: payload.name }
   flows.set(id, flow)
   if (authorization.method === "auto") run(flow)
   const expire = setTimeout(() => { controller.abort(); flows.delete(id); void cleanup(context) }, 15 * 60_000)
   expire.unref()
-  return { flow: id, url, instructions: method.instructions || authorization.instructions || "", poll_interval_ms: 1500,
+  return { flow: id, url, instructions, poll_interval_ms: 1500,
     external_browser: method.browserMode === "external", allowed_hosts: policy.allowedHosts, script_login: policy.ui }
 }
 
@@ -77,9 +84,21 @@ function run(flow, code) {
       const result = await untilCancelled(flow.authorization.callback(code, { signal: flow.controller.signal }), flow.controller.signal)
       flow.controller.signal.throwIfAborted()
       if (result?.type !== "success") throw new Error(result?.error || "Sign-in was not completed")
-      flow.result = { state: "done", account: normalized(flow.provider, result, flow.name) }
+      const account = normalized(flow.provider, result, flow.name, flow.single)
+      if (flow.context.localProvider) {
+        flow.context.loginAuth = account.secret
+        flow.context.action = "models.refresh"
+        try {
+          const outcome = await refreshModels(flow.context.localProvider)
+          if (outcome.refreshed) await rpc("notify", { kind: "models_changed", payload: { provider: flow.provider } })
+        } catch (error) {
+          console.warn(safeMessage(error, flow.context))
+        }
+        flow.controller.signal.throwIfAborted()
+      }
+      flow.result = { state: "done", account }
     } catch (error) {
-      flow.result = { state: "failed", message: safeMessage(error, flow.context).slice(0, 1000) }
+      flow.result = { state: "failed", message: safeMessage(flow.context.loginNetwork?.error || error, flow.context).slice(0, 1000) }
     } finally { await cleanup(flow.context) }
   })
 }
@@ -98,7 +117,10 @@ export function poll(provider, id) {
     flow.result = { state: "failed", message: "登录等待超时，请重新发起" }
     return flow.result
   }
-  return { state: "pending", hint: flow.authorization.instructions || "等待浏览器完成登录" }
+  const instructions = typeof flow.authorization.instructions === "string" ? flow.authorization.instructions.trim() : ""
+  const hint = flow.context.loginNetwork?.hint || (instructions && !flow.instructions.includes(instructions)
+    ? instructions : flow.policy.ui.browserMode === "plugin" ? "等待插件完成登录" : "等待浏览器完成登录")
+  return { state: "pending", hint }
 }
 
 export async function callback(provider, params) {

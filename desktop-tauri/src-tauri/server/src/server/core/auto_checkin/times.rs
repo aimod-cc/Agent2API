@@ -84,13 +84,19 @@ pub fn provider_time(provider: &str) -> Option<&'static str> {
 }
 
 /// 一家在某个条目里的**生效时刻**：条目覆盖 > 内置专属 > 条目自己的 time。
+pub fn declared_time(provider: &str) -> Option<String> {
+    crate::server::core::plugin_host::wasm::tasks::checkin_time(provider)
+        .or_else(|| (!crate::server::core::plugin_host::wasm::has_capability(provider, "tasks.v1"))
+            .then(|| provider_time(provider).map(str::to_string)).flatten())
+}
+
 pub fn effective_time(schedule: &Schedule, provider: &str) -> String {
     schedule
         .provider_times
         .get(provider)
         .filter(|time| !time.is_empty())
         .cloned()
-        .or_else(|| provider_time(provider).map(str::to_string))
+        .or_else(|| declared_time(provider))
         .unwrap_or_else(|| schedule.time.clone())
 }
 

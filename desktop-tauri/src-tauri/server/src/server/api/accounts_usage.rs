@@ -19,11 +19,13 @@
 //! 供界面在**不点按钮**的情况下跟上自动查询的节奏（每账号到期的写法下，
 //! 界面轮询一份快照就能拿到全部账号的最新读数）。
 
-use axum::response::Response;
+use axum::{body::Bytes, response::Response};
+use serde_json::{json, Value};
 
 use crate::server::core::usage_query;
 use crate::server::errors::management_error;
 use crate::server::http::{ok_json, query_param};
+use super::accounts::parse_json_body;
 use crate::server::ServerState;
 
 /// GET /api/accounts/usage
@@ -40,19 +42,36 @@ pub async fn accounts_usage(state: &ServerState, query: &str) -> Response {
     }
 }
 
-/// GET /api/accounts/usage/snapshot
-///
-/// 各账号最近一次查询结果的快照
-/// （`{ at, results: [{id,name,usage,error,code?,at}], skipped }`，`at` 是毫秒
-/// 时间戳、0 表示还没查过；行上的 `at` 是**这一行**的结论时刻）。
-///
-/// 形状与 `/api/accounts/usage` 的响应兼容（每行多一个自己的 `at`）：
-/// 前端因此可以用同一个 `applyBalances` 写缓存，不必为「手动」与「自动」两条
-/// 来源各写一套解析。行级 `at` 是按账号到期查询的要求 —— 各行的结论时刻天然
-/// 不同，失败行的时效判定必须按行算。
-///
-/// 读快照要带上账号存储：出口会丢掉「账号已删除」的行、以及「比账号记录还旧」
-/// 的失败行（见 `core::usage_query::snapshot` 的说明）。
+/// POST /api/accounts/usage/start：返回任务编号，不等待上游请求结束。
+pub fn start_usage(state: &ServerState, body: &Bytes) -> Response {
+    let payload = match parse_json_body(body, "请求内容不是有效 JSON") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if !payload.is_object() || payload.get("id").is_some_and(|value| !value.is_null() && !value.is_string())
+        || payload.get("replace").is_some_and(|value| !value.is_boolean()) {
+        return management_error(400, "余额查询参数无效");
+    }
+    let id = payload.get("id").and_then(Value::as_str).filter(|value| !value.is_empty());
+    let replace = payload.get("replace").and_then(Value::as_bool).unwrap_or(false);
+    match usage_query::start_queries(state.store(), id, replace) {
+        Ok(report) => ok_json(report),
+        Err(error) => management_error(error.status_code as i32, error.message),
+    }
+}
+
+pub fn cancel_usage(body: &Bytes) -> Response {
+    let payload = match parse_json_body(body, "请求内容不是有效 JSON") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let id = payload.get("id").and_then(Value::as_str).unwrap_or("");
+    let request_id = payload.get("requestId").and_then(Value::as_str).unwrap_or("");
+    if id.is_empty() || request_id.is_empty() { return management_error(400, "缺少账号或查询任务编号"); }
+    ok_json(json!({ "cancelled": usage_query::jobs::cancel(id, request_id) }))
+}
+
+/// GET /api/accounts/usage/snapshot：历史读数与当前任务状态分别返回。
 pub async fn accounts_usage_snapshot(state: &ServerState) -> Response {
     ok_json(usage_query::snapshot(state.store()))
 }

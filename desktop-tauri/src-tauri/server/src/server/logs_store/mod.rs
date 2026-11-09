@@ -2,6 +2,7 @@
 //! 查询可按重要事件、全部事件、调试详情筛选，并在分页前折叠重复记录。
 //! 原始记录不因折叠删除；日志 id 高水位只在显式全清时重置。
 
+mod plugin_events;
 mod presentation;
 mod sql;
 

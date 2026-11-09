@@ -94,6 +94,10 @@ function ProxiesPage() {
             {item.source === 'clash'
               ? <span className='truncate' title={t('只读：在 Clash Verge 里改')}>Clash Verge</span>
               : <span className='truncate'>{t('手动添加')}</span>}
+            {item.nonDirect ? <>
+              <span className='opacity-45' aria-hidden='true'>·</span>
+              <span className='shrink-0' title={t('先经过系统代理，再连接到此代理')}>{t('非直连')}</span>
+            </> : null}
             {item.enabled === false ? <>
               <span className='opacity-45' aria-hidden='true'>·</span>
               <span className='shrink-0'>{t('已禁用')}</span>

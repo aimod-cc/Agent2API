@@ -108,6 +108,7 @@ export type ManageMapping = {
 export type ManageProvider = {
   provider: string
   providerLabel: string
+  settingsAvailable?: boolean
   count: number
   source: 'none' | 'remote' | 'builtin'
   refreshedAt: number

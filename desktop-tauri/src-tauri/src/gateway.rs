@@ -191,6 +191,13 @@ pub(crate) fn local_client(timeout: Duration) -> Result<reqwest::Client, String>
         .map_err(|error| format!("创建 HTTP 客户端失败: {error}"))
 }
 
+fn management_client(path: &str, timeout_ms: u64) -> Result<reqwest::Client, String> {
+    if path.split('?').next() != Some("/api/accounts/usage") {
+        return local_client(Duration::from_millis(timeout_ms));
+    }
+    local_client(Duration::from_secs(195))
+}
+
 fn request_builder_with_timeout(
     method: &str,
     path: &str,
@@ -198,7 +205,7 @@ fn request_builder_with_timeout(
     timeout_ms: u64,
 ) -> Result<reqwest::RequestBuilder, String> {
     let url = format!("http://127.0.0.1:{}{path}", proxy_port());
-    let base = local_client(Duration::from_millis(timeout_ms))?;
+    let base = management_client(path, timeout_ms)?;
     let mut builder = match method.to_uppercase().as_str() {
         "GET" => base.get(&url),
         "POST" => base.post(&url),
@@ -307,7 +314,7 @@ async fn send_once(
     let request = request_builder_with_timeout(method, path, body, timeout_ms)?.build()
         .map_err(|error| format!("构造管理请求失败: {error}"))?;
     let credentials = request.headers().clone();
-    let response = local_client(Duration::from_millis(timeout_ms))?
+    let response = management_client(path, timeout_ms)?
         .execute(request)
         .await
         .map_err(|error| describe_transport_error(&error))?;

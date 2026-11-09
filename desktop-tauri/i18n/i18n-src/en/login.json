@@ -19,5 +19,12 @@
   "首次使用：创建一个管理员账号，用于登录此面板": "First-time use: create an admin account to sign in to this panel",
   "验证中…": "Verifying…",
   "验证失败，请重试": "Verification failed. Please try again.",
-  "验证成功": "Verified"
+  "验证成功": "Verified",
+  "无法读取登录验证设置，请刷新页面重试": "Could not read sign-in verification settings. Refresh the page and try again.",
+  "请完成人机验证后重试": "Complete the human verification and try again",
+  "重新验证": "Verify again",
+  "机器人校验配置已变更或不完整，请刷新页面或联系管理员。": "Bot verification settings have changed or are incomplete. Refresh the page or contact the administrator.",
+  "Turnstile 验证超时，请重试。": "Turnstile verification timed out. Please try again.",
+  "当前浏览器不支持 Turnstile，请更新浏览器后重试。": "This browser does not support Turnstile. Update your browser and try again.",
+  "Turnstile 加载或验证失败，请检查网络、浏览器拦截和域名配置后重试。": "Turnstile could not load or verify. Check your connection, browser blocking and hostname settings, then try again."
 }

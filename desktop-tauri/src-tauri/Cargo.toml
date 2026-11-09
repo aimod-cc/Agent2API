@@ -24,6 +24,7 @@ homepage = "https://github.com/aimod-cc/Agent2API"
 # 本 workspace 只剩网关本体；插件作者用的 trait / serve 主循环也在那个仓库里。
 [workspace]
 members = ["server"]
+default-members = [".", "server"]
 
 [lib]
 name = "workbuddy_proxy_desktop_lib"

@@ -19,6 +19,7 @@ type Source = Box<dyn Stream<Item = Result<Bytes, io::Error>> + Send + Unpin>;
 
 pub(super) fn normalize_outcome(outcome: ForwardOutcome, telemetry: Arc<RequestTelemetry>) -> ForwardOutcome {
     match outcome {
+        ForwardOutcome::Native(response) => ForwardOutcome::Native(response),
         ForwardOutcome::Completion { mut body } => {
             if let Some(usage) = body.get_mut("usage").filter(|usage| usage.is_object()) {
                 normalize_chat(usage);

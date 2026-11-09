@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::server::config::vision_compat::{VisionSettings, VisionTarget};
+use crate::server::config::vision_compat::{VisionRule, VisionTarget};
 use crate::server::core::{capability, key_scope, providers::catalog, routing, routing_groups, routing_groups::RequestNeeds};
 use crate::server::errors::GatewayError;
 use super::super::{payload::ProviderContext, route_context::RequestRouting, RouteTarget, UpstreamService};
@@ -35,12 +35,19 @@ fn compatible(target: &VisionTarget, needs: &RequestNeeds) -> bool {
         && (!needs.video || item.get("supportsVideo").and_then(Value::as_bool) == Some(true))
 }
 
-pub(super) fn resolve(service: &UpstreamService, ctx: &ProviderContext<'_>, mut target: VisionTarget,
+pub(super) fn resolve(service: &UpstreamService, ctx: &ProviderContext<'_>, target: VisionTarget,
     request_model: &str, needs: &RequestNeeds) -> Result<Destination, GatewayError> {
+    // 指定模型是全局配置；只按目标自己的路由选账号，不继承来源路由的参与名单。
+    let routing = RequestRouting::capture_request(request_model, &service.store, &serde_json::json!({}), ctx.key_scope, false)?;
+    resolve_in_route(service, ctx, target, request_model, needs, &routing)
+}
+
+fn resolve_in_route(service: &UpstreamService, ctx: &ProviderContext<'_>, mut target: VisionTarget,
+    request_model: &str, needs: &RequestNeeds, routing: &RequestRouting) -> Result<Destination, GatewayError> {
     if !key_scope::allows_provider(ctx.key_scope, &target.provider) {
         return Err(GatewayError::with_status(403, "当前网关 Key 不允许所选视觉提供商").with_code("vision_target_forbidden"));
     }
-    let permission_model = ctx.routing.group.as_ref().map(|group| group.model.as_str()).unwrap_or(request_model);
+    let permission_model = routing.group.as_ref().map(|group| group.model.as_str()).unwrap_or(request_model);
     if !key_scope::allows_model(ctx.key_scope, permission_model)
         || !key_scope::allows_model(ctx.key_scope, &target.model) {
         return Err(GatewayError::with_status(403, "当前网关 Key 不允许所选视觉模型").with_code("vision_target_forbidden"));
@@ -49,7 +56,7 @@ pub(super) fn resolve(service: &UpstreamService, ctx: &ProviderContext<'_>, mut 
         return Err(GatewayError::bad_request("所选视觉模型未确认支持本次请求需要的图片、工具或视频能力，请检查模型管理")
             .with_code("vision_target_incompatible"));
     }
-    if ctx.routing.group.is_none() {
+    if routing.group.is_none() {
         if !catalog::forwarding_providers(request_model).contains(&target.provider) {
             return Err(GatewayError::with_status(404, "所选视觉模型已停用或不在当前提供商目录中").with_code("vision_target_unavailable"));
         }
@@ -65,8 +72,8 @@ pub(super) fn resolve(service: &UpstreamService, ctx: &ProviderContext<'_>, mut 
             return Err(GatewayError::with_status(409, "视觉模型映射已经改变，请重新保存图片兼容配置").with_code("vision_target_changed"));
         }
     }
-    let routing = ctx.routing.for_vision_target(&service.store, &target.provider, &target.model,
-        request_model, ctx.key_scope, ctx.pinned_account, None, Some(needs))?;
+    let routing = routing.for_vision_target(&service.store, &target.provider, &target.model,
+        ctx.key_scope, ctx.pinned_account, None, Some(needs))?;
     Ok(Destination { target, request_model: request_model.to_string(), routing })
 }
 
@@ -78,12 +85,12 @@ pub(super) fn original(service: &UpstreamService, ctx: &ProviderContext<'_>, ori
             crate::server::core::custom_providers::wire_model_for(&target.provider, &request_model).1
         } else { catalog::wire_target_for_provider(&request_model, &target.provider, original.account.as_ref()).reasoning }.unwrap_or_default();
     }
-    let routing = ctx.routing.for_vision_target(&service.store, &target.provider, &target.model, &request_model,
+    let routing = ctx.routing.for_vision_target(&service.store, &target.provider, &target.model,
         ctx.key_scope, ctx.pinned_account, original.account.as_ref().map(routing_groups::attempt_key).as_deref(), None)?;
     Ok(Destination { target, request_model, routing })
 }
 
-pub(super) fn reroute_targets(service: &UpstreamService, ctx: &ProviderContext<'_>, settings: &VisionSettings,
+pub(super) fn reroute_targets(service: &UpstreamService, ctx: &ProviderContext<'_>, rule: &VisionRule,
     failed: &RouteTarget) -> (Vec<Destination>, Vec<String>) {
     let mut result = Vec::new();
     let mut errors = Vec::new();
@@ -91,21 +98,29 @@ pub(super) fn reroute_targets(service: &UpstreamService, ctx: &ProviderContext<'
     let failed_model = actual_model(ctx, failed);
     let requested = ctx.body.get("model").and_then(Value::as_str).unwrap_or("");
     let needs = RequestNeeds::from_body(ctx.body);
-    let mut add = |target: VisionTarget, request_model: &str| {
-        if (target.provider == failed.provider && target.model.eq_ignore_ascii_case(&failed_model))
-            || !seen.insert((target.provider.clone(), target.model.to_lowercase())) { return; }
-        match resolve(service, ctx, target, request_model, &needs) {
-            Ok(destination) => result.push(destination),
+    let mut add = |target: VisionTarget, request_model: &str, current_route: bool| {
+        if target.provider == failed.provider && target.model.eq_ignore_ascii_case(&failed_model) { return; }
+        let destination = if current_route {
+            resolve_in_route(service, ctx, target, request_model, &needs, &ctx.routing)
+        } else {
+            resolve(service, ctx, target, request_model, &needs)
+        };
+        match destination {
+            Ok(destination) => {
+                if seen.insert((destination.target.provider.clone(), destination.target.model.to_lowercase(), destination.routing.cache_identity())) {
+                    result.push(destination);
+                }
+            }
             Err(error) => errors.push(error.message),
         }
     };
-    if settings.reroute.prefer_current_route {
+    if rule.prefer_current_route {
         if ctx.routing.group.is_some() {
             for account in &ctx.routing.group_projection.accounts {
                 let provider = routing::provider_of(account);
                 let Some(model) = routing_groups::candidate_model(account) else { continue; };
                 if supports_images(provider, model) != Some(true) { continue; }
-                add(VisionTarget { provider: provider.to_string(), model: model.to_string(), reasoning: String::new() }, requested);
+                add(VisionTarget { provider: provider.to_string(), model: model.to_string(), reasoning: String::new() }, requested, true);
             }
         } else {
             for provider in ctx.routing.providers(catalog::forwarding_providers(requested)) {
@@ -113,12 +128,12 @@ pub(super) fn reroute_targets(service: &UpstreamService, ctx: &ProviderContext<'
                     crate::server::core::providers::custom::forward::cooldown_model(&provider, requested)
                 } else { catalog::wire_target_for_provider(requested, &provider, None).model };
                 if supports_images(&provider, &model) != Some(true) { continue; }
-                add(VisionTarget { provider, model, reasoning: String::new() }, requested);
+                add(VisionTarget { provider, model, reasoning: String::new() }, requested, true);
             }
         }
     }
-    if settings.reroute.fallback == crate::server::config::vision_compat::Fallback::Designated {
-        for target in &settings.reroute.targets { add(target.clone(), &target.model); }
+    if rule.fallback == crate::server::config::vision_compat::Fallback::Designated {
+        for target in &rule.targets { add(target.clone(), &target.model, false); }
     }
     (result, errors)
 }
