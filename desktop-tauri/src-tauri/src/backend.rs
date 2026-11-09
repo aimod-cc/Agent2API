@@ -707,7 +707,6 @@ pub fn shutdown(state: &AppState) {
     // 会整段跳过，留下一个仍在轮询的循环。stop 自身也是幂等的（task 取走后
     // 再调直接返回），所以不破坏本函数「重复调用无副作用」的既有语义。
     server::core::auto_checkin::stop_global();
-    server::core::assistant_coding::client::request_shutdown();
 
     let Ok(mut guard) = state.backend.lock() else {
         return;

@@ -512,7 +512,7 @@ body.ck-chain-dragging { cursor: grabbing; user-select: none; }
 }
 .ck-account-group > span:first-of-type { font-weight: 550; }
 .ck-account-list [data-slot='item'],
-.ck-account-list > .flex { padding: 0 14px; }
+.ck-account-list > .flex { padding-inline: 14px; }
 .ck-account-list > div:not(.ck-account-group) { border-bottom: 1px solid var(--hairline); }
 .ck-account-list > div:not(.ck-account-group):last-child { border-bottom: 0; }
 .ck-account-list > div:not(.ck-account-group):hover { background: var(--row-hover); }

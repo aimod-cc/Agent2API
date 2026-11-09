@@ -48,7 +48,6 @@ pub mod accounts_usage;
 // 设置读写与流式对话转发。工具定义与执行都在前端，后端不认识任何工具，
 // 见该文件模块头
 pub mod assistant;
-pub mod assistant_coding;
 pub mod assistant_history;
 pub mod assistant_images;
 // 工具服务（「工具服务」页）：列表 / 开关 / 超时 / 上游提供商 / 视觉配置 /

@@ -267,7 +267,6 @@ fn apply_security_gates() {
 
 /// 收尾：通知 HTTP 服务停机，给在途请求留出跑完的时间。
 fn finish(shutdown_tx: tokio::sync::oneshot::Sender<()>) {
-    agent2api_server::server::core::assistant_coding::client::request_shutdown();
     let _ = shutdown_tx.send(());
     // `start` 内部会等 graceful shutdown 收尾，这里只补一小段余量
     std::thread::sleep(std::time::Duration::from_millis(300));

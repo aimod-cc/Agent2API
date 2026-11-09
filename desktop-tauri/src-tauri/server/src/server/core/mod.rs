@@ -71,7 +71,6 @@ pub mod api_keys;
 pub mod auth;
 pub mod auth_http;
 pub mod assistant_sessions;
-pub mod assistant_coding;
 pub mod assistant_images;
 pub mod auto_checkin;
 pub mod beijing;

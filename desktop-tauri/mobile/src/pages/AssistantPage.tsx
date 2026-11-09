@@ -35,7 +35,6 @@ import { apiCall } from '../api/client'
 import { useModelApiKeys } from '../../../ui-shared/use-model-api-keys'
 import { ModelApiKeyField } from '../../../ui-shared/model-api-key-field'
 import { modelApiKeyAllows, modelApiKeyLabel, type ModelApiKey } from '../../../ui-shared/model-api-key'
-import { MobileAssistantWorkspace } from './assistant-workspace'
 
 /**
  * AI 助手（手机端）。
@@ -71,10 +70,6 @@ const QUICK_ASKS: QuickAsk[] = [
 ]
 
 export function AssistantPage() {
-  return <MobileAssistantWorkspace><BuiltinAssistantPage /></MobileAssistantWorkspace>
-}
-
-function BuiltinAssistantPage() {
   const [bubbles, setBubbles] = useState<Bubble[]>([])
   const [draft, setDraft] = useState('')
   const [attachments, setAttachments] = useState<string[]>([])
@@ -484,7 +479,7 @@ function BuiltinAssistantPage() {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div
         className='m-assistant-head'
-        style={{ display: 'flex', alignItems: 'center', gap: 9, flex: 'none', paddingTop: 8 }}
+        style={{ display: 'flex', alignItems: 'center', gap: 9, flex: 'none' }}
       >
         <Button variant='ghost' size='icon-sm' aria-label={t('历史对话')} onClick={() => setHistoryOpen(true)}><Icon name='log' /></Button>
         <div style={{ flex: 1, minWidth: 0 }}>

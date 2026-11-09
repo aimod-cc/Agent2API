@@ -1052,7 +1052,6 @@ pub fn start(state: &ServerState) -> Result<oneshot::Sender<()>, PortConflict> {
         None => None,
     };
 
-    let codex_owner = core::assistant_coding::client::allow_start();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     // 停机广播：oneshot 只有一个 receiver，而分端口形态有两个 serve 都要
     // 收到停机信号。协调任务把 oneshot 信号（send 或发送端被 drop）转成
@@ -1067,7 +1066,6 @@ pub fn start(state: &ServerState) -> Result<oneshot::Sender<()>, PortConflict> {
             _ = stop_requested.wait_for(|stop| *stop) => {}
         }
         stop_from_signal.send_replace(true);
-        core::assistant_coding::client::shutdown(codex_owner).await;
     });
 
     // 停机收尾要用的统计句柄：先克隆出来再移进任务（`state` 是借用，不能

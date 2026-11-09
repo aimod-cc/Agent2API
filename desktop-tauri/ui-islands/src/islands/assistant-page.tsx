@@ -72,7 +72,6 @@ import { useModelApiKeys } from '../../../ui-shared/use-model-api-keys'
 import { ModelApiKeyField } from '../../../ui-shared/model-api-key-field'
 import { modelApiKeyAllows, modelApiKeyLabel, type ModelApiKey } from '../../../ui-shared/model-api-key'
 import { callJson } from './assistant-state'
-import { DesktopAssistantWorkspace } from './assistant-workspace'
 
 /** 一轮对话里最多允许的「上游调用 → 工具 → 上游调用」循环次数 */
 const MAX_ROUNDS = 12
@@ -803,7 +802,7 @@ function mount(): void {
   if (!section) return
   section.replaceChildren()
   root = createRoot(section)
-  root.render(<DesktopAssistantWorkspace><AssistantPage /></DesktopAssistantWorkspace>)
+  root.render(<AssistantPage />)
   // 首轮对话少一次往返：只在用户第一次打开助手页时预热网关地址。
   void gatewayBase().catch(() => {})
 }

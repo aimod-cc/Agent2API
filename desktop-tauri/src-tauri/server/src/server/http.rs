@@ -628,7 +628,6 @@ pub fn panel_router(state: ServerState) -> Router {
             get(api::assistant::get_config).put(api::assistant::put_config),
         )
         .route("/api/assistant/chat", post(api::assistant::chat))
-        .merge(api::assistant_coding::routes(state.clone()))
         .route("/api/assistant/images/generations", post(api::assistant_images::generations))
         .route("/api/assistant/images/edits", post(api::assistant_images::edits))
         .route("/api/assistant/images/files/{id}", get(api::assistant_images::download))
@@ -1234,9 +1233,6 @@ async fn require_api_key(mut request: Request, next: Next) -> Response {
     }
     let model_access = api::model_access::authenticate(request.headers(), "").ok();
     let panel_session = crate::server::access::session_valid(request.headers());
-    if path.starts_with("/api/assistant/coding/") && !panel_session {
-        return errors::panel_login_required_response(request.headers());
-    }
     if !panel_session {
         if let Some(access) = &model_access {
             let restricted = access.scope.as_ref().is_some_and(|scope| scope.restricts_models() || scope.restricts_providers());
