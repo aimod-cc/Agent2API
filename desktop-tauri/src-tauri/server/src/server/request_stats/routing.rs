@@ -73,12 +73,14 @@ impl RequestStats {
             self.with_conn(&guard, |conn| {
                 let matched: i64 = conn.query_row(
                     &format!("SELECT COUNT(*) FROM requests WHERE route IS NOT NULL
-                     AND (?1 = '' OR model = ?1 COLLATE NOCASE){status_clause}"),
+                     AND (?1 = '' OR model = ?1 COLLATE NOCASE
+                       OR client_model = ?1 COLLATE NOCASE OR upstream_model = ?1 COLLATE NOCASE){status_clause}"),
                     params![model], |row| row.get(0),
                 )?;
                 let query = format!(
                     "SELECT {} FROM requests WHERE route IS NOT NULL
-                     AND (?1 = '' OR model = ?1 COLLATE NOCASE){status_clause}
+                     AND (?1 = '' OR model = ?1 COLLATE NOCASE
+                       OR client_model = ?1 COLLATE NOCASE OR upstream_model = ?1 COLLATE NOCASE){status_clause}
                      ORDER BY ts DESC, row_id DESC LIMIT ?2 OFFSET ?3", sql::REQUEST_COLUMNS,
                 );
                 let mut stmt = conn.prepare(&query)?;
@@ -219,5 +221,44 @@ mod tests {
             None,
             "别的模型的请求不该计入本模型的账号在途数：{metrics}"
         );
+    }
+
+    /// 历史回放与指标必须使用同一套模型名匹配，客户端别名不能只出现在一侧。
+    #[test]
+    fn replays_match_the_same_client_alias_as_metrics() {
+        let (stats, _dir) = temp_stats("replay-client-model");
+        insert_running(
+            &stats,
+            "req-1",
+            "deepseek-v4.1-flash",
+            "DeepSeek-V4.1-Flash(low)",
+            "acct-trae",
+        );
+        stats.update_running(
+            "req-1",
+            &RunningProgress {
+                provider: "trae".to_string(),
+                account_id: "acct-trae".to_string(),
+                account_name: "mojie126".to_string(),
+                upstream_model: "deepseek-v4.1-flash".to_string(),
+                upstream_reasoning: String::new(),
+                attempts: 1,
+                first_response_ms: None,
+                phase: "streaming".to_string(),
+                phase_started_at: None,
+                attempt_details: Vec::new(),
+                route: Some(json!({ "accountId": "acct-trae" })),
+                sensitive_hits: Vec::new(),
+            },
+        );
+        for model in ["DeepSeek-V4.1-Flash(low)", "deepseek-v4.1-flash"] {
+            let replays = stats.routing_replays(Some(model), 0, 20, "all");
+            assert_eq!(
+                replays["matched"].as_i64(),
+                Some(1),
+                "历史回放应按客户端别名或上游模型名命中：{model}，{replays}"
+            );
+            assert_eq!(replays["entries"].as_array().map(Vec::len), Some(1));
+        }
     }
 }
