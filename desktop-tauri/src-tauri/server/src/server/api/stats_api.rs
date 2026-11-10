@@ -70,8 +70,10 @@ use serde_json::{json, Value};
 use super::date_range::{date_bounds, parse_day_param};
 use crate::server::config::{
     self, RetentionPatch, RetentionSettings, KEY_DAILY_RETENTION_DAYS, KEY_LOG_RETENTION_COUNT,
-    KEY_LOG_RETENTION_DAYS, KEY_REQUEST_RETENTION_COUNT, KEY_REQUEST_RETENTION_DAYS,
-    RETENTION_MAX_COUNT, RETENTION_MAX_DAYS, RETENTION_MIN_COUNT, RETENTION_MIN_DAYS,
+    KEY_LOG_RETENTION_DAYS, KEY_MAINTENANCE_RECORD_MAX_COUNT, KEY_MAINTENANCE_RECORD_RETENTION_DAYS,
+    KEY_REQUEST_RETENTION_COUNT, KEY_REQUEST_RETENTION_DAYS, MAINTENANCE_RECORD_MAX_COUNT,
+    MAINTENANCE_RECORD_MIN_COUNT, RETENTION_MAX_COUNT, RETENTION_MAX_DAYS, RETENTION_MIN_COUNT,
+    RETENTION_MIN_DAYS,
 };
 use crate::server::errors;
 use crate::server::http::{ok_json, parse_body, parse_query_ms};
@@ -437,7 +439,7 @@ pub async fn get_retention(State(_state): State<ServerState>) -> Response {
     ok_json(retention_json(config::retention_settings()))
 }
 
-/// PUT /api/retention —— 支持部分更新三档天数及 logRetentionCount / requestLogRetentionCount。
+/// PUT /api/retention —— 支持部分更新三档天数、两个数量上限与维护记录的保留策略。
 ///
 /// 允许部分字段（未出现的项保持原值）。校验通过后：写 config.json → 立即裁剪
 /// → 返回**生效后**的值（前端直接用响应刷新界面，不必再 GET 一次）。
@@ -492,6 +494,20 @@ pub async fn put_retention(State(state): State<ServerState>, body: Bytes) -> Res
             RETENTION_MAX_COUNT,
             "条",
         ),
+        (
+            KEY_MAINTENANCE_RECORD_RETENTION_DAYS,
+            &mut patch.maintenance_days,
+            RETENTION_MIN_DAYS,
+            RETENTION_MAX_DAYS,
+            "天",
+        ),
+        (
+            KEY_MAINTENANCE_RECORD_MAX_COUNT,
+            &mut patch.maintenance_count,
+            MAINTENANCE_RECORD_MIN_COUNT,
+            MAINTENANCE_RECORD_MAX_COUNT,
+            "条",
+        ),
     ];
     for (key, slot, min, max, unit) in targets {
         let Some(value) = object.get(key).filter(|value| !value.is_null()) else {
@@ -508,12 +524,16 @@ pub async fn put_retention(State(state): State<ServerState>, body: Bytes) -> Res
         || patch.log_count.is_some()
         || patch.request_days.is_some()
         || patch.request_count.is_some()
-        || patch.daily_days.is_some();
+        || patch.daily_days.is_some()
+        || patch.maintenance_days.is_some()
+        || patch.maintenance_count.is_some();
     if updated {
         if !config::set_retention(patch) {
-            // 写盘失败：内存快照已更新（本次运行仍生效），但重启后会回到旧值 ——
-            // 必须让用户知道，否则「改了设置重启又变回去」会被当成玄学问题
-            logging::log("[Config]", "⚠️  数据保留设置写入失败，本次运行内仍生效");
+            logging::log("[Config]", "数据保留设置写入失败，未更新内存快照，也未执行清理");
+            return errors::management_error(
+                500,
+                "数据保留设置保存失败；为避免配置与历史记录不一致，本次未执行清理",
+            );
         }
         // ── 立即清理（两种数据各自的时机不同，这里一次触发）──
         // 请求统计：prune() 内部**动态取**保留期回调，所以取到的就是刚写入的值
@@ -526,6 +546,21 @@ pub async fn put_retention(State(state): State<ServerState>, body: Bytes) -> Res
                 logging::console_line("[Logs]", &format!("按保留设置清理了 {removed} 条日志"));
             }
         }
+        // 维护记录：改小保留天数或条数上限时立即收敛，与上面三类同一理由
+        let maintenance_prune = crate::server::core::maintenance::storage::prune();
+        match maintenance_prune {
+            Ok((expired, overflow)) if expired + overflow > 0 => {
+                logging::console_line("[Maintenance]", &format!("按保留设置清理了 {} 条维护记录", expired + overflow));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                logging::log("[Maintenance]", &format!("按保留设置清理维护记录失败：{error}"));
+                return errors::management_error(
+                    500,
+                    format!("数据保留设置已保存，但维护记录清理失败：{error}"),
+                );
+            }
+        }
     }
 
     let settings = config::retention_settings();
@@ -533,12 +568,14 @@ pub async fn put_retention(State(state): State<ServerState>, body: Bytes) -> Res
         logging::log(
             "[Config]",
             &format!(
-                "数据保留设置已更新: 日志 {} 天 / {} 条，请求日志 {} 天 / {} 条，按天聚合 {} 天",
+                "数据保留设置已更新: 日志 {} 天 / {} 条，请求日志 {} 天 / {} 条，按天聚合 {} 天，维护记录 {} 天 / {} 条",
                 settings.log_days,
                 settings.log_count,
                 settings.request_days,
                 settings.request_count,
-                settings.daily_days
+                settings.daily_days,
+                settings.maintenance_days,
+                settings.maintenance_count
             ),
         );
     }
@@ -559,6 +596,8 @@ fn retention_json(settings: RetentionSettings) -> Value {
         KEY_REQUEST_RETENTION_DAYS: settings.request_days,
         KEY_REQUEST_RETENTION_COUNT: settings.request_count,
         KEY_DAILY_RETENTION_DAYS: settings.daily_days,
+        KEY_MAINTENANCE_RECORD_RETENTION_DAYS: settings.maintenance_days,
+        KEY_MAINTENANCE_RECORD_MAX_COUNT: settings.maintenance_count,
     })
 }
 

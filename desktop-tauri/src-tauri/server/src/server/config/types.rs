@@ -48,6 +48,10 @@ pub const KEY_REQUEST_RETENTION_DAYS: &str = "requestLogRetentionDays";
 pub const KEY_DAILY_RETENTION_DAYS: &str = "dailyAggregateRetentionDays";
 pub const KEY_LOG_RETENTION_COUNT: &str = "logRetentionCount";
 pub const KEY_REQUEST_RETENTION_COUNT: &str = "requestLogRetentionCount";
+/// 维护记录（凭证维护 / 模型刷新的执行记录）保留天数
+pub const KEY_MAINTENANCE_RECORD_RETENTION_DAYS: &str = "maintenanceRecordRetentionDays";
+/// 维护记录保留条数上限（`maintenance_runs` 的行数上限，明细行随主行一起清理）
+pub const KEY_MAINTENANCE_RECORD_MAX_COUNT: &str = "maintenanceRecordMaxCount";
 
 /// 事件日志的保存目录（config.json 键）。
 ///
@@ -412,8 +416,14 @@ pub const DEFAULT_REQUEST_RETENTION_DAYS: i64 = 99999;
 pub const DEFAULT_DAILY_RETENTION_DAYS: i64 = 99999;
 pub const DEFAULT_LOG_RETENTION_COUNT: i64 = 10_000;
 pub const DEFAULT_REQUEST_RETENTION_COUNT: i64 = 1_000_000;
+/// 维护记录的默认保留策略（与改造前 `maintenance::storage` 的硬编码一致）
+pub const DEFAULT_MAINTENANCE_RECORD_RETENTION_DAYS: i64 = 30;
+pub const DEFAULT_MAINTENANCE_RECORD_MAX_COUNT: i64 = 2_000;
 pub const RETENTION_MIN_COUNT: i64 = 1;
 pub const RETENTION_MAX_COUNT: i64 = 100_000_000;
+/// 维护记录条数上限的范围（记录行数远小于事件日志，上限单独设一档）
+pub const MAINTENANCE_RECORD_MIN_COUNT: i64 = 1;
+pub const MAINTENANCE_RECORD_MAX_COUNT: i64 = 100_000;
 
 /// **历史**路由优先级键：`{"workbuddy": 10, "raccoon": 20}`。
 ///
@@ -446,6 +456,10 @@ pub struct RetentionSettings {
     pub request_count: i64,
     /// 按天聚合保留天数
     pub daily_days: i64,
+    /// 维护记录保留天数
+    pub maintenance_days: i64,
+    /// 维护记录保留条数上限
+    pub maintenance_count: i64,
 }
 
 impl Default for RetentionSettings {
@@ -456,6 +470,8 @@ impl Default for RetentionSettings {
             request_days: DEFAULT_REQUEST_RETENTION_DAYS,
             request_count: DEFAULT_REQUEST_RETENTION_COUNT,
             daily_days: DEFAULT_DAILY_RETENTION_DAYS,
+            maintenance_days: DEFAULT_MAINTENANCE_RECORD_RETENTION_DAYS,
+            maintenance_count: DEFAULT_MAINTENANCE_RECORD_MAX_COUNT,
         }
     }
 }
@@ -469,6 +485,8 @@ pub struct RetentionPatch {
     pub request_days: Option<i64>,
     pub request_count: Option<i64>,
     pub daily_days: Option<i64>,
+    pub maintenance_days: Option<i64>,
+    pub maintenance_count: Option<i64>,
 }
 
 // ─── 定时任务设置的键名与边界（config.json 里的字段名**就是契约**）─────

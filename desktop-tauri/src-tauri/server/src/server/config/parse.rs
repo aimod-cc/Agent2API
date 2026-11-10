@@ -208,6 +208,18 @@ pub(super) fn retention_from(map: &Map<String, Value>) -> RetentionSettings {
             RETENTION_MAX_COUNT,
         ),
         daily_days: days_field(map, KEY_DAILY_RETENTION_DAYS, defaults.daily_days),
+        maintenance_days: days_field(
+            map,
+            KEY_MAINTENANCE_RECORD_RETENTION_DAYS,
+            defaults.maintenance_days,
+        ),
+        maintenance_count: bounded_int_field(
+            map,
+            KEY_MAINTENANCE_RECORD_MAX_COUNT,
+            defaults.maintenance_count,
+            MAINTENANCE_RECORD_MIN_COUNT,
+            MAINTENANCE_RECORD_MAX_COUNT,
+        ),
     }
 }
 

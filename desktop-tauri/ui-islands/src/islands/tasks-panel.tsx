@@ -1,7 +1,9 @@
 import * as React from 'react'
 import { createRoot } from 'react-dom/client'
 import { mountOnPage } from '../island-lazy'
+import { confirmDialog } from '@ui'
 import { t } from '../i18n'
+import { callJson } from './assistant-api'
 import { MaintenancePanel } from '../../../ui-shared/maintenance-panel'
 import type { MaintenanceApi, MaintenanceDetail, MaintenanceOverview, MaintenanceQuery, MaintenanceTask, MaintenanceTaskId } from '../../../ui-shared/maintenance-types'
 
@@ -32,7 +34,11 @@ const api: MaintenanceApi = {
   detail: id => bridge().getMaintenanceRecord(id),
   run: id => bridge().runMaintenance(id),
   retry: (id, itemId) => bridge().retryMaintenance(id, itemId),
+  clear: () => callJson('POST', '/api/maintenance/records/clear', {}),
   save: (id, patch) => bridge().saveScheduledTask(id, patch),
+  // 维护记录的保留策略没有专用桥方法，直接走管理 API 的部分更新：
+  // 只带这两个键，其余保留设置不受影响
+  saveStorage: patch => callJson('PUT', '/api/retention', patch),
 }
 
 function AutoMaintenancePage() {
@@ -46,6 +52,7 @@ function AutoMaintenancePage() {
     return () => { window.removeEventListener('wb:page', onPage); window.removeEventListener('wb:maintenance-refresh', onRefresh) }
   }, [])
   return <MaintenancePanel api={api} active={active} revision={revision}
+    confirmClear={() => confirmDialog(t('确定清空全部维护执行记录？清空后无法恢复。'))}
     notify={(message, kind) => host().wbApp?.toast?.(message, kind)}
     onChanged={() => host().wbApp?.refresh?.()}
     onAccount={id => { host().wbApp?.showPage?.('accounts'); host().wbAccountPanel?.open(id) }} />

@@ -24,13 +24,15 @@ const initialQuery: MaintenanceQuery = { taskId: '', source: '', status: '', key
  * 其余数据流一律不动：20 秒静默轮询 + 页面可见性、搜索 300ms 防抖、明细按 id 缓存
  * （保留最近 20 条）、执行中的记录跑完自动重取、翻页越界回退、busy 互斥。
  */
-export function MaintenancePanel({ api, active = true, revision = 0, onAccount, onChanged, notify }: {
+export function MaintenancePanel({ api, active = true, revision = 0, onAccount, onChanged, notify, confirmClear }: {
   api: MaintenanceApi
   active?: boolean
   revision?: number
   onAccount?(id: string): void
   onChanged?(): void | Promise<unknown>
   notify?(message: string, kind?: 'ok' | 'err'): void
+  /** 清理执行记录前的确认：桌面与手机两端各用自己的确认弹窗实现 */
+  confirmClear(): Promise<boolean>
 }) {
   const [overview, setOverview] = React.useState<MaintenanceOverview | null>(null)
   const [query, setQuery] = React.useState(initialQuery)
@@ -45,6 +47,7 @@ export function MaintenancePanel({ api, active = true, revision = 0, onAccount, 
   const [details, setDetails] = React.useState<Record<string, MaintenanceDetail>>({})
   const [detailLoading, setDetailLoading] = React.useState('')
   const [detailError, setDetailError] = React.useState<Record<string, string>>({})
+  const [clearing, setClearing] = React.useState(false)
   const detailInFlight = React.useRef(new Set<string>())
   const operation = React.useRef(false)
   const sequence = React.useRef(0)
@@ -144,6 +147,21 @@ export function MaintenancePanel({ api, active = true, revision = 0, onAccount, 
     setExpanded(latest.id)
     void fetchDetail(latest.id)
   }
+  const clearRecords = async () => {
+    if (operation.current) return
+    if (!await confirmClear()) return
+    operation.current = true
+    setClearing(true)
+    setActionError('')
+    try {
+      const result = await api.clear()
+      notify?.(t('已清理 {n} 条维护记录', { n: result.cleared }), 'ok')
+      await load(true)
+      try { await onChanged?.() } catch { /* 清理已经落库，页面同步失败不重试。 */ }
+    } catch (failure) {
+      if (mounted.current) setActionError(failure instanceof Error ? failure.message : String(failure))
+    } finally { operation.current = false; if (mounted.current) setClearing(false) }
+  }
   const total = overview?.records.total ?? 0
   React.useEffect(() => {
     if (!overview || loading) return
@@ -194,10 +212,14 @@ export function MaintenancePanel({ api, active = true, revision = 0, onAccount, 
         retentionDays={overview.retentionDays}
         maxRecords={overview.maxRecords}
         onRetry={(runId, itemId) => { const run = runs.find(item => item.id === runId); if (run) void execute(run.taskId, runId, itemId) }}
+        onClear={() => void clearRecords()}
+        clearing={clearing}
         onAccount={onAccount}
       />
     </> : null}
 
-    {settingsOpen && overview ? <MaintenanceSettings tasks={overview.tasks} api={api} onClose={() => setSettingsOpen(false)} onSaved={() => void load(true)} /> : null}
+    {settingsOpen && overview ? <MaintenanceSettings tasks={overview.tasks} api={api}
+      retentionDays={overview.retentionDays} maxRecords={overview.maxRecords}
+      onClose={() => setSettingsOpen(false)} onSaved={() => void load(true)} /> : null}
   </div>
 }

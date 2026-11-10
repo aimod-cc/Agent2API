@@ -27,7 +27,7 @@ import type { MaintenanceDetail, MaintenanceQuery, MaintenanceRun, MaintenanceTa
 
 export function MaintenanceRecords({ compact, loading, busy, runs, total, page, pages, query, search,
   onSearch, onQuery, onPage, openId, onToggle, detail, detailLoading, detailError, onReloadDetail,
-  retentionDays, maxRecords, onRetry, onAccount }: {
+  retentionDays, maxRecords, onRetry, onClear, clearing, onAccount }: {
   compact: boolean
   loading: boolean
   busy: boolean
@@ -49,6 +49,9 @@ export function MaintenanceRecords({ compact, loading, busy, runs, total, page, 
   retentionDays: number
   maxRecords: number
   onRetry(runId: string, itemId?: string): void
+  /** 清空全部已结束的执行记录（确认弹窗在页面层） */
+  onClear(): void
+  clearing: boolean
   onAccount?(accountId: string): void
 }) {
   const resultOptions = [{ value: '', label: t('全部结果') }, { value: 'failed', label: t('有失败项') }, { value: 'success', label: t('无失败项') }]
@@ -88,6 +91,10 @@ export function MaintenanceRecords({ compact, loading, busy, runs, total, page, 
         className='maintenance-push maintenance-search'
         onChange={event => onSearch(event.target.value)}
       />
+      {/* 与请求日志列表头的「清理」同一套配色（destructive） */}
+      <Button size='sm' variant='destructive' disabled={busy || loading || clearing} onClick={onClear}>
+        {clearing ? t('清理中…') : t('清理')}
+      </Button>
     </div>
 
     {compact

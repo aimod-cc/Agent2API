@@ -8,14 +8,67 @@ use crate::server::db::Db;
 use crate::server::logging;
 
 use super::types::{self, Detail, Item, Query, Run};
-
-pub const RETENTION_DAYS: i64 = 30;
-pub const MAX_RECORDS: i64 = 2000;
+use crate::server::config;
 static DB: OnceLock<Option<Db>> = OnceLock::new();
 const COLUMNS: &str = "id, task_id, source, retry_of, started_at, finished_at, status, refreshed, skipped, failed, total, error, metadata, duration_ms";
 
+/// 按当前保留设置清理已结束的历史记录（天数与条数上限都以设置为准）。
+///
+/// 在每轮记录落库后与「设置页把保留值改小」这两个时机调用：后者不主动清理的话，
+/// 旧数据要等到下一次维护执行才消失，界面会显得「改了没生效」。
+/// 数据库与事务错误向调用方返回，配置已保存时由设置入口明确报告清理失败。
+pub fn prune() -> Result<(u64, u64), String> {
+    let settings = config::retention_settings();
+    let db = database()?;
+    db.with_mut(|conn| -> Result<(u64, u64), String> {
+        let tx = sql(conn.transaction())?;
+        let pruned = prune_with(&tx, settings.maintenance_days, settings.maintenance_count)?;
+        sql(tx.commit())?;
+        Ok(pruned)
+    })
+    .ok_or_else(|| "维护记录数据库繁忙".to_string())?
+}
+
+/// 一条事务里的清理动作，返回（按天数清理的行数，按条数清理的行数）。
+fn prune_with(tx: &rusqlite::Transaction<'_>, retention_days: i64, max_records: i64) -> Result<(u64, u64), String> {
+    let cutoff = logging::now_ms().saturating_sub(retention_days.max(1) * 86_400_000);
+    let expired = sql(tx.execute(
+        "DELETE FROM maintenance_runs WHERE status != 'running' AND started_at < ?1",
+        params![cutoff],
+    ))?;
+    let overflow = sql(tx.execute(
+        "DELETE FROM maintenance_runs WHERE status != 'running' AND id NOT IN (SELECT id FROM maintenance_runs WHERE status != 'running' ORDER BY started_at DESC, id DESC LIMIT ?1)",
+        params![max_records.max(1)],
+    ))?;
+    sql(tx.execute(
+        "DELETE FROM maintenance_items WHERE NOT EXISTS (SELECT 1 FROM maintenance_runs r WHERE r.id = maintenance_items.run_id)",
+        [],
+    ))?;
+    Ok((expired as u64, overflow as u64))
+}
+
 pub fn install(db: Option<Db>) {
     let _ = DB.set(db);
+}
+
+/// 手动清理：删掉全部已结束的执行记录与孤儿明细，运行中的记录不动。
+/// 返回删除的记录条数。
+pub fn clear() -> Result<u64, String> {
+    let db = database()?;
+    db.with_mut(|conn| -> Result<u64, String> {
+        let tx = sql(conn.transaction())?;
+        let cleared = sql(tx.execute(
+            "DELETE FROM maintenance_runs WHERE status != 'running'",
+            [],
+        ))?;
+        sql(tx.execute(
+            "DELETE FROM maintenance_items WHERE NOT EXISTS (SELECT 1 FROM maintenance_runs r WHERE r.id = maintenance_items.run_id)",
+            [],
+        ))?;
+        sql(tx.commit())?;
+        Ok(cleared as u64)
+    })
+    .unwrap_or_else(|| Err("维护记录数据库不可用".to_string()))
 }
 
 fn database() -> Result<&'static Db, String> {
@@ -132,9 +185,8 @@ impl Recorder {
                 params![self.run.id, self.run.finished_at, self.run.status, refreshed as i64, skipped as i64, failed as i64, results.len() as i64, encoded_metadata, self.run.duration_ms],
             ))?;
             recover_interrupted(&tx)?;
-            let cutoff = logging::now_ms().saturating_sub(RETENTION_DAYS * 86_400_000);
-            sql(tx.execute("DELETE FROM maintenance_runs WHERE status != 'running' AND (started_at < ?1 OR id IN (SELECT id FROM maintenance_runs WHERE status != 'running' ORDER BY started_at DESC, id DESC LIMIT -1 OFFSET ?2))", params![cutoff, MAX_RECORDS]))?;
-            sql(tx.execute("DELETE FROM maintenance_items WHERE NOT EXISTS (SELECT 1 FROM maintenance_runs r WHERE r.id = maintenance_items.run_id)", []))?;
+            let settings = config::retention_settings();
+            prune_with(&tx, settings.maintenance_days, settings.maintenance_count)?;
             sql(tx.commit())
         }).ok_or_else(|| "维护记录数据库繁忙".to_string()).and_then(|result| result);
         if let Err(error) = result {

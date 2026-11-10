@@ -16,12 +16,13 @@ pub async fn overview(
     let result = (|| -> Result<Value, String> {
         let records = maintenance::storage::list(&query)?;
         let latest = maintenance::storage::latest()?;
+        let retention = crate::server::config::retention_settings();
         Ok(json!({
             "tasks": [scheduled_tasks::task_by_id(maintenance::CREDENTIAL), scheduled_tasks::task_by_id(maintenance::MODEL)],
             "latest": latest,
             "records": records,
-            "retentionDays": maintenance::storage::RETENTION_DAYS,
-            "maxRecords": maintenance::storage::MAX_RECORDS,
+            "retentionDays": retention.maintenance_days,
+            "maxRecords": retention.maintenance_count,
         }))
     })();
     match result {
@@ -36,6 +37,10 @@ pub async fn entry(State(state): State<ServerState>, request: axum::extract::Req
     let rest = path.strip_prefix("/api/maintenance/").unwrap_or_default();
     let segments = rest.split('/').collect::<Vec<_>>();
     match (method.clone(), segments.as_slice()) {
+        (Method::POST, ["records", "clear"]) => match maintenance::storage::clear() {
+            Ok(cleared) => ok_json(json!({ "cleared": cleared })),
+            Err(error) => error_response(500, error),
+        },
         (Method::GET, ["records", id]) => match maintenance::storage::detail(id) {
             Ok(detail) => ok_json(json!(detail)),
             Err(error) => error_response(
