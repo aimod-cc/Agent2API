@@ -78,6 +78,11 @@ export type ManageModel = {
   reasoningFixedLevel?: unknown
   reasoningBindingSupported?: unknown
   reasoningSource?: unknown
+  /** 后端解析出的 models.dev canonical 标识与命中方式（管理页解释来源） */
+  modelsDevId?: unknown
+  modelsDevMatch?: unknown
+  modelsDevCandidates?: unknown
+  modelsDevBinding?: unknown
   /**
    * **可见性**：这个模型在官方客户端里是否会被列出。
    *

@@ -51,7 +51,8 @@ impl RequestNeeds {
 fn manifest(provider: &str) -> Vec<Value> {
     if let Some(owner) = custom_providers::get(provider) {
         owner.get("models").and_then(Value::as_array).cloned().unwrap_or_default().into_iter().map(|mut item| {
-            super::model_meta::apply(&mut item);
+            let id = model_id(&item);
+            super::model_meta::apply(provider, &mut item, Some(&id));
             let overrides = capability::normalize_object(item.get("capabilities"));
             capability::apply_overrides(&mut item, &overrides);
             item

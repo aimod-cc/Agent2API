@@ -24,7 +24,9 @@
 //! 越过冷却（`ManualBackoff::Bypass`：用户按按钮往往正是刚把网络问题修好）。
 
 use std::collections::HashMap;
+use std::io::Read;
 
+use flate2::read::GzDecoder;
 use serde_json::{json, Value};
 
 use crate::server::config;
@@ -37,8 +39,9 @@ use super::snapshot::{self, Record, Snapshot};
 const API_URL: &str = "https://models.dev/api.json";
 const MODELS_URL: &str = "https://models.dev/models.json";
 
-/// 单次请求总超时（api.json 有几 MB，给足一分钟；超时即失败、不产半份索引）。
-const REQUEST_TIMEOUT_MS: u64 = 60_000;
+/// 单次请求总超时（两个官方文件都较大，国内网络经代理经常需要一分钟以上；
+/// 与 `scripts/sync-modelsdev.mjs` 保持两分钟，超时即失败、不产半份索引）。
+const REQUEST_TIMEOUT_MS: u64 = 120_000;
 
 /// 两次刷新之间的最小间隔（防连点 / 防两个进程并排打；手动也不越过）。
 const MIN_GAP_MS: i64 = 5_000;
@@ -65,7 +68,11 @@ pub async fn refresh(manual: bool, interval_ms: i64) -> Value {
         row["message"] = json!("已在设置里关闭 models.dev 模型元数据");
         return row;
     }
-    let backoff = if manual { ManualBackoff::Bypass } else { ManualBackoff::Respect };
+    let backoff = if manual {
+        ManualBackoff::Bypass
+    } else {
+        ManualBackoff::Respect
+    };
     let guard = match task_state::claim(
         &format!("modelRefresh:{SCHEDULE_SCOPE}"),
         interval_ms,
@@ -80,7 +87,11 @@ pub async fn refresh(manual: bool, interval_ms: i64) -> Value {
             // 会与「按钮其实能立刻重试」自相矛盾 —— 与各家目录刷新同一口径，
             // 见 `providers::catalog_refresh::deferred_message` 的说明。
             row["message"] = json!(if state.retry_at > logging::now_ms() || state.running() {
-                if manual { state.waiting_message_bypassing() } else { state.waiting_message() }
+                if manual {
+                    state.waiting_message_bypassing()
+                } else {
+                    state.waiting_message()
+                }
             } else {
                 "沿用缓存，尚未到刷新时间".to_string()
             });
@@ -126,26 +137,68 @@ async fn fetch_and_reduce() -> Result<(Snapshot, usize), String> {
 async fn fetch_json(url: &str) -> Result<Value, String> {
     let response = client::fetch_public(
         url,
-        &[("accept".to_string(), "application/json".to_string())],
+        &[
+            ("accept".to_string(), "application/json".to_string()),
+            // `models.dev` 的两个官方文件较大，节点通常支持 gzip；
+            // 网关的 reqwest 未启用自动解压特性，因此在读完响应后显式解码
+            ("accept-encoding".to_string(), "gzip".to_string()),
+        ],
         Some(REQUEST_TIMEOUT_MS),
     )
     .await?;
     if !response.status().is_success() {
         return Err(format!("{url} 返回 HTTP {}", response.status().as_u16()));
     }
-    response.json::<Value>().await.map_err(|error| format!("{url} 响应不是合法 JSON：{error}"))
+    let content_encoding = response
+        .headers()
+        .get(reqwest::header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let bytes = response.bytes().await.map_err(|error| {
+        if error.is_timeout() {
+            format!("{url} 响应读取超时（超过 {} 秒）", REQUEST_TIMEOUT_MS / 1000)
+        } else {
+            format!("{url} 响应读取失败：{error}")
+        }
+    })?;
+    decode_json_body(url, &content_encoding, bytes.as_ref())
+}
+
+fn decode_json_body(
+    url: &str,
+    content_encoding: &str,
+    bytes: &[u8],
+) -> Result<Value, String> {
+    let decoded = match content_encoding.trim() {
+        "" | "identity" => bytes.to_vec(),
+        "gzip" => {
+            let mut decoded = Vec::new();
+            GzDecoder::new(bytes)
+                .read_to_end(&mut decoded)
+                .map_err(|error| format!("{url} gzip 响应解压失败：{error}"))?;
+            decoded
+        }
+        encoding => return Err(format!("{url} 返回不支持的压缩编码：{encoding}")),
+    };
+    serde_json::from_slice::<Value>(&decoded).map_err(|error| {
+        format!(
+            "{url} 响应不是合法 JSON（收到 {} 字节）：{error}",
+            decoded.len()
+        )
+    })
 }
 
 /// 两份官方 JSON → 精简索引（与 `scripts/sync-modelsdev.mjs` 逐字同口径）。
 fn reduce(api: &Value, models: &Value) -> Option<Snapshot> {
-    let mut index: HashMap<String, Record> = HashMap::new();
+    let mut records: Vec<Record> = Vec::new();
+    let mut by_canonical: HashMap<String, usize> = HashMap::new();
     // ① canonical 条目的能力位与上下限
     for (canonical, entry) in models.as_object()? {
         if !is_chat_model(entry) {
             continue;
         }
-        let key = snapshot::key_of(canonical);
-        if key.is_empty() {
+        if snapshot::key_of(canonical).is_empty() {
             continue;
         }
         let input = entry
@@ -154,26 +207,32 @@ fn reduce(api: &Value, models: &Value) -> Option<Snapshot> {
             .cloned()
             .unwrap_or_default();
         let has = |name: &str| input.iter().any(|item| item.as_str() == Some(name));
-        index.insert(
-            key,
-            Record {
-                canonical: canonical.clone(),
-                reasoning: entry.get("reasoning").and_then(Value::as_bool),
-                tool_call: entry.get("tool_call").and_then(Value::as_bool),
-                images: Some(has("image")),
-                video: Some(has("video")),
-                context: limit_of(entry.pointer("/limit/context")),
-                output: limit_of(entry.pointer("/limit/output")),
-                levels: Vec::new(),
-            },
-        );
+        by_canonical.insert(canonical.to_ascii_lowercase(), records.len());
+        records.push(Record {
+            canonical: canonical.clone(),
+            name: entry
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string),
+            reasoning: entry.get("reasoning").and_then(Value::as_bool),
+            tool_call: entry.get("tool_call").and_then(Value::as_bool),
+            images: Some(has("image")),
+            video: Some(has("video")),
+            context: limit_of(entry.pointer("/limit/context")),
+            output: limit_of(entry.pointer("/limit/output")),
+            levels: Vec::new(),
+        });
     }
     // ② provider 条目的命名档位（lab 家优先，其次 provider id 字典序）
-    let mut picks: HashMap<String, (Vec<String>, bool)> = HashMap::new();
+    let mut picks: HashMap<String, (Vec<String>, bool, String)> = HashMap::new();
     let mut providers: Vec<(&String, &Value)> = api.as_object()?.iter().collect();
     providers.sort_by(|(left, _), (right, _)| left.cmp(right));
     for (provider_id, provider) in providers {
-        let Some(entries) = provider.get("models").and_then(Value::as_object) else { continue };
+        let Some(entries) = provider.get("models").and_then(Value::as_object) else {
+            continue;
+        };
         for entry in entries.values() {
             let canonical = entry
                 .get("canonical_model_id")
@@ -181,29 +240,33 @@ fn reduce(api: &Value, models: &Value) -> Option<Snapshot> {
                 .filter(|value| !value.is_empty())
                 .or_else(|| entry.get("id").and_then(Value::as_str))
                 .unwrap_or_default();
-            let key = snapshot::key_of(canonical);
-            if key.is_empty() {
+            if snapshot::key_of(canonical).is_empty() {
                 continue;
             }
-            let Some(levels) = effort_levels(entry) else { continue };
+            let pick_key = canonical.to_ascii_lowercase();
+            let Some(levels) = effort_levels(entry) else {
+                continue;
+            };
             let is_lab = canonical.split('/').next() == Some(provider_id.as_str());
-            match picks.get(&key) {
+            match picks.get(&pick_key) {
                 // 实验室自述的那条优先；两条都不是 lab 时按 provider 名序取第一条
-                Some((_, true)) => continue,
-                Some((_, false)) if !is_lab => continue,
-                _ => picks.insert(key, (levels, is_lab)),
+                Some((_, true, _)) => continue,
+                Some((_, false, _)) if !is_lab => continue,
+                _ => picks.insert(pick_key, (levels, is_lab, canonical.to_string())),
             };
         }
     }
-    for (key, (levels, _)) in picks {
-        if let Some(record) = index.get_mut(&key) {
-            record.levels = levels;
+    for (levels, _, canonical) in picks.into_values() {
+        if let Some(index) = by_canonical.get(&canonical.to_ascii_lowercase()).copied() {
+            if let Some(record) = records.get_mut(index) {
+                record.levels = levels;
+            }
         }
     }
-    if index.is_empty() {
+    if records.is_empty() {
         return None;
     }
-    Some(Snapshot::new(index, logging::now_ms(), "network"))
+    Some(Snapshot::new(records, logging::now_ms(), "network"))
 }
 
 /// 正整数上限，其余（0 / 负数 / 小数 / 非数字）→ `None`（=「这份数据没说」）。
@@ -222,7 +285,10 @@ fn is_chat_model(entry: &Value) -> bool {
             return false;
         }
     }
-    match entry.pointer("/modalities/output").and_then(Value::as_array) {
+    match entry
+        .pointer("/modalities/output")
+        .and_then(Value::as_array)
+    {
         Some(output) => output.iter().any(|item| item.as_str() == Some("text")),
         None => true,
     }
@@ -245,4 +311,30 @@ fn effort_levels(entry: &Value) -> Option<Vec<String>> {
         .map(str::to_string)
         .collect();
     (!levels.is_empty()).then_some(levels)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+
+    #[test]
+    fn gzip_json_is_decoded_before_parsing() {
+        let body = br#"{"models":{"demo/model":{"name":"Demo"}}}"#;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(body).expect("gzip input");
+        let compressed = encoder.finish().expect("gzip finish");
+        let value = decode_json_body("https://models.dev/models.json", "gzip", &compressed)
+            .expect("gzip JSON should decode");
+        assert_eq!(value["models"]["demo/model"]["name"], "Demo");
+    }
+
+    #[test]
+    fn unsupported_content_encoding_is_reported() {
+        let error = decode_json_body("https://models.dev/models.json", "br", b"{}")
+            .expect_err("unsupported encoding must fail");
+        assert!(error.contains("不支持的压缩编码"));
+    }
 }

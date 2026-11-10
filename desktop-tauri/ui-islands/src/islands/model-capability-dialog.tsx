@@ -29,7 +29,7 @@
 
 import * as React from 'react'
 import {
-  Button, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle,
+  Button, Checkbox, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle,
   Input, Label, SegmentedControl, type SegmentedControlOption,
 } from '@ui'
 
@@ -40,8 +40,9 @@ import {
 } from './model-capability'
 import * as customSource from './models-custom-source'
 import {
-  accept, errorMessage, modelRowOf, providerLabelOf, toast, writeCapabilities,
-  type CapabilityContext,
+  accept, errorMessage, modelRowOf, PartialCapabilitySaveError, providerLabelOf, readModelsDevBinding,
+  searchModelsDev, toast,
+  writeCapabilities, writeModelsDevBinding, type CapabilityContext, type ModelsDevBinding, type ModelsDevChoice,
 } from './models-panel-state'
 import { t } from '../i18n'
 
@@ -106,6 +107,16 @@ function setKeysOf(capabilities: ReturnType<typeof capabilitiesOf>, overrides: C
   })
 }
 
+function bindingOf(value: unknown): ModelsDevBinding {
+  if (!value || typeof value !== 'object') return { modelsDevId: '', sourceName: '', matchByNames: false }
+  const object = value as Record<string, unknown>
+  return {
+    modelsDevId: typeof object.modelsDevId === 'string' ? object.modelsDevId : '',
+    sourceName: typeof object.sourceName === 'string' ? object.sourceName : '',
+    matchByNames: object.matchByNames === true,
+  }
+}
+
 /**
  * 草稿初值：**已设置的项**给现值（数值键给数字串，布尔键给 'on' / 'off'），
  * 其余留空 / 'inherit'（数值键的 placeholder 会显示上游值）。
@@ -135,6 +146,28 @@ export function CapabilityDialog({ context, onClose }: { context: CapabilityCont
   const [draft, setDraft] = React.useState<CapabilityDraft>(() => draftFrom(capabilities, setKeys))
   const [status, setStatus] = React.useState('')
   const [saving, setSaving] = React.useState(false)
+  const initialBinding = bindingOf(row?.modelsDevBinding)
+  const [modelsDevId, setModelsDevId] = React.useState(initialBinding.modelsDevId || '')
+  const [sourceName, setSourceName] = React.useState(initialBinding.sourceName || row?.name || '')
+  const [matchByNames, setMatchByNames] = React.useState(initialBinding.matchByNames === true)
+  const [metadataQuery, setMetadataQuery] = React.useState(initialBinding.modelsDevId || row?.name || '')
+  const [metadataChoices, setMetadataChoices] = React.useState<ModelsDevChoice[]>([])
+  /** 用户先碰到绑定或搜索时，晚到的初次读取不能把输入覆盖回旧值 */
+  const bindingTouched = React.useRef(false)
+  /** 搜索请求的代际：慢旧结果不能覆盖用户最新一次搜索 */
+  const metadataSearch = React.useRef(0)
+
+  React.useEffect(() => {
+    let cancelled = false
+    void readModelsDevBinding(context.provider, context.id).then(binding => {
+      if (cancelled || !binding || bindingTouched.current) return
+      setModelsDevId(String(binding.modelsDevId || ''))
+      setSourceName(String(binding.sourceName || row?.name || ''))
+      setMatchByNames(binding.matchByNames === true)
+      setMetadataQuery(String(binding.modelsDevId || row?.name || ''))
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [context.provider, context.id, row?.name])
 
   /** 行没了：给一句解释 + 只能关闭（保存按钮打空靶比这难查得多） */
   if (!row) {
@@ -197,12 +230,34 @@ export function CapabilityDialog({ context, onClose }: { context: CapabilityCont
     setSaving(true)
     setStatus(t('保存中…'))
     try {
-      accept(await writeCapabilities(context.provider, context.id, patchFromDraft(draft)))
+      const view = await writeCapabilities(context.provider, context.id, patchFromDraft(draft), {
+        modelsDevId: modelsDevId.trim() || null,
+        sourceName: sourceName.trim() || row?.name || '',
+        matchByNames,
+      })
+      // 自定义家没有整份 manage 视图，能力写入本身会刷新页面数据
+      if (view) accept(view)
       onClose()
-      toast(t('✅ 已保存 {id} 的能力位（{provider}）', { id: rowId, provider: providerLabel }))
+      toast(t('✅ 已保存 {id} 的能力位与 models.dev 身份（{provider}）', { id: rowId, provider: providerLabel }))
     } catch (error) {
-      setStatus(t('保存失败：{message}', { message: errorMessage(error) }))
+      setStatus(error instanceof PartialCapabilitySaveError
+        ? t('能力位已保存，models.dev 身份保存失败：{message}', { message: error.reason })
+        : t('保存失败：{message}', { message: errorMessage(error) }))
       setSaving(false)
+    }
+  }
+
+  async function findMetadata(): Promise<void> {
+    const token = ++metadataSearch.current
+    setStatus(t('搜索 models.dev…'))
+    try {
+      const rows = await searchModelsDev(metadataQuery.trim())
+      if (token !== metadataSearch.current) return
+      setMetadataChoices(rows)
+      setStatus(rows.length ? '' : t('没有找到匹配的 models.dev 模型'))
+    } catch (error) {
+      if (token !== metadataSearch.current) return
+      setStatus(t('搜索失败：{message}', { message: errorMessage(error) }))
     }
   }
 
@@ -221,6 +276,50 @@ export function CapabilityDialog({ context, onClose }: { context: CapabilityCont
           {/* 预览行：改的是哪一条模型（与映射弹窗的预览区同一用意） */}
           <div className='rounded-md border border-border bg-surface-inset px-3 py-2.5 font-mono text-[12px] text-subtle'>
             <b className='text-primary-fg'>{row.id}</b>{t('（{provider}）', { provider: providerLabel })}
+          </div>
+
+          <div className='flex flex-col gap-2 rounded-md border border-border px-3 py-3'>
+            <Label>{t('models.dev 身份')}</Label>
+            <div className='flex gap-2'>
+              <Input value={metadataQuery} disabled={saving} autoComplete='off' spellCheck={false}
+                placeholder={t('搜索模型名称或 canonical ID')}
+                onChange={event => { bindingTouched.current = true; setMetadataQuery(event.currentTarget.value) }}
+                onKeyDown={event => {
+                  if (event.key === 'Enter') { event.preventDefault(); void findMetadata() }
+                }} />
+              <Button variant='outline' disabled={saving} onClick={() => void findMetadata()}>{t('搜索')}</Button>
+            </div>
+            {metadataChoices.length ? (
+              <div className='max-h-36 overflow-y-auto rounded border border-border'>
+                {metadataChoices.map(choice => (
+                  <button key={choice.id} type='button' disabled={saving}
+                    className='flex w-full flex-col border-b border-border px-2 py-1.5 text-left last:border-b-0 hover:bg-surface-inset'
+                    onClick={() => {
+                      bindingTouched.current = true
+                      setModelsDevId(choice.id)
+                      setMetadataQuery(choice.id)
+                      setMetadataChoices([])
+                    }}>
+                    <span className='font-mono text-[12px] text-primary-fg'>{choice.id}</span>
+                    {choice.name ? <span className='text-xs text-subtle'>{choice.name}</span> : null}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            <Input value={modelsDevId} disabled={saving} autoComplete='off' spellCheck={false}
+              placeholder={t('已选择的 canonical ID（留空 = 未绑定）')}
+              onChange={event => { bindingTouched.current = true; setModelsDevId(event.currentTarget.value) }} />
+            <Input value={sourceName} disabled={saving} autoComplete='off' spellCheck={false}
+              placeholder={t('用于名称对齐的上游展示名')}
+              onChange={event => { bindingTouched.current = true; setSourceName(event.currentTarget.value) }} />
+            <label className='flex items-start gap-2 text-xs leading-[1.6] text-subtle'>
+              <Checkbox checked={matchByNames} disabled={saving || !modelsDevId.trim()}
+                onCheckedChange={next => { bindingTouched.current = true; setMatchByNames(next === true) }} />
+              <span>{t('允许同一提供商的新模型 ID 按名称复用此映射')}</span>
+            </label>
+            <p className='text-xs leading-[1.6] text-subtle'>
+              {t('名称只在当前提供商内参与唯一候选匹配；精确 ID 绑定始终优先，出现同名冲突时不会自动补齐。')}
+            </p>
           </div>
 
           {TOKEN_KEYS.map(key => (

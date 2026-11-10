@@ -35,7 +35,8 @@ fn scoped_models(store: &AccountStore, scope: Option<&KeyScope>) -> Vec<Model> {
                     return providers::catalog::manifest_for_provider(provider);
                 }
                 custom_providers::models_of(provider).into_iter().map(|mut model| {
-                    model_meta::apply(&mut model);
+                    let id = model_id(&model);
+                    model_meta::apply(provider, &mut model, Some(&id));
                     let overrides = capability::normalize_object(model.get("capabilities"));
                     capability::apply_overrides(&mut model, &overrides);
                     model
