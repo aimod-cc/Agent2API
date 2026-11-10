@@ -156,35 +156,51 @@ function RuleSwitchRow({ enabled, disabled, onChange }: {
 }
 
 /** 弹窗底栏：左边一枚删除（只编辑已有规则时出现），右边取消 + 保存 */
-function RuleDialogFooter({ onClose, onSave, onDelete, disabled }: {
-  onClose(): void; onSave(): void; onDelete?(): void; disabled?: boolean
+function RuleDialogFooter({ busy, deleting, onClose, onSave, onDelete, disabled }: {
+  busy?: boolean; deleting?: boolean
+  onClose(): void
+  onSave(): void
+  onDelete?(): Promise<boolean>
+  disabled?: boolean
 }) {
   return <DialogFooter>
     {onDelete ? <Button variant='destructive' className='mr-auto' disabled={disabled}
-      onClick={() => { onDelete(); onClose() }}>{t('删除规则')}</Button> : null}
-    <Button variant='ghost' disabled={disabled} onClick={onClose}>{t('取消')}</Button>
-    <Button disabled={disabled} onClick={onSave}>{t('保存规则')}</Button>
+      onClick={() => {
+        if (!onDelete) return
+        void Promise.resolve(onDelete()).then(saved => {
+          if (saved !== false) {
+            onClose()
+          }
+        })
+      }}>
+      {deleting ? t('删除中…') : t('删除规则')}</Button> : null}
+    <Button variant='ghost' disabled={busy} onClick={onClose}>{t('取消')}</Button>
+    <Button disabled={disabled} onClick={onSave}>{busy ? t('保存中…') : t('保存规则')}</Button>
   </DialogFooter>
 }
 
 /* ─────────────────── 压缩上下文 ─────────────────── */
 
-function CompactRuleDialog({ rule, models, clients, saving, onClose, onSave, onDelete }: {
+function CompactRuleDialog({ rule, models, clients, saving, error, onClose, onSave, onDelete }: {
   rule: CompactRoute
   models: ModelChoice[]
   clients: CompactView['clients']
   saving: boolean
+  error: string
   onClose(): void
-  onSave(rule: CompactRoute): void
-  onDelete?(): void
+  onSave(rule: CompactRoute): Promise<void>
+  onDelete?(): Promise<boolean>
 }) {
   const [draft, setDraft] = React.useState(rule)
+  const [busy, setBusy] = React.useState(false)
+  const [deleting, setDeleting] = React.useState(false)
   const update = (patch: Partial<CompactRoute>) => setDraft(current => ({ ...current, ...patch }))
   const clientLabel = clients.find(client => client.id === draft.client)?.label || draft.client
   return <Dialog open onOpenChange={next => { if (!next) onClose() }}>
     <DialogContent className='w-[min(520px,calc(100vw-24px))]'>
       <DialogHeader><DialogTitle>{onDelete ? t('编辑规则') : t('添加规则')}</DialogTitle></DialogHeader>
       <DialogBody>
+        {error ? <p className='routing-config-error' role='alert'>{error}</p> : null}
         <p className='text-[12px] leading-[1.7] text-muted-foreground'>
           {t('命中这条规则的压缩请求会改用「压缩模型」重发一次；改写之后按新模型自己的路由挑账号。')}
         </p>
@@ -206,7 +222,17 @@ function CompactRuleDialog({ rule, models, clients, saving, onClose, onSave, onD
             ariaLabel={t('压缩模型')} onChange={target => update({ target })} />
         </DlgField>
       </DialogBody>
-      <RuleDialogFooter disabled={saving} onClose={onClose} onSave={() => onSave(draft)} onDelete={onDelete} />
+      <RuleDialogFooter busy={busy} deleting={deleting} disabled={saving || busy || deleting} onClose={onClose}
+        onSave={() => {
+          if (saving || busy || deleting) return
+          setBusy(true)
+          void onSave(draft).finally(() => setBusy(false))
+        }}
+        onDelete={onDelete ? () => {
+          if (saving || busy || deleting) return Promise.resolve(false)
+          setDeleting(true)
+          return onDelete().finally(() => setDeleting(false))
+        } : undefined} />
     </DialogContent>
   </Dialog>
 }
@@ -221,11 +247,18 @@ export function CompactSpecialPanel({ editor }: { editor: SpecialEditor<CompactC
   const [editing, setEditing] = React.useState<{ rule: CompactRoute; index: number } | null>(null)
   const clientLabel = (id: string) => clients.find(client => client.id === id)?.label || id
   const full = maxRules > 0 && rules.length >= maxRules
-  const write = (index: number, rule: CompactRoute) => editor.update(current => ({
-    ...current,
-    rules: index < 0 ? [...current.rules, rule] : current.rules.map((item, at) => at === index ? rule : item),
-  }))
+  const commit = (index: number, rule: CompactRoute) => editor.commit({
+    ...draft!,
+    rules: index < 0 ? [...draft!.rules, rule] : draft!.rules.map((item, at) => at === index ? rule : item),
+  })
+  const remove = (index: number) => editor.commit({
+    ...draft!, rules: draft!.rules.filter((_, at) => at !== index),
+  })
   const blank: CompactRoute = { client: clients[0]?.id || '', source: '', target: '', enabled: true }
+  const openRule = (rule: CompactRoute, index: number) => {
+    editor.clearError()
+    setEditing({ rule, index })
+  }
   return <RulePanel title={t('压缩上下文')}
     lede={t('命中下面规则的上下文压缩请求，会改用指定的模型压缩一次；账号仍按新模型自己的路由挑。')}
     enabled={Boolean(draft?.enabled)} onEnabled={next => editor.update(current => ({ ...current, enabled: next }))}
@@ -234,7 +267,7 @@ export function CompactSpecialPanel({ editor }: { editor: SpecialEditor<CompactC
     {draft ? <>
       <RuleSection title={t('规则')} count={t('{n} 条', { n: rules.length })}
         action={<Button variant='outline' size='sm' disabled={saving || full || !models.length}
-          onClick={() => setEditing({ rule: blank, index: -1 })}>
+          onClick={() => openRule(blank, -1)}>
           <RouteIcon name='plus' size={13} />{t('添加规则')}
         </Button>}>
         {rules.length ? rules.map((rule, index) => <RuleRow key={index} off={!rule.enabled}
@@ -245,18 +278,19 @@ export function CompactSpecialPanel({ editor }: { editor: SpecialEditor<CompactC
             <span className='rp-row-target'>{rule.target || t('还没选压缩模型')}</span>
           </>}
           side={rule.enabled ? null : t('已停用')}
-          onClick={() => setEditing({ rule, index })} />)
+          onClick={() => openRule(rule, index)} />)
           : <p className='rp-empty'>{t('还没有规则。压缩请求会按原模型照常转发。')}</p>}
       </RuleSection>
       {!models.length ? <p className='rp-note'>{t('没有可选的对话模型，请先启用模型和对应账号。')}</p> : null}
       {full ? <p className='rp-note'>{t('规则最多 {n} 条。', { n: maxRules })}</p> : null}
     </> : null}
-    {editing ? <CompactRuleDialog key={editing.index} rule={editing.rule} models={models} clients={clients} saving={saving}
+    {editing ? <CompactRuleDialog key={editing.index} rule={editing.rule} models={models} clients={clients} saving={saving} error={error}
       onClose={() => setEditing(null)}
-      onSave={rule => { write(editing.index, rule); setEditing(null) }}
-      onDelete={editing.index < 0 ? undefined : () => editor.update(current => ({
-        ...current, rules: current.rules.filter((_, at) => at !== editing.index),
-      }))} /> : null}
+      onSave={async rule => {
+        if (saving) return
+        if (await commit(editing.index, rule)) setEditing(null)
+      }}
+        onDelete={editing.index < 0 ? undefined : () => remove(editing.index)} /> : null}
   </RulePanel>
 }
 
@@ -279,15 +313,18 @@ function visionLabel(models: VisionView['models'], ref: { provider: string; mode
   return `${found?.providerLabel || ref.provider} · ${found?.model || ref.model}`
 }
 
-function VisionRuleDialog({ rule, view, saving, onClose, onSave, onDelete }: {
+function VisionRuleDialog({ rule, view, saving, error, onClose, onSave, onDelete }: {
   rule: VisionRuleItem
   view: VisionView
   saving: boolean
+  error: string
   onClose(): void
-  onSave(rule: VisionRuleItem): void
-  onDelete?(): void
+  onSave(rule: VisionRuleItem): Promise<void>
+  onDelete?(): Promise<boolean>
 }) {
   const [draft, setDraft] = React.useState(rule)
+  const [busy, setBusy] = React.useState(false)
+  const [deleting, setDeleting] = React.useState(false)
   const [candidate, setCandidate] = React.useState('')
   const update = (patch: Partial<VisionRuleItem>) => setDraft(current => ({ ...current, ...patch }))
   const listChoices = view.models.filter(model => model.capabilities?.supportsImages !== true)
@@ -313,6 +350,7 @@ function VisionRuleDialog({ rule, view, saving, onClose, onSave, onDelete }: {
     <DialogContent className='w-[min(560px,calc(100vw-24px))]'>
       <DialogHeader><DialogTitle>{onDelete ? t('编辑规则') : t('添加规则')}</DialogTitle></DialogHeader>
       <DialogBody>
+        {error ? <p className='routing-config-error' role='alert'>{error}</p> : null}
         <p className='text-[12px] leading-[1.7] text-muted-foreground'>
           {t('这条规则里的模型收到图片时按选定的方式处理；没被任何规则选中的模型一律原样放行。')}
         </p>
@@ -332,6 +370,20 @@ function VisionRuleDialog({ rule, view, saving, onClose, onSave, onDelete }: {
             <SelectContent>
               <SelectItem value='assist'>{t('辅助识图')}</SelectItem>
               <SelectItem value='reroute'>{t('整体接管')}</SelectItem>
+            </SelectContent>
+          </Select>
+        </DlgField>
+        <DlgField label={t('图片能力未知时')}>
+          <Select value={draft.unknownCapability} disabled={saving}
+            onValueChange={next => update({ unknownCapability: next as VisionRuleItem['unknownCapability'] })}>
+            <SelectTrigger className='w-full' aria-label={t('图片能力未知时')}><SelectValue>
+              {draft.unknownCapability === 'inherit' ? t('沿用全局设置')
+                : draft.unknownCapability === 'compat' ? t('直接按当前方式兼容') : t('先发送原图，明确拒图后补救')}
+            </SelectValue></SelectTrigger>
+            <SelectContent>
+              <SelectItem value='inherit'>{t('沿用全局设置')}</SelectItem>
+              <SelectItem value='try_original'>{t('先发送原图，明确拒图后补救')}</SelectItem>
+              <SelectItem value='compat'>{t('直接按当前方式兼容')}</SelectItem>
             </SelectContent>
           </Select>
         </DlgField>
@@ -398,7 +450,17 @@ function VisionRuleDialog({ rule, view, saving, onClose, onSave, onDelete }: {
           </DlgField>
         </>}
       </DialogBody>
-      <RuleDialogFooter disabled={saving} onClose={onClose} onSave={() => onSave(draft)} onDelete={onDelete} />
+      <RuleDialogFooter busy={busy} deleting={deleting} disabled={saving || busy || deleting} onClose={onClose}
+        onSave={() => {
+          if (saving || busy || deleting) return
+          setBusy(true)
+          void onSave(draft).finally(() => setBusy(false))
+        }}
+        onDelete={onDelete ? () => {
+          if (saving || busy || deleting) return Promise.resolve(false)
+          setDeleting(true)
+          return onDelete().finally(() => setDeleting(false))
+        } : undefined} />
     </DialogContent>
   </Dialog>
 }
@@ -409,12 +471,19 @@ export function VisionSpecialPanel({ editor }: { editor: SpecialEditor<VisionCon
   const [editing, setEditing] = React.useState<{ rule: VisionRuleItem; index: number } | null>(null)
   const blank: VisionRuleItem = {
     enabled: true, models: [], mode: 'assist', source: 'shared', target: null,
-    reuseResults: true, preferCurrentRoute: true, fallback: 'stop', targets: [],
+    reuseResults: true, preferCurrentRoute: true, fallback: 'stop', targets: [], unknownCapability: 'inherit',
   }
-  const write = (index: number, rule: VisionRuleItem) => editor.update(current => ({
-    ...current,
-    rules: index < 0 ? [...current.rules, rule] : current.rules.map((item, at) => at === index ? rule : item),
-  }))
+  const openRule = (rule: VisionRuleItem, index: number) => {
+    editor.clearError()
+    setEditing({ rule, index })
+  }
+  const commit = (index: number, rule: VisionRuleItem) => editor.commit({
+    ...draft!,
+    rules: index < 0 ? [...draft!.rules, rule] : draft!.rules.map((item, at) => at === index ? rule : item),
+  })
+  const remove = (index: number) => editor.commit({
+    ...draft!, rules: draft!.rules.filter((_, at) => at !== index),
+  })
   const detail = (rule: VisionRuleItem) => {
     const label = visionLabel(view?.models || [], rule.targets[0] || rule.target)
     if (rule.mode === 'assist') {
@@ -432,7 +501,7 @@ export function VisionSpecialPanel({ editor }: { editor: SpecialEditor<VisionCon
     {draft && view ? <>
       <RuleSection title={t('规则')} count={t('{n} 条', { n: rules.length })}
         action={<Button variant='outline' size='sm' disabled={saving}
-          onClick={() => setEditing({ rule: blank, index: -1 })}>
+          onClick={() => openRule(blank, -1)}>
           <RouteIcon name='plus' size={13} />{t('添加规则')}
         </Button>}>
         {rules.length ? rules.map((rule, index) => <RuleRow key={index} off={!rule.enabled}
@@ -441,37 +510,42 @@ export function VisionSpecialPanel({ editor }: { editor: SpecialEditor<VisionCon
             : t('未选择模型')}
           detail={detail(rule)}
           side={rule.enabled ? null : t('已停用')}
-          onClick={() => setEditing({ rule, index })} />)
+          onClick={() => openRule(rule, index)} />)
           : <p className='rp-empty'>{t('还没有规则。图片会照常交给原模型，看不了的就会报错。')}</p>}
       </RuleSection>
       {!view.models.length ? <p className='rp-note'>{t('还没有可用的模型，请先启用模型和对应账号。')}</p> : null}
     </> : null}
-    {editing && view ? <VisionRuleDialog key={editing.index} rule={editing.rule} view={view} saving={saving}
+    {editing && view ? <VisionRuleDialog key={editing.index} rule={editing.rule} view={view} saving={saving} error={error}
       onClose={() => setEditing(null)}
-      onSave={rule => { write(editing.index, rule); setEditing(null) }}
-      onDelete={editing.index < 0 ? undefined : () => editor.update(current => ({
-        ...current, rules: current.rules.filter((_, at) => at !== editing.index),
-      }))} /> : null}
+      onSave={async rule => {
+        if (saving) return
+        if (await commit(editing.index, rule)) setEditing(null)
+      }}
+      onDelete={editing.index < 0 ? undefined : () => remove(editing.index)} /> : null}
   </RulePanel>
 }
 
 /* ─────────────────── 标题生成 ─────────────────── */
 
-function TitleRuleDialog({ rule, models, clients, saving, onClose, onSave, onDelete }: {
+function TitleRuleDialog({ rule, models, clients, saving, error, onClose, onSave, onDelete }: {
   rule: TitleRule
   models: ModelChoice[]
   clients: TitleView['clients']
   saving: boolean
+  error: string
   onClose(): void
-  onSave(rule: TitleRule): void
-  onDelete?(): void
+  onSave(rule: TitleRule): Promise<void>
+  onDelete?(): Promise<boolean>
 }) {
   const [draft, setDraft] = React.useState(rule)
+  const [busy, setBusy] = React.useState(false)
+  const [deleting, setDeleting] = React.useState(false)
   const update = (patch: Partial<TitleRule>) => setDraft(current => ({ ...current, ...patch }))
   return <Dialog open onOpenChange={next => { if (!next) onClose() }}>
     <DialogContent className='w-[min(520px,calc(100vw-24px))]'>
       <DialogHeader><DialogTitle>{onDelete ? t('编辑规则') : t('添加规则')}</DialogTitle></DialogHeader>
       <DialogBody>
+        {error ? <p className='routing-config-error' role='alert'>{error}</p> : null}
         <p className='text-[12px] leading-[1.7] text-muted-foreground'>
           {t('这条规则只改写被识别为标题生成的小请求，普通对话不受影响。')}
         </p>
@@ -499,7 +573,17 @@ function TitleRuleDialog({ rule, models, clients, saving, onClose, onSave, onDel
           </Select>
         </DlgField>
       </DialogBody>
-      <RuleDialogFooter disabled={saving} onClose={onClose} onSave={() => onSave(draft)} onDelete={onDelete} />
+      <RuleDialogFooter busy={busy} deleting={deleting} disabled={saving || busy || deleting} onClose={onClose}
+        onSave={() => {
+          if (saving || busy || deleting) return
+          setBusy(true)
+          void onSave(draft).finally(() => setBusy(false))
+        }}
+        onDelete={onDelete ? () => {
+          if (saving || busy || deleting) return Promise.resolve(false)
+          setDeleting(true)
+          return onDelete().finally(() => setDeleting(false))
+        } : undefined} />
     </DialogContent>
   </Dialog>
 }
@@ -511,11 +595,18 @@ export function TitleSpecialPanel({ editor }: { editor: SpecialEditor<TitleConfi
   const rules = draft?.rules || []
   const [editing, setEditing] = React.useState<{ rule: TitleRule; index: number } | null>(null)
   const clientLabel = (id: string) => clients.find(client => client.id === id)?.label || id
-  const write = (index: number, rule: TitleRule) => editor.update(current => ({
-    ...current,
-    rules: index < 0 ? [...current.rules, rule] : current.rules.map((item, at) => at === index ? rule : item),
-  }))
+  const commit = (index: number, rule: TitleRule) => editor.commit({
+    ...draft!,
+    rules: index < 0 ? [...draft!.rules, rule] : draft!.rules.map((item, at) => at === index ? rule : item),
+  })
+  const remove = (index: number) => editor.commit({
+    ...draft!, rules: draft!.rules.filter((_, at) => at !== index),
+  })
   const blank: TitleRule = { enabled: true, clients: [], model: '', fallback: 'original' }
+  const openRule = (rule: TitleRule, index: number) => {
+    editor.clearError()
+    setEditing({ rule, index })
+  }
   return <RulePanel title={t('标题生成')}
     lede={t('只改写被识别为标题生成的小请求，普通对话不受影响。')}
     enabled={Boolean(draft?.enabled)} onEnabled={next => editor.update(current => ({ ...current, enabled: next }))}
@@ -524,7 +615,7 @@ export function TitleSpecialPanel({ editor }: { editor: SpecialEditor<TitleConfi
     {draft ? <>
       <RuleSection title={t('规则')} count={t('{n} 条', { n: rules.length })}
         action={<Button variant='outline' size='sm' disabled={saving || !models.length}
-          onClick={() => setEditing({ rule: blank, index: -1 })}>
+          onClick={() => openRule(blank, -1)}>
           <RouteIcon name='plus' size={13} />{t('添加规则')}
         </Button>}>
         {rules.length ? rules.map((rule, index) => <RuleRow key={index} off={!rule.enabled}
@@ -538,16 +629,17 @@ export function TitleSpecialPanel({ editor }: { editor: SpecialEditor<TitleConfi
             <span>{rule.fallback === 'original' ? t('失败时退回原模型') : t('失败时直接报错')}</span>
           </>}
           side={rule.enabled ? null : t('已停用')}
-          onClick={() => setEditing({ rule, index })} />)
+          onClick={() => openRule(rule, index)} />)
           : <p className='rp-empty'>{t('还没有规则。标题请求会照常交给原模型。')}</p>}
       </RuleSection>
       {!models.length ? <p className='rp-note'>{t('没有可选的对话模型，请先启用模型和对应账号。')}</p> : null}
     </> : null}
-    {editing ? <TitleRuleDialog key={editing.index} rule={editing.rule} models={models} clients={clients} saving={saving}
+    {editing ? <TitleRuleDialog key={editing.index} rule={editing.rule} models={models} clients={clients} saving={saving} error={error}
       onClose={() => setEditing(null)}
-      onSave={rule => { write(editing.index, rule); setEditing(null) }}
-      onDelete={editing.index < 0 ? undefined : () => editor.update(current => ({
-        ...current, rules: current.rules.filter((_, at) => at !== editing.index),
-      }))} /> : null}
+      onSave={async rule => {
+        if (saving) return
+        if (await commit(editing.index, rule)) setEditing(null)
+      }}
+      onDelete={editing.index < 0 ? undefined : () => remove(editing.index)} /> : null}
   </RulePanel>
 }

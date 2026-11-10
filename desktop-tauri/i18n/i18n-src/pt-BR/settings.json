@@ -252,6 +252,7 @@
   "允许浏览器里的页面跨来源调用网关（/v1/*）": "Permitir que páginas do navegador chamem o gateway de outra origem (/v1/*)",
   "允许的域名": "Hostnames permitidos",
   "先发送原图，明确拒图后补救": "Enviar originais primeiro; adaptar somente após rejeição explícita",
+  "沿用全局设置": "Usar configuração global",
   "先在当前路由范围内找可用的视觉模型，这次请求由视觉模型直接回答，不回原模型；{fallback}": "",
   "先把图片交给视觉模型读一遍，再让原模型结合读到的内容回答。": "O modelo de visão lê a imagem primeiro e o modelo original responde usando o que foi lido.",
   "全局配置": "Configuração global",

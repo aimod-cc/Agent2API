@@ -40,7 +40,7 @@ export function requestRewrite(row: ReplayRow): Rewrite | null {
   const route = row.route as (NonNullable<ReplayRow['route']> & {
     compactRoute?: { source?: string; target?: string; client?: string }
     titleRoute?: { source?: string; target?: string; client?: string }
-    visionCompatibility?: { mode?: string; calls?: unknown[]; target?: { model?: string } }
+    visionCompatibility?: { mode?: string; status?: string; calls?: unknown[]; target?: { model?: string } }
   }) | null | undefined
   if (!route) return null
 
@@ -57,6 +57,7 @@ export function requestRewrite(row: ReplayRow): Rewrite | null {
   const vision = route.visionCompatibility
   if (vision?.mode) {
     // 图片兼容不改「请求的模型」：辅助识图是另起一次读图调用，整体接管才是换模型。
+    if (vision.status === 'skipped') return null
     const calls = Array.isArray(vision.calls) ? vision.calls.length : 0
     const assist = vision.mode === 'assist_call' || vision.mode === 'assist'
     return {

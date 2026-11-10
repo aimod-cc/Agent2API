@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::server::config::vision_compat::{
-    self, Fallback, Mode, ModelRef, ModelSource, OverrideMode, UnknownCapability, VisionSettings, VisionTarget,
+    self, Fallback, Mode, ModelRef, ModelSource, OverrideMode, SaveShape, UnknownCapability, VisionSettings, VisionTarget,
 };
 use crate::server::core::{
     account_store::AccountStore, capability, custom_providers, model_meta, models::model_id,
@@ -157,6 +157,9 @@ pub async fn get_settings(State(state): State<ServerState>) -> Response {
 struct SaveSettings {
     config: VisionSettings,
     revision: String,
+    /// 新界面显式声明规则或投影哪一边是配置源
+    #[serde(default)]
+    shape: Option<SaveShape>,
     /// 旧版客户端会带这个字段（保存前的人工授权确认）。现在改完即生效，不再校验它，
     /// 保留声明只是为了不让老客户端直接拿到 400。
     #[serde(default)]
@@ -178,17 +181,29 @@ fn validate_available(target: &VisionTarget) -> Result<(), GatewayError> {
 }
 
 pub async fn put_settings(State(state): State<ServerState>, body: Bytes) -> Response {
-    let payload = match parse_body(&body).and_then(|value| serde_json::from_value::<SaveSettings>(value)
-        .map_err(|error| GatewayError::bad_request(format!("图片兼容设置不完整：{error}")))) {
+    let parsed = parse_body(&body).and_then(|value| {
+        let has_rules = value.get("config").and_then(Value::as_object)
+            .is_some_and(|config| config.contains_key("rules"));
+        serde_json::from_value::<SaveSettings>(value)
+            .map(|payload| (payload, has_rules))
+            .map_err(|error| GatewayError::bad_request(format!("图片兼容设置不完整：{error}")))
+    });
+    let (payload, has_rules) = match parsed {
         Ok(payload) => payload,
         Err(error) => return response(Err(error)),
     };
+    // 新客户端显式声明形状；旧客户端没有 shape 时保持原行为：非空 rules
+    // 视为规则配置，缺失或空 rules 视为两块投影
+    let shape = payload.shape.unwrap_or_else(|| {
+        if has_rules && !payload.config.rules.is_empty() { SaveShape::ExplicitRules }
+        else { SaveShape::ProjectedBlocks }
+    });
     match tokio::task::spawn_blocking(move || {
         // 校验按「折成规则之后」的那一份来（手机端发的只有两块设置）；
         // 但保存仍交原始载荷给 config::save —— 「同一种方式已有多条规则」那条
         // 拦截要在它那边判，它才拿得到保存前的旧配置。
         let mut normalized = payload.config.clone();
-        normalized.fold_blocks();
+        if shape == SaveShape::ProjectedBlocks { normalized.fold_blocks(); }
         vision_compat::validate(&normalized).map_err(GatewayError::bad_request)?;
         if normalized.enabled {
             for rule in normalized.rules.iter().filter(|rule| rule.enabled && !rule.models.is_empty()) {
@@ -208,7 +223,7 @@ pub async fn put_settings(State(state): State<ServerState>, body: Bytes) -> Resp
                 }
             }
         }
-        vision_compat::save(payload.config, &payload.revision)?;
+        vision_compat::save(payload.config, &payload.revision, shape)?;
         view(&state)
     }).await {
         Ok(result) => response(result),

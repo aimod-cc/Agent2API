@@ -52,13 +52,14 @@ function VisionTag({ route }: { route: unknown }) {
   const modeLabel = value.mode === 'assist' ? t('辅助识图')
     : value.mode === 'reroute' ? t('切换视觉模型') : t('辅助识图调用')
   const statusLabel = value.status === 'failed' ? t('失败')
-    : value.status === 'processing' ? t('处理中') : t('已完成')
+    : value.status === 'processing' ? t('处理中')
+    : value.status === 'skipped' ? t('未应用') : t('已完成')
   const title = `${modeLabel} · ${statusLabel}`
     + (value.targetModel ? ` · ${[value.targetProvider, value.targetModel].filter(Boolean).join(' ')}` : '')
     + (Number(value.durationMs) ? ` · ${((Number(value.durationMs) || 0) / 1000).toFixed(1)}s` : '')
     + (value.error ? ` · ${value.error}` : '')
-  return <Badge shape='tag' variant={value.status === 'failed' ? 'destructive' : 'outline'} title={title}>
-    {modeLabel}
+  return <Badge shape='tag' variant={value.status === 'failed' ? 'destructive' : value.status === 'skipped' ? 'secondary' : 'outline'} title={title}>
+    {value.status === 'skipped' ? t('图片兼容未应用') : modeLabel}
   </Badge>
 }
 

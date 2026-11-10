@@ -2,6 +2,24 @@ use serde_json::Value;
 
 use super::{current, save_raw, synced_fingerprint, CONFIG, CONFIG_UPDATE_LOCK};
 
+/// 配置底稿更新后重建受影响的一项运行期快照
+///
+/// 派生快照必须与底稿在同一临界区内更新，否则保存接口读回旧配置与旧修订号，
+/// 页面刷新回退，后续保存还会因修订号过期返回冲突
+pub(super) fn refresh_derived(next: &mut super::RuntimeConfig, key: &str) {
+    match key {
+        crate::server::core::model_rules::KEY_MODEL_RULES =>
+            next.model_rules = std::sync::Arc::new(crate::server::core::model_rules::ModelRules::from_raw(&next.raw)),
+        super::KEY_ROUTING_PROFILES => next.routing_profiles = super::routing_profiles::from_raw(&next.raw),
+        super::compact_routes::KEY_COMPACT_ROUTES => next.compact_routes = super::compact_routes::from_raw(&next.raw),
+        super::title_routes::KEY_TITLE_ROUTES => next.title_routes = super::title_routes::from_raw(&next.raw),
+        super::client_identification::KEY_CLIENT_IDENTIFICATION =>
+            next.client_identification = super::client_identification::from_raw(&next.raw),
+        super::vision_compat::KEY_VISION_COMPAT => next.vision_compat = super::vision_compat::from_raw(&next.raw),
+        _ => {}
+    }
+}
+
 pub(crate) fn try_update_raw_field<T, E>(
     key: &str,
     mutate: impl FnOnce(&mut Value) -> Result<T, E>,
@@ -22,21 +40,7 @@ pub(crate) fn try_update_raw_field<T, E>(
     }
     let fingerprint = synced_fingerprint(&next.raw);
     next.raw.insert(key.to_string(), value);
-    if key == crate::server::core::model_rules::KEY_MODEL_RULES {
-        next.model_rules = std::sync::Arc::new(crate::server::core::model_rules::ModelRules::from_raw(&next.raw));
-    }
-    if key == super::KEY_ROUTING_PROFILES {
-        next.routing_profiles = super::routing_profiles::from_raw(&next.raw);
-    }
-    if key == super::compact_routes::KEY_COMPACT_ROUTES {
-        next.compact_routes = super::compact_routes::from_raw(&next.raw);
-    }
-    if key == super::client_identification::KEY_CLIENT_IDENTIFICATION {
-        next.client_identification = super::client_identification::from_raw(&next.raw);
-    }
-    if key == super::vision_compat::KEY_VISION_COMPAT {
-        next.vision_compat = super::vision_compat::from_raw(&next.raw);
-    }
+    refresh_derived(&mut next, key);
     if !save_raw(&next.raw) {
         return Err(storage_error());
     }

@@ -4,6 +4,8 @@ import type { Translate } from './assistant-read-types'
 type VisionDetail = {
   mode: 'assist' | 'reroute' | 'assist_call'
   status?: string
+  trigger?: string
+  reason?: string
   sourceProvider?: string
   sourceModel?: string
   targetProvider?: string
@@ -27,8 +29,12 @@ export function VisionRequestDetail({ route, t }: { route: unknown; t: Translate
   const value = visionDetail(route)
   if (!value) return null
   const mode = value.mode === 'assist' ? t('辅助识图 · 原模型回答') : value.mode === 'reroute' ? t('切换视觉模型 · 视觉模型回答') : t('辅助识图调用')
+  const status = value.status === 'failed' ? t('失败') : value.status === 'processing' ? t('处理中')
+    : value.status === 'skipped' ? t('未应用') : t('已完成')
   return <div className='space-y-2 text-xs'>
-    <div className='flex flex-wrap items-center gap-2'><Badge variant='outline'>{mode}</Badge><span className='text-muted-foreground'>{value.status === 'failed' ? t('失败') : value.status === 'processing' ? t('处理中') : t('已完成')}</span></div>
+    <div className='flex flex-wrap items-center gap-2'><Badge variant={value.status === 'skipped' ? 'secondary' : 'outline'}>{mode}</Badge><span className='text-muted-foreground'>{status}</span></div>
+    {value.trigger ? <p>{t('触发方式')}：{value.trigger === 'capability' ? t('图片能力判据') : t('上游拒图补救')}</p> : null}
+    {value.reason ? <p className='text-muted-foreground'>{t('未应用原因')}：{value.reason === 'model-declares-image-support' ? t('模型已声明支持图片') : value.reason === 'image-capability-unknown' ? t('模型图片能力未知，先发送原图') : value.reason}</p> : null}
     {value.sourceModel ? <p className='break-all'>{t('原模型')}：{value.sourceProvider} · {value.sourceModel}</p> : null}
     {value.targetModel ? <p className='break-all'>{t('视觉模型')}：{value.targetProvider} · {value.targetModel}</p> : null}
     {value.parentId ? <p className='break-all text-muted-foreground'>{t('所属请求')}：{value.parentId}</p> : null}

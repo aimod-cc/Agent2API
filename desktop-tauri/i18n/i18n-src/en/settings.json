@@ -252,6 +252,7 @@
   "允许浏览器里的页面跨来源调用网关（/v1/*）": "Allow pages in a browser to call the gateway cross-origin (/v1/*)",
   "允许的域名": "Allowed hostnames",
   "先发送原图，明确拒图后补救": "Send original images first; adapt only after an explicit rejection",
+  "沿用全局设置": "Use global setting",
   "先在当前路由范围内找可用的视觉模型，这次请求由视觉模型直接回答，不回原模型；{fallback}": "",
   "先把图片交给视觉模型读一遍，再让原模型结合读到的内容回答。": "The vision model reads the image first, then the original model answers using what was read.",
   "全局配置": "Global Configuration",

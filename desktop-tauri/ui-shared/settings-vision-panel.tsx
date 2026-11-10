@@ -129,7 +129,7 @@ export function VisionCompatibilityPanel({ api, t, active = true }: { api: Visio
       if (!current) return
       setBusy(true)
       try {
-        const saved = await api.save({ config: next, revision: current.revision })
+        const saved = await api.save({ config: next, revision: current.revision, shape: 'projected_blocks' })
         if (!alive.current) return
         latest.current = saved
         setView(saved)
@@ -234,11 +234,11 @@ export function VisionCompatibilityPanel({ api, t, active = true }: { api: Visio
                   <Select value={draft.unknownCapability} disabled={busy}
                     onValueChange={unknownCapability => patch({ unknownCapability: unknownCapability as VisionSettings['unknownCapability'] })}>
                     <SelectTrigger className='w-[min(260px,100%)]' aria-label={t('图片能力未知时')}>
-                      <SelectValue>{draft.unknownCapability === 'try_original' ? t('先发送原图，明确拒图后补救') : t('直接按上面的设置兼容')}</SelectValue>
+                      <SelectValue>{draft.unknownCapability === 'try_original' ? t('先发送原图，明确拒图后补救') : t('直接按当前方式兼容')}</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value='try_original'>{t('先发送原图，明确拒图后补救')}</SelectItem>
-                      <SelectItem value='compat'>{t('直接按上面的设置兼容')}</SelectItem>
+                      <SelectItem value='compat'>{t('直接按当前方式兼容')}</SelectItem>
                     </SelectContent>
                   </Select>
                 } />

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use crate::server::config::vision_compat::{self as config, Mode, UnknownCapability, VisionRule, VisionSettings, VisionTarget};
+use crate::server::config::vision_compat::{self as config, Mode, VisionRule, VisionSettings, VisionTarget};
 use crate::server::errors::GatewayError;
 use super::{connections::ConnectionGuard, payload::ProviderContext, usage::TelemetrySnapshot, ForwardOutcome, InFlightGuard, RouteTarget, UpstreamService};
 
@@ -77,8 +77,29 @@ pub(super) async fn before_target(service: &UpstreamService, ctx: &ProviderConte
     ctx.telemetry.set_vision_enabled(rule.is_some());
     let Some(rule) = rule else { return Ok(None); };
     match targets::supports_images(&target.provider, &model) {
-        Some(true) => Ok(None),
-        None if vision.settings.unknown_capability == UnknownCapability::TryOriginal => Ok(None),
+        Some(true) => {
+            ctx.telemetry.note_vision(json!({
+                "mode": rule.mode.as_str(), "status": "skipped", "trigger": "capability",
+                "sourceProvider": target.provider, "sourceModel": model,
+                "targetProvider": "", "targetModel": "", "durationMs": 0,
+                "imageCount": 0, "cachedImages": 0, "promptTokens": 0,
+                "completionTokens": 0, "totalTokens": 0, "calls": [],
+                "reason": "model-declares-image-support",
+            }));
+            Ok(None)
+        }
+        None if rule.unknown_capability.effective(vision.settings.unknown_capability)
+            == config::UnknownCapability::TryOriginal => {
+            ctx.telemetry.note_vision(json!({
+                "mode": rule.mode.as_str(), "status": "skipped", "trigger": "capability",
+                "sourceProvider": target.provider, "sourceModel": model,
+                "targetProvider": "", "targetModel": "", "durationMs": 0,
+                "imageCount": 0, "cachedImages": 0, "promptTokens": 0,
+                "completionTokens": 0, "totalTokens": 0, "calls": [],
+                "reason": "image-capability-unknown",
+            }));
+            Ok(None)
+        }
         _ => recover(service, ctx, target, &rule, "capability", slot, connections).await.map(Some),
     }
 }

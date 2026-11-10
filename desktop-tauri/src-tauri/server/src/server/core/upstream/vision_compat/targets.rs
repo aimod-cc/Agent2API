@@ -56,22 +56,14 @@ fn resolve_in_route(service: &UpstreamService, ctx: &ProviderContext<'_>, mut ta
         return Err(GatewayError::bad_request("所选视觉模型未确认支持本次请求需要的图片、工具或视频能力，请检查模型管理")
             .with_code("vision_target_incompatible"));
     }
-    if routing.group.is_none() {
-        // 与保存校验同一判据：目标按上游真实 id 存储，别名启用即可达
-        if !catalog::provider_serves_model(&target.provider, &target.model) {
-            return Err(GatewayError::with_status(404, "所选视觉模型已停用或不在当前提供商目录中").with_code("vision_target_unavailable"));
-        }
-        let actual = if crate::server::core::custom_providers::is_custom_provider_id(&target.provider) {
-            crate::server::core::providers::custom::forward::cooldown_model(&target.provider, request_model)
-        } else { catalog::wire_target_for_provider(request_model, &target.provider, None).model };
-        if target.reasoning.is_empty() {
-            target.reasoning = if crate::server::core::custom_providers::is_custom_provider_id(&target.provider) {
-                crate::server::core::custom_providers::wire_model_for(&target.provider, request_model).1
-            } else { catalog::wire_target_for_provider(request_model, &target.provider, None).reasoning }.unwrap_or_default();
-        }
-        if !actual.eq_ignore_ascii_case(&target.model) {
-            return Err(GatewayError::with_status(409, "视觉模型映射已经改变，请重新保存图片兼容配置").with_code("vision_target_changed"));
-        }
+    // 与保存校验同一判据：目标按上游真实 id 存储，别名启用即可达
+    if !catalog::provider_serves_model(&target.provider, &target.model) {
+        return Err(GatewayError::with_status(404, "所选视觉模型已停用或不在当前提供商目录中").with_code("vision_target_unavailable"));
+    }
+    if target.reasoning.is_empty() {
+        target.reasoning = if crate::server::core::custom_providers::is_custom_provider_id(&target.provider) {
+            crate::server::core::custom_providers::wire_model_for(&target.provider, &target.model).1
+        } else { catalog::wire_target_for_provider(&target.model, &target.provider, None).reasoning }.unwrap_or_default();
     }
     let routing = routing.for_vision_target(&service.store, &target.provider, &target.model,
         ctx.key_scope, ctx.pinned_account, None, Some(needs))?;

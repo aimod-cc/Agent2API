@@ -152,10 +152,8 @@ impl RequestRouting {
                     .with_code("vision_target_outside_route"));
             }
         } else {
-            if !self.providers(vec![provider.to_string()]).contains(&provider.to_string()) {
-                return Err(GatewayError::with_status(403, "视觉提供商未参与所选路由，请检查目标模型的路由配置")
-                    .with_code("vision_target_outside_route"));
-            }
+            // 目标供应商不再要求出现在原请求的路由参与范围里：图片兼容规则是全局配置，
+            // 目标模型按自己的路由选择账号，网关 Key 的范围已在 resolve 入口单独校验
             next.positions.retain(|id, _| pinned.is_none_or(|pinned| pinned == id));
             if next.positions.is_empty() {
                 return Err(GatewayError::with_status(503, "当前权限和目标路由内没有参与图片处理的账号")
