@@ -54,13 +54,15 @@ const DialogDescription = (props: DialogPrimitive.Description.Props) => (
 )
 
 function DialogOverlay({ className, ...props }: DialogPrimitive.Backdrop.Props) {
+  // 遮罩带全屏 backdrop-filter，入场动画会迫使每一帧重新模糊整个背景，
+  // 高负载时掉帧明显，因此入场不设动画（挂载即终态，模糊只计算一次），
+  // 出场保留短淡出与 fill-mode-forwards（关窗闪一下的修复见上方注释）。
   return (
     <DialogPrimitive.Backdrop
       data-slot='dialog-overlay'
       className={cn(
         'fixed inset-0 isolate z-30 bg-mask backdrop-blur-[3px]',
         'transition-opacity duration-150',
-        'data-open:animate-in data-open:fade-in-0',
         'data-closed:animate-out data-closed:fade-out-0 data-closed:fill-mode-forwards',
         className
       )}

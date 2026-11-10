@@ -54,13 +54,13 @@ const SheetDescription = (props: DialogPrimitive.Description.Props) => (
 )
 
 function SheetOverlay({ className, ...props }: DialogPrimitive.Backdrop.Props) {
+  // 与 dialog 的遮罩同一口径：全屏模糊不做入场动画，避免高负载掉帧。
   return (
     <DialogPrimitive.Backdrop
       data-slot='sheet-overlay'
       className={cn(
         'fixed inset-0 isolate z-30 bg-mask backdrop-blur-[3px]',
         'transition-opacity duration-200',
-        'data-open:animate-in data-open:fade-in-0',
         'data-closed:animate-out data-closed:fade-out-0 data-closed:fill-mode-forwards',
         className
       )}
