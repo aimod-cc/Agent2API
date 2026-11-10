@@ -200,6 +200,8 @@ export function useSpecialEditor<T, V extends { config: T; revision: string }>(
   }, [api])
 
   const reload = React.useCallback(async () => {
+    // 手动重读代表用户要求的整份最新状态，在途参考数据刷新不能再晚到覆盖
+    refreshSequence.current++
     const token = ++sequence.current
     setLoading(true); setError('')
     try {
