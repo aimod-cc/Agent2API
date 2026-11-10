@@ -49,7 +49,8 @@ fn model_choices(store: &AccountStore) -> Vec<Value> {
         for name in names {
             let Some(name) = name.as_str().filter(|name| !name.is_empty()) else { continue };
             let model = if is_custom {
-                name.to_string()
+                // 自定义家同样先把对外名解析成内部模型 ID，别名对外显示名而配置按真实 ID 存
+                custom_providers::wire_model_for(provider, name).0
             } else {
                 // 对外名 → 上游真实 id：与转发层运行时匹配（actual_model）同一套解析；
                 // 清单按家取一次，避免逐名重取触发整份清单克隆

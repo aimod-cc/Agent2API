@@ -75,27 +75,40 @@ function message(failure: unknown): string {
 
 /** 上次成功读取的视图：设置页岛重挂时先回种子再静默刷新，避免每次进页面都闪「加载中」 */
 let cachedView: VisionView | null = null
+/** 缓存所属网关身份；空串表示尚未记录，桌面端本机网关使用固定值 */
+let cachedScope = ''
 
-export function VisionCompatibilityPanel({ api, t, active = true }: { api: VisionCompatApi; t: Translate; active?: boolean }) {
-  const [view, setView] = useState<VisionView | null>(() => cachedView)
-  const [draft, setDraft] = useState<VisionSettings | null>(() => cachedView ? structuredClone(cachedView.config) : null)
+export function VisionCompatibilityPanel({ api, t, active = true, scope = '' }: {
+  api: VisionCompatApi
+  t: Translate
+  active?: boolean
+  /** 当前连接身份；切换网关后不能复用上一台的配置与修订号 */
+  scope?: string
+}) {
+  const scopedView = cachedScope === scope ? cachedView : null
+  const [view, setView] = useState<VisionView | null>(() => scopedView)
+  const [draft, setDraft] = useState<VisionSettings | null>(() => scopedView ? structuredClone(scopedView.config) : null)
   const [busy, setBusy] = useState(false)
   /** 首次读取进行中（无种子时首帧必须是「加载中」而不是误显「读取失败」） */
-  const [loading, setLoading] = useState(() => !cachedView)
+  const [loading, setLoading] = useState(() => !scopedView)
   const [error, setError] = useState('')
   const [more, setMore] = useState(false)
   const alive = useRef(true)
   const sequence = useRef(0)
   /** 本地编辑序号：静默读取开始后有新改动时，读取结果不能回写草稿 */
   const edits = useRef(0)
+  /** 当前组件已经成功交付给用户的视图；异步保存返回时仅用作过期检查 */
+  const adopted = useRef<VisionView | null>(scopedView)
   /** 服务端最新状态：提交要用它的 revision，失败回滚也回到它 */
-  const latest = useRef<VisionView | null>(cachedView)
+  const latest = useRef<VisionView | null>(scopedView)
   /** 提交串行化：改动是逐次点出来的，但在途请求不能并发（否则后一次会拿到旧的 revision） */
   const chain = useRef<Promise<unknown>>(Promise.resolve())
 
   const adopt = (next: VisionView) => {
     latest.current = next
+    cachedScope = scope
     cachedView = next
+    adopted.current = next
     setView(next)
     setDraft(structuredClone(next.config))
   }
@@ -122,7 +135,7 @@ export function VisionCompatibilityPanel({ api, t, active = true }: { api: Visio
       if (alive.current && token === sequence.current) setBusy(false)
       if (alive.current && token === sequence.current) setLoading(false)
     }
-  }, [api])
+  }, [api, scope])
 
   useEffect(() => {
     alive.current = true
@@ -141,15 +154,16 @@ export function VisionCompatibilityPanel({ api, t, active = true }: { api: Visio
       setBusy(true)
       try {
         const saved = await api.save({ config: next, revision: current.revision, shape: 'projected_blocks' })
-        if (!alive.current) return
+        if (!alive.current || adopted.current?.revision !== current.revision) return
         latest.current = saved
+        adopted.current = saved
         setView(saved)
       } catch (failure) {
-        if (!alive.current) return
+        if (!alive.current || adopted.current?.revision !== current.revision) return
         setError(message(failure))
         setDraft(structuredClone(latest.current?.config ?? current.config))
       } finally {
-        if (alive.current) setBusy(false)
+        if (alive.current && adopted.current?.revision === current.revision) setBusy(false)
       }
     })
   }

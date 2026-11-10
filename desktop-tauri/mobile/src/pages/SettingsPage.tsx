@@ -407,7 +407,7 @@ export function SettingsPage() {
 
       <Sheet open={visionCompatibility} onOpenChange={setVisionCompatibility}>
         <SheetContent><SheetHeader><SheetTitle>{t('图片兼容')}</SheetTitle></SheetHeader><SheetBody>
-          {visionCompatibility ? <VisionCompatibilityPanel key={serverIdentity()} api={visionCompatApi} t={t} /> : null}
+          {visionCompatibility ? <VisionCompatibilityPanel key={serverIdentity()} scope={serverIdentity()} api={visionCompatApi} t={t} /> : null}
         </SheetBody></SheetContent>
       </Sheet>
       <Sheet open={clientIdentification} onOpenChange={setClientIdentification}>
