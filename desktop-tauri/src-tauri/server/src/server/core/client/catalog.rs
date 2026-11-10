@@ -50,6 +50,8 @@ pub const MAX_UA_BYTES: usize = 1024;
 pub const MAX_HEADER_BYTES: usize = 256;
 pub const MAX_RULES: usize = 200;
 pub const MAX_CLIENTS: usize = 100;
+/// 供应商归属规则的上限：一家一条，正常远用不满
+pub const MAX_PROVIDER_RULES: usize = 100;
 
 /// 账号级自定义 User-Agent 的归一与校验。
 ///
@@ -114,12 +116,31 @@ pub struct ClientRule {
     pub client_id: String,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// 供应商归属规则：路由命中该供应商时，请求归属到指定客户端。
+///
+/// 请求头识别的是真实客户端（保留在 evidence 里作依据），这里的规则是
+/// 记账时的最终归属改写；与头匹配规则（`ClientRule`）相互独立。
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderRule {
+    pub provider: String,
+    pub client_id: String,
+}
+
+/// 不加 deny_unknown_fields：配置经云同步在混合版本部署间流动，读到其他
+/// 版本新增的未知字段时按忽略处理，不让整个识别配置解析失败。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ClientSettings {
     pub accept_declarations: bool,
     pub clients: Vec<CustomClient>,
     pub rules: Vec<ClientRule>,
+    /// 供应商归属规则（记账时按路由供应商改写归属客户端）
+    #[serde(default)]
+    pub provider_rules: Vec<ProviderRule>,
+    /// 默认归属客户端：供应商未命中规则时统一归属到它（空 = 不改写）
+    #[serde(default)]
+    pub default_client_id: String,
 }
 
 pub fn builtin(id: &str) -> Option<&'static BuiltinClient> {
@@ -145,8 +166,9 @@ pub fn declared_client<'a>(settings: &'a ClientSettings, name: &str) -> Option<&
 
 pub fn validate(settings: &ClientSettings) -> Result<(), String> {
     use std::collections::HashSet;
-    if settings.rules.len() > MAX_RULES || settings.clients.len() > MAX_CLIENTS {
-        return Err(format!("客户端识别最多允许 {MAX_RULES} 条规则和 {MAX_CLIENTS} 个自定义客户端"));
+    if settings.rules.len() > MAX_RULES || settings.clients.len() > MAX_CLIENTS
+        || settings.provider_rules.len() > MAX_PROVIDER_RULES {
+        return Err(format!("客户端识别最多允许 {MAX_RULES} 条规则、{MAX_CLIENTS} 个自定义客户端和 {MAX_PROVIDER_RULES} 条供应商归属规则"));
     }
     let valid_text = |text: &str, max: usize| !text.is_empty() && text.trim() == text
         && text.chars().count() <= max && !text.chars().any(char::is_control);
@@ -185,5 +207,72 @@ pub fn validate(settings: &ClientSettings) -> Result<(), String> {
             return Err("识别规则指向的客户端不存在".into());
         }
     }
+    let mut providers = HashSet::new();
+    for rule in &settings.provider_rules {
+        let provider = rule.provider.trim();
+        if provider.is_empty() || provider != rule.provider || provider.chars().count() > 120
+            || provider.chars().any(char::is_control)
+            || !providers.insert(provider.to_lowercase()) {
+            return Err("供应商归属规则的供应商无效或重复".into());
+        }
+        if target(settings, &rule.client_id).is_none() {
+            return Err("供应商归属规则指向的客户端不存在".into());
+        }
+    }
+    if !settings.default_client_id.is_empty() && target(settings, &settings.default_client_id).is_none() {
+        return Err("默认归属客户端不存在".into());
+    }
     Ok(())
+}
+
+/// 供应商归属改写：返回这条请求最终归属的客户端。
+///
+/// 路由供应商命中「供应商归属规则」时用规则客户端；未命中回落「默认归属
+/// 客户端」；两者都未配置时保留请求头识别出的真实客户端。
+pub fn attribution_client(identified: &str, provider: &str, settings: &ClientSettings) -> String {
+    if !provider.is_empty() {
+        if let Some(rule) = settings.provider_rules.iter()
+            .find(|rule| rule.provider.eq_ignore_ascii_case(provider)) {
+            return rule.client_id.clone();
+        }
+    }
+    if !settings.default_client_id.is_empty() {
+        return settings.default_client_id.clone();
+    }
+    identified.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attribution_prefers_provider_rule_then_default() {
+        let mut settings = ClientSettings::default();
+        settings.clients.push(CustomClient { id: "custom:abcdef123456".into(), name: "网关中转".into() });
+        settings.provider_rules.push(ProviderRule { provider: "zcode-intl".into(), client_id: "zcode".into() });
+        settings.default_client_id = "custom:abcdef123456".into();
+        // 命中规则（大小写不敏感）：用规则客户端
+        assert_eq!(attribution_client("codex", "ZCODE-INTL", &settings), "zcode");
+        // 未命中：回落默认归属客户端
+        assert_eq!(attribution_client("codex", "raccoon", &settings), "custom:abcdef123456");
+        // 两者都没配置：保留请求头识别出的真实客户端
+        let empty = ClientSettings::default();
+        assert_eq!(attribution_client("codex", "zcode", &empty), "codex");
+    }
+
+    #[test]
+    fn deserialize_tolerates_unknown_fields() {
+        // 模拟云同步场景：配置在混合版本部署间流动，字段集合不一致时按未知字段忽略
+        let value = serde_json::json!({
+            "acceptDeclarations": true,
+            "clients": [],
+            "rules": [],
+            "futureField": "ignored"
+        });
+        let settings: ClientSettings = serde_json::from_value(value).expect("未知字段必须被忽略");
+        assert!(settings.accept_declarations);
+        assert!(settings.provider_rules.is_empty());
+        assert!(settings.default_client_id.is_empty());
+    }
 }

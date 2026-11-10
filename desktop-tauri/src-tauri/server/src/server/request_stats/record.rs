@@ -655,6 +655,10 @@ impl NewRequestEntry {
 pub struct RunningProgress {
     /// 到此刻为止承载这一轮的 provider id（空串 = 还没走到选路）
     pub provider: String,
+    /// 在途期间的**归属客户端**（空串 = 供应商未定或识别配置异常，写入侧不覆盖）：
+    /// 供应商确定后按归属规则改写，在途行与终态行显示同一个客户端；收尾仍以
+    /// 记账写入为准（判据见 `api::pipeline::running_progress`）
+    pub client: String,
     /// 承载账号 id / 展示名（空串 = 走默认登录态，或还没选路）
     pub account_id: String,
     pub account_name: String,

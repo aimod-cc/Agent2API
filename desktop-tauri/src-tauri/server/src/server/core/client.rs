@@ -4,7 +4,7 @@ pub mod catalog;
 mod evidence;
 mod matcher;
 
-pub use catalog::{ClientRule, ClientSettings};
+pub use catalog::{attribution_client, ClientRule, ClientSettings, ProviderRule};
 pub use evidence::ClientEvidence;
 pub use matcher::{identify, rule_matches};
 
@@ -37,9 +37,24 @@ pub fn display_name(value: &str, recorded: &str) -> String {
             }
         }
     }
-    if let Some(client) = catalog::CLIENTS.iter().find(|client| client.value == value) {
+    // 记账归属与归属规则存的是客户端 id（如 zcode），历史行可能是 value（如
+    // ZCode），两种形态都要换算成显示名
+    if let Some(client) = catalog::CLIENTS.iter().find(|client| client.id == value || client.value == value) {
         return client.name.into();
     }
     if !recorded.is_empty() { return recorded.into(); }
     value.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_name_accepts_client_id_and_value() {
+        // 归属改写后的行存 id，识别依据里记录的是显示名，界面取到的都是名称
+        assert_eq!(display_name("zcode", "Codex"), "ZCode");
+        assert_eq!(display_name("Codex", ""), "Codex");
+        assert_eq!(display_name("custom:not-registered", "记录名"), "记录名");
+    }
 }

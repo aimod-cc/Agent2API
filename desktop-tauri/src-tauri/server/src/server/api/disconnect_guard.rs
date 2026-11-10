@@ -50,14 +50,17 @@ pub struct DisconnectGuard {
     id: String,
     telemetry: Arc<RequestTelemetry>,
     started_at: i64,
+    /// 请求头识别出的真实客户端 id：中断收尾改写在途归属时用，与在途回写同一判据
+    identified_client: String,
     /// 是否仍处于「转发还没产生响应」的阶段（armed）
     armed: bool,
 }
 
 impl DisconnectGuard {
     /// 在 `record_started` 之后创建（此刻进行中行已经在库里）。
-    pub fn new(stats: Arc<RequestStats>, telemetry: Arc<RequestTelemetry>, started_at: i64) -> Self {
-        Self { stats, id: telemetry.id(), telemetry, started_at, armed: true }
+    pub fn new(stats: Arc<RequestStats>, telemetry: Arc<RequestTelemetry>, started_at: i64, identified_client: &str) -> Self {
+        Self { stats, id: telemetry.id(), telemetry, started_at,
+            identified_client: identified_client.to_string(), armed: true }
     }
 
     /// 记账已完成 —— 解除兜底并注销取消令牌（请求不再在途）。
@@ -96,7 +99,7 @@ impl Drop for DisconnectGuard {
             };
             let finished_at = crate::server::logging::now_ms();
             snapshot.finish_trace(finished_at, Some(&error));
-            let progress = pipeline::running_progress(&snapshot, self.started_at);
+            let progress = pipeline::running_progress(&snapshot, self.started_at, &self.identified_client);
             // 必须与终态同事务保存，不能等限频队列再写回。
             crate::server::core::blocking::in_place(|| {
                 self.stats.finalize_interrupted(&self.id, &error, &progress, finished_at);

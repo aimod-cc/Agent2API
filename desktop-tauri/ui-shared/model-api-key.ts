@@ -46,6 +46,9 @@ export type RequestIdentity = {
   client?: string
   clientLabel?: string
   clientEvidence?: ClientEvidence
+  /** 路由命中的供应商 id / 显示名（旧数据或未走到转发时为空）：归属规则入口用 */
+  provider?: string
+  providerLabel?: string
   isTest?: boolean
   apiKeyId?: string
   apiKeyName?: string

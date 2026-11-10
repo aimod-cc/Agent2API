@@ -232,6 +232,7 @@ pub async fn responses_endpoint(
         state.request_stats(),
         telemetry_id.clone(),
         started_at,
+        &source.client,
     ));
     // 手动终止的取消令牌 + 断线兜底守卫（与 /v1/chat/completions 同一处时点
     // 与同一套语义：登记后详情页可终止这条请求；handler 被 axum 取消时
@@ -239,7 +240,7 @@ pub async fn responses_endpoint(
     if let Some(token) = cancellation::register(&telemetry_id) {
         telemetry.set_cancel_token(token);
     }
-    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry.clone(), started_at);
+    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry.clone(), started_at, &source.client);
     let outcome = forward_chat(
         &state,
         chat_body,
@@ -438,6 +439,7 @@ pub async fn messages_endpoint(
         state.request_stats(),
         telemetry_id.clone(),
         started_at,
+        &source.client,
     ));
     // 手动终止的取消令牌 + 断线兜底守卫（与 /v1/chat/completions 同一处时点
     // 与同一套语义：登记后详情页可终止这条请求；handler 被 axum 取消时
@@ -445,7 +447,7 @@ pub async fn messages_endpoint(
     if let Some(token) = cancellation::register(&telemetry_id) {
         telemetry.set_cancel_token(token);
     }
-    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry.clone(), started_at);
+    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry.clone(), started_at, &source.client);
     let outcome = forward_chat(
         &state,
         chat_body,
