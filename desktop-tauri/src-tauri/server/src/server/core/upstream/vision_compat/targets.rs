@@ -57,7 +57,8 @@ fn resolve_in_route(service: &UpstreamService, ctx: &ProviderContext<'_>, mut ta
             .with_code("vision_target_incompatible"));
     }
     if routing.group.is_none() {
-        if !catalog::forwarding_providers(request_model).contains(&target.provider) {
+        // 与保存校验同一判据：目标按上游真实 id 存储，别名启用即可达
+        if !catalog::provider_serves_model(&target.provider, &target.model) {
             return Err(GatewayError::with_status(404, "所选视觉模型已停用或不在当前提供商目录中").with_code("vision_target_unavailable"));
         }
         let actual = if crate::server::core::custom_providers::is_custom_provider_id(&target.provider) {

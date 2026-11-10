@@ -42,6 +42,26 @@ function shared() {
 
 /* ─── 单元格读数 ───────────────────────────── */
 
+/**
+ * 图片兼容标识：route 里带 visionCompatibility 的行在状态徽章旁挂一个小标签，
+ * 让“用了图片兼容”不用等报错才知道，悬停给出方式、状态、目标模型、耗时与错误。
+ */
+function VisionTag({ route }: { route: unknown }) {
+  const value = visionDetail(route)
+  if (!value) return null
+  const modeLabel = value.mode === 'assist' ? t('辅助识图')
+    : value.mode === 'reroute' ? t('切换视觉模型') : t('辅助识图调用')
+  const statusLabel = value.status === 'failed' ? t('失败')
+    : value.status === 'processing' ? t('处理中') : t('已完成')
+  const title = `${modeLabel} · ${statusLabel}`
+    + (value.targetModel ? ` · ${[value.targetProvider, value.targetModel].filter(Boolean).join(' ')}` : '')
+    + (Number(value.durationMs) ? ` · ${((Number(value.durationMs) || 0) / 1000).toFixed(1)}s` : '')
+    + (value.error ? ` · ${value.error}` : '')
+  return <Badge shape='tag' variant={value.status === 'failed' ? 'destructive' : 'outline'} title={title}>
+    {modeLabel}
+  </Badge>
+}
+
 /** 用时：秒以内给毫秒，分钟以上给分秒（与 OmniProxy 同一格式） */
 function formatDuration(ms: unknown): string {
   const rounded = Math.round(Number(ms) || 0)
@@ -304,7 +324,10 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
         return (
           <span key={key} className={className}>
             {/* 徽章与阶段计时都由 wbRequestPhase 产出 HTML（详情弹窗读同一份，两处必须逐字一致） */}
-            <HtmlContent className='req-status-badge' html={phase.badgeHtml(entry)} render={<span />} />
+            <span className='req-status-badge gap-x-1'>
+              <HtmlContent html={phase.badgeHtml(entry)} render={<span />} />
+              <VisionTag route={entry.route} />
+            </span>
             {elapsed ? <HtmlContent className='req-status-line' html={elapsed} render={<span />} /> : null}
           </span>
         )
@@ -316,10 +339,11 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
         ? t('HTTP {status}，但响应体阶段出错：见错误列', { status })
         : undefined
       return (
-        <span key={key} className={className}>
+        <span key={key} className={`${className} flex flex-wrap items-start gap-x-1`}>
           <Badge shape='tag' variant={ok ? 'success' : 'destructive'} title={title}>
             {status || t('失败')}
           </Badge>
+          <VisionTag route={entry.route} />
         </span>
       )
     }
