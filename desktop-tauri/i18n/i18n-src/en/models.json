@@ -132,6 +132,7 @@
   "例如 gpt-5.5-preview": "e.g. gpt-5.5-preview",
   "保存": "Save",
   "保存中…": "Saving…",
+  "能力位已保存，models.dev 身份保存失败：{message}": "Capabilities were saved, but the models.dev identity could not be saved: {message}",
   "保存失败：{message}": "Save failed: {message}",
   "保存映射": "Save mapping",
   "保存等级": "Save level",

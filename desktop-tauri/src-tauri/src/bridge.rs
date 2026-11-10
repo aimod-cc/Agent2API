@@ -325,7 +325,8 @@ const BRIDGE_JS: &str = r#"
     // 能力位覆盖（只服务内置家；自定义家走 /api/custom-providers/models 的
     // 整表保存，见后端 handler 的说明）。`capabilities` 各键三态：不给 = 不改、
     // null = 恢复清单原值、给值 = 覆盖。
-    setModelCapabilities: (provider, id, capabilities) => call('POST', '/api/models/capabilities', { provider, id, capabilities }),
+    setModelCapabilities: (provider, id, capabilities, binding) =>
+      call('POST', '/api/models/capabilities', { provider, id, capabilities, binding: binding ?? null }),
     // models.dev 手动身份绑定：精确 canonical 标识与“同提供商名称对齐”开关。
     getModelMetadataBinding: (provider, id) =>
       call('GET', `/api/models/metadata/binding?provider=${encodeURIComponent(provider)}&id=${encodeURIComponent(id)}`),

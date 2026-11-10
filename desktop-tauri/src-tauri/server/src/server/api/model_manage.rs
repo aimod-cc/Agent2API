@@ -385,6 +385,8 @@ pub async fn set_capabilities(State(state): State<ServerState>, body: Bytes) -> 
         Some(Value::Object(map)) => map.clone(),
         Some(_) => return errors::management_error(400, "capabilities 必须是对象"),
     };
+    // 旧客户端不带 binding 时只改能力位，不能因为新增字段把原请求打成 400
+    let binding = object.get("binding").filter(|binding| !binding.is_null());
     // 值校验在这里就拦掉（与 add_mapping 的 reasoning 同一取向：不留一条
     // 读回来会被归一丢弃的脏数据）；`null` 是合法的「清除」信号，不算非法值。
     for (key, value) in &patch {
@@ -398,7 +400,39 @@ pub async fn set_capabilities(State(state): State<ServerState>, body: Bytes) -> 
             );
         }
     }
-    if let Err(error) = model_rules::set_capabilities(&provider, &id, &patch, None) {
+    let binding = match binding {
+        None => None,
+        Some(binding) => {
+            let Some(object) = binding.as_object() else {
+                return errors::management_error(400, "binding 必须是对象或 null");
+            };
+            let Some(models_dev) = object.get("modelsDevId") else {
+                return errors::management_error(400, "binding 缺少 modelsDevId 字段");
+            };
+            let models_dev_id = match models_dev {
+                Value::Null => String::new(),
+                Value::String(value) => value.trim().to_string(),
+                _ => return errors::management_error(400, "modelsDevId 必须是字符串或 null"),
+            };
+            let source_name = object
+                .get("sourceName")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let match_by_names = object
+                .get("matchByNames")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            Some(model_rules::MetadataBindingUpdate {
+                models_dev_id: Some(models_dev_id),
+                source_name: Some(source_name),
+                match_by_names: Some(match_by_names),
+            })
+        }
+    };
+    // 能力位与 models.dev 身份在同一次配置事务中落库，避免分两次写入时只成功一半
+    if let Err(error) = model_rules::set_capabilities(&provider, &id, &patch, binding.as_ref()) {
         return errors::management_error(error.status_code, error.message);
     }
     // 日志把每一项写成「键=值 / 键=恢复」，否则排查时只看得到「保存了能力」
@@ -450,7 +484,7 @@ pub async fn get_metadata_binding(Query(query): Query<MetadataBindingQuery>) -> 
 }
 
 /// POST /api/models/metadata/binding —— 设置或清除一条手动 models.dev 身份绑定。
-pub async fn set_metadata_binding(State(_state): State<ServerState>, body: Bytes) -> Response {
+pub async fn set_metadata_binding(State(state): State<ServerState>, body: Bytes) -> Response {
     let object = match body_object(&body) {
         Ok(object) => object,
         Err(response) => return response,
@@ -501,5 +535,6 @@ pub async fn set_metadata_binding(State(_state): State<ServerState>, body: Bytes
     );
     ok_json(serde_json::json!({
         "binding": binding_json(model_rules::metadata_binding(&provider, &id)),
+        "view": catalog::manage_view(state.store()),
     }))
 }

@@ -110,7 +110,7 @@ async function main() {
   const collisions = []
 
   // ── 第一遍：canonical 条目的能力位与上下限 ──────────────────
-  for (const [canonicalId, entry] of Object.entries(models ?? {})) {
+  for (const [canonicalId, entry] of Object.entries(models ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
     if (!isChatModel(entry)) continue
     const baseKey = keyOf(canonicalId)
     if (!baseKey) continue

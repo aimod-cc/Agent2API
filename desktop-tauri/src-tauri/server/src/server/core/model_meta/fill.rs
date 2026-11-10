@@ -74,11 +74,15 @@ pub fn apply(provider: &str, item: &mut Value, identity_id: Option<&str>) {
     let (record, match_source, candidates) = match resolution {
         Resolution::Matched(record, source) => (Some(record), source, 0),
         Resolution::Ambiguous(count) => (None, "ambiguous", count),
-        Resolution::Stale => (None, "stale", 0),
+        Resolution::Stale => (
+            None,
+            "stale",
+            snapshot::candidate_count(identity_id, display_name),
+        ),
         Resolution::Unmatched => (
             None,
             "unmatched",
-            snapshot::candidate_count(id, display_name),
+            snapshot::candidate_count(identity_id, display_name),
         ),
     };
     let mut sources: Map<String, Value> = Map::new();
@@ -167,9 +171,9 @@ fn resolve(
     binding: Option<&model_rules::MetadataBinding>,
 ) -> Resolution {
     if let Some(explicit) = binding.and_then(|binding| binding.models_dev_id.as_deref()) {
-        return snapshot::by_canonical(explicit)
-            .map(|record| Resolution::Matched(record, "manual"))
-            .unwrap_or(Resolution::Stale);
+        if let Some(record) = snapshot::by_canonical(explicit) {
+            return Resolution::Matched(record, "manual");
+        }
     }
     if let Some(explicit) = item
         .get("modelsDevId")
@@ -179,9 +183,9 @@ fn resolve(
         .map(str::trim)
         .filter(|id| !id.is_empty())
     {
-        return snapshot::by_canonical(explicit)
-            .map(|record| Resolution::Matched(record, "adapter"))
-            .unwrap_or(Resolution::Stale);
+        if let Some(record) = snapshot::by_canonical(explicit) {
+            return Resolution::Matched(record, "adapter");
+        }
     }
     if let Some(record) = snapshot::by_canonical(identity_id) {
         return Resolution::Matched(record, "canonical");
@@ -229,6 +233,16 @@ fn resolve(
         if let Some(record) = snapshot::by_name_unique(name) {
             return Resolution::Matched(record, "name");
         }
+    }
+    if binding.and_then(|binding| binding.models_dev_id.as_deref()).is_some()
+        || item
+            .get("modelsDevId")
+            .and_then(Value::as_str)
+            .or_else(|| item.get("canonicalModelId").and_then(Value::as_str))
+            .or_else(|| item.get("canonical_model_id").and_then(Value::as_str))
+            .is_some_and(|id| !id.trim().is_empty())
+    {
+        return Resolution::Stale;
     }
     Resolution::Unmatched
 }

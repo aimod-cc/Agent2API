@@ -85,7 +85,7 @@ export type SharedWindow = {
     removeCustomModel(provider: string, id: string): Promise<ManageView | null | undefined>
     /** 能力位覆盖（只服务内置家；自定义家走 wbModelsCustom.setCapabilities） */
     setModelCapabilities(
-      provider: string, id: string, patch: Record<string, number | boolean | null>,
+      provider: string, id: string, patch: Record<string, number | boolean | null>, binding?: unknown,
     ): Promise<ManageView | null | undefined>
     getModelMetadataBinding(provider: string, id: string): Promise<{ binding?: ModelsDevBinding | null } | null | undefined>
     setModelMetadataBinding(
@@ -824,6 +824,18 @@ export async function writeRemoveModel(provider: string, id: string): Promise<un
   return enqueueWrite(() => api.removeCustomModel(provider, id))
 }
 
+/** 自定义提供商能力位已保存、但 models.dev 身份写入失败时的部分保存状态 */
+export class PartialCapabilitySaveError extends Error {
+  /** 已成功保存能力位、但身份绑定写入失败时的原始错误信息 */
+  readonly reason: string
+
+  constructor(reason: string) {
+    super(reason)
+    this.name = 'PartialCapabilitySaveError'
+    this.reason = reason
+  }
+}
+
 /**
  * 保存一条模型的能力位覆盖（两个数据源各走各的写路径，与 `writeBinding` 同一条分流）：
  *   · 自定义家：记录里整表提交（`customSource.setCapabilities`）；
@@ -837,11 +849,23 @@ export async function writeCapabilities(
   provider: string,
   id: string,
   capabilities: Record<string, number | boolean | null>,
+  binding?: unknown,
 ): Promise<unknown> {
-  if (customSource.isCustom(provider)) return customSource.setCapabilities(provider, id, capabilities)
+  if (customSource.isCustom(provider)) {
+    await customSource.setCapabilities(provider, id, capabilities)
+    // 自定义家的能力在提供商表里，身份绑定在 modelRules，走两次写入后由目录模块自行重绘
+    if (binding !== undefined) {
+      try {
+        await writeModelsDevBinding(provider, id, binding as ModelsDevBinding)
+      } catch (error) {
+        throw new PartialCapabilitySaveError(errorMessage(error))
+      }
+    }
+    return undefined
+  }
   const api = shared().workbuddyDesktop
   if (!api) throw new Error(t('后端桥不可用'))
-  return enqueueWrite(() => api.setModelCapabilities(provider, id, capabilities))
+  return enqueueWrite(() => api.setModelCapabilities(provider, id, capabilities, binding))
 }
 
 /** 手动选择的 models.dev 身份；`modelsDevId` 为空表示没有显式绑定。 */
@@ -862,14 +886,16 @@ export async function readModelsDevBinding(provider: string, id: string): Promis
 
 export async function writeModelsDevBinding(
   provider: string, id: string, binding: ModelsDevBinding,
-): Promise<void> {
+): Promise<unknown> {
   const api = shared().workbuddyDesktop
   if (!api?.setModelMetadataBinding) throw new Error(t('后端桥不可用'))
-  await enqueueWrite(() => api.setModelMetadataBinding!(provider, id, {
+  const response = await enqueueWrite(() => api.setModelMetadataBinding!(provider, id, {
     modelsDevId: binding.modelsDevId || null,
     sourceName: binding.sourceName || '',
     matchByNames: binding.matchByNames === true,
   }))
+  const view = (response as { view?: unknown } | null | undefined)?.view
+  return view
 }
 
 export async function searchModelsDev(query: string): Promise<ModelsDevChoice[]> {

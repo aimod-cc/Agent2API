@@ -1657,8 +1657,10 @@ pub fn shim_js() -> &'static str {
     // 能力位覆盖（只服务内置家）：`capabilities` 各键三态 —— 不给 = 不改、
     // null = 恢复清单原值、给值 = 覆盖。自定义家走 /api/custom-providers/models
     // 的整表保存（见后端 handler 的说明），不经过这里。
-    setModelCapabilities: function (provider, id, capabilities) {
-      return call('POST', '/api/models/capabilities', { provider: provider, id: id, capabilities: capabilities });
+    setModelCapabilities: function (provider, id, capabilities, binding) {
+      return call('POST', '/api/models/capabilities', {
+        provider: provider, id: id, capabilities: capabilities, binding: binding == null ? null : binding,
+      });
     },
     getModelMetadataBinding: function (provider, id) {
       return call('GET', '/api/models/metadata/binding?provider=' + encodeURIComponent(provider)
