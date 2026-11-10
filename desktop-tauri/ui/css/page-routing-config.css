@@ -78,7 +78,8 @@
 .routing-config-search { flex: none; max-width: none; }
 .routing-groups-hint { flex: none; margin: 0; color: var(--text-3); font-size: 11px; line-height: 1.6; }
 .routing-config-listcol { flex: 1; min-width: 0; min-height: 0; padding: 1px 3px 12px; overflow: auto; scrollbar-gutter: stable; }
-.routing-config-participants { display: flex; flex-direction: column; gap: 10px; }
+/* 顶部留白容纳首卡上沿外 5px 的 drop-before 落点横条，避免被滚动容器裁剪 */
+.routing-config-participants { display: flex; flex-direction: column; gap: 10px; padding-top: 6px; }
 .routing-config-provider { position: relative; min-width: 0; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); box-shadow: var(--shadow-1); }
 .routing-config-provider.is-off { border-style: dashed; background: var(--surface-2); box-shadow: none; }
 .routing-config-provider > header { display: flex; align-items: center; gap: 7px; padding: 10px 8px; }

@@ -60,6 +60,18 @@ export function RoutingPage() {
   const titleEditor = useSpecialEditor(special.title, mode === 'config' && specialKey === 'title')
   const specialDirty = (compactEditor.dirty ? 1 : 0) + (visionEditor.dirty ? 1 : 0) + (titleEditor.dirty ? 1 : 0)
   const dirtyCount = editor.dirtyCount + groups.dirtyCount + specialDirty
+  // 页面岛跨页切换不卸载：从模型页改完映射 / 拉完模型回到路由页时，特殊请求
+  // 路由的模型下拉要重新对齐一次清单。参考数据只读不写，静默失败沿用旧清单
+  React.useEffect(() => {
+    const onPage = (event: Event) => {
+      if ((event as CustomEvent<string>).detail !== 'routing') return
+      if (mode !== 'config' || !specialKey) return
+      const editors = { compact: compactEditor, vision: visionEditor, title: titleEditor }
+      void editors[specialKey].refreshView()
+    }
+    window.addEventListener('wb:page', onPage)
+    return () => window.removeEventListener('wb:page', onPage)
+  }, [mode, specialKey, compactEditor.refreshView, visionEditor.refreshView, titleEditor.refreshView])
   const [modal, setModal] = React.useState<
     | { kind: 'sticky' }
     | { kind: 'account' | 'sort'; id: string }
