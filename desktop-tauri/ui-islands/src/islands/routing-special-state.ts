@@ -137,6 +137,8 @@ export type SpecialEditor<T, V extends { config: T; revision: string }> = {
   update(mutate: (draft: T) => T): void
   save(): Promise<boolean>
   reload(): Promise<void>
+  /** 只刷新模型 / 客户端等参考数据，配置、修订号与未保存草稿保持不变 */
+  refreshView(): Promise<void>
   discard(): void
 }
 
@@ -159,6 +161,10 @@ export function useSpecialEditor<T, V extends { config: T; revision: string }>(
   const sequence = React.useRef(0)
   /** 服务端最新状态：保存要用它的 revision，失败回滚也回到它 */
   const latest = React.useRef<V | null>(null)
+  /** view 的镜像：参考数据合并要读当前值，避免闭包拿到旧 state */
+  const viewRef = React.useRef<V | null>(null)
+  /** 参考数据刷新自己的序号，与 reload 的 sequence 分开，互不打断对方的收尾 */
+  const refreshSequence = React.useRef(0)
 
   React.useEffect(() => {
     alive.current = true
@@ -167,9 +173,31 @@ export function useSpecialEditor<T, V extends { config: T; revision: string }>(
 
   const adopt = React.useCallback((next: V) => {
     latest.current = next
+    viewRef.current = next
     setView(next)
     setDraft(structuredClone(next.config))
   }, [])
+
+  /**
+   * 只刷新参考数据（模型 / 客户端 / 上限等），配置与修订号保持现值，草稿不动。
+   *
+   * 模型映射与获取模型发生在模型页或路由页的其他面板，页面岛跨页切换不卸载，
+   * 只靠首次激活拉一次数据会让模型下拉停留在旧清单；面板重新可见时调用这里
+   * 对齐一次。静默失败沿用现有清单，下次触发再试
+   */
+  const refreshView = React.useCallback(async () => {
+    if (!latest.current) return
+    const token = ++refreshSequence.current
+    try {
+      const next = await api.load()
+      if (!alive.current || token !== refreshSequence.current) return
+      const current = viewRef.current
+      const merged = current ? { ...next, config: current.config, revision: current.revision } : next
+      latest.current = merged
+      viewRef.current = merged
+      setView(merged)
+    } catch { /* 参考数据刷新失败沿用现有清单 */ }
+  }, [api])
 
   const reload = React.useCallback(async () => {
     const token = ++sequence.current
@@ -184,7 +212,12 @@ export function useSpecialEditor<T, V extends { config: T; revision: string }>(
     }
   }, [api, adopt])
 
-  React.useEffect(() => { if (active && !latest.current) void reload() }, [active, reload])
+  React.useEffect(() => {
+    if (!active) return
+    // 已经读过配置的，激活时只对齐参考数据，不重置草稿
+    if (latest.current) void refreshView()
+    else void reload()
+  }, [active, reload, refreshView])
 
   const update = React.useCallback((mutate: (draft: T) => T) => {
     setError('')
@@ -218,7 +251,7 @@ export function useSpecialEditor<T, V extends { config: T; revision: string }>(
   }, [])
 
   const dirty = view !== null && draft !== null && JSON.stringify(draft) !== JSON.stringify(view.config)
-  return { view, draft, loading, saving, error, dirty, update, save, reload, discard }
+  return { view, draft, loading, saving, error, dirty, update, save, reload, refreshView, discard }
 }
 
 export function message(failure: unknown): string {
