@@ -78,23 +78,42 @@ fn has_entry(manifest: &Value) -> bool {
         || pick_entry(&manifest["exports"]).is_some() || pick_entry(&manifest["exports"]["./server"]).is_some()
 }
 
-async fn read(row: &Value, previous: Option<&Entry>, force: bool) -> Result<Option<Entry>, Failure> {
+/// 单个仓库的读取结论：
+/// Entry = 入库，Skip = 本次读出「不是提供商或清单缺失」（进忽略生命周期），
+/// Skipped = 忽略快速路径命中（没有新信息，保留已有的未解析记录），
+/// Unreadable = 清单不是合法 JSON（同样进忽略生命周期，原因进错误详情）
+enum ReadOutcome {
+    Entry(Entry),
+    Skip,
+    Skipped,
+    Unreadable(String),
+}
+
+async fn read(row: &Value, previous: Option<&Entry>, force: bool) -> Result<ReadOutcome, Failure> {
     let repository = types::repository(&row["full_name"]).ok_or_else(|| Failure::from("GitHub 仓库标识无效".to_string()))?;
     let now = crate::server::logging::now_ms();
     if let Some(previous) = previous.filter(|entry| entry.is_provider() && !force && entry.pushed_at == row["pushed_at"].as_str().unwrap_or("")
         && entry.manifest_at > 0 && now.saturating_sub(entry.manifest_at) < MANIFEST_TTL) {
         let mut entry = previous.clone();
         apply_repository(&mut entry, row);
-        return Ok(Some(entry));
+        return Ok(ReadOutcome::Entry(entry));
     }
     let reference = row["default_branch"].as_str().filter(|value| !value.is_empty()).unwrap_or("HEAD");
     let url = raw_url(&repository, reference, "package.json")?;
-    let Some(manifest) = network::github(&url, 2 * 1024 * 1024).await? else { return Ok(None); };
+    let manifest = match network::github(&url, 2 * 1024 * 1024).await {
+        Ok(Some(manifest)) => manifest,
+        Ok(None) => return Ok(ReadOutcome::Skip),
+        Err(failure) if failure.message == network::INVALID_MANIFEST => {
+            return Ok(ReadOutcome::Unreadable(failure.detail
+                .unwrap_or_else(|| "响应体不是合法 JSON".to_string())))
+        }
+        Err(failure) => return Err(failure),
+    };
     let name = manifest["name"].as_str().unwrap_or("");
-    if !super::super::packages::package_name(name) { return Ok(None); }
-    if provider::excluded(&manifest) { return Ok(None); }
+    if !super::super::packages::package_name(name) { return Ok(ReadOutcome::Skip); }
+    if provider::excluded(&manifest) { return Ok(ReadOutcome::Skip); }
     let evidence = provider::inspect(&repository, reference, &manifest).await?;
-    if !evidence.provider { return Ok(None); }
+    if !evidence.provider { return Ok(ReadOutcome::Skip); }
     let mut entry = Entry {
         name: name.to_string(), label: name.to_string(), publisher: "third-party".to_string(),
         source: format!("github:{repository}"), selector: reference.to_string(),
@@ -114,7 +133,7 @@ async fn read(row: &Value, previous: Option<&Entry>, force: bool) -> Result<Opti
             entry.selector = npm["version"].as_str().unwrap_or("latest").to_string();
             market::apply_manifest(&mut entry, npm, true);
             apply_repository(&mut entry, row);
-            return Ok(Some(entry));
+            return Ok(ReadOutcome::Entry(entry));
         }
     }
     if entry.version.is_empty() {
@@ -124,7 +143,7 @@ async fn read(row: &Value, previous: Option<&Entry>, force: bool) -> Result<Opti
         entry.installable = false;
         entry.unavailable_reason = Some("仓库没有已提交的可加载入口，请等待作者发布构建产物".to_string());
     }
-    Ok(Some(entry))
+    Ok(ReadOutcome::Entry(entry))
 }
 
 pub(super) async fn resolve(rows: Vec<Value>, previous: Vec<Entry>, force: bool) -> (usize, Option<Failure>) {
@@ -142,7 +161,7 @@ pub(super) async fn resolve(rows: Vec<Value>, previous: Vec<Entry>, force: bool)
         (row, repository, before, skip)
     }).collect();
     let results = stream::iter(tasks.into_iter().map(|(row, repository, before, skip)| async move {
-        let result = if skip { Ok(None) } else {
+        let result = if skip { Ok(ReadOutcome::Skipped) } else {
             tokio::time::timeout(std::time::Duration::from_secs(90), read(&row, before.as_ref(), force)).await
                 .unwrap_or_else(|_| Err(Failure::from("插件仓库信息读取超时".to_string())))
         };
@@ -152,22 +171,59 @@ pub(super) async fn resolve(rows: Vec<Value>, previous: Vec<Entry>, force: bool)
     let mut completed = 0;
     let mut missing = 0;
     let mut failure: Option<Failure> = None;
+    let mut failures: Vec<cache::CatalogFailure> = Vec::new();
     while let Some((row, repository, before, result)) = results.next().await {
         completed += 1;
         let entry = match result {
-            Ok(Some(entry)) => {
-                cache::update(|cache| { cache.ignored.remove(&repository); });
+            Ok(ReadOutcome::Entry(entry)) => {
+                cache::update(|cache| {
+                    cache.ignored.remove(&repository);
+                    cache.github_unreadable.retain(|entry| entry.repository != repository);
+                });
                 Some(entry)
             }
-            Ok(None) => {
+            Ok(ReadOutcome::Skip) => {
                 cache::update(|cache| {
                     cache.ignored.insert(repository.clone(), (types::text(&row["pushed_at"], 64), now));
                     cache.github.retain(|entry| entry.repository.as_ref().is_none_or(|known| !known.eq_ignore_ascii_case(&repository)));
+                    cache.github_unreadable.retain(|entry| entry.repository != repository);
+                });
+                None
+            }
+            Ok(ReadOutcome::Skipped) => {
+                // 快速路径没有新信息，只刷新忽略时间戳，未解析记录原样保留
+                cache::update(|cache| {
+                    cache.ignored.insert(repository.clone(), (types::text(&row["pushed_at"], 64), now));
+                });
+                None
+            }
+            Ok(ReadOutcome::Unreadable(detail)) => {
+                cache::update(|cache| {
+                    cache.ignored.insert(repository.clone(), (types::text(&row["pushed_at"], 64), now));
+                    cache.github.retain(|entry| entry.repository.as_ref().is_none_or(|known| !known.eq_ignore_ascii_case(&repository)));
+                    if let Some(slot) = cache.github_unreadable.iter_mut().find(|entry| entry.repository == repository) {
+                        slot.detail = detail.clone();
+                        slot.at = now;
+                    } else {
+                        cache.github_unreadable.push(cache::UnreadableManifest {
+                            repository: repository.clone(), detail, at: now,
+                        });
+                        if cache.github_unreadable.len() > 16 {
+                            if let Some(oldest) = cache.github_unreadable.iter()
+                                .min_by_key(|entry| entry.at).map(|entry| entry.repository.clone()) {
+                                cache.github_unreadable.retain(|entry| entry.repository != oldest);
+                            }
+                        }
+                    }
                 });
                 None
             }
             Err(error) => {
                 missing += 1;
+                failures.push(cache::CatalogFailure {
+                    repository: repository.clone(), message: error.message.clone(), retry_at: error.retry_at,
+                });
+                let error = error.with_repository(&repository);
                 if failure.as_ref().is_none_or(|previous| previous.retry_at < error.retry_at) { failure = Some(error); }
                 before.filter(Entry::is_provider).map(|mut entry| { apply_repository(&mut entry, &row); entry.manifest_at = 0; entry })
             }
@@ -185,6 +241,8 @@ pub(super) async fn resolve(rows: Vec<Value>, previous: Vec<Entry>, force: bool)
             super::super::icons::wake(false);
         }
     }
+    failures.truncate(32);
+    cache::update(|cache| { cache.github_failures = failures; });
     (missing, failure)
 }
 
