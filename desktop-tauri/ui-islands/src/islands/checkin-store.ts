@@ -294,8 +294,13 @@ export function patch(next: Partial<Store>): void {
 
 let centerRequest = 0
 
-/** 拉聚合快照（页面打开 / 任何写动作之后） */
-export async function loadCenter(): Promise<void> {
+/**
+ * 拉聚合快照（页面打开 / 任何写动作之后）
+ *
+ * `preserveDrafts` 供后台轮询使用：总览变化不能清掉正在编辑的保活模型链与
+ * 猫猫旅行时刻，用户没有保存的草稿只能由显式刷新或保存成功收起
+ */
+export async function loadCenter(preserveDrafts = false): Promise<void> {
   const request = ++centerRequest
   try {
     const data = await bridge().getCheckinCenter?.()
@@ -309,9 +314,8 @@ export async function loadCenter(): Promise<void> {
       onboarding: onboardingFromCenter(data, store.onboarding),
       loaded: true,
       loadError: '',
-      // 快照到手 = 草稿该跟着它走（写动作成功后也会清，两处不冲突）
-      keepaliveDraft: null,
-      travelTimesDraft: null,
+      // 首次读取与用户主动刷新回到服务端快照；后台轮询保留未保存草稿
+      ...(preserveDrafts ? {} : { keepaliveDraft: null, travelTimesDraft: null }),
     })
   } catch (error) {
     if (request === centerRequest) patch({ loaded: true, loadError: errorMessage(error) })

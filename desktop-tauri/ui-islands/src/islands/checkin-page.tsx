@@ -85,7 +85,8 @@ function CheckinPage(): React.ReactElement {
       const page = (window as unknown as { wbApp?: { currentPage?: string } }).wbApp?.currentPage
       if (document.hidden || page !== 'checkin') return
       const now = store.center?.auto?.running === true
-      if (now || activeTab === 'schedule' && store.center?.auto?.enabled) void loadCenter()
+      // 轮询只更新后台状态，不能把排程页正在编辑的草稿按旧快照清掉
+      if (now || activeTab === 'schedule' && store.center?.auto?.enabled) void loadCenter(true)
       if (now && activeTab === 'records') void loadRecords()
       if (running && !now && activeTab === 'records') void loadRecords()
       running = now
