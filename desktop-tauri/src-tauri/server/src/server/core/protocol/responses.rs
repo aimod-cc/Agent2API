@@ -37,6 +37,17 @@ use crate::server::logging;
 /// 400 响应，转换层不需要知道 HTTP 状态码 —— 保持纯函数才好单独推演。
 pub type ConvertError = String;
 
+/// 思考摘要**不注入**任何标题段 —— 这是 2026-11-07 定下的口径。
+///
+/// Codex TUI 主视图只渲染「首行是 `**加粗标题**`」的思考摘要；没有标题段的摘要会被判成
+/// `transcript_only`：主视图不显示，按 Ctrl+T 才在转录里看到。**这正是想要的** ——
+/// 原始思考（`reasoning_content`）又长又吵，不该刷满主视图，需要时用 Ctrl+T 翻。
+///
+/// 曾给每段摘要垫过一个零宽空格标题（`**\u{200b}**\n\n`）让主视图能显示思考块，
+/// 实测主视图被整段原始思考淹没（一条会话累积出 9000 多个标题段），已回退。
+/// **不要再加回来**，回归测试见文末 `reasoning_passthrough_tests`。
+const _REASONING_TITLE_NOTE: () = ();
+
 /// 有状态字段：本网关无状态，这些字段一律拒绝（理由见模块头）
 const STATEFUL_FIELDS: [&str; 4] =
     ["previous_response_id", "conversation", "prompt", "background"];
@@ -1021,6 +1032,8 @@ pub fn responses_from_chat(
         output.push(json!({
             "type": "reasoning",
             "id": random_id("rs"),
+            // 不加任何标题段：纯正文会被 Codex 判成 transcript_only（主视图隐藏、Ctrl+T 可见），
+            // 这正是想要的口径，理由见 REASONING_TITLE 那段注释。
             "summary": [{ "type": "summary_text", "text": reasoning }],
         }));
     }
@@ -1657,6 +1670,7 @@ impl ResponsesStream {
         self.reasoning_index = self.next_index;
         self.next_index += 1;
         self.reasoning_id = random_id("rs");
+        // 不垫标题：summary 只有正文 → Codex 判 transcript_only（主视图隐藏、Ctrl+T 可见）
         vec![
             self.event(
                 "response.output_item.added",
@@ -2019,6 +2033,7 @@ impl ResponsesCollector {
             output.push(json!({
                 "type": "reasoning",
                 "id": random_id("rs"),
+                // 非流式出口同样不加标题，保持与流式一致（Codex 判 transcript_only）
                 "summary": [{ "type": "summary_text", "text": self.reasoning }],
             }));
         }
@@ -2201,5 +2216,94 @@ mod tests {
             true,
         );
         assert_eq!(commentary["output"][0]["phase"], "commentary");
+    }
+}
+
+#[cfg(test)]
+mod reasoning_passthrough_tests {
+    //! 思考摘要**原样透传**的回归测试：三条 Responses 出口（流式 / 聚合 / 单次 chat 转换）
+    //! 都不得给思考摘要垫任何标题段。
+    //!
+    //! 背景：2026-11-07 曾给摘要垫零宽标题（`**<U+200B>**\n\n`）以便 Codex TUI 主视图
+    //! 渲染思考块，实测主视图被整段原始思考淹没，当天即回退。这里的断言钉住回退后的口径：
+    //! summary 里只有正文一段，不额外发标题帧，`done` 与客户端累积结果一致。
+    //! 创建者：zhenghq
+    use super::*;
+
+    /// 从 SSE 帧字节里挑出指定事件名的 JSON 负载
+    fn event_payloads<'a>(frames: &'a [bytes::Bytes], name: &str) -> Vec<Value> {
+        frames
+            .iter()
+            .filter_map(|frame| {
+                let text = String::from_utf8_lossy(frame);
+                let data = text
+                    .lines()
+                    .find_map(|line| line.strip_prefix("data: "))?;
+                let value: Value = serde_json::from_str(data).ok()?;
+                (value.get("type").and_then(Value::as_str) == Some(name)).then_some(value)
+            })
+            .collect()
+    }
+
+    /// 构造一帧标准 chat 流式块
+    fn chat_chunk(delta: Value) -> Vec<u8> {
+        format!(
+            "data: {}\n\n",
+            json!({ "id": "c1", "choices": [{ "delta": delta }] })
+        )
+        .into_bytes()
+    }
+
+    /// 流式出口：只有正文一帧，不额外发标题
+    #[test]
+    fn stream_keeps_reasoning_without_title() {
+        let request = json!({});
+        let mut stream = ResponsesStream::new("test", &request, false);
+        let mut frames =
+            stream.push(&chat_chunk(json!({ "role": "assistant", "reasoning_content": "思考正文" })));
+        frames.extend(stream.finish());
+
+        let deltas = event_payloads(&frames, "response.reasoning_summary_text.delta");
+        assert_eq!(deltas.len(), 1, "只有正文一帧，不额外发标题");
+        assert_eq!(deltas[0]["delta"], json!("思考正文"));
+
+        // done 与客户端累积结果一致（Codex 用 done 落库）
+        let done = event_payloads(&frames, "response.reasoning_summary_text.done");
+        assert_eq!(done[0]["text"], json!("思考正文"));
+    }
+
+    /// 聚合出口：summary 里只有正文
+    #[test]
+    fn collected_response_keeps_reasoning_without_title() {
+        let request = json!({});
+        let mut collector = ResponsesCollector::new();
+        collector.push(&chat_chunk(json!({ "reasoning_content": "思考正文" })));
+        collector.push(&chat_chunk(json!({ "content": "正文" })));
+        collector.finish();
+        let body = collector.into_response("test", &request, false);
+
+        let reasoning = body["output"]
+            .as_array()
+            .expect("output 是数组")
+            .iter()
+            .find(|item| item["type"] == json!("reasoning"))
+            .expect("有 reasoning 项");
+        assert_eq!(reasoning["summary"][0]["text"], json!("思考正文"));
+    }
+
+    /// 单次 chat 转换出口：summary 里只有正文
+    #[test]
+    fn chat_completion_conversion_keeps_reasoning_without_title() {
+        let chat = json!({
+            "choices": [{ "message": { "reasoning_content": "思考正文", "content": "正文" } }]
+        });
+        let body = responses_from_chat(&chat, "test", &json!({}), false);
+        let reasoning = body["output"]
+            .as_array()
+            .expect("output 是数组")
+            .iter()
+            .find(|item| item["type"] == json!("reasoning"))
+            .expect("有 reasoning 项");
+        assert_eq!(reasoning["summary"][0]["text"], json!("思考正文"));
     }
 }
