@@ -106,6 +106,15 @@ pub async fn check_script_updates() -> Response {
     ok_json(plugin_host::script::check_updates().await)
 }
 
+/// 清理 Bun 运行时：先停止脚本宿主，再删除按需下载的运行时目录。
+/// 下次使用脚本插件时重新下载，用于运行时启动失败后的重置。
+pub async fn clean_script_runtime() -> Response {
+    match plugin_host::script::clean_runtime() {
+        Ok(operation) => ok_json(operation),
+        Err(error) => management_error(400, error),
+    }
+}
+
 pub async fn settings() -> Response {
     ok_json(json!(plugin_host::settings::current()))
 }

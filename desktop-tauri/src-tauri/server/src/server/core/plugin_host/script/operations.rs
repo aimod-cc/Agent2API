@@ -125,6 +125,21 @@ pub fn install(
     Ok(operation())
 }
 
+/// 清理 Bun 运行时：先停脚本宿主再删整个运行时目录，
+/// 用于启动失败后的重置，下次使用脚本插件时按需重新下载
+pub fn clean_runtime() -> Result<Value, String> {
+    begin("clean-runtime", Value::Null)?;
+    crate::spawn_task(async move {
+        let result = async {
+            plugin_host::runtime::shutdown_packs(&[super::HOST_ID.to_string()]).await?;
+            super::bun::clean().await
+        }
+        .await;
+        finished(result);
+    });
+    Ok(operation())
+}
+
 pub fn change(
     id: String,
     action: String,

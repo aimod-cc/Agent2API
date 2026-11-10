@@ -707,6 +707,7 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/plugins/scripts/prompts", post(api::plugins::script_prompts))
         .route("/api/plugins/scripts/check", get(api::plugins::check_script_updates))
         .route("/api/plugins/scripts/catalog/refresh", post(api::plugins::refresh_script_catalog))
+        .route("/api/plugins/scripts/runtime/clean", post(api::plugins::clean_script_runtime))
         .route(
             "/api/plugins/install",
             post(api::plugins::install).route_layer(axum::extract::DefaultBodyLimit::max(

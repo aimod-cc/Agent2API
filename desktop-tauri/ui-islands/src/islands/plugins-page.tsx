@@ -174,6 +174,22 @@ function PluginsPage(): React.ReactElement {
     })
   }
 
+  /** 停止脚本宿主并删除按需下载的 Bun 运行时，下次使用时重新下载 */
+  async function cleanRuntime(): Promise<void> {
+    if (scriptBusy) return
+    setScriptBusy(true)
+    try {
+      await api('POST', '/api/plugins/scripts/runtime/clean', {})
+      refreshPluginStartup()
+      await load()
+      toast(t('Bun 运行时已清理，下次使用脚本插件时自动重新下载'), 'ok')
+    } catch (failure) {
+      toast(errorMessage(failure), 'err')
+    } finally {
+      if (mounted.current) setScriptBusy(false)
+    }
+  }
+
   async function refreshStore(): Promise<void> {
     await run('refresh', async () => {
       const result = await api<ReleaseState>('GET', '/api/plugins/release')
@@ -453,7 +469,8 @@ function PluginsPage(): React.ReactElement {
       </div>
     </div>
     <PluginSettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} onChanged={check} />
-    <PluginDiagnostics open={diagnosticsOpen} payload={payload} onClose={() => setDiagnosticsOpen(false)} />
+    <PluginDiagnostics open={diagnosticsOpen} payload={payload} onClose={() => setDiagnosticsOpen(false)}
+      onCleanRuntime={() => void cleanRuntime()} cleanRuntimeBusy={scriptBusy} />
     {startupId ? <PluginStartupDialog id={startupId}
       name={packs.find(pack => pack.id === startupId)?.name || payload?.scripts?.packages.find(pack => pack.id === startupId)?.name || startupId}
       status={packs.find(pack => pack.id === startupId)?.startup || payload?.scripts?.packages.find(pack => pack.id === startupId)?.startup}
