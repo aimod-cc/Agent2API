@@ -362,3 +362,8 @@ Quando há uma nova versão, uma barra "Reiniciar e atualizar" surge na parte de
 | Ver status do takeover de Agent, restaurar | Reescrever configurações de clientes (um celular não lê arquivos locais) |
 
 A barra lateral do desktop tem uma entrada "Abrir no celular" no rodapé que leva à mesma página.
+
+
+## Referência opcional de manutenção em contêiner separado
+
+`contrib/maintenance-sidecar/` contém um protótipo de worker externo e testes isolados; consulte o [relatório da implementação](maintenance-sidecar.md). Ele não é ativado pela imagem ou Compose padrão e não tem instalador automático. A sincronização do cache de saldo exige uma ponte usage explícita; check-in e credenciais exigem montagens compatíveis do banco e da chave. A validação cobre o contrato indicado e Linux amd64, sem garantir instalação direta em versões arbitrárias.

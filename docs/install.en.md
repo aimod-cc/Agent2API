@@ -362,3 +362,8 @@ When a new version is available, a "Restart & update" bar floats at the bottom: 
 | View Agent takeover status, restore | Rewrite client configs (a phone cannot read local files) |
 
 The desktop sidebar has an "Open on phone" entry at the bottom that leads to the same page.
+
+
+## Optional maintenance sidecar reference
+
+`contrib/maintenance-sidecar/` contains a reviewable external-worker prototype and isolated tests; see the [implementation report](maintenance-sidecar.md). It is not enabled by the default image or Compose file and has no automatic installer. Balance-cache synchronisation requires an explicit usage bridge; check-in and credential callbacks require compatible database/key mounts. The current contract is validated on Linux amd64, not as a drop-in installer for arbitrary versions.
