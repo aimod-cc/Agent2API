@@ -223,6 +223,10 @@ export type ScriptPluginsState = {
     githubRetryAt?: number
     githubMissing?: number
     topic: string
+    /** 最近一次刷新里读取失败的仓库（网络 / HTTP 类，会自动重试） */
+    githubFailures?: Array<{ repository: string; message: string; retryAt?: number }>
+    /** 清单不是合法 JSON 的仓库：已停止重试，作者修复后自动恢复 */
+    githubUnreadable?: Array<{ repository: string; detail: string; at: number }>
   }
   updates?: ScriptUpdatesState
 }

@@ -148,6 +148,7 @@ async fn tagged(force: bool) {
     cache::update(|cache| {
         cache.github.retain(|entry| entry.repository.as_ref().is_some_and(|repo| repositories.contains(&repo.to_lowercase())));
         cache.ignored.retain(|repo, _| repositories.contains(repo));
+        cache.github_unreadable.retain(|entry| repositories.contains(&entry.repository));
         for entry in cache.market.iter_mut().chain(cache.github.iter_mut()) {
             if let Some(row) = rows.items.iter().find(|row| types::repository(&row["full_name"]).as_ref().zip(entry.repository.as_ref())
                 .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))) {

@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { Alert, Button, Spinner } from '@ui'
+import { Alert, Button, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Spinner } from '@ui'
 import type { ScriptCatalogInfo, ScriptPluginsState, ScriptRecommendation } from './plugins'
 import type { PluginTranslate } from './plugins-store'
 
@@ -55,6 +55,7 @@ export function ScriptCatalogStatus({ catalog, request, refresh, disabled, t }: 
 }) {
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState('')
+  const [details, setDetails] = React.useState(false)
   const pending = React.useRef(false)
   const refreshing = busy || catalog.refreshing
   const checkedAt = Math.max(catalog.marketCheckedAt, catalog.githubCheckedAt)
@@ -65,6 +66,7 @@ export function ScriptCatalogStatus({ catalog, request, refresh, disabled, t }: 
     catalog.githubError ? `GitHub：${catalog.githubError}` : '',
     error,
   ].filter(Boolean)
+  const hasDetails = Boolean(catalog.githubFailures?.length || catalog.githubUnreadable?.length)
 
   async function reload(): Promise<void> {
     if (pending.current || refreshing || disabled) return
@@ -96,6 +98,55 @@ export function ScriptCatalogStatus({ catalog, request, refresh, disabled, t }: 
       <p className='m-0'>{t('部分信息未能更新，已读取的插件仍可查看。')}</p>
       {problems.map((problem, index) => <p key={index} className='m-0 mt-1 whitespace-pre-wrap break-words'>{problem}</p>)}
       {retryAt.length ? <p className='m-0 mt-1'>{t('受影响的来源将在 {time} 后自动重试', { time: new Date(Math.min(...retryAt)).toLocaleTimeString() })}</p> : null}
+      {hasDetails ? <p className='m-0 mt-1'>
+        <Button variant='link' size='xs' className='h-auto min-w-0 px-0 text-xs' onClick={() => setDetails(true)}>{t('错误详情')}</Button>
+      </p> : null}
     </Alert> : null}
+    {details ? <CatalogProblemsDialog catalog={catalog} onClose={() => setDetails(false)} t={t} /> : null}
   </div>
+}
+
+/** 错误详情弹窗：横幅只留一句话，每个来源的具体原因与重试时间在这里展开 */
+function CatalogProblemsDialog({ catalog, onClose, t }: {
+  catalog: NonNullable<ScriptPluginsState['catalog']>
+  onClose(): void
+  t: PluginTranslate
+}) {
+  const failures = catalog.githubFailures || []
+  const unreadable = catalog.githubUnreadable || []
+  return <Dialog open onOpenChange={next => { if (!next) onClose() }}>
+    <DialogContent className='w-[min(560px,calc(100vw-24px))]'>
+      <DialogHeader><DialogTitle>{t('错误详情')}</DialogTitle></DialogHeader>
+      <DialogBody>
+        {catalog.marketError ? <section className='mb-4'>
+          <h3 className='m-0 mb-1 text-[12px] font-semibold'>{t('Magpie 官方名单')}</h3>
+          <p className='m-0 text-[12px] leading-relaxed text-muted-foreground'>{catalog.marketError}</p>
+        </section> : null}
+        {failures.length ? <section className={unreadable.length ? 'mb-4' : undefined}>
+          <h3 className='m-0 mb-1 text-[12px] font-semibold'>{t('读取失败的仓库')}</h3>
+          <ul className='m-0 list-none space-y-1.5 p-0 text-[12px] leading-relaxed text-muted-foreground'>
+            {failures.map((failure, index) => <li key={index} className='break-words'>
+              <span>{failure.message}</span>
+              {failure.retryAt && failure.retryAt > Date.now()
+                ? <span className='ml-1'>{t('受影响的来源将在 {time} 后自动重试', { time: new Date(failure.retryAt).toLocaleTimeString() })}</span>
+                : null}
+            </li>)}
+          </ul>
+        </section> : null}
+        {unreadable.length ? <section>
+          <h3 className='m-0 mb-1 text-[12px] font-semibold'>{t('无法解析的插件清单')}</h3>
+          <ul className='m-0 list-none space-y-1.5 p-0 text-[12px] leading-relaxed text-muted-foreground'>
+            {unreadable.map(entry => <li key={entry.repository} className='break-words'>
+              <span className='text-foreground'>{entry.repository}</span>
+              <span className='ml-1'>{entry.detail}</span>
+              <span className='ml-1'>{t('清单不是合法 JSON，作者修复后会自动恢复')}</span>
+            </li>)}
+          </ul>
+        </section> : null}
+      </DialogBody>
+      <DialogFooter>
+        <Button variant='ghost' size='sm' onClick={onClose}>{t('关闭')}</Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
 }

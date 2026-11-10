@@ -22,6 +22,24 @@ pub(super) struct Cache {
     pub github_error: Option<String>,
     pub github_missing: usize,
     pub ignored: BTreeMap<String, (String, i64)>,
+    /// 最近一次刷新里读取失败的仓库（网络 / HTTP 类，会自动重试）
+    pub github_failures: Vec<CatalogFailure>,
+    /// 清单不是合法 JSON 的仓库：与忽略生命周期同待遇，留下原因供错误详情展示
+    pub github_unreadable: Vec<UnreadableManifest>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+pub(super) struct CatalogFailure {
+    pub repository: String,
+    pub message: String,
+    pub retry_at: i64,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub(super) struct UnreadableManifest {
+    pub repository: String,
+    pub detail: String,
+    pub at: i64,
 }
 
 #[derive(Default)]
@@ -101,5 +119,6 @@ pub(super) fn status() -> Value {
         "marketError": state.cache.market_error, "githubError": state.cache.github_error,
         "marketRetryAt": state.cache.market_retry, "githubRetryAt": state.cache.github_retry,
         "githubMissing": state.cache.github_missing, "topic": super::github::TOPIC,
+        "githubFailures": state.cache.github_failures, "githubUnreadable": state.cache.github_unreadable,
     })
 }
