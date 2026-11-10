@@ -15,8 +15,16 @@
 //! ── 超时 ────────────────────────────────────────────────────
 //! 传输层单独建 Client，不用 `egress` 的共享 Client：后者的 read_timeout 来自
 //! 「请求超时」设置（面向 SSE，可能被用户调成 600 秒），而云同步要的是
-//! 「连接 30 秒、整次传输 300 秒」这种一次性长任务的口径。建一个不缓存的
-//! Client 的代价（一次连接池）远小于把两套语义挤进一个实例。
+//! 「连接 30 秒、整次传输 300 秒」这种一次性长任务的口径，Client 由
+//! Transport 按整次操作构建并持有，PROPFIND / MKCOL / PUT 复用同一连接池，
+//! 一次上传只真正建连一次，GET 因为要逐跳处理重定向，单独配一个不跟转的
+//! 姊妹客户端，同一操作内同样复用
+//!
+//! ── 连接重试 ────────────────────────────────────────────────
+//! 首次上传偶发「Network is unreachable」：解析器偶尔只返回 IPv6 记录（A 记录
+//! 查询瞬时失败时返回部分结果），连接器在应答缺 IPv4 时没有回退目标，整条
+//! 连接直接失败，连接阶段失败时服务端没有收到任何字节，重发没有副作用，
+//! 自动重试一次即可越过瞬态，非连接类错误不重试
 
 mod download;
 
@@ -30,6 +38,8 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// 大文件传输（PUT / GET 快照）的超时。整次请求的总预算 —— 256MB 上限下，
 /// 300 秒意味着 0.85MB/s 的下限，家用宽带上足够。
 const TRANSFER_TIMEOUT_SECS: u64 = 300;
+/// 连接类失败的重试间隔：重试会重新解析域名，多数瞬态在这一档延迟内恢复
+const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 /// Basic Auth 的 `(用户名, 密码)`
 pub(crate) type WebDavAuth = Option<(String, Option<String>)>;
@@ -45,10 +55,6 @@ fn method_mkcol() -> Method {
 /// ── 自定义 User-Agent ───────────────────────────────────────
 /// 少数 WebDAV 服务（如中国科技云数据胶囊）把凭据绑到「应用类型」上，并按
 /// User-Agent 校验它；UA 不含该应用名就拒绝。`user_agent` 为空 = 不覆盖。
-fn client(user_agent: &str) -> Result<reqwest::Client, String> {
-    client_with_policy(reqwest::redirect::Policy::limited(10), user_agent)
-}
-
 fn client_with_policy(
     policy: reqwest::redirect::Policy,
     user_agent: &str,
@@ -65,6 +71,42 @@ fn client_with_policy(
     builder
         .build()
         .map_err(|error| format!("创建 HTTP 客户端失败: {}", redact_detail(&error.to_string())))
+}
+
+/// 整次同步操作共用的客户端：自动跟随跳转（≤10 次）。
+///
+/// 由 Transport 按操作构建并持有一次，PROPFIND / MKCOL / PUT 复用同一连接池，
+/// 一次上传不再每个请求重做 DNS 解析与 TLS 握手
+pub(crate) fn build_client(user_agent: &str) -> Result<reqwest::Client, String> {
+    client_with_policy(reqwest::redirect::Policy::limited(10), user_agent)
+}
+
+/// GET 专用的不自动跟转客户端：download 模块逐跳处理重定向以保留真实失败目标
+pub(crate) fn build_client_without_redirects(user_agent: &str) -> Result<reqwest::Client, String> {
+    client_with_policy(reqwest::redirect::Policy::none(), user_agent)
+}
+
+/// 发送请求，连接类失败自动重试一次。
+///
+/// 连接阶段的失败（域名解析部分应答、路由未就绪等瞬态）发生时 TCP 与 TLS 都
+/// 没有建立，服务端不会收到这次请求，重发没有副作用；非连接类错误说明请求
+/// 可能已到达服务端，不重试。重试用克隆的请求重新发送，重新解析在连接器
+/// 内部自然发生，多数瞬态在第二次尝试时拿到完整地址
+async fn send_with_connect_retry(
+    builder: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, reqwest::Error> {
+    match builder.try_clone() {
+        Some(retry) => match builder.send().await {
+            Ok(response) => Ok(response),
+            Err(error) if error.is_connect() => {
+                tokio::time::sleep(CONNECT_RETRY_DELAY).await;
+                retry.send().await
+            }
+            Err(error) => Err(error),
+        },
+        // 流式 body 之类不可克隆的请求没有重试机会，直接发送
+        None => builder.send().await,
+    }
 }
 
 /// 解析并校验 WebDAV 基地址（只认 http / https）。
@@ -225,19 +267,17 @@ fn transport_error(op: &str, url: &str, error: &reqwest::Error) -> String {
 /// PROPFIND 是 WebDAV 的「你好，这里有东西吗」，能同时验证「地址对」与
 /// 「这是 WebDAV 而不是普通静态站点」。
 pub(crate) async fn test_connection(
+    http: &reqwest::Client,
     base_url: &str,
     auth: &WebDavAuth,
-    user_agent: &str,
 ) -> Result<(), String> {
     let url = parse_base_url(base_url)?;
-    let response = apply_auth(
-        client(user_agent)?
-            .request(method_propfind(), url)
+    let response = send_with_connect_retry(apply_auth(
+        http.request(method_propfind(), url)
             .header("Depth", "0")
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS)),
         auth,
-    )
-    .send()
+    ))
     .await
     .map_err(|error| transport_error("连接", base_url, &error))?;
 
@@ -254,24 +294,22 @@ pub(crate) async fn test_connection(
 /// 405（METHOD_NOT_ALLOWED）或 409（CONFLICT），这两种都可能是「已存在」也
 /// 可能是「父目录不存在」，所以再补一次 PROPFIND 确认；确认存在就算成功。
 pub(crate) async fn ensure_remote_directories(
+    http: &reqwest::Client,
     base_url: &str,
     segments: &[String],
     auth: &WebDavAuth,
-    user_agent: &str,
 ) -> Result<(), String> {
     if segments.is_empty() {
         return Ok(());
     }
-    let http = client(user_agent)?;
     for depth in 1..=segments.len() {
         let url = build_remote_url(base_url, &segments[..depth])?;
         let dir_url = if url.ends_with('/') { url } else { format!("{url}/") };
-        let response = apply_auth(
+        let response = send_with_connect_retry(apply_auth(
             http.request(method_mkcol(), &dir_url)
                 .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS)),
             auth,
-        )
-        .send()
+        ))
         .await
         .map_err(|error| transport_error("MKCOL", &dir_url, &error))?;
 
@@ -315,21 +353,19 @@ async fn propfind_exists(
 
 /// PUT 一个文件。
 pub(crate) async fn put_bytes(
+    http: &reqwest::Client,
     url: &str,
     auth: &WebDavAuth,
     bytes: Vec<u8>,
     content_type: &str,
-    user_agent: &str,
 ) -> Result<(), String> {
-    let response = apply_auth(
-        client(user_agent)?
-            .put(url)
+    let response = send_with_connect_retry(apply_auth(
+        http.put(url)
             .header("Content-Type", content_type)
             .body(bytes)
             .timeout(Duration::from_secs(TRANSFER_TIMEOUT_SECS)),
         auth,
-    )
-    .send()
+    ))
     .await
     .map_err(|error| transport_error("PUT", url, &error))?;
     if response.status().is_success() {
@@ -343,25 +379,27 @@ pub(crate) async fn put_bytes(
 /// `max_bytes` 是**硬上限**：先看 `Content-Length`，再在流式读取时逐块累计 ——
 /// 只看头不够（服务端可以不发长度，或发一个假的），所以两道都做。
 pub(crate) async fn get_bytes(
+    http: &reqwest::Client,
     url: &str,
     auth: &WebDavAuth,
     max_bytes: usize,
-    user_agent: &str,
 ) -> Result<Option<Vec<u8>>, String> {
-    download::get_bytes(url, auth, max_bytes, user_agent).await
+    download::get_bytes(http, url, auth, max_bytes).await
 }
 
 /// 删除一个文件（当前只在「上传失败后清理半截数据」之外使用；保留给将来的
 /// 「清空远端」按钮）。404 视为成功。
 #[allow(dead_code)]
-pub(crate) async fn delete(url: &str, auth: &WebDavAuth, user_agent: &str) -> Result<(), String> {
-    let response = apply_auth(
-        client(user_agent)?
-            .delete(url)
+pub(crate) async fn delete(
+    http: &reqwest::Client,
+    url: &str,
+    auth: &WebDavAuth,
+) -> Result<(), String> {
+    let response = send_with_connect_retry(apply_auth(
+        http.delete(url)
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS)),
         auth,
-    )
-    .send()
+    ))
     .await
     .map_err(|error| transport_error("DELETE", url, &error))?;
     if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {

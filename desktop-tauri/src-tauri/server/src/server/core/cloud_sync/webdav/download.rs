@@ -1,4 +1,5 @@
-//! GET 逐跳处理重定向，以保留真实失败目标并限制跨来源凭据转发。
+//! GET 逐跳处理重定向，以保留真实失败目标并限制跨来源凭据转发，客户端由
+//! 调用方（Transport）传入，同一操作内的多次 GET 复用同一个连接池
 
 use std::time::Duration;
 
@@ -6,8 +7,8 @@ use futures::StreamExt as _;
 use reqwest::{header, StatusCode, Url};
 
 use super::{
-    apply_auth, client_with_policy, parse_base_url, redact_url, status_error, transport_error,
-    WebDavAuth, TRANSFER_TIMEOUT_SECS,
+    apply_auth, parse_base_url, redact_url, send_with_connect_retry, status_error,
+    transport_error, WebDavAuth, TRANSFER_TIMEOUT_SECS,
 };
 
 const MAX_REDIRECTS: usize = 10;
@@ -36,12 +37,11 @@ fn redirect_error(reason: &str, status: StatusCode, urls: &[Url]) -> String {
 }
 
 pub(super) async fn get_bytes(
+    http: &reqwest::Client,
     url: &str,
     auth: &WebDavAuth,
     max_bytes: usize,
-    user_agent: &str,
 ) -> Result<Option<Vec<u8>>, String> {
-    let http = client_with_policy(reqwest::redirect::Policy::none(), user_agent)?;
     let mut current = parse_base_url(url)?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(TRANSFER_TIMEOUT_SECS);
     let mut urls = vec![current.clone()];
@@ -63,7 +63,7 @@ pub(super) async fn get_bytes(
         } else {
             request
         };
-        let response = request.send().await.map_err(|error| {
+        let response = send_with_connect_retry(request).await.map_err(|error| {
             with_redirect_context(transport_error("GET", current.as_str(), &error), &urls)
         })?;
         let status = response.status();
