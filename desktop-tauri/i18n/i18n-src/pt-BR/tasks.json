@@ -90,6 +90,8 @@
   "改动立即生效，不需要重启程序": "As alterações entram em vigor imediatamente; não é preciso reiniciar o programa",
   "改间隔": "",
   "无失败项": "Sem falhas",
+  "维护记录保留上限": "Limite de retenção de registros de manutenção",
+  "维护记录保留上限必须是 {min}–{max} 的整数": "O limite de retenção de registros de manutenção deve ser um inteiro entre {min} e {max}",
   "日志页自动刷新": "Atualização automática da página de logs",
   "明细状态筛选": "Filtrar status dos itens",
   "暂无维护记录，首次执行后会自动保存": "Ainda não há registros de manutenção. A primeira execução será salva automaticamente.",

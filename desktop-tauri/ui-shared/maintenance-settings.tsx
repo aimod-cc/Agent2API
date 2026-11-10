@@ -57,7 +57,7 @@ export function MaintenanceSettings({ tasks, api, retentionDays, maxRecords, onC
       return
     }
     if (!/^\d+$/.test(count) || Number(count) < RETENTION_MIN_COUNT || Number(count) > RETENTION_MAX_COUNT) {
-      setError(t('日志保留上限必须是 {min}–{max} 的整数', { min: RETENTION_MIN_COUNT, max: RETENTION_MAX_COUNT }))
+      setError(t('维护记录保留上限必须是 {min}–{max} 的整数', { min: RETENTION_MIN_COUNT, max: RETENTION_MAX_COUNT }))
       return
     }
     saving.current = true
@@ -130,7 +130,7 @@ export function MaintenanceSettings({ tasks, api, retentionDays, maxRecords, onC
                   <FieldDescription>{t('可填 {min}–{max} 天', { min: RETENTION_MIN_DAYS, max: RETENTION_MAX_DAYS })}</FieldDescription>
                 </Field>
                 <Field className='w-[220px]'>
-                  <FieldLabel>{t('日志保留上限')}</FieldLabel>
+                  <FieldLabel>{t('维护记录保留上限')}</FieldLabel>
                   <Input type='number' inputMode='numeric' min={RETENTION_MIN_COUNT} max={RETENTION_MAX_COUNT} step={1} disabled={busy}
                     value={retention.count} onChange={event => setRetention(previous => ({ ...previous, count: event.target.value }))} />
                   <FieldDescription>{t('可填 {min}–{max} 条', { min: RETENTION_MIN_COUNT, max: RETENTION_MAX_COUNT })}</FieldDescription>

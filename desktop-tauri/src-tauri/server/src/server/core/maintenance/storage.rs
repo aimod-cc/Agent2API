@@ -16,17 +16,17 @@ const COLUMNS: &str = "id, task_id, source, retry_of, started_at, finished_at, s
 ///
 /// 在每轮记录落库后与「设置页把保留值改小」这两个时机调用：后者不主动清理的话，
 /// 旧数据要等到下一次维护执行才消失，界面会显得「改了没生效」。
-pub fn prune() -> (u64, u64) {
+/// 数据库与事务错误向调用方返回，配置已保存时由设置入口明确报告清理失败。
+pub fn prune() -> Result<(u64, u64), String> {
     let settings = config::retention_settings();
-    let Ok(db) = database() else { return (0, 0) };
+    let db = database()?;
     db.with_mut(|conn| -> Result<(u64, u64), String> {
         let tx = sql(conn.transaction())?;
         let pruned = prune_with(&tx, settings.maintenance_days, settings.maintenance_count)?;
         sql(tx.commit())?;
         Ok(pruned)
     })
-    .unwrap_or(Ok((0, 0)))
-    .unwrap_or((0, 0))
+    .ok_or_else(|| "维护记录数据库繁忙".to_string())?
 }
 
 /// 一条事务里的清理动作，返回（按天数清理的行数，按条数清理的行数）。

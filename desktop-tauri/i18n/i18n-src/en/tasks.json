@@ -89,6 +89,8 @@
   "改动立即生效，不需要重启程序": "Changes take effect immediately; no restart needed",
   "改间隔": "",
   "无失败项": "No failures",
+  "维护记录保留上限": "Maintenance record retention limit",
+  "维护记录保留上限必须是 {min}–{max} 的整数": "Maintenance record retention limit must be an integer between {min} and {max}",
   "日志页自动刷新": "Logs auto-refresh",
   "明细状态筛选": "Filter item status",
   "暂无维护记录，首次执行后会自动保存": "No maintenance records yet. The first run will be saved automatically.",

@@ -1291,6 +1291,24 @@ fn update<F>(mutate: F) -> bool
 where
     F: FnOnce(&mut RuntimeConfig),
 {
+    update_inner(mutate, true)
+}
+
+/// 更新配置，仅在写盘成功后发布内存快照。
+///
+/// 数据保留设置会直接触发不可恢复的历史清理，不能沿用在写盘失败时仍让本次运行生效的语义，
+/// 否则较短保留期未持久化时会先删除数据，重启后又恢复旧设置
+fn update_persisted<F>(mutate: F) -> bool
+where
+    F: FnOnce(&mut RuntimeConfig),
+{
+    update_inner(mutate, false)
+}
+
+fn update_inner<F>(mutate: F, publish_when_unsaved: bool) -> bool
+where
+    F: FnOnce(&mut RuntimeConfig),
+{
     let _usage_guard = crate::server::core::usage_query::config::lock();
     // 读改写必须串行，否则两个模型的独立配置会互相覆盖。
     let _update_guard = CONFIG_UPDATE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1306,6 +1324,9 @@ where
     // 先算改动后的指纹再交出所有权：`next` 要移进内存快照
     let changed = before != synced_fingerprint(&next.raw);
     let catalog_changed = crate::server::core::providers::catalog::config_changed(&previous, &next);
+    if !saved && !publish_when_unsaved {
+        return false;
+    }
     if catalog_changed { crate::server::core::providers::catalog::invalidate(); }
     if let Ok(mut guard) = CONFIG.write() {
         *guard = Some(next);
@@ -1529,11 +1550,10 @@ pub(crate) fn update_raw_field_with(key: &str, mutate: impl FnOnce(&mut Value)) 
 /// 调用方（`stats_api::put_retention`）**必须先校验范围**：本函数按「已合法」
 /// 处理，越界值会被 `days_field` 的回读逻辑丢弃（那会让用户以为设置生效了）。
 ///
-/// 内存快照与 raw 底稿一起改（与 `set_api_key` 同一模式）：前者让下一次裁剪
-/// 立刻用新值，后者保证写盘时不会把字段吃掉。无论写盘成功与否内存都已更新
-/// （与其它 setter 一致），所以「设置页保存 → 立即清理」不依赖磁盘 IO。
+/// 只有写盘成功后才会发布内存快照：保留期缩短会立即触发不可恢复的数据清理，
+/// 写盘失败却继续按新值清理，会在重启恢复旧配置后留下无法解释的数据缺失
 pub fn set_retention(patch: RetentionPatch) -> bool {
-    update(|config| {
+    update_persisted(|config| {
         let mut next = config.retention;
         // 未传的项保持原值，不把默认值固化到配置里。
         let mut apply = |key: &str, value: Option<i64>, slot: &mut i64| {
