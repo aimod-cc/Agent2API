@@ -230,11 +230,12 @@ pub fn validate(settings: &ClientSettings) -> Result<(), String> {
 /// 路由供应商命中「供应商归属规则」时用规则客户端；未命中回落「默认归属
 /// 客户端」；两者都未配置时保留请求头识别出的真实客户端。
 pub fn attribution_client(identified: &str, provider: &str, settings: &ClientSettings) -> String {
-    if !provider.is_empty() {
-        if let Some(rule) = settings.provider_rules.iter()
-            .find(|rule| rule.provider.eq_ignore_ascii_case(provider)) {
-            return rule.client_id.clone();
-        }
+    if provider.is_empty() {
+        return identified.to_string();
+    }
+    if let Some(rule) = settings.provider_rules.iter()
+        .find(|rule| rule.provider.eq_ignore_ascii_case(provider)) {
+        return rule.client_id.clone();
     }
     if !settings.default_client_id.is_empty() {
         return settings.default_client_id.clone();
@@ -256,6 +257,8 @@ mod tests {
         assert_eq!(attribution_client("codex", "ZCODE-INTL", &settings), "zcode");
         // 未命中：回落默认归属客户端
         assert_eq!(attribution_client("codex", "raccoon", &settings), "custom:abcdef123456");
+        // 尚未确定供应商：保留请求头识别出的真实客户端，不能提前套用默认归属
+        assert_eq!(attribution_client("codex", "", &settings), "codex");
         // 两者都没配置：保留请求头识别出的真实客户端
         let empty = ClientSettings::default();
         assert_eq!(attribution_client("codex", "zcode", &empty), "codex");
