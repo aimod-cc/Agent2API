@@ -24,16 +24,31 @@ export type ClientRule = {
   clientId: string
 }
 export type CustomClient = { id: string; name: string }
-export type ClientSettings = { acceptDeclarations: boolean; clients: CustomClient[]; rules: ClientRule[] }
+/**
+ * 供应商归属规则：路由命中该供应商时，请求归属到指定客户端。
+ * 请求头识别的真实客户端保留在 evidence 里，这里是记账时的最终归属改写。
+ */
+export type ProviderRule = { provider: string; clientId: string }
+export type ClientSettings = {
+  acceptDeclarations: boolean
+  clients: CustomClient[]
+  /** 头匹配规则：按列表顺序匹配，用于给难以识别的软件标识固定归属 */
+  rules: ClientRule[]
+  providerRules: ProviderRule[]
+  defaultClientId: string
+}
 export type ClientIdentificationView = {
   config: ClientSettings
   revision: string
   /** `ua` 是该客户端一份代表性的 User-Agent（账号级自定义 UA 的预置项，见后端 catalog） */
   builtins: { id: string; name: string; value: string; products: string[]; ua?: string }[]
+  /** 已添加供应商（模型管理同源）：内置家在前、自定义家在后，归属规则第一列用 */
+  providers: { id: string; label: string; custom: boolean }[]
   headers: string[]
   declarationHeader: string
   maxRules: number
   maxClients: number
+  maxProviderRules: number
 }
 export type IdentificationSample = {
   id?: string
@@ -98,6 +113,7 @@ export function randomId(): string {
 export function clientSettingsError(config: ClientSettings, view: ClientIdentificationView, t: Translate): string {
   if (config.rules.length > view.maxRules) return t('识别规则数量已达上限')
   if (config.clients.length > view.maxClients) return t('自定义客户端数量已达上限')
+  if (config.providerRules.length > view.maxProviderRules) return t('供应商归属规则数量已达上限')
   const names = new Set(view.builtins.flatMap(client => [client.name, client.id, client.value, ...client.products]).map(name => name.toLowerCase()))
   for (const client of config.clients) {
     if (!client.name.trim() || client.name.trim() !== client.name || client.name.length > 80) return t('客户端名称不能为空，最长 80 个字符')
@@ -105,6 +121,15 @@ export function clientSettingsError(config: ClientSettings, view: ClientIdentifi
     names.add(client.name.toLowerCase())
   }
   const clients = new Set([...view.builtins, ...config.clients].map(client => client.id))
+  const providerIds = new Set<string>()
+  for (const rule of config.providerRules) {
+    const provider = rule.provider.trim()
+    if (!provider) return t('请选择供应商')
+    if (providerIds.has(provider.toLowerCase())) return t('同一供应商只能有一条归属规则')
+    providerIds.add(provider.toLowerCase())
+    if (!clients.has(rule.clientId)) return t('归属规则指向的客户端不存在')
+  }
+  if (config.defaultClientId && !clients.has(config.defaultClientId)) return t('默认归属客户端不存在')
   for (const rule of config.rules) {
     if (!rule.pattern.trim() || rule.pattern.trim() !== rule.pattern || rule.pattern.length > 256) return t('匹配内容不能为空，最长 256 个字符')
     if (!clients.has(rule.clientId)) return t('请选择归属客户端')

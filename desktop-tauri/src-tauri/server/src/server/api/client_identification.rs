@@ -4,19 +4,33 @@ use serde_json::{json, Value};
 
 use crate::server::config::client_identification;
 use crate::server::core::client::{self, catalog, ClientEvidence, ClientSettings};
+use crate::server::core::custom_providers;
+use crate::server::core::providers::{self, catalog as provider_catalog};
 use crate::server::errors::{self, GatewayError};
 use crate::server::http::{ok_json, parse_body};
 use crate::server::{logging, ServerState};
 
-fn view() -> Result<Value, GatewayError> {
+fn view(state: &ServerState) -> Result<Value, GatewayError> {
     let snapshot = client_identification::current();
     let settings = snapshot.settings.as_ref().map_err(|error| GatewayError::new(error.clone()))?;
+    // 已添加供应商（与模型管理左栏同源）：有可用账号的内置家 + 自定义家，
+    // 供应商归属规则的第一列从这里选
+    let mut providers: Vec<Value> = provider_catalog::managed_manifests(state.store()).into_iter()
+        .map(|(id, _)| json!({ "id": id, "label": providers::label_of(&id), "custom": false }))
+        .collect();
+    providers.extend(custom_providers::list().iter().filter_map(|owner| {
+        let id = owner.get("id").and_then(Value::as_str)?.to_string();
+        let name = owner.get("name").and_then(Value::as_str).unwrap_or(&id);
+        Some(json!({ "id": id, "label": name, "custom": true }))
+    }));
     Ok(json!({
         "config": settings, "revision": snapshot.revision,
         "builtins": catalog::CLIENTS,
+        "providers": providers,
         "headers": ["user-agent", "x-title", "x-client-type", "x-cerebras-3rd-party-integration", catalog::DECLARATION_HEADER],
         "declarationHeader": catalog::DECLARATION_HEADER,
         "maxRules": catalog::MAX_RULES, "maxClients": catalog::MAX_CLIENTS,
+        "maxProviderRules": catalog::MAX_PROVIDER_RULES,
     }))
 }
 
@@ -27,7 +41,7 @@ fn response(result: Result<Value, GatewayError>) -> Response {
     }
 }
 
-pub async fn get_settings() -> Response { response(view()) }
+pub async fn get_settings(State(state): State<ServerState>) -> Response { response(view(&state)) }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -36,17 +50,17 @@ struct SaveSettings {
     revision: String,
 }
 
-pub async fn put_settings(body: Bytes) -> Response {
+pub async fn put_settings(State(state): State<ServerState>, body: Bytes) -> Response {
     let payload = match parse_body(&body).and_then(|value| serde_json::from_value::<SaveSettings>(value)
         .map_err(|error| GatewayError::bad_request(format!("客户端识别设置不完整：{error}")))) {
         Ok(payload) => payload,
         Err(error) => return response(Err(error)),
     };
     match tokio::task::spawn_blocking(move || {
-        let count = payload.config.rules.len();
+        let count = payload.config.provider_rules.len();
         client_identification::save(payload.config, &payload.revision)?;
-        logging::log("[Config]", &format!("客户端识别设置已保存：{count} 条规则，仅对新请求生效"));
-        view()
+        logging::log("[Config]", &format!("客户端识别设置已保存：{count} 条供应商归属规则，仅对新请求生效"));
+        view(&state)
     }).await {
         Ok(result) => response(result),
         Err(error) => errors::management_error(500, error.to_string()),

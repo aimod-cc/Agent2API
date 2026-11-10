@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Alert, Badge, Button } from '@ui'
 import type { Translate } from './assistant-read-types'
 import { requestClientLabel, type RequestIdentity } from './model-api-key'
-import { ClientRuleEditor } from './client-identification-editor'
+import { RequestIdentificationDialog } from './client-identification-request-dialog'
 import { clientMethodLabel, type ClientIdentificationApi, type ClientIdentificationView } from './client-identification'
 
 export function ClientIdentificationDetail({ entry, api, t }: { entry: RequestIdentity; api: ClientIdentificationApi; t: Translate }) {
@@ -16,6 +16,9 @@ export function ClientIdentificationDetail({ entry, api, t }: { entry: RequestId
   if (entry.isTest && !evidence) return <span>{requestClientLabel(entry, t)}</span>
   return <div className='space-y-2 text-xs'>
     <div className='flex flex-wrap items-center gap-2'><Badge variant='outline'>{requestClientLabel(entry, t)}</Badge><span className='text-muted-foreground'>{clientMethodLabel(evidence?.method, t)}</span></div>
+    {entry.client && evidence && entry.client.trim().toLowerCase() !== evidence.clientId.trim().toLowerCase()
+      ? <p className='text-muted-foreground'>{t('请求头识别为 {identified}，已改写归属为 {client}', { identified: evidence.clientName || evidence.clientId, client: requestClientLabel(entry, t) })}</p>
+      : null}
     {evidence ? <>
       <div className='break-all'><span className='text-muted-foreground'>User-Agent: </span>{evidence.userAgent || '—'}</div>
       {evidence.userAgentTruncated ? <p className='text-muted-foreground'>{t('软件标识超过 1 KB，已截断保存；匹配仅使用保留部分。')}</p> : null}
@@ -34,6 +37,6 @@ export function ClientIdentificationDetail({ entry, api, t }: { entry: RequestId
     </> : <p className='text-muted-foreground'>{t('这条历史请求没有保存识别依据，不能据此自动创建规则。')}</p>}
     {error ? <Alert variant='destructive'>{error}</Alert> : null}
     {saved ? <p className='text-muted-foreground'>{t('规则已保存，对后续请求生效；当前历史记录未修改。')}</p> : null}
-    {view && evidence ? <ClientRuleEditor api={api} view={view} evidence={evidence} t={t} onClose={() => setView(null)} onSaved={() => { setView(null); setSaved(true) }} /> : null}
+    {view && evidence ? <RequestIdentificationDialog api={api} view={view} entry={entry} evidence={evidence} t={t} onClose={() => setView(null)} onSaved={() => { setView(null); setSaved(true) }} /> : null}
   </div>
 }

@@ -485,14 +485,25 @@ pub fn live_row_sink(
     stats: Arc<RequestStats>,
     id: String,
     started_at: i64,
+    identified_client: &str,
 ) -> impl Fn(&TelemetrySnapshot) + Send + Sync {
+    let identified = identified_client.to_string();
     let live = super::live_progress::sink(stats, id);
-    move |snapshot| live(running_progress(snapshot, started_at))
+    move |snapshot| live(running_progress(snapshot, started_at, &identified))
 }
 
-pub(super) fn running_progress(snapshot: &TelemetrySnapshot, started_at: i64) -> RunningProgress {
+pub(super) fn running_progress(snapshot: &TelemetrySnapshot, started_at: i64, identified_client: &str) -> RunningProgress {
+    let provider = snapshot.provider.clone().unwrap_or_default();
+    // 供应商定下后在途行就按归属规则改写 client：与收尾记账同一判据，转发期间
+    // 列表显示的不再是请求头识别出的真实客户端；供应商未定（空串）不覆盖。
+    let client = if provider.is_empty() { String::new() } else {
+        crate::server::config::client_identification::current().settings.as_ref().ok()
+            .map(|settings| crate::server::core::client::attribution_client(identified_client, &provider, settings))
+            .unwrap_or_default()
+    };
     RunningProgress {
-        provider: snapshot.provider.clone().unwrap_or_default(),
+        provider,
+        client,
         account_id: snapshot.account_id.clone(),
         account_name: snapshot.account_name.clone(),
         upstream_model: snapshot.upstream_model.clone(),
