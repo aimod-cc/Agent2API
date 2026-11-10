@@ -85,6 +85,9 @@ function PluginsPage(): React.ReactElement {
     return subscribePluginDiagnostics(open)
   }, [])
   const [scriptBusy, setScriptBusy] = React.useState(false)
+  /** 运行时清理是独立任务，不能复用脚本面板的忙碌标记，否则面板结束会提前解禁按钮 */
+  const [runtimeCleaning, setRuntimeCleaning] = React.useState(false)
+  const runtimeCleanRef = React.useRef(false)
   const [scriptInstallRequest, setScriptInstallRequest] = React.useState(0)
   const [bulk, setBulk] = React.useState<{ index: number; total: number } | null>(null)
   const fileRef = React.useRef<HTMLInputElement>(null)
@@ -180,6 +183,46 @@ function PluginsPage(): React.ReactElement {
       await load()
       if (result.error) toast(result.reason || t('检查更新失败'), 'err')
     })
+  }
+
+  async function cleanRuntime(): Promise<void> {
+    if (runtimeCleanRef.current) return
+    runtimeCleanRef.current = true
+    setRuntimeCleaning(true)
+    let settled = false
+    try {
+      await api('POST', '/api/plugins/scripts/runtime/clean', {})
+      // 清理接口只启动后台任务，必须等脚本操作状态结束并确认没有错误
+      const startedAt = Date.now()
+      let operation = (await api<PluginsPayload>('GET', '/api/plugins')).scripts?.operation
+      while (!operation || operation.action !== 'clean-runtime') {
+        if (Date.now() - startedAt > 60_000) throw new Error(t('运行时清理超时，请稍后刷新状态重试'))
+        await new Promise(resolve => window.setTimeout(resolve, 750))
+        if (!mounted.current) return
+        operation = (await api<PluginsPayload>('GET', '/api/plugins')).scripts?.operation
+      }
+      while (operation.active) {
+        if (!mounted.current) return
+        if (Date.now() - startedAt > 60_000) throw new Error(t('运行时清理超时，请稍后刷新状态重试'))
+        await new Promise(resolve => window.setTimeout(resolve, 750))
+        if (!mounted.current) return
+        const current = (await api<PluginsPayload>('GET', '/api/plugins')).scripts?.operation
+        if (!current) throw new Error(t('运行时清理未完成'))
+        operation = current
+      }
+      if (operation.error) throw new Error(operation.error)
+      if (operation.stage !== 'done') throw new Error(t('运行时清理未完成'))
+      settled = true
+      await load()
+      toast(t('Bun 运行时已清理，下次使用脚本插件时自动重新下载'), 'ok')
+    } catch (failure) {
+      toast(errorMessage(failure) || t('清理失败'), 'err')
+    } finally {
+      runtimeCleanRef.current = false
+      if (mounted.current) setRuntimeCleaning(false)
+      // 清理已成功结束时重新挂载也不能再凭旧终态显示完成提示
+      if (settled) refreshPluginStartup()
+    }
   }
 
   async function accept(result: PluginMutation): Promise<void> {
@@ -453,7 +496,8 @@ function PluginsPage(): React.ReactElement {
       </div>
     </div>
     <PluginSettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} onChanged={check} />
-    <PluginDiagnostics open={diagnosticsOpen} payload={payload} onClose={() => setDiagnosticsOpen(false)} />
+    <PluginDiagnostics open={diagnosticsOpen} payload={payload} onClose={() => setDiagnosticsOpen(false)}
+      onCleanRuntime={() => { void cleanRuntime() }} cleanRuntimeBusy={runtimeCleaning} />
     {startupId ? <PluginStartupDialog id={startupId}
       name={packs.find(pack => pack.id === startupId)?.name || payload?.scripts?.packages.find(pack => pack.id === startupId)?.name || startupId}
       status={packs.find(pack => pack.id === startupId)?.startup || payload?.scripts?.packages.find(pack => pack.id === startupId)?.startup}

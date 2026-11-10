@@ -396,6 +396,28 @@ export function readPanelLogin(): boolean {
 }
 
 /** 首屏值：各面板都是「检测中…」，与静态骨架逐字一致 */
+/* ─── 整库备份勾选的记忆 ──────────────────────────── */
+/**
+ * 「包含日志与调试报文」是导出偏好，跨会话记住上次勾选：默认完整备份
+ * （true），用户取消勾选后写回 localStorage，下次打开设置仍是关闭态。
+ * 存储不可用（隐私模式等）只影响记忆，不影响本次导出。
+ */
+const DB_INCLUDE_LOGS_KEY = 'a2api:settings:db-include-logs'
+
+function readDbIncludeLogs(): boolean {
+  try {
+    return localStorage.getItem(DB_INCLUDE_LOGS_KEY) !== '0'
+  } catch {
+    return true
+  }
+}
+
+function rememberDbIncludeLogs(on: boolean): void {
+  try {
+    localStorage.setItem(DB_INCLUDE_LOGS_KEY, on ? '1' : '0')
+  } catch { /* 存储不可用只影响下次启动 */ }
+}
+
 const INITIAL: SettingsSnapshot = {
   // 初值取第一个分类：restoreCategory / load 会把 localStorage 里的偏好盖上来
   category: CATEGORIES[0].id,
@@ -458,8 +480,8 @@ const INITIAL: SettingsSnapshot = {
   modelsDev: { status: 'loading', enabled: true, source: '', updatedAt: 0, count: 0 },
   ioFailure: null,
   retentionConfirm: null,
-  // 整库备份：默认包含日志与调试报文（完整备份）；恢复确认弹窗默认关闭
-  dbIncludeLogs: true,
+  // 整库备份：「包含日志与调试报文」记忆上次勾选（默认完整备份）；恢复确认弹窗默认关闭
+  dbIncludeLogs: readDbIncludeLogs(),
   dbExportConfirm: false,
   dbBackupConfirm: null,
   dbWarning: null,
@@ -888,6 +910,7 @@ export async function importAccounts(): Promise<void> {
 
 /** 拨动「包含日志与调试报文」复选框（默认勾上；取消后只备业务数据） */
 export function toggleDbIncludeLogs(on: boolean): void {
+  rememberDbIncludeLogs(on)
   publish({ dbIncludeLogs: on })
 }
 

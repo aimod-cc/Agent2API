@@ -89,12 +89,14 @@ pub fn snapshot() -> Value {
     }
 }
 
-pub async fn ensure() -> Result<PathBuf, String> {
+/// 下载与清理共用同一把互斥锁：删除运行时目录不能与按需下载并发
+fn download_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    let _guard = LOCK
-        .get_or_init(|| tokio::sync::Mutex::new(()))
-        .lock()
-        .await;
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+pub async fn ensure() -> Result<PathBuf, String> {
+    let _guard = download_lock().lock().await;
     let path = installed()?;
     if path.is_file() {
         validate(&path).await?;
@@ -111,6 +113,22 @@ pub async fn ensure() -> Result<PathBuf, String> {
         .map_err(|error| format!("安装 Bun 任务中断：{error}"))??;
     validate(&path).await?;
     Ok(path)
+}
+
+/// 删除整个运行时目录（含全部版本），供启动失败后的重置入口调用，
+/// 下次使用脚本插件时按需重新下载，目录不存在视为已清理
+pub async fn clean() -> Result<(), String> {
+    let _guard = download_lock().lock().await;
+    let root = crate::server::config::config_dir()
+        .join("runtimes")
+        .join("bun");
+    tokio::task::spawn_blocking(move || match std::fs::remove_dir_all(&root) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Bun 运行时目录清理失败：{error}")),
+    })
+    .await
+    .map_err(|error| format!("清理 Bun 运行时任务中断：{error}"))?
 }
 
 async fn validate(path: &Path) -> Result<(), String> {
