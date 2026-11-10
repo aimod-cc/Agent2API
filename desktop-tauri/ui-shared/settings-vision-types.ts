@@ -58,7 +58,7 @@ export type VisionView = {
 export type VisionCompatApi = {
   load(): Promise<VisionView>
   /** 没有保存步骤：改一次就提交一次，返回服务端的最新状态 */
-  save(payload: { config: VisionSettings; revision: string }): Promise<VisionView>
+  save(payload: { config: VisionSettings; revision: string; shape: 'projected_blocks' }): Promise<VisionView>
 }
 
 export function visionTargetKey(target: Pick<VisionTarget, 'provider' | 'model'>): string {

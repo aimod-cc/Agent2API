@@ -29,7 +29,7 @@ pub(crate) fn entry_id_in_manifest(manifest: &[Value], requested: &str) -> Optio
         .map(model_id)
 }
 
-pub(super) fn builtin_target(
+pub(crate) fn builtin_target(
     rules: &model_rules::ModelRules,
     provider: &str,
     manifest: &[Value],
@@ -120,6 +120,27 @@ pub fn forwarding_providers(model: &str) -> Vec<String> {
     }).collect();
     result.extend(custom_providers::carriers_of_model(model));
     result
+}
+
+/// 该提供商当前能否把这只**上游真实 id** 的模型发出去。
+///
+/// 图片兼容的视觉目标按上游真实 id 存储，而模型管理里原始 id 的默认绑定可能
+/// 被关闭、指向它的别名仍然启用（界面上启用的正是别名），可达性判断必须把
+/// 别名路径算上，否则保存与运行时会把这类目标误判成「尚未启用」。
+pub fn provider_serves_model(provider: &str, upstream_model: &str) -> bool {
+    if custom_providers::is_custom_provider_id(provider) {
+        return custom_providers::carriers_of_model(upstream_model).iter().any(|id| id == provider);
+    }
+    let rules = model_rules::shared();
+    let manifest = manifest_for_provider(provider);
+    let Some(upstream) = entry_id_in_manifest(&manifest, upstream_model) else { return false; };
+    if rules.default_enabled(provider, &upstream) { return true; }
+    rules.mappings.iter().any(|mapping| {
+        mapping.enabled
+            && mapping.provider.as_deref().map_or(true, |owner| owner.eq_ignore_ascii_case(provider))
+            && entry_id_in_manifest(&manifest, &mapping.target)
+                .is_some_and(|target| target.eq_ignore_ascii_case(&upstream))
+    })
 }
 
 /// 「这个名字是不是被关掉了」—— 只在广告里没有它时用来区分「承载家全被关闭」

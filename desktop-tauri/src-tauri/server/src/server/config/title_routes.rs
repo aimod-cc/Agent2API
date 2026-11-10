@@ -236,3 +236,43 @@ pub fn save(settings: TitleRoutes, expected: &str) -> Result<(), GatewayError> {
         Ok(())
     }, || GatewayError::new("标题生成路由保存失败，未应用本次修改"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 保存后的运行期快照必须使用新配置与新修订号，后续保存不能继续使用旧修订号
+    #[test]
+    fn saving_refreshes_the_runtime_snapshot_without_using_a_stale_revision() {
+        let initial = json!({ "enabled": true, "rules": [] });
+        let configured = json!({
+            "enabled": true,
+            "rules": [{ "enabled": true, "clients": ["zcode"], "model": "title-model", "fallback": "original" }]
+        });
+        let saved = TitleRoutes {
+            enabled: true,
+            rules: vec![TitleRule {
+                enabled: true,
+                clients: vec!["zcode".to_string()],
+                model: "title-model".to_string(),
+                fallback: Fallback::Original,
+            }],
+        };
+        assert_eq!(serde_json::to_value(&saved).expect("serialize title routes"), configured);
+
+        let mut next = super::super::build(serde_json::Map::new());
+        next.raw.insert(KEY_TITLE_ROUTES.to_string(), initial.clone());
+        super::super::mutations::refresh_derived(&mut next, KEY_TITLE_ROUTES);
+        next.raw.insert(KEY_TITLE_ROUTES.to_string(), configured.clone());
+        super::super::mutations::refresh_derived(&mut next, KEY_TITLE_ROUTES);
+        assert_eq!(next.title_routes.settings.as_ref().expect("saved config must parse").rules.len(), 1);
+        assert_eq!(next.title_routes.revision, revision(Some(&configured)));
+
+        let next_revision = next.title_routes.revision.clone();
+        next.raw.insert(KEY_TITLE_ROUTES.to_string(), initial.clone());
+        super::super::mutations::refresh_derived(&mut next, KEY_TITLE_ROUTES);
+        assert_ne!(next.title_routes.revision, next_revision);
+        assert!(next.title_routes.settings.as_ref().expect("saved config must parse").rules.is_empty());
+    }
+}

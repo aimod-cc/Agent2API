@@ -5,14 +5,71 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::server::config::vision_compat::{
-    self, Fallback, Mode, ModelRef, ModelSource, OverrideMode, UnknownCapability, VisionSettings, VisionTarget,
+    self, Fallback, Mode, ModelRef, ModelSource, OverrideMode, SaveShape, UnknownCapability, VisionSettings, VisionTarget,
 };
-use crate::server::core::{capability, providers::catalog, routing_groups};
+use crate::server::core::{
+    account_store::AccountStore, capability, custom_providers, model_meta, models::model_id,
+    model_rules, providers::{self, catalog}, routing_groups,
+};
 use crate::server::errors::{self, GatewayError};
 use crate::server::http::{ok_json, parse_body};
 use crate::server::ServerState;
 
 fn shared_target() -> Option<VisionTarget> { vision_compat::shared_target() }
+
+/// 候选模型清单：与「模型管理」同源，显示名一律用映射后的对外模型名。
+///
+/// 名单来自 `models_by_provider`（各提供商对外可请求的名字：启用的别名 +
+/// 默认绑定 + 自定义家清单 + 路由组名），显示名用它；存储与运行时匹配仍用
+/// `builtin_target`（`wire_target_for_provider` 的同名解析）得到的上游真实
+/// id —— 与转发层运行时的 `actual_model` 同一套解析，配置按真实 id 存才
+/// 不会因别名调整而失配。
+/// 解析不到真实 id 的对外名（路由组聚合名等）跳过。生图模型不进清单：
+/// 图片兼容只处理「对话模型看不了图」的场景，生图模型不是对话目标。
+fn model_choices(store: &AccountStore) -> Vec<Value> {
+    let advertised = catalog::models_by_provider(store);
+    let accounts = store.routing_snapshot();
+    let rules = model_rules::shared();
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+    for (provider, names) in advertised.as_object().into_iter().flatten() {
+        let Some(names) = names.as_array() else { continue };
+        let is_custom = custom_providers::is_custom_provider_id(provider);
+        let manifest: Vec<Value> = if is_custom {
+            custom_providers::get(provider).and_then(|owner| owner.get("models").and_then(Value::as_array).cloned()).unwrap_or_default()
+                .into_iter().map(|mut item| {
+                    model_meta::apply(&mut item);
+                    let overrides = capability::normalize_object(item.get("capabilities"));
+                    capability::apply_overrides(&mut item, &overrides);
+                    item
+                }).collect()
+        } else {
+            catalog::manifest_for_provider(provider)
+        };
+        for name in names {
+            let Some(name) = name.as_str().filter(|name| !name.is_empty()) else { continue };
+            let model = if is_custom {
+                // 自定义家同样先把对外名解析成内部模型 ID，别名对外显示名而配置按真实 ID 存
+                custom_providers::wire_model_for(provider, name).0
+            } else {
+                // 对外名 → 上游真实 id：与转发层运行时匹配（actual_model）同一套解析；
+                // 清单按家取一次，避免逐名重取触发整份清单克隆
+                catalog::builtin_target(&rules, provider, &manifest, name)
+                    .map(|wire| wire.model)
+                    .unwrap_or_else(|| name.to_string())
+            };
+            if model.is_empty() || !seen.insert((provider.to_lowercase(), model.to_lowercase())) { continue; }
+            let Some(item) = manifest.iter().find(|item| model_id(item).eq_ignore_ascii_case(&model)) else { continue };
+            if providers::images::model_is_image(&item) { continue; }
+            result.push(json!({ "provider": provider, "providerLabel": providers::label_of(provider), "model": model,
+                "name": name, "capabilities": capability::effective(&item),
+                "accountCount": accounts.accounts.iter().filter(|account| {
+                    crate::server::core::routing::provider_of(account) == provider
+                }).count() }));
+        }
+    }
+    result
+}
 
 /// 把旧版（全局二选一 + 模型单独配置）展开成两块的模型名单。
 ///
@@ -59,7 +116,7 @@ fn expand_legacy(settings: &mut VisionSettings, choices: &[Value]) {
 fn view(state: &ServerState) -> Result<Value, GatewayError> {
     let snapshot = vision_compat::current();
     let settings = snapshot.settings.as_ref().map_err(|error| GatewayError::new(error.clone()))?;
-    let mut choices = routing_groups::choices(&state.store());
+    let mut choices = model_choices(&state.store());
     for choice in &mut choices {
         let provider = choice["provider"].as_str().unwrap_or("");
         let model = choice["model"].as_str().unwrap_or("");
@@ -101,6 +158,9 @@ pub async fn get_settings(State(state): State<ServerState>) -> Response {
 struct SaveSettings {
     config: VisionSettings,
     revision: String,
+    /// 新界面显式声明规则或投影哪一边是配置源
+    #[serde(default)]
+    shape: Option<SaveShape>,
     /// 旧版客户端会带这个字段（保存前的人工授权确认）。现在改完即生效，不再校验它，
     /// 保留声明只是为了不让老客户端直接拿到 400。
     #[serde(default)]
@@ -114,24 +174,37 @@ fn validate_available(target: &VisionTarget) -> Result<(), GatewayError> {
     if capability::images_for_channel(&target.provider, &item) != Some(true) {
         return Err(GatewayError::bad_request("请选择已确认支持图片的视觉模型；能力未声明时请先在模型管理中确认"));
     }
-    if !catalog::forwarding_providers(&target.model).contains(&target.provider) {
+    // 目标存的是上游真实 id，可达性要承认「启用别名指向它」的路径
+    if !catalog::provider_serves_model(&target.provider, &target.model) {
         return Err(GatewayError::bad_request("所选视觉模型尚未启用，请先在模型管理中启用"));
     }
     Ok(())
 }
 
 pub async fn put_settings(State(state): State<ServerState>, body: Bytes) -> Response {
-    let payload = match parse_body(&body).and_then(|value| serde_json::from_value::<SaveSettings>(value)
-        .map_err(|error| GatewayError::bad_request(format!("图片兼容设置不完整：{error}")))) {
+    let parsed = parse_body(&body).and_then(|value| {
+        let has_rules = value.get("config").and_then(Value::as_object)
+            .is_some_and(|config| config.contains_key("rules"));
+        serde_json::from_value::<SaveSettings>(value)
+            .map(|payload| (payload, has_rules))
+            .map_err(|error| GatewayError::bad_request(format!("图片兼容设置不完整：{error}")))
+    });
+    let (payload, has_rules) = match parsed {
         Ok(payload) => payload,
         Err(error) => return response(Err(error)),
     };
+    // 新客户端显式声明形状；旧客户端没有 shape 时保持原行为：非空 rules
+    // 视为规则配置，缺失或空 rules 视为两块投影
+    let shape = payload.shape.unwrap_or_else(|| {
+        if has_rules && !payload.config.rules.is_empty() { SaveShape::ExplicitRules }
+        else { SaveShape::ProjectedBlocks }
+    });
     match tokio::task::spawn_blocking(move || {
         // 校验按「折成规则之后」的那一份来（手机端发的只有两块设置）；
         // 但保存仍交原始载荷给 config::save —— 「同一种方式已有多条规则」那条
         // 拦截要在它那边判，它才拿得到保存前的旧配置。
         let mut normalized = payload.config.clone();
-        normalized.fold_blocks();
+        if shape == SaveShape::ProjectedBlocks { normalized.fold_blocks(); }
         vision_compat::validate(&normalized).map_err(GatewayError::bad_request)?;
         if normalized.enabled {
             for rule in normalized.rules.iter().filter(|rule| rule.enabled && !rule.models.is_empty()) {
@@ -151,7 +224,7 @@ pub async fn put_settings(State(state): State<ServerState>, body: Bytes) -> Resp
                 }
             }
         }
-        vision_compat::save(payload.config, &payload.revision)?;
+        vision_compat::save(payload.config, &payload.revision, shape)?;
         view(&state)
     }).await {
         Ok(result) => response(result),

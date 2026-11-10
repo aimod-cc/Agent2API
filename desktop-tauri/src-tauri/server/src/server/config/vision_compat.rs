@@ -44,6 +44,19 @@ pub enum Fallback { #[default] Stop, Designated }
 #[serde(rename_all = "snake_case")]
 pub enum UnknownCapability { #[default] TryOriginal, Compat }
 
+/// 能力未知时的处理方式是否由规则自己指定
+///
+/// 未指定时沿用顶层 `unknownCapability` 的历史语义，旧配置与手机端保存的规则
+/// 都不会因为缺少这个字段而改变行为
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleUnknownCapability {
+    #[default]
+    Inherit,
+    TryOriginal,
+    Compat,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VisionTarget {
@@ -159,6 +172,8 @@ pub struct VisionRule {
     pub fallback: Fallback,
     /// 整体接管：指定接管模型与备选，按顺序尝试。
     pub targets: Vec<VisionTarget>,
+    /// 这条规则自己的能力未知处理方式
+    pub unknown_capability: RuleUnknownCapability,
 }
 
 impl Default for VisionRule {
@@ -168,7 +183,18 @@ impl Default for VisionRule {
         Self {
             enabled: true, models: Vec::new(), mode: Mode::Assist, source: ModelSource::Shared,
             target: None, reuse_results: true, prefer_current_route: true, fallback: Fallback::Stop,
-            targets: Vec::new(),
+            targets: Vec::new(), unknown_capability: RuleUnknownCapability::Inherit,
+        }
+    }
+}
+
+impl RuleUnknownCapability {
+    /// 解析这条规则实际使用的处理方式，未指定时采用全局默认值
+    pub fn effective(self, global: UnknownCapability) -> UnknownCapability {
+        match self {
+            Self::Inherit => global,
+            Self::TryOriginal => UnknownCapability::TryOriginal,
+            Self::Compat => UnknownCapability::Compat,
         }
     }
 }
@@ -205,7 +231,7 @@ pub struct ModelOverride {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct VisionSettings {
-    // 旧配置缺少开关时仍按关闭读取；只有整块未配置才采用新的默认值。
+    // 旧配置缺少开关时仍按关闭读取，只有整块未配置才采用新的默认值
     #[serde(default)]
     pub enabled: bool,
     /// 权威形状：按列表顺序匹配，第一条命中的生效。
@@ -509,7 +535,16 @@ pub fn shared_target() -> Option<VisionTarget> {
     Some(VisionTarget { provider: config.provider, model: config.upstream_model, reasoning: config.reasoning })
 }
 
-pub fn save(settings: VisionSettings, expected: &str) -> Result<(), GatewayError> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SaveShape {
+    /// 新界面显式提交 `rules`，空数组代表用户删光了全部规则
+    ExplicitRules,
+    /// 旧界面只提交 `assist` / `reroute`，缺少 `rules`
+    ProjectedBlocks,
+}
+
+pub fn save(settings: VisionSettings, expected: &str, shape: SaveShape) -> Result<(), GatewayError> {
     super::try_update_raw_field(KEY_VISION_COMPAT, |raw| {
         if revision(Some(raw)) != expected {
             return Err(GatewayError::with_status(409, "图片兼容已在其他位置修改，请重新读取后再改；本次改动未生效"));
@@ -520,7 +555,7 @@ pub fn save(settings: VisionSettings, expected: &str) -> Result<(), GatewayError
         //
         // 同一种方式已经有多条规则时两块表达不了，直接拒掉并指路 —— 让它照样存下去，
         // 等于用两条规则覆盖掉其余的，那是静默丢配置。
-        if next.rules.is_empty() {
+        if shape == SaveShape::ProjectedBlocks {
             let count = |mode: Mode| previous.rules.iter().filter(|rule| rule.mode == mode).count();
             if count(Mode::Assist) > 1 || count(Mode::Reroute) > 1 {
                 return Err(GatewayError::bad_request(
@@ -534,4 +569,63 @@ pub fn save(settings: VisionSettings, expected: &str) -> Result<(), GatewayError
         *raw = serde_json::to_value(&next).map_err(|error| GatewayError::new(error.to_string()))?;
         Ok(())
     }, || GatewayError::new("图片兼容保存失败，未应用本次修改"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 每条规则可以覆盖全局的能力未知处理方式，未指定时继续沿用全局值
+    #[test]
+    fn rule_capability_choice_overrides_the_global_default_only_when_set() {
+        let global = UnknownCapability::TryOriginal;
+        assert_eq!(RuleUnknownCapability::Inherit.effective(global), UnknownCapability::TryOriginal);
+        assert_eq!(RuleUnknownCapability::Compat.effective(global), UnknownCapability::Compat);
+        assert_eq!(RuleUnknownCapability::TryOriginal.effective(UnknownCapability::Compat), UnknownCapability::TryOriginal);
+    }
+
+    /// 空规则与投影同时清空时，旧版折叠入口不会凭已有规则重建
+    #[test]
+    fn explicit_empty_rules_are_not_rebuilt_from_projected_blocks() {
+        let previous = VisionSettings {
+            assist: AssistSettings {
+                models: vec![ModelRef::new("provider", "model")],
+                ..AssistSettings::default()
+            },
+            ..VisionSettings::default()
+        };
+        let mut projected = previous.clone();
+        projected.fold_blocks();
+        projected.project_blocks();
+        let mut next = projected.clone();
+        next.rules.clear();
+        next.assist.models.clear();
+        next.reroute.models.clear();
+        next.fold_blocks();
+        assert!(next.rules.is_empty());
+        assert!(next.assist.models.is_empty());
+    }
+
+    /// 新界面的显式空列表不能被旧版折叠路径恢复
+    #[test]
+    fn explicit_empty_rules_survive_a_normalized_projected_save() {
+        let previous = VisionSettings {
+            assist: AssistSettings {
+                models: vec![ModelRef::new("provider", "model")],
+                ..AssistSettings::default()
+            },
+            ..VisionSettings::default()
+        };
+        let mut projected = previous.clone();
+        projected.fold_blocks();
+        projected.project_blocks();
+        let mut explicit = projected.clone();
+        explicit.rules.clear();
+
+        let mut legacy = explicit.clone();
+        legacy.fold_blocks();
+        assert!(!legacy.rules.is_empty(), "legacy projected save should rebuild the rule");
+
+        assert!(explicit.rules.is_empty(), "explicit rules must remain empty");
+    }
 }

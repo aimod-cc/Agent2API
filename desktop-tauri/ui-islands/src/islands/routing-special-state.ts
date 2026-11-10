@@ -69,6 +69,7 @@ export type VisionRuleItem = {
   preferCurrentRoute: boolean
   fallback: 'stop' | 'designated'
   targets: VisionTarget[]
+  unknownCapability: 'inherit' | 'try_original' | 'compat'
 }
 
 /**
@@ -102,7 +103,7 @@ type DesktopBridge = {
 
 export type VisionApi = {
   load(): Promise<VisionView>
-  save(payload: { config: VisionConfig; revision: string }): Promise<VisionView>
+  save(payload: { config: VisionConfig; revision: string; shape: 'explicit_rules' }): Promise<VisionView>
 }
 
 const desktop = () => (window as unknown as { workbuddyDesktop?: DesktopBridge }).workbuddyDesktop
@@ -122,7 +123,7 @@ export function titleApi() {
 /** 图片兼容走网关的 HTTP 接口（设置页与手机端也用同一份）。 */
 export const visionApi: VisionApi = {
   load: () => callJson('GET', '/api/vision-compatibility'),
-  save: payload => callJson('PUT', '/api/vision-compatibility', payload),
+  save: payload => callJson('PUT', '/api/vision-compatibility', { ...payload, shape: 'explicit_rules' }),
 }
 
 /* ─────────────────── 通用草稿容器 ─────────────────── */
@@ -135,6 +136,10 @@ export type SpecialEditor<T, V extends { config: T; revision: string }> = {
   error: string
   dirty: boolean
   update(mutate: (draft: T) => T): void
+  /** 以替换后的完整配置立即保存，供规则弹窗确认时一次性落库 */
+  commit(next: T): Promise<boolean>
+  /** 清除上一次读取或保存留下的错误提示 */
+  clearError(): void
   save(): Promise<boolean>
   reload(): Promise<void>
   discard(): void
@@ -157,6 +162,8 @@ export function useSpecialEditor<T, V extends { config: T; revision: string }>(
   const [error, setError] = React.useState('')
   const alive = React.useRef(true)
   const sequence = React.useRef(0)
+  /** 同一编辑器同一时刻只允许一次保存，防止快速重复点击复用同一个修订号 */
+  const inFlight = React.useRef(false)
   /** 服务端最新状态：保存要用它的 revision，失败回滚也回到它 */
   const latest = React.useRef<V | null>(null)
 
@@ -194,7 +201,8 @@ export function useSpecialEditor<T, V extends { config: T; revision: string }>(
   const save = React.useCallback(async () => {
     const current = latest.current
     const next = draft
-    if (!current || !next || saving) return false
+    if (!current || !next || inFlight.current) return false
+    inFlight.current = true
     setSaving(true); setError('')
     try {
       const saved = await api.save({ config: next, revision: current.revision })
@@ -208,17 +216,49 @@ export function useSpecialEditor<T, V extends { config: T; revision: string }>(
       }
       return false
     } finally {
+      inFlight.current = false
       if (alive.current) setSaving(false)
     }
-  }, [api, adopt, draft, saving])
+  }, [api, adopt, draft])
+
+  /**
+   * 用指定配置立即保存
+   *
+   * 规则弹窗的保存与删除是单个动作，提交的配置必须取自点按那一刻，
+   * React 状态更新尚未回流时不能借用 `draft`，否则重复点按会漏掉上一次修改
+   */
+  const commit = React.useCallback(async (next: T) => {
+    const current = latest.current
+    if (!current || inFlight.current) return false
+    inFlight.current = true
+    setDraft(structuredClone(next))
+    setSaving(true)
+    setError('')
+    try {
+      const saved = await api.save({ config: next, revision: current.revision })
+      if (alive.current) adopt(saved)
+      return true
+    } catch (failure) {
+      if (alive.current) {
+        setError(message(failure))
+        if (latest.current) setDraft(structuredClone(next))
+      }
+      return false
+    } finally {
+      inFlight.current = false
+      if (alive.current) setSaving(false)
+    }
+  }, [api, adopt])
 
   const discard = React.useCallback(() => {
     if (latest.current) setDraft(structuredClone(latest.current.config))
     setError('')
   }, [])
 
+  const clearError = React.useCallback(() => setError(''), [])
+
   const dirty = view !== null && draft !== null && JSON.stringify(draft) !== JSON.stringify(view.config)
-  return { view, draft, loading, saving, error, dirty, update, save, reload, discard }
+  return { view, draft, loading, saving, error, dirty, update, commit, clearError, save, reload, discard }
 }
 
 export function message(failure: unknown): string {
