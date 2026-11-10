@@ -51,6 +51,26 @@ pub fn install(db: Option<Db>) {
     let _ = DB.set(db);
 }
 
+/// 手动清理：删掉全部已结束的执行记录与孤儿明细，运行中的记录不动。
+/// 返回删除的记录条数。
+pub fn clear() -> Result<u64, String> {
+    let db = database()?;
+    db.with_mut(|conn| -> Result<u64, String> {
+        let tx = sql(conn.transaction())?;
+        let cleared = sql(tx.execute(
+            "DELETE FROM maintenance_runs WHERE status != 'running'",
+            [],
+        ))?;
+        sql(tx.execute(
+            "DELETE FROM maintenance_items WHERE NOT EXISTS (SELECT 1 FROM maintenance_runs r WHERE r.id = maintenance_items.run_id)",
+            [],
+        ))?;
+        sql(tx.commit())?;
+        Ok(cleared as u64)
+    })
+    .unwrap_or_else(|| Err("维护记录数据库不可用".to_string()))
+}
+
 fn database() -> Result<&'static Db, String> {
     DB.get()
         .and_then(Option::as_ref)
