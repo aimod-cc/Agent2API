@@ -44,7 +44,8 @@ function shared() {
 
 /**
  * 图片兼容标识：route 里带 visionCompatibility 的行在状态徽章旁挂一个小标签，
- * 让“用了图片兼容”不用等报错才知道，悬停给出方式、状态、目标模型、耗时与错误。
+ * 让「用了图片兼容」不用等报错才知道。悬停给出方式、状态、目标模型与耗时；
+ * 在途行 processing 阶段就会出现（route 随在途回写更新）。
  */
 function VisionTag({ route }: { route: unknown }) {
   const value = visionDetail(route)
@@ -53,7 +54,8 @@ function VisionTag({ route }: { route: unknown }) {
     : value.mode === 'reroute' ? t('切换视觉模型') : t('辅助识图调用')
   const statusLabel = value.status === 'failed' ? t('失败')
     : value.status === 'processing' ? t('处理中')
-    : value.status === 'skipped' ? t('未应用') : t('已完成')
+    : value.status === 'skipped' ? t('未应用')
+    : value.status === 'completed' || !value.status ? t('已完成') : t('未知状态')
   const title = `${modeLabel} · ${statusLabel}`
     + (value.targetModel ? ` · ${[value.targetProvider, value.targetModel].filter(Boolean).join(' ')}` : '')
     + (Number(value.durationMs) ? ` · ${((Number(value.durationMs) || 0) / 1000).toFixed(1)}s` : '')
@@ -325,10 +327,10 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
         return (
           <span key={key} className={className}>
             {/* 徽章与阶段计时都由 wbRequestPhase 产出 HTML（详情弹窗读同一份，两处必须逐字一致） */}
-            <span className='req-status-badge gap-x-1'>
+            <span className='req-status-badge'>
               <HtmlContent html={phase.badgeHtml(entry)} render={<span />} />
-              <VisionTag route={entry.route} />
             </span>
+            <span className='block'><VisionTag route={entry.route} /></span>
             {elapsed ? <HtmlContent className='req-status-line' html={elapsed} render={<span />} /> : null}
           </span>
         )
@@ -340,7 +342,7 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
         ? t('HTTP {status}，但响应体阶段出错：见错误列', { status })
         : undefined
       return (
-        <span key={key} className={`${className} flex flex-wrap items-start gap-x-1`}>
+        <span key={key} className={`${className} flex flex-wrap items-center gap-x-1`}>
           <Badge shape='tag' variant={ok ? 'success' : 'destructive'} title={title}>
             {status || t('失败')}
           </Badge>
@@ -375,8 +377,19 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
 
     case 'client': {
       const label = clientRequestLabel(entry)
-      return <span key={key} className={className}
-        title={entry.clientEvidence?.userAgent || t('来源客户端：{client}', { client: label })}>{label}</span>
+      const evidence = entry.clientEvidence
+      // 在途且还没选路（provider 空）时归属未定：显示 —，避免先闪真实标识、
+      // 选路后再翻转成归属客户端；供应商与归属在同一次回写里落库
+      if (isRunning(entry) && !entry.provider?.trim()) {
+        return <span key={key} className={className} title={t('归属在选路后确定：命中供应商规则用规则客户端，未命中用默认归属客户端，都没设置保留识别结果')}>—</span>
+      }
+      // 归属被改写时悬停要交代来龙去脉：识别出的是谁、改写成了谁，UA 只作依据
+      const rewritten = Boolean(evidence && entry.client
+        && evidence.clientId.trim().toLowerCase() !== entry.client.trim().toLowerCase())
+      const tip = rewritten && evidence
+        ? `${t('请求头识别为 {identified}，已改写归属为 {client}', { identified: evidence.clientName || evidence.clientId, client: label })}\n${evidence.userAgent}`
+        : evidence?.userAgent || t('来源客户端：{client}', { client: label })
+      return <span key={key} className={className} title={tip}>{label}</span>
     }
 
     case 'apiKey': {

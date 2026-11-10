@@ -86,6 +86,8 @@ export function VisionCompatibilityPanel({ api, t, active = true }: { api: Visio
   const [more, setMore] = useState(false)
   const alive = useRef(true)
   const sequence = useRef(0)
+  /** 本地编辑序号：静默读取开始后有新改动时，读取结果不能回写草稿 */
+  const edits = useRef(0)
   /** 服务端最新状态：提交要用它的 revision，失败回滚也回到它 */
   const latest = useRef<VisionView | null>(cachedView)
   /** 提交串行化：改动是逐次点出来的，但在途请求不能并发（否则后一次会拿到旧的 revision） */
@@ -100,12 +102,20 @@ export function VisionCompatibilityPanel({ api, t, active = true }: { api: Visio
 
   const load = useCallback(async (quiet = false) => {
     const token = ++sequence.current
+    const edited = edits.current
     if (!quiet) setBusy(true)
     setLoading(true)
     setError('')
     try {
       const next = await api.load()
-      if (alive.current && token === sequence.current) adopt(next)
+      if (alive.current && token === sequence.current) {
+        if (quiet && edited !== edits.current) {
+          latest.current = next
+          setView(next)
+        } else {
+          adopt(next)
+        }
+      }
     } catch (failure) {
       if (alive.current && token === sequence.current) setError(message(failure))
     } finally {
@@ -122,6 +132,7 @@ export function VisionCompatibilityPanel({ api, t, active = true }: { api: Visio
 
   /** 改一处就提交一次：界面上没有保存按钮，这里也不留草稿状态 */
   const commit = (next: VisionSettings) => {
+    edits.current++
     setDraft(next)
     setError('')
     chain.current = chain.current.then(async () => {

@@ -30,7 +30,8 @@ export function VisionRequestDetail({ route, t }: { route: unknown; t: Translate
   if (!value) return null
   const mode = value.mode === 'assist' ? t('辅助识图 · 原模型回答') : value.mode === 'reroute' ? t('切换视觉模型 · 视觉模型回答') : t('辅助识图调用')
   const status = value.status === 'failed' ? t('失败') : value.status === 'processing' ? t('处理中')
-    : value.status === 'skipped' ? t('未应用') : t('已完成')
+    : value.status === 'skipped' ? t('未应用')
+    : value.status === 'completed' || !value.status ? t('已完成') : t('未知状态')
   return <div className='space-y-2 text-xs'>
     <div className='flex flex-wrap items-center gap-2'><Badge variant={value.status === 'skipped' ? 'secondary' : 'outline'}>{mode}</Badge><span className='text-muted-foreground'>{status}</span></div>
     {value.trigger ? <p>{t('触发方式')}：{value.trigger === 'capability' ? t('图片能力判据') : t('上游拒图补救')}</p> : null}
