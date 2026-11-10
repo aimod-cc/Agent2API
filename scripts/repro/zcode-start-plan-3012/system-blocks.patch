@@ -1,0 +1,86 @@
+diff --git a/crates/providers/src/providers/zcode/plan.rs b/crates/providers/src/providers/zcode/plan.rs
+index 2fcb5c8..9ad7120 100644
+--- a/crates/providers/src/providers/zcode/plan.rs
++++ b/crates/providers/src/providers/zcode/plan.rs
+@@ -24,9 +24,8 @@
+ //!
+ //!   1. `system` = **恰好 3 块**（`cliPrefix` / 其余稳定段 `\n\n` 拼接 /
+ //!      动态段以 `\n\n` 开头），每块都带 `cache_control:{type:"ephemeral"}`；
+-//!      客户端自己的 system 排在这 3 块**之后**，且**去掉**它的 cache_control
+-//!      （Anthropic 的缓存断点上限是 4：官方 3 块 + 最后一条消息 1 个，客户端
+-//!      再带就超了，而真实客户端因为自己拥有整份 body 从不产生外来断点）；
++//!      客户端自己的 system 按原顺序追加到第三块的正文，保留系统指令层级，
++//!      不增加系统块或缓存断点（官方 3 块 + 最后一条消息共 4 个断点）；
+ //!   2. 动态段里的 Environment 段要用**真实运行值**（cwd / platform / shell /
+ //!      osVersion），并以 `- You are powered by the model named {provider}/{model}.`
+ //!      收尾（`{provider}` 由地区给出：国内 `bigmodel-api`、国际 `zai-api`）；
+@@ -527,17 +526,63 @@ fn merged_texts(
+     }
+ }
+
+-/// 官方三块 + 客户端自带 system（去掉缓存断点）。
++/// 客户端系统指令并入动态块，保留三块结构和原有指令顺序。
+ fn system_blocks(texts: &GatewayBlocks, existing: Option<&Value>) -> Vec<Value> {
+     let ephemeral = json!({ "type": "ephemeral" });
+-    let mut blocks = vec![
++    let mut dynamic = format!("\n\n{}", texts.dynamic);
++    for block in user_system_blocks(existing) {
++        if let Some(text) = block.get("text").and_then(Value::as_str) {
++            dynamic.push_str("\n\n");
++            dynamic.push_str(text);
++        }
++    }
++    vec![
+         text_block(texts.identity.clone(), Some(ephemeral.clone())),
+         text_block(texts.stable.clone(), Some(ephemeral.clone())),
+         // 动态块以 `\n\n` 开头，是官方装配的形状（不是排版疏忽）
+-        text_block(format!("\n\n{}", texts.dynamic), Some(ephemeral)),
+-    ];
+-    blocks.extend(user_system_blocks(existing));
+-    blocks
++        text_block(dynamic, Some(ephemeral)),
++    ]
++}
++
++#[cfg(test)]
++mod client_system_tests {
++    use super::*;
++
++    #[test]
++    fn client_instructions_keep_the_three_block_structure() {
++        let texts = GatewayBlocks {
++            identity: "identity".into(),
++            stable: "stable".into(),
++            dynamic: "dynamic".into(),
++        };
++        let instructions = "请准确回答用户的问题。\n保留所有上下文。";
++        let blocks = system_blocks(&texts, Some(&json!(instructions)));
++        assert_eq!(blocks.len(), 3);
++        assert_eq!(blocks[0]["text"], "identity");
++        assert_eq!(blocks[1]["text"], "stable");
++        assert_eq!(blocks[2]["text"], format!("\n\ndynamic\n\n{instructions}"));
++        assert!(blocks.iter().all(|b| b["cache_control"]["type"] == "ephemeral"));
++    }
++
++    #[test]
++    fn multiple_client_blocks_preserve_order_and_text() {
++        let texts = GatewayBlocks { identity: "i".into(), stable: "s".into(), dynamic: "d".into() };
++        let existing = json!([
++            {"type": "text", "text": "第一段", "cache_control": {"type": "ephemeral"}},
++            {"type": "text", "text": "第二段"}
++        ]);
++        let blocks = system_blocks(&texts, Some(&existing));
++        assert_eq!(blocks.len(), 3);
++        assert_eq!(blocks[2]["text"], "\n\nd\n\n第一段\n\n第二段");
++    }
++
++    #[test]
++    fn no_client_instructions_leave_the_original_blocks_unchanged() {
++        let texts = GatewayBlocks { identity: "i".into(), stable: "s".into(), dynamic: "d".into() };
++        let blocks = system_blocks(&texts, None);
++        assert_eq!(blocks.len(), 3);
++        assert_eq!(blocks[2]["text"], "\n\nd");
++    }
+ }
+
+ /// 客户端自带 system → 文本块数组（**丢弃** cache_control，理由见模块头）。
