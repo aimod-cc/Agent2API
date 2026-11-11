@@ -35,6 +35,7 @@ import { apiCall } from '../api/client'
 import { useModelApiKeys } from '../../../ui-shared/use-model-api-keys'
 import { ModelApiKeyField } from '../../../ui-shared/model-api-key-field'
 import { modelApiKeyAllows, modelApiKeyLabel, type ModelApiKey } from '../../../ui-shared/model-api-key'
+import { newCorrelationId } from '../../../ui-shared/correlation-id'
 
 /**
  * AI 助手（手机端）。
@@ -99,7 +100,7 @@ export function AssistantPage() {
   const [tools, setTools] = useState<Array<Record<string, unknown>>>([])
   const enabledToolsRef = useRef<Record<string, boolean>>({})
   const modeRef = useRef<'confirm' | 'full'>('confirm')
-  const sessionRef = useRef<string>(crypto.randomUUID())
+  const sessionRef = useRef<string>(newCorrelationId())
   const mountedRef = useRef(true)
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve())
   const historyRef = useRef<ChatMessage[]>([])
@@ -222,8 +223,8 @@ export function AssistantPage() {
     }
     const attached = [...attachments]
     const attachedFiles = [...textFiles]
-    const userId = crypto.randomUUID()
-    const replyId = crypto.randomUUID()
+    const userId = newCorrelationId()
+    const replyId = newCorrelationId()
     const history: ChatMessage[] = [...historyRef.current, {
       id: userId, role: 'user', content,
       ...(attached.length ? { images: attached } : {}),
@@ -254,7 +255,7 @@ export function AssistantPage() {
       const generatedImages: ImageAsset[] = []
       for (let round = 0; round < 6; round++) {
         if (controller.signal.aborted || !mountedRef.current || serverIdentity() !== identity) break
-        const roundId = round === 0 ? replyId : crypto.randomUUID()
+        const roundId = round === 0 ? replyId : newCorrelationId()
         unfinishedId = roundId
         setBubbles(previous => previous.map(item => item.id === replyId ? { ...item, messageIds: [...new Set([...(item.messageIds || []), roundId])] } : item))
         let pendingCalls: ToolCall[] = []
@@ -418,7 +419,7 @@ export function AssistantPage() {
     historyRef.current = []
     titleRef.current = ''
     setTitle('')
-    sessionRef.current = crypto.randomUUID()
+    sessionRef.current = newCorrelationId()
     setHistoryOpen(false)
   }
 

@@ -34,6 +34,7 @@ import {
   createAttachmentReadTool,
 } from '../../../ui-shared/assistant-account-import-tools'
 import { callJson } from './assistant-api'
+import { newCorrelationId } from '../../../ui-shared/correlation-id'
 import { checkToolSignal, runToolBatch } from '../../../ui-shared/assistant-tool-execution'
 import { safeText } from '../../../ui-shared/assistant-read-data'
 
@@ -702,7 +703,7 @@ const testModel: AssistantTool = {
     const api = bridge()
     if (!api.testModel) throw new Error(t('当前客户端缺少读取接口：{name}', { name: 'testModel' }))
     if (!context?.apiKey) throw new Error(t('请先选择一把 API Key'))
-    const testId = crypto.randomUUID()
+    const testId = newCorrelationId()
     const payload: Record<string, unknown> = { provider: str(args.provider), model: str(args.id), test_id: testId }
     const prompt = str(args.prompt, 4000)
     if (prompt) payload.prompt = prompt

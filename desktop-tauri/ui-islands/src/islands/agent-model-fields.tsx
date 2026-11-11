@@ -5,6 +5,7 @@ import type { AgentClient, AgentModel, AgentProfile } from './agent-types'
 import type { CatalogModel } from './agent-catalog'
 import { AgentSelect, TextField } from './agent-fields'
 import { blankModel } from './agent-model'
+import { newCorrelationId } from '../../../ui-shared/correlation-id'
 
 export function ModelsFields({ client, draft, update, catalog, disabled, native = false }: {
   client: AgentClient; draft: AgentProfile; update: (patch: Partial<AgentProfile>) => void; catalog: CatalogModel[]; disabled: boolean; native?: boolean
@@ -12,7 +13,7 @@ export function ModelsFields({ client, draft, update, catalog, disabled, native 
   const change = (index: number, patch: Partial<AgentModel>) => update({ models: draft.models.map((model, i) => i === index ? { ...model, ...patch } : model) })
   const imported = Boolean(draft.sourceId)
   const sourceIds = React.useRef(new Set(imported ? draft.models.map(model => model.id) : []))
-  const [rowKeys, setRowKeys] = React.useState(() => draft.models.map(() => crypto.randomUUID()))
+  const [rowKeys, setRowKeys] = React.useState(() => draft.models.map(() => newCorrelationId()))
   const [expanded, setExpanded] = React.useState<string | null>(() => draft.models.length === 1 ? rowKeys[0] : null)
   const [query, setQuery] = React.useState('')
   const listRef = React.useRef<HTMLDivElement>(null)
@@ -26,7 +27,7 @@ export function ModelsFields({ client, draft, update, catalog, disabled, native 
   const rows = draft.models.map((model, index) => ({ model, index, key: rowKeys[index] }))
     .filter(({ model, key }) => !keyword || key === expanded || `${model.id} ${model.name}`.toLowerCase().includes(keyword))
   const add = () => {
-    const key = crypto.randomUUID()
+    const key = newCorrelationId()
     addedKey.current = key
     setRowKeys(current => [...current.slice(0, draft.models.length), key]); setExpanded(key); setQuery('')
     update({ models: [...draft.models, blankModel()] })

@@ -59,6 +59,7 @@ import {
 } from './models-panel-state'
 import { t } from '../i18n'
 import { ModelApiKeyField } from '../../../ui-shared/model-api-key-field'
+import { newCorrelationId } from '../../../ui-shared/correlation-id'
 import { modelApiKeyAllows } from '../../../ui-shared/model-api-key'
 import { useModelApiKeys } from '../../../ui-shared/use-model-api-keys'
 import { useRememberedModelApiKey } from '../../../ui-shared/model-api-key-memory'
@@ -174,14 +175,7 @@ function accountLabel(account: AccountRecord): string {
   return displayNameOf(account) || email || t('未命名账号')
 }
 
-/** 关联 id：优先 `crypto.randomUUID`（WebView2 与 localhost 都是安全上下文），退化到自拼的 v4 形态 */
-function newTestId(): string {
-  const uuid = globalThis.crypto?.randomUUID?.()
-  if (uuid) return uuid
-  const hex = (count: number): string =>
-    Array.from({ length: count }, () => Math.floor(Math.random() * 16).toString(16)).join('')
-  return `${hex(8)}-${hex(4)}-4${hex(3)}-a${hex(3)}-${hex(12)}`
-}
+/** 关联 id 见 `ui-shared/correlation-id`：优先 `crypto.randomUUID`，退化到自拼的 v4 形态。 */
 
 /**
  * 「测试」那颗按钮的门禁：该家**没有可用账号**（启用 + 凭证完整）→ 一行都发不出去，
@@ -372,7 +366,7 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
       accountId: account.id,
       label: accountLabel(account),
       position: positions.get(account.id)?.position || 0,
-      testId: newTestId(),
+      testId: newCorrelationId(),
       startedAt,
       state: 'running',
     }))

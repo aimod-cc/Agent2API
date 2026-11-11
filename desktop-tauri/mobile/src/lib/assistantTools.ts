@@ -41,6 +41,7 @@ import {
 } from '../../../ui-shared/assistant-account-import-tools'
 import type { ImageAsset, ImageToolContext } from '../../../ui-shared/assistant-image-tools'
 import { checkToolSignal, providerGroups, runToolBatch } from '../../../ui-shared/assistant-tool-execution'
+import { newCorrelationId } from '../../../ui-shared/correlation-id'
 import { safeText } from '../../../ui-shared/assistant-read-data'
 import { isCustomModelProvider, readCustomModelView, removeCustomMapping, setCustomBinding, setCustomCapabilities } from './assistant-custom-models'
 
@@ -381,7 +382,7 @@ const testModel: AssistantTool = {
   run: async (args, context) => {
     checkToolSignal(context)
     if (!context?.apiKey) throw new Error(t('请先选择一把 API Key'))
-    const testId = crypto.randomUUID()
+    const testId = newCorrelationId()
     const payload: Record<string, unknown> = { provider: str(args.provider), model: str(args.id), test_id: testId }
     const prompt = str(args.prompt, 4000)
     if (prompt) payload.prompt = prompt

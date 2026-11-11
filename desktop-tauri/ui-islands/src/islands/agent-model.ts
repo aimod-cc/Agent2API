@@ -1,5 +1,6 @@
 import { t } from '../i18n'
 import type { AgentClient, AgentModel, AgentOperation, AgentProfile } from './agent-types'
+import { newCorrelationId } from '../../../ui-shared/correlation-id'
 
 export function protocolLabel(value: string): string {
   return { anthropic: 'Anthropic Messages', responses: 'OpenAI Responses', openai_chat: 'OpenAI Chat Completions', gemini: 'Gemini API', native: t('客户端原生配置') }[value] || value
@@ -15,7 +16,7 @@ export function blankModel(): AgentModel { return { id: '', name: '', reasoningL
 export function blankProfile(client: AgentClient, gateway: string): AgentProfile {
   const protocol = client.protocols[0] || ''
   return {
-    id: `p-${crypto.randomUUID()}`, name: '', kind: client.supportsGateway ? 'gateway' : 'relay', protocol,
+    id: `p-${newCorrelationId()}`, name: '', kind: client.supportsGateway ? 'gateway' : 'relay', protocol,
     baseUrl: client.supportsGateway ? protocol === 'anthropic' ? gateway : `${gateway}/v1` : '',
     model: '', provider: '', effort: '', enabled: true, default: false, note: '',
     models: client.supportsModels ? [blankModel()] : [],
