@@ -55,6 +55,13 @@ fn global_runtime() -> &'static Runtime {
     GLOBAL_RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
+            // Tokio worker 线程默认栈 2 MiB。网关的请求处理链（axum handler →
+            // 转发管线 → 协议转换/脱敏/记账）会为一次请求实例化很大的 async
+            // Future 状态机（观测到引用 ≥15 KiB 状态体的 8 KiB poll 函数），
+            // 2 MiB 默认栈在长上下文大流式请求下已被观测到栈溢出硬崩
+            // （Windows Event ID 1000，异常码 0xc00000fd；详见 PR 说明）。
+            // 提到 16 MiB：仅增加虚拟地址空间预留，物理页按实际使用提交。
+            .thread_stack_size(16 * 1024 * 1024)
             .build()
             .expect("创建后台 Tokio 运行时失败")
     })
