@@ -132,8 +132,13 @@ fn run_foreground(launch: Launch) -> ExitCode {
 
     // 停机信号：Ctrl+C（全平台）+ SIGTERM（unix，容器 stop 走这条）；
     // 「面板发起的重启」与两者同一条收尾路径（见 `start_gateway` 的说明）。
+    //
+    // thread_stack_size 16 MiB：Tokio worker 默认栈 2 MiB，长上下文大流式
+    // 请求已被观测到栈溢出硬崩（0xc00000fd，见 lib.rs `global_runtime` 的
+    // 注释与 PR 说明），此处与桌面/后台运行时保持同一栈容量。
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .thread_stack_size(16 * 1024 * 1024)
         .build()
     {
         Ok(runtime) => runtime,
@@ -297,8 +302,13 @@ fn run_as_windows_service(launch: Launch) -> ExitCode {
         //   · SCM 的 STOP / SHUTDOWN 控制事件（`sc.exe stop`、关机）；
         //   · 面板「安装并重启」的自更新钩子（替文件后要求进程退出，
         //     由 SCM 的恢复策略把新版本拉起来 —— 与容器 restart 同语义）。
+        //
+        // thread_stack_size 16 MiB：与 lib.rs `global_runtime`、headless 主
+        // 运行时保持同一栈容量（Tokio worker 默认 2 MiB，大流式请求下已有
+        // 栈溢出观测，见 PR 说明）。
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
+            .thread_stack_size(16 * 1024 * 1024)
             .build()
             .map_err(|error| format!("创建 Tokio 运行时失败: {error}"))?;
         runtime.block_on(async move {
