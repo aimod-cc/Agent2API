@@ -48,7 +48,7 @@ function settle(requestId: string, row: UsageQueryRow | null): void {
   for (const waiter of waiters) { clearTimeout(waiter.timer); waiter.resolve(row) }
 }
 
-function publish(tasks: Map<string, UsageQueryTask>): void {
+function publish(tasks: Map<string, UsageQueryTask>, usageChanged = false): void {
   const previous = getStore().usageTasks
   for (const [id, task] of tasks) {
     const before = previous.get(id)
@@ -63,7 +63,10 @@ function publish(tasks: Map<string, UsageQueryTask>): void {
     const task = tasks.get(id)
     return task?.requestId === requestId && task.status === 'running'
   }))
-  patch({ usageTasks: tasks, usageInflight: inflight, usageBusy })
+  patch({
+    usageTasks: tasks, usageInflight: inflight, usageBusy,
+    ...(usageChanged ? { dataVersion: getStore().dataVersion + 1 } : {}),
+  })
   schedule()
 }
 
@@ -156,7 +159,10 @@ export async function cancelAllUsage(): Promise<void> {
 export function invalidateUsageTasks(ids: string[]): void {
   revision++
   const tasks = new Map(getStore().usageTasks)
+  let usageChanged = false
   for (const id of ids) {
+    const row = usageRowOf(id)
+    if (row && !row.stale) usageChanged = true
     markUsageStale(id)
     starts.delete(id)
     const task = tasks.get(id)
@@ -166,5 +172,5 @@ export function invalidateUsageTasks(ids: string[]): void {
     if (task.status === 'running') void shared().workbuddyDesktop?.cancelBalanceQuery?.(id, task.requestId).catch(() => {})
   }
   patch({ usageStarting: new Set(starts.keys()) })
-  publish(tasks)
+  publish(tasks, usageChanged)
 }

@@ -1227,8 +1227,7 @@ window.addEventListener('wb:sidebar-layout', () => {
   if (fallback) showPage(fallback);
 });
 
-api.onStateChanged(next => {
-  if (!next?.accounts && !next?.session && !next?.health) return;
+api.onStateChanged(() => {
   // 事件快照可能早于插件操作，只作失效通知；最新状态仍经统一刷新读取。
   void refresh();
 });

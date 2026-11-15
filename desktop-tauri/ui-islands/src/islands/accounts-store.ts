@@ -20,6 +20,8 @@ export type AccountsDialog =
 export type AccountsStore = {
   /** 每次变更 +1；React 靠它判断「该重画了」（快照对象同时被换掉） */
   version: number
+  /** 账号数据与共享缓存的重画版本；勾选、加载态等界面变更不增加它。 */
+  dataVersion: number
   listBusy: boolean
   listError: string
   filter: AccountFilter
@@ -157,6 +159,7 @@ function loadGroupTotalFiltered(): boolean {
 
 let store: AccountsStore = {
   version: 0,
+  dataVersion: 0,
   listBusy: false,
   listError: '',
   filter: loadFilter(),
@@ -191,9 +194,9 @@ export function patch(partial: Partial<AccountsStore>): void {
   listeners.forEach(listener => listener())
 }
 
-/** 原地改过 Map / Set 之后调它（内容变了但对象引用没变） */
+/** 账号数据或共享缓存变化时，同时使行组件的缓存失效。 */
 export function bump(): void {
-  patch({})
+  patch({ dataVersion: store.dataVersion + 1 })
 }
 
 /* ─── 从后端快照派生的读法（唯一入口）─────────── */
@@ -202,9 +205,13 @@ export function snapshot(): AccountsSnapshot | null | undefined {
   return shared().wbApp?.getState?.()?.accounts
 }
 
+const EMPTY_ACCOUNTS: AccountRecord[] = []
+let indexedAccounts: AccountRecord[] = EMPTY_ACCOUNTS
+let accountIndex = new Map<string, AccountRecord>()
+
 export function allAccounts(): AccountRecord[] {
   const list = snapshot()?.accounts
-  return Array.isArray(list) ? list : []
+  return Array.isArray(list) ? list : EMPTY_ACCOUNTS
 }
 
 /** 插件未就绪的账号摘要；旧后端只有数量时使用中性的「未加载」原因。 */
@@ -249,7 +256,13 @@ export function hiddenAccounts(): HiddenAccountsSummary {
 }
 
 export function findAccount(id: string): AccountRecord | null {
-  return allAccounts().find(account => account.id === id) || null
+  const accounts = allAccounts()
+  // [喵喵喵]: 成功重读会替换快照数组；只在数组变化时重建索引，避免逐账号扫描整表。
+  if (accounts !== indexedAccounts) {
+    indexedAccounts = accounts
+    accountIndex = new Map(accounts.map(account => [account.id, account]))
+  }
+  return accountIndex.get(id) || null
 }
 
 /** 当前可见账号（筛选 + 搜索）与分段计数共用 accounts-domain 的同一份口径。
