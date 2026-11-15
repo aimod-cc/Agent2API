@@ -196,6 +196,12 @@ impl AccountStore {
         self.snapshot(&state, Visibility::All)
     }
 
+    /// 单条账号的公开形态：沿用全量快照的字段口径，不做展示过滤。
+    pub(crate) fn public_account_by_id(&self, id: &str) -> Option<Value> {
+        let record = self.read_record(id)?;
+        Some(self.public_account(&record))
+    }
+
     /// 界面用的账号快照：**只含此刻真的能用的那些家**（判据见 [`account_visible`]）。
     ///
     /// 所有面向用户的账号入口都应走这一条（`/api/session`、`/api/accounts`、

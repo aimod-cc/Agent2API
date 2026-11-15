@@ -59,14 +59,19 @@ export function BatchDialog({ ids, action, onClose }: { ids: string[]; action: s
   const [result, setResult] = React.useState<React.ReactNode>('')
   const [refreshProgress, setRefreshProgress] = React.useState<BatchTokenRefreshProgress | null>(null)
   const running = React.useRef(false)
-  const accounts = ids.map(id => findAccount(id)).filter((account): account is AccountRecord => account !== null)
+  const accountList = allAccounts()
+  const accounts = React.useMemo(
+    () => ids.map(id => findAccount(id)).filter((account): account is AccountRecord => account !== null),
+    [ids, accountList],
+  )
   const usageAccounts = accounts.filter(supportsUsage)
   const editingRules = current === 'limiters' && (limiterMode === 'append' || limiterMode === 'replace')
   const needsBalance = editingRules && limiterDraft.some(group => group.conditions.some(condition => condition.metric !== 'tokens' && condition.metric !== 'requests'))
   const targets = current === 'refresh'
     ? accounts.filter(account => !tokenRefreshSkipReason(account))
     : current === 'usageQuery' || needsBalance ? usageAccounts : accounts
-  const skippedAccounts = accounts.filter(account => !targets.includes(account))
+  const targetIds = new Set(targets.map(account => account.id))
+  const skippedAccounts = accounts.filter(account => !targetIds.has(account.id))
   const copyOptions = current === 'usageQuery' ? usageAccounts : accounts
   const source = copyOptions.find(account => account.id === sourceId)
   const concHardCap = accounts.reduce(

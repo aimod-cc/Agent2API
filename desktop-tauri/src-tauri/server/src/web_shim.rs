@@ -14,7 +14,7 @@
 //!   · 凭证：桌面壳自动带第一把 Key（进程内读）；网页端由**用户输入**
 //!     （401 时弹出输入层，存 localStorage 后重试一次）。
 //!   · 事件：Tauri 的 push 事件不存在，改为**模拟** ——
-//!     `accounts:state-changed` 在写类请求成功后拉一次 /api/session 重放
+//!     `accounts:state-changed` 在写类请求成功后通知状态失效，由界面统一读取
 //!     （300ms 防抖，合并连续写）；`login:state` 由本文件的登录状态机
 //!     本地驱动；`backend:error` / `accounts:auto-maintained` 没有对应物，
 //!     订阅返回空操作（桌面端它们也只是「去查一次」的提醒）。
@@ -851,12 +851,9 @@ pub fn shim_js() -> &'static str {
   var stateEmitTimer = null;
   function emitStateSoon() {
     if (stateEmitTimer) return;
-    stateEmitTimer = setTimeout(async function () {
+    stateEmitTimer = setTimeout(function () {
       stateEmitTimer = null;
-      try {
-        var next = await call('GET', '/api/session');
-        stateListeners.forEach(function (cb) { try { cb(next); } catch (e) { console.warn(e); } });
-      } catch (e) { /* 面板关闭中的正常失败 */ }
+      stateListeners.forEach(function (cb) { try { cb(); } catch (e) { console.warn(e); } });
     }, 300);
   }
 
@@ -1677,7 +1674,8 @@ pub fn shim_js() -> &'static str {
     getAccountSorting: function () { return call('GET', '/api/accounts/sorting'); },
     saveAccountSorting: function (payload) { return call('PUT', '/api/accounts/sorting', payload || {}); },
     switchAccount: function (id) { return call('POST', '/api/accounts/current', { id: id }); },
-    refreshAccountToken: function (id) { return call('POST', '/api/accounts/refresh', id ? { id: id } : {}); },
+    // [喵喵喵]: 单号和批量调用方负责操作后的补读，避免桥层再触发一轮整表刷新。
+    refreshAccountToken: function (id) { return rawCall('POST', '/api/accounts/refresh', id ? { id: id } : {}); },
     removeAccount: function (id) { return call('DELETE', '/api/accounts/' + encodeURIComponent(id)); },
     updateAccount: function (id, patch) { return call('PATCH', '/api/accounts/' + encodeURIComponent(id), patch); },
     // 整队重排（账号页分组模式拖拽的落库通道；与桌面 bridge.rs 的同名方法成对）。
@@ -2346,8 +2344,8 @@ pub fn shim_js() -> &'static str {
     return result ? '?' + result : '';
   }
 
-  // 写类请求成功后重放一次状态（模拟桌面的 accounts:state-changed 推送）：
-  // 拦一层 call，只对管理 API 的非 GET 生效，/v1/* 与登录轮询不受影响。
+  // 写类请求成功后通知状态失效（模拟桌面的 accounts:state-changed 推送）：
+  // 状态读取由界面统一调度；只对管理 API 的非 GET 生效，/v1/* 与登录轮询不受影响。
   var rawCall = call;
   call = function (method, path, body) {
     var promise = rawCall(method, path, body);

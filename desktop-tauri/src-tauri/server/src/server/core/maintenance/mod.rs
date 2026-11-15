@@ -306,10 +306,10 @@ pub async fn refresh_single(
     use crate::server::errors::GatewayError;
     let recorder = storage::Recorder::start(CREDENTIAL, "manual", None)
         .map_err(|error| GatewayError::with_status(503, error))?;
-    let before = types::accounts(store);
+    let before = types::account(store, id);
     let started = std::time::Instant::now();
     let result = credential_maintenance::refresh_checked(store, adapter, id).await;
-    let after = types::accounts(store);
+    let after = types::account(store, id);
     let raw = json!({
         "id": id, "provider": store.account_provider_of(id).unwrap_or_default(),
         "status": if result.is_ok() { "refreshed" } else { "failed" },

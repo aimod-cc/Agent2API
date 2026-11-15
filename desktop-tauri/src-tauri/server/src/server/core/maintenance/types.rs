@@ -72,31 +72,41 @@ pub struct AccountSnapshot {
     pub expires_at: Option<i64>,
 }
 
+fn account_snapshot(account: &Value) -> Option<(String, AccountSnapshot)> {
+    let id = account.get("id")?.as_str()?;
+    let name = if account.get("nameCustom").and_then(Value::as_bool) == Some(true) {
+        text(account, "name")
+    } else {
+        ["nickname", "name", "email"]
+            .into_iter()
+            .find_map(|key| text(account, key))
+    }
+    .unwrap_or_else(|| id.to_string());
+    let expires_at = [
+        "accessTokenExpiresAt",
+        "tokenExpiresAt",
+        "expiresAt",
+        "tokenExpireAt",
+    ]
+    .into_iter()
+    .find_map(|key| millis(account.get(key)));
+    Some((id.to_string(), AccountSnapshot { name, expires_at }))
+}
+
 pub fn accounts(store: &AccountStore) -> HashMap<String, AccountSnapshot> {
     store.list_accounts()["accounts"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|account| {
-            let id = account.get("id")?.as_str()?;
-            let name = if account.get("nameCustom").and_then(Value::as_bool) == Some(true) {
-                text(account, "name")
-            } else {
-                ["nickname", "name", "email"]
-                    .into_iter()
-                    .find_map(|key| text(account, key))
-            }
-            .unwrap_or_else(|| id.to_string());
-            let expires_at = [
-                "accessTokenExpiresAt",
-                "tokenExpiresAt",
-                "expiresAt",
-                "tokenExpireAt",
-            ]
-            .into_iter()
-            .find_map(|key| millis(account.get(key)));
-            Some((id.to_string(), AccountSnapshot { name, expires_at }))
-        })
+        .filter_map(account_snapshot)
+        .collect()
+}
+
+pub fn account(store: &AccountStore, id: &str) -> HashMap<String, AccountSnapshot> {
+    store.public_account_by_id(id)
+        .as_ref()
+        .and_then(account_snapshot)
+        .into_iter()
         .collect()
 }
 

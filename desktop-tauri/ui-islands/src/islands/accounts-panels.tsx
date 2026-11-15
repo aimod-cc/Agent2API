@@ -189,16 +189,16 @@ function GroupMenu({ group, ids, collapsed }: { group: AccountGroup; ids: string
  * 样式刻意保持中性（surface 底 + 一条 hairline）：一家一色会让整页像调色板，
  * 而「哪一段是哪一家」由家名与图标已经说清楚了。
  */
-export function GroupBandRow({ group, collapsed, colSpan }: {
+export const GroupBandRow = React.memo(function GroupBandRow({ group, collapsed, colSpan, filtered }: {
   group: AccountGroup
   collapsed: boolean
   colSpan: number
+  filtered: boolean
 }) {
   const now = useDisplayClock()
   const { src: icon, onError: onIconError } = useProviderIcon(group.provider)
   // 合计口径：默认整组（`members`），设置里打开「按筛选」后改用可见行（`accounts`）。
   // 分页不参与 —— 见 groupBalanceOf 的说明。
-  const filtered = getStore().groupTotalFiltered
   const members = filtered ? group.accounts : group.members
   // 「值不值得画合计」看的是**整组**有几个账号（一个账号的组，合计与下面那行读数
   // 逐字重复）；而**加哪些账号**看的是当前口径。两者不能合成一个判据：按筛选口径下
@@ -274,7 +274,7 @@ export function GroupBandRow({ group, collapsed, colSpan }: {
       </TableCell>
     </TableRow>
   )
-}
+})
 
 /* ─── 状态列 ────────────────────────────────── */
 
