@@ -68,6 +68,25 @@ use crate::server::http::{ok_json, parse_body, query_param};
 use crate::server::logging;
 use crate::server::ServerState;
 
+/// 给账号列表附上熔断状态（账号页「熔断」徽章）。
+///
+/// 熔断状态在 `RouteState` 的运行时表里，不在账号库；所以统一在列表出口注入。
+/// `/api/session` 与 `/api/accounts` 共用这一处口径，字段名固定为
+/// `breakerOpenUntil`（毫秒时间戳，0 = 当前未熔断）。
+pub(super) fn with_breaker(mut list: Value, state: &ServerState) -> Value {
+    let now = logging::now_ms();
+    if let Some(accounts) = list.as_array_mut() {
+        for account in accounts {
+            let Some(id) = account.get("id").and_then(Value::as_str) else { continue };
+            let open_until = state.upstream().breaker_open_until(id, now).unwrap_or(0);
+            if let Some(object) = account.as_object_mut() {
+                object.insert("breakerOpenUntil".into(), open_until.into());
+            }
+        }
+    }
+    list
+}
+
 /// 账号存储错误 → 管理信封（打日志 + 原状态码）。
 ///
 /// 可见性是 `pub(super)`：`api::session` 的 Loomy 验证码登录要落账号
@@ -396,7 +415,7 @@ pub async fn dispatch(
     // ① 精确命中 `/api/accounts`
     if rest.is_none() {
         match method.as_str() {
-            "GET" => return ok_json(state.store().list_visible_accounts()),
+            "GET" => return ok_json(with_breaker(state.store().list_visible_accounts(), &state)),
             "POST" => return add_account(&state, body).await,
             // Node 版对 `/api/accounts` 上的其它方法同样走 404 信封
             _ => {
@@ -448,6 +467,12 @@ pub async fn dispatch(
             let id = decode_segment(id);
             if !id.is_empty() {
                 return clear_rate_limits(&state, &id, body);
+            }
+        }
+        if let Some(id) = rest.strip_suffix("/breaker/clear") {
+            let id = decode_segment(id);
+            if !id.is_empty() {
+                return clear_breaker(&state, &id);
             }
         }
         // ZCode「限时套餐」：探测（只读、不要验证码）与领取（要验证码）。
@@ -1612,6 +1637,23 @@ pub async fn move_account(state: &ServerState, id: &str, body: &Bytes) -> Respon
         }
         Err(error) => store_error(error),
     }
+}
+
+// ─── POST /api/accounts/{id}/breaker/clear ─────────────────────
+
+/// 手动清除某账号的熔断状态（账号页「熔断 ×」）。
+///
+/// 熔断是运行时状态，不在账号库里：这里只删 `RouteState` 的那一条，
+/// 失败计数与半开计数一并归零。返回 `{cleared: 是否确实删掉了}`。
+pub fn clear_breaker(state: &ServerState, id: &str) -> Response {
+    if id.is_empty() {
+        return management_error(400, "缺少账号 id");
+    }
+    let cleared = state.upstream().breaker_clear(id);
+    if cleared {
+        logging::log("[Upstream]", &format!("账号 {id} 的熔断状态已手动清除"));
+    }
+    ok_json(json!({ "cleared": cleared }))
 }
 
 // ─── POST /api/accounts/{id}/rate-limits/clear ─────────────────

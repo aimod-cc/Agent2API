@@ -504,6 +504,27 @@ impl RouteState {
         }
     }
 
+    /// 熔断打开中的恢复时刻（毫秒）；未打开 / 半开期返回 None。
+    ///
+    /// 账号页的「熔断」徽章用；与选路快照里的 `open` 同源（`open_until > now`）。
+    pub(super) fn breaker_open_until(&self, account_id: &str, now: i64) -> Option<i64> {
+        let table = self.breaker.lock().ok()?;
+        table
+            .get(account_id)
+            .map(|entry| entry.open_until)
+            .filter(|until| *until > now)
+    }
+
+    /// 手动清除某账号的熔断状态（账号页「熔断 ×」）。
+    ///
+    /// 只删运行时表里的这一条；失败计数与半开计数一并归零。返回是否确实删掉了。
+    pub(super) fn breaker_clear(&self, account_id: &str) -> bool {
+        let Ok(mut table) = self.breaker.lock() else {
+            return false;
+        };
+        table.remove(account_id).is_some()
+    }
+
     /// 选路快照：粘性命中 + 沉底 / 休息 / 熔断三张表（一次取齐）。
     pub(super) fn snapshot(&self, conv_key: &str, now: i64, ttl_ms: i64) -> RouteSnapshot {
         self.snapshot_for_model(conv_key, "", now, ttl_ms)

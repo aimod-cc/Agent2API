@@ -257,6 +257,8 @@ export type AccountRecord = {
   source?: string
   proxy?: ProxyConfig | null
   rateLimits?: Record<string, RateLimitInfo>
+  /** 账号级熔断的恢复时刻（毫秒）；0 / 缺省 = 当前未熔断。 */
+  breakerOpenUntil?: number
   upstreamCooldownUntil?: number | null
   upstreamBlockedReason?: string
   [key: string]: unknown
@@ -324,6 +326,8 @@ export type AccountsBridge = {
   saveAccountSorting(payload: { provider: string; rules: GroupSortRule[] | null; onlyIfUnset?: boolean }): Promise<AccountSorting>
   moveAccount(id: string, direction: 'up' | 'down'): Promise<unknown>
   clearRateLimits(id: string, model?: string | null): Promise<unknown>
+  /** 清除账号级熔断（运行时状态，不动账号记录）。 */
+  clearBreaker(id: string): Promise<unknown>
   /**
    * 账号路由（策略 / 粘性 / 退避 / 垫底 / 熔断）与候选队列可见化。
    * `setRoutingConfig` 收**部分**补丁、返回生效后的全量值（与 /api/timeouts

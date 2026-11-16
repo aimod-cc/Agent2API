@@ -11,7 +11,7 @@ import { shared, toast, type AccountRecord, type ColSettingsHandle } from './acc
 import { isDesktopAccount, isEnabled, providerOf, supportsUsage } from './accounts-domain'
 import { ACCOUNT_COLUMNS, bindColumnGrips, columnWidths, tableMinWidth } from './accounts-columns'
 import {
-  allAccounts, bump, clearFilter, clearLimits, ensureProxyPoolOptions,
+  allAccounts, bump, clearBreaker, clearFilter, clearLimits, ensureProxyPoolOptions,
   filterActive, getStore, groupSortRules, groupView, hiddenAccounts, installAccountsApi, normalizeProviderFilter, openBatchDialog,
   providerSummaryList, queryAllUsage, cancelAllUsage, refreshList, reorderQueue, rowContext, seats, segmentCounts,
   setAllGroupsCollapsed, setAllPicked, setProviderFilter, setSearchFilter, setSegmentFilter,
@@ -351,7 +351,7 @@ function AccountsPage() {
       case 'status':
         return <StatusCell account={account} />
       case 'limits':
-        return <LimitsCell account={account} onClear={model => void clearLimits(account.id, model)} />
+        return <LimitsCell account={account} onClear={model => void clearLimits(account.id, model)} onClearBreaker={() => void clearBreaker(account.id)} />
       case 'expiry':
         return <ExpiryCell account={account} />
       case 'usage':

@@ -469,3 +469,45 @@ fn every_retry_advice_stops_when_the_budget_is_exhausted() {
     };
     assert!(transport_retry_advice(&error, 0).is_none());
 }
+
+#[test]
+fn payment_required_is_normalized_to_an_account_level_quota() {
+    let class = credit_exhausted(
+        402,
+        UpstreamErrorClass::Fatal {
+            status: 402,
+            message: "积分不足".into(),
+            upstream_code: Some(7),
+        },
+    );
+    match class {
+        UpstreamErrorClass::QuotaLimited { status, message, upstream_code, reset_at } => {
+            assert_eq!(status, 402);
+            assert_eq!(message, "积分不足");
+            assert_eq!(upstream_code, Some(7));
+            assert_eq!(reset_at, None);
+        }
+        other => panic!("402 应归一为 QuotaLimited，实际 {other:?}"),
+    }
+    // 其他状态码不改变分类
+    let class = credit_exhausted(
+        400,
+        UpstreamErrorClass::Fatal {
+            status: 400,
+            message: "bad".into(),
+            upstream_code: None,
+        },
+    );
+    assert!(matches!(class, UpstreamErrorClass::Fatal { status: 400, .. }));
+    // 适配器已经声明的 QuotaLimited 保持原值（包括已有的 reset_at）
+    let class = credit_exhausted(
+        402,
+        UpstreamErrorClass::QuotaLimited {
+            status: 402,
+            message: "quota".into(),
+            upstream_code: None,
+            reset_at: Some(1),
+        },
+    );
+    assert!(matches!(class, UpstreamErrorClass::QuotaLimited { reset_at: Some(1), .. }));
+}
