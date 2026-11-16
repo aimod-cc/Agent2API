@@ -163,3 +163,70 @@ fn invalid_limits_and_out_of_scope_models_are_rejected() {
         json!({"id":"local","label":"local","models":["allowed"]});
     assert!(groups::normalize_groups(&value).is_err());
 }
+
+#[test]
+fn free_model_exemption_only_covers_balance_conditions() {
+    let balance = Reading { hit: true, local: false, ..Default::default() };
+    let token = Reading { hit: true, local: true, ..Default::default() };
+    let missed_token = Reading { hit: false, local: true, ..Default::default() };
+    let missed_balance = Reading { hit: false, local: false, ..Default::default() };
+
+    // 纯余额命中：免费模型可以豁免。
+    assert!(only_balance_conditions(&[balance.clone()]));
+    // Token / 请求数命中：本地保护，免费模型也不能豁免。
+    assert!(!only_balance_conditions(&[token.clone()]));
+    // 余额 + Token 同时命中：保留拦截。
+    assert!(!only_balance_conditions(&[balance.clone(), token]));
+    // 未命中的条件不参与判定。
+    assert!(only_balance_conditions(&[balance, missed_token, missed_balance]));
+}
+
+#[test]
+fn parses_numeric_multipliers_before_credit_strings() {
+    // 有效倍率优先：raccoon 的免费模型同时有 0.5 的 billingMultiplier
+    // 与 0 的 billingEffectiveMultiplier，实际计费以 effective 为准。
+    assert_eq!(
+        multiplier_of(&json!({
+            "billingEffectiveMultiplier": 0,
+            "billingMultiplier": 0.5,
+            "pointsMultiplier": 0.5,
+            "credits": "x0 credits",
+        })),
+        Some(0.0)
+    );
+    assert_eq!(
+        multiplier_of(&json!({"billingMultiplier": 1, "credits": "x1 credits"})),
+        Some(1.0)
+    );
+}
+
+#[test]
+fn parses_credit_display_strings() {
+    assert_eq!(multiplier_of(&json!({"credits": "x0.00 credits"})), Some(0.0));
+    assert_eq!(multiplier_of(&json!({"credits": "x0.0"})), Some(0.0));
+    assert_eq!(multiplier_of(&json!({"credits": "x0.5 credits"})), Some(0.5));
+    assert_eq!(multiplier_of(&json!({"credits": "x1.33 credits"})), Some(1.33));
+    // 非数值展示（autoclaw 的低/中/高）不是计费读数，不做免费判定。
+    assert_eq!(multiplier_of(&json!({"credits": "低"})), None);
+    assert_eq!(multiplier_of(&json!({"credits": ""})), None);
+    assert_eq!(multiplier_of(&json!({})), None);
+}
+
+#[test]
+fn non_finite_readings_are_ignored() {
+    assert_eq!(multiplier_of(&json!({"billingMultiplier": "x"})), None);
+    assert_eq!(multiplier_of(&json!({"credits": "xNaN credits"})), None);
+}
+
+#[test]
+fn parses_alternate_credit_fields_and_free_labels() {
+    // LobsterAI 把 0 倍率写成「免费」。
+    assert_eq!(multiplier_of(&json!({"credits": "免费"})), Some(0.0));
+    // CodeArts 的展示串是后缀形态。
+    assert_eq!(multiplier_of(&json!({"credits": "0.7x"})), Some(0.7));
+    // Tabbit 用 creditMultiplier，不是 credits。
+    assert_eq!(multiplier_of(&json!({"creditMultiplier": "x0"})), Some(0.0));
+    assert_eq!(multiplier_of(&json!({"creditMultiplier": "x1"})), Some(1.0));
+    // 数字形态的 0 也按免费处理（防御性兼容）。
+    assert_eq!(multiplier_of(&json!({"credits": 0})), Some(0.0));
+}
