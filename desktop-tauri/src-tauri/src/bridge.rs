@@ -371,6 +371,9 @@ const BRIDGE_JS: &str = r#"
     clearRateLimits: (id, model) =>
       call('POST', '/api/accounts/' + encodeURIComponent(id) + '/rate-limits/clear',
         model ? { model } : {}),
+    // 清除账号级熔断（账号页「熔断 ×」）：运行时状态，不动账号记录。
+    clearBreaker: id =>
+      call('POST', '/api/accounts/' + encodeURIComponent(id) + '/breaker/clear', {}),
     // ── 账号路由（策略 / 粘性 / 退避 / 垫底 / 熔断 + 队列可见化）──
     getRoutingConfig: () => call('GET', '/api/routing'),
     getRoutingWorkspace: model => call('GET', '/api/routing/workspace' + toQuery({ model })),

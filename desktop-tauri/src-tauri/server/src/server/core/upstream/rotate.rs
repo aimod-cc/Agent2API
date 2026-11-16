@@ -309,7 +309,7 @@ fn select_target_account_sync(
     decision["scope"] = Value::String(request_routing.scope.clone());
     decision["configSnapshot"] = request_routing.json();
     if let Some(blocked) = decision.get_mut("blocked").and_then(Value::as_array_mut) {
-        blocked.extend(request_routing.group_projection.blocked.iter().take(12usize.saturating_sub(blocked.len())).cloned());
+        blocked.extend(request_routing.group_projection.blocked.iter().take(ROUTE_SNAPSHOT_LIMIT.saturating_sub(blocked.len())).cloned());
     }
     decision["blockedTotal"] = (plan.blocked.len() + request_routing.group_projection.blocked.len()).into();
     if !conv_key.is_empty() {
@@ -823,10 +823,19 @@ pub(super) fn pick_next_account(
     plan.ordered.into_iter().next().map(|entry| entry.account)
 }
 
+/// 请求日志 / 选路回放里保存的候选上限。
+///
+/// 12 条在只有全局队列时够用；路由组把「成员 × 账号」摊平后经常有 20+
+/// 个候选，截断会让「为什么没选它」无据可查（实测：被 413 试过的账号
+/// 落在第 13 位之后，回放里只剩一句「未保存」）。128 覆盖常见规模，
+/// 同时仍保留一个上限避免请求日志无限膨胀。
+pub(super) const ROUTE_SNAPSHOT_LIMIT: usize = 128;
+
 /// 选路决策快照（请求日志「路由回放」的数据源）。
 ///
-/// 有界：排序清单与被跳过者各最多带 12 条 —— 账号几十个时全部带上只会
-/// 让每条请求日志膨胀，而前 12 位已足以回答「为什么是它、为什么不是那个」。
+/// 有界：排序清单与被跳过者各最多带 [`ROUTE_SNAPSHOT_LIMIT`] 条 —— 账号
+/// 几十个时全量保存会让每条请求日志膨胀；128 已覆盖路由组的常见规模，
+/// 超出时前端会明确提示「候选快照仅保存部分记录」。
 fn decision_json(
     plan: &routing::RoutePlan,
     settings: &config::RoutingSettings,
@@ -850,8 +859,8 @@ fn decision_json(
         "sticky": settings.sticky.as_str(),
         "stickyHit": plan.sticky_hit,
         "picked": plan.ordered.first().map(|entry| entry.id.clone()).unwrap_or_default(),
-        "ordered": plan.ordered.iter().take(12).map(entry_json).collect::<Vec<_>>(),
-        "blocked": plan.blocked.iter().take(12).map(entry_json).collect::<Vec<_>>(),
+        "ordered": plan.ordered.iter().take(ROUTE_SNAPSHOT_LIMIT).map(entry_json).collect::<Vec<_>>(),
+        "blocked": plan.blocked.iter().take(ROUTE_SNAPSHOT_LIMIT).map(entry_json).collect::<Vec<_>>(),
         "orderedTotal": plan.ordered.len(),
         "blockedTotal": plan.blocked.len(),
     })

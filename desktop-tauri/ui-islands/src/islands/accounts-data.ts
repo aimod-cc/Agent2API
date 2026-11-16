@@ -239,6 +239,17 @@ export async function clearLimits(id: string, model?: string): Promise<void> {
   }
 }
 
+/** 清除账号级熔断：只清运行时状态，下一次请求会重新尝试这个账号。 */
+export async function clearBreaker(id: string): Promise<void> {
+  try {
+    await shared().workbuddyDesktop?.clearBreaker?.(id)
+    toast(t('✅ 已清除该账号的熔断状态'))
+    await shared().wbApp?.refresh?.()
+  } catch (error) {
+    toast(t('清除失败：{message}', { message: errorMessage(error) }), 'err')
+  }
+}
+
 /**
  * 代理列选中即保存（`value` 是下拉的值）。下拉的选项只有三类：
  *   ''                     → 直连（proxy = null）

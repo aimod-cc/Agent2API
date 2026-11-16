@@ -47,7 +47,7 @@ pub async fn get_session(State(state): State<ServerState>) -> Response {
     let snapshot = config::current();
     let plugin_startup = crate::server::core::plugin_host::startup::snapshot();
     // 可见账号与路由页预演共用同一份快照，插件未就绪的账号不参与。
-    let accounts = state.store().list_visible_accounts();
+    let accounts = super::accounts::with_breaker(state.store().list_visible_accounts(), &state);
     let routed = super::routing_api::queue_for_accounts(
         &state, snapshot.last_request_model().map(str::to_string), &crate::server::core::routing::accounts_of(&accounts),
     )

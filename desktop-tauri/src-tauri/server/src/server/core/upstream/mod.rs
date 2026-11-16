@@ -344,6 +344,18 @@ impl UpstreamService {
         (snapshot.sunk, snapshot.resting, snapshot.open)
     }
 
+    /// 某账号熔断打开的恢复时刻（毫秒）；未熔断返回 None。
+    ///
+    /// 账号页「熔断」徽章用；与 [`Self::route_queue_facts`] 的 open 集合同源。
+    pub fn breaker_open_until(&self, account_id: &str, now: i64) -> Option<i64> {
+        self.route.breaker_open_until(account_id, now)
+    }
+
+    /// 手动清除某账号的熔断状态；返回是否确实删掉了。
+    pub fn breaker_clear(&self, account_id: &str) -> bool {
+        self.route.breaker_clear(account_id)
+    }
+
     pub fn route_sticky_sessions(&self, model: Option<&str>, now: i64) -> Vec<Value> {
         self.route.sticky_list(model, now)
     }

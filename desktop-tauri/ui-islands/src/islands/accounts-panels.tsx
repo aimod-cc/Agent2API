@@ -330,52 +330,69 @@ export function StatusCell({ account }: { account: AccountRecord }) {
  * 三家形态的判据都是「有没有生效中的限额记录」，不为任何一家开特例 ——
  * 记录怎么来（429 / 限额码 / 上游的 Retry-After）是转发层的事，界面只认这一份。
  */
-export function LimitsCell({ account, onClear }: {
+export function LimitsCell({ account, onClear, onClearBreaker }: {
   account: AccountRecord
   onClear: (model: string) => void
+  onClearBreaker: () => void
 }) {
   const entries = activeLimits(account)
   const cooldown = upstreamCooldownOf(account)
   const suspendedReason = upstreamSuspendedReasonOf(account)
+  // 账号级熔断：与限制器 / 限流是两套状态；有熔断时额外挂一枚红色徽章。
+  // 恢复时刻来自 /api/session 的 breakerOpenUntil（毫秒，0 = 当前未熔断）。
+  const breakerUntil = Number(account.breakerOpenUntil || 0)
+  // 每秒重算一次，徽章显示「熔断 4:32」；没有熔断时不挂定时器。
+  const [now, setNow] = React.useState(() => Date.now())
+  const breakerOpen = breakerUntil > now
+  React.useEffect(() => {
+    if (!breakerOpen) return
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [breakerOpen, breakerUntil])
+  const remaining = Math.max(0, breakerUntil - now)
+  const seconds = Math.ceil(remaining / 1000)
+  const countdown = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+  const breaker = breakerOpen
+    ? <span className='inline-flex items-center gap-1'>
+        <Badge variant='destructive' shape='tag' title={`${t('熔断')} · ${formatResetText(breakerUntil)}`}>
+          {t('熔断')} {countdown}
+        </Badge>
+        <button type='button' title={t('清除熔断')} aria-label={t('清除熔断')}
+          className='inline-flex h-4 w-4 items-center justify-center rounded-full text-destructive hover:bg-destructive/10'
+          onClick={event => { event.stopPropagation(); onClearBreaker() }}>×</button>
+      </span>
+    : null
   if (suspendedReason) {
-    return <Badge variant='destructive' shape='tag' title={suspendedReason}>{t('上游限制 · 已禁用')}</Badge>
+    return <>{breaker}<Badge variant='destructive' shape='tag' title={suspendedReason}>{t('上游限制 · 已禁用')}</Badge></>
   }
   if (!entries.length && !cooldown) {
     if (Array.isArray(account.limiterGroups) && limiterHit(account)) {
-      return <LimiterStatus account={account} onOpen={() => openSettingsDialog(account.id)} />
+      return <>{breaker}<LimiterStatus account={account} onOpen={() => openSettingsDialog(account.id)} /></>
     }
     if (balanceBlockedOf(account, usageEntryOf(account))) {
-      return (
-        <Badge variant='warning' shape='tag'
+      return <>{breaker}<Badge variant='warning' shape='tag'
           title={t('余额低于限制器的阈值，转发时会跳过该账号（余额回升自动恢复）')}>
           {t('余额不足')}
-        </Badge>
-      )
+        </Badge></>
     }
     if (tokenBlockedOf(account, tokenUsageOf(account))) {
-      return (
-        <Badge variant='warning' shape='tag'
+      return <>{breaker}<Badge variant='warning' shape='tag'
           title={t('本周期 Token 消耗达到限制器的上限，转发时会跳过该账号（窗口重置自动恢复）')}>
           {t('Token 限额')}
-        </Badge>
-      )
+        </Badge></>
     }
-    return (
-      <Badge variant='success' shape='tag' title={t('当前没有任何模型处于限流中')}>
+    return <>{breaker}<Badge variant='success' shape='tag' title={t('当前没有任何模型处于限流中')}>
         <BadgeDot />{t('正常')}
-      </Badge>
-    )
+      </Badge></>
   }
-  return (
-    <LimitDetailButton
+  return <>{breaker}<LimitDetailButton
       accountName={displayNameOf(account)}
       rows={limitRowsOf(account)}
       count={entries.length}
       cooldown={cooldown}
       soonest={formatResetText(cooldown ? cooldown.resetAt : entries[0].resetAt)}
       onClear={onClear}
-    />
-  )
+    /></>
 }
 
 /* ─── 有效期 / 连接数 / 余额列 ──────────────── */
