@@ -38,7 +38,9 @@ pub(super) async fn forward(
         let class = adapter.classify_conversation_error(&error);
         let detail = serde_json::json!({ "message": error.message, "code": error.code });
         let policy = adapter.error_policy_async(status, &detail).await;
-        if policy.stop || settings.no_retry(status) || policy.suspend_account || policy.account_cooldown_until.is_some() {
+        // 402（积分不足）不在本插件循环里原地重发：外层会按账号级额度耗尽
+        // 标记该账号×模型的冷却并换下一个候选。这里的重发只会白等一个间隔。
+        if status == 402 || policy.stop || settings.no_retry(status) || policy.suspend_account || policy.account_cooldown_until.is_some() {
             return Err(error);
         }
         if !matches!(class, UpstreamErrorClass::TokenExpired { .. }) {
