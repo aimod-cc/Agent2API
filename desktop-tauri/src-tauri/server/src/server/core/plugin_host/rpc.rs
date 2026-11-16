@@ -1236,8 +1236,15 @@ impl ProviderAdapter for RpcAdapter {
             let method = crate::server::core::providers::retry::RETRY_DECISION_METHOD;
             match self.control(method, Value::Object(params)).await {
                 Ok(value) => {
-                    let decision = serde_json::from_value(value).unwrap_or_else(|_| RetryDecision::Stop {
-                        reason: "提供商插件返回的重试决定无法解析，停止本次请求".to_string(),
+                    // 解析失败 ≠ 插件要求停止：按 Default 交回编排层的通用重试 /
+                    // 换号预算。兜底成 Stop 会让一次协议错位直接吃掉整条请求的
+                    // 失败转移能力（实测：502 后所有候选都没走到）。
+                    let decision = serde_json::from_value(value).unwrap_or_else(|error| {
+                        crate::server::logging::console_line(
+                            "[Upstream]",
+                            &format!("提供商插件返回的重试决定无法解析（{error}），按默认重试/换号处理"),
+                        );
+                        RetryDecision::Default
                     });
                     if strict::applies(self.id) { strict::retry_decision(decision) } else { decision }
                 }
@@ -1250,9 +1257,15 @@ impl ProviderAdapter for RpcAdapter {
                         None => RetryDecision::Default,
                     }
                 }
-                Err(error) => RetryDecision::Stop {
-                    reason: format!("提供商插件无法给出重试决定，停止本次请求：{}", error.message),
-                },
+                Err(error) => {
+                    // 控制面 RPC 失败（超时 / 插件忙 / 通道断）不是「上游要求停止」。
+                    // 同样按 Default 处理：让瞬时 5xx 继续走换号，而不是整单终止。
+                    crate::server::logging::console_line(
+                        "[Upstream]",
+                        &format!("提供商插件无法给出重试决定（{}），按默认重试/换号处理", error.message),
+                    );
+                    RetryDecision::Default
+                }
             }
         })
     }
