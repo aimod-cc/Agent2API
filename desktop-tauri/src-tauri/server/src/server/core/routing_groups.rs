@@ -122,6 +122,11 @@ pub fn project_with_vision(group: &RoutingGroup, accounts: &[Value], needs: &Req
         let item = manifests.get(&member.provider).and_then(|items| items.iter().find(|item| model_id(item).eq_ignore_ascii_case(&member.model))).cloned();
         let reason = if !key_scope::allows_provider(scope, &member.provider) { Some("网关 Key 不允许此提供商".to_string()) }
             else if !provider_active(&member.provider) { Some("提供商当前不可用".to_string()) }
+            else if !crate::server::core::model_rules::shared().default_enabled(&member.provider, &member.model) {
+                // 模型管理里的「启用 / 映射」开关是全局可见性：关掉之后，
+                // 路由组也不该再用它（组员配置保留，便于随时重新打开）。
+                Some("模型已在模型管理中关闭（启用/映射开关），配置保留但不参与转发".to_string())
+            }
             else if let Some(item) = &item {
                 if providers::images::model_is_image(item) { Some("生图模型不能用于对话路由".to_string()) }
                 else {
