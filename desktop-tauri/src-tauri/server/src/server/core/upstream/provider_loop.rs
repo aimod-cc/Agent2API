@@ -932,20 +932,36 @@ async fn attempt_queue(
                     // 拆散取值 —— 拆散后「漏带一个字段」编译期与运行期都不报错
                     // （本分支此前就把 `reset_at` 写成死 `None`，见那个函数的说明）。
                     let class = adapter.classify_conversation_error(&error);
+                    // ── 上游瞬态 5xx / 用户点名的码：账号级失败，不是请求级失败 ──
+                    // 408/500/502/503/504 说明「这一次这个账号/模型没答上来」；
+                    // 用户也可以在设置页「指定错误码直接换号」里额外点名别的码。
+                    // 两类都必须继续按队列顺延，而不是终止整条请求 —— 否则一个
+                    // 上游抖动就会挡住后面所有账号与模型（实测：路由组第一位 502，
+                    // 后面的 11 个候选一个都没走到）。
+                    //
+                    // 内置 5xx 与用户名单分开：前者是安全默认（原地重试由插件自己
+                    // 的循环负责，宿主只负责换号），后者是用户的显式选择。
+                    let status = u16::try_from(error.status_code).unwrap_or(0);
+                    let switchable = TRANSIENT_RETRY_STATUSES.contains(&status)
+                        || direct_switch_status(i64::from(error.status_code));
                     // 会话可能持有待回传的工具结果，显式停止策略优先于账号顺延。
-                    let policy = adapter.error_policy_async(error.status_code as u16, &serde_json::json!({
+                    // 可换号的错误例外：这条错误只对当前账号成立，换号仍可能成功。
+                    let policy = adapter.error_policy_async(status, &serde_json::json!({
                         "message": error.message,
                         "code": error.code,
                         "upstreamCode": error.upstream_code,
                     })).await;
-                    if policy.stop {
+                    if policy.stop && !switchable {
                         if !policy.reason.is_empty() { ctx.telemetry.note_attempt_notice(&policy.reason); }
                         return Err(error);
                     }
                     // Scoped runtime 的原生 loader 已拥有单次 token 恢复；宿主不再消费
                     // refresh，也不把 Fatal/权限/WAF/取消/超时改成账号顺延。
+                    // 可换号的错误不在「不换号」的范围内：它是账号/链路问题，
+                    // 按队列换下一个账号（含下一个模型的账号）才是正确动作。
                     if (strict_runtime || adapter.forwards_response() && !adapter.is_stateful())
-                        && !account_unavailable && !matches!(&class, UpstreamErrorClass::QuotaLimited { .. }) {
+                        && !account_unavailable && !switchable
+                        && !matches!(&class, UpstreamErrorClass::QuotaLimited { .. }) {
                         return Err(error);
                     }
                     if let (UpstreamErrorClass::QuotaLimited { .. }, Some(account_id)) =
@@ -1474,7 +1490,22 @@ async fn attempt_queue(
                             });
                         }
                     }
-                    if failure.stop || failure.policy.stop {
+                    // ── 插件说 Stop，但错误可换号：仍然换号 ────────────────
+                    // `RetryDecision::Stop` 的字面语义是「本次请求不再原地重发」。
+                    // 当上游返回的是内置瞬态 5xx（408/500/502/503/504），或用户
+                    // 在「指定错误码直接换号」里点名的码时，这条结论只对**当前
+                    // 账号/模型**成立：同一份请求换到下一个候选完全可能成功。
+                    // 因此这里只在「不可换号」或「显式 policy.stop」时终止整条
+                    // 请求；可换号的错误落到下面的动作 3，按队列继续换号。
+                    //
+                    // 生图请求例外：上游可能已经消耗额度，换号重发有重复计费
+                    // 风险，维持原来的直接收尾。手动终止的 499 也不在可换号名单里。
+                    let status = u16::try_from(failure.error.status_code).unwrap_or(0);
+                    let switchable = ctx.images.is_none()
+                        && (TRANSIENT_RETRY_STATUSES.contains(&status)
+                            || direct_switch_status(i64::from(failure.error.status_code)));
+                    let transient_stop = failure.stop && !failure.policy.stop && switchable;
+                    if (failure.stop || failure.policy.stop) && !transient_stop {
                         ctx.telemetry.finish_last_attempt(
                             Some(i64::from(failure.error.status_code)),
                             Some(&failure.error.message),
