@@ -1542,19 +1542,26 @@ async fn attempt_queue(
                             );
                         }
                     }
-                    // ── 名单码要不要被 `stop` 拦下 ────────────────────────
-                    // `stop` 来自适配器（`RetryDecision::Stop` / `ErrorPolicy.stop`），
-                    // 语义是「这个错别再折腾了，直接还给客户端」。但用户把某个码
-                    // 放进「直接换号」名单，就是明确说了「这个码要换号」—— 两者冲突时
-                    // 以用户的配置为准，否则名单在「适配器给了 Stop」的家上永远不生效
-                    // （症状：客户端收到的就是原始 402，一次都没换过号）。
+                    // ── `stop` 还拦不拦换号 ──────────────────────────────
+                    // 适配器的 `stop`（`RetryDecision::Stop` / `ErrorPolicy.stop`）
+                    // 语义是「这份 body 别再重发了」—— 那是**原地重发**的闸门，
+                    // 不是「不许换下一个账号」。把它当换号闸门用，账号级失败就会
+                    // 静默收尾、一个候选都不试。
+                    //
+                    // 实测（2026-11-17 23:57 那批 lobsterai/dsf 请求）：上游回
+                    // 502「账号暂时无法使用相关服务…预计 20:22:59 恢复」，插件给了
+                    // Stop，于是 30 个候选账号一个都没尝试、连一行顺延日志都没有，
+                    // `attempts` 恒为 1，客户端只能反复撞同一个被封禁的号。
+                    //
+                    // 所以：只要失败落在**某个账号**上，就照常按动作 3 记账（退避 /
+                    // 熔断）并顺延下一个账号；`stop` 继续只约束同一账号的原地重发
+                    // （那个闸门在 `send_with_retry` 里，不受此处影响）。
                     //
                     // 唯一的例外是**生图**：结果不确定时换号会重复消耗额度
-                    // （`uncertain_image` 也是靠 `stop` 挡住的），所以生图不解除。
-                    // 手动终止在上面已经先行 return，不经过这里。
-                    let named_switch_overrides_stop = ctx.images.is_none()
-                        && direct_switch_status(i64::from(failure.error.status_code));
-                    if (failure.stop || failure.policy.stop) && !named_switch_overrides_stop {
+                    // （`uncertain_image` 同样靠 `stop` 挡住），所以生图维持原样、
+                    // 不解除。手动终止在上面已先行 return，不经过这里。
+                    let stop_blocks_failover = ctx.images.is_some();
+                    if (failure.stop || failure.policy.stop) && stop_blocks_failover {
                         ctx.telemetry.finish_last_attempt(
                             Some(i64::from(failure.error.status_code)),
                             Some(&failure.error.message),
