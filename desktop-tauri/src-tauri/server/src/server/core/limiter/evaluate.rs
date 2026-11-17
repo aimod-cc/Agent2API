@@ -34,6 +34,9 @@ pub fn read(account: &Value, condition: &Condition, facts: &sources::Facts, coun
             return reading;
         }
     }
+    // 滚动窗口的恢复时刻：只能等事件滑出窗口后才知道，先在读数分支里算好，
+    // 等 `hit` 定下来再决定要不要写进 `resets_at`（未命中时没有倒计时的意义）。
+    let mut rolling_at: Option<i64> = None;
     let value = if matches!(condition.metric, Metric::Tokens | Metric::Requests) {
         reading.local = true;
         let Some(window) = counter::window_for(condition) else { return reading };
@@ -43,24 +46,47 @@ pub fn read(account: &Value, condition: &Condition, facts: &sources::Facts, coun
         }
         let (start, end) = counter::window_bounds(&window, now);
         reading.window_start = start;
+        // 滚动窗口没有「窗口终点」可言，恢复时刻要等最早那批事件滑出去才能算出来，
+        // 所以先置 0，出了读数再按命中情况补（见下方 `rolling_at`）。
         reading.resets_at = if window.reset == Reset::Rolling { 0 } else { end };
+        let tokens = condition.metric == Metric::Tokens;
         let count = counts.get(&(id.to_string(), counter::key(condition)))
             .filter(|count| window.reset == Reset::Rolling || count.start == start);
-        if let Some(count) = count {
+        let value = if let Some(count) = count {
             let models = counter::models_for(condition);
             if !models.is_empty() {
+                let mut soonest: Option<i64> = None;
                 for model in models {
-                    let value = count.by_model.get(&model.to_ascii_lowercase())
-                        .map(|count| if condition.metric == Metric::Tokens { count.tokens as f64 } else { count.requests as f64 })
+                    let entry = count.by_model.get(&model.to_ascii_lowercase());
+                    let value = entry
+                        .map(|count| if tokens { count.tokens as f64 } else { count.requests as f64 })
                         .unwrap_or(0.0);
                     reading.model_values.insert(model.clone(), value);
-                    if compare(value, condition) { reading.models.push(model.clone()); }
+                    if !compare(value, condition) { continue; }
+                    reading.models.push(model.clone());
+                    if window.reset != Reset::Rolling { continue; }
+                    let amount = entry
+                        .map(|count| if tokens { count.tokens } else { count.requests })
+                        .unwrap_or(0);
+                    let releases = count.model_releases
+                        .get(&model.to_ascii_lowercase())
+                        .map(Vec::as_slice)
+                        .unwrap_or_default();
+                    let at = counter::rolling_release(releases, amount, tokens, |v| compare(v, condition));
+                    // 取命中的模型里恢复最早的那条 —— 与「最早 … 恢复」的展示口径一致。
+                    if at > 0 { soonest = Some(soonest.map_or(at, |current| current.min(at))); }
                 }
+                if window.reset == Reset::Rolling { rolling_at = Some(soonest.unwrap_or(0)); }
                 reading.model_values.values().copied().reduce(f64::max)
             } else {
-                Some(if condition.metric == Metric::Tokens { count.tokens as f64 } else { count.requests as f64 })
+                let total = if tokens { count.tokens } else { count.requests };
+                if window.reset == Reset::Rolling {
+                    rolling_at = Some(counter::rolling_release(&count.releases, total, tokens, |v| compare(v, condition)));
+                }
+                Some(if tokens { count.tokens as f64 } else { count.requests as f64 })
             }
-        } else { None }
+        } else { None };
+        value
     } else if condition.source_id.is_empty() || condition.source_id == "account" {
         record.and_then(|record| record.remaining)
     } else {
@@ -87,6 +113,9 @@ pub fn read(account: &Value, condition: &Condition, facts: &sources::Facts, coun
         reading.value.is_some_and(|value| compare(value, condition))
     };
     if !reading.local && reading.hit { reading.models = counter::models_for(condition).to_vec(); }
+    // 滚动窗口：只有真的命中才给恢复时刻。0 表示「算不出来」（还没有事件滑出、
+    // 或者窗口里压根没有事件），前端据此显示「待计数回落」而不是编一个数字。
+    if let Some(at) = rolling_at { reading.resets_at = if reading.hit { at } else { 0 }; }
     if !reading.known { reading.reason = "暂无可判定的额度读数".to_string(); }
     reading
 }

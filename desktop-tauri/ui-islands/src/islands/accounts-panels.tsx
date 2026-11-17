@@ -60,6 +60,7 @@ import { accountReloginText, supportsTokenRefresh } from './accounts-authorizati
 import { credentialExpiryRowsOf, credentialExpiryText, type CredentialExpiryRow } from '../../../ui-shared/credential-expiry'
 import { creditStatisticsWalletsOf, isSnapshotWallet, snapshotReadingsOf, usageAggregateOf, usageEmptyStateOf, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
 import { LimitDetailButton, limitRowsOf } from './accounts-limit-detail'
+import { LiveCountdown } from './live-countdown'
 import { upstreamCooldownOf, upstreamSuspendedReasonOf } from '../../../ui-shared/account-upstream-state'
 import { LimiterStatus } from './accounts-limiter-status'
 import { limiterHit } from './accounts-limiter-model'
@@ -353,12 +354,14 @@ export function LimitsCell({ account, onClear }: {
       )
     }
     if (tokenBlockedOf(account, tokenUsageOf(account))) {
-      return (
+      const tokenResetAt = soonestTokenReset(account)
+      return <>
         <Badge variant='warning' shape='tag'
           title={t('本周期 Token 消耗达到限制器的上限，转发时会跳过该账号（窗口重置自动恢复）')}>
           {t('Token 限额')}
         </Badge>
-      )
+        {tokenResetAt > 0 ? <LiveCountdown until={tokenResetAt} className='lim-sub' /> : null}
+      </>
     }
     return (
       <Badge variant='success' shape='tag' title={t('当前没有任何模型处于限流中')}>
@@ -373,9 +376,34 @@ export function LimitsCell({ account, onClear }: {
       count={entries.length}
       cooldown={cooldown}
       soonest={formatResetText(cooldown ? cooldown.resetAt : entries[0].resetAt)}
+      soonestAt={Number(cooldown ? cooldown.resetAt : entries[0].resetAt) || 0}
       onClear={onClear}
     />
   )
+}
+
+/**
+ * 「Token 限额」的恢复时刻：已触发规则里最早的窗口终点（毫秒）。
+ *
+ * 口径与 `tokenWindowInfo` 同源（固定周期 = 窗口终点、自然日 = 次日 0 点），
+ * 所以这里给的倒计时与余额格第二行那句「剩 N 分」不会互相打脸 —— 二者只是
+ * 精度不同（那边到分钟，这边到秒）。
+ *
+ * 读不到窗口（`remainingMs` 为 0，例如 `total` 档已过期末）时返回 0，
+ * 调用方就不画倒计时。
+ */
+function soonestTokenReset(account: AccountRecord, now = Date.now()): number {
+  let soonest = 0
+  for (const rule of tokenRulesOf(account)) {
+    if (rule.enabled === false) continue
+    const reading = tokenReadingForRule(rule, tokenUsageOf(account))
+    if (!reading || reading.used < rule.threshold) continue
+    const remaining = tokenWindowInfo(rule, now).remainingMs
+    if (remaining <= 0) continue
+    const at = now + remaining
+    if (soonest === 0 || at < soonest) soonest = at
+  }
+  return soonest
 }
 
 /* ─── 有效期 / 连接数 / 余额列 ──────────────── */
