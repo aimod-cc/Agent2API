@@ -1533,9 +1533,28 @@ async fn attempt_queue(
                                 None,
                                 &failure.error.message,
                             );
+                            logging::console_line(
+                                "[Upstream]",
+                                &format!(
+                                    "⚠️ 账号 {account_id} 命中「直接换号」状态码 {}，已标记冷却并按队列顺延",
+                                    failure.error.status_code,
+                                ),
+                            );
                         }
                     }
-                    if failure.stop || failure.policy.stop {
+                    // ── 名单码要不要被 `stop` 拦下 ────────────────────────
+                    // `stop` 来自适配器（`RetryDecision::Stop` / `ErrorPolicy.stop`），
+                    // 语义是「这个错别再折腾了，直接还给客户端」。但用户把某个码
+                    // 放进「直接换号」名单，就是明确说了「这个码要换号」—— 两者冲突时
+                    // 以用户的配置为准，否则名单在「适配器给了 Stop」的家上永远不生效
+                    // （症状：客户端收到的就是原始 402，一次都没换过号）。
+                    //
+                    // 唯一的例外是**生图**：结果不确定时换号会重复消耗额度
+                    // （`uncertain_image` 也是靠 `stop` 挡住的），所以生图不解除。
+                    // 手动终止在上面已经先行 return，不经过这里。
+                    let named_switch_overrides_stop = ctx.images.is_none()
+                        && direct_switch_status(i64::from(failure.error.status_code));
+                    if (failure.stop || failure.policy.stop) && !named_switch_overrides_stop {
                         ctx.telemetry.finish_last_attempt(
                             Some(i64::from(failure.error.status_code)),
                             Some(&failure.error.message),
