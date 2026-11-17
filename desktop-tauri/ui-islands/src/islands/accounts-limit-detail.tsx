@@ -36,12 +36,15 @@ import { t } from '../i18n'
 import { activeLimits, formatResetText, RESET_UNKNOWN } from './accounts-domain'
 import type { AccountRecord } from './accounts-shared'
 import type { AccountCooldown } from '../../../ui-shared/account-upstream-state'
+import { countdownText, LiveCountdown } from './live-countdown'
 
 /** 明细里的一行（`limitRowsOf` 的产物） */
 export type LimitRow = {
   /** 被限流的模型名（后端给的键，原样透出） */
   model: string
-  /** 右侧读数：相对倒计时；恢复时刻读不到时是「恢复时间未知」 */
+  /** 恢复时刻（毫秒）；读不到时为 0 —— 渲染侧据此决定给不给倒计时 */
+  resetAt: number
+  /** 静态读数：相对倒计时；恢复时刻读不到时是「恢复时间未知」。用于 title 与兜底 */
   wait: string
   /** 读数语义档：正常有恢复时刻 = warn，读不到 = muted */
   tone: 'warn' | 'muted'
@@ -56,29 +59,13 @@ export type LimitRow = {
 }
 
 /**
- * 剩余毫秒 → 倒计时文案。
- *
- * 分档按「读的人要拿它做什么」定：一小时内给分钟（这段时间是要盯着它回来的），
- * 一天内给小时 + 分钟，超过一天只给天（那时分钟是噪音）。取整用 `Math.round`：
- * 「还有 1 分钟」比「还有 0 分钟」有意义，而后者会让已经等了 30 秒的人以为该好了。
- */
-function waitText(remainingMs: number): string {
-  const minutes = Math.round(remainingMs / 60000)
-  if (minutes < 1) return t('不到 1 分钟')
-  if (minutes < 60) return t('还有 {n} 分钟', { n: minutes })
-  const hours = Math.floor(minutes / 60)
-  const rest = minutes % 60
-  if (hours < 24) {
-    return rest ? t('还有 {h} 小时 {m} 分', { h: hours, m: rest }) : t('还有 {h} 小时', { h: hours })
-  }
-  return t('还有 {d} 天', { d: Math.floor(hours / 24) })
-}
-
-/**
  * 账号**当前生效**的限流记录 → 明细行。
  *
  * 顺序照 `activeLimits` 给的（按恢复时间升序，最早恢复的排最前）：先回来的排最前，
  * 与列上那句「最早 … 恢复」说的是同一条记录，两处不会对不上。
+ *
+ * 右侧的相对倒计时不再在这里算成死字符串：行里只带 `resetAt`，渲染时交给
+ * `LiveCountdown` 每秒自己跳（见 `live-countdown.tsx` 文件头，为什么不是全局 ticker）。
  */
 export function limitRowsOf(account: AccountRecord | null | undefined): LimitRow[] {
   const now = Date.now()
@@ -87,15 +74,17 @@ export function limitRowsOf(account: AccountRecord | null | undefined): LimitRow
     const started = Number(entry.at)
     const reset = formatResetText(entry.resetAt)
     const unknown = reset === RESET_UNKNOWN
+    const live = Number.isFinite(resetAt) && resetAt > now
     const reason = entry.message || (entry.status ? t('上游返回 {status}', { status: entry.status }) : '')
     const span = resetAt - started
     const progress = started > 0 && Number.isFinite(span) && span > 0
       ? Math.max(0, Math.min(100, ((now - started) / span) * 100))
       : null
-    const wait = unknown ? t('恢复时间未知') : waitText(resetAt - now)
+    const wait = unknown ? t('恢复时间未知') : countdownText(resetAt - now)
     const resetLine = unknown ? '' : t('{time} 恢复', { time: reset })
     return {
       model: entry.model,
+      resetAt: live ? resetAt : 0,
       wait,
       tone: unknown ? 'muted' : 'warn',
       reset: resetLine,
@@ -120,12 +109,15 @@ export function limitRowsOf(account: AccountRecord | null | undefined): LimitRow
  *
  * `soonest` 在账号冷却时读账号恢复时刻，否则读最早解除的模型记录。
  */
-export function LimitDetailButton({ accountName, rows, count, cooldown, soonest, onClear }: {
+export function LimitDetailButton({ accountName, rows, count, cooldown, soonest, soonestAt, onClear }: {
   accountName: string
   rows: LimitRow[]
   count: number
   cooldown: AccountCooldown | null
+  /** 绝对时刻文案（`今天 14:20`），用于第二行与 title */
   soonest: string
+  /** 同一时刻的毫秒值，用于列下那行的实时倒计时；<=0 时退回静态文案 */
+  soonestAt: number
   onClear: (model: string) => void
 }) {
   const [open, setOpen] = React.useState(false)
@@ -165,7 +157,7 @@ export function LimitDetailButton({ accountName, rows, count, cooldown, soonest,
               <div className='usage-pop-row'>
                 <div className='usage-pop-line'>
                   <span className='usage-pop-name'>{t('账号冷却')}</span>
-                  <span className='usage-pop-view warn'>{waitText(cooldown.resetAt - Date.now())}</span>
+                  <span className='usage-pop-view warn'><LiveCountdown until={cooldown.resetAt} /></span>
                 </div>
                 <div className='lp-pop-subline'>
                   <span className='lp-pop-reason'>
@@ -178,7 +170,9 @@ export function LimitDetailButton({ accountName, rows, count, cooldown, soonest,
               <div className='usage-pop-row' key={row.model} title={row.title}>
                 <div className='usage-pop-line'>
                   <span className='usage-pop-name lp-pop-model'>{row.model}</span>
-                  <span className={`usage-pop-view ${row.tone}`}>{row.wait}</span>
+                  <span className={`usage-pop-view ${row.tone}`}>
+                    {row.resetAt > 0 ? <LiveCountdown until={row.resetAt} /> : row.wait}
+                  </span>
                 </div>
                 <div className='lp-pop-subline'>
                   <span className='lp-pop-reason'>
@@ -205,7 +199,9 @@ export function LimitDetailButton({ accountName, rows, count, cooldown, soonest,
         </PopoverContent>
       </Popover>
       <span className='lim-sub' title={cooldown ? t('账号冷却') : t('最早恢复')}>
-        {cooldown ? t('{time} 恢复', { time: earliest }) : t('最早 {soonest} 恢复', { soonest: earliest })}
+        {soonestAt > 0
+          ? <LiveCountdown until={soonestAt} />
+          : cooldown ? t('{time} 恢复', { time: earliest }) : t('最早 {soonest} 恢复', { soonest: earliest })}
       </span>
     </>
   )

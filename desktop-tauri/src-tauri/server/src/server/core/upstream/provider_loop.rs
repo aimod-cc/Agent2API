@@ -308,6 +308,22 @@ fn direct_switch_status(status: i64) -> bool {
         .unwrap_or(false)
 }
 
+/// 这条失败要不要按**限额**记账（立刻写冷却，让下次选路跳过这个账号）。
+///
+/// ── 为什么名单码也要算进来 ──────────────────────────────────
+/// 「指定错误码直接换号」名单（默认 `[402]`）说的是「这个码别再试这个账号了」，
+/// 但真正决定「下次选路跳过它」的是**记账**，不是换号本身。而记账的既有判据
+/// `GatewayError::is_quota_limit` 只认 429 / 上游限额码 / 已分类为 QuotaLimited——
+/// 402 通常被分类成 Fatal，落不进那一档，于是只累加退避与熔断**计数**
+/// （阈值到了才开，开关关着就什么都不记）。
+///
+/// 症状正是用户报的那种：客户端不停发消息，而每条都被路由回同一个已经没钱的
+/// 账号、撞同一个 402，流程卡死。名单码与真限额走同一记账出口即可自愈 ——
+/// 上游没给恢复时刻时 `mark_rate_limited` 用 10 分钟起的指数退避兜底。
+fn marks_limited(is_quota: bool, status: i32) -> bool {
+    is_quota || direct_switch_status(i64::from(status))
+}
+
 /// 瞬时 HTTP 错误的统一退避建议（设置页「请求重试」的全局兜底）。
 ///
 /// `remaining` 是原地重发**还剩几次**（见 [`RetryBudget`] 的说明）；
@@ -779,7 +795,7 @@ async fn attempt_queue(
                             // 并进 message、`mark_account_limited` 内部再解析）。
                             // 自定义家没有「同名多池」之类的键重排，冷却键
                             // 与发送名同源（`custom::forward::cooldown_model`）。
-                            if error.is_quota_limit() {
+                            if marks_limited(error.is_quota_limit(), error.status_code) {
                                 let wire_model = if ctx.routing.group.is_some() { selected_model.clone() } else {
                                     custom_forward::cooldown_model(&custom_provider_id, &model)
                                 };
@@ -968,6 +984,29 @@ async fn attempt_queue(
                                 account_id, label,
                             ),
                         );
+                    } else if let Some(account_id) = stateful_account_id.as_deref() {
+                        // 名单码（默认 402）落在这一支：适配器的会话式分类默认给
+                        // Fatal，进不了上面那条 QuotaLimited 记账闸门。不在这里补一条，
+                        // 失败账号下一轮还会被选中，客户端就会反复撞同一个 402
+                        // （见 `marks_limited` 的说明）。
+                        if direct_switch_status(i64::from(error.status_code)) {
+                            let wire = if ctx.routing.group.is_some() {
+                                selected_model.clone()
+                            } else {
+                                cooldown_keys.for_provider(provider_id).to_string()
+                            };
+                            rotate::mark_account_limited(
+                                service, account_id, &wire, error.status_code,
+                                error.upstream_code, None, &error.message,
+                            );
+                            logging::console_line(
+                                "[Upstream]",
+                                &format!(
+                                    "⚠️ 会话式账号 {account_id} 命中「直接换号」状态码 {}，标记冷却后按队列顺延",
+                                    error.status_code,
+                                ),
+                            );
+                        }
                     }
                     match rotate::pick_next_account(
                         service,
@@ -1472,9 +1511,57 @@ async fn attempt_queue(
                             let _ = crate::server::core::blocking::in_place(|| {
                                 service.store.cooldown_upstream_account(account_id, until, &failure.policy.reason)
                             });
+                        } else if direct_switch_status(i64::from(failure.error.status_code))
+                            && !matches!(failure.class, UpstreamErrorClass::QuotaLimited { .. })
+                        {
+                            // ── 名单码（默认 402）自己记账 ──────────────────
+                            // 适配器没给 policy 时（402 通常被分类成 Fatal），
+                            // 上面两条都不走，账号一条记录都不落 —— 于是下一条消息
+                            // 选路又把同一个没钱账号挑回来，客户端反复撞同一个 402。
+                            // 这里按限额补记一条（上游没给恢复时刻时走
+                            // `mark_rate_limited` 的 10 分钟起指数退避）。
+                            //
+                            // 位置刻意在 `stop` 早退**之前**：适配器把 402 判成
+                            // Stop 时本次请求仍要把错误还给客户端，但账号必须记上，
+                            // 否则失败只会不停重复、永远不收敛。
+                            rotate::mark_account_limited(
+                                service,
+                                account_id,
+                                &wire_model,
+                                failure.error.status_code,
+                                failure.error.upstream_code,
+                                None,
+                                &failure.error.message,
+                            );
+                            logging::console_line(
+                                "[Upstream]",
+                                &format!(
+                                    "⚠️ 账号 {account_id} 命中「直接换号」状态码 {}，已标记冷却并按队列顺延",
+                                    failure.error.status_code,
+                                ),
+                            );
                         }
                     }
-                    if failure.stop || failure.policy.stop {
+                    // ── `stop` 还拦不拦换号 ──────────────────────────────
+                    // 适配器的 `stop`（`RetryDecision::Stop` / `ErrorPolicy.stop`）
+                    // 语义是「这份 body 别再重发了」—— 那是**原地重发**的闸门，
+                    // 不是「不许换下一个账号」。把它当换号闸门用，账号级失败就会
+                    // 静默收尾、一个候选都不试。
+                    //
+                    // 实测（2026-11-17 23:57 那批 lobsterai/dsf 请求）：上游回
+                    // 502「账号暂时无法使用相关服务…预计 20:22:59 恢复」，插件给了
+                    // Stop，于是 30 个候选账号一个都没尝试、连一行顺延日志都没有，
+                    // `attempts` 恒为 1，客户端只能反复撞同一个被封禁的号。
+                    //
+                    // 所以：只要失败落在**某个账号**上，就照常按动作 3 记账（退避 /
+                    // 熔断）并顺延下一个账号；`stop` 继续只约束同一账号的原地重发
+                    // （那个闸门在 `send_with_retry` 里，不受此处影响）。
+                    //
+                    // 唯一的例外是**生图**：结果不确定时换号会重复消耗额度
+                    // （`uncertain_image` 同样靠 `stop` 挡住），所以生图维持原样、
+                    // 不解除。手动终止在上面已先行 return，不经过这里。
+                    let stop_blocks_failover = ctx.images.is_some();
+                    if (failure.stop || failure.policy.stop) && stop_blocks_failover {
                         ctx.telemetry.finish_last_attempt(
                             Some(i64::from(failure.error.status_code)),
                             Some(&failure.error.message),

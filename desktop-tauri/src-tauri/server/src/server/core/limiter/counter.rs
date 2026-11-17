@@ -28,6 +28,8 @@ struct Event {
     requests: i64,
 }
 
+type Release = (i64, i64, i64);
+
 #[derive(Debug, Default)]
 pub struct Count {
     pub tokens: i64,
@@ -39,6 +41,12 @@ pub struct Count {
     pub models: Vec<String>,
     pub channel: String,
     pub by_model: HashMap<String, ModelCount>,
+    /// 滚动窗口专用：`(过期时刻, tokens, requests)`，按过期时刻升序。
+    /// 只记「这条事件什么时候滑出窗口」，让 `evaluate` 能在不改动事件队列的前提下
+    /// 反推出「计数回落到阈值以下」的时刻。非滚动窗口恒为空。
+    pub releases: Vec<Release>,
+    /// 同一张表按模型小写名分组（条件限定了模型时才用得上）。
+    pub model_releases: HashMap<String, Vec<Release>>,
     events: VecDeque<Event>,
 }
 
@@ -54,6 +62,10 @@ impl Clone for Count {
             models: self.models.clone(),
             channel: self.channel.clone(),
             by_model: self.by_model.clone(),
+            // 读数侧（`evaluate`）要拿这两张表算滚动窗口的恢复时刻，所以必须随克隆带过去。
+            // `events` 仍留在这里：它只服务于写侧的淘汰，克隆出去没有用途。
+            releases: self.releases.clone(),
+            model_releases: self.model_releases.clone(),
             events: VecDeque::new(),
         }
     }
@@ -69,6 +81,12 @@ impl Count {
         if self.window.reset == Reset::Rolling {
             let index = self.events.iter().position(|existing| existing.ts > event.ts)
                 .unwrap_or(self.events.len());
+            let release = (event.ts.saturating_add(self.window.seconds.saturating_mul(1000)),
+                event.tokens, event.requests);
+            push_release(&mut self.releases, release);
+            let key = event.model.to_ascii_lowercase();
+            let bucket = self.model_releases.entry(key).or_default();
+            push_release(bucket, release);
             self.events.insert(index, event);
         }
     }
@@ -80,19 +98,55 @@ impl Count {
                 let Some(event) = self.events.pop_front() else { break };
                 self.tokens = self.tokens.saturating_sub(event.tokens).max(0);
                 self.requests = self.requests.saturating_sub(event.requests).max(0);
-                if let Some(model) = self.by_model.get_mut(&event.model.to_ascii_lowercase()) {
+                let key = event.model.to_ascii_lowercase();
+                if let Some(model) = self.by_model.get_mut(&key) {
                     model.tokens = model.tokens.saturating_sub(event.tokens).max(0);
                     model.requests = model.requests.saturating_sub(event.requests).max(0);
+                }
+            }
+            // 与 `events` 同步淘汰：过期时刻 <= now 的条目已经滑出窗口，留着只会让
+            // 恢复时刻算得偏晚。
+            while self.releases.first().is_some_and(|release| release.0 <= now) {
+                self.releases.remove(0);
+            }
+            for bucket in self.model_releases.values_mut() {
+                while bucket.first().is_some_and(|release| release.0 <= now) {
+                    bucket.remove(0);
                 }
             }
         } else if self.start != start {
             self.tokens = 0;
             self.requests = 0;
             self.by_model.clear();
+            self.releases.clear();
+            self.model_releases.clear();
         }
         self.start = start;
         self.end = end;
     }
+}
+
+/// 按过期时刻升序插入（事件本身来自 `ORDER BY ts`，绝大多数情况就是尾部追加）。
+fn push_release(bucket: &mut Vec<Release>, release: Release) {
+    let index = bucket.iter().position(|existing| existing.0 > release.0).unwrap_or(bucket.len());
+    bucket.insert(index, release);
+}
+
+/// 滚动窗口下「计数回落到解除条件」的时刻（毫秒时间戳）。
+///
+/// `total` 是当前窗口内的累计读数；从最旧的事件开始逐条扣减，
+/// 第一次满足「不再命中」时返回该事件的过期时刻。全部扣完仍命中
+/// （阈值比窗口内所有事件之和还小）时返回最后一条的过期时刻 —— 那之后
+/// 窗口一定是空的。拿不到任何事件（含非滚动窗口）返回 0，前端据此不显示倒计时。
+pub fn rolling_release(releases: &[Release], total: i64, tokens: bool, mut still_hit: impl FnMut(f64) -> bool) -> i64 {
+    let Some(last) = releases.last() else { return 0 };
+    if !still_hit(total as f64) { return 0; }
+    let mut remaining = total;
+    for release in releases {
+        remaining = remaining.saturating_sub(if tokens { release.1 } else { release.2 }).max(0);
+        if !still_hit(remaining as f64) { return release.0; }
+    }
+    last.0
 }
 
 pub type Facts = HashMap<(String, String), Count>;
@@ -283,5 +337,43 @@ pub(crate) fn update_facts(
             if !count.models.is_empty() && !count.models.iter().any(|wanted| wanted.eq_ignore_ascii_case(model)) { continue; }
             count.add(Event { ts, model: model.to_string(), tokens: tokens.max(0), requests: 1 });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rolling_release;
+
+    /// `(过期时刻, 请求数)` → `rolling_release` 吃的三元组（tokens 固定 0）
+    fn requests(at: &[(i64, i64)]) -> Vec<(i64, i64, i64)> {
+        at.iter().map(|(expire, count)| (*expire, 0, *count)).collect()
+    }
+
+    #[test]
+    fn a_rolling_window_recovers_when_enough_events_slide_out() {
+        let table = requests(&[(1_000, 5), (2_000, 5), (3_000, 5)]);
+        let hit = |value: f64| value >= 10.0;
+        // 15 次、阈值 10：一条滑出后剩 10（仍命中），第二条滑出后剩 5 才放行
+        assert_eq!(2_000, rolling_release(&table, 15, false, hit));
+        // 阈值 15：第一条滑出就放行
+        assert_eq!(1_000, rolling_release(&table, 15, false, |value| value >= 15.0));
+        // 阈值 1：要等窗口整段滑空
+        assert_eq!(3_000, rolling_release(&table, 15, false, |value| value >= 1.0));
+    }
+
+    #[test]
+    fn an_unhit_or_empty_window_has_no_recovery_moment() {
+        assert_eq!(0, rolling_release(&[], 0, false, |_| true));
+        // 当前读数本就不命中：没有「恢复时刻」可言，返回 0 让前端不画倒计时
+        assert_eq!(0, rolling_release(&requests(&[(1_000, 1)]), 1, false, |value| value >= 5.0));
+    }
+
+    #[test]
+    fn tokens_use_their_own_column() {
+        let table = vec![(1_000i64, 400i64, 3i64), (2_000, 400, 3)];
+        // 阈值 5：按 tokens 扣是 800 → 400 → 0，要等两条都滑出；
+        // 若错用 requests 列（6 → 3）则第一条滑出就低于 5、返回 1000，
+        // 所以 2000 这个预期同时钉住了「读的是 tokens 列」。
+        assert_eq!(2_000, rolling_release(&table, 800, true, |value| value >= 5.0));
     }
 }
