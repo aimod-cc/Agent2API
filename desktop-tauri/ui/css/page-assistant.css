@@ -186,8 +186,9 @@
 
 .asst-msg { display: flex; flex-direction: column; gap: 6px; }
 .asst-msg.user { align-items: flex-end; }
+.asst-msg.user > div { width: calc(100% - 34px); }
 .asst-msg.user .bubble {
-  max-width: 78%;
+  max-width: 80%;
   padding: 9px 13px;
   border: 1px solid var(--border);
   border-radius: var(--r-md);
@@ -918,5 +919,4 @@
 
 @media (max-width: 600px) {
   .asst-pill-model { max-width: 110px; }
-  .asst-msg.user .bubble { max-width: 88%; }
 }

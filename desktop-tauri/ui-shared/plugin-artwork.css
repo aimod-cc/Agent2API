@@ -1,0 +1,35 @@
+@layer components {
+  .plugin-artwork {
+    --plugin-artwork-hue: 220;
+    --plugin-artwork-saturation: 42%;
+    --plugin-artwork-lightness: 97%;
+    --plugin-artwork-border-lightness: 92%;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid hsl(var(--plugin-artwork-hue) var(--plugin-artwork-saturation) var(--plugin-artwork-border-lightness));
+    background: hsl(var(--plugin-artwork-hue) var(--plugin-artwork-saturation) var(--plugin-artwork-lightness));
+  }
+  .plugin-artwork[data-tone='empty'] {
+    border-color: var(--ui-hairline);
+    background: var(--ui-surface-2);
+  }
+  .plugin-artwork[data-tone='neutral'] { --plugin-artwork-saturation: 20%; }
+  .plugin-artwork[data-tone='dark'] {
+    border-color: #3c424d;
+    background: #262c35;
+  }
+  .plugin-artwork[data-native] {
+    border: 0;
+    background: transparent;
+  }
+  :root[data-theme='dark'] .plugin-artwork {
+    --plugin-artwork-lightness: 93%;
+    --plugin-artwork-border-lightness: 88%;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root[data-theme='system'] .plugin-artwork {
+      --plugin-artwork-lightness: 93%;
+      --plugin-artwork-border-lightness: 88%;
+    }
+  }
+}

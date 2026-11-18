@@ -196,12 +196,12 @@ pub async fn refresh(
             results.push(item);
             continue;
         }
-        // 需要账号时只从该 provider 的启用凭证账号里选；点名错误不回落队首。
+        // 维护可使用停用账号的凭据；点名错误不回落队首。
         // 不读 secret，也不把空账号发给 builtin / 插件执行体。
         let account_id = if crate::server::core::plugin_host::wasm::catalog::enabled(&id) && requested.is_empty() {
             String::new()
         } else if adapter.refresh_uses_account() {
-            let available = store.accounts_for_provider(&id);
+            let available = store.maintenance_accounts_for_provider(&id);
             let selected = available.iter().filter_map(|account| account.get("id").and_then(Value::as_str))
                 .find(|account_id| requested.is_empty() || *account_id == requested);
             let Some(selected) = selected else {
@@ -209,7 +209,7 @@ pub async fn refresh(
                 item["message"] = json!(if requested.is_empty() {
                     "当前没有可用的目录账号"
                 } else {
-                    "指定账号不属于该提供商、未启用或没有可用凭证"
+                    "指定账号不属于该提供商或没有可用凭证"
                 });
                 results.push(item);
                 continue;
@@ -244,7 +244,25 @@ pub async fn refresh(
             }
         };
         let started = std::time::Instant::now();
-        let outcome = adapter.refresh_models(store, &account_id, manual).await;
+        let outcome = if super::subscriptions::contains(&id) && requested.is_empty() {
+            let mut combined = super::adapter::ModelRefreshOutcome::unchanged();
+            let mut failures = Vec::new();
+            for account in store.maintenance_accounts_for_provider(&id) {
+                let Some(account_id) = account.get("id").and_then(Value::as_str) else { continue };
+                let result = adapter.refresh_models(store, account_id, manual).await;
+                combined.refreshed |= result.refreshed;
+                if let Some(message) = result.message { failures.push(message); }
+            }
+            combined.count = adapter.list_models().len();
+            if !failures.is_empty() {
+                combined.refreshed = false;
+                combined.message = Some(failures.join("；"));
+            }
+            combined
+        } else { adapter.refresh_models(store, &account_id, manual).await };
+        if super::subscriptions::contains(&id) && requested.is_empty() {
+            if let Some(fields) = item.as_object_mut() { fields.remove("accountId"); }
+        }
         item["durationMs"] = json!(started.elapsed().as_millis().min(i64::MAX as u128) as i64);
         item["status"] = json!(if outcome.refreshed {
             "refreshed"
@@ -278,6 +296,7 @@ pub async fn refresh(
 /// 「定时任务什么时候跑一轮」—— 只改任务级键会让各家的实际间隔留在旧值上。
 pub fn reschedule(interval_ms: i64) -> Result<(), String> {
     for kind in implemented_kinds() {
+        if is_executable_provider(kind_id(kind)) { continue; }
         if !adapter_for(kind).supports_model_refresh() { continue; }
         let scope = if matches!(kind, ProviderKind::ClineFree | ProviderKind::ClinePass) {
             "cline"

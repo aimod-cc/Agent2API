@@ -39,6 +39,7 @@ pub(super) fn validate(dir: &Path, manifest: &proto::PackManifest) -> Result<(),
 }
 
 pub(super) fn installed_error(pack: &InstalledPack) -> Option<String> {
+    if let Some(reason) = super::support::legacy_reason(pack) { return Some(reason); }
     let dir = install::plugins_dir().join(&pack.id).join(&pack.version);
     install::read_manifest(&dir).and_then(|manifest| validate(&dir, &manifest)).err()
 }

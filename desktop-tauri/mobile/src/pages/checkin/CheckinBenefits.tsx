@@ -13,6 +13,9 @@ import { t, locale } from '../../i18n'
 import { CampaignRewards } from '../../../../ui-shared/checkin-campaign-rewards'
 import { OfficeaceSubscription } from '../../../../ui-shared/checkin-officeace-subscription'
 import { activateOfficeaceSubscription, claimCampaignReward, getCampaignRewards, getOfficeaceSubscription, redeemCampaignBenefit } from '../../api/checkin'
+import { PluginTaskSettings } from '../../../../ui-shared/plugin-task-settings'
+import { isCheckinTask } from '../../../../ui-shared/plugin-task-types'
+import { apiCall } from '../../api/client'
 
 const campaignApi = { query: getCampaignRewards, claim: claimCampaignReward, redeem: redeemCampaignBenefit }
 const subscriptionApi = { query: getOfficeaceSubscription, activate: activateOfficeaceSubscription }
@@ -22,8 +25,15 @@ export function CheckinBenefits({ center, section, busy, action, onChange }: {
 }) {
   const [planId, setPlanId] = useState('')
   const plan = center.extras?.plans?.find(item => item.id === planId)
+  const taskRows = (center.pluginTasks ?? []).filter(row => isCheckinTask(row)
+    && (section === 'growth' ? row.category === 'growth' : section === 'plans' ? row.category === 'rewards' : section === 'daily' && row.category === 'checkin'))
   return (
     <>
+      {taskRows.length ? <div className='m-section'>
+        <PluginTaskSettings rows={taskRows} t={t} disabled={Boolean(busy)} refresh={onChange}
+          request={(method, path, body) => apiCall(path, { method, body })} title={t('签到与成长自动任务')}
+          description={t('插件提供任务能力，主程序统一管理开关、执行时间和结果。与每日签到计划分别设置，不会因打开页面自动执行。')} />
+      </div> : null}
       <div hidden={section !== 'onboarding'}>
         {center.extras?.onboarding?.length ? <div className='m-section'>
           <SectionHead title={t('新手福利')} />
@@ -110,8 +120,10 @@ function OnboardingRow({ row, busy, action, active, onChange }: {
     if (!result) return
     setData(result)
     const failed = Number(result.failed) || 0
+    const points = result.claimedPoints
     const text = result.message || t('领取完成：{n} 项，+{points} 积分，{failed} 项失败', {
-      n: Number(result.claimed) || 0, points: Number(result.claimedPoints) || 0, failed,
+      n: Number(result.claimed) || 0,
+      points: typeof points === 'number' && Number.isFinite(points) ? points : t('未知'), failed,
     })
     setError(failed > 0 ? text : '')
     store.toast(text, failed > 0 ? 'err' : 'ok')

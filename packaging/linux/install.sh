@@ -97,7 +97,7 @@ configure_updater() {
   chown root:"$SERVICE_GROUP" "$state_dir/ready.json" || return 1
   chmod 0660 "$state_dir/ready.json" || return 1
   if [ ! -e "$CONF_DIR/updater.env" ]; then
-    printf '# 管理员可在此指定受信任的发布仓库及 HTTPS_PROXY；默认使用官方索引。\n' > "$CONF_DIR/updater.env" || return 1
+    printf '# 更新只通过官网获取；需要代理时可在此配置 HTTPS_PROXY。\n' > "$CONF_DIR/updater.env" || return 1
     chmod 0600 "$CONF_DIR/updater.env" || return 1
   fi
   cat > /etc/systemd/system/agent2api-updater.socket <<'EOF' || return 1

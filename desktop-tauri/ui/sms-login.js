@@ -41,10 +41,12 @@
    */
   function create(config) {
     const prefix = config.provider;
-    const hint = () => $(`${prefix}-sms-hint`);
-    const phoneInput = () => $(`${prefix}-sms-phone`);
-    const codeInput = () => $(`${prefix}-sms-code`);
-    const nameInput = () => $(`${prefix}-sms-name`);
+    let disposed = false;
+    let unsubscribeStatus;
+    const hint = () => disposed ? null : $(`${prefix}-sms-hint`);
+    const phoneInput = () => disposed ? null : $(`${prefix}-sms-phone`);
+    const codeInput = () => disposed ? null : $(`${prefix}-sms-code`);
+    const nameInput = () => disposed ? null : $(`${prefix}-sms-name`);
 
     /**
      * 按 provider 分的短信链路档案。
@@ -148,7 +150,8 @@
     // 而不是点完干等（壳侧监视任务每 1 秒读窗口标题上报，见
     // src-tauri/src/login.rs 的 start_kuku_sms）。
     if (prefix === 'kuku' && typeof window.workbuddyDesktop?.onKukuSmsStatus === 'function') {
-      window.workbuddyDesktop.onKukuSmsStatus(payload => {
+      unsubscribeStatus = window.workbuddyDesktop.onKukuSmsStatus(payload => {
+        if (disposed) return;
         const status = payload && payload.status;
         const textByStatus = {
           opening: wbI18n.t('正在打开百度登录页…'),
@@ -271,6 +274,7 @@
      * 不会留下两个叠加的 interval 把秒数减半。
      */
     function startCooldown(seconds = RESEND_COOLDOWN_SECONDS) {
+      if (disposed) return;
       const button = $(`${prefix}-sms-send`);
       if (!button) return;
       window.clearInterval(cooldownTimer);
@@ -342,12 +346,13 @@
       try {
         await openVerifyPage(url);
       } catch {
+        if (disposed) return;
         setHint(wbI18n.t('{message}：请手动打开验证页面 {url}，完成后回到这里点「已完成验证，继续发送」', { message, url }), true);
       }
     }
 
     async function send() {
-      if (busy) return;
+      if (busy || disposed) return;
       // 用户在验证页滑完回来点的还是这一颗按钮：这一次不是「重发」，是完成
       // 同一次发码，因此跳过冷却判据。
       const resuming = captchaPending;
@@ -378,6 +383,7 @@
         if (selectedProxy !== undefined) sendPayload.proxy = selectedProxy;
         if (captchaTicket) sendPayload.uuid = captchaTicket;
         const data = await request(profile.send, sendPayload);
+        if (disposed) return;
         // ── 发码前的滑块验证（目前只有 Tabbit 国内站）──────────────────
         // 上游这一轮没有发短信，只是要求先验证；不能往下走「已发送」。
         if (profile.captchaPage && data?.status === 'captcha') {
@@ -396,6 +402,7 @@
         // 成功也进冷却：官方口径（见 RESEND_COOLDOWN_SECONDS 的说明）
         startCooldown();
       } catch (error) {
+        if (disposed) return;
         const reason = describeError(error);
         setHint(wbI18n.t('发送失败：{message}', { message: reason }), true);
         window.wbApp.toast(wbI18n.t('发送失败：{message}', { message: reason }), 'err');
@@ -408,12 +415,12 @@
         startCooldown();
       } finally {
         busy = false;
-        config.onBusyChange?.(prefix === 'kuku' && Boolean(ticket));
+        if (!disposed) config.onBusyChange?.(prefix === 'kuku' && Boolean(ticket));
       }
     }
 
     async function submit() {
-      if (busy) return;
+      if (busy || disposed) return;
       const phone = phoneOf();
       const code = codeOf();
       if (!PHONE_RE.test(phone)) { window.wbApp.toast(wbI18n.t('请填写 11 位大陆手机号'), 'err'); return; }
@@ -433,19 +440,23 @@
         const name = nameInput()?.value.trim() || '';
         if (name) payload.name = name;
         const data = await request(profile.verify, payload);
+        if (disposed) { await window.wbApp?.refresh?.(); return; }
         // 成功后清掉验证码（手机号留着：连加第二个账号时省一次输入）
         const codeNode = codeInput();
         if (codeNode) codeNode.value = '';
         ticket = '';
         await config.onSuccess?.(data);
       } catch (error) {
+        if (disposed) return;
         const reason = describeError(error);
         setHint(wbI18n.t('登录失败：{message}', { message: reason }), true);
         window.wbApp.toast(wbI18n.t('登录失败：{message}', { message: reason }), 'err');
       } finally {
         busy = false;
-        config.onBusyChange?.(false);
-        if (button) { button.disabled = false; button.textContent = wbI18n.t('登录并添加'); }
+        if (!disposed) {
+          config.onBusyChange?.(false);
+          if (button) { button.disabled = false; button.textContent = wbI18n.t('登录并添加'); }
+        }
       }
     }
 
@@ -454,18 +465,38 @@
      * 不清理的话，新号会带着旧号那次验证的中间态去发码/登录 —— 上游那边
      * 是两次不同的会话，只会得到一个对不上的结果。
      */
-    phoneInput()?.addEventListener('input', () => {
-      if (!captchaPending && !captchaTicket) return;
+    const changePhone = () => {
+      if (disposed || (!captchaPending && !captchaTicket)) return;
       captchaPending = false;
       captchaTicket = '';
       ticket = '';
       // 冷却期间按钮由倒计时接管，别在这里抢它的文案与禁用态
       if (cooldownLeft <= 0) resetSendButton();
       setHint('');
-    });
-
-    $(`${prefix}-sms-send`)?.addEventListener('click', send);
-    $(`${prefix}-sms-submit`)?.addEventListener('click', submit);
+    };
+    const phoneNode = phoneInput();
+    const sendNode = $(`${prefix}-sms-send`);
+    const submitNode = $(`${prefix}-sms-submit`);
+    phoneNode?.addEventListener('input', changePhone);
+    sendNode?.addEventListener('click', send);
+    submitNode?.addEventListener('click', submit);
+    return {
+      dispose() {
+        if (disposed) return;
+        disposed = true;
+        window.clearInterval(cooldownTimer);
+        cooldownTimer = 0;
+        phoneNode?.removeEventListener('input', changePhone);
+        sendNode?.removeEventListener('click', send);
+        submitNode?.removeEventListener('click', submit);
+        if (typeof unsubscribeStatus === 'function') unsubscribeStatus();
+        if (busy || (prefix === 'kuku' && ticket)) config.onBusyChange?.(false);
+        busy = false;
+        ticket = '';
+        captchaTicket = '';
+        selectedProxy = undefined;
+      },
+    };
   }
 
   window.wbSmsLogin = { create };

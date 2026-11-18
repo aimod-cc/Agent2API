@@ -1,5 +1,5 @@
 import { t } from '../i18n'
-import { githubErrorMessage } from '../../../ui-shared/updates'
+import { updateErrorMessage } from '../../../ui-shared/updates'
 import type { PluginMutation } from './plugins-types'
 
 export type PluginBridge = {
@@ -19,18 +19,18 @@ export function bridge(): PluginBridge {
 }
 
 export function errorMessage(error: unknown): string {
-  return githubErrorMessage(error, t, 'plugin')
+  return updateErrorMessage(error, t)
 }
 
 export function toast(message: string, kind?: 'err' | 'ok'): void {
   bridge().wbApp?.toast?.(errorMessage(message), kind)
 }
 
-export async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
+export async function api<T>(method: string, path: string, body?: unknown, options?: { retry: 'never' }): Promise<T> {
   const invoke = bridge().__TAURI_INTERNALS__?.invoke
   if (!invoke) throw new Error(t('桌面运行时不可用（Tauri 未初始化）'))
   const result = await invoke('api_request', {
-    request: { method, path, body: body === undefined ? null : body },
+    request: { method, path, body: body === undefined ? null : body, ...(options ? { retry: options.retry } : {}) },
   })
   if (result && typeof result === 'object' && 'success' in result) {
     const envelope = result as { success?: boolean; data?: unknown; error?: string }

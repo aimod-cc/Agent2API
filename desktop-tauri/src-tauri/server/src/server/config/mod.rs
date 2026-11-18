@@ -69,12 +69,18 @@ mod account_sort;
 mod assistant_config;
 pub(crate) mod captcha;
 pub(crate) mod compact_routes;
+pub(crate) mod error_policy;
+mod error_policy_types;
+pub(crate) mod runtime_capacity;
 pub(crate) mod title_routes;
 pub(crate) mod client_identification;
+pub(crate) mod prompt_rules;
 pub(crate) mod vision_compat;
-mod github_access;
+pub(crate) mod web_tools;
+pub(crate) mod model_key_source;
 mod mutations;
-pub(crate) use mutations::try_update_raw_field;
+pub(crate) mod plugin_task_grants;
+pub(crate) use mutations::{try_update_raw_field, try_update_raw_fields};
 pub(crate) mod parse;
 pub(crate) mod routing_groups;
 mod routing_profiles;
@@ -89,10 +95,6 @@ pub use account_sort::{
     AddedSortDirection, BalanceSortDirection, CreditSortDirection,
 };
 pub use assistant_config::*;
-pub use github_access::{
-    github_access, set_github_access, GithubAccessMode, GithubAccessPatch,
-    GithubAccessSettings, DEFAULT_GITHUB_MIRROR,
-};
 pub use sanitize_config::{
     set_sanitize_settings, SanitizePatch, SanitizeSettings, KEY_SANITIZE_PROVIDERS,
     KEY_SANITIZE_RULES, MAX_SANITIZE_PROVIDERS,
@@ -143,6 +145,7 @@ pub struct RuntimeConfig {
     /// 与保留期同一理由：转发层**每次重试判定**都要取它（改完设置下一个
     /// 失败请求就用新值，不重启进程），解析一次存下来最省事。
     retry: RetrySettings,
+    error_policy: std::sync::Arc<error_policy::ErrorPolicySnapshot>,
     /// 上游请求的四项超时（设置页「通用 → 请求超时」区域）。
     ///
     /// 与 retry 同一理由：转发层**每次发送 / 每次分片**都要取它（改完设置
@@ -171,6 +174,7 @@ pub struct RuntimeConfig {
     routing: RoutingSettings,
     routing_profiles: std::sync::Arc<RoutingProfiles>,
     compact_routes: std::sync::Arc<compact_routes::CompactRoutesSnapshot>,
+    runtime_capacity: std::sync::Arc<runtime_capacity::CapacitySnapshot>,
     title_routes: std::sync::Arc<title_routes::TitleRoutesSnapshot>,
     client_identification: std::sync::Arc<client_identification::ClientIdentificationSnapshot>,
     vision_compat: std::sync::Arc<vision_compat::VisionSnapshot>,
@@ -281,17 +285,15 @@ pub struct RuntimeConfig {
     update_proxy: Option<Value>,
     /// 正式版与 beta 的关注策略；与当前安装版本无关。
     update_channels: UpdateChannels,
-    /// GitHub 令牌的**密文信封**（`githubToken`：None = 未在界面保存）。
-    ///
-    /// 注意这里从配置里读出来的就已经是 `enc1:` 信封，**明文永远不进
-    /// config 快照**（加解密都在 `core::update::token` 里），环境变量
-    /// 兜底也不在这里管。与 update_proxy 同为低频字段，存原始字符串即可。
-    github_token: Option<String>,
     /// 磁盘上那份 JSON 对象（含未知字段），写盘时的全量底稿
     raw: Map<String, Value>,
 }
 
 impl RuntimeConfig {
+    pub(crate) fn error_policy_snapshot(&self) -> std::sync::Arc<error_policy::ErrorPolicySnapshot> {
+        self.error_policy.clone()
+    }
+
     /// 当前是否存在启用的 Key 配置（含旧字段和环境变量）；不表示模型可免鉴权。
     pub fn api_key_set(&self) -> bool {
         !self.active_api_keys().is_empty()
@@ -405,6 +407,8 @@ impl RuntimeConfig {
                 source: self.prompt.source,
             },
             &self.prompt.providers,
+            &self.prompt.rules,
+            self.prompt.rules_configured,
         )
     }
 
@@ -594,6 +598,7 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
         retention,
         scheduled,
         retry,
+        error_policy: error_policy::from_raw(&raw),
         timeouts,
         queue,
         captcha_pool,
@@ -601,6 +606,7 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
         routing,
         routing_profiles: routing_profiles::from_raw(&raw),
         compact_routes: compact_routes::from_raw(&raw),
+        runtime_capacity: runtime_capacity::from_raw(&raw),
         title_routes: title_routes::from_raw(&raw),
         client_identification: client_identification::from_raw(&raw),
         vision_compat: vision_compat::from_raw(&raw),
@@ -691,9 +697,6 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
             .filter(|value| !value.is_null())
             .cloned(),
         update_channels: UpdateChannels::from_raw(&raw),
-        // GitHub 令牌信封：空串按未设置处理（手改库写出的空值不该被当成密文）
-        github_token: string_field(&raw, KEY_GITHUB_TOKEN)
-            .filter(|envelope| !envelope.is_empty()),
         raw,
     }
 }
@@ -736,6 +739,7 @@ fn prompt_from(raw: &Map<String, Value>) -> PromptSettings {
     let file = string_field(raw, KEY_PROMPT_FILE);
     let inline = string_field(raw, KEY_PROMPT_TEXT);
     let base = resolve_choice(mode, file, inline);
+    let (rules, rules_configured, rules_error) = prompt_rules::from_raw(raw);
     PromptSettings {
         mode: base.mode,
         file: base.file,
@@ -744,6 +748,9 @@ fn prompt_from(raw: &Map<String, Value>) -> PromptSettings {
         source: base.source,
         file_error: base.file_error,
         providers: providers_from(raw),
+        rules,
+        rules_configured,
+        rules_error,
         gateway: gateway_from(raw),
         gateway_text: gateway_text_from(raw),
     }
@@ -966,6 +973,11 @@ static CONFIG: RwLock<Option<RuntimeConfig>> = RwLock::new(None);
 /// 东西搬进库」，而快照已经从旧文件读到了同样的值（`merge_legacy`），
 /// 重装只是白读一遍库。
 pub fn init(db: Option<Db>) -> RuntimeConfig {
+    let _update = plugin_task_grants::update_lock();
+    if CONFIG_UPDATE_LOCK.is_poisoned() { model_key_source::fail_closed(); }
+    // 先关闭原 Key 权威，再读库；相同内容初始化也不能恢复旧来源。
+    model_key_source::before_reload();
+    plugin_task_grants::before_reload();
     let db = db.filter(|db| {
         // 打不开的库句柄不该装进来（`Db` 只在打开成功时才有值，这里是防御）
         let _ = db;
@@ -974,8 +986,10 @@ pub fn init(db: Option<Db>) -> RuntimeConfig {
     let _ = DB.set(db);
     let snapshot = build(read_raw());
     crate::server::core::providers::catalog::invalidate();
-    if let Ok(mut guard) = CONFIG.write() {
-        *guard = Some(snapshot.clone());
+    if plugin_task_grants::publish(snapshot.clone()) {
+        model_key_source::published(&snapshot, true);
+    } else {
+        model_key_source::fail_closed();
     }
     crate::server::core::providers::catalog::invalidate();
     snapshot
@@ -992,10 +1006,16 @@ pub fn init(db: Option<Db>) -> RuntimeConfig {
 /// 只在迁移真的产生过结果时才由调用点触发（`db::migrate` 的返回非空）；
 /// 没有任何旧文件时不必多读一次库。
 pub fn reload() -> RuntimeConfig {
+    let _update = plugin_task_grants::update_lock();
+    if CONFIG_UPDATE_LOCK.is_poisoned() { model_key_source::fail_closed(); }
+    model_key_source::before_reload();
+    plugin_task_grants::before_reload();
     let snapshot = build(read_raw());
     crate::server::core::providers::catalog::invalidate();
-    if let Ok(mut guard) = CONFIG.write() {
-        *guard = Some(snapshot.clone());
+    if plugin_task_grants::publish(snapshot.clone()) {
+        model_key_source::published(&snapshot, true);
+    } else {
+        model_key_source::fail_closed();
     }
     crate::server::core::providers::catalog::invalidate();
     snapshot
@@ -1293,11 +1313,18 @@ where
 {
     let _usage_guard = crate::server::core::usage_query::config::lock();
     // 读改写必须串行，否则两个模型的独立配置会互相覆盖。
-    let _update_guard = CONFIG_UPDATE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut next = current();
+    let _update_guard = plugin_task_grants::update_lock();
+    if CONFIG_UPDATE_LOCK.is_poisoned() { model_key_source::fail_closed(); }
+    let Some(mut next) = plugin_task_grants::write_snapshot() else {
+        model_key_source::fail_closed();
+        return false;
+    };
     let previous = next.clone();
     let before = synced_fingerprint(&next.raw);
     mutate(&mut next);
+    // CONFIG 克隆门已释放；本门撤销完成后才允许存储或新的配置发布。
+    model_key_source::before_change(&previous, &next);
+    plugin_task_grants::before_change(&previous.raw, &next.raw);
     if previous.raw().get(crate::server::core::model_rules::KEY_MODEL_RULES)
         != next.raw().get(crate::server::core::model_rules::KEY_MODEL_RULES) {
         next.model_rules = std::sync::Arc::new(crate::server::core::model_rules::ModelRules::from_raw(&next.raw));
@@ -1307,8 +1334,12 @@ where
     let changed = before != synced_fingerprint(&next.raw);
     let catalog_changed = crate::server::core::providers::catalog::config_changed(&previous, &next);
     if catalog_changed { crate::server::core::providers::catalog::invalidate(); }
-    if let Ok(mut guard) = CONFIG.write() {
-        *guard = Some(next);
+    // 只有 CONFIG 确认发布后才能启用新 Key 代；失败永久关闭，不复活旧对象。
+    let key_snapshot = next.clone();
+    if plugin_task_grants::publish(next) {
+        model_key_source::published(&key_snapshot, false);
+    } else {
+        model_key_source::fail_closed();
     }
     if catalog_changed { crate::server::core::providers::catalog::invalidate(); }
     // 云同步的自动上传：只有**同步范围内的键**真的变了才发信号。
@@ -1660,6 +1691,8 @@ pub fn set_retry(patch: RetryPatch) -> bool {
             next.no_retry_codes = std::sync::Arc::from(codes.as_slice());
         }
         config.retry = next;
+        error_policy::sync_legacy(&mut config.raw, patch.no_retry_codes.is_some());
+        config.error_policy = error_policy::from_raw(&config.raw);
     })
 }
 
@@ -1913,6 +1946,8 @@ pub fn set_routing(patch: RoutingPatch) -> bool {
             next.breaker_success_threshold = count;
         }
         config.routing = next;
+        error_policy::sync_legacy(&mut config.raw, false);
+        config.error_policy = error_policy::from_raw(&config.raw);
     })
 }
 
@@ -2199,41 +2234,6 @@ pub fn set_update_proxy(proxy: Option<Value>) -> bool {
                 // 配置里不留没意义的空值（读侧也按缺省 = 直连处理）
                 config.raw.remove(KEY_UPDATE_PROXY);
                 config.update_proxy = None;
-            }
-        }
-    })
-}
-
-// ─── GitHub 令牌信封（githubToken）────────────────────────
-
-/// 只取 GitHub 令牌密文信封的轻量读取（**不克隆整份 raw**）。
-///
-/// 加解密都在 `core::update::token`（这里只存取信封，理由见字段说明）。
-/// 未初始化时给 None（未在界面保存）。
-pub fn github_token_envelope() -> Option<String> {
-    if let Ok(guard) = CONFIG.read() {
-        if let Some(config) = guard.as_ref() {
-            return config.github_token.clone();
-        }
-    }
-    None
-}
-
-/// 写入 GitHub 令牌的密文信封（None = 清除，连键一起删）。
-///
-/// **只收信封不收明文**：调用方（`core::update::token::set_token`）负责加密
-/// 与校验。与 `set_update_proxy` 同一模式：内存立即生效（下一次检查更新就用
-/// 新令牌），写盘时不吃掉其它字段。
-pub fn set_github_token_envelope(envelope: Option<String>) -> bool {
-    update(move |config| {
-        match envelope.clone() {
-            Some(value) => {
-                config.raw.insert(KEY_GITHUB_TOKEN.to_string(), Value::String(value));
-                config.github_token = envelope.clone();
-            }
-            None => {
-                config.raw.remove(KEY_GITHUB_TOKEN);
-                config.github_token = None;
             }
         }
     })

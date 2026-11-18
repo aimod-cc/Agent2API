@@ -88,9 +88,12 @@ pub(super) fn of(record: &StoredAccount) -> QueryConfig {
         "reading": reading,
         "proxy": connection(&proxy),
         "proxyConfig": proxy.as_object().map(|fields| select(fields, &["source", "proxyId", "proxyIds", "all", "listenerUid"])),
-        "userAgent": record.get("userAgent"),
+        "userAgent": crate::server::core::user_agent::override_value(
+            &record.provider(), record.get("userAgent").and_then(Value::as_str).unwrap_or(""),
+        ),
         "timeoutSeconds": crate::server::core::usage_records::query_timeout_of(record.get("usageQuery")),
         "retries": crate::server::core::usage_records::query_retries_of(record.get("usageQuery")),
+        "accountOriginGrant": crate::server::core::plugin_host::wasm::account_origin::grant_configuration(&record.provider()),
     }));
     QueryConfig { fingerprint, reading_key }
 }

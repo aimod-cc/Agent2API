@@ -62,6 +62,17 @@
 
 use rusqlite::Connection;
 
+pub(crate) const CLINE_FREE_REFRESH_SLOT_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS main.cline_free_refresh_slots (
+    account_id TEXT NOT NULL PRIMARY KEY
+        CHECK (typeof(account_id) = 'text' AND octet_length(account_id) BETWEEN 1 AND 512),
+    identity_key TEXT NOT NULL UNIQUE
+        CHECK (typeof(identity_key) = 'text' AND octet_length(identity_key) = 64 AND identity_key NOT GLOB '*[^0-9a-f]*'),
+    payload TEXT NOT NULL
+        CHECK (typeof(payload) = 'text' AND octet_length(payload) BETWEEN 1 AND 8192)
+) WITHOUT ROWID;
+";
+
 #[cfg(test)]
 #[path = "schema_tests.rs"]
 mod tests;
@@ -90,7 +101,10 @@ pub const RESERVED_KV_KEYS: &[&str] = &[
     // 本机编程会话连接设置与加密凭据，不参与配置同步。
     "assistantCoding",
     "assistantCodexLocal",
+    "routingProviderCooldowns",
     "priorityScope",
+    // 单账号可信版本的本机库代次；仅新内核使用，不从配置或云同步恢复授权。
+    "accountCredentialEpoch",
     // 侧边栏布局（core::sidebar_layout）：整份「分组 / 顺序 / 显隐」JSON 一个键。
     // 从前只存浏览器 localStorage，而桌面壳与网页端是两个 origin、localStorage
     // 隔离 —— 于是「在 WebUI 里隐藏的菜单，客户端照旧显示」。落库后两端读同一份。
@@ -99,12 +113,14 @@ pub const RESERVED_KV_KEYS: &[&str] = &[
     "sidebarLayout",
     // 品牌图片与名称独立保存，避免每次转发克隆整份图片；整库备份仍会保留。
     "panelBranding",
+    "advertisementCache",
     // 事件日志的下一个 id 水位（logs_store::sql）
     "logsNextId",
     // 整份桌面设置 JSON（壳侧 settings）—— 一个键而不是拆成三个：
     // 桌面设置是整体读写单元（前端一次 PUT 整份），拆键会让一次写入变成
     // 多行更新，徒增事务与冲突面。
     "desktopSettings",
+    "pluginDesktopClients",
     // **遗留**：旧「敏感词脱敏」的整份状态（词表 / 开关 / 作用角色 / 作用提供商）。
     //
     // 那个功能已随规则集换成硬编码指纹脱敏（`core::sanitize`）而整体删除，
@@ -347,7 +363,19 @@ pub fn is_reserved(key: &str) -> bool {
 /// 请求日志新增「积分」列读它。与 token 四列刻意不同：这一列**可空 REAL** ——
 /// `NULL` = 这一家没上报（旧行 / 不提供该读数），0 = 确实零消耗；用 0 兜底会
 /// 把「没读到」画成「花了 0 积分」，比缺一列更难排查。
-pub const SCHEMA_VERSION: i64 = 29;
+pub const SCHEMA_VERSION: i64 = 30;
+
+/// CodeArts 未开放发送槽的封闭 DDL；只在其原连接耐久事务内按需建立空表。
+/// 尚未登记启动迁移或可信首次纳管，不改 user_version，也不因建表补任何 Ready 行。
+/// 账号、槽代次与状态均绑定在加密 payload 内；不存刷新令牌或 DPoP 私钥。
+pub(crate) const CODEARTS_REFRESH_SLOT_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS main.codearts_refresh_slots (
+  account_id TEXT NOT NULL PRIMARY KEY
+    CHECK (typeof(account_id) = 'text' AND octet_length(account_id) BETWEEN 1 AND 512),
+  payload TEXT NOT NULL
+    CHECK (typeof(payload) = 'text' AND octet_length(payload) BETWEEN 1 AND 8192)
+) WITHOUT ROWID;
+";
 
 /// 版本 1 的全部表与索引：改造前所有 JSON / JSONL 文件的对应形态。
 ///
@@ -1087,6 +1115,7 @@ fn apply_version(
         27 => conn.execute_batch(include_str!("schema_coding.sql")),
         28 => conn.execute_batch(include_str!("schema_model_recency.sql")),
         29 => conn.execute_batch(include_str!("schema_usage_query.sql")),
+        30 => conn.execute_batch(include_str!("schema_usage_diagnostics.sql")),
         _ => Ok(()),
     }
 }

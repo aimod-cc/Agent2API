@@ -12,7 +12,7 @@ use crate::server::logging;
 pub(super) fn notify(payload: &Value) {
     let Some(provider) = payload.get("provider").and_then(Value::as_str)
         .filter(|value| !value.is_empty()) else { return };
-    if super::registry::is_switching(provider) { return; }
+    if super::registry::is_switching(provider) || super::operations::active_for_provider(provider) { return; }
     let Some(host) = runtime::host_for_provider(provider) else { return };
     let Some(lease) = host.activity.acquire() else { return };
     let provider = provider.to_string();

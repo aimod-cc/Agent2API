@@ -320,6 +320,9 @@ export function ModelsPage() {
                           {model.id}
                         </div>
                         <div style={{ display: 'flex', gap: 6, marginTop: 4, fontSize: 10.5, color: 'var(--m-text-3)', flexWrap: 'wrap' }}>
+                          {model.toolCallingMode === 'emulated' ? <UiBadge variant='secondary' shape='tag' className='m-pill'
+                            title={t('由网关模拟，执行权限仍由客户端控制')}>{t('模拟工具')}</UiBadge> : null}
+                          {model.toolCallingMode === 'disabled' ? <UiBadge variant='secondary' shape='tag' className='m-pill'>{t('工具模拟已关闭')}</UiBadge> : null}
                           {model.kind === 'image' ? <UiBadge variant='secondary' shape='tag' className='m-pill'>{t('图片生成')}</UiBadge> : null}
                           {model.supports_image_editing ? <UiBadge variant='secondary' shape='tag' className='m-pill'>{t('图片编辑')}</UiBadge> : null}
                           {model.upstreamStatus === 'undeployed' ? (

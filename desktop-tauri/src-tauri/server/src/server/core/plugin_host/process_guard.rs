@@ -63,4 +63,4 @@ mod platform {
     }
 }
 
-pub(super) use platform::ProcessGuard;
+pub(crate) use platform::ProcessGuard;

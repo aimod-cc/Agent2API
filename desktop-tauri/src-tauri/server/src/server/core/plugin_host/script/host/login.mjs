@@ -11,9 +11,9 @@ import { promptView, keyPrompt } from "./login-prompts.mjs"
 const flows = new Map()
 const starting = new Set()
 
-export function methods(provider) {
+export function methods(provider, locale = "zh-CN") {
   return {
-    methods: loginMethods(provider).map(method => ({
+    methods: loginMethods(provider, locale).map(method => ({
       methodIndex: method.methodIndex, type: method.type, label: method.label || (method.type === "oauth" ? "OAuth 登录" : "API Key"),
       prompts: [
         ...[keyPrompt(method)].filter(Boolean),
@@ -37,7 +37,7 @@ export async function start(provider, params) {
   }
   const payload = params.payload ?? {}
   const index = payload.methodIndex ?? 0
-  const method = loginMethods(provider).find(method => method.methodIndex === index)
+  const method = loginMethods(provider, payload.locale).find(method => method.methodIndex === index)
   if (method?.type !== "oauth" || typeof method.authorize !== "function") throw new Error("Unsupported sign-in method")
   if (method.desktopOnly && payload.mode !== "embedded") throw new Error("此登录方式需要应用内嵌窗口，请在桌面应用中发起")
   const controller = new AbortController()
@@ -85,7 +85,7 @@ function run(flow, code) {
       flow.controller.signal.throwIfAborted()
       if (result?.type !== "success") throw new Error(result?.error || "Sign-in was not completed")
       const account = normalized(flow.provider, result, flow.name, flow.single)
-      if (flow.context.localProvider) {
+      if (flow.context.localProvider && typeof flow.context.localProvider.hooks.provider?.models === "function") {
         flow.context.loginAuth = account.secret
         flow.context.action = "models.refresh"
         try {

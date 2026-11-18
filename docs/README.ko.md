@@ -25,7 +25,8 @@ Agent2API는 **AI 라우팅 게이트웨이와 Agent 클라이언트 설정 관�
 - 🔌 **통합 모델 API** — OpenAI Chat / Responses / Images, Anthropic Messages 및 통합 모델 목록. Raccoon, Loomy, Antigravity, ModelScope, WorkBuddy, Doubao Work가 이미지 생성을 제공하며 Raccoon, Loomy, Antigravity, ModelScope, WorkBuddy는 참조 이미지 편집도 지원. 생성과 편집은 AI 어시스턴트 도구로도 사용 가능
 - 🧭 **AI 라우팅** — 모델 매핑, 계정 우선순위, 부하 분산, 세션 고정 및 장애 전환
 - 🤖 **Agent 클라이언트 설정 관리** — 여러 연결 프로필, 기존 설정 가져오기, 쓰기 미리보기 및 서비스 전환
-- 🧩 **플러그인 확장** — 추가 공급자 구현은 본체에 포함되지 않고 별도 설치·업데이트. 사용자 지정 공급자에는 플러그인 불필요
+- 🧩 **플러그인 확장** — 추가 공급자는 별도 설치·업데이트하며 지역과 사용량 풀을 분리합니다. 기존 기초 패키지에 CodeArts 대화·공식 로그인·관리형 갱신·혜택, CatPaw 대화·도구 후속 대화·이미지 입력·권한 기반 로컬 로그인 연동, Doubao Work 대화·비동기 응답·이미지 업로드 및 생성·로그인·로컬 가져오기·출석 및 작업 보상, MonkeyCode 중국판/국제판의 독립 대화 작업·도구 연결·로그인·일일 출석을 구현했습니다. MonkeyCode 작업과 로컬 자격 증명 읽기는 명시적 권한이 필요합니다. Kiro 관리형 로그인과 명시적으로 등록한 Cline Free 갱신도 사용할 수 있습니다. 이 구현은 실제 계정으로 검증하지 않았습니다.
+- 🧰 **웹 도구 모의 호출** — 플러그인이 명시한 智谱清言, DeepSeek 웹, Tabbit 모델의 도구 선언·기록·결과를 공통 게이트웨이 계층에서 변환합니다. 기본으로 켜져 있고 끌 수 있습니다. 웹 기본 기능이 아니며 실제 계정으로 아직 검증하지 않았습니다.
 - 🛡️ **아웃바운드 프록시** — 계정과 업데이트 작업에 프록시 풀의 출구 선택
 - 🔑 **게이트웨이 보안** — 권한별 키, 패널 로그인 사람 확인, 키 미설정 시 모델 요청 기본 거부
 - 📊 **요청 리포트** — 요청 수, 성공률, 토큰 사용량, 캐시 적중률, 365일 히트맵
@@ -34,13 +35,29 @@ Agent2API는 **AI 라우팅 게이트웨이와 Agent 클라이언트 설정 관�
 
 ## ❤️ 스폰서
 
+본 프로젝트를 후원하는 Beichen API, IPWO, ProxyLane 세 스폰서에 감사드립니다.
+
+<table>
+<tr>
+<td width="180" align="center"><a href="https://beichenapi.com/register?aff=QWJJYF7PT8SY"><img src="../desktop-tauri/ui/assets/providers/beichen.png" alt="Beichen API" width="64" /><br /><strong>Beichen API</strong></a></td>
+<td><strong>하나의 API로 여러 주요 모델을 연결합니다.</strong><br />Beichen은 OpenAI 호환 AI API 중계 서비스를 제공하며 스트리밍 응답과 장시간 추론 모델의 연결을 지원합니다. Agent2API의 "계정 추가 → API 템플릿"에서 첫 번째 카드를 선택하면 접속 주소가 자동 입력되므로, 본인의 API Key를 입력하면 됩니다.<br /><br /><a href="https://beichenapi.com/register?aff=QWJJYF7PT8SY"><strong>가입 / API Key 받기 ↗</strong></a></td>
+</tr>
+</table>
+
+<table>
+<tr>
+<td width="180" align="center"><a href="https://www.ipwo.net/?code=LQW28BAYK"><img src="../desktop-tauri/ui/assets/sponsors/ipwo.png" alt="IPWO" width="140" /><br /><strong>IPWO 주거용 IP</strong></a></td>
+<td><strong>동적·고정·무제한 주거용 프록시를 용도에 맞게 선택하세요.</strong><br />IPWO는 여러 지역의 주거용 IP를 제공하며 국가·도시 단위 지정과 HTTP(S) / SOCKS5를 지원합니다. 받은 프록시 주소를 Agent2API의 "네트워크 프록시"에 추가하면 계정과 서비스 연결 경로에 사용할 수 있습니다.<br /><br /><a href="https://www.ipwo.net/?code=LQW28BAYK"><strong>요금제 보기 / 주거용 IP 받기 ↗</strong></a></td>
+</tr>
+</table>
+
 <a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><img src="../assets/sponsor-proxylane.png" alt="ProxyLane(스폰서)" width="100%" /></a>
 
 <table>
 
 <tr>
 <td width="240"><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/proxylane-logo-for-dark-bg.png" /><img src="../assets/proxylane-logo-for-light-bg.png" alt="ProxyLane" width="220" /></picture></a></td>
-<td><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme">ProxyLane</a>가 이 프로젝트를 후원합니다! ProxyLane은 AI 계정 전용 네이티브 정적 주거용 IP(Static Residential ISP)를 제공합니다. 실제 가정용 브로드밴드 사업자의 IP를 사용하며 Scamalytics 사기 점수가 낮고, IP는 1개씩 전용, 트래픽 무제한, $3.90부터. "네트워크 프록시" 페이지에서 계정마다 출구 하나를 지정하면 됩니다. 첫 구매 시 코드 <code>AGENT2API25</code>로 25% 할인됩니다.</td>
+<td><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme">ProxyLane</a>은 AI 계정 전용 네이티브 정적 주거용 IP(Static Residential ISP)를 제공합니다. 실제 가정용 브로드밴드 사업자의 IP를 사용하며 Scamalytics 사기 점수가 낮고, IP는 1개씩 전용, 트래픽 무제한, $3.90부터. "네트워크 프록시" 페이지에서 계정마다 출구 하나를 지정하면 됩니다. 첫 구매 시 코드 <code>AGENT2API25</code>로 25% 할인됩니다.</td>
 </tr>
 
 </table>
@@ -48,10 +65,9 @@ Agent2API는 **AI 라우팅 게이트웨이와 Agent 클라이언트 설정 관�
 ## 💬 커뮤니티 및 지원
 
 - **QQ 그룹**: Agent2API 교류 그룹입니다. QQ에서 그룹 번호를 검색해 참여하세요.
-  - 그룹 1: `1127656296` (**곧 정원 마감 — 그룹 3 또는 4에 우선 참여해 주세요**)
-  - 그룹 2: `1130894674` (**곧 정원 마감 — 그룹 3 또는 4에 우선 참여해 주세요**)
+  - 그룹 1: `1127656296`
+  - 그룹 2: `1130894674`
   - 그룹 3: `1108276647`
-  - 그룹 4: `1054072416`
 - **Telegram 그룹**: <https://t.me/+9gM8YPvgRL02NGRl>
 - **💖 후원**: Agent2API가 도움이 되셨다면 [작성자에게 커피 한 잔](./SPONSOR.md)도 환영합니다. 후원은 자발적이며 아무 기능도 해제되지 않습니다.
 - **🤝 스폰서 / 비즈니스**: 프로젝트를 후원하거나 여기에 제품을 소개하고 싶다면 [541675139@qq.com](mailto:541675139@qq.com)으로 메일 주세요.

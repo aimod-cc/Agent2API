@@ -11,7 +11,6 @@ export function safeMessage(error, context = scope.getStore()) {
   for (const value of values) {
     for (const record of [value, value?.metadata]) {
       for (const field of ["access", "refresh", "key", "accessToken", "refreshToken", "cookie", "sid", "password"]) {
-        if (context?.localProvider && field === "key" && record?.[field] === "agy") continue
         if (typeof record?.[field] === "string" && record[field]) secrets.add(record[field])
       }
     }

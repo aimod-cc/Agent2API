@@ -6,6 +6,12 @@ use crate::server::core::beijing;
 pub(super) const LEDGER_KIND: &str = "dailyCheckin";
 const LEDGER_KEY: &str = "pluginLedger.dailyCheckin";
 
+pub(super) fn doubao_status(record: &StoredAccount) -> Option<Value> {
+    if record.provider() != "doubaowork" { return None; }
+    let entry = record.get("pluginState")?.get("host:doubaowork:daily-confirmation")?;
+    super::sql::credential_version::doubao_state::public_status(entry)
+}
+
 pub(super) fn record_status(record: &StoredAccount) -> Option<&Value> {
     record.get(LEDGER_KEY).filter(|value| {
         (rolling_until(value).is_some() || value.get("at").and_then(Value::as_i64)
@@ -21,6 +27,9 @@ pub(crate) fn rolling_until(value: &Value) -> Option<i64> {
 }
 
 pub(super) fn completed(record: &StoredAccount) -> bool {
+    if let Some(status) = doubao_status(record) {
+        return status.get("completed").and_then(Value::as_bool) == Some(true);
+    }
     if let Some(status) = record_status(record) {
         if let Some(until) = rolling_until(status) {
             return until > crate::server::logging::now_ms() && status.get("completed").and_then(Value::as_bool) == Some(true);

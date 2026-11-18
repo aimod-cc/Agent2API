@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { fetchUsageSnapshot } from '../api/gateway'
+import { accountUsageSnapshot, refreshAccountUsage, subscribeAccountUsage, trackAccountUsage } from '../lib/accounts-realtime'
 import { apiCall } from '../api/client'
 import { serverIdentity } from '../lib/servers'
 import { store } from '../state/store'
 import { t } from '../i18n'
-import { usageQueryDeadline, usageTaskText, type UsageQueryStart, type UsageQueryTask } from '../../../ui-shared/usage-query-task'
-import type { UsageQueryRow } from '../../../ui-shared/usage-query-state'
+import { usageQueryDeadline, usageTaskPending, usageTaskText, type UsageQueryStart, type UsageQueryTask } from '../../../ui-shared/usage-query-task'
+import { mergeUsageQueryRow } from '../../../ui-shared/usage-query-state'
+import { usageQueryNoticeOf, type UsageQueryRow } from '../../../ui-shared/usage-query-state'
 
 export function useAccountUsage(id: string, enabled: boolean) {
   const [row, setRow] = useState<UsageQueryRow>()
@@ -26,35 +27,29 @@ export function useAccountUsage(id: string, enabled: boolean) {
     startingRef.current = false
     queryRevision.current++
     if (!id || !enabled) return
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const controller = new AbortController()
-    const poll = async () => {
-      const revision = queryRevision.current
-      try {
-        const snapshot = await usageQueryDeadline(fetchUsageSnapshot(controller.signal), 5000)
-        if (epoch.current !== version || serverIdentity() !== identity) return
-        const incoming = snapshot.results?.find(row => row.id === id)
-        if (incoming && revision === queryRevision.current) {
-          setRow(previous => Number(previous?.at) > Number(incoming.at) ? previous : incoming)
-        }
-        const next = snapshot.queries?.find(task => task.id === id)
-        if (next && revision === queryRevision.current) setTask(previous => {
-          if (previous && (previous.startedAt > next.startedAt
-            || previous.requestId === next.requestId && previous.status !== 'running' && next.status === 'running')) return previous
-          return next
-        })
-      } catch { /* 保留历史读数；查询任务有独立超时。 */ }
-      if (epoch.current !== version || controller.signal.aborted) return
-      timer = setTimeout(poll, latest.current.task?.status === 'running' ? 800 : 5000)
+    const receive = (snapshot: ReturnType<typeof accountUsageSnapshot>) => {
+      if (epoch.current !== version || serverIdentity() !== identity) return
+      const incoming = snapshot.results?.find(row => row.id === id)
+      if (incoming) setRow(previous => Number(previous?.at) > Number(incoming.at) ? previous : mergeUsageQueryRow(incoming, previous))
+      const next = snapshot.queries?.find(task => task.id === id)
+      if (next) setTask(previous => {
+        if (previous && (previous.startedAt > next.startedAt
+          || previous.requestId === next.requestId && !usageTaskPending(previous) && usageTaskPending(next)
+          || previous.requestId === next.requestId && previous.status === 'running' && next.status === 'queued')) return previous
+        return next
+      })
     }
-    void poll()
-    return () => { epoch.current++; controller.abort(); clearTimeout(timer) }
+    const unsubscribe = subscribeAccountUsage(receive)
+    const tracker = trackAccountUsage([id])
+    receive(accountUsageSnapshot())
+    void refreshAccountUsage().catch(() => {})
+    return () => { epoch.current++; unsubscribe(); tracker.close() }
   }, [id, identity, enabled])
 
   useEffect(() => {
     const id = setInterval(() => {
       const current = latest.current.task
-      if (serverIdentity() !== identity || current?.status !== 'running' || Date.now() <= current.deadlineAt + 15_000) return
+      if (serverIdentity() !== identity || !current || !usageTaskPending(current) || Date.now() <= current.deadlineAt + 15_000) return
       setTask(task => task?.requestId === current.requestId ? { ...task, status: 'timeout' } : task)
       void usageQueryDeadline(apiCall('/api/accounts/usage/cancel', {
         method: 'POST', body: { id: current.id, requestId: current.requestId },
@@ -77,6 +72,7 @@ export function useAccountUsage(id: string, enabled: boolean) {
         const task = result.queries.find(task => task.id === id)
         if (!task) throw new Error(t('余额查询接口返回异常'))
         setTask(task)
+        void refreshAccountUsage().catch(() => {})
       }
     } catch (error) {
       if (epoch.current === version && serverIdentity() === identity) store.toast(error instanceof Error ? error.message : String(error), 'err')
@@ -86,7 +82,7 @@ export function useAccountUsage(id: string, enabled: boolean) {
   }
 
   const cancel = async () => {
-    if (!task || task.status !== 'running' || serverIdentity() !== identity) return
+    if (!task || !usageTaskPending(task) || serverIdentity() !== identity) return
     const version = epoch.current
     queryRevision.current++
     try {
@@ -99,5 +95,6 @@ export function useAccountUsage(id: string, enabled: boolean) {
     }
   }
 
-  return { row, task, starting, query, cancel, status: usageTaskText(task, t) }
+  const notice = task?.status === 'failed' && row?.error ? usageQueryNoticeOf(row.code, t) : null
+  return { row, task, pending: usageTaskPending(task), starting, query, cancel, status: notice || usageTaskText(task, t) }
 }

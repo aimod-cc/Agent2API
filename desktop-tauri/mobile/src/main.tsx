@@ -1,6 +1,8 @@
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
-import { setAuthLostHandler } from './api/client'
+import { setAuthLostHandler, apiCall } from './api/client'
+import { configureAdvertisements, resetAdvertisements } from '../../ui-shared/advertisements'
+import { serverIdentity } from './lib/servers'
 import { store } from './state/store'
 import { initPwa } from './lib/pwa'
 import './styles/mobile.css'
@@ -15,6 +17,9 @@ import './styles/mobile.css'
  * 401 接管：客户端自己不做跳转（它不知道当前界面在做什么），由这里注册
  * 回调，交给 store 弹「重新登录 / 补 Key」层。
  */
+configureAdvertisements(() => apiCall('/api/advertisements', { quiet: true }), serverIdentity)
+window.addEventListener('wb:management-session-changed', resetAdvertisements)
+
 setAuthLostHandler(mode => {
   store.setAuthLost(mode)
 })

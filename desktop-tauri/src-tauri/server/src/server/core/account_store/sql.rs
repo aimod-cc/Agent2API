@@ -74,6 +74,12 @@
 //! 也绝不 panic：所有 SQL 失败都以 `rusqlite::Result` 往上传，由调用方转成
 //! `AccountStoreError`（500）。
 
+pub(super) mod credential_version;
+pub(super) mod stream_limits;
+mod task_read;
+pub(crate) use task_read::{load_task_final, TaskReadError};
+
+use credential_version::ordinary::{self as credential_writes, WriteKind};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::server::core::account_store::priority::{grouped_queue_order, QueueEntry};
@@ -117,8 +123,8 @@ impl DecodeError {
 
 /// 一行 `data` 列 → 记录字段的 JSON `Value`（**密文与历史明文都能读**）。
 ///
-/// 这是「`data` 列 ↔ 内存明形态」这条边界的读侧内核，[`decode_data`] 与
-/// [`save_state`] 的差异比较都复用它。两段分支：
+/// 这是「`data` 列 ↔ 内存明形态」这条边界的读侧内核；普通批量删除的坏行保护也复用它。
+/// 两段分支：
 ///   - 是密文信封（`crypto::is_envelope`，判据只有 `core::crypto` 一处）→ 走
 ///     `core::crypto::open` 解开信封（它已校验明文是合法 UTF-8），再当 JSON 解析；
 ///   - 其余 → 按**历史明文** JSON 解析（本轮改造的过渡期安全网，见模块头）。
@@ -397,25 +403,18 @@ pub(crate) fn apply_priorities(
     conn: &Connection,
     updates: &[(String, i64)],
 ) -> rusqlite::Result<usize> {
-    let mut changed = 0usize;
-    for (id, priority) in updates {
-        let data: Option<String> = conn
-            .query_row("SELECT data FROM accounts WHERE id = ?1", params![id], |row| {
-                row.get(0)
-            })
-            .optional()?;
-        let Some(record) = data.as_deref().and_then(|text| decode_data(text).ok()) else {
-            continue;
-        };
-        if record.priority() == *priority {
-            continue;
+    credential_writes::atomic(conn, |conn| {
+        let mut changed = 0usize;
+        for (id, priority) in updates {
+            let Some(record) = credential_writes::priority_record(conn, id)? else { continue; };
+            if record.priority() == *priority { continue; }
+            let mut record = record;
+            record.set_priority(*priority);
+            update_in_place(conn, &record)?;
+            changed += 1;
         }
-        let mut record = record;
-        record.set_priority(*priority);
-        update_in_place(conn, &record)?;
-        changed += 1;
-    }
-    Ok(changed)
+        Ok(changed)
+    })
 }
 
 /// 新账号的号是否插进了别家的区段里（需要整理队列）。
@@ -490,12 +489,16 @@ pub(crate) fn normalize_grouped_queue(conn: &Connection) -> rusqlite::Result<usi
 /// 分组模式下「插在别家区段中间」不是一个有意义的请求（界面上也没有这个入口），
 /// 落在本组末尾是唯一自洽的结果。
 pub(crate) fn put(conn: &Connection, record: &StoredAccount) -> rusqlite::Result<()> {
-    let existed = delete(conn, record.id())?;
-    insert_row(conn, record)?;
-    if !existed && queue_needs_normalize(conn, &record.provider(), record.id())? {
-        normalize_grouped_queue(conn)?;
-    }
-    Ok(())
+    credential_writes::atomic(conn, |conn| {
+        let prepared = credential_writes::prepare(conn, record, WriteKind::Replace)?;
+        let record = prepared.record();
+        let existed = delete(conn, record.id())?;
+        insert_row(conn, record)?;
+        if !existed && queue_needs_normalize(conn, &record.provider(), record.id())? {
+            normalize_grouped_queue(conn)?;
+        }
+        Ok(())
+    })
 }
 
 /// 原地更新一条记录（**物理位置不变**）。
@@ -505,13 +508,23 @@ pub(crate) fn put(conn: &Connection, record: &StoredAccount) -> rusqlite::Result
 /// 字段」的操作走这里 —— 旧代码在下标上改字段，数组位置本来就不动，
 /// 界面上的行序（优先级序）也不该因为一次「改备注名」而跳动。
 ///
-/// 行不存在时退化成插入（拿到末尾位置）：那是「读出来之后被并发删掉了」的
-/// 竞态窗口 —— 旧实现在那个窗口里是「把整份内存状态写回文件」，效果同样是
-/// 让这条记录重新出现。这里保持同一结果（而不是静默丢弃这次写入），
-/// 因为调用方大多已经把「写入成功」当作前提继续往下算了。
+/// 行不存在时普通无版本记录仍退化成插入；带旧CodeArts版本的缺行更新拒绝补建，
+/// 不能让已删除账号携带旧续期资格重新出现。其余提供商保留历史回落语义。
 pub(crate) fn update_in_place(conn: &Connection, record: &StoredAccount) -> rusqlite::Result<()> {
+    credential_writes::atomic(conn, |conn| {
+        let prepared = credential_writes::prepare(conn, record, WriteKind::Update)?;
+        if prepared.existed() {
+            update_row(conn, prepared.record())
+        } else {
+            insert_row(conn, prepared.record())
+        }
+    })
+}
+
+/// 只接受本事务已处理过版本的行；存在性来自同一次读取，零行不能再INSERT补救。
+fn update_row(conn: &Connection, record: &StoredAccount) -> rusqlite::Result<()> {
     let changed = conn.execute(
-        "UPDATE accounts SET provider = ?2, priority = ?3, enabled = ?4, added_at = ?5, data = ?6
+        "UPDATE main.accounts SET provider = ?2, priority = ?3, enabled = ?4, added_at = ?5, data = ?6
          WHERE id = ?1",
         params![
             record.id(),
@@ -522,21 +535,19 @@ pub(crate) fn update_in_place(conn: &Connection, record: &StoredAccount) -> rusq
             encode_data(record)?,
         ],
     )?;
-    if changed == 0 {
-        insert_row(conn, record)?;
-    }
+    if changed != 1 { return Err(rusqlite::Error::QueryReturnedNoRows); }
     Ok(())
 }
 
 /// 删除一条记录，返回是否真的删掉了（`false` = 本来就没有这一行）。
 pub(crate) fn delete(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
-    Ok(conn.execute("DELETE FROM accounts WHERE id = ?1", params![id])? > 0)
+    credential_writes::delete(conn, id)
 }
 
 /// 一行 INSERT（[`put`] / [`update_in_place`] 的公共落点）
 fn insert_row(conn: &Connection, record: &StoredAccount) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO accounts (id, provider, priority, enabled, added_at, data)
+        "INSERT INTO main.accounts (id, provider, priority, enabled, added_at, data)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             record.id(),
@@ -575,106 +586,23 @@ fn enabled_flag(record: &StoredAccount) -> i64 {
 /// 顺序只在「新增」时体现（INSERT 按 `state.accounts` 的次序，于是新行的 rowid
 /// 相对顺序与旧实现的 push 顺序一致）；既有行一律 UPDATE，物理位置不动。
 ///
-/// 为什么拿 `&mut Connection`：调用方要么已经持有可变借用（`Db::with_mut`），
-/// 要么在事务里。事务由本函数自己开（`conn.transaction()`），批量的原子性
-/// 因此在最内层就成立 —— 调用方不需要记得包一层。
+/// 事务由最内层的IMMEDIATE写入协调器建立；批量原子性不依赖调用者补包一层。
+/// 版本与正文同事务更新，普通无关编辑保留当前版本，公开整份输入另走失效入口。
 ///
 /// `priorityScope` 单独写在 `kv` 表（键名约定见 `server/db/schema.rs` 模块头）：
 /// 它不属于任何一条账号记录，只在 `Some` 时写入（旧文件里也是「没有这个键」
 /// 表示尚未迁移），读取见 [`load_priority_scope`]。
 pub(crate) fn save_state(conn: &mut Connection, state: &AccountState) -> rusqlite::Result<()> {
-    let tx = conn.transaction()?;
-    // 现有行：id → data 的**解密后**值。比字符串更可靠：两边序列化格式若有一丝
-    // 差异（空格、键序）不会误判成「变了」而白写一遍。
-    //
-    // 这里**必须**解密（`decode_value`）而不是直接 `serde_json::from_str`：
-    //   · 直接解析密文 → 解析失败 → 得到 None → 下面走 INSERT 分支 → 主键冲突；
-    //   · 改成比较密文串 → GCM 每次 nonce 随机、同一明文两次的密文不同 →
-    //     永远不相等 → 每次 `save_state` 都把全表重写一遍。
-    // 存解密后的 `Value` 两个坑都不踩：内容没变的行解密后与 `record.to_value()`
-    // 相等（`serde_json::Value` 的比较按结构，与键序无关），于是**一条语句都不发**；
-    // 内容变了的行照常 UPDATE。**已加密且未变的行因此不会被降级回明文。**
-    let mut existing: Vec<(String, Option<serde_json::Value>)> = Vec::new();
-    {
-        let mut stmt = tx.prepare("SELECT id, data FROM accounts")?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let id: String = row.get(0)?;
-            let text: String = row.get(1)?;
-            existing.push((id, decode_value(&text).ok()));
-        }
-    }
+    credential_writes::save_state(conn, state, WriteKind::Update)
+}
 
-    // 删除：库里在、目标状态里没有的 —— 但**只删「读得出来」的行**。
-    //
-    // `existing` 的 id 来自主键列（总能读到），而 `state.accounts` 来自全量读取，
-    // 那里解不开的行会被 `decode_data` 跳过。于是「密钥丢失 / 密钥不匹配 / 拷库没拷
-    // `account.key`」这种场景下，全部密文行都解不开 → `state.accounts` 为**空** ——
-    // 若仍按「库里在、内存里没有」删，任何一次 bulk 操作（`batch_update` /
-    // `batch_remove` / 导入合并 / `migrate_startup` 有改动时）都会把**全部账号
-    // DELETE 掉**。这正是我们要替旧程序避免的灾难，新版在密钥出问题时自己也会犯。
-    //
-    // 判据因此收紧成：**只有 `decode_value` 成功（`value.is_some()`）的行才参与
-    // 删除**；`None`（解不开 / 坏数据）的行一律**不删** —— 读不出的行不删，
-    // 密钥丢失时保住数据，宁可留着让人恢复也不能删。
-    for (id, value) in &existing {
-        if value.is_none() {
-            continue;
-        }
-        if !state.accounts.iter().any(|record| record.id() == *id) {
-            tx.execute("DELETE FROM accounts WHERE id = ?1", params![id])?;
-        }
-    }
-    // 新增 / 更新
-    for record in &state.accounts {
-        let current = existing
-            .iter()
-            .find(|(id, _)| id == record.id())
-            .map(|(_, value)| value.as_ref())
-            .unwrap_or(None);
-        match current {
-            Some(value) if *value == record.to_value() => {}
-            Some(_) => {
-                tx.execute(
-                    "UPDATE accounts SET provider = ?2, priority = ?3, enabled = ?4,
-                     added_at = ?5, data = ?6 WHERE id = ?1",
-                    params![
-                        record.id(),
-                        record.provider(),
-                        record.priority(),
-                        enabled_flag(record),
-                        record.added_at(),
-                        encode_data(record)?,
-                    ],
-                )?;
-            }
-            None => {
-                tx.execute(
-                    "INSERT INTO accounts (id, provider, priority, enabled, added_at, data)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![
-                        record.id(),
-                        record.provider(),
-                        record.priority(),
-                        enabled_flag(record),
-                        record.added_at(),
-                        encode_data(record)?,
-                    ],
-                )?;
-            }
-        }
-    }
-
-    if let Some(scope) = &state.priority_scope {
-        // 幂等写：值没变时 SQLite 也会重写这一行，但它只有一行、且这条路径
-        // 本来就是「整份状态落盘」，不必为它再查一次
-        tx.execute(
-            "INSERT INTO kv (key, value) VALUES ('priorityScope', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![scope],
-        )?;
-    }
-    tx.commit()
+/// 整份传入状态没有逐行的来源见证；CodeArts即使凭据相同也不沿用输入私有版本。
+/// 只在本次真实保存事务内失效，外层成功仍由save_state的COMMIT决定。
+pub(in crate::server::core::account_store) fn save_imported_state(
+    conn: &mut Connection,
+    state: &AccountState,
+) -> rusqlite::Result<()> {
+    credential_writes::save_state(conn, state, WriteKind::Imported)
 }
 
 /// 读 `priorityScope`（`kv` 表；没有这个键时 None）。
@@ -702,53 +630,17 @@ pub(crate) fn load_priority_scope(conn: &Connection) -> rusqlite::Result<Option<
 /// 本函数在启动时把过渡态收敛掉。
 ///
 /// ── 幂等判据：数据自证 ──────────────────────────────────────
-/// 判据是「还有没有 `data` 不以 `enc1:` 开头的行」，**不用任何 kv 标记**：
-/// 加密是可重复的纯变换，迁完就没有明文行，再跑一遍在第一段就早退、连事务都不开。
-/// 加标记键反而多一份「这条跑过没有」的事实来源，还会与「用户手工把某行改回
-/// 明文」这类边角情形打架。
+/// 判据是数据自证（只处理非`enc1:`行），不用任何kv迁移标记；没有明文行时不写库。
+/// 不借迁移标记推断行的状态，重复调用仍按实际正文决定是否需要加密。
 ///
-/// ── 为什么整批一个事务（且先在内存里把信封全算好）────────────
-/// 加密到一半中断会留下「部分密文、部分明文」的中间态。这里先只读收集明文行、
-/// 再把全部信封算进内存（任何一行 `seal` 失败就整批不写、直接返回 Err），最后
-/// 才开事务逐行 UPDATE 一次提交 —— 于是「要么全加密、要么一行都不动」，中断后
-/// 下次启动从头再来一遍（幂等）。
+/// ── 原行读取、版本清理与加密写入同一事务 ──────────────────────
+/// 任何一行失败都回滚整批，不把提交前读到的旧快照另起事务写回。
+/// CodeArts的明文私有标记不具备来源见证，迁移只移除该标记，保留其余原始字段。
 ///
 /// 失败用 `ToSqlConversionFailure` 承载一句人能读的话（本仓既有手法，见
 /// `db::migrate::logs::assign_log_id` 的说明）：这个变体的 `Display` 就是那句
 /// 原文，`Db::open` / `with_conn_mut` 会把它原样带进日志。**失败不阻断启动**
 /// 由调用方决定（见 `store_admin::encrypt_legacy_accounts`）。
 pub(crate) fn encrypt_legacy_rows(conn: &mut Connection) -> rusqlite::Result<usize> {
-    // ① 只读收集「还不是密文」的行，不动库
-    let mut pending: Vec<(String, String)> = Vec::new();
-    {
-        let mut stmt = conn.prepare("SELECT id, data FROM accounts")?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let id: String = row.get(0)?;
-            let text: String = row.get(1)?;
-            if !crypto::is_envelope(&text) {
-                pending.push((id, text));
-            }
-        }
-    }
-    if pending.is_empty() {
-        return Ok(0);
-    }
-    // ② 在内存里把全部信封算好：任何一行失败就整批放弃（此时库还一字未改）
-    let mut updates: Vec<(String, String)> = Vec::with_capacity(pending.len());
-    for (id, plaintext) in pending {
-        let envelope = crypto::seal(plaintext.as_bytes(), SecretScope::Accounts)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
-        updates.push((id, envelope));
-    }
-    // ③ 一个事务写回（要么全成、要么全不成）
-    let tx = conn.transaction()?;
-    for (id, envelope) in &updates {
-        tx.execute(
-            "UPDATE accounts SET data = ?2 WHERE id = ?1",
-            params![id, envelope],
-        )?;
-    }
-    tx.commit()?;
-    Ok(updates.len())
+    credential_writes::encrypt_legacy_rows(conn)
 }

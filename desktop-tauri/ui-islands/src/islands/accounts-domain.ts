@@ -33,10 +33,11 @@
  * （模型测试的候选清单、⋯ 菜单的「已在第一位」判定）。
  */
 
+import type { AccountListGroup } from '../../../ui-shared/accounts-list'
 import { shared, formatTime, type AccountRecord, type AccountsSnapshot, type AccountSorting, type GroupSortRule, type LimiterRule, type RateLimitInfo, type TokenReading, type UsageEntry } from './accounts-shared'
 import { providerFeatures, type ProviderFeatures } from './accounts-features'
 import { t } from '../i18n'
-import { limiterHit } from './accounts-limiter-model'
+import { limiterHit, limiterStatesOf } from './accounts-limiter-model'
 import { accountReloginText } from './accounts-authorization'
 import { upstreamCooldownOf, upstreamSuspendedReasonOf } from '../../../ui-shared/account-upstream-state'
 import { accountSortBalanceOf, balanceSortStateOf, comparableBalance } from '../../../ui-shared/account-sorting'
@@ -877,6 +878,10 @@ export function isLimitedNow(
   entry?: UsageEntry,
   tokenReadings?: TokenReading[],
 ): boolean {
+  if (typeof account?.listLimited === 'boolean') {
+    const states = limiterStatesOf(account)
+    if (!states || !Array.isArray(account.limiterGroups)) return account.listLimited
+  }
   return isRateLimited(account)
     || balanceBlockedOf(account, entry)
     || tokenBlockedOf(account, tokenReadings)
@@ -1030,6 +1035,7 @@ export function defaultGroupSortRules(provider: string): GroupSortRule[] {
 }
 
 export type AccountGroup = {
+  summary?: AccountListGroup
   /** 这一组的家（provider id） */
   provider: string
   /** 家名（后端注册表的 label，取不到回落 id） */

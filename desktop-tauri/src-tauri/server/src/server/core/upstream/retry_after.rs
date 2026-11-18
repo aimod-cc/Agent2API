@@ -6,7 +6,7 @@ use crate::server::core::providers::adapter::UpstreamErrorClass;
 use crate::server::errors::GatewayError;
 use crate::server::logging;
 
-pub(super) fn reset_at(headers: &HeaderMap) -> Option<i64> {
+pub(crate) fn reset_at(headers: &HeaderMap) -> Option<i64> {
     let now = logging::now_ms();
     let value = |name: &str| headers.get(name)?.to_str().ok().map(str::trim);
     if let Some(milliseconds) = value("retry-after-ms").and_then(|text| text.parse::<f64>().ok()) {

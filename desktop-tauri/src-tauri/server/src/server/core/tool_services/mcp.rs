@@ -36,6 +36,7 @@ pub struct McpRequestContext {
     pub base_url: String,
     pub store: crate::server::core::account_store::AccountStore,
     pub scope: Option<crate::server::core::key_scope::KeyScope>,
+    pub key_source: Option<std::sync::Arc<crate::server::config::model_key_source::Source>>,
     pub state: crate::server::ServerState,
     pub source: crate::server::request_stats::RequestSource,
     pub owner: String,

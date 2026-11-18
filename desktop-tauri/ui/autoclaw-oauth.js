@@ -110,6 +110,7 @@
     );
 
     let busy = false;
+    let disposed = false;
     /** 最近一次发起的 state（仅用于日志与「有没有发起过」的判断） */
     let activeState = '';
     /**
@@ -182,7 +183,7 @@
      *   ④ 把 {state, authUrl} 交给壳去开窗口并等待
      */
     async function start(vendor) {
-      if (busy) return;
+      if (busy || disposed) return;
       const bridge = window.workbuddyDesktop;
       if (!bridge?.startAutoclawOauth || !bridge?.getAutoclawOauthCaptchaConfig
         || !bridge?.startAutoclawOauthLogin) {
@@ -200,6 +201,7 @@
         config.onBusyChange?.(true);
         // ① 风控配置。`enabled: false` = 这一家没有这条登录方式（国内版就是这个值）
         const captchaConfig = await bridge.getAutoclawOauthCaptchaConfig(prefix, proxy);
+        if (flow !== flowGeneration || disposed) return;
         if (!captchaConfig?.enabled) {
           throw new CaptchaError(wbI18n.t('这一家当前不支持网页登录，请改用填写凭证'));
         }
@@ -220,7 +222,9 @@
             sceneId: captchaConfig.sceneId,
           },
           async captchaVerifyParam => {
+            if (flow !== flowGeneration || disposed) throw new CaptchaCancelledError();
             const answer = await bridge.startAutoclawOauth(prefix, vendor, captchaVerifyParam, proxy);
+            if (flow !== flowGeneration || disposed) throw new CaptchaCancelledError();
             const authUrl = String(answer?.authUrl || '').trim();
             if (!authUrl) {
               throw new CaptchaError(wbI18n.t('未能获取授权地址，请重试'));
@@ -287,8 +291,12 @@
     }
 
     const nodes = vendorButtons();
-    if (nodes.zai) nodes.zai.addEventListener('click', () => start('zai'));
-    if (nodes.google) nodes.google.addEventListener('click', () => start('google'));
+    const cancelNode = cancelButton();
+    const startZai = () => start('zai');
+    const startGoogle = () => start('google');
+    const cancel = () => controller.cancel();
+    nodes.zai?.addEventListener('click', startZai);
+    nodes.google?.addEventListener('click', startGoogle);
 
     const controller = {
       provider: prefix,
@@ -319,6 +327,7 @@
        * 但白打一次没有意义）。
        */
       cancel() {
+        if (disposed || (!busy && !activeState)) return;
         flowGeneration += 1;
         const cancelledCaptcha = cancelCaptcha();
         const wasWaiting = Boolean(activeState);
@@ -332,8 +341,19 @@
           window.workbuddyDesktop?.cancelLogin?.().catch(() => {});
         }
       },
+      dispose() {
+        if (disposed) return;
+        controller.cancel();
+        disposed = true;
+        flowGeneration += 1;
+        nodes.zai?.removeEventListener('click', startZai);
+        nodes.google?.removeEventListener('click', startGoogle);
+        cancelNode?.removeEventListener('click', cancel);
+        const index = controllers.indexOf(controller);
+        if (index >= 0) controllers.splice(index, 1);
+      },
     };
-    cancelButton()?.addEventListener('click', () => controller.cancel());
+    cancelNode?.addEventListener('click', cancel);
     controllers.push(controller);
     return controller;
   }

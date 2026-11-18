@@ -62,7 +62,7 @@ export function ClientRuleEditor({ api, view: initialView, rule, evidence, onClo
     <DialogContent className='w-[min(640px,calc(100vw-24px))]'>
       <DialogHeader><DialogTitle>{rule ? t('编辑识别规则') : t('设置识别规则')}</DialogTitle></DialogHeader>
       <DialogBody>
-        <p className='max-w-[62ch] text-[12px] leading-[1.7] text-muted-foreground'>{t('规则忽略大小写，只影响新请求的日志与统计，不改变模型选择或权限。')}</p>
+        <p className='max-w-[62ch] text-[12px] leading-[1.7] text-muted-foreground'>{t('规则忽略大小写，对新请求的客户端分类和提示词规则生效，不改变模型选择或权限。')}</p>
         {/* 与面板同一套行形态：底色分层而不是描边，开关在左、状态右对齐 */}
         <div className='flex items-center gap-3 rounded-lg bg-surface-inset px-4 py-3'>
           <Switch checked={draft.enabled} disabled={Boolean(busy)} onCheckedChange={enabled => update({ enabled })} aria-label={t('启用规则')} />

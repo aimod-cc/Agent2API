@@ -858,15 +858,8 @@ impl AccountStore {
         }
 
         if let Some(value) = patch.get("userAgent") {
-            // 账号级自定义 User-Agent：空串 / null = 清除（回到该家自己的默认值）。
-            //
-            // 为什么存在账号记录里而不是放在 provider 上：同一家的不同账号可能
-            // 需要不同的身份（一个用官方 CLI 的 UA、另一个用别的客户端），而
-            // 「用哪个 UA」是这组凭证的事实，跟着账号走才对。
-            //
-            // 校验口径：1 KiB 上限、无控制字符（含 CR/LF）—— 这个值会原样成为
-            // 出站请求头，含换行就是一次请求头注入。
-            let next = crate::server::core::client::catalog::normalize_user_agent_override(value)?;
+            // 空串 / null = 清除；不允许覆盖的提供商忽略旧客户端提交的值。
+            let next = crate::server::core::user_agent::normalize_override(&record.provider(), value)?;
             let current = record.get("userAgent").and_then(Value::as_str).unwrap_or("").to_string();
             if next != current {
                 if next.is_empty() {

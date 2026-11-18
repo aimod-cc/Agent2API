@@ -1,4 +1,4 @@
-//! 软件更新：共享 GitHub 访问策略、版本检查与经过校验的安装包下载。
+//! 软件更新：官网版本检查与经过校验的安装包下载。
 
 mod check;
 mod download;
@@ -9,14 +9,8 @@ mod service_task;
 #[cfg(any(target_os = "linux", windows))]
 #[path = "systemd/trust.rs"]
 mod service_trust;
-pub(crate) mod source;
-pub(crate) mod rate_limit;
-mod source_state;
-mod selection;
-mod probe;
 mod integrity;
-// 更新源索引：从索引仓库的 `app.json` 读「构建产物放在哪个仓库」。
-// 与插件商店共用信任根仓库、两个文件（见模块头）。
+// 更新策略由官网后台管理，决定构建产物仓库与强制更新要求。
 mod index;
 // 公网出网的候选出口实现（`fetch_public`）也被 `core::model_meta`（models.dev
 // 元数据刷新）复用：那条链路回答的是「这台机器的公网怎么出去」，与访问哪个
@@ -27,8 +21,8 @@ pub(crate) mod client;
 // 所以对本 crate 之外也要可见（桌面形态不注册，该模块的函数在非 Linux 上
 // 一律返回「不支持」）。
 pub mod selfupdate;
-mod token;
 mod version;
+pub(crate) mod website;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -38,15 +32,12 @@ use serde_json::{json, Map, Value};
 use crate::server::{config, logging};
 
 pub use version::{
-    api_base, asset_suffixes, assert_downloadable, compare_versions, custom_api_base, desktop_shell,
+    api_base, asset_suffixes, assert_downloadable, compare_versions, desktop_shell,
     installer_kind, installer_suffixes, is_prerelease_version, parse_version, pick_android_apk,
     pick_asset_by_name, pick_installer, safe_file_name, server_bundle_name, set_desktop_shell,
-    UpdateError, DEFAULT_REPO, GITHUB_API, MAX_INSTALLER_BYTES, SOURCE_REPO,
+    UpdateError, DEFAULT_REPO, MAX_INSTALLER_BYTES, SOURCE_REPO,
 };
 pub use integrity::download_plan;
-/// 「更新设置」弹窗的 GitHub 令牌接口（api::update 走这两条；加解密本体
-/// 只在 token 模块内部，见它的模块头）
-pub use token::{set_token, status_json};
 
 /// 请求 GitHub 的 UA（Node 版字面量，随项目改名同步）
 const USER_AGENT: &str = "agent2api-local-proxy";
@@ -73,8 +64,7 @@ struct Task {
     path: Option<String>,
     received: u64,
     total: u64,
-    selecting: bool,
-    source: Option<String>,
+    preparing: bool,
 }
 
 impl Task {
@@ -94,8 +84,7 @@ impl Task {
         );
         map.insert("received".to_string(), Value::from(self.received));
         map.insert("total".to_string(), Value::from(self.total));
-        map.insert("selecting".to_string(), Value::Bool(self.selecting));
-        map.insert("source".to_string(), json!(self.source));
+        map.insert("preparing".to_string(), Value::Bool(self.preparing));
         // percent：总量未知时为 0；已知时向上取整到 100 封顶
         // （Node: `task.total > 0 ? Math.min(100, Math.round(received/total*100)) : 0`）
         let percent = if self.total > 0 {
@@ -117,13 +106,6 @@ struct Inner {
     /// 最近一次拉到的 Release（内存缓存）
     latest: Option<Value>,
     repository: String,
-    /// `repository` 来自 `WORKBUDDY_UPDATE_REPO` 环境变量（显式覆盖）。
-    ///
-    /// 为真时**不读索引**：用户的覆盖绝不能被索引悄悄改回官方仓库。
-    repository_explicit: bool,
-    /// `repository` 是从索引里解析出来的（`true`）还是内置默认值（`false`）。
-    /// 只用于日志口径。
-    repository_from_index: bool,
     /// 上次尝试解析索引的时刻（毫秒，0 = 还没试过）。与 [`INDEX_RETRY_MS`]
     /// 一起做节流。
     index_checked_at: i64,
@@ -143,25 +125,15 @@ pub struct UpdateManager {
 }
 
 impl UpdateManager {
-    /// 构造管理器。`directory` 是配置目录（下载落在 `{directory}/updates`）。
-    ///
-    /// 仓库解析顺序与 Node 版一致：参数 > `WORKBUDDY_UPDATE_REPO` > DEFAULT_REPO
-    /// （`String(repo || env || DEFAULT).trim()`）。
     pub fn new(directory: PathBuf) -> Self {
-        let explicit = std::env::var("WORKBUDDY_UPDATE_REPO")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-        let app_index = if explicit.is_some() { index::AppIndex::default() } else { index::cached() };
-        let repository = explicit.clone().unwrap_or_else(|| app_index.repo.clone());
+        let app_index = index::cached();
+        let repository = app_index.repo.clone();
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 task: None,
                 cancel_flag: None,
                 latest: None,
                 repository,
-                repository_explicit: explicit.is_some(),
-                repository_from_index: false,
                 index_checked_at: 0,
                 app_index,
                 download_dir: directory.join("updates"),
@@ -183,30 +155,13 @@ impl UpdateManager {
         self.lock().repository.clone()
     }
 
-    pub fn reset_source_preference(&self) {
-        source::clear_preferences();
+    pub fn reset_policy_cache(&self) {
         self.lock().index_checked_at = 0;
     }
 
-    /// 解析本次检查要用的仓库，必要时先读一次索引。
-    ///
-    /// ── 优先级 ──────────────────────────────────────────────────
-    /// 1. `WORKBUDDY_UPDATE_REPO` 环境变量：显式覆盖，最高优先，**且不读索引**
-    ///    —— 内网镜像 / 离线演练要能完全绕开官方源；
-    /// 2. 索引里的 `app.repo`（见 [`index::resolve_app_repo`]）；
-    /// 3. 内置 [`DEFAULT_REPO`]。
-    ///
-    /// ── 为什么带节流 ────────────────────────────────────────────
-    /// 定时检查可能几分钟一轮，而索引是一份几乎不变的几百字节文件。每次都读
-    /// 只是白打 raw.githubusercontent.com（顺带消耗它的限额）。所以读成功后
-    /// [`INDEX_RETRY_MS`] 内不再读；**读失败**也一样等这么久再试 —— 失败多半
-    /// 是网络不通，立刻重试只会连着失败。
-    ///
-    /// 注意节流只影响「多久读一次」，不影响「解析后的值」：一旦读到过，就用它
-    /// 覆盖 `repository` 并一直用下去（进程重启后重新读）。
+    /// 更新策略只从官网取得，每五分钟刷新一次。
     async fn resolve_repository(&self) -> String {
-        let (current, explicit) = { let guard = self.lock(); (guard.repository.clone(), guard.repository_explicit) };
-        if explicit { return current; }
+        let current = self.repository();
         let now = logging::now_ms();
         {
             let mut guard = self.lock();
@@ -219,18 +174,15 @@ impl UpdateManager {
             let mut guard = self.lock();
             let changed = guard.repository != repository;
             guard.repository = repository.clone();
-            guard.repository_from_index = true;
             guard.app_index = resolved;
             changed
         };
-        if changed { logging::verbose("[Update]", &format!("更新源仓库改为 {repository}（来自索引）")); }
+        if changed { logging::verbose("[Update]", &format!("更新源仓库改为 {repository}（来自官网更新策略）")); }
         repository
     }
 
     pub fn force_update(&self, current: &str) -> Option<Value> {
-        let guard = self.lock();
-        if guard.repository_explicit { return None; }
-        guard.app_index.required(current)
+        self.lock().app_index.required(current)
     }
 
     pub async fn refresh_policy(&self, current: &str) -> Value {
@@ -277,17 +229,13 @@ impl UpdateManager {
         let asset = latest
             .as_ref()
             .and_then(|value| value.get("asset"))
-            .filter(|value| {
-                value.get("url").and_then(Value::as_str).map(|url| !url.is_empty()).unwrap_or(false)
-            })
+            .filter(|value| value.get("url").and_then(Value::as_str).is_some_and(website::download_url))
             .cloned();
         // 容器内更新包与它的 .sha256 伴随文件（非 Linux、或该发布没挂这两个
         // 资产时都是 None —— 面板据此退回「手动升级命令」的提示）
         let downloadable = |value: Option<&Value>| -> Option<Value> {
             value
-                .filter(|item| {
-                    item.get("url").and_then(Value::as_str).map(|url| !url.is_empty()).unwrap_or(false)
-                })
+                .filter(|item| item.get("url").and_then(Value::as_str).is_some_and(website::download_url))
                 .cloned()
         };
         let server_asset = downloadable(latest.as_ref().and_then(|value| value.get("serverBundle")));
@@ -324,6 +272,7 @@ impl UpdateManager {
         } else { systemd_task.clone() };
         json!({
             "updateCapability": capability,
+            "updateSource": "website",
             "serviceTask": service_task,
             "systemdTask": systemd_task,
             "forceUpdate": force_update,
@@ -343,7 +292,7 @@ impl UpdateManager {
             "releaseName": latest_text("name"),
             "notes": latest_text("notes"),
             "publishedAt": latest_text("publishedAt"),
-            "pageUrl": latest_text("pageUrl"),
+            "pageUrl": website::release_page(latest.as_ref().and_then(|value| value["pageUrl"].as_str()).unwrap_or("")),
             "prerelease": latest
                 .as_ref()
                 .and_then(|value| value.get("prerelease"))
@@ -352,7 +301,7 @@ impl UpdateManager {
             "asset": asset.clone().unwrap_or(Value::Null),
             // ── 手机端（APK）────────────────────────────────────
             // 与 `asset` 并列：网关同时服务电脑和手机，两边各取所需。
-            // 手机端拿这个 GitHub 下载地址自己去下（手机自己出网，不经网关中转）。
+            // 手机端自行连接官网，不经网关中转安装包。
             // 该版本没挂 apk 时是 null，手机端据此藏起「立即更新」。
             "androidAsset": downloadable(latest.as_ref().and_then(|value| value.get("androidAsset")))
                 .unwrap_or(Value::Null),
@@ -414,11 +363,8 @@ impl UpdateManager {
             ));
         }
         let bundle = selfupdate::bundle_name().expect("supported 已判定平台与架构");
-        // 从**内存里那份 release JSON** 取三个值：包地址、校验文件地址、版本号。
-        // 键名是 check.rs 存进去的那套（`serverBundle` / `serverChecksums` / `tag`），
-        // **不是** check 响应里给界面用的扁平字段（`serverAsset` / `serverChecksumUrl` /
-        // `latestVersion`）—— 两套名字混用的后果是永远读空、永远报「没有提供校验文件」。
-        let (bundle_url, checksum_url, version) = {
+        // 安装依据来自内存中的官网发布记录，不接受调用方自选包地址或校验值。
+        let (bundle_url, version) = {
             let guard = self.lock();
             let latest = guard.latest.clone();
             let asset_url = |key: &str| -> String {
@@ -436,7 +382,7 @@ impl UpdateManager {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            (asset_url("serverBundle"), asset_url("serverChecksums"), tag)
+            (asset_url("serverBundle"), tag)
         };
         // 该发布没挂包（老版本 Release）：给界面一句能照做的提示，而不是含糊的失败
         if bundle_url.is_empty() {
@@ -454,21 +400,14 @@ impl UpdateManager {
             }
             _ => {}
         }
-        if checksum_url.is_empty() && !source::is_resource(&bundle_url) {
-            return Err(UpdateError::with_status(
-                400,
-                "本次发布没有提供校验文件（.sha256），已放弃安装",
-            ));
-        }
+        assert_downloadable(&bundle_url)?;
         let archive = self.download_dir().join(safe_file_name(&bundle));
         if !archive.is_file() {
             return Err(UpdateError::with_status(400, "更新包尚未下载，请先点击「下载并更新」"));
         }
-        let expected = match integrity::trusted_digest(&bundle_url).await {
-            Some((hash, _)) => hash,
-            None if !checksum_url.is_empty() => selfupdate::fetch_checksum(&checksum_url).await?,
-            None => return Err(UpdateError::new("未取得官方校验值，已放弃安装")),
-        };
+        let expected = integrity::trusted_digest(&bundle_url).await
+            .map(|(hash, _)| hash)
+            .ok_or_else(|| UpdateError::new("未取得官网更新包的可信校验值，已放弃安装"))?;
         let actual = selfupdate::file_sha256(&archive)?;
         if expected != actual {
             logging::log(
@@ -525,7 +464,7 @@ static GLOBAL: std::sync::OnceLock<UpdateManager> = std::sync::OnceLock::new();
 /// 更新检查的排期按仓库隔离，缓存里的版本比较仍使用当前二进制版本。
 pub fn global_check_key() -> String {
     GLOBAL.get().map(UpdateManager::check_key)
-        .unwrap_or_else(|| format!("updateCheck:{DEFAULT_REPO}"))
+        .unwrap_or_else(|| format!("updateCheck:website:{DEFAULT_REPO}"))
 }
 
 pub fn required_update() -> Option<Value> {

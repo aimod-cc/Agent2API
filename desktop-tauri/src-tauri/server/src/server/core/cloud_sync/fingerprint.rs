@@ -62,7 +62,7 @@ fn hash_row(
 ) -> Result<(), String> {
     let mut fields: Vec<_> = row.iter().filter(|(name, _)| {
         table != "account_usage_records"
-            || !matches!(name.as_str(), "last_attempt_at" | "last_success_at" | "updated_at")
+            || !matches!(name.as_str(), "last_attempt_at" | "last_success_at" | "updated_at" | "diagnostics")
     }).collect();
     fields.sort_unstable_by(|a, b| a.0.cmp(b.0));
     digest.update((fields.len() as u64).to_be_bytes());

@@ -101,6 +101,8 @@ pub(crate) fn stable(provider: &str, fields: &Map<String, Value>) -> Option<Stri
         }
         Some(ProviderKind::Atomcode) => text(fields, &["userId", "user_id", "uid", "username", "userName"]),
         Some(ProviderKind::Accio | ProviderKind::AccioCn) => text(fields, USER_KEYS),
+        Some(ProviderKind::ClaudeSubscription | ProviderKind::ChatgptSubscription
+            | ProviderKind::CodexSubscription) => text(fields, &["uid"]),
         None => text(fields, &["userId", "user_id", "userid", "uid", "loginName", "login_name", "account", "email", "phone", "username"]),
     }
 }

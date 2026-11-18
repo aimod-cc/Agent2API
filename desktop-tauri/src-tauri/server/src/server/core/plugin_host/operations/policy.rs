@@ -28,7 +28,8 @@ impl InstallPolicy {
             Self::Automatic(channels) => {
                 let settings = settings::current();
                 let allowed = settings.auto_update && installed.is_some_and(|pack| {
-                    pack.enabled && pack.signed
+                    super::super::support::installed_state(&pack) == super::super::PackSupportState::Supported
+                        && pack.enabled && pack.signed
                         && compare_versions(&asset.version, &pack.version) == Some(1)
                 });
                 if !allowed || !settings.auto_check || settings.channels() != channels {

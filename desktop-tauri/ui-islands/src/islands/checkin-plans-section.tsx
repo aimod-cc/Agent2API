@@ -63,7 +63,7 @@ function CampaignRow({ row, disabled, onReport }: {
   onReport: PlansRowReporter
 }): React.ReactElement {
   const [expanded, setExpanded] = React.useState(false)
-  const state = useCampaignRewards({ entry: row, api, t, onChange: () => void loadCenter() })
+  const state = useCampaignRewards({ entry: row, api, t, onChange: () => void loadCenter(true) })
   const { data, busy, now } = state
 
   const claimable = row.available ? claimableCount(data, now) : 0
@@ -144,7 +144,7 @@ function CampaignRow({ row, disabled, onReport }: {
     >
       <CampaignRewardDetails entry={row} api={api} t={t}
         locale={window.wbI18n?.locale() || 'zh-Hans'} formatTime={formatShort}
-        onChange={() => void loadCenter()} state={viewState} />
+        onChange={() => void loadCenter(true)} state={viewState} />
     </CheckinRow>
   )
 }

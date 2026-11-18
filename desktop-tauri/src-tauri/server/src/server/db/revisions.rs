@@ -39,6 +39,7 @@ impl AccountRevisions {
             }
         }
         self.revision.store(revision, Ordering::Release);
+        crate::server::core::panel_events::notify(crate::server::core::panel_events::Change::Accounts);
     }
 
     pub fn invalidate(&self) {
@@ -47,6 +48,7 @@ impl AccountRevisions {
         journal.reset_at = journal.revision;
         journal.rows.clear();
         self.revision.store(journal.revision, Ordering::Release);
+        crate::server::core::panel_events::notify(crate::server::core::panel_events::Change::Accounts);
     }
 
     pub fn since(&self, revision: Option<u64>) -> AccountChanges {

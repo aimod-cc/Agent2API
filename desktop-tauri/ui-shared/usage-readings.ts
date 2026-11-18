@@ -46,6 +46,16 @@ export function usageEmptyStateOf(value: unknown, t: Translate): { text: string;
   }
 }
 
+export function usageAvailableViewOf(value: unknown, t: Translate): string {
+  const usage = object(value)
+  const supplied = typeof usage?.availableView === 'string' ? usage.availableView.trim() : ''
+  if (!supplied) return ''
+  const noQuota = Array.isArray(usage?.plans)
+    && Array.isArray(usage?.wallets) && usage.wallets.length === 0
+    && usageNumberOrNull(usage?.available) === null && usage?.unlimited !== true
+  return noQuota ? t('无额度') : supplied
+}
+
 export function usageNumberOrNull(value: unknown): number | null {
   if (typeof value !== 'number' && typeof value !== 'string') return null
   if (typeof value === 'string' && !value.trim()) return null

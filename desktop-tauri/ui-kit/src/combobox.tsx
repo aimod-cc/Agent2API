@@ -3,7 +3,6 @@ import { Combobox as BaseCombobox } from '@base-ui/react/combobox'
 import { createChangeEventDetails } from '@base-ui/react/internals/createBaseUIEventDetails'
 import { useRender } from '@base-ui/react/use-render'
 import { cn } from './lib/cn'
-import { useSelectBoundary } from './lib/select-boundary'
 
 const ComboboxContext = React.createContext<{
   open: boolean
@@ -103,11 +102,11 @@ type ComboboxContentProps = Omit<React.ComponentProps<typeof BaseCombobox.Popup>
 
 function ComboboxContent({ className, sideOffset = 4, children, finalFocus, ...props }: ComboboxContentProps) {
   const context = React.useContext(ComboboxContext)
-  const boundary = useSelectBoundary(context?.trigger ?? null, context?.open ?? false)
 
   return (
     <BaseCombobox.Portal>
-      <BaseCombobox.Positioner sideOffset={sideOffset} align='start' collisionBoundary={boundary}
+      {/* 搜索框占用固定高度，菜单不能再受短弹窗正文的剩余高度限制。 */}
+      <BaseCombobox.Positioner sideOffset={sideOffset} align='start'
         className='z-[35] data-anchor-hidden:invisible data-anchor-hidden:pointer-events-none'
         render={(positionerProps, state) => <ComboboxPositionerElement {...positionerProps}
           anchorHidden={state.anchorHidden} open={state.open} />}>

@@ -14,8 +14,9 @@ import {
 } from '@ui'
 import {
   downloadAsset, handleExternalClick, isSelfUpdate, isManualUpdate, manualUpdateReason, markdownHtml, missingAssetReasonFor,
-  openExternal, safeExternal, shared, serviceUpdateTask, type UpdateInfo,
+  openExternal, shared, serviceUpdateTask, type UpdateInfo,
 } from './update-shared'
+import { updatePageUrl } from '../../../ui-shared/updates'
 import { t } from '../i18n'
 import { serviceTaskActive } from './update-systemd'
 import { HtmlContent } from '@ui'
@@ -72,7 +73,7 @@ let promptedUpdateVersion = ''
  * 早先只判 `hasUpdate === true`：没有资产也照弹「去更新」，点进去落到面板上
  * 只会得到一句「没有可下载的安装包」—— 用户被指到一条死路。现在弹窗自己看
  * `downloadAsset`（与面板同一口径）：没有包就不给「去更新」，改成把原因说清楚
- * 并给「到 GitHub 发布页下载」。仍然弹，是因为「有新版本」这件事本身值得知道 ——
+ * 并给「到官网下载」。仍然弹，是因为「有新版本」这件事本身值得知道 ——
  * 静默处理反而让人永远停在旧版本上。
  *
  * 调用点与旧实现一致：check / syncFromCache / openAndDownload 结束时各一次（check 那条
@@ -119,7 +120,7 @@ function UpdateModal({ info, onGoUpdate, onClose }: UpdateModalProps) {
   const canDownload = !!downloadAsset(info)?.url
   const manual = isManualUpdate(info)
   const reason = manual ? manualUpdateReason(info) : canDownload ? '' : missingAssetReasonFor(info)
-  const pageUrl = safeExternal(info.pageUrl)
+  const pageUrl = updatePageUrl(info.pageUrl)
 
   /** 「跳过此次更新」：按版本号记进 localStorage（与旧 app.js 同一个键） */
   function handleSkip(): void {
@@ -190,7 +191,7 @@ function UpdateModal({ info, onGoUpdate, onClose }: UpdateModalProps) {
         <DialogFooter>
           {/* 旧 .modal-foot 的布局：跳过 | spacer | 取消 + 去更新。
               没有可下载的包时「去更新」这条路不存在（见 handleGo 的说明）：
-              桌面端换成「到 GitHub 发布页下载」（pageUrl 正常都在，后端在没给
+              桌面端换成「到官网下载」（pageUrl 正常都在，后端在没给
               html_url 时会兜底拼一个 releases 页面地址）；容器端的升级不走安装包，
               上面那条 compose 命令才是正路，这里就不给按钮了 */}
           <Button variant='outline' size='sm' onClick={handleSkip}>{t('跳过此次更新')}</Button>
@@ -199,7 +200,7 @@ function UpdateModal({ info, onGoUpdate, onClose }: UpdateModalProps) {
           {canDownload
             ? <Button variant='default' onClick={handleGo}>{manual ? t('下载服务端包') : t('去更新')}</Button>
             : (!isSelfUpdate(info) && pageUrl)
-              ? <Button variant='default' onClick={handleOpenRelease}>{t('到 GitHub 发布页下载')}</Button>
+              ? <Button variant='default' onClick={handleOpenRelease}>{t('到官网下载')}</Button>
               : null}
         </DialogFooter>
       </DialogContent>

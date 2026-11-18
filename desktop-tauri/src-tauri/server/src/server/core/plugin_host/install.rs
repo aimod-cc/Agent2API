@@ -1,12 +1,12 @@
 //! 插件包的安装、校验与注册表。
 //!
 //! ── 信任链（顺序不能变）──────────────────────────────────────
-//!   1. **sha256**：zip 自身的摘要记进注册表，用于完整性复核（`InstalledPack::sha256`）。
-//!      它挡「文件传坏了」与「装完之后被换过」—— 校验在 [`verify_installed`]；
+//!   1. **sha256**：安装时对实际ZIP字节求摘要并登记；登记表中的字符串不是可信见证。
+//!      进程内见证只由实际ZIP校验和安装提交产生；冷启动不保存原ZIP，不能重建原归档真实性。
 //!   2. **协议版本**：`pack.json` 的 `protocol` 必须等于网关的
 //!      [`proto::PROTOCOL_VERSION`]。挡「版本不匹配」；
 //!   3. **签名**：`pack.json` 里带 `signature` 时做 ed25519 验签（公钥内置，
-//!      见 [`OFFICIAL_PUBKEYS`]）。验签覆盖的是**包内容**（见 [`signing_payload`]），
+//!      见 [`OFFICIAL_PUBKEYS`]）。验签覆盖规定的包内容和UI资源（见 `proto::signing_payload`），
 //!      不是 zip 字节 —— zip 的压缩方式/时间戳可以变，内容才是要保护的东西。
 //!
 //! 三步都过才允许落盘并登记。**未签名的包仍然允许安装**（第三方/自建包必须
@@ -25,13 +25,12 @@
 //!     0.1.0/                  版本目录（可并存多版本，便于回滚）
 //!       pack.json
 //!       bin/providers.exe
-//!     current -> 0.1.0        当前版本（Windows 上是 current.txt）
+//!     当前版本由plugins.json的version字段选择
 //! ```
 //!
 //! ── 为什么要版本目录而不是原地覆盖 ───────────────────────────
 //! 一个包升级失败时要能回滚。原地覆盖会让「新版本起不来」变成「这个功能
-//! 彻底没了」。多版本并存 + `current` 指针是 mihomo 内核那套已经在用的
-//! 形态（`sub_kernel::layout`），复用同一思路让排障心智一致。
+//! 彻底没了」。多版本目录与注册表版本字段共同支持恢复，不能据目录名称证明内容。
 //!
 //! ── 安装从哪来（zip 上传）────────────────────────────────────
 //! 用户拿到的是各平台的 zip（`scripts/pack.mjs`（Agent2Providers 仓库） 产出，约 13MB）。
@@ -43,7 +42,6 @@
 //! 入口里的 `..`（见 [`validate_manifest`]）。
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use agent2api_provider_protocol as proto;
@@ -279,7 +277,7 @@ pub struct InstalledPack {
     pub providers: BTreeMap<String, bool>,
     /// 入口二进制的相对路径（相对版本目录）。
     pub entry: String,
-    /// 包的 sha256（安装时算的，用于完整性复核）。
+    /// 实际ZIP安装时的摘要缓存；仅供展示/比较，不单独证明当前安装真实性。
     #[serde(default)]
     pub sha256: String,
     /// 是否已签名并通过验签。
@@ -335,8 +333,31 @@ impl PackRegistry {
         }
     }
 
-    /// 写回注册表（原子替换）。
+    /// 写回注册表；见证票据先失效旧对象，文件动作不持见证锁。
     pub fn save(&self) -> Result<(), String> {
+        let witness = super::packages::provenance::begin_registry_save(self, None);
+        self.save_with_witness(witness).map(|_| ())
+    }
+
+    pub(super) fn save_with_witness(
+        &self,
+        mut witness: super::packages::provenance::RegistrySave,
+    ) -> Result<super::packages::provenance::RegistrySave, String> {
+        if !witness.matches(self) {
+            witness.finish(false);
+            let mut replacement = super::packages::provenance::begin_registry_save(self, None);
+            let result = self.save_file();
+            replacement.finish(result.is_ok());
+            result?;
+            return Ok(replacement);
+        }
+        let result = self.save_file();
+        witness.finish(result.is_ok());
+        result?;
+        Ok(witness)
+    }
+
+    fn save_file(&self) -> Result<(), String> {
         let path = registry_path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("建目录失败: {e}"))?;
@@ -350,9 +371,10 @@ impl PackRegistry {
         Ok(())
     }
 
-    /// 找一个已启用的包。
+    /// 找一个已启用且仍受支持的包。
     pub fn enabled(&self) -> Option<&InstalledPack> {
-        self.packs.iter().find(|pack| pack.enabled)
+        self.packs.iter().find(|pack| pack.enabled
+            && super::support::installed_state(pack) == super::PackSupportState::Supported)
     }
 
     /// 某个 provider 是否由已启用的包提供。
@@ -360,6 +382,7 @@ impl PackRegistry {
         if crate::server::core::providers::availability::is_suspended(provider) { return false; }
         self.packs.iter().any(|pack| {
             pack.enabled
+                && super::support::installed_state(pack) == super::PackSupportState::Supported
                 && pack
                     .manifest_providers
                     .iter()
@@ -375,6 +398,7 @@ impl PackRegistry {
 /// 安装失败时界面就显示这句话。因此文案要说「为什么」与「怎么办」，
 /// 不要只说「校验失败」。
 pub fn validate_manifest(manifest: &proto::PackManifest, host_protocol: u32) -> Result<(), String> {
+    super::support::require_wasm(manifest)?;
     if manifest.protocol != host_protocol {
         return Err(format!(
             "这个插件包要求协议版本 {}，而当前网关是 {}。请更新插件包（或更新网关）。",
@@ -408,25 +432,14 @@ pub fn validate_manifest(manifest: &proto::PackManifest, host_protocol: u32) -> 
         if entry.split(['/', '\\']).any(|part| part == "..") {
             return Err(format!("入口路径不能包含 ..（{target}: {entry}）"));
         }
+        super::packages::provenance::validate_entry_path(entry)?;
     }
     Ok(())
 }
 
 /// 为当前目标挑一个入口。
-pub fn entry_for_target(manifest: &proto::PackManifest, target: &str) -> Option<String> {
-    // Wasm 在所有平台使用同一入口和签名目标。
-    if let Some(entry) = manifest.entry.get(super::wasm::manifest::TARGET) { return Some(entry.clone()); }
-    // 先精确匹配，再按「架构-系统」宽松匹配（不同打包工具的三元组写法不一致）
-    if let Some(entry) = manifest.entry.get(target) {
-        return Some(entry.clone());
-    }
-    let arch = std::env::consts::ARCH;
-    let os = std::env::consts::OS;
-    manifest
-        .entry
-        .iter()
-        .find(|(key, _)| key.contains(arch) && key.contains(os))
-        .map(|(_, entry)| entry.clone())
+pub fn entry_for_target(manifest: &proto::PackManifest, _target: &str) -> Option<String> {
+    manifest.entry.get(super::wasm::manifest::TARGET).cloned()
 }
 
 /// 读一个版本目录里的 `pack.json`。
@@ -444,78 +457,11 @@ pub fn install_zip(bytes: &[u8]) -> Result<PackSummary, String> {
     super::packages::prepare(bytes, None, None, false)?.install()
 }
 
-/// 解 zip 到目标目录（拒绝越界路径）。
-pub(super) fn extract_zip(bytes: &[u8], target: &Path) -> Result<(), String> {
-    let reader = std::io::Cursor::new(bytes);
-    let mut archive =
-        zip::ZipArchive::new(reader).map_err(|e| format!("不是合法的 zip 包: {e}"))?;
-    if archive.len() > 4096 {
-        return Err("插件包文件数量超过上限".to_string());
-    }
-    let mut expanded = 0_u64;
-    let mut actual_expanded = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
-    for index in 0..archive.len() {
-        let mut file = archive
-            .by_index(index)
-            .map_err(|e| format!("读 zip 条目失败: {e}"))?;
-        let declared_size = file.size();
-        expanded = expanded.saturating_add(declared_size);
-        if expanded > 128 * 1024 * 1024 {
-            return Err("插件包解压后超过 128 MB 上限".to_string());
-        }
-        // `enclosed_name` 已经做了「不能越出解包目录」的判定（含 `..` 与
-        // 绝对路径两种形态）；返回 None 一律拒绝，不尝试修复路径
-        let Some(relative) = file.enclosed_name() else {
-            return Err(format!("包里有越界路径，已拒绝安装：{}", file.name()));
-        };
-        let out_path = target.join(&relative);
-        if file.is_dir() {
-            std::fs::create_dir_all(&out_path).map_err(|e| format!("建目录失败: {e}"))?;
-            continue;
-        }
-        if let Some(parent) = out_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("建目录失败: {e}"))?;
-        }
-        let mut out = std::fs::File::create(&out_path)
-            .map_err(|e| format!("写文件失败（{}）: {e}", out_path.display()))?;
-        let mut file_expanded = 0_u64;
-        loop {
-            let remaining = 128 * 1024 * 1024 - actual_expanded;
-            // 额度耗尽后仍读最多 1 字节，既区分真实 EOF，也让 zip 完成 CRC 校验。
-            let read_len = buffer.len().min((remaining + 1) as usize);
-            let count = match file.read(&mut buffer[..read_len]) {
-                Ok(count) => count,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => return Err("解包失败：读取条目或 CRC 校验失败".to_string()),
-            };
-            if count == 0 {
-                break;
-            }
-            if count as u64 > remaining {
-                return Err("插件包解压后超过 128 MB 上限".to_string());
-            }
-            actual_expanded += count as u64;
-            file_expanded += count as u64;
-            if file_expanded > declared_size {
-                return Err("插件包条目实际解压尺寸与声明不一致".to_string());
-            }
-            out.write_all(&buffer[..count])
-                .map_err(|_| "解包失败：写入文件失败".to_string())?;
-        }
-        if file_expanded != declared_size {
-            return Err("插件包条目实际解压尺寸与声明不一致".to_string());
-        }
-        // Unix 上要保住可执行位（zip 的 external attributes 高 16 位是 mode）
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = file.unix_mode().unwrap_or(0o644);
-            std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(mode))
-                .map_err(|error| format!("设置文件权限失败（{}）：{error}", out_path.display()))?;
-        }
-    }
-    Ok(())
+/// 解包与见证共用同一有界流；先核对原始目录和路径，再写新文件，拒绝覆盖/链接。
+pub(super) fn extract_zip(
+    bytes: &[u8], target: &Path,
+) -> Result<super::packages::provenance::Extracted, String> {
+    super::packages::provenance::extract(bytes, target)
 }
 
 /// 目录改名的重试退避：三次，合计约 1.4 秒。
@@ -607,6 +553,7 @@ pub fn uninstall(id: &str) -> Result<(), String> {
         return Err(format!("没有安装这个插件包：{id}"));
     };
     let pack = registry.packs.remove(index);
+    let _change = super::packages::provenance::begin_file_change(&pack.id);
     let dir = plugins_dir().join(&pack.id);
     if dir.exists() {
         // 走重试版：卸载时同样会撞上杀软扫描（尤其是刚装完还没扫过的包）
@@ -625,6 +572,11 @@ pub fn set_pack_enabled(id: &str, enabled: bool) -> Result<(), String> {
     let Some(pack) = registry.packs.iter_mut().find(|pack| pack.id == id) else {
         return Err(format!("没有安装这个插件包：{id}"));
     };
+    if enabled {
+        if let Some(reason) = super::support::legacy_reason(pack) { return Err(reason); }
+        if let Some(reason) = super::compatibility::installed_error(pack) { return Err(reason); }
+    }
+    let _change = super::packages::provenance::begin_file_change(&pack.id);
     pack.enabled = enabled;
     registry.save()?;
     Ok(())
@@ -643,6 +595,11 @@ pub fn set_provider_enabled(id: &str, provider: &str, enabled: bool) -> Result<(
     {
         return Err(format!("这个包里没有提供商 {provider}"));
     }
+    if enabled {
+        if let Some(reason) = super::support::legacy_reason(pack) { return Err(reason); }
+        if let Some(reason) = super::compatibility::installed_error(pack) { return Err(reason); }
+    }
+    let _change = super::packages::provenance::begin_file_change(&pack.id);
     pack.providers.insert(provider.to_string(), enabled);
     registry.save()?;
     Ok(())

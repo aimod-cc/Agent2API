@@ -35,11 +35,12 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone)]
 pub struct Connections {
     inner: Arc<Mutex<HashMap<String, usize>>>,
+    changed: Arc<tokio::sync::Notify>,
 }
 
 impl Connections {
     pub fn new() -> Self {
-        Self { inner: Arc::new(Mutex::new(HashMap::new())) }
+        Self { inner: Arc::new(Mutex::new(HashMap::new())), changed: Arc::new(tokio::sync::Notify::new()) }
     }
 
     /// 全部**非零**计数（account_id → count），按 id 排序保证输出稳定。
@@ -63,6 +64,8 @@ impl Connections {
         }
         let mut guard = lock_counts(&self.inner);
         *guard.entry(account_id.to_string()).or_insert(0) += 1;
+        drop(guard);
+        crate::server::core::panel_events::notify(crate::server::core::panel_events::Change::Connections);
     }
 
     /// 计数 -1（减到 0 就删项；无记录时是空操作 —— 幂等，重复释放不会变负数）
@@ -78,7 +81,12 @@ impl Connections {
             }
             None => {}
         }
+        drop(guard);
+        self.changed.notify_waiters();
+        crate::server::core::panel_events::notify(crate::server::core::panel_events::Change::Connections);
     }
+
+    pub(super) fn changed_notify(&self) -> Arc<tokio::sync::Notify> { self.changed.clone() }
 }
 
 impl Default for Connections {
@@ -134,6 +142,27 @@ impl ConnectionGuard {
             self.connections.add(current);
         }
         self.account_id = next;
+    }
+
+    pub(super) fn try_rebind(&mut self, account_id: Option<String>, limit: u64) -> bool {
+        let next = account_id.filter(|id| !id.is_empty());
+        if self.account_id == next { return true; }
+        let mut counts = lock_counts(&self.connections.inner);
+        if let Some(id) = &next {
+            if limit > 0 && counts.get(id).copied().unwrap_or(0) >= limit as usize { return false; }
+        }
+        if let Some(previous) = self.account_id.as_deref() {
+            if let Some(count) = counts.get_mut(previous) {
+                *count = count.saturating_sub(1);
+                if *count == 0 { counts.remove(previous); }
+            }
+        }
+        if let Some(id) = &next { *counts.entry(id.clone()).or_insert(0) += 1; }
+        self.account_id = next;
+        drop(counts);
+        self.connections.changed.notify_waiters();
+        crate::server::core::panel_events::notify(crate::server::core::panel_events::Change::Connections);
+        true
     }
 
     /// 把计数移交给响应流：返回一个持有当前账号的新凭证，自身转为已释放。

@@ -103,7 +103,7 @@ pub async fn ensure() -> Result<PathBuf, String> {
     let (target, checksum) = asset()?;
     super::operations::stage("runtime", "正在下载 Bun 运行时");
     let url =
-        format!("https://github.com/oven-sh/bun/releases/download/bun-v{VERSION}/{target}.zip");
+        format!("https://agent2api.dev/downloads/runtimes/bun/{VERSION}/{target}.zip");
     let bytes = super::download::bytes(&url, 200 * 1024 * 1024, Some(checksum)).await?;
     let destination = path.clone();
     tokio::task::spawn_blocking(move || extract(&bytes, target, &destination))

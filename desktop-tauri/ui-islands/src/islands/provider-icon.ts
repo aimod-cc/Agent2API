@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { BUILTIN_PROVIDER_ICONS, cachedProviderIconPath } from '../../../ui-shared/provider-icons'
+import { BUILTIN_PROVIDER_ICONS, providerIconSource } from '../../../ui-shared/provider-icons'
 import { useImageFallback } from '../../../ui-shared/use-image-fallback'
 import { useGatewayBase } from './port-panel'
 
@@ -26,9 +26,10 @@ function subscribe(listener: () => void): () => void {
 }
 
 export function useProviderIcon(provider: string, fallback = BUILTIN_PROVIDER_ICONS[provider] || '') {
-  const path = React.useSyncExternalStore(subscribe, () => cachedProviderIconPath(
-    (window as unknown as IconBridge).wbApp?.getState?.()?.providerIcons, provider,
-  ))
   const base = useGatewayBase()
-  return useImageFallback(path ? `${base.replace(/\/+$/, '')}${path}` : '', fallback)
+  const icon = React.useSyncExternalStore(subscribe, () => providerIconSource(
+    (window as unknown as IconBridge).wbApp?.getState?.()?.providerIcons, provider,
+    path => `${base.replace(/\/+$/, '')}${path}`,
+  ))
+  return useImageFallback(icon, fallback)
 }

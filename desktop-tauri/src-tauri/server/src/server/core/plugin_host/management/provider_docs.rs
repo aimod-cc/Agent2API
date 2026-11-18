@@ -3,9 +3,7 @@ use std::collections::BTreeMap;
 use agent2api_provider_protocol as proto;
 use serde::{Deserialize, Serialize};
 
-use crate::server::core::plugin_host::{self, install};
-
-const MAX_DOCUMENT_BYTES: u64 = 512 * 1024;
+use crate::server::core::plugin_host;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -74,30 +72,8 @@ struct ProviderDocumentation {
     notes: Vec<LocalizedText>,
 }
 
-fn read_notes(pack: &plugin_host::PackSummary) -> PackNotes {
-    // 放在 ui/ 下的说明数据与页面资源一样受现有插件签名覆盖。
-    let root = install::plugins_dir()
-        .join(&pack.id)
-        .join(&pack.version)
-        .join("ui");
-    let result = (|| {
-        let root = root.canonicalize().ok()?;
-        let path = root.join("provider-docs.json").canonicalize().ok()?;
-        if !path.starts_with(&root) {
-            return None;
-        }
-        let metadata = std::fs::metadata(&path).ok()?;
-        if !metadata.is_file() || metadata.len() > MAX_DOCUMENT_BYTES {
-            return None;
-        }
-        let bytes = std::fs::read(path).ok()?;
-        if bytes.len() as u64 > MAX_DOCUMENT_BYTES {
-            return None;
-        }
-        let notes: PackNotes = serde_json::from_slice(&bytes).ok()?;
-        (notes.schema == 1).then_some(notes)
-    })();
-    result.unwrap_or_default()
+fn read_notes(_pack: &plugin_host::PackSummary) -> PackNotes {
+    PackNotes::default()
 }
 
 fn runtime_capabilities(info: &proto::ProviderInfo) -> [(&'static str, bool); 6] {
@@ -187,7 +163,7 @@ fn provider_documentation(
 pub(super) fn snapshot(packs: &[plugin_host::PackSummary]) -> Vec<PackDocumentation> {
     packs
         .iter()
-        .filter(|pack| pack.enabled)
+        .filter(|pack| pack.enabled && pack.support_state == plugin_host::PackSupportState::Supported)
         .filter_map(|pack| {
             let notes = read_notes(pack);
             let infos = plugin_host::host_for_pack(&pack.id)

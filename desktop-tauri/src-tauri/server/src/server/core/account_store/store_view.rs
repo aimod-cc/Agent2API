@@ -38,6 +38,13 @@ pub(crate) fn account_visible(provider: &str) -> bool {
         || crate::server::core::providers::is_executable_provider(provider)
 }
 
+pub(crate) fn account_list_visible(provider: &str, booting: bool) -> bool {
+    account_visible(provider)
+        && (provider.starts_with(custom_providers::ID_PREFIX)
+            || crate::server::core::providers::subscriptions::contains(provider)
+            || !booting)
+}
+
 /// 快照的两种用途：内部逻辑要全部账号，界面只要此刻能用的。
 ///
 /// ── 为什么必须是两个入口而不是一个布尔参数 ────────────────────
@@ -157,6 +164,7 @@ impl AccountStore {
         // Node 是 `record.rateLimits || {}`：任何真值都原样透出
         // （手工写成数组/字符串时也照透，前端按对象读会得到 undefined，
         // 与 Node 的行为保持一致比「顺手修正」重要）
+        public.insert("routingCooldowns".to_string(), value_or(fields.get("routingCooldowns"), json!({})));
         public.insert(
             "rateLimits".to_string(),
             value_or(fields.get("rateLimits"), Value::Object(Map::new())),
@@ -299,8 +307,9 @@ impl AccountStore {
         // 「隐藏」恒为空，算它只是白跑一遍。
         let mut hidden: std::collections::BTreeMap<String, usize> =
             std::collections::BTreeMap::new();
+        let booting = crate::server::core::plugin_host::startup::booting();
         for record in &state.accounts {
-            if visibility == Visibility::All || account_visible(record.provider().as_str()) {
+            if visibility == Visibility::All || account_list_visible(record.provider().as_str(), booting) {
                 visible.push(record.clone());
             } else {
                 *hidden.entry(record.provider()).or_insert(0) += 1;
@@ -485,7 +494,7 @@ impl AccountStore {
         };
         match shaped {
             Value::Object(mut fields) => {
-                for key in ["rateLimits", "upstreamCooldownUntil", "upstreamBlockedReason"] {
+                for key in ["rateLimits", "routingCooldowns", "upstreamCooldownUntil", "upstreamBlockedReason"] {
                     if let Some(value) = record.get(key) { fields.insert(key.to_string(), value.clone()); }
                     else { fields.remove(key); }
                 }
@@ -567,8 +576,8 @@ impl AccountStore {
                 }
                 fields.insert("checkinAt".to_string(), Value::from(record.checkin_at()));
                 fields.insert("checkedInToday".to_string(), Value::Bool(super::checkin_state::completed(record)));
-                fields.insert("dailyCheckin".to_string(), super::checkin_state::record_status(record)
-                    .cloned().unwrap_or(Value::Null));
+                fields.insert("dailyCheckin".to_string(), super::checkin_state::doubao_status(record)
+                    .or_else(|| super::checkin_state::record_status(record).cloned()).unwrap_or(Value::Null));
                 // 成长中心连登天数（WorkBuddy 国内版；签到后回读落库，见
                 // `AccountStore::mark_streak_days`）。恒为数字键（0 = 还没读到过），
                 // 与 checkinAt 同一理由：界面按数字读，不必判「字段缺失」。
@@ -626,21 +635,17 @@ impl AccountStore {
                     "usageQuery".to_string(),
                     usage_query_public(record.fields().get("usageQuery")),
                 );
-                // 账号级自定义 User-Agent（所有家通用）：恒为字符串，空串 = 没设置
-                // （用该家自己的默认 UA）。与上面几条同一理由 —— 账号设置弹窗要预填
-                // 现值，不能按 provider 各写一份读取；插件家的形状由插件给，顶层
-                // 这个键本来也不在它的 `account_view` 里。
+                // 公开当前有效的账号覆盖值；被固定身份策略禁止的旧值不交给执行体。
                 fields.insert(
                     "userAgent".to_string(),
-                    Value::String(
-                        record
-                            .fields()
-                            .get("userAgent")
-                            .and_then(Value::as_str)
-                            .map(str::trim)
-                            .unwrap_or("")
-                            .to_string(),
-                    ),
+                    Value::String(crate::server::core::user_agent::override_value(
+                        &record.provider(),
+                        record.get("userAgent").and_then(Value::as_str).unwrap_or(""),
+                    ).to_string()),
+                );
+                fields.insert(
+                    "userAgentOverridable".to_string(),
+                    Value::Bool(crate::server::core::user_agent::provider_overridable(&record.provider())),
                 );
                 fields.insert(
                     "lowBalance".to_string(),
@@ -683,6 +688,7 @@ impl AccountStore {
                         Value::Bool(super::chatglm_accounts::guest_of_record(record)),
                     );
                 }
+                super::credential_version::strip_private(&mut fields);
                 Value::Object(fields)
             }
             // 各家形状恒为对象；真出现异常形态时原样透出，不在这里改语义

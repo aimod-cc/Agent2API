@@ -7,7 +7,7 @@ export function retryAt(value) {
   return Number.isFinite(at) && at > Date.now() ? at : null
 }
 
-export function classify(status, body) {
+export function classify(status, body, provider) {
   const detail = body?.error ?? body
   const message = safeMessage(detail?.message ?? (typeof detail === "string" ? detail : `Upstream HTTP ${status}`))
   const code = detail?.code ?? detail?.type
@@ -15,6 +15,12 @@ export function classify(status, body) {
   const reset = body?.resetAt ?? detail?.resetAt
   const reset_at = Number.isFinite(reset) && reset > Date.now() ? reset : null
   const base = { status, message, upstream_code: typeof code === "number" ? code : null }
+  if (provider === "joycode" && String(code) === "9033") {
+    return { ...base, status: 429, kind: "quota_limited", message: "JoyCode 当前账号积分余额不足", upstream_code: 9033, reset_at }
+  }
+  if (provider === "joycode" && code === "AI_GRAY_ACCESS_DENIED") {
+    return { ...base, status: 403, kind: "fatal", message: "JoyCode 当前账号访问受限，请在官方页面联系管理员开通；这不是登录过期" }
+  }
   if (said === "expired") return { kind: "token_expired", message }
   if (status === 401) return said === "kept" || said === "renewed" ? { ...base, kind: "fatal" } : { kind: "token_expired", message }
   if (status === 429 || status === 402) return { ...base, kind: "quota_limited", reset_at }

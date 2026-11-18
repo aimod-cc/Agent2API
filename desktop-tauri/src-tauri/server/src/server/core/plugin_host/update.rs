@@ -1,18 +1,14 @@
-//! 插件索引、发行版与下载。网络出口和 GitHub 令牌复用软件更新链路。
+//! 插件目录、发行版与下载统一读取官网，官方包保持可信签名校验。
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub(crate) use super::packages::MAX_PACK_BYTES;
 
-use crate::server::core::update::client::{
-    fetch_candidate, fetch_json, fetch_public, github_headers,
-};
-use crate::server::core::update::{compare_versions, is_prerelease_version, source, UpdateError};
+use crate::server::core::update::{compare_versions, is_prerelease_version, website, UpdateError};
 
-pub const INDEX_REPO: &str = "Agent2plugin/Agent2plugin";
+pub const INDEX_SOURCE: &str = website::PLUGIN_BASE;
 pub const FALLBACK_REPO: &str = "Agent2Builder/agent2api-providers-releases";
-const GITHUB_API: &str = "https://api.github.com";
 const QUERY_TIMEOUT_MS: u64 = 30_000;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -23,6 +19,8 @@ pub struct PackAsset {
     pub size: u64,
     pub page: String,
     pub require_signed: bool,
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 pub fn asset_name(pack_id: &str, version: &str, target: &str) -> String {
@@ -58,6 +56,7 @@ pub struct ReleaseAssets {
     pub published_at: String,
     pub prerelease: bool,
     pub platforms: Vec<(String, String, u64)>,
+    pub digests: std::collections::HashMap<String, String>,
     pub require_signed: bool,
 }
 
@@ -74,6 +73,7 @@ impl ReleaseAssets {
             size: *size,
             page: self.page.clone(),
             require_signed: self.require_signed,
+            sha256: self.digests.get(url).cloned(),
         })
     }
 }
@@ -87,35 +87,30 @@ fn text(value: &Value, key: &str) -> String {
 }
 
 pub(super) fn waiting_message(state: &crate::server::core::task_state::TaskState) -> String {
-    source::GithubSettings::Plugin.waiting_message(state)
+    state.waiting_message()
 }
 
 pub fn clear_cooldown() {
     super::catalog::clear_cooldown();
 }
 
-async fn fetch(url: &str) -> Result<reqwest::Response, String> {
-    fetch_public(url, &github_headers(), Some(QUERY_TIMEOUT_MS)).await
-}
-
 pub async fn read_index_result() -> Result<Vec<IndexEntry>, UpdateError> {
-    let url = format!("https://raw.githubusercontent.com/{INDEX_REPO}/main/index.json");
-    let response = fetch_json(&url, &github_headers(), QUERY_TIMEOUT_MS, |value| {
-        value.get("plugins").and_then(Value::as_array).is_some()
-    })
-    .await?;
+    let url = format!("{INDEX_SOURCE}/index.json");
+    let response = website::fetch_json(&url, QUERY_TIMEOUT_MS).await?;
     if !response.status.is_success() {
         return Err(UpdateError::new(format!(
             "读取插件索引失败：HTTP {}",
             response.status.as_u16()
         )));
     }
-    let require_signed = !response.official;
+    let require_signed = true;
     let document = response.value;
+    if document["schema"] != 1 { return Err(UpdateError::new("官网插件目录版本不受支持")); }
     let items = document
         .get("plugins")
         .and_then(Value::as_array)
         .ok_or_else(|| UpdateError::new("插件索引缺少 plugins 数组"))?;
+    if items.len() > 200 { return Err(UpdateError::new("官网插件目录过大")); }
     Ok(items
         .iter()
         .filter_map(|item| {
@@ -157,20 +152,12 @@ fn index_path(path: &str) -> Option<String> {
     {
         return None;
     }
-    Some(format!(
-        "https://raw.githubusercontent.com/{INDEX_REPO}/main/{path}"
-    ))
+    Some(format!("{INDEX_SOURCE}/{path}"))
 }
 
 pub async fn read_detail(path: &str) -> Option<PluginDetail> {
-    let response = fetch_json(
-        &index_path(path)?,
-        &github_headers(),
-        QUERY_TIMEOUT_MS,
-        |value| value.is_object() && value.get("release").is_some_and(Value::is_object),
-    )
-    .await
-    .ok()?;
+    let response = website::fetch_json(&index_path(path)?, QUERY_TIMEOUT_MS)
+        .await.ok()?;
     if !response.status.is_success() {
         return None;
     }
@@ -191,22 +178,21 @@ pub async fn read_detail(path: &str) -> Option<PluginDetail> {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "{id}-{version}-{target}.zip".to_string()),
         homepage: text(&document, "homepage"),
-        require_signed: !response.official,
+        require_signed: true,
     })
 }
 
 pub async fn read_store_icon(path: &str) -> Option<String> {
-    let response = fetch(&index_path(path)?).await.ok()?;
-    if !response.status().is_success() || response.content_length().unwrap_or(0) > 2 * 1024 * 1024 {
-        return None;
-    }
+    if !path.starts_with("/plugin-assets/") && !path.starts_with("/api/media/") { return None; }
+    if path.contains("..") || path.contains(['?', '#', '\\']) { return None; }
     let mime = match path.rsplit('.').next()?.to_ascii_lowercase().as_str() {
         "png" => "image/png",
         "webp" => "image/webp",
         "jpg" | "jpeg" => "image/jpeg",
+        "svg" if path.starts_with("/plugin-assets/") => "image/svg+xml",
         _ => return None,
     };
-    let bytes = response.bytes().await.ok()?;
+    let bytes = website::fetch_bytes(&format!("{}{path}", website::ORIGIN), 2 * 1024 * 1024).await.ok()?;
     if bytes.len() > 2 * 1024 * 1024 {
         return None;
     }
@@ -236,7 +222,7 @@ fn release_version(release: &Value, template: &str) -> Option<String> {
     Some(version.to_string())
 }
 
-fn pick_release_assets(
+pub(super) fn pick_release_assets(
     release: &Value,
     id: &str,
     detail: Option<&PluginDetail>,
@@ -258,13 +244,7 @@ fn pick_release_assets(
         .filter_map(|item| {
             let name = item.get("name")?.as_str()?;
             let target = name.strip_prefix(prefix)?.strip_suffix(suffix)?;
-            if target.is_empty()
-                || !target
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-            {
-                return None;
-            }
+            if target != super::wasm::manifest::TARGET { return None; }
             let url = text(item, "browser_download_url");
             if url.is_empty() {
                 return None;
@@ -280,16 +260,33 @@ fn pick_release_assets(
     if platforms.is_empty() {
         return None;
     }
+    let digests = release.get("assets").and_then(Value::as_array).into_iter().flatten().filter_map(|asset| {
+        let value = asset.get("digest")?.as_str()?.strip_prefix("sha256:")?;
+        (value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then(|| (text(asset, "browser_download_url"), value.to_ascii_lowercase()))
+    }).collect();
     Some(ReleaseAssets {
         prerelease: release.get("prerelease").and_then(Value::as_bool) == Some(true)
             || is_prerelease_version(&version),
         version,
-        page: text(release, "html_url"),
+        page: website::release_page(&text(release, "html_url")),
         notes: text(release, "body").chars().take(32_000).collect(),
         published_at: text(release, "published_at"),
         platforms,
+        digests,
         require_signed: false,
     })
+}
+
+pub(super) fn validate_release_urls(release: &Value, assets: &ReleaseAssets, id: &str) -> Result<(), UpdateError> {
+    let tag = text(release, "tag_name");
+    for (platform, url, _) in &assets.platforms {
+        let name = asset_name(id, &assets.version, platform);
+        if !website::plugin_url(url, id, &tag, &name) {
+            return Err(UpdateError::new("官网插件下载地址与包或版本不一致"));
+        }
+    }
+    Ok(())
 }
 
 pub async fn release_for(
@@ -316,7 +313,7 @@ pub(super) async fn release_for_channels(
         .unwrap_or(false);
     let listed = channels.beta || custom_tag;
     let response = match query_releases(
-        repo,
+        id,
         if listed { "?per_page=100" } else { "/latest" },
         listed,
     )
@@ -343,8 +340,8 @@ pub(super) async fn release_for_channels(
         let Some(mut assets) = pick_release_assets(release, id, detail) else {
             continue;
         };
-        assets.require_signed =
-            !response.official || detail.is_some_and(|detail| detail.require_signed);
+        validate_release_urls(release, &assets, id)?;
+        assets.require_signed = true;
         if !channels.accepts(assets.prerelease) {
             continue;
         }
@@ -368,30 +365,26 @@ pub(super) async fn release_for_channels(
 }
 
 async fn query_releases(
-    repo: &str,
+    id: &str,
     suffix: &str,
     listed: bool,
-) -> Result<Option<crate::server::core::update::client::JsonResponse>, UpdateError> {
-    if !valid_repo(repo) {
-        return Err(UpdateError::new("插件发布仓库必须是 owner/repo"));
+) -> Result<Option<website::JsonResponse>, UpdateError> {
+    if id.is_empty() || id.len() > 64 || !id.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-') {
+        return Err(UpdateError::new("插件标识无效"));
     }
-    let url = format!("{GITHUB_API}/repos/{repo}/releases{suffix}");
-    let response = fetch_json(&url, &github_headers(), QUERY_TIMEOUT_MS, |value| {
-        if listed {
-            value.is_array()
-        } else {
-            value.get("tag_name").and_then(Value::as_str).is_some()
-        }
-    })
-    .await?;
+    let url = format!("{INDEX_SOURCE}/{id}/releases{suffix}");
+    let response = website::fetch_json(&url, QUERY_TIMEOUT_MS).await?;
     if response.status.as_u16() == 404 {
         return Ok(None);
     }
     if !response.status.is_success() {
         return Err(UpdateError::new(format!(
-            "查询插件更新失败：GitHub 返回 HTTP {}",
+            "查询插件更新失败：官网返回 HTTP {}",
             response.status.as_u16()
         )));
+    }
+    if (listed && !response.value.is_array()) || (!listed && response.value.get("tag_name").and_then(Value::as_str).is_none()) {
+        return Err(UpdateError::new("官网插件版本信息格式无效"));
     }
     Ok(Some(response))
 }
@@ -420,6 +413,9 @@ pub async fn download(
     asset: &PackAsset,
     mut progress: impl FnMut(u64, u64),
 ) -> Result<Vec<u8>, String> {
+    if !website::trusted_url(&asset.url) || !url::Url::parse(&asset.url).is_ok_and(|url| {
+        url.path().starts_with("/downloads/plugins/") && url.query().is_none()
+    }) { return Err("官方插件只能从官网下载，请重新刷新插件列表".to_string()); }
     crate::server::core::update::assert_downloadable(&asset.url).map_err(|error| error.message)?;
     if asset.size > MAX_PACK_BYTES as u64 {
         return Err(format!("插件包超过 {} MiB 上限", MAX_PACK_BYTES / (1024 * 1024)));
@@ -433,66 +429,23 @@ pub async fn download(
         name.split_once(version_marker.as_str())
             .map(|(id, _)| id.to_string())
     });
-    let mut last_error = "没有可用的插件下载源".to_string();
-    let mut limited = Vec::new();
-    for candidate in source::download_candidates(&asset.url, pack_id.is_some(), &headers).await.map_err(|error| error.message)? {
-        if let Some(error) = candidate.cooling_error(&headers) {
-            limited.extend(error.rate_limits);
-            continue;
-        }
-        let started = std::time::Instant::now();
-        let response = match fetch_candidate(&candidate, &headers, None).await {
-            Ok(response) => response,
-            Err(error) => {
-                candidate.observe(source::failed_state(&error.message), started.elapsed().as_millis() as u64, false);
-                limited.extend(error.rate_limits);
-                last_error = error.message;
-                continue;
-            }
-        };
-        if response.status().as_u16() != 200 {
-            last_error = format!(
-                "下载插件包失败：{}返回 HTTP {}",
-                candidate.label(),
-                response.status().as_u16()
-            );
-            if source::should_switch(&candidate, response.status())
-                || candidate.source == source::Source::Mirror
-            {
-                candidate.forget();
-                continue;
-            }
-            return Err(last_error);
-        }
-        candidate.observe("ok", started.elapsed().as_millis() as u64, false);
-        match read_download(response, asset, &mut progress).await {
-            Ok(buffer) => {
-                if asset.require_signed || candidate.source == source::Source::Mirror {
-                    let verify = buffer.clone();
-                    let id = pack_id.clone();
-                    let version = asset.version.clone();
-                    let prepared = tokio::task::spawn_blocking(move || {
-                        super::packages::prepare(&verify, id.as_deref(), Some(&version), true)
-                    })
-                    .await
-                    .map_err(|error| error.to_string())
-                    .and_then(|result| result);
-                    if let Err(error) = prepared {
-                        candidate.forget();
-                        last_error = format!("加速下载的插件未通过可信签名校验：{error}");
-                        continue;
-                    }
-                }
-                candidate.remember();
-                return Ok(buffer);
-            }
-            Err(error) => {
-                candidate.forget();
-                last_error = error;
-            }
+    let response = website::request(&asset.url, &headers, None).await.map_err(|error| error.message)?;
+    if response.status().as_u16() != 200 {
+        return Err(format!("下载插件包失败：官网返回 HTTP {}", response.status().as_u16()));
+    }
+    let buffer = read_download(response, asset, &mut progress).await?;
+    if let Some(expected) = asset.sha256.as_ref() {
+        if super::install::sha256_hex(&buffer) != *expected {
+            return Err("官网下载的插件包 SHA-256 不一致，已拒绝使用".to_string());
         }
     }
-    Err(if limited.is_empty() { last_error } else { UpdateError::rate_limited(limited).message })
+    let verify = buffer.clone();
+    let version = asset.version.clone();
+    tokio::task::spawn_blocking(move || {
+        super::packages::prepare(&verify, pack_id.as_deref(), Some(&version), true)
+    }).await.map_err(|error| error.to_string())?
+        .map_err(|error| format!("官网下载的插件未通过可信签名校验：{error}"))?;
+    Ok(buffer)
 }
 
 async fn read_download(

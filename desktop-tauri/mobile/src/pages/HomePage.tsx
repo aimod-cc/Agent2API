@@ -6,10 +6,10 @@ import { Icon } from '../components/Icon'
 import { PullIndicator, usePullToRefresh } from '../components/PullToRefresh'
 import { useStore, store } from '../state/store'
 import {
-  fetchCheckinCenter,
+  fetchHomeCheckinSummary,
   fetchRequests,
-  fetchStatsSummary,
-  type CheckinCenter,
+  fetchTodayRequestCount,
+  type HomeCheckinSummary,
   type RequestPage,
   type StatsSummary,
 } from '../api/gateway'
@@ -34,9 +34,9 @@ export function HomePage() {
   const branding = mobileBranding.useValue()
   const session = state.session
   const accounts = session?.accounts?.accounts || []
-  const enabled = accounts.filter(item => item.enabled).length
-  const limited = accounts.filter(item => item.enabled && isRateLimited(item)).length
-  const [checkin, setCheckin] = useState<CheckinCenter | null>(null)
+  const enabled = session?.accounts?.summary?.enabled ?? accounts.filter(item => item.enabled).length
+  const limited = session?.accounts?.summary?.limited ?? accounts.filter(item => item.enabled && isRateLimited(item)).length
+  const [checkin, setCheckin] = useState<HomeCheckinSummary | null>(null)
   const [requests, setRequests] = useState<RequestPage | null>(null)
   const [today, setToday] = useState<StatsSummary | null>(null)
   const [error, setError] = useState('')
@@ -45,9 +45,9 @@ export function HomePage() {
     try {
       // 今日请求数走报表汇总（区间内的请求数）；该接口失败不应拖垮整页，失败时按 0 显示
       const [center, page, summary] = await Promise.all([
-        fetchCheckinCenter(),
+        fetchHomeCheckinSummary(),
         fetchRequests({ limit: 3 }),
-        fetchStatsSummary('today').catch(() => null),
+        fetchTodayRequestCount().catch(() => null),
       ])
       setCheckin(center)
       setRequests(page)

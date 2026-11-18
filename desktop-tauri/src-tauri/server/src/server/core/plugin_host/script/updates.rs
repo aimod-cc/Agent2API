@@ -59,7 +59,7 @@ fn worker() -> &'static Worker {
 }
 
 fn path() -> std::path::PathBuf {
-    super::root().join("updates.json")
+    super::root().join("website-updates.json")
 }
 
 fn cache() -> Cache {

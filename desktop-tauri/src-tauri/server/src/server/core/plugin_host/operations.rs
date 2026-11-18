@@ -1,7 +1,7 @@
 //! 插件下载任务在服务端执行，进度按包 id 隔离；下载后自动验签、安装并热加载。
 
-use std::collections::BTreeMap;
-use std::sync::{Mutex, OnceLock};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{atomic::{AtomicU64, Ordering}, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -17,10 +17,13 @@ mod policy;
 pub use management::{change, PackChange};
 use policy::InstallPolicy;
 
+static OPERATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Operation {
     pub id: String,
+    pub operation_id: String,
     pub action: String,
     pub stage: String,
     pub active: bool,
@@ -53,6 +56,38 @@ pub async fn mutation_guard() -> MutexGuard<'static, ()> {
 
 fn record_key(id: &str) -> String {
     format!("pluginOperation:{id}")
+}
+
+fn operation_id() -> String {
+    format!("{}-{}-{}", std::process::id(), logging::now_ms(), OPERATION_SEQUENCE.fetch_add(1, Ordering::Relaxed))
+}
+
+struct OperationGuard {
+    id: String,
+    operation_id: String,
+    guard: Option<task_state::RunGuard>,
+    policy: InstallPolicy,
+}
+
+impl OperationGuard {
+    fn finish(mut self, result: Result<&Value, &String>) {
+        if let Some(guard) = self.guard.take() {
+            finish_operation(&self.id, result, guard, self.policy);
+        }
+    }
+}
+
+impl Drop for OperationGuard {
+    fn drop(&mut self) {
+        let current = tasks().lock().ok().is_some_and(|tasks| tasks.get(&self.id)
+            .is_some_and(|operation| operation.active && operation.operation_id == self.operation_id));
+        if current {
+            if let Some(guard) = self.guard.take() {
+                let error = "插件安装任务中断，请刷新后查看插件状态再重试".to_string();
+                finish_operation(&self.id, Err(&error), guard, self.policy);
+            }
+        }
+    }
 }
 
 fn mutate(id: &str, update: impl FnOnce(&mut Operation)) {
@@ -93,52 +128,69 @@ pub fn active(id: &str) -> bool {
         .unwrap_or(false)
 }
 
+pub(crate) fn active_for_provider(provider: &str) -> bool {
+    super::provider_pack(provider).is_some_and(|id| active(&id))
+}
+
 pub fn snapshot() -> Value {
+    snapshot_with_states(&task_state::read_all().unwrap_or_default())
+}
+
+pub fn snapshot_with_states(states: &HashMap<String, task_state::TaskState>) -> Value {
     let mut operations = tasks()
         .lock()
         .map(|tasks| tasks.clone())
         .unwrap_or_default();
-    if let Ok(states) = task_state::read_all() {
-        for (key, state) in states {
-            let Some(id) = key.strip_prefix("pluginOperation:") else {
-                continue;
-            };
-            if operations.contains_key(id) {
-                continue;
-            }
-            let Some(value) = state.value else {
-                continue;
-            };
-            let Ok(mut operation) = serde_json::from_value::<Operation>(value) else {
-                continue;
-            };
-            if operation.active {
-                operation.active = false;
-                operation.stage = "failed".to_string();
-                operation.error = Some("上次插件安装中断，请重试".to_string());
-            }
-            operation.result = None;
-            operations.insert(id.to_string(), operation);
+    for (key, state) in states {
+        let Some(id) = key.strip_prefix("pluginOperation:") else {
+            continue;
+        };
+        if operations.contains_key(id) {
+            continue;
         }
+        let Some(value) = &state.value else {
+            continue;
+        };
+        let Ok(mut operation) = serde_json::from_value::<Operation>(value.clone()) else {
+            continue;
+        };
+        if operation.active {
+            operation.active = false;
+            operation.stage = "failed".to_string();
+            operation.error = Some("上次插件安装中断，请重试".to_string());
+        }
+        operation.result = None;
+        operations.insert(id.to_string(), operation);
     }
     json!({ "operations": operations.into_values().collect::<Vec<_>>() })
 }
 
 pub async fn install_prepared(prepared: packages::PreparedPack) -> Result<Value, String> {
+    let (_, task) = spawn_prepared(prepared)?;
+    task.await.map_err(|error| format!("插件安装任务中断：{error}"))?
+}
+
+pub fn start_prepared(prepared: packages::PreparedPack) -> Result<Operation, String> {
+    spawn_prepared(prepared).map(|(operation, _)| operation)
+}
+
+fn spawn_prepared(prepared: packages::PreparedPack) -> Result<(Operation, tokio::task::JoinHandle<Result<Value, String>>), String> {
     let id = prepared.id().to_string();
     let guard = claim_operation(&id, InstallPolicy::Manual)?;
     let operation = Operation {
-        id: id.clone(), action: "install".to_string(), stage: "waiting".to_string(), active: true,
+        id: id.clone(), operation_id: operation_id(), action: "install".to_string(), stage: "waiting".to_string(), active: true,
         version: prepared.record(&super::PackRegistry::load()).version,
         updated_at: logging::now_ms(), ..Default::default()
     };
-    tasks().lock().map_err(|_| "插件任务状态不可用".to_string())?.insert(id.clone(), operation);
+    tasks().lock().map_err(|_| "插件任务状态不可用".to_string())?.insert(id.clone(), operation.clone());
     persist(&id);
-    crate::spawn_task(async move {
+    let guard = OperationGuard { id, operation_id: operation.operation_id.clone(), guard: Some(guard), policy: InstallPolicy::Manual };
+    let task = crate::spawn_task(async move {
         let result = activation::install(prepared, None).await;
-        finish_operation(&id, result.as_ref(), guard, InstallPolicy::Manual);
+        guard.finish(result.as_ref());
         result
-    }).await.map_err(|error| format!("插件安装任务中断：{error}"))?
+    });
+    Ok((operation, task))
 }
 
 pub fn start_cached(
@@ -152,13 +204,17 @@ pub fn start_cached(
     if target != super::host_target() && target != super::wasm::manifest::TARGET {
         return Err("只能安装当前网关平台的插件包".to_string());
     }
+    if platform["target"] != super::wasm::manifest::TARGET {
+        return Err(super::support::LEGACY_REASON.to_string());
+    }
     let asset = update::PackAsset {
         version: version.to_string(),
         name: update::asset_name(id, version, platform["target"].as_str().unwrap_or(target)),
         url: platform["url"].as_str().unwrap_or("").to_string(),
         size: platform["size"].as_u64().unwrap_or(0),
         page: String::new(),
-        require_signed: automatic || platform["requireSigned"] == true,
+        require_signed: true,
+        sha256: platform["sha256"].as_str().map(str::to_string),
     };
     let policy = if automatic {
         InstallPolicy::Automatic(super::settings::current().channels())
@@ -197,7 +253,9 @@ fn finish_operation(
             Ok(result) => operation.host_error = result["hostError"].as_str().map(str::to_string),
             Err(error) => operation.error = Some(error.clone()),
         }
-        operation.result = None;
+        operation.result = result.ok().map(|result| json!({
+            "pack": result["pack"], "installNotice": result["installNotice"],
+        }));
         value = serde_json::to_value(&*operation).unwrap_or(Value::Null);
     });
     let message = value["error"].as_str().or_else(|| value["hostError"].as_str())
@@ -217,6 +275,7 @@ fn start_asset(
     let guard = claim_operation(id, policy)?;
     let operation = Operation {
         id: id.to_string(),
+        operation_id: operation_id(),
         action: action.to_string(),
         stage: "downloading".to_string(),
         active: true,
@@ -232,9 +291,10 @@ fn start_asset(
         .insert(id.to_string(), operation.clone());
     persist(id);
     let id = id.to_string();
+    let guard = OperationGuard { id: id.clone(), operation_id: operation.operation_id.clone(), guard: Some(guard), policy };
     crate::spawn_task(async move {
         let result = run(&id, &asset, policy).await;
-        finish_operation(&id, result.as_ref(), guard, policy);
+        guard.finish(result.as_ref());
     });
     Ok(operation)
 }
@@ -283,6 +343,9 @@ pub async fn start(id: &str, action: &str, target: &str) -> Result<Operation, St
     if action == "update" && pack.is_none() {
         return Err("还没有安装这个插件包".to_string());
     }
+    if action == "update" && pack.is_some_and(|pack| pack.support_state == super::PackSupportState::LegacyUnsupported) {
+        return Err(super::support::LEGACY_REASON.to_string());
+    }
     let cached = catalog::snapshot();
     let catalog = if cached["checked"] == true && cached["stale"] != true {
         cached
@@ -311,7 +374,7 @@ pub async fn start(id: &str, action: &str, target: &str) -> Result<Operation, St
     }
     let platform = entry["platforms"]
         .as_array()
-        .and_then(|items| items.iter().find(|item| item["target"] == target || item["target"] == super::wasm::manifest::TARGET))
+        .and_then(|items| items.iter().find(|item| item["target"] == super::wasm::manifest::TARGET))
         .ok_or_else(|| "当前平台暂无安装包".to_string())?;
     start_cached(id, action, target, version, platform, false)
 }

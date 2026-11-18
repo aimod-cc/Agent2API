@@ -16,10 +16,11 @@ import { CheckinRegionSettings } from './CheckinRegionSettings'
 import { t } from '../../i18n'
 import { checkinEnd, checkinMakeupTime, checkinRangeText, defaultCheckinEnd, providerCheckinEnd, validCheckinRange } from '../../../../ui-shared/checkin-window'
 
-export function CheckinSchedules({ center, busy, action }: {
+export function CheckinSchedules({ center, busy, action, onChange }: {
   center: CheckinCenter
   busy: string
   action: CheckinAction
+  onChange: () => Promise<void>
 }) {
   const [editing, setEditing] = useState<ScheduleEntry | 'new' | null>(null)
   const [remove, setRemove] = useState<ScheduleEntry | null>(null)
@@ -107,7 +108,7 @@ export function CheckinSchedules({ center, busy, action }: {
       ))}
       {!entries.length ? <Empty text={t('还没有定时条目，添加一条或到签到中心手动签到')} /> : null}
 
-      <CheckinRegionSettings center={center} busy={busy} action={action} />
+      <CheckinRegionSettings center={center} busy={busy} action={action} onChange={onChange} />
 
       {editing ? <ScheduleEditor key={typeof editing === 'string' ? editing : editing.id}
         entry={editing === 'new' ? null : editing} options={options} busy={busy} action={action} onClose={() => setEditing(null)} /> : null}

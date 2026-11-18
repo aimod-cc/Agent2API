@@ -18,6 +18,7 @@ use serde_json::Value;
 use crate::server::core::egress;
 use crate::server::core::proxies::ResolvedProxy;
 use crate::server::core::user_agent::AccountRequest;
+use crate::server::core::usage_query::{diagnostics, network};
 use crate::server::errors::GatewayError;
 
 /// token 临期刷新窗口：过期前 5 分钟视为需要刷新
@@ -97,6 +98,8 @@ pub async fn send_raw(
     timeout_ms: Option<u64>,
 ) -> Result<ApiResponse, reqwest::Error> {
     let client = egress::client_for(proxy);
+    let trace = diagnostics::current().and_then(|trace| trace.request(method, url, proxy, false));
+    let timeout_ms = diagnostics::request_timeout(timeout_ms);
     let mut builder = match method {
         "POST" => client.post(url),
         "PUT" => client.put(url),
@@ -116,10 +119,22 @@ pub async fn send_raw(
     if let Some(timeout) = timeout_ms {
         builder = builder.timeout(Duration::from_millis(timeout));
     }
-    let response = builder.with_account_user_agent().send().await?;
+    let response = builder.with_account_user_agent().send().await.map_err(|error| {
+        if let (Some(trace), Some(kind)) = (&trace, network::classify(&error, false)) {
+            trace.failed(kind, &egress::describe_error_detail(&error));
+        }
+        error
+    })?;
     let status = response.status().as_u16();
     let ok = response.status().is_success();
-    let text = response.text().await?;
+    if let Some(trace) = &trace { trace.response(status); }
+    let text = response.text().await.map_err(|error| {
+        if let (Some(trace), Some(kind)) = (&trace, network::classify(&error, true)) {
+            trace.failed(kind, &egress::describe_error_detail(&error));
+        }
+        error
+    })?;
+    if let Some(trace) = &trace { trace.finish(); }
     let payload = if text.trim().is_empty() {
         None
     } else {

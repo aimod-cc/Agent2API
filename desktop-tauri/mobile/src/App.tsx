@@ -15,6 +15,7 @@ import { ProxiesPage } from './pages/ProxiesPage'
 import { TasksPage } from './pages/TasksPage'
 import { RequestsPage } from './pages/RequestsPage'
 import { LogsPage } from './pages/LogsPage'
+import { RoutingPage } from './pages/routing-page'
 import { SettingsPage } from './pages/SettingsPage'
 import { ProviderSettingsPage } from './pages/provider-settings-page'
 import { DocsPage } from './pages/DocsPage'
@@ -57,6 +58,7 @@ const SCREENS: Record<ScreenId, ScreenDef> = {
   tasks: { title: t('自动维护'), component: TasksPage },
   requests: { title: t('请求日志'), component: RequestsPage },
   logs: { title: t('运行日志'), component: LogsPage },
+  routing: { title: t('路由 · 错误处理'), component: RoutingPage },
   settings: { title: t('设置'), component: SettingsPage },
   'provider-settings': { title: t('提供商设置'), component: ProviderSettingsPage },
   docs: { title: t('接口文档'), component: DocsPage },

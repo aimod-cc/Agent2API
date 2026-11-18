@@ -27,7 +27,7 @@ pub fn load_client(client: &str) -> Result<Vec<Profile>, String> {
     load_with_revision(client).map(|(profiles, _)| profiles)
 }
 
-pub fn load_with_revision(client: &str) -> Result<(Vec<Profile>, String), String> {
+pub fn load_snapshot() -> Result<Value, String> {
     let text = access::kv_get(KEY);
     let value: Value = text
         .map(|text| serde_json::from_str(&text).map_err(|e| format!("已保存方案无法读取: {e}")))
@@ -36,6 +36,14 @@ pub fn load_with_revision(client: &str) -> Result<(Vec<Profile>, String), String
     if !value.is_object() {
         return Err("已保存方案存储不是对象，拒绝覆盖".into());
     }
+    Ok(value)
+}
+
+pub fn load_with_revision(client: &str) -> Result<(Vec<Profile>, String), String> {
+    load_from_snapshot(&load_snapshot()?, client)
+}
+
+pub fn load_from_snapshot(value: &Value, client: &str) -> Result<(Vec<Profile>, String), String> {
     let revision = client_revision(value.get(client));
     let Some(items) = value.get(client) else {
         return Ok((Vec::new(), revision));

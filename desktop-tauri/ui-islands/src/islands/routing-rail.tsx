@@ -22,10 +22,11 @@ export const SPECIAL_RAIL: Array<{ key: SpecialKey; label: string; icon: string 
   { key: 'title', label: t('标题生成'), icon: 'spark' },
 ]
 
-export function RoutingRail({ editor, groups, workspace, onModel, onGroup, onAdd, special, onSpecial }: {
+export function RoutingRail({ editor, groups, workspace, onModel, onGroup, onAdd, special, onSpecial, errors = false, errorsDirty = false, onErrors }: {
   editor: RoutingEditorState; groups: RouteGroupEditor; workspace?: RoutingWorkspace | null
   onModel(model: string): void; onGroup(id: string): void; onAdd(): void
   special: SpecialKey | null; onSpecial(key: SpecialKey): void
+  errors?: boolean; errorsDirty?: boolean; onErrors?(): void
 }) {
   const configured = editor.draft?.workspace.configuredModels || workspace?.configuredModels || []
   const modelKeys = new Map(configured.map(model => [model.toLowerCase(), model]))
@@ -36,10 +37,10 @@ export function RoutingRail({ editor, groups, workspace, onModel, onGroup, onAdd
   const disabled = editor.busy || groups.busy || groups.loading
   const addDisabled = disabled || editor.loading || !(editor.draft || workspace) || !groups.data
   const groupDrafts = Object.values(groups.drafts)
-  const globalSelected = !special && !groups.selected && !editor.scope
+  const globalSelected = !errors && !special && !groups.selected && !editor.scope
   const dirtyDot = (dirty: boolean) => dirty ? <span className='routing-rail-dirty' title={t('有未保存的修改')} aria-label={t('有未保存的修改')}><StatusDot variant='warning' /></span> : undefined
   return <Sidebar className='routing-config-rail'>
-    <SidebarHeader className='routing-config-rail-head'><b>{t('路由配置')}</b><span>{1 + SPECIAL_RAIL.length + models.length + groupDrafts.length}</span>
+    <SidebarHeader className='routing-config-rail-head'><b>{t('路由配置')}</b><span>{2 + SPECIAL_RAIL.length + models.length + groupDrafts.length}</span>
       <Button variant='ghost' size='icon-sm' disabled={addDisabled} onClick={onAdd}
         title={t('新增路由配置')} aria-label={t('新增路由配置')}><RouteIcon name='plus' size={14} /></Button>
     </SidebarHeader>
@@ -47,22 +48,24 @@ export function RoutingRail({ editor, groups, workspace, onModel, onGroup, onAdd
       <SidebarGroupLabel>{t('默认规则')}</SidebarGroupLabel>
       <NavItem className='routing-config-scope-item' active={globalSelected} disabled={disabled}
         trailing={dirtyDot(Boolean(editor.drafts[''] && draftDirty(editor.drafts[''])))} onClick={() => onModel('')}>
-        <b>{t('全局默认')}</b>
+        {t('全局默认')}
       </NavItem>
+      <NavItem className='routing-config-scope-item' active={errors} icon={<RouteIcon name='refresh' size={17} />}
+        trailing={dirtyDot(errorsDirty)} onClick={onErrors}>{t('错误处理')}</NavItem>
       <SidebarGroupLabel>{t('特殊请求路由')}</SidebarGroupLabel>
       {SPECIAL_RAIL.map(item => <NavItem key={item.key} className='routing-config-scope-item' active={special === item.key}
-        onClick={() => onSpecial(item.key)} title={item.label}>
-        <b><span className='routing-rail-special'><RouteIcon name={item.icon} size={13} />{item.label}</span></b>
+        icon={<RouteIcon name={item.icon} size={17} />} onClick={() => onSpecial(item.key)} title={item.label}>
+        {item.label}
       </NavItem>)}
       {models.length ? <SidebarGroupLabel>{t('模型路由')}</SidebarGroupLabel> : null}
-      {models.map(model => <NavItem key={model} className='routing-config-scope-item' active={!special && !groups.selected && model.toLowerCase() === editor.scope.toLowerCase()}
+      {models.map(model => <NavItem key={model} className='routing-config-scope-item' active={!errors && !special && !groups.selected && model.toLowerCase() === editor.scope.toLowerCase()}
         disabled={disabled} trailing={dirtyDot(Boolean(editor.drafts[model.toLowerCase()] && draftDirty(editor.drafts[model.toLowerCase()])))} onClick={() => onModel(model)} title={model}>
-        <b>{model}</b>
+        {model}
       </NavItem>)}
       {groupDrafts.length ? <SidebarGroupLabel>{t('自定义路由组')}</SidebarGroupLabel> : null}
       {groupDrafts.map(draft => <NavItem key={draft.group.id} disabled={disabled} className='routing-config-scope-item'
-        active={draft.group.id === groups.selected} trailing={dirtyDot(groupDirty(draft))} onClick={() => onGroup(draft.group.id)} title={draft.group.model}>
-        <b>{draft.group.name}</b>
+        active={!errors && !special && draft.group.id === groups.selected} trailing={dirtyDot(groupDirty(draft))} onClick={() => onGroup(draft.group.id)} title={draft.group.model}>
+        {draft.group.name}
       </NavItem>)}
       {groups.error ? <p className='routing-config-error' role='alert'>{groups.error}<Button variant='link' disabled={groups.loading} onClick={() => void groups.load()}>{t('重新读取')}</Button></p> : null}
     </NavList>

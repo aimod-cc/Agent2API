@@ -102,7 +102,7 @@ export function CheckinPlansSheet({ entry, onClose, onChange }: {
     mounted.current = true
     const controller = new AbortController()
     void loadPreview()
-    void fetchUsageSnapshot(controller.signal).then(snapshot => {
+    void fetchUsageSnapshot(controller.signal, [entry.id]).then(snapshot => {
       if (controller.signal.aborted || !mounted.current || serverIdentity() !== identity) return
       const row = snapshot.results?.find(item => item.id === entry.id)
       if (row) { setUsage(row); setUsageError(row.error || '') }

@@ -33,7 +33,7 @@
 //! 日志一律在闭包之外打。
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
@@ -41,6 +41,8 @@ use serde_json::Value;
 use crate::server::core::account_store::store_util::js_truthy;
 use crate::server::db::Db;
 use crate::server::logging;
+
+mod cache;
 
 /// 旧 kv 快照键（全局「定时查询积分」时代的存放处）。
 /// 保留在 `db::schema::RESERVED_KV_KEYS` 里：迁移中断（导入失败不删键）时，
@@ -69,6 +71,7 @@ pub struct UsageRecord {
     pub usage: Option<Value>,
     /// 最近一次失败的原因（成功行清空）。
     pub error: Option<String>,
+    pub diagnostics: Option<Value>,
     /// 失败的机器可识别标记（如「未配置查询凭证」）。
     pub code: Option<String>,
     /// 数值投影（成功时从 usage 提出；失败保留上次成功值；判不出为 NULL）。
@@ -87,6 +90,7 @@ pub struct UsageOutcome {
     pub usage: Option<Value>,
     pub error: Option<String>,
     pub code: Option<String>,
+    pub diagnostics: Option<Value>,
 }
 
 pub fn install(db: Option<Db>) {
@@ -103,9 +107,11 @@ fn database() -> Option<&'static Db> {
 
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageRecord> {
     let usage_text: Option<String> = row.get("usage")?;
+    let diagnostics_text: Option<String> = row.get("diagnostics")?;
     Ok(UsageRecord {
         usage: usage_text.and_then(|text| serde_json::from_str(&text).ok()),
         error: row.get("error")?,
+        diagnostics: diagnostics_text.and_then(|text| serde_json::from_str(&text).ok()),
         code: row.get("code")?,
         remaining: row.get::<_, Option<f64>>("remaining")?,
         unlimited: row.get::<_, i64>("unlimited").unwrap_or(0) != 0,
@@ -117,13 +123,14 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageRecord> {
 }
 
 const RECORD_COLUMNS: &str =
-    "usage, error, code, remaining, unlimited, last_success_at, last_attempt_at, query_config, query_request_id";
+    "usage, error, code, diagnostics, remaining, unlimited, last_success_at, last_attempt_at, query_config, query_request_id";
 
 /// 某账号的最近一条记录（没有 = 全缺省：从未查过）。
 pub fn load(account_id: &str) -> UsageRecord {
     let fallback = UsageRecord {
         usage: None,
         error: None,
+        diagnostics: None,
         code: None,
         remaining: None,
         unlimited: false,
@@ -165,6 +172,10 @@ pub fn load_all() -> HashMap<String, UsageRecord> {
         rows.filter_map(|item| item.ok()).collect::<HashMap<_, _>>()
     })
     .unwrap_or_default()
+}
+
+pub(crate) fn cached_snapshot() -> Arc<HashMap<String, UsageRecord>> {
+    cache::snapshot()
 }
 
 /// 选路用的余额事实快照（内存查表，调用方克隆一份小 Map）。
@@ -221,6 +232,7 @@ pub fn write_result(account_id: &str, outcome: &UsageOutcome, query_config: &str
                        usage = excluded.usage,
                        error = NULL,
                        code = NULL,
+                       diagnostics = NULL,
                        remaining = excluded.remaining,
                        unlimited = excluded.unlimited,
                        last_success_at = excluded.last_success_at,
@@ -234,18 +246,21 @@ pub fn write_result(account_id: &str, outcome: &UsageOutcome, query_config: &str
                 Some((true, remaining))
             }
             None => {
-                let error = outcome.error.clone().unwrap_or_else(|| "查询失败".to_string());
+                let error = outcome.error.as_deref().unwrap_or("查询失败");
+                let diagnostics = outcome.diagnostics.as_ref().filter(|value| value.is_object())
+                    .and_then(|value| serde_json::to_string(value).ok());
                 conn.execute(
                     "INSERT INTO account_usage_records
-                       (account_id, error, code, last_attempt_at, updated_at, query_request_id)
-                     VALUES (?1, ?2, ?3, ?4, ?4, ?5)
+                       (account_id, error, code, last_attempt_at, updated_at, query_request_id, diagnostics)
+                     VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6)
                      ON CONFLICT(account_id) DO UPDATE SET
                        error = excluded.error,
                        code = excluded.code,
                        last_attempt_at = excluded.last_attempt_at,
                        updated_at = excluded.updated_at,
-                       query_request_id = excluded.query_request_id",
-                    params![account_id, error, outcome.code, now, request_id],
+                       query_request_id = excluded.query_request_id,
+                       diagnostics = excluded.diagnostics",
+                    params![account_id, error, outcome.code, now, request_id, diagnostics],
                 )
                 .ok()?;
                 Some((false, None))

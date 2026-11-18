@@ -12,13 +12,12 @@
  * 换群 / 换码就得跟着发一次版；群号 + 复制按钮改一个常量即可。
  */
 
-export type QqGroup = { no: string; nearlyFull: boolean }
+export type QqGroup = { no: string }
 
 export const QQ_GROUPS: readonly QqGroup[] = [
-  { no: '1127656296', nearlyFull: true },
-  { no: '1130894674', nearlyFull: true },
-  { no: '1108276647', nearlyFull: false },
-  { no: '1054072416', nearlyFull: false },
+  { no: '1127656296' },
+  { no: '1130894674' },
+  { no: '1108276647' },
 ]
 
 export type CommunityLink = { id: 'telegram'; url: string }

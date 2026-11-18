@@ -145,6 +145,10 @@ const BRIDGE_JS: &str = r#"
     };
   };
 
+  on('management-session-changed', () => {
+    window.dispatchEvent(new Event('wb:management-session-changed'));
+  });
+
   window.workbuddyDesktop = {
     // ── 平台 ──
     // 壳的编译目标平台（'macos' / 'windows' / 'linux'）。界面用它裁剪
@@ -165,7 +169,7 @@ const BRIDGE_JS: &str = r#"
     saveToolImage: id => invoke('save_tool_image', { id: String(id || '') }),
 
     // ── 会话 ──
-    getState: () => call('GET', '/api/session'),
+    getState: () => call('GET', '/api/session?accounts=index'),
     startLogin: (edition, mode, provider, socialRestore, options) =>
       invoke('start_login', {
         edition: edition || 'cn',
@@ -178,14 +182,16 @@ const BRIDGE_JS: &str = r#"
         ...(options === undefined ? {} : { options }),
       }),
     // URL / 裸 code 都原样交给网关；accepted / pending 不是登录完成，startLogin
-    // 仍须等 /wait 的 done 才返回成功。
+    // 仍须等 /wait 的 done 才返回成功。这里只 invoke 一次；gateway 对 callback 与
+    // interaction 的精确 POST 禁止 401 自动重放，也覆盖动态表单直接调用 api_request。
     submitLoginCallback: (state, callbackUrl) =>
       call('POST', '/api/session/login/callback', {
         state: String(state ?? ''),
         callbackUrl: String(callbackUrl ?? ''),
       }),
     getLoginState: () => invoke('login_state'),
-    cancelLogin: () => invoke('cancel_login'),
+    cancelLogin: state => state === undefined ? invoke('cancel_login')
+      : call('POST', '/api/session/login/cancel', { state: String(state) }),
     // ── AutoClaw 国际版 OAuth（**授权地址由界面先拿好**）──────────
     // 与 startLogin 的区别：那条是「壳去问后端要地址」，这条是「界面已经
     // 拿到地址了，壳只负责开窗口并等待」。原因是这条链前面有一次**必须在
@@ -239,21 +245,36 @@ const BRIDGE_JS: &str = r#"
       call('POST', `/api/accounts/${encodeURIComponent(String(accountId || ''))}/zcode-claim/captcha-config`),
     zcodeClaimPreview: accountId =>
       call('POST', `/api/accounts/${encodeURIComponent(String(accountId || ''))}/zcode-claim/preview`),
-    zcodeClaim: (accountId, planId, captchaVerifyParam, captchaRegion) =>
-      call('POST', `/api/accounts/${encodeURIComponent(String(accountId || ''))}/zcode-claim`, {
-        planId: planId ? String(planId) : '',
+    zcodeClaim: (accountId, planOrPayload, captchaVerifyParam, captchaRegion) => {
+      const body = planOrPayload && typeof planOrPayload === 'object' && !Array.isArray(planOrPayload) ? {
+        provider: planOrPayload.provider, accountId: planOrPayload.accountId, configId: planOrPayload.configId,
+        planId: planOrPayload.planId, captchaVerifyParam: planOrPayload.captchaVerifyParam,
+        captchaRegion: planOrPayload.captchaRegion,
+      } : {
+        planId: planOrPayload ? String(planOrPayload) : '',
         captchaVerifyParam: String(captchaVerifyParam || ''),
         captchaRegion: captchaRegion ? String(captchaRegion) : '',
-      }),
+      };
+      return call('POST', `/api/accounts/${encodeURIComponent(String(accountId || ''))}/zcode-claim`, body);
+    },
     // ── ZCode 活动套餐通道的验证码令牌池（见 core/providers/zcode/captcha.rs）──
     // 它与上面三条**不是一回事**：那三条服务「领套餐」（用户动作，拖滑块拿串）；
     // 这两条服务**转发** —— 活动套餐的推理端点每条请求都要一个当次铸的令牌，而
-    // 转发在后台发生，令牌只能由界面静默铸造后推进池子（唯一调用方是
-    // ui/zcode-captcha-pool.js）。响应形状见 `api::zcode_captcha`。
+    // 转发在后台发生，票据只由用户主动验证后提交；查询可以无参读概览，
+    // 实际验证必须携带账号，WASM 提交还需 provider/accountId/configId 绑定。
     zcodeClaimVerification: payload => call('POST', '/api/zcode/claim-verification', payload),
-    zcodeCaptchaStats: () => call('GET', '/api/zcode/captcha'),
-    pushZcodeCaptchaTokens: tokens =>
-      call('POST', '/api/zcode/captcha', { tokens: Array.isArray(tokens) ? tokens : [] }),
+    zcodeCaptchaStats: (accountId, provider) => call('GET', '/api/zcode/captcha' + toQuery({
+      accountId: accountId == null ? '' : String(accountId),
+      provider: provider == null ? '' : String(provider),
+    })),
+    pushZcodeCaptchaTokens: payload => {
+      // 旧原生调用仍传数组；WASM 必须原样保留三项绑定，不能丢失后退到全局池。
+      const body = Array.isArray(payload) ? { tokens: payload } : {
+        provider: payload?.provider, accountId: payload?.accountId, configId: payload?.configId,
+        tokens: Array.isArray(payload?.tokens) ? payload.tokens.map(item => ({ param: item?.param })) : [],
+      };
+      return call('POST', '/api/zcode/captcha', body);
+    },
     onLoginState: callback => on('login:state', callback),
     // 动态登录说明与 /wait 的 pending.hint；不含授权地址或用户输入。
     onLoginProgress: callback => on('login:progress', callback),
@@ -348,7 +369,10 @@ const BRIDGE_JS: &str = r#"
     deleteKey: id => call('DELETE', '/api/keys/' + encodeURIComponent(id)),
 
     // ── 多账号 ──
-    getAccounts: () => call('GET', '/api/accounts'),
+    getAccounts: query => call('GET', '/api/accounts' + toQuery(query)),
+    queryAccounts: query => call('POST', '/api/accounts/query', query || {}),
+    getAccountSelection: query => call('POST', '/api/accounts/selection', query || {}),
+    getAccount: id => call('GET', '/api/accounts/' + encodeURIComponent(id)),
     getAccountSorting: () => call('GET', '/api/accounts/sorting'),
     saveAccountSorting: payload => call('PUT', '/api/accounts/sorting', payload || {}),
     // switchAccount 仅把账号移到全局队列第一位，不改变启用状态
@@ -368,10 +392,12 @@ const BRIDGE_JS: &str = r#"
         direction: direction === 'down' ? 'down' : 'up',
       }),
     // 清除限流标记（账号页「限流明细」面板）：model 缺省 = 清掉该账号全部模型的标记
-    clearRateLimits: (id, model) =>
+    clearRateLimits: (id, model, includeProvider) =>
       call('POST', '/api/accounts/' + encodeURIComponent(id) + '/rate-limits/clear',
-        model ? { model } : {}),
+        model ? { model } : { includeProvider: includeProvider === true }),
     // ── 账号路由（策略 / 粘性 / 退避 / 垫底 / 熔断 + 队列可见化）──
+    getRoutingErrors: () => call('GET', '/api/routing/errors'),
+    saveRoutingErrors: payload => call('PUT', '/api/routing/errors', payload),
     getRoutingConfig: () => call('GET', '/api/routing'),
     getRoutingWorkspace: model => call('GET', '/api/routing/workspace' + toQuery({ model })),
     saveRoutingProfile: payload => call('PUT', '/api/routing/profile', payload || {}),
@@ -463,6 +489,7 @@ const BRIDGE_JS: &str = r#"
 
     // 桌面壳的文件夹选择框：参数名与命令签名一致（camelCase ← Rust 的 snake_case）
     pickFolder: defaultDir => invoke('pick_folder', { defaultDir: defaultDir == null ? null : String(defaultDir) }),
+    pickDesktopClient: defaultPath => invoke('pick_desktop_client', { defaultPath: defaultPath == null ? null : String(defaultPath) }),
 
     // ── 积分 / 签到 ──
     getUsage: () => call('GET', '/api/usage'),
@@ -477,7 +504,7 @@ const BRIDGE_JS: &str = r#"
     // 账号页轮询它，于是用户不点按钮也能看到最新余额。
     startBalanceQuery: (id, replace) => call('POST', '/api/accounts/usage/start', { id: id || null, replace: replace === true }),
     cancelBalanceQuery: (id, requestId) => call('POST', '/api/accounts/usage/cancel', { id, requestId }),
-    getBalancesSnapshot: () => call('GET', '/api/accounts/usage/snapshot'),
+    getBalancesSnapshot: ids => Array.isArray(ids) ? call('POST', '/api/accounts/usage/snapshot', { ids }) : call('GET', '/api/accounts/usage/snapshot'),
     // 逐账号活跃连接数 `{counts: {id: n}}`（只含非零项，缺失即 0）。
     // 账号页「连接数」列 2 秒轮询它 —— 后端是进程内计数，这条请求很轻。
     getAccountConnections: () => call('GET', '/api/accounts/connections'),
@@ -684,18 +711,13 @@ const BRIDGE_JS: &str = r#"
       invoke('system_info', { hideUsername: options?.hideUsername === true }),
     // 最近一次「检查更新」的结果（定时任务写入；app.js 轮询它亮侧栏徽标）
     getUpdateStatus: () => call('GET', '/api/update/status'),
+    getAdvertisements: () => call('GET', '/api/advertisements'),
     // 「软件更新」的出网线路：null = 直连。更新面板「检查更新」左侧的下拉读写
     // （检查与下载安装包都走它，后端出口候选的第一优先级）
     getUpdateProxy: () => call('GET', '/api/update/proxy'),
     setUpdateProxy: payload => call('POST', '/api/update/proxy', payload),
-    getGithubAccess: () => call('GET', '/api/update/github'),
-    setGithubAccess: payload => call('POST', '/api/update/github', payload),
-    // 「软件更新」的 GitHub 令牌：读只报 {filled, origin}（后端永不回显本体），
-    // 写传 {token: '…' | null}（null = 清除）。加密落库在后端做
-    getUpdateToken: () => call('GET', '/api/update/token'),
-    setUpdateToken: payload => call('POST', '/api/update/token', payload),
     // 「加入 beta 版」：读只报 {enabled}，写传 {enabled: true|false}。
-    // 打开后更新检查把 GitHub 的预发布版一并纳入候选（后端下一次检查就换通道）；
+    // 打开后更新检查把官网的预发布版一并纳入候选（后端下一次检查就换通道）；
     // 写响应带 saved（false = 本次运行已生效、重启会回到原通道）
     getUpdateBeta: () => call('GET', '/api/update/beta'),
     setUpdateBeta: payload => call('POST', '/api/update/beta', payload),
@@ -720,6 +742,8 @@ const BRIDGE_JS: &str = r#"
     // ── 开发者角色兼容开关 ──
     // 与 getSanitize / saveSanitize 同形：GET 读、PUT 写，响应体就是新状态。
     // 与 web_shim.rs 的同名方法逐字同形（漏一侧的症状见下面 getCors 那段）。
+    getWebToolEmulation: () => call('GET', '/api/web-tool-emulation'),
+    saveWebToolEmulation: enabled => call('PUT', '/api/web-tool-emulation', { enabled: enabled === true }),
     getDeveloperRoleCompat: () => call('GET', '/api/developer-role-compat'),
     saveDeveloperRoleCompat: enabled =>
       call('PUT', '/api/developer-role-compat', { developerRoleCompat: enabled === true }),
@@ -787,6 +811,9 @@ const BRIDGE_JS: &str = r#"
     // 生效后的全量状态（含降级是否生效）。`clearDegrade` 是同一端点上的一个
     // 动作位（参考项目只能等到零点，本项目允许用户当场解除）。
     getPrompt: () => call('GET', '/api/prompt'),
+    getPromptRules: () => call('GET', '/api/prompt/rules'),
+    savePromptRules: payload => call('PUT', '/api/prompt/rules', payload),
+    previewPromptRules: payload => call('POST', '/api/prompt/rules/preview', payload),
     savePrompt: payload =>
       call('PUT', '/api/prompt', {
         promptMode: payload && payload.promptMode != null ? String(payload.promptMode) : null,
@@ -1026,6 +1053,8 @@ const BRIDGE_JS: &str = r#"
     // 这四项不走 api_request：设置存在桌面端本地（与后端无关），
     // 导入导出需要调用系统文件对话框，只有壳进程能做。
     getAppSettings: () => invoke('get_app_settings'),
+    getGraphicsSettings: () => invoke('get_graphics_settings'),
+    saveGraphicsSettings: enabled => invoke('save_graphics_settings', { enabled }),
     // 参数名 patch 必须与 Rust 侧 save_app_settings 的形参名一致
     saveAppSettings: patch => invoke('save_app_settings', { patch }),
     exportAccounts: () => invoke('export_accounts'),

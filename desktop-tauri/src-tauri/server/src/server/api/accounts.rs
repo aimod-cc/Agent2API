@@ -126,12 +126,12 @@ async fn add_plugin_account(
             }
         }
     };
-    let proxy = selected_proxy.map(|proxy| agent2api_provider_protocol::WireProxy {
-        protocol: proxy.protocol,
-        host: proxy.host,
+    let proxy = selected_proxy.as_ref().map(|proxy| agent2api_provider_protocol::WireProxy {
+        protocol: proxy.protocol.clone(),
+        host: proxy.host.clone(),
         port: proxy.port,
-        username: proxy.username,
-        password: proxy.password,
+        username: proxy.username.clone(),
+        password: proxy.password.clone(),
     });
 
     let source = if payload.get("importDesktop").and_then(Value::as_bool).unwrap_or(false) {
@@ -184,13 +184,20 @@ async fn add_plugin_account(
         agent2api_provider_protocol::NormalizeSource::FileText { .. }
             | agent2api_provider_protocol::NormalizeSource::FileBase64 { .. }
     );
+    let desktop = matches!(&source, agent2api_provider_protocol::NormalizeSource::Desktop);
     let input = agent2api_provider_protocol::NormalizeInput {
         provider: provider.to_string(),
         source,
         name: import_name.map(str::to_string),
         proxy,
     };
-    let account = match adapter.normalize_account(&state.store, input).await {
+    let direct = proxy_config.as_ref().is_some_and(|config| config["source"] == "direct");
+    let account = match crate::server::core::plugin_host::account_egress::scope_selection(
+        provider, "", selected_proxy, direct,
+        crate::server::core::plugin_host::wasm::desktop_credentials::supplied_scope(!desktop,
+            crate::server::core::plugin_host::wasm::desktop_credentials::import_scope(provider, desktop, adapter.normalize_account(&state.store, input)),
+        ),
+    ).await {
         Ok(account) => account,
         Err(error) => {
             logging::log("[Accounts]", &format!("❌ {}", error.message));
@@ -224,7 +231,7 @@ async fn add_plugin_account(
             // 不咽成「添加成功但 UA 没存上」。
             let mut saved_account = record;
             if let Some(user_agent) = payload.get("userAgent").filter(|_| !imported_id.is_empty()) {
-                match crate::server::core::client::catalog::normalize_user_agent_override(user_agent) {
+                match crate::server::core::user_agent::normalize_override(provider, user_agent) {
                     Ok(value) if !value.is_empty() => {
                         match state.store().update_account(&imported_id, &json!({ "userAgent": value })) {
                             Ok((account, _)) => saved_account = account,
@@ -246,6 +253,9 @@ async fn add_plugin_account(
                     result["account"] = account.get("public").cloned().unwrap_or(Value::Null);
                 }
             }
+            crate::server::core::providers::subscriptions::refresh_after_account_saved(
+                state.store().clone(), provider, &imported_id,
+            );
             result["list"] = state.store().list_visible_accounts();
             ok_json(result)
         }
@@ -396,7 +406,7 @@ pub async fn dispatch(
     // ① 精确命中 `/api/accounts`
     if rest.is_none() {
         match method.as_str() {
-            "GET" => return ok_json(state.store().list_visible_accounts()),
+            "GET" => return super::accounts_list::list(&state, query),
             "POST" => return add_account(&state, body).await,
             // Node 版对 `/api/accounts` 上的其它方法同样走 404 信封
             _ => {
@@ -408,6 +418,8 @@ pub async fn dispatch(
 
     // ② 固定子路径（Node 版把它们放在 `<id>` 通配之前的原因）
     match (method.as_str(), rest) {
+        ("POST", "query") => return super::accounts_list::query(&state, body, false),
+        ("POST", "selection") => return super::accounts_list::query(&state, body, true),
         ("GET", "sorting") => return super::accounts_sort::get_sorting(&state),
         ("PUT", "sorting") => return super::accounts_sort::save_sorting(&state, body),
         ("GET", "export") => return export_accounts(&state),
@@ -427,8 +439,9 @@ pub async fn dispatch(
             return super::accounts_usage::accounts_usage(&state, query).await
         }
         // 定时查询那一轮的结果快照（形状同 usage，多一个 `at`）
+        ("POST", "usage/snapshot") => return super::accounts_usage::scoped_usage_snapshot(&state, body),
         ("GET", "usage/snapshot") => {
-            return super::accounts_usage::accounts_usage_snapshot(&state).await
+            return super::accounts_usage::accounts_usage_snapshot(&state, query).await
         }
         // 账号级活跃连接数（账号页「连接数」列；见 `core::upstream::connections`）
         ("GET", "connections") => return account_connections(&state),
@@ -438,6 +451,12 @@ pub async fn dispatch(
 
     // ③ POST + /move 结尾；POST + /rate-limits/clear 结尾
     if method == Method::POST {
+        if let Some(id) = rest.strip_suffix("/credentials/cline-free") {
+            let id = decode_segment(id);
+            if !id.is_empty() {
+                return super::accounts_credentials::replace_cline_free(&state, &id, body).await;
+            }
+        }
         if let Some(id) = rest.strip_suffix("/move") {
             let id = decode_segment(id);
             if !id.is_empty() {
@@ -577,6 +596,7 @@ pub async fn dispatch(
     //    这与 Node 版 PATCH 分支 `if (!id) throw` 的结果一致。
     //    注意与 `/api/accounts//` 的区别：那条解出的是 "/"（非空）→ 404「账号不存在」。
     match method.as_str() {
+        "GET" if !rest.contains('/') => return super::accounts_list::detail(&state, &decode_segment(rest)),
         "PATCH" => return patch_account(&state, &decode_segment(rest), body).await,
         "DELETE" => return delete_account(&state, &decode_segment(rest)),
         _ => {}
@@ -648,7 +668,7 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
     // 半成功状态；而 UA 又是纯账号属性（不参与该家的账号规范化），拦在这里
     // 不会误伤任何一家的凭证解析。空串 / null 都按「不设置」放行。
     if let Some(value) = payload.get("userAgent") {
-        if let Err(error) = crate::server::core::client::catalog::normalize_user_agent_override(value) {
+        if let Err(error) = crate::server::core::user_agent::normalize_override(provider, value) {
             return store_error(error);
         }
     }
@@ -920,6 +940,11 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
         // 链**的兼容。现在没有可落的路径了 —— 静默按国内版落一条记录等于把
         // 用户的凭证写进一个没有执行体的组，界面看不出异常但转发必然失败，
         // 所以统一回 503 并指路去装插件。
+        Some(crate::server::core::providers::ProviderKind::ClaudeSubscription
+            | crate::server::core::providers::ProviderKind::ChatgptSubscription
+            | crate::server::core::providers::ProviderKind::CodexSubscription) => {
+            management_error(503, "内置订阅提供商尚未就绪，请重启网关")
+        }
         Some(crate::server::core::providers::ProviderKind::WorkBuddy)
         | Some(crate::server::core::providers::ProviderKind::WorkBuddyIntl)
         | None => {
@@ -1616,12 +1641,12 @@ pub async fn move_account(state: &ServerState, id: &str, body: &Bytes) -> Respon
 
 // ─── POST /api/accounts/{id}/rate-limits/clear ─────────────────
 
-/// 清除账号的限流标记：body `{model?}`，给了模型只清那一个，否则全清。
+/// 清除账号的限流标记；共享提供商记录仅在 includeProvider 明确为 true 时清除。
 ///
 /// 这是账号页「限流明细」面板上的动作。语义只是「让本机立刻重新尝试这个模型」：
-/// 标记是本机从上游 429 推断出来的冷却期，清掉之后下一次请求若仍被上游限流，
-/// 会再次被标记 —— 所以这个动作是安全的，不需要二次确认。
-/// 返回 `{cleared: 清掉的模型数, list}`，前端拿 list 直接刷新。
+/// 标记是本机从上游错误记录的冷却期。上游仍限流时会重新记录。
+/// 提供商共享记录影响其他账号，前端需确认后再传 includeProvider。
+/// 返回 `{cleared, list}`，前端用 list 更新冷却视图。
 pub fn clear_rate_limits(state: &ServerState, id: &str, body: &Bytes) -> Response {
     if id.is_empty() {
         return management_error(400, "缺少账号 id");
@@ -1639,10 +1664,16 @@ pub fn clear_rate_limits(state: &ServerState, id: &str, body: &Bytes) -> Respons
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let provider_cleared = if payload["includeProvider"] == true && model.is_none() {
+        match state.store().clear_provider_policy_cooldowns(id) {
+            Ok(count) => count,
+            Err(message) => return management_error(500, message),
+        }
+    } else { 0 };
     let cleared = match model {
         Some(model) => usize::from(state.store().clear_rate_limit(id, model)),
         None => state.store().clear_all_rate_limits(id),
-    };
+    } + provider_cleared;
     if cleared > 0 {
         logging::log(
             "[Accounts]",

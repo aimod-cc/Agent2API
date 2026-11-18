@@ -2,8 +2,6 @@
 //! 配置变化、取消和替换使旧任务失效，结果提交与限制器判定使用同一份有效配置。
 //! 单次上游超时之外，整轮查询还有独立的总时限，重试不能越过该时限。
 
-use std::time::Duration;
-
 use serde_json::{json, Value};
 
 use crate::server::core::account_store::AccountStore;
@@ -13,17 +11,46 @@ use crate::server::core::usage_records;
 use crate::server::logging;
 
 pub(crate) mod config;
+pub(crate) mod diagnostics;
 pub mod jobs;
+pub(crate) mod network;
+mod query;
+mod recovery;
+mod queue;
 mod run;
 
-/// 余额查询失败的原因：区分「没有凭证」（Node 的早退分支，少 name 键）与
-/// 「请求失败」（带 name 键）。第二个字段是给前端的**机器可识别标记**（当前
-/// 只有「未配置查询凭证」用，见 `adapter::USAGE_NOT_CONFIGURED_CODE`）：前端据此
-/// 把这一条显示成中性提示而不是红色失败，比按文案匹配可靠。
-enum UsageFailure {
-    /// 账号没有可用凭证 —— Node 里那个 `return { id, usage:null, error }`
-    NoCredentials,
-    Request(String, Option<String>, i32),
+use query::UsageFailure;
+
+pub(crate) fn current_query_deadline() -> Option<tokio::time::Instant> {
+    QUERY_DEADLINE.try_with(|deadline| *deadline).ok().flatten()
+}
+
+tokio::task_local! {
+    static QUERY_ACCOUNT: Option<(String, String)>;
+    static QUERY_DEADLINE: Option<tokio::time::Instant>;
+}
+
+pub(crate) async fn scope_query_deadline<F: std::future::Future>(deadline: Option<tokio::time::Instant>, work: F) -> F::Output {
+    QUERY_DEADLINE.scope(deadline, work).await
+}
+
+pub(crate) fn account_query_deadline(provider: &str, account: &str) -> Option<tokio::time::Instant> {
+    is_account_query(provider, account).then(|| QUERY_DEADLINE.try_with(|deadline| *deadline).ok().flatten()).flatten()
+}
+
+pub(crate) async fn scope_account_query<F: std::future::Future>(
+    provider: &str,
+    account: &str,
+    active: bool,
+    work: F,
+) -> F::Output {
+    QUERY_ACCOUNT.scope(active.then(|| (provider.to_string(), account.to_string())), work).await
+}
+
+pub(crate) fn is_account_query(provider: &str, account: &str) -> bool {
+    !provider.is_empty() && !account.is_empty() && QUERY_ACCOUNT.try_with(|current| {
+        current.as_ref().is_some_and(|(owner, id)| owner == provider && id == account)
+    }).unwrap_or(false)
 }
 
 /// 目标集合解析失败。
@@ -106,80 +133,11 @@ pub fn resolve_batch_targets(
     Ok((targets, skipped))
 }
 
-/// 单账号余额查询：任何失败都收敛为 `{error}` 而不是抛出（批量查询不被单账号
-/// 拖垮），刷新重试在 `query_usage_inner` 里。
-async fn query_usage_for(store: &AccountStore, account: &Value) -> Value {
-    let id = account.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-    let name = account.get("name").cloned().unwrap_or(Value::Null);
-    let started = std::time::Instant::now();
-    // 凭证与 provider 都从目标集合里的账号对象读，**不回读账号文件**：
-    // 20 个账号并发时那次回读会变成 20 次整库读盘，而答案已在手上。
-    // `hasCredentials` 是 store 逐条给出的统一判据（缺省视为有）。
-    //
-    // 自定义家（含「预置 API」卡片建的那些）另有**一份查询凭证**（NewAPI 的
-    // 访问令牌 / 商汤的控制台账号密码 / 智谱的控制台令牌，见
-    // `providers::custom::balance`）：只靠它也能查余额，所以「有余额方案」
-    // 就放行 —— 不然一个没填转发 Key 的账号只会得到笼统的「没有可用凭证」，
-    // 而真正该说的是「哪一份凭证缺了」（各方案自己给 400「未配置」）。
-    let has_credentials = account.get("hasCredentials").and_then(Value::as_bool) != Some(false)
-        || account
-            .get("balanceQuery")
-            .and_then(|query| query.get("scheme"))
-            .is_some();
-    let retry_limit = usage_records::query_retries_of(account.get("usageQuery"));
-    let mut retries = 0;
-    let outcome = if has_credentials {
-        let provider_id = account
-            .get("provider")
-            .and_then(Value::as_str)
-            .unwrap_or(crate::server::core::providers::DEFAULT_PROVIDER_ID);
-        let mut outcome = query_usage_inner(store, provider_id, &id).await;
-        while retries < retry_limit && matches!(&outcome,
-            Err(UsageFailure::Request(_, code, status))
-                if matches!(*status, 408 | 429 | 500..=599)
-                    && !matches!(code.as_deref(), Some("usage_not_configured" | "account_proxy_unavailable" | "refresh_token_expired"))
-        ) {
-            tokio::time::sleep(Duration::from_secs(1 << retries.min(2))).await;
-            retries += 1;
-            outcome = query_usage_inner(store, provider_id, &id).await;
-        }
-        outcome
-    } else {
-        Err(UsageFailure::NoCredentials)
-    };
-    let row = match outcome {
-        Ok(usage) => json!({ "id": id, "name": name, "usage": usage, "error": Value::Null }),
-        // Node 的这条早退 `return` **不含 name 键**（只有 catch 分支才带）
-        Err(UsageFailure::NoCredentials) => {
-            json!({ "id": id, "usage": Value::Null, "error": "没有可用凭证" })
-        }
-        Err(UsageFailure::Request(message, code, _)) => {
-            json!({ "id": id, "name": name, "usage": Value::Null, "error": message, "code": code })
-        }
-    };
-    let provider = account.get("provider").and_then(Value::as_str)
-        .unwrap_or(crate::server::core::providers::DEFAULT_PROVIDER_ID);
-    let error = row.get("error").and_then(Value::as_str);
-    let not_configured = row.get("code").and_then(Value::as_str)
-        == Some(crate::server::core::providers::adapter::USAGE_NOT_CONFIGURED_CODE)
-        || matches!(error, Some("没有可用凭证"));
-    let level = if error.is_none() || not_configured { "debug" } else { "warn" };
-    let summary = if error.is_none() { "余额查询完成" } else if not_configured { "余额查询未配置" } else { "余额查询失败" };
-    logging::log_event(level, "account", summary, Some(json!({
-        "provider": provider,
-        "providerLabel": crate::server::core::providers::label_of(provider),
-        "account": id,
-        "accountName": name,
-        "action": "usage.query",
-        "summary": summary,
-        "outcome": if error.is_none() { "success" } else { "failed" },
-        "detail": error,
-        "code": row.get("code"),
-        "retries": retries,
-        "retryLimit": retry_limit,
-        "durationMs": started.elapsed().as_millis() as u64,
-    })));
-    row
+fn no_usage_retry(code: Option<&str>) -> bool {
+    recovery::requires_action(code) || code.is_some_and(|code| matches!(code,
+        "usage_not_configured" | "account_proxy_unavailable" | "refresh_token_expired" | "credential_refresh_unavailable" | "plugin_busy")
+        || code.starts_with("codearts_refresh_") || code.starts_with("cline_free_refresh_")
+        || code.starts_with("cline_refresh_"))
 }
 
 /// 查询一个账号的余额 / 积分（**按账号所属 provider 分流到适配器**）。
@@ -202,6 +160,7 @@ async fn query_usage_inner(
     store: &AccountStore,
     provider_id: &str,
     id: &str,
+    refresh_available: &mut bool,
 ) -> Result<Value, UsageFailure> {
     // 自定义提供商（含「预置 API」卡片建的那些）走**余额方案**那条路：它们
     // 没有 `ProviderKind`（不在注册表里），只有提供商记录上的 `balanceScheme`
@@ -232,7 +191,14 @@ async fn query_usage_inner(
         Ok(usage) => Ok(usage),
         Err(error) => {
             // 不支持刷新的家直接返回原错误（CatPaw：重试必然失败，见上）
-            if error.status_code != 401 || !adapter.supports_refresh() || store.needs_relogin(id) {
+            if error.status_code != 401 || !adapter.supports_refresh() || store.needs_relogin(id) || !*refresh_available {
+                return Err(UsageFailure::Request(error.message, error.code, error.status_code));
+            }
+            *refresh_available = false;
+            if let Some(trace) = diagnostics::current() {
+                trace.failed(&error.message, error.code.as_deref(), error.status_code);
+            }
+            if !diagnostics::retry_fits(std::time::Duration::ZERO) {
                 return Err(UsageFailure::Request(error.message, error.code, error.status_code));
             }
             if let Err(refresh_error) = adapter.refresh_access_token(store, id).await {
@@ -241,12 +207,15 @@ async fn query_usage_inner(
                 // 上游术语（小浣熊是 `authorization_verify_error`）用户既看不懂、
                 // 也不知道该做什么。两句都给出，并明确「重新登录」这条出路
                 // ——这里能走到刷新，说明这家有续期能力，凭证失效的解法就是换一份。
+                if recovery::requires_action(refresh_error.code.as_deref()) {
+                    return Err(UsageFailure::Request(refresh_error.message, refresh_error.code, refresh_error.status_code));
+                }
                 return Err(UsageFailure::Request(
                     format!(
                         "{}；自动续期也失败：{}（登录态可能已被上游作废，请重新登录或重新导入该账号的凭证）",
                         error.message, refresh_error.message
                     ),
-                    error.code,
+                    refresh_error.code.or(error.code),
                     refresh_error.status_code,
                 ));
             }
@@ -286,7 +255,7 @@ fn is_guest(account: &Value) -> bool {
 /// 所以按账号形态一并排除：自动调度不再给它排期、批量查询不再把它算进分母。
 /// 单账号路径（`?id=`）**不**过这条判据（见 `query_all`），用户手点那一行时
 /// 仍会得到插件给的中性说明，而不是一个说不清理由的静默。
-fn supports_usage(account: &Value) -> bool {
+pub(crate) fn supports_usage(account: &Value) -> bool {
     if is_guest(account) {
         return false;
     }
@@ -398,7 +367,7 @@ pub fn spawn_sweeper(store: AccountStore) {
     crate::spawn_task(async move {
         loop {
             sweep_due(&store).await;
-            tokio::time::sleep(Duration::from_millis(SWEEP_TICK_MS)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(SWEEP_TICK_MS)).await;
         }
     });
 }
@@ -441,10 +410,13 @@ async fn sweep_due(store: &AccountStore) {
     }
     .into_iter()
     .filter(supports_usage)
+    .filter(|account| !crate::server::core::plugin_host::operations::active_for_provider(
+        account.get("provider").and_then(Value::as_str).unwrap_or("")))
     .filter(|account| account.get("needsRelogin").and_then(Value::as_bool) != Some(true))
     .filter_map(|account| {
         let interval = usage_records::query_interval_of(&account)?;
         let id = account.get("id").and_then(Value::as_str)?;
+        if recovery::waiting_for_change(store, id) { return None; }
         let due_at = usage_records::load(id).last_attempt_at + interval * 1000;
         (due_at <= now).then_some((account, interval))
     })
@@ -505,6 +477,7 @@ pub fn snapshot(store: &AccountStore) -> Value {
                 "usage": Value::Null,
                 "error": error,
                 "code": record.code,
+                "diagnostics": record.diagnostics,
                 "at": record.last_attempt_at,
                 "lastUsage": record.usage,
                 "lastSuccessAt": record.last_success_at,

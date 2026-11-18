@@ -52,9 +52,8 @@
         category: item.category === 'web' ? 'web' : 'agent',
         dynamicLogin: item.dynamicLogin === true,
         loginAvailable: item.loginAvailable !== false,
-        // 这家出站 UA 能否按账号改写（会话式家由插件自己拼头，网关覆盖不到）。
-        // 缺省按 true：旧后端没有这个键时，界面照常给出输入框。
-        userAgentOverridable: item.userAgentOverridable !== false,
+        // 以后端的提供商策略和实际覆盖能力为准。
+        userAgentOverridable: item.userAgentOverridable === true,
       }));
   }
 

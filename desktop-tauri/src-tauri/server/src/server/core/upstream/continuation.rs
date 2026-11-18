@@ -756,7 +756,9 @@ impl Continuation {
             {
                 cache_creation = Some(cache_creation.unwrap_or(0).saturating_add(count));
             }
-            if repeat || !looks_truncated(&verdict) || rounds >= self.max_rounds || self.telemetry.is_cancelled() {
+            if repeat || !looks_truncated(&verdict) || rounds >= self.max_rounds || self.telemetry.is_cancelled()
+                || self.telemetry.replay_guard().blocked()
+            {
                 break;
             }
             // 没有 messages 数组就改不动（入口校验过，走到这里按不续处理）
@@ -912,6 +914,7 @@ impl Continuation {
                     && !repeat
                     && looks_truncated(&verdict)
                     && !telemetry.is_cancelled()
+                    && !telemetry.replay_guard().blocked()
                     // 客户端在这一轮 EOF 到「决定续写」之间断开了。上面那处
                     // `sender.send` 失败是唯一**已经发生**的探测点，而这个窗口里
                     // 原本没有任何探测 —— 断线之后照样会白打一轮上游（带全量历史，
@@ -1013,6 +1016,7 @@ async fn forward_round_with(
     allowed_providers: Option<KeyScope>,
     mut body: Value,
 ) -> Result<ForwardOutcome, crate::server::errors::GatewayError> {
+    if telemetry.replay_guard().blocked() { return Err(super::replay_guard::blocked_error()); }
     if telemetry.vision_continuation().is_none() && body.get("_wb_route_group_id").and_then(Value::as_str).is_some() {
         let snapshot = telemetry.snapshot();
         let candidate = snapshot.route.as_ref().and_then(|route| route.get("pickedCandidate")).and_then(Value::as_str).unwrap_or("");

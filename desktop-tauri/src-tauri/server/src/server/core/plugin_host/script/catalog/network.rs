@@ -1,6 +1,5 @@
 use std::time::Duration;
 use serde_json::Value;
-use crate::server::core::update::client;
 
 #[derive(Clone, Debug)]
 pub(super) struct Failure {
@@ -36,8 +35,8 @@ async fn read(mut response: reqwest::Response, limit: usize) -> Result<Option<Ve
 
 pub(super) async fn github_bytes(url: &str, limit: usize) -> Result<Option<Vec<u8>>, Failure> {
     let work = async {
-        let response = client::fetch_official(url, &client::github_headers(), Some(45_000)).await
-            .map_err(|error| Failure { retry_at: error.retry_at(), message: error.message })?;
+        let response = super::super::website::request(url, Some(45_000)).await
+            .map_err(Failure::from)?;
         read(response, limit).await
     };
     tokio::time::timeout(Duration::from_secs(60), work).await
@@ -52,8 +51,7 @@ pub(super) async fn github(url: &str, limit: usize) -> Result<Option<Value>, Fai
 pub(super) async fn npm(name: &str) -> Result<Option<Value>, Failure> {
     let url = format!("https://registry.npmjs.org/{}/latest", name.replace('/', "%2f"));
     let work = async {
-        let headers = vec![("User-Agent".to_string(), "Agent2API-PluginCatalog".to_string())];
-        let response = client::fetch_public(&url, &headers, Some(15_000)).await.map_err(Failure::from)?;
+        let response = super::super::website::request(&url, Some(15_000)).await.map_err(Failure::from)?;
         let bytes = read(response, 2 * 1024 * 1024).await?;
         bytes.map(|bytes| serde_json::from_slice(&bytes)
             .map_err(|_| Failure::from("npm 插件信息不是有效 JSON".to_string()))).transpose()

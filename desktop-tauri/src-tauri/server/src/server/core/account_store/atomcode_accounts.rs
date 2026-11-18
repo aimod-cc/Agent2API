@@ -49,7 +49,7 @@ impl AccountStore {
         if let Some(object) = value.as_object_mut() {
             object.remove("accessToken");
             object.remove("refreshToken");
-            object.insert("available".to_string(), Value::Bool(record.enabled()));
+            object.insert("available".to_string(), Value::Bool(record.has_credentials()));
             object.insert(
                 "hasSession".to_string(),
                 Value::Bool(record.get("accessToken").is_some() || record.get("tokenTail").is_some()),

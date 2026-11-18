@@ -9,8 +9,7 @@
 //! ── 密码 / Secret 的存放 ────────────────────────────────────
 //! 全部经 `crypto::seal`（`SecretScope::CloudSync`）加密后落库，明文只在
 //! 「保存的那一刻」与「发起请求的那一刻」存在于内存。界面读设置时只回
-//! `hasPassword` / `hasSecretKey`，绝不回显 —— 与 `core::update::token` 的
-//! `status_json` 同一取向。
+//! `hasPassword` / `hasSecretKey`，绝不回显凭据本体。
 //!
 //! ── 为什么同步密码是必填 ────────────────────────────────────
 //! 它封装的是**账号加密密钥**（`account.key`）。允许留空就等于允许把账号

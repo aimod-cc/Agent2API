@@ -17,7 +17,6 @@ import {
 } from './accounts-domain'
 import { allAccounts, findAccount, syncBalancesSnapshot } from './accounts-data'
 import { confirmBatchResult, refreshSavedAccounts } from './accounts-update'
-import { tokenRefreshSkipReason } from './accounts-authorization'
 import { refreshAccountTokens, type BatchTokenRefreshProgress } from './accounts-batch-refresh'
 import { limiterDraftOf, LimiterSection } from './accounts-dialog-limiter'
 import { readUsageDraft, UsageSettingsSection, usageDraftOf, type UsageDraft } from './accounts-dialog-usage'
@@ -63,9 +62,7 @@ export function BatchDialog({ ids, action, onClose }: { ids: string[]; action: s
   const usageAccounts = accounts.filter(supportsUsage)
   const editingRules = current === 'limiters' && (limiterMode === 'append' || limiterMode === 'replace')
   const needsBalance = editingRules && limiterDraft.some(group => group.conditions.some(condition => condition.metric !== 'tokens' && condition.metric !== 'requests'))
-  const targets = current === 'refresh'
-    ? accounts.filter(account => !tokenRefreshSkipReason(account))
-    : current === 'usageQuery' || needsBalance ? usageAccounts : accounts
+  const targets = current === 'usageQuery' || needsBalance ? usageAccounts : accounts
   const skippedAccounts = accounts.filter(account => !targets.includes(account))
   const copyOptions = current === 'usageQuery' ? usageAccounts : accounts
   const source = copyOptions.find(account => account.id === sourceId)
@@ -231,13 +228,9 @@ export function BatchDialog({ ids, action, onClose }: { ids: string[]; action: s
             <DialogSection>
               <h3>{t('将作用于以下账号')}</h3>
               <p className='max-h-[84px] overflow-y-auto'>{targets.map(labelOf).join(t('、')) || t('没有适用于本次操作的账号')}</p>
-              {skippedAccounts.length ? <p className='max-h-[84px] overflow-y-auto'>{current === 'refresh'
-                ? <>{t('跳过 {count} 个：', { count: skippedAccounts.length })}
-                  {skippedAccounts.map(account => `${labelOf(account)}（${tokenRefreshSkipReason(account)}）`).join(t('；'))}
-                </>
-                : t('以下 {count} 个账号不支持余额查询，本次会跳过：{names}', {
-                  count: skippedAccounts.length, names: skippedAccounts.map(labelOf).join(t('、')),
-                })}</p> : null}
+              {skippedAccounts.length ? <p className='max-h-[84px] overflow-y-auto'>{t('以下 {count} 个账号不支持余额查询，本次会跳过：{names}', {
+                count: skippedAccounts.length, names: skippedAccounts.map(labelOf).join(t('、')),
+              })}</p> : null}
               {current === 'refresh'
                 ? <p>{t('逐个刷新所选账号的 Token，未到期也会尝试刷新；不改变启用状态、代理或转发顺序。')}</p>
                 : current !== 'remove' ? <p>{t('只修改本次选择的设置，不影响备注、凭证、转发顺序或其他设置。')}</p> : null}

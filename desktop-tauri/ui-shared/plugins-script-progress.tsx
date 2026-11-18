@@ -32,8 +32,9 @@ export function ScriptOperationProgress({ operation, t }: { operation: ScriptOpe
 
 export function ScriptOperationCard({ operation, t }: { operation: ScriptOperation; t: PluginTranslate }) {
   const name = operation.target?.name || operation.target?.source || t('Magpie 插件')
-  return <Card render={<article />} data-plugin-card='' aria-label={name} className='flex h-full flex-col gap-3 p-4'>
-    <div className='flex items-start gap-3.5'>
+  return <Card render={<article />} data-plugin-card='' aria-label={name}
+    className='flex h-full min-h-[220px] flex-col gap-4 border-hairline p-4 dark:shadow-none'>
+    <div className='flex items-start gap-3'>
       <PluginArtwork kind='script' />
       <div className='min-w-0 flex-1'>
         <h3 className='m-0 break-words text-[14px] font-semibold leading-5'>{name}</h3>

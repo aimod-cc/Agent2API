@@ -129,10 +129,15 @@ export function capabilityTip(
   value: unknown,
   overridden: boolean,
   source: CapabilitySource | '' = '',
+  toolMode: unknown = null,
 ): string {
   const label = CAPABILITY_LABELS[key]
   const suffix = overridden ? t('（已被手动覆盖，弹窗里可恢复继承）') : ''
   const origin = capabilitySourceText(source)
+  if (key === 'supportsToolCall' && toolMode === 'emulated' && value === true) {
+    return t('工具调用：由网关模拟，非上游原生能力；执行权限仍由客户端控制{suffix}', { suffix })
+  }
+  if (key === 'supportsToolCall' && toolMode === 'disabled') return t('网页工具模拟已关闭；修改能力声明不会开启实际适配')
   if (isTokenKey(key)) {
     if (value === null || value === undefined) return t('{label}：上游未声明{suffix}', { label, suffix })
     return t('{label}：{value}（对下游声明的精确值）{origin}{suffix}', { label, value: exactTokens(value), origin, suffix })
@@ -147,6 +152,7 @@ export function capabilityTip(
 export function capabilitySourceText(source: CapabilitySource | ''): string {
   if (source === 'modelsdev') return t('（由 models.dev 补齐）')
   if (source === 'user') return t('（手动设定）')
+  if (source === 'gateway') return t('（由网关模拟，非上游原生能力）')
   return ''
 }
 

@@ -275,9 +275,58 @@ pub async fn call_with_timeout(
     body: Option<&Value>,
     timeout_ms: u64,
 ) -> Result<Value, String> {
+    call_with_retry_policy(method, path, body, timeout_ms, false).await
+}
+
+pub async fn call_without_auth_replay(method: &str, path: &str, body: Option<&Value>) -> Result<Value, String> {
+    call_with_retry_policy(method, path, body, REQUEST_TIMEOUT_MS, true).await
+}
+
+async fn call_with_retry_policy(
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+    timeout_ms: u64,
+    never: bool,
+) -> Result<Value, String> {
+    let generation = crate::panel_session::revision();
+    let no_auth_replay = never || url::Url::parse(&format!("http://127.0.0.1:{}{path}", proxy_port()))
+        .is_ok_and(|url| {
+            let path = url.path();
+            path.starts_with("/api/plugins/desktop-import/chatglm/")
+                || path.starts_with("/api/plugins/desktop-launch/")
+                || path.starts_with("/api/plugins/enrollment/codearts/")
+                || path.starts_with("/api/plugins/enrollment/cline-free/")
+                || method.eq_ignore_ascii_case("PATCH") && path == "/api/plugins/permissions"
+                || method.eq_ignore_ascii_case("POST")
+                    && (path == "/api/accounts"
+                        || path == "/api/accounts/refresh" || path == "/api/accounts/refresh-expiring"
+                        || path.strip_prefix("/api/accounts/").and_then(|rest| rest.strip_suffix("/credentials/cline-free"))
+                            .is_some_and(|account| !account.is_empty() && !account.contains('/'))
+                        || path == "/api/zcode/captcha"
+                        || path.starts_with("/api/session/login/")
+                        || path == "/api/zcode/claim-verification"
+                            && body.and_then(|value| value.get("action")).and_then(Value::as_str) == Some("complete")
+                        || path == "/api/accounts/checkin"
+                        || path == "/api/plugins/tasks/run"
+                        || path == "/api/travel-schedule/run"
+                        || path.ends_with("/growth/travel") || path.ends_with("/growth/task") || path.ends_with("/growth/school")
+                        || path == "/api/checkin-activity"
+                        || path.ends_with("/campaigns/claim") || path.ends_with("/campaigns/redeem")
+                        || path.ends_with("/onboarding/claim")
+                        || path.strip_prefix("/api/accounts/").and_then(|rest| rest.strip_suffix("/zcode-claim"))
+                            .is_some_and(|account| !account.is_empty() && !account.contains('/')))
+        });
     crate::startup::wait().await?;
-    let first = send_once(method, path, body, timeout_ms).await?;
-    if recover_management_session(&first, path)? {
+    let first = send_once_with_source(method, path, body, timeout_ms, no_auth_replay.then_some(generation)).await?;
+    if no_auth_replay && crate::panel_session::revision() != generation {
+        return Err("本机管理会话已变化，本次确认或请求没有自动重发；请重新读取状态".into());
+    }
+    let recovered = recover_management_session(&first, path)?;
+    if recovered && no_auth_replay {
+        return Err("本机管理会话已变化，本次确认或请求没有自动重发；请重新读取状态".into());
+    }
+    if recovered {
         let retried = send_once(method, path, body, timeout_ms).await?;
         return unwrap_envelope(&retried.text, retried.status);
     }
@@ -311,8 +360,21 @@ async fn send_once(
     body: Option<&Value>,
     timeout_ms: u64,
 ) -> Result<RawResponse, String> {
+    send_once_with_source(method, path, body, timeout_ms, None).await
+}
+
+async fn send_once_with_source(
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+    timeout_ms: u64,
+    generation: Option<u64>,
+) -> Result<RawResponse, String> {
     let request = request_builder_with_timeout(method, path, body, timeout_ms)?.build()
         .map_err(|error| format!("构造管理请求失败: {error}"))?;
+    if generation.is_some_and(|generation| crate::panel_session::revision() != generation) {
+        return Err("本机管理会话已变化，本次确认或请求没有自动重发；请重新读取状态".into());
+    }
     let credentials = request.headers().clone();
     let response = management_client(path, timeout_ms)?
         .execute(request)

@@ -24,8 +24,6 @@ pub(super) struct Request {
     pub started_at: i64,
     #[serde(default)]
     pub size: u64,
-    #[serde(default)]
-    pub github_token: Option<String>,
 }
 
 pub(super) fn peer_uid(fd: RawFd) -> Result<u32, UpdateError> {
@@ -97,7 +95,6 @@ pub(super) fn submit(task: &UpdateTask, archive: &Path) -> Result<(), UpdateErro
     let request = Request {
         action: "install".to_string(), id: task.id.clone(), version: task.version.clone(),
         started_at: task.started_at, size,
-        github_token: crate::server::core::update::token::effective_token(),
     };
     serde_json::to_writer(&mut stream, &request).map_err(|error| UpdateError::new(error.to_string()))?;
     stream.write_all(b"\n").map_err(io_error)?;

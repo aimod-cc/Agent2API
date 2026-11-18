@@ -1,0 +1,201 @@
+import * as React from 'react'
+import { Alert, Badge, Button, Checkbox, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Input, Label, Progress, Spinner } from '@ui'
+import type { PluginMutation, PluginOperation, PluginsPayload } from './plugins'
+import { PluginOperationUnconfirmed, waitPackOperation, type PluginRequest } from './plugins-batch-runner'
+import type { PluginTranslate } from './plugins-store'
+import { readFileAsDataUrl } from './file-read'
+
+const errorMessage = (cause: unknown) => cause instanceof Error ? cause.message : String(cause)
+const formatSize = (bytes: number) => bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MiB` : `${Math.max(1, Math.round(bytes / 1024))} KiB`
+
+const MIB = 1024 * 1024
+export const LEGACY_MAX_PACK_BYTES = 24 * MIB
+const HARD_MAX_PACK_BYTES = 96 * MIB
+
+export function clampMaxPackBytes(value: unknown): number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? Math.min(value, HARD_MAX_PACK_BYTES) : LEGACY_MAX_PACK_BYTES
+}
+
+type Preview = { id: string; name: string; version: string; signed: boolean; sha256: string; previousVersion?: string | null; enabled: boolean }
+type FileState = 'preparing' | 'ready' | 'installing' | 'installed' | 'warning' | 'unconfirmed' | 'failed' | 'invalid' | 'duplicate'
+export type PluginFileResult = { key: string; file: File; state: FileState; preview?: Preview; error?: string; percent?: number | null }
+
+async function readPack(file: File, maxPackBytes: number, t: PluginTranslate): Promise<string> {
+  if (!file.size || file.size > maxPackBytes || !file.name.toLowerCase().endsWith('.zip')) throw new Error(t('请选择非空且不超过 {n} MiB 的 zip 插件包', { n: maxPackBytes / MIB }))
+  const data = await readFileAsDataUrl(file, t('读取文件失败'))
+  const encoded = data.slice(data.indexOf('base64,') + 7)
+  if (encoded.length > Math.ceil(maxPackBytes / 3) * 4) throw new Error(t('插件包大小不能超过 {n} MiB', { n: maxPackBytes / MIB }))
+  return encoded
+}
+
+export function usePluginFileInstall({ maxPackBytes, previewAvailable, disabled, accept, refresh, remember, request, t, scope = '' }: {
+  request: PluginRequest; t: PluginTranslate; scope?: string
+  maxPackBytes: number; previewAvailable: boolean; disabled: boolean; accept(result: PluginMutation): Promise<void>; refresh(): Promise<void>; remember(operation: PluginOperation): void
+}) {
+  const [open, setOpen] = React.useState(false)
+  const [results, setResults] = React.useState<PluginFileResult[]>([])
+  const [phase, setPhase] = React.useState<'ready' | 'preparing' | 'running' | 'done'>('ready')
+  const rows = React.useRef<PluginFileResult[]>([])
+  const lock = React.useRef(false)
+  const sequence = React.useRef(0)
+  const alive = React.useRef(true)
+  const scopeRef = React.useRef(scope)
+  React.useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
+  React.useEffect(() => {
+    if (scopeRef.current === scope) return
+    scopeRef.current = scope
+    if (!lock.current) { rows.current = []; setResults([]); setPhase('ready'); setOpen(false) }
+  }, [scope])
+  const publish = () => { if (alive.current && scopeRef.current === scope) setResults([...rows.current]) }
+  const update = (key: string, patch: Partial<PluginFileResult>) => { rows.current = rows.current.map(item => item.key === key ? { ...item, ...patch } : item); publish() }
+
+  const addFiles = async (files: File[]) => {
+    if (disabled || lock.current || !files.length) return
+    lock.current = true
+    setPhase('preparing')
+    setOpen(true)
+    try {
+      for (const file of files) {
+        if (!alive.current || scopeRef.current !== scope) return
+        const key = `${Date.now()}:${sequence.current++}`
+        const duplicate = rows.current.some(item => item.file.name === file.name && item.file.size === file.size && item.file.lastModified === file.lastModified)
+        rows.current.push({ key, file, state: duplicate ? 'duplicate' : 'preparing', error: duplicate ? t('重复文件，已跳过') : undefined })
+        publish()
+        if (duplicate) continue
+        try {
+          if (!previewAvailable) throw new Error(t('当前网关不支持安装前预览，请更新网关后重试'))
+          const packB64 = await readPack(file, maxPackBytes, t)
+          if (!alive.current || scopeRef.current !== scope) return
+          const response = await request<{ preview: Preview }>('POST', '/api/plugins/install?preview=true', { packB64 }, { retry: 'never' })
+          if (!response?.preview?.id) throw new Error(t('无法读取插件包信息，请更新网关后重试'))
+          const same = rows.current.some(item => item.key !== key && item.preview?.id === response.preview.id && item.preview?.version === response.preview.version && !['invalid', 'failed', 'duplicate'].includes(item.state))
+          update(key, { preview: response.preview, state: same ? 'duplicate' : 'ready', error: same ? t('同一插件的相同版本，已跳过') : undefined })
+        } catch (cause) { update(key, { state: 'invalid', error: errorMessage(cause) }) }
+      }
+    } finally {
+      lock.current = false
+      if (alive.current) {
+        if (scopeRef.current !== scope) { rows.current = []; setResults([]); setOpen(false) }
+        setPhase('ready')
+      }
+    }
+  }
+
+  const start = async (retry = false) => {
+    if (disabled || lock.current || rows.current.some(item => item.state === 'unconfirmed')) return
+    const pending = rows.current.filter(item => item.state === (retry ? 'failed' : 'ready'))
+    if (!pending.length) return
+    lock.current = true
+    setPhase('running')
+    try {
+      for (const item of pending) {
+        if (!alive.current || scopeRef.current !== scope) return
+        update(item.key, { state: 'installing', error: undefined, percent: null })
+        try {
+          const packB64 = await readPack(item.file, maxPackBytes, t)
+          if (!alive.current || scopeRef.current !== scope) return
+          let response: PluginMutation | { operation: PluginOperation }
+          if (!item.preview) throw new Error(t('无法读取插件包信息，请更新网关后重试'))
+          const query = new URLSearchParams({ background: 'true', expected_id: item.preview.id, expected_version: item.preview.version, expected_sha256: item.preview.sha256 })
+          try { response = await request('POST', `/api/plugins/install?${query}`, { packB64 }, { retry: 'never' }) }
+          catch (cause) {
+            if (/超时|timeout|timed out|network|fetch|连接|网络/i.test(errorMessage(cause))) throw new PluginOperationUnconfirmed(t('安装结果尚未确认，请查看插件状态后再重试'))
+            throw cause
+          }
+          let result: PluginMutation
+          if ('operation' in response) {
+            if (!response.operation) throw new PluginOperationUnconfirmed(t('安装结果尚未确认，请查看插件状态后再重试'))
+            const operation = await waitPackOperation(response.operation, request, t, operation => { remember(operation); update(item.key, { percent: operation.stage === 'downloading' ? operation.percent : null }) })
+            if (operation.error) throw new Error(operation.error)
+            if (!operation.done && !operation.hostError) throw new Error(t('插件安装未完成'))
+            let state: PluginsPayload
+            try { state = await request('GET', '/api/plugins') }
+            catch { throw new PluginOperationUnconfirmed(t('插件已安装，但读取状态失败，请刷新后查看结果')) }
+            result = { ...state, pack: operation.result?.pack, hostError: operation.hostError, installNotice: operation.result?.installNotice }
+          } else result = response
+          let notice = result.hostError || result.installNotice || result.pack?.unavailableReason || ''
+          if (!alive.current || scopeRef.current !== scope) return
+          try { await accept(result) }
+          catch (cause) { notice = t('插件已安装，但刷新界面失败：{error}', { error: errorMessage(cause) }) }
+          update(item.key, { state: notice ? 'warning' : 'installed', error: notice || undefined, percent: 100 })
+        } catch (cause) {
+          const unconfirmed = cause instanceof PluginOperationUnconfirmed
+          update(item.key, { state: unconfirmed ? 'unconfirmed' : 'failed', error: errorMessage(cause), percent: null })
+          if (unconfirmed) break
+        }
+        try { await refresh() } catch {}
+      }
+    } finally {
+      lock.current = false
+      if (alive.current) {
+        if (scopeRef.current !== scope) { rows.current = []; setResults([]); setOpen(false); setPhase('ready') }
+        else setPhase('done')
+      }
+    }
+  }
+  const reset = () => { if (!lock.current) { rows.current = []; publish(); setPhase('ready') } }
+  return { open, setOpen, results, phase, running: phase === 'running' || phase === 'preparing', addFiles, start, reset,
+    show: () => { if (disabled && !lock.current) return; if (!lock.current && phase === 'done') reset(); setOpen(true) },
+    remove: (key: string) => { if (!lock.current) { rows.current = rows.current.filter(item => item.key !== key); publish() } } }
+}
+
+export function PluginFileInstallDialog({ model, maxPackBytes, t }: { model: ReturnType<typeof usePluginFileInstall>; maxPackBytes: number; t: PluginTranslate }) {
+  const input = React.useRef<HTMLInputElement>(null)
+  const [dragging, setDragging] = React.useState(false)
+  const [trusted, setTrusted] = React.useState(false)
+  const [trustKey, setTrustKey] = React.useState('')
+  const ready = model.results.filter(item => item.state === 'ready').length
+  const failed = model.results.filter(item => item.state === 'failed').length
+  const done = model.results.filter(item => ['installed', 'warning', 'failed', 'unconfirmed'].includes(item.state)).length
+  const total = model.results.filter(item => !['invalid', 'duplicate'].includes(item.state)).length
+  const skipped = model.results.filter(item => ['invalid', 'duplicate'].includes(item.state)).length
+  const current = model.results.find(item => item.state === 'installing')
+  const unconfirmed = model.results.some(item => item.state === 'unconfirmed')
+  const unsigned = model.results.filter(item => (item.state === 'ready' || item.state === 'failed') && item.preview?.signed === false)
+  const unsignedKey = JSON.stringify(unsigned.map(item => [item.key, item.preview?.sha256]))
+  const canInstall = !unsigned.length || trusted && trustKey === unsignedKey
+  const labels: Record<FileState, string> = { preparing: t('正在校验包内容…'), ready: t('待安装'), installing: t('正在安装…'), installed: t('已安装'), warning: t('已安装，需检查'), unconfirmed: t('结果待确认'), failed: t('安装失败'), invalid: t('无法安装'), duplicate: t('已跳过') }
+  return <Dialog open={model.open} onOpenChange={model.setOpen}>
+    <DialogContent className='w-[min(860px,calc(100vw-48px))]'>
+      <DialogHeader><div><DialogTitle>{model.phase === 'done' ? t('本地安装结果') : t('批量安装插件包')}</DialogTitle><p className='m-0 mt-1 text-xs text-muted-foreground'>{t('先确认文件清单，再逐个校验并安装')}</p></div></DialogHeader>
+      <DialogBody className='min-h-0 gap-4'>
+        {model.phase === 'ready' || model.phase === 'preparing' ? <>
+          <Input type='file' ref={input} multiple accept='.zip,application/zip' className='hidden' onChange={event => { const files = Array.from(event.currentTarget.files || []); event.currentTarget.value = ''; void model.addFiles(files) }} />
+          <Button variant='outline' className={`plugins-file-drop ${dragging ? 'is-dragging' : ''}`} disabled={model.running}
+            onClick={() => input.current?.click()} onDragOver={event => { event.preventDefault(); setDragging(true) }} onDragLeave={() => setDragging(false)}
+            onDrop={event => { event.preventDefault(); setDragging(false); void model.addFiles(Array.from(event.dataTransfer.files)) }}>
+            <svg viewBox='0 0 24 24' className='size-6 shrink-0 text-muted-foreground' fill='none' stroke='currentColor' strokeWidth='1.7' strokeLinecap='round' strokeLinejoin='round' aria-hidden='true'><path d='M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M4.5 15v4.5h15V15' /></svg>
+            <span><span className='block text-sm'>{t('拖入插件包，或选择文件')}</span><span className='mt-1 block text-xs font-normal text-muted-foreground'>{t('支持多个 zip · 单个不超过 {n} MiB', { n: maxPackBytes / MIB })}</span></span>
+          </Button>
+        </> : null}
+        <div className='plugins-file-list'>
+          <div className='plugins-file-list-head'><span>{t('已选 {count} 个文件', { count: model.results.length })}{skipped ? ` · ${t('跳过 {count} 个', { count: skipped })}` : ''}</span>
+            {!model.running && model.phase !== 'done' && model.results.length ? <Button variant='link' size='xs' onClick={model.reset}>{t('清空列表')}</Button> : null}
+          </div>
+          {model.results.map(item => <div key={item.key} className='plugins-file-row'>
+            <svg viewBox='0 0 24 24' className='size-5 shrink-0 text-muted-foreground' fill='none' stroke='currentColor' strokeWidth='1.6' aria-hidden='true'><path d='M6 3h7l5 5v13H6V3ZM13 3v5h5' /></svg>
+            <div className='min-w-0 flex-1'><p className='m-0 flex flex-wrap items-center gap-2 text-sm'>{item.preview?.name || item.file.name}{item.preview ? <Badge variant={item.preview.signed ? 'outline' : 'warning'} shape='tag'>{item.preview.signed ? t('已签名') : t('未签名')}</Badge> : null}</p>
+              <p className='m-0 mt-1 break-all text-xs text-muted-foreground'>{item.preview && !item.preview.previousVersion ? `${t('版本')} ${item.preview.version} · ` : ''}{item.file.name}</p>
+              {item.preview?.previousVersion ? <p className='m-0 mt-1 text-xs text-muted-foreground'>{t('已装版本 {current} · 文件版本 {next}', { current: item.preview.previousVersion, next: item.preview.version })}</p> : null}
+              {item.preview?.enabled === false ? <p className='m-0 mt-1 text-xs text-muted-foreground'>{t('安装后保留原有停用状态')}</p> : null}
+              {item.error ? <p className={`m-0 mt-1 break-words text-xs ${item.state === 'failed' || item.state === 'invalid' ? 'text-destructive' : 'text-warning'}`}>{item.error}</p> : null}
+            </div>
+            <div className='plugins-file-state'><span className={item.state === 'installed' ? 'text-success' : item.state === 'failed' || item.state === 'invalid' ? 'text-destructive' : item.state === 'unconfirmed' || item.state === 'warning' ? 'text-warning' : 'text-muted-foreground'}>{item.state === 'preparing' || item.state === 'installing' ? <Spinner className='inline-block size-3' /> : null} {labels[item.state]}</span><span className='mt-1 block text-muted-foreground'>{formatSize(item.file.size)}</span></div>
+            {!model.running && model.phase !== 'done' ? <Button variant='ghost' size='icon-sm' aria-label={t('移除文件 {name}', { name: item.file.name })} onClick={() => model.remove(item.key)}><svg viewBox='0 0 16 16' className='size-3' fill='none' stroke='currentColor' strokeWidth='1.7' strokeLinecap='round' aria-hidden='true'><path d='m4 4 8 8M12 4l-8 8' /></svg></Button> : null}
+          </div>)}
+          {!model.results.length ? <p className='m-0 py-8 text-center text-xs text-muted-foreground'>{t('选择插件包后，文件清单会显示在这里')}</p> : null}
+        </div>
+        {unsigned.length && !model.running ? <Label className='flex items-start gap-3 text-xs font-normal leading-5'><Checkbox checked={trusted && trustKey === unsignedKey}
+          onCheckedChange={value => { setTrusted(value === true); setTrustKey(unsignedKey) }} />{t('我信任本次所选的未签名插件包，并确认继续安装。')}</Label> : null}
+        {unconfirmed ? <Alert variant='warning'>{t('本批已暂停，请先确认插件状态，再处理剩余文件。')}</Alert> : null}
+        <p className='m-0 text-xs leading-5 text-muted-foreground'>{t('单项失败不会中断其余插件。账号和原有设置均保留。')}</p>
+      </DialogBody>
+      <DialogFooter className='flex-wrap'>
+        <div className='mr-auto min-w-[180px] text-xs text-muted-foreground'>{model.phase === 'running' ? <><p className='mb-2'>{current?.preview?.name || current?.file.name} · {done}/{total}</p><Progress value={done} max={Math.max(1, total)} aria-label={t('插件安装进度')} /></> : model.phase === 'done' ? t('安装结束：{done} 个完成，{failed} 个失败', { done: model.results.filter(item => item.state === 'installed' || item.state === 'warning').length, failed }) : model.phase === 'preparing' ? t('正在校验包内容…') : t('待安装 {count} 个插件包', { count: ready })}</div>
+        <Button variant='outline' onClick={() => model.setOpen(false)}>{model.running ? t('收起') : model.phase === 'done' ? t('完成') : t('取消')}</Button>
+        {!model.running && failed && !unconfirmed ? <Button variant='outline' disabled={!canInstall} onClick={() => void model.start(true)}>{t('重试失败项')}</Button> : null}
+        {!model.running && ready && !unconfirmed ? <Button disabled={!canInstall} onClick={() => void model.start()}>{t('开始安装（{count}）', { count: ready })}</Button> : null}
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+}

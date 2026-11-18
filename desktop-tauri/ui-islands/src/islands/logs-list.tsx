@@ -8,16 +8,15 @@ import {
 import { DIALOG_SEG_CLASS } from './dialog-segmented'
 import { Empty } from '@ui'
 
-export function LogsList({ groups, empty, loading, listRef, onScroll, onDetail }: {
+export function LogsList({ groups, empty, loading, listRef, onDetail }: {
   groups: LogGroup[]
   empty: string
   loading: boolean
   listRef: React.RefObject<HTMLDivElement | null>
-  onScroll: () => void
   onDetail: (group: LogGroup) => void
 }) {
   return (
-    <div className='log-list event-log-list' id='log-list' ref={listRef} onScroll={onScroll} aria-busy={loading}>
+    <div className='log-list event-log-list' id='log-list' ref={listRef} aria-busy={loading}>
       <div className='event-log-head' aria-hidden='true'>
         <span>{t('时间')}</span><span>{t('级别')}</span><span>{t('来源')}</span>
         <span>{t('事件摘要')}</span><span>{t('次数')}</span><span />
@@ -69,7 +68,7 @@ export function LogDetail({ group, onClose }: { group: LogGroup | null; onClose:
   if (!group) return null
   const entry = group.entry
   const advice = logAdvice(entry, t)
-  const detail = logDetailText(entry)
+  const detail = logDetailText(entry, t)
   const steps = logSteps(entry, t)
   const plugins = logPlugins(entry, t)
   const copy = async () => {

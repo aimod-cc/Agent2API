@@ -171,8 +171,7 @@ impl UpdateManager {
         {
             let archive = self.download_dir().join(&bundle);
             let task = task.clone();
-            let token = super::token::effective_token();
-            tokio::task::spawn_blocking(move || worker::launch(&task, &archive, token))
+            tokio::task::spawn_blocking(move || worker::launch(&task, &archive))
                 .await.map_err(|error| UpdateError::new(error.to_string()))?
         }
         #[cfg(not(windows))]

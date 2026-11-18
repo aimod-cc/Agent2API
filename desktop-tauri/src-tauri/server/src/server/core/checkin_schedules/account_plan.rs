@@ -42,6 +42,7 @@ impl AccountPlan {
                 account.at <= now
                     && account.attempted_at.is_none()
                     && crate::server::core::plugin_host::serves_provider(&account.provider)
+                    && !crate::server::core::plugin_host::operations::active_for_provider(&account.provider)
             })
             .map(|(id, account)| (account.at, id.clone()))
             .collect();
@@ -61,6 +62,7 @@ impl AccountPlan {
             .filter(|account| {
                 account.attempted_at.is_none()
                     && crate::server::core::plugin_host::serves_provider(&account.provider)
+                    && !crate::server::core::plugin_host::operations::active_for_provider(&account.provider)
             })
             .map(|account| account.at)
             .min()
@@ -201,6 +203,7 @@ pub fn take_due(id: &str, account_id: &str, date: &str) -> Option<String> {
             || account.at > now.timestamp_millis()
             || !schedule.providers.contains(&account.provider)
             || !crate::server::core::plugin_host::serves_provider(&account.provider)
+            || crate::server::core::plugin_host::operations::active_for_provider(&account.provider)
             || schedule
                 .account_plan
                 .windows

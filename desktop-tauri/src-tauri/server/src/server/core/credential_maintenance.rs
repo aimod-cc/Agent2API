@@ -206,7 +206,7 @@ pub async fn refresh_accounts(store: &AccountStore, selected: Option<&[String]>,
         return slots.into_iter().flatten().collect();
     }
 
-    logging::log(
+    logging::verbose(
         "[Accounts]",
         &format!("检测到 {} 个临期账号，开始自动刷新凭证…", pending.len()),
     );
@@ -223,33 +223,46 @@ pub async fn refresh_accounts(store: &AccountStore, selected: Option<&[String]>,
         // 串行既避开风控也保证日志顺序稳定；失败被 match 收敛成一条结果，
         // 不会中断循环（见模块头的失败隔离）。
         let started = std::time::Instant::now();
-        slots[index] = Some(match refresh_checked(store, adapter.as_ref(), &id).await {
-            Ok(_) => {
-                // 成功也打一条：用户在日志页能看到「网关自动刷新了谁的凭证」，
-                // 否则「token 怎么自己变新了」是个无法追溯的问题
-                logging::log("[Accounts]", &format!("✅ 已自动刷新账号 {id} 的凭证"));
-                json!({
-                    "id": id,
-                    "provider": provider,
-                    "status": STATUS_REFRESHED,
-                })
-            }
-            Err(error) => {
-                logging::log(
-                    "[Accounts]",
-                    &format!("❌ 账号 {id} 凭证自动刷新失败: {}", error.message),
-                );
-                json!({
-                    "id": id,
-                    "provider": provider,
-                    "status": STATUS_FAILED,
-                    "message": error.message,
-                })
-            }
-        });
-        if let Some(row) = &mut slots[index] {
-            row["durationMs"] = json!(started.elapsed().as_millis().min(i64::MAX as u128) as i64);
-        }
+        let credential_stamp = store.credential_stamp(&id);
+        let result = refresh_checked(store, adapter.as_ref(), &id).await.map(|_| ());
+        let mut row = match &result {
+            Ok(_) => json!({
+                "id": id,
+                "provider": provider,
+                "status": STATUS_REFRESHED,
+            }),
+            Err(error) => json!({
+                "id": id,
+                "provider": provider,
+                "status": STATUS_FAILED,
+                "message": crate::server::core::maintenance::types::safe_message(&error.message),
+            }),
+        };
+        row["durationMs"] = json!(started.elapsed().as_millis().min(i64::MAX as u128) as i64);
+        let message = if result.is_ok() {
+            format!("✅ 已自动刷新账号 {id} 的凭证")
+        } else {
+            format!("❌ 账号 {id} 凭证自动刷新失败: {}", row["message"].as_str().unwrap_or_default())
+        };
+        logging::console_line("[Accounts]", &message);
+        logging::log_event(
+            if result.is_ok() { "info" } else { "error" },
+            "account",
+            &format!("[Accounts] {message}"),
+            Some(json!({
+                "action": "credential.refresh",
+                "accountId": id,
+                "accountName": before.get(&id).filter(|account| account.name != id)
+                    .map(|account| crate::server::core::maintenance::types::safe_message(&account.name)),
+                "provider": provider,
+                "providerLabel": crate::server::core::providers::label_of(&provider),
+                "outcome": row["status"],
+                "code": result.as_ref().err().and_then(|error| error.code.as_deref()),
+                "credentialStamp": credential_stamp,
+                "durationMs": row["durationMs"],
+            })),
+        );
+        slots[index] = Some(row);
     }
 
     let mut results: Vec<Value> = slots.into_iter().flatten().collect();
@@ -261,13 +274,6 @@ pub async fn refresh_accounts(store: &AccountStore, selected: Option<&[String]>,
         row["forced"] = json!(forced.iter().any(|account_id| account_id == &id));
         if row["status"] == STATUS_REFRESHED { row["credentialChanged"] = json!(true); }
     }
-    let (refreshed, skipped_count, failed) = summarize(&results);
-    // 汇总级别跟结果走：「失败 0 个」是正常收尾，不能因文案带「失败」被抬成 error
-    logging::log_with_level(
-        "[Accounts]",
-        &format!("凭证自动维护完成：成功 {refreshed}，跳过 {skipped_count}，失败 {failed}"),
-        if failed > 0 { "error" } else { "info" },
-    );
     results
 }
 
@@ -289,8 +295,8 @@ pub async fn refresh_expiring_report(store: &AccountStore) -> Value {
 
 /// 统计逐条结果里的三档状态：`(refreshed, skipped, failed)`。
 ///
-/// 供路由层拼汇总用（本模块内部打日志也走它）—— 统计口径只写一份，
-/// 免得「日志说成功 2、响应说成功 3」这种对不上的情况。
+/// 供路由层拼汇总用；统计口径只写一份，
+/// 免得响应与维护记录的成功数量对不上。
 pub fn summarize(results: &[Value]) -> (usize, usize, usize) {
     let count = |status: &str| {
         results

@@ -222,6 +222,7 @@ fn push_managed_model(
         "provider": provider, "providerLabel": super::super::label_of(provider),
         "source": source, "enabled": enabled, "aliases": aliases,
         "capabilities": capability::effective(&item),
+        "toolCallingMode": item.get("toolCallingMode"),
         "kind": if super::super::images::model_is_image(&item) { json!("image") }
             else { item.get("kind").cloned().unwrap_or(json!("chat")) },
         "output_modalities": item.get("output_modalities"),

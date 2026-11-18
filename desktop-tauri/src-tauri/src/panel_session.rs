@@ -3,14 +3,32 @@
 //! 凭证只在本进程内保存；网关启动后通过 Rust 调用签发，不对 HTTP 暴露入口。
 //! 发送管理请求前校验服务端的会话状态，缺失、过期或被撤销时自动重建。
 
-use std::sync::Mutex;
+use std::sync::{atomic::{AtomicU64, Ordering}, Mutex, OnceLock};
 
 use serde_json::Value;
+use tauri::{AppHandle, Emitter};
 
 use crate::server::access::{self, local_session::Session};
 
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
+static REVISION: AtomicU64 = AtomicU64::new(0);
+static APP: OnceLock<AppHandle> = OnceLock::new();
 const RENEW_AHEAD_MS: i64 = 2 * 60 * 1000;
+
+pub(crate) fn revision() -> u64 {
+    REVISION.load(Ordering::Acquire)
+}
+
+pub(crate) fn initialize(app: &AppHandle) {
+    let _ = APP.set(app.clone());
+}
+
+fn changed() {
+    REVISION.fetch_add(1, Ordering::AcqRel);
+    if let Some(app) = APP.get() {
+        let _ = app.emit("management-session-changed", ());
+    }
+}
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -33,16 +51,22 @@ fn ensure_session() -> Result<Session, String> {
     }
     // 并发请求共用这把锁，只有一个调用负责重新签发。
     let issued = access::local_session::issue()?;
-    *current = Some(issued.clone());
+    if let Some(previous) = current.replace(issued.clone()) {
+        access::local_session::revoke(&previous.access_token);
+    }
+    drop(current);
+    changed();
     Ok(issued)
 }
 
 pub fn clear() {
-    if let Ok(mut current) = SESSION.lock() {
+    let cleared = if let Ok(mut current) = SESSION.lock() {
         if let Some(session) = current.take() {
             access::local_session::revoke(&session.access_token);
-        }
-    }
+            true
+        } else { false }
+    } else { false };
+    if cleared { changed(); }
 }
 
 pub fn ensure_local_access() -> Result<(), String> {
@@ -76,5 +100,7 @@ pub fn recover_rejected(headers: &reqwest::header::HeaderMap) -> Result<bool, St
         return Ok(false);
     }
     *current = Some(access::local_session::issue()?);
+    drop(current);
+    changed();
     Ok(true)
 }

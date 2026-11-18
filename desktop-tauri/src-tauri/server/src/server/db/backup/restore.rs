@@ -80,7 +80,13 @@ pub(super) fn import(
     let tables = table_row_counts(&temp.conn, &[]);
     set_phase(RestorePhase::SafetyBackup);
     let suppression = cloud_sync::auto_sync::SuppressionGuard::new();
-    let safety = db.with_mut(|main| {
+    if !config::model_key_source::pre_replace() {
+        return Err("模型Key原授权无法安全撤销，未替换主数据库".into());
+    }
+    // 原epoch先真实耐久轮换，随后暂存库另写新隔离epoch，最后才创建安全备份和覆盖。
+    // 因而安全备份本身已隔离；覆盖失败回滚、应用重启均不能恢复本次之前的旧发送资格。
+    // 槽payload不参与密钥重加密：原样保留但永远属于旧epoch，不按ID解密或建立Ready。
+    let safety = db.with_account_change(|change| change.restore(&temp.conn, |main| {
         db.invalidate_accounts();
         let safety = safety::create(main, config_dir)?;
         set_phase(RestorePhase::Replacing);
@@ -91,13 +97,13 @@ pub(super) fn import(
                 .and_then(|old| replace(&old, main));
             db.invalidate_accounts();
             return match rollback {
-                Ok(()) => Err(format!("{error}；已自动还原替换前的数据，本机密钥未更换")),
+                Ok(()) => Err(format!("{error}；已自动还原替换前的业务数据，本机密钥未更换；旧换证资格仍保持隔离")),
                 Err(rollback_error) => Err(format!("{error}；自动还原失败: {rollback_error}。安全备份保存在 {}，本机密钥未更换", safety.display())),
             };
         }
         db.invalidate_accounts();
         Ok(safety)
-    }).ok_or("数据库连接不可用，恢复未执行")??;
+    })).ok_or("数据库连接不可用，恢复未执行")??;
     db.invalidate_accounts();
     set_phase(RestorePhase::Reloading);
     config::reload();
@@ -145,6 +151,7 @@ pub(super) fn fail_next_replace() {
 }
 
 fn replace(source: &Connection, target: &mut Connection) -> Result<(), String> {
+    super::super::invalidate_query_caches();
     let backup =
         Backup::new(source, target).map_err(|error| format!("初始化数据库替换失败: {error}"))?;
     complete_backup(&backup, "恢复主数据库")?;

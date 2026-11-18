@@ -28,6 +28,7 @@ pub(super) fn stored_attempt_details(list: &[usage::AttemptDetail]) -> Vec<Attem
             }).collect(),
             notice: item.notice.clone(),
             body_bytes: item.body_bytes,
+            error_policy: item.error_policy.clone(),
         })
         .collect()
 }

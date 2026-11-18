@@ -134,6 +134,8 @@ pub struct AppSettings {
     /// 兑现。代价同上（令牌池在打开窗口前不补货）。
     /// 默认 false。
     pub lightweight_mode: bool,
+    /// Linux WebKitGTK 硬件加速；创建界面前读取，改动需重启整个进程。
+    pub hardware_acceleration: bool,
     /// 旧版保存的网页会话；保留字段以兼容已有设置，本机壳不再读取它。
     #[serde(default)]
     pub panel_session: PanelSession,
@@ -169,6 +171,7 @@ impl Default for AppSettings {
             lan_access: false,
             lan_panel: false,
             lightweight_mode: false,
+            hardware_acceleration: true,
             panel_session: PanelSession::default(),
         }
     }

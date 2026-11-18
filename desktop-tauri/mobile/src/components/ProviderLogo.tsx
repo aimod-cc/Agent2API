@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import { Icon } from './Icon'
 import { providerIcon, providerLabel } from '../lib/providers'
-import { cachedProviderIconPath } from '../../../ui-shared/provider-icons'
+import { providerIconSource } from '../../../ui-shared/provider-icons'
 import { useImageFallback } from '../../../ui-shared/use-image-fallback'
 import { resolveUrl } from '../api/client'
 import { store } from '../state/store'
@@ -22,11 +22,10 @@ export function ProviderLogo({
   label?: string
   size?: 'default' | 'lg'
 }) {
-  const cachedIcon = useSyncExternalStore(subscribe, () => {
-    const path = cachedProviderIconPath(store.get().session?.providerIcons, id || '')
-    return path ? resolveUrl(path) : ''
-  })
-  const { src: icon, onError } = useImageFallback(cachedIcon, providerIcon(id))
+  const pluginIcon = useSyncExternalStore(subscribe, () => providerIconSource(
+    store.get().session?.providerIcons, id || '', resolveUrl,
+  ))
+  const { src: icon, onError } = useImageFallback(pluginIcon, providerIcon(id))
   const text = providerLabel(id, label)
   return (
     <span className={size === 'lg' ? 'm-logo m-lg' : 'm-logo'}>

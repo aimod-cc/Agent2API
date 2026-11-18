@@ -8,6 +8,7 @@ import { adoptAccountSorting, refreshAccountSorting } from './accounts-sort'
 import { putUsageRow, usageEntries, usageEntryOf, usageFailureOf } from './accounts-usage-cache'
 import { usageEmptyStateOf } from '../../../ui-shared/usage-readings'
 import { usageQueryDeadline } from '../../../ui-shared/usage-query-task'
+import { applyAccountLimited } from './accounts-limited-snapshot'
 import { applyUsageTasks, installUsageTaskSync, startUsageTasks, usageTaskRevision, waitUsageTask } from './accounts-usage-tasks'
 export { cancelAllUsage, cancelUsageQuery, invalidateUsageTasks } from './accounts-usage-tasks'
 import { t } from '../i18n'
@@ -17,7 +18,12 @@ export { NOT_CONFIGURED_CODE, pruneUsageCache, usageEntries, usageEntryOf, usage
 const tokenUsageMap = new Map<string, TokenReading[]>()
 let lastTokenAt = 0
 let shapeRepairStarted = false
+let listRevision = 0
+let balanceRevision = 0
+export function accountUsageRevision(): number { return listRevision }
+export function accountBalanceRevision(): number { return balanceRevision }
 let snapshotPending: Promise<boolean> | undefined
+let snapshotRequested = 0
 installUsageTaskSync(syncBalancesSnapshot)
 
 export function tokenUsageOf(account: AccountRecord | null | undefined): TokenReading[] {
@@ -25,7 +31,7 @@ export function tokenUsageOf(account: AccountRecord | null | undefined): TokenRe
 }
 
 function applyTokenUsage(
-  snapshot: { tokenAt?: unknown; tokenUsage?: Record<string, unknown> } | null | undefined,
+  snapshot: { tokenAt?: unknown; tokenUsage?: Record<string, unknown>; partial?: boolean } | null | undefined,
 ): boolean {
   const tokenAt = Number(snapshot?.tokenAt) || 0
   if (!tokenAt || tokenAt === lastTokenAt) return false
@@ -48,14 +54,14 @@ function applyTokenUsage(
     }
     fresh.set(id, readings)
   }
-  const changed = fresh.size !== tokenUsageMap.size
+  const changed = !snapshot?.partial && fresh.size !== tokenUsageMap.size
     || [...fresh].some(([id, readings]) => {
       const current = tokenUsageMap.get(id)
       return !current || current.length !== readings.length
         || readings.some((row, index) => row.used !== current[index]?.used
           || row.windowStart !== current[index]?.windowStart)
     })
-  tokenUsageMap.clear()
+  if (!snapshot?.partial) tokenUsageMap.clear()
   for (const [id, readings] of fresh) tokenUsageMap.set(id, readings)
   return changed
 }
@@ -79,6 +85,8 @@ export function applyBalances(
     }
   }
   if (applied) {
+    listRevision++
+    balanceRevision++
     bump()
     shared().wbApp?.renderTopbarStatus?.()
   }
@@ -104,20 +112,36 @@ async function repairStaleDetail(): Promise<void> {
 }
 
 export function syncBalancesSnapshot(): Promise<boolean> {
-  if (!snapshotPending) snapshotPending = readBalancesSnapshot().finally(() => { snapshotPending = undefined })
+  snapshotRequested++
+  if (!snapshotPending) snapshotPending = (async () => {
+    let completed: number
+    let applied = false
+    do {
+      completed = snapshotRequested
+      applied = await readBalancesSnapshot() || applied
+    } while (completed !== snapshotRequested)
+    return applied
+  })().finally(() => { snapshotPending = undefined })
   return snapshotPending
 }
 
 async function readBalancesSnapshot(): Promise<boolean> {
   try {
     const revision = usageTaskRevision()
-    const data = await usageQueryDeadline(Promise.resolve(shared().workbuddyDesktop?.getBalancesSnapshot?.()), 5000)
+    const dialog = getStore().dialog
+    const scope = shared().wbApp?.getState?.()?.accounts?.indexOnly
+      ? [...new Set([...getStore().visibleUsageIds, ...getStore().usageInflight,
+        ...(dialog?.kind === 'settings' ? [dialog.id] : [])])]
+      : undefined
+    const data = await usageQueryDeadline(Promise.resolve(shared().workbuddyDesktop?.getBalancesSnapshot?.(scope)), 5000)
     if (revision !== usageTaskRevision()) return false
     // Token 消耗独立于余额查询变化，不能被余额的时间戳早退挡住。
     const limiterApplied = adoptLimiterSnapshot(data)
+    applyAccountLimited(data?.listLimited)
     const sortingApplied = !getStore().sortBusy && adoptAccountSorting(data?.sorting)
     const tokenApplied = applyTokenUsage(data) || limiterApplied || sortingApplied
     if (tokenApplied) {
+      listRevision++
       bump()
       shared().wbApp?.renderTopbarStatus?.()
     }
@@ -157,7 +181,7 @@ export async function queryUsageOnce(id: string): Promise<void> {
     const entry = usageEntries().get(id)
     const failure = usageFailureOf(entry)
     const empty = usageEmptyStateOf(entry, t)
-    if (failure?.notConfigured) toast(failure.message, 'ok')
+    if (failure?.notice) toast(failure.message, 'ok')
     else if (failure) toast(t('余额查询失败：{message}', { message: failure.message }), 'err')
     else if (empty) toast(empty.detail, 'ok')
     else toast(t('✅ 已更新余额'))

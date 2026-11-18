@@ -35,8 +35,13 @@
 
 // 「Agent」页：本机 AI 客户端配置接管（列表 / 保存 / 写入 / 预览 / 还原 / 导入）
 pub mod agents;
+pub mod advertisements;
 pub mod agent_resources;
+pub(crate) mod capacity_admission;
+pub(crate) mod runtime_capacity;
 pub mod accounts;
+mod accounts_credentials;
+mod accounts_list;
 mod account_import_setup;
 pub mod accounts_batch;
 mod accounts_export;
@@ -44,6 +49,7 @@ mod accounts_sort;
 // `/api/accounts/usage` 的查询与结果组装（从 accounts.rs 拆出：余额能力从
 // 「只服务 workbuddy」扩到四家混查时新增，见该文件模块头）
 pub mod accounts_usage;
+mod accounts_usage_snapshot;
 // AI 助手（GET/PUT /api/assistant/config + POST /api/assistant/chat）：
 // 设置读写与流式对话转发。工具定义与执行都在前端，后端不认识任何工具，
 // 见该文件模块头
@@ -134,6 +140,7 @@ pub mod models;
 pub mod onboarding;
 mod officeace_subscription;
 pub mod panel;
+pub mod panel_events;
 pub mod pipeline;
 mod live_progress;
 mod record_persist;
@@ -143,6 +150,11 @@ pub mod plugins;
 pub mod plugin_tasks;
 pub mod plugin_login;
 pub mod plugin_helpers;
+pub mod plugin_desktop_import;
+pub mod plugin_desktop_launch;
+pub mod plugin_codearts_enrollment;
+pub mod plugin_cline_free_enrollment;
+pub mod plugin_permissions;
 pub mod plugin_icons;
 pub mod plugin_provider_settings;
 // 插件 UI 资源的托管（`/plugins/{pack}/ui/*`）：插件包可以带页面，由网关
@@ -152,6 +164,7 @@ pub mod plugin_ui;
 // 原样出给 iframe 里的插件页，让迁移过来的页面与宿主同一套色板 / 圆角 / 阴影
 pub mod plugin_theme;
 pub mod prompt;
+pub mod prompt_rules;
 pub mod protocol;
 pub mod proxies;
 pub mod qoder_umid;
@@ -161,6 +174,7 @@ pub mod queue_api;
 // 见该文件模块头
 pub mod image_compress;
 pub mod vision_compat;
+pub mod web_tools;
 mod vision_compat_record;
 pub mod retry_api;
 pub(crate) mod request_prepare;
@@ -172,6 +186,7 @@ pub mod role_compat;
 // /api/developer-role-compat 同形的单开关端点，实施点在
 // `core::protocol::responses` 的 Responses 事件重建层，见该文件模块头
 pub mod reasoning_collapse;
+pub mod routing_errors;
 pub mod routing_api;
 pub mod routing_flow;
 pub mod routing_groups;

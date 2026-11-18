@@ -93,7 +93,8 @@ export function groupBalanceOf(members: AccountRecord[], scope: 'group' | 'filte
     if (entry === undefined || entry === null) { out.pending++; continue }
     const failure = usageFailureOf(entry)
     if (failure) {
-      if (!failure.notConfigured) out.failed++
+      if (!failure.notice) out.failed++
+      else out.uncountable++
       continue
     }
     if (typeof entry !== 'object' || Array.isArray(entry)) { out.uncountable++; continue }

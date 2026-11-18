@@ -362,11 +362,13 @@ impl AccountStore {
         let count = match record.get("rateLimits") {
             Some(Value::Object(limits)) => limits.len(),
             _ => 0,
-        } + usize::from(record.get("upstreamCooldownUntil").is_some());
+        } + usize::from(record.get("upstreamCooldownUntil").is_some())
+            + record.get("routingCooldowns").and_then(Value::as_object).map(|limits| limits.len()).unwrap_or(0);
         if count == 0 {
             return 0;
         }
         record.remove("rateLimits");
+        record.remove("routingCooldowns");
         record.remove("upstreamCooldownUntil");
         if record.enabled() { record.remove("upstreamBlockedReason"); }
         record.set_updated_at(logging::now_ms());
@@ -1128,7 +1130,12 @@ impl AccountStore {
                 .iter()
                 .find(|(id, _)| *id == provider)
                 .map(|(_, rank)| *rank)
-                .unwrap_or_else(|| (provider_index(&provider).unwrap_or(usize::MAX / 2) as u32 + 1) * 10)
+                .unwrap_or_else(|| {
+                    provider_index(&provider)
+                        .and_then(|index| u32::try_from(index).ok())
+                        .map(|index| index.saturating_add(1).saturating_mul(10))
+                        .unwrap_or(u32::MAX)
+                })
         };
         let mut sorted = state.accounts.clone();
         if legacy_order {

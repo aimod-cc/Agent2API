@@ -112,6 +112,7 @@ export type RouteAttempt = {
   error?: string | null
   notice?: string | null
   bodyBytes?: number | null
+  errorPolicy?: import('../../../ui-shared/routing-errors-types').ErrorPolicyRecord
   retries?: Array<{ reason?: string; status?: number | null; delayMs?: number }>
 }
 export type ReplayRow = {

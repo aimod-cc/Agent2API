@@ -115,7 +115,7 @@ function AssistantPage() {
   const { images, setImages, files, setFiles, addFiles, reading: readingAttachments } = useAssistantAttachments(activeIdRef)
   /** 会话标题（用户没改过就一直取第一条用户消息，见 `titleFrom`） */
   const titleRef = React.useRef<string>('')
-  const { sessions, setSessions, persist, summarize, remove: removeSavedSession, clear: clearSavedSessions } = useAssistantSessions({
+  const { sessions, setSessions, persist, summarize, acceptLoaded, remove: removeSavedSession, clear: clearSavedSessions } = useAssistantSessions({
     config: configRef, messages: wireRef, ui: uiRef, activeId: activeIdRef, title: titleRef, apiKey: requestKeyRef,
   })
   const stoppedRef = React.useRef(false)
@@ -604,6 +604,7 @@ function AssistantPage() {
     try {
       await persistRef.current(false)
       const detail = await loadSession(id)
+      acceptLoaded(detail)
       uiRef.current = replayMessages(detail.messages, detail.model)
       wireRef.current = detail.messages
       activeIdRef.current = detail.id
@@ -633,7 +634,7 @@ function AssistantPage() {
       setHistoryBusy(false)
     }
     setSidebarOpen(false)
-  }, [awaiting, busy, config, syncUI, saveConfig, refreshModelOptions])
+  }, [awaiting, busy, config, syncUI, saveConfig, refreshModelOptions, acceptLoaded])
 
   const removeSession = React.useCallback(async (id: string) => {
     if (busy || awaiting || sendingRef.current || historyBusyRef.current) return
@@ -696,6 +697,7 @@ function AssistantPage() {
     setBusy: value => { historyBusyRef.current = value; setHistoryBusy(value) },
     model: () => configRef.current?.model ?? null, sync: syncUI, persist: () => persistRef.current(),
     open: detail => {
+      acceptLoaded(detail)
       wireRef.current = detail.messages
       uiRef.current = replayMessages(detail.messages, detail.model)
       activeIdRef.current = detail.id

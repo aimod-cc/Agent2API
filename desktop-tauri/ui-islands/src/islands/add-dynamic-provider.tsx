@@ -1,139 +1,52 @@
-/** 未在内置表单登记的运行时 provider：动态方法、纯文本说明与旧插件兼容入口。 */
+/** 运行时提供商的动态登录表单。 */
 import * as React from 'react'
 import {
-  Alert, AlertDescription, AlertTitle, Button, Input, Label, SegmentedControl,
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Spinner, Textarea,
+  Alert, AlertDescription, AlertTitle, Button, Input, Label, Spinner,
 } from '@ui'
-import { AddFoot, AddGroup } from './add-account-kit'
+import { AddFoot } from './add-account-kit'
 import { t } from '../i18n'
-import { MAX_NAME_LENGTH } from './add-account-configs'
+import { MAX_NAME_LENGTH } from './add-account-constants'
 import {
-  accountRequest, addedLabelOf, afterAdd, describeError, isMethodsUnavailable,
-  normalizeLoginResult, postAccount, runtimeProviderOf, saveAccountProxySelection, shared, startLogin, toast,
-  type LoginProgress, type LoginResult, type RuntimeProviderRecord,
+  accountRequest, addedLabelOf, afterAdd, describeError, desktopImportRequest, isMethodsUnavailable,
+  normalizeLoginResult, postAccount, accountProviderAvailable, saveAccountProxySelection, shared, startLogin, toast,
+  type LoginProgress, type LoginResult,
   type WebLoginController, type WebLoginView,
 } from './add-account-bridge'
 import { draftOfProxy, readProxyDraft } from './accounts-proxy-form'
-import { AccountProxySection } from './add-account-proxy'
+import { accountProxySummary, AccountProxySection } from './add-account-proxy'
 import { UserAgentInput, useUserAgentPresets, userAgentEditable, applyUserAgentAfterCreate, createdAccountIdOf } from './add-account-user-agent'
 import { openExternal } from './update-shared'
-import { PluginLoginInteraction } from '../../../ui-shared/plugin-login-interaction'
-import { SearchableSelect } from '../../../ui-shared/searchable-select'
+import { PluginLoginInteraction, type LoginRequest } from '../../../ui-shared/plugin-login-interaction'
+import { PluginDesktopImport } from '../../../ui-shared/plugin-desktop-import'
+import { PluginCodeArtsEnrollment } from '../../../ui-shared/plugin-codearts-enrollment'
+import { PluginClineFreeEnrollment } from '../../../ui-shared/plugin-cline-free-enrollment'
+import { getPluginStartup, subscribePluginStartup } from '../../../ui-shared/plugin-startup'
+import { managedLoginSourceGeneration, MANAGEMENT_SESSION_CHANGE, type ManagedLoginScope } from '../../../ui-shared/plugin-login-managed'
+import { PluginLoginBrowser, PluginLoginFields, PluginLoginMethodPicker, PluginLoginSecurity } from '../../../ui-shared/plugin-login-form'
+import { PluginLoginDiagnostic } from '../../../ui-shared/plugin-login-diagnostic-view'
+import { loginDiagnosticOf, type LoginDiagnostic } from '../../../ui-shared/plugin-login-diagnostic'
 import { usePluginPrompts } from './add-account-plugin-prompts'
 
 import {
-  loginText, mergeLoginInstructions, methodLabel, parseCallbackInput, parseMethods, pluginBrowserInstructions, promptEnabled, promptValue, readInputs,
-  type Method, type MethodsState,
+  loginText, mergeLoginInstructions, parseCallbackInput, parseMethods, pluginBrowserInstructions, readInputs,
+  type MethodsState,
 } from './add-account-dynamic-fields'
 
-const MAX_JSON_LENGTH = 262_144
-const UNSAFE_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
-const RESERVED_KEYS = new Set([
-  'provider', 'name', 'proxy', 'methodIndex', 'inputs', 'importDesktop', 'guest',
-  'authFileContent', 'authFileB64', 'authFileName', 'edition', 'mode', 'socialRestore',
-  'options', 'state', 'flow', 'callbackUrl', 'signal',
-])
 const textOf = (value: unknown): string => typeof value === 'string' ? value : ''
 const objectOf = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown> : undefined
 
-/** 501 才使用已有握手 meta；不臆造方法索引，也不把 token/sms 当作 OAuth。 */
-function legacyMethods(provider: RuntimeProviderRecord | undefined): MethodsState {
-  const source = provider?.source || textOf(provider?.meta?.source)
-  const builtin = source === 'builtin' || provider?.id?.endsWith('-subscription') === true
-  if (builtin) return {
-    phase: 'error', methods: [], instructions: '',
-    reason: t('本体订阅未返回动态登录方式（501）；不会猜测导入接口或显示插件手动凭证入口。请更新网关后重试。'),
-  }
-  const meta: Record<string, unknown> | undefined = provider?.meta || (provider && { ...provider })
-  const declared = meta?.login_methods ?? meta?.loginMethods
-  const methods: Method[] = []
-  for (const [index, value] of (Array.isArray(declared) ? declared : []).entries()) {
-    const raw = objectOf(value)
-    if (!raw) continue
-    const kind = textOf(raw.kind)
-    const method: Method = {
-      id: `legacy:${index}`, type: 'unsupported', prompts: [], localOnly: false,
-      manualCallback: false, callbackInput: 'url', embeddedOnly: false,
-      label: textOf(raw.label) || textOf(raw.button) || kind,
-      instructions: textOf(raw.hint) || textOf(raw.placeholder),
-    }
-    if (kind === 'browser') {
-      method.type = 'oauth'
-      method.label ||= t('网页登录（旧版声明）')
-    } else if (kind === 'token') {
-      // 旧 token 声明没有主字段的 key，不能猜成 token/apiKey；由 JSON 手动明确字段。
-      method.type = 'manual'
-      method.label ||= t('手动凭证 JSON')
-      const extraFields = Array.isArray(raw.extra_fields) ? raw.extra_fields : []
-      method.instructions = [method.instructions, ...extraFields.map(value => {
-        const field = objectOf(value)
-        return [textOf(field?.label), textOf(field?.key), textOf(field?.placeholder)].filter(Boolean).join(' · ')
-      })].filter(Boolean).join('\n')
-    } else if (kind === 'desktop') {
-      method.type = 'desktop'
-      method.localOnly = true
-      method.label ||= t('从网关本机客户端导入')
-    } else if (kind === 'guest') {
-      method.type = 'guest'
-      method.label ||= t('访客模式')
-    } else {
-      method.label ||= t('旧版登录方式')
-      method.reason = kind === 'sms'
-        ? t('插件只声明了短信登录，但没有下发可用的动态表单；此界面不会猜测短信接口')
-        : t('此旧版登录声明无法安全映射到动态表单，请联系插件作者')
-    }
-    methods.push(method)
-  }
-  if (!methods.some(method => method.type === 'manual')) {
-    methods.push({
-      id: 'manual:compat', type: 'manual', label: t('手动凭证 JSON（兼容入口）'),
-      prompts: [], localOnly: false, manualCallback: false, callbackInput: 'url', embeddedOnly: false, instructions: '',
-    })
-  }
-  return {
-    phase: 'legacy', methods, instructions: textOf(meta?.instructions),
-    reason: Array.isArray(declared) && declared.length
-      ? t('插件未实现 auth.methods（501）；以下入口仅依据旧版登录声明显示')
-      : t('插件未实现 auth.methods（501），且没有可用的旧版登录声明；仅保留需要插件确认的手动凭证 JSON 入口'),
-  }
-}
-
-function credentialPayload(text: string): Record<string, unknown> {
-  if (!text.trim() || text.length > MAX_JSON_LENGTH) {
-    throw new Error(t('请填写非空的凭证 JSON 对象，且不超过 256 KiB'))
-  }
-  let value: unknown
-  try { value = JSON.parse(text) } catch {
-    // JSON.parse 的错误可能包含原文片段，不能把凭证回显进错误提示。
-    throw new Error(t('凭证 JSON 格式不正确，请检查括号和引号'))
-  }
-  const record = objectOf(value)
-  if (!record || !Object.keys(record).length) throw new Error(t('凭证 JSON 必须是非空对象，不能是数组或字符串'))
-  const inspect = (value: unknown, depth: number): void => {
-    if (depth > 20) throw new Error(t('凭证 JSON 嵌套过深，请只粘贴该插件要求的凭证对象'))
-    if (!value || typeof value !== 'object') return
-    for (const [key, child] of Object.entries(value)) {
-      if (UNSAFE_KEYS.has(key) || (depth === 0 && RESERVED_KEYS.has(key))) {
-        throw new Error(t('凭证 JSON 含有不允许的字段：{key}', { key }))
-      }
-      inspect(child, depth + 1)
-    }
-  }
-  inspect(record, 0)
-  return record
-}
-
 export function DynamicProviderBlock({
-  provider, label, active, version, footerHost, hideMethodPicker = false,
+  provider, label, active, version, footerHost, preserveOnHide = false, availability = '',
 }: {
   provider: string
   label: string
   active: boolean
   version: number
   footerHost: HTMLElement | null
-  hideMethodPicker?: boolean
+  preserveOnHide?: boolean
+  availability?: string
 }): React.ReactElement {
   const prefix = `${React.useId()}-dynamic-login`
   const [methodsState, setMethodsState] = React.useState<MethodsState>({
@@ -141,22 +54,23 @@ export function DynamicProviderBlock({
   })
   const [selected, setSelected] = React.useState('')
   const [values, setValues] = React.useState<Record<string, Record<string, string>>>({})
-  const [credentialJson, setCredentialJson] = React.useState('')
   const [name, setName] = React.useState('')
-  // 账号级自定义 User-Agent（可选）：只对走 POST /api/accounts 的方式生效
-  // （api / manual / desktop / guest）；OAuth 那条由共享登录桥建号，建好后
-  // 到「账号设置」里改 —— 这里不给一个提交了却不生效的输入框。
+  // 第三方插件是否允许覆盖由后端申报；网页登录成功后走同一补写入口。
   const [userAgent, setUserAgent] = React.useState('')
   const userAgentRef = React.useRef(userAgent)
   userAgentRef.current = userAgent
   const uaPresets = useUserAgentPresets()
-  // 会话式家由插件自己拼出站头，网关覆盖不到 —— 不显示输入框
   const uaEditable = userAgentEditable(provider)
   const [proxyDraft, setProxyDraft] = React.useState(() => draftOfProxy(undefined))
   const [readingSystemProxy, setReadingSystemProxy] = React.useState(false)
   const [mode, setMode] = React.useState<'external' | 'embedded'>('external')
   const [saving, setSaving] = React.useState(false)
-  const [error, setError] = React.useState('')
+  const [error, updateError] = React.useState('')
+  const [diagnostic, setDiagnostic] = React.useState<LoginDiagnostic>()
+  const setError = (message: string, source?: unknown): void => {
+    updateError(message)
+    setDiagnostic(message ? loginDiagnosticOf(source) : undefined)
+  }
   const [progress, setProgress] = React.useState<LoginProgress>({})
   const [hasCallback, setHasCallback] = React.useState(false)
   const [callbackBusy, setCallbackBusy] = React.useState(false)
@@ -167,6 +81,10 @@ export function DynamicProviderBlock({
   const callbackRequest = React.useRef(false)
   const callbackGeneration = React.useRef(0)
   const progressRef = React.useRef<LoginProgress>({})
+  const loginScope = React.useRef<{
+    origin: string; bridge: ReturnType<typeof shared>['workbuddyDesktop']; bootId: string; managementGeneration: number;
+    state: string; methodIndex?: number; remark?: string; managed: boolean; cancelled: boolean; cancelSent?: boolean; deadline: number; cleanup?: () => void;
+  } | null>(null)
   const [loginView, setLoginView] = React.useState<WebLoginView>({
     label: t('登录并添加'), hint: '', disabled: false, waiting: false,
   })
@@ -175,25 +93,86 @@ export function DynamicProviderBlock({
   const savingRef = React.useRef(false)
   const requestingRef = React.useRef(false)
   const loadedRef = React.useRef(false)
-  const declaredMethod = methodsState.methods.find(item => item.id === selected) || methodsState.methods[0]
+  const loadedAvailability = React.useRef('')
+  const localActionsAvailable = shared().workbuddyDesktop?.platform === 'windows'
+    && Boolean(shared().__TAURI_INTERNALS__?.invoke) && accountProviderAvailable(provider)
+  const localAction = localActionsAvailable && methodsState.phase === 'ready' && provider === 'chatglm' ? 'local:chatglm-import'
+    : localActionsAvailable && methodsState.phase === 'ready' && ['codearts', 'cline-free'].includes(provider) ? 'local:enrollment' : ''
+  const localActionSelected = Boolean(localAction && selected === localAction)
+  const declaredMethod = localActionSelected ? undefined
+    : methodsState.methods.find(item => item.id === selected) || methodsState.methods.find(item => !item.reason) || methodsState.methods[0]
   const inputs = (declaredMethod && values[declaredMethod.id]) || {}
   const resolvedPrompts = usePluginPrompts(provider, declaredMethod, inputs, active && !loginView.waiting,
     (path, body) => accountRequest('POST', path, body))
   const method = resolvedPrompts.method
-  const methodAvailable = method && methodsState.phase !== 'loading' && method.type !== 'unsupported'
-  const selectedRef = React.useRef(method?.id)
-  selectedRef.current = method?.id
+  const methodAvailable = method && methodsState.phase === 'ready'
+  const selectedRef = React.useRef(selected)
+  selectedRef.current = selected || method?.id || ''
   const locked = saving || loginView.disabled || readingSystemProxy
   const submitLocked = locked || resolvedPrompts.pending || Boolean(resolvedPrompts.error)
-  const legacyBrowser = method?.type === 'oauth' && method.methodIndex === undefined
+  const remarkRef = React.useRef(name)
+  remarkRef.current = name
   const snapshot = React.useRef({ method, inputs, mode, proxyDraft })
   snapshot.current = { method, inputs, mode, proxyDraft }
   const callbackType = progress.callbackInput ?? method?.callbackInput ?? 'url'
   // 网页端的粘贴框归 web shim；本岛仅补原生桌面等待态，避免重复回调输入。
-  const manualWaiting = active && shared().workbuddyDesktop?.platform !== 'web'
+  const manualWaiting = (active || preserveOnHide) && shared().workbuddyDesktop?.platform !== 'web'
     && loginView.waiting && method?.type === 'oauth' && !method.reason
     && progress.active === true && progress.provider === provider && Boolean(progress.state)
-    && (progress.manualCallback === true || method.manualCallback)
+    && progress.managedLogin !== true && (progress.manualCallback === true || method.manualCallback)
+
+  const bootId = () => getPluginStartup().value?.bootId || shared().wbApp?.getState?.()?.pluginStartup?.bootId || ''
+  const sameServer = (scope: NonNullable<typeof loginScope.current>) => scope.bridge === shared().workbuddyDesktop
+    && scope.origin === window.location.origin && scope.bootId === bootId() && scope.managementGeneration === managedLoginSourceGeneration()
+    && (!shared().wbApp?.getState?.()?.pluginStartup?.bootId || scope.bootId === shared().wbApp?.getState?.()?.pluginStartup?.bootId)
+  const savingUnconfirmed = (value: LoginProgress) => value.phase === 'saving' || value.phase === 'unconfirmed' || value.saved === null
+  const resultCurrent = (scope: NonNullable<typeof loginScope.current>) => alive.current && loginScope.current === scope
+    && !scope.cancelled && sameServer(scope) && accountProviderAvailable(provider)
+  const scopeCurrent = (scope: NonNullable<typeof loginScope.current>) => resultCurrent(scope)
+    && (!scope.managed || performance.now() < scope.deadline)
+
+  async function cancelOwnedLogin(automatic = false): Promise<unknown> {
+    const scope = loginScope.current
+    if (!scope || scope.cancelled) return false
+    const savingUnknown = savingUnconfirmed(progressRef.current) || progressRef.current.saved === true
+    scope.cancelled = true
+    if (alive.current) { progressRef.current = {}; setProgress({}) }
+    if (automatic && savingUnknown) { scope.cancelSent = true; scope.cleanup?.(); return false }
+    if (!sameServer(scope)) return false
+    if (scope.state) {
+      scope.cleanup?.()
+      scope.cancelSent = true
+      return scope.bridge?.cancelLogin ? scope.bridge.cancelLogin(scope.state)
+        : accountRequest('POST', '/api/session/login/cancel', { state: scope.state })
+    }
+    if (scope.methodIndex === undefined) return scope.bridge?.cancelLogin?.()
+    // start 尚未回 flow 时只等它的公开进度；不能用无参取消误关随后打开的新流程。
+    let release: (() => void) | undefined
+    const timer = window.setTimeout(() => release?.(), 125000)
+    const stop = () => { window.clearTimeout(timer); release?.(); scope.cleanup = undefined }
+    scope.cleanup = stop
+    const unsubscribe = scope.bridge?.onLoginProgress?.(next => {
+      if (!sameServer(scope)) { stop(); return }
+      if (next.provider !== provider || next.active !== true || !next.state
+        || next.methodIndex !== undefined && next.methodIndex !== scope.methodIndex) return
+      scope.state = next.state
+      stop()
+      if (!scope.cancelSent) {
+        scope.cancelSent = true
+        void scope.bridge?.cancelLogin?.(scope.state).catch(() => {})
+      }
+    })
+    release = typeof unsubscribe === 'function' ? unsubscribe : undefined
+    return false
+  }
+
+  const interactionRequest: LoginRequest = async <T,>(verb: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown, options?: { signal?: AbortSignal }) => {
+    const scope = loginScope.current
+    if (!scope || !scopeCurrent(scope) || savingUnconfirmed(progressRef.current) || options?.signal?.aborted) throw new DOMException('请求已取消', 'AbortError')
+    const response = await accountRequest(verb, path, body)
+    if (!scopeCurrent(scope) || savingUnconfirmed(progressRef.current) || options?.signal?.aborted) throw new DOMException('请求已取消', 'AbortError')
+    return response as T
+  }
 
   function clearCallback(preserveError = false): void {
     if (callbackInputRef.current) callbackInputRef.current.value = ''
@@ -207,9 +186,13 @@ export function DynamicProviderBlock({
     setNextAuthUrl('')
   }
 
+  const callbackIdentity = `${method?.id || ''}:${progress.state || ''}:${callbackType}:${manualWaiting}`
+  const previousCallback = React.useRef(callbackIdentity)
   React.useEffect(() => {
+    if (preserveOnHide && previousCallback.current === callbackIdentity) return
+    previousCallback.current = callbackIdentity
     clearCallback(true)
-    if (!active) {
+    if (!active && !preserveOnHide) {
       // 关掉弹窗即作废这次读取；下次打开会重新问插件要登录方式
       //（原来的「重新读取登录方式」按钮已移除，靠这里保证每次打开都是新清单）。
       loadedRef.current = false
@@ -217,44 +200,47 @@ export function DynamicProviderBlock({
       progressRef.current = {}
       setProgress({})
       setValues({})
-      setCredentialJson('')
       setProxyDraft(previous => ({ ...previous, password: '' }))
     }
-  }, [active, method?.id, progress.state, progress.callbackInput, manualWaiting])
+  }, [active, preserveOnHide, callbackIdentity])
 
   React.useEffect(() => {
     if (!active || savingRef.current || requestingRef.current || loginView.waiting) return
-    if (loadedRef.current && runtimeProviderOf(provider)) return
+    if (loadedRef.current && loadedAvailability.current === availability && accountProviderAvailable(provider)) return
     let current = true
     const previousSelection = selectedRef.current
     const previousInputs = snapshot.current.inputs
     const accept = (next: MethodsState): void => {
       if (!current) return
+      next.methods = next.methods.filter(method => provider !== 'chatglm' || method.type !== 'desktop')
       const retained = next.methods.find(item => item.id === previousSelection)
       const nonSecret = retained ? Object.fromEntries(retained.prompts
         .filter(prompt => !prompt.secret && Object.hasOwn(previousInputs, prompt.key))
         .map(prompt => [prompt.key, previousInputs[prompt.key]])) : {}
       setValues(retained ? { [retained.id]: nonSecret } : {})
-      setCredentialJson('')
-      setSelected(retained?.id || '')
+      setSelected(retained?.id || (previousSelection?.startsWith('local:') ? previousSelection : ''))
       setMethodsState(next)
       loadedRef.current = next.phase !== 'error'
+      loadedAvailability.current = availability
     }
     requestingRef.current = true
     loadedRef.current = false
     setMethodsState(previous => ({ ...previous, phase: 'loading', reason: '' }))
     void (async () => {
       try {
-        if (!runtimeProviderOf(provider)) throw new Error(t('该提供商已不在运行时目录中，请返回列表重新选择'))
+        if (!accountProviderAvailable(provider)) throw new Error(t('该提供商已不在运行时目录中，请返回列表重新选择'))
         const locale = window.wbI18n?.locale() || 'zh-CN'
         const result = await accountRequest('GET', `/api/session/login/methods?provider=${encodeURIComponent(provider)}&locale=${encodeURIComponent(locale)}`)
         const parsed = parseMethods(result, provider)
-        if (shared().workbuddyDesktop?.platform === 'web') parsed.methods = parsed.methods.filter(method => !method.desktopOnly)
+        if (shared().workbuddyDesktop?.platform === 'web') parsed.methods = parsed.methods.filter(method => !method.desktopOnly
+          && !(provider === 'trae' && method.type === 'oauth'))
         accept(parsed)
       } catch (failure) {
         if (!current) return
-        accept(isMethodsUnavailable(failure) ? legacyMethods(runtimeProviderOf(provider)) : {
-          phase: 'error', methods: [], instructions: '', reason: describeError(failure),
+        accept({
+          phase: 'error', methods: [], instructions: '', reason: isMethodsUnavailable(failure)
+            ? t('该提供商未声明动态登录方式，请更新插件或网关后重试；不会使用旧版兼容入口。')
+            : describeError(failure),
         })
       } finally {
         if (current) requestingRef.current = false
@@ -262,7 +248,7 @@ export function DynamicProviderBlock({
     })()
     return () => { current = false; requestingRef.current = false }
     // 等待状态由共享引擎掌管，不以等待态重建方法或重新发起登录。
-  }, [provider, active, version])
+  }, [provider, active, version, availability])
 
   React.useEffect(() => {
     alive.current = true
@@ -274,43 +260,73 @@ export function DynamicProviderBlock({
         texts: () => ({ button: t('登录并添加'), hint: '' }),
         start: async () => {
           const current = snapshot.current
-          if (!current.method || current.method.type !== 'oauth') throw new Error(t('请先选择有效的 OAuth 登录方式'))
+          if (!current.method || !['oauth', 'sms'].includes(current.method.type)) throw new Error(t('请先选择有效的登录方式'))
           setError('')
           clearCallback()
           progressRef.current = {}
           setProgress({})
           const inputs = readInputs(current.method, current.inputs)
+          loginScope.current = { origin: window.location.origin, bridge: shared().workbuddyDesktop, bootId: bootId(), managementGeneration: managedLoginSourceGeneration(),
+            state: '', methodIndex: current.method.methodIndex, remark: current.method.prompts.some(prompt => prompt.key === 'name') ? '' : remarkRef.current.trim(),
+            managed: false, cancelled: false, deadline: Infinity }
+          const owner = loginScope.current
           // 插件申报 embeddedOnly 时一律走内嵌窗口（不信任残留的 mode 状态）。
           const mode = current.method.embeddedOnly ? 'embedded' : current.method.browserMode === 'external' ? 'external' : current.mode
-          // 旧 browser 声明没有索引，只走已存在的默认网页登录入口。
           try {
-            return await startLogin(provider, undefined, mode, undefined, {
-              ...(current.method.methodIndex === undefined ? {} : { methodIndex: current.method.methodIndex, inputs }),
+            const result = await startLogin(provider, undefined, mode, undefined, {
+              methodIndex: current.method.methodIndex, inputs, locale: window.wbI18n?.locale() || 'zh-CN',
               proxy: readProxyDraft(current.proxyDraft),
             })
+            if (owner.managed && result.managedLogin !== true) throw new Error(t('账号保存未确认，请查询本次状态；不会再次保存。'))
+            if (result.managedLogin === true && (result.provider !== provider || result.methodIndex !== owner.methodIndex
+              || owner.state && result.flow !== owner.state)) throw new Error(t('账号保存未确认，请查询本次状态；不会再次保存。'))
+            return resultCurrent(owner) ? result : { ok: false, canceled: true, silent: true }
           } catch (failure) {
-            if (alive.current) setError(loginText(describeError(failure)))
+            if (!resultCurrent(owner)) return { ok: false, canceled: true, silent: true }
+            if (alive.current) setError(loginText(describeError(failure)), failure)
             throw failure
-          }
+          } finally { owner.cleanup?.() }
         },
+        cancel: () => cancelOwnedLogin(),
         onSuccess: async raw => {
+          const owner = loginScope.current
+          if (!owner || !resultCurrent(owner)) return
           const result = raw as LoginResult
           if (!result?.ok || result.canceled) throw new Error(t('登录桥未确认账号添加完成'))
-          // OAuth 建号也走共享登录桥，UA 同样只能建好后补写
+          if (owner.managed && result.managedLogin !== true) throw new Error(t('账号保存未确认，请查询本次状态；不会再次保存。'))
+          if (result.managedLogin === true && (result.provider !== provider || result.methodIndex !== owner.methodIndex
+            || owner.state && result.flow !== owner.state || result.saved !== true || result.phase !== 'saved'
+            || !result.session || !(result.session.accountUid || result.session.accountId))) {
+            throw new Error(t('账号保存未确认，请查询本次状态；不会再次保存。'))
+          }
+          if (owner.remark) {
+            const id = createdAccountIdOf(result), remark = owner.remark
+            owner.remark = ''
+            if (id && resultCurrent(owner)) {
+              try { await accountRequest('PATCH', `/api/accounts/${encodeURIComponent(id)}`, { name: remark }) }
+              catch { if (resultCurrent(owner)) toast(t('账号已添加，但备注名未保存，请在账号设置中修改。'), 'warn') }
+            }
+          }
           await applyUserAgentAfterCreate(createdAccountIdOf(result), provider, userAgentRef.current)
+          if (!resultCurrent(owner)) return
           await finish(result)
         },
       }) ?? null
     }
     const receiveProgress = (next: LoginProgress): void => {
       if (!alive.current) return
-      if (next.active === false || next.provider && next.provider !== provider) {
+      const scope = loginScope.current
+      if (next.active === false && scope?.managed && savingUnconfirmed(progressRef.current)
+        && (!next.state || next.state === scope.state) && (next.provider === undefined || next.provider === provider)
+        && next.phase === undefined && next.saved === undefined) return
+      if ((next.active === false && !savingUnconfirmed(next)) || (next.provider && next.provider !== provider)) {
+        if (preserveOnHide && progressRef.current.active !== true) return
+        if (next.state && progressRef.current.state && next.state !== progressRef.current.state) return
         progressRef.current = {}
         setProgress({})
         clearCallback()
         setValues({})
-        setCredentialJson('')
-        setProxyDraft(previous => ({ ...previous, password: '' }))
+            setProxyDraft(previous => ({ ...previous, password: '' }))
         return
       }
       if (next.provider !== provider || next.active !== true) return
@@ -321,11 +337,34 @@ export function DynamicProviderBlock({
         if (!progressRef.current.state) setProgress({ active: true, provider })
         return
       }
+      if (!scope || !sameServer(scope)) return
+      if (scope.managed && next.managedLogin !== true) return
+      if (scope.state && scope.state !== state) return
+      if (!scope.state) scope.state = state
+      if (scope.cancelled) {
+        if (!scope.cancelSent) {
+          scope.cancelSent = true
+          void accountRequest('POST', '/api/session/login/cancel', { state }).catch(() => {})
+        }
+        return
+      }
+      if (next.managedLogin === true) {
+        const savingUnknown = savingUnconfirmed(next)
+        if (next.methodIndex !== scope.methodIndex || typeof next.remainingMs !== 'number' || !Number.isFinite(next.remainingMs)
+          || (savingUnknown ? next.remainingMs < 0 : next.remainingMs <= 0) || !scope.bootId || next.manualCallback !== false || next.callbackInput !== 'url') {
+          if (!savingUnknown) void cancelOwnedLogin().catch(() => {})
+          clearCallback(); setValues({})
+          setError(savingUnknown ? t('账号保存未确认，请查询本次状态；不会再次保存。') : t('登录步骤与当前流程不匹配，请重新发起登录。'))
+          return
+        }
+        scope.managed = true
+        scope.deadline = Math.min(scope.deadline, performance.now() + next.remainingMs)
+      }
       let callbackInput: LoginProgress['callbackInput']
       try {
         callbackInput = parseCallbackInput(next.callbackInput === undefined ? current?.callbackInput : next.callbackInput)
         if (next.manualCallback !== undefined && typeof next.manualCallback !== 'boolean') throw new Error()
-        if (current?.manualCallback && (next.manualCallback === false || callbackInput !== current.callbackInput)) throw new Error()
+        if (!scope.managed && current?.manualCallback && (next.manualCallback === false || callbackInput !== current.callbackInput)) throw new Error()
         if (callbackInput === 'code' && !(next.manualCallback === true || current?.manualCallback)) throw new Error()
       } catch {
         progressRef.current = {}
@@ -336,36 +375,70 @@ export function DynamicProviderBlock({
       }
       // 只摘公开进度字段，不保存整个 payload 或凭证；flow 必须属于当前 provider。
       const safe: LoginProgress = {
-        active: true, provider, state,
-        manualCallback: next.manualCallback === true, callbackInput,
+        active: true, provider, state, managedLogin: scope.managed, methodIndex: scope.methodIndex,
+        manualCallback: !scope.managed && next.manualCallback === true, callbackInput,
         instructions: loginText(next.instructions), hint: loginText(next.hint), userCode: textOf(next.userCode),
+        ...(scope.managed ? { phase: next.phase, saved: next.saved, remainingMs: next.remainingMs } : {}),
       }
-      if (progressRef.current.state !== safe.state || progressRef.current.callbackInput !== safe.callbackInput) clearCallback()
+      if (savingUnconfirmed(safe)) { clearCallback(); setValues({}) }
+      else if (progressRef.current.state !== safe.state || progressRef.current.callbackInput !== safe.callbackInput) clearCallback()
       progressRef.current = safe
       setProgress(safe)
     }
     const bridge = shared().workbuddyDesktop
     const unsubscribeState = bridge?.onLoginState?.(receiveProgress)
     const unsubscribeProgress = bridge?.onLoginProgress?.(receiveProgress)
+    const guard = () => {
+      const scope = loginScope.current
+      if (scope && (!sameServer(scope) || !accountProviderAvailable(provider))) {
+        scope.cancelled = true; scope.cancelSent = true; scope.cleanup?.()
+        loginScope.current = null
+        progressRef.current = {}; setProgress({}); clearCallback()
+        snapshot.current = { ...snapshot.current, inputs: {}, proxyDraft: { ...snapshot.current.proxyDraft, password: '' } }
+        setValues({}); setProxyDraft(previous => ({ ...previous, password: '' }))
+      }
+    }
+    const unsubscribeBoot = subscribePluginStartup(guard)
+    const unsubscribeStateRefresh = shared().wbApp?.subscribeRefresh?.(guard)
+    const pagehide = () => { void cancelOwnedLogin(true).catch(() => {}); alive.current = false; progressRef.current = {}; setProgress({}) }
+    const pageshow = () => { alive.current = true }
+    window.addEventListener(MANAGEMENT_SESSION_CHANGE, guard)
+    window.addEventListener('pagehide', pagehide)
+    window.addEventListener('pageshow', pageshow)
     return () => {
       alive.current = false
+      void cancelOwnedLogin(true).catch(() => {})
       clearCallback()
       progressRef.current = {}
       controllerRef.current?.dispose()
       controllerRef.current = null
       if (typeof unsubscribeState === 'function') unsubscribeState()
       if (typeof unsubscribeProgress === 'function') unsubscribeProgress()
-      void shared().wbWebLogin?.cancelIfActive?.(provider)
+      unsubscribeBoot(); unsubscribeStateRefresh?.()
+      window.removeEventListener(MANAGEMENT_SESSION_CHANGE, guard)
+      window.removeEventListener('pagehide', pagehide)
+      window.removeEventListener('pageshow', pageshow)
     }
-  }, [provider, prefix])
+  }, [provider, prefix, preserveOnHide])
+
+  React.useEffect(() => {
+    const scope = loginScope.current
+    if (!progress.managedLogin || !scope || !Number.isFinite(scope.deadline)) return
+    const timer = window.setTimeout(() => {
+      if (loginScope.current !== scope || !sameServer(scope)) return
+      // 托管到期只清输入；保存进度可能尚未到达，不能自动取消并丢弃迟到真实回执。
+      clearCallback(); setValues({})
+    }, Math.max(0, scope.deadline - performance.now()))
+    return () => window.clearTimeout(timer)
+  }, [progress.state, progress.managedLogin, progress.phase, progress.saved, progress.remainingMs])
 
   async function finish(result: LoginResult): Promise<void> {
     clearCallback()
     progressRef.current = {}
+    loginScope.current = null
     if (!alive.current) { await shared().wbApp?.refresh?.(); return }
     setProgress({})
     setValues({})
-    setCredentialJson('')
     setUserAgent('')
     setProxyDraft(draftOfProxy(undefined))
     setError('')
@@ -377,7 +450,7 @@ export function DynamicProviderBlock({
   async function submit(): Promise<void> {
     if (!method || submitLocked || savingRef.current || requestingRef.current || methodsState.phase === 'loading') return
     try {
-      if (!runtimeProviderOf(provider)) throw new Error(t('该提供商已不在运行时目录中，请返回列表重新选择'))
+      if (!accountProviderAvailable(provider)) throw new Error(t('该提供商已不在运行时目录中，请返回列表重新选择'))
       if (method.reason) throw new Error(method.reason)
       const fields = readInputs(method, inputs)
       const proxy = readProxyDraft(proxyDraft)
@@ -386,16 +459,12 @@ export function DynamicProviderBlock({
       }
       const remark = method.prompts.some(prompt => prompt.key === 'name') ? fields.name : name.trim()
       const payload: Record<string, unknown> = { provider, proxy, ...(remark ? { name: remark } : {}) }
-      if (userAgent.trim()) payload.userAgent = userAgent.trim()
+      if (uaEditable && userAgent.trim()) payload.userAgent = userAgent.trim()
       if (method.type === 'api') {
         payload.methodIndex = method.methodIndex
         payload.inputs = fields
-      } else if (method.type === 'manual') {
-        Object.assign(payload, credentialPayload(credentialJson))
       } else if (method.type === 'desktop') {
         payload.importDesktop = true
-      } else if (method.type === 'guest') {
-        payload.guest = true
       } else {
         throw new Error(t('此登录方式需要由共享登录桥发起'))
       }
@@ -406,7 +475,7 @@ export function DynamicProviderBlock({
       const result = await saveAccountProxySelection(normalizeLoginResult(await postAccount(payload)), proxy)
       await finish(result)
     } catch (failure) {
-      if (alive.current) setError(describeError(failure))
+      if (alive.current) setError(describeError(failure), failure)
     } finally {
       savingRef.current = false
       if (alive.current) setSaving(false)
@@ -417,27 +486,25 @@ export function DynamicProviderBlock({
     clearCallback()
     progressRef.current = {}
     setValues({})
-    setCredentialJson('')
     setSelected(value)
     setError('')
     setProgress({})
   }
 
-  function startOauth(): void {
+  function startFlow(): void {
     if (submitLocked || !method || requestingRef.current || methodsState.phase === 'loading') return
     try {
-      if (!runtimeProviderOf(provider)) throw new Error(t('该提供商已不在运行时目录中，请返回列表重新选择'))
+      if (!accountProviderAvailable(provider)) throw new Error(t('该提供商已不在运行时目录中，请返回列表重新选择'))
       readInputs(method, inputs)
       readProxyDraft(proxyDraft)
       if (!controllerRef.current) throw new Error(t('共享登录桥不可用，请重新打开面板'))
       controllerRef.current.start()
-    } catch (failure) { setError(describeError(failure)) }
+    } catch (failure) { setError(describeError(failure), failure) }
   }
 
-  function cancelOauth(): void {
+  function cancelFlow(): void {
     clearCallback()
     setValues({})
-    setCredentialJson('')
     setProxyDraft(previous => ({ ...previous, password: '' }))
     controllerRef.current?.cancel()
   }
@@ -459,7 +526,7 @@ export function DynamicProviderBlock({
     setCallbackError('')
     setCallbackNotice('')
     try {
-      if (!runtimeProviderOf(provider)) throw new Error(t('该提供商已不在运行时目录中，请返回列表重新选择'))
+      if (!accountProviderAvailable(provider)) throw new Error(t('该提供商已不在运行时目录中，请返回列表重新选择'))
       if (!engine?.isActive?.() || engine.activeProvider?.() !== provider) throw new Error()
       const bridge = shared().workbuddyDesktop
       if (!bridge?.submitLoginCallback) throw new Error()
@@ -494,129 +561,77 @@ export function DynamicProviderBlock({
     }
   }
 
+  const optionalName = method?.prompts.find(prompt => prompt.key === 'name' && prompt.type === 'text' && !prompt.secret && prompt.optional && !prompt.when)
+  const formPrompts = method?.prompts.filter(prompt => prompt !== optionalName) || []
+  const accountName = optionalName ? inputs[optionalName.key] ?? optionalName.default ?? '' : name
   const instructions = mergeLoginInstructions(methodsState.instructions, method?.instructions,
     method?.browserMode === 'plugin' ? pluginBrowserInstructions(provider) : '',
     loginText(progress.instructions), loginText(progress.hint), loginText(loginView.hint))
-  const commonFields = method && method.type !== 'unsupported'
+  const owned = loginScope.current
+  const managed: ManagedLoginScope | undefined = progress.managedLogin && owned && owned.methodIndex !== undefined ? {
+    provider, methodIndex: owned.methodIndex, key: JSON.stringify([owned.origin, owned.bootId, owned.managementGeneration, provider, owned.state]),
+    deadline: owned.deadline, current: () => alive.current && scopeCurrent(owned) && progressRef.current.state === owned.state && !savingUnconfirmed(progressRef.current),
+  } : undefined
 
-  return <div className='add-provider-block' hidden={!active}>
-    <AddGroup label={t('添加方式')} hidden={hideMethodPicker && methodsState.phase === 'ready' && !methodsState.reason}>
-      {methodsState.phase === 'loading' ? <p role='status'><Spinner /> {t('正在读取插件登录方式…')}</p>
-        : methodsState.reason ? <Alert variant={methodsState.phase === 'error' ? 'destructive' : 'warning'}>
-          <AlertTitle>{methodsState.phase === 'error' ? t('无法读取登录方式') : t('登录方式说明')}</AlertTitle>
-          <AlertDescription className='whitespace-pre-wrap break-words'>{methodsState.reason}</AlertDescription>
-        </Alert> : null}
-      {!hideMethodPicker && method && methodsState.phase !== 'loading' ? (
-        methodsState.methods.length <= 3 ? <SegmentedControl
-          aria-label={t('{label} 账号的添加方式', { label })} disabled={locked}
-          className='max-w-full flex-wrap [&_[data-slot=segmented-item]]:h-7'
-          value={method.id} options={methodsState.methods.map(item => ({ value: item.id, label: methodLabel(item) }))}
-          onValueChange={selectMethod}
-        /> : <div className='min-w-0'>
-          <Select value={method.id} disabled={locked}
-            onValueChange={value => { if (value !== null) selectMethod(value) }}>
-            <SelectTrigger className='w-full max-w-full' aria-label={t('账号登录方式')} title={methodLabel(method)}>
-              <SelectValue>{methodLabel(method)}</SelectValue>
-            </SelectTrigger>
-            <SelectContent className='w-[min(var(--anchor-width),var(--available-width))]'>
-              {methodsState.methods.map(item => <SelectItem key={item.id} value={item.id}
-                className='[&>:first-child]:whitespace-normal [&>:first-child]:break-words'>
-                {methodLabel(item)}
-              </SelectItem>)}
-            </SelectContent>
-          </Select>
-        </div>
-      ) : null}
-    </AddGroup>
-
-    {progress.active && progress.state ? <PluginLoginInteraction key={progress.state} flow={progress.state} t={t}
-      request={async <T,>(method: string, path: string, body?: unknown) => await accountRequest(method, path, body) as T} /> : null}
-    {instructions || progress.userCode ? <Alert>
-      <AlertTitle>{t('登录指引 / 设备码授权')}</AlertTitle>
-      <AlertDescription className='whitespace-pre-wrap break-words'>
-        {instructions}
-        {progress.userCode ? <div className='mt-2'>{t('设备授权码：{code}', { code: progress.userCode })}</div> : null}
-      </AlertDescription>
+  return <div className='add-provider-block plugin-account-form' hidden={!active}>
+    {methodsState.phase === 'loading' ? <p role='status'><Spinner /> {t('正在读取插件登录方式…')}</p> : null}
+    {methodsState.reason ? <Alert variant={methodsState.phase === 'error' ? 'destructive' : 'warning'}>
+      <AlertTitle>{methodsState.phase === 'error' ? t('无法读取登录方式') : t('登录方式说明')}</AlertTitle>
+      <AlertDescription className='whitespace-pre-wrap break-words'>{methodsState.reason}</AlertDescription>
     </Alert> : null}
+    {methodsState.phase !== 'loading' && (method || localAction) ? <PluginLoginMethodPicker
+      label={t('{label} 账号的添加方式', { label })} disabled={locked || loginView.waiting}
+      value={localActionSelected ? localAction : method?.id || ''} methods={methodsState.methods} onChange={selectMethod}
+      extra={localAction ? [{ value: localAction, label: localAction === 'local:enrollment' ? t('续期登记') : t('本机导入') }] : []}
+    /> : null}
 
-    {method && methodsState.phase !== 'loading' ? <AddGroup label={methodLabel(method)}>
-      {method.type === 'oauth' && !method.localOnly ? <p>{t('填写信息后发起授权，进度与失败原因会显示在这里。')}</p> : null}
-      {method.type === 'api' ? <p>{t('API 方法提交给插件的账号规范化入口；不会用该密钥发起 OAuth 登录。')}</p> : null}
-      {method.localOnly ? <Alert variant='warning'>
+    {localActionsAvailable && provider === 'chatglm' ? <PluginDesktopImport
+      active={active && localActionSelected} disabled={locked || loginView.waiting} source={shared().workbuddyDesktop}
+      scopeIdentity={JSON.stringify([window.location.origin, bootId(), availability])} footerHost={footerHost} preserveOnHide
+      current={() => shared().workbuddyDesktop?.platform === 'windows' && Boolean(shared().__TAURI_INTERNALS__?.invoke) && accountProviderAvailable('chatglm')}
+      request={desktopImportRequest} onSaved={async () => { await afterAdd('', label) }} t={t} /> : null}
+    {localActionsAvailable && provider === 'codearts' ? <PluginCodeArtsEnrollment
+      active={active && localActionSelected} disabled={locked || loginView.waiting} footerHost={footerHost}
+      current={() => accountProviderAvailable('codearts')} onSaved={async () => { await shared().wbApp?.refresh?.() }} t={t} /> : null}
+    {localActionsAvailable && provider === 'cline-free' ? <PluginClineFreeEnrollment
+      active={active && localActionSelected} disabled={locked || loginView.waiting} footerHost={footerHost}
+      current={() => accountProviderAvailable('cline-free')} onSaved={async () => { await shared().wbApp?.refresh?.() }} t={t} /> : null}
+    {progress.active && progress.state ? <PluginLoginInteraction key={progress.state} flow={progress.state} t={t}
+      openExternal={managed ? async url => {
+        if (!managed.current()) throw new DOMException('请求已取消', 'AbortError')
+        if (owned?.bridge?.platform === 'web') { window.open(url, '_blank', 'noopener,noreferrer'); return }
+        if (!owned?.bridge?.openReleasePage) throw new Error('external_browser_unavailable')
+        await owned.bridge.openReleasePage(url)
+      } : openExternal}
+      managed={managed} request={interactionRequest} /> : null}
+    {method && methodsState.phase !== 'loading' && instructions ? <p className='plugin-login-instructions'>{instructions}</p> : null}
+    {progress.userCode ? <p className='plugin-login-local-scope'>{t('设备授权码：{code}', { code: progress.userCode })}</p> : null}
+
+    {method && methodsState.phase !== 'loading' ? <section className='plugin-login-content'>
+      {method.localOnly && !method.desktopOnly && !method.embeddedOnly ? <Alert variant='warning'>
         <AlertTitle>{t('需要网关本机环境')}</AlertTitle>
         <AlertDescription>{t('“本机”指运行网关的机器，不是打开面板的电脑。远程浏览器也可以发起，但网关本机可能需要安装客户端并已登录；是否可用由网关返回结果决定。')}</AlertDescription>
       </Alert> : null}
-      {method.manualCallback ? <Alert>
-        <AlertDescription>{method.callbackInput === 'code'
-          ? t('此方式需要原样提交授权码或令牌；输入会隐藏，不会当作 URL 或 API 凭证解析。提交后仍需等待网关确认。')
-          : t('此方式需要完整回调地址；请原样粘贴，不拆分参数或重建地址。提交后仍需等待网关确认。')}</AlertDescription>
-      </Alert> : null}
+      {method.manualCallback && manualWaiting ? <p className='plugin-login-note'>{method.callbackInput === 'code'
+        ? t('此方式需要原样提交授权码或令牌；输入会隐藏，不会当作 URL 或 API 凭证解析。提交后仍需等待网关确认。')
+        : t('此方式需要完整回调地址；请原样粘贴，不拆分参数或重建地址。提交后仍需等待网关确认。')}</p> : null}
       {resolvedPrompts.error ? <Alert variant='destructive'><AlertDescription>{resolvedPrompts.error}</AlertDescription></Alert> : null}
       {method.reason ? <Alert variant='warning'><AlertDescription>{method.reason}</AlertDescription></Alert> : null}
-      {method.prompts.map((prompt, index) => {
-        if (!promptEnabled(prompt, method, inputs)) return null
-        const id = `${prefix}-prompt-${index}`
-        const current = promptValue(prompt, inputs)
-        return <div key={`${method.id}:${prompt.key}`} className='flex flex-col gap-1.5'>
-          <Label htmlFor={id}>{prompt.label}{prompt.optional ? t('（可选）') : t('（必填）')}</Label>
-          {prompt.type === 'select' ? <SearchableSelect value={current} disabled={locked || !prompt.options.length}
-            onValueChange={value => setValues(previous => ({
-              ...previous, [method.id]: { ...previous[method.id], [prompt.key]: value },
-            }))}
-            id={id} className='w-full' searchable={prompt.options.length > 8}
-            displayValue={prompt.options.find(option => option.value === current)?.label || prompt.placeholder || t('请选择')}
-            options={[
-              ...(prompt.optional ? [{ value: '', label: t('不填写（可选）') }] : []),
-              ...prompt.options,
-            ]} /> : <Input id={id} type={prompt.secret ? 'password' : 'text'} disabled={locked}
-            autoComplete={prompt.secret ? 'new-password' : 'off'} spellCheck={false}
-            placeholder={prompt.placeholder} value={current} onChange={event => {
-              const value = event.currentTarget.value
-              setValues(previous => ({ ...previous, [method.id]: { ...previous[method.id], [prompt.key]: value } }))
-            }} />}
-        </div>
-      })}
-      {method.type === 'manual' ? <>
-        <Alert variant='warning'><AlertDescription>
-          {t('这是旧插件的手动兼容入口，不代表支持任意凭证或登录方式。请仅粘贴该插件明确接受的凭证 JSON；网关会交给 account.normalize 校验，不会自动推断 Token、Cookie 或 OAuth。')}
-        </AlertDescription></Alert>
-        <Label htmlFor={`${prefix}-credential`}>{t('凭证 JSON（必填）')}</Label>
-        <Textarea id={`${prefix}-credential`} rows={6} maxLength={MAX_JSON_LENGTH} disabled={locked}
-          autoComplete='off' spellCheck={false} value={credentialJson}
-          onChange={event => setCredentialJson(event.currentTarget.value)}
-          placeholder={t('粘贴插件要求的 JSON 对象，不要包含 provider、name、proxy 或登录流程控制字段')} />
-        <p>{t('凭证只在提交时发送到网关；备注名和代理请使用下面的字段，解析错误不会回显凭证内容。')}</p>
-      </> : null}
-      {commonFields ? <>
-        {method.type !== 'oauth' && !method.prompts.some(prompt => prompt.key === 'name') ? <div className='flex flex-col gap-1.5'>
-          <Label htmlFor={`${prefix}-name`}>{t('备注名')}</Label>
-          <Input id={`${prefix}-name`} maxLength={MAX_NAME_LENGTH} placeholder={t('可选，留空使用账号昵称')}
-            value={name} disabled={locked} onChange={event => setName(event.currentTarget.value)} />
-        </div> : null}
-        {uaEditable ? <div className='flex flex-col gap-1.5'>
-          <Label htmlFor={`${prefix}-user-agent`}>{t('User-Agent（可选）')}</Label>
-          <UserAgentInput id={`${prefix}-user-agent`} value={userAgent} onChange={setUserAgent}
-            presets={uaPresets} disabled={locked} />
-        </div> : null}
-      </> : null}
-      {method.type === 'oauth' && !legacyBrowser && !method.prompts.some(prompt => prompt.key === 'name')
-        ? <p>{t('账号名由插件自动获取，添加后可修改。')}</p> : null}
-      {method.type === 'oauth' && !method.localOnly && !method.embeddedOnly && (!method.browserMode || method.browserMode === 'choice') && shared().workbuddyDesktop?.platform !== 'web' ? <>
-        <Label>{t('打开方式')}</Label>
-        <SegmentedControl aria-label={t('网页登录的打开方式')} value={mode} disabled={locked}
-          options={[{ value: 'external', label: t('系统浏览器') }, { value: 'embedded', label: t('内嵌窗口') }]}
-          onValueChange={setMode} />
-      </> : null}
-      {method.type === 'oauth' ? <AddFoot host={footerHost} active={active}>
-        <Button id={`${prefix}-start`} disabled={submitLocked || Boolean(method.reason)} onClick={startOauth}>
-          {loginView.waiting ? <Spinner /> : null}{loginView.label}
+      <PluginLoginBrowser method={method} provider={provider} desktop={shared().workbuddyDesktop?.platform !== 'web'}
+        value={mode} onChange={setMode} disabled={locked || loginView.waiting} />
+      <PluginLoginFields method={method} prompts={formPrompts} values={inputs} prefix={prefix} disabled={locked || loginView.waiting}
+        onChange={(key, value) => setValues(previous => ({ ...previous, [method.id]: { ...previous[method.id], [key]: value } }))} />
+      {method.type === 'oauth' || method.type === 'sms' ? <AddFoot host={footerHost} active={active}>
+        <Button id={`${prefix}-start`} disabled={submitLocked || Boolean(method.reason)} onClick={startFlow}
+          hidden={method.type === 'sms' && loginView.waiting}>
+          {loginView.waiting ? <Spinner /> : null}{method.type === 'sms' ? t('开始短信登录') : loginView.label}
         </Button>
         <Button id={`${prefix}-cancel`} variant='outline' hidden={!loginView.waiting}
-          onClick={cancelOauth}>{t('取消等待')}</Button>
-      </AddFoot> : method.type !== 'unsupported' ? <AddFoot host={footerHost} active={active}>
+          onClick={cancelFlow}>{t('取消等待')}</Button>
+      </AddFoot> : <AddFoot host={footerHost} active={active}>
         <Button disabled={submitLocked || Boolean(method.reason)}
           onClick={() => void submit()}>{saving ? <Spinner /> : null}{saving ? t('添加中…') : t('添加账号')}</Button>
-      </AddFoot> : null}
+      </AddFoot>}
       {manualWaiting ? <div className='flex flex-col gap-2'>
         {nextAuthUrl ? <Button variant='outline' className='self-start' disabled={callbackBusy}
           onClick={() => {
@@ -639,12 +654,32 @@ export function DynamicProviderBlock({
         {callbackNotice ? <p role='status'>{callbackNotice}</p> : null}
       </div> : null}
       {callbackError ? <Alert variant='destructive'><AlertDescription>{callbackError}</AlertDescription></Alert> : null}
-      {error ? <Alert variant='destructive'><AlertTitle>{t('添加失败')}</AlertTitle>
+      {error ? <Alert variant='destructive'><AlertTitle>{diagnostic ? t('登录失败') : t('添加失败')}</AlertTitle>
         <AlertDescription className='whitespace-pre-wrap break-words'>{error}</AlertDescription>
+        <PluginLoginDiagnostic diagnostic={diagnostic} />
       </Alert> : null}
-    </AddGroup> : null}
-    {error && !methodAvailable ? <Alert variant='destructive'><AlertDescription>{error}</AlertDescription></Alert> : null}
+    </section> : null}
+    {error && !methodAvailable ? <Alert variant='destructive'><AlertDescription>{error}</AlertDescription>
+      <PluginLoginDiagnostic diagnostic={diagnostic} />
+    </Alert> : null}
     {methodAvailable ? <AccountProxySection draft={proxyDraft} onChange={setProxyDraft}
-      idPrefix={`${prefix}-proxy`} disabled={locked} onSystemImportBusy={setReadingSystemProxy} /> : null}
+      idPrefix={`${prefix}-proxy`} disabled={locked || loginView.waiting} onSystemImportBusy={setReadingSystemProxy}
+      label={t('备注与代理')} summary={`${accountName || t('默认账号名')} · ${accountProxySummary(proxyDraft)}`}>
+      {optionalName || !method.prompts.some(prompt => prompt.key === 'name') ? <div className='plugin-login-field'>
+        <Label htmlFor={`${prefix}-name`}>{t('备注名')}<span className='plugin-login-optional'>{t('可选')}</span></Label>
+        <Input id={`${prefix}-name`} maxLength={MAX_NAME_LENGTH} placeholder={t('可选，留空使用账号昵称')}
+          value={accountName} disabled={locked || loginView.waiting} onChange={event => {
+            const value = event.currentTarget.value
+            if (optionalName) setValues(previous => ({ ...previous, [method.id]: { ...previous[method.id], [optionalName.key]: value } }))
+            else setName(value)
+          }} />
+      </div> : null}
+      {uaEditable ? <div className='plugin-login-field'>
+        <Label htmlFor={`${prefix}-user-agent`}>{t('User-Agent（可选）')}</Label>
+        <UserAgentInput id={`${prefix}-user-agent`} value={userAgent} onChange={setUserAgent}
+          presets={uaPresets} disabled={locked || loginView.waiting} />
+      </div> : null}
+    </AccountProxySection> : null}
+    <PluginLoginSecurity />
   </div>
 }

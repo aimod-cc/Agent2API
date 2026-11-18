@@ -20,7 +20,7 @@ use std::collections::HashSet;
 use serde_json::{json, Value};
 
 use crate::server::core::account_store::sql;
-use crate::server::core::account_store::store_view::{account_visible, Visibility};
+use crate::server::core::account_store::store_view::{account_list_visible, Visibility};
 use crate::server::core::account_store::store::{AccountStore, AccountStoreError};
 
 impl AccountStore {
@@ -35,10 +35,11 @@ impl AccountStore {
     pub fn reorder_accounts(&self, ids: &[String]) -> Result<Value, AccountStoreError> {
         let guard = self.guard();
         let state = self.load(&guard);
+        let booting = crate::server::core::plugin_host::startup::booting();
 
         let known: HashSet<&str> = state.accounts.iter().map(|record| record.id()).collect();
         let visible: HashSet<&str> = state.accounts.iter()
-            .filter(|record| account_visible(&record.provider()))
+            .filter(|record| account_list_visible(&record.provider(), booting))
             .map(|record| record.id()).collect();
         let mut seen: HashSet<&str> = HashSet::with_capacity(ids.len());
         for id in ids {

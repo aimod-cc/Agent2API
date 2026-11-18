@@ -4,12 +4,13 @@ use serde_json::Value;
 use super::network::{self, Failure};
 use super::types::{self, Entry};
 
-pub(super) const MARKET_URL: &str = "https://raw.githubusercontent.com/magpie-community/plugins/main/registry.json";
-const DISTRIBUTION_URL: &str = "https://raw.githubusercontent.com/magpie-community/plugins/dist/index.json";
+pub(super) const MARKET_URL: &str = super::super::website::REGISTRY;
+const DISTRIBUTION_URL: &str = super::super::website::DISTRIBUTION;
 
 pub(super) fn project(value: &Value) -> Result<Vec<Entry>, Failure> {
     if value["version"] != 1 { return Err("Magpie 官方名单版本暂不兼容".to_string().into()); }
-    let plugins = value["plugins"].as_array().filter(|items| !items.is_empty() && items.len() <= 4096)
+    if value["disabled"] == true { return Ok(Vec::new()); }
+    let plugins = value["plugins"].as_array().filter(|items| items.len() <= 4096)
         .ok_or_else(|| Failure::from("Magpie 官方名单格式无效".to_string()))?;
     let mut result = Vec::new();
     for item in plugins {
@@ -33,7 +34,6 @@ pub(super) fn project(value: &Value) -> Result<Vec<Entry>, Failure> {
             kind: "provider".to_string(), installable: true, provider_verified: true, ..Entry::default()
         });
     }
-    if result.is_empty() { return Err("Magpie 官方名单没有可识别的提供商条目".to_string().into()); }
     for entry in &mut result { if entry.label.is_empty() { entry.label = entry.name.clone(); } }
     Ok(result)
 }

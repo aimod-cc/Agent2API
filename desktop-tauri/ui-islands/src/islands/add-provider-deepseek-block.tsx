@@ -48,8 +48,8 @@ function proxyLabel(draft: ProxyDraft): string {
   return t('请选择代理')
 }
 
-export function DeepseekAccountBlock({ active, footerHost, onClose }: {
-  active: boolean; footerHost: HTMLElement | null; onClose: () => void
+export function DeepseekAccountBlock({ active, footerHost, onClose, preserveOnHide = false }: {
+  active: boolean; footerHost: HTMLElement | null; onClose: () => void; preserveOnHide?: boolean
 }): React.ReactElement {
   const id = `${React.useId()}-deepseek-login`
   const desktop = shared().workbuddyDesktop?.platform !== 'web'
@@ -107,13 +107,13 @@ export function DeepseekAccountBlock({ active, footerHost, onClose }: {
   }, [id])
 
   React.useEffect(() => {
-    if (active) return
+    if (active || preserveOnHide) return
     setToken('')
     setCookie('')
     setError('')
     setProxy(previous => ({ ...previous, password: '' }))
     void shared().wbWebLogin?.cancelIfActive?.('deepseek-web')
-  }, [active])
+  }, [active, preserveOnHide])
 
   async function addToken(): Promise<void> {
     if (!tokenValid || locked || savingRef.current) return

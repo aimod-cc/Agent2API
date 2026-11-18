@@ -4,14 +4,14 @@ import {
   Input, NavItem, NavList, Sidebar, Switch,
 } from '@ui'
 import { errorMessage, forwardUpdateResult, shared, toast, type UpdateChannels } from './update-shared'
-import { GithubUpdateSettings } from './update-github-settings'
+import { UpdateNetworkSettings } from './update-network-settings'
 import { t } from '../i18n'
 
 const TASK_ID = 'updateCheck'
 const MIN_INTERVAL = 1
 const MAX_INTERVAL = 1440
 
-type PaneId = 'check' | 'channel' | 'network' | 'token'
+type PaneId = 'check' | 'channel' | 'network'
 
 export function UpdateSettingsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [checkTask, setCheckTask] = React.useState<{ enabled: boolean; interval: number } | null>(null)
@@ -23,7 +23,7 @@ export function UpdateSettingsDialog({ open, onClose }: { open: boolean; onClose
   const contentRef = React.useRef<HTMLDivElement>(null)
   const panes: Array<[PaneId, string]> = [
     ['check', t('检查计划')], ['channel', t('更新通道')],
-    ['network', t('网络')], ['token', t('GitHub 令牌')],
+    ['network', t('出网代理')],
   ]
 
   React.useEffect(() => {
@@ -136,7 +136,7 @@ export function UpdateSettingsDialog({ open, onClose }: { open: boolean; onClose
                     || Number(intervalDraft) === checkTask.interval} onClick={() => void saveInterval()}>{t('保存')}</Button>
                 </div>
                 <p className='text-[12px] text-subtle'>
-                  {t('到点自动向 GitHub 查询新版本，查到就走「检测到更新」弹窗；关闭后「检查更新」按钮仍可手动触发')}
+                  {t('到点自动查询新版本，查到就走「检测到更新」弹窗；关闭后「检查更新」按钮仍可手动触发')}
                 </p>
               </div>
             </div> : null}
@@ -165,7 +165,7 @@ export function UpdateSettingsDialog({ open, onClose }: { open: boolean; onClose
                 </div>
               </div>
             </div> : null}
-            {open ? <GithubUpdateSettings pane={pane === 'network' || pane === 'token' ? pane : null} /> : null}
+            {open && pane === 'network' ? <UpdateNetworkSettings /> : null}
           </div>
         </DialogBody>
         <DialogFooter className='settings-dlg-footer'>

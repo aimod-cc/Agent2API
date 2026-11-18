@@ -48,8 +48,12 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
-use agent2api_server::server::{config, logging, start, ServerState};
+use agent2api_server::server::{config, logging, start_managed, ServerHandle, ServerState};
+use futures::FutureExt;
+use tokio::sync::watch;
+use tokio::time::Instant;
 
 // ── 全局内存分配器（仅 Linux）──────────────────────────────────
 // 长稳、多账号并发转发的部署形态（Docker 容器 / Linux 服务端）改用 jemalloc，
@@ -73,20 +77,85 @@ struct Launch {
     ui_dir: PathBuf,
 }
 
-/// 网关跑起来之后交出去的两条通道：收尾时要用。
+/// 启动到清理一直由同一份自有运行时承接；句柄取得后不再直接关闭插件。
+#[derive(Default)]
 struct Running {
-    shutdown_tx: tokio::sync::oneshot::Sender<()>,
-    /// 面板「安装并重启」的信号（容器内更新用）
-    restart_rx: tokio::sync::mpsc::Receiver<()>,
+    bootstrap_started: bool,
+    server: Option<ServerHandle>,
+}
+
+#[derive(Clone)]
+struct ShutdownRequest {
+    source: &'static str,
+    error: Option<String>,
+    deadline: Instant,
+}
+
+/// 同步回调也能发送；首次请求固定原因和截止，取消等待者不会留下阻塞线程。
+#[derive(Clone)]
+struct ShutdownSignal(watch::Sender<Option<ShutdownRequest>>);
+
+impl ShutdownSignal {
+    fn new() -> Self {
+        Self(watch::channel(None).0)
+    }
+
+    fn request(&self, source: &'static str) -> bool {
+        self.request_with_error(source, None)
+    }
+
+    fn request_with_error(&self, source: &'static str, error: Option<String>) -> bool {
+        self.0.send_if_modified(move |request| {
+            if request.is_some() {
+                return false;
+            }
+            *request = Some(ShutdownRequest {
+                source,
+                error,
+                // 尚未拿到ServerHandle时也记录首关期限，稍后只能继承，不能重新起算。
+                deadline: Instant::now() + Duration::from_secs(55),
+            });
+            true
+        })
+    }
+
+    fn current(&self) -> Option<ShutdownRequest> {
+        self.0.borrow().clone()
+    }
+
+    async fn wait(&self) -> ShutdownRequest {
+        let mut receiver = self.0.subscribe();
+        loop {
+            if let Some(request) = receiver.borrow_and_update().clone() {
+                return request;
+            }
+            // self仍保留发送端，正常情况下不会断开；断开也不能变成永远等待。
+            if receiver.changed().await.is_err() {
+                self.request_with_error("停止通知中断", Some("停止通知通道意外关闭".into()));
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum GatewayEvent {
+    Ready,
+    Stopping,
 }
 
 fn main() -> ExitCode {
+    if let Some(code) = agent2api_server::server::core::providers::subscriptions::dispatch_helper()
+    {
+        return ExitCode::from(code);
+    }
     if std::env::args().nth(1).as_deref() == Some("--systemd-updater") {
         return ExitCode::from(agent2api_server::server::core::update::systemd::run_helper() as u8);
     }
     if std::env::args().nth(1).as_deref() == Some("--windows-updater") {
         let id = std::env::args().nth(2).unwrap_or_default();
-        return ExitCode::from(agent2api_server::server::core::update::windows_service::run_helper(&id) as u8);
+        return ExitCode::from(
+            agent2api_server::server::core::update::windows_service::run_helper(&id) as u8,
+        );
     }
     // Windows 服务形态判定放在**参数解析之前**：服务进程没有控制台，
     // 配置写错（端口非法之类）时 eprintln 会全部丢掉，而「配置错导致起不来」
@@ -98,68 +167,150 @@ fn main() -> ExitCode {
         // 运行期再没有别的可观察痕迹（SCM 拉起与双击启动的进程一模一样）。
         agent2api_server::server::core::system_info::set_service_mode(true);
         logging::init_file_sink();
-        let launch = match parse_launch() {
-            Ok(launch) => launch,
-            Err(reason) => {
-                // 此时文件通道已开，console_line 会同时写进文件
-                logging::console_line("[Server]", &format!("❌ {reason}"));
-                return ExitCode::FAILURE;
-            }
-        };
-        return run_as_windows_service(launch);
+        return run_as_windows_service();
     }
 
     let launch = match parse_launch() {
         Ok(launch) => launch,
-        Err(reason) => {
-            eprintln!("❌ {reason}");
-            return ExitCode::FAILURE;
-        }
+        Err(reason) => return exit_code(Err(reason)),
     };
 
     run_foreground(launch)
 }
 
-/// 前台形态：Ctrl+C / SIGTERM / 面板重启 三条停机路径。
+/// 前台形态：信号先于bootstrap监听，启动期间收到停止也继承同一请求。
 fn run_foreground(launch: Launch) -> ExitCode {
-    let running = match start_gateway(&launch) {
-        Ok(running) => running,
-        Err(reason) => {
-            eprintln!("❌ {reason}");
-            return ExitCode::FAILURE;
-        }
-    };
+    exit_code(run_gateway(launch, ShutdownSignal::new(), true, |_| Ok(())))
+}
 
-    // 停机信号：Ctrl+C（全平台）+ SIGTERM（unix，容器 stop 走这条）；
-    // 「面板发起的重启」与两者同一条收尾路径（见 `start_gateway` 的说明）。
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
+fn exit_code(result: Result<(), String>) -> ExitCode {
+    match result {
+        Ok(()) => {
+            logging::console_line(
+                "[Server]",
+                "进程退出码=0；本轮关闭结果已确认，未验证远端环境回收",
+            );
+            ExitCode::SUCCESS
+        }
+        Err(reason) => {
+            logging::console_line("[Server]", &format!("进程退出码=1：{reason}"));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// 运行时在任何bootstrap之前建立。先等库侧真实Result，再关闭运行时，绝不倒序。
+fn run_gateway(
+    launch: Launch,
+    signal: ShutdownSignal,
+    console_signals: bool,
+    mut report: impl FnMut(GatewayEvent) -> Result<(), String>,
+) -> Result<(), String> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            eprintln!("❌ 创建 Tokio 运行时失败: {error}");
-            return ExitCode::FAILURE;
+        .map_err(|error| format!("创建 Tokio 运行时失败: {error}"))?;
+    let result = runtime.block_on(async {
+        let signal_job = if console_signals {
+            Some(install_shutdown_signals(signal.clone())?)
+        } else {
+            None
+        };
+        let mut running = Running::default();
+        // 保留取得的句柄跨越启动异常：有句柄就等它，没有才使用初始化回退清理。
+        let work = std::panic::AssertUnwindSafe(async {
+            start_gateway(&launch, &signal, &mut running)?;
+            let server = running.server.as_ref().ok_or("服务器停止句柄未登记")?;
+            if server.wait_shutdown_requested().now_or_never().is_some() {
+                signal.request("服务器内部开始关闭");
+            } else if signal.current().is_none() {
+                report(GatewayEvent::Ready)?;
+            }
+            tokio::select! {
+                _ = signal.wait() => {},
+                _ = server.wait_shutdown_requested() => {
+                    signal.request("服务器内部开始关闭");
+                },
+            }
+            Ok::<(), String>(())
+        })
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| Err("网关启动或运行异常，开始核对清理结果".into()));
+
+        if let Err(reason) = &work {
+            signal.request_with_error("启动或运行失败", Some(reason.clone()));
         }
-    };
-    let Running {
-        shutdown_tx,
-        restart_rx,
-    } = running;
-    runtime.block_on(wait_for_shutdown_signal(restart_rx));
-    finish(shutdown_tx);
-    ExitCode::SUCCESS
+        let request = signal.wait().await;
+        // 先通知监听和插件协调器，再上报状态；慢日志/服务状态上报不能推迟首关。
+        if let Some(server) = &running.server {
+            server.request_shutdown_until(request.deadline);
+        }
+        let notice = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            report(GatewayEvent::Stopping)
+        }))
+        .unwrap_or_else(|_| Err("停止状态上报异常；仍继续等待实际清理结果".into()));
+        logging::console_line(
+            "[Server]",
+            &format!("开始停止：{}；重复请求不会延长首个关闭期限", request.source),
+        );
+        if let Some(reason) = &request.error {
+            logging::console_line("[Server]", reason);
+        }
+        // 信号任务只做异步等待，可取消并确认结束，不留下阻塞recv工作。
+        if let Some(job) = signal_job {
+            job.abort();
+            let _ = job.await;
+        }
+        let cleanup = std::panic::AssertUnwindSafe(finish(&running, request.deadline))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| Err("退出清理异常，完成状态未确认".into()));
+        let original = match work {
+            Err(reason) => Err(reason),
+            Ok(()) => request.error.map_or(Ok(()), Err),
+        };
+        let result = combine_results(combine_results(original, notice), cleanup);
+        match &result {
+            Ok(()) => logging::console_line("[Server]", "本轮关闭结果已收到，即将结束服务器运行时"),
+            Err(reason) => {
+                logging::console_line("[Server]", &format!("本轮启动/关闭未完整确认：{reason}"))
+            }
+        }
+        result
+    });
+    // 这里只终止已取得结果之后的进程运行时，不再加一个55秒窗口。
+    // 库侧Result不承诺所有进程后台工作结束；不能让未跟踪的阻塞工作无限卡住退出，
+    // 也不能把不等待它们冒充已全部析构。进程返回后仍由系统结束残留工作。
+    runtime.shutdown_background();
+    result
+}
+
+fn combine_results(first: Result<(), String>, second: Result<(), String>) -> Result<(), String> {
+    match (first, second) {
+        (Ok(()), result) | (result, Ok(())) => result,
+        (Err(first), Err(second)) => Err(format!("{first}；{second}")),
+    }
 }
 
 /// 把网关跑起来：开库、装闸门、绑端口、起 HTTP 服务。
 ///
 /// 前台与服务形态共用 —— 两者的差异只在「怎么等停机」，不在这里。
-fn start_gateway(launch: &Launch) -> Result<Running, String> {
-    // bootstrap：开库、读配置、探测旧数据、装日志库（与桌面同一套时序）。
-    // 失败只可能来自目录迁移防御性校验、以及「库 schema 版本高于本程序」
-    // —— 两者都原样透出，不能带错继续。
+fn start_gateway(
+    launch: &Launch,
+    signal: &ShutdownSignal,
+    running: &mut Running,
+) -> Result<(), String> {
+    if signal.current().is_some() {
+        return Err("开始初始化前已收到停止请求，本次不启动网关".into());
+    }
+    // bootstrap中途失败也按已尝试初始化处理，不遗漏先前已启动的插件/调度。
+    running.bootstrap_started = true;
     let mut state = ServerState::bootstrap(launch.port, launch.host)
         .map_err(|reason| format!("网关初始化失败: {reason}"))?;
+    if signal.current().is_some() {
+        return Err("初始化期间收到停止请求，不再启动HTTP监听".into());
+    }
 
     state.panel_port = launch.panel_port;
     // headless 面板闸门：未注册时 /api/* 只放行注册相关端点与 API Key（强制
@@ -187,19 +338,30 @@ fn start_gateway(launch: &Launch) -> Result<Running, String> {
 
     state.set_ui_dir(launch.ui_dir.clone());
 
-    // 「面板发起的重启」通道：面板点了「安装并重启」之后，自更新模块的钩子
-    // 往这里发一个信号，主线程照 SIGTERM 那条路优雅停机并返回 —— 服务由
-    // 外部监管者拉起（容器 restart 策略 / systemd Restart= / SCM 恢复策略）。
-    //
-    // 放 start() 之前注册：请求只会由正在跑的服务器发来，而钩子只需要这个
-    // 发送端（停机动作仍在主线程做，见 `finish`）。
-    let (restart_tx, restart_rx) = tokio::sync::mpsc::channel::<()>(1);
+    // 更新钩子只登记请求，不直接退出进程；清理失败仍必须保留失败退出码。
+    let restart_signal = signal.clone();
     agent2api_server::server::core::update::selfupdate::set_restart_hook(Box::new(move || {
-        // 钩子跑在自更新的后台线程里：try_send 不阻塞、也不要求运行时上下文
-        let _ = restart_tx.try_send(());
+        if restart_signal.request("面板安装并重启") {
+            logging::console_line(
+                "[Server]",
+                "已收到面板重启请求；先等待真实收尾结果，再由外部服务管理器拉起",
+            );
+        }
     }));
 
-    let shutdown_tx = start(&state).map_err(|conflict| format!("网关启动失败：{}", conflict.message))?;
+    if signal.current().is_some() {
+        return Err("启动监听前收到停止请求，本次不再接受连接".into());
+    }
+    let server =
+        start_managed(&state).map_err(|conflict| format!("网关启动失败：{}", conflict.message))?;
+    // 先保存再做任何就绪通知；后续失败仍有同一关闭句柄可等待。
+    running.server = Some(server);
+    if let Some(request) = signal.current() {
+        if let Some(server) = &running.server {
+            server.request_shutdown_until(request.deadline);
+        }
+        return Ok(());
+    }
     agent2api_server::server::core::update::systemd::notify_ready();
 
     logging::log(
@@ -213,10 +375,7 @@ fn start_gateway(launch: &Launch) -> Result<Running, String> {
         ),
     );
 
-    Ok(Running {
-        shutdown_tx,
-        restart_rx,
-    })
+    Ok(())
 }
 
 /// 安全闸门：/v1/* 的 fail-closed 与注册提示。
@@ -265,11 +424,31 @@ fn apply_security_gates() {
     }
 }
 
-/// 收尾：通知 HTTP 服务停机，给在途请求留出跑完的时间。
-fn finish(shutdown_tx: tokio::sync::oneshot::Sender<()>) {
-    let _ = shutdown_tx.send(());
-    // `start` 内部会等 graceful shutdown 收尾，这里只补一小段余量
-    std::thread::sleep(std::time::Duration::from_millis(300));
+/// 有句柄只走该协调器；无句柄的启动失败才单独清理已初始化的插件和签到。
+async fn finish(running: &Running, deadline: Instant) -> Result<(), String> {
+    let native = std::panic::catch_unwind(|| {
+        agent2api_server::server::core::providers::claude_subscription::shutdown();
+    })
+    .map_err(|_| "原生会话取消发生异常，完成状态未确认".to_string());
+    let managed = if let Some(server) = &running.server {
+        server.request_shutdown_until(deadline);
+        server.wait_shutdown().await
+    } else if running.bootstrap_started {
+        logging::console_line(
+            "[Server]",
+            "尚未取得服务器句柄；按首个截止清理启动期间的插件与签到，保留原启动错误",
+        );
+        let auto_checkin = std::panic::catch_unwind(|| {
+            agent2api_server::server::core::auto_checkin::stop_global();
+        })
+        .map_err(|_| "签到调度停止异常；仍继续排空插件".to_string());
+        let plugins =
+            agent2api_server::server::core::plugin_host::shutdown_all_until(deadline).await;
+        combine_results(auto_checkin, plugins)
+    } else {
+        Ok(())
+    };
+    combine_results(native, managed)
 }
 
 // ─── Windows 服务形态 ────────────────────────────────────────
@@ -282,45 +461,16 @@ pub mod service;
 /// 调用方（main）已经打开日志文件通道 —— 服务进程没有控制台，
 /// 不开文件通道等于整场运行都是哑的。
 #[cfg(windows)]
-fn run_as_windows_service(launch: Launch) -> ExitCode {
-    // SCM 要求进程启动后尽快连上 dispatcher；run_service 里再去做开库等
-    // 耗时动作（并且先报 StartPending）。
-    let start_fn: service::StartFn = Box::new(move |stop, ready| {
-        let Running {
-            shutdown_tx,
-            mut restart_rx,
-        } = start_gateway(&launch)?;
-        // 端口已绑、开始接受请求 —— 这时才让 SCM 看到 Running
-        ready.signal();
-
-        // 停机有两条来源，收尾路径相同：
-        //   · SCM 的 STOP / SHUTDOWN 控制事件（`sc.exe stop`、关机）；
-        //   · 面板「安装并重启」的自更新钩子（替文件后要求进程退出，
-        //     由 SCM 的恢复策略把新版本拉起来 —— 与容器 restart 同语义）。
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| format!("创建 Tokio 运行时失败: {error}"))?;
-        runtime.block_on(async move {
-            tokio::select! {
-                _ = stop.into_async().wait() => {}
-                _ = restart_rx.recv() => {}
-            }
-        });
-
-        finish(shutdown_tx);
-        Ok(())
+fn run_as_windows_service() -> ExitCode {
+    // 参数错误也在已连接SCM之后报告，避免启动失败没有服务退出码。
+    let start_fn: service::StartFn = Box::new(move |stop, progress| {
+        let launch = parse_launch()?;
+        run_gateway(launch, stop.signal(), false, |event| match event {
+            GatewayEvent::Ready => progress.ready(),
+            GatewayEvent::Stopping => progress.stopping(),
+        })
     });
-
-    match service::dispatch(start_fn) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(reason) => {
-            // 服务模式没有控制台：走日志通道，否则这条关键错误（典型是
-            // 「连接 SCM 失败」）只会在无处可去的 stderr 里消失
-            logging::console_line("[Server]", &format!("❌ {reason}"));
-            ExitCode::FAILURE
-        }
-    }
+    exit_code(service::dispatch(start_fn))
 }
 
 // ─── 参数解析 ──────────────────────────────────────────────
@@ -407,24 +557,47 @@ fn display_host(host: IpAddr) -> String {
     }
 }
 
-/// 等待停机信号：Ctrl+C（全平台）、SIGTERM（unix，容器 stop 走这条），
-/// 或面板发起的重启（外部监管者拉起新进程，见 `start_gateway` 的说明）。
-async fn wait_for_shutdown_signal(mut restart: tokio::sync::mpsc::Receiver<()>) {
+/// 在bootstrap之前注册系统信号；安装失败是可清理的错误，不panic或伪装成正常停止。
+fn install_shutdown_signals(signal: ShutdownSignal) -> Result<tokio::task::JoinHandle<()>, String> {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut term = signal(SignalKind::terminate()).expect("注册 SIGTERM 处理失败");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
-            _ = restart.recv() => {}
-        }
+        use tokio::signal::unix::{signal as unix_signal, SignalKind};
+        let mut interrupt = unix_signal(SignalKind::interrupt())
+            .map_err(|error| format!("注册 Ctrl+C 处理失败: {error}"))?;
+        let mut term = unix_signal(SignalKind::terminate())
+            .map_err(|error| format!("注册 SIGTERM 处理失败: {error}"))?;
+        Ok(tokio::spawn(async move {
+            let (source, event) = tokio::select! {
+                event = interrupt.recv() => ("Ctrl+C", event),
+                event = term.recv() => ("SIGTERM", event),
+            };
+            let error = event
+                .is_none()
+                .then(|| format!("{source} 信号监听意外结束"));
+            signal.request_with_error(source, error);
+        }))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = restart.recv() => {}
-        }
+        let mut interrupt = tokio::signal::windows::ctrl_c()
+            .map_err(|error| format!("注册 Ctrl+C 处理失败: {error}"))?;
+        Ok(tokio::spawn(async move {
+            let error = interrupt
+                .recv()
+                .await
+                .is_none()
+                .then(|| "Ctrl+C 信号监听意外结束".to_string());
+            signal.request_with_error("Ctrl+C", error);
+        }))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Ok(tokio::spawn(async move {
+            let error = tokio::signal::ctrl_c()
+                .await
+                .err()
+                .map(|error| format!("Ctrl+C 信号监听失败: {error}"));
+            signal.request_with_error("Ctrl+C", error);
+        }))
     }
 }

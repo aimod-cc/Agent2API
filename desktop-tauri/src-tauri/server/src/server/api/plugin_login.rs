@@ -1,16 +1,18 @@
-use axum::{body::Bytes, extract::{OriginalUri, Query, State}, response::{IntoResponse, Response}};
+use axum::{body::Bytes, extract::{OriginalUri, Query, State}, http::HeaderMap, response::{IntoResponse, Response}};
 use serde_json::{json, Value};
 use crate::server::{errors::management_error, http::{ok_json, parse_body}, ServerState};
 
 pub async fn callback(State(state): State<ServerState>, OriginalUri(uri): OriginalUri,
-    Query(query): Query<std::collections::HashMap<String, String>>) -> Response {
+    headers: HeaderMap, Query(query): Query<std::collections::HashMap<String, String>>) -> Response {
     let flow = query.get("state").map(String::as_str).unwrap_or("");
     let Some(task) = state.login().tasks().get(flow) else { return management_error(404, "登录流程已过期") };
     if !crate::server::core::plugin_host::wasm::has_capability(&task.snapshot().provider, "login.callback.v1") {
         return management_error(403, "此流程未声明本机回调能力");
     }
-    let port = crate::server::core::plugin_host::callback_port();
-    let callback = format!("http://127.0.0.1:{port}{uri}");
+    let callback = match super::session::original_callback_url(&uri, &headers) {
+        Ok(url) => url,
+        Err(error) => return management_error(error.status_code, error.message),
+    };
     let result = state.login().submit_login_callback(flow, &callback).await;
     let text = if result.is_ok() { "授权回调已交给插件处理，请返回面板查看登录结果。" }
         else { "授权回调未完成，请返回面板查看原因或重新登录。" };
@@ -25,6 +27,21 @@ pub async fn get(State(state): State<ServerState>, Query(query): Query<std::coll
     let Some(task) = state.login().tasks().get(flow) else { return management_error(404, "登录任务不存在或已过期") };
     let snapshot = task.snapshot();
     if snapshot.done || snapshot.canceled { return ok_json(json!({ "interaction": null })); }
+    if snapshot.managed {
+        // 公开快照不等操作锁；换授权地址期间仍能展示 processing 与剩余时间。
+        return match crate::server::core::login::managed::snapshot(&task) {
+            Ok(value) => ok_json(json!({ "interaction": value })),
+            Err(error) => management_error(error.status_code, error.message),
+        };
+    }
+    if snapshot.sms {
+        let _operation = task.operation.lock().await;
+        if task.snapshot().done || task.snapshot().canceled { return ok_json(json!({ "interaction": null })); }
+        return match crate::server::core::login::sms::snapshot(&task) {
+            Ok(value) => ok_json(json!({ "interaction": value })),
+            Err(error) => management_error(error.status_code, error.message),
+        };
+    }
     if !crate::server::core::plugin_host::wasm::has_capability(&snapshot.provider, "login.interaction.v1") {
         return ok_json(json!({ "interaction": null }));
     }
@@ -41,6 +58,35 @@ pub async fn submit(State(state): State<ServerState>, body: Bytes) -> Response {
     let value = parse_body(&body).unwrap_or(Value::Null);
     let flow = value["state"].as_str().unwrap_or("");
     let Some(task) = state.login().tasks().get(flow) else { return management_error(404, "登录任务不存在或已过期") };
+    if task.snapshot().managed {
+        let result = crate::spawn_task(async move {
+            let _operation = task.operation.try_lock().map_err(|_|
+                crate::server::errors::GatewayError::with_status(409, "当前登录步骤正在处理，请等待完成，不要重复提交"))?;
+            crate::server::core::login::managed::submit(&task, value).await
+        }).await;
+        return match result {
+            Ok(Ok(value)) => ok_json(value),
+            Ok(Err(error)) => management_error(error.status_code, error.message),
+            Err(_) => management_error(503, "托管登录处理已中断，请重新发起；不会自动重放验证码或回调"),
+        };
+    }
+    if task.snapshot().sms {
+        let mut value = value.clone();
+        if let Some(object) = value.as_object_mut() { object.remove("state"); }
+        let result = crate::spawn_task(async move {
+            let _operation = task.operation.lock().await;
+            let snapshot = task.snapshot();
+            if snapshot.done || snapshot.canceled {
+                return Err(crate::server::errors::GatewayError::with_status(409, "登录流程已结束"));
+            }
+            crate::server::core::login::sms::submit(&state, &task, value).await
+        }).await;
+        return match result {
+            Ok(Ok(value)) => ok_json(value),
+            Ok(Err(error)) => management_error(error.status_code, error.message),
+            Err(_) => management_error(503, "短信登录处理已中断，请重新发起"),
+        };
+    }
     let _operation = task.operation.lock().await;
     let snapshot = task.snapshot();
     if snapshot.done || snapshot.canceled { return management_error(409, "登录流程已结束") }

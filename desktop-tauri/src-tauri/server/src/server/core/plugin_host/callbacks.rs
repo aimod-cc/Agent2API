@@ -197,7 +197,8 @@ impl Host {
         let authorization = match method.as_str() {
             "script.http.open" | "script.http.read" | "script.http.close" | "script.protocol.request"
             | "script.stream.open" | "script.stream.push" | "script.stream.close"
-            | "script.ws.open" | "script.ws.read" | "script.ws.send" | "script.ws.abort" | "script.proxy.resolve" | "script.signature" => {
+            | "script.ws.open" | "script.ws.read" | "script.ws.send" | "script.ws.abort" | "script.proxy.resolve" | "script.signature"
+            | "script.catalog.refresh" => {
                 if self.options.script && !params.get("id").and_then(serde_json::Value::as_str)
                     .is_some_and(|id| id.starts_with("wasm-")) { Ok(()) }
                 else { Err(proto::WireError::with_code("脚本资源不属于当前宿主", CALLBACK_FORBIDDEN)) }
@@ -240,6 +241,10 @@ impl Host {
         }
         let outcome: Result<serde_json::Value, proto::WireError> = match method.as_str() {
             "script.usage" => super::script::record_usage(&params),
+            "script.catalog.refresh" => {
+                super::script::model_catalog::refresh(params["missing"].as_bool().unwrap_or(false));
+                Ok(serde_json::Value::Null)
+            }
             "script.http.open" => super::script::open(&params).await,
             "script.http.read" => super::script::read_http(&params).await,
             "script.http.close" => { super::script::close_http(&params); Ok(serde_json::Value::Null) }

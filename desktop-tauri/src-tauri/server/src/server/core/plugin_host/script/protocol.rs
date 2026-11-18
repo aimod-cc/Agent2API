@@ -22,6 +22,7 @@ struct Conversion {
     machine: Machine,
     lines: SseLineBuffer,
     terminal: bool,
+    strict: bool,
     chat_choices: HashMap<u64, bool>,
 }
 
@@ -39,7 +40,8 @@ impl Conversion {
             let finished = choice["finish_reason"]
                 .as_str()
                 .is_some_and(|reason| !reason.trim().is_empty());
-            self.chat_choices.insert(index, finished);
+            let previous = self.chat_choices.entry(index).or_insert(false);
+            *previous |= finished;
         }
     }
 
@@ -66,19 +68,25 @@ pub fn open(params: &Value) -> Result<Value, proto::WireError> {
         Some("chat") => Machine::Chat,
         _ => return Err(error("脚本插件使用了尚未支持的响应协议")),
     };
+    let id = match params.get("id") {
+        None => crate::server::core::protocol::random_id("convert"),
+        Some(value) => value.as_str().filter(|id| id.starts_with("wasm-") && id.len() <= 80
+            && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+            .ok_or_else(|| error("响应转换标识无效"))?.to_string(),
+    };
     let mut items = conversions()
         .lock()
         .map_err(|_| error("脚本响应转换不可用"))?;
-    if items.len() >= 128 {
-        return Err(error("脚本响应转换数量已达上限"));
+    if items.len() >= 128 || items.contains_key(&id) {
+        return Err(error("响应转换数量已达上限或标识重复"));
     }
-    let id = crate::server::core::protocol::random_id("convert");
     items.insert(
         id.clone(),
         Conversion {
             machine,
             lines: SseLineBuffer::new(),
             terminal: false,
+            strict: id.starts_with("wasm-"),
             chat_choices: HashMap::new(),
         },
     );
@@ -126,37 +134,40 @@ pub fn push(params: &Value) -> Result<Value, proto::WireError> {
                         value["type"].as_str(),
                         Some("response.completed" | "response.failed" | "response.incomplete" | "error")
                     ),
-                    Machine::Gemini(_) => value.get("error").is_some_and(|error| !error.is_null())
-                        || value.get("candidates").and_then(Value::as_array).is_some_and(|items| items.iter()
-                            .any(|item| item["finishReason"].as_str().is_some_and(|reason| !reason.is_empty()))),
+                    Machine::Gemini(_) => {
+                        let inner = value.get("response").filter(|value| value.is_object()).unwrap_or(&value);
+                        inner.get("error").is_some_and(|error| !error.is_null())
+                            || inner.get("candidates").and_then(Value::as_array).is_some_and(|items| items.iter()
+                                .any(|item| item["finishReason"].as_str().is_some_and(|reason| !reason.is_empty())))
+                    }
                     Machine::Chat => value.get("error").is_some_and(|error| !error.is_null()),
                 }
             }),
         };
         item.terminal |= terminal;
     }
-    // finish_reason 只结束对应 choice；等自然 EOF 才收尾，保留后续 choice 与用量帧。
-    let close_chat = finish && !item.terminal && matches!(item.machine, Machine::Chat) && item.chat_finished();
+    // 脚本兼容既有 finish_reason 收尾；Wasm 必须提供真实终止事件，不补成功 DONE。
+    let close_chat = finish && !item.strict && !item.terminal && matches!(item.machine, Machine::Chat) && item.chat_finished();
     if finish && !item.terminal && !close_chat {
         items.remove(id);
         return Err(error("上游流未返回完整结束事件，未将截断内容视为成功"));
     }
     let frames = match &mut item.machine {
         Machine::Anthropic(machine) => {
-            if finish {
-                machine.finish()
-            } else {
-                machine.push(&bytes)
-            }
+            let mut frames = machine.push(&bytes);
+            if finish { frames.extend(machine.finish()); }
+            frames
         }
         Machine::Responses(machine) => {
-            if finish {
-                machine.finish()
-            } else {
-                machine.push(&bytes)
-            }
+            let mut frames = machine.push(&bytes);
+            if finish { frames.extend(machine.finish()); }
+            frames
         }
-        Machine::Gemini(machine) => if finish { machine.finish() } else { machine.push(&bytes) },
+        Machine::Gemini(machine) => {
+            let mut frames = machine.push(&bytes);
+            if finish { frames.extend(machine.finish()); }
+            frames
+        }
         Machine::Chat => {
             let mut frames = vec![bytes::Bytes::from(bytes)];
             if close_chat {
@@ -165,6 +176,12 @@ pub fn push(params: &Value) -> Result<Value, proto::WireError> {
             frames
         }
     };
+    // Wasm 的单次原始输出不超过 4 MiB，编码后仍远小于 16 MiB ABI；拒绝而不是截断。
+    let output_bytes = frames.iter().fold(0usize, |total, frame| total.saturating_add(frame.len()));
+    if item.strict && output_bytes > 4 * 1024 * 1024 {
+        items.remove(id);
+        return Err(proto::WireError::with_code("协议转换结果超过 4 MiB 限制", "plugin_resource_limit"));
+    }
     let data: Vec<u8> = frames
         .into_iter()
         .flat_map(|frame| frame.to_vec())
@@ -185,6 +202,7 @@ pub fn close(params: &Value) {
 
 pub fn clear() {
     if let Ok(mut items) = conversions().lock() {
-        items.clear();
+        // Wasm 转换器归各自 Context 持有，不随独立脚本宿主重载而释放。
+        items.retain(|id, _| id.starts_with("wasm-"));
     }
 }

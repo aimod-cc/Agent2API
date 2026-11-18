@@ -13,6 +13,7 @@ export type AssistantModelRow = ModelProviderRow & ReasoningModel & {
   supports_image_generation?: unknown
   supports_image_editing?: unknown
   capabilities?: unknown
+  toolCallingMode?: unknown
   capSources?: unknown
 }
 export type AssistantMappingRow = ModelProviderRow & {
@@ -80,6 +81,7 @@ function modelCapabilities(row: AssistantModelRow) {
   return {
     capabilities,
     capSources,
+    ...(row.toolCallingMode === 'emulated' || row.toolCallingMode === 'disabled' ? { toolCallingMode: row.toolCallingMode } : {}),
     ...(reasoning.declared ? { reasoningLevels: reasoning.levels } : {}),
     ...(reasoning.defaultLevel ? { reasoningDefaultLevel: reasoning.defaultLevel } : {}),
     ...(reasoning.fixedLevel ? { reasoningFixedLevel: reasoning.fixedLevel } : {}),
@@ -98,7 +100,7 @@ export function createModelListTool(read: () => Promise<AssistantModelView>, t: 
     id: 'list_models',
     label: t('获取模型列表'),
     kind: 'read',
-    desc: '分页读取内置与自定义提供商的模型清单、展示名、启用状态、映射，以及 capabilities 中的上下文窗口、最大输出 Token、工具调用、图片输入、视频输入和推理能力。回答模型能力、上下文大小或提供商归属前先查询。capabilities 只包含已声明的值：false 是明确不支持，缺失是未知，不能当作 false 或 0；capSources 的 upstream / modelsdev / user 分别表示上游目录 / 社区数据 / 用户配置，不等于运行实测。reasoningLevels 是模型已声明的推理档位，缺失时不要猜测；固定档位、默认档位和能否配置也会随已声明数据返回。图片输入与 supports_image_generation / supports_image_editing 的生图、编辑能力不同。provider 支持 ID、展示名或唯一匹配的名称片段，重名请用 ID；keyword 可同时搜索模型与提供商名称。模型与映射各自分页，hasMore 为 true 时用 nextOffset 继续读取；不要用单页数据推算总量。',
+    desc: '分页读取内置与自定义提供商的模型清单、展示名、启用状态、映射，以及 capabilities 中的上下文窗口、最大输出 Token、工具调用、图片输入、视频输入和推理能力。回答模型能力、上下文大小或提供商归属前先查询。capabilities 只包含已声明的值：false 是明确不支持，缺失是未知，不能当作 false 或 0；capSources 的 upstream / modelsdev / user / gateway 分别表示上游目录 / 社区数据 / 用户配置 / 网关模拟，不等于运行实测。toolCallingMode=emulated 表示通过提示词模拟工具调用，非上游原生能力；disabled 表示模拟已关闭。reasoningLevels 是模型已声明的推理档位，缺失时不要猜测；固定档位、默认档位和能否配置也会随已声明数据返回。图片输入与 supports_image_generation / supports_image_editing 的生图、编辑能力不同。provider 支持 ID、展示名或唯一匹配的名称片段，重名请用 ID；keyword 可同时搜索模型与提供商名称。模型与映射各自分页，hasMore 为 true 时用 nextOffset 继续读取；不要用单页数据推算总量。',
     params: {
       type: 'object',
       properties: {

@@ -133,15 +133,13 @@ function ManualSection({
   const note = manualNoteOf(config)
   const fieldIds = config.fields.map(field => fieldIdOf(config, field))
   const userAgentId = `${prefix}-user-agent`
-  // 会话式家（CatPaw / Qoder / Trae 等）的每一步请求都由插件自己拼头，网关没有
-  // 覆盖点 —— 不显示输入框，而不是让用户填了发现没生效。
   const uaEditable = userAgentEditable(config.provider)
 
   async function submit(): Promise<void> {
     const payload: Record<string, unknown> = { provider: config.provider }
     // 地区（Qoder）：整块共用一个分段控件
     if (config.regionOptions?.length) payload.mode = region
-    if (userAgent.trim()) payload.userAgent = userAgent.trim()
+    if (uaEditable && userAgent.trim()) payload.userAgent = userAgent.trim()
     for (const field of config.fields) {
       const value = readField(fieldIdOf(config, field))
       if (!field.optional && !value) {
@@ -504,12 +502,13 @@ function SmsSection({
   React.useEffect(() => {
     if (!sms) return
     // DOM 由下面的 JSX 拼好（id 与旧实现逐字一致），交互全在引擎里
-    shared().wbSmsLogin?.create({
+    const controller = shared().wbSmsLogin?.create({
       provider: prefix,
       proxy: proxy.read,
       onBusyChange: proxy.setBusy,
       onSuccess: data => afterAdd(addedLabelOf((data as { account?: AccountRecord } | null)?.account), config.label),
     })
+    return () => { controller?.dispose() }
   }, [])
 
   if (!sms) return null
@@ -625,6 +624,7 @@ function OauthSection({
       // 传 provider 名当 name 会得到「AutoClaw 国际版账号已添加：AutoClaw 国际版」这种同义重复
       onSuccess: () => afterAdd('', config.label),
     }) ?? null
+    return () => { controllerRef.current?.dispose(); controllerRef.current = null }
   }, [])
 
   React.useEffect(() => {

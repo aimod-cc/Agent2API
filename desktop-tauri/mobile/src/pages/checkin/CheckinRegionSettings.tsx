@@ -9,17 +9,27 @@ import { t } from '../../i18n'
 import { apiCall } from '../../api/client'
 import { ModelApiKeyField } from '../../../../ui-shared/model-api-key-field'
 import { useModelApiKeys } from '../../../../ui-shared/use-model-api-keys'
+import { PluginTaskSettings } from '../../../../ui-shared/plugin-task-settings'
+import { isCheckinTask } from '../../../../ui-shared/plugin-task-types'
 
-export function CheckinRegionSettings({ center, busy, action }: {
+export function CheckinRegionSettings({ center, busy, action, onChange }: {
   center: CheckinCenter
   busy: string
   action: CheckinAction
+  onChange: () => Promise<void>
 }) {
   const panels = new Set(center.adminPanels || [])
   return (
     <>
       {panels.has('daily_keepalive') && center.keepalive ? <KeepalivePanel center={center} busy={busy} action={action} /> : null}
-      {panels.has('growth_tasks') && center.travel ? <TravelPanel center={center} busy={busy} action={action} /> : null}
+      {panels.has('growth_tasks') && center.travel && center.travel.engine !== 'wasm_tasks'
+        ? <TravelPanel center={center} busy={busy} action={action} /> : null}
+      {(center.pluginTasks ?? []).some(isCheckinTask) ? <div className='m-section'>
+        <PluginTaskSettings rows={(center.pluginTasks ?? []).filter(isCheckinTask)} t={t} disabled={Boolean(busy)} expanded
+          request={(method, path, body) => apiCall(path, { method, body })} refresh={onChange}
+          title={t('签到与成长自动任务')}
+          description={t('插件提供任务能力，主程序统一管理开关、执行时间和结果。与每日签到计划分别设置，不会因打开页面自动执行。')} />
+      </div> : null}
     </>
   )
 }

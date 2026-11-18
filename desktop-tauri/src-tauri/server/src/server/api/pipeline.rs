@@ -38,6 +38,7 @@ use crate::server::request_stats::{RequestStats, RunningProgress};
 use crate::server::ServerState;
 
 mod raw;
+pub(super) mod catpaw_output;
 pub use raw::{capture_raw_body, capture_raw_json, raw_body_text};
 use raw::RawCapture;
 
@@ -249,7 +250,7 @@ fn resolve_model_for(
             .with_code("model_not_found"));
         }
     }
-    let requested_model = model_field_text(payload);
+    let mut requested_model = model_field_text(payload);
     // 空路由也是已登记入口；权限照常检查，具体不可用原因交给组内选路报告。
     if let Some(group) = config::routing_profiles().group_for_model(&requested_model) {
         if !key_scope::allows_model(scope, &requested_model) {
@@ -262,6 +263,14 @@ fn resolve_model_for(
         }
         config::remember_request_model(&group.model);
         return Ok(group.model.clone());
+    }
+    if !image_generation {
+        if let Some(alias) = crate::server::core::trae_model_ids::legacy_model_alias(&requested_model) {
+            if let Some(object) = payload.as_object_mut() {
+                object.insert("model".into(), Value::String(alias.clone()));
+            }
+            requested_model = alias;
+        }
     }
     // 按提供商区分启停后，404 判定是「路由全链（原生 + 映射）都不可用」
     if !requested_model.is_empty() && model_blocked_everywhere(&requested_model) {

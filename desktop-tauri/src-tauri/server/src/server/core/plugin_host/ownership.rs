@@ -5,8 +5,18 @@ use serde::{Deserialize, Serialize};
 
 use super::install::{self, InstalledPack, PackRegistry};
 
-pub(super) const WEB_PACK_ID: &str = "agent2api-web-providers";
-const LEGACY_PACK_ID: &str = "agent2api-providers";
+pub(super) fn unavailable_reason(pack: &InstalledPack) -> Option<String> {
+    super::support::legacy_reason(pack).or_else(|| suspended_reason(pack))
+}
+
+pub(super) fn suspended_reason(pack: &InstalledPack) -> Option<String> {
+    if super::support::installed_state(pack) != super::PackSupportState::Supported || pack.manifest_providers.is_empty()
+        || pack.manifest_providers.iter().any(|provider|
+            !crate::server::core::providers::availability::is_suspended(provider.id.as_str())) {
+        return None;
+    }
+    Some("插件文件已安装，但该提供商目前暂停开放，不会启动或参与转发；恢复开放后可重新启用。".into())
+}
 
 pub(super) fn reserved(id: &str) -> bool {
     crate::server::core::providers::availability::BUILTIN_SUBSCRIPTION_IDS.contains(&id)
@@ -33,33 +43,28 @@ pub(super) fn owners(registry: &PackRegistry) -> BTreeMap<String, String> {
 }
 
 pub(super) fn owners_with(registry: &PackRegistry, prepared: Option<&InstalledPack>) -> BTreeMap<String, String> {
+    owners_using(registry, prepared, &super::script::package_for_provider)
+}
+
+pub(super) fn display_owners(registry: &PackRegistry, scripts: &std::collections::HashMap<String, String>) -> BTreeMap<String, String> {
+    owners_using(registry, None, &|provider| scripts.get(provider).cloned())
+}
+
+fn owners_using(registry: &PackRegistry, prepared: Option<&InstalledPack>, script_owner: &impl Fn(&str) -> Option<String>) -> BTreeMap<String, String> {
     let mut owners = BTreeMap::new();
-    for pack in registry.packs.iter().filter(|pack| pack.enabled) {
-        let ids = match prepared.filter(|prepared| prepared.id == pack.id) {
-            Some(prepared) => prepared.manifest_providers.iter().map(|provider| provider.id.0.clone()).collect(),
-            None => declared_ids(pack),
-        };
-        for provider in ids.into_iter().filter(|id| {
-            !reserved(id) && !crate::server::core::providers::availability::is_suspended(id)
-                && super::script::package_for_provider(id).is_none()
-        }) {
-            owners.entry(provider).or_insert_with(|| pack.id.clone());
-        }
-    }
-    // 独立 Wasm 包保留接管权；停用或加载失败不能偷偷改用旧原生实现。
+    // 已安装的 WASM 保留归属，停用或加载失败不切换到另一执行体。
     for pack in &registry.packs {
-        let source = prepared.filter(|item| item.id == pack.id).unwrap_or(pack);
-        if !source.entry.ends_with(".wasm") { continue; }
+        let prepared = prepared.filter(|item| item.id == pack.id);
+        let source = prepared.unwrap_or(pack);
+        let supported = prepared.map(|pack| pack.entry.ends_with(".wasm"))
+            .unwrap_or_else(|| super::support::installed_state(pack) == super::PackSupportState::Supported);
+        if !supported { continue; }
         for provider in source.manifest_providers.iter().map(|item| item.id.as_str()) {
             if !reserved(provider) && !crate::server::core::providers::availability::is_suspended(provider)
-                && super::script::package_for_provider(provider).is_none() {
+                && script_owner(provider).is_none() {
                 owners.insert(provider.to_string(), pack.id.clone());
             }
         }
-    }
-    // 旧包仍包含 chatglm 时，新包接管后不得因停用或加载失败回退到旧执行体。
-    if registry.packs.iter().any(|pack| pack.id == WEB_PACK_ID) {
-        owners.insert("chatglm".to_string(), WEB_PACK_ID.to_string());
     }
     owners
 }
@@ -77,8 +82,3 @@ pub(super) fn declared_ids(pack: &InstalledPack) -> Vec<String> {
         .into_iter().map(|provider| provider.id.0).collect()
 }
 
-pub(super) fn migrated_enabled(registry: &PackRegistry, pack: &str, provider: &str) -> Option<bool> {
-    if pack != WEB_PACK_ID || provider != "chatglm" { return None; }
-    registry.packs.iter().find(|pack| pack.id == LEGACY_PACK_ID)
-        .and_then(|pack| pack.providers.get(provider).copied())
-}

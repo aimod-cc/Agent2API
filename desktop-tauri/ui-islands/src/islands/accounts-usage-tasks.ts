@@ -2,8 +2,9 @@ import { t } from '../i18n'
 import { errorMessage, shared, toast } from './accounts-shared'
 import { getStore, patch } from './accounts-store'
 import { markUsageStale, usageRowOf } from './accounts-usage-cache'
+import { accountEventsConnected } from './accounts-live-state'
 import {
-  USAGE_QUERY_POLL_MS, usageQueryDeadline,
+  USAGE_QUERY_POLL_MS, usageQueryDeadline, usageTaskPending,
   type UsageQueryTask, type UsageQueryStart,
 } from '../../../ui-shared/usage-query-task'
 import type { UsageQueryRow } from '../../../ui-shared/usage-query-state'
@@ -25,11 +26,13 @@ function schedule(): void {
   timer = setTimeout(async () => {
     timer = undefined
     pollBusy = true
-    try { await usageQueryDeadline(sync!(), 5000) } catch { /* 下一轮继续读状态，整轮有独立时限。 */ }
+    try {
+      if (!document.hidden && !accountEventsConnected()) await usageQueryDeadline(sync!(), 5000)
+    } catch { /* 保留已知查询状态。 */ }
     const tasks = new Map(getStore().usageTasks)
     let changed = false
     for (const [id, task] of tasks) {
-      if (task.status === 'running' && Date.now() > task.deadlineAt + 15_000) {
+      if (usageTaskPending(task) && Date.now() > task.deadlineAt + 15_000) {
         tasks.set(id, { ...task, status: 'timeout' })
         changed = true
         void shared().workbuddyDesktop?.cancelBalanceQuery?.(id, task.requestId).catch(() => {})
@@ -38,7 +41,7 @@ function schedule(): void {
     if (changed) { revision++; publish(tasks) }
     pollBusy = false
     schedule()
-  }, USAGE_QUERY_POLL_MS)
+  }, accountEventsConnected() ? 1000 : Math.max(5000, USAGE_QUERY_POLL_MS))
 }
 
 function settle(requestId: string, row: UsageQueryRow | null): void {
@@ -53,15 +56,15 @@ function publish(tasks: Map<string, UsageQueryTask>): void {
   for (const [id, task] of tasks) {
     const before = previous.get(id)
     if (before && before.requestId !== task.requestId) settle(before.requestId, null)
-    if (task.status !== 'running') {
+    if (!usageTaskPending(task)) {
       const row = usageRowOf(id)
       settle(task.requestId, row?.requestId === task.requestId ? row : null)
     }
   }
-  const inflight = new Set([...tasks].filter(([, task]) => task.status === 'running').map(([id]) => id))
+  const inflight = new Set([...tasks].filter(([, task]) => usageTaskPending(task)).map(([id]) => id))
   const usageBusy = Boolean(batch && [...batch].some(([id, requestId]) => {
     const task = tasks.get(id)
-    return task?.requestId === requestId && task.status === 'running'
+    return task?.requestId === requestId && usageTaskPending(task)
   }))
   patch({ usageTasks: tasks, usageInflight: inflight, usageBusy })
   schedule()
@@ -75,10 +78,13 @@ export function applyUsageTasks(incoming?: UsageQueryTask[]): void {
     if (!task?.id || !task.requestId || !Number.isFinite(task.startedAt) || !Number.isFinite(task.deadlineAt)) continue
     const current = tasks.get(task.id)
     if (current && (current.startedAt > task.startedAt
-      || current.requestId === task.requestId && current.status !== 'running' && task.status === 'running'
+      || current.requestId === task.requestId && !usageTaskPending(current) && usageTaskPending(task)
+      || current.requestId === task.requestId && current.status === 'running' && task.status === 'queued'
       || current.requestId === task.requestId && current.status === 'config_changed')) continue
-    if (current?.requestId === task.requestId && current.status === task.status) {
-      if (task.status !== 'running') {
+    if (current?.requestId === task.requestId && current.status === task.status
+      && current.deadlineAt === task.deadlineAt && current.error === task.error
+      && current.code === task.code && JSON.stringify(current.diagnostics) === JSON.stringify(task.diagnostics)) {
+      if (!usageTaskPending(task)) {
         const row = usageRowOf(task.id)
         settle(task.requestId, row?.requestId === task.requestId ? row : null)
       }
@@ -117,7 +123,7 @@ export async function startUsageTasks(id?: string, replace = true): Promise<Usag
 export function waitUsageTask(task: UsageQueryTask): Promise<UsageQueryRow | null> {
   const current = getStore().usageTasks.get(task.id)
   if (!current || current.requestId !== task.requestId) return Promise.resolve(null)
-  if (current.status !== 'running') {
+  if (!usageTaskPending(current)) {
     const row = usageRowOf(task.id)
     if (row?.requestId === task.requestId) return Promise.resolve(row)
     if (!['success', 'failed', 'timeout'].includes(current.status) || !sync) return Promise.resolve(null)
@@ -128,7 +134,8 @@ export function waitUsageTask(task: UsageQueryTask): Promise<UsageQueryRow | nul
     })
   }
   return new Promise(resolve => {
-    const budget = Math.max(1000, Math.min(195_000, task.deadlineAt - Date.now() + 15_000))
+    const executionBudget = current.status === 'queued' ? 180_000 : 0
+    const budget = Math.max(1000, Math.min(495_000, current.deadlineAt - Date.now() + executionBudget + 15_000))
     const timer = setTimeout(() => settle(task.requestId, null), budget)
     waits.set(task.requestId, [...(waits.get(task.requestId) || []), { resolve, timer }])
   })
@@ -136,7 +143,7 @@ export function waitUsageTask(task: UsageQueryTask): Promise<UsageQueryRow | nul
 
 export async function cancelUsageQuery(id: string): Promise<void> {
   const task = getStore().usageTasks.get(id)
-  if (!task || task.status !== 'running') return
+  if (!task || !usageTaskPending(task)) return
   try {
     const result = await usageQueryDeadline(shared().workbuddyDesktop!.cancelBalanceQuery(id, task.requestId))
     if (getStore().usageTasks.get(id)?.requestId !== task.requestId) return
@@ -163,7 +170,7 @@ export function invalidateUsageTasks(ids: string[]): void {
     if (!task) continue
     settle(task.requestId, null)
     tasks.set(id, { ...task, status: 'config_changed' })
-    if (task.status === 'running') void shared().workbuddyDesktop?.cancelBalanceQuery?.(id, task.requestId).catch(() => {})
+    if (usageTaskPending(task)) void shared().workbuddyDesktop?.cancelBalanceQuery?.(id, task.requestId).catch(() => {})
   }
   patch({ usageStarting: new Set(starts.keys()) })
   publish(tasks)

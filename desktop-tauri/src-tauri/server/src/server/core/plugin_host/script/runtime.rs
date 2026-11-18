@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use super::storage::{Package, Registry};
 use crate::server::core::account_store::AccountStore;
-use crate::server::core::plugin_host::{self, Host, HostOptions, RpcAdapter, StoreCallbacks};
+use crate::server::core::plugin_host::{self, packages::provenance, Host, HostOptions, RpcAdapter, StoreCallbacks};
 
 fn owners() -> &'static Mutex<HashMap<String, String>> {
     static OWNERS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
@@ -24,6 +24,18 @@ pub fn package_for_provider(provider: &str) -> Option<String> {
         .into_iter()
         .find(|package| package.enabled && package.providers.iter().any(|id| id == provider))
         .map(|package| package.id)
+}
+
+pub(in crate::server::core::plugin_host) fn display_owners() -> HashMap<String, String> {
+    let Some(mut result) = owners().lock().ok().map(|owners| owners.clone()) else { return HashMap::new() };
+    if let Ok(registry) = super::storage::read() {
+        for package in registry.packages.into_iter().filter(|package| package.enabled) {
+            for provider in package.providers {
+                result.entry(provider).or_insert_with(|| package.id.clone());
+            }
+        }
+    }
+    result
 }
 
 pub fn registered_label(provider: &str) -> Option<String> {
@@ -58,6 +70,9 @@ pub fn provider_state(provider: &str) -> Option<&'static str> {
 
 pub fn clear_owners() {
     if let Ok(mut saved) = owners().lock() {
+        let affected = saved.keys().cloned().collect();
+        // 脚本归属锁 -> 安装表；先撤销再清空，表内不回查脚本或运行时。
+        provenance::revoke_provider_runtimes(&affected);
         saved.clear();
     }
 }
@@ -161,6 +176,7 @@ pub async fn start(store: AccountStore) -> Result<(), String> {
     super::icons::spawn();
     super::updates::spawn();
     let mut registry = super::storage::read()?;
+    revoke_ownership_sources(&registry);
     plugin_host::startup::configure_scripts(&registry);
     let ids: Vec<_> = registry.packages.iter().filter(|package| package.enabled).map(|package| package.id.clone()).collect();
     if ids.is_empty() { return Ok(()); }
@@ -172,14 +188,17 @@ pub async fn start(store: AccountStore) -> Result<(), String> {
     let result = prepare_tracked(&store, &mut registry, executable, loading).await
         .and_then(|prepared| activate(&registry, prepared));
     if let Err(error) = result {
+        revoke_ownership_sources(&registry);
         let _ = plugin_host::runtime::shutdown_packs(&[super::HOST_ID.to_string()]).await;
         super::transport::clear();
         for package in registry.packages.iter_mut().filter(|package| package.enabled) {
             package.error = Some(error.clone());
         }
+        revoke_ownership_sources(&registry);
         super::storage::save(&registry)?;
         return Err(error);
     }
+    revoke_ownership_sources(&registry);
     super::storage::save(&registry)?;
     super::icons::wake(false);
     Ok(())
@@ -199,7 +218,15 @@ pub struct PreparedRuntime {
     host: Option<Arc<Host>>,
     callbacks: Option<Arc<StoreCallbacks>>,
     infos: Vec<proto::ProviderInfo>,
+    execution: HashMap<String, ProviderExecution>,
     owners: HashMap<String, String>,
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderExecution {
+    account_user_agent: bool,
+    stop_on_error: bool,
 }
 
 pub async fn prepare(
@@ -207,6 +234,7 @@ pub async fn prepare(
     registry: &mut Registry,
     executable: std::path::PathBuf,
 ) -> Result<PreparedRuntime, String> {
+    revoke_ownership_sources(registry);
     plugin_host::startup::configure_scripts(registry);
     let ids = registry.packages.iter().filter(|package| package.enabled).map(|package| package.id.clone()).collect();
     let loading = plugin_host::startup::begin(ids, plugin_host::startup::Phase::Starting);
@@ -218,12 +246,13 @@ async fn prepare_tracked(
     loading: plugin_host::startup::LoadGuard,
 ) -> Result<PreparedRuntime, String> {
     match prepare_inner(store, registry, executable, &loading.attempt).await {
-        Ok((host, callbacks, infos, owners)) => Ok(PreparedRuntime { loading, host, callbacks, infos, owners }),
+        Ok((host, callbacks, infos, execution, owners)) => Ok(PreparedRuntime { loading, host, callbacks, infos, execution, owners }),
         Err(error) => { loading.fail(&error); Err(error) }
     }
 }
 
-type PreparedParts = (Option<Arc<Host>>, Option<Arc<StoreCallbacks>>, Vec<proto::ProviderInfo>, HashMap<String, String>);
+type PreparedParts = (Option<Arc<Host>>, Option<Arc<StoreCallbacks>>, Vec<proto::ProviderInfo>,
+    HashMap<String, ProviderExecution>, HashMap<String, String>);
 
 async fn prepare_inner(
     store: &AccountStore, registry: &mut Registry, executable: std::path::PathBuf,
@@ -236,7 +265,7 @@ async fn prepare_inner(
         .cloned()
         .collect();
     if enabled.is_empty() {
-        return Ok((None, None, Vec::new(), HashMap::new()));
+        return Ok((None, None, Vec::new(), HashMap::new(), HashMap::new()));
     }
     let mut entries = Vec::new();
     let names = super::icons::names();
@@ -258,7 +287,9 @@ async fn prepare_inner(
     let mut reserved: std::collections::HashSet<String> = native_owners.keys().cloned().collect();
     reserved.extend(crate::server::core::providers::availability::BUILTIN_SUBSCRIPTION_IDS.iter().map(|id| id.to_string()));
     reserved.extend(crate::server::core::providers::PROVIDERS.iter().map(|meta| meta.id.to_string()));
-    for package in &native_registry.packs {
+    for package in native_registry.packs.iter().filter(|pack| {
+        plugin_host::support::installed_state(pack) == plugin_host::PackSupportState::Supported
+    }) {
         reserved.extend(plugin_host::ownership::declared_ids(package));
     }
     for info in plugin_host::runtime::provider_infos() {
@@ -282,7 +313,7 @@ async fn prepare_inner(
     for (package, aliases) in &registry.identities {
         for id in aliases.values() { claimed.entry(id.clone()).or_insert_with(|| package.clone()); }
     }
-    let catalog_path = super::model_catalog::prepare().await;
+    let catalog_path = super::model_catalog::prepare();
     let options = HostOptions {
         args: vec![
             "run".into(),
@@ -313,6 +344,7 @@ async fn prepare_inner(
         .map_err(|error| error.message)?;
     let list = discovered.as_array().ok_or("脚本宿主没有返回插件清单")?;
     let mut next_owners = HashMap::new();
+    let mut execution = HashMap::new();
     for package in registry
         .packages
         .iter_mut()
@@ -367,6 +399,12 @@ async fn prepare_inner(
         {
             return Err("脚本插件提供商别名与清单不一致".into());
         }
+        let policies: HashMap<String, ProviderExecution> = serde_json::from_value(found["execution"].clone())
+            .map_err(|_| "脚本插件运行声明无效")?;
+        if policies.len() != ids.len() || policies.keys().any(|id| !ids.contains(id)) {
+            return Err("脚本插件运行声明与提供商清单不一致".into());
+        }
+        execution.extend(policies);
         package.icon = found["icon"].as_str().and_then(super::icons::declaration);
         package.settings_schema = found["settings"].clone();
         package.provider_aliases = aliases.clone();
@@ -387,8 +425,9 @@ async fn prepare_inner(
     if !host.ready() {
         return Err("脚本宿主在完成加载前已退出".into());
     }
+    revoke_ownership_sources(registry);
     plugin_host::startup::configure_scripts(registry);
-    Ok((Some(host), Some(callbacks), infos, next_owners))
+    Ok((Some(host), Some(callbacks), infos, execution, next_owners))
 }
 
 pub fn activate(registry: &Registry, prepared: PreparedRuntime) -> Result<(), String> {
@@ -397,6 +436,7 @@ pub fn activate(registry: &Registry, prepared: PreparedRuntime) -> Result<(), St
         host,
         callbacks,
         infos,
+        execution,
         owners: next_owners,
     } = prepared;
     let Some(host) = host else {
@@ -421,6 +461,10 @@ pub fn activate(registry: &Registry, prepared: PreparedRuntime) -> Result<(), St
                 .cloned()
         })
         .collect();
+    // 归属最早可能被运行登记/回调观察到；先关闭原归属与即将发布集合的旧Lease。
+    revoke_ownership_sources(registry);
+    let claimed = next_owners.keys().cloned().collect();
+    provenance::revoke_provider_runtimes(&claimed);
     // 只在网关完成身份冲突校验后授予账号权限，初始化脚本不能读取既有凭证。
     if let Some(callbacks) = callbacks {
         callbacks.authorize_providers(next_owners.keys().cloned().collect());
@@ -437,13 +481,16 @@ pub fn activate(registry: &Registry, prepared: PreparedRuntime) -> Result<(), St
         plugin_host::rpc_cache::set_defaults(&id, info.default_models.clone());
         let kind = crate::server::core::providers::kind_from_id(&id)
             .unwrap_or(crate::server::core::providers::ProviderKind::WorkBuddy);
-        adapters.push((
-            id.clone(),
-            Arc::new(RpcAdapter::new(id, kind, host.clone(), info)),
-        ));
+        let policy = execution.get(&id).ok_or("脚本插件缺少运行声明")?;
+        let mut adapter = RpcAdapter::new(id.clone(), kind, host.clone(), info);
+        adapter.configure_script_execution(policy.account_user_agent, policy.stop_on_error);
+        adapters.push((id, Arc::new(adapter)));
     }
     plugin_host::runtime::set_providers(super::HOST_ID, active_ids);
     if let Ok(mut saved) = owners().lock() {
+        // 实际归属赋值前在同一脚本锁内重新核对旧/新集合；无命中不推进revision。
+        let affected = saved.keys().chain(next_owners.keys()).cloned().collect();
+        provenance::revoke_provider_runtimes(&affected);
         *saved = next_owners;
     }
     plugin_host::registry::stage_all(adapters);
@@ -451,7 +498,23 @@ pub fn activate(registry: &Registry, prepared: PreparedRuntime) -> Result<(), St
     crate::server::core::checkin_schedules::extend_plugin_providers_once();
     plugin_host::schedules::wake();
     loading.finish();
+    super::model_catalog::sync();
     Ok(())
+}
+
+/// 只用于归属应用/恢复前关闭旧运行来源；输入为当前已有快照，不读磁盘，不持表锁写配置。
+/// 单项disabled仍保留归属；整包停用且未实际登记的不纳入，失败不恢复Lease。
+pub(super) fn revoke_ownership_sources(registry: &Registry) {
+    let mut affected: std::collections::HashSet<String> = registry.packages.iter()
+        .filter(|package| package.enabled)
+        .flat_map(|package| package.providers.iter().cloned()).collect();
+    if let Ok(saved) = owners().lock() {
+        affected.extend(saved.keys().cloned());
+        provenance::revoke_provider_runtimes(&affected);
+    } else {
+        // 归属锁异常不把普通脚本动作变成安装失败；至少撤销快照中的已知来源。
+        provenance::revoke_provider_runtimes(&affected);
+    }
 }
 
 pub fn all_ids(registry: &Registry) -> std::collections::HashSet<String> {

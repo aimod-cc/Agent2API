@@ -180,6 +180,7 @@ struct LegacyAppSettings {
     _lan_access: bool,
     _lan_panel: bool,
     _lightweight_mode: bool,
+    _hardware_acceleration: bool,
     /// 面板会话令牌（两个字段都是密文）。旧版文件不会有，`default` 让缺失照常通过。
     _panel_session: LegacyPanelSession,
 }
@@ -200,6 +201,7 @@ impl Default for LegacyAppSettings {
             _lan_access: false,
             _lan_panel: false,
             _lightweight_mode: false,
+            _hardware_acceleration: true,
             _panel_session: LegacyPanelSession::default(),
         }
     }

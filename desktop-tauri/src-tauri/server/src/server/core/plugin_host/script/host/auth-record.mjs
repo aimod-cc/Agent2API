@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto"
-import { AGY_PROVIDER, localAccountName } from "./local-provider.mjs"
+import { scope } from "./fetch.mjs"
 
 const text = value => typeof value === "string" ? value.trim() : ""
 const fingerprint = value => createHash("sha256").update(value).digest("hex")
 
 export function publicAccount(auth) {
-  if (auth?.localProvider === AGY_PROVIDER) return {
-    name: localAccountName(), uid: "", tokenTail: "", hasToken: false, longLived: true, credentialReference: true,
+  if (auth?.localProvider && auth.localProvider === scope.getStore()?.provider) return {
+    name: text(auth.name) || text(auth.metadata?.email) || text(auth.metadata?.name) || auth.localProvider,
+    uid: "", tokenTail: "", hasToken: false, longLived: true, credentialReference: true,
   }
   const metadata = auth?.metadata ?? {}
   const token = auth?.agent2apiAuthRemoved ? "" : text(auth?.access) || text(auth?.key)
@@ -39,7 +40,6 @@ export function normalized(provider, value, name, single = false) {
     || text(metadata.userId) || text(metadata.email)
   const identity = single ? "single" : identifier || fingerprint(text(auth.key) || text(auth.refresh) || text(auth.access)
     || JSON.stringify([provider, auth.source, auth.project, auth.account, metadata]))
-  if (single && provider === AGY_PROVIDER) auth.localProvider = AGY_PROVIDER
   const view = publicAccount(auth)
   if (name) view.name = name
   return { identity, secret: auth, public: view, desktop: false }

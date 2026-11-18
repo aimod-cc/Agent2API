@@ -67,3 +67,13 @@ export function cachedProviderIconPath(icons: unknown, provider: string): string
   if (!provider || !icons || typeof icons !== 'object' || Array.isArray(icons)) return ''
   return cachedPluginIconPath((icons as Record<string, unknown>)[provider])
 }
+
+export function providerIconSource(icons: unknown, provider: string, resolvePath: (path: string) => string): string {
+  const path = cachedProviderIconPath(icons, provider)
+  if (path) return resolvePath(path)
+  if (!provider || !icons || typeof icons !== 'object' || Array.isArray(icons)) return ''
+  const value = (icons as Record<string, unknown>)[provider]
+  // Wasm 包图标由网关限量读取并内联；不接受插件提供的任意外链或可执行数据。
+  return typeof value === 'string' && value.length <= Math.ceil(2 * 1024 * 1024 / 3) * 4 + 64
+    && /^data:image\/(png|jpeg|webp|svg\+xml);base64,[A-Za-z0-9+/]+={0,2}$/.test(value) ? value : ''
+}

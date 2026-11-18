@@ -660,6 +660,8 @@ pub fn note_request_tokens(account_id: &str, tokens: i64, now_ms: i64) {
             }
         }
     }
+    drop(facts);
+    crate::server::core::panel_events::notify(crate::server::core::panel_events::Change::Usage);
 }
 
 /// 单个账号的 Token 读数 → 快照出口的 JSON 行（每条启用中的 Token 规则窗口

@@ -36,7 +36,7 @@
 //! 迁移是**旧数据的一次性搬运**，它的失败不该让网关起不来：迁移前的老版本
 //! 二进制照样能读那些旧文件（本任务不动任何现有 store 的读写逻辑），所以
 //! 「这次迁移失败 → 下次启动再试」是安全的降级路径。于是注册表里的每一项
-//! 都是「尽力而为」：失败只记一行日志、返回 `None`，后续项照跑。
+//! 都是「尽力而为」：失败只记一行日志、返回 `None`；连接仍可用时后续项照跑。
 //!
 //! 日志走 [`crate::server::logging::console_line`] 而**不是** `logging::log`：
 //! 迁移发生在 `logging::init_store` **之前**（数据库必须先于日志库就绪，
@@ -90,8 +90,8 @@
 //!   - **整批一个事务**：导入 N 行必须原子提交（中断后表要么空、要么完整），
 //!     否则「表非空」这道幂等闸门会被半截数据关上。这里拿到的是 `&Connection`，
 //!     事务用 `unchecked_transaction()`（`transaction()` 要 `&mut`）——
-//!     调用点是 `Db::with`，全程只有一把锁、没有第二个访问者，那条
-//!     「同连接不得嵌套事务」的约束由调用点保证。
+//!     调用点由实际Db锁生成连接借用，全程只有一把锁、没有第二个访问者；
+//!     账号项额外持有同连接的单向失效借用，不接自由Connection配对。
 //!   - **失败要自己记日志**：`Option` 表达不了「没有旧文件」与「导入失败」的区别
 //!     （都是 `None`），所以失败必须由迁移项自己用 `console_line` 讲清楚，
 //!     本框架不替它猜（见 [`run_legacy_migrations`]）。
@@ -120,6 +120,7 @@ mod settings;
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
+use super::{AccountChange, Db};
 
 /// 单项旧数据迁移的结果。**这是后续所有迁移项的统一返回形态**。
 ///
@@ -158,8 +159,13 @@ pub struct LegacyMigration {
     pub label: &'static str,
     /// 旧文件还在不在（`Some` = 待迁移）。找不到时返回 `None`。
     pub locate: fn(&Path) -> Option<PathBuf>,
-    /// 真正导入（幂等、失败自记日志，见模块头）
-    pub import: fn(&Connection, &Path) -> Option<LegacyOutcome>,
+    /// 真正导入；账号项只能取得实际Db连接锁内的失效借用，没有裸Connection旁路。
+    import: LegacyImport,
+}
+
+enum LegacyImport {
+    Ordinary(fn(&Connection, &Path) -> Option<LegacyOutcome>),
+    Accounts(fn(&mut AccountChange<'_>, &Path) -> Option<LegacyOutcome>),
 }
 
 /// 迁移注册表：**逐项接入**，当前八项（网关配置、桌面设置、账号、事件日志、
@@ -206,13 +212,13 @@ pub struct LegacyMigration {
 /// （标记键，因为配置项是开放集合）—— 两种判据的完整论证分别见
 /// `settings.rs` / `config.rs` 的模块头。
 pub const LEGACY_MIGRATIONS: &[LegacyMigration] = &[
-    LegacyMigration { label: config::LABEL, locate: config::legacy_file, import: config::import_config },
-    LegacyMigration { label: settings::LABEL, locate: settings::legacy_file, import: settings::import_settings },
-    LegacyMigration { label: accounts::LABEL, locate: accounts::legacy_file, import: accounts::import_accounts },
-    LegacyMigration { label: logs::LABEL, locate: logs::legacy_file, import: logs::import_logs },
-    LegacyMigration { label: requests::LABEL, locate: requests::requests_file, import: requests::import_requests },
-    LegacyMigration { label: requests::DAILY_LABEL, locate: requests::daily_file, import: requests::import_daily },
-    LegacyMigration { label: debug::LABEL, locate: debug::legacy_file, import: debug::import_debug },
+    LegacyMigration { label: config::LABEL, locate: config::legacy_file, import: LegacyImport::Ordinary(config::import_config) },
+    LegacyMigration { label: settings::LABEL, locate: settings::legacy_file, import: LegacyImport::Ordinary(settings::import_settings) },
+    LegacyMigration { label: accounts::LABEL, locate: accounts::legacy_file, import: LegacyImport::Accounts(accounts::import_accounts) },
+    LegacyMigration { label: logs::LABEL, locate: logs::legacy_file, import: LegacyImport::Ordinary(logs::import_logs) },
+    LegacyMigration { label: requests::LABEL, locate: requests::requests_file, import: LegacyImport::Ordinary(requests::import_requests) },
+    LegacyMigration { label: requests::DAILY_LABEL, locate: requests::daily_file, import: LegacyImport::Ordinary(requests::import_daily) },
+    LegacyMigration { label: debug::LABEL, locate: debug::legacy_file, import: LegacyImport::Ordinary(debug::import_debug) },
 ];
 
 /// 还在原处的旧文件对应的迁移项名（**界面列「待迁移数据」用**）。
@@ -245,22 +251,27 @@ pub fn has_pending(dir: &Path) -> bool {
 }
 
 /// 遍历注册表执行每一项，返回**成功项**的结果（失败/跳过的项不在返回里）。
+/// 实际Db连接锁不可用返回None；不存在供账号项使用的无来源Connection兼容入口。
 ///
-/// 「不阻断」这条保证落在本函数的形状上：循环体里没有 `?`、没有 `break`，
-/// 每一项的返回值只决定「要不要收集」，不会影响后面任何一项 —— 前面那项
-/// 失败也好、没旧文件也好，后面每一项都照样被调用。
+/// 单项失败不阻止后续迁移；连接被隔离或事务未结束时，必须停止借用该连接。
+/// 已完成项仍按真实结果保留，不因后续连接不可用而改判失败。
 ///
 /// 为什么本函数不为失败的项记日志：`Option` 把「没有旧文件」与「导入失败」
 /// 归成了同一个 `None`（这是刻意的 —— 框架不该要求每个迁移项自造一套错误
 /// 类型，见模块头的取舍），所以框架**无从知道**某一次 `None` 是正常跳过
 /// 还是真出了错，去记一条「迁移失败」只会把正常情况误报成失败。失败日志
 /// 由最清楚发生了什么的那一层（迁移项自己）用 `console_line` 写。
-pub fn run_legacy_migrations(conn: &Connection, dir: &Path) -> Vec<LegacyOutcome> {
-    let mut outcomes = Vec::new();
-    for migration in LEGACY_MIGRATIONS {
-        if let Some(outcome) = (migration.import)(conn, dir) {
-            outcomes.push(outcome);
+pub fn run_legacy_migrations(db: &Db, dir: &Path) -> Option<Vec<LegacyOutcome>> {
+    db.with_account_change(|change| {
+        let mut outcomes = Vec::new();
+        for migration in LEGACY_MIGRATIONS {
+            if !change.available() { break; }
+            let outcome = match &migration.import {
+                LegacyImport::Ordinary(import) => import(change.connection(), dir),
+                LegacyImport::Accounts(import) => import(change, dir),
+            };
+            if let Some(outcome) = outcome { outcomes.push(outcome); }
         }
-    }
-    outcomes
+        outcomes
+    })
 }

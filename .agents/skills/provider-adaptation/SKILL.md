@@ -1,304 +1,393 @@
 ---
 name: provider-adaptation
-description: Agent2API（workbuddy）仓库接入新提供商（provider）与验收适配完整度的规范 —— README「支持情况一览」六列的口径、必须登记的代码与前端落点、能力探测脚本的用法、静默失效排查、六份 README 同步。凡是涉及新增一家反代 Agent / 客户端 provider、审核这类 PR、判断某家「做完了没有」、改 providers/ 下的适配器或能力位（supports_*）、给签到清单加一家、或补 README 支持矩阵时，都先按本 Skill 执行 —— 即使对方没提「provider」「适配」这类字眼。
+description: Agent2API（workbuddy）提供商接入与完整度审核规范，以独立 WASM 插件为主流程：单提供商包、无 WASI 沙箱、宿主能力与权限声明、动态登录及三端界面、账号和模型隔离、六项能力的实现与真实验收状态、旧原生插件迁移。凡涉及新增反代 Agent / 网页客户端 provider、审核适配 PR、改 WASM 提供商或 supports_* 能力、签到与领取、支持矩阵和旧二进制插件迁移时，都先执行本 Skill，即使请求未出现「provider」「适配」等字眼。
 ---
 
-# Agent2API 提供商接入规范
+# Agent2API 提供商接入规范（WASM）
 
-覆盖两件事：**接一家新 provider 要改哪些地方**（第 2–5 节），以及**怎么判断它接完了没有**（第 1、6、7 节）。排查见第 8 节。
+覆盖新提供商接入、现有提供商维护、旧原生插件迁移，以及适配完整度审核。**新增提供商默认做独立 WASM 插件，不再把上游适配写进主程序，也不再新增分平台原生可执行插件。** 旧原生插件即将弃用，但当前仍有兼容代码；不能因此自行删除旧包、旧账号或迁移数据。
 
-## 0. 一条红线：README 的支持矩阵就是验收口径
+本规范以当前工作区的实际实现为准。遇到宿主契约与 README、旧模块注释不一致，先核对代码，不把历史说明当成新接口承诺。
 
-根 `README.md`（英文）的「Supported Providers」表有六列，每一格都是**用户可见的承诺**（中文译本在 `docs/README.zh-CN.md`，表述为「支持情况一览」）：
+## 0. 先确定架构与事实来源
 
-| 列 | 含义 |
+### 0.1 当前目录与职责
+
+以下路径均相对 **Agent2API 仓库根**，不是相对本 Skill 目录。`plugin/` 下是独立 Git 仓库的本地工作副本，操作前分别检查状态，不能假定它们与主仓库一起提交。
+
+| 位置 | 职责 |
 |---|---|
-| LLM 请求 | 能转发对话（含流式） |
-| Token 自动续期 | 凭证过期能自己换新 |
-| 模型列表 | 有清单，且支持在线拉取 |
-| 余额查询 | 能读余额 / 积分 |
-| 签到 | 有每日签到（或等价动作），且接进了自动签到框架 |
-| 领取类 | 有可领取的活动（新手礼 / 每日任务 / 限时套餐） |
+| `plugin/Agent2Providers/wasm/<id>/` | Agent / 客户端提供商的独立 WASM 实现、包清单、权限清单、图标 |
+| `plugin/Agent2WebProviders/wasm/<id>/` | 网页提供商的独立 WASM 实现 |
+| `plugin/Agent2Providers/wasm/sdk/` | `agent2api-wasm-sdk`，提供当前 WASM ABI 与受控宿主调用 |
+| `plugin/Agent2Providers/crates/provider-protocol/src/` | 共用的提供商、账号、模型与错误数据类型；部分说明仍源自原生插件阶段 |
+| `desktop-tauri/src-tauri/server/src/server/` | 宿主后端；下文的 `core/...`、`api/...` 均相对这里 |
+| `desktop-tauri/ui-shared/` | 桌面、网页、手机共用的插件登录、权限、设置与任务界面 |
+| `desktop-tauri/ui-islands/`、`desktop-tauri/mobile/` | 桌面 / 网页面板与手机端的声明式界面消费方 |
 
-**打 ✓ 的每一格，必须有一个落地物和一个可执行的验收动作**（见第 6 节）。**打 ✗ 或 — 的每一格，必须能说清「上游确实没有这个能力」是怎么排除的**，不能是「还没做」。
+**WASM SDK 与旧的 `crates/provider-sdk/` 不是一回事。** 后者的原生进程服务循环、标准输入输出、`reqwest` / `tokio` 直接联网方式，不是新插件模板。旧实现可以提供上游协议证据，不能原样当作 WASM 运行方式。
 
-这条红线的由来：本仓库历史上多次出现「只做了对话，模型获取 / 余额 / 签到没做」的半成品，而表格和代码之间没有任何自动校验 —— 表格只能靠人自觉。因此：
+### 0.2 动手前必须读的契约
 
-- **✗ 不等于没做，等于确认不存在。** 结论要能复述排查过程（打过哪些接口、返回什么）。
-- **默认值不是结论。** `ProviderAdapter` 的 `supports_*()` 默认全是 `false`，那是「尚未接入」的语义，不是「这家不支持」。
-- **不要为了让表格好看而打 ✓。** 一个必然报错的按钮比没有按钮更糟（见 `auto_checkin.rs` 的 `CHECKIN_PROVIDERS` 注释）。
+按所需功能读对应文件，不必一次读完所有提供商：
 
-## 1. 先做的三件事（动手写代码之前）
+- 包与权限：`core/plugin_host/wasm/manifest.rs`。
+- 模块导入、ABI、每次调用的资源与取消：`core/plugin_host/wasm/runtime.rs`、`plugin/Agent2Providers/wasm/sdk/src/abi.rs`。
+- 握手与动态登记：`core/plugin_host/wasm/host.rs`、`core/plugin_host/bootstrap.rs`、`core/plugin_host/registry.rs`。
+- 可调用的宿主服务：`core/plugin_host/wasm/services.rs` 与对应的 SDK 模块。
+- 业务数据形状：`plugin/Agent2Providers/crates/provider-protocol/src/{provider,account,model,chat}.rs`；**再对照宿主实际消费代码和当前 WASM 示例**，旧注释可能落后于实现。
+- 在线宿主的能力摘要由受保护的 `GET /api/plugins` 返回：顶层 `wasm` 给出 ABI、能力与限制，顶层 `protocol` 给出包通信协议。不要把本机平台的 `target` 当成 WASM 构建目标。
 
-### 1.1 摸清上游的真实形态
+新增宿主能力时，先确定输入、输出、权限、账号范围、取消和错误契约，再同时对齐宿主与 SDK。**不能先在 `requires` 中编一个名字，再假定主程序能执行。** 改共用契约还要核对宿主 `Cargo.toml` 当前使用的 Git tag；修改本地副本不会自动改变宿主依赖，勿把私人路径写进正式依赖。
 
-拿到这家客户端的通信证据（抓包 / 安装包逆向 / 官方 CLI 源码 / 参考实现），至少要回答：
+### 0.3 六项能力仍是验收口径，但不再固定放在根 README
 
-- 推理是 OpenAI 兼容，还是自有协议？（决定走 `build_chat_request` 还是 `forward_conversation`）
-- 响应是 SSE、NDJSON，还是别的信封？（决定要不要新开 `UpstreamResponse` 变体）
-- 鉴权头怎么拼？凭证从哪来、会不会过期、有没有续期接口？
-- 有没有模型目录接口、余额接口、签到接口？**每一条都要有实际请求证据。**
-- 有没有地区 / 额度池的区分？（决定是不是要拆成两个 provider）
+根 `README.md` 与 `docs/README.*.md` 当前是网关介绍，不再承载旧的完整提供商支持表。具体支持情况主要在对应插件仓库的 `README.md` / `README.zh-CN.md`，以及面板读取的运行时声明中。
 
-### 1.2 判断要不要拆成两家 provider
+| 能力 | 必须说清的内容 |
+|---|---|
+| LLM 请求 | 对话与流式；工具、思考、图片、生图 / 编辑分别声明，不用一个 ✓ 包办全部 |
+| Token 自动续期 | 上游可续期、插件已接通；哪些账号来源具备续期材料或明确授权 |
+| 模型列表 | 静态兜底、在线刷新、账号可用模型目录分别说明 |
+| 余额查询 | 金额、积分、百分比用量、套餐状态分别说明，不把使用率叫作余额 |
+| 签到 | 真正的每日动作或等价动作，以及可参与的账号与时间窗口 |
+| 领取类 | 新手礼、已完成任务奖励、活动套餐等；查状态不能偷偷领取 |
 
-**地区 / 额度池是 provider 身份，不是账号上的字段。** 这条在本仓库被反复确认过，走过这条路的：WorkBuddy、AutoClaw、Qoder、Accio、ZCode、MonkeyCode、ModelScope（两地），Cline（两池）。
+结论至少分开：
 
-把地区做成账号字段的后果每次都一样：
+- **已验证支持**：当前 WASM 实现有对应真实验收证据，才可无条件写 ✓。
+- **已实现，未验收**：代码与契约已接通，但没有真实账号结果，必须明确标注。
+- **未确认 / 未接入**：不能由能力位为 `false` 推导出「上游没有」。
+- **不支持 / 不适用**：有上游证据或账号形态依据，不能代替「还没做」。
 
-1. 模型目录只有一份缓存，两个地区互相覆盖；
-2. 模型规则只有一个 `(provider, id)` 命名空间，同名模型无法分别点名；
-3. 转发候选不含地区，请求可能落到另一地区的账号上，而「模型不存在」的 400 是 `Fatal`、不换账号，直接失败。
+面板的能力说明已有 `supported`、`implemented_unverified`、`unsupported`、`not_applicable`、`undeclared` 五种状态。当前 WASM 的 `verified: false` 会把已开启的能力显示为「已实现，未验收」；**签名、编译成功、能安装都不是验收证明**。`verified` 是包级标记，不要为了一个能力通过就让所有能力看起来都已验证。
 
-判断依据是**账号体系是否分开**：两套账号、两份目录、令牌不通用 → 拆。只是同一套协议换域名、账号通用 → 不必拆（但仍需确认）。
+插件 README 中仍有原生能力表、分平台构建说明等过渡内容。审核时必须区分 **旧原生实现** 与 **当前 WASM 实现**，不能继承旧表的 ✓，也不要恢复「主程序内置 N 家」或写死提供商数量。
 
-拆了之后：`ProviderKind` 加两个变体，`PROVIDERS` 加两条（相邻排列），实现是**一套**、按 `Region` 参数化，两个静态实例由 `adapter_for` 分派。地区互查放在 `region.rs`（`kind` / `provider_id` / `from_provider_id`），**别处不要再写 `"xxx-intl"` 这类字面量**。
+## 1. 写代码前先摸清上游
 
-### 1.3 确认「没有某接口」的排除过程
+### 1.1 先查已有方案，再核对实际通信
 
-CatPaw 与 AutoClaw 都曾把「上游没有目录接口」写进注释，后来两次都被证伪：CatPaw 的 `tenant/scene/env` 是 POST body 不是 query；AutoClaw 的目录在同 host 的 `/proxy/` 一级而不是对话用的 `/proxy/autoclaw`。
+反代提供商问题先网络搜索同类项目的 Issue、PR、修复记录与可靠参考实现，再判断是否适用于本项目；没有可用方案时再开展针对性排查。不确定的上游事实要查证，不能猜。
 
-所以：**「这家没有某接口」的结论要能说清是怎么排除的**，否则它只是一个还没找到的接口。把这个过程写进对应模块的模块头，别只写结论。
+通信证据可来自官方源码、公开接口、用户授权的抓包 / 安装包分析、已有适配。至少回答：
 
-## 2. 后端登记点（漏一个就是静默失效）
+- 请求是 OpenAI Chat、Responses、Anthropic，还是多步自有会话？响应是 SSE、NDJSON、快照还是轮询任务？
+- 工具是上游原生支持，还是主程序模拟？工具结果怎样回灌？哪些模型支持图片、思考或生图？
+- 鉴权材料从哪来、生命周期多长、是否需要设备身份、是否有真实续期链路？
+- 模型、余额、签到、领取有哪些接口？查询是否有副作用？
+- 接口域名、账户域、地区与额度池是否独立？登录只适用于桌面本机，还是远程面板也能完成？
 
-按顺序改，每一条都写清「漏了会怎样」。
+实际请求或官方协议证据要可复述，并先脱敏。记录真正的约束与排除依据，不写「这次为了某任务」之类临时注释，也不额外创建使用文档。
 
-### 2.1 身份与注册表
+### 1.2 地区 / 额度池是提供商身份
 
-| 文件 | 改什么 | 漏了会怎样 |
-|---|---|---|
-| `core/providers/mod.rs` | `ProviderKind` 加变体（**加在末尾**） | 编译不过 |
-| 同上 | `PROVIDERS` 加 `ProviderMeta { id, label }` | 编译不过 / 界面无此项 |
-| 同上 | `kind_from_id` 加分支 | 编译期不报，运行期「未知 provider」，账号静默失配 |
-| 同上 | `kind_id` 加分支 | 编译报错（穷举 match） |
-| `core/providers/adapter.rs` | `adapter_for` 加分支 | 编译报错（穷举 match） |
-| 同上 | `implemented_kinds()` 加 kind | **不报错**，但后台目录刷新永不调度 —— 症状是「一直是内置兜底、手动刷新也没用」 |
+两套账号、不同目录或额度池、令牌不通用，就拆成不同 provider id 和**不同 WASM 包**。同一账号体系只是换域名，不必机械拆分，但要核实。
 
-`ProviderMeta.id` 是落盘契约（`accounts.json` 里的 `provider` 字段），**存量 id 不能改名**。新家取新 id；只有国际版这类新增身份才用新串。
+- 每个包只声明一个身份，例如 `<id>` 与 `<id>-intl` 分开。
+- 共用协议可放共享模块 / crate，但每个包的身份、网络权限、目录、账号与状态必须独立。
+- `pack.json`、`init`、`provider.info` 返回的 id 必须一致。**存量 provider id 不能改名**，包 id 与 provider id 是两个概念。
+- 不通过账号的 `edition` 字段把两个身份硬塞成一家，也不新增 `ProviderKind` 变体来登记普通插件。
 
-### 2.2 账号层
+否则模型缓存互相覆盖、同名模型无法分别选路，或者一地区的请求落到另一地区的账号上。
 
-| 文件 | 改什么 | 漏了会怎样 |
-|---|---|---|
-| `api/accounts.rs` | `add_account` 加 `ProviderKind` 分派分支 | 这家根本加不了号 |
-| 同上 | `refresh_provider_account` 分派（如果支持手动刷新凭证） | 界面上「刷新」按钮点了没反应或报未知 provider |
-| `core/account_store/<name>_accounts.rs` | 新建：账号记录的读写、公开形态转换、id 生成 | 账号无法落库 / 界面上看不到 |
-| `core/account_store/mod.rs` | 加 `is_<name>_family(provider_id)` | 两地 / 两池的家判定失效 |
-| `core/account_store/store_view.rs` | `public_account` 加分支（去掉凭证本体） | **凭证会随公开形态泄漏到前端** |
+### 1.3 「没有接口」不是默认结论
 
-公开形态**绝不能含 accessToken / refreshToken**，只留 `tokenTail` 与「有没有令牌」。这条是安全边界。
+CatPaw 目录参数实际在 POST body，AutoClaw 目录实际在另一层路径前缀；这两家都曾被误判为没有目录接口。
 
-### 2.3 目录与转发
+因此「不支持」要能说清检索、请求、返回及适用版本。旧版没有实现、SDK 默认关闭、仅找到静态清单，都不是排除证据。一次性网络失败也不是「接口不存在」。
 
-| 文件 | 改什么 | 漏了会怎样 |
-|---|---|---|
-| `core/providers/<name>/models.rs` | `list_models`（静态兜底 + 远程清单） | `/v1/models` 无此项 |
-| `core/providers/catalog.rs` | `refresh_meta` 加分支（穷举 match） | 编译报错 |
-| `core/providers/catalog_cache.rs` | `SCOPE_*` 常量 + 加进 `ALL_SCOPES` | **不报错**，清单进程重启后丢失 |
-| `core/providers/<name>/adapter.rs` | `supports_model_refresh` + `refresh_models` | 界面「刷新模型」按钮无效 |
+## 2. WASM 后端接入
 
-`ALL_SCOPES` 漏了不会报错 —— 缓存能写进内存，但重启后读不回来。这是最容易漏的一处。
+### 2.1 一个包的必需落点
 
-### 2.4 能力位
+在对应 `wasm/` 工作区新增 `<id>/`，参照当前独立包，至少包含：
 
-`ProviderAdapter` 的每个能力位都有明确的消费方，填错会直接影响界面行为：
+| 文件 / 声明 | 要求 |
+|---|---|
+| `<id>/Cargo.toml` | `agent2api-wasm-<id>`、`cdylib`、依赖 WASM SDK；按用户已确认的版本维护，不夹带发版 |
+| `wasm/Cargo.toml` | 登记 workspace member；依赖变化时同步该 WASM 工作区的锁文件 |
+| `<id>/pack.json` | 唯一包 id、唯一 provider、唯一 `entry.wasm32-unknown-unknown`，入口是包内 `.wasm` |
+| `<id>/wasm.json` | 真实 ABI、`requires`、HTTPS 来源白名单、资源限制、验收状态与所需受控声明 |
+| `<id>/src/lib.rs` | 通过 `sdk::export_provider!` 导出 ABI，并实现握手与业务分派 |
+| `<id>/assets/` | 声明图标目录后必须有可显示的图标；必要的第三方许可保留在 `licenses/` |
 
-| 能力位 | 消费方 | 填错的后果 |
-|---|---|---|
-| `supports_chat` | `account_store::pick_current`（全局队首） | 无转发能力的家排进队首，顶栏显示成「当前登录态」 |
-| `supports_refresh` | `credential_maintenance` | 声称支持但刷不动 → 每轮白跑 + 灌失败日志 |
-| `supports_model_refresh` | `catalog_refresh` | 声称支持却拿不到新清单，用户以为坏了 |
-| `supports_usage` | `usage_query` / 前端积分按钮 | 给了入口但必然失败 |
-| `supports_web_login` | `api::session` 登录路由 | 标 true 但 `build_login_url` 返回 None → 能用的功能变 400 |
+Web 提供商在 `pack.json` 中声明 `provider_category: "web"`，否则默认归为 Agent。分类是宿主读取的包元数据，不要自行把它等同于某项业务权限。
 
-口径统一为：**「上游到底有没有那个接口」，不是「我们想不想实现」**。判不出来时返回 `false`（宁可漏刷，也不要凭猜测打上游）。
+当前宿主检查：
 
-### 2.5 签到与领取
+1. `providers` 与 `entry` 都只能有一项，目标固定为 `wasm32-unknown-unknown`，跨平台使用同一包。
+2. `wasm.json` 的 ABI 与宿主一致，所需能力全部存在，依赖声明齐全。
+3. `init` 返回**单元素提供商数组**，id 与包清单一致。
+4. 模块只允许导入 `agent2api.call` / `agent2api.read`，导出 `memory`、`a2a_abi_version`、`a2a_alloc`、`a2a_call`。
+5. 不能携带可执行网页；`pack.json.ui` 必须为空 / 缺省，**包内连 `ui/` 目录也不允许**。
 
-| 文件 | 改什么 | 漏了会怎样 |
-|---|---|---|
-| `core/auto_checkin.rs` | `CHECKIN_PROVIDERS` 加 id（**数组长度 `[&str; 16]` 也要 +1**） | 签到中心无这家、定时任务不跑 |
-| 同上 | `PROVIDERS_VERSION` +1，`PROVIDERS_ADDED_IN` 加条目（**数组长度 `[(&str, i64); 6]` 也要 +1**） | **不报错**，存量用户的签到清单里不会自动出现这家 |
-| `core/billing/checkin.rs` | `checkin_for` 的 `match provider_id` 加分支 | 批量签到对这家算 `skipped` |
-| `core/providers/<name>/checkin.rs` | 新建：claim 实现 | — |
-| 领取类 | 各家自己的入口（`zcode::claim` / `codearts::welfare` / `chatglm::tasks` / `workbuddy::growth`） | 无统一位置，最容易被整块漏掉 |
+ABI、资源上限与能力清单以 `manifest.rs`、`runtime.rs` 和宿主摘要为准，不把当前数值复制成永久常量。不要使用 WASI、wasm-bindgen 浏览器导入、任意文件 / 进程 / 环境变量接口，也不直接把原生依赖树搬过来。
 
-**`PROVIDERS_ADDED_IN` 是最隐蔽的一处。** 只往 `CHECKIN_PROVIDERS` 加 id 而不升版本号，新家不会进入存量用户的清单；而每次读都补齐又会让用户取消不掉勾选（读完就补回来）。版本号就是那个「只补一次」的记账。
+### 2.2 两种声明要同时对齐
 
-加一家之前**先确认签到链路真的存在**。上游没有独立签到接口但有等价动作（每日首次登录、调一次信息接口就触发）也算，但要在模块头写清依据。完全没活动就不进清单 —— 一个点了必然报错的复选框比没有更糟。
+**`ProviderInfo.capabilities` 表示插件实现了什么；`wasm.json.requires` 表示需要宿主提供什么。它们不是同一张表。** 声称有业务能力，却没有对应实现或宿主权限，会加载失败或出现必然报错的入口。
 
-### 2.6 错误分类（最容易做错的一档）
+| 业务能力 / 元数据 | 对应插件操作 / 约束 |
+|---|---|
+| `chat` | 实现 `conversation`；至少声明 `chat.stream.v1` 与 `accounts.cas.v1` |
+| `stateful` | 按上游是否多步会话如实填写；WASM 即使为 `false`，转发仍由宿主走 `conversation` |
+| `refresh` | `token.ensure`、`token.refresh`、`token.expiring` 与安全凭证写回 |
+| `model_refresh` | `models.list`、`models.refresh` 与 `catalog.v1`；账号目录另需 `catalog.accounts.v1` |
+| `usage` | `usage.query`，并与 `account_features.usage`、实际读数和单位一致 |
+| `checkin` / `claims` | `checkin.claim` / `claim.status` / `claim`，以及实际存在的入口与签到元数据 |
+| `web_login` | 声明 `login.forms.v1`，实现相应登录流程与动态登录方式 |
+| `account_features` | 标识、有效期、积分明细、套餐、并发等字段与公开视图一致 |
+| `settings_schema` / `settings_group` | 如需要设置面板，在 `init` 元数据中声明并使用现有宿主设置契约 |
 
-`classify_error` 只能归到四档，**多出来的分类在编排层没有对应分支，会静默落进 `Fatal`**：
+新包显式填写相关能力，不依赖省略字段的默认值。当前共用协议的 `chat` 默认是 `true`，**不能再套用「所有能力默认 false」的旧说法**。默认值无论真假都不构成上游或实现证据。
 
-| 档 | 动作 | 判错的后果 |
-|---|---|---|
-| `QuotaLimited` | 标记账号对该模型冷却 + 换账号 | 限额被当 Fatal → 账号永不轮换，每次都撞同一面墙 |
-| `TokenExpired` | 刷新凭证后**同一账号**重试一次 | 凭证过期被当 Fatal → 用户看到 401 |
-| `ContentBlocked` | **不罚账号**，换中性提示词重试一次 | 审核误报被当限额 → 白扔另一个账号的额度 |
-| `Fatal` | 原样透传给客户端 | — |
+`anonymous_default_session` 与 `env_credentials` 在 WASM 中不能开启。不能声称隐式读取本机登录态；本机导入要走明确授权的受控入口。
 
-几条实践要点：
+### 2.3 网络、系统能力与授权边界
 
-- 有些上游把「额度耗尽」和「速率窗口」都用 429 表达，只能靠**文案**区分，而处置完全不同（前者冷却到次日零点，后者是分钟级窗口）。判据要写清来源。
-- 有些上游把业务失败包装成 **HTTP 200**（正文一句固定话术，或流内 `{"type":"error"}`）。这种要靠 `is_error_response` / `stream_refusal_finishes` / `stream_refusal_markers` 拦下，否则会被当成一次成功答复。
-- `stream_refusal_finishes` 判的是**内容策略**拒绝（不罚账号、换家）；`stream_refusal_markers` 判的是**本账号额度**问题（必须罚账号）。两条别混。
-- 会话式转发（`is_stateful`）的错误默认走 `Fatal`。要参与限额记账必须覆写 `classify_conversation_error`，否则福利池耗尽后每个请求都从头撞一遍全部账号。
+- 所有网络经 SDK / 宿主发出。`origins` 只接受明确的 HTTPS origin，不含路径、通配符、账号密码、query 或 fragment；普通请求不得靠重定向跳出授权来源。
+- HTTP、WebSocket、资源上传与下载分别核对对应权限。不要凭证跟随公共图片 URL，也不要用公共下载入口访问本机或内网地址。
+- 账号代理、可信请求上下文由宿主决定；插件不能用传入 JSON 自选另一个账号、代理、跟踪标识或可信调用来源。
+- 设置声明只放可公开的配置；令牌、密码、Cookie 放账号 `secret`，不能塞进全局设置或表单默认值。
+- 动态账号域名需要 `http.account-origin.v1` 与受控 `account_origin` 声明、明确授权，不能扩大为任意 URL。当前该入口不支持代理，不得声称支持。
+- 本机凭据、托管登录、验证码、固定续期、MonkeyCode 任务等走现成受控能力；**声明不是用户授权**，敏感授权绑定具体包与来源，更新 / 切换后按宿主规则重新核对。
+- 某些能力只允许特定 provider 使用。不得把 CodeArts、Cline Free、CatPaw、豆包或 MonkeyCode 的固定入口复制给新 id；也不得用普通 HTTP 绕开固定入口。
+- 能力确实不够时，明确缺口并先设计宿主契约，不引入任意原生执行来补洞。不要为了兼容新插件而放宽沙箱。
 
-## 3. 前端登记点
+### 2.4 账号、凭证与状态
 
-| 文件 | 改什么 | 漏了会怎样 |
-|---|---|---|
-| `ui-islands/src/islands/add-account-configs.ts` | `ProviderConfig`：表单字段、登录方式（`webLogin` / `smsLogin` / `oauthLogin` / 访客） | 添加账号弹窗里没有这家的表单 |
-| `ui-islands/src/islands/add-provider-pick.tsx` | 卡片列表登记 | 选不到这家 |
-| `ui-islands/src/islands/add-provider-blocks.tsx` | 特殊块（如 WorkBuddy 的版本 + 打开方式） | 仅特殊形态需要 |
-| `ui-islands/src/islands/accounts-domain.ts` | 账号行的能力标记（`usage` / `creditDetail` / `edition` / `identifier` / `expiry` / `longLived`） | 账号卡片上的徽章、余额格、有效期显示不对 |
-| `ui-islands/src/islands/checkin-page.tsx` | `PROVIDER_DESC` 加链路说明 | 签到中心该家分组没有说明文字 |
-| `ui/assets/providers/<name>.png` | 图标 | 卡片没有图标 |
+新提供商使用通用插件账号路径，不新建宿主的 `<name>_accounts.rs`，不新增 `api/accounts.rs` 或 `store_view.rs` 的厂商分支。
 
-`ui/providers.js` **不用改** —— 它从 `/api/session` 的 `accounts.providers`（后端注册表摘要）自动派生。
+- `account.normalize` 返回 `{secret, public, identity, desktop}`；`account.view` 从凭证产生同样安全的公开形态。
+- 新包原则上声明 `accounts.identity.v1`，返回稳定、非空身份，并实现 `account.identity`。凭证轮换不应生成新账号；不得跨地区、跨额度池合并。
+- 迁移的旧账号可能没有稳定 user id。保留已存在的兼容策略并明确风险，不能为了新契约拒掉原来能用的账号，更不能靠易变 token 假装用户身份恒定。
+- 公开形态绝不包含 token / Cookie / 密码本体或嵌套副本。`tokenTail` 最多 6 字符，到期时间用毫秒；具体安全字段以 `core/plugin_host/wasm/public_view.rs` 为准。
+- 当前账号只能通过受控 `account.get` 读取。续期写回使用 `account.update` 的 `expect`、`secret`、`public`；锁内重读，比较失败后重新读取，不覆盖用户刚换上的凭证。
+- 只有访问令牌的账号不能自动获得续期权；需要登记 / 明确授权的固定续期链路，也不能给旧导入账号自动补权。
 
-改完前端要重新构建岛：`npm run ui:islands`（产物 `ui/islands/ui.js`、`ui/islands/login.js` 都要提交）。
+**每次 WASM 调用都会新建实例。** 不能把登录状态、刷新结果、会话、目录、台账存在插件全局变量里期待下一次仍在：
 
-## 4. i18n 与文档
+| 状态 | 当前宿主方式与生命周期 |
+|---|---|
+| 登录 | `state.v1` 的 `login` 范围，绑定 flow；取消 / 重载后按宿主规则清理 |
+| 会话 | `state.v1` 的 `conversation` 范围，隔离 provider、账号、身份与 session；可跨普通重载，不能承诺跨进程重启 |
+| 账号持久状态 | `state.v1` 的 `account` 范围，加密持久化、格式版本与比较更新 |
+| 短期缓存 | `sessions.v1`，临时 TTL 缓存；不能当长期数据库，也不要混用不同账号 / flow 的键 |
+| 模型 / 台账 | 现有 catalog 与 ledger 服务，不另建插件数据库或本地文件 |
 
-### 4.1 i18n
+状态读取要处理 `compatible` / schema，比较更新失败要回读。重启后临时状态消失是边界，不应伪造成续接成功。
 
-中文是 i18n 的源语言，`i18n/i18n-src/` 下只有五份译文（`en` / `ja` / `ko` / `pt-BR` / `zh-Hant`）。新增的中文文案会被 `scan.mjs` 扫出来，缺译文就是空值。
+### 2.5 模型目录与请求转发
+
+- 模型目录由插件给出 `default_models` / `models.list`，在线变化由 `models.refresh` 返回。可复用 SDK 的目录结果构造，不手写两套不同字段。
+- 成功刷新含 `refreshed`、`count`、`models`、`meta.remote`、`meta.refreshed_at`；确实成功取到的空目录与失败不同。失败保留最后成功清单，不假报刷新成功。
+- `force` 表示手动刷新，跳过插件缓存 / TTL；宿主的在途占位、取消与失败冷却仍生效。
+- 不同账号可用模型不同，声明 `catalog.accounts.v1`，由宿主保存各账号快照并聚合展示；不能把一家账号的目录当成另一账号的访问许可。
+- 新插件目录使用动态缓存 / 账号快照。**不新增旧的 `SCOPE_*` / `ALL_SCOPES`，不往 `implemented_kinds()` 登记。** 自动刷新遍历运行时已安装的插件。
+- `supportsToolCall`、`supportsImages`、`supportsReasoning`、上下文长度等按模型填写，有证据才声明，不把目录里的名字出现过等同于功能可用。
+
+WASM 对话实现 `conversation`，通过 SDK 调用网络，然后输出标准 Chat SSE（`stream.head`、`stream.chunk`）。`stateful: false` 不代表应返回旧原生 `chat` 请求计划。
+
+- 现有 Chat / Anthropic / Responses 请求与响应转换、Gemini 流转换可使用 `protocol.convert.v1`，转换器句柄只属于当前调用；自有信封在插件内解析，不默认给宿主新增响应枚举。
+- 保留完整工具声明、工具调用 id、工具结果、多轮历史、思考与 usage；不要靠删工具、截断结果或吞错误实现「能回复」。
+- 网页模型若走主程序工具模拟，按现有 `toolEmulation` 契约声明，并保持原生 `supportsToolCall` 的真实含义。文案说明模拟可关闭，不能宣传为网页原生工具能力。
+- 图片输入与图片生成 / 编辑是不同能力。生成 / 编辑另核对 `images.v1`、`images.capabilities` 与对应标准入口；大图不能靠无限放宽普通 JSON 限制处理。
+- 原始客户端流式意图需要时用 `request.context.v1`；不能把插件内部为了向上游取流而修改的 `params.stream` 当成客户端原始选择。
+- 上游失败应在下发正常内容前识别。已有实际输出后不能偷偷从头重发或换账号拼接两次回答；取消、超时、流中断必须如实结束并释放资源。
+
+### 2.6 错误分类
+
+`classify` 返回现有四档（JSON 使用 snake_case），不发明第五档，也不要拿未解析的文案字符串代替结构化分类：
+
+| `kind` | 网关处置含义 |
+|---|---|
+| `quota_limited` | 冷却账号对应模型并换账号；恢复时间与业务码要保留 |
+| `token_expired` | 有实际续期能力时刷新，再按网关策略重试同一账号 |
+| `content_blocked` | 内容审核不是账号配额，不罚额度，按网关内容重试策略处理 |
+| `fatal` | 不可恢复错误，保留可读原因并返回客户端 |
+
+HTTP 200 仍可能是业务失败、流内 error 或固定拒绝话术；需要插件解析和 `is_error_response` / 拒绝标记共同处理。`refusal_finishes` 属于内容拒绝，`refusal_markers` 属于账号配额，不能混。
+
+429 可能是额度耗尽、速率窗口、设备 / 账号限制，不只看状态码。区分分钟级与实际额度重置窗口，不能全写次日零点。`error.policy`、`retry.decision`、`retry_advice`、`cooldown_models` 等按宿主实际调用名称实现；未知操作返回明确 unsupported，不能返回空成功掩盖缺口。
+
+SDK 错误中的 `status`、`code`、`upstream_code`、`reset_at`、`credential_scope` 按需保留，防止本来可轮换 / 可续期的错误被折成 502。WASM 的会话出口同样要接通错误分类，不能沿用「会话错误一律 Fatal」的旧假设。
+
+### 2.7 签到、活动与插件任务
+
+- 每日动作声明 `capabilities.checkin` 与 `checkin` 元数据：说明、`daily`、`modes`、访客排除等，与实际实现一致。新包显式写 `daily`，避免默认值混淆。
+- 只有活动领取、没有每日动作时用 `daily: false`，并按实际声明 `plans` / `onboarding` / `growth`，不能把活动账号拉进每日签到。
+- 标准结果是 `claimed`、`done`、`ineligible`、`inactive`、`captcha`、`failed`；没有活动不等于红色失败，验证码不等于签到成功。
+- 新插件每日签到通过运行时能力加入清单，宿主使用 `pluginProvidersSeen` 一次性补齐定时范围。**不修改旧 `CHECKIN_PROVIDERS`、`PROVIDERS_ADDED_IN` 或 `PROVIDERS_VERSION`。** 这些常量仅服务旧名单兼容。
+- 核对首次补齐、用户取消勾选不再补回、停用 / 卸载后不执行且保留配置、重新安装可恢复。不能每次读配置都全选。
+- 特殊保活、成长、奖励、维护任务用 `tasks.v1`、`tasks.list`、`tasks.run`，可附 `tasks.categories`。任务分类只决定界面位置，**不授予权限**；同一每日动作不要又进签到调度又进插件任务导致双跑。
+- 活动状态用 `claim.status` / 现有只读管理入口，写动作独立。付费兑换、消耗兑换码或改变套餐等必须明确用户意图；页面打开 / 状态刷新不能自动提交。
+- 超时、取消或未知领取结果不盲目重领；回读上游状态并沿用宿主台账和已存在的受控入口。
+
+## 3. 前端：先声明，不再逐家写死
+
+WASM 不能自带 HTML / JS 页面。普通新提供商优先使用主程序已有界面，不照抄旧插件的 `ui/` 页面、iframe 或手工厂商卡片。
+
+| 插件声明 | 宿主消费与注意事项 |
+|---|---|
+| `pack.json` / `ProviderInfo` | 动态提供商列表、分类、标签和包内图标；未安装 / 未启用不出现可操作入口 |
+| `admin.action: auth.methods` | 动态添加账号表单；具体消费见 `api/session.rs` 与 `desktop-tauri/ui-islands/src/islands/add-dynamic-provider.tsx` |
+| `account_features` + `account.view` | `/api/session.accountFeatures` 与账号卡显示；桌面及手机以声明为准，不新增旧 fallback 常量表 |
+| `checkin`、`tasks.*` | 签到分组、模式、任务和说明；不能只做按钮而没有执行入口 |
+| `settings_schema` | `desktop-tauri/ui-shared/plugin-provider-settings.tsx` 等共用设置界面 |
+| 登录交互、敏感权限 | `desktop-tauri/ui-shared/plugin-login-*`、`plugins-permissions.tsx` 等现有组件 |
+
+新包实现 `auth.methods`，不要只靠旧 `login_methods` 兜底。方法按现有 `oauth` / `api` / `sms` 契约返回，`methodIndex` 稳定且不重复；条件字段、选项、敏感输入、说明与真实提交形状对齐。
+
+- 登录方式要区分桌面独立窗口、系统浏览器、本机导入、远程手动回调或凭证粘贴。上游不接受回调时明确限制，不能渲染一个必然失败的入口。
+- 短信、验证码、托管登录按现有独立契约；flow、一次性输入、取消和回调归属由宿主核对。
+- 选择框显式传当前选项的展示文案，不依赖 value 自动显示。
+- 必须核对桌面、网页面板、手机端都能消费声明，不把桌面本机能力宣传为服务端 / 手机直接可用。
+- 通用界面确实缺能力时，先定前后端契约，再按功能纵向闭环修改 `ui-shared` 与两端消费方；不要只给一家堆私有页面。
+
+## 4. 多语言、文案与分发落点
+
+### 4.1 多语言
+
+主程序中文仍是源语言，译文在 `desktop-tauri/i18n/i18n-src/{en,ja,ko,pt-BR,zh-Hant}/`。主程序新增文案时扫描、补译并生成产物；插件动态返回的说明和表单不会因为主程序扫描自动获得翻译，应按 `auth.methods` 收到的 locale 等现有契约自行提供六语文案。
+
+主程序前端变化涉及的构建入口：
 
 ```bash
-cd desktop-tauri/i18n
-npm run scan     # 扫出中文键，补齐到 i18n-src/*
-npm run check    # 检查是否有空值（CI 会拦）
-npm run build    # 生成 ui/i18n/*.js
+npm run ui:islands
+npm run mobile:build
+npm --prefix desktop-tauri/i18n run scan
+npm --prefix desktop-tauri/i18n run build
 ```
 
-历史教训：上游 v3.0.7 加了六条中文文案但没跑扫描，`scan.mjs --check` 时被扫出空值。**改完前端一定要跑 `check`。**
+译文补齐后再生成词典；按实际改动重建相关产物，不是每次插件变化都重建全部主程序。岛产物在 `desktop-tauri/ui/islands/`，手机网页产物在 `desktop-tauri/ui/m/`，词典在 `desktop-tauri/ui/i18n/`。CI 的译文完整性检查是现有要求，但**本 Skill 不授权忽略用户「不运行测试 / 检查」的指示**。
 
-### 4.2 文档
+### 4.2 支持说明
 
-`README.md` 的「Supported Providers」**六份一一对应**，加一家要六份一起改（注意：**根 `README.md` 是英文**，简体中文在 `docs/README.zh-CN.md`，别把中文写回根目录）：
+- 只改某个插件的能力时，在对应插件仓库当前维护的 README 语言版本中同步；当前两家主要维护英文与简体中文两份，不默认新建六份插件 README。
+- 普通 Agent 插件看 `plugin/Agent2Providers/README.md` / `README.zh-CN.md`；网页插件看 `plugin/Agent2WebProviders/README.md` / `README.zh-CN.md`。分别标注 WASM 的实现、验收与限制。
+- 主程序定位、通用功能或用户承诺变化，才同步根英文 `README.md` 和 `docs/README.{zh-CN,zh-Hant,ja,ko,pt-BR}.md`。不要把旧完整矩阵和「内置家数」塞回根 README。
+- 安装 / 部署 / 升级 / 排错说明仍只维护 `docs/install.md` 与另外五份译文，产物与参数变化六份同步；不额外创建使用文档。
+- 旧 `ui/provider-docs.json` 属于原生包的能力说明通路。**当前 WASM 禁止 `ui/`，打包器也不包含它**，不能为了复用说明数据就拷进 WASM 包；逐项说明的宿主契约不足时明确缺口，不静默假装已支持。
 
-- `README.md`（English，GitHub 默认展示）
-- `docs/README.zh-CN.md`（简体中文，文案源语言）
-- `docs/README.zh-Hant.md`
-- `docs/README.ja.md`
-- `docs/README.ko.md`
-- `docs/README.pt-BR.md`
+### 4.3 构建与发布边界
 
-另外注意「内置 N 家提供商」这个数字（「核心特性」一节，**六份 README 都有**，各自语言的措辞不同）。它数的是**表格里的内置行数**（不含「自定义提供商」那一行），不是 `PROVIDERS` 的条目数：
+开发构建使用现有脚本，不沿用旧的分平台 `scripts/pack.mjs`：
 
-- 表格把两地 / 两池合并成一行（如 `AutoClaw（国内版 / 国际版）`、`Cline（Free / Pass）`），而 `PROVIDERS` 里是两个条目；
-- 所以加一家两地 provider 时，`PROVIDERS` +2、表格只 +1 行、这个数字也只 +1。
+```bash
+# 从 Agent2API 仓库根执行；只在用户请求实现 / 构建的范围内运行
+node plugin/Agent2Providers/wasm/build.mjs <id>
+node plugin/Agent2WebProviders/wasm/build.mjs <id>
+```
 
-当前状态：表格 22 行内置 + 1 行自定义 = 23 行，`PROVIDERS` 29 条。改之前先数一遍，别按 `PROVIDERS` 的条数算。
+构建器按对应 WASM 工作区 `--locked` 构建 `wasm32-unknown-unknown`，打出 `<pack-id>-<version>-wasm32-unknown-unknown.zip` 与 `.sha256`。Web 构建复用相邻 Agent2Providers 仓库的 SDK 和工具，缺少副本时明确报缺，不切回原生构建。
 
-安装 / 部署相关的内容只在 `docs/install*.md` 里维护，不要往 README 塞。
+本地开发包可以未签名，但必须如实显示未签名与未验收，不冒用官方密钥。要改版本、签名配置、CI、插件索引、tag、Release 或推送，另按 `release-flow` 和用户确认执行；本 Skill 不授予这些操作权限。仅更新本规范时不构建、不安装、不更新索引。
 
-## 5. 施工顺序
+## 5. 按功能纵向闭环施工
 
-按功能纵向闭环，不要先把后端全写完再做前端：
+1. **证据与契约**：上游形态、身份拆分、六项能力状态；确定宿主是否已有全部必要能力。
+2. **包与握手**：独立工作区成员、两份清单、ABI、唯一身份、动态登记。
+3. **账号与界面**：`auth.methods`、规范化、稳定身份、公开视图、声明式表单；先做到可添加与安全展示。
+4. **目录与选路**：静态 / 在线 / 账号目录、模型能力、缓存持久化与账号权限隔离。
+5. **对话与错误**：请求、流式、工具循环、思考 / 图片、usage、错误分类、取消与真实结束。
+6. **维护能力**：按事实接续期、余额、签到 / 领取、插件任务，每项对齐声明和界面。
+7. **文案与交付**：相关多语言、实际受影响的前端产物、插件支持状态与迁移限制。
 
-1. **身份**：`ProviderKind` + `PROVIDERS` + `kind_from_id` / `kind_id` + `adapter_for` + `implemented_kinds`
-2. **账号**：`<name>_accounts.rs` + `add_account` 分派 + 公开形态 + 前端表单 → 能加号、能在列表里看到
-3. **目录**：`list_models` + `catalog_cache` scope + `refresh_models` → `/v1/models` 有内容、刷新按钮有效
-4. **转发**：`build_chat_request` 或 `forward_conversation` + `classify_error` → 能对话、限额能轮换
-5. **余额**：`supports_usage` + `query_usage` → 账号行能看到余额
-6. **签到 / 领取**：`CHECKIN_PROVIDERS` + 版本号 + `checkin_for` 分派
-7. **前端收尾**：`accounts-domain` 标记、签到中心说明、图标
-8. **i18n + 六份 README**
-
-每一步做完都能独立验证，不要攒到最后一起测。
+不要先写完整后端再补全部前端。涉及两端时先确认契约；未经用户允许不创建子智能体。单个新文件尽量不超过 800 行，优先按上游职责拆分。
 
 ## 6. 完成度验收清单
 
-每一格都要能跑出结果，不是「我实现了」。
+验收口径保留，但不等于授权自动测试。**遵守用户要求：不新增测试文件，不擅自运行测试、真实账号探测或触发签到 / 领取。** 未运行的项目必须写「未验收」，不能据源码、编译或签名宣称通过。仅更新 Skill 时做静态核对即可。
 
-### 6.1 用探测脚本验（推荐）
+### 6.1 基础与安全核对
+
+- [ ] 包内唯一 provider、唯一 WASM 入口，包身份与握手一致，分类和图标正确。
+- [ ] `requires` 存在且依赖完整，无 WASI / 浏览器绑定 / 未授权系统导入，也无 `ui/`。
+- [ ] 安装 / 启用后动态登记；停用、切换、加载失败不显示假可用入口、不偷偷调用旧原生实现。
+- [ ] 普通新 provider 没有新增主程序枚举、账号厂商分支、固定缓存 scope 或签到常量。
+- [ ] 公开形态、表单默认值、全局设置、日志与交付材料没有凭证本体。
+- [ ] 账号身份稳定，地区 / 池不混用；并发刷新采用锁内重读与比较写回。
+- [ ] 本机能力、托管续期与任务有对应明确授权，不能通过 JSON 重建可信来源。
+- [ ] 临时状态、账号状态、模型快照符合各自生命周期，升级不覆盖用户设置。
+
+### 6.2 六项能力与三端闭环
+
+| 能力 | 用户要求验收时的动作 |
+|---|---|
+| LLM 请求 | 钉住当前 WASM 包、provider、账号和模型，检查流式、工具往返、usage；额外能力逐项验；取消 / 中断不自动重发 |
+| 自动续期 | 用具备实际续期材料 / 授权的账号核对临期刷新、401 恢复、并发写回与公开有效期；只持 access token 的账号不假报支持 |
+| 模型列表 | 分别核对静态与远程来源、手动强刷、成功空目录、失败保留、重启恢复；账号 A 的目录不授权账号 B |
+| 余额查询 | 核对真实读数、单位、缺少查询凭证时中性提示；未知不是 0，比例不是金额 |
+| 签到 | 动态分组、访客 / 地区排除、每日窗口、手动结果与定时台账；首次加入、取消不补回、停用不执行 |
+| 领取类 | 查询只读、明确领取、无活动中性返回；验证码 / 未知结果如实显示，不自动兑换或重领 |
+
+桌面、网页面板、手机端分别检查声明式登录、账号能力、设置与任务显示。本机导入或回调受平台限制时，远程端必须给出能理解的限制或可用替代登录方式。
+
+### 6.3 现有探测脚本（只有用户要求时才运行）
+
+`scripts/probe-provider.mjs` 与 `scripts/probe-cases.mjs` 仍可用于网关侧行为探测，不是旧二进制插件验收器：
 
 ```bash
 node scripts/probe-provider.mjs \
   --base http://127.0.0.1:3065 \
-  --key sk-dev-<provider> \
+  --key <仅允许目标提供商的网关Key> \
   --provider <id> \
   --model <模型名>
 ```
 
-前置：在面板「网关 Key」页建一把**只允许目标 provider** 的 Key。不建的话，同名模型在多家里都有映射时会被路由到别家，结论无法归因（脚本启动时会先校验并报错退出）。
+**必须自行确认 Key 只允许目标 provider，并核对当前执行体是 WASM。** `--provider` 不是路由强制开关；当前脚本只查健康、模型存在及 `owned_by`，缺 Key 只警告，**不会检查 Key 的完整 provider 白名单，也不识别原生 / WASM 包归属**。不能再沿用旧规范「脚本会自动保证仅测试这家」的说法。
 
-脚本由两个文件组成：`scripts/probe-provider.mjs`（CLI 外壳：参数、HTTP、前置校验、输出）与 `scripts/probe-cases.mjs`（九个用例的请求构造与判定）。加新用例改后者，`CASE_ORDER` 决定执行顺序。
-
-用例与能力位的对应：
-
-| 用例 | 验的是什么 | 对应 README 列 / 能力位 |
-|---|---|---|
-| `stream` | 流式 SSE 能正常逐帧下发 | LLM 请求 |
-| `tool_call` | `tools` 声明被上游接受，返回 `tool_calls` | LLM 请求（工具调用） |
-| `parallel_tools` | 一次返回多个 `tool_calls` | LLM 请求（并行工具） |
-| `tool_roundtrip` | 工具结果回灌后能继续生成 | LLM 请求（多轮循环） |
-| `image` | 图片输入被接受 | LLM 请求（多模态） |
-| `reasoning` | 思考字段能透出 | LLM 请求（思考） |
-| `json_schema` | 结构化输出可用 | LLM 请求（结构化输出） |
-| `usage` | 终帧带非零 usage | 报表 / 用量统计 |
-| `context_window` | 目录声明的上下文窗口（读 `/v1/models`，不发上游） | 模型列表 |
-
-判定口径：
-
-- **必需项失败 = 这家的「LLM 请求」不能算接完。** `tool_call` 即使被目录声明为不支持，也记 **FAIL** 而不是 SKIP —— 记 SKIP 会让汇总显示「必需项全部通过」，而实际上 agent 客户端根本用不了这家。
-- 可选项目录声明不支持时（`image` / `reasoning`）记 **SKIP** 而不是 FAIL，否则每家都会刷一堆假失败。`--force` 可强测（用于「怀疑目录写错了」）。
-- `tool_call` 允许重试一次（模型偶尔就是不调工具），失败后换更硬的提示再发一次。
-- `parallel_tools` 只返回 1 个 call 时记 **INFO** —— 模型可能打算分两轮返回，那是行为差异不是适配缺陷。
-- `context_window` 记 **INFO/PASS** —— 它读的是目录声明，不是上游行为，和其余用例性质不同。
-
-退出码：`0` = 没有必需项失败；`1` = 有必需项失败；`2` = 用法或前置条件错误（连不上网关、模型不在清单里、模型不由该家承载）。
-
-### 6.2 逐列验收
-
-| README 列 | 验收动作 |
+| 用例 | 当前口径 |
 |---|---|
-| LLM 请求 ✓ | 探测 `stream` + `tool_call` + `tool_roundtrip` 全 PASS；用真实客户端（Claude Code / Codex 等）跑一轮多轮对话不报错 |
-| Token 自动续期 ✓ | 账号页能看到有效期；等一个临期窗口（或手动改凭证时间）后跑 `credential_maintenance`，日志里有刷新成功记录；401 时能自动恢复而不是报错给客户端 |
-| 模型列表 ✓ | `/v1/models` 有该家的条目；模型管理页点「获取模型」后清单变化；**重启进程后清单还在**（验 `ALL_SCOPES` 有没有漏） |
-| 余额查询 ✓ | 账号行显示余额；点「积分明细」能展开；读不到的数值留空显示，不是 0 |
-| 签到 ✓ | 签到中心出现该家分组且有说明文字；手动点一次成功；次日定时任务跑完台账有记录；**存量配置升级后这家在默认清单里**（验 `PROVIDERS_VERSION`） |
-| 领取类 ✓ | 对应按钮能点且返回可读结果；没有活动时返回中性说明而不是红色失败 |
-| 某列 ✗ | 能在代码注释里找到「怎么排除的」记录（打过哪些接口、返回什么） |
+| `stream` | 必需项，流式 SSE |
+| `tool_call` | 必需项，目录不支持工具也记 FAIL，不用 SKIP 掩盖 Agent 能力不足 |
+| `tool_roundtrip` | 必需项，工具结果回灌；前置未通过时跳过，不能把跳过当通过 |
+| `parallel_tools` | 只返回一个调用可记 INFO，不机械当适配错误 |
+| `image` / `reasoning` | 可选项，目录未声明时可 SKIP；`--force` 仅在用户要求时强探 |
+| `json_schema` / `usage` | 结构化输出与非零 usage，不能从通过推导余额 / 自动续期可用 |
+| `context_window` | 只读目录声明，不是实际长上下文行为证明 |
 
-### 6.3 静默失效自查
+退出码 `0` 只表示本次没有记录到必需项 FAIL，`1` 为必需项失败，`2` 为用法 / 前置错误。使用 `--cases` 缩小范围或发生 SKIP 时，**不能凭退出码 0 声称所有必需项通过**。
 
-这些**不会报错**，只能靠主动验：
+仅文本支持与完整 Agent 客户端支持分开说明；没有工具闭环不能宣传完整 Agent 适配。主程序工具模拟通过也要标注模拟边界，不能改称上游原生支持。
 
-- [ ] 重启进程后模型清单还在（`ALL_SCOPES`）
-- [ ] 后台目录刷新真的会调度到这家（`implemented_kinds`）
-- [ ] 存量用户升级后签到清单里有这家（`PROVIDERS_VERSION` + `PROVIDERS_ADDED_IN`）
-- [ ] 公开形态里没有 token 本体（`store_view::public_account`）
-- [ ] 限额错误真的触发了账号轮换，而不是当 Fatal 透传（看请求日志的 attempts 与冷却标记）
-- [ ] 前端中文文案全部有译文（`npm run check`）
+## 7. 调试与静默失效排查
 
-## 7. 调试设施（都是现成的，别重造）
+先查现成设施，不重造抓包器，也不假定旧路径覆盖了全部 WASM 专用入口：
 
-| 要看的 | 怎么看 |
+| 要看什么 | 当前落点 |
 |---|---|
-| **发往上游的最终 body**（已按家改写、已脱敏） | 面板设置页开「调试模式」→ 跑一次请求 → 请求日志详情页「原始报文」标签。数据在 `debug_traffic` 表，保留最近 500 条 |
-| 上游原始响应（含 SSE 全文） | 同上，同一个标签 |
-| 客户端发来的请求体 | 调试模式开启后同样可见（`request_raw` 表） |
-| 单次转发的选路、重试链、usage | 模型管理页的「测试」按钮（`POST /api/models/test`），走真实转发链路、钉住 provider + account、结果失败也返回 2xx |
-| 帧级翻译问题（Anthropic / Gemini / NDJSON / Chatglm 快照） | 调试报文里的上游原始 SSE，对照 `core/upstream/translate` 的输出 |
+| 包是否安装、启用、加载完成，ABI 与能力 | 插件管理、启动状态与 `GET /api/plugins` |
+| 为什么提供商不出现 / 被其他包接管 | `core/plugin_host/bootstrap.rs`、`registry.rs`、`ownership.rs` 与启动失败原因 |
+| 登录按钮 / 表单不对 | `api/session.rs` 的动态登录元数据校验、`auth.methods`、现有共用登录组件 |
+| 模型刷新与重启恢复 | `core/plugin_host/wasm/catalog.rs`、`rpc_cache.rs`、`core/providers/catalog_refresh.rs` |
+| 签到分组 / 定时范围 | `core/auto_checkin.rs`、`core/checkin_schedules.rs`、`core/billing/checkin.rs` 与声明 |
+| 最终上游报文、原始响应、选路、重试与 usage | 现有调试模式及请求日志「原始报文」；未覆盖的专用路径如实注明，不承诺一律全覆盖 |
+| 钉住 provider 与账号的单次模型请求 | 现有模型测试入口 `POST /api/models/test`，仅在用户要求时调用 |
 
-**出站报文不需要新做工具** —— `TrafficCapture::reset_request` 抓的就是「即将发送前」那一份，四家路径全覆盖。
+「能安装但没出现」先看握手、暂停名单、包 / 单项开关与归属，不给主程序新增硬编码 id 解决。目录总是兜底先查 `model_refresh`、账号上下文和返回结构，不去旧 `ALL_SCOPES` 补常量。
 
-## 8. 已知坑
+## 8. 旧原生插件迁移的边界与常见误区
 
-- **「上游没有这个接口」要先怀疑找法。** CatPaw 的目录参数在 POST body 里（看着像 query），AutoClaw 的目录在另一个路径前缀下（顺着 `chat/completions` 找永远找不到）。两次结论都错。
-- **429 不一定都是限额。** 有的家把额度耗尽、速率窗口、未验证邮箱都用 429/403 表达，处置完全不同（次日零点 vs 分钟级 vs 永久）。只看状态码会把三种混成一档。
-- **HTTP 200 可能是失败。** 正文一句固定话术、或流内 `{"type":"error"}`、或 `finish_reason: content_filter`，都要单独识别。
-- **`supports_*` 默认 false 不是「不支持」。** 它是「尚未接入」。判据必须是上游有没有那个接口。
-- **两个地区拆家时，`PROVIDERS` 里要相邻排列。** 中间隔着别家会让「找国际版」变成一次扫描。
-- **`implemented_kinds()` 与 `PROVIDERS` 是两个口径。** 前者是「适配器接线了没有」，后者是「注册了没有」。占位实现不该进前者。
-- **签到清单的默认全选是个陷阱。** 加一家进 `CHECKIN_PROVIDERS` 会让存量用户第二天零点就多发一轮请求。想默认开启就升版本号；不想默认开启就别进 `PROVIDERS_ADDED_IN`。
-- **改完前端要重新构建岛并提交产物。** `ui/islands/ui.js` 与 `ui/islands/login.js` 都是检入仓库的，只改 tsx 不构建等于没改。
+- **WASM 是主流程，但原生兼容尚未删除。** `plugin/Agent2Providers/crates/providers/`、`plugin/Agent2WebProviders/crates/providers/` 及旧包清单是协议参考 / 迁移来源，不是新增模板。
+- **保留 provider id、旧账号、设置与授权边界。** 换包不能重命名身份或默认重建所有账号；不自动迁移 / 删除用户数据，不给存量导入账号补敏感权限。
+- **加载失败不能偷偷回退旧原生。** 当前归属优先级、暂停名单和旧包特殊迁移以 `core/plugin_host/ownership.rs` 为准，不写一个通用回退来绕过它。
+- **主程序旧 `ProviderKind` / `PROVIDERS` 是历史身份与少量真实内置执行体，不是插件登记入口。** 新插件走运行时注册表；只为宿主真正的新内置功能修改它时，先说明这是另外一种任务。
+- **无需给每个插件新建厂商前端表、账号存储分支、缓存 scope、签到版本。** 有遗留 fallback 不代表需要继续扩展。
+- **`verified`、签名与权限是三件事。** 已签名不等于真实验收，权限声明不等于用户批准，未声明能力不等于上游没有。
+- **原生表的 ✓ 不会自动迁到 WASM。** 特别核对模型在线刷新、余额单位、工具续接、登录 / 本机导入、续期材料、签到台账和领取入口。
+- **`ui/provider-docs.json` 不能直接塞入 WASM。** 如需新说明通路，先确定受控宿主契约，不放开可执行网页限制。
+- **先确认输出是否已经开始，再决定重试。** 不把取消、流中断或未知领奖结果改写成普通成功，也不重复上游副作用。
 
-## 9. 参考实现
+## 9. 当前参考实现
 
-`git show 1576330` 是 ModelScope 接入的完整提交，48 个文件，正好覆盖第 2–4 节的每一类落点。拿不准该改哪些文件时，对着这个提交的 `--stat` 过一遍。
+按功能参考当前源码，不能整包照抄所有权限或未验收能力：
+
+- `plugin/Agent2Providers/wasm/atomcode/`：独立包、账号规范化、动态登录、比较写回、账号目录与流内失败识别。
+- `plugin/Agent2Providers/wasm/workbuddy/`：对话、图片生成 / 编辑、成长与奖励任务；国内 / 国际身份隔离。
+- `plugin/Agent2Providers/wasm/zcode/`：声明式设置、每日窗口、活动与验证码受控流程，以及旧无 user id 凭证的兼容约束。
+- `plugin/Agent2WebProviders/wasm/deepseek-web/`：网页会话、图片输入、工具模拟声明与未确认能力的明确关闭。
+- `plugin/Agent2WebProviders/wasm/tabbit/`、`tabbit-intl/`、`tabbit-common/`：双地区独立包与共享实现、短信登录、在线目录、百分比额度。
+
+旧 ModelScope 接入提交以及原生插件编写指南只用于理解历史，不再作为「新 provider 必须修改哪些主程序文件」的施工清单。

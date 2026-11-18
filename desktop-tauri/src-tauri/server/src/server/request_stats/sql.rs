@@ -194,6 +194,7 @@ fn encode_optional_json(value: &serde_json::Value) -> SqlValue {
 /// 旧实现是两处共用同一个 `matches_filter` 函数，现在共用的层次更靠下：连 SQL 的
 /// WHERE 片段都是同一份，两处不可能漂移。
 /// `offset` / `limit` 是分页参数、不是筛选条件，所以不在这里。
+#[derive(Clone, PartialEq)]
 pub(super) struct FilterPlan {
     /// `WHERE ...` 片段；无条件时为空串（直接拼在 FROM 后面）
     where_sql: String,
@@ -325,41 +326,25 @@ pub(super) fn count_matching(
     Ok(count.max(0) as usize)
 }
 
-/// 列表页一次要的三个计数（总条数 / 命中条数 / 其中进行中）—— **一次扫描**。
-///
-/// 原先三条独立 `COUNT(*)`：每条都在自己的 WHERE 上扫一遍表，而列表页每秒
-/// 轮询一次，明细上百万行时等于每秒三遍全表。这里把三个计数写成同一个
-/// `SELECT` 里的 `COUNT(*)` 与两个 `SUM(CASE ...)`，扫描次数从三降到一。
-///
-/// 每个 `CASE` 都要各自一组绑定参数（SQLite 不保证跨表达式复用），所以绑定
-/// 值按「命中」与「命中且 status=0」各复制一份。
-pub(super) fn counts(
+pub(super) fn filtered_counts(
     conn: &Connection,
     plan: &FilterPlan,
-) -> rusqlite::Result<(usize, usize, usize)> {
-    let filter = plan
-        .where_sql
-        .strip_prefix(" WHERE ")
-        .unwrap_or("1");
+    total: usize,
+) -> rusqlite::Result<(usize, usize)> {
+    if plan.is_empty() {
+        let running: i64 = conn.query_row("SELECT COUNT(*) FROM requests WHERE status = 0", [], |row| row.get(0))?;
+        return Ok((total, running.max(0) as usize));
+    }
     let sql = format!(
-        "SELECT COUNT(*), \
-         COALESCE(SUM(CASE WHEN ({filter}) THEN 1 ELSE 0 END), 0), \
-         COALESCE(SUM(CASE WHEN ({filter}) AND status = 0 THEN 1 ELSE 0 END), 0) \
-         FROM requests"
+        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END), 0) \
+         FROM requests{}", plan.where_sql,
     );
-    let mut binds = Vec::with_capacity(plan.binds.len() * 2);
-    binds.extend(plan.binds.iter().cloned());
-    binds.extend(plan.binds.iter().cloned());
-    let (total, matched, running): (i64, i64, i64) = conn.query_row(
+    let (matched, running): (i64, i64) = conn.query_row(
         &sql,
-        params_from_iter(binds.iter()),
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        params_from_iter(plan.binds.iter()),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    Ok((
-        total.max(0) as usize,
-        matched.max(0) as usize,
-        running.max(0) as usize,
-    ))
+    Ok((matched.max(0) as usize, running.max(0) as usize))
 }
 
 /// 筛选下拉的候选清单：明细里出现过的模型名与 provider id（各按出现次数降序）。
@@ -838,6 +823,7 @@ pub(super) fn delete_matching(
 
 /// 清空全部明细。调用方必须先在同一事务中清理两侧报文。
 pub(super) fn delete_all_requests(conn: &Connection) -> rusqlite::Result<usize> {
+    crate::server::db::invalidate_query_caches();
     conn.execute("DELETE FROM requests", [])
 }
 

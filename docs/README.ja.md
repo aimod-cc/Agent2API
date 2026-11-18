@@ -25,7 +25,8 @@ Agent2API は **AI ルーティングゲートウェイと Agent クライアン
 - 🔌 **統一モデル API** — OpenAI Chat / Responses / Images、Anthropic Messages と統一モデル一覧。Raccoon、Loomy、Antigravity、ModelScope、WorkBuddy、豆包工作 が画像生成を提供し、Raccoon、Loomy、Antigravity、ModelScope、WorkBuddy は参照画像の編集にも対応。生成と編集は AI アシスタントのツールからも利用可能
 - 🧭 **AI ルーティング** — モデルマッピング、アカウント優先度、負荷分散、セッション固定、フェイルオーバー
 - 🤖 **Agent クライアント設定管理** — 複数の接続設定、既存設定のインポート、書き込みプレビュー、サービス切り替え
-- 🧩 **プラグイン拡張** — 追加プロバイダーは本体に同梱せず個別にインストール・更新。カスタムプロバイダーにはプラグイン不要
+- 🧩 **プラグイン拡張** — 追加プロバイダーは個別にインストール・更新し、地域と利用枠を分離します。基礎パッケージに CodeArts の会話・公式ログイン・管理付き更新・特典、CatPaw の会話・ツール継続・画像入力・許可制のローカルログイン連携、Doubao Work の会話・非同期応答・画像アップロードと生成・ログイン・ローカルインポート・チェックインとタスク報酬、MonkeyCode 中国版／国際版の独立した会話タスク・ツール橋渡し・ログイン・毎日チェックインを実装しました。MonkeyCode タスクとローカル認証情報の読み取りには明示的な許可が必要です。Kiro 管理付きログインと明示登録後の Cline Free 更新も利用できます。これらの実装は実アカウントでは未検証です。
+- 🧰 **Web ツール模擬機能** — プラグインが明示した智譜清言、DeepSeek Web、Tabbit モデルに共通ゲートウェイ層でツール定義・履歴・結果を変換します。既定で有効、無効化可能。Web のネイティブ機能ではなく、実アカウントでは未検証です。
 - 🛡️ **外向きプロキシ** — アカウントと更新タスクの出口をプロキシプールから選択
 - 🔑 **ゲートウェイのセキュリティ** — 権限別キー、パネルログインの人間確認、キー未設定時のモデルリクエスト拒否
 - 📊 **リクエストレポート** — リクエスト数、成功率、トークン使用量、キャッシュヒット率、365 日ヒートマップ
@@ -34,13 +35,29 @@ Agent2API は **AI ルーティングゲートウェイと Agent クライアン
 
 ## ❤️ スポンサー
 
+本プロジェクトを支援するスポンサーの北辰 API、IPWO、ProxyLane に感謝します。
+
+<table>
+<tr>
+<td width="180" align="center"><a href="https://beichenapi.com/register?aff=QWJJYF7PT8SY"><img src="../desktop-tauri/ui/assets/providers/beichen.png" alt="Beichen API" width="64" /><br /><strong>北辰 API</strong></a></td>
+<td><strong>1 つの API で複数の主要モデルを利用。</strong><br />北辰は OpenAI 互換の AI API 中継サービスを提供し、ストリーミング応答と長時間推論モデルの接続に対応しています。Agent2API の「アカウント追加 → API テンプレート」の先頭カードを選ぶと接続先が入力されるので、自分の API Key を設定してください。<br /><br /><a href="https://beichenapi.com/register?aff=QWJJYF7PT8SY"><strong>登録 / API Key を取得 ↗</strong></a></td>
+</tr>
+</table>
+
+<table>
+<tr>
+<td width="180" align="center"><a href="https://www.ipwo.net/?code=LQW28BAYK"><img src="../desktop-tauri/ui/assets/sponsors/ipwo.png" alt="IPWO" width="140" /><br /><strong>IPWO 住宅用 IP</strong></a></td>
+<td><strong>動的・静的・無制限の住宅用プロキシを用途に合わせて選択。</strong><br />IPWO は複数地域の住宅用 IP を提供し、国・都市単位の指定と HTTP(S) / SOCKS5 に対応しています。取得したプロキシアドレスを Agent2API の「ネットワークプロキシ」に追加すると、アカウントやサービスの通信経路に利用できます。<br /><br /><a href="https://www.ipwo.net/?code=LQW28BAYK"><strong>プランを見る / 住宅用 IP を取得 ↗</strong></a></td>
+</tr>
+</table>
+
 <a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><img src="../assets/sponsor-proxylane.png" alt="ProxyLane（スポンサー）" width="100%" /></a>
 
 <table>
 
 <tr>
 <td width="240"><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/proxylane-logo-for-dark-bg.png" /><img src="../assets/proxylane-logo-for-light-bg.png" alt="ProxyLane" width="220" /></picture></a></td>
-<td><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme">ProxyLane</a> が本プロジェクトをスポンサーしています！ProxyLane は AI アカウント専用のネイティブ静的住宅用 IP（Static Residential ISP）を提供しています。実在の家庭向けブロードバンド事業者の IP を使い、Scamalytics の不正スコアが低く、IP は 1 つずつ専有、通信量は無制限、$3.90 から。「ネットワークプロキシ」ページでアカウントごとに出口を 1 つ割り当てるだけです。初回購入はコード <code>AGENT2API25</code> で 25% オフ。</td>
+<td><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme">ProxyLane</a> は AI アカウント専用のネイティブ静的住宅用 IP（Static Residential ISP）を提供しています。実在の家庭向けブロードバンド事業者の IP を使い、Scamalytics の不正スコアが低く、IP は 1 つずつ専有、通信量は無制限、$3.90 から。「ネットワークプロキシ」ページでアカウントごとに出口を 1 つ割り当てるだけです。初回購入はコード <code>AGENT2API25</code> で 25% オフ。</td>
 </tr>
 
 </table>
@@ -48,10 +65,9 @@ Agent2API は **AI ルーティングゲートウェイと Agent クライアン
 ## 💬 コミュニティとサポート
 
 - **QQ グループ**: Agent2API の交流グループ。QQ でグループ番号を検索すると参加できます。
-  - グループ 1：`1127656296`（**まもなく満員 — グループ 3 または 4 への参加をおすすめします**）
-  - グループ 2：`1130894674`（**まもなく満員 — グループ 3 または 4 への参加をおすすめします**）
+  - グループ 1：`1127656296`
+  - グループ 2：`1130894674`
   - グループ 3：`1108276647`
-  - グループ 4：`1054072416`
 - **Telegram グループ**: <https://t.me/+9gM8YPvgRL02NGRl>
 - **💖 支援**: Agent2API がお役に立ったら、[作者にコーヒーをおごる](./SPONSOR.md)のも歓迎です。支援は任意で、機能の解放などはありません。
 - **🤝 スポンサー / ビジネス**: スポンサーになりたい、またはここに製品を掲載したい場合は [541675139@qq.com](mailto:541675139@qq.com) までメールでご連絡ください。

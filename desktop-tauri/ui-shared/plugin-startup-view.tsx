@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { Badge, Button, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Spinner } from '@ui'
-import { getPluginStartup, pluginFailed, pluginPending, pluginPhaseDetail, pluginPhaseLabel, refreshPluginStartup,
+import { getPluginStartup, pluginFailed, pluginPending, pluginPhaseDetail, pluginPhaseLabel, pluginLoadSteps, pluginStepLabel, refreshPluginStartup,
   startupForPack, subscribePluginStartup, type PluginLoadStatus } from './plugin-startup'
 import type { PluginTranslate } from './plugins-store'
 
@@ -29,20 +29,23 @@ export function PluginStartupDetails({ id, status: fallback, t }: { id: string; 
   const status = usePluginLoadStatus(id, fallback)
   const view = getPluginStartup()
   const now = view.value?.now || Date.now()
-  const elapsed = status?.startedAt ? Math.max(0, Math.round(((status.finishedAt || now) - status.startedAt) / 1000)) : null
+  const elapsed = status?.startedAt ? Math.max(0, (status.finishedAt ?? now) - status.startedAt) : null
+  const steps = pluginLoadSteps(status, now)
+  const shared = steps.some(step => step.phase === 'waiting')
   return <section className='flex flex-col gap-2 text-xs' aria-label={t('加载状态')}>
     <div className='flex items-center gap-2'>
       {pluginPending(status) ? <Spinner className='size-3.5' /> : null}
       <Badge variant={pluginFailed(status) ? 'warning' : 'outline'} shape='tag'>{pluginPhaseLabel(status, t)}</Badge>
-      {elapsed !== null ? <span className='text-muted-foreground'>{t('本次用时 {n} 秒', { n: elapsed })}</span> : null}
+      {elapsed !== null ? <span className='text-muted-foreground'>{t('总用时 {n} 秒', { n: (elapsed / 1000).toFixed(1) })}</span> : null}
     </div>
     <p className='m-0 whitespace-pre-wrap break-words text-muted-foreground'>{pluginPhaseDetail(status, t, now)}</p>
     {status?.phase === 'blocked' && status.error ? <p className='m-0 whitespace-pre-wrap break-words text-muted-foreground'>{status.error}</p> : null}
     {status?.startedAt ? <p className='m-0 text-muted-foreground'>{t('开始时间：{time}', { time: new Date(status.startedAt).toLocaleString() })}</p> : null}
     {status?.finishedAt ? <p className='m-0 text-muted-foreground'>{t('完成时间：{time}', { time: new Date(status.finishedAt).toLocaleString() })}</p> : null}
-    {status?.steps?.length ? <div className='flex flex-wrap gap-x-3 gap-y-1 text-muted-foreground'>
-      {status.steps.map((step, index) => <span key={index}>{pluginPhaseLabel({ ...status, phase: step.phase }, t)} · {(step.durationMs / 1000).toFixed(1)} s</span>)}
+    {steps.length ? <div className='flex flex-wrap gap-x-3 gap-y-1 text-muted-foreground'>
+      {steps.map((step, index) => <span key={index}>{shared ? pluginStepLabel(step.phase, t) : pluginPhaseLabel({ phase: step.phase }, t)} · {(step.durationMs / 1000).toFixed(1)} s</span>)}
     </div> : null}
+    {shared ? <p className='m-0 text-muted-foreground'>{t('总用时包含等待其他插件，不等于本插件自身的初始化耗时。')}</p> : null}
     {status?.previousError ? <details className='text-muted-foreground'><summary>{t('上次加载记录（非本次故障）')}</summary>
       <p className='whitespace-pre-wrap break-words'>{status.previousError}</p></details> : null}
     {view.error && !view.unavailable ? <p className='m-0 text-muted-foreground'>{t('暂时无法获取插件状态，显示上次结果；这不代表插件启动失败。')}</p> : null}
@@ -60,7 +63,7 @@ export function PluginStartupDialog({ id, name, status: fallback, script, onClos
   const [error, setError] = React.useState('')
   React.useEffect(() => { refreshPluginStartup() }, [id])
   const run = async () => {
-    if (busy || pluginPending(status) || getPluginStartup().error || script && operation?.active) return
+    if (busy || status?.phase === 'unsupported' || pluginPending(status) || getPluginStartup().error || script && operation?.active) return
     setBusy(true); setError('')
     try { await retry(); refreshPluginStartup() }
     catch (error) { setError(error instanceof Error ? error.message : String(error)) }
@@ -78,7 +81,7 @@ export function PluginStartupDialog({ id, name, status: fallback, script, onClos
         {error ? <p role='alert' className='m-0 text-xs text-destructive'>{error}</p> : null}
       </DialogBody>
       <DialogFooter><Button variant='outline' disabled={busy} onClick={refreshPluginStartup}>{t('刷新状态')}</Button>
-        {status && status.phase !== 'ready' && status.phase !== 'disabled' ? <Button disabled={busy || pluginPending(status) || Boolean(getPluginStartup().error) || Boolean(script && operation?.active)} onClick={() => void run()}>
+        {status && !['ready', 'disabled', 'unsupported'].includes(status.phase) ? <Button disabled={busy || pluginPending(status) || Boolean(getPluginStartup().error) || Boolean(script && operation?.active)} onClick={() => void run()}>
           {busy ? t('正在重试…') : t('重新加载')}
         </Button> : null}
         <Button variant='ghost' disabled={busy} onClick={onClose}>{t('关闭')}</Button></DialogFooter>

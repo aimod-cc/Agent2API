@@ -12,7 +12,10 @@ thread_local! {
         .tempdir()
         .expect("测试配置目录应当可创建");
     static KEYS: Mutex<HashMap<&'static str, [u8; 32]>> = Mutex::new(HashMap::new());
+    static KEY_CONTEXT: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
+
+static PROCESS_KEYS: OnceLock<Mutex<HashMap<&'static str, [u8; 32]>>> = OnceLock::new();
 
 pub(crate) fn is_isolated() -> bool {
     std::env::var_os(CHILD).is_some()
@@ -41,11 +44,25 @@ pub(crate) fn with_key<T>(
         }
         result
     };
-    if is_isolated() {
-        static PROCESS_KEYS: OnceLock<Mutex<HashMap<&'static str, [u8; 32]>>> = OnceLock::new();
+    let isolated = is_isolated();
+    KEY_CONTEXT.with(|context| context.set(Some(isolated)));
+    if isolated {
         apply(PROCESS_KEYS.get_or_init(|| Mutex::new(HashMap::new())))
     } else {
         KEYS.with(apply)
+    }
+}
+
+// 最终短临界区只读已选择的缓存；不读取环境、不初始化密钥、不等待锁。
+pub(crate) fn try_cached_key(name: &'static str) -> Option<[u8; 32]> {
+    let isolated = KEY_CONTEXT.try_with(|context| context.get()).ok().flatten()?;
+    let read = |keys: &Mutex<HashMap<&'static str, [u8; 32]>>| {
+        keys.try_lock().ok()?.get(name).copied()
+    };
+    if isolated {
+        read(PROCESS_KEYS.get()?)
+    } else {
+        KEYS.try_with(read).ok().flatten()
     }
 }
 

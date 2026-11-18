@@ -17,7 +17,7 @@ pub async fn overview(
         let records = maintenance::storage::list(&query)?;
         let latest = maintenance::storage::latest()?;
         Ok(json!({
-            "tasks": [scheduled_tasks::task_by_id(maintenance::CREDENTIAL), scheduled_tasks::task_by_id(maintenance::MODEL)],
+            "tasks": scheduled_tasks::tasks_by_ids(&[maintenance::CREDENTIAL, maintenance::MODEL]),
             "latest": latest,
             "records": records,
             "retentionDays": maintenance::storage::RETENTION_DAYS,

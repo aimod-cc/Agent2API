@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto"
 import { rpc } from "./wire.mjs"
 import { observeUsageResponse } from "./usage-policy.mjs"
 import { observeLoginRequest, loginNetworkError } from "./login-network.mjs"
+import { cachedCatalogResponse } from "./catalog.mjs"
 
 export const scope = new AsyncLocalStorage()
 
@@ -43,11 +44,15 @@ async function perform(input, init = {}) {
   let encoded
   if (body !== undefined && body !== null) encoded = Buffer.from(await new Response(body).arrayBuffer()).toString("base64")
   const at = new URL(url)
+  const requestHeaders = headersOf(input, init)
+  const cached = await cachedCatalogResponse(at, method, requestHeaders, context)
+  signal.throwIfAborted()
+  if (cached) return cached
   const loginExchange = observeLoginRequest(context, at, method)
   const trace = context.chat?.origin === at.origin && context.chat?.pathname === at.pathname ? context.chat.trace : undefined
   const id = randomUUID()
   signal.throwIfAborted()
-  const opening = rpc("script.http.open", { id, url, method, headers: headersOf(input, init), body: encoded, proxy: context.proxy ?? null, trace, provider: context.provider })
+  const opening = rpc("script.http.open", { id, url, method, headers: requestHeaders, body: encoded, proxy: context.proxy ?? null, trace, provider: context.provider })
   const cancelOpening = () => { void rpc("script.http.close", { id }).catch(() => {}) }
   signal.addEventListener("abort", cancelOpening, { once: true })
   context.resources?.add(id)

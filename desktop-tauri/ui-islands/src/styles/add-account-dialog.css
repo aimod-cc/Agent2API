@@ -1,22 +1,5 @@
-/* 添加账号弹窗（两步：选提供商 → 登录 / 填凭证）：macOS 设置面板式排版。
- *
- * 与原实现的分工：既有那一套 `.add-provider-* / .add-form / .add-field / .sms-* /
- * .compact-login-*` 留在 ui/css/page-accounts-providers.css 里不动（它们是布局预算的
- * 原始记录，别的页面也可能引用），这里只做**作用域覆盖**：
- *
- *   `.acct-add-dialog`      —— 第 1 步（选提供商，1100px）
- *   `.acct-add-form-dialog` —— 第 2 步（登录 / 填凭证，540~620px）
- *
- * 为什么覆盖得了：本工程没有引入 Tailwind preflight，工具类都在 @layer 里，而这份
- * 样式是未分层的普通 CSS —— 未分层恒压过分层，加上选择器都是「两级以上」，因此不需要
- * !important。同一手法见 styles/accounts-settings-dialog.css。
- *
- * 这一版改的是排版节奏，不动任何 DOM id（登录引擎按 id 取节点，短信 / 网页登录 /
- * OAuth 那几条链路的契约原样保留）：
- *   · 分区名（选择提供商 / 添加方式 / 网页登录…）挪到方框外，框内各行以 1px 细线分隔；
- *   · 主按钮从各段落里挪进弹窗底栏（`.acct-add-foot-host`，底栏为空时整条收起）；
- *   · 间距收敛到 4 的倍数；字号四档（14 / 12.5 / 11.5 / 11）；强调色只剩主色。
- */
+/* 添加账号：选择提供商后，登录方式、凭证和可选设置使用统一布局。
+   旧表单的节点与底栏宿主保持常驻，登录引擎按 id 绑定的操作不能随折叠卸载。 */
 
 /* ── 外壳 ───────────────────────────────────────────────────── */
 
@@ -44,8 +27,9 @@
 /* ── 底栏：各段落的主按钮与说明都落在这里 ───────────────────── */
 
 .acct-add-form-dialog [data-slot='dialog-footer'] { padding: 11px 16px; background: var(--surface); border-color: var(--hairline); }
-/* 当前这一屏没有动作时整条收起（portal 卸载后宿主为空 → :has 判定） */
-.acct-add-form-dialog [data-slot='dialog-footer']:not(:has(.acct-add-foot-host > *)) { display: none; }
+/* 当前这一屏没有动作时保留返回入口。 */
+.acct-add-form-dialog .acct-add-foot { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 56px; padding: 12px 20px; }
+.acct-add-back { flex: none; padding: 0 4px; color: var(--text-3); font-size: 12px; }
 /* 底栏宿主与挂载点都要能吃满宽度：宿主是 createElement 出来的节点，
    挂在 .acct-add-foot-mount 里 —— 只写 width:100% 的话在 flex 父级里会退化成
    「内容宽度」，说明行就贴到按钮旁边去了 */
@@ -200,6 +184,14 @@
   text-align: left;
 }
 .acct-add-dialog .add-provider-card:hover { border-color: var(--primary); background: var(--primary-soft); }
+.acct-add-dialog .add-provider-card.is-sponsored,
+.acct-add-dialog .add-provider-card.is-sponsored:hover {
+  position: relative;
+  isolation: isolate;
+  border-color: #d6a13e;
+  background: linear-gradient(120deg, #d6a13e14, var(--surface) 72%);
+}
+.acct-add-dialog .add-provider-card.is-sponsored:hover { border-color: #e8bf65; background: color-mix(in srgb, #d6a13e 12%, var(--surface)); }
 .acct-add-dialog .add-provider-card:focus-visible { box-shadow: var(--ring); }
 .acct-add-dialog .add-provider-card.is-new,
 .acct-add-dialog .add-provider-card.is-new:hover { border-style: dashed; background: transparent; }
@@ -319,6 +311,67 @@
   gap: 6px;
 }
 .acct-add-form-dialog .add-group-box > div.border-l-2 > span { font-size: 11.5px; color: var(--text-2); }
+
+/* 表单层使用开放分区；底栏和内部确认弹窗仍由各自组件控制。 */
+.acct-add-form-dialog .acct-add-head-mark { width: 26px; height: 26px; border-radius: var(--radius-sm); }
+.acct-add-form-dialog .acct-add-head-mark img { width: 18px; height: 18px; }
+.acct-add-form-dialog > [data-slot='dialog-header'] { padding: 12px 44px 12px 20px; gap: 10px; }
+.acct-add-form-dialog > [data-slot='dialog-header'] > [data-slot='dialog-title'] { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; letter-spacing: 0; }
+.acct-add-form-dialog > [data-slot='dialog-body'] { padding: 16px 20px; gap: 16px; }
+.acct-add-form-dialog .add-provider-block.plugin-account-form { display: flex; gap: 16px; }
+.acct-add-form-dialog .add-group { margin-top: 16px; }
+.acct-add-form-dialog .add-group:first-child { margin-top: 0; }
+.acct-add-form-dialog .add-group-label { margin: 0 0 6px; font-size: 12px; font-weight: 500; color: var(--text-2); }
+.acct-add-form-dialog .add-group-box { display: flex; min-width: 0; flex-direction: column; gap: 12px; border: 0; border-radius: 0; overflow: visible; background: transparent; }
+.acct-add-form-dialog .add-group-box > * { border-top: 0; }
+.acct-add-form-dialog .add-group-box > *:where(:not([data-slot='segmented-control'], [data-slot='select-trigger'], [data-slot='input'], [data-slot='textarea'])) { padding: 0; }
+.acct-add-form-dialog .add-group-box > [data-slot='segmented-control'],
+.acct-add-form-dialog .add-group-box > [data-slot='select-trigger'],
+.acct-add-form-dialog .add-group-box > [data-slot='input'],
+.acct-add-form-dialog .add-group-box > [data-slot='textarea'] { margin: 0; max-width: 100%; }
+.acct-add-form-dialog .add-group-box > p,
+.acct-add-form-dialog .add-group-box > .detail { font-size: 12px; line-height: 1.6; color: var(--text-2); }
+.acct-add-form-dialog [data-slot='segmented-control'] { max-width: 100%; flex-wrap: wrap; gap: 2px; padding: 2px; border-radius: var(--radius-md); }
+.acct-add-form-dialog [data-slot='segmented-control'] [data-slot='segmented-item'] { height: auto; min-height: 28px; padding: 4px 12px; border-radius: var(--radius-sm); font-size: 12.5px; line-height: 1.4; white-space: normal; text-align: center; }
+.acct-add-form-dialog [data-slot='segmented-control'] [data-slot='segmented-thumb'] { border-radius: var(--radius-sm); }
+.acct-add-form-dialog .add-group-box > [data-slot='segmented-control'],
+.acct-add-form-dialog .plugin-login-methods { display: flex; width: 100%; }
+.acct-add-form-dialog .add-group-box > [data-slot='segmented-control'] [data-slot='segmented-item'],
+.acct-add-form-dialog .plugin-login-methods [data-slot='segmented-item'] { flex: 1 1 auto; justify-content: center; min-height: 28px; font-size: 12.5px; }
+.acct-add-form-dialog [data-slot='input']:not([type='file'], [type='hidden']),
+.acct-add-form-dialog [data-slot='input-group']:has(> input),
+.acct-add-form-dialog [data-slot='select-trigger'],
+.acct-add-form-dialog [data-slot='combobox-trigger'] { height: 30px; min-height: 30px; padding: 0 10px; border-radius: var(--radius-md); font-size: 12.5px; }
+.acct-add-form-dialog [data-slot='input-group']:has(> input) { padding: 0; }
+.acct-add-form-dialog [data-slot='input-group'] > input[data-slot='input-group-control'] { height: 28px; min-height: 0; font-size: 12.5px; }
+.acct-add-form-dialog .plugin-login-method-section,
+.acct-add-form-dialog .plugin-login-browser,
+.acct-add-form-dialog .plugin-login-field { gap: 6px; }
+.acct-add-form-dialog .plugin-login-content,
+.acct-add-form-dialog .plugin-login-fields,
+.acct-add-form-dialog .plugin-login-enrollment { gap: 12px; }
+.acct-add-form-dialog .plugin-login-field > [data-slot='label'],
+.acct-add-form-dialog .plugin-login-field-label > [data-slot='label'],
+.acct-add-form-dialog .plugin-login-instructions { font-size: 12.5px; }
+.acct-add-form-dialog .plugin-login-instructions { line-height: 1.6; }
+.acct-add-form-dialog .plugin-login-browser-fixed { min-height: 30px; padding: 4px 10px; border-radius: var(--radius-md); font-size: 12.5px; }
+.acct-add-form-dialog .plugin-login-options-trigger { min-height: 36px; padding: 8px 0; }
+.acct-add-form-dialog .plugin-login-options-content { gap: 12px; padding: 4px 0 12px; }
+.acct-add-form-dialog .plugin-login-options-content .acct-proxy-form { gap: 0; padding: 0; }
+.acct-add-form-dialog .plugin-login-local-scope { gap: 8px; padding: 8px 12px; }
+.acct-add-form-dialog .plugin-login-textarea { min-height: 120px; padding: 10px; border-radius: var(--radius-md); font-size: 12px; line-height: 1.6; }
+.acct-add-form-dialog .plugin-login-reveal { font-size: 12px; }
+.acct-add-form-dialog [data-slot='button']:not([data-slot='dialog-close']) { height: 30px; min-height: 30px; font-size: 12.5px; }
+.acct-add-form-dialog [data-slot='button'].plugin-login-options-trigger { height: auto; min-height: 36px; font-size: 12px; }
+.acct-add-form-dialog .acct-add-foot-host { justify-content: flex-end; }
+.acct-add-form-dialog .acct-add-foot-slot { justify-content: flex-end; }
+.acct-add-form-dialog .acct-add-foot-note:empty { display: none; }
+
+@media (max-width: 720px) {
+  .acct-add-form-dialog > [data-slot='dialog-header'] { padding-left: 16px; }
+  .acct-add-form-dialog > [data-slot='dialog-body'] { padding: 16px; }
+  .acct-add-form-dialog .acct-add-foot { gap: 8px; padding: 12px 16px; }
+}
 
 /* 窄窗口：正文两侧收窄、选提供商那一屏的搜索框换行、表单标签列变窄 */
 @media (max-width: 900px) {

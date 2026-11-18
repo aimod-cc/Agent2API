@@ -63,6 +63,19 @@ pub fn shim_js() -> &'static str {
     } catch (e) { /* 老浏览器 / 被禁用：留着标记只是多一次放行，不影响正确性 */ }
   })();
 
+  var MANAGEMENT_SESSION_CHANGE = 'wb:management-session-changed';
+  var managementGeneration = 0;
+  window.addEventListener(MANAGEMENT_SESSION_CHANGE, function () {
+    managementGeneration += 1;
+    if (currentFlow && currentFlow.managed) {
+      // 原 flow 不属于新管理来源；只废弃本地资格，不查询、取消或重发给新会话。
+      currentFlow.sourceLost = true;
+      closeWebOverlay(true);
+      loginActive = false; loginProvider = ''; emitLogin();
+    }
+  });
+  function notifyManagementSessionChanged() { window.dispatchEvent(new Event(MANAGEMENT_SESSION_CHANGE)); }
+
   // ── API Key 的存取 ────────────────────────────────────────
   var KEY_STORAGE = 'agent2api.webKey';
   function readStoredKey() {
@@ -70,7 +83,9 @@ pub fn shim_js() -> &'static str {
   }
   var apiKey = readStoredKey();
   function storeKey(value) {
+    var changed = value !== apiKey;
     apiKey = value;
+    if (changed) notifyManagementSessionChanged();
     try {
       if (value) localStorage.setItem(KEY_STORAGE, value);
       else localStorage.removeItem(KEY_STORAGE);
@@ -127,6 +142,8 @@ pub fn shim_js() -> &'static str {
   }
 
   function storePanelAuth(access, refresh) {
+    // 只通知当前真实变更；凭据仍由原存储单点保管，不进入flow或事件。
+    notifyManagementSessionChanged();
     try {
       localStorage.setItem(PANEL_AUTH, JSON.stringify({
         access: access, refresh: refresh, expiresAt: panelExpiresAt || currentExpiry(),
@@ -134,9 +151,13 @@ pub fn shim_js() -> &'static str {
     } catch (e) { /* 隐私模式等：留在本次调用链即可 */ }
   }
   function clearPanelAuth() {
+    notifyManagementSessionChanged();
     panelExpiresAt = 0;
     try { localStorage.removeItem(PANEL_AUTH); } catch (e) { /* 无害 */ }
   }
+  window.addEventListener('storage', function (event) {
+    if (event.key === KEY_STORAGE || event.key === PANEL_AUTH || event.key === null) notifyManagementSessionChanged();
+  });
 
   // ── 覆盖层（Key 输入 / 链接兜底 / 粘贴回调）：原生 DOM，界面样式不依赖 ──
   // options（可选）：
@@ -674,10 +695,39 @@ pub fn shim_js() -> &'static str {
 
   // ── HTTP 调用：信封解包与桌面 gateway::unwrap_envelope 对齐 ──
   async function httpCall(method, path, body, retried, selectedKey) {
+    var loginOwner = currentFlow;
+    var requestGeneration = managementGeneration;
     // 到期前先把令牌换掉：这一步让「access 过期 → 401 → 续期」不再发生，
     // 也就没有那条每 2 小时一次的 401（见 `ensureFreshSession`）。
     // 只在首轮做：重试那一趟（retried=true）刚刚续过期，再判一次纯属多余。
     if (!retried) await ensureFreshSession();
+    var requestMethod = String(method).toUpperCase();
+    var requestPath = '';
+    try { requestPath = new URL(path, window.location.href).pathname; } catch (e) { /* 交给原请求处理无效路径 */ }
+    // 权限确认只允许用户主动提交，管理会话或 Key 恢复不能重发这条 PATCH。
+    var noAuthReplay = requestMethod === 'PATCH' && requestPath === '/api/plugins/permissions';
+    // 覆盖具名回调桥和动态交互的直接 api_request；登录材料只发一次，不因 401 重放。
+    var sensitiveLogin = requestMethod === 'POST' && (requestPath.indexOf('/api/session/login/') === 0 || requestPath === '/api/accounts'
+      || /^\/api\/accounts\/[^/]+\/credentials\/cline-free$/.test(requestPath));
+    noAuthReplay = noAuthReplay || sensitiveLogin || requestPath.indexOf('/api/plugins/desktop-import/chatglm/') === 0
+      || requestPath.indexOf('/api/plugins/enrollment/') === 0
+      || requestMethod === 'POST' && (requestPath === '/api/accounts/refresh' || requestPath === '/api/accounts/refresh-expiring'
+        || requestPath === '/api/accounts/checkin' || requestPath === '/api/checkin-activity'
+        || requestPath === '/api/plugins/tasks/run' || requestPath === '/api/travel-schedule/run'
+        || requestPath.endsWith('/growth/travel') || requestPath.endsWith('/growth/task') || requestPath.endsWith('/growth/school')
+        || requestPath.endsWith('/campaigns/claim') || requestPath.endsWith('/campaigns/redeem')
+        || requestPath.endsWith('/onboarding/claim'));
+    var managedRead = requestMethod === 'GET' && loginOwner && loginOwner.managed
+      && (requestPath === '/api/session/login/wait' || requestPath === '/api/session/login/interaction');
+    if (sensitiveLogin || managedRead) retried = true;
+    if (requestGeneration !== managementGeneration && (noAuthReplay || managedRead)) {
+      throw new Error('管理会话已变化，本次请求未重发，请重新读取状态。');
+    }
+    if (loginOwner && loginOwner.managed && requestPath.indexOf('/api/session/login/') === 0) {
+      checkManagedFlow(loginOwner, requestPath === '/api/session/login/cancel');
+      if (requestPath === '/api/session/login/interaction' && (loginOwner.readOnlyOnly || loginOwner.saved === null
+        || loginOwner.saved === true || loginOwner.phase !== 'waiting')) throw new Error(MANAGED_SAVE_UNKNOWN);
+    }
     var headers = { 'Accept': 'application/json' };
     if (apiKey) headers['x-api-key'] = apiKey;
     // 面板会话的头部回退（见 PANEL_AUTH 段）：有存令牌就带上；
@@ -708,27 +758,35 @@ pub fn shim_js() -> &'static str {
       throw new Error('无法连接网关：' + (error && error.message ? error.message : error));
     }
     var text = await response.text();
+    if (requestGeneration !== managementGeneration && (noAuthReplay || managedRead)) {
+      throw new Error('管理会话已变化，本次请求未重发，请重新读取状态。');
+    }
+    if (loginOwner && loginOwner.managed && requestPath.indexOf('/api/session/login/') === 0) {
+      checkManagedFlow(loginOwner, requestPath === '/api/session/login/cancel');
+    }
     if (response.status === 401 && !retried) {
-      // 按错误类型分流。panel_login_required：管理员已注册、要登录 ——
-      // 先用长效 refresh 静默换新（access 过期时用户无感），不行再整页
-      // 跳独立登录页；其余 401 = 未配管理员的部署，弹 Key 框兜底。
+      // 只有管理鉴权错误才恢复会话或询问 Key；上游账号的 401 不改变面板登录。
       var probe = null;
       try { probe = JSON.parse(text); } catch (e) { /* 非 JSON */ }
       var errorType = probe && probe.error && probe.error.type;
       if (errorType === 'panel_login_required') {
         var refreshed = await tryRefresh();
-        if (refreshed) return httpCall(method, path, body, true, selectedKey);
-        // 续期失败 = 会话链真的没了：清掉本地令牌再跳登录页，
-        // 否则下次进来还带着死 token，永远是同一轮失败。
-        clearPanelAuth();
-        window.location.href = '/login';
-        // 页面即将整页跳转，返回一个挂起的承诺占位
-        return new Promise(function () {});
-      }
-      var key = selectedKey === undefined ? await askForKey() : null;
-      if (key) {
-        storeKey(key);
-        return httpCall(method, path, body, true, selectedKey);
+        if (refreshed) {
+          if (!noAuthReplay) return httpCall(method, path, body, true, selectedKey);
+        } else {
+          // 续期失败 = 会话链真的没了：清掉本地令牌再跳登录页，
+          // 否则下次进来还带着死 token，永远是同一轮失败。
+          clearPanelAuth();
+          window.location.href = '/login';
+          // 页面即将整页跳转，返回一个挂起的承诺占位
+          return new Promise(function () {});
+        }
+      } else if (errorType === 'invalid_api_key') {
+        var key = selectedKey === undefined ? await askForKey() : null;
+        if (key) {
+          storeKey(key);
+          if (!noAuthReplay) return httpCall(method, path, body, true, selectedKey);
+        }
       }
     }
     var payload;
@@ -839,6 +897,9 @@ pub fn shim_js() -> &'static str {
       if (data && typeof data.accessToken === 'string' && data.accessToken
         && typeof data.refreshToken === 'string' && data.refreshToken) {
         storePanelAuth(data.accessToken, data.refreshToken);
+      } else {
+        // HttpOnly cookie 模式成功换会话也必须换代；不能因为JS拿不到令牌漏通知。
+        notifyManagementSessionChanged();
       }
       return true;
     } catch (e) {
@@ -853,8 +914,9 @@ pub fn shim_js() -> &'static str {
     if (stateEmitTimer) return;
     stateEmitTimer = setTimeout(async function () {
       stateEmitTimer = null;
+      if (window.wbApp && window.wbApp.currentPage === 'accounts') return;
       try {
-        var next = await call('GET', '/api/session');
+        var next = await call('GET', '/api/session?accounts=index');
         stateListeners.forEach(function (cb) { try { cb(next); } catch (e) { console.warn(e); } });
       } catch (e) { /* 面板关闭中的正常失败 */ }
     }, 300);
@@ -878,6 +940,11 @@ pub fn shim_js() -> &'static str {
       instructions: flow ? [flow.instructions].concat(flow.notices || []).filter(Boolean).join('\n') : '',
       hint: flow ? flow.hint || '' : '',
       state: flow && flow.dynamic && flow.state ? flow.state : null,
+      managedLogin: !!(flow && flow.managed), methodIndex: flow && flow.started ? flow.started.methodIndex : undefined,
+      remainingMs: flow && flow.managed ? Math.max(0, flow.monotonicDeadline - performance.now()) : undefined,
+      timeoutMs: flow ? flow.timeoutMs : undefined,
+      phase: flow && flow.managed ? flow.phase : undefined,
+      saved: flow && flow.managed ? flow.saved : undefined,
       manualCallback: !!(flow && flow.dynamic && flow.manualCallback),
       callbackInput: flow && flow.dynamic ? flow.callbackInput : 'url',
     };
@@ -904,8 +971,104 @@ pub fn shim_js() -> &'static str {
     + '授权完成后的回调会落到你本机而不是网关 —— 请复制浏览器地址栏里的'
     + '完整回调地址，粘回面板重试。';
 
+  var MANAGED_SAVE_UNKNOWN = '账号保存未确认，请查询本次状态；不会再次保存。';
+  function managedLoginText(key) {
+    return window.wbI18n && typeof window.wbI18n.t === 'function' ? window.wbI18n.t(key) : key;
+  }
+  function managedObject(value) { return !!value && typeof value === 'object' && !Array.isArray(value); }
+  function managedId(value, limit) {
+    return typeof value === 'string' && value.length > 0 && value.length <= (limit || 512)
+      && value.trim() === value && !/[\u0000-\u001f\u007f]/.test(value);
+  }
+  function checkManagedFlow(flow, closing) {
+    if (flow.sourceLost || flow.managementGeneration !== managementGeneration) {
+      throw new Error('管理会话已变化，本次登录资格已失效；不会继续查询或重发原流程。');
+    }
+    if (flow.readOnlyClosed) {
+      var unknown = new Error(MANAGED_SAVE_UNKNOWN); unknown.loginStateReadOnly = true; throw unknown;
+    }
+    if (currentFlow !== flow || flow.canceled && !closing) throw canceledError();
+  }
+  function managedWaitResult(wait, flow) {
+    checkManagedFlow(flow);
+    if (!managedObject(wait) || wait.managedLogin !== true || wait.provider !== flow.provider || wait.flow !== flow.state
+      || wait.ok === false || wait.success === false || wait.methodIndex !== flow.methodIndex || !Number.isSafeInteger(wait.methodIndex) || wait.methodIndex < 0
+      || (wait.saved !== null && typeof wait.saved !== 'boolean')
+      || (wait.pending !== undefined && typeof wait.pending !== 'boolean')
+      || (wait.done !== undefined && typeof wait.done !== 'boolean')) throw new Error(MANAGED_SAVE_UNKNOWN);
+    var phase = wait.phase;
+    var terminal = ['saved', 'failed', 'canceled', 'unconfirmed'].indexOf(phase) >= 0;
+    if (!terminal && phase !== 'waiting' && phase !== 'saving') throw new Error(MANAGED_SAVE_UNKNOWN);
+    var expectedSaved = phase === 'saved' ? true : phase === 'saving' || phase === 'unconfirmed' ? null : false;
+    if (wait.saved !== expectedSaved || (terminal ? wait.done !== true || wait.pending === true
+      : wait.done === true || wait.pending !== true)) throw new Error(MANAGED_SAVE_UNKNOWN);
+    ['instructions', 'hint', 'error'].forEach(function (key) {
+      if (wait[key] !== undefined && wait[key] !== null && (typeof wait[key] !== 'string' || wait[key].length > 8192)) {
+        throw new Error(MANAGED_SAVE_UNKNOWN);
+      }
+    });
+    if (wait.error && (phase === 'waiting' || phase === 'saving' || phase === 'saved')) throw new Error(MANAGED_SAVE_UNKNOWN);
+    var session = null;
+    if (phase === 'saved') {
+      var summary = wait.session;
+      if (!managedObject(summary) || summary.provider !== flow.provider
+        || (!managedId(summary.accountUid) && !managedId(summary.accountId))) throw new Error(MANAGED_SAVE_UNKNOWN);
+      ['accountUid', 'accountId'].forEach(function (key) {
+        if (summary[key] !== undefined && summary[key] !== null && !managedId(summary[key])) throw new Error(MANAGED_SAVE_UNKNOWN);
+      });
+      session = { provider: flow.provider };
+      ['accountUid', 'accountId', 'nickname', 'edition', 'warning'].forEach(function (key) {
+        if (typeof summary[key] === 'string' && summary[key].length <= (key === 'warning' ? 8192 : 512)) session[key] = summary[key];
+      });
+      if (typeof summary.proxySaved === 'boolean') session.proxySaved = summary.proxySaved;
+    }
+    return { managedLogin: true, provider: flow.provider, flow: flow.state, methodIndex: flow.methodIndex,
+      phase: phase, saved: wait.saved, pending: wait.pending, done: wait.done, error: wait.error,
+      instructions: wait.instructions, hint: wait.hint, session: session };
+  }
+  async function queryUnconfirmedManagedWait(flow) {
+    checkManagedFlow(flow);
+    flow.readOnlyOnly = true;
+    flow.phase = 'unconfirmed'; flow.saved = null; flow.instructions = ''; flow.hint = MANAGED_SAVE_UNKNOWN;
+    emitLogin();
+    var decision = await ensureOverlay(managedLoginText('保存未确认'), '<div>' + escapeHtml(managedLoginText(MANAGED_SAVE_UNKNOWN)) + '</div>',
+      managedLoginText('查询本次登录状态（只读）'), { cancelText: managedLoginText('关闭') });
+    checkManagedFlow(flow);
+    if (decision === null || decision === DISPOSED) {
+      var abandoned = new Error(MANAGED_SAVE_UNKNOWN);
+      abandoned.loginStateReadOnly = true;
+      throw abandoned;
+    }
+    // 用户主动查询只进入下一次原 flow GET；没有 start/callback/interaction/save 的补偿分支。
+  }
+  async function pollManagedWait(flow) {
+    while (true) {
+      checkManagedFlow(flow);
+      var result;
+      try {
+        result = managedWaitResult(await call('GET', '/api/session/login/wait?state=' + encodeURIComponent(flow.state)), flow);
+      } catch (error) {
+        checkManagedFlow(flow);
+        await queryUnconfirmedManagedWait(flow);
+        continue;
+      }
+      flow.phase = result.phase; flow.saved = result.saved;
+      if (result.phase === 'saved' && result.saved === true && result.done === true && result.session) return result;
+      if (result.phase === 'canceled') throw canceledError();
+      if (result.phase === 'failed') throw new Error(result.error || '托管登录未确认保存账号，未宣布登录成功');
+      if (result.phase === 'unconfirmed') { await queryUnconfirmedManagedWait(flow); continue; }
+      flow.instructions = result.phase === 'saving' ? '' : result.instructions || '';
+      flow.hint = result.phase === 'saving' ? '正在保存账号，保存结果尚未确认' : result.hint || '';
+      if (flow.readOnlyOnly && result.phase !== 'saving') { await queryUnconfirmedManagedWait(flow); continue; }
+      emitLogin();
+      if (performance.now() >= flow.monotonicDeadline) { await queryUnconfirmedManagedWait(flow); continue; }
+      await sleep(flow.pollIntervalMs);
+    }
+  }
+
   async function pollWait(flow) {
-    while (Date.now() < flow.deadline) {
+    if (flow.managed) return pollManagedWait(flow);
+    while (flow.managed ? performance.now() < flow.monotonicDeadline : Date.now() < flow.deadline) {
       if (currentFlow !== flow || flow.canceled) throw canceledError();
       var wait;
       try {
@@ -915,8 +1078,20 @@ pub fn shim_js() -> &'static str {
         throw error;
       }
       if (currentFlow !== flow || flow.canceled) throw canceledError();
+      if (wait && wait.managedLogin === true) {
+        // 不能将意外 managed 回包降级成旧 done+summary；原启动来源不相符只报未知。
+        flow.managed = true;
+        throw new Error(MANAGED_SAVE_UNKNOWN);
+      }
+      if (flow.managed && performance.now() >= flow.monotonicDeadline) throw new Error('托管登录已过期，请重新发起');
       if (wait && wait.done === true && !wait.pending) {
-        if (wait.error) throw asError(wait.error);
+        if (wait.error) {
+          var failure = asError(wait.error);
+          if (wait.diagnostic && typeof wait.diagnostic === 'object') failure.diagnostic = wait.diagnostic;
+          throw failure;
+        }
+        if (flow.managed && (!wait.session || wait.session.provider !== flow.provider
+          || !(wait.session.accountUid || wait.session.accountId))) throw new Error('登录桥返回了空会话，无法确认账号已添加');
         return wait.session == null ? {} : wait.session;
       }
       if (wait) {
@@ -934,7 +1109,7 @@ pub fn shim_js() -> &'static str {
     var timeoutHint = flow.callbackInput === 'code'
       ? '：请重新发起，并按此方式要求粘贴本人已授权的令牌或一次性 code。'
       : MANUAL_CALLBACK_TIMEOUT_HINT;
-    throw new Error('登录等待超时（5 分钟）' + (flow.manualCallback ? timeoutHint : ''));
+    throw new Error('登录等待超时（' + Math.round((flow.timeoutMs || 300000) / 60000) + ' 分钟）' + (flow.manualCallback ? timeoutHint : ''));
   }
 
   /** 取消信号：用 `canceled` 标记与普通失败区分（界面据此提示「已取消」而非报错） */
@@ -955,7 +1130,9 @@ pub fn shim_js() -> &'static str {
     var dynamic = config.dynamic === true;
     var popup = null;
     var flow = {
-      state: '', canceled: false, dynamic: dynamic, mode: config.mode || 'embedded', edition: config.edition || 'cn',
+      state: '', provider: provider, canceled: false, dynamic: dynamic, managed: false,
+      managementGeneration: managementGeneration, sourceLost: false, phase: undefined, saved: undefined,
+      mode: config.mode || 'embedded', edition: config.edition || 'cn',
       instructions: '', hint: '', notices: [], manualCallback: false, callbackInput: 'url', started: null, callbackTargets: [],
       pollIntervalMs: 3000, deadline: 0,
     };
@@ -971,6 +1148,7 @@ pub fn shim_js() -> &'static str {
     }
     try {
       // 工厂延后到全局锁生效后执行，避免第二次调用先 POST 再被锁拒绝。
+      var startedAt = performance.now();
       var started = await (typeof startRequest === 'function' ? startRequest(flow) : startRequest);
       flow.started = started || {};
       flow.state = String(started && (started.state || started.flow) || '');
@@ -981,6 +1159,17 @@ pub fn shim_js() -> &'static str {
       if (authUrl == null) authUrl = '';
       if (typeof authUrl !== 'string') throw new Error('网关返回的登录链接格式无效');
       var hasUrl = !!authUrl.trim();
+      flow.managed = started.managedLogin === true;
+      if (flow.managed) {
+        checkManagedFlow(flow);
+        flow.phase = 'waiting'; flow.saved = false;
+      }
+      if (flow.managed && (started.provider !== provider || started.flow !== flow.state || hasUrl
+        || started.browserMode !== 'none' || started.manualCallback !== false || started.callbackInput !== 'url'
+        || !Number.isSafeInteger(started.methodIndex) || started.methodIndex !== flow.methodIndex
+        || typeof started.remainingMs !== 'number' || !Number.isFinite(started.remainingMs) || started.remainingMs <= 0)) {
+        throw new Error('托管登录启动信息无效，请重新发起');
+      }
       flow.manualCallback = dynamic && typeof started.manualCallback === 'boolean' ? started.manualCallback
         : dynamic ? !!(flow.method && flow.method.manualCallback) : legacyNeedsManualCallback(provider);
       flow.callbackInput = dynamic && flow.manualCallback
@@ -999,7 +1188,15 @@ pub fn shim_js() -> &'static str {
       // 插件 pollIntervalMs=0 是回调型，不代表关闭网关 /wait；不用于猜 manualCallback。
       flow.pollIntervalMs = Number.isFinite(interval) && interval > 0
         ? Math.max(1000, Math.min(30000, interval)) : 3000;
-      flow.deadline = Date.now() + 5 * 60 * 1000;
+      var timeout = Number(started.timeoutMs);
+      flow.timeoutMs = Number.isFinite(timeout) && timeout > 0
+        ? Math.max(60000, Math.min(15 * 60 * 1000, timeout)) : 5 * 60 * 1000;
+      flow.deadline = Date.now() + flow.timeoutMs;
+      if (flow.managed) {
+        flow.monotonicDeadline = startedAt + Math.min(started.remainingMs, flow.timeoutMs);
+        flow.manualCallback = false;
+        if (performance.now() >= flow.monotonicDeadline) throw new Error('托管登录已过期，请重新发起');
+      }
       if (hasUrl) {
         if (!dynamic) authUrl = buildRaccoonWebAuthUrl(provider, flow.state, authUrl);
         flow.callbackTargets = loginCallbackTargets(authUrl);
@@ -1045,7 +1242,7 @@ pub fn shim_js() -> &'static str {
         var quiet = flow.externalCancel || (error && error.silent);
         return quiet ? { canceled: true, silent: true } : { canceled: true };
       }
-      if (flow.state) {
+      if (flow.state && !flow.managed && !(error && error.loginStateReadOnly)) {
         call('POST', '/api/session/login/cancel', { state: flow.state }).catch(function () {});
       }
       throw error;
@@ -1455,39 +1652,24 @@ pub fn shim_js() -> &'static str {
     platform: 'web',
 
     // ── 会话 ──
-    getState: function () { return call('GET', '/api/session'); },
+    getState: function () { return call('GET', '/api/session?accounts=index'); },
     startLogin: function (edition, mode, provider, socialRestore, options) {
-      var target = String(provider || 'workbuddy').trim();
-      var dynamic = hasMethodIndex(options);
+      var target = String(provider || '').trim();
+      if (!target || !hasMethodIndex(options)) {
+        return Promise.reject(new Error('请从添加账号页面选择当前提供商声明的登录方式；旧版默认登录入口已停止支持。'));
+      }
       if (target === 'monkeycode' || target === 'monkeycode-intl') {
         return Promise.reject(new Error('MonkeyCode 自动网页登录仅限桌面端；浏览器面板请登录对应官网后粘贴 session。'));
       }
-      // 只有旧小浣熊入口才改 redirect/预检；动态方法不能被 provider 特判覆盖。
-      if (!dynamic && target === 'raccoon') {
-        var problem = raccoonCallbackOriginProblem();
-        if (problem) return reportRaccoonCallbackProblem(problem);
-      }
       return runLoginFlow(target, async function (flow) {
-        if (dynamic) flow.method = await selectedLoginMethod(target, options);
+        flow.methodIndex = options.methodIndex;
+        flow.method = await selectedLoginMethod(target, options);
         if (flow.canceled) throw canceledError();
-        var body = { edition: edition || 'cn', provider: target };
-        // 不压缩第四参 socialRestore；第五参对象保持原字段/原值（含 proxy:null）。
-        if (options !== undefined) body.options = options;
-        if (dynamic) {
-          body.mode = 'external';
-          body.socialRestore = socialRestore === true;
-          // 兼容当前 API 的平铺读取；options 字段也完整保留给新端点。
-          body.methodIndex = options.methodIndex;
-          if (Object.prototype.hasOwnProperty.call(options, 'inputs')) body.inputs = options.inputs;
-          if (Object.prototype.hasOwnProperty.call(options, 'proxy')) body.proxy = options.proxy;
-        } else if (options && Object.prototype.hasOwnProperty.call(options, 'proxy')) {
-          // 旧入口（内置表单的网页登录）也能带登录代理：网关的非动态分支读的
-          // 就是顶层 `proxy`（见 api::session 的 legacy_proxy）。少了这一句，
-          // 无头服务器上选了代理也仍然直连。
-          body.proxy = options.proxy;
-        }
+        var body = { provider: target, mode: 'external', methodIndex: options.methodIndex, locale: options.locale || 'zh-CN' };
+        if (Object.prototype.hasOwnProperty.call(options, 'inputs')) body.inputs = options.inputs;
+        if (Object.prototype.hasOwnProperty.call(options, 'proxy')) body.proxy = options.proxy;
         return call('POST', '/api/session/login/start', body);
-      }, { dynamic: dynamic, mode: mode || 'embedded', edition: edition || 'cn' });
+      }, { dynamic: true, mode: mode || 'embedded', edition: edition || 'cn' });
     },
     submitLoginCallback: function (state, callbackUrl) {
       return call('POST', '/api/session/login/callback', {
@@ -1498,7 +1680,25 @@ pub fn shim_js() -> &'static str {
     getLoginState: function () {
       return Promise.resolve(loginSnapshot());
     },
-    cancelLogin: async function () {
+    cancelLogin: async function (expectedState) {
+      if (expectedState !== undefined) {
+        var owner = currentFlow;
+        var targetState = String(expectedState);
+        if (owner && owner.managed && (owner.state !== targetState || owner.sourceLost
+          || owner.managementGeneration !== managementGeneration)) {
+          throw new Error('管理会话已变化，本次登录资格已失效；不会继续查询或重发原流程。');
+        }
+        if (owner && owner.state === targetState) {
+          if (owner.managed && (owner.saved === null || owner.saved === true || owner.phase === 'unconfirmed')) {
+            owner.readOnlyClosed = true; closeWebOverlay(true); loginActive = false; loginProvider = ''; emitLogin();
+            return false;
+          }
+          owner.canceled = true; owner.externalCancel = true;
+          closeWebOverlay(true);
+          loginActive = false; loginProvider = ''; emitLogin();
+        }
+        return call('POST', '/api/session/login/cancel', { state: targetState });
+      }
       // 桌面壳只记一个活动登录；网页端由本状态机驱动。
       //
       // 三步缺一不可（早先只做了第一步，于是「取消等待」之后粘贴回调那层
@@ -1511,6 +1711,16 @@ pub fn shim_js() -> &'static str {
       //
       // 取消来源在这里统一登记（externalCancel）：界面那一侧在发起取消时
       // 自己已经 toast 过一次，流程这边不要再重复提示。
+      if (currentFlow && currentFlow.managed && (currentFlow.sourceLost
+        || currentFlow.managementGeneration !== managementGeneration)) {
+        closeWebOverlay(true); loginActive = false; loginProvider = ''; emitLogin();
+        return false;
+      }
+      if (currentFlow && currentFlow.managed && (currentFlow.saved === null
+        || currentFlow.saved === true || currentFlow.phase === 'unconfirmed')) {
+        currentFlow.readOnlyClosed = true; closeWebOverlay(true); loginActive = false; loginProvider = ''; emitLogin();
+        return false;
+      }
       var wasActive = loginActive;
       var state = currentFlow && currentFlow.state;
       if (currentFlow) { currentFlow.canceled = true; currentFlow.externalCancel = true; }
@@ -1574,35 +1784,47 @@ pub fn shim_js() -> &'static str {
       return call('POST', '/api/accounts/' + encodeURIComponent(String(accountId || ''))
         + '/zcode-claim/preview');
     },
-    zcodeClaim: function (accountId, planId, captchaVerifyParam, captchaRegion) {
-      return call('POST', '/api/accounts/' + encodeURIComponent(String(accountId || ''))
-        + '/zcode-claim', {
-        planId: planId ? String(planId) : '',
+    zcodeClaim: async function (accountId, planOrPayload, captchaVerifyParam, captchaRegion) {
+      var body = planOrPayload && typeof planOrPayload === 'object' && !Array.isArray(planOrPayload) ? {
+        provider: planOrPayload.provider, accountId: planOrPayload.accountId, configId: planOrPayload.configId,
+        planId: planOrPayload.planId, captchaVerifyParam: planOrPayload.captchaVerifyParam,
+        captchaRegion: planOrPayload.captchaRegion,
+      } : {
+        planId: planOrPayload ? String(planOrPayload) : '',
         captchaVerifyParam: String(captchaVerifyParam || ''),
         captchaRegion: captchaRegion ? String(captchaRegion) : '',
-      });
+      };
+      await ensureFreshSession();
+      return httpCall('POST', '/api/accounts/' + encodeURIComponent(String(accountId || ''))
+        + '/zcode-claim', body, true);
     },
     // ── ZCode 活动套餐通道的验证码令牌池（见 api/zcode_captcha.rs）──────
     // 与上面三条**不是一回事**：那三条服务「领套餐」（用户动作）；这两条服务
-    // **转发** —— 活动套餐的推理端点每条请求都要一个当次铸的令牌，令牌只能由
-    // 界面静默铸造后推进池子（唯一调用方 ui/zcode-captcha-pool.js）。
-    //
-    // ★ 这两条**必须**在这里给 web 端实现，理由就是本模块存在的理由：铸造器
-    // 只认 `window.workbuddyDesktop`，桌面端由 bridge.rs 注入、headless 由这里
-    // 注入。早先只给了桌面端，于是 headless（Docker / 浏览器面板）下铸造器
-    // 每轮都读到「没有这个方法」→ 安静退让 → 池子永远是空的，活动套餐通道
-    // 整条不可用（Issue #163）。铸造本身仍发生在**浏览器**里（阿里云 SDK 跑在
-    // 页面上），所以 headless 只要有人开着面板页就能维持池子 —— 与桌面端一致。
-    zcodeClaimVerification: function (payload) {
+    // **转发** —— 模型票据只由用户主动验证后提交，不由后台定时生成。
+    // 查询无参时只是概览；实际验证必须绑定账号，WASM 提交保留完整配置绑定。
+    // 桌面壳和网页桥保持同一调用形状，具体验证码界面仍由主程序组件承载。
+    zcodeClaimVerification: async function (payload) {
+      if (payload && payload.action === 'complete') {
+        await ensureFreshSession();
+        return httpCall('POST', '/api/zcode/claim-verification', payload, true);
+      }
       return call('POST', '/api/zcode/claim-verification', payload);
     },
-    zcodeCaptchaStats: function () {
-      return call('GET', '/api/zcode/captcha');
+    zcodeCaptchaStats: function (accountId, provider) {
+      return call('GET', '/api/zcode/captcha' + toQuery({
+        accountId: accountId == null ? '' : String(accountId),
+        provider: provider == null ? '' : String(provider),
+      }));
     },
-    pushZcodeCaptchaTokens: function (tokens) {
-      return call('POST', '/api/zcode/captcha', {
-        tokens: Array.isArray(tokens) ? tokens : [],
-      });
+    pushZcodeCaptchaTokens: async function (payload) {
+      var body = Array.isArray(payload) ? { tokens: payload } : {
+        provider: payload && payload.provider, accountId: payload && payload.accountId,
+        configId: payload && payload.configId,
+        tokens: payload && Array.isArray(payload.tokens) ? payload.tokens.map(function (item) { return { param: item && item.param }; }) : [],
+      };
+      // 只在发送前维护管理会话；一次性票据遇到401也不能自动重放。
+      await ensureFreshSession();
+      return httpCall('POST', '/api/zcode/captcha', body, true);
     },
     onLoginState: function (callback) {
       loginListeners.add(callback);
@@ -1673,7 +1895,10 @@ pub fn shim_js() -> &'static str {
     deleteKey: function (id) { return call('DELETE', '/api/keys/' + encodeURIComponent(id)); },
 
     // ── 多账号 ──
-    getAccounts: function () { return call('GET', '/api/accounts'); },
+    getAccounts: function (query) { return call('GET', '/api/accounts' + toQuery(query)); },
+    queryAccounts: function (query) { return call('POST', '/api/accounts/query', query || {}); },
+    getAccountSelection: function (query) { return call('POST', '/api/accounts/selection', query || {}); },
+    getAccount: function (id) { return call('GET', '/api/accounts/' + encodeURIComponent(id)); },
     getAccountSorting: function () { return call('GET', '/api/accounts/sorting'); },
     saveAccountSorting: function (payload) { return call('PUT', '/api/accounts/sorting', payload || {}); },
     switchAccount: function (id) { return call('POST', '/api/accounts/current', { id: id }); },
@@ -1697,9 +1922,9 @@ pub fn shim_js() -> &'static str {
         direction: direction === 'down' ? 'down' : 'up',
       });
     },
-    clearRateLimits: function (id, model) {
+    clearRateLimits: function (id, model, includeProvider) {
       return call('POST', '/api/accounts/' + encodeURIComponent(id) + '/rate-limits/clear',
-        model ? { model: model } : {});
+        model ? { model: model } : { includeProvider: includeProvider === true });
     },
     batchAccounts: function (payload) {
       payload = payload || {};
@@ -1719,6 +1944,8 @@ pub fn shim_js() -> &'static str {
     },
 
     // ── 账号路由（与 bridge.rs 的同名方法成对，缺一边会报「桥接方法缺失」）──
+    getRoutingErrors: function () { return call('GET', '/api/routing/errors'); },
+    saveRoutingErrors: function (payload) { return call('PUT', '/api/routing/errors', payload); },
     getRoutingConfig: function () { return call('GET', '/api/routing'); },
     getRoutingWorkspace: function (model) { return call('GET', '/api/routing/workspace' + toQuery({ model: model })); },
     saveRoutingProfile: function (payload) { return call('PUT', '/api/routing/profile', payload || {}); },
@@ -1783,7 +2010,7 @@ pub fn shim_js() -> &'static str {
     },
     startBalanceQuery: function (id, replace) { return call('POST', '/api/accounts/usage/start', { id: id || null, replace: replace === true }); },
     cancelBalanceQuery: function (id, requestId) { return call('POST', '/api/accounts/usage/cancel', { id: id, requestId: requestId }); },
-    getBalancesSnapshot: function () { return call('GET', '/api/accounts/usage/snapshot'); },
+    getBalancesSnapshot: function (ids) { return Array.isArray(ids) ? call('POST', '/api/accounts/usage/snapshot', { ids: ids }) : call('GET', '/api/accounts/usage/snapshot'); },
     getAccountConnections: function () { return call('GET', '/api/accounts/connections'); },
     checkinAllAccounts: function (id) { return call('POST', '/api/accounts/checkin', id ? { id: id } : {}); },
     getCampaignRewards: function (id) {
@@ -1961,6 +2188,7 @@ pub fn shim_js() -> &'static str {
     // ── 软件更新（检查 / 下载 / 容器内更新；只有「跑安装程序」是桌面专有）──
     checkUpdate: function () { return invokeShell('check_update'); },
     getUpdateStatus: function () { return call('GET', '/api/update/status'); },
+    getAdvertisements: function () { return call('GET', '/api/advertisements'); },
     // 设置页「版本信息」：与桌面 bridge 的同名方法成对存在（两边必须一起加，
     // 少一边时那一半形态会报「桥接方法缺失」）。网页端没有壳侧的
     // package_info / WebView 版本，这里补的是**浏览器**那份：
@@ -1981,11 +2209,6 @@ pub fn shim_js() -> &'static str {
     // 「软件更新」的出网线路（null = 直连）：与桌面 bridge 对齐，面板下拉读写
     getUpdateProxy: function () { return call('GET', '/api/update/proxy'); },
     setUpdateProxy: function (payload) { return call('POST', '/api/update/proxy', payload); },
-    getGithubAccess: function () { return call('GET', '/api/update/github'); },
-    setGithubAccess: function (payload) { return call('POST', '/api/update/github', payload); },
-    // GitHub 令牌：读只报 {filled, origin}，写传 {token: '…' | null}
-    getUpdateToken: function () { return call('GET', '/api/update/token'); },
-    setUpdateToken: function (payload) { return call('POST', '/api/update/token', payload); },
     // 「加入 beta 版」：读只报 {enabled}，写传 {enabled: true|false}（与桌面 bridge
     // 逐字同形 —— 两侧接口名与签名必须一致，界面代码零改动地跑在两边）
     getUpdateBeta: function () { return call('GET', '/api/update/beta'); },
@@ -2020,6 +2243,10 @@ pub fn shim_js() -> &'static str {
     // 与桌面桥（src/bridge.rs 的 getDeveloperRoleCompat / saveDeveloperRoleCompat）
     // 同一映射：两边接口名与签名必须一致，界面代码零改动地跑在两边
     //（漏一侧的症状见 getClineHeaders 那段）。
+    getWebToolEmulation: function () { return call('GET', '/api/web-tool-emulation'); },
+    saveWebToolEmulation: function (enabled) {
+      return call('PUT', '/api/web-tool-emulation', { enabled: enabled === true });
+    },
     getDeveloperRoleCompat: function () { return call('GET', '/api/developer-role-compat'); },
     saveDeveloperRoleCompat: function (enabled) {
       return call('PUT', '/api/developer-role-compat', { developerRoleCompat: enabled === true });
@@ -2060,6 +2287,9 @@ pub fn shim_js() -> &'static str {
 
     // ── 系统提示词与内容拦截降级 ──
     getPrompt: function () { return call('GET', '/api/prompt'); },
+    getPromptRules: function () { return call('GET', '/api/prompt/rules'); },
+    savePromptRules: function (payload) { return call('PUT', '/api/prompt/rules', payload); },
+    previewPromptRules: function (payload) { return call('POST', '/api/prompt/rules/preview', payload); },
     savePrompt: function (payload) {
       payload = payload || {};
       return call('PUT', '/api/prompt', {
@@ -2346,12 +2576,13 @@ pub fn shim_js() -> &'static str {
     return result ? '?' + result : '';
   }
 
-  // 写类请求成功后重放一次状态（模拟桌面的 accounts:state-changed 推送）：
-  // 拦一层 call，只对管理 API 的非 GET 生效，/v1/* 与登录轮询不受影响。
+  // 查询接口也会使用 POST；只读请求不能触发写后状态通知。
   var rawCall = call;
   call = function (method, path, body) {
     var promise = rawCall(method, path, body);
-    if (method !== 'GET' && path.indexOf('/api/') === 0) {
+    var pathname = path.split('?')[0];
+    var reads = ['/api/accounts/query', '/api/accounts/selection', '/api/accounts/usage/snapshot'];
+    if (method !== 'GET' && method !== 'HEAD' && path.indexOf('/api/') === 0 && reads.indexOf(pathname) < 0) {
       promise.then(function () { emitStateSoon(); }, function () {});
     }
     return promise;

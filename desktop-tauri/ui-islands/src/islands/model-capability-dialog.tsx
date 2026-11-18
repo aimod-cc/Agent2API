@@ -85,6 +85,7 @@ function statusText(
   }
   if (custom) return t('未填写（下游按未声明处理）')
   if (!has) return t('上游未声明（下游会按不支持处理）')
+  if (source === 'gateway') return t('由网关模拟：非上游原生工具能力')
   return source === 'modelsdev'
     ? t('models.dev 补齐：对下游声明 {value}', { value: shown })
     : t('继承上游：{value}', { value: shown })
@@ -254,6 +255,14 @@ export function CapabilityDialog({ context, onClose }: { context: CapabilityCont
               </p>
             </div>
           ))}
+
+          {row.toolCallingMode ? (
+            <p className='text-xs leading-[1.65] text-subtle'>
+              {row.toolCallingMode === 'emulated'
+                ? t('此模型的工具调用由网关模拟，实际执行与权限确认由客户端负责。这里修改的只是能力声明，不会改变模拟设置。')
+                : t('网页工具模拟已关闭；修改能力声明不会开启实际适配')}
+            </p>
+          ) : null}
 
           {levelsInfo ? (
             <div className='rounded-md border border-border bg-surface-inset px-3 py-2.5 text-xs leading-[1.7] text-subtle'>

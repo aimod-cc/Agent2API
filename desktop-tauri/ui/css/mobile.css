@@ -509,7 +509,6 @@
     overflow-x: auto;
     max-width: 100%;
   }
-  .asst-msg.user .bubble { max-width: 100%; }
   .asst-msg.bot .md pre {
     white-space: pre-wrap;
     word-break: break-word;

@@ -11,6 +11,35 @@ type Permission = { pack: string; provider: string; id: string; available: boole
 type Payload = { requested: Permission[]; candidates: Candidate[]; grants: Record<string, Record<string, Grant>>; saved?: boolean }
 type Request = <T>(method: 'GET' | 'PATCH', path: string, body?: unknown) => Promise<T>
 
+function raccoonRefresh(candidate: Candidate): boolean {
+  return candidate.pack === 'agent2api-host' && candidate.id === 'desktop.refresh.raccoon.v1'
+}
+
+function localRefresh(candidate: Candidate): boolean {
+  return candidate.pack === 'agent2api-host' && candidate.id.startsWith('desktop.refresh.')
+}
+
+function deviceVerification(candidate: Candidate): boolean {
+  return candidate.pack === 'agent2api-host' && candidate.id === 'desktop.qoder-umid.v1'
+}
+
+function candidateLabel(candidate: Candidate, t: PluginTranslate): string {
+  if (candidate.pack !== 'agent2api-host') return `${candidate.pack} ${candidate.version}`
+  if (raccoonRefresh(candidate)) return t('小浣熊本机续期与安全写回')
+  if (localRefresh(candidate)) return t('本机续期与安全写回')
+  if (deviceVerification(candidate)) return t('官方设备验证组件')
+  if (candidate.id.startsWith('desktop.device.')) return t('本机设备标识（只读）')
+  return t('主程序内置读取（仅当前客户端）')
+}
+
+function candidateDescription(candidate: Candidate, t: PluginTranslate): string {
+  if (raccoonRefresh(candidate)) return t('允许续期这条本机小浣熊账号，并把新凭据安全写回原登录文件。不会覆盖客户端刚更新的登录态；IAM 凭据仍需重新登录。')
+  if (localRefresh(candidate)) return t('允许续期已关联的本机账号，并将新凭据写回官方登录文件；客户端已切换账号或文件发生变化时停止写入。')
+  if (deviceVerification(candidate)) return t('允许读取或下载经过校验的官方设备验证组件，并用于当前账号的活动验证；不会绕过官方资格或设备限领规则。')
+  if (candidate.id.startsWith('desktop.device.')) return t('只读取这家官方客户端的固定设备标识文件，不修改设备编号，也不读取其他账号。')
+  return t('只读取所选客户端当前用户的固定登录文件，不扫描浏览器或其他账号；撤销后停止本机读取。')
+}
+
 function candidateKey(candidate: Candidate): string {
   return JSON.stringify([candidate.pack, candidate.provider, candidate.version, candidate.digest, candidate.operations])
 }
@@ -77,7 +106,7 @@ export function PluginHelpers({ packId, providers, enabled, disabled = false, on
   }
 
   const requested = data?.requested.filter(item => item.pack === packId) || []
-  if (!requested.length && !error) return null
+  if (!requested.length) return error ? <Alert variant='destructive'>{error}</Alert> : null
   const locked = disabled || busy || loading
   return <PluginPermissions t={t}>
     <div className='flex items-center justify-between gap-3'>
@@ -96,16 +125,17 @@ export function PluginHelpers({ packId, providers, enabled, disabled = false, on
       const label = providers.find(provider => provider.id === item.provider)?.label || item.provider
       return <div key={key} className='flex flex-col gap-2 border-t border-hairline pt-3'>
         <Label className='text-[12.5px] text-foreground'>{t(label)} · {item.id}</Label>
-        <span className='text-xs text-muted-foreground'>{current ? `${current.pack} ${current.version}` : t('未授权')}</span>
+        <span className='text-xs text-muted-foreground'>{current ? candidateLabel(current, t) : t('未授权')}</span>
         {enabled && item.available ? <>
           {current && !authorized ? <Alert>{t('原生辅助授权已失效或暂不可用，请重新选择并确认。')}</Alert> : null}
           <SearchableSelect value={selected[key] || ''} disabled={locked || !options.length} aria-label={`${t(label)} · ${item.id}`}
-            displayValue={chosen ? `${chosen.pack} ${chosen.version}` : t('请选择')}
+            displayValue={chosen ? candidateLabel(chosen, t) : t('请选择')}
             onValueChange={value => { setSelected(previous => ({ ...previous, [key]: value })); setConfirmed(previous => ({ ...previous, [key]: false })) }}
             options={options.map(candidate => ({ value: candidateKey(candidate),
-              label: `${candidate.pack} · ${candidate.version} · ${candidate.provider}`,
+              label: `${candidateLabel(candidate, t)} · ${candidate.provider}`,
             }))} />
           {!options.length ? <p className='m-0'>{t('暂无可用的原生辅助程序，请先安装并启用所需插件。')}</p> : null}
+          {chosen?.pack === 'agent2api-host' ? <p className='m-0'>{candidateDescription(chosen, t)}</p> : null}
           {chosen ? <>
             <p className='m-0 break-words'>{t('允许的操作')}：{chosen.operations.join('、')}</p>
             <Label className='flex items-start gap-2 text-xs leading-relaxed'>

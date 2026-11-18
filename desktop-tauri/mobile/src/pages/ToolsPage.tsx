@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   Button, Card, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle,
-  Input, MultiSelect, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch, confirmDialog,
+  MultiSelect, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch, confirmDialog,
 } from '@ui'
 import { PageIntro, IconButton, Badge, Empty, ErrorNote, SkeletonList } from '../components/ui'
 import { PullIndicator, usePullToRefresh } from '../components/PullToRefresh'
@@ -9,8 +9,13 @@ import { apiCall } from '../api/client'
 import { store } from '../state/store'
 import { usePolling } from '../lib/usePolling'
 import { t } from '../i18n'
+import { createRefreshRequest } from '../../../ui-shared/refresh-request'
 import { SearchableSelect } from '../../../ui-shared/searchable-select'
 import { ImageGenerationSection } from './ToolsImageGeneration'
+import {
+  providerKeyDrafts, providerKeysPayload, providerReady, type SearchProviderRow as ProviderRow,
+} from '../../../ui-shared/tools-provider-keys'
+import { ProviderKeyList, ProviderKeysEditor } from '../../../ui-shared/tools-provider-keys-view'
 
 /**
  * MCP & Skills（手机端）。
@@ -26,13 +31,6 @@ type ToolProtocol = 'skill' | 'mcp' | 'api'
 type ToolService = {
   id: 'web-search' | 'vision' | 'image-generation'; protocol: ToolProtocol; key: string; enabled: boolean
   capability_count: number; endpoint: string; version: string; timeout_seconds: number
-}
-type ProviderRow = {
-  provider: string; display_name: string; configured: boolean; key_hint: string | null
-  enabled: boolean; updated_at: number | null
-  auth_type?: 'api_key' | 'account'; supports_fetch?: boolean; available?: boolean
-  account_id?: string; account_name?: string; max_query_chars?: number | null; unavailable_reason?: string | null
-  accounts?: Array<{ id: string; name: string; enabled: boolean }>
 }
 type Selection = { search_providers: string[]; fetch_provider: string }
 type VisionConfig = {
@@ -51,6 +49,15 @@ function message(failure: unknown): string {
   return t(failure instanceof Error ? failure.message : String(failure))
 }
 
+function providerFailure(result: { code?: string; error?: string; reset_at?: number | null }): string {
+  if (result.code === 'quota_exhausted' || result.code === 'rate_limited') {
+    return [result.code === 'quota_exhausted' ? t('额度已用完') : t('触发上游限流'),
+      result.reset_at ? t('恢复时间：{time}', { time: new Date(result.reset_at).toLocaleString() })
+        : result.code === 'quota_exhausted' ? t('上游未提供恢复时间') : ''].filter(Boolean).join(' · ')
+  }
+  return result.error ? t(result.error) : t('连接测试失败')
+}
+
 export function ToolsPage() {
   const [services, setServices] = useState<ToolService[]>([])
   const [providers, setProviders] = useState<ProviderRow[]>([])
@@ -64,30 +71,46 @@ export function ToolsPage() {
   const [visionOpen, setVisionOpen] = useState(false)
   const [selectionOpen, setSelectionOpen] = useState(false)
 
-  const load = async () => {
+  const loadProviderRows = useMemo(() => createRefreshRequest(async isCurrent => {
+    const rows = await apiCall<ProviderRow[]>('/api/tools/providers')
+    if (isCurrent()) setProviders(rows.map(provider => ({ ...provider, display_name: t(provider.display_name) })))
+  }), [])
+
+  const refreshProviderRows = async (afterChange = false) => {
+    try { await loadProviderRows(afterChange) } catch {}
+  }
+
+  const load = useMemo(() => createRefreshRequest(async isCurrent => {
+    const requests = [
+      apiCall<ToolService[]>('/api/tools/servers'),
+      loadProviderRows(),
+      apiCall<Selection>('/api/tools/provider-selection'),
+      apiCall<{ config: VisionConfig | null; keys: VisionKey[] }>('/api/tools/vision/config'),
+      apiCall<{ models: ManageModel[]; providers: ManageProvider[]; reasoningLevels?: string[] }>('/api/models/manage'),
+    ] as const
     try {
-      const [servicesData, providersData, selectionData, visionData, manageData] = await Promise.all([
-        apiCall<ToolService[]>('/api/tools/servers'),
-        apiCall<ProviderRow[]>('/api/tools/providers'),
-        apiCall<Selection>('/api/tools/provider-selection'),
-        apiCall<{ config: VisionConfig | null; keys: VisionKey[] }>('/api/tools/vision/config'),
-        apiCall<{ models: ManageModel[]; providers: ManageProvider[]; reasoningLevels?: string[] }>('/api/models/manage'),
-      ])
+      const [servicesData, , selectionData, visionData, manageData] = await Promise.all(requests)
+      if (!isCurrent()) return
       setServices((servicesData || []).filter(service => service.protocol !== 'api'))
-      setProviders((providersData || []).map(provider => ({ ...provider, display_name: t(provider.display_name) })))
       setSelection(selectionData)
       setVision(visionData)
       setManage({ models: (manageData.models || []).filter(model => model.enabled && model.kind !== 'image'), providers: manageData.providers || [] })
       setError('')
     } catch (failure) {
-      setError(message(failure))
+      if (isCurrent()) setError(message(failure))
     } finally {
-      setLoading(false)
+      if (isCurrent()) setLoading(false)
+      await Promise.allSettled(requests)
     }
+  }), [loadProviderRows])
+
+  const reloadAfterChange = () => {
+    void refreshProviderRows(true)
+    return load(true)
   }
 
-  useEffect(() => { void load() }, [])
   usePolling(load, 120_000)
+  usePolling(refreshProviderRows, busy ? 0 : 15_000)
   const pull = usePullToRefresh({ onRefresh: load })
 
   const toggle = async (service: ToolService, enabled: boolean) => {
@@ -107,7 +130,7 @@ export function ToolsPage() {
     try {
       await apiCall(`/api/tools/providers/${provider.provider}`, { method: 'PUT', body: { enabled } })
       store.toast(t('已保存'))
-      await load()
+      await reloadAfterChange()
     } catch (failure) {
       store.toast(message(failure), 'err')
     }
@@ -116,13 +139,14 @@ export function ToolsPage() {
   const testProvider = async (provider: ProviderRow) => {
     setBusy(provider.provider)
     try {
-      const result = await apiCall<{ success: boolean; result_count?: number; duration_ms?: number; error?: string; code?: string }>(
+      const result = await apiCall<{ success: boolean; result_count?: number; duration_ms?: number; error?: string; code?: string; reset_at?: number | null }>(
         `/api/tools/providers/${provider.provider}/test`, { method: 'POST' })
       if (result.success) store.toast(t('连接成功：{count} 条结果，耗时 {duration}ms', { count: result.result_count ?? 0, duration: result.duration_ms ?? 0 }))
-      else store.toast(result.error ? t(result.error) : t('连接测试失败'), 'err')
+      else store.toast(providerFailure(result), 'err')
     } catch (failure) {
       store.toast(message(failure), 'err')
     } finally {
+      await refreshProviderRows(true)
       setBusy('')
     }
   }
@@ -131,7 +155,7 @@ export function ToolsPage() {
     try {
       await apiCall(`/api/tools/providers/${provider.provider}/key`, { method: 'DELETE' })
       store.toast(t('密钥已清除'))
-      await load()
+      await reloadAfterChange()
     } catch (failure) {
       store.toast(message(failure), 'err')
     }
@@ -141,8 +165,8 @@ export function ToolsPage() {
   const fetchOptions = providers.filter(provider => provider.supports_fetch !== false)
     .map(provider => ({ value: provider.provider, label: provider.display_name }))
   const selectedProviders = providers.filter(provider => selection.search_providers.includes(provider.provider))
-  const readyProviders = selectedProviders.filter(provider => provider.enabled && provider.configured)
-  const missingProviders = selectedProviders.filter(provider => !(provider.enabled && provider.configured))
+  const readyProviders = selectedProviders.filter(provider => providerReady(provider))
+  const missingProviders = selectedProviders.filter(provider => !providerReady(provider))
   const searchReady = readyProviders.length > 0
   const readyNames = readyProviders.map(provider => provider.display_name).join(', ')
   const missingNames = missingProviders.map(provider => provider.display_name).join(', ')
@@ -192,7 +216,7 @@ export function ToolsPage() {
           <div style={{ fontSize: 12, color: searchReady ? 'var(--m-ok)' : 'var(--m-warn)', marginBottom: 8 }}>
             {searchReady
               ? (missingProviders.length
-                ? t('批量网页搜索可用：将使用 {ready}，未配置的 {missing} 会自动跳过。', { ready: readyNames, missing: missingNames })
+                ? t('批量网页搜索可用：将使用 {ready}，暂不可用的 {missing} 会自动跳过。', { ready: readyNames, missing: missingNames })
                 : t('批量网页搜索可用：所选来源均已启用并配置完成。'))
               : t('批量网页搜索不可用：请启用来源并配置密钥或绑定可用账号。')}
           </div>
@@ -214,17 +238,17 @@ export function ToolsPage() {
               <div>{t('搜索账号')}: {provider.account_name || t('未选择账号')}</div>
               {provider.max_query_chars ? <div>{t('每条搜索词最多 {count} 字', { count: provider.max_query_chars })}</div> : null}
               {provider.unavailable_reason ? <div style={{ color: 'var(--m-warn)' }}>{t(provider.unavailable_reason)}</div> : null}
-            </> : <>{t('密钥提示')}: {provider.key_hint || '-'}</>}
+            </> : <ProviderKeyList provider={provider} />}
           </div>
           <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
             <Button size='sm' variant='outline' onClick={() => setEditing(provider)}>{t('编辑')}</Button>
             <Button size='sm' variant='outline' disabled={!provider.configured || busy === provider.provider} onClick={() => void testProvider(provider)}>{t('测试连接')}</Button>
-            {provider.auth_type !== 'account' ? <Button size='sm' variant='ghost' disabled={!provider.configured} onClick={() => void confirmDialog(t('确定清除提供商 {name} 的 API Key？清除后该提供商将不可用，直到重新保存新密钥。', { name: provider.display_name }), { destructive: true }).then(ok => { if (ok) void clearProvider(provider) })}>{t('清除密钥')}</Button> : null}
+            {provider.auth_type !== 'account' ? <Button size='sm' variant='ghost' disabled={!provider.configured} onClick={() => void confirmDialog(t('确定清除提供商 {name} 的全部 API Key？清除后该提供商将不可用，直到重新保存新密钥。', { name: provider.display_name }), { destructive: true }).then(ok => { if (ok) void clearProvider(provider) })}>{t('清除密钥')}</Button> : null}
           </div>
         </Card>)}
       </div>
 
-      <ImageGenerationSection onChanged={() => { void load() }} />
+      <ImageGenerationSection onChanged={() => { void reloadAfterChange() }} />
 
       <div className='m-section'>
         <div className='m-section-head'>
@@ -250,13 +274,14 @@ export function ToolsPage() {
       </div>
     </> : null}
 
-    {editing ? <ProviderDialog provider={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); void load() }} /> : null}
+    {editing ? <ProviderDialog provider={providers.find(provider => provider.provider === editing.provider) || editing}
+      onClose={() => setEditing(null)} onSaved={() => { setEditing(null); void reloadAfterChange() }} onRefresh={() => refreshProviderRows(true)} /> : null}
     {selectionOpen ? <SelectionDialog
       providers={providerOptions}
       fetchProviders={fetchOptions}
       value={selection}
       onClose={() => setSelectionOpen(false)}
-      onSaved={next => { setSelection(next); setSelectionOpen(false); void load() }}
+      onSaved={next => { setSelection(next); setSelectionOpen(false); void reloadAfterChange() }}
     /> : null}
     {visionOpen ? <VisionDialog
       config={vision.config}
@@ -264,13 +289,16 @@ export function ToolsPage() {
       providers={(manage.providers || []).filter(item => (item.count ?? 0) > 0)}
       models={manage.models}
       onClose={() => setVisionOpen(false)}
-      onSaved={() => { setVisionOpen(false); void load() }}
+      onSaved={() => { setVisionOpen(false); void reloadAfterChange() }}
     /> : null}
   </div>
 }
 
-function ProviderDialog({ provider, onClose, onSaved }: { provider: ProviderRow; onClose: () => void; onSaved: () => void }) {
-  const [apiKey, setApiKey] = useState('')
+function ProviderDialog({ provider, onClose, onSaved, onRefresh }: {
+  provider: ProviderRow; onClose: () => void; onSaved: () => void; onRefresh: () => Promise<void>
+}) {
+  const [keyDrafts, setKeyDrafts] = useState(() => providerKeyDrafts(provider))
+  const [checking, setChecking] = useState('')
   const [accountId, setAccountId] = useState(provider.account_id || '')
   const isAccount = provider.auth_type === 'account'
   const accounts = (provider.accounts || []).filter(account => account.enabled)
@@ -278,18 +306,34 @@ function ProviderDialog({ provider, onClose, onSaved }: { provider: ProviderRow;
     || (accountId ? t('已绑定账号不可用，请重新选择') : t('未选择账号'))
   const [enabled, setEnabled] = useState(provider.enabled)
   const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    setKeyDrafts(current => current.map(draft => ({ ...draft, row: provider.keys?.find(row => row.id === draft.id) || draft.row })))
+  }, [provider.keys])
+  const check = async (id: string, operation: 'search' | 'fetch') => {
+    setChecking(`${id}:${operation}`)
+    try {
+      const query = new URLSearchParams({ key_id: id, operation })
+      const result = await apiCall<{ success: boolean; code?: string; error?: string; reset_at?: number | null }>(
+        `/api/tools/providers/${provider.provider}/test?${query}`, { method: 'POST' })
+      if (result.success) store.toast(t('密钥检查成功，额度标记已清除'))
+      else store.toast(providerFailure(result), 'err')
+      await onRefresh()
+    } catch (failure) { store.toast(message(failure), 'err') }
+    finally { setChecking('') }
+  }
   const save = async () => {
+    if (!isAccount && keyDrafts.some(draft => !draft.id && !draft.apiKey.trim())) { store.toast(t('新密钥不能为空'), 'err'); return }
     setBusy(true)
     try {
       await apiCall(`/api/tools/providers/${provider.provider}`, { method: 'PUT', body: isAccount
         ? { account_id: accountId || null, enabled }
-        : { api_key: apiKey.trim() || undefined, enabled } })
+        : { keys: providerKeysPayload(keyDrafts), enabled } })
       store.toast(t('已保存'))
       onSaved()
     } catch (failure) { store.toast(message(failure), 'err') }
     finally { setBusy(false) }
   }
-  return <Dialog open onOpenChange={open => { if (!open && !busy) onClose() }}>
+  return <Dialog open onOpenChange={open => { if (!open && !busy && !checking) onClose() }}>
     <DialogContent>
       <DialogHeader><DialogTitle>{t('编辑 {name}', { name: provider.display_name })}</DialogTitle></DialogHeader>
       <DialogBody className='flex flex-col gap-3'>
@@ -306,16 +350,15 @@ function ProviderDialog({ provider, onClose, onSaved }: { provider: ProviderRow;
           <p style={{ fontSize: 11.5, color: 'var(--m-text-3)' }}>{t('复用「账号」页的登录态，不需要额外填写搜索密钥。账号停用或删除后不会自动换号。')}</p>
           {!accounts.length ? <ErrorNote text={t('没有可绑定的启用账号，请先到「账号」页添加或启用。')} /> : null}
           {provider.available === false && provider.unavailable_reason ? <ErrorNote text={t(provider.unavailable_reason)} /> : null}
-        </div> : <label style={{ fontSize: 12.5 }}>{t('API Key')}
-          <Input type='password' autoComplete='new-password' value={apiKey} placeholder={t('输入新密钥；留空保持不变')} onChange={event => setApiKey(event.currentTarget.value)} />
-        </label>}
+        </div> : <ProviderKeysEditor value={keyDrafts} onChange={setKeyDrafts} maxKeys={provider.max_keys}
+          disabled={busy || Boolean(checking)} testing={checking} onTest={(id, operation) => void check(id, operation)} />}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}>
           {t('启用')}<Switch checked={enabled} disabled={isAccount && provider.available === false && !enabled} onCheckedChange={checked => setEnabled(checked === true)} aria-label={t('启用')} />
         </div>
       </DialogBody>
       <DialogFooter>
-        <Button variant='outline' disabled={busy} onClick={onClose}>{t('取消')}</Button>
-        <Button disabled={busy} onClick={() => void save()}>{t('保存')}</Button>
+        <Button variant='outline' disabled={busy || Boolean(checking)} onClick={onClose}>{t('取消')}</Button>
+        <Button disabled={busy || Boolean(checking)} onClick={() => void save()}>{t('保存')}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

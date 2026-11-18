@@ -315,7 +315,7 @@ export function ModelCell({ columns, model, selection, togglePick, setTestTarget
           const source = capSourceOf(model, key)
           return (
             <span key={key} className={cn('cap-dot', state, source === 'modelsdev' && 'filled', overridden && 'marked')}
-              title={capabilityTip(key, value, overridden, source)}>
+              title={capabilityTip(key, value, overridden, source, model.toolCallingMode)}>
               {CAP_ICON[key]}
               {overridden ? <i className='cap-mark' /> : null}
             </span>

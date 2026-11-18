@@ -4,6 +4,16 @@ import type { CampaignApi, CampaignEntry, CampaignPreview, MonthlyGift } from '.
 
 type Translate = (key: string, params?: Record<string, string | number>) => string
 
+function noticeText(value: string, t: Translate): string {
+  if (value === '部分原任务领奖结果仍待确认；即使官方暂未显示完成也不会重新提交。这里只查询和领取已完成任务，不代做任务或购买。') {
+    return t('部分原任务领奖结果仍待确认；即使官方暂未显示完成也不会重新提交。这里只查询和领取已完成任务，不代做任务或购买。')
+  }
+  if (value === '只领取官方明确可领的已完成任务；每项先保存待确认记录，单次提交并回查，结果不明不重发。') {
+    return t('只领取官方明确可领的已完成任务；每项先保存待确认记录，单次提交并回查，结果不明不重发。')
+  }
+  return t(value)
+}
+
 function giftStatus(status: MonthlyGift['status'], t: Translate): string {
   switch (status) {
     case 'pending': return t('待发放')
@@ -56,7 +66,7 @@ export function CampaignBenefitDetails({ entry, data, api, t, formatTime, onChan
   }
 
   return <div className='space-y-4'>
-    {data.notice ? <p className='text-sm text-muted-foreground break-words'>{data.notice}</p> : null}
+    {data.notice ? <p className='text-sm text-muted-foreground break-words'>{noticeText(data.notice, t)}</p> : null}
     {data.redemption?.supported && api.redeem ? <div className='space-y-2 border-t pt-3'>
       <Label htmlFor={inputId}>{t('权益兑换码 / 订单号')}</Label>
       <Input id={inputId} type='password' autoComplete='new-password' spellCheck={false} maxLength={128}

@@ -1,0 +1,23 @@
+[Desktop Entry]
+Categories={{categories}}
+{{#if comment}}
+Comment={{comment}}
+{{/if}}
+Exec={{exec}}{{#if mime_type}} %U{{/if}}
+Icon={{icon}}
+Name={{name}}
+Terminal=false
+Type=Application
+{{#if mime_type}}
+MimeType={{mime_type}}
+{{/if}}
+Actions=compatibility;
+
+[Desktop Action compatibility]
+Name=Start in compatibility mode
+Name[zh_CN]=以兼容模式启动
+Name[zh_TW]=以相容模式啟動
+Name[ja]=互換モードで起動
+Name[ko]=호환 모드로 시작
+Name[pt_BR]=Iniciar em modo de compatibilidade
+Exec={{exec}} --disable-gpu

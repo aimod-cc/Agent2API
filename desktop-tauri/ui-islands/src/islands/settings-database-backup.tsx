@@ -43,7 +43,7 @@ export function DatabaseBackupPanel(): React.ReactElement {
           </div>
         </div>
         <p className='hint'>
-          {t('一个 .a2ab 文件即可跨机器恢复，账号、网关 Key、GitHub 令牌与云同步凭据无需另行复制密钥。插件程序与库外文件不在整库备份范围。')}
+          {t('一个 .a2ab 文件即可跨机器恢复，账号、网关 Key 与云同步凭据无需另行复制密钥。插件程序与库外文件不在整库备份范围。')}
         </p>
         <Alert variant='destructive' className='danger-zone'>{NOTES.backupDanger}</Alert>
       </CardContent>

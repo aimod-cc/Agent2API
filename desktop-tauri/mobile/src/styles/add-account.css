@@ -1,0 +1,13 @@
+.mobile-account-add > [data-slot='sheet-header'] { min-height: 68px; gap: 12px; padding: 16px 48px 16px 20px; }
+.mobile-account-add > [data-slot='sheet-header'] > [data-slot='sheet-title'] { font-size: 16px; font-weight: 500; }
+.mobile-account-add > [data-slot='sheet-body'] { gap: 20px; padding: 20px; }
+.mobile-account-add-footer { justify-content: space-between; gap: 12px; min-height: 64px; background: var(--ui-surface); }
+.mobile-account-add-footer > button { flex: none; padding: 0 4px; color: var(--ui-muted-foreground); font-size: 12px; }
+.mobile-account-add-foot-mount { display: flex; justify-content: flex-end; min-width: 0; }
+.mobile-account-add-foot-mount > div { min-width: 0; }
+.mobile-account-add-foot-mount .plugin-login-actions { justify-content: flex-end; }
+.mobile-account-add-foot-mount button { min-height: 36px; font-size: 13px; }
+.mobile-account-add .plugin-login-options-content > [data-slot='label'] { color: var(--ui-text-2); font-size: 13px; font-weight: 400; }
+.mobile-account-add .plugin-login-options-content [data-slot='select-trigger'] { min-height: 36px; font-size: 13px; }
+.mobile-account-add .plugin-login-fields { gap: 16px; }
+.mobile-account-add .plugin-login-field input { min-height: 36px; font-size: 14px; }

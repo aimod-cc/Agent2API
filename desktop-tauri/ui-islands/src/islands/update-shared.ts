@@ -17,10 +17,9 @@
  * 见该函数自己的说明。
  */
 
-import type { GithubFailure } from '../../../ui-shared/github-access'
 import type * as React from 'react'
 import type { AssetProbe, UpdateChannels, ForceUpdatePolicy, UpdateCapability, ServiceUpdateTask } from '../../../ui-shared/updates'
-import { assetMissingReason, githubErrorMessage, updateUnavailableReason } from '../../../ui-shared/updates'
+import { assetMissingReason, updateErrorMessage, updateUnavailableReason } from '../../../ui-shared/updates'
 export type { UpdateChannels, AssetProbe } from '../../../ui-shared/updates'
 // 代理池的共享类型与值前缀与账号页共用一份 —— 两处下拉的值域必须一致
 // （`pool:<id>`），各写一份迟早会漂移。accounts-shared 是纯类型 + 常量的
@@ -33,8 +32,9 @@ import { t } from '../i18n'
 
 /** 更新检查结果（checkUpdate 的壳命令返回 / getUpdateStatus 的缓存）。字段按可选收：
  *  后端在「仓库暂无发布版本」「版本号无法解析」等情形下会给 null */
-export type UpdateInfo = GithubFailure & {
+export type UpdateInfo = {
   updateCapability?: UpdateCapability
+  updateSource?: 'website'
   systemdTask?: ServiceUpdateTask | null
   serviceTask?: ServiceUpdateTask | null
   forceUpdate?: ForceUpdatePolicy | null
@@ -46,7 +46,7 @@ export type UpdateInfo = GithubFailure & {
   notes?: string | null
   /** UTC 的 ISO 串 */
   publishedAt?: string | null
-  /** GitHub 发布页（外链，交给 openReleasePage 打开） */
+  /** 官网发布页（外链，交给 openReleasePage 打开） */
   pageUrl?: string | null
   prerelease?: boolean
   /** 可下载资产；没有资产时「下载并安装」不给 */
@@ -161,8 +161,7 @@ export type DownloadTask = {
   received?: number
   total?: number
   percent?: number
-  selecting?: boolean
-  source?: string | null
+  preparing?: boolean
 }
 
 export type UpdateProxyChoice = {
@@ -171,20 +170,6 @@ export type UpdateProxyChoice = {
   error?: string
   config?: { source?: string; listenerUid?: string; proxyId?: string } | null
 } | null
-
-/** GitHub 令牌状态（`/api/update/token` 的返回）：**没有本体**，只有有没有、来自哪 */
-export type UpdateTokenStatus = {
-  filled?: boolean
-  /** 'stored'（界面保存）/ 'env'（环境变量）· null（没配） */
-  origin?: string | null
-  /** 已存令牌解不开时的原因（界面据此提示重新保存一次） */
-  error?: string | null
-  /** 仅 POST 有：是否落盘成功（false = 本次运行已生效，重启会丢） */
-  saved?: boolean
-}
-
-import type { GithubAccessSettings, GithubAccessPatch } from '../../../ui-shared/github-access'
-export type { GithubAccessSettings } from '../../../ui-shared/github-access'
 
 /** 「软件更新」这一族用到的壳侧接口（见 bridge.rs 的「软件更新」一节） */
 export type UpdateBridge = {
@@ -199,15 +184,9 @@ export type UpdateBridge = {
     proxy?: UpdateProxyChoice
     saved?: boolean
   } | null | undefined>
-  getGithubAccess(): Promise<GithubAccessSettings | null | undefined>
-  setGithubAccess(payload: GithubAccessPatch): Promise<GithubAccessSettings | null | undefined>
-  /** GitHub 令牌状态（filled / origin，永不回显本体） */
-  getUpdateToken(): Promise<UpdateTokenStatus | null | undefined>
-  /** 保存 / 清除 GitHub 令牌（token 传 null = 清除） */
-  setUpdateToken(payload: { token: string | null }): Promise<UpdateTokenStatus | null | undefined>
   /** 「加入 beta 版」开关的读数（`/api/update/beta`）：只有 enabled 一个字段 */
   getUpdateBeta(): Promise<{ enabled?: boolean } | null | undefined>
-  /** 写「加入 beta 版」：true = 加入（此后检查把 GitHub 的预发布版一并纳入候选）。
+  /** 写「加入 beta 版」：true = 加入（此后检查把官网的预发布版一并纳入候选）。
    *  写响应里的 saved = 是否落盘成功（false = 本次运行已生效，重启回到原通道） */
   setUpdateBeta(payload: { enabled: boolean }): Promise<{
     enabled?: boolean
@@ -292,7 +271,7 @@ export function toast(message: string, kind?: 'err' | 'ok'): void {
 }
 
 export function errorMessage(error: unknown): string {
-  return githubErrorMessage(error, t, 'update')
+  return updateErrorMessage(error, t)
 }
 
 /** 外链白名单：只放行 http(s)（与后端 open_release_page 的口径一致，这里先挡一道） */
@@ -303,7 +282,7 @@ export function safeExternal(value: unknown): string {
 
 /**
  * 打开外链：一律交给系统默认浏览器。webview 里直接导航会白屏，而且本程序持有
- * 桥接权限，外部链接不该在应用内部打开（「更新设置」里的 GitHub 令牌页也走它）。
+ * 桥接权限，外部链接不该在应用内部打开。
  */
 export async function openExternal(url: string): Promise<void> {
   const target = safeExternal(url)
@@ -319,21 +298,15 @@ export async function openExternal(url: string): Promise<void> {
 }
 
 /**
- * 官方 QQ 群号。加群弹窗里逐个显示并可复制；群 1、群 2 都已接近满员，
- * 加群时优先给群 3、群 4 —— 这条提示写在弹窗里，不在常量上。
+ * 官方 QQ 群号，加群弹窗逐个显示并可复制。
  *
- * 为什么不摆二维码：二维码是打进包里的静态图，换群 / 换码就得跟着发一次版。
- * 现在群号会变（群 1 满员、后续可能再开群），只留群号 + 复制按钮，改一个常量即可。
- *
- * 顺带记一笔：桌面版 QQ 能接的两条加群路子都坏在 QQ 自己那一层 —— `mqqapi://`
- * 的群名片 QQ NT 不认，`qm.qq.com/q/…` 那条分享链接只认 QQ 内置浏览器。所以
- * 这里只给群号（手打 / 复制到 QQ 搜索），不假装能一键跳转。
+ * 二维码是打进包里的静态图，换群 / 换码就得跟着发一次版，因此只保留群号。
+ * 桌面版 QQ 的群名片协议与分享链接无法可靠跳转，这里只给群号供 QQ 搜索。
  */
 export const QQ_GROUPS = [
-  { no: '1127656296', nearlyFull: true },
-  { no: '1130894674', nearlyFull: true },
-  { no: '1108276647', nearlyFull: false },
-  { no: '1054072416', nearlyFull: false },
+  { no: '1127656296' },
+  { no: '1130894674' },
+  { no: '1108276647' },
 ] as const
 
 /**

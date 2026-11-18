@@ -1,4 +1,4 @@
-use std::sync::{Mutex, OnceLock};
+use std::sync::{atomic::{AtomicU64, Ordering}, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -38,8 +38,11 @@ pub(super) fn begin(action: &str, target: Value) -> Result<(), String> {
     if value["active"] == true {
         return Err("已有脚本插件任务正在执行".into());
     }
+    static SEQUENCE: AtomicU64 = AtomicU64::new(1);
+    let started_at = crate::server::logging::now_ms();
+    let operation_id = format!("{}-{}-{}", std::process::id(), started_at, SEQUENCE.fetch_add(1, Ordering::Relaxed));
     *value = json!({ "active": true, "action": action, "target": target, "stage": "starting", "received": 0,
-        "startedAt": crate::server::logging::now_ms(), "error": null });
+        "operationId": operation_id, "startedAt": started_at, "error": null });
     Ok(())
 }
 
@@ -219,6 +222,9 @@ pub(super) async fn switch(
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     };
+    // 切换保护已经取得；在停止、发现新清单或任何登记发布之前关闭已知旧归属。
+    super::runtime::revoke_ownership_sources(&before);
+    super::runtime::revoke_ownership_sources(&after);
     let before_ids = ids.clone();
     stage("loading", "正在加载脚本插件");
     let old_executable = hosts.first().map(|host| host.options.exe.clone());
@@ -237,8 +243,12 @@ pub(super) async fn switch(
                 .clone()
                 .unwrap_or_else(|| "脚本插件加载失败".into()));
         }
+        // prepare可能发现新provider；磁盘登记本身已可被归属查询观察，必须先撤销再写盘。
+        super::runtime::revoke_ownership_sources(&after);
         super::storage::save(&after)?;
         if let Err(error) = super::runtime::activate(&after, prepared) {
+            super::runtime::revoke_ownership_sources(&after);
+            super::runtime::revoke_ownership_sources(&before);
             super::storage::save(&before)?;
             return Err(error);
         }
@@ -246,6 +256,9 @@ pub(super) async fn switch(
     }
     .await;
     if let Err(error) = result {
+        // 包括prepare/写盘失败与内存发布失败；恢复原配置不恢复旧来源，也不重发回执。
+        super::runtime::revoke_ownership_sources(&after);
+        super::runtime::revoke_ownership_sources(&before);
         stage("restoring", "正在恢复原有脚本插件");
         plugin_host::runtime::shutdown_packs(&[super::HOST_ID.to_string()]).await?;
         super::transport::clear();

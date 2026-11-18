@@ -46,8 +46,9 @@ import {
 import { balanceSpecOf, type BalanceFieldKey } from './balance-query'
 import { DuplicateProviderDialog } from './add-provider-duplicate-dialog'
 import { presetOfProvider, sameProviderEndpoint } from './add-provider-metadata'
+import { PresetSponsorCard } from './add-provider-sponsor'
 import { useAddAccountProxy, useAccountAddBusy } from './add-account-proxy'
-import { UserAgentInput, useUserAgentPresets } from './add-account-user-agent'
+import { UserAgentInput, useUserAgentPresets, customUserAgentEditable } from './add-account-user-agent'
 import type { ProxyPayload } from './accounts-proxy-form'
 import { t } from '../i18n'
 
@@ -296,7 +297,10 @@ export function CustomProviderBlock({
   const pickedProvider = list.find(item => item.id === providerHint)
   const current = pickedProvider?.id || ''
   const pickedName = pickedProvider?.name || t('该提供商')
-  const selfHosted = mode === 'create' && Boolean(presetKey) && !shared().wbPresetProviders?.presetOf?.(presetKey)?.baseUrl
+  const createPreset = mode === 'create' && presetKey ? shared().wbPresetProviders?.presetOf?.(presetKey) : null
+  const createUaEditable = customUserAgentEditable(createPreset)
+  const existingUaEditable = customUserAgentEditable(pickedProvider)
+  const selfHosted = mode === 'create' && Boolean(presetKey) && !createPreset?.baseUrl
 
   React.useEffect(() => {
     if (mode !== 'create' || !presetKey) return
@@ -347,6 +351,7 @@ export function CustomProviderBlock({
           <h3>{t('上游信息')}</h3>
           <span>{t('创建这个提供商，并同时建立它的第一个账号。')}</span>
         </div>
+        {createPreset ? <PresetSponsorCard preset={createPreset} /> : null}
         <div className='add-form'>
           <div className='add-field'>
             <Label htmlFor={NAME_ID}>
@@ -429,13 +434,13 @@ export function CustomProviderBlock({
           />
           {/* 余额查询：只有预置卡带方案的家才出现（新建时方案随记录写入） */}
           <BalanceFields scheme={createScheme} prefix={BALANCE_CREATE_PREFIX} />
-          <div className='add-field'>
+          {createUaEditable ? <div className='add-field'>
             <Label htmlFor={UA_CREATE_ID}>{t('User-Agent（可选）')}</Label>
             <UserAgentInput id={UA_CREATE_ID} value={createUa}
               onChange={value => { setCreateUa(value); writeUaDraft(UA_CREATE_ID, value) }}
               presets={uaPresets} className='col-start-2 row-start-1' />
             <span className='hint'>{t('留空使用默认的 User-Agent；可从预置里选一个内置客户端，也可以直接填写。')}</span>
-          </div>
+          </div> : null}
         </div>
       </DialogSection>
 
@@ -494,13 +499,13 @@ export function CustomProviderBlock({
             />
             <span className='hint'>{t('留空则用提供商名称')}</span>
           </div>
-          <div className='add-field'>
+          {existingUaEditable ? <div className='add-field'>
             <Label htmlFor={UA_EXISTING_ID}>{t('User-Agent（可选）')}</Label>
             <UserAgentInput id={UA_EXISTING_ID} value={existingUa}
               onChange={value => { setExistingUa(value); writeUaDraft(UA_EXISTING_ID, value) }}
               presets={uaPresets} className='col-start-2 row-start-1' />
             <span className='hint'>{t('留空使用默认的 User-Agent；可从预置里选一个内置客户端，也可以直接填写。')}</span>
-          </div>
+          </div> : null}
         </div>
       </DialogSection>
     </>
@@ -574,7 +579,7 @@ async function submitCreate(context: FootContext, allowDuplicate = false, target
     if (noAuth) payload.noAuth = true
     else if (apiKey) payload.apiKey = apiKey
     // 账号级自定义 UA（空串 = 不设置，用该家默认）
-    const userAgent = readUaDraft(UA_CREATE_ID)
+    const userAgent = customUserAgentEditable(target || preset) ? readUaDraft(UA_CREATE_ID) : ''
     if (userAgent) payload.userAgent = userAgent
     context.setHint('')
     try {
@@ -623,7 +628,8 @@ async function submitExisting(context: FootContext): Promise<void> {
     if (noAuth) payload.noAuth = true
     else if (apiKey) payload.apiKey = apiKey
     if (name) payload.name = name
-    const userAgent = readUaDraft(UA_EXISTING_ID)
+    const selectedProvider = customList().find(item => item.id === providerId)
+    const userAgent = customUserAgentEditable(selectedProvider) ? readUaDraft(UA_EXISTING_ID) : ''
     if (userAgent) payload.userAgent = userAgent
     const balanceQuery = readBalanceQuery(scheme, BALANCE_EXISTING_PREFIX)
     if (balanceQuery) payload.balanceQuery = balanceQuery

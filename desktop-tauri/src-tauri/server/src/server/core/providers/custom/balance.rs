@@ -198,7 +198,8 @@ pub async fn query_usage(store: &AccountStore, account_id: &str) -> Result<Value
         .custom_balance_query_by_id(account_id)
         .unwrap_or_else(empty_query);
     let proxy = credential.proxy.as_ref();
-    crate::server::core::user_agent::scope(&credential.user_agent, async {
+    let user_agent = crate::server::core::user_agent::override_value(&provider_id, &credential.user_agent);
+    crate::server::core::user_agent::scope(user_agent, async {
         let label = label.as_str();
         // 错误与日志文案一律用提供商的展示名，不用余额方案名。
         let what = |kind: &str| format!("{label} {kind}");

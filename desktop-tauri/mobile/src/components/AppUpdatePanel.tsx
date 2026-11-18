@@ -19,14 +19,11 @@ import {
   type ApkUpdateInfo,
   type DownloadProgress,
 } from '../lib/appUpdate'
-import { GithubAccessSettingsPanel } from './GithubAccessSettings'
+import { UpdateProxySettings } from './UpdateProxySettings'
 import { AppUpdateSettings } from './AppUpdateSettings'
 import { openExternal } from '../lib/community'
 import { t } from '../i18n'
-import { apiCall } from '../api/client'
-import type { GithubFailure } from '../../../ui-shared/github-access'
-import { GithubFailureText } from '../../../ui-shared/github-failure'
-import { githubErrorMessage, assetMissingReason } from '../../../ui-shared/updates'
+import { updateErrorMessage, updatePageUrl, assetMissingReason } from '../../../ui-shared/updates'
 import { Card, Button } from '@ui'
 import { Switch as UiSwitch } from '@ui'
 
@@ -40,7 +37,7 @@ import { Switch as UiSwitch } from '@ui'
  * ── iOS 为什么只有「去下载」 ────────────────────────────────────
  * 苹果不允许 App 自行下载并安装可执行代码，IPA 只能由系统装（App Store /
  * TestFlight / 侧载工具）。所以 iOS 上这个面板到「发现新版本」为止，动作
- * 按钮改成打开 GitHub Release 页面，由用户自己选渠道 —— 不渲染下载进度条
+ * 按钮改成打开官网下载页，由用户选择适用的安装方式；不渲染下载进度条
  * 与「安装」按钮，避免给一个必然失败的承诺。
  *
  * ── 自动检查 ────────────────────────────────────────────────────
@@ -64,7 +61,6 @@ export function AppUpdatePanel() {
   const [info, setInfo] = useState<ApkUpdateInfo | null>(null)
   const [progress, setProgress] = useState<DownloadProgress | null>(null)
   const [error, setError] = useState('')
-  const [githubFailure, setGithubFailure] = useState<GithubFailure | null>(null)
   const [busy, setBusy] = useState(false)
   const [auto, setAuto] = useState(autoCheckEnabled)
   const [settingsRevision, setSettingsRevision] = useState(0)
@@ -149,12 +145,11 @@ export function AppUpdatePanel() {
       setBusy(true)
       setPhase('checking')
     }
-    if (!silent) { setError(''); setGithubFailure(null) }
+    if (!silent) setError('')
     try {
       const result = await checkApkUpdate()
       if (revision !== channelRevision.current) return
       setInfo(result)
-      setGithubFailure(null)
       setError('')
       // hasUpdate 为 null = 版本无法比较（上游 tag 不是 semver）；
       // 这时只要挂了 APK 就允许手动更新，而不是卡在「未知」上
@@ -162,14 +157,8 @@ export function AppUpdatePanel() {
       setPhase(prev => (prev === 'downloading' || prev === 'downloaded' ? prev : canUpdate ? 'available' : 'latest'))
     } catch (failure) {
       if (!silent && revision === channelRevision.current) {
-        setError(githubErrorMessage(failure, t, 'update'))
+        setError(updateErrorMessage(failure, t))
         setPhase('idle')
-        try {
-          const status = await apiCall<GithubFailure & { lastError?: string | null }>('/api/update/status')
-          if (revision === channelRevision.current && status.rateLimited) {
-            setGithubFailure({ ...status, reason: status.lastError })
-          }
-        } catch { /* 保留本次错误，不额外发起上游查询。 */ }
       }
     } finally {
       checkInFlight.current = false
@@ -189,14 +178,13 @@ export function AppUpdatePanel() {
     }
     setBusy(true)
     setError('')
-    setGithubFailure(null)
     setProgress({ received: 0, total: 0, percent: -1 })
     setPhase('downloading')
     try {
       await downloadApk(url, setProgress)
       setPhase('downloaded')
     } catch (failure) {
-      setError(githubErrorMessage(failure, t, 'update'))
+      setError(updateErrorMessage(failure, t))
       setPhase('available')
     } finally {
       setBusy(false)
@@ -207,7 +195,6 @@ export function AppUpdatePanel() {
   const install = async () => {
     setBusy(true)
     setError('')
-    setGithubFailure(null)
     try {
       // 先确认授权：没有的话跳到系统设置页，回来后用户再点一次安装
       if (!(await canInstallApk())) {
@@ -218,7 +205,7 @@ export function AppUpdatePanel() {
       await installApk()
       store.toast(t('已启动安装器'))
     } catch (failure) {
-      setError(githubErrorMessage(failure, t, 'update'))
+      setError(updateErrorMessage(failure, t))
     } finally {
       setBusy(false)
     }
@@ -231,15 +218,9 @@ export function AppUpdatePanel() {
     setBusy(false)
   }
 
-  /**
-   * iOS 的「更新」只能跳转：打开 GitHub Release 页面，由用户自己选渠道
-   * （TestFlight / App Store / 侧载）。`pageUrl` 是网关从 GitHub API 拿到的
-   * release 页面地址，没有它时退回**源码仓库**的 releases 列表 —— 构建账号
-   * （安装包实际存放处）不是项目地址，不能拿来当兜底。
-   */
+  /** iOS 只能打开官网下载页，由用户选择适用的安装方式。 */
   const openReleasePage = () => {
-    const target = info?.pageUrl || 'https://github.com/aimod-cc/Agent2API/releases'
-    openExternal(target)
+    openExternal(updatePageUrl(info?.pageUrl))
   }
 
   const toggleAuto = () => {
@@ -248,22 +229,6 @@ export function AppUpdatePanel() {
     setAuto(next)
     store.toast(next ? t('已开启自动检查') : t('已关闭自动检查'))
   }
-
-  useEffect(() => {
-    if (!githubFailure || !error) return
-    let alive = true
-    const refresh = async () => {
-      if (document.hidden || checkInFlight.current) return
-      try {
-        const status = await apiCall<GithubFailure & { lastError?: string | null }>('/api/update/status')
-        if (!alive || checkInFlight.current) return
-        setGithubFailure(status.rateLimited ? { ...status, reason: status.lastError } : null)
-        if (!status.rateLimited) setError(githubErrorMessage(status.lastError, t, 'update'))
-      } catch { /* 下一轮重新读取网关状态。 */ }
-    }
-    const timer = window.setInterval(() => void refresh(), 5000)
-    return () => { alive = false; window.clearInterval(timer) }
-  }, [Boolean(githubFailure), error])
 
   const percent = progress && progress.percent >= 0 ? progress.percent : null
   const sizeText = (bytes?: number) => {
@@ -288,7 +253,7 @@ export function AppUpdatePanel() {
                 : phase === 'available'
                   ? t('发现新版本 {version}', { version: info?.latestVersion || '' })
                   : phase === 'downloading'
-                    ? progress?.phase === 'selecting' ? t('正在选择下载通道…') : t('正在下载…')
+                    ? t('正在下载…')
                     : phase === 'downloaded'
                       ? t('已下载，待安装')
                       : phase === 'checking'
@@ -297,7 +262,7 @@ export function AppUpdatePanel() {
             </div>
             <div className='m-t2' style={{ wordBreak: 'break-word' }}>
               {phase === 'available' && !selfUpdate
-                ? t('请在 Release 页面下载后通过 TestFlight 或 App Store 安装')
+                ? t('请前往官网查看适用于本机的安装方式')
                 : phase === 'available' && info?.asset
                   ? t('{size} · 下载后可直接安装，无需跳转浏览器', { size: sizeText(info.asset.size) })
                   : phase === 'downloaded'
@@ -307,13 +272,9 @@ export function AppUpdatePanel() {
                     : phase === 'latest'
                       ? t('当前版本 {version}', { version: APP_VERSION })
                       : selfUpdate
-                        ? t('版本 {version} · 按 GitHub 访问设置下载安装包', { version: APP_VERSION })
-                        : t('版本 {version} · 更新包需从 Release 页面获取', { version: APP_VERSION })}
+                        ? t('版本 {version} · 从官网检查更新和获取安装包', { version: APP_VERSION })
+                        : t('版本 {version} · 请前往官网获取更新', { version: APP_VERSION })}
             </div>
-
-            {phase === 'downloading' && progress?.source ? <div className='m-t2'>
-              {t('当前下载通道：{source}', { source: progress.source })}
-            </div> : null}
 
             {/* 进度条：总长度未知（percent = null）时不画，只显示已下载量 */}
             {phase === 'downloading' ? (
@@ -330,7 +291,7 @@ export function AppUpdatePanel() {
 
             {error ? (
               <div style={{ marginTop: 6, fontSize: 11.5, color: 'var(--m-danger)', wordBreak: 'break-word' }}>
-                {githubFailure ? <GithubFailureText value={githubFailure} settings='update' t={t} /> : error}
+                {error}
               </div>
             ) : null}
           </div>
@@ -408,7 +369,7 @@ export function AppUpdatePanel() {
           }
           setSettingsRevision(revision => revision + 1)
         }} />
-        <GithubAccessSettingsPanel />
+        <UpdateProxySettings />
       </Card>
     </div>
   )

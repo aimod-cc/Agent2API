@@ -61,7 +61,10 @@
 //! 约定：core 里的模块只做纯逻辑 + 文件读写 + 上游 HTTP，不认识 axum；
 //! api/ 里的 handler 负责把 HTTP 输入转成 core 调用、再把结果转成响应。
 
+pub(crate) mod panel_events;
 pub mod account_order;
+pub mod advertisements;
+pub mod accounts_list;
 mod account_order_balance;
 pub mod account_store;
 // 本机 AI 客户端的接管注册表（「Agent」页）：客户端定义 + 配置读写
@@ -123,6 +126,7 @@ pub mod routing;
 pub(crate) mod routing_groups;
 pub mod routing_order;
 pub mod routing_scope;
+pub(crate) mod runtime_capacity;
 pub mod sanitize;
 pub mod scheduled_tasks;
 // 侧边栏布局（分组 / 顺序 / 显隐）的持久化：整份 JSON 存 kv 一个键。

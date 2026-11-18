@@ -263,7 +263,6 @@ function toPlainText(info: SystemInfo): string {
     [t('/v1 拒绝无 Key 请求'), onOff(security.v1FailClosed)],
     [t('未注册闸门'), onOff(security.panelGate)],
     [t('允许无 Key 裸跑'), onOff(security.allowNoKey)],
-    [t('GitHub 令牌'), security.githubTokenFilled ? t('已填写') : t('未填写')],
     [t('更新出网线路'), security.updateProxy ? t('已指定出口') : t('直连')],
   ])
   section(t('开关'), [
@@ -440,7 +439,6 @@ function SystemInfoPanel() {
         [t('/v1 拒绝无 Key 请求'), onOff(security.v1FailClosed)],
         [t('未注册闸门'), onOff(security.panelGate)],
         [t('允许无 Key 裸跑'), onOff(security.allowNoKey)],
-        [t('GitHub 令牌'), security.githubTokenFilled ? t('已填写') : t('未填写')],
         [t('更新出网线路'), security.updateProxy ? t('已指定出口') : t('直连')],
       ],
     },

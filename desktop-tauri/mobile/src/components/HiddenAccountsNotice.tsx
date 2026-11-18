@@ -2,7 +2,7 @@ import { useEffect, useId, useState, useSyncExternalStore } from 'react'
 import { Badge, Button, Sheet, SheetBody, SheetContent, SheetFooter, SheetHeader, SheetTitle, SegmentedControl } from '@ui'
 import type { HiddenAccountProvider, HiddenAccountsSummary } from '../../../ui-shared/plugins'
 import { hiddenAction, hiddenDetail, hiddenFailed, hiddenInFilter, hiddenLabel, type HiddenFilter } from '../../../ui-shared/plugin-hidden'
-import { getPluginStartup, hiddenWithStartup, refreshPluginStartup, subscribePluginStartup } from '../../../ui-shared/plugin-startup'
+import { getPluginStartup, hiddenWithStartup, refreshPluginStartup, refreshPluginStartupIfIdle, subscribePluginStartup } from '../../../ui-shared/plugin-startup'
 import { store } from '../state/store'
 import { t } from '../i18n'
 
@@ -11,7 +11,7 @@ export function HiddenAccountsNotice({ hidden }: { hidden?: HiddenAccountsSummar
   const [filter, setFilter] = useState<HiddenFilter>('all')
   const state = useSyncExternalStore(subscribePluginStartup, getPluginStartup)
   const prefix = useId()
-  useEffect(() => { if (open) refreshPluginStartup() }, [open])
+  useEffect(() => { if (open) refreshPluginStartupIfIdle() }, [open])
   if (!hidden?.total) return null
   const providers = hiddenWithStartup(hidden).providers
   const broken = providers.filter(hiddenFailed).length
@@ -20,7 +20,7 @@ export function HiddenAccountsNotice({ hidden }: { hidden?: HiddenAccountsSummar
   const shown = providers.filter(item => hiddenInFilter(item, filter))
   const goPlugins = (item?: HiddenAccountProvider) => {
     setOpen(false)
-    const inspect = item?.packId && !['not_installed', 'pack_disabled', 'provider_disabled'].includes(item.reason)
+    const inspect = item?.packId && !['not_installed', 'legacy_unsupported', 'pack_disabled', 'provider_disabled'].includes(item.reason)
     store.push('plugins', inspect ? { id: item.packId! } : undefined)
   }
   return <>
@@ -29,6 +29,9 @@ export function HiddenAccountsNotice({ hidden }: { hidden?: HiddenAccountsSummar
         {t('未显示账号')} {providers.length}
         {broken ? <Badge variant='warning' shape='tag'>{t('加载异常')}</Badge> : null}
       </Button>
+      {state.value?.booting ? <p className='m-0 mt-2 text-xs text-muted-foreground' role='status'>
+        {t('正在准备插件，账号将在本轮启动完成后统一显示。')}
+      </p> : null}
     </div>
     <Sheet open={open} onOpenChange={next => { if (!next) setOpen(false) }}>
       <SheetContent>

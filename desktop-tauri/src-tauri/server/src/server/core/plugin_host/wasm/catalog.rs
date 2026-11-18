@@ -33,6 +33,15 @@ fn snapshot(provider: &str) -> Option<Arc<Snapshot>> {
 
 pub(crate) fn enabled(provider: &str) -> bool { super::has_capability(provider, "catalog.accounts.v1") }
 
+// OfficeAce、ChatGLM、LobsterAI、Loomy 与 Tabbit 两站的官方目录控制展示，旧合法点名请求仍由上游判断；
+// Tabbit 插件在本账号快照中解析 slug/display_name，宿主的 id-only 门不能拒绝合法展示名。
+// Accio 两站由各自插件按当前账号目录严格解析 id/name/upstreamKey，宿主的 id-only 门不能拒绝合法别名。
+// MonkeyCode 两站分别在当前账号快照中严格映射唯一 UUID，分页展示清单不授予任务来源。
+// 千问两站分别展示完整 qwork 目录，由插件在原账号快照按 id/name/upstreamKey 解析并核对权益。
+// ZCode 两站的客户端目录与赠送套餐模型只供各自账号展示，合法点名请求仍由原上游判断。
+// 账号快照只负责聚合与隔离，其它提供商仍执行原有使用资格门。
+fn enforces_permissions(provider: &str) -> bool { !matches!(provider, "officeace" | "chatglm" | "lobsterai" | "loomy" | "tabbit" | "tabbit-intl" | "accio" | "accio-cn" | "monkeycode" | "monkeycode-intl" | "qwenwork" | "qwenwork-intl" | "zcode" | "zcode-intl") && enabled(provider) }
+
 pub(super) fn cached(provider: &str, account: &str) -> Result<Value, proto::WireError> {
     let store = plugin_accounts::shared().ok_or_else(|| super::error("账号存储尚未就绪"))?;
     let state = store.plugin_state(provider, account, KEY).map_err(super::error)?;
@@ -106,21 +115,21 @@ pub(crate) fn rebuild(provider: &str) {
 
 pub(crate) fn route_allowed(account: &Value, model: &str) -> Option<bool> {
     let provider = account["provider"].as_str()?;
-    if !enabled(provider) || model.is_empty() { return None; }
+    if !enforces_permissions(provider) || model.is_empty() { return None; }
     let permissions = &account["pluginModelPermissions"];
     if permissions["known"] != true { return None; }
     Some(permissions["models"].as_array()?.iter().any(|id| id.as_str().is_some_and(|id| id.eq_ignore_ascii_case(model))))
 }
 
 pub(crate) fn allowed(provider: &str, account: &str, model: &str) -> Option<bool> {
-    if !enabled(provider) || model.is_empty() { return None; }
+    if !enforces_permissions(provider) || model.is_empty() { return None; }
     let snapshot = snapshot(provider)?;
     let list = snapshot.accounts.get(account)?;
     Some(list.models.iter().any(|entry| entry["id"].as_str().is_some_and(|id| id.eq_ignore_ascii_case(model))))
 }
 
 pub(crate) async fn ensure(adapter: &super::super::RpcAdapter, account: &str, model: &str) -> Result<(), crate::server::errors::GatewayError> {
-    if !enabled(adapter.provider_id()) { return Ok(()) }
+    if !enforces_permissions(adapter.provider_id()) { return Ok(()) }
     let store = plugin_accounts::shared().ok_or_else(|| crate::server::errors::GatewayError::with_status(503, "账号存储尚未就绪"))?;
     if allowed(adapter.provider_id(), account, model).is_none() {
         let _ = adapter.refresh_models(&store, account, false).await;
@@ -137,7 +146,7 @@ pub(crate) async fn ensure(adapter: &super::super::RpcAdapter, account: &str, mo
 pub(crate) async fn refresh_all(adapter: &super::super::RpcAdapter, force: bool) -> crate::server::core::providers::adapter::ModelRefreshOutcome {
     use crate::server::core::providers::adapter::ModelRefreshOutcome;
     let Some(store) = plugin_accounts::shared() else { return ModelRefreshOutcome::failed("账号存储尚未就绪") };
-    let accounts = store.accounts_for_provider(adapter.provider_id());
+    let accounts = store.maintenance_accounts_for_provider(adapter.provider_id());
     let mut refreshed = false;
     let mut failures = Vec::new();
     for account in accounts {

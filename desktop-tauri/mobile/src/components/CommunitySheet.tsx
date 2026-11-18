@@ -1,6 +1,6 @@
 import { Sheet, SheetContent, SheetHeader, SheetBody, SheetTitle, SheetFooter , Button } from '@ui'
 import { Icon } from './Icon'
-import { Badge, copyWithToast } from './ui'
+import { copyWithToast } from './ui'
 import { COMMUNITY_LINKS, QQ_GROUPS, openExternal } from '../lib/community'
 import { t } from '../i18n'
 
@@ -63,19 +63,11 @@ export function CommunitySheet({
                     {group.no}
                   </span>
                 </div>
-                <div className='m-t2 whitespace-normal'>
-                  {group.nearlyFull
-                    ? t('即将满员，请优先加3群、4群')
-                    : t('点击复制群号')}
-                </div>
+                <div className='m-t2 whitespace-normal'>{t('点击复制群号')}</div>
               </div>
-              {group.nearlyFull ? (
-                <Badge tone='warn'>{t('即将满员')}</Badge>
-              ) : (
-                <span style={{ color: 'var(--m-primary)', display: 'flex', flex: 'none' }}>
-                  <Icon name='copy' style={{ width: 16, height: 16 }} />
-                </span>
-              )}
+              <span style={{ color: 'var(--m-primary)', display: 'flex', flex: 'none' }}>
+                <Icon name='copy' style={{ width: 16, height: 16 }} />
+              </span>
             </Button>
           ))}
 

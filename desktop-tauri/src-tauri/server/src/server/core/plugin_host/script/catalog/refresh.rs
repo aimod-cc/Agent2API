@@ -8,7 +8,7 @@ use tokio::sync::Notify;
 
 use super::{cache, github, market, network, types};
 
-const MARKET_TTL: i64 = 6 * 3_600_000;
+const MARKET_TTL: i64 = 5 * 60_000;
 const GITHUB_TTL: i64 = 10 * 60_000;
 
 struct Worker { wake: Notify, force: AtomicBool, started: AtomicBool }

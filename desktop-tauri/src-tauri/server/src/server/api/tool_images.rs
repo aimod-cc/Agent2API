@@ -184,6 +184,7 @@ async fn submit(name: &str, args: &Value, ctx: &McpRequestContext, db: &Db) -> R
     let hash_copy = hash.clone();
     let state = ctx.state.clone();
     let source = ctx.source.clone();
+    let key_source = ctx.key_source.clone();
     // 受理落库与启动独立于 HTTP 请求生命周期，断线不能只留下占位记录。
     let acceptance = tokio::spawn(async move {
         let (job, created) = blocking::run(move || image_jobs::create(&db_copy, &config, image_jobs::NewJob {
@@ -194,7 +195,7 @@ async fn submit(name: &str, args: &Value, ctx: &McpRequestContext, db: &Db) -> R
             let id = job.id.clone();
             tokio::spawn(async move {
                 run_job(state, db, id, payload, ImageExecution { operation, headers: HeaderMap::new(),
-                    scope: Some(scope), source, started_at: logging::now_ms(), is_assistant: false }, timeout).await;
+                    scope: Some(scope), key_source, source, started_at: logging::now_ms(), is_assistant: false }, timeout).await;
             });
         }
         Ok::<_, GatewayError>(job)
@@ -215,7 +216,7 @@ fn name_for(operation: ImageOperation) -> &'static str {
 }
 
 async fn run_job(state: ServerState, db: Db, id: String, mut payload: Value, input: ImageExecution, timeout: u64) {
-    let telemetry = Arc::new(RequestTelemetry::new());
+    let telemetry = Arc::new(RequestTelemetry::new_with_model_key(input.key_source.clone()));
     telemetry.ensure_id(&id);
     let deadline = Instant::now() + Duration::from_secs(timeout);
     let preparation = async {

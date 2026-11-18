@@ -1,7 +1,7 @@
 import * as React from 'react'
 import {
   Badge, BadgeDot, Button, Meter, Popover, PopoverContent, PopoverDescription,
-  PopoverHeader, PopoverTitle, PopoverTrigger,
+  PopoverHeader, PopoverTitle, PopoverTrigger, SegmentedControl,
 } from '@ui'
 import { t } from '../i18n'
 import { isFreePlan, planBadgeLabel } from './accounts-domain'
@@ -28,6 +28,19 @@ export type UsageWindowReading = {
   resetsAt: number | null
   expiresAt: number | null
   aside: boolean
+}
+
+export type ModelQuotaReading = {
+  id: string
+  name: string
+  group: string
+  window: string
+  windowCode: string
+  view: string
+  percent: number | null
+  percentText: string
+  tone: 'ok' | 'warn' | 'muted'
+  resetsAt: number | null
 }
 
 type WindowGroup = { id: string; name: string; rows: UsageWindowReading[] }
@@ -81,6 +94,38 @@ export function usageWindows(entry: UsageEntry): UsageWindowReading[] {
   return readings
 }
 
+export function usageModelQuotas(entry: UsageEntry): ModelQuotaReading[] {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return []
+  const rows = Array.isArray(entry.modelQuotas) ? entry.modelQuotas : []
+  const readings: ModelQuotaReading[] = []
+  for (const value of rows) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+    const row = value as Record<string, unknown>
+    const id = typeof row.id === 'string' ? row.id.trim() : ''
+    const name = typeof row.name === 'string' && row.name.trim() ? row.name.trim() : id
+    if (!id && !name) continue
+    const group = typeof row.group === 'string' ? row.group.trim() : ''
+    const windowCode = typeof row.window === 'string' ? row.window.trim().toLowerCase() : ''
+    const window = windowLabel(typeof row.window === 'string' ? row.window : '')
+    const read = usageNumberOrNull(row.remainingPercent)
+    const percent = read === null ? null : Math.max(0, Math.min(100, read))
+    const resetsAt = usageNumberOrNull(row.resetsAt)
+    readings.push({
+      id: id || name,
+      name,
+      group,
+      window,
+      windowCode,
+      view: usageWindowView(row, t, numberText),
+      percent,
+      percentText: percent !== null ? `${numberText(percent)}%` : '',
+      tone: percent === null ? 'muted' : percent < 20 ? 'warn' : 'ok',
+      resetsAt: resetsAt !== null && resetsAt > 0 && resetsAt <= 8.64e15 ? resetsAt : null,
+    })
+  }
+  return readings
+}
+
 function groupWindows(rows: UsageWindowReading[]): WindowGroup[] {
   const groups = new Map<string, WindowGroup>()
   for (const row of rows) {
@@ -127,6 +172,41 @@ function WindowReading({ row }: { row: UsageWindowReading }) {
   )
 }
 
+function ModelQuotaCard({ row }: { row: ModelQuotaReading }) {
+  const value = row.percentText || row.view
+  const remaining = row.percent === null ? row.view : t('剩余 {percent}%', { percent: numberText(row.percent) })
+  return (
+    <div className='usage-window-model-card'>
+      <div className='usage-window-model-head'>
+        <span className='usage-window-model-name' title={`${row.name} (${row.id})`}>{row.name}</span>
+        <span className={`usage-window-model-val ${row.tone}`}>{value}</span>
+      </div>
+      <div className='usage-window-model-sub'>
+        <span className='usage-window-model-id' title={row.id}>{row.id}</span>
+        {row.window ? <span className='usage-window-model-win'>{row.window}</span> : null}
+      </div>
+      {row.percent !== null ? (
+        <Meter value={row.percent} variant={row.tone === 'warn' ? 'warning' : 'success'}
+          className='mt-1.5' trackClassName='h-[3px]' indicatorClassName={row.tone === 'ok' ? 'opacity-75' : undefined}
+          aria-label={`${row.name} · ${remaining}`} />
+      ) : null}
+      <div className='usage-window-model-reset'>
+        {row.resetsAt !== null
+          ? <time dateTime={new Date(row.resetsAt).toISOString()}>{t('重置 {date}', { date: formatTime(row.resetsAt) })}</time>
+          : <span>{t('未返回重置时间')}</span>}
+      </div>
+    </div>
+  )
+}
+
+function groupTitleFor(groupName: string, models: ModelQuotaReading[]): string | undefined {
+  if (!groupName || !models.length) return undefined
+  const matched = models.filter(model => model.group === groupName)
+  if (!matched.length) return undefined
+  const list = matched.map(model => `${model.name} ${model.percentText || model.view}`).join('\n')
+  return `${t('{group}（{count} 个模型）', { group: groupName, count: matched.length })}\n${list}`
+}
+
 export function UsageWindowsCell({ entry, rows, updatedAt, creditDetail, children }: {
   entry: UsageEntry
   rows: UsageWindowReading[]
@@ -134,12 +214,15 @@ export function UsageWindowsCell({ entry, rows, updatedAt, creditDetail, childre
   creditDetail?: React.ReactNode
   children?: React.ReactNode
 }) {
+  const [detailTab, setDetailTab] = React.useState<'models' | 'windows'>('models')
   const data = entry && typeof entry === 'object' ? entry : {}
   const subscription = data.subscription && typeof data.subscription === 'object'
     ? data.subscription as Record<string, unknown> : {}
   const planName = typeof subscription.planName === 'string' ? subscription.planName.trim() : ''
+  const models = React.useMemo(() => usageModelQuotas(entry), [entry])
   const groups = groupWindows(rows)
   const grouped = rows.some(row => row.group)
+  const activeTab = models.length > 0 ? detailTab : 'windows'
   // 无分组、读数较长或没有比例的窗口（Kiro 的「剩 x / y 积分」、AStudio 的
   // 两个余额）按紧凑行排：标签在左、读数在右。不这样排的话，未分组的窗口会
   // 走「统计格」样式（标签在上一行、读数 15px 在下一行），单列时整格被一个
@@ -149,6 +232,7 @@ export function UsageWindowsCell({ entry, rows, updatedAt, creditDetail, childre
   const supplementary = supplementaryReadings(data, rows)
   const measured = rows.filter(row => !row.aside && !row.unlimited)
   const low = measured.some(row => row.percent !== null ? row.percent < 20 : row.remaining !== null && row.remaining <= 0)
+    || models.some(model => model.percent !== null && model.percent < 20)
   const unknown = measured.some(row => row.percent === null && row.remaining === null) || warnings.length > 0
   const informational = measured.length === 0 && rows.every(row => !row.unlimited)
   const status = informational ? t('额度详情') : low ? t('部分窗口偏低') : unknown ? t('部分读数未知') : t('额度充足')
@@ -168,12 +252,15 @@ export function UsageWindowsCell({ entry, rows, updatedAt, creditDetail, childre
         </span>
         <span className={`usage-window-grid${grouped ? ' grouped' : ' ungrouped'}${compact ? ' compact' : ''}`}
           style={{ '--quota-columns': Math.min(3, groups.length) } as React.CSSProperties}>
-          {groups.map(group => (
-            <span className='usage-window-group' key={group.id}>
-              {group.name ? <span className='usage-window-group-name' title={group.name}>{group.name}</span> : null}
-              {group.rows.map(row => <WindowReading key={row.id} row={row} />)}
-            </span>
-          ))}
+          {groups.map(group => {
+            const title = groupTitleFor(group.name, models)
+            return (
+              <span className='usage-window-group' key={group.id} title={title}>
+                {group.name ? <span className='usage-window-group-name' title={title || group.name}>{group.name}</span> : null}
+                {group.rows.map(row => <WindowReading key={row.id} row={row} />)}
+              </span>
+            )
+          })}
         </span>
         <span className='usage-window-foot'>
           <span className='usage-window-updated' title={updateTitle}>
@@ -181,25 +268,47 @@ export function UsageWindowsCell({ entry, rows, updatedAt, creditDetail, childre
           </span>
           <Popover>
             <PopoverTrigger render={<Button type='button' size='xs' variant='ghost' className='usage-window-detail' />}>
-              {t('额度详情')}<span aria-hidden='true' className='usage-window-caret'>⌄</span>
+              {models.length > 0 ? t('模型配额（{count}）', { count: models.length }) : t('额度详情')}
+              <span aria-hidden='true' className='usage-window-caret'>⌄</span>
             </PopoverTrigger>
-            <PopoverContent align='end' sideOffset={6} className='usage-window-pop'>
-              <PopoverHeader><PopoverTitle>{t('窗口额度与时间')}</PopoverTitle></PopoverHeader>
+            <PopoverContent align='end' sideOffset={6} className={models.length > 0 ? 'usage-window-pop usage-window-pop-wide' : 'usage-window-pop'}>
+              <PopoverHeader>
+                <PopoverTitle>{models.length > 0 ? t('模型与窗口额度') : t('窗口额度与时间')}</PopoverTitle>
+              </PopoverHeader>
               <div className='usage-window-pop-body'>
-                {rows.map(row => (
-                  <div className='usage-window-reset' key={row.id}>
-                    <div className='usage-window-reset-head'>
-                      <span title={row.label}>{row.label}</span>
-                      <span className={`usage-window-reset-value ${row.tone}`}>{row.percentText || row.view}</span>
-                    </div>
-                    {row.resetsAt !== null
-                      ? <time dateTime={new Date(row.resetsAt).toISOString()}>{t('重置 {date}', { date: formatTime(row.resetsAt) })}</time>
-                      : row.expiresAt === null ? <span className='usage-window-reset-unknown'>{t('未返回重置时间')}</span> : null}
-                    {row.expiresAt !== null ? <time dateTime={new Date(row.expiresAt).toISOString()}>
-                      {t('到期 {date}', { date: formatTime(row.expiresAt) })}
-                    </time> : null}
+                {models.length > 0 ? (
+                  <div className='usage-window-pop-tabs'>
+                    <SegmentedControl
+                      aria-label={t('额度详情视图')}
+                      value={activeTab}
+                      onValueChange={setDetailTab}
+                      options={[
+                        { value: 'models', label: t('模型配额'), count: models.length },
+                        { value: 'windows', label: t('分组窗口'), count: rows.length },
+                      ]}
+                    />
                   </div>
-                ))}
+                ) : null}
+                {activeTab === 'models' ? (
+                  <div className='usage-window-model-grid'>
+                    {models.map(model => <ModelQuotaCard key={model.id} row={model} />)}
+                  </div>
+                ) : (
+                  rows.map(row => (
+                    <div className='usage-window-reset' key={row.id}>
+                      <div className='usage-window-reset-head'>
+                        <span title={row.label}>{row.label}</span>
+                        <span className={`usage-window-reset-value ${row.tone}`}>{row.percentText || row.view}</span>
+                      </div>
+                      {row.resetsAt !== null
+                        ? <time dateTime={new Date(row.resetsAt).toISOString()}>{t('重置 {date}', { date: formatTime(row.resetsAt) })}</time>
+                        : row.expiresAt === null ? <span className='usage-window-reset-unknown'>{t('未返回重置时间')}</span> : null}
+                      {row.expiresAt !== null ? <time dateTime={new Date(row.expiresAt).toISOString()}>
+                        {t('到期 {date}', { date: formatTime(row.expiresAt) })}
+                      </time> : null}
+                    </div>
+                  ))
+                )}
                 {supplementary.length ? <div className='usage-window-supplementary'>
                   {supplementary.map(line => <p key={line}>{line}</p>)}
                 </div> : null}

@@ -1,3 +1,7 @@
+pub(super) mod chatglm;
+pub(crate) use chatglm::{prepare as desktop_import_prepare, confirm as desktop_import_confirm,
+    cancel as desktop_import_cancel, status as desktop_import_status, ImportError};
+
 use std::collections::HashSet;
 use std::time::Duration;
 use agent2api_provider_protocol as proto;
@@ -37,6 +41,7 @@ pub(crate) async fn snapshot(pack_id: Option<&str>) -> Value {
                 let available = super::super::host_for_provider(provider).is_some_and(|host| host.ready())
                     && super::super::serves_provider(provider);
                 for id in &options.manifest.helpers {
+                    if super::desktop_credentials::helper(provider) == Some(id.as_str()) { continue; }
                     requested.push(json!({ "pack": pack.id, "provider": provider, "id": id,
                         "available": available, "callerDigest": pack.sha256 }));
                 }
@@ -46,6 +51,7 @@ pub(crate) async fn snapshot(pack_id: Option<&str>) -> Value {
             for (provider, helpers) in providers {
                 let Some(helpers) = helpers.as_object() else { continue };
                 for (id, grant) in helpers {
+                    if super::desktop_credentials::helper(provider) == Some(id.as_str()) { continue; }
                     if grant["callerPack"].as_str() != Some(pack.id.as_str()) { continue; }
                     scoped_grants.entry(provider.clone()).or_insert_with(|| json!({}))[id] = grant.clone();
                     if !requested.iter().any(|item| item["provider"] == *provider && item["id"] == *id) {
@@ -70,6 +76,11 @@ pub(crate) async fn snapshot(pack_id: Option<&str>) -> Value {
         }
     }
     let mut candidates = Vec::new();
+    for item in &requested {
+        if let (Some(provider),Some(id)) = (item["provider"].as_str(),item["id"].as_str()) {
+            if let Some(candidate) = super::desktop_credentials::candidate(provider,id) { candidates.push(candidate); }
+        }
+    }
     let mut results = stream::iter(sources).map(|(pack, version, digest, provider, host)| async move {
         let result = host.call_coded("native.helpers", json!({ "provider": provider }), Duration::from_secs(5)).await;
         (pack, version, digest, provider, result)
@@ -130,9 +141,71 @@ pub(crate) async fn grant(provider: &str, helper: &str, selected: &Value, pack_i
     Ok(config::update_raw_field("pluginNativeHelpers", all))
 }
 
+pub(super) fn authorized_builtin(provider: &str, helper: &str) -> Result<(), proto::WireError> {
+    if helper == super::desktop_credentials::HELPER_CATPAW {
+        let store = crate::server::core::account_store::plugin_accounts::shared().ok_or_else(super::desktop_credentials::invalid)?;
+        if store.plugin_account("desktop-auth").is_some_and(|record| record["provider"] == provider && record["desktop"] == true) { return Ok(()); }
+    }
+    let grant = grants()[provider][helper].clone();
+    let pack = super::super::provider_pack(provider).ok_or_else(|| super::error("插件归属不可用"))?;
+    let digest = super::super::PackRegistry::load().packs.into_iter().find(|entry|entry.id==pack).map(|entry|entry.sha256);
+    if super::desktop_credentials::candidate(provider,helper).is_none_or(|candidate|
+        ["pack","version","provider","id","operations","digest"].iter().any(|key| grant[*key] != candidate[*key]))
+        || grant["callerPack"] != pack || grant["callerDigest"].as_str()!=digest.as_deref() {
+        let message = if helper == super::desktop_credentials::HELPER_RACCOON_REFRESH {
+            "请在小浣熊插件设置里明确授权本机续期与安全写回"
+        } else if super::desktop_credentials::refresh::helper(provider) == Some(helper) {
+            "请在当前插件设置里明确授权本机续期与安全写回"
+        } else if helper == super::qoder_umid::HELPER {
+            "请在当前插件设置里明确授权官方设备验证组件"
+        } else if helper.starts_with("desktop.device.") {
+            "请在当前插件设置里明确授权读取这家客户端的设备标识"
+        } else {
+            "请在当前插件设置里明确授权主程序读取这家客户端的登录态"
+        };
+        return Err(proto::WireError::with_code(message, "native_helper_not_authorized"));
+    }
+    Ok(())
+}
+
 impl Context {
     pub(super) async fn native(&mut self, params: &Value) -> Result<Value, proto::WireError> {
         self.permission("native.helpers.v1")?;
+        if self.shared.options.provider == "cline-free" && params["helper"] == "desktop.credentials.cline.v1"
+            && params["operation"].as_str() != Some("read") {
+            return Err(proto::WireError::with_code("Cline Free受控续期尚未接通，原生辅助不能刷新旧材料", "forbidden"));
+        }
+        if self.shared.options.provider == "raccoon"
+            && params["helper"] == super::desktop_credentials::HELPER_RACCOON_REFRESH {
+            return super::desktop_credentials::raccoon_refresh(self, params).await;
+        }
+        if params["helper"] == super::qoder_umid::HELPER {
+            return super::qoder_umid::invoke(self, params).await;
+        }
+        if super::client_device::helper(&self.shared.options.provider).is_some_and(|helper| params["helper"] == helper) {
+            return super::client_device::invoke(self, params).await;
+        }
+        if params["helper"] == super::quwork_device::HELPER {
+            return super::quwork_device::invoke(self, params).await;
+        }
+        if super::desktop_credentials::refresh::helper(&self.shared.options.provider).is_some_and(|helper| params["helper"] == helper) {
+            return super::desktop_credentials::refresh::invoke(self, params).await;
+        }
+        if params["helper"].as_str() == super::desktop_credentials::helper(&self.shared.options.provider) {
+            if params["operation"] == "read" && params["payload"].as_object().is_some_and(|fields| fields.is_empty()) {
+                return super::desktop_credentials::invoke(self, &json!({})).await;
+            }
+            if matches!(self.shared.options.provider.as_str(), "autoclaw" | "autoclaw-intl") && params["operation"] == "decrypt" {
+                super::desktop_credentials::authorize_decrypt(self, &params["payload"])?;
+                let provider = self.shared.options.provider.clone();
+                let payload = params["payload"].clone();
+                let result = crate::server::core::blocking::run(move || super::desktop_credentials::decrypt(&provider, &payload)).await
+                    .map_err(|_| super::desktop_credentials::invalid())?;
+                super::desktop_credentials::authorize_decrypt(self, &params["payload"])?;
+                return result;
+            }
+            return Err(proto::WireError::with_code("固定本机导入不支持该操作", "forbidden"));
+        }
         let _mutation = super::super::operations::mutation_guard().await;
         let helper = params["helper"].as_str().unwrap_or("");
         let operation = params["operation"].as_str().unwrap_or("");

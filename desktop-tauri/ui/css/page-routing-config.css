@@ -4,24 +4,17 @@
   overflow: hidden; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface-2);
   background-image: radial-gradient(var(--hairline) .8px, transparent .8px); background-size: 20px 20px; }
 .routing-config-rail { position: relative; z-index: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; gap: 0; padding: 0;
-  border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); overflow: hidden; }
+  border: 1px solid var(--sidebar-border); border-radius: var(--r-lg); overflow: hidden; }
 .routing-config-rail-head { display: flex; align-items: center; gap: 8px; padding: 12px; }
 .routing-config-rail-head b { font-size: 13px; font-weight: 600; }
 .routing-config-rail-head > span { color: var(--text-3); font-size: 12px; }
 .routing-config-rail-head > button { margin-left: auto; }
 .routing-rail-search { padding: 0 10px 8px; }
 .routing-rail-search input { font-size: 12px; }
-.routing-config-rail-list { flex: 1; min-height: 0; padding: 0 7px 10px; overflow: auto;
-  --ui-selection-bg: var(--primary-soft); --ui-selection-border: transparent; }
+.routing-config-rail-list { flex: 1; min-height: 0; padding: 0 8px 12px; overflow: auto; }
 .routing-config-rail-list > * { flex: none; }
-.routing-config-rail-list [data-slot='sidebar-group-label'] { padding: 12px 8px 4px; font-size: 11px; }
-.routing-config-rail-list .routing-config-scope-item { padding: 9px 8px; }
-.routing-config-rail-list .routing-config-scope-item[data-active] { color: var(--primary-fg); }
-.routing-config-scope-item b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-weight: 550; }
-.routing-config-scope-item small { display: block; margin-top: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: 11px; font-weight: 400; }
-.routing-config-scope-item[data-active] small { color: var(--primary-fg); }
 .routing-rail-dirty { display: inline-flex; flex: none; align-items: center; }
-.routing-config-rail-foot { padding: 10px; gap: 0; border-top: 1px solid var(--hairline); }
+.routing-config-rail-foot { padding: 12px; gap: 0; }
 .routing-config-rail-foot button { width: 100%; }
 
 .routing-canvas { position: relative; display: grid; grid-template-columns: minmax(270px, 314px) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto;
@@ -230,10 +223,11 @@
 .routing-model-providers, .routing-model-choices { display: flex; flex-direction: column; gap: 10px; min-width: 0; min-height: 0; padding: 10px; }
 .routing-model-providers { background: var(--rail-bg); border-right: 1px solid var(--hairline); }
 .routing-model-providers > input, .routing-model-choices > input { flex: none; font-size: 12px; }
-.routing-model-provider-list { flex: 1; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; --ui-selection-bg: var(--primary-soft); --ui-selection-border: transparent; }
-.routing-model-provider-list > [data-slot='nav-item'] { flex: none; min-width: 0; padding: 9px 7px; font-size: 12px; }
+.routing-model-provider-list { flex: 1; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.routing-model-provider-list > [data-slot='nav-item'] { flex: none; min-width: 0; }
 .routing-model-provider-list > .routing-model-provider-all { position: sticky; top: 0; z-index: 2; background: var(--rail-bg); }
-.routing-model-provider-list > .routing-model-provider-all[data-active] { background: var(--primary-soft); color: var(--primary-fg); }
+/* 固定项会盖住滑块，选中时仍沿用统一导航配色。 */
+.routing-model-provider-list > .routing-model-provider-all[data-active] { background: var(--nav-selected-bg); border-color: var(--nav-selected-border); }
 .routing-model-provider-list .routing-provider-mark { width: 22px; height: 22px; }
 .routing-model-choices-head { display: flex; flex: none; align-items: center; gap: 8px; color: var(--text-3); font-size: 11px; }
 .routing-model-choices-head > b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); font-size: 12.5px; font-weight: 600; }

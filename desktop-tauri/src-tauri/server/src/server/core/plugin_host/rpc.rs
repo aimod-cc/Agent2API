@@ -41,6 +41,7 @@ use crate::server::core::upstream::ForwardOutcome;
 use crate::server::errors::GatewayError;
 
 use super::Host;
+use super::wasm::conversation::ConversationOwner;
 use super::errors::strict;
 
 #[path = "rpc_images.rs"]
@@ -164,8 +165,10 @@ pub struct RpcAdapter {
     binding: Option<Arc<tokio::sync::OnceCell<RpcAdapter>>>,
     /// 握手时取回的能力位（本地缓存）。
     capabilities: proto::Capabilities,
+    web_tool_emulation: bool,
     image_generation: bool,
     account_user_agent: bool,
+    sms_login: bool,
     stop_on_error: bool,
     image_editing: bool,
     image_models: Vec<Value>,
@@ -192,11 +195,14 @@ impl RpcAdapter {
             id: leak_str(id),
             label: leak_str(info.label.clone()),
             kind,
-            account_user_agent: (host.options.script && info.id.as_str() != "agy-cli") || host.options.wasm.is_some(),
-            stop_on_error: host.options.script && info.id.as_str() == "agy-cli",
+            account_user_agent: host.options.script || host.options.wasm.is_some(),
+            sms_login: info.login_methods.iter().any(|method| matches!(method, proto::LoginMethod::Sms { .. })),
+            stop_on_error: false,
             host,
             lease: None,
             binding: None,
+            web_tool_emulation: info.default_models.iter()
+                .any(|model| crate::server::core::upstream::web_tools::Profile::from_model(model).is_some()),
             capabilities: info.capabilities,
             image_generation: false,
             image_editing: false,
@@ -205,6 +211,12 @@ impl RpcAdapter {
             refusal_finishes: leak_slice(info.refusal_finishes),
             refusal_markers: leak_slice(info.refusal_markers),
         }
+    }
+
+    pub(super) fn configure_script_execution(&mut self, account_user_agent: bool, stop_on_error: bool) {
+        if !self.host.options.script { return; }
+        self.account_user_agent = account_user_agent;
+        self.stop_on_error = stop_on_error;
     }
 
     pub(super) fn leased(&self) -> Option<Self> {
@@ -237,13 +249,11 @@ impl RpcAdapter {
 
     pub(super) fn host(&self) -> &Arc<Host> { &self.host }
 
+    pub(super) fn dynamic_login(&self) -> bool {
+        self.host.options.wasm.is_some() || self.host.options.script
+    }
+
     pub(super) async fn load_capabilities(&mut self) {
-        if !self.host.options.script && self.host.options.wasm.is_none() {
-            let result = self.control(proto::methods::gateway::ADMIN_ACTION, serde_json::json!({
-                "provider": self.id, "account": "", "action": "network.user-agent", "payload": {},
-            })).await;
-            self.account_user_agent = result.ok().is_some_and(|value| value["accountWide"] == true);
-        }
         let result = self.control(
             crate::server::core::providers::images::CAPABILITIES_METHOD,
             Value::Object(self.base()),
@@ -265,10 +275,22 @@ impl RpcAdapter {
 
     /// 调一次要出网的 RPC（超时更宽）。
     async fn network(&self, method: &str, mut params: Value) -> Result<Value, GatewayError> {
+        if matches!(self.id, "cline-free" | "codearts") && self.metadata().host.options.wasm.is_some()
+            && method == proto::methods::gateway::MODELS_REFRESH {
+            let store = crate::server::core::account_store::plugin_accounts::shared()
+                .ok_or_else(|| GatewayError::with_status(503, "原账号存储尚未就绪"))?;
+            let account = params["account"].as_str().unwrap_or("");
+            if !account.is_empty() {
+                self.prepare_read_credentials(&store, account).await?;
+            }
+        }
         super::account_egress::apply(&mut params)?;
         // 脚本签到可包含多步领取与对话任务，不能套用单次网络请求的两分钟预算。
         let timeout = if self.host.options.script && method == proto::methods::gateway::CHECKIN_CLAIM {
             Duration::from_secs(600)
+        } else if self.host.options.wasm.is_some() && self.id == "workbuddy-intl"
+            && method == proto::methods::gateway::ADMIN_ACTION && params["action"] == "activity.run" {
+            Duration::from_secs(60)
         } else { NETWORK_TIMEOUT };
         self.call(method, params, timeout).await
     }
@@ -293,11 +315,37 @@ impl RpcAdapter {
         let host = execution.host.clone();
         let method = method.to_string();
         let provider = self.id;
+        let desktop_selected = super::wasm::desktop_credentials::selected_import(provider);
+        let supplied_credentials = super::wasm::desktop_credentials::supplied_import();
+        let account = params["account"].as_str().unwrap_or("").to_string();
+        let usage_query = crate::server::core::usage_query::is_account_query(provider, &account);
+        let query_deadline = crate::server::core::usage_query::account_query_deadline(provider, &account)
+            .filter(|_| host.options.wasm.is_some());
+        let timeout = query_deadline.map_or(timeout, |deadline| timeout.min(deadline.saturating_duration_since(tokio::time::Instant::now())));
+        let query_reservation = super::wasm::query_queue::capture(provider, &account, &method);
+        let query_trace = crate::server::core::usage_query::diagnostics::capture(provider, &account);
+        if timeout.is_zero() {
+            return Err(GatewayError::with_status(504, "余额查询已到本轮时间上限，未开始新的插件调用").with_code("usage_timeout"));
+        }
+        let capacity_caller = crate::server::core::runtime_capacity::caller();
+        let capacity_background = crate::server::core::runtime_capacity::background();
         // 调用方取消等待不能让已发送的管理动作失去保护，完成或超时后才释放租约。
         crate::spawn_task(async move {
             let _lease = lease;
-            host.call_coded(&method, params, timeout).await
-                .map_err(|error| rpc_error(provider, error, &method))
+            crate::server::core::usage_query::diagnostics::scope(query_trace,
+                super::wasm::query_queue::scope(query_reservation,
+                crate::server::core::usage_query::scope_query_deadline(query_deadline,
+                    crate::server::core::usage_query::scope_account_query(provider, &account, usage_query,
+                        super::wasm::desktop_credentials::supplied_scope(supplied_credentials,
+                            super::wasm::desktop_credentials::import_scope(provider, desktop_selected,
+                                crate::server::core::runtime_capacity::caller_scope(capacity_caller,
+                                    crate::server::core::runtime_capacity::background_if(capacity_background,
+                                        host.call_coded(&method, params, timeout))),
+                            ),
+                        ),
+                    ),
+                ),
+            )).await.map_err(|error| rpc_error(provider, error, &method))
         }).await.map_err(|_| GatewayError::with_status(503, "插件调用任务中断"))?
     }
 
@@ -325,6 +373,21 @@ impl RpcAdapter {
 
 /// 控制面与 head 前的会话错误共用同一解码，不靠文案猜分类。
 pub(super) fn rpc_error(provider: &str, error: proto::WireError, method: &str) -> GatewayError {
+    if error.code.as_deref() == Some("plugin_busy") {
+        return GatewayError::with_status(503, "插件正在处理其他操作，等待超时，请稍后重试").with_code("plugin_busy")
+            .with_retry_after_seconds(crate::server::core::runtime_capacity::retry_after_seconds());
+    }
+    if error.code.as_deref() == Some("plugin_resource_limit") {
+        let message = match error.message.as_str() {
+            "Wasm 插件计算额度耗尽" => "Wasm 插件计算额度耗尽",
+            "Wasm 插件执行栈溢出" => "Wasm 插件执行栈溢出",
+            "Wasm 插件内存超限" => "Wasm 插件内存超限",
+            "Wasm 插件表容量超限" => "Wasm 插件表容量超限",
+            "Wasm 插件共享内存预算超限" => "Wasm 插件共享内存预算超限",
+            _ => "插件运行资源已达上限，未继续处理请求",
+        };
+        return GatewayError::with_status(503, message).with_code("plugin_resource_limit");
+    }
     if strict::applies(provider) { return strict::wire_error(provider, &error, method); }
     if let Some(failure) = super::errors::control_error(&error) {
         return failure;
@@ -341,7 +404,8 @@ pub(super) fn rpc_error(provider: &str, error: proto::WireError, method: &str) -
         Some(proto::WireError::ABORTED) => 499,
         Some("timeout") => 504,
         Some("plugin_unavailable") => 503,
-        Some("forbidden") => 403,
+        Some("forbidden" | "account_origin_authorization_required") => 403,
+        Some("account_origin_proxy_unsupported") => 409,
         Some("bad_params") => 400,
         _ => 502,
     };
@@ -375,6 +439,12 @@ impl ProviderAdapter for RpcAdapter {
         // 定期调 `models.list` 填充。缓存为空时返回内置兜底（握手时
         // `provider.info` 已经带回来了）。
         let mut models = super::rpc_cache::models_for(self.id).unwrap_or_default();
+        if !self.metadata().web_tool_emulation {
+            // 降级插件后，旧目录缓存不能自行重新授予模拟契约。
+            for model in &mut models {
+                if let Some(fields) = model.as_object_mut() { fields.remove("toolEmulation"); }
+            }
+        }
         for image in &self.metadata().image_models {
             let id = crate::server::core::models::model_id(image);
             if let Some(existing) = models.iter_mut().find(|item| crate::server::core::models::model_id(item).eq_ignore_ascii_case(&id)) {
@@ -601,7 +671,7 @@ impl ProviderAdapter for RpcAdapter {
         Box::pin(async move {
             if self.metadata().stop_on_error {
                 return crate::server::core::providers::policy::ErrorPolicy {
-                    stop: true, reason: "ACP 会话失败时不自动重发，也不切换到其他接入方式。".into(),
+                    stop: true, stop_switching: true, reason: "本机客户端会话失败时不自动重发，也不切换到其他接入方式。".into(),
                     ..Default::default()
                 };
             }
@@ -651,10 +721,25 @@ impl ProviderAdapter for RpcAdapter {
 
     fn credentials_expiring_async<'a>(
         &'a self,
-        _store: &'a AccountStore,
+        store: &'a AccountStore,
         account_id: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
+            if super::operations::active_for_provider(self.id) { return false; }
+            if self.id == "cline-free" && self.metadata().host.options.wasm.is_some() {
+                let store = store.clone();
+                let account = account_id.to_string();
+                if store.plugin_account(&account).is_some_and(|record| record["desktop"] == true) {
+                    return self.control(proto::methods::gateway::TOKEN_EXPIRING, self.with_account(account_id)).await
+                        .ok().and_then(|value| value.as_bool()).unwrap_or(false);
+                }
+                return crate::server::core::blocking::run(move || store.read_free_refresh_origin(&account)
+                    .is_ok_and(|origin| origin.expiring())).await.unwrap_or(false);
+            }
+            if self.id == "codearts" && self.metadata().host.options.wasm.is_some()
+                && super::rpc_refresh::readiness(store, self.id, account_id).await.is_err() {
+                return false;
+            }
             self.control(
                 proto::methods::gateway::TOKEN_EXPIRING,
                 self.with_account(account_id),
@@ -738,6 +823,7 @@ impl ProviderAdapter for RpcAdapter {
 
     fn supports_account_user_agent(&self) -> bool {
         self.metadata().account_user_agent
+            && !crate::server::core::user_agent::builtin_agent_plugin(self.id)
     }
 
     fn supports_refresh(&self) -> bool {
@@ -805,6 +891,117 @@ impl ProviderAdapter for RpcAdapter {
         Some(self.metadata().capabilities.checkin)
     }
 
+    fn supports_managed_login(&self, method_index: u64) -> bool {
+        self.metadata().host.options.wasm.as_ref().is_some_and(|options|
+            options.allows("login.managed.v1") && options.manifest.managed_login.as_ref()
+                .is_some_and(|declaration| declaration.methods.contains(&method_index)))
+    }
+
+    fn managed_login_owner(&self) -> Option<Arc<dyn ProviderAdapter>> {
+        let mut owner = self.metadata().clone();
+        if owner.host.options.wasm.as_ref().is_none_or(|options| !options.allows("login.managed.v1")) { return None; }
+        owner.lease = None;
+        owner.binding = None;
+        Some(Arc::new(owner))
+    }
+
+    fn prepare_managed_login(&self, call: &crate::server::core::login::managed::Call) -> Result<(), GatewayError> {
+        call.validate_adapter(self)?;
+        self.metadata().host.prepare_wasm_managed(call)
+    }
+
+    fn managed_login_action<'a>(
+        &'a self,
+        call: &'a crate::server::core::login::managed::Call,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, GatewayError>> + Send + 'a>> {
+        Box::pin(async move {
+            call.validate_adapter(self)?;
+            // 已登记任务固定原 host/runtime，绝不 ensure 或重新解析切换后的执行体。
+            self.metadata().host.call_wasm_managed(call, NETWORK_TIMEOUT).await
+                .map_err(|error| rpc_error(self.id, error, call.method()))
+        })
+    }
+
+    fn sms_action<'a>(
+        &'a self,
+        store: &'a AccountStore,
+        call: &'a crate::server::core::login::sms::Call,
+        action: &'a str,
+        payload: &'a Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, GatewayError>> + Send + 'a>> {
+        Box::pin(async move {
+            call.validate_adapter(self)?;
+            call.validate_action(action, payload)?;
+            let execution = self.execution().await?;
+            if execution.host.options.wasm.is_none() {
+                return self.admin_action(store, "", action, payload).await;
+            }
+            let host = execution.host.clone();
+            host.ensure().await.map_err(|_| GatewayError::with_status(503, "短信登录执行体不可用"))?;
+            let call = call.clone();
+            let action = action.to_string();
+            let payload = payload.clone();
+            let provider = self.id;
+            // 管理请求断开仍由主机任务完成/取消；可信凭据不是可伪造的 JSON 字段。
+            crate::spawn_task(async move {
+                host.call_wasm_sms(&call, &action, payload, NETWORK_TIMEOUT).await
+                    .map_err(|error| rpc_error(provider, error, proto::methods::gateway::ADMIN_ACTION))
+            }).await.map_err(|_| GatewayError::with_status(503, "短信登录调用中断"))?
+        })
+    }
+
+    fn verification_action<'a>(
+        &'a self,
+        store: &'a AccountStore,
+        account_id: &'a str,
+        payload: &'a Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, GatewayError>> + Send + 'a>> {
+        Box::pin(async move {
+            let execution = self.metadata();
+            let host = execution.host.clone();
+            if super::host_for_provider(self.id).is_none_or(|current| !Arc::ptr_eq(&current, &host))
+                || !super::serves_provider(self.id) || super::registry::is_switching(self.id) {
+                return Err(GatewayError::with_status(503, "验证码执行体正在切换或尚未就绪"));
+            }
+            if host.options.wasm.is_some() {
+                return host.call_wasm_verification(store, self.id, account_id, "captcha.push", payload).await
+                    .map_err(|error| rpc_error(self.id, error, proto::methods::gateway::ADMIN_ACTION));
+            }
+            // 仅真正原生的旧全局池兼容；固定当前 host，不调用会等待切换/重选的 execution。
+            if host.options.script || !account_id.is_empty() || !super::wasm::verification::legacy_global_allowed() {
+                return Err(GatewayError::with_status(403, "当前执行体不支持此验证码提交契约"));
+            }
+            let _lease = host.activity.acquire().ok_or_else(|| GatewayError::with_status(503, "验证码执行体正在切换"))?;
+            host.ensure().await.map_err(|_| GatewayError::with_status(503, "原生验证码执行体不可用"))?;
+            let params = serde_json::json!({ "provider": self.id, "account": "", "action": "captcha.push", "payload": payload });
+            host.call_coded(proto::methods::gateway::ADMIN_ACTION, params, NETWORK_TIMEOUT).await
+                .map_err(|error| rpc_error(self.id, error, proto::methods::gateway::ADMIN_ACTION))
+        })
+    }
+
+    fn claim_verification_action<'a>(
+        &'a self,
+        store: &'a AccountStore,
+        account_id: &'a str,
+        complete: bool,
+        payload: &'a Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, GatewayError>> + Send + 'a>> {
+        Box::pin(async move {
+            let host = self.metadata().host.clone();
+            let action = if complete { "claim.verification.complete" } else { "claim.verification.poll" };
+            if super::host_for_provider(self.id).is_none_or(|current| !Arc::ptr_eq(&current, &host))
+                || !super::serves_provider(self.id) || super::registry::is_switching(self.id) {
+                return Err(GatewayError::with_status(503, "领取验证码执行体正在切换或尚未就绪"));
+            }
+            if host.options.wasm.is_some() {
+                return host.call_wasm_verification(store, self.id, account_id, action, payload).await
+                    .map_err(|error| rpc_error(self.id, error, proto::methods::gateway::ADMIN_ACTION));
+            }
+            super::wasm::verification::native_claim(&host, self.id, account_id, complete, payload).await
+                .map_err(|error| rpc_error(self.id, error, proto::methods::gateway::ADMIN_ACTION))
+        })
+    }
+
     /// 厂商专属管理动作：转发成一次 `admin.action` RPC。
     ///
     /// ── 超时用 `network` 而不是 `control` ───────────────────────
@@ -820,6 +1017,9 @@ impl ProviderAdapter for RpcAdapter {
         Box<dyn std::future::Future<Output = Result<Value, GatewayError>> + Send + 'a>,
     > {
         Box::pin(async move {
+            if super::wasm::verification::guarded_action(action) && self.metadata().host.options.wasm.is_some() {
+                return Err(GatewayError::with_status(403, "验证码交互必须由主程序账号验证入口发起"));
+            }
             if self.metadata().host.options.wasm.is_some() && matches!(action, "login.interaction" | "login.submit") {
                 let mut params = payload.clone();
                 params["provider"] = Value::String(self.id.into());
@@ -867,12 +1067,20 @@ impl ProviderAdapter for RpcAdapter {
 
     fn ensure_access_token<'a>(
         &'a self,
-        _store: &'a AccountStore,
+        store: &'a AccountStore,
         account_id: &'a str,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<String, GatewayError>> + Send + 'a>,
     > {
         Box::pin(async move {
+            if matches!(self.id, "codearts" | "cline-free") && self.metadata().host.options.wasm.is_some()
+                && self.supports_refresh() && self.credentials_expiring_async(store, account_id).await {
+                // CodeArts 旧/手工材料没有登记时，尚未到期的访问仍可只读使用；不据临期补建续期资格。
+                // 已登记后的真实换证失败继续报错，不能沿用旧值冒充本次换证成功。
+                if self.id != "codearts" || super::rpc_refresh::readiness(store, self.id, account_id).await.is_ok() {
+                    return self.refresh_access_token(store, account_id).await;
+                }
+            }
             let value = self
                 .network(proto::methods::gateway::TOKEN_ENSURE, self.with_account(account_id))
                 .await?;
@@ -891,9 +1099,19 @@ impl ProviderAdapter for RpcAdapter {
         Box<dyn std::future::Future<Output = Result<String, GatewayError>> + Send + 'a>,
     > {
         Box::pin(async move {
-            let value = self
-                .network(proto::methods::gateway::TOKEN_REFRESH, self.with_account(account_id))
-                .await?;
+            let value = if matches!(self.id, "codearts" | "cline-free") && self.metadata().host.options.wasm.is_some() {
+                let execution = self.execution().await?;
+                super::rpc_refresh::readiness(_store, self.id, account_id).await?;
+                let params = self.with_account(account_id);
+                let result = if self.id == "cline-free" {
+                    if _store.plugin_account(account_id).is_some_and(|record| record["desktop"] == true) {
+                        execution.host.call_wasm_cline_desktop_refresh(params, NETWORK_TIMEOUT).await
+                    } else { execution.host.call_wasm_cline_free_refresh(params, NETWORK_TIMEOUT).await }
+                } else { execution.host.call_wasm_codearts_refresh(params, NETWORK_TIMEOUT).await };
+                result.map_err(|error| rpc_error(self.id, error, proto::methods::gateway::TOKEN_REFRESH))?
+            } else {
+                self.network(proto::methods::gateway::TOKEN_REFRESH, self.with_account(account_id)).await?
+            };
             value
                 .as_str()
                 .map(str::to_string)
@@ -911,25 +1129,50 @@ impl ProviderAdapter for RpcAdapter {
 
     fn refresh_models<'a>(
         &'a self,
-        _store: &'a AccountStore,
+        store: &'a AccountStore,
         account_id: &'a str,
         force: bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ModelRefreshOutcome> + Send + 'a>> {
         Box::pin(async move {
-            if account_id.is_empty() && super::wasm::catalog::enabled(self.id) {
-                return Box::pin(super::wasm::catalog::refresh_all(self, force)).await;
+            if !force && super::operations::active_for_provider(self.id) {
+                return ModelRefreshOutcome::failed("插件正在安装或更新，自动目录刷新已暂缓");
             }
+            let execution = match self.execution().await {
+                Ok(execution) => execution,
+                Err(error) => return ModelRefreshOutcome::failed(error.message),
+            };
+            if account_id.is_empty() && super::wasm::catalog::enabled(self.id) {
+                return Box::pin(super::wasm::catalog::refresh_all(execution, force)).await;
+            }
+            let wasm = execution.host.options.wasm.is_some();
+            let selected = if wasm && account_id.is_empty() && execution.capabilities.refresh_uses_account {
+                // 目录维护按本家凭据与优先级选号，不向插件开放凭据枚举。
+                store.maintenance_accounts_for_provider(self.id).into_iter()
+                    .find_map(|account| account["id"].as_str().map(str::to_string))
+            } else { None };
+            let account_id = selected.as_deref().unwrap_or(account_id);
+            if wasm && !account_id.is_empty() && store.account_provider_of(account_id).as_deref() != Some(self.id) {
+                return ModelRefreshOutcome::failed("所选账号不存在或不属于当前提供商，已保留模型清单");
+            }
+            let missing_account = wasm && account_id.is_empty() && execution.capabilities.refresh_uses_account;
             let mut params = self.base();
             params.insert("account".into(), Value::String(account_id.to_string()));
             params.insert("force".into(), Value::Bool(force));
-            match self
+            match execution
                 .network(proto::methods::gateway::MODELS_REFRESH, Value::Object(params))
                 .await
             {
                 Ok(value) => match serde_json::from_value::<proto::RefreshOutcome>(value.clone()) {
                     Ok(outcome) => {
-                        if self.host.options.script {
-                            super::script::observe_concurrency(&self.host, self.id, &value);
+                        if execution.host.options.script {
+                            super::script::observe_concurrency(&execution.host, self.id, &value);
+                        }
+                        if missing_account && outcome.refreshed {
+                            return ModelRefreshOutcome {
+                                refreshed: false,
+                                count: super::rpc_cache::models_for(self.id).map(|models| models.len()).unwrap_or(0),
+                                message: Some("没有可用账号，已保留原有静态或缓存模型清单".into()),
+                            };
                         }
                         if !outcome.refreshed {
                             return ModelRefreshOutcome {
@@ -940,9 +1183,14 @@ impl ProviderAdapter for RpcAdapter {
                                 } else { outcome.message },
                             };
                         }
-                        let list = if self.host.options.script || self.host.options.wasm.is_some() || crate::server::core::providers::is_scoped_runtime_provider(self.id) {
+                        let list = if execution.host.options.script || wasm || crate::server::core::providers::is_scoped_runtime_provider(self.id) {
+                            if wasm && value.get("count").and_then(Value::as_u64).is_none() {
+                                return ModelRefreshOutcome::failed("插件刷新缺少明确的模型数量，已保留旧清单");
+                            }
                             match serde_json::from_value::<proto::ModelList>(value) {
-                                Ok(list) if list.meta.remote && outcome.count == list.models.len() => list,
+                                Ok(list) if list.meta.remote && outcome.count == list.models.len()
+                                    && (!wasm || list.meta.refreshed_at >= 0 && list.models.iter().all(|model|
+                                        model["id"].as_str().is_some_and(|id| !id.trim().is_empty()))) => list,
                                 _ => return ModelRefreshOutcome::failed("插件刷新缺少同次真实远程模型快照，已保留旧清单"),
                             }
                         } else { match self.control(
@@ -964,7 +1212,7 @@ impl ProviderAdapter for RpcAdapter {
                                 Err(error) => return ModelRefreshOutcome::failed(error.message),
                             }
                         } else { super::rpc_cache::set_remote(self.id, list) };
-                        if count == 0 && !self.host.options.script && self.host.options.wasm.is_none()
+                        if count == 0 && !execution.host.options.script && !wasm
                             && !crate::server::core::providers::is_scoped_runtime_provider(self.id) {
                             return ModelRefreshOutcome::failed("插件刷新后没有可用模型，已保留旧清单");
                         }
@@ -999,7 +1247,7 @@ impl ProviderAdapter for RpcAdapter {
 
     fn forward_conversation<'a>(
         &'a self,
-        _store: &'a AccountStore,
+        store: &'a AccountStore,
         account_id: &'a str,
         body: &'a Value,
         client_headers: &'a HeaderMap,
@@ -1012,12 +1260,31 @@ impl ProviderAdapter for RpcAdapter {
         Box::pin(async move {
             super::wasm::catalog::ensure(self, account_id, body["model"].as_str().unwrap_or("")).await?;
             let execution = self.execution().await?;
+            let prepared_tools = if execution.web_tool_emulation {
+                crate::server::core::upstream::web_tools::prepare(body, &execution.list_models())?
+            } else { None };
+            let (body, tool_context) = match &prepared_tools {
+                Some(prepared) => (&prepared.body, prepared.context.is_some()),
+                None => (body, false),
+            };
+            if tool_context {
+                telemetry.note_attempt_notice("已启用网页工具模拟：正文在完整校验后下发，工具仍由客户端执行");
+            }
             let host = execution.host.clone();
             let lease = execution.lease.clone().or_else(|| host.activity.acquire())
                 .ok_or_else(|| super::activity::AvailabilityError::Unavailable.gateway())?;
+            let workbuddy_failure = if self.id == "workbuddy" && host.options.wasm.is_some() {
+                Some(super::stream::workbuddy::Owner::prepare(store, account_id,
+                    body["model"].as_str().unwrap_or(""), telemetry.clone()).await)
+            } else { None };
+            let (mut conversation, trusted_call) = if host.options.wasm.is_some() {
+                // 仍在原选号scope内；缺来源只关闭受控出口资格，不停用普通对话。
+                let egress = super::account_egress::capture_current(self.id, account_id, telemetry);
+                let (owner, call) = ConversationOwner::open(&host, self.id, account_id, telemetry, egress)?;
+                (Some(owner), Some(call))
+            } else { (None, None) };
             let mut params = self.base();
             params.insert("account".into(), Value::String(account_id.to_string()));
-            params.insert("proxy".into(), proxy.map(wire_proxy).transpose()?.unwrap_or(Value::Null));
             params.insert("body".into(), body.clone());
             params.insert("headers".into(), headers_json(client_headers));
             // ── 恒发 `stream: true` ────────────────────────────────
@@ -1031,6 +1298,7 @@ impl ProviderAdapter for RpcAdapter {
                 crate::server::core::upstream::plugin_session_id(client_headers, body)
             } else { session_of(client_headers) }));
             if host.options.wasm.is_some() {
+                params.insert("client_stream".into(), Value::Bool(stream));
                 if let Some(trace) = super::script::register_trace(telemetry) {
                     params.insert("plugin_trace".into(), Value::String(trace));
                 }
@@ -1047,19 +1315,39 @@ impl ProviderAdapter for RpcAdapter {
 
             let strict = strict::applies(self.id);
             let mut params = Value::Object(params);
-            super::account_egress::apply(&mut params)?;
-            let call = host
-                .open_stream(proto::methods::gateway::CONVERSATION, params)
-                .await
-                .map_err(|e| {
-                    if strict { strict::fatal(self.id, 503, "runtime_transport_unavailable") }
-                    else { GatewayError::with_status(503, format!("提供商插件不可用：{e}")) }
-                })?;
+            // 不先降格proxy再apply；兼容JSON和可信来源使用同一次完整路径选择。
+            super::account_egress::apply_conversation(&mut params, proxy)?;
+            let opening_call = async {
+                match trusted_call {
+                    Some(call) => host.open_wasm_conversation(params, call).await,
+                    None => host.open_stream(proto::methods::gateway::CONVERSATION, params).await
+                        .map(|call| (call, None)),
+                }
+            };
+            let opened = if host.options.wasm.is_some() {
+                if let Some(token) = telemetry.cancel_token() {
+                    tokio::select! {
+                        biased;
+                        _ = token.cancelled() => {
+                            drop(conversation.take());
+                            return Err(crate::server::core::upstream::cancellation::cancelled_error());
+                        }
+                        result = opening_call => result,
+                    }
+                } else { opening_call.await }
+            } else { opening_call.await };
+            let (call, classifier) = opened.map_err(|e| {
+                drop(conversation.take());
+                if strict { strict::fatal(self.id, 503, "runtime_transport_unavailable") }
+                else { GatewayError::with_status(503, format!("提供商插件不可用：{e}")) }
+            })?;
+            let workbuddy_failure = workbuddy_failure.map(|owner| owner.bind(classifier));
             let id = call.id;
             let mut events = call.events;
             // head 前取消也必须把流清理完，不能先释放宿主使用凭证。
             let mut opening = Some(ErrorBodyScope {
                 host: host.clone(), id, abort_on_drop: true, lease: Some(lease.clone()),
+                conversation: conversation.take(),
             });
 
             // ── 等 head：这段时间里插件在做真正的上游请求 ────────────────
@@ -1077,7 +1365,10 @@ impl ProviderAdapter for RpcAdapter {
                 if let Some(token) = telemetry.cancel_token() {
                     tokio::select! {
                         biased;
-                        _ = token.cancelled() => return Err(crate::server::core::upstream::cancellation::cancelled_error()),
+                        _ = token.cancelled() => {
+                            if let Some(scope) = &mut opening { scope.close_conversation(); }
+                            return Err(crate::server::core::upstream::cancellation::cancelled_error());
+                        }
                         result = receive => result,
                     }
                 } else { receive.await }
@@ -1086,6 +1377,7 @@ impl ProviderAdapter for RpcAdapter {
                 Ok(Some(event)) => event,
                 // 通道关了：宿主清表（进程没了）
                 Ok(None) => {
+                    if let Some(scope) = &mut opening { scope.close_conversation(); }
                     host.close_stream(id);
                     return Err(GatewayError::with_status(
                         502,
@@ -1095,6 +1387,7 @@ impl ProviderAdapter for RpcAdapter {
                 Err(_) => {
                     // 超时：取消掉这条调用，否则插件会一直跑到上游自己超时，
                     // 而客户端早就拿到错误了 —— 那份上游连接是白占的。
+                    if let Some(scope) = &mut opening { scope.close_conversation(); }
                     host.abort(id).await;
                     host.close_stream(id);
                     return Err(GatewayError::with_status(
@@ -1145,6 +1438,8 @@ impl ProviderAdapter for RpcAdapter {
                         let mut classified = conversation_error(status, class, &detail);
                         classified.code = failure.code;
                         classified = classified.with_optional_code(failure.upstream_code);
+                        classified.plugin_metadata = failure.plugin_metadata;
+                        if classified.retry_after_secs.is_none() { classified.retry_after_secs = failure.retry_after_secs; }
                         failure = classified;
                     }
                     return Err(failure);
@@ -1158,6 +1453,7 @@ impl ProviderAdapter for RpcAdapter {
                     ));
                 }
                 super::StreamEvent::Failed(message) => {
+                    if let Some(scope) = &mut opening { scope.close_conversation(); }
                     host.close_stream(id);
                     return Err(if strict { strict::fatal(self.id, 502, "runtime_stream_interrupted") }
                         else { GatewayError::with_status(502, message) });
@@ -1165,19 +1461,20 @@ impl ProviderAdapter for RpcAdapter {
                 // 先到的居然是正文：协议要求先 head，但把它当「状态码 200」
                 // 继续处理比报错有用 —— 少一帧头不至于让整条流作废。
                 super::StreamEvent::Chunk(_) if strict => {
+                    if let Some(scope) = &mut opening { scope.close_conversation(); }
                     return Err(GatewayError::with_status(502, "辅助程序在真实响应头之前发送正文，未猜测成功"));
                 }
                 super::StreamEvent::Chunk(bytes) => {
                     let status = 200;
-                    if let Some(scope) = opening.take() { scope.handoff(); }
+                    let conversation = opening.take().and_then(ErrorBodyScope::handoff_conversation);
                     return execution
-                        .finish_stream(id, status, stream, events, Some(bytes), wire_model, telemetry, None, lease)
+                        .finish_stream(id, status, stream, events, Some(bytes), wire_model, telemetry, None, lease, conversation, workbuddy_failure, prepared_tools.and_then(|prepared| prepared.context))
                         .await;
                 }
             };
 
-            if let Some(scope) = opening.take() { scope.handoff(); }
-            execution.finish_stream(id, head.status, stream, events, None, wire_model, telemetry, Some(head.headers), lease)
+            let conversation = opening.take().and_then(ErrorBodyScope::handoff_conversation);
+            execution.finish_stream(id, head.status, stream, events, None, wire_model, telemetry, Some(head.headers), lease, conversation, workbuddy_failure, prepared_tools.and_then(|prepared| prepared.context))
                 .await
         })
     }
@@ -1314,6 +1611,7 @@ impl ProviderAdapter for RpcAdapter {
                 "provider": self.id,
                 "method": "browser",
                 "proxy": options.get("proxy").cloned().unwrap_or(Value::Null),
+                "proxy_override": options.get("proxy").is_some(),
                 "payload": options,
             });
             // 直接授权入口可能先向上游注册 OAuth 客户端，使用网络请求超时。
@@ -1534,11 +1832,25 @@ impl ProviderAdapter for RpcAdapter {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Value, GatewayError>> + Send + 'a>,
     > {
-        Box::pin(async move {
+        let (waiter, pending) = super::wasm::checkin_call::Waiter::new(self.id, account_id, NETWORK_TIMEOUT);
+        Box::pin(waiter.wait(async move {
             let mut params = self.base();
             params.insert("account".into(), Value::String(account_id.to_string()));
             params.insert("manual".into(), Value::Bool(manual));
-            let value = self.network(proto::methods::gateway::CHECKIN_CLAIM, Value::Object(params)).await?;
+            let mut params = Value::Object(params);
+            super::account_egress::apply(&mut params)?;
+            let execution = self.execution().await?;
+            let value = if execution.host.options.wasm.is_some() {
+                let lease = execution.lease.clone().or_else(|| execution.host.activity.acquire())
+                    .ok_or_else(|| super::activity::AvailabilityError::Unavailable.gateway())?;
+                match pending.run(execution.host.clone(), lease, params, NETWORK_TIMEOUT).await? {
+                    super::wasm::checkin_call::CallResult::Ordinary(value) => value,
+                    super::wasm::checkin_call::CallResult::Unknown(settlement) => return Ok(settlement.claim()),
+                }
+            } else {
+                let timeout = if self.host.options.script { Duration::from_secs(600) } else { NETWORK_TIMEOUT };
+                self.call(proto::methods::gateway::CHECKIN_CLAIM, params, timeout).await?
+            };
             let retry_at = value.get("retryAt").cloned();
             let checkin_until = (self.host.options.script || self.host.options.wasm.is_some()).then(|| value.get("until").and_then(Value::as_i64))
                 .flatten().filter(|until| *until > crate::server::logging::now_ms()
@@ -1638,7 +1950,7 @@ impl ProviderAdapter for RpcAdapter {
                 }
             }
             Ok(claim)
-        })
+        }))
     }
 
     /// 插件领取：`claim` RPC，结果原样透给调用方。
@@ -1654,6 +1966,11 @@ impl ProviderAdapter for RpcAdapter {
             let mut params = self.base();
             params.insert("account".into(), Value::String(account_id.to_string()));
             params.insert("claim".into(), Value::String(claim.to_string()));
+            if self.id == "doubaowork" && self.metadata().host.options.wasm.is_some() {
+                let execution = self.execution().await?;
+                return execution.host.call_wasm_doubao_rewards(Value::Object(params), NETWORK_TIMEOUT).await
+                    .map_err(|error| rpc_error(self.id, error, proto::methods::gateway::CLAIM));
+            }
             self.network(proto::methods::gateway::CLAIM, Value::Object(params))
                 .await
         })
@@ -1674,6 +1991,12 @@ impl ProviderAdapter for RpcAdapter {
                 if let Some(object) = params.as_object_mut() {
                     object.insert("refresh".into(), Value::Bool(true));
                 }
+            }
+            if self.id == "doubaowork" && self.metadata().host.options.wasm.is_some() {
+                let execution = self.execution().await?;
+                params["claim"] = Value::String(String::new());
+                return execution.host.call_wasm_doubao_rewards(params, NETWORK_TIMEOUT).await
+                    .map_err(|error| rpc_error(self.id, error, proto::methods::gateway::CLAIM_STATUS));
             }
             self.network(proto::methods::gateway::CLAIM_STATUS, params)
                 .await
@@ -1740,6 +2063,17 @@ impl RpcAdapter {
                 "账号库尚未就绪，无法保存登录结果",
             ));
         };
+        if let Some(completed) = super::wasm::codearts_login::take(self.id, account) {
+            let origin = store.prepare_codearts_enrollment_origin().map_err(|_| GatewayError::with_status(503,"CodeArts 新登录的账号存储不可用"))?;
+            return match origin.commit_new_login(completed, proxy) {
+                crate::server::core::account_store::credential_version::EnrollmentCommitOutcome::Committed {receipt,..} => Ok(receipt.account().to_string()),
+                _ => Err(GatewayError::with_status(503,"CodeArts 登录已完成，但保存未确认；不会再次交换授权码")),
+            };
+        }
+        if self.id == "codearts" && self.metadata().host.options.wasm.is_some()
+            && account.secret["refresh_token"].as_str().is_some_and(|token| !token.is_empty()) {
+            return Err(GatewayError::with_status(503, "CodeArts 新授权保存来源未确认，未改用普通导入或再次交换授权码"));
+        }
         let id = account.identity.clone();
         let name = account
             .public
@@ -1770,19 +2104,24 @@ impl RpcAdapter {
         id: i64,
         status: u16,
         stream: bool,
-        events: tokio::sync::mpsc::UnboundedReceiver<super::StreamEvent>,
+        events: super::StreamEvents,
         pending: Option<Vec<u8>>,
         wire_model: String,
         telemetry: &Arc<RequestTelemetry>,
         response_headers: Option<std::collections::BTreeMap<String, String>>,
         lease: Arc<super::activity::UsageLease>,
+        mut conversation: Option<ConversationOwner>,
+        workbuddy_failure: Option<super::stream::workbuddy::Owner>,
+        tool_context: Option<crate::server::core::upstream::web_tools::Context>,
     ) -> Result<ForwardOutcome, GatewayError> {
+        let workbuddy = workbuddy_failure.is_some();
         // ── 失败状态：先收齐正文再分类（与内置家的门控同一处置）────────
         // `status >= 400` 时插件仍会推 chunk（那是错误体的字节），但客户端
         // 要的是一份**完整的** JSON 错误，而不是一段 SSE。
         if status >= 400 {
+            drop(conversation.take());
             let scope = ErrorBodyScope {
-                host: self.host.clone(), id, abort_on_drop: true, lease: Some(lease.clone()),
+                host: self.host.clone(), id, abort_on_drop: true, lease: Some(lease.clone()), conversation: None,
             };
             let mut error_private = None;
             let collected = match collect(self.id, &self.host, id, events, pending, telemetry, &mut error_private).await {
@@ -1807,6 +2146,17 @@ impl RpcAdapter {
                         let code = if status == 556 { proto::WireError::LOCAL_PRECONDITION } else { "runtime_stream_interrupted" };
                         return Err(strict::fatal(self.id, status, code));
                     }
+                    if let Some(owner) = workbuddy_failure {
+                        let mut error = error;
+                        if telemetry.is_cancelled() {
+                            error = crate::server::core::upstream::cancellation::cancelled_error();
+                        } else if matches!(status, 499 | 504) {
+                            error = GatewayError::with_status(i32::from(status), error.message);
+                        } else if error.code.is_none() {
+                            error.code = Some("runtime_stream_interrupted".into());
+                        }
+                        return Err(owner.finish(error).await);
+                    }
                     return Err(error);
                 }
             };
@@ -1817,6 +2167,9 @@ impl RpcAdapter {
                 // 错误页形态不同，逐家解析没有意义）。
                 Err(_) => Value::String(text.to_string()),
             };
+            if let Some(owner) = workbuddy_failure {
+                return Err(owner.finish(super::errors::workbuddy_stream::response(status, &error)).await);
+            }
             // 分类走同一个 RPC 入口（插件知道自己的业务码含义）。
             let class = self.classify_error_async(status, &error).await;
             if strict::applies(self.id) {
@@ -1825,8 +2178,15 @@ impl RpcAdapter {
             return Err(conversation_error(status, class, &error));
         }
 
+        if self.id == "catpaw" && self.host.options.wasm.is_some()
+            && (!(200..300).contains(&status) || response_headers.is_none()) {
+            drop(conversation.take());
+            return Err(GatewayError::with_status(502, "CatPaw 原响应头未确认，未以先到正文或非成功状态选择输出来源")
+                .with_code("plugin_response_started"));
+        }
+        if let Some(owner) = &conversation { owner.select_output()?; }
         let strict = strict::applies(self.id);
-        let bounded = strict || self.host.options.wasm.is_some();
+        let bounded = strict || self.host.options.wasm.is_some() || tool_context.is_some();
         let failure = bounded.then(|| Arc::new(std::sync::Mutex::new(None)));
         let private_failure = strict.then(|| Arc::new(std::sync::Mutex::new(None)));
         let source = super::RpcStream::with_pending(
@@ -1839,7 +2199,15 @@ impl RpcAdapter {
             failure.clone(),
             private_failure.clone(),
             lease,
-        );
+        ).with_conversation(if stream { conversation.take() } else { None })
+            .with_workbuddy(workbuddy_failure);
+        let source: futures::stream::BoxStream<'static, Result<bytes::Bytes, std::io::Error>> = Box::pin(source);
+        let has_tool_emulation = tool_context.is_some();
+        let source = match tool_context {
+            Some(context) => crate::server::core::upstream::web_tools::wrap(source, context, telemetry.clone(),
+                failure.clone().ok_or_else(|| GatewayError::new("网页工具调用缺少可信终态观察"))?),
+            None => source,
+        };
 
         // ── 非流式：网关把帧聚合掉（插件恒按 stream:true 推）───────────
         // 客户端要不要流式是**网关**的事：非流式时网关自己聚合（与内置家
@@ -1862,6 +2230,8 @@ impl RpcAdapter {
                 policy,
             )
             .await;
+            // 租约覆盖整个聚合 future；结束后先撤销，再做可能异步的错误分类。
+            drop(conversation.take());
             // 输入流在聚合器丢弃 HTTP/业务元数据前保存错误；不重造聚合规则。
             if strict && telemetry.is_cancelled() {
                 return Err(crate::server::core::upstream::cancellation::cancelled_error());
@@ -1869,11 +2239,25 @@ impl RpcAdapter {
             if strict && aggregated.as_ref().err().is_some_and(|error| error.message.starts_with("非流式响应超时(")) {
                 return Err(strict::fatal(self.id, 504, "upstream_timeout"));
             }
+            if workbuddy {
+                if telemetry.is_cancelled() {
+                    return Err(super::errors::workbuddy_stream::started(
+                        crate::server::core::upstream::cancellation::cancelled_error()));
+                }
+                if let Some(error) = aggregated.as_ref().err().filter(|error| error.message.starts_with("非流式响应超时(")) {
+                    return Err(super::errors::workbuddy_stream::started(
+                        GatewayError::with_status(504, error.message.clone()).with_code("timeout")));
+                }
+            }
             let upstream = failure.and_then(|slot| {
                 let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 guard.take()
             });
             if let Some(error) = upstream {
+                if workbuddy {
+                    // 已由原流唯一Owner分类并尝试条件记账；包括未确认/取消，不再次RPC或冷却。
+                    return Err(super::errors::workbuddy_stream::started(error));
+                }
                 if !strict {
                     let status = u16::try_from(error.status_code).unwrap_or(502);
                     let mut detail = serde_json::json!({ "message": error.message, "code": error.code });
@@ -1905,7 +2289,7 @@ impl RpcAdapter {
             return match aggregated {
                 Ok(done) => Ok(ForwardOutcome::Completion { body: done.body }),
                 Err(error) => {
-                    if self.host.options.wasm.is_some() { return Err(error.with_code("plugin_response_started")); }
+                    if self.host.options.wasm.is_some() || has_tool_emulation { return Err(error.with_code("plugin_response_started")); }
                     if strict { return Err(strict::reproject(self.id, &error)); }
                     Err(error)
                 }
@@ -1967,11 +2351,12 @@ pub(super) struct ErrorBodyScope {
     id: i64,
     abort_on_drop: bool,
     lease: Option<Arc<super::activity::UsageLease>>,
+    conversation: Option<ConversationOwner>,
 }
 
 impl ErrorBodyScope {
     pub(super) fn new(host: Arc<Host>, id: i64, lease: Arc<super::activity::UsageLease>) -> Self {
-        Self { host, id, abort_on_drop: true, lease: Some(lease) }
+        Self { host, id, abort_on_drop: true, lease: Some(lease), conversation: None }
     }
 
     pub(super) fn handoff(mut self) {
@@ -1979,11 +2364,21 @@ impl ErrorBodyScope {
         self.id = 0; // 后续 RpcStream/ErrorBodyScope 接管正数 id，不能此刻清登记。
     }
 
+    fn handoff_conversation(mut self) -> Option<ConversationOwner> {
+        self.abort_on_drop = false;
+        self.id = 0;
+        self.conversation.take()
+    }
+
+    fn close_conversation(&mut self) { drop(self.conversation.take()); }
+
     fn finish(mut self) {
+        self.close_conversation();
         self.abort_on_drop = false;
     }
 
     async fn abort(mut self) {
+        self.close_conversation();
         self.abort_on_drop = false;
         let host = self.host.clone();
         let id = self.id;
@@ -1999,6 +2394,7 @@ impl ErrorBodyScope {
 
 impl Drop for ErrorBodyScope {
     fn drop(&mut self) {
+        self.close_conversation();
         if self.id == 0 { return; }
         self.host.close_stream(self.id);
         if self.abort_on_drop {
@@ -2018,7 +2414,7 @@ async fn collect(
     provider: &str,
     host: &Arc<Host>,
     id: i64,
-    mut events: tokio::sync::mpsc::UnboundedReceiver<super::StreamEvent>,
+    mut events: super::StreamEvents,
     pending: Option<Vec<u8>>,
     telemetry: &RequestTelemetry,
     private_failure: &mut Option<(u16, Value)>,
@@ -2086,6 +2482,9 @@ async fn collect(
             Some(super::StreamEvent::Done(Ok(_))) => return Ok(out),
             Some(super::StreamEvent::Done(Err(error))) => {
                 if strict::applies(provider) { *private_failure = strict::private_control(&error); }
+                if provider == "workbuddy" && host.options.wasm.is_some() {
+                    return Err(super::errors::workbuddy_stream::control(error));
+                }
                 return Err(rpc_error(provider, error, proto::methods::gateway::CONVERSATION));
             }
             Some(super::StreamEvent::Failed(message)) => {

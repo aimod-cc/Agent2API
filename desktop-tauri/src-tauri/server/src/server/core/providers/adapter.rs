@@ -239,6 +239,8 @@ pub enum UpstreamResponse {
     /// OpenAI Chat SSE（默认）
     #[default]
     Chat,
+    /// OpenAI Responses SSE，跨协议出口复用 Responses → Chat 转换器。
+    Responses,
     /// Anthropic Messages SSE：下发前折回标准 chat SSE（见 `upstream::translate`）
     Anthropic,
     /// **AI SDK v5 风格 NDJSON**（`application/x-ndjson`）：一行一个 JSON 事件、
@@ -1595,6 +1597,60 @@ pub trait ProviderAdapter: Send + Sync {
         None
     }
 
+    /// 托管登录只走主程序签发的 Call；默认不把可信事件降级成普通 JSON 管理动作。
+    fn supports_managed_login(&self, _method_index: u64) -> bool { false }
+
+    /// 等待真人期间仅固定执行体身份，不长期占用普通在途调用许可阻止卸载。
+    fn managed_login_owner(&self) -> Option<std::sync::Arc<dyn ProviderAdapter>> { None }
+
+    fn prepare_managed_login(&self, _call: &crate::server::core::login::managed::Call) -> Result<(), GatewayError> {
+        Err(GatewayError::with_status(501, "当前执行体未接入托管登录"))
+    }
+
+    fn managed_login_action<'a>(
+        &'a self,
+        _call: &'a crate::server::core::login::managed::Call,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, GatewayError>> + Send + 'a>> {
+        Box::pin(async { Err(GatewayError::with_status(501, "当前执行体未接入托管登录")) })
+    }
+
+    /// 主程序已绑定短信任务的窄调用；凭据不能由前端载荷构造。
+    /// 旧原生/脚本适配器保持现有管理动作形状，Wasm 单独校验并注入可信上下文。
+    fn sms_action<'a>(
+        &'a self,
+        store: &'a AccountStore,
+        call: &'a crate::server::core::login::sms::Call,
+        action: &'a str,
+        payload: &'a Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, GatewayError>> + Send + 'a>> {
+        Box::pin(async move {
+            call.validate_adapter(self)?;
+            call.validate_action(action, payload)?;
+            self.admin_action(store, "", action, payload).await
+        })
+    }
+
+    /// 主程序模型验证码提交入口；默认不让普通管理调用取得交互通道。
+    fn verification_action<'a>(
+        &'a self,
+        _store: &'a AccountStore,
+        _account_id: &'a str,
+        _payload: &'a Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, GatewayError>> + Send + 'a>> {
+        Box::pin(async { Err(GatewayError::with_status(501, "当前执行体不支持账号验证码提交")) })
+    }
+
+    /// 主程序领取验证入口；固定轮询/回传动作，不影响既有模型验证码签名。
+    fn claim_verification_action<'a>(
+        &'a self,
+        _store: &'a AccountStore,
+        _account_id: &'a str,
+        _complete: bool,
+        _payload: &'a Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, GatewayError>> + Send + 'a>> {
+        Box::pin(async { Err(GatewayError::with_status(501, "当前执行体不支持领取验证码交互")) })
+    }
+
     /// **厂商专属的管理动作**（成长任务 / 每日活跃保活 / 平台福利 / 套餐领取…）。
     ///
     /// ── 为什么是一条通道 ────────────────────────────────────────
@@ -1658,22 +1714,14 @@ pub fn usage_not_configured(provider_label: &str, field_hint: &str) -> GatewayEr
     .with_code(USAGE_NOT_CONFIGURED_CODE)
 }
 
-/// 注册表：provider → 适配器实现。
-///
-/// ── 这里现在只有一件事：返回占位 ──────────────────────────────
-/// 29 个 `ProviderKind` 的实现**全部**搬到了提供商插件（`agent2api-providers`，
-/// 不随本仓库发布）。网关没有任何内置转发 / 账号解析实现可返回，所以本函数
-/// 对任何 kind 都返回 [`missing_plugin::placeholder`] —— 它如实报「需安装
-/// 插件」，而不是在网关里留一份会随时间漂移的旁路实现。
-///
-/// 保留这个函数（而不是让调用点直接拿占位）是因为它是适配器层的**唯一入口**：
-/// 将来若真要接回某个内置实现，改动只在这里；反过来，任何人想往网关里塞
-/// 「怎么打某个上游」的代码，都必须先改这里 —— review 时一眼能看见。
-///
-/// 硬约束：**不要**在这里加任何真实现。插件缺失时如实报错是产品语义的一部分
-/// （见 `missing_plugin` 的模块头），不是待补的坑。
+/// 编译进主程序的订阅实现；旧提供商仍返回缺插件占位。
 pub fn adapter_for(kind: ProviderKind) -> &'static dyn ProviderAdapter {
-    crate::server::core::providers::missing_plugin::placeholder(kind)
+    match kind {
+        ProviderKind::ClaudeSubscription => &super::claude_subscription::ADAPTER,
+        ProviderKind::ChatgptSubscription => &super::chatgpt_subscription::ADAPTER,
+        ProviderKind::CodexSubscription => &super::codex_subscription::ADAPTER,
+        _ => super::missing_plugin::placeholder(kind),
+    }
 }
 
 /// 运行时注册表：provider id → 适配器（插件架构新增）。
@@ -1702,7 +1750,8 @@ pub fn adapter_for(kind: ProviderKind) -> &'static dyn ProviderAdapter {
 /// （迁移期对照、插件实现出问题时的诊断入口）用它，而不是依赖这里的优先级。
 pub fn adapter_by_id(id: &str) -> Option<Arc<dyn ProviderAdapter>> {
     if super::availability::is_suspended(id) { return None; }
-    // 插件家优先（见上面第 3 条：没装/停用时自然落到内置）
+    if let Some(adapter) = super::subscriptions::adapter(id) { return Some(adapter); }
+    // 旧提供商仍由插件执行。
     if let Some(adapter) = crate::server::core::plugin_host::lookup(id) {
         return Some(adapter);
     }
@@ -1712,6 +1761,7 @@ pub fn adapter_by_id(id: &str) -> Option<Arc<dyn ProviderAdapter>> {
 
 pub async fn adapter_by_id_ready(id: &str) -> Result<Option<Arc<dyn ProviderAdapter>>, GatewayError> {
     if super::availability::is_suspended(id) { return Ok(None); }
+    if let Some(adapter) = super::subscriptions::adapter(id) { return Ok(Some(adapter)); }
     if let Some(adapter) = crate::server::core::plugin_host::lookup_ready(id).await? {
         return Ok(Some(adapter));
     }
@@ -1725,7 +1775,7 @@ pub async fn adapter_by_id_ready(id: &str) -> Result<Option<Arc<dyn ProviderAdap
 /// 诊断对照、以及任何「想知道这家有没有编译进网关」的判定。
 /// 生产转发路径一律用 [`adapter_by_id`]（插件优先）。
 pub fn builtin_adapter_by_id(id: &str) -> Option<Arc<dyn ProviderAdapter>> {
-    super::kind_from_id(id).map(Into::into)
+    super::subscriptions::adapter(id).or_else(|| super::kind_from_id(id).map(Into::into))
 }
 
 /// 内置家的 `Arc` 包装（让 `adapter_by_id` 的返回类型统一）。
@@ -2201,22 +2251,9 @@ impl ProviderAdapter for BuiltinAdapter {
     }
 }
 
-/// 已**完整实现**的适配器对应的 kind 列表（顺序 = 注册表顺序）。
-///
-/// ── 现在恒为空，且这是**终点状态** ────────────────────────────
-/// 这个函数回答的问题是「网关编译进去的执行体还剩哪几家」。全部提供商的转发与
-/// 账号实现都已搬到独立的提供商插件（`agent2api-providers`，不随本仓库发布），
-/// 所以答案就是「一家都不剩」。
-///
-/// 保留空实现而不是删掉函数：它的两个消费方（`catalog_refresh` 的逐家刷新与
-/// `reschedule`）都是「遍历内置家」的形状，删掉函数会让那两处改写成
-/// `if false` 之类的形状，反而不如一张空表读得明白。**不要往这张表里加东西**
-/// —— 往里加一家，等于把该家的实现重新带回网关，正是拆家要消除的东西。
-///
-/// 插件家不走这里：`catalog_refresh` 另有基于 `plugin_host::installed_ids()` 的
-/// 第二段循环，与内置家共用同一套「支持才刷」的判据。
+/// 编译进网关的真实执行体；旧身份占位不参与后台刷新。
 pub fn implemented_kinds() -> Vec<ProviderKind> {
-    Vec::new()
+    super::subscriptions::KINDS.to_vec()
 }
 
 /// 一次模型目录刷新的结果（模块头扩展 9）。

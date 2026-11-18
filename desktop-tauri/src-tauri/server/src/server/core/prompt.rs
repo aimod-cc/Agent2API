@@ -40,6 +40,8 @@
 
 use serde_json::{json, Value};
 
+pub mod rules;
+
 /// 降级提示词：内容拦截误报时用的**最小中性提示词**（对应参考项目的
 /// `prompt.Degraded`）。
 ///
@@ -68,7 +70,8 @@ something you did not actually run.
 without explicit confirmation from the user.";
 
 /// 系统提示词的三种模式（配置文件里的字符串就是契约，见 `config::KEY_PROMPT_MODE`）
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PromptMode {
     /// 透传客户端 system（默认；与改造前行为逐字相同）
     #[default]
@@ -236,53 +239,44 @@ impl GatewayBlocks {
     }
 }
 
-/// 一次请求的提示词决定（全局默认 + 各家覆盖的**借用**视图）。
-///
-/// 借用而不是克隆：本结构由 `upstream::forward` 从配置快照里取一次，随
-/// `ProviderContext` 借给整条转发链 —— 提示词可能有几百行，逐请求克隆一份
-/// 纯属浪费（`config::current()` 已经克隆了整份配置，那份克隆在本函数栈帧里
-/// 活得比 ctx 久，所以这里借得到）。
-///
-/// ── 为什么按家分派 ──────────────────────────────────────────
-/// 「用哪份提示词」是**按上游**不同的问题（见 `config::KEY_PROMPT_PROVIDERS`），
-/// 而模式语义（透传 / 替换 / 追加）是同一条加工链（[`PromptChoice::apply`]）——
-/// 所以这里只做「取哪一份」的分派，加工一个字节都不分叉。`provider_id` 在
-/// `payload::send_body` 就有，那正是「某一家即将发送之前」的时刻。
+/// 请求开始时借用同一份规则快照；提供商随实际选路匹配，客户端和模型保持入站值。
 #[derive(Clone, Copy, Debug)]
 pub struct PromptPlan<'a> {
-    /// 未单独配置的家用的那一份（对应全局的 `promptMode` / `promptFile`）
     pub default: PromptChoice<'a>,
-    /// 逐家覆盖（借自配置快照；空表 = 所有家都用 default）
     providers: &'a std::collections::BTreeMap<String, crate::server::config::ProviderPrompt>,
+    rules: &'a [rules::CompiledRule],
+    rules_configured: bool,
+    request: Option<&'a rules::Request>,
 }
 
 impl<'a> PromptPlan<'a> {
-    /// 组装一次请求的提示词决定（**唯一构造点**：`config::RuntimeConfig::prompt_plan`）。
-    ///
-    /// 逐家覆盖不对外暴露字段：它只有「按 id 取一份」这一个合法用法（见
-    /// [`Self::for_provider`]），让调用方拿到整张表迟早会有人自己写一遍查找。
-    ///
-    /// 「网关自带提示词」的开关**不在这里**：它由 `config::gateway_prompt_enabled`
-    /// 直接读（那是一条热路径上的轻量读取，见那里的说明）。两个入口读同一张表，
-    /// 各自不重复实现「缺省 = 装」的默认值，就不会有一处漏改。
     pub fn new(
         default: PromptChoice<'a>,
         providers: &'a std::collections::BTreeMap<String, crate::server::config::ProviderPrompt>,
+        rules: &'a [rules::CompiledRule],
+        rules_configured: bool,
     ) -> Self {
-        Self { default, providers }
+        Self { default, providers, rules, rules_configured, request: None }
     }
 
-    /// 这一家实际要用的那一份（没单独配就走 `default`）。
-    ///
-    /// 返回**借用**视图而不是值：逐家覆盖里带着几百行文本，克隆一次就等于把
-    /// 「借用视图」这层设计白做了。
-    pub fn for_provider(&self, provider_id: &str) -> PromptChoice<'_> {
+    pub fn with_request(mut self, request: &'a rules::Request) -> Self {
+        self.request = Some(request);
+        self
+    }
+
+    pub fn matched_rule(&self, provider_id: &str) -> Option<&'a rules::CompiledRule> {
+        let client = self.request.map(|request| request.client.as_str()).unwrap_or("");
+        let model = self.request.map(|request| request.model.as_str()).unwrap_or("");
+        self.rules.iter().find(|rule| rule.matches(provider_id, client, model))
+    }
+
+    pub fn for_provider(&self, provider_id: &str) -> PromptChoice<'a> {
+        if let Some(rule) = self.matched_rule(provider_id) {
+            return PromptChoice { mode: rule.prompt.mode, text: &rule.prompt.text, source: rule.prompt.source };
+        }
+        if self.rules_configured { return self.default; }
         match self.providers.get(provider_id) {
-            Some(entry) => PromptChoice {
-                mode: entry.mode,
-                text: &entry.text,
-                source: entry.source,
-            },
+            Some(entry) => PromptChoice { mode: entry.mode, text: &entry.text, source: entry.source },
             None => self.default,
         }
     }

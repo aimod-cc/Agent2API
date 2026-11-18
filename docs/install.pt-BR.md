@@ -122,7 +122,7 @@ Início no boot, reinício automático após travamento (`Restart=always`) e des
 >
 > Em instalações antigas, baixe um novo pacote do servidor que inclua esse recurso e execute `sudo bash install.sh --upgrade` uma vez na pasta extraída para instalar o componente. Contas de serviço ou caminhos personalizados não são sobrescritos; mantenha seu procedimento de implantação. Use `AGENT2API_SYSTEMD_UPDATE=0` para desativar a opção no painel, ou desative `agent2api-updater.socket` para desativar o componente. `AGENT2API_SELF_UPDATE` continua exclusivo do Docker.
 >
-> O componente usa um socket local, sem abrir portas de rede. Por padrão, valida o repositório de releases pelo índice oficial. Para fixar um repositório ou configurar um proxy para a validação independente, configure `AGENT2API_UPDATER_REPO=owner/repo` ou `HTTPS_PROXY` em `/etc/agent2api/updater.env`. Falhas na substituição restauram os arquivos antigos. Se a nova inicialização não for confirmada, os arquivos de recuperação ficam em `/opt/agent2api/.before-update-*` e a falha é informada; o banco de dados nunca é revertido automaticamente.
+> O componente usa um socket local, sem abrir portas de rede. As políticas de publicação e os dados de verificação vêm somente do site oficial. Se a validação independente precisar de um proxy, configure `HTTPS_PROXY` em `/etc/agent2api/updater.env`. Falhas na substituição restauram os arquivos antigos. Se a nova inicialização não for confirmada, os arquivos de recuperação ficam em `/opt/agent2api/.before-update-*` e a falha é informada; o banco de dados nunca é revertido automaticamente.
 
 ### Depois de instalar
 
@@ -197,7 +197,8 @@ Variáveis de ambiente (todas opcionais):
 | `AGENT2API_SELF_UPDATE` | Ponto de atualização dentro do contêiner: `1` ativado por padrão (o painel oferece "Baixar e atualizar"); `0` desativa e deixa apenas a atualização manual |
 | `AGENT2API_IMAGE_CACHE_MB` | Limite do cache em memória de download das imagens geradas (MiB, padrão `128`, faixa 8–4096). Valores inválidos ou fora da faixa voltam ao padrão |
 | `AGENT2API_IMAGE_COMPRESS_CACHE_MB` | Limite do cache em memória do resultado da compactação de imagens de sessão (MiB, padrão `128`, faixa 8–4096, mesmas regras) |
-| `WORKBUDDY_UPDATE_REPO` + `WORKBUDDY_UPDATE_API_BASE` | Avançado: aponte "verificar atualizações / baixar atualizações" para a sua própria fonte. O primeiro troca o repositório (por padrão segue o upstream `aimod-cc/Agent2API`; em fork, sobrescreva), o segundo troca a raiz da API (padrão `https://api.github.com`; deve devolver um JSON de release no formato do GitHub). Com uma fonte própria configurada, a lista de permissões de download passa a aceitar, além disso, apenas **o próprio host dessa fonte** (o esquema segue a fonte: uma fonte `http://` também permite download em texto puro — só para ensaios locais / espelhos internos) |
+
+As atualizações de software e plugins consultam versões e baixam pacotes somente pelo [site oficial do Agent2API](https://agent2api.dev/downloads). Fontes personalizadas e aceleradores do GitHub não são mais aceitos, e nenhum token do GitHub é necessário. O proxy de saída para acessar o site pode ser escolhido nas configurações de atualização.
 
 Compilar a partir do código: clone o repositório e rode `docker compose up -d --build` (a imagem contém apenas o gateway e o painel, sem toolchain Rust).
 
@@ -224,7 +225,7 @@ Ajustes de alocador glibc como `MALLOC_ARENA_MAX=2` só fazem sentido em builds 
 
 ### Atualização dentro do contêiner (opcional)
 
-A página "Atualização de software" do painel consegue baixar e aplicar atualizações de dentro do contêiner: busca `agent2api-server-linux-<arch>.tar.gz` no Release oficial (validando o `.sha256`), substitui o executável e a pasta `ui/` e encerra o processo de forma graciosa, para que a política de `restart` suba o mesmo contêiner de novo. Controlado por `AGENT2API_SELF_UPDATE` (`1` no Dockerfile); defina `0` para atualizar apenas manualmente.
+A página Atualização de software pode aplicar atualizações dentro do contêiner. Ela baixa `agent2api-server-linux-<arch>.tar.gz` do site oficial, verifica o SHA-256 publicado no site, substitui o executável e `ui/` e encerra o processo de forma segura. A política de restart inicia novamente o mesmo contêiner. O recurso é controlado por `AGENT2API_SELF_UPDATE` (`1` no Dockerfile); use `0` para atualizar apenas manualmente.
 
 O mesmo `agent2api-server-linux-<arch>.tar.gz` também é o pacote de instalação do [servidor Linux](#linux-systemd): os itens `agent2api-server` e `ui/` são exatamente o que a cadeia de atualização lê pelo nome, e ele ainda traz `install.sh` / `agent2api.service` / `agent2api.env.example`. A cadeia de atualização lê apenas os dois primeiros (o resto é descartado — veja `selfupdate::extract_bundle`), então um artefato serve aos dois propósitos: extrair e substituir dentro do contêiner, extrair e rodar `install.sh` em máquina física.
 

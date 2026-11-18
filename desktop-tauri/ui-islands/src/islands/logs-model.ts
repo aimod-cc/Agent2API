@@ -6,7 +6,7 @@ export * from '../../../ui-shared/logs'
 export type Filters = { view: LogView; level: string; category: string; keyword: string; range: string; aggregate: boolean; dates: CustomDates }
 export type IntervalTask = { id?: string; enabled?: boolean; interval?: number; unit?: string }
 export type LogStats = { lastId?: number; total?: number } | null
-export type LoadOptions = { silent?: boolean; resetPage?: boolean; latest?: boolean; manual?: boolean }
+export type LoadOptions = { silent?: boolean; resetPage?: boolean }
 
 const FILTERS_KEY = 'workbuddy-desktop-logs-filters'
 const RANGE_KEY = 'workbuddy-desktop-logs-range'

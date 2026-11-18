@@ -58,6 +58,7 @@ pub(crate) fn manifest_for_provider(provider: &str) -> Vec<Value> {
     }
     for item in models.iter_mut() {
         model_meta::apply(item);
+        crate::server::core::upstream::web_tools::advertise(item);
     }
     model_rules::apply_capability_overrides(provider, &mut models);
     models
@@ -68,9 +69,13 @@ pub(crate) fn manifest_for(kind: ProviderKind) -> Vec<Value> {
     manifest_for_provider(kind_id(kind))
 }
 
-/// 旧内置目录已迁入插件，网关不再持有按 kind 划分的刷新元数据。
-pub(crate) fn refresh_meta(_kind: ProviderKind) -> (bool, i64) {
-    (false, 0)
+pub(crate) fn refresh_meta(kind: ProviderKind) -> (bool, i64) {
+    match kind {
+        ProviderKind::ClaudeSubscription => super::claude_subscription::refresh_meta(),
+        ProviderKind::ChatgptSubscription => super::chatgpt_subscription::refresh_meta(),
+        ProviderKind::CodexSubscription => super::codex_subscription::refresh_meta(),
+        _ => (false, 0),
+    }
 }
 
 pub(crate) fn refresh_meta_for_provider(provider: &str) -> (bool, i64) {

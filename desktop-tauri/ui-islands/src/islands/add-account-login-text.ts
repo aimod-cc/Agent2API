@@ -1,20 +1,16 @@
 import { t } from '../i18n'
+import { subscriptionLoginText } from './add-account-subscription-text'
 
 export function pluginLoginText(value: string): string {
+  const subscription = subscriptionLoginText(value)
+  if (subscription !== undefined) return subscription
   switch (value.trim()) {
-    case 'ACP 的本机进程仍使用原来的代理。请先在插件页停用再启用 ACP 插件，再使用新的代理。':
-      return t('ACP 的本机进程仍使用原来的代理。请先在插件页停用再启用 ACP 插件，再使用新的代理。')
-    case 'ACP 代理配置无效，请重新选择代理。': return t('ACP 代理配置无效，请重新选择代理。')
+    case '本机客户端进程仍使用原来的代理。请先在插件页停用再启用该插件，再使用新的代理。':
+      return t('本机客户端进程仍使用原来的代理。请先在插件页停用再启用该插件，再使用新的代理。')
+    case '本机客户端代理配置无效，请重新选择代理。': return t('本机客户端代理配置无效，请重新选择代理。')
     case '此提供商已有登录任务，请先完成或取消。': return t('此提供商已有登录任务，请先完成或取消。')
-    case 'ACP 尚未返回可用的会话模型目录，请检查官方 CLI 登录状态后重试。':
-      return t('ACP 尚未返回可用的会话模型目录，请检查官方 CLI 登录状态后重试。')
-    case 'ACP 会话失败时不自动重发，也不切换到其他接入方式。':
-      return t('ACP 会话失败时不自动重发，也不切换到其他接入方式。')
-    case 'Google 授权（ACP）': return t('Google 授权（ACP）')
-    case 'ACP 使用网关电脑上的官方 agy CLI，不是当前手机或浏览器所在设备。请先安装 agy 1.5.0 或更新版本：https://antigravity.google/docs/cli。程序不在默认位置时，可在网关启动环境设置 AGY_PATH。':
-      return t('ACP 使用网关电脑上的官方 agy CLI，不是当前手机或浏览器所在设备。请先安装 agy 1.5.0 或更新版本：https://antigravity.google/docs/cli。程序不在默认位置时，可在网关启动环境设置 AGY_PATH。')
-    case '点击登录后，在 Google 页面授权，再原样粘贴授权码或完整页面地址；已登录的 agy 会直接连接。Google 凭证由官方客户端保管，Agent2API 只保存本机连接标记。同一网关仅使用 agy 当前登录的一个账号，不支持复制为多个独立账号。':
-      return t('点击登录后，在 Google 页面授权，再原样粘贴授权码或完整页面地址；已登录的 agy 会直接连接。Google 凭证由官方客户端保管，Agent2API 只保存本机连接标记。同一网关仅使用 agy 当前登录的一个账号，不支持复制为多个独立账号。')
+    case '本机客户端会话失败时不自动重发，也不切换到其他接入方式。':
+      return t('本机客户端会话失败时不自动重发，也不切换到其他接入方式。')
     case 'Browser sign-in (ink credits + creates an API key)':
       return t('浏览器登录（墨点额度 + 自动创建 API Key）')
     case 'Browser sign-in + reuse an existing API key':

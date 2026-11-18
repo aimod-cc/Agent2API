@@ -7,6 +7,7 @@
 
 import { callJson, gatewayBase } from './assistant-state'
 import { t } from '../i18n'
+import type { ProviderKeyUpdate, SearchProviderRow } from '../../../ui-shared/tools-provider-keys'
 
 export type ToolProtocol = 'skill' | 'mcp' | 'api'
 export type ToolServiceId = 'web-search' | 'vision' | 'image-generation'
@@ -34,23 +35,7 @@ export type ToolService = {
   variants?: SkillVariantInfo[]
 }
 
-export type ProviderRow = {
-  provider: string
-  display_name: string
-  auth_type?: 'api_key' | 'account'
-  supports_search?: boolean
-  supports_fetch?: boolean
-  available?: boolean
-  configured: boolean
-  key_hint: string | null
-  enabled: boolean
-  updated_at: number | null
-  account_id?: string
-  account_name?: string
-  accounts?: Array<{ id: string; name: string; enabled: boolean }>
-  max_query_chars?: number | null
-  unavailable_reason?: string | null
-}
+export type ProviderRow = SearchProviderRow
 
 export type ProviderSelection = { search_providers: string[]; fetch_provider: string }
 
@@ -61,6 +46,9 @@ export type ProviderTestResult = {
   error?: string
   result_count?: number
   duration_ms?: number
+  key_id?: string | null
+  operation?: 'search' | 'fetch'
+  reset_at?: number | null
 }
 
 export type VisionConfig = {
@@ -175,14 +163,17 @@ export const fetchSelection = (): Promise<ProviderSelection> => callJson('GET', 
 export const saveSelection = (value: ProviderSelection): Promise<ProviderSelection> =>
   callJson('PUT', '/api/tools/provider-selection', value)
 
-export const saveProvider = (provider: string, body: { api_key?: string; account_id?: string | null; enabled?: boolean }) =>
+export const saveProvider = (provider: string, body: { api_key?: string; keys?: ProviderKeyUpdate[]; account_id?: string | null; enabled?: boolean }) =>
   callJson('PUT', `/api/tools/providers/${encodeURIComponent(provider)}`, body)
 
 export const clearProviderKey = (provider: string) =>
   callJson('DELETE', `/api/tools/providers/${encodeURIComponent(provider)}/key`)
 
-export const testProvider = (provider: string): Promise<ProviderTestResult> =>
-  callJson('POST', `/api/tools/providers/${encodeURIComponent(provider)}/test`)
+export const testProvider = (provider: string, keyId?: string, operation: 'search' | 'fetch' = 'search'): Promise<ProviderTestResult> => {
+  const query = new URLSearchParams({ operation })
+  if (keyId) query.set('key_id', keyId)
+  return callJson('POST', `/api/tools/providers/${encodeURIComponent(provider)}/test?${query}`)
+}
 
 export const fetchVision = (): Promise<{ config: VisionConfig | null; keys: VisionKeyOption[] }> =>
   callJson('GET', '/api/tools/vision/config')

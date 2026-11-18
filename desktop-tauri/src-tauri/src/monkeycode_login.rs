@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use agent2api_server::server::core::providers::monkeycode::Region;
 use serde_json::{json, Value};
 use tauri::{AppHandle, WebviewWindow};
@@ -79,33 +77,43 @@ pub async fn credentials(window: &WebviewWindow, region: Region) -> Result<Optio
     if !allowed(&url, region) || url.host_str() != Some(site_host(region)) {
         return Ok(None);
     }
-    let owned = window.clone();
-    // HttpOnly 凭证只能由窗口宿主读取；Windows 上不能在消息线程同步等待 Cookie。
-    let cookies = tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio::task::spawn_blocking(move || owned.cookies()),
-    )
-    .await
-    .map_err(|_| "读取 MonkeyCode 登录凭证超时")?
-    .map_err(|_| "读取 MonkeyCode 登录凭证的后台任务失败")?
-    .map_err(|_| "读取 MonkeyCode 登录凭证失败")?;
+    let cookies = crate::login::read_window_cookies(window).await?;
+    if cookies.len() > 2048 {
+        return Err("MonkeyCode 登录窗口 Cookie 数量超过读取上限".into());
+    }
     let now = chrono::Utc::now().timestamp();
-    let session = cookies.iter().find(|cookie| {
-        cookie.name() == SESSION_COOKIE
-            && cookie
-                .domain()
-                .is_some_and(|domain| domain.trim_start_matches('.') == site_host(region))
-            && cookie.path().unwrap_or("/") == "/"
-            && !cookie.value().is_empty()
-            && !cookie
-                .expires_datetime()
-                .is_some_and(|expiry| expiry.unix_timestamp() <= now)
-    });
-    Ok(session.map(|cookie| {
-        json!({
-            "session": cookie.value(),
-            "expiresAt": cookie.expires_datetime().map(|expiry| expiry.unix_timestamp() * 1000),
-        })
-        .to_string()
+    let mut captured: Option<(&str, Option<i64>)> = None;
+    for cookie in &cookies {
+        if cookie.name() != SESSION_COOKIE
+            || !cookie.domain().is_some_and(|domain| {
+                domain.trim_start_matches('.').eq_ignore_ascii_case(site_host(region))
+            })
+            || cookie.path().unwrap_or("/") != "/"
+            || cookie.value().is_empty()
+            || cookie.expires_datetime().is_some_and(|expiry| expiry.unix_timestamp() <= now)
+        {
+            continue;
+        }
+        let value = cookie.value();
+        if value.len() > 8192 || !value.bytes().all(|byte| {
+            matches!(byte, 0x21 | 0x23..=0x2b | 0x2d..=0x3a | 0x3c..=0x5b | 0x5d..=0x7e)
+        }) {
+            return Err("MonkeyCode 登录窗口的 Session 格式无效".into());
+        }
+        let expiry = cookie.expires_datetime().and_then(|expiry| {
+            expiry.unix_timestamp().checked_mul(1000)
+        });
+        if captured.as_ref().is_some_and(|(previous, _)| *previous != value) {
+            return Err("MonkeyCode 登录窗口出现不同 Session，请重新发起登录".into());
+        }
+        captured = Some((value, expiry));
+    }
+    // 读取后再次核对本家地址；不从第三方 SSO 页面交付凭据。
+    let current = window.url().map_err(|_| "读取 MonkeyCode 登录窗口地址失败")?;
+    if !allowed(&current, region) || current.host_str() != Some(site_host(region)) {
+        return Ok(None);
+    }
+    Ok(captured.map(|(session, expiry)| {
+        json!({ "session": session, "expiresAt": expiry }).to_string()
     }))
 }

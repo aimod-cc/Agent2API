@@ -9,6 +9,7 @@ import './desktop-titlebar'
 import './island-registry'
 import './desktop-tray'
 import './plugin-startup'
+import './advertisements'
 
 declare global {
   interface Window {

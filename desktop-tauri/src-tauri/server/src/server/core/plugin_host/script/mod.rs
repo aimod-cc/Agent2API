@@ -5,10 +5,11 @@ mod catalog;
 mod distribution;
 mod dependencies;
 mod download;
+mod website;
 pub(crate) mod icons;
 mod login_ui;
 mod local;
-mod model_catalog;
+pub(super) mod model_catalog;
 pub(crate) mod native;
 mod operations;
 mod packages;
@@ -27,7 +28,7 @@ pub(super) use usage::record as record_usage;
 mod websocket;
 
 pub(crate) use login_ui::{decorate as decorate_login, remember as remember_login};
-pub(super) use websocket::{abort as abort_ws, open as open_ws, read as read_ws, send as send_ws};
+pub(super) use websocket::{abort as abort_ws, open as open_ws, open_with_policy as open_ws_with_policy, read as read_ws, send as send_ws};
 pub use operations::{change, install, operation};
 pub(super) use protocol::{close as close_stream, open as open_stream, push as push_stream};
 pub(super) use runtime::{host, observe_concurrency, package_for_provider, registered_label};
@@ -37,10 +38,10 @@ pub fn refresh_catalog() -> serde_json::Value {
     catalog::wake(true);
     catalog::status()
 }
-pub(super) use trace::register as register_trace;
+pub(super) use trace::{find as capture_for_trace, register as register_trace};
 pub(super) use transport::{
-    clear as clear_transport, close as close_http, convert as convert_request, open, open_body, RequestBody,
-    read as read_http, resolve_proxy,
+    clear as clear_transport, close as close_http, convert as convert_request, open, open_body_with_policy, open_frozen_once, open_pinned, RequestBody,
+    read as read_http, resolve_proxy, HttpDeadline, HttpHandle,
 };
 
 pub const HOST_ID: &str = "agent2api-script-host";
@@ -79,6 +80,7 @@ fn script_files() -> &'static [(&'static str, &'static str)] {
         ("auth-record.mjs", include_str!("host/auth-record.mjs")),
         ("diagnostics.mjs", include_str!("host/diagnostics.mjs")),
         ("login.mjs", include_str!("host/login.mjs")),
+        ("localization.mjs", include_str!("host/localization.mjs")),
         ("login-policy.mjs", include_str!("host/login-policy.mjs")),
         ("login-prompts.mjs", include_str!("host/login-prompts.mjs")),
         ("login-network.mjs", include_str!("host/login-network.mjs")),

@@ -289,7 +289,7 @@ pub(super) fn event(level: &str, message: &str, data: Value) {
     logging::log_event(level, "plugin", &format!("Plugin {message}"), Some(data));
 }
 
-pub(super) fn redact(text: &str) -> String {
+pub(crate) fn redact(text: &str) -> String {
     static FILTERS: OnceLock<Result<Vec<Regex>, regex::Error>> = OnceLock::new();
     let filters = FILTERS.get_or_init(|| [
         r#"(?i)(?:https?|wss?|socks5h?)://[^\s<>\"']+"#,

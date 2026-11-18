@@ -1426,6 +1426,9 @@ impl ResponsesStream {
         if let Some(id) = chunk.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()) {
             if !self.created_sent {
                 self.response_id = id.to_string();
+                if let Some(created) = chunk.get("created").and_then(Value::as_i64).filter(|created| *created > 0) {
+                    self.created = created;
+                }
             }
         }
         if let Some(usage) = chunk.get("usage").filter(|value| value.is_object()) {

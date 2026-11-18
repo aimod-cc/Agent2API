@@ -7,6 +7,8 @@ import { MaintenanceSummary } from './maintenance-summary'
 import { hasFailures } from './maintenance-format'
 import { MAINTENANCE_TASKS, type MaintenanceApi, type MaintenanceDetail, type MaintenanceOverview, type MaintenanceQuery, type MaintenanceRun, type MaintenanceTaskId } from './maintenance-types'
 import './maintenance.css'
+import { PluginTasks } from './plugin-tasks'
+import type { PluginTaskRequest } from './plugin-task-types'
 
 const initialQuery: MaintenanceQuery = { taskId: '', source: '', status: '', keyword: '', offset: 0, limit: 10 }
 
@@ -24,13 +26,14 @@ const initialQuery: MaintenanceQuery = { taskId: '', source: '', status: '', key
  * 其余数据流一律不动：20 秒静默轮询 + 页面可见性、搜索 300ms 防抖、明细按 id 缓存
  * （保留最近 20 条）、执行中的记录跑完自动重取、翻页越界回退、busy 互斥。
  */
-export function MaintenancePanel({ api, active = true, revision = 0, onAccount, onChanged, notify }: {
+export function MaintenancePanel({ api, active = true, revision = 0, onAccount, onChanged, notify, pluginTaskRequest }: {
   api: MaintenanceApi
   active?: boolean
   revision?: number
   onAccount?(id: string): void
   onChanged?(): void | Promise<unknown>
   notify?(message: string, kind?: 'ok' | 'err'): void
+  pluginTaskRequest?: PluginTaskRequest
 }) {
   const [overview, setOverview] = React.useState<MaintenanceOverview | null>(null)
   const [query, setQuery] = React.useState(initialQuery)
@@ -161,6 +164,7 @@ export function MaintenancePanel({ api, active = true, revision = 0, onAccount, 
         <p>{t('查看凭证与模型目录的每次维护结果，失败和跳过都有原因')}</p>
       </div>
       <div className='maintenance-heading-actions'>
+        {pluginTaskRequest ? <PluginTasks request={pluginTaskRequest} t={t} active={active} /> : null}
         <Button variant='ghost' disabled={loading} onClick={() => void load()}>{loading ? <Spinner /> : null}{loading ? t('加载中…') : t('刷新记录')}</Button>
         <Button variant='ghost' disabled={!overview?.tasks.length} onClick={() => setSettingsOpen(true)}>{t('维护设置')}</Button>
       </div>

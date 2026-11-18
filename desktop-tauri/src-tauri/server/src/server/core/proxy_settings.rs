@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use crate::server::db::Db;
 
 pub const KV_KEY: &str = "proxySettings";
-pub const DEFAULT_TEST_URL: &str = "https://copilot.tencent.com/v2/config";
+pub const DEFAULT_TEST_URL: &str = "https://www.google.com/";
 const MAX_URL_LENGTH: usize = 2048;
 static DB: OnceLock<Option<Db>> = OnceLock::new();
 

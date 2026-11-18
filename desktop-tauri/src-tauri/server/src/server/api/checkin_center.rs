@@ -46,7 +46,7 @@
 
 use std::collections::BTreeMap;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::Response;
 use serde_json::{json, Value};
 
@@ -125,7 +125,8 @@ fn out_of_scope_reason(account: &Value) -> &'static str {
 }
 
 /// 签到中心的聚合快照（不发任何上游请求 —— 资格类状态由前端按需惰性查询）
-pub async fn get_center(State(state): State<ServerState>) -> Response {
+pub async fn get_center(State(state): State<ServerState>, Query(params): Query<BTreeMap<String, String>>) -> Response {
+    let summary_only = params.get("view").is_some_and(|view| view == "summary");
     // 界面视图：插件不在的家不出现（账号仍在库里，装上插件原样回来）
     let accounts: Vec<Value> = state
         .store()
@@ -150,6 +151,15 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
     // 点了必然失败的空行（2026-10 用户反馈）。可用清单的判据是「插件正接管
     // 这家，或库里已有它的账号」—— 见 `providers::serves_or_has_accounts`。
     let checkin_providers = auto_checkin::available_checkin_providers(state.store());
+    if summary_only {
+        let eligible: Vec<_> = accounts.iter().filter(|account| {
+            let provider = account.get("provider").and_then(Value::as_str).filter(|provider| !provider.is_empty())
+                .unwrap_or(crate::server::core::providers::DEFAULT_PROVIDER_ID);
+            checkin_providers.iter().any(|id| id == provider) && checkin::supports_checkin(account)
+        }).collect();
+        let done = eligible.iter().filter(|account| checked_in_today(account)).count();
+        return ok_json(json!({ "daily": { "todayDone": done, "todayEligible": eligible.len() } }));
+    }
     let mut buckets: Vec<Vec<Value>> = vec![Vec::new(); checkin_providers.len()];
     let mut out_of_scope: BTreeMap<String, (String, String, i64)> = BTreeMap::new();
     for account in &accounts {
@@ -346,6 +356,7 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
         // 猫猫旅行定时排程（国内版）：开关 / 时刻 / 今日已跑时刻 / 上一轮结果。
         // 与 `auto`（签到排程）并列 —— 两者是独立排程，各自开关与时刻。
         "travel": crate::server::core::growth_scheduler::state(),
+        "pluginTasks": crate::server::core::plugin_host::wasm::tasks::checkin_snapshot(),
         "history": checkin_history::list(),
         // 插件申报的管理面板：界面据此决定「猫猫旅行」「保活模型链」这两块
         // 显不显示。它们的能力由 WorkBuddy 插件的不同地区版本提供（国内版

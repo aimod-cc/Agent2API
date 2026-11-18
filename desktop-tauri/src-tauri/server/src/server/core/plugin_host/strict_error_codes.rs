@@ -13,7 +13,10 @@ pub(super) fn credential_scope(value: &str) -> bool {
 
 pub(super) fn known(provider: &str, code: &str) -> bool {
     let qwen = crate::server::core::providers::availability::is_qwenwork_family(provider);
-    if qwen && code.parse::<i64>().ok().is_some_and(qwen_number) { return true; }
+    if qwen && (code.parse::<i64>().ok().is_some_and(qwen_number)
+        || matches!(code, "qwenwork_model_busy" | "qwenwork_auth_expired" | "qwenwork_quota_limited"
+            | "qwenwork_rate_limited" | "qwenwork_forbidden" | "qwenwork_upstream_error"
+            | "qwenwork_transport" | "qwenwork_usage_invalid_response" | "legacy_secret_cas_unavailable")) { return true; }
     if matches!(code, "400" | "401" | "402" | "403" | "404" | "408" | "409" | "413" | "429" | "499" | "500" | "502" | "503" | "504" | "556") { return true; }
     if matches!(code,
         "runtime_upstream_error" | "runtime_invalid_error_metadata" | "runtime_protocol_error"

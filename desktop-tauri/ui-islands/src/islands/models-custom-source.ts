@@ -58,6 +58,7 @@ export type ManageModel = {
    * 两种形状不会分叉。
    */
   capabilities?: unknown
+  toolCallingMode?: 'emulated' | 'disabled' | null
   /** 被用户覆盖过的能力键（只有内置家给；自定义家的一切都是用户填的，恒空） */
   capOverrides?: unknown
   /**

@@ -80,6 +80,7 @@ mod record;
 // 对外暴露面收敛在这一层。
 mod report;
 mod cache_report;
+mod counts;
 mod model_recency;
 mod routing;
 mod trace;
@@ -226,6 +227,7 @@ pub struct RequestStats {
     /// 上次做保留期裁剪的毫秒时间戳；低流量时用它兜底。
     last_maintenance_ms: AtomicI64,
     model_recency: Arc<model_recency::ModelRecency>,
+    counts: counts::CountsCache,
 }
 
 impl RequestStats {
@@ -266,6 +268,7 @@ impl RequestStats {
             maintenance_writes: AtomicU64::new(0),
             last_maintenance_ms: AtomicI64::new(0),
             model_recency: Arc::new(model_recency::ModelRecency::default()),
+            counts: counts::CountsCache::default(),
         }
     }
 
@@ -481,6 +484,13 @@ impl RequestStats {
         summary
     }
 
+    pub fn today_request_count(&self) -> Value {
+        let date = date_key(today());
+        let guard = self.guard();
+        let requests = self.with_conn(&guard, |conn| daily::request_count(conn, &date)).unwrap_or(0);
+        json!({ "range": "today", "startDate": date, "endDate": date, "overview": { "requests": requests } })
+    }
+
     /// 明细查询：倒序（新在前）分页。
     ///
     /// 顺序由 SQL 的 `ORDER BY ts DESC, row_id DESC` 保证 —— 与旧的「内存恒按 ts
@@ -505,10 +515,17 @@ impl RequestStats {
         let plan = sql::FilterPlan::of(filter);
         let loaded = {
             let guard = self.guard();
-            self.with_conn(&guard, |conn| {
-                // 三个计数共用一次扫描（见 `sql::counts` 的说明）。
-                let (total, matched, running) = sql::counts(conn, &plan)?;
-                let entries = sql::select_page_desc(conn, &plan, filter.offset, limit)?;
+            self.with_conn_mut(&guard, |conn| {
+                let tx = conn.transaction()?;
+                let entries = sql::select_page_desc(&tx, &plan, filter.offset, limit)?;
+                let external = tx.pragma_query_value(None, "data_version", |row| row.get(0))?;
+                let version = counts::Version {
+                    requests: self.db.as_ref().map_or(0, Db::request_revision),
+                    database: crate::server::db::query_cache_generation(),
+                    external,
+                };
+                let (total, matched, running) = self.counts.read(&tx, version, &plan)?;
+                tx.commit()?;
                 Ok((total, matched, running, entries))
             })
         };

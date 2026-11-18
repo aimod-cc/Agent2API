@@ -198,6 +198,7 @@ struct CompletionAccumulator {
     role: String,
     content: String,
     reasoning: String,
+    encrypted_content: Option<String>,
     finish: String,
     usage: Option<Value>,
     chunk_count: usize,
@@ -307,6 +308,10 @@ impl CompletionAccumulator {
                 self.reasoning.push_str(reasoning);
             }
         }
+        if let Some(encrypted) = delta.get(crate::server::core::protocol::FIELD_ENCRYPTED_CONTENT)
+            .and_then(Value::as_str).filter(|text| !text.is_empty()) {
+            self.encrypted_content = Some(encrypted.to_string());
+        }
         if let Some(finish) = choice.get("finish_reason").and_then(Value::as_str) {
             if !finish.is_empty() {
                 self.finish = finish.to_string();
@@ -363,6 +368,9 @@ impl CompletionAccumulator {
         message.insert("content".to_string(), Value::String(self.content));
         if !self.reasoning.is_empty() {
             message.insert("reasoning_content".to_string(), Value::String(self.reasoning));
+        }
+        if let Some(encrypted) = self.encrypted_content {
+            message.insert(crate::server::core::protocol::FIELD_ENCRYPTED_CONTENT.to_string(), Value::String(encrypted));
         }
         if !self.tool_calls.is_empty() {
             message.insert(

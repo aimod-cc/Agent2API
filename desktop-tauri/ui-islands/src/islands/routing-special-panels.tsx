@@ -14,18 +14,12 @@
  * 三块共用同一套零件（RulePanel / RuleSection / RuleRow / 弹窗字段），
  * 差别只在表单字段 —— 状态机也一样（读取 / 改草稿 / 保存 / 撤销），
  * 由 routing-special-state 的 useSpecialEditor 收口。
- *
- * ── 迁移进度 ──────────────────────────────────────────────────
- * 已迁到新版式：压缩上下文。
- * 仍用旧版式（SpecialShell / SpecialFlow，下面那一段）：标题生成 / 图片兼容 ——
- * 它们要连同后端契约一起改（标题生成从「一套模型管所有客户端」改成按规则，
- * 图片兼容从「两块固定设置」改成按规则），改完一起删掉旧壳子。
  */
 
 import * as React from 'react'
 import {
-  Button, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle,
-  Label, MultiSelect, Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+  Button, Card, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle,
+  Item, ItemGroup, Label, MultiSelect, Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
   Spinner, Switch,
 } from '@ui'
 import { t } from '../i18n'
@@ -105,7 +99,6 @@ function RulePanel({ title, lede, enabled, onEnabled, busy, dirty, error, loadin
   </section>
 }
 
-/** 一个分组：13px 半粗标题（带计数与行尾操作）+ 一张无描边白底圆角卡 */
 function RuleSection({ title, count, action, children }: {
   title: string; count?: string; action?: React.ReactNode; children: React.ReactNode
 }) {
@@ -115,7 +108,7 @@ function RuleSection({ title, count, action, children }: {
       {count ? <span className='rp-section-count'>{count}</span> : null}
       {action ? <span className='rp-section-action'>{action}</span> : null}
     </div>
-    <div className='rp-rows'>{children}</div>
+    <Card className='rp-rows'><ItemGroup role={undefined}>{children}</ItemGroup></Card>
   </section>
 }
 
@@ -127,7 +120,7 @@ function RuleRow({ title, detail, side, off, onClick }: {
   off?: boolean
   onClick(): void
 }) {
-  return <button type='button' className='rp-row' data-off={off ? '' : undefined} onClick={onClick}>
+  return <Item render={<Button variant='ghost' onClick={onClick} />} className='rp-row font-normal' data-off={off ? '' : undefined}>
     <span className='rp-row-main'>
       <span className='rp-row-title'>{title}</span>
       <span className='rp-row-detail'>{detail}</span>
@@ -136,7 +129,7 @@ function RuleRow({ title, detail, side, off, onClick }: {
       {side}
       <span className='rp-caret'><RouteIcon name='chevronRight' size={13} /></span>
     </span>
-  </button>
+  </Item>
 }
 
 /** 弹窗表单的一格：标签在上、控件在下（与设置页的规则编辑弹窗同一口径） */

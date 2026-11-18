@@ -18,7 +18,7 @@ fn cache() -> &'static Mutex<HashMap<String, Entry>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub(super) async fn resolve(policy: &NetworkPolicy, host: &str) -> Vec<IpAddr> {
+pub(crate) async fn resolve(policy: &NetworkPolicy, host: &str) -> Vec<IpAddr> {
     let trusted = policy.trusted_origins.iter().any(|origin| {
         url::Url::parse(origin)
             .ok()
@@ -158,7 +158,7 @@ fn parse_ips(text: &str) -> Vec<IpAddr> {
         .collect()
 }
 
-pub(super) fn public_ip(ip: &IpAddr) -> bool {
+pub(crate) fn public_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => {
             !ip.is_private()

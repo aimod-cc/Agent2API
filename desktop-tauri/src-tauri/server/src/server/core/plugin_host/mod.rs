@@ -47,20 +47,25 @@ mod runtime;
 mod packages;
 mod pack_view;
 mod process;
-mod process_guard;
+pub(crate) mod process_guard;
 pub(crate) mod provider_settings;
 mod registry;
 mod rpc;
+mod rpc_refresh;
 pub(crate) mod rpc_cache;
 pub mod schedules;
 pub mod script;
 pub mod settings;
 mod stream;
+mod stream_events;
+pub(crate) use stream_events::StreamEvents;
 pub mod startup;
+mod support;
 mod switching;
 pub mod update;
 pub(crate) mod wasm;
-pub use wasm::owns as dynamic_login;
+pub use registry::dynamic_login;
+pub use wasm::owns as is_wasm_provider;
 
 #[cfg(test)]
 mod tests;
@@ -75,13 +80,15 @@ pub use install::{
     install_zip, list_packs, resolve_ui_file, set_pack_enabled, set_provider_enabled, uninstall,
     InstalledPack, PackProviderSummary, PackRegistry, PackSummary, PackUiSummary,
 };
+pub use pack_view::provider_icons;
 pub use registry::{install as install_provider, installed_ids, lookup, lookup_ready, remove, clear};
 pub use registry::{serves as serves_provider};
 pub use rpc::{HostOptions, RpcAdapter};
 pub(crate) use rpc_cache::meta as model_catalog_meta;
-pub use management::snapshot as management_snapshot;
+pub use management::{snapshot as management_snapshot, snapshot_with_packs as management_snapshot_with_packs};
 pub(crate) use packages::prepare as prepare_pack;
 pub(crate) use compatibility::provider_error as provider_compatibility_error;
+pub(crate) use process::redact as redact_diagnostic;
 
 /// 当前平台的目标三元组（界面提示「下载哪个平台的包」用）。
 pub fn host_target() -> String {
@@ -139,7 +146,10 @@ use tokio::sync::{oneshot, Mutex};
 use crate::server::logging;
 
 pub use ownership::ProviderCategory;
+pub use support::PackSupportState;
+pub(crate) use support::installed_state as support_state;
 pub use runtime::{current, detach, host_for_pack, host_for_provider, install, provider_category, provider_pack, shutdown_all};
+pub use runtime::shutdown_all_until;
 use runtime::provider_info;
 
 /// 当前已加载的 provider 申报了哪些**管理面板**（去重）。
@@ -361,7 +371,7 @@ pub(crate) struct StreamCall {
     /// 本次调用的 RPC id（归还额度、取消时点名用）。
     pub id: i64,
     /// head / chunk / 收尾事件（顺序即协议顺序）。
-    pub events: tokio::sync::mpsc::UnboundedReceiver<StreamEvent>,
+    pub events: StreamEvents,
 }
 
 const CALLBACK_FORBIDDEN: &str = "forbidden";
@@ -699,7 +709,7 @@ impl Host {
             return Err(format!("写插件失败: {e}"));
         }
         opening.id = None;
-        Ok(StreamCall { id, events: event_rx })
+        Ok(StreamCall { id, events: event_rx.into() })
     }
 
     /// 消费端结束不代表插件已完成；登记与租约由终态应答或进程退出释放。

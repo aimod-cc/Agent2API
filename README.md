@@ -25,7 +25,8 @@ Agent2API is an **AI routing gateway with Agent client takeover**. It exposes a 
 - 🔌 **Unified model APIs** — OpenAI Chat / Responses / Images and Anthropic Messages, with a unified model catalog; Raccoon, Loomy, Antigravity, ModelScope, WorkBuddy and Doubao Work supply image generation, while Raccoon, Loomy, Antigravity, ModelScope and WorkBuddy also support reference-image editing. Both are available as AI assistant tools
 - 🧭 **AI routing** — model mapping, account priority, load balancing, session affinity and failover in one place
 - 🤖 **Agent client takeover** — manage multiple connection profiles for local clients, import existing settings, preview writes and switch between the gateway and custom services
-- 🧩 **Plugin extensions** — additional provider implementations are installed and updated separately, not bundled with the application; custom providers do not require them
+- 🧩 **Plugin extensions** — additional providers are installed and updated separately, with regions and quota pools kept isolated. The former foundation packages now include CodeArts chat, official sign-in, managed renewal and benefits; CatPaw chat, tool continuation, image input and authorized live desktop accounts; Doubao Work chat, asynchronous replies, image upload/generation, sign-in, desktop import, check-in and task rewards; and separate MonkeyCode China/International chat tasks, tool bridges, sign-in and daily check-in. MonkeyCode tasks and desktop credential access require explicit permission. Kiro managed sign-in and explicitly enrolled Cline Free renewal remain available. These source implementations have not been verified with live accounts.
+- 🧰 **Web tool emulation** — a shared gateway layer converts tools and their history/results for explicitly declared Zhipu Qingyan, DeepSeek Web and Tabbit models. Enabled by default with an off switch; not native web functionality and not yet verified with live accounts.
 - 🛡️ **Egress proxies** — select proxy-pool exits for accounts and update tasks
 - 🔑 **Gateway security** — scoped gateway keys, optional human verification for panel sign-in, and model requests refused by default until a key is configured
 - 📊 **Request reports** — request volume, success rate, token usage, cache hit rate and a 365-day heatmap
@@ -34,13 +35,29 @@ Agent2API is an **AI routing gateway with Agent client takeover**. It exposes a 
 
 ## ❤️ Sponsors
 
+Thanks to Beichen API, IPWO and ProxyLane for sponsoring this project.
+
+<table>
+<tr>
+<td width="180" align="center"><a href="https://beichenapi.com/register?aff=QWJJYF7PT8SY"><img src="./desktop-tauri/ui/assets/providers/beichen.png" alt="Beichen API" width="64" /><br /><strong>Beichen API</strong></a></td>
+<td><strong>One API for multiple leading model providers.</strong><br />Beichen offers an OpenAI-compatible AI API relay with streaming responses and connection support for long-reasoning models. Select the first card in Agent2API's Add account → API templates, then enter your own API key alongside the prefilled endpoint.<br /><br /><a href="https://beichenapi.com/register?aff=QWJJYF7PT8SY"><strong>Register / Get an API key ↗</strong></a></td>
+</tr>
+</table>
+
+<table>
+<tr>
+<td width="180" align="center"><a href="https://www.ipwo.net/?code=LQW28BAYK"><img src="./desktop-tauri/ui/assets/sponsors/ipwo.png" alt="IPWO" width="140" /><br /><strong>IPWO Residential IPs</strong></a></td>
+<td><strong>Rotating, static and unlimited residential proxy plans.</strong><br />IPWO offers residential IPs across multiple regions, with country- and city-level targeting and HTTP(S) / SOCKS5 support. Add the proxy address in Agent2API's Network proxy page for use by accounts and service routes.<br /><br /><a href="https://www.ipwo.net/?code=LQW28BAYK"><strong>Explore plans / Get residential IPs ↗</strong></a></td>
+</tr>
+</table>
+
 <a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><img src="./assets/sponsor-proxylane.png" alt="ProxyLane (sponsor)" width="100%" /></a>
 
 <table>
 
 <tr>
 <td width="240"><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/proxylane-logo-for-dark-bg.png" /><img src="./assets/proxylane-logo-for-light-bg.png" alt="ProxyLane" width="220" /></picture></a></td>
-<td>Thanks to <a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme">ProxyLane</a> for sponsoring this project! ProxyLane provides native static residential ISP proxies for AI accounts (Static Residential ISP): IPs come from real home broadband operators with low Scamalytics fraud scores, each IP is dedicated to you, with unlimited traffic, from $3.90. Add one exit per account on the Network proxy page. Use code <code>AGENT2API25</code> for 25% off your first purchase.</td>
+<td><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme">ProxyLane</a> provides native static residential ISP proxies for AI accounts (Static Residential ISP): IPs come from real home broadband operators with low Scamalytics fraud scores, each IP is dedicated to you, with unlimited traffic, from $3.90. Add one exit per account on the Network proxy page. Use code <code>AGENT2API25</code> for 25% off your first purchase.</td>
 </tr>
 
 </table>
@@ -48,10 +65,9 @@ Agent2API is an **AI routing gateway with Agent client takeover**. It exposes a 
 ## 💬 Community & Support
 
 - **QQ groups**: Agent2API chat groups; search the group number in QQ to join.
-  - Group 1: `1127656296` (**Almost full — please join group 3 or 4 first**)
-  - Group 2: `1130894674` (**Almost full — please join group 3 or 4 first**)
+  - Group 1: `1127656296`
+  - Group 2: `1130894674`
   - Group 3: `1108276647`
-  - Group 4: `1054072416`
 - **Telegram group**: <https://t.me/+9gM8YPvgRL02NGRl>
 - **💖 Donate**: if Agent2API helps you, you are welcome to [buy the author a coffee](./docs/SPONSOR.md); donations are voluntary and unlock nothing.
 - **🤝 Sponsorship / business**: want to sponsor the project, or feature your product here? Email [541675139@qq.com](mailto:541675139@qq.com).

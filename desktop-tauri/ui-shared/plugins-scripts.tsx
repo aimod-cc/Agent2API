@@ -6,8 +6,9 @@ import {
 import type { ScriptOperation, ScriptPackage, ScriptPluginsState, ScriptRecommendation } from './plugins'
 import { matchesPluginStatus, matchesScriptPublisher, scriptPublisher, type PluginStatusFilter, type ScriptPublisherFilter } from './plugins-filters'
 import { ScriptOperationCard, ScriptOperationProgress, scriptOperationMatches } from './plugins-script-progress'
-import { PluginGetButton, PluginSectionHeading, PluginSettingsButton, PluginStoreCard, type PluginTranslate } from './plugins-store'
+import { PLUGIN_GRID_CLASS, PluginGetButton, PluginSectionHeading, PluginSettingsButton, PluginStoreCard, type PluginTranslate } from './plugins-store'
 import { ScriptPluginSettings } from './plugins-script-settings'
+import { PluginDetailsDialog, type PluginDetailsPane } from './plugins-details'
 import { ScriptPluginInstallNotice } from './plugins-script-install-notice'
 import { cachedPluginIconPath } from './provider-icons'
 import { getPluginStartup, pluginFailed, pluginPending, refreshPluginStartup, startupForPack, subscribePluginStartup } from './plugin-startup'
@@ -15,6 +16,8 @@ import { requestPluginDiagnostics } from './plugin-startup-view'
 import { isRecommendationInstalled, matchesRecommendedPlugin, matchesScriptPlugin, recommendationKey, recommendedDescription, reinstallRequest, scriptOfficialBadge, scriptPluginDescription, scriptPluginName, scriptRecommendations, scriptSourceLabel, scriptUpdate, updateLabel } from './plugins-script-display'
 import { ScriptCatalogStatus, ScriptRepository, scriptUnavailableReason, type PluginOpenExternal } from './plugins-script-catalog'
 import { ScriptPaginationFooter, useScriptPagination } from './plugins-script-pagination'
+import { scriptSelectionKey } from './plugins-batch-items'
+import type { PluginCardSelection } from './plugins-store'
 
 type Install = { name: string; version: string; id?: string }
 type GalleryItem = { kind: 'installed'; value: ScriptPackage } | { kind: 'recommended'; value: ScriptRecommendation }
@@ -22,7 +25,7 @@ type GalleryItem = { kind: 'installed'; value: ScriptPackage } | { kind: 'recomm
 export function ScriptPluginsPanel({ state, request, refresh, t, disabled = false, status = 'all',
   publisher: controlledPublisher, onPublisherChange, onClearFilters,
   query = '', galleryVisible = true, showInstallAction = true, installRequest = 0, onBusyChange,
-  resolveIcon = path => path, onOpenExternal }: {
+  resolveIcon = path => path, onOpenExternal, selection, onSelectGroup }: {
   state: ScriptPluginsState
   request: (path: string, body: Record<string, unknown>) => Promise<unknown>
   refresh: () => Promise<void>
@@ -39,6 +42,8 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
   onBusyChange?: (busy: boolean) => void
   resolveIcon?: (path: string) => string
   onOpenExternal?: PluginOpenExternal
+  selection?: (key: string) => PluginCardSelection
+  onSelectGroup?: () => void
 }) {
   React.useSyncExternalStore(subscribePluginStartup, getPluginStartup)
   const [localPublisher, setLocalPublisher] = React.useState<ScriptPublisherFilter>('all')
@@ -51,6 +56,8 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
   const [installNotice, setInstallNotice] = React.useState<Install | null>(null)
   const [remove, setRemove] = React.useState<ScriptPackage | null>(null)
   const [settingsId, setSettingsId] = React.useState<string | null>(null)
+  const [detailsPane, setDetailsPane] = React.useState<PluginDetailsPane>('settings')
+  const [detailsRecommendation, setDetailsRecommendation] = React.useState<ScriptRecommendation | null>(null)
   const [trusted, setTrusted] = React.useState(false)
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState('')
@@ -60,6 +67,7 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
   const prefix = React.useId()
   const locked = disabled || busy || state.operation.active
   const recommended = scriptRecommendations(state)
+  const detailsItem = detailsRecommendation ? recommended.find(item => recommendationKey(item) === recommendationKey(detailsRecommendation)) || detailsRecommendation : null
   const github = /^(github:|https:\/\/github\.com\/)/i.test(install?.name.trim() || '')
   const magpie = install?.name.trim().startsWith('magpie:') === true
   const settingsPack = state.packages.find(pack => pack.id === settingsId)
@@ -103,11 +111,14 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
   React.useEffect(() => {
     if (installRequest <= lastInstallRequest.current) return
     lastInstallRequest.current = installRequest
-    setTrusted(false); setError(''); setInstallNotice(null); setInstall({ name: '', version: '' })
+    setTrusted(false); setError(''); setSettingsId(null); setDetailsRecommendation(null); setInstallNotice(null); setInstall({ name: '', version: '' })
   }, [installRequest])
   React.useEffect(() => {
     if (settingsId && !settingsPack) setSettingsId(null)
   }, [settingsId, settingsPack])
+  React.useEffect(() => {
+    if (detailsRecommendation && isRecommendationInstalled(detailsRecommendation, state.packages)) setDetailsRecommendation(null)
+  }, [detailsRecommendation, state.packages])
 
   async function act(path: string, body: Record<string, unknown>): Promise<boolean> {
     if (pending.current || locked) return false
@@ -129,7 +140,11 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
   }
 
   function openInstall(value: Install): void {
-    setSettingsId(null); setTrusted(false); setError(''); setInstallNotice(null); setInstall(value)
+    setSettingsId(null); setDetailsRecommendation(null); setTrusted(false); setError(''); setInstallNotice(null); setInstall(value)
+  }
+
+  function openDetails(pack: ScriptPackage, pane: PluginDetailsPane): void {
+    setError(''); setDetailsRecommendation(null); setDetailsPane(pane); setSettingsId(pack.id)
   }
 
   async function confirmInstall(): Promise<void> {
@@ -148,7 +163,7 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
 
   return <>
     {failure ? <Alert variant='destructive' className='whitespace-pre-wrap break-words'>{failure}</Alert> : null}
-    {galleryVisible || count > 0 || unmatchedOperation ? <section aria-label={t('Magpie 插件')}>
+    {galleryVisible || count > 0 || unmatchedOperation ? <section className='@container/plugin-gallery min-w-0' aria-label={t('Magpie 插件')}>
       <PluginSectionHeading t={t} title={t('Magpie 插件')} count={count + Number(unmatchedOperation)}
         filters={galleryVisible ? <SegmentedControl<ScriptPublisherFilter> value={publisher} onValueChange={changePublisher}
           aria-label={`${t('Magpie 插件')} · ${t('来源')}`} className='max-w-full flex-wrap' options={[
@@ -158,11 +173,12 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
             { value: 'third-party', label: t('第三方'), count: publisherCount('third-party') },
           ]} /> : null}
         hint={t('Magpie 官方与社区插件，共用一个按需下载的运行时')}
-        actions={galleryVisible && showInstallAction ? <Button variant='ghost' size='sm' disabled={locked} onClick={() => openInstall({ name: '', version: '' })}>
-          {t('从 npm / GitHub / Magpie 安装')}
-        </Button> : null} />
+        actions={<>{selection && onSelectGroup ? <Button variant='link' size='xs' onClick={onSelectGroup}>{t('全选本组')}</Button> : null}
+          {galleryVisible && showInstallAction ? <Button variant='ghost' size='sm' disabled={locked} onClick={() => openInstall({ name: '', version: '' })}>
+            {t('从 npm / GitHub / Magpie 安装')}
+          </Button> : null}</>} />
       {galleryVisible && state.catalog ? <ScriptCatalogStatus catalog={state.catalog} request={request} refresh={refresh} disabled={disabled} t={t} /> : null}
-      <div className='grid grid-cols-1 gap-3.5 min-[900px]:grid-cols-2'>
+      <div className={PLUGIN_GRID_CLASS}>
         {unmatchedOperation ? <ScriptOperationCard operation={operation} t={t} /> : null}
         {visibleGallery.map(entry => {
           const progress = scriptOperationMatches(operation, entry.value) ? <ScriptOperationProgress operation={operation} t={t} /> : null
@@ -171,8 +187,10 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
             const unavailable = item.installable === false ? scriptUnavailableReason(item, t) : ''
             return <PluginStoreCard key={`recommended:${recommendationKey(item)}`} t={t} name={item.label}
               description={recommendedDescription(item, t)} version={item.version}
+              onDetails={() => { setSettingsId(null); setDetailsRecommendation(item) }}
               highlightedSource={scriptOfficialBadge(item)} sourceLabel={scriptSourceLabel(item, t)}
               icon={iconUrl(item.icon)} status='missing' providerCount={item.providers.length || undefined}
+              selection={selection?.(scriptSelectionKey(item))}
               metadata={<ScriptRepository item={item} onOpenExternal={onOpenExternal} t={t} />}
               feedback={<>{unavailable ? <p className='m-0 break-words text-xs text-muted-foreground'>{unavailable}</p> : null}{progress}</>}
               actions={unavailable ? <Badge variant='secondary' shape='tag'>{t('暂不可安装')}</Badge>
@@ -182,22 +200,29 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
           const startup = startupForPack(pack.id, pack.startup)
           const name = scriptPluginName(pack, recommended, t)
           const update = scriptUpdate(state, pack.id)
+          const showDiagnostics = pack.enabled && (pluginFailed(startup) || startup?.phase === 'blocked' || (!startup && pack.error))
           return <PluginStoreCard key={`installed:${pack.id}`} t={t} name={name} description={scriptPluginDescription(pack, recommended, t)}
             version={pack.version} icon={iconUrl(pack.icon)} highlightedSource={scriptOfficialBadge(pack)} sourceLabel={scriptSourceLabel(pack, t)}
             badges={update ? <Badge variant='warning' shape='tag'>{updateLabel(update, t)}</Badge> : undefined}
             metadata={<ScriptRepository item={pack} onOpenExternal={onOpenExternal} t={t} />}
             status={!pack.enabled ? 'disabled' : pack.running && !pack.error ? 'running' : 'unavailable'} startup={startup}
-            footerAction={<Button variant='link' size='xs' onClick={() => requestPluginDiagnostics(pack.id)}>{t('加载诊断')}</Button>}
+            selection={selection?.(scriptSelectionKey(pack))}
+            onDetails={() => openDetails(pack, 'about')}
+            footerAction={showDiagnostics || update ? <>
+              {showDiagnostics ? <Button variant='link' size='xs'
+                onClick={() => requestPluginDiagnostics(pack.id)}>{t('加载诊断')}</Button> : null}
+              {update && !selection ? <Button variant='outline' size='sm' disabled={locked}
+                onClick={() => openInstall(reinstallRequest(pack))}>{t('更新')}</Button> : null}
+            </> : null}
             providerCount={pack.providers.length} enabledCount={pack.providers.filter(provider => provider.enabled).length}
             actions={<>
-              {update ? <Button variant='outline' size='sm' disabled={locked}
-                onClick={() => openInstall(reinstallRequest(pack))}>{t('更新')}</Button> : null}
-              <PluginSettingsButton name={name} t={t} onClick={() => { setError(''); setSettingsId(pack.id) }} />
+              <PluginSettingsButton name={name} t={t} onClick={() => openDetails(pack, 'settings')} />
               <Switch checked={pack.enabled} disabled={locked} aria-label={`${t('启用')} ${name}`}
                 onCheckedChange={enabled => { void act('/api/plugins/scripts/change', { id: pack.id, action: 'enable', enabled }) }} />
             </>}
             feedback={<>
-              {(startup ? pluginFailed(startup) && startup.error : pack.error) ? <p className='m-0 break-words text-xs text-destructive'>{startup?.error || pack.error}</p> : null}
+              {pack.enabled && (startup ? (pluginFailed(startup) || startup.phase === 'blocked') && startup.error : pack.error)
+                ? <p className='m-0 line-clamp-2 break-words text-xs text-destructive'>{startup?.error || pack.error}</p> : null}
               {progress}
             </>} />
         })}
@@ -212,7 +237,16 @@ export function ScriptPluginsPanel({ state, request, refresh, t, disabled = fals
           onClick={() => { changePublisher('all'); onClearFilters?.() }}>{t('清除筛选')}</Button> : null}
       </Empty></Card> : null}
     </section> : null}
+    {detailsItem ? <PluginDetailsDialog name={detailsItem.label} version={detailsItem.version} sourceLabel={scriptSourceLabel(detailsItem, t)}
+      description={recommendedDescription(detailsItem, t)} icon={iconUrl(detailsItem.icon)} t={t} onClose={() => setDetailsRecommendation(null)}
+      metadata={<>
+        <ScriptRepository item={detailsItem} onOpenExternal={onOpenExternal} t={t} />
+        {detailsItem.installable === false ? <p className='m-0 text-xs text-warning'>{scriptUnavailableReason(detailsItem, t)}</p> : null}
+      </>}
+      primaryAction={<PluginGetButton t={t} disabled={locked || detailsItem.installable === false}
+        onClick={() => openInstall({ name: detailsItem.source || detailsItem.name, version: detailsItem.selector ?? detailsItem.version })} />} /> : null}
     {settingsPack ? <ScriptPluginSettings key={settingsPack.id} pack={settingsPack} icon={iconUrl(settingsPack.icon)} recommended={recommended} t={t}
+      initialPane={detailsPane}
       disabled={locked} error={error} request={request} refresh={refresh} onOpenExternal={onOpenExternal} onClose={() => setSettingsId(null)}
       onEnabled={enabled => { void act('/api/plugins/scripts/change', { id: settingsPack.id, action: 'enable', enabled }) }}
       onProvider={(provider, enabled) => { void act('/api/plugins/scripts/change', { id: settingsPack.id, action: 'provider', provider, enabled }) }}

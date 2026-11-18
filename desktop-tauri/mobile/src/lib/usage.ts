@@ -13,10 +13,19 @@
 
 import type { UsageRow, UsageSnapshot } from '../api/gateway'
 import { t, locale } from '../i18n'
-import { creditStatisticsWalletsOf, recordReadingsOf, snapshotReadingsOf, usageAggregateOf, usageEmptyStateOf, usageNumberOrNull, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
+import { creditStatisticsWalletsOf, recordReadingsOf, snapshotReadingsOf, usageAggregateOf, usageAvailableViewOf, usageEmptyStateOf, usageNumberOrNull, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
 import { formatStamp } from './format'
-import { mergeUsageQueryRow, usageQueryFailureStatus } from '../../../ui-shared/usage-query-state'
+import { mergeUsageQueryRow, usageQueryFailureStatus, usageQueryNoticeOf } from '../../../ui-shared/usage-query-state'
 import { creditExpirySummaryOf, creditExpiryText, creditExpiryUnitOf, expiringCreditsOf } from '../../../ui-shared/credit-expiry'
+
+export type UsageModelReading = {
+  id: string
+  name: string
+  group: string
+  view: string
+  percent: number | null
+  resetsAt: number | null
+}
 
 export type UsageView = {
   kind: 'ok' | 'warn' | 'bad' | 'muted'
@@ -24,6 +33,7 @@ export type UsageView = {
   text: string
   /** 完整说明（给详情页/长按提示用） */
   detail: string
+  models?: UsageModelReading[]
   failureStatus?: string
   failureDetail?: string
   expiry?: ReturnType<typeof creditExpiryText>
@@ -75,9 +85,8 @@ export function usageText(row?: UsageRow, now = Date.now()): UsageView {
 
   // ② 这一行明确失败：「未配置查询凭证」是中性提示，其余才是红色失败
   if (row.error) {
-    if (row.code === 'usage_not_configured') {
-      return { kind: 'muted', text: t('未配置'), detail: t(row.error) }
-    }
+    const notice = usageQueryNoticeOf(row.code, t)
+    if (notice) return { kind: 'muted', text: notice, detail: t(row.error) }
     const status = usageQueryFailureStatus(row, t, formatStamp)
     const previous = row.lastUsage ? usageText({ usage: row.lastUsage }, now) : null
     return {
@@ -109,10 +118,30 @@ export function usageText(row?: UsageRow, now = Date.now()): UsageView {
     ...recordReadingsOf(data, t, compact, formatStamp),
   ]
   const baseKind: UsageView['kind'] = errors.length ? 'warn' : 'ok'
+  const models: UsageModelReading[] = Array.isArray(data.modelQuotas)
+    ? data.modelQuotas
+        .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item))
+        .map(item => {
+          const id = typeof item.id === 'string' ? item.id.trim() : ''
+          const name = typeof item.name === 'string' && item.name.trim() ? item.name.trim() : id
+          const percent = usageNumberOrNull(item.remainingPercent)
+          const resetsAt = usageNumberOrNull(item.resetsAt)
+          return {
+            id: id || name,
+            name,
+            group: typeof item.group === 'string' ? item.group.trim() : '',
+            view: percent !== null ? `${compact(Math.max(0, Math.min(100, percent)))}%` : usageWindowView(item, t, compact),
+            percent: percent === null ? null : Math.max(0, Math.min(100, percent)),
+            resetsAt: resetsAt !== null && resetsAt > 0 && resetsAt <= 8.64e15 ? resetsAt : null,
+          }
+        })
+        .filter(item => Boolean(item.name))
+    : []
   const withErrors = (view: UsageView): UsageView => ({
     kind: errors.length ? 'warn' : view.kind,
     text: view.text,
     detail: [...new Set([view.detail, ...readings, expiry.detail, ...errors].filter(Boolean))].join(' · '),
+    ...(models.length ? { models } : {}),
     expiry: expiry.badge ? expiry : undefined,
   })
 
@@ -145,8 +174,8 @@ export function usageText(row?: UsageRow, now = Date.now()): UsageView {
 
   // ⑤ 后端已经给好的紧凑展示串（ZCode 的「1亿 token」之类）优先
   if (typeof data.availableView === 'string' && data.availableView.trim()) {
-    const text = data.availableView.trim()
-    const parts = [text]
+    const text = usageAvailableViewOf(data, t)
+    const parts = [data.availableView.trim()]
     if (data.available !== undefined && data.available !== null) {
       parts.push(t('可用 {value} {unit}', { value: compact(data.available), unit: unitOf(data) }))
     }

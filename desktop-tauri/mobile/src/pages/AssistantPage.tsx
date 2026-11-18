@@ -27,7 +27,8 @@ import { readMobileAttachments } from '../lib/assistant-attachments'
 import { serverIdentity } from '../lib/servers'
 import { AssistantMessageActions } from '../../../ui-shared/assistant-message-actions'
 import { AssistantTitleSettings } from '../../../ui-shared/assistant-title-settings'
-import { parseAssistantMessages, removeAssistantMessage } from '../../../ui-shared/assistant-history'
+import { parseAssistantMessages, removeAssistantMessage, assistantTitle } from '../../../ui-shared/assistant-history'
+import { equalSavedContent } from '../../../ui-shared/saved-content'
 import { replayBubbles, type Bubble } from './assistant/history'
 import { AssistantAvatar as Avatar, assistantBubbleStyle as bubbleStyle, parseAssistantArgs as parseArgs } from './assistant/display'
 import { AssistantHistory } from './assistant/AssistantHistory'
@@ -102,6 +103,7 @@ export function AssistantPage() {
   const sessionRef = useRef<string>(crypto.randomUUID())
   const mountedRef = useRef(true)
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const lastSavedRef = useRef<{ identity: string; session: string; messages: ChatMessage[]; model: string; title: string } | null>(null)
   const historyRef = useRef<ChatMessage[]>([])
   const fileRef = useRef<HTMLInputElement | null>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -110,16 +112,21 @@ export function AssistantPage() {
 
   const persist = (session: string, messages: ChatMessage[], selected: string, identity: string): Promise<void> => {
     const snapshot = parseAssistantMessages(messages)
-    const snapshotTitle = titleRef.current
+    const snapshotTitle = titleRef.current || assistantTitle(snapshot)
     const pending = saveQueueRef.current.catch(() => {}).then(async () => {
       if (serverIdentity() !== identity) return
-      const saved = await saveAssistantSession(session, snapshot, selected, snapshotTitle || undefined)
+      const last = lastSavedRef.current
+      if (last?.identity === identity && last.session === session && last.model === selected
+        && last.title === snapshotTitle && equalSavedContent(last.messages, snapshot)) return
+      const saved = await saveAssistantSession(session, snapshot, selected, snapshotTitle)
+      if (serverIdentity() === identity) lastSavedRef.current = { identity, session, messages: snapshot, model: selected, title: saved.title }
       if (mountedRef.current && serverIdentity() === identity) {
         if (sessionRef.current === session) { titleRef.current = saved.title; setTitle(saved.title) }
         setSessions(previous => [saved, ...previous.filter(item => item.id !== saved.id)])
       }
     })
     saveQueueRef.current = pending.catch(failure => {
+      lastSavedRef.current = null
       if (mountedRef.current && serverIdentity() === identity) store.toast(t('这条会话没能存进历史：{message}', { message: failure instanceof Error ? failure.message : String(failure) }), 'err')
     })
     return pending
@@ -354,6 +361,8 @@ export function AssistantPage() {
       if (!controller.signal.aborted && !sessions.find(item => item.id === session)?.titleGenerated) {
         void summarizeAssistantSession(session, requestKey.key).then(saved => {
           if (!mountedRef.current || serverIdentity() !== identity) return
+          const last = lastSavedRef.current
+          if (last?.identity === identity && last.session === session) lastSavedRef.current = { ...last, title: saved.title }
           if (sessionRef.current === session) { titleRef.current = saved.title; setTitle(saved.title) }
           setSessions(previous => previous.map(item => item.id === saved.id ? saved : item))
         }).catch(failure => { if (mountedRef.current && serverIdentity() === identity) store.toast(t('标题总结失败：{message}', { message: failure instanceof Error ? failure.message : String(failure) }), 'warn') })
@@ -423,6 +432,10 @@ export function AssistantPage() {
   }
 
   const showSession = (detail: SessionDetail) => {
+    lastSavedRef.current = detail.reasoning ? null : {
+      identity: serverIdentity(), session: detail.id, messages: parseAssistantMessages(detail.messages),
+      model: detail.model || '', title: detail.title,
+    }
     historyRef.current = detail.messages
     sessionRef.current = detail.id
     titleRef.current = detail.title
@@ -771,7 +784,7 @@ export function AssistantPage() {
         onDelete={id => { void confirmDialog(t('删除这条对话？'), { title: t('删除这条对话') }).then(async confirmed => {
           if (!confirmed || busy || historyBusy) return
           setHistoryBusy(true)
-          try { await saveQueueRef.current; await deleteAssistantSession(id); setSessions(previous => previous.filter(item => item.id !== id)); if (sessionRef.current === id) clear() }
+          try { await saveQueueRef.current; await deleteAssistantSession(id); if (lastSavedRef.current?.session === id) lastSavedRef.current = null; setSessions(previous => previous.filter(item => item.id !== id)); if (sessionRef.current === id) clear() }
           catch (failure) { store.toast(failure instanceof Error ? failure.message : String(failure), 'err') } finally { setHistoryBusy(false) }
         }) }} />
       <AssistantTitleSettings open={titleSettingsOpen} onOpenChange={setTitleSettingsOpen} model={config?.titleModel ?? null} prompt={config?.titlePrompt || ''}

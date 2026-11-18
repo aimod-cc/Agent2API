@@ -34,6 +34,10 @@ fn normalize_time(value: Option<&Value>) -> Option<String> {
 
 /// 用户明确保存的值优先；缺失字段采用已加载插件的默认值。
 pub fn settings() -> (bool, Vec<String>) {
+    if let Some(state) = plugin_host::wasm::tasks::travel_state() {
+        return (state["enabled"].as_bool().unwrap_or(false), state["times"].as_array().into_iter()
+            .flatten().filter_map(Value::as_str).map(str::to_string).collect());
+    }
     let declared = schedules::definition(PROVIDER, SCHEDULE_ID);
     let raw = config::current()
         .raw()
@@ -73,6 +77,9 @@ pub fn settings() -> (bool, Vec<String>) {
 /// 与 `auto_checkin` 的 `write_state` 同构：合并写回，config.json 的其它字段
 /// 原样保留。
 pub fn configure(patch: &Value) -> Result<Value, String> {
+    if plugin_host::wasm::has_capability(PROVIDER, "tasks.v1") {
+        return plugin_host::wasm::tasks::configure_travel(patch);
+    }
     let (_, previous_times) = settings();
     let mut current = config::current()
         .raw()
@@ -126,6 +133,7 @@ pub fn configure(patch: &Value) -> Result<Value, String> {
 
 /// 对外状态（设置页 / 签到页读它）。
 pub fn state() -> Value {
+    if let Some(state) = plugin_host::wasm::tasks::travel_state() { return state; }
     let (enabled, times) = settings();
     let raw = config::current()
         .raw()
@@ -208,6 +216,10 @@ pub enum RunOutcome {
 
 /// 跑一轮巡检；去重按计划时刻落，手动执行不占用定时轮次。
 pub async fn run_once(store: &AccountStore, reason: &str, plan_time: Option<&str>) -> RunOutcome {
+    if plugin_host::wasm::has_capability(PROVIDER, "tasks.v1") {
+        if plan_time.is_some() { return RunOutcome::Skipped("旅行排程由WASM任务调度，旧入口不重复执行".into()); }
+        return plugin_host::wasm::tasks::run_travel(store).await;
+    }
     if let Some(message) = schedules::pause_reason(PROVIDER, SCHEDULE_ID) {
         return RunOutcome::Skipped(message);
     }

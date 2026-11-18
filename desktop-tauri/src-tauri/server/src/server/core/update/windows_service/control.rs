@@ -46,10 +46,6 @@ pub(super) fn registered_root() -> Option<PathBuf> {
     reg_string("UpdateInstallDir").ok().map(PathBuf::from)
 }
 
-pub(super) fn repository() -> Option<String> {
-    reg_string("UpdateRepository").ok().filter(|value| !value.trim().is_empty())
-}
-
 fn reg_string(name: &str) -> Result<String, UpdateError> {
     let key = security::wide(std::ffi::OsStr::new(KEY));
     let name = security::wide(std::ffi::OsStr::new(name));

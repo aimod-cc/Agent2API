@@ -30,7 +30,7 @@ import { t } from '../i18n'
  * 时有时无的控件比一个灰着的框更让人困惑。
  *
  * ── 两种分页口径 ───────────────────────────────────────────
-   *   · **客户端分页**（模型管理 / 网关 Key / 账号）：数据一次全取回，
+ *   · **客户端分页**（模型管理 / 网关 Key）：数据一次全取回，
  *     本文件负责页码状态与切片（useClientPaging），「每页条数」里可以选「全部」。
  *   · **服务端真分页**（请求日志）：明细条数无上限，offset/limit 由后端执行，
  *     页码状态在页面自己手里（本文件只渲染页脚）；不给「全部」这一档
@@ -66,7 +66,7 @@ export function pageSizeText(size: PageSizeChoice): string {
  * 传进来的 `sizes` 是这张表**当前允许**的档位：存盘里的值已经不在档位里
  * （比如某张表后来去掉了「全部」）就回落默认值 —— 否则会出现「下拉里没有
  * 这一项、表格却按它分页」这种没法解释的状态。`fallback` 是「没存过」时用哪一档
- * （账号页给出「全部」：那是队列，行序本身就是数据）。
+ * （账号页默认 50 条，主动选择「全部」时由页面使用虚拟滚动）。
  */
 export function readPageSize(
   table: string,
@@ -181,6 +181,7 @@ type TableFooterProps = {
   disabled?: boolean
   /** 页脚左侧的说明文字：沿用各页原有的提示，不因为加了控件就删掉 */
   leading?: React.ReactNode
+  countLabel?: string
   className?: string
 }
 
@@ -201,6 +202,7 @@ function TableFooter({
   range = null,
   disabled = false,
   leading,
+  countLabel,
   className,
 }: TableFooterProps) {
   // 跳页框是**草稿态**：输入过程中不翻页，回车 / 失焦才提交（边打字边翻页会把
@@ -219,11 +221,11 @@ function TableFooter({
   }
 
   const single = pageCount <= 1
-  const countText = total === 0
+  const countText = countLabel ?? (total === 0
     ? t('共 0 条')
     : range
       ? t('共 {total} 条 · 当前第 {start}–{end} 条', { total, start: range.start, end: range.end })
-      : t('共 {total} 条（全部显示）', { total })
+      : t('共 {total} 条（全部显示）', { total }))
 
   return (
     <CardFooter className={className ? `panel-foot table-foot-bar ${className}` : 'panel-foot table-foot-bar'}>

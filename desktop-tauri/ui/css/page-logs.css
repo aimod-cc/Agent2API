@@ -29,13 +29,12 @@
   flex-wrap: wrap;
   flex: none;
 }
-.event-log-status { color: var(--text-3); font-size: 11.5px; }
 .event-log-aggregate { display: flex; align-items: center; gap: 7px; margin-left: auto; color: var(--text-2); font-size: 11.5px; }
 .event-log-overview { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; flex: none; color: var(--text-3); font-size: 11.5px; }
 .event-log-errors { color: var(--danger); }
 .event-log-warnings { color: var(--warn); }
 .event-log-note { flex: none; color: var(--text-3); font-size: 11.5px; line-height: 1.6; }
-.event-log-new, .event-log-error {
+.event-log-error {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -45,7 +44,6 @@
   border-radius: var(--r-md);
   font-size: 12px;
 }
-.event-log-new { border: 1px solid var(--border); background: var(--surface-2); color: var(--text-2); }
 .event-log-error { border: 1px solid var(--danger-bd); background: var(--danger-soft); color: var(--danger); }
 .event-log-head, .event-log-row {
   display: grid;
@@ -116,7 +114,6 @@
 
 @media (max-width: 1100px) {
   .event-log-head, .event-log-row { grid-template-columns: 128px 42px minmax(64px, 88px) minmax(0, 1fr) 38px 46px; gap: 8px; padding: 10px; }
-  .event-log-status { display: none; }
 }
 @media (max-width: 900px) {
   .page[data-page="logs"] .panel-head .head-actions { flex-basis: 100%; margin-left: 0; justify-content: flex-start; }

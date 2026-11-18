@@ -94,7 +94,7 @@ pub(super) async fn provider_row(store: &AccountStore, provider: &str, entry: Pr
 
 #[derive(Clone)]
 pub(super) enum SearchSource {
-    Key { provider: String, key: String },
+    Key { provider: String },
     Account { provider: String, account_id: String, adapter: Arc<dyn ProviderAdapter>, max_chars: usize },
 }
 
@@ -105,7 +105,7 @@ impl SearchSource {
 
     pub(super) async fn search(&self, store: &AccountStore, query: &str, timeout: u64) -> Result<Vec<SourceDraft>, SearchError> {
         match self {
-            Self::Key { provider, key } => super::providers::search(provider, key, query, timeout).await,
+            Self::Key { provider } => super::providers::search(provider, query, timeout).await,
             Self::Account { provider, account_id, adapter, max_chars } => {
                 if query.chars().count() > *max_chars {
                     return Err(SearchError::new(SearchErrorCode::InvalidInput, format!("该搜索来源最多接受 {max_chars} 个字符")));
@@ -128,8 +128,8 @@ pub(super) async fn prepare(store: &AccountStore, provider: &str, entry: &Provid
         let (adapter, max_chars) = capability(store, provider).await?;
         Ok(SearchSource::Account { provider: provider.to_string(), account_id: entry.account_id.clone(), adapter, max_chars })
     } else {
-        let key = super::decrypt_provider_key(entry).ok_or_else(|| configuration("提供商尚未配置有效密钥"))?;
-        Ok(SearchSource::Key { provider: provider.to_string(), key })
+        if !super::provider_keys::has_keys(entry) { return Err(configuration("提供商尚未配置有效密钥")); }
+        Ok(SearchSource::Key { provider: provider.to_string() })
     }
 }
 
@@ -168,9 +168,9 @@ fn source_rows(provider: &str, value: &Value) -> Result<Vec<SourceDraft>, Search
     }).collect())
 }
 
-pub async fn test_provider(store: &AccountStore, provider: &str) -> Value {
+pub async fn test_provider(store: &AccountStore, provider: &str, key_id: Option<&str>, operation: &str) -> Value {
     if !super::is_account_provider(provider) {
-        return super::providers::test_provider(provider).await;
+        return super::providers::test_provider(provider, key_id, operation).await;
     }
     let started = crate::server::logging::now_ms();
     let entry = super::load().providers.get(provider).cloned().unwrap_or_default();

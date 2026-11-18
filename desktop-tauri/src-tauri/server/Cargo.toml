@@ -1,6 +1,6 @@
 [package]
 name = "agent2api-server"
-version = "3.5.0-beta.1"
+version = "3.5.0-beta.2"
 description = "Agent2API 网关本体 — AI 路由网关与 Agent 客户端接管（桌面端与 headless 服务器共用）"
 authors = ["Agent2API"]
 edition = "2021"
@@ -48,6 +48,8 @@ path = "src/bin/agent2api-server.rs"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 工具参数只在本机校验，不解析网络或文件引用。
+jsonschema = { version = "=0.61.2", default-features = false }
 # rt-multi-thread/macros 起运行时，net 监听端口，sync 传停机信号，
 # fs/io-util 读写配置与日志文件；signal 供 headless 二进制接 SIGTERM
 # （容器 stop 的优雅停机路径）；process 供 Qoder 国际版签到的 UMID 组件
@@ -69,7 +71,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 # 不要改这一行 —— 那会让干净 clone 的构建依赖某个人的磁盘布局。
 agent2api-provider-protocol = { git = "https://github.com/ProvidersPlugin/Agent2Providers", tag = "v3.4.0" }
 # LTS 安全补丁；不链接 WASI，不向插件暴露文件、进程或环境变量。
-wasmtime = { version = "36.0.19", default-features = false, features = ["async", "cranelift", "runtime", "std"] }
+wasmtime = { version = "36.0.19", default-features = false, features = ["async", "cache", "cranelift", "pooling-allocator", "runtime", "std"] }
+sysinfo = { version = "=0.37.2", default-features = false, features = ["system"] }
 # Qoder 国际版签到的 UMID 组件安装（providers/qoder/risk.rs）：官方 qodercli
 # npm 包是 .tgz（gzip + tar），解出内嵌的 runtime-info 二进制。flate2 已在
 # 依赖树里（image 拉的），声明出来直接复用；tar 解析手写（几十行，见 risk.rs）
@@ -98,6 +101,7 @@ serde_yaml = "0.9"
 # DSH 的 Cordis 配置含序列、注释和 !!js 标签，编辑时保留未触及的语法树。
 yaml-edit = { version = "=0.3.6", default-features = false }
 sha2 = "0.10"
+ring = "0.17"
 # Loomy 账号（CAccount）请求签名的 HMAC-SHA1（复刻客户端指纹，不是安全边界，
 # 见 providers/loomy/sign.rs）。与 sha2/md-5/hmac 同属 RustCrypto digest 0.10
 # 那条链，不引入新的哈希依赖树。
@@ -169,7 +173,9 @@ ed25519-dalek = { version = "2", default-features = false, features = ["fast", "
 windows = { version = "0.61", features = [
     "Win32_Security_Cryptography",
     "Win32_Security_Authorization",
+    "Win32_Security_Credentials",
     "Win32_Storage_FileSystem",
+    "Win32_UI_WindowsAndMessaging",
     "Win32_System_Threading",
     "Win32_System_JobObjects",
     # KukuAI 会话换发（providers/kuku/engine.rs）：LoadLibrary 引擎 DLL +

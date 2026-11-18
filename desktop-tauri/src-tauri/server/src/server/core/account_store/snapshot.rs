@@ -24,13 +24,20 @@ struct CachedSnapshot {
 pub(crate) struct RoutingSnapshot {
     pub accounts: Vec<Arc<Value>>,
     pub by_id: HashMap<String, Arc<Value>>,
+    pub by_provider: HashMap<String, Vec<Arc<Value>>>,
+    pub public_accounts: Vec<Arc<Value>>,
+    pub public_by_id: HashMap<String, Arc<Value>>,
     pub available_providers: HashSet<String>,
     pub forwarding_providers: HashSet<String>,
 }
 
 impl RoutingSnapshot {
     fn from_rows(rows: &BTreeMap<i64, Arc<Value>>) -> Self {
-        let accounts: Vec<_> = rows.values().cloned().collect();
+        let public_accounts: Vec<_> = rows.values().cloned().collect();
+        let public_by_id = public_accounts.iter().filter_map(|account| {
+            Some((account.get("id")?.as_str()?.to_string(), account.clone()))
+        }).collect();
+        let accounts: Vec<_> = public_accounts.iter().map(|account| Arc::new(route_account(account))).collect();
         let by_id = accounts.iter().filter_map(|account| {
             Some((account.get("id")?.as_str()?.to_string(), account.clone()))
         }).collect();
@@ -42,7 +49,12 @@ impl RoutingSnapshot {
             account.get("provider")?.as_str().map(str::to_string)
         }).collect::<HashSet<_>>().into_iter()
             .filter(|provider| super::store::provider_forwards_requests(provider)).collect();
-        Self { accounts, by_id, available_providers, forwarding_providers }
+        let mut by_provider: HashMap<String, Vec<Arc<Value>>> = HashMap::new();
+        for account in &accounts {
+            let provider = crate::server::core::routing::provider_of(account);
+            by_provider.entry(provider.to_string()).or_default().push(account.clone());
+        }
+        Self { accounts, by_id, by_provider, public_accounts, public_by_id, available_providers, forwarding_providers }
     }
 }
 
@@ -97,7 +109,7 @@ impl AccountStore {
             rows.remove(&rowid);
             if let Some(raw) = raw {
                 match read_rows::decode(raw) {
-                    Ok((_, record)) => { rows.insert(rowid, Arc::new(route_account(&self.public_account(&record)))); }
+                    Ok((_, record)) => { rows.insert(rowid, Arc::new(self.public_account(&record))); }
                     Err(_) => failed += 1,
                 }
             }
@@ -117,9 +129,8 @@ impl AccountStore {
 
     pub(crate) fn route_account_ids_for_provider(&self, provider: &str) -> Vec<String> {
         let snapshot = self.routing_snapshot();
-        let mut accounts: Vec<_> = snapshot.accounts.iter().filter(|account| {
-            account.get("provider").and_then(Value::as_str) == Some(provider)
-                && account.get("enabled").and_then(Value::as_bool) != Some(false)
+        let mut accounts: Vec<_> = snapshot.by_provider.get(provider).into_iter().flatten().filter(|account| {
+            account.get("enabled").and_then(Value::as_bool) != Some(false)
                 && account.get("hasCredentials").and_then(Value::as_bool) == Some(true)
         }).collect();
         accounts.sort_by_key(|account| super::store::route_order_key(account));
@@ -142,13 +153,13 @@ fn empty() -> Arc<RoutingSnapshot> {
     Arc::new(RoutingSnapshot::from_rows(&BTreeMap::new()))
 }
 
-// 复用各家公开投影的字段口径，只缓存选路和发送编排需要的部分。
+// 选路只消费所需字段；完整公开投影复用同一份按账号增量更新的缓存。
 fn route_account(account: &Value) -> Value {
     let mut public = Map::new();
     for key in [
         "id", "provider", "name", "nickname", "email", "userId", "uid", "account",
         "displayName", "priority", "addedAt", "enabled", "hasCredentials", "nameCustom",
-        "needsRelogin", "allowRouteSkip", "maxConcurrent", "rateLimits", "limiterGroups",
+        "needsRelogin", "allowRouteSkip", "maxConcurrent", "rateLimits", "routingCooldowns", "limiterGroups",
         "upstreamCooldownUntil", "zcodePlan", "pool", "quotaChannel", "pluginModelPermissions", "usageConfigKey",
     ] {
         if let Some(value) = account.get(key) { public.insert(key.to_string(), value.clone()); }

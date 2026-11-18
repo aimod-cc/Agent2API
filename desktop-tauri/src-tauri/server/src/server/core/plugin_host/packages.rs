@@ -1,6 +1,9 @@
 //! 包在停止旧宿主之前完成解包与验签；登记失败时恢复同版本重装的原目录。
 
-use std::path::{Path, PathBuf};
+pub(super) mod provenance;
+
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent2api_provider_protocol as proto;
@@ -18,6 +21,7 @@ pub struct PreparedPack {
     entry: String,
     sha256: String,
     signed: bool,
+    artifact: Option<Arc<provenance::VerifiedArtifact>>,
 }
 
 impl Drop for PreparedPack {
@@ -26,33 +30,6 @@ impl Drop for PreparedPack {
             let _ = std::fs::remove_dir_all(&self.staging);
         }
     }
-}
-
-pub(super) fn ensure_entry_executable(path: &Path) -> Result<(), String> {
-    let metadata = std::fs::metadata(path)
-        .map_err(|error| format!("读取插件入口失败（{}）：{error}", path.display()))?;
-    if !metadata.is_file() {
-        return Err(format!("插件入口不是普通文件：{}", path.display()));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mode = metadata.permissions().mode();
-        if mode & 0o100 == 0 {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode | 0o100))
-                .map_err(|error| format!("设置插件入口执行权限失败（{}）：{error}", path.display()))?;
-            let updated = std::fs::metadata(path)
-                .map_err(|error| format!("读取插件入口权限失败（{}）：{error}", path.display()))?;
-            if updated.permissions().mode() & 0o100 == 0 {
-                return Err(format!(
-                    "插件入口仍不可执行，请检查数据目录是否支持 Unix 执行权限：{}",
-                    path.display()
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 pub fn prepare(
@@ -75,14 +52,14 @@ pub fn prepare(
     ));
     std::fs::create_dir_all(&staging).map_err(|error| format!("创建临时目录失败：{error}"))?;
     let prepared = (|| {
-        install::extract_zip(bytes, &staging)?;
-        let manifest = install::read_manifest(&staging)?;
+        let extracted = install::extract_zip(bytes, &staging)?;
+        let manifest = extracted.manifest()?;
         install::validate_manifest(&manifest, proto::PROTOCOL_VERSION)?;
         if manifest.id == super::script::HOST_ID || super::script::is_package(&manifest.id) {
             return Err("该插件标识保留给脚本运行环境，不能安装为原生插件".to_string());
         }
-        super::compatibility::validate(&staging, &manifest)?;
-        if manifest.id.is_empty()
+        let is_wasm = extracted.validate(&staging, &manifest)?;
+        if manifest.id.is_empty() || manifest.id.len() > 128
             || !manifest
                 .id
                 .bytes()
@@ -90,7 +67,7 @@ pub fn prepare(
         {
             return Err("插件包 id 只能包含小写字母、数字和连字符".to_string());
         }
-        if manifest.version.is_empty()
+        if manifest.version.is_empty() || manifest.version.len() > 128
             || !manifest
                 .version
                 .bytes()
@@ -105,27 +82,25 @@ pub fn prepare(
         {
             return Err("下载包的 id 或版本与所选发行版不一致，已拒绝安装".to_string());
         }
-        let wasm = super::wasm::manifest::read(&staging, &manifest)?;
         let target = super::host_target();
         let entry = install::entry_for_target(&manifest, &target)
             .ok_or_else(|| format!("插件包没有为当前平台（{target}）提供入口"))?;
         if !staging.join(&entry).is_file() {
             return Err(format!("包里的入口二进制不存在：{entry}"));
         }
-        let (signature, problem) = install::verify_signature(&staging, &manifest, &target);
-        if signature == SignatureState::Invalid {
-            return Err(format!("签名校验失败：{}", problem.unwrap_or_default()));
-        }
+        let signature = extracted.signature(&manifest, &target)?;
         if require_signed && signature != SignatureState::Verified {
             return Err("此下载方式只接受通过可信签名校验的插件包；未签名包请从原来源下载后手动安装".to_string());
         }
-        if wasm.is_none() { ensure_entry_executable(&staging.join(&entry))?; }
+        if !is_wasm { return Err(super::support::LEGACY_REASON.to_string()); }
+        let artifact = provenance::VerifiedArtifact::from_prepared(extracted, &manifest, &entry, &target, signature, &staging)?;
         Ok(PreparedPack {
             staging: staging.clone(),
             manifest,
             entry,
             sha256: install::sha256_hex(bytes),
             signed: signature.is_signed(),
+            artifact,
         })
     })();
     if prepared.is_err() {
@@ -137,20 +112,40 @@ pub fn prepare(
 impl PreparedPack {
     pub fn id(&self) -> &str { &self.manifest.id }
 
+    pub(crate) fn preview(&self) -> serde_json::Value {
+        let registry = PackRegistry::load();
+        let previous = registry.packs.iter().find(|pack| pack.id == self.manifest.id);
+        let record = self.record(&registry);
+        serde_json::json!({
+            "id": self.manifest.id,
+            "name": super::pack_view::display_name(&self.manifest.name),
+            "version": self.manifest.version,
+            "signed": self.signed,
+            "sha256": self.sha256,
+            "previousVersion": previous.map(|pack| &pack.version),
+            "enabled": record.enabled,
+            "providers": self.manifest.providers,
+        })
+    }
+
     pub(super) fn record(&self, registry: &PackRegistry) -> InstalledPack {
         let previous = registry.packs.iter().find(|pack| pack.id == self.manifest.id);
         let providers = self.manifest.providers.iter().map(|provider| {
             let id = provider.id.0.clone();
             let enabled = previous.and_then(|pack| pack.providers.get(&id)).copied()
-                .or_else(|| super::ownership::migrated_enabled(registry, &self.manifest.id, &id))
-                .or_else(|| super::wasm::manifest::is_wasm(&self.manifest).then(|| registry.packs.iter()
-                    .find_map(|pack| pack.providers.get(&id).copied())).flatten())
+                .or_else(|| registry.packs.iter().find_map(|pack| {
+                    pack.manifest_providers.iter().any(|provider| provider.id.as_str() == id)
+                        .then(|| pack.enabled && pack.providers.get(&id).copied().unwrap_or(true))
+                }))
                 .unwrap_or(provider.default_enabled);
             (id, enabled)
         }).collect();
         InstalledPack {
             id: self.manifest.id.clone(), version: self.manifest.version.clone(),
-            enabled: previous.map(|pack| pack.enabled).unwrap_or(true), providers,
+            enabled: previous.map(|pack| pack.enabled).unwrap_or(true)
+                && self.manifest.providers.iter().any(|provider|
+                    !crate::server::core::providers::availability::is_suspended(provider.id.as_str())),
+            providers,
             entry: self.entry.clone(), sha256: self.sha256.clone(), signed: self.signed,
             installed_at: crate::server::logging::now_ms(),
             manifest_providers: self.manifest.providers.clone(),
@@ -166,10 +161,18 @@ impl PreparedPack {
     }
 
     pub(super) fn install_pending(self) -> Result<InstalledTransaction, String> {
+        self.install_pending_inner(None)
+    }
+
+    pub(super) fn install_pending_changed(self, change: provenance::FileChange) -> Result<InstalledTransaction, String> {
+        self.install_pending_inner(Some(change))
+    }
+
+    fn install_pending_inner(self, change: Option<provenance::FileChange>) -> Result<InstalledTransaction, String> {
         let mut registry = PackRegistry::load();
         if super::wasm::manifest::is_wasm(&self.manifest) {
             if let Some(other) = registry.packs.iter().find(|pack| pack.id != self.manifest.id
-                && pack.entry.ends_with(".wasm") && pack.manifest_providers.iter()
+                && super::support::installed_state(pack) == super::PackSupportState::Supported && pack.manifest_providers.iter()
                     .any(|provider| self.manifest.providers.iter().any(|item| item.id == provider.id))) {
                 return Err(format!("该提供商已由独立插件「{}」接管，请先卸载对应插件", other.id));
             }
@@ -180,6 +183,11 @@ impl PreparedPack {
             return Err(format!("提供商 {} 已由脚本插件接管，请先停用对应脚本插件", provider.id));
         }
         let record = self.record(&registry);
+        // 准备失败不撤销；开始目录/登记变更前再次核对原ZIP事实，并永久关闭旧代次。
+        if let Some(artifact) = &self.artifact { artifact.recheck(&self.staging)?; }
+        let change = change.unwrap_or_else(|| provenance::begin_file_change(&self.manifest.id));
+        let ordinal = registry.packs.iter().position(|pack| pack.id == record.id).unwrap_or(registry.packs.len());
+        let mut witness = self.artifact.as_ref().and_then(|artifact| provenance::begin_install(artifact.clone(), &record, ordinal, &change));
         let version_dir = install::plugins_dir()
             .join(&self.manifest.id)
             .join(&self.manifest.version);
@@ -209,19 +217,24 @@ impl PreparedPack {
             Some(slot) => *slot = record,
             None => registry.packs.push(record),
         }
-        if let Err(error) = registry.save() {
-            install::remove_dir_retrying(&version_dir)
-                .map_err(|restore| format!("保存插件登记失败：{error}；移除新文件失败：{restore}；旧备份已保留"))?;
-            if replaced {
-                install::move_dir_retrying(&backup, &version_dir).map_err(|restore| {
-                    format!("保存插件登记失败：{error}；恢复旧文件失败：{restore}；备份保留在 {}", backup.display())
-                })?;
+        let save = provenance::begin_registry_save(&registry, Some(&self.manifest.id));
+        let save = match registry.save_with_witness(save) {
+            Ok(save) => save,
+            Err(error) => {
+                install::remove_dir_retrying(&version_dir)
+                    .map_err(|restore| format!("保存插件登记失败：{error}；移除新文件失败：{restore}；旧备份已保留"))?;
+                if replaced {
+                    install::move_dir_retrying(&backup, &version_dir).map_err(|restore| {
+                        format!("保存插件登记失败：{error}；恢复旧文件失败：{restore}；备份保留在 {}", backup.display())
+                    })?;
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
+        };
+        if let Some(witness) = &mut witness { witness.saved_by(&save); }
         Ok(InstalledTransaction {
             id: self.manifest.id.clone(), previous_registry, version_dir,
-            backup: replaced.then_some(backup),
+            backup: replaced.then_some(backup), witness, change,
         })
     }
 }
@@ -231,10 +244,21 @@ pub(super) struct InstalledTransaction {
     previous_registry: PackRegistry,
     version_dir: PathBuf,
     backup: Option<PathBuf>,
+    witness: Option<provenance::PendingInstall>,
+    change: provenance::FileChange,
 }
 
 impl InstalledTransaction {
-    pub fn commit(self) {
+    pub(super) fn take_start_source(&mut self) -> Option<provenance::StartSource> {
+        self.witness.as_mut()?.take_start_source(&self.version_dir)
+    }
+
+    pub(super) fn accept_start(&mut self, receipt: provenance::StartReceipt) -> Result<(), &'static str> {
+        self.witness.as_mut().ok_or("本次安装没有可信启动来源")?.accept_start(receipt)
+    }
+
+    pub fn commit(mut self) {
+        if let Some(witness) = self.witness { witness.commit(&self.version_dir, &mut self.change); }
         if let Some(backup) = self.backup {
             if let Err(error) = install::remove_dir_retrying(&backup) {
                 crate::server::logging::log("[Plugin]", &format!("插件更新成功，但临时备份清理失败：{error}"));
@@ -243,6 +267,8 @@ impl InstalledTransaction {
     }
 
     pub fn rollback(self) -> Result<(), String> {
+        provenance::begin_change(&self.id);
+        // 只恢复普通安装；旧JSON记录没有重新签发见证的资格。
         install::remove_dir_retrying(&self.version_dir)
             .map_err(|error| format!("移除未能启动的插件文件失败，旧版本备份已保留：{error}"))?;
         if let Some(backup) = self.backup {

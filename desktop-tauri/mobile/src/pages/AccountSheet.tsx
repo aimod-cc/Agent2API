@@ -7,6 +7,7 @@ import { Badge } from '../components/ui'
 import { store } from '../state/store'
 import {
   clearAccountRateLimits,
+  fetchAccount,
   deleteAccount,
   promoteAccount,
   refreshAccount,
@@ -17,6 +18,7 @@ import {
 import { accountName, activeLimits, formatExpiry, formatRelative, formatStamp, isRateLimited } from '../lib/format'
 import { expiryOf, hasExpiry, isLongLivedCredential, supportsUsage } from '../lib/providerFacts'
 import { usageText } from '../lib/usage'
+import { AccountQueryRecovery } from './accounts/AccountQueryRecovery'
 import { useDisplayClock } from '../../../ui-shared/use-display-clock'
 import { credentialExpiryRowsOf, credentialExpiryText } from '../../../ui-shared/credential-expiry'
 import { upstreamCooldownOf, upstreamSuspendedReasonOf } from '../../../ui-shared/account-upstream-state'
@@ -34,7 +36,7 @@ import { MetricGrid, MetricCard } from '@ui'
  * 查询余额、设为首选、清除限流、删除），编辑仍回桌面端。
  */
 export function AccountSheet({
-  account,
+  account: initialAccount,
   onClose,
   onChanged,
 }: {
@@ -42,13 +44,27 @@ export function AccountSheet({
   onClose: () => void
   onChanged: () => void
 }) {
+  const [details, setDetails] = useState<Account | null>(null)
+  const account: Account | null = details && initialAccount && details.id === initialAccount.id ? { ...initialAccount, ...details } : initialAccount
   const now = useDisplayClock()
   const [busy, setBusy] = useState('')
+  const [recoveryBusy, setRecoveryBusy] = useState(false)
   const [editingName, setEditingName] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
   const open = Boolean(account)
   const accountId = account?.id || ''
   const identity = serverIdentity()
+  useEffect(() => {
+    setDetails(null)
+    if (!initialAccount || initialAccount.detailsLoaded !== false) return
+    const controller = new AbortController()
+    void fetchAccount(initialAccount.id, controller.signal).then(account => {
+      if (!controller.signal.aborted && serverIdentity() === identity) setDetails(account)
+    }).catch(error => {
+      if (!controller.signal.aborted && serverIdentity() === identity) store.toast(error instanceof Error ? error.message : String(error), 'err')
+    })
+    return () => controller.abort()
+  }, [initialAccount?.id, initialAccount?.updatedAt, initialAccount?.detailsLoaded, identity])
   const usage = useAccountUsage(accountId, Boolean(account && supportsUsage(account)))
   const usageRow = usage.row
   useEffect(() => {
@@ -61,7 +77,7 @@ export function AccountSheet({
   }, [accountId])
 
   const run = async (kind: string, task: () => Promise<unknown>, success: string): Promise<boolean> => {
-    if (serverIdentity() !== identity) return false
+    if (serverIdentity() !== identity || recoveryBusy) return false
     setBusy(kind)
     try {
       await task()
@@ -109,11 +125,13 @@ export function AccountSheet({
   /** 不传 model 时同时清除账号冷却和全部模型限流。 */
   const clearLimit = async (model?: string) => {
     if (!account) return
-    const question = model
-      ? t('确定清除模型「{model}」的限流标记？', { model })
-      : t('确定清除该账号的冷却与全部模型限流标记？')
+    const includeProvider = !model && Number(account.providerCooldown?.resetAt) > Date.now()
+    const question = includeProvider
+      ? t('这条冷却由同一提供商的账号共用。清除后这些账号都会重新参与；上游仍受限时会再次冷却。')
+      : model ? t('确定清除模型「{model}」的限流标记？', { model })
+        : t('确定清除该账号的冷却与全部模型限流标记？')
     if (!await confirmDialog(question)) return
-    await run('clear', () => clearAccountRateLimits(account.id, model), t('限流已清除'))
+    await run('clear', () => clearAccountRateLimits(account.id, model, includeProvider), t('限流已清除'))
   }
 
   const promote = async () => {
@@ -136,10 +154,9 @@ export function AccountSheet({
   const isPrimary = (store.get().session?.routedAccountId || store.get().session?.accounts?.currentAccountId) === account?.id
   const sortActive = (store.get().session?.accounts?.sorting?.rules[String(account?.provider || '')] || []).some(rule => rule.on)
   const canQueryUsage = Boolean(account && supportsUsage(account))
-  const canRefresh = Boolean(account && account.desktop !== true && (account.canRefresh === true || account.hasRefreshToken === true))
 
   return (
-    <Sheet open={open} onOpenChange={next => { if (!next) onClose() }}>
+    <Sheet open={open} onOpenChange={next => { if (!next && !recoveryBusy) onClose() }}>
       <SheetContent>
         <SheetHeader>
           <SheetTitle>{t('账号详情')}</SheetTitle>
@@ -332,10 +349,35 @@ export function AccountSheet({
                     <span className='m-k' style={{ flex: 'none' }}>{t('余额详情')}</span>
                     <span
                       className='m-v'
-                      style={{ flex: 1, minWidth: 0, textAlign: 'right', lineHeight: 1.5, wordBreak: 'break-word' }}
+                      style={{ flex: 1, minWidth: 0, textAlign: 'right', lineHeight: 1.5, wordBreak: 'break-word', whiteSpace: 'pre-line' }}
                     >
                       {usageView.detail}
                     </span>
+                  </div>
+                ) : null}
+                {canQueryUsage && usageView.models?.length ? (
+                  <div className='m-row' style={{ alignItems: 'flex-start' }}>
+                    <span className='m-k' style={{ flex: 'none' }}>{t('模型配额')}</span>
+                    <div
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 6,
+                      }}
+                    >
+                      {usageView.models.map(model => (
+                        <div key={model.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8, fontSize: 12 }}>
+                          <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--m-text)' }}>
+                            {model.name}
+                          </span>
+                          <span className='m-mono' style={{ flex: 'none', color: model.percent !== null && model.percent < 20 ? 'var(--m-warn)' : 'var(--m-text-2)' }}>
+                            {model.view}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 ) : null}
                 {suspendedReason ? (
@@ -356,6 +398,9 @@ export function AccountSheet({
                 ) : null}
               </div>
 
+              {['officeace', 'cline-free'].includes(account.provider || '') ? <AccountQueryRecovery account={account}
+                disabled={Boolean(busy)} onBusyChange={setRecoveryBusy} onChanged={onChanged} onQuery={usage.query} /> : null}
+
               {limits.length || cooldown ? (
                 <>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0 2px' }}>
@@ -372,10 +417,11 @@ export function AccountSheet({
                   <div className='m-rows'>
                     {cooldown ? (
                       <div className='m-row' style={{ alignItems: 'flex-start' }}>
-                        <span className='m-k'>{t('账号冷却')}</span>
+                        <span className='m-k'>{cooldown.scope === 'provider' ? t('提供商共享冷却') : t('账号冷却')}</span>
                         <div className='m-v' style={{ whiteSpace: 'normal', wordBreak: 'break-word', lineHeight: 1.5 }}>
                           <div title={formatStamp(cooldown.resetAt)}>{t('{time} 恢复', { time: formatRelative(cooldown.resetAt) })}</div>
-                          <div>{t('账号全部模型暂时停止转发 · 到恢复时间自动解除')}</div>
+                          <div>{cooldown.scope === 'provider' ? t('同一提供商的账号暂时停止转发 · 到恢复时间自动解除') : t('账号全部模型暂时停止转发 · 到恢复时间自动解除')}</div>
+                          {cooldown.timeSource ? <div>{cooldown.timeSource === 'upstream' ? t('冷却来自上游时间') : t('冷却来自本机估算')}</div> : null}
                           {cooldown.message ? <div>{cooldown.message}</div> : null}
                         </div>
                       </div>
@@ -409,31 +455,30 @@ export function AccountSheet({
           {canQueryUsage ? <Button size='touch' variant='outline'
             type='button'
             className='m-btn m-ghost w-full'
-            disabled={usage.starting || Boolean(busy) || !account}
+            disabled={usage.starting || Boolean(busy) || recoveryBusy || !account}
             onClick={() => void usage.query()}
           >
             <Icon name='wallet' />
-            {usage.starting ? t('启动中…') : usage.task?.status === 'running' ? t('重新查询') : t('查询余额')}
+            {usage.starting ? t('启动中…') : usage.pending ? t('重新查询') : t('查询余额')}
           </Button> : null}
           {usage.status ? <p className='text-xs text-subtle' role='status'>{usage.status}</p> : null}
           {usageRow?.stale ? <p className='text-xs text-subtle'>{t('历史余额，尚未按新配置验证')}</p> : null}
-          {usage.task?.status === 'running' ? <Button variant='outline' onClick={() => void usage.cancel()}>{t('取消查询')}</Button> : null}
-          {canRefresh ? <Button size='touch' variant='default'
+          {usage.pending ? <Button variant='outline' onClick={() => void usage.cancel()}>{t('取消查询')}</Button> : null}
+          <Button size='touch' variant='default'
             type='button'
             className='m-btn w-full'
-            disabled={Boolean(busy) || !account || account.needsRelogin === true}
-            title={account?.needsRelogin ? account.needsReloginReason : undefined}
-            onClick={() => account && void run('refresh', () => refreshAccount(account.id), t('凭证已刷新'))}
+            disabled={Boolean(busy) || recoveryBusy || !account}
+            onClick={() => account && void run('refresh', () => refreshAccount(account.id), account.canSyncCredentials === true ? t('登录态已刷新') : t('凭证已刷新'))}
           >
             <Icon name='refresh' />
-            {busy === 'refresh' ? t('刷新中…') : t('刷新凭证')}
-          </Button> : account ? <p className='text-xs text-subtle'>{t('未声明可手动续期；本机引用请在原客户端处理登录态。')}</p> : null}
+            {busy === 'refresh' ? t('刷新中…') : t('刷新 Token')}
+          </Button>
           <div className='m-btn-row'>
             <Button size='touch' variant='outline'
               type='button'
               className='m-btn m-ghost w-full'
               style={{ flex: 1 }}
-              disabled={busy === 'toggle' || !account}
+              disabled={busy === 'toggle' || recoveryBusy || !account}
               onClick={() =>
                 account &&
                 void run(
@@ -450,7 +495,7 @@ export function AccountSheet({
               type='button'
               className='m-btn m-danger w-full'
               style={{ flex: 1 }}
-              disabled={busy === 'delete' || !account}
+              disabled={busy === 'delete' || recoveryBusy || !account}
               onClick={() => void remove()}
             >
               <Icon name='trash' />

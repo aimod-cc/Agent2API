@@ -19,8 +19,8 @@
 //!   · 控制台：服务进程没有控制台，`eprintln!` 全部落空 —— 所以调用方在
 //!     进 SCM 之前先打开日志文件通道（`logging::init_file_sink`），否则
 //!     服务会「启动成功但什么都看不见」；
-//!   · 停机：SCM 发 STOP / SHUTDOWN 控制事件，转成与 Ctrl+C / SIGTERM 同一条
-//!     优雅停机路径（网关主循环收到信号 → `shutdown_tx` → 在途请求收尾）。
+//!   · 停机：SCM 的停止控制事件与面板重启共用可取消的异步通知；先报
+//!     StopPending，再等待同一ServerHandle的真实收尾结果，最后报告Stopped。
 //!
 //! ── 工作目录 ────────────────────────────────────────────────
 //! 服务进程的 CWD 是 `C:\Windows\system32`，不是 exe 所在目录：
@@ -36,34 +36,37 @@
 //! ── 就绪判定为什么由网关回报 ────────────────────────────────
 //! 「进程起来了」不等于「服务可用」：开库、绑端口任一步失败，SCM 都应看到
 //! 启动失败而不是先 Running 再闪退（后者会触发恢复策略反复拉起）。所以
-//! 网关在**端口绑好、开始接受请求**那一刻调 `Ready::signal()`，本模块据此
-//! 上报 Running；网关在 signal 之前返回错误，就上报带退出码的 Stopped。
+//! 网关在**端口绑好、开始接受请求**后报告就绪；上报Running失败也必须
+//! 先收尾再退出。最终服务退出码和进程退出码都保留真实失败，不能静默归零。
 //!
 //! 本模块只在 `cfg(windows)` 下编译，调用点由 `bin/agent2api-server.rs`
 //! 用 `#[cfg(windows)]` 圈住。
 
 use std::ffi::OsString;
-use std::sync::mpsc;
-use std::sync::Mutex;
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
+use agent2api_server::server::logging;
 use windows_service::service::{
-    ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
-    ServiceType,
+    ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType,
 };
-use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
+use windows_service::service_control_handler::{
+    self, ServiceControlHandlerResult, ServiceStatusHandle,
+};
 use windows_service::service_dispatcher;
+
+use super::ShutdownSignal;
 
 /// 服务名：与 install-service.ps1 里 `sc.exe create` 的名字**必须逐字一致**
 /// （SCM 按名字把进程与注册项对上；不一致时服务会以 1053 启动失败）。
 pub const SERVICE_NAME: &str = "Agent2API";
 
-/// 启动宽限期：开库 + 读配置 + 绑端口，给足 SCM 的判活窗口。
-/// 只用于 StartPending 的 `wait_hint`，不代表真的会等这么久。
+/// 启动提示与首次状态通知的等待上限；超时只请求停止，不把线程当作已退出。
 const START_HINT: Duration = Duration::from_secs(30);
 
-/// 停机宽限期：在途请求收尾（SSE 长连接可能还没断）。
-const STOP_HINT: Duration = Duration::from_secs(20);
+/// 仅是SCM状态提示，含少量状态传递余量；不是第二个关闭计时器。
+/// 真正排空期限只继承首次停止请求，系统关机仍可能提前结束进程。
+const STOP_HINT: Duration = Duration::from_secs(60);
 
 /// 命令行走服务模式（`--service`，大小写不敏感，容忍前后空白）
 pub fn requested() -> bool {
@@ -72,146 +75,272 @@ pub fn requested() -> bool {
         .any(|arg| arg.trim().eq_ignore_ascii_case("--service"))
 }
 
-/// 停机信号：SCM 的控制事件经回调转到这里。
-/// 网关主循环拿它和 Ctrl+C / SIGTERM 一起 select。
-pub struct StopSignal(mpsc::Receiver<()>);
+/// SCM同步回调与网关共用watch通知；没有spawn_blocking或永久recv等待。
+pub struct StopSignal(ShutdownSignal);
 
 impl StopSignal {
-    /// 阻塞等待 SCM 要求停止。
-    ///
-    /// 通道断开（回调已释放）也当停机处理：宁可退出让 SCM 按恢复策略拉起，
-    /// 也不要卡住进程变成「僵而不死」。
-    pub fn wait(self) {
-        let _ = self.0.recv();
-    }
-
-    /// 转成能和非阻塞 select 一起用的接收端。
-    /// 网关主循环里通常是 `tokio::select!`，用 `recv()` 的 future 形式更自然：
-    /// 这个方法把同步通道包成 async 等待点。
-    pub fn into_async(self) -> StopSignalAsync {
-        StopSignalAsync(self.0)
+    pub(super) fn signal(&self) -> ShutdownSignal {
+        self.0.clone()
     }
 }
 
-/// `StopSignal` 的 async 形态：`wait()` 在阻塞线程上轮询通道。
-/// 之所以不用 tokio::sync::mpsc：SCM 回调线程是**同步**线程，不能在里面
-/// await，而 tokio 的 `blocking_send` 又要求运行时上下文 —— 用标准库通道
-/// 是两边都能安全调用的最小公约数。
-pub struct StopSignalAsync(mpsc::Receiver<()>);
+/// 固定状态槽串行化Running/StopPending/Stopped，迟到就绪不能覆盖停止。
+struct StatusState {
+    handle: Option<ServiceStatusHandle>,
+    current: ServiceState,
+    stop_reported: bool,
+    error: Option<String>,
+}
 
-impl StopSignalAsync {
-    /// 等到停机信号（在 tokio 的阻塞线程池上轮询，不占 worker）。
-    pub async fn wait(self) {
-        let receiver = self.0;
-        let _ = tokio::task::spawn_blocking(move || receiver.recv()).await;
+#[derive(Clone)]
+pub struct Progress {
+    state: Arc<Mutex<StatusState>>,
+    stop: ShutdownSignal,
+    settled: mpsc::SyncSender<()>,
+}
+
+impl Progress {
+    fn install(&self, handle: ServiceStatusHandle) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.handle = Some(handle);
+        let stopping = self.stop.current().is_some();
+        let next = if stopping {
+            ServiceState::StopPending
+        } else {
+            ServiceState::StartPending
+        };
+        let hint = if stopping { STOP_HINT } else { START_HINT };
+        let result = Self::report(&mut state, status(next, 1, hint));
+        if stopping && result.is_ok() {
+            state.stop_reported = true;
+        }
+        result
+    }
+
+    pub(super) fn ready(&self) -> Result<(), String> {
+        let result = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if self.stop.current().is_some() || state.current != ServiceState::StartPending {
+                Err("就绪前已开始停止，不再报告Running".into())
+            } else {
+                Self::report(&mut state, status(ServiceState::Running, 0, Duration::ZERO))
+            }
+        };
+        let _ = self.settled.try_send(());
+        if result.is_ok() && self.stop.current().is_none() {
+            agent2api_server::server::core::update::windows_service::notify_ready();
+        }
+        result
+    }
+
+    pub(super) fn stopping(&self) -> Result<(), String> {
+        self.stop.request("Windows服务开始关闭");
+        let result = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.current == ServiceState::Stopped || state.stop_reported {
+                Ok(())
+            } else if state.handle.is_none() {
+                // 注册回调与保存状态句柄之间收到STOP；install随后补报，不能漏信号。
+                state.current = ServiceState::StopPending;
+                Ok(())
+            } else {
+                let result =
+                    Self::report(&mut state, status(ServiceState::StopPending, 1, STOP_HINT));
+                state.stop_reported = result.is_ok();
+                result
+            }
+        };
+        let _ = self.settled.try_send(());
+        result
+    }
+
+    fn stopped(&self, outcome: Result<(), String>) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let status_error = state.error.clone().map_or(Ok(()), Err);
+        let outcome = super::combine_results(outcome, status_error);
+        let code = if outcome.is_ok() {
+            ServiceExitCode::NO_ERROR
+        } else {
+            ServiceExitCode::ServiceSpecific(1)
+        };
+        // SCM收到Stopped后可能立即结束进程：结果和退出码证据必须在此前保存。
+        store_service_result(&outcome);
+        logging::console_line(
+            "[Service]",
+            &format!("即将报告Stopped，服务退出码={code:?}"),
+        );
+        let reported = Self::report(
+            &mut state,
+            status_with_exit(ServiceState::Stopped, 0, Duration::ZERO, code),
+        );
+        let report_failed = reported.is_err();
+        let outcome = super::combine_results(outcome, reported);
+        if report_failed {
+            store_service_result(&outcome);
+        }
+        outcome
+    }
+
+    fn report(state: &mut StatusState, status: ServiceStatus) -> Result<(), String> {
+        let next = status.current_state;
+        let result = state
+            .handle
+            .ok_or_else(|| "服务状态句柄尚未就绪".to_string())
+            .and_then(|handle| {
+                handle
+                    .set_service_status(status)
+                    .map_err(|error| format!("上报 {next:?} 失败：{error}"))
+            });
+        // 即便上报失败，本地也不能倒退回Running；首个错误保留到最终服务结果。
+        state.current = next;
+        if let Err(error) = &result {
+            state.error.get_or_insert_with(|| error.clone());
+            logging::console_line("[Service]", error);
+        } else if next != ServiceState::Stopped {
+            logging::console_line("[Service]", &format!("已报告 {next:?}"));
+        }
+        result
     }
 }
 
-/// 就绪回报：网关在「端口已绑、开始接受请求」那一刻调 `signal()`。
-pub struct Ready(mpsc::Sender<()>);
-
-impl Ready {
-    pub fn signal(self) {
-        let _ = self.0.send(());
-    }
-}
-
-/// 网关启动逻辑：拿到停机信号与就绪回报，跑起来并阻塞到停机。
-pub type StartFn = Box<dyn FnOnce(StopSignal, Ready) -> Result<(), String> + Send>;
+/// 工作线程拥有运行时，从启动直到取得真实清理结果后才返回。
+pub type StartFn = Box<dyn FnOnce(StopSignal, Progress) -> Result<(), String> + Send>;
 
 /// 进程级启动槽位：SCM 的 service_main 是 `extern "system" fn`，不能捕获
 /// 环境，只能走静态槽位取值（进程内只会被调用一次）。
 static START_FN: Mutex<Option<StartFn>> = Mutex::new(None);
+static SERVICE_RESULT: Mutex<Option<Result<(), String>>> = Mutex::new(None);
 
-/// 连接到 SCM 并开始服务生命周期。会阻塞到服务停止。
+fn store_service_result(outcome: &Result<(), String>) {
+    *SERVICE_RESULT
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(outcome.clone());
+    match outcome {
+        Ok(()) => logging::console_line(
+            "[Service]",
+            "服务收尾结果已确认；预定进程退出码=0，远端回收未验证",
+        ),
+        Err(reason) => logging::console_line(
+            "[Service]",
+            &format!("服务收尾失败；预定进程退出码=1：{reason}"),
+        ),
+    }
+}
+
+/// dispatcher返回成功只说明SCM连接结束，必须再取service_main的真实运行结果。
 pub fn dispatch(start: StartFn) -> Result<(), String> {
     *START_FN.lock().map_err(|_| "启动槽位被污染".to_string())? = Some(start);
-    service_dispatcher::start(SERVICE_NAME, ffi_service_main)
-        .map_err(|error| format!("连接服务控制管理器失败：{error}"))
+    *SERVICE_RESULT
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = None;
+    let dispatched = service_dispatcher::start(SERVICE_NAME, ffi_service_main)
+        .map_err(|error| format!("连接服务控制管理器失败：{error}"));
+    // dispatch未进入service_main时也释放启动闭包，不遗留跨轮状态。
+    START_FN
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take();
+    match SERVICE_RESULT
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
+    {
+        Some(outcome) => super::combine_results(outcome, dispatched),
+        None => dispatched.and(Err("服务入口未返回可确认的运行结果".into())),
+    }
 }
 
 windows_service::define_windows_service!(ffi_service_main, service_main);
 
 /// SCM 调用的真正入口：注册控制回调、上报状态、跑网关、收尾上报。
 fn service_main(_arguments: Vec<OsString>) {
-    if let Err(reason) = run_service() {
-        // 服务进程没有控制台，这条只会进日志文件（调用方已开文件通道）
-        eprintln!("❌ Windows 服务运行失败：{reason}");
+    let outcome = std::panic::catch_unwind(run_service)
+        .unwrap_or_else(|_| Err("Windows服务入口异常，关闭状态未确认".into()));
+    // 正常路径在Stopped之前已保存；这里只兜住尚无结果的入口/注册异常。
+    let missing = SERVICE_RESULT
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .is_none();
+    if missing {
+        store_service_result(&outcome);
     }
 }
 
 fn run_service() -> Result<(), String> {
-    let (stop_tx, stop_rx) = mpsc::channel::<()>();
-
-    let event_handler = move |control| -> ServiceControlHandlerResult {
-        match control {
-            ServiceControl::Stop | ServiceControl::Shutdown | ServiceControl::Preshutdown => {
-                // send 失败 = 网关已经退出（重复 STOP 或停机竞态）。照样回
-                // NoError，让 SCM 认定事件已受理，不然它会重试到判活超时。
-                let _ = stop_tx.send(());
-                ServiceControlHandlerResult::NoError
-            }
-            // 只声明接受 STOP / SHUTDOWN（见下面 controls_accepted），其余按
-            // 未实现回给 SCM。本服务没有暂停 / 继续 / 参数变更的语义。
-            _ => ServiceControlHandlerResult::NotImplemented,
-        }
+    let stop = ShutdownSignal::new();
+    let (settled_tx, settled_rx) = mpsc::sync_channel(1);
+    let progress = Progress {
+        state: Arc::new(Mutex::new(StatusState {
+            handle: None,
+            current: ServiceState::StartPending,
+            stop_reported: false,
+            error: None,
+        })),
+        stop: stop.clone(),
+        settled: settled_tx,
     };
-
+    let control_progress = progress.clone();
+    let event_handler = move |control| -> ServiceControlHandlerResult {
+        let source = match control {
+            ServiceControl::Interrogate => return ServiceControlHandlerResult::NoError,
+            ServiceControl::Stop => "Windows服务STOP",
+            ServiceControl::Shutdown => "Windows系统关机",
+            ServiceControl::Preshutdown => "Windows系统预关机",
+            _ => return ServiceControlHandlerResult::NotImplemented,
+        };
+        // 回调只登记首关请求和pending，不等待任何HTTP/插件清理。
+        control_progress.stop.request(source);
+        let _ = control_progress.stopping();
+        ServiceControlHandlerResult::NoError
+    };
     let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)
         .map_err(|error| format!("注册服务控制回调失败：{error}"))?;
+    let outcome = (|| {
+        progress.install(status_handle)?;
+        let start = START_FN
+            .lock()
+            .map_err(|_| "启动槽位被污染".to_string())?
+            .take()
+            .ok_or_else(|| "未找到网关启动逻辑".to_string())?;
+        let worker_progress = progress.clone();
+        let completed = progress.settled.clone();
+        let worker = std::thread::Builder::new()
+            .name("agent2api-gateway".to_string())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    start(StopSignal(stop), worker_progress)
+                }))
+                .unwrap_or_else(|_| Err("网关线程异常退出，关闭状态未确认".into()));
+                // 参数/运行时创建失败也唤醒启动等待，不能丢失真实错误后再等30秒。
+                let _ = completed.try_send(());
+                result
+            })
+            .map_err(|error| format!("创建网关线程失败：{error}"))?;
 
-    // 先报 StartPending：开库 + 绑端口可能超过 SCM 的判活窗口，
-    // 不报 pending 会被当成「启动超时」直接杀进程（1053）。
-    status_handle
-        .set_service_status(status(ServiceState::StartPending, 1, START_HINT))
-        .map_err(|error| format!("上报 StartPending 失败：{error}"))?;
-
-    let start = START_FN
-        .lock()
-        .map_err(|_| "启动槽位被污染".to_string())?
-        .take()
-        .ok_or_else(|| "未找到网关启动逻辑（dispatch 未被调用？）".to_string())?;
-
-    // 就绪通道 + 网关线程：SCM 要求 service_main 尽快返回控制权，
-    // 而网关的 block_on 会一直占着线程直到停机。
-    let (ready_tx, ready_rx) = mpsc::channel::<()>();
-    let worker = std::thread::Builder::new()
-        .name("agent2api-gateway".to_string())
-        .spawn(move || start(StopSignal(stop_rx), Ready(ready_tx)))
-        .map_err(|error| format!("创建网关线程失败：{error}"))?;
-
-    // 等就绪信号。超时或线程提前结束都算启动失败 —— 不能让 SCM 停在
-    // StartPending 里一直转（它会按 wait_hint 判活并杀掉进程）。
-    let ready = ready_rx.recv_timeout(START_HINT).is_ok();
-
-    if !ready {
-        // 网关可能在报就绪前就失败了：等它收尾拿到真实原因
-        let reason = worker
+        // 只在SCM入口线程做一次有界启动等待，不占Tokio阻塞池。
+        // 就绪、开始清理、启动提前失败都解除这个等待，清理中不能被误判为启动超时。
+        let startup = match settled_rx.recv_timeout(START_HINT) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let reason = match error {
+                    mpsc::RecvTimeoutError::Timeout => "网关启动未在宽限期内就绪",
+                    mpsc::RecvTimeoutError::Disconnected => "网关启动通知意外中断",
+                }
+                .to_string();
+                progress
+                    .stop
+                    .request_with_error("Windows服务启动失败", Some(reason.clone()));
+                let _ = progress.stopping();
+                Err(reason)
+            }
+        };
+        // 所有启动/状态上报失败都等同一worker清理结束，绝不丢掉线程就报Stopped。
+        let worker_result = worker
             .join()
-            .err()
-            .map(|_| "网关线程异常退出".to_string())
-            .unwrap_or_else(|| "网关启动未在宽限期内就绪".to_string());
-        let _ = status_handle.set_service_status(status_with_exit(
-            ServiceState::Stopped,
-            0,
-            Duration::default(),
-            ServiceExitCode::ServiceSpecific(1),
-        ));
-        return Err(reason);
-    }
-
-    status_handle
-        .set_service_status(status(ServiceState::Running, 0, Duration::default()))
-        .map_err(|error| format!("上报 Running 失败：{error}"))?;
-    agent2api_server::server::core::update::windows_service::notify_ready();
-
-    // 等网关收尾（收到 STOP 后走优雅停机）
-    let outcome = worker
-        .join()
-        .map_err(|_| "网关线程异常退出".to_string())?;
-
-    let _ = status_handle.set_service_status(status(ServiceState::Stopped, 0, STOP_HINT));
-    outcome
+            .unwrap_or_else(|_| Err("网关线程异常退出，关闭状态未确认".into()));
+        super::combine_results(worker_result, startup)
+    })();
+    progress.stopped(outcome)
 }
 
 /// 上报状态。`checkpoint` 只在 pending 态非零。
@@ -228,8 +357,12 @@ fn status_with_exit(
     ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
         current_state: state,
-        // 只接受停机类事件：本服务没有暂停 / 继续的语义
-        controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+        // pending/Stopped都不再接新控制；停止回调和迟到就绪由同一状态锁排顺序。
+        controls_accepted: if state == ServiceState::Running {
+            ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN
+        } else {
+            ServiceControlAccept::empty()
+        },
         exit_code,
         checkpoint,
         wait_hint,

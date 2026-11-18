@@ -279,7 +279,7 @@ async fn mcp_post(state: &ServerState, headers: HeaderMap, body: Bytes, kind: Mc
         crate::server::request_stats::RequestSource { client: "image-generation".into(), ..access.source }
     } else { access.source };
     let context = McpRequestContext { base_url: base_url(&headers, state), store: state.store().clone(),
-        scope: access.scope, state: state.clone(), source, owner };
+        scope: access.scope, key_source: access.key_source, state: state.clone(), source, owner };
     let response = match tool_services::mcp_dispatch(&payload, kind, &context).await {
         Some(response) => json_response(StatusCode::OK, response),
         None => StatusCode::ACCEPTED.into_response(),

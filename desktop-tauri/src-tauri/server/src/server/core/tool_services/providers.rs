@@ -1,13 +1,9 @@
 //! 四家搜索提供商的上游客户端（搜索 + 抓取）。
-//!
-//! 请求体与响应字段逐条对齐 OmniProxy 的实现（Tavily / Querit / Firecrawl /
-//! Ollama Web Search）。统一由 [`post_json`] 发请求：超时跟随服务的执行超时
-//! 设置，非 2xx / 401/403 / 429 / 超时 / `success:false` 归一成稳定错误码；
-//! 错误信息只保留清洗后的片段，绝不暴露密钥或整段上游响应体。
-
-use std::time::Duration;
+//! 密钥选择、限额状态与故障切换由共享请求层处理；批量抓取只重试失败的请求。
 
 use serde_json::{json, Value};
+
+use super::provider_request::ProviderRequest;
 
 use super::normalize::{
     draft_source, text_of, SourceDraft, MAX_CONTENT_LENGTH, MAX_FETCHED_CONTENT_LENGTH,
@@ -33,99 +29,6 @@ pub fn display_name(provider: &str) -> &'static str {
     }
 }
 
-/// 从上游错误体里取一段简短可展示信息（绝不含密钥）
-fn sanitized_detail(body: Option<&Value>, status: u16) -> String {
-    let mut candidates: Vec<String> = Vec::new();
-    if let Some(value) = body {
-        if let Some(error) = value.get("error") {
-            match error {
-                Value::String(text) => candidates.push(text.clone()),
-                Value::Object(_) => {
-                    for key in ["message", "code", "type"] {
-                        candidates.push(text_of(error, key));
-                    }
-                }
-                _ => {}
-            }
-        }
-        for key in ["error_msg", "detail", "message", "reason"] {
-            candidates.push(text_of(value, key));
-        }
-    }
-    for candidate in candidates {
-        let cleaned = candidate.split_whitespace().collect::<Vec<_>>().join(" ");
-        if !cleaned.is_empty() {
-            return cleaned.chars().take(200).collect();
-        }
-    }
-    format!("HTTP {status}")
-}
-
-/// 发一次 POST JSON 请求并解析响应；失败按稳定错误码抛 [`SearchError`]
-pub async fn post_json(
-    url: &str,
-    payload: Value,
-    api_key: &str,
-    timeout_seconds: u64,
-) -> Result<Value, SearchError> {
-    let client = crate::server::core::egress::client_for(None);
-    let response = client
-        .post(url)
-        .timeout(Duration::from_secs(timeout_seconds.max(1)))
-        .header("authorization", format!("Bearer {api_key}"))
-        .header("content-type", "application/json")
-        .header("accept", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|error| {
-            if error.is_timeout() {
-                SearchError::new(SearchErrorCode::TimedOut, "The upstream provider timed out")
-            } else {
-                SearchError::new(
-                    SearchErrorCode::ProviderUnavailable,
-                    "Unable to connect to the upstream provider",
-                )
-            }
-        })?;
-    let status = response.status().as_u16();
-    let raw = response.text().await.unwrap_or_default();
-    let body: Option<Value> = serde_json::from_str(&raw).ok();
-    if status == 401 || status == 403 {
-        return Err(SearchError::new(
-            SearchErrorCode::InvalidProviderKey,
-            "The provider API key is invalid or unauthorized",
-        ));
-    }
-    if status == 429 {
-        return Err(SearchError::new(
-            SearchErrorCode::RateLimited,
-            "The provider rate limit was exceeded",
-        ));
-    }
-    if !(200..300).contains(&status) {
-        return Err(SearchError::new(
-            SearchErrorCode::ProviderUnavailable,
-            format!(
-                "The upstream provider returned {}",
-                sanitized_detail(body.as_ref(), status)
-            ),
-        ));
-    }
-    if body.as_ref().and_then(|value| value.get("success")).and_then(Value::as_bool) == Some(false) {
-        let detail = body
-            .as_ref()
-            .and_then(|value| value.get("error"))
-            .map(|error| sanitized_detail(Some(&json!({ "error": error })), status))
-            .unwrap_or_else(|| format!("HTTP {status}"));
-        return Err(SearchError::new(
-            SearchErrorCode::ProviderUnavailable,
-            format!("The upstream provider reported a failure: {detail}"),
-        ));
-    }
-    Ok(body.unwrap_or(Value::Null))
-}
-
 fn array_of<'a>(value: &'a Value, key: &str) -> &'a [Value] {
     value.get(key).and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[])
 }
@@ -140,8 +43,8 @@ fn nested<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
 
 /* ─── Tavily ───────────────────────────────────────────────── */
 
-async fn tavily_search(api_key: &str, query: &str, timeout: u64) -> Result<Vec<SourceDraft>, SearchError> {
-    let body = post_json(
+async fn tavily_search(request: &ProviderRequest<'_>, query: &str) -> Result<Vec<SourceDraft>, SearchError> {
+    let body = request.post_json(
         TAVILY_SEARCH,
         json!({
             "query": query,
@@ -152,8 +55,6 @@ async fn tavily_search(api_key: &str, query: &str, timeout: u64) -> Result<Vec<S
             "include_raw_content": false,
             "include_images": false,
         }),
-        api_key,
-        timeout,
     )
     .await?;
     Ok(array_of(&body, "results")
@@ -172,15 +73,12 @@ async fn tavily_search(api_key: &str, query: &str, timeout: u64) -> Result<Vec<S
 }
 
 async fn tavily_fetch(
-    api_key: &str,
+    request: &ProviderRequest<'_>,
     urls: &[String],
-    timeout: u64,
 ) -> Result<(Vec<FetchPageDraft>, Vec<FetchErrorItem>), SearchError> {
-    let body = post_json(
+    let body = request.post_json(
         TAVILY_EXTRACT,
         json!({ "urls": urls, "extract_depth": "basic", "include_images": false, "format": "markdown" }),
-        api_key,
-        timeout,
     )
     .await?;
     let mut pages = Vec::new();
@@ -247,12 +145,10 @@ fn querit_published_date(item: &Value) -> String {
         .unwrap_or_default()
 }
 
-async fn querit_search(api_key: &str, query: &str, timeout: u64) -> Result<Vec<SourceDraft>, SearchError> {
-    let body = post_json(
+async fn querit_search(request: &ProviderRequest<'_>, query: &str) -> Result<Vec<SourceDraft>, SearchError> {
+    let body = request.post_json(
         QUERIT_SEARCH,
         json!({ "query": query, "count": 10 }),
-        api_key,
-        timeout,
     )
     .await?;
     let results = nested(&body, &["results", "result"]).and_then(Value::as_array);
@@ -274,15 +170,12 @@ async fn querit_search(api_key: &str, query: &str, timeout: u64) -> Result<Vec<S
 }
 
 async fn querit_fetch(
-    api_key: &str,
+    request: &ProviderRequest<'_>,
     urls: &[String],
-    timeout: u64,
 ) -> Result<(Vec<FetchPageDraft>, Vec<FetchErrorItem>), SearchError> {
-    let body = post_json(
+    let body = request.post_json(
         QUERIT_CONTENTS,
         json!({ "urls": urls, "format": "markdown", "crawlTimeout": 30, "extrasMeta": true }),
-        api_key,
-        timeout,
     )
     .await?;
     let mut pages = Vec::new();
@@ -324,12 +217,10 @@ async fn querit_fetch(
 
 /* ─── Firecrawl ────────────────────────────────────────────── */
 
-async fn firecrawl_search(api_key: &str, query: &str, timeout: u64) -> Result<Vec<SourceDraft>, SearchError> {
-    let body = post_json(
+async fn firecrawl_search(request: &ProviderRequest<'_>, query: &str) -> Result<Vec<SourceDraft>, SearchError> {
+    let body = request.post_json(
         FIRECRAWL_SEARCH,
         json!({ "query": query, "limit": 10, "sources": ["web"] }),
-        api_key,
-        timeout,
     )
     .await?;
     let results = nested(&body, &["data", "web"]).and_then(Value::as_array);
@@ -368,15 +259,12 @@ async fn firecrawl_search(api_key: &str, query: &str, timeout: u64) -> Result<Ve
 }
 
 async fn firecrawl_scrape_one(
-    api_key: &str,
+    request: &ProviderRequest<'_>,
     url: &str,
-    timeout: u64,
 ) -> Result<FetchPageDraft, FetchErrorItem> {
-    let body = post_json(
+    let body = request.post_json(
         FIRECRAWL_SCRAPE,
         json!({ "url": url, "formats": ["markdown"], "onlyMainContent": true, "removeBase64Images": true }),
-        api_key,
-        timeout,
     )
     .await
     .map_err(|error| FetchErrorItem {
@@ -413,12 +301,11 @@ async fn firecrawl_scrape_one(
 }
 
 async fn firecrawl_fetch(
-    api_key: &str,
+    request: &ProviderRequest<'_>,
     urls: &[String],
-    timeout: u64,
 ) -> Result<(Vec<FetchPageDraft>, Vec<FetchErrorItem>), SearchError> {
     let outcomes = futures::future::join_all(
-        urls.iter().map(|url| firecrawl_scrape_one(api_key, url, timeout)),
+        urls.iter().map(|url| firecrawl_scrape_one(request, url)),
     )
     .await;
     let mut pages = Vec::new();
@@ -437,12 +324,10 @@ async fn firecrawl_fetch(
 
 /* ─── Ollama Web Search ────────────────────────────────────── */
 
-async fn ollama_search(api_key: &str, query: &str, timeout: u64) -> Result<Vec<SourceDraft>, SearchError> {
-    let body = post_json(
+async fn ollama_search(request: &ProviderRequest<'_>, query: &str) -> Result<Vec<SourceDraft>, SearchError> {
+    let body = request.post_json(
         OLLAMA_SEARCH,
         json!({ "query": query, "max_results": 10 }),
-        api_key,
-        timeout,
     )
     .await?;
     Ok(array_of(&body, "results")
@@ -465,8 +350,8 @@ async fn ollama_search(api_key: &str, query: &str, timeout: u64) -> Result<Vec<S
         .collect())
 }
 
-async fn ollama_fetch_one(api_key: &str, url: &str, timeout: u64) -> Result<FetchPageDraft, FetchErrorItem> {
-    let body = post_json(OLLAMA_FETCH, json!({ "url": url }), api_key, timeout)
+async fn ollama_fetch_one(request: &ProviderRequest<'_>, url: &str) -> Result<FetchPageDraft, FetchErrorItem> {
+    let body = request.post_json(OLLAMA_FETCH, json!({ "url": url }))
         .await
         .map_err(|error| FetchErrorItem {
             url: url.to_string(),
@@ -496,12 +381,11 @@ async fn ollama_fetch_one(api_key: &str, url: &str, timeout: u64) -> Result<Fetc
 }
 
 async fn ollama_fetch(
-    api_key: &str,
+    request: &ProviderRequest<'_>,
     urls: &[String],
-    timeout: u64,
 ) -> Result<(Vec<FetchPageDraft>, Vec<FetchErrorItem>), SearchError> {
     let outcomes = futures::future::join_all(
-        urls.iter().map(|url| ollama_fetch_one(api_key, url, timeout)),
+        urls.iter().map(|url| ollama_fetch_one(request, url)),
     )
     .await;
     let mut pages = Vec::new();
@@ -520,62 +404,63 @@ async fn ollama_fetch(
 
 /* ─── 分发 ─────────────────────────────────────────────────── */
 
-pub async fn search(
-    provider: &str,
-    api_key: &str,
-    query: &str,
-    timeout: u64,
-) -> Result<Vec<SourceDraft>, SearchError> {
+pub async fn search(provider: &str, query: &str, timeout: u64) -> Result<Vec<SourceDraft>, SearchError> {
+    search_with_request(provider, &ProviderRequest::new(provider, "search", timeout), query).await
+}
+
+async fn search_with_request(provider: &str, request: &ProviderRequest<'_>, query: &str) -> Result<Vec<SourceDraft>, SearchError> {
     match provider {
-        "tavily" => tavily_search(api_key, query, timeout).await,
-        "querit" => querit_search(api_key, query, timeout).await,
-        "firecrawl" => firecrawl_search(api_key, query, timeout).await,
-        "ollama" => ollama_search(api_key, query, timeout).await,
+        "tavily" => tavily_search(request, query).await,
+        "querit" => querit_search(request, query).await,
+        "firecrawl" => firecrawl_search(request, query).await,
+        "ollama" => ollama_search(request, query).await,
         _ => Err(SearchError::new(SearchErrorCode::ProviderUnavailable, "Unknown search provider")),
     }
 }
 
-pub async fn fetch(
-    provider: &str,
-    api_key: &str,
-    urls: &[String],
-    timeout: u64,
-) -> Result<(Vec<FetchPageDraft>, Vec<FetchErrorItem>), SearchError> {
+pub async fn fetch(provider: &str, urls: &[String], timeout: u64) -> Result<(Vec<FetchPageDraft>, Vec<FetchErrorItem>), SearchError> {
+    let request = ProviderRequest::new(provider, "fetch", timeout);
     match provider {
-        "tavily" => tavily_fetch(api_key, urls, timeout).await,
-        "querit" => querit_fetch(api_key, urls, timeout).await,
-        "firecrawl" => firecrawl_fetch(api_key, urls, timeout).await,
-        "ollama" => ollama_fetch(api_key, urls, timeout).await,
+        "tavily" => tavily_fetch(&request, urls).await,
+        "querit" => querit_fetch(&request, urls).await,
+        "firecrawl" => firecrawl_fetch(&request, urls).await,
+        "ollama" => ollama_fetch(&request, urls).await,
         _ => Err(SearchError::new(SearchErrorCode::ProviderUnavailable, "Unknown search provider")),
     }
 }
 
-/// 管理端「测试连接」：用该提供商做一次最小搜索
-pub async fn test_provider(provider: &str) -> Value {
+/// 管理端「测试连接」可检查指定密钥，即使它尚在额度冷却期。
+pub async fn test_provider(provider: &str, key_id: Option<&str>, operation: &str) -> Value {
     let started = crate::server::logging::now_ms();
     let duration = || (crate::server::logging::now_ms() - started) as u64;
-    let Some(key) = super::provider_key(provider) else {
-        return json!({
-            "success": false,
-            "provider": provider,
-            "code": SearchErrorCode::Configuration.as_str(),
-            "error": "Provider is not configured with an API key",
-            "duration_ms": duration(),
-        });
-    };
     let timeout = super::timeout_seconds(super::WEB_SEARCH_SERVICE_ID);
-    match search(provider, &key, "Agent2API connectivity check", timeout).await {
-        Ok(sources) => json!({
-            "success": true,
-            "provider": provider,
-            "result_count": sources.len(),
-            "duration_ms": duration(),
+    let request = ProviderRequest::for_test(provider, if operation == "fetch" { "fetch" } else { "search" }, timeout, key_id);
+    let outcome = if operation == "fetch" {
+        request.post_json(match provider {
+            "tavily" => TAVILY_EXTRACT,
+            "querit" => QUERIT_CONTENTS,
+            "firecrawl" => FIRECRAWL_SCRAPE,
+            _ => OLLAMA_FETCH,
+        }, match provider {
+            "tavily" => json!({ "urls": ["https://example.com"], "extract_depth": "basic" }),
+            "querit" => json!({ "urls": ["https://example.com"], "format": "markdown" }),
+            "firecrawl" => json!({ "url": "https://example.com", "formats": ["markdown"] }),
+            _ => json!({ "url": "https://example.com" }),
+        }).await.map(|_| 1)
+    } else {
+        search_with_request(provider, &request, "Agent2API connectivity check").await
+            .and_then(|sources| if sources.is_empty() {
+                Err(SearchError::new(SearchErrorCode::NoResults, "The search provider returned no results"))
+            } else { Ok(sources.len()) })
+    };
+    match outcome {
+        Ok(count) => json!({
+            "success": true, "provider": provider, "key_id": key_id,
+            "operation": operation, "result_count": count, "duration_ms": duration(),
         }),
         Err(error) => json!({
-            "success": false,
-            "provider": provider,
-            "code": error.code.as_str(),
-            "error": error.message,
+            "success": false, "provider": provider, "key_id": key_id, "operation": operation,
+            "code": error.code.as_str(), "error": error.message, "reset_at": error.reset_at,
             "duration_ms": duration(),
         }),
     }

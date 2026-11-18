@@ -200,6 +200,17 @@ impl serde::Serialize for ContextField<'_> {
     }
 }
 
+fn group_window(entry: &LogEntry) -> i64 {
+    let credential_failure = entry.level == "error" && entry.data.as_ref().is_some_and(|data| {
+        data.get("action").and_then(Value::as_str) == Some("credential.refresh")
+            && data.get("outcome").and_then(Value::as_str) == Some("failed")
+            && data.get("credentialStamp").and_then(Value::as_array)
+                .is_some_and(|stamp| stamp.len() == 2 && stamp.iter().all(Value::is_number))
+    });
+    // 凭证指纹属于分组键，更新凭证后的新故障不会并入旧组。
+    if credential_failure { 86_400_000 } else { 30_000 }
+}
+
 /// 按页折叠并返回 `(分组总数, 当前页分组)`。
 ///
 /// 与「先构造全部分组、再 skip/take」的区别在**只为当前页保留完整条目**：
@@ -213,8 +224,6 @@ pub fn groups_paged(
     offset: usize,
     limit: usize,
 ) -> (usize, Vec<LogGroup>) {
-    const WINDOW_MS: i64 = 30_000;
-
     if !aggregate {
         let grouped = entries.len();
         let groups = entries
@@ -251,7 +260,7 @@ pub fn groups_paged(
         let key = group_key(&entry);
         if let Some(index) = key.as_ref().and_then(|key| recent.get(key)).copied() {
             let state = &mut states[index];
-            if entry.ts <= state.last_ts && state.last_ts.saturating_sub(entry.ts) <= WINDOW_MS {
+            if entry.ts <= state.last_ts && state.last_ts.saturating_sub(entry.ts) <= group_window(&entry) {
                 state.first_ts = state.first_ts.min(entry.ts);
                 state.count += 1;
                 if let Some(page_index) = state.page_index {

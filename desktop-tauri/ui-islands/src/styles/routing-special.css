@@ -1,24 +1,6 @@
-/* 路由页 · 特殊请求路由的面板版式（新版）。
- *
- * ── 这一稿在改什么 ────────────────────────────────────────────
- * 原来三块面板的正文固定是「触发 → 改写 → 目标」三个方框 + 一堆徽章与底栏，
- * 一屏里十来个描边矩形，读者得自己把「谁触发、改成什么」拼起来。其实每块
- * 只回答两件事，所以改成系统设置那种分组列表：
- *   一句话说清这类请求怎么被改写 → 一份规则列表（每行一句）→ 点行改、按钮添加。
- *
- * ── 为什么这几条不写成组件库的工具类 ────────────────────────────
- * 1) 组件库的工具类挂在 `@layer utilities` 里，未分层恒压过分层 —— 页面骨架
- *    要能压住它们只能不写进 @layer（与 ui/css 各页样式表同一口径）。
- * 2) 行分隔线不能靠 Tailwind 的 `divide-y`：它挂在 `:where(...)` 上（特异度 0），
- *    而项目没有引入 Tailwind preflight，裸 `<button>` 自带浏览器默认的
- *    `2px outset` 边框 —— 只要行上用任何 `border-*` 工具类去清掉默认边框，
- *    divide 那一条会被一起清掉（实测行高差 3px、分隔线整条消失）。
- *    所以这里显式写：行边框一律清零，分隔线只由「非首个子元素的上边框」画。 */
+/* 未分层的页面样式只负责排版，控件观感由 ui-kit 提供。 */
 
-/* 特殊请求路由的画布：与账号路由的画布（点阵底 + 表层色）分开。
-   规则卡片是纯白无描边的，画布必须比它暗一档才看得出边界，点阵在这里也只是噪音。
-   列数也从两列变三列：配置在左、这条路由最近命中的请求在右（见 RoutingSpecialHits），
-   后两列**等宽**——配置与它产生的记录是同一条规则的两面，不该一边宽一边窄。 */
+/* 特殊路由没有账号连线，规则与最近命中并排显示。 */
 .routing-config-shell.is-plain {
   background: var(--rail-bg);
   background-image: none;
@@ -31,9 +13,9 @@
 .routing-hits-head { display: flex; align-items: center; gap: 8px; padding: 0 4px; }
 .routing-hits-head h3 { margin: 0; font-size: 13px; font-weight: 600; }
 .routing-hits-head > span { color: var(--text-3); font-size: 12px; font-variant-numeric: tabular-nums; }
-.routing-hits-head > button { height: auto; margin-left: auto; padding: 0; font-size: 11.5px; font-weight: 400; }
-.routing-hits-list { display: flex; flex-direction: column; overflow: hidden; border-radius: var(--r-lg); background: var(--surface); }
-.routing-hits-row { display: flex; flex-direction: column; gap: 4px; padding: 11px 14px; }
+.routing-hits-head > button { margin-left: auto; }
+.routing-hits-list { display: flex; flex: none; flex-direction: column; }
+.routing-hits-row { display: flex; flex-direction: column; gap: 4px; padding: 12px 16px; }
 .routing-hits-row + .routing-hits-row { border-top: 1px solid var(--hairline); }
 .routing-hits-flow { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12.5px; }
 .routing-hits-flow .ico { flex: none; color: var(--text-3); }
@@ -51,7 +33,8 @@
   .routing-hits { display: none; }
 }
 
-.rp-panel { display: flex; flex-direction: column; gap: 22px; min-width: 0; }
+.rp-panel { display: flex; flex-direction: column; gap: 24px; min-width: 0; min-height: 0; overflow-y: auto; }
+.rp-panel > * { flex-shrink: 0; }
 
 /* ── 面板开头：名字 + 一句话规则，右侧一枚总开关 ────────────────── */
 
@@ -61,7 +44,7 @@
 .rp-lede { margin: 4px 0 0; max-width: 62ch; color: var(--text-3); font-size: 12.5px; line-height: 1.7; }
 .rp-enable { display: flex; flex: none; align-items: center; gap: 8px; padding-top: 6px; color: var(--text-3); font-size: 12px; }
 
-/* ── 分组：13px 半粗标题（可带计数与行尾操作）+ 一张无描边白底圆角卡 ── */
+/* ── 规则分组 ─────────────────────────────────────────────────── */
 
 .rp-section { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .rp-section-head { display: flex; align-items: center; gap: 8px; padding: 0 4px; }
@@ -69,29 +52,15 @@
 .rp-section-count { color: var(--text-3); font-size: 12px; font-variant-numeric: tabular-nums; }
 .rp-section-action { margin-left: auto; }
 
-.rp-rows { display: flex; flex-direction: column; overflow: hidden; border-radius: var(--r-lg); background: var(--surface); }
-.rp-rows > * { border: 0; }
-.rp-rows > * + * { border-top: 1px solid var(--hairline); }
+.rp-rows { flex: none; }
+.rp-rows [data-slot='item-group'] > * + * { border-top: 1px solid var(--hairline); }
 
 /* ── 一行规则：整行可点（按钮），右侧一枚雪佛龙 ──────────────────── */
 
-.rp-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  width: 100%;
-  padding: 12px 16px;
-  border: 0;
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition: background-color .15s ease-out;
-}
-.rp-row:hover { background: var(--nav-hover); }
+.rp-row { height: auto; border: 0; border-radius: 0; white-space: normal; }
+.rp-row:focus-visible { position: relative; z-index: 1; box-shadow: inset var(--ring); }
 .rp-row[data-off] { opacity: .55; }
-.rp-row-main { display: flex; flex: 1; flex-direction: column; gap: 3px; min-width: 0; }
+.rp-row-main { display: flex; flex: 1; flex-direction: column; gap: 4px; min-width: 0; }
 .rp-row-title { font-size: 13px; font-weight: 500; }
 .rp-row-detail { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; color: var(--text-3); font-size: 12px; }
 /* 这类规则的落点：改写成哪只模型 —— 整块面板里唯一用主色的地方 */
@@ -107,9 +76,9 @@
 
 /* ── 面板底部的保存条：左「已保存 / 有未保存的修改」，右三枚按钮 ────── */
 
-.rp-foot { display: flex; align-items: center; gap: 10px; }
+.rp-foot { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
 .rp-foot-state { color: var(--text-3); font-size: 11.5px; }
-.rp-foot-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.rp-foot-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-left: auto; }
 
 /* ── 规则弹窗里的字段 ──────────────────────────────────────────── */
 

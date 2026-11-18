@@ -423,19 +423,20 @@ impl RouteState {
         counters
     }
 
-    /// 记一笔失败退避（连续失败翻倍，上限 1 小时），返回休息截止时刻。
+    /// 记一笔失败退避，按当前规则翻倍并封顶。
     pub(super) fn backoff_mark(&self, account_id: &str, now: i64) -> i64 {
-        let Ok(mut table) = self.backoff.lock() else {
-            return 0;
-        };
-        let entry = table.entry(account_id.to_string()).or_insert(BackoffEntry {
-            until: 0,
-            strikes: 0,
-        });
+        let settings = crate::server::config::error_policy::snapshot();
+        if !settings.settings.backoff { return 0; }
+        self.backoff_mark_for(account_id, now, settings.settings.backoff_seconds, settings.settings.backoff_cap_seconds)
+    }
+
+    pub(super) fn backoff_mark_for(&self, account_id: &str, now: i64, seconds: u64, cap: u64) -> i64 {
+        let Ok(mut table) = self.backoff.lock() else { return 0; };
+        let entry = table.entry(account_id.to_string()).or_insert(BackoffEntry { until: 0, strikes: 0 });
         entry.strikes = entry.strikes.saturating_add(1);
-        let factor = 1i64 << entry.strikes.saturating_sub(1).min(3); // 1x / 2x / 4x / 8x
-        let wait = (BACKOFF_BASE_MS * factor).min(BACKOFF_MAX_MS);
-        entry.until = now + wait;
+        let factor = 1u64 << entry.strikes.saturating_sub(1).min(30);
+        let wait = seconds.saturating_mul(1000).saturating_mul(factor).min(cap.saturating_mul(1000));
+        entry.until = now.saturating_add(wait.min(i64::MAX as u64) as i64);
         entry.until
     }
 
@@ -448,8 +449,12 @@ impl RouteState {
 
     /// 记一笔垫底（还有额度时被 429 的账号）。
     pub(super) fn sink_mark(&self, account_id: &str, now: i64) {
+        self.sink_mark_for(account_id, now, crate::server::config::error_policy::snapshot().settings.sink_seconds);
+    }
+
+    pub(super) fn sink_mark_for(&self, account_id: &str, now: i64, seconds: u64) {
         if let Ok(mut table) = self.sink.lock() {
-            table.insert(account_id.to_string(), now);
+            table.insert(account_id.to_string(), now.saturating_add(seconds.saturating_mul(1000).min(i64::MAX as u64) as i64));
         }
     }
 
@@ -514,13 +519,14 @@ impl RouteState {
         // 垫底按 [`SINK_TTL_MS`] 过滤 —— 与下面 resting / open 同款。
         // 上游原实现是整张表原样克隆（没有时间判定），于是垫底永不失效；
         // 唯一的解除路径是「该账号成功转发一次」，而它正排在队尾 —— 自锁。
+        let settings = crate::server::config::error_policy::snapshot();
         let sunk = self
             .sink
             .lock()
             .map(|table| {
                 table
                     .iter()
-                    .filter(|(_, at)| now - **at < SINK_TTL_MS)
+                    .filter(|(_, until)| settings.settings.sink && **until > now)
                     .map(|(id, at)| (id.clone(), *at))
                     .collect()
             })
@@ -531,7 +537,7 @@ impl RouteState {
             .map(|table| {
                 table
                     .iter()
-                    .filter(|(_, entry)| entry.until > now)
+                    .filter(|(_, entry)| settings.settings.backoff && entry.until > now)
                     .map(|(id, entry)| (id.clone(), entry.until))
                     .collect()
             })
@@ -542,7 +548,7 @@ impl RouteState {
             .map(|table| {
                 table
                     .iter()
-                    .filter(|(_, entry)| entry.open_until > now)
+                    .filter(|(_, entry)| settings.settings.breaker && entry.open_until > now)
                     .map(|(id, _)| id.clone())
                     .collect()
             })

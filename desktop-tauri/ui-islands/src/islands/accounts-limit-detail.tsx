@@ -87,7 +87,8 @@ export function limitRowsOf(account: AccountRecord | null | undefined): LimitRow
     const started = Number(entry.at)
     const reset = formatResetText(entry.resetAt)
     const unknown = reset === RESET_UNKNOWN
-    const reason = entry.message || (entry.status ? t('上游返回 {status}', { status: entry.status }) : '')
+    const reason = [entry.message || (entry.status ? t('上游返回 {status}', { status: entry.status }) : ''),
+      entry.timeSource === 'upstream' ? t('冷却来自上游时间') : entry.timeSource === 'fallback' ? t('冷却来自本机估算') : ''].filter(Boolean).join(' · ')
     const span = resetAt - started
     const progress = started > 0 && Number.isFinite(span) && span > 0
       ? Math.max(0, Math.min(100, ((now - started) / span) * 100))
@@ -142,6 +143,8 @@ export function LimitDetailButton({ accountName, rows, count, cooldown, soonest,
   }, [])
   const initialFocus = React.useCallback(() => boxRef.current ?? null, [])
 
+  const cooldownLabel = cooldown?.scope === 'provider' ? t('提供商共享冷却') : t('账号冷却')
+  const cooldownSource = cooldown?.timeSource === 'upstream' ? t('冷却来自上游时间') : cooldown?.timeSource === 'fallback' ? t('冷却来自本机估算') : ''
   const earliest = soonest === RESET_UNKNOWN ? t('待定') : soonest
 
   return (
@@ -151,7 +154,7 @@ export function LimitDetailButton({ accountName, rows, count, cooldown, soonest,
           render={<Button size='default' variant='ghost' type='button' className='usage-toggle warn'
             title={cooldown ? t('点击查看账号冷却与模型限流明细') : t('点击查看各模型的限流明细')} aria-label={t('限流明细')} />}
         >
-          <span className='val'>{cooldown ? t('账号冷却') : t('{n} 个模型', { n: count })}</span>
+          <span className='val'>{cooldown ? cooldownLabel : t('{n} 个模型', { n: count })}</span>
           <span className='caret' aria-hidden>▾</span>
         </PopoverTrigger>
         {/* `align='center'`：与「积分明细」同一处置（理由见 accounts-credit-detail
@@ -164,12 +167,12 @@ export function LimitDetailButton({ accountName, rows, count, cooldown, soonest,
             {cooldown ? (
               <div className='usage-pop-row'>
                 <div className='usage-pop-line'>
-                  <span className='usage-pop-name'>{t('账号冷却')}</span>
+                  <span className='usage-pop-name'>{cooldownLabel}</span>
                   <span className='usage-pop-view warn'>{waitText(cooldown.resetAt - Date.now())}</span>
                 </div>
                 <div className='lp-pop-subline'>
                   <span className='lp-pop-reason'>
-                    {t('{time} 恢复', { time: soonest })}{cooldown.message ? ` · ${cooldown.message}` : ''}
+                    {t('{time} 恢复', { time: soonest })}{cooldown.message ? ` · ${cooldown.message}` : ''}{cooldownSource ? ` · ${cooldownSource}` : ''}
                   </span>
                 </div>
               </div>
@@ -196,7 +199,7 @@ export function LimitDetailButton({ accountName, rows, count, cooldown, soonest,
             ))}
             <div className='lp-pop-foot'>
               <span className='lp-pop-note'>{cooldown
-                ? t('账号全部模型暂时停止转发 · 到恢复时间自动解除')
+                ? cooldown.scope === 'provider' ? t('同一提供商的账号暂时停止转发 · 到恢复时间自动解除') : t('账号全部模型暂时停止转发 · 到恢复时间自动解除')
                 : t('{n} 个模型限流中 · 到恢复时间自动解除', { n: count })}</span>
               <Button variant='outline' size='xs' title={t('清除该账号的冷却与全部模型限流标记')}
                 onClick={() => onClear('')}>{t('全部清除')}</Button>
@@ -204,7 +207,7 @@ export function LimitDetailButton({ accountName, rows, count, cooldown, soonest,
           </div>
         </PopoverContent>
       </Popover>
-      <span className='lim-sub' title={cooldown ? t('账号冷却') : t('最早恢复')}>
+      <span className='lim-sub' title={cooldown ? cooldownLabel : t('最早恢复')}>
         {cooldown ? t('{time} 恢复', { time: earliest }) : t('最早 {soonest} 恢复', { soonest: earliest })}
       </span>
     </>

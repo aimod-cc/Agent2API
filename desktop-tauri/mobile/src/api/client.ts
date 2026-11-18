@@ -18,7 +18,8 @@
  * ── 401 的两种语义 ────────────────────────────────────────────
  *   · `error.type === 'panel_login_required'` → 管理员已注册但会话没了：
  *     先静默 refresh，失败才交给界面弹登录；
- *   · 其余 401 → 兼容模式没配 Key：交给界面提示输入。
+ *   · `error.type === 'invalid_api_key'` → 网关 Key 无效：交给界面提示输入。
+ *     账号或上游返回的其他 401 只报告业务错误，不改变管理登录。
  */
 
 import type { PanelCaptchaStatus } from '../../../ui-shared/panel-captcha'
@@ -28,6 +29,8 @@ import {
   apiBase,
   clearServerAuth,
   isPackaged,
+  managementSessionGeneration,
+  notifyManagementSessionChanged,
   readServerAuth,
   readServerKey,
   serverIdentity,
@@ -179,6 +182,10 @@ async function doRefresh(identity: string): Promise<boolean> {
     const data = payload?.data
     if (data?.accessToken && data?.refreshToken) {
       storeServerAuth(serverId, data.accessToken, data.refreshToken, data.expiresIn)
+    } else if (!isPackaged()) {
+      notifyManagementSessionChanged(serverId)
+    } else {
+      return false
     }
     return true
   } catch {
@@ -218,6 +225,8 @@ type RequestInitLite = {
   body?: unknown
   /** 不触发 401 接管（探活类请求用） */
   quiet?: boolean
+  /** 一次性确认用：仍可恢复管理会话，但绝不在 401 后自动重发本条请求。 */
+  noAuthReplay?: boolean
   signal?: AbortSignal
   apiKey?: string
 }
@@ -234,9 +243,25 @@ export function apiCall<T = unknown>(path: string, init: RequestInitLite = {}): 
 async function requestApi<T>(path: string, init: RequestInitLite, identity: string, retry: boolean): Promise<T> {
   requireCurrentServer(identity)
   if (init.signal?.aborted) throw new DOMException('请求已取消', 'AbortError')
+  const method = init.method || 'GET'
+  const noAuthReplay = init.noAuthReplay === true || method === 'POST' && (
+    path === '/api/session/login/start' || path === '/api/session/login/callback'
+      || path === '/api/session/login/interaction' || path === '/api/zcode/captcha'
+      || path.startsWith('/api/plugins/desktop-import/') || path.startsWith('/api/plugins/enrollment/')
+      || /^\/api\/accounts\/[^/]+\/credentials\/cline-free$/.test(path)
+      || path === '/api/accounts/refresh' || path === '/api/accounts/refresh-expiring'
+      || path === '/api/accounts/checkin' || path === '/api/checkin-activity'
+      || path === '/api/plugins/tasks/run' || path === '/api/travel-schedule/run'
+      || path.endsWith('/growth/travel') || path.endsWith('/growth/task') || path.endsWith('/growth/school')
+      || path.endsWith('/campaigns/claim') || path.endsWith('/campaigns/redeem') || path.endsWith('/onboarding/claim')
+  )
+  const management = managementSessionGeneration()
   await ensureFreshSession()
   requireCurrentServer(identity)
-  const method = init.method || 'GET'
+  if (noAuthReplay && managementSessionGeneration() !== management) {
+    throw new ApiError('管理会话已变化，本次请求未重发，请重新读取状态。', 401, 'panel_login_required')
+  }
+  if (init.signal?.aborted) throw new DOMException('请求已取消', 'AbortError')
   const headers = buildHeaders()
   if (init.apiKey !== undefined) {
     headers['x-api-key'] = init.apiKey
@@ -271,10 +296,12 @@ async function requestApi<T>(path: string, init: RequestInitLite, identity: stri
     if (type === 'panel_login_required') {
       const refreshed = retry && !path.startsWith('/api/assistant/images/') && await tryRefresh()
       requireCurrentServer(identity)
-      if (refreshed) return requestApi<T>(path, init, identity, false)
-      clearPanelAuth()
-      onAuthLost?.('login')
-    } else if (init.apiKey === undefined) {
+      if (refreshed && !noAuthReplay) return requestApi<T>(path, init, identity, false)
+      if (!refreshed) {
+        clearPanelAuth()
+        onAuthLost?.('login')
+      }
+    } else if (type === 'invalid_api_key' && init.apiKey === undefined) {
       onAuthLost?.('key')
     }
   }
@@ -286,6 +313,28 @@ async function requestApi<T>(path: string, init: RequestInitLite, identity: stri
     throw new ApiError(errorMessage(envelope?.error, response.status), response.status, readErrorType(payload))
   }
   return (envelope && 'data' in envelope ? envelope.data : envelope) as T
+}
+
+export async function openPanelEvents(signal: AbortSignal, retry = true): Promise<Response> {
+  const identity = serverIdentity()
+  await ensureFreshSession()
+  requireCurrentServer(identity)
+  if (signal.aborted) throw new DOMException('请求已取消', 'AbortError')
+  const response = await fetch(url('/api/panel/events'), {
+    headers: buildHeaders({ Accept: 'text/event-stream' }), signal, credentials: 'same-origin',
+  })
+  requireCurrentServer(identity)
+  if (response.status !== 401) return response
+  const payload = await response.clone().json().catch(() => null)
+  const type = readErrorType(payload)
+  if (type === 'panel_login_required' && retry && await tryRefresh()) {
+    requireCurrentServer(identity)
+    await response.body?.cancel().catch(() => {})
+    return openPanelEvents(signal, false)
+  }
+  if (type === 'panel_login_required') { clearPanelAuth(); onAuthLost?.('login') }
+  else if (type === 'invalid_api_key') onAuthLost?.('key')
+  return response
 }
 
 function readErrorType(payload: unknown): string {

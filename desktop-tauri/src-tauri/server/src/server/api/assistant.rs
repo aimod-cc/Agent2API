@@ -303,7 +303,7 @@ pub async fn chat(State(state): State<ServerState>, headers: HeaderMap, body: By
             super::assistant_images::preserve_tool_references(&mut upstream);
         }
     }
-    let telemetry = Arc::new(RequestTelemetry::with_id());
+    let telemetry = Arc::new(RequestTelemetry::with_model_key(access.key_source));
     let telemetry_id = telemetry.snapshot().id;
     // 进行中行：与真实请求同一时点。`is_test = true` —— 报表排除、请求日志标记
     // （与模型测试同一口径，见模块头）；下游模型名记用户点名的那个对外名

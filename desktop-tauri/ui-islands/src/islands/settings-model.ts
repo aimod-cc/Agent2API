@@ -107,15 +107,13 @@ type ModelsDevView = {
 }
 
 /**
- * models.dev 面板的状态行：把「开关 + 数据来历 + 生成时刻 + 条数」写成一句话。
- *
- * 为什么不只写「已开启」：这个开关的价值全在**那份元数据是什么时候的、有多少
- * 条** —— 只报开关状态，用户没法判断「我的档位为什么还是老样子」是没开、
- * 是没拉到、还是这份快照本来就旧。
+ * models.dev 面板的状态行：把「数据来历 + 生成时刻 + 自动更新开关」写成一句话，
+ * 刷新进行中提示正在更新；总条数已由卡片右上角徽章展示，这里不再重复。
  */
-export function modelsDevStateText(state: ModelsDevView): string {
+export function modelsDevStateText(state: ModelsDevView, refreshing = false): string {
   if (state.status === 'loading') return STATES.appLoading
   if (state.status === 'unavailable') return STATES.modelsDevUnavailable
+  if (refreshing) return STATES.modelsDevRefreshing
   const origin = state.source === 'builtin'
     ? STATES.modelsDevSourceBuiltin
     : state.source === 'cache'
@@ -129,14 +127,11 @@ export function modelsDevStateText(state: ModelsDevView): string {
     ? String(shared().wbApp?.formatTime?.(state.updatedAt) ?? '')
     : ''
   if (!origin && !stamp && !state.count) return STATES.modelsDevEmpty
-  const at = stamp ? t('，{time}', { time: stamp }) : ''
-  const mode = state.enabled ? t('正在联网更新') : t('仅用现有数据、不联网刷新')
-  return t('{count} 条 · 来自{origin}{at} · {mode}', {
-    count: Number(state.count).toLocaleString('zh-CN'),
-    origin: origin || t('未知来源'),
-    at,
-    mode,
-  })
+  const source = origin || t('未知来源')
+  const mode = state.enabled ? t('自动更新已开启') : t('仅用本地数据')
+  return stamp
+    ? t('当前数据：{origin} · {time} · {mode}', { origin: source, time: stamp, mode })
+    : t('当前数据：{origin} · {mode}', { origin: source, mode })
 }
 
 /* ─── 桥与共享全局 ─────────────────────────── */
@@ -151,6 +146,15 @@ export type AppSettings = {
   lanPanel: boolean
   /** 轻量模式：关窗销毁界面进程（释放 WebView2 内存），托盘按需重建 */
   lightweightMode: boolean
+  hardwareAcceleration: boolean
+}
+
+export type GraphicsSettings = {
+  enabled: boolean
+  active: boolean
+  environmentOverride: boolean
+  compatibilityMode: boolean
+  restartRequired: boolean
 }
 
 /**
@@ -208,8 +212,6 @@ export type SystemInfo = {
     allowNoKey?: boolean | null
     v1FailClosed?: boolean | null
     panelGate?: boolean | null
-    githubTokenFilled?: boolean | null
-    githubTokenOrigin?: string | null
     updateProxy?: boolean | null
   }
   features?: {
@@ -322,6 +324,8 @@ export type SettingsBridge = {
   platform?: string
   getAppSettings(): Promise<AppSettings | null | undefined>
   saveAppSettings(patch: AppSettings): Promise<AppSettings | null | undefined>
+  getGraphicsSettings?(): Promise<GraphicsSettings>
+  saveGraphicsSettings?(enabled: boolean): Promise<void>
   exportAccounts(): Promise<ExportResult | null | undefined>
   importAccounts(): Promise<ImportResult | null | undefined>
   getRetention(): Promise<unknown>
@@ -338,6 +342,8 @@ export type SettingsBridge = {
   saveDebug(enabled: boolean): Promise<unknown>
   getSanitize(): Promise<unknown>
   saveSanitize(patch: boolean | SanitizePatch): Promise<unknown>
+  getWebToolEmulation?(): Promise<unknown>
+  saveWebToolEmulation?(enabled: boolean): Promise<unknown>
   getDeveloperRoleCompat(): Promise<unknown>
   saveDeveloperRoleCompat(enabled: boolean): Promise<unknown>
   getReasoningCollapse(): Promise<unknown>
@@ -500,7 +506,6 @@ export const CATEGORIES = [
   { id: 'display', label: t('显示'), icon: 'display' },
   { id: 'gateway', label: t('网关'), icon: 'traffic' },
   { id: 'providers', label: t('提供商'), icon: 'sliders' },
-  { id: 'retry', label: t('重试'), icon: 'refresh' },
   { id: 'timeout', label: t('超时'), icon: 'timer' },
   { id: 'security', label: t('安全'), icon: 'shield' },
   { id: 'data', label: t('数据'), icon: 'database' },
@@ -801,6 +806,7 @@ export function normalizeApp(saved: unknown, fallback: AppSettings): AppSettings
     if (typeof record.lanAccess === 'boolean') result.lanAccess = record.lanAccess
     if (typeof record.lanPanel === 'boolean') result.lanPanel = record.lanPanel
     if (typeof record.lightweightMode === 'boolean') result.lightweightMode = record.lightweightMode
+    if (typeof record.hardwareAcceleration === 'boolean') result.hardwareAcceleration = record.hardwareAcceleration
   }
   return result
 }
@@ -913,7 +919,7 @@ export const NOTES = {
   captcha: t('开启后，登录页在浏览器后台自动完成验证（对真人无感），而脚本每次尝试都要先算一道题 —— 暴力破解与抢注的成本显著上升。仅影响面板的登录 / 注册，与 API 客户端的 API Key 无关。桌面端与网页端各自独立：桌面端主要服务本机与局域网，网页端（Docker / 服务端）直接暴露在网络上的登录页风险更高，建议保持开启。'),
   panelLogin: t('当前浏览器以管理员身份登录着本面板。「退出登录」会撤销这台设备的登录会话（30 天内的自动续期一并失效），需要重新输入账号密码；其他已登录的设备不受影响。'),
   exportDanger: t('导出文件内含 accessToken / refreshToken / apiKey 等凭证与自定义提供商定义，可直接用于登录。请妥善保管，不要外传或上传到公共位置。'),
-  backupDanger: t('备份包含账号凭证、网关 Key、GitHub 令牌与云同步凭据的恢复密钥，整个文件受备份密码保护。请分开保管文件与密码；忘记密码无法恢复。'),
+  backupDanger: t('备份包含账号凭证、网关 Key 与云同步凭据的恢复密钥，整个文件受备份密码保护。请分开保管文件与密码；忘记密码无法恢复。'),
 } as const
 
 /** 状态行（`.settings-state`）的派生文案：与旧实现的赋值逐字一致 */
@@ -942,10 +948,11 @@ export const STATES = {
   corsOn: t('正在应答跨源请求：浏览器跨域请求可直连 /v1/*。'),
   corsOff: t('未开启，浏览器跨域无法直连网关。'),
   modelsDevUnavailable: t('未能读取 models.dev 元数据状态，请稍后重试'),
+  modelsDevRefreshing: t('正在从 models.dev 更新…'),
   /** 数据来历：内嵌快照（发版时那份）/ 上次刷新结果 / 刚拉的 */
-  modelsDevSourceBuiltin: t('随包内嵌的快照（发版时的那份）'),
-  modelsDevSourceCache: t('上次成功刷新的结果（存在本机数据库里）'),
-  modelsDevSourceNetwork: t('刚刚从 models.dev 拉到的最新数据'),
+  modelsDevSourceBuiltin: t('内置快照'),
+  modelsDevSourceCache: t('本地缓存'),
+  modelsDevSourceNetwork: t('在线拉取'),
   modelsDevEmpty: t('还没有装载任何数据。'),
   promptUnavailable: t('未能读取系统提示词设置，请稍后重试'),
   degradeUntilFallback: t('次日 00:00'),

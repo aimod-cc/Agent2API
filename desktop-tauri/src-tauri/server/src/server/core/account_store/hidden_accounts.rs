@@ -6,6 +6,23 @@ use serde_json::{json, Value};
 use crate::server::core::plugin_host::{startup, PackRegistry};
 use crate::server::core::providers;
 
+impl super::AccountStore {
+    pub(crate) fn plugin_account_summary(&self) -> Value {
+        let snapshot = self.routing_snapshot();
+        let booting = startup::booting();
+        let mut counts = BTreeMap::new();
+        let mut hidden = BTreeMap::new();
+        for account in &snapshot.public_accounts {
+            let provider = crate::server::core::routing::provider_of(account);
+            *counts.entry(provider.to_string()).or_insert(0usize) += 1;
+            if !super::store_view::account_list_visible(provider, booting) {
+                *hidden.entry(provider.to_string()).or_insert(0usize) += 1;
+            }
+        }
+        json!({ "counts": counts, "hidden": summary(hidden) })
+    }
+}
+
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum HiddenReason {
@@ -16,6 +33,7 @@ enum HiddenReason {
     LoadFailed,
     LoadTimeout,
     NotLoaded,
+    LegacyUnsupported,
 }
 
 fn reason_of(provider: &str, registry: &PackRegistry) -> HiddenReason {
@@ -36,8 +54,21 @@ fn reason_of(provider: &str, registry: &PackRegistry) -> HiddenReason {
             _ => HiddenReason::NotLoaded,
         };
     }
+    if registry.packs.iter().any(|pack| {
+        pack.manifest_providers.iter().any(|item| item.id.as_str() == provider)
+            && crate::server::core::plugin_host::support_state(pack)
+                == crate::server::core::plugin_host::PackSupportState::LegacyUnsupported
+    }) && !registry.packs.iter().any(|pack| {
+        pack.manifest_providers.iter().any(|item| item.id.as_str() == provider)
+            && crate::server::core::plugin_host::support_state(pack)
+                == crate::server::core::plugin_host::PackSupportState::Supported
+    }) { return HiddenReason::LegacyUnsupported; }
     let mut reason = HiddenReason::NotInstalled;
     for pack in &registry.packs {
+        if crate::server::core::plugin_host::support_state(pack)
+            != crate::server::core::plugin_host::PackSupportState::Supported {
+            continue;
+        }
         if !pack
             .manifest_providers
             .iter()

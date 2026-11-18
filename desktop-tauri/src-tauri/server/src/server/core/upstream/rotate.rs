@@ -76,6 +76,11 @@ pub(super) async fn session_for(
             if service.store.account_provider_of(&id).as_deref() != Some(provider.as_str()) {
                 return Err(unavailable());
             }
+            if crate::server::core::providers::subscriptions::contains(&provider) {
+                return service.store.plugin_account(&id)
+                    .filter(|account| account.get("provider").and_then(Value::as_str) == Some(provider.as_str()))
+                    .ok_or_else(unavailable);
+            }
             let mut entry = service.store.get_session_by_id(&id)
                 .filter(|_| service.store.account_provider_of(&id).as_deref() == Some(provider.as_str()))
                 .ok_or_else(unavailable)?;
@@ -357,6 +362,11 @@ fn select_target_account_sync(
         ));
     }
 
+    if super::account_admission::all_busy(&candidates, &counts, tried_ids) {
+        return Err(GatewayError::with_status(503, "当前路由内的账号均已达到并发上限")
+            .with_code("account_busy"));
+    }
+
     if request_routing.strict_vision {
         return Err(GatewayError::with_status(503, "图片处理候选账号受冷却、并发或额度限制；未强行发送或扩大路由范围")
             .with_code("vision_target_unavailable"));
@@ -366,21 +376,14 @@ fn select_target_account_sync(
             "固定生图账号受冷却、并发或额度限制，或已无可用凭证；未自动换号")
             .with_code("image_account_unavailable"));
     }
-    // ── 第二级兜底（并发感知）──────────────────────────────────
-    // 启用中的账号都在限额冷却期内 / 已达并发上限时，仍挑一个试一次：
-    //   ① 先在「启用 + 未尝试 + 未达并发上限」的账号里挑**恢复最早**的
-    //      —— 上游若已实际解除限额可直接成功，否则把真实 429 与恢复时间
-    //      返回给客户端（与改造前同一条路，只多了并发这一道闸）；
-    //   ② 一个都没有（未尝试的账号**全部**达到并发上限）→ 挑**余量最大**
-    //      的账号强塞。
-    //
-    // ── 为什么 ② 强塞而不是报 503（本级的取舍）──────────────────
-    // 限流是「等得起」的：冷却有明确恢复时间，到点账号自然回来；并发挤占
-    // 则是**即刻自愈**的 —— 在途请求一轮对话结束后计数立刻回落（见
-    // connections.rs 的 Drop）。全部账号都忙时拒绝请求（503）只会把本可
-    // 服务的请求直接挡在门外，而强塞只意味着短暂超载 1-2 个（软上限口径见
-    // `routing::max_concurrent_of`）。所以：能等就等（①），等不了就挤（②），
-    // 永不因并发上限直接 503。
+    if pinned.is_none() {
+        let earliest = enabled.iter().map(|account| routing::rate_limit_reset_at(account, keys, now)).filter(|at| *at > now).min();
+        if let Some(at) = earliest {
+            return Err(GatewayError::with_status(429, format!("当前路由对象处于冷却期，最早 {} 恢复；未提前重发", errors::format_reset_at_text(at)))
+                .with_code("routing_cooldown").with_retry_after_seconds(at.saturating_sub(now).max(0) as u64 / 1000 + 1));
+        }
+    }
+    // 冷却兜底仍需有账号并发余量；所有账号满额时交由准入队列等待。
     let mut best_effort: Option<Value> = None;
     let mut best_reset = f64::INFINITY;
     for account in &enabled {
@@ -400,23 +403,6 @@ fn select_target_account_sync(
         if reset < best_reset {
             best_reset = reset;
             best_effort = Some(account.clone());
-        }
-    }
-    if best_effort.is_none() {
-        // ① 无果：在「全部达到并发上限」（或没有未尝试账号）时按余量挤占。
-        // 挑出的账号走与 ① 同一条收尾（取会话 → 组装选路结果）。
-        if let Some(account) = squeeze_by_headroom(&enabled, &counts, tried_ids, keys, now) {
-            if let Some(id) = routing::account_id(&account).map(str::to_string) {
-                if let Some(entry) = service.store.get_session_by_id(&id) {
-                    return Ok(with_proxy_notice(
-                        account,
-                        entry.proxy,
-                        entry.proxy_error,
-                        id,
-                        Some(decision),
-                    ));
-                }
-            }
         }
     }
     if let Some(account) = best_effort {
@@ -499,18 +485,17 @@ pub(super) fn accounts_in_providers(
     pinned: Option<&str>,
 ) -> Vec<Value> {
     let snapshot = service.store.routing_snapshot();
-    snapshot.accounts.iter()
+    if let Some(id) = pinned {
+        return snapshot.by_id.get(id).filter(|account| providers.contains(&provider_of(account)))
+            .filter(|account| crate::server::core::account_store::store_view::account_visible(provider_of(account)))
+            .map(|account| vec![account.as_ref().clone()]).unwrap_or_default();
+    }
+    providers.iter().flat_map(|provider| snapshot.by_provider.get(*provider).into_iter().flatten())
         .filter(|account| crate::server::core::account_store::store_view::account_visible(provider_of(account)))
-        .filter(|account| providers.contains(&provider_of(account)))
-        .filter(|account| match pinned {
-            Some(id) => routing::account_id(account) == Some(id),
-            None => true,
-        })
-        .map(|account| account.as_ref().clone())
-        .collect()
+        .map(|account| account.as_ref().clone()).collect()
 }
 
-fn scoped_accounts(
+pub(super) fn scoped_accounts(
     service: &UpstreamService,
     providers: &[&str],
     model: &str,
@@ -523,7 +508,14 @@ fn scoped_accounts(
     } else {
         crate::server::core::routing_scope::apply_accounts(&accounts, model)
     };
-    let accounts: Vec<Value> = accounts.into_iter().filter(|account| {
+    let keys = routing::CooldownKeys::new(model);
+    let accounts: Vec<Value> = accounts.into_iter().map(|mut account| {
+        let provider = provider_of(&account).to_string();
+        if let Some(entry) = service.store.policy_cooldown_for(&provider, &keys.for_account(&account)) {
+            account["providerCooldown"] = entry;
+        }
+        account
+    }).filter(|account| {
         pinned.is_some() || !account.get("upstreamCooldownUntil").and_then(Value::as_i64)
             .is_some_and(|until| until > logging::now_ms())
     }).collect();
@@ -695,59 +687,6 @@ fn earliest_limit_reset_at_in(
         .filter(|reset| *reset > 0)
         .min()
         .unwrap_or(0)
-}
-
-/// 全部账号达到并发上限时的**挤占**挑选：余量（`limit - count`）最大者优先。
-///
-/// ── 排序口径（任务约定，改动前先读）──────────────────────────
-///   · **不限（maxConcurrent == 0）= 无穷大余量**，永远排在有限上限之前 ——
-///     用 `i64::MAX` 近似：任何真实的 `limit - count` 都比它小；
-///   · 同余量挑**恢复最早**的（与 ① 的「恢复最早试一次」同一偏好：优先选
-///     「最可能马上恢复额度」的账号多打一个）；
-///   · `>` 严格比较保持候选顺序稳定（同余量同恢复时间时先见者优先）。
-///
-/// 挑中即打一行 verbose（verbose 级别不进运行日志页，只在终端/调试时可见
-/// —— 这是逐请求的事件，info 级会刷屏，但排障时必须找得到「为什么明明
-/// 设了上限还打到这个账号」的答案）。没有可挤的账号（全部已尝试过）时
-/// 返回 None，由调用方落到尾部的「无账号」兜底。
-fn squeeze_by_headroom(
-    enabled: &[Value],
-    counts: &HashMap<String, usize>,
-    tried_ids: &[String],
-    keys: &routing::CooldownKeys<'_>,
-    now: i64,
-) -> Option<Value> {
-    let mut squeezed: Option<Value> = None;
-    let mut best_headroom = i64::MIN;
-    let mut best_reset = f64::INFINITY;
-    for account in enabled {
-        let Some(id) = routing::account_id(account) else {
-            continue;
-        };
-        if tried_ids.iter().any(|tried| tried == &crate::server::core::routing_groups::attempt_key(account)) {
-            continue;
-        }
-        let count = counts.get(id).copied().unwrap_or(0) as i64;
-        let limit = routing::max_concurrent_of(account) as i64;
-        let headroom = if limit > 0 { limit - count } else { i64::MAX };
-        let reset = routing::rate_limit_reset_at(account, keys, now);
-        let reset = if reset > 0 { reset as f64 } else { f64::INFINITY };
-        if headroom > best_headroom || (headroom == best_headroom && reset < best_reset) {
-            best_headroom = headroom;
-            best_reset = reset;
-            squeezed = Some(account.clone());
-        }
-    }
-    if let Some(account) = &squeezed {
-        logging::verbose(
-            "[Upstream]",
-            &format!(
-                "全部账号达到并发上限，按余量挤占账号「{}」",
-                account_display(account)
-            ),
-        );
-    }
-    squeezed
 }
 
 /// 当前在途请求计数的快照（账号 id → 请求数），选路的并发过滤用。

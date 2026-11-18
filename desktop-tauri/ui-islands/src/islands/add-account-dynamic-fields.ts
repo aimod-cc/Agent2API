@@ -17,11 +17,24 @@ export type Prompt = {
 
 export type CallbackInput = 'url' | 'code'
 
+export type SmsConfig = {
+  phoneLabel: string
+  phonePlaceholder: string
+  countryCodes: Array<{ value: string; label: string }>
+  phoneMinLength: number
+  phoneMaxLength: number
+  codeMinLength: number
+  codeMaxLength: number
+  resendAfterSeconds: number
+  expiresAfterSeconds: number
+}
+
 export type Method = {
   id: string
-  type: 'oauth' | 'api' | 'manual' | 'desktop' | 'guest' | 'unsupported'
+  type: 'oauth' | 'api' | 'sms' | 'desktop'
+  sms?: SmsConfig
   label: string
-  methodIndex?: number
+  methodIndex: number
   prompts: Prompt[]
   dynamicPrompts?: boolean
   localOnly: boolean
@@ -39,7 +52,7 @@ export type Method = {
 }
 
 export type MethodsState = {
-  phase: 'loading' | 'ready' | 'legacy' | 'error'
+  phase: 'loading' | 'ready' | 'error'
   methods: Method[]
   instructions: string
   reason: string
@@ -108,6 +121,50 @@ export function parseCallbackInput(value: unknown): CallbackInput {
   throw new Error(t('插件返回了无效的登录方式，请更新插件或联系作者'))
 }
 
+function parseSms(value: unknown): SmsConfig {
+  const raw = objectOf(value)
+  const integer = (key: string, min: number, max: number): number => {
+    const value = raw?.[key]
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) {
+      throw new Error(t('插件返回的短信登录声明无效'))
+    }
+    return value
+  }
+  if (!raw || typeof raw.phoneLabel !== 'string' || !raw.phoneLabel.trim() || !Array.isArray(raw.countryCodes)) {
+    throw new Error(t('插件返回的短信登录声明无效'))
+  }
+  const countryCodes: SmsConfig['countryCodes'] = []
+  for (const item of raw.countryCodes) {
+    const code = objectOf(item)
+    if (!code || typeof code.value !== 'string' || !/^\d{1,6}$/.test(code.value)
+      || typeof code.label !== 'string' || !code.label.trim() || countryCodes.some(item => item.value === code.value)) {
+      throw new Error(t('插件返回的短信登录声明无效'))
+    }
+    countryCodes.push({ value: code.value, label: loginText(code.label) })
+  }
+  const phoneMinLength = integer('phoneMinLength', 1, 32)
+  const codeMinLength = integer('codeMinLength', 1, 16)
+  return {
+    phoneLabel: loginText(raw.phoneLabel), phonePlaceholder: loginText(raw.phonePlaceholder), countryCodes,
+    phoneMinLength, phoneMaxLength: integer('phoneMaxLength', phoneMinLength, 32),
+    codeMinLength, codeMaxLength: integer('codeMaxLength', codeMinLength, 16),
+    resendAfterSeconds: integer('resendAfterSeconds', 1, 3600), expiresAfterSeconds: integer('expiresAfterSeconds', 30, 900),
+  }
+}
+
+function parseUnavailableReason(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined
+  const valid = (text: string) => text.trim().length > 0
+    && new TextEncoder().encode(text).length <= 8192
+    && !/[\u0000-\u0009\u000B-\u001F\u007F-\u009F]/.test(text)
+  if (typeof value !== 'string' || !valid(value)) {
+    throw new Error(t('插件返回了无效的登录方式，请更新插件或联系作者'))
+  }
+  const reason = loginText(value.trim())
+  if (!valid(reason)) throw new Error(t('插件返回了无效的登录方式，请更新插件或联系作者'))
+  return reason
+}
+
 export function parseMethods(value: unknown, provider = ''): MethodsState {
   const data = objectOf(value)
   if (!data || !Array.isArray(data.methods)) {
@@ -118,7 +175,7 @@ export function parseMethods(value: unknown, provider = ''): MethodsState {
     const raw = objectOf(value)
     const index = raw?.methodIndex
     if (!raw || typeof index !== 'number' || !Number.isSafeInteger(index) || index < 0
-      || indexes.has(index) || (raw.type !== 'oauth' && raw.type !== 'api') || !Array.isArray(raw.prompts)) {
+      || indexes.has(index) || !['oauth', 'api', 'sms', 'desktop'].includes(String(raw.type)) || !Array.isArray(raw.prompts)) {
       throw new Error(t('插件返回了无效的登录方式，请更新插件或联系作者'))
     }
     indexes.add(index)
@@ -139,6 +196,15 @@ export function parseMethods(value: unknown, provider = ''): MethodsState {
     const callbackInput = parseCallbackInput(raw.callbackInput)
     const manualCallback = raw.manualCallback === true
     const embeddedOnly = raw.embeddedOnly === true
+    const sms = raw.type === 'sms' ? parseSms(raw.sms) : undefined
+    if (sms && (raw.localOnly === true || manualCallback || embeddedOnly || raw.desktopOnly === true
+      || raw.dynamicPrompts === true || prompts.length > 0 || raw.browserMode !== 'none')
+      || !sms && raw.sms !== undefined) {
+      throw new Error(t('插件返回的短信登录声明无效'))
+    }
+    if (raw.type === 'desktop' && (raw.localOnly !== true || raw.browserMode !== 'none' || manualCallback || embeddedOnly || prompts.length > 0)) {
+      throw new Error(t('插件返回了无效的登录方式，请更新插件或联系作者'))
+    }
     if ((callbackInput === 'code' && !manualCallback)
       || (raw.type === 'api' && (raw.localOnly === true || manualCallback || embeddedOnly))) {
       throw new Error(t('插件返回了无效的登录方式，请更新插件或联系作者'))
@@ -149,15 +215,15 @@ export function parseMethods(value: unknown, provider = ''): MethodsState {
     if (raw.type === 'oauth' && !embeddedOnly && ['intern-inkstone', 'mclaw'].includes(provider)
       && (!browserMode || browserMode === 'choice')) browserMode = 'plugin'
     return {
-      id: `method:${index}`, methodIndex: index, type: raw.type,
-      label: loginText(textOf(raw.label) || (raw.type === 'oauth' ? t('OAuth 登录') : t('API 凭证'))),
+      id: `method:${index}`, methodIndex: index, type: raw.type as Method['type'], sms,
+      label: loginText(textOf(raw.label) || (raw.type === 'oauth' ? t('OAuth 登录') : raw.type === 'sms' ? t('手机验证码登录') : t('API 凭证'))),
       prompts, dynamicPrompts: raw.dynamicPrompts === true, localOnly: raw.localOnly === true, manualCallback, callbackInput, embeddedOnly,
       desktopOnly: raw.desktopOnly === true, browserMode,
       instructions: loginText(raw.instructions),
-      reason: callbackContractMissing
+      reason: parseUnavailableReason(raw.unavailableReason) ?? (callbackContractMissing
         ? t('此 Copilot 手动令牌方式未声明回调输入契约，暂不发起；请改用设备码登录或只读本机引用。')
         : prompts.some(prompt => prompt.type === 'select' && !prompt.options.length)
-          ? t('该登录方式没有可选项，无法提交；请更新插件或联系作者') : undefined,
+          ? t('该登录方式没有可选项，无法提交；请更新插件或联系作者') : undefined),
     }
   })
   return {

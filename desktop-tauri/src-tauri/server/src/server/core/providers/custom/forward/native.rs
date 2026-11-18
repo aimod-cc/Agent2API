@@ -16,7 +16,7 @@ use crate::server::core::upstream::{cancellation, native, ForwardOutcome, InFlig
 use crate::server::errors::GatewayError;
 use crate::server::logging;
 
-use super::{apply_user_agent_override, classify_custom_error, describe_proxy, ProviderQuirks};
+use super::{apply_user_agent_override, describe_proxy, ProviderQuirks};
 
 pub(super) async fn forward(
     protocol: WireProtocol,
@@ -130,7 +130,8 @@ pub(super) async fn forward(
     }
     quirks.apply_emulation_headers(&mut headers, api_key, &outbound, base_url);
     quirks.apply_to(&mut headers);
-    apply_user_agent_override(&mut headers, user_agent);
+    apply_user_agent_override(&mut headers,
+        crate::server::core::user_agent::override_value(provider_id, user_agent));
     let level = match protocol {
         WireProtocol::Anthropic => anthropic_thinking::effort(&outbound),
         WireProtocol::Responses => outbound
@@ -173,10 +174,6 @@ pub(super) async fn forward(
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
         let headers = native::response_headers(response.headers());
-        let retry = headers
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
         let capture = telemetry.capture();
         let budget =
             std::time::Duration::from_millis(crate::server::config::timeout_settings().body_ms());
@@ -191,7 +188,7 @@ pub(super) async fn forward(
             read.await
         }
         .map_err(|_| GatewayError::with_status(502, "读取上游错误响应超时"))?;
-        let mut error = classify_custom_error(status, &detail.message, retry.as_deref());
+        let mut error = super::errors::from_detail(status, &detail, &headers);
         if let Some(body) = detail.payload {
             error.native_response = Some((protocol, body, headers));
         }

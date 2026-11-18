@@ -1,4 +1,6 @@
 import { invalidateUsageTasks } from './accounts-usage-tasks'
+import { cacheAccountDetails } from './accounts-list-api'
+import { refreshAccountIndex } from './accounts-index-refresh'
 import { t } from '../i18n'
 import {
   shared, type AccountRecord, type BatchAccountsPayload, type BatchAccountsResult,
@@ -111,7 +113,7 @@ export async function updateAccountConfirmed(id: string, patch: Record<string, u
     || !accountPatchConfirmed(account, patch)) {
     throw new Error(t('账号更新结果未确认，请刷新后核对设置'))
   }
-  return account
+  return cacheAccountDetails([account])[0]
 }
 
 function batchPatch(payload: BatchAccountsPayload): Record<string, unknown> {
@@ -167,6 +169,10 @@ export function confirmBatchResult(data: BatchAccountsResult | null | undefined,
 }
 
 export async function refreshSavedAccounts(): Promise<void> {
+  if (shared().wbApp?.currentPage === 'accounts') {
+    await refreshAccountIndex()
+    return
+  }
   const app = shared().wbApp
   if (!app?.refresh) throw new Error(t('账号列表刷新接口不可用，请重新打开页面'))
   if (await app.refresh() !== true) {

@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { Alert, Badge, Button, Card, CardContent, CardHeader, CardTitle, Empty, Spinner, confirmDialog } from '@ui'
 import { t } from '../ui-kit/src/i18n'
+import { createRefreshRequest } from './refresh-request'
 import type { ImageToolApi, ToolImageFile, ToolImageJob, ToolImageJobs } from './tools-image-types'
 
 const STATUS: Record<ToolImageJob['status'], string> = {
@@ -12,21 +13,53 @@ export function ToolImageHistory({ api }: { api: ImageToolApi }) {
   const [error, setError] = React.useState('')
   const [busy, setBusy] = React.useState('')
   const [loading, setLoading] = React.useState(true)
-  const load = React.useCallback(async () => {
-    try { setData(await api.jobs()); setError('') }
-    catch (failure) { setError(t(failure instanceof Error ? failure.message : String(failure))) }
-    finally { setLoading(false) }
-  }, [api])
+  const root = React.useRef<HTMLDivElement | null>(null)
+  const mounted = React.useRef(false)
+  const load = React.useMemo(() => createRefreshRequest(async isCurrent => {
+    try {
+      const next = await api.jobs()
+      if (mounted.current && isCurrent()) { setData(next); setError('') }
+    } catch (failure) {
+      if (mounted.current && isCurrent()) setError(t(failure instanceof Error ? failure.message : String(failure)))
+    } finally {
+      if (mounted.current && isCurrent()) setLoading(false)
+    }
+  }), [api])
   React.useEffect(() => {
-    void load()
-    const timer = setInterval(() => { if (document.visibilityState === 'visible') void load() }, 10_000)
-    return () => clearInterval(timer)
+    mounted.current = true
+    const page = root.current?.closest<HTMLElement>('.page[data-page]')
+    let timer: ReturnType<typeof setInterval> | null = null
+    const visible = () => !document.hidden && (!page || page.classList.contains('active'))
+    const clear = () => {
+      if (timer !== null) clearInterval(timer)
+      timer = null
+    }
+    const refreshVisible = () => {
+      clear()
+      if (!visible()) return
+      void load()
+      timer = setInterval(() => { if (visible()) void load() }, 10_000)
+    }
+    const onPage = (event: Event) => {
+      const selected = (event as CustomEvent<string>).detail
+      if (!page || selected === page.dataset.page) refreshVisible()
+      else clear()
+    }
+    refreshVisible()
+    document.addEventListener('visibilitychange', refreshVisible)
+    window.addEventListener('wb:page', onPage)
+    return () => {
+      mounted.current = false
+      clear()
+      document.removeEventListener('visibilitychange', refreshVisible)
+      window.removeEventListener('wb:page', onPage)
+    }
   }, [load])
 
   const remove = async (job: ToolImageJob) => {
     if (!await confirmDialog(t('清理这次生成的临时图片？已保存到本机的文件不会被删除，原提交编号也不会重新生图。'), { destructive: true })) return
     setBusy(job.job_id)
-    try { await api.remove(job.job_id); await load() }
+    try { await api.remove(job.job_id); await load(true) }
     catch (failure) { setError(t(failure instanceof Error ? failure.message : String(failure))) }
     finally { setBusy('') }
   }
@@ -37,7 +70,7 @@ export function ToolImageHistory({ api }: { api: ImageToolApi }) {
     finally { setBusy('') }
   }
   const mib = (value: number) => (value / (1024 * 1024)).toFixed(1)
-  return <Card>
+  return <Card ref={root}>
     <CardHeader>
       <CardTitle>{t('最近生成记录')}</CardTitle>
       <Button className='ml-auto' size='sm' variant='outline' onClick={() => void load()}>{t('刷新')}</Button>

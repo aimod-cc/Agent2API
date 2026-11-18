@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent2api_provider_protocol as proto;
+use futures::{stream, StreamExt};
 
 use crate::server::core::account_store::AccountStore;
 use crate::server::core::providers::ProviderKind;
@@ -234,8 +235,15 @@ impl GatewayCallbacks for StoreCallbacks {
                 if store.account_provider_of(&account).as_deref() != Some(provider.as_str()) {
                     return Err("账号归属已变化".to_string());
                 }
-                store.mark_rate_limited(&account, &model, 429, None,
-                    reset_at.map(|value| value as f64), "插件上报限额");
+                let class = crate::server::core::providers::adapter::UpstreamErrorClass::QuotaLimited {
+                    status: 429, upstream_code: None, reset_at, message: "插件上报限额".into(),
+                };
+                let decision = crate::server::core::upstream::error_policy::decide(&provider, &model, &class, 429,
+                    &serde_json::json!({ "resetAt": reset_at }), false, false);
+                if decision.cooldown() {
+                    store.mark_policy_cooldown(&account, &model, decision.scope, 429, None,
+                        reset_at, "插件上报限额", &decision.rule, decision.floor_ms);
+                }
                 Ok(())
             }).await.map_err(|error| proto::WireError::with_code(error.message, proto::WireError::INTERNAL))?
                 .map_err(|message| proto::WireError::with_code(message, super::CALLBACK_FORBIDDEN))
@@ -289,6 +297,14 @@ impl GatewayCallbacks for StoreCallbacks {
             // 用两个**约定键名**而不是把整份配置摊给插件：插件只需要问它要
             // 的那两项，网关也只回答这两项。
             match key.as_str() {
+                "upstreamHeaders" if matches!(
+                    crate::server::core::providers::kind_from_id(&provider),
+                    Some(ProviderKind::ClineFree | ProviderKind::ClinePass)
+                ) => {
+                    let overrides: std::collections::BTreeMap<_, _> =
+                        crate::server::config::cline_upstream_overrides().into_iter().collect();
+                    return Ok(serde_json::json!(overrides));
+                }
                 super::rpc_cache::SETTING_MODEL_CATALOG => {
                     return Ok(super::rpc_cache::snapshot(&provider)
                         .and_then(|list| serde_json::to_value(list).ok())
@@ -369,14 +385,26 @@ fn plugin_settings_key(provider: &str, key: &str) -> String {
 pub async fn start(store: AccountStore) -> Option<Arc<Host>> {
     let registry_file = PackRegistry::load();
     let owners = super::ownership::owners(&registry_file);
-    let mut first = None;
-    for pack in registry_file.packs.iter().filter(|pack| pack.enabled) {
-        if let Some(host) = start_pack(store.clone(), pack, &owners).await {
-            if first.is_none() {
-                first = Some(host);
+    super::startup::configure_packs(&registry_file);
+    let packs = async {
+        let mut jobs = Vec::new();
+        for (index, pack) in registry_file.packs.iter().enumerate().filter(|(_, pack)| pack.enabled) {
+            let store = store.clone();
+            let owners = &owners;
+            jobs.push(async move { (index, start_pack_tracked(store, pack, owners, None).await) });
+        }
+        let mut loading = stream::iter(jobs).buffer_unordered(4);
+        let mut first: Option<(usize, Arc<Host>)> = None;
+        while let Some((index, result)) = loading.next().await {
+            if let Some((host, _)) = result {
+                if first.as_ref().is_none_or(|(previous, _)| index < *previous) {
+                    first = Some((index, host));
+                }
             }
         }
-    }
+        first.map(|(_, host)| host)
+    };
+    let (first, scripts) = tokio::join!(packs, super::script::start(store.clone()));
     if first.is_some() {
         crate::server::core::providers::adapter::restore_cached_catalogs();
         if crate::server::core::checkin_schedules::extend_plugin_providers_once() {
@@ -384,21 +412,40 @@ pub async fn start(store: AccountStore) -> Option<Arc<Host>> {
         }
         super::schedules::wake();
     }
-    if let Err(error) = super::script::start(store).await {
+    if let Err(error) = scripts {
         logging::log("[Plugin]", &format!("脚本插件启动失败：{error}"));
     }
     first.or_else(super::script::host)
 }
 
-pub(super) async fn start_pack(
+pub(super) async fn start_pack_with_source(
     store: AccountStore,
     pack: &install::InstalledPack,
     owners: &std::collections::BTreeMap<String, String>,
-) -> Option<Arc<Host>> {
+    source: Option<super::packages::provenance::StartSource>,
+) -> Option<(Arc<Host>, Option<super::packages::provenance::StartReceipt>)> {
     super::startup::configure_packs(&PackRegistry::load());
+    start_pack_tracked(store, pack, owners, source).await
+}
+
+async fn start_pack_tracked(
+    store: AccountStore,
+    pack: &install::InstalledPack,
+    owners: &std::collections::BTreeMap<String, String>,
+    source: Option<super::packages::provenance::StartSource>,
+) -> Option<(Arc<Host>, Option<super::packages::provenance::StartReceipt>)> {
     let loading = super::startup::begin(vec![pack.id.clone()], super::startup::Phase::Starting);
-    match start_pack_inner(store, pack, owners, &loading.attempt).await {
-        Ok(host) => { loading.finish(); Some(host) }
+    if let Some(reason) = super::ownership::unavailable_reason(pack) {
+        loading.block(&reason);
+        return None;
+    }
+    let mut claim: Option<super::packages::provenance::StartClaim> = None;
+    match start_pack_inner(store, pack, owners, &loading.attempt, source, &mut claim).await {
+        Ok(host) => {
+            let receipt = claim.and_then(|claim| claim.observe_loaded());
+            loading.finish();
+            Some((host, receipt))
+        }
         Err(error) => { loading.fail(&error); None }
     }
 }
@@ -408,6 +455,8 @@ async fn start_pack_inner(
     pack: &install::InstalledPack,
     owners: &std::collections::BTreeMap<String, String>,
     attempt: &super::startup::Attempt,
+    source: Option<super::packages::provenance::StartSource>,
+    start_claim: &mut Option<super::packages::provenance::StartClaim>,
 ) -> Result<Arc<Host>, String> {
     // 入口路径与清单都在版本目录里。清单读不出来不致命 —— 入口路径注册表里
     // 也有一份（`InstalledPack::entry`），但**必须**复核协议版本，否则一个
@@ -437,8 +486,8 @@ async fn start_pack_inner(
     // 也选对文件；注册表那条是清单读不到时的退路。
     let entry = manifest
         .as_ref()
-        .and_then(|manifest| install::entry_for_target(manifest, &super::rpc::target_triple()))
-        .unwrap_or_else(|| pack.entry.clone());
+        .and_then(|manifest| install::entry_for_target(manifest, &super::wasm::manifest::TARGET))
+        .ok_or_else(|| super::support::LEGACY_REASON.to_string())?;
     let exe = dir.join(&entry);
     if !exe.exists() {
         return Err(format!("插件入口不存在（{}）", exe.display()));
@@ -447,18 +496,16 @@ async fn start_pack_inner(
         Ok(wasm) => wasm.flatten(),
         Err(reason) => { logging::log("Plugin", &format!("插件包「{}」不可用：{reason}", pack.id)); return Err(reason); }
     };
+    if wasm.as_ref().is_some_and(|options| crate::server::core::providers::availability::is_suspended(&options.provider)) {
+        return Err(format!("提供商 {} 当前已暂停开放，未启动该 Wasm 插件", wasm.as_ref().map(|options| options.provider.as_str()).unwrap_or("")));
+    }
     if let Some(manifest) = &manifest {
         let (signature, problem) = install::verify_signature(&dir, manifest, &super::host_target());
         if signature == install::SignatureState::Invalid || pack.signed && !signature.is_signed() {
             return Err(format!("插件包「{}」完整性复核失败：{}", pack.id, problem.unwrap_or_default()));
         }
     }
-    if wasm.is_none() {
-        if let Err(reason) = super::packages::ensure_entry_executable(&exe) {
-            logging::log("Plugin", &format!("插件包「{}」不可用：{reason}", pack.id));
-            return Err(reason);
-        }
-    }
+    if wasm.is_none() { return Err(super::support::LEGACY_REASON.to_string()); }
 
     let options = HostOptions {
         wasm,
@@ -476,7 +523,14 @@ async fn start_pack_inner(
         .map(|(provider, _)| provider.clone())
         .collect();
     let callbacks = Arc::new(StoreCallbacks::for_providers(store, allowed));
-    let host = Arc::new(Host::new(options, callbacks));
+    let host = match source.filter(|source| source.matches_pack(pack)) {
+        Some(source) => {
+            let (host, claim) = source.new_host(options, callbacks);
+            *start_claim = claim;
+            host
+        }
+        None => Arc::new(Host::new(options, callbacks)),
+    };
     attempt.attach(&host);
     super::runtime::install_pack(&pack.id, super::ownership::category(&dir), host.clone());
     match host.ensure().await {
@@ -562,6 +616,8 @@ pub async fn reload(store: AccountStore) -> Option<Arc<Host>> {
             logging::log("[Plugin]", &format!("插件包「{id}」仍有任务，未执行重载"));
             continue;
         };
+        // 仅重载入口持这一轮票据；不套入已有安装事务，停止/启动失败也不恢复旧来源。
+        let _change = super::packages::provenance::begin_scope_change(&scope.packs, &id);
         if let Err(error) = scope.stop().await {
             logging::log("[Plugin]", &error);
             continue;

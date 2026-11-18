@@ -75,14 +75,6 @@ pub const KEY_UPDATE_PROXY: &str = "updateProxy";
 /// beta 版本号必须与 tag 的语义化版本一致，否则无法判断更新先后。
 pub const KEY_UPDATE_BETA: &str = "updateBeta";
 
-/// GitHub 令牌的密文信封（config.json 键，**存的不是明文**）。
-///
-/// 值是 `core::update::token` 用 AES-256-GCM 加密出来的 `enc1:<base64>` 信封，
-/// 明文只进内存、只在拼请求头时用；密钥在库外的密钥文件里（细节见那个
-/// 模块的头注释）。API 只报「有没有、来自哪」，不回显本体。
-/// 环境变量 `GITHUB_TOKEN` 仍是兜底来源（优先级：这个键 > 环境变量）。
-pub const KEY_GITHUB_TOKEN: &str = "githubToken";
-
 /// 调试模式开关（config.json 键）。
 ///
 /// 开启后转发层会把**发给上游的请求头（脱敏）与请求体、上游返回的响应头与
@@ -352,6 +344,10 @@ pub struct PromptSettings {
     /// `BTreeMap` 而不是 `HashMap`：界面与接口响应都要有稳定顺序（同一份配置
     /// 每次渲染的行序不同，用户会以为设置被改动过）
     pub providers: BTreeMap<String, ProviderPrompt>,
+    pub rules: Vec<crate::server::core::prompt::rules::CompiledRule>,
+    /// 显式空列表也具有权威性，不能重新启用旧的提供商覆盖。
+    pub rules_configured: bool,
+    pub rules_error: Option<String>,
     /// **网关自带提示词的逐家开关**（`KEY_PROMPT_GATEWAY`）：`false` = 这一家不装，
     /// 不在表里 = 装（默认）。与 `providers` 分开的两点理由见那个键的说明。
     pub gateway: BTreeMap<String, bool>,
@@ -370,6 +366,9 @@ impl Default for PromptSettings {
             source: crate::server::core::prompt::PromptSource::None,
             file_error: None,
             providers: BTreeMap::new(),
+            rules: Vec::new(),
+            rules_configured: false,
+            rules_error: None,
             gateway: BTreeMap::new(),
             gateway_text: BTreeMap::new(),
         }

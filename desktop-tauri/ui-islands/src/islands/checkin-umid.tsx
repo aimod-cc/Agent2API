@@ -60,7 +60,7 @@ export function CheckinUmid(): React.ReactElement | null {
       if (!active.current) return
       if (next?.available) {
         toast(t('UMID 组件已安装，可重新签到。'))
-        await loadCenter()
+        await loadCenter(true)
       } else if (next && !next.installing) {
         throw new Error(t('安装后仍未检测到 UMID 组件，请重新检查。'))
       }
@@ -87,15 +87,16 @@ export function CheckinUmid(): React.ReactElement | null {
 
   return (
     <div className='flex flex-wrap items-center gap-2' aria-live='polite'>
-      <span>{state
-        ? t('国际版签到需要 UMID 组件生成设备风控身份（本机未检测到）。')
+      <span>{state?.authorized === false
+        ? t('请在 Qoder 国际版插件设置中授权设备验证组件')
+        : state ? t('国际版签到需要 UMID 组件生成设备风控身份（本机未检测到）。')
         : error ? t('网关设备组件') : t('正在读取 UMID 组件状态…')}</span>
-      {state?.installSupported ? (
+      {state?.installSupported && state.authorized !== false ? (
         <Button variant='outline' size='sm' disabled={pending || !bridge.installQoderUmid}
           onClick={() => void install()}>
           {pending ? <><Spinner className='size-3.5' />{t('安装中…')}</> : t('一键安装组件')}
         </Button>
-      ) : state ? <span>{t('安装 Qoder 客户端或 qodercli 后即可（无需重启网关）。')}</span> : null}
+      ) : state && state.authorized !== false ? <span>{t('安装 Qoder 客户端或 qodercli 后即可（无需重启网关）。')}</span> : null}
       <Button variant='ghost' size='sm' onClick={() => { setInstallError(''); void load() }}>
         {t('重新检查')}
       </Button>

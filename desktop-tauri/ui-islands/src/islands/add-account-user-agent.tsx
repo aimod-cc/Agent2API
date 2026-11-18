@@ -72,22 +72,42 @@ export function useUserAgentPresets(): UserAgentPreset[] {
   return presets
 }
 
-/**
- * 这家提供商的 UA 能不能被改写（读后端摘要的 `userAgentOverridable`）。
- *
- * 未返回能力位时保留旧版界面的行为；新版后端按执行体实际能力判断，
- * 只有全部上游请求支持账号 UA 覆盖时才显示输入框。
- */
+/** 已建 API 以后端策略为准；新建模板在尚无提供商 ID 时使用模板声明。 */
+export function customUserAgentEditable(provider: {
+  userAgentOverridable?: boolean
+  presetKey?: string
+  clientEmulation?: string
+  baseUrl?: string
+  headers?: Record<string, string>
+  quirks?: { headers?: Record<string, string> }
+} | null | undefined): boolean {
+  if (!provider) return true
+  if (provider.userAgentOverridable !== undefined) return provider.userAgentOverridable
+  const preset = provider.presetKey && (window as unknown as {
+    wbPresetProviders?: { presetOf?: (key: string) => { userAgentOverridable?: boolean } | null }
+  }).wbPresetProviders?.presetOf?.(provider.presetKey)
+  if (preset && preset.userAgentOverridable !== undefined) return preset.userAgentOverridable
+  if (provider.clientEmulation === 'opencode'
+    && (provider.baseUrl || '').trim().replace(/\/+$/, '').toLowerCase() !== 'https://opencode.ai/zen/go/v1') return false
+  const headers = Object.entries(provider.headers || provider.quirks?.headers || {})
+  return !(headers.some(([name, value]) => name.toLowerCase() === 'x-client-type' && value === 'cline-sdk')
+    && headers.some(([name, value]) => name.toLowerCase() === 'user-agent' && value.startsWith('Cline/')))
+}
+
+/** 未取得后端策略时不开放 Agent 覆盖，避免固定身份被旧界面误改。 */
 export function userAgentEditable(provider: string): boolean {
   const bridge = window as unknown as {
-    wbProviders?: { all?: () => Array<{ id?: string; userAgentOverridable?: boolean }> }
+    wbProviders?: {
+      all?: () => Array<{ id?: string; userAgentOverridable?: boolean }>
+      customList?: () => Array<{ id?: string; userAgentOverridable?: boolean; presetKey?: string; clientEmulation?: string; baseUrl?: string }>
+    }
     wbApp?: { getState?: () => { accounts?: { providers?: Array<{ id?: string; userAgentOverridable?: boolean }> } } | null | undefined }
   }
-  const list = bridge.wbProviders?.all?.()
-    || bridge.wbApp?.getState?.()?.accounts?.providers
-  if (!Array.isArray(list)) return true
-  const found = list.find(item => item?.id === provider)
-  return found?.userAgentOverridable !== false
+  if (provider.startsWith('custom-')) {
+    return customUserAgentEditable(bridge.wbProviders?.customList?.().find(item => item.id === provider))
+  }
+  const list = bridge.wbApp?.getState?.()?.accounts?.providers || bridge.wbProviders?.all?.()
+  return list?.find(item => item.id === provider)?.userAgentOverridable === true
 }
 
 /**

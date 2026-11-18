@@ -6,7 +6,15 @@
 // login-page 不在其中：登录页单独构建成 ui/islands/login.js（见
 // src/login-entry.tsx 与 vite.login.config.ts）。如果留在主包里，登录页
 // 为了显示一张卡片又要下载整份 2.3 MB 的主面板脚本 —— 那正是这次要拆掉的。
-const islandModules = import.meta.glob(['./islands/*.tsx', '!./islands/login-page.tsx'], {
+const islandModules = import.meta.glob([
+  './islands/*.tsx',
+  '!./islands/login-page.tsx',
+  '!./islands/add-provider-blocks.tsx',
+  '!./islands/add-workbuddy-provider.tsx',
+  '!./islands/add-provider-file.tsx',
+  '!./islands/add-provider-common.tsx',
+  '!./islands/add-provider-deepseek-block.tsx',
+], {
   eager: true,
 })
 void islandModules

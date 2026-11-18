@@ -76,6 +76,7 @@ pub(super) struct ProviderContext<'a> {
     pub body: &'a Value,
     pub native: Option<&'a crate::server::core::protocol::native::NativeRequest>,
     pub routing: super::route_context::RequestRouting,
+    pub error_policy: Arc<crate::server::config::error_policy::ErrorPolicySnapshot>,
     pub vision: Option<Arc<super::vision_compat::RequestVision>>,
     pub direct_provider: Option<String>,
     pub direct_model: Option<String>,
@@ -327,7 +328,8 @@ pub(super) async fn send_body<'a>(
     // 工具（智谱那套）也一并删掉，与透传契约矛盾。
     // 日后若某家确认支持某个原生工具，在这里（唯一闸门）按家/按类型开白即可。
     // 完整取舍见 `core::protocol::native_tool` 的模块头。
-    let mut body = if crate::server::core::custom_providers::is_custom_provider_id(provider_id) {
+    let mut body = if crate::server::core::custom_providers::is_custom_provider_id(provider_id)
+        || crate::server::core::providers::subscriptions::native_protocol(provider_id).is_some() {
         body
     } else {
         match crate::server::core::protocol::native_tool::downgrade(body.as_ref()) {
@@ -522,7 +524,7 @@ fn rewrite_model(body: &mut Cow<'_, Value>, requested: &str, wire: &str, provide
 /// 来源 —— 映射绑定生效时它就是发出去的档位（CatPaw 的归并已在 patch 内完成）。
 /// 其余分支（没绑 / 关闭思考 / Skip / 请求体不是对象）一律返回 None，
 /// 由调用方改问承载家的 `outbound_reasoning`。
-async fn apply_reasoning(
+pub(super) async fn apply_reasoning(
     body: &mut Cow<'_, Value>,
     provider_id: &str,
     requested: &str,

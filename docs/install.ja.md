@@ -122,7 +122,7 @@ journalctl -u agent2api -f
 >
 > 旧インストールでは、この機能を含む新サーバーパッケージを取得し、そのディレクトリで一度 `sudo bash install.sh --upgrade` を実行して更新コンポーネントを導入してください。カスタムサービスアカウントやパスは上書きしません。従来の手順で更新してください。`AGENT2API_SYSTEMD_UPDATE=0` でパネルの入口を無効化でき、`agent2api-updater.socket` を無効にすると更新コンポーネントも停止します。`AGENT2API_SELF_UPDATE` は引き続き Docker 専用です。
 >
-> 更新プログラムはローカル socket を使用し、ネットワークポートは公開しません。既定で公式インデックスから公開リポジトリを検証します。固定リポジトリや独立検証用プロキシは、管理者が `/etc/agent2api/updater.env` に `AGENT2API_UPDATER_REPO=owner/repo` または `HTTPS_PROXY` を設定できます。置換失敗時は旧ファイルに復元します。新版の起動を確認できない場合は `/opt/agent2api/.before-update-*` に復旧ファイルを残して失敗を通知し、データベースは自動で巻き戻しません。
+> 更新プログラムはローカル socket を使用し、ネットワークポートは公開しません。公開ポリシーと検証情報は公式サイトからのみ取得します。独立検証にプロキシが必要な場合は `/etc/agent2api/updater.env` に `HTTPS_PROXY` を設定できます。置換失敗時は旧ファイルに復元します。新版の起動を確認できない場合は `/opt/agent2api/.before-update-*` に復旧ファイルを残して失敗を通知し、データベースは自動で巻き戻しません。
 
 ### インストール後
 
@@ -197,7 +197,8 @@ services:
 | `AGENT2API_SELF_UPDATE` | コンテナ内の更新入口: 既定 `1`（有効。パネルから「ダウンロードして更新」可能）。`0` で無効化し手動更新のみに |
 | `AGENT2API_IMAGE_CACHE_MB` | 生成画像のダウンロード用メモリキャッシュ上限（MiB、既定 `128`、範囲 8〜4096）。不正 / 範囲外は既定値にフォールバック |
 | `AGENT2API_IMAGE_COMPRESS_CACHE_MB` | セッション画像の圧縮結果メモリキャッシュ上限（MiB、既定 `128`、範囲 8〜4096、扱いは同じ） |
-| `WORKBUDDY_UPDATE_REPO` + `WORKBUDDY_UPDATE_API_BASE` | 上級: 「更新確認 / 更新ダウンロード」を自前のソースに差し替えます。前者はリポジトリを変更（既定は上流の `aimod-cc/Agent2API`。fork 後は変更可）、後者は API ルートを変更（既定 `https://api.github.com`。GitHub と同じ形の release JSON を返す必要があります）。自前ソース設定後、ダウンロードの許可リストは**そのソース自身のホスト**のみを追加で許可します（スキームはソースに従う: `http://` を設定すれば平文ダウンロードも許可。ローカル演習 / 内部ミラー向け） |
+
+ソフトウェアとプラグインの更新確認・パッケージ取得は、[Agent2API 公式サイト](https://agent2api.dev/downloads) のみを使用します。独自の更新元や GitHub 高速化サービスは使用できず、GitHub トークンも不要です。公式サイトへの接続用プロキシは「更新設定」で選択できます。
 
 ソースからビルドする場合: 本リポジトリをクローンして `docker compose up -d --build`（イメージにはゲートウェイとパネルのみが入り、Rust ツールチェーンは含まれません）。
 
@@ -224,7 +225,7 @@ compose の場合はサービスに `mem_limit: 1g` を 1 行追加します（`
 
 ### コンテナ内アップデート（任意）
 
-パネルの「ソフトウェア更新」ページから、コンテナ内でそのまま「ダウンロードして更新」できます。公式 Release の `agent2api-server-linux-<arch>.tar.gz`（`.sha256` を検証）を取得 → 実行ファイルと `ui/` を差し替え → プロセスが正常終了し、`restart` ポリシーが同じコンテナを起動し直します。`AGENT2API_SELF_UPDATE` で制御します（Dockerfile では既定 `1`）。`0` にすると手動アップグレードのみになります。
+パネルの「ソフトウェア更新」ページから、コンテナ内で更新を適用できます。公式サイトから `agent2api-server-linux-<arch>.tar.gz` を取得し、そこで公開された SHA-256 を検証してから実行ファイルと `ui/` を置き換えます。その後プロセスが正常終了し、`restart` ポリシーが同じコンテナを起動し直します。`AGENT2API_SELF_UPDATE` で制御します（Dockerfile では既定 `1`）。`0` にすると手動アップグレードのみになります。
 
 同じ `agent2api-server-linux-<arch>.tar.gz` は [Linux サーバー](#linuxsystemd) のインストールパッケージでもあります: 中の `agent2api-server` と `ui/` がこの更新経路が名前で取得する項目で、さらに `install.sh` / `agent2api.service` / `agent2api.env.example` も同梱されています。更新経路が読むのは前の 2 つだけ（残りは読んで捨てます。`selfupdate::extract_bundle` を参照）なので、1 つの成果物が 2 つの用途を兼ねます —— コンテナ内では展開して差し替え、ベアメタルでは展開して `install.sh` を実行。
 

@@ -1,0 +1,61 @@
+.plugin-account-form { display: flex; min-width: 0; flex-direction: column; gap: 24px; }
+.plugin-account-form p { margin: 0; }
+.plugin-login-method-section, .plugin-login-browser, .plugin-login-fields, .plugin-login-field { display: flex; min-width: 0; flex-direction: column; gap: 8px; }
+.plugin-login-method-section > [data-slot='label'], .plugin-login-browser > [data-slot='label'] { color: var(--ui-text-2); font-size: 12px; font-weight: 500; }
+.plugin-login-methods { display: flex; width: 100%; flex-wrap: wrap; gap: 4px; padding: 4px; border-radius: 10px; }
+.plugin-login-methods [data-slot='segmented-item'] { display: flex; flex: 1 1 auto; justify-content: center; min-width: 0; height: auto; min-height: 36px; padding: 8px 12px; border-radius: 6px; font-size: 13px; line-height: 1.4; white-space: normal; text-align: center; overflow-wrap: anywhere; }
+.plugin-login-methods [data-slot='segmented-thumb'] { border-radius: 6px; }
+.plugin-login-methods [data-slot='segmented-item'][data-disabled] { opacity: .55; }
+.plugin-login-content { display: flex; min-width: 0; flex-direction: column; gap: 20px; }
+.plugin-login-fields { gap: 16px; }
+.plugin-login-fields:empty { display: none; }
+.plugin-login-field > [data-slot='label'], .plugin-login-field-label > [data-slot='label'] { display: inline-flex; align-items: center; gap: 8px; color: var(--ui-text-2); font-size: 13px; font-weight: 400; }
+.plugin-login-field-label { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.plugin-login-optional { color: var(--ui-muted-foreground); font-size: 11px; font-weight: 400; }
+.plugin-login-field [data-slot='input'], .plugin-login-select { width: 100%; min-width: 0; height: 36px; min-height: 36px; padding: 8px 12px; border-radius: 8px; font-size: 13px; }
+.plugin-login-textarea { min-height: 156px; padding: 12px; border-radius: 8px; font: 12px/1.75 var(--ui-font-mono); }
+.plugin-login-concealed { -webkit-text-security: disc; }
+.plugin-login-concealed::placeholder { -webkit-text-security: none; }
+.plugin-login-reveal { height: 24px; padding: 0 4px; color: var(--ui-muted-foreground); font-size: 11px; }
+.plugin-login-note { color: var(--ui-muted-foreground); font-size: 12px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.plugin-login-instructions { color: var(--ui-text-2); font-size: 13px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
+.plugin-login-browser-choice { align-self: flex-start; gap: 4px; padding: 4px; border-radius: 10px; }
+.plugin-login-browser-choice [data-slot='segmented-item'] { height: 32px; padding: 0 16px; border-radius: 6px; font-size: 13px; }
+.plugin-login-browser-choice [data-slot='segmented-thumb'] { border-radius: 6px; }
+.plugin-login-browser-choice [data-slot='segmented-item'][data-disabled] { opacity: .55; }
+.plugin-login-browser-fixed { display: flex; align-items: center; width: fit-content; min-height: 36px; padding: 8px 12px; border: 1px solid var(--ui-hairline); border-radius: 8px; background: var(--ui-surface-2); color: var(--ui-text-2); font-size: 13px; }
+.plugin-login-options { border-top: 1px solid var(--ui-hairline); border-bottom: 1px solid var(--ui-hairline); }
+.plugin-login-options-trigger { display: flex; align-items: center; justify-content: space-between; gap: 16px; width: 100%; min-height: 44px; padding: 12px 0; border-radius: 0; font-size: 12px; font-weight: 400; }
+.plugin-login-options-label, .plugin-login-options-summary { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.plugin-login-options-label { flex: none; }
+.plugin-login-options-summary { color: var(--ui-muted-foreground); font-size: 11px; white-space: normal; text-align: right; overflow-wrap: anywhere; }
+.plugin-login-options-summary svg { flex: none; }
+.plugin-login-options-trigger[data-panel-open] .plugin-login-options-summary svg { transform: rotate(180deg); }
+.plugin-login-options-content { display: flex; flex-direction: column; gap: 16px; padding: 4px 0 16px; }
+.plugin-login-security { display: flex; align-items: center; gap: 8px; color: var(--ui-muted-foreground); font-size: 11px; line-height: 1.6; }
+.plugin-login-security svg { flex: none; opacity: .8; }
+.plugin-login-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.plugin-login-actions > .acct-add-foot-buttons { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.plugin-account-form .plugin-login-actions button { min-height: 36px; }
+.plugin-login-enrollment { display: flex; min-width: 0; flex-direction: column; gap: 16px; }
+.plugin-login-enrollment > div:first-child { display: flex; flex-direction: column; gap: 8px; }
+.plugin-login-enrollment h3 { margin: 0; font-size: 14px; font-weight: 500; }
+.plugin-login-enrollment [data-slot='alert'][role='alert'] { color: var(--ui-text-2); }
+.plugin-login-enrollment .plugin-login-field { width: 100%; }
+.plugin-login-local-scope { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border: 1px solid var(--ui-hairline); border-radius: 8px; background: var(--ui-surface-2); color: var(--ui-text-2); font-size: 12px; }
+.plugin-login-diagnostic { position: relative; min-width: 0; margin-top: 12px; border-top: 1px solid var(--ui-hairline); }
+.plugin-login-diagnostic-copy-source { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
+.plugin-login-diagnostic-trigger { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 10px 0; font-size: 12px; }
+.plugin-login-diagnostic-trigger[data-panel-open] svg { transform: rotate(180deg); }
+.plugin-login-diagnostic-content { display: flex; min-width: 0; flex-direction: column; gap: 12px; }
+.plugin-login-diagnostic-meta { display: flex; flex-direction: column; gap: 6px; margin: 0; color: var(--ui-text-2); font-size: 12px; }
+.plugin-login-diagnostic-meta > div { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 8px; }
+.plugin-login-diagnostic-meta dt { color: var(--ui-muted-foreground); }
+.plugin-login-diagnostic-meta dd { margin: 0; overflow-wrap: anywhere; }
+.plugin-login-diagnostic-body { max-height: 240px; min-width: 0; margin: 0; overflow: auto; padding: 12px; border: 1px solid var(--ui-hairline); border-radius: 8px; background: var(--ui-surface-2); color: var(--ui-text-2); font: 11px/1.6 var(--ui-font-mono); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+@media (max-width: 720px) {
+  .plugin-account-form { gap: 20px; }
+  .plugin-login-methods [data-slot='segmented-item'] { flex: 1 1 calc(33% - 4px); padding: 8px; font-size: 12px; }
+  .plugin-login-options-trigger { gap: 8px; }
+  .plugin-login-options-summary { font-size: 11px; }
+}

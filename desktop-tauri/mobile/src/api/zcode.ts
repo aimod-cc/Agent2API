@@ -1,16 +1,16 @@
 import { apiCall } from './client'
 import { serverIdentity } from '../lib/servers'
+import { store } from '../state/store'
 import { t } from '../i18n'
+import { isZcodeCaptchaProvider, zcodeCaptchaAccepted, zcodeCaptchaBinding, zcodeCaptchaStatsMatch,
+  type ZcodeCaptchaConfig, type ZcodeCaptchaPoolStats, type ZcodeClaimPayload } from '../../../ui-shared/zcode-captcha-binding'
 
 export type { Entitlement, PreviewPlan, OwnedPlan, PreviewResult, ClaimResult } from '../../../ui-shared/zcode-plans'
 import type { PreviewResult, ClaimResult } from '../../../ui-shared/zcode-plans'
 
 export type CaptchaPhase = 'preparing' | 'verifying' | 'submitting'
-export type CaptchaPoolStats = {
-  ready?: number; target?: number; required?: boolean; needsTokens?: boolean
-  demandActive?: boolean; startPlanAccounts?: number; configError?: string; error?: string
-}
-type CaptchaConfig = { enabled?: boolean; region?: string; prefix?: string; sceneId?: string; skipModelRequest?: boolean }
+export type CaptchaPoolStats = ZcodeCaptchaPoolStats
+type CaptchaConfig = ZcodeCaptchaConfig
 type CaptchaApi = {
   solve<T>(config: CaptchaConfig, request: (param: string) => Promise<{ captchaResult: boolean; bizResult: boolean; result: T }>, signal?: AbortSignal,
     options?: { protocol: 'v3'; onPhase?: (phase: CaptchaPhase) => void }): Promise<{ result: T }>
@@ -54,34 +54,85 @@ export function previewPlans(id: string): Promise<PreviewResult> {
 
 export async function claimPlan(id: string, planId: string, signal?: AbortSignal, onPhase?: (phase: CaptchaPhase) => void): Promise<ClaimResult> {
   const identity = serverIdentity()
+  const controller = new AbortController()
+  const original = store.get().session?.accounts?.accounts?.find(account => account.id === id)
+  let provider = original?.provider
+  let submitted = false
+  const cancel = () => controller.abort()
+  const guard = () => {
+    if (signal?.aborted || serverIdentity() !== identity) { cancel(); return }
+    const accounts = store.get().session?.accounts?.accounts
+    if (!Array.isArray(accounts)) { cancel(); return }
+    const account = accounts.find(account => account.id === id)
+    if (!account || account.available === false || !isZcodeCaptchaProvider(account.provider)
+      || provider !== undefined && provider !== account.provider) cancel()
+    else provider = account.provider
+  }
   const requireCurrent = () => {
-    if (signal?.aborted || serverIdentity() !== identity) throw new DOMException('请求已取消', 'AbortError')
+    guard()
+    if (controller.signal.aborted) throw new DOMException('请求已取消', 'AbortError')
   }
-  requireCurrent()
-  onPhase?.('preparing')
-  const config = await apiCall<CaptchaConfig>(`${accountPath(id)}/zcode-claim/captcha-config`, { method: 'POST', signal })
-  requireCurrent()
-  if (!config || typeof config.enabled !== 'boolean') throw new Error(t('风控验证配置不完整，请稍后重试'))
-  const claim = (captchaVerifyParam: string) => {
+  const reportPhase = (phase: CaptchaPhase) => { requireCurrent(); onPhase?.(phase) }
+  signal?.addEventListener('abort', cancel, { once: true })
+  window.addEventListener('pagehide', cancel)
+  const unsubscribe = store.subscribe(guard)
+  try {
     requireCurrent()
-    onPhase?.('submitting')
-    return apiCall<ClaimResult>(`${accountPath(id)}/zcode-claim`, {
-      method: 'POST', body: { planId, captchaVerifyParam, captchaRegion: config.region || '' },
-    })
+    if (!id.trim() || !planId.trim()) throw new Error('claim_target_missing')
+    reportPhase('preparing')
+    const config = Object.freeze({ ...await apiCall<CaptchaConfig>(`${accountPath(id)}/zcode-claim/captcha-config`, {
+      method: 'POST', signal: controller.signal,
+    }) })
+    requireCurrent()
+    const binding = zcodeCaptchaBinding(config, id)
+    if (binding && provider !== undefined && provider !== binding.provider) throw new Error('claim_provider_changed')
+    if (binding) provider = binding.provider
+    const claim = async (param: string) => {
+      requireCurrent()
+      if (submitted || config.enabled && (typeof param !== 'string' || !param.trim())) throw new Error('claim_submission_invalid')
+      reportPhase('submitting')
+      submitted = true
+      const fields = { planId, captchaVerifyParam: param, captchaRegion: config.region || '' }
+      const body: ZcodeClaimPayload = binding ? { ...binding, ...fields } : fields
+      const result = await apiCall<ClaimResult>(`${accountPath(id)}/zcode-claim`, {
+        method: 'POST', body, quiet: true, signal: controller.signal,
+      })
+      requireCurrent()
+      if (!result || typeof result.ok !== 'boolean' || result.planId && result.planId !== planId) throw new Error('claim_result_unconfirmed')
+      return result
+    }
+    if (!config.enabled) return await claim('')
+    const captcha = await loadCaptcha()
+    requireCurrent()
+    const token = await captcha.requestToken(config, controller.signal, { onPhase: reportPhase })
+    requireCurrent()
+    return await claim(token.param)
+  } catch (error) {
+    requireCurrent()
+    if (['AbortError', 'CaptchaCancelledError'].includes((error as Error)?.name)) throw error
+    throw new Error(submitted ? t('领取提交结果未确认，请查看签到记录，勿重复领取')
+      : t('领取验证未完成，请刷新套餐配置后重试'))
+  } finally {
+    signal?.removeEventListener('abort', cancel)
+    window.removeEventListener('pagehide', cancel)
+    unsubscribe()
   }
-  if (!config.enabled) return claim('')
-  const captcha = await loadCaptcha()
-  requireCurrent()
-  const response = await captcha.solve({ ...config, region: config.region || 'cn' }, async param => {
-    const result = await claim(param)
-    return { captchaResult: result.failure !== 'captcha', bizResult: Boolean(result.ok), result }
-  }, signal, { protocol: 'v3', onPhase })
-  requireCurrent()
-  return response.result
 }
 
-export function captchaPoolStats(signal?: AbortSignal): Promise<CaptchaPoolStats> {
-  return apiCall('/api/zcode/captcha', { signal })
+export async function captchaPoolStats(accountId: string, signal?: AbortSignal, provider?: string): Promise<CaptchaPoolStats> {
+  if (!accountId || provider !== undefined && !isZcodeCaptchaProvider(provider)) throw new Error(t('验证码状态与当前账号不匹配，请刷新后重试'))
+  const identity = serverIdentity()
+  const query = new URLSearchParams({ accountId })
+  if (provider) query.set('provider', provider)
+  try {
+    const value = await apiCall<unknown>(`/api/zcode/captcha?${query}`, { signal })
+    if (signal?.aborted || serverIdentity() !== identity) throw new DOMException('请求已取消', 'AbortError')
+    if (!zcodeCaptchaStatsMatch(value, accountId, provider, provider !== undefined)) throw new Error('invalid_captcha_scope')
+    return value
+  } catch (error) {
+    if (signal?.aborted || serverIdentity() !== identity || (error as Error)?.name === 'AbortError') throw new DOMException('请求已取消', 'AbortError')
+    throw new Error(t('验证码状态读取失败，请刷新后重试'))
+  }
 }
 
 export async function verifyPlanChannel(id: string, signal?: AbortSignal, onPhase?: (phase: CaptchaPhase) => void): Promise<boolean> {
@@ -89,23 +140,48 @@ export async function verifyPlanChannel(id: string, signal?: AbortSignal, onPhas
   const requireCurrent = () => {
     if (signal?.aborted || serverIdentity() !== identity) throw new DOMException('请求已取消', 'AbortError')
   }
-  requireCurrent()
-  onPhase?.('preparing')
-  const config = await apiCall<CaptchaConfig>(`${accountPath(id)}/zcode-claim/captcha-config`, { method: 'POST', signal })
-  requireCurrent()
-  const stats = await captchaPoolStats(signal)
-  requireCurrent()
-  if (stats.required === false) return false
-  const captcha = await loadCaptcha()
-  requireCurrent()
-  const token = await captcha.requestToken(config, signal, { onPhase })
-  requireCurrent()
-  onPhase?.('submitting')
-  const result = await apiCall<{ accepted?: number }>('/api/zcode/captcha', {
-    method: 'POST', body: { tokens: [{ param: token.param, region: config.region || '' }] },
-  })
-  if (result.accepted !== 1) throw new Error(t('验证码令牌未全部入池'))
-  return true
+  const reportPhase = (phase: CaptchaPhase) => { requireCurrent(); onPhase?.(phase) }
+  let submitting = false
+  let accepted = false
+  try {
+    requireCurrent()
+    if (!id.trim()) throw new Error('captcha_account_missing')
+    reportPhase('preparing')
+    const config = Object.freeze({ ...await apiCall<CaptchaConfig>(`${accountPath(id)}/zcode-claim/captcha-config`, { method: 'POST', signal }) })
+    requireCurrent()
+    const binding = zcodeCaptchaBinding(config, id)
+    const stats = await captchaPoolStats(id, signal, binding?.provider)
+    requireCurrent()
+    if (stats.error || stats.configError) throw new Error('captcha_status_unavailable')
+    if (stats.required === false) return false
+    if (!config.enabled) throw new Error('captcha_config_unavailable')
+    const captcha = await loadCaptcha()
+    requireCurrent()
+    const token = await captcha.requestToken(config, signal, { onPhase: reportPhase })
+    requireCurrent()
+    if (typeof token?.param !== 'string' || !token.param.trim()) throw new Error('invalid_captcha_token')
+    reportPhase('submitting')
+    submitting = true
+    const result = await apiCall<unknown>('/api/zcode/captcha', {
+      method: 'POST', signal, quiet: true,
+      body: binding ? { ...binding, tokens: [{ param: token.param }] }
+        : { tokens: [{ param: token.param, region: config.region }] },
+    })
+    requireCurrent()
+    if (!zcodeCaptchaAccepted(result, binding)) throw new Error('captcha_submit_unconfirmed')
+    accepted = true
+    // 提交回执不含库存；成功后只重新读取原账号，绝不重发一次性票据。
+    const refreshed = await captchaPoolStats(id, signal, binding?.provider)
+    requireCurrent()
+    if (refreshed.error || refreshed.configError) throw new Error('captcha_status_unavailable')
+    return true
+  } catch (error) {
+    requireCurrent()
+    if ((error as Error)?.name === 'AbortError' || (error as Error)?.name === 'CaptchaCancelledError') throw error
+    throw new Error(accepted ? t('验证码已提交，但状态刷新失败，请手动刷新')
+      : submitting ? t('验证码提交结果未确认，请刷新状态后重新验证；不会自动重发')
+        : t('验证码验证未完成，请刷新配置后重试'))
+  }
 }
 
 export function cancelPlanCaptcha(): void {

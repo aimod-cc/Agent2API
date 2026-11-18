@@ -10,6 +10,7 @@ import {
   DialogTitle,
   Input,
   Label,
+  SegmentedControl,
   Select,
   SelectContent,
   SelectItem,
@@ -22,30 +23,12 @@ import {
   type ProxyPoolItem,
 } from './proxies-state'
 import { t } from '../i18n'
-// 赞助位外链：与文档页/更新日志同一条路（data-external 委托 + 系统浏览器打开）。
-// 链接本体在 sponsor.ts（唯一定义点），这里只取用。
-import { handleExternalClick } from './update-shared'
-import { PROXYLANE_URL } from './sponsor'
+import { openExternal } from './update-shared'
+import { ProxySponsorCards } from '../../../ui-shared/proxy-sponsor-cards'
 import { ProxyBatchEditor, type ProxyBatchHandle } from '../../../ui-shared/proxy-batch-editor'
 import { proxyHost, type ProxyImportDraft, type ProxyImportReport } from '../../../ui-shared/proxy-import'
 
 /* ─── 新增 / 编辑弹窗 ───────────────────────── */
-
-/**
- * 赞助位里的行内链接：一处样式、一条链接（同一行的品牌名与「去获取」都用它）。
- * 「链接只裹需要点的字」是全站赞助位的口径 —— 句子按片段拼，翻译时片段可以
- * 各自贴合目标语言的语序。
- */
-function SponsorLink({ children }: { children: React.ReactNode }) {
-  return (
-    <a
-      className='font-semibold text-primary-fg no-underline hover:underline'
-      href={PROXYLANE_URL}
-      data-external={PROXYLANE_URL}
-      onClick={handleExternalClick}
-    >{children}</a>
-  )
-}
 
 export function ProxyModal({
   item,
@@ -63,6 +46,9 @@ export function ProxyModal({
   const [password, setPassword] = React.useState(item?.password || '')
   const [enabled, setEnabled] = React.useState(item ? item.enabled : true)
   const [nonDirect, setNonDirect] = React.useState(item?.nonDirect === true)
+  const [mode, setMode] = React.useState<'single' | 'batch'>('single')
+  const body = React.useRef<HTMLDivElement>(null)
+  const [batchFooterHost, setBatchFooterHost] = React.useState<HTMLDivElement | null>(null)
   const [batchBusy, setBatchBusy] = React.useState(false)
   const batch = React.useRef<ProxyBatchHandle>(null)
   const [useAuth, setUseAuth] = React.useState(Boolean(item?.username || item?.password))
@@ -72,6 +58,7 @@ export function ProxyModal({
   const busy = saving || testing || batchBusy
 
   React.useEffect(() => { setStatus(null) }, [name, protocol, host, port, username, password, useAuth, nonDirect])
+  React.useEffect(() => { if (body.current) body.current.scrollTop = 0 }, [mode])
 
   async function saveBatch(items: ProxyImportDraft[]): Promise<ProxyImportReport> {
     const data = await saveItem(null, { items })
@@ -183,13 +170,16 @@ export function ProxyModal({
       if (busy) { details.cancel(); return }
       onClose()
     }}>
-      <DialogContent className={editing ? 'max-w-[560px]' : 'w-[min(1120px,calc(100vw-48px))]'}>
-        <DialogHeader>
+      <DialogContent className={editing ? 'max-w-[560px]' : 'w-[min(760px,calc(100vw-48px))]'}>
+        <DialogHeader className='shrink-0'>
           <DialogTitle>{editing ? t('编辑代理') : t('新增代理')}</DialogTitle>
         </DialogHeader>
-        <DialogBody className={editing ? 'flex flex-col gap-3.5' : 'grid gap-6 lg:grid-cols-[minmax(300px,0.8fr)_minmax(0,1.2fr)]'}>
-          <div className='flex min-w-0 flex-col gap-3.5' inert={busy}>
-          {!editing ? <h3 className='text-sm font-semibold'>{t('单个添加')}</h3> : null}
+        {!editing ? <div className='shrink-0 border-b border-hairline px-5 py-3'>
+          <SegmentedControl value={mode} onValueChange={setMode} disabled={busy} aria-label={t('新增方式')}
+            options={[{ value: 'single', label: t('单个添加') }, { value: 'batch', label: t('批量添加') }]} />
+        </div> : null}
+        <DialogBody ref={body} className='min-h-0 gap-3.5'>
+          <div className={mode === 'single' ? 'flex min-w-0 flex-col gap-3.5' : 'hidden'} inert={busy || mode !== 'single'}>
           <div className='flex flex-col gap-1.5'>
             <Label htmlFor='proxy-name'>{t('名称')}</Label>
             <Input id='proxy-name' maxLength={60} autoComplete='off' spellCheck={false}
@@ -252,37 +242,26 @@ export function ProxyModal({
             </span>
           </div>
 
-          {/* 赞助位：一行提示（另两处在 README 顶部与「文档」页的网络代理示例）。
-              品牌名与句尾的「去获取」都是行内链接（SponsorLink），翻译时片段
-              可以各自贴合目标语言的语序 */}
-          <p className='text-xs leading-[1.65] text-subtle'>
-            {t('需要干净的出口？')}
-            <SponsorLink>ProxyLane</SponsorLink>
-            {t(' AI 账号专用静态住宅 IP：Scamalytics 低欺诈评分，不限流量，首单 75 折（AGENT2API25）')}
-            {' '}
-            <SponsorLink>{t('去获取')}</SponsorLink>
-          </p>
-
-          <div className='min-h-[18px] text-xs text-subtle' role='status'>{status}</div>
-          {!editing ? <div className='mt-auto flex gap-2'>
-            <Button variant='outline' disabled={busy} onClick={() => void testDraft()}>{testing ? t('测试中…') : t('测试出口')}</Button>
-            <Button disabled={busy} onClick={() => void save()}>{saving ? t('保存中…') : t('添加单个')}</Button>
-          </div> : null}
+          {status ? <div className='text-xs text-subtle' role='status'>{status}</div> : null}
           </div>
-          {!editing ? <div className='min-w-0 border-t border-border pt-5 lg:border-t-0 lg:border-l lg:pt-0 lg:pl-6'>
+          {!editing ? <div className={mode === 'batch' ? 'min-w-0' : 'hidden'} inert={mode !== 'batch'}>
             <ProxyBatchEditor ref={batch} t={t} locked={saving || testing} onBusyChange={setBatchBusy}
+              footerHost={batchFooterHost} active={mode === 'batch'}
               save={saveBatch} test={testBatch} onNotice={(message, failed) => toast(message, failed ? 'err' : 'ok')} />
           </div> : null}
+          {!editing ? <ProxySponsorCards compact t={t} openExternal={openExternal} className='border-t border-hairline pt-3' /> : null}
         </DialogBody>
-        <DialogFooter>
-          {editing ? <Button variant='outline' disabled={busy} onClick={() => void testDraft()}>
-            {testing ? t('测试中…') : t('测试出口')}
-          </Button> : null}
-          <div className='mr-auto' />
-          <Button variant='outline' disabled={busy} onClick={onClose}>{editing ? t('取消') : t('关闭')}</Button>
-          {editing ? <Button variant='default' disabled={busy} onClick={() => void save()}>
-            {saving ? t('保存中…') : t('保存')}
-          </Button> : null}
+        <DialogFooter className='shrink-0 flex-wrap'>
+          <Button variant='outline' className='mr-auto' disabled={busy} onClick={onClose}>{editing ? t('取消') : t('关闭')}</Button>
+          {mode === 'single' ? <>
+            <Button variant='outline' disabled={busy} onClick={() => void testDraft()}>
+              {testing ? t('测试中…') : t('测试出口')}
+            </Button>
+            <Button disabled={busy} onClick={() => void save()}>
+              {saving ? t('保存中…') : editing ? t('保存') : t('添加单个')}
+            </Button>
+          </> : null}
+          {!editing ? <div ref={setBatchFooterHost} className={mode === 'batch' ? 'min-w-0' : 'hidden'} /> : null}
         </DialogFooter>
       </DialogContent>
     </Dialog>

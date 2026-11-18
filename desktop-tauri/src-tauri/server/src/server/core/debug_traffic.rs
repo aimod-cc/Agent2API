@@ -21,9 +21,8 @@
 //! 「文件 → 表」的改造里一字未变，只是「单独一个文件」变成了「单独一张表」。
 //!
 //! ── 脱敏（**硬要求**，不可关闭）─────────────────────────────
-//! 请求头里的 `authorization` / `cookie` / `x-api-key` 等凭据类字段一律替换成
-//! `[redacted]`（见 [`redact_headers`]）。这不是可选项：报文是明文落盘的，
-//! 不脱敏等于把各家账号的 token 抄在磁盘上。响应头里的 `set-cookie` 同理。
+//! 请求头、地址查询参数及 JSON 正文中的凭据字段一律替换成 `[redacted]`。
+//! 这不是可选项：报文是明文落盘的。响应头和可解析响应正文遵循同一规则。
 //!
 //! ── 留存控制 ──────────────────────────────────────────────
 //! 请求体与响应体完整保存，不按单条大小截断；仅超过 [`MAX_ENTRIES`] 时淘汰最旧记录。
@@ -63,6 +62,7 @@ use crate::server::db::Db;
 use crate::server::logging;
 
 mod sql;
+mod redact;
 
 /// 表里保留的最大条数。超过后**精确删到上限**（每次只删超出那几条）。
 ///
@@ -106,6 +106,11 @@ const SENSITIVE_HEADERS: &[&str] = &[
     "x-qoder-token",
     "x-catpaw-cookie",
     "x-autoclaw-token",
+    "sgcookie",
+    "x-authorization",
+    "x-security-token",
+    "x-acs-security-token",
+    "dpop",
 ];
 
 /// 脱敏占位符（与 OmniProxy 同字面量，便于对照两边的日志）
@@ -179,7 +184,8 @@ pub fn count() -> usize {
 }
 
 /// 落一条完整报文；同 id 覆盖，失败只打日志，不影响转发。
-pub fn record(entry: TrafficEntry) {
+pub fn record(mut entry: TrafficEntry) {
+    redact::entry(&mut entry);
     super::blocking::in_place(|| record_sync(entry));
 }
 
@@ -229,7 +235,7 @@ pub struct TrafficEntry {
     pub id: String,
     /// 记录时刻（毫秒 Unix 时间戳）
     pub ts: i64,
-    /// 上游 URL（含路径；查询串原样保留）
+    /// 上游 URL（凭据查询参数与密钥路径已脱敏）
     #[serde(default)]
     pub url: String,
     /// 实际承载的 provider id
@@ -255,6 +261,8 @@ pub struct TrafficEntry {
     pub truncated: bool,
 }
 
+pub(crate) fn redact_url(raw: &str) -> String { redact::url(raw) }
+
 /// 头集合脱敏：凭据类字段换成 [`REDACTED`]，其余原样。
 ///
 /// 收 `Vec<(String, String)>`（适配器给出的形态）与 `HeaderMap`（reqwest 响应）
@@ -264,12 +272,14 @@ pub fn redact_headers<'a>(headers: impl IntoIterator<Item = (&'a str, &'a str)>)
     let mut object = serde_json::Map::new();
     for (name, value) in headers {
         let lower = name.to_ascii_lowercase();
-        let shown = if SENSITIVE_HEADERS.contains(&lower.as_str()) {
-            REDACTED
+        let shown = if SENSITIVE_HEADERS.contains(&lower.as_str()) || redact::header_sensitive(name) {
+            REDACTED.to_string()
+        } else if matches!(lower.as_str(), "location" | "referer") {
+            redact::url(value)
         } else {
-            value
+            value.to_string()
         };
-        object.insert(lower, Value::String(shown.to_string()));
+        object.insert(lower, Value::String(shown));
     }
     Value::Object(object)
 }
@@ -278,6 +288,8 @@ pub fn redact_headers<'a>(headers: impl IntoIterator<Item = (&'a str, &'a str)>)
 ///
 /// 由 `api::debug_api` 组装（本模块只给报文那半）。
 pub fn detail_payload(entry: &TrafficEntry) -> Value {
+    let mut entry = entry.clone();
+    redact::entry(&mut entry);
     json!({
         "id": entry.id,
         "ts": entry.ts,
@@ -374,7 +386,10 @@ impl TrafficCapture {
     }
 
     pub fn push(&self, chunk: &[u8]) {
-        self.lock().body.extend_from_slice(chunk);
+        let mut guard = self.lock();
+        if redact::hide_response(&guard.entry) {
+            if guard.body.is_empty() && !chunk.is_empty() { guard.body.extend_from_slice(REDACTED.as_bytes()); }
+        } else { guard.body.extend_from_slice(chunk); }
     }
 
     #[cfg(test)]
@@ -435,10 +450,10 @@ fn blank_entry(
     TrafficEntry {
         id: id.to_string(),
         ts: logging::now_ms(),
-        url: url.to_string(),
+        url: redact::url(url),
         provider: provider.to_string(),
         request_headers: redact_headers(pairs),
-        request_body: body.clone(),
+        request_body: redact::value(body),
         status: None,
         response_headers: None,
         response_body: None,
@@ -482,7 +497,9 @@ pub(crate) fn import_legacy(
     let mut imported = 0usize;
     let mut skipped = 0usize;
     for entry in entries {
-        if sql::insert_entry_ignore(&tx, entry)? {
+        let mut entry = entry.clone();
+        redact::entry(&mut entry);
+        if sql::insert_entry_ignore(&tx, &entry)? {
             imported += 1;
         } else {
             skipped += 1;

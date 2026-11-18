@@ -25,6 +25,15 @@ export type ServerEntry = {
 
 const SERVERS_KEY = 'agent2api.servers'
 const ACTIVE_KEY = 'agent2api.activeServer'
+let managementGeneration = 0
+
+export function managementSessionGeneration(): number { return managementGeneration }
+
+export function notifyManagementSessionChanged(id = activeServerId()): void {
+  if (typeof window === 'undefined' || id !== activeServerId()) return
+  managementGeneration++
+  window.dispatchEvent(new Event('wb:management-session-changed'))
+}
 
 /** 是否跑在打包的原生壳里（Capacitor 注入的全局标记） */
 export function isPackaged(): boolean {
@@ -180,6 +189,7 @@ export function saveServer(input: { id?: string; name?: string; base: string }):
     existing.base = base
     existing.name = (input.name || '').trim()
     writeServers(list)
+    if (existing.id === activeServerId()) notifyManagementSessionChanged()
     return existing
   }
   const entry: ServerEntry = {
@@ -203,15 +213,18 @@ export function removeServer(id: string): void {
     } catch {
       /* 忽略 */
     }
+    notifyManagementSessionChanged()
   }
 }
 
 export function setActiveServer(id: string): void {
+  const previous = serverIdentity()
   try {
     localStorage.setItem(ACTIVE_KEY, id)
   } catch {
     /* 忽略 */
   }
+  if (serverIdentity() !== previous) notifyManagementSessionChanged()
 }
 
 /* ── 按服务器隔离的凭证 ───────────────────────────────────── */
@@ -241,12 +254,14 @@ export function readServerKey(id: string): string {
 }
 
 export function storeServerKey(id: string, value: string): void {
+  const changed = readServerKey(id) !== value
   try {
     if (value) localStorage.setItem(KEY_STORAGE(id), value)
     else localStorage.removeItem(KEY_STORAGE(id))
   } catch {
     /* 隐私模式：只留在内存 */
   }
+  if (changed) notifyManagementSessionChanged(id)
 }
 
 export function readServerAuth(id: string): PanelAuth | null {
@@ -275,6 +290,7 @@ export function storeServerAuth(
   } catch {
     /* 同上 */
   }
+  notifyManagementSessionChanged(id)
 }
 
 export function clearServerAuth(id: string): void {
@@ -283,4 +299,5 @@ export function clearServerAuth(id: string): void {
   } catch {
     /* 无害 */
   }
+  notifyManagementSessionChanged(id)
 }

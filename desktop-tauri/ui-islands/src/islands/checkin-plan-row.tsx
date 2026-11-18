@@ -74,7 +74,7 @@ export function PlanRow({ row, disabled, onReport }: {
       setResults(current => Object.fromEntries(Object.entries(current)
         .filter(([, receipt]) => receipt.ok || receipt.failure === 'already_claimed')))
       setError(planQueryErrors(result).join('；'))
-      void loadCenter()
+      void loadCenter(true)
     } catch (cause) {
       if (mounted.current) { setPreview(null); setError(errorMessage(cause)) }
     } finally {
@@ -113,7 +113,7 @@ export function PlanRow({ row, disabled, onReport }: {
           return false
         }
         if (taken) {
-          void loadCenter()
+          void loadCenter(true)
           void shared().wbApp?.refresh?.()
         } else {
           setError(result.message || result.failureLabel || t('活动领取未成功，请重新查询后再试'))

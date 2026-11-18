@@ -18,17 +18,27 @@ pub async fn startup() -> Response {
     ok_json(plugin_host::startup::snapshot())
 }
 
-pub async fn list() -> Response {
-    let mut result = plugin_host::management_snapshot();
+pub async fn list(
+    axum::extract::State(state): axum::extract::State<crate::server::ServerState>,
+) -> Response {
+    let packs = plugin_host::list_packs();
+    let states = crate::server::core::task_state::read_all().unwrap_or_default();
+    let catalog = plugin_host::catalog::snapshot_with_states(&states);
+    let mut result = plugin_host::management_snapshot_with_packs(&packs);
     result["target"] = json!(plugin_host::host_target());
     result["protocol"] = json!(agent2api_provider_protocol::PROTOCOL_VERSION);
     result["maxPackBytes"] = json!(MAX_PACK_BYTES);
+    result["supportsPackPreview"] = json!(true);
     result["pluginsDir"] = json!(plugin_host::plugins_dir_display());
-    result["catalog"] = plugin_host::catalog::snapshot();
-    result["updates"] = plugin_host::catalog::updates()["updates"].clone();
-    result["operations"] = plugin_host::operations::snapshot()["operations"].clone();
+    result["updates"] = plugin_host::catalog::updates_with_packs(&packs, &catalog)["updates"].clone();
+    result["catalog"] = catalog;
+    result["operations"] = plugin_host::operations::snapshot_with_states(&states)["operations"].clone();
     result["scripts"] = plugin_host::script::snapshot();
     result["startup"] = plugin_host::startup::snapshot();
+    result["capacity"] = crate::server::core::runtime_capacity::snapshot();
+    let accounts = crate::server::core::blocking::in_place(|| state.store().plugin_account_summary());
+    result["accountCounts"] = accounts["counts"].clone();
+    result["hiddenAccounts"] = accounts["hidden"].clone();
     ok_json(result)
 }
 
@@ -127,7 +137,21 @@ pub async fn progress() -> Response {
     ok_json(result)
 }
 
-pub async fn install(body: Bytes) -> Response {
+#[derive(serde::Deserialize, Default)]
+pub struct InstallQuery {
+    #[serde(default)]
+    background: bool,
+    #[serde(default)]
+    preview: bool,
+    #[serde(default)]
+    expected_id: Option<String>,
+    #[serde(default)]
+    expected_version: Option<String>,
+    #[serde(default)]
+    expected_sha256: Option<String>,
+}
+
+pub async fn install(axum::extract::Query(query): axum::extract::Query<InstallQuery>, body: Bytes) -> Response {
     let bytes = match pack_bytes(&body) {
         Ok(bytes) => bytes,
         Err(error) => return management_error(400, error),
@@ -135,8 +159,10 @@ pub async fn install(body: Bytes) -> Response {
     if bytes.is_empty() || bytes.len() > MAX_PACK_BYTES {
         return management_error(400, pack_size_error());
     }
+    let expected_id = query.expected_id.clone();
+    let expected_version = query.expected_version.clone();
     let prepared = match tokio::task::spawn_blocking(move || {
-        plugin_host::prepare_pack(&bytes, None, None, false)
+        plugin_host::prepare_pack(&bytes, expected_id.as_deref(), expected_version.as_deref(), false)
     })
     .await
     {
@@ -144,6 +170,19 @@ pub async fn install(body: Bytes) -> Response {
         Ok(Err(error)) => return management_error(400, error),
         Err(error) => return management_error(500, format!("插件校验任务中断：{error}")),
     };
+    let preview = prepared.preview();
+    if query.expected_sha256.as_deref().is_some_and(|expected| preview["sha256"].as_str() != Some(expected)) {
+        return management_error(400, "插件包与预览时的内容不同，请重新选择文件");
+    }
+    if query.preview {
+        return ok_json(json!({ "preview": preview }));
+    }
+    if query.background {
+        return match plugin_host::operations::start_prepared(prepared) {
+            Ok(operation) => ok_json(json!({ "operation": operation })),
+            Err(error) => management_error(400, format!("安装失败：{error}")),
+        };
+    }
     match plugin_host::operations::install_prepared(prepared).await {
         Ok(result) => ok_json(result),
         Err(error) => management_error(400, format!("安装失败：{error}")),

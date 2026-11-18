@@ -33,6 +33,8 @@ pub async fn title(State(state): State<ServerState>, Path(id): Path<String>, hea
 }
 
 async fn summarize(state: &ServerState, id: &str, access: ModelAccess) -> Result<Value, errors::GatewayError> {
+    let summary = assistant_sessions::get_summary(id).ok_or_else(|| errors::GatewayError::with_status(404, "会话不存在"))?;
+    if summary["titleGenerated"] == true { return Ok(summary); }
     let session = assistant_sessions::get(id).ok_or_else(|| errors::GatewayError::with_status(404, "会话不存在"))?;
     if session["titleGenerated"] == true {
         let mut session = session;
@@ -63,7 +65,7 @@ async fn summarize(state: &ServerState, id: &str, access: ModelAccess) -> Result
             return Err(error);
         }
     };
-    let telemetry = Arc::new(RequestTelemetry::with_id());
+    let telemetry = Arc::new(RequestTelemetry::with_model_key(access.key_source));
     let request_id = telemetry.id();
     super::request_prepare::record_started(state.request_stats(), &request_id, started, &requested, &model, "", &access.source, true).await;
     if let Some(token) = crate::server::core::upstream::cancellation::register(&request_id) {

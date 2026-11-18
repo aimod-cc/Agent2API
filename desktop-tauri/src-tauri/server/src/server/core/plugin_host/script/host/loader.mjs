@@ -4,7 +4,7 @@ import { client } from "./accounts.mjs"
 import { metadata } from "./models.mjs"
 import { modelRecords, normalizeModels } from "./model-records.mjs"
 import { send } from "./wire.mjs"
-import { rememberProviderName } from "./local-provider.mjs"
+import { executionMetadata } from "./local-provider.mjs"
 import { pluginEnvironment, packageSettings } from "./environment.mjs"
 import { readManifest, importProvider, bounded } from "./entries.mjs"
 import { allocateProvider } from "./identity.mjs"
@@ -19,6 +19,7 @@ const displayName = value => typeof value === "string" && value.trim() && Buffer
 
 export function packageList() {
   return packages.map(record => ({ id: record.id, providers: record.providers, aliases: record.aliases,
+    execution: Object.fromEntries(record.items.map(provider => [provider.id, executionMetadata(provider)])),
     icon: record.icon, providerIcons: record.providerIcons, error: record.error, settings: packageSettings(record) }))
 }
 
@@ -28,13 +29,13 @@ export async function load(entries, options = {}) {
   const progress = (id, phase, error = null) => send({ id: 0, event: "startup", params: { package: id, phase, error } })
   const prepared = await Promise.all((entries ?? []).map(async entry => {
     const record = { id: entry.id, providers: [], aliases: {}, items: [], icon: null, providerIcons: {}, error: null,
-      providerOptions: entry.providerOptions ?? {}, options: entry.options ?? {}, optionsExample: {} }
+      providerOptions: entry.providerOptions ?? {}, options: entry.options ?? {}, optionsExample: {}, catalogAccess: { at: 0 } }
     packages.push(record)
     record.environment = pluginEnvironment(record)
     const controller = new AbortController()
     record.controller = controller
     const context = { signal: controller.signal, provider: "", account: "", package: entry.id, action: "init",
-      resources: new Set(), sockets: new Set(), localCleanups: new Set() }
+      resources: new Set(), sockets: new Set(), localCleanups: new Set(), catalogAccess: record.catalogAccess }
     await progress(entry.id, "loading")
     try {
       const result = await bounded(() => scope.run(context, async () => {
@@ -59,6 +60,7 @@ export async function load(entries, options = {}) {
         }
         return { manifest, configuration, loaded, headerHooks }
       }), 20_000, "Provider plugin initialization")
+      await progress(entry.id, "waiting")
       return { entry, record, context, result }
     } catch (error) {
       controller.abort()
@@ -70,6 +72,7 @@ export async function load(entries, options = {}) {
   }))
   for (const { entry, record, context, result } of prepared) {
     if (!result) continue
+    await progress(entry.id, "registering")
     try {
       const { manifest, configuration, loaded, headerHooks } = result
       for (const hooks of loaded) {
@@ -91,12 +94,12 @@ export async function load(entries, options = {}) {
           name: displayName(config.name) || displayName(declaration.name)
             || (loaded.length === 1 ? displayName(entry.displayName) || displayName(manifest.magpie?.name) : "") || originalID,
           models: {}, remote: false, refreshedAt: 0, catalogs: new Map(),
+          configuredModels: configuration.provider[originalID]?.models,
           catalogRevision: JSON.stringify(record.providerOptions?.[id] ?? record.providerOptions?.[originalID] ?? {}) }
         if (id !== originalID) provider.name += " · Magpie"
         provider.models = normalizeModels(provider, config.models)
         provider.seedModels = provider.models
         provider.records = modelRecords(provider.models)
-        rememberProviderName(provider)
         providers.set(id, provider)
         record.items.push(provider)
         const artwork = icon(hooks.auth.icon)
@@ -112,6 +115,22 @@ export async function load(entries, options = {}) {
     await progress(entry.id, record.error ? "failed" : "registering", record.error)
   }
   return [...providers.values()].map(metadata)
+}
+
+export async function reloadCatalog() {
+  await loadCatalog()
+  return [...providers.values()].map(provider => {
+    const base = catalogProvider(provider.originalID)
+    if (base) {
+      const models = normalizeModels(provider, { ...base.models, ...provider.configuredModels })
+      provider.seedModels = models
+      if (!provider.remote && !provider.catalogs.size) {
+        provider.models = models
+        provider.records = modelRecords(models)
+      }
+    }
+    return { id: provider.id, models: modelRecords(provider.seedModels) }
+  })
 }
 
 export function provider(id) {

@@ -76,7 +76,7 @@ export function TabBar() {
   if (!PRIMARY_SCREENS.has(state.route.screen) || state.stack.length > 0) return null
   // 键盘弹起时让位：那一条高度留给输入框，而不是导航
   if (keyboardOpen) return null
-  const limited = state.session?.accounts?.accounts?.filter(a => a.enabled && isRateLimited(a)).length || 0
+  const limited = state.session?.accounts?.summary?.limited ?? state.session?.accounts?.accounts?.filter(a => a.enabled && isRateLimited(a)).length ?? 0
   return (
     <BottomNavigation className='m-tabbar' aria-label={t('主导航')}>
       {TABS.map(tab => (

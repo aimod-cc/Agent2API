@@ -9,7 +9,7 @@ export const CAPABILITY_KEYS = [
 
 export type CapabilityKey = (typeof CAPABILITY_KEYS)[number]
 export type Capabilities = Partial<Record<CapabilityKey, number | boolean | null>>
-export type CapabilitySource = 'upstream' | 'modelsdev' | 'user'
+export type CapabilitySource = 'upstream' | 'modelsdev' | 'user' | 'gateway'
 
 export const TOKEN_KEYS: readonly CapabilityKey[] = ['maxInputTokens', 'maxOutputTokens']
 export const BOOLEAN_KEYS: readonly CapabilityKey[] = [
@@ -53,5 +53,5 @@ export function capSourceOf(
   key: CapabilityKey,
 ): CapabilitySource | '' {
   const raw = (model?.capSources as Record<string, unknown> | undefined)?.[key]
-  return raw === 'upstream' || raw === 'modelsdev' || raw === 'user' ? raw : ''
+  return raw === 'upstream' || raw === 'modelsdev' || raw === 'user' || raw === 'gateway' ? raw : ''
 }

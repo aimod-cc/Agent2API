@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { createPortal } from 'react-dom'
 import { Button, Checkbox, Input, Label, Switch, Table, TableBody, TableCell, TableHead, TableHeader, TableRow, Textarea } from '@ui'
 import { parseProxyList, proxyAddress, type ProxyImportDraft, type ProxyImportIssue, type ProxyImportReport } from './proxy-import'
 
@@ -16,7 +17,9 @@ export const ProxyBatchEditor = React.forwardRef<ProxyBatchHandle, {
   save: (items: ProxyImportDraft[]) => Promise<ProxyImportReport>
   test: (item: ProxyImportDraft) => Promise<TestResult>
   onNotice: (message: string, failed?: boolean) => void
-}>(({ t, locked, onBusyChange, save, test, onNotice }, ref) => {
+  footerHost?: HTMLElement | null
+  active?: boolean
+}>(({ t, locked, onBusyChange, save, test, onNotice, footerHost, active = true }, ref) => {
   const [input, setInput] = React.useState('')
   const [rows, setRows] = React.useState<BatchRow[]>([])
   const [issues, setIssues] = React.useState<ProxyImportIssue[]>([])
@@ -100,6 +103,15 @@ export const ProxyBatchEditor = React.forwardRef<ProxyBatchHandle, {
     }
   }
 
+  const actions = <div className='flex flex-wrap justify-end gap-2'>
+    <Button variant='outline' disabled={disabled || !selected.length} onClick={() => void act('test')}>
+      {busy === 'test' ? t('测试中 {done}/{total}', progress) : t('批量测试（{n}）', { n: selected.length })}
+    </Button>
+    <Button disabled={disabled || !selected.length} onClick={() => void act('save')}>
+      {busy === 'save' ? t('保存中…') : t('批量添加（{n}）', { n: selected.length })}
+    </Button>
+  </div>
+
   return <section className='flex min-w-0 flex-col gap-3' aria-label={t('批量添加')}>
     <div>
       <h3 className='text-sm font-semibold'>{t('批量添加')}</h3>
@@ -153,13 +165,6 @@ export const ProxyBatchEditor = React.forwardRef<ProxyBatchHandle, {
     </div> : null}
     {summary ? <p className='text-xs text-subtle' role='status'>{summary}</p> : null}
     {error ? <p className='text-xs text-destructive' role='alert'>{error}</p> : null}
-    <div className='mt-auto flex flex-wrap justify-end gap-2 pt-1'>
-      <Button variant='outline' disabled={disabled || !selected.length} onClick={() => void act('test')}>
-        {busy === 'test' ? t('测试中 {done}/{total}', progress) : t('批量测试（{n}）', { n: selected.length })}
-      </Button>
-      <Button disabled={disabled || !selected.length} onClick={() => void act('save')}>
-        {busy === 'save' ? t('保存中…') : t('批量添加（{n}）', { n: selected.length })}
-      </Button>
-    </div>
+    {active ? footerHost ? createPortal(actions, footerHost) : <div className='mt-auto pt-1'>{actions}</div> : null}
   </section>
 })

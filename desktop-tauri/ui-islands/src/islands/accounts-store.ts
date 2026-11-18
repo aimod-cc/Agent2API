@@ -1,4 +1,5 @@
 import type { UsageQueryTask } from '../../../ui-shared/usage-query-task'
+import { cachedAccount } from './accounts-list-api'
 
 import {
   shared, type AccountRecord, type AccountsSnapshot, type AccountSorting,
@@ -12,8 +13,10 @@ import {
 
 /** 弹窗状态：账号设置（单个）/ 批量操作（多选 + 动作）/ 分组设置（单组），关闭即 null */
 export type AccountsDialog =
-  | { kind: 'settings'; id: string }
+  | { kind: 'settings'; id: string; pane?: 'query' | 'credential' | 'network' }
+  | { kind: 'settings-loading'; id: string; pane?: 'query' | 'credential' | 'network' }
   | { kind: 'batch'; ids: string[]; action: string }
+  | { kind: 'batch-loading'; ids: string[]; action: string }
   | { kind: 'group'; provider: string }
   | null
 
@@ -35,6 +38,7 @@ export type AccountsStore = {
   usageInflight: ReadonlySet<string>
   usageTasks: ReadonlyMap<string, UsageQueryTask>
   usageStarting: ReadonlySet<string>
+  visibleUsageIds: readonly string[]
   /**
    * 组头读数（可用合计 / 可用最低）是否只统计**当前筛选 / 搜索后可见的行**。
    * 默认关闭（= 按整组统计，见 accounts-panels 的 groupBalanceOf）；开关在
@@ -169,6 +173,7 @@ let store: AccountsStore = {
   usageInflight: new Set<string>(),
   usageTasks: new Map(),
   usageStarting: new Set(),
+  visibleUsageIds: [],
   groupTotalFiltered: loadGroupTotalFiltered(),
   groupSort: loadGroupSort(),
   sorting: null,
@@ -249,7 +254,8 @@ export function hiddenAccounts(): HiddenAccountsSummary {
 }
 
 export function findAccount(id: string): AccountRecord | null {
-  return allAccounts().find(account => account.id === id) || null
+  const account = allAccounts().find(account => account.id === id)
+  return account ? cachedAccount(account) : null
 }
 
 /** 当前可见账号（筛选 + 搜索）与分段计数共用 accounts-domain 的同一份口径。
@@ -358,6 +364,7 @@ export function setProviderFilter(value: string): void {
 export function setSegmentFilter(key: 'enabled' | 'limit', value: string): void {
   const filter: AccountFilter = { ...store.filter, [key]: value }
   if (filter.enabled === 'disabled' && filter.limit !== 'all') filter.limit = 'all'
+  if (store.filter.enabled === filter.enabled && store.filter.limit === filter.limit) return
   patch({ filter })
   persistFilter()
 }

@@ -1,7 +1,9 @@
 import { InputGroup, InputGroupInput, InputGroupAddon, InputGroupButton } from '@ui'
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useAccountsList } from '../hooks/useAccountsList'
+import { AccountsListBody } from '../components/AccountsListBody'
+import { ACCOUNT_PAGE_SIZES, readAccountPageSize, type AccountPageSize } from '../../../ui-shared/accounts-list'
 import { PageHead, IconButton, Badge, Empty, ErrorNote, SkeletonList } from '../components/ui'
-import { ProviderLogo } from '../components/ProviderLogo'
 import { HiddenAccountsNotice } from '../components/HiddenAccountsNotice'
 import { Icon } from '../components/Icon'
 import { AccountSheet } from './AccountSheet'
@@ -14,7 +16,6 @@ import {
 } from '../components/AccountsFilterSheet'
 import { useStore, store } from '../state/store'
 import {
-  fetchUsageSnapshot,
   setAccountEnabled,
   type Account,
   type UsageRow,
@@ -23,14 +24,15 @@ import {
 import { accountName, formatExpiry, formatRelative, isRateLimited } from '../lib/format'
 import { expiryOf, hasExpiry, isLongLivedCredential, supportsUsage } from '../lib/providerFacts'
 import { usageIndex, usageText } from '../lib/usage'
+import { usageQueryNoticeOf } from '../../../ui-shared/usage-query-state'
 import { useDisplayClock } from '../../../ui-shared/use-display-clock'
 import { credentialExpiryRowsOf, credentialExpiryText } from '../../../ui-shared/credential-expiry'
 import { upstreamCooldownOf, upstreamSuspendedReasonOf } from '../../../ui-shared/account-upstream-state'
 import { providerLabel } from '../lib/providers'
-import { usePolling } from '../lib/usePolling'
+import { accountBalanceRevision, accountUsageSnapshot, refreshRealtimeAccounts, subscribeBalanceRevision, subscribeAccountUsage, trackAccountUsage } from '../lib/accounts-realtime'
 import { usePullToRefresh, PullIndicator } from '../components/PullToRefresh'
 import { t } from '../i18n'
-import { Button, Input, Card } from '@ui'
+import { Button, Card, Pager, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@ui'
 import { Switch as UiSwitch } from '@ui'
 import { Toggle as UiToggle } from '@ui'
 
@@ -46,7 +48,7 @@ import { Toggle as UiToggle } from '@ui'
  * 组内使用网关的全局消耗顺序，组顺位仍由账号库的手动优先级决定。
  */
 
-type Filter = 'all' | 'enabled' | 'limited' | 'disabled'
+const PAGE_SIZE_KEY = 'workbuddy-mobile-accounts-page-size'
 
 export function AccountsPage() {
   const state = useStore()
@@ -57,26 +59,52 @@ export function AccountsPage() {
   const [adding, setAdding] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const [usage, setUsage] = useState<UsageSnapshot | null>(null)
+  const [usage, setUsage] = useState<UsageSnapshot | null>(accountUsageSnapshot)
+  const [pageSize, setPageSize] = useState<AccountPageSize>(() => readAccountPageSize(PAGE_SIZE_KEY, 20))
+  const [page, setPage] = useState(1)
+  const listRef = useRef<HTMLDivElement | null>(null)
+  const visibleUsageIds = useRef<string[]>([])
+  const [usageScope, setUsageScope] = useState('')
+  const setVisibleUsageIds = useCallback((ids: string[]) => {
+    visibleUsageIds.current = ids
+    setUsageScope(ids.join('|'))
+  }, [])
+  const listQuery = { q: query, providers: filters.providers, status: filters.status, expiry: filters.expiry, usage: filters.usage,
+    offset: pageSize === 'all' ? 0 : (page - 1) * pageSize, pageSize: pageSize === 'all' ? 100 : pageSize }
+  const listRevision = JSON.stringify(state.session?.accounts?.accounts || [])
+  const balanceEvents = useSyncExternalStore(subscribeBalanceRevision, accountBalanceRevision)
+  const balanceRevision = `${balanceEvents}:${JSON.stringify((usage?.results || []).map(row => [row.id, row.at, row.requestId, row.stale]))}`
+  const accountList = useAccountsList(listQuery, pageSize === 'all', listRevision, balanceRevision)
   const accounts = state.session?.accounts?.accounts || []
+  const pageAccounts = accountList.data?.accounts || []
+  const total = accountList.data?.displayTotal ?? 0
+  const pageCount = pageSize === 'all' ? 1 : Math.max(1, Math.ceil(total / pageSize))
+  useEffect(() => {
+    setPage(1)
+    if (listRef.current) listRef.current.scrollTop = 0
+  }, [query, filters])
+  useEffect(() => { if (accountList.data && page > pageCount) setPage(pageCount) }, [page, pageCount, accountList.data])
+  useEffect(() => { if (listRef.current) listRef.current.scrollTop = 0 }, [page, pageSize])
   const sessionSorting = state.session?.accounts?.sorting
   const sorting = (usage?.sorting?.updatedAt || 0) > (sessionSorting?.updatedAt || 0) ? usage?.sorting : sessionSorting
 
+  const usageTracker = useRef<ReturnType<typeof trackAccountUsage> | null>(null)
+  useEffect(() => {
+    const unsubscribe = subscribeAccountUsage(setUsage)
+    const tracker = trackAccountUsage(visibleUsageIds.current)
+    usageTracker.current = tracker
+    return () => { unsubscribe(); tracker.close(); usageTracker.current = null }
+  }, [state.serverRevision])
+  useEffect(() => { usageTracker.current?.update(visibleUsageIds.current) }, [usageScope])
+
   const load = async () => {
-    // 余额快照与账号刷新并行：快照失败不影响账号列表（余额查不到是常态，
-    // 静默降级成「未查询」，不弹 toast 也不进页内错误条）
-    void fetchUsageSnapshot()
-      .then(setUsage)
-      .catch(() => {})
     try {
-      await store.refresh(true)
+      await refreshRealtimeAccounts()
       setError('')
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure))
     }
   }
-
-  usePolling(load, 30_000)
 
   const pull = usePullToRefresh({ onRefresh: load })
 
@@ -99,12 +127,12 @@ export function AccountsPage() {
     if (!supportsUsage(account)) return 'unqueried'
     const row = usageById.get(account.id)
     if (!row) return 'unqueried'
-    if (row.error) return 'failed'
+    if (row.error) return usageQueryNoticeOf(row.code, t) ? 'unqueried' : 'failed'
     return 'has'
   }
 
   /** 各维度选项的计数：基于**搜索词过滤后**的集合，数字与点进去看到的一致 */
-  const counts = useMemo(() => {
+  const localCounts = useMemo(() => {
     const keyword = query.trim().toLowerCase()
     const base = accounts.filter(item => {
       if (!keyword) return true
@@ -127,7 +155,7 @@ export function AccountsPage() {
       if (!supportsUsage(account)) return 'unqueried'
       const row = usageById.get(account.id)
       if (!row) return 'unqueried'
-      if (row.error) return 'failed'
+      if (row.error) return usageQueryNoticeOf(row.code, t) ? 'unqueried' : 'failed'
       return 'has'
     }
     return {
@@ -154,6 +182,8 @@ export function AccountsPage() {
     }
     // usageById 变化（余额刷新）要重算余额那组计数
   }, [accounts, query, usageById])
+
+  const counts = (accountList.data?.counts || localCounts) as typeof localCounts
 
   /** 可选的提供商（按当前账号里出现过的去重，保持后端给的先后） */
   const providerOptions = useMemo(() => {
@@ -206,7 +236,7 @@ export function AccountsPage() {
 
   const groups = useMemo(() => {
     const map = new Map<string, Account[]>()
-    filtered.forEach(item => {
+    pageAccounts.forEach(item => {
       const provider = String(item.provider || 'unknown')
       const list = map.get(provider) || []
       list.push(item)
@@ -226,10 +256,12 @@ export function AccountsPage() {
         ? (sorting.providerOrder.indexOf(a.provider) < 0 ? Infinity : sorting.providerOrder.indexOf(a.provider))
           - (sorting.providerOrder.indexOf(b.provider) < 0 ? Infinity : sorting.providerOrder.indexOf(b.provider))
         : Math.min(...a.list.map(account => account.priority ?? 999)) - Math.min(...b.list.map(account => account.priority ?? 999)))
-  }, [filtered, sorting])
+  }, [pageAccounts, sorting])
 
-  const enabledCount = accounts.filter(item => item.enabled).length
-  const limitedCount = accounts.filter(item => item.enabled && isRateLimited(item)).length
+  const providerLabels = useMemo(() => new Map((state.session?.accounts?.providers || []).flatMap(provider => provider.id ? [[provider.id, provider.label || provider.id] as const] : [])), [state.session?.accounts?.providers])
+  const ranks = useMemo(() => new Map(Object.values(sorting?.accountOrder || {}).flatMap(ids => ids.map((id, index) => [id, index + 1] as const))), [sorting])
+  const enabledCount = accountList.data?.summary.enabled ?? state.session?.accounts?.summary?.enabled ?? accounts.filter(item => item.enabled).length
+  const limitedCount = accountList.data?.summary.limited ?? state.session?.accounts?.summary?.limited ?? accounts.filter(item => item.enabled && isRateLimited(item)).length
 
   const toggle = async (account: Account, next: boolean) => {
     setBusy(true)
@@ -244,7 +276,7 @@ export function AccountsPage() {
     }
   }
 
-  const openAccount = openId ? accounts.find(item => item.id === openId) || null : null
+  const openAccount = openId ? pageAccounts.find(item => item.id === openId) || accounts.find(item => item.id === openId) || null : null
 
   return (
     <div className='m-page m-fixed' ref={pull.bindRef}>
@@ -319,19 +351,19 @@ export function AccountsPage() {
         {activeFilterCount(filters) > 0 ? (
           <UiToggle size='default' variant='outline' type='button' className='m-chip rounded-pill' pressed onClick={() => setFilterOpen(true)}>
             <Icon name='filter' style={{ width: 13, height: 13 }} />
-            {t('已筛选 {n} 项', { n: filtered.length })}
+            {t('已筛选 {n} 项', { n: accountList.data?.total ?? filtered.length })}
           </UiToggle>
         ) : null}
       </div>
       </div>
 
       {/* 只有这一块跟着手指滚：筛选条常驻，换筛选不用先滑回顶部 */}
-      <div className='m-body'>
-      {error || state.sessionError ? <ErrorNote text={error || state.sessionError} /> : null}
+      <div className='m-body' ref={listRef}>
+      {error || state.sessionError || accountList.error ? <ErrorNote text={accountList.error || error || state.sessionError} /> : null}
       <HiddenAccountsNotice hidden={state.session?.accounts?.hiddenAccounts} />
-      {!state.session && state.loading ? <SkeletonList rows={4} height={72} /> : null}
+      {!accountList.data && (state.loading || accountList.loading) ? <SkeletonList rows={4} height={72} /> : null}
 
-      {state.session && !groups.length && (!state.session.accounts?.hiddenAccounts?.total || activeFilterCount(filters) > 0 || query) ? (
+      {state.session && !accountList.loading && !groups.length && (!state.session.accounts?.hiddenAccounts?.total || activeFilterCount(filters) > 0 || query) ? (
         <div className='m-section'>
           <Card className='m-card'>
             <Empty
@@ -347,38 +379,32 @@ export function AccountsPage() {
         </div>
       ) : null}
 
-      {groups.map(group => {
-        const enabled = group.list.filter(item => item.enabled).length
-        const limited = group.list.filter(item => item.enabled && isRateLimited(item)).length
-        return (
-          <div key={group.provider} className='m-section' style={{ marginTop: 12 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '0 3px 8px' }}>
-              <ProviderLogo id={group.provider} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 600 }}>{providerLabel(group.provider, state.session?.accounts?.providers?.find(provider => provider.id === group.provider)?.label)}</div>
-                <div style={{ fontSize: 11.5, color: 'var(--m-text-3)', marginTop: 2 }}>
-                  {t('{n} 个账号 · 启用 {e}', { n: group.list.length, e: enabled })}
-                  {limited ? t(' · 限流 {n}', { n: limited }) : ''}
-                </div>
-              </div>
-            </div>
-            <Card className='m-card'>
-              {group.list.map((account, index) => (
-                <AccountRow
-                  key={account.id}
-                  account={account}
-                  rank={index + 1}
-                  usageRow={usageById.get(account.id)}
-                  onOpen={() => setOpenId(account.id)}
-                  onToggle={next => void toggle(account, next)}
-                  busy={busy}
-                />
-              ))}
-            </Card>
-          </div>
-        )
-      })}
+      <AccountsListBody groups={groups} summaries={accountList.data?.groups || []} providerLabels={providerLabels} ranks={ranks}
+        continuous={pageSize === 'all'} total={total} scrollRef={listRef} loadMore={accountList.loadMore} onVisibleIds={setVisibleUsageIds}
+        renderRow={(account, rank) => <AccountRow key={account.id} account={account} rank={rank}
+          usageRow={usageById.get(account.id)} onOpen={() => setOpenId(account.id)}
+          onToggle={next => void toggle(account, next)} busy={busy} />} />
 
+      </div>
+      <div className='shrink-0 border-t border-hairline px-4 py-2.5'>
+        <div className='flex flex-wrap items-center justify-between gap-2'>
+          <span className='text-[11.5px] text-subtle'>{pageSize === 'all'
+            ? t('已加载 {loaded} / {total} 个账号', { loaded: pageAccounts.length, total })
+            : t('共 {total} 个 · 本页 {count} 个', { total, count: pageAccounts.length })}</span>
+          <Select value={String(pageSize)} onValueChange={value => {
+            const next = value === 'all' ? 'all' : Number(value) as AccountPageSize
+            setPageSize(next); setPage(1)
+            try { localStorage.setItem(PAGE_SIZE_KEY, String(next)) } catch { /* 当前会话内仍保留选择。 */ }
+          }}>
+            <SelectTrigger className='h-8 w-28' aria-label={t('每页账号数量')}>
+              <SelectValue>{pageSize === 'all' ? t('全部') : t('每页 {n} 个', { n: pageSize })}</SelectValue>
+            </SelectTrigger>
+            <SelectContent>{ACCOUNT_PAGE_SIZES.map(size => <SelectItem key={size} value={String(size)}>
+              {size === 'all' ? t('全部') : t('每页 {n} 个', { n: size })}
+            </SelectItem>)}</SelectContent>
+          </Select>
+          {pageSize !== 'all' && pageCount > 1 ? <Pager page={page} pageCount={pageCount} onPageChange={setPage} /> : null}
+        </div>
       </div>
 
       {adding ? <DynamicProviderSheet onClose={() => setAdding(false)} onAdded={() => {

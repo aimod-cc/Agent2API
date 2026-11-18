@@ -4,6 +4,7 @@ import { t } from '../i18n'
 import { RouteIcon, formatDuration } from './routing-ui'
 import { errorText, formatTraceTokens, isTraceRunning, requestModel, traceCandidates, traceProvider } from './routing-trace-model'
 import { execAccounts, execAttemptName, execTiming, type ExecAccount } from './routing-exec-model'
+import { errorPolicyDescription } from '../../../ui-shared/routing-errors-record'
 import type { ReplayRow } from './routing-types'
 
 export function RoutingExecDuration({ row, now }: { row: ReplayRow; now: number }) {
@@ -35,6 +36,7 @@ export function RoutingExecDuration({ row, now }: { row: ReplayRow; now: number 
                 style={{ left: `${segment.start / scale * 100}%`, width: `${(segment.end - segment.start) / scale * 100}%` }} />)}
             </div> : null}
             <span className='routing-exec-bar-note'>{info}</span>
+            {attempt.errorPolicy ? <span className='routing-exec-bar-note'>{errorPolicyDescription(attempt.errorPolicy, t)}</span> : null}
             {!multi && attempt.notice ? <span className='routing-exec-bar-note'>{errorText(attempt.notice)}</span> : null}
           </div>
           {multi ? <span className='routing-exec-bar-result' data-tone={timing.tone}>{timing.label}</span> : null}

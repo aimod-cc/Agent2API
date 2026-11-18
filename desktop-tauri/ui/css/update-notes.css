@@ -331,12 +331,6 @@ button.qq-card:focus-visible { box-shadow: var(--ring); }
   color: var(--text-3);
 }
 
-/* 「即将满员」：卡片右上角的整卡状态，不跟标题挤在一行 */
-.qq-card-flag {
-  flex: 0 0 auto;
-  align-self: flex-start;
-}
-
 .qq-foot {
   margin: 2px 0 0;
   color: var(--text-3);

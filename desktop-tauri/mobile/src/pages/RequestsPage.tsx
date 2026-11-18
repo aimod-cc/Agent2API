@@ -16,6 +16,7 @@ import { DateRangeFilter } from '../components/DateRangeFilter'
 import { requestApiKeyLabel, requestClientLabel } from '../../../ui-shared/model-api-key'
 import { ClientIdentificationDetail } from '../../../ui-shared/client-identification-detail'
 import { VisionRequestDetail, visionDetail } from '../../../ui-shared/request-vision-detail'
+import { errorPolicyDescription } from '../../../ui-shared/routing-errors-record'
 import { clientIdentificationApi } from '../api/client-identification'
 import { dateRangeQuery, readCustomRange, saveCustomRange, validCustomRange, type CustomDates, type DateRange } from '../../../ui-shared/date-range'
 
@@ -438,6 +439,7 @@ function RequestSheet({ row, onClose }: { row: RequestRow | null; onClose: () =>
                         <span className='m-k'>#{index + 1}</span>
                         <span className='m-v' style={{ flex: 1, minWidth: 0, textAlign: 'left' }}>
                           {providerLabel(item.provider)} · {item.status || '—'}
+                          {item.errorPolicy ? <span className='block mt-1 text-xs text-muted-foreground'>{errorPolicyDescription(item.errorPolicy, t)}</span> : null}
                           {item.error ? (
                             <span style={{ display: 'block', color: 'var(--m-danger)', fontSize: 11, marginTop: 2 }}>
                               {item.error}

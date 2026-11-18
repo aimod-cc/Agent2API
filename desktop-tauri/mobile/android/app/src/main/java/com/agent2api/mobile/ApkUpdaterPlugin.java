@@ -6,7 +6,6 @@ import android.os.Build;
 import android.os.SystemClock;
 import android.provider.Settings;
 import androidx.core.content.FileProvider;
-import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
@@ -16,9 +15,8 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
+import java.net.URL;
 import java.security.MessageDigest;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -54,7 +52,6 @@ public class ApkUpdaterPlugin extends Plugin {
     private final AtomicBoolean cancelled = new AtomicBoolean(false);
     private final AtomicBoolean operationActive = new AtomicBoolean(false);
     private final Set<HttpURLConnection> connections = ConcurrentHashMap.newKeySet();
-    private final ApkSourceSelector selector = new ApkSourceSelector();
     private static final long MAX_BYTES = 600L * 1024 * 1024;
 
     /** 目标文件：应用缓存目录下的固定名，重下时覆盖 */
@@ -64,53 +61,11 @@ public class ApkUpdaterPlugin extends Plugin {
             //noinspection ResultOfMethodCallIgnored
             dir.mkdirs();
         }
-        return new File(dir, "agent2api-update.apk");
+        return new File(dir, "agent2api-website-update.apk");
     }
 
     private File partialFile() {
-        return new File(targetFile().getParentFile(), "agent2api-update.apk.part");
-    }
-
-    @PluginMethod
-    public void sourceSelectionSupported(PluginCall call) {
-        JSObject result = new JSObject();
-        result.put("supported", true);
-        call.resolve(result);
-    }
-
-    @PluginMethod
-    public void selectSources(PluginCall call) {
-        JSArray values = call.getArray("urls");
-        String hash = call.getString("sha256", "");
-        String scope = call.getString("scope", "");
-        if (values == null || values.length() == 0 || values.length() > 7) {
-            call.reject("下载源数量无效");
-            return;
-        }
-        if (hash == null || (!hash.isEmpty() && !hash.matches("[0-9a-fA-F]{64}"))) {
-            call.reject("官方校验值格式无效");
-            return;
-        }
-        List<String> urls = new ArrayList<>();
-        for (int index = 0; index < values.length(); index++) {
-            String value = values.optString(index, "");
-            if (value.isEmpty() || value.length() > 8192) { call.reject("下载源地址无效"); return; }
-            urls.add(value);
-        }
-        if (!operationActive.compareAndSet(false, true)) { call.reject("下载或探测正在进行"); return; }
-        cancelled.set(false);
-        final String expectedHash = hash;
-        executor.execute(() -> {
-            JSObject result = null;
-            String failure = null;
-            try {
-                result = selector.select(getContext(), urls, expectedHash, scope, cancelled);
-            } catch (Exception error) {
-                failure = cancelled.get() ? "已取消下载" : error.getMessage();
-            } finally { operationActive.set(false); }
-            if (result != null) call.resolve(result);
-            else call.reject(failure == null ? "探测下载源失败" : failure);
-        });
+        return new File(targetFile().getParentFile(), "agent2api-website-update.apk.part");
     }
 
     /**
@@ -128,14 +83,23 @@ public class ApkUpdaterPlugin extends Plugin {
             return;
         }
         String expectedHash = call.getString("sha256", "");
-        if (expectedHash == null) expectedHash = "";
-        if (!expectedHash.isEmpty() && !expectedHash.matches("[0-9a-fA-F]{64}")) {
-            call.reject("官方校验值格式无效");
+        if (expectedHash == null || !expectedHash.matches("[0-9a-fA-F]{64}")) {
+            call.reject("官网安装包缺少可信校验值");
+            return;
+        }
+        try {
+            if (!ApkUpdateConnection.isWebsiteAsset(new URL(url))) {
+                call.reject("更新包只能从 Agent2API 官网下载");
+                return;
+            }
+        } catch (Exception error) {
+            call.reject("官网安装包地址无效");
             return;
         }
         final String hash = expectedHash;
         final long expectedSize = call.getData().optLong("size", 0);
-        if (!operationActive.compareAndSet(false, true)) { call.reject("下载或探测正在进行"); return; }
+        if (expectedSize <= 0 || expectedSize > MAX_BYTES) { call.reject("官网安装包大小无效"); return; }
+        if (!operationActive.compareAndSet(false, true)) { call.reject("下载正在进行"); return; }
         cancelled.set(false);
 
         executor.execute(() -> {
@@ -151,11 +115,9 @@ public class ApkUpdaterPlugin extends Plugin {
                 if (old.exists() && !old.delete()) throw new Exception("无法清理上次下载的安装包");
                 if (cancelled.get()) throw new Exception("已取消下载");
 
-                connection = ApkUpdateConnection.open(url, hash, SystemClock.elapsedRealtime() + 12_000, false, cancelled, connections);
+                connection = ApkUpdateConnection.open(url, SystemClock.elapsedRealtime() + 12_000, cancelled, connections);
                 int status = connection.getResponseCode();
-                if (ApkUpdateConnection.rateLimited(connection, url)) {
-                    throw new Exception("下载源限流中，请稍后重试");
-                }
+                if (status == 429) throw new Exception("官网请求过于频繁，请稍后重试");
                 if (status != HttpURLConnection.HTTP_OK) {
                     throw new Exception("服务器返回 HTTP " + status);
                 }
@@ -199,7 +161,7 @@ public class ApkUpdaterPlugin extends Plugin {
                         actual.append(String.format(java.util.Locale.ROOT, "%02x", value & 0xff));
                     }
                     if (!hash.equalsIgnoreCase(actual.toString())) {
-                        throw new Exception("安装包 SHA-256 与 GitHub 官方校验值不一致，已拒绝使用");
+                        throw new Exception("安装包 SHA-256 与可信发布校验值不一致，已拒绝使用");
                     }
                 }
                 File target = targetFile();
@@ -209,7 +171,6 @@ public class ApkUpdaterPlugin extends Plugin {
                 result.put("path", target.getAbsolutePath());
                 result.put("size", received);
             } catch (Exception error) {
-                selector.forget(url);
                 failure = cancelled.get() ? "已取消下载" : "下载失败：" + error.getMessage();
             } finally {
                 try { if (input != null) input.close(); } catch (Exception ignored) { }
@@ -236,7 +197,6 @@ public class ApkUpdaterPlugin extends Plugin {
     @PluginMethod
     public void cancel(PluginCall call) {
         cancelled.set(true);
-        selector.cancel();
         for (HttpURLConnection connection : connections) ApkUpdateConnection.close(connection, connections);
         call.resolve();
     }
@@ -314,7 +274,6 @@ public class ApkUpdaterPlugin extends Plugin {
     @Override
     protected void handleOnDestroy() {
         cancelled.set(true);
-        selector.cancel();
         for (HttpURLConnection connection : connections) ApkUpdateConnection.close(connection, connections);
         executor.shutdownNow();
         super.handleOnDestroy();

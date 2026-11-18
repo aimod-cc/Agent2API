@@ -2,11 +2,11 @@ import * as React from 'react'
 import { Button, Dialog, DialogBody, DialogContent, DialogHeader, DialogTitle, Popover, PopoverContent,
   PopoverTitle, PopoverTrigger } from '@ui'
 import type { PluginsPayload } from './plugins-types'
-import { GithubFailureText } from '../../../ui-shared/github-failure'
+import { errorMessage } from './plugins-shared'
 import { t } from '../i18n'
 
 export function PluginPageTools({ disabled, fileDisabled, scriptDisabled, scriptsAvailable, checking,
-  onRefresh, onCheck, onSettings, onFile, onScript, onDiagnostics }: {
+  onRefresh, onCheck, onSettings, onFile, onScript, onDiagnostics, onMissing }: {
   disabled: boolean
   fileDisabled: boolean
   scriptDisabled: boolean
@@ -18,6 +18,7 @@ export function PluginPageTools({ disabled, fileDisabled, scriptDisabled, script
   onFile: () => void
   onScript: () => void
   onDiagnostics: () => void
+  onMissing?: () => void
 }) {
   const [open, setOpen] = React.useState(false)
   const actions = [
@@ -26,6 +27,7 @@ export function PluginPageTools({ disabled, fileDisabled, scriptDisabled, script
     { label: t('插件设置'), disabled, action: onSettings },
     { label: t('从文件安装…'), disabled: fileDisabled, action: onFile },
     ...(scriptsAvailable ? [{ label: t('从 npm / GitHub 安装'), disabled: scriptDisabled, action: onScript }] : []),
+    ...(onMissing ? [{ label: t('补全缺失插件'), disabled, action: onMissing }] : []),
     { label: t('诊断信息'), disabled: false, action: onDiagnostics },
   ]
   return <Popover open={open} onOpenChange={setOpen}>
@@ -54,7 +56,7 @@ export function PluginDiagnostics({ open, payload, onClose }: {
         <div>{t('插件目录')} <code className='break-all'>{payload?.pluginsDir || '—'}</code></div>
         <div>{t('当前平台')} <code>{payload?.target || '—'}</code></div>
         <div>{t('协议版本')} {payload?.protocol || '—'}</div>
-        {payload?.catalog.reason ? <div className='text-destructive'><GithubFailureText value={payload.catalog} t={t} /></div> : null}
+        {payload?.catalog.reason ? <div className='text-destructive'>{errorMessage(payload.catalog.reason)}</div> : null}
         {payload?.host?.lastError ? <div className='break-words text-destructive'>{payload.host.lastError}</div> : null}
         {payload?.scripts ? <div className='flex flex-col gap-2 border-t border-hairline pt-3'>
           <span>Bun {payload.scripts.runtime.version} · {payload.scripts.runtime.installed ? t('已下载') : t('按需下载')}</span>

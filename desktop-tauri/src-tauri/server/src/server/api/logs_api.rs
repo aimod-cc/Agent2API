@@ -110,8 +110,31 @@ fn log_query(params: &Params) -> Result<LogQuery, Response> {
     Ok(query)
 }
 
+fn fill_usage_context(store: &crate::server::core::account_store::AccountStore, entry: &mut logs_store::LogEntry) {
+    let Some(data) = entry.data.as_mut().and_then(Value::as_object_mut) else { return; };
+    if data.get("action").and_then(Value::as_str) != Some("usage.query") { return; }
+    let missing_provider = data.get("provider").and_then(Value::as_str).is_none_or(str::is_empty);
+    let missing_name = data.get("accountName").and_then(Value::as_str).is_none_or(str::is_empty);
+    if !missing_provider && !missing_name { return; }
+    let Some(id) = data.get("account").and_then(Value::as_str) else { return; };
+    let Some(account) = store.route_account(id) else { return; };
+    if missing_provider {
+        if let Some(provider) = account.get("provider").and_then(Value::as_str) {
+            data.insert("provider".to_string(), json!(provider));
+            if data.get("providerLabel").and_then(Value::as_str).is_none_or(str::is_empty) {
+                data.insert("providerLabel".to_string(), json!(crate::server::core::providers::label_of(provider)));
+            }
+        }
+    }
+    if missing_name {
+        if let Some(name) = account.get("name").and_then(Value::as_str).filter(|name| !name.is_empty()) {
+            data.insert("accountName".to_string(), json!(name));
+        }
+    }
+}
+
 /// GET /api/logs
-pub async fn query_logs(State(_state): State<ServerState>, Query(params): Query<Params>) -> Response {
+pub async fn query_logs(State(state): State<ServerState>, Query(params): Query<Params>) -> Response {
     let store = match store_or_error() {
         Ok(store) => store,
         Err(response) => return response,
@@ -119,7 +142,12 @@ pub async fn query_logs(State(_state): State<ServerState>, Query(params): Query<
 
     let query = match log_query(&params) { Ok(query) => query, Err(response) => return response };
 
-    let result = store.query(&query);
+    let mut result = store.query(&query);
+    for entry in &mut result.entries { fill_usage_context(state.store(), entry); }
+    for group in &mut result.groups {
+        fill_usage_context(state.store(), &mut group.entry);
+        for entry in &mut group.entries { fill_usage_context(state.store(), entry); }
+    }
     let mut data = match serde_json::to_value(&result) {
         Ok(value) => value,
         Err(error) => {

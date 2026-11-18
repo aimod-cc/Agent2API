@@ -71,16 +71,19 @@ pub async fn start(app: &AppHandle, options: &Value) -> Result<Value, String> {
     crate::startup::wait().await?;
     let proxy = window_proxy(options.get("proxy"))?;
     let started = crate::gateway::call("POST", "/api/session/login/start", Some(&json!({
-        "provider": "deepseek-web", "methodIndex": 1,
+        "provider": "deepseek-web", "methodIndex": 1, "mode": "embedded",
+        "locale": options.get("locale").and_then(Value::as_str).unwrap_or("zh-CN"),
         "inputs": options.get("inputs").cloned().unwrap_or_else(|| json!({})),
         "proxy": options.get("proxy").cloned().unwrap_or(Value::Null),
     }))).await?;
     let flow = started["state"].as_str().filter(|value| !value.is_empty())
         .ok_or("后端未返回 DeepSeek 登录状态")?.to_string();
     let auth_url = started["authUrl"].as_str().unwrap_or("");
-    let valid = url::Url::parse(auth_url).ok().is_some_and(|url| {
-        allowed(&url) && url.host_str() == Some("chat.deepseek.com")
-    });
+    let valid = started["state"].as_str() == Some(flow.as_str())
+        && started["externalBrowser"] != true
+        && url::Url::parse(auth_url).ok().is_some_and(|url| {
+            allowed(&url) && url.host_str() == Some("chat.deepseek.com")
+        });
     let result = if valid {
         crate::login::run_cookie_login_with_proxy(app, "deepseek-web", auth_url, "登录 DeepSeek 账号", &flow, proxy).await
     } else {
@@ -121,11 +124,11 @@ pub async fn credentials(window: &WebviewWindow, capture: &mut CredentialCapture
     }).ok_or("DeepSeek 网页浏览器标识无效")?;
     // 网页可能在登录后的设备校验中更换令牌；连续稳定后才读取最新 Cookie 并交回。
     if !capture.stable(token) { return Ok(None); }
-    let owned = window.clone();
-    let cookies = tokio::time::timeout(Duration::from_secs(10), tokio::task::spawn_blocking(move || owned.cookies()))
-        .await.map_err(|_| "读取 DeepSeek Cookie 超时")?
-        .map_err(|_| "读取 DeepSeek Cookie 的后台任务失败")?
-        .map_err(|_| "读取 DeepSeek Cookie 失败")?;
+    let cookies = tokio::time::timeout(Duration::from_secs(10), crate::login::read_window_cookies(window))
+        .await.map_err(|_| "读取 DeepSeek Cookie 超时")??;
+    if cookies.len() > 256 {
+        return Err("DeepSeek 网页 Cookie 数量超过限制".into());
+    }
     let now = chrono::Utc::now().timestamp();
     let rows: Vec<String> = cookies.into_iter().filter_map(|cookie| {
         let domain = cookie.domain()?.trim_start_matches('.');

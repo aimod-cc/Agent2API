@@ -1093,14 +1093,14 @@ body.queue-dragging * { cursor: grabbing; }
   gap: 4px;
 }
 
-.acct-actions button {
+.acct-actions > button {
   height: 25px;
   padding: 0 8px;
   border-radius: var(--r-sm);
   font-size: 11.5px;
 }
 
-.acct-actions button:hover:not(:disabled) {
+.acct-actions > button:hover:not(:disabled) {
   border-color: var(--primary-bd);
   background: var(--primary-soft);
   color: var(--primary-fg);

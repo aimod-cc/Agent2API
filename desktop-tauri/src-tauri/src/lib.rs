@@ -26,9 +26,12 @@ mod assistant_image;
 mod backend;
 mod bridge;
 mod commands;
+mod desktop_client;
 mod deepseek_login;
 mod doubaowork_login;
+mod exit;
 mod gateway;
+mod graphics;
 mod legacy_install;
 mod login;
 mod login_profile;
@@ -47,7 +50,7 @@ mod update;
 use agent2api_server::port_conflict;
 use agent2api_server::server;
 
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
@@ -110,13 +113,8 @@ fn launched_by_autostart() -> bool {
 /// 隐形进程，永远启动不起来。看门狗保证失败路径一定有终点；超时足够长
 /// （5 分钟），正常用户读提示的时间远小于它。
 ///
-/// ── 退出路径不会写盘 ────────────────────────────────────────
-/// 迁移失败时 `settings::load()` 从未执行，`close_to_tray` 保持默认 false，
-/// 因此 `ExitRequested` 分支不会拦截退出，只会调 `backend::shutdown` ——
-/// 那里只做停机信号与日志，不发网络请求、不写配置文件（后端从未启动，
-/// 定时签到全局句柄也未初始化）。`app.exit` 只触发 ExitRequested/Exit，
-/// 不会再走一遍 setup 之后的初始化；看门狗走 `process::exit` 更直接：
-/// 此时没有窗口、托盘、后台任务或文件句柄需要收尾。
+/// 迁移失败分支在任何后端启动前登记专用退出状态；不为了退出再初始化库或插件。
+/// 五分钟看门狗仅保留在这个无后端、无窗口和无托盘的启动失败分支。
 fn report_startup_failure(app: &tauri::AppHandle, error: &str) {
     /// 用户长时间不确认时强制结束的上限
     const FORCE_EXIT_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
@@ -126,13 +124,14 @@ fn report_startup_failure(app: &tauri::AppHandle, error: &str) {
          本次未改动、未删除任何旧数据，也未创建新配置目录。\
          排除原因（磁盘空间、文件占用、权限）后重新打开本程序即可自动重试迁移。"
     );
+    exit::mark_startup_failure(app);
     eprintln!("[Startup] ❌ {message}");
     let handle = app.clone();
     app.dialog()
         .message(message)
         .title("Agent2API 无法启动")
         .kind(MessageDialogKind::Error)
-        .show(move |_| handle.exit(1));
+        .show(move |_| exit::early_exit(&handle));
 
     std::thread::spawn(|| {
         std::thread::sleep(FORCE_EXIT_AFTER);
@@ -249,6 +248,10 @@ pub fn ensure_main_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
 }
 
 pub fn run() {
+    if let Some(code) = server::core::providers::subscriptions::dispatch_helper() {
+        std::process::exit(i32::from(code));
+    }
+    graphics::initialize();
     let mut builder = tauri::Builder::default();
 
     // 单实例必须第一个注册：插件按注册顺序执行，晚于其它插件时，
@@ -256,6 +259,11 @@ pub fn run() {
     #[cfg(desktop)]
     {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            #[cfg(target_os = "linux")]
+            if _args.iter().any(|arg| arg == graphics::COMPATIBILITY_FLAG) {
+                graphics::confirm_compatibility_restart(app);
+                return;
+            }
             // 第二个实例已被插件结束进程，这里只负责把已有窗口叫到前台
             tray::show_main_window(app);
         }));
@@ -297,7 +305,10 @@ pub fn run() {
             commands::cancel_login,
             commands::export_logs,
             commands::pick_folder,
+            desktop_client::pick_desktop_client,
             commands::get_app_settings,
+            graphics::get_graphics_settings,
+            graphics::save_graphics_settings,
             commands::save_app_settings,
             commands::export_accounts,
             account_export::export_account_files,
@@ -327,6 +338,7 @@ pub fn run() {
         ])
         .setup(|app| {
             let handle = app.handle().clone();
+            panel_session::initialize(&handle);
 
             // ── 第一步：一次性配置目录迁移（`~/.workbuddy-proxy` → `~/.agent2api`）──
             // 必须是**全进程最早**的一处配置目录访问：晚于任何写盘（桌面设置、
@@ -454,22 +466,7 @@ pub fn run() {
             // 后端负责维护任务的持久化排期，桌面壳不额外触发刷新。
             tauri::async_runtime::spawn(async move {
                 let started = backend::ensure_ready(&handle).await;
-                if let Err(failure) = &started {
-                    eprintln!("[backend] 启动失败: {}", failure.message);
-                    // 存一份到 AppState：事件是一次性的，界面可能在事件发出之后
-                    // 才订阅（窗口还在加载、WebView 被刷新），那时只能靠主动查
-                    // （backend_status）拿到失败原因，否则状态灯永远说不清为什么灰着
-                    if let Some(state) = handle.try_state::<AppState>() {
-                        if let Ok(mut guard) = state.backend.lock() {
-                            guard.failure = Some(failure.clone());
-                        }
-                    }
-                    startup::complete(&started);
-                    let _ = handle.emit("backend:error", failure);
-                } else {
-                    startup::complete(&started);
-                    let _ = handle.emit("backend:ready", ());
-                }
+                exit::startup_result(&handle, started);
             });
 
             Ok(())
@@ -488,9 +485,12 @@ pub fn run() {
                     return;
                 }
                 let state = app.state::<AppState>();
-                // 用户主动退出（托盘菜单）时就别拦了，否则退出路径被自己挡死
-                if state.window.close_to_tray() && !state.window.is_exiting() {
-                    api.prevent_close();
+                if exit::allowed(&state) {
+                    return;
+                }
+                // 无论隐藏还是真退出都先同步拦截；清理失败时保留现有窗口显示原因。
+                api.prevent_close();
+                if state.window.close_to_tray() && !exit::requested(&state) {
                     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                         if state.window.lightweight() {
                             // 轻量模式：直接销毁窗口 —— WebView2 那 6 个进程
@@ -503,29 +503,16 @@ pub fn run() {
                             let _ = window.hide();
                         }
                     }
-                }
-            }
-            // 最后一个窗口关闭后 Tauri 会请求退出，这里再兜一次：
-            // 只拦「用户关窗」这一种，托盘退出与主动 exit 都要放行。
-            // 放行时顺手回收后端 —— 例如用户关掉了「关闭到托盘」后直接关窗真退出，
-            // 这条路径不会走到下面的 Exit 分支，不在这里回收就会漏下 node 进程
-            // （shutdown 幂等，与其它调用点重复也不会有副作用）。
-            tauri::RunEvent::ExitRequested { api, .. } => {
-                let state = app.state::<AppState>();
-                if state.window.close_to_tray() && !state.window.is_exiting() {
-                    api.prevent_exit();
+                } else if !exit::exit_in_flight(&state) {
+                    let _ = exit::request_quit(app, 0);
                 } else {
-                    backend::shutdown(&state);
+                    exit::show_failure(app);
                 }
             }
-            // 最后兜底回收后端进程（复用外部服务的不会被动）。
-            // 注意：程序化退出（托盘退出、安装前退出走的都是 `AppHandle::exit(0)`）
-            // 不保证触发本事件，这是 Tauri 的已知行为，所以那几条主动退出路径
-            // 已各自显式调用了 shutdown，这里只覆盖其余自然退出。
-            tauri::RunEvent::Exit => {
-                let state = app.state::<AppState>();
-                backend::shutdown(&state);
+            tauri::RunEvent::ExitRequested { api, code, .. } => {
+                exit::on_exit_requested(app, &api, code);
             }
+            tauri::RunEvent::Exit => exit::on_exit(app),
             _ => {}
         });
 }

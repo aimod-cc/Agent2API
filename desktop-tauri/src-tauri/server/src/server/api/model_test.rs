@@ -604,7 +604,8 @@ pub async fn run_model_test(State(state): State<ServerState>, headers: HeaderMap
     // `ensure_id` 只在 id 为空时才写入，所以有前端 id 时要用**没带 id 的**
     // 槽位（`new`），否则会保留自己生成的那个
     let given_id = text_field(&payload, "test_id", 64);
-    let telemetry = Arc::new(RequestTelemetry::new());
+    let telemetry = Arc::new(RequestTelemetry::new_with_model_key(access.key_source));
+    telemetry.capture_prompt_request(&access.source, &model);
     if !given_id.is_empty() {
         telemetry.ensure_id(&given_id);
     }

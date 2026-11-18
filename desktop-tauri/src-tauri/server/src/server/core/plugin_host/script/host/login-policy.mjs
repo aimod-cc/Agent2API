@@ -1,12 +1,13 @@
-import { AGY_INSTRUCTIONS, isLocalProvider } from "./local-provider.mjs"
+import { localizedText } from "./localization.mjs"
 import { applies } from "./login-prompts.mjs"
 
 const WPS_SITE = "https://lingxi.wps.cn/"
 const LOCAL_CLIENT_HINT = "读取的是网关电脑上已登录的客户端，不是打开面板的电脑；也可改用粘贴凭据。"
 
-export function loginMethods(provider) {
+export function loginMethods(provider, locale = "zh-CN") {
   const original = provider.hooks.auth?.methods ?? []
-  const methods = original.map((method, methodIndex) => ({ ...method, methodIndex }))
+  const methods = original.map((method, methodIndex) => ({ ...method, methodIndex,
+    label: localizedText(method.label, method.labels, locale) }))
   if (provider.id === "wps-lingxi") {
     const paste = methods.find(method => method.type === "oauth" && method.prompts?.some(prompt => prompt.key === "cookie"))
     for (const method of methods) {
@@ -45,11 +46,6 @@ export function loginMethods(provider) {
     }
   }
   for (const method of methods) {
-    if (isLocalProvider(provider) && method.type === "oauth") {
-      method.label = "Google 授权（ACP）"
-      method.browserMode = "external"
-      method.instructions = AGY_INSTRUCTIONS
-    }
     if (provider.id === "deepaicode" && method.type === "oauth") {
       method.instructions = "浏览器显示登录完成后，网关还需联网获取账号凭据。若浏览器或 Magpie 使用系统代理，请先在下方点击「填入系统代理」；选择直连不会跟随系统代理。"
     }

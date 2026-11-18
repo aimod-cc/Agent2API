@@ -636,6 +636,13 @@ pub(crate) async fn run_checkin_selected(
     let manual = matches!(source, "single" | "manual");
     let mut results = Vec::with_capacity(targets.len());
     for account in &targets {
+        if !manual && crate::server::core::plugin_host::operations::active_for_provider(provider_of(account)) {
+            results.push(json!({ "id": account["id"], "name": account["name"], "claim": {
+                "success": false, "outcome": "inactive", "code": "plugin_installing",
+                "msg": "插件正在安装或更新，本次自动签到暂缓，等待重试", "retryAt": logging::now_ms() + 120_000,
+            }, "error": Value::Null, "deferred": true }));
+            continue;
+        }
         let row = checkin_for(store, billing, account, manual).await;
         // 落签到时间：手动单签与定时签到走的是**这一段**（两条链都调本函数），
         // 所以账号页的「已签到」在两种路径下都会亮起来，不需要各自记一次。

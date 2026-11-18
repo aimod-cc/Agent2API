@@ -32,7 +32,32 @@ pub(crate) struct Interaction {
     #[serde(default)]
     pub fields: Vec<Prompt>,
     #[serde(default)]
-    pub captcha: Option<Geetest>,
+    pub captcha: Option<Captcha>,
+    #[serde(default)]
+    pub qr: Option<Qr>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub(crate) enum Captcha {
+    Geetest(Geetest),
+    Alicom4(Alicom4),
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Alicom4 {
+    pub engine: String,
+    #[serde(rename = "captchaId")]
+    pub captcha_id: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Qr {
+    pub url: String,
+    #[serde(rename = "expiresAt")]
+    pub expires_at: i64,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -74,9 +99,28 @@ impl Interactions {
                 return Err(super::error("登录交互字段无效"));
             }
         }
-        if let Some(captcha) = &interaction.captcha {
-            if !options.allows("login.captcha.geetest.v1") || captcha.gt.is_empty() || captcha.gt.len() > 128
-                || captcha.challenge.is_empty() || captcha.challenge.len() > 256 { return Err(super::error("登录验证码声明无效")); }
+        match &interaction.captcha {
+            Some(Captcha::Geetest(captcha)) => {
+                if !options.allows("login.captcha.geetest.v1") || captcha.gt.is_empty() || captcha.gt.len() > 128
+                    || captcha.challenge.is_empty() || captcha.challenge.len() > 256 { return Err(super::error("登录验证码声明无效")); }
+            }
+            Some(Captcha::Alicom4(captcha)) => {
+                if !options.allows("login.captcha.alicom4.v1") || options.provider != "codar"
+                    || captcha.engine != "alicom4" || captcha.captcha_id != "bb7f810ecc9f6d21dcf72bcae120c8c5" {
+                    return Err(super::error("登录验证码声明无效"));
+                }
+            }
+            None => {}
+        }
+        if let Some(qr) = &interaction.qr {
+            let url = url::Url::parse(&qr.url).map_err(|_| super::error("登录二维码地址无效"))?;
+            let now = crate::server::logging::now_ms();
+            if options.provider != "codar" || qr.url.len() > 8192 || url.scheme() != "https"
+                || !url.username().is_empty() || url.password().is_some() || url.fragment().is_some()
+                || !matches!(url.host_str(), Some("mp.weixin.qq.com" | "api.kuaipaper.com" | "api.claw.speedai.com"))
+                || qr.expires_at <= now || qr.expires_at > now.saturating_add(900_000) {
+                return Err(super::error("登录二维码来源或有效期无效"));
+            }
         }
         if interaction.captcha.is_some() && !interaction.fields.iter().all(|field| field.key != "captcha") {
             return Err(super::error("登录输入字段不能与验证码结果重名"));
@@ -110,13 +154,25 @@ impl Interactions {
             if !field.optional && value.trim().is_empty() || field.kind == "select" && !value.is_empty()
                 && !field.options.iter().any(|option| option.value == value) { return Err(super::error("请完整填写当前登录步骤")); }
         }
-        if let Some(captcha) = &interaction.captcha {
-            let reply = &params["captcha"];
-            if reply["geetest_challenge"].as_str().is_none_or(|value| value.is_empty() || value.len() > 512 || !value.starts_with(&captcha.challenge))
-                || ["geetest_validate", "geetest_seccode"].iter().any(|key| reply[*key].as_str().is_none_or(|value| value.is_empty() || value.len() > 1024)) {
-                return Err(super::error("请完成当前步骤的人机验证"));
+        match &interaction.captcha {
+            Some(Captcha::Geetest(captcha)) => {
+                let reply = &params["captcha"];
+                if reply["geetest_challenge"].as_str().is_none_or(|value| value.is_empty() || value.len() > 512 || !value.starts_with(&captcha.challenge))
+                    || ["geetest_validate", "geetest_seccode"].iter().any(|key| reply[*key].as_str().is_none_or(|value| value.is_empty() || value.len() > 1024)) {
+                    return Err(super::error("请完成当前步骤的人机验证"));
+                }
             }
-        } else if params.get("captcha").is_some_and(|value| !value.is_null()) { return Err(super::error("当前步骤不接受验证码结果")); }
+            Some(Captcha::Alicom4(_)) => {
+                let reply = params["captcha"].as_object().ok_or_else(|| super::error("请完成当前步骤的人机验证"))?;
+                let keys = ["lot_number", "captcha_output", "pass_token", "gen_time"];
+                if reply.len() != keys.len() || reply.iter().any(|(key, value)| !keys.contains(&key.as_str())
+                    || value.as_str().is_none_or(|value| value.is_empty() || value.len() > 8192 || value.chars().any(char::is_control))) {
+                    return Err(super::error("请完成当前步骤的人机验证"));
+                }
+            }
+            None if params.get("captcha").is_some_and(|value| !value.is_null()) => return Err(super::error("当前步骤不接受验证码结果")),
+            None => {}
+        }
         Ok(())
     }
 }

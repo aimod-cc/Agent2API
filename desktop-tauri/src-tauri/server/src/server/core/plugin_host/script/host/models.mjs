@@ -3,7 +3,7 @@ import { getAuth, refresh, noteSignIn } from "./accounts.mjs"
 import { scope } from "./fetch.mjs"
 import { rpc } from "./wire.mjs"
 import { isLocalProvider, normalizeLocalModels } from "./local-provider.mjs"
-import { checkLocalProxy, hasLocalProcesses, waitLocalProcesses } from "./local-process.mjs"
+import { checkLocalProxy } from "./local-process.mjs"
 import { modelRecords, normalizeModels, modelsFromRecords } from "./model-records.mjs"
 import { sdkDefault, catalogProvider } from "./catalog.mjs"
 import { bounded } from "./entries.mjs"
@@ -26,9 +26,8 @@ export function metadata(provider) {
     login_methods: methods.filter(method => method.type === "oauth").map(method => ({ kind: "browser", button: method.label || "登录", hint: null })),
     default_models: provider.records, needs_proxy: false, refusal_finishes: [], refusal_markers: [], admin_panels: [],
     account_features: {
-      usage: typeof auth.usage === "function", identifier: isLocalProvider(provider) ? [] : ["uid", "email"],
-      expiry: isLocalProvider(provider) ? [] : ["expiresAt"], long_lived: isLocalProvider(provider),
-      email_as_name: !isLocalProvider(provider), default_limiters: [], concurrency_default: provider.concurrencyDefault || null,
+      usage: typeof auth.usage === "function", identifier: ["uid", "email"], expiry: ["expiresAt"],
+      email_as_name: true, default_limiters: [], concurrency_default: provider.concurrencyDefault || null,
     },
     checkin: typeof auth.checkin === "function" ? {
       description: provider.originalID === "wps-lingxi" ? "每日签到及一次性任务；可能消耗智点、发送对话并创建及解散群聊"
@@ -131,20 +130,23 @@ async function refreshModelCatalog(provider, auth, context) {
   const method = provider.hooks.provider?.models
   if (isLocalProvider(provider)) checkLocalProxy(provider, context)
   context.network = { tried: false, anyOk: false }
+  context.catalogCached = false
   const info = structuredClone(providerInfo(provider))
   const ask = () => typeof method === "function" ? method(info, { auth, signal: context.signal })
     : provider.originalID === "github-copilot" ? copilotModels(provider, auth)
       : Promise.resolve(catalogProvider(provider.originalID)?.models ?? info.models)
   let models
   try {
-    if (isLocalProvider(provider)) {
-      const deadline = Date.now() + 35_000
-      do {
+    const warming = provider.hooks.provider?.warming
+    const deadline = Date.now() + (isLocalProvider(provider) ? 35_000 : 20_000)
+    models = await bounded(ask, Math.max(1, deadline - Date.now()), "Provider model list")
+    if (typeof warming === "function") {
+      const pending = warming()
+      if (pending) {
+        await bounded(() => pending, Math.max(1, deadline - Date.now()), "Provider model catalog preparation")
         models = await bounded(ask, Math.max(1, deadline - Date.now()), "Provider model list")
-        if (!hasLocalProcesses(context)) break
-        while (hasLocalProcesses(context) && Date.now() < deadline) { context.signal.throwIfAborted(); await waitLocalProcesses(context) }
-      } while (Date.now() < deadline)
-    } else models = await bounded(ask, 20_000, "Provider model list")
+      }
+    }
   } catch (error) { await noteSignIn(error?.signIn); throw error }
   context.signal.throwIfAborted()
   if (revision !== provider.catalogRevision) throw new Error("Provider options changed during model refresh")
@@ -152,25 +154,28 @@ async function refreshModelCatalog(provider, auth, context) {
     || Object.entries(models).some(([id, model]) => !id.trim() || !model || typeof model !== "object" || Array.isArray(model))) throw new Error("插件返回的模型目录格式无效")
   const fellBack = models[Symbol.for("magpie.fellBack")] === true
     || models === info.models && context.network.tried && !context.network.anyOk
-    || isLocalProvider(provider) && !provider.localCatalog
   if (fellBack) return { refreshed: false, count: Object.keys(providerInfo(provider).models).length,
     message: "在线目录未能确认，保留插件的现有模型清单" }
   const original = models
   models = normalizeModels(provider, normalizeLocalModels(provider, models))
   const at = Date.now()
-  const confirmed = context.network.anyOk || original !== info.models || isLocalProvider(provider)
+  const cachedAt = context.catalogCached ? context.catalogCacheAt : context.catalogAccess?.at
+  const cachedCatalog = Boolean(cachedAt) && !context.network.anyOk
+  const confirmed = context.network.anyOk || !cachedCatalog && original !== info.models
+  const fetchedAt = cachedCatalog ? cachedAt : at
   const currentStamp = stamp(await getAuth())
-  const value = { models, at, stamp: currentStamp, confirmed, revision }
+  const value = { models, at: fetchedAt, stamp: currentStamp, confirmed, revision }
   provider.catalogs.set(account, value)
   provider.models = models
   provider.records = modelRecords(models, provider.loads)
   provider.remote = true
-  provider.refreshedAt = at
+  provider.refreshedAt = fetchedAt
   if (account) await rpc("store.ledger_put", { account, kind: CATALOG_KEY,
     value: { ...value, models: modelRecords(models, undefined, true), stamp: value.stamp } })
   const records = listModels(provider).models
-  return { refreshed: true, count: records.length, models: records,
-    concurrency_default: provider.concurrencyDefault || null, meta: { remote: true, refreshed_at: at } }
+  if (cachedCatalog) void rpc("notify", { kind: "models_changed", payload: { provider: provider.id, account } }).catch(() => {})
+  return { refreshed: !cachedCatalog, count: records.length, models: records,
+    concurrency_default: provider.concurrencyDefault || null, meta: { remote: true, refreshed_at: fetchedAt } }
 }
 
 export async function modelForRequest(provider, id) {

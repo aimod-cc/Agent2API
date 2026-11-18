@@ -21,11 +21,12 @@ import * as React from 'react'
 import { Alert, InputGroup, InputGroupAddon, InputGroupInput, SegmentedControl, Button, Item } from '@ui'
 
 import { isAddAccountProviderHidden } from '../../../ui-shared/provider-availability'
-import { groupAntigravityCards } from '../../../ui-shared/antigravity-login'
-import { accountCountOf, shared } from './add-account-bridge'
+import { useAdvertisements, type Advertisement } from '../../../ui-shared/advertisements'
+import { ProviderSponsorCards } from './add-provider-sponsor'
+import { shared, accountProviderAvailable, type RuntimeProviderRecord } from './add-account-bridge'
 import { presetOfProvider, providerPresetIcon, providerSiteLabel } from './add-provider-metadata'
 import { useProviderIcon } from './provider-icon'
-import { WORKBUDDY_ENTRY_LABEL, WORKBUDDY_PROVIDER } from './add-account-configs'
+import { WORKBUDDY_PROVIDER } from './add-account-constants'
 import { DIALOG_SEG_CLASS } from './dialog-segmented'
 import { AddGroup } from './add-account-kit'
 import { t } from '../i18n'
@@ -85,69 +86,61 @@ function typeLabelOf(type: AccountType): string {
   return 'Agent'
 }
 
-/**
- * Agent 段**不露出添加入口**的内置家（精确匹配 provider id）。目前只有
- * `cline-pass`：
- *   ① 它支持 API Key 形态（与 OAuth token 走同一个 Bearer 头），添加入口已迁到
- *      「预置 API」段的 Cline Pass 卡（`preset-providers.js` 的 `clinepass`）；
- *   ② 后端 Provider 与存量账号完全不动 —— 存量账号照常转发 / 刷新 / 删除，
- *      账号页的分组带仍会列出 cline-pass（那段走 accounts-domain 的
- *      providerSummaries 直读 providers 摘要，不经过本文件）；
- *   ③ 这是刻意的（与 `workbuddy-intl` 那条同类：入口只留一处），**不要当成
- *      漏掉的 bug 把它恢复**。
- * 注意只按 id 精确匹配：`cline-free`（免费池）不受影响，仍在 Agent 段。
- */
-const HIDDEN_AGENT_PROVIDERS = new Set(['cline-pass'])
+const API_SUBSCRIPTION_PROVIDERS = ['claude-subscription', 'chatgpt-subscription', 'codex-subscription']
+
+function isApiSubscriptionProvider(id: string): boolean {
+  return API_SUBSCRIPTION_PROVIDERS.includes(id)
+}
 
 type CardItem = {
   id: string
   label: string
   count: number
   preset?: boolean
+  sponsored?: boolean
   custom?: boolean
   icon?: string
   site?: string
   template?: string
 }
 
-/** 模板卡只负责新建；已建 API 按提供商 ID 列出，不按名称或模板类型合并。 */
-function providerCards(accountType: AccountType): CardItem[] {
+/** 订阅入口只调整展示分类，继续使用真实提供商 ID 和原有登录流程。 */
+function providerCards(accountType: AccountType, runtime: RuntimeProviderRecord[], counts: ReadonlyMap<string, number>, ads: readonly Advertisement[]): CardItem[] {
   const providers = shared().wbProviders
   if (accountType === TYPE_PRESET) {
-    return (shared().wbPresetProviders?.list || []).map(preset => ({
+    const liveAds = new Map(ads.filter(ad => ad.category === 'provider' && ad.presetKey).map(ad => [ad.presetKey, ad]))
+    const presets = (shared().wbPresetProviders?.list || []).filter(preset => !preset.sponsored || liveAds.has(preset.key))
+    const promoted = presets.filter(preset => liveAds.has(preset.key))
+      .sort((left, right) => liveAds.get(left.key)!.order - liveAds.get(right.key)!.order)
+    const ordinary = presets.filter(preset => !liveAds.has(preset.key))
+    const cardsOf = (list: typeof presets): CardItem[] => list.map(preset => ({
       id: PRESET_CARD_PREFIX + preset.key,
       label: preset.name,
       count: 0,
       preset: true,
+      sponsored: liveAds.has(preset.key),
     }))
+    const subscriptions: CardItem[] = API_SUBSCRIPTION_PROVIDERS.flatMap(id => {
+      const item = runtime.find(item => item.id === id && item.loginAvailable !== false)
+      return item ? [{ id, label: t(String(item.label || id)), count: Number(item.count) || 0 }] : []
+    })
+    return [...cardsOf(promoted), ...subscriptions, ...cardsOf(ordinary)]
   }
   if (accountType === TYPE_CUSTOM) {
     return (providers?.customList?.() || []).map(provider => ({
       id: provider.id,
       label: provider.name || provider.id,
-      count: accountCountOf(provider.id),
+      count: counts.get(provider.id) || 0,
       custom: true,
       icon: providerPresetIcon(provider),
       site: providerSiteLabel(provider.baseUrl),
       template: presetOfProvider(provider)?.name,
     }))
   }
-  // Cline Pass 的添加入口不在这一段（判据与缘由见 HIDDEN_AGENT_PROVIDERS）：
-  // 在映射成卡片之前就把摘要里那条剔掉，后面的名字处理都不必再想它。
-  // 过滤只落在**本函数**（PickStep 的列表构造）上：账号页分组带 / 模型管理页
-  // 读的是同一份 providers 摘要，但各自有自己的列表构造（accounts-domain 的
-  // providerSummaries、models-page 的左栏），不经过这里，所以存量 cline-pass
-  // 账号仍照常成组显示。
-  const list = (providers?.all?.() || [])
-    .filter(item => !isAddAccountProviderHidden(String(item?.id || '')) && item.loginAvailable !== false)
+  const list = runtime
+    .filter(item => !isAddAccountProviderHidden(String(item?.id || '')) && accountProviderAvailable(item.id || ''))
+    .filter(item => !isApiSubscriptionProvider(String(item.id || '')))
     .filter(item => (item.category === 'web') === (accountType === TYPE_WEB))
-    .filter(item => accountType === TYPE_WEB || !HIDDEN_AGENT_PROVIDERS.has(String(item?.id || '')))
-  // WorkBuddy 这张卡与它的弹窗标题用**中性品牌名**（不带地区）而不是注册名：
-  // 这个入口内部有「账号版本」分段，两版都从这一张卡进（名字见
-  // `WORKBUDDY_ENTRY_LABEL` 的说明）。与下面那条「国际版不进卡片列表」是同一件事
-  // 的两半：入口一处、版本在块里选。
-  // 注册名（「AutoClaw 国内版」这类）过一遍词典：卡片名与弹窗标题都由它出，
-  // 不查表的话非中文界面会在这里印中文
   const labelOf = (id: string, fallback: string): string => {
     if (id === 'minimax-code') return t('MiniMax Code 国内版')
     if (id === 'minimax-code-global') return t('MiniMax Code 国际版')
@@ -157,7 +150,7 @@ function providerCards(accountType: AccountType): CardItem[] {
     if (id === 'qwenwork') return t('千问办公 国内版')
     if (id === 'qwenwork-intl') return t('千问办公 国际版')
     if (id === 'qwenwork-enterprise') return t('QwenWork 千问办公企业版')
-    return id === WORKBUDDY_PROVIDER ? WORKBUDDY_ENTRY_LABEL : t(shared().wbProviders?.labelOf?.(id) || fallback)
+    return t(fallback)
   }
   // 摘要为空**不再兜底放 WorkBuddy 一张**（2026-10 改）：
   // 以前那张兜底卡的理由是「弹窗不能因为一次状态未就绪就空着」，但本版本
@@ -165,9 +158,7 @@ function providerCards(accountType: AccountType): CardItem[] {
   // 比空着更糟（用户以为功能坏了）。空列表的处置交给渲染处：显示
   // 「先去安装提供商插件包」，并给一个跳转入口。
   //
-  // 「摘要还没到」那一瞬也走空态：`add-account-modal` 的 reset 已经会在
-  // 列表为空时补拉一次再重画（见那里的 `providers?.load?.().then(bump)`），
-  // 所以空态最多闪一下。这个代价比留一张必然失败的卡小得多。
+  // 目录未就绪时由 useAddAccountCatalog 补读；没有可用插件时不生成可点击的兜底家。
   const cards: CardItem[] = list.map(item => {
     const id = String(item.id || '')
     return {
@@ -176,20 +167,15 @@ function providerCards(accountType: AccountType): CardItem[] {
       count: Number(item.count) || 0,
     }
   })
-  // WorkBuddy 国际版**不进这张卡列表**：它已经由国内版那张卡里的「账号版本」
-  // 分段覆盖（同一个 WorkBuddyBlock 的两个选项），两处入口会让用户以为要走两条
-  // 流程，而落到国际版卡片时那个块根本不会渲染（`add-account-modal` 按
-  // `provider === 'workbuddy'` 分派，症状是一张空表单）。
-  // 拆家后它是独立 provider，但**添加入口**仍然是同一个块 —— 与 AutoClaw /
-  // Accio / ZCode 那三家（各自一块、没有地区分段）的形态不同，这是刻意的：
-  // WorkBuddy 两地的登录页与凭证形态完全一致，合成一块对用户更省事。
-  const visible = groupAntigravityCards(cards.filter(item => item.id !== 'workbuddy-intl'))
-  // 展示顺序微调：AutoClaw 与 Qoder 的两个版本都要挨着（两列网格里同处一行）
-  // 且**国内版在前** —— 摘要给的是注册表顺序，Qoder 国际版注册在 Qoder 后面
-  // 本就相邻（拆家后无需再挪）；AutoClaw 国际版排在 Cline 之后，仍要前移。
-  const from = visible.findIndex(item => item.id === 'autoclaw-intl')
-  const to = visible.findIndex(item => item.id === 'autoclaw')
-  if (to >= 0 && from > to) visible.splice(to + 1, 0, visible.splice(from, 1)[0])
+  const visible = cards
+  for (const [primary, secondary] of [['workbuddy', 'workbuddy-intl'], ['autoclaw', 'autoclaw-intl']]) {
+    const from = visible.findIndex(item => item.id === secondary)
+    const to = visible.findIndex(item => item.id === primary)
+    if (to >= 0 && from >= 0 && from !== to + 1) {
+      const secondary = visible.splice(from, 1)[0]
+      visible.splice(visible.findIndex(item => item.id === primary) + 1, 0, secondary)
+    }
+  }
   return visible
 }
 
@@ -216,10 +202,10 @@ function cardMeta(item: CardItem): string {
   return item.count ? t('{n} 个账号', { n: item.count }) : t('还没有账号')
 }
 
-function ProviderCard({ item, onPick }: { item: CardItem; onPick: (id: string) => void }): React.ReactElement {
+const ProviderCard = React.memo(function ProviderCard({ item, onPick }: { item: CardItem; onPick: (id: string) => void }): React.ReactElement {
   return (
     <Item render={<Button variant='outline' />} variant='outline'
-      className='add-provider-card h-auto whitespace-normal text-left'
+      className={`add-provider-card h-auto whitespace-normal text-left${item.sponsored ? ' is-sponsored' : ''}`}
       data-provider={item.id}
       title={[item.label, item.site, item.template].filter(Boolean).join(' · ')}
       role='option'
@@ -234,7 +220,7 @@ function ProviderCard({ item, onPick }: { item: CardItem; onPick: (id: string) =
       <span className='add-provider-go'>›</span>
     </Item>
   )
-}
+})
 
 /**
  * 「新建自定义提供商」卡：落在自定义块上，由那个块切到「新建」模式。
@@ -282,14 +268,26 @@ export function PickStep({
   importing,
   importPanel,
 }: PickStepProps): React.ReactElement {
-  const hasAgentCards = React.useMemo(() => providerCards(TYPE_PROXY).length > 0, [version])
-  const hasWebCards = React.useMemo(() => providerCards(TYPE_WEB).length > 0, [version])
+  const ads = useAdvertisements()
+  const catalog = React.useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const account of shared().wbApp?.getState?.()?.accounts?.accounts || []) {
+      const provider = account.provider || WORKBUDDY_PROVIDER
+      counts.set(provider, (counts.get(provider) || 0) + 1)
+    }
+    const runtime = shared().wbProviders?.all?.() || []
+    return new Map(GROUPED_TYPES.map(type => [type, providerCards(type, runtime, counts, ads)]))
+  }, [version, ads])
+  const hasAgentCards = Boolean(catalog.get(TYPE_PROXY)?.length)
+  const hasWebCards = Boolean(catalog.get(TYPE_WEB)?.length)
   const hiddenType = (accountType === TYPE_PROXY && !hasAgentCards)
     || (accountType === TYPE_WEB && !hasWebCards)
   const effectiveType = hiddenType ? (hasWebCards ? TYPE_WEB : TYPE_PRESET) : accountType
   const keyword = search.trim().toLowerCase()
-  const hitOf = (item: CardItem): boolean => !keyword
-    || [item.label, item.site, item.template].filter(Boolean).join(' ').toLowerCase().includes(keyword)
+  const filtered = React.useMemo(() => new Map(GROUPED_TYPES.map(type => [type,
+    (catalog.get(type) || []).filter(item => !keyword
+      || [item.label, item.site, item.template].filter(Boolean).join(' ').toLowerCase().includes(keyword)),
+  ])), [catalog, keyword])
   // 有关键词时「新建」那张卡收起来 —— 用户在找的是一家。
   // 「全部」段里它住在「已建 API」组里当第一张（与单分类段的位置一致）
   const newCard = !keyword && (effectiveType === TYPE_CUSTOM || effectiveType === TYPE_ALL)
@@ -298,7 +296,7 @@ export function PickStep({
   const groups = (grouped ? GROUPED_TYPES : [effectiveType]).map(type => ({
     type,
     label: typeLabelOf(type),
-    items: providerCards(type).filter(hitOf),
+    items: filtered.get(type) || [],
   }))
   // 「全部」段：空组整组不出（连分组带一起收），否则找一类得先翻过几条空带子。
   // 唯一例外是「已建 API」—— 「新建自定义提供商」那张卡住在里面，它永远可达
@@ -308,7 +306,7 @@ export function PickStep({
   // 四个分类合起来命中多少家：「全部」那一档的计数徽标就是它（没搜索时即总家数）。
   // 徽标不只是装饰 —— 在「API 模板」段搜 Cline 时它显示 1，等于替「全部」喊了一声
   const hitCounts = new Map<AccountType, number>(GROUPED_TYPES
-    .map(type => [type, providerCards(type).filter(hitOf).length]))
+    .map(type => [type, filtered.get(type)?.length || 0]))
   const allHitCount = [...hitCounts.values()].reduce((sum, count) => sum + count, 0)
   // 当前分段里一家没有、别的分类里有：这正是「全部」段要解决的那件事，
   // 所以给一条提示把人送过去，而不是指望他自己想到去点「全部」。
@@ -401,6 +399,7 @@ export function PickStep({
             ) : null}
             {newCard && group.type === TYPE_CUSTOM ? <NewProviderCard onPick={onPick} /> : null}
             {group.items.map(item => <ProviderCard key={item.id} item={item} onPick={onPick} />)}
+            {group.type === TYPE_PRESET ? <ProviderSponsorCards onPick={onPick} keyword={keyword} /> : null}
           </React.Fragment>
         ))}
         {!hit.length && keyword ? (

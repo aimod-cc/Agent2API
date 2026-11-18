@@ -1,6 +1,6 @@
 import { listen, makeCall, forgetCall, cancelAll, send } from "./wire.mjs"
 import { scope, installFetch, cleanup } from "./fetch.mjs"
-import { load, provider, packages, packageList } from "./loader.mjs"
+import { load, reloadCatalog, provider, packages, packageList } from "./loader.mjs"
 import { updateSettings } from "./environment.mjs"
 import { dispatch, safeMessage } from "./provider.mjs"
 import { stop } from "./login.mjs"
@@ -44,6 +44,7 @@ async function handle(frame) {
         } else if (!initialized) throw new Error("Script host is not initialized")
         else if (frame.method === "ping") result = null
         else if (frame.method === "script.packages") result = packageList()
+        else if (frame.method === "script.catalog") result = await reloadCatalog()
         else if (frame.method === "script.settings") {
           const record = packages.find(record => record.id === params.package)
           if (!record) throw new Error("Plugin package is not loaded")
@@ -55,6 +56,7 @@ async function handle(frame) {
           call.originalProvider = item.originalID || item.id
           call.package = item.package
           call.lifetime = item.record.controller.signal
+          call.catalogAccess = item.record.catalogAccess
           if (call.account && ["conversation", "models.refresh", "token.ensure", "token.refresh", "usage.query", "checkin.claim", "claim", "claim.status", "admin.action"].includes(frame.method)) await getAuth()
           result = await dispatch(item, frame.method, params, call)
         }

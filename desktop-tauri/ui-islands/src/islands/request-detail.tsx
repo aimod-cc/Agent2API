@@ -17,6 +17,7 @@ import {
   type RawState, type DebugState, type DebugTraffic,
 } from './request-raw-panes'
 import { RouteReplayFacts } from './routing-replay'
+import { errorPolicyDescription } from '../../../ui-shared/routing-errors-record'
 import type { ReplayRow, RouteDecision } from './routing-types'
 
 /**
@@ -93,6 +94,7 @@ type AttemptDetail = {
   error?: unknown
   /** 内部重试链：原因 + 退避间隔（毫秒） */
   retries?: { reason?: unknown; delayMs?: unknown }[]
+  errorPolicy?: import('../../../ui-shared/routing-errors-types').ErrorPolicyRecord
   notice?: unknown
   /** 这一轮实际发给上游的体字节数（缺 = 没发出去过）*/
   bodyBytes?: unknown
@@ -429,7 +431,7 @@ function AttemptsTable({ row }: { row: RequestRow }) {
               : ''
             return `${String(retry?.reason || t('未知原因'))}${delay}`
           }).join('\n')
-          const notice = String(item?.notice ?? '').trim()
+          const notice = [String(item?.notice ?? '').trim(), errorPolicyDescription(item?.errorPolicy, t)].filter(Boolean).join(' · ')
           // 体积：上游那两道墙都按请求体字节判（413 / PARSE_REQUEST_DATA_EXCEPTION），
           const bodyRaw = Number(item?.bodyBytes)
           const bodyText = Number.isFinite(bodyRaw) && bodyRaw > 0

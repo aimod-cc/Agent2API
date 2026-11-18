@@ -1,6 +1,6 @@
 import type { HiddenAccountProvider, HiddenAccountsSummary } from './plugins'
 
-export type PluginPhase = 'queued' | 'runtime' | 'starting' | 'loading' | 'registering' | 'ready' | 'failed' | 'timeout' | 'blocked' | 'disabled' | 'unknown'
+export type PluginPhase = 'queued' | 'runtime' | 'starting' | 'loading' | 'waiting' | 'registering' | 'ready' | 'failed' | 'timeout' | 'blocked' | 'unsupported' | 'disabled' | 'unknown'
 export type PluginLoadStatus = {
   phase: PluginPhase
   attempt: number
@@ -20,6 +20,7 @@ export type PluginStartupSnapshot = {
   revision: string
   availabilityRevision: string
   pending: boolean
+  booting?: boolean
   packs: { id: string; name: string; script: boolean; startup: PluginLoadStatus }[]
   providers: Record<string, PluginProviderState>
   error: string | null
@@ -29,38 +30,53 @@ export type PluginStartupSnapshot = {
 type Translate = (key: string, params?: Record<string, string | number>) => string
 
 export function pluginPending(status?: PluginLoadStatus | null): boolean {
-  return Boolean(status && ['queued', 'runtime', 'starting', 'loading', 'registering'].includes(status.phase))
+  return Boolean(status && ['queued', 'runtime', 'starting', 'loading', 'waiting', 'registering'].includes(status.phase))
 }
 export function pluginFailed(status?: PluginLoadStatus | null): boolean {
   return status?.phase === 'failed' || status?.phase === 'timeout'
 }
-export function pluginPhaseLabel(status: PluginLoadStatus | null | undefined, t: Translate): string {
+export function pluginPhaseLabel(status: Pick<PluginLoadStatus, 'phase'> | null | undefined, t: Translate): string {
   switch (status?.phase) {
     case 'queued': return t('等待加载')
     case 'runtime': return t('准备运行环境')
     case 'starting': return t('正在启动')
     case 'loading': return t('正在加载')
+    case 'waiting': return t('等待其他插件')
     case 'registering': return t('即将就绪')
     case 'ready': return t('已就绪')
     case 'failed': return t('加载失败')
     case 'timeout': return t('初始化超时')
     case 'blocked': return t('等待运行环境恢复')
+    case 'unsupported': return t('旧插件已停止支持')
     case 'disabled': return t('已停用')
     default: return t('状态待确认')
   }
 }
+export function pluginLoadSteps(status: PluginLoadStatus | null | undefined, now: number): { phase: PluginPhase; durationMs: number }[] {
+  if (!status) return []
+  const steps = [...(status.steps || [])]
+  if (pluginPending(status) && status.finishedAt == null) steps.push({ phase: status.phase, durationMs: Math.max(0, now - status.updatedAt) })
+  return steps
+}
+
+export function pluginStepLabel(phase: PluginPhase, t: Translate): string {
+  return phase === 'loading' ? t('自身初始化') : pluginPhaseLabel({ phase }, t)
+}
+
 export function pluginPhaseDetail(status: PluginLoadStatus | null | undefined, t: Translate, now = Date.now()): string {
   if (status?.error && pluginFailed(status)) return status.error
   switch (status?.phase) {
-    case 'queued': return t('等待前面的插件完成，不代表加载失败。')
+    case 'queued': return t('等待空闲的加载位置，不代表加载失败。')
     case 'runtime': return t('正在检查或准备脚本运行环境。')
     case 'starting': return t('正在启动插件，账号将在就绪后自动恢复。')
     case 'loading': return now - status.updatedAt > 10_000
       ? t('启动较慢，仍在加载；尚未收到失败结果。') : t('正在初始化插件，尚未收到失败结果。')
+    case 'waiting': return t('本插件初始化已完成，正在等待其他插件完成后统一校验和登记。')
     case 'registering': return t('初始化已完成，正在等待校验和登记。')
     case 'ready': return t('插件已就绪，账号列表将自动同步。')
     case 'timeout': return t('本次初始化超过等待时限，已停止；可查看诊断后重试。')
     case 'blocked': return t('共享运行环境尚未就绪，本插件没有明确的加载失败结果。')
+    case 'unsupported': return t('旧原生提供商插件已停止支持，请安装对应的 WASM 插件；已有账号和配置保留。')
     case 'failed': return t('本次加载未完成，请查看诊断。')
     default: return t('暂未取得明确的加载结果，不能据此判断启动失败。')
   }
@@ -72,8 +88,9 @@ const listeners = new Set<() => void>()
 export const subscribePluginStartup = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } }
 export const getPluginStartup = () => view
 function publish(patch: Partial<View>) { view = { ...view, ...patch }; listeners.forEach(listener => listener()) }
-let wake: (() => void) | undefined
+let wake: ((reusePending?: boolean) => void) | undefined
 export function refreshPluginStartup() { wake?.() }
+export function refreshPluginStartupIfIdle() { wake?.(true) }
 
 export function startPluginStartupPolling(options: {
   read(signal: AbortSignal): Promise<PluginStartupSnapshot>
@@ -115,10 +132,11 @@ export function startPluginStartupPolling(options: {
       const changed = view.value?.bootId !== next.bootId || view.value?.revision !== next.revision
       publish({ value: next, error: next.error || '', receivedAt: Date.now(), unavailable: false })
       if (changed) options.onChange?.()
-      const availability = `${next.bootId}:${next.availabilityRevision}`
+      const availability = `${next.bootId}:${next.availabilityRevision}:${Boolean(next.booting)}`
       const session = options.session()
-      if (lastAvailable && lastAvailable !== availability || !session
-        || session.bootId !== next.bootId || session.availabilityRevision !== next.availabilityRevision) sync()
+      if ((lastAvailable && lastAvailable !== availability || !session
+        || session.bootId !== next.bootId || session.availabilityRevision !== next.availabilityRevision
+        || Boolean(session.booting) !== Boolean(next.booting)) && (!next.booting || !session)) sync()
       lastAvailable = availability
     } catch (error) {
       if (disposed) return
@@ -138,7 +156,11 @@ export function startPluginStartupPolling(options: {
       }
     }
   }
-  const refresh = () => { clearTimeout(timer); void poll() }
+  const refresh = (reusePending = false) => {
+    if (reusePending && pending) return
+    clearTimeout(timer)
+    void poll()
+  }
   const visibility = () => { if (!document.hidden) refresh(); else clearTimeout(timer) }
   wake = refresh
   document.addEventListener('visibilitychange', visibility)
@@ -160,6 +182,7 @@ export function hiddenWithStartup(hidden: HiddenAccountsSummary): HiddenAccounts
   const providers = hidden.providers.map((item): HiddenAccountProvider => {
     const live = view.value?.providers[item.id]
     if (!live || item.startup && item.startup.updatedAt > live.startup.updatedAt) return item
+    if (live.startup.phase === 'unsupported') return { ...item, packId: live.packId, startup: live.startup, reason: 'legacy_unsupported' }
     if (!live.enabled) return { ...item, packId: live.packId, startup: live.startup,
       reason: live.packEnabled ? 'provider_disabled' : 'pack_disabled' }
     const startup = live.startup

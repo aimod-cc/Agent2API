@@ -15,6 +15,7 @@ import * as React from 'react'
  */
 
 import { fetchSession, type SessionPayload, type Account } from '../api/gateway'
+import { apiCall } from '../api/client'
 // 插件申报的账号行参数（有效期键 / 标识键 / 余额能力）：随会话一起下发，
 // 收到即归一（见 providerFacts 的模块头）
 import { adoptProviderFacts } from '../lib/providerFacts'
@@ -308,12 +309,47 @@ class Store {
       const session = await fetchSession(controller.signal)
       if (controller.signal.aborted || serverIdentity() !== identity) return
       adoptProviderFacts(session.accountFeatures)
-      this.patch({ session, sessionError: '', loading: false, authLost: null })
+      const accounts = this.mergeAccounts(session.accounts)
+      this.patch({ session: { ...session, accounts }, sessionError: '', loading: false, authLost: null })
     } catch (error) {
       if (controller.signal.aborted || serverIdentity() !== identity) return
       const message = error instanceof Error ? error.message : String(error)
       this.patch({ sessionError: message, loading: false })
     }
+  }
+
+  private mergeAccounts(next: SessionPayload['accounts']): SessionPayload['accounts'] {
+    const previous = this.state.session?.accounts
+    const signature = (snapshot: SessionPayload['accounts']) => {
+      if (!snapshot) return ''
+      const { sorting, ...fields } = snapshot
+      const { updatedAt: _updatedAt, ...order } = sorting || {}
+      return JSON.stringify({ ...fields, sorting: order })
+    }
+    if (signature(previous) === signature(next)) return previous
+    const saved = new Map((previous?.accounts || []).map(account => [account.id, account]))
+    return next ? { ...next, accounts: (next.accounts || []).map(account => {
+      const old = saved.get(account.id)
+      return old && JSON.stringify(old) === JSON.stringify(account) ? old : account
+    }) } : next
+  }
+
+  applyAccounts(next: SessionPayload['accounts']): void {
+    if (!next) return
+    const accounts = this.mergeAccounts(next)
+    if (accounts === this.state.session?.accounts) return
+    const session = { ...this.state.session, accounts }
+    if (next.accountFeatures) { session.accountFeatures = next.accountFeatures; adoptProviderFacts(next.accountFeatures) }
+    if (next.providerIcons) session.providerIcons = next.providerIcons
+    this.patch({ session })
+  }
+
+  async refreshAccounts(): Promise<void> {
+    const identity = serverIdentity()
+    const next = await apiCall<NonNullable<SessionPayload['accounts']>>('/api/accounts?view=index')
+    if (serverIdentity() !== identity) return
+    this.applyAccounts(next)
+    if (this.state.sessionError) this.patch({ sessionError: '' })
   }
 
   /** 账号清单（会话里的那份就是权威快照） */

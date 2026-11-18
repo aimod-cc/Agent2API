@@ -8,16 +8,74 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Semaphore;
+use tokio::sync::{watch, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use super::ResolvedProxy;
 
+mod lease;
 mod tunnel;
+
+pub(crate) use lease::{freeze_path, freeze_selected, FrozenEndpoint};
+
+/// 宿主在真正选路时捕获的完整路径；字段封闭，无JSON/桥地址/认证值反查构造器。
+/// 只保存本次选择，不代表请求已发送或任务获准；克隆不重新读取系统上游。
+#[derive(Clone)]
+pub(crate) struct SelectedPath {
+    choice: PathChoice,
+}
+
+#[derive(Clone)]
+enum PathChoice {
+    Direct,
+    Single(ResolvedProxy),
+    Chain { target: ResolvedProxy, upstream: ResolvedProxy },
+}
+
+/// None只能由调用方确认是明确直连后传入；不在这里把缺失选路解释为直连。
+/// 本阶段不创建客户端或本机桥；链上游在这一处选定，后续仅使用这份快照。
+pub(crate) fn capture_selected(selected: Option<ResolvedProxy>) -> Result<SelectedPath, String> {
+    let Some(mut target) = selected else {
+        return Ok(SelectedPath { choice: PathChoice::Direct });
+    };
+    validate(&target)?;
+    target.host = super::normalize_host(&target.host)?;
+    let choice = if target.non_direct {
+        let mut upstream = selected_upstream(&target)?;
+        upstream.host = super::normalize_host(&upstream.host)?;
+        PathChoice::Chain { target, upstream }
+    } else {
+        PathChoice::Single(target)
+    };
+    Ok(SelectedPath { choice })
+}
+
+impl SelectedPath {
+    pub(crate) fn is_direct(&self) -> bool {
+        matches!(&self.choice, PathChoice::Direct)
+    }
+
+    /// 兼容参数只从完整快照投影；链仍可初始化本机桥，但不重选系统上游或探测远端。
+    pub(crate) fn wire_json(&self) -> Result<Value, String> {
+        let proxy = match &self.choice {
+            PathChoice::Direct => return Ok(Value::Null),
+            PathChoice::Single(proxy) => proxy.clone(),
+            PathChoice::Chain { target, upstream } => {
+                let mut entries = bridges().lock().map_err(|_| "非直连代理转发不可用")?;
+                let bridge = bridge_locked(&mut entries, target, upstream)?;
+                endpoint_for(target, &bridge)
+            }
+        };
+        Ok(wire_value(&proxy))
+    }
+}
 
 const MAX_BRIDGES: usize = 128;
 const IDLE_TTL: Duration = Duration::from_secs(30 * 60);
 const HEADER_LIMIT: usize = 16 * 1024;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Startup { Starting, Ready, Failed }
 
 struct Bridge {
     port: u16,
@@ -25,6 +83,9 @@ struct Bridge {
     password: String,
     touched: Arc<Mutex<Instant>>,
     active: Arc<AtomicUsize>,
+    // 独立于临时 Arc 与普通网络连接；仅在桥表锁下增加，克隆的是同一份租约。
+    leases: AtomicUsize,
+    startup: watch::Receiver<Startup>,
     cancel: CancellationToken,
 }
 
@@ -61,23 +122,37 @@ fn validate(proxy: &ResolvedProxy) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn endpoint(proxy: &ResolvedProxy) -> Result<ResolvedProxy, String> {
-    if !proxy.non_direct { return Ok(proxy.clone()); }
+fn selected_upstream(proxy: &ResolvedProxy) -> Result<ResolvedProxy, String> {
     validate(proxy)?;
     let upstream = super::system::upstream()?;
     validate(&upstream)?;
     if super::normalize_host(&proxy.host)? == super::normalize_host(&upstream.host)? && proxy.port == upstream.port {
         return Err("非直连代理不能与系统代理使用同一个地址和端口".to_string());
     }
-    let key = fingerprint(proxy, &upstream);
+    Ok(upstream)
+}
+
+pub(crate) fn endpoint(proxy: &ResolvedProxy) -> Result<ResolvedProxy, String> {
+    if !proxy.non_direct { return Ok(proxy.clone()); }
+    let upstream = selected_upstream(proxy)?;
     let mut entries = bridges().lock().map_err(|_| "非直连代理转发不可用")?;
+    let bridge = bridge_locked(&mut entries, proxy, &upstream)?;
+    Ok(endpoint_for(proxy, &bridge))
+}
+
+// 调用方必须持续持有桥表锁；租约建立和淘汰判断不能分成两段。
+fn bridge_locked(entries: &mut HashMap<String, Arc<Bridge>>, proxy: &ResolvedProxy,
+    upstream: &ResolvedProxy) -> Result<Arc<Bridge>, String> {
+    let key = fingerprint(proxy, upstream);
     entries.retain(|_, bridge| !bridge.cancel.is_cancelled()
-        && (bridge.active.load(Ordering::Relaxed) > 0 || bridge.touched.lock().is_ok_and(|time| time.elapsed() < IDLE_TTL)));
+        && (bridge.leases.load(Ordering::Acquire) > 0 || bridge.active.load(Ordering::Relaxed) > 0
+            || bridge.touched.lock().is_ok_and(|time| time.elapsed() < IDLE_TTL)));
     let bridge = if let Some(bridge) = entries.get(&key) {
         bridge.clone()
     } else {
         if entries.len() >= MAX_BRIDGES {
-            let oldest = entries.iter().filter(|(_, bridge)| bridge.active.load(Ordering::Relaxed) == 0)
+            let oldest = entries.iter().filter(|(_, bridge)| bridge.leases.load(Ordering::Acquire) == 0
+                    && bridge.active.load(Ordering::Relaxed) == 0)
                 .filter_map(|(key, bridge)| bridge.touched.lock().ok().map(|time| (key.clone(), *time)))
                 .min_by_key(|(_, time)| *time).map(|(key, _)| key);
             let Some(oldest) = oldest else { return Err("非直连代理连接过多，请稍后重试".to_string()); };
@@ -94,32 +169,45 @@ pub(crate) fn endpoint(proxy: &ResolvedProxy) -> Result<ResolvedProxy, String> {
         let cancel = CancellationToken::new();
         let touched = Arc::new(Mutex::new(Instant::now()));
         let active = Arc::new(AtomicUsize::new(0));
+        let (ready, startup) = watch::channel(Startup::Starting);
         let bridge = Arc::new(Bridge {
             port, username: username.clone(), password: password.clone(),
-            touched: touched.clone(), active: active.clone(), cancel: cancel.clone(),
+            touched: touched.clone(), active: active.clone(), leases: AtomicUsize::new(0),
+            startup, cancel: cancel.clone(),
         });
         let target = proxy.clone();
+        let upstream = upstream.clone();
+        // 在 spawn 前构造，任务即使未被首次轮询便被丢弃，也会报告失败并取消桥。
+        let startup = StartupGuard { ready, cancel: cancel.clone() };
         crate::spawn_task(async move {
-            serve(listener, target, upstream, username, password, cancel, touched, active).await;
+            serve(listener, target, upstream, username, password, cancel, touched, active, startup).await;
         });
         entries.insert(key, bridge.clone());
         bridge
     };
     if let Ok(mut touched) = bridge.touched.lock() { *touched = Instant::now(); }
-    Ok(ResolvedProxy {
+    Ok(bridge)
+}
+
+fn endpoint_for(proxy: &ResolvedProxy, bridge: &Bridge) -> ResolvedProxy {
+    ResolvedProxy {
         source: proxy.source.clone(), protocol: "http".to_string(),
         host: "127.0.0.1".to_string(), port: Some(bridge.port),
         username: bridge.username.clone(), password: bridge.password.clone(),
         label: proxy.label.clone(), non_direct: false,
-    })
+    }
 }
 
 pub(crate) fn wire_json(proxy: &ResolvedProxy) -> Result<Value, String> {
     let proxy = endpoint(proxy)?;
-    Ok(json!({
+    Ok(wire_value(&proxy))
+}
+
+fn wire_value(proxy: &ResolvedProxy) -> Value {
+    json!({
         "protocol": proxy.protocol, "host": proxy.host, "port": proxy.port,
         "username": proxy.username, "password": proxy.password,
-    }))
+    })
 }
 
 fn limits() -> Arc<Semaphore> {
@@ -127,14 +215,30 @@ fn limits() -> Arc<Semaphore> {
     LIMITS.get_or_init(|| Arc::new(Semaphore::new(512))).clone()
 }
 
+// 只报告本机监听是否已交给 Tokio；不探测系统代理或目标代理是否连通。
+struct StartupGuard {
+    ready: watch::Sender<Startup>,
+    cancel: CancellationToken,
+}
+
+impl Drop for StartupGuard {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.ready.send_replace(Startup::Failed);
+    }
+}
+
 async fn serve(
     listener: std::net::TcpListener, target: ResolvedProxy, upstream: ResolvedProxy,
-    username: String, password: String, cancel: CancellationToken, touched: Arc<Mutex<Instant>>, active: Arc<AtomicUsize>,
+    username: String, password: String, cancel: CancellationToken,
+    touched: Arc<Mutex<Instant>>, active: Arc<AtomicUsize>, startup: StartupGuard,
 ) {
-    let Ok(listener) = TcpListener::from_std(listener) else { cancel.cancel(); return; };
+    let Ok(listener) = TcpListener::from_std(listener) else { return; };
     let auth = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}")));
     let target = Arc::new(target);
     let upstream = Arc::new(upstream);
+    if cancel.is_cancelled() { return; }
+    startup.ready.send_replace(Startup::Ready);
     loop {
         let accepted = tokio::select! {
             biased;
@@ -178,13 +282,16 @@ async fn handle(socket: TcpStream, target: &ResolvedProxy, upstream: &ResolvedPr
     match tokio::time::timeout(timeout, opening).await {
         Ok(Ok(mut remote)) => { let _ = tokio::io::copy_bidirectional(&mut client, &mut remote).await; }
         result => {
-            let reason = match result { Ok(Err(reason)) => reason, _ => "非直连代理连接超时".to_string() };
-            let (status, code) = if reason == "本机代理认证失败" {
-                ("407 Proxy Authentication Required", 407)
-            } else { ("502 Bad Gateway", 502) };
+            let unauthorized = matches!(&result, Ok(Err(reason)) if reason == "本机代理认证失败");
+            // 不把底层错误链（可能含代理地址/认证详情）带进响应或日志。
+            let (status, reason) = if unauthorized {
+                ("407 Proxy Authentication Required", "本机代理认证失败")
+            } else {
+                ("502 Bad Gateway", "非直连代理连接失败，请检查当前固定出口")
+            };
             let response = format!("HTTP/1.1 {status}\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\n\r\n{reason}", reason.len());
             let _ = tokio::time::timeout(Duration::from_secs(2), client.write_all(response.as_bytes())).await;
-            if code != 407 { crate::server::logging::log("[Proxies]", &format!("非直连代理连接失败：{reason}")); }
+            if !unauthorized { crate::server::logging::log("[Proxies]", reason); }
         }
     }
 }

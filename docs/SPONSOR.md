@@ -14,10 +14,9 @@
 
 **QQ 群**：Agent2API 交流群，在 QQ 里搜索群号即可加入。
 
-- 群 1：`1127656296`（**即将满员，请优先加3群、4群**）
-- 群 2：`1130894674`（**即将满员，请优先加3群、4群**）
+- 群 1：`1127656296`
+- 群 2：`1130894674`
 - 群 3：`1108276647`
-- 群 4：`1054072416`
 
 **Telegram 群**：<https://t.me/+9gM8YPvgRL02NGRl>
 
@@ -33,10 +32,9 @@ Other ways to help just as much: ⭐ star the repository · 🐛 file issues or 
 
 **QQ groups**: Agent2API chat groups; search the group number in QQ to join.
 
-- Group 1: `1127656296` (**Almost full — please join group 3 or 4 first**)
-- Group 2: `1130894674` (**Almost full — please join group 3 or 4 first**)
+- Group 1: `1127656296`
+- Group 2: `1130894674`
 - Group 3: `1108276647`
-- Group 4: `1054072416`
 
 **Telegram group**: <https://t.me/+9gM8YPvgRL02NGRl>
 

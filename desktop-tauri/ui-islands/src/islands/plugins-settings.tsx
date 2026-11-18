@@ -4,12 +4,13 @@ import {
   Input, NavItem, NavList, Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
   Sidebar, Switch,
 } from '@ui'
-import { GithubUpdateSettings } from './update-github-settings'
+import { UpdateNetworkSettings } from './update-network-settings'
 import { api, toast } from './plugins-shared'
 import type { PluginSettings } from './plugins-types'
+import { RuntimeCapacityPanel } from '../../../ui-shared/runtime-capacity-panel'
 import { t } from '../i18n'
 
-type PaneId = 'check' | 'channel' | 'automatic' | 'network' | 'token'
+type PaneId = 'capacity' | 'check' | 'channel' | 'automatic' | 'network'
 
 export function PluginSettingsDialog({ open, onClose, onChanged }: {
   open: boolean
@@ -22,8 +23,8 @@ export function PluginSettingsDialog({ open, onClose, onChanged }: {
   const [pane, setPane] = React.useState<PaneId>('check')
   const contentRef = React.useRef<HTMLDivElement>(null)
   const panes: Array<[PaneId, string]> = [
-    ['check', t('检查计划')], ['channel', t('更新通道')], ['automatic', t('自动更新插件')],
-    ['network', t('网络')], ['token', t('GitHub 令牌')],
+    ['capacity', t('运行容量')], ['check', t('检查计划')], ['channel', t('更新通道')], ['automatic', t('自动更新插件')],
+    ['network', t('出网代理')],
   ]
   const modes = [
     { value: 'follow', label: t('跟随软件') },
@@ -90,6 +91,10 @@ export function PluginSettingsDialog({ open, onClose, onChanged }: {
             </NavList>
           </Sidebar>
           <div className='settings-dlg-main' ref={contentRef}>
+            {pane === 'capacity' ? <div>
+              <div className='settings-dlg-pane-head'><h3>{t('运行容量')}</h3></div>
+              <RuntimeCapacityPanel api={api} t={t} />
+            </div> : null}
             {pane === 'check' ? <div>
               <div className='settings-dlg-pane-head'>
                 <h3>{t('检查计划')}</h3>
@@ -171,7 +176,7 @@ export function PluginSettingsDialog({ open, onClose, onChanged }: {
                 </p>
               </div>
             </div> : null}
-            {open ? <GithubUpdateSettings plugin pane={pane === 'network' || pane === 'token' ? pane : null} /> : null}
+            {open && pane === 'network' ? <UpdateNetworkSettings plugin /> : null}
           </div>
         </DialogBody>
         <DialogFooter className='settings-dlg-footer'>

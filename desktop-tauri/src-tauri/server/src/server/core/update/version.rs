@@ -16,70 +16,15 @@ use serde_json::Value;
 
 use crate::server::config::UpdateChannels;
 
-/// 默认仓库：安装包实际发布的地方（独立构建账号下的仓库）。
-///
-/// ── 为什么不是主仓库 ────────────────────────────────────────
-/// 构建已搬到专用账号（见 `Agent2Builder/agent2api-releases` 的
-/// `release.yml`）：七个平台 job 跑一次是重负载，留在主仓库做 tag 触发容易
-/// 被判定为 Actions 滥用。因此**主仓库不再发带安装包的 Release** —— 这个
-/// 常量若仍指向主仓库，更新检查会永远「已是最新」（不报错，只是静默失效）。
-///
-/// ── 这个值是可以被远程改掉的 ────────────────────────────────
-/// 它只是**兜底**。正常情况下实际用的是索引里的 `app.repo`
-/// （见 `core::update::index`）：构建仓库换了，改索引文件即可，不必发版。
-/// 这里保留一个可用值，是为了「索引读不到也还能更新」。
-///
-/// `WORKBUDDY_UPDATE_REPO` 环境变量仍可覆盖（最高优先级，且不读索引）。
+/// 官网发布策略尚未取得时使用的产物标识；所有查询仍通过官网。
 pub const DEFAULT_REPO: &str = "Agent2Builder/agent2api-releases";
 
-/// 项目源码仓库（`owner/repo`）。
-///
-/// ── 为什么不能复用 [`DEFAULT_REPO`] ──────────────────────────
-/// 界面上的「关于作者 / 收藏项目」两个入口指的是**项目**，不是安装包存放处。
-/// 构建账号（`Agent2Builder`）只是借来跑 Actions 的，它的主页没有代码、
-/// 没有 issue、Star 也没有意义 —— 拿 `repository` 现拼链接会把人领错地方。
-///
-/// 这个值不随索引变：索引回答的是「产物在哪」，这里回答的是「项目在哪」，
-/// 两者只有「换源码仓库」时才需要一起改（换构建仓库不该动它）。
-///
-/// 网页端 / 手机端拿到的 `sourceRepository` 就是它（见 `build_check_result`）。
+/// 项目主页与开源链接不属于更新来源。
 pub const SOURCE_REPO: &str = "aimod-cc/Agent2API";
 
-/// GitHub API 根（Node 版 GITHUB_API）—— [`api_base`] 的默认值
-pub const GITHUB_API: &str = "https://api.github.com";
-
-/// 自建更新源的地址（`WORKBUDDY_UPDATE_API_BASE`，空串/非法值当没配）。
-///
-/// 用途是「不连 GitHub 也能更新」：内网镜像站、离线演练都走这条。配置后
-/// **只管更新检查与下载两件事**（账号转发、模型清单一概不受影响）：
-///   · 检查更新打 `{base}/repos/{repo}/releases/latest`，返回体与 GitHub 同形；
-///     「加入 beta 版」打开时改打 `{base}/repos/{repo}/releases?per_page=…`
-///     （取的是**数组**，元素同形）—— 自建源要支持 beta 通道就得提供这个列表接口；
-///   · 下载白名单额外放行 `base` 的 host（见 [`assert_downloadable`]）——
-///     这是**显式配置才生效**的口子，没配就还是只有 GitHub 那几个域名。
-pub fn custom_api_base() -> Option<String> {
-    std::env::var("WORKBUDDY_UPDATE_API_BASE")
-        .ok()
-        .map(|value| value.trim().trim_end_matches('/').to_string())
-        .filter(|value| !value.is_empty())
+pub fn api_base() -> &'static str {
+    super::website::API_BASE
 }
-
-/// 更新源 API 根：配了 `WORKBUDDY_UPDATE_API_BASE` 就用它，否则是 GitHub。
-pub fn api_base() -> String {
-    custom_api_base().unwrap_or_else(|| GITHUB_API.to_string())
-}
-
-/// 允许下载的域名：Release 资产实际会落在 github.com 或 *.githubusercontent.com
-/// （Node 版 ALLOWED_HOSTS）
-pub const ALLOWED_HOSTS: &[&str] = &[
-    "github.com",
-    "www.github.com",
-    "objects.githubusercontent.com",
-    "codeload.github.com",
-];
-
-/// 允许下载的域名后缀（Node 版 ALLOWED_HOST_SUFFIX）
-pub const ALLOWED_HOST_SUFFIX: &str = ".githubusercontent.com";
 
 /// 安装包体积上限：只用于拦明显异常的响应，避免把磁盘写满（Node 版 600MB）
 pub const MAX_INSTALLER_BYTES: u64 = 600 * 1024 * 1024;
@@ -91,25 +36,15 @@ pub const MAX_INSTALLER_BYTES: u64 = 600 * 1024 * 1024;
 pub struct UpdateError {
     pub message: String,
     pub status_code: i32,
-    pub rate_limits: Vec<super::rate_limit::RateLimit>,
 }
 
 impl UpdateError {
     pub fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into(), status_code: 502, rate_limits: Vec::new() }
+        Self { message: message.into(), status_code: 502 }
     }
 
     pub fn with_status(status_code: i32, message: impl Into<String>) -> Self {
-        Self { message: message.into(), status_code, rate_limits: Vec::new() }
-    }
-
-    pub fn rate_limited(rate_limits: Vec<super::rate_limit::RateLimit>) -> Self {
-        Self { message: super::rate_limit::message(&rate_limits), status_code: 429, rate_limits }
-    }
-
-    pub fn retry_at(&self) -> i64 {
-        self.rate_limits.iter().filter(|limit| limit.retry_at > crate::server::logging::now_ms())
-            .map(|limit| limit.retry_at).min().unwrap_or(0)
+        Self { message: message.into(), status_code }
     }
 
     /// 转成统一的网关错误。更新路由的失败 body 走 OpenAI 风格
@@ -280,50 +215,12 @@ pub fn pick_listed_release(payload: &Value, channels: UpdateChannels) -> Option<
 
 // ─── URL 与资产 ─────────────────────────────────────────────
 
-/// 域名白名单校验：只允许 https 且落在 GitHub 资产域名下（对应 assertDownloadable）。
-///
-/// Node 用 `new URL(url)` 解析：非法 URL 抛 400「下载地址不是合法 URL」，
-/// 非 https 抛 400「下载地址必须是 https」，域名不在列表抛 400
-/// 「下载地址域名不在允许列表内: <host>」。
-pub fn assert_downloadable(url: &str) -> Result<url::Url, UpdateError> {
-    let parsed = url::Url::parse(url)
+/// 安装包只允许从官网受控下载路径获取。
+pub fn assert_downloadable(value: &str) -> Result<url::Url, UpdateError> {
+    let parsed = url::Url::parse(value)
         .map_err(|_| UpdateError::with_status(400, "下载地址不是合法 URL"))?;
-    if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err(UpdateError::with_status(400, "下载地址不能包含凭证"));
-    }
-    let host = parsed.host_str().unwrap_or("").to_lowercase();
-
-    // ── 自建更新源（WORKBUDDY_UPDATE_API_BASE）───────────────
-    // 放行「显式配置的那个源」本身：host 相同或它的子域。scheme 跟着配置走 ——
-    // 配 http:// 就允许 http 下载（本地演练 / 内网镜像常见形态），配 https://
-    // 仍然强制 https。公共 GitHub 那条路不受影响，照旧强制 https + 白名单。
-    //
-    // 代价说清楚：把源配成 http 等于放弃传输层保护，完整性只剩 sha256 这一道
-    // （而校验文件也来自同一个源）。**演练与内网可信网络**用它没问题，公网部署
-    // 请配 https。
-    if let Some(base) = custom_api_base() {
-        if let Ok(parsed_base) = url::Url::parse(&base) {
-            let base_host = parsed_base.host_str().unwrap_or("").to_lowercase();
-            let same_host = !base_host.is_empty()
-                && (host == base_host || host.ends_with(&format!(".{base_host}")));
-            if same_host {
-                if parsed_base.scheme() == "https" && parsed.scheme() != "https" {
-                    return Err(UpdateError::with_status(400, "下载地址必须是 https"));
-                }
-                return Ok(parsed);
-            }
-        }
-    }
-
-    if parsed.scheme() != "https" {
-        return Err(UpdateError::with_status(400, "下载地址必须是 https"));
-    }
-    let allowed = ALLOWED_HOSTS.contains(&host.as_str()) || host.ends_with(ALLOWED_HOST_SUFFIX);
-    if !allowed {
-        return Err(UpdateError::with_status(
-            400,
-            format!("下载地址域名不在允许列表内: {host}"),
-        ));
+    if !super::website::download_url(value) {
+        return Err(UpdateError::with_status(400, "更新包只能从 Agent2API 官网下载"));
     }
     Ok(parsed)
 }

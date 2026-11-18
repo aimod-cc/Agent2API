@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { Alert, Button, Spinner } from '@ui'
+import { Alert, Button, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Spinner } from '@ui'
 import type { ScriptCatalogInfo, ScriptPluginsState, ScriptRecommendation } from './plugins'
 import type { PluginTranslate } from './plugins-store'
 
@@ -55,6 +55,7 @@ export function ScriptCatalogStatus({ catalog, request, refresh, disabled, t }: 
 }) {
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState('')
+  const [detailsOpen, setDetailsOpen] = React.useState(false)
   const pending = React.useRef(false)
   const refreshing = busy || catalog.refreshing
   const checkedAt = Math.max(catalog.marketCheckedAt, catalog.githubCheckedAt)
@@ -92,10 +93,28 @@ export function ScriptCatalogStatus({ catalog, request, refresh, disabled, t }: 
         <Button variant='ghost' size='xs' disabled={disabled || refreshing} onClick={() => void reload()}>{t('刷新清单')}</Button>
       </div>
     </div>
-    {problems.length ? <Alert variant='warning' className='text-xs'>
+    {problems.length ? <Alert variant='warning' className='flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2 text-xs'>
       <p className='m-0'>{t('部分信息未能更新，已读取的插件仍可查看。')}</p>
-      {problems.map((problem, index) => <p key={index} className='m-0 mt-1 whitespace-pre-wrap break-words'>{problem}</p>)}
-      {retryAt.length ? <p className='m-0 mt-1'>{t('受影响的来源将在 {time} 后自动重试', { time: new Date(Math.min(...retryAt)).toLocaleTimeString() })}</p> : null}
+      <Button variant='link' size='xs' className='shrink-0 text-inherit' onClick={() => setDetailsOpen(true)}>{t('查看详情')}</Button>
     </Alert> : null}
+    <Dialog open={detailsOpen} onOpenChange={setDetailsOpen}>
+      <DialogContent className='w-[min(560px,calc(100vw-32px))]'>
+        <DialogHeader className='shrink-0'><DialogTitle>{t('插件清单更新详情')}</DialogTitle></DialogHeader>
+        <DialogBody className='min-h-0 gap-3 text-sm'>
+          <p className='m-0 text-muted-foreground'>{problems.length
+            ? t('部分信息未能更新，已读取的插件仍可查看。') : refreshing ? t('正在读取插件清单…') : t('插件清单已恢复正常')}</p>
+          {problems.map((problem, index) => <p key={index} className='m-0 whitespace-pre-wrap break-words text-warning'>{problem}</p>)}
+          {problems.length && retryAt.length ? <p className='m-0 text-xs text-muted-foreground'>
+            {t('受影响的来源将在 {time} 后自动重试', { time: new Date(Math.min(...retryAt)).toLocaleTimeString() })}
+          </p> : null}
+        </DialogBody>
+        <DialogFooter className='shrink-0'>
+          <Button variant='outline' disabled={disabled || refreshing} onClick={() => void reload()}>
+            {refreshing ? <Spinner className='size-3' /> : null}{t('刷新清单')}
+          </Button>
+          <Button variant='ghost' onClick={() => setDetailsOpen(false)}>{t('关闭')}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
 }

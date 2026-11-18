@@ -28,6 +28,9 @@
 //!
 //! 硬约束不变：持锁期间绝不做网络请求（见 super::mod 头部说明）。
 
+mod task_guard;
+pub(crate) use task_guard::TaskStoreError;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -307,13 +310,14 @@ impl AccountStore {
         self.load(guard)
     }
 
-    /// 供导入导出子模块复用：在已持锁的前提下写回全部账号
+    /// 供导入导出子模块复用：整份输入没有逐行来源见证，CodeArts版本保守失效。
+    /// 内部可信运营改动使用save；两条路径都在实际账号写入的同一事务内处理版本。
     pub fn save_locked(
         &self,
         state: &AccountState,
         guard: &MutexGuard<'_, ()>,
     ) -> Result<(), AccountStoreError> {
-        self.save(state, guard)
+        self.with_conn_mut(guard, |conn| sql::save_imported_state(conn, state))
     }
 
     /// 供导入导出子模块复用：加锁后执行一个「读-改-写」周期
@@ -620,18 +624,12 @@ impl AccountStore {
                 }
             }
         }
-        // ── 账号级自定义 User-Agent ─────────────────────────────
-        // 用户在这个账号上填的「冒充值」，出站前由转发层统一覆盖适配器写好的
-        // UA（每家的默认 UA 都不同，覆盖点只能放在汇总处，见 `provider_loop`）。
-        // 与上面 ZCode / Antigravity 同一手法：键只在有值时出现，没设置的账号
-        // 连键都不会多，适配器看到的会话形状与历史逐字一致。
+        // 只有允许账号覆盖的执行体才能收到该值，旧数据不能改变固定客户端身份。
         if let Some(object) = session.as_object_mut() {
-            let value = record
-                .fields()
-                .get("userAgent")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .unwrap_or("");
+            let value = crate::server::core::user_agent::override_value(
+                &record.provider(),
+                record.get("userAgent").and_then(Value::as_str).unwrap_or(""),
+            );
             if !value.is_empty() {
                 object.insert("userAgent".to_string(), Value::String(value.to_string()));
             }

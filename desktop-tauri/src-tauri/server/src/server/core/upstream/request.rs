@@ -271,7 +271,8 @@ pub struct UpstreamRequestError {
 
 impl UpstreamRequestError {
     pub fn to_gateway_error(&self) -> GatewayError {
-        GatewayError::with_status(502, self.message.clone())
+        let error = GatewayError::with_status(502, self.message.clone());
+        if self.safe_to_retry { error } else { error.with_code("upstream_submission_unconfirmed") }
     }
 }
 

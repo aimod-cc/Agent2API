@@ -135,8 +135,7 @@ pub async fn run_upgrade(State(state): State<ServerState>) -> Response {
     let store = state.store().clone();
     let request_stats = state.request_stats();
     let result = tokio::task::spawn_blocking(move || {
-        let outcomes =
-            db.with(|conn| crate::server::db::migrate::run_legacy_migrations(conn, &config_dir));
+        let outcomes = crate::server::db::migrate::run_legacy_migrations(&db, &config_dir);
         // 只有真导入了东西才补做后续动作（一项都没成时库里的配置与账号都没变）
         if matches!(outcomes, Some(ref list) if !list.is_empty()) {
             // 配置快照必须重装：迁移把配置搬进库之后，库才是真相来源（见模块头）。
@@ -170,7 +169,7 @@ pub async fn run_upgrade(State(state): State<ServerState>) -> Response {
 
     let outcomes = match result {
         Ok(Some(outcomes)) => outcomes,
-        // `Db::with` 返回 None = 连接锁中毒（某次持锁 panic 打断了未提交的事务）。
+        // 迁移入口返回None表示实际Db连接锁不可用或已隔离，不能当作成功导入零项。
         // 接管连接去读可能读到半截数据，所以它保守回落 —— 这里如实报错。
         Ok(None) => return errors::management_error(500, "数据库连接不可用，迁移未执行"),
         Err(error) => return errors::management_error(500, format!("迁移任务执行失败: {error}")),

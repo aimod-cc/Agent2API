@@ -149,10 +149,11 @@
           applyState();
           return;
         }
-        const canceled = await cancelLogin();
+        const canceled = config.cancel ? await cancelOwned(config.cancel) : await cancelLogin();
         toast(canceled ? wbI18n.t('已取消登录等待') : wbI18n.t('登录已结束'));
         await syncShellState();
       },
+      cancelOwned: config.cancel,
       dispose() {
         const index = controllers.indexOf(controller);
         if (index >= 0) controllers.splice(index, 1);
@@ -161,6 +162,14 @@
     controllers.push(controller);
     applyState();
     return controller;
+  }
+
+  async function cancelOwned(cancel) {
+    try { return await cancel() !== false; }
+    catch (error) {
+      toast(wbI18n.t('取消失败：{message}', { message: error.message }), 'err');
+      return false;
+    }
   }
 
   /** 通知主进程取消等待中的登录（不区分是哪一家：主进程只记一个活动登录） */
@@ -219,7 +228,8 @@
     async cancelIfActive(provider) {
       if (!loginActive || flowSettling) return false;
       if (provider && loginProvider !== provider) return false;
-      const canceled = await cancelLogin();
+      const owner = controllers.find(controller => controller.provider === loginProvider && controller.cancelOwned);
+      const canceled = owner ? await cancelOwned(owner.cancelOwned) : await cancelLogin();
       await syncShellState();
       return canceled;
     },

@@ -150,14 +150,32 @@ pub async fn preview(state: &ServerState, account_id: &str) -> Response {
 /// 领取是低频动作（一次领一次），不值得在这里维护带 TTL 的进程级缓存。
 ///
 /// ── 这一支**不要求账号有 jwt** ──────────────────────────────
-/// 风控配置是「上游此刻要不要验证码」的公共信息，与哪个账号无关。提前报
-/// 「缺 jwt」会让用户以为账号有问题，而真正的原因是他还没登录过。
+/// 风控开关不要求 JWT，但 WASM 配置必须绑定明确账号及其凭据身份。
+/// 原生旧配置按原合同返回；绑定校验不负责更改手动领取的既有入参。
 pub async fn captcha_config(state: &ServerState, account_id: &str) -> Response {
-    if let Err((status, message)) = zcode_account_of(state, account_id) {
-        return management_error(status, message);
+    use crate::server::core::plugin_host::{self, wasm::verification};
+    let provider = match super::zcode_captcha::account_provider(state, account_id, None) {
+        Ok(provider) => provider,
+        Err((status, message)) => return management_error(status, message),
+    };
+    let wasm = plugin_host::wasm::owns(&provider);
+    if !wasm && !verification::legacy_native(&provider) {
+        return management_error(400, "当前执行体不支持 ZCode 验证码配置");
     }
     match call_action(state, account_id, "claim.captcha-config", &Value::Null).await {
-        Ok(body) => ok_json(body),
+        Ok(body) => {
+            if let Err((status, message)) = super::zcode_captcha::account_provider(state, account_id, Some(&provider)) {
+                return management_error(status, message);
+            }
+            if plugin_host::wasm::owns(&provider) != wasm {
+                return management_error(409, "验证码执行体已变化，请重新获取配置");
+            }
+            if !wasm { return ok_json(body); }
+            match super::zcode_captcha::project_config(&body, &provider, account_id) {
+                Ok(config) => ok_json(config),
+                Err((status, message)) => management_error(status, message),
+            }
+        }
         Err((status, message)) => management_error(status, message),
     }
 }
@@ -168,18 +186,38 @@ pub async fn captcha_config(state: &ServerState, account_id: &str) -> Response {
 /// ```json
 /// { "planId": "...", "captchaVerifyParam": "...", "captchaRegion": "..." }
 /// ```
-/// `planId` 省略或为空时取**优先级最高**的那个可领套餐（插件侧实现）。
-/// 因此前端可以「先探测、用户直接点领取」，也可以「探测后让用户选一个再领」。
+/// 原生旧请求允许省略套餐后按优先级选择；WASM 必须带完整
+/// provider/accountId/configId/planId/captchaVerifyParam/captchaRegion 绑定。
 ///
 /// ── 失败也返回 HTTP 200（业务结果不是 HTTP 错误）─────────────
 /// 「已领过」「额度用尽」「验证码没过」都是**正常的业务结果**，前端要靠
 /// `failure` 字段给不同提示。只有「请求本身没打成」（账号不存在、缺 jwt、
 /// 网络故障）才用非 2xx。
 pub async fn claim_plan(state: &ServerState, account_id: &str, body: &Bytes) -> Response {
-    if let Err((status, message)) = zcode_account_of(state, account_id) {
-        return management_error(status, message);
+    let record = match zcode_account_of(state, account_id) {
+        Ok(record) => record,
+        Err((status, message)) => return management_error(status, message),
+    };
+    let provider = record["provider"].as_str().unwrap_or("");
+    let wasm = crate::server::core::plugin_host::wasm::owns(provider);
+    if wasm && body.len() > crate::server::core::plugin_host::wasm::verification::MAX_MESSAGE {
+        return management_error(413, "领取请求超过大小限制");
     }
     let payload = parse_body(body).ok().unwrap_or(Value::Null);
+    if wasm {
+        if payload["provider"] != provider || payload["accountId"] != account_id {
+            return management_error(400, "领取请求与当前账号的归属不一致");
+        }
+        let valid_text = |key: &str, required: bool, max: usize| payload[key].as_str().is_some_and(|value|
+            (!required || !value.trim().is_empty()) && value.len() <= max && !value.chars().any(char::is_control));
+        if !valid_text("configId", true, 256) || !valid_text("planId", true, 256)
+            || !valid_text("captchaRegion", false, 256)
+            || payload["captchaVerifyParam"].as_str().is_none_or(|value| value.len() > 16_384 || value.contains(['\r', '\n', '\0'])) {
+            return management_error(400, "领取请求缺少完整的账号验证码配置或套餐标识");
+        }
+    } else if ["provider", "accountId", "configId"].iter().any(|key| payload.get(*key).is_some()) {
+        return management_error(400, "旧原生领取不接受部分新版配置绑定");
+    }
     let outcome = match call_action(state, account_id, "claim.claim", &payload).await {
         Ok(outcome) => outcome,
         Err((status, message)) => return management_error(status, message),

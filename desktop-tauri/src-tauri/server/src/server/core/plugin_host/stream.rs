@@ -19,7 +19,10 @@
 //! 插件自己可能已经写过一条 —— 所以合成前先看尾巴：末尾已经有 `[DONE]`
 //! 就不再补，避免客户端收到两个终止信号。
 
+pub(super) mod workbuddy;
+
 use std::collections::VecDeque;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -38,12 +41,15 @@ pub(crate) type FailureSlot = Arc<Mutex<Option<GatewayError>>>;
 pub(crate) type PrivateFailureSlot = Arc<Mutex<Option<Value>>>;
 
 use super::errors::strict;
+use super::wasm::conversation::ConversationOwner;
 use super::{Host, StreamEvent};
 
 /// 标准 Chat SSE 的只读用量旁路；跨分片缓冲有界，不改写下发字节。
 #[derive(Default)]
 struct UsageSniffer {
     strict_provider: Option<&'static str>,
+    workbuddy: bool,
+    workbuddy_failure: Option<GatewayError>,
     line: Vec<u8>,
     data: Vec<u8>,
     line_bytes: usize,
@@ -115,11 +121,20 @@ impl UsageSniffer {
                 let payload = payload.strip_prefix(b" ").unwrap_or(payload);
                 self.data.extend_from_slice(payload);
                 self.data.push(b'\n');
+                // 聚合器逐行识别错误；本家完整JSON行到达即可记住，不能等空行而漏过聚合早退。
+                if self.workbuddy { self.consume_data(telemetry, false); }
             }
         }
         self.first_line_seen = true;
         self.line.clear();
         self.line_bytes = 0;
+    }
+
+    fn remember_workbuddy_error(&mut self, error: GatewayError) {
+        match &mut self.workbuddy_failure {
+            Some(previous) => super::errors::workbuddy_stream::merge(previous, error),
+            None => self.workbuddy_failure = Some(error),
+        }
     }
 
     fn consume_data(&mut self, telemetry: &RequestTelemetry, complete: bool) {
@@ -149,6 +164,12 @@ impl UsageSniffer {
             }
             return;
         }
+        if self.workbuddy {
+            if let Some(error) = chunk.get("error").filter(|value| crate::server::core::protocol::is_truthy(value)) {
+                self.remember_workbuddy_error(super::errors::workbuddy_stream::frame(error));
+            }
+            return;
+        }
         if let Some(error) = chunk.get("error").filter(|value| crate::server::core::protocol::is_truthy(value)) {
             if self.failure.is_none() { self.failure = Some(error.clone()); }
             let message = error.get("message").and_then(Value::as_str)
@@ -159,15 +180,23 @@ impl UsageSniffer {
     }
 }
 
+/// 错误正文先暂停下发，最多等一秒/16条/256KiB补齐同一调用的控制终态。
+struct WorkbuddyTail {
+    until: Pin<Box<tokio::time::Sleep>>,
+    events: usize,
+    bytes: usize,
+}
+
 /// 一条插件流在网关侧的形态。
 pub(crate) struct RpcStream {
     /// 宿主（Drop 时要发 abort / 清登记）。
     host: Arc<Host>,
     lease: Option<Arc<super::activity::UsageLease>>,
+    conversation: Option<ConversationOwner>,
     /// 本次调用的 RPC id。
     id: i64,
     /// 插件的 chunk / 收尾事件。
-    events: tokio::sync::mpsc::UnboundedReceiver<StreamEvent>,
+    events: super::StreamEvents,
     /// 归还额度的发送端（见模块头）。通道关闭 = 本流结束，泵任务自行退出。
     credit: tokio::sync::mpsc::UnboundedSender<usize>,
     /// 待下发的合成帧（错误帧 / 补的 `[DONE]`）。
@@ -180,6 +209,11 @@ pub(crate) struct RpcStream {
     failure: Option<FailureSlot>,
     private_failure: Option<PrivateFailureSlot>,
     raw: bool,
+    workbuddy: bool,
+    workbuddy_owner: Option<workbuddy::Owner>,
+    workbuddy_tail: Option<WorkbuddyTail>,
+    workbuddy_synthetic: bool,
+    settling: Option<futures::future::BoxFuture<'static, ()>>,
 }
 
 impl RpcStream {
@@ -196,7 +230,7 @@ impl RpcStream {
         provider: &'static str,
         host: Arc<Host>,
         id: i64,
-        events: tokio::sync::mpsc::UnboundedReceiver<StreamEvent>,
+        events: super::StreamEvents,
         pending: Option<Vec<u8>>,
         telemetry: Arc<RequestTelemetry>,
         failure: Option<FailureSlot>,
@@ -213,15 +247,18 @@ impl RpcStream {
         let mut queue = VecDeque::new();
         let mut usage = UsageSniffer {
             strict_provider: strict::applies(provider).then_some(provider),
+            workbuddy: provider == "workbuddy" && host.options.wasm.is_some(),
             ..UsageSniffer::default()
         };
         if let Some(bytes) = pending {
+            if usage.workbuddy { let _ = credit.send(bytes.len() + proto::FRAME_OVERHEAD_BYTES); }
             usage.feed(&bytes, &telemetry);
             queue.push_back(Bytes::from(bytes));
         }
         Self {
             host,
             lease: Some(lease),
+            conversation: None,
             id,
             events,
             credit,
@@ -232,8 +269,109 @@ impl RpcStream {
             failure,
             private_failure,
             raw: false,
+            workbuddy: false,
+            workbuddy_owner: None,
+            workbuddy_tail: None,
+            workbuddy_synthetic: false,
+            settling: None,
         }
     }
+
+    pub(super) fn with_workbuddy(mut self, owner: Option<workbuddy::Owner>) -> Self {
+        self.workbuddy = owner.is_some();
+        self.workbuddy_owner = owner;
+        // constructor中已嗅探pending首块，此时补同一处理，不允许首块绕过记账。
+        if self.workbuddy { self.capture_frame_failure(); self.wait_workbuddy_tail(); }
+        self
+    }
+
+    fn start_settlement(&mut self) {
+        if !self.workbuddy || self.settling.is_some() || self.workbuddy_owner.is_none() { return; }
+        if self.telemetry.is_cancelled() {
+            self.capture_failure(crate::server::core::upstream::cancellation::cancelled_error());
+        }
+        let error = self.failure.as_ref().and_then(|slot| slot.lock().ok().and_then(|value| value.clone()));
+        if error.is_none() { return; }
+        if let (Some(error), Some(owner), Some(slot)) = (error, self.workbuddy_owner.take(), self.failure.clone()) {
+            self.settling = Some(owner.settle(error, slot));
+        }
+    }
+
+    fn workbuddy_error(&self) -> Option<GatewayError> {
+        self.failure.as_ref().and_then(|slot| slot.lock().ok().and_then(|error| error.clone()))
+    }
+
+    fn wait_workbuddy_tail(&mut self) {
+        if !self.workbuddy || self.workbuddy_owner.is_none() || self.workbuddy_tail.is_some()
+            || self.workbuddy_error().is_none() { return; }
+        if self.ended { self.start_settlement(); return; }
+        self.workbuddy_tail = Some(WorkbuddyTail {
+            until: Box::pin(tokio::time::sleep(std::time::Duration::from_secs(1))), events: 0, bytes: 0,
+        });
+    }
+
+    fn finish_workbuddy_tail(&mut self) {
+        self.workbuddy_tail = None;
+        self.close_conversation();
+        self.usage.finish(&self.telemetry);
+        self.capture_frame_failure();
+        self.ended = true;
+        self.start_settlement();
+    }
+
+    fn poll_workbuddy_tail(&mut self, context: &mut Context<'_>) -> Poll<()> {
+        loop {
+            let Some(tail) = &mut self.workbuddy_tail else { return Poll::Ready(()); };
+            if self.telemetry.is_cancelled() {
+                self.capture_failure(crate::server::core::upstream::cancellation::cancelled_error());
+                self.finish_workbuddy_tail();
+                return Poll::Ready(());
+            }
+            // 宿主WASM分片最多64KiB；读下一片前预留完整一片，尾部不会越过256KiB。
+            if tail.until.as_mut().poll(context).is_ready() || tail.events >= 16
+                || tail.bytes.saturating_add(64 * 1024) > 256 * 1024 {
+                self.finish_workbuddy_tail();
+                return Poll::Ready(());
+            }
+            let event = match self.events.poll_recv(context) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(event) => event,
+            };
+            if let Some(tail) = &mut self.workbuddy_tail { tail.events += 1; }
+            match event {
+                Some(StreamEvent::Chunk(bytes)) => {
+                    let _ = self.credit.send(bytes.len() + proto::FRAME_OVERHEAD_BYTES);
+                    if let Some(tail) = &mut self.workbuddy_tail { tail.bytes = tail.bytes.saturating_add(bytes.len()); }
+                    self.usage.feed(&bytes, &self.telemetry);
+                    self.capture_frame_failure();
+                    self.pending.push_back(Bytes::from(bytes));
+                }
+                Some(StreamEvent::Head(_)) => {},
+                Some(StreamEvent::Done(Err(error))) => {
+                    self.capture_failure(super::errors::workbuddy_stream::control(error));
+                    self.finish_workbuddy_tail();
+                    return Poll::Ready(());
+                }
+                Some(StreamEvent::Done(Ok(_))) => {
+                    self.finish_workbuddy_tail();
+                    return Poll::Ready(());
+                }
+                Some(StreamEvent::Failed(_)) | None => {
+                    self.capture_failure(GatewayError::with_status(502, "WorkBuddy流在错误终态确认前中断")
+                        .with_code("runtime_stream_interrupted"));
+                    self.finish_workbuddy_tail();
+                    return Poll::Ready(());
+                }
+            }
+        }
+    }
+
+    pub(super) fn with_conversation(mut self, owner: Option<ConversationOwner>) -> Self {
+        self.conversation = owner;
+        self
+    }
+
+    fn close_conversation(&mut self) { drop(self.conversation.take()); }
 
     pub(super) fn raw(mut self) -> Self {
         self.raw = true;
@@ -243,6 +381,13 @@ impl RpcStream {
     fn capture_failure(&self, error: GatewayError) {
         if let Some(slot) = &self.failure {
             let mut slot = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if self.workbuddy {
+                match slot.as_mut() {
+                    Some(previous) => super::errors::workbuddy_stream::merge(previous, error),
+                    None => *slot = Some(error),
+                }
+                return;
+            }
             // 已确认的取消/超时/清理失败不能被更早的额度帧覆盖。
             if slot.is_none() || self.usage.strict_provider.is_some() && strict::stopped(&error)
                 && !slot.as_ref().is_some_and(|prior| matches!(prior.status_code, 499 | 504)) {
@@ -252,6 +397,10 @@ impl RpcStream {
     }
 
     fn capture_frame_failure(&self) {
+        if self.workbuddy {
+            if let Some(error) = &self.usage.workbuddy_failure { self.capture_failure(error.clone()); }
+            return;
+        }
         let Some(error) = &self.usage.failure else { return };
         if let Some(provider) = self.usage.strict_provider {
             if let Some((failure, private)) = strict::stream_failure(provider, &json!({ "error": error })) {
@@ -277,11 +426,21 @@ impl RpcStream {
 
     /// 排上「错误帧 + [DONE]」收尾。
     fn finish_with_error(&mut self, message: &str) {
+        self.close_conversation();
         self.usage.finish(&self.telemetry);
         self.capture_frame_failure();
         if let Some(provider) = self.usage.strict_provider {
             let failure = strict::fatal(provider, 502, "runtime_stream_interrupted");
             self.finish_strict_error(failure);
+            return;
+        }
+        if self.workbuddy {
+            if self.workbuddy_error().is_none() {
+                self.capture_failure(GatewayError::with_status(502, message).with_code("runtime_stream_interrupted"));
+            }
+            self.ended = true;
+            self.workbuddy_synthetic = !self.usage.done;
+            self.start_settlement();
             return;
         }
         self.capture_failure(GatewayError::with_status(502, message).with_code("runtime_stream_interrupted"));
@@ -303,6 +462,7 @@ impl RpcStream {
         }
     }
     fn finish_strict_error(&mut self, failure: GatewayError) {
+        self.close_conversation();
         let failure = self.failure.as_ref().and_then(|slot| {
             let guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             guard.as_ref().filter(|prior| matches!(prior.status_code, 499 | 504)).cloned()
@@ -328,10 +488,22 @@ impl Stream for RpcStream {
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.as_mut().get_mut();
         loop {
+            if this.workbuddy_tail.is_some() && this.poll_workbuddy_tail(context).is_pending() { return Poll::Pending; }
+            if let Some(settling) = &mut this.settling {
+                if settling.as_mut().poll(context).is_pending() { return Poll::Pending; }
+                this.settling = None;
+            }
+            if this.workbuddy_synthetic {
+                this.workbuddy_synthetic = false;
+                if let Some(error) = this.workbuddy_error() {
+                    this.pending.push_back(super::errors::workbuddy_stream::stream_frame(&error));
+                }
+            }
             if let Some(frame) = this.pending.pop_front() {
                 return Poll::Ready(Some(Ok(frame)));
             }
             if this.ended {
+                this.close_conversation();
                 return Poll::Ready(None);
             }
             if this.raw {
@@ -341,9 +513,12 @@ impl Stream for RpcStream {
                         let _ = this.credit.send(bytes.len() + proto::FRAME_OVERHEAD_BYTES);
                         return Poll::Ready(Some(Ok(Bytes::from(bytes))));
                     }
-                    Poll::Ready(Some(StreamEvent::Done(Ok(_)))) => { this.ended = true; return Poll::Ready(None); }
+                    Poll::Ready(Some(StreamEvent::Done(Ok(_)))) => {
+                        this.close_conversation(); this.ended = true; return Poll::Ready(None);
+                    }
                     Poll::Ready(Some(StreamEvent::Head(_))) => continue,
                     event => {
+                        this.close_conversation();
                         let message = match event {
                             Poll::Ready(Some(StreamEvent::Done(Err(error)))) => error.message,
                             Poll::Ready(Some(StreamEvent::Failed(message))) => message,
@@ -369,9 +544,17 @@ impl Stream for RpcStream {
                     this.usage.feed(&bytes, &this.telemetry);
                     this.capture_frame_failure();
                     this.telemetry.note_first_frame();
+                    if this.workbuddy {
+                        this.wait_workbuddy_tail();
+                        if this.workbuddy_tail.is_some() || this.settling.is_some() {
+                            this.pending.push_back(Bytes::from(bytes));
+                            continue;
+                        }
+                    }
                     return Poll::Ready(Some(Ok(Bytes::from(bytes))));
                 }
                 Poll::Ready(Some(StreamEvent::Failed(message))) => {
+                    this.close_conversation();
                     if let Some(provider) = this.usage.strict_provider {
                         this.usage.finish(&this.telemetry);
                         this.capture_frame_failure();
@@ -379,8 +562,10 @@ impl Stream for RpcStream {
                     } else { this.finish_with_error(&message); }
                 }
                 Poll::Ready(Some(StreamEvent::Done(Ok(_)))) => {
+                    this.close_conversation();
                     this.usage.finish(&this.telemetry);
                     this.capture_frame_failure();
+                    if this.workbuddy { this.start_settlement(); }
                     // 插件正常结束。它本该自己写 `[DONE]`；漏了就在这里补上
                     // —— 少一个终止帧会让客户端一直等（连接挂着不关）。
                     if !this.usage.done {
@@ -393,9 +578,12 @@ impl Stream for RpcStream {
                     this.ended = true;
                 }
                 Poll::Ready(Some(StreamEvent::Done(Err(error)))) => {
-                    if let Some(provider) = this.usage.strict_provider {
+                    this.close_conversation();
+                    if this.workbuddy || this.usage.strict_provider.is_some() {
                         this.usage.finish(&this.telemetry);
                         this.capture_frame_failure();
+                    }
+                    if let Some(provider) = this.usage.strict_provider {
                         if let Some((_, private)) = strict::private_control(&error) {
                             if let Some(slot) = &this.private_failure {
                                 let mut slot = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -405,7 +593,9 @@ impl Stream for RpcStream {
                         let failure = super::rpc::rpc_error(provider, error, proto::methods::gateway::CONVERSATION);
                         this.finish_strict_error(failure);
                     } else {
-                        this.capture_failure(super::rpc::rpc_error("", error.clone(), proto::methods::gateway::CONVERSATION));
+                        let failure = if this.workbuddy { super::errors::workbuddy_stream::control(error.clone()) }
+                            else { super::rpc::rpc_error("", error.clone(), proto::methods::gateway::CONVERSATION) };
+                        this.capture_failure(failure);
                         this.finish_with_error(&error.message);
                     }
                 }
@@ -416,6 +606,7 @@ impl Stream for RpcStream {
 
 impl Drop for RpcStream {
     fn drop(&mut self) {
+        self.close_conversation();
         let unfinished = self.host.close_stream(self.id);
         if unfinished {
             let host = self.host.clone();

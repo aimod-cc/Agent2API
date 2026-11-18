@@ -37,7 +37,8 @@ export function CheckinUmid() {
   return (
     <div className='m-card-pad'>
       <p className='m-ck-note'>{t('网关设备组件')}: {state?.available ? t('已就绪') : state?.installing ? t('安装中…') : t('未就绪')}</p>
-      {state?.installSupported && !state.available ? <Button variant='outline' size='sm' disabled={busy || state.installing}
+      {state?.authorized === false ? <p className='m-ck-note'>{t('请在 Qoder 国际版插件设置中授权设备验证组件')}</p> : null}
+      {state?.installSupported && state.authorized !== false && !state.available ? <Button variant='outline' size='sm' disabled={busy || state.installing}
         onClick={() => void install()}>{busy || state.installing ? t('安装中…') : t('在网关安装组件')}</Button> : null}
       {error ? <p className='m-ck-error'>{error}</p> : null}
     </div>

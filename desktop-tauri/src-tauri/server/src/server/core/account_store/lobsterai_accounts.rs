@@ -58,7 +58,7 @@ impl AccountStore {
             object.remove("uuid");
             object.remove("firstKeyfrom");
             object.remove("latestKeyfrom");
-            object.insert("available".to_string(), Value::Bool(record.enabled()));
+            object.insert("available".to_string(), Value::Bool(record.has_credentials()));
             object.insert("hasSession".to_string(), Value::Bool(true));
             object.insert("canRefresh".to_string(), Value::Bool(can_refresh));
         }

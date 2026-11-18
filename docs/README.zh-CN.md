@@ -25,7 +25,8 @@ Agent2API 是一个 **AI 路由网关 + Agent 客户端接管**项目。它将�
 - 🔌 **统一模型接口** —— 支持 OpenAI Chat / Responses / Images 与 Anthropic Messages 协议，以及统一的模型列表；小浣熊、Loomy、Antigravity、ModelScope、WorkBuddy、豆包工作 提供文生图，小浣熊、Loomy、Antigravity、ModelScope 与 WorkBuddy 还支持参考图编辑；生图与编辑也可由 AI 助手工具调用
 - 🧭 **AI 路由** —— 模型映射、账号优先级、负载均衡、会话粘性与失败切换集中配置
 - 🤖 **Agent 客户端接管** —— 管理本机客户端的多套连接配置，导入现有配置、预览写入内容并切换网关或自定义服务
-- 🧩 **插件扩展** —— 额外提供商实现独立安装和更新，不随主程序打包；自定义提供商无需插件
+- 🧩 **插件扩展** —— 额外提供商独立安装和更新，地区与额度池保持隔离。原基础批包已补齐：CodeArts 对话、官方登录、托管续期与福利；CatPaw 对话、工具续接、图片输入与授权本机实时关联；豆包工作对话、异步回答、图片上传和生图、登录、本机导入、签到与任务领奖；MonkeyCode 国内及国际两地独立对话任务、工具桥、登录和每日签到。MonkeyCode 任务及本机凭据读取必须明确授权。Kiro 托管登录和显式登记后的 Cline Free 续期仍可使用；上述源码实现未做真实账号验收。
+- 🧰 **网页工具模拟** —— 主程序共用适配层为明确声明的智谱清言、DeepSeek 网页与 Tabbit 模型转换工具声明、历史及结果；默认开启、可关闭，不是网页原生能力，尚未用真实账号验收。
 - 🛡️ **出网代理** —— 账号与更新任务可选择代理池中的出口
 - 🔑 **网关安全** —— 网关 Key 可分权、面板登录支持人机验证，未配置 Key 时默认拒绝模型请求
 - 📊 **请求报表** —— 请求量、成功率、Token 消耗、缓存命中率与 365 天热力图
@@ -34,13 +35,29 @@ Agent2API 是一个 **AI 路由网关 + Agent 客户端接管**项目。它将�
 
 ## ❤️ 赞助商
 
+感谢北辰 API、IPWO 和 ProxyLane 三家赞助商对本项目的支持。
+
+<table>
+<tr>
+<td width="180" align="center"><a href="https://beichenapi.com/register?aff=QWJJYF7PT8SY"><img src="../desktop-tauri/ui/assets/providers/beichen.png" alt="北辰 API" width="64" /><br /><strong>北辰 API 中转站</strong></a></td>
+<td><strong>一个接口，连接多家主流模型。</strong><br />北辰提供兼容 OpenAI 协议的 AI 接口中转服务，支持流式响应与长思考模型连接。可在 Agent2API「添加账号 → API 模板」首张卡片中选用，预填接入地址后填写自己的 API Key。<br /><br /><a href="https://beichenapi.com/register?aff=QWJJYF7PT8SY"><strong>注册 / 获取 API Key ↗</strong></a></td>
+</tr>
+</table>
+
+<table>
+<tr>
+<td width="180" align="center"><a href="https://www.ipwo.net/?code=LQW28BAYK"><img src="../desktop-tauri/ui/assets/sponsors/ipwo.png" alt="IPWO" width="140" /><br /><strong>IPWO 家庭住宅 IP</strong></a></td>
+<td><strong>动态、静态与不限量住宅代理，按需选择网络出口。</strong><br />IPWO 提供多地区住宅 IP，支持国家及城市级定位，以及 HTTP(S) / SOCKS5 协议。获取代理地址后，可在 Agent2API「网络代理」中添加，供账号与服务线路使用。<br /><br /><a href="https://www.ipwo.net/?code=LQW28BAYK"><strong>了解套餐 / 获取住宅 IP ↗</strong></a></td>
+</tr>
+</table>
+
 <a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><img src="../assets/sponsor-proxylane.png" alt="ProxyLane（赞助位）" width="100%" /></a>
 
 <table>
 
 <tr>
 <td width="240"><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/proxylane-logo-for-dark-bg.png" /><img src="../assets/proxylane-logo-for-light-bg.png" alt="ProxyLane" width="220" /></picture></a></td>
-<td>感谢 <a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme">ProxyLane</a> 赞助了本项目！ProxyLane 提供 AI 账号专用的原生静态住宅 IP（Static Residential ISP）：IP 来自真实家庭宽带运营商，Scamalytics 低欺诈评分，每个 IP 独享，不限流量，$3.90 起。在「网络代理」页给每个账号配一个出口即可。首次购买使用优惠码 <code>AGENT2API25</code> 享 75 折。</td>
+<td><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme">ProxyLane</a> 提供 AI 账号专用的原生静态住宅 IP（Static Residential ISP）：IP 来自真实家庭宽带运营商，Scamalytics 低欺诈评分，每个 IP 独享，不限流量，$3.90 起。在「网络代理」页给每个账号配一个出口即可。首次购买使用优惠码 <code>AGENT2API25</code> 享 75 折。</td>
 </tr>
 
 </table>
@@ -48,10 +65,9 @@ Agent2API 是一个 **AI 路由网关 + Agent 客户端接管**项目。它将�
 ## 💬 社区与支持
 
 - **QQ 群**：Agent2API 交流群，在 QQ 里搜索群号即可加入。
-  - 群 1：`1127656296`（**即将满员，请优先加3群、4群**）
-  - 群 2：`1130894674`（**即将满员，请优先加3群、4群**）
+  - 群 1：`1127656296`
+  - 群 2：`1130894674`
   - 群 3：`1108276647`
-  - 群 4：`1054072416`
 - **Telegram 群**：<https://t.me/+9gM8YPvgRL02NGRl>
 - **💖 赞赏**：如果 Agent2API 帮到了你，欢迎[请作者喝杯咖啡](./SPONSOR.md)；赞赏完全自愿，不解锁任何功能。
 - **🤝 赞助 / 商务合作**：想赞助本项目，或想让你的产品出现在这里？发邮件到 [541675139@qq.com](mailto:541675139@qq.com)。

@@ -27,6 +27,14 @@ async fn apply(id: &str, change: PackChange) -> Result<Value, GatewayError> {
     let mut after = before.clone();
     let pack = after.packs.iter_mut().find(|pack| pack.id == id)
         .ok_or_else(|| GatewayError::with_status(404, "没有安装这个插件包"))?;
+    if matches!(&change, PackChange::Reload | PackChange::Enabled(true) | PackChange::Provider { enabled: true, .. }) {
+        if let Some(reason) = plugin_host::ownership::unavailable_reason(pack) {
+            return Err(GatewayError::with_status(409, reason));
+        }
+        if let Some(reason) = plugin_host::compatibility::installed_error(pack) {
+            return Err(GatewayError::with_status(409, reason));
+        }
+    }
     match &change {
         PackChange::Reload => {
             if !pack.enabled { return Err(GatewayError::bad_request("插件已停用，请先启用后再重新加载")); }
@@ -54,6 +62,7 @@ async fn apply(id: &str, change: PackChange) -> Result<Value, GatewayError> {
     let switch = scope.begin().ok_or_else(|| GatewayError::with_status(
         409, "插件仍有在途请求、登录或后台任务，未执行变更，请稍后重试",
     ))?;
+    let _change = plugin_host::packages::provenance::begin_scope_change(&scope.packs, id);
     if let Err(error) = scope.stop().await {
         let _ = scope.start(&store).await;
         return Err(GatewayError::with_status(503, error));

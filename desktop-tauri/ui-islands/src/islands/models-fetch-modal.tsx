@@ -65,7 +65,7 @@ import { ModelsFetchTable, type RefreshItem, type Row } from './models-fetch-tab
 type Account = {
   id?: unknown; provider?: string; name?: string; nickname?: string; email?: string
   nameCustom?: boolean
-  available?: boolean; enabled?: boolean
+  available?: boolean; hasCredentials?: boolean
 }
 
 /** 内置家注册表里的一项（`wbProviders.all()`）；自定义家目录里的一项（`customList()`） */
@@ -194,33 +194,20 @@ function accountLabel(account: Account): string {
   return name || t('未命名账号')
 }
 
-/** 该家可用于拉取目录的账号（「模型来源」下拉的选项）。过滤 = `available`（后端口径：启用 + 有
- *  凭证）+ `enabled`；排序用账号页同一条 `byPriorityOrder`（前端渲染层与后端 `order_key` 是同构
- *  实现，两边算出的「第一个账号」必然是同一条）。账号清单直接读主状态，不另拉接口。 */
+/** 目录来源只要求有凭据；账号停用不影响刷新，顺序沿用账号优先级。 */
 function sourceAccounts(providerId: string): Account[] {
   if (ACCOUNTLESS_REFRESH.has(providerId)) return []
   const order = shared().wbAccountsModel?.byPriorityOrder
   const list = accounts().filter(account => (account?.provider || 'workbuddy') === providerId
-    && account?.available !== false && account?.enabled !== false)
+    && account?.hasCredentials !== false)
   return order ? list.sort(order) : list
 }
 
-/**
- * 本次刷新的范围：**模型管理页左栏实有清单的家 ∪ 有启用账号的家**。
- *
- * 与「模型来源」下拉同一哲学（见 sourceAccounts）：用户在界面上都看不到的家（没有启用账号、清单
- * 也为空）不该参加刷新 —— 刷它只会得到一行「缺少登录态」，而用户既没有账号可选、列表里也根本
- * 没有这家，无从理解。名单随请求带给后端（见 api/models.rs 的 providers）：名单外的家不打网络、
- * 也不进结果。
- *
- * 「有启用账号的家」并进来，是为「刚加完账号、清单还是空的」这一档：它暂时不在左栏，但用户马上
- * 就该看到它 —— 刷一次清单就有了。左栏数据缺席（页面数据未加载）时不降级成全量：宁缺毋滥，自动
- * 刷新任务会兜底。
- */
+/** 刷新范围包含模型页已有提供商和有凭据的账号所属提供商。 */
 function scopeProviders(): string[] {
   const ids = new Set(shared().wbModelsPanel?.builtinProviders?.() || [])
   for (const account of accounts()) {
-    if (account?.available === false || account?.enabled === false) continue
+    if (account?.hasCredentials === false) continue
     ids.add(account?.provider || 'workbuddy')
   }
   return [...ids]

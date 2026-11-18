@@ -67,7 +67,7 @@ async fn run(
         .map(str::trim)
         .filter(|id| !id.is_empty() && id.len() <= 128)
         .ok_or_else(|| GatewayError::bad_request("图片工具缺少有效的会话 ID"))?;
-    if assistant_sessions::get(session).is_none() {
+    if !assistant_sessions::exists(session) {
         return Err(GatewayError::bad_request(
             "请先保存当前助手会话，再调用图片工具",
         ));
@@ -105,6 +105,7 @@ async fn run(
             operation,
             headers: HeaderMap::new(),
             scope: access.scope,
+            key_source: access.key_source,
             source: access.source,
             started_at: logging::now_ms(),
             is_assistant: true,

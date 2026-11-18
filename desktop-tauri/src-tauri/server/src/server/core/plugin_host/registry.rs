@@ -101,6 +101,11 @@ pub fn serves(id: &str) -> bool {
     table().lock().unwrap_or_else(|error| error.into_inner()).adapters.contains_key(id)
 }
 
+pub fn dynamic_login(id: &str) -> bool {
+    table().lock().unwrap_or_else(|error| error.into_inner()).adapters.get(id)
+        .is_some_and(|adapter| adapter.dynamic_login())
+}
+
 pub fn installed_ids() -> Vec<String> {
     let table = table().lock().unwrap_or_else(|error| error.into_inner());
     let mut ids: Vec<_> = table.adapters.keys()

@@ -28,6 +28,7 @@
    * 预置清单。字段：
    *   key      卡片的稳定标记（data-provider="preset:<key>"），也是图标文件名
    *   name     模板展示名（有固定端点时预填名称，可改；自建站点名称由用户填写）。
+   *   sponsored 关联官网广告的模板；推荐效果和显示由官网投放状态决定。
    *   icon     assets/providers/ 下的图标文件；没有收录的用首字母徽章
    *   protocol 预填协议（下拉仍可改）
    *   baseUrl  预填基址（按本网关的拼接语义，见文件头）
@@ -84,6 +85,12 @@
   };
 
   const PRESET_PROVIDERS = [
+    {
+      key: 'beichen', name: wbI18n.t('北辰 API 中转站'), icon: 'beichen.png',
+      sponsored: true,
+      protocol: P.openai, baseUrl: 'https://api.beichenapi.com/v1',
+      hint: wbI18n.t('使用北辰控制台生成的 API Key；可用模型与价格以平台实时信息为准。'),
+    },
     {
       key: 'openai', name: 'OpenAI', icon: 'openai.png',
       protocol: P.openai, baseUrl: 'https://api.openai.com/v1',
@@ -208,6 +215,7 @@
     },
     {
       key: 'opencode-zen', name: 'OpenCode Zen', icon: 'opencode-zen.png',
+      userAgentOverridable: false,
       // 端点 2026-10 换过：旧的 /zen/v1 已废弃（打它一律 403 FreeTierError），
       // 当前是 /inference/v1。存量记录里写着的旧值由后端读侧自动迁移
       // （custom_providers::migrate_base_url），不必手改。
@@ -228,6 +236,7 @@
       // 图标：复用 Agent 段那张 Cline 品牌图 cline.png（与内置家 cline-free /
       // cline-pass 同一张图，卡片视觉一致）。
       key: 'clinepass', name: 'Cline Pass', icon: 'cline.png',
+      userAgentOverridable: false,
       protocol: P.openai, baseUrl: 'https://api.cline.bot/api/v1',
       hint: wbI18n.t('Cline Pass 的 API Key 在 app.cline.bot 获取（订阅制）；端点为 OpenAI 兼容，模型清单以 Cline 控制台为准，模型名在模型管理里按裸名添加（如 glm-5.2 / kimi-k2.7-code / deepseek-v4-pro）；上游按客户端形态校验，所需的客户端请求头已随卡预置'),
       // 请求头抄自本网关 Cline 适配器的官方客户端形态（后端 providers/cline/
@@ -267,6 +276,7 @@
     // 商汤日日新取官网 www.sensenova.cn 的 icon.png（商汤品牌方格标）。
     {
       key: 'sub2api', name: 'Sub2API', icon: 'sub2api.png',
+      userAgentOverridable: true,
       protocol: P.openai, baseUrl: '',
       placeholder: 'https://你的 Sub2API 站点地址（OpenAI 兼容填到 /v1）',
       hint: wbI18n.t('自建聚合面板：填你自己的站点地址。余额查询用该账号的 API Key 打 {base}/v1/usage，不需要额外配置'),
@@ -274,6 +284,7 @@
     },
     {
       key: 'newapi', name: 'NewAPI', icon: 'newapi.png',
+      userAgentOverridable: true,
       protocol: P.openai, baseUrl: '',
       placeholder: 'https://你的 NewAPI 站点地址（OpenAI 兼容填到 /v1）',
       hint: wbI18n.t('自建聚合面板：填你自己的站点地址；余额查询要另填 NewAPI 的个人访问令牌（见下方「余额查询」一段）'),
@@ -298,12 +309,12 @@
       hint: wbI18n.t('Kimi / Moonshot 国际站 API Key，使用 moonshot.ai 按量接口；不是 Kimi Code 会员入口'),
     },
     {
-      key: 'stepfun-cn', name: wbI18n.t('StepFun 国内版（按量）'), icon: 'stepfun-color.svg',
+      key: 'stepfun-cn', name: wbI18n.t('StepFun 国内版'), icon: 'stepfun-color.svg',
       protocol: P.openai, baseUrl: 'https://api.stepfun.com/v1',
       hint: wbI18n.t('StepFun 国内站按量 API；请使用按量 API Key，不要填 Step Plan 套餐 Key'),
     },
     {
-      key: 'stepfun', name: wbI18n.t('StepFun 国际版（按量）'), icon: 'stepfun-color.svg',
+      key: 'stepfun', name: wbI18n.t('StepFun 国际版'), icon: 'stepfun-color.svg',
       protocol: P.openai, baseUrl: 'https://api.stepfun.ai/v1',
       hint: wbI18n.t('StepFun 国际站按量 API；请使用按量 API Key，不要填 Step Plan 套餐 Key'),
     },
@@ -313,12 +324,12 @@
       hint: wbI18n.t('LongCat 的 OpenAI 兼容端点，使用 LongCat 平台的 API Key'),
     },
     {
-      key: 'tencent-tokenhub-cn', name: wbI18n.t('腾讯 TokenHub 国内版（按量）'), icon: 'tencentcloud-color.svg',
+      key: 'tencent-tokenhub-cn', name: wbI18n.t('腾讯 TokenHub 国内版'), icon: 'tencentcloud-color.svg',
       protocol: P.openai, baseUrl: 'https://tokenhub.tencentmaas.com/v1',
       hint: wbI18n.t('腾讯 TokenHub 国内站按量 API；使用 TokenHub API Key，不是 Token Plan 套餐或 WorkBuddy 凭证'),
     },
     {
-      key: 'tencent-tokenhub', name: wbI18n.t('腾讯 TokenHub 国际版（按量）'), icon: 'tencentcloud-color.svg',
+      key: 'tencent-tokenhub', name: wbI18n.t('腾讯 TokenHub 国际版'), icon: 'tencentcloud-color.svg',
       protocol: P.openai, baseUrl: 'https://tokenhub-intl.tencentmaas.com/v1',
       hint: wbI18n.t('腾讯 TokenHub 国际站按量 API；使用 TokenHub API Key，不是 Token Plan 套餐或 WorkBuddy 凭证'),
     },
@@ -354,7 +365,7 @@
       account: { noAuth: true },
     },
     {
-      key: 'xiaomi', name: wbI18n.t('小米 MiMo（按量）'), icon: 'xiaomi-tokenplan.png',
+      key: 'xiaomi', name: wbI18n.t('小米 MiMo'), icon: 'xiaomi-tokenplan.png',
       protocol: P.openai, baseUrl: 'https://api.xiaomimimo.com/v1',
       hint: wbI18n.t('小米 MiMo 按量 API；使用按量 API Key，不要混用 Token Plan 套餐 Key'),
     },

@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use crate::server::config::vision_compat::{self as config, Mode, UnknownCapability, VisionRule, VisionSettings, VisionTarget};
 use crate::server::errors::GatewayError;
-use super::{connections::ConnectionGuard, payload::ProviderContext, usage::TelemetrySnapshot, ForwardOutcome, InFlightGuard, RouteTarget, UpstreamService};
+use super::{connections::ConnectionGuard, payload::ProviderContext, replay_guard::blocked_error, usage::TelemetrySnapshot, ForwardOutcome, InFlightGuard, RouteTarget, UpstreamService};
 
 #[derive(Clone, Debug)]
 pub(crate) struct VisionCall {
@@ -112,6 +112,7 @@ pub(super) async fn forward(service: &UpstreamService, ctx: ProviderContext<'_>,
     let model = targets::actual_model(&ctx, &target);
     let Some(rule) = ctx.vision.as_ref().and_then(|vision| vision.settings.rule_for(&target.provider, &model)) else { return Err(error); };
     ctx.telemetry.finish_last_attempt(Some(i64::from(error.status_code)), Some(&error.message));
+    if ctx.telemetry.replay_guard().blocked() { return Err(error); }
     ctx.telemetry.prepare_vision_retry();
     let outcome = recover(service, &ctx, &target, &rule, "rejection", slot, connections).await?;
     Ok(super::provider_loop::attach_slot(outcome, slot, connections))
@@ -124,6 +125,7 @@ enum Prepared {
 
 async fn recover(service: &UpstreamService, ctx: &ProviderContext<'_>, original: &RouteTarget, rule: &VisionRule,
     trigger: &str, slot: &mut Option<InFlightGuard>, connections: &mut ConnectionGuard) -> Result<ForwardOutcome, GatewayError> {
+    if ctx.telemetry.replay_guard().blocked() { return Err(blocked_error()); }
     let vision = ctx.vision.as_ref().ok_or_else(|| GatewayError::new("图片兼容上下文不存在"))?;
     if vision.triggered.swap(true, Ordering::AcqRel) {
         return Err(GatewayError::bad_request("本次图片兼容已经执行，未递归调用或改用其他处理方式").with_code("vision_recursion_blocked"));
@@ -172,6 +174,7 @@ async fn recover(service: &UpstreamService, ctx: &ProviderContext<'_>, original:
     ctx.telemetry.note_vision(detail);
     let outcome = match result? {
         Prepared::Assist { body, destination } => {
+            if ctx.telemetry.replay_guard().blocked() { return Err(blocked_error()); }
             continuation::remember(ctx, &body, &destination);
             ctx.telemetry.prepare_vision_retry();
             dispatch(service, ctx, &destination, &body, ctx.telemetry, ctx.stream,
@@ -196,6 +199,7 @@ fn timeout_error() -> GatewayError {
 async fn dispatch(service: &UpstreamService, ctx: &ProviderContext<'_>, destination: &targets::Destination,
     body: &Value, telemetry: &Arc<super::usage::RequestTelemetry>, stream: bool, preserve_prompt: bool,
     slot: &mut Option<InFlightGuard>, connections: &mut ConnectionGuard) -> Result<ForwardOutcome, GatewayError> {
+    if telemetry.replay_guard().blocked() { return Err(blocked_error()); }
     let mut next = ctx.clone();
     next.body = body;
     next.native = None;
@@ -227,6 +231,7 @@ async fn reroute(service: &UpstreamService, ctx: &ProviderContext<'_>, original:
     }
     let mut last_error = None;
     for destination in destinations {
+        if ctx.telemetry.replay_guard().blocked() { return Err(last_error.unwrap_or_else(blocked_error)); }
         if ctx.telemetry.is_cancelled() { return Err(super::cancellation::cancelled_error()); }
         detail["targetProvider"] = destination.target.provider.clone().into();
         detail["targetModel"] = destination.target.model.clone().into();
@@ -243,6 +248,7 @@ async fn reroute(service: &UpstreamService, ctx: &ProviderContext<'_>, original:
             }
             Err(error) => {
                 ctx.telemetry.finish_last_attempt(Some(i64::from(error.status_code)), Some(&error.message));
+                if ctx.telemetry.replay_guard().blocked() { return Err(error); }
                 ctx.telemetry.prepare_vision_retry();
                 last_error = Some(error);
             }

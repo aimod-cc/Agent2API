@@ -1,10 +1,15 @@
 import { useEffect, useState } from 'react'
 import { Button, Input, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, SheetBody, SheetContent, SheetHeader, SheetTitle, Switch , Label } from '@ui'
 import { getPluginSettings, savePluginSettings, type PluginSettings } from '../../api/plugins'
-import { GithubAccessSettingsPanel } from '../../components/GithubAccessSettings'
+import { UpdateProxySettings } from '../../components/UpdateProxySettings'
 import { serverIdentity } from '../../lib/servers'
 import { store } from '../../state/store'
+import { RuntimeCapacityPanel } from '../../../../ui-shared/runtime-capacity-panel'
+import type { CapacityApi } from '../../../../ui-shared/runtime-capacity'
+import { apiCall } from '../../api/client'
 import { t } from '../../i18n'
+
+const capacityApi: CapacityApi = (method, path, body) => apiCall(path, { method, body })
 
 export function PluginSettingsSheet({ onClose, onChanged }: { onClose: () => void; onChanged: () => Promise<void> }) {
   const [settings, setSettings] = useState<PluginSettings | null>(null)
@@ -65,6 +70,8 @@ export function PluginSettingsSheet({ onClose, onChanged }: { onClose: () => voi
       <SheetHeader><SheetTitle>{t('插件设置')}</SheetTitle></SheetHeader>
       <SheetBody>
         <p className='m-ck-note'>{t('以下设置属于所连接网关，不是手机本地设置。')}</p>
+        <div className='m-ck-title'>{t('运行容量')}</div>
+        <RuntimeCapacityPanel api={capacityApi} t={t} identity={identity} />
         <div className='m-ck-title'>{t('检查计划')}</div>
         <Select value={settings?.checkMode || 'follow'} disabled={busy || !settings}
           onValueChange={value => void save({ checkMode: value as PluginSettings['checkMode'] })}>
@@ -117,7 +124,7 @@ export function PluginSettingsSheet({ onClose, onChanged }: { onClose: () => voi
           <p className='m-ck-note'>{t('仅自动更新已安装、已启用且通过可信签名校验的社区插件。新插件需手动安装，卸载后不会自动重新安装；未签名插件需手动更新。')}</p>
         </div>
         {error ? <p className='m-ck-error'>{error}</p> : null}
-        <GithubAccessSettingsPanel />
+        <UpdateProxySettings plugin />
       </SheetBody>
     </SheetContent>
   </Sheet>

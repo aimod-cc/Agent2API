@@ -6,13 +6,12 @@
  *     浏览器里的「新版本」是网关托管的 `ui/m/*` 变了，刷新即可。
  *   · **APK**：界面打在包里，必须换安装包。这条路是这里实现的：
  *       1. 调网关 `GET /api/update/check` 拿最新版本与 `androidAsset`；
- *       2. 向网关领取下载方案，手机按候选源下载并校验 APK；
+ *       2. 向网关领取官网地址与可信校验值，手机直接从官网下载 APK；
  *       3. 调起系统安装器。
- *     下载字节不经过网关中转，GitHub 令牌也不传给手机或加速站。
+ *     下载字节不经过网关中转。
  *   · **iOS（IPA）**：苹果不允许 App 自行下载并安装可执行代码，所以这里
- *     **只能跳转** —— 拿 `pageUrl` 打开 GitHub Release 页面，由用户自己走
- *     TestFlight / App Store / AltStore。`downloadApk` / `installApk` 在 iOS
- *     上直接报错，界面也据此不渲染那几个按钮（见 AppUpdatePanel）。
+ *     **只能跳转** —— 打开官网下载页，由用户选择适用的安装渠道。
+ *     `downloadApk` / `installApk` 在 iOS 上直接报错，界面也据此不渲染那几个按钮（见 AppUpdatePanel）。
  *
  * ── 为什么下载走原生而不是 fetch ────────────────────────────────
  * APK 有几十 MB，`fetch` + `blob` 会把整包读进 WebView 内存；`CapacitorHttp`
@@ -33,10 +32,10 @@
  */
 
 import { Capacitor, registerPlugin } from '@capacitor/core'
-import { ApiError, apiCall } from '../api/client'
-import { activeServerId, nativePlatform } from '../lib/servers'
+import { apiCall } from '../api/client'
+import { nativePlatform } from '../lib/servers'
 import { t } from '../i18n'
-import type { AssetProbe, ForceUpdatePolicy } from '../../../ui-shared/updates'
+import { updatePageUrl, websiteDownloadUrl, type AssetProbe, type ForceUpdatePolicy } from '../../../ui-shared/updates'
 
 /** 构建期注入的本工程版本号 */
 declare const __APP_VERSION__: string
@@ -45,6 +44,7 @@ export const APP_VERSION: string = typeof __APP_VERSION__ === 'string' ? __APP_V
 
 /** 更新检查结果里手机端关心的那部分 */
 export type ApkUpdateInfo = {
+  updateSource?: 'website'
   forceUpdate?: ForceUpdatePolicy | null
   currentVersion: string
   latestVersion: string | null
@@ -60,6 +60,7 @@ export type ApkUpdateInfo = {
 }
 
 type RawCheckResult = {
+  updateSource?: 'website'
   forceUpdate?: ForceUpdatePolicy | null
   currentVersion?: string | null
   latestVersion?: string | null
@@ -80,17 +81,20 @@ type RawCheckResult = {
  * 传本机版本号而不是让服务端猜：网关可能跑在电脑上、版本与手机端不同，
  * 「手机端有没有新版本」只有手机自己知道当前是哪个版本。
  *
- * 走网关的 `/api/update/check` 而不是手机直接打 GitHub API：这样能**复用
- * 电脑端已配置的 GitHub 令牌**（匿名限额 60 次/小时，带令牌 5000），
- * 也不必让手机再存一份凭证。注意这里只复用「查询」，下载仍是手机直连。
+ * 版本查询由所连接网关访问官网，手机下载仍使用本机网络。
  */
 export async function checkApkUpdate(): Promise<ApkUpdateInfo> {
   const raw = await apiCall<RawCheckResult>(
     `/api/update/check?current=${encodeURIComponent(APP_VERSION)}`,
   )
   if (raw.channelChanged && raw.checked === false) throw new Error(t('更新通道已改变，请重新检查更新。'))
+  if (raw.updateSource !== 'website') throw new Error(t('当前网关尚未使用官网更新，请先升级网关'))
+  if (raw.androidAsset?.url && !websiteDownloadUrl(raw.androidAsset.url)) {
+    throw new Error(t('官网安装包地址无效，请重新检查更新'))
+  }
   const asset = raw.androidAsset && raw.androidAsset.url ? raw.androidAsset : null
   return {
+    updateSource: raw.updateSource,
     forceUpdate: raw.forceUpdate,
     currentVersion: APP_VERSION,
     latestVersion: raw.latestVersion || null,
@@ -99,7 +103,7 @@ export async function checkApkUpdate(): Promise<ApkUpdateInfo> {
     hasUpdate: raw.hasUpdate === true && asset !== null ? true : raw.hasUpdate === false ? false : null,
     notes: raw.notes || '',
     publishedAt: raw.publishedAt || '',
-    pageUrl: raw.pageUrl || '',
+    pageUrl: updatePageUrl(raw.pageUrl),
     prerelease: Boolean(raw.prerelease),
     asset,
     assetProbe: raw.assetProbe ? { ...raw.assetProbe, expectedSuffixes: ['.apk'], expectedName: null } : null,
@@ -161,9 +165,7 @@ export async function autoCheckIntervalMs(): Promise<number> {
 type PluginListenerHandle = { remove: () => Promise<void> }
 
 type ApkUpdaterPlugin = {
-  sourceSelectionSupported(): Promise<{ supported: boolean }>
-  selectSources(options: { urls: string[]; sha256?: string; scope: string }): Promise<{ urls: string[]; selected: string; elapsedMs: number; cached: boolean }>
-  download(options: { url: string; sha256?: string; size?: number }): Promise<{ path: string; size: number }>
+  download(options: { url: string; sha256: string; size: number }): Promise<{ path: string; size: number }>
   cancel(): Promise<void>
   canInstall(): Promise<{ allowed: boolean }>
   openInstallPermissionSettings(): Promise<void>
@@ -193,27 +195,19 @@ export type DownloadProgress = {
   total: number
   /** 0–100；总长度未知时为 -1 */
   percent: number
-  phase?: 'selecting' | 'downloading'
-  source?: string
+  phase?: 'downloading'
 }
 
 let downloadCanceled = false
 let downloadTask: Promise<{ path: string; size: number }> | null = null
-let nativeSelection: Promise<boolean> | null = null
-
-function sourceSelectionSupported(api: ApkUpdaterPlugin): Promise<boolean> {
-  nativeSelection ??= api.sourceSelectionSupported().then(value => value.supported === true).catch(() => false)
-  return nativeSelection
-}
-
-type DownloadPlan = { urls: string[]; sha256?: string | null; size?: number; mode?: 'auto' | 'official' | 'accelerated' }
+type DownloadPlan = { url: string; sha256: string; size: number }
 
 /** APK 字节由手机下载；网关只提供候选源和经过官方 API 确认的校验值。 */
 export async function downloadApk(
   url: string,
   onProgress?: (progress: DownloadProgress) => void,
 ): Promise<{ path: string; size: number }> {
-  if (downloadTask) throw new Error('下载或探测正在进行')
+  if (downloadTask) throw new Error('下载正在进行')
   downloadCanceled = false
   const task = runApkDownload(url, onProgress)
   downloadTask = task
@@ -230,53 +224,26 @@ async function runApkDownload(
     // iOS 与浏览器都会走到这里：两者都不允许应用内自装安装包
     throw new Error(
       nativePlatform() === 'ios'
-        ? 'iOS 不支持应用内安装，请到 GitHub Release 页面下载'
+        ? 'iOS 不支持应用内安装，请到官网下载页获取更新'
         : '当前不是 APK 形态，无法在应用内更新',
     )
   }
-  if (!url) throw new Error('缺少下载地址')
-
-  let plan: DownloadPlan
-  try {
-    plan = await apiCall<DownloadPlan>('/api/update/download-plan', { method: 'POST', body: { url } })
-  } catch (error) {
-    if (!(error instanceof ApiError) || error.status !== 404) throw error
-    plan = { urls: [url] }
+  if (!websiteDownloadUrl(url)) throw new Error(t('更新包只能从 Agent2API 官网下载'))
+  const plan = await apiCall<DownloadPlan>('/api/update/download-plan', { method: 'POST', body: { url } })
+  if (plan.url !== url || !websiteDownloadUrl(plan.url)
+    || !/^[0-9a-fA-F]{64}$/.test(plan.sha256 || '')
+    || !Number.isSafeInteger(plan.size) || plan.size <= 0 || plan.size > 600 * 1024 * 1024) {
+    throw new Error(t('官网安装包缺少可信校验信息，请重新检查更新'))
   }
-  if (!plan.urls?.length) throw new Error('没有可用的下载源')
-  if (downloadCanceled) throw new Error('已取消下载')
-  const candidates = [...plan.urls]
-  const hasNativeSelection = await sourceSelectionSupported(api)
-  if (plan.mode === 'auto' && candidates.length > 1 && hasNativeSelection) {
-    if (downloadCanceled) throw new Error('已取消下载')
-    onProgress?.({ received: 0, total: 0, percent: -1, phase: 'selecting' })
-    const selected = await api.selectSources({ urls: candidates, sha256: plan.sha256 || undefined, scope: activeServerId() || 'local' })
-    if (downloadCanceled) throw new Error('已取消下载')
-    const valid = selected.urls.filter(candidate => candidates.includes(candidate))
-    candidates.splice(0, candidates.length, ...new Set([...valid, ...candidates]))
-  }
+  if (downloadCanceled) throw new Error(t('已取消下载'))
   let handle: PluginListenerHandle | null = null
-  let currentSource = ''
   if (onProgress) {
-    handle = await api.addListener('downloadProgress', data => onProgress({ ...data, phase: 'downloading', source: currentSource }))
+    handle = await api.addListener('downloadProgress', data => onProgress({ ...data, phase: 'downloading' }))
   }
   try {
-    let lastError: unknown = new Error('没有可用的下载源')
-    for (const candidate of candidates) {
-      if (downloadCanceled) throw new Error('已取消下载')
-      try {
-        currentSource = new URL(candidate).host
-        onProgress?.({ received: 0, total: plan.size || 0, percent: -1, phase: 'downloading', source: currentSource })
-        const result = await api.download({ url: candidate, sha256: plan.sha256 || undefined, size: plan.size })
-        return result
-      } catch (error) {
-        if (downloadCanceled) throw new Error('已取消下载')
-        const message = error instanceof Error ? error.message : String(error)
-        if (/限流|HTTP 429\b/.test(message) || (!hasNativeSelection && /HTTP 403\b/.test(message))) throw error
-        lastError = error
-      }
-    }
-    throw lastError
+    if (downloadCanceled) throw new Error(t('已取消下载'))
+    onProgress?.({ received: 0, total: plan.size, percent: -1, phase: 'downloading' })
+    return await api.download(plan)
   } finally {
     if (handle) void handle.remove()
   }
@@ -308,7 +275,7 @@ export async function installApk(): Promise<void> {
   if (!api) {
     throw new Error(
       nativePlatform() === 'ios'
-        ? 'iOS 不支持应用内安装，请到 GitHub Release 页面下载'
+        ? 'iOS 不支持应用内安装，请到官网下载页获取更新'
         : '当前不是 APK 形态，无法安装',
     )
   }

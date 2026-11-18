@@ -2,8 +2,7 @@ import { Badge, Button, Progress, Switch } from '@ui'
 import { errorMessage, formatSize, formatTime, pluginDescription, pluginName } from './plugins-shared'
 import type { HostState, PackSummary, PluginOperation, PluginUpdate, StorePlugin } from './plugins-types'
 import { t } from '../i18n'
-import { GithubFailureText } from '../../../ui-shared/github-failure'
-import { PluginGetButton, PluginSettingsButton, PluginStoreCard } from '../../../ui-shared/plugins-store'
+import { PluginGetButton, PluginSettingsButton, PluginStoreCard, type PluginCardSelection } from '../../../ui-shared/plugins-store'
 import { requestPluginDiagnostics, usePluginLoadStatus } from '../../../ui-shared/plugin-startup-view'
 import { pluginFailed } from '../../../ui-shared/plugin-startup'
 
@@ -57,7 +56,7 @@ export function PluginUpdateDetails({ pack, update, operation, disabled, onUpdat
         </Button> : null}
       </div>
     </div>
-    {update?.reason && (update.error || required) ? <div className='text-[12px] text-destructive'><GithubFailureText value={update} t={t} /></div> : null}
+    {update?.reason && (update.error || required) ? <div className='text-[12px] text-destructive'>{errorMessage(update.reason)}</div> : null}
     {!pack.entryPresent ? <p className='m-0 text-[12px] text-destructive'>{t('插件包的可执行文件不在磁盘上（可能被手工删除或移动），请重新安装。')}</p> : null}
     {operation?.error ? <p className='m-0 text-[12px] text-destructive'>{errorMessage(operation.error)}</p> : null}
     {operation?.hostError ? <p className='m-0 text-[12px] text-warning'>{operation.hostError}</p> : null}
@@ -65,68 +64,78 @@ export function PluginUpdateDetails({ pack, update, operation, disabled, onUpdat
   </div>
 }
 
-export function StorePluginCard({ item, target, operation, disabled, onInstall, onNotes }: {
+export function StorePluginCard({ item, target, operation, disabled, selection, onInstall, onNotes, onDetails }: {
   item: StorePlugin
   target: string
   operation?: PluginOperation
   disabled: boolean
+  selection?: PluginCardSelection
   onInstall: () => void
   onNotes: () => void
+  onDetails: () => void
 }) {
-  const platform = item.platforms.find(platform => platform.target === target || platform.target === 'wasm32-unknown-unknown')
+  const platform = item.platforms.find(platform => platform.target === 'wasm32-unknown-unknown')
   const installable = Boolean(item.version && platform && !item.error)
   return <PluginStoreCard t={t} name={pluginName(item.id, item.name)} description={pluginDescription(item.id, item.description)}
     version={item.version} icon={item.icon} artwork={item.id === 'agent2api-web-providers' ? 'web' : 'providers'}
-    status='missing'
-    badges={<>{item.prerelease ? <Badge variant='warning' shape='tag'>{t('beta 版')}</Badge> : null}
+    status='missing' selection={selection} onDetails={onDetails}
+    badges={<>{item.prerelease ? <Badge variant='warning' shape='tag' className='min-h-4 px-1.5 text-[10px] font-normal'>{t('beta 版')}</Badge> : null}
       {!item.version ? <Badge variant='outline' shape='tag'>{t('暂未发布')}</Badge> : null}</>}
     actions={<PluginGetButton t={t} disabled={disabled || operation?.active === true || !installable} onClick={onInstall} />}
     footerAction={item.version ? <Button variant='link' size='xs' onClick={onNotes}>{t('更新日志')}</Button> : null}
     feedback={<>
       {item.version && !platform ? <p className='m-0 text-[12px] text-warning'>{t('当前平台暂无包')}</p> : null}
-      {item.error ? <div className='text-[12px] text-destructive'><GithubFailureText value={item} t={t} /></div> : null}
+      {item.error ? <div className='text-[12px] text-destructive'>{errorMessage(item.reason)}</div> : null}
       {operation?.error ? <p className='m-0 text-[12px] text-destructive'>{errorMessage(operation.error)}</p> : null}
       {operation?.active ? <OperationProgress operation={operation} /> : null}
     </>} />
 }
 
-export function InstalledPluginCard({ pack, store, host, update, operation, disabled, onEnabled, onSettings }: {
+export function InstalledPluginCard({ pack, store, host, update, operation, disabled, selection, onEnabled, onSettings, onDetails }: {
   pack: PackSummary
   store?: StorePlugin
   host: HostState
   update?: PluginUpdate
   operation?: PluginOperation
   disabled: boolean
+  selection?: PluginCardSelection
   onEnabled: (enabled: boolean) => void
   onSettings: () => void
+  onDetails: () => void
 }) {
   const startup = usePluginLoadStatus(pack.id, pack.startup)
   const packHost = pack.host === undefined ? host : pack.host
-  const running = pack.enabled && packHost?.running === true && pack.entryPresent && !pack.updateRequired
+  const legacy = pack.supportState === 'legacy_unsupported'
+  const running = !legacy && pack.enabled && packHost?.running === true && pack.entryPresent && !pack.updateRequired
   const name = pluginName(pack.id, store?.name || pack.name)
   return <PluginStoreCard t={t} name={name} description={pluginDescription(pack.id, store?.description || pack.description)}
     version={pack.version} icon={pack.icon || store?.icon} artwork={pack.id === 'agent2api-web-providers' ? 'web' : 'providers'}
-    status={!pack.enabled ? 'disabled' : running ? 'running' : 'unavailable'} startup={startup}
-    footerAction={<Button variant='link' size='xs' onClick={() => requestPluginDiagnostics(pack.id)}>{t('加载诊断')}</Button>}
-    providerCount={pack.providers.length} enabledCount={pack.providers.filter(provider => provider.enabled && !provider.overriddenBy).length}
+    status={!pack.enabled ? 'disabled' : running ? 'running' : 'unavailable'} startup={startup} selection={selection}
+    onDetails={onDetails}
+    footerAction={pack.enabled && (pluginFailed(startup) || startup?.phase === 'blocked' || (!startup && packHost?.lastError))
+      ? <Button variant='link' size='xs' onClick={() => requestPluginDiagnostics(pack.id)}>{t('加载诊断')}</Button> : null}
+    providerCount={pack.providers.length} enabledCount={legacy ? 0 : pack.providers.filter(provider => provider.enabled && !provider.overriddenBy).length}
     badges={<>
       {pack.updateRequired ? <Badge variant='destructive' shape='tag'>{t('接口不兼容')}</Badge>
         : update?.available ? <Badge variant='brand' shape='tag'>{t('有更新')}{update.latest ? ` v${update.latest}` : ''}</Badge> : null}
-      {pack.version.includes('-') ? <Badge variant='warning' shape='tag'>{t('beta 版')}</Badge> : null}
+      {pack.version.includes('-') ? <Badge variant='warning' shape='tag' className='min-h-4 px-1.5 text-[10px] font-normal'>{t('beta 版')}</Badge> : null}
+      {pack.unavailableReason ? <Badge variant='secondary' shape='tag'>{legacy ? t('旧插件已停止支持') : t('暂未开放')}</Badge> : null}
       {!pack.entryPresent ? <Badge variant='destructive' shape='tag'>{t('文件缺失')}</Badge> : null}
     </>}
     actions={<>
       <PluginSettingsButton t={t} name={name} onClick={onSettings} />
-      <Switch checked={pack.enabled} disabled={disabled} aria-label={`${t('启用')} ${name}`} onCheckedChange={onEnabled} />
+      <Switch checked={!legacy && pack.enabled} disabled={disabled || Boolean(pack.unavailableReason)} aria-label={`${t('启用')} ${name}`} onCheckedChange={onEnabled} />
     </>}
     feedback={<>
+      {pack.unavailableReason ? <p className='m-0 text-[12px] leading-relaxed text-muted-foreground'>{t(pack.unavailableReason)}</p> : null}
       {pack.updateRequired ? <p className='m-0 text-[12px] leading-relaxed text-destructive'>
         {pack.compatibilityError || t('插件与当前网关的公共接口不兼容，暂未加载。')}
         <Button variant='link' size='xs' onClick={onSettings}>{t('查看详情')}</Button>
       </p> : null}
-      {update?.error && !pack.updateRequired ? <div className='text-[12px] text-destructive'><GithubFailureText value={update} t={t} /></div> : null}
+      {update?.error && !pack.updateRequired ? <div className='text-[12px] text-destructive'>{errorMessage(update.reason)}</div> : null}
       {operation?.error ? <p className='m-0 break-words text-[12px] text-destructive'>{errorMessage(operation.error)}</p> : null}
-      {(startup ? pluginFailed(startup) && startup.error : packHost?.lastError) ? <p className='m-0 break-words text-[12px] text-destructive'>{startup?.error || packHost?.lastError}</p> : null}
+      {pack.enabled && (startup ? (pluginFailed(startup) || startup.phase === 'blocked') && startup.error : packHost?.lastError)
+        ? <p className='m-0 line-clamp-2 break-words text-[12px] text-destructive'>{startup?.error || packHost?.lastError}</p> : null}
       {operation?.hostError ? <p className='m-0 break-words text-[12px] text-warning'>{operation.hostError}</p> : null}
       {operation?.active ? <OperationProgress operation={operation} /> : null}
     </>} />

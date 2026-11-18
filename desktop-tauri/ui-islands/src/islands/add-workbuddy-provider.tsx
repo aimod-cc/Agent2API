@@ -265,6 +265,11 @@ export function WorkBuddyBlock({ active, footerHost, initialEdition }: {
   const modeRef = React.useRef(loginMode)
   const socialRef = React.useRef(socialRestore)
   const controllerRef = React.useRef<WebLoginController | null>(null)
+  React.useEffect(() => {
+    if (!initialEdition) return
+    setEdition(initialEdition)
+    setLoginMode(initialEdition === 'intl' ? 'external' : 'embedded')
+  }, [initialEdition])
   editionRef.current = edition
   modeRef.current = loginMode
   socialRef.current = socialRestore

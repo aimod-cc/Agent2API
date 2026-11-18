@@ -3,11 +3,11 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{cache, download, formats};
+use super::{cache, formats};
 use super::super::storage::Package;
 
-const MARKET: &str = "https://raw.githubusercontent.com/magpie-community/plugins/main/registry.json";
-const DISTRIBUTION: &str = "https://raw.githubusercontent.com/magpie-community/plugins/dist/index.json";
+const MARKET: &str = super::super::website::REGISTRY;
+const DISTRIBUTION: &str = super::super::website::DISTRIBUTION;
 const REFRESH_MS: i64 = 86_400_000;
 const MAX_DOCUMENT: usize = 16 * 1024 * 1024;
 
@@ -93,7 +93,7 @@ impl Sources {
         let now = crate::server::logging::now_ms();
         if force || document.retry_at <= now && (now.saturating_sub(document.checked_at) >= REFRESH_MS
             || kind == "market" && document.names.is_empty()) {
-            let fetched = download::bytes(url, MAX_DOCUMENT).await.ok()
+            let fetched = super::super::website::bytes(url, MAX_DOCUMENT).await.ok()
                 .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
                 .and_then(|value| project(&value, kind).map(|(entries, listed)| (entries, listed, project_names(&value, kind))));
             if let Some((entries, listed, names)) = fetched {

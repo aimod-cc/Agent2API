@@ -7,7 +7,7 @@
 
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
 use tauri_plugin_dialog::DialogExt;
 
@@ -26,6 +26,14 @@ pub struct ApiRequest {
     pub body: Option<Value>,
     #[serde(default)]
     pub api_key: Option<String>,
+    #[serde(default)]
+    pub retry: Option<ApiRetry>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiRetry {
+    Never,
 }
 
 /// 统一的管理 API 入口：返回后端 data，出错时返回可读消息。
@@ -33,6 +41,9 @@ pub struct ApiRequest {
 pub async fn api_request(request: ApiRequest) -> Result<Value, String> {
     match request.api_key.as_deref() {
         Some(key) => gateway::call_with_api_key(&request.method, &request.path, request.body.as_ref(), key).await,
+        None if matches!(request.retry, Some(ApiRetry::Never)) => {
+            gateway::call_without_auth_replay(&request.method, &request.path, request.body.as_ref()).await
+        }
         None => gateway::call(&request.method, &request.path, request.body.as_ref()).await,
     }
 }
@@ -97,36 +108,16 @@ pub async fn wait_for_backend() -> Result<Value, String> {
     Ok(json!({ "ready": true, "port": gateway::proxy_port() }))
 }
 
-/// 重启整个应用。
-///
-/// ── 为什么是整进程重启，而不是「进程内重建后端」 ──────────────
-/// 服务端有一批**进程级单例**（模型目录、定时签到调度、更新管理器），它们用
-/// `OnceLock` 装载：第二次 `ServerState::bootstrap` 装不进全局，于是新的
-/// ServerState 会拿着一份与全局不同的句柄 —— 停机时 `stop_global()` 停的是
-/// 旧那份，新起的调度循环没人管。整进程重启让所有单例从头初始化，不存在这种
-/// 分叉；代价是窗口会重新打开（约一秒），换来的是「重启后状态一定是对的」。
-///
-/// ── 顺序上的两个要点 ────────────────────────────────────────
-///   1. **必须先 `begin_exit()`**：否则 `RunEvent::ExitRequested` 会被
-///      「关闭到托盘」那条规则拦下（`api.prevent_exit()`），重启请求落空；
-///   2. **延迟再退**：让本命令的返回值先回到前端，界面才能提示「正在重启」
-///      而不是无声消失。
-pub fn schedule_app_restart(app: &AppHandle) {
-    app.state::<AppState>().begin_exit();
-    let handle = app.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        // `restart()` 触发 ExitRequested → Exit（插件在此释放单实例互斥体）
-        // → 拉起新进程 → 本进程退出。不返回。
-        handle.restart();
-    });
+/// 请求整进程重启；共享同一次后台清理，失败通过原生提示报告，不重建后端单例。
+pub(crate) fn schedule_app_restart(app: &AppHandle) -> Result<crate::exit::Ticket, String> {
+    crate::exit::request_restart(app)
 }
 
 /// 重启应用（供界面在「结束占用进程」后重试启动，或用户手动触发）。
 #[tauri::command]
 pub async fn restart_app(app: AppHandle) -> Result<Value, String> {
     let port = gateway::proxy_port();
-    schedule_app_restart(&app);
+    schedule_app_restart(&app)?;
     Ok(json!({ "restarting": true, "port": port }))
 }
 
@@ -251,9 +242,8 @@ pub async fn change_port(app: AppHandle, port: u16) -> Result<Value, String> {
     current.proxy_port = port;
     settings::save(&current)?;
 
-    // 重启后新端口生效。不在这里等结果：重启会带走本进程，
-    // 界面靠重连（页面重载）确认新端口是否可用。
-    schedule_app_restart(&app);
+    // 已保存后才申请重启；restarting只表示请求已接收，清理失败由同一原生提示报告。
+    schedule_app_restart(&app).map_err(|error| format!("端口设置已保存，但未能申请重启：{error}"))?;
     Ok(json!({ "changed": true, "port": port, "restarting": true }))
 }
 
@@ -383,7 +373,7 @@ pub async fn change_lan_access(app: AppHandle, enabled: bool, panel: bool) -> Re
     current.lan_panel = panel;
     settings::save(&current)?;
 
-    schedule_app_restart(&app);
+    schedule_app_restart(&app).map_err(|error| format!("网络设置已保存，但未能申请重启：{error}"))?;
     Ok(json!({
         "changed": true,
         "enabled": enabled,
@@ -421,23 +411,8 @@ pub fn local_ip() -> Result<Option<String>, String> {
         .filter(|ip| ip != "0.0.0.0" && ip != "127.0.0.1"))
 }
 
-/// 发起登录；阻塞到完成/失败/取消/超时。
-///
-/// `provider` 是 Option：老版本界面不会传它，缺省（None）按 workbuddy 处理 ——
-/// 那条链的行为必须逐字保持。`Option<String>` 在 Tauri 命令里就是「可以不传」，
-/// 比给一个空串默认值更贴实地表达「老客户端没有这个概念」。
-///
-/// `social_restore` 同样缺省为 false（不恢复 Google / GitHub 入口），
-/// 老界面不传它时得到的是与新界面默认不勾选一致的行为：登录窗口只按官方
-/// 登录页的形态走，不放宽域名白名单。
-///
-/// ── AutoClaw 国际版为什么不走这条命令 ────────────────────────
-/// 它的授权地址要先过一次**浏览器端**风控验证码（阿里云 SDK），而那个环境是
-/// 主窗口 —— 于是「拿地址」这一步在渲染层完成，壳只负责开窗口。因此它走
-/// [`start_autoclaw_oauth_login`]（入参是已经拿到的 state + authUrl），
-/// 不走这里。
-/// `options` 是新增的可选第五参（methodIndex / inputs / proxy / manualCallback），
-/// 不改变第四参 social_restore。没有 methodIndex 时继续走旧登录支路。
+/// 使用提供商声明的登录方式；options 中必须有 methodIndex。
+/// 阻塞到完成、失败、取消或超时。
 #[tauri::command]
 pub async fn start_login(
     app: AppHandle,
@@ -625,8 +600,10 @@ pub async fn get_app_settings(app: AppHandle) -> Result<AppSettings, String> {
 pub async fn save_app_settings(app: AppHandle, patch: AppSettings) -> Result<AppSettings, String> {
     crate::startup::wait().await?;
     let mut saved = patch;
-    // 端口由 change_port 专门负责，这里保持磁盘现值不被覆盖
-    saved.proxy_port = settings::load().proxy_port;
+    let current = settings::load();
+    // 端口与图形加速各有独立保存入口，旧界面的全量提交也不能重置它们。
+    saved.proxy_port = current.proxy_port;
+    saved.hardware_acceleration = current.hardware_acceleration;
 
     let autolaunch = app.autolaunch();
     let currently_enabled = autolaunch.is_enabled().unwrap_or(false);
@@ -1010,123 +987,11 @@ pub async fn cancel_update() -> Result<Value, String> {
     gateway::call("POST", "/api/update/cancel", Some(&json!({}))).await
 }
 
-/// 运行已下载的安装包。
-///
-/// 路径必须通过 `update::verify_installer` 的校验（存在、后缀属于本平台、
-/// 位于下载目录内），否则这个命令就成了「执行任意程序」的入口。
-///
-/// `restart` 为 true 时：先把退出标志置位再退出，让出安装包要覆盖的文件占用
-/// （不置位的话关窗逻辑会把退出拦成「最小化到托盘」，安装程序会卡在文件占用上）。
-///
-/// 顺序很关键：必须在启动安装包之前显式回收后端进程。
-/// 壳自己退出并不会带走 node 子进程（`exit(0)` 不保证触发 `RunEvent::Exit`），
-/// NSIS 覆盖安装时 node.exe 仍占着可执行文件与 3065 端口，复制文件必然失败；
-/// `backend::shutdown` 内部是同步的 kill + wait，返回时占用已经释放。
-///
-/// ── macOS 上为什么不退出（与 Windows 的关键差异）────────────────
-/// Windows 的 NSIS 是**覆盖安装**：安装程序要往正在运行的那个安装目录里写文件，
-/// 所以必须先把本进程与后端都让出来，否则复制文件必然失败。
-///
-/// macOS 的 dmg 是**挂载 + 拖拽**：`open` 只是把磁盘映像挂上，安装动作发生在
-/// 用户把 .app 拖进「应用程序」的那一刻，与当前正在运行的进程没有文件冲突。
-/// 此时若照着 Windows 那样退出，副作用反而更糟 —— 用户还没开始拖，
-/// 本机网关就已经停了（而且 dmg 挂载后用户往往会先去看一眼再决定），
-/// 等于用一个没有必要的退出打断了正在服务的网关。所以这一支不关机、不退出，
-/// 只把映像挂上，并如实把 `restart: false` 回给界面（界面据此不提示「即将退出」）。
-///
-/// ── Linux 上为什么也不退出（与 macOS 同理，但两种包型不同）──────
-/// `.deb` 交给桌面环境的图形安装器（GNOME Software / Discover）：用户点「安装」
-/// 之后由包管理器往系统目录写文件 —— 与当前进程**不在同一个路径**（本程序跑在
-/// `~/.local/bin` 或 AppImage 自解目录这类用户目录里），没有文件占用冲突，
-/// 且安装动作的时机完全由用户决定。所以这一支同样不回收后端、不退出。
-///
-/// `.AppImage` 是个例外：它是自包含单文件，更新方式就是「用新的覆盖旧的」，
-/// 而本进程此刻正占着旧文件。因此要退回「先让出、再启动新的」那条老路
-/// （与 Windows 同一套顺序）。
+/// 只运行受控下载目录内已核验的安装包；等待者取消不重复执行安装动作。
+/// Windows/AppImage先确认后台清理成功；dmg/deb保持仅打开、不停止服务的行为。
 #[tauri::command]
-pub fn run_installer(app: AppHandle, path: String, restart: Option<bool>) -> Result<Value, String> {
-    let target = crate::update::verify_installer(&path)?;
-
-    // macOS：挂载磁盘映像即可，不回收后端、不退出（理由见函数说明）
-    #[cfg(target_os = "macos")]
-    {
-        // app 只被下面那一支用到；显式消费一次，避免 macOS 构建出现未使用告警
-        let _ = &app;
-        let _ = restart;
-        crate::update::launch_installer(&target, false)?;
-        return Ok(json!({
-            "launched": true,
-            "path": target.to_string_lossy(),
-            "restart": false,
-        }));
-    }
-
-    // Linux：deb 交给图形安装器（不退出），AppImage 走「让位 + 启动」（要退出）
-    #[cfg(target_os = "linux")]
-    {
-        let is_appimage = target
-            .extension()
-            .and_then(|value| value.to_str())
-            .map(|value| value.eq_ignore_ascii_case("appimage"))
-            .unwrap_or(false);
-
-        if is_appimage {
-            // AppImage：新文件要覆盖本进程正占着的旧可执行文件，先让位
-            // （与 Windows 同一套顺序，理由见函数说明）
-            crate::backend::shutdown(&app.state::<AppState>());
-            crate::update::launch_installer(&target, true)?;
-
-            let restart = restart.unwrap_or(true);
-            if restart {
-                app.state::<AppState>().begin_exit();
-                let handle = app.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(400));
-                    handle.exit(0);
-                });
-            }
-            return Ok(json!({
-                "launched": true,
-                "path": target.to_string_lossy(),
-                "restart": restart,
-            }));
-        }
-
-        // deb：交给桌面环境的图形安装器，不回收后端、不退出（理由见函数说明）。
-        // 与 macOS 那一支同样显式消费掉未用的参数，避免 unused 告警。
-        let _ = &app;
-        let _ = restart;
-        crate::update::launch_installer(&target, false)?;
-        Ok(json!({
-            "launched": true,
-            "path": target.to_string_lossy(),
-            "restart": false,
-        }))
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        // 先让出 node.exe 的文件占用与 3065 端口，再让安装包去覆盖文件
-        crate::backend::shutdown(&app.state::<AppState>());
-        crate::update::launch_installer(&target, true)?;
-
-        let restart = restart.unwrap_or(true);
-        if restart {
-            let state = app.state::<AppState>();
-            state.begin_exit();
-            // 稍留一点时间让命令的返回值先回到前端，再退出
-            let handle = app.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(400));
-                handle.exit(0);
-            });
-        }
-        Ok(json!({
-            "launched": true,
-            "path": target.to_string_lossy(),
-            "restart": restart,
-        }))
-    }
+pub async fn run_installer(app: AppHandle, path: String, restart: Option<bool>) -> Result<Value, String> {
+    crate::exit::run_installer(app, path, restart).await
 }
 
 /// 用系统默认浏览器打开 Release 页面。

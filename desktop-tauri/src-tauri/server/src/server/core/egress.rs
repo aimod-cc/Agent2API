@@ -53,6 +53,9 @@ use crate::server::config::TimeoutSettings;
 use crate::server::core::proxies::ResolvedProxy;
 use crate::server::logging;
 
+pub(crate) mod managed;
+mod resolved_cache;
+
 /// 默认 User-Agent，**必须设置**。
 ///
 /// ── 为什么这条不是「顺手加的」而是必需 ────────────────────────
@@ -68,18 +71,16 @@ use crate::server::logging;
 ///
 /// 客户端级默认头**不会覆盖**请求级头（reqwest 只在 HeaderMap 空缺时插入），
 /// 所以 banner 的 `whitelistHeaders` 里那个真正的 WorkBuddy UA 依然生效。
-const DEFAULT_USER_AGENT: &str = "undici";
+pub(crate) const DEFAULT_USER_AGENT: &str = "undici";
 
 /// Client 缓存上限（对照 Node 版 MAX_DISPATCHERS）
 const MAX_CLIENTS: usize = 24;
 
 /// 出口 IP 查询服务：拿不到只当作附加信息缺失，不影响连通性结论
 const IP_ECHO_URL: &str = "https://api.ipify.org?format=json";
-/// 连通性测试的默认目标：**上游站点**而不是第三方站点（判据见 test_connectivity）。
-/// 用户可在「网络代理」页的设置里换成自家上游（`core::proxy_settings::test_url`），
 /// 未配置（空）时回落到这里 —— 字面量与 `core::proxy_settings::DEFAULT_TEST_URL`
 /// 保持一致，改一处要同步另一处。
-const DEFAULT_TEST_URL: &str = "https://copilot.tencent.com/v2/config";
+const DEFAULT_TEST_URL: &str = "https://www.google.com/";
 /// 连通性测试默认超时
 const DEFAULT_TEST_TIMEOUT_MS: u64 = 15_000;
 /// 出口 IP 查询的超时上限（即便测试超时给得更大，也不要在这里耗太久）
@@ -326,13 +327,11 @@ pub fn resolved_client(
     host: &str,
     addresses: &[std::net::SocketAddr],
 ) -> Result<reqwest::Client, String> {
-    resolved_builder(proxy, system_proxy_when_unset, host, addresses)?
-        .build().map_err(|_| "无法创建出站连接".to_string())
+    resolved_cache::client(proxy, system_proxy_when_unset, host, addresses, false)
 }
 
-pub fn websocket_client(proxy: Option<&ResolvedProxy>) -> Result<reqwest::Client, String> {
-    resolved_builder(proxy, false, "", &[])?.http1_only()
-        .build().map_err(|_| "无法创建 WebSocket 出站连接".to_string())
+pub fn websocket_client(proxy: Option<&ResolvedProxy>, system_proxy_when_unset: bool) -> Result<reqwest::Client, String> {
+    resolved_cache::client(proxy, system_proxy_when_unset, "", &[], true)
 }
 
 fn resolved_builder(
@@ -353,52 +352,6 @@ fn resolved_builder(
         builder = builder.no_proxy();
     }
     Ok(builder)
-}
-
-pub fn client_for_github(proxy: Option<&ResolvedProxy>) -> Result<Arc<reqwest::Client>, String> {
-    let transport = proxy.map(crate::server::core::proxies::chain::endpoint).transpose()?;
-    let proxy = transport.as_ref();
-    let timeouts = crate::server::config::timeout_settings();
-    let key = format!("github|{}", cache_key(proxy, &timeouts));
-    {
-        let mut guard = lock_clients();
-        let cache = guard.get_or_insert_with(ClientCache::default);
-        cache.clock += 1;
-        let now = cache.clock;
-        if let Some(entry) = cache.entries.get_mut(&key) {
-            entry.used_at = now;
-            return Ok(entry.client.clone());
-        }
-    }
-    // 跳转逐跳检查域名和凭证，客户端构造失败不能回落到自动跟转的客户端。
-    let client = Arc::new(build_client_with(proxy, &timeouts, true)?);
-    let mut guard = lock_clients();
-    let cache = guard.get_or_insert_with(ClientCache::default);
-    cache.clock += 1;
-    let now = cache.clock;
-    if let Some(entry) = cache.entries.get_mut(&key) {
-        entry.used_at = now;
-        return Ok(entry.client.clone());
-    }
-    while cache.entries.len() >= MAX_CLIENTS {
-        let Some(oldest) = cache
-            .entries
-            .iter()
-            .min_by_key(|(_, entry)| entry.used_at)
-            .map(|(key, _)| key.clone())
-        else {
-            break;
-        };
-        cache.entries.remove(&oldest);
-    }
-    cache.entries.insert(
-        key,
-        CacheEntry {
-            used_at: now,
-            client: client.clone(),
-        },
-    );
-    Ok(client)
 }
 
 /// 跟随系统代理的 Client（进程级缓存一份）。
@@ -575,7 +528,7 @@ async fn read_exit_ip(client: &reqwest::Client, proxy: Option<&ResolvedProxy>, t
 /// 测试目标必须返回成功状态（2xx）；收到 HTTP 响应不等于目标可用。
 /// 重定向由客户端跟随，以最终响应状态为准。
 ///
-/// `target_url` 为 None 时用 `https://copilot.tencent.com/v2/config`。
+/// `target_url` 为 None 时用 `DEFAULT_TEST_URL`。
 pub async fn test_connectivity(
     proxy: Option<&ResolvedProxy>,
     timeout_ms: u64,

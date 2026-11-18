@@ -10,6 +10,11 @@ const REFRESH_EXPIRY_KEYS: &[&str] = &[
 ];
 
 pub(super) fn credential_fields(record: &StoredAccount, public: &mut Map<String, Value>) {
+    if record.is_desktop() && matches!(record.provider().as_str(),
+        "raccoon" | "kiro" | "autoclaw" | "autoclaw-intl" | "cline-free" | "cline-pass")
+        && crate::server::core::plugin_host::wasm::has_capability(&record.provider(), "desktop.credentials.v1") {
+        public.insert("canSyncCredentials".to_string(), Value::Bool(true));
+    }
     if record.get("pluginIdentityContract").and_then(Value::as_u64) == Some(1) {
         return;
     }
@@ -21,7 +26,23 @@ pub(super) fn credential_fields(record: &StoredAccount, public: &mut Map<String,
         &["refreshToken", "refresh_token", "refresh"]
     };
     let has_refresh = token_present(record, public, refresh_keys, "hasRefreshToken");
-    let can_refresh = public.get("canRefresh").and_then(Value::as_bool).unwrap_or(false) || has_refresh;
+    let read_only = record.is_desktop()
+        && secret.and_then(|fields| fields.get("desktopReadOnly")).and_then(Value::as_bool) == Some(true);
+    // 有刷新材料不代表可消费：实际本机只读引用由官方客户端维护，不能合成续期许可。
+    // Free 的旧兼容记录没有可信新登记，不能从刷新材料或旧展示字段合成续期资格。
+    // 已确认的新登记与固定续期记录为 contract 1，已在入口保持其宿主公开结果。
+    let refreshable = if record.provider() == "lobsterai" {
+        // 龙虾的续期还需要首次登录载荷件，不能把仅有refreshToken的旧账号显示成可续期。
+        let fields = secret.unwrap_or(record.fields());
+        has_refresh && ["firstKeyfrom", "latestKeyfrom"].iter().all(|key| {
+            let alias = if *key == "firstKeyfrom" { "first_keyfrom" } else { "latest_keyfrom" };
+            [fields.get(*key), fields.get(alias)].into_iter().flatten().any(|value|
+                value.as_str().is_some_and(|value| !value.trim().is_empty()))
+        })
+    } else {
+        public.get("canRefresh").and_then(Value::as_bool).unwrap_or(false) || has_refresh
+    };
+    let can_refresh = !read_only && record.provider() != "cline-free" && refreshable;
     public.insert("hasRefreshToken".to_string(), Value::Bool(has_refresh));
     public.insert("canRefresh".to_string(), Value::Bool(can_refresh));
     let has_access = token_present(record, public, &["accessToken", "access_token", "access", "token"], "hasAccessToken")
@@ -83,7 +104,7 @@ fn token_present(record: &StoredAccount, public: &Map<String, Value>, keys: &[&s
 }
 
 pub(super) fn is_private_field(key: &str) -> bool {
-    matches!(key,
+    super::credential_version::private_field(key) || matches!(key,
         "pluginSecret" | "pluginPublic" | "pluginIdentity" | "pluginIdentityContract" | "pluginState" | "accessToken" | "refreshToken"
         | "access_token" | "refresh_token" | "apiKey" | "api_key" | "password"
         | "balanceToken" | "workbuddyWebSession" | "access_key_id" | "secret_access_key" | "security_token" | "oauth_context"

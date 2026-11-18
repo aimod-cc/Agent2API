@@ -193,7 +193,11 @@ pub async fn stats_summary(State(state): State<ServerState>, Query(params): Quer
         return errors::management_error(400, "apiKey 取值非法（需要 key:<id>、env、none 或 unknown）");
     }
     let stats = state.request_stats();
-    let result = tokio::task::spawn_blocking(move || stats.usage_summary(&requested, custom, api_key.as_deref())).await;
+    let count_only = params.get("view").is_some_and(|view| view == "requestCount") && requested == "today" && api_key.is_none();
+    let result = tokio::task::spawn_blocking(move || {
+        if count_only { stats.today_request_count() }
+        else { stats.usage_summary(&requested, custom, api_key.as_deref()) }
+    }).await;
     match result {
         Ok(value) => ok_json(value),
         // 任务被取消（runtime 关闭中）或 panic：给一个可读的 500 而不是让
@@ -217,9 +221,15 @@ pub async fn stats_summary(State(state): State<ServerState>, Query(params): Quer
 /// 收尾后由终态记账覆盖。status 过滤也认 `running` 值（只看进行中）。
 pub async fn stats_requests(State(state): State<ServerState>, Query(params): Query<Params>) -> Response {
     let filter = match checked_filter(&params) { Ok(value) => value, Err(response) => return response };
-    let mut value = state.request_stats().query_requests(&filter);
-    crate::server::core::billing::keepalive::normalize_request_display(state.store(), &mut value);
-    ok_json(value)
+    let result = tokio::task::spawn_blocking(move || {
+        let mut value = state.request_stats().query_requests(&filter);
+        crate::server::core::billing::keepalive::normalize_request_display(state.store(), &mut value);
+        value
+    }).await;
+    match result {
+        Ok(value) => ok_json(value),
+        Err(error) => errors::management_error(500, format!("请求记录读取任务失败: {error}")),
+    }
 }
 
 /// 从查询串解析筛选条件 —— GET / DELETE / clear-preview 三条路由共用同一份

@@ -281,7 +281,7 @@ impl AccountStore {
         // 合法性只有一处定义）；custom 路径在同一个事务前写进记录，不额外再
         // 走一次 update_account。
         if let Some(value) = object.get("userAgent") {
-            let next = crate::server::core::client::catalog::normalize_user_agent_override(value)?;
+            let next = crate::server::core::user_agent::normalize_override(provider_id, value)?;
             if next.is_empty() {
                 fields.remove("userAgent");
             } else {
@@ -996,11 +996,9 @@ fn credential_of_record(record: &StoredAccount) -> CustomCredential {
             .filter(|text| !text.is_empty()),
         proxy,
         proxy_error,
-        user_agent: fields
-            .get("userAgent")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .unwrap_or("")
-            .to_string(),
+        user_agent: crate::server::core::user_agent::override_value(
+            &record.provider(),
+            fields.get("userAgent").and_then(Value::as_str).unwrap_or(""),
+        ).to_string(),
     }
 }

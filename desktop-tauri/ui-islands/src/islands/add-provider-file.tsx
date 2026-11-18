@@ -7,6 +7,7 @@ import { readFileAsDataUrl } from '../../../ui-shared/file-read'
 import { accountFilePayload, isAccountExport } from './add-account-file'
 import { Note, runAdd } from './add-provider-common'
 import { useAddAccountProxy, useAccountAddBusy } from './add-account-proxy'
+import { userAgentEditable } from './add-account-user-agent'
 import { t } from '../i18n'
 
 /* ─── 导入凭证文件（通用版；WorkBuddy 那段是另一套 payload，不要合并）─── */
@@ -95,7 +96,9 @@ export function FileImportSection({
         if (remark) payload.name = remark
         // 账号文件（导出回流）自带 UA 时不覆盖用户这次填的；凭证文件导入没有
         // 这个字段，用弹窗里填的那份。
-        if (userAgent.trim() && payload.userAgent === undefined) payload.userAgent = userAgent.trim()
+        if (userAgentEditable(config.provider) && userAgent.trim() && payload.userAgent === undefined) {
+          payload.userAgent = userAgent.trim()
+        }
         Object.assign(payload, isAccountExport(payload) ? proxy.importFields() : { proxy: proxy.read() })
         const data = (await postAccount(payload)) as { account?: AccountRecord } | null
         setHint('')

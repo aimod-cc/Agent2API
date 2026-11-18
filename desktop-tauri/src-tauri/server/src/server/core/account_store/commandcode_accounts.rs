@@ -43,7 +43,7 @@ impl AccountStore {
         let mut value = record.to_value();
         if let Some(object) = value.as_object_mut() {
             object.remove("accessToken");
-            object.insert("available".to_string(), Value::Bool(record.enabled()));
+            object.insert("available".to_string(), Value::Bool(record.has_credentials()));
             // 有没有 key（等价于 has_credentials，但这里给出的是**本家语义**的
             // 字段名，界面按它显示「已配置 / 需重贴」）
             object.insert(

@@ -7,6 +7,7 @@ use axum::http::HeaderMap;
 use crate::server::core::protocol::native::WireProtocol;
 
 mod native;
+mod errors;
 mod translate;
 use translate::ProtocolTranslateStream;
 
@@ -120,12 +121,13 @@ pub(crate) async fn forward(
     // 最终地址之后**再过一次读侧迁移（提供商层已在 `custom_providers::item_of`
     // 过了一遍，账号覆盖项只在这里能碰到）。
     let base_url = custom_providers::migrate_base_url(&base_url, quirks.emulate_opencode);
+    let user_agent = crate::server::core::user_agent::override_value(provider_id, &credential.user_agent);
     if let Some(native_protocol) = native_protocol {
         if WireProtocol::from_provider(protocol) != Some(native_protocol) {
             return Err(GatewayError::with_status(409, "提供商协议在转发前发生变化，请重试；未发送错误协议的请求"));
         }
         return native::forward(
-            native_protocol, provider_id, account_id, &credential.api_key, &credential.user_agent,
+            native_protocol, provider_id, account_id, &credential.api_key, user_agent,
             &base_url, &quirks, body, route_model, client_headers, proxy, stream, telemetry, slot, connections,
         ).await;
     }
@@ -135,7 +137,7 @@ pub(crate) async fn forward(
             provider_id,
             account_id,
             &credential.api_key,
-            &credential.user_agent,
+            user_agent,
             &base_url,
             &quirks,
             body,
@@ -216,11 +218,8 @@ pub(crate) async fn forward(
     }
     quirks.apply_emulation_headers(&mut headers, api_key, &outbound, &base_url);
     quirks.apply_to(&mut headers);
-    // 账号级自定义 User-Agent 放在**最后**：伪装头与用户手写的静态头都可能
-    // 写了 UA（`quirks.headers` 里就有），而账号设置里填的值是用户对**这一条
-    // 账号**的最新意图，优先级最高。大小写不敏感地摘掉同名头再追加，避免留下
-    // 两个 `user-agent` 让上游取哪个变成实现细节。
-    apply_user_agent_override(&mut headers, &credential.user_agent);
+    // 只有提供商允许的账号覆盖才在配套请求头之后生效。
+    apply_user_agent_override(&mut headers, user_agent);
 
     logging::verbose(
         "[CustomProvider]",
@@ -246,20 +245,9 @@ pub(crate) async fn forward(
     // ── 响应：2xx 打包 outcome；非 2xx 分类（见模块头）────────────────
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
-        // Retry-After 要在读 body **之前**取（read_upstream_error 会吃掉响应）
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok())
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .map(str::to_string);
+        let headers = response.headers().clone();
         let detail = read_upstream_error(response, telemetry.capture().as_deref()).await;
-        return Err(classify_custom_error(
-            status,
-            &detail.message,
-            retry_after.as_deref(),
-        ));
+        return Err(errors::from_detail(status, &detail, &headers));
     }
 
     if stream {
@@ -424,12 +412,8 @@ impl ProviderQuirks {
     }
 }
 
-/// 账号级自定义 User-Agent 的落地：摘掉同名头（不区分大小写）再追加一条。
-///
-/// 位置固定在各协议的「头已拼完」之后 —— 伪装头（OpenCode 两个面）与用户
-/// 手写在提供商记录上的静态头都可能带 UA，而账号设置里填的值是用户对**这一条
-/// 账号**的最新意图，优先级最高。留两条同名头会让上游取哪个变成实现细节。
-/// 值在落库时已校验（无控制字符、能转成合法头值），这里不做二次兜底。
+/// 已经过提供商策略过滤的账号 User-Agent，在配套头拼好后覆盖同名头。
+/// 值在落库时完成校验；空串保留默认身份，不产生重复请求头。
 fn apply_user_agent_override(headers: &mut Vec<(String, String)>, user_agent: &str) {
     crate::server::core::user_agent::apply(headers, user_agent);
 }
@@ -509,7 +493,8 @@ async fn forward_translated(
             }
             quirks.apply_emulation_headers(&mut headers, api_key, &outbound_chat, base_url);
             quirks.apply_to(&mut headers);
-            apply_user_agent_override(&mut headers, user_agent);
+            apply_user_agent_override(&mut headers,
+                crate::server::core::user_agent::override_value(provider_id, user_agent));
             (url, headers, payload)
         }
         OutboundKind::Anthropic => {
@@ -558,7 +543,8 @@ async fn forward_translated(
             }
             quirks.apply_emulation_headers(&mut headers, api_key, &outbound_chat, base_url);
             quirks.apply_to(&mut headers);
-            apply_user_agent_override(&mut headers, user_agent);
+            apply_user_agent_override(&mut headers,
+                crate::server::core::user_agent::override_value(provider_id, user_agent));
             (url, headers, payload)
         }
     };
@@ -600,20 +586,9 @@ async fn forward_translated(
     // （message → msg → error.message → 前 500 字符兜底）两条都覆盖
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
-        // Retry-After 要在读 body **之前**取（read_upstream_error 会吃掉响应）
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok())
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .map(str::to_string);
+        let headers = response.headers().clone();
         let detail = read_upstream_error(response, telemetry.capture().as_deref()).await;
-        return Err(classify_custom_error(
-            status,
-            &detail.message,
-            retry_after.as_deref(),
-        ));
+        return Err(errors::from_detail(status, &detail, &headers));
     }
 
     // 上游字节流先过协议翻译（→ 标准 chat SSE），再交给既有消费层：

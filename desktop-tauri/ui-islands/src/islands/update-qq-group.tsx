@@ -1,6 +1,5 @@
 import * as React from 'react'
 import {
-  Badge,
   Dialog,
   DialogBody,
   DialogContent,
@@ -19,13 +18,9 @@ import { t } from '../i18n'
  * icons.js 那两枚）、右边主标题 + 副标题，整张卡可点。QQ 卡片用于「复制群号」
  * （群号本身就是要拿走的文本），Telegram 卡片用于「打开链接」（外链交给系统浏览器）。
  *
- * 群 1、群 2 的「即将满员」放在卡片右上角而不是标题旁：它是这张卡的**状态**，
- * 挂在标题上会把标题挤成两截，扫视时也看不出这是「整张卡」的属性。
- *
  * ── 为什么不再摆二维码 ────────────────────────────────────
  * 二维码是打进包里的静态图，换群 / 换码必须跟着发一次版（见 update-shared.ts
- * 上 QQ_GROUPS 的注释）。现在群号本来就会变（群 1 满员、以后可能再开群），
- * 只留群号 + 复制就没有这个负担，改一个常量即可。
+ * 上 QQ_GROUPS 的注释）。只留群号 + 复制，更新群号时改常量即可。
  */
 export function QqGroupDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   /** 取一枚内联 SVG（icons.js 由 index.html 在岛之前加载，正常总是就位） */
@@ -63,13 +58,8 @@ export function QqGroupDialog({ open, onClose }: { open: boolean; onClose: () =>
                     {t('QQ 群 {n}', { n: index + 1 })}
                     <code>{group.no}</code>
                   </span>
-                  <span className='qq-card-sub'>
-                    {group.nearlyFull ? t('即将满员，请优先加3群、4群') : t('点击复制群号')}
-                  </span>
+                  <span className='qq-card-sub'>{t('点击复制群号')}</span>
                 </span>
-                {group.nearlyFull ? (
-                  <Badge shape='tag' variant='warning' className='qq-card-flag'>{t('即将满员')}</Badge>
-                ) : null}
               </Item>
             ))}
 

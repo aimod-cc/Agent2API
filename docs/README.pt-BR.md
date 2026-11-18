@@ -25,7 +25,8 @@ O Agent2API é um **gateway de roteamento de IA com gerenciamento de clientes Ag
 - 🔌 **APIs de modelos unificadas** — OpenAI Chat / Responses / Images, Anthropic Messages e catálogo unificado; Raccoon, Loomy, Antigravity, ModelScope, WorkBuddy e Doubao Work geram imagens, e Raccoon, Loomy, Antigravity, ModelScope e WorkBuddy também editam imagens de referência. Ambos os recursos estão disponíveis como ferramentas do assistente de IA
 - 🧭 **Roteamento de IA** — modelos, prioridade de contas, balanceamento, afinidade de sessão e failover
 - 🤖 **Gerenciamento de clientes Agent** — vários perfis, importação de configurações, prévia de gravação e alternância de serviços
-- 🧩 **Extensões por plugins** — provedores adicionais instalados e atualizados separadamente; provedores personalizados dispensam plugins
+- 🧩 **Extensões por plugins** — provedores adicionais são instalados e atualizados separadamente, sem misturar regiões ou cotas. Os antigos pacotes básicos agora incluem conversa, login oficial, renovação gerenciada e benefícios do CodeArts; conversa, continuação de ferramentas, entrada de imagens e vínculo local autorizado do CatPaw; conversa, respostas assíncronas, upload/geração de imagens, login, importação local, check-in e recompensas do Doubao Work; e tarefas de conversa, ferramentas, login e check-in diário separados para MonkeyCode China/Internacional. Tarefas MonkeyCode e leitura de credenciais locais exigem autorização explícita. O login gerenciado do Kiro e a renovação do Cline Free após registro explícito continuam disponíveis. Essas implementações ainda não foram validadas com contas reais.
+- 🧰 **Emulação de ferramentas web** — a camada comum do gateway converte ferramentas, histórico e resultados para modelos declarados de Zhipu Qingyan, DeepSeek Web e Tabbit. Ativada por padrão e pode ser desligada. Não é suporte web nativo e ainda não foi validada com contas reais.
 - 🛡️ **Proxies de saída** — saídas do pool de proxies para contas e tarefas de atualização
 - 🔑 **Segurança do gateway** — chaves com escopo, verificação humana no painel e recusa de modelos sem chave configurada
 - 📊 **Relatórios** — volume, sucesso, tokens, acerto de cache e mapa de calor de 365 dias
@@ -34,13 +35,29 @@ O Agent2API é um **gateway de roteamento de IA com gerenciamento de clientes Ag
 
 ## ❤️ Patrocinadores
 
+Agradecemos à Beichen API, à IPWO e à ProxyLane por patrocinarem este projeto.
+
+<table>
+<tr>
+<td width="180" align="center"><a href="https://beichenapi.com/register?aff=QWJJYF7PT8SY"><img src="../desktop-tauri/ui/assets/providers/beichen.png" alt="Beichen API" width="64" /><br /><strong>Beichen API</strong></a></td>
+<td><strong>Uma API para vários modelos de referência.</strong><br />A Beichen oferece uma API de IA intermediária compatível com OpenAI, com respostas em streaming e suporte à conexão de modelos de raciocínio prolongado. Selecione o primeiro cartão em Adicionar conta → Modelos de API no Agent2API e informe sua API Key junto ao endereço preenchido automaticamente.<br /><br /><a href="https://beichenapi.com/register?aff=QWJJYF7PT8SY"><strong>Cadastrar / Obter API Key ↗</strong></a></td>
+</tr>
+</table>
+
+<table>
+<tr>
+<td width="180" align="center"><a href="https://www.ipwo.net/?code=LQW28BAYK"><img src="../desktop-tauri/ui/assets/sponsors/ipwo.png" alt="IPWO" width="140" /><br /><strong>IPs residenciais IPWO</strong></a></td>
+<td><strong>Planos de proxies residenciais dinâmicos, estáticos e ilimitados.</strong><br />A IPWO oferece IPs residenciais em várias regiões, com seleção por país e cidade e suporte a HTTP(S) / SOCKS5. Adicione o endereço recebido na página "Proxy de rede" do Agent2API para usar com contas e rotas de serviço.<br /><br /><a href="https://www.ipwo.net/?code=LQW28BAYK"><strong>Ver planos / Obter IPs residenciais ↗</strong></a></td>
+</tr>
+</table>
+
 <a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><img src="../assets/sponsor-proxylane.png" alt="ProxyLane (patrocinador)" width="100%" /></a>
 
 <table>
 
 <tr>
 <td width="240"><a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/proxylane-logo-for-dark-bg.png" /><img src="../assets/proxylane-logo-for-light-bg.png" alt="ProxyLane" width="220" /></picture></a></td>
-<td>A <a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme">ProxyLane</a> patrocina este projeto! A ProxyLane oferece proxies de IP residencial estático nativos para contas de IA (Static Residential ISP): os IPs vêm de operadoras de banda larga residenciais reais, com pontuação de fraude baixa no Scamalytics, cada IP é dedicado a você, com tráfego ilimitado, a partir de $3.90. Adicione uma saída por conta na página "Proxy de rede". Use o código <code>AGENT2API25</code> para 25% de desconto na primeira compra.</td>
+<td>A <a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=agent2api&utm_medium=partnership&utm_campaign=agent2api_202610&utm_content=github_readme">ProxyLane</a> oferece proxies de IP residencial estático nativos para contas de IA (Static Residential ISP): os IPs vêm de operadoras de banda larga residenciais reais, com pontuação de fraude baixa no Scamalytics, cada IP é dedicado a você, com tráfego ilimitado, a partir de $3.90. Adicione uma saída por conta na página "Proxy de rede". Use o código <code>AGENT2API25</code> para 25% de desconto na primeira compra.</td>
 </tr>
 
 </table>
@@ -48,10 +65,9 @@ O Agent2API é um **gateway de roteamento de IA com gerenciamento de clientes Ag
 ## 💬 Comunidade e suporte
 
 - **Grupos do QQ**: grupos de chat do Agent2API; pesquise o número do grupo no QQ para entrar.
-  - Grupo 1: `1127656296` (**Quase lotado — prefira o grupo 3 ou 4**)
-  - Grupo 2: `1130894674` (**Quase lotado — prefira o grupo 3 ou 4**)
+  - Grupo 1: `1127656296`
+  - Grupo 2: `1130894674`
   - Grupo 3: `1108276647`
-  - Grupo 4: `1054072416`
 - **Grupo do Telegram**: <https://t.me/+9gM8YPvgRL02NGRl>
 - **💖 Doação**: se o Agent2API ajuda você, fique à vontade para [pagar um café ao autor](./SPONSOR.md); doações são voluntárias e não desbloqueiam nada.
 - **🤝 Patrocínio / negócios**: quer patrocinar o projeto ou divulgar seu produto aqui? Envie um e-mail para [541675139@qq.com](mailto:541675139@qq.com).

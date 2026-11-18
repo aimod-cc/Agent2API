@@ -12,11 +12,11 @@ mod events;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Phase { Queued, Runtime, Starting, Loading, Registering, Ready, Failed, Timeout, Blocked, Disabled, Unknown }
+pub enum Phase { Queued, Runtime, Starting, Loading, Waiting, Registering, Ready, Failed, Timeout, Blocked, Unsupported, Disabled, Unknown }
 
 impl Phase {
     pub fn pending(self) -> bool {
-        matches!(self, Self::Queued | Self::Runtime | Self::Starting | Self::Loading | Self::Registering)
+        matches!(self, Self::Queued | Self::Runtime | Self::Starting | Self::Loading | Self::Waiting | Self::Registering)
     }
     pub fn failed(self) -> bool { matches!(self, Self::Failed | Self::Timeout) }
 }
@@ -70,6 +70,7 @@ struct Entry {
     enabled: bool,
     providers: Vec<Provider>,
     startup: LoadStatus,
+    unsupported: bool,
     registered: bool,
     host: Option<Weak<Host>>,
 }
@@ -97,7 +98,7 @@ fn configure(entries: Vec<Entry>, script: bool) {
     state.entries.retain(|id, entry| entry.script != script || ids.contains(id));
     for mut entry in entries {
         if let Some(previous) = state.entries.get(&entry.id) {
-            if entry.enabled == previous.enabled {
+            if entry.enabled == previous.enabled && entry.unsupported == previous.unsupported {
                 entry.startup = previous.startup.clone();
                 entry.registered = previous.registered;
                 entry.host = previous.host.clone();
@@ -107,17 +108,26 @@ fn configure(entries: Vec<Entry>, script: bool) {
     }
 }
 
+fn pack_status(pack: &super::InstalledPack) -> LoadStatus {
+    if let Some(reason) = super::support::legacy_reason(pack) {
+        LoadStatus { error: Some(reason), ..LoadStatus::new(Phase::Unsupported) }
+    } else {
+        LoadStatus::new(if pack.enabled { Phase::Queued } else { Phase::Disabled })
+    }
+}
+
 pub(super) fn configure_packs(registry: &PackRegistry) {
     let owners = super::ownership::owners(registry);
     configure(registry.packs.iter().map(|pack| Entry {
         id: pack.id.clone(), name: super::install::read_manifest(&super::install::plugins_dir().join(&pack.id).join(&pack.version))
-            .map(|manifest| manifest.name).unwrap_or_else(|_| pack.id.clone()),
+            .map(|manifest| super::pack_view::display_name(&manifest.name).to_string()).unwrap_or_else(|_| pack.id.clone()),
         package_name: pack.id.clone(), script: false, enabled: pack.enabled,
         providers: pack.manifest_providers.iter().filter(|provider|
-            owners.get(provider.id.as_str()).is_none_or(|owner| owner == &pack.id))
+            owners.get(provider.id.as_str()) == Some(&pack.id))
             .map(|provider| Provider { id: provider.id.0.clone(), label: provider.label.clone(),
                 enabled: pack.providers.get(provider.id.as_str()).copied().unwrap_or(true) }).collect(),
-        startup: LoadStatus::new(if pack.enabled { Phase::Queued } else { Phase::Disabled }), registered: false, host: None,
+        startup: pack_status(pack), unsupported: super::support::legacy_reason(pack).is_some(),
+        registered: false, host: None,
     }).collect(), false);
 }
 
@@ -129,7 +139,8 @@ pub(super) fn configure_scripts(registry: &super::script::storage::Registry) {
         providers: pack.providers.iter().map(|id| Provider { id: id.clone(),
             label: super::script::runtime::provider_label(id), enabled: !pack.disabled_providers.contains(id) }).collect(),
         startup: LoadStatus { previous_error: pack.error.as_ref().map(|error| super::process::redact(error)),
-            ..LoadStatus::new(if pack.enabled { Phase::Queued } else { Phase::Disabled }) }, registered: false, host: None,
+            ..LoadStatus::new(if pack.enabled { Phase::Queued } else { Phase::Disabled }) },
+        unsupported: false, registered: false, host: None,
     }).collect(), true);
     state().lock().unwrap_or_else(|error| error.into_inner()).error = None;
 }
@@ -142,7 +153,9 @@ pub(super) fn initialize() {
     state.boot_id = format!("{}-{}", std::process::id(), logging::now_ms());
     for entry in state.entries.values_mut() {
         let previous = entry.startup.error.clone().or_else(|| entry.startup.previous_error.clone());
-        entry.startup = LoadStatus::new(if entry.enabled { Phase::Queued } else { Phase::Disabled });
+        entry.startup = if entry.unsupported {
+            LoadStatus { error: Some(super::support::LEGACY_REASON.to_string()), ..LoadStatus::new(Phase::Unsupported) }
+        } else { LoadStatus::new(if entry.enabled { Phase::Queued } else { Phase::Disabled }) };
         entry.startup.previous_error = previous;
         entry.registered = false;
         entry.host = None;
@@ -152,11 +165,16 @@ pub(super) fn initialize() {
     state.booting = true;
 }
 
+pub(crate) fn booting() -> bool {
+    state().lock().unwrap_or_else(|error| error.into_inner()).booting
+}
+
 pub(super) fn finish_boot() {
     let event = {
         let mut state = state().lock().unwrap_or_else(|error| error.into_inner());
         if !state.booting { return; }
         state.booting = false;
+        crate::server::core::providers::catalog::invalidate();
         let entries = state.entries.values().filter(|entry| entry.enabled).collect::<Vec<_>>();
         (!entries.is_empty() && entries.iter().all(|entry| !entry.startup.phase.pending()))
             .then(|| events::summary_event(&entries, &state.boot_id, 0))
@@ -181,7 +199,8 @@ pub(super) fn begin(ids: Vec<String>, phase: Phase) -> LoadGuard {
     for id in &ids {
         if let Some(entry) = state.entries.get_mut(id) {
             let previous = entry.startup.error.clone().or_else(|| entry.startup.previous_error.clone());
-            entry.startup = LoadStatus::new(phase);
+            entry.startup = LoadStatus::new(if entry.unsupported { Phase::Unsupported } else { phase });
+            if entry.unsupported { entry.startup.error = Some(super::support::LEGACY_REASON.to_string()); }
             entry.startup.attempt = generation;
             entry.startup.started_at = Some(entry.startup.updated_at);
             entry.startup.previous_error = previous;
@@ -210,6 +229,7 @@ impl Attempt {
                 if id.is_some_and(|id| id != key) { continue; }
                 let Some(entry) = state.entries.get_mut(key).filter(|entry|
                     entry.enabled && entry.startup.attempt == self.generation) else { continue; };
+                if entry.unsupported { continue; }
                 if id.is_none() && (entry.startup.phase.failed() || entry.startup.phase == Phase::Blocked)
                     && (phase != Phase::Starting || !entry.registered) { continue; }
                 if id.is_some() && phase.pending() && !entry.startup.phase.pending() { continue; }
@@ -272,7 +292,7 @@ impl Attempt {
         } else {
             for (id, phase) in script {
                 if phase.failed() || phase == Phase::Blocked { continue; }
-                let blocked = matches!(phase, Phase::Queued | Phase::Registering | Phase::Ready | Phase::Runtime | Phase::Starting);
+                let blocked = matches!(phase, Phase::Queued | Phase::Waiting | Phase::Registering | Phase::Ready | Phase::Runtime | Phase::Starting);
                 self.update(Some(&id), if blocked { Phase::Blocked } else if timeout { Phase::Timeout } else { Phase::Failed }, Some(message), None);
             }
         }
@@ -289,7 +309,7 @@ impl Attempt {
         let Some(id) = params["package"].as_str().filter(|id| self.ids.iter().any(|known| known == id)) else { return; };
         let phase = match params["phase"].as_str() {
             Some("queued") => Phase::Queued, Some("loading") => Phase::Loading,
-            Some("registering") => Phase::Registering, Some("failed") => Phase::Failed,
+            Some("waiting") => Phase::Waiting, Some("registering") => Phase::Registering, Some("failed") => Phase::Failed,
             _ => return,
         };
         let current = state().lock().unwrap_or_else(|error| error.into_inner()).entries.get(id)
@@ -307,6 +327,10 @@ impl Attempt {
 impl LoadGuard {
     pub fn finish(mut self) { self.attempt.phase(Phase::Ready); self.completed = true; }
     pub fn fail(mut self, message: &str) { self.attempt.fail(message, false); self.completed = true; }
+    pub(super) fn block(mut self, message: &str) {
+        self.attempt.update(None, Phase::Blocked, Some(message), None);
+        self.completed = true;
+    }
 }
 
 impl Drop for LoadGuard {
@@ -317,6 +341,11 @@ impl Drop for LoadGuard {
 
 fn effective(entry: &Entry) -> LoadStatus {
     let mut status = entry.startup.clone();
+    if entry.unsupported {
+        status.phase = Phase::Unsupported;
+        status.error = Some(super::support::LEGACY_REASON.to_string());
+        return status;
+    }
     if !entry.enabled { status.phase = Phase::Disabled; status.error = None; return status; }
     if status.phase == Phase::Ready {
         match entry.host.as_ref().and_then(Weak::upgrade) {
@@ -359,13 +388,13 @@ fn provider_state(entry: &Entry, item: &Provider, status: &LoadStatus) -> Provid
 }
 
 pub fn snapshot() -> Value {
-    let (boot_id, initialized, error, entries) = {
+    let (boot_id, initialized, booting, error, entries) = {
         let state = state().lock().unwrap_or_else(|error| error.into_inner());
-        (state.boot_id.clone(), state.initialized, state.error.clone(), state.entries.values().cloned().collect::<Vec<_>>())
+        (state.boot_id.clone(), state.initialized, state.booting, state.error.clone(), state.entries.values().cloned().collect::<Vec<_>>())
     };
     let mut providers = BTreeMap::new();
     let mut packs = Vec::new();
-    let mut pending = !initialized;
+    let mut pending = !initialized || booting;
     for entry in entries {
         let status = effective(&entry);
         pending |= entry.enabled && status.phase.pending();
@@ -378,11 +407,11 @@ pub fn snapshot() -> Value {
         }
         packs.push(json!({ "id": entry.id, "name": entry.name, "script": entry.script, "startup": status }));
     }
-    let revision = hash(&json!({ "packs": packs, "providers": providers, "error": error, "initialized": initialized }));
-    let availability_revision = hash(&json!(providers.iter().map(|(id, state)|
-        (id, state.available, state.available.then_some((state.startup.attempt, state.startup.started_at)))).collect::<Vec<_>>()));
+    let revision = hash(&json!({ "packs": packs, "providers": providers, "error": error, "initialized": initialized, "booting": booting }));
+    let availability_revision = hash(&json!({ "booting": booting, "providers": providers.iter().map(|(id, state)|
+        (id, state.available, state.available.then_some((state.startup.attempt, state.startup.started_at)))).collect::<Vec<_>>() }));
     json!({ "bootId": boot_id, "revision": revision, "availabilityRevision": availability_revision,
-        "pending": pending, "packs": packs, "providers": providers, "error": error,
+        "pending": pending, "booting": booting, "packs": packs, "providers": providers, "error": error,
         "scriptOperation": super::script::operation(), "now": logging::now_ms() })
 }
 

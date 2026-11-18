@@ -48,17 +48,10 @@
 //!   <provider>/       各家的**身份**：地区 ↔ provider id ↔ 枚举值、展示名
 //! ```
 //!
-//! **各家的转发与账号实现都不在这里** —— 它们整体位于独立的提供商插件
-//! （`agent2api-providers`，不随本仓库发布）。这是风险隔离的核心：主仓库不
-//! 持有「怎么伪装成官方客户端打某个上游」的任何知识，只剩身份、账号库、
-//! 用户配置与插件宿主。
-//!
-//! 因此 `<provider>/` 目录里出现下列内容就是**回退**（review 时直接拦下）：
-//!   - 上游域名 / 端点路径 / 客户端版本号 / UA 或产品面标识头；
-//!   - 请求体形状、协议转换、SSE 信封拆解；
-//!   - 凭证文件定位（官方客户端把登录态落在哪）、解密链、换码/续期逻辑。
-//!
-//! 本文件仍然只做「身份与元数据」这一件事，不认识磁盘也不认识账号。
+//! 旧提供商的转发与账号实现仍由独立插件负责；Claude、ChatGPT、Codex
+//! 订阅使用本体 Rust 实现，经同一个 ProviderAdapter 契约接入。
+//! 本文件只维护身份与元数据，订阅的公共接线在 subscriptions，
+//! 上游协议与授权逻辑分别保留在各家的独立模块。
 
 pub mod adapter;
 pub mod availability;
@@ -70,6 +63,10 @@ pub mod catalog;
 pub mod catalog_cache;
 mod catalog_legacy;
 pub mod catalog_refresh;
+pub mod chatgpt_subscription;
+pub mod claude_subscription;
+pub mod codex_subscription;
+pub mod subscriptions;
 pub mod cline;
 pub mod content_block;
 /// 自定义提供商（用户自己填 baseUrl + apiKey）的**运行期接线**：它不是内置家，
@@ -93,11 +90,7 @@ pub mod onboarding_memory;
 /// 不进身份体系：它是各家的共用设施，只按 provider id 记状态。
 pub mod readiness;
 pub mod policy;
-/// **未安装插件**时的占位适配器（如实报错 + 指路去装插件）。
-///
-/// 本项目把「怎么伪装成官方客户端打某个上游」的全部实现搬到了独立的提供商
-/// 插件里（不随本仓库发布），因此网关这边没有内置转发实现 —— 这个模块就是
-/// 「插件缺失」时的那条路径。见文件头的完整说明。
+/// 旧提供商缺少插件时使用占位；内置订阅不经过插件宿主。
 pub mod missing_plugin;
 pub mod qoder;
 pub mod refresh_flight;
@@ -203,6 +196,9 @@ pub enum ProviderKind {
     Atomcode,
     /// LobsterAI（网易有道「有道龙虾」）；`lobsterai`
     LobsterAi,
+    ClaudeSubscription,
+    ChatgptSubscription,
+    CodexSubscription,
 }
 
 /// 一个提供商的静态元数据。
@@ -261,6 +257,9 @@ pub const PROVIDERS: &[ProviderMeta] = &[
     ProviderMeta { id: "modelscope-intl", label: "ModelScope 国际版" },
     ProviderMeta { id: "atomcode", label: "AtomCode" },
     ProviderMeta { id: "lobsterai", label: "LobsterAI" },
+    ProviderMeta { id: claude_subscription::ID, label: "Claude 订阅" },
+    ProviderMeta { id: chatgpt_subscription::ID, label: "ChatGPT API 订阅" },
+    ProviderMeta { id: codex_subscription::ID, label: "Codex 订阅" },
 ];
 
 /// provider id 在注册表里的下标（未知 id → None）。
@@ -350,6 +349,9 @@ pub fn kind_from_id(id: &str) -> Option<ProviderKind> {
         "modelscope-intl" => Some(ProviderKind::ModelscopeIntl),
         "atomcode" => Some(ProviderKind::Atomcode),
         "lobsterai" => Some(ProviderKind::LobsterAi),
+        claude_subscription::ID => Some(ProviderKind::ClaudeSubscription),
+        chatgpt_subscription::ID => Some(ProviderKind::ChatgptSubscription),
+        codex_subscription::ID => Some(ProviderKind::CodexSubscription),
         // 走到这里 = 上面的注册表判定已放行、这个 match 却没有对应分支：
         // 只可能是有人给 `PROVIDERS` 加了条目忘了加这里。开发期喊出来；
         // release 返回 None（见上：宁可为「未知」，不可误认成别家）。
@@ -397,6 +399,9 @@ pub const fn kind_id(kind: ProviderKind) -> &'static str {
         ProviderKind::ModelscopeIntl => "modelscope-intl",
         ProviderKind::Atomcode => "atomcode",
         ProviderKind::LobsterAi => "lobsterai",
+        ProviderKind::ClaudeSubscription => claude_subscription::ID,
+        ProviderKind::ChatgptSubscription => chatgpt_subscription::ID,
+        ProviderKind::CodexSubscription => codex_subscription::ID,
     }
 }
 
@@ -417,12 +422,18 @@ pub(crate) fn is_scoped_runtime_provider(id: &str) -> bool {
 /// 此刻有真实执行体的 provider（不含旧身份的 MissingPlugin 占位）。
 /// 自定义 `custom-` 提供商有独立的存储与直连路径，由消费方另行判断。
 pub fn is_executable_provider(id: &str) -> bool {
-    !availability::is_suspended(id) && crate::server::core::plugin_host::serves_provider(id)
+    !availability::is_suspended(id)
+        && (subscriptions::contains(id) || crate::server::core::plugin_host::serves_provider(id))
 }
 
 /// 真实执行体的 ID；保留插件排序，不包含停用身份。
 pub fn executable_provider_ids() -> Vec<String> {
-    crate::server::core::plugin_host::installed_ids()
+    let mut ids = crate::server::core::plugin_host::installed_ids();
+    for kind in subscriptions::KINDS {
+        let id = kind_id(kind);
+        if !ids.iter().any(|existing| existing == id) { ids.push(id.to_string()); }
+    }
+    ids
 }
 
 /// provider id → 给人看的名字；未登记的 id 原样回显。
@@ -506,8 +517,8 @@ where
 /// 插件保留宿主申报的 category / `plugin`。缺执行体的残留账号不列。
 /// `account_providers` 参数保留既有公开签名。
 ///
-/// `userAgentOverridable`：该执行体支持对账号的全部上游请求覆盖 User-Agent。
-/// 脚本和 Wasm 由宿主执行，原生插件必须明确申报支持，避免旧插件显示无效设置。
+/// `userAgentOverridable`：账号覆盖既被提供商策略允许，也能在全部上游请求中生效。
+/// 自带 Agent 使用适配器身份，第三方插件仍按执行体能力判断。
 pub fn summary_json<F>(count: F, account_providers: &[String]) -> Vec<Value>
 where
     F: Fn(&str) -> usize,
@@ -530,7 +541,8 @@ where
                 "loginAvailable": !plugin || crate::server::core::plugin_host::startup::provider(detail.id)
                     .is_some_and(|state| state.available),
                 "userAgentOverridable": user_agent_overridable(detail.id),
-                "dynamicLogin": crate::server::core::plugin_host::wasm::owns(detail.id),
+                "dynamicLogin": subscriptions::contains(detail.id)
+                    || crate::server::core::plugin_host::dynamic_login(detail.id),
             })
         })
         .collect();
@@ -555,7 +567,7 @@ where
             "loginAvailable": crate::server::core::plugin_host::startup::provider(&id)
                 .is_some_and(|state| state.available),
             "userAgentOverridable": user_agent_overridable(&id),
-            "dynamicLogin": crate::server::core::plugin_host::wasm::owns(&id),
+            "dynamicLogin": crate::server::core::plugin_host::dynamic_login(&id),
         }));
     }
     // 缺插件的残留账号仍不列，记录留在账号库里等待执行体恢复。
@@ -563,9 +575,7 @@ where
     list
 }
 
-/// 自定义 API 没有适配器实例，由网关直接覆盖；插件按加载时的能力声明判断。
+/// 提供商策略与请求能力共用同一判断，不能只按插件运行形式决定。
 fn user_agent_overridable(id: &str) -> bool {
-    adapter::adapter_by_id(id)
-        .map(|adapter| adapter.supports_account_user_agent())
-        .unwrap_or(true)
+    crate::server::core::user_agent::provider_overridable(id)
 }

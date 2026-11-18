@@ -94,6 +94,12 @@ pub(super) fn select_daily_row(
     }
 }
 
+pub(super) fn request_count(conn: &Connection, date: &str) -> rusqlite::Result<i64> {
+    use rusqlite::OptionalExtension;
+    conn.query_row("SELECT requests FROM request_daily WHERE date = ?1", [date], |row| row.get(0))
+        .optional().map(|count| count.unwrap_or(0))
+}
+
 /// 整行写入（存在即覆盖）。
 ///
 /// `date` 是主键，所以「同一天重复记账」天然是覆盖而不是插入两行 ——

@@ -111,6 +111,18 @@ pub fn facts() -> Facts {
     facts.clone()
 }
 
+pub(crate) fn next_change(now: i64) -> Option<i64> {
+    let facts = slot().lock().ok()?;
+    facts.values().flat_map(|count| {
+        if count.window.reset == Reset::Rolling {
+            count.events.iter().map(|event| event.ts.saturating_add(count.window.seconds.saturating_mul(1000)).saturating_add(1))
+                .filter(|at| *at > now).min()
+        } else {
+            (count.end > now).then_some(count.end)
+        }
+    }).min()
+}
+
 pub fn invalidate() { if let Ok(mut facts) = slot().lock() { facts.clear(); } }
 
 pub fn channel_of(account: &serde_json::Value) -> String {
@@ -284,4 +296,5 @@ pub(crate) fn update_facts(
             count.add(Event { ts, model: model.to_string(), tokens: tokens.max(0), requests: 1 });
         }
     }
+    crate::server::core::panel_events::notify(crate::server::core::panel_events::Change::Usage);
 }

@@ -78,9 +78,9 @@ function siblingsOf(item: HTMLElement, kind: 'group' | 'row'): HTMLElement[] {
     return list ? ([...list.children].filter(element =>
       element.classList.contains('acct-group')) as HTMLElement[]) : []
   }
-  const tbody = item.parentElement
-  return tbody ? ([...tbody.children].filter(element =>
-    element.classList.contains('acct-row')) as HTMLElement[]) : []
+  const table = item.closest('table')
+  const provider = item.dataset.provider || item.closest<HTMLElement>('tbody.acct-group')?.dataset.provider
+  return table ? [...table.querySelectorAll<HTMLElement>('tr.acct-row')].filter(row => row.dataset.provider === provider) : []
 }
 
 /**
@@ -189,7 +189,7 @@ export function bindQueueDrag(host: HTMLElement | null, handlers: QueueDragHandl
     const others = items.filter(candidate => candidate !== item)
     drag = {
       kind, provider, accountId, item,
-      container: item.parentElement || host,
+      container: item.closest<HTMLElement>('table') || item.parentElement || host,
       items,
       index: insertionIndex(others, event.clientY),
     }

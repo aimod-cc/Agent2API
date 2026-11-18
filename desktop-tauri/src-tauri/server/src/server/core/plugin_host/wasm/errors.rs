@@ -21,7 +21,10 @@ struct Failure {
 pub(super) fn decode(mut value: Value) -> Result<Value, proto::WireError> {
     if let Some(error) = value.get("error") {
         let error: Failure = serde_json::from_value(error.clone()).map_err(|_| protocol())?;
-        if error.message.len() > 16 * 1024 || error.code.as_ref().is_some_and(|code| code.len() > 4096) {
+        if error.message.len() > 16 * 1024 || error.code.as_ref().is_some_and(|code| code.len() > 4096)
+            || error.reset_at.is_some_and(|reset| reset < 0 || reset > (1_i64 << 53) - 1
+                || chrono::DateTime::from_timestamp_millis(reset).is_none())
+            || error.credential_scope.as_deref().is_some_and(|scope| !super::super::errors::credential_scope_allowed(scope)) {
             return Err(protocol());
         }
         if let Some(status) = error.status {
@@ -42,8 +45,10 @@ pub(super) fn protocol() -> proto::WireError {
 
 pub(super) fn interrupted(error: &wasmtime::Error) -> proto::WireError {
     let (code, message) = match error.downcast_ref::<wasmtime::Trap>() {
-        Some(wasmtime::Trap::OutOfFuel | wasmtime::Trap::StackOverflow) =>
-            ("plugin_resource_limit", "Wasm 插件超过计算或栈限制"),
+        Some(wasmtime::Trap::OutOfFuel) =>
+            ("plugin_resource_limit", "Wasm 插件计算额度耗尽"),
+        Some(wasmtime::Trap::StackOverflow) =>
+            ("plugin_resource_limit", "Wasm 插件执行栈溢出"),
         Some(_) => ("plugin_trap", "Wasm 插件执行中断"),
         None => ("plugin_protocol_error", "Wasm 插件超过资源限制或返回了无效消息"),
     };

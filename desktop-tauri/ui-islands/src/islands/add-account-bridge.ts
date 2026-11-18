@@ -11,9 +11,17 @@
  * （见 add-account-modal.tsx 末尾）。
  */
 
+import { getPluginStartup } from '../../../ui-shared/plugin-startup'
 import { isSuspendedProvider } from '../../../ui-shared/provider-availability'
 import { accountImportNotice } from '../../../ui-shared/account-import-result'
+import { loginFailure } from '../../../ui-shared/plugin-login-diagnostic'
+import type { DesktopImportRequest } from '../../../ui-shared/plugin-desktop-import'
+import {
+  managedLoginSourceGeneration, managedLoginWaitMessage, managedLoginWaitRecord, readManagedLoginWait,
+  type ManagedLoginWaitOwner, type ManagedLoginWaitPhase,
+} from '../../../ui-shared/plugin-login-managed'
 import { t } from '../i18n'
+import { pluginLoginText } from './add-account-login-text'
 
 /* ─── window 上的共享桥（窄类型 + 转型读取）────────────── */
 
@@ -26,7 +34,7 @@ export type AccountRecord = {
   provider?: string
 }
 
-/** 只使用当前运行时摘要中的 provider；旧握手元数据若已下发，供 501 兼容路径读取。 */
+/** 添加账号只使用当前运行时摘要中的提供商。 */
 export type RuntimeProviderRecord = {
   id?: string
   label?: string
@@ -35,12 +43,7 @@ export type RuntimeProviderRecord = {
   source?: 'builtin' | 'plugin'
   dynamicLogin?: boolean
   loginAvailable?: boolean
-  /**
-   * 这家出站请求的 User-Agent 能否按账号改写（后端 `providers::summary_json`）。
-   * false = 会话式家（CatPaw / Qoder / Trae 等），每一步请求由插件自己拼头，
-   * 网关覆盖不到 —— 添加账号与账号设置里都不显示 UA 输入框。
-   * 缺省（旧后端）按 true 处理。
-   */
+  /** 后端统一判断：提供商允许修改，且执行体能够让账号覆盖实际生效。 */
   userAgentOverridable?: boolean
   meta?: Record<string, unknown>
   login_methods?: unknown[]
@@ -49,9 +52,10 @@ export type RuntimeProviderRecord = {
 }
 
 export type LoginOptions = {
-  /** 动态方法索引；缺省 = 旧入口（没有动态方法清单的家，例如内置表单） */
+  /** 启动时必须提供当前提供商声明的登录方式索引。 */
   methodIndex?: number
   inputs?: Record<string, string>
+  locale?: string
   proxy?: unknown
 }
 
@@ -65,6 +69,12 @@ export type LoginProgress = {
   instructions?: string
   hint?: string
   userCode?: string
+  managedLogin?: boolean
+  methodIndex?: number
+  remainingMs?: number
+  timeoutMs?: number
+  phase?: ManagedLoginWaitPhase
+  saved?: boolean | null
 }
 
 /** 桌面 ok/payload、网页登录 session 的统一终态；未结束/空响应绝不补成成功。 */
@@ -77,6 +87,14 @@ export type LoginResult = {
   proxySaved?: boolean
   warning?: string
   instructions?: string
+  managedLogin?: true
+  provider?: string
+  flow?: string
+  methodIndex?: number
+  phase?: ManagedLoginWaitPhase
+  saved?: boolean | null
+  done?: boolean
+  pending?: boolean
 }
 
 /** 目录条目：自定义提供商（wbProviders.customList）与预置目录（wbPresetProviders）共用形状 */
@@ -86,6 +104,7 @@ export type CustomProviderRecord = {
   protocol?: string
   baseUrl?: string
   presetKey?: string
+  userAgentOverridable?: boolean
   accountCount?: number
   /** 客户端形态伪装（预置卡写入的记录字段）：'opencode' = 按官方 CLI 形状补齐请求 */
   clientEmulation?: string
@@ -105,6 +124,8 @@ export type CustomProviderRecord = {
 export type PresetRecord = {
   key: string
   name: string
+  sponsored?: boolean
+  userAgentOverridable?: boolean
   protocol?: string
   baseUrl?: string
   hint?: string
@@ -142,7 +163,10 @@ export type OauthController = {
   start(vendor: 'zai' | 'google'): void
   syncTexts(): void
   cancel(): void
+  dispose(): void
 }
+
+export type SmsController = { dispose(): void }
 
 export type SharedWindow = {
   workbuddyDesktop?: {
@@ -150,15 +174,18 @@ export type SharedWindow = {
     readonly platform?: string
     startLogin(edition: string, mode: string, provider: string, socialRestore?: boolean, options?: LoginOptions): Promise<unknown>
     submitLoginCallback?: (state: string, callbackUrl: string) => Promise<unknown>
+    openReleasePage?: (url: string) => Promise<unknown>
     onLoginState?: (callback: (progress: LoginProgress) => void) => (() => void) | void
     onLoginProgress?: (callback: (progress: LoginProgress) => void) => (() => void) | void
-    cancelLogin?(): Promise<unknown>
+    cancelLogin?(state?: string): Promise<unknown>
   }
   wbApp?: {
     toast?: (message: string, kind?: 'err' | 'ok' | 'warn') => void
     refresh?: () => Promise<unknown> | unknown
+    subscribeRefresh?: (listener: () => void) => () => void
     getState?: () => {
       accounts?: { accounts?: AccountRecord[]; providers?: RuntimeProviderRecord[] }
+      pluginStartup?: { bootId: string }
     } | null | undefined
     /** 切页（app.js 的出口）：空态里「去安装插件包」用它跳到插件页 */
     showPage?: (page: string) => void
@@ -174,6 +201,7 @@ export type SharedWindow = {
       texts?: () => { button?: string; hint?: string }
       onStateChange?: (state: WebLoginView) => void
       start: () => unknown
+      cancel?: () => Promise<unknown>
       onSuccess: (result?: unknown) => unknown
     }): WebLoginController | null | undefined
     refresh?: () => Promise<unknown>
@@ -188,7 +216,7 @@ export type SharedWindow = {
       proxy?: () => unknown
       onBusyChange?: (busy: boolean) => void
       onSuccess: (data?: unknown) => unknown
-    }): unknown
+    }): SmsController | null | undefined
   }
   /** AutoClaw 国际版 OAuth 引擎（autoclaw-oauth.js）：create / cancel（模块级遍历） */
   wbAutoclawOauth?: {
@@ -258,7 +286,7 @@ function errorText(error: unknown, depth = 0): string {
 /** Tauri rejection 可能是裸字符串；结构化错误只取 message/error 等文字。 */
 export function describeError(error: unknown): string {
   const text = errorText(error)
-  return text ? t(text) : t('未知错误')
+  return text ? pluginLoginText(text) : t('未知错误')
 }
 
 /** 优先读取 HTTP 状态；原生桥仅返回文字时，只认网关明确的能力缺失文案。 */
@@ -273,7 +301,7 @@ export function isMethodsUnavailable(error: unknown, depth = 0): boolean {
     if (record.error && record.error !== error && isMethodsUnavailable(record.error, depth + 1)) return true
   }
   const text = errorText(error)
-  return text === '该提供商尚未申报动态登录方式，请使用既有登录入口'
+  return text === '该提供商未声明动态登录方式，请更新插件或网关后重试；不会使用旧版兼容入口。'
     || /\b501\b|auth\.methods[^\n]*(?:not implemented|no method|未实现|不支持)/i.test(text)
 }
 
@@ -282,6 +310,13 @@ export function runtimeProviderOf(provider: string): RuntimeProviderRecord | und
   const live = shared().wbApp?.getState?.()?.accounts?.providers
   const list = Array.isArray(live) ? live : shared().wbProviders?.all?.() || []
   return list.find(item => item.id === provider)
+}
+
+export function accountProviderAvailable(provider: string): boolean {
+  const entry = runtimeProviderOf(provider)
+  if (!entry || entry.loginAvailable === false) return false
+  const startup = getPluginStartup().value?.providers[provider]
+  return !startup || startup.available
 }
 
 /** 该提供商此刻名下的账号数（读主状态的全量列表，不跟筛选走） */
@@ -309,6 +344,26 @@ export async function accountRequest(method: string, path: string, body?: unknow
   return result
 }
 
+/** 固定本机 ChatGLM 导入只 invoke 一次；原生管理会话重发策略同样必须执行 retry=never。 */
+export const desktopImportRequest: DesktopImportRequest = async <T,>(method: 'GET' | 'POST', path: string,
+  body: unknown, options: { retry: 'never' }): Promise<T> => {
+  const bridge = shared()
+  const base = '/api/plugins/desktop-import/chatglm'
+  const expected = method === 'POST' && ['prepare', 'confirm', 'cancel'].some(action => path === `${base}/${action}`)
+    || method === 'GET' && path.startsWith(`${base}/status?intent=`)
+  if (!expected || options.retry !== 'never' || bridge.workbuddyDesktop?.platform !== 'windows'
+    || typeof bridge.__TAURI_INTERNALS__?.invoke !== 'function') throw new Error('desktop_import_unavailable')
+  const result = await bridge.__TAURI_INTERNALS__.invoke('api_request', {
+    request: { method, path, body: body === undefined ? null : body, retry: 'never' },
+  })
+  if (result && typeof result === 'object') {
+    const envelope = result as Record<string, unknown>
+    if (envelope.success === false) throw new Error('desktop_import_failed')
+    if (envelope.success === true && Object.hasOwn(envelope, 'data')) return envelope.data as T
+  }
+  return result as T
+}
+
 /** 统一提交入口：POST /api/accounts，保留各提供商自己的凭证字段。 */
 export function postAccount(payload: Record<string, unknown>): Promise<unknown> {
   return accountRequest('POST', '/api/accounts', payload)
@@ -330,7 +385,36 @@ function publicAccount(value: unknown): AccountRecord | undefined {
   return account.id || account.uid || account.userId ? account : undefined
 }
 
-export function normalizeLoginResult(value: unknown): LoginResult {
+export function normalizeLoginResult(value: unknown, owner?: ManagedLoginWaitOwner): LoginResult {
+  let managed: Record<string, unknown> | undefined
+  try { managed = managedLoginWaitRecord(value) }
+  catch { throw new Error(t('账号保存未确认，请查询本次状态；不会再次保存。')) }
+  if (managed) {
+    let wait
+    try { wait = readManagedLoginWait(value, owner) }
+    catch { throw new Error(t('账号保存未确认，请查询本次状态；不会再次保存。')) }
+    // 必须先判断保存事实；外层 ok:true、旧账号或昵称不能盖过 saved:null/false。
+    if (wait.saved === null) throw new Error(t('账号保存未确认，请查询本次状态；不会再次保存。'))
+    if (wait.phase === 'waiting') throw new Error(t('登录尚未完成，请继续通过共享登录桥等待结果'))
+    if (wait.phase === 'canceled') return {
+      ok: false, canceled: true, managedLogin: true, provider: wait.provider, flow: wait.flow,
+      methodIndex: wait.methodIndex, phase: wait.phase, saved: false, done: true,
+    }
+    if (wait.saved !== true || wait.phase !== 'saved' || wait.done !== true || !wait.session) {
+      throw new Error(managedLoginWaitMessage(wait, t))
+    }
+    const summary = wait.session
+    return {
+      ok: true, canceled: false, managedLogin: true, provider: wait.provider, flow: wait.flow,
+      methodIndex: wait.methodIndex, phase: wait.phase, saved: true, done: true,
+      session: Object.fromEntries(['accountUid', 'accountId', 'nickname', 'edition', 'provider']
+        .filter(key => typeof summary[key as keyof typeof summary] === 'string')
+        .map(key => [key, summary[key as keyof typeof summary]])),
+      ...(typeof summary.proxySaved === 'boolean' ? { proxySaved: summary.proxySaved } : {}),
+      warning: summary.warning ? t(summary.warning) : undefined, instructions: wait.instructions,
+    }
+  }
+  // 非 managed 的旧 wait/payload/session 仍使用原判定与原公开投影。
   let record = resultRecord(value)
   if (record?.success === false) throw value
   if (record?.success === true && Object.hasOwn(record, 'data')) record = resultRecord(record.data)
@@ -343,7 +427,7 @@ export function normalizeLoginResult(value: unknown): LoginResult {
   for (const item of sources) {
     if (item.error || item.ok === false || item.success === false || item.state === 'failed'
       || item.status === 'failed' || item.type === 'error') {
-      throw new Error(describeError(item.error || item))
+      throw loginFailure(describeError(item.error || item), item)
     }
     if (item.pending === true || resultRecord(item.pending) || item.accepted === true
       || item.done === false || item.state === 'pending' || item.status === 'pending') {
@@ -379,6 +463,10 @@ export function normalizeLoginResult(value: unknown): LoginResult {
 
 export async function saveAccountProxySelection(result: LoginResult, proxy: unknown): Promise<LoginResult> {
   if (result.canceled || result.proxySaved === true) return result
+  // 托管登录不另起写账号补偿；未确认同次代理保存只提示，绝不重发账号保存。
+  if (result.managedLogin === true) return {
+    ...result, warning: [result.warning, t('账号已添加，但代理选择未确认保存；请在账号设置中重新检查。')].filter(Boolean).join('\n'),
+  }
   const id = result.account?.id || result.session?.accountUid || result.session?.accountId
   let warning = t('旧网关未确认代理同次保存，已使用兼容接口保存；请在账号设置中确认代理选择。')
   try {
@@ -398,17 +486,17 @@ export async function saveAccountProxySelection(result: LoginResult, proxy: unkn
 export async function startLogin(
   provider: string, edition = 'cn', mode = 'embedded', socialRestore?: boolean, options?: LoginOptions,
 ): Promise<LoginResult> {
-  // 只有带 methodIndex 的才是动态方法；只带 proxy 的是旧入口加代理
-  // （内置表单的网页登录，见 add-provider-blocks 的 WebLoginSection）。
-  // 两者的收尾判定不同：动态方法必须回来一个账号 id，旧入口照旧不看。
-  const dynamic = options !== undefined && options.methodIndex !== undefined
-  if (isSuspendedProvider(provider) || (dynamic && !runtimeProviderOf(provider))) {
+  if (!options || !Number.isSafeInteger(options.methodIndex) || options.methodIndex! < 0) {
+    throw new Error(t('请从添加账号页面选择当前提供商声明的登录方式；旧版默认登录入口已停止支持。'))
+  }
+  const managementGeneration = managedLoginSourceGeneration()
+  if (!accountProviderAvailable(provider)) {
     throw new Error(t('该提供商已不在运行时目录中，请返回列表重新选择'))
   }
   try {
     const bridge = shared().workbuddyDesktop
     let result: unknown
-    if (dynamic && bridge?.platform !== 'web') {
+    if (bridge?.platform !== 'web') {
       const internals = shared().__TAURI_INTERNALS__
       if (!internals?.invoke) throw new Error(t('桌面运行时不可用（Tauri 未初始化）'))
       result = await internals.invoke('start_login', {
@@ -418,8 +506,14 @@ export async function startLogin(
       if (!bridge?.startLogin) throw new Error(t('共享登录桥不可用，请重新打开面板'))
       result = await bridge.startLogin(edition, mode, provider, socialRestore, options)
     }
-    const normalized = normalizeLoginResult(result)
-    if (dynamic && !normalized.canceled) {
+    let managed = false
+    try { managed = Boolean(managedLoginWaitRecord(result)) }
+    catch { throw new Error(t('账号保存未确认，请查询本次状态；不会再次保存。')) }
+    if (managed && managementGeneration !== managedLoginSourceGeneration()) {
+      throw new Error(t('管理会话已变化，本次登录资格已失效；不会继续查询或重发原流程。'))
+    }
+    const normalized = normalizeLoginResult(result, { provider, methodIndex: options.methodIndex })
+    if (!normalized.canceled) {
       const accountId = normalized.account?.id || normalized.session?.accountUid || normalized.session?.accountId
       const resultProvider = normalized.account?.provider || normalized.session?.provider
       if (!accountId || resultProvider && resultProvider !== provider) {
@@ -431,9 +525,11 @@ export async function startLogin(
       : normalized
   } catch (failure) {
     const record = resultRecord(failure)
-    if (record?.canceled === true) return { ok: false, canceled: true, silent: record.silent === true }
+    if (record?.canceled === true || failure instanceof Error && failure.name === 'AbortError') {
+      return { ok: false, canceled: true, silent: record?.silent === true }
+    }
     // web-login.js 按 error.message 展示错误；原始 invoke 的 rejection 可能只是 String。
-    throw new Error(describeError(failure))
+    throw loginFailure(describeError(failure), failure)
   }
 }
 

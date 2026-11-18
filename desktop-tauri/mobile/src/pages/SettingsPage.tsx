@@ -19,6 +19,9 @@ import { ClientIdentificationPanel } from '../../../ui-shared/client-identificat
 import { clientIdentificationApi } from '../api/client-identification'
 import { VisionCompatibilityPanel } from '../../../ui-shared/settings-vision-panel'
 import { visionCompatApi } from '../api/vision-compat'
+import { WebToolsSettings } from './settings-web-tools'
+import { PromptSettingsPanel } from '../../../ui-shared/settings-prompt-panel'
+import { promptRulesApi } from '../api/prompt-rules'
 
 /**
  * 设置。
@@ -29,8 +32,7 @@ import { visionCompatApi } from '../api/vision-compat'
  *   · 账号凭证（兼容模式的 API Key、退出登录）
  *   · 网关地址（复制给客户端）
  *   · 关于与安装（PWA 安装引导、版本）
- * 端口、路由、重试、超时、数据保留这些需要看文档才能填对的，一律留在桌面端
- * —— 摆出来只会让人误改。
+ * 路由的错误处理独立放在「更多 → 路由」，与桌面端共用规则和表单。
  */
 export function SettingsPage() {
   const { session, packaged, server, servers } = useStore()
@@ -40,6 +42,8 @@ export function SettingsPage() {
   const [systemInfo, setSystemInfo] = useState(false)
   const [clientIdentification, setClientIdentification] = useState(false)
   const [visionCompatibility, setVisionCompatibility] = useState(false)
+  const [webTools, setWebTools] = useState(false)
+  const [promptRules, setPromptRules] = useState(false)
   const currentLocale = locale()
   const options = localeOptions()
 
@@ -157,6 +161,16 @@ export function SettingsPage() {
       <div className='m-section'>
         <SectionHead title={t('接入')} />
         <Card className='m-card'>
+          <Button size='default' variant='ghost' type='button' className='m-row h-auto min-h-[52px] w-full justify-start rounded-none border-0 px-3.5 py-3 text-left' onClick={() => setPromptRules(true)}>
+            <span className='m-logo'><Icon name='doc' /></span>
+            <div className='m-grow'><div className='m-t1'>{t('系统提示词')}</div></div>
+            <span className='m-chev'><Icon name='chev' /></span>
+          </Button>
+          <Button size='default' variant='ghost' type='button' className='m-row h-auto min-h-[52px] w-full justify-start rounded-none border-0 px-3.5 py-3 text-left' onClick={() => setWebTools(true)}>
+            <span className='m-logo'><Icon name='settings' /></span>
+            <div className='m-grow'><div className='m-t1'>{t('网页工具调用')}</div><div className='m-t2'>{t('由网关模拟，执行权限仍由客户端控制')}</div></div>
+            <span className='m-chev'><Icon name='chev' /></span>
+          </Button>
           <Button size='default' variant='ghost' type='button' className='m-row h-auto min-h-[52px] w-full justify-start rounded-none border-0 px-3.5 py-3 text-left' onClick={() => setVisionCompatibility(true)}>
             <span className='m-logo'><Icon name='model' /></span>
             <div className='m-grow'><div className='m-t1'>{t('图片兼容')}</div><div className='m-t2'>{t('辅助识图或切换视觉模型，默认关闭')}</div></div>
@@ -405,6 +419,16 @@ export function SettingsPage() {
         </Card>
       </div>
 
+      <Sheet open={promptRules} onOpenChange={setPromptRules}>
+        <SheetContent><SheetHeader><SheetTitle>{t('系统提示词')}</SheetTitle></SheetHeader><SheetBody>
+          {promptRules ? <PromptSettingsPanel key={serverIdentity()} api={promptRulesApi} t={t} /> : null}
+        </SheetBody></SheetContent>
+      </Sheet>
+      <Sheet open={webTools} onOpenChange={setWebTools}>
+        <SheetContent><SheetHeader><SheetTitle>{t('网页工具调用')}</SheetTitle></SheetHeader><SheetBody>
+          {webTools ? <WebToolsSettings key={serverIdentity()} /> : null}
+        </SheetBody></SheetContent>
+      </Sheet>
       <Sheet open={visionCompatibility} onOpenChange={setVisionCompatibility}>
         <SheetContent><SheetHeader><SheetTitle>{t('图片兼容')}</SheetTitle></SheetHeader><SheetBody>
           {visionCompatibility ? <VisionCompatibilityPanel key={serverIdentity()} api={visionCompatApi} t={t} /> : null}

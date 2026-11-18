@@ -38,7 +38,7 @@ fn workspace_json(state: &ServerState, model: Option<String>) -> Value {
     let (profiles, base_settings) = config::routing_snapshot();
     let legacy_global_participation = config::routing_workspace::global_accounts::legacy_snapshot(profiles.global.as_ref(), &account_state.accounts);
     drop(guard);
-    let accounts = routing::accounts_of(&account_snapshot);
+    let accounts: Vec<_> = routing::accounts_of(&account_snapshot).into_iter().map(|account| store.decorate_policy_cooldown(account, "")).collect();
     let all_providers = available_providers(&accounts);
     let eligible = model.as_deref().map(providers::catalog::forwarding_providers)
         .unwrap_or_else(|| all_providers.clone());

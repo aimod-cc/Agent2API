@@ -10,7 +10,7 @@ use crate::server::core::providers::catalog_cache;
 use crate::server::logging;
 
 pub const SETTING_MODEL_CATALOG: &str = "modelCatalog";
-// 非空信封只用于新增 scoped runtime；不会作为模型广告出去。
+// 非空信封保存已确认的空目录；标识不会作为模型广告出去。
 const ENVELOPE_ID: &str = "__scoped_plugin_catalog_v1";
 const ENVELOPE_VERSION: u64 = 1;
 
@@ -37,7 +37,7 @@ fn scope(provider: &str) -> String {
 fn accepts_empty(provider: &str) -> bool {
     crate::server::core::providers::is_scoped_runtime_provider(provider)
         || super::script::known_provider(provider)
-        || super::wasm::catalog::enabled(provider)
+        || super::wasm::owns(provider)
 }
 
 fn from_cached(provider: &str, cached: catalog_cache::CachedCatalog) -> Option<proto::ModelList> {

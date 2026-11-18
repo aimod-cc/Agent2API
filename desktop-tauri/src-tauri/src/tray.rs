@@ -22,6 +22,8 @@ pub const TRAY_ID: &str = "main-tray";
 const MENU_SHOW: &str = "tray-show";
 const MENU_CHECK_UPDATE: &str = "tray-check-update";
 const MENU_QUIT: &str = "tray-quit";
+#[cfg(target_os = "linux")]
+const MENU_COMPATIBILITY: &str = "tray-compatibility";
 
 /// 创建托盘图标。应用启动时调用一次即可。
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
@@ -30,6 +32,16 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
         MenuItem::with_id(app, MENU_CHECK_UPDATE, "检查更新", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit_item = MenuItem::with_id(app, MENU_QUIT, "退出", true, None::<&str>)?;
+    #[cfg(target_os = "linux")]
+    let compatibility_item = MenuItem::with_id(
+        app, MENU_COMPATIBILITY, "以兼容模式重启", true, None::<&str>,
+    )?;
+    #[cfg(target_os = "linux")]
+    let menu = Menu::with_items(
+        app,
+        &[&show_item, &check_update_item, &compatibility_item, &separator, &quit_item],
+    )?;
+    #[cfg(not(target_os = "linux"))]
     let menu = Menu::with_items(
         app,
         &[&show_item, &check_update_item, &separator, &quit_item],
@@ -45,6 +57,8 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             MENU_SHOW => show_main_window(app),
             MENU_CHECK_UPDATE => request_update_check(app),
+            #[cfg(target_os = "linux")]
+            MENU_COMPATIBILITY => crate::graphics::confirm_compatibility_restart(app),
             MENU_QUIT => request_exit(app),
             _ => {}
         })
@@ -95,17 +109,7 @@ pub fn take_update_check_request(app: AppHandle, window: tauri::WebviewWindow) -
         && app.state::<AppState>().window.take_update_check_request()
 }
 
-/// 真正退出应用。
-///
-/// 先置位「正在退出」标志再 `exit(0)`：开启关闭到托盘时，`exit(0)` 同样会走
-/// `RunEvent::ExitRequested`，没有这个标志就会被当成「用户关窗」再拦一次，
-/// 表现为「托盘点了退出但进程还在」。
-///
-/// 这里还要显式回收后端：`exit(0)` 这种程序化退出不保证触发 `RunEvent::Exit`
-/// （Tauri 已知行为），只靠 lib.rs 的兜底分支会漏掉，node 会带着 3065 端口
-/// 残留在后台。shutdown 是幂等的，多调一次无害。
+/// 托盘退出只提交意图；后台清理成功后才由统一协调器请求真正退出。
 pub fn request_exit(app: &AppHandle) {
-    app.state::<AppState>().begin_exit();
-    crate::backend::shutdown(&app.state::<AppState>());
-    app.exit(0);
+    let _ = crate::exit::request_quit(app, 0);
 }

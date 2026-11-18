@@ -19,7 +19,13 @@ pub async fn run(State(state): State<ServerState>, body: Bytes) -> Response {
     let value = parse_body(&body).unwrap_or(Value::Null);
     let provider = value["provider"].as_str().unwrap_or("");
     let id = value["task"].as_str().unwrap_or("");
-    match tasks::run(state.store(), provider, id, true).await {
+    let accepted = value.get("background").and_then(Value::as_bool).unwrap_or(false);
+    let result = if accepted {
+        tasks::launch(state.store().clone(), provider, id).await
+    } else {
+        tasks::run(state.store(), provider, id, true).await
+    };
+    match result {
         Ok(value) => ok_json(value),
         Err(error) => management_error(400, error),
     }

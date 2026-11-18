@@ -13,7 +13,7 @@ use tokio::io::AsyncWriteExt;
 use crate::server::logging;
 
 use super::{
-    assert_downloadable, client, integrity, safe_file_name, source, Task, UpdateError,
+    assert_downloadable, integrity, safe_file_name, website, Task, UpdateError,
     UpdateManager, MAX_INSTALLER_BYTES, USER_AGENT,
 };
 
@@ -80,8 +80,7 @@ impl UpdateManager {
                 path: None,
                 received: 0,
                 total: 0,
-                selecting: true,
-                source: None,
+                preparing: true,
             };
             let snapshot = task.to_json();
             guard.task = Some(task);
@@ -120,7 +119,7 @@ impl UpdateManager {
             let mut guard = self.lock();
             if let Some(task) = guard.task.as_mut() {
                 task.active = false;
-                task.selecting = false;
+                task.preparing = false;
                 task.path = None;
                 if !canceled {
                     match &outcome {
@@ -158,93 +157,35 @@ impl UpdateManager {
         path: &PathBuf,
         cancel: &Arc<AtomicBool>,
     ) -> Result<u64, UpdateError> {
-        let expected = integrity::trusted_digest(target.as_str()).await;
+        let expected = integrity::trusted_digest(target.as_str()).await
+            .ok_or_else(|| UpdateError::new("未取得官网安装包校验值，已拒绝下载，请重新检查更新"))?;
         let headers = vec![
             ("User-Agent".to_string(), USER_AGENT.to_string()),
             ("Accept".to_string(), "application/octet-stream".to_string()),
         ];
-        // 镜像不可同时提供程序与信任依据；只有官方 HTTPS API 的摘要才能放行。
-        let candidates = source::download_candidates(target.as_str(), expected.is_some(), &headers).await?;
-        if expected.is_none() && candidates.len() == 1 {
-            logging::verbose("[Update]", "未取得官方校验值，安装包仅使用原始源下载");
+        if cancel.load(Ordering::SeqCst) { return Ok(0); }
+        if let Some(task) = self.lock().task.as_mut() {
+            task.preparing = false;
+            task.received = 0;
+            task.total = 0;
         }
-        let mut failures = super::rate_limit::Failures::default();
-        for candidate in &candidates {
-            if let Some(error) = candidate.cooling_error(&headers) {
-                failures.push(error);
-                continue;
-            }
-            if cancel.load(Ordering::SeqCst) {
-                return Ok(0);
-            }
-            if let Some(task) = self.lock().task.as_mut() {
-                task.selecting = false;
-                task.source = Some(candidate.label());
-                task.received = 0;
-                task.total = 0;
-            }
-            let started = std::time::Instant::now();
-            let response = match client::fetch_candidate(candidate, &headers, None).await {
-                Ok(response) => response,
-                Err(error) => {
-                    candidate.observe(source::failed_state(&error.message), started.elapsed().as_millis() as u64, false);
-                    failures.push(error);
-                    continue;
-                }
-            };
-            if response.status().as_u16() != 200 {
-                let error = UpdateError::new(format!(
-                    "下载失败：{}返回 HTTP {}",
-                    candidate.label(),
-                    response.status().as_u16()
-                ));
-                if source::should_switch(candidate, response.status())
-                    || candidate.source == source::Source::Mirror
-                {
-                    candidate.forget();
-                    failures.push(error);
-                    continue;
-                }
-                return Err(error);
-            }
-            if super::source_state::state(candidate).is_none_or(|state| state.state != "ok") {
-                candidate.observe("ok", started.elapsed().as_millis() as u64, false);
-            }
-            logging::log(
-                "[Update]",
-                &format!(
-                    "开始下载 {}（{}）",
-                    path.file_name().unwrap_or_default().to_string_lossy(),
-                    candidate.label()
-                ),
-            );
-            match self
-                .write_response(response, path, expected.as_ref(), cancel)
-                .await
-            {
-                Ok(size) => {
-                    candidate.remember();
-                    return Ok(size);
-                }
-                Err(error) => {
-                    candidate.forget();
-                    failures.push(error);
-                    let _ = tokio::fs::remove_file(path).await;
-                }
-            }
+        let response = website::request(target.as_str(), &headers, None).await?;
+        if response.status().as_u16() != 200 {
+            return Err(UpdateError::new(format!("下载失败：官网返回 HTTP {}", response.status().as_u16())));
         }
-        Err(failures.error())
+        logging::log("[Update]", &format!("开始下载 {}（Agent2API 官网）", path.file_name().unwrap_or_default().to_string_lossy()));
+        self.write_response(response, path, &expected, cancel).await
     }
 
     async fn write_response(
         &self,
         response: reqwest::Response,
         path: &PathBuf,
-        expected: Option<&(String, u64)>,
+        expected: &(String, u64),
         cancel: &Arc<AtomicBool>,
     ) -> Result<u64, UpdateError> {
         let declared = response.content_length().unwrap_or(0);
-        let expected_size = expected.map(|(_, size)| *size).unwrap_or(0);
+        let expected_size = expected.1;
         let total = if expected_size > 0 {
             expected_size
         } else {
@@ -268,7 +209,7 @@ impl UpdateManager {
         let mut hasher = Sha256::new();
         while let Some(chunk) = tokio::select! {
             item = tokio::time::timeout(Duration::from_secs(30), stream.next()) => {
-                item.map_err(|_| UpdateError::new("下载长时间没有数据，正在切换下载源"))?
+                item.map_err(|_| UpdateError::new("下载长时间没有数据，请重新下载"))?
             }
             _ = wait_cancel(cancel) => return Ok(received),
         } {
@@ -295,12 +236,8 @@ impl UpdateManager {
         {
             return Err(UpdateError::new("安装包不完整，已拒绝使用"));
         }
-        if let Some((hash, _)) = expected {
-            if format!("{:x}", hasher.finalize()) != *hash {
-                return Err(UpdateError::new(
-                    "安装包 SHA-256 与 GitHub 官方校验值不一致，已拒绝使用",
-                ));
-            }
+        if format!("{:x}", hasher.finalize()) != expected.0 {
+            return Err(UpdateError::new("安装包 SHA-256 与可信发布校验值不一致，已拒绝使用"));
         }
         Ok(received)
     }

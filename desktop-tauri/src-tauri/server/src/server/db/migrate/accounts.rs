@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 
 use super::backup::backup_legacy_file;
 use super::LegacyOutcome;
-use crate::server::core::account_store::state::StoredAccount;
+use crate::server::core::account_store::{credential_version, state::StoredAccount};
+use crate::server::db::AccountChange;
 use crate::server::logging;
 
 /// 账号旧文件名（`{config_dir}/accounts.json`）。
@@ -82,7 +83,7 @@ pub(super) fn legacy_file(dir: &Path) -> Option<PathBuf> {
 /// 「已存在就不动」还有一条**语义**上的正确性：库里那条可能是用户升级后
 /// 改过的（改名、调优先级、换代理），拿旧文件覆盖会把这些改动抹掉 ——
 /// 忽略正是要保护它们。
-pub(super) fn import_accounts(conn: &Connection, dir: &Path) -> Option<LegacyOutcome> {
+pub(super) fn import_accounts(change: &mut AccountChange<'_>, dir: &Path) -> Option<LegacyOutcome> {
     let path = legacy_file(dir)?;
 
     let text = match std::fs::read_to_string(&path) {
@@ -133,7 +134,9 @@ pub(super) fn import_accounts(conn: &Connection, dir: &Path) -> Option<LegacyOut
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
 
-    let (imported, skipped) = match write_accounts(conn, &records, priority_scope.as_deref()) {
+    // 文件已真实读出且通过原解析后才撤销旧读凭证；撤销与写入持同一实际Db连接锁。
+    // 即使本批全被IGNORE或事务失败，旧代次也不恢复；这不代表导入了任何一行。
+    let (imported, skipped) = match change.replace(|conn| write_accounts(conn, &records, priority_scope.as_deref())) {
         Ok(result) => result,
         Err(error) => {
             logging::console_line(
@@ -157,7 +160,7 @@ pub(super) fn import_accounts(conn: &Connection, dir: &Path) -> Option<LegacyOut
     Some(LegacyOutcome {
         label: LABEL,
         source: path,
-        imported: records.len(),
+        imported,
         backup,
     })
 }
@@ -193,6 +196,10 @@ fn write_accounts(
     let mut imported = 0usize;
     let mut skipped = 0usize;
     for record in records {
+        // 只剥离固定三家的外来顶层私有合同，不能让同名JSON变成新宿主来源。
+        let mut imported_record = record.clone();
+        credential_version::strip_imported_row_version(&mut imported_record);
+        let record = &imported_record;
         // 投影列一律取访问器的值（口径见 `import_accounts` 的说明）：
         // provider 缺失/为空 → 默认 provider；priority 越界 → 夹回区间；
         // enabled 非 bool false → 1；added_at 取不到 → 0（对应 schema 的 DEFAULT）

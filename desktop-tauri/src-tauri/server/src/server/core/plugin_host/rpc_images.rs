@@ -23,14 +23,26 @@ impl RpcAdapter {
         let mut params = json!({ "provider": self.id, "account": account, "body": body,
             "headers": headers_json(headers), "proxy": proxy.map(wire_proxy).transpose()?.unwrap_or(Value::Null),
             "session": crate::server::core::upstream::plugin_session_id(headers, body) });
+        super::super::account_egress::apply(&mut params)?;
         if let Some(trace) = super::super::script::register_trace(telemetry) { params["plugin_trace"] = json!(trace); }
+        let mut owner = None;
+        let call = if self.id == "doubaowork" {
+            let egress = super::super::account_egress::capture_current(self.id, account, telemetry);
+            let (retained, call) = super::ConversationOwner::open(&host, self.id, account, telemetry, egress)?;
+            owner = Some(retained);
+            Some(call)
+        } else { None };
         let token = telemetry.cancel_token();
         let cancelled = async { match token { Some(token) => token.cancelled().await, None => std::future::pending().await } };
         let result = tokio::select! {
             biased;
             _ = cancelled => return Err(crate::server::core::upstream::cancellation::cancelled_error()),
-            result = host.call_wasm(operation.method(), params, Duration::from_secs(3600)) => result,
+            result = async {
+                if let Some(call) = call { host.call_wasm_doubao_image(params, call, Duration::from_secs(3600)).await }
+                else { host.call_wasm(operation.method(), params, Duration::from_secs(3600)).await }
+            } => result,
         };
+        drop(owner);
         let body = match result {
             Ok(body) => body,
             Err(error) => {

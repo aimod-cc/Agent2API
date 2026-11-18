@@ -93,7 +93,7 @@ const ACCOUNT_KEY_ENV: &str = "AGENT2API_ACCOUNT_KEY";
 /// 其余实现（信封、算法、缓存）原样复用。
 #[derive(Clone, Copy)]
 pub enum SecretScope {
-    /// GitHub 令牌（`core::update::token`）。密钥文件名是历史事实，不许改
+    /// 历史 GitHub 令牌备份使用的密钥域；不再用于更新请求。
     UpdateToken,
     /// 账号表（`accounts`）。预留：支持 `AGENT2API_ACCOUNT_KEY` 兜底
     Accounts,
@@ -110,6 +110,8 @@ pub enum SecretScope {
     CodingSessions,
     /// 登录校验凭据与部署域名绑定，不参与账号云同步。
     PanelCaptcha,
+    /// 本机客户端恢复材料不能随账号密钥的云同步或恢复而失效。
+    DesktopLaunch,
 }
 
 impl SecretScope {
@@ -124,6 +126,7 @@ impl SecretScope {
             SecretScope::CloudSync => "cloud-sync.key",
             SecretScope::CodingSessions => "coding-sessions.key",
             SecretScope::PanelCaptcha => "panel-captcha.key",
+            SecretScope::DesktopLaunch => "desktop-client.key",
         }
     }
 
@@ -138,6 +141,7 @@ impl SecretScope {
             SecretScope::CloudSync => "在「设置 → 数据 → 云同步」里重新输入同步密码即可自愈",
             SecretScope::CodingSessions => "在 AI 助手的编程会话连接设置里重新输入密钥即可自愈",
             SecretScope::PanelCaptcha => "在机器人校验设置中重新保存 Turnstile 服务端密钥即可恢复",
+            SecretScope::DesktopLaunch => "本机凭证备份密钥缺失或不匹配，请保留备份并恢复原 desktop-client.key",
         }
     }
 }
@@ -150,7 +154,9 @@ impl SecretScope {
 /// 又要是「进程内一次性初始化」的静态量。两个独立静态变量比一张 `HashMap`
 /// 更省：域是编译期已知的枚举，没有动态增删的场景。
 #[cfg(not(test))]
-fn cache_for(scope: SecretScope) -> &'static std::sync::Mutex<Option<[u8; KEY_LEN]>> {
+fn cache_slot(
+    scope: SecretScope,
+) -> &'static std::sync::OnceLock<std::sync::Mutex<Option<[u8; KEY_LEN]>>> {
     static UPDATE_TOKEN: std::sync::OnceLock<std::sync::Mutex<Option<[u8; KEY_LEN]>>> =
         std::sync::OnceLock::new();
     static ACCOUNTS: std::sync::OnceLock<std::sync::Mutex<Option<[u8; KEY_LEN]>>> =
@@ -161,12 +167,34 @@ fn cache_for(scope: SecretScope) -> &'static std::sync::Mutex<Option<[u8; KEY_LE
         std::sync::OnceLock::new();
     static PANEL_CAPTCHA: std::sync::OnceLock<std::sync::Mutex<Option<[u8; KEY_LEN]>>> =
         std::sync::OnceLock::new();
+    static DESKTOP_LAUNCH: std::sync::OnceLock<std::sync::Mutex<Option<[u8; KEY_LEN]>>> =
+        std::sync::OnceLock::new();
     match scope {
-        SecretScope::UpdateToken => UPDATE_TOKEN.get_or_init(|| std::sync::Mutex::new(None)),
-        SecretScope::Accounts => ACCOUNTS.get_or_init(|| std::sync::Mutex::new(None)),
-        SecretScope::CloudSync => CLOUD_SYNC.get_or_init(|| std::sync::Mutex::new(None)),
-        SecretScope::CodingSessions => CODING_SESSIONS.get_or_init(|| std::sync::Mutex::new(None)),
-        SecretScope::PanelCaptcha => PANEL_CAPTCHA.get_or_init(|| std::sync::Mutex::new(None)),
+        SecretScope::UpdateToken => &UPDATE_TOKEN,
+        SecretScope::Accounts => &ACCOUNTS,
+        SecretScope::CloudSync => &CLOUD_SYNC,
+        SecretScope::CodingSessions => &CODING_SESSIONS,
+        SecretScope::PanelCaptcha => &PANEL_CAPTCHA,
+        SecretScope::DesktopLaunch => &DESKTOP_LAUNCH,
+    }
+}
+
+#[cfg(not(test))]
+fn cache_for(scope: SecretScope) -> &'static std::sync::Mutex<Option<[u8; KEY_LEN]>> {
+    cache_slot(scope).get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// 最终短临界区只取已加载的密钥；不等待初始化/锁，不查环境、文件或生成密钥。
+/// 测试构建同样只读已选定的测试缓存，没有上下文时保守返回None。
+pub(crate) fn try_cached_key(scope: SecretScope) -> Option<[u8; KEY_LEN]> {
+    #[cfg(test)]
+    return crate::test_support::try_cached_key(scope.key_file());
+
+    #[cfg(not(test))]
+    {
+        let slot = cache_slot(scope).get()?;
+        let key = slot.try_lock().ok()?;
+        *key
     }
 }
 

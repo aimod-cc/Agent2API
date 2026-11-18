@@ -299,12 +299,17 @@ pub(crate) fn apply(
         ));
     }
 
-    let applied = db.with_mut(|conn| {
+    if !crate::server::config::model_key_source::pre_replace() {
+        return Err("模型Key原授权无法安全撤销，未应用同步快照".into());
+    }
+    // 同一实际连接锁内先撤销旧读来源并耐久轮换宿主epoch，再执行业务替换事务。
+    // epoch保留键与发送槽均不参与云同步；输入不能覆盖本机epoch，失败也不恢复旧资格。
+    let applied = db.with_account_change(|change| change.replace(|conn| {
         db.invalidate_accounts();
         let applied = apply_conn(conn, snapshot, key);
         db.invalidate_accounts();
         applied
-    })
+    }))
         .ok_or_else(|| "数据库连接不可用，无法应用同步快照".to_string())?;
     db.invalidate_accounts();
     applied

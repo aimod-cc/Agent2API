@@ -39,7 +39,11 @@ mod image_mcp;
 mod mcp;
 mod normalize;
 mod providers;
+mod provider_errors;
+mod provider_keys;
+mod provider_request;
 mod search;
+pub use provider_keys::{ProviderKeyConfig, ProviderKeyUpdate, MAX_PROVIDER_KEYS};
 mod skill_package;
 mod vision;
 
@@ -68,7 +72,6 @@ use serde_json::{json, Value};
 
 use crate::server::config;
 use crate::server::core::account_store::AccountStore;
-use crate::server::core::crypto::{self, SecretScope};
 
 /// 配置在网关配置里的键名（kv 表一行）
 pub const KEY_TOOL_SERVICES: &str = "toolServices";
@@ -176,9 +179,12 @@ pub fn version(service: &str) -> &'static str {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ProviderConfig {
-    /// `enc1:` 信封；空串 = 未配置
+    /// 旧版单密钥字段，读取后迁移到有序列表。
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub encrypted_key: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub key_hint: String,
+    pub keys: Vec<ProviderKeyConfig>,
     /// 账号型来源只保存账号引用，凭证仍由账号库与插件管理。
     pub account_id: String,
     pub enabled: bool,
@@ -187,7 +193,7 @@ pub struct ProviderConfig {
 
 impl Default for ProviderConfig {
     fn default() -> Self {
-        Self { encrypted_key: String::new(), key_hint: String::new(), account_id: String::new(), enabled: false, updated_at: 0 }
+        Self { encrypted_key: String::new(), key_hint: String::new(), keys: Vec::new(), account_id: String::new(), enabled: false, updated_at: 0 }
     }
 }
 
@@ -237,6 +243,9 @@ impl ToolConfig {
         for provider in SEARCH_PROVIDERS {
             self.providers.entry(provider.to_string()).or_default();
         }
+        for provider in API_KEY_PROVIDERS {
+            if let Some(entry) = self.providers.get_mut(provider) { provider_keys::normalize(entry); }
+        }
         self.selection.search.retain(|item| is_search_provider(item));
         if self.selection.search.is_empty() {
             self.selection.search = Selection::default().search;
@@ -266,16 +275,25 @@ fn parse_stored(value: &serde_json::Value) -> ToolConfig {
 
 /// 在配置锁内做一次读改写：两个页面同时保存时不会互相覆盖（后写者基于前写者的结果）
 fn update(mutate: impl FnOnce(&mut ToolConfig)) -> Result<ToolConfig, String> {
+    try_update(|config_value| { mutate(config_value); Ok(()) })
+}
+
+fn try_update(mutate: impl FnOnce(&mut ToolConfig) -> Result<(), String>) -> Result<ToolConfig, String> {
     let mut next: Option<ToolConfig> = None;
+    let mut failure = None;
     let saved = crate::server::config::update_raw_field_with(KEY_TOOL_SERVICES, |value| {
         let mut current = parse_stored(value);
-        mutate(&mut current);
+        if let Err(error) = mutate(&mut current) {
+            failure = Some(error);
+            return;
+        }
         let current = current.normalized();
         if let Ok(serialized) = serde_json::to_value(&current) {
             *value = serialized;
             next = Some(current);
         }
     });
+    if let Some(error) = failure { return Err(error); }
     match (saved, next) {
         (true, Some(config_value)) => Ok(config_value),
         _ => Err("工具服务配置写入失败".into()),
@@ -408,18 +426,7 @@ pub async fn list_providers(store: &AccountStore) -> Value {
     let config_value = load();
     let mut rows: Vec<Value> = API_KEY_PROVIDERS.iter().map(|provider| {
         let entry = config_value.providers.get(*provider).cloned().unwrap_or_default();
-        json!({
-            "provider": provider,
-            "display_name": provider_display_name(provider),
-            "auth_type": "api_key",
-            "supports_search": true,
-            "supports_fetch": true,
-            "available": true,
-            "configured": !entry.encrypted_key.is_empty(),
-            "key_hint": if entry.key_hint.is_empty() { Value::Null } else { json!(entry.key_hint) },
-            "enabled": entry.enabled,
-            "updated_at": if entry.updated_at > 0 { json!(entry.updated_at) } else { Value::Null },
-        })
+        provider_keys::provider_row(provider, &entry)
     }).collect();
     let account_rows = futures::future::join_all(ACCOUNT_PROVIDERS.iter().map(|provider| {
         let entry = config_value.providers.get(*provider).cloned().unwrap_or_default();
@@ -443,12 +450,13 @@ pub fn update_provider(
     api_key: Option<&str>,
     enabled: Option<bool>,
     account_id: Option<&str>,
+    keys: Option<Vec<ProviderKeyUpdate>>,
 ) -> Result<Value, String> {
     if !is_search_provider(provider) {
         return Err("未知的搜索提供商".into());
     }
     if is_account_provider(provider) {
-        if api_key.is_some_and(|key| !key.trim().is_empty()) {
+        if keys.is_some() || api_key.is_some_and(|key| !key.trim().is_empty()) {
             return Err("该搜索来源使用已有账号，不接受 API Key".into());
         }
         let account_id = account_id.map(str::trim);
@@ -467,33 +475,23 @@ pub fn update_provider(
     if account_id.is_some() {
         return Err("该搜索来源使用 API Key，不接受账号绑定".into());
     }
-    let api_key = api_key.map(str::trim).filter(|value| !value.is_empty());
-    let encrypted = match api_key {
-        Some(key) => {
-            let sealed = crypto::seal(key.as_bytes(), SecretScope::Accounts)
-                .map_err(|_| "无法加密 API Key".to_string())?;
-            Some((sealed, key_hint(key)))
-        }
-        None => None,
-    };
-    let config_value = update(|config_value| {
+    if keys.is_some() && api_key.is_some() {
+        return Err("不能同时提交单密钥和密钥列表".into());
+    }
+    let prepared = keys.as_deref().map(provider_keys::prepare_updates).transpose()?;
+    let replacement = api_key.map(str::trim).filter(|value| !value.is_empty())
+        .map(provider_keys::prepare_legacy_key).transpose()?;
+    let config_value = try_update(|config_value| {
         let entry = config_value.providers.entry(provider.to_string()).or_default();
-        if let Some((sealed, hint)) = encrypted {
-            entry.encrypted_key = sealed;
-            entry.key_hint = hint;
-            entry.updated_at = crate::server::logging::now_ms();
-        }
-        if let Some(enabled) = enabled {
-            entry.enabled = enabled;
-        }
+        if let Some(items) = prepared { provider_keys::apply_updates(entry, items)?; }
+        if let Some(key) = replacement { provider_keys::replace_legacy_key(entry, key); }
+        if let Some(enabled) = enabled { entry.enabled = enabled; }
+        Ok(())
     })?;
     let entry = config_value.providers.get(provider).cloned().unwrap_or_default();
-    Ok(json!({
-        "success": true,
-        "provider": provider,
-        "configured": !entry.encrypted_key.is_empty(),
-        "key_hint": if entry.key_hint.is_empty() { Value::Null } else { json!(entry.key_hint) },
-    }))
+    let mut result = provider_keys::provider_row(provider, &entry);
+    result["success"] = json!(true);
+    Ok(result)
 }
 
 pub fn clear_provider_key(provider: &str) -> bool {
@@ -502,6 +500,7 @@ pub fn clear_provider_key(provider: &str) -> bool {
     }
     update(|config_value| {
         let entry = config_value.providers.entry(provider.to_string()).or_default();
+        entry.keys.clear();
         entry.encrypted_key.clear();
         entry.key_hint.clear();
         entry.updated_at = crate::server::logging::now_ms();
@@ -509,37 +508,19 @@ pub fn clear_provider_key(provider: &str) -> bool {
     .is_ok()
 }
 
-/// 读取某家当前配置（含解密后的密钥；仅服务端内部使用，禁止出现在日志/响应中）
-pub fn provider_key(provider: &str) -> Option<String> {
-    decrypt_provider_key(load().providers.get(provider)?)
-}
-
-fn decrypt_provider_key(entry: &ProviderConfig) -> Option<String> {
-    if entry.encrypted_key.is_empty() {
-        return None;
-    }
-    let bytes = crypto::open(&entry.encrypted_key, SecretScope::Accounts).ok()?;
-    String::from_utf8(bytes).ok().filter(|value| !value.is_empty())
-}
-
 pub fn configured_provider(provider: &str) -> bool {
-    load()
-        .providers
-        .get(provider)
-        .is_some_and(|entry| !entry.encrypted_key.is_empty() && entry.enabled)
+    load().providers.get(provider).is_some_and(|entry| entry.enabled && provider_keys::has_keys(entry))
 }
 
 /// 已启用且已配置密钥的提供商
 pub fn ready_providers() -> Vec<&'static str> {
     let config_value = load();
-    SEARCH_PROVIDERS
+    API_KEY_PROVIDERS
         .iter()
         .copied()
         .filter(|provider| {
-            config_value
-                .providers
-                .get(*provider)
-                .is_some_and(|entry| entry.enabled && !entry.encrypted_key.is_empty())
+            config_value.providers.get(*provider)
+                .is_some_and(|entry| entry.enabled && provider_keys::has_keys(entry) && provider_keys::usable(entry, "search"))
         })
         .collect()
 }

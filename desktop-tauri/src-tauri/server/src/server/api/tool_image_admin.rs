@@ -26,8 +26,9 @@ pub async fn clear() -> Response {
 pub async fn jobs(State(state): State<ServerState>) -> Response {
     let db = match super::tool_images::database(&state) { Ok(db) => db, Err(error) => return error.payload_response() };
     respond(blocking::run(move || {
-        let rows = image_jobs::list(&db)?.iter().map(|job| super::tool_image_results::job_result(job, "", true)).collect::<Vec<_>>();
-        Ok(json!({ "jobs": rows, "storage": image_jobs::storage_usage(&db)? }))
+        let (jobs, storage) = image_jobs::list_with_usage(&db)?;
+        let rows = jobs.iter().map(|job| super::tool_image_results::job_result(job, "", true)).collect::<Vec<_>>();
+        Ok(json!({ "jobs": rows, "storage": storage }))
     }).await.and_then(|result| result))
 }
 

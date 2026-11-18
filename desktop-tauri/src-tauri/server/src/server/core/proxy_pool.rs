@@ -87,6 +87,7 @@ fn write_items(items: &[Value]) -> Result<(), String> {
         })
         .ok_or_else(|| "代理池数据库不可用".to_string())?;
     written?;
+    crate::server::core::panel_events::notify(crate::server::core::panel_events::Change::Proxies);
     crate::server::core::cloud_sync::auto_sync::notify_change();
     Ok(())
 }
@@ -288,17 +289,17 @@ pub fn create_batch(input: &Value) -> Result<Value, String> {
     import::create(input)
 }
 
-pub fn create(input: &Value) -> Result<Vec<Value>, String> {
+pub fn create(input: &Value) -> Result<(), String> {
     let _guard = mutation_lock();
     let item = normalize_item(input, None)?;
     let mut items = read_items();
     items.insert(0, item.clone());
     write_items(&items)?;
     logging::log("[Proxies]", &format!("✅ 新增代理「{}」", text_of(&item, "name")));
-    Ok(list())
+    Ok(())
 }
 
-pub fn update(input: &Value) -> Result<Vec<Value>, String> {
+pub fn update(input: &Value) -> Result<(), String> {
     let _guard = mutation_lock();
     let id = clean_string(input.get("id"), MAX_LABEL_LENGTH);
     if id.is_empty() {
@@ -310,7 +311,7 @@ pub fn update(input: &Value) -> Result<Vec<Value>, String> {
     items[index] = next.clone();
     write_items(&items)?;
     logging::log("[Proxies]", &format!("✅ 更新代理「{}」", text_of(&next, "name")));
-    Ok(list())
+    Ok(())
 }
 
 fn writable_index(items: &[Value], id: &str) -> Result<usize, String> {
@@ -341,7 +342,7 @@ pub struct EnabledChange {
     pub enabled: bool,
 }
 
-pub fn set_enabled(id: &str, enabled: bool) -> Result<(Vec<Value>, EnabledChange), String> {
+pub fn set_enabled(id: &str, enabled: bool) -> Result<EnabledChange, String> {
     let _guard = mutation_lock();
     let mut items = read_items();
     let index = supported_index(&items, id)?;
@@ -365,10 +366,10 @@ pub fn set_enabled(id: &str, enabled: bool) -> Result<(Vec<Value>, EnabledChange
     object.insert("updatedAt".to_string(), Value::from(logging::now_ms()));
     write_items(&items)?;
     logging::log("[Proxies]", &format!("{}代理「{name}」", if enabled { "✅ 启用" } else { "⏸️ 禁用" }));
-    Ok((list(), EnabledChange { name, enabled }))
+    Ok(EnabledChange { name, enabled })
 }
 
-pub fn remove(id: &str) -> Result<(Vec<Value>, String), String> {
+pub fn remove(id: &str) -> Result<String, String> {
     let _guard = mutation_lock();
     let mut items = read_items();
     let index = writable_index(&items, id)?;
@@ -376,7 +377,7 @@ pub fn remove(id: &str) -> Result<(Vec<Value>, String), String> {
     write_items(&items)?;
     let name = text_of(&removed, "name");
     logging::log("[Proxies]", &format!("🗑️ 删除代理「{name}」"));
-    Ok((list(), name))
+    Ok(name)
 }
 
 pub struct ClashSyncReport {
@@ -459,7 +460,7 @@ pub struct TestOutcome {
     pub error: Option<String>,
 }
 
-pub fn record_test(id: &str, result: &TestOutcome) -> Result<Vec<Value>, String> {
+pub fn record_test(id: &str, result: &TestOutcome) -> Result<(), String> {
     let _guard = mutation_lock();
     let mut items = read_items();
     let index = supported_index(&items, id)?;
@@ -474,5 +475,5 @@ pub fn record_test(id: &str, result: &TestOutcome) -> Result<Vec<Value>, String>
         "error": result.error,
     }));
     write_items(&items)?;
-    Ok(list())
+    Ok(())
 }

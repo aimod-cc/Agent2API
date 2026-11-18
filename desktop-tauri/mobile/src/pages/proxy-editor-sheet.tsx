@@ -10,6 +10,8 @@ import {
 import { serverIdentity } from '../lib/servers'
 import { store } from '../state/store'
 import { t } from '../i18n'
+import { openExternal } from '../lib/community'
+import { ProxySponsorCards } from '../../../ui-shared/proxy-sponsor-cards'
 import { ProxyBatchEditor, type ProxyBatchHandle } from '../../../ui-shared/proxy-batch-editor'
 import { proxyHost, type ProxyImportDraft, type ProxyImportReport } from '../../../ui-shared/proxy-import'
 
@@ -128,6 +130,7 @@ export function ProxyEditorSheet({ item, onClose, onSaved }: {
           <ProxyBatchEditor ref={batch} t={t} locked={Boolean(busy)} onBusyChange={setBatchBusy} save={saveBatch} test={testBatch}
             onNotice={(message, failed) => { if (serverIdentity() === identity) store.toast(message, failed ? 'err' : 'ok') }} />
         </div> : null}
+        {!item ? <ProxySponsorCards t={t} openExternal={openExternal} /> : null}
       </SheetBody>
       <SheetFooter>
         {mode === 'single' ? <>

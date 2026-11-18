@@ -11,6 +11,7 @@ import { ScheduleTab } from './checkin-schedule-tab'
 import { MakeupTab } from './checkin-makeup-tab'
 import { t } from '../i18n'
 import { RecordsTab } from './checkin-records-tab'
+import { pluginTaskRunning } from '../../../ui-shared/plugin-task-types'
 
 /**
  * Agent2API · 签到中心（页面岛）。
@@ -81,7 +82,8 @@ function CheckinPage(): React.ReactElement {
     const timer = window.setInterval(() => {
       const page = (window as unknown as { wbApp?: { currentPage?: string } }).wbApp?.currentPage
       if (document.hidden || page !== 'checkin') return
-      if (store.center?.auto?.running || activeTab === 'schedule' && store.center?.auto?.enabled) void loadCenter()
+      if (store.center?.auto?.running || store.center?.travel?.running || store.center?.pluginTasks?.some(pluginTaskRunning)
+        || activeTab === 'schedule' && (store.center?.auto?.enabled || store.center?.pluginTasks?.some(row => row.task.enabled))) void loadCenter()
     }, 3000)
     return () => window.clearInterval(timer)
   }, [])
@@ -211,5 +213,5 @@ declare global {
 
 window.wbCheckin = {
   load: loadCenter,
-  refresh: () => { void loadCenter(); void loadRecords() },
+  refresh: () => { void loadCenter(true); void loadRecords() },
 }

@@ -181,7 +181,7 @@ pub async fn pool_remove(state: &ServerState, body: &Bytes) -> Response {
     }
     let exists = proxy_pool::list().iter().any(|item| item.get("id").and_then(Value::as_str) == Some(id));
     match proxy_pool::remove(id) {
-        Ok((_, name)) => {
+        Ok(name) => {
             let mut data = pool_payload(state);
             data["removed"] = json!(name);
             ok_json(data)
@@ -203,7 +203,7 @@ pub async fn pool_enable(state: &ServerState, body: &Bytes) -> Response {
         return management_error(400, "缺少 enabled（true / false）");
     };
     match proxy_pool::set_enabled(id, enabled) {
-        Ok((_, change)) => {
+        Ok(change) => {
             let mut data = pool_payload(state);
             data["name"] = json!(change.name);
             data["enabled"] = json!(change.enabled);

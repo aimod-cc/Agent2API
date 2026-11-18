@@ -140,7 +140,7 @@ fn cline_public_account(record: &StoredAccount) -> Value {
             "available".to_string(),
             // 用 `has_credentials()` 而不是 `has_token()`：桌面端账号按设计不落
             // token（凭证实时读客户端文件），只认 has_token 会把它标成不可用
-            Value::Bool(record.enabled() && record.has_credentials()),
+            Value::Bool(record.has_credentials()),
         );
         if let Some(expires) = value.get("expiresAt").filter(|value| !value.is_null()) {
             out.insert("expiresAt".to_string(), expires.clone());

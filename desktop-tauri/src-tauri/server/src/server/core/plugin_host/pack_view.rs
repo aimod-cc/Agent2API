@@ -8,6 +8,14 @@ use serde::Serialize;
 
 use super::install::{plugins_dir, read_manifest, PackRegistry};
 
+pub(super) fn display_name(name: &str) -> &str {
+    name.trim_end().rsplit_once('·')
+        .filter(|(_, suffix)| suffix.trim().eq_ignore_ascii_case("wasm"))
+        .map(|(label, _)| label.trim_end())
+        .filter(|label| !label.is_empty())
+        .unwrap_or(name)
+}
+
 /// 已安装包的摘要（界面列表用）。
 ///
 /// 与 [`super::InstalledPack`] 的区别：这里是**给界面看的**，多带三样安装期才知道的
@@ -27,9 +35,11 @@ pub struct PackSummary {
     pub description: Option<String>,
     /// 版本。
     pub version: String,
+    pub support_state: super::PackSupportState,
     pub required_version: Option<String>,
     pub update_required: bool,
     pub compatibility_error: Option<String>,
+    pub unavailable_reason: Option<String>,
     /// 是否启用。
     pub enabled: bool,
     /// 是否已签名（安装时验签通过才为 true —— 界面据此显示「已签名 / 未签名」）。
@@ -182,46 +192,6 @@ fn is_image_path(path: &Path) -> bool {
     )
 }
 
-/// 把包清单里的 UI 页面展开成客户端能直接用的形态（`url` 指向网关托管地址）。
-///
-/// ── 为什么要校验 `entry` ────────────────────────────────────
-/// `entry` 是包自己写的字符串。不校验的话，一个包可以写 `../../../../etc/passwd`
-/// 让托管端点去读包外的文件 —— 那是路径穿越。这里在**声明侧**就挡掉：必须是
-/// 相对路径、不含 `..`、以 `.html` 结尾。托管端点那边还会再挡一次（纵深防御）。
-fn pack_ui_pages(pack_id: &str, manifest: Option<&proto::PackManifest>) -> Vec<PackUiSummary> {
-    let Some(manifest) = manifest else {
-        return Vec::new();
-    };
-    manifest
-        .ui
-        .iter()
-        .filter(|page| ui_entry_ok(&page.entry))
-        .map(|page| PackUiSummary {
-            id: page.id.clone(),
-            title: page.title.clone(),
-            icon: page.icon.clone(),
-            // 包 id 与入口都进 URL，所以两边都要 URL-safe：包 id 由安装期校验
-            // （只允许 `[a-z0-9-]`），入口这里已挡掉 `..` 与绝对路径
-            url: format!("/plugins/{pack_id}/ui/{}", page.entry.replace('\\', "/")),
-            // 原样转出插件申报的默认分组，不做白名单校验（理由见
-            // `PackUiSummary::group` 的说明）
-            group: page.group.clone(),
-            order: page.order,
-        })
-        .collect()
-}
-
-/// UI 页面的入口路径是否合法（相对、不含 `..`、以 `.html` 结尾）。
-fn ui_entry_ok(entry: &str) -> bool {
-    let normalized = entry.replace('\\', "/");
-    if normalized.is_empty() || normalized.starts_with('/') || normalized.contains(':') {
-        return false;
-    }
-    if normalized.split('/').any(|segment| segment == "..") {
-        return false;
-    }
-    normalized.to_ascii_lowercase().ends_with(".html")
-}
 
 /// 列出全部已安装包（含未启用的）。
 ///
@@ -229,18 +199,21 @@ fn ui_entry_ok(entry: &str) -> bool {
 /// 显示一行「清单损坏，请重新安装」。整表读失败才返回空 —— 那是「没装过」。
 pub fn list_packs() -> Vec<PackSummary> {
     let registry = PackRegistry::load();
-    let owners = super::ownership::owners(&registry);
+    let scripts = super::script::runtime::display_owners();
+    let owners = super::ownership::display_owners(&registry, &scripts);
     registry
         .packs
         .iter()
         .map(|pack| {
             let dir = plugins_dir().join(&pack.id).join(&pack.version);
-            let compatibility_error = super::compatibility::installed_error(pack);
+            let support_state = super::support::installed_state(pack);
+            let supported = support_state == super::PackSupportState::Supported;
+            let compatibility_error = supported.then(|| super::compatibility::installed_error(pack)).flatten();
             let update_required = compatibility_error.is_some();
             let manifest = read_manifest(&dir).ok();
             let name = manifest
                 .as_ref()
-                .map(|item| item.name.clone())
+                .map(|item| display_name(&item.name).to_string())
                 .unwrap_or_else(|| pack.id.clone());
             let description = std::fs::read_to_string(dir.join("pack.json"))
                 .ok()
@@ -258,9 +231,10 @@ pub fn list_packs() -> Vec<PackSummary> {
                 .map(|item| {
                     let id = item.id.0.clone();
                     let enabled = pack.providers.get(&id).copied().unwrap_or(true);
-                    let overridden_by = super::ownership::overridden_by(&owners, &pack.id, &id);
+                    let overridden_by = scripts.get(&id).or_else(|| owners.get(&id))
+                        .filter(|owner| *owner != &pack.id).cloned();
                     PackProviderSummary {
-                        loaded: pack.enabled && enabled && overridden_by.is_none()
+                        loaded: supported && pack.enabled && enabled && overridden_by.is_none()
                             && super::startup::provider(&id).is_some_and(|state| state.available && state.pack_id == pack.id),
                         enabled,
                         overridden_by,
@@ -274,9 +248,11 @@ pub fn list_packs() -> Vec<PackSummary> {
                 name,
                 description,
                 version: pack.version.clone(),
+                support_state,
                 required_version: None,
                 update_required,
                 compatibility_error,
+                unavailable_reason: super::ownership::unavailable_reason(pack),
                 enabled: pack.enabled,
                 signed: pack.signed,
                 installed_at: pack.installed_at,
@@ -295,73 +271,42 @@ pub fn list_packs() -> Vec<PackSummary> {
                 protocol,
                 homepage,
                 icon: pack_icon(&dir, manifest.as_ref()),
-                ui: if update_required { Vec::new() } else { pack_ui_pages(&pack.id, manifest.as_ref()) },
+                ui: Vec::new(),
             }
         })
         .collect()
 }
 
+/// 当前归属包的提供商图标；Wasm 单提供商包与插件卡片共用同一张图。
+pub fn provider_icons() -> serde_json::Value {
+    let registry = PackRegistry::load();
+    let scripts = super::script::runtime::display_owners();
+    let owners = super::ownership::display_owners(&registry, &scripts);
+    let mut icons = super::script::provider_icons().as_object().cloned().unwrap_or_default();
+    for pack in registry.packs.iter().filter(|pack| super::support::installed_state(pack) == super::PackSupportState::Supported) {
+        let [provider] = pack.manifest_providers.as_slice() else { continue };
+        let id = provider.id.as_str();
+        if scripts.contains_key(id) || owners.get(id).is_none_or(|owner| owner != &pack.id) {
+            continue;
+        }
+        // 已安装的 Wasm 包保留提供商归属，缺图不能借用被覆盖的脚本插件图标。
+        icons.remove(id);
+        let dir = plugins_dir().join(&pack.id).join(&pack.version);
+        let Ok(manifest) = read_manifest(&dir) else { continue };
+        if manifest.id != pack.id || !super::wasm::manifest::is_wasm(&manifest)
+            || manifest.providers.len() != 1 || manifest.providers[0].id.as_str() != id {
+            continue;
+        }
+        if let Some(icon) = pack_icon(&dir, Some(&manifest)) {
+            icons.insert(id.to_string(), serde_json::Value::String(icon));
+        }
+    }
+    serde_json::Value::Object(icons)
+}
+
 // ─── UI 资源托管 ─────────────────────────────────────────────
 
-/// 把 `/plugins/{pack}/ui/{rest}` 解析成磁盘上的文件路径（`None` = 不存在 / 非法）。
-///
-/// ── 安全边界（三条，缺一条就是漏洞）──────────────────────────
-///   1. **只服务已启用包的版本目录**：包 id 必须在注册表里且 `enabled`，
-///      版本目录由注册表给（不是 URL 给的）—— 于是 URL 里的 `{pack}` 只是一个
-///      查表的键，不能指向任意目录；
-///   2. **路径逐段归一化**：`..` / 绝对路径 / 反斜杠一律拒绝，不允许逃出
-///      `ui/` 目录；
-///   3. **只出 `ui/` 前缀下的文件**：包里的 `bin/`、`pack.json` 不对外
-///      （那些是后端与元数据，前端没有理由读到）。
-///
-/// 与 `static_files::serve` 分开写而不是复用：那个的根是 `ui_dir`、还要注入
-/// web shim（面板桥接），语义完全不同。共用会逼着两边都长出一堆分支。
-pub fn resolve_ui_file(pack_id: &str, rest: &str) -> Option<PathBuf> {
-    if pack_id.is_empty() || rest.is_empty() {
-        return None;
-    }
-    // ① 包必须已安装且启用（停用 = 页面也不该能访问）
-    let registry = PackRegistry::load();
-    let pack = registry
-        .packs
-        .iter()
-        .find(|item| item.id == pack_id && item.enabled)?;
-    if super::compatibility::installed_error(pack).is_some() {
-        return None;
-    }
-    let root = plugins_dir().join(&pack.id).join(&pack.version).join("ui");
-    // ② 逐段归一化（与 `static_files::resolve_file` 同一套规则）
-    let mut segments: Vec<&str> = Vec::new();
-    for segment in rest.split('/') {
-        if segment.contains(':') {
-            return None;
-        }
-        match segment {
-            "" | "." => {}
-            ".." => {
-                segments.pop()?;
-            }
-            other => {
-                // 反斜杠：Windows 分隔符，归一化阶段就该拒绝（`..\..\x` 这类）
-                if other.contains('\\') {
-                    return None;
-                }
-                segments.push(other);
-            }
-        }
-    }
-    if segments.is_empty() {
-        return None;
-    }
-    let mut path = root.clone();
-    for segment in &segments {
-        path.push(segment);
-    }
-    // ③ 归一化后的路径必须仍在 `ui/` 下（双保险：`..` 已在上面消化）
-    let canonical_root = root.canonicalize().ok()?;
-    let canonical = path.canonicalize().ok()?;
-    if !canonical.starts_with(&canonical_root) {
-        return None;
-    }
-    canonical.is_file().then_some(canonical)
+/// 旧插件网页不再托管；WASM 只使用主程序的声明式界面。
+pub fn resolve_ui_file(_pack_id: &str, _rest: &str) -> Option<PathBuf> {
+    None
 }

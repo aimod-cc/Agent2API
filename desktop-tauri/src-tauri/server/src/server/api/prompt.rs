@@ -78,6 +78,12 @@ pub async fn put_prompt(State(state): State<ServerState>, body: Bytes) -> Respon
     };
     let current = config::current();
     let settings = current.prompt_settings();
+    let updates_global = [KEY_PROMPT_MODE, KEY_PROMPT_FILE, KEY_PROMPT_TEXT].iter()
+        .any(|key| object.get(*key).is_some_and(|value| !value.is_null()));
+    if settings.rules_configured && object.get(KEY_PROMPT_PROVIDERS)
+        .and_then(Value::as_object).is_some_and(|entries| !entries.is_empty()) {
+        return errors::management_error(409, "已使用多条件提示词规则，请刷新设置页后编辑规则");
+    }
 
     // ── 模式 ──────────────────────────────────────────────
     let mode = match object.get(KEY_PROMPT_MODE) {
@@ -136,7 +142,7 @@ pub async fn put_prompt(State(state): State<ServerState>, body: Bytes) -> Respon
     };
     // 新模式要用文件时才校验：passthrough 不读文件（与读侧一致），
     // 那时路径写错也不影响任何行为，拦下来只会挡住「先存着、以后切模式」的用法
-    if matches!(mode, PromptMode::Custom | PromptMode::Append) && inline.is_none() {
+    if updates_global && matches!(mode, PromptMode::Custom | PromptMode::Append) && inline.is_none() {
         if let Some(path) = file.as_deref() {
             if let Err(message) = config::read_prompt_file(path) {
                 return errors::management_error(400, message);
@@ -386,9 +392,8 @@ pub async fn put_prompt(State(state): State<ServerState>, body: Bytes) -> Respon
     }
 
     // ── 落盘 ─────────────────────────────────────────────
-    // 无论配置项有没有变都重跑一次解析：它顺带把**提示词文件此刻的内容**重新读
-    // 一遍（用户刚改完文件、或刚把文件恢复出来，一次 PUT 就能生效）。
-    if !config::set_prompt(mode, file, inline) {
+    // 网关自带提示词开关和降级动作不回写旧快照里的全局配置。
+    if updates_global && !config::set_prompt(mode, file, inline) {
         logging::log(
             "[Config]",
             "⚠️  系统提示词设置写入失败，本次运行内仍生效",
@@ -557,7 +562,7 @@ fn providers_json(settings: &PromptSettings) -> Value {
 }
 
 /// 开关表的 JSON 形态（只含被明确拨过的家；见 `KEY_PROMPT_GATEWAY`）
-fn gateway_json(settings: &PromptSettings) -> Value {
+pub(super) fn gateway_json(settings: &PromptSettings) -> Value {
     let mut map = serde_json::Map::new();
     for (id, flag) in &settings.gateway {
         map.insert(id.clone(), Value::Bool(*flag));
@@ -566,7 +571,7 @@ fn gateway_json(settings: &PromptSettings) -> Value {
 }
 
 /// 网关自带提示词正文覆盖的 JSON 形态（只含改过的家与段；见 `KEY_PROMPT_GATEWAY_TEXT`）
-fn gateway_text_json(settings: &PromptSettings) -> Value {
+pub(super) fn gateway_text_json(settings: &PromptSettings) -> Value {
     let mut map = serde_json::Map::new();
     for (id, blocks) in &settings.gateway_text {
         let mut one = serde_json::Map::new();
@@ -594,13 +599,19 @@ fn gateway_text_json(settings: &PromptSettings) -> Value {
 /// 提供商插件了（今天只有 ZCode 一家有）。网关这边问插件的 `prompt.info`
 /// 管理动作；插件不在时三项都是 null/0，界面于是不显示那一行 —— 那比如实
 /// 报错好，也比编一份过时的原文好（用户一保存就等于把它钉死了）。
-async fn provider_options(state: &ServerState) -> Value {
-    let mut items = Vec::with_capacity(providers::PROVIDERS.len());
-    for meta in providers::PROVIDERS.iter() {
-        let info = plugin_prompt_info(state, meta.id).await;
+pub(super) async fn provider_options(state: &ServerState) -> Value {
+    let mut ids = providers::executable_provider_ids();
+    for item in crate::server::core::custom_providers::list() {
+        if let Some(id) = item.get("id").and_then(Value::as_str) {
+            if !ids.iter().any(|existing| existing == id) { ids.push(id.to_string()); }
+        }
+    }
+    let mut items = Vec::with_capacity(ids.len());
+    for id in ids {
+        let info = plugin_prompt_info(state, &id).await;
         items.push(json!({
-            "id": meta.id,
-            "label": meta.label,
+            "id": id,
+            "label": providers::label_of(&id),
             "gatewayNote": info.as_ref().and_then(|info| info.get("gatewayNote")).cloned()
                 .unwrap_or(Value::Null),
             "gatewayChars": info.as_ref().and_then(|info| info.get("gatewayChars")).cloned()

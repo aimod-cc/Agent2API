@@ -71,7 +71,24 @@ pub fn cancel_usage(body: &Bytes) -> Response {
     ok_json(json!({ "cancelled": usage_query::jobs::cancel(id, request_id) }))
 }
 
+pub fn scoped_usage_snapshot(state: &ServerState, body: &Bytes) -> Response {
+    #[derive(serde::Deserialize)]
+    struct Scope { ids: Vec<String> }
+    let scope = match serde_json::from_slice::<Scope>(body) {
+        Ok(scope) if scope.ids.iter().all(|id| !id.is_empty() && id.len() <= 512) => scope,
+        _ => return management_error(400, "余额快照账号范围无效"),
+    };
+    crate::server::core::blocking::in_place(|| ok_json(super::accounts_usage_snapshot::snapshot(state.store(), &scope.ids)))
+}
+
 /// GET /api/accounts/usage/snapshot：历史读数与当前任务状态分别返回。
-pub async fn accounts_usage_snapshot(state: &ServerState) -> Response {
+pub async fn accounts_usage_snapshot(state: &ServerState, query: &str) -> Response {
+    if let Some(ids) = query_param(query, "ids") {
+        let ids = match serde_json::from_str::<Vec<String>>(&ids) {
+            Ok(ids) if ids.len() <= 3000 && ids.iter().all(|id| id.len() <= 512) => ids,
+            _ => return management_error(400, "余额快照账号范围无效"),
+        };
+        return crate::server::core::blocking::in_place(|| ok_json(super::accounts_usage_snapshot::snapshot(state.store(), &ids)));
+    }
     ok_json(usage_query::snapshot(state.store()))
 }

@@ -79,14 +79,27 @@
 //! 可读的错误页面与日志。各 store 的接线点要按「数据库可能不存在」写。
 
 pub mod backup;
+mod codearts_slot;
+mod cline_free_enrollment;
+mod durable;
+mod credential_epoch;
 pub mod migrate;
 mod revisions;
 pub mod schema;
+mod task_guard;
 
+pub(crate) use codearts_slot::{CodeArtsStorageError, CodeArtsTransaction};
+pub(crate) use durable::Durable;
+pub(crate) use cline_free_enrollment::{FreeEnrollmentStorageError, FreeEnrollmentTransaction};
+pub(crate) use credential_epoch::{AccountChange, CredentialSource, CredentialSourceError};
 pub(crate) use revisions::AccountChanges;
+pub(crate) use task_guard::{TaskTransaction, TaskTransactionError};
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex,
+};
 
 use rusqlite::Connection;
 
@@ -96,6 +109,20 @@ use rusqlite::Connection;
 /// （接入本库的五个 store —— 账号、事件日志、请求统计、调试报文、脱敏词表 ——
 /// 改造后都不再有自己的文件名，它们的数据都在本库的各张表里。）
 pub const FILE_NAME: &str = "agent2api.db";
+
+static QUERY_CACHE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn query_cache_generation() -> u64 {
+    QUERY_CACHE_GENERATION.load(Ordering::Acquire)
+}
+
+pub(crate) fn invalidate_query_caches() {
+    QUERY_CACHE_GENERATION.fetch_add(1, Ordering::AcqRel);
+    crate::server::core::panel_events::notify(crate::server::core::panel_events::Change::Accounts);
+    crate::server::core::panel_events::notify(crate::server::core::panel_events::Change::Balances);
+    crate::server::core::panel_events::notify(crate::server::core::panel_events::Change::Usage);
+    crate::server::core::panel_events::notify(crate::server::core::panel_events::Change::Proxies);
+}
 
 /// SQLite 连接句柄。`Clone` 共享**同一个**连接（内部 `Arc`）。
 ///
@@ -118,10 +145,14 @@ pub struct Db {
 struct DbInner {
     /// 单连接。锁中毒时按「数据库不可用」处理，**不用** `into_inner()` 接管 ——
     /// 与 `core::egress` / `logs_store` 的取向不同，理由见 `with` 的注释。
-    conn: Mutex<Connection>,
+    conn: Mutex<credential_epoch::ConnectionState>,
+    /// 仅在短事务无法确认已结束或无法恢复连接设置时隔离；所有访问须在conn锁内检查。
+    task_guard_unusable: AtomicBool,
     /// 库文件路径（打开时确定，之后不变）
     file: PathBuf,
     accounts: Arc<revisions::AccountRevisions>,
+    requests: Arc<AtomicU64>,
+    usage: Arc<AtomicU64>,
 }
 
 impl Db {
@@ -154,12 +185,17 @@ impl Db {
         apply_pragmas(&conn)?;
         schema::migrate(&conn).map_err(|error| format!("建表/升级 schema 失败: {error}"))?;
         let accounts = Arc::new(revisions::AccountRevisions::default());
-        install_cloud_sync_hook(&conn, accounts.clone());
+        let requests = Arc::new(AtomicU64::new(0));
+        let usage = Arc::new(AtomicU64::new(0));
+        install_cloud_sync_hook(&conn, accounts.clone(), requests.clone(), usage.clone());
         Ok(Db {
             inner: Arc::new(DbInner {
-                conn: Mutex::new(conn),
+                conn: Mutex::new(credential_epoch::ConnectionState::new(conn)),
+                task_guard_unusable: AtomicBool::new(false),
                 file: path.to_path_buf(),
                 accounts,
+                requests,
+                usage,
             }),
         })
     }
@@ -187,7 +223,12 @@ impl Db {
     /// 连接本身（状态可能停在事务中间），那里持的是空标记。
     pub fn with<T>(&self, f: impl FnOnce(&Connection) -> T) -> Option<T> {
         match self.inner.conn.lock() {
-            Ok(conn) => Some(f(&conn)),
+            Ok(conn) => {
+                if self.inner.task_guard_unusable.load(Ordering::Acquire) {
+                    return None;
+                }
+                Some(f(&conn))
+            }
             Err(_) => None,
         }
     }
@@ -210,9 +251,22 @@ impl Db {
     /// 批量改/删、`migrate_startup`、三家旧数据导入、导入合并）。
     pub fn with_mut<T>(&self, f: impl FnOnce(&mut Connection) -> T) -> Option<T> {
         match self.inner.conn.lock() {
-            Ok(mut conn) => Some(f(&mut conn)),
+            Ok(mut conn) => {
+                if self.inner.task_guard_unusable.load(Ordering::Acquire) {
+                    return None;
+                }
+                Some(f(&mut conn))
+            }
             Err(_) => None,
         }
+    }
+
+    pub(crate) fn request_revision(&self) -> u64 {
+        self.inner.requests.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn usage_revision(&self) -> u64 {
+        self.inner.usage.load(Ordering::Acquire)
     }
 
     pub(crate) fn account_revision(&self) -> u64 {
@@ -273,7 +327,8 @@ pub fn stored_schema_version(path: &Path) -> Option<i64> {
 ///   - `synchronous=NORMAL`：WAL 下的推荐档位 —— 事务提交不再每次 fsync
 ///     WAL 文件，只在检查点落盘时 fsync。掉电**不会损坏库**（WAL 本身是
 ///     崩溃安全的），最多丢最近若干已提交事务；换来的是写入快一个量级。
-///     本项目存的是日志/统计/账号缓存，丢最后几条可以接受，因此不用 FULL。
+///     普通日志/统计仍使用此档；CodeArts 封闭发送槽另在原锁内、BEGIN 前临时升到 FULL。
+///     槽的 COMMIT 事实与设置恢复分别确认，不能用本默认值推定一次材料已经耐久消费。
 ///   - `foreign_keys=ON`：SQLite 默认**关闭**外键约束（为兼容旧版而留的坑），
 ///     必须逐连接开启。现在表之间还没有外键，但先开着 —— 后续切片加关联表时
 ///     不会因为「忘了开这个 PRAGMA」而静默失去约束。
@@ -306,10 +361,17 @@ fn apply_pragmas(conn: &Connection) -> Result<(), String> {
 /// 钩子只服务自动同步这一个可选功能。注册不上（旧版 SQLite 等）时最坏是
 /// 「自动同步不触发」，手动上传照样可用 —— 不该让整个网关起不来。
 /// 账号表同时记录行级失效信号；回调不读库，也不获取账号或快照的锁。
-fn install_cloud_sync_hook(conn: &Connection, accounts: Arc<revisions::AccountRevisions>) {
+fn install_cloud_sync_hook(conn: &Connection, accounts: Arc<revisions::AccountRevisions>, requests: Arc<AtomicU64>, usage: Arc<AtomicU64>) {
     let result = conn.update_hook(Some(move |_action, _db: &str, table: &str, rowid: i64| {
+        if table == "requests" {
+            requests.fetch_add(1, Ordering::AcqRel);
+        }
         if table == "accounts" {
             accounts.changed(rowid);
+        }
+        if table == "account_usage_records" {
+            usage.fetch_add(1, Ordering::AcqRel);
+            crate::server::core::panel_events::notify(crate::server::core::panel_events::Change::Balances);
         }
         crate::server::core::cloud_sync::auto_sync::on_table_change(table);
     }));

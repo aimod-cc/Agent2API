@@ -26,7 +26,7 @@ struct CallGuard {
 
 impl CallGuard {
     fn new(parent: &Arc<RequestTelemetry>) -> Self {
-        let child = Arc::new(RequestTelemetry::with_id());
+        let child = Arc::new(parent.child_with_id());
         child.set_cancel_token(Arc::new(super::super::cancellation::CancelToken::new()));
         Self { parent: parent.clone(), child, started_at: logging::now_ms(), status: 504,
             error: Some("辅助识图被取消或超过等待时限".into()) }
@@ -143,6 +143,7 @@ pub(super) async fn run(service: &UpstreamService, ctx: &ProviderContext<'_>, or
                 continue;
             }
         }
+        if ctx.telemetry.replay_guard().blocked() { return Err(super::blocked_error()); }
         let mut call = CallGuard::new(ctx.telemetry);
         let result = describe(service, ctx, &destination, image, &question, &call.child).await;
         call.finish(&result);
@@ -156,8 +157,11 @@ pub(super) async fn run(service: &UpstreamService, ctx: &ProviderContext<'_>, or
                 "totalTokens": snapshot.total_tokens, "status": call.status, "error": call.error }));
         }
         ctx.telemetry.note_vision(detail.clone());
-        let text = result.map_err(|error| GatewayError::with_status(error.status_code,
-            format!("辅助识图失败：{}；未删除图片或切换处理方式", error.message)).with_code("vision_assist_failed"))?;
+        let text = result.map_err(|error| {
+            if ctx.telemetry.replay_guard().blocked() { return error; }
+            GatewayError::with_status(error.status_code,
+                format!("辅助识图失败：{}；未删除图片或切换处理方式", error.message)).with_code("vision_assist_failed")
+        })?;
         if rule.reuse_results { cache::put(key, text.clone()); }
         descriptions.push(text);
     }

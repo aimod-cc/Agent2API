@@ -1,19 +1,29 @@
 import * as React from 'react'
 import { Button, Field, FieldLabel, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, StatusDot, cn } from '@ui'
 import { t } from '../i18n'
-import { errorMessage, shared, type AccountsBridge } from './accounts-shared'
+import { shared, type AccountsBridge } from './accounts-shared'
+import { zcodeCaptchaStatsMatch } from '../../../ui-shared/zcode-captcha-binding'
 import { zcodePlanLabel, ZCODE_PLAN_CODING, ZCODE_PLAN_START } from './accounts-domain'
 
 type PoolStats = NonNullable<Awaited<ReturnType<NonNullable<AccountsBridge['zcodeCaptchaStats']>>>>
-type MintStatus = { state: string; error: string }
+type MintStatus = { state: string; error: string; accountId?: string; provider?: string }
+type CaptchaView = { accountId: string; pool: PoolStats | null; mint: MintStatus | null; phase: string }
+
+function mintForAccount(accountId: string): MintStatus | null {
+  const value = shared().wbZcodeCaptchaPool?.status?.(accountId)
+  return value?.accountId === accountId ? value : null
+}
 
 export function poolStatus(pool: PoolStats | null, mint: MintStatus | null): string {
   if (!pool) return t('读取中…')
   const error = pool.error || pool.configError
-  if (error) return t('读取失败：{error}', { error })
+  if (error) return t('验证码状态读取失败，请刷新后重试')
   if (pool.required === false) return t('当前模型请求免人机验证')
   if (mint?.state === 'verifying') return t('正在验证…')
-  if (mint?.state === 'error') return t('验证失败：{error}', { error: mint.error })
+  if (mint?.state === 'error') {
+    const safe = [t('验证码已提交，但状态刷新失败，请手动刷新'), t('验证码提交结果未确认，请刷新状态后重新验证；不会自动重发')]
+    return safe.includes(mint.error) ? mint.error : t('验证码验证未完成，请刷新配置后重试')
+  }
   if (mint?.state === 'paused') return t('已暂停验证，需要时请手动重试')
   const counts = `${Number(pool.ready) || 0} / ${Number(pool.target) || 3}`
   if (!Number(pool.startPlanAccounts)) return t('未启用套餐池账号，不生成验证码令牌')
@@ -26,57 +36,88 @@ export function poolStatus(pool: PoolStats | null, mint: MintStatus | null): str
 export function ZcodeCaptchaStatus({ accountId, disabled = false, onBusy }: {
   accountId: string; disabled?: boolean; onBusy?: (busy: boolean) => void
 }) {
-  const [pool, setPool] = React.useState<PoolStats | null>(null)
-  const [mint, setMint] = React.useState<MintStatus | null>(null)
-  const [phase, setPhase] = React.useState('')
+  const [view, setView] = React.useState<CaptchaView>(() => ({ accountId, pool: null, mint: null, phase: '' }))
   const controller = React.useRef<AbortController | null>(null)
   const mounted = React.useRef(true)
+  const generation = React.useRef(0)
+  const readGeneration = React.useRef(0)
+  const latest = React.useRef({ accountId, onBusy })
+  latest.current = { accountId, onBusy }
+  const { pool, mint, phase } = view.accountId === accountId ? view : { pool: null, mint: null, phase: '' }
   const refresh = React.useCallback(async () => {
+    if (controller.current) return
     const api = shared().workbuddyDesktop
+    const epoch = generation.current
+    const current = ++readGeneration.current
+    const isCurrent = () => mounted.current && epoch === generation.current && current === readGeneration.current
+      && latest.current.accountId === accountId && shared().workbuddyDesktop === api
     try {
-      const value = api?.zcodeCaptchaStats ? await api.zcodeCaptchaStats() : { error: t('验证码令牌池接口不可用') }
-      if (mounted.current) {
-        setPool(value || null)
-        if (shared().wbZcodeCaptchaPool?.status) setMint(shared().wbZcodeCaptchaPool?.status?.() || null)
-      }
-    } catch (error) {
-      if (mounted.current) setPool({ error: errorMessage(error) })
+      if (!api?.zcodeCaptchaStats || !accountId) throw new Error('captcha_api_unavailable')
+      const value = await api.zcodeCaptchaStats(accountId)
+      if (!isCurrent()) return
+      if (!zcodeCaptchaStatsMatch(value, accountId)) throw new Error('invalid_captcha_scope')
+      setView(previous => ({ ...previous, accountId, pool: value, mint: mintForAccount(accountId) || previous.mint }))
+    } catch {
+      if (isCurrent()) setView(previous => ({ ...previous, accountId, pool: { error: t('验证码状态读取失败，请刷新后重试') } }))
     }
-  }, [])
+  }, [accountId])
   React.useEffect(() => {
     mounted.current = true
+    generation.current++
+    setView({ accountId, pool: null, mint: null, phase: '' })
     void refresh()
     const timer = window.setInterval(() => void refresh(), 15000)
-    const onStatus = () => {
-      setMint(shared().wbZcodeCaptchaPool?.status?.() || null)
+    const onStatus = (event: Event) => {
+      if (!mounted.current || latest.current.accountId !== accountId
+        || (event as CustomEvent<MintStatus>).detail?.accountId !== accountId) return
+      setView(previous => ({ ...previous, mint: mintForAccount(accountId) }))
       void refresh()
     }
     window.addEventListener('zcode-captcha-status', onStatus)
     return () => {
       mounted.current = false
+      generation.current++
+      readGeneration.current++
       controller.current?.abort()
-      onBusy?.(false)
+      controller.current = null
+      latest.current.onBusy?.(false)
       window.clearInterval(timer)
       window.removeEventListener('zcode-captcha-status', onStatus)
     }
-  }, [refresh, onBusy])
+  }, [accountId, refresh])
 
   async function verify() {
     const api = shared().wbZcodeCaptchaPool
-    if (controller.current || !api?.verify) return
+    const bridge = shared().workbuddyDesktop
+    if (controller.current || disabled || !api?.verify || latest.current.accountId !== accountId) return
     const current = new AbortController()
+    const epoch = generation.current
+    const notifyBusy = latest.current.onBusy
+    const isCurrent = () => mounted.current && epoch === generation.current && latest.current.accountId === accountId
+      && shared().workbuddyDesktop === bridge
+    readGeneration.current++
     controller.current = current
-    setPhase('preparing')
-    onBusy?.(true)
+    setView(previous => ({ ...previous, accountId, phase: 'preparing', mint: { state: 'verifying', error: '', accountId } }))
+    notifyBusy?.(true)
     try {
-      await api.verify(accountId, current.signal, value => { if (mounted.current) setPhase(value) })
+      await api.verify(accountId, current.signal, value => {
+        if (isCurrent() && !current.signal.aborted) setView(previous => ({ ...previous, phase: value }))
+      })
     } catch (error) {
-      if (mounted.current && !current.signal.aborted && (error as Error)?.name !== 'CaptchaCancelledError') {
-        setMint({ state: 'error', error: errorMessage(error) })
+      if (isCurrent() && !current.signal.aborted && !['AbortError', 'CaptchaCancelledError'].includes((error as Error)?.name)) {
+        const message = error instanceof Error ? error.message : ''
+        const safe = [t('验证码已提交，但状态刷新失败，请手动刷新'), t('验证码提交结果未确认，请刷新状态后重新验证；不会自动重发')]
+        setView(previous => ({ ...previous, mint: { state: 'error', error: safe.includes(message) ? message : t('验证码验证未完成，请刷新配置后重试'), accountId } }))
       }
     } finally {
-      if (controller.current === current) controller.current = null
-      if (mounted.current) { setPhase(''); onBusy?.(false); void refresh() }
+      if (controller.current === current) {
+        controller.current = null
+        notifyBusy?.(false)
+        if (isCurrent()) {
+          setView(previous => ({ ...previous, phase: '' }))
+          void refresh()
+        }
+      }
     }
   }
 

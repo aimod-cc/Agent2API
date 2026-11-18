@@ -25,8 +25,8 @@ pub const BUILTIN_SUBSCRIPTION_IDS: [&str; 5] = [
 /// 所以不能留在 scoped runtime 里 —— 留在里面有执行体也走不通（症状与 Kiro
 /// 当初一样：插件装了、账号加得上，界面上却看不到这家）。
 ///
-/// 千问办公那三家留在名单里：国内版由「提供商增强」插件实现但走的是同一套
-/// FULL-auth 边界，国际版与企业版还等着上游放开登录。
+/// 千问办公三家保留同一套 FULL-auth 边界；国内与国际版由独立插件提供执行体，
+/// 企业版仍须单独接入。
 const SCOPED_RUNTIME_IDS: [&str; 3] = [
     "qwenwork",
     // 千问办公国际版（`qwenwork-intl`）与国内版同协议、同凭证形态，
@@ -43,17 +43,9 @@ const SCOPED_RUNTIME_IDS: [&str; 3] = [
 /// （`!is_suspended(id) && serves_provider(id)`），于是插件装了也不被认作执行体
 /// —— 症状是「账号加得上，请求永远没有上游」，而日志里看不出任何异常。
 ///
-/// ── 千问办公**国际版**为什么在停用名单里（2026-11-03）────────────
-/// 与「没有实现」不同：它的对话/余额链路是通的，卡住的是**登录**——用户点了
-/// 添加账号也加不上，留着入口只会让人反复失败。上游对国际站只接受它自己注册的
-/// 回调地址（`https://gateway.qwenwork.ai/oauth/callback`），本机回环一律被拒；
-/// 设备码入口又已整体停用（对任何请求都回 400），授权码因此回不到我们手里。
-/// 所以先从可见列表里摘掉：`is_suspended` 会让注册、添加、目录刷新全部跳过它，
-/// 但身份仍在 [`SCOPED_RUNTIME_IDS`] 里 —— 已存在的记录照旧能显示与被识别。
-/// 上游哪天放开回调白名单，把它从这份名单里移出即可（插件侧代码不用动）。
-///
-/// `qwenwork-enterprise`（企业旗舰版）同样停用：插件要另立 provider
-/// （企业自己的域名）。
+/// 千问办公国际版由独立 WASM 插件提供设备授权与手工凭据入口，
+/// 不依赖本机回调；单一登录方式的上游限制不能暂停整家执行体。
+/// 企业旗舰版使用独立域名，尚须另立提供商实现。
 ///
 /// ── Kiro 为什么在 2026-11 移出这两份名单 ─────────────────────
 /// 它已由「提供商增强」插件实现（Rust，见 Agent2Providers 的 `kiro`）。
@@ -73,17 +65,10 @@ const SCOPED_RUNTIME_IDS: [&str; 3] = [
 /// 身份不丢：这八个 id 已登记进 `script::catalog::label`，因此
 /// `is_known_provider_id` 照旧为真，存量账号仍能被识别与展示（与 Kiro 同一手法）。
 ///
-/// 订阅族那五家（`claude` / `codex` / `chatgpt` / `copilot` / `gemini` 的
-/// `*-subscription`）**不在这批里**：它们是内置订阅身份，没有任何插件可以申报
-/// （`script::runtime` 用 [`BUILTIN_SUBSCRIPTION_IDS`] 硬挡住），放开只会让
-/// 存量记录失去「已知」身份。Magpie 的 GitHub Copilot 插件用的是它自己的
-/// `github-copilot`，与 `copilot-subscription` 不是同一个身份。
-const SUSPENDED_IDS: [&str; 7] = [
-    "qwenwork-intl",
+/// 订阅身份不向插件开放。Claude、ChatGPT、Codex 由本体执行；
+/// Copilot 与 Gemini 的订阅身份仍保留在停用名单中。
+const SUSPENDED_IDS: [&str; 3] = [
     "qwenwork-enterprise",
-    "claude-subscription",
-    "codex-subscription",
-    "chatgpt-subscription",
     "copilot-subscription",
     "gemini-subscription",
 ];

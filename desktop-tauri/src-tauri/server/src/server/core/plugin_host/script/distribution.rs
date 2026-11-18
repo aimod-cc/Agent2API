@@ -2,12 +2,12 @@ use serde_json::Value;
 
 use super::storage::{Package, PackageSource};
 
-const BASE: &str = "https://raw.githubusercontent.com/magpie-community/plugins/dist/";
+const INDEX_URL: &str = super::website::DISTRIBUTION;
 const INDEX_LIMIT: usize = 16 * 1024 * 1024;
 
 /// 官方分发索引（`dist` 分支的 `index.json`）：下载与「检查更新」共用一份读法。
 pub(super) async fn index() -> Result<Value, String> {
-    let bytes = super::download::github_bytes(&format!("{BASE}index.json"), INDEX_LIMIT).await?;
+    let bytes = super::download::github_bytes(INDEX_URL, INDEX_LIMIT).await?;
     let index: Value = serde_json::from_slice(&bytes).map_err(|_| "Magpie 社区索引无法解析")?;
     if index["version"].as_u64() != Some(1) {
         return Err("Magpie 社区分发索引版本暂不兼容".into());
@@ -45,7 +45,8 @@ pub(super) async fn download(name: &str, selector: &str) -> Result<Package, Stri
         value.starts_with("sha512-") && !value.chars().any(char::is_whitespace)
     }).ok_or("Magpie 插件缺少 SHA-512 完整性校验值")?;
     super::operations::stage("package", "正在下载 Magpie 社区脚本插件");
-    let archive = super::download::github_bytes(&format!("{BASE}{file}"), super::packages::MAX_PACKAGE_BYTES).await?;
+    let download_url = super::website::url("magpie-file", &[("file", file)])?;
+    let archive = super::download::github_bytes(&download_url, super::packages::MAX_PACKAGE_BYTES).await?;
     super::packages::verify_integrity(&archive, integrity)?;
     let source = PackageSource::Magpie { file: file.into(), integrity: integrity.into() };
     super::packages::store_archive(archive, Some((name.into(), version.into())), Some(source)).await

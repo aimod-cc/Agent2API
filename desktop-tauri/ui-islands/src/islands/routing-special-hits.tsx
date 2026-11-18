@@ -13,11 +13,12 @@
  */
 
 import * as React from 'react'
-import { Button } from '@ui'
+import { Button, Card } from '@ui'
 import { t } from '../i18n'
 import { RouteIcon } from './routing-ui'
 import { requestRewrite } from './routing-exec-rewrite'
 import { bridge, errorMessage, type ReplayRow } from './routing-types'
+import { createRefreshRequest } from '../../../ui-shared/refresh-request'
 import type { SpecialKey } from './routing-rail'
 
 /** 取一页最近请求。命中可能稀疏（一条路由的命中混在全部请求里），所以取宽一点。 */
@@ -35,31 +36,46 @@ export function RoutingSpecialHits({ kind, refreshToken, onOpenReplay }: {
   const [rows, setRows] = React.useState<ReplayRow[]>([])
   const [loading, setLoading] = React.useState(false)
   const [error, setError] = React.useState('')
-  const [tick, setTick] = React.useState(0)
-  React.useEffect(() => {
-    if (document.hidden) return
-    const timer = window.setInterval(() => setTick(value => value + 1), REFRESH_MS)
-    return () => window.clearInterval(timer)
-  }, [])
   React.useEffect(() => {
     let alive = true
-    setLoading(true)
-    const load = async () => {
+    const page = document.querySelector('.page[data-page="routing"]')
+    const visible = () => !document.hidden && page?.classList.contains('active') === true
+    const load = createRefreshRequest(async isCurrent => {
+      if (!alive || !visible()) return
+      setLoading(true)
       try {
         const result = await bridge().getRoutingReplays({ offset: 0, limit: WINDOW })
-        if (!alive) return
+        if (!alive || !isCurrent()) return
         if (result.available === false) throw new Error(t('请求记录数据库不可用'))
         setRows(result.entries.filter((entry): entry is ReplayRow => !('latest' in entry)))
         setError('')
       } catch (failure) {
-        if (alive) setError(errorMessage(failure))
+        if (alive && isCurrent()) setError(errorMessage(failure))
       } finally {
-        if (alive) setLoading(false)
+        if (alive && isCurrent()) setLoading(false)
       }
+    })
+    let timer: ReturnType<typeof setInterval> | null = null
+    const clear = () => {
+      if (timer !== null) clearInterval(timer)
+      timer = null
     }
-    void load()
-    return () => { alive = false }
-  }, [kind, refreshToken, tick])
+    const refreshVisible = () => {
+      clear()
+      if (!visible()) return
+      void load(true)
+      timer = setInterval(() => { if (visible()) void load() }, REFRESH_MS)
+    }
+    refreshVisible()
+    document.addEventListener('visibilitychange', refreshVisible)
+    window.addEventListener('wb:page', refreshVisible)
+    return () => {
+      alive = false
+      clear()
+      document.removeEventListener('visibilitychange', refreshVisible)
+      window.removeEventListener('wb:page', refreshVisible)
+    }
+  }, [kind, refreshToken])
   const hits = rows
     .map(row => ({ row, rewrite: requestRewrite(row) }))
     .filter((item): item is { row: ReplayRow; rewrite: NonNullable<ReturnType<typeof requestRewrite>> } =>
@@ -71,7 +87,7 @@ export function RoutingSpecialHits({ kind, refreshToken, onOpenReplay }: {
       <span>{t('最近 {n} 条', { n: hits.length })}</span>
       <Button variant='link' size='sm' onClick={onOpenReplay}>{t('查看全部')}</Button>
     </header>
-    <div className='routing-hits-list'>
+    <Card className='routing-hits-list'>
       {hits.map(({ row, rewrite }) => <div key={row.id} className='routing-hits-row'>
         <span className='routing-hits-flow'>
           <span className='routing-hits-from' title={rewrite.from}>{rewrite.from}</span>
@@ -89,7 +105,7 @@ export function RoutingSpecialHits({ kind, refreshToken, onOpenReplay }: {
       {!hits.length ? <p className='routing-hits-empty'>
         {loading ? t('读取中…') : t('最近没有命中记录')}
       </p> : null}
-    </div>
+    </Card>
     {error ? <p className='routing-config-error' role='alert'>{error}</p> : null}
   </section>
 }

@@ -42,8 +42,8 @@ fn lock() -> std::sync::MutexGuard<'static, State> {
 fn load(state: &mut State) {
     let root = super::super::root();
     if state.root == root { return; }
-    let mut cache = std::fs::metadata(root.join("catalog.json")).ok().filter(|meta| meta.len() <= 16 * 1024 * 1024)
-        .and_then(|_| std::fs::read(root.join("catalog.json")).ok())
+    let mut cache = std::fs::metadata(root.join("website-catalog.json")).ok().filter(|meta| meta.len() <= 16 * 1024 * 1024)
+        .and_then(|_| std::fs::read(root.join("website-catalog.json")).ok())
         .and_then(|bytes| serde_json::from_slice::<Cache>(&bytes).ok())
         .filter(|cache| cache.version == 1).unwrap_or_default();
     if cache.github.iter().any(|entry| !entry.is_provider()) {
@@ -79,7 +79,7 @@ pub(super) fn persist() {
     load(&mut state);
     let Ok(bytes) = serde_json::to_vec(&state.cache) else { return; };
     if bytes.len() > 16 * 1024 * 1024 { return; }
-    if let Err(error) = super::super::storage::atomic_write(&state.root.join("catalog.json"), &bytes) {
+    if let Err(error) = super::super::storage::atomic_write(&state.root.join("website-catalog.json"), &bytes) {
         crate::server::logging::verbose("[PluginCatalog]", &format!("插件清单缓存保存失败：{error}"));
     }
 }

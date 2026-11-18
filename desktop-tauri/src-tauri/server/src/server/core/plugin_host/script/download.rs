@@ -1,24 +1,17 @@
 use futures::StreamExt;
 use sha2::{Digest, Sha256};
 
-use crate::server::core::update::client;
-
 pub async fn bytes(
     url: &str,
     limit: usize,
     expected_sha256: Option<&str>,
 ) -> Result<Vec<u8>, String> {
-    let headers = vec![(
-        "User-Agent".to_string(),
-        "Agent2API-script-plugins".to_string(),
-    )];
-    let response = client::fetch_public(url, &headers, None).await?;
+    let response = super::website::request(url, None).await?;
     read(response, limit, expected_sha256).await
 }
 
 pub(super) async fn npm_metadata(url: &str) -> Result<Option<Vec<u8>>, String> {
-    let headers = vec![("User-Agent".to_string(), "Agent2API-script-plugins".to_string())];
-    let response = client::fetch_public(url, &headers, None).await?;
+    let response = super::website::request(url, None).await?;
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }
@@ -26,8 +19,7 @@ pub(super) async fn npm_metadata(url: &str) -> Result<Option<Vec<u8>>, String> {
 }
 
 pub(super) async fn github_bytes(url: &str, limit: usize) -> Result<Vec<u8>, String> {
-    let headers = client::github_headers();
-    let response = client::fetch_official(url, &headers, None).await.map_err(|error| error.message)?;
+    let response = super::website::request(url, None).await?;
     read(response, limit, None).await
 }
 

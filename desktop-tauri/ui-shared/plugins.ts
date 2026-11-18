@@ -1,5 +1,4 @@
 import type { UpdateSettingsMode } from './updates'
-import type { GithubFailure } from './github-access'
 import type { PluginLoadStatus, PluginStartupSnapshot } from './plugin-startup'
 
 export type PackProvider = {
@@ -15,9 +14,11 @@ export type PackSummary = {
   name: string
   description?: string | null
   version: string
+  supportState?: 'supported' | 'legacy_unsupported'
   requiredVersion?: string | null
   updateRequired?: boolean
   compatibilityError?: string | null
+  unavailableReason?: string | null
   enabled: boolean
   signed: boolean
   installedAt: number
@@ -47,7 +48,7 @@ export type ReleasePlatform = {
   current: boolean
 }
 
-export type StorePlugin = GithubFailure & {
+export type StorePlugin = {
   id: string
   name: string
   description: string
@@ -61,9 +62,11 @@ export type StorePlugin = GithubFailure & {
   platforms: ReleasePlatform[]
   homepage?: string | null
   icon?: string | null
+  providers?: Array<{ id: string; label?: string }>
+  requireSigned?: boolean
 }
 
-export type ReleaseState = GithubFailure & {
+export type ReleaseState = {
   available: boolean
   current: string
   plugins: StorePlugin[]
@@ -74,7 +77,7 @@ export type ReleaseState = GithubFailure & {
   checkedAt?: number
 }
 
-export type PluginUpdate = GithubFailure & {
+export type PluginUpdate = {
   id: string
   available: boolean
   checked: boolean
@@ -96,6 +99,7 @@ export type PluginUpdate = GithubFailure & {
 
 export type PluginOperation = {
   id: string
+  operationId?: string
   action: string
   stage: 'downloading' | 'verifying' | 'waiting' | 'installing' | 'loading' | 'restoring' | 'done' | 'failed'
   active: boolean
@@ -109,7 +113,7 @@ export type PluginOperation = {
   error?: string | null
   hostError?: string | null
   updatedAt: number
-  result?: PluginMutation | null
+  result?: Pick<PluginMutation, 'pack' | 'installNotice' | 'hostError'> | null
 }
 
 export type PluginSettings = {
@@ -163,6 +167,8 @@ export type ScriptPackage = ScriptCatalogInfo & {
 }
 
 export type ScriptOperation = {
+  operationId?: string
+  startedAt?: number
   active: boolean
   action?: string
   target?: { id?: string | null; name?: string | null; source?: string | null; version?: string | null }
@@ -228,6 +234,11 @@ export type ScriptPluginsState = {
 }
 
 export type PluginsPayload = {
+  capacity?: import('./runtime-capacity').CapacitySnapshot
+  supportsPackPreview?: boolean
+  maxPackBytes?: number
+  accountCounts?: Record<string, number>
+  hiddenAccounts?: HiddenAccountsSummary
   startup?: PluginStartupSnapshot
   scripts?: ScriptPluginsState
   packs: PackSummary[]
@@ -244,10 +255,11 @@ export type PluginsPayload = {
 
 export type PluginMutation = Pick<PluginsPayload, 'packs' | 'host' | 'adminPanels' | 'accountFeatures'> & {
   pack?: PackSummary
+  installNotice?: string | null
   hostError?: string | null
 }
 
-export type HiddenAccountReason = 'not_installed' | 'pack_disabled' | 'provider_disabled' | 'not_loaded' | 'loading' | 'load_failed' | 'load_timeout'
+export type HiddenAccountReason = 'not_installed' | 'pack_disabled' | 'provider_disabled' | 'not_loaded' | 'loading' | 'load_failed' | 'load_timeout' | 'legacy_unsupported'
 
 export type HiddenAccountProvider = {
   id: string

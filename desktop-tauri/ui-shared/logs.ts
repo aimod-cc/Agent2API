@@ -1,3 +1,5 @@
+import { usageFailureDetail, usageFailureLabel, usageRouteText, usageStopText, type UsageQueryDiagnostics } from './usage-query-state'
+
 export type LogView = 'important' | 'all' | 'debug'
 export type LogEntry = {
   id?: number
@@ -85,7 +87,7 @@ export function logCategory(category: string | undefined, t: Translate): string 
     case 'upstream': return t('上游')
     case 'config': return t('配置')
     case 'checkin': return t('自动签到')
-    case 'maintenance': return t('凭证自动维护')
+    case 'maintenance': return t('系统维护')
     case 'update': return t('软件版本检查')
     case 'desensitize': return t('脱敏')
     case 'plugin': return t('插件')
@@ -93,12 +95,48 @@ export function logCategory(category: string | undefined, t: Translate): string 
   }
 }
 
+function logComponent(component: string, t: Translate): string {
+  switch (component) {
+    case 'Server': return t('服务')
+    case 'Init': return t('初始化')
+    case 'Logs': return t('日志')
+    case 'HTTP': return t('网络请求')
+    case 'Storage': return t('存储')
+    case 'Config': return t('配置')
+    case 'Security': return t('安全')
+    case 'Login':
+    case 'Auth': return t('登录')
+    case 'Accounts': return t('账号')
+    case 'Usage': return t('用量查询')
+    case 'Models':
+    case 'Model': return t('模型')
+    case 'Upstream': return t('上游')
+    case 'Billing': return t('计费')
+    case 'Activity': return t('活动')
+    case 'Desensitize': return t('脱敏')
+    case 'Checkin': return t('自动签到')
+    case 'Maintenance': return t('系统维护')
+    case 'Update': return t('软件版本检查')
+    case 'Plugin': return t('插件')
+    default: return component
+  }
+}
+
 export function logSource(entry: LogEntry, t: Translate): string {
   return logText(entry, 'pluginName') || logText(entry, 'providerLabel') || logText(entry, 'provider')
-    || logText(entry, 'component') || logCategory(entry.category, t)
+    || logComponent(logText(entry, 'component'), t) || logCategory(entry.category, t)
 }
 
 export function logSummary(entry: LogEntry, t: Translate): string {
+  if (logText(entry, 'action') === 'usage.query') {
+    const diagnostics = entry.data?.diagnostics as UsageQueryDiagnostics | undefined
+    const reason = usageFailureLabel(diagnostics?.reason, t)
+    if (logText(entry, 'detail') && reason && logText(entry, 'code').startsWith('usage_network_')) {
+      return t('余额查询失败：{reason}', { reason })
+    }
+    if (logText(entry, 'code') === 'usage_queue_timeout') return t('余额查询排队超时')
+    if (logText(entry, 'code') === 'usage_timeout') return t('余额查询超时')
+  }
   if (logText(entry, 'action') === 'plugin.startup.summary') {
     const ready = logNumber(entry, 'readyCount') ?? 0
     const failed = logNumber(entry, 'failedCount') ?? 0
@@ -171,6 +209,9 @@ export function logContext(entry: LogEntry, t: Translate): string {
     parts.push(t('相关功能暂不可用，原因见详情'))
   } else if (action === 'plugin.failure' || action === 'plugin.exit') {
     parts.push(t('相关功能暂不可用，原因见详情'))
+  } else if (action === 'usage.query' && entry.data?.diagnostics) {
+    const attempts = (entry.data.diagnostics as UsageQueryDiagnostics).attempts
+    if (typeof attempts === 'number' && attempts > 1) parts.push(t('尝试 {n} 次', { n: attempts }))
   } else {
     const detail = logText(entry, 'detail')
     if (detail && entry.level !== 'debug' && !action.startsWith('plugin.')) parts.push(detail)
@@ -178,9 +219,32 @@ export function logContext(entry: LogEntry, t: Translate): string {
   return parts.filter(Boolean).join(' · ')
 }
 
-export function logDetailText(entry: LogEntry): string {
+export function logDetailText(entry: LogEntry, t?: Translate): string {
   const detail = logText(entry, 'detail')
   const action = logText(entry, 'action')
+  if (action === 'usage.query' && entry.data?.diagnostics && t) {
+    const diagnostics = entry.data.diagnostics as UsageQueryDiagnostics
+    const row = { error: detail, code: logText(entry, 'code'), diagnostics }
+    const requests = Array.isArray(diagnostics.requests) ? diagnostics.requests : []
+    const failures = Array.isArray(diagnostics.failures) ? diagnostics.failures : []
+    const requestLines = requests.map(request => {
+      const attempt = t('第 {n} 次尝试', { n: Number(request.attempt) || 1 })
+      const route = usageRouteText(request.route, request.proxy, t)
+      const status = [request.status ? `HTTP ${request.status}` : '',
+        request.phase === 'failed' ? usageFailureLabel(request.reason, t) || t('请求失败')
+          : request.phase === 'complete' ? request.status ? '' : t('完成') : t('未完成'),
+      ].filter(Boolean).join(' · ')
+      const elapsed = formatLogDuration(request.durationMs, t)
+      return [attempt, [request.method, request.url].filter(Boolean).join(' '), route, status, elapsed,
+        request.detail].filter(Boolean).join(' · ')
+    })
+    const failureLines = failures.map(failure => [
+      t('第 {n} 次尝试', { n: Number(failure.attempt) || 1 }), failure.error,
+      failure.code, formatLogDuration(failure.durationMs, t),
+    ].filter(Boolean).join(' · '))
+    return [detail ? usageFailureDetail(row, t) : usageStopText(diagnostics, t),
+      ...requestLines, ...failureLines].filter(Boolean).join('\n')
+  }
   if (!['plugin.failure', 'plugin.exit', 'plugin.shutdown', 'plugin.recovered'].includes(action)) return detail
   const message = (entry.message || '').replace(/^(?:(?:\[[^\]]+\]|Plugin)\s*)+/, '')
   return [...new Set([message, detail].filter(Boolean))].join('\n\n')
@@ -212,6 +276,7 @@ export function logPhase(phase: string, t: Translate): string {
     case 'runtime': return t('准备运行环境')
     case 'starting': return t('启动进程')
     case 'loading': return t('加载插件')
+    case 'waiting': return t('等待其他插件')
     case 'registering': return t('登记提供商')
     case 'ready': return t('已就绪')
     case 'failed': return t('启动失败')
@@ -227,7 +292,8 @@ export function logSteps(entry: LogEntry, t: Translate): { label: string; durati
   return steps.flatMap(step => {
     if (!step || typeof step !== 'object' || typeof step.phase !== 'string'
       || typeof step.durationMs !== 'number' || !Number.isFinite(step.durationMs) || step.durationMs < 0) return []
-    return [{ label: logPhase(step.phase, t), duration: formatLogDuration(step.durationMs, t) }]
+    return [{ label: step.phase === 'loading' && steps.some(item => item?.phase === 'waiting')
+      ? t('自身初始化') : logPhase(step.phase, t), duration: formatLogDuration(step.durationMs, t) }]
   })
 }
 
@@ -239,14 +305,6 @@ export function logPlugins(entry: LogEntry, t: Translate): { id: string; name: s
     return [{ id: plugin.pluginId, name: typeof plugin.pluginName === 'string' && plugin.pluginName ? plugin.pluginName : t('未记录插件名称'),
       status: logPhase(plugin.phase, t), phase: plugin.phase }]
   }).sort((left, right) => Number(left.phase === 'ready') - Number(right.phase === 'ready'))
-}
-
-export function logViewNote(view: LogView, t: Translate): string {
-  switch (view) {
-    case 'important': return t('显示启动汇总和需要关注的事件；单个插件的正常启动记录在“全部事件”中。')
-    case 'all': return t('显示所有已保留的事件；技术信息可在详情中查看。')
-    default: return t('仅显示调试记录，供排查问题使用。')
-  }
 }
 
 export function formatLogTime(ts: number | undefined, clockOnly = false): string {

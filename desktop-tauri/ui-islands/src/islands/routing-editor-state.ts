@@ -79,6 +79,7 @@ export function useRoutingEditor(onSaved: () => void) {
         workspace: { ...synced.workspace, accounts: workspace.accounts,
           ...(refreshOrder ? { profile: workspace.profile, inheritedProfile: workspace.inheritedProfile, revision: workspace.revision } : {}),
           accountStates: workspace.accountStates, metrics: workspace.metrics, queue: workspace.queue, updatedAt: workspace.updatedAt,
+          settings: workspace.settings, globalSettings: workspace.globalSettings,
           modelLastUsed: workspace.modelLastUsed,
           globalAccountControl: workspace.globalAccountControl, legacyGlobalParticipation: workspace.legacyGlobalParticipation } } }
     })

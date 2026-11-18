@@ -8,8 +8,7 @@ import { RoutingCanvasEdges } from './routing-canvas-edges'
  * 配置画布的外壳。
  *
  * `plain` = 特殊请求路由那一版：去掉点阵底、把画布压到 --rail-bg。
- * 理由：点阵是账号路由画布的语言（连线、流转），特殊路由那边只有一份规则列表；
- * 而规则卡片是纯白无描边的，画布必须比它暗一档才看得出卡片边界。
+ * 点阵只用于账号路由的连线与流转，特殊路由只有规则列表。
  */
 export function RoutingConfigShell({ plain = false, children }: { plain?: boolean; children: React.ReactNode }) {
   const root = React.useRef<HTMLDivElement>(null)

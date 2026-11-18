@@ -296,6 +296,7 @@ fn item_of(object: &Map<String, Value>) -> Value {
         "balanceScheme": balance_scheme_of_record(object),
     });
     presets::write_key(&mut item, presets::key_of_record(object));
+    item["userAgentOverridable"] = Value::Bool(crate::server::core::user_agent::custom_overridable(&item));
     item
 }
 
@@ -1007,7 +1008,7 @@ pub async fn fetch_upstream_models(
         };
     }
     let response = crate::server::core::user_agent::AccountRequest::with_user_agent(
-        builder, &credential.user_agent,
+        builder, crate::server::core::user_agent::override_value(provider_id, &credential.user_agent),
     ).send().await.map_err(|error| {
         format!("上游请求失败: {}", egress::describe_error_detail(&error))
     })?;

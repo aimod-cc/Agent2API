@@ -92,6 +92,9 @@ pub fn list_item(model: &Value, provider_id: &str) -> Value {
         "supports_tool_call".to_string(),
         Value::Bool(model.get("supportsToolCall").map(js_truthy).unwrap_or(false)),
     );
+    if let Some(mode) = model.get("toolCallingMode").filter(|mode| mode.is_string()) {
+        item.insert("tool_calling_mode".to_string(), mode.clone());
+    }
     item.insert("supports_images".to_string(), Value::Bool(images));
     item.insert("supports_video".to_string(), Value::Bool(video));
     item.insert(

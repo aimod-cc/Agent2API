@@ -4,6 +4,79 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, WebviewWindow};
 
 const DOMAINS: &[&str] = &["doubao.com", "feishu.cn", "larksuite.com"];
+const CONTEXT_SCRIPT: &str = r#"(() => {
+  if (location.origin !== 'https://www.doubao.com') return null;
+  const script = document.getElementById('agent2api-doubao-login-context');
+  const value = script && script.textContent;
+  if (value && value.length > 8192) return null;
+  try {
+    const context = value ? JSON.parse(value) : {};
+    if (!context.webId) {
+      try {
+        const saved = JSON.parse(localStorage.getItem('samantha_web_web_id') || '{}');
+        if (typeof saved.web_id === 'string' && saved.web_id.length <= 1024) context.webId = saved.web_id;
+      } catch (_) {}
+    }
+    return { ...context, userAgent: navigator.userAgent };
+  } catch (_) { return null; }
+})()"#;
+
+pub(crate) fn capture_script() -> &'static str {
+    r#"(() => {
+      if (location.origin !== 'https://www.doubao.com') return;
+      const save = raw => {
+        try {
+          const url = new URL(raw, location.href);
+          if (url.origin !== location.origin || !/^\/(?:chat|alice|account|im)(?:\/|$)/.test(url.pathname)) return;
+          const fields = { device_id: 'deviceId', web_id: 'webId', fp: 'fingerprint', tea_uuid: 'teaUuid', web_tab_id: 'webTabId',
+            pc_version: 'clientVersion', doubao_pc_version: 'clientVersion', channel: 'channel', chromium_version: 'chromiumVersion' };
+          const id = 'agent2api-doubao-login-context';
+          let node = document.getElementById(id);
+          let stored = {};
+          if (node) { try { stored = JSON.parse(node.textContent || '{}'); } catch (_) {} }
+          for (const [key, name] of Object.entries(fields)) {
+            const value = url.searchParams.get(key);
+            if (value && value.length <= 1024 && !/[\r\n;]/.test(value)) stored[name] = value;
+          }
+          // 初始化脚本可能早于documentElement；内存保留当前官方请求，DOM就绪后再投影。
+          if (!Object.keys(stored).length) return;
+          const persist = () => {
+            if (!document.documentElement) return;
+            let target = document.getElementById(id);
+            if (!target) { target = document.createElement('script'); target.id = id; target.type = 'application/json'; document.documentElement.appendChild(target); }
+            let latest = {};
+            try { latest = JSON.parse(target.textContent || '{}'); } catch (_) {}
+            target.textContent = JSON.stringify({ ...latest, ...stored });
+          };
+          if (document.documentElement) {
+            if (!node) { node = document.createElement('script'); node.id = id; node.type = 'application/json'; document.documentElement.appendChild(node); }
+            node.textContent = JSON.stringify(stored);
+          } else document.addEventListener('DOMContentLoaded', persist, { once: true });
+        } catch (_) {}
+      };
+      const originalFetch = window.fetch;
+      window.fetch = function(input, ...args) {
+        save(typeof input === 'string' ? input : input && input.url);
+        return Reflect.apply(originalFetch, this, [input, ...args]);
+      };
+      const originalOpen = XMLHttpRequest.prototype.open;
+      XMLHttpRequest.prototype.open = function(method, url, ...args) {
+        save(url);
+        return Reflect.apply(originalOpen, this, [method, url, ...args]);
+      };
+    })()"#
+}
+
+async fn page_context(window: &WebviewWindow) -> Result<Value, String> {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    window.eval_with_callback(CONTEXT_SCRIPT, move |result| {
+        let _ = sender.try_send(result);
+    }).map_err(|_| "读取豆包工作登录窗口设备信息失败")?;
+    let result = tokio::time::timeout(Duration::from_secs(5), receiver.recv()).await
+        .map_err(|_| "读取豆包工作登录窗口设备信息超时")?
+        .ok_or("豆包工作登录窗口已关闭")?;
+    serde_json::from_str(&result).map_err(|_| "豆包工作登录窗口设备信息无效".into())
+}
 
 pub fn allowed(url: &url::Url) -> bool {
     url.scheme() == "https"
@@ -48,6 +121,9 @@ pub async fn start(app: &AppHandle, mode: &str, proxy: Option<Value>) -> Result<
 }
 
 pub async fn cookie(window: &WebviewWindow) -> Result<Option<String>, String> {
+    if !window.url().ok().is_some_and(|url| allowed(&url) && url.host_str() == Some("www.doubao.com")) {
+        return Ok(None);
+    }
     let owned = window.clone();
     let cookies = tokio::time::timeout(
         Duration::from_secs(10),
@@ -65,6 +141,7 @@ pub async fn cookie(window: &WebviewWindow) -> Result<Option<String>, String> {
         if expires.is_some_and(|expires| expires <= now) { return None; }
         Some(json!({"name":cookie.name(),"value":cookie.value(),"domain":format!(".{domain}"),"path":"/","expires":expires}))
     }).collect();
+    if rows.len() > 512 { return Err("豆包工作登录窗口 Cookie 数量异常".into()); }
     if !rows.iter().any(|cookie| {
         matches!(cookie["name"].as_str(), Some("sessionid" | "sessionid_ss"))
             && cookie["value"]
@@ -73,5 +150,22 @@ pub async fn cookie(window: &WebviewWindow) -> Result<Option<String>, String> {
     }) {
         return Ok(None);
     }
-    Ok(Some(json!({"cookies":rows}).to_string()))
+    let mut value = json!({"cookies":rows});
+    let captured = page_context(window).await?;
+    for key in ["deviceId", "webId", "fingerprint", "teaUuid", "webTabId", "userAgent", "clientVersion", "channel", "chromiumVersion"] {
+        if let Some(text) = captured[key].as_str().filter(|text| !text.is_empty() && text.len() <= 1024
+            && text.bytes().all(|byte| (32..=126).contains(&byte)) && !text.contains(';')) {
+            value[key] = json!(text);
+        }
+    }
+    if value["deviceId"].is_null() {
+        if let Some(device) = value["cookies"].as_array().into_iter().flatten()
+            .find(|cookie| cookie["name"] == "device_id").and_then(|cookie| cookie["value"].as_str()).map(str::to_string) {
+            value["deviceId"] = json!(device);
+        }
+    }
+    if value["deviceId"].as_str().is_none_or(|device| device.is_empty()) {
+        return Ok(None);
+    }
+    Ok(Some(value.to_string()))
 }

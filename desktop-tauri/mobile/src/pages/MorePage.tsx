@@ -20,7 +20,7 @@ type Entry = { id: string; label: string; icon: IconName; badge?: string }
 export function MorePage() {
   const { session } = useStore()
   const accounts = session?.accounts?.accounts || []
-  const limited = accounts.filter(item => item.enabled && isRateLimited(item)).length
+  const limited = session?.accounts?.summary?.limited ?? accounts.filter(item => item.enabled && isRateLimited(item)).length
 
   // 本页没有自己的列表请求：下拉只需重拉会话（角标与网关状态都来自它）
   const pull = usePullToRefresh({ onRefresh: () => store.refresh(true) })
@@ -30,6 +30,7 @@ export function MorePage() {
       title: t('转发链路'),
       entries: [
         { id: 'checkin', label: t('签到中心'), icon: 'checkin' },
+        { id: 'routing', label: t('路由'), icon: 'route' },
         { id: 'models', label: t('模型管理'), icon: 'model' },
         { id: 'agent', label: t('Agent 配置'), icon: 'agent' },
         { id: 'tools', label: t('MCP & Skills'), icon: 'tools' },

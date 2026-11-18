@@ -56,16 +56,16 @@ import { creditExpirySummaryOf, creditExpiryText, creditExpiryUnitOf } from '../
 import { useDisplayClock } from '../../../ui-shared/use-display-clock'
 import { UsageWindowsCell, usageWindows } from './accounts-usage-windows'
 import { GroupBalanceBadge, groupBalanceOf } from './accounts-usage-group'
-import { accountReloginText, supportsTokenRefresh } from './accounts-authorization'
+import { accountReloginText } from './accounts-authorization'
 import { credentialExpiryRowsOf, credentialExpiryText, type CredentialExpiryRow } from '../../../ui-shared/credential-expiry'
-import { creditStatisticsWalletsOf, isSnapshotWallet, snapshotReadingsOf, usageAggregateOf, usageEmptyStateOf, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
+import { creditStatisticsWalletsOf, isSnapshotWallet, snapshotReadingsOf, usageAggregateOf, usageAvailableViewOf, usageEmptyStateOf, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
 import { LimitDetailButton, limitRowsOf } from './accounts-limit-detail'
 import { upstreamCooldownOf, upstreamSuspendedReasonOf } from '../../../ui-shared/account-upstream-state'
 import { LimiterStatus } from './accounts-limiter-status'
 import { limiterHit } from './accounts-limiter-model'
 import {
   PROXY_CUSTOM_CURRENT, PROXY_CUSTOM_EDIT, applyProxyPick,
-  connectionsOf, getStore, groupSortRules, maskName, openBatchDialog, openGroupDialog, openSettingsDialog,
+  connectionsOf, getStore, subscribe, subscribeProxyPool, groupSortRules, maskName, openBatchDialog, openGroupDialog, openSettingsDialog,
   poolError, proxyPoolSnapshot, queryUsageOnce, setAccountEnabled, setGroupEnabled,
   tokenUsageOf, toggleGroupCollapsed, toggleNamesHidden, usageEntryOf, usageFailureOf, usageFailureStatusOf, usageUpdatedAtOf,
 } from './accounts-data'
@@ -73,9 +73,11 @@ import type { AccountGroup } from './accounts-domain'
 import { activeGroupSortRules, groupSortSummary, manualOrderBlockedMessage } from './accounts-group-settings'
 import { exportAccountFiles } from './accounts-export'
 import { useProviderIcon } from './provider-icon'
-import { usageTaskText } from '../../../ui-shared/usage-query-task'
+import { usageTaskPending, usageTaskText } from '../../../ui-shared/usage-query-task'
 import { usageRowOf } from './accounts-usage-cache'
+import { usageRecoveryPane } from '../../../ui-shared/usage-query-state'
 import { cancelUsageQuery } from './accounts-usage-tasks'
+import { DesktopLaunchButton } from './accounts-desktop-launch'
 import { t } from '../i18n'
 import { Empty } from '@ui'
 
@@ -189,10 +191,14 @@ function GroupMenu({ group, ids, collapsed }: { group: AccountGroup; ids: string
  * 样式刻意保持中性（surface 底 + 一条 hairline）：一家一色会让整页像调色板，
  * 而「哪一段是哪一家」由家名与图标已经说清楚了。
  */
-export function GroupBandRow({ group, collapsed, colSpan }: {
+export function GroupBandRow({ group, collapsed, colSpan, pageCount, virtualIndex, measure, stickyTop }: {
   group: AccountGroup
   collapsed: boolean
   colSpan: number
+  pageCount?: number
+  virtualIndex?: number
+  measure?: (element: HTMLTableRowElement | null) => void
+  stickyTop?: number
 }) {
   const now = useDisplayClock()
   const { src: icon, onError: onIconError } = useProviderIcon(group.provider)
@@ -204,7 +210,11 @@ export function GroupBandRow({ group, collapsed, colSpan }: {
   // 逐字重复）；而**加哪些账号**看的是当前口径。两者不能合成一个判据：按筛选口径下
   // 筛出唯一一行时，合计正是用户要的那个数（100），不能因为「可见只剩一行」就藏掉。
   const worthSumming = group.members.length > 1 && members.length > 0
-  const balance = worthSumming && members.some(supportsUsage)
+  const balance = group.summary?.balance ? { ...group.summary.balance, ratio: group.summary.balance.ratio ? {
+    ...group.summary.balance.ratio,
+    windows: group.summary.balance.ratio.windows.map(row => ({ ...row, label: row.label.split(' · ').map(part =>
+      part === 'daily' ? t('每日') : part === 'weekly' ? t('每周') : part === 'monthly' ? t('每月') : part === '5h' ? t('{n} 小时', { n: 5 }) : part).join(' · ') })),
+  } : null } : worthSumming && members.some(supportsUsage)
     ? groupBalanceOf(members, filtered ? 'filtered' : 'group', now)
     : null
   /**
@@ -222,8 +232,9 @@ export function GroupBandRow({ group, collapsed, colSpan }: {
   }
   const sortSummary = groupSortSummary(groupSortRules(group.provider))
   return (
-    <TableRow className='grp-band' data-provider={group.provider}>
-      <TableCell colSpan={colSpan} onClick={onBandClick}>
+    <TableRow className='grp-band' data-provider={group.provider} data-index={virtualIndex} ref={measure}>
+      <TableCell colSpan={colSpan} onClick={onBandClick}
+        style={stickyTop === undefined ? undefined : { position: 'sticky', top: stickyTop, zIndex: 1, background: 'var(--surface)' }}>
         <div className='grp-band-inner'>
           <span className='queue-grip' role='button' tabIndex={-1} aria-label={t('拖动调整整组顺序')}
             title={t('按住拖动，调整这一家的组顺位（整组一起动）')}
@@ -238,12 +249,13 @@ export function GroupBandRow({ group, collapsed, colSpan }: {
           </span>
           <span className='grp-name'>{t(group.label)}</span>
           <span className='grp-stat'>{t('{total} 个账号 · 启用 {enabled} · 禁用 {disabled}{limited}', {
-            total: group.members.length,
-            enabled: group.enabled,
-            disabled: group.disabled,
-            limited: group.limited > 0 ? t(' · 限流 {n}', { n: group.limited }) : '',
+            total: group.summary?.total ?? group.members.length,
+            enabled: group.summary?.enabled ?? group.enabled,
+            disabled: group.summary?.disabled ?? group.disabled,
+            limited: (group.summary?.limited ?? group.limited) > 0 ? t(' · 限流 {n}', { n: group.summary?.limited ?? group.limited }) : '',
           })}</span>
-          {balance ? <GroupBalanceBadge balance={balance} /> : null}
+          {pageCount !== undefined ? <span className='grp-stat'>{t('本页 {n} 个', { n: pageCount })}</span> : null}
+          {balance && (group.summary?.total ?? group.members.length) > 1 ? <GroupBalanceBadge balance={balance} /> : null}
           {sortSummary ? (
             <Button size='default' variant='ghost' type='button' className='grp-sort-mark'
               title={t('当前排序规则：{rules}。点击调整', { rules: sortSummary })}
@@ -440,14 +452,14 @@ function CredentialExpiryLine({ row }: { row: CredentialExpiryRow }) {
 }
 
 /**
- * 连接数：此刻正在使用这个账号的请求数（2 秒一轮的实时计数）。
+ * 连接数：此刻正在使用这个账号的请求数。
  * 口径与 OmniProxy 上游管理页的「连接」列一致 —— 有连接时显示数字、为 0 时**什么都不
  * 显示**（留空）。满屏的 0 会把少数几个真正在跑的账号淹没；要看「谁是 0」时空白本身
  * 就是答案。计数缺失（还没拉到、后端不可达）与 0 同样处理：把一个尚未知的值渲染成 0
  * 会读成「这个账号没在用」，而事实可能是「数据还没到」。
  */
 export function ConnectionsCell({ account }: { account: AccountRecord }) {
-  const value = connectionsOf(account.id)
+  const value = React.useSyncExternalStore(subscribe, () => connectionsOf(account.id))
   if (value <= 0) return null
   return (
     <span className='conn-count' title={t('{n} 个请求正在使用该账号（含还在下发内容的流式请求）', { n: value })}>
@@ -540,11 +552,11 @@ export function pendingPlansTitle(plans: Array<Record<string, unknown>>): string
  */
 export function usageSummary(entry: UsageEntry): { text: string; kind: string; title: string } {
   if (entry === undefined) return { text: t('未查询'), kind: 'muted', title: t('尚未查询该账号的余额') }
-  if (entry === null) return { text: t('查询中…'), kind: 'muted', title: t('正在查询') }
+  if (entry === null) return { text: '—', kind: 'muted', title: '' }
   const failure = usageFailureOf(entry)
   if (failure) {
-    return failure.notConfigured
-      ? { text: t('未配置'), kind: 'muted', title: t('{message}（去该账号的「设置」里填上查询凭证即可）', { message: failure.message }) }
+    return failure.notice
+      ? { text: failure.notice, kind: 'muted', title: failure.message }
       : { text: t('查询失败'), kind: 'bad', title: failure.message }
   }
   if (typeof entry !== 'object' || entry === null) return { text: t('无数据'), kind: 'muted', title: String(entry) }
@@ -563,11 +575,18 @@ export function usageSummary(entry: UsageEntry): { text: string; kind: string; t
   }
   if (Array.isArray(data.windows) && data.windows.length) {
     const windows = data.windows as Array<Record<string, unknown>>
+    const modelRows = Array.isArray(data.modelQuotas) ? data.modelQuotas as Array<Record<string, unknown>> : []
     const missing = usageWarningsOf(data)
     return {
       text: t('分窗口额度'),
       kind: missing.length ? 'warn' : 'ok',
-      title: [...new Set([...usageSupplementReadingsOf(data, t, numberText), subscriptionText(data.subscription), ...windows.filter(row => row && typeof row === 'object').map(row => [usageWindowLabel(row.label, t), usageWindowView(row, t, numberText)].filter(Boolean).join(' ')), ...missing.map(line => t(line))].filter(Boolean))].join(' · '),
+      title: [...new Set([
+        ...usageSupplementReadingsOf(data, t, numberText),
+        subscriptionText(data.subscription),
+        ...windows.filter(row => row && typeof row === 'object').map(row => [usageWindowLabel(row.label, t), usageWindowView(row, t, numberText)].filter(Boolean).join(' ')),
+        ...modelRows.filter(row => row && typeof row === 'object').map(row => [typeof row.name === 'string' ? row.name : String(row.id || ''), usageWindowView(row, t, numberText)].filter(Boolean).join(' ')),
+        ...missing.map(line => t(line)),
+      ].filter(Boolean))].join(' · '),
     }
   }
   if (Object.prototype.hasOwnProperty.call(data, 'available') || Array.isArray(data.wallets)) {
@@ -609,8 +628,9 @@ export function usageSummary(entry: UsageEntry): { text: string; kind: string; t
     const fallbackWallet = data.available == null
       ? wallets.find(wallet => numberOrNull(wallet?.balance) !== null)
       : undefined
-    const available = data.availableView
-      ? String(data.availableView)
+    const availableView = usageAvailableViewOf(data, t)
+    const available = availableView
+      ? availableView
       : fallbackWallet
         ? t('可用 {value} {unit}', {
             value: numberText(fallbackWallet.balance),
@@ -628,7 +648,7 @@ export function usageSummary(entry: UsageEntry): { text: string; kind: string; t
     return {
       text: knownView + (missing.length ? ' ⚠' : ''),
       kind: missing.length ? 'warn' : missingNumber ? 'muted' : 'ok',
-      title: [...new Set([knownView, detail, readings, subscription, ...supplement, ...notes, ...missing].filter(Boolean))].join(' · '),
+      title: [...new Set([knownView, data.availableView ? String(data.availableView) : '', detail, readings, subscription, ...supplement, ...notes, ...missing].filter(Boolean))].join(' · '),
     }
   }
   return { text: t('无数据'), kind: 'muted', title: t('未返回可识别的余额数据') }
@@ -1030,17 +1050,25 @@ export function UsageCell({ account }: { account: AccountRecord }) {
   const failureStatus = supportsUsage(account) ? usageFailureStatusOf(account) : null
   const lastUsage = failureStatus && entry && typeof entry === 'object' ? entry.lastUsage : null
   const task = getStore().usageTasks.get(account.id)
-  const stateText = task?.status === 'failed' && failureStatus ? '' : usageTaskText(task, t)
+  const querying = usageTaskPending(task)
   const stale = usageRowOf(account.id)?.stale
-  const reading = lastUsage && typeof lastUsage === 'object' && !Array.isArray(lastUsage) ? lastUsage as Record<string, unknown> : entry
+  const recoveryPane = usageRecoveryPane(usageRowOf(account.id)?.code)
+  const configChanged = task?.status === 'config_changed' || stale && !task
+  const stateText = configChanged ? t('配置已变更，请重新查询')
+    : task?.status === 'queued' ? usageTaskText(task, t)
+      : querying || task?.status === 'failed' && (failureStatus || usageFailureOf(entry)?.notice) ? '' : usageTaskText(task, t)
+  const reading = lastUsage && typeof lastUsage === 'object' && !Array.isArray(lastUsage) ? lastUsage as Record<string, unknown>
+    : querying && (entry === undefined || usageFailureOf(entry)) ? null : entry
   return (
     <span className='usage-sum-wrap flex flex-col gap-1'>
       <UsageReadingCell account={account} entry={reading} />
-      {failureStatus && lastUsage ? <span className='text-[11px] text-destructive whitespace-normal leading-snug' title={failureStatus.detail}>
+      {!configChanged && failureStatus && lastUsage ? <span className='text-[11px] text-destructive whitespace-normal leading-snug'
+        title={failureStatus.detail}>
         {failureStatus.text}
       </span> : null}
+      {recoveryPane ? <Button type='button' variant='link' size='xs' className='self-start h-auto px-0 text-[11px]'
+        onClick={() => openSettingsDialog(account.id, recoveryPane)}>{t('处理查询问题')}</Button> : null}
       {stateText ? <span className='text-[11px] text-subtle' role='status'>{stateText}</span> : null}
-      {stale ? <span className='text-[11px] text-subtle'>{t('历史余额，尚未按新配置验证')}</span> : null}
     </span>
   )
 }
@@ -1343,6 +1371,7 @@ export function AccountCell({ account, namesHidden }: { account: AccountRecord; 
 
 
 export function ProxyCell({ account }: { account: AccountRecord }) {
+  React.useSyncExternalStore(subscribeProxyPool, () => JSON.stringify([proxyPoolSnapshot(), poolError()]))
   const proxy = account.proxy
   const source = proxy?.config?.source || proxy?.source
   const label = proxy?.label || (source === 'custom' ? t('自定义代理') : t('已设置'))
@@ -1450,6 +1479,7 @@ export function ActionsCell({ account, atFront }: { account: AccountRecord; atFr
 
   return (
     <div className='acct-actions'>
+      <DesktopLaunchButton account={account} />
       {canUsage ? (
         <Button variant='outline' size='xs' disabled={usageStarting}
           title={usageBusy ? t('停止旧查询，按当前配置重新查询余额') : t('查询该账号剩余余额（读数显示在余额列）')}
@@ -1473,8 +1503,6 @@ export function ActionsCell({ account, atFront }: { account: AccountRecord; atFr
  * 顺序（不改启用状态），排在它之后；「并发上限」是账号属性（标签里带当前值）；
  * 「删除账号」同样最重，排在最后并加一条分隔线。首尾两项都标 danger：它们会立刻改变
  * 转发可用性。
- * 「刷新 Token」按 `hasRefreshToken` 决定（桌面端账号的记录里不落 refreshToken，
- * 所以这一项对它不出现 —— 手动刷新走的是「不过期就原样返回」的路径）。
  */
 export function MoreMenu({ account, atFront }: { account: AccountRecord; atFront: boolean }) {
   const [open, setOpen] = React.useState(false)
@@ -1505,13 +1533,10 @@ export function MoreMenu({ account, atFront }: { account: AccountRecord; atFront
             onClick={() => { setOpen(false); openSettingsDialog(account.id) }}>
             {t('并发上限：{value}', { value: maxConcurrent > 0 ? maxConcurrent : t('不限') })}
           </Button>
-          {supportsTokenRefresh(account) ? (
-            <Button variant='ghost' size='sm' className={itemClass} disabled={account.needsRelogin === true}
-              title={account.needsRelogin ? accountReloginText(account) : undefined}
-              onClick={() => { setOpen(false); shared().wbApp?.runAccountAction?.('refresh', account.id) }}>
-              {t('刷新 Token')}
-            </Button>
-          ) : null}
+          <Button variant='ghost' size='sm' className={itemClass}
+            onClick={() => { setOpen(false); shared().wbApp?.runAccountAction?.('refresh', account.id) }}>
+            {t('刷新 Token')}
+          </Button>
           <Button variant='ghost' size='sm' className={itemClass}
             title={t('将这个账号及其登录凭证保存为单独的 JSON 文件')}
             onClick={() => { setOpen(false); void exportAccountFiles({ id: account.id }) }}>
@@ -1543,12 +1568,13 @@ export function MoreMenu({ account, atFront }: { account: AccountRecord; atFront
  * 各列的对齐类（ta-*）由 syncStaticHead 统一贴（它按用户配置给），所以这里不写 ——
  * 写了反而会与它的结果打架。数据行相反：完全按 visibleColumns() 逐列渲染。
  */
-export function TableHead({ namesHidden, allPicked, somePicked, disabled, onToggleAll }: {
+export function TableHead({ namesHidden, allPicked, somePicked, disabled, onToggleAll, selectionLabel }: {
   namesHidden: boolean
   allPicked: boolean
   somePicked: boolean
   disabled: boolean
   onToggleAll: (picked: boolean) => void
+  selectionLabel?: string
 }) {
   const grip = <span className='col-grip' title={t('拖动调整列宽（双击还原）')} />
   return (
@@ -1557,8 +1583,8 @@ export function TableHead({ namesHidden, allPicked, somePicked, disabled, onTogg
         <UiTableHead className='cell-pick' data-col='pick'>
           {/* 表头这颗「全选」与批量栏那颗是**同一个选择**（表头入口是表格化之后补的） */}
           <Checkbox id='acct-select-all' checked={allPicked} indeterminate={!allPicked && somePicked}
-            disabled={disabled} aria-label={t('全选当前筛选结果')}
-            title={t('全选 / 取消全选当前筛选结果（与批量栏同一个选择）')}
+            disabled={disabled} aria-label={selectionLabel || t('选择本页账号')}
+            title={selectionLabel || t('选择本页账号')}
             onCheckedChange={next => onToggleAll(next)} />
         </UiTableHead>
         <UiTableHead className='cell-order' data-col='order'>

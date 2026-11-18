@@ -1,34 +1,15 @@
 import type * as React from 'react'
-import { Avatar, AvatarFallback, AvatarImage, Badge, Button, Card, StatusDot, Spinner, cn } from '@ui'
+import { Badge, Button, Card, Checkbox, StatusDot, Spinner, cn } from '@ui'
 import { pluginFailed, pluginPending, pluginPhaseLabel, type PluginLoadStatus } from './plugin-startup'
+import { PluginArtwork, type PluginArtworkKind } from './plugin-artwork'
 
+export { PluginArtwork, type PluginArtworkKind } from './plugin-artwork'
 export type PluginTranslate = (key: string, params?: Record<string, string | number>) => string
-export type PluginArtworkKind = 'web' | 'providers' | 'script'
 export type PluginDisplayStatus = 'running' | 'disabled' | 'unavailable' | 'missing'
+export type PluginCardSelection = { checked: boolean; disabled?: boolean; onChange: (checked: boolean) => void }
 
-export function PluginArtwork({ src, kind = 'script', fallback }: {
-  src?: string | null
-  kind?: PluginArtworkKind
-  fallback?: React.ReactNode
-}) {
-  // 固定底色不随主题变化，插件原图不做反色或亮度处理。
-  return <Avatar className='size-12 rounded-lg border border-black/10 bg-[#808080]' aria-hidden='true'>
-    {src ? <AvatarImage src={src} alt='' referrerPolicy='no-referrer' className='m-auto size-9 object-contain' /> : null}
-    <AvatarFallback className='bg-transparent text-white'>
-      {fallback ?? <svg viewBox='0 0 24 24' className='size-6' fill='none' stroke='currentColor' strokeWidth='1.8'
-        strokeLinecap='round' strokeLinejoin='round'>
-        {kind === 'web' ? <>
-          <circle cx='12' cy='12' r='8.4' />
-          <path d='M3.6 12h16.8M12 3.6c2.2 2.4 3.3 5.2 3.3 8.4S14.2 18 12 20.4C9.8 18 8.7 15.2 8.7 12S9.8 6 12 3.6Z' />
-        </> : kind === 'providers' ? <path d='m12 3.4 2.4 5.4 5.4 2.4-5.4 2.4L12 19l-2.4-5.4L4.2 11.2l5.4-2.4Z' />
-          : <>
-            <rect x='4.5' y='4.5' width='15' height='15' rx='4' />
-            <path d='m10 8-4 4 4 4m4-8 4 4-4 4' />
-          </>}
-      </svg>}
-    </AvatarFallback>
-  </Avatar>
-}
+// 断点包含 16px 卡片间距，保证多列时每张卡片至少 320px。
+export const PLUGIN_GRID_CLASS = 'grid grid-cols-1 gap-4 @min-[656px]/plugin-gallery:grid-cols-2 @min-[992px]/plugin-gallery:grid-cols-3 @min-[1328px]/plugin-gallery:grid-cols-4'
 
 export function PluginSettingsButton({ name, onClick, t }: { name: string; onClick: () => void; t: PluginTranslate }) {
   const label = `${name} · ${t('设置')}`
@@ -43,7 +24,7 @@ export function PluginSettingsButton({ name, onClick, t }: { name: string; onCli
 
 export function PluginGetButton({ disabled, onClick, t }: { disabled: boolean; onClick: () => void; t: PluginTranslate }) {
   return <Button variant='secondary' size='sm' disabled={disabled} onClick={onClick}
-    className='rounded-pill border-primary-bd bg-primary-soft px-4 font-semibold text-primary-fg hover:bg-primary-tint'>
+    className='rounded-sm border-primary-bd bg-primary-soft px-3 font-medium text-primary-fg hover:bg-primary-tint'>
     {t('获取')}
   </Button>
 }
@@ -56,7 +37,7 @@ export function PluginSectionHeading({ title, count, hint, filters, actions, t }
   actions?: React.ReactNode
   t: PluginTranslate
 }) {
-  return <div className='mb-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-2'>
+  return <div className='mb-4 flex flex-wrap items-center justify-between gap-x-3 gap-y-2'>
     <div className='flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2'>
       <h2 className='m-0 flex items-baseline gap-2 text-[15px] font-semibold leading-5'>
         {title}<span className='text-[12px] font-normal text-muted-foreground'>{t('{count} 个插件', { count })}</span>
@@ -71,7 +52,7 @@ export function PluginSectionHeading({ title, count, hint, filters, actions, t }
 }
 
 export function PluginStoreCard({ name, description, version, icon, artwork, highlightedSource = false, sourceLabel, badges, status,
-  providerCount, enabledCount, actions, feedback, footerAction, metadata, startup, t }: {
+  providerCount, enabledCount, actions, feedback, footerAction, metadata, startup, selection, onDetails, t }: {
   name: string
   description: string
   version?: string | null
@@ -88,28 +69,46 @@ export function PluginStoreCard({ name, description, version, icon, artwork, hig
   feedback?: React.ReactNode
   footerAction?: React.ReactNode
   metadata?: React.ReactNode
+  selection?: PluginCardSelection
+  onDetails: () => void
   t: PluginTranslate
 }) {
   const pending = status !== 'disabled' && pluginPending(startup)
-  const failed = status !== 'disabled' && pluginFailed(startup)
+  const failed = status !== 'disabled' && (pluginFailed(startup) || startup?.phase === 'blocked')
   const running = status !== 'disabled' && (startup ? startup.phase === 'ready' : status === 'running')
   const statusText = status === 'disabled' ? t('已停用') : status === 'missing' ? t('未安装')
-    : startup ? pluginPhaseLabel(startup, t) : running ? t('运行中') : t('状态待确认')
-  return <Card render={<article />} data-plugin-card='' aria-label={name} className='flex h-full flex-col gap-3 p-4'>
-    <div className='flex items-start gap-3.5'>
+    : running ? t('运行中') : pluginPhaseLabel(startup, t)
+  return <Card render={<article />} data-plugin-card='' aria-label={name}
+    onClick={selection ? event => {
+      if (selection.disabled || (event.target as Element).closest('button, input, a, [role="checkbox"], [role="switch"]')) return
+      selection.onChange(!selection.checked)
+    } : undefined}
+    className={cn('flex h-full min-h-[220px] flex-col gap-4 border-hairline p-4 transition-colors hover:border-border-strong dark:shadow-none',
+      selection && !selection.disabled && 'cursor-pointer', selection?.checked && 'border-primary bg-primary-soft/30 hover:border-primary')}>
+    <div className='flex items-start gap-3'>
       <PluginArtwork src={icon} kind={artwork} />
       <div className='min-w-0 flex-1'>
         <h3 className='m-0 break-words text-[14px] font-semibold leading-5'>{name}</h3>
         <div className='mt-1.5 flex flex-wrap items-center gap-1.5'>
-          <Badge variant={highlightedSource ? 'brand' : 'outline'} shape='tag'>{sourceLabel ?? t('社区插件')}</Badge>
+          <Badge variant={highlightedSource ? 'brand' : 'ghost'} shape='tag'
+            className={cn('font-normal', !highlightedSource && 'border-0 px-0')}>{sourceLabel ?? t('社区插件')}</Badge>
           {badges}
         </div>
       </div>
-      <div className='flex shrink-0 items-center gap-2.5'>{actions}</div>
+      <div className='flex shrink-0 items-center gap-1'>{selection ? <Checkbox className='size-4'
+        checked={selection.checked} disabled={selection.disabled} onCheckedChange={value => selection.onChange(value === true)}
+        aria-label={t('选择插件 {name}', { name })} /> : actions}</div>
     </div>
-    <p className='m-0 min-h-9 break-words text-[12px] leading-[18px] text-subtle'>{description}</p>
+    <div className='flex flex-col items-start gap-2'>
+      <p className='m-0 line-clamp-3 min-h-[60px] w-full min-w-0 break-words text-[12px] leading-5 text-subtle'>{description}</p>
+      <Button variant='link' size='xs' className='gap-1 px-0 text-primary-fg' aria-haspopup='dialog'
+        aria-label={`${name} · ${t('查看详情')}`} onClick={onDetails}>
+        {t('查看详情')}<svg viewBox='0 0 24 24' className='size-3 text-muted-foreground' fill='none' stroke='currentColor'
+          strokeWidth='1.6' strokeLinecap='round' strokeLinejoin='round' aria-hidden='true'><path d='m9 5 7 7-7 7' /></svg>
+      </Button>
+    </div>
     {metadata}
-    <div className='mt-auto flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11.5px] leading-[18px] text-muted-foreground'>
+    <div className='mt-auto flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] leading-4 text-muted-foreground'>
       <span className={cn('inline-flex items-center gap-1.5', running && 'text-success', failed && 'text-warning')}>
         {pending ? <Spinner className='size-3' /> : status !== 'missing' ? <StatusDot variant={running ? 'success' : failed ? 'warning' : 'muted'} /> : null}
         {statusText}
@@ -120,8 +119,8 @@ export function PluginStoreCard({ name, description, version, icon, artwork, hig
           count: enabledCount === undefined ? providerCount : `${enabledCount}/${providerCount}`,
         })}</span>
       </> : null}
-      {version ? <><span className='opacity-40' aria-hidden='true'>·</span><span className='tabular-nums'>v{version}</span></> : null}
-      {footerAction ? <span className='ml-auto'>{footerAction}</span> : null}
+      {version ? <span className='ml-auto tabular-nums'>v{version}</span> : null}
+      {footerAction ? <span className='ml-auto flex flex-wrap items-center justify-end gap-2'>{footerAction}</span> : null}
     </div>
     {feedback}
   </Card>

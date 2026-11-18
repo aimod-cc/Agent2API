@@ -187,7 +187,18 @@ pub async fn put_provider(State(state): State<ServerState>, Path(provider): Path
         Some(Value::String(value)) => Some(value.as_str()),
         Some(_) => return errors::management_error(400, "account_id 必须是字符串或 null"),
     };
-    match tool_services::update_provider(state.store(), &provider, api_key, enabled, account_id) {
+    let keys = match object.get("keys") {
+        None => None,
+        Some(Value::Array(items)) if items.len() <= tool_services::MAX_PROVIDER_KEYS => {
+            match serde_json::from_value::<Vec<tool_services::ProviderKeyUpdate>>(Value::Array(items.clone())) {
+                Ok(keys) => Some(keys),
+                Err(_) => return errors::management_error(400, "keys 必须是包含 id 或 api_key 的密钥列表"),
+            }
+        }
+        Some(Value::Array(_)) => return errors::management_error(400, "每家提供商最多保存 100 个密钥"),
+        Some(_) => return errors::management_error(400, "keys 必须是数组"),
+    };
+    match tool_services::update_provider(state.store(), &provider, api_key, enabled, account_id, keys) {
         Ok(value) => ok_json(value),
         Err(error) => errors::management_error(400, error),
     }
@@ -203,11 +214,21 @@ pub async fn delete_provider_key(Path(provider): Path<String>) -> Response {
     ok_json(json!({ "success": true }))
 }
 
-pub async fn test_provider(State(state): State<ServerState>, Path(provider): Path<String>) -> Response {
+pub async fn test_provider(
+    State(state): State<ServerState>, Path(provider): Path<String>, Query(query): Query<HashMap<String, String>>,
+) -> Response {
     if !tool_services::is_search_provider(&provider) {
         return errors::management_error(400, "未知的搜索提供商");
     }
-    ok_json(tool_services::test_provider(state.store(), &provider).await)
+    let key_id = query.get("key_id").map(String::as_str).filter(|id| !id.trim().is_empty());
+    let operation = query.get("operation").map(String::as_str).unwrap_or("search");
+    if !matches!(operation, "search" | "fetch") {
+        return errors::management_error(400, "operation 必须是 search 或 fetch");
+    }
+    if tool_services::is_account_provider(&provider) && (key_id.is_some() || operation == "fetch") {
+        return errors::management_error(400, "已有账号搜索不支持密钥检查或网页抓取");
+    }
+    ok_json(tool_services::test_provider(state.store(), &provider, key_id, operation).await)
 }
 
 /* ─── 视觉分析 ─────────────────────────────────────────────── */

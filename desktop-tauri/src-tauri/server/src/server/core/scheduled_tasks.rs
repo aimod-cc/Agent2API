@@ -39,6 +39,7 @@
 //! 它独有的语义。硬塞进 `{enabled, interval}` 会逼着两边都变形。
 //! 界面上它仍在同一页展示，只是读改走 `/api/auto-checkin`。
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -207,19 +208,7 @@ pub fn list() -> Value {
     // 逐条任务各读一次库（四次读 + 四次解析）没有意义。
     let states = task_state::read_all();
     json!({
-        "tasks": TASKS
-            .iter()
-            .map(|task| {
-                let state = match &states {
-                    Ok(states) if task.runner == Runner::Backend => {
-                        Ok(states.get(&state_key(task.id)).cloned().unwrap_or_default())
-                    }
-                    Ok(_) => Ok(TaskState::default()),
-                    Err(error) => Err(error.clone()),
-                };
-                task_json(task, state)
-            })
-            .collect::<Vec<_>>(),
+        "tasks": TASKS.iter().map(|task| task_from_states(task.id, &states)).collect::<Vec<_>>(),
     })
 }
 
@@ -234,6 +223,24 @@ pub fn task_by_id(id: &str) -> Value {
             task_json(task, state)
         })
         .unwrap_or(Value::Null)
+}
+
+pub fn tasks_by_ids(ids: &[&str]) -> Vec<Value> {
+    let states = task_state::read_all();
+    ids.iter().map(|id| task_from_states(id, &states)).collect()
+}
+
+fn task_from_states(id: &str, states: &Result<HashMap<String, TaskState>, String>) -> Value {
+    find(id).map(|task| {
+        let state = match states {
+            Ok(states) if task.runner == Runner::Backend => {
+                Ok(states.get(&state_key(task.id)).cloned().unwrap_or_default())
+            }
+            Ok(_) => Ok(TaskState::default()),
+            Err(error) => Err(error.clone()),
+        };
+        task_json(task, state)
+    }).unwrap_or(Value::Null)
 }
 
 pub fn configure(id: &str, patch: IntervalTaskPatch) -> Result<Value, String> {

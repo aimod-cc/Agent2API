@@ -25,6 +25,7 @@ pub fn is_model_endpoint(path: &str) -> bool {
 
 pub struct ModelAccess {
     pub scope: Option<KeyScope>,
+    pub key_source: Option<std::sync::Arc<config::model_key_source::Source>>,
     pub source: RequestSource,
 }
 
@@ -42,25 +43,18 @@ pub fn authenticate(headers: &HeaderMap, client: &str) -> Result<ModelAccess, Ga
         GatewayError::with_status(401, "模型调用必须选择并携带 API Key，请先在「网关 Key」页创建并启用一把 Key")
             .with_code("model_api_key_required")
     })?;
-    let snapshot = config::current();
-    let (scope, identity) = if config::parse::env_api_key_value().as_deref() == Some(key) {
-        (None, ApiKeyIdentity { source: "env".to_string(), ..Default::default() })
+    let (scope, key_source, identity) = if config::parse::env_api_key_value().as_deref() == Some(key) {
+        (None, None, ApiKeyIdentity { source: "env".to_string(), ..Default::default() })
     } else {
-        let entry = api_keys::entries_from(snapshot.raw())
-            .into_iter()
-            .find(|entry| entry.is_usable() && entry.key == key)
-            .ok_or_else(|| {
-                GatewayError::with_status(401, "所选 API Key 已失效、停用或不可用，请重新选择一把启用的 Key")
-                    .with_code("invalid_api_key")
-            })?;
-        (Some(KeyScope::from_entry(&entry)), ApiKeyIdentity {
-            id: entry.id,
-            name: entry.name,
-            source: "key".to_string(),
-        })
+        let (scope, source) = config::model_key_source::authenticate_key(key).ok_or_else(|| {
+            GatewayError::with_status(401, "所选 API Key 已失效、停用或不可用，请重新选择一把启用的 Key")
+                .with_code("invalid_api_key")
+        })?;
+        let identity = source.log_identity();
+        (Some(scope), Some(std::sync::Arc::new(source)), identity)
     };
     Ok(ModelAccess {
-        scope,
+        scope, key_source,
         source: RequestSource { client: client.to_string(), api_key: identity, ..Default::default() },
     })
 }

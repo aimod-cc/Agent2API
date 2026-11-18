@@ -132,12 +132,14 @@ pub fn get(db: &Db, id: &str) -> Result<ImageJob, GatewayError> {
         .ok_or_else(|| GatewayError::with_status(404, "图片任务不存在或已过期").with_code("image_job_not_found"))
 }
 
-pub fn list(db: &Db) -> Result<Vec<ImageJob>, GatewayError> {
+pub fn list_with_usage(db: &Db) -> Result<(Vec<ImageJob>, Value), GatewayError> {
     db.with(|conn| {
         maintain(conn, logging::now_ms())?;
         let mut statement = conn.prepare(&format!("SELECT {JOB_COLUMNS} FROM tool_image_jobs ORDER BY created_at DESC LIMIT 50"))?;
         let rows = statement.query_map([], from_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok::<_, rusqlite::Error>(rows)
+        let usage = conn.query_row("SELECT COALESCE((SELECT SUM(length(bytes)) FROM tool_image_files),0),COALESCE((SELECT SUM(reserved_bytes) FROM tool_image_jobs),0)",
+            [], |row| Ok(json!({ "used_bytes": row.get::<_, i64>(0)?, "reserved_bytes": row.get::<_, i64>(1)? })))?;
+        Ok::<_, rusqlite::Error>((rows, usage))
     }).ok_or_else(locked)?.map_err(storage_error)
 }
 

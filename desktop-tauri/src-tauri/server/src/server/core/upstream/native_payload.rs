@@ -22,6 +22,7 @@ pub(super) fn filter_candidates(
                 .and_then(Value::as_str)
                 .and_then(WireProtocol::from_provider)
         }) == Some(native.protocol)
+            || crate::server::core::providers::subscriptions::native_protocol(provider) == Some(native.protocol)
             || crate::server::core::plugin_host::script::native::protocol(provider,
                 ctx.direct_model.as_deref().unwrap_or_else(|| ctx.body["model"].as_str().unwrap_or(""))) == Some(native.protocol)
             || crate::server::core::plugin_host::script::native::has_protocol(provider, native.protocol)

@@ -39,9 +39,7 @@ use sha2::{Digest, Sha256};
 
 use crate::server::logging;
 
-use super::client;
 use super::version::{UpdateError, MAX_INSTALLER_BYTES};
-use super::USER_AGENT;
 
 /// 归档里的可执行文件条目名（与 CI 打包逐字一致）
 const BINARY_ENTRY: &str = "agent2api-server";
@@ -52,8 +50,6 @@ const UI_PREFIX: &str = "ui/";
 const MAX_EXTRACTED_BYTES: u64 = 1024 * 1024 * 1024;
 /// tar 元数据条目（`L` / `x`）的大小上限：正常只有几十到几百字节
 const MAX_META_BYTES: u64 = 1024 * 1024;
-/// 校验文件请求的超时（几十字节的文本）
-const CHECKSUM_TIMEOUT_MS: u64 = 30_000;
 
 /// 部署开关：`AGENT2API_SELF_UPDATE=1`（严格等于 1，与 ALLOW_NO_KEY 同口径）。
 /// 设 `0` 或空即关闭，Dockerfile 里默认 `1`。
@@ -91,41 +87,6 @@ fn backup_path(target: &Path) -> PathBuf {
 }
 
 // ─── 校验和 ─────────────────────────────────────────────────
-
-/// 取 `.sha256` 伴随文件里的期望哈希。
-///
-/// 内容按 `sha256sum` 的格式解析（`<64 位十六进制>␣␣<文件名>`），也容忍只有
-/// 哈希本身。格式不对直接报错 —— 这一环是「装上去的东西确实是发布产物」的
-/// 唯一依据，含糊接受等于没校验。
-pub async fn fetch_checksum(url: &str) -> Result<String, UpdateError> {
-    let headers = vec![
-        ("User-Agent".to_string(), USER_AGENT.to_string()),
-        ("Accept".to_string(), "text/plain".to_string()),
-    ];
-    super::assert_downloadable(url)?;
-    let response = client::fetch_official(url, &headers, Some(CHECKSUM_TIMEOUT_MS)).await?;
-    if !response.status().is_success() {
-        return Err(UpdateError::new(format!(
-            "下载校验文件失败：GitHub 返回 HTTP {}",
-            response.status().as_u16()
-        )));
-    }
-    let text = response
-        .text()
-        .await
-        .map_err(|error| UpdateError::new(format!("读取校验文件失败：{error}")))?;
-    parse_checksum(&text)
-}
-
-/// 从校验文件正文里取哈希（首段 + 64 位十六进制）。
-fn parse_checksum(text: &str) -> Result<String, UpdateError> {
-    let token = text.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
-    if token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        Ok(token)
-    } else {
-        Err(UpdateError::new("校验文件格式异常（找不到 sha256 哈希），已放弃安装"))
-    }
-}
 
 /// 文件内容的 sha256（十六进制小写，流式读取，不整包进内存）。
 pub fn file_sha256(path: &Path) -> Result<String, UpdateError> {

@@ -114,7 +114,7 @@ export type OnboardingResult = {
   settledAt?: number | null
   claimed?: number
   failed?: number
-  claimedPoints?: number
+  claimedPoints?: number | null
   message?: string
 }
 
@@ -190,7 +190,8 @@ export function runGrowthSchool(id: string, lottery: boolean): Promise<GrowthRun
   return apiCall(`${accountPath(id)}/growth/school`, { method: 'POST', body: { lottery } })
 }
 
-export type UmidState = { available?: boolean; installing?: boolean; installSupported?: boolean; source?: string }
+export type UmidState = { available?: boolean; installing?: boolean; installSupported?: boolean; source?: string;
+  authorized?: boolean; componentAvailable?: boolean; message?: string }
 
 export function getUmid(): Promise<UmidState> {
   return apiCall('/api/qoder-umid')

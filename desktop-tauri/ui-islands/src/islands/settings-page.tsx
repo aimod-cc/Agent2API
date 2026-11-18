@@ -1,7 +1,5 @@
 import * as React from 'react'
 import { mountOnPage } from '../island-lazy'
-import { providerPromptRows } from './settings-prompt-rows'
-import { SearchableSelect } from '../../../ui-shared/searchable-select'
 import { flushSync } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import {
@@ -36,10 +34,8 @@ import {
   IMAGE_COMPRESS_FIELDS,
   modelsDevStateText,
   NOTES,
-  PROMPT_MODES,
   QUEUE_FIELDS,
   RETENTION_FIELDS,
-  RETRY_FIELDS,
   STATES,
   THEME_EVENT,
   THEME_MODES,
@@ -53,17 +49,12 @@ import {
   readThemeMode,
   readZoomPercent,
   shared,
-  type GatewayBlocks,
   type NumberField,
   type ThemeMode,
 } from './settings-model'
 import {
-  addProviderPrompt,
-  addRetryCode,
   applyUnits,
-  clearDegrade,
   closePasswordDialog,
-  dropLastRetryCode,
   exportAccounts,
   importAccounts,
   load,
@@ -77,14 +68,10 @@ import {
   refreshCors,
   refreshCaptchaPool,
   refreshModelsDev,
-  refreshPrompt,
   refreshQueue,
   refreshRetention,
-  refreshRetry,
   refreshStorage,
   refreshTimeouts,
-  removeProviderPrompt,
-  removeRetryCode,
   renderDebug,
   renderCors,
   renderPrompt,
@@ -102,14 +89,8 @@ import {
   saveImageCompressEnabled,
   saveImageCompressField,
   saveModelsDev,
-  savePromptFile,
-  savePromptMode,
-  saveProviderGatewayPrompt,
-  saveProviderPromptFile,
-  saveProviderPromptMode,
   saveQueueField,
   saveRetentionField,
-  saveRetryField,
   saveDeveloperRoleCompat,
   saveReasoningCollapse,
   saveTimeoutField,
@@ -122,9 +103,6 @@ import {
   type DebugState,
   type LoadStatus,
   type NumericState,
-  type PromptState,
-  type ProviderPromptOption,
-  type ProviderPromptState,
   type SettingsSnapshot,
   type StorageState,
 } from './settings-state'
@@ -133,21 +111,19 @@ import {
 import {
   readGroupTotalFiltered, readNamesHidden, setGroupTotalFiltered, setNamesHidden, subscribe,
 } from './accounts-store'
-import {
-  GatewayTextButton,
-  ProviderPromptTextButton,
-  PromptTextButton,
-  gatewayEditedText,
-} from './settings-prompt-editor'
+import { PromptSettingsPanel } from '../../../ui-shared/settings-prompt-panel'
+import { promptRulesApi } from './settings-prompt-api'
 // 云同步面板（设置 → 数据）：独立成文件、自带一份数据流（/api/cloud-sync），
 // 与设置页的快照 store 没有交集，见该文件的模块头
 import { CloudSyncPanel } from './settings-cloud-sync'
 import { CaptchaSettingsPanel } from './settings-captcha'
 import { BrandingSettingsPanel } from './settings-branding'
 import { NetworkAccessDialog, NetworkAccessPanel } from './settings-network-access'
+import { GraphicsSettingsPanel } from './settings-graphics'
 import { DbRestoreDialog } from './settings-db-restore'
 import { DatabaseBackupDialogs, DatabaseBackupPanel } from './settings-database-backup'
 import { SanitizePanel } from './settings-sanitize'
+import { WebToolsPanel } from './settings-web-tools'
 import { ClientIdentificationPanel } from '../../../ui-shared/client-identification-panel'
 import { ProviderSettingsPane } from './settings-providers'
 import { clientIdentificationApi } from './settings-client-identification'
@@ -560,6 +536,8 @@ function DisplayPane() {
         </CardContent>
       </Card>
 
+      <GraphicsSettingsPanel />
+
       <Card render={<section />} className='panel'>
         <PanelHead title={t('语言设置')} tip={TIPS.displayLanguage} />
         <CardContent className='panel-body'>
@@ -653,447 +631,8 @@ function LanguageRow() {
 
 /* ─── 网关分类 ─────────────────────────────── */
 
-/** 「指定错误码直接换号」的标签输入（GitHub Topics 同款：徽章 + 行内输入框） */
-function RetryCodesField({ codes, status, busy }: {
-  codes: number[] | null
-  status: LoadStatus
-  busy: boolean
-}) {
-  const [text, setText] = React.useState('')
-  const inputRef = React.useRef<HTMLInputElement | null>(null)
-  // 读不到重试设置时整框禁用（旧实现：field.disabled + .disabled 类 + 占位符换「—」）
-  const locked = status === 'unavailable'
-
-  return (
-    <div className='retention-row'>
-      <Label htmlFor='settings-retry-no-codes-input'>{t('指定错误码直接换号')}</Label>
-      <div className='retention-input'>
-        {/* 点框体空白处 = 聚焦输入框（整框是一个输入控件的观感，旧实现同） */}
-        <InputGroup
-          className={`h-auto w-[320px] max-w-full flex-wrap gap-1.5 px-2 py-1${locked ? ' opacity-55' : ''}`}
-          onClick={() => inputRef.current?.focus()}
-        >
-          {(codes || []).map(code => (
-            <Badge variant='brand' className='tag-chip' key={code}>
-              <span className='v'>{code}</span>
-              {/* 徽章上的 ✕：小号圆角热区，悬停加深 —— 用组件库的小件档 + 语义色，
-                  「能点删」的视觉暗示与旧实现一致 */}
-              <Button
-                type='button'
-                variant='ghost'
-                size='icon-2xs'
-                className='tag-x text-muted-foreground hover:bg-destructive-soft hover:text-destructive'
-                title={t('删除 {code}', { code })}
-                aria-label={t('删除状态码 {code}', { code })}
-                onClick={event => { event.stopPropagation(); void removeRetryCode(code) }}
-              >
-                ✕
-              </Button>
-            </Badge>
-          ))}
-          <InputGroupInput
-            ref={inputRef}
-            id='settings-retry-no-codes-input'
-            type='text'
-            className='h-6 min-w-[120px] flex-1 px-0'
-            placeholder={locked ? '—' : t('输入状态码，回车添加')}
-            inputMode='numeric'
-            autoComplete='off'
-            value={text}
-            disabled={locked || busy}
-            onChange={event => setText(event.target.value)}
-            onKeyDown={event => {
-              if (event.key === 'Enter') {
-                event.preventDefault()
-                void addRetryCode(text)
-                setText('') // 提交后立即清空输入框（旧实现同）
-                return
-              }
-              // 与 GitHub Topics 一致：输入框为空时退格删掉最后一枚
-              if (event.key === 'Backspace' && !text) void dropLastRetryCode()
-            }}
-          />
-        </InputGroup>
-      </div>
-      <div className='hint'>{NOTES.retryCodes}</div>
-    </div>
-  )
-}
-
-/** 系统提示词：文件路径输入框（草稿机制与数字框同款，失焦 / 回车才提交） */
-function PromptFileRow({ prompt, locked, busy }: {
-  prompt: PromptState
-  locked: boolean
-  busy: boolean
-}) {
-  const [draft, setDraft] = React.useState<string | null>(null)
-
-  async function commit(): Promise<void> {
-    const raw = draft
-    if (raw === null) return
-    try { await savePromptFile(raw) } finally { setDraft(null) }
-  }
-
-  return (
-    <div className='retention-row'>
-      <Label htmlFor='settings-prompt-file'>{t('提示词文件')}</Label>
-      <span className='prompt-input'>
-        <Input
-          id='settings-prompt-file'
-          type='text'
-          placeholder={t('留空 = 用内置默认提示词')}
-          value={draft !== null ? draft : prompt.file}
-          disabled={locked || busy}
-          onChange={event => setDraft(event.target.value)}
-          onFocus={() => setDraft(prompt.file)}
-          onBlur={() => void commit()}
-          onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }}
-        />
-      </span>
-      <div className='hint'>{NOTES.promptFile}</div>
-    </div>
-  )
-}
-
-/** 提示词状态行：模式说明 + 来源与行数 + 文件读取告警 */
-function promptStateText(prompt: PromptState): string {
-  if (prompt.status === 'loading') return STATES.appLoading
-  if (prompt.status === 'unavailable') return STATES.promptUnavailable
-  const source = promptSourceText(prompt.source)
-  const parts: string[] = []
-  if (prompt.mode === 'passthrough') {
-    parts.push(t('客户端 system 原样出站（只靠指纹脱敏改写模板句）。'))
-  } else {
-    parts.push(
-      t('{mode}生效：上游收到的 system 来自{source}{lines}。', {
-        mode: prompt.mode === 'custom' ? t('替换') : t('追加'),
-        source,
-        lines: prompt.lines ? t('（{n} 行）', { n: prompt.lines }) : '',
-      }),
-    )
-  }
-  if (prompt.fileError) parts.push(`⚠️ ${prompt.fileError}`)
-  return parts.join('')
-}
-
-/** 正文来源的中文说法（三处状态行共用；'' = 没有正文可讲） */
-function promptSourceText(source: string): string {
-  if (source === 'inline') return t('界面里编辑的正文')
-  if (source === 'file') return t('提示词文件')
-  if (source === 'builtin') return t('内置默认提示词')
-  return ''
-}
-
-/** 降级行的说明：只在真的处于降级期时出现（平时它是一行与用户无关的状态噪音） */
-function degradeHint(prompt: PromptState): string {
-  return t('已自动切换到最小中性提示词（撞了上游内容拦截，多半是 system 指纹误报），到 {until} 自动解除。', {
-    until: prompt.degradeUntilText || STATES.degradeUntilFallback,
-  })
-    + t('期间本模式自己的提示词不会发出；把提示词改好后可以立即解除。')
-}
-
-/**
- * 提示词文件输入框（草稿机制与上面那个全局的同款，按 id 提交到对应那一家）
- */
-function ProviderFileRow({ item, label, locked, busy }: {
-  item: ProviderPromptState
-  label: string
-  locked: boolean
-  busy: boolean
-}) {
-  const [draft, setDraft] = React.useState<string | null>(null)
-
-  async function commit(): Promise<void> {
-    const raw = draft
-    if (raw === null) return
-    try {
-      // 只在与「显示值」真的不同时才提交：这一行可能是「跟随全局」的（显示的是
-      // 全局那两份），点进去再点出来不该凭空生成一条覆盖
-      if (raw !== item.file) await saveProviderPromptFile(item, raw)
-    } finally { setDraft(null) }
-  }
-
-  return (
-    <span className='prompt-input'>
-      <Input
-        id={`settings-prompt-file-${item.id}`}
-        type='text'
-        placeholder={t('留空 = 用内置默认提示词')}
-        aria-label={t('{label} 提示词文件', { label })}
-        value={draft !== null ? draft : item.file}
-        disabled={locked || busy}
-        onChange={event => setDraft(event.target.value)}
-        onFocus={() => setDraft(item.file)}
-        onBlur={() => void commit()}
-        onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }}
-      />
-    </span>
-  )
-}
-
-/** 一家的状态行：模式说明 + 来源与行数 + 文件读取告警（与全局那行同一套措辞） */
-function providerStateText(item: ProviderPromptState, configured: boolean): string {
-  // 没单独配过的家（只在「有网关自带提示词」时才会被列出来）走全局那份 ——
-  // 不说这一句的话，用户会以为这一行显示的就是「这家的设置」
-  if (!configured) return t('未单独配置：模式、提示词文件与正文都跟随上面的全局配置（当前「{mode}」）。', {
-    mode: PROMPT_MODES.find(option => option.value === item.mode)?.toastLabel ?? item.mode,
-  })
-  if (item.mode === 'passthrough') return t('客户端 system 原样出站。')
-  const head = t('{mode}生效：上游收到的 system 来自{source}{lines}。', {
-    mode: item.mode === 'custom' ? t('替换') : t('追加'),
-    source: promptSourceText(item.source),
-    lines: item.lines ? t('（{n} 行）', { n: item.lines }) : '',
-  })
-  return item.fileError ? `${head} ⚠️ ${item.fileError}` : head
-}
-
-/**
- * 一家的**网关自带提示词**那一行（只有 registry 里标了 `gatewayNote` 的家才有）。
- *
- * 这段文本不来自客户端、也不来自提示词文件，是网关自己装上去的（ZCode 活动套餐
- * 通道的官方三段身份块）。它默认开、可以关，**也可以改正文** —— 关掉后还能不能跑
- * 取决于上游当前的校验口径，所以关掉时把这一行**换成警示语气**（`tone` 为非 ok
- * 的徽章 + 粗体），而不是留一个看起来无害的灰开关。
- */
-function ProviderGatewayRow({ item, option, over, locked, busy }: {
-  item: ProviderPromptState
-  option: ProviderPromptOption
-  /** 这一家已存的正文覆盖（只含改过的段；缺省 = 全是官方原文） */
-  over: GatewayBlocks | undefined
-  locked: boolean
-  busy: boolean
-}) {
-  const on = item.gateway
-  const chars = option.gatewayChars
-  const size = chars ? t('约 {n} 字符', { n: chars.toLocaleString('zh-CN') }) : t('一段内置装配')
-  const edited = gatewayEditedText(over)
-  return (
-    <div className='retention-row'>
-      <Label className='prompt-gateway-label'>{t('网关自带')}</Label>
-      <span className='prompt-input'>
-        <SwitchRow
-          id={`settings-prompt-gateway-${item.id}`}
-          label={t('装上{size}的官方身份提示词', { size })}
-          checked={on}
-          disabled={locked || busy}
-          onCheckedChange={next => void saveProviderGatewayPrompt(item.id, next)}
-        />
-        {/* 正文编辑与开关并排：两件事（装不装 / 长什么样）在同一个可视范围里，
-            但各走各的接口字段，改一个不会动另一个（见 settings-state 两个动作） */}
-        <GatewayTextButton item={item} option={option} over={over} locked={locked} busy={busy} />
-      </span>
-      <div className={on ? 'hint' : 'hint prompt-gateway-off'}>
-        {on ? option.gatewayNote : t('已关闭。{note}', { note: option.gatewayNote })}
-        {edited ? t(' 正文已改：{edited}（其余段用官方原文）。', { edited }) : ''}
-      </div>
-    </div>
-  )
-}
-
-/** 只列已保存的模式、网关开关或正文覆盖；未配置的提供商从下拉手动添加。 */
-function ProviderPromptRows({ prompt, locked, busy }: {
-  prompt: PromptState
-  locked: boolean
-  busy: boolean
-}) {
-  const options = prompt.options
-  const rows = providerPromptRows(prompt)
-  const listed = new Set(rows.map(row => row.id))
-  const candidates = options.filter(item => !listed.has(item.id))
-  const [pending, setPending] = React.useState('')
-  const labelOf = (id: string) => options.find(item => item.id === id)?.label || id
-  const optionOf = (id: string) => options.find(item => item.id === id)
-  const noteOf = (id: string) => optionOf(id)?.gatewayNote || ''
-
-  return (
-    <>
-      {rows.map(item => {
-        const label = labelOf(item.id)
-        const modeLabel = PROMPT_MODES.find(option => option.value === item.mode)?.optionLabel ?? item.mode
-        const note = noteOf(item.id)
-        const option = optionOf(item.id)
-        return (
-          <React.Fragment key={item.id}>
-            <div className='retention-row'>
-              <Label htmlFor={`settings-prompt-mode-${item.id}`}>{label}</Label>
-              <span className='prompt-input'>
-                <Select
-                  value={item.mode}
-                  onValueChange={next => {
-                    // 同上：null = 没选（清空 / 取消），不是一个叫 "null" 的模式。
-                    // 模式与文件一起提交：这一行可能还在「跟随全局」，只写模式会让
-                    // 它的文件从屏幕上的路径变成内置默认（见 saveProviderPromptMode）
-                    if (next != null && String(next)) {
-                      void saveProviderPromptMode(item, String(next))
-                    }
-                  }}
-                >
-                  <SelectTrigger
-                    id={`settings-prompt-mode-${item.id}`}
-                    className='w-[240px]'
-                    disabled={locked || busy}
-                    aria-label={t('{label} 的提示词模式', { label })}
-                  >
-                    <SelectValue>{modeLabel}</SelectValue>
-                  </SelectTrigger>
-                  <SelectContent>
-                    {PROMPT_MODES.map(option => (
-                      <SelectItem key={option.value} value={option.value}>{option.optionLabel}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <ProviderFileRow item={item} label={label} locked={locked} busy={busy} />
-                <ProviderPromptTextButton item={item} label={label} locked={locked} busy={busy} />
-                {/* 「跟随默认」只在**单独配过**的行上出现：没配过的行点了它也删不掉
-                    任何东西（后端此时没有这一项），留一颗无效按钮只会让人以为点坏了 */}
-                {item.configured ? (
-                  <Button
-                    variant='outline'
-                    disabled={locked || busy}
-                    onClick={() => void removeProviderPrompt(item.id)}
-                  >
-                    {t('跟随默认')}
-                  </Button>
-                ) : null}
-              </span>
-              <div className='hint'>{providerStateText(item, item.configured)}</div>
-            </div>
-            {/* 网关自带那段（只有 registry 标了 note 的家有）——单独一行开关，
-                与上面那行不是一回事：那个管客户端 system、这个管网关自己装什么 */}
-            {option && note ? (
-              <ProviderGatewayRow
-                item={item}
-                option={option}
-                over={prompt.gatewayText[item.id]}
-                locked={locked}
-                busy={busy}
-              />
-            ) : null}
-          </React.Fragment>
-        )
-      })}
-
-      <div className='retention-row'>
-        <Label htmlFor='settings-prompt-provider-add'>{t('添加提供商')}</Label>
-        <span className='prompt-input'>
-          <SearchableSelect value={pending} disabled={locked || busy || candidates.length === 0}
-            id='settings-prompt-provider-add' className='w-[240px]'
-            aria-label={t('添加要单独配置的提供商')} searchPlaceholder={t('搜索提供商')}
-            displayValue={pending ? labelOf(pending) : (candidates.length ? t('添加提供商…') : t('全部已配置'))}
-            options={candidates.map(item => ({ value: item.id, label: item.label }))}
-            onValueChange={id => { setPending(''); if (id) void addProviderPrompt(id) }} />
-        </span>
-        <div className='hint'>{NOTES.promptProviders}</div>
-      </div>
-    </>
-  )
-}
-
 function PromptPanel({ snap }: { snap: SettingsSnapshot }) {
-  const prompt = snap.prompt
-  const locked = prompt.status !== 'ready'
-  const busy = snap.busy === 'prompt'
-  const modeLabel = PROMPT_MODES.find(item => item.value === prompt.mode)?.optionLabel ?? prompt.mode
-
-  return (
-    <Card render={<section />} className='panel'>
-      <PanelHead
-        title={t('系统提示词')}
-        tip={TIPS.prompt}
-        badge={prompt.status === 'ready'
-          ? <StatusBadge tone='ok'>{prompt.mode === 'passthrough' ? t('透传') : t('已接管')}</StatusBadge>
-          : prompt.status === 'unavailable'
-            ? <StatusBadge tone='bad'>{t('不可用')}</StatusBadge>
-            : <StatusBadge tone='idle'>{t('检测中…')}</StatusBadge>}
-        actions={<RefreshButton id='btn-prompt-refresh' onClick={() => void refreshPrompt()} />}
-      />
-      <CardContent className='panel-body'>
-        <div className='retention-list'>
-          {/* 两个分组条把「默认」与「某家的例外」分开：上面那几行是所有未单独配置的
-              家共用的默认值，下面那张表是逐家的例外 —— 不分开时它们是一串同构的行，
-              用户读不出哪几行管全部、哪几行只管一家（见 page-settings.css 的 .prompt-group）。 */}
-          <div className='prompt-group'>
-            {t('全局配置')}<span className='note'>{t('所有未单独配置的提供商都用这一份')}</span>
-          </div>
-
-          <div className='retention-row'>
-            <Label htmlFor='settings-prompt-mode'>{t('模式')}</Label>
-            <span className='prompt-input'>
-              {/* 旧实现是原生 <select>（select.js 增强 + wbSelect.sync）；这里换成组件库的
-                  Select：触发器是按钮，page-settings.css 的 `.prompt-input select{width:240px}`
-                  不再命中，宽度得用工具类补回（否则触发器按内容宽度缩成一团）。
-                  展示文案显式给 SelectValue，不依赖 value 自动显示。 */}
-              <Select
-                value={prompt.mode}
-                // 同「添加提供商」那条：null = 没选，不当作一个模式名（见那里的说明）
-                onValueChange={next => { if (next != null && String(next)) void savePromptMode(String(next)) }}
-              >
-                <SelectTrigger
-                  id='settings-prompt-mode'
-                  className='w-[240px]'
-                  disabled={locked || busy}
-                  aria-label={t('系统提示词模式')}
-                >
-                  <SelectValue>{modeLabel}</SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {PROMPT_MODES.map(item => (
-                    <SelectItem key={item.value} value={item.value}>{item.optionLabel}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </span>
-            <div className='hint'>{NOTES.promptMode}</div>
-          </div>
-
-          <PromptFileRow prompt={prompt} locked={locked} busy={busy} />
-
-          {/* 提示词正文：与文件是同一件事的两个来源（正文优先），所以紧挨着文件那一行。
-              行里只放按钮与状态 —— 几百行文本塞进行内输入框既看不清也没法编辑 */}
-          <div className='retention-row'>
-            <Label htmlFor='btn-prompt-edit-body'>{t('提示词正文')}</Label>
-            <span className='prompt-input'>
-              <PromptTextButton prompt={prompt} locked={locked} busy={busy} />
-            </span>
-            <div className='hint'>
-              {NOTES.promptText}
-              {prompt.source === 'inline'
-                ? t('（当前生效的就是这一份，{n} 行）', { n: prompt.lines })
-                : prompt.text.trim()
-                  ? t('（已存一份正文，{n} 行；切成「替换 / 追加」后生效）', { n: prompt.lines })
-                  : ''}
-            </div>
-          </div>
-
-          <div className='prompt-group'>
-            {t('按提供商配置')}<span className='note'>{t('只列单独配置过的家，其余沿用上面的全局配置')}</span>
-          </div>
-
-          <ProviderPromptRows prompt={prompt} locked={locked} busy={busy} />
-
-          {/* 降级行只在真的处于降级期时渲染（旧实现是切 hidden） */}
-          {prompt.status === 'ready' && prompt.degradeActive ? (
-            <div className='retention-row'>
-              <Label>{t('内容拦截降级')}</Label>
-              <span className='prompt-input'>
-                <Button
-                  id='btn-prompt-clear-degrade'
-                  variant='outline'
-                  disabled={busy}
-                  onClick={() => void clearDegrade()}
-                >
-                  {t('立即解除')}
-                </Button>
-              </span>
-              <div className='hint'>{degradeHint(prompt)}</div>
-            </div>
-          ) : null}
-        </div>
-        <div className='settings-state'>{promptStateText(prompt)}</div>
-        <div className='hint retention-note'>{NOTES.prompt}</div>
-      </CardContent>
-    </Card>
-  )
+  return <PromptSettingsPanel api={promptRulesApi} t={t} active={snap.category === 'gateway'} />
 }
 
 /** 调试模式的状态行：条数只在后端给了两个整数时才提 */
@@ -1131,39 +670,6 @@ function TimeoutPane({ snap }: { snap: SettingsSnapshot }) {
           ))}
         </div>
         <div className='hint retention-note'>{NOTES.timeouts}</div>
-      </CardContent>
-    </Card>
-  )
-}
-
-/** 请求重试：数字参数 + 「指定错误码」名单（两段共用同一份保存流程） */
-function RetryPane({ snap }: { snap: SettingsSnapshot }) {
-  return (
-    <Card render={<section />} className='panel'>
-      <PanelHead
-        title={t('请求重试')}
-        tip={TIPS.retry}
-        badge={numericBadge(snap.retry)}
-        actions={<RefreshButton id='btn-retry-refresh' onClick={() => void refreshRetry()} />}
-      />
-      <CardContent className='panel-body'>
-        <div className='retention-list'>
-          {RETRY_FIELDS.map(field => (
-            <NumberRow
-              key={field.key}
-              field={field}
-              value={snap.retry.values?.[field.key] ?? null}
-              disabled={snap.busy === 'retry'}
-              onCommit={raw => saveRetryField(field, raw)}
-            />
-          ))}
-          <RetryCodesField
-            codes={snap.retryCodes}
-            status={snap.retry.status}
-            busy={snap.busy === 'codes' || snap.busy === 'retry'}
-          />
-        </div>
-        <div className='hint retention-note'>{NOTES.retry}</div>
       </CardContent>
     </Card>
   )
@@ -1281,15 +787,16 @@ function GatewayPane({ snap, panels }: { snap: SettingsSnapshot; panels: Set<str
             id='settings-modelsdev'
             label={t('用 models.dev 补齐上游没声明的模型能力与思考档位（联网刷新，内嵌快照始终生效）')}
             checked={snap.modelsDev.enabled}
-            disabled={snap.modelsDev.status !== 'ready' || snap.busy === 'modelsDev'}
+            disabled={snap.modelsDev.status !== 'ready' || snap.busy === 'modelsDev' || snap.busy === 'modelsDevRefresh'}
             onCheckedChange={next => void saveModelsDev(next)}
           />
-          <div className='settings-state'>{modelsDevStateText(snap.modelsDev)}</div>
+          <div className='settings-state'>{modelsDevStateText(snap.modelsDev, snap.busy === 'modelsDevRefresh')}</div>
           <div className='hint retention-note'>{NOTES.modelsDev}</div>
         </CardContent>
       </Card>
 
       <SanitizePanel snap={snap} />
+      <WebToolsPanel />
 
       <Card render={<section />} className='panel'>
         <PanelHead
@@ -2167,9 +1674,6 @@ function SettingsPage() {
         </div>
         <div className={paneClass('providers')} data-cat='providers'>
           <ProviderSettingsPane active={snap.category === 'providers'} onOpenDetail={() => setMobileDetail(true)} />
-        </div>
-        <div className={paneClass('retry')} data-cat='retry'>
-          <RetryPane snap={snap} />
         </div>
         <div className={paneClass('timeout')} data-cat='timeout'>
           <TimeoutPane snap={snap} />

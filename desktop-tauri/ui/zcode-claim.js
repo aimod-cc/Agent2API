@@ -49,12 +49,6 @@
 (() => {
   const bridge = () => window.workbuddyDesktop;
 
-  const describeError = error => {
-    if (error instanceof Error && error.message) return error.message;
-    const text = String(error ?? '').trim();
-    return text || wbI18n.t('未知错误');
-  };
-
   /** unix 秒 → 本地可读时间（后端给的一律是秒，不是毫秒） */
   function formatTime(seconds) {
     const value = Number(seconds);
@@ -81,104 +75,103 @@
     return api.zcodeClaimPreview(id);
   }
 
-  /**
-   * ② 领取一份套餐（要验证码）。
-   *
-   * `planId` 为空时由后端按优先级挑一份（与旧的默认目标同口径）。流程：
-   * 先问上游**此刻要不要**人机验证（风控配置）—— 不要就直接领（后端允许不带
-   * 验证码参数，只在该有值时发那个头），要就拉起阿里云滑块、拿到 verifyParam
-   * 再领。硬弹一次滑块会让用户在本不需要验证的时候被拦一道，而且滑块可能根本
-   * 初始化不出来。
-   *
-   * 业务结果（成功 / `already_claimed` / 其它失败）都走 `reportOutcome` 播报，
-   * 并把后端那份结果送回调用方。
-   */
+  const validProvider = value => value === 'zcode' || value === 'zcode-intl';
+  const validText = value => typeof value === 'string' && value.trim() && !/[\u0000-\u001f\u007f]/.test(value);
+  const manual = new Set();
+  let generation = 0;
+
+  function bindingOf(config, accountId) {
+    if (!config || typeof config !== 'object' || Array.isArray(config) || typeof config.enabled !== 'boolean') throw new Error('invalid_claim_config');
+    if (config.enabled && (!validText(config.prefix) || !validText(config.sceneId) || !validText(config.region))) throw new Error('invalid_claim_config');
+    if (!['provider', 'accountId', 'configId', 'engine'].some(key => Object.prototype.hasOwnProperty.call(config, key))) return null;
+    if (!validProvider(config.provider) || config.accountId !== accountId || !validText(config.configId)
+      || (config.enabled ? config.engine !== 'aliyun' : !['none', 'aliyun'].includes(config.engine))) throw new Error('invalid_claim_binding');
+    return { provider: config.provider, accountId, configId: config.configId };
+  }
+
+  // 只在已明确指定账号与套餐的用户操作中启动，不缓存验证结果或重试领取。
   async function claim(accountId, planId, signal, onPhase) {
     const api = bridge();
     const id = String(accountId || '');
-    if (!id) {
-      window.wbApp.toast(wbI18n.t('账号信息不完整，请刷新后重试'), 'warn');
+    const target = String(planId || '');
+    if (!validText(id) || !validText(target)) {
+      window.wbApp?.toast(wbI18n.t('账号或套餐信息不完整，请刷新后重试'), 'warn');
       return null;
     }
     if (!api?.zcodeClaimCaptchaConfig || !api?.zcodeClaim) {
-      window.wbApp.toast(wbI18n.t('当前环境不支持领取（桥接方法缺失）'), 'warn');
+      window.wbApp?.toast(wbI18n.t('当前环境不支持领取（桥接方法缺失）'), 'warn');
       return null;
     }
-    const target = String(planId || '');
-    const requireActive = () => {
-      if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
+    const controller = new AbortController();
+    const flow = { api, controller, epoch: generation, origin: window.location.origin };
+    const initialAccounts = window.wbApp?.getState?.()?.accounts?.accounts;
+    const initial = Array.isArray(initialAccounts) ? initialAccounts.find(account => account.id === id) : null;
+    let provider = initial?.provider;
+    let submitted = false;
+    manual.add(flow);
+    const cancel = () => controller.abort();
+    const guard = () => {
+      if (signal?.aborted || flow.epoch !== generation || flow.api !== bridge() || flow.origin !== window.location.origin) { cancel(); return; }
+      const accounts = window.wbApp?.getState?.()?.accounts?.accounts;
+      if (!Array.isArray(accounts)) { cancel(); return; }
+      const account = accounts.find(item => item.id === id);
+      if (!account || account.available === false || !validProvider(account.provider)
+        || provider !== undefined && provider !== account.provider) cancel();
+      else provider = account.provider;
     };
-    requireActive();
-    onPhase?.('preparing');
-
-    let captchaConfig;
+    const requireCurrent = () => { guard(); if (controller.signal.aborted) throw new DOMException('请求已取消', 'AbortError'); };
+    const phase = value => { requireCurrent(); onPhase?.(value); };
+    signal?.addEventListener('abort', cancel, { once: true });
+    const unsubscribe = window.wbApp?.subscribeRefresh?.(guard);
     try {
-      captchaConfig = await api.zcodeClaimCaptchaConfig(id);
-      requireActive();
+      requireCurrent();
+      phase('preparing');
+      const config = Object.freeze({ ...await api.zcodeClaimCaptchaConfig(id) });
+      requireCurrent();
+      const binding = bindingOf(config, id);
+      if (binding && provider !== undefined && provider !== binding.provider) throw new Error('claim_provider_changed');
+      if (binding) provider = binding.provider;
+      let param = '';
+      if (config.enabled) {
+        const captcha = window.wbAliyunCaptcha;
+        if (!captcha?.requestToken) throw new Error('captcha_unavailable');
+        const token = await captcha.requestToken(config, controller.signal, { onPhase: phase });
+        requireCurrent();
+        if (!validText(token?.param)) throw new Error('invalid_captcha_token');
+        param = token.param;
+      }
+      requireCurrent();
+      phase('submitting');
+      submitted = true;
+      const result = binding
+        ? await api.zcodeClaim(id, { ...binding, planId: target, captchaVerifyParam: param, captchaRegion: config.region || '' })
+        : await api.zcodeClaim(id, target, param, config.region || '');
+      requireCurrent();
+      if (!result || typeof result.ok !== 'boolean' || result.planId && result.planId !== target) throw new Error('claim_result_unconfirmed');
+      return reportOutcome(result);
     } catch (error) {
-      if (signal?.aborted) return null;
-      window.wbApp.toast(wbI18n.t('获取风控配置失败：{message}', { message: describeError(error) }), 'warn');
-      return null;
-    }
-
-    if (!captchaConfig || typeof captchaConfig.enabled !== 'boolean') {
-      window.wbApp.toast(wbI18n.t('风控验证配置不完整，请稍后重试'), 'warn');
-      return null;
-    }
-
-    const callClaim = captchaVerifyParam => {
-      requireActive();
-      onPhase?.('submitting');
-      return api.zcodeClaim(id, target, captchaVerifyParam || '', captchaConfig?.region || '');
-    };
-
-    // 不需要验证码：一次请求就完事
-    if (!captchaConfig?.enabled) {
-      try {
-        return reportOutcome(await callClaim(''));
-      } catch (error) {
-        window.wbApp.toast(wbI18n.t('领取失败：{message}', { message: describeError(error) }), 'warn');
+      guard();
+      const cancelled = controller.signal.aborted || ['AbortError', 'CaptchaCancelledError'].includes(error?.name);
+      if (flow.epoch !== generation || flow.api !== bridge() || flow.origin !== window.location.origin) return null;
+      if (cancelled && !submitted) {
+        window.wbApp?.toast(wbI18n.t('已取消领取'));
         return null;
       }
-    }
-
-    // ── 需要验证码：滑块 → 拿 verifyParam 直接领取 ──────────
-    // 注意与 AutoClaw 的 OAuth 不同 —— 那边拿到串之后是去换授权地址、再开窗口
-    // 等回调（长流程，必须放在 solve 之外）；这里是**拿串直接领取**，全部动作
-    // 都在 `request` 回调里完成，因此不存在「长流程被 120 秒验证码超时误杀」
-    // 的问题（见 aliyun-captcha.js 里 solve 的说明）。
-    const captcha = window.wbAliyunCaptcha;
-    if (!captcha) {
-      window.wbApp.toast(wbI18n.t('验证码组件未加载，请重启应用后重试'), 'warn');
+      const message = submitted ? wbI18n.t('领取提交结果未确认，请查看签到记录，勿重复领取')
+        : wbI18n.t('领取验证未完成，请刷新套餐配置后重试');
+      window.wbApp?.toast(message, 'warn');
       return null;
+    } finally {
+      manual.delete(flow);
+      signal?.removeEventListener('abort', cancel);
+      unsubscribe?.();
     }
-
-    let outcome;
-    try {
-      outcome = await captcha.solve(
-        {
-          region: captchaConfig.region || 'cn',
-          prefix: captchaConfig.prefix,
-          sceneId: captchaConfig.sceneId,
-        },
-        async captchaVerifyParam => {
-          const result = await callClaim(captchaVerifyParam);
-          return { captchaResult: result?.failure !== 'captcha', bizResult: Boolean(result?.ok), result };
-        },
-        signal,
-        { protocol: 'v3', onPhase },
-      );
-    } catch (error) {
-      // 用户主动取消验证码不算失败（与 AutoClaw 登录那边同一处置）
-      if (error instanceof captcha.CaptchaCancelledError || error?.name === 'AbortError') {
-        window.wbApp.toast(wbI18n.t('已取消领取'));
-        return null;
-      }
-      window.wbApp.toast(wbI18n.t('领取失败：{message}', { message: describeError(error) }), 'warn');
-      return null;
-    }
-    return reportOutcome(outcome?.result);
   }
+
+  window.addEventListener('pagehide', () => {
+    generation++;
+    for (const flow of manual) flow.controller.abort();
+  });
 
   /**
    * 领取结果 → 提示 + 返回值。

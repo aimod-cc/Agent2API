@@ -37,6 +37,21 @@ pub fn list() -> Vec<Value> {
     }).and_then(Result::ok).unwrap_or_default()
 }
 
+pub fn get_summary(id: &str) -> Option<Value> {
+    let db = database()?;
+    db.with(|conn| conn.query_row(
+        "SELECT id, title, model, reasoning, created_at, updated_at, title_generated FROM assistant_sessions WHERE id = ?1",
+        params![id.trim()], summary,
+    ).optional().ok().flatten()).flatten()
+}
+
+pub fn exists(id: &str) -> bool {
+    database().and_then(|db| db.with(|conn| conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM assistant_sessions WHERE id = ?1)",
+        params![id.trim()], |row| row.get::<_, bool>(0),
+    ).unwrap_or(false))).unwrap_or(false)
+}
+
 pub fn get(id: &str) -> Option<Value> {
     let db = database()?;
     db.with(|conn| conn.query_row(
@@ -70,9 +85,7 @@ pub fn save(payload: &Value) -> Result<Value, String> {
         params![id, title, encoded, model, reasoning, now],
     ).is_ok());
     if written != Some(true) { return Err("会话写入失败".into()); }
-    let mut value = get(id).ok_or("会话写入后无法读取")?;
-    value.as_object_mut().expect("session object").remove("messages");
-    Ok(value)
+    get_summary(id).ok_or_else(|| "会话写入后无法读取".into())
 }
 
 pub fn set_title(id: &str, expected_messages: &Value, title: &str) -> Result<Value, String> {
@@ -82,9 +95,7 @@ pub fn set_title(id: &str, expected_messages: &Value, title: &str) -> Result<Val
         "UPDATE assistant_sessions SET title = ?2, title_generated = 1 WHERE id = ?1 AND title_generated = 0 AND messages = ?3",
         params![id, truncate(title, MAX_TITLE_CHARS), expected],
     )).ok_or("会话数据库不可用")?.map_err(|_| "保存标题失败")?;
-    let mut value = get(id).ok_or("会话不存在")?;
-    value.as_object_mut().expect("session object").remove("messages");
-    Ok(value)
+    get_summary(id).ok_or_else(|| "会话不存在".into())
 }
 
 pub fn fork(id: &str, new_id: &str, message_id: &str) -> Result<Value, String> {

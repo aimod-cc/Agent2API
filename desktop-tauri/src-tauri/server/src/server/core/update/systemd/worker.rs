@@ -73,7 +73,7 @@ fn handle() -> Result<(), UpdateError> {
         archive.as_file().sync_all().map_err(transport::io_error)?;
         // 接收完整载荷后即可让网页返回；后面的校验、替换、重启不依赖网页存活。
         respond(json!({ "ok": true, "accepted": true, "id": task.id }))?;
-        let official = trust::verify(&task.version, request.github_token.as_deref())?;
+        let official = trust::verify(&task.version)?;
         if official.size != request.size || selfupdate::file_sha256(archive.path())? != official.sha256 {
             return Err(UpdateError::new("更新包与官方校验值不一致，现有程序未修改"));
         }

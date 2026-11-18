@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { Badge, Button, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@ui'
 import { handleExternalClick, markdownHtml, openExternal } from './update-shared'
+import { updatePageUrl } from '../../../ui-shared/updates'
 import { t } from '../i18n'
 import { HtmlContent } from '@ui'
 
@@ -30,7 +31,7 @@ export function PluginNotesDialog({ value, onClose }: { value: PluginNotes | nul
         </div>
       </DialogBody>
       {value?.page ? <DialogFooter>
-        <Button variant='outline' size='sm' onClick={() => void openExternal(value.page || '')}>{t('查看发布页面')}</Button>
+        <Button variant='outline' size='sm' onClick={() => void openExternal(updatePageUrl(value.page))}>{t('查看发布页面')}</Button>
       </DialogFooter> : null}
     </DialogContent>
   </Dialog>

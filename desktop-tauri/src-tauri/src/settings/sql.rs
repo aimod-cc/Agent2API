@@ -72,7 +72,9 @@ fn open(path: &Path) -> rusqlite::Result<Connection> {
 /// 调用方对「读不出来」的处理与「还没有这份设置」完全相同（回落），
 /// 而上抛只会让每个调用点各写一遍同样的判断。
 pub(super) fn load(path: &Path) -> Option<String> {
-    let conn = open(path).ok()?;
+    // 图形初始化之前也会读取；只读连接不能提前创建新库，阻断旧目录迁移。
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    conn.busy_timeout(std::time::Duration::from_millis(5_000)).ok()?;
     let value: Option<Option<String>> = conn
         .query_row("SELECT value FROM kv WHERE key = ?1", rusqlite::params![KEY], |row| {
             row.get(0)

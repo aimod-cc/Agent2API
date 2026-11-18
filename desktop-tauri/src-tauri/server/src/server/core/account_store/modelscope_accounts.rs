@@ -31,7 +31,7 @@ impl AccountStore {
         let mut value = record.to_value();
         if let Some(object) = value.as_object_mut() {
             object.remove("accessToken");
-            object.insert("available".to_string(), Value::Bool(record.enabled()));
+            object.insert("available".to_string(), Value::Bool(record.has_credentials()));
             object.insert("hasToken".to_string(), Value::Bool(true));
         }
         value

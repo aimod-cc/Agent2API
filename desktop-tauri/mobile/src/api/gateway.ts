@@ -12,6 +12,7 @@ import type { CheckinCenter } from '../../../ui-shared/checkin'
 import type { HiddenAccountsSummary } from '../../../ui-shared/plugins'
 import type { PluginStartupSnapshot } from '../../../ui-shared/plugin-startup'
 import type { AccountSorting } from '../../../ui-shared/account-sorting'
+import type { AccountListQuery, AccountListPage, AccountListSummary } from '../../../ui-shared/accounts-list'
 import { logQueryString, type LogPage, type LogQuery } from '../../../ui-shared/logs'
 
 export type { LogEntry, LogPage } from '../../../ui-shared/logs'
@@ -31,6 +32,7 @@ export type RateLimitInfo = {
 
 export type Account = {
   id: string
+  detailsLoaded?: boolean
   provider?: string
   name?: string
   displayName?: string
@@ -48,6 +50,9 @@ export type Account = {
   hasAccessToken?: boolean
   accessTokenExpiresAt?: number | null
   hasRefreshToken?: boolean
+  canRefresh?: boolean
+  canSyncCredentials?: boolean
+  desktop?: boolean
   refreshTokenLongLived?: boolean
   refreshExpiresAt?: number | null
   refreshTokenExpiresAt?: number | null
@@ -57,6 +62,8 @@ export type Account = {
   isGuest?: boolean
   /** 按模型记的限流记录 */
   rateLimits?: Record<string, RateLimitInfo>
+  routingCooldowns?: Record<string, RateLimitInfo>
+  providerCooldown?: RateLimitInfo
   upstreamCooldownUntil?: number | null
   upstreamBlockedReason?: string
   [key: string]: unknown
@@ -75,6 +82,12 @@ export type SessionPayload = {
     currentAccountId?: string | null
     currentAccountIds?: Record<string, string | null>
     accounts?: Account[]
+    indexOnly?: boolean
+    total?: number
+    summary?: AccountListSummary
+    accountFeatures?: Record<string, unknown>
+    providerIcons?: Record<string, string>
+    desktopLaunch?: unknown
     providers?: ProviderSummary[]
     hiddenAccounts?: HiddenAccountsSummary
     sorting?: AccountSorting
@@ -89,7 +102,7 @@ export type SessionPayload = {
 }
 
 export function fetchSession(signal?: AbortSignal): Promise<SessionPayload> {
-  return apiCall<SessionPayload>('/api/session', { signal })
+  return apiCall<SessionPayload>('/api/session?accounts=index', { signal })
 }
 
 /** 账号列表（`GET /api/accounts` 返回的就是快照形状） */
@@ -102,6 +115,14 @@ export function fetchAccounts(signal?: AbortSignal): Promise<{
   currentAccountIds?: Record<string, string | null>
 }> {
   return apiCall('/api/accounts', { signal })
+}
+
+export function queryAccounts(query: AccountListQuery, signal?: AbortSignal): Promise<AccountListPage<Account>> {
+  return apiCall('/api/accounts/query', { method: 'POST', signal, body: { ...query, mobile: true, utcOffsetMinutes: -new Date().getTimezoneOffset() } })
+}
+
+export function fetchAccount(id: string, signal?: AbortSignal): Promise<Account> {
+  return apiCall(`/api/accounts/${encodeURIComponent(id)}`, { signal })
 }
 
 export function setAccountEnabled(id: string, enabled: boolean): Promise<unknown> {
@@ -186,7 +207,8 @@ export function fetchStatsSummary(range: StatsRange, signal?: AbortSignal, optio
 
 /* ─── 请求日志 ─────────────────────────────────── */
 
-export type AttemptDetail = { provider?: string; status?: number; error?: string }
+export type AttemptDetail = { provider?: string; status?: number; error?: string;
+  errorPolicy?: import('../../../ui-shared/routing-errors-types').ErrorPolicyRecord }
 
 export type RequestRow = {
   clientLabel?: string
@@ -263,6 +285,16 @@ export function fetchLogs(params: LogQuery, signal?: AbortSignal): Promise<LogPa
 
 /* ─── 签到中心 ─────────────────────────────────── */
 
+export type HomeCheckinSummary = { daily?: { todayDone?: number; todayEligible?: number } }
+
+export function fetchHomeCheckinSummary(signal?: AbortSignal): Promise<HomeCheckinSummary> {
+  return apiCall('/api/checkin-center?view=summary', { signal })
+}
+
+export function fetchTodayRequestCount(signal?: AbortSignal): Promise<Pick<StatsSummary, 'overview'>> {
+  return apiCall('/api/stats/summary?range=today&view=requestCount', { signal })
+}
+
 export function fetchCheckinCenter(signal?: AbortSignal): Promise<CheckinCenter> {
   return apiCall<CheckinCenter>('/api/checkin-center', { signal })
 }
@@ -283,6 +315,7 @@ export type ManageModel = {
   visibility?: string | null
   upstreamStatus?: 'undeployed' | null
   capabilities?: unknown
+  toolCallingMode?: 'emulated' | 'disabled' | null
   capSources?: unknown
   reasoningLevels?: unknown
   reasoningDefaultLevel?: unknown
@@ -527,6 +560,7 @@ export type UsageRow = import('../../../ui-shared/usage-query-state').UsageQuery
 export type UsageSnapshot = {
   queries?: import('../../../ui-shared/usage-query-task').UsageQueryTask[]
   sorting?: AccountSorting
+  listLimited?: Record<string, boolean>
   /** 全部行里最新的结论时刻 */
   at?: number
   results?: UsageRow[]
@@ -534,8 +568,9 @@ export type UsageSnapshot = {
 }
 
 /** 最近一次查询结果的快照（只读记录表，不触发上游查询） */
-export function fetchUsageSnapshot(signal?: AbortSignal): Promise<UsageSnapshot> {
-  return apiCall<UsageSnapshot>('/api/accounts/usage/snapshot', { signal })
+export function fetchUsageSnapshot(signal?: AbortSignal, ids?: string[]): Promise<UsageSnapshot> {
+  return ids ? apiCall<UsageSnapshot>('/api/accounts/usage/snapshot', { method: 'POST', body: { ids }, signal })
+    : apiCall<UsageSnapshot>('/api/accounts/usage/snapshot', { signal })
 }
 
 /** 手动查询单个账号余额（会真的打上游，可能慢） */
@@ -551,10 +586,10 @@ export function renameAccount(id: string, name: string): Promise<unknown> {
 }
 
 /** 不传 model 时清除账号冷却与全部模型限流标记。 */
-export function clearAccountRateLimits(id: string, model?: string): Promise<unknown> {
+export function clearAccountRateLimits(id: string, model?: string, includeProvider = false): Promise<unknown> {
   return apiCall(`/api/accounts/${encodeURIComponent(id)}/rate-limits/clear`, {
     method: 'POST',
-    body: model ? { model } : {},
+    body: model ? { model } : { includeProvider },
   })
 }
 

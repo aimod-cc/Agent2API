@@ -43,8 +43,9 @@ pub fn snapshot(port: u16) -> Value {
     if crate::server::config::parse::env_api_key_value().is_some() {
         keys.push(json!({ "id": "env", "name": "环境变量 Key", "allowedModels": [], "allowedProviders": [] }));
     }
+    let saved = store::load_snapshot();
     json!({
-        "clients": CLIENTS.iter().map(|def| client_view(def, &gateway)).collect::<Vec<_>>(),
+        "clients": CLIENTS.iter().map(|def| client_view(def, &gateway, &saved)).collect::<Vec<_>>(),
         "gateway": {
             "baseUrl": gateway,
             "defaultModel": crate::server::config::current().default_model(),
@@ -56,13 +57,16 @@ pub fn snapshot(port: u16) -> Value {
     })
 }
 
-fn client_view(def: &ClientDef, gateway: &str) -> Value {
+fn client_view(def: &ClientDef, gateway: &str, saved_snapshot: &Result<Value, String>) -> Value {
     let detection = paths::detect(def);
     let (mut live, read_error) = discover::read_live(def, &detection.path);
     for profile in &mut live {
         profile.kind = kind_of(&profile.base_url, gateway).into();
     }
-    let saved = store::load_with_revision(def.id);
+    let saved = match saved_snapshot {
+        Ok(value) => store::load_from_snapshot(value, def.id),
+        Err(error) => Err(error.clone()),
+    };
     let state = if read_error.is_some() {
         "read_error"
     } else if !detection.detected {
