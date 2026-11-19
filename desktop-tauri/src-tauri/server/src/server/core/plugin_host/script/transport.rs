@@ -144,7 +144,16 @@ async fn open_inner(params: &Value, body: Option<RequestBody>, pinned: Option<re
     let capture = params["trace"].as_str().and_then(super::trace::find);
     let mut sent_body = Value::Null;
     if let Some(body) = body {
-        request = match body { RequestBody::Bytes(bytes) => request.body(bytes), RequestBody::Multipart(form) => request.multipart(form) };
+        request = match body {
+            // 资源承载的正文在调试开启时同样留痕；未开启不解析，避免额外复制。
+            RequestBody::Bytes(bytes) => {
+                if capture.is_some() {
+                    sent_body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                }
+                request.body(bytes)
+            }
+            RequestBody::Multipart(form) => request.multipart(form),
+        };
     } else if let Some(body) = params["body"].as_str() {
         if body.len() > 120 * 1024 * 1024 {
             return Err(error("脚本请求体过大"));

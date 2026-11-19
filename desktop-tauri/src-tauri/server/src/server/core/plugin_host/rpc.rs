@@ -377,6 +377,11 @@ pub(super) fn rpc_error(provider: &str, error: proto::WireError, method: &str) -
         return GatewayError::with_status(503, "插件正在处理其他操作，等待超时，请稍后重试").with_code("plugin_busy")
             .with_retry_after_seconds(crate::server::core::runtime_capacity::retry_after_seconds());
     }
+    // 正文/图片超过插件能处理的尺寸：换个账号或重试都不会变好。
+    // 413 让编排层直接停下，并把可读的尺寸说明交给调用方。
+    if error.code.as_deref() == Some("plugin_request_too_large") {
+        return GatewayError::with_status(413, error.message).with_code("plugin_request_too_large");
+    }
     if error.code.as_deref() == Some("plugin_resource_limit") {
         let message = match error.message.as_str() {
             "Wasm 插件计算额度耗尽" => "Wasm 插件计算额度耗尽",

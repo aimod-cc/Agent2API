@@ -72,6 +72,7 @@ impl Invocation {
             Some("fuel_total") => "Wasm 插件计算额度耗尽（单次总额）",
             Some("stack") => "Wasm 插件执行栈溢出",
             Some("memory") => "Wasm 插件内存超限",
+            Some("input") => "Wasm 插件请求超过输入上限",
             Some("table") => "Wasm 插件表容量超限",
             Some("host_memory") => "Wasm 插件共享内存预算超限",
             Some("timeout") => "Wasm 插件调用超时",
