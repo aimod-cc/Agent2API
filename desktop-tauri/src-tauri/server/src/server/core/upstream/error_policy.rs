@@ -21,6 +21,8 @@ pub(crate) struct ErrorDecision {
     pub interval_ms: u64,
     pub floor_ms: u64,
     pub model: String,
+    pub unconfirmed_replay: bool,
+    pub stop_reason: Option<&'static str>,
 }
 
 impl ErrorDecision {
@@ -53,6 +55,11 @@ pub(crate) fn decide(provider: &str, model: &str, class: &UpstreamErrorClass, st
 
 pub(crate) fn decide_with(snapshot: &config::ErrorPolicySnapshot, provider: &str, model: &str, class: &UpstreamErrorClass,
     status: u16, body: &Value, local: bool, explicit_stop: bool) -> ErrorDecision {
+    decide_with_replay(snapshot, provider, model, class, status, body, local, explicit_stop, false)
+}
+
+fn decide_with_replay(snapshot: &config::ErrorPolicySnapshot, provider: &str, model: &str, class: &UpstreamErrorClass,
+    status: u16, body: &Value, local: bool, explicit_stop: bool, ordinary_inference: bool) -> ErrorDecision {
     let settings = &snapshot.settings;
     let code = evidence::machine_code(body);
     let kind = evidence::kind(provider, class, status, &code);
@@ -65,7 +72,10 @@ pub(crate) fn decide_with(snapshot: &config::ErrorPolicySnapshot, provider: &str
         (scope, _) => scope,
     };
     let account_model = matches!(code.as_str(), "account_model_unavailable" | "account_model_permissions_unknown" | "model_not_available_for_account");
-    let hard_stop = explicit_stop || evidence::hard_stop(status, &code)
+    let submission_unknown = code == "upstream_submission_unconfirmed";
+    let unconfirmed_replay = !explicit_stop && ordinary_inference && submission_unknown && status == 502
+        && kind == ErrorKind::Transient && rule.retry_unconfirmed;
+    let hard_stop = explicit_stop || evidence::hard_stop(status, &code) && !unconfirmed_replay
         || matches!(kind, ErrorKind::BadRequest | ErrorKind::Content)
         || local && status == 501 && !account_model && !matches!(code.as_str(), "unsupported" | "no_method" | "not_implemented"
             | "route_not_supported" | "subscription_sharing_route_not_supported" | "subscription_sharing_unsupported_capability");
@@ -86,7 +96,11 @@ pub(crate) fn decide_with(snapshot: &config::ErrorPolicySnapshot, provider: &str
         }
     }
     let exception = settings.overrides.iter().any(|item| item.id == rule.id);
-    ErrorDecision { rule, kind, action, scope, reset_at, hard_stop, exception, model: model.to_string(),
+    let stop_reason = if submission_unknown && hard_stop && !explicit_stop {
+        Some(if ordinary_inference { "上游接收情况不确定，当前规则未允许普通推理重发" }
+            else { "上游接收情况不确定，未满足普通推理重发条件" })
+    } else { None };
+    ErrorDecision { rule, kind, action, scope, reset_at, hard_stop, exception, model: model.to_string(), unconfirmed_replay, stop_reason,
         interval_ms: settings.interval_seconds.saturating_mul(1000), floor_ms: if matches!(kind, ErrorKind::RateLimit | ErrorKind::Quota) {
             settings.cooldown_floor_seconds.saturating_mul(1000)
         } else { 0 } }
@@ -100,7 +114,7 @@ pub(super) fn for_error(provider: &str, model: &str, error: &GatewayError, expli
 pub(super) fn for_error_with(snapshot: &config::ErrorPolicySnapshot, provider: &str, model: &str,
     error: &GatewayError, explicit_stop: bool) -> ErrorDecision {
     let local = error.native_response.is_none() && error.conversation_class.is_none();
-    decide_with(snapshot, provider, model, &evidence::gateway_class(error), error.status_code as u16, &evidence::detail(error), local, explicit_stop)
+    decide_with_replay(snapshot, provider, model, &evidence::gateway_class(error), error.status_code as u16, &evidence::detail(error), local, explicit_stop, error.unconfirmed_inference)
 }
 
 pub(super) fn classified_error(class: &UpstreamErrorClass, body: &Value) -> GatewayError {
@@ -145,7 +159,8 @@ pub(crate) fn note(telemetry: &super::usage::RequestTelemetry, decision: &ErrorD
     telemetry.note_error_policy(json!({ "ruleId": decision.rule.id, "ruleName": decision.rule.name,
         "kind": decision.kind, "action": decision.action, "scope": decision.scope,
         "resetAt": decision.reset_at, "timeSource": if !decision.cooldown() { "none" } else if decision.reset_at.is_some() { "upstream" } else { "fallback" },
-        "exception": decision.exception, "reason": reason.unwrap_or(action) }));
+        "exception": decision.exception, "configuredAction": decision.rule.action,
+        "unconfirmedReplay": decision.unconfirmed_replay, "reason": reason.or(decision.stop_reason).unwrap_or(action) }));
 }
 
 pub(super) fn remember_cooldown(service: &super::UpstreamService, settings: &config::ErrorSettings, account_id: &str, model: &str,
@@ -165,3 +180,6 @@ pub(super) fn exclude_provider(service: &super::UpstreamService, providers: &[&s
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -1,7 +1,7 @@
 import type { ErrorKind, ErrorRule, ErrorSettings, ErrorTranslate } from './routing-errors-types'
 import { actionLabels, duration, kindLabels, ruleLabel, scopeLabels } from './routing-errors-types'
 
-export type ErrorScenario = { id: string; label: string; status: number; kind: ErrorKind; code: string; seconds: number | null; scope: 'model' | 'account' | 'provider'; local?: boolean }
+export type ErrorScenario = { id: string; label: string; status: number; kind: ErrorKind; code: string; seconds: number | null; scope: 'model' | 'account' | 'provider'; local?: boolean; unconfirmedInference?: boolean }
 export function errorScenarios(t: ErrorTranslate): ErrorScenario[] {
   return [
     { id: 'rate', label: t('429 · 有等待时间'), status: 429, kind: 'rate_limit', code: 'rate_limit_error', seconds: 90, scope: 'model' },
@@ -11,6 +11,7 @@ export function errorScenarios(t: ErrorTranslate): ErrorScenario[] {
     { id: 'unsupported', label: t('501 · 上游不支持'), status: 501, kind: 'unsupported', code: 'unsupported', seconds: null, scope: 'provider' },
     { id: 'gateway', label: t('501 · 网关缺能力'), status: 501, kind: 'unsupported', code: 'gateway_capability_missing', seconds: null, scope: 'model', local: true },
     { id: 'transient', label: t('503 · 服务异常'), status: 503, kind: 'transient', code: 'service_unavailable', seconds: null, scope: 'model' },
+    { id: 'transport-unknown', label: t('502 · 普通推理连接中断或等待超时'), status: 502, kind: 'transient', code: 'upstream_submission_unconfirmed', seconds: null, scope: 'model', unconfirmedInference: true },
     { id: 'shared', label: t('429 · 共享限制'), status: 429, kind: 'rate_limit', code: 'provider_rate_limit', seconds: 90, scope: 'provider' },
     { id: 'auth', label: t('401 · 登录过期'), status: 401, kind: 'auth', code: 'token_expired', seconds: null, scope: 'account' },
     { id: 'input', label: t('413 · 请求太大'), status: 413, kind: 'bad_request', code: 'payload_too_large', seconds: null, scope: 'model' },
@@ -32,6 +33,9 @@ export function simulateError(settings: ErrorSettings, input: ErrorPreviewInput,
   const stop = (message: string) => { result.title = t('结束本次请求'); result.stopped = true; result.steps.push({ title: result.title, detail: message }); return result }
   if (input.started) return stop(t('回答已经交付给客户端，不从头重发或换号拼接另一份回答。'))
   if (input.uncertain) return stop(t('任务可能已执行。没有可靠的安全重放依据，不再次提交或换账号重复执行。'))
+  if (scenario.unconfirmedInference && !input.provider.startsWith('custom-')) return stop(t('上游接收情况不确定，未满足普通推理重发条件'))
+  if (scenario.unconfirmedInference && !rule.retryUnconfirmed) return stop(t('上游接收情况不确定，当前规则未允许普通推理重发'))
+  if (scenario.unconfirmedInference) result.steps.push({ title: t('允许提交不确定的普通推理重发'), detail: t('已允许普通推理重发，可能重复计费') })
   if (scenario.local) return stop(t('错误来自网关自身缺少能力。换其他账号或提供商不能补齐宿主功能。'))
   result.steps.push({ title: t('识别错误'), detail: `HTTP ${scenario.status} · ${kindLabels(t)[scenario.kind]} · ${scenario.code}` })
   result.steps.push({ title: ruleLabel(rule, t), detail: actionLabels(t)[rule.action] })

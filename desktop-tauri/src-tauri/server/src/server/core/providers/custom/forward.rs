@@ -8,6 +8,7 @@ use crate::server::core::protocol::native::WireProtocol;
 
 mod native;
 mod errors;
+mod replay;
 mod translate;
 use translate::ProtocolTranslateStream;
 
@@ -240,7 +241,7 @@ pub(crate) async fn forward(
     };
     let response = send_chat_request(&transport)
         .await
-        .map_err(|error| error.to_gateway_error())?;
+        .map_err(|error| replay::transport_error(error, &outbound))?;
 
     // ── 响应：2xx 打包 outcome；非 2xx 分类（见模块头）────────────────
     let status = response.status().as_u16();
@@ -556,6 +557,7 @@ async fn forward_translated(
     if let Some(capture) = telemetry.capture() {
         capture.reset_request(&url, provider_id, &headers, &payload);
     }
+    let ordinary_inference = replay::ordinary_inference(body) && replay::ordinary_inference(&payload);
     let payload = serde_json::to_string(&payload)
         .map_err(|error| GatewayError::with_status(500, format!("请求体序列化失败: {error}")))?;
 
@@ -578,7 +580,11 @@ async fn forward_translated(
     };
     let response = send_chat_request(&transport)
         .await
-        .map_err(|error| error.to_gateway_error())?;
+        .map_err(|error| {
+            let mut gateway = error.to_gateway_error();
+            gateway.unconfirmed_inference = !error.safe_to_retry && ordinary_inference;
+            gateway
+        })?;
 
     // ── 响应：2xx 打包 outcome；非 2xx 分类（与 chat 分支同一套）──────
     // 两种协议的错误体形状不同（responses 是 {error:{message}}、anthropic

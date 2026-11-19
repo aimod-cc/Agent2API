@@ -170,7 +170,7 @@ pub(super) async fn forward(
     } else {
         send.await
     }
-    .map_err(|error| error.to_gateway_error())?;
+    .map_err(|error| super::replay::transport_error(error, &outbound))?;
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
         let headers = native::response_headers(response.headers());

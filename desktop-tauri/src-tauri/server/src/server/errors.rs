@@ -51,6 +51,9 @@ pub struct GatewayError {
     pub(crate) conversation_class: Option<crate::server::core::providers::adapter::UpstreamErrorClass>,
     pub(crate) routing_error: Option<crate::server::core::upstream::error_policy::ErrorDecision>,
     pub(crate) native_response: Option<(crate::server::core::protocol::native::WireProtocol, Value, axum::http::HeaderMap)>,
+    /// Host-only evidence from an ordinary custom-provider inference send failure.
+    /// Never reconstructed from upstream JSON, plugin metadata or an error code.
+    pub(crate) unconfirmed_inference: bool,
     /// 只随受保护的登录任务返回，不进入模型 API 的错误响应。
     pub(crate) login_diagnostic: Option<crate::server::core::login::LoginDiagnostic>,
 }
@@ -77,6 +80,7 @@ impl GatewayError {
             routing_error: None,
             native_response: None,
             login_diagnostic: None,
+            unconfirmed_inference: false,
         }
     }
 
@@ -93,6 +97,7 @@ impl GatewayError {
             routing_error: None,
             native_response: None,
             login_diagnostic: None,
+            unconfirmed_inference: false,
         }
     }
 

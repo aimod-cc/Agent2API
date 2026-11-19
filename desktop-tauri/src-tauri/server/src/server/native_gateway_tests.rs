@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use tower::ServiceExt;
 
 mod cases;
+mod transport_retry;
 
 #[derive(Clone)]
 struct Reply {

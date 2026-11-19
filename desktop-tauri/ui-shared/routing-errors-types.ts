@@ -4,6 +4,7 @@ export type CooldownMode = 'upstream' | 'fixed' | 'protection' | 'none'
 export type CooldownScope = 'auto' | 'model' | 'account' | 'provider'
 export type ErrorRule = {
   id: string; name: string; kind: ErrorKind; statuses: number[]; code: string; provider: string; model: string; enabled: boolean
+  retryUnconfirmed?: boolean
   action: ErrorAction; cooldown: CooldownMode; fallbackSeconds: number; exponential: boolean; fallbackCapSeconds: number; scope: CooldownScope
 }
 export type ErrorSettings = {
@@ -18,7 +19,7 @@ export type ErrorPolicyView = {
 }
 export type ErrorPolicyApi = { load(): Promise<ErrorPolicyView>; save(payload: { settings: ErrorSettings; revision: string }): Promise<ErrorPolicyView> }
 export type ErrorPolicyRecord = { ruleId?: string; ruleName?: string; kind?: ErrorKind; action?: ErrorAction; scope?: CooldownScope;
-  resetAt?: number | null; timeSource?: 'upstream' | 'fallback' | 'none'; exception?: boolean; reason?: string }
+  resetAt?: number | null; timeSource?: 'upstream' | 'fallback' | 'none'; exception?: boolean; reason?: string; configuredAction?: ErrorAction; unconfirmedReplay?: boolean }
 export type ErrorTranslate = (key: string, variables?: Record<string, string | number>) => string
 export const ERROR_POLICY_CHANGED = 'wb:routing-errors-changed'
 
