@@ -173,6 +173,8 @@ impl Harness {
             auth,
             billing,
             request_stats: Arc::new(RequestStats::with_db(Some(db.clone()), Retention::default)),
+            advertisements: crate::server::core::advertisements::AdvertisementCache::new(Some(db.clone())),
+            panel_events_stop: tokio_util::sync::CancellationToken::new(),
             db: Some(db),
             upgrade_pending: Arc::new(AtomicBool::new(false)),
             startup_maintenance: Arc::new(AtomicBool::new(false)),

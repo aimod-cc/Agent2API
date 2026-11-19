@@ -2539,7 +2539,7 @@ fn frame_policy_of(adapter: &dyn ProviderAdapter, model: &str) -> super::sse::Fr
 async fn send_with_retry(
     adapter: &dyn ProviderAdapter, transport: &TransportRequest, budget: &mut RetryBudget,
     capture: Option<&crate::server::core::debug_traffic::TrafficCapture>,
-    telemetry: &Arc<super::usage::RequestTelemetry>, _degraded: bool,
+    telemetry: &std::sync::Arc<super::usage::RequestTelemetry>, _degraded: bool,
     images: Option<crate::server::core::providers::images::ImageResponseKind>,
     network: Option<&crate::server::core::providers::policy::NetworkPolicy>,
 ) -> Result<super::images::ImageResponse, OutboundFailure> {
