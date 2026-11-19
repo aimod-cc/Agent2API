@@ -1,4 +1,5 @@
 import { t } from '../i18n'
+import { newId } from '../../../ui-shared/ids'
 import type { AgentClient, AgentModel, AgentOperation, AgentProfile } from './agent-types'
 import { modelLevels } from './agent-model-config'
 
@@ -16,7 +17,7 @@ export function blankModel(): AgentModel { return { id: '', name: '', reasoningL
 export function blankProfile(client: AgentClient, gateway: string): AgentProfile {
   const protocol = client.protocols[0] || ''
   return {
-    id: `p-${crypto.randomUUID()}`, name: '', kind: client.supportsGateway ? 'gateway' : 'relay', protocol,
+    id: `p-${newId()}`, name: '', kind: client.supportsGateway ? 'gateway' : 'relay', protocol,
     baseUrl: client.supportsGateway ? protocol === 'anthropic' ? gateway : `${gateway}/v1` : '',
     model: '', provider: '', effort: '', enabled: true, default: false, note: '',
     models: [],

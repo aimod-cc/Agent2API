@@ -1,5 +1,6 @@
 import * as React from 'react'
 import { Badge, Button, Card, CardAction, CardContent, CardFooter, CardHeader, CardTitle, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Field, FieldLabel, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@ui'
+import { newId } from './ids'
 import { ErrorChoice, ErrorIcon, ErrorNumber, ErrorText, ErrorToggle } from './routing-errors-controls'
 import { actionLabels, cooldownSummary, kindLabels, ruleLabel, scopeLabels, type CooldownMode, type CooldownScope, type ErrorAction, type ErrorKind, type ErrorRule, type ErrorSettings, type ErrorTranslate } from './routing-errors-types'
 
@@ -68,7 +69,7 @@ export function ErrorRules({ settings, providers, t, onChange, onPreview }: { se
   }
   const add = () => {
     const source = settings.rules.find(rule => rule.kind === 'unsupported') || settings.rules[0]
-    if (source) setEditor({ exception: true, rule: { ...structuredClone(source), id: `rule-${crypto.randomUUID()}`, name: t('新例外规则'), provider: providers[0]?.id || '*', statuses: [501] } })
+    if (source) setEditor({ exception: true, rule: { ...structuredClone(source), id: `rule-${newId()}`, name: t('新例外规则'), provider: providers[0]?.id || '*', statuses: [501] } })
   }
   return <>
     <Card className='re-rules-card'><CardHeader><CardTitle>{t('全局处理规则')}</CardTitle></CardHeader>
