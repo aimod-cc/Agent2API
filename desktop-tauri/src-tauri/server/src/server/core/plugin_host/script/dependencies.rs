@@ -4,13 +4,19 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-pub(super) fn entries(package: &Value) -> Vec<String> {
+/// 清单里明确声明的入口（exports / main），不含任何猜测出来的兜底路径。
+pub(super) fn declared_entries(package: &Value) -> Vec<String> {
     fn pick(value: &Value) -> Option<&str> {
         value.as_str().or_else(|| ["import", "default", "node", "require", "bun"].iter()
             .find_map(|key| value.get(*key).and_then(pick)))
     }
-    let mut paths = [package.get("exports").and_then(|exports| exports.get("./server")).and_then(pick), package["main"].as_str(),
-        package.get("exports").and_then(|exports| exports.get(".")).and_then(pick), package.get("exports").and_then(pick)].into_iter().flatten().map(str::to_string).collect::<Vec<_>>();
+    [package.get("exports").and_then(|exports| exports.get("./server")).and_then(pick), package["main"].as_str(),
+        package.get("exports").and_then(|exports| exports.get(".")).and_then(pick), package.get("exports").and_then(pick)]
+        .into_iter().flatten().map(str::to_string).collect()
+}
+
+pub(super) fn entries(package: &Value) -> Vec<String> {
+    let mut paths = declared_entries(package);
     paths.extend(["index.ts", "index.tsx", "index.js", "index.mjs", "index.cjs"].iter().map(|path| path.to_string()));
     paths
 }

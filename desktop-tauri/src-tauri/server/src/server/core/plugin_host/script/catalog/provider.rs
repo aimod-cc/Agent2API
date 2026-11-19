@@ -137,39 +137,77 @@ fn relative(parent: &str, import: &str) -> Option<String> {
     Some(segments.join("/"))
 }
 
+/// 清单自己声明的提供商。有声明就不再读源码，未声明才回退到入口文件扫描。
+pub(super) fn declared_providers(manifest: &Value) -> Option<Vec<String>> {
+    fn valid(value: &str) -> bool {
+        !value.is_empty() && value.len() <= 128
+            && value.bytes().all(|ch| ch.is_ascii_alphanumeric() || b"-_.".contains(&ch))
+    }
+    fn push(providers: &mut BTreeSet<String>, value: &str) {
+        if valid(value) { providers.insert(value.to_string()); }
+    }
+    let magpie = &manifest["magpie"];
+    let mut providers = BTreeSet::new();
+    match &magpie["providers"] {
+        Value::Array(items) => for item in items {
+            if let Some(value) = item.as_str() { push(&mut providers, value); }
+            else if let Some(value) = item.get("id").and_then(Value::as_str) { push(&mut providers, value); }
+        },
+        Value::String(value) => push(&mut providers, value),
+        _ => {}
+    }
+    match &magpie["provider"] {
+        Value::String(value) => push(&mut providers, value),
+        Value::Object(value) => if let Some(id) = value.get("id").and_then(Value::as_str) { push(&mut providers, id); },
+        _ => {}
+    }
+    if providers.is_empty() && magpie["kind"].as_str() != Some("provider") { return None; }
+    Some(providers.into_iter().collect())
+}
+
 // 只读取入口及有限的相对导入，不为插件发现执行任何第三方代码。
 pub(super) async fn inspect(repository: &str, reference: &str, manifest: &Value) -> Result<Evidence, Failure> {
-    let entries = super::super::dependencies::entries(manifest);
-    let mut pending: VecDeque<_> = entries.into_iter().map(|path| (path.trim_start_matches("./").to_string(), true, 0)).collect();
-    pending.extend(["src/index.ts", "src/index.js", "src/index.mjs", "src/plugin.ts"].map(|path| (path.to_string(), false, 0)));
+    let declared = super::super::dependencies::declared_entries(manifest);
+    let has_declared = !declared.is_empty();
+    let mut pending: VecDeque<_> = declared.into_iter().map(|path| (path.trim_start_matches("./").to_string(), true, 0)).collect();
+    // 清单已经指明入口时，不再把根目录的一排 index.* 全试一遍；
+    // 只保留两个最常见的源码入口作为兜底（有些包把 main 指向未提交的 dist）。
+    let fallback: &[&str] = if has_declared { &["src/index.ts", "src/index.js"] }
+        else { &["index.ts", "index.tsx", "index.js", "index.mjs", "index.cjs", "src/index.ts", "src/index.js"] };
     let mut seen = BTreeSet::new();
     let mut evidence = Evidence { entry_present: false, provider: false, providers: Vec::new() };
     let mut downloaded = 0;
-    while let Some((path, entry, depth)) = pending.pop_front() {
-        if seen.len() >= 16 || downloaded >= 6 * 1024 * 1024 { break; }
-        if !seen.insert(path.clone()) { continue; }
-        if ![".ts", ".tsx", ".js", ".mjs", ".cjs"].iter().any(|suffix| path.ends_with(suffix)) { continue; }
-        let url = super::github::raw_url(repository, reference, &path)?;
-        let Some(bytes) = network::github_bytes(&url, 2 * 1024 * 1024).await? else { continue; };
-        downloaded += bytes.len();
-        evidence.entry_present |= entry;
-        let Ok(source) = std::str::from_utf8(&bytes) else { continue; };
-        if let Some(providers) = auth_provider(source) {
-            evidence.provider = true;
-            evidence.providers = providers;
-            return Ok(evidence);
-        }
-        if depth >= 3 { continue; }
-        for import in imports(source).into_iter().rev() {
-            let Some(path) = relative(&path, &import) else { continue; };
-            if path.rsplit('/').next().is_some_and(|file| file.contains('.')) {
-                pending.push_front((path, false, depth + 1));
-            } else {
-                for suffix in [".ts", ".js", ".mjs", "/index.ts", "/index.js"].into_iter().rev() {
-                    pending.push_front((format!("{path}{suffix}"), false, depth + 1));
+    let mut fallback_added = false;
+    loop {
+        while let Some((path, entry, depth)) = pending.pop_front() {
+            if seen.len() >= 16 || downloaded >= 6 * 1024 * 1024 { return Ok(evidence); }
+            if !seen.insert(path.clone()) { continue; }
+            if ![".ts", ".tsx", ".js", ".mjs", ".cjs"].iter().any(|suffix| path.ends_with(suffix)) { continue; }
+            let url = super::github::raw_url(repository, reference, &path)?;
+            let Some(bytes) = network::github_bytes(&url, 2 * 1024 * 1024).await? else { continue; };
+            downloaded += bytes.len();
+            evidence.entry_present |= entry;
+            let Ok(source) = std::str::from_utf8(&bytes) else { continue; };
+            if let Some(providers) = auth_provider(source) {
+                evidence.provider = true;
+                evidence.providers = providers;
+                return Ok(evidence);
+            }
+            if depth >= 3 { continue; }
+            for import in imports(source).into_iter().rev() {
+                let Some(path) = relative(&path, &import) else { continue; };
+                if path.rsplit('/').next().is_some_and(|file| file.contains('.')) {
+                    pending.push_front((path, false, depth + 1));
+                } else {
+                    for suffix in [".ts", ".js", ".mjs", "/index.ts", "/index.js"].into_iter().rev() {
+                        pending.push_front((format!("{path}{suffix}"), false, depth + 1));
+                    }
                 }
             }
         }
+        if fallback_added { break; }
+        fallback_added = true;
+        pending.extend(fallback.iter().map(|path| (path.to_string(), false, 0)));
     }
     Ok(evidence)
 }
