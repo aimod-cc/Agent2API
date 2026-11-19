@@ -8,7 +8,9 @@ use super::types::{self, Entry};
 
 pub(super) const TOPIC: &str = "magpie-plugin";
 const LIMIT: usize = 1000;
-const MANIFEST_TTL: i64 = 6 * 3_600_000;
+/// 搜索里已经带了 pushed_at：仓库没推新提交时内容不会变，没必要按固定周期重扫。
+/// 这里只作为「一次都没推送过、但内容可能被改写」的兜底回看周期。
+const MANIFEST_TTL: i64 = 7 * 24 * 3_600_000;
 
 pub(super) struct Repositories {
     pub items: Vec<Value>,
