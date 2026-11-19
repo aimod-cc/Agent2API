@@ -69,6 +69,26 @@ export function isSnapshotWallet(value: unknown): boolean {
   return wallet?.snapshot === true || wallet?.type === 'magicubes'
 }
 
+/** 钱包里只描述运行维度的条目，不是余额：SOLO 并发/套餐状态、快请求每月配额。 */
+const NON_BALANCE_WALLET_TYPES = new Set(['solo_parallel', 'solo_package', 'fast_request_per'])
+
+/**
+ * 从 `wallets` 里找第一个真正代表余额的读数。
+ *
+ * `available` 为空时界面会用钱包兜底显示，但钱包里既有「积分池」也有
+ * 「SOLO 并发 2 路」这类附加维度 —— 直接取第一个带数字的钱包会把并发数
+ * 当成余额（实测 Trae 账号显示成「2 积分」）。
+ */
+export function balanceWalletOf(wallets: readonly unknown[]): Record<string, unknown> | null {
+  for (const value of wallets) {
+    const wallet = object(value)
+    if (!wallet || NON_BALANCE_WALLET_TYPES.has(String(wallet.type || ''))) continue
+    if (isSnapshotWallet(wallet)) continue
+    if (usageNumberOrNull(wallet.balance) !== null) return wallet
+  }
+  return null
+}
+
 /** 旧版魔粒明细把钱包余额和已用次数都写成了 remain，兼容时只转换这一种钱包。 */
 export function creditPacksOf(value: unknown): UsageObject[] {
   const usage = object(value)

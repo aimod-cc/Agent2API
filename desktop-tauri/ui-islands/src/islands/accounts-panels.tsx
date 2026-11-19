@@ -58,7 +58,7 @@ import { UsageWindowsCell, usageWindows } from './accounts-usage-windows'
 import { GroupBalanceBadge, groupBalanceOf } from './accounts-usage-group'
 import { accountReloginText } from './accounts-authorization'
 import { credentialExpiryRowsOf, credentialExpiryText, type CredentialExpiryRow } from '../../../ui-shared/credential-expiry'
-import { creditStatisticsWalletsOf, isSnapshotWallet, snapshotReadingsOf, usageAggregateOf, usageAvailableViewOf, usageEmptyStateOf, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
+import { balanceWalletOf, creditStatisticsWalletsOf, isSnapshotWallet, snapshotReadingsOf, usageAggregateOf, usageAvailableViewOf, usageEmptyStateOf, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
 import { LimitDetailButton, limitRowsOf } from './accounts-limit-detail'
 import { upstreamCooldownOf, upstreamSuspendedReasonOf } from '../../../ui-shared/account-upstream-state'
 import { LimiterStatus } from './accounts-limiter-status'
@@ -625,9 +625,7 @@ export function usageSummary(entry: UsageEntry): { text: string; kind: string; t
     // `usagePercent`：issue #242 的「可用 — %」）—— 此时读**钱包里的实际读数**
     // （`balance` + 自己的 `unit`），有可读的钱包就不再拼「—」。钱包也没有
     // （真读空了）才落回「—」，如实说没读到。
-    const fallbackWallet = data.available == null
-      ? wallets.find(wallet => numberOrNull(wallet?.balance) !== null)
-      : undefined
+    const fallbackWallet = data.available == null ? balanceWalletOf(wallets) : null
     const availableView = usageAvailableViewOf(data, t)
     const available = availableView
       ? availableView

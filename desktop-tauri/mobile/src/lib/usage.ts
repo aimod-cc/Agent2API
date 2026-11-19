@@ -13,7 +13,7 @@
 
 import type { UsageRow, UsageSnapshot } from '../api/gateway'
 import { t, locale } from '../i18n'
-import { creditStatisticsWalletsOf, recordReadingsOf, snapshotReadingsOf, usageAggregateOf, usageAvailableViewOf, usageEmptyStateOf, usageNumberOrNull, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
+import { balanceWalletOf, creditStatisticsWalletsOf, recordReadingsOf, snapshotReadingsOf, usageAggregateOf, usageAvailableViewOf, usageEmptyStateOf, usageNumberOrNull, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
 import { formatStamp } from './format'
 import { mergeUsageQueryRow, usageQueryFailureStatus, usageQueryNoticeOf } from '../../../ui-shared/usage-query-state'
 import { creditExpirySummaryOf, creditExpiryText, creditExpiryUnitOf, expiringCreditsOf } from '../../../ui-shared/credit-expiry'
@@ -196,7 +196,7 @@ export function usageText(row?: UsageRow, now = Date.now()): UsageView {
     const wallets = creditStatisticsWalletsOf(data) ?? data.wallets.filter(
       (item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object',
     )
-    const lead = wallets.find(item => usageNumberOrNull(item.balance) !== null)
+    const lead = balanceWalletOf(wallets)
     if (lead) {
       const walletUnit = typeof lead.unit === 'string' && lead.unit.trim() ? usageUnitLabel(lead.unit.trim(), t) : unitOf(data)
       const detail = wallets
