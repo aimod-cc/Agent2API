@@ -107,7 +107,15 @@ async fn read(row: &Value, previous: Option<&Entry>, force: bool) -> Result<Opti
     let description = types::text(&row["description"], 8000);
     if entry.summary.is_empty() && !description.is_empty() { entry.summary.insert("en".to_string(), description); }
     apply_repository(&mut entry, row);
-    let npm = network::npm(name).await?.filter(|npm| npm["name"].as_str() == Some(name)
+    // npm 只是补充信息：查不到或被上游限流时保留已读到的 GitHub 清单，
+    // 否则这一轮读到的文件全部作废，下一轮又把整个仓库重读一遍。
+    let npm = match network::npm(name).await {
+        Ok(value) => value,
+        Err(error) => {
+            crate::server::logging::verbose("[PluginCatalog]", &format!("{repository}：{}", error.message));
+            None
+        }
+    }.filter(|npm| npm["name"].as_str() == Some(name)
         && npm["version"].as_str().is_some_and(|version| !version.is_empty() && super::super::source::valid_version(version))
         && types::repository(&npm["repository"]).is_some_and(|repo| repo.eq_ignore_ascii_case(&repository)));
     if let Some(npm) = &npm {
