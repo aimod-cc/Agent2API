@@ -45,11 +45,18 @@ function credentialFieldOf(
   return ''
 }
 
-/** 按文件内容推断归属：`auth.domain`（官方 .info）或顶层 `domain`（扁平形） */
+/**
+ * 按文件内容推断归属：`auth.domain`（官方 .info）或顶层 `domain`（扁平形）；
+ * 域名推不出时再看 `realm` / `region` / `edition`（wb2api 导出带 realm）。
+ * 国内版历史出口 `copilot.tencent.com` 与新版 `workbuddy.cn` 都要认。
+ */
 function editionFromFile(record: Record<string, unknown>): Edition | null {
   const domain = credentialFieldOf(record, ['domain'], 'auth')
-  if (/workbuddy\.ai/i.test(domain)) return 'intl'
-  if (/workbuddy\.cn|codebuddy\.cn/i.test(domain)) return 'cn'
+  if (/workbuddy\.ai|codebuddy\.ai/i.test(domain)) return 'intl'
+  if (/workbuddy\.cn|codebuddy\.cn|copilot\.tencent\.com/i.test(domain)) return 'cn'
+  const realm = credentialFieldOf(record, ['realm', 'region', 'edition'], '').toLowerCase()
+  if (['intl', 'international', 'global', 'ai', 'workbuddy-ai', 'workbuddyai', 'en'].includes(realm)) return 'intl'
+  if (['cn', 'china', 'mainland', 'workbuddy', 'zh', 'cn-intl'].includes(realm)) return 'cn'
   return null
 }
 
