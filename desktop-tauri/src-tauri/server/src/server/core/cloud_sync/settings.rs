@@ -458,6 +458,23 @@ pub(crate) fn update_status_for(
     save(&settings)
 }
 
+/// 一次自动上传失败的结果：**无论是否写库成功**都带出本次算好的退避。
+///
+/// ── 为什么不是 `Result` ────────────────────────────────────
+/// 写库失败（DB 只读 / 磁盘满）时，等待循环仍必须按本次算出的 `retry_at` 退避；
+/// 只返回 `Err` 会让调用方拿不到截止时间，只能立刻重试 —— 上传与写库同时失败
+/// 就是一条没有间隔的热循环。
+pub(crate) struct AutoFailureRecord {
+    /// 本次失败尝试的时刻。与持久化的 `last_attempt_at` 对齐，用来判断
+    /// 「库里的状态是不是这一次写的」。
+    pub attempt_at: i64,
+    /// 本次应等待到的时刻（`0` = 目标已变，不该再等）
+    pub retry_at: i64,
+    pub last_sync_at: Option<i64>,
+    /// 写库失败的原因；有值时调用方只记日志，退避仍用 `retry_at`
+    pub save_error: Option<String>,
+}
+
 /// 记录一次自动上传失败，退避按**写入时**生效的间隔计算。
 ///
 /// ── 为什么不在调用方算好再写 ────────────────────────────────
@@ -468,22 +485,25 @@ pub(crate) fn update_status_for(
 ///
 /// `backoff_for` 把「退避策略」留在调用方（`auto_sync` 里有失败次数的指数退避），
 /// 这里只保证「算的时候用的是当前间隔」。
-///
-/// 返回 `(retry_at, last_sync_at)`：前者给等待循环，后者给它的目标一致性判断。
 pub(crate) fn record_auto_failure(
     target: &CloudSyncSettings,
     backoff_for: impl FnOnce(u32, u32) -> i64,
     error: &str,
-) -> Result<(i64, Option<i64>), String> {
+) -> AutoFailureRecord {
     let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut settings = load();
+    let now = crate::server::logging::now_ms();
     if settings.target_id() != target.target_id() {
         // 目标已经变了，这次失败不属于当前通道：不写状态，也不制造退避
-        return Ok((0, settings.status.last_sync_at));
+        return AutoFailureRecord {
+            attempt_at: now,
+            retry_at: 0,
+            last_sync_at: settings.status.last_sync_at,
+            save_error: None,
+        };
     }
     let failures = settings.status.consecutive_failures.saturating_add(1);
     let backoff = backoff_for(settings.auto_sync_interval_minutes, failures);
-    let now = crate::server::logging::now_ms();
     let retry_at = now.saturating_add(backoff);
     settings.status.last_attempt_at = Some(now);
     settings.status.retry_at = Some(retry_at);
@@ -491,8 +511,13 @@ pub(crate) fn record_auto_failure(
     settings.status.last_error = Some(error.to_string());
     settings.status.last_error_source = Some("auto".to_string());
     let last_sync_at = settings.status.last_sync_at;
-    save(&settings)?;
-    Ok((retry_at, last_sync_at))
+    let save_error = save(&settings).err();
+    AutoFailureRecord {
+        attempt_at: now,
+        retry_at,
+        last_sync_at,
+        save_error,
+    }
 }
 
 /// 保存请求：界面传来的形态 → 落库形态。

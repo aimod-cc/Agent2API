@@ -142,6 +142,9 @@ async fn run_worker(db: Db, mut rx: Receiver<()>) {
 
 struct RetryDelay {
     at: i64,
+    /// 这次失败尝试的时刻。只有库里 `last_attempt_at` 与它相同，才说明持久化的
+    /// `retry_at` 是本次写的；否则（写库失败）库里的可能是上一次的旧值。
+    attempt_at: i64,
     target_id: String,
     last_sync_at: Option<i64>,
 }
@@ -153,14 +156,21 @@ async fn wait_until_ready(rx: &mut Receiver<()>, retry: Option<&RetryDelay>) -> 
             return false;
         }
         let now = logging::now_ms();
-        // 持久化的 retry_at 可能刚被 apply_save 收紧（用户把间隔改小了）；
-        // 缓存的 at 只作「写库失败」时的兜底 —— 取小才能让新间隔立刻生效。
+        // 只有持久化状态确实来自本次尝试，才允许它收紧截止时间：写库失败时
+        // 库里留着上一次的 retry_at（可能早已到期），直接取较小值会让循环立刻
+        // 重试。用户改小间隔时 apply_save 不动 last_attempt_at，标识仍然相同，
+        // 收紧照样生效。
         let retry_floor = retry
             .filter(|delay| {
                 delay.target_id == settings.target_id()
                     && delay.last_sync_at == settings.status.last_sync_at
             })
-            .map(|delay| delay.at.min(settings.status.retry_at.unwrap_or(delay.at)))
+            .map(|delay| match settings.status.last_attempt_at {
+                Some(at) if at == delay.attempt_at => {
+                    delay.at.min(settings.status.retry_at.unwrap_or(delay.at))
+                }
+                _ => delay.at,
+            })
             .unwrap_or(0);
         let due = settings.auto_sync_due_at().max(retry_floor);
         if due <= now {
@@ -194,7 +204,7 @@ async fn run_once(db: &Db) -> RunOutcome {
         Err(error) => {
             // 退避在 SETTINGS_LOCK 内按「当前间隔」计算：上传期间用户可能把间隔
             // 改小了，用开始时那份快照算会把旧的长退避写回去
-            let saved = settings::record_auto_failure(
+            let record = settings::record_auto_failure(
                 &settings,
                 |minutes, failures| {
                     RETRY_BASE_MS
@@ -204,17 +214,19 @@ async fn run_once(db: &Db) -> RunOutcome {
                 },
                 &error,
             );
-            let detail = saved
-                .as_ref()
-                .err()
+            let detail = record
+                .save_error
+                .as_deref()
                 .map(|cause| format!("；同步状态未保存：{cause}"))
                 .unwrap_or_default();
             logging::log_with_level("[CloudSync]", &format!("⚠️ 云同步（自动）失败：{error}{detail}"), "warn");
-            let (at, last_sync_at) = saved.unwrap_or((logging::now_ms(), settings.status.last_sync_at));
+            // 写库失败也照样用本次算出的 retry_at：没有它，上传与写库同时失败
+            // 就是一条没有间隔的热循环
             RunOutcome::Retry(RetryDelay {
-                at,
+                at: record.retry_at,
+                attempt_at: record.attempt_at,
                 target_id: settings.target_id(),
-                last_sync_at,
+                last_sync_at: record.last_sync_at,
             })
         }
     }
