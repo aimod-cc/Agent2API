@@ -707,8 +707,7 @@ pub fn shim_js() -> &'static str {
     // 权限确认只允许用户主动提交，管理会话或 Key 恢复不能重发这条 PATCH。
     var noAuthReplay = requestMethod === 'PATCH' && requestPath === '/api/plugins/permissions';
     // 覆盖具名回调桥和动态交互的直接 api_request；登录材料只发一次，不因 401 重放。
-    var sensitiveLogin = requestMethod === 'POST' && (requestPath.indexOf('/api/session/login/') === 0 || requestPath === '/api/accounts'
-      || /^\/api\/accounts\/[^/]+\/credentials\/cline-free$/.test(requestPath));
+    var sensitiveLogin = requestMethod === 'POST' && (requestPath.indexOf('/api/session/login/') === 0 || requestPath === '/api/accounts');
     noAuthReplay = noAuthReplay || sensitiveLogin || requestPath.indexOf('/api/plugins/desktop-import/chatglm/') === 0
       || requestPath.indexOf('/api/plugins/enrollment/') === 0
       || requestMethod === 'POST' && (requestPath === '/api/accounts/refresh' || requestPath === '/api/accounts/refresh-expiring'
@@ -1150,10 +1149,14 @@ pub fn shim_js() -> &'static str {
       // 工厂延后到全局锁生效后执行，避免第二次调用先 POST 再被锁拒绝。
       var startedAt = performance.now();
       var started = await (typeof startRequest === 'function' ? startRequest(flow) : startRequest);
+      if (flow.canceled || currentFlow !== flow) {
+        var canceledState = started && (started.state || started.flow);
+        if (canceledState && !flow.managed) await cancelWebLogin(String(canceledState));
+        throw canceledError();
+      }
       flow.started = started || {};
       flow.state = String(started && (started.state || started.flow) || '');
       if (!flow.state.trim()) throw new Error('网关未返回登录流程状态');
-      if (flow.canceled || currentFlow !== flow) await cancelWebLogin(flow.state);
       var authUrl = started && Object.prototype.hasOwnProperty.call(started, 'url')
         ? started.url : started && started.authUrl;
       if (authUrl == null) authUrl = '';
@@ -1269,7 +1272,7 @@ pub fn shim_js() -> &'static str {
         args.socialRestore, args.options);
     },
     login_state: function () { return window.workbuddyDesktop.getLoginState(); },
-    cancel_login: function () { return window.workbuddyDesktop.cancelLogin(); },
+    cancel_login: function (args) { return window.workbuddyDesktop.cancelLogin(args && args.state); },
     api_request: function (args) {
       var request = (args && args.request) || {};
       return httpCall(request.method || 'GET', request.path || '/', request.body, false,
@@ -1663,9 +1666,11 @@ pub fn shim_js() -> &'static str {
       }
       return runLoginFlow(target, async function (flow) {
         flow.methodIndex = options.methodIndex;
+        flow.requestId = typeof options.requestId === 'string' ? options.requestId.trim() : '';
         flow.method = await selectedLoginMethod(target, options);
         if (flow.canceled) throw canceledError();
         var body = { provider: target, mode: 'external', methodIndex: options.methodIndex, locale: options.locale || 'zh-CN' };
+        if (flow.requestId) body.requestId = flow.requestId;
         if (Object.prototype.hasOwnProperty.call(options, 'inputs')) body.inputs = options.inputs;
         if (Object.prototype.hasOwnProperty.call(options, 'proxy')) body.proxy = options.proxy;
         return call('POST', '/api/session/login/start', body);
@@ -1684,11 +1689,13 @@ pub fn shim_js() -> &'static str {
       if (expectedState !== undefined) {
         var owner = currentFlow;
         var targetState = String(expectedState);
-        if (owner && owner.managed && (owner.state !== targetState || owner.sourceLost
+        var matchesOwner = Boolean(owner && (owner.state === targetState
+          || (owner.requestId && owner.requestId === targetState)));
+        if (owner && owner.managed && (!matchesOwner || owner.sourceLost
           || owner.managementGeneration !== managementGeneration)) {
           throw new Error('管理会话已变化，本次登录资格已失效；不会继续查询或重发原流程。');
         }
-        if (owner && owner.state === targetState) {
+        if (matchesOwner) {
           if (owner.managed && (owner.saved === null || owner.saved === true || owner.phase === 'unconfirmed')) {
             owner.readOnlyClosed = true; closeWebOverlay(true); loginActive = false; loginProvider = ''; emitLogin();
             return false;
@@ -1697,7 +1704,10 @@ pub fn shim_js() -> &'static str {
           closeWebOverlay(true);
           loginActive = false; loginProvider = ''; emitLogin();
         }
-        return call('POST', '/api/session/login/cancel', { state: targetState });
+        var cancelBody = { state: owner && matchesOwner && owner.state ? owner.state : targetState };
+        if (owner && matchesOwner && owner.requestId) cancelBody.requestId = owner.requestId;
+        var res = await call('POST', '/api/session/login/cancel', cancelBody).catch(function () { return null; });
+        return matchesOwner ? { canceled: true } : res;
       }
       // 桌面壳只记一个活动登录；网页端由本状态机驱动。
       //
@@ -1722,7 +1732,7 @@ pub fn shim_js() -> &'static str {
         return false;
       }
       var wasActive = loginActive;
-      var state = currentFlow && currentFlow.state;
+      var state = currentFlow && (currentFlow.state || currentFlow.requestId);
       if (currentFlow) { currentFlow.canceled = true; currentFlow.externalCancel = true; }
       if (activeOverlay && activeOverlay.cancelable) {
         // 粘贴框自己会发 /cancel（见 cancelWebLogin），这里不重复发
@@ -1730,7 +1740,9 @@ pub fn shim_js() -> &'static str {
       } else {
         closeWebOverlay(true);
         if (state) {
-          call('POST', '/api/session/login/cancel', { state: state }).catch(function () {});
+          var payload = { state: state };
+          if (currentFlow && currentFlow.requestId) payload.requestId = currentFlow.requestId;
+          call('POST', '/api/session/login/cancel', payload).catch(function () {});
         }
       }
       loginActive = false;

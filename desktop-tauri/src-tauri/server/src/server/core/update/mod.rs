@@ -42,8 +42,8 @@ pub use integrity::download_plan;
 /// 请求 GitHub 的 UA（Node 版字面量，随项目改名同步）
 const USER_AGENT: &str = "agent2api-local-proxy";
 
-/// 强制更新策略独立于用户的普通版本检查开关，每五分钟刷新一次。
-const INDEX_RETRY_MS: i64 = 5 * 60 * 1000;
+/// 强制更新策略独立于用户的普通版本检查开关，每 60 分钟刷新一次。
+const INDEX_RETRY_MS: i64 = 60 * 60 * 1000;
 
 /// 本应用的当前版本号（编译期取自 Cargo.toml，发布流程与 tauri.conf.json
 /// 同步更新）。壳的 `checkUpdate` 命令用的是运行时 package_info —— 两者常态

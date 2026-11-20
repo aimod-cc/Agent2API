@@ -64,11 +64,27 @@ pub(crate) async fn reserve(provider: &str, account: &str) -> Result<Option<Arc<
         biased;
         _ = shared.cancel.cancelled() => return Err(unavailable()),
         result = async {
-            use crate::server::core::runtime_capacity::{self as capacity, Class};
+            use crate::server::core::runtime_capacity::{self as capacity, AcquireError, Class};
             let guard = shared.account_lock(&format!("{provider}:{account}:usage-query")).lock_owned().await;
-            let ticket = capacity::acquire(Class::Background, provider, &capacity::caller(), 512,
-                tokio::time::Instant::now() + std::time::Duration::from_secs(WAIT_SECONDS), &shared.cancel).await
-                .map_err(|error| GatewayError::with_status(503, error.message).with_code("plugin_busy"))?;
+            let ticket = match capacity::acquire_detailed(Class::Background, provider, &capacity::caller(), 512,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(WAIT_SECONDS), &shared.cancel).await {
+                Ok(ticket) => ticket,
+                Err(AcquireError::Cancelled) => return Err(unavailable()),
+                Err(AcquireError::Rejected(rejection)) => {
+                    crate::server::logging::log_with_level(
+                        "[Plugin]",
+                        &format!(
+                            "⚠️ 余额查询容量排队拒绝 (503 plugin_busy): 提供商={provider} {}",
+                            rejection.describe(),
+                        ),
+                        "warn",
+                    );
+                    return Err(GatewayError::with_status(503, rejection.message())
+                        .with_code("plugin_busy")
+                        .with_reason(rejection.reason.code())
+                        .with_retry_after_seconds(rejection.retry_after_seconds()));
+                }
+            };
             Ok::<_, GatewayError>((guard, ticket))
         } => result?,
     };

@@ -8,15 +8,6 @@ export function usageQueryNoticeOf(code: unknown, t: Translate): string | null {
   if (code === USAGE_UNAVAILABLE_CODE) return t('暂无可查额度')
   if (code === 'account_origin_authorization_required') return t('待授权')
   if (code === 'account_origin_proxy_unsupported') return t('需直连')
-  if (code === 'cline_free_refresh_registration_required' || code === 'cline_free_refresh_requires_host') return t('待更新凭证')
-  if (code === 'cline_free_refresh_unconfirmed') return t('待核对续期状态')
-  return null
-}
-
-export function usageRecoveryPane(code: unknown): 'query' | 'credential' | 'network' | null {
-  if (code === 'account_origin_authorization_required') return 'query'
-  if (code === 'account_origin_proxy_unsupported') return 'network'
-  if (code === 'cline_free_refresh_registration_required' || code === 'cline_free_refresh_requires_host') return 'credential'
   return null
 }
 

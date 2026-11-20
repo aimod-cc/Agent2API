@@ -208,7 +208,9 @@ function PluginsPage(): React.ReactElement {
   const detailsInstallable = Boolean(detailsItem?.version && !detailsItem.error
     && detailsItem.platforms.some(platform => platform.target === 'wasm32-unknown-unknown'))
   const installedIds = new Set(packs.map(pack => pack.id))
-  const storePlugins = store.filter(item => !installedIds.has(item.id))
+  // 当前通道拿不到可安装版本的插件不进商店列表，避免正式版用户看到满屏「暂未发布」。
+  const unpublishedCount = store.filter(item => !installedIds.has(item.id) && !item.version).length
+  const storePlugins = store.filter(item => !installedIds.has(item.id) && Boolean(item.version))
   const operations = payload?.operations || []
   const active = operations.some(operation => operation.active)
   const target = payload?.target || ''
@@ -354,7 +356,9 @@ function PluginsPage(): React.ReactElement {
         <EmptyTitle>{!payload || (!hasAny && catalog?.checking) ? t('正在读取插件列表…')
           : hasAny ? t('没有符合筛选条件的插件') : t('暂无可安装的插件')}</EmptyTitle>
         <EmptyDescription>{hasAny ? t('换一组筛选条件，或把来源和状态都切回「全部」。')
-          : errorMessage(catalog?.reason) || t('可以点击「刷新」读取插件仓库，或从本地 zip 安装插件。')}</EmptyDescription>
+          : errorMessage(catalog?.reason) || (unpublishedCount > 0
+            ? t('插件发布后会显示在这里。')
+            : t('可以点击「刷新」读取插件仓库，或从本地 zip 安装插件。'))}</EmptyDescription>
         {payload && hasAny && filtersActive ? <Button variant='outline' size='sm' className='mt-2'
           onClick={clearFilters}>{t('清除筛选')}</Button> : null}
       </Empty></Card> : null}

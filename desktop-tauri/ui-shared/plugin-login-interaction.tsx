@@ -41,6 +41,7 @@ export function PluginLoginInteraction({ flow, request, t, openExternal, managed
   const attempted = React.useRef(new Set<string>())
   const attemptKey = (step: ManagedInteraction) => JSON.stringify([step.id, step.captcha?.configId])
   const callbackSubmitted = React.useRef(new Set<string>())
+  const browserOpened = React.useRef(new Set<string>())
   const managedKey = React.useRef('')
   const managedInstance = React.useRef(0)
   const managedStatus = React.useRef('')
@@ -110,7 +111,7 @@ export function PluginLoginInteraction({ flow, request, t, openExternal, managed
     alive.current = true
     generation.current += 1
     signature.current = ''; managedKey.current = ''; managedInstance.current += 1
-    deadlines.current.clear(); attempted.current.clear(); callbackSubmitted.current.clear()
+    deadlines.current.clear(); attempted.current.clear(); callbackSubmitted.current.clear(); browserOpened.current.clear()
     submitting.current = false; submitOwner.current = null
     setInteraction(null); setValues({}); setCaptcha(null); setReadError('')
     void refresh()
@@ -126,6 +127,13 @@ export function PluginLoginInteraction({ flow, request, t, openExternal, managed
       window.clearInterval(timer); window.removeEventListener('pagehide', stop)
     }
   }, [refresh])
+
+  const preparing = interaction?.type === 'managed' && interaction.status === 'preparing'
+  React.useEffect(() => {
+    if (!preparing) return
+    const timer = window.setInterval(() => void refresh(), 250)
+    return () => window.clearInterval(timer)
+  }, [preparing, refresh])
 
   async function submit() {
     if (!interaction || interaction.type === 'sms' || interaction.type === 'managed' || submitting.current) return
@@ -161,6 +169,7 @@ export function PluginLoginInteraction({ flow, request, t, openExternal, managed
       deadline={deadlines.current.get(key) ?? 0} request={request} refresh={refresh}
       accept={(next, startedAt) => { if (stepScope.current()) accept(next, startedAt) }}
       attemptedBefore={attempted.current.has(attemptKey(interaction))} markAttempted={() => { attempted.current.add(attemptKey(interaction)) }}
+      browserOpenedBefore={browserOpened.current.has(key)} markBrowserOpened={() => { browserOpened.current.add(key) }}
       callbackSubmitted={callbackSubmitted.current.has(interaction.id)} markCallbackSubmitted={value => {
         if (!stepScope.current()) return
         if (value) callbackSubmitted.current.add(interaction.id)

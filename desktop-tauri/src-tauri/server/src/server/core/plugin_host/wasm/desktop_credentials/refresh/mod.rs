@@ -1,5 +1,6 @@
 //! 本机续期只使用原账号绑定的固定文件和固定协议；写回前再次核对原始材料。
 
+mod cline;
 mod source;
 mod protocols;
 

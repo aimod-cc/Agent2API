@@ -241,6 +241,7 @@ struct SelectedLogin {
     adapter: std::sync::Arc<dyn crate::server::core::providers::adapter::ProviderAdapter>,
     proxy: Option<crate::server::core::login::LoginProxySelection>,
     options: Value,
+    request_id: Option<String>,
     local_only: bool,
     manual_callback: bool,
     callback_input: LoginCallbackInput,
@@ -597,6 +598,12 @@ pub async fn login_start(State(state): State<ServerState>, peer: Result<ConnectI
         if let Some(selection) = &proxy {
             options["proxy"] = selection.resolved.clone();
         }
+        let request_id = request
+            .get("requestId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
         let instructions = [metadata.instructions.as_deref(), method.instructions.as_deref()]
             .into_iter().flatten().filter(|text| !text.trim().is_empty())
             .collect::<Vec<_>>().join("\n");
@@ -604,6 +611,7 @@ pub async fn login_start(State(state): State<ServerState>, peer: Result<ConnectI
             adapter,
             proxy,
             options,
+            request_id,
             local_only: method.local_only,
             manual_callback: method.manual_callback,
             callback_input: method.callback_input,
@@ -633,7 +641,7 @@ async fn start_plugin_web_login(
     provider: String,
     selected: SelectedLogin,
 ) -> Response {
-    let SelectedLogin { adapter, proxy, options, local_only, manual_callback, callback_input, validates_callback, local_source, instructions } = selected;
+    let SelectedLogin { adapter, proxy, options, request_id, local_only, manual_callback, callback_input, validates_callback, local_source, instructions } = selected;
     let label = adapter.label();
     let method_index = options.get("methodIndex").and_then(Value::as_u64);
     if let Some(index) = method_index.filter(|index| adapter.supports_managed_login(*index)) {
@@ -645,13 +653,26 @@ async fn start_plugin_web_login(
             Err(error) => management_error(error.status_code, error.message),
         };
     }
-    let mut start = match crate::server::core::plugin_host::wasm::desktop_credentials::import_scope(
-        &provider, local_only, adapter.build_login_flow_with_options(options),
-    ).await {
+    let (cancel_token, _pending_guard) = state.login().register_pending(request_id.as_deref());
+    if cancel_token.is_cancelled() {
+        return management_error(400, "登录已取消");
+    }
+    let start_result = tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => return management_error(400, "登录已取消"),
+        result = crate::server::core::plugin_host::wasm::desktop_credentials::import_scope(
+            &provider, local_only, adapter.build_login_flow_with_options_cancellable(options, cancel_token.clone()),
+        ) => result,
+    };
+    let mut start = match start_result {
         Ok(Some(start)) => start,
         Ok(None) => return management_error(400, format!("{label}未能生成登录流程，请重试")),
         Err(error) => return management_error(error.status_code, error.message),
     };
+    if cancel_token.is_cancelled() {
+        let _ = adapter.login_cancel_async(&start.flow).await;
+        return management_error(400, "登录已取消");
+    }
     if start.flow.trim().is_empty() {
         return management_error(502, "插件没有返回登录流程 id");
     }
@@ -671,6 +692,7 @@ async fn start_plugin_web_login(
     let handle = state.login().new_handle_for_adapter(edition, adapter.clone(), proxy);
     handle.update(|task| {
         task.state = Some(start.flow.clone());
+        task.request_id = request_id;
         task.auth_url = Some(start.url.clone());
         task.allowed_hosts = start.allowed_hosts.clone();
         task.validates_callback = validates_callback;
@@ -805,18 +827,30 @@ pub async fn login_wait(
 // ─── POST /api/session/login/cancel ─────────────────────────
 
 pub async fn login_cancel(State(state): State<ServerState>, body: Bytes) -> Response {
-    let task_state = parse_body(&body)
-        .ok()
-        .and_then(|payload| {
-            payload
-                .get("state")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .unwrap_or_default();
-    // 走 LoginService 那一层（而不是 `tasks().cancel`）：AutoClaw 那条链借来的
-    // 回调端口挂在它的待办表上，取消时得一起释放（见 `LoginService::cancel`）
-    let canceled = state.login().cancel_async(&task_state).await;
+    let payload = parse_body(&body).ok();
+    let task_state = payload
+        .as_ref()
+        .and_then(|payload| payload.get("state").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let request_id = payload
+        .as_ref()
+        .and_then(|payload| payload.get("requestId").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    // 走 LoginService 那一层（而不是 `tasks().cancel`）：既清理进行中的启动请求，
+    // 也释放插件侧会话与回调端口（见 `LoginService::cancel`）。
+    let mut canceled = match task_state.as_deref() {
+        Some(target) => state.login().cancel_async(target).await,
+        None => false,
+    };
+    if !canceled {
+        if let Some(req) = request_id.as_deref().filter(|req| Some(*req) != task_state.as_deref()) {
+            canceled = state.login().cancel_async(req).await;
+        }
+    }
     ok_json(json!({ "canceled": canceled }))
 }
 

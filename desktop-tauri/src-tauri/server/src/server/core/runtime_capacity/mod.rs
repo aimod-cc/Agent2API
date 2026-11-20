@@ -4,7 +4,7 @@ mod queue;
 mod scope;
 
 pub(crate) use memory::{Allocation, MemoryBudget};
-pub(crate) use queue::{acquire, try_acquire, Ticket};
+pub(crate) use queue::{acquire_detailed, record_slot_rejection, try_acquire, Ticket};
 pub(crate) use scope::{background, background_if, background_scope, caller, caller_scope};
 
 use std::sync::{Arc, Mutex, OnceLock};
@@ -65,7 +65,12 @@ pub(super) fn manager() -> &'static Arc<Manager> {
 pub fn changed() { manager().changed.notify_waiters(); }
 
 pub fn limits() -> Limits {
-    effective(&runtime_capacity::current().settings, monitor::sample())
+    snapshot_inputs().0
+}
+
+pub(super) fn snapshot_inputs() -> (Limits, monitor::Resources) {
+    let resources = monitor::sample();
+    (effective(&runtime_capacity::current().settings, resources), resources)
 }
 
 fn effective(settings: &CapacitySettings, resources: monitor::Resources) -> Limits {
@@ -109,12 +114,196 @@ pub fn snapshot() -> Value {
             "images": state.active[3], "connections": state.active[4], "memoryBytes": state.memory,
             "queued": state.waiters.len(), "queueBytes": state.queue_bytes,
             "requests": state.active[5], "imageRequests": state.active[6] },
-        "rejected": state.rejected })
+        "rejected": state.rejected,
+        "rejectedReasons": state.reject_counts.as_value() })
 }
 
-pub(crate) fn busy() -> proto::WireError {
-    proto::WireError::with_code("运行容量暂时不足，排队等待已结束，请稍后重试", "plugin_busy")
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RejectReason {
+    MemoryPressure,
+    CpuPressure,
+    ConcurrencyLimit,
+    ProviderLimit,
+    QueueFull,
+    QueueMemoryFull,
+    PluginSlotLimit,
+    QueueTimeout,
 }
+
+impl RejectReason {
+    const ALL: [Self; 8] = [
+        Self::MemoryPressure,
+        Self::CpuPressure,
+        Self::ConcurrencyLimit,
+        Self::ProviderLimit,
+        Self::QueueFull,
+        Self::QueueMemoryFull,
+        Self::PluginSlotLimit,
+        Self::QueueTimeout,
+    ];
+
+    fn index(self) -> usize {
+        match self {
+            Self::MemoryPressure => 0,
+            Self::CpuPressure => 1,
+            Self::ConcurrencyLimit => 2,
+            Self::ProviderLimit => 3,
+            Self::QueueFull => 4,
+            Self::QueueMemoryFull => 5,
+            Self::PluginSlotLimit => 6,
+            Self::QueueTimeout => 7,
+        }
+    }
+
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::MemoryPressure => "memory_pressure",
+            Self::CpuPressure => "cpu_pressure",
+            Self::ConcurrencyLimit => "concurrency_limit",
+            Self::ProviderLimit => "provider_limit",
+            Self::QueueFull => "queue_full",
+            Self::QueueMemoryFull => "queue_memory_full",
+            Self::PluginSlotLimit => "plugin_slot_limit",
+            Self::QueueTimeout => "queue_timeout",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::MemoryPressure => "系统或容器内存紧张",
+            Self::CpuPressure => "系统CPU负载过高",
+            Self::ConcurrencyLimit => "并发数已达上限",
+            Self::ProviderLimit => "提供商并发已达上限",
+            Self::QueueFull => "排队请求数已达上限",
+            Self::QueueMemoryFull => "排队内存预算已达上限",
+            Self::PluginSlotLimit => "插件执行槽位已满",
+            Self::QueueTimeout => "容量排队等待超时",
+        }
+    }
+
+    pub fn client_message(self, class: Class) -> &'static str {
+        match self {
+            Self::MemoryPressure => "系统或容器可用内存紧张，排队等待已结束，请稍后重试",
+            Self::CpuPressure => "系统 CPU 负载过高，暂缓接收后台或图片任务，请稍后重试",
+            Self::ConcurrencyLimit => {
+                if matches!(class, Class::Request | Class::ImageRequest) {
+                    "网关并发请求数已满，排队等待已结束，请稍后重试"
+                } else {
+                    "插件运行并发数已满，排队等待已结束，请稍后重试"
+                }
+            }
+            Self::ProviderLimit => "当前提供商并发数已达上限，排队等待已结束，请稍后重试",
+            Self::QueueFull => "网关排队请求数已达上限，请稍后重试",
+            Self::QueueMemoryFull => "网关排队内存预算已达上限，请稍后重试",
+            Self::PluginSlotLimit => "当前插件并发执行槽位已满，排队等待已结束，请稍后重试",
+            Self::QueueTimeout => "运行容量排队等待超时，请稍后重试",
+        }
+    }
+
+    pub fn retry_after_seconds(self) -> u64 {
+        match self {
+            Self::MemoryPressure | Self::CpuPressure | Self::QueueFull | Self::QueueMemoryFull => 2,
+            Self::ConcurrencyLimit | Self::ProviderLimit | Self::PluginSlotLimit | Self::QueueTimeout => 1,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct RejectCounts([u64; 8]);
+
+impl RejectCounts {
+    pub(super) fn record(&mut self, reason: RejectReason) {
+        let slot = &mut self.0[reason.index()];
+        *slot = slot.saturating_add(1);
+    }
+
+    fn as_value(&self) -> Value {
+        let mut map = serde_json::Map::new();
+        for reason in RejectReason::ALL {
+            map.insert(reason.code().to_string(), json!(self.0[reason.index()]));
+        }
+        Value::Object(map)
+    }
+}
+
+/// 单次容量准入失败的详细诊断快照（供日志记录和客户端返回可区分的错误原因）。
+#[derive(Clone, Debug)]
+pub struct CapacityRejection {
+    pub reason: RejectReason,
+    pub class: Class,
+    pub waited_ms: u64,
+    pub active: usize,
+    pub limit: usize,
+    pub queued: usize,
+    pub queue_limit: usize,
+    pub queue_bytes: usize,
+    pub queue_bytes_limit: usize,
+    pub available_bytes: u64,
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+}
+
+impl CapacityRejection {
+    pub fn message(&self) -> &'static str { self.reason.client_message(self.class) }
+
+    pub fn retry_after_seconds(&self) -> u64 { self.reason.retry_after_seconds() }
+
+    pub fn into_wire_error(self) -> proto::WireError {
+        proto::WireError::with_code(self.message(), "plugin_busy")
+    }
+
+    pub fn describe(&self) -> String {
+        format!(
+            "原因={}({}) 等待={}ms 并发={}/{} 排队={}/{} 排队内存={}/{}MiB 内存占用={}/{}MiB 可用={}MiB",
+            self.reason.label(),
+            self.reason.code(),
+            self.waited_ms,
+            self.active,
+            self.limit,
+            self.queued,
+            self.queue_limit,
+            bytes_to_mib(self.queue_bytes as u64),
+            bytes_to_mib(self.queue_bytes_limit as u64),
+            bytes_to_mib(self.used_bytes),
+            bytes_to_mib(self.total_bytes),
+            bytes_to_mib(self.available_bytes),
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum AcquireError {
+    Cancelled,
+    Rejected(CapacityRejection),
+}
+
+impl AcquireError {
+    pub fn into_wire_error(self) -> proto::WireError {
+        match self {
+            Self::Cancelled => proto::WireError::with_code("容量等待已取消", proto::WireError::ABORTED),
+            Self::Rejected(rejection) => rejection.into_wire_error(),
+        }
+    }
+}
+
+/// 将宿主机生成的 `plugin_busy` 静态错误文案还原为可信的 `(文案, 原因码, 建议重试秒数)`；
+/// 非宿主机白名单文案统一收敛为兜底提示，防止插件自带文本透传。
+pub(crate) fn classify_busy_message(message: &str) -> (&'static str, &'static str, u64) {
+    for reason in RejectReason::ALL {
+        for class in [Class::Conversation, Class::Request] {
+            let expected = reason.client_message(class);
+            if message == expected {
+                return (expected, reason.code(), reason.retry_after_seconds());
+            }
+        }
+    }
+    if message == "当前账号还有其他操作，等待账号锁超时，请稍后重试" {
+        return ("当前账号还有其他操作，等待账号锁超时，请稍后重试", "account_lock", 1);
+    }
+    ("插件正在处理其他操作，等待超时，请稍后重试", "plugin_busy", retry_after_seconds())
+}
+
+fn bytes_to_mib(bytes: u64) -> u64 { bytes / (MIB as u64) }
 
 pub(crate) fn exhausted() -> proto::WireError {
     proto::WireError::with_code("运行内存预算不足，未继续分配资源", "plugin_resource_limit")

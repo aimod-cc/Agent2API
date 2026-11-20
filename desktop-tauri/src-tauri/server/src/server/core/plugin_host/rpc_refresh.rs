@@ -1,7 +1,7 @@
 //! 只观察原账号的既有续期登记，不补建槽、恢复旧代次或开放普通插件换证。
 
 use crate::server::core::account_store::{
-    credential_version::{Conflict, Error, FreeEnrollmentError, SlotFailure, SlotOutcome},
+    credential_version::{Conflict, Error, SlotFailure, SlotOutcome},
     AccountStore,
 };
 use crate::server::core::providers::adapter::ProviderAdapter;
@@ -23,16 +23,6 @@ pub(super) async fn readiness(store: &AccountStore, provider: &str, account: &st
             | Ok(SlotOutcome::CommitUnconfirmed { .. } | SlotOutcome::CommittedButUnusable) => Err(unconfirmed("codearts")),
             _ => Err(unavailable("codearts")),
         },
-        "cline-free" => {
-            if store.plugin_account(&account).is_some_and(|record| record["desktop"] == true) { return Ok(()); }
-            match store.read_free_refresh_origin(&account) {
-            Ok(_) => Ok(()),
-            Err(FreeEnrollmentError::IdentityConflict | FreeEnrollmentError::RefreshRegistrationMissing) => Err(registration("cline-free")),
-            Err(FreeEnrollmentError::Unavailable | FreeEnrollmentError::Storage | FreeEnrollmentError::KeyUnavailable
-                | FreeEnrollmentError::Transaction(_)) => Err(unavailable("cline-free")),
-            _ => Err(unconfirmed("cline-free")),
-            }
-        },
         _ => Ok(()),
     }).await.map_err(|_| unavailable(&failure_provider))?
 }
@@ -47,26 +37,18 @@ fn codearts(error: SlotFailure) -> GatewayError {
     }
 }
 
-pub(super) fn registration(provider: &str) -> GatewayError {
-    let (code, message) = if provider == "cline-free" {
-        ("cline_free_refresh_registration_required", "Cline Free 当前旧账号没有可用的自动续期登记。请到「账号设置 → 凭证设置」粘贴官方重新登录后的完整凭证，并勾选自动续期授权；原账号会保留")
-    } else {
-        ("codearts_refresh_registration_required", "CodeArts 当前账号没有可用的受控续期登记。请在官方重新获取有效凭据并更新此账号；需要自动续期时，通过 CodeArts 显式登记入口确认完整原 OAuth 材料，余额查询不会自行补建登记")
-    };
-    GatewayError::with_status(409, message).with_code(code)
+pub(super) fn registration(_provider: &str) -> GatewayError {
+    GatewayError::with_status(409, "CodeArts 当前账号没有可用的受控续期登记。请在官方重新获取有效凭据并更新此账号；需要自动续期时，通过 CodeArts 显式登记入口确认完整原 OAuth 材料，余额查询不会自行补建登记")
+        .with_code("codearts_refresh_registration_required")
 }
 
-fn unconfirmed(provider: &str) -> GatewayError {
-    let (code, message) = if provider == "cline-free" {
-        ("cline_free_refresh_unconfirmed", "Cline Free 上次续期或登记来源未确认，请先查看原操作状态；不会再次换证、解封旧登记或读取其他额度池")
-    } else {
-        ("codearts_refresh_unconfirmed", "CodeArts 上次续期或登记来源未确认，请先查看原操作状态；不会再次换证、重新占槽或沿用旧值冒充成功")
-    };
-    GatewayError::with_status(409, message).with_code(code)
+fn unconfirmed(_provider: &str) -> GatewayError {
+    GatewayError::with_status(409, "CodeArts 上次续期或登记来源未确认，请先查看原操作状态；不会再次换证、重新占槽或沿用旧值冒充成功")
+        .with_code("codearts_refresh_unconfirmed")
 }
 
-fn unavailable(provider: &str) -> GatewayError {
-    GatewayError::with_status(503, format!("{} 原账号续期前提暂不可确认，未发送换证请求；请刷新账号状态", if provider == "cline-free" { "Cline Free" } else { "CodeArts" }))
+fn unavailable(_provider: &str) -> GatewayError {
+    GatewayError::with_status(503, "CodeArts 原账号续期前提暂不可确认，未发送换证请求；请刷新账号状态")
         .with_code("credential_refresh_unavailable")
 }
 

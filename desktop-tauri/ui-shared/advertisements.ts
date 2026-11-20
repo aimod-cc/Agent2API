@@ -69,7 +69,7 @@ async function refresh(): Promise<void> {
     if (generation !== requestGeneration || source !== identity()) return
     if (!result || result.schemaVersion !== 1 || typeof result.enabled !== 'boolean'
       || typeof result.expiresInSeconds !== 'number' || !Number.isFinite(result.expiresInSeconds)
-      || result.expiresInSeconds < 0 || result.expiresInSeconds > 300 || !Array.isArray(result.items) || result.items.length > 100) {
+      || result.expiresInSeconds < 0 || result.expiresInSeconds > 3600 || !Array.isArray(result.items) || result.items.length > 100) {
       expiresAt = 0; publish(EMPTY); return
     }
     expiresAt = started + result.expiresInSeconds * 1000
@@ -113,8 +113,14 @@ function safeImage(value: unknown): boolean {
   if (typeof value !== 'string') return false
   try {
     const url = new URL(value)
-    return url.origin === 'https://agent2api.dev' && !url.search && !url.hash
-      && /^\/(?:ad-assets\/[\w-]+\.(?:png|jpg|jpeg|webp)|api\/media\/[a-f0-9-]+\.(?:png|jpg|webp))$/.test(url.pathname)
+    if (url.search || url.hash) return false
+    if (url.origin === 'https://agent2api.dev') {
+      return /^\/(?:ad-assets\/[\w-]+\.(?:png|jpg|jpeg|webp)|api\/media\/[a-f0-9-]+\.(?:png|jpg|webp))$/.test(url.pathname)
+    }
+    if (url.origin === 'https://cdn.agent2api.dev') {
+      return /^\/advertisements\/[\w-]+\.(?:png|jpg|jpeg|webp)$/.test(url.pathname)
+    }
+    return false
   } catch { return false }
 }
 

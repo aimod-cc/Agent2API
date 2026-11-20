@@ -62,17 +62,6 @@
 
 use rusqlite::Connection;
 
-pub(crate) const CLINE_FREE_REFRESH_SLOT_SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS main.cline_free_refresh_slots (
-    account_id TEXT NOT NULL PRIMARY KEY
-        CHECK (typeof(account_id) = 'text' AND octet_length(account_id) BETWEEN 1 AND 512),
-    identity_key TEXT NOT NULL UNIQUE
-        CHECK (typeof(identity_key) = 'text' AND octet_length(identity_key) = 64 AND identity_key NOT GLOB '*[^0-9a-f]*'),
-    payload TEXT NOT NULL
-        CHECK (typeof(payload) = 'text' AND octet_length(payload) BETWEEN 1 AND 8192)
-) WITHOUT ROWID;
-";
-
 #[cfg(test)]
 #[path = "schema_tests.rs"]
 mod tests;

@@ -1,10 +1,10 @@
 use std::time::Duration;
 
-use super::types::WEBSITE_ORIGIN;
+use super::types::{CDN_ORIGIN, WEBSITE_ORIGIN};
 use crate::server::core::{egress, update};
 
 pub async fn request(url: &str) -> Result<reqwest::Response, String> {
-    if !url.starts_with(&format!("{WEBSITE_ORIGIN}/")) {
+    if !url.starts_with(&format!("{WEBSITE_ORIGIN}/")) && !url.starts_with(&format!("{CDN_ORIGIN}/")) {
         return Err("广告请求地址无效".into());
     }
     let candidates = update::client::resolve_egress_candidates()?;

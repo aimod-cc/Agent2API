@@ -174,7 +174,7 @@ impl UpdateManager {
         }
     }
 
-    /// 从官网查询所关注通道的最高版本；没有候选版本时视为无更新。
+    /// 优先从官网静态 CDN 拉取发布清单挑选版本，必要时回退实时 API；没有候选版本时视为无更新。
     async fn fetch_release(
         &self,
         channels: UpdateChannels,
@@ -183,6 +183,32 @@ impl UpdateManager {
         let repository = self.resolve_repository().await;
         let beta = channels.beta;
         let target = required.and_then(|rule| rule["targetVersion"].as_str());
+
+        if let Ok(feed) = super::website::fetch_json(super::website::CDN_RELEASES_URL, REQUEST_TIMEOUT_MS).await {
+            if feed.status.is_success()
+                && feed.value.get("repository").and_then(Value::as_str) == Some(repository.as_str())
+                && feed.value.get("releases").is_some_and(Value::is_array)
+            {
+                let items = &feed.value["releases"];
+                let picked = if let Some(target) = target {
+                    items.as_array().and_then(|list| {
+                        list.iter().find(|item| {
+                            item["draft"] != true
+                                && version::compare_versions(item["tag_name"].as_str().unwrap_or(""), target) == Some(0)
+                        }).cloned()
+                    })
+                } else {
+                    version::pick_listed_release(items, channels).cloned()
+                };
+                if picked.is_some() || required.is_none() {
+                    if let Some(release) = picked.as_ref() {
+                        super::integrity::remember_website_release(release, &repository);
+                    }
+                    return Ok(picked.map(|item| release_json(&item, &repository)));
+                }
+            }
+        }
+
         let url = if let Some(target) = target {
             format!("{}/repos/{repository}/releases/tags/v{}", api_base(), target.trim_start_matches(['v', 'V']))
         } else if beta {

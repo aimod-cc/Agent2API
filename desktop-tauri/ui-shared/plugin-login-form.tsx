@@ -107,18 +107,17 @@ export function PluginLoginBrowser({ method, provider, desktop, value, onChange,
   if (method.type !== 'oauth' || method.browserMode === 'none' || method.localOnly && !method.embeddedOnly) return null
   const embeddedOnly = method.embeddedOnly
   const choice = desktop && (embeddedOnly ? provider === 'raccoon' : !method.browserMode || method.browserMode === 'choice')
+  if (!choice) return null
   const reason = provider === 'raccoon'
     ? t('当前插件只接通了内置窗口的自动回调，系统浏览器尚未接通')
     : t('此登录方式需要内置窗口，系统浏览器不可用')
   return <div className='plugin-login-browser'>
     <Label>{t('打开方式')}</Label>
-    {choice ? <SegmentedControl className='plugin-login-browser-choice' aria-label={t('网页登录的打开方式')}
+    <SegmentedControl className='plugin-login-browser-choice' aria-label={t('网页登录的打开方式')}
       value={embeddedOnly ? 'embedded' : value} disabled={disabled} onValueChange={onChange}
       options={[{ value: 'embedded', label: t('内置窗口') },
         { value: 'external', label: t('系统浏览器'), disabled: embeddedOnly, title: embeddedOnly ? reason : undefined }]} />
-      : <span className='plugin-login-browser-fixed'>{embeddedOnly ? t('内置窗口')
-        : method.browserMode === 'plugin' ? t('由插件打开浏览器登录') : t('系统浏览器')}</span>}
-    {choice && embeddedOnly ? <p className='plugin-login-note'>{reason}</p> : null}
+    {embeddedOnly ? <p className='plugin-login-note'>{reason}</p> : null}
   </div>
 }
 

@@ -19,7 +19,6 @@ import { openExternal } from './update-shared'
 import { PluginLoginInteraction, type LoginRequest } from '../../../ui-shared/plugin-login-interaction'
 import { PluginDesktopImport } from '../../../ui-shared/plugin-desktop-import'
 import { PluginCodeArtsEnrollment } from '../../../ui-shared/plugin-codearts-enrollment'
-import { PluginClineFreeEnrollment } from '../../../ui-shared/plugin-cline-free-enrollment'
 import { getPluginStartup, subscribePluginStartup } from '../../../ui-shared/plugin-startup'
 import { managedLoginSourceGeneration, MANAGEMENT_SESSION_CHANGE, type ManagedLoginScope } from '../../../ui-shared/plugin-login-managed'
 import { PluginLoginBrowser, PluginLoginFields, PluginLoginMethodPicker, PluginLoginSecurity } from '../../../ui-shared/plugin-login-form'
@@ -83,7 +82,7 @@ export function DynamicProviderBlock({
   const progressRef = React.useRef<LoginProgress>({})
   const loginScope = React.useRef<{
     origin: string; bridge: ReturnType<typeof shared>['workbuddyDesktop']; bootId: string; managementGeneration: number;
-    state: string; methodIndex?: number; remark?: string; managed: boolean; cancelled: boolean; cancelSent?: boolean; deadline: number; cleanup?: () => void;
+    state: string; requestId: string; methodIndex?: number; remark?: string; managed: boolean; cancelled: boolean; cancelSent?: boolean; deadline: number; cleanup?: () => void;
   } | null>(null)
   const [loginView, setLoginView] = React.useState<WebLoginView>({
     label: t('登录并添加'), hint: '', disabled: false, waiting: false,
@@ -97,7 +96,7 @@ export function DynamicProviderBlock({
   const localActionsAvailable = shared().workbuddyDesktop?.platform === 'windows'
     && Boolean(shared().__TAURI_INTERNALS__?.invoke) && accountProviderAvailable(provider)
   const localAction = localActionsAvailable && methodsState.phase === 'ready' && provider === 'chatglm' ? 'local:chatglm-import'
-    : localActionsAvailable && methodsState.phase === 'ready' && ['codearts', 'cline-free'].includes(provider) ? 'local:enrollment' : ''
+    : localActionsAvailable && methodsState.phase === 'ready' && provider === 'codearts' ? 'local:enrollment' : ''
   const localActionSelected = Boolean(localAction && selected === localAction)
   const declaredMethod = localActionSelected ? undefined
     : methodsState.methods.find(item => item.id === selected) || methodsState.methods.find(item => !item.reason) || methodsState.methods[0]
@@ -131,6 +130,10 @@ export function DynamicProviderBlock({
   const scopeCurrent = (scope: NonNullable<typeof loginScope.current>) => resultCurrent(scope)
     && (!scope.managed || performance.now() < scope.deadline)
 
+  const nextLoginRequestId = () => typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? `req-${crypto.randomUUID()}`
+    : `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+
   async function cancelOwnedLogin(automatic = false): Promise<unknown> {
     const scope = loginScope.current
     if (!scope || scope.cancelled) return false
@@ -139,31 +142,19 @@ export function DynamicProviderBlock({
     if (alive.current) { progressRef.current = {}; setProgress({}) }
     if (automatic && savingUnknown) { scope.cancelSent = true; scope.cleanup?.(); return false }
     if (!sameServer(scope)) return false
-    if (scope.state) {
+    const target = scope.state || scope.requestId
+    if (target) {
       scope.cleanup?.()
       scope.cancelSent = true
-      return scope.bridge?.cancelLogin ? scope.bridge.cancelLogin(scope.state)
-        : accountRequest('POST', '/api/session/login/cancel', { state: scope.state })
-    }
-    if (scope.methodIndex === undefined) return scope.bridge?.cancelLogin?.()
-    // start 尚未回 flow 时只等它的公开进度；不能用无参取消误关随后打开的新流程。
-    let release: (() => void) | undefined
-    const timer = window.setTimeout(() => release?.(), 125000)
-    const stop = () => { window.clearTimeout(timer); release?.(); scope.cleanup = undefined }
-    scope.cleanup = stop
-    const unsubscribe = scope.bridge?.onLoginProgress?.(next => {
-      if (!sameServer(scope)) { stop(); return }
-      if (next.provider !== provider || next.active !== true || !next.state
-        || next.methodIndex !== undefined && next.methodIndex !== scope.methodIndex) return
-      scope.state = next.state
-      stop()
-      if (!scope.cancelSent) {
-        scope.cancelSent = true
-        void scope.bridge?.cancelLogin?.(scope.state).catch(() => {})
+      const result = scope.bridge?.cancelLogin
+        ? await scope.bridge.cancelLogin(target)
+        : await accountRequest('POST', '/api/session/login/cancel', { state: target })
+      if (result && typeof result === 'object' && 'canceled' in result) {
+        return (result as { canceled?: boolean }).canceled !== false
       }
-    })
-    release = typeof unsubscribe === 'function' ? unsubscribe : undefined
-    return false
+      return result !== false
+    }
+    return scope.bridge?.cancelLogin?.()
   }
 
   const interactionRequest: LoginRequest = async <T,>(verb: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown, options?: { signal?: AbortSignal }) => {
@@ -266,8 +257,9 @@ export function DynamicProviderBlock({
           progressRef.current = {}
           setProgress({})
           const inputs = readInputs(current.method, current.inputs)
+          const requestId = nextLoginRequestId()
           loginScope.current = { origin: window.location.origin, bridge: shared().workbuddyDesktop, bootId: bootId(), managementGeneration: managedLoginSourceGeneration(),
-            state: '', methodIndex: current.method.methodIndex, remark: current.method.prompts.some(prompt => prompt.key === 'name') ? '' : remarkRef.current.trim(),
+            state: '', requestId, methodIndex: current.method.methodIndex, remark: current.method.prompts.some(prompt => prompt.key === 'name') ? '' : remarkRef.current.trim(),
             managed: false, cancelled: false, deadline: Infinity }
           const owner = loginScope.current
           // 插件申报 embeddedOnly 时一律走内嵌窗口（不信任残留的 mode 状态）。
@@ -275,7 +267,7 @@ export function DynamicProviderBlock({
           try {
             const result = await startLogin(provider, undefined, mode, undefined, {
               methodIndex: current.method.methodIndex, inputs, locale: window.wbI18n?.locale() || 'zh-CN',
-              proxy: readProxyDraft(current.proxyDraft),
+              proxy: readProxyDraft(current.proxyDraft), requestId,
             })
             if (owner.managed && result.managedLogin !== true) throw new Error(t('账号保存未确认，请查询本次状态；不会再次保存。'))
             if (result.managedLogin === true && (result.provider !== provider || result.methodIndex !== owner.methodIndex
@@ -564,7 +556,7 @@ export function DynamicProviderBlock({
   const optionalName = method?.prompts.find(prompt => prompt.key === 'name' && prompt.type === 'text' && !prompt.secret && prompt.optional && !prompt.when)
   const formPrompts = method?.prompts.filter(prompt => prompt !== optionalName) || []
   const accountName = optionalName ? inputs[optionalName.key] ?? optionalName.default ?? '' : name
-  const instructions = mergeLoginInstructions(methodsState.instructions, method?.instructions,
+  const instructions = mergeLoginInstructions(methodsState.instructions, progress.managedLogin ? '' : method?.instructions,
     method?.browserMode === 'plugin' ? pluginBrowserInstructions(provider) : '',
     loginText(progress.instructions), loginText(progress.hint), loginText(loginView.hint))
   const owned = loginScope.current
@@ -593,13 +585,16 @@ export function DynamicProviderBlock({
     {localActionsAvailable && provider === 'codearts' ? <PluginCodeArtsEnrollment
       active={active && localActionSelected} disabled={locked || loginView.waiting} footerHost={footerHost}
       current={() => accountProviderAvailable('codearts')} onSaved={async () => { await shared().wbApp?.refresh?.() }} t={t} /> : null}
-    {localActionsAvailable && provider === 'cline-free' ? <PluginClineFreeEnrollment
-      active={active && localActionSelected} disabled={locked || loginView.waiting} footerHost={footerHost}
-      current={() => accountProviderAvailable('cline-free')} onSaved={async () => { await shared().wbApp?.refresh?.() }} t={t} /> : null}
     {progress.active && progress.state ? <PluginLoginInteraction key={progress.state} flow={progress.state} t={t}
       openExternal={managed ? async url => {
         if (!managed.current()) throw new DOMException('请求已取消', 'AbortError')
-        if (owned?.bridge?.platform === 'web') { window.open(url, '_blank', 'noopener,noreferrer'); return }
+        if (owned?.bridge?.platform === 'web') {
+          const popup = window.open('about:blank', '_blank')
+          if (!popup) throw new Error('popup_blocked')
+          popup.opener = null
+          popup.location.replace(url)
+          return
+        }
         if (!owned?.bridge?.openReleasePage) throw new Error('external_browser_unavailable')
         await owned.bridge.openReleasePage(url)
       } : openExternal}

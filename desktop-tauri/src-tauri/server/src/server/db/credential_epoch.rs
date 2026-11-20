@@ -120,31 +120,6 @@ impl AccountChange<'_> {
 }
 
 impl Db {
-    /// Free首次登记只捕获原Db当前私有来源；不读账号/kv、不写版本、不接任意action。
-    /// 与CodeArts来源捕获分离，但共享原连接私有Arc；恢复后不能按路径/JSON重建。
-    pub(crate) fn capture_cline_free_enrollment_source(
-        &self,
-    ) -> Result<CredentialSource, CredentialSourceError> {
-        let state = self
-            .inner
-            .conn
-            .lock()
-            .map_err(|_| CredentialSourceError::Unavailable)?;
-        if self.inner.task_guard_unusable.load(Ordering::Acquire) {
-            return Err(CredentialSourceError::Unavailable);
-        }
-        if !state.connection.is_autocommit() {
-            self.inner
-                .task_guard_unusable
-                .store(true, Ordering::Release);
-            return Err(CredentialSourceError::Unavailable);
-        }
-        Ok(CredentialSource {
-            owner: Arc::downgrade(&self.inner),
-            epoch: state.epoch.clone(),
-        })
-    }
-
     /// CodeArts首次登记只捕获此Db当前私有代次；不读账号/kv、不写版本、不接任意action。
     /// 只有同一实际连接已收尾且可用才交付，不能从路径、账号ID、JSON或摘要重建。
     pub(crate) fn capture_codearts_enrollment_source(

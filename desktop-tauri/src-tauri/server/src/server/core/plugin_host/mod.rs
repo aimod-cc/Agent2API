@@ -567,7 +567,29 @@ impl Host {
         params: serde_json::Value,
         timeout: Duration,
     ) -> Result<serde_json::Value, proto::WireError> {
-        if self.options.wasm.is_some() { return self.call_wasm(method, params, timeout).await; }
+        self.call_coded_with_cancel(method, params, timeout, None).await
+    }
+
+    pub async fn call_coded_with_cancel(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: Duration,
+        cancel: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<serde_json::Value, proto::WireError> {
+        if self.options.wasm.is_some() {
+            if let Some(token) = cancel {
+                return tokio::select! {
+                    biased;
+                    _ = token.cancelled() => Err(proto::WireError::with_code(
+                        "登录已取消",
+                        proto::WireError::ABORTED,
+                    )),
+                    result = self.call_wasm(method, params, timeout) => result,
+                };
+            }
+            return self.call_wasm(method, params, timeout).await;
+        }
         let lease = if matches!(method, proto::methods::gateway::INIT | proto::methods::gateway::SHUTDOWN | proto::methods::gateway::ABORT) {
             None
         } else {
@@ -613,7 +635,25 @@ impl Host {
                 code,
             ));
         }
-        match tokio::time::timeout(timeout, rx).await {
+        let wait_result = if let Some(token) = cancel {
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => {
+                    Box::pin(self.abort(id)).await;
+                    if let Ok(mut map) = self.pending.lock() {
+                        map.remove(&id);
+                    }
+                    return Err(proto::WireError::with_code(
+                        "登录已取消",
+                        proto::WireError::ABORTED,
+                    ));
+                }
+                res = tokio::time::timeout(timeout, rx) => res,
+            }
+        } else {
+            tokio::time::timeout(timeout, rx).await
+        };
+        match wait_result {
             Ok(Ok(Ok(value))) => Ok(value),
             Ok(Ok(Err(err))) => Err(err),
             Ok(Err(_)) => Err(proto::WireError::with_code(

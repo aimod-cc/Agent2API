@@ -607,18 +607,28 @@ impl UpstreamService {
         if signal.is_done() {
             return;
         }
+        let wait_started = std::time::Instant::now();
         let wait = tokio::time::timeout(Duration::from_millis(INFLIGHT_WAIT_MS), notified);
         tokio::pin!(wait);
-        match cancel {
+        let timed_out = match cancel {
             // 排队期间被手动终止：立即醒来（返回后由 begin_slot 放弃占位、
             // 转发链在循环顶收尾）
             Some(token) => tokio::select! {
-                _ = &mut wait => {}
-                _ = token.cancelled() => {}
+                result = &mut wait => result.is_err(),
+                _ = token.cancelled() => false,
             },
-            None => {
-                let _ = wait.await;
-            }
+            None => wait.await.is_err(),
+        };
+        if timed_out {
+            logging::log_with_level(
+                "[Upstream]",
+                &format!(
+                    "⚠️ 相同请求去重排队已达 {}s 上限（等待 {}ms），停止等待并继续转发",
+                    INFLIGHT_WAIT_MS / 1000,
+                    wait_started.elapsed().as_millis(),
+                ),
+                "warn",
+            );
         }
     }
 }

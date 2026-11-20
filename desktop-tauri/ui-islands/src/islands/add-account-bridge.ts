@@ -57,6 +57,7 @@ export type LoginOptions = {
   inputs?: Record<string, string>
   locale?: string
   proxy?: unknown
+  requestId?: string
 }
 
 /** 共享登录桥推送的公开进度；设备授权只展示 userCode，不展示 device_code 或凭证。 */

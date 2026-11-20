@@ -56,7 +56,7 @@ pub fn sample() -> Resources {
     let mut container_bytes = None;
     if let Some(cgroup) = monitor.system.cgroup_limits().filter(|group| group.total_memory > 0 && group.total_memory < total_bytes) {
         total_bytes = cgroup.total_memory;
-        available_bytes = available_bytes.min(cgroup.free_memory);
+        available_bytes = available_bytes.min(cgroup_available_memory(&cgroup));
         container_bytes = Some(cgroup.rss);
     }
     let resources = Resources { total_bytes, available_bytes, process_bytes, container_bytes, cpu_percent, cores,
@@ -77,3 +77,33 @@ fn connection_ceiling() -> usize {
 
 #[cfg(not(unix))]
 fn connection_ceiling() -> usize { 32768 }
+
+/// sysinfo 的 cgroup `free_memory` 只用上限减去总占用（含可回收文件页缓存），
+/// 容器跑数据库/大请求后缓存常占满剩余配额导致误判内存紧张；补回可回收缓存并受 `total - rss` 封顶。
+#[cfg(target_os = "linux")]
+fn cgroup_available_memory(cgroup: &sysinfo::CGroupLimits) -> u64 {
+    let reclaimable = cgroup_reclaimable_bytes();
+    cgroup.free_memory.saturating_add(reclaimable).min(cgroup.total_memory.saturating_sub(cgroup.rss))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cgroup_available_memory(cgroup: &sysinfo::CGroupLimits) -> u64 { cgroup.free_memory }
+
+#[cfg(target_os = "linux")]
+fn cgroup_reclaimable_bytes() -> u64 {
+    if std::path::Path::new("/sys/fs/cgroup/memory.current").exists() {
+        return read_memory_stat_sum("/sys/fs/cgroup/memory.stat", &["inactive_file", "slab_reclaimable"]);
+    }
+    read_memory_stat_sum("/sys/fs/cgroup/memory/memory.stat", &["total_inactive_file"])
+}
+
+#[cfg(target_os = "linux")]
+fn read_memory_stat_sum(path: &str, keys: &[&str]) -> u64 {
+    let Ok(content) = std::fs::read_to_string(path) else { return 0; };
+    content.lines().fold(0u64, |sum, line| {
+        let Some((key, value)) = line.split_once(' ') else { return sum; };
+        if keys.contains(&key) {
+            sum.saturating_add(value.trim().parse::<u64>().unwrap_or(0))
+        } else { sum }
+    })
+}

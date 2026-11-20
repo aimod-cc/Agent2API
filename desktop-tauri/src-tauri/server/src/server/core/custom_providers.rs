@@ -908,8 +908,9 @@ pub fn carriers_of_model(name: &str) -> Vec<String> {
 /// ── 解析优先级（与 `catalog::wire_target_for_provider` 对齐但数据源不同）──
 ///   ① 存在 enabled 且 `alias == 请求名` 的映射 → 真名 = 该映射的 `target`、
 ///      等级 = 该映射的 `reasoning`（映射上没绑则空）；
-///   ② 否则存在 enabled 的同 id 模型 → 真名 = 请求名**原值**（零改写是常态，
-///      统一大小写只会白复制一次 body）、等级 = 该模型上绑的 `reasoning`；
+///   ② 否则存在 enabled 的同 id 模型（忽略 ASCII 大小写）→ 真名 = 该模型
+///      条目登记的精确 `id`（保留上游原始大小写，供大小写敏感上游使用）、
+///      等级 = 该模型上绑的 `reasoning`；
 ///   ③ 都不命中 → 真名 = 请求名、等级 = None（防御：正常选路下不会发生，
 ///      候选链就是按 [`carriers_of_model`] 算的）。
 ///

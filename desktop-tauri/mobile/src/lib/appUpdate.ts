@@ -140,7 +140,7 @@ export function setAutoCheckEnabled(enabled: boolean): void {
  * 仍由 `/api/scheduled-tasks` 返回 —— 手机端直接读同一个来源，不另做设置页。
  * 任务被关掉时返回 0（= 不自动检查），与电脑端语义一致。
  *
- * 读不到（老网关 / 请求失败）时退回 20 分钟：那是电脑端的缺省值
+ * 读不到（老网关 / 请求失败）时退回 4 小时：那是电脑端的缺省值
  * （`DEFAULT_UPDATE_CHECK_MINUTES`），行为与「没配过」一致。
  */
 export async function autoCheckIntervalMs(): Promise<number> {
@@ -149,14 +149,14 @@ export async function autoCheckIntervalMs(): Promise<number> {
       tasks?: Array<{ id?: string; enabled?: boolean; interval?: number; unit?: string }>
     }>('/api/scheduled-tasks')
     const task = (payload.tasks || []).find(item => item.id === 'updateCheck')
-    if (!task) return 20 * 60_000
+    if (!task) return 240 * 60_000
     if (task.enabled === false) return 0
     const interval = Number(task.interval) || 0
-    if (interval <= 0) return 20 * 60_000
+    if (interval <= 0) return 240 * 60_000
     // 电脑端这条任务的单位是分钟（见 scheduled_tasks.rs 的 TaskDef）
     return interval * 60_000
   } catch {
-    return 20 * 60_000
+    return 240 * 60_000
   }
 }
 

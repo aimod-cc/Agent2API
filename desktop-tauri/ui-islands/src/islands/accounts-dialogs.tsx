@@ -21,7 +21,7 @@ export function AccountsDialogs() {
     </DialogContent>
   </Dialog>
   if (store.dialog.kind === 'settings') {
-    return <AccountSettingsDialog key={store.dialog.id} id={store.dialog.id} initialPane={store.dialog.pane} onClose={closeDialog} />
+    return <AccountSettingsDialog key={store.dialog.id} id={store.dialog.id} onClose={closeDialog} />
   }
   if (store.dialog.kind === 'batch-loading') return <Dialog open onOpenChange={open => { if (!open) closeDialog() }}>
     <DialogContent><DialogHeader><DialogTitle>{t('批量操作 · 已选 {count} 个账号', { count: store.dialog.ids.length })}</DialogTitle></DialogHeader>

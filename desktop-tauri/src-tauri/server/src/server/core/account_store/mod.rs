@@ -98,7 +98,6 @@ pub mod catpaw_accounts;
 pub mod chatglm_accounts;
 pub(crate) mod checkin_state;
 pub mod cline_accounts;
-mod cline_credentials;
 pub mod codearts_accounts;
 pub mod atomcode_accounts;
 pub mod commandcode_accounts;

@@ -248,7 +248,6 @@ async function requestApi<T>(path: string, init: RequestInitLite, identity: stri
     path === '/api/session/login/start' || path === '/api/session/login/callback'
       || path === '/api/session/login/interaction' || path === '/api/zcode/captcha'
       || path.startsWith('/api/plugins/desktop-import/') || path.startsWith('/api/plugins/enrollment/')
-      || /^\/api\/accounts\/[^/]+\/credentials\/cline-free$/.test(path)
       || path === '/api/accounts/refresh' || path === '/api/accounts/refresh-expiring'
       || path === '/api/accounts/checkin' || path === '/api/checkin-activity'
       || path === '/api/plugins/tasks/run' || path === '/api/travel-schedule/run'

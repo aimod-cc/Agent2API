@@ -9,8 +9,9 @@ use axum::response::Response;
 use futures::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
-use crate::server::core::runtime_capacity::{self as capacity, Class, MemoryBudget, Ticket};
+use crate::server::core::runtime_capacity::{self as capacity, AcquireError, Class, MemoryBudget, Ticket};
 use crate::server::errors::GatewayError;
+use crate::server::logging;
 
 struct Admitted<S> {
     inner: S,
@@ -37,10 +38,27 @@ pub async fn admit(mut request: Request, next: Next) -> Response {
     let cancel = CancellationToken::new();
     let bytes = request.body().size_hint().upper().and_then(|bytes| usize::try_from(bytes).ok()).unwrap_or(64 * 1024);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(limits.queue_wait_seconds);
-    let ticket = match capacity::acquire(class, "", &caller, bytes, deadline, &cancel).await {
+    let path = request.uri().path().to_string();
+    let ticket = match capacity::acquire_detailed(class, "", &caller, bytes, deadline, &cancel).await {
         Ok(ticket) => ticket,
-        Err(error) => return GatewayError::with_status(503, error.message).with_code("gateway_busy")
-            .with_retry_after_seconds(capacity::retry_after_seconds()).payload_response(),
+        Err(AcquireError::Cancelled) => {
+            return GatewayError::with_status(499, "容量等待已取消").payload_response();
+        }
+        Err(AcquireError::Rejected(rejection)) => {
+            logging::log_with_level(
+                "[Server]",
+                &format!(
+                    "⚠️ 网关容量拦截 (503 gateway_busy): 路径={path} 调用方={caller} {}",
+                    rejection.describe(),
+                ),
+                "warn",
+            );
+            return GatewayError::with_status(503, rejection.message())
+                .with_code("gateway_busy")
+                .with_reason(rejection.reason.code())
+                .with_retry_after_seconds(rejection.retry_after_seconds())
+                .payload_response();
+        }
     };
     let memory = MemoryBudget::new();
     let budget = memory.clone();

@@ -22,8 +22,6 @@ mod doubao_upload;
 mod doubao_turn;
 mod monkeycode_cap;
 pub(crate) mod codearts_login;
-pub(crate) mod cline_free_enrollment;
-mod cline_free_refresh;
 mod client_device;
 mod doubao_rewards;
 mod doubao_local_gate;

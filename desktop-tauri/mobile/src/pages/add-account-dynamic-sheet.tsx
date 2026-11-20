@@ -155,6 +155,8 @@ function DynamicForm({ provider, label, source, onAdded, active, footerHost }: D
   const callbackGeneration = useRef(0)
   const [canceling, setCanceling] = useState(false)
   const flowRef = useRef('')
+  const startController = useRef<AbortController | null>(null)
+  const startRequestId = useRef('')
   const loginProxy = useRef<unknown>(undefined)
   const mounted = useRef(false)
   const submitting = useRef(false)
@@ -188,12 +190,24 @@ function DynamicForm({ provider, label, source, onAdded, active, footerHost }: D
     setCallbackNotice('')
   }
 
+  function abortPendingStart(sendRemote = true): void {
+    const pendingRequest = startRequestId.current
+    const activeController = startController.current
+    startRequestId.current = ''
+    startController.current = null
+    activeController?.abort()
+    if (sendRemote && pendingRequest && serverIdentity() === identity) {
+      void cancelDynamicLogin(pendingRequest, identity).catch(() => {})
+    }
+  }
+
   useEffect(() => {
     mounted.current = true
     const stop = () => {
       lifecycle.current += 1
       const state = flowRef.current
       flowRef.current = ''
+      abortPendingStart(!state)
       clearCallback()
       const owner = currentFlow.current
       if (state && serverIdentity() === identity && (!owner?.managed || !waitReadOnly.current && owner.bootId === originBoot()
@@ -207,7 +221,7 @@ function DynamicForm({ provider, label, source, onAdded, active, footerHost }: D
       const owner = currentFlow.current
       if (!owner?.managed) return
       lifecycle.current += 1
-      flowRef.current = ''; waitController.current?.abort(); clearCallback(); loginProxy.current = undefined
+      flowRef.current = ''; abortPendingStart(false); waitController.current?.abort(); clearCallback(); loginProxy.current = undefined
       setFlow(null); setValues({}); setPassword(''); setProgress(''); setManagedPhase(''); setWaitUnconfirmed(false)
       setError(t('管理会话已变化，本次登录资格已失效；不会继续查询或重发原流程。'))
     }
@@ -224,6 +238,8 @@ function DynamicForm({ provider, label, source, onAdded, active, footerHost }: D
       mounted.current = false; lifecycle.current += 1
       unsubscribe(); unsubscribeBoot(); window.removeEventListener('pagehide', stop)
       window.removeEventListener(MANAGEMENT_SESSION_CHANGE, sourceLost); waitController.current?.abort()
+      const hasFlow = Boolean(flowRef.current)
+      abortPendingStart(!hasFlow)
       clearCallback()
       const owner = currentFlow.current
       if (flowRef.current && serverIdentity() === identity && (!owner?.managed || !waitReadOnly.current && owner.bootId === originBoot()
@@ -470,6 +486,7 @@ function DynamicForm({ provider, label, source, onAdded, active, footerHost }: D
   async function submit() {
     if (submitLocked || submitting.current || canceling || !method || methods.phase !== 'ready') return
     const epoch = lifecycle.current
+    const controller = new AbortController()
     submitting.current = true
     setBusy(true)
     setError('')
@@ -492,11 +509,16 @@ function DynamicForm({ provider, label, source, onAdded, active, footerHost }: D
       const startedAt = performance.now()
       const initialBoot = originBoot()
       const managementGeneration = managedLoginSourceGeneration()
-      const loginInput = { ...input, locale: locale() }
-      const started = await startDynamicLogin(loginInput)
+      const requestId = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? `req-${crypto.randomUUID()}`
+        : `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+      startController.current = controller
+      startRequestId.current = requestId
+      const loginInput = { ...input, locale: locale(), requestId }
+      const started = await startDynamicLogin(loginInput, controller.signal)
       const state = started.state || started.flow
       if (!state || typeof state !== 'string') throw new Error(t('登录桥未返回已完成的账号或会话，请重试'))
-      if (!mounted.current || lifecycle.current !== epoch || serverIdentity() !== identity) {
+      if (controller.signal.aborted || !mounted.current || lifecycle.current !== epoch || serverIdentity() !== identity) {
         if (serverIdentity() === identity && initialBoot === originBoot()
           && (started.managedLogin !== true || managementGeneration === managedLoginSourceGeneration())) await cancelDynamicLogin(state, identity)
         return
@@ -540,11 +562,34 @@ function DynamicForm({ provider, label, source, onAdded, active, footerHost }: D
       setFlow({ state, url: rawUrl, manual, callbackInput, managed, methodIndex: method.methodIndex!, bootId: initialBoot,
         managementGeneration, deadline: managed ? startedAt + started.remainingMs! : Infinity,
         interval: managed ? 1500 : 1000 })
+      if (rawUrl) openExternal(rawUrl)
     } catch (failure) {
-      if (mounted.current && serverIdentity() === identity && lifecycle.current === epoch) setError(dynamicLoginError(failure), failure)
+      if (!controller.signal.aborted && mounted.current && serverIdentity() === identity && lifecycle.current === epoch) {
+        setError(dynamicLoginError(failure), failure)
+      }
     } finally {
-      submitting.current = false
-      if (mounted.current && serverIdentity() === identity) setBusy(false)
+      if (lifecycle.current === epoch) {
+        startController.current = null
+        startRequestId.current = ''
+        submitting.current = false
+        if (mounted.current && serverIdentity() === identity) setBusy(false)
+      }
+    }
+  }
+
+  async function cancelPendingStart() {
+    const pendingId = startRequestId.current
+    if (!pendingId || canceling) return
+    lifecycle.current += 1
+    abortPendingStart(false)
+    submitting.current = false
+    setBusy(false)
+    setCanceling(true)
+    try {
+      await cancelDynamicLogin(pendingId, identity).catch(() => {})
+      if (mounted.current && serverIdentity() === identity) store.toast(t('已取消登录等待'))
+    } finally {
+      if (mounted.current && serverIdentity() === identity) setCanceling(false)
     }
   }
 
@@ -636,7 +681,7 @@ function DynamicForm({ provider, label, source, onAdded, active, footerHost }: D
   const formPrompts = method?.prompts.filter(prompt => prompt !== optionalName) || []
   const accountName = optionalName ? inputs[optionalName.key] ?? optionalName.default ?? '' : name
   const proxyLabel = proxyMode === 'pool' ? t('已保存的代理') : proxyMode === 'custom' ? t('自定义代理') : t('无代理（直连）')
-  const instructions = mergeLoginInstructions(methods.instructions, method?.instructions,
+  const instructions = mergeLoginInstructions(methods.instructions, flow?.managed ? '' : method?.instructions,
     method?.browserMode === 'plugin' ? pluginBrowserInstructions(provider) : '', progress)
 
   return <div className='plugin-account-form' hidden={!active}>
@@ -704,6 +749,9 @@ function DynamicForm({ provider, label, source, onAdded, active, footerHost }: D
           {busy || resolvedPrompts.pending ? <Spinner /> : null}
           {method.type === 'api' || method.type === 'desktop' ? t('添加账号') : method.type === 'sms' ? t('开始短信登录') : t('登录并添加')}
         </Button>
+        {!flow && busy && (method.type === 'oauth' || method.type === 'sms') ? (
+          <Button type='button' variant='outline' disabled={canceling} onClick={() => void cancelPendingStart()}>{t('取消等待')}</Button>
+        ) : null}
       </PluginLoginActions>
     </> : null}
     {flow ? <Alert variant={flow.managed && waitUnconfirmed ? 'warning' : undefined}><AlertTitle>{flow.managed && waitUnconfirmed

@@ -296,13 +296,10 @@ async fn call_with_retry_policy(
             path.starts_with("/api/plugins/desktop-import/chatglm/")
                 || path.starts_with("/api/plugins/desktop-launch/")
                 || path.starts_with("/api/plugins/enrollment/codearts/")
-                || path.starts_with("/api/plugins/enrollment/cline-free/")
                 || method.eq_ignore_ascii_case("PATCH") && path == "/api/plugins/permissions"
                 || method.eq_ignore_ascii_case("POST")
                     && (path == "/api/accounts"
                         || path == "/api/accounts/refresh" || path == "/api/accounts/refresh-expiring"
-                        || path.strip_prefix("/api/accounts/").and_then(|rest| rest.strip_suffix("/credentials/cline-free"))
-                            .is_some_and(|account| !account.is_empty() && !account.contains('/'))
                         || path == "/api/zcode/captcha"
                         || path.starts_with("/api/session/login/")
                         || path == "/api/zcode/claim-verification"

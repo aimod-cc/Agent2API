@@ -1,10 +1,15 @@
 export const UPDATE_WEBSITE = 'https://agent2api.dev'
+export const UPDATE_CDN = 'https://cdn.agent2api.dev'
 
 export function websiteDownloadUrl(value: string): boolean {
   try {
     const url = new URL(value)
-    return url.origin === UPDATE_WEBSITE && !url.username && !url.password
-      && url.pathname.startsWith('/downloads/') && !url.search && !url.hash
+    if (url.username || url.password || url.search || url.hash) return false
+    if (url.origin === UPDATE_WEBSITE) return url.pathname.startsWith('/downloads/')
+    if (url.origin === UPDATE_CDN) {
+      return url.pathname.startsWith('/agent2api/installers/') || url.pathname.startsWith('/agent2api/plugins/')
+    }
+    return false
   } catch { return false }
 }
 

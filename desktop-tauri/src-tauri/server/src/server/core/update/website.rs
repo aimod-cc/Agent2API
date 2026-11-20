@@ -9,15 +9,56 @@ use super::{client, UpdateError};
 pub const ORIGIN: &str = "https://agent2api.dev";
 pub const API_BASE: &str = "https://agent2api.dev/api/updates";
 pub const PLUGIN_BASE: &str = "https://agent2api.dev/api/plugins";
+pub const CDN_ORIGIN: &str = "https://cdn.agent2api.dev";
+pub const CDN_FEEDS_BASE: &str = "https://cdn.agent2api.dev/agent2api/feeds";
+pub const CDN_APP_INDEX_URL: &str = "https://cdn.agent2api.dev/agent2api/feeds/updates/app.json";
+pub const CDN_RELEASES_URL: &str = "https://cdn.agent2api.dev/agent2api/feeds/updates/releases.json";
+pub const CDN_PLUGIN_CATALOG_URL: &str = "https://cdn.agent2api.dev/agent2api/feeds/plugins/catalog.json";
+pub const CDN_COMMUNITY_CATALOG_URL: &str = "https://cdn.agent2api.dev/agent2api/feeds/community/catalog.json";
+pub const CDN_COMMUNITY_DISTRIBUTION_URL: &str = "https://cdn.agent2api.dev/agent2api/feeds/community/distribution.json";
+pub const CDN_COMMUNITY_REGISTRY_URL: &str = "https://cdn.agent2api.dev/agent2api/feeds/community/registry.json";
 
 pub struct JsonResponse {
     pub value: Value,
     pub status: reqwest::StatusCode,
 }
 
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn decoded_segments(url: &url::Url) -> Option<Vec<String>> {
+    url.path_segments().map(|segments| {
+        segments
+            .map(|part| percent_decode_segment(part))
+            .collect::<Option<Vec<_>>>()
+    })?
+}
+
+fn percent_decode_segment(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if bytes[idx] == b'%' {
+            let hi = (*bytes.get(idx + 1)? as char).to_digit(16)?;
+            let lo = (*bytes.get(idx + 2)? as char).to_digit(16)?;
+            out.push((hi * 16 + lo) as u8);
+            idx += 3;
+        } else {
+            out.push(bytes[idx]);
+            idx += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 pub fn trusted_url(value: &str) -> bool {
     url::Url::parse(value).is_ok_and(|url| {
-        url.origin().ascii_serialization() == ORIGIN
+        let origin = url.origin().ascii_serialization();
+        let allowed_origin = origin == ORIGIN
+            || (origin == CDN_ORIGIN && (url.path().starts_with("/agent2api/") || url.path().starts_with("/advertisements/")));
+        allowed_origin
             && url.username().is_empty()
             && url.password().is_none()
             && url.fragment().is_none()
@@ -26,24 +67,49 @@ pub fn trusted_url(value: &str) -> bool {
 
 pub fn api_url(value: &str) -> bool {
     trusted_url(value) && url::Url::parse(value).is_ok_and(|url| {
-        url.path().starts_with("/api/updates/") || url.path().starts_with("/api/plugins/")
+        let origin = url.origin().ascii_serialization();
+        if origin == ORIGIN {
+            url.path().starts_with("/api/updates/") || url.path().starts_with("/api/plugins/")
+        } else if origin == CDN_ORIGIN {
+            url.path().starts_with("/agent2api/feeds/") && url.query().is_none()
+        } else {
+            false
+        }
     })
 }
 
 pub fn download_url(value: &str) -> bool {
     trusted_url(value) && url::Url::parse(value).is_ok_and(|url| {
-        url.path().starts_with("/downloads/") && url.query().is_none()
+        let origin = url.origin().ascii_serialization();
+        let valid_path = if origin == ORIGIN {
+            url.path().starts_with("/downloads/")
+        } else if origin == CDN_ORIGIN {
+            url.path().starts_with("/agent2api/installers/") || url.path().starts_with("/agent2api/plugins/")
+        } else {
+            false
+        };
+        valid_path && url.query().is_none()
     })
 }
 
 pub fn release_page(value: &str) -> String {
-    if trusted_url(value) { value.to_string() }
+    if url::Url::parse(value).is_ok_and(|url| {
+        url.origin().ascii_serialization() == ORIGIN && url.username().is_empty() && url.password().is_none() && url.fragment().is_none()
+    }) { value.to_string() }
     else { format!("{ORIGIN}/downloads") }
 }
 
 pub fn plugin_url(value: &str, id: &str, tag: &str, name: &str) -> bool {
     if !download_url(value) || id.is_empty() || name.is_empty() { return false; }
     let Ok(url) = url::Url::parse(value) else { return false; };
+    if url.origin().ascii_serialization() == CDN_ORIGIN {
+        let Some(parts) = decoded_segments(&url) else { return false; };
+        return matches!(
+            parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice(),
+            ["agent2api", "plugins", pid, ptag, hash, pname]
+                if *pid == id && *ptag == tag && is_sha256_hex(hash) && *pname == name
+        );
+    }
     let component = |text: &str| url::form_urlencoded::byte_serialize(text.as_bytes()).collect::<String>();
     url.path() == format!("/downloads/plugins/{}/{}/{}", component(id), component(tag), component(name))
 }
@@ -53,6 +119,14 @@ pub fn installer_url(value: &str, repository: &str, tag: &str, name: &str) -> bo
         return false;
     }
     let Ok(url) = url::Url::parse(value) else { return false; };
+    if url.origin().ascii_serialization() == CDN_ORIGIN {
+        let Some(parts) = decoded_segments(&url) else { return false; };
+        return matches!(
+            parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice(),
+            ["agent2api", "installers", owner, repo, ptag, hash, pname]
+                if format!("{owner}/{repo}") == repository && *ptag == tag && is_sha256_hex(hash) && *pname == name
+        );
+    }
     let component = |text: &str| url::form_urlencoded::byte_serialize(text.as_bytes()).collect::<String>();
     url.path() == format!("/downloads/{repository}/{}/{}", component(tag), component(name))
 }
@@ -108,7 +182,14 @@ pub async fn request(
 
 pub async fn fetch_bytes(value: &str, limit: usize) -> Result<Vec<u8>, UpdateError> {
     if !trusted_url(value) || !url::Url::parse(value).is_ok_and(|url| {
-        url.path().starts_with("/plugin-assets/") || url.path().starts_with("/api/media/")
+        let origin = url.origin().ascii_serialization();
+        if origin == ORIGIN {
+            url.path().starts_with("/plugin-assets/") || url.path().starts_with("/api/media/")
+        } else if origin == CDN_ORIGIN {
+            url.path().starts_with("/advertisements/") && url.query().is_none()
+        } else {
+            false
+        }
     }) { return Err(UpdateError::new("官网插件图标地址无效")); }
     let response = request(value, &[], Some(8_000)).await?;
     if !response.status().is_success() { return Err(UpdateError::new("官网插件图标不可用")); }
@@ -129,7 +210,7 @@ async fn read_bytes(mut response: reqwest::Response, limit: usize, timeout_ms: u
     }).await.map_err(|_| UpdateError::new("读取官网更新信息超时"))?
 }
 
-pub async fn fetch_json(value: &str, timeout_ms: u64) -> Result<JsonResponse, UpdateError> {
+pub async fn fetch_json_limit(value: &str, timeout_ms: u64, limit: usize) -> Result<JsonResponse, UpdateError> {
     if !api_url(value) { return Err(UpdateError::new("官网更新地址无效")); }
     let headers = vec![("Accept".to_string(), "application/json".to_string())];
     let response = request(value, &headers, Some(timeout_ms)).await?;
@@ -139,7 +220,24 @@ pub async fn fetch_json(value: &str, timeout_ms: u64) -> Result<JsonResponse, Up
         .is_some_and(|value| value.starts_with("application/json")) {
         return Err(UpdateError::new("官网更新信息不是 JSON"));
     }
-    let bytes = read_bytes(response, 4 * 1024 * 1024, timeout_ms).await?;
+    let bytes = read_bytes(response, limit, timeout_ms).await?;
     let value = serde_json::from_slice(&bytes).map_err(|_| UpdateError::new("官网更新信息格式无效"))?;
     Ok(JsonResponse { value, status })
+}
+
+pub async fn fetch_json(value: &str, timeout_ms: u64) -> Result<JsonResponse, UpdateError> {
+    fetch_json_limit(value, timeout_ms, 4 * 1024 * 1024).await
+}
+
+pub async fn fetch_json_with_fallback(
+    primary_cdn_url: &str,
+    fallback_api_url: &str,
+    timeout_ms: u64,
+) -> Result<JsonResponse, UpdateError> {
+    if let Ok(response) = fetch_json(primary_cdn_url, timeout_ms).await {
+        if response.status.is_success() {
+            return Ok(response);
+        }
+    }
+    fetch_json(fallback_api_url, timeout_ms).await
 }

@@ -451,12 +451,6 @@ pub async fn dispatch(
 
     // ③ POST + /move 结尾；POST + /rate-limits/clear 结尾
     if method == Method::POST {
-        if let Some(id) = rest.strip_suffix("/credentials/cline-free") {
-            let id = decode_segment(id);
-            if !id.is_empty() {
-                return super::accounts_credentials::replace_cline_free(&state, &id, body).await;
-            }
-        }
         if let Some(id) = rest.strip_suffix("/move") {
             let id = decode_segment(id);
             if !id.is_empty() {

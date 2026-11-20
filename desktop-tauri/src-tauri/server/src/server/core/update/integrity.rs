@@ -54,8 +54,21 @@ pub async fn trusted_digest(value: &str) -> Option<(String, u64)> {
     if let Some(digest) = cached(value) { return Some(digest); }
     let url = url::Url::parse(value).ok()?;
     let parts: Vec<_> = url.path_segments()?.collect();
-    let ["downloads", owner, repo, tag, _name] = parts.as_slice() else { return None; };
-    let repository = format!("{owner}/{repo}");
+    let (repository, tag) = match parts.as_slice() {
+        ["downloads", owner, repo, tag, _name] => (format!("{owner}/{repo}"), *tag),
+        ["agent2api", "installers", owner, repo, tag, _hash, _name] => (format!("{owner}/{repo}"), *tag),
+        _ => return None,
+    };
+    if let Ok(feed) = website::fetch_json(website::CDN_RELEASES_URL, 15_000).await {
+        if feed.status.is_success() && feed.value.get("repository").and_then(Value::as_str) == Some(repository.as_str()) {
+            if let Some(releases) = feed.value.get("releases").and_then(Value::as_array) {
+                for release in releases {
+                    remember_website_release(release, &repository);
+                }
+                if let Some(digest) = cached(value) { return Some(digest); }
+            }
+        }
+    }
     let endpoint = format!("{}/repos/{repository}/releases/tags/{tag}", website::API_BASE);
     let response = website::fetch_json(&endpoint, 15_000).await.ok()?;
     if !response.status.is_success() { return None; }

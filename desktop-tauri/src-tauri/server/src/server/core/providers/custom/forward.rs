@@ -221,11 +221,15 @@ pub(crate) async fn forward(
     // 只有提供商允许的账号覆盖才在配套请求头之后生效。
     apply_user_agent_override(&mut headers, user_agent);
 
+    let outbound_model = outbound
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     logging::verbose(
         "[CustomProvider]",
         &format!(
             "POST {url} model={} stream={stream} account={account_id} 出口={}{}",
-            if requested.is_empty() { "(默认)" } else { &requested },
+            if outbound_model.is_empty() { "(默认)" } else { outbound_model },
             describe_proxy(proxy.as_ref()),
             if quirks.emulate_opencode { " 伪装=opencode" } else { "" },
         ),
@@ -622,8 +626,9 @@ async fn forward_translated(
 ///
 /// ── 两道改写的细节（与内置家的对应关系）────────────────────────
 ///   - **模型名**：`custom_providers::wire_model_for` 一次解析出「上游真名 +
-///     思考等级」（两者同源，见那个函数的说明）。真名与请求名忽略大小写相同
-///     时**不复制**（零改写是常态）；不同才升级成副本；
+///     思考等级」（两者同源，见那个函数的说明）。仅当出站 `model` 与上游
+///     真名逐字节相同时不改写；只要大小写或别名不同就改写为清单中的精确
+///     模型 ID（OpenCode Go 等大小写敏感上游不认大小写不一致的请求名）；
 ///   - **思考等级**：绑定非空且不是关闭思考时，清理冲突的客户端思考参数，再
 ///     强制写入 `reasoning_effort`；后续协议转换只读取覆盖后的等级。
 ///     `off` / `none` 仍不注入关闭思考字段，与内置家共用判据。
@@ -644,10 +649,19 @@ fn rewrite_body(body: &Value, provider_id: &str, requested: &str) -> (Value, Opt
         return (outbound, None);
     }
     let (wire_model, reasoning) = custom_providers::wire_model_for(provider_id, requested);
-    if !wire_model.eq_ignore_ascii_case(requested) {
+    let current = outbound
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !wire_model.is_empty() && current != wire_model {
+        let reason = if wire_model.eq_ignore_ascii_case(requested) {
+            "按模型清单精确大小写改写模型名"
+        } else {
+            "按映射改写模型名"
+        };
         logging::verbose(
             "[CustomProvider]",
-            &format!("provider={provider_id} 按映射改写模型名 {requested} → {wire_model}"),
+            &format!("provider={provider_id} {reason} {current} → {wire_model}"),
         );
         if let Some(object) = outbound.as_object_mut() {
             object.insert("model".to_string(), Value::String(wire_model));

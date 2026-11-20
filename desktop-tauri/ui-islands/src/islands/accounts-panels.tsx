@@ -75,7 +75,6 @@ import { exportAccountFiles } from './accounts-export'
 import { useProviderIcon } from './provider-icon'
 import { usageTaskPending, usageTaskText } from '../../../ui-shared/usage-query-task'
 import { usageRowOf } from './accounts-usage-cache'
-import { usageRecoveryPane } from '../../../ui-shared/usage-query-state'
 import { cancelUsageQuery } from './accounts-usage-tasks'
 import { DesktopLaunchButton } from './accounts-desktop-launch'
 import { t } from '../i18n'
@@ -1050,7 +1049,6 @@ export function UsageCell({ account }: { account: AccountRecord }) {
   const task = getStore().usageTasks.get(account.id)
   const querying = usageTaskPending(task)
   const stale = usageRowOf(account.id)?.stale
-  const recoveryPane = usageRecoveryPane(usageRowOf(account.id)?.code)
   const configChanged = task?.status === 'config_changed' || stale && !task
   const stateText = configChanged ? t('配置已变更，请重新查询')
     : task?.status === 'queued' ? usageTaskText(task, t)
@@ -1064,8 +1062,6 @@ export function UsageCell({ account }: { account: AccountRecord }) {
         title={failureStatus.detail}>
         {failureStatus.text}
       </span> : null}
-      {recoveryPane ? <Button type='button' variant='link' size='xs' className='self-start h-auto px-0 text-[11px]'
-        onClick={() => openSettingsDialog(account.id, recoveryPane)}>{t('处理查询问题')}</Button> : null}
       {stateText ? <span className='text-[11px] text-subtle' role='status'>{stateText}</span> : null}
     </span>
   )

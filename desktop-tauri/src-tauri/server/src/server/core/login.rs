@@ -25,11 +25,12 @@ mod persistence;
 
 pub use callback::LoginCallbackResult;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use tokio_util::sync::CancellationToken;
 
 use crate::server::core::account_store::AccountStore;
 use crate::server::core::endpoints::DEFAULT_EDITION;
@@ -56,6 +57,7 @@ const TASK_RETENTION_MS: i64 = 10 * 60 * 1000;
 #[derive(Clone, Debug, Default)]
 pub struct LoginTaskState {
     pub state: Option<String>,
+    pub request_id: Option<String>,
     pub auth_url: Option<String>,
     pub allowed_hosts: Vec<String>,
     pub validates_callback: bool,
@@ -296,6 +298,17 @@ impl LoginTasks {
         table.by_state.get(state).cloned()
     }
 
+    pub fn find_by_request_id(&self, request_id: &str) -> Option<String> {
+        if request_id.is_empty() {
+            return None;
+        }
+        let mut table = self.lock();
+        Self::sweep(&mut table);
+        table.by_state.iter().find_map(|(state, handle)| {
+            (handle.lock().request_id.as_deref() == Some(request_id)).then(|| state.clone())
+        })
+    }
+
     /// 登记任务（`/start` 拿到 state 后调用）
     pub fn register(&self, state: &str, handle: LoginTaskHandle) -> bool {
         if state.is_empty() {
@@ -369,10 +382,30 @@ impl Default for LoginTasks {
 /// 它原来只服务 WorkBuddy 的登录链（拉 `login/account` / `accounts`、
 /// 续期），那条链已随实现搬到插件。现在这里只剩「任务表 + 落库 + 各家
 /// 自己的回调收尾」，不再需要会话服务。
+#[derive(Default)]
+struct PendingStarts {
+    active: HashMap<String, CancellationToken>,
+    canceled: VecDeque<String>,
+}
+
+pub(crate) struct PendingStartGuard {
+    pending: Arc<Mutex<PendingStarts>>,
+    request_id: String,
+}
+
+impl Drop for PendingStartGuard {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.pending.lock() {
+            guard.active.remove(&self.request_id);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct LoginService {
     store: AccountStore,
     tasks: LoginTasks,
+    pending_starts: Arc<Mutex<PendingStarts>>,
 }
 
 impl LoginService {
@@ -380,6 +413,7 @@ impl LoginService {
         Self {
             store,
             tasks: LoginTasks::new(),
+            pending_starts: Arc::new(Mutex::new(PendingStarts::default())),
         }
     }
 
@@ -387,24 +421,72 @@ impl LoginService {
         &self.tasks
     }
 
+    pub(crate) fn register_pending(&self, request_id: Option<&str>) -> (CancellationToken, Option<PendingStartGuard>) {
+        let token = CancellationToken::new();
+        let Some(id) = request_id.map(str::trim).filter(|value| !value.is_empty()) else {
+            return (token, None);
+        };
+        if let Ok(mut guard) = self.pending_starts.lock() {
+            if let Some(pos) = guard.canceled.iter().position(|item| item == id) {
+                guard.canceled.remove(pos);
+                token.cancel();
+                return (token, None);
+            }
+            guard.active.insert(id.to_string(), token.clone());
+        }
+        let guard = PendingStartGuard { pending: self.pending_starts.clone(), request_id: id.to_string() };
+        (token, Some(guard))
+    }
+
+    pub(crate) fn cancel_pending(&self, key: &str) -> bool {
+        let id = key.trim();
+        if id.is_empty() {
+            return false;
+        }
+        let Ok(mut guard) = self.pending_starts.lock() else {
+            return false;
+        };
+        if let Some(token) = guard.active.remove(id) {
+            token.cancel();
+            return true;
+        }
+        if id.starts_with("req-") && !guard.canceled.iter().any(|item| item == id) {
+            if guard.canceled.len() >= 32 {
+                guard.canceled.pop_front();
+            }
+            guard.canceled.push_back(id.to_string());
+        }
+        false
+    }
+
     /// 取消一次登录：先清本体任务，再通知对应适配器释放插件侧会话与端口。
     /// 保留同步签名（已有调用方无需改动），HTTP 入口用 cancel_async 等清理完成。
     pub fn cancel(&self, state: &str) -> bool {
-        let Some(handle) = self.cancel_task(state) else { return false };
-        let flow = state.to_string();
+        if self.cancel_pending(state) {
+            return true;
+        }
+        let Some((flow, handle)) = self.cancel_task(state) else { return false };
         crate::spawn_task(async move { handle.cancel_provider_flow(&flow).await; });
         true
     }
 
     pub async fn cancel_async(&self, state: &str) -> bool {
-        let Some(handle) = self.cancel_task(state) else { return false };
-        handle.cancel_provider_flow(state).await;
+        if self.cancel_pending(state) {
+            return true;
+        }
+        let Some((flow, handle)) = self.cancel_task(state) else { return false };
+        handle.cancel_provider_flow(&flow).await;
         true
     }
 
-    fn cancel_task(&self, state: &str) -> Option<LoginTaskHandle> {
-        let handle = self.tasks.get(state)?;
-        self.tasks.cancel(state).then_some(handle)
+    fn cancel_task(&self, key: &str) -> Option<(String, LoginTaskHandle)> {
+        let actual_state = if self.tasks.get(key).is_some() {
+            key.to_string()
+        } else {
+            self.tasks.find_by_request_id(key)?
+        };
+        let handle = self.tasks.get(&actual_state)?;
+        self.tasks.cancel(&actual_state).then_some((actual_state, handle))
     }
 
     /// OAuth 明确失败：保留可读终态供 /wait 读取，清理仍使用启动 flow 的实例。
@@ -450,6 +532,7 @@ impl LoginService {
         LoginTaskHandle {
             inner: Arc::new(Mutex::new(LoginTaskState {
                 state: None,
+                request_id: None,
                 auth_url: None,
                 allowed_hosts: Vec::new(),
                 validates_callback: false,

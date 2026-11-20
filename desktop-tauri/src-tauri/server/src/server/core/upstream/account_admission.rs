@@ -12,7 +12,9 @@ pub(super) async fn select(service: &UpstreamService, providers: &[&str], keys: 
     tried: &[String], pinned: Option<&str>, conversation: &str, routing: &RequestRouting,
     connection: &mut ConnectionGuard, telemetry: &Arc<RequestTelemetry>,
 ) -> Result<RouteTarget, GatewayError> {
-    let deadline = Instant::now() + Duration::from_secs(crate::server::core::runtime_capacity::limits().queue_wait_seconds);
+    let wait_seconds = crate::server::core::runtime_capacity::limits().queue_wait_seconds;
+    let wait_started = Instant::now();
+    let deadline = wait_started + Duration::from_secs(wait_seconds);
     let mut excluded = tried.to_vec();
     let notify = service.connections().changed_notify();
     loop {
@@ -35,14 +37,18 @@ pub(super) async fn select(service: &UpstreamService, providers: &[&str], keys: 
             Err(error) => return Err(error),
         }
         connection.rebind(None);
-        if Instant::now() >= deadline { return Err(busy()); }
+        if Instant::now() >= deadline {
+            return Err(busy_timeout(providers, tried.len(), wait_started.elapsed(), wait_seconds));
+        }
         let token = telemetry.cancel_token();
         tokio::select! {
             biased;
             _ = async { match token { Some(token) => token.cancelled().await, None => std::future::pending().await } } => {
                 return Err(cancellation::cancelled_error());
             }
-            _ = tokio::time::sleep_until(deadline) => return Err(busy()),
+            _ = tokio::time::sleep_until(deadline) => {
+                return Err(busy_timeout(providers, tried.len(), wait_started.elapsed(), wait_seconds));
+            }
             _ = &mut wake => {},
             _ = tokio::time::sleep(Duration::from_millis(100)) => {},
         }
@@ -51,9 +57,24 @@ pub(super) async fn select(service: &UpstreamService, providers: &[&str], keys: 
     }
 }
 
+fn busy_timeout(providers: &[&str], tried_count: usize, waited: Duration, wait_seconds: u64) -> GatewayError {
+    crate::server::logging::log_with_level(
+        "[Upstream]",
+        &format!(
+            "⚠️ 路由内可用账号均忙，排队超时 (503 account_busy): 提供商=[{}] 已尝试排除={} 等待={}ms 上限={}s",
+            providers.join(","),
+            tried_count,
+            waited.as_millis(),
+            wait_seconds,
+        ),
+        "warn",
+    );
+    busy()
+}
+
 fn busy() -> GatewayError {
     GatewayError::with_status(503, "当前路由内的账号均忙，排队等待超时，请稍后重试")
-        .with_code("account_busy").with_retry_after_seconds(1)
+        .with_code("account_busy").with_reason("account_busy").with_retry_after_seconds(1)
 }
 
 pub(super) fn all_busy(accounts: &[Value], counts: &std::collections::HashMap<String, usize>, tried: &[String]) -> bool {

@@ -9,10 +9,10 @@ use crate::server::{db::Db, logging};
 
 mod network;
 mod types;
-use types::{image_url, Feed, MAX_FEED_BYTES, MAX_TTL_MS, WEBSITE_ORIGIN};
+use types::{image_url, Feed, CDN_ADVERTISEMENTS_URL, CDN_ORIGIN, MAX_FEED_BYTES, MAX_TTL_MS, WEBSITE_ORIGIN};
 
 const CACHE_KEY: &str = "advertisementCache";
-const RETRY_SECONDS: u64 = 30;
+const RETRY_SECONDS: u64 = 300;
 
 #[derive(Clone)]
 pub struct AdvertisementCache {
@@ -213,11 +213,17 @@ fn empty() -> Value {
     json!({ "schemaVersion": 1, "revision": 0, "enabled": false, "expiresInSeconds": 0, "items": [] })
 }
 
-async fn fetch_feed() -> Result<Feed, String> {
-    let url = format!("{WEBSITE_ORIGIN}/api/advertisements");
-    let mut response = network::request(&url).await?;
+fn header_server_time_ms(headers: &reqwest::header::HeaderMap) -> Option<i64> {
+    let raw = headers.get(reqwest::header::DATE)?.to_str().ok()?.trim();
+    chrono::DateTime::parse_from_rfc2822(raw)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
+}
+
+async fn fetch_feed_from(url: &str, expected_origin: &str, wrapped: bool) -> Result<Feed, String> {
+    let mut response = network::request(url).await?;
     if !response.status().is_success()
-        || response.url().origin().ascii_serialization() != WEBSITE_ORIGIN
+        || response.url().origin().ascii_serialization() != expected_origin
     {
         return Err("官网广告服务不可用".into());
     }
@@ -235,6 +241,7 @@ async fn fetch_feed() -> Result<Feed, String> {
     {
         return Err("官网广告配置过大".into());
     }
+    let server_header_ms = header_server_time_ms(response.headers());
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(|_| "读取官网广告配置失败")? {
         if bytes.len().saturating_add(chunk.len()) > MAX_FEED_BYTES {
@@ -242,12 +249,31 @@ async fn fetch_feed() -> Result<Feed, String> {
         }
         bytes.extend_from_slice(&chunk);
     }
-    let envelope: Value = serde_json::from_slice(&bytes).map_err(|_| "官网广告配置格式无效")?;
-    if envelope["success"] != true {
-        return Err("官网广告服务返回失败".into());
+    let mut feed: Feed = if wrapped {
+        let envelope: Value = serde_json::from_slice(&bytes).map_err(|_| "官网广告配置格式无效")?;
+        if envelope["success"] != true {
+            return Err("官网广告服务返回失败".into());
+        }
+        serde_json::from_value(envelope["data"].clone()).map_err(|_| "官网广告配置格式无效")?
+    } else {
+        serde_json::from_slice(&bytes).map_err(|_| "官网广告配置格式无效")?
+    };
+    if !wrapped {
+        if feed.server_time == 0 {
+            feed.server_time = server_header_ms
+                .unwrap_or_else(|| if feed.generated_at > 0 { feed.generated_at } else { logging::now_ms() });
+        }
+        if feed.expires_at == 0 {
+            feed.expires_at = feed.server_time.saturating_add(MAX_TTL_MS);
+        }
     }
-    let feed: Feed =
-        serde_json::from_value(envelope["data"].clone()).map_err(|_| "官网广告配置格式无效")?;
     feed.validate()?;
     Ok(feed)
+}
+
+async fn fetch_feed() -> Result<Feed, String> {
+    match fetch_feed_from(CDN_ADVERTISEMENTS_URL, CDN_ORIGIN, false).await {
+        Ok(feed) => Ok(feed),
+        Err(_) => fetch_feed_from(&format!("{WEBSITE_ORIGIN}/api/advertisements"), WEBSITE_ORIGIN, true).await,
+    }
 }

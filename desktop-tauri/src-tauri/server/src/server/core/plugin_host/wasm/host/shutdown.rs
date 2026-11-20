@@ -16,7 +16,6 @@ impl Host {
         crate::server::core::login::managed::close_trae_for_host(self);
         super::super::managed::close_kiro_for_host(self);
         super::super::codearts_enrollment::close_for_host(self);
-        super::super::cline_free_enrollment::close_for_host(self);
         super::super::codearts_refresh::close_for_host(self);
         super::super::desktop_launch::close_for_host(self);
         // 只短借用当前/装载中的Shared；旧scope的Shared由受控登记表批次负责通知与保留。
@@ -59,7 +58,6 @@ impl Host {
         crate::server::core::login::managed::wait_trae_for_host(self).await;
         super::super::managed::wait_kiro_for_host(self).await;
         super::super::codearts_enrollment::wait_workers(self).await;
-        super::super::cline_free_enrollment::wait_workers(self).await;
         super::super::codearts_refresh::wait_for_host(self).await;
         super::super::desktop_launch::wait_for_host(self).await;
     }
@@ -68,8 +66,6 @@ impl Host {
         if !crate::server::core::login::managed::trae_release_ready(self)
             || !super::super::managed::kiro_release_ready(self)
             || !super::super::codearts_enrollment::release_ready(self)
-            || !super::super::cline_free_enrollment::release_ready(self)
-            || !super::super::cline_free_refresh::release_ready(self)
             || !super::super::doubao_rewards::release_ready(self)
             || !super::super::codearts_refresh::release_ready(self)
             || !super::super::desktop_launch::release_ready(self) { return false; }

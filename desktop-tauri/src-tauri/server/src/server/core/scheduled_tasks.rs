@@ -106,7 +106,7 @@ pub const TASKS: [TaskDef; 6] = [
     TaskDef {
         id: TASK_UPDATE_CHECK,
         label: "软件版本检查",
-        description: "定期向 GitHub 查询最新发布版本，默认每 20 分钟一次。检查结果、排期和限流冷却跨重启保留；手动检查也会合并重复请求并遵守冷却。开关与间隔在「软件更新」面板的「更新设置」弹窗里配置（定时任务页不再渲染这一条）。",
+        description: "定期检查最新发布版本，默认每 4 小时一次。检查结果、排期和冷却跨重启保留；手动检查也会合并重复请求并遵守冷却。开关与间隔在「软件更新」面板的「更新设置」弹窗里配置（定时任务页不再渲染这一条）。",
         unit: "minutes",
         runner: Runner::Backend,
         min: config::INTERVAL_MIN_MINUTES,

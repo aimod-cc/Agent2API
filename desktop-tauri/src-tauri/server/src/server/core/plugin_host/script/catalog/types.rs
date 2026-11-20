@@ -27,6 +27,7 @@ pub(super) struct Entry {
     pub pushed_at: String,
     pub manifest_at: i64,
     pub provider_verified: bool,
+    pub commit_sha: Option<String>,
 }
 
 impl Entry {

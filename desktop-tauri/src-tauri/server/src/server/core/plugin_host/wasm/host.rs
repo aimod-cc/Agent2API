@@ -179,41 +179,6 @@ impl Host {
         unwrap_reply(runtime.invoke_codearts_refresh(call, params, timeout).await?)
     }
 
-    pub(in crate::server::core::plugin_host) async fn call_wasm_cline_free_refresh(self: &Arc<Self>,
-        params: Value, timeout: Duration,
-    ) -> Result<Value, proto::WireError> {
-        let account = params["account"].as_str().ok_or_else(|| super::error("Cline Free原续期调用缺少目标账号"))?;
-        if params["provider"].as_str() != Some("cline-free") || !self.ready() {
-            return Err(super::error("Cline Free原续期运行来源不可用"));
-        }
-        let (_telemetry, egress) = match super::super::account_egress::capture_request("cline-free", account) {
-            Ok((telemetry, egress)) => (Some(telemetry), Some(egress)),
-            Err(super::super::account_egress::EgressError::MissingScope
-                | super::super::account_egress::EgressError::NoRequest) => (None, None),
-            Err(_) => return Err(super::error("Cline Free原账号出口未确认，未重新选号或回退直连")),
-        };
-        let runtime = self.embedded.runtime.try_read().map_err(|_| super::error("Cline Free原运行实例正忙"))?
-            .clone().ok_or_else(|| super::error("Cline Free原运行实例不可用"))?;
-        let call = super::cline_free_refresh::Call::capture(self, &runtime, account, timeout, egress)?;
-        unwrap_reply(runtime.invoke_cline_free_refresh(call, params, timeout).await?)
-    }
-
-    pub(in crate::server::core::plugin_host) async fn call_wasm_cline_desktop_refresh(self: &Arc<Self>,
-        params: Value, timeout: Duration,
-    ) -> Result<Value, proto::WireError> {
-        let account = params["account"].as_str().ok_or_else(|| super::error("本机续期缺少原账号"))?;
-        let runtime = self.embedded.runtime.read().await.clone().ok_or_else(|| super::error("插件未加载"))?;
-        if runtime.shared.options.provider != "cline-free" { return Err(super::error("额度池不一致")); }
-        let store = crate::server::core::account_store::plugin_accounts::shared().ok_or_else(|| super::error("账号存储未就绪"))?;
-        if !store.plugin_account(account).is_some_and(|record| record["desktop"] == true && record["provider"] == "cline-free") {
-            return Err(super::error("当前账号不是已保存的本机引用"));
-        }
-        let _lease = self.activity.acquire().ok_or_else(|| super::error("插件正在切换"))?;
-        let mut params = params;
-        params["desktopRefresh"] = json!(true);
-        unwrap_reply(runtime.invoke(proto::methods::gateway::TOKEN_REFRESH, params, timeout, None).await?)
-    }
-
     pub(in crate::server::core::plugin_host) async fn call_wasm_doubao_rewards(self: &Arc<Self>,
         params: Value, timeout: Duration,
     ) -> Result<Value, proto::WireError> {
@@ -311,7 +276,7 @@ impl Host {
         }
         let _lease = self.activity.acquire().ok_or_else(|| super::error("插件正在切换或已关闭"))?;
         let runtime = self.embedded.runtime.read().await.clone().ok_or_else(|| super::error("Wasm 插件尚未加载"))?;
-        if matches!(runtime.shared.options.provider.as_str(), "codearts" | "cline-free")
+        if runtime.shared.options.provider.as_str() == "codearts"
             && method == proto::methods::gateway::TOKEN_REFRESH {
             return Err(proto::WireError::with_code("换证必须来自原账号的固定宿主调用", "forbidden"));
         }

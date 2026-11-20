@@ -18,23 +18,56 @@ pub(super) fn verify(version: &str) -> Result<VerifiedRelease, UpdateError> {
     runtime.block_on(fetch(version))
 }
 
+async fn get_with_fallback(
+    client: &reqwest::Client,
+    primary: &str,
+    fallback: &str,
+    limit: usize,
+) -> Result<Vec<u8>, UpdateError> {
+    match get(client, primary, limit).await {
+        Ok(bytes) => Ok(bytes),
+        Err(_) => get(client, fallback, limit).await,
+    }
+}
+
 async fn fetch(tag: &str) -> Result<VerifiedRelease, UpdateError> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
         .user_agent("agent2api-service-updater")
         .build().map_err(|error| UpdateError::new(error.to_string()))?;
-    let index_url = format!("{}/app.json", website::API_BASE);
-    let index: Value = serde_json::from_slice(&get(&client, &index_url, 64 * 1024).await?)
+    let fallback_index_url = format!("{}/app.json", website::API_BASE);
+    let index_bytes = get_with_fallback(&client, website::CDN_APP_INDEX_URL, &fallback_index_url, 64 * 1024).await?;
+    let index: Value = serde_json::from_slice(&index_bytes)
         .map_err(|_| UpdateError::new("官网更新索引格式异常"))?;
     if index["schema"] != 1 { return Err(UpdateError::new("官网更新索引版本不受支持")); }
     let repository = index["app"]["repo"].as_str()
         .ok_or_else(|| UpdateError::new("官网更新索引缺少仓库"))?;
     if !valid_repo(repository) { return Err(UpdateError::new("官网更新索引的仓库标识无效")); }
-    let url = format!("{}/repos/{repository}/releases/tags/v{tag}", website::API_BASE);
-    let release: Value = serde_json::from_slice(&get(&client, &url, 2 * 1024 * 1024).await?)
-        .map_err(|_| UpdateError::new("官网发布信息格式异常"))?;
     let expected_tag = format!("v{tag}");
+    let mut matched_release: Option<Value> = None;
+    if let Ok(feed_bytes) = get(&client, website::CDN_RELEASES_URL, 4 * 1024 * 1024).await {
+        if let Ok(feed) = serde_json::from_slice::<Value>(&feed_bytes) {
+            if feed["repository"].as_str() == Some(repository) {
+                matched_release = feed["releases"]
+                    .as_array()
+                    .and_then(|items| {
+                        items.iter().find(|item| {
+                            item["draft"] != true && item["tag_name"].as_str() == Some(expected_tag.as_str())
+                        })
+                    })
+                    .cloned();
+            }
+        }
+    }
+    let release = match matched_release {
+        Some(release) => release,
+        None => {
+            let url = format!("{}/repos/{repository}/releases/tags/v{tag}", website::API_BASE);
+            serde_json::from_slice(&get(&client, &url, 2 * 1024 * 1024).await?)
+                .map_err(|_| UpdateError::new("官网发布信息格式异常"))?
+        }
+    };
     if release["draft"] == true || release["tag_name"].as_str() != Some(expected_tag.as_str()) {
         return Err(UpdateError::new("官网发布版本与待安装版本不符"));
     }

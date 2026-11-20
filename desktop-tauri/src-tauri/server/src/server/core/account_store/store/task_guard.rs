@@ -19,10 +19,9 @@ impl AccountStore {
     pub(in crate::server::core::account_store) fn bound_credential_transaction(
         &self, source: &crate::server::db::CredentialSource, commit: &mut Option<bool>,
         action: &mut impl FnMut(&rusqlite::Connection) -> bool,
-    ) -> Result<crate::server::db::CodeArtsTransaction<(), ()>, super::super::credential_version::FreeEnrollmentError> {
-        use super::super::credential_version::FreeEnrollmentError;
-        let _account = self.inner.lock.try_lock().map_err(|_| FreeEnrollmentError::Unavailable)?;
-        let db = self.inner.db.as_ref().ok_or(FreeEnrollmentError::Unavailable)?;
+    ) -> Result<crate::server::db::CodeArtsTransaction<(), ()>, ()> {
+        let _account = self.inner.lock.try_lock().map_err(|_| ())?;
+        let db = self.inner.db.as_ref().ok_or(())?;
         Ok(db.try_codearts_final_transaction(source, commit, action))
     }
 

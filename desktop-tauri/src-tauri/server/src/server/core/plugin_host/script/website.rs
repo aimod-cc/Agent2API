@@ -1,7 +1,11 @@
 use crate::server::core::update::website as official;
 
-pub(super) const REGISTRY: &str = "https://agent2api.dev/api/plugins/community/registry";
-pub(super) const DISTRIBUTION: &str = "https://agent2api.dev/api/plugins/community/distribution";
+pub(super) const CATALOG: &str = official::CDN_COMMUNITY_CATALOG_URL;
+pub(super) const LEGACY_CATALOG: &str = "https://agent2api.dev/api/plugins/community/catalog";
+pub(super) const REGISTRY: &str = official::CDN_COMMUNITY_REGISTRY_URL;
+pub(super) const LEGACY_REGISTRY: &str = "https://agent2api.dev/api/plugins/community/registry";
+pub(super) const DISTRIBUTION: &str = official::CDN_COMMUNITY_DISTRIBUTION_URL;
+pub(super) const LEGACY_DISTRIBUTION: &str = "https://agent2api.dev/api/plugins/community/distribution";
 const BASE: &str = "https://agent2api.dev/api/plugins/community";
 
 pub(super) fn url(kind: &str, parameters: &[(&str, &str)]) -> Result<String, String> {
@@ -13,6 +17,7 @@ pub(super) fn url(kind: &str, parameters: &[(&str, &str)]) -> Result<String, Str
 fn convert(value: &str) -> Result<String, String> {
     let original = url::Url::parse(value).map_err(|_| "插件来源地址无效")?;
     if official::trusted_url(value) && (original.path().starts_with("/api/plugins/community/")
+        || original.path().starts_with("/agent2api/feeds/community/")
         || official::download_url(value)) { return Ok(value.to_string()); }
     let parts: Vec<_> = original.path_segments().ok_or("插件来源缺少路径")?.collect();
     let decode = |value: &str| url::form_urlencoded::parse(format!("value={value}").as_bytes()).next().map(|(_, value)| value.into_owned()).unwrap_or_default();
@@ -83,4 +88,11 @@ pub(super) async fn bytes(value: &str, limit: usize) -> Result<Vec<u8>, String> 
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
+}
+
+pub(super) async fn bytes_with_fallback(primary: &str, fallback: &str, limit: usize) -> Result<Vec<u8>, String> {
+    match bytes(primary, limit).await {
+        Ok(data) => Ok(data),
+        Err(_) => bytes(fallback, limit).await,
+    }
 }

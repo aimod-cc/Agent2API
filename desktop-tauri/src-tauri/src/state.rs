@@ -78,10 +78,47 @@ impl WindowState {
     }
 }
 
+/// 一次进行中的登录的可取消信号与前端请求追踪标识。
+#[derive(Clone)]
+pub struct LoginCancel(Arc<tokio::sync::watch::Sender<bool>>);
+
+impl Default for LoginCancel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LoginCancel {
+    pub fn new() -> Self {
+        Self(Arc::new(tokio::sync::watch::channel(false).0))
+    }
+
+    pub fn cancel(&self) {
+        let _ = self.0.send_replace(true);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        *self.0.borrow()
+    }
+
+    pub async fn wait(&self) {
+        let mut rx = self.0.subscribe();
+        let _ = rx.wait_for(|cancelled| *cancelled).await;
+    }
+}
+
+#[derive(Clone)]
+pub struct PendingLoginControl {
+    pub state: String,
+    pub request_id: String,
+    pub cancel: LoginCancel,
+}
+
 #[derive(Default)]
 pub struct AppState {
     pub backend: Arc<Mutex<BackendHandle>>,
     pub login: Mutex<Option<ActiveLogin>>,
+    pub login_cancel: Mutex<Option<PendingLoginControl>>,
     pub window: WindowState,
     pub(crate) exit: Arc<crate::exit::Coordinator>,
 }

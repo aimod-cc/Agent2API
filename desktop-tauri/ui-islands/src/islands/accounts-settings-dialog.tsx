@@ -29,7 +29,6 @@ import { allAccounts, findAccount, syncBalancesSnapshot } from './accounts-data'
 import { refreshSavedAccounts, updateAccountConfirmed } from './accounts-update'
 import { draftOfProxy, ProxyForm, readProxyDraft, type ProxyDraft, type ProxyPayload } from './accounts-proxy-form'
 import { UserAgentInput, useUserAgentPresets, userAgentEditable } from './add-account-user-agent'
-import { AccountUsageRecovery, AccountClineCredentials } from './accounts-usage-recovery'
 import {
   AccountSettingsIcon, BalanceTokenField, CustomCredentialFields, ProviderSection, SettingGroup,
   type ProviderSettings,
@@ -47,10 +46,9 @@ function labelOf(account: AccountLike | null | undefined): string {
   return displayNameOf(account) || account?.id || ''
 }
 
-export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane = 'basic', routeContext }: {
+export function AccountSettingsDialog({ id, onClose, initialAccount, routeContext }: {
   id: string; onClose: () => void
   initialAccount?: AccountRecord
-  initialPane?: PaneId
   routeContext?: React.ReactNode
 }) {
   const [account, setAccount] = React.useState(() => initialAccount || findAccount(id))
@@ -66,7 +64,6 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
   // ZCode 的「使用哪个套餐」草稿（非 ZCode 账号恒为空串，那一段也不渲染）
   const [planChannel, setPlanChannel] = React.useState(() => zcodePlanOf(account))
   const [busy, setBusy] = React.useState(false)
-  const [recoveryBusy, setRecoveryBusy] = React.useState(false)
   const [status, setStatus] = React.useState<React.ReactNode>('')
   const [provider, setProvider] = React.useState<ProviderSettings | null>(null)
   const [providerName, setProviderName] = React.useState('')
@@ -88,7 +85,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
   // 「限制器」段的草稿（余额 / Token 规则列表）：与查询设置同一 gating
   const [limiterDraft, setLimiterDraft] = React.useState<LimiterGroup[]>(() => limiterDraftOf(account))
   // 分组导航的当前页（弹窗按账号 id 挂载，切账号自然回到「基本」）
-  const [pane, setPane] = React.useState<PaneId>(initialPane)
+  const [pane, setPane] = React.useState<PaneId>('basic')
   // 并发上限草稿（原列表 ⋯ 菜单的 conc-dialog 迁入「基本」分组）：0~999，0 = 不限
   const [concDraft, setConcDraft] = React.useState(() => String(Number(account?.maxConcurrent) || 0))
   const [confirming, setConfirming] = React.useState(false)
@@ -99,7 +96,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
     enabled, allowRouteSkip, name, userAgent, proxyDraft, planChannel, usageDraft,
     balanceQueryDraft, limiterDraft, concDraft, noAuthDraft,
   })
-  const credentialLabel = providerOf(account).startsWith('custom-') || providerOf(account) === 'cline-free' ? t('凭证设置') : t('凭证与套餐')
+  const credentialLabel = providerOf(account).startsWith('custom-') ? t('凭证设置') : t('凭证与套餐')
   const paneInfo: Record<PaneId, { title: string; description: string; icon: string }> = {
     basic: { title: t('基本信息'), description: t('设置账号名称、启用状态与转发行为。'), icon: 'sliders' },
     credential: { title: credentialLabel, description: t('管理当前账号的凭证与可用套餐。'), icon: 'key' },
@@ -195,7 +192,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
     )),
   }
   const dirtyCount = Object.values(dirtyPanes).filter(Boolean).length
-  const interactionBusy = busy || confirming || recoveryBusy
+  const interactionBusy = busy || confirming
 
   async function askConfirmation(title: string, text: string, okText: string, danger = false): Promise<boolean> {
     if (actionLock.current) return false
@@ -520,7 +517,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
 
   // 内置账号仅在有余额凭证或套餐通道时显示凭证分区。
   const concDefault = Number(providerFeatures(providerOf(target)).concurrencyDefault) || 0
-  const hasCredentialPane = isCatpaw || isCustomAccount || supportsPlanChannel(target) || providerOf(target) === 'cline-free'
+  const hasCredentialPane = isCatpaw || isCustomAccount || supportsPlanChannel(target)
   const accountPanes: PaneId[] = ['basic', ...(hasCredentialPane ? ['credential' as const] : []),
     ...(supportsUsage(target) ? ['query' as const] : []), 'limiter', 'network']
   const providerLabel = provider?.name || shared().wbProviders?.labelOf?.(providerOf(target)) || providerOf(target)
@@ -652,8 +649,6 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
                   ) : null}
 
                   {pane === 'credential' && hasCredentialPane ? <>
-                    {providerOf(target) === 'cline-free' ? <AccountClineCredentials account={target} disabled={busy || confirming}
-                      onBusyChange={setRecoveryBusy} onSaved={setAccount} /> : null}
                     {isCatpaw ? <BalanceTokenField configured={account.hasBalanceToken === true} value={balanceToken}
                       onChange={setBalanceToken} clearBusy={interactionBusy} onClear={() => void clearBalanceToken()} /> : null}
                     {isCustomAccount ? <CustomCredentialFields hasApiKey={target.hasApiKey === true} noAuth={noAuthDraft}
@@ -671,8 +666,6 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
                   </> : null}
 
                   {pane === 'query' && supportsUsage(target) ? <>
-                    {['officeace', 'cline-free'].includes(providerOf(target)) ? <AccountUsageRecovery account={target}
-                      disabled={busy || confirming} onBusyChange={setRecoveryBusy} onCredential={() => selectPane('credential')} /> : null}
                     <SettingGroup title={t('余额查询')}>
                       <UsageSettingsSection draft={usageDraft} onChange={setUsageDraft} />
                     </SettingGroup>

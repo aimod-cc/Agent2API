@@ -32,9 +32,18 @@ pub(super) fn market_sources(value: &str) -> Vec<String> { formats::market(value
 pub(super) fn manifest(directory: &std::path::Path) -> Option<String> { sources::manifest_icon(directory) }
 pub(crate) fn read(file: &str) -> Option<(Vec<u8>, &'static str)> { cache::read(file) }
 
+static RECOMMENDATIONS: AtomicBool = AtomicBool::new(false);
+
 pub fn wake(force: bool) {
+    spawn();
     if force { worker().force.store(true, Ordering::Release); }
     worker().wake.notify_one();
+}
+
+pub(super) fn wake_recommendations() {
+    if !RECOMMENDATIONS.swap(true, Ordering::AcqRel) {
+        wake(false);
+    }
 }
 
 async fn first(values: Vec<String>, force: bool, resolved: &mut std::collections::HashMap<String, Option<String>>) -> Option<String> {
@@ -50,15 +59,20 @@ async fn first(values: Vec<String>, force: bool, resolved: &mut std::collections
 }
 
 async fn refresh(force: bool) {
-    let Ok(cards) = tokio::task::spawn_blocking(sources::cards).await else { return };
-    let keys = cards.iter().map(|card| card.key.clone()).collect();
-    cache::retain_cards(&keys);
+    let include_recommendations = force || RECOMMENDATIONS.load(Ordering::Acquire);
+    let Ok(cards) = tokio::task::spawn_blocking(move || sources::cards(include_recommendations)).await else { return };
+    if cards.is_empty() { return; }
+    if include_recommendations {
+        let keys = cards.iter().map(|card| card.key.clone()).collect();
+        cache::retain_cards(&keys);
+    }
     let mut sources = sources::Sources::default();
-    sources.refresh_market(force).await;
+    if cards.iter().any(|card| card.own.is_empty()) {
+        sources.refresh_market(force).await;
+    }
     let mut resolved = std::collections::HashMap::new();
     for card in cards {
         let mut file = first(card.own.clone(), force, &mut resolved).await;
-        if file.is_none() && !card.installed { file = first(sources.package(&card, force).await, force, &mut resolved).await; }
         if file.is_none() { file = first(sources.market(&card, force).await, force, &mut resolved).await; }
         if file.is_some() { cache::bind(&card.key, file.as_deref()); }
         if card.installed {

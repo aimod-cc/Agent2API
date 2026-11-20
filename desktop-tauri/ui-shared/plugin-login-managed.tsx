@@ -219,7 +219,7 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 }
 
 export function ManagedLoginInteraction({ step, deadline, scope, request, refresh, accept, onSubmitting,
-  attemptedBefore, markAttempted, callbackSubmitted, markCallbackSubmitted, openExternal, t }: {
+  attemptedBefore, markAttempted, browserOpenedBefore = false, markBrowserOpened, callbackSubmitted, markCallbackSubmitted, openExternal, t }: {
   step: ManagedInteraction
   deadline: number
   scope: ManagedLoginScope
@@ -229,6 +229,8 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
   onSubmitting(busy: boolean, owner: symbol): void
   attemptedBefore: boolean
   markAttempted(): void
+  browserOpenedBefore?: boolean
+  markBrowserOpened?: () => void
   callbackSubmitted: boolean
   markCallbackSubmitted(value: boolean): void
   openExternal(url: string): void | Promise<void>
@@ -239,9 +241,11 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
   const [expired, setExpired] = React.useState(false)
   const [error, setError] = React.useState('')
   const [notice, setNotice] = React.useState('')
+  const [autoOpenNotice, setAutoOpenNotice] = React.useState('')
   const [hasCallback, setHasCallback] = React.useState(false)
   const [callbackSent, setCallbackSent] = React.useState(callbackSubmitted)
   const callbackLocked = React.useRef(callbackSubmitted)
+  const browserOpened = React.useRef(browserOpenedBefore)
   const input = React.useRef<HTMLInputElement>(null)
   const controller = React.useRef<AbortController | null>(null)
   const owner = React.useRef(Symbol(`${scope.key}:${step.id}`))
@@ -293,6 +297,13 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
       clearInput()
     }
   }, [step.status, scopeAlive])
+  React.useEffect(() => {
+    if (browserOpened.current || !current() || busy || expired || callbackSent || callbackLocked.current
+      || step.status !== 'ready' || !step.browser || !managedBrowserUrl(step.browser.url)) return
+    browserOpened.current = true
+    markBrowserOpened?.()
+    void open(true)
+  }, [scopeKey, stepKey, step.status, scopeAlive, busy, expired, callbackSent])
 
   async function verify() {
     if (controller.current || used.current || !current() || step.status !== 'ready' || !step.captcha) return
@@ -387,11 +398,16 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
     }
   }
 
-  async function open() {
+  async function open(auto = false) {
     if (!current() || busy || callbackSent || step.status !== 'ready' || !step.browser || !managedBrowserUrl(step.browser.url)) return
     setError('')
+    setAutoOpenNotice('')
     try { await latest.current.openExternal(step.browser.url) }
-    catch { if (current()) setError(t('打开授权页失败，请刷新当前步骤后重试。')) }
+    catch {
+      if (!current()) return
+      if (auto) setAutoOpenNotice(t('未能自动打开官方授权页，请点击下方按钮手动打开。'))
+      else setError(t('打开授权页失败，请刷新当前步骤后重试。'))
+    }
   }
 
   const disabled = Boolean(busy) || expired || !scopeAlive || step.status !== 'ready'
@@ -406,7 +422,10 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
       {busy ? <Spinner /> : null}{t('开始登录验证')}
     </Button> : null}
     {step.browser ? <>
-      <Button variant='outline' disabled={disabled || callbackSent} onClick={() => void open()}>{t('打开官方授权页')}</Button>
+      {autoOpenNotice ? <p role='status' className='text-xs text-muted-foreground'>{autoOpenNotice}</p> : null}
+      <Button variant='outline' disabled={disabled || callbackSent} onClick={() => void open()}>
+        {autoOpenNotice ? t('打开官方授权页') : t('重新打开官方授权页')}
+      </Button>
       {step.browser.manualCallback ? <>
         <p className='text-xs text-muted-foreground'>{t('授权完成后如未自动返回，请粘贴本次完整回调地址。打开浏览器不代表登录成功。')}</p>
         <Label>{t('完整回调地址（原样提交）')}

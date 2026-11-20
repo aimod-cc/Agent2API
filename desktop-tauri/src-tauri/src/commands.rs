@@ -502,9 +502,9 @@ pub fn login_state(app: AppHandle) -> LoginState {
 }
 
 #[tauri::command]
-pub async fn cancel_login(app: AppHandle) -> Result<Value, String> {
-    login::cancel(&app).await?;
-    Ok(json!({ "canceled": true }))
+pub async fn cancel_login(app: AppHandle, state: Option<String>) -> Result<Value, String> {
+    let canceled = login::cancel(&app, state.as_deref()).await?;
+    Ok(json!({ "canceled": canceled }))
 }
 
 /// 导出运行日志：拉取 JSONL 原文，弹系统保存框落盘。

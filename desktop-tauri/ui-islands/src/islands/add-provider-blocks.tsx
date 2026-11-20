@@ -438,7 +438,7 @@ function WebLoginSection({
   return (
     <AddGroup label={t('网页登录')} hidden={!visible}>
       <Note html={web.noteHtml} />
-      {web.modes?.length && !isWeb ? (
+      {web.modes && web.modes.length > 1 && !isWeb ? (
         <div className='flex flex-col gap-2.5 border-l-2 border-border pl-[11px]'>
           <span className='text-[12.5px] text-subtle'>{t('打开方式')}</span>
           <SegmentedControl
@@ -635,7 +635,7 @@ function OauthSection({
   return (
     <AddGroup label={oauth.title || t('网页登录')} hidden={!visible}>
       <Note html={oauth.noteHtml} />
-      {oauth.modes?.length && !isWeb ? (
+      {oauth.modes && oauth.modes.length > 1 && !isWeb ? (
         <div className='flex flex-col gap-2.5 border-l-2 border-border pl-[11px]'>
           <span className='text-[12.5px] text-subtle'>{t('打开方式')}</span>
           <SegmentedControl

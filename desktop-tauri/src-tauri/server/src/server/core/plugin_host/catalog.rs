@@ -174,8 +174,12 @@ pub async fn refresh(manual: bool) -> Result<Value, String> {
 }
 
 async fn fetch_catalog(channels: crate::server::config::UpdateChannels) -> Result<Value, UpdateError> {
-    let url = format!("{}/catalog?stable={}&beta={}", update::INDEX_SOURCE, u8::from(channels.stable), u8::from(channels.beta));
-    let response = crate::server::core::update::website::fetch_json(&url, 30_000).await?;
+    let fallback_url = format!("{}/catalog?stable={}&beta={}", update::INDEX_SOURCE, u8::from(channels.stable), u8::from(channels.beta));
+    let response = crate::server::core::update::website::fetch_json_with_fallback(
+        crate::server::core::update::website::CDN_PLUGIN_CATALOG_URL,
+        &fallback_url,
+        30_000,
+    ).await?;
     if !response.status.is_success() || response.value["schema"] != 1 {
         return Err(UpdateError::new("官网插件目录暂不可用"));
     }
@@ -229,16 +233,45 @@ async fn fetch_catalog(channels: crate::server::config::UpdateChannels) -> Resul
             "version": Value::Null, "page": Value::Null, "notes": "", "prerelease": false,
             "platforms": [], "error": false, "reason": Value::Null,
         });
-        let release = &entry["release"];
-        let selected = if release.is_null() { Ok(None) } else {
-            update::pick_release_assets(release, id, Some(&detail))
-                .ok_or_else(|| UpdateError::new("官网插件版本或附件格式无效"))
-                .and_then(|mut assets| {
-                    update::validate_release_urls(release, &assets, id)?;
-                    if !channels.accepts(assets.prerelease) { return Err(UpdateError::new("官网插件版本不属于当前通道")); }
-                    assets.require_signed = true;
-                    Ok(Some(assets))
-                })
+        let selected = if let Some(items) = entry["releases"].as_array() {
+            let mut matched: Option<update::ReleaseAssets> = None;
+            let mut parse_error: Option<UpdateError> = None;
+            for release in items {
+                if release.is_null() { continue; }
+                let mut assets = match update::pick_release_assets(release, id, Some(&detail)) {
+                    Some(assets) => assets,
+                    None => {
+                        parse_error = Some(UpdateError::new("官网插件版本或附件格式无效"));
+                        continue;
+                    }
+                };
+                if !channels.accepts(assets.prerelease) { continue; }
+                if let Err(error) = update::validate_release_urls(release, &assets, id) {
+                    parse_error = Some(error);
+                    continue;
+                }
+                assets.require_signed = true;
+                if matched.as_ref().is_none_or(|best| {
+                    crate::server::core::update::compare_versions(&assets.version, &best.version) == Some(1)
+                }) {
+                    matched = Some(assets);
+                }
+            }
+            if matched.is_some() { Ok(matched) }
+            else if let Some(error) = parse_error { Err(error) }
+            else { Ok(None) }
+        } else {
+            let release = &entry["release"];
+            if release.is_null() { Ok(None) } else {
+                update::pick_release_assets(release, id, Some(&detail))
+                    .ok_or_else(|| UpdateError::new("官网插件版本或附件格式无效"))
+                    .and_then(|mut assets| {
+                        update::validate_release_urls(release, &assets, id)?;
+                        if !channels.accepts(assets.prerelease) { return Err(UpdateError::new("官网插件版本不属于当前通道")); }
+                        assets.require_signed = true;
+                        Ok(Some(assets))
+                    })
+            }
         };
         match selected {
             Ok(Some(release)) => {

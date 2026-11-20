@@ -190,8 +190,7 @@ const BRIDGE_JS: &str = r#"
         callbackUrl: String(callbackUrl ?? ''),
       }),
     getLoginState: () => invoke('login_state'),
-    cancelLogin: state => state === undefined ? invoke('cancel_login')
-      : call('POST', '/api/session/login/cancel', { state: String(state) }),
+    cancelLogin: state => invoke('cancel_login', state === undefined ? {} : { state: String(state ?? '') }),
     // ── AutoClaw 国际版 OAuth（**授权地址由界面先拿好**）──────────
     // 与 startLogin 的区别：那条是「壳去问后端要地址」，这条是「界面已经
     // 拿到地址了，壳只负责开窗口并等待」。原因是这条链前面有一次**必须在

@@ -2,7 +2,7 @@ import { scope } from "./fetch.mjs"
 
 export function safeMessage(error, context = scope.getStore()) {
   let message = String(error?.message || error || "Script plugin failed")
-  if (context?.localProvider) {
+  if (context?.localProvider && context.action === "conversation") {
     message = message.replace(/stderr tail:[\s\S]*/i, "stderr tail: [redacted]")
       .replace(/(["']?(?:prompt|messages|content|system|tool_result)["']?\s*[:=])[\s\S]*/i, "$1 [redacted]")
   }

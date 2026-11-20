@@ -13,8 +13,8 @@ import {
 
 /** 弹窗状态：账号设置（单个）/ 批量操作（多选 + 动作）/ 分组设置（单组），关闭即 null */
 export type AccountsDialog =
-  | { kind: 'settings'; id: string; pane?: 'query' | 'credential' | 'network' }
-  | { kind: 'settings-loading'; id: string; pane?: 'query' | 'credential' | 'network' }
+  | { kind: 'settings'; id: string }
+  | { kind: 'settings-loading'; id: string }
   | { kind: 'batch'; ids: string[]; action: string }
   | { kind: 'batch-loading'; ids: string[]; action: string }
   | { kind: 'group'; provider: string }

@@ -171,10 +171,6 @@ pub(super) fn authorized_builtin(provider: &str, helper: &str) -> Result<(), pro
 impl Context {
     pub(super) async fn native(&mut self, params: &Value) -> Result<Value, proto::WireError> {
         self.permission("native.helpers.v1")?;
-        if self.shared.options.provider == "cline-free" && params["helper"] == "desktop.credentials.cline.v1"
-            && params["operation"].as_str() != Some("read") {
-            return Err(proto::WireError::with_code("Cline Free受控续期尚未接通，原生辅助不能刷新旧材料", "forbidden"));
-        }
         if self.shared.options.provider == "raccoon"
             && params["helper"] == super::desktop_credentials::HELPER_RACCOON_REFRESH {
             return super::desktop_credentials::raccoon_refresh(self, params).await;

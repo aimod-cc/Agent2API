@@ -29,8 +29,6 @@ pub(super) fn credential_fields(record: &StoredAccount, public: &mut Map<String,
     let read_only = record.is_desktop()
         && secret.and_then(|fields| fields.get("desktopReadOnly")).and_then(Value::as_bool) == Some(true);
     // 有刷新材料不代表可消费：实际本机只读引用由官方客户端维护，不能合成续期许可。
-    // Free 的旧兼容记录没有可信新登记，不能从刷新材料或旧展示字段合成续期资格。
-    // 已确认的新登记与固定续期记录为 contract 1，已在入口保持其宿主公开结果。
     let refreshable = if record.provider() == "lobsterai" {
         // 龙虾的续期还需要首次登录载荷件，不能把仅有refreshToken的旧账号显示成可续期。
         let fields = secret.unwrap_or(record.fields());
@@ -42,7 +40,7 @@ pub(super) fn credential_fields(record: &StoredAccount, public: &mut Map<String,
     } else {
         public.get("canRefresh").and_then(Value::as_bool).unwrap_or(false) || has_refresh
     };
-    let can_refresh = !read_only && record.provider() != "cline-free" && refreshable;
+    let can_refresh = !read_only && refreshable;
     public.insert("hasRefreshToken".to_string(), Value::Bool(has_refresh));
     public.insert("canRefresh".to_string(), Value::Bool(can_refresh));
     let has_access = token_present(record, public, &["accessToken", "access_token", "access", "token"], "hasAccessToken")

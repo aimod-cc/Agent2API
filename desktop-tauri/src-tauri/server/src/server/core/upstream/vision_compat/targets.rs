@@ -28,11 +28,12 @@ pub(super) fn supports_images(provider: &str, model: &str) -> Option<bool> {
     routing_groups::catalog_model(provider, model).and_then(|item| capability::images_for_channel(provider, &item))
 }
 
-fn compatible(target: &VisionTarget, needs: &RequestNeeds) -> bool {
-    let Some(item) = routing_groups::catalog_model(&target.provider, &target.model) else { return false; };
-    capability::images_for_channel(&target.provider, &item) == Some(true)
+fn compatible(target: &VisionTarget, needs: &RequestNeeds) -> Option<String> {
+    let item = routing_groups::catalog_model(&target.provider, &target.model)?;
+    (capability::images_for_channel(&target.provider, &item) == Some(true)
         && (!needs.tools || item.get("supportsToolCall").and_then(Value::as_bool) == Some(true))
-        && (!needs.video || item.get("supportsVideo").and_then(Value::as_bool) == Some(true))
+        && (!needs.video || item.get("supportsVideo").and_then(Value::as_bool) == Some(true)))
+    .then(|| crate::server::core::models::model_id(&item))
 }
 
 pub(super) fn resolve(service: &UpstreamService, ctx: &ProviderContext<'_>, target: VisionTarget,
@@ -52,9 +53,12 @@ fn resolve_in_route(service: &UpstreamService, ctx: &ProviderContext<'_>, mut ta
         || !key_scope::allows_model(ctx.key_scope, &target.model) {
         return Err(GatewayError::with_status(403, "当前网关 Key 不允许所选视觉模型").with_code("vision_target_forbidden"));
     }
-    if !compatible(&target, needs) {
+    let Some(canonical_model) = compatible(&target, needs) else {
         return Err(GatewayError::bad_request("所选视觉模型未确认支持本次请求需要的图片、工具或视频能力，请检查模型管理")
             .with_code("vision_target_incompatible"));
+    };
+    if !canonical_model.is_empty() {
+        target.model = canonical_model;
     }
     if routing.group.is_none() {
         if !catalog::forwarding_providers(request_model).contains(&target.provider) {

@@ -84,6 +84,6 @@ pub(super) async fn refresh(job:&Job,old:&Value)->Result<Value,proto::WireError>
     if !(200..300).contains(&status){return Err(invalid());}
     let raw=serde_json::to_vec(&value).map_err(|_|invalid())?;
     let account=text(old,&["account"]);
-    let (next,_)=super::super::super::cline_free_refresh::protocol::replacement(&raw,&account,&json!({"name":account}))?;
+    let (next, _) = super::cline::replacement(&raw, &account, &json!({"name": account}))?;
     Ok(next.0.clone())
 }

@@ -80,7 +80,6 @@
 
 pub mod backup;
 mod codearts_slot;
-mod cline_free_enrollment;
 mod durable;
 mod credential_epoch;
 pub mod migrate;
@@ -90,7 +89,6 @@ mod task_guard;
 
 pub(crate) use codearts_slot::{CodeArtsStorageError, CodeArtsTransaction};
 pub(crate) use durable::Durable;
-pub(crate) use cline_free_enrollment::{FreeEnrollmentStorageError, FreeEnrollmentTransaction};
 pub(crate) use credential_epoch::{AccountChange, CredentialSource, CredentialSourceError};
 pub(crate) use revisions::AccountChanges;
 pub(crate) use task_guard::{TaskTransaction, TaskTransactionError};

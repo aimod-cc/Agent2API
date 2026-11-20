@@ -42,7 +42,7 @@ export type DynamicLoginWait = {
   session?: { accountUid?: string; accountId?: string; nickname?: string; provider?: string; proxySaved?: boolean; warning?: string } | null
 }
 
-export type LoginInput = { provider: string; methodIndex: number; inputs: Record<string, string>; proxy?: unknown }
+export type LoginInput = { provider: string; methodIndex: number; inputs: Record<string, string>; proxy?: unknown; requestId?: string }
 
 function requireAvailableProvider(provider: string): void {
   if (isSuspendedProvider(provider)) {
@@ -55,9 +55,9 @@ export function readDynamicMethods(provider: string, signal?: AbortSignal): Prom
   return apiCall(`/api/session/login/methods?provider=${encodeURIComponent(provider)}&locale=${encodeURIComponent(locale())}`, { signal })
 }
 
-export function startDynamicLogin(input: LoginInput): Promise<DynamicLoginStart> {
+export function startDynamicLogin(input: LoginInput, signal?: AbortSignal): Promise<DynamicLoginStart> {
   requireAvailableProvider(input.provider)
-  return apiCall('/api/session/login/start', { method: 'POST', body: input, quiet: true })
+  return apiCall('/api/session/login/start', { method: 'POST', body: input, quiet: true, signal })
 }
 
 export async function waitDynamicLogin(state: string, owner?: ManagedLoginWaitOwner, signal?: AbortSignal): Promise<DynamicLoginWait> {

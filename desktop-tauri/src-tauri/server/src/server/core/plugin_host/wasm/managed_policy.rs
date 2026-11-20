@@ -14,7 +14,7 @@ pub struct Declaration {
 pub(crate) enum CallbackKind { GoogleCode, AutoclawCode, CatpawPassport, KiroPortal, KiroAws, TraeCode }
 
 pub(crate) const TRAE_PROFILE: &str = "trae.pkce.v1";
-pub(crate) const TRAE_AUTHORIZATION_ORIGIN: &str = "https://api.trae.cn";
+pub(crate) const TRAE_AUTHORIZATION_ORIGIN: &str = "https://www.trae.cn";
 
 pub(crate) const KIRO_PORTAL_PROFILE: &str = "kiro.portal.v1";
 pub(crate) const KIRO_AWS_PROFILE: &str = "kiro.aws.v1";

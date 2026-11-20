@@ -28,7 +28,7 @@ pub(super) fn guard_ordinary(policy: super::managed_task::OrdinaryPolicy, params
 
 pub(super) fn guard_token_exchange(context: &Context, params: &Value) -> Result<(), proto::WireError> {
     let provider = context.shared.options.provider.as_str();
-    if !matches!(provider, "kiro" | "codearts" | "cline-free" | "doubaowork") { return Ok(()); }
+    if !matches!(provider, "kiro" | "codearts" | "doubaowork") { return Ok(()); }
     let raw = params["url"].as_str().ok_or_else(|| super::error("换证请求地址无效"))?;
     let parsed = url::Url::parse(raw).map_err(|_| super::error("换证请求地址无效"))?;
     let host = parsed.host_str().unwrap_or("");
@@ -49,8 +49,6 @@ pub(super) fn guard_token_exchange(context: &Context, params: &Value) -> Result<
     } else if provider == "doubaowork" {
         host == "www.doubao.com" && ["/alice/ug/campaign/landing/checkin", "/alice/ug/campaign/item/reward/claim"]
             .iter().any(|reserved| path.trim_end_matches('/').eq_ignore_ascii_case(reserved))
-    } else if provider == "cline-free" {
-        host == "api.cline.bot" && path.trim_end_matches('/').eq_ignore_ascii_case("/api/v1/auth/refresh")
     } else {
         host == "sts.cn-north-4.myhuaweicloud.com"
             && path.trim_end_matches('/').eq_ignore_ascii_case("/v1/oauth2/tokens")

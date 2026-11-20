@@ -52,6 +52,10 @@ export async function start(provider, params) {
   try {
     authorization = await scope.run(context, async () => {
       await validateInputs(method, payload.inputs ?? {})
+      if (provider.hooks.auth?.cli) {
+        const { ensureLocalCliReady } = await import("./local-provider.mjs")
+        await ensureLocalCliReady(provider, context, controller.signal, untilCancelled)
+      }
       return untilCancelled(method.authorize(method.prompts?.length || typeof method.ask === "function" ? payload.inputs ?? {} : undefined, { signal: controller.signal }), controller.signal)
     })
     if (authorization?.type === "failed") throw new Error(authorization.error || "Sign-in could not be started")

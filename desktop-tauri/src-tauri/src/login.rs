@@ -1055,21 +1055,63 @@ fn task_gone(message: &str) -> bool {
 }
 
 /// 通知后端中止轮询；用于用户关窗/点取消
-pub async fn cancel(app: &AppHandle) -> Result<(), String> {
+pub async fn cancel(app: &AppHandle, target_state: Option<&str>) -> Result<bool, String> {
+    let target = target_state.map(str::trim).filter(|s| !s.is_empty());
     let active = current_login(app);
+    let control = app
+        .state::<crate::state::AppState>()
+        .login_cancel
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone());
     if let Some(active) = active {
+        let matched_control = control.as_ref().filter(|item| item.state == active.state);
+        if let Some(expected) = target {
+            let matches_request = matched_control
+                .is_some_and(|item| !item.request_id.is_empty() && item.request_id == expected);
+            if active.state != expected && !matches_request {
+                if !expected.starts_with("starting-") && !expected.starts_with("req-") {
+                    let res = gateway::call(
+                        "POST",
+                        "/api/session/login/cancel",
+                        Some(&json!({ "state": expected })),
+                    )
+                    .await;
+                    return Ok(res
+                        .ok()
+                        .and_then(|v| v.get("canceled").and_then(Value::as_bool))
+                        .unwrap_or(false));
+                }
+                return Ok(false);
+            }
+        }
+        if let Some(item) = matched_control {
+            item.cancel.cancel();
+        }
         if let Some(window) = app.get_webview_window(&login_window_label(&active.state)) {
             let _ = window.destroy();
         }
         clear_active_login(app, &active.state);
-        let _ = gateway::call(
+        let mut body = json!({ "state": active.state });
+        if let Some(item) = matched_control.filter(|item| !item.request_id.is_empty()) {
+            body["requestId"] = json!(item.request_id);
+        }
+        let _ = gateway::call("POST", "/api/session/login/cancel", Some(&body)).await;
+        return Ok(true);
+    }
+    if let Some(expected) = target {
+        let res = gateway::call(
             "POST",
             "/api/session/login/cancel",
-            Some(&json!({ "state": active.state })),
+            Some(&json!({ "state": expected, "requestId": expected })),
         )
         .await;
+        return Ok(res
+            .ok()
+            .and_then(|v| v.get("canceled").and_then(Value::as_bool))
+            .unwrap_or(false));
     }
-    Ok(())
+    Ok(false)
 }
 
 /// 启动插件声明的登录方式，保留本机窗口捕获与受控托管流程。
@@ -1107,6 +1149,14 @@ pub async fn start_with_options(
     let mut nonce = [0u8; 16];
     getrandom::getrandom(&mut nonce).map_err(|_| "无法生成登录流程标识")?;
     let reservation = format!("starting-{}", nonce.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
+    let request_id = options
+        .get("requestId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| reservation.clone());
+    let cancel_signal = crate::state::LoginCancel::new();
     {
         let state = app.state::<crate::state::AppState>();
         let mut guard = state.login.lock().map_err(|_| "登录状态锁不可用")?;
@@ -1117,6 +1167,13 @@ pub async fn start_with_options(
             state: reservation.clone(), edition: edition.clone(), mode: mode.clone(),
             provider: provider.into(),
         });
+        if let Ok(mut cancel_guard) = state.login_cancel.lock() {
+            *cancel_guard = Some(crate::state::PendingLoginControl {
+                state: reservation.clone(),
+                request_id: request_id.clone(),
+                cancel: cancel_signal.clone(),
+            });
+        };
     }
     emit_login_state(app, LoginState {
         active: true, provider: Some(provider.into()), edition: Some(edition.clone()), mode: Some(mode.clone()),
@@ -1124,6 +1181,7 @@ pub async fn start_with_options(
     let mut request = json!({
         "provider": provider, "edition": edition, "mode": mode,
         "socialRestore": social_restore, "options": options,
+        "requestId": request_id,
     });
     // HTTP 新契约带完整 options，同时兼容当前 API 的平铺读取。缺省字段不补
     // null（inputs 缺省是 {}，proxy 的显式 null 则必须保留为直连）。
@@ -1132,11 +1190,32 @@ pub async fn start_with_options(
     }
     let request_generation = crate::panel_session::revision();
     let request_started = tokio::time::Instant::now();
-    let response = gateway::call("POST", "/api/session/login/start", Some(&request)).await;
+    // 稍微宽于后端插件 RPC 的 120s 超时，确保真实插件/本地 CLI 错误先返回而不是在 60s 被网关调用超时掩盖。
+    let response = tokio::select! {
+        biased;
+        _ = cancel_signal.wait() => {
+            clear_active_login(app, &reservation);
+            return Ok(json!({ "ok": false, "canceled": true }));
+        }
+        res = gateway::call_with_timeout("POST", "/api/session/login/start", Some(&request), 135_000) => res,
+    };
     let mut started = match response {
         Ok(value) => value,
-        Err(error) => { clear_active_login(app, &reservation); return Err(error); }
+        Err(error) => {
+            clear_active_login(app, &reservation);
+            if cancel_signal.is_cancelled() {
+                return Ok(json!({ "ok": false, "canceled": true }));
+            }
+            return Err(error);
+        }
     };
+    if cancel_signal.is_cancelled() {
+        if let Some(flow) = started.get("state").or_else(|| started.get("flow")).and_then(Value::as_str).filter(|value| !value.trim().is_empty()) {
+            let _ = gateway::call("POST", "/api/session/login/cancel", Some(&json!({ "state": flow, "requestId": request_id }))).await;
+        }
+        clear_active_login(app, &reservation);
+        return Ok(json!({ "ok": false, "canceled": true }));
+    }
     if started.get("managedLogin").and_then(Value::as_bool) == Some(true) {
         if crate::panel_session::revision() != request_generation {
             clear_active_login(app, &reservation);
@@ -1180,6 +1259,15 @@ pub async fn start_with_options(
                 *guard = Some(ActiveLogin {
                     state: flow.into(), edition: edition.clone(), mode: mode_id.into(), provider: provider.into(),
                 });
+                if let Ok(mut cancel_guard) = state.login_cancel.lock() {
+                    if cancel_guard.as_ref().is_some_and(|item| item.state == reservation) {
+                        *cancel_guard = Some(crate::state::PendingLoginControl {
+                            state: flow.into(),
+                            request_id: request_id.clone(),
+                            cancel: cancel_signal.clone(),
+                        });
+                    }
+                }
                 true
             }
             _ => false,
@@ -1926,6 +2014,11 @@ fn clear_active_login(app: &AppHandle, expected_state: &str) {
     if let Ok(mut guard) = state.login.lock() {
         if guard.as_ref().is_some_and(|active| active.state == expected_state) {
             *guard = None;
+            if let Ok(mut cancel_guard) = state.login_cancel.lock() {
+                if cancel_guard.as_ref().is_some_and(|item| item.state == expected_state) {
+                    *cancel_guard = None;
+                }
+            }
             emit_login_state(app, LoginState { active: false, mode: None, edition: None, provider: None });
         }
     };

@@ -39,6 +39,8 @@ pub struct GatewayError {
     pub status_code: i32,
     pub upstream_code: Option<i64>,
     pub code: Option<String>,
+    /// 容量/限流类错误的可区分原因（如 `memory_pressure`、`concurrency_limit`、`account_busy`）。
+    pub reason: Option<String>,
     /// `Retry-After`（秒）；`None` = 不带这个头。
     ///
     /// 只有**算得出恢复时刻**的限额类错误才该有值（见
@@ -71,6 +73,7 @@ impl GatewayError {
             status_code: 500,
             upstream_code: None,
             code: None,
+            reason: None,
             retry_after_secs: None,
             plugin_metadata: None,
             conversation_class: None,
@@ -87,6 +90,7 @@ impl GatewayError {
             status_code: status,
             upstream_code: None,
             code: None,
+            reason: None,
             retry_after_secs: None,
             plugin_metadata: None,
             conversation_class: None,
@@ -104,6 +108,17 @@ impl GatewayError {
     /// 挂上错误码字符串（Node 版手写 body 里的 `code` 字段）
     pub fn with_code(mut self, code: impl Into<String>) -> Self {
         self.code = Some(code.into());
+        self
+    }
+
+    /// 挂上可区分的拒绝原因（目前仅容量/并发拒绝等路径使用）
+    pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
+        self.reason = Some(reason.into());
+        self
+    }
+
+    pub fn with_optional_reason(mut self, reason: Option<String>) -> Self {
+        self.reason = reason;
         self
     }
 
@@ -176,6 +191,12 @@ impl GatewayError {
         error.insert("type".to_string(), Value::String(self.error_type().to_string()));
         if let Some(code) = &self.code {
             error.insert("code".to_string(), Value::String(code.clone()));
+        }
+        if let Some(reason) = &self.reason {
+            error.insert("reason".to_string(), Value::String(reason.clone()));
+            if let Some(seconds) = self.retry_after_secs.filter(|seconds| *seconds > 0) {
+                error.insert("retry_after".to_string(), Value::from(seconds));
+            }
         }
         if let Some(code) = self.upstream_code {
             error.insert("upstream_code".to_string(), Value::from(code));

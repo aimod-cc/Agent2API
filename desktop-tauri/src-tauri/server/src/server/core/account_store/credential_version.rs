@@ -7,12 +7,6 @@ pub(crate) use codearts_slot::{ReadyRead, PendingSlot, PendingBinding, SlotOutco
 pub(crate) use codearts_slot::{PendingFinalCheck, PendingFinalState, PendingFinalCallback, PendingCommitFact, PendingFinalError};
 pub(crate) use codearts_slot::{PendingCompletion, PendingCompletionCheck, PendingCompletionState, PendingCompletionCallback};
 pub(in crate::server::core::account_store) use codearts_slot::{PendingFinalRead, PendingCompletionRead};
-mod cline_free_refresh;
-pub(crate) use cline_free_refresh::{FreeRefreshOrigin, FreeRefreshPending, FreeRefreshFinal};
-mod cline_free_input;
-mod cline_free_enrollment;
-pub(crate) use cline_free_input::{FreeEnrollmentInput, FreeInputError};
-pub(crate) use cline_free_enrollment::{FreeEnrollmentOrigin, FreeEnrollmentCommitOutcome, FreeEnrollmentError};
 mod codearts_enrollment_input;
 mod codearts_enrollment;
 pub(crate) use codearts_enrollment_input::EnrollmentInput;
@@ -74,7 +68,7 @@ impl RowProvider {
 
 /// 仅剥离固定三家旧导入记录的顶层宿主标记；不签发来源，不改任何业务字段。
 pub(crate) fn strip_imported_row_version(record: &mut super::state::StoredAccount) {
-    if sql::credential_version::maintained_provider(&record.provider()) || record.provider() == "cline-free" {
+    if sql::credential_version::maintained_provider(&record.provider()) {
         record.remove(PRIVATE_FIELD);
     }
 }

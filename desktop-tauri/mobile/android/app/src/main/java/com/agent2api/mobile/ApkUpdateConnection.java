@@ -8,11 +8,16 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 final class ApkUpdateConnection {
     static boolean isWebsiteAsset(URL url) {
-        return "https".equals(url.getProtocol())
-            && "agent2api.dev".equalsIgnoreCase(url.getHost())
-            && (url.getPort() == -1 || url.getPort() == 443)
-            && url.getUserInfo() == null && url.getQuery() == null && url.getRef() == null
-            && url.getPath().startsWith("/downloads/");
+        if (!"https".equals(url.getProtocol())
+            || (url.getPort() != -1 && url.getPort() != 443)
+            || url.getUserInfo() != null || url.getQuery() != null || url.getRef() != null) {
+            return false;
+        }
+        String host = url.getHost();
+        String path = url.getPath();
+        if ("agent2api.dev".equalsIgnoreCase(host)) return path.startsWith("/downloads/");
+        if ("cdn.agent2api.dev".equalsIgnoreCase(host)) return path.startsWith("/agent2api/installers/");
+        return false;
     }
 
     static HttpURLConnection open(String startUrl, long deadline,

@@ -43,7 +43,7 @@ impl AppIndex {
         if compare_versions(target, minimum).is_none_or(|order| order < 0) { return None; }
         Some(json!({ "required": true, "minimumVersion": minimum, "targetVersion": target,
             "message": if rule.message.trim().is_empty() { "当前版本已停止提供模型服务，请先完成更新。" } else { rule.message.trim() },
-            "source": format!("{}/app.json", super::website::API_BASE),
+            "source": super::website::CDN_APP_INDEX_URL,
         }))
     }
 }
@@ -55,8 +55,8 @@ pub fn cached() -> AppIndex {
 
 pub async fn resolve() -> AppIndex {
     let previous = cached();
-    let url = format!("{}/app.json", super::website::API_BASE);
-    let response = match super::website::fetch_json(&url, 15_000).await {
+    let fallback = format!("{}/app.json", super::website::API_BASE);
+    let response = match super::website::fetch_json_with_fallback(super::website::CDN_APP_INDEX_URL, &fallback, 15_000).await {
         Ok(response) if response.status.is_success() => response,
         _ => return previous,
     };

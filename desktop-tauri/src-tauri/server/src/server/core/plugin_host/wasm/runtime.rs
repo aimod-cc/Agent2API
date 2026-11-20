@@ -73,7 +73,6 @@ enum InvocationContext {
     DesktopImport(super::native::chatglm::DesktopCall),
     DesktopLaunch(super::desktop_launch::binding::Call),
     CodeArtsRefresh(Arc<super::codearts_refresh::Call>),
-    ClineFreeRefresh(Arc<super::cline_free_refresh::Call>),
     DoubaoRewards(Arc<super::doubao_rewards::Call>),
 }
 
@@ -200,13 +199,6 @@ impl Runtime {
             InvocationContext::CodeArtsRefresh(call)).await
     }
 
-    pub(super) async fn invoke_cline_free_refresh(&self, call: Arc<super::cline_free_refresh::Call>,
-        params: Value, timeout: Duration,
-    ) -> Result<Value, proto::WireError> {
-        self.invoke_inner(proto::methods::gateway::TOKEN_REFRESH, params, timeout, None,
-            InvocationContext::ClineFreeRefresh(call)).await
-    }
-
     pub(super) async fn invoke_doubao_rewards(&self, call: Arc<super::doubao_rewards::Call>,
         params: Value, timeout: Duration,
     ) -> Result<Value, proto::WireError> {
@@ -264,16 +256,46 @@ impl Runtime {
         let query_reserved = !interactive && super::query_queue::reserved(&self.shared, &account, method)?;
         let diagnostics = super::diagnostics::Invocation::new(&self.shared.options.provider, method, &self.module_digest);
         let work = async {
+            let wait_started = tokio::time::Instant::now();
             let queue_deadline = (tokio::time::Instant::now() + Duration::from_secs(capacity::limits().queue_wait_seconds)).min(call_deadline);
             let _hard_limit = if matches!(class, Class::Conversation | Class::Image) {
                 match &self.shared.execution_slots {
-                    Some(slots) => Some(tokio::time::timeout_at(queue_deadline, slots.acquire()).await
-                        .map_err(|_| capacity::busy())?.map_err(|_| capacity::busy())?),
+                    Some(slots) => match tokio::time::timeout_at(queue_deadline, slots.acquire()).await {
+                        Ok(Ok(permit)) => Some(permit),
+                        Ok(Err(_)) | Err(_) => {
+                            let rejection = capacity::record_slot_rejection(class, wait_started.elapsed());
+                            crate::server::logging::log_with_level(
+                                "[Plugin]",
+                                &format!(
+                                    "⚠️ 插件执行槽位已满 (503 plugin_busy): 提供商={} 方法={} {}",
+                                    self.shared.options.provider, method, rejection.describe(),
+                                ),
+                                "warn",
+                            );
+                            return Err(rejection.into_wire_error());
+                        }
+                    },
                     None => None,
                 }
             } else { None };
             let _ticket = if interactive || query_reserved { None } else {
-                Some(capacity::acquire(class, &self.shared.options.provider, &caller, input_bytes, queue_deadline, &cancel).await?)
+                match capacity::acquire_detailed(class, &self.shared.options.provider, &caller, input_bytes, queue_deadline, &cancel).await {
+                    Ok(ticket) => Some(ticket),
+                    Err(capacity::AcquireError::Cancelled) => {
+                        return Err(capacity::AcquireError::Cancelled.into_wire_error());
+                    }
+                    Err(capacity::AcquireError::Rejected(rejection)) => {
+                        crate::server::logging::log_with_level(
+                            "[Plugin]",
+                            &format!(
+                                "⚠️ 插件容量排队超时/拒绝 (503 plugin_busy): 提供商={} 方法={} {}",
+                                self.shared.options.provider, method, rejection.describe(),
+                            ),
+                            "warn",
+                        );
+                        return Err(rejection.into_wire_error());
+                    }
+                }
             };
             let _input_memory = capacity::Allocation::new(input_bytes)?;
             diagnostics.phase("preparing");
@@ -314,10 +336,6 @@ impl Runtime {
                         InvocationContext::DoubaoRewards(call) => {
                             call.enter(self, method, &context.account)?;
                             context.doubao_rewards = Some(call);
-                        }
-                        InvocationContext::ClineFreeRefresh(call) => {
-                            call.enter(self, method, &context.account)?;
-                            context.cline_free_refresh = Some(call);
                         }
                         InvocationContext::CodeArtsRefresh(call) => {
                             call.enter_once(self, method, &context.account)?;
@@ -378,14 +396,13 @@ impl Runtime {
                 context.permission("resources.cookie-file.v1")?;
                 context.supplied_cookie_file = Some(super::desktop_credentials::cookie_file::prepare(&params)?);
             }
-            if !context.account.is_empty() && context.codearts_refresh.is_none() && context.cline_free_refresh.is_none() && context.doubao_rewards.is_none() {
+            if !context.account.is_empty() && context.codearts_refresh.is_none() && context.doubao_rewards.is_none() {
                 context.invoke("account.get", json!({})).await?;
             }
             if let Some(call) = &context.conversation { call.validate_context(&self.shared, &context.account)?; }
             if let Some(call) = &context.checkin_call { call.observe_context(&context)?; }
             let mut params = params;
             if context.supplied_cookie_file.is_some() { params["source"]["content"] = Value::Null; }
-            if context.cline_free_refresh.is_some() { params["desktopRefresh"] = json!(false); }
             if let Some(map) = params.as_object_mut() {
                 for key in ["proxy", "proxy_override", "plugin_trace", "client_stream"] { map.remove(key); }
                 if self.shared.options.provider == "raccoon" {

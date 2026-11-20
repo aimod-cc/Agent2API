@@ -101,6 +101,6 @@ pub(super) fn status() -> Value {
         "marketCheckedAt": state.cache.market_at, "githubCheckedAt": state.cache.github_at,
         "marketError": state.cache.market_error, "githubError": state.cache.github_error,
         "marketRetryAt": state.cache.market_retry, "githubRetryAt": state.cache.github_retry,
-        "githubMissing": state.cache.github_missing, "topic": super::github::TOPIC,
+        "githubMissing": state.cache.github_missing, "topic": "magpie-plugin",
     })
 }

@@ -1257,6 +1257,21 @@ pub trait ProviderAdapter: Send + Sync {
         Box::pin(async move { Ok(self.login_start_async().await) })
     }
 
+    /// 可取消的参数化登录启动：取消令牌触发时同时中止进行中的跨进程 RPC。
+    fn build_login_flow_with_options_cancellable<'a>(
+        &'a self,
+        options: Value,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Option<agent2api_provider_protocol::LoginStart>, GatewayError>>
+                + Send + 'a,
+        >,
+    > {
+        let _ = cancel;
+        self.build_login_flow_with_options(options)
+    }
+
     /// 轮询一次登录进度（**轮询型流程用**，插件架构新增）。
     ///
     /// 只有平台把 `poll_interval_ms` 报成 `> 0` 时才会被调用。默认返回错误：
@@ -2096,6 +2111,19 @@ impl ProviderAdapter for BuiltinAdapter {
         >,
     > {
         adapter_for(self.0).build_login_flow_with_options(options)
+    }
+
+    fn build_login_flow_with_options_cancellable<'a>(
+        &'a self,
+        options: Value,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Option<agent2api_provider_protocol::LoginStart>, GatewayError>>
+                + Send + 'a,
+        >,
+    > {
+        adapter_for(self.0).build_login_flow_with_options_cancellable(options, cancel)
     }
 
     fn login_callback_poll_async<'a>(

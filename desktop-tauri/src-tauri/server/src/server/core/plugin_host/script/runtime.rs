@@ -148,6 +148,8 @@ pub fn snapshot() -> Value {
                 .is_some_and(|status| status.phase == plugin_host::startup::Phase::Ready),
         })
     }).collect()).unwrap_or_default();
+    super::catalog::ensure_loaded();
+    super::icons::wake_recommendations();
     let mut recommendations = super::catalog::recommendations();
     for item in recommendations.as_array_mut().into_iter().flatten() {
         item["icon"] = json!(super::icons::recommended(item));
@@ -172,10 +174,11 @@ pub(in crate::server::core::plugin_host) fn package_names(registry: &Registry) -
 }
 
 pub async fn start(store: AccountStore) -> Result<(), String> {
-    super::catalog::spawn();
-    super::icons::spawn();
-    super::updates::spawn();
     let mut registry = super::storage::read()?;
+    if !registry.packages.is_empty() {
+        super::icons::spawn();
+        super::updates::spawn();
+    }
     revoke_ownership_sources(&registry);
     plugin_host::startup::configure_scripts(&registry);
     let ids: Vec<_> = registry.packages.iter().filter(|package| package.enabled).map(|package| package.id.clone()).collect();

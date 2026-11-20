@@ -133,6 +133,15 @@ async fn refresh_inner(force: bool) {
     if !force && now.saturating_sub(cache().checked_at) < REFRESH_MS {
         return;
     }
+    if registry.packages.is_empty() {
+        if !cache().packages.is_empty() || force {
+            let cached = Cache { checked_at: now, packages: BTreeMap::new() };
+            if let Ok(bytes) = serde_json::to_vec(&cached) {
+                let _ = super::storage::atomic_write(&path(), &bytes);
+            }
+        }
+        return;
+    }
     // 懒加载：只有真的装了 magpie 分发源的包，才去拉那份索引（几 MB）。
     let mut distribution: Option<Result<Value, String>> = None;
     let mut packages = BTreeMap::new();
@@ -149,7 +158,15 @@ async fn refresh_inner(force: bool) {
                 }
             }
             Some(PackageSource::Github { repository, reference, commit, .. }) => {
-                github_entry(repository, reference, commit).await
+                if !force {
+                    if let Some(sha) = super::catalog::github_commit(repository) {
+                        Entry { available: !sha.eq_ignore_ascii_case(commit), latest: sha[..12].to_string(), error: None }
+                    } else {
+                        github_entry(repository, reference, commit).await
+                    }
+                } else {
+                    github_entry(repository, reference, commit).await
+                }
             }
             // 没有 source = npm 装的
             None => npm_entry(&package.name, &package.version).await,

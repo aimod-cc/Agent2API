@@ -3,11 +3,12 @@ use serde_json::Value;
 use super::storage::{Package, PackageSource};
 
 const INDEX_URL: &str = super::website::DISTRIBUTION;
+const LEGACY_INDEX_URL: &str = super::website::LEGACY_DISTRIBUTION;
 const INDEX_LIMIT: usize = 16 * 1024 * 1024;
 
 /// 官方分发索引（`dist` 分支的 `index.json`）：下载与「检查更新」共用一份读法。
 pub(super) async fn index() -> Result<Value, String> {
-    let bytes = super::download::github_bytes(INDEX_URL, INDEX_LIMIT).await?;
+    let bytes = super::website::bytes_with_fallback(INDEX_URL, LEGACY_INDEX_URL, INDEX_LIMIT).await?;
     let index: Value = serde_json::from_slice(&bytes).map_err(|_| "Magpie 社区索引无法解析")?;
     if index["version"].as_u64() != Some(1) {
         return Err("Magpie 社区分发索引版本暂不兼容".into());

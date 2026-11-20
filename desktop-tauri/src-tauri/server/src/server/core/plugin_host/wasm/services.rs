@@ -91,15 +91,6 @@ impl Context {
         if method == "claim.doubao.tasks" {
             return Err(proto::WireError::with_code("当前调用没有豆包原任务领奖来源", "forbidden"));
         }
-        if let Some(call) = &self.cline_free_refresh {
-            if method != "credential.cline-free.refresh" || params.as_object().is_none_or(|fields| !fields.is_empty()) {
-                return Err(proto::WireError::with_code("Cline Free续期只接受原调用的固定宿主入口", "forbidden"));
-            }
-            return super::cline_free_refresh::exchange(call.clone()).await;
-        }
-        if method == "credential.cline-free.refresh" {
-            return Err(proto::WireError::with_code("当前调用没有Cline Free原续期来源", "forbidden"));
-        }
         if let Some(call) = &self.codearts_refresh {
             if method != "credential.codearts.refresh" || params.as_object().is_none_or(|fields| !fields.is_empty()) {
                 return Err(proto::WireError::with_code("CodeArts换证只接受原调用的固定宿主入口", "forbidden"));
@@ -217,7 +208,7 @@ impl Context {
                 self.account()?;
                 self.identity = record["identity"].as_str().unwrap_or(&self.account).to_string();
                 if self.desktop_launch.is_none() && self.codearts_refresh.is_none()
-                    && self.cline_free_refresh.is_none() && self.doubao_rewards.is_none() {
+                    && self.doubao_rewards.is_none() {
                     super::legacy_secret::expose(self, &mut record);
                 }
                 self.observe_origin_account(&record)?;
@@ -315,9 +306,21 @@ impl Context {
                     format!("{provider}:{account}:conversation:{session}")
                 } else if scope.is_empty() || scope == "account" { format!("{provider}:{account}") }
                 else { return Err(super::error("锁范围无效")); };
+                let lock_started = std::time::Instant::now();
                 let guard = tokio::time::timeout_at(self.call_deadline.min(tokio::time::Instant::now() + std::time::Duration::from_secs(10)),
                     self.shared.account_lock(&key).lock_owned()).await
-                    .map_err(|_| proto::WireError::with_code("当前账号还有其他操作，等待账号锁超时，请稍后重试", "plugin_busy"))?;
+                    .map_err(|_| {
+                        crate::server::logging::log_with_level(
+                            "[Plugin]",
+                            &format!(
+                                "⚠️ 插件账号锁排队超时 (503 plugin_busy): 提供商={provider} 范围={} 等待={}ms",
+                                if scope.is_empty() { "account" } else { scope },
+                                lock_started.elapsed().as_millis(),
+                            ),
+                            "warn",
+                        );
+                        proto::WireError::with_code("当前账号还有其他操作，等待账号锁超时，请稍后重试", "plugin_busy")
+                    })?;
                 self.guards.insert("account".into(), guard);
                 Ok(json!("account"))
             }

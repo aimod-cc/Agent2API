@@ -5,7 +5,6 @@
 mod bounded;
 pub(in crate::server::core::account_store) mod codearts_slot;
 pub(in crate::server::core::account_store) mod codearts_enrollment;
-pub(in crate::server::core::account_store) mod cline_free_enrollment;
 pub(in crate::server::core::account_store) mod doubao_state;
 pub(super) mod ordinary;
 mod projection;
@@ -97,7 +96,7 @@ struct Version {
 }
 
 pub(in crate::server::core::account_store) fn maintained_provider(provider: &str) -> bool {
-    provider == projection::PROVIDER || provider == "cline-free" || RowProvider::parse(provider).is_some()
+    provider == projection::PROVIDER || RowProvider::parse(provider).is_some()
 }
 
 pub(in crate::server::core::account_store) fn check_target(

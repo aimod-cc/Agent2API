@@ -169,7 +169,12 @@ export function PluginsPage() {
   const packs = payload?.packs || []
   const settingsPack = packSettings?.server === identity ? packs.find(pack => pack.id === packSettings.id) : undefined
   const catalog = payload?.catalog?.plugins || []
-  const uninstalled = catalog.filter(item => !packs.some(pack => pack.id === item.id))
+  // 当前通道拿不到可安装版本的插件不进列表，避免正式版用户看到满屏「暂未发布」。
+  const uninstalledAll = catalog.filter(item => !packs.some(pack => pack.id === item.id))
+  const unpublished = uninstalledAll.filter(item => !item.version)
+  const unpublishedKeys = new Set(unpublished.map(item => packSelectionKey(item.id)))
+  const unpublishedCount = unpublished.length
+  const uninstalled = uninstalledAll.filter(item => Boolean(item.version))
   const detailsItem = storeDetails?.server === identity && !packs.some(pack => pack.id === storeDetails.item.id)
     ? catalog.find(item => item.id === storeDetails.item.id) || storeDetails.item : null
   const detailsInstallable = Boolean(detailsItem?.version && !detailsItem.error
@@ -193,18 +198,19 @@ export function PluginsPage() {
           </div>
         </Card>
       </div>
-      {selecting ? <div className='m-section'><PluginBatchToolbar items={batchItems} visibleKeys={batchItems.filter(item => !item.active).map(item => item.key)} selected={selected}
+      {selecting ? <div className='m-section'><PluginBatchToolbar items={batchItems} visibleKeys={batchItems.filter(item => !item.active && !unpublishedKeys.has(item.key)).map(item => item.key)} selected={selected}
         disabled={pageLocked} t={t} onSelection={changeSelection} onAction={confirmBatch} onExit={() => { setSelecting(false); setSelected(new Set()) }} /></div> : null}
       {missing.required.length || missing.unresolved.length ? <div className='m-section'><PluginMissingBanner count={missing.required.length + missing.unresolved.length}
         accounts={missing.required.reduce((sum, item) => sum + item.accounts, 0) + missing.unresolved.reduce((sum, item) => sum + item.count, 0)} onOpen={() => setMissingOpen(true)} t={t} /></div> : null}
       {batch.task ? <div className='m-section'><PluginBatchProgress task={batch.task} t={t} onClose={batch.clear} onRetry={items => confirmBatch(batch.task!.action, items)} /></div> : null}
       {error ? <ErrorNote text={error} /> : null}
       {payload?.host?.lastError ? <ErrorNote text={payload.host.lastError} /> : null}
-      {uninstalled.length ? <div className='m-section'><SectionHead title={t('可安装插件')} />
+      {uninstalled.length || unpublishedCount > 0 ? <div className='m-section'><SectionHead title={t('可安装插件')} />
         {uninstalled.map(item => <StorePluginCard key={item.id} item={item} target={payload?.target || ''}
           operation={payload?.operations?.find(operation => operation.id === item.id)} busy={pageLocked} onInstall={() => void install(item.id, false)}
           selection={selecting ? selectionFor(packSelectionKey(item.id)) : undefined}
           onDetails={() => setStoreDetails({ item, server: identity })} />)}
+        {!uninstalled.length ? <Card className='m-card'><Empty text={t('插件发布后会显示在这里。')} /></Card> : null}
       </div> : null}
       <div className='m-section'>
         <SectionHead title={t('已安装插件')} />
