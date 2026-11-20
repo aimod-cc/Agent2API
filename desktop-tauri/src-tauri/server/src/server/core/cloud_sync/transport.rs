@@ -12,10 +12,12 @@ pub(crate) enum Transport {
     WebDav {
         base_url: String,
         auth: webdav::WebDavAuth,
+        /// 整次操作共用的客户端：PROPFIND / MKCOL / PUT 复用连接池，一次上传只建连一次
+        http: reqwest::Client,
+        /// GET 专用客户端（不自动跟转，download 模块逐跳处理重定向），同一操作内复用
+        http_no_redirect: reqwest::Client,
         /// 远端目录段（`remoteRoot/v1/profile`），每次读写都要拼
         segments: Vec<String>,
-        /// 自定义 User-Agent；空 = 默认。部分服务按它校验客户端类型
-        user_agent: String,
     },
     S3 {
         credentials: s3::S3Credentials,
@@ -46,8 +48,11 @@ impl Transport {
                     &settings.webdav.username,
                     &settings.webdav_password_plain()?,
                 ),
+                // 两个客户端在构建时就完成系统代理解析与 TLS 后端初始化，
+                // 之后整次操作不再重做
+                http: webdav::build_client(&settings.webdav.user_agent)?,
+                http_no_redirect: webdav::build_client_without_redirects(&settings.webdav.user_agent)?,
                 segments,
-                user_agent: settings.webdav.user_agent.clone(),
             }),
         }
     }
@@ -68,11 +73,12 @@ impl Transport {
             Transport::WebDav {
                 base_url,
                 auth,
+                http,
                 segments,
-                user_agent,
+                ..
             } => {
-                webdav::test_connection(base_url, auth, user_agent).await?;
-                webdav::ensure_remote_directories(base_url, segments, auth, user_agent).await
+                webdav::test_connection(http, base_url, auth).await?;
+                webdav::ensure_remote_directories(http, base_url, segments, auth).await
             }
             Transport::S3 { credentials, .. } => s3::test_connection(credentials).await,
         }
@@ -89,13 +95,14 @@ impl Transport {
             Transport::WebDav {
                 base_url,
                 auth,
+                http,
                 segments,
-                user_agent,
+                ..
             } => {
                 let mut file_segments = segments.clone();
                 file_segments.extend(manifest::sanitize_segments(name)?);
                 let url = webdav::build_remote_url(base_url, &file_segments)?;
-                webdav::put_bytes(&url, auth, bytes, content_type, user_agent).await
+                webdav::put_bytes(http, &url, auth, bytes, content_type).await
             }
             Transport::S3 { credentials, prefix } => {
                 let key = format!("{prefix}/{}", name.trim_start_matches('/'));
@@ -114,13 +121,14 @@ impl Transport {
             Transport::WebDav {
                 base_url,
                 auth,
+                http_no_redirect,
                 segments,
-                user_agent,
+                ..
             } => {
                 let mut file_segments = segments.clone();
                 file_segments.extend(manifest::sanitize_segments(name)?);
                 let url = webdav::build_remote_url(base_url, &file_segments)?;
-                webdav::get_bytes(&url, auth, max_bytes, user_agent).await
+                webdav::get_bytes(http_no_redirect, &url, auth, max_bytes).await
             }
             Transport::S3 { credentials, prefix } => {
                 let key = format!("{prefix}/{}", name.trim_start_matches('/'));
