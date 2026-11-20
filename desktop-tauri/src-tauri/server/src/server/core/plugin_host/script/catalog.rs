@@ -11,6 +11,10 @@ pub(super) fn ensure_loaded() { refresh::ensure_loaded(); }
 pub(super) fn status() -> Value { cache::status() }
 
 pub(super) fn github_commit(repository: &str) -> Option<String> {
+    github_commit_for(repository, "")
+}
+
+pub(super) fn github_commit_for(repository: &str, reference: &str) -> Option<String> {
     cache::entries()
         .iter()
         .find(|entry| {
@@ -18,9 +22,11 @@ pub(super) fn github_commit(repository: &str) -> Option<String> {
                 .repository
                 .as_ref()
                 .is_some_and(|repo| repo.eq_ignore_ascii_case(repository))
+                && (reference.is_empty() || entry.selector.eq_ignore_ascii_case(reference))
         })
         .and_then(|entry| entry.commit_sha.clone())
         .filter(|sha| sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(|sha| sha.to_ascii_lowercase())
 }
 
 pub(super) fn recommendations() -> Value {

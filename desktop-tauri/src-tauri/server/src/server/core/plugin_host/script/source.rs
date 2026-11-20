@@ -90,7 +90,13 @@ impl InstallSource {
     }
 }
 
-async fn download(repository: &str, reference: &str) -> Result<Package, String> {
+async fn resolve_github_commit(repository: &str, reference: &str) -> Result<String, String> {
+    if reference.len() == 40 && reference.bytes().all(|ch| ch.is_ascii_hexdigit()) {
+        return Ok(reference.to_ascii_lowercase());
+    }
+    if let Some(commit) = super::catalog::github_commit_for(repository, reference) {
+        return Ok(commit);
+    }
     super::operations::stage("package", "正在解析 GitHub 插件提交");
     let mut endpoint = url::Url::parse(&format!("https://api.github.com/repos/{repository}/commits"))
         .map_err(|_| "GitHub 仓库地址无效")?;
@@ -101,9 +107,15 @@ async fn download(repository: &str, reference: &str) -> Result<Package, String> 
     }
     let bytes = super::download::github_bytes(endpoint.as_str(), 4 * 1024 * 1024).await?;
     let response: Value = serde_json::from_slice(&bytes).map_err(|_| "GitHub 提交信息无法解析")?;
-    let commit = if reference.is_empty() { &response[0]["sha"] } else { &response["sha"] }
-        .as_str().filter(|sha| sha.len() == 40 && sha.bytes().all(|ch| ch.is_ascii_hexdigit()))
-        .ok_or("GitHub 没有返回有效的固定提交")?.to_ascii_lowercase();
+    if reference.is_empty() { &response[0]["sha"] } else { &response["sha"] }
+        .as_str()
+        .filter(|sha| sha.len() == 40 && sha.bytes().all(|ch| ch.is_ascii_hexdigit()))
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| "GitHub 没有返回有效的固定提交".to_string())
+}
+
+async fn download(repository: &str, reference: &str) -> Result<Package, String> {
+    let commit = resolve_github_commit(repository, reference).await?;
     super::operations::stage("package", "正在下载 GitHub 脚本插件");
     // 源码没有 npm integrity；仅从 GitHub 官方源下载固定提交，不接受镜像代换。
     let archive = super::download::github_bytes(
