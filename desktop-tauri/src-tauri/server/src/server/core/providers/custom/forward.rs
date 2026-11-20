@@ -8,6 +8,8 @@ use crate::server::core::protocol::native::WireProtocol;
 
 mod native;
 mod errors;
+mod replay;
+mod send;
 mod translate;
 use translate::ProtocolTranslateStream;
 
@@ -20,7 +22,7 @@ use crate::server::core::protocol::{anthropic_outbound, responses_outbound};
 use crate::server::core::proxies::ResolvedProxy;
 use crate::server::core::providers::custom::emulation;
 use crate::server::core::upstream::connections::ConnectionGuard;
-use crate::server::core::upstream::request::{read_upstream_error, send_chat_request, TransportRequest};
+use crate::server::core::upstream::request::{read_upstream_error, TransportRequest};
 // `FramePolicy::with_rewrite(...)`：自定义家只带 model 回写，保活换行的丢弃
 // 保持关闭 —— 那一项的依据是 WorkBuddy / AutoClaw 两条上游的实测，不能替
 // 用户自配的上游猜。
@@ -238,9 +240,7 @@ pub(crate) async fn forward(
         // 自定义家没有能力位（用户自己配的出口就是唯一口径：配了就代理，没配就直连）
         system_proxy_when_unset: false,
     };
-    let response = send_chat_request(&transport)
-        .await
-        .map_err(|error| error.to_gateway_error())?;
+    let response = send::send_or_cancel(&transport, telemetry, replay::ordinary_inference(&outbound)).await?;
 
     // ── 响应：2xx 打包 outcome；非 2xx 分类（见模块头）────────────────
     let status = response.status().as_u16();
@@ -556,6 +556,7 @@ async fn forward_translated(
     if let Some(capture) = telemetry.capture() {
         capture.reset_request(&url, provider_id, &headers, &payload);
     }
+    let ordinary_inference = replay::ordinary_inference(body) && replay::ordinary_inference(&payload);
     let payload = serde_json::to_string(&payload)
         .map_err(|error| GatewayError::with_status(500, format!("请求体序列化失败: {error}")))?;
 
@@ -576,9 +577,7 @@ async fn forward_translated(
         // 自定义家没有能力位（用户自己配的出口就是唯一口径：配了就代理，没配就直连）
         system_proxy_when_unset: false,
     };
-    let response = send_chat_request(&transport)
-        .await
-        .map_err(|error| error.to_gateway_error())?;
+    let response = send::send_or_cancel(&transport, telemetry, ordinary_inference).await?;
 
     // ── 响应：2xx 打包 outcome；非 2xx 分类（与 chat 分支同一套）──────
     // 两种协议的错误体形状不同（responses 是 {error:{message}}、anthropic

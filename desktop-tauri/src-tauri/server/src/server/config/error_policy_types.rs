@@ -43,6 +43,9 @@ pub struct ErrorRule {
     #[serde(default = "enabled")]
     pub enabled: bool,
     pub action: ErrorAction,
+    /// Explicitly accepts duplicate inference/billing risk before any response starts.
+    #[serde(default)]
+    pub retry_unconfirmed: bool,
     pub cooldown: CooldownMode,
     pub fallback_seconds: u64,
     #[serde(default)]
@@ -92,7 +95,7 @@ pub fn default_rules() -> Vec<ErrorRule> {
     use ErrorKind::*;
     let rule = |kind: ErrorKind, name: &str, statuses: &[u16], action, cooldown, fallback_seconds, exponential, scope| ErrorRule {
         id: kind.id().into(), name: name.into(), kind, statuses: statuses.to_vec(), code: String::new(), provider: "*".into(),
-        model: String::new(), enabled: true, action, cooldown, fallback_seconds, exponential, fallback_cap_seconds: 1800, scope,
+        model: String::new(), enabled: true, action, retry_unconfirmed: false, cooldown, fallback_seconds, exponential, fallback_cap_seconds: 1800, scope,
     };
     vec![
         rule(RateLimit, "请求限流", &[429], SwitchAccount, Upstream, 60, false, CooldownScope::Auto),
@@ -133,6 +136,9 @@ impl ErrorSettings {
             }
             if rule.statuses.len() > 50 || rule.statuses.iter().any(|status| !(400..600).contains(status)) { return Err("错误状态码必须在 400–599 范围，最多 50 项".into()); }
             if !(1..=86400).contains(&rule.fallback_seconds) || !(rule.fallback_seconds..=86400).contains(&rule.fallback_cap_seconds) { return Err("冷却时间必须在 1–86400 秒范围，上限不能短于首次时间".into()); }
+            if rule.retry_unconfirmed && rule.kind != ErrorKind::Transient {
+                return Err("仅连接或服务异常规则可以允许提交不确定的普通推理重发".into());
+            }
             if rule.kind != ErrorKind::Auth && rule.action == ErrorAction::RefreshThenSwitch {
                 return Err("仅登录失效规则可以使用凭证续期".into());
             }

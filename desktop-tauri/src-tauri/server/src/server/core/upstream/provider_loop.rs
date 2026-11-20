@@ -2030,7 +2030,12 @@ async fn attempt_custom(
     };
     let mut last_error = None;
     loop {
-        if ctx.telemetry.replay_guard().blocked() {
+        if ctx.telemetry.is_cancelled() {
+            let error = cancellation::cancelled_error();
+            ctx.telemetry.finish_last_attempt(Some(i64::from(error.status_code)), Some(&error.message));
+            return Err(error);
+        }
+        if ctx.telemetry.replay_guard().blocked() || ctx.telemetry.response_started() {
             let error = last_error.unwrap_or_else(super::replay_guard::blocked_error);
             ctx.telemetry.finish_last_attempt(Some(i64::from(error.status_code)), Some(&error.message));
             return Err(error);

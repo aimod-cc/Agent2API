@@ -14,6 +14,7 @@ export function ErrorRuleEditor({ rule, providers, t, exception, onClose, onSave
   const patch = (next: Partial<ErrorRule>) => setDraft(current => {
     const updated = { ...current, ...next }
     if (updated.kind === 'bad_request' || updated.kind === 'content') { updated.action = 'return_error'; updated.cooldown = 'none' }
+    if (updated.kind !== 'transient') updated.retryUnconfirmed = false
     if (updated.kind !== 'auth' && updated.action === 'refresh_then_switch') updated.action = 'switch_account'
     if (updated.fallbackCapSeconds < updated.fallbackSeconds) updated.fallbackCapSeconds = updated.fallbackSeconds
     return updated
@@ -39,11 +40,17 @@ export function ErrorRuleEditor({ rule, providers, t, exception, onClose, onSave
           <Field><FieldLabel>{t('错误类型')}</FieldLabel><ErrorChoice label={t('例外错误类型')} value={draft.kind}
             options={Object.entries(kindLabels(t)).map(([value, label]) => ({ value: value as ErrorKind, label }))} onChange={kind => patch({ kind })} /></Field>
           <ErrorText label={t('上游状态码')} placeholder={t('留空匹配此类全部状态码')} value={statuses} onChange={setStatuses} />
-          <ErrorText label={t('业务码（可选）')} placeholder={t('准确匹配，不按错误文案猜测')} value={draft.code} onChange={code => patch({ code })} /></div>
+          <ErrorText label={t('业务码（可选）')} placeholder={t('不是 HTTP 状态码；留空匹配全部业务码')} value={draft.code} onChange={code => patch({ code })} /></div>
         <ErrorText label={t('模型（可选）')} placeholder={t('留空适用全部模型')} value={draft.model} onChange={model => patch({ model })} />
         <ErrorToggle label={t('启用规则')} checked={draft.enabled} onChange={enabled => patch({ enabled })} />
       </> : <Badge variant='outline' shape='tag'>{rule.statuses.join(', ') || t('提供商已识别')}</Badge>}
       <Field><FieldLabel>{t('遇到错误时')}</FieldLabel><ErrorChoice label={t('错误处置方式')} value={draft.action} options={actions} onChange={action => patch({ action })} /></Field>
+      {draft.kind === 'transient' ? <div className='re-inset'>
+        <ErrorToggle label={t('允许提交不确定的普通推理重发')} checked={Boolean(draft.retryUnconfirmed)}
+          description={t('仅自定义提供商的普通推理、尚未响应时生效；沿用当前重发和换号上限。')}
+          onChange={retryUnconfirmed => patch({ retryUnconfirmed })} />
+        {draft.retryUnconfirmed ? <p className='re-warning'>{t('上游可能已经接收请求；开启后可能重复推理或重复计费。生图、后台任务和服务端工具不适用。')}</p> : null}
+      </div> : null}
       <div className='re-form-grid'><Field><FieldLabel>{t('冷却方式')}</FieldLabel><ErrorChoice label={t('冷却方式')} value={draft.cooldown} options={modes} disabled={inputProblem} onChange={cooldown => patch({ cooldown })} /></Field>
         <Field><FieldLabel>{t('影响范围')}</FieldLabel><ErrorChoice label={t('冷却影响范围')} value={draft.scope} disabled={inputProblem}
           options={Object.entries(scopeLabels(t)).map(([value, label]) => ({ value: value as CooldownScope, label }))} onChange={scope => patch({ scope })} /></Field></div>
@@ -54,7 +61,7 @@ export function ErrorRuleEditor({ rule, providers, t, exception, onClose, onSave
         {draft.exponential ? <ErrorNumber label={t('自行估算的冷却上限')} unit={t('秒')} value={draft.fallbackCapSeconds} min={draft.fallbackSeconds} max={86400} onChange={fallbackCapSeconds => patch({ fallbackCapSeconds })} /> : null}
       </div> : null}
       {draft.cooldown === 'fixed' ? <p className='re-warning'>{t('固定时间也不能早于上游明确要求的恢复时间。')}</p> : null}
-      <p className='re-note'><ErrorIcon name='shield' />{t('已经输出、任务结果不确定、验证或风控拒绝仍会停止；例外规则不能绕过安全限制或已识别的请求错误。')}</p>
+      <p className='re-note'><ErrorIcon name='shield' />{t('已开始响应、非普通推理任务结果不确定、验证或风控拒绝始终停止；仅合格普通推理的未确认提交可按显式配置重发。')}</p>
       {error ? <p role='alert' className='re-warning'>{error}</p> : null}
     </DialogBody><DialogFooter><Button variant='outline' onClick={onClose}>{t('取消')}</Button><Button onClick={save}>{t('应用')}</Button></DialogFooter>
   </DialogContent></Dialog>

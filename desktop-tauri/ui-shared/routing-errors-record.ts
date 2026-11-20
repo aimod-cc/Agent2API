@@ -4,6 +4,8 @@ import { actionLabels, kindLabels, scopeLabels } from './routing-errors-types'
 export function errorPolicyDescription(record: ErrorPolicyRecord | null | undefined, t: ErrorTranslate): string {
   if (!record?.kind || !record.action) return ''
   const reasons: Record<string, string> = {
+    '上游接收情况不确定，当前规则未允许普通推理重发': t('上游接收情况不确定，当前规则未允许普通推理重发'),
+    '上游接收情况不确定，未满足普通推理重发条件': t('上游接收情况不确定，未满足普通推理重发条件'),
     '该账号需要重新登录': t('该账号需要重新登录'),
     '当前账号已关闭失败换号': t('当前账号已关闭失败换号'),
     '本次请求明确指定账号，未更换指定对象': t('本次请求明确指定账号，未更换指定对象'),
@@ -14,6 +16,7 @@ export function errorPolicyDescription(record: ErrorPolicyRecord | null | undefi
   }
   const name = record.ruleName && record.ruleId !== record.kind ? record.ruleName : kindLabels(t)[record.kind]
   const parts = [name, record.reason ? reasons[record.reason] || t(record.reason) : actionLabels(t)[record.action]]
+  if (record.unconfirmedReplay) parts.push(t('已允许普通推理重发，可能重复计费'))
   if (record.resetAt && record.timeSource !== 'none') {
     parts.push(record.timeSource === 'upstream' ? t('冷却来自上游时间') : t('冷却来自本机估算'))
     if (record.scope) parts.push(scopeLabels(t)[record.scope])
