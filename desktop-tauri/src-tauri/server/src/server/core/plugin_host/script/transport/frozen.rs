@@ -9,7 +9,7 @@ use tokio::{sync::{oneshot, Notify}, task::JoinHandle, time::Instant};
 
 use super::{error, lifecycle::{self, Download, HttpDeadline, HttpHandle}};
 use crate::server::core::{debug_traffic::TrafficCapture, egress::managed::FrozenHttpClient,
-    plugin_host::wasm::conversation::WorkBuddyExecution};
+    plugin_host::wasm::conversation::{WorkBuddyExecution, WORKBUDDY_MAX_BODY}};
 
 type Permit = Box<dyn FnOnce(&reqwest::Request) -> Result<(), proto::WireError> + Send>;
 
@@ -181,7 +181,7 @@ where F: FnOnce(&reqwest::Request) -> Result<(), proto::WireError> + Send + 'sta
     deadline.check()?;
     headers_deadline.check()?;
     if params.get("body").is_some_and(|body| !body.is_null()) || params.get("body_resource").is_some()
-        || params.get("multipart").is_some() || body.is_empty() || body.len() > 8 * 1024 * 1024 {
+        || params.get("multipart").is_some() || body.is_empty() || body.len() > WORKBUDDY_MAX_BODY {
         return Err(error("封闭HTTP只接受已准备的有界原字节，未读取资源或回退普通正文"));
     }
     let headers_deadline = headers_deadline.instant().ok_or_else(|| error("原冻结HTTP缺少绝对发送截止"))?

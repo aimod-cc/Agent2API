@@ -4,7 +4,7 @@
 
 #[path = "workbuddy_http.rs"]
 mod workbuddy_http;
-pub(in crate::server::core::plugin_host) use workbuddy_http::WorkBuddyExecution;
+pub(in crate::server::core::plugin_host) use workbuddy_http::{WorkBuddyExecution, MAX_BODY as WORKBUDDY_MAX_BODY};
 
 use std::sync::Arc;
 

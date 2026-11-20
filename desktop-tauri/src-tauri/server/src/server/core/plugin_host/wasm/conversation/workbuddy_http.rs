@@ -29,7 +29,7 @@ const PATH: &str = "/v2/chat/completions";
 const ORIGINS: [&str; 3] = [
     "https://www.workbuddy.cn", "https://copilot.tencent.com", "https://wb.tencentbuddy.com",
 ];
-const MAX_BODY: usize = 8 * 1024 * 1024;
+pub(in crate::server::core::plugin_host) const MAX_BODY: usize = 14 * 1024 * 1024;
 const MAX_ENCODED: usize = ((MAX_BODY + 2) / 3) * 4;
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_NODES: usize = 65_536;
@@ -167,7 +167,7 @@ fn prepare(context: &Context, params: &Value, deadline: script::HttpDeadline) ->
         crate::server::config::timeout_settings().headers_ms().clamp(1000, 600_000)));
     headers_deadline.check()?;
     deadline.check()?;
-    let material = material(params, url)?;
+    let material = material(context, params, url)?;
     let call = context.conversation.as_ref().ok_or_else(unavailable)?;
     let cancel = context.sink.as_ref().ok_or_else(unavailable)?.cancel.clone();
     if call.provider != PROVIDER || call.account.is_empty() || call.account != context.account
@@ -275,10 +275,10 @@ fn route(context: &Context, params: &Value) -> Result<Option<String>, proto::Wir
     Ok(Some(raw.to_string()))
 }
 
-fn material(params: &Value, url: String) -> Result<Material, proto::WireError> {
+fn material(context: &Context, params: &Value, url: String) -> Result<Material, proto::WireError> {
     let object = params.as_object().ok_or_else(invalid)?;
     if object.keys().any(|key| !matches!(key.as_str(),
-        "method" | "url" | "headers" | "body" | "timeout_ms" | "id" | "provider" | "proxy" | "trace" | "max_chunk")) {
+        "method" | "url" | "headers" | "body" | "body_resource" | "timeout_ms" | "id" | "provider" | "proxy" | "trace" | "max_chunk")) {
         return Err(invalid());
     }
     if params["provider"] != PROVIDER || params["max_chunk"].as_u64() != Some(64 * 1024) { return Err(invalid()); }
@@ -311,11 +311,7 @@ fn material(params: &Value, url: String) -> Result<Material, proto::WireError> {
             .is_some_and(|value| value.strip_prefix("Bearer ").is_some_and(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))) {
         return Err(invalid());
     }
-    let encoded = params["body"].as_str().filter(|body| !body.is_empty() && body.len() <= MAX_ENCODED).ok_or_else(invalid)?;
-    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|_| invalid())?;
-    if bytes.is_empty() || bytes.len() > MAX_BODY || base64::engine::general_purpose::STANDARD.encode(&bytes) != encoded {
-        return Err(invalid());
-    }
+    let bytes = body_bytes(context, params)?;
     let value: Value = crate::server::core::plugin_host::wasm::managed_task::declaration::parse_object(&bytes, MAX_BODY)
         .map_err(|_| invalid())?;
     let mut nodes = 0;
@@ -326,7 +322,38 @@ fn material(params: &Value, url: String) -> Result<Material, proto::WireError> {
     }
     let params = json!({ "method": "POST", "url": url, "headers": wire_headers, "id": id,
         "provider": PROVIDER, "trace": trace, "max_chunk": 64 * 1024 });
-    Ok(Material { params, bytes: Bytes::from(bytes), headers, url })
+    Ok(Material { params, bytes, headers, url })
+}
+
+fn body_bytes(context: &Context, params: &Value) -> Result<Bytes, proto::WireError> {
+    let raw = params.get("body").filter(|value| !value.is_null());
+    let resource = params.get("body_resource").filter(|value| !value.is_null());
+    match (raw, resource) {
+        (Some(raw), None) => {
+            let encoded = raw.as_str().filter(|body| !body.is_empty() && body.len() <= MAX_ENCODED).ok_or_else(invalid)?;
+            let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|_| invalid())?;
+            if bytes.is_empty() || bytes.len() > MAX_BODY || base64::engine::general_purpose::STANDARD.encode(&bytes) != encoded {
+                return Err(invalid());
+            }
+            Ok(Bytes::from(bytes))
+        }
+        (None, Some(resource)) => {
+            context.permission("resources.v1")?;
+            let id = resource.as_str().filter(|id| !id.is_empty()).ok_or_else(invalid)?;
+            let bytes = context.blobs.raw(id).map_err(|_| invalid())?;
+            if bytes.is_empty() {
+                return Err(invalid());
+            }
+            if bytes.len() > MAX_BODY {
+                return Err(proto::WireError::with_code(
+                    format!("请求正文超过 {} MiB 的受控上限，请缩小上下文或图片后重试", MAX_BODY / (1024 * 1024)),
+                    "plugin_request_too_large",
+                ));
+            }
+            Ok(bytes)
+        }
+        _ => Err(invalid()),
+    }
 }
 
 fn shape(value: &Value, depth: usize, nodes: &mut usize) -> Result<(), proto::WireError> {
