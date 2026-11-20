@@ -338,6 +338,14 @@ pub async fn responses_endpoint(
             pipeline::record_entry(&context, None);
             // 记账已完成：解除断线兜底并注销取消令牌
             guard.complete();
+            // 下游要流式（WS 入口恒为 true）：把聚合体补成 SSE 事件序列。
+            // 直接回 JSON 的话，WS 层只看到 200 + application/json，无法区分
+            // 「成功但没流」和「错误响应」，整轮结果与历史都会丢。
+            if stream {
+                let frames = responses::completion_events(&response);
+                let body = futures::stream::iter(frames.into_iter().map(Ok::<_, std::io::Error>));
+                return sse_response(StatusCode::OK, Box::new(body));
+            }
             json_response(response)
         }
         Err(error) => {

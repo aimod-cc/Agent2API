@@ -1908,6 +1908,36 @@ pub fn response_event(sequence: &mut i64, event: &str, mut data: Value) -> bytes
     event_frame(event, &data)
 }
 
+/// 上游走了聚合路径（`ForwardOutcome::Completion`）但下游要流式时，
+/// 把聚合出来的 response 对象补成完整的流式事件序列。
+///
+/// ── 为什么需要它 ────────────────────────────────────────────
+/// 部分有状态适配器（如 CatPaw）直接回 `Completion` 而不给流。此时若按
+/// 「下游的 stream 标志」硬回 `application/json`，WS 入口（恒为流式）会拿到
+/// 一个 200 的 JSON 而不是 SSE，只能把它当成失败 —— 整轮历史也因此提交不了。
+/// 这里把同一个 response 对象按协议补成 `response.created` + 终态事件，
+/// 内容与 `ResponsesStream` 的收尾形态一致，下游按普通流处理即可。
+pub fn completion_events(response: &Value) -> Vec<bytes::Bytes> {
+    let mut sequence = 0;
+    let mut in_progress = response.clone();
+    if let Some(map) = in_progress.as_object_mut() {
+        map.insert("status".to_string(), Value::String("in_progress".to_string()));
+        map.insert("output".to_string(), Value::Array(Vec::new()));
+        map.insert("completed_at".to_string(), Value::Null);
+    }
+    // 聚合体的 status 决定终态事件名：incomplete 是「正常但没跑完」，
+    // failed 是失败，其余按 completed 收尾。
+    let terminal = match response.get("status").and_then(Value::as_str) {
+        Some("incomplete") => "response.incomplete",
+        Some("failed") => "response.failed",
+        _ => "response.completed",
+    };
+    vec![
+        response_event(&mut sequence, "response.created", json!({ "response": in_progress })),
+        response_event(&mut sequence, terminal, json!({ "response": response.clone() })),
+    ]
+}
+
 /// 非流式聚合：把 Chat SSE 字节流收成一个 Responses 响应对象。
 ///
 /// 非流式 Responses 请求也要上游走流式（各家上游的流式才是完整能力），
@@ -2204,5 +2234,55 @@ mod tests {
             true,
         );
         assert_eq!(commentary["output"][0]["phase"], "commentary");
+    }
+
+    /// 聚合体补成流式事件时，两帧序号连续、created 为空 output、终态带完整内容。
+    #[test]
+    fn completion_events_form_a_valid_stream() {
+        let response = json!({
+            "id": "resp_done",
+            "object": "response",
+            "status": "completed",
+            "output": [{ "type": "message", "content": [{ "type": "output_text", "text": "完成" }] }],
+        });
+        let frames = completion_events(&response);
+        assert_eq!(frames.len(), 2);
+
+        let mut buffer = SseLineBuffer::new();
+        let mut payloads = buffer.push(&frames[0]);
+        payloads.extend(buffer.push(&frames[1]));
+        let events: Vec<Value> = payloads
+            .into_iter()
+            .flatten()
+            .filter_map(|data| serde_json::from_str(&data).ok())
+            .collect();
+
+        assert_eq!(events[0]["type"], "response.created");
+        assert_eq!(events[0]["sequence_number"], 0);
+        assert_eq!(events[0]["response"]["status"], "in_progress");
+        assert_eq!(events[0]["response"]["output"].as_array().map(Vec::len), Some(0));
+        assert_eq!(events[1]["type"], "response.completed");
+        assert_eq!(events[1]["sequence_number"], 1);
+        assert_eq!(events[1]["response"]["id"], "resp_done");
+        assert_eq!(events[1]["response"]["output"].as_array().map(Vec::len), Some(1));
+    }
+
+    /// 非正常收尾的聚合体用对应的终态事件名，不冒充 completed。
+    #[test]
+    fn completion_events_use_matching_terminal_event() {
+        let incomplete = json!({ "id": "resp_i", "status": "incomplete", "output": [] });
+        let failed = json!({ "id": "resp_f", "status": "failed", "output": [] });
+        let collect = |response: &Value| {
+            let frames = completion_events(response);
+            let mut buffer = SseLineBuffer::new();
+            buffer
+                .push(&frames[1])
+                .into_iter()
+                .flatten()
+                .filter_map(|data| serde_json::from_str::<Value>(&data).ok())
+                .next()
+        };
+        assert_eq!(collect(&incomplete).unwrap()["type"], "response.incomplete");
+        assert_eq!(collect(&failed).unwrap()["type"], "response.failed");
     }
 }

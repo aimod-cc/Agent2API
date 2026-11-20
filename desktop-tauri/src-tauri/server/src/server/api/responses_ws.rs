@@ -194,7 +194,8 @@ async fn handle_message(
     }
 
     // 命中续轮才拼历史；不带 previous_response_id 视为一轮全新的对话。
-    let mut history = if previous.is_some() {
+    let resume = previous.is_some();
+    let base_history = if resume {
         streams.get(&stream_id).map(|entry| entry.history.clone()).unwrap_or_default()
     } else {
         Vec::new()
@@ -207,10 +208,10 @@ async fn handle_message(
         let response_id = random_id("resp");
         let keep = send_warmup(socket, &stream_id, &response_id, &payload).await;
         let entry = streams.entry(stream_id.clone()).or_default();
-        if previous.is_none() {
-            entry.history.clear();
-        }
-        entry.history.extend(input_items);
+        // 预热算一个成功的空回合：新对话替换历史，续轮追加。
+        let mut committed = base_history;
+        committed.extend(input_items);
+        entry.history = committed;
         entry.last_response_id = Some(response_id);
         logging::verbose(
             "[ResponsesWS]",
@@ -219,6 +220,7 @@ async fn handle_message(
         return keep;
     }
 
+    let mut history = base_history.clone();
     history.extend(input_items.iter().cloned());
 
     if let Some(map) = payload.as_object_mut() {
@@ -290,6 +292,9 @@ async fn handle_message(
     let mut buffer = SseLineBuffer::new();
     let mut response_id: Option<String> = None;
     let mut output: Option<Vec<Value>> = None;
+    // 只有正常收尾的回合才允许写历史：`response.created` 之后的失败与中断
+    // 都不该留下「有输入没输出」的续写起点。
+    let mut commit = false;
     let mut keep = true;
     while let Some(chunk) = stream.next().await {
         let Ok(chunk) = chunk else {
@@ -300,7 +305,8 @@ async fn handle_message(
             let Ok(value) = serde_json::from_str::<Value>(&data) else {
                 continue;
             };
-            observe_event(&value, &mut response_id, &mut output);
+            let value = wrap_stream_error(value);
+            observe_event(&value, &mut response_id, &mut output, &mut commit);
             if !send_event(socket, &stream_id, value).await {
                 keep = false;
                 break;
@@ -316,7 +322,8 @@ async fn handle_message(
             let Ok(value) = serde_json::from_str::<Value>(&data) else {
                 continue;
             };
-            observe_event(&value, &mut response_id, &mut output);
+            let value = wrap_stream_error(value);
+            observe_event(&value, &mut response_id, &mut output, &mut commit);
             if !send_event(socket, &stream_id, value).await {
                 keep = false;
                 break;
@@ -324,23 +331,33 @@ async fn handle_message(
         }
     }
 
-    // 只有跑完的回合才进历史：失败 / 中途断开会话不产生可续的上一轮。
-    let entry = streams.entry(stream_id.clone()).or_default();
-    entry.history.extend(input_items);
-    if let Some(output) = output {
-        entry.history.extend(output);
+    if commit {
+        // 续轮追加、新对话替换：新对话的请求体本来就不含旧历史，若这里也
+        // 追加，下一轮引用它时会把已重置的上一段对话又带回来。
+        let entry = streams.entry(stream_id.clone()).or_default();
+        let mut committed = if resume { base_history } else { Vec::new() };
+        committed.extend(input_items);
+        if let Some(output) = output {
+            committed.extend(output);
+        }
+        entry.history = committed;
+        if let Some(id) = response_id {
+            entry.last_response_id = Some(id);
+        }
+        logging::verbose(
+            "[ResponsesWS]",
+            &format!(
+                "stream={stream_id} 回合完成 history_items={} last_response={}",
+                entry.history.len(),
+                entry.last_response_id.as_deref().unwrap_or("-"),
+            ),
+        );
+    } else {
+        logging::verbose(
+            "[ResponsesWS]",
+            &format!("stream={stream_id} 回合未正常结束，历史与续写 ID 保持不变"),
+        );
     }
-    if let Some(id) = response_id {
-        entry.last_response_id = Some(id);
-    }
-    logging::verbose(
-        "[ResponsesWS]",
-        &format!(
-            "stream={stream_id} history_items={} last_response={}",
-            entry.history.len(),
-            entry.last_response_id.as_deref().unwrap_or("-"),
-        ),
-    );
     keep
 }
 
@@ -376,20 +393,56 @@ fn append_input(items: &mut Vec<Value>, input: Option<&Value>) {
 
 /// 从事件里记下这一轮的 response id 与最终 output。
 ///
-/// 只认 `response.created` / `response.completed` / `response.incomplete`：
-/// `response.failed` 的回合不能作为下一轮的续写起点。
-fn observe_event(value: &Value, response_id: &mut Option<String>, output: &mut Option<Vec<Value>>) {
+/// 只认 `response.completed` / `response.incomplete`：`response.created` 之后
+/// 的失败、流中断都不算可续的回合 —— 这时把 id 记下来，下一轮会通过校验，
+/// 但历史里只有输入没有输出，模型看到的是残缺对话。
+fn observe_event(
+    value: &Value,
+    response_id: &mut Option<String>,
+    output: &mut Option<Vec<Value>>,
+    commit: &mut bool,
+) {
     let kind = value.get("type").and_then(Value::as_str).unwrap_or_default();
-    if kind == "response.created" || kind == "response.completed" || kind == "response.incomplete" {
-        if let Some(id) = value.pointer("/response/id").and_then(Value::as_str) {
-            *response_id = Some(id.to_string());
-        }
+    if !matches!(kind, "response.completed" | "response.incomplete") {
+        return;
     }
-    if matches!(kind, "response.completed" | "response.incomplete") {
-        if let Some(items) = value.pointer("/response/output").and_then(Value::as_array) {
-            *output = Some(items.clone());
-        }
+    *commit = true;
+    if let Some(id) = value.pointer("/response/id").and_then(Value::as_str) {
+        *response_id = Some(id.to_string());
     }
+    if let Some(items) = value.pointer("/response/output").and_then(Value::as_array) {
+        *output = Some(items.clone());
+    }
+}
+
+/// 把 `ResponsesStream` 产生的扁平 error 事件包成官方形状。
+///
+/// 上游在 `response.created` 之后报错时，流内走的是 SSE 的扁平帧
+/// `{"type":"error","code","message","param"}`（见 `responses.rs` 的
+/// `finish` / `consume`）。WS 上 Codex 只认带 `status` 与嵌套 `error` 的
+/// 包装错误，扁平帧会被忽略、客户端一直等到空闲超时。状态码在这里明确定义
+/// 为 502（上游流内错误），不从扁平事件里取。
+fn wrap_stream_error(value: Value) -> Value {
+    if value.get("type").and_then(Value::as_str) != Some("error") {
+        return value;
+    }
+    if value.get("status").is_some() && value.get("error").is_some() {
+        return value;
+    }
+    let message = value
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("上游在流式响应中途返回错误")
+        .to_string();
+    let code = value.get("code").cloned().unwrap_or(Value::Null);
+    let param = value.get("param").cloned().unwrap_or(Value::Null);
+    error_event(
+        502,
+        "server_error",
+        code.as_str(),
+        &message,
+        param.as_str(),
+    )
 }
 
 /// 下发一个事件帧；`stream_id` 不是缺省槽位时按协议回填信封字段。
@@ -519,36 +572,86 @@ mod tests {
     }
 
     #[test]
-    fn observe_keeps_id_and_output() {
-        let mut id = None;
-        let mut output = None;
-        observe_event(
-            &json!({ "type": "response.created", "response": { "id": "resp_1" } }),
-            &mut id,
-            &mut output,
-        );
+    fn observe_keeps_id_and_output_on_completion() {
+        let (commit, id, output) = fold_events(&[
+            json!({ "type": "response.created", "response": { "id": "resp_1" } }),
+            json!({ "type": "response.completed", "response": { "id": "resp_1", "output": [{ "type": "message" }] } }),
+        ]);
+        assert!(commit);
         assert_eq!(id.as_deref(), Some("resp_1"));
-        assert!(output.is_none());
-
-        observe_event(
-            &json!({ "type": "response.completed", "response": { "id": "resp_1", "output": [{ "type": "message" }] } }),
-            &mut id,
-            &mut output,
-        );
         assert_eq!(output.as_ref().map(Vec::len), Some(1));
     }
 
     #[test]
     fn observe_ignores_failed_turns() {
-        let mut id = None;
-        let mut output = None;
-        observe_event(
-            &json!({ "type": "response.failed", "response": { "id": "resp_bad", "output": [] } }),
-            &mut id,
-            &mut output,
-        );
+        let (commit, id, output) = fold_events(&[
+            json!({ "type": "response.created", "response": { "id": "resp_bad" } }),
+            json!({ "type": "response.failed", "response": { "id": "resp_bad", "output": [] } }),
+        ]);
+        assert!(!commit, "失败回合不能提交历史");
+        assert!(id.is_none(), "失败回合的 id 不能成为续写起点");
+        assert!(output.is_none());
+    }
+
+    #[test]
+    fn observe_ignores_interrupted_turns() {
+        // 创建后就断流：只有 created，没有终态。
+        let (commit, id, output) = fold_events(&[json!({
+            "type": "response.created",
+            "response": { "id": "resp_cut" }
+        })]);
+        assert!(!commit);
         assert!(id.is_none());
         assert!(output.is_none());
+    }
+
+    #[test]
+    fn observe_accepts_incomplete_turn() {
+        let (commit, id, _) = fold_events(&[
+            json!({ "type": "response.created", "response": { "id": "resp_inc" } }),
+            json!({ "type": "response.incomplete", "response": { "id": "resp_inc", "output": [] } }),
+        ]);
+        assert!(commit, "incomplete 是正常收尾，应提交");
+        assert_eq!(id.as_deref(), Some("resp_inc"));
+    }
+
+    #[test]
+    fn wrap_stream_error_wraps_flat_event() {
+        let wrapped = wrap_stream_error(json!({
+            "type": "error",
+            "code": "upstream_network_error",
+            "message": "上游报错",
+            "param": Value::Null,
+            "sequence_number": 9,
+        }));
+        assert_eq!(wrapped["type"], "error");
+        assert_eq!(wrapped["status"], 502);
+        assert_eq!(wrapped["error"]["code"], "upstream_network_error");
+        assert_eq!(wrapped["error"]["message"], "上游报错");
+        assert_eq!(wrapped["error"]["type"], "server_error");
+    }
+
+    #[test]
+    fn wrap_stream_error_keeps_wrapped_event() {
+        let original = error_event(429, "rate_limit_error", Some("rate_limit_exceeded"), "太频繁", None);
+        assert_eq!(wrap_stream_error(original.clone()), original);
+    }
+
+    #[test]
+    fn wrap_stream_error_ignores_other_events() {
+        let event = json!({ "type": "response.completed", "response": { "id": "resp_1" } });
+        assert_eq!(wrap_stream_error(event.clone()), event);
+    }
+
+    /// 按事件顺序推进回合状态（与 `handle_message` 里的调用顺序一致）。
+    fn fold_events(events: &[Value]) -> (bool, Option<String>, Option<Vec<Value>>) {
+        let mut commit = false;
+        let mut id = None;
+        let mut output = None;
+        for event in events {
+            observe_event(event, &mut id, &mut output, &mut commit);
+        }
+        (commit, id, output)
     }
 
     #[test]
