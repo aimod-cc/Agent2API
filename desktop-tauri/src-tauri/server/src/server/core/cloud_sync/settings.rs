@@ -458,6 +458,43 @@ pub(crate) fn update_status_for(
     save(&settings)
 }
 
+/// 记录一次自动上传失败，退避按**写入时**生效的间隔计算。
+///
+/// ── 为什么不在调用方算好再写 ────────────────────────────────
+/// `run_once` 手里那份设置是上传开始时的快照。上传期间用户可能把间隔改小，
+/// 而失败回来再用快照里的旧间隔算退避，就会把「3 天后」写回去，覆盖用户刚
+/// 保存的值 —— 界面显示新间隔，实际仍等旧间隔。所以退避必须在 `SETTINGS_LOCK`
+/// 内、基于重新读出的设置计算，与写入同一次临界区完成。
+///
+/// `backoff_for` 把「退避策略」留在调用方（`auto_sync` 里有失败次数的指数退避），
+/// 这里只保证「算的时候用的是当前间隔」。
+///
+/// 返回 `(retry_at, last_sync_at)`：前者给等待循环，后者给它的目标一致性判断。
+pub(crate) fn record_auto_failure(
+    target: &CloudSyncSettings,
+    backoff_for: impl FnOnce(u32, u32) -> i64,
+    error: &str,
+) -> Result<(i64, Option<i64>), String> {
+    let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut settings = load();
+    if settings.target_id() != target.target_id() {
+        // 目标已经变了，这次失败不属于当前通道：不写状态，也不制造退避
+        return Ok((0, settings.status.last_sync_at));
+    }
+    let failures = settings.status.consecutive_failures.saturating_add(1);
+    let backoff = backoff_for(settings.auto_sync_interval_minutes, failures);
+    let now = crate::server::logging::now_ms();
+    let retry_at = now.saturating_add(backoff);
+    settings.status.last_attempt_at = Some(now);
+    settings.status.retry_at = Some(retry_at);
+    settings.status.consecutive_failures = failures;
+    settings.status.last_error = Some(error.to_string());
+    settings.status.last_error_source = Some("auto".to_string());
+    let last_sync_at = settings.status.last_sync_at;
+    save(&settings)?;
+    Ok((retry_at, last_sync_at))
+}
+
 /// 保存请求：界面传来的形态 → 落库形态。
 ///
 /// 密码 / Secret 的**沿用语义**：请求里 `hasPassword` 为真且 `password` 为空串

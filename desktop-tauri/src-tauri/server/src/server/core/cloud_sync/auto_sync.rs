@@ -153,8 +153,15 @@ async fn wait_until_ready(rx: &mut Receiver<()>, retry: Option<&RetryDelay>) -> 
             return false;
         }
         let now = logging::now_ms();
-        let retry_floor = retry.filter(|delay| delay.target_id == settings.target_id()
-            && delay.last_sync_at == settings.status.last_sync_at).map(|delay| delay.at).unwrap_or(0);
+        // 持久化的 retry_at 可能刚被 apply_save 收紧（用户把间隔改小了）；
+        // 缓存的 at 只作「写库失败」时的兜底 —— 取小才能让新间隔立刻生效。
+        let retry_floor = retry
+            .filter(|delay| {
+                delay.target_id == settings.target_id()
+                    && delay.last_sync_at == settings.status.last_sync_at
+            })
+            .map(|delay| delay.at.min(settings.status.retry_at.unwrap_or(delay.at)))
+            .unwrap_or(0);
         let due = settings.auto_sync_due_at().max(retry_floor);
         if due <= now {
             return true;
@@ -185,25 +192,29 @@ async fn run_once(db: &Db) -> RunOutcome {
     match upload_if_changed(db, &settings).await {
         Ok(()) => RunOutcome::Complete,
         Err(error) => {
-            let failures = settings.status.consecutive_failures.saturating_add(1);
-            let backoff = RETRY_BASE_MS.saturating_mul(1i64 << failures.saturating_sub(1).min(6))
-                .min(RETRY_MAX_MS)
-                .max(i64::from(settings.auto_sync_interval_minutes) * 60_000);
-            let now = logging::now_ms();
-            let retry_at = now.saturating_add(backoff);
-            let saved = settings::update_status_for(&settings, |status| {
-                status.last_attempt_at = Some(now);
-                status.retry_at = Some(retry_at);
-                status.consecutive_failures = failures;
-                status.last_error = Some(error.clone());
-                status.last_error_source = Some("auto".to_string());
-            });
-            let detail = saved.err().map(|cause| format!("；同步状态未保存：{cause}")).unwrap_or_default();
+            // 退避在 SETTINGS_LOCK 内按「当前间隔」计算：上传期间用户可能把间隔
+            // 改小了，用开始时那份快照算会把旧的长退避写回去
+            let saved = settings::record_auto_failure(
+                &settings,
+                |minutes, failures| {
+                    RETRY_BASE_MS
+                        .saturating_mul(1i64 << failures.saturating_sub(1).min(6))
+                        .min(RETRY_MAX_MS)
+                        .max(i64::from(minutes) * 60_000)
+                },
+                &error,
+            );
+            let detail = saved
+                .as_ref()
+                .err()
+                .map(|cause| format!("；同步状态未保存：{cause}"))
+                .unwrap_or_default();
             logging::log_with_level("[CloudSync]", &format!("⚠️ 云同步（自动）失败：{error}{detail}"), "warn");
+            let (at, last_sync_at) = saved.unwrap_or((logging::now_ms(), settings.status.last_sync_at));
             RunOutcome::Retry(RetryDelay {
-                at: retry_at,
+                at,
                 target_id: settings.target_id(),
-                last_sync_at: settings.status.last_sync_at,
+                last_sync_at,
             })
         }
     }
