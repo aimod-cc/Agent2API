@@ -18,6 +18,24 @@ use crate::server::core::{
 
 const MAX_WORKERS: usize = 64;
 
+/// 「发送 → 读完响应」的总预算。
+///
+/// 原值硬编码 25s，对弱网过紧：token 端点抖动时响应会超过 25s，一旦卡到上限
+/// 就被判「未确认」——一次性 Pending 被封成 Blocked，账号只能重新登录，此后
+/// 巡检把它当「无需刷新」永久跳过。
+///
+/// 取值受两个既有上限约束，不能只按「越大越稳」来定：
+/// - 插件关闭窗口 `lifecycle::shutdown::TIMEOUT` = 55s：worker 持着 Runtime，
+///   在途读超过它会让 `finish_shutdown` 判超时、保留旧实例（插件替换失败）；
+/// - 管理面单请求 60s（`POST /api/accounts/refresh`）：预算之外还有出口冻结与
+///   换证落库，45s 才留得下余量。
+///
+/// 放宽的只是「等多久算超时」，不改变「超时即未确认、不重发」的判定。
+///
+/// 与关闭窗口的账：出口冻结上限 5s + 本预算 40s + `block()`/落库（单条 sqlite
+/// 事务）≈ 45s，留在 55s 内；取 45s 时余量只剩 5s，留给主机抖动不够。
+const EXCHANGE_BUDGET: Duration = Duration::from_secs(40);
+
 struct Job {
     handle: Option<JoinHandle<()>>,
     waiting: bool,
@@ -163,7 +181,7 @@ async fn run(owner: &mut Ownership) -> Result<Value, proto::WireError> {
     }
     let request = owner.request.take().ok_or_else(unknown)?;
     let client = owner.client.as_ref().ok_or_else(unknown)?;
-    let deadline = call.deadline().min(Instant::now() + Duration::from_secs(25));
+    let deadline = call.deadline().min(Instant::now() + EXCHANGE_BUDGET);
     let read = tokio::time::timeout_at(deadline, async {
         let mut response = client.client().map_err(|_| unknown())?.execute(request).await.map_err(|_| unknown())?;
         let status = response.status().as_u16();
