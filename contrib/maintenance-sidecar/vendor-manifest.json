@@ -1,0 +1,11 @@
+{
+  "name": "tom-select",
+  "version": "2.4.3",
+  "source": "https://registry.npmjs.org/tom-select/-/tom-select-2.4.3.tgz",
+  "archive_sha256": "6a40f60febcdd909aa8d269ac9efaf7e2e88480c67e24ffe185ddeb7abe148b9",
+  "vendored_files": {
+    "LICENSE.tom-select": "f15dc64ea1f373c8af0ee7c020064360497addf335c9c2bcf27c3a6f56a6f0bd",
+    "tom-select.css": "7b29f39e2916acfb3d050e00df8fcdfca89279ead2d8e654afec307ca63b10f9",
+    "tom-select.min.js": "b797005cf23378fb38448b80dc57a33313a5c577b841765743bb1f289c4d53e6"
+  }
+}
