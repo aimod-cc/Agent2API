@@ -174,11 +174,14 @@ pub async fn responses_endpoint(
             return error.payload_response();
         }
     };
-    if !chat_body
+    // 空数组同样不是可用的对话：`messages_from_input` 在既无 instructions
+    // 也无 input 时返回空表，放过去只会让上游用自家文案拒绝 —— 实测豆包
+    // 通道回的是「messages 必须包含消息」，客户端看到的是提供商内部表述。
+    let has_messages = chat_body
         .get("messages")
-        .map(Value::is_array)
-        .unwrap_or(false)
-    {
+        .and_then(Value::as_array)
+        .is_some_and(|messages| !messages.is_empty());
+    if !has_messages {
         let error = GatewayError::bad_request("input 必须能转换成对话消息");
         record_early_failure(&state, started_at, "", &client_reasoning, &source, &error);
         return error.payload_response();
