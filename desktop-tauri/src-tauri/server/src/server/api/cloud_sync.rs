@@ -186,7 +186,10 @@ fn parse_save_input(payload: &Value) -> Result<settings::SaveInput, String> {
         .map(|value| value.as_u64()
             .filter(|minutes| (1..=u64::from(settings::MAX_AUTO_SYNC_INTERVAL_MINUTES)).contains(minutes))
             .map(|minutes| minutes as u32)
-            .ok_or_else(|| "最小自动上传间隔必须是 1–1440 分钟的整数".to_string()))
+            .ok_or_else(|| format!(
+                "最小自动上传间隔必须是 1–{} 分钟的整数",
+                settings::MAX_AUTO_SYNC_INTERVAL_MINUTES
+            )))
         .transpose()?;
     Ok(settings::SaveInput {
         provider: {

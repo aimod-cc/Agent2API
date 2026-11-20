@@ -43,7 +43,12 @@ pub(crate) const DEFAULT_PROFILE: &str = "default";
 /// 太短会让「云盘泄露 + 弱密码」变成可离线爆破的组合。
 pub(crate) const MIN_PASSWORD_LEN: usize = 8;
 pub(crate) const DEFAULT_AUTO_SYNC_INTERVAL_MINUTES: u32 = 5;
-pub(crate) const MAX_AUTO_SYNC_INTERVAL_MINUTES: u32 = 1_440;
+/// 上限取 3 天（4320 分钟）。
+///
+/// 云盘（尤其坚果云免费版）按**上传流量**计费，而快照动辄几 MB；间隔给到天级，
+/// 用户才能在「换台机器接着用」与「流量额度」之间自己取舍。上限放在这里而不是
+/// 界面里，是为了让手改库 / 旧配置也能被同一套校验兜住。
+pub(crate) const MAX_AUTO_SYNC_INTERVAL_MINUTES: u32 = 4_320;
 
 fn default_auto_sync_interval_minutes() -> u32 {
     DEFAULT_AUTO_SYNC_INTERVAL_MINUTES
@@ -461,7 +466,9 @@ pub(crate) fn apply_save(input: SaveInput) -> Result<CloudSyncSettings, String> 
     let previous_target = settings.target_id();
     if let Some(minutes) = input.auto_sync_interval_minutes {
         if !(1..=MAX_AUTO_SYNC_INTERVAL_MINUTES).contains(&minutes) {
-            return Err("最小自动上传间隔必须是 1–1440 分钟的整数".to_string());
+            return Err(format!(
+                "最小自动上传间隔必须是 1–{MAX_AUTO_SYNC_INTERVAL_MINUTES} 分钟的整数"
+            ));
         }
         settings.auto_sync_interval_minutes = minutes;
     }
