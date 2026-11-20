@@ -43,7 +43,12 @@ pub(crate) const DEFAULT_PROFILE: &str = "default";
 /// 太短会让「云盘泄露 + 弱密码」变成可离线爆破的组合。
 pub(crate) const MIN_PASSWORD_LEN: usize = 8;
 pub(crate) const DEFAULT_AUTO_SYNC_INTERVAL_MINUTES: u32 = 5;
-pub(crate) const MAX_AUTO_SYNC_INTERVAL_MINUTES: u32 = 1_440;
+/// 上限取 3 天（4320 分钟）。
+///
+/// 云盘（尤其坚果云免费版）按**上传流量**计费，而快照动辄几 MB；间隔给到天级，
+/// 用户才能在「换台机器接着用」与「流量额度」之间自己取舍。上限放在这里而不是
+/// 界面里，是为了让手改库 / 旧配置也能被同一套校验兜住。
+pub(crate) const MAX_AUTO_SYNC_INTERVAL_MINUTES: u32 = 4_320;
 
 fn default_auto_sync_interval_minutes() -> u32 {
     DEFAULT_AUTO_SYNC_INTERVAL_MINUTES
@@ -237,6 +242,31 @@ impl CloudSyncSettings {
         next.max(self.status.retry_at.unwrap_or(0))
     }
 
+    /// 间隔改小后，把旧的失败退避一并收紧。
+    ///
+    /// ── 为什么需要它 ────────────────────────────────────────────
+    /// `auto_sync_due_at()` 取「上次尝试 + 间隔」与 `retry_at` 的较大值，而
+    /// `retry_at` 是失败当时按**旧间隔**算出来的（间隔 3 天时退避至少 3 天）。
+    /// 用户把间隔从 3 天改回 5 分钟后，若不动 `retry_at`，下一次上传仍要等满
+    /// 三天 —— 界面上的新间隔形同虚设。
+    ///
+    /// ── 为什么是「收紧到新间隔」而不是直接清空 ──────────────────
+    /// 清空等于让失败退避失效，改完设置立刻重试，刚失败的通道会被连着打；
+    /// 收紧到「上次尝试 + 新间隔」既保留退避（至少再等一个新间隔），又让新
+    /// 间隔真正生效。只收紧不推迟：改大间隔时原值更早，保持不动。
+    fn tighten_retry_after_interval_change(&mut self, minutes: u32) {
+        let Some(retry_at) = self.status.retry_at else {
+            return;
+        };
+        let Some(anchor) = self.status.last_attempt_at.filter(|at| *at > 0) else {
+            return;
+        };
+        let ceiling = anchor.saturating_add(i64::from(minutes) * 60_000);
+        if ceiling < retry_at {
+            self.status.retry_at = Some(ceiling);
+        }
+    }
+
     /// 保存前的校验：只校验**当前服务商**的必填项。
     ///
     /// 另一家的配置可能只填了一半（用户切过去看过又切回来），不该因此拦住保存 ——
@@ -428,6 +458,68 @@ pub(crate) fn update_status_for(
     save(&settings)
 }
 
+/// 一次自动上传失败的结果：**无论是否写库成功**都带出本次算好的退避。
+///
+/// ── 为什么不是 `Result` ────────────────────────────────────
+/// 写库失败（DB 只读 / 磁盘满）时，等待循环仍必须按本次算出的 `retry_at` 退避；
+/// 只返回 `Err` 会让调用方拿不到截止时间，只能立刻重试 —— 上传与写库同时失败
+/// 就是一条没有间隔的热循环。
+pub(crate) struct AutoFailureRecord {
+    /// 本次失败尝试的时刻。与持久化的 `last_attempt_at` 对齐，用来判断
+    /// 「库里的状态是不是这一次写的」。
+    pub attempt_at: i64,
+    /// 本次应等待到的时刻（`0` = 目标已变，不该再等）
+    pub retry_at: i64,
+    pub last_sync_at: Option<i64>,
+    /// 写库失败的原因；有值时调用方只记日志，退避仍用 `retry_at`
+    pub save_error: Option<String>,
+}
+
+/// 记录一次自动上传失败，退避按**写入时**生效的间隔计算。
+///
+/// ── 为什么不在调用方算好再写 ────────────────────────────────
+/// `run_once` 手里那份设置是上传开始时的快照。上传期间用户可能把间隔改小，
+/// 而失败回来再用快照里的旧间隔算退避，就会把「3 天后」写回去，覆盖用户刚
+/// 保存的值 —— 界面显示新间隔，实际仍等旧间隔。所以退避必须在 `SETTINGS_LOCK`
+/// 内、基于重新读出的设置计算，与写入同一次临界区完成。
+///
+/// `backoff_for` 把「退避策略」留在调用方（`auto_sync` 里有失败次数的指数退避），
+/// 这里只保证「算的时候用的是当前间隔」。
+pub(crate) fn record_auto_failure(
+    target: &CloudSyncSettings,
+    backoff_for: impl FnOnce(u32, u32) -> i64,
+    error: &str,
+) -> AutoFailureRecord {
+    let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut settings = load();
+    let now = crate::server::logging::now_ms();
+    if settings.target_id() != target.target_id() {
+        // 目标已经变了，这次失败不属于当前通道：不写状态，也不制造退避
+        return AutoFailureRecord {
+            attempt_at: now,
+            retry_at: 0,
+            last_sync_at: settings.status.last_sync_at,
+            save_error: None,
+        };
+    }
+    let failures = settings.status.consecutive_failures.saturating_add(1);
+    let backoff = backoff_for(settings.auto_sync_interval_minutes, failures);
+    let retry_at = now.saturating_add(backoff);
+    settings.status.last_attempt_at = Some(now);
+    settings.status.retry_at = Some(retry_at);
+    settings.status.consecutive_failures = failures;
+    settings.status.last_error = Some(error.to_string());
+    settings.status.last_error_source = Some("auto".to_string());
+    let last_sync_at = settings.status.last_sync_at;
+    let save_error = save(&settings).err();
+    AutoFailureRecord {
+        attempt_at: now,
+        retry_at,
+        last_sync_at,
+        save_error,
+    }
+}
+
 /// 保存请求：界面传来的形态 → 落库形态。
 ///
 /// 密码 / Secret 的**沿用语义**：请求里 `hasPassword` 为真且 `password` 为空串
@@ -461,9 +553,15 @@ pub(crate) fn apply_save(input: SaveInput) -> Result<CloudSyncSettings, String> 
     let previous_target = settings.target_id();
     if let Some(minutes) = input.auto_sync_interval_minutes {
         if !(1..=MAX_AUTO_SYNC_INTERVAL_MINUTES).contains(&minutes) {
-            return Err("最小自动上传间隔必须是 1–1440 分钟的整数".to_string());
+            return Err(format!(
+                "最小自动上传间隔必须是 1–{MAX_AUTO_SYNC_INTERVAL_MINUTES} 分钟的整数"
+            ));
         }
-        settings.auto_sync_interval_minutes = minutes;
+        if minutes != settings.auto_sync_interval_minutes {
+            settings.auto_sync_interval_minutes = minutes;
+            // 间隔变了，旧的失败退避是按旧间隔算的，改小后不能继续把上传推后
+            settings.tighten_retry_after_interval_change(minutes);
+        }
     }
     settings.provider = input.provider;
     settings.webdav.base_url = input.webdav_base_url;

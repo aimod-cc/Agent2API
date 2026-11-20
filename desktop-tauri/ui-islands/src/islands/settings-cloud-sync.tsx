@@ -54,6 +54,35 @@ import {
 type Busy = 'load' | 'test' | 'save' | 'upload' | 'download' | 'remote' | 'key' | null
 type DialogKind = 'upload' | 'download' | 'key' | null
 
+/**
+ * 最小自动上传间隔的可选档位（分钟）。
+ *
+ * 为什么给到 3 天：云盘按上传流量计费，快照是几 MB 量级，天级间隔才能让用户在
+ * 「换台机器接着用」与「不把月度流量额度一次耗光」之间自己选。档位与后端
+ * `MAX_AUTO_SYNC_INTERVAL_MINUTES` 一一对应，改上限时两处一起改。
+ */
+const AUTO_SYNC_INTERVAL_PRESETS = [5, 15, 30, 60, 180, 360, 720, 1_440, 4_320] as const
+
+/**
+ * 间隔 → 界面文案。60 分钟以上按小时 / 天显示（1440 分钟写「1 天」比「1440 分钟」
+ * 好认），非整点的旧配置仍回落分钟，避免出现「1.5 小时」这类不好读的写法。
+ *
+ * 数值为 1 时走单独的键：词典是纯键值替换、没有复数引擎，英文里
+ * 「{hours} hours」会拼成「1 hours」。中文 / 日文 / 韩文看不出差别，但英文与
+ * 葡语必须分两条键。
+ */
+function formatIntervalLabel(minutes: number): string {
+  if (minutes >= 1_440 && minutes % 1_440 === 0) {
+    const days = minutes / 1_440
+    return days === 1 ? t('1 天') : t('{days} 天', { days })
+  }
+  if (minutes >= 60 && minutes % 60 === 0) {
+    const hours = minutes / 60
+    return hours === 1 ? t('1 小时') : t('{hours} 小时', { hours })
+  }
+  return minutes === 1 ? t('1 分钟') : t('{minutes} 分钟', { minutes })
+}
+
 export function CloudSyncPanel() {
   const bridge = shared().workbuddyDesktop
   const [view, setView] = React.useState<CloudSyncView | null>(null)
@@ -561,11 +590,11 @@ export function CloudSyncPanel() {
                   <Select value={String(form.autoSyncIntervalMinutes)} disabled={disabled || !form.autoSync || !form.enabled}
                     onValueChange={value => { if (value !== null) patch({ autoSyncIntervalMinutes: Number(value) }) }}>
                     <SelectTrigger id='cloud-auto-sync-interval' className='min-w-[220px]'>
-                      <SelectValue>{t('{minutes} 分钟', { minutes: form.autoSyncIntervalMinutes })}</SelectValue>
+                      <SelectValue>{formatIntervalLabel(form.autoSyncIntervalMinutes)}</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
-                      {[...new Set([5, 15, 30, 60, form.autoSyncIntervalMinutes])].sort((a, b) => a - b).map(minutes => (
-                        <SelectItem key={minutes} value={String(minutes)}>{t('{minutes} 分钟', { minutes })}</SelectItem>
+                      {[...new Set([...AUTO_SYNC_INTERVAL_PRESETS, form.autoSyncIntervalMinutes])].sort((a, b) => a - b).map(minutes => (
+                        <SelectItem key={minutes} value={String(minutes)}>{formatIntervalLabel(minutes)}</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
