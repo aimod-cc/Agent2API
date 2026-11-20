@@ -80,7 +80,10 @@ flate2 = "1"
 # npm 插件包使用 tar.gz；不执行安装脚本。
 tar = "0.4"
 url = "2"
-axum = { version = "0.8", features = ["multipart"] }
+# `ws`：`/v1/responses` 的 WebSocket 入口（Responses API 的 WS 传输，
+# 见 api::responses_ws）。只是入站 upgrade 需要的 feature，
+# 出站 wss（MonkeyCode）仍走 tokio-tungstenite。
+axum = { version = "0.8", features = ["multipart", "ws"] }
 # 出站请求：rustls（纯 Rust，不依赖系统 openssl）+ socks5 出网代理。
 # `system-proxy` 打开 hyper-util 的系统代理匹配器（Windows / macOS 系统设置 +
 # 环境变量）：只有「跟随系统代理」那条出口（`egress::client_for_system_proxy`，
