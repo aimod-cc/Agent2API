@@ -66,15 +66,21 @@ const AUTO_SYNC_INTERVAL_PRESETS = [5, 15, 30, 60, 180, 360, 720, 1_440, 4_320] 
 /**
  * 间隔 → 界面文案。60 分钟以上按小时 / 天显示（1440 分钟写「1 天」比「1440 分钟」
  * 好认），非整点的旧配置仍回落分钟，避免出现「1.5 小时」这类不好读的写法。
+ *
+ * 数值为 1 时走单独的键：词典是纯键值替换、没有复数引擎，英文里
+ * 「{hours} hours」会拼成「1 hours」。中文 / 日文 / 韩文看不出差别，但英文与
+ * 葡语必须分两条键。
  */
 function formatIntervalLabel(minutes: number): string {
   if (minutes >= 1_440 && minutes % 1_440 === 0) {
-    return t('{days} 天', { days: minutes / 1_440 })
+    const days = minutes / 1_440
+    return days === 1 ? t('1 天') : t('{days} 天', { days })
   }
   if (minutes >= 60 && minutes % 60 === 0) {
-    return t('{hours} 小时', { hours: minutes / 60 })
+    const hours = minutes / 60
+    return hours === 1 ? t('1 小时') : t('{hours} 小时', { hours })
   }
-  return t('{minutes} 分钟', { minutes })
+  return minutes === 1 ? t('1 分钟') : t('{minutes} 分钟', { minutes })
 }
 
 export function CloudSyncPanel() {

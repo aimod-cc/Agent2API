@@ -242,6 +242,31 @@ impl CloudSyncSettings {
         next.max(self.status.retry_at.unwrap_or(0))
     }
 
+    /// 间隔改小后，把旧的失败退避一并收紧。
+    ///
+    /// ── 为什么需要它 ────────────────────────────────────────────
+    /// `auto_sync_due_at()` 取「上次尝试 + 间隔」与 `retry_at` 的较大值，而
+    /// `retry_at` 是失败当时按**旧间隔**算出来的（间隔 3 天时退避至少 3 天）。
+    /// 用户把间隔从 3 天改回 5 分钟后，若不动 `retry_at`，下一次上传仍要等满
+    /// 三天 —— 界面上的新间隔形同虚设。
+    ///
+    /// ── 为什么是「收紧到新间隔」而不是直接清空 ──────────────────
+    /// 清空等于让失败退避失效，改完设置立刻重试，刚失败的通道会被连着打；
+    /// 收紧到「上次尝试 + 新间隔」既保留退避（至少再等一个新间隔），又让新
+    /// 间隔真正生效。只收紧不推迟：改大间隔时原值更早，保持不动。
+    fn tighten_retry_after_interval_change(&mut self, minutes: u32) {
+        let Some(retry_at) = self.status.retry_at else {
+            return;
+        };
+        let Some(anchor) = self.status.last_attempt_at.filter(|at| *at > 0) else {
+            return;
+        };
+        let ceiling = anchor.saturating_add(i64::from(minutes) * 60_000);
+        if ceiling < retry_at {
+            self.status.retry_at = Some(ceiling);
+        }
+    }
+
     /// 保存前的校验：只校验**当前服务商**的必填项。
     ///
     /// 另一家的配置可能只填了一半（用户切过去看过又切回来），不该因此拦住保存 ——
@@ -470,7 +495,11 @@ pub(crate) fn apply_save(input: SaveInput) -> Result<CloudSyncSettings, String> 
                 "最小自动上传间隔必须是 1–{MAX_AUTO_SYNC_INTERVAL_MINUTES} 分钟的整数"
             ));
         }
-        settings.auto_sync_interval_minutes = minutes;
+        if minutes != settings.auto_sync_interval_minutes {
+            settings.auto_sync_interval_minutes = minutes;
+            // 间隔变了，旧的失败退避是按旧间隔算的，改小后不能继续把上传推后
+            settings.tighten_retry_after_interval_change(minutes);
+        }
     }
     settings.provider = input.provider;
     settings.webdav.base_url = input.webdav_base_url;
