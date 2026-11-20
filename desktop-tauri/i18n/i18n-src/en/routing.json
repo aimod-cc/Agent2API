@@ -401,7 +401,7 @@
   "已完成请求时间范围": "Completed request time range",
   "已尝试": "Already attempted",
   "已尝试 · 失败": "Tried · failed",
-  "已开始响应、非普通推理任务结果不确定、验证或风控拒绝始终停止；仅合格普通推理的未确认提交可按显式配置重发。": "Started responses, uncertain non-inference jobs, and verification or risk-control denials always stop. Explicit opt-in permits replay only for eligible ordinary inference with unconfirmed submission.",
+  "已开始响应、非普通推理任务结果不确定、验证或风控拒绝始终停止；仅合格普通推理的未确认提交可按显式配置重发。": "Started responses, uncertain outcomes for tasks outside ordinary inference (including inference with server-side tools), and verification or risk-control denials always stop. Explicit opt-in permits replay only for eligible ordinary inference with unconfirmed submission.",
   "已用时": "Elapsed",
   "已确认的共享限制范围不能缩小；指定范围只会扩大影响。": "A confirmed shared restriction cannot be narrowed. A selected scope can only broaden its effect.",
   "已禁用账号": "Disabled accounts",
