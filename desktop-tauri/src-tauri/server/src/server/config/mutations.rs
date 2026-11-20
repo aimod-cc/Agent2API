@@ -73,6 +73,7 @@ fn try_update_raw_fields_inner<T, E>(
         super::KEY_PROMPT_GATEWAY_TEXT].iter().any(|key| next.raw.get(*key) != previous.raw.get(*key)) {
         next.prompt = super::prompt_from(&next.raw);
     }
+    super::privacy_masking::refresh(&mut next, &previous);
     if !save_raw(&next.raw) {
         return Err(storage_error());
     }

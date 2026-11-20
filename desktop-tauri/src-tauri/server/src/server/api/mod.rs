@@ -190,6 +190,7 @@ pub mod routing_flow;
 pub mod routing_groups;
 pub mod routing_trace;
 pub mod routing_workspace;
+pub(crate) mod privacy_masking;
 pub mod sanitize;
 pub mod scheduled_tasks;
 pub mod session;

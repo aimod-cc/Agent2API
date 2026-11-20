@@ -123,6 +123,7 @@ import { GraphicsSettingsPanel } from './settings-graphics'
 import { DbRestoreDialog } from './settings-db-restore'
 import { DatabaseBackupDialogs, DatabaseBackupPanel } from './settings-database-backup'
 import { SanitizePanel } from './settings-sanitize'
+import { PrivacyMaskingPanel } from './settings-privacy-masking'
 import { WebToolsPanel } from './settings-web-tools'
 import { ClientIdentificationPanel } from '../../../ui-shared/client-identification-panel'
 import { ProviderSettingsPane } from './settings-providers'
@@ -1071,6 +1072,7 @@ function SecurityPane({ snap }: { snap: SettingsSnapshot }) {
 
   return (
     <>
+      <PrivacyMaskingPanel />
       <Card render={<section />} className='panel'>
         <PanelHead
           title={t('网关跨域访问（CORS）')}

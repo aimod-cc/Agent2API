@@ -127,6 +127,7 @@ pub(crate) mod routing_groups;
 pub mod routing_order;
 pub mod routing_scope;
 pub(crate) mod runtime_capacity;
+pub(crate) mod privacy_masking;
 pub mod sanitize;
 pub mod scheduled_tasks;
 // 侧边栏布局（分组 / 顺序 / 显隐）的持久化：整份 JSON 存 kv 一个键。

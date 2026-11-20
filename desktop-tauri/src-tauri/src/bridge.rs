@@ -738,6 +738,10 @@ const BRIDGE_JS: &str = r#"
     saveSanitize: patch => call('PUT', '/api/sanitize',
       typeof patch === 'boolean' ? { sanitizeBlacklistFingerprints: patch } : patch),
 
+    // ── Magpie 风格本地隐私脱敏 ──
+    getPrivacyMasking: () => call('GET', '/api/privacy-masking'),
+    savePrivacyMasking: settings => call('PUT', '/api/privacy-masking', settings),
+
     // ── 开发者角色兼容开关 ──
     // 与 getSanitize / saveSanitize 同形：GET 读、PUT 写，响应体就是新状态。
     // 与 web_shim.rs 的同名方法逐字同形（漏一侧的症状见下面 getCors 那段）。

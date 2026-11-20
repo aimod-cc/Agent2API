@@ -711,6 +711,7 @@ pub fn panel_router(state: ServerState) -> Router {
         // 「安装」同样能 spawn 任意二进制，敏感度与 /api/plugins/install 同级。
         .route("/api/plugins/release", get(api::plugins::release))
         .route("/api/plugins/install-from-release", post(api::plugins::install_from_release))
+        .route("/api/privacy-masking", get(api::privacy_masking::get).put(api::privacy_masking::put))
         // 出站词表与提供商范围修改请求正文，必须沿用管理面鉴权。
         .route(
             "/api/sanitize",
@@ -1034,6 +1035,7 @@ pub fn gateway_router(state: ServerState) -> Router {
         .route("/mcp/image-generation", post(api::tool_runtime::mcp_image_generation)
             .get(api::tool_runtime::mcp_unsupported).delete(api::tool_runtime::mcp_unsupported))
         .route("/mcp/image-generation/files/{id}", get(api::tool_images::download))
+        .layer(middleware::from_fn(api::privacy_masking::protect))
         .layer(middleware::from_fn(api::capacity_admission::admit))
         .layer(middleware::from_fn(require_api_key))
         .with_state(state);

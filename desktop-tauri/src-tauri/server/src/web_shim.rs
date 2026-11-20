@@ -2197,6 +2197,9 @@ pub fn shim_js() -> &'static str {
       return call('POST', '/api/scheduled-tasks/' + encodeURIComponent(String(id || '')) + '/run', {});
     },
 
+    // ── Magpie 风格本地隐私脱敏 ──
+    getPrivacyMasking: function () { return call('GET', '/api/privacy-masking'); },
+    savePrivacyMasking: function (settings) { return call('PUT', '/api/privacy-masking', settings || {}); },
     // ── 软件更新（检查 / 下载 / 容器内更新；只有「跑安装程序」是桌面专有）──
     checkUpdate: function () { return invokeShell('check_update'); },
     getUpdateStatus: function () { return call('GET', '/api/update/status'); },

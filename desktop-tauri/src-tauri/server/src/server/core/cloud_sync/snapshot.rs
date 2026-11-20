@@ -71,6 +71,8 @@ const EXCLUDED_CONFIG_KEYS: &[&str] = &[
     // 代理内核的下载出网线路：绑本机网络环境
     "kernelProxy",
     crate::server::config::KEY_INSTALLED_UPDATE_VERSION,
+    // 自定义隐私词可能包含用户希望仅留在当前网关的名字或代号。
+    crate::server::config::privacy_masking::KEY,
 ];
 
 /// 保留键里**进快照**的项（其余保留键一律不进）。
@@ -529,6 +531,7 @@ mod tests {
         assert!(!is_synced_kv_key("kernelDir"));
         // 另一把密钥加密：不同步
         assert!(!is_synced_kv_key("githubToken"));
+        assert!(!is_synced_kv_key(crate::server::config::privacy_masking::KEY));
         // 保留键：白名单里的同步，其余不同步
         assert!(is_synced_kv_key("agentProfiles"));
         assert!(is_synced_kv_key("proxyPool"));
