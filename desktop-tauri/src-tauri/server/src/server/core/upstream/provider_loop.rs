@@ -1066,7 +1066,7 @@ async fn attempt_queue(
             let cache_key = (provider_id, account_pool.clone(), selected_model.clone(), degraded);
             if !send_cache.contains_key(&cache_key) {
                 let built = if let Some(native) = subscription_native {
-                    let mut prepared = super::native_payload::prepare(ctx, native, provider_id, target.account.as_ref(), degraded);
+                    let mut prepared = super::native_payload::prepare(ctx, native, provider_id, target.account.as_ref(), degraded)?;
                     let requested = model_of(ctx.body);
                     let wire = crate::server::core::providers::catalog::wire_target_for_provider(&requested, provider_id, target.account.as_ref());
                     if ctx.direct_model.is_none() && target.account.as_ref().and_then(crate::server::core::routing_groups::candidate_model).is_none() {
@@ -1078,7 +1078,7 @@ async fn attempt_queue(
                     }
                     prepared
                 } else {
-                    send_body(ctx, provider_id, target.account.as_ref(), degraded).await
+                    send_body(ctx, provider_id, target.account.as_ref(), degraded).await?
                 };
                 send_cache.insert(cache_key.clone(), built);
             }
@@ -1993,7 +1993,7 @@ async fn attempt_custom(
     let send = match native {
         Some(native) => super::native_payload::prepare(ctx, native, &provider_id, target.account.as_ref(), degraded),
         None => send_body(ctx, &provider_id, target.account.as_ref(), degraded).await,
-    };
+    }?;
     // 「上游模型」列以**真名**为准：send_body 对自定义 id 是零改写（它记的
     // 是请求名），真名的解析与改写发生在 forward 内部 —— 这里按同源解析
     // 覆盖一次（note_upstream_model 是覆盖式，最后一次为准；空串被内部过滤）。
@@ -2244,7 +2244,7 @@ async fn attempt_stateful(
     // `degraded` 由调用方（账号循环）给出：本路径**没有**就地补救（有状态
     // provider 一次转发就是一个会话轮次，没有「换提示词重发」这一步），
     // 但降级期内（状态机已生效）首发的提示词也要跟着换。
-    let send = send_body(ctx, provider_id, target.account.as_ref(), degraded).await;
+    let send = send_body(ctx, provider_id, target.account.as_ref(), degraded).await?;
     // 工具失败标记由实际出站桥接消费，不能提前清掉。
     let web_tools = crate::server::config::web_tools::enabled() && adapter.list_models().iter()
         .any(|model| super::web_tools::Profile::from_model(model).is_some());
@@ -2299,7 +2299,7 @@ async fn attempt_stateful(
         crate::server::core::plugin_host::script::native::protocol(provider_id, wire_model) == Some(native.protocol)
             && native.protocol != crate::server::core::protocol::native::WireProtocol::Chat
     }) {
-        let prepared = super::native_payload::prepare(ctx, native, provider_id, target.account.as_ref(), degraded);
+        let prepared = super::native_payload::prepare(ctx, native, provider_id, target.account.as_ref(), degraded)?;
         crate::server::core::plugin_host::script::native::forward(provider_id,
             target.account_id.as_deref().unwrap_or(""), prepared.body.into_owned(), ctx.client_headers,
             target.proxy.clone(), native.protocol, &model, ctx.stream, ctx.telemetry).await

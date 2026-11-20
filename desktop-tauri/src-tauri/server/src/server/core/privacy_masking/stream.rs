@@ -30,13 +30,16 @@ pub(crate) fn wrap(body: Body, format: Format, restore: Restore) -> Body {
         fragments: HashMap::new(),
         output: VecDeque::new(),
         eof: false,
+        failed: false,
     };
     Body::from_stream(stream::unfold(state, |mut state| async move {
         match state.next_frame().await {
             Ok(Some(frame)) => Some((Ok(frame), state)),
             Ok(None) => None,
             Err(error) => {
-                state.eof = true;
+                state.failed = true;
+                state.offset = 0;
+                state.line_start = 0;
                 state.output.clear();
                 state.input.clear();
                 state.waiting.clear();
@@ -133,10 +136,14 @@ struct Decoder {
     fragments: HashMap<Track, Pending>,
     output: VecDeque<Bytes>,
     eof: bool,
+    failed: bool,
 }
 
 impl Decoder {
     async fn next_frame(&mut self) -> io::Result<Option<Bytes>> {
+        if self.failed {
+            return Ok(None);
+        }
         loop {
             if let Some(frame) = self.output.pop_front() {
                 return Ok(Some(frame));
@@ -270,5 +277,27 @@ impl Decoder {
         }
         self.waiting_bytes = 0;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::core::privacy_masking::{RequestMask, Rules};
+
+    #[tokio::test]
+    async fn errored_stream_fuses_after_partial_frame() {
+        let source = Body::from_stream(stream::iter([
+            Ok(Bytes::from_static(b"data: {\"incomplete\":")),
+            Err(io::Error::other("synthetic source error")),
+        ]));
+        let mut wrapped = wrap(
+            source,
+            Format::Chat,
+            RequestMask::new(&Rules::default()).restore(),
+        )
+        .into_data_stream();
+        assert!(wrapped.next().await.is_some_and(|event| event.is_err()));
+        assert!(wrapped.next().await.is_none());
     }
 }

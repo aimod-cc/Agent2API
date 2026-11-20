@@ -13,7 +13,7 @@ use crate::server::{
     core::privacy_masking::{
         stream,
         wire::{self, Format},
-        Mask, Restore, Rules, Settings,
+        RequestMask, Restore, Settings,
     },
     errors::{management_error, GatewayError},
     http::ok_json,
@@ -59,6 +59,12 @@ pub(crate) async fn put(body: Bytes) -> Response {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct PrivacyContext {
+    pub(super) original_digest: String,
+    pub(super) masking: RequestMask,
+}
+
 pub(crate) async fn protect(request: Request, next: Next) -> Response {
     if request.method() != Method::POST {
         return next.run(request).await;
@@ -97,42 +103,44 @@ pub(crate) async fn protect(request: Request, next: Next) -> Response {
         Ok(body) => body,
         Err(_) => return error(413, "隐私脱敏无法读取请求或请求超过 32 MiB，未转发"),
     };
-    let (body, restore) = match mask_body(rules, format, original) {
-        Ok(value) => value,
-        Err(response) => return response,
-    };
-    if restore.is_some() {
-        parts.headers.remove(header::CONTENT_LENGTH);
-    }
-    let upstream = next.run(Request::from_parts(parts, Body::from(body))).await;
-    match restore {
-        Some(restore) if upstream.status().is_success() => {
-            restore_response(format, upstream, restore).await
-        }
-        _ => upstream,
-    }
-}
-
-fn mask_body(
-    rules: &Rules,
-    format: Format,
-    original: Bytes,
-) -> Result<(Bytes, Option<Restore>), Response> {
     let Ok(mut parsed @ Value::Object(_)) = serde_json::from_slice::<Value>(&original) else {
-        return Err(error(400, "隐私脱敏需要 JSON 对象，未转发"));
+        return error(400, "隐私脱敏需要 JSON 对象，未转发");
     };
-    let mut mask = Mask::new(rules);
-    wire::request(format, &mut parsed, &mut mask)
-        .map_err(|_| error(503, "隐私脱敏处理失败，未转发"))?;
-    let restore = mask.into_restore();
-    if restore.is_none() {
-        return Ok((original, None));
+    if matches!(format, Format::Responses)
+        && ["previous_response_id", "conversation"]
+            .iter()
+            .any(|key| parsed.get(key).is_some_and(|v| !v.is_null()))
+    {
+        // 上游历史没有本轮的映射。禁止隐式恢复跨请求的原值，完整重发上下文即可继续使用。
+        return GatewayError::bad_request(
+            "隐私脱敏不支持引用上游历史；请随本次请求发送完整 input，未转发",
+        )
+        .with_code("privacy_masking_stateful_responses")
+        .payload_response();
     }
-    let bytes = serde_json::to_vec(&parsed).map_err(|_| error(503, "隐私脱敏处理失败，未转发"))?;
+    let masking = RequestMask::new(rules);
+    let original_digest = super::pipeline::sha256_hex(&original);
+    if let Err(err) = masking.apply(format, &mut parsed) {
+        return err.payload_response();
+    }
+    let Ok(bytes) = serde_json::to_vec(&parsed) else {
+        return error(503, "隐私脱敏处理失败，未转发");
+    };
     if bytes.len() > MAX_BODY {
-        return Err(error(413, "脱敏后的请求超过 32 MiB，未转发"));
+        return error(413, "脱敏后的请求超过 32 MiB，未转发");
     }
-    Ok((Bytes::from(bytes), restore))
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts.extensions.insert(PrivacyContext {
+        original_digest,
+        masking: masking.clone(),
+    });
+    let upstream = next
+        .run(Request::from_parts(parts, Body::from(bytes)))
+        .await;
+    if !upstream.status().is_success() {
+        return upstream;
+    }
+    restore_response(format, upstream, masking.restore()).await
 }
 
 async fn restore_response(format: Format, response: Response, mut restore: Restore) -> Response {

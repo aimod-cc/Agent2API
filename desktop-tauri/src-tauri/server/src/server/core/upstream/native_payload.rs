@@ -66,7 +66,7 @@ pub(super) fn prepare(
     provider: &str,
     account: Option<&Value>,
     degraded: bool,
-) -> super::payload::SendBody<'static> {
+) -> Result<super::payload::SendBody<'static>, GatewayError> {
     let mut body = native.routed(ctx.body);
     if ctx.compact_routed || ctx.title_routed {
         crate::server::core::compact_routing::parameters::clear_source_reasoning(&mut body);
@@ -162,11 +162,19 @@ pub(super) fn prepare(
             }
         }
     }
-    super::payload::SendBody {
+    if let Some(masking) = ctx.telemetry.privacy_mask() {
+        use crate::server::core::privacy_masking::wire::Format;
+        masking.apply(match native.protocol {
+            WireProtocol::Chat => Format::Chat,
+            WireProtocol::Responses => Format::Responses,
+            WireProtocol::Anthropic => Format::Messages,
+        }, &mut body)?;
+    }
+    Ok(super::payload::SendBody {
         body: std::borrow::Cow::Owned(body),
         wire_model,
         wire_reasoning: None,
-    }
+    })
 }
 
 fn apply_prompt(

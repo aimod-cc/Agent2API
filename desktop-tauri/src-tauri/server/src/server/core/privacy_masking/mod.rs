@@ -1,9 +1,17 @@
 //! 内存内的推理正文脱敏。只接受协议层挑出的文本；不接触鉴权、路由或持久化。
 
-use std::{collections::HashMap, fmt::Write, sync::LazyLock};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt::Write,
+    sync::{Arc, LazyLock, Mutex},
+};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+
+mod custom;
+mod detectors;
+use detectors::Category;
 
 pub(crate) mod stream;
 pub(crate) mod wire;
@@ -15,6 +23,7 @@ const MAX_VALUES: usize = 4096;
 const MAX_MATCHES: usize = 65_536;
 const MAX_VALUE_BYTES: usize = 64 * 1024;
 const MAX_EXPANSION: usize = 16 * 1024 * 1024;
+const MAX_MAPPED_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -22,12 +31,27 @@ pub(crate) struct Settings {
     pub(crate) secrets: bool,
     pub(crate) personal: bool,
     pub(crate) terms: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    kinds: BTreeMap<Category, bool>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    terms_any_case: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    terms_whole: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rules: Vec<custom::CustomRule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    allow: Vec<String>,
 }
 
-#[derive(Default)]
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(Clone, Default)]
 pub(crate) struct Rules {
     pub(crate) settings: Settings,
-    terms: Option<Regex>,
+    terms: Vec<custom::Term>,
+    custom: Vec<Regex>,
 }
 
 impl std::fmt::Debug for Rules {
@@ -40,76 +64,99 @@ impl std::fmt::Debug for Rules {
 
 impl Rules {
     pub(crate) fn enabled(&self) -> bool {
-        self.settings.secrets || self.settings.personal || self.terms.is_some()
+        self.settings.secrets || self.settings.personal || !self.terms.is_empty()
     }
 
     pub(crate) fn compile(mut settings: Settings) -> Result<Self, &'static str> {
-        if settings.terms.len() > 100 || settings.terms.iter().any(|s| s.len() > 256) {
-            return Err("terms 最多 100 项，每项最多 256 字节");
-        }
         for term in &mut settings.terms {
             *term = term.trim().to_owned();
         }
         settings.terms.retain(|s| !s.is_empty());
         settings.terms.sort();
         settings.terms.dedup();
-        let terms = if settings.terms.is_empty() {
-            None
-        } else {
-            let mut by_length: Vec<_> = settings.terms.iter().collect();
-            by_length.sort_by_key(|s| std::cmp::Reverse(s.len()));
-            let pattern = by_length
-                .iter()
-                .map(|s| regex::escape(s))
-                .collect::<Vec<_>>()
-                .join("|");
-            Some(Regex::new(&pattern).map_err(|_| "脱敏词规则编译失败")?)
-        };
-        Ok(Self { settings, terms })
+        if settings.terms.len() > 100 || settings.terms.iter().any(|s| s.len() > 256) {
+            return Err("terms 最多 100 项，每项最多 256 字节");
+        }
+        if !settings.kinds.keys().copied().all(Category::optional) {
+            return Err("无效的个人信息分类");
+        }
+        if (settings.secrets || settings.personal) && !detectors::ready() {
+            return Err("内置脱敏规则初始化失败");
+        }
+        let terms = settings
+            .terms
+            .iter()
+            .map(|term| custom::Term::compile(term, settings.terms_any_case))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "脱敏词规则编译失败")?;
+        for allowed in &mut settings.allow {
+            *allowed = allowed.trim().to_lowercase();
+        }
+        settings.allow.retain(|v| !v.is_empty());
+        settings.allow.sort();
+        settings.allow.dedup();
+        if settings.allow.len() > 100 || settings.allow.iter().any(|v| v.len() > 256) {
+            return Err("白名单最多 100 项，每项最多 256 字节");
+        }
+        if settings.rules.len() > 32 {
+            return Err("自定义脱敏规则最多 32 条");
+        }
+        let mut configured = Vec::new();
+        let mut custom = Vec::new();
+        for mut rule in std::mem::take(&mut settings.rules) {
+            if let Some(compiled) = rule.compile()? {
+                if !configured.contains(&rule) {
+                    configured.push(rule);
+                    custom.push(compiled);
+                }
+            }
+        }
+        settings.rules = configured;
+        Ok(Self {
+            settings,
+            terms,
+            custom,
+        })
     }
 }
 
-static SECRETS: LazyLock<[Regex; 3]> = LazyLock::new(|| {
-    [
-    Regex::new(r"(?s)-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----.*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----").unwrap(),
-    Regex::new(r"(?-u:\b)(?:(?:sk-|sk_live_|gh[pousr]_|github_pat_|glpat-|hf_|xox[baprs]-|gsk_|npm_)[A-Za-z0-9_-]{12,}|AIza[A-Za-z0-9_-]{30,}|(?:AKIA|ASIA)[A-Z0-9]{16}|eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)").unwrap(),
-    Regex::new(r"(?i)(?-u:\b)bearer[ \t]+([a-z0-9._~+/-]{12,}={0,2})").unwrap(),
-]
-});
-static ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)(?-u:\b)(?:[a-z0-9_.-]+[_-])?(?:api[_-]?key|(?:client|api)[_-]?secret|(?:access|refresh|auth)[_-]?token|private[_-]?key|password|passwd|secret|token|credential)["']?[ \t]*[:=][ \t]*(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s,;{}<>"']+))"#).unwrap()
-});
-static URL_SECRET: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"://[^:/\s@]+:([^@/\s]+)@").unwrap());
-static KEY_NAME: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(?:[a-z0-9_.-]+[_-])?(?:api[_-]?key|(?:client|api)[_-]?secret|(?:access|refresh|auth)[_-]?token|private[_-]?key|password|passwd|secret|token|credential)$").unwrap()
-});
-static PERSONAL: LazyLock<[Regex; 2]> = LazyLock::new(|| {
-    [
-        Regex::new(r"(?i)[A-Z0-9.!#$%&'*+/=?^_{|}~-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)*\.[A-Z]{2,63}")
-            .unwrap(),
-        Regex::new(r"(?:\+86[ -]?)?(?-u:\b)1[3-9][0-9]{9}(?-u:\b)").unwrap(),
-    ]
-});
 static PLACEHOLDER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\{\{A2A_[0-9a-f]{32}\}\}").unwrap());
 
 pub(super) fn is_secret_field(name: &str) -> bool {
-    KEY_NAME.is_match(name)
+    detectors::is_secret_field(name)
 }
 
-pub(crate) struct Mask<'a> {
-    rules: &'a Rules,
+// Encoded attachments can also occur as strings in tool output. Keep only
+// the data-URL form, not arbitrary prose beginning with "data:".
+fn encoded_attachment(text: &str) -> bool {
+    text.strip_prefix("data:")
+        .and_then(|rest| rest.split_once(','))
+        .and_then(|(head, data)| head.strip_suffix(";base64").map(|media| (media, data)))
+        .is_some_and(|(media, data)| {
+            media.contains('/')
+                && !media.bytes().any(|b| b.is_ascii_whitespace())
+                && !data.is_empty()
+                && data
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+        })
+}
+
+pub(crate) struct Mask {
+    rules: Rules,
     by_value: HashMap<String, String>,
     by_token: HashMap<String, String>,
+    mapped_bytes: usize,
 }
 
-impl<'a> Mask<'a> {
-    pub(crate) fn new(rules: &'a Rules) -> Self {
+impl Mask {
+    pub(crate) fn new(rules: &Rules) -> Self {
         Self {
-            rules,
+            rules: rules.clone(),
             by_value: HashMap::new(),
             by_token: HashMap::new(),
+            mapped_bytes: 0,
         }
     }
 
@@ -118,7 +165,9 @@ impl<'a> Mask<'a> {
             return Err(());
         }
         if !self.by_value.contains_key(value) {
-            if self.by_value.len() >= MAX_VALUES {
+            if self.by_value.len() >= MAX_VALUES
+                || self.mapped_bytes + value.len() > MAX_MAPPED_BYTES
+            {
                 return Err(());
             }
             let token = loop {
@@ -136,11 +185,15 @@ impl<'a> Mask<'a> {
             };
             self.by_token.insert(token.clone(), value.to_owned());
             self.by_value.insert(value.to_owned(), token);
+            self.mapped_bytes += value.len();
         }
         self.by_value.get(value).map(String::as_str).ok_or(())
     }
 
     pub(super) fn apply(&mut self, text: &mut String, secret_field: bool) -> Result<(), ()> {
+        if encoded_attachment(text) {
+            return Ok(());
+        }
         let mut ranges = Vec::new();
         let mut collect = |items: &mut dyn Iterator<Item = (usize, usize)>| {
             for pair in items {
@@ -151,31 +204,50 @@ impl<'a> Mask<'a> {
             }
             Ok(())
         };
-        if secret_field && self.rules.settings.secrets && !text.trim().is_empty() {
-            ranges.push((0, text.len()));
+        let settings = &self.rules.settings;
+        for term in &self.rules.terms {
+            collect(&mut term.spans(text, settings.terms_whole))?;
+        }
+        let literal_count = ranges.len();
+        let mut record = |pair: (usize, usize)| {
+            if ranges.len() >= MAX_MATCHES {
+                return Err(());
+            }
+            ranges.push(pair);
+            Ok(())
+        };
+        if secret_field && settings.secrets && detectors::secret_field_value(text) {
+            record((0, text.len()))?;
         } else {
-            if self.rules.settings.secrets {
-                for pattern in &SECRETS[..2] {
-                    collect(&mut pattern.find_iter(text).map(|m| (m.start(), m.end())))?;
-                }
-                for pattern in [&SECRETS[2], &*ASSIGNMENT, &*URL_SECRET] {
-                    collect(&mut pattern.captures_iter(text).filter_map(|c| {
-                        c.iter()
-                            .skip(1)
-                            .flatten()
-                            .next()
-                            .map(|m| (m.start(), m.end()))
-                    }))?;
+            detectors::scan(
+                text,
+                settings.secrets,
+                settings.personal,
+                &settings.kinds,
+                &mut record,
+            )?;
+            if settings.secrets {
+                for re in &self.rules.custom {
+                    for m in re
+                        .captures_iter(text)
+                        .filter_map(|m| m.get(if m.len() > 1 { 1 } else { 0 }))
+                        .filter(|m| m.len() >= 4)
+                    {
+                        record((m.start(), m.end()))?;
+                    }
                 }
             }
-            if self.rules.settings.personal {
-                for pattern in PERSONAL.iter() {
-                    collect(&mut pattern.find_iter(text).map(|m| (m.start(), m.end())))?;
-                }
-            }
-            if let Some(pattern) = &self.rules.terms {
-                collect(&mut pattern.find_iter(text).map(|m| (m.start(), m.end())))?;
-            }
+        }
+        if !settings.allow.is_empty() {
+            let mut index = 0;
+            ranges.retain(|&(a, b)| {
+                index += 1;
+                index <= literal_count
+                    || settings
+                        .allow
+                        .binary_search(&text[a..b].to_lowercase())
+                        .is_err()
+            });
         }
         if ranges.is_empty() {
             return Ok(());
@@ -192,11 +264,34 @@ impl<'a> Mask<'a> {
                 _ => merged.push((start, end)),
             }
         }
+        // The egress pass must not remask placeholders that this request already owns.
+        let retained: Vec<_> = PLACEHOLDER
+            .find_iter(text)
+            .filter(|hit| self.by_token.contains_key(hit.as_str()))
+            .map(|hit| (hit.start(), hit.end()))
+            .collect();
+        // Subtract owned placeholders from matched ranges, but still mask any new
+        // plaintext a match spans (e.g. a freshly appended credential on the same line).
         let mut out = String::with_capacity(text.len());
         let mut at = 0;
         for (start, end) in merged {
             out.push_str(&text[at..start]);
-            out.push_str(self.token(&text[start..end])?);
+            let first = retained.partition_point(|&(_, stop)| stop <= start);
+            let mut begin = start;
+            for &(a, b) in &retained[first..] {
+                if a >= end {
+                    break;
+                }
+                if begin < a {
+                    out.push_str(self.token(&text[begin..a])?);
+                }
+                // Copy only the part within this merged range. The rest remains in the source.
+                out.push_str(&text[begin.max(a)..end.min(b)]);
+                begin = end.min(b);
+            }
+            if begin < end {
+                out.push_str(self.token(&text[begin..end])?);
+            }
             at = end;
         }
         out.push_str(&text[at..]);
@@ -204,23 +299,60 @@ impl<'a> Mask<'a> {
         Ok(())
     }
 
-    pub(crate) fn into_restore(self) -> Option<Restore> {
-        (!self.by_token.is_empty()).then_some(Restore {
-            tokens: self.by_token,
-            budget: MAX_EXPANSION,
-        })
+    #[cfg(test)]
+    fn into_restore(self) -> Option<Restore> {
+        (!self.by_token.is_empty()).then(|| RequestMask(Arc::new(Mutex::new(self))).restore())
     }
+}
+
+/// 单次请求的不透明句柄。只在鉴权后创建，不进入日志或遥测快照。
+#[derive(Clone)]
+pub(crate) struct RequestMask(Arc<Mutex<Mask>>);
+
+impl RequestMask {
+    pub(crate) fn new(rules: &Rules) -> Self {
+        Self(Arc::new(Mutex::new(Mask::new(rules))))
+    }
+
+    pub(crate) fn apply(
+        &self,
+        format: wire::Format,
+        body: &mut serde_json::Value,
+    ) -> Result<(), crate::server::errors::GatewayError> {
+        let mut mask = self.0.lock().map_err(|_| unavailable())?;
+        wire::request(format, body, &mut mask).map_err(|_| unavailable())
+    }
+
+    // A stream can start an automatic continuation after the HTTP handler returns.
+    // Keep the same mapping alive until both sides of the request are done.
+    pub(crate) fn restore(&self) -> Restore {
+        Restore {
+            request: self.clone(),
+            budget: MAX_EXPANSION,
+        }
+    }
+}
+
+pub(crate) fn unavailable() -> crate::server::errors::GatewayError {
+    crate::server::errors::GatewayError::with_status(503, "隐私脱敏处理失败，未转发该请求")
+        .with_code("privacy_masking")
 }
 
 pub(crate) struct Restore {
     // Never derive Debug, and never put this map into an extension visible to metrics/loggers.
-    tokens: HashMap<String, String>,
+    request: RequestMask,
     budget: usize,
 }
 
 impl Restore {
     /// Only wait for a prefix of a token actually emitted for this HTTP request.
     pub(super) fn partial_len(&self, text: &str) -> usize {
+        let Ok(mask) = self.request.0.lock() else {
+            return 0;
+        };
+        if mask.by_token.is_empty() {
+            return 0;
+        }
         let max = text.len().min(TOKEN_LEN - 1);
         (1..=max)
             .rev()
@@ -228,17 +360,18 @@ impl Restore {
                 text.get(text.len() - n..).is_some_and(|tail| {
                     (n <= PREFIX.len() && PREFIX.starts_with(tail))
                         || (tail.starts_with(PREFIX)
-                            && self.tokens.keys().any(|token| token.starts_with(tail)))
+                            && mask.by_token.keys().any(|token| token.starts_with(tail)))
                 })
             })
             .unwrap_or(0)
     }
 
     pub(super) fn apply(&mut self, text: &mut String, json_fragment: bool) -> Result<(), ()> {
+        let mask = self.request.0.lock().map_err(|_| ())?;
         let mut out = String::new();
         let mut at = 0;
         for hit in PLACEHOLDER.find_iter(text) {
-            let Some(value) = self.tokens.get(hit.as_str()) else {
+            let Some(value) = mask.by_token.get(hit.as_str()) else {
                 continue;
             };
             out.push_str(&text[at..hit.start()]);
@@ -272,9 +405,10 @@ mod tests {
             secrets: true,
             personal: true,
             terms: vec!["nightjar".into(), "lp-example".into()],
+            ..Settings::default()
         })
         .unwrap();
-        let input = "nightjar example@example.test +86 13800138000 DB_PASSWORD=example sk-example1234567890";
+        let input = "nightjar fixture@orchid.internal +86 13800138000 DB_PASSWORD=Example1234 sk-fixtureA1234567890ZZYX";
         let mut mask = Mask::new(&rules);
         let mut redacted = input.to_owned();
         mask.apply(&mut redacted, false).unwrap();

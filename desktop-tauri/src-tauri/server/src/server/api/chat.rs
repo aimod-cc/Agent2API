@@ -79,6 +79,7 @@ pub async fn chat_completions(
     key_scope: Option<Extension<crate::server::core::key_scope::KeyScope>>,
     key_identity: Option<Extension<crate::server::request_stats::ApiKeyIdentity>>,
     key_source: Option<Extension<Arc<crate::server::config::model_key_source::Source>>>,
+    privacy: Option<Extension<super::privacy_masking::PrivacyContext>>,
     body: Bytes,
 ) -> Response {
     let scope = key_scope.map(|Extension(scope)| scope);
@@ -117,7 +118,8 @@ pub async fn chat_completions(
         .unwrap_or(0);
     let user_agent = pipeline::user_agent_of(&headers);
     let body_len = body.len();
-    let dedupe_key = pipeline::sha256_hex(&body);
+    let dedupe_key = privacy.as_ref().map(|Extension(context)| context.original_digest.clone())
+        .unwrap_or_else(|| pipeline::sha256_hex(&body));
     let raw_request = pipeline::capture_raw_body(&body);
 
     // ③ 调试落盘：保存最近一次入站请求体，供重放分析（覆盖写）
@@ -164,7 +166,8 @@ pub async fn chat_completions(
     );
 
     // 原始请求的去重键已在模型改写前计算。
-    let telemetry = Arc::new(RequestTelemetry::with_model_key(key_source.map(|Extension(source)| source)));
+    let telemetry = Arc::new(RequestTelemetry::with_model_key(key_source.map(|Extension(source)| source))
+        .with_privacy_mask(privacy.map(|Extension(context)| context.masking)));
     telemetry.capture_prompt_request(&request_source, &client_model);
     // 「进行中」行：模型解析已成功、转发即将开始 —— 先插一条 status=0 的明细，
     // 让请求日志在响应还没跑完时就能看到这条请求（收尾时由 `record` 的 UPDATE

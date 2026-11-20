@@ -201,7 +201,7 @@ pub(super) async fn send_body<'a>(
     provider_id: &str,
     account: Option<&Value>,
     degraded: bool,
-) -> SendBody<'a> {
+) -> Result<SendBody<'a>, crate::server::errors::GatewayError> {
     if ctx.images.is_some() {
         let requested = ctx.body.get("model").and_then(Value::as_str).unwrap_or("");
         let wire = crate::server::core::providers::catalog::wire_target_for_provider(
@@ -211,7 +211,7 @@ pub(super) async fn send_body<'a>(
         rewrite_model(&mut body, requested, &wire.model, provider_id);
         ctx.telemetry.note_upstream_model(&wire.model);
         ctx.telemetry.note_upstream_reasoning(None);
-        return SendBody { body, wire_model: wire.model, wire_reasoning: None };
+        return Ok(SendBody { body, wire_model: wire.model, wire_reasoning: None });
     }
     // ── ⓪ 角色归一层（开发者角色兼容开关）───────────────────────────
     // 在所有改写**之前**：先把 developer 角色归一成 system，后面各层（提示词、
@@ -346,6 +346,9 @@ pub(super) async fn send_body<'a>(
             None => body,
         }
     };
+    if let Some(masking) = ctx.telemetry.privacy_mask() {
+        masking.apply(crate::server::core::privacy_masking::wire::Format::Chat, body.to_mut())?;
+    }
     let requested = body
         .get("model")
         .and_then(Value::as_str)
@@ -355,7 +358,7 @@ pub(super) async fn send_body<'a>(
     if requested.is_empty() {
         // 没有 model 字段：不改写，也没有可用的冷却键（空串，与改造前一致）
         ctx.telemetry.note_upstream_reasoning(None);
-        return SendBody { body, wire_model: requested, wire_reasoning: None };
+        return Ok(SendBody { body, wire_model: requested, wire_reasoning: None });
     }
     // 一次解析出两个属性：该家要收的名字 + 跟着那条映射走的思考等级
     // （同源，见模块头「思考等级绑定为什么也在这一步」）
@@ -378,7 +381,7 @@ pub(super) async fn send_body<'a>(
     // 未注入时读取原有客户端参数；绑定成功时以覆盖后的等级为准。
     let upstream_reasoning = injected.or_else(|| outbound_reasoning_of(provider_id, &body));
     ctx.telemetry.note_upstream_reasoning(upstream_reasoning.clone());
-    SendBody { body, wire_model: wire.model, wire_reasoning: upstream_reasoning }
+    Ok(SendBody { body, wire_model: wire.model, wire_reasoning: upstream_reasoning })
 }
 
 /// 承载家的 [`ProviderAdapter::outbound_reasoning`]（读发送体里随行的等级）。

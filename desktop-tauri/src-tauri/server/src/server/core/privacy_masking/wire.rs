@@ -32,12 +32,12 @@ fn kind(value: &Value) -> &str {
     value.get("type").and_then(Value::as_str).unwrap_or("")
 }
 
-enum Transform<'a, 'r> {
-    Mask(&'a mut Mask<'r>),
+enum Transform<'a> {
+    Mask(&'a mut Mask),
     Restore(&'a mut Restore),
 }
 
-impl Transform<'_, '_> {
+impl Transform<'_> {
     fn text(&mut self, value: Option<&mut Value>) -> Result {
         text(value, |s| match self {
             Self::Mask(mask) => mask.apply(s, false),
@@ -50,7 +50,7 @@ impl Transform<'_, '_> {
         if let Value::String(s) = value {
             if let Ok(mut decoded) = serde_json::from_str::<Value>(s) {
                 let original = decoded.clone();
-                self.tool_values(&mut decoded, false)?;
+                self.tool_values(&mut decoded, None, false)?;
                 if original != decoded {
                     *s = serde_json::to_string(&decoded).map_err(|_| ())?;
                 }
@@ -58,23 +58,28 @@ impl Transform<'_, '_> {
                 self.text(Some(value))?;
             }
         } else {
-            self.tool_values(value, false)?;
+            self.tool_values(value, None, false)?;
         }
         Ok(())
     }
 
-    fn tool_values(&mut self, value: &mut Value, secret_field: bool) -> Result {
+    fn tool_values(&mut self, value: &mut Value, field: Option<&str>, in_secret: bool) -> Result {
+        let secret_field = in_secret || field.is_some_and(is_secret_field);
         match value {
             Value::String(s) => match self {
-                Self::Mask(mask) => mask.apply(s, secret_field),
+                Self::Mask(mask) => {
+                    let named = secret_field
+                        && !field.is_some_and(|key| super::detectors::tool_lookup(key, s));
+                    mask.apply(s, named)
+                }
                 Self::Restore(restore) => restore.apply(s, false),
             },
             Value::Array(items) => items
                 .iter_mut()
-                .try_for_each(|v| self.tool_values(v, secret_field)),
+                .try_for_each(|v| self.tool_values(v, field, secret_field)),
             Value::Object(fields) => fields
                 .iter_mut()
-                .try_for_each(|(key, v)| self.tool_values(v, secret_field || is_secret_field(key))),
+                .try_for_each(|(key, v)| self.tool_values(v, Some(key), secret_field)),
             _ => Ok(()),
         }
     }
@@ -87,6 +92,21 @@ impl Transform<'_, '_> {
         }
     }
 
+    // Tool results can carry a JSON document in a string or a protocol text block.
+    // Reuse the argument walker for the document, not for the surrounding envelope.
+    fn result_content(&mut self, value: Option<&mut Value>) -> Result {
+        match value {
+            Some(value @ Value::String(_)) => self.arguments(Some(value)),
+            Some(Value::Array(blocks)) => {
+                blocks.iter_mut().try_for_each(|block| match kind(block) {
+                    "text" | "input_text" | "output_text" => self.arguments(block.get_mut("text")),
+                    _ => self.block(block),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn block(&mut self, block: &mut Value) -> Result {
         match kind(block) {
             "text" | "input_text" | "output_text" => self.text(block.get_mut("text")),
@@ -94,11 +114,17 @@ impl Transform<'_, '_> {
             "tool_use" | "server_tool_use" | "mcp_tool_use" => {
                 self.arguments(block.get_mut("input"))
             }
-            "tool_result" | "mcp_tool_result" => self.content(block.get_mut("content")),
+            "tool_result" | "mcp_tool_result" => self.result_content(block.get_mut("content")),
             "function_call" | "mcp_call" => self.arguments(block.get_mut("arguments")),
             "custom_tool_call" => self.text(block.get_mut("input")),
             "function_call_output" | "custom_tool_call_output" => {
-                self.content(block.get_mut("output"))
+                self.result_content(block.get_mut("output"))
+            }
+            // Responses Lite 和工具搜索把声明放在 input 项里，不只在顶层 tools。
+            item if item.eq_ignore_ascii_case("additional_tools")
+                || item == "tool_search_output" =>
+            {
+                each(block.get_mut("tools"), |tool| self.tool_definition(tool))
             }
             "message" => self.message(block),
             "" if block.get("role").is_some() => self.message(block),
@@ -108,7 +134,14 @@ impl Transform<'_, '_> {
     }
 
     fn message(&mut self, message: &mut Value) -> Result {
-        self.content(message.get_mut("content"))?;
+        if matches!(
+            message.get("role").and_then(Value::as_str),
+            Some("tool" | "function")
+        ) {
+            self.result_content(message.get_mut("content"))?;
+        } else {
+            self.content(message.get_mut("content"))?;
+        }
         self.text(message.get_mut("refusal"))?;
         self.text(message.get_mut("reasoning_content"))?;
         self.arguments(message.pointer_mut("/function_call/arguments"))?;
@@ -125,6 +158,10 @@ impl Transform<'_, '_> {
             if let Some(schema) = tool.pointer_mut(path) {
                 self.schema(schema)?;
             }
+        }
+        // 命名空间只递归子工具声明；名字、格式约束和语法不参加规则扫描。
+        if kind(tool).eq_ignore_ascii_case("namespace") {
+            each(tool.get_mut("tools"), |child| self.tool_definition(child))?;
         }
         Ok(())
     }
@@ -174,7 +211,7 @@ impl Transform<'_, '_> {
     }
 }
 
-pub(crate) fn request(format: Format, payload: &mut Value, mask: &mut Mask<'_>) -> Result {
+pub(crate) fn request(format: Format, payload: &mut Value, mask: &mut Mask) -> Result {
     let mut transform = Transform::Mask(mask);
     match format {
         Format::Chat | Format::Messages => {

@@ -122,6 +122,11 @@ bytes = "1"
 # CatPaw 适配器的内联图片压缩（providers/catpaw/image_compress.rs）
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 base64 = "0.22"
+# 入站隐私遮盖仅识别并校验钱包格式，不导出密钥。
+bs58 = { version = "0.5", features = ["check"] }
+data-encoding = "2"
+# 编译期嵌入 Public Suffix List；识别邮箱不查询网络。
+psl = "2"
 # Qoder 网页登录的 PKCE verifier / nonce
 getrandom = "0.2"
 # P-256 密钥（两家共用一份依赖）：

@@ -343,7 +343,7 @@ export type SettingsBridge = {
   getSanitize(): Promise<unknown>
   saveSanitize(patch: boolean | SanitizePatch): Promise<unknown>
   getPrivacyMasking?(): Promise<unknown>
-  savePrivacyMasking?(settings: { secrets: boolean; personal: boolean; terms: string[] }): Promise<unknown>
+  savePrivacyMasking?(settings: { secrets: boolean; personal: boolean; terms: string[]; kinds?: Record<string, boolean>; terms_any_case?: boolean; terms_whole?: boolean; allow?: string[]; rules?: unknown[] }): Promise<unknown>
   getWebToolEmulation?(): Promise<unknown>
   saveWebToolEmulation?(enabled: boolean): Promise<unknown>
   getDeveloperRoleCompat(): Promise<unknown>

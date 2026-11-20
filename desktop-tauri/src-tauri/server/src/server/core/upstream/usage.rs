@@ -487,6 +487,7 @@ pub struct RequestTelemetry {
     /// 请求安全状态独立于统计快照；attempt、首响及用量清理均不能替换或解除它。
     replay_guard: Arc<super::replay_guard::ReplayGuard>,
     model_key: Option<Arc<crate::server::config::model_key_source::Source>>,
+    privacy_mask: Option<crate::server::core::privacy_masking::RequestMask>,
     prompt_request: Mutex<Option<crate::server::core::prompt::rules::Request>>,
     catpaw_output: Mutex<Option<Arc<crate::server::core::plugin_host::wasm::CatPawOutputSlot>>>,
     catpaw_output_taken: std::sync::atomic::AtomicBool,
@@ -519,6 +520,15 @@ impl Default for RequestTelemetry {
 }
 
 impl RequestTelemetry {
+    pub(crate) fn with_privacy_mask(mut self, state: Option<crate::server::core::privacy_masking::RequestMask>) -> Self {
+        self.privacy_mask = state;
+        self
+    }
+
+    pub(super) fn privacy_mask(&self) -> Option<&crate::server::core::privacy_masking::RequestMask> {
+        self.privacy_mask.as_ref()
+    }
+
     pub fn new() -> Self {
         Self::with_replay_guard(Arc::new(super::replay_guard::ReplayGuard::new()))
     }
@@ -528,6 +538,7 @@ impl RequestTelemetry {
             inner: Mutex::new(TelemetrySnapshot::default()),
             replay_guard,
             model_key: None,
+            privacy_mask: None,
             prompt_request: Mutex::new(None),
             catpaw_output: Mutex::new(None),
             catpaw_output_taken: std::sync::atomic::AtomicBool::new(false),
