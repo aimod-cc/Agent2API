@@ -641,29 +641,41 @@ mod tests {
         }
     }
 
+    fn wasm_manifest(protocol: u32) -> proto::PackManifest {
+        let mut m = manifest(protocol);
+        m.entry = BTreeMap::from([(crate::server::core::plugin_host::wasm::manifest::TARGET.to_string(), "plugin.wasm".to_string())]);
+        m
+    }
+
+    #[test]
+    fn rejects_legacy_native_manifest() {
+        let err = validate_manifest(&manifest(1), 1).unwrap_err();
+        assert!(err.contains("旧原生提供商插件已停止支持"), "旧原生包应给出停用提示: {err}");
+    }
+
     #[test]
     fn rejects_protocol_mismatch() {
-        let err = validate_manifest(&manifest(999), 1).unwrap_err();
+        let err = validate_manifest(&wasm_manifest(999), 1).unwrap_err();
         assert!(err.contains("999"), "错误里要带上对方的版本号: {err}");
     }
 
     #[test]
     fn rejects_absolute_entry() {
-        let mut m = manifest(1);
+        let mut m = wasm_manifest(1);
         m.entry.insert("t".into(), "/usr/bin/evil".into());
         assert!(validate_manifest(&m, 1).is_err());
     }
 
     #[test]
     fn rejects_parent_traversal() {
-        let mut m = manifest(1);
+        let mut m = wasm_manifest(1);
         m.entry.insert("t".into(), "../../evil".into());
         assert!(validate_manifest(&m, 1).is_err());
     }
 
     #[test]
     fn accepts_matching_protocol() {
-        assert!(validate_manifest(&manifest(1), 1).is_ok());
+        assert!(validate_manifest(&wasm_manifest(1), 1).is_ok());
     }
 
     // ── 签名 ────────────────────────────────────────────────────

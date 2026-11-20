@@ -586,20 +586,20 @@ mod tests {
             "tag_name": "v0.2.0",
             "html_url": "https://github.com/x/y/releases/tag/v0.2.0",
             "assets": [
-                { "name": "agent2api-providers-0.2.0-x86_64-pc-windows-msvc.zip",
+                { "name": "agent2api-providers-0.2.0-wasm32-unknown-unknown.zip",
                   "browser_download_url": "https://example.com/a.zip", "size": 100 },
                 { "name": "agent2api-providers-0.2.0-aarch64-apple-darwin.zip",
                   "browser_download_url": "https://example.com/b.zip", "size": 200 }
             ]
         });
-        let asset = pick_asset(&release, "agent2api-providers", "x86_64-pc-windows-msvc")
-            .expect("应当挑到 Windows 包");
+        let asset = pick_asset(&release, "agent2api-providers", crate::server::core::plugin_host::wasm::manifest::TARGET)
+            .expect("应当挑到 Wasm 包");
         assert_eq!(asset.version, "0.2.0");
         assert_eq!(asset.size, 100);
         assert_eq!(asset.url, "https://example.com/a.zip");
     }
 
-    /// 找不到当前平台时返回 None（而不是错挑一个别的平台）。
+    /// 找不到 Wasm 包（例如只有旧平台二进制）时返回 None。
     #[test]
     fn skips_other_platforms() {
         let release = json!({
@@ -609,7 +609,7 @@ mod tests {
                   "browser_download_url": "https://example.com/b.zip" }
             ]
         });
-        assert!(pick_asset(&release, "agent2api-providers", "x86_64-pc-windows-msvc").is_none());
+        assert!(pick_asset(&release, "agent2api-providers", crate::server::core::plugin_host::wasm::manifest::TARGET).is_none());
     }
 
     /// tag 带 `v` 前缀也要认。
@@ -618,12 +618,12 @@ mod tests {
         let release = json!({
             "tag_name": "v1.2.3",
             "assets": [
-                { "name": "agent2api-providers-1.2.3-x86_64-unknown-linux-gnu.zip",
+                { "name": "agent2api-providers-1.2.3-wasm32-unknown-unknown.zip",
                   "browser_download_url": "https://example.com/a.zip" }
             ]
         });
-        let asset = pick_asset(&release, "agent2api-providers", "x86_64-unknown-linux-gnu")
-            .expect("应当挑到 Linux 包");
+        let asset = pick_asset(&release, "agent2api-providers", crate::server::core::plugin_host::wasm::manifest::TARGET)
+            .expect("应当挑到 Wasm 包");
         assert_eq!(asset.version, "1.2.3");
     }
 }

@@ -217,12 +217,26 @@ const ERROR: (u16, &str, &str) = (
     "application/json",
     r#"{"code":123,"message":"retry later"}"#,
 );
+const TRANSIENT_ERROR: (u16, &str, &str) = (
+    503,
+    "application/json",
+    r#"{"code":123,"message":"retry later"}"#,
+);
 const SUCCESS: (u16, &str, &str) = (200, "text/event-stream", "data: [DONE]\n\n");
+
+/// 测试预算：把统一错误处理策略里的重试间隔清零，避免单测等待默认 5 秒退避超时。
+fn budget(total: usize) -> RetryBudget {
+    let mut b = RetryBudget::new(total);
+    let mut policy = (*b.policy).clone();
+    policy.settings.interval_seconds = 0;
+    b.policy = Arc::new(policy);
+    b
+}
 
 #[tokio::test]
 async fn successful_response_does_not_spend_retry_budget() {
     let upstream = upstream(vec![SUCCESS]).await;
-    let mut budget = RetryBudget::new(3);
+    let mut budget = budget(3);
     let telemetry = telemetry();
     assert!(send(
         &TestAdapter::default(),
@@ -241,8 +255,8 @@ async fn successful_response_does_not_spend_retry_budget() {
 
 #[tokio::test]
 async fn a_transient_failure_can_retry_and_then_succeed() {
-    let upstream = upstream(vec![ERROR, SUCCESS]).await;
-    let mut budget = RetryBudget::new(3);
+    let upstream = upstream(vec![TRANSIENT_ERROR, SUCCESS]).await;
+    let mut budget = budget(3);
     let telemetry = telemetry();
     let adapter = TestAdapter {
         retry: true,
@@ -257,20 +271,20 @@ async fn a_transient_failure_can_retry_and_then_succeed() {
     assert_eq!(budget.remaining, 2);
     let snapshot = telemetry.snapshot();
     assert_eq!(snapshot.attempts_detail[0].retries.len(), 1);
-    assert_eq!(snapshot.attempts_detail[0].retries[0].status, Some(409));
+    assert_eq!(snapshot.attempts_detail[0].retries[0].status, Some(503));
 }
 
 #[tokio::test]
 async fn retry_limit_is_initial_send_plus_budget_and_is_shared_across_calls() {
-    let upstream = upstream(vec![ERROR]).await;
-    let mut budget = RetryBudget::new(2);
+    let upstream = upstream(vec![TRANSIENT_ERROR]).await;
+    let mut budget = budget(2);
     let adapter = TestAdapter {
         retry: true,
         ..Default::default()
     };
     let telemetry = telemetry();
     let error = failure(send(&adapter, &upstream, &mut budget, &telemetry, false, None).await);
-    assert_eq!(error.error.status_code, 409);
+    assert_eq!(error.error.status_code, 503);
     assert_eq!(error.error.upstream_code, Some(123));
     assert_eq!(upstream.hits.load(Ordering::SeqCst), 3);
     assert_eq!(budget.remaining, 0);
@@ -351,16 +365,17 @@ async fn provider_stop_and_suspension_override_retry_advice() {
     }
 }
 
+/// 内容被拒绝在统一错误处理策略中属于直接返回错误（`hard_stop`），无论是否降级都不原地重发。
 #[tokio::test]
-async fn content_blocking_only_retries_after_the_degraded_attempt() {
+async fn content_blocking_is_not_retried_in_place() {
     let adapter = TestAdapter {
         retry: true,
         content_blocked: true,
         ..Default::default()
     };
-    for (degraded, expected) in [(false, 1), (true, 3)] {
+    for degraded in [false, true] {
         let upstream = upstream(vec![(400, ERROR.1, ERROR.2)]).await;
-        let mut budget = RetryBudget::new(2);
+        let mut budget = budget(2);
         let error = failure(
             send(
                 &adapter,
@@ -376,14 +391,16 @@ async fn content_blocking_only_retries_after_the_degraded_attempt() {
             error.class,
             UpstreamErrorClass::ContentBlocked { .. }
         ));
-        assert_eq!(upstream.hits.load(Ordering::SeqCst), expected);
+        assert!(error.stop);
+        assert_eq!(upstream.hits.load(Ordering::SeqCst), 1);
+        assert_eq!(budget.remaining, 2);
     }
 }
 
 #[tokio::test]
 async fn http_200_business_error_is_classified_instead_of_returned_as_success() {
     let upstream = upstream(vec![(200, ERROR.1, ERROR.2)]).await;
-    let mut budget = RetryBudget::new(3);
+    let mut budget = budget(3);
     let adapter = TestAdapter {
         json_error: true,
         ..Default::default()
@@ -401,7 +418,8 @@ async fn http_200_business_error_is_classified_instead_of_returned_as_success() 
 #[tokio::test]
 async fn uncertain_image_failure_is_not_resent_even_with_retry_advice() {
     let upstream = upstream(vec![(503, ERROR.1, ERROR.2)]).await;
-    let mut budget = RetryBudget::new(3);
+    let mut budget = budget(3);
+    let telemetry = telemetry();
     let adapter = TestAdapter {
         retry: true,
         ..Default::default()
@@ -411,14 +429,17 @@ async fn uncertain_image_failure_is_not_resent_even_with_retry_advice() {
             &adapter,
             &upstream,
             &mut budget,
-            &telemetry(),
+            &telemetry,
             false,
             Some(ImageResponseKind::Openai),
         )
         .await,
     );
     assert!(error.stop);
-    assert!(error.error.message.contains("未自动重试"));
+    assert_eq!(
+        telemetry.snapshot().attempts_detail[0].notice.as_deref(),
+        Some("图片请求结果不确定，未自动重发，以免重复消耗额度")
+    );
     assert_eq!(upstream.hits.load(Ordering::SeqCst), 1);
     assert_eq!(budget.remaining, 3);
 }

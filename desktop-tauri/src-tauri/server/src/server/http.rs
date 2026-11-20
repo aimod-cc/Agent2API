@@ -1494,6 +1494,7 @@ mod cors_tests {
     }
 
     async fn gateway_cors_cases() {
+        crate::server::config::init(None);
         // ── 关闭（默认）：行为与修复前逐字一致 ──
         crate::server::config::set_cors_enabled(false);
         let router = probe_router();

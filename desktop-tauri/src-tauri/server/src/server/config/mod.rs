@@ -2706,41 +2706,47 @@ mod auto_continue_tests {
     ///     重启后读侧按「类型不符」回落默认 —— 用户会以为设置没保存住。
     #[test]
     fn the_setters_write_the_backup_and_the_snapshot_together() {
-        let _guard = hold_config();
-        // 起点固定：先回到出厂态，免得别的用例留下的状态改变这里的判据
-        let _ = set_auto_continue_patch(AutoContinuePatch {
-            enabled: Some(false),
-            max_rounds: Some(DEFAULT_AUTO_CONTINUE_MAX_ROUNDS),
-        });
+        crate::test_support::isolated(
+            concat!(module_path!(), "::the_setters_write_the_backup_and_the_snapshot_together"),
+            || {
+                let _guard = hold_config();
+                init(None);
+                // 起点固定：先回到出厂态，免得别的用例留下的状态改变这里的判据
+                let _ = set_auto_continue_patch(AutoContinuePatch {
+                    enabled: Some(false),
+                    max_rounds: Some(DEFAULT_AUTO_CONTINUE_MAX_ROUNDS),
+                });
 
-        let saved = set_auto_continue(true);
-        assert_eq!(saved, db().is_some(), "返回值只该由「落库成不成功」决定（测试进程里没有库）");
-        assert!(auto_continue(), "开关必须能被在线打开（轻量读取走的是解析字段）");
-        assert_eq!(current().raw()[KEY_AUTO_CONTINUE], json!(true), "底稿里必须带上这一项，否则写盘写不出它");
-        assert!(current().auto_continue(), "快照 getter 与轻量读取必须是同一个值");
-        assert_eq!(
-            auto_continue_rounds_from(current().raw()),
-            DEFAULT_AUTO_CONTINUE_MAX_ROUNDS,
-            "只动开关不许把上限一并固化成默认之外的值"
+                let saved = set_auto_continue(true);
+                assert_eq!(saved, db().is_some(), "返回值只该由「落库成不成功」决定（测试进程里没有库）");
+                assert!(auto_continue(), "开关必须能被在线打开（轻量读取走的是解析字段）");
+                assert_eq!(current().raw()[KEY_AUTO_CONTINUE], json!(true), "底稿里必须带上这一项，否则写盘写不出它");
+                assert!(current().auto_continue(), "快照 getter 与轻量读取必须是同一个值");
+                assert_eq!(
+                    auto_continue_rounds_from(current().raw()),
+                    DEFAULT_AUTO_CONTINUE_MAX_ROUNDS,
+                    "只动开关不许把上限一并固化成默认之外的值"
+                );
+
+                set_auto_continue_max_rounds(AUTO_CONTINUE_MAX_ROUNDS);
+                assert_eq!(auto_continue_max_rounds(), AUTO_CONTINUE_MAX_ROUNDS, "上限必须能被在线收到边界值");
+                assert_eq!(current().raw()[KEY_AUTO_CONTINUE_MAX_ROUNDS], json!(8), "底稿里要落成一个 JSON 数字");
+                assert!(auto_continue(), "改上限时开关必须保持原样（部分更新不是整份替换）");
+
+                // 两项一起写（PUT 的形状）：一次 update 就该把两项都对齐
+                set_auto_continue_patch(AutoContinuePatch {
+                    enabled: Some(false),
+                    max_rounds: Some(AUTO_CONTINUE_MIN_ROUNDS),
+                });
+                assert!(!auto_continue());
+                assert_eq!(auto_continue_max_rounds(), AUTO_CONTINUE_MIN_ROUNDS);
+
+                // 复位出厂态：别把「开着 + 1 轮」留给后面的用例（尤其留给续写那条链）
+                let _ = set_auto_continue_patch(AutoContinuePatch {
+                    enabled: Some(false),
+                    max_rounds: Some(DEFAULT_AUTO_CONTINUE_MAX_ROUNDS),
+                });
+            },
         );
-
-        set_auto_continue_max_rounds(AUTO_CONTINUE_MAX_ROUNDS);
-        assert_eq!(auto_continue_max_rounds(), AUTO_CONTINUE_MAX_ROUNDS, "上限必须能被在线收到边界值");
-        assert_eq!(current().raw()[KEY_AUTO_CONTINUE_MAX_ROUNDS], json!(8), "底稿里要落成一个 JSON 数字");
-        assert!(auto_continue(), "改上限时开关必须保持原样（部分更新不是整份替换）");
-
-        // 两项一起写（PUT 的形状）：一次 update 就该把两项都对齐
-        set_auto_continue_patch(AutoContinuePatch {
-            enabled: Some(false),
-            max_rounds: Some(AUTO_CONTINUE_MIN_ROUNDS),
-        });
-        assert!(!auto_continue());
-        assert_eq!(auto_continue_max_rounds(), AUTO_CONTINUE_MIN_ROUNDS);
-
-        // 复位出厂态：别把「开着 + 1 轮」留给后面的用例（尤其留给续写那条链）
-        let _ = set_auto_continue_patch(AutoContinuePatch {
-            enabled: Some(false),
-            max_rounds: Some(DEFAULT_AUTO_CONTINUE_MAX_ROUNDS),
-        });
     }
 }
