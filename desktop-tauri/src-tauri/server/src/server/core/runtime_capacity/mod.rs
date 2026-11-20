@@ -79,8 +79,11 @@ fn effective(settings: &CapacitySettings, resources: monitor::Resources) -> Limi
         else { settings.memory_mib.saturating_mul(MIB).min((resources.total_bytes * 3 / 4) as usize).max(16 * MIB) };
     let process_ceiling = resources.total_bytes.saturating_mul(4) / 5;
     // 有内核压力等级就以它为准：按空闲页推算在 macOS 上会因为压缩内存而长期误判。
+    // macOS 给的是 1 正常 / 2 警告 / 4 危险，只有 4 才代表「内存真的不够用」；
+    // 2 在正常使用的机器上是常态（内核刚开始压缩/换页就会报），拿它判紧张会把
+    // 后台并发压到 0、模型清单刷不出来。
     let memory_pressure = match resources.os_pressure_level {
-        Some(level) => level >= 2,
+        Some(level) => level >= 4,
         None => resources.available_bytes < resources.total_bytes / 10,
     } || resources.container_bytes.unwrap_or(resources.process_bytes) >= process_ceiling;
     let cpu_pressure = resources.cpu_percent >= 90.0;
@@ -353,11 +356,22 @@ mod memory_pressure_tests {
     }
 
     #[test]
-    fn a_kernel_warning_level_still_stops_background_work() {
-        // 可用内存再多也听内核的：2（紧张）就该停后台任务。
+    fn a_kernel_warning_level_is_not_memory_pressure() {
+        // macOS 的 1/2/4 是 normal / warning / critical；warning（2）只是「开始压缩/换页」，
+        // 在正常使用的 Mac 上是常态（实测 18 GiB、系统空闲 37% 时仍报 2）。
+        // 拿它判紧张会把后台并发压到 0，客户端连模型清单都刷不出来。
         let limits = effective(&CapacitySettings::default(), resources(8 * GIB, Some(2)));
-        assert!(limits.memory_pressure, "内核报 2（紧张）必须判内存紧张");
-        assert_eq!(limits.background, 0, "内存紧张时后台并发为 0 是设计，不是缺陷");
+        assert!(!limits.memory_pressure, "内核报 2（warning）不代表内存已经不够用");
+        assert!(limits.background > 0, "warning 级不该把后台并发压到 0");
+    }
+
+    #[test]
+    fn a_kernel_critical_level_still_stops_background_work() {
+        // 4 才是 critical：这时才停后台与图片，给前台腾内存。
+        let limits = effective(&CapacitySettings::default(), resources(8 * GIB, Some(4)));
+        assert!(limits.memory_pressure, "内核报 4（critical）必须判内存紧张");
+        assert_eq!(limits.background, 0, "内存危险时后台并发为 0");
+        assert_eq!(limits.images, 0, "内存危险时图片并发为 0");
     }
 
     #[test]

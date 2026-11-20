@@ -14,9 +14,10 @@ pub struct Resources {
     pub cpu_percent: f32,
     pub cores: usize,
     pub connection_ceiling: usize,
-    /// 内核给出的内存压力等级（macOS：1 正常 / 2 紧张 / 4 危险）。
+    /// 内核给出的内存压力等级（macOS：1 正常 / 2 警告 / 4 危险）。
     /// 有值时以它为准，比按空闲页推算可靠：macOS 的压缩内存会把
     /// 「free + inactive + purgeable − compressor」压到 0，导致常驻误判。
+    /// 判「不够用」只看 4：2 在正常使用的机器上是常态，不是危险。
     pub os_pressure_level: Option<u8>,
 }
 
