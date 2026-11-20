@@ -1027,6 +1027,10 @@ pub fn responses_from_chat(
     let text = content_text(message.get("content").unwrap_or(&Value::Null));
     let tool_calls = message.get("tool_calls").and_then(Value::as_array).filter(|calls| !calls.is_empty());
     let incomplete = responses_phase::incomplete_reason(Some(&finish));
+    // 上游把失败写在 `finish_reason` 里时（如 ZCode 活动套餐通道的
+    // `network_error`）不能落成 `completed`，否则客户端收到的是「成功但空」。
+    // 判据与流式的 `ResponsesStream::finish` 同一张表（`finish_failure`）。
+    let failure = finish_failure(Some(&finish));
     // 没有工具调用时始终给一条 message 项（哪怕文本为空）：
     // 客户端的 `output_text` 解析依赖它存在，缺失会被当成「响应损坏」
     if !text.is_empty() || tool_calls.is_none() {
@@ -1060,7 +1064,13 @@ pub fn responses_from_chat(
         }
     }
 
-    let status = if incomplete.is_some() { "incomplete" } else { "completed" };
+    let status = if failure.is_some() {
+        "failed"
+    } else if incomplete.is_some() {
+        "incomplete"
+    } else {
+        "completed"
+    };
     let created = chat
         .get("created")
         .and_then(Value::as_i64)
@@ -1079,6 +1089,14 @@ pub fn responses_from_chat(
         created,
         incomplete,
     );
+    if let Some((code, message)) = failure {
+        if let Some(map) = body.as_object_mut() {
+            map.insert(
+                "error".to_string(),
+                json!({ "code": code, "message": message }),
+            );
+        }
+    }
     if let Some(map) = body.as_object_mut() {
         // output_text 是官方 SDK 的便捷字段（把所有 message 项的文本拼起来）
         map.insert("output_text".to_string(), Value::String(text));
@@ -1915,15 +1933,35 @@ pub fn response_event(sequence: &mut i64, event: &str, mut data: Value) -> bytes
 /// 部分有状态适配器（如 CatPaw）直接回 `Completion` 而不给流。此时若按
 /// 「下游的 stream 标志」硬回 `application/json`，WS 入口（恒为流式）会拿到
 /// 一个 200 的 JSON 而不是 SSE，只能把它当成失败 —— 整轮历史也因此提交不了。
-/// 这里把同一个 response 对象按协议补成 `response.created` + 终态事件，
-/// 内容与 `ResponsesStream` 的收尾形态一致，下游按普通流处理即可。
+///
+/// ── 为什么要逐项补 `output_item.done` ─────────────────────────
+/// 终态事件不够：Codex 的 `ResponseCompleted` 只解析 `id` / `usage` /
+/// `usage_metadata`（见 openai/codex 的 `sse/responses.rs`），输出项是靠
+/// `response.output_item.done` 收集的。只发终态的话，客户端拿到的是一轮
+/// 「成功但没有任何输出」的响应。
 pub fn completion_events(response: &Value) -> Vec<bytes::Bytes> {
     let mut sequence = 0;
+    let mut frames = Vec::new();
     let mut in_progress = response.clone();
     if let Some(map) = in_progress.as_object_mut() {
         map.insert("status".to_string(), Value::String("in_progress".to_string()));
         map.insert("output".to_string(), Value::Array(Vec::new()));
         map.insert("completed_at".to_string(), Value::Null);
+    }
+    frames.push(response_event(
+        &mut sequence,
+        "response.created",
+        json!({ "response": in_progress }),
+    ));
+    // 每个输出项按 `output_index` 顺序补一条 done（聚合体没有增量，只发 done）。
+    if let Some(items) = response.get("output").and_then(Value::as_array) {
+        for (index, item) in items.iter().enumerate() {
+            frames.push(response_event(
+                &mut sequence,
+                "response.output_item.done",
+                json!({ "output_index": index as i64, "item": item.clone() }),
+            ));
+        }
     }
     // 聚合体的 status 决定终态事件名：incomplete 是「正常但没跑完」，
     // failed 是失败，其余按 completed 收尾。
@@ -1932,10 +1970,12 @@ pub fn completion_events(response: &Value) -> Vec<bytes::Bytes> {
         Some("failed") => "response.failed",
         _ => "response.completed",
     };
-    vec![
-        response_event(&mut sequence, "response.created", json!({ "response": in_progress })),
-        response_event(&mut sequence, terminal, json!({ "response": response.clone() })),
-    ]
+    frames.push(response_event(
+        &mut sequence,
+        terminal,
+        json!({ "response": response.clone() }),
+    ));
+    frames
 }
 
 /// 非流式聚合：把 Chat SSE 字节流收成一个 Responses 响应对象。
@@ -2236,7 +2276,8 @@ mod tests {
         assert_eq!(commentary["output"][0]["phase"], "commentary");
     }
 
-    /// 聚合体补成流式事件时，两帧序号连续、created 为空 output、终态带完整内容。
+    /// 聚合体补成流式事件时，序号连续、created 为空 output、每个输出项都有 done、
+    /// 终态带完整内容。
     #[test]
     fn completion_events_form_a_valid_stream() {
         let response = json!({
@@ -2246,11 +2287,13 @@ mod tests {
             "output": [{ "type": "message", "content": [{ "type": "output_text", "text": "完成" }] }],
         });
         let frames = completion_events(&response);
-        assert_eq!(frames.len(), 2);
+        assert_eq!(frames.len(), 3);
 
         let mut buffer = SseLineBuffer::new();
-        let mut payloads = buffer.push(&frames[0]);
-        payloads.extend(buffer.push(&frames[1]));
+        let mut payloads = Vec::new();
+        for frame in &frames {
+            payloads.extend(buffer.push(frame));
+        }
         let events: Vec<Value> = payloads
             .into_iter()
             .flatten()
@@ -2261,10 +2304,16 @@ mod tests {
         assert_eq!(events[0]["sequence_number"], 0);
         assert_eq!(events[0]["response"]["status"], "in_progress");
         assert_eq!(events[0]["response"]["output"].as_array().map(Vec::len), Some(0));
-        assert_eq!(events[1]["type"], "response.completed");
-        assert_eq!(events[1]["sequence_number"], 1);
-        assert_eq!(events[1]["response"]["id"], "resp_done");
-        assert_eq!(events[1]["response"]["output"].as_array().map(Vec::len), Some(1));
+
+        // Codex 的 ResponseCompleted 只读 id / usage，输出项必须靠 done 事件。
+        assert_eq!(events[1]["type"], "response.output_item.done");
+        assert_eq!(events[1]["output_index"], 0);
+        assert_eq!(events[1]["item"]["type"], "message");
+
+        assert_eq!(events[2]["type"], "response.completed");
+        assert_eq!(events[2]["sequence_number"], 2);
+        assert_eq!(events[2]["response"]["id"], "resp_done");
+        assert_eq!(events[2]["response"]["output"].as_array().map(Vec::len), Some(1));
     }
 
     /// 非正常收尾的聚合体用对应的终态事件名，不冒充 completed。
@@ -2284,5 +2333,47 @@ mod tests {
         };
         assert_eq!(collect(&incomplete).unwrap()["type"], "response.incomplete");
         assert_eq!(collect(&failed).unwrap()["type"], "response.failed");
+    }
+
+    /// `finish_reason` 里的失败信号要落到 `status: failed` 与 `error`，
+    /// 与流式的 `finish_failure` 同一判据。
+    #[test]
+    fn completion_with_network_error_is_failed() {
+        let response = responses_from_chat(
+            &json!({
+                "id": "chatcmpl_x",
+                "choices": [{
+                    "message": { "role": "assistant", "content": "" },
+                    "finish_reason": "network_error"
+                }]
+            }),
+            "m",
+            &json!({}),
+            false,
+        );
+        assert_eq!(response["status"], "failed");
+        assert_eq!(response["error"]["code"], "upstream_network_error");
+        assert!(response["error"]["message"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()));
+    }
+
+    /// 正常的 `stop` 不受失败判定影响。
+    #[test]
+    fn completion_with_stop_is_completed() {
+        let response = responses_from_chat(
+            &json!({
+                "id": "chatcmpl_y",
+                "choices": [{
+                    "message": { "role": "assistant", "content": "好" },
+                    "finish_reason": "stop"
+                }]
+            }),
+            "m",
+            &json!({}),
+            false,
+        );
+        assert_eq!(response["status"], "completed");
+        assert_eq!(response["error"], Value::Null);
     }
 }
