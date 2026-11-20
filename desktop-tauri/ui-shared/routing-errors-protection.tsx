@@ -29,6 +29,6 @@ export function ErrorBoundaries({ t }: { t: ErrorTranslate }) {
     <div><strong>{t('已经开始输出')}</strong><p>{t('不从头重发，不拼接另一个账号的回答。')}</p></div>
     <div><strong>{t('任务或计费结果不确定')}</strong><p>{t('默认不重复提交；仅自定义提供商的普通推理可在错误规则中明确接受重复推理或计费风险。生图、后台任务和服务端工具仍停止。')}</p></div>
     <div><strong>{t('验证、风控与明确拒绝')}</strong><p>{t('不通过换号绕过；保留原因，返回客户端。')}</p></div>
-    <div><strong>{t('既有权限与路由范围')}</strong><p>{t('不扩大网关密钥授权，不擅自改指定账号，不新增付费操作。')}</p></div>
+    <div><strong>{t('既有权限与路由范围')}</strong><p>{t('不扩大网关密钥授权，不擅自改指定账号；明确开启的普通推理重发可能再次执行并产生额外费用。')}</p></div>
   </CardContent></Card>
 }

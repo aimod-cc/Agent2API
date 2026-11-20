@@ -20,6 +20,10 @@ pub(super) fn ordinary_inference(payload: &Value) -> bool {
         || ["conversation", "previous_response_id", "prompt"].iter().any(|key| body.get(*key).is_some_and(|value| !value.is_null())) {
         return false;
     }
+    if body.get("mcp_servers").is_some_and(|value| !value.is_null()
+        && value.as_array().is_none_or(|servers| !servers.is_empty())) {
+        return false;
+    }
     if body.get("modalities").is_some_and(|value| value.as_array()
         .is_none_or(|items| items.iter().any(|item| item.as_str() != Some("text")))) {
         return false;
@@ -44,11 +48,13 @@ mod tests {
 
     #[test]
     fn only_ordinary_inference_gets_host_owned_evidence() {
-        for body in [json!({}), json!({"tools": [{"type": "function", "function": {"name": "read_file"}}]}),
+        for body in [json!({}), json!({"mcp_servers": null}), json!({"mcp_servers": []}), json!({"tools": [{"type": "function", "function": {"name": "read_file"}}]}),
             json!({"tools": [{"name": "read_file", "input_schema": {"type": "object"}}]})] {
             assert!(ordinary_inference(&body));
         }
-        for body in [json!({"background": true}), json!({"background": "false"}),
+        for body in [json!({"mcp_servers": [{"type": "url", "name": "remote", "url": "https://mcp.example.com"}]}),
+            json!({"mcp_servers": {}}), json!({"mcp_servers": "invalid"}), json!({"mcp_servers": false}),
+            json!({"background": true}), json!({"background": "false"}),
             json!({"previous_response_id": "resp_previous"}), json!({"conversation": "conv_previous"}),
             json!({"tools": [{"type": "web_search"}]}), json!({"tools": [{"type": "image_generation"}]}),
             json!({"tools": [{"type": "code_interpreter"}]}), json!({"tools": [{"type": "mcp"}]}),

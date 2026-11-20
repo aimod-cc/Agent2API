@@ -61,7 +61,7 @@ export function ErrorRuleEditor({ rule, providers, t, exception, onClose, onSave
         {draft.exponential ? <ErrorNumber label={t('自行估算的冷却上限')} unit={t('秒')} value={draft.fallbackCapSeconds} min={draft.fallbackSeconds} max={86400} onChange={fallbackCapSeconds => patch({ fallbackCapSeconds })} /> : null}
       </div> : null}
       {draft.cooldown === 'fixed' ? <p className='re-warning'>{t('固定时间也不能早于上游明确要求的恢复时间。')}</p> : null}
-      <p className='re-note'><ErrorIcon name='shield' />{t('已经输出、非普通推理任务结果不确定、验证或风控拒绝仍会停止；仅明确开启的普通推理重发可例外。')}</p>
+      <p className='re-note'><ErrorIcon name='shield' />{t('已开始响应、非普通推理任务结果不确定、验证或风控拒绝始终停止；仅合格普通推理的未确认提交可按显式配置重发。')}</p>
       {error ? <p role='alert' className='re-warning'>{error}</p> : null}
     </DialogBody><DialogFooter><Button variant='outline' onClick={onClose}>{t('取消')}</Button><Button onClick={save}>{t('应用')}</Button></DialogFooter>
   </DialogContent></Dialog>
