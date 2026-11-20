@@ -78,8 +78,11 @@ fn effective(settings: &CapacitySettings, resources: monitor::Resources) -> Limi
     let memory_bytes = if settings.memory_mib == 0 { auto_memory.max(16 * MIB) }
         else { settings.memory_mib.saturating_mul(MIB).min((resources.total_bytes * 3 / 4) as usize).max(16 * MIB) };
     let process_ceiling = resources.total_bytes.saturating_mul(4) / 5;
-    let memory_pressure = resources.available_bytes < resources.total_bytes / 10
-        || resources.container_bytes.unwrap_or(resources.process_bytes) >= process_ceiling;
+    // 有内核压力等级就以它为准：按空闲页推算在 macOS 上会因为压缩内存而长期误判。
+    let memory_pressure = match resources.os_pressure_level {
+        Some(level) => level >= 2,
+        None => resources.available_bytes < resources.total_bytes / 10,
+    } || resources.container_bytes.unwrap_or(resources.process_bytes) >= process_ceiling;
     let cpu_pressure = resources.cpu_percent >= 90.0;
     let automatic = settings.mode == CapacityMode::Auto;
     let conversations = if automatic {
@@ -319,5 +322,53 @@ pub fn value_bytes(value: &Value) -> usize {
             total.saturating_add(key.len()).saturating_add(64).saturating_add(value_bytes(item))
         }),
         _ => 32,
+    }
+}
+
+#[cfg(test)]
+mod memory_pressure_tests {
+    use super::*;
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    fn resources(available_bytes: u64, os_pressure_level: Option<u8>) -> monitor::Resources {
+        monitor::Resources {
+            total_bytes: 18 * GIB,
+            available_bytes,
+            process_bytes: 0,
+            container_bytes: None,
+            cpu_percent: 0.0,
+            cores: 8,
+            connection_ceiling: 4096,
+            os_pressure_level,
+        }
+    }
+
+    #[test]
+    fn the_kernel_pressure_level_beats_a_zero_available_estimate() {
+        // macOS 的压缩内存会把可用页算成 0；内核说「正常」时就不能再把后台任务全部闸住。
+        let limits = effective(&CapacitySettings::default(), resources(0, Some(1)));
+        assert!(!limits.memory_pressure, "内核报 1（正常）就不该判内存紧张");
+        assert!(limits.background > 0, "内存不紧张时后台并发必须放开，否则 models.refresh 会一直 plugin_busy");
+    }
+
+    #[test]
+    fn a_kernel_warning_level_still_stops_background_work() {
+        // 可用内存再多也听内核的：2（紧张）就该停后台任务。
+        let limits = effective(&CapacitySettings::default(), resources(8 * GIB, Some(2)));
+        assert!(limits.memory_pressure, "内核报 2（紧张）必须判内存紧张");
+        assert_eq!(limits.background, 0, "内存紧张时后台并发为 0 是设计，不是缺陷");
+    }
+
+    #[test]
+    fn without_a_kernel_level_the_available_ratio_still_applies() {
+        // 非 macOS（或 sysctl 取不到）沿用原判据：可用低于总量一成即紧张。
+        let low = effective(&CapacitySettings::default(), resources(0, None));
+        assert!(low.memory_pressure, "取不到内核等级时，可用内存为 0 必须判紧张");
+        assert_eq!(low.background, 0, "旧判据下紧张时后台并发仍为 0");
+
+        let high = effective(&CapacitySettings::default(), resources(8 * GIB, None));
+        assert!(!high.memory_pressure, "可用内存充足时旧判据也不该误报");
+        assert!(high.background > 0, "可用内存充足时后台并发要放开");
     }
 }

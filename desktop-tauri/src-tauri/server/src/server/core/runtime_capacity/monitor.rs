@@ -14,6 +14,10 @@ pub struct Resources {
     pub cpu_percent: f32,
     pub cores: usize,
     pub connection_ceiling: usize,
+    /// 内核给出的内存压力等级（macOS：1 正常 / 2 紧张 / 4 危险）。
+    /// 有值时以它为准，比按空闲页推算可靠：macOS 的压缩内存会把
+    /// 「free + inactive + purgeable − compressor」压到 0，导致常驻误判。
+    pub os_pressure_level: Option<u8>,
 }
 
 struct Monitor {
@@ -28,6 +32,7 @@ fn fallback() -> Resources {
         process_bytes: 0, container_bytes: None, cpu_percent: 0.0,
         cores: std::thread::available_parallelism().map(usize::from).unwrap_or(1),
         connection_ceiling: connection_ceiling(),
+        os_pressure_level: None,
     }
 }
 
@@ -60,12 +65,35 @@ pub fn sample() -> Resources {
         container_bytes = Some(cgroup.rss);
     }
     let resources = Resources { total_bytes, available_bytes, process_bytes, container_bytes, cpu_percent, cores,
-        connection_ceiling: connection_ceiling() };
+        connection_ceiling: connection_ceiling(), os_pressure_level: os_pressure_level() };
     monitor.resources = if total_bytes == 0 { fallback() } else { resources };
     monitor.updated = Instant::now();
     *last.write().unwrap_or_else(|error| error.into_inner()) = monitor.resources;
     monitor.resources
 }
+
+/// 读内核的内存压力等级。取不到时返回 None，调用方退回按空闲页推算。
+#[cfg(target_os = "macos")]
+fn os_pressure_level() -> Option<u8> {
+    let name = b"kern.memorystatus_vm_pressure_level\0";
+    let mut level: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    // SAFETY: 传的是本栈上的 c_int 与它的字节长度，名字以 NUL 结尾；
+    // sysctlbyname 只在这块缓冲里写一个 c_int，长度不符时会自己返回错误而不越界。
+    let status = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr() as *const libc::c_char,
+            &mut level as *mut libc::c_int as *mut libc::c_void,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (status == 0 && level > 0).then_some(u8::try_from(level).unwrap_or(u8::MAX))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn os_pressure_level() -> Option<u8> { None }
 
 #[cfg(unix)]
 fn connection_ceiling() -> usize {
