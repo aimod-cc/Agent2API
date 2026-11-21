@@ -230,19 +230,35 @@ const NON_CREDENTIAL: &[&str] = &[
 
 fn credential_name(name: &str) -> bool {
     let words = ident_words(name);
-    !words.is_empty()
-        && !name.eq_ignore_ascii_case("key")
-        && !(words.len() == 2
-            && words[0].eq_ignore_ascii_case("element")
-            && words[1].eq_ignore_ascii_case("token"))
-        && words.last().is_some_and(|last| {
-            !["id", "ids", "uuid", "guid"]
+    if words.is_empty()
+        || name.eq_ignore_ascii_case("key")
+        || element_field(name)
+        || words.last().is_some_and(|last| {
+            ["id", "ids", "uuid", "guid"]
                 .iter()
                 .any(|word| last.eq_ignore_ascii_case(word))
         })
+    {
+        return false;
+    }
+    // "file_password" is still a password. A password's hash/digest is not.
+    let password = words.iter().any(|word| {
+        ["password", "passwd", "passphrase", "pass", "pwd"]
+            .iter()
+            .any(|secret| word.eq_ignore_ascii_case(secret))
+    });
+    if password
         && !words.iter().any(|word| {
-            NON_CREDENTIAL
+            ["hash", "digest", "checksum", "sha", "fingerprint", "etag"]
                 .iter()
-                .any(|keep| word.eq_ignore_ascii_case(keep))
+                .any(|data| word.eq_ignore_ascii_case(data))
         })
+    {
+        return true;
+    }
+    !words.iter().any(|word| {
+        NON_CREDENTIAL
+            .iter()
+            .any(|keep| word.eq_ignore_ascii_case(keep))
+    })
 }

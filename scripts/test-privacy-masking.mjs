@@ -21,6 +21,7 @@ const seen = []
 let foreign = ''
 let echoPrompt = false
 let echoToolResult = false
+let compactBudgetReply = false
 const toolHistoryId = 'call_local'
 const encodedWord = 'EncodedMediaFixture0'
 const lookupId = ['736a9b08', '170a', '4b11', '97ef', '02329fbd984a'].join('-')
@@ -75,11 +76,12 @@ const upstream = createServer(async (req, res) => {
         : messages.flatMap(m => Array.isArray(m.content) ? m.content : []).find(part => part.type === 'tool_result')
     const toolOutput = protocol === 'responses' ? history?.output : history?.content
     const resultText = typeof toolOutput === 'string' ? toolOutput : toolOutput?.find(part => part.type === 'text' || part.type === 'input_text')?.text
-    const reply = echoToolResult ? resultText : (foreign ? foreign + ' | ' : '') + text + (echoPrompt ? ' | ' + prompt : '')
+    const reply = compactBudgetReply ? 'budget accepted' : echoToolResult ? resultText : (foreign ? foreign + ' | ' : '') + text + (echoPrompt ? ' | ' + prompt : '')
     const msg = { id: 'msg_local', type: 'message', role: 'assistant', model: body.model,
       content: [textPart(reply), { type: 'tool_use', name: 'echo', id: 'call_local', input: tool }],
       stop_reason: 'tool_use', stop_sequence: null, usage: { input_tokens: 3, output_tokens: 2 } }
     const response = { id: 'resp_local', object: 'response', model: body.model, status: 'completed',
+      instructions: body.instructions ?? null, tools: body.tools ?? [],
       output: [{ type: 'message', role: 'assistant', id: 'msg_local', content: [{ type: 'output_text', text: reply, annotations: [] }] },
         { type: 'function_call', name: 'echo', call_id: 'call_local', id: 'fc_local', arguments: args(tool.password) }],
       usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 } }
@@ -390,7 +392,7 @@ try {
   for (const [i, [label, value]] of credentialIds.entries()) {
     const line = identifierWire[keptIds.length + i]
     assert(line.startsWith(label) && !line.includes(value), 'labelled credential escaped identifier guard: ' + i)
-    assert.match(line.slice(label.length), /^\{\{A2A_[0-9a-f]{32}\}\}(?::14)?$/)
+    assert.match(line.slice(label.length), /^\{\{A2A_[0-9a-f]{32}\}\}$/)
   }
   await json(endpoint, 'PUT', { ...enabled, terms: [lookupId] })
   await json(paths.chat_completions, 'POST', identifierRequest)
@@ -442,6 +444,130 @@ try {
   assert.deepEqual(sentDefinitions.tools[1].format, grammar.format, 'custom tool grammar must stay as defined')
   assert.equal(searchResult.call_id, 'search_local')
   console.log('PASS Magpie tool definitions: namespaces, inline/search tools, schema descriptions and opaque grammar')
+  const reviewFailures = []
+  async function reviewRegression(name, run) {
+    try { await run(); console.log('PASS REVIEW', name) }
+    catch (error) { reviewFailures.push({ name, error: error.message }); console.log('FAIL REVIEW', name) }
+    finally { echoToolResult = false }
+  }
+  const sendText = async (text, policy) => {
+    await json(endpoint, 'PUT', policy)
+    const request = body('chat_completions', false)
+    request.messages[0].content = text
+    const response = await json(paths.chat_completions, 'POST', request)
+    assert.equal(response.choices[0].message.content, text, 'client text must restore exactly')
+    return seen.at(-1).text
+  }
+  const secretsOnly = { ...disabled, secrets: true }
+  const placeholderOnly = /^\{\{A2A_[0-9a-f]{32}\}\}$/
+  await reviewRegression('explicit alphabetic and numeric passwords', async () => {
+    const values = [['Orchid','Fir','Seagull'].join(''), ['9415','8206'].join('')]
+    const input = values.map(value => 'password="' + value + '"').join('\n')
+    const wire = (await sendText(input, secretsOnly)).split('\n')
+    for (const [i, line] of wire.entries()) {
+      assert.match(line.slice('password="'.length, -1), placeholderOnly)
+      assert(!line.includes(values[i]))
+    }
+    const harmless = ['process.env.FIXTURE_PASSWORD', '2030-12-30T16:48:25+08:00', ['$', '{FIXTURE_PASSWORD}'].join('')]
+    const prose = [...values, ...harmless.map(value => 'password=' + value)].join('\n')
+    assert.equal(await sendText(prose, secretsOnly), prose, 'unlabelled text and references stay unchanged')
+  })
+  await reviewRegression('entire colon-bearing credential value', async () => {
+    const value = ['LocalCredentialFixture93', ':14'].join('')
+    const sent = await sendText('password=' + value, secretsOnly)
+    assert.match(sent.slice('password='.length), placeholderOnly)
+    assert(!sent.includes(':14'))
+  })
+  await reviewRegression('example-domain label boundaries', async () => {
+    const addresses = [['alice','notexample.com'].join('@'), ['alice','example.com'].join('@'), ['alice','docs.example.com'].join('@')]
+    const input = [...addresses, 'hostname: notexample.com', 'hostname: docs.example.com'].join('\n')
+    const wire = (await sendText(input, { ...disabled, personal: true, kinds: { userhost: true } })).split('\n')
+    assert.match(wire[0], placeholderOnly)
+    assert.deepEqual(wire.slice(1,3), addresses.slice(1))
+    assert.match(wire[3].slice('hostname: '.length), placeholderOnly)
+    assert.equal(wire[4], 'hostname: docs.example.com')
+  })
+  await reviewRegression('file_password overrides generic identifier words', async () => {
+    const value = ['96a34f05', 'cd0243a7', '90b2dd48', '91c5fa36'].join('')
+    const input = ['file_password=' + value, 'file_hash=' + value, 'page_token=' + value].join('\n')
+    const wire = (await sendText(input, secretsOnly)).split('\n')
+    assert.match(wire[0].slice('file_password='.length), placeholderOnly)
+    assert.deepEqual(wire.slice(1), input.split('\n').slice(1))
+  })
+  await reviewRegression('all mnemonic spans within one detector match', async () => {
+    const first = 'abandon ability able about above absent absorb abstract absurd abuse access accident'
+    const second = 'zoo zone zero zebra youth young yellow year wrap write wrist wrong'
+    const wire = await sendText('mnemonic: ' + first + ' backup ' + second, secretsOnly)
+    const parts = wire.slice('mnemonic: '.length).split(' backup ')
+    assert.equal(parts.length, 2)
+    for (const part of parts) assert.match(part, placeholderOnly)
+    const joined = await sendText('mnemonic: ' + first + ' ' + second, secretsOnly)
+    assert.match(joined.slice('mnemonic: '.length), placeholderOnly)
+  })
+  await reviewRegression('JSON scalar tool text applies custom terms', async () => {
+    const cases = [['42424242','42424242'], ['true','true'], ['null','null'], [JSON.stringify('scalarFixture'),'scalarFixture']]
+    for (const protocol of Object.keys(paths)) for (const [raw, term] of cases) {
+      await json(endpoint, 'PUT', { ...disabled, terms: [term] })
+      const request = body(protocol, false)
+      if (protocol === 'chat_completions') request.messages.at(-1).content = raw
+      else if (protocol === 'responses') request.input.at(-1).output = raw
+      else request.messages.at(-1).content[0].content = raw
+      echoToolResult = true
+      const response = await json(paths[protocol], 'POST', request)
+      const returned = protocol === 'responses' ? response.output[0].content[0].text
+        : protocol === 'anthropic' ? response.content[0].text : response.choices[0].message.content
+      assert.equal(returned, raw)
+      const payload = seen.at(-1).body
+      const output = protocol === 'responses' ? payload.input.find(item => item.type === 'function_call_output').output
+        : protocol === 'anthropic' ? payload.messages.flatMap(item => Array.isArray(item.content) ? item.content : []).find(item => item.type === 'tool_result').content
+          : payload.messages.find(item => item.role === 'tool').content
+      assert(!output.includes(term), 'raw scalar leaked in ' + protocol)
+      assert.match(output, /\{\{A2A_[0-9a-f]{32}\}\}/)
+    }
+  })
+  await reviewRegression('owned placeholders do not consume fresh match budget', async () => {
+    // Exercise the full 40k-match request and a new gateway prompt. The upstream
+    // answers briefly; echoing 1.6 MB is unrelated to the request matching budget.
+    await json(endpoint, 'PUT', { ...disabled, terms: ['A'] })
+    await json('/api/prompt', 'PUT', { promptMode: 'append', promptText: 'A' })
+    compactBudgetReply = true
+    try {
+      const request = body('chat_completions', false)
+      request.messages[0].content = 'A '.repeat(40_000)
+      const response = await json(paths.chat_completions, 'POST', request)
+      assert.equal(response.choices[0].message.content, 'budget accepted')
+      const captured = seen.at(-1)
+      const tokens = captured.text.match(/\{\{A2A_[0-9a-f]{32}\}\}/g)
+      assert.equal(tokens?.length, 40_000)
+      assert.equal(captured.text, (tokens[0] + ' ').repeat(40_000))
+      assert.equal(captured.prompt, tokens[0], 'mask newly injected plaintext without remasking owned tokens')
+    } finally {
+      compactBudgetReply = false
+      await json('/api/prompt', 'PUT', { promptMode: 'passthrough', promptText: '' })
+    }
+  })
+  await reviewRegression('Responses echo restores instructions and tool descriptions', async () => {
+    await json(endpoint, 'PUT', { ...disabled, terms: [sentinel] })
+    for (const stream of [false,true]) {
+      const request = body('responses', stream)
+      request.instructions = 'instructions ' + sentinel
+      request.tools = [{ type: 'function', name: 'fixture_echo', description: 'tool ' + sentinel,
+        parameters: { type: 'object', properties: {}, additionalProperties: false } }]
+      const response = await call(paths.responses, 'POST', request)
+      assert(response.ok)
+      const raw = await response.text()
+      const envelopes = stream ? raw.split(/\r?\n/).filter(line => line.startsWith('data:'))
+        .map(line => JSON.parse(line.slice(5).trim())).filter(event => event.response).map(event => event.response) : [JSON.parse(raw)]
+      assert(envelopes.length > 0)
+      for (const envelope of envelopes) {
+        assert.equal(envelope.instructions, request.instructions)
+        assert.deepEqual(envelope.tools, request.tools)
+      }
+      assert(!seen.at(-1).body.instructions.includes(sentinel))
+      assert(!seen.at(-1).body.tools[0].description.includes(sentinel))
+    }
+  })
+  assert.deepEqual(reviewFailures, [], 'new review regressions must all pass')
   const beforeBlocks = seen.length
   const blocked = await call('/v1/images/generations', 'POST', { prompt: content })
   assert.equal(blocked.status, 400)

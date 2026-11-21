@@ -85,6 +85,7 @@ enum Guard {
     PhoneAt,
     RealEmail,
     SecretValue,
+    AssignedSecret,
     SeedPhraseAt,
     SerialOK,
     SolanaKey,
@@ -206,23 +207,30 @@ pub(super) fn scan(
             }
             captures(*spec, &caps, |hit, check| {
                 let (a, b) = (hit.start(), hit.end());
-                let Some((a, b)) = guards::repair(spec.repair, text, a, b) else {
-                    return Ok(());
+                let spans = if matches!(spec.repair, Guard::SeedPhraseAt) {
+                    wallet::phrases(text, a, b)
+                } else {
+                    guards::repair(spec.repair, text, a, b)
+                        .into_iter()
+                        .collect()
                 };
-                if a >= b || guards::adjacent(text, a, b, spec.bound) {
-                    return Ok(());
+                for (a, b) in spans {
+                    if a >= b || guards::adjacent(text, a, b, spec.bound) {
+                        continue;
+                    }
+                    let value = &text[a..b];
+                    if !guards::accept(check, value)
+                        || !guards::context(spec.context, text, a, b)
+                        || id_filter.keep(spec.id_rule, text, a, b)
+                        || (spec.category != Category::Secrets
+                            && spec.category != Category::Ip
+                            && guards::part_of_number_or_id(text, a, b))
+                    {
+                        continue;
+                    }
+                    visit((a, b))?;
                 }
-                let value = &text[a..b];
-                if !guards::accept(check, value)
-                    || !guards::context(spec.context, text, a, b)
-                    || id_filter.keep(spec.id_rule, text, a, b)
-                    || (spec.category != Category::Secrets
-                        && spec.category != Category::Ip
-                        && guards::part_of_number_or_id(text, a, b))
-                {
-                    return Ok(());
-                }
-                visit((a, b))
+                Ok(())
             })?;
         }
     }

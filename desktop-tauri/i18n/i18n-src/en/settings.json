@@ -10,7 +10,7 @@
   "登录用户名和主机名": "Login username and hostname",
   "公网 IP": "Public IP address",
   "云存储桶": "Cloud storage bucket",
-  "遮盖邮箱、手机号、身份证号和银行账号信息": "Mask email, mobile, national ID and bank card information",
+  "遮盖邮箱、手机号、身份证号和银行卡号": "Mask email, mobile, national ID and bank card numbers",
   "附加个人信息分类": "Additional personal-data categories",
   "自定义脱敏词（每行一个）": "Custom masking terms (one per line)",
   "高级脱敏规则": "Advanced masking rules",

@@ -43,7 +43,6 @@ pub(super) fn repair(guard: Guard, s: &str, a: usize, mut b: usize) -> Option<(u
                 && !NOT_NAMES.contains(&name.to_ascii_lowercase().as_str()))
             .then_some((a, a + name.len()))
         }
-        Guard::SeedPhraseAt => wallet::phrase(s, a, b),
         Guard::None => Some((a, b)),
         _ => None,
     }
@@ -86,6 +85,7 @@ pub(super) fn accept(guard: Guard, v: &str) -> bool {
         }
         Guard::RealEmail => email(v),
         Guard::SecretValue => secret(v),
+        Guard::AssignedSecret => secret_field_value(v) && !path_value(v) && !in_code(v),
         Guard::SerialOK => v.len() >= 6 && v.bytes().any(|c| c.is_ascii_digit()) && not_repeated(v),
         Guard::SolanaKey => wallet::solana(v),
         Guard::SolanaKeypair => wallet::solana_array(v),
@@ -332,7 +332,13 @@ fn placeholder_host(host: &str) -> bool {
         ".localhost",
     ]
     .iter()
-    .any(|a| host == a.trim_start_matches('.') || host.ends_with(a))
+    .any(|a| {
+        let domain = a.trim_start_matches('.');
+        host == domain
+            || host
+                .strip_suffix(domain)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    })
 }
 fn host(v: &str) -> bool {
     let l = v.trim_end_matches('.').to_ascii_lowercase();
@@ -626,7 +632,8 @@ fn field_at(s: &str, a: usize, b: usize) -> bool {
     !code
         && !skill
         && !v.starts_with('=')
-        && !LINE_REF.is_match(v)
+        && (!LINE_REF.is_match(v)
+            || prospective.is_some_and(secret_field) && v.bytes().all(|byte| byte.is_ascii_digit()))
         && !VERSION.is_match(v)
         && !TIMESTAMP.is_match(v)
         && !path_value(v)

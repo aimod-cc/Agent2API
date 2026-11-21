@@ -109,7 +109,7 @@ export function PrivacyMaskingPanel() {
           onCheckedChange={secrets => setDraft(value => ({ ...value, secrets }))} />
       </Label>
       <Label htmlFor={labelId + '-personal'} className='flex items-center justify-between gap-3'>
-        <span>{t('遮盖邮箱、手机号、身份证号和银行账号信息')}</span>
+        <span>{t('遮盖邮箱、手机号、身份证号和银行卡号')}</span>
         <Switch id={labelId + '-personal'} checked={draft.personal} disabled={locked}
           onCheckedChange={personal => setDraft(value => ({ ...value, personal }))} />
       </Label>

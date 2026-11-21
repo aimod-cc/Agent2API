@@ -121,10 +121,9 @@ static WORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         .collect()
 });
 
-pub(super) fn phrase(text: &str, start: usize, end: usize) -> Option<(usize, usize)> {
-    let mut ends = Vec::with_capacity(41);
-    let mut run_start = start;
-    let mut best = (0, None);
+pub(super) fn phrases(text: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
+    let mut found = Vec::new();
+    let (mut run_start, mut run_end, mut words) = (start, start, 0);
     let mut at = start;
     while at < end {
         while at < end && matches!(text.as_bytes()[at], b' ' | b'\t') {
@@ -135,23 +134,21 @@ pub(super) fn phrase(text: &str, start: usize, end: usize) -> Option<(usize, usi
         }
         let stop = text[at..end].find([' ', '\t']).map_or(end, |n| at + n);
         if WORDS.contains(text[at..stop].to_ascii_lowercase().as_str()) {
-            if ends.is_empty() {
+            if words == 0 {
                 run_start = at;
             }
-            ends.push(stop);
-            if ends.len() > best.0 {
-                best = (
-                    ends.len(),
-                    [25, 24, 21, 18, 15, 12]
-                        .into_iter()
-                        .find(|&n| n <= ends.len())
-                        .map(|n| (run_start, ends[n - 1])),
-                );
-            }
+            words += 1;
+            run_end = stop;
         } else {
-            ends.clear();
+            if words >= 12 {
+                found.push((run_start, run_end));
+            }
+            words = 0;
         }
         at = stop;
     }
-    best.1
+    if words >= 12 {
+        found.push((run_start, run_end));
+    }
+    found
 }

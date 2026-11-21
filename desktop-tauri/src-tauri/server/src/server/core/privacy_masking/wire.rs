@@ -48,7 +48,9 @@ impl Transform<'_> {
     fn arguments(&mut self, value: Option<&mut Value>) -> Result {
         let Some(value) = value else { return Ok(()) };
         if let Value::String(s) = value {
-            if let Ok(mut decoded) = serde_json::from_str::<Value>(s) {
+            if let Ok(mut decoded @ (Value::Object(_) | Value::Array(_))) =
+                serde_json::from_str::<Value>(s)
+            {
                 let original = decoded.clone();
                 self.tool_values(&mut decoded, None, false)?;
                 if original != decoded {
@@ -255,6 +257,14 @@ pub(crate) fn response(format: Format, payload: &mut Value, restore: &mut Restor
         Format::Responses => {
             transform.content(payload.get_mut("output"))?;
             transform.content(payload.pointer_mut("/response/output"))?;
+            transform.text(payload.get_mut("instructions"))?;
+            transform.text(payload.pointer_mut("/response/instructions"))?;
+            each(payload.get_mut("tools"), |tool| {
+                transform.tool_definition(tool)
+            })?;
+            each(payload.pointer_mut("/response/tools"), |tool| {
+                transform.tool_definition(tool)
+            })?;
             for key in ["item", "part"] {
                 if let Some(block) = payload.get_mut(key) {
                     transform.block(block)?;

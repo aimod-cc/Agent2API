@@ -194,9 +194,24 @@ impl Mask {
         if encoded_attachment(text) {
             return Ok(());
         }
+        // The egress pass must not remask placeholders that this request already owns.
+        let retained: Vec<_> = PLACEHOLDER
+            .find_iter(text)
+            .filter(|hit| self.by_token.contains_key(hit.as_str()))
+            .map(|hit| (hit.start(), hit.end()))
+            .collect();
+        let owned = |(a, b): (usize, usize)| {
+            let index = retained.partition_point(|&(_, end)| end <= a);
+            retained
+                .get(index)
+                .is_some_and(|&(start, end)| start <= a && b <= end)
+        };
         let mut ranges = Vec::new();
         let mut collect = |items: &mut dyn Iterator<Item = (usize, usize)>| {
             for pair in items {
+                if owned(pair) {
+                    continue;
+                }
                 if ranges.len() >= MAX_MATCHES {
                     return Err(());
                 }
@@ -210,6 +225,9 @@ impl Mask {
         }
         let literal_count = ranges.len();
         let mut record = |pair: (usize, usize)| {
+            if owned(pair) {
+                return Ok(());
+            }
             if ranges.len() >= MAX_MATCHES {
                 return Err(());
             }
@@ -264,12 +282,7 @@ impl Mask {
                 _ => merged.push((start, end)),
             }
         }
-        // The egress pass must not remask placeholders that this request already owns.
-        let retained: Vec<_> = PLACEHOLDER
-            .find_iter(text)
-            .filter(|hit| self.by_token.contains_key(hit.as_str()))
-            .map(|hit| (hit.start(), hit.end()))
-            .collect();
+
         // Subtract owned placeholders from matched ranges, but still mask any new
         // plaintext a match spans (e.g. a freshly appended credential on the same line).
         let mut out = String::with_capacity(text.len());
