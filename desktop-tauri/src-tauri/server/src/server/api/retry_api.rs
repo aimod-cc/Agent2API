@@ -26,8 +26,8 @@ use serde_json::{json, Value};
 use crate::server::config::{
     self, RetryPatch, RetrySettings, KEY_RETRY_ACCOUNT_SWITCH_COUNT, KEY_RETRY_COUNT,
     KEY_RETRY_INTERVAL_SECONDS, KEY_RETRY_NO_RETRY_CODES, RETRY_CODE_MAX, RETRY_CODE_MIN,
-    RETRY_MAX_COUNT, RETRY_MAX_INTERVAL_SECONDS, RETRY_MAX_NO_RETRY_CODES, RETRY_MIN_COUNT,
-    RETRY_MIN_INTERVAL_SECONDS,
+    RETRY_MAX_COUNT, RETRY_MAX_INTERVAL_SECONDS, RETRY_MAX_NO_RETRY_CODES, RETRY_MAX_SWITCH_COUNT,
+    RETRY_MIN_COUNT, RETRY_MIN_INTERVAL_SECONDS,
 };
 use crate::server::errors;
 use crate::server::http::{ok_json, parse_body};
@@ -67,7 +67,7 @@ pub async fn put_retry(State(_state): State<ServerState>, body: Bytes) -> Respon
             KEY_RETRY_ACCOUNT_SWITCH_COUNT,
             object.get(KEY_RETRY_ACCOUNT_SWITCH_COUNT),
             RETRY_MIN_COUNT,
-            RETRY_MAX_COUNT,
+            RETRY_MAX_SWITCH_COUNT,
             &mut patch.account_switch_count,
         ),
         (
@@ -96,9 +96,9 @@ pub async fn put_retry(State(_state): State<ServerState>, body: Bytes) -> Respon
         }
     }
 
-    // ── 第四项：指定错误码直接换号（整数数组）─────────────────────
+    // ── 第四项：例外错误码（整数数组，命中 = 允许把错误透传给下游）─────────────────────
     // 与三个数字项同一顺序：先整单校验，非法整体不落盘。允许 null / 缺省
-    // （这一项不动）；空数组是合法值 = 清空名单（任何错误都照常重试）。
+    // （这一项不动）；空数组是合法值 = 没有例外（任何错误都换号）。
     if let Some(value) = object.get(KEY_RETRY_NO_RETRY_CODES) {
         if !value.is_null() {
             match parse_no_retry_codes(value) {
@@ -147,7 +147,7 @@ fn retry_json(settings: RetrySettings) -> Value {
     })
 }
 
-/// 「指定错误码直接换号」的校验：整数数组、每项 100–599、最多 50 项。
+/// 「例外错误码」的校验：整数数组、每项 100–599、最多 50 项。
 ///
 /// 与 `parse_bounded_int` 同一口径：只认 JSON 数字（含 `402.0` 这种整值浮点）；
 /// 有一项非法就整单 400（不悄悄剔除），写盘前排序去重，落库形态规整。

@@ -8,7 +8,15 @@ use super::{error_policy, rotate, RouteTarget, UpstreamService};
 use super::payload::ProviderContext;
 
 pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_>, providers: &[&str], keys: &rotate::CooldownKeys<'_>,
-    target: &RouteTarget, error: &mut GatewayError, tried: &mut Vec<String>, switches_left: &mut usize, switch_total: usize) -> bool {
+    target: &RouteTarget, error: &mut GatewayError, tried: &mut Vec<String>, switches_left: &mut usize, switch_total: usize,
+    conv_key: &str, sticky_model: &str, sticky_generation: u64) -> bool {
+    // 失败即解除会话绑定：粘性只在成功时建立，绑着一个刚失败的候选只会让
+    // 同一会话的下一条请求先撞一次同样的错误（429 时表现为「每次都先吃一个
+    // 429」）。解绑放在最前面 —— 哪怕这一次最终收尾（hard_stop / 无候选），
+    // 也不该把失败账号继续粘在这个会话上。
+    if let Some(candidate) = target.attempt_key() {
+        service.route.sticky_forget(conv_key, sticky_model, &candidate, sticky_generation);
+    }
     let model = error.routing_error.as_ref().map(|decision| decision.model.clone()).unwrap_or_else(|| {
         target.account.as_ref().map(|account| keys.for_account(account)).unwrap_or_else(|| keys.for_provider(&target.provider))
     });

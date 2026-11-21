@@ -138,18 +138,32 @@ pub fn project_with_vision(group: &RoutingGroup, accounts: &[Value], needs: &Req
                 "providerLabel": providers::label_of(&member.provider), "model": actual, "name": actual, "state": "unavailable", "reason": reason }));
             continue;
         }
+        // 成员的参与账号：**空名单 = 该提供商的全部可用账号**（#644「全加入路由」）。
+        // 少勾一个账号就等于少一条退路；路由组不该因为漏选而在失败时静默少候选。
+        let mut candidates: Vec<(String, Value)> = Vec::new();
         if member.accounts.is_empty() {
-            result.blocked.push(json!({ "id": member.id, "memberId": member.id, "provider": member.provider, "model": actual,
-                "name": actual, "state": "excluded", "reason": "该成员没有参与账号" }));
-        }
-        for id in &member.accounts {
-            let Some(account) = by_id.get(id.as_str()).filter(|account| routing::provider_of(account) == member.provider) else {
-                result.blocked.push(json!({ "id": id, "memberId": member.id, "provider": member.provider, "model": actual,
-                    "name": id, "state": "unavailable", "reason": "参与账号已移除或不属于此提供商" }));
+            for account in accounts.iter().filter(|account| routing::provider_of(account) == member.provider
+                && account.get("enabled") != Some(&Value::Bool(false))) {
+                if let Some(id) = routing::account_id(account) {
+                    candidates.push((id.to_string(), (*account).clone()));
+                }
+            }
+            if candidates.is_empty() {
+                result.blocked.push(json!({ "id": member.id, "memberId": member.id, "provider": member.provider, "model": actual,
+                    "name": actual, "state": "excluded", "reason": "该提供商没有可用账号" }));
                 continue;
-            };
-            let mut account = (*account).clone();
-            account["routingCandidateId"] = candidate_key(&member.id, id).into();
+            }
+        } else {
+            for id in &member.accounts {
+                match by_id.get(id.as_str()).filter(|account| routing::provider_of(account) == member.provider) {
+                    Some(account) => candidates.push((id.clone(), (*account).clone())),
+                    None => result.blocked.push(json!({ "id": id, "memberId": member.id, "provider": member.provider, "model": actual,
+                        "name": id, "state": "unavailable", "reason": "参与账号已移除或不属于此提供商" })),
+                }
+            }
+        }
+        for (id, mut account) in candidates {
+            account["routingCandidateId"] = candidate_key(&member.id, &id).into();
             account["routingMemberId"] = member.id.clone().into();
             account["routingModel"] = actual.clone().into();
             account["routingPriority"] = result.accounts.len().into();
@@ -181,9 +195,15 @@ pub fn append_public(store: &AccountStore, scope: Option<&KeyScope>, data: &mut 
     for group in config::routing_profiles().groups.values() {
         if !key_scope::allows_model(scope, &group.model) || data.iter().any(|item| model_id(item).eq_ignore_ascii_case(&group.model)) { continue; }
         let members: Vec<_> = group.members.iter().filter(|member| member.included && key_scope::allows_provider(scope, &member.provider)
-            && provider_active(&member.provider)
-            && accounts.available_providers.contains(&member.provider) && member.accounts.iter().any(|id|
-                accounts.accounts.iter().any(|account| routing::account_id(account) == Some(id) && routing::provider_of(account) == member.provider && account.get("enabled") != Some(&Value::Bool(false)))))
+            && provider_active(&member.provider) && accounts.available_providers.contains(&member.provider)
+            && if member.accounts.is_empty() {
+                // 空名单 = 该提供商的全部账号（与 `project` 同口径）
+                accounts.accounts.iter().any(|account| routing::provider_of(account) == member.provider
+                    && account.get("enabled") != Some(&Value::Bool(false)))
+            } else {
+                member.accounts.iter().any(|id| accounts.accounts.iter().any(|account| routing::account_id(account) == Some(id)
+                    && routing::provider_of(account) == member.provider && account.get("enabled") != Some(&Value::Bool(false))))
+            })
             .filter_map(|member| catalog_model(&member.provider, &member.model)).filter(|item| !providers::images::model_is_image(item)).collect();
         if members.is_empty() { continue; }
         let mut item = json!({ "id": group.model, "name": group.name, "object": "model", "owned_by": "routing-group", "kind": "chat", "routing_group": true });

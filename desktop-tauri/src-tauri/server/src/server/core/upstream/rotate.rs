@@ -502,12 +502,7 @@ pub(super) fn scoped_accounts(
     pinned: Option<&str>,
     request_routing: Option<&super::route_context::RequestRouting>,
 ) -> Vec<Value> {
-    let accounts = accounts_in_providers(service, providers, pinned);
-    let accounts = if pinned.is_some() && !request_routing.is_some_and(|routing| routing.strict_vision) { accounts } else if let Some(request_routing) = request_routing {
-        request_routing.accounts(accounts)
-    } else {
-        crate::server::core::routing_scope::apply_accounts(&accounts, model)
-    };
+    let accounts = scoped_in_providers(service, providers, model, pinned, request_routing);
     let keys = routing::CooldownKeys::new(model);
     let accounts: Vec<Value> = accounts.into_iter().map(|mut account| {
         let provider = provider_of(&account).to_string();
@@ -523,6 +518,41 @@ pub(super) fn scoped_accounts(
         .filter(|account| !readiness::gated(provider_of(account)))
         .cloned().collect();
     if routable.is_empty() { accounts } else { routable }
+}
+
+/// 候选账号的**作用域过滤**（路由组 / 指定账号 / 路由作用范围），不含冷却判定。
+fn scoped_in_providers(
+    service: &UpstreamService,
+    providers: &[&str],
+    model: &str,
+    pinned: Option<&str>,
+    request_routing: Option<&super::route_context::RequestRouting>,
+) -> Vec<Value> {
+    let accounts = accounts_in_providers(service, providers, pinned);
+    if pinned.is_some() && !request_routing.is_some_and(|routing| routing.strict_vision) {
+        accounts
+    } else if let Some(request_routing) = request_routing {
+        request_routing.accounts(accounts)
+    } else {
+        crate::server::core::routing_scope::apply_accounts(&accounts, model)
+    }
+}
+
+/// 这条请求的候选池**规模**（不含冷却 / 限额 / 熔断判定）。
+///
+/// 用途只有一个：给「最多换几个账号」定一条**下限**。队列里有多少候选，
+/// 这条请求至少就该换几次 —— 否则一条 10 个候选的队列配上默认 5 次的预算，
+/// 就会出现「第 6 个候选本来能答上来，却因为预算用完直接 400 给下游」。
+/// 这里刻意不逐账号查冷却（那是 `scoped_accounts` 的活）：拿到的是上界，
+/// 宁可多给几个额度（真失败时队列自己会把名额用光），也不要提前截断。
+pub(super) fn scoped_account_cap(
+    service: &UpstreamService,
+    providers: &[&str],
+    model: &str,
+    pinned: Option<&str>,
+    request_routing: Option<&super::route_context::RequestRouting>,
+) -> usize {
+    scoped_in_providers(service, providers, model, pinned, request_routing).len()
 }
 
 /// 组装选路结果；代理解析失败时把提示**带进选路结果**（本次回退直连）。
