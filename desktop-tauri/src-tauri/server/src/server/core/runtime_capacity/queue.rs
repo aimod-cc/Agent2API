@@ -71,11 +71,8 @@ impl Drop for Waiting {
 }
 
 fn block_reason(state: &State, class: Class, provider: &str, limits: &Limits) -> Option<RejectReason> {
-    if limits.memory_pressure
-        && matches!(class, Class::Conversation | Class::Image | Class::Background | Class::Request | Class::ImageRequest)
-    {
-        return Some(RejectReason::MemoryPressure);
-    }
+    // 内存压力只体现在 limits 里（background / images 被压到 0），不在这里整类拒绝：
+    // 对话与 chat 请求每笔都由 MemoryBudget 单独限额，宿主紧张时也不该把用户踢下线。
     if limits.cpu_pressure
         && matches!(class, Class::Image | Class::Background | Class::ImageRequest)
         && limits.for_class(class) == 0
@@ -244,4 +241,32 @@ pub fn record_slot_rejection(class: Class, waited: Duration) -> CapacityRejectio
     let (limits, resources) = super::snapshot_inputs();
     let mut state = manager.state.lock().unwrap_or_else(|error| error.into_inner());
     record_rejection(&mut state, RejectReason::PluginSlotLimit, class, waited, &limits, resources)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn limits(memory_pressure: bool) -> Limits {
+        Limits {
+            conversations: 8, interactive: 8,
+            // 生产里 effective() 在压力下把这两项压到 0；这里仍给非零，
+            // 好让用例单独盯住 block_reason() 自己有没有额外拦人。
+            background: 4, background_per_provider: 2, images: 2, connections: 16,
+            memory_bytes: 1024, queue_requests: 8, queue_bytes: 1024, queue_wait_seconds: 1,
+            cpu_pressure: false, memory_pressure,
+        }
+    }
+
+    #[test]
+    fn memory_pressure_must_not_block_chat_requests() {
+        let state = State::default();
+        let limits = limits(true);
+        // 对话类请求（/v1/chat/completions 的 Request、插件流式的 Conversation、
+        // 非流式的 Interactive）都靠每请求的 MemoryBudget 兜底，不能因为宿主内存
+        // 紧张就整类拒绝 —— 那样用户只会看到排队 10 秒后 503。
+        assert!(block_reason(&state, Class::Request, "", &limits).is_none(), "内存紧张也不该挡 chat 请求");
+        assert!(block_reason(&state, Class::Conversation, "", &limits).is_none(), "内存紧张也不该挡流式会话");
+        assert!(block_reason(&state, Class::Interactive, "", &limits).is_none(), "内存紧张也不该挡交互调用");
+    }
 }
