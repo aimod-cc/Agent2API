@@ -48,8 +48,40 @@ pub(super) fn kind(provider: &str, class: &UpstreamErrorClass, status: u16, code
     ErrorKind::Unknown
 }
 
-pub(super) fn scope(body: &Value) -> CooldownScope {
-    match body.get("credentialScope").or_else(|| body.get("credential_scope")).or_else(|| body.get("scope")).and_then(Value::as_str) {
+/// 「这份 body 本身就发不出去」的本地业务码 —— 换账号无用，得换一家。
+/// 这些码由本机在**发送前**生成（网页工具的字符预算、视觉兼容的前置校验），
+/// 它们的结论是「提供商 × 模型能力吃不下这份请求」，与具体账号无关。
+/// 判据按码前缀匹配：新增同类能力检查时只要沿用同一前缀，就自动获得
+/// 「跳过这一家 + 落模型冷却」的处置。
+pub(super) fn provider_local(code: &str) -> bool {
+    ["web_tools_", "vision_", "native_payload_"].iter().any(|prefix| code.starts_with(prefix))
+}
+
+/// 429/402 里包着的「账号资源已经用完」语义，按**文案**还原成真正的错误类型。
+///
+/// 聚合类上游常把余额/套餐问题套在 429 里返回，例如：
+/// `上游返回 429: 上游返回 402: 积分余额不足，请获取积分后再试`、
+/// `ZCode 套餐池当前没有有效套餐（1005）`。只按状态码归成「请求限流」会让
+/// 处置方向错掉 —— 限流是「等一会儿还能用」，余额/套餐是「这个账号暂时
+/// 不可能答」，后者必须按**账号级**冷却并把该账号的其余候选一起排掉，
+/// 否则路由组会拿同一个账号换着模型再撞一次（429 连着两条就是这么来的）。
+///
+/// 返回 `None` 表示文案看不出资源问题（例如真正的频率限制），保持原分类。
+pub(super) fn resource_kind(message: &str) -> Option<ErrorKind> {
+    let text = message.to_lowercase();
+    // 明确的频率限制优先排除：文案里常同时出现「额度」「quota」这类词。
+    const RATE: [&str; 5] = ["rate limit", "rate_limit", "too many requests", "限流", "频率限制"];
+    if RATE.iter().any(|word| text.contains(word)) { return None; }
+    const BALANCE: [&str; 8] = ["积分余额不足", "积分不足", "余额不足", "欠费", "insufficient balance", "insufficient credit",
+        "credit balance", "payment required"];
+    if BALANCE.iter().any(|word| text.contains(word)) { return Some(ErrorKind::Balance); }
+    const QUOTA: [&str; 9] = ["套餐池", "没有有效套餐", "套餐到期", "套餐已到期", "额度已用尽", "quota", "usage limit",
+        "配额不足", "quota exceeded"];
+    if QUOTA.iter().any(|word| text.contains(word)) { return Some(ErrorKind::Quota); }
+    None
+}
+
+pub(super) fn scope(body: &Value) -> CooldownScope {    match body.get("credentialScope").or_else(|| body.get("credential_scope")).or_else(|| body.get("scope")).and_then(Value::as_str) {
         Some("provider") => CooldownScope::Provider,
         Some("account" | "credential" | "subscription" | "oauth" | "token") => CooldownScope::Account,
         _ => CooldownScope::Model,
@@ -100,15 +132,22 @@ pub(in crate::server::core::upstream) fn gateway_class(error: &GatewayError) -> 
     })
 }
 
+/// 「不要再换号、直接把错误交回下游」的硬终止判据。
+///
+/// ── 为什么 403 / 权限类不再在这里 ─────────────────────────
+/// 上游 403（账号被风控、凭证对该模型无权、订阅级禁止）是**账号级**结论：
+/// 换下一个账号或另一家仍可能成功，属于「应该顺延」而不是「整条请求没救」。
+/// #644 之后它们走默认的换号规则（并落账号级冷却/熔断）。这里只保留
+/// 「再发一次可能造成重复执行/重复计费/状态错乱」与「用户已取消」两类。
 pub(super) fn hard_stop(status: u16, code: &str) -> bool {
-    matches!(status, 403 | 409 | 428 | 499)
+    matches!(status, 409 | 428 | 499)
         || code.ends_with("cleanup_unconfirmed") || code.starts_with("claude_session_")
-        || matches!(code, "permission_denied" | "access_denied" | "permission_error" | "validation_required"
+        || matches!(code, "validation_required"
             | "tabbit_submission_unconfirmed" | "tabbit_account_changed" | "tabbit_state_conflict"
             | "claude_response_started" | "account_origin_authorization_required"
             | "plugin_busy" | "gateway_busy" | "account_busy" | "plugin_response_started" | "plugin_resource_limit"
-            | "plugin_protocol_error" | "plugin_trap" | "forbidden" | "native_helper_not_authorized" | "native_helper_unavailable"
-            | "request_replay_blocked" | "web_tools_invalid_request" | "gateway_capability_missing" | "aborted" | "cancelled"
+            | "plugin_protocol_error" | "plugin_trap" | "native_helper_not_authorized" | "native_helper_unavailable"
+            | "request_replay_blocked" | "gateway_capability_missing" | "aborted" | "cancelled"
             | "upstream_submission_unconfirmed" | "runtime_invalid_error_metadata" | "runtime_protocol_error" | "runtime_stream_interrupted"
             | "runtime_classification_unavailable" | "runtime_transport_unavailable" | "network_cleanup_unconfirmed"
             | "runtime_upstream_error" | "builtin_runtime_error" | "runtime_sdk_content")

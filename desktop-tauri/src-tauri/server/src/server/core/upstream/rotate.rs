@@ -379,6 +379,25 @@ fn select_target_account_sync(
     if pinned.is_none() {
         let earliest = enabled.iter().map(|account| routing::rate_limit_reset_at(account, keys, now)).filter(|at| *at > now).min();
         if let Some(at) = earliest {
+            // ── 兜底：全队列都在冷却，但冷却未必是上游说的 ────────────
+            // `routing_cooldown` 这条 429 是本请求「一个候选都没试就失败」的
+            // 唯一来源，也是用户看到的「又是直接报错、没换号没换家」。
+            //
+            // 冷却有两类来源：上游明确给了 `resetAt`（`guessed = false`）——
+            // 它说「现在别来」，必须尊重，照旧回 429 让客户端等；另一类是我们
+            // 自己按退避规则**估算**出来的时长（`guessed = true`），用它把整条
+            // 请求判死属于「自己的记账把自己的活掐了」。所以这里只越过估算
+            // 冷却：挑最早恢复的那个先试一次。成了就解开，不成也照常记一次
+            // 失败（下一次估算会更长）。
+            if let Some(account) = last_resort(&enabled, keys, tried_ids, now, &snap.open) {
+                let id = routing::account_id(&account).unwrap_or_default().to_string();
+                if let Some(picked) = service.store.get_session_by_id(&id) {
+                    logging::console_line("[Upstream]", &format!(
+                        "候选全部处于冷却（最早 {} 恢复），按兜底尝试估算冷却中的账号 {id}", errors::format_reset_at_text(at)));
+                    decision["lastResort"] = Value::Bool(true);
+                    return Ok(with_proxy_notice(account, picked.proxy, picked.proxy_error, id, Some(decision)));
+                }
+            }
             return Err(GatewayError::with_status(429, format!("当前路由对象处于冷却期，最早 {} 恢复；未提前重发", errors::format_reset_at_text(at)))
                 .with_code("routing_cooldown").with_retry_after_seconds(at.saturating_sub(now).max(0) as u64 / 1000 + 1));
         }
@@ -502,12 +521,7 @@ pub(super) fn scoped_accounts(
     pinned: Option<&str>,
     request_routing: Option<&super::route_context::RequestRouting>,
 ) -> Vec<Value> {
-    let accounts = accounts_in_providers(service, providers, pinned);
-    let accounts = if pinned.is_some() && !request_routing.is_some_and(|routing| routing.strict_vision) { accounts } else if let Some(request_routing) = request_routing {
-        request_routing.accounts(accounts)
-    } else {
-        crate::server::core::routing_scope::apply_accounts(&accounts, model)
-    };
+    let accounts = scoped_in_providers(service, providers, model, pinned, request_routing);
     let keys = routing::CooldownKeys::new(model);
     let accounts: Vec<Value> = accounts.into_iter().map(|mut account| {
         let provider = provider_of(&account).to_string();
@@ -523,6 +537,41 @@ pub(super) fn scoped_accounts(
         .filter(|account| !readiness::gated(provider_of(account)))
         .cloned().collect();
     if routable.is_empty() { accounts } else { routable }
+}
+
+/// 候选账号的**作用域过滤**（路由组 / 指定账号 / 路由作用范围），不含冷却判定。
+fn scoped_in_providers(
+    service: &UpstreamService,
+    providers: &[&str],
+    model: &str,
+    pinned: Option<&str>,
+    request_routing: Option<&super::route_context::RequestRouting>,
+) -> Vec<Value> {
+    let accounts = accounts_in_providers(service, providers, pinned);
+    if pinned.is_some() && !request_routing.is_some_and(|routing| routing.strict_vision) {
+        accounts
+    } else if let Some(request_routing) = request_routing {
+        request_routing.accounts(accounts)
+    } else {
+        crate::server::core::routing_scope::apply_accounts(&accounts, model)
+    }
+}
+
+/// 这条请求的候选池**规模**（不含冷却 / 限额 / 熔断判定）。
+///
+/// 用途只有一个：给「最多换几个账号」定一条**下限**。队列里有多少候选，
+/// 这条请求至少就该换几次 —— 否则一条 10 个候选的队列配上默认 5 次的预算，
+/// 就会出现「第 6 个候选本来能答上来，却因为预算用完直接 400 给下游」。
+/// 这里刻意不逐账号查冷却（那是 `scoped_accounts` 的活）：拿到的是上界，
+/// 宁可多给几个额度（真失败时队列自己会把名额用光），也不要提前截断。
+pub(super) fn scoped_account_cap(
+    service: &UpstreamService,
+    providers: &[&str],
+    model: &str,
+    pinned: Option<&str>,
+    request_routing: Option<&super::route_context::RequestRouting>,
+) -> usize {
+    scoped_in_providers(service, providers, model, pinned, request_routing).len()
 }
 
 /// 组装选路结果；代理解析失败时把提示**带进选路结果**（本次回退直连）。
@@ -759,7 +808,70 @@ pub(super) fn pick_next_account(
         sticky_account: None,
     };
     let plan = routing::plan_route(&candidates, keys, &counts, tried_ids, now, &meta);
-    plan.ordered.into_iter().next().map(|entry| entry.account)
+    if let Some(entry) = plan.ordered.into_iter().next() {
+        return Some(entry.account);
+    }
+    // 队列被冷却 / 并发 / 退避挡得一个不剩 —— 顺延路径同样不能就此收尾：
+    // 与首轮选路共用 `last_resort` 的口径（只越过我们自己的估算冷却）。
+    last_resort(&candidates, keys, tried_ids, now, &snap.open)
+}
+
+/// 账号此刻的冷却如果**全是我们自己估算**的，返回最晚的恢复时间。
+///
+/// 任何一个上游明确声明过的冷却（`guessed != true`）都直接返回 `None` ——
+/// 那是上游在说「现在别来」，兜底不得越过它。
+fn guessed_reset(account: &Value, wire: &str, now: i64) -> Option<i64> {
+    let mut entries: Vec<&Value> = Vec::new();
+    if let Some(entry) = account.get("rateLimits").and_then(|limits| limits.get(wire)) {
+        entries.push(entry);
+    }
+    if let Some(entry) = account.get("routingCooldowns").and_then(|limits| limits.get("@account")) {
+        entries.push(entry);
+    }
+    if let Some(entry) = account.get("providerCooldown") {
+        entries.push(entry);
+    }
+    let mut latest = 0i64;
+    for entry in entries {
+        let Some(at) = entry["resetAt"].as_i64().filter(|at| *at > now) else { continue };
+        if entry["guessed"].as_bool() != Some(true) {
+            return None;
+        }
+        latest = latest.max(at);
+    }
+    (latest > 0).then_some(latest)
+}
+
+/// 全队列被冷却挡住时的兜底候选：估算冷却中、最早恢复、本请求还没试过的那个。
+///
+/// 只看估算冷却（见 [`guessed_reset`]），所以「上游明确让我们等」的队列不会
+/// 被这条兜底绕过；**熔断中的账号也不碰** —— 熔断的含义就是「先别用它」，兜底
+/// 越过它等于把熔断作废。反复失败时估算会一次比一次长，不会把同一个账号
+/// 无休止地重试（且每次都会进 `tried_ids`）。
+fn last_resort(
+    accounts: &[Value],
+    keys: &routing::CooldownKeys<'_>,
+    tried_ids: &[String],
+    now: i64,
+    open: &std::collections::HashSet<String>,
+) -> Option<Value> {
+    accounts
+        .iter()
+        .filter(|account| {
+            if matches!(account.get("enabled"), Some(Value::Bool(false))) {
+                return false;
+            }
+            if routing::account_id(account).is_some_and(|id| open.contains(id)) {
+                return false;
+            }
+            let key = crate::server::core::routing_groups::attempt_key(account);
+            !key.is_empty() && !tried_ids.iter().any(|tried| tried == &key)
+        })
+        .filter_map(|account| {
+            guessed_reset(account, &keys.for_account(account), now).map(|at| (at, account))
+        })
+        .min_by_key(|(at, account)| (*at, account.get("priority").and_then(Value::as_i64).unwrap_or(i64::MAX)))
+        .map(|(_, account)| Value::clone(account))
 }
 
 /// 选路决策快照（请求日志「路由回放」的数据源）。
