@@ -1495,12 +1495,21 @@ async fn attempt_queue(
                                 service, provider_id, target.account_id.as_deref(),
                             ).await {
                                 let delay = host_rule.retry_delay(0);
-                                if !budget.take_retry(delay) { return Err(failure.error); }
-                                ctx.telemetry.note_attempt_retry("登录凭证已刷新，在原账号重试一次", Some(401), delay);
-                                super::error_policy_send::sleep_or_cancel(ctx.telemetry, delay).await;
-                                session = fresh;
-                                last_error = Some(failure.error);
-                                continue;
+                                // 等待预算用完只说明「这一刻不适合原地再等」，**不是**整条
+                                // 请求的结论：以前这里直接 `return Err`，用户看到的就是
+                                // 「401 之后什么都没换就抛出异常」。现在落下去走统一分类
+                                // （换号 / 换家），把剩下的候选试完。
+                                if budget.take_retry(delay) {
+                                    ctx.telemetry.note_attempt_retry("登录凭证已刷新，在原账号重试一次", Some(401), delay);
+                                    super::error_policy_send::sleep_or_cancel(ctx.telemetry, delay).await;
+                                    session = fresh;
+                                    last_error = Some(failure.error);
+                                    continue;
+                                }
+                                logging::console_line(
+                                    "[Upstream]",
+                                    &format!("账号 {account_id} 的凭证已刷新，但等待预算已用完，改为换号继续"),
+                                );
                             }
                         } else {
                             // 刷新**失败**：这是「401 了、也试过续期、但没救回来」的

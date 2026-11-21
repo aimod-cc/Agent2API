@@ -68,7 +68,11 @@ pub const MAX_SWITCHES: u64 = 100;
 /// 账号×模型被下一条请求反复挑中）。旧版本存下来的 `routingErrorPolicy`
 /// 里那套 `return_error + 不冷却` 的组合必须跟着升级，否则用户升级了二进制
 /// 却还在跑旧口径 —— 见 `config::error_policy::from_raw` 的升级分支。
-pub const RULES_VERSION: u64 = 2;
+///
+/// v3：登录失效（401）也带账号级短冷却。续期没救回来的账号如果既不冷却、
+/// 也不退出轮转，下一条请求还会轮到它再吃一次 401 —— 日志上就是每隔几秒
+/// 一条 401，队列里明明有别的家能答，却一直排在一个已经失效的账号后面。
+pub const RULES_VERSION: u64 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
@@ -131,12 +135,16 @@ pub fn default_rules() -> Vec<ErrorRule> {
     // 而是为了让「刚在同一个 账号×模型 上失败过的组合」在接下来的几十秒里别
     // 再被同一条坏请求抢着试一遍 —— 这就是用户要的「限制器」。
     //
+    // 登录失效（401）原本没有冷却：续期失败后账号既不冷却、也不会被移出队列，
+    // 于是**下一条请求**仍然轮到它、再吃一次 401、再续期一次 —— 日志里的
+    // 「每隔几秒一条 CodeArts 401」就是这么来的。现在给它一段账号级短冷却：
+    // 续期没救回来的账号先退出轮转 60 秒，让队列里别的候选先去答。
     // 要「允许直接把错误返回下游」的码，走「提供商例外」（`overrides`）配置，
     // 见 `config::error_policy` 对旧「指定错误码」名单的映射。
     vec![
         rule(RateLimit, "请求限流", &[429], SwitchAccount, Upstream, 60, false, CooldownScope::Auto),
         rule(Quota, "额度耗尽", &[429], SwitchAccount, Upstream, 600, true, CooldownScope::Auto),
-        rule(Auth, "登录失效", &[401], RefreshThenSwitch, None, 60, false, CooldownScope::Account),
+        rule(Auth, "登录失效", &[401], RefreshThenSwitch, Fixed, 60, false, CooldownScope::Account),
         rule(Balance, "余额不足", &[402], SwitchAccount, Upstream, 600, false, CooldownScope::Account),
         rule(Transient, "连接或服务异常", &[408, 500, 502, 503, 504], SwitchAccount, Protection, 60, false, CooldownScope::Auto),
         rule(Unsupported, "能力不支持", &[501], SwitchProvider, Fixed, 60, false, CooldownScope::Model),
@@ -217,6 +225,17 @@ mod tests {
                 _ => assert_eq!(rule.action, ErrorAction::SwitchAccount, "{} 默认应换号", rule.kind.id()),
             }
         }
+    }
+
+    /// 登录失效也要留冷却：续期没救回来的账号必须先退出轮转，否则下一条请求
+    /// 还会轮到它、再吃一次 401（日志上就是每隔几秒一条 401）。
+    #[test]
+    fn auth_rule_cools_the_account_after_401() {
+        let settings = ErrorSettings::default();
+        let rule = settings.rules.iter().find(|rule| rule.kind == ErrorKind::Auth).expect("auth rule");
+        assert_eq!(rule.action, ErrorAction::RefreshThenSwitch, "401 仍然先续期");
+        assert_ne!(rule.cooldown, CooldownMode::None, "401 续期失败后要冷却账号");
+        assert_eq!(rule.scope, CooldownScope::Account, "401 是账号级的失效");
     }
 
     /// 请求有误 / 内容被拒默认也换号（并留短冷却）；显式配成 ReturnError 依然合法。
