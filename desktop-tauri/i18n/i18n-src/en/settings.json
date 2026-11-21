@@ -464,7 +464,7 @@
   "天数": "Days",
   "失败 {n} 个": "failed: {n}",
   "失败 {n} 个：{detail}": "Failed: {n}; {detail}",
-  "失败后最多再换几个账号试（填 N = 最多换 N 个，首发那个不算）。换到同一家名下另一个账号、或换到另一家，都各算一次；换满仍失败就返回错误。可填 0–10，0 表示失败立即报错。": "How many more accounts to try on failure (N = switch to at most N accounts; the account that made the first attempt does not count). Switching to another account under the same provider and switching to a different provider each count as one; once the limit is reached and the request still fails, an error is returned. Accepts 0–10; 0 means report the error immediately on failure.",
+  "失败后最多再换几个账号试（填 N = 最多换 N 个，首发那个不算）。换到同一家名下另一个账号、或换到另一家，都各算一次；换满仍失败就返回错误。可填 0–100，0 表示失败立即报错。": "How many more accounts to try on failure (N = switch to at most N accounts; the account that made the first attempt does not count). Switching to another account under the same provider and switching to a different provider each count as one; once the limit is reached and the request still fails, an error is returned. Accepts 0–100; 0 means report the error immediately on failure.",
   "如果主库已被替换到一半，替换前的数据在 backups/ 目录里仍可整文件拷回。": "",
   "存储桶（Bucket）": "Bucket",
   "存储概况已刷新": "Storage overview refreshed",

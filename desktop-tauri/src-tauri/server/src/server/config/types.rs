@@ -640,8 +640,8 @@ pub const KEY_RETRY_INTERVAL_SECONDS: &str = "retryIntervalSeconds";
 /// 有别的候选时，换一个账号/模型的成功率高得多，所以默认直接顺延；需要
 /// 原地重发的人可以在设置里调大。
 pub const DEFAULT_RETRY_COUNT: i64 = 0;
-/// 换账号的次数默认值：32 —— 与转发层 `MAX_ROUTE_ATTEMPTS` 对齐，等于「试完
-/// 队列里的全部候选」，不再用一个 5 次的默认值提前截断。
+/// 换账号的次数默认值：32 —— 覆盖绝大多数部署的候选队列；上限另见
+/// [`RETRY_MAX_SWITCH_COUNT`]（100），账号多的人可以自己往上调。
 pub const DEFAULT_RETRY_SWITCH_COUNT: i64 = 32;
 /// 重试间隔默认值：5 秒
 pub const DEFAULT_RETRY_INTERVAL_SECONDS: i64 = 5;
@@ -672,11 +672,12 @@ pub const RETRY_MAX_NO_RETRY_CODES: usize = 50;
 /// 该档（不重发 / 不换号），间隔 0 = 立即重发。
 pub const RETRY_MIN_COUNT: i64 = 0;
 pub const RETRY_MAX_COUNT: i64 = 10;
-/// 「换账号次数」的上界：与转发层 `MAX_ROUTE_ATTEMPTS`（32）对齐。
+/// 「换账号次数」的上界：与转发层 `MAX_ROUTE_ATTEMPTS`（100）对齐。
 ///
 /// 换账号不是「重发」：一份请求最多试几个候选，本身受循环上限约束，所以
-/// 这里放宽到 32，让默认值等于「试完队列里的全部候选」。
-pub const RETRY_MAX_SWITCH_COUNT: i64 = 32;
+/// 这里放到 100，让账号多的部署能把整条队列试完，而不是被一个 10 次的上界
+/// 提前收尾。
+pub const RETRY_MAX_SWITCH_COUNT: i64 = 100;
 pub const RETRY_MIN_INTERVAL_SECONDS: i64 = 0;
 pub const RETRY_MAX_INTERVAL_SECONDS: i64 = 300;
 
