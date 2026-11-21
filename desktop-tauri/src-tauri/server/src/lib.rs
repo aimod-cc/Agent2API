@@ -37,21 +37,35 @@ use std::sync::OnceLock;
 
 use tokio::runtime::{Handle, Runtime};
 
-/// 工作线程与阻塞池的栈大小（8 MiB）：
-/// Thin LTO / 调试构建下加载与执行 Wasm 插件会超出默认的 2 MiB 栈空间。
-pub const WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
+/// 工作线程与阻塞池的栈大小（默认 16 MiB，可用环境变量覆盖）：
+/// Thin LTO / 调试构建下加载与执行 Wasm 插件会超出默认的 2 MiB 栈空间
+/// （`0xC00000FD STATUS_STACK_OVERFLOW`，注意这是**线程栈**不是堆内存，
+/// 机器空闲也照崩）。改前是 8 MiB，实测 debug 构建 + 62 个账号同时刷新
+/// 用量仍会溢出一次，故抬到 16 MiB 并留出 `AGENT2API_THREAD_STACK_MB` 逃生口
+/// （4–64 MiB），便于在不重新编译的前提下继续加大。
+pub fn worker_stack_bytes() -> usize {
+    let mb = std::env::var("AGENT2API_THREAD_STACK_MB").ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .map(|mb| mb.clamp(4, 64))
+        .unwrap_or(16);
+    mb * 1024 * 1024
+}
+
+/// 兼容旧调用的常量名（编译期默认值，实际取值见 [`worker_stack_bytes`]）。
+pub const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 /// 惰性全局运行时：只承接「在非 Tokio 上下文里发起的后台任务」，
 /// 正常路径（handler / 既有任务体内）不会碰到它。
 static GLOBAL_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
-/// 构造网关共享配置的多线程 Tokio 运行时（工作线程与阻塞池均使用 8 MiB 栈）。
+/// 构造网关共享配置的多线程 Tokio 运行时（工作线程与阻塞池均使用
+/// [`worker_stack_bytes`] 指定的栈，默认 16 MiB）。
 ///
 /// 桌面端、headless 入口与本 crate 的兜底运行时共用同一构造器，
 /// 避免某一宿主形态遗漏栈配置。
 pub fn build_runtime() -> std::io::Result<Runtime> {
     tokio::runtime::Builder::new_multi_thread()
-        .thread_stack_size(WORKER_STACK_BYTES)
+        .thread_stack_size(worker_stack_bytes())
         .enable_all()
         .build()
 }
