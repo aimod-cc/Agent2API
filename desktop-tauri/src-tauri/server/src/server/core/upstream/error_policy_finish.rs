@@ -26,6 +26,16 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
         if matches!(decision.kind, ErrorKind::RateLimit | ErrorKind::Quota) && settings.sink && ctx.pinned_account.is_none() {
             service.route.sink_mark_for(account, logging::now_ms(), settings.sink_seconds);
         }
+        // ── 上游说「余额/积分不足」→ 把本地余额读数按 0 落一次 ──────────
+        // 余额是查上游接口读回来的，字段形状一变就会读出一个明显偏高的数字；
+        // 限制器与低余额跳过都按这个数字判断，于是账号一直显得「有钱」，每条
+        // 请求都被派上去再吃一次 402「积分余额不足」。上游的 402 比本地读数更
+        // 权威：这里直接落 0，余额列显示 0、低余额规则立刻拦下它，充值后下一
+        // 次成功查询会自己把 0 顶掉。
+        if decision.kind == ErrorKind::Balance || says_no_money(&error.message) {
+            crate::server::core::usage_records::force_zero_balance(
+                account, "上游报余额不足，余额读数已按 0 处理；充值后自动恢复");
+        }
         if decision.kind == ErrorKind::Transient && decision.rule.cooldown == crate::server::config::error_policy::CooldownMode::Protection {
             if settings.backoff { service.route.backoff_mark_for(account, logging::now_ms(), settings.backoff_seconds, settings.backoff_cap_seconds); }
             if settings.breaker {
@@ -68,4 +78,21 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
     logging::console_line("[Upstream]", &format!("统一错误规则「{}」：HTTP {}，顺延到 {}（换号 {}/{}）",
         decision.rule.name, error.status_code, super::account_display(&next), switch_total - *switches_left, switch_total));
     true
+}
+
+/// 上游文案里明说「余额/积分不足」——包括被 429 外壳包住的情况
+/// （`上游返回 429: 上游返回 402: 积分余额不足，请获取积分后再试`）。
+///
+/// 为什么要看文案：402 会直接分到 `Balance`，但「429 包 402」的顶层状态码是
+/// 429，分类只看状态码/机器码时会被当成限流，这个账号的钱包事实就丢了。限流
+/// 词先排除，避免把真正的 429 也当欠费（那会误清余额读数）。
+fn says_no_money(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    if ["rate limit", "too many requests", "限流", "频率", "rpm", "tpm"].iter().any(|word| lower.contains(word)) {
+        return false;
+    }
+    ["积分余额不足", "余额不足", "积分不足", "欠费", "没有可用积分", "insufficient balance", "insufficient credit",
+        "insufficient_quota", "payment required", "payment_required"]
+        .iter()
+        .any(|word| lower.contains(word))
 }
